@@ -11,16 +11,17 @@ import static org.mockito.Mockito.verify;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.UserDataHost;
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.chrome.browser.app.tab_activity_glue.TabReparentingController.Delegate;
+import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabCreationState;
 import org.chromium.chrome.browser.tab.TabLaunchType;
@@ -30,7 +31,6 @@ import org.chromium.chrome.browser.tabmodel.AsyncTabParamsManagerFactory;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.tabmodel.TabReparentingParams;
 import org.chromium.chrome.test.util.browser.tabmodel.MockTabModel;
-import org.chromium.components.embedder_support.util.UrlConstants;
 import org.chromium.content_public.browser.NavigationController;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.url.GURL;
@@ -39,37 +39,14 @@ import org.chromium.url.JUnitTestGURLs;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Unit tests for {@link TabReparentingControllerTest}.
- */
+/** Unit tests for {@link TabReparentingControllerTest}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class TabReparentingControllerTest {
-    class FakeNightModeReparentingDelegate implements Delegate {
-        TabModelSelector mTabModelSelector;
-
-        @Override
-        public TabModelSelector getTabModelSelector() {
-            if (mTabModelSelector == null) {
-                // setup
-                mTabModelSelector = Mockito.mock(TabModelSelector.class);
-
-                doReturn(mTabModel).when(mTabModelSelector).getModel(false);
-                doReturn(mIncognitoTabModel).when(mTabModelSelector).getModel(true);
-            }
-
-            return mTabModelSelector;
-        }
-
-        @Override
-        public boolean isNTPUrl(GURL url) {
-            return UrlConstants.NTP_NON_NATIVE_URL.equals(url.getSpec())
-                    || UrlConstants.NTP_URL.equals(url.getSpec());
-        }
-    }
-
-    @Mock
-    ReparentingTask mTask;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock TabModelSelector mTabModelSelector;
+    @Mock ReparentingTask mTask;
+    @Mock Profile mProfile;
+    @Mock Profile mIncognitoProfile;
 
     MockTabModel mTabModel;
     MockTabModel mIncognitoTabModel;
@@ -77,19 +54,21 @@ public class TabReparentingControllerTest {
     Tab mForegroundTab;
 
     TabReparentingController mController;
-    FakeNightModeReparentingDelegate mFakeDelegate;
     AsyncTabParamsManager mRealAsyncTabParamsManager;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
+        Mockito.when(mIncognitoProfile.isOffTheRecord()).thenReturn(true);
 
-        mTabModel = new MockTabModel(false, null);
-        mIncognitoTabModel = new MockTabModel(true, null);
+        mTabModel = new MockTabModel(mProfile, null);
+        mIncognitoTabModel = new MockTabModel(mIncognitoProfile, null);
 
-        mFakeDelegate = new FakeNightModeReparentingDelegate();
+        doReturn(mTabModel).when(mTabModelSelector).getModel(false);
+        doReturn(mIncognitoTabModel).when(mTabModelSelector).getModel(true);
+
         mRealAsyncTabParamsManager = AsyncTabParamsManagerFactory.createAsyncTabParamsManager();
-        mController = new TabReparentingController(mFakeDelegate, mRealAsyncTabParamsManager);
+        mController =
+                new TabReparentingController(() -> mTabModelSelector, mRealAsyncTabParamsManager);
     }
 
     @After
@@ -116,12 +95,17 @@ public class TabReparentingControllerTest {
 
     @Test
     public void testReparenting_singleTab_NTP() {
-        // New tab pages aren't reparented intentionally.
-        mForegroundTab =
-                createAndAddMockTab(1, false, JUnitTestGURLs.getGURL(JUnitTestGURLs.NTP_URL));
+        mForegroundTab = createAndAddMockTab(1, /* incognito= */ false, JUnitTestGURLs.NTP_URL);
         mController.prepareTabsForReparenting();
 
-        Assert.assertFalse(mRealAsyncTabParamsManager.hasParamsWithTabToReparent());
+        AsyncTabParams params = mRealAsyncTabParamsManager.getAsyncTabParams().get(1);
+        Assert.assertNotNull(params);
+        Assert.assertTrue(params instanceof TabReparentingParams);
+
+        TabReparentingParams trp = (TabReparentingParams) params;
+        Tab tab = trp.getTabToReparent();
+        Assert.assertNotNull(tab);
+        verify(mTask, times(1)).detach();
     }
 
     @Test
@@ -217,7 +201,6 @@ public class TabReparentingControllerTest {
 
     @Test
     public void testReparenting_stopLoadingIfNeeded() {
-        // New tab pages aren't reparented intentionally.
         mForegroundTab = createAndAddMockTab(1, false);
         doReturn(true).when(mForegroundTab).isLoading();
 
@@ -249,11 +232,17 @@ public class TabReparentingControllerTest {
 
         int index;
         if (incognito) {
-            mIncognitoTabModel.addTab(tab, -1, TabLaunchType.FROM_BROWSER_ACTIONS,
+            mIncognitoTabModel.addTab(
+                    tab,
+                    -1,
+                    TabLaunchType.FROM_BROWSER_ACTIONS,
                     TabCreationState.LIVE_IN_FOREGROUND);
             index = mIncognitoTabModel.indexOf(tab);
         } else {
-            mTabModel.addTab(tab, -1, TabLaunchType.FROM_BROWSER_ACTIONS,
+            mTabModel.addTab(
+                    tab,
+                    -1,
+                    TabLaunchType.FROM_BROWSER_ACTIONS,
                     TabCreationState.LIVE_IN_FOREGROUND);
             index = mTabModel.indexOf(tab);
         }
@@ -263,7 +252,6 @@ public class TabReparentingControllerTest {
     }
 
     private Tab createAndAddMockTab(int id, boolean incognito) {
-        return createAndAddMockTab(
-                id, incognito, JUnitTestGURLs.getGURL(JUnitTestGURLs.EXAMPLE_URL));
+        return createAndAddMockTab(id, incognito, JUnitTestGURLs.EXAMPLE_URL);
     }
 }

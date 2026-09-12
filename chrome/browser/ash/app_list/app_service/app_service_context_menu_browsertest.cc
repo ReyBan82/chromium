@@ -12,15 +12,15 @@
 #include "chrome/browser/ash/app_list/app_list_model_updater.h"
 #include "chrome/browser/ash/app_list/chrome_app_list_item.h"
 #include "chrome/browser/ash/app_list/test/chrome_app_list_test_support.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
 #include "chrome/browser/web_applications/web_app_command_manager.h"
-#include "chrome/browser/web_applications/web_app_id.h"
 #include "chrome/browser/web_applications/web_app_install_info.h"
 #include "chrome/browser/web_applications/web_app_provider.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "components/webapps/common/web_app_id.h"
 #include "content/public/test/browser_test.h"
-#include "ui/base/models/simple_menu_model.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/menus/simple_menu_model.h"
 #include "ui/views/vector_icons.h"
 #include "url/gurl.h"
 
@@ -31,20 +31,24 @@ class AppServiceContextMenuBrowserTest : public InProcessBrowserTest {
 
   const gfx::VectorIcon& GetExpectedLaunchNewIcon(int command_id) {
     if (command_id == ash::USE_LAUNCH_TYPE_REGULAR)
-      return views::kNewTabIcon;
+      return features::IsRoundedIconsEnabled() ? views::kTabIcon
+                                               : views::kNewTabOldIcon;
     else if (command_id == ash::USE_LAUNCH_TYPE_WINDOW)
-      return views::kNewWindowIcon;
+      return features::IsRoundedIconsEnabled() ? views::kNewWindowIcon
+                                               : views::kNewWindowOldIcon;
     else
-      return views::kLaunchIcon;
+      return features::IsRoundedIconsEnabled() ? views::kOpenInNewIcon
+                                               : views::kLaunchOldIcon;
   }
 };
 
 IN_PROC_BROWSER_TEST_F(AppServiceContextMenuBrowserTest,
                        LaunchNewMenuItemDynamicallyChanges) {
-  Profile* profile = browser()->profile();
-  auto web_app_install_info = std::make_unique<WebAppInstallInfo>();
-  web_app_install_info->start_url = GURL("https://example.org");
-  web_app::AppId app_id =
+  Profile* profile = browser()->GetProfile();
+  auto web_app_install_info =
+      web_app::WebAppInstallInfo::CreateWithStartUrlForTesting(
+          GURL("https://example.org"));
+  webapps::AppId app_id =
       web_app::test::InstallWebApp(profile, std::move(web_app_install_info));
 
   AppListClientImpl* client = AppListClientImpl::GetInstance();

@@ -36,43 +36,33 @@ struct EnumTraits<tab_groups::mojom::Color, tab_groups::TabGroupColorId> {
         return MojoTabGroupColorId::kCyan;
       case TabGroupColorId::kOrange:
         return MojoTabGroupColorId::kOrange;
+      case TabGroupColorId::kNumEntries:
+        NOTREACHED() << "kNumEntries is not a supported color enum.";
     }
-    NOTREACHED();
-    return MojoTabGroupColorId::kGrey;
   }
 
-  static bool FromMojom(MojoTabGroupColorId input, TabGroupColorId* out) {
+  static TabGroupColorId FromMojom(MojoTabGroupColorId input) {
     switch (input) {
       case MojoTabGroupColorId::kGrey:
-        *out = TabGroupColorId::kGrey;
-        return true;
+        return TabGroupColorId::kGrey;
       case MojoTabGroupColorId::kBlue:
-        *out = TabGroupColorId::kBlue;
-        return true;
+        return TabGroupColorId::kBlue;
       case MojoTabGroupColorId::kRed:
-        *out = TabGroupColorId::kRed;
-        return true;
+        return TabGroupColorId::kRed;
       case MojoTabGroupColorId::kYellow:
-        *out = TabGroupColorId::kYellow;
-        return true;
+        return TabGroupColorId::kYellow;
       case MojoTabGroupColorId::kGreen:
-        *out = TabGroupColorId::kGreen;
-        return true;
+        return TabGroupColorId::kGreen;
       case MojoTabGroupColorId::kPink:
-        *out = TabGroupColorId::kPink;
-        return true;
+        return TabGroupColorId::kPink;
       case MojoTabGroupColorId::kPurple:
-        *out = TabGroupColorId::kPurple;
-        return true;
+        return TabGroupColorId::kPurple;
       case MojoTabGroupColorId::kCyan:
-        *out = TabGroupColorId::kCyan;
-        return true;
+        return TabGroupColorId::kCyan;
       case MojoTabGroupColorId::kOrange:
-        *out = TabGroupColorId::kOrange;
-        return true;
+        return TabGroupColorId::kOrange;
     }
     NOTREACHED();
-    return false;
   }
 };
 

@@ -8,8 +8,10 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
+using base::Bucket;
+using testing::UnorderedElementsAre;
+
 namespace media {
-namespace test {
 
 TEST(VideoCaptureMetricsTest, TestLogCaptureDeviceMetrics) {
   base::HistogramTester histogram_tester;
@@ -41,19 +43,17 @@ TEST(VideoCaptureMetricsTest, TestLogCaptureDeviceMetrics) {
 
   EXPECT_THAT(histogram_tester.GetAllSamples(
                   "Media.VideoCapture.Device.SupportedPixelFormat"),
-              testing::UnorderedElementsAre(
-                  base::Bucket(media::PIXEL_FORMAT_NV12, 1),
-                  base::Bucket(media::PIXEL_FORMAT_UYVY, 2),
-                  base::Bucket(media::PIXEL_FORMAT_MJPEG, 1),
-                  base::Bucket(media::PIXEL_FORMAT_UNKNOWN, 1)));
+              UnorderedElementsAre(Bucket(media::PIXEL_FORMAT_NV12, 1),
+                                   Bucket(media::PIXEL_FORMAT_UYVY, 2),
+                                   Bucket(media::PIXEL_FORMAT_MJPEG, 1),
+                                   Bucket(media::PIXEL_FORMAT_UNKNOWN, 1)));
 
-  EXPECT_THAT(histogram_tester.GetAllSamples(
-                  "Media.VideoCapture.Device.SupportedResolution"),
-              testing::UnorderedElementsAre(
-                  base::Bucket(0 /*other*/, 1), base::Bucket(1 /*qqvga*/, 1),
-                  base::Bucket(6 /*vga*/, 2), base::Bucket(23 /*4k_UHD*/, 1),
-                  base::Bucket(18 /*hd*/, 1)));
+  EXPECT_THAT(
+      histogram_tester.GetAllSamples(
+          "Media.VideoCapture.Device.SupportedResolution"),
+      UnorderedElementsAre(Bucket(0 /*other*/, 1), Bucket(1 /*qqvga*/, 1),
+                           Bucket(6 /*vga*/, 2), Bucket(23 /*4k_UHD*/, 1),
+                           Bucket(18 /*hd*/, 1)));
 }
 
-}  // namespace test
 }  // namespace media

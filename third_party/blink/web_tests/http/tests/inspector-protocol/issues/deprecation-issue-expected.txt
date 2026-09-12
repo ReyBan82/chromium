@@ -8,10 +8,10 @@ Inspector issue: {
                     frameId : <string>
                 }
                 sourceCodeLocation : {
-                    columnNumber : 24
+                    columnNumber : 23
                     lineNumber : 0
                     scriptId : <string>
-                    url : 
+                    url :
                 }
                 type : RangeExpand
             }

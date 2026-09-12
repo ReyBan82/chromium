@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "content/test/mock_keyboard.h"
 
 namespace content {
@@ -28,7 +29,7 @@ MockKeyboardDriverWin::MockKeyboardDriverWin() {
   orig_keyboard_layouts_list_.resize(num_keyboard_layouts);
   GetKeyboardLayoutList(num_keyboard_layouts, &orig_keyboard_layouts_list_[0]);
 
-  memset(&keyboard_states_[0], 0, sizeof(keyboard_states_));
+  UNSAFE_TODO(memset(&keyboard_states_[0], 0, sizeof(keyboard_states_)));
 }
 
 MockKeyboardDriverWin::~MockKeyboardDriverWin() {
@@ -102,10 +103,10 @@ bool MockKeyboardDriverWin::SetLayout(int layout) {
     {L"00001009", MockKeyboard::LAYOUT_CANADIAN_FRENCH},
   };
 
-  for (size_t i = 0; i < std::size(kLanguageIDs); ++i) {
-    if (layout == kLanguageIDs[i].keyboard_layout) {
-      HKL new_keyboard_layout = LoadKeyboardLayout(kLanguageIDs[i].language,
-                                                   KLF_ACTIVATE);
+  for (const auto& language_id : kLanguageIDs) {
+    if (layout == language_id.keyboard_layout) {
+      HKL new_keyboard_layout =
+          LoadKeyboardLayout(language_id.language, KLF_ACTIVATE);
       // loaded_keyboard_layout_ must always have a valid keyboard handle
       // so we only assign upon success.
       if (new_keyboard_layout) {
@@ -127,7 +128,7 @@ bool MockKeyboardDriverWin::SetModifiers(int modifiers) {
   // modifier-key status. So, we update the modifier-key status with this
   // SetKeyboardState() call before creating NativeWebKeyboardEvent
   // instances.
-  memset(&keyboard_states_[0], 0, sizeof(keyboard_states_));
+  UNSAFE_TODO(memset(&keyboard_states_[0], 0, sizeof(keyboard_states_)));
   static const struct {
     int key_code;
     int mask;
@@ -144,8 +145,9 @@ bool MockKeyboardDriverWin::SetModifiers(int modifiers) {
   };
   for (size_t i = 0; i < std::size(kModifierMasks); ++i) {
     const int kKeyDownMask = 0x80;
-    if (modifiers & kModifierMasks[i].mask)
-      keyboard_states_[kModifierMasks[i].key_code] = kKeyDownMask;
+    if (modifiers & UNSAFE_TODO(kModifierMasks[i]).mask) {
+      UNSAFE_TODO(keyboard_states_[kModifierMasks[i]).key_code] = kKeyDownMask;
+    }
   }
   SetKeyboardState(&keyboard_states_[0]);
 

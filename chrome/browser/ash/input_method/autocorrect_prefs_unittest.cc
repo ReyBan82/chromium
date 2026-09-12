@@ -5,11 +5,11 @@
 #include "chrome/browser/ash/input_method/autocorrect_prefs.h"
 
 #include "ash/constants/ash_features.h"
+#include "ash/constants/ash_pref_names.h"
 #include "base/feature_list.h"
 #include "base/strings/strcat.h"
 #include "base/values.h"
 #include "chrome/browser/ash/input_method/autocorrect_enums.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/test/base/testing_profile.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -19,15 +19,22 @@ namespace {
 
 constexpr char kUsEnglish[] = "xkb:us::eng";
 constexpr char kBrazilPortuguese[] = "xkb:br::por";
+constexpr char kLatinAmericaSpanish[] = "xkb:latam::spa";
+constexpr char kFranceFrench[] = "xkb:fr::fra";
+
+void SetManagedPkAutocorrectAllowed(Profile& profile, bool allowed) {
+  profile.GetPrefs()->SetBoolean(
+      ash::prefs::kManagedPhysicalKeyboardAutocorrectAllowed, allowed);
+}
 
 void SetAutocorrectLevelTo(Profile& profile,
                            const std::string& pref_name,
                            const std::string& engine_id,
                            int autocorrect_level) {
-  base::Value::Dict input_method_setting;
+  base::DictValue input_method_setting;
   input_method_setting.SetByDottedPath(
       base::StrCat({engine_id, ".", pref_name}), autocorrect_level);
-  profile.GetPrefs()->Set(::prefs::kLanguageInputMethodSpecificSettings,
+  profile.GetPrefs()->Set(ash::prefs::kLanguageInputMethodSpecificSettings,
                           base::Value(std::move(input_method_setting)));
 }
 
@@ -177,6 +184,52 @@ TEST_F(AutocorrectPrefsTest, EnabledByDefaultIsScopedToSingleLanguage) {
                                                kBrazilPortuguese),
             AutocorrectPreference::kEnabledByDefault);
 }
+
+class AutocorrectAdminPolicy : public AutocorrectPrefsTest,
+                               public testing::WithParamInterface<std::string> {
+};
+
+TEST_P(AutocorrectAdminPolicy,
+       WhenAdminPolicyDisallowsAutocorrectItIsAlwaysDisabled) {
+  const std::string& engine_id = GetParam();
+
+  SetPkAutocorrectLevelTo(profile_, engine_id, 1);
+  SetManagedPkAutocorrectAllowed(profile_, false);
+
+  EXPECT_EQ(
+      GetPhysicalKeyboardAutocorrectPref(*(profile_.GetPrefs()), engine_id),
+      AutocorrectPreference::kDisabled);
+}
+
+TEST_P(AutocorrectAdminPolicy, WhenAdminPolicyAllowsAutocorrectItCanBeEnabled) {
+  const std::string& engine_id = GetParam();
+
+  SetPkAutocorrectLevelTo(profile_, engine_id, 1);
+  SetManagedPkAutocorrectAllowed(profile_, true);
+
+  EXPECT_EQ(
+      GetPhysicalKeyboardAutocorrectPref(*(profile_.GetPrefs()), engine_id),
+      AutocorrectPreference::kEnabled);
+}
+
+TEST_P(AutocorrectAdminPolicy, WhenAdminPolicyIsNotSetAutocorrectCanBeEnabled) {
+  const std::string& engine_id = GetParam();
+
+  SetPkAutocorrectLevelTo(profile_, engine_id, 1);
+
+  EXPECT_EQ(
+      GetPhysicalKeyboardAutocorrectPref(*(profile_.GetPrefs()), engine_id),
+      AutocorrectPreference::kEnabled);
+}
+
+INSTANTIATE_TEST_SUITE_P(AutocorrectPrefsTest,
+                         AutocorrectAdminPolicy,
+                         testing::ValuesIn<std::string>({
+                             kBrazilPortuguese,
+                             kFranceFrench,
+                             kLatinAmericaSpanish,
+                             kUsEnglish,
+                         }));
 
 }  // namespace
 }  // namespace ash::input_method

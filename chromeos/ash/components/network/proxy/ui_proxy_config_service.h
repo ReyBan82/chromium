@@ -8,6 +8,7 @@
 #include <string>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/proxy_config/proxy_prefs.h"
@@ -58,7 +59,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) UIProxyConfigService {
   //
   // Returns whether |proxy_settings| have been changed.
   bool MergeEnforcedProxyConfig(const std::string& network_guid,
-                                base::Value::Dict* proxy_settings);
+                                base::DictValue* proxy_settings);
 
   // Returns the ProxyMode for |network|. The returned result is used to display
   // a privacy warning to the user in the system tray.
@@ -70,14 +71,16 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) UIProxyConfigService {
   // GUID of network used for current_ui_config_.
   std::string current_ui_network_guid_;
 
-  PrefService* profile_prefs_;  // unowned
+  raw_ptr<PrefService> profile_prefs_;  // unowned
   PrefChangeRegistrar profile_registrar_;
 
-  PrefService* local_state_prefs_;  // unowned
+  raw_ptr<PrefService> local_state_prefs_;  // unowned
   PrefChangeRegistrar local_state_registrar_;
 
-  NetworkStateHandler* network_state_handler_;      // unowned
-  NetworkProfileHandler* network_profile_handler_;  // unowned
+  raw_ptr<NetworkStateHandler, DanglingUntriaged>
+      network_state_handler_;  // unowned
+  raw_ptr<NetworkProfileHandler, DanglingUntriaged>
+      network_profile_handler_;  // unowned
 };
 
 }  // namespace ash

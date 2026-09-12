@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "components/security_state/core/security_state.h"
 
 class AutocompleteClassifier;
@@ -51,10 +51,6 @@ class LocationBarModelDelegate {
   // in the location bar.
   virtual bool ShouldDisplayURL() const;
 
-  // Returns whether the omnibox should use the new security indicators for
-  // secure HTTPS connections.
-  virtual bool ShouldUseUpdatedConnectionSecurityIndicators() const;
-
   // Returns the underlying security level of the page without regard to any
   // user edits that may be in progress.
   virtual security_state::SecurityLevel GetSecurityLevel() const;
@@ -91,6 +87,15 @@ class LocationBarModelDelegate {
   // Returns whether |url| corresponds to the user's home page.
   virtual bool IsHomePage(const GURL& url) const;
 
+  // Returns true if the current page is a contextual tasks UI page (i.e.
+  // chrome://contextual-tasks/).
+  virtual bool IsContextualTasksPage() const;
+
+  // Returns the inner frame URL associated with the current contextual tasks UI
+  // page. If the current page is not a contextual tasks UI page, this will
+  // return an empty URL.
+  virtual GURL GetContextualTasksInnerFrameURL() const;
+
   // Returns the AutocompleteClassifier instance for the current page.
   virtual AutocompleteClassifier* GetAutocompleteClassifier();
 
@@ -98,7 +103,7 @@ class LocationBarModelDelegate {
   virtual TemplateURLService* GetTemplateURLService();
 
  protected:
-  virtual ~LocationBarModelDelegate() {}
+  virtual ~LocationBarModelDelegate() = default;
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_LOCATION_BAR_MODEL_DELEGATE_H_

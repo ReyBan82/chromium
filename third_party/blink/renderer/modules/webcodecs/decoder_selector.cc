@@ -11,6 +11,7 @@
 #include "base/task/single_thread_task_runner.h"
 #include "media/base/channel_layout.h"
 #include "media/base/demuxer_stream.h"
+#include "media/base/media_switches.h"
 #include "media/base/sample_format.h"
 #include "media/filters/decrypting_demuxer_stream.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
@@ -48,8 +49,12 @@ class NullDemuxerStream : public media::DemuxerStream {
   Type type() const override { return stream_type; }
 
   bool SupportsConfigChanges() override {
-    NOTREACHED();
-    return true;
+    // NOTE: Returning false here causes the DecoderSelector to select based on
+    // resolution when hardwareAcceleration == "no-preference". If it's instead
+    // "prefer-hardware" or "prefer-software" the flag has no effect since only
+    // the hardware or software factory is returned via `create_decoders_cb`.
+    return !base::FeatureList::IsEnabled(
+        media::kResolutionBasedDecoderPriority);
   }
 
   void set_low_delay(bool low_delay) { low_delay_ = low_delay; }
@@ -82,13 +87,17 @@ template <media::DemuxerStream::Type StreamType>
 DecoderSelector<StreamType>::DecoderSelector(
     scoped_refptr<base::SequencedTaskRunner> task_runner,
     CreateDecodersCB create_decoders_cb,
+    media::MediaLog* media_log,
     typename Decoder::OutputCB output_cb)
-    : impl_(std::move(task_runner),
+    : media_log_(media_log),
+      impl_(std::move(task_runner),
             std::move(create_decoders_cb),
-            &null_media_log_),
+            media_log_,
+            /*enable_priority_based_selection=*/true),
       demuxer_stream_(new NullDemuxerStream<StreamType>()),
       stream_traits_(CreateStreamTraits()),
       output_cb_(output_cb) {
+  CHECK(media_log_);
   impl_.Initialize(stream_traits_.get(), demuxer_stream_.get(),
                    nullptr /*CdmContext*/, media::WaitingCB());
 }
@@ -108,8 +117,8 @@ void DecoderSelector<StreamType>::SelectDecoder(
   // media::DecoderSelector will call back with a DecoderStatus if selection is
   // in progress when it is destructed.
   impl_.BeginDecoderSelection(
-      WTF::BindOnce(&DecoderSelector<StreamType>::OnDecoderSelected,
-                    weak_factory_.GetWeakPtr(), std::move(select_decoder_cb)),
+      blink::BindOnce(&DecoderSelector<StreamType>::OnDecoderSelected,
+                      weak_factory_.GetWeakPtr(), std::move(select_decoder_cb)),
       output_cb_);
 }
 
@@ -118,14 +127,13 @@ std::unique_ptr<WebCodecsAudioDecoderSelector::StreamTraits>
 DecoderSelector<media::DemuxerStream::AUDIO>::CreateStreamTraits() {
   // TODO(chcunningham): Consider plumbing real hw channel layout.
   return std::make_unique<DecoderSelector::StreamTraits>(
-      &null_media_log_, media::CHANNEL_LAYOUT_NONE,
-      media::kUnknownSampleFormat);
+      media_log_, media::ChannelLayoutConfig(), media::kUnknownSampleFormat);
 }
 
 template <>
 std::unique_ptr<WebCodecsVideoDecoderSelector::StreamTraits>
 DecoderSelector<media::DemuxerStream::VIDEO>::CreateStreamTraits() {
-  return std::make_unique<DecoderSelector::StreamTraits>(&null_media_log_);
+  return std::make_unique<DecoderSelector::StreamTraits>(media_log_);
 }
 
 template <media::DemuxerStream::Type StreamType>
@@ -141,11 +149,7 @@ void DecoderSelector<StreamType>::OnDecoderSelected(
   // (configure() no longer takes a promise).
   impl_.FinalizeDecoderSelection();
 
-  if (!decoder_or_error.has_value()) {
-    std::move(select_decoder_cb).Run(nullptr);
-  } else {
-    std::move(select_decoder_cb).Run(std::move(decoder_or_error).value());
-  }
+  std::move(select_decoder_cb).Run(std::move(decoder_or_error));
 }
 
 template class MODULES_EXPORT DecoderSelector<media::DemuxerStream::VIDEO>;

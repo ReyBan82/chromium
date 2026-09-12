@@ -10,50 +10,43 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 
-import androidx.annotation.VisibleForTesting;
-
+import org.chromium.base.IntentUtils;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.browserservices.intents.WebappConstants;
 import org.chromium.components.browser_ui.notifications.PendingIntentProvider;
 
 /**
  * Triggered when user interaction with WebAPK install notifications.
  *
- * Lifecycle: This BroadcastReceiver is started when an Intent arrives, performs a small amount of
- * work (dismissing a notification and post task to retry the install) and is destroyed.
+ * <p>Lifecycle: This BroadcastReceiver is started when an Intent arrives, performs a small amount
+ * of work (dismissing a notification and post task to retry the install) and is destroyed.
  *
- * Thread safety: {@link #onReceive} is called on the main thread by the Android framework.
+ * <p>Thread safety: {@link #onReceive} is called on the main thread by the Android framework.
  */
+@NullMarked
 public class WebApkInstallBroadcastReceiver extends BroadcastReceiver {
     private static final String TAG = "webapk";
 
-    static final String ACTION_RETRY_INSTALL = "WebApkInstallNotification.retry";
     static final String ACTION_OPEN_IN_BROWSER = "WebApkInstallNotification.open";
 
     private static final String NOTIFICATION_ID = "WebApkInstallNotification.notification_id";
     private static final String WEBAPK_START_URL = "WebApkInstallNotification.start_url";
 
-    private final WebApkInstallCoordinatorBridge mBridge;
-
     /** Constructor used by the Android framework. */
-    public WebApkInstallBroadcastReceiver() {
-        this(new WebApkInstallCoordinatorBridge());
-    }
-
-    /** Constructor that allows dependency injection for use in tests. */
-    @VisibleForTesting
-    public WebApkInstallBroadcastReceiver(WebApkInstallCoordinatorBridge bridge) {
-        mBridge = bridge;
-    }
+    public WebApkInstallBroadcastReceiver() {}
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        assert intent != null && !intent.hasExtra(NOTIFICATION_ID);
+        assert intent != null;
+        String id = IntentUtils.safeGetStringExtra(intent, NOTIFICATION_ID);
+        assert id != null;
 
-        String id = intent.getStringExtra(NOTIFICATION_ID);
         WebApkInstallService.cancelNotification(id);
 
         if (ACTION_OPEN_IN_BROWSER.equals(intent.getAction())) {
-            openInChrome(context, intent.getStringExtra(WEBAPK_START_URL));
+            String startUrl = IntentUtils.safeGetStringExtra(intent, WEBAPK_START_URL);
+            assert startUrl != null;
+            openInChrome(context, startUrl);
         }
     }
 

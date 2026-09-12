@@ -4,9 +4,10 @@
 
 package org.chromium.chrome.browser.app.feed;
 
-import static junit.framework.Assert.assertNull;
-
-import static org.junit.Assert.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 
 import androidx.test.filters.SmallTest;
 
@@ -14,124 +15,124 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
-import org.chromium.base.Callback;
 import org.chromium.base.Log;
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CallbackHelper;
 import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
-import org.chromium.chrome.browser.tab.EmptyTabObserver;
+import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.Tab.LoadUrlResult;
+import org.chromium.chrome.browser.tab.TabObserver;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
+import org.chromium.chrome.test.transit.AutoResetCtaTransitTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
 import org.chromium.chrome.test.util.ChromeTabUtils;
 import org.chromium.content_public.browser.LoadUrlParams;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
 import org.chromium.net.test.EmbeddedTestServer;
 import org.chromium.url.GURL;
 
-import java.util.concurrent.TimeoutException;
-
-/**
- * Instrumentation tests for {@link NavigationRecorder}.
- */
+/** Instrumentation tests for {@link NavigationRecorder}. */
 @RunWith(ChromeJUnit4ClassRunner.class)
+@Batch(Batch.PER_CLASS)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class NavigationRecorderTest {
     private static final String TAG = "NavRecorderTest";
+
     @Rule
-    public ChromeTabbedActivityTestRule mTestSetupRule = new ChromeTabbedActivityTestRule();
+    public AutoResetCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.fastAutoResetCtaActivityRule();
+
+    @Mock private NavigationRecorder.Natives mNavigationRecorderJniMock;
 
     private EmbeddedTestServer mTestServer;
     private String mNavUrl;
     private Tab mInitialTab;
+    private Profile mProfile;
+    private int mSurfaceId;
+    private CallbackHelper mReportCompleteCallback;
 
     @Before
     public void setUp() {
-        mTestServer = mTestSetupRule.getEmbeddedTestServerRule().getServer();
+        MockitoAnnotations.openMocks(this);
+        mTestServer = mActivityTestRule.getTestServer();
         mNavUrl = mTestServer.getURL("/chrome/test/data/android/google.html");
-        mTestSetupRule.startMainActivityOnBlankPage();
+        NavigationRecorderJni.setInstanceForTesting(mNavigationRecorderJniMock);
+        mReportCompleteCallback = new CallbackHelper();
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mInitialTab = mTestSetupRule.getActivity().getActivityTab();
-            // Add logging to debug flaky test: crbug.com/1297086.
-            mInitialTab.addObserver(new EmptyTabObserver() {
-                @Override
-                public void onPageLoadStarted(Tab tab, GURL url) {
-                    Log.e(TAG, "onPageLoadStarted " + url.getSpec());
-                }
-                @Override
-                public void onPageLoadFinished(Tab tab, GURL url) {
-                    Log.e(TAG, "onPageLoadFinished " + url.getSpec());
-                }
-                @Override
-                public void onPageLoadFailed(Tab tab, int errorCode) {
-                    Log.e(TAG, "onPageLoadFailed " + errorCode);
-                }
-            });
-        });
+        doAnswer(
+                        _ -> {
+                            mReportCompleteCallback.notifyCalled();
+                            return null;
+                        })
+                .when(mNavigationRecorderJniMock)
+                .reportOpenVisitComplete(any(), anyInt(), anyLong());
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mInitialTab = mActivityTestRule.getActivity().getActivityTab();
+                    // Add logging to debug flaky test: crbug.com/40822096.
+                    mInitialTab.addObserver(
+                            new TabObserver() {
+                                @Override
+                                public void onPageLoadStarted(Tab tab, GURL url) {
+                                    Log.e(TAG, "onPageLoadStarted " + url.getSpec());
+                                }
+
+                                @Override
+                                public void onPageLoadFinished(Tab tab, GURL url) {
+                                    Log.e(TAG, "onPageLoadFinished " + url.getSpec());
+                                }
+
+                                @Override
+                                public void onPageLoadFailed(Tab tab, int errorCode) {
+                                    Log.e(TAG, "onPageLoadFailed " + errorCode);
+                                }
+                            });
+                    mProfile = mActivityTestRule.getProfile(/* incognito= */ false);
+                    mSurfaceId = 1;
+                });
     }
 
     @Test
     @SmallTest
-    public void testRecordVisitInCurrentTabEndsWithBack() throws TimeoutException {
-        final CallbackHelper callback = new CallbackHelper();
-        loadUrlAndRecordVisit(mNavUrl, new Callback<NavigationRecorder.VisitData>() {
-            @Override
-            public void onResult(NavigationRecorder.VisitData visit) {
-                // When the tab is hidden we receive a notification with no end URL.
-                assertEquals("about:blank", visit.endUrl.getSpec());
-                callback.notifyCalled();
-            }
-        });
+    public void testRecordVisitInCurrentTabEndsWithBack() throws Exception {
+        loadUrlAndRecordVisit(mNavUrl, mProfile, mSurfaceId);
 
-        ChromeTabUtils.waitForTabPageLoaded(mInitialTab, (String) null);
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mInitialTab.goBack(); });
-
-        callback.waitForCallback(0);
+        ChromeTabUtils.waitForTabPageLoaded(mInitialTab, null);
+        ThreadUtils.runOnUiThreadBlocking(() -> mInitialTab.goBack());
+        mReportCompleteCallback.waitForCallback(0);
     }
 
     @Test
     @SmallTest
-    public void testRecordVisitInCurrentTabEndsWhenHidden() throws TimeoutException {
-        final CallbackHelper callback = new CallbackHelper();
-        loadUrlAndRecordVisit(mNavUrl, new Callback<NavigationRecorder.VisitData>() {
-            @Override
-            public void onResult(NavigationRecorder.VisitData visit) {
-                // When the tab is hidden we receive a notification with no end URL.
-                assertNull(visit.endUrl);
-                callback.notifyCalled();
-            }
-        });
+    public void testRecordVisitInCurrentTabEndsWhenHidden() throws Exception {
+        loadUrlAndRecordVisit(mNavUrl, mProfile, mSurfaceId);
 
-        mTestSetupRule.loadUrlInNewTab(null);
-        callback.waitForCallback(0);
+        mActivityTestRule.loadUrlInNewTab(null);
+        mReportCompleteCallback.waitForCallback(0);
     }
 
     @Test
     @SmallTest
-    public void testRecordVisitInCurrentTabEndsWhenURLTyped() throws TimeoutException {
-        final CallbackHelper callback = new CallbackHelper();
-        loadUrlAndRecordVisit(mNavUrl, new Callback<NavigationRecorder.VisitData>() {
-            @Override
-            public void onResult(NavigationRecorder.VisitData visit) {
-                // When the visit is hidden because of the transition type we get no URL.
-                assertNull(visit.endUrl);
-                callback.notifyCalled();
-            }
-        });
+    public void testRecordVisitInCurrentTabEndsWhenURLTyped() throws Exception {
+        loadUrlAndRecordVisit(mNavUrl, mProfile, mSurfaceId);
 
-        mTestSetupRule.loadUrl(mTestServer.getURL("/chrome/test/data/android/simple.html"));
-        callback.waitForCallback(0);
+        mActivityTestRule.loadUrl(mTestServer.getURL("/chrome/test/data/android/simple.html"));
+        mReportCompleteCallback.waitForCallback(0);
     }
 
     /** Loads the provided URL in the current tab and sets up navigation recording for it. */
-    private void loadUrlAndRecordVisit(
-            final String url, Callback<NavigationRecorder.VisitData> visitCallback) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            int status = mInitialTab.loadUrl(new LoadUrlParams(url));
-            Log.e(TAG, "loadUrl status=" + status);
-            NavigationRecorder.record(mInitialTab, visitCallback);
-        });
+    private void loadUrlAndRecordVisit(final String url, Profile profile, int sourceId) {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    LoadUrlResult result = mInitialTab.loadUrl(new LoadUrlParams(url));
+                    Log.e(TAG, "loadUrl status=" + result.tabLoadStatus);
+                    NavigationRecorder.record(mInitialTab, profile, sourceId);
+                });
     }
 }

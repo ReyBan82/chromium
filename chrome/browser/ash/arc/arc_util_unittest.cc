@@ -6,46 +6,54 @@
 
 #include <memory>
 
-#include "ash/components/arc/arc_features.h"
-#include "ash/components/arc/arc_prefs.h"
 #include "ash/constants/ash_features.h"
+#include "ash/constants/ash_pref_names.h"
+#include "base/check.h"
 #include "base/command_line.h"
+#include "base/memory/raw_ptr.h"
 #include "base/system/sys_info.h"
 #include "base/test/icu_test_util.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_command_line.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/values.h"
 #include "chrome/browser/ash/arc/session/arc_session_manager.h"
 #include "chrome/browser/ash/login/demo_mode/demo_session.h"
 #include "chrome/browser/ash/login/oobe_configuration.h"
-#include "chrome/browser/ash/login/ui/fake_login_display_host.h"
-#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
+#include "chrome/browser/ash/policy/core/device_local_account.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
+#include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/ash/login/fake_login_display_host.h"
+#include "chrome/browser/ui/webui/ash/login/consolidated_consent_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/demo_preferences_screen_handler.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
 #include "chromeos/ash/components/install_attributes/stub_install_attributes.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
+#include "chromeos/ash/experiences/arc/arc_features.h"
+#include "chromeos/ash/experiences/arc/arc_prefs.h"
 #include "components/account_id/account_id.h"
 #include "components/policy/core/common/cloud/cloud_policy_constants.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/testing_pref_service.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
 #include "components/user_manager/known_user.h"
-#include "components/user_manager/scoped_user_manager.h"
 #include "components/user_manager/user_manager.h"
 #include "components/user_manager/user_names.h"
 #include "components/version_info/version_info.h"
-#include "content/public/browser/notification_service.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/test/browser_task_environment.h"
+#include "google_apis/gaia/gaia_id.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
+#include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace arc {
@@ -54,7 +62,7 @@ namespace util {
 namespace {
 
 constexpr char kTestProfileName[] = "user@gmail.com";
-constexpr char kTestGaiaId[] = "1234567890";
+constexpr GaiaId::Literal kTestGaiaId("1234567890");
 
 void SetProfileIsManagedForTesting(Profile* profile) {
   policy::ProfilePolicyConnector* const connector =
@@ -69,88 +77,6 @@ void DisableDBusForProfileManager() {
   if (!command_line->HasSwitch(switches::kTestType))
     command_line->AppendSwitch(switches::kTestType);
 }
-
-class FakeUserManagerWithLocalState : public ash::FakeChromeUserManager {
- public:
-  explicit FakeUserManagerWithLocalState(
-      TestingProfileManager* testing_profile_manager)
-      : testing_profile_manager_(testing_profile_manager),
-        test_local_state_(std::make_unique<TestingPrefServiceSimple>()) {
-    RegisterPrefs(test_local_state_->registry());
-  }
-
-  FakeUserManagerWithLocalState(const FakeUserManagerWithLocalState&) = delete;
-  FakeUserManagerWithLocalState& operator=(
-      const FakeUserManagerWithLocalState&) = delete;
-
-  PrefService* GetLocalState() const override {
-    return test_local_state_.get();
-  }
-
-  TestingProfileManager* testing_profile_manager() {
-    return testing_profile_manager_;
-  }
-
- private:
-  // Unowned pointer.
-  TestingProfileManager* const testing_profile_manager_;
-
-  std::unique_ptr<TestingPrefServiceSimple> test_local_state_;
-};
-
-class ScopedLogIn {
- public:
-  ScopedLogIn(
-      FakeUserManagerWithLocalState* fake_user_manager,
-      const AccountId& account_id,
-      user_manager::UserType user_type = user_manager::USER_TYPE_REGULAR)
-      : fake_user_manager_(fake_user_manager), account_id_(account_id) {
-    // Prevent access to DBus. This switch is reset in case set from test SetUp
-    // due massive usage of InitFromArgv.
-    base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
-    if (!command_line.HasSwitch(switches::kTestType))
-      command_line.AppendSwitch(switches::kTestType);
-
-    switch (user_type) {
-      case user_manager::USER_TYPE_REGULAR:  // fallthrough
-      case user_manager::USER_TYPE_ACTIVE_DIRECTORY:
-        LogIn();
-        break;
-      case user_manager::USER_TYPE_PUBLIC_ACCOUNT:
-        LogInAsPublicAccount();
-        break;
-      case user_manager::USER_TYPE_ARC_KIOSK_APP:
-        LogInArcKioskApp();
-        break;
-      default:
-        NOTREACHED();
-    }
-  }
-
-  ScopedLogIn(const ScopedLogIn&) = delete;
-  ScopedLogIn& operator=(const ScopedLogIn&) = delete;
-
-  ~ScopedLogIn() { fake_user_manager_->RemoveUserFromList(account_id_); }
-
- private:
-  void LogIn() {
-    fake_user_manager_->AddUser(account_id_);
-    fake_user_manager_->LoginUser(account_id_);
-  }
-
-  void LogInAsPublicAccount() {
-    fake_user_manager_->AddPublicAccountUser(account_id_);
-    fake_user_manager_->LoginUser(account_id_);
-  }
-
-  void LogInArcKioskApp() {
-    fake_user_manager_->AddArcKioskAppUser(account_id_);
-    fake_user_manager_->LoginUser(account_id_);
-  }
-
-  FakeUserManagerWithLocalState* fake_user_manager_;
-  const AccountId account_id_;
-};
 
 bool IsArcAllowedForProfileOnFirstCall(const Profile* profile) {
   ResetArcAllowedCheckForTesting(profile);
@@ -170,15 +96,18 @@ class ChromeArcUtilTest : public testing::Test {
 
   void SetUp() override {
     command_line_ = std::make_unique<base::test::ScopedCommandLine>();
+    command_line_->GetProcessCommandLine()->AppendSwitch(switches::kTestType);
+
+    // TODO(crbug.com/278643115): Rework user/profile set up.
+    ash::ProfileHelper::SetProfileToUserForTestingEnabled(true);
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            TestingBrowserProcess::GetGlobal()->local_state());
 
     ASSERT_TRUE(data_dir_.CreateUniqueTempDir());
     profile_manager_ = std::make_unique<TestingProfileManager>(
         TestingBrowserProcess::GetGlobal());
     ASSERT_TRUE(profile_manager_->SetUp());
-
-    user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::make_unique<FakeUserManagerWithLocalState>(
-            profile_manager_.get()));
 
     profile_ = profile_manager_->CreateTestingProfile(kTestProfileName);
   }
@@ -186,25 +115,19 @@ class ChromeArcUtilTest : public testing::Test {
   void TearDown() override {
     // Avoid retries, let the next test start safely.
     ResetArcAllowedCheckForTesting(profile_);
+    SetArcBlockedDueToIncompatibleFileSystemForTesting(false);
     profile_manager_->DeleteTestingProfile(kTestProfileName);
     profile_ = nullptr;
-    user_manager_enabler_.reset();
     profile_manager_.reset();
+    user_session_test_environment_.reset();
+    ash::ProfileHelper::SetProfileToUserForTestingEnabled(false);
     command_line_.reset();
   }
 
   TestingProfile* profile() { return profile_; }
 
-  FakeUserManagerWithLocalState* GetFakeUserManager() const {
-    return static_cast<FakeUserManagerWithLocalState*>(
-        user_manager::UserManager::Get());
-  }
-
-  void LogIn() {
-    const auto account_id = AccountId::FromUserEmailGaiaId(
-        profile()->GetProfileUserName(), kTestGaiaId);
-    GetFakeUserManager()->AddUser(account_id);
-    GetFakeUserManager()->LoginUser(account_id);
+  ash::test::UserSessionTestEnvironment* user_session_test_environment() const {
+    return user_session_test_environment_.get();
   }
 
  protected:
@@ -212,21 +135,23 @@ class ChromeArcUtilTest : public testing::Test {
 
  private:
   std::unique_ptr<base::test::ScopedCommandLine> command_line_;
-  base::test::ScopedFeatureList feature_list_;
   content::BrowserTaskEnvironment task_environment_;
   base::ScopedTempDir data_dir_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
   std::unique_ptr<TestingProfileManager> profile_manager_;
-  std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
   // Owned by |profile_manager_|
-  TestingProfile* profile_ = nullptr;
+  raw_ptr<TestingProfile, DanglingUntriaged> profile_ = nullptr;
 };
 
 TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
 
   // false for nullptr.
@@ -238,10 +163,12 @@ TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile) {
 }
 
 TEST_F(ChromeArcUtilTest, IsArcAllowedForProfileLegacy) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv({"", "--enable-arc"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
 
   // false for nullptr.
@@ -253,153 +180,127 @@ TEST_F(ChromeArcUtilTest, IsArcAllowedForProfileLegacy) {
 }
 
 TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_DisableArc) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv({""});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_FALSE(IsArcAllowedForProfileOnFirstCall(profile()));
 }
 
 TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_NonPrimaryProfile) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login2(
-      GetFakeUserManager(),
-      AccountId::FromUserEmailGaiaId("user2@gmail.com", "0123456789"));
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const AccountId account_id2 =
+      AccountId::FromUserEmailGaiaId("user2@gmail.com", GaiaId("0123456789"));
+  const AccountId account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id2));
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id2);
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_FALSE(IsArcAllowedForProfileOnFirstCall(profile()));
 }
 
 // User without GAIA account.
 TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_PublicAccount) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail("public_user@gmail.com"),
-                    user_manager::USER_TYPE_PUBLIC_ACCOUNT);
+  policy::DeviceLocalAccount device_local_account(
+      policy::DeviceLocalAccountType::kPublicSession,
+      policy::DeviceLocalAccount::EphemeralMode::kFollowDeviceWidePolicy,
+      "public_user@gmail.com", /*kiosk_app_id=*/"",
+      /*kiosk_app_update_url=*/"");
+  CHECK(user_session_test_environment()->AddPublicAccountUser(
+      device_local_account.user_id));
+  user_session_test_environment()->LogIn(
+      AccountId::FromUserEmail(device_local_account.user_id));
   EXPECT_TRUE(IsArcAllowedForProfile(profile()));
 }
 
-TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_ActiveDirectoryEnabled) {
-  base::CommandLine::ForCurrentProcess()->InitFromArgv(
-      {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(
-      GetFakeUserManager(),
-      AccountId::AdFromUserEmailObjGuid("testing_profile@test",
-                                        "f04557de-5da2-40ce-ae9d-b8874d8da96e"),
-      user_manager::USER_TYPE_ACTIVE_DIRECTORY);
-  EXPECT_FALSE(
-      ash::ProfileHelper::Get()->GetUserByProfile(profile())->HasGaiaAccount());
-  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
-}
-
-TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_ActiveDirectoryDisabled) {
-  base::CommandLine::ForCurrentProcess()->InitFromArgv({""});
-  ScopedLogIn login(
-      GetFakeUserManager(),
-      AccountId::AdFromUserEmailObjGuid("testing_profile@test",
-                                        "f04557de-5da2-40ce-ae9d-b8874d8da96e"),
-      user_manager::USER_TYPE_ACTIVE_DIRECTORY);
-  EXPECT_FALSE(
-      ash::ProfileHelper::Get()->GetUserByProfile(profile())->HasGaiaAccount());
-  EXPECT_FALSE(IsArcAllowedForProfileOnFirstCall(profile()));
-}
-
-TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_KioskArcNotAvailable) {
-  base::CommandLine::ForCurrentProcess()->InitFromArgv({""});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail(profile()->GetProfileUserName()),
-                    user_manager::USER_TYPE_ARC_KIOSK_APP);
-  EXPECT_FALSE(
-      ash::ProfileHelper::Get()->GetUserByProfile(profile())->HasGaiaAccount());
-  EXPECT_FALSE(IsArcAllowedForProfileOnFirstCall(profile()));
-}
-
-TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_KioskArcInstalled) {
-  base::CommandLine::ForCurrentProcess()->InitFromArgv(
-      {"", "--arc-availability=installed"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail(profile()->GetProfileUserName()),
-                    user_manager::USER_TYPE_ARC_KIOSK_APP);
-  EXPECT_FALSE(
-      ash::ProfileHelper::Get()->GetUserByProfile(profile())->HasGaiaAccount());
-  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
-}
-
-TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_KioskArcSupported) {
-  base::CommandLine::ForCurrentProcess()->InitFromArgv(
-      {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail(profile()->GetProfileUserName()),
-                    user_manager::USER_TYPE_ARC_KIOSK_APP);
-  EXPECT_FALSE(
-      ash::ProfileHelper::Get()->GetUserByProfile(profile())->HasGaiaAccount());
-  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
-}
-
-// Guest account is interpreted as EphemeralDataUser.
 TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_GuestAccount) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    GetFakeUserManager()->GetGuestAccountId());
+  CHECK(user_session_test_environment()->AddGuestUser());
+  user_session_test_environment()->LogIn(user_manager::GuestAccountId());
+  EXPECT_FALSE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+// Unmanaged account on managed device is not allowed to
+// use arc on reven board.
+TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_UnmanagedAccount_Reven) {
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported", "--reven-branding"});
+  cros_settings_test_helper_.InstallAttributes()->SetCloudManaged(
+      "example.com", "fake-device-id");
+  EXPECT_FALSE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+// Managed account is allowed to use arc on reven board.
+TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_ManagedDeviceAccount_Reven) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported", "--reven-branding"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  SetProfileIsManagedForTesting(profile());
+  cros_settings_test_helper_.InstallAttributes()->SetCloudManaged(
+      "example.com", "fake-device-id");
   EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
 }
 
-// Demo account is interpreted as EphemeralDataUser.
-TEST_F(ChromeArcUtilTest, IsArcAllowedForProfile_DemoAccount) {
-  base::CommandLine::ForCurrentProcess()->InitFromArgv(
-      {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(GetFakeUserManager(), user_manager::DemoAccountId());
-  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
-}
-
-TEST_F(ChromeArcUtilTest, IsArcBlockedDueToIncompatibleFileSystem) {
+TEST_F(ChromeArcUtilTest, IsArcBlockedDueToIncompatibleFileSystem_RegularUser) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   SetArcBlockedDueToIncompatibleFileSystemForTesting(true);
 
   const AccountId user_id(AccountId::FromUserEmailGaiaId(
       profile()->GetProfileUserName(), kTestGaiaId));
-  const AccountId robot_id(
-      AccountId::FromUserEmail(profile()->GetProfileUserName()));
+  CHECK(user_session_test_environment()->AddRegularUser(user_id));
+  user_session_test_environment()->LogIn(user_id);
+  EXPECT_TRUE(IsArcBlockedDueToIncompatibleFileSystem(profile()));
+}
 
-  // Blocked for a regular user.
-  {
-    ScopedLogIn login(GetFakeUserManager(), user_id,
-                      user_manager::USER_TYPE_REGULAR);
-    EXPECT_TRUE(IsArcBlockedDueToIncompatibleFileSystem(profile()));
-  }
+TEST_F(ChromeArcUtilTest,
+       IsArcBlockedDueToIncompatibleFileSystem_PublicAccount) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  SetArcBlockedDueToIncompatibleFileSystemForTesting(true);
 
-  // Never blocked for an ARC kiosk.
-  {
-    ScopedLogIn login(GetFakeUserManager(), robot_id,
-                      user_manager::USER_TYPE_ARC_KIOSK_APP);
-    EXPECT_FALSE(IsArcBlockedDueToIncompatibleFileSystem(profile()));
-  }
-
-  // Never blocked for a public session.
-  {
-    ScopedLogIn login(GetFakeUserManager(), robot_id,
-                      user_manager::USER_TYPE_PUBLIC_ACCOUNT);
-    EXPECT_FALSE(IsArcBlockedDueToIncompatibleFileSystem(profile()));
-  }
+  policy::DeviceLocalAccount device_local_account(
+      policy::DeviceLocalAccountType::kPublicSession,
+      policy::DeviceLocalAccount::EphemeralMode::kFollowDeviceWidePolicy,
+      "public_session", /*kiosk_app_id=*/"",
+      /*kiosk_app_update_url=*/"");
+  CHECK(user_session_test_environment()->AddPublicAccountUser(
+      device_local_account.user_id));
+  user_session_test_environment()->LogIn(
+      AccountId::FromUserEmail(device_local_account.user_id));
+  EXPECT_FALSE(IsArcBlockedDueToIncompatibleFileSystem(profile()));
 }
 
 TEST_F(ChromeArcUtilTest, IsArcCompatibleFileSystemUsedForProfile) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
 
   const AccountId id(AccountId::FromUserEmailGaiaId(
       profile()->GetProfileUserName(), kTestGaiaId));
-  ScopedLogIn login(GetFakeUserManager(), id);
+  CHECK(user_session_test_environment()->AddRegularUser(id));
+  user_session_test_environment()->LogIn(id);
   const user_manager::User* user =
-      ash::ProfileHelper::Get()->GetUserByProfile(profile());
+      user_manager::UserManager::Get()->FindUser(id);
 
   // Unconfirmed
-  EXPECT_FALSE(IsArcCompatibleFileSystemUsedForUser(user));
+  EXPECT_TRUE(IsArcCompatibleFileSystemUsedForUser(user));
 
   user_manager::KnownUser known_user(g_browser_process->local_state());
   // Old FS
@@ -419,12 +320,14 @@ TEST_F(ChromeArcUtilTest, IsArcCompatibleFileSystemUsedForProfile) {
 }
 
 TEST_F(ChromeArcUtilTest, ArcPlayStoreEnabledForProfile) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   // Ensure IsAllowedForProfile() true.
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   ASSERT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
 
   // By default, Google Play Store is disabled.
@@ -454,12 +357,14 @@ TEST_F(ChromeArcUtilTest, ArcPlayStoreEnabledForProfile_NotAllowed) {
 }
 
 TEST_F(ChromeArcUtilTest, ArcPlayStoreEnabledForProfile_Managed) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   // Ensure IsAllowedForProfile() true.
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   ASSERT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
 
   // By default it is not managed.
@@ -495,20 +400,16 @@ TEST_F(ChromeArcUtilTest, ArcPlayStoreEnabledForProfile_Managed) {
   EXPECT_FALSE(IsArcPlayStoreEnabledPreferenceManagedForProfile(profile()));
 }
 
-// Test the AreArcAllOptInPreferencesIgnorableForProfile() function.
+// Test the AreArcAllOptInPreferencesIgnorableForProfile() legacy behavior (Pre
+// Privacy Hub).
 TEST_F(ChromeArcUtilTest, AreArcAllOptInPreferencesIgnorableForProfile) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndDisableFeature(ash::features::kCrosPrivacyHub);
+
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   // OptIn prefs are unset, the function returns false.
   EXPECT_FALSE(AreArcAllOptInPreferencesIgnorableForProfile(profile()));
-
-  // Prefs are unused for Active Directory users.
-  {
-    ScopedLogIn login(GetFakeUserManager(),
-                      AccountId::AdFromUserEmailObjGuid(
-                          profile()->GetProfileUserName(), kTestGaiaId));
-    EXPECT_TRUE(AreArcAllOptInPreferencesIgnorableForProfile(profile()));
-  }
 
   // OptIn prefs are set to unmanaged/OFF values, and the function returns
   // false.
@@ -526,7 +427,11 @@ TEST_F(ChromeArcUtilTest, AreArcAllOptInPreferencesIgnorableForProfile) {
   profile()->GetTestingPrefService()->SetManagedPref(
       prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(false));
   profile()->GetPrefs()->SetBoolean(prefs::kArcLocationServiceEnabled, false);
-  EXPECT_FALSE(AreArcAllOptInPreferencesIgnorableForProfile(profile()));
+  // When PrivacyHubLocation is enabled, the location setting is no longer
+  // ARC++ specific, but ChromeOS system setting. Thus we only check the
+  // Backup-restore pref.
+  EXPECT_EQ(ash::features::IsCrosPrivacyHubLocationEnabled(),
+            AreArcAllOptInPreferencesIgnorableForProfile(profile()));
 
   // Location-service pref is managed/OFF, while backup-restore is unmanaged,
   // and the function returns false.
@@ -569,29 +474,53 @@ TEST_F(ChromeArcUtilTest, AreArcAllOptInPreferencesIgnorableForProfile) {
   EXPECT_TRUE(AreArcAllOptInPreferencesIgnorableForProfile(profile()));
 }
 
-// Test the IsActiveDirectoryUserForProfile() function for non-AD accounts.
-TEST_F(ChromeArcUtilTest, IsActiveDirectoryUserForProfile_Gaia) {
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
-  EXPECT_FALSE(IsActiveDirectoryUserForProfile(profile()));
-}
+// PrivacyHub introduces a system-wide location setting that Android should
+// respect. In essence, this new preference, `kUserGeolocationAccessLevel`,
+// replaces the functionality of `kArcLocationServiceEnabled`. Therefore, this
+// utility function should check if `kUserGeolocationAccessLevel` has been set
+// by policy.
+TEST_F(ChromeArcUtilTest,
+       AreArcAllOptInPreferencesIgnorableForProfile_PrivacyHubEnabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(ash::features::kCrosPrivacyHub);
 
-// Test the IsActiveDirectoryUserForProfile() function for AD accounts.
-TEST_F(ChromeArcUtilTest, IsActiveDirectoryUserForProfile_AD) {
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::AdFromUserEmailObjGuid(
-                        profile()->GetProfileUserName(), kTestGaiaId));
-  EXPECT_TRUE(IsActiveDirectoryUserForProfile(profile()));
+  // In the legacy flow (without Privacy Hub), having both
+  // `kArcBackupRestoreEnabled` and `kArcLocationServiceEnabled` managed would
+  // make the function return true. With Privacy Hub enabled, it now requires
+  // `kUserGeolocationAccessLevel` instead of `kArcLocationServiceEnabled` to be
+  // managed; hence return false.
+  profile()->GetTestingPrefService()->SetManagedPref(
+      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(false));
+  profile()->GetTestingPrefService()->SetManagedPref(
+      prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(false));
+  EXPECT_FALSE(AreArcAllOptInPreferencesIgnorableForProfile(profile()));
+
+  // Remove `kArcLocationServiceEnabled` pref and set
+  // `kUserGeolocationAccessLevel` as managed. Now the function should return
+  // true.
+  profile()->GetTestingPrefService()->RemoveManagedPref(
+      prefs::kArcLocationServiceEnabled);
+  profile()->GetTestingPrefService()->SetManagedPref(
+      ash::prefs::kUserGeolocationAccessLevel,
+      std::make_unique<base::Value>(1));
+  EXPECT_TRUE(AreArcAllOptInPreferencesIgnorableForProfile(profile()));
+
+  // Cleanup
+  profile()->GetTestingPrefService()->RemoveManagedPref(
+      prefs::kArcBackupRestoreEnabled);
+  profile()->GetTestingPrefService()->RemoveManagedPref(
+      ash::prefs::kUserGeolocationAccessLevel);
 }
 
 TEST_F(ChromeArcUtilTest, TermsOfServiceNegotiationNeededForAlreadyAccepted) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   DisableDBusForProfileManager();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_TRUE(IsArcTermsOfServiceNegotiationNeeded(profile()));
   EXPECT_TRUE(IsArcTermsOfServiceOobeNegotiationNeeded());
   profile()->GetPrefs()->SetBoolean(prefs::kArcTermsAccepted, true);
@@ -602,12 +531,14 @@ TEST_F(ChromeArcUtilTest, TermsOfServiceNegotiationNeededForAlreadyAccepted) {
 // For managed user, generally no opt-in dialog is shown.
 // For OOBE user, see TermsOfServiceOobeNegotiationNeededForManagedUser test.
 TEST_F(ChromeArcUtilTest, TermsOfServiceNegotiationNeededForManagedUser) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   DisableDBusForProfileManager();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
 
   EXPECT_TRUE(IsArcTermsOfServiceNegotiationNeeded(profile()));
 
@@ -626,49 +557,52 @@ TEST_F(ChromeArcUtilTest, TermsOfServiceOobeNegotiationNeededNoLogin) {
 
 TEST_F(ChromeArcUtilTest,
        TermsOfServiceOobeNegotiationNeededNoArcAvailability) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   DisableDBusForProfileManager();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
 }
 
 TEST_F(ChromeArcUtilTest, TermsOfServiceOobeNegotiationNeededNoPlayStore) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported",
        "--arc-start-mode=always-start-with-no-play-store"});
   DisableDBusForProfileManager();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
-  EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
-}
-
-TEST_F(ChromeArcUtilTest, TermsOfServiceOobeNegotiationNeededAdUser) {
-  base::CommandLine::ForCurrentProcess()->InitFromArgv(
-      {"", "--arc-availability=officially-supported"});
-  DisableDBusForProfileManager();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::AdFromUserEmailObjGuid(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
 }
 
 TEST_F(ChromeArcUtilTest, IsArcStatsReportingEnabled) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_FALSE(IsArcStatsReportingEnabled());
 }
 
 TEST_F(ChromeArcUtilTest, IsArcStatsReportingEnabled_PublicAccount) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail("public_user@gmail.com"),
-                    user_manager::USER_TYPE_PUBLIC_ACCOUNT);
+  policy::DeviceLocalAccount device_local_account(
+      policy::DeviceLocalAccountType::kPublicSession,
+      policy::DeviceLocalAccount::EphemeralMode::kFollowDeviceWidePolicy,
+      "public_user@gmail.com", /*kiosk_app_id=*/"",
+      /*kiosk_app_update_url=*/"");
+  CHECK(user_session_test_environment()->AddPublicAccountUser(
+      device_local_account.user_id));
+  user_session_test_environment()->LogIn(
+      AccountId::FromUserEmail(device_local_account.user_id));
   EXPECT_FALSE(IsArcStatsReportingEnabled());
 }
 
@@ -679,35 +613,36 @@ TEST_F(ChromeArcUtilTest, ArcStartModeDefault) {
 }
 
 TEST_F(ChromeArcUtilTest, ArcStartModeDefaultPublicSession) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   auto* command_line = base::CommandLine::ForCurrentProcess();
   command_line->InitFromArgv({"", "--arc-availability=installed"});
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail("public_user@gmail.com"),
-                    user_manager::USER_TYPE_PUBLIC_ACCOUNT);
+  policy::DeviceLocalAccount device_local_account(
+      policy::DeviceLocalAccountType::kPublicSession,
+      policy::DeviceLocalAccount::EphemeralMode::kFollowDeviceWidePolicy,
+      "public_user@gmail.com", /*kiosk_app_id=*/"",
+      /*kiosk_app_update_url=*/"");
+  CHECK(user_session_test_environment()->AddPublicAccountUser(
+      device_local_account.user_id));
+  user_session_test_environment()->LogIn(
+      AccountId::FromUserEmail(device_local_account.user_id));
   EXPECT_FALSE(IsPlayStoreAvailable());
 }
 
 TEST_F(ChromeArcUtilTest, ArcStartModeDefaultDemoMode) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   auto* command_line = base::CommandLine::ForCurrentProcess();
   command_line->InitFromArgv({"", "--arc-availability=installed"});
   cros_settings_test_helper_.InstallAttributes()->SetDemoMode();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail("public_user@gmail.com"),
-                    user_manager::USER_TYPE_PUBLIC_ACCOUNT);
+  policy::DeviceLocalAccount device_local_account(
+      policy::DeviceLocalAccountType::kPublicSession,
+      policy::DeviceLocalAccount::EphemeralMode::kFollowDeviceWidePolicy,
+      "public_user@gmail.com", /*kiosk_app_id=*/"",
+      /*kiosk_app_update_url=*/"");
+  CHECK(user_session_test_environment()->AddPublicAccountUser(
+      device_local_account.user_id));
+  user_session_test_environment()->LogIn(
+      AccountId::FromUserEmail(device_local_account.user_id));
   EXPECT_TRUE(IsPlayStoreAvailable());
-}
-
-TEST_F(ChromeArcUtilTest, ArcStartModeDefaultDemoModeWithoutPlayStore) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitWithFeatureState(ash::features::kShowPlayInDemoMode,
-                                    false /* disabled */);
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  command_line->InitFromArgv({"", "--arc-availability=installed"});
-  cros_settings_test_helper_.InstallAttributes()->SetDemoMode();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmail("public_user@gmail.com"),
-                    user_manager::USER_TYPE_PUBLIC_ACCOUNT);
-  EXPECT_FALSE(IsPlayStoreAvailable());
 }
 
 TEST_F(ChromeArcUtilTest, ArcStartModeWithoutPlayStore) {
@@ -718,11 +653,7 @@ TEST_F(ChromeArcUtilTest, ArcStartModeWithoutPlayStore) {
   EXPECT_FALSE(IsPlayStoreAvailable());
 }
 
-TEST_F(ChromeArcUtilTest, ArcUnmanagedToManagedTransition_FeatureOn) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(
-      arc::kEnableUnmanagedToManagedTransitionFeature);
-
+TEST_F(ChromeArcUtilTest, ArcUnmanagedToManagedTransition) {
   profile()->GetPrefs()->SetInteger(
       arc::prefs::kArcManagementTransition,
       static_cast<int>(arc::ArcManagementTransition::UNMANAGED_TO_MANAGED));
@@ -731,33 +662,45 @@ TEST_F(ChromeArcUtilTest, ArcUnmanagedToManagedTransition_FeatureOn) {
             arc::ArcManagementTransition::UNMANAGED_TO_MANAGED);
 }
 
-TEST_F(ChromeArcUtilTest, ArcUnmanagedToManagedTransition_FeatureOff) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndDisableFeature(
-      arc::kEnableUnmanagedToManagedTransitionFeature);
-
-  profile()->GetPrefs()->SetInteger(
-      arc::prefs::kArcManagementTransition,
-      static_cast<int>(arc::ArcManagementTransition::UNMANAGED_TO_MANAGED));
-
-  EXPECT_EQ(GetManagementTransition(profile()),
-            arc::ArcManagementTransition::NO_TRANSITION);
-}
-
-class ArcOobeTest : public ChromeArcUtilTest {
+class ArcOobeTest : public ChromeArcUtilTest,
+                    public testing::WithParamInterface<bool> {
  public:
-  ArcOobeTest() {
-    ash::ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
-    oobe_configuration_ = std::make_unique<ash::OobeConfiguration>();
-  }
-
+  ArcOobeTest() = default;
   ArcOobeTest(const ArcOobeTest&) = delete;
   ArcOobeTest& operator=(const ArcOobeTest&) = delete;
+  ~ArcOobeTest() override = default;
 
-  ~ArcOobeTest() override {
+  void SetUp() override {
+    if (GetParam()) {
+      scoped_feature_list_.InitAndEnableFeature(ash::features::kCrosPrivacyHub);
+    } else {
+      scoped_feature_list_.InitAndDisableFeature(
+          ash::features::kCrosPrivacyHub);
+    }
+    ash::ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
+    oobe_configuration_ = std::make_unique<ash::OobeConfiguration>();
+
+    TestingBrowserProcess::GetGlobal()
+        ->platform_part()
+        ->InitializeComponentManager();
+    TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(
+        test_url_loader_factory_.GetSafeWeakWrapper());
+
+    ChromeArcUtilTest::SetUp();
+  }
+
+  void TearDown() override {
     // Fake display host have to be shut down first, as it may access
     // configuration.
     fake_login_display_host_.reset();
+
+    ChromeArcUtilTest::TearDown();
+
+    TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(nullptr);
+    TestingBrowserProcess::GetGlobal()
+        ->platform_part()
+        ->ShutdownComponentManager();
+
     oobe_configuration_.reset();
     ash::ConciergeClient::Shutdown();
   }
@@ -776,15 +719,22 @@ class ArcOobeTest : public ChromeArcUtilTest {
  private:
   std::unique_ptr<ash::OobeConfiguration> oobe_configuration_;
   std::unique_ptr<ash::FakeLoginDisplayHost> fake_login_display_host_;
+  base::test::ScopedFeatureList scoped_feature_list_;
+  network::TestURLLoaderFactory test_url_loader_factory_;
 };
 
-TEST_F(ArcOobeTest, TermsOfServiceOobeNegotiationNeededForManagedUser) {
+// Testing both states of the `ash::features::kCrosPrivacyHub` feature.
+INSTANTIATE_TEST_SUITE_P(All, ArcOobeTest, testing::Bool());
+
+TEST_P(ArcOobeTest, TermsOfServiceOobeNegotiationNeededForManagedUser) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   DisableDBusForProfileManager();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
 
   CreateLoginDisplayHost();
   EXPECT_TRUE(IsArcOobeOptInActive());
@@ -795,45 +745,41 @@ TEST_F(ArcOobeTest, TermsOfServiceOobeNegotiationNeededForManagedUser) {
   EXPECT_TRUE(IsArcTermsOfServiceNegotiationNeeded(profile()));
   EXPECT_TRUE(IsArcTermsOfServiceOobeNegotiationNeeded());
 
+  // Set `kArcBackupRestoreEnabled`as managed, this is not sufficient to skip
+  // the negotiation, the location preference has to be set too.
   profile()->GetTestingPrefService()->SetManagedPref(
       prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(false));
-  EXPECT_TRUE(IsArcTermsOfServiceNegotiationNeeded(profile()));
   EXPECT_TRUE(IsArcTermsOfServiceOobeNegotiationNeeded());
+  EXPECT_TRUE(IsArcTermsOfServiceNegotiationNeeded(profile()));
 
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(false));
-  EXPECT_FALSE(IsArcTermsOfServiceNegotiationNeeded(profile()));
-  EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
-
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(true));
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(false));
-  EXPECT_FALSE(IsArcTermsOfServiceNegotiationNeeded(profile()));
-  EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
-
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(false));
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(true));
-  EXPECT_FALSE(IsArcTermsOfServiceNegotiationNeeded(profile()));
-  EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
-
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(true));
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(true));
-  EXPECT_FALSE(IsArcTermsOfServiceNegotiationNeeded(profile()));
-  EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
+  if (ash::features::IsCrosPrivacyHubLocationEnabled()) {
+    // When Privacy Hub is enabled, location setting is controlled by
+    // `kUserGeolocationAccessLevel`.
+    profile()->GetTestingPrefService()->SetManagedPref(
+        ash::prefs::kUserGeolocationAccessLevel,
+        std::make_unique<base::Value>(1));
+    EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
+    EXPECT_FALSE(IsArcTermsOfServiceNegotiationNeeded(profile()));
+  } else {
+    // When Privacy Hub is disabled, location setting is controlled by
+    // `kArcLocationServiceEnabled`.
+    profile()->GetTestingPrefService()->SetManagedPref(
+        prefs::kArcLocationServiceEnabled,
+        std::make_unique<base::Value>(false));
+    EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
+    EXPECT_FALSE(IsArcTermsOfServiceNegotiationNeeded(profile()));
+  }
 }
 
-TEST_F(ArcOobeTest, ShouldStartArcSilentlyForManagedProfile) {
+TEST_P(ArcOobeTest, ShouldStartArcSilentlyForManagedProfile) {
+  // TODO(hidehiko): Fix profile and user login creation order.
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   DisableDBusForProfileManager();
-  ScopedLogIn login(GetFakeUserManager(),
-                    AccountId::FromUserEmailGaiaId(
-                        profile()->GetProfileUserName(), kTestGaiaId));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
 
   CreateLoginDisplayHost();
   EXPECT_TRUE(IsArcOobeOptInActive());
@@ -843,46 +789,44 @@ TEST_F(ArcOobeTest, ShouldStartArcSilentlyForManagedProfile) {
       prefs::kArcEnabled, std::make_unique<base::Value>(true));
   EXPECT_FALSE(ShouldStartArcSilentlyForManagedProfile(profile()));
 
+  // Set `kArcBackupRestoreEnabled`as managed. ARC++ should not start silently,
+  // location preference has to be set first.
   profile()->GetTestingPrefService()->SetManagedPref(
       prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(false));
   EXPECT_FALSE(ShouldStartArcSilentlyForManagedProfile(profile()));
 
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(false));
-  EXPECT_TRUE(ShouldStartArcSilentlyForManagedProfile(profile()));
-
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(true));
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(false));
-  EXPECT_TRUE(ShouldStartArcSilentlyForManagedProfile(profile()));
-
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(false));
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(true));
-  EXPECT_TRUE(ShouldStartArcSilentlyForManagedProfile(profile()));
-
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcBackupRestoreEnabled, std::make_unique<base::Value>(true));
-  profile()->GetTestingPrefService()->SetManagedPref(
-      prefs::kArcLocationServiceEnabled, std::make_unique<base::Value>(true));
-  EXPECT_TRUE(ShouldStartArcSilentlyForManagedProfile(profile()));
+  if (ash::features::IsCrosPrivacyHubLocationEnabled()) {
+    // When Privacy Hub is enabled, location setting is controlled by
+    // `kUserGeolocationAccessLevel`.
+    profile()->GetTestingPrefService()->SetManagedPref(
+        ash::prefs::kUserGeolocationAccessLevel,
+        std::make_unique<base::Value>(1));
+    EXPECT_TRUE(ShouldStartArcSilentlyForManagedProfile(profile()));
+  } else {
+    // When Privacy Hub is disabled, location setting is controlled by
+    // `kArcLocationServiceEnabled`.
+    profile()->GetTestingPrefService()->SetManagedPref(
+        prefs::kArcLocationServiceEnabled,
+        std::make_unique<base::Value>(false));
+    EXPECT_TRUE(ShouldStartArcSilentlyForManagedProfile(profile()));
+  }
 }
 
 using ArcOobeOptInActiveInTest = ArcOobeTest;
+INSTANTIATE_TEST_SUITE_P(All, ArcOobeOptInActiveInTest, testing::Bool());
 
-TEST_F(ArcOobeOptInActiveInTest, OobeOptInActive) {
-  // OOBE OptIn is active in case of OOBE controller is alive and the ARC ToS
-  // screen is currently showing.
-  LogIn();
+TEST_P(ArcOobeOptInActiveInTest, OobeOptInActive) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  // OOBE OptIn is active in case of OOBE controller is alive and the
+  // Consolidated Consent screen is currently showing.
+  const AccountId account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
   EXPECT_FALSE(IsArcOobeOptInActive());
   CreateLoginDisplayHost();
 
-  const AccountId account_id = AccountId::FromUserEmailGaiaId(
-      profile()->GetProfileUserName(), kTestGaiaId);
-
-  // OOBE OptIn can only start if Onobarding is not completed yet.
+  // OOBE OptIn can only start if Onboarding is not completed yet.
   EXPECT_TRUE(IsArcOobeOptInActive());
 
   // Set a version for the Onboarding to indicate that the user completed the
@@ -890,15 +834,17 @@ TEST_F(ArcOobeOptInActiveInTest, OobeOptInActive) {
   user_manager::KnownUser(g_browser_process->local_state())
       .SetOnboardingCompletedVersion(account_id, version_info::GetVersion());
   EXPECT_FALSE(IsArcOobeOptInActive());
-  // ARC ToS wizard but Onboarding flow completed.
+
+  // Consolidated Consent wizard but Onboarding flow completed.
   login_display_host()->StartWizard(
-      ash::ArcTermsOfServiceScreenView::kScreenId);
+      ash::ConsolidatedConsentScreenView::kScreenId);
   EXPECT_FALSE(IsArcOobeOptInActive());
 }
 
 using DemoSetupFlowArcOptInTest = ArcOobeTest;
+INSTANTIATE_TEST_SUITE_P(All, DemoSetupFlowArcOptInTest, testing::Bool());
 
-TEST_F(DemoSetupFlowArcOptInTest, NoTermsOfServiceOobeNegotiationNeeded) {
+TEST_P(DemoSetupFlowArcOptInTest, NoTermsOfServiceOobeNegotiationNeeded) {
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   DisableDBusForProfileManager();
@@ -907,7 +853,7 @@ TEST_F(DemoSetupFlowArcOptInTest, NoTermsOfServiceOobeNegotiationNeeded) {
   EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
 }
 
-TEST_F(DemoSetupFlowArcOptInTest, TermsOfServiceOobeNegotiationNeeded) {
+TEST_P(DemoSetupFlowArcOptInTest, TermsOfServiceOobeNegotiationNeeded) {
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported"});
   DisableDBusForProfileManager();
@@ -920,7 +866,7 @@ TEST_F(DemoSetupFlowArcOptInTest, TermsOfServiceOobeNegotiationNeeded) {
   EXPECT_TRUE(IsArcTermsOfServiceOobeNegotiationNeeded());
 }
 
-TEST_F(DemoSetupFlowArcOptInTest,
+TEST_P(DemoSetupFlowArcOptInTest,
        NoPlayStoreNoTermsOfServiceOobeNegotiationNeeded) {
   base::CommandLine::ForCurrentProcess()->InitFromArgv(
       {"", "--arc-availability=officially-supported",
@@ -933,6 +879,164 @@ TEST_F(DemoSetupFlowArcOptInTest,
       ->SimulateDemoModeSetupForTesting();
   EXPECT_TRUE(IsArcDemoModeSetupFlow());
   EXPECT_FALSE(IsArcTermsOfServiceOobeNegotiationNeeded());
+}
+
+using ChromeUnaffiliatedDevicesArcRestrictionTest = ChromeArcUtilTest;
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ArcAllowedForAffiliatedUser_WhenPolicyValueTrue) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  user_manager::UserManager::Get()->SetUserPolicyStatus(
+      account_id, /*is_managed=*/true, /*is_affiliated=*/true);
+  SetProfileIsManagedForTesting(profile());
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed, true);
+
+  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ArcAllowedForUnAffiliatedUser_WhenPolicyValueTrue) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  SetProfileIsManagedForTesting(profile());
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed, true);
+
+  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ArcAllowedForNonEnterpriseAccount_WhenPolicyValueTrue) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed, true);
+
+  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ArcAllowedForAffiliatedUser_WhenPolicyValueFalse) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  user_manager::UserManager::Get()->SetUserPolicyStatus(
+      account_id, /*is_managed=*/true, /*is_affiliated=*/true);
+  SetProfileIsManagedForTesting(profile());
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed,
+                                    false);
+
+  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ArcNotAllowedForUnAffiliatedUser_WhenPolicyValueFalse) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  SetProfileIsManagedForTesting(profile());
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed,
+                                    false);
+
+  EXPECT_FALSE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ArcAllowedForNonEnterpriseAccount_WhenPolicyValueFalse) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed,
+                                    false);
+
+  EXPECT_TRUE(IsArcAllowedForProfileOnFirstCall(profile()));
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ReportArcAllowedForAffiliatedUser_WhenPolicyValueFalse) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::HistogramTester tester;
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  user_manager::UserManager::Get()->SetUserPolicyStatus(
+      account_id, /*is_managed=*/true, /*is_affiliated=*/true);
+  SetProfileIsManagedForTesting(profile());
+  profile()->GetTestingPrefService()->SetManagedPref(
+      prefs::kArcEnabled, std::make_unique<base::Value>(true));
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed,
+                                    false);
+
+  RecordArcStatusBasedOnDeviceAffiliationUMA(profile());
+  tester.ExpectBucketCount("Arc.Provisioning.DeviceAffiliationAction", 0, 1);
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ReportArcAllowedForUnAffiliatedUser_WhenPolicyValueTrue) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::HistogramTester tester;
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  SetProfileIsManagedForTesting(profile());
+  profile()->GetTestingPrefService()->SetManagedPref(
+      prefs::kArcEnabled, std::make_unique<base::Value>(true));
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed, true);
+  RecordArcStatusBasedOnDeviceAffiliationUMA(profile());
+  tester.ExpectBucketCount("Arc.Provisioning.DeviceAffiliationAction", 1, 1);
+}
+
+TEST_F(ChromeUnaffiliatedDevicesArcRestrictionTest,
+       ReportArcNotAllowedForUnAffiliatedUser_WhenPolicyValueFalse) {
+  // TODO(hidehiko): Fix profile and user login creation order.
+  base::HistogramTester tester;
+  base::CommandLine::ForCurrentProcess()->InitFromArgv(
+      {"", "--arc-availability=officially-supported"});
+  profile()->GetTestingPrefService()->SetManagedPref(
+      prefs::kArcEnabled, std::make_unique<base::Value>(true));
+  const auto account_id = AccountId::FromUserEmailGaiaId(
+      profile()->GetProfileUserName(), kTestGaiaId);
+  CHECK(user_session_test_environment()->AddRegularUser(account_id));
+  user_session_test_environment()->LogIn(account_id);
+  SetProfileIsManagedForTesting(profile());
+  profile()->GetTestingPrefService()->SetManagedPref(
+      prefs::kArcEnabled, std::make_unique<base::Value>(true));
+  profile()->GetPrefs()->SetBoolean(prefs::kUnaffiliatedDeviceArcAllowed,
+                                    false);
+  RecordArcStatusBasedOnDeviceAffiliationUMA(profile());
+  tester.ExpectBucketCount("Arc.Provisioning.DeviceAffiliationAction", 2, 1);
 }
 
 }  // namespace util

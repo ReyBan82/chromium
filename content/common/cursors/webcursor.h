@@ -11,10 +11,10 @@
 #include "ui/display/display.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 #if defined(USE_AURA)
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
 #endif
 
 namespace content {
@@ -34,15 +34,13 @@ class CONTENT_EXPORT WebCursor {
 
   const ui::Cursor& cursor() const { return cursor_; }
 
-  // Sets the ui::Cursor |cursor|; returns whether it has reasonable values.
-  bool SetCursor(const ui::Cursor& cursor);
-
   // Returns a native cursor representing the current WebCursor instance.
   gfx::NativeCursor GetNativeCursor();
 
 #if defined(USE_AURA)
-  // Updates |device_scale_factor_| and |rotation_| based on |display|.
-  void SetDisplayInfo(const display::Display& display);
+  // Updates |device_scale_factor_| and |rotation_| based on |window|'s
+  // preferred scale (if any) and its display information.
+  void UpdateDisplayInfoForWindow(aura::Window* window);
 
   bool has_custom_cursor_for_test() const { return !!custom_cursor_; }
 #endif
@@ -53,20 +51,20 @@ class CONTENT_EXPORT WebCursor {
   // The basic cursor info.
   ui::Cursor cursor_;
 
-#if defined(USE_AURA) || BUILDFLAG(IS_OZONE)
+#if defined(USE_AURA)
   // Only used for custom cursors.
   float device_scale_factor_ = 1.f;
   display::Display::Rotation rotation_ = display::Display::ROTATE_0;
 #endif
 
-#if BUILDFLAG(IS_OZONE)
+#if BUILDFLAG(IS_CHROMEOS)
   // This matches ozone drm_util.cc's kDefaultCursorWidth/Height.
   static constexpr int kDefaultMaxSize = 64;
   gfx::Size maximum_cursor_size_ = {kDefaultMaxSize, kDefaultMaxSize};
 #endif
 
 #if defined(USE_AURA)
-  absl::optional<ui::Cursor> custom_cursor_;
+  std::optional<ui::Cursor> custom_cursor_;
 #endif
 };
 

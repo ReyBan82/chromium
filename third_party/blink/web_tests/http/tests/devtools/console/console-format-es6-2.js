@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
 (async function() {
   TestRunner.addResult('Tests that console properly displays information about ES6 features.\n');
 
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   await TestRunner.evaluateInPagePromise(`
@@ -40,35 +42,30 @@
     })();
   `);
 
-  TestRunner.evaluateInPage('globals.length', loopOverGlobals.bind(this, 0));
-
-  function loopOverGlobals(current, total) {
-    function advance() {
-      var next = current + 1;
-
-      if (next == total)
-        finish();
-      else
-        loopOverGlobals(next, total);
-    }
-
-    async function finish() {
-      await ConsoleTestRunner.dumpConsoleMessages(false, false, TestRunner.textContentWithLineBreaks);
-      TestRunner.addResult('Expanded all messages');
-      ConsoleTestRunner.expandConsoleMessages(dumpConsoleMessages);
-    }
-
-    async function dumpConsoleMessages() {
-      await ConsoleTestRunner.dumpConsoleMessages(false, false, TestRunner.textContentWithLineBreaks);
-      TestRunner.completeTest();
-    }
-
-    TestRunner.evaluateInPage('log(' + current + ')');
-    TestRunner.deprecatedRunAfterPendingDispatches(evalInConsole);
-
-    function evalInConsole() {
-      ConsoleTestRunner.evaluateInConsole('globals[' + current + ']');
-      TestRunner.deprecatedRunAfterPendingDispatches(advance);
-    }
+  const total = await TestRunner.evaluateInPagePromise('globals.length');
+  for (let current = 0; current < total; current++) {
+    const targetCount = ConsoleTestRunner.consoleMessagesCount() + 2;
+    const messagesPromise = new Promise(resolve => {
+      ConsoleTestRunner.addConsoleViewSniffer(() => {
+        if (ConsoleTestRunner.consoleMessagesCount() >= targetCount) {
+          resolve();
+        }
+      }, true);
+    });
+    await TestRunner.evaluateInPagePromise('log(' + current + ')');
+    await messagesPromise;
+    await ConsoleTestRunner.evaluateInConsolePromise('globals[' + current +
+                                                     ']');
   }
+
+  await ConsoleTestRunner.dumpConsoleMessages(
+      false, false, TestRunner.textContentWithLineBreaks);
+  TestRunner.addResult('Expanded all messages');
+  await ConsoleTestRunner.expandConsoleMessagesPromise();
+  if (ConsoleTestRunner.waitForAllPopulations) {
+    await ConsoleTestRunner.waitForAllPopulations();
+  }
+  await ConsoleTestRunner.dumpConsoleMessages(
+      false, false, TestRunner.textContentWithLineBreaks);
+  TestRunner.completeTest();
 })();

@@ -6,17 +6,21 @@
 
 #include <launch.h>
 #include <sys/types.h>
+
+#include <optional>
 #include <utility>
 
+#include "base/apple/bridging.h"
+#include "base/apple/foundation_util.h"
+#include "base/apple/osstatus_logging.h"
 #include "base/command_line.h"
-#include "base/files/file_util.h"
+#include "base/compiler_specific.h"
+#include "base/files/file_path.h"
 #include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/mac/authorization_util.h"
-#include "base/mac/foundation_util.h"
 #include "base/mac/launchd.h"
-#include "base/mac/mac_logging.h"
 #include "base/mac/scoped_authorizationref.h"
 #include "base/mac/scoped_launch_data.h"
 #include "base/memory/ptr_util.h"
@@ -31,7 +35,6 @@
 #include "remoting/host/mac/permission_checker.h"
 #include "remoting/host/mac/permission_wizard.h"
 #include "remoting/host/resources.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/l10n/l10n_util_mac.h"
 
@@ -47,11 +50,11 @@ constexpr char kIoThreadName[] = "DaemonControllerDelegateMac IO thread";
 // deleter function.
 class ScopedWaitpid {
  public:
-  // -1 is treated as an invalid PID and waitpit() will not be called in this
+  // -1 is treated as an invalid PID and waitpid() will not be called in this
   // case. Note that -1 is the value returned from
   // base::mac::ExecuteWithPrivilegesAndGetPID() when the child PID could not be
   // determined.
-  ScopedWaitpid(pid_t pid) : pid_(pid) {}
+  explicit ScopedWaitpid(pid_t pid) : pid_(pid) {}
   ~ScopedWaitpid() { MaybeWait(); }
 
   // Executes the waitpid() and resets the scoper. After this, the caller may
@@ -91,7 +94,8 @@ bool RunHelperAsRoot(const std::string& command,
       IDS_HOST_AUTHENTICATION_PROMPT,
       l10n_util::GetStringUTF16(IDS_PRODUCT_NAME));
   base::mac::ScopedAuthorizationRef authorization =
-      base::mac::AuthorizationCreateToRunAsRoot(base::mac::NSToCFCast(prompt));
+      base::mac::AuthorizationCreateToRunAsRoot(
+          base::apple::NSToCFPtrCast(prompt));
   if (!authorization.get()) {
     LOG(ERROR) << "Failed to obtain authorizationRef";
     return false;
@@ -130,8 +134,8 @@ bool RunHelperAsRoot(const std::string& command,
   }
 
   if (!input_data.empty()) {
-    size_t bytes_written =
-        fwrite(input_data.data(), sizeof(char), input_data.size(), pipe);
+    size_t bytes_written = UNSAFE_TODO(
+        fwrite(input_data.data(), sizeof(char), input_data.size(), pipe));
     // According to the fwrite manpage, a partial count is returned only if a
     // write error has occurred.
     if (bytes_written != input_data.size()) {
@@ -165,7 +169,7 @@ bool RunHelperAsRoot(const std::string& command,
   return false;
 }
 
-void ElevateAndSetConfig(base::Value::Dict config,
+void ElevateAndSetConfig(base::DictValue config,
                          DaemonController::CompletionCallback done) {
   // Find out if the host service is running.
   pid_t job_pid = base::mac::PIDForJob(remoting::kServiceName);
@@ -223,34 +227,36 @@ DaemonControllerDelegateMac::~DaemonControllerDelegateMac() {
 }
 
 DaemonController::State DaemonControllerDelegateMac::GetState() {
-  pid_t job_pid = base::mac::PIDForJob(kServiceName);
-  if (job_pid < 0) {
-    return DaemonController::STATE_UNKNOWN;
-  } else if (job_pid == 0) {
-    // Service is stopped, or a start attempt failed.
-    return DaemonController::STATE_STOPPED;
-  } else {
-    return DaemonController::STATE_STARTED;
+  pid_t job_pid = base::mac::PIDForJobIfLoaded(kServiceName);
+  switch (job_pid) {
+    case -1:  // Error.
+      return DaemonController::STATE_UNKNOWN;
+    case -2:  // Not loaded.
+    case 0:   // Loaded but not running.
+      return DaemonController::STATE_STOPPED;
+    default:  // Loaded and running with specified pid.
+      return DaemonController::STATE_STARTED;
   }
 }
 
-absl::optional<base::Value::Dict> DaemonControllerDelegateMac::GetConfig() {
+std::optional<base::DictValue> DaemonControllerDelegateMac::GetConfig() {
   base::FilePath config_path(kHostConfigFilePath);
-  absl::optional<base::Value::Dict> host_config(
-      HostConfigFromJsonFile(config_path));
+  auto host_config = HostConfigFromJsonFile(config_path);
   if (!host_config.has_value()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
-  base::Value::Dict config;
+  base::DictValue config;
   std::string* value = host_config->FindString(kHostIdConfigPath);
   if (value) {
     config.Set(kHostIdConfigPath, *value);
   }
 
-  value = host_config->FindString(kXmppLoginConfigPath);
+  value = host_config->FindString(kServiceAccountConfigPath);
   if (value) {
-    config.Set(kXmppLoginConfigPath, *value);
+    // Set both keys for compatibility purposes.
+    config.Set(kServiceAccountConfigPath, *value);
+    config.Set(kDeprecatedXmppLoginConfigPath, *value);
   }
 
   return config;
@@ -268,7 +274,7 @@ void DaemonControllerDelegateMac::CheckPermission(
 }
 
 void DaemonControllerDelegateMac::SetConfigAndStart(
-    base::Value::Dict config,
+    base::DictValue config,
     bool consent,
     DaemonController::CompletionCallback done) {
   config.Set(kUsageStatsConsentConfigPath, consent);
@@ -276,10 +282,10 @@ void DaemonControllerDelegateMac::SetConfigAndStart(
 }
 
 void DaemonControllerDelegateMac::UpdateConfig(
-    base::Value::Dict config,
+    base::DictValue config,
     DaemonController::CompletionCallback done) {
   base::FilePath config_file_path(kHostConfigFilePath);
-  absl::optional<base::Value::Dict> host_config(
+  std::optional<base::DictValue> host_config(
       HostConfigFromJsonFile(config_file_path));
   if (!host_config.has_value()) {
     std::move(done).Run(DaemonController::RESULT_FAILED);
@@ -287,7 +293,7 @@ void DaemonControllerDelegateMac::UpdateConfig(
   }
 
   host_config->Merge(std::move(config));
-  ElevateAndSetConfig(std::move(host_config.value()), std::move(done));
+  ElevateAndSetConfig(std::move(*host_config), std::move(done));
 }
 
 void DaemonControllerDelegateMac::Stop(
@@ -304,17 +310,24 @@ DaemonControllerDelegateMac::GetUsageStatsConsent() {
   consent.set_by_policy = false;
 
   base::FilePath config_file_path(kHostConfigFilePath);
-  absl::optional<base::Value::Dict> host_config(
+  std::optional<base::DictValue> host_config(
       HostConfigFromJsonFile(config_file_path));
   if (host_config.has_value()) {
-    absl::optional<bool> host_config_value =
+    std::optional<bool> host_config_value =
         host_config->FindBool(kUsageStatsConsentConfigPath);
     if (host_config_value.has_value()) {
-      consent.allowed = host_config_value.value();
+      consent.allowed = *host_config_value;
     }
   }
 
   return consent;
+}
+
+bool DaemonControllerDelegateMac::is_privileged() const {
+  // Note: the daemon controller actually runs the helper script elevated, so
+  // the daemon controller itself is always privileged to perform state-changing
+  // operations.
+  return true;
 }
 
 scoped_refptr<DaemonController> DaemonController::Create() {

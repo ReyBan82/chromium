@@ -4,29 +4,35 @@
 
 #include "components/services/storage/service_worker/service_worker_database.h"
 
+#include <optional>
+#include <string_view>
+
+#include "base/byte_size.h"
 #include "base/command_line.h"
 #include "base/debug/crash_logging.h"
-#include "base/files/file_util.h"
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/no_destructor.h"
+#include "base/notreached.h"
 #include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "components/services/storage/filesystem_proxy_factory.h"
+#include "components/services/storage/public/mojom/service_worker_database.mojom-forward.h"
 #include "components/services/storage/service_worker/service_worker_database.pb.h"
 #include "services/network/public/cpp/web_sandbox_flags.h"
-#include "services/network/public/mojom/cross_origin_embedder_policy.mojom-shared.h"
-#include "services/network/public/mojom/cross_origin_opener_policy.mojom-shared.h"
 #include "services/network/public/mojom/ip_address_space.mojom-shared.h"
+#include "services/network/public/mojom/referrer_policy.mojom.h"
+#include "services/network/public/mojom/service_worker_router_info.mojom-shared.h"
 #include "services/network/public/mojom/web_sandbox_flags.mojom-shared.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/common/service_worker/service_worker_router_rule.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/service_worker/service_worker_ancestor_frame_type.mojom.h"
-#include "third_party/blink/public/mojom/service_worker/service_worker_database.mojom.h"
 #include "third_party/leveldatabase/env_chromium.h"
 #include "third_party/leveldatabase/leveldb_chrome.h"
 #include "third_party/leveldatabase/src/include/leveldb/db.h"
@@ -55,7 +61,7 @@
 //
 //   Note: This has changed from `GURL origin` to StorageKey but the name will
 //   be updated in the future to avoid a migration.
-//   TODO(crbug.com/1199077): Update name during a migration to Version 3.
+//   TODO(crbug.com/40177656): Update name during a migration to Version 3.
 //   See StorageKey::Deserialize() for more information on the format.
 //   key: "INITDATA_UNIQUE_ORIGIN:" + <StorageKey>
 //   value: <empty>
@@ -65,7 +71,7 @@
 //
 //   Note: This has changed from `GURL origin` to StorageKey but the name will
 //   be updated in the future to avoid a migration.
-//   TODO(crbug.com/1199077): Update name during a migration to Version 3.
+//   TODO(crbug.com/40177656): Update name during a migration to Version 3.
 //   See StorageKey::Deserialize() for more information on the format.
 //   key: "REG:" + <StorageKey> + '\x00' + <int64_t 'registration_id'>
 //    (ex. "REG:https://example.com/\x00123456")
@@ -92,7 +98,7 @@
 //
 //   Note: This has changed from `GURL origin` to StorageKey but the name will
 //   be updated in the future to avoid a migration.
-//   TODO(crbug.com/1199077): Update name during a migration to Version 3.
+//   TODO(crbug.com/40177656): Update name during a migration to Version 3.
 //   See StorageKey::Deserialize() for more information on the format.
 //   key: "REGID_TO_ORIGIN:" + <int64_t 'registration_id'>
 //   value: <StorageKey>
@@ -135,6 +141,21 @@ const char kPurgeableResIdKeyPrefix[] = "PRES:";
 
 const int64_t kCurrentSchemaVersion = 2;
 
+const int kRouterRuleVersion = 1;
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+//
+// LINT.IfChange(ServiceWorkerIPAddressSpace)
+enum class ServiceWorkerIPAddressSpaceHistogram {
+  kLoopback = 0,
+  kLocal = 1,
+  kPublic = 2,
+  kUnknown = 3,
+  kMaxValue = kUnknown,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/service/enums.xml:ServiceWorkerIPAddressSpace)
+
 }  // namespace service_worker_internals
 
 namespace {
@@ -143,11 +164,11 @@ namespace {
 // set a low write buffer size to trigger compaction more often.
 constexpr size_t kWriteBufferSize = 512 * 1024;
 
+using RouterSourceType = network::mojom::ServiceWorkerRouterSourceType;
+
 class ServiceWorkerEnv : public leveldb_env::ChromiumEnv {
  public:
-  ServiceWorkerEnv()
-      : ChromiumEnv("LevelDBEnv.ServiceWorker",
-                    storage::CreateFilesystemProxy()) {}
+  ServiceWorkerEnv() : ChromiumEnv(storage::CreateFilesystemProxy()) {}
 
   // Returns a shared instance of ServiceWorkerEnv. This is thread-safe.
   static ServiceWorkerEnv* GetInstance() {
@@ -207,8 +228,9 @@ std::string CreateUserDataKeyPrefix(int64_t registration_id) {
 }
 
 std::string CreateUserDataKey(int64_t registration_id,
-                              const std::string& user_data_name) {
-  return CreateUserDataKeyPrefix(registration_id).append(user_data_name);
+                              std::string_view user_data_name) {
+  return base::StrCat(
+      {CreateUserDataKeyPrefix(registration_id), user_data_name});
 }
 
 std::string CreateHasUserDataKeyPrefix(const std::string& user_data_name) {
@@ -244,7 +266,7 @@ void PutPurgeableResourceIdToBatch(int64_t resource_id,
       "");
 }
 
-ServiceWorkerDatabase::Status ParseId(const std::string& serialized,
+ServiceWorkerDatabase::Status ParseId(std::string_view serialized,
                                       int64_t* out) {
   DCHECK(out);
   int64_t id;
@@ -270,12 +292,829 @@ ServiceWorkerDatabase::Status LevelDBStatusToServiceWorkerDBStatus(
     return ServiceWorkerDatabase::Status::kErrorFailed;
 }
 
-int64_t AccumulateResourceSizeInBytes(
+base::ByteSize AccumulateResourceSizeInBytes(
     const std::vector<mojom::ServiceWorkerResourceRecordPtr>& resources) {
-  int64_t total_size_bytes = 0;
-  for (const auto& resource : resources)
-    total_size_bytes += resource->size_bytes;
-  return total_size_bytes;
+  base::ByteSize total_size;
+  for (const auto& resource : resources) {
+    // TODO(https://crbug.com/474382520): This code assumes no error; verify
+    // this.
+    total_size += resource->size.value();
+  }
+  return total_size;
+}
+
+std::optional<std::vector<liburlpattern::Part>> ConvertToBlinkParts(
+    const google::protobuf::RepeatedPtrField<
+        storage::ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+            URLPattern::Part>& parts) {
+  std::vector<liburlpattern::Part> ret;
+  for (const auto& input_part : parts) {
+    liburlpattern::Part part;
+    switch (input_part.modifier()) {
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::kNone:
+        part.modifier = liburlpattern::Modifier::kNone;
+        break;
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::kOptional:
+        part.modifier = liburlpattern::Modifier::kOptional;
+        break;
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::kZeroOrMore:
+        part.modifier = liburlpattern::Modifier::kZeroOrMore;
+        break;
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::kOneOrMore:
+        part.modifier = liburlpattern::Modifier::kOneOrMore;
+        break;
+    }
+    switch (input_part.pattern_case()) {
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::PATTERN_NOT_SET:
+        // If URLPattern is used, one of the part must be set.
+        return std::nullopt;
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::kFixed:
+        part.type = liburlpattern::PartType::kFixed;
+        part.value = input_part.fixed().value();
+        break;
+      // No case statement for "regexp" is intended for the security
+      // concern.
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::kSegmentWildcard:
+        part.type = liburlpattern::PartType::kSegmentWildcard;
+        part.name = input_part.segment_wildcard().name();
+        part.prefix = input_part.segment_wildcard().prefix();
+        part.value = input_part.segment_wildcard().value();
+        part.suffix = input_part.segment_wildcard().suffix();
+        break;
+      case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+          URLPattern::Part::kFullWildcard:
+        part.type = liburlpattern::PartType::kFullWildcard;
+        part.name = input_part.full_wildcard().name();
+        part.prefix = input_part.full_wildcard().prefix();
+        part.value = input_part.full_wildcard().value();
+        part.suffix = input_part.full_wildcard().suffix();
+        break;
+    }
+    ret.emplace_back(part);
+  }
+  return ret;
+}
+
+void ConvertToProtoParts(
+    const std::vector<liburlpattern::Part> parts,
+    google::protobuf::RepeatedPtrField<
+        storage::ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+            URLPattern::Part>* out_parts) {
+  for (const auto& p : parts) {
+    ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::URLPattern::
+        Part* output_part = out_parts->Add();
+    switch (p.modifier) {
+      case liburlpattern::Modifier::kNone:
+        output_part->set_modifier(
+            ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                URLPattern::Part::kNone);
+        break;
+      case liburlpattern::Modifier::kOptional:
+        output_part->set_modifier(
+            ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                URLPattern::Part::kOptional);
+        break;
+      case liburlpattern::Modifier::kZeroOrMore:
+        output_part->set_modifier(
+            ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                URLPattern::Part::kZeroOrMore);
+        break;
+      case liburlpattern::Modifier::kOneOrMore:
+        output_part->set_modifier(
+            ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                URLPattern::Part::kOneOrMore);
+        break;
+    }
+    switch (p.type) {
+      case liburlpattern::PartType::kFixed: {
+        ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+            URLPattern::Part::FixedPattern* ptn = output_part->mutable_fixed();
+        ptn->set_value(p.value);
+        break;
+      }
+      case liburlpattern::PartType::kRegex:
+        NOTREACHED() << "should not see regexp URLPattern";
+      case liburlpattern::PartType::kSegmentWildcard: {
+        ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+            URLPattern::Part::WildcardPattern* ptn =
+                output_part->mutable_segment_wildcard();
+        ptn->set_name(p.name);
+        ptn->set_prefix(p.prefix);
+        ptn->set_value(p.value);
+        ptn->set_suffix(p.suffix);
+        break;
+      }
+      case liburlpattern::PartType::kFullWildcard: {
+        ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+            URLPattern::Part::WildcardPattern* ptn =
+                output_part->mutable_full_wildcard();
+        ptn->set_name(p.name);
+        ptn->set_prefix(p.prefix);
+        ptn->set_value(p.value);
+        ptn->set_suffix(p.suffix);
+        break;
+      }
+    }
+  }
+}
+
+// Returns whether the write operation succeeds
+bool WriteToBlinkCondition(
+    const ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition&
+        condition,
+    blink::ServiceWorkerRouterCondition& out) {
+  auto&& [out_url_pattern, out_request, out_running_status, out_or_condition,
+          out_not_condition] = out.get();
+  switch (condition.condition_case()) {
+    case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+        CONDITION_NOT_SET:
+      return false;
+    case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+        kUrlPattern: {
+      if (out_url_pattern) {
+        // Duplicated URLpattern found
+        return false;
+      }
+      blink::SafeUrlPattern url_pattern;
+      if (condition.url_pattern().legacy_pathname_size() == 0) {
+        if (condition.url_pattern().protocol_size() > 0) {
+          auto protocol =
+              ConvertToBlinkParts(condition.url_pattern().protocol());
+          if (!protocol) {
+            return false;
+          }
+          url_pattern.protocol = *protocol;
+        }
+        if (condition.url_pattern().username_size() > 0) {
+          auto username =
+              ConvertToBlinkParts(condition.url_pattern().username());
+          if (!username) {
+            return false;
+          }
+          url_pattern.username = *username;
+        }
+        if (condition.url_pattern().password_size() > 0) {
+          auto password =
+              ConvertToBlinkParts(condition.url_pattern().password());
+          if (!password) {
+            return false;
+          }
+          url_pattern.password = *password;
+        }
+        if (condition.url_pattern().hostname_size() > 0) {
+          auto hostname =
+              ConvertToBlinkParts(condition.url_pattern().hostname());
+          if (!hostname) {
+            return false;
+          }
+          url_pattern.hostname = *hostname;
+        }
+        if (condition.url_pattern().port_size() > 0) {
+          auto port = ConvertToBlinkParts(condition.url_pattern().port());
+          if (!port) {
+            return false;
+          }
+          url_pattern.port = *port;
+        }
+        if (condition.url_pattern().pathname_size() > 0) {
+          auto pathname =
+              ConvertToBlinkParts(condition.url_pattern().pathname());
+          if (!pathname) {
+            return false;
+          }
+          url_pattern.pathname = *pathname;
+        }
+        if (condition.url_pattern().search_size() > 0) {
+          auto search = ConvertToBlinkParts(condition.url_pattern().search());
+          if (!search) {
+            return false;
+          }
+          url_pattern.search = *search;
+        }
+        if (condition.url_pattern().hash_size() > 0) {
+          auto hash = ConvertToBlinkParts(condition.url_pattern().hash());
+          if (!hash) {
+            return false;
+          }
+          url_pattern.hash = *hash;
+        }
+        if (condition.url_pattern().has_options()) {
+          url_pattern.options.ignore_case =
+              condition.url_pattern().options().ignore_case();
+        }
+      } else {
+        // Workaround for the legacy URLPattern pathanme implementation.
+        // It assumes the non-existence of the fields as matching
+        // anything. i.e. "*".
+        CHECK_GT(condition.url_pattern().legacy_pathname_size(), 0);
+        auto pathname =
+            ConvertToBlinkParts(condition.url_pattern().legacy_pathname());
+        if (!pathname) {
+          return false;
+        }
+        url_pattern.pathname = *pathname;
+
+        // Set default "*" to all other fields.
+        {
+          liburlpattern::Part part;
+          part.modifier = liburlpattern::Modifier::kNone;
+          part.type = liburlpattern::PartType::kFullWildcard;
+          part.name = "0";
+
+          url_pattern.protocol.push_back(part);
+          url_pattern.username.push_back(part);
+          url_pattern.password.push_back(part);
+          url_pattern.hostname.push_back(part);
+          url_pattern.port.push_back(part);
+          url_pattern.search.push_back(part);
+          url_pattern.hash.push_back(part);
+        }
+      }
+      out_url_pattern = std::move(url_pattern);
+      break;
+    }
+    case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+        kRequest: {
+      if (out_request) {
+        // Duplicated RequestCondition found
+        return false;
+      }
+      blink::ServiceWorkerRouterRequestCondition request;
+      if (condition.request().has_method()) {
+        request.method = condition.request().method();
+      }
+      if (condition.request().has_mode()) {
+        switch (condition.request().mode()) {
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kSameOriginMode:
+            request.mode = network::mojom::RequestMode::kSameOrigin;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kNoCorsMode:
+            request.mode = network::mojom::RequestMode::kNoCors;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kCorsMode:
+            request.mode = network::mojom::RequestMode::kCors;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kCorsWithForcedPreflightMode:
+            request.mode =
+                network::mojom::RequestMode::kCorsWithForcedPreflight;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kNavigateMode:
+            request.mode = network::mojom::RequestMode::kNavigate;
+            break;
+        }
+      }
+      if (condition.request().has_destination()) {
+        switch (condition.request().destination()) {
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kEmptyDestination:
+            request.destination = network::mojom::RequestDestination::kEmpty;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kAudioDestination:
+            request.destination = network::mojom::RequestDestination::kAudio;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kAudioWorkletDestination:
+            request.destination =
+                network::mojom::RequestDestination::kAudioWorklet;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kDocumentDestination:
+            request.destination = network::mojom::RequestDestination::kDocument;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kEmbedDestination:
+            request.destination = network::mojom::RequestDestination::kEmbed;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kFontDestination:
+            request.destination = network::mojom::RequestDestination::kFont;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kFrameDestination:
+            request.destination = network::mojom::RequestDestination::kFrame;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kIframeDestination:
+            request.destination = network::mojom::RequestDestination::kIframe;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kImageDestination:
+            request.destination = network::mojom::RequestDestination::kImage;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kManifestDestination:
+            request.destination = network::mojom::RequestDestination::kManifest;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kObjectDestination:
+            request.destination = network::mojom::RequestDestination::kObject;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kPaintWorkletDestination:
+            request.destination =
+                network::mojom::RequestDestination::kPaintWorklet;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kReportDestination:
+            request.destination = network::mojom::RequestDestination::kReport;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kScriptDestination:
+            request.destination = network::mojom::RequestDestination::kScript;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kServiceWorkerDestination:
+            request.destination =
+                network::mojom::RequestDestination::kServiceWorker;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kSharedWorkerDestination:
+            request.destination =
+                network::mojom::RequestDestination::kSharedWorker;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kStyleDestination:
+            request.destination = network::mojom::RequestDestination::kStyle;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kTrackDestination:
+            request.destination = network::mojom::RequestDestination::kTrack;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kVideoDestination:
+            request.destination = network::mojom::RequestDestination::kVideo;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kWebBundleDestination:
+            request.destination =
+                network::mojom::RequestDestination::kWebBundle;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kWorkerDestination:
+            request.destination = network::mojom::RequestDestination::kWorker;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kXsltDestination:
+            request.destination = network::mojom::RequestDestination::kXslt;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kFencedframeDestination:
+            request.destination =
+                network::mojom::RequestDestination::kFencedframe;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kWebIdentityDestination:
+            request.destination =
+                network::mojom::RequestDestination::kWebIdentity;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kEmailVerificationDestination:
+            request.destination =
+                network::mojom::RequestDestination::kEmailVerification;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kDictionaryDestination:
+            request.destination =
+                network::mojom::RequestDestination::kCompressionDictionary;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kSpeculationRulesDestination:
+            request.destination =
+                network::mojom::RequestDestination::kSpeculationRules;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kJsonDestination:
+            request.destination = network::mojom::RequestDestination::kJson;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kTextDestination:
+            request.destination = network::mojom::RequestDestination::kText;
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+              Request::kSharedStorageWorkletDestination:
+            break;
+        }
+      }
+      out_request = request;
+      break;
+    }
+    case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+        kRunningStatus: {
+      if (out_running_status) {
+        // Duplicated RunningStatusCondition found
+        return false;
+      }
+      blink::ServiceWorkerRouterRunningStatusCondition running_status;
+      if (!condition.has_running_status() ||
+          !condition.running_status().has_status()) {
+        return false;
+      }
+      switch (condition.running_status().status()) {
+        case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+            RunningStatus::kRunning:
+          running_status.status =
+              blink::ServiceWorkerRouterRunningStatusCondition::
+                  RunningStatusEnum::kRunning;
+          break;
+        case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+            RunningStatus::kNotRunning:
+          running_status.status =
+              blink::ServiceWorkerRouterRunningStatusCondition::
+                  RunningStatusEnum::kNotRunning;
+          break;
+      }
+      out_running_status = running_status;
+      break;
+    }
+    case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+        kOrCondition: {
+      if (out_or_condition) {
+        // Duplicated `or` condition found
+        return false;
+      }
+      if (!condition.has_or_condition()) {
+        return false;
+      }
+      blink::ServiceWorkerRouterOrCondition or_condition;
+      const auto& pb_objects = condition.or_condition().objects();
+      or_condition.conditions.reserve(pb_objects.size());
+      for (const auto& pb_o : pb_objects) {
+        blink::ServiceWorkerRouterCondition blink_condition;
+        for (const auto& pb_c : pb_o.conditions()) {
+          if (!WriteToBlinkCondition(pb_c, blink_condition)) {
+            return false;
+          }
+        }
+        if (blink_condition.IsEmpty()) {
+          return false;
+        }
+        or_condition.conditions.emplace_back(std::move(blink_condition));
+      }
+
+      out_or_condition = std::move(or_condition);
+      break;
+    }
+    case ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+        kNotCondition: {
+      if (out_not_condition) {
+        // Duplicated `not` condition found
+        return false;
+      }
+      if (!condition.has_not_condition()) {
+        return false;
+      }
+      blink::ServiceWorkerRouterNotCondition not_condition;
+      const auto& pb_o = condition.not_condition().object();
+      blink::ServiceWorkerRouterCondition blink_condition;
+      for (const auto& pb_c : pb_o.conditions()) {
+        if (!WriteToBlinkCondition(pb_c, blink_condition)) {
+          return false;
+        }
+      }
+      if (blink_condition.IsEmpty()) {
+        return false;
+      }
+      not_condition.condition =
+          std::make_unique<blink::ServiceWorkerRouterCondition>(
+              std::move(blink_condition));
+
+      out_not_condition = std::move(not_condition);
+      break;
+    }
+  }
+
+  if (!out.IsValid()) {
+    DLOG(ERROR) << "out is not valid";
+    return false;
+  }
+
+  return true;
+}
+
+// Helper class to uniformly add conditions to both `ConditionObject` and
+// `RuleV1` in the DB. This uses simple dynamic dispatch to avoid template
+// functions.
+class AddConditionHelper {
+ public:
+  using ConditionObject = ServiceWorkerRegistrationData::RouterRules::RuleV1::
+      Condition::ConditionObject;
+  using RuleV1 = ServiceWorkerRegistrationData::RouterRules::RuleV1;
+
+  // Not default-constructible, copyable, nor movable
+  AddConditionHelper() = delete;
+  AddConditionHelper(const AddConditionHelper&) = delete;
+  AddConditionHelper(AddConditionHelper&&) = delete;
+
+  explicit AddConditionHelper(ConditionObject* object) : object_(object) {}
+  explicit AddConditionHelper(RuleV1* v1) : v1_(v1) {}
+
+  ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition*
+  add_condition() {
+    if (object_) {
+      CHECK(!v1_);
+      return object_->add_conditions();
+    }
+    if (v1_) {
+      CHECK(!object_);
+      return v1_->add_condition();
+    }
+    return nullptr;
+  }
+
+ private:
+  raw_ptr<ConditionObject> object_;
+  raw_ptr<RuleV1> v1_;
+};
+
+// Write
+void WriteConditionToProtoWithHelper(
+    const blink::ServiceWorkerRouterCondition& condition,
+    AddConditionHelper& out) {
+  const auto& [url_pattern, request, running_status, or_condition,
+               not_condition] = condition.get();
+  if (url_pattern) {
+    auto* out_c = out.add_condition();
+    ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::URLPattern*
+        mutable_url_pattern = out_c->mutable_url_pattern();
+    CHECK(!url_pattern->protocol.empty() || !url_pattern->username.empty() ||
+          !url_pattern->password.empty() || !url_pattern->hostname.empty() ||
+          !url_pattern->port.empty() || !url_pattern->pathname.empty() ||
+          !url_pattern->search.empty() || !url_pattern->hash.empty());
+    if (!url_pattern->protocol.empty()) {
+      ConvertToProtoParts(url_pattern->protocol,
+                          mutable_url_pattern->mutable_protocol());
+    }
+    if (!url_pattern->username.empty()) {
+      ConvertToProtoParts(url_pattern->username,
+                          mutable_url_pattern->mutable_username());
+    }
+    if (!url_pattern->password.empty()) {
+      ConvertToProtoParts(url_pattern->password,
+                          mutable_url_pattern->mutable_password());
+    }
+    if (!url_pattern->hostname.empty()) {
+      ConvertToProtoParts(url_pattern->hostname,
+                          mutable_url_pattern->mutable_hostname());
+    }
+    if (!url_pattern->port.empty()) {
+      ConvertToProtoParts(url_pattern->port,
+                          mutable_url_pattern->mutable_port());
+    }
+    if (!url_pattern->pathname.empty()) {
+      ConvertToProtoParts(url_pattern->pathname,
+                          mutable_url_pattern->mutable_pathname());
+    }
+    if (!url_pattern->search.empty()) {
+      ConvertToProtoParts(url_pattern->search,
+                          mutable_url_pattern->mutable_search());
+    }
+    if (!url_pattern->hash.empty()) {
+      ConvertToProtoParts(url_pattern->hash,
+                          mutable_url_pattern->mutable_hash());
+    }
+    mutable_url_pattern->mutable_options()->set_ignore_case(
+        url_pattern->options.ignore_case);
+  }
+  if (request) {
+    auto* out_c = out.add_condition();
+    ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::Request*
+        mutable_request = out_c->mutable_request();
+    if (request->method) {
+      mutable_request->set_method(*request->method);
+    }
+    if (request->mode) {
+      switch (*request->mode) {
+        case network::mojom::RequestMode::kSameOrigin:
+          mutable_request->set_mode(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kSameOriginMode);
+          break;
+        case network::mojom::RequestMode::kNoCors:
+          mutable_request->set_mode(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kNoCorsMode);
+          break;
+        case network::mojom::RequestMode::kCors:
+          mutable_request->set_mode(ServiceWorkerRegistrationData::RouterRules::
+                                        RuleV1::Condition::Request::kCorsMode);
+          break;
+        case network::mojom::RequestMode::kCorsWithForcedPreflight:
+          mutable_request->set_mode(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kCorsWithForcedPreflightMode);
+          break;
+        case network::mojom::RequestMode::kNavigate:
+          mutable_request->set_mode(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kNavigateMode);
+          break;
+      }
+    }
+    if (request->destination) {
+      switch (*request->destination) {
+        case network::mojom::RequestDestination::kEmpty:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kEmptyDestination);
+          break;
+        case network::mojom::RequestDestination::kAudio:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kAudioDestination);
+          break;
+        case network::mojom::RequestDestination::kAudioWorklet:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kAudioWorkletDestination);
+          break;
+        case network::mojom::RequestDestination::kDocument:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kDocumentDestination);
+          break;
+        case network::mojom::RequestDestination::kEmbed:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kEmbedDestination);
+          break;
+        case network::mojom::RequestDestination::kFont:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kFontDestination);
+          break;
+        case network::mojom::RequestDestination::kFrame:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kFrameDestination);
+          break;
+        case network::mojom::RequestDestination::kIframe:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kIframeDestination);
+          break;
+        case network::mojom::RequestDestination::kImage:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kImageDestination);
+          break;
+        case network::mojom::RequestDestination::kManifest:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kManifestDestination);
+          break;
+        case network::mojom::RequestDestination::kObject:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kObjectDestination);
+          break;
+        case network::mojom::RequestDestination::kPaintWorklet:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kPaintWorkletDestination);
+          break;
+        case network::mojom::RequestDestination::kReport:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kReportDestination);
+          break;
+        case network::mojom::RequestDestination::kScript:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kScriptDestination);
+          break;
+        case network::mojom::RequestDestination::kServiceWorker:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kServiceWorkerDestination);
+          break;
+        case network::mojom::RequestDestination::kSharedWorker:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kSharedWorkerDestination);
+          break;
+        case network::mojom::RequestDestination::kStyle:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kStyleDestination);
+          break;
+        case network::mojom::RequestDestination::kTrack:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kTrackDestination);
+          break;
+        case network::mojom::RequestDestination::kVideo:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kVideoDestination);
+          break;
+        case network::mojom::RequestDestination::kWebBundle:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kWebBundleDestination);
+          break;
+        case network::mojom::RequestDestination::kWorker:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kWorkerDestination);
+          break;
+        case network::mojom::RequestDestination::kXslt:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kXsltDestination);
+          break;
+        case network::mojom::RequestDestination::kFencedframe:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kFencedframeDestination);
+          break;
+        case network::mojom::RequestDestination::kWebIdentity:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kWebIdentityDestination);
+          break;
+        case network::mojom::RequestDestination::kEmailVerification:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kEmailVerificationDestination);
+          break;
+        case network::mojom::RequestDestination::kCompressionDictionary:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kDictionaryDestination);
+          break;
+        case network::mojom::RequestDestination::kSpeculationRules:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kSpeculationRulesDestination);
+          break;
+        case network::mojom::RequestDestination::kJson:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kJsonDestination);
+          break;
+        case network::mojom::RequestDestination::kText:
+          mutable_request->set_destination(
+              ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                  Request::kTextDestination);
+          break;
+      }
+    }
+  }
+  if (running_status) {
+    auto* out_c = out.add_condition();
+    ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+        RunningStatus* mutable_running_status = out_c->mutable_running_status();
+    switch (running_status->status) {
+      case blink::ServiceWorkerRouterRunningStatusCondition::RunningStatusEnum::
+          kRunning:
+        mutable_running_status->set_status(
+            ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                RunningStatus::kRunning);
+        break;
+      case blink::ServiceWorkerRouterRunningStatusCondition::RunningStatusEnum::
+          kNotRunning:
+        mutable_running_status->set_status(
+            ServiceWorkerRegistrationData::RouterRules::RuleV1::Condition::
+                RunningStatus::kNotRunning);
+        break;
+    }
+  }
+  if (or_condition) {
+    auto* out_c = out.add_condition();
+    const auto& conditions = or_condition->conditions;
+    auto* pb_objects = out_c->mutable_or_condition()->mutable_objects();
+    pb_objects->Reserve(conditions.size());
+    for (const auto& c : conditions) {
+      AddConditionHelper pb_o(pb_objects->Add());
+      WriteConditionToProtoWithHelper(c, pb_o);
+    }
+  }
+  if (not_condition) {
+    auto* out_c = out.add_condition();
+    AddConditionHelper pb_o(out_c->mutable_not_condition()->mutable_object());
+    CHECK(not_condition->condition);
+    WriteConditionToProtoWithHelper(*not_condition->condition, pb_o);
+  }
+}
+
+void WriteConditionToProto(
+    const blink::ServiceWorkerRouterCondition& condition,
+    ServiceWorkerRegistrationData::RouterRules::RuleV1* out) {
+  AddConditionHelper helper(out);
+  WriteConditionToProtoWithHelper(condition, helper);
 }
 
 }  // namespace
@@ -301,7 +1140,6 @@ const char* ServiceWorkerDatabase::StatusToString(
       return "Storage is disconnected";
   }
   NOTREACHED();
-  return "Database unknown error";
 }
 
 ServiceWorkerDatabase::ServiceWorkerDatabase(const base::FilePath& path)
@@ -355,6 +1193,35 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::GetNextAvailableIds(
   if (status != Status::kOk)
     return status;
 
+  if (base::FeatureList::IsEnabled(
+          blink::features::kServiceWorkerDatabaseDoomOnMissingNextId) &&
+      (next_avail_registration_id_ == 0 || next_avail_version_id_ == 0 ||
+       next_avail_resource_id_ == 0)) {
+    // If any next available ID metadata is 0 while pre-existing registrations
+    // exist on disk, the database ID metadata was lost or corrupted.
+    // Treat this as database corruption to allow ServiceWorkerStorage to doom
+    // the database and recover cleanly.
+    {
+      std::unique_ptr<leveldb::Iterator> itr(
+          db_->NewIterator(leveldb::ReadOptions()));
+      itr->Seek(service_worker_internals::kRegKeyPrefix);
+      status = LevelDBStatusToServiceWorkerDBStatus(itr->status());
+      if (status == Status::kOk && itr->Valid()) {
+        std::string_view key_str(itr->key().data(), itr->key().size());
+        if (base::StartsWith(key_str, service_worker_internals::kRegKeyPrefix,
+                             base::CompareCase::SENSITIVE)) {
+          DLOG(ERROR) << "Registrations exist on disk but next available ID "
+                         "metadata is missing.";
+          status = Status::kErrorCorrupted;
+        }
+      }
+    }
+    if (status != Status::kOk) {
+      HandleReadResult(FROM_HERE, status);
+      return status;
+    }
+  }
+
   *next_avail_registration_id = next_avail_registration_id_;
   *next_avail_version_id = next_avail_version_id_;
   *next_avail_resource_id = next_avail_resource_id_;
@@ -392,7 +1259,7 @@ ServiceWorkerDatabase::GetStorageKeysWithRegistrations(
       if (blink::StorageKey::ShouldSkipKeyDueToPartitioning(key_str))
         continue;
 
-      absl::optional<blink::StorageKey> key =
+      std::optional<blink::StorageKey> key =
           blink::StorageKey::Deserialize(key_str);
       if (!key) {
         status = Status::kErrorCorrupted;
@@ -450,6 +1317,8 @@ ServiceWorkerDatabase::GetRegistrationsForStorageKey(
           opt_resources_list->clear();
         break;
       }
+      // TODO(crbug.com/372879072): remove this CHECK
+      CHECK_EQ(key.origin(), url::Origin::Create(registration->scope));
       registrations->push_back(std::move(registration));
     }
   }
@@ -484,10 +1353,10 @@ ServiceWorkerDatabase::GetRegistrationsForStorageKey(
 
 ServiceWorkerDatabase::Status ServiceWorkerDatabase::GetUsageForStorageKey(
     const blink::StorageKey& key,
-    int64_t& out_usage) {
+    base::ByteSize& out_usage) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  out_usage = 0;
+  out_usage = base::ByteSize(0);
 
   Status status = LazyOpen(false);
   if (IsNewOrNonexistentDatabase(status))
@@ -514,7 +1383,7 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::GetUsageForStorageKey(
           ParseRegistrationData(itr->value().ToString(), key, &registration);
       if (status != Status::kOk)
         break;
-      out_usage += registration->resources_total_size_bytes;
+      out_usage += registration->resources_total_size;
     }
   }
 
@@ -522,7 +1391,7 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::GetUsageForStorageKey(
   // purposes.
   HandleReadResult(FROM_HERE, status);
   if (status != Status::kOk) {
-    out_usage = 0;
+    out_usage = base::ByteSize(0);
   }
 
   return status;
@@ -584,7 +1453,7 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::GetAllRegistrations(
       if (blink::StorageKey::ShouldSkipKeyDueToPartitioning(reg_key_string))
         continue;
 
-      absl::optional<blink::StorageKey> key =
+      std::optional<blink::StorageKey> key =
           blink::StorageKey::Deserialize(reg_key_string);
       if (!key)
         break;
@@ -660,7 +1529,7 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::ReadRegistrationStorageKey(
   // registration IDs associated with partitioned entries.
   DCHECK(!blink::StorageKey::ShouldSkipKeyDueToPartitioning(value));
 
-  absl::optional<blink::StorageKey> parsed =
+  std::optional<blink::StorageKey> parsed =
       blink::StorageKey::Deserialize(value);
   if (!parsed) {
     status = Status::kErrorCorrupted;
@@ -692,7 +1561,7 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::WriteRegistration(
   PutUniqueOriginToBatch(registration.key, &batch);
 
   DCHECK_EQ(AccumulateResourceSizeInBytes(resources),
-            registration.resources_total_size_bytes)
+            registration.resources_total_size)
       << "The total size in the registration must match the cumulative "
       << "sizes of the resources.";
 
@@ -735,8 +1604,8 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::WriteRegistration(
     DCHECK_LT(old_registration->version_id, registration.version_id);
     deleted_version->registration_id = old_registration->registration_id;
     deleted_version->version_id = old_registration->version_id;
-    deleted_version->resources_total_size_bytes =
-        old_registration->resources_total_size_bytes;
+    deleted_version->resources_total_size =
+        old_registration->resources_total_size;
     status = DeleteResourceRecords(old_registration->version_id,
                                    &deleted_version->newly_purgeable_resources,
                                    &batch);
@@ -972,8 +1841,8 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::DeleteRegistration(
     if (registration->registration_id == registration_id) {
       deleted_version->registration_id = registration_id;
       deleted_version->version_id = registration->version_id;
-      deleted_version->resources_total_size_bytes =
-          registration->resources_total_size_bytes;
+      deleted_version->resources_total_size =
+          registration->resources_total_size;
       status = DeleteResourceRecords(
           registration->version_id, &deleted_version->newly_purgeable_resources,
           &batch);
@@ -1332,9 +2201,9 @@ ServiceWorkerDatabase::ReadUserDataForAllRegistrationsByKeyPrefix(
         break;
       }
 
-      std::vector<std::string> parts = base::SplitString(
+      std::vector<std::string_view> parts = base::SplitStringPiece(
           user_data_name_with_id,
-          std::string(1, service_worker_internals::kKeySeparator),
+          std::string_view(&service_worker_internals::kKeySeparator, 1),
           base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
       if (parts.size() != 2) {
         status = Status::kErrorCorrupted;
@@ -1357,8 +2226,8 @@ ServiceWorkerDatabase::ReadUserDataForAllRegistrationsByKeyPrefix(
         user_data->clear();
         break;
       }
-      user_data->push_back(
-          mojom::ServiceWorkerUserData::New(registration_id, parts[0], value));
+      user_data->push_back(mojom::ServiceWorkerUserData::New(
+          registration_id, std::string(parts[0]), value));
     }
   }
 
@@ -1400,9 +2269,9 @@ ServiceWorkerDatabase::DeleteUserDataForAllRegistrationsByKeyPrefix(
                      &user_data_name_with_id);
     DCHECK(did_remove_prefix);
 
-    std::vector<std::string> parts = base::SplitString(
+    std::vector<std::string_view> parts = base::SplitStringPiece(
         user_data_name_with_id,
-        std::string(1, service_worker_internals::kKeySeparator),
+        std::string_view(&service_worker_internals::kKeySeparator, 1),
         base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
     if (parts.size() != 2)
       return Status::kErrorCorrupted;
@@ -1480,9 +2349,8 @@ ServiceWorkerDatabase::PurgeUncommittedResourceIds(
   return WriteBatch(&batch);
 }
 
-ServiceWorkerDatabase::Status
-ServiceWorkerDatabase::DeleteAllDataForStorageKeys(
-    const std::set<blink::StorageKey>& keys,
+ServiceWorkerDatabase::Status ServiceWorkerDatabase::DeleteAllDataForOrigins(
+    const std::set<url::Origin>& origins,
     std::vector<int64_t>* newly_purgeable_resources) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   Status status = LazyOpen(false);
@@ -1503,18 +2371,14 @@ ServiceWorkerDatabase::DeleteAllDataForStorageKeys(
   for (const mojom::ServiceWorkerRegistrationDataPtr& reg : registrations) {
     blink::StorageKey& key = reg->key;
 
-    for (const blink::StorageKey& requested_key : keys) {
-      // Only the origin of the requested key is relevant.
-      const url::Origin& requested_origin = requested_key.origin();
-
+    for (const url::Origin& requested_origin : origins) {
       if (requested_origin.opaque()) {
         return Status::kErrorFailed;
       }
 
       auto match = key.origin() == requested_origin;
-      match = match ||
-              (key.IsThirdPartyContext() &&
-               key.top_level_site() == net::SchemefulSite(requested_origin));
+      match = match || (key.IsThirdPartyContext() &&
+                        key.top_level_site().IsSameSiteWith(requested_origin));
       if (!match) {
         continue;
       }
@@ -1613,7 +2477,6 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::LazyOpen(
     default:
       // Other cases should be handled in ReadDatabaseVersion.
       NOTREACHED();
-      return Status::kErrorCorrupted;
   }
 }
 
@@ -1702,10 +2565,10 @@ network::mojom::ReferrerPolicy ConvertReferrerPolicyFromProtocolBufferToMojom(
 network::mojom::IPAddressSpace ConvertIPAddressSpaceFromProtocolBufferToMojom(
     ServiceWorkerRegistrationData::IPAddressSpace value) {
   switch (value) {
+    case ServiceWorkerRegistrationData::LOOPBACK:
+      return network::mojom::IPAddressSpace::kLoopback;
     case ServiceWorkerRegistrationData::LOCAL:
       return network::mojom::IPAddressSpace::kLocal;
-    case ServiceWorkerRegistrationData::PRIVATE:
-      return network::mojom::IPAddressSpace::kPrivate;
     case ServiceWorkerRegistrationData::PUBLIC:
       return network::mojom::IPAddressSpace::kPublic;
     case ServiceWorkerRegistrationData::UNKNOWN:
@@ -1720,8 +2583,10 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::ParseRegistrationData(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(out);
   ServiceWorkerRegistrationData data;
-  if (!data.ParseFromString(serialized))
+  if (!data.ParseFromString(serialized)) {
+    DLOG(ERROR) << "Failed to parse serialized data.";
     return Status::kErrorCorrupted;
+  }
 
   GURL scope_url(data.scope_url());
   GURL script_url(data.script_url());
@@ -1780,12 +2645,12 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::ParseRegistrationData(
         (*out)->fetch_handler_type =
             blink::mojom::ServiceWorkerFetchHandlerType::kEmptyFetchHandler;
         break;
-        // TODO(crbug.com/1347319): implement other fetch_handler_type.
     }
   }
   (*out)->last_update_check = base::Time::FromDeltaSinceWindowsEpoch(
       base::Microseconds(data.last_update_check_time()));
-  (*out)->resources_total_size_bytes = data.resources_total_size_bytes();
+  (*out)->resources_total_size =
+      base::ByteSize(data.resources_total_size_bytes());
   if (data.has_origin_trial_tokens()) {
     const ServiceWorkerOriginTrialInfo& info = data.origin_trial_tokens();
     FeatureToTokensMap origin_trial_tokens;
@@ -1924,39 +2789,166 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::ParseRegistrationData(
     }
   }
 
-  if (data.has_policy_container_policies()) {
+  // There was a bug fixed in M141 where extension service workers had the wrong
+  // IP address space assigned (crbug.com/435246545). However, extensions that
+  // had service workers previously installed before the fix were persisted to
+  // the service worker database with the wrong IP address space. To fix this,
+  // when reading the service worker registration data, if the service worker is
+  // part of a chrome extension, we change the IP address space to kLoopback.
+  //
+  // This was discovered in M142(crbug.com/456078996), hopefully we can remove
+  // this patch after some time has passed to allow all service worker
+  // registrations to get persisted with the correct IP address space.
+  bool is_chrome_extension_scope = scope_url.SchemeIs("chrome-extension");
+
+  if (data.has_policy_container_policies() || is_chrome_extension_scope) {
     if (!(*out)->policy_container_policies) {
       (*out)->policy_container_policies =
           blink::mojom::PolicyContainerPolicies::New();
     }
-    auto& policies = data.policy_container_policies();
-    if (policies.has_referrer_policy()) {
-      if (!ServiceWorkerRegistrationData::ReferrerPolicyValue_IsValid(
-              policies.referrer_policy())) {
-        DLOG(ERROR) << "Referrer policy in policy container policies '"
-                    << policies.referrer_policy() << "' is not valid.";
-        return Status::kErrorCorrupted;
+    if (data.has_policy_container_policies()) {
+      auto& policies = data.policy_container_policies();
+      if (policies.has_referrer_policy()) {
+        if (!ServiceWorkerRegistrationData::ReferrerPolicyValue_IsValid(
+                policies.referrer_policy())) {
+          DLOG(ERROR) << "Referrer policy in policy container policies '"
+                      << policies.referrer_policy() << "' is not valid.";
+          return Status::kErrorCorrupted;
+        }
+        (*out)->policy_container_policies->referrer_policy =
+            ConvertReferrerPolicyFromProtocolBufferToMojom(
+                policies.referrer_policy());
       }
-      (*out)->policy_container_policies->referrer_policy =
-          ConvertReferrerPolicyFromProtocolBufferToMojom(
-              policies.referrer_policy());
-    }
-    if (policies.has_sandbox_flags()) {
-      (*out)->policy_container_policies->sandbox_flags =
-          static_cast<network::mojom::WebSandboxFlags>(
-              policies.sandbox_flags());
-    }
-    if (policies.has_ip_address_space()) {
-      if (!ServiceWorkerRegistrationData_IPAddressSpace_IsValid(
-              policies.ip_address_space())) {
-        DLOG(ERROR) << "IP address space in policy container policies '"
-                    << policies.ip_address_space() << "' is not valid.";
-        return Status::kErrorCorrupted;
+      if (policies.has_sandbox_flags()) {
+        (*out)->policy_container_policies->sandbox_flags =
+            static_cast<network::mojom::WebSandboxFlags>(
+                policies.sandbox_flags());
       }
-      (*out)->policy_container_policies->ip_address_space =
-          ConvertIPAddressSpaceFromProtocolBufferToMojom(
-              policies.ip_address_space());
+      if (policies.has_ip_address_space()) {
+        if (!ServiceWorkerRegistrationData_IPAddressSpace_IsValid(
+                policies.ip_address_space())) {
+          DLOG(ERROR) << "IP address space in policy container policies '"
+                      << policies.ip_address_space() << "' is not valid.";
+          return Status::kErrorCorrupted;
+        }
+        (*out)->policy_container_policies->ip_address_space =
+            ConvertIPAddressSpaceFromProtocolBufferToMojom(
+                policies.ip_address_space());
+      }
     }
+    if (is_chrome_extension_scope) {
+      if ((*out)->policy_container_policies->ip_address_space !=
+          network::mojom::IPAddressSpace::kLoopback) {
+        service_worker_internals::ServiceWorkerIPAddressSpaceHistogram
+            histogram_value;
+        switch ((*out)->policy_container_policies->ip_address_space) {
+          case network::mojom::IPAddressSpace::kLoopback:
+            histogram_value = service_worker_internals::
+                ServiceWorkerIPAddressSpaceHistogram::kLoopback;
+            break;
+          case network::mojom::IPAddressSpace::kLocal:
+            histogram_value = service_worker_internals::
+                ServiceWorkerIPAddressSpaceHistogram::kLocal;
+            break;
+          case network::mojom::IPAddressSpace::kPublic:
+            histogram_value = service_worker_internals::
+                ServiceWorkerIPAddressSpaceHistogram::kPublic;
+            break;
+          case network::mojom::IPAddressSpace::kUnknown:
+            histogram_value = service_worker_internals::
+                ServiceWorkerIPAddressSpaceHistogram::kUnknown;
+            break;
+        }
+
+        base::UmaHistogramEnumeration(
+            "ServiceWorker.ChromeExtensionUpdateIPAddressSpace",
+            histogram_value);
+        (*out)->policy_container_policies->ip_address_space =
+            network::mojom::IPAddressSpace::kLoopback;
+      }
+    }
+  }
+
+  if (data.has_router_rules()) {
+    if (data.router_rules().version() !=
+        service_worker_internals::kRouterRuleVersion) {
+      // Unknown route version.
+      DLOG(ERROR) << "Router version '" << data.router_rules().version()
+                  << "' is not valid.";
+      return Status::kErrorCorrupted;
+    }
+    blink::ServiceWorkerRouterRules router_rules;
+    for (const auto& r : data.router_rules().v1()) {
+      blink::ServiceWorkerRouterRule router_rule;
+      blink::ServiceWorkerRouterCondition condition;
+      for (const auto& c : r.condition()) {
+        if (!WriteToBlinkCondition(c, condition)) {
+          DLOG(ERROR) << "Failed to write to blink condition.";
+          return Status::kErrorCorrupted;
+        }
+      }
+      router_rule.condition = std::move(condition);
+      for (const auto& s : r.source()) {
+        blink::ServiceWorkerRouterSource source;
+        switch (s.source_case()) {
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Source::
+              SOURCE_NOT_SET:
+            DLOG(ERROR) << "Source not set.";
+            return Status::kErrorCorrupted;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Source::
+              kNetworkSource:
+            source.type = RouterSourceType::kNetwork;
+            source.network_source.emplace();
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Source::
+              kRaceNetworkAndFetchEventSource:
+            source.type = RouterSourceType::kRaceNetworkAndFetchEvent;
+            source.race_network_and_fetch_event_source.emplace();
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Source::
+              kFetchEventSource:
+            source.type = RouterSourceType::kFetchEvent;
+            source.fetch_event_source.emplace();
+            break;
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Source::
+              kCacheSource: {
+            source.type = RouterSourceType::kCache;
+            blink::ServiceWorkerRouterCacheSource cache_source;
+            if (s.cache_source().has_cache_name()) {
+              cache_source.cache_name = s.cache_source().cache_name();
+            }
+            source.cache_source = cache_source;
+            break;
+          }
+          case ServiceWorkerRegistrationData::RouterRules::RuleV1::Source::
+              kRaceNetworkAndCacheSource: {
+            source.type = RouterSourceType::kRaceNetworkAndCache;
+            source.race_network_and_cache_source.emplace();
+
+            const auto& cache_source =
+                s.race_network_and_cache_source().cache_source();
+            blink::ServiceWorkerRouterCacheSource cache_source_data;
+            if (cache_source.has_cache_name()) {
+              cache_source_data.cache_name = cache_source.cache_name();
+            }
+            source.race_network_and_cache_source->cache_source =
+                cache_source_data;
+            break;
+          }
+        }
+        router_rule.sources.emplace_back(source);
+      }
+      router_rules.rules.emplace_back(router_rule);
+    }
+    (*out)->router_rules = std::move(router_rules);
+  }
+
+  if (data.has_has_hid_event_handlers()) {
+    (*out)->has_hid_event_handlers = data.has_hid_event_handlers();
+  }
+
+  if (data.has_has_usb_event_handlers()) {
+    (*out)->has_usb_event_handlers = data.has_usb_event_handlers();
   }
 
   return Status::kOk;
@@ -2004,10 +2996,10 @@ ServiceWorkerRegistrationData::IPAddressSpace
 ConvertIPAddressSpaceFromMojomToProtocolBuffer(
     network::mojom::IPAddressSpace value) {
   switch (value) {
+    case network::mojom::IPAddressSpace::kLoopback:
+      return ServiceWorkerRegistrationData::LOOPBACK;
     case network::mojom::IPAddressSpace::kLocal:
       return ServiceWorkerRegistrationData::LOCAL;
-    case network::mojom::IPAddressSpace::kPrivate:
-      return ServiceWorkerRegistrationData::PRIVATE;
     case network::mojom::IPAddressSpace::kPublic:
       return ServiceWorkerRegistrationData::PUBLIC;
     case network::mojom::IPAddressSpace::kUnknown:
@@ -2047,11 +3039,8 @@ void ServiceWorkerDatabase::WriteRegistrationDataInBatch(
         data.set_fetch_handler_skippable_type(
             ServiceWorkerRegistrationData::SKIPPABLE_EMPTY_FETCH_HANDLER);
         break;
-      // TODO(crbug.com/1347319): implement other fetch_handler_type.
-      // TODO(crbug.com/1351246): remove default if possible.
-      default:
-        DCHECK(false) << "Unknown fetch_handler_type is used."
-                      << registration.fetch_handler_type;
+      case blink::mojom::ServiceWorkerFetchHandlerType::kNoHandler:
+        NOTREACHED();
     }
   }
   data.set_last_update_check_time(
@@ -2060,7 +3049,8 @@ void ServiceWorkerDatabase::WriteRegistrationDataInBatch(
   data.set_script_response_time(
       registration.script_response_time.ToDeltaSinceWindowsEpoch()
           .InMicroseconds());
-  data.set_resources_total_size_bytes(registration.resources_total_size_bytes);
+  data.set_resources_total_size_bytes(
+      registration.resources_total_size.InBytes());
   if (registration.origin_trial_tokens) {
     ServiceWorkerOriginTrialInfo* info = data.mutable_origin_trial_tokens();
     for (const auto& feature : *registration.origin_trial_tokens) {
@@ -2133,6 +3123,52 @@ void ServiceWorkerDatabase::WriteRegistrationDataInBatch(
         ConvertIPAddressSpaceFromMojomToProtocolBuffer(
             registration.policy_container_policies->ip_address_space));
   }
+
+  if (registration.router_rules) {
+    ServiceWorkerRegistrationData::RouterRules* rules =
+        data.mutable_router_rules();
+    rules->set_version(service_worker_internals::kRouterRuleVersion);
+    for (const auto& r : registration.router_rules->rules) {
+      ServiceWorkerRegistrationData::RouterRules::RuleV1* v1 = rules->add_v1();
+      WriteConditionToProto(r.condition, v1);
+      for (const auto& s : r.sources) {
+        ServiceWorkerRegistrationData::RouterRules::RuleV1::Source* source =
+            v1->add_source();
+        switch (s.type) {
+          case RouterSourceType::kNetwork:
+            source->mutable_network_source();
+            break;
+          case RouterSourceType::kRaceNetworkAndFetchEvent:
+            source->mutable_race_network_and_fetch_event_source();
+            break;
+          case RouterSourceType::kFetchEvent:
+            source->mutable_fetch_event_source();
+            break;
+          case RouterSourceType::kCache: {
+            auto* cache_source = source->mutable_cache_source();
+            if (s.cache_source->cache_name) {
+              cache_source->set_cache_name(*s.cache_source->cache_name);
+            }
+            break;
+          }
+          case RouterSourceType::kRaceNetworkAndCache: {
+            auto* race_network_and_cache_source =
+                source->mutable_race_network_and_cache_source();
+            auto* cache_source =
+                race_network_and_cache_source->mutable_cache_source();
+            if (s.race_network_and_cache_source->cache_source.cache_name) {
+              cache_source->set_cache_name(
+                  *s.race_network_and_cache_source->cache_source.cache_name);
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  data.set_has_hid_event_handlers(registration.has_hid_event_handlers);
+  data.set_has_usb_event_handlers(registration.has_usb_event_handlers);
 
   std::string value;
   bool success = data.SerializeToString(&value);
@@ -2213,7 +3249,7 @@ ServiceWorkerDatabase::Status ServiceWorkerDatabase::ParseResourceRecord(
   *out = mojom::ServiceWorkerResourceRecord::New();
   (*out)->resource_id = record.resource_id();
   (*out)->url = url;
-  (*out)->size_bytes = record.size_bytes();
+  (*out)->size = base::ByteSize(record.size_bytes());
   if (record.has_sha256_checksum()) {
     (*out)->sha256_checksum = record.sha256_checksum();
   }
@@ -2225,7 +3261,6 @@ void ServiceWorkerDatabase::WriteResourceRecordInBatch(
     int64_t version_id,
     leveldb::WriteBatch* batch) {
   DCHECK(batch);
-  DCHECK_GE(resource.size_bytes, 0);
 
   // The next available resource id should be bumped when a resource is recorded
   // in the uncommitted list and this should be nop. However, we attempt it here
@@ -2240,7 +3275,8 @@ void ServiceWorkerDatabase::WriteResourceRecordInBatch(
   ServiceWorkerResourceRecord data;
   data.set_resource_id(resource.resource_id);
   data.set_url(resource.url.spec());
-  data.set_size_bytes(resource.size_bytes);
+  // TODO(https://crbug.com/474382520): This code assumes no error; verify this.
+  data.set_size_bytes(resource.size.value().InBytes());
   if (resource.sha256_checksum) {
     data.set_sha256_checksum(*resource.sha256_checksum);
   }

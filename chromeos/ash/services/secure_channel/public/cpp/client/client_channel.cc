@@ -5,12 +5,9 @@
 #include "chromeos/ash/services/secure_channel/public/cpp/client/client_channel.h"
 
 #include "base/functional/callback.h"
-#include "base/guid.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel_types.mojom.h"
 
 namespace ash::secure_channel {
-
-ClientChannel::Observer::~Observer() = default;
 
 ClientChannel::ClientChannel() = default;
 
@@ -73,6 +70,14 @@ void ClientChannel::NotifyMessageReceived(const std::string& payload) {
 
   for (auto& observer : observer_list_)
     observer.OnMessageReceived(payload_copy);
+}
+
+void ClientChannel::NotifyNearbyConnectionStateChanged(
+    mojom::NearbyConnectionStep step,
+    mojom::NearbyConnectionStepResult result) {
+  for (auto& observer : observer_list_) {
+    observer.OnNearbyConnectionStateChanged(step, result);
+  }
 }
 
 }  // namespace ash::secure_channel

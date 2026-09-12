@@ -4,20 +4,20 @@
 
 import './diagnostics_shared.css.js';
 
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
-import {TroubleshootingInfo} from './diagnostics_types.js';
+import type {TroubleshootingInfo} from './diagnostics_types.js';
 import {getTemplate} from './network_troubleshooting.html.js';
 
 const NetworkTroubleshootingElementBase = I18nMixin(PolymerElement);
 
 export class NetworkTroubleshootingElement extends
     NetworkTroubleshootingElementBase {
-  static get is(): string {
-    return 'network-troubleshooting';
+  static get is(): 'network-troubleshooting' {
+    return 'network-troubleshooting' as const;
   }
 
   static get template(): HTMLTemplateElement {
@@ -26,10 +26,7 @@ export class NetworkTroubleshootingElement extends
 
   static get properties(): PolymerElementProperties {
     return {
-      isLoggedIn: {
-        type: Boolean,
-        value: loadTimeData.getBoolean('isLoggedIn'),
-      },
+      isLoggedIn: {type: Boolean},
 
       troubleshootingInfo: {
         type: Object,
@@ -37,8 +34,13 @@ export class NetworkTroubleshootingElement extends
     };
   }
 
-  troubleshootingInfo: TroubleshootingInfo;
-  protected isLoggedIn: boolean;
+  constructor() {
+    super();
+    this.isLoggedIn = loadTimeData.getBoolean('isLoggedIn');
+  }
+
+  declare troubleshootingInfo: TroubleshootingInfo;
+  declare protected isLoggedIn: boolean;
 
   protected onLinkTextClicked(): void {
     window.open(this.troubleshootingInfo.url);
@@ -47,7 +49,7 @@ export class NetworkTroubleshootingElement extends
 
 declare global {
   interface HTMLElementTagNameMap {
-    'network-troubleshooting': NetworkTroubleshootingElement;
+    [NetworkTroubleshootingElement.is]: NetworkTroubleshootingElement;
   }
 }
 

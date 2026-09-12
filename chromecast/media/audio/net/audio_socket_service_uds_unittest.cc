@@ -27,7 +27,6 @@ namespace chromecast {
 namespace media {
 
 using ::testing::_;
-using ::testing::Invoke;
 
 namespace {
 
@@ -45,7 +44,7 @@ class MockAudioSocketServiceDelegate : public AudioSocketService::Delegate {
 
   MOCK_METHOD(void,
               HandleAcceptedSocket,
-              (std::unique_ptr<net::StreamSocket>),
+              (std::unique_ptr<net::StreamSocket>, const std::string&),
               (override));
 };
 
@@ -99,8 +98,8 @@ class AudioSocketServiceTest : public testing::TestWithParam<bool> {
       base::CreateSocketPair(&fd1, &fd2);
       connected_socket_ = AdoptUnnamedSocketHandle(std::move(fd1));
       base::UnixDomainSocket::SendMsg(
-          connecting_socket_->ReleaseConnectedSocket(), kSocketMsg,
-          sizeof(kSocketMsg), {fd2.get()});
+          connecting_socket_->ReleaseConnectedSocket(),
+          base::as_byte_span(std::string_view(kSocketMsg)), {fd2.get()});
     }
     run_loop_.Run();
   }
@@ -129,12 +128,13 @@ TEST_P(AudioSocketServiceTest, UseSocketDescriptor) {
   InitializeAudioSocketService();
   io_thread_->FlushForTesting();
 
-  EXPECT_CALL(*delegate_, HandleAcceptedSocket(_))
-      .WillOnce(Invoke([this](std::unique_ptr<net::StreamSocket> socket) {
+  EXPECT_CALL(*delegate_, HandleAcceptedSocket(_, _))
+      .WillOnce([this](std::unique_ptr<net::StreamSocket> socket,
+                       const std::string& session_id) {
         EXPECT_TRUE(socket);
         EXPECT_TRUE(socket->IsConnected());
         run_loop_.Quit();
-      }));
+      });
 
   ConnectToAudioSocketService();
 }

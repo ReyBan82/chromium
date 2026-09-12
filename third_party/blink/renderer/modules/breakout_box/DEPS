@@ -1,7 +1,4 @@
 include_rules = [
-    "+base/task/bind_post_task.h",
-    # Required to initialize WebGraphicsContext3DVideoFramePool.
-    "+gpu/command_buffer/client/gpu_memory_buffer_manager.h",
     "+media/base",
     "+media/capture/video",
     "-third_party/blink/renderer/modules",
@@ -12,7 +9,7 @@ include_rules = [
 ]
 
 specific_include_rules = {
-    ".*test\.cc" : [
+    ".*test\\.cc" : [
         "+base/run_loop.h",
     ],
 }

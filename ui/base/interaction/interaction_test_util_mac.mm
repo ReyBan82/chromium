@@ -4,10 +4,11 @@
 
 #include "ui/base/interaction/interaction_test_util_mac.h"
 
-#include "base/mac/foundation_util.h"
-#include "ui/base/cocoa/menu_controller.h"
+#include "base/apple/foundation_util.h"
 #include "ui/base/interaction/element_tracker_mac.h"
 #include "ui/base/models/menu_model.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/menus/cocoa/menu_controller.h"
 
 namespace ui::test {
 
@@ -33,12 +34,12 @@ ActionResult InteractionTestUtilSimulatorMac::SelectMenuItem(
   }
 
   MenuControllerCocoa* controller =
-      base::mac::ObjCCastStrict<MenuControllerCocoa>([menu delegate]);
+      base::apple::ObjCCastStrict<MenuControllerCocoa>([menu delegate]);
   if (!controller) {
     LOG(ERROR) << "Cannot retrieve MenuControllerCocoa from menu.";
     return ActionResult::kFailed;
   }
-  ui::MenuModel* const model = [controller model];
+  ui::MenuModel* const model = controller.model;
   if (!model) {
     LOG(ERROR) << "Cannot retrieve MenuModel from controller.";
     return ActionResult::kFailed;
@@ -46,10 +47,9 @@ ActionResult InteractionTestUtilSimulatorMac::SelectMenuItem(
 
   for (size_t i = 0; i < model->GetItemCount(); ++i) {
     if (model->GetElementIdentifierAt(i) == element->identifier()) {
-      NSMenuItem* item = [menu itemWithTag:i];
-      if (item) {
-        DCHECK([item action]);
-        [controller performSelector:[item action] withObject:item];
+      NSInteger item_index = [menu indexOfItemWithTag:i];
+      if (item_index != -1) {
+        [menu performActionForItemAtIndex:item_index];
         [controller cancel];
         return ActionResult::kSucceeded;
       }
@@ -59,6 +59,14 @@ ActionResult InteractionTestUtilSimulatorMac::SelectMenuItem(
   LOG(ERROR) << "Item with id " << element->identifier()
              << " not found in menu.";
   return ActionResult::kFailed;
+}
+
+// static
+gfx::NativeWindow InteractionTestUtilMac::GetNativeWindowFor(
+    const ui::TrackedElement* el) {
+  auto view = el->GetNativeView();
+  return view ? gfx::NativeWindow([view.GetNativeNSView() window])
+              : gfx::NativeWindow();
 }
 
 }  // namespace ui::test

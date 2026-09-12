@@ -10,7 +10,7 @@
 #include "base/types/pass_key.h"
 #include "chrome/browser/ui/tabs/existing_window_sub_menu_model.h"
 
-class Browser;
+class BrowserWindowInterface;
 class TabStripModel;
 class TabMenuModelDelegate;
 
@@ -34,11 +34,12 @@ class ExistingWindowSubMenuModelChromeOS : public ExistingWindowSubMenuModel {
   ~ExistingWindowSubMenuModelChromeOS() override;
 
  private:
-  // Builds the submenu, grouping browsers from |existing_browsers| by desks.
+  // Builds the submenu, grouping browsers from `existing_browsers` by desks.
   // Browsers within desk groupings maintain the originally provided order. I.e.
   // if browsers were provided in MRU order, then within desk groupings browsers
   // will be in MRU order.
-  void BuildMenuGroupedByDesk(const std::vector<Browser*>& existing_browsers);
+  void BuildMenuGroupedByDesk(
+      const std::vector<BrowserWindowInterface*>& existing_browsers);
 };
 
 }  // namespace chromeos

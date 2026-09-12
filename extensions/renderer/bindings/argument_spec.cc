@@ -5,9 +5,9 @@
 #include "extensions/renderer/bindings/argument_spec.h"
 
 #include <cmath>
+#include <string_view>
 
 #include "base/check.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
@@ -61,8 +61,8 @@ const char* GetV8ValueTypeString(v8::Local<v8::Value> value) {
 // |maximum|, populating |error| otherwise.
 template <class T>
 bool CheckFundamentalBounds(T value,
-                            const absl::optional<int>& minimum,
-                            const absl::optional<int>& maximum,
+                            const std::optional<int>& minimum,
+                            const std::optional<int>& maximum,
                             std::string* error) {
   if (minimum && value < *minimum) {
     *error = api_errors::NumberTooSmall(*minimum);
@@ -77,10 +77,7 @@ bool CheckFundamentalBounds(T value,
 
 }  // namespace
 
-ArgumentSpec::ArgumentSpec(const base::Value& value)
-    : ArgumentSpec(value.GetDict()) {}
-
-ArgumentSpec::ArgumentSpec(const base::Value::Dict& dict) {
+ArgumentSpec::ArgumentSpec(const base::DictValue& dict) {
   optional_ = dict.FindBool("optional").value_or(optional_);
   if (const std::string* name = dict.FindString("name"))
     name_ = *name;
@@ -90,19 +87,19 @@ ArgumentSpec::ArgumentSpec(const base::Value::Dict& dict) {
 
 ArgumentSpec::ArgumentSpec(ArgumentType type) : type_(type) {}
 
-void ArgumentSpec::InitializeType(const base::Value::Dict& dict) {
+void ArgumentSpec::InitializeType(const base::DictValue& dict) {
   if (const std::string* ref_string = dict.FindString("$ref")) {
     ref_ = *ref_string;
     type_ = ArgumentType::REF;
     return;
   }
 
-  if (const base::Value::List* choices = dict.FindList("choices")) {
+  if (const base::ListValue* choices = dict.FindList("choices")) {
     DCHECK(!choices->empty());
     type_ = ArgumentType::CHOICES;
     choices_.reserve(choices->size());
     for (const auto& choice : *choices)
-      choices_.push_back(std::make_unique<ArgumentSpec>(choice));
+      choices_.push_back(std::make_unique<ArgumentSpec>(choice.GetDict()));
     return;
   }
 
@@ -129,12 +126,14 @@ void ArgumentSpec::InitializeType(const base::Value::Dict& dict) {
   else
     NOTREACHED();
 
-  if (absl::optional<int> minimum = dict.FindInt("minimum"))
+  if (std::optional<int> minimum = dict.FindInt("minimum")) {
     minimum_ = *minimum;
-  if (absl::optional<int> maximum = dict.FindInt("maximum"))
+  }
+  if (std::optional<int> maximum = dict.FindInt("maximum")) {
     maximum_ = *maximum;
+  }
 
-  absl::optional<int> min_length = dict.FindInt("minLength");
+  std::optional<int> min_length = dict.FindInt("minLength");
   if (!min_length)
     min_length = dict.FindInt("minItems");
   if (min_length) {
@@ -142,7 +141,7 @@ void ArgumentSpec::InitializeType(const base::Value::Dict& dict) {
     min_length_ = *min_length;
   }
 
-  absl::optional<int> max_length = dict.FindInt("maxLength");
+  std::optional<int> max_length = dict.FindInt("maxLength");
   if (!max_length)
     max_length = dict.FindInt("maxItems");
   if (max_length) {
@@ -151,29 +150,33 @@ void ArgumentSpec::InitializeType(const base::Value::Dict& dict) {
   }
 
   if (type_ == ArgumentType::OBJECT) {
-    if (const base::Value::Dict* properties_value =
-            dict.FindDict("properties")) {
+    if (const base::DictValue* properties_value = dict.FindDict("properties")) {
       for (const auto item : *properties_value) {
-        properties_[item.first] = std::make_unique<ArgumentSpec>(item.second);
+        properties_[item.first] =
+            std::make_unique<ArgumentSpec>(item.second.GetDict());
       }
     }
 
-    if (const base::Value::Dict* additional_properties_value =
+    if (const base::DictValue* additional_properties_value =
             dict.FindDict("additionalProperties")) {
       additional_properties_ =
           std::make_unique<ArgumentSpec>(*additional_properties_value);
       // Additional properties are always optional.
       additional_properties_->optional_ = true;
     }
+
+    if (dict.FindBool("ignoreAdditionalProperties").value_or(false)) {
+      ignore_additional_properties_ = true;
+    }
   } else if (type_ == ArgumentType::LIST) {
-    const base::Value::Dict* item_value = dict.FindDict("items");
+    const base::DictValue* item_value = dict.FindDict("items");
     CHECK(item_value);
     list_element_type_ = std::make_unique<ArgumentSpec>(*item_value);
   } else if (type_ == ArgumentType::STRING) {
     // Technically, there's no reason enums couldn't be other objects (e.g.
     // numbers), but right now they seem to be exclusively strings. We could
     // always update this if need be.
-    if (const base::Value::List* enums = dict.FindList("enum")) {
+    if (const base::ListValue* enums = dict.FindList("enum")) {
       CHECK(!enums->empty());
       for (const base::Value& value : *enums) {
         // Enum entries come in two versions: a list of possible strings, or
@@ -320,7 +323,6 @@ bool ArgumentSpec::ParseArgument(v8::Local<v8::Context> context,
   }
 
   NOTREACHED();
-  return false;
 }
 
 const std::string& ArgumentSpec::GetTypeName() const {
@@ -356,7 +358,7 @@ const std::string& ArgumentSpec::GetTypeName() const {
       type_name_ = ref_->c_str();
       break;
     case ArgumentType::CHOICES: {
-      std::vector<base::StringPiece> choices_strings;
+      std::vector<std::string_view> choices_strings;
       choices_strings.reserve(choices_.size());
       for (const auto& choice : choices_)
         choices_strings.push_back(choice->GetTypeName());
@@ -394,7 +396,7 @@ bool ArgumentSpec::ParseArgumentToFundamental(
       if (out_value)
         *out_value = std::make_unique<base::Value>(int_val);
       if (v8_out_value)
-        *v8_out_value = v8::Integer::New(context->GetIsolate(), int_val);
+        *v8_out_value = v8::Integer::New(v8::Isolate::GetCurrent(), int_val);
       return true;
     }
     case ArgumentType::DOUBLE: {
@@ -430,8 +432,8 @@ bool ArgumentSpec::ParseArgumentToFundamental(
       if (!enum_values_.empty() || out_value) {
         std::string str;
         // We already checked that this is a string, so this should never fail.
-        CHECK(gin::Converter<std::string>::FromV8(context->GetIsolate(), value,
-                                                  &str));
+        CHECK(gin::Converter<std::string>::FromV8(v8::Isolate::GetCurrent(),
+                                                  value, &str));
         if (!enum_values_.empty() && enum_values_.count(str) == 0) {
           *error = api_errors::InvalidEnumValue(enum_values_);
           return false;
@@ -460,7 +462,6 @@ bool ArgumentSpec::ParseArgumentToFundamental(
     default:
       NOTREACHED();
   }
-  return false;
 }
 
 bool ArgumentSpec::ParseArgumentToObject(
@@ -471,7 +472,7 @@ bool ArgumentSpec::ParseArgumentToObject(
     v8::Local<v8::Value>* v8_out_value,
     std::string* error) const {
   DCHECK_EQ(ArgumentType::OBJECT, type_);
-  base::Value::Dict result;
+  base::DictValue result;
 
   // We don't convert to a new object in two cases:
   // - If instanceof is specified, we don't want to create a new data object,
@@ -488,7 +489,8 @@ bool ArgumentSpec::ParseArgumentToObject(
   // and allow us to handle the other additional_properties_ cases. But first,
   // we need to track down all the instances that use it.
   bool convert_to_v8 = v8_out_value && !additional_properties_ && !instance_of_;
-  gin::DataObjectBuilder v8_result(context->GetIsolate());
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  gin::DataObjectBuilder v8_result(isolate);
 
   v8::Local<v8::Array> own_property_names;
   if (!object->GetOwnPropertyNames(context).ToLocal(&own_property_names)) {
@@ -511,7 +513,7 @@ bool ArgumentSpec::ParseArgumentToObject(
     // excluded by GetOwnPropertyNames()). If you try to set anything else
     // (e.g. an object), it is converted to a string.
     DCHECK(key->IsString() || key->IsNumber());
-    v8::String::Utf8Value utf8_key(context->GetIsolate(), key);
+    v8::String::Utf8Value utf8_key(isolate, key);
 
     ArgumentSpec* property_spec = nullptr;
     auto iter = properties_.find(*utf8_key);
@@ -526,6 +528,9 @@ bool ArgumentSpec::ParseArgumentToObject(
       // functions, or even NaN. If the additional properties are of
       // ArgumentType::ANY, allow anything, even if it doesn't serialize.
       allow_unserializable = property_spec->type_ == ArgumentType::ANY;
+    } else if (ignore_additional_properties_) {
+      // If we're ignoring additional properties, we just skip to the next one.
+      continue;
     } else {
       *error = api_errors::UnexpectedProperty(*utf8_key);
       return false;
@@ -607,10 +612,9 @@ bool ArgumentSpec::ParseArgumentToObject(
     v8::Local<v8::Value> next_check = object;
     do {
       v8::Local<v8::Object> current = next_check.As<v8::Object>();
-      v8::String::Utf8Value constructor(context->GetIsolate(),
-                                        current->GetConstructorName());
+      v8::String::Utf8Value constructor(isolate, current->GetConstructorName());
       if (*instance_of_ ==
-          base::StringPiece(*constructor, constructor.length())) {
+          std::string_view(*constructor, constructor.length())) {
         found = true;
         break;
       }
@@ -631,8 +635,7 @@ bool ArgumentSpec::ParseArgumentToObject(
       v8::Local<v8::Object> converted = v8_result.Build();
       // We set the object's prototype to Null() so that handlers avoid
       // triggering any tricky getters or setters on Object.prototype.
-      CHECK(converted->SetPrototype(context, v8::Null(context->GetIsolate()))
-                .ToChecked());
+      CHECK(converted->SetPrototype(context, v8::Null(isolate)).ToChecked());
       *v8_out_value = converted;
     } else {
       *v8_out_value = object;
@@ -661,10 +664,10 @@ bool ArgumentSpec::ParseArgumentToArray(v8::Local<v8::Context> context,
     return false;
   }
 
-  base::Value::List result;
+  base::ListValue result;
   v8::Local<v8::Array> v8_result;
   if (v8_out_value)
-    v8_result = v8::Array::New(context->GetIsolate(), length);
+    v8_result = v8::Array::New(v8::Isolate::GetCurrent(), length);
 
   std::string item_error;
   for (uint32_t i = 0; i < length; ++i) {
@@ -754,7 +757,7 @@ bool ArgumentSpec::ParseArgumentToFunction(
       }
       std::string str;
       // If ToLocal() succeeds, this should always be a string.
-      CHECK(gin::Converter<std::string>::FromV8(context->GetIsolate(),
+      CHECK(gin::Converter<std::string>::FromV8(v8::Isolate::GetCurrent(),
                                                 serialized_function, &str));
       *out_value = std::make_unique<base::Value>(std::move(str));
     } else {  // Not a serializable function.

@@ -4,21 +4,22 @@
 
 package org.chromium.chrome.browser.feedback;
 
-import android.support.test.InstrumentationRegistry;
+import androidx.test.core.app.ApplicationProvider;
 
+import org.junit.rules.TestRule;
 import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
 
-import org.chromium.chrome.test.ChromeBrowserTestRule;
+import org.chromium.content_public.browser.test.NativeLibraryTestUtils;
 import org.chromium.net.test.EmbeddedTestServer;
 
 /**
  * Base class for tests related to checking connectivity.
  *
- * It includes a {@link ConnectivityTestServer} which is set up and torn down automatically
- * for tests.
+ * <p>It includes a {@link ConnectivityTestServer} which is set up and torn down automatically for
+ * tests.
  */
-public class ConnectivityCheckerTestRule extends ChromeBrowserTestRule {
+public class ConnectivityCheckerTestRule implements TestRule {
     public static final int TIMEOUT_MS = 5000;
 
     private EmbeddedTestServer mTestServer;
@@ -29,46 +30,45 @@ public class ConnectivityCheckerTestRule extends ChromeBrowserTestRule {
     private String mGeneratedSlowUrl;
 
     @Override
-    public Statement apply(final Statement base, Description description) {
-        return super.apply(new Statement() {
+    public Statement apply(Statement base, Description description) {
+        return new Statement() {
             @Override
             public void evaluate() throws Throwable {
                 setUp();
-                try {
-                    base.evaluate();
-                } finally {
-                    tearDown();
-                }
+                base.evaluate();
             }
-        }, description);
+        };
     }
 
     public String getGenerated200Url() {
         return mGenerated200Url;
     }
+
     public String getGenerated204Url() {
         return mGenerated204Url;
     }
+
     public String getGenerated302Url() {
         return mGenerated302Url;
     }
+
     public String getGenerated404Url() {
         return mGenerated404Url;
     }
+
     public String getGeneratedSlowUrl() {
         return mGeneratedSlowUrl;
     }
 
     private void setUp() {
-        mTestServer = EmbeddedTestServer.createAndStartServer(InstrumentationRegistry.getContext());
+        NativeLibraryTestUtils.loadNativeLibraryAndInitBrowserProcess();
+        mTestServer =
+                EmbeddedTestServer.createAndStartServer(
+                        ApplicationProvider.getApplicationContext());
         mGenerated200Url = mTestServer.getURL("/echo?status=200");
         mGenerated204Url = mTestServer.getURL("/echo?status=204");
         mGenerated302Url = mTestServer.getURL("/echo?status=302");
         mGenerated404Url = mTestServer.getURL("/echo?status=404");
         mGeneratedSlowUrl = mTestServer.getURL("/slow?5");
-    }
-
-    private void tearDown() {
-        mTestServer.stopAndDestroyServer();
     }
 }

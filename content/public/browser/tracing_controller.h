@@ -15,7 +15,6 @@
 #include "base/memory/ref_counted.h"
 #include "base/task/task_traits.h"
 #include "content/common/content_export.h"
-#include "content/public/browser/tracing_delegate.h"
 
 namespace base {
 namespace trace_event {
@@ -77,6 +76,13 @@ class TracingController {
       GetCategoriesDoneCallback;
   virtual bool GetCategories(GetCategoriesDoneCallback callback) = 0;
 
+  // Return a descriptor for all available tracing categories as serialized
+  // perfetto.protos.TrackEventDescriptor.
+  typedef base::OnceCallback<void(std::vector<uint8_t>)>
+      GetTrackEventDescriptorDoneCallback;
+  virtual bool GetTrackEventDescriptor(
+      GetTrackEventDescriptorDoneCallback callback) = 0;
+
   // Start tracing (recording traces) on all processes.
   //
   // Tracing begins immediately locally, and asynchronously on child processes
@@ -96,8 +102,12 @@ class TracingController {
   //
   // |trace_config| controls what kind of tracing is enabled.
   typedef base::OnceCallback<void()> StartTracingDoneCallback;
-  virtual bool StartTracing(const base::trace_event::TraceConfig& trace_config,
-                            StartTracingDoneCallback callback) = 0;
+  bool StartTracing(const base::trace_event::TraceConfig& trace_config,
+                    StartTracingDoneCallback callback,
+                    bool privacy_filtering_enabled = false) {
+    return StartTracingImpl(trace_config, std::move(callback),
+                            privacy_filtering_enabled);
+  }
 
   // Stop tracing (recording traces) on all processes.
   //
@@ -119,8 +129,7 @@ class TracingController {
       const scoped_refptr<TraceDataEndpoint>& trace_data_endpoint) = 0;
   virtual bool StopTracing(
       const scoped_refptr<TraceDataEndpoint>& trace_data_endpoint,
-      const std::string& agent_label,
-      bool privacy_filtering_enabled = false) = 0;
+      const std::string& agent_label) = 0;
 
   // Get the maximum across processes of trace buffer percent full state.
   // When the TraceBufferUsage value is determined, the callback is
@@ -133,6 +142,11 @@ class TracingController {
 
  protected:
   virtual ~TracingController() {}
+
+  virtual bool StartTracingImpl(
+      const base::trace_event::TraceConfig& trace_config,
+      StartTracingDoneCallback callback,
+      bool privacy_filtering_enabled) = 0;
 };
 
 }  // namespace content

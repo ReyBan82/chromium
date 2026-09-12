@@ -9,6 +9,7 @@
 #include "base/functional/bind.h"
 #include "chromeos/ash/components/drivefs/mojom/drivefs.mojom.h"
 #include "chromeos/components/mojo_bootstrap/pending_connection_manager.h"
+#include "mojo/core/configuration.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/platform/platform_channel_endpoint.h"
@@ -20,15 +21,16 @@ DriveFsBootstrapListener::DriveFsBootstrapListener()
     : bootstrap_(invitation_.AttachMessagePipe("drivefs-bootstrap"),
                  mojom::DriveFsBootstrap::Version_),
       pending_token_(base::UnguessableToken::Create()) {
-  mojo_bootstrap::PendingConnectionManager::Get().ExpectOpenIpcChannel(
-      pending_token_,
-      base::BindOnce(&DriveFsBootstrapListener::AcceptMojoConnection,
-                     base::Unretained(this)));
+  mojo_bootstrap::PendingConnectionManager::GetForDriveFs()
+      .ExpectOpenIpcChannel(
+          pending_token_,
+          base::BindOnce(&DriveFsBootstrapListener::AcceptMojoConnection,
+                         base::Unretained(this)));
 }
 
 DriveFsBootstrapListener::~DriveFsBootstrapListener() {
   if (pending_token_) {
-    mojo_bootstrap::PendingConnectionManager::Get()
+    mojo_bootstrap::PendingConnectionManager::GetForDriveFs()
         .CancelExpectedOpenIpcChannel(pending_token_);
     pending_token_ = {};
   }
@@ -47,6 +49,9 @@ void DriveFsBootstrapListener::AcceptMojoConnection(base::ScopedFD handle) {
 }
 
 void DriveFsBootstrapListener::SendInvitationOverPipe(base::ScopedFD handle) {
+  if (!mojo::core::GetConfiguration().is_broker_process) {
+    invitation_.set_extra_flags(MOJO_SEND_INVITATION_FLAG_SHARE_BROKER);
+  }
   mojo::OutgoingInvitation::Send(
       std::move(invitation_), base::kNullProcessHandle,
       mojo::PlatformChannelEndpoint(mojo::PlatformHandle(std::move(handle))));

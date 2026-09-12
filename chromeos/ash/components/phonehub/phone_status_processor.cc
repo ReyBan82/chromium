@@ -12,6 +12,7 @@
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "base/containers/flat_set.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/components/phonehub/app_stream_manager.h"
@@ -23,6 +24,8 @@
 #include "chromeos/ash/components/phonehub/multidevice_feature_access_manager.h"
 #include "chromeos/ash/components/phonehub/mutable_phone_model.h"
 #include "chromeos/ash/components/phonehub/notification_processor.h"
+#include "chromeos/ash/components/phonehub/phone_hub_structured_metrics_logger.h"
+#include "chromeos/ash/components/phonehub/phone_hub_ui_readiness_recorder.h"
 #include "chromeos/ash/components/phonehub/proto/phonehub_api.pb.h"
 #include "chromeos/ash/components/phonehub/recent_apps_interaction_handler.h"
 #include "chromeos/ash/components/phonehub/screen_lock_manager_impl.h"
@@ -33,8 +36,7 @@
 #include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/paint_vector_icon.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 namespace {
 
@@ -170,6 +172,7 @@ FindMyDeviceController::Status ComputeFindMyDeviceStatus(
 }
 
 PhoneStatusModel CreatePhoneStatusModel(const proto::PhoneProperties& proto) {
+  PA_LOG(INFO) << "Creating PhoneStatusModel from PhoneProperties message.";
   return PhoneStatusModel(
       GetMobileStatusFromProto(proto.connection_state()),
       PhoneStatusModel::MobileConnectionMetadata{
@@ -221,31 +224,35 @@ PhoneStatusProcessor::PhoneStatusProcessor(
     FindMyDeviceController* find_my_device_controller,
     MultideviceFeatureAccessManager* multidevice_feature_access_manager,
     ScreenLockManager* screen_lock_manager,
-    NotificationProcessor* notification_processor_,
+    NotificationProcessor* notification_processor,
     MultiDeviceSetupClient* multidevice_setup_client,
     MutablePhoneModel* phone_model,
     RecentAppsInteractionHandler* recent_apps_interaction_handler,
     PrefService* pref_service,
     AppStreamManager* app_stream_manager,
     AppStreamLauncherDataModel* app_stream_launcher_data_model,
-    IconDecoder* icon_decoder)
+    IconDecoder* icon_decoder,
+    PhoneHubUiReadinessRecorder* phone_hub_ui_readiness_recorder,
+    PhoneHubStructuredMetricsLogger* phone_hub_structured_metrics_logger)
     : do_not_disturb_controller_(do_not_disturb_controller),
       feature_status_provider_(feature_status_provider),
-      message_receiver_(message_receiver),
       find_my_device_controller_(find_my_device_controller),
       multidevice_feature_access_manager_(multidevice_feature_access_manager),
       screen_lock_manager_(screen_lock_manager),
-      notification_processor_(notification_processor_),
+      notification_processor_(notification_processor),
       multidevice_setup_client_(multidevice_setup_client),
       phone_model_(phone_model),
       recent_apps_interaction_handler_(recent_apps_interaction_handler),
       pref_service_(pref_service),
       app_stream_manager_(app_stream_manager),
       app_stream_launcher_data_model_(app_stream_launcher_data_model),
-      icon_decoder_(icon_decoder) {
+      icon_decoder_(icon_decoder),
+      phone_hub_ui_readiness_recorder_(phone_hub_ui_readiness_recorder),
+      phone_hub_structured_metrics_logger_(
+          phone_hub_structured_metrics_logger) {
   DCHECK(do_not_disturb_controller_);
   DCHECK(feature_status_provider_);
-  DCHECK(message_receiver_);
+  DCHECK(message_receiver);
   DCHECK(find_my_device_controller_);
   DCHECK(multidevice_feature_access_manager_);
   DCHECK(notification_processor_);
@@ -254,19 +261,17 @@ PhoneStatusProcessor::PhoneStatusProcessor(
   DCHECK(pref_service_);
   DCHECK(app_stream_manager_);
   DCHECK(icon_decoder_);
+  DCHECK(phone_hub_ui_readiness_recorder_);
+  DCHECK(phone_hub_structured_metrics_logger_);
 
-  message_receiver_->AddObserver(this);
-  feature_status_provider_->AddObserver(this);
-  multidevice_setup_client_->AddObserver(this);
+  message_receiver_observation_.Observe(message_receiver);
+  feature_status_provider_observation_.Observe(feature_status_provider_);
+  multidevice_setup_client_observation_.Observe(multidevice_setup_client_);
 
   MaybeSetPhoneModelName(multidevice_setup_client_->GetHostStatus().second);
 }
 
-PhoneStatusProcessor::~PhoneStatusProcessor() {
-  message_receiver_->RemoveObserver(this);
-  feature_status_provider_->RemoveObserver(this);
-  multidevice_setup_client_->RemoveObserver(this);
-}
+PhoneStatusProcessor::~PhoneStatusProcessor() = default;
 
 void PhoneStatusProcessor::ProcessReceivedNotifications(
     const RepeatedPtrField<proto::Notification>& notification_protos) {
@@ -299,6 +304,8 @@ void PhoneStatusProcessor::ProcessReceivedNotifications(
 
 void PhoneStatusProcessor::SetReceivedPhoneStatusModelStates(
     const proto::PhoneProperties& phone_properties) {
+  phone_hub_structured_metrics_logger_->ProcessPhoneInformation(
+      phone_properties);
   phone_model_->SetPhoneStatusModel(CreatePhoneStatusModel(phone_properties));
 
   do_not_disturb_controller_->SetDoNotDisturbStateInternal(
@@ -310,10 +317,8 @@ void PhoneStatusProcessor::SetReceivedPhoneStatusModelStates(
       ComputeNotificationAccessState(phone_properties),
       ComputeNotificationAccessProhibitedReason(phone_properties));
 
-  if (features::IsPhoneHubCameraRollEnabled()) {
-    multidevice_feature_access_manager_->SetCameraRollAccessStatusInternal(
-        ComputeCameraRollAccessState(phone_properties));
-  }
+  multidevice_feature_access_manager_->SetCameraRollAccessStatusInternal(
+      ComputeCameraRollAccessState(phone_properties));
 
   if (screen_lock_manager_) {
     screen_lock_manager_->SetLockStatusInternal(
@@ -337,9 +342,9 @@ void PhoneStatusProcessor::SetReceivedPhoneStatusModelStates(
 }
 
 void PhoneStatusProcessor::MaybeSetPhoneModelName(
-    const absl::optional<multidevice::RemoteDeviceRef>& remote_device) {
+    const std::optional<multidevice::RemoteDeviceRef>& remote_device) {
   if (!remote_device.has_value()) {
-    phone_model_->SetPhoneName(absl::nullopt);
+    phone_model_->SetPhoneName(std::nullopt);
     return;
   }
 
@@ -368,8 +373,6 @@ void PhoneStatusProcessor::SetEcheFeatureStatusReceivedFromPhoneHub(
         ash::multidevice_setup::EcheSupportReceivedFromPhoneHub::kNotSpecified;
   } else {
     NOTREACHED();
-    eche_support_received_from_phone_hub =
-        ash::multidevice_setup::EcheSupportReceivedFromPhoneHub::kNotSpecified;
   }
 
   pref_service_->SetInteger(
@@ -382,7 +385,7 @@ void PhoneStatusProcessor::OnFeatureStatusChanged() {
   // Reset phone model instance when but still keep the phone's name.
   if (feature_status_provider_->GetStatus() !=
       FeatureStatus::kEnabledAndConnected) {
-    phone_model_->SetPhoneStatusModel(absl::nullopt);
+    phone_model_->SetPhoneStatusModel(std::nullopt);
     notification_processor_->ClearNotificationsAndPendingUpdates();
   }
 }
@@ -394,8 +397,9 @@ void PhoneStatusProcessor::OnPhoneStatusSnapshotReceived(
                << " and GmsCore version "
                << phone_status_snapshot.properties().gmscore_version();
 
-  if (features::IsEcheLauncherEnabled() && features::IsEcheSWAEnabled() &&
-      !has_received_first_app_list_update_ &&
+  phone_hub_ui_readiness_recorder_->RecordPhoneStatusSnapShotReceived();
+
+  if (features::IsEcheSWAEnabled() && !has_received_first_app_list_update_ &&
       connection_initialized_timestamp_ == base::TimeTicks()) {
     connection_initialized_timestamp_ = base::TimeTicks::Now();
   }
@@ -416,10 +420,8 @@ void PhoneStatusProcessor::OnPhoneStatusUpdateReceived(
   SetReceivedPhoneStatusModelStates(phone_status_update.properties());
 
   if (!phone_status_update.removed_notification_ids().empty()) {
-    base::flat_set<int64_t> removed_notification_ids;
-    for (auto& id : phone_status_update.removed_notification_ids()) {
-      removed_notification_ids.emplace(id);
-    }
+    base::flat_set<int64_t> removed_notification_ids(
+        std::from_range, phone_status_update.removed_notification_ids());
 
     notification_processor_->RemoveNotifications(removed_notification_ids);
   }
@@ -446,7 +448,7 @@ void PhoneStatusProcessor::OnAppListUpdateReceived(
   if (!features::IsEcheSWAEnabled()) {
     return;
   }
-  if (app_list_update.has_all_apps() && features::IsEcheLauncherEnabled()) {
+  if (app_list_update.has_all_apps()) {
     GenerateAppListWithIcons(app_list_update.all_apps(),
                              AppListUpdateType::kOnlyLauncherApps);
   }
@@ -458,10 +460,6 @@ void PhoneStatusProcessor::OnAppListUpdateReceived(
 
 void PhoneStatusProcessor::OnAppListIncrementalUpdateReceived(
     const proto::AppListIncrementalUpdate app_incremental_update) {
-  if (!features::IsEcheLauncherEnabled()) {
-    return;
-  }
-
   if (app_incremental_update.has_removed_apps()) {
     for (const auto& app : app_incremental_update.removed_apps().apps()) {
       if (app_stream_launcher_data_model_) {
@@ -498,9 +496,12 @@ void PhoneStatusProcessor::GenerateAppListWithIcons(
     // TODO(nayebi): AppMetadata is no longer limited to Notification class,
     // let's move it outside of the Notification class.s2
     apps_list.emplace_back(Notification::AppMetadata(
-        base::UTF8ToUTF16(app.visible_name()), app.package_name(), image,
-        /* icon_color = */ absl::nullopt, /* icon_is_monochrome = */ false,
-        app.user_id(), app.app_streamability_status()));
+        base::UTF8ToUTF16(app.visible_name()), app.package_name(),
+        /* color_icon= */ image,
+        /* monochrome_icon_mask= */ std::nullopt,
+        /* icon_color = */ std::nullopt,
+        /* icon_is_monochrome = */ false, app.user_id(),
+        app.app_streamability_status()));
     std::string key = app.package_name() + base::NumberToString(app.user_id());
     decoding_data_list->emplace_back(
         IconDecoder::DecodingData(str_hash(key), app.icon()));
@@ -526,7 +527,7 @@ void PhoneStatusProcessor::IconsDecoded(
       std::string key = app_metadata.package_name +
                         base::NumberToString(app_metadata.user_id);
       if (decoding_data.id == str_hash(key)) {
-        app_metadata.icon = decoding_data.result;
+        app_metadata.color_icon = decoding_data.result;
         continue;
       }
     }
@@ -536,7 +537,7 @@ void PhoneStatusProcessor::IconsDecoded(
     recent_apps_interaction_handler_->SetStreamableApps(apps_list);
   }
 
-  if (features::IsEcheLauncherEnabled() && app_stream_launcher_data_model_ &&
+  if (app_stream_launcher_data_model_ &&
       ShouldUpdateLauncher(app_list_update_type)) {
     app_stream_launcher_data_model_->SetAppList(apps_list);
   }
@@ -549,13 +550,10 @@ void PhoneStatusProcessor::IconsDecoded(
     has_received_first_app_list_update_ = true;
   }
 
-  if (features::IsEcheLauncherEnabled() &&
-      IsIncrementalAppUpdate(app_list_update_type)) {
-    if (app_stream_launcher_data_model_) {
-      app_stream_launcher_data_model_->AddAppToList(apps_list.at(0));
-    }
+  if (IsIncrementalAppUpdate(app_list_update_type) &&
+      app_stream_launcher_data_model_) {
+    app_stream_launcher_data_model_->AddAppToList(apps_list.at(0));
   }
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

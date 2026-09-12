@@ -7,10 +7,10 @@
 #include <utility>
 #include <vector>
 
-#include "ash/components/arc/mojom/file_system.mojom-forward.h"
-#include "ash/components/arc/session/arc_service_manager.h"
 #include "base/functional/bind.h"
 #include "base/task/bind_post_task.h"
+#include "chromeos/ash/experiences/arc/mojom/file_system.mojom-forward.h"
+#include "chromeos/ash/experiences/arc/session/arc_service_manager.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "url/gurl.h"
@@ -23,7 +23,7 @@ namespace file_system_operation_runner_util {
 
 namespace {
 
-// TODO(crbug.com/745648): Use correct BrowserContext.
+// TODO(crbug.com/206352868): Use correct BrowserContext.
 ArcFileSystemOperationRunner* GetArcFileSystemOperationRunner() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   return ArcFileSystemOperationRunner::GetForBrowserContext(
@@ -123,7 +123,6 @@ void OpenFileSessionToReadOnIOThread(const GURL& url,
                                     std::move(callback))));
 }
 
-// TODO(b/222823695): Consider using a mojo interface to disconnect remote.
 void CloseFileSession(const std::string& url_id, const CloseStatus status) {
   content::GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(&CloseFileSessionOnUIThread, url_id, status));

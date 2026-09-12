@@ -9,7 +9,7 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/media_galleries/media_galleries_dialog_controller_mock.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
 #include "chrome/browser/ui/views/extensions/media_gallery_checkbox_view.h"
@@ -43,20 +43,20 @@ MediaGalleryPrefInfo MakePrefInfo(
 
 class MediaGalleriesInteractiveDialogTest : public DialogBrowserTest {
  public:
-  MediaGalleriesInteractiveDialogTest() {}
+  MediaGalleriesInteractiveDialogTest() = default;
 
   MediaGalleriesInteractiveDialogTest(
       const MediaGalleriesInteractiveDialogTest&) = delete;
   MediaGalleriesInteractiveDialogTest& operator=(
       const MediaGalleriesInteractiveDialogTest&) = delete;
 
-  ~MediaGalleriesInteractiveDialogTest() override {}
+  ~MediaGalleriesInteractiveDialogTest() override = default;
 
   void PreRunTestOnMainThread() override {
     DialogBrowserTest::PreRunTestOnMainThread();
     const GURL about_blank(url::kAboutBlankURL);
     content::WebContents* content =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        browser()->GetTabStripModel()->GetActiveWebContents();
     ASSERT_TRUE(content);
     EXPECT_CALL(controller_, WebContents())
         .WillRepeatedly(testing::Return(content));

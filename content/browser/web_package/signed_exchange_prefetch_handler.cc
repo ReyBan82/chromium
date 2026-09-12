@@ -23,7 +23,7 @@
 namespace content {
 
 SignedExchangePrefetchHandler::SignedExchangePrefetchHandler(
-    int frame_tree_node_id,
+    FrameTreeNodeId frame_tree_node_id,
     const network::ResourceRequest& resource_request,
     network::mojom::URLResponseHeadPtr response_head,
     mojo::ScopedDataPipeConsumerHandle response_body,
@@ -48,7 +48,7 @@ SignedExchangePrefetchHandler::SignedExchangePrefetchHandler(
       network_anonymization_key, frame_tree_node_id);
   auto devtools_proxy = std::make_unique<SignedExchangeDevToolsProxy>(
       resource_request.url, response_head.Clone(), frame_tree_node_id,
-      absl::nullopt /* devtools_navigation_token */,
+      std::nullopt /* devtools_navigation_token */,
       resource_request.devtools_request_id.has_value());
   signed_exchange_loader_ = std::make_unique<SignedExchangeLoader>(
       resource_request, std::move(response_head), std::move(response_body),
@@ -56,8 +56,8 @@ SignedExchangePrefetchHandler::SignedExchangePrefetchHandler(
       network::mojom::kURLLoadOptionNone,
       false /* should_redirect_to_fallback */, std::move(devtools_proxy),
       std::move(reporter), std::move(url_loader_factory),
-      loader_throttles_getter, network_anonymization_key, frame_tree_node_id,
-      accept_langs, keep_entry_for_prefetch_cache);
+      loader_throttles_getter, frame_tree_node_id, accept_langs,
+      keep_entry_for_prefetch_cache);
 }
 
 SignedExchangePrefetchHandler::~SignedExchangePrefetchHandler() = default;
@@ -65,7 +65,7 @@ SignedExchangePrefetchHandler::~SignedExchangePrefetchHandler() = default;
 mojo::PendingReceiver<network::mojom::URLLoaderClient>
 SignedExchangePrefetchHandler::FollowRedirect(
     mojo::PendingReceiver<network::mojom::URLLoader> loader_receiver) {
-  DCHECK(signed_exchange_loader_);
+  CHECK(signed_exchange_loader_, base::NotFatalUntil::M159);
   mojo::PendingRemote<network::mojom::URLLoaderClient> client;
   auto pending_receiver = client.InitWithNewPipeAndPassReceiver();
   signed_exchange_loader_->ConnectToClient(std::move(client));
@@ -76,7 +76,7 @@ SignedExchangePrefetchHandler::FollowRedirect(
 
 std::unique_ptr<PrefetchedSignedExchangeCacheEntry>
 SignedExchangePrefetchHandler::TakePrefetchedSignedExchangeCacheEntry() {
-  DCHECK(signed_exchange_loader_);
+  CHECK(signed_exchange_loader_, base::NotFatalUntil::M159);
   return signed_exchange_loader_->TakePrefetchedSignedExchangeCacheEntry();
 }
 
@@ -88,7 +88,7 @@ void SignedExchangePrefetchHandler::OnReceiveEarlyHints(
 void SignedExchangePrefetchHandler::OnReceiveResponse(
     network::mojom::URLResponseHeadPtr head,
     mojo::ScopedDataPipeConsumerHandle body,
-    absl::optional<mojo_base::BigBuffer> cached_metadata) {
+    std::optional<mojo_base::BigBuffer> cached_metadata) {
   NOTREACHED();
 }
 
@@ -116,7 +116,7 @@ void SignedExchangePrefetchHandler::OnComplete(
     const network::URLLoaderCompletionStatus& status) {
   // We only reach here on error, since successful completion of the
   // outer sxg load should trigger redirect and land on ::OnReceiveRedirect.
-  DCHECK_NE(net::OK, status.error_code);
+  CHECK_NE(net::OK, status.error_code, base::NotFatalUntil::M159);
 
   forwarding_client_->OnComplete(status);
 }

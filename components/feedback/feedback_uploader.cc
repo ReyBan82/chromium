@@ -4,18 +4,24 @@
 
 #include "components/feedback/feedback_uploader.h"
 
+#include <string>
+
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
+#include "build/branding_buildflags.h"
+#include "build/build_config.h"
 #include "components/feedback/features.h"
 #include "components/feedback/feedback_report.h"
 #include "components/feedback/feedback_switches.h"
 #include "components/variations/net/variations_http_headers.h"
 #include "net/base/load_flags.h"
+#include "net/http/http_response_headers.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
@@ -38,8 +44,12 @@ enum class FeedbackReportSendingResult {
 constexpr base::FilePath::CharType kFeedbackReportPath[] =
     FILE_PATH_LITERAL("Feedback Reports");
 
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
 constexpr char kFeedbackPostUrl[] =
     "https://www.google.com/tools/feedback/chrome/__submit";
+#else
+constexpr char kFeedbackPostUrl[] = "";
+#endif
 
 constexpr char kProtoBufMimeType[] = "application/x-protobuf";
 
@@ -96,7 +106,7 @@ FeedbackUploader::FeedbackUploader(
                        SharedURLLoaderFactoryGetter(),
                        shared_url_loader_factory) {}
 
-FeedbackUploader::~FeedbackUploader() {}
+FeedbackUploader::~FeedbackUploader() = default;
 
 // static
 void FeedbackUploader::SetMinimumRetryDelayForTesting(base::TimeDelta delay) {
@@ -104,10 +114,11 @@ void FeedbackUploader::SetMinimumRetryDelayForTesting(base::TimeDelta delay) {
 }
 
 void FeedbackUploader::QueueReport(std::unique_ptr<std::string> data,
-                                   bool has_email) {
+                                   bool has_email,
+                                   int product_id) {
   reports_queue_.emplace(base::MakeRefCounted<FeedbackReport>(
       feedback_reports_path_, base::Time::Now(), std::move(data), task_runner_,
-      has_email));
+      has_email, product_id));
   UpdateUploadTimer();
 }
 
@@ -206,6 +217,18 @@ void FeedbackUploader::DispatchReport() {
             "information' prevents sending logs as well), the screenshot, or "
             "even his/her email address."
           destination: GOOGLE_OWNED_SERVICE
+          internal {
+            contacts {
+              email: "cros-device-enablement@google.com"
+            }
+          }
+          user_data {
+            type: ARBITRARY_DATA
+            type: EMAIL
+            type: IMAGE
+            type: USER_CONTENT
+          }
+          last_reviewed: "2023-08-14"
         }
         policy {
           cookies_allowed: NO
@@ -224,11 +247,13 @@ void FeedbackUploader::DispatchReport() {
   resource_request->method = "POST";
 
   // Tell feedback server about the variation state of this install.
-  variations::AppendVariationsHeaderUnknownSignedIn(
-      feedback_post_url_,
-      is_off_the_record_ ? variations::InIncognito::kYes
-                         : variations::InIncognito::kNo,
-      resource_request.get());
+  if (report_being_dispatched_->should_include_variations()) {
+    variations::AppendVariationsHeaderUnknownSignedIn(
+        feedback_post_url_,
+        is_off_the_record_ ? variations::InIncognito::kYes
+                           : variations::InIncognito::kNo,
+        resource_request.get());
+  }
 
   if (report_being_dispatched_->has_email()) {
     AppendExtraHeadersToUploadRequest(resource_request.get());
@@ -249,7 +274,7 @@ void FeedbackUploader::DispatchReport() {
     DCHECK(url_loader_factory_);
   }
 
-  simple_url_loader_ptr->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
+  simple_url_loader_ptr->DownloadHeadersOnly(
       url_loader_factory_.get(),
       base::BindOnce(&FeedbackUploader::OnDispatchComplete,
                      base::Unretained(this), std::move(it)));
@@ -257,13 +282,12 @@ void FeedbackUploader::DispatchReport() {
 
 void FeedbackUploader::OnDispatchComplete(
     UrlLoaderList::iterator it,
-    std::unique_ptr<std::string> response_body) {
+    scoped_refptr<net::HttpResponseHeaders> headers) {
   std::stringstream error_stream;
   network::SimpleURLLoader* simple_url_loader = it->get();
   int response_code = kHttpPostFailNoConnection;
-  if (simple_url_loader->ResponseInfo() &&
-      simple_url_loader->ResponseInfo()->headers) {
-    response_code = simple_url_loader->ResponseInfo()->headers->response_code();
+  if (headers) {
+    response_code = headers->response_code();
   }
   if (response_code == kHttpPostSuccessNoContent) {
     error_stream << "Success";
@@ -325,6 +349,12 @@ void FeedbackUploader::UpdateUploadTimer() {
     upload_timer_.Start(FROM_HERE, delay, this,
                         &FeedbackUploader::UpdateUploadTimer);
   }
+}
+
+GURL FeedbackUploader::SetFeedbackGURLForTesting(GURL url) {
+  GURL previous_url = feedback_post_url_;
+  feedback_post_url_ = std::move(url);
+  return previous_url;
 }
 
 }  // namespace feedback

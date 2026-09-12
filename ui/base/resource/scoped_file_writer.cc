@@ -4,6 +4,7 @@
 
 #include "ui/base/resource/scoped_file_writer.h"
 
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
 
@@ -11,9 +12,11 @@ namespace ui {
 
 // ScopedFileWriter implementation.
 ScopedFileWriter::ScopedFileWriter(const base::FilePath& path)
-    : valid_(true), file_(base::OpenFile(path, "wb")) {
-  if (!file_) {
-    PLOG(ERROR) << "Could not open pak file for writing";
+    : valid_(true),
+      file_(path, base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE) {
+  if (!file_.IsValid()) {
+    LOG(ERROR) << "Could not open pak file for writing: "
+               << base::File::ErrorToString(file_.error_details());
     valid_ = false;
   }
 }
@@ -22,23 +25,20 @@ ScopedFileWriter::~ScopedFileWriter() {
   Close();
 }
 
-void ScopedFileWriter::Write(const void* data, size_t data_size) {
-  if (!data_size)
+void ScopedFileWriter::Write(base::span<const uint8_t> data) {
+  if (data.empty()) {
     return;
+  }
 
-  if (valid_ && fwrite(data, data_size, 1, file_) != 1) {
+  if (valid_ && !file_.WriteAtCurrentPosAndCheck(data)) {
     PLOG(ERROR) << "Could not write to pak file";
     valid_ = false;
   }
 }
 
 bool ScopedFileWriter::Close() {
-  if (file_) {
-    valid_ = (fclose(file_) == 0);
-    file_ = nullptr;
-    if (!valid_) {
-      PLOG(ERROR) << "Could not close pak file";
-    }
+  if (file_.IsValid()) {
+    file_.Close();
   }
   return valid_;
 }

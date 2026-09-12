@@ -7,6 +7,7 @@
 
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "ui/ozone/platform/drm/gpu/drm_overlay_manager.h"
 
@@ -18,9 +19,8 @@ class DrmThreadProxy;
 // overlay validations requests to the DRM thread.
 class DrmOverlayManagerGpu : public DrmOverlayManager {
  public:
-  explicit DrmOverlayManagerGpu(
-      DrmThreadProxy* drm_thread_proxy,
-      bool allow_sync_and_real_buffer_page_flip_testing);
+  DrmOverlayManagerGpu(DrmThreadProxy* drm_thread_proxy,
+                       bool allow_sync_and_real_buffer_page_flip_testing);
 
   DrmOverlayManagerGpu(const DrmOverlayManagerGpu&) = delete;
   DrmOverlayManagerGpu& operator=(const DrmOverlayManagerGpu&) = delete;
@@ -47,7 +47,7 @@ class DrmOverlayManagerGpu : public DrmOverlayManager {
       const std::vector<OverlaySurfaceCandidate>& candidates,
       const std::vector<OverlayStatus>& status);
 
-  DrmThreadProxy* const drm_thread_proxy_;
+  const raw_ptr<DrmThreadProxy> drm_thread_proxy_;
 
   bool has_set_displays_configured_callback_ = false;
 

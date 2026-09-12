@@ -4,6 +4,7 @@
 
 #include "chromecast/graphics/cast_window_manager_aura.h"
 
+#include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "build/build_config.h"
 #include "chromecast/base/cast_features.h"
@@ -39,13 +40,13 @@ namespace chromecast {
 namespace {
 
 gfx::Transform GetPrimaryDisplayRotationTransform() {
-  display::Display display = display::Screen::GetScreen()->GetPrimaryDisplay();
+  display::Display display = display::Screen::Get()->GetPrimaryDisplay();
   return display::CreateRotationTransform(display.rotation(),
                                           gfx::SizeF(display.size()));
 }
 
 gfx::Rect GetPrimaryDisplayHostBounds() {
-  display::Display display(display::Screen::GetScreen()->GetPrimaryDisplay());
+  display::Display display(display::Screen::Get()->GetPrimaryDisplay());
   gfx::Point display_origin_in_pixel = display.bounds().origin();
   gfx::Size display_size_in_pixel = display.GetSizeInPixel();
   switch (display.rotation()) {
@@ -169,8 +170,7 @@ void CastLayoutManager::SetChildBounds(aura::Window* child,
 
 }  // namespace
 
-CastWindowManagerAura::CastWindowManagerAura(bool enable_input)
-    : enable_input_(enable_input) {}
+CastWindowManagerAura::CastWindowManagerAura() {}
 
 CastWindowManagerAura::~CastWindowManagerAura() {
   TearDown();
@@ -180,27 +180,17 @@ void CastWindowManagerAura::Setup() {
   if (window_tree_host_) {
     return;
   }
-  DCHECK(display::Screen::GetScreen());
+  DCHECK(display::Screen::Get());
 
   ui::InitializeInputMethodForTesting();
 
   gfx::Rect host_bounds = GetPrimaryDisplayHostBounds();
   ui::PlatformWindowInitProperties properties(host_bounds);
 
-#if BUILDFLAG(IS_FUCHSIA)
-  // When using Scenic Ozone platform we need to supply a view_token to the
-  // window. This is not necessary when using the headless ozone platform.
-  if (ui::OzonePlatform::GetInstance()
-          ->GetPlatformProperties()
-          .needs_view_token) {
-    ui::fuchsia::InitializeViewTokenAndPresentView(&properties);
-  }
-#endif
-
   LOG(INFO) << "Starting window manager, bounds: " << host_bounds.ToString();
   CHECK(aura::Env::GetInstance());
   window_tree_host_ = std::make_unique<CastWindowTreeHostAura>(
-      enable_input_, std::move(properties));
+      std::move(properties));
   window_tree_host_->InitHost();
   aura::Window* root_window = window_tree_host_->window();
   root_window->SetLayoutManager(
@@ -234,10 +224,6 @@ void CastWindowManagerAura::Setup() {
   side_swipe_detector_ = std::make_unique<SideSwipeDetector>(
       system_gesture_dispatcher_.get(), root_window);
 
-#if BUILDFLAG(IS_CAST_AUDIO_ONLY)
-  window_tree_host_->compositor()->SetDisplayVSyncParameters(
-      base::TimeTicks(), base::Milliseconds(250));
-#endif
 
   // Chromecast devices do not support cut/copy/paste.
   DCHECK(!ui::TouchSelectionMenuRunner::GetInstance());
@@ -305,8 +291,10 @@ CastWindowManagerAura::GetWindowOrder() {
   return window_order_;
 }
 
-aura::Window* CastWindowManagerAura::GetDefaultParent(aura::Window* window,
-                                                      const gfx::Rect& bounds) {
+aura::Window* CastWindowManagerAura::GetDefaultParent(
+    aura::Window* window,
+    const gfx::Rect& bounds,
+    const int64_t display_id) {
   DCHECK(window_tree_host_);
   return window_tree_host_->window();
 }

@@ -4,9 +4,9 @@
 
 module cc.mojom;
 
-import "mojo/public/mojom/base/time.mojom";
 import "services/viz/public/mojom/compositing/local_surface_id.mojom";
 import "services/viz/public/mojom/compositing/selection.mojom";
+import "services/viz/public/mojom/compositing/tracked_element_rects.mojom";
 import "services/viz/public/mojom/compositing/vertical_scroll_direction.mojom";
 import "skia/public/mojom/skcolor4f.mojom";
 import "ui/gfx/geometry/mojom/geometry.mojom";
@@ -23,7 +23,30 @@ struct DelegatedInkBrowserMetadata {
   bool delegated_ink_is_hovering;
 };
 
-// See components/viz/service/quads/render_frame_metadata.h
+// Contains browser controls related information.
+struct BrowserControlsMetadata {
+  // Used to position the top controls and page content, whose precise position
+  // is computed by the renderer compositor.
+  float top_controls_height;
+
+  float top_controls_shown_ratio;
+
+  // Used to position Android/iOS bottom bar, whose position is computed by the
+  // renderer compositor.
+  [EnableIf=is_android|is_ios]
+  float bottom_controls_height;
+
+  [EnableIf=is_android|is_ios]
+  float bottom_controls_shown_ratio;
+
+  [EnableIf=is_android|is_ios]
+  float top_controls_min_height_offset;
+
+  [EnableIf=is_android|is_ios]
+  float bottom_controls_min_height_offset;
+};
+
+// See cc/trees/render_frame_metadata.h
 struct RenderFrameMetadata {
   // The background color of a CompositorFrame. It can be used for filling the
   // content area if the primary surface is unavailable and fallback is not
@@ -73,56 +96,38 @@ struct RenderFrameMetadata {
   // only used for setting raster scale in child renderers.
   float external_page_scale_factor;
 
-  // Used to position the Android location top bar and page content, whose
-  // precise position is computed by the renderer compositor.
-  float top_controls_height;
-
-  float top_controls_shown_ratio;
+  BrowserControlsMetadata browser_controls_metadata;
 
   viz.mojom.VerticalScrollDirection new_vertical_scroll_direction;
 
-  // The cumulative time spent performing visual updates since the last commit.
-  // Tracked for all `local_surface_id` before this one.
-  mojo_base.mojom.TimeDelta previous_surfaces_visual_update_duration;
+  // Indicates the `item_sequence_number` for the primary main frame's
+  // `content::FrameNavigationEntry`. This is only set if the primary main frame
+  // is rendering to this compositor.
+  int64 primary_main_frame_item_sequence_number;
 
-  // The cumulative time spend performing visual updates for the current
-  // `local_surface_id` since the last commit.
-  mojo_base.mojom.TimeDelta current_surface_visual_update_duration;
+  // Screen-space bounds of 'tracked elements' attached to the document
+  viz.mojom.TrackedElementRects tracked_element_rects;
 
-  // Used to position Android bottom bar, whose position is computed by the
-  // renderer compositor.
-  [EnableIf=is_android]
-  float bottom_controls_height;
-
-  [EnableIf=is_android]
-  float bottom_controls_shown_ratio;
-
-  [EnableIf=is_android]
-  float top_controls_min_height_offset;
-
-  [EnableIf=is_android]
-  float bottom_controls_min_height_offset;
-
-  [EnableIf=is_android]
+  [EnableIf=is_android|is_ios]
   float min_page_scale_factor;
 
-  [EnableIf=is_android]
+  [EnableIf=is_android|is_ios]
   float max_page_scale_factor;
 
-  [EnableIf=is_android]
+  [EnableIf=is_android|is_ios]
   bool root_overflow_y_hidden;
 
-  [EnableIf=is_android]
+  [EnableIf=is_android|is_ios]
   gfx.mojom.SizeF scrollable_viewport_size;
 
-  [EnableIf=is_android]
+  [EnableIf=is_android|is_ios]
   gfx.mojom.SizeF root_layer_size;
 
-  [EnableIf=is_android]
+  [EnableIf=is_android|is_ios]
   bool has_transparent_background;
 };
 
-[EnableIf=is_android]
+[EnableIf=is_android|is_ios]
 enum RootScrollOffsetUpdateFrequency {
   // The client will only be notified of root scroll offsets via the regular
   // RenderFrameMetadata updates. This is the default behavior. See
@@ -155,7 +160,7 @@ interface RenderFrameMetadataObserver {
   // In other words, if this is sent, *only* the root-scroll-offset has changed
   // and the client is not sent a OnRenderFrameMetadataChanged() for the frame.
   // Used on Android for acessibility and GestureListenerManager.
-  [EnableIf=is_android]
+  [EnableIf=is_android|is_ios]
   UpdateRootScrollOffsetUpdateFrequency(
       RootScrollOffsetUpdateFrequency frequency);
 
@@ -169,17 +174,21 @@ interface RenderFrameMetadataObserver {
 // RenderFrameMetadata. It can be notified of all frame submissions, via
 // RenderFrameMetadataObserver::ReportAllFrameSubmissionsForTesting, or of
 // additional frames with root scroll offset changes via
-// RenderFrameMetadataObserver::ReportAllRootScrolls.
+// RenderFrameMetadataObserver::UpdateRootScrollOffsetUpdateFrequency.
 interface RenderFrameMetadataObserverClient {
   // Notified when RenderFrameMetadata has changed.
-  OnRenderFrameMetadataChanged(uint32 frame_token,
-                               RenderFrameMetadata metadata);
+  OnRenderFrameMetadataChanged(
+      uint32 frame_token, RenderFrameMetadata metadata);
 
   // Notified on all frame submissions.
   OnFrameSubmissionForTesting(uint32 frame_token);
 
-  // Only called if ReportAllRootScrolls(true) has been called. See
-  // ReportAllRootScrolls() for details.
-  [EnableIf=is_android]
+  // Only called if UpdateRootScrollOffsetUpdateFrequency() has been called.
+  [EnableIf=is_android|is_ios]
   OnRootScrollOffsetChanged(gfx.mojom.PointF root_scroll_offset);
+
+  // Notified when a scroll gesture finishes with scroll jank v4 statistics to
+  // report to the OS. janky_frames must be less than or equal to total_frames.
+  [EnableIf=is_android]
+  ReportScrollJankStats(uint32 total_frames, uint32 janky_frames);
 };

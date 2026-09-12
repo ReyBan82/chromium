@@ -15,11 +15,6 @@ namespace content {
 
 namespace {
 
-base::RepeatingClosure& GetStartupCallback() {
-  static base::NoDestructor<base::RepeatingClosure> callback;
-  return *callback;
-}
-
 // XRDeviceServiceHostImpl is the browser process implementation of
 // XRDeviceServiceHost
 class XRDeviceServiceHostImpl : public device::mojom::XRDeviceServiceHost {
@@ -30,8 +25,8 @@ class XRDeviceServiceHostImpl : public device::mojom::XRDeviceServiceHost {
   // BindGpu is called from the XR process to establish a connection to the GPU
   // process.
   void BindGpu(::mojo::PendingReceiver<::viz::mojom::Gpu> receiver) override {
-    gpu_client_ =
-        content::CreateGpuClient(std::move(receiver), base::DoNothing());
+    gpu_client_ = content::CreateGpuClient(
+        std::move(receiver), /*enable_extra_handles_validation=*/false);
   }
 
  private:
@@ -59,10 +54,6 @@ const mojo::Remote<device::mojom::XRDeviceService>& GetXRDeviceService() {
     // terminated if it isn't already.
     remote->reset_on_disconnect();
     remote->reset_on_idle_timeout(base::Seconds(5));
-
-    auto& startup_callback = GetStartupCallback();
-    if (startup_callback)
-      startup_callback.Run();
   }
 
   return *remote;
@@ -76,11 +67,6 @@ CreateXRDeviceServiceHost() {
       device_service_host.InitWithNewPipeAndPassReceiver());
 
   return device_service_host;
-}
-
-void SetXRDeviceServiceStartupCallbackForTestingInternal(
-    base::RepeatingClosure callback) {
-  GetStartupCallback() = std::move(callback);
 }
 
 }  // namespace content

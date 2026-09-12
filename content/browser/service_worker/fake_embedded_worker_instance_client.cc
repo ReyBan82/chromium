@@ -33,7 +33,7 @@ class FakeServiceWorkerInstalledScriptsManager
       base::RunLoop loop;
       quit_closure_ = loop.QuitClosure();
       loop.Run();
-      DCHECK(script_info_);
+      CHECK(script_info_, base::NotFatalUntil::M159);
     }
     return std::move(script_info_);
   }
@@ -66,7 +66,7 @@ class FakeEmbeddedWorkerInstanceClient::LoaderClient final
   void OnReceiveResponse(
       network::mojom::URLResponseHeadPtr response_head,
       mojo::ScopedDataPipeConsumerHandle body,
-      absl::optional<mojo_base::BigBuffer> cached_metadata) override {}
+      std::optional<mojo_base::BigBuffer> cached_metadata) override {}
   void OnReceiveRedirect(
       const net::RedirectInfo& redirect_info,
       network::mojom::URLResponseHeadPtr response_head) override {}
@@ -121,7 +121,7 @@ void FakeEmbeddedWorkerInstanceClient::RunUntilBound() {
 
 blink::mojom::ServiceWorkerScriptInfoPtr
 FakeEmbeddedWorkerInstanceClient::WaitForTransferInstalledScript() {
-  DCHECK(installed_scripts_manager_);
+  CHECK(installed_scripts_manager_, base::NotFatalUntil::M159);
   return installed_scripts_manager_->WaitForTransferInstalledScript();
 }
 
@@ -224,7 +224,8 @@ void FakeEmbeddedWorkerInstanceClient::EvaluateScript() {
   host_->OnScriptEvaluationStart();
   host_->OnStarted(blink::mojom::ServiceWorkerStartStatus::kNormalCompletion,
                    blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable,
-                   helper_->GetNextThreadId(),
+                   /*has_hid_event_handlers=*/false,
+                   /*has_usb_event_handlers=*/false, helper_->GetNextThreadId(),
                    blink::mojom::EmbeddedWorkerStartTiming::New());
 }
 
@@ -307,7 +308,6 @@ void DelayedFakeEmbeddedWorkerInstanceClient::StartWorker(
     case State::kCompleted:
     case State::kBlocked:
       NOTREACHED();
-      break;
   }
   if (quit_closure_for_start_worker_)
     std::move(quit_closure_for_start_worker_).Run();
@@ -328,7 +328,6 @@ void DelayedFakeEmbeddedWorkerInstanceClient::StopWorker() {
       break;
     case State::kCompleted:
       NOTREACHED();
-      break;
   }
   if (quit_closure_for_stop_worker_)
     std::move(quit_closure_for_stop_worker_).Run();
@@ -337,7 +336,7 @@ void DelayedFakeEmbeddedWorkerInstanceClient::StopWorker() {
 void DelayedFakeEmbeddedWorkerInstanceClient::CompleteStopWorker() {
   if (!host()) {
     // host() might not be bound if start never was called or is blocked.
-    DCHECK(start_params_);
+    CHECK(start_params_, base::NotFatalUntil::M159);
     host().Bind(std::move(start_params_->instance_host));
   }
   // Destroys |this|.

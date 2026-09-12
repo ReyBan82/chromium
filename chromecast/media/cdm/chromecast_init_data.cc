@@ -5,6 +5,8 @@
 #include "chromecast/media/cdm/chromecast_init_data.h"
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "media/base/bit_reader.h"
 #include "media/cdm/cenc_utils.h"
 
@@ -42,15 +44,11 @@ bool FindChromecastInitData(const std::vector<uint8_t>& init_data,
   // Data may or may not be present and is specific to the given |type|.
 
   std::vector<uint8_t> pssh_data;
-  if (!::media::GetPsshData(
-          init_data, std::vector<uint8_t>(kChromecastPlayreadyUuid,
-                                          kChromecastPlayreadyUuid +
-                                              sizeof(kChromecastPlayreadyUuid)),
-          &pssh_data)) {
+  if (!::media::GetPsshData(init_data, kChromecastPlayreadyUuid, &pssh_data)) {
     return false;
   }
 
-  ::media::BitReader reader(pssh_data.data(), pssh_data.size());
+  ::media::BitReader reader(pssh_data);
 
   uint16_t msg_type;
   RCHECK(reader.ReadBits(2 * 8, &msg_type));

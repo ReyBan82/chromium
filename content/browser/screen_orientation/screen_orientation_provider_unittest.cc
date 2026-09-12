@@ -4,6 +4,8 @@
 
 #include "content/browser/screen_orientation/screen_orientation_provider.h"
 
+#include <optional>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
@@ -12,7 +14,6 @@
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/test/test_render_view_host.h"
 #include "content/test/test_web_contents.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
 
 namespace content {
@@ -84,11 +85,24 @@ class FakeWebContentsDelegate : public WebContentsDelegate {
     return fullscreened_contents_ && web_contents == fullscreened_contents_;
   }
 
+  // Used for forcing a specific |blink::mojom::DisplayMode| during a test.
+  blink::mojom::DisplayMode GetDisplayMode(
+      const WebContents* web_contents) override {
+    return display_mode_;
+  }
+
+  void SetDisplayMode(blink::mojom::DisplayMode display_mode) {
+    display_mode_ = display_mode;
+  }
+
  private:
-  raw_ptr<WebContents> fullscreened_contents_ = nullptr;
+  raw_ptr<WebContents, DanglingUntriaged> fullscreened_contents_ = nullptr;
+
+ private:
+  blink::mojom::DisplayMode display_mode_ = blink::mojom::DisplayMode::kBrowser;
 };
 
-void LockResultCallback(absl::optional<ScreenOrientationLockResult>* out_result,
+void LockResultCallback(std::optional<ScreenOrientationLockResult>* out_result,
                         ScreenOrientationLockResult result) {
   *out_result = result;
 }
@@ -108,7 +122,10 @@ class ScreenOrientationProviderTest : public RenderViewHostImplTestHarness {
   // Helpers for testing ScreenOrientationProvider methods.
   void CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType orientation,
-      absl::optional<ScreenOrientationLockResult>* out_result) {
+      std::optional<ScreenOrientationLockResult>* out_result) {
+    contents()
+        ->GetScreenOrientationProviderForTesting()
+        ->SetCurrentTargetFrameForTesting(main_test_rfh());
     contents()->GetScreenOrientationProviderForTesting()->LockOrientation(
         orientation, base::BindOnce(&LockResultCallback, out_result));
 
@@ -126,7 +143,7 @@ class ScreenOrientationProviderTest : public RenderViewHostImplTestHarness {
 // Lock operation is not available.
 TEST_F(ScreenOrientationProviderTest, DelegateNotAvailableLockOnce) {
   // No ScreenOrientationDelegate.
-  absl::optional<ScreenOrientationLockResult> result_1;
+  std::optional<ScreenOrientationLockResult> result_1;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_1);
   EXPECT_EQ(ScreenOrientationLockResult::
@@ -135,7 +152,7 @@ TEST_F(ScreenOrientationProviderTest, DelegateNotAvailableLockOnce) {
 
   // ScreenOrientationDelegate not supported.
   FakeScreenOrientationDelegate delegate(false, false);
-  absl::optional<ScreenOrientationLockResult> result_2;
+  std::optional<ScreenOrientationLockResult> result_2;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_2);
   EXPECT_EQ(ScreenOrientationLockResult::
@@ -153,7 +170,7 @@ TEST_F(ScreenOrientationProviderTest, DelegateLockOnce) {
   controller().LoadURL(url, Referrer(), ui::PAGE_TRANSITION_TYPED,
                        std::string());
 
-  absl::optional<ScreenOrientationLockResult> result_1;
+  std::optional<ScreenOrientationLockResult> result_1;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_1);
   // Lock request is pending.
@@ -174,7 +191,7 @@ TEST_F(ScreenOrientationProviderTest, DelegateRequireFullScreenLockOnce) {
 
   // Current web contents is not in full screen.
   ASSERT_FALSE(contents()->IsFullscreen());
-  absl::optional<ScreenOrientationLockResult> result_1;
+  std::optional<ScreenOrientationLockResult> result_1;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_1);
   EXPECT_EQ(ScreenOrientationLockResult::
@@ -189,7 +206,7 @@ TEST_F(ScreenOrientationProviderTest, DelegateRequireFullScreenLockOnce) {
                                    base::DoNothing());
   ASSERT_TRUE(contents()->IsFullscreen());
 
-  absl::optional<ScreenOrientationLockResult> result_2;
+  std::optional<ScreenOrientationLockResult> result_2;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_2);
   // Lock request is pending.
@@ -207,7 +224,7 @@ TEST_F(ScreenOrientationProviderTest, DelegateLockThenUnlock) {
   controller().LoadURL(url, Referrer(), ui::PAGE_TRANSITION_TYPED,
                        std::string());
 
-  absl::optional<ScreenOrientationLockResult> result_1;
+  std::optional<ScreenOrientationLockResult> result_1;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_1);
   // The lock request will be pending.
@@ -234,7 +251,7 @@ TEST_F(ScreenOrientationProviderTest, DelegateLockThenLock) {
   controller().LoadURL(url, Referrer(), ui::PAGE_TRANSITION_TYPED,
                        std::string());
 
-  absl::optional<ScreenOrientationLockResult> result_1;
+  std::optional<ScreenOrientationLockResult> result_1;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_1);
   // The lock request will be pending.
@@ -243,7 +260,7 @@ TEST_F(ScreenOrientationProviderTest, DelegateLockThenLock) {
   EXPECT_EQ(1, delegate.lock_count());
   EXPECT_EQ(0, delegate.unlock_count());
 
-  absl::optional<ScreenOrientationLockResult> result_2;
+  std::optional<ScreenOrientationLockResult> result_2;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_2);
   // The pending lock request is cancelled.
@@ -289,7 +306,7 @@ TEST_F(ScreenOrientationProviderTest, UnlockWhenExitingFullScreen) {
                                    base::DoNothing());
   ASSERT_TRUE(contents()->IsFullscreen());
 
-  absl::optional<ScreenOrientationLockResult> result;
+  std::optional<ScreenOrientationLockResult> result;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result);
   // The lock request will be pending.
@@ -320,7 +337,7 @@ TEST_F(ScreenOrientationProviderTest, UnlockWhenNavigation) {
   controller().LoadURL(url, Referrer(), ui::PAGE_TRANSITION_TYPED,
                        std::string());
 
-  absl::optional<ScreenOrientationLockResult> result;
+  std::optional<ScreenOrientationLockResult> result;
   CallLockAndGetResult(
       device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result);
   // The lock request will be pending.
@@ -338,6 +355,185 @@ TEST_F(ScreenOrientationProviderTest, UnlockWhenNavigation) {
             result);
   // Delegate did apply unlock once.
   EXPECT_EQ(1, delegate.unlock_count());
+}
+
+TEST_F(ScreenOrientationProviderTest,
+       DelegateRequireDisplayModeFullScreenLockOnce) {
+  // ScreenOrientationDelegate requires full screen.
+  FakeScreenOrientationDelegate delegate(true, true);
+  std::unique_ptr<FakeWebContentsDelegate> wc_delegate(
+      new FakeWebContentsDelegate());
+  contents()->SetDelegate(wc_delegate.get());
+
+  // Navigate to a site.
+  const GURL url("http://www.google.com");
+  controller().LoadURL(url, Referrer(), ui::PAGE_TRANSITION_TYPED,
+                       std::string());
+
+  // Current web contents is not in full screen.
+  ASSERT_FALSE(contents()->IsFullscreen());
+  EXPECT_EQ(blink::mojom::DisplayMode::kBrowser, contents()->GetDisplayMode());
+
+  std::optional<ScreenOrientationLockResult> result_1;
+  CallLockAndGetResult(
+      device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_1);
+  EXPECT_EQ(ScreenOrientationLockResult::
+                SCREEN_ORIENTATION_LOCK_RESULT_ERROR_FULLSCREEN_REQUIRED,
+            *result_1);
+  // Delegate did not apply any lock.
+  EXPECT_EQ(0, delegate.lock_count());
+
+  // Simulates DisplayMode updating to full screen.
+  wc_delegate->SetDisplayMode(blink::mojom::DisplayMode::kFullscreen);
+
+  std::optional<ScreenOrientationLockResult> result_2;
+  CallLockAndGetResult(
+      device::mojom::ScreenOrientationLockType::LANDSCAPE_SECONDARY, &result_2);
+
+  // Lock request is pending.
+  EXPECT_FALSE(result_2.has_value());
+  // Delegate did apply lock once.
+  EXPECT_EQ(1, delegate.lock_count());
+
+  EXPECT_EQ(blink::mojom::DisplayMode::kFullscreen,
+            contents()->GetDisplayMode());
+  ASSERT_FALSE(contents()->IsFullscreen());
+}
+
+TEST_F(ScreenOrientationProviderTest, ProviderReportsSupported) {
+  FakeScreenOrientationDelegate delegate(/*supported=*/true,
+                                         /*full_screen_required=*/false);
+  std::unique_ptr<FakeWebContentsDelegate> wc_delegate(
+      new FakeWebContentsDelegate());
+  contents()->SetDelegate(wc_delegate.get());
+  EXPECT_TRUE(contents()
+                  ->GetScreenOrientationProviderForTesting()
+                  ->IsOrientationLockSupported());
+}
+
+TEST_F(ScreenOrientationProviderTest, ProviderReportsNotSupported) {
+  FakeScreenOrientationDelegate delegate(/*supported=*/false,
+                                         /*full_screen_required=*/false);
+  std::unique_ptr<FakeWebContentsDelegate> wc_delegate(
+      new FakeWebContentsDelegate());
+  contents()->SetDelegate(wc_delegate.get());
+  EXPECT_FALSE(contents()
+                   ->GetScreenOrientationProviderForTesting()
+                   ->IsOrientationLockSupported());
+}
+
+// DevTools emulation enables orientation lock without a platform delegate.
+TEST_F(ScreenOrientationProviderTest, DevToolsEmulationEnablesLock) {
+  // Ensure no ScreenOrientationDelegate is set -- lock would normally fail.
+  ScreenOrientationProvider::SetDelegate(nullptr);
+  auto* provider = contents()->GetScreenOrientationProviderForTesting();
+  ASSERT_FALSE(provider->IsOrientationLockSupported());
+
+  // Enable DevTools emulation.
+  provider->SetDevToolsEmulationEnabled(true);
+  EXPECT_TRUE(provider->IsOrientationLockSupported());
+
+  // Lock should succeed immediately.
+  std::optional<ScreenOrientationLockResult> result;
+  CallLockAndGetResult(
+      device::mojom::ScreenOrientationLockType::PORTRAIT_PRIMARY, &result);
+  EXPECT_EQ(ScreenOrientationLockResult::SCREEN_ORIENTATION_LOCK_RESULT_SUCCESS,
+            *result);
+
+  // Disable emulation.
+  provider->SetDevToolsEmulationEnabled(false);
+  EXPECT_FALSE(provider->IsOrientationLockSupported());
+}
+
+// DevTools emulation lock fires the callback.
+TEST_F(ScreenOrientationProviderTest, DevToolsEmulationCallbackOnLock) {
+  ScreenOrientationProvider::SetDelegate(nullptr);
+  auto* provider = contents()->GetScreenOrientationProviderForTesting();
+  provider->SetDevToolsEmulationEnabled(true);
+
+  bool callback_locked = false;
+  std::optional<device::mojom::ScreenOrientationLockType> callback_orientation;
+
+  provider->SetOrientationLockChangedCallback(base::BindRepeating(
+      [](bool* out_locked,
+         std::optional<device::mojom::ScreenOrientationLockType>*
+             out_orientation,
+         bool locked,
+         std::optional<device::mojom::ScreenOrientationLockType> orientation) {
+        *out_locked = locked;
+        *out_orientation = orientation;
+      },
+      &callback_locked, &callback_orientation));
+
+  // Lock should trigger callback with locked=true.
+  std::optional<ScreenOrientationLockResult> result;
+  CallLockAndGetResult(
+      device::mojom::ScreenOrientationLockType::LANDSCAPE_PRIMARY, &result);
+  EXPECT_EQ(ScreenOrientationLockResult::SCREEN_ORIENTATION_LOCK_RESULT_SUCCESS,
+            *result);
+  EXPECT_TRUE(callback_locked);
+  EXPECT_EQ(device::mojom::ScreenOrientationLockType::LANDSCAPE_PRIMARY,
+            callback_orientation);
+
+  // Unlock should trigger callback with locked=false.
+  CallUnlock();
+  EXPECT_FALSE(callback_locked);
+  EXPECT_FALSE(callback_orientation.has_value());
+}
+
+// Disabling DevTools emulation auto-unlocks and fires callback.
+TEST_F(ScreenOrientationProviderTest, DevToolsEmulationDisableUnlocks) {
+  ScreenOrientationProvider::SetDelegate(nullptr);
+  auto* provider = contents()->GetScreenOrientationProviderForTesting();
+  provider->SetDevToolsEmulationEnabled(true);
+
+  bool callback_locked = true;
+  provider->SetOrientationLockChangedCallback(base::BindRepeating(
+      [](bool* out_locked, bool locked,
+         std::optional<device::mojom::ScreenOrientationLockType>) {
+        *out_locked = locked;
+      },
+      &callback_locked));
+
+  // Lock orientation.
+  std::optional<ScreenOrientationLockResult> result;
+  CallLockAndGetResult(
+      device::mojom::ScreenOrientationLockType::PORTRAIT_PRIMARY, &result);
+  EXPECT_EQ(ScreenOrientationLockResult::SCREEN_ORIENTATION_LOCK_RESULT_SUCCESS,
+            *result);
+  EXPECT_TRUE(callback_locked);
+
+  // Disabling emulation should auto-unlock and fire callback.
+  provider->SetDevToolsEmulationEnabled(false);
+  EXPECT_FALSE(callback_locked);
+}
+
+// DevTools emulation still falls back to delegate when delegate exists.
+TEST_F(ScreenOrientationProviderTest, DevToolsEmulationWithDelegate) {
+  FakeScreenOrientationDelegate delegate(/*supported=*/true,
+                                         /*full_screen_required=*/false);
+  auto* provider = contents()->GetScreenOrientationProviderForTesting();
+
+  // Even without emulation, lock is supported via delegate.
+  EXPECT_TRUE(provider->IsOrientationLockSupported());
+
+  // With emulation enabled, lock still works (emulation path takes priority).
+  provider->SetDevToolsEmulationEnabled(true);
+  EXPECT_TRUE(provider->IsOrientationLockSupported());
+
+  // Navigate to a site.
+  const GURL url("http://www.google.com");
+  controller().LoadURL(url, Referrer(), ui::PAGE_TRANSITION_TYPED,
+                       std::string());
+
+  std::optional<ScreenOrientationLockResult> result;
+  CallLockAndGetResult(
+      device::mojom::ScreenOrientationLockType::LANDSCAPE_PRIMARY, &result);
+  // Emulation path succeeds immediately (doesn't go through delegate).
+  EXPECT_EQ(ScreenOrientationLockResult::SCREEN_ORIENTATION_LOCK_RESULT_SUCCESS,
+            *result);
+  // Delegate was NOT called since emulation path handles it.
+  EXPECT_EQ(0, delegate.lock_count());
 }
 
 }  // namespace content

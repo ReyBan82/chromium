@@ -4,6 +4,9 @@
 
 #include "cc/test/test_types.h"
 
+#include "cc/base/region.h"
+#include "cc/input/main_thread_scrolling_reason.h"
+
 namespace cc {
 
 namespace {
@@ -27,6 +30,22 @@ const char* RasterTypeTestSuffix(TestRasterType type) {
 void PrintTo(const RasterTestConfig& config, std::ostream* os) {
   PrintTo(config.renderer_type, os);
   *os << '_' << RasterTypeTestSuffix(config.raster_type);
+}
+
+void PrintTo(const Region& region, std::ostream* os) {
+  *os << region.ToString();
+}
+
+void PrintTo(MainThreadRepaintReasons reasons, std::ostream* os) {
+  *os << MainThreadScrollingReason::AsText(reasons);
+}
+
+void PrintTo(MainThreadHitTestReasons reasons, std::ostream* os) {
+  *os << MainThreadScrollingReason::AsText(reasons);
+}
+
+void PrintTo(MainThreadScrollingOtherReasons reasons, std::ostream* os) {
+  *os << MainThreadScrollingReason::AsText(reasons);
 }
 
 }  // namespace cc

@@ -10,13 +10,14 @@ import static org.junit.Assert.assertEquals;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.components.webapk.lib.client.WebApkVerifySignature.Error;
 import org.chromium.testing.local.TestDir;
 
 import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -27,7 +28,6 @@ import java.security.spec.X509EncodedKeySpec;
 
 /** Unit tests for WebApkVerifySignature for Android. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class WebApkVerifySignatureTest {
     /** Elliptical Curves, Digital Signature Algorithm */
     private static final String KEY_FACTORY = "EC";
@@ -40,6 +40,56 @@ public class WebApkVerifySignatureTest {
 
     private static PublicKey createPublicKey(byte[] bytes) throws Exception {
         return KeyFactory.getInstance(KEY_FACTORY).generatePublic(new X509EncodedKeySpec(bytes));
+    }
+
+    @Test
+    public void testRead2() {
+        byte[] data = {
+            (byte) 0x01, (byte) 0x00, // 1
+            (byte) 0xFF, (byte) 0x7F, // 32767
+            (byte) 0x00, (byte) 0x80, // 32768
+            (byte) 0xFF, (byte) 0xFF // 65535
+        };
+        ByteBuffer buf = ByteBuffer.wrap(data);
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        WebApkVerifySignature v = new WebApkVerifySignature(buf);
+
+        assertEquals(1, v.read2());
+        assertEquals(32767, v.read2());
+        assertEquals(32768, v.read2());
+        assertEquals(65535, v.read2());
+    }
+
+    @Test
+    public void testRead4() {
+        byte[] data = {
+            (byte) 0x01, (byte) 0x00, (byte) 0x00, (byte) 0x00, // 1
+            (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0x7F, // 2147483647
+            (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x80, // 2147483648
+            (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF // 4294967295
+        };
+        ByteBuffer buf = ByteBuffer.wrap(data);
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        WebApkVerifySignature v = new WebApkVerifySignature(buf);
+
+        // test read4InIntRange() for small values
+        assertEquals(1, v.read4InIntRange());
+        assertEquals(2147483647, v.read4InIntRange());
+
+        // test read4InIntRange() for values > 2GB (should throw)
+        try {
+            v.read4InIntRange();
+            Assert.fail("Should have thrown IndexOutOfBoundsException for 2147483648");
+        } catch (IndexOutOfBoundsException e) {
+            assertEquals("32-bit value too large: 2147483648", e.getMessage());
+        }
+
+        try {
+            v.read4InIntRange();
+            Assert.fail("Should have thrown IndexOutOfBoundsException for 4294967295");
+        } catch (IndexOutOfBoundsException e) {
+            assertEquals("32-bit value too large: 4294967295", e.getMessage());
+        }
     }
 
     @Test
@@ -64,14 +114,16 @@ public class WebApkVerifySignatureTest {
                 bytes, WebApkVerifySignature.parseCommentSignature("XXXwebapk:0000:decafbadXXX"));
         assertArrayEquals(
                 bytes, WebApkVerifySignature.parseCommentSignature("\n\nwebapk:0000:decafbad\n\n"));
-        assertArrayEquals(bytes,
+        assertArrayEquals(
+                bytes,
                 WebApkVerifySignature.parseCommentSignature("chrome-webapk:000:decafbad\n\n"));
-        assertArrayEquals(bytes,
+        assertArrayEquals(
+                bytes,
                 WebApkVerifySignature.parseCommentSignature(
                         "prefixed: chrome-webapk:000:decafbad :suffixed"));
     }
 
-    class FileResult {
+    static class FileResult {
         FileResult(String filename, int expect) {
             this.filename = filename;
             this.want = expect;
@@ -85,31 +137,31 @@ public class WebApkVerifySignatureTest {
     public void testBadVerifyFiles() throws Exception {
         PublicKey pub = readPublicKey(testFilePath("public.der"));
         FileResult[] tests = {
-                new FileResult("example.apk", Error.OK),
-                new FileResult("java-example.apk", Error.OK),
-                new FileResult("v2-signed-ok.apk", Error.OK),
-                new FileResult("bad-sig.apk", Error.INCORRECT_SIGNATURE),
-                new FileResult("bad-utf8-fname.apk", Error.INCORRECT_SIGNATURE),
-                new FileResult("empty.apk", Error.BAD_APK),
-                new FileResult("extra-field-too-large.apk", Error.EXTRA_FIELD_TOO_LARGE),
-                new FileResult("extra-len-too-large.apk", Error.BAD_APK),
-                new FileResult("no-cd.apk", Error.BAD_APK),
-                new FileResult("no-comment.apk", Error.SIGNATURE_NOT_FOUND),
-                new FileResult("no-eocd.apk", Error.BAD_APK),
-                new FileResult("no-lfh.apk", Error.BAD_APK),
-                new FileResult("not-an.apk", Error.BAD_APK),
-                new FileResult("too-many-metainf.apk", Error.TOO_MANY_META_INF_FILES),
-                new FileResult("truncated.apk", Error.BAD_APK),
-                new FileResult("zeros.apk", Error.BAD_APK),
-                new FileResult("zeros-at-end.apk", Error.BAD_APK),
-                new FileResult("block-before-first.apk", Error.BAD_BLANK_SPACE),
-                new FileResult("block-at-end.apk", Error.BAD_BLANK_SPACE),
-                new FileResult("block-before-eocd.apk", Error.BAD_BLANK_SPACE),
-                new FileResult("block-before-cd.apk", Error.BAD_BLANK_SPACE),
-                new FileResult("block-middle.apk", Error.BAD_BLANK_SPACE),
-                new FileResult("v2-signed-too-large.apk", Error.BAD_V2_SIGNING_BLOCK),
-                // This badly fuzzed file should return Error.FILE_COMMENT_TOO_LARGE.
-                new FileResult("fcomment-too-large.apk", Error.BAD_APK),
+            new FileResult("example.apk", Error.OK),
+            new FileResult("java-example.apk", Error.OK),
+            new FileResult("v2-signed-ok.apk", Error.OK),
+            new FileResult("bad-sig.apk", Error.INCORRECT_SIGNATURE),
+            new FileResult("bad-utf8-fname.apk", Error.INCORRECT_SIGNATURE),
+            new FileResult("empty.apk", Error.BAD_APK),
+            new FileResult("extra-field-too-large.apk", Error.OK),
+            new FileResult("extra-len-too-large.apk", Error.BAD_APK),
+            new FileResult("no-cd.apk", Error.BAD_APK),
+            new FileResult("no-comment.apk", Error.SIGNATURE_NOT_FOUND),
+            new FileResult("no-eocd.apk", Error.BAD_APK),
+            new FileResult("no-lfh.apk", Error.BAD_APK),
+            new FileResult("not-an.apk", Error.BAD_APK),
+            new FileResult("too-many-metainf.apk", Error.TOO_MANY_META_INF_FILES),
+            new FileResult("truncated.apk", Error.BAD_APK),
+            new FileResult("zeros.apk", Error.BAD_APK),
+            new FileResult("zeros-at-end.apk", Error.BAD_APK),
+            new FileResult("block-before-first.apk", Error.BAD_BLANK_SPACE),
+            new FileResult("block-at-end.apk", Error.BAD_BLANK_SPACE),
+            new FileResult("block-before-eocd.apk", Error.BAD_BLANK_SPACE),
+            new FileResult("block-before-cd.apk", Error.BAD_BLANK_SPACE),
+            new FileResult("block-middle.apk", Error.BAD_BLANK_SPACE),
+            new FileResult("v2-signed-too-large.apk", Error.BAD_V2_SIGNING_BLOCK),
+            // This badly fuzzed file should return Error.FILE_COMMENT_TOO_LARGE.
+            new FileResult("fcomment-too-large.apk", Error.BAD_APK),
         };
         for (FileResult test : tests) {
             RandomAccessFile file = new RandomAccessFile(testFilePath(test.filename), "r");
@@ -119,8 +171,7 @@ public class WebApkVerifySignatureTest {
             buf.load();
             WebApkVerifySignature v = new WebApkVerifySignature(buf);
             try {
-                @WebApkVerifySignature.Error
-                int readError = v.read();
+                @WebApkVerifySignature.Error int readError = v.read();
                 if (readError == WebApkVerifySignature.Error.OK) {
                     assertEquals(test.filename, test.want, v.verifySignature(pub));
                 } else {

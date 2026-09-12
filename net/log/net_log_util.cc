@@ -4,6 +4,8 @@
 
 #include "net/log/net_log_util.h"
 
+#include <stdint.h>
+
 #include <algorithm>
 #include <string>
 #include <utility>
@@ -17,14 +19,13 @@
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
+#include "base/trace_event/trace_event.h"  // IWYU pragma: export
 #include "base/values.h"
 #include "net/base/address_family.h"
 #include "net/base/load_states.h"
 #include "net/base/net_errors.h"
 #include "net/base/net_info_source_list.h"
 #include "net/cert/cert_verifier.h"
-#include "net/cert/pki/simple_path_builder_delegate.h"
-#include "net/cert/pki/trust_store.h"
 #include "net/disk_cache/disk_cache.h"
 #include "net/dns/host_cache.h"
 #include "net/dns/host_resolver.h"
@@ -34,6 +35,7 @@
 #include "net/http/http_cache.h"
 #include "net/http/http_network_session.h"
 #include "net/http/http_server_properties.h"
+#include "net/http/http_stream_pool.h"
 #include "net/http/http_transaction_factory.h"
 #include "net/log/net_log_capture_mode.h"
 #include "net/log/net_log_entry.h"
@@ -48,6 +50,8 @@
 #include "net/third_party/quiche/src/quiche/quic/core/quic_packets.h"
 #include "net/url_request/url_request.h"
 #include "net/url_request/url_request_context.h"
+#include "third_party/boringssl/src/pki/simple_path_builder_delegate.h"
+#include "third_party/boringssl/src/pki/trust_store.h"
 
 #if BUILDFLAG(ENABLE_REPORTING)
 #include "net/network_error_logging/network_error_logging_service.h"
@@ -85,7 +89,7 @@ const StringToConstant kLoadStateTable[] = {
 #undef LOAD_STATE
 };
 
-const short kNetErrors[] = {
+const int16_t kNetErrors[] = {
 #define NET_ERROR(label, value) value,
 #include "net/base/net_error_list.h"
 #undef NET_ERROR
@@ -124,17 +128,18 @@ bool RequestCreatedBefore(const URLRequest* request1,
 base::Value GetActiveFieldTrialList() {
   base::FieldTrial::ActiveGroups active_groups;
   base::FieldTrialList::GetActiveFieldTrialGroups(&active_groups);
-  base::Value::List field_trial_groups;
+  base::ListValue field_trial_groups;
   for (const auto& group : active_groups) {
-    field_trial_groups.Append(group.trial_name + ":" + group.group_name);
+    field_trial_groups.Append(
+        base::StrCat({group.trial_name, ":", group.group_name}));
   }
   return base::Value(std::move(field_trial_groups));
 }
 
 }  // namespace
 
-base::Value::Dict GetNetConstants() {
-  base::Value::Dict constants_dict;
+base::DictValue GetNetConstants(NetConstantsRequestMode request_mode) {
+  base::DictValue constants_dict;
 
   // Version of the file format.
   constants_dict.Set("logFormatVersion", kLogFormatVersion);
@@ -146,7 +151,7 @@ base::Value::Dict GetNetConstants() {
   // Add a dictionary with information about the relationship between CertStatus
   // flags and their symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
 
     for (const auto& flag : kCertStatusFlags)
       dict.Set(flag.name, flag.constant);
@@ -156,38 +161,43 @@ base::Value::Dict GetNetConstants() {
 
   // Add a dictionary with information about the relationship between
   // CertVerifier::VerifyFlags and their symbolic names.
+  // LINT.IfChange(CertVerifier.VerifyFlags)
   {
-    base::Value::Dict dict;
-
-    dict.Set("VERIFY_DISABLE_NETWORK_FETCHES",
-             CertVerifier::VERIFY_DISABLE_NETWORK_FETCHES);
-
-    static_assert(CertVerifier::VERIFY_FLAGS_LAST == (1 << 0),
+    static_assert(CertVerifier::VERIFY_FLAGS_LAST == (1 << 1),
                   "Update with new flags");
+    constants_dict.Set("certVerifierFlags",
+                       base::DictValue()
+                           .Set("VERIFY_DISABLE_NETWORK_FETCHES",
+                                CertVerifier::VERIFY_DISABLE_NETWORK_FETCHES)
+                           .Set("VERIFY_SXG_CT_REQUIREMENTS",
+                                CertVerifier::VERIFY_SXG_CT_REQUIREMENTS)
 
-    constants_dict.Set("certVerifierFlags", std::move(dict));
+    );
   }
+  // LINT.ThenChange(/net/cert/cert_verifier.h:CertVerifier.VerifyFlags)
 
+  // LINT.IfChange(CertVerifyProc.VerifyFlags)
   {
-    base::Value::Dict dict;
-
-    dict.Set("kStrong", static_cast<int>(
-                            SimplePathBuilderDelegate::DigestPolicy::kStrong));
-    dict.Set("kWeakAllowSha1",
-             static_cast<int>(
-                 SimplePathBuilderDelegate::DigestPolicy::kWeakAllowSha1));
-
-    static_assert(SimplePathBuilderDelegate::DigestPolicy::kMaxValue ==
-                      SimplePathBuilderDelegate::DigestPolicy::kWeakAllowSha1,
+    static_assert(CertVerifyProc::VERIFY_FLAGS_LAST == (1 << 3),
                   "Update with new flags");
-
-    constants_dict.Set("certPathBuilderDigestPolicy", std::move(dict));
+    constants_dict.Set(
+        "certVerifyFlags",
+        base::DictValue()
+            .Set("VERIFY_REV_CHECKING_ENABLED",
+                 CertVerifyProc::VERIFY_REV_CHECKING_ENABLED)
+            .Set("VERIFY_REV_CHECKING_REQUIRED_LOCAL_ANCHORS",
+                 CertVerifyProc::VERIFY_REV_CHECKING_REQUIRED_LOCAL_ANCHORS)
+            .Set("VERIFY_DISABLE_NETWORK_FETCHES",
+                 CertVerifyProc::VERIFY_DISABLE_NETWORK_FETCHES)
+            .Set("VERIFY_SXG_CT_REQUIREMENTS",
+                 CertVerifyProc::VERIFY_SXG_CT_REQUIREMENTS));
   }
+  // LINT.ThenChange(/net/cert/cert_verify_proc.h:CertVerifyProc.VerifyFlags)
 
   // Add a dictionary with information about the relationship between load flag
   // enums and their symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
 
     for (const auto& flag : kLoadFlags)
       dict.Set(flag.name, flag.constant);
@@ -198,7 +208,7 @@ base::Value::Dict GetNetConstants() {
   // Add a dictionary with information about the relationship between load state
   // enums and their symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
 
     for (const auto& state : kLoadStateTable)
       dict.Set(state.name, state.constant);
@@ -209,10 +219,13 @@ base::Value::Dict GetNetConstants() {
   // Add information on the relationship between net error codes and their
   // symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
 
-    for (const auto& error : kNetErrors)
+    // Zero represents OK.
+    dict.Set("net::OK", 0);
+    for (const auto& error : kNetErrors) {
       dict.Set(ErrorToShortString(error), error);
+    }
 
     constants_dict.Set("netError", std::move(dict));
   }
@@ -220,7 +233,7 @@ base::Value::Dict GetNetConstants() {
   // Add information on the relationship between QUIC error codes and their
   // symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
 
     for (quic::QuicErrorCode error = quic::QUIC_NO_ERROR;
          error < quic::QUIC_LAST_ERROR;
@@ -234,7 +247,7 @@ base::Value::Dict GetNetConstants() {
   // Add information on the relationship between QUIC RST_STREAM error codes
   // and their symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
 
     for (quic::QuicRstStreamErrorCode error = quic::QUIC_STREAM_NO_ERROR;
          error < quic::QUIC_STREAM_LAST_ERROR;
@@ -248,13 +261,12 @@ base::Value::Dict GetNetConstants() {
   // Information about the relationship between event phase enums and their
   // symbolic names.
   {
-    base::Value::Dict dict;
-
-    dict.Set("PHASE_BEGIN", static_cast<int>(NetLogEventPhase::BEGIN));
-    dict.Set("PHASE_END", static_cast<int>(NetLogEventPhase::END));
-    dict.Set("PHASE_NONE", static_cast<int>(NetLogEventPhase::NONE));
-
-    constants_dict.Set("logEventPhase", std::move(dict));
+    constants_dict.Set(
+        "logEventPhase",
+        base::DictValue()
+            .Set("PHASE_BEGIN", static_cast<int>(NetLogEventPhase::BEGIN))
+            .Set("PHASE_END", static_cast<int>(NetLogEventPhase::END))
+            .Set("PHASE_NONE", static_cast<int>(NetLogEventPhase::NONE)));
   }
 
   // Information about the relationship between source type enums and
@@ -264,19 +276,18 @@ base::Value::Dict GetNetConstants() {
   // Information about the relationship between address family enums and
   // their symbolic names.
   {
-    base::Value::Dict dict;
-
-    dict.Set("ADDRESS_FAMILY_UNSPECIFIED", ADDRESS_FAMILY_UNSPECIFIED);
-    dict.Set("ADDRESS_FAMILY_IPV4", ADDRESS_FAMILY_IPV4);
-    dict.Set("ADDRESS_FAMILY_IPV6", ADDRESS_FAMILY_IPV6);
-
-    constants_dict.Set("addressFamily", std::move(dict));
+    constants_dict.Set(
+        "addressFamily",
+        base::DictValue()
+            .Set("ADDRESS_FAMILY_UNSPECIFIED", ADDRESS_FAMILY_UNSPECIFIED)
+            .Set("ADDRESS_FAMILY_IPV4", ADDRESS_FAMILY_IPV4)
+            .Set("ADDRESS_FAMILY_IPV6", ADDRESS_FAMILY_IPV6));
   }
 
   // Information about the relationship between DnsQueryType enums and their
   // symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
     for (const auto& type : kDnsQueryTypes) {
       dict.Set(type.second, static_cast<int>(type.first));
     }
@@ -286,7 +297,7 @@ base::Value::Dict GetNetConstants() {
   // Information about the relationship between SecureDnsMode enums and their
   // symbolic names.
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
     for (const auto& mode : kSecureDnsModes) {
       dict.Set(mode.second, static_cast<int>(mode.first));
     }
@@ -317,7 +328,11 @@ base::Value::Dict GetNetConstants() {
   // TODO(eroman): Is this needed?
   // "clientInfo" key is required for some log readers. Provide a default empty
   // value for compatibility.
-  constants_dict.Set("clientInfo", base::Value::Dict());
+  constants_dict.Set("clientInfo", base::DictValue());
+
+  if (request_mode == NetConstantsRequestMode::kTracing) {
+    return constants_dict;
+  }
 
   // Add a list of field experiments active at the start of the capture.
   // Additional trials may be enabled later in the browser session.
@@ -326,11 +341,11 @@ base::Value::Dict GetNetConstants() {
   return constants_dict;
 }
 
-NET_EXPORT base::Value::Dict GetNetInfo(URLRequestContext* context) {
+NET_EXPORT base::DictValue GetNetInfo(URLRequestContext* context) {
   // May only be called on the context's thread.
   context->AssertCalledOnValidThread();
 
-  base::Value::Dict net_info_dict =
+  base::DictValue net_info_dict =
       context->proxy_resolution_service()->GetProxyNetLogValues();
 
   // Log Host Resolver info.
@@ -339,28 +354,25 @@ NET_EXPORT base::Value::Dict GetNetInfo(URLRequestContext* context) {
     DCHECK(host_resolver);
     HostCache* cache = host_resolver->GetHostCache();
     if (cache) {
-      base::Value::Dict dict;
-      base::Value dns_config = host_resolver->GetDnsConfigAsValue();
-      dict.Set("dns_config", std::move(dns_config));
-
-      base::Value::Dict cache_info_dict;
-      base::Value::List cache_contents_list;
-
-      cache_info_dict.Set("capacity", static_cast<int>(cache->max_entries()));
-      cache_info_dict.Set("network_changes", cache->network_changes());
-
+      base::ListValue cache_contents_list;
       cache->GetList(cache_contents_list, true /* include_staleness */,
                      HostCache::SerializationType::kDebug);
-      cache_info_dict.Set("entries", std::move(cache_contents_list));
 
-      dict.Set("cache", std::move(cache_info_dict));
-      net_info_dict.Set(kNetInfoHostResolver, std::move(dict));
+      net_info_dict.Set(
+          kNetInfoHostResolver,
+          base::DictValue()
+              .Set("dns_config", host_resolver->GetDnsConfigAsValue())
+              .Set("cache",
+                   base::DictValue()
+                       .Set("capacity", static_cast<int>(cache->max_entries()))
+                       .Set("network_changes", cache->network_changes())
+                       .Set("entries", std::move(cache_contents_list))));
     }
 
     // Construct a list containing the names of the disabled DoH providers.
-    base::Value::List disabled_doh_providers_list;
+    base::ListValue disabled_doh_providers_list;
     for (const DohProviderEntry* provider : DohProviderEntry::GetList()) {
-      if (!base::FeatureList::IsEnabled(provider->feature)) {
+      if (!base::FeatureList::IsEnabled(provider->feature.get())) {
         disabled_doh_providers_list.Append(
             NetLogStringValue(provider->provider));
       }
@@ -378,16 +390,22 @@ NET_EXPORT base::Value::Dict GetNetInfo(URLRequestContext* context) {
                       http_network_session->SocketPoolInfoToValue());
   }
 
+  // Log HttpStreamPool info.
+  if (http_network_session->http_stream_pool()) {
+    net_info_dict.Set(
+        kNetInfoHttpStreamPool,
+        http_network_session->http_stream_pool()->GetInfoAsValue());
+  }
+
   // Log SPDY Sessions.
   {
     net_info_dict.Set(kNetInfoSpdySessions,
-                      base::Value::FromUniquePtrValue(
-                          http_network_session->SpdySessionPoolInfoToValue()));
+                      http_network_session->SpdySessionPoolInfoToValue());
   }
 
   // Log SPDY status.
   {
-    base::Value::Dict status_dict;
+    base::DictValue status_dict;
 
     status_dict.Set("enable_http2",
                     http_network_session->params().enable_http2);
@@ -406,11 +424,10 @@ NET_EXPORT base::Value::Dict GetNetInfo(URLRequestContext* context) {
     const SSLConfig::ApplicationSettings& application_settings =
         http_network_session->GetApplicationSettings();
     if (!application_settings.empty()) {
-      base::Value::Dict application_settings_dict;
+      base::DictValue application_settings_dict;
       for (const auto& setting : application_settings) {
-        application_settings_dict.Set(
-            NextProtoToString(setting.first),
-            base::HexEncode(setting.second.data(), setting.second.size()));
+        application_settings_dict.Set(NextProtoToString(setting.first),
+                                      base::HexEncode(setting.second));
       }
       status_dict.Set("application_settings",
                       std::move(application_settings_dict));
@@ -433,8 +450,8 @@ NET_EXPORT base::Value::Dict GetNetInfo(URLRequestContext* context) {
 
   // Log HTTP Cache info.
   {
-    base::Value::Dict info_dict;
-    base::Value::Dict stats_dict;
+    base::DictValue info_dict;
+    base::DictValue stats_dict;
 
     disk_cache::Backend* disk_cache = GetDiskCacheBackend(context);
 
@@ -466,15 +483,13 @@ NET_EXPORT base::Value::Dict GetNetInfo(URLRequestContext* context) {
       }
       net_info_dict.Set(kNetInfoReporting, std::move(reporting_value));
     } else {
-      base::Value::Dict reporting_dict;
-      reporting_dict.Set("reportingEnabled", false);
-      net_info_dict.Set(kNetInfoReporting, std::move(reporting_dict));
+      net_info_dict.Set(kNetInfoReporting,
+                        base::DictValue().Set("reportingEnabled", false));
     }
 
 #else   // BUILDFLAG(ENABLE_REPORTING)
-    base::Value::Dict reporting_dict;
-    reporting_dict.Set("reportingEnabled", false);
-    net_info_dict.Set(kNetInfoReporting, std::move(reporting_dict));
+    net_info_dict.Set(kNetInfoReporting,
+                      base::DictValue().Set("reportingEnabled", false));
 #endif  // BUILDFLAG(ENABLE_REPORTING)
   }
 
@@ -495,7 +510,7 @@ NET_EXPORT void CreateNetLogEntriesForActiveObjects(
     context->AssertCalledOnValidThread();
     // Contexts should all be using the same NetLog.
     DCHECK_EQ((*contexts.begin())->net_log(), context->net_log());
-    for (auto* request : *context->url_requests()) {
+    for (const URLRequest* request : *context->url_requests()) {
       requests.push_back(request);
     }
   }
@@ -505,11 +520,24 @@ NET_EXPORT void CreateNetLogEntriesForActiveObjects(
 
   // Create fake events.
   for (auto* request : requests) {
+    // Use default capture mode for simplicity. Can't call capture_mode() on
+    // `observer` because this method is typically called just before it starts
+    // observing, so it would CHECK. The capture mode only affects inlined
+    // credentials in the URL, which are pretty rare, so simplest to always
+    // redact them here. Can change later if needed.
     NetLogEntry entry(NetLogEventType::REQUEST_ALIVE,
                       request->net_log().source(), NetLogEventPhase::BEGIN,
-                      request->creation_time(), request->GetStateAsValue());
+                      request->creation_time(),
+                      request->GetStateAsValue(NetLogCaptureMode::kDefault));
     observer->OnAddEntry(entry);
   }
+}
+
+perfetto::Flow NetLogWithSourceToFlow(const NetLogWithSource& net_log) {
+  const uint64_t flow_id =
+      (reinterpret_cast<uint64_t>(net_log.net_log()) << 32) |
+      net_log.source().id;
+  return perfetto::Flow::ProcessScoped(flow_id);
 }
 
 }  // namespace net

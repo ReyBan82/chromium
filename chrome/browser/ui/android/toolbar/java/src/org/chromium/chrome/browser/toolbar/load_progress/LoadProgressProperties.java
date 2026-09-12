@@ -6,18 +6,21 @@ package org.chromium.chrome.browser.toolbar.load_progress;
 
 import androidx.annotation.IntDef;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.modelutil.PropertyKey;
-import org.chromium.ui.modelutil.PropertyModel;
+import org.chromium.ui.modelutil.PropertyModel.WritableFloatPropertyKey;
+import org.chromium.ui.modelutil.PropertyModel.WritableIntDefPropertyKey;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
 /** List of load progress bar properties. */
+@NullMarked
 class LoadProgressProperties {
     @IntDef({
-            CompletionState.UNFINISHED,
-            CompletionState.FINISHED_DO_ANIMATE,
-            CompletionState.FINISHED_DONT_ANIMATE,
+        CompletionState.UNFINISHED,
+        CompletionState.FINISHED_DO_ANIMATE,
+        CompletionState.FINISHED_DONT_ANIMATE,
     })
     @Retention(RetentionPolicy.SOURCE)
     public @interface CompletionState {
@@ -25,9 +28,9 @@ class LoadProgressProperties {
         int FINISHED_DO_ANIMATE = 1;
         int FINISHED_DONT_ANIMATE = 2;
     }
-    public static final PropertyModel.WritableIntPropertyKey COMPLETION_STATE =
-            new PropertyModel.WritableIntPropertyKey();
-    public static final PropertyModel.WritableFloatPropertyKey PROGRESS =
-            new PropertyModel.WritableFloatPropertyKey();
+
+    public static final WritableIntDefPropertyKey<CompletionState> COMPLETION_STATE =
+            new WritableIntDefPropertyKey<>(CompletionState.UNFINISHED);
+    public static final WritableFloatPropertyKey PROGRESS = new WritableFloatPropertyKey();
     static final PropertyKey[] ALL_KEYS = {COMPLETION_STATE, PROGRESS};
 }

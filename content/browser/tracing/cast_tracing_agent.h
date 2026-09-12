@@ -5,29 +5,13 @@
 #ifndef CONTENT_BROWSER_TRACING_CAST_TRACING_AGENT_H_
 #define CONTENT_BROWSER_TRACING_CAST_TRACING_AGENT_H_
 
-#include <memory>
-#include <set>
-#include <string>
-
-#include "services/tracing/public/cpp/base_agent.h"
+#include "base/feature_list.h"
 
 namespace content {
 
-// TODO(crbug.com/839086): Remove once we have replaced the legacy tracing
-// service with perfetto.
-class CastTracingAgent : public tracing::BaseAgent {
- public:
-  CastTracingAgent();
+void RegisterCastTracingDataSource();
 
-  CastTracingAgent(const CastTracingAgent&) = delete;
-  CastTracingAgent& operator=(const CastTracingAgent&) = delete;
-
-  ~CastTracingAgent() override;
-
- private:
-  // tracing::BaseAgent implementation.
-  void GetCategories(std::set<std::string>* category_set) override;
-};
+BASE_DECLARE_FEATURE(kCastTracingDataSource);
 
 }  // namespace content
 

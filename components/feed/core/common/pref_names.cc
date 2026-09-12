@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
@@ -33,33 +34,27 @@ const char kThrottlerLastRequestTime[] =
     "feedv2.request_throttler.last_request_time";
 const char kDebugStreamData[] = "feedv2.debug_stream_data";
 const char kRequestSchedule[] = "feedv2.request_schedule";
-const char kWebFeedsRequestSchedule[] = "webfeed.request_schedule";
 const char kMetricsData[] = "feedv2.metrics_data";
 const char kClientInstanceId[] = "feedv2.client_instance_id";
 // This pref applies to all discover APIs despite the string.
 const char kDiscoverAPIEndpointOverride[] = "feedv2.actions_endpoint_override";
-const char kEnableWebFeedFollowIntroDebug[] =
-    "webfeed_follow_intro_debug.enable";
 const char kReliabilityLoggingIdSalt[] = "feedv2.reliability_logging_id_salt";
 const char kHasStoredData[] = "feedv2.has_stored_data";
-const char kWebFeedContentOrder[] = "webfeed.content_order";
-const char kLastSeenFeedType[] = "feedv2.last_seen_feed_type";
 const char kFeedOnDeviceUserActionsCollector[] = "feed.user_actions_collection";
 const char kInfoCardStates[] = "feed.info_card_states";
-const char kHasSeenWebFeed[] = "webfeed.has_seen_feed";
-const char kLastBadgeAnimationTime[] = "webfeed.last_badge_animation_time";
-const char kExperimentsV2[] = "feedv2.experiments_v2";
+const char kExperimentsV3[] = "feedv2.experiments_v3";
+const char kInfoCardTrackingStateDict[] = "info-card-tracking-state-dict";
 
-// Deprecated October 2022
-const char kExperimentsDeprecated[] = "feedv2.experiments";
+// Deprecated June 2024
+const char kExperimentsV2Deprecated[] = "feedv2.experiments_v2";
 
 }  // namespace prefs
 
 // Deprecated prefs:
 namespace {
 
-void RegisterObsoletePrefsOct_2022(PrefRegistrySimple* registry) {
-  registry->RegisterDictionaryPref(prefs::kExperimentsDeprecated);
+void RegisterObsoletePrefsJun_2024(PrefRegistrySimple* registry) {
+  registry->RegisterDictionaryPref(prefs::kExperimentsV2Deprecated);
 }
 
 }  // namespace
@@ -72,7 +67,6 @@ void RegisterProfilePrefs(PrefRegistrySimple* registry) {
                              base::Time());
   registry->RegisterStringPref(feed::prefs::kDebugStreamData, std::string());
   registry->RegisterDictionaryPref(feed::prefs::kRequestSchedule);
-  registry->RegisterDictionaryPref(feed::prefs::kWebFeedsRequestSchedule);
   registry->RegisterDictionaryPref(feed::prefs::kMetricsData);
   registry->RegisterStringPref(feed::prefs::kClientInstanceId, "");
   registry->RegisterStringPref(feed::prefs::kDiscoverAPIEndpointOverride, "");
@@ -82,42 +76,20 @@ void RegisterProfilePrefs(PrefRegistrySimple* registry) {
 
   registry->RegisterIntegerPref(feed::prefs::kNoticeCardViewsCount, 0);
   registry->RegisterIntegerPref(feed::prefs::kNoticeCardClicksCount, 0);
-  registry->RegisterBooleanPref(feed::prefs::kEnableWebFeedFollowIntroDebug,
-                                false);
   registry->RegisterUint64Pref(feed::prefs::kReliabilityLoggingIdSalt, 0);
   registry->RegisterBooleanPref(feed::prefs::kHasStoredData, false);
-  registry->RegisterIntegerPref(feed::prefs::kWebFeedContentOrder, 0);
-  registry->RegisterIntegerPref(feed::prefs::kLastSeenFeedType, 0);
   registry->RegisterListPref(feed::prefs::kFeedOnDeviceUserActionsCollector,
                              PrefRegistry::LOSSY_PREF);
   registry->RegisterDictionaryPref(feed::prefs::kInfoCardStates, 0);
-  registry->RegisterBooleanPref(feed::prefs::kHasSeenWebFeed, false);
-  registry->RegisterTimePref(feed::prefs::kLastBadgeAnimationTime,
-                             base::Time());
-  registry->RegisterDictionaryPref(feed::prefs::kExperimentsV2);
+  registry->RegisterDictionaryPref(feed::prefs::kExperimentsV3);
+  registry->RegisterDictionaryPref(feed::prefs::kInfoCardTrackingStateDict);
 
 #if BUILDFLAG(IS_IOS)
   registry->RegisterBooleanPref(feed::prefs::kLastFetchHadLoggingEnabled,
                                 false);
 #endif  // BUILDFLAG(IS_IOS)
 
-  RegisterObsoletePrefsOct_2022(registry);
-}
-
-void MigrateObsoleteProfilePrefsOct_2022(PrefService* prefs) {
-  const base::Value* val =
-      prefs->GetUserPrefValue(prefs::kExperimentsDeprecated);
-  const base::Value::Dict* old = val ? val->GetIfDict() : nullptr;
-  if (old) {
-    base::Value::Dict dict;
-    for (const auto kv : *old) {
-      base::Value::List list;
-      list.Append(kv.second.GetString());
-      dict.Set(kv.first, std::move(list));
-    }
-    prefs->SetDict(feed::prefs::kExperimentsV2, std::move(dict));
-  }
-  prefs->ClearPref(prefs::kExperimentsDeprecated);
+  RegisterObsoletePrefsJun_2024(registry);
 }
 
 }  // namespace feed

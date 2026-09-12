@@ -4,10 +4,11 @@
 
 #include "third_party/blink/renderer/modules/credentialmanagement/credential_manager_proxy.h"
 
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -16,9 +17,9 @@ CredentialManagerProxy::CredentialManagerProxy(LocalDOMWindow& window)
       authenticator_(window.GetExecutionContext()),
       credential_manager_(window.GetExecutionContext()),
       webotp_service_(window.GetExecutionContext()),
-      payment_credential_(window.GetExecutionContext()),
-      federated_auth_request_(window.GetExecutionContext()),
-      fedcm_logout_request_(window.GetExecutionContext()) {}
+      spc_service_(window.GetExecutionContext()),
+      federated_request_service_(window.GetExecutionContext()),
+      digital_identity_request_(window.GetExecutionContext()) {}
 
 CredentialManagerProxy::~CredentialManagerProxy() = default;
 
@@ -55,16 +56,16 @@ mojom::blink::WebOTPService* CredentialManagerProxy::WebOTPService() {
   return webotp_service_.get();
 }
 
-payments::mojom::blink::PaymentCredential*
-CredentialManagerProxy::PaymentCredential() {
-  if (!payment_credential_.is_bound()) {
+payments::mojom::blink::SecurePaymentConfirmationService*
+CredentialManagerProxy::SecurePaymentConfirmationService() {
+  if (!spc_service_.is_bound()) {
     LocalFrame* frame = GetSupplementable()->GetFrame();
     DCHECK(frame);
     frame->GetBrowserInterfaceBroker().GetInterface(
-        payment_credential_.BindNewPipeAndPassReceiver(
+        spc_service_.BindNewPipeAndPassReceiver(
             frame->GetTaskRunner(TaskType::kMiscPlatformAPI)));
   }
-  return payment_credential_.get();
+  return spc_service_.get();
 }
 
 template <typename Interface>
@@ -83,35 +84,31 @@ void CredentialManagerProxy::BindRemoteForFedCm(
   remote.set_disconnect_handler(std::move(disconnect_closure));
 }
 
-mojom::blink::FederatedAuthRequest*
-CredentialManagerProxy::FederatedAuthRequest() {
+mojom::blink::FederatedRequestService*
+CredentialManagerProxy::FederatedRequestService() {
   BindRemoteForFedCm(
-      federated_auth_request_,
-      WTF::BindOnce(
-          &CredentialManagerProxy::OnFederatedAuthRequestConnectionError,
+      federated_request_service_,
+      BindOnce(
+          &CredentialManagerProxy::OnFederatedRequestServiceConnectionError,
           WrapWeakPersistent(this)));
-  return federated_auth_request_.get();
+  return federated_request_service_.get();
 }
 
-mojom::blink::FederatedAuthRequest*
-CredentialManagerProxy::FedCmLogoutRpsRequest() {
+void CredentialManagerProxy::OnFederatedRequestServiceConnectionError() {
+  federated_request_service_.reset();
+}
+
+mojom::blink::DigitalIdentityRequest*
+CredentialManagerProxy::DigitalIdentityRequest() {
   BindRemoteForFedCm(
-      fedcm_logout_request_,
-      WTF::BindOnce(&CredentialManagerProxy::OnFedCmLogoutConnectionError,
-                    WrapWeakPersistent(this)));
-  return fedcm_logout_request_.get();
+      digital_identity_request_,
+      BindOnce(&CredentialManagerProxy::OnDigitalIdentityRequestConnectionError,
+               WrapWeakPersistent(this)));
+  return digital_identity_request_.get();
 }
 
-void CredentialManagerProxy::OnFederatedAuthRequestConnectionError() {
-  federated_auth_request_.reset();
-  // TODO(crbug.com/1275769): Cache the resolver and resolve the promise with an
-  // appropriate error message.
-}
-
-void CredentialManagerProxy::OnFedCmLogoutConnectionError() {
-  fedcm_logout_request_.reset();
-  // TODO(crbug.com/1275769): Cache the resolver and resolve the promise with an
-  // appropriate error message.
+void CredentialManagerProxy::OnDigitalIdentityRequestConnectionError() {
+  digital_identity_request_.reset();
 }
 
 // TODO(crbug.com/1372275): Replace From(ScriptState*) with
@@ -153,9 +150,9 @@ void CredentialManagerProxy::Trace(Visitor* visitor) const {
   visitor->Trace(authenticator_);
   visitor->Trace(credential_manager_);
   visitor->Trace(webotp_service_);
-  visitor->Trace(payment_credential_);
-  visitor->Trace(federated_auth_request_);
-  visitor->Trace(fedcm_logout_request_);
+  visitor->Trace(spc_service_);
+  visitor->Trace(federated_request_service_);
+  visitor->Trace(digital_identity_request_);
   Supplement<LocalDOMWindow>::Trace(visitor);
 }
 

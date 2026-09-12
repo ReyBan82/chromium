@@ -8,7 +8,10 @@
 #include <lib/fidl/cpp/binding_set.h>
 #include <lib/fpromise/promise.h>
 
+#include <optional>
+
 #include "base/containers/flat_set.h"
+#include "base/containers/span.h"
 #include "base/containers/unique_ptr_adapters.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
@@ -23,8 +26,9 @@
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
+#include "crypto/hash.h"
+#include "media/base/media_switches.h"
 #include "media/mojo/services/fuchsia_cdm_provisioning_fetcher_impl.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/origin.h"
 
 namespace media {
@@ -64,7 +68,7 @@ CdmDirectoryInfo GetCdmDirectoryInfo(const base::FilePath& path) {
 
 void ApplyCdmStorageQuota(base::FilePath cdm_data_path,
                           uint64_t cdm_data_quota_bytes) {
-  // TODO(crbug.com/1148334): Migrate to using a platform-provided quota
+  // TODO(crbug.com/42050202): Migrate to using a platform-provided quota
   // mechanism to manage CDM storage.
   VLOG(2) << "Enumerating CDM data directories.";
 
@@ -129,12 +133,15 @@ void ApplyCdmStorageQuota(base::FilePath cdm_data_path,
 }
 
 std::string HexEncodeHash(const std::string& name) {
-  uint32_t hash = base::PersistentHash(name);
-  return base::HexEncode(&hash, sizeof(uint32_t));
+  return base::HexEncode(base::byte_span_from_ref(base::PersistentHash(name)));
+}
+
+std::string HexEncodeSecureHash(const std::string& name) {
+  return base::HexEncode(base::byte_span_from_ref(crypto::hash::Sha256(name)));
 }
 
 // Returns a nullopt if storage was created successfully.
-absl::optional<base::File::Error> CreateStorageDirectory(base::FilePath path) {
+std::optional<base::File::Error> CreateStorageDirectory(base::FilePath path) {
   base::File::Error error;
   bool success = base::CreateDirectoryAndGetError(path, &error);
   if (!success) {
@@ -178,7 +185,7 @@ class FuchsiaCdmManager::KeySystemClient {
       CreateFetcherCB create_fetcher_callback,
       fidl::InterfaceRequest<fuchsia::media::drm::ContentDecryptionModule>
           request) {
-    absl::optional<DataStoreId> data_store_id = GetDataStoreIdForPath(
+    std::optional<DataStoreId> data_store_id = GetDataStoreIdForPath(
         std::move(storage_path), std::move(create_fetcher_callback));
     if (!data_store_id) {
       request.Close(ZX_ERR_NO_RESOURCES);
@@ -196,7 +203,7 @@ class FuchsiaCdmManager::KeySystemClient {
  private:
   using DataStoreId = uint32_t;
 
-  absl::optional<DataStoreId> GetDataStoreIdForPath(
+  std::optional<DataStoreId> GetDataStoreIdForPath(
       base::FilePath storage_path,
       CreateFetcherCB create_fetcher_callback) {
     // If we have already added a data store id for that path, just use that
@@ -210,7 +217,7 @@ class FuchsiaCdmManager::KeySystemClient {
         base::OpenDirectoryHandle(storage_path);
     if (!data_directory.is_valid()) {
       DLOG(ERROR) << "Unable to OpenDirectory " << storage_path;
-      return absl::nullopt;
+      return std::nullopt;
     }
 
     auto provisioning_fetcher =
@@ -280,7 +287,7 @@ FuchsiaCdmManager* FuchsiaCdmManager::GetInstance() {
 FuchsiaCdmManager::FuchsiaCdmManager(
     CreateKeySystemCallbackMap create_key_system_callbacks_by_name,
     base::FilePath cdm_data_path,
-    absl::optional<uint64_t> cdm_data_quota_bytes)
+    std::optional<uint64_t> cdm_data_quota_bytes)
     : create_key_system_callbacks_by_name_(
           std::move(create_key_system_callbacks_by_name)),
       cdm_data_path_(std::move(cdm_data_path)),
@@ -297,6 +304,11 @@ FuchsiaCdmManager::FuchsiaCdmManager(
 
   DCHECK(!g_fuchsia_cdm_manager_instance);
   g_fuchsia_cdm_manager_instance = this;
+  if (base::FeatureList::IsEnabled(kFuchsiaCdmStoragePathMigration)) {
+    DLOG(WARNING) << "Fuchsia CDM storage path migration is ENABLED.";
+  } else {
+    DLOG(WARNING) << "Fuchsia CDM storage path migration is DISABLED.";
+  }
 }
 
 FuchsiaCdmManager::~FuchsiaCdmManager() {
@@ -365,8 +377,41 @@ FuchsiaCdmManager::KeySystemClient* FuchsiaCdmManager::CreateKeySystemClient(
 
 base::FilePath FuchsiaCdmManager::GetStoragePath(const std::string& key_system,
                                                  const url::Origin& origin) {
-  return cdm_data_path_.Append(HexEncodeHash(origin.Serialize()))
-      .Append(HexEncodeHash(key_system));
+  std::string origin_str = origin.Serialize();
+
+  base::FilePath old_origin_path =
+      cdm_data_path_.Append(HexEncodeHash(origin_str))
+          .Append(HexEncodeHash(key_system));
+
+  if (!base::FeatureList::IsEnabled(kFuchsiaCdmStoragePathMigration)) {
+    return old_origin_path;
+  }
+
+  base::FilePath new_origin_path =
+      cdm_data_path_.Append(HexEncodeSecureHash(origin_str))
+          .Append(HexEncodeSecureHash(key_system));
+
+  // Migrate old data to the new path if necessary.
+  if (base::DirectoryExists(old_origin_path) &&
+      !base::DirectoryExists(new_origin_path)) {
+    bool migration_succeeded = base::CreateDirectory(new_origin_path);
+    migration_succeeded =
+        migration_succeeded && base::Move(old_origin_path, new_origin_path);
+
+    if (!migration_succeeded) {
+      DLOG(ERROR) << "Failed to migrate CDM storage from " << old_origin_path
+                  << " to " << new_origin_path;
+    }
+  }
+
+  // Delete old data if necessary.
+  if (base::DirectoryExists(old_origin_path)) {
+    if (!base::DeletePathRecursively(old_origin_path)) {
+      DLOG(ERROR) << "Failed to delete CDM storage at " << old_origin_path;
+    }
+  }
+
+  return new_origin_path;
 }
 
 void FuchsiaCdmManager::CreateCdm(
@@ -375,7 +420,7 @@ void FuchsiaCdmManager::CreateCdm(
     fidl::InterfaceRequest<fuchsia::media::drm::ContentDecryptionModule>
         request,
     base::FilePath storage_path,
-    absl::optional<base::File::Error> storage_creation_error) {
+    std::optional<base::File::Error> storage_creation_error) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   if (storage_creation_error) {

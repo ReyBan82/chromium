@@ -7,6 +7,7 @@
 
 #include "base/component_export.h"
 #include "base/time/time.h"
+#include "build/build_config.h"
 #include "ui/base/class_property.h"
 
 namespace wm {
@@ -21,6 +22,12 @@ enum WindowVisibilityAnimationTransition {
 };
 
 // Alphabetical sort.
+
+#if BUILDFLAG(IS_WIN)
+// A property to tell if the window should be excluded from screen capture.
+COMPONENT_EXPORT(UI_WM)
+extern const ui::ClassProperty<bool>* const kExcludeFromScreenCaptureKey;
+#endif
 
 // Property to tell if the container uses screen coordinates for the child
 // windows.
@@ -47,11 +54,18 @@ extern const ui::ClassProperty<float>* const
 COMPONENT_EXPORT(UI_WM)
 extern const ui::ClassProperty<int32_t>* const kWindowHidingAnimationCountKey;
 
+COMPONENT_EXPORT(UI_WM)
+extern const ui::ClassProperty<bool>* const kPersistableKey;
+
 }  // namespace wm
 
-// These need to be declared here for jumbo builds.
+// Declare template specializations introduced by WM here to make sure that the
+// compiler knows about them before the first template instance use. Using a
+// template instance before its specialization is declared in a translation unit
+// is an error.
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(COMPONENT_EXPORT(UI_WM),
+                                        base::TimeDelta)
 DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(COMPONENT_EXPORT(UI_WM),
                                         wm::WindowVisibilityAnimationTransition)
-DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(COMPONENT_EXPORT(UI_WM), float)
 
 #endif  // UI_WM_CORE_WINDOW_PROPERTIES_H_

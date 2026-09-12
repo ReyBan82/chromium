@@ -6,13 +6,15 @@
 #define SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_COPY_OUTPUT_REQUEST_MOJOM_TRAITS_H_
 
 #include <memory>
+#include <optional>
 
+#include "base/types/expected.h"
 #include "components/viz/common/frame_sinks/copy_output_request.h"
 #include "mojo/public/cpp/base/unguessable_token_mojom_traits.h"
+#include "mojo/public/cpp/bindings/deserialization_error.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/viz/public/cpp/compositing/copy_output_result_mojom_traits.h"
 #include "services/viz/public/mojom/compositing/copy_output_request.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/mojom/geometry_mojom_traits.h"
 
 namespace mojo {
@@ -40,26 +42,32 @@ struct StructTraits<viz::mojom::CopyOutputRequestDataView,
     return request->scale_to();
   }
 
-  static const absl::optional<base::UnguessableToken>& source(
+  static const std::optional<base::UnguessableToken>& source(
       const std::unique_ptr<viz::CopyOutputRequest>& request) {
     return request->source_;
   }
 
-  static const absl::optional<gfx::Rect>& area(
+  static const std::optional<gfx::Rect>& area(
       const std::unique_ptr<viz::CopyOutputRequest>& request) {
     return request->area_;
   }
 
-  static const absl::optional<gfx::Rect>& result_selection(
+  static const std::optional<gfx::Rect>& result_selection(
       const std::unique_ptr<viz::CopyOutputRequest>& request) {
     return request->result_selection_;
+  }
+
+  static const std::optional<viz::BlitRequest>& blit_request(
+      const std::unique_ptr<viz::CopyOutputRequest>& request) {
+    return request->blit_request_;
   }
 
   static mojo::PendingRemote<viz::mojom::CopyOutputResultSender> result_sender(
       const std::unique_ptr<viz::CopyOutputRequest>& request);
 
-  static bool Read(viz::mojom::CopyOutputRequestDataView data,
-                   std::unique_ptr<viz::CopyOutputRequest>* out_p);
+  static base::expected<void, DeserializationError> Read(
+      viz::mojom::CopyOutputRequestDataView data,
+      std::unique_ptr<viz::CopyOutputRequest>* out_p);
 };
 
 }  // namespace mojo

@@ -271,7 +271,8 @@ class TestMockTimeTaskRunner : public SingleThreadTaskRunner,
 
   typedef std::priority_queue<TestOrderedPendingTask,
                               std::vector<TestOrderedPendingTask>,
-                              TemporalOrder> TaskPriorityQueue;
+                              TemporalOrder>
+      TaskPriorityQueue;
 
   // Core of the implementation for all flavors of fast-forward methods. Given a
   // non-negative |max_delta|, processes up to |limit| tasks with a remaining
@@ -290,8 +291,8 @@ class TestMockTimeTaskRunner : public SingleThreadTaskRunner,
   // Returns the |next_task| to run if there is any with a running time that is
   // at most |reference| + |max_delta|. This additional complexity is required
   // so that |max_delta| == TimeDelta::Max() can be supported.
-  bool DequeueNextTask(const TimeTicks& reference,
-                       const TimeDelta& max_delta,
+  bool DequeueNextTask(TimeTicks reference,
+                       TimeDelta max_delta,
                        TestPendingTask* next_task);
 
   // RunLoop::Delegate:

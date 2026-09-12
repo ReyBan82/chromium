@@ -7,6 +7,13 @@ input about user behavior. Whenever the frontend gives a trigger signal that
 in-product help could be displayed, the backend will provide an answer to
 whether it is appropriate to show it or not.
 
+**Important Note for Desktop Developers:** This system is not used directly on
+Desktop. Instead, use the [User Education](/components/user_education/README.md)
+component. If you need to create UI that uses Feature Engagement outside of User
+Education, please use
+[NonIphPromo](/chrome/browser/feature_engagement/non_iph_promo.h)
+rather than calling this system directly.
+
 [TOC]
 
 ## Objectives
@@ -74,7 +81,7 @@ In addition, since each feature might have preconditions that must be met within
 the time window configured for the experiment, the frontend needs to inform the
 backend whenever such events happen.
 
-To ensure that it is possible to use whether a feature has been used or not as
+To ensure that it is possible to know whether a feature has been used or not as
 input to the algorithm to decide whether to show IPH and for tracking purposes,
 the frontend needs to inform whenever the feature has been used.
 
@@ -98,8 +105,33 @@ All of the local tracking of data will happen per Chrome user profile.
 
 ## Developing a new In-Product Help Feature
 
-You need to do the following things to enable your feature, all described in
-detail below.
+### The Easy Way (Recommended)
+
+We have a helper script that automates almost all of the boilerplate setup. It
+will register your feature, add it to the required lists, and set up the basic
+UMA configurations.
+
+Just run:
+```sh
+python3 tools/feature_engagement/generate_iph_entry.py
+```
+
+It will prompt you for a feature name (e.g., `GoatTeleportation`), a
+description, and whether you want to export to Java (choose yes if your IPH
+is used on Android).
+
+After it runs, you will still need to:
+1.  Fill in the `TODO`s it left in `feature_configurations.cc` (and
+`EventConstants.java` if you opted for Java export) to define your feature's
+specific rules.
+2.  Start using the tracker in your code to trigger the IPH (see [Using the
+ tracker](#Using-the-feature_engagement_Tracker) below).
+3.  Set up your field trial config.
+
+### The Manual Way
+
+If you prefer to do it by hand (or want to know what the script just did),
+you need to:
 
 *   [Declare your feature](#Declaring-your-feature) and make it available to the
     `feature_engagement::Tracker`.
@@ -119,7 +151,7 @@ of the constant should be of the form:
 
 1.  `kIPH` prefix
 1.  Your unique CamelCased name, for example `GoatTeleportation`.
-1.  `Feature` suffix.
+1.  `Feature` variant (suffix).
 
 The example listed above would end up as `kIPHGoatTeleportationFeature`.
 
@@ -130,6 +162,9 @@ and be on the form:
 1.  Your unique CamelCased name, for example `GoatTeleportation`.
 
 #### Required Code Changes
+
+> [!NOTE]
+> The `generate_iph_entry.py` script handles all of these code changes for you.
 
 There are also a few more places where the feature should be added, so overall
 you would have to add it to the following places:
@@ -159,7 +194,7 @@ you would have to add it to the following places:
 1.  `//components/feature_engagement/public/feature_constants.h`:
 
     ```c++
-    BASE_DECLARE_FEATURE(kIPHGoatTeleportationFeature);
+    FEATURE_CONSTANTS_DECLARE_FEATURE(kIPHGoatTeleportationFeature);
     ```
 
 1.  `//components/feature_engagement/public/feature_list.cc`:
@@ -178,33 +213,36 @@ constant.
 
 #### Required UMA Changes
 
+> [!NOTE]
+> The `generate_iph_entry.py` script handles these UMA changes for you.
+
 To enable UMA tracking, you need to make the following changes to the metrics
 configuration:
 
-1.  Add feature to the histogram variant `IPHFeatures` in:
+1.  Add feature to the histogram variant `IPHFeature` in:
     `//tools/metrics/histograms/metadata/feature_engagement/histograms.xml`.
     *   The variant name must match the `base::Feature` `name` member of your
         feature.
 2.  Add feature to the actions file at: `//tools/metrics/actions/actions.xml`.
-    *   The suffix must match the `base::Feature` `name` member with `IPH_`
-        stripped.
-    *   Find the `<action-suffix>` entry at the end of the file, where the
-        following `<affected-action>`s are listed:
+    *   In the `<variants name="InProductHelp_Type">` element, add a new
+        `<variant>`. These variants are used by the following actions:
         *   `InProductHelp.NotifyEvent.IPH`
         *   `InProductHelp.NotifyUsedEvent.IPH`
         *   `InProductHelp.ShouldTriggerHelpUI.IPH`
         *   `InProductHelp.ShouldTriggerHelpUIResult.NotTriggered.IPH`
         *   `InProductHelp.ShouldTriggerHelpUIResult.Triggered.IPH`
         *   `InProductHelp.ShouldTriggerHelpUIResult.WouldHaveTriggered.IPH`
-    *   Add an alphebetically sorted entry to the list of `<suffix>`es like:
-        `<suffix name="GoatTeleportationFeature" label="For goat teleportation
-        feature."/>`
+    *   The `name` attribute must be the `base::Feature` `name` member of
+        your feature, with `IPH` stripped and an `_` prepended.
+    *   Keep the list sorted alphabetically by name.
+    *   For a feature with name `IPH_GoatTeleportation` you would add:
+        `<variant name="_GoatTeleportation" summary="For the goat teleportation feature."/>`
 
 ### Using the feature_engagement::Tracker
 
 To retrieve the `feature_engagement::Tracker` you need to use your platform
-specific way for how to retrieve a `KeyedService`. For example for desktop
-platforms and Android, you can use the `feature_engagement::TrackerFactory` in
+specific way for how to retrieve a `KeyedService`. For example for Android, you
+can use the `feature_engagement::TrackerFactory` in
 `//chrome/browser/feature_engagement/tracker_factory.h` to retrieve it from the
 `Profile` or `BrowserContext`:
 
@@ -442,6 +480,18 @@ How to select a feature or features is described below.
     *   Enabled IPH_GoatTeleportationFeature
 1.  Restart Chrome
 
+
+## Feature Grouping
+
+Sometimes, it's desirable to have one list of rules apply to many different
+features. For example, you may have a set of 3 similar features and want to
+show one to the user each week. Each feature can declare itself part of one
+or more groups. Groups have their own extra configuration, and then when a
+feature is checked, all the group configuration properties are checked as
+well. Thus, for a feature to show, its own configuration and all of its
+groups' configurations must be met. Effectively, the strictest set of rules
+will apply.
+
 ## Configuration Format
 
 Each In-Product Help feature must have its own feature configuration
@@ -467,6 +517,7 @@ Format:
   "event_???": "{EventConfig}",
   "snooze_params": "{SnoozeParams}"
   "tracking_only": "{Boolean}"
+  "groups": {GroupList},
   "x_???": "..."
  }
 ```
@@ -543,6 +594,10 @@ into the same field trial.
     *   Enabled snooze capability for in-product help bubbles.
     *   By default, an in-product help is not snoozable and is dismissed until triggered again.
     *   See [SnoozeParams](#SnoozeParams) below for details.
+*   `groups`
+    *   List of groups this feature is part of.
+    *   The feature will be subject to all items from its groups' configurations.
+    *   See [GroupList](#GroupList) below for details.
 *   `tracking_only`
     *   Set to true if in-product help should never trigger.
     *   Tracker::ShouldTriggerHelpUI(...) will always return false, but if all
@@ -637,7 +692,7 @@ all described below:
         *   `0` Nothing should be stored.
         *   `1` |current_day| should be stored.
         *   `2+` |current_day| plus |N-1| more days should be stored.
-    *   The value should not exceed 10 years (3650 days).
+    *   The value should not exceed 10 years (3650 days, see `kMaxStoragePeriod`).
     *   Value client side data type: uint32_t
     *   Whenever a particular event is used by multiple features, the maximum
         value of all `storage` is used as the storage window.
@@ -806,6 +861,66 @@ The IPH bubble will be force dismissed after 2 snoozes, which means it will be s
 max_limit:2,snooze_interval:4
 ```
 
+### GroupList
+
+Format: `[comma-separated list]`
+
+This is a comma-separated list of group names that this feature is part of.
+
+### GroupConfig
+
+The `GroupConfig` fields `session_rate` and `event_trigger` are required, and
+there can be an arbitrary amount of other `event_???` entries. Like features,
+the group fields can also have an optional name prefix.
+
+
+```
+{
+  "session_rate": "{Comparator}",
+  "event_trigger": "{EventConfig}",
+  "event_???": "{EventConfig}",
+  "x_???": "..."
+ }
+```
+
+* `session_rate` __REQUIRED__
+    * Similar to the [FeatureConfig](#FeatureConfig) field of the same name.
+    * The count of total In-Product Help displayed in the current end user session must
+      meet all session rates: the base feature's and those of any of its groups.
+
+* `event_trigger` __REQUIRED__
+    * Similar to the [FeatureConfig](#FeatureConfig) field of the same name.
+    * Automatically increments whenever any feature in this group is triggered.
+
+* `event_???`
+    * Similar to the [FeatureConfig](#FeatureConfig) field of the same name.
+
+**Examples**
+
+There are 2 features that trigger once per month each. The overarching group causes
+only one of the 2 to trigger every week.
+
+```
+DownloadHomeIPH: {
+  "availability": ">=30",
+  "session_rate": "<1",
+  "event_used": "name:download_home_opened;comparator:any;window:90;storage:360",
+  "event_trigger": "name:download_home_iph_trigger;comparator:==0;window:30;storage:30",
+  "groups": "DownloadGroup",
+}
+DownloadCustomIPH: {
+  "availability": ">=30",
+  "session_rate": "<1",
+  "event_used": "name:download_custom_opened;comparator:any;window:90;storage:360",
+  "event_trigger": "name:download_custom_iph_trigger;comparator:==0;window:30;storage:30",
+  "groups": "DownloadGroup",
+}
+DownloadGroup: {
+  "session_rate": "<1",
+  "event_trigger": "name:download_group_trigger;comparator:==0;window:7;storage:30",
+}
+```
+
 ### Manual testing using field trial configurations
 
 Usually, the options for testing IPHs provided in
@@ -875,6 +990,18 @@ a debug build of chrome with the following command line arguments:
 --vmodule=tracker_impl*=2,event_model_impl*=2,persistent_availability_store*=2,chrome_variations_configuration*=3
 ```
 
+## Automated External Testing (Tast)
+
+If you want to restrict the IPH that can show when launching Chrome as an
+external process as part of a test, use the `--propagate-iph-for-testing`
+switch:
+
+ * `chrome --propagate-iph-for-testing`
+   - disables all IPH
+ * `chrome --propagate-iph-for-testing=IPH_GoatTeleportationFeature,IPH_FlyingCowFeature`
+   - disables all IPH except for "IPH_GoatTeleportationFeature" and
+   "IPH_FlyingCowFeature".
+
 ## Development of `//components/feature_engagement`
 
 ### Testing
@@ -918,7 +1045,7 @@ The configuration will look like this:
 In `//components/feature_engagement/public/feature_constants.h`:
 
 ```c++
-BASE_DECLARE_FEATURE(kIPHPasswordInfobarFeature);
+FEATURE_CONSTANTS_DECLARE_FEATURE(kIPHPasswordInfobarFeature);
 ```
 
 In `//components/feature_engagement/public/event_constants.h`

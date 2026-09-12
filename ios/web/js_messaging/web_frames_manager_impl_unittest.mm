@@ -12,13 +12,12 @@
 #import "ios/web/web_state/web_state_impl.h"
 #import "testing/gtest/include/gtest/gtest.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace web {
 
 namespace {
+
+constexpr char kLowercaseFrameId[] = "abba1234beef1234cafe1234deed1234";
+constexpr char kUppercaseFrameId[] = "ABBA1234BEEF1234CAFE1234DEED1234";
 
 class FakeWebFramesManagerObserver : public WebFramesManagerImpl::Observer {
  public:
@@ -33,7 +32,7 @@ class FakeWebFramesManagerObserver : public WebFramesManagerImpl::Observer {
   }
 
   void WebFrameBecameUnavailable(WebFramesManager* web_frames_manager,
-                                 const std::string frame_id) override {
+                                 const std::string& frame_id) override {
     frames_.erase(frame_id);
   }
 
@@ -59,20 +58,19 @@ class WebFramesManagerImplTest : public WebTestWithWebState {
 
   // Notifies `web_state()` of a newly available `web_frame`.
   void SendFrameBecameAvailableMessage(std::unique_ptr<WebFrame> web_frame) {
-    WebStateImpl* web_state_impl = WebStateImpl::FromWebState(web_state());
-    web_state_impl->WebFrameBecameAvailable(std::move(web_frame));
+    GetPageWorldWebFramesManager().AddFrame(std::move(web_frame));
   }
 
   // Notifies `web_state()` that the web frame with `frame_id` will become
   // unavailable.
   void SendFrameBecameUnavailableMessage(const std::string& frame_id) {
-    WebStateImpl* web_state_impl = WebStateImpl::FromWebState(web_state());
-    web_state_impl->WebFrameBecameUnavailable(frame_id);
+    GetPageWorldWebFramesManager().RemoveFrameWithId(frame_id);
   }
 
   WebFramesManagerImpl& GetPageWorldWebFramesManager() {
     WebStateImpl* web_state_impl = WebStateImpl::FromWebState(web_state());
-    return web_state_impl->GetWebFramesManagerImpl();
+    return web_state_impl->GetWebFramesManagerImpl(
+        ContentWorld::kPageContentWorld);
   }
 
  protected:
@@ -221,6 +219,41 @@ TEST_F(WebFramesManagerImplTest, RemoveNonexistantFrame) {
   WebFrame* observed_main_frame = main_frame_it->second;
   EXPECT_TRUE(observed_main_frame);
   EXPECT_EQ(main_frame, observed_main_frame);
+}
+
+// Tests that frame lookup is not case-sensitive.
+TEST_F(WebFramesManagerImplTest, CaseInsensitiveLookup) {
+  auto frame = FakeWebFrame::Create(kLowercaseFrameId,
+                                    /*is_main_frame=*/true,
+                                    GURL("https://www.main.test"));
+  SendFrameBecameAvailableMessage(std::move(frame));
+
+  EXPECT_EQ(1ul, GetPageWorldWebFramesManager().GetAllWebFrames().size());
+
+  WebFrame* frame_by_uppercase_id =
+      GetPageWorldWebFramesManager().GetFrameWithId(kUppercaseFrameId);
+  EXPECT_TRUE(frame_by_uppercase_id);
+
+  WebFrame* frame_by_lowercase_id =
+      GetPageWorldWebFramesManager().GetFrameWithId(kLowercaseFrameId);
+  EXPECT_TRUE(frame_by_lowercase_id);
+
+  EXPECT_EQ(frame_by_uppercase_id, frame_by_lowercase_id);
+}
+
+// By convention, the frame ID should be stored in lowercase internally, even if
+// it was passed as uppercase at construct-time.
+TEST_F(WebFramesManagerImplTest, CaseInsensitiveConstruct) {
+  auto frame_with_uppercase_id = FakeWebFrame::Create(
+      kUppercaseFrameId, /*is_main_frame=*/true, GURL("https://www.main.test"));
+
+  SendFrameBecameAvailableMessage(std::move(frame_with_uppercase_id));
+
+  WebFrame* frame_by_lowercase_id =
+      GetPageWorldWebFramesManager().GetFrameWithId(kLowercaseFrameId);
+  ASSERT_TRUE(frame_by_lowercase_id);
+
+  EXPECT_EQ(frame_by_lowercase_id->GetFrameId(), kLowercaseFrameId);
 }
 
 }  // namespace web

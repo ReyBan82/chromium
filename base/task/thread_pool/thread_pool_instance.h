@@ -5,17 +5,12 @@
 #ifndef BASE_TASK_THREAD_POOL_THREAD_POOL_INSTANCE_H_
 #define BASE_TASK_THREAD_POOL_THREAD_POOL_INSTANCE_H_
 
+#include <cstddef>
 #include <memory>
+#include <string_view>
 
 #include "base/base_export.h"
 #include "base/functional/callback.h"
-#include "base/gtest_prod_util.h"
-#include "base/strings/string_piece.h"
-#include "base/task/sequenced_task_runner.h"
-#include "base/task/single_thread_task_runner.h"
-#include "base/task/single_thread_task_runner_thread_mode.h"
-#include "base/task/task_runner.h"
-#include "base/task/task_traits.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 
@@ -31,8 +26,8 @@ class BrowserMainLoopTest_CreateThreadsInSingleProcess_Test;
 
 namespace base {
 
-class WorkerThreadObserver;
 class ThreadPoolTestHelpers;
+class WorkerThreadObserver;
 
 // Interface for a thread pool and static methods to manage the instance used
 // by the thread_pool.h API.
@@ -47,6 +42,11 @@ class ThreadPoolTestHelpers;
 // process's instance.
 class BASE_EXPORT ThreadPoolInstance {
  public:
+  enum class RecordLockContention {
+    kDisabled,
+    kEnabled,
+  };
+
   struct BASE_EXPORT InitParams {
     enum class CommonThreadPoolEnvironment {
       // Use the default environment (no environment).
@@ -59,16 +59,23 @@ class BASE_EXPORT ThreadPoolInstance {
 
     InitParams(size_t max_num_foreground_threads_in);
     InitParams(size_t max_num_foreground_threads_in,
-               size_t max_num_utility_threads_in);
+               size_t max_num_utility_threads_in,
+               size_t max_num_audio_threads_in);
     ~InitParams();
 
     // Maximum number of unblocked tasks that can run concurrently in the
-    // foreground thread group.
+    // foreground thread group. This is capped at 256 (and should likely not be
+    // configured anywhere close to this in a browser, approaching that limit is
+    // most useful on compute farms running tests or compiles in parallel).
     size_t max_num_foreground_threads;
 
     // Maximum number of unblocked tasks that can run concurrently in the
     // utility thread group.
     size_t max_num_utility_threads;
+
+    // Maximum number of unblocked tasks that can run concurrently in the
+    // audio thread group.
+    size_t max_num_audio_threads;
 
     // Whether COM is initialized when running sequenced and parallel tasks.
     CommonThreadPoolEnvironment common_thread_pool_environment =
@@ -97,30 +104,14 @@ class BASE_EXPORT ThreadPoolInstance {
 #endif
   };
 
-  // A Scoped(BestEffort)ExecutionFence prevents new tasks of any/BEST_EFFORT
-  // priority from being scheduled in ThreadPoolInstance within its scope.
-  // Multiple fences can exist at the same time. Upon destruction of all
-  // Scoped(BestEffort)ExecutionFences, tasks that were preeempted are released.
-  // Note: the constructor of Scoped(BestEffort)ExecutionFence will not wait for
-  // currently running tasks (as they were posted before entering this scope and
-  // do not violate the contract; some of them could be CONTINUE_ON_SHUTDOWN and
-  // waiting for them to complete is ill-advised).
-  class BASE_EXPORT ScopedExecutionFence {
+  // Used to restrict the maximum number of concurrent tasks that can run in a
+  // scope.
+  class BASE_EXPORT ScopedRestrictedTasks {
    public:
-    ScopedExecutionFence();
-    ScopedExecutionFence(const ScopedExecutionFence&) = delete;
-    ScopedExecutionFence& operator=(const ScopedExecutionFence&) = delete;
-    ~ScopedExecutionFence();
-  };
-
-  class BASE_EXPORT ScopedBestEffortExecutionFence {
-   public:
-    ScopedBestEffortExecutionFence();
-    ScopedBestEffortExecutionFence(const ScopedBestEffortExecutionFence&) =
-        delete;
-    ScopedBestEffortExecutionFence& operator=(
-        const ScopedBestEffortExecutionFence&) = delete;
-    ~ScopedBestEffortExecutionFence();
+    ScopedRestrictedTasks();
+    ScopedRestrictedTasks(const ScopedRestrictedTasks&) = delete;
+    ScopedRestrictedTasks& operator=(const ScopedRestrictedTasks&) = delete;
+    ~ScopedRestrictedTasks();
   };
 
   // Used to allow posting `BLOCK_SHUTDOWN` tasks after shutdown in a scope. The
@@ -212,27 +203,29 @@ class BASE_EXPORT ThreadPoolInstance {
   // not thread-safe; proper synchronization is required to use the
   // thread_pool.h API after registering a new ThreadPoolInstance.
 
-#if !BUILDFLAG(IS_NACL)
   // Creates and starts a thread pool using default params. |name| is used to
   // label histograms, it must not be empty. It should identify the component
   // that calls this. Start() is called by this method; it is invalid to call it
   // again afterwards. CHECKs on failure. For tests, prefer
   // base::test::TaskEnvironment (ensures isolation).
-  static void CreateAndStartWithDefaultParams(StringPiece name);
+  static void CreateAndStartWithDefaultParams(std::string_view name);
 
   // Same as CreateAndStartWithDefaultParams() but allows callers to split the
   // Create() and StartWithDefaultParams() calls. Start() is called by this
   // method; it is invalid to call it again afterwards.
   void StartWithDefaultParams();
-#endif  // !BUILDFLAG(IS_NACL)
 
   // Creates a ready to start thread pool. |name| is used to label histograms,
   // it must not be empty. It should identify the component that creates the
-  // ThreadPoolInstance. The thread pool doesn't create threads until Start() is
+  // ThreadPoolInstance. |record_lock_contention| is used to
+  // determine if lock contention metrics are recorded depending on the
+  // process type. The thread pool doesn't create threads until Start() is
   // called. Tasks can be posted at any time but will not run until after
   // Start() is called. For tests, prefer base::test::TaskEnvironment
   // (ensures isolation).
-  static void Create(StringPiece name);
+  static void Create(std::string_view name,
+                     RecordLockContention record_lock_contention =
+                         RecordLockContention::kDisabled);
 
   // Registers |thread_pool| to handle tasks posted through the thread_pool.h
   // API for this process. For tests, prefer base::test::TaskEnvironment
@@ -252,22 +245,17 @@ class BASE_EXPORT ThreadPoolInstance {
   static ThreadPoolInstance* Get();
 
  private:
+  friend class ScopedBestEffortExecutionFence;
+  friend class ScopedThreadPoolExecutionFence;
   friend class ThreadPoolTestHelpers;
   friend class gin::V8Platform;
   friend class content::BrowserMainLoopTest_CreateThreadsInSingleProcess_Test;
 
-  // Returns the maximum number of non-single-threaded non-blocked tasks posted
-  // with |traits| that can run concurrently in this thread pool. |traits|
-  // can't contain TaskPriority::BEST_EFFORT.
+  // Returns the maximum number of non-single-threaded tasks that can run
+  // concurrently in the foreground thread group.
   //
-  // Do not use this method. To process n items, post n tasks that each process
-  // 1 item rather than GetMaxConcurrentNonBlockedTasksWithTraitsDeprecated()
-  // tasks that each process
-  // n/GetMaxConcurrentNonBlockedTasksWithTraitsDeprecated() items.
-  //
-  // TODO(fdoray): Remove this method. https://crbug.com/687264
-  virtual size_t GetMaxConcurrentNonBlockedTasksWithTraitsDeprecated(
-      const TaskTraits& traits) const = 0;
+  // Do not use this method. To process n items, prefer using PostJob() API.
+  virtual size_t GetMaxConcurrentForegroundTasks() const = 0;
 
   // Starts/stops a fence that prevents scheduling of tasks of any / BEST_EFFORT
   // priority. Ongoing tasks will still be allowed to complete and not be
@@ -284,6 +272,9 @@ class BASE_EXPORT ThreadPoolInstance {
   virtual void EndFence() = 0;
   virtual void BeginBestEffortFence() = 0;
   virtual void EndBestEffortFence() = 0;
+
+  virtual void BeginRestrictedTasks() = 0;
+  virtual void EndRestrictedTasks() = 0;
 };
 
 }  // namespace base

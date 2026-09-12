@@ -6,7 +6,7 @@
 #define CHROME_BROWSER_ASH_EXTENSIONS_FILE_MANAGER_PRIVATE_API_MEDIA_PARSER_UTIL_H_
 
 #include "base/values.h"
-#include "chrome/services/media_gallery_util/public/mojom/media_parser.mojom-forward.h"
+#include "components/media_gallery_util/public/mojom/media_parser.mojom-forward.h"
 
 namespace extensions {
 
@@ -15,7 +15,7 @@ namespace api {
 namespace file_manager_private {
 
 // Converts a mojo::MediaMetadata to a MediaMetadata value.
-base::Value::Dict MojoMediaMetadataToValue(
+base::DictValue MojoMediaMetadataToValue(
     chrome::mojom::MediaMetadataPtr metadata);
 
 }  // namespace file_manager_private

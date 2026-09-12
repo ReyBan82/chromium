@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@ namespace blink {
 
 RtcEncodedVideoReceiverSourceOptimizer::RtcEncodedVideoReceiverSourceOptimizer(
     UnderlyingSourceSetter set_underlying_source,
-    WTF::CrossThreadOnceClosure disconnect_callback)
+    CrossThreadOnceClosure disconnect_callback)
     : set_underlying_source_(std::move(set_underlying_source)),
       disconnect_callback_(std::move(disconnect_callback)) {}
 

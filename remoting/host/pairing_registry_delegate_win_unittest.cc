@@ -7,8 +7,8 @@
 
 #include "remoting/host/pairing_registry_delegate_win.h"
 
-#include "base/guid.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/uuid.h"
 #include "base/values.h"
 #include "base/win/registry.h"
 #include "base/win/shlwapi.h"
@@ -21,7 +21,7 @@ using protocol::PairingRegistry;
 class PairingRegistryDelegateWinTest : public testing::Test {
  public:
   void SetUp() override {
-    key_name_ = base::GenerateGUID();
+    key_name_ = base::Uuid::GenerateRandomV4().AsLowercaseString();
 
     base::win::RegKey root;
     EXPECT_TRUE(root.Create(HKEY_CURRENT_USER,
@@ -78,7 +78,7 @@ TEST_F(PairingRegistryDelegateWinTest, SaveAndLoad) {
 
   // Verify that the only remaining value is |pairing2|.
   EXPECT_EQ(delegate->LoadAll().size(), 1u);
-  base::Value::List pairings = delegate->LoadAll();
+  base::ListValue pairings = delegate->LoadAll();
   ASSERT_TRUE(pairings[0].is_dict());
   EXPECT_EQ(PairingRegistry::Pairing::CreateFromValue(
                 std::move(pairings[0]).TakeDict()),

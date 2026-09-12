@@ -14,6 +14,7 @@
 #include "base/files/scoped_temp_dir.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
+#include "base/uuid.h"
 #include "components/device_signals/test/win/scoped_executable_files.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -45,7 +46,8 @@ class WinPlatformDelegateTest : public testing::Test {
     absolute_file_path_ = scoped_dir_.GetPath().Append(
         base::FilePath::FromUTF8Unsafe(kTestFileName));
     EXPECT_TRUE(
-        base::WriteFile(absolute_file_path_, "irrelevant file content"));
+        base::WriteFile(absolute_file_path_,
+                        base::Uuid::GenerateRandomV4().AsLowercaseString()));
 
     env_->SetVar(kEnvironmentVariableName,
                  scoped_dir_.GetPath().AsUTF8Unsafe());
@@ -65,19 +67,17 @@ class WinPlatformDelegateTest : public testing::Test {
 TEST_F(WinPlatformDelegateTest, ResolveFilePath_Success) {
   std::string directory_name = scoped_dir_.GetPath().BaseName().AsUTF8Unsafe();
 
-  std::array<std::string, 4> test_cases = {
-      absolute_file_path_.AsUTF8Unsafe(),
+  std::array<std::string, 2> test_cases = {
       base::StrCat({"%", kEnvironmentVariableName, "%\\", kTestFileName}),
       base::StrCat({"%", kEnvironmentVariableName, "%\\..\\", directory_name,
-                    "\\", kTestFileName}),
-
-      // Should work with directories too.
-      scoped_dir_.GetPath().AsUTF8Unsafe()};
+                    "\\", kTestFileName})};
 
   for (const auto& test_case : test_cases) {
     base::FilePath resolved_fp;
-    EXPECT_TRUE(platform_delegate_.ResolveFilePath(
-        base::FilePath::FromUTF8Unsafe(test_case), &resolved_fp));
+    const base::FilePath test_case_fp =
+        base::FilePath::FromUTF8Unsafe(test_case);
+    EXPECT_TRUE(platform_delegate_.ResolveFilePath(test_case_fp, &resolved_fp));
+    EXPECT_TRUE(base::ContentsEqual(absolute_file_path_, resolved_fp));
   }
 }
 
@@ -88,44 +88,90 @@ TEST_F(WinPlatformDelegateTest, ResolveFilePath_Fail) {
   EXPECT_EQ(resolved_fp, base::FilePath());
 }
 
-TEST_F(WinPlatformDelegateTest,
-       GetSigningCertificatesPublicKeyHashes_InvalidPath) {
-  auto public_keys = platform_delegate_.GetSigningCertificatesPublicKeyHashes(
-      base::FilePath());
-  ASSERT_TRUE(public_keys);
-  EXPECT_EQ(public_keys->size(), 0U);
+TEST_F(WinPlatformDelegateTest, ResolveFilePath_NetworkAndNtPaths) {
+  const std::vector<std::string> invalid_paths = {
+      "//server/share/file.txt",
+      "\\\\server\\share\\file.txt",
+      "\\??\\UNC\\server\\share\\file.txt",
+      "/??/UNC/server/share/file.txt",
+      "\\??\\C:\\file.txt",
+      "/??/C:/file.txt",
+      "\\Device\\HarddiskVolume1\\file.txt",
+      "/Device/HarddiskVolume1/file.txt",
+  };
+
+  for (const auto& invalid_path : invalid_paths) {
+    base::FilePath resolved_fp;
+    EXPECT_FALSE(platform_delegate_.ResolveFilePath(
+        base::FilePath::FromUTF8Unsafe(invalid_path), &resolved_fp));
+    EXPECT_EQ(resolved_fp, base::FilePath());
+  }
+
+  // Environment variable expanding to a network path.
+  env_->SetVar("UncEnvVar", "\\\\server\\share");
+  base::FilePath resolved_fp;
+  EXPECT_FALSE(platform_delegate_.ResolveFilePath(
+      base::FilePath::FromUTF8Unsafe("%UncEnvVar%\\file.txt"), &resolved_fp));
+  EXPECT_EQ(resolved_fp, base::FilePath());
+
+  // Environment variable expanding to an NT-object path.
+  env_->SetVar("NtEnvVar", "\\??\\UNC\\server\\share");
+  EXPECT_FALSE(platform_delegate_.ResolveFilePath(
+      base::FilePath::FromUTF8Unsafe("%NtEnvVar%\\file.txt"), &resolved_fp));
+  EXPECT_EQ(resolved_fp, base::FilePath());
+
+  env_->UnSetVar("UncEnvVar");
+  env_->UnSetVar("NtEnvVar");
 }
 
-TEST_F(WinPlatformDelegateTest, GetSigningCertificatesPublicKeyHashes_Signed) {
+TEST_F(WinPlatformDelegateTest, GetSigningCertificatesPublicKeys_InvalidPath) {
+  auto public_keys =
+      platform_delegate_.GetSigningCertificatesPublicKeys(base::FilePath());
+  ASSERT_TRUE(public_keys);
+  EXPECT_EQ(public_keys->hashes.size(), 0U);
+  EXPECT_FALSE(public_keys->is_os_verified);
+  EXPECT_FALSE(public_keys->subject_name);
+}
+
+TEST_F(WinPlatformDelegateTest, GetSigningCertificatesPublicKeys_Signed) {
   base::FilePath signed_exe_path = scoped_executable_files_.GetSignedExePath();
   ASSERT_TRUE(base::PathExists(signed_exe_path));
 
   auto public_keys =
-      platform_delegate_.GetSigningCertificatesPublicKeyHashes(signed_exe_path);
+      platform_delegate_.GetSigningCertificatesPublicKeys(signed_exe_path);
   ASSERT_TRUE(public_keys);
-  ASSERT_EQ(public_keys->size(), 1U);
+  EXPECT_EQ(public_keys->hashes.size(), 1U);
+  // The binary is properly signed, but with a self-signed cert that the OS
+  // does not trust.
+  EXPECT_FALSE(public_keys->is_os_verified);
+  EXPECT_TRUE(public_keys->subject_name);
+  EXPECT_EQ(public_keys->subject_name.value(), "Joe's-Software-Emporium");
 
-  std::string base64_encoded_public_key;
-  base::Base64Encode(public_keys.value()[0], &base64_encoded_public_key);
+  const std::string base64_encoded_public_key =
+      base::Base64Encode(public_keys.value().hashes[0]);
   EXPECT_EQ(base64_encoded_public_key, kExpectedSignedBase64PublicKey);
 }
 
-TEST_F(WinPlatformDelegateTest,
-       GetSigningCertificatesPublicKeyHashes_MultiSigned) {
+TEST_F(WinPlatformDelegateTest, GetSigningCertificatesPublicKeys_MultiSigned) {
   base::FilePath multi_signed_exe_path =
       scoped_executable_files_.GetMultiSignedExePath();
   ASSERT_TRUE(base::PathExists(multi_signed_exe_path));
 
-  auto public_keys = platform_delegate_.GetSigningCertificatesPublicKeyHashes(
+  auto public_keys = platform_delegate_.GetSigningCertificatesPublicKeys(
       multi_signed_exe_path);
   ASSERT_TRUE(public_keys);
-  ASSERT_EQ(public_keys->size(), 2U);
+  EXPECT_EQ(public_keys->hashes.size(), 2U);
+  // The binary is properly signed, but with a self-signed cert that the OS
+  // does not trust.
+  EXPECT_FALSE(public_keys->is_os_verified);
+  EXPECT_TRUE(public_keys->subject_name);
+  EXPECT_EQ(public_keys->subject_name.value(), "SebL's-Software-Emporium");
 
-  std::string base64_encoded_public_key;
-  base::Base64Encode(public_keys.value()[0], &base64_encoded_public_key);
+  std::string base64_encoded_public_key =
+      base::Base64Encode(public_keys.value().hashes[0]);
   EXPECT_EQ(base64_encoded_public_key,
             kExpectedMultiSignedPrimaryBase64PublicKey);
-  base::Base64Encode(public_keys.value()[1], &base64_encoded_public_key);
+  base64_encoded_public_key = base::Base64Encode(public_keys.value().hashes[1]);
   EXPECT_EQ(base64_encoded_public_key,
             kExpectedMultiSignedSecondaryBase64PublicKey);
 }
@@ -135,9 +181,11 @@ TEST_F(WinPlatformDelegateTest, GetSigningCertificatePublicKeysHash_Empty) {
   ASSERT_TRUE(base::PathExists(empty_exe_path));
 
   auto public_keys =
-      platform_delegate_.GetSigningCertificatesPublicKeyHashes(empty_exe_path);
+      platform_delegate_.GetSigningCertificatesPublicKeys(empty_exe_path);
   ASSERT_TRUE(public_keys);
-  EXPECT_EQ(public_keys->size(), 0U);
+  EXPECT_EQ(public_keys->hashes.size(), 0U);
+  EXPECT_FALSE(public_keys->is_os_verified);
+  EXPECT_FALSE(public_keys->subject_name);
 }
 
 TEST_F(WinPlatformDelegateTest, GetProductMetadata_Success) {

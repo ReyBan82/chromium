@@ -44,6 +44,17 @@ bool UserActionElementSet::HasFlags(const Node* node, unsigned flags) const {
   return HasFlags(To<Element>(node), flags);
 }
 
+HeapVector<Member<Element>> UserActionElementSet::GetAllWithFlags(
+    const unsigned flags) const {
+  HeapVector<Member<Element>> found_elements;
+  for (const auto& pair : elements_) {
+    if (pair.value & flags) {
+      found_elements.push_back(pair.key);
+    }
+  }
+  return found_elements;
+}
+
 void UserActionElementSet::SetFlags(Node* node, unsigned flags) {
   auto* this_element = DynamicTo<Element>(node);
   if (!this_element)
@@ -91,15 +102,13 @@ inline void UserActionElementSet::ClearFlags(Element* element, unsigned flags) {
 }
 
 inline void UserActionElementSet::SetFlags(Element* element, unsigned flags) {
-  ElementFlagMap::iterator result = elements_.find(element);
-  if (result != elements_.end()) {
+  ElementFlagMap::AddResult result = elements_.insert(element, flags);
+  if (result.is_new_entry) {
+    element->SetUserActionElement(true);
+  } else {
     DCHECK(element->IsUserActionElement());
-    result->value |= flags;
-    return;
+    result.stored_value->value |= flags;
   }
-
-  element->SetUserActionElement(true);
-  elements_.insert(element, flags);
 }
 
 void UserActionElementSet::Trace(Visitor* visitor) const {

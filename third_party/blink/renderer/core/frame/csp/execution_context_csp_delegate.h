@@ -27,9 +27,11 @@ class ExecutionContextCSPDelegate final
   const KURL& Url() const override;
   void SetSandboxFlags(network::mojom::blink::WebSandboxFlags) override;
   void SetRequireTrustedTypes() override;
-  void AddInsecureRequestPolicy(mojom::blink::InsecureRequestPolicy) override;
-  std::unique_ptr<SourceLocation> GetSourceLocation() override;
-  absl::optional<uint16_t> GetStatusCode() override;
+  void ApplyInsecureRequestPolicy(mojom::blink::InsecureRequestPolicy) override;
+  void NotifyBrowserOfInsecureRequestPolicy(
+      mojom::blink::InsecureRequestPolicy added_policy) override;
+  SourceLocation* GetSourceLocation() override;
+  std::optional<uint16_t> GetStatusCode() override;
   String GetDocumentReferrer() override;
   void DispatchViolationEvent(const SecurityPolicyViolationEventInit&,
                               Element*) override;
@@ -46,7 +48,8 @@ class ExecutionContextCSPDelegate final
   void ReportBlockedScriptExecutionToInspector(
       const String& directive_text) override;
   void DidAddContentSecurityPolicies(
-      WTF::Vector<network::mojom::blink::ContentSecurityPolicyPtr>) override;
+      Vector<network::mojom::blink::ContentSecurityPolicyPtr>) override;
+  bool ScriptSrcExtendedHashesEnabled() override;
 
  private:
   SecurityContext& GetSecurityContext();

@@ -5,6 +5,7 @@
 #include "chrome/browser/support_tool/ash/network_health_data_collector.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -21,13 +22,13 @@
 #include "chromeos/ash/components/dbus/debug_daemon/debug_daemon_client.h"
 #include "chromeos/ash/components/dbus/shill/shill_device_client.h"
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
+#include "chromeos/ash/components/system/fake_statistics_provider.h"
 #include "components/feedback/redaction_tool/redaction_tool.h"
 #include "components/feedback/system_logs/system_logs_source.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/shill/dbus-constants.h"
 
 using ::testing::ContainerEq;
@@ -65,9 +66,9 @@ constexpr char kRedactedNetworkHealthSnapshot[] =
     "Type: kEthernet\n"
     "State: kOnline\n"
     "Portal State: kOnline\n"
-    "MAC Address: [MAC OUI=aa:aa:aa IFACE=1]\n"
-    "IPV4 Address: <IPv4: 1>\n"
-    "IPV6 Addresses: <IPv6: 1>\n"
+    "MAC Address: (MAC OUI=aa:aa:aa IFACE=1)\n"
+    "IPV4 Address: (IPv4: 1)\n"
+    "IPV6 Addresses: (IPv6: 1)\n"
     "\n"
     "Name: wifi_none_1\n"
     "GUID: wifi_none_1\n"
@@ -78,9 +79,9 @@ constexpr char kRedactedNetworkHealthSnapshot[] =
     "Signal Strength (Average): 81.25555419921875\n"
     "Signal Strength (Deviation): 3.1622776985168457\n"
     "Signal Strength (Samples): [80,80,75,75,82,82,75,75,80,80,85,85,85]\n"
-    "MAC Address: [MAC OUI=aa:bb:cc IFACE=2]\n"
+    "MAC Address: (MAC OUI=aa:bb:cc IFACE=2)\n"
     "IPV4 Address: N/A\n"
-    "IPV6 Addresses: <IPv6: 2>\n"
+    "IPV6 Addresses: (IPv6: 2)\n"
     "\n";
 
 const PIIMap kExpectedPIIMap = {
@@ -123,7 +124,7 @@ class NetworkHealthDataCollectorTest : public ::testing::Test {
         base::ThreadPool::CreateSequencedTaskRunner({});
     redaction_tool_container_ =
         base::MakeRefCounted<redaction::RedactionToolContainer>(
-            task_runner_for_redaction_tool_, nullptr);
+            task_runner_for_redaction_tool_);
   }
 
   NetworkHealthDataCollectorTest(const NetworkHealthDataCollectorTest&) =
@@ -188,6 +189,7 @@ class NetworkHealthDataCollectorTest : public ::testing::Test {
   base::ScopedTempDir temp_dir_;
   scoped_refptr<base::SequencedTaskRunner> task_runner_for_redaction_tool_;
   scoped_refptr<redaction::RedactionToolContainer> redaction_tool_container_;
+  ash::system::ScopedFakeStatisticsProvider statistics_provider_;
 };
 
 TEST_F(NetworkHealthDataCollectorTest, CollectAndExportData) {
@@ -196,20 +198,20 @@ TEST_F(NetworkHealthDataCollectorTest, CollectAndExportData) {
   data_collector.SetLogSourceForTesting(std::make_unique<TestLogSource>());
 
   // Test data collection and PII detection.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_collect_data;
   data_collector.CollectDataAndDetectPII(test_future_collect_data.GetCallback(),
                                          task_runner_for_redaction_tool_,
                                          redaction_tool_container_);
   // Check if CollectDataAndDetectPII call returned an error.
-  absl::optional<SupportToolError> error = test_future_collect_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  std::optional<SupportToolError> error = test_future_collect_data.Get();
+  EXPECT_EQ(error, std::nullopt);
 
   PIIMap detected_pii = data_collector.GetDetectedPII();
   EXPECT_THAT(detected_pii, ContainerEq(kExpectedPIIMap));
 
   // Check PII removal and data export.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_export_data;
   base::FilePath output_dir = GetTempDirForOutput();
   // Export collected data to a directory and remove all PII from it.
@@ -218,7 +220,7 @@ TEST_F(NetworkHealthDataCollectorTest, CollectAndExportData) {
       redaction_tool_container_, test_future_export_data.GetCallback());
   // Check if ExportCollectedDataWithPII call returned an error.
   error = test_future_export_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  EXPECT_EQ(error, std::nullopt);
   // Read the output file.
   std::string output_file_contents;
   {

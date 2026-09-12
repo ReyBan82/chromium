@@ -7,7 +7,6 @@
 #include <memory>
 
 #include "chrome/browser/background_sync/background_sync_delegate_impl.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/ukm/test_ukm_recorder.h"
@@ -29,7 +28,7 @@ class BackgroundSyncMetricsBrowserTest : public InProcessBrowserTest {
   ~BackgroundSyncMetricsBrowserTest() override = default;
 
   void SetUpOnMainThread() override {
-    Profile* profile = browser()->profile();
+    Profile* profile = browser()->GetProfile();
 
     background_sync_delegate_ =
         std::make_unique<BackgroundSyncDelegateImpl>(profile);
@@ -71,7 +70,7 @@ IN_PROC_BROWSER_TEST_F(BackgroundSyncMetricsBrowserTest,
     auto entries = recorder_->GetEntriesByName(
         ukm::builders::BackgroundSyncRegistered::kEntryName);
     ASSERT_EQ(entries.size(), 1u);
-    const auto* entry = entries[0];
+    const auto* entry = entries[0].get();
     recorder_->ExpectEntryMetric(
         entry, ukm::builders::BackgroundSyncRegistered::kCanFireName, true);
     recorder_->ExpectEntryMetric(
@@ -90,7 +89,7 @@ IN_PROC_BROWSER_TEST_F(BackgroundSyncMetricsBrowserTest,
     auto entries = recorder_->GetEntriesByName(
         ukm::builders::BackgroundSyncCompleted::kEntryName);
     ASSERT_EQ(entries.size(), 1u);
-    const auto* entry = entries[0];
+    const auto* entry = entries[0].get();
     recorder_->ExpectEntryMetric(
         entry, ukm::builders::BackgroundSyncCompleted::kStatusName,
         static_cast<int64_t>(blink::ServiceWorkerStatusCode::kOk));
@@ -114,7 +113,7 @@ IN_PROC_BROWSER_TEST_F(BackgroundSyncMetricsBrowserTest,
     auto entries = recorder_->GetEntriesByName(
         ukm::builders::PeriodicBackgroundSyncRegistered::kEntryName);
     ASSERT_EQ(entries.size(), 1u);
-    const auto* entry = entries[0];
+    const auto* entry = entries[0].get();
     recorder_->ExpectEntryMetric(
         entry,
         ukm::builders::PeriodicBackgroundSyncRegistered::kMinIntervalMsName,
@@ -136,7 +135,7 @@ IN_PROC_BROWSER_TEST_F(BackgroundSyncMetricsBrowserTest,
     auto entries = recorder_->GetEntriesByName(
         ukm::builders::PeriodicBackgroundSyncEventCompleted::kEntryName);
     ASSERT_EQ(entries.size(), 1u);
-    const auto* entry = entries[0];
+    const auto* entry = entries[0].get();
     recorder_->ExpectEntryMetric(
         entry, ukm::builders::PeriodicBackgroundSyncEventCompleted::kStatusName,
         static_cast<int64_t>(blink::ServiceWorkerStatusCode::kOk));

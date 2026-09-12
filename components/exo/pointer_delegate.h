@@ -5,6 +5,7 @@
 #ifndef COMPONENTS_EXO_POINTER_DELEGATE_H_
 #define COMPONENTS_EXO_POINTER_DELEGATE_H_
 
+#include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "ui/events/event_constants.h"
 
@@ -56,17 +57,18 @@ class PointerDelegate {
                                const gfx::Vector2dF& offset,
                                bool discrete) = 0;
 
-  // Called when pointer scroll has stopped and a fling is happening (e.g.
-  // lifting the fingers from the touchpad after scrolling quickly)
-  virtual void OnPointerScrollStop(base::TimeTicks time_stamp) = 0;
+  // Called to end a sequence of finger (continuous) scroll events, e.g.
+  // lifting the fingers from the touchpad after scrolling.
+  virtual void OnFingerScrollStop(base::TimeTicks time_stamp) = 0;
 
   // Called after all pointer information of this frame has been set and the
   // client should evaluate the updated state. No events are being sent before
   // this method is called.
   virtual void OnPointerFrame() = 0;
+  virtual base::WeakPtr<PointerDelegate> GetWeakPtr() = 0;
 
  protected:
-  virtual ~PointerDelegate() {}
+  virtual ~PointerDelegate() = default;
 };
 
 }  // namespace exo

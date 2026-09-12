@@ -3,9 +3,18 @@
 // found in the LICENSE file.
 
 #include "net/websockets/websocket_quic_spdy_stream.h"
+
+#include <sys/types.h>  // for struct iovec
+
+#include "base/check.h"
+#include "base/check_op.h"
 #include "net/base/io_buffer.h"
-#include "net/http/http_status_code.h"
-#include "net/third_party/quiche/src/quiche/quic/core/http/spdy_utils.h"
+#include "net/base/net_errors.h"
+#include "net/third_party/quiche/src/quiche/quic/core/http/quic_spdy_client_session_base.h"
+
+namespace quic {
+class QuicHeaderList;
+}  // namespace quic
 
 namespace net {
 
@@ -13,7 +22,7 @@ WebSocketQuicSpdyStream::WebSocketQuicSpdyStream(
     quic::QuicStreamId id,
     quic::QuicSpdyClientSessionBase* session,
     quic::StreamType type)
-    : quic::QuicSpdyStream(id, session, type) {}
+    : QuicChromiumClientStreamBase(id, session, type) {}
 
 WebSocketQuicSpdyStream::~WebSocketQuicSpdyStream() {
   if (delegate_) {
@@ -37,6 +46,14 @@ void WebSocketQuicSpdyStream::OnInitialHeadersComplete(
   }
 }
 
+void WebSocketQuicSpdyStream::OnClose() {
+  quic::QuicSpdyStream::OnClose();
+  Delegate* delegate = std::exchange(delegate_, nullptr);
+  if (delegate) {
+    delegate->OnClose(MapQuicErrorToNetError());
+  }
+}
+
 int WebSocketQuicSpdyStream::Read(IOBuffer* buf, int buf_len) {
   DCHECK_GT(buf_len, 0);
   DCHECK(buf->data());
@@ -56,6 +73,57 @@ int WebSocketQuicSpdyStream::Read(IOBuffer* buf, int buf_len) {
   // Since HasBytesToRead is true, Readv() must have read some data.
   DCHECK_NE(0u, bytes_read);
   return bytes_read;
+}
+
+void WebSocketQuicSpdyStream::OnCanWriteNewData() {
+  quic::QuicSpdyStream::OnCanWriteNewData();
+  if (delegate_) {
+    delegate_->OnCanWriteNewData();
+  }
+}
+
+void WebSocketQuicSpdyStream::DetachDelegate() {
+  // Cleared first: closing the stream below notifies the delegate, which is
+  // going away.
+  delegate_ = nullptr;
+
+  if (fin_buffered() || write_side_closed()) {
+    // Nothing more can be written, so the closure has already been decided.
+    return;
+  }
+
+  // RFC 9220 section 3 makes HTTP/3 stream closure analogous to TCP connection
+  // closure: "Orderly TCP-level closures are represented as a FIN bit on the
+  // stream", while a stream error of type H3_REQUEST_CANCELLED represents an
+  // RST exception. If the peer's FIN has been consumed then the closing
+  // handshake ran to completion, so answer it with our own FIN. Otherwise the
+  // stream is being abandoned mid-flight, which is the RST exception.
+  if (read_side_closed()) {
+    WriteOrBufferBody("", /*fin=*/true);
+  } else {
+    Reset(quic::QUIC_STREAM_CANCELLED);
+  }
+}
+
+int WebSocketQuicSpdyStream::MapQuicErrorToNetError() {
+  // Map Connection QUIC errors to net errors.
+  if (connection_error() != quic::QUIC_NO_ERROR) {
+    return ERR_QUIC_PROTOCOL_ERROR;
+  }
+
+  // Map Stream QUIC errors to net errors.
+  switch (stream_error()) {
+    case quic::QUIC_STREAM_NO_ERROR:
+      return OK;
+    case quic::QUIC_STREAM_GENERAL_PROTOCOL_ERROR:
+      return ERR_QUIC_PROTOCOL_ERROR;
+    case quic::QUIC_STREAM_INTERNAL_ERROR:
+      return ERR_FAILED;
+    case quic::QUIC_STREAM_CANCELLED:
+      return ERR_ABORTED;
+    default:
+      return ERR_CONNECTION_RESET;
+  }
 }
 
 }  // namespace net

@@ -36,6 +36,18 @@ bool LaserPointerControllerTestApi::IsFadingAway() const {
          !instance_->GetLaserPointerView()->fadeout_done_.is_null();
 }
 
+bool LaserPointerControllerTestApi::HasLaserPointerView() const {
+  return instance_->GetLaserPointerView();
+}
+
+void LaserPointerControllerTestApi::ResetPointerView() {
+  instance_->ResetPointerView();
+}
+
+views::View* LaserPointerControllerTestApi::GetLaserPointerView() const {
+  return instance_->GetLaserPointerView();
+}
+
 PaletteTray* LaserPointerControllerTestApi::GetPaletteTrayOnDisplay(
     int64_t display_id) const {
   aura::Window* window = Shell::GetRootWindowForDisplayId(display_id);
@@ -43,13 +55,12 @@ PaletteTray* LaserPointerControllerTestApi::GetPaletteTrayOnDisplay(
   return Shelf::ForWindow(window)->GetStatusAreaWidget()->palette_tray();
 }
 
-const fast_ink::FastInkPoints& LaserPointerControllerTestApi::laser_points()
-    const {
+const FastInkPoints& LaserPointerControllerTestApi::laser_points() const {
   return instance_->GetLaserPointerView()->laser_points_;
 }
 
-const fast_ink::FastInkPoints&
-LaserPointerControllerTestApi::predicted_laser_points() const {
+const FastInkPoints& LaserPointerControllerTestApi::predicted_laser_points()
+    const {
   return instance_->GetLaserPointerView()->predicted_laser_points_;
 }
 

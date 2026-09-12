@@ -6,7 +6,6 @@
 
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/security_interstitials/content/security_interstitial_page.h"
@@ -32,7 +31,7 @@ testing::AssertionResult SecurityInterstitialIDNTest::VerifyIDNDecoded() const {
   content::TestNavigationObserver observer(contents);
   contents->GetController().LoadPostCommitErrorPage(
       contents->GetPrimaryMainFrame(), request_url,
-      blocking_page->GetHTMLContents(), net::ERR_BLOCKED_BY_CLIENT);
+      blocking_page->GetHTMLContents());
   observer.Wait();
   delete blocking_page;
   if (ui_test_utils::FindInPage(contents, kHostnameUnicode, true /*forward*/,

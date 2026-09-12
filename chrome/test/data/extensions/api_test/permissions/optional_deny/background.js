@@ -2,37 +2,33 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var assertFalse = chrome.test.assertFalse;
-var assertTrue = chrome.test.assertTrue;
-var assertEq = chrome.test.assertEq;
-var pass = chrome.test.callbackPass;
+const assertFalse = chrome.test.assertFalse;
+const assertTrue = chrome.test.assertTrue;
+const assertEq = chrome.test.assertEq;
+const pass = chrome.test.callbackPass;
 
-var NO_BOOKMARKS_PERMISSION =
-    "You do not have permission to use 'bookmarks.getTree'.";
+const NO_BOOKMARKS_PERMISSION =
+    'You do not have permission to use \'bookmarks.getTree\'.';
 
 chrome.test.getConfig(function(config) {
-
   function doReq(domain, callback) {
-    var req = new XMLHttpRequest();
-    var url = domain + ":PORT/extensions/test_file.txt";
+    let url = `${domain}:PORT/extensions/test_file.txt`;
     url = url.replace(/PORT/, config.testServer.port);
 
-    chrome.test.log("Requesting url: " + url);
-    req.open("GET", url, true);
-
-    req.onload = function() {
-      assertEq(200, req.status);
-      assertEq("Hello!", req.responseText);
-      callback(true);
-    };
-
-    req.onerror = function() {
-      chrome.test.log("status: " + req.status);
-      chrome.test.log("text: " + req.responseText);
-      callback(false);
-    };
-
-    req.send(null);
+    chrome.test.log(`Requesting url: ${url}`);
+    fetch(url)
+        .then(function(response) {
+          assertEq(200, response.status);
+          return response.text();
+        })
+        .then(function(text) {
+          assertEq('Hello!', text);
+          callback(true);
+        })
+        .catch(function(error) {
+          chrome.test.log(error.toString());
+          callback(false);
+        });
   }
 
   chrome.test.runTests([
@@ -46,23 +42,24 @@ chrome.test.getConfig(function(config) {
 
             // Make sure they weren't granted...
             chrome.permissions.contains(
-                {permissions: ['bookmarks'], origins:['http://*.c.com/*']},
-                pass(function(result) { assertFalse(result); }));
+                {permissions: ['bookmarks'], origins: ['http://*.c.com/*']},
+                pass(function(result) {
+                  assertFalse(result);
+                }));
 
             assertEq(undefined, chrome.bookmarks);
             doReq('http://b.c.com/', pass(function(result) {
-              assertFalse(result);
-            }));
-      }));
+                    assertFalse(result);
+                  }));
+          }));
     },
 
     function noPromptForActivePermissions() {
       // We shouldn't prompt if the extension already has the permissions.
       chrome.permissions.request(
-          {permissions: ["management"]},
-          pass(function(granted) {
-        assertTrue(granted);
-      }));
-    }
+          {permissions: ['management']}, pass(function(granted) {
+            assertTrue(granted);
+          }));
+    },
   ]);
 });

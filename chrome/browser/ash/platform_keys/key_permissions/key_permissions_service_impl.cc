@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -15,20 +16,17 @@
 #include "base/base64.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
-#include "base/functional/callback_forward.h"
 #include "base/logging.h"
 #include "base/values.h"
 #include "chrome/browser/ash/platform_keys/key_permissions/key_permissions_manager_impl.h"
 #include "chrome/browser/ash/platform_keys/platform_keys_service.h"
-#include "chrome/browser/chromeos/platform_keys/platform_keys.h"
-#include "chrome/common/pref_names.h"
+#include "chromeos/ash/components/platform_keys/platform_keys.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_namespace.h"
 #include "components/policy/core/common/policy_service.h"
 #include "components/policy/policy_constants.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash::platform_keys {
 
@@ -95,7 +93,7 @@ void KeyPermissionsServiceImpl::
         std::vector<uint8_t> public_key_spki_der,
         CanUserGrantPermissionForKeyCallback callback,
         const std::vector<TokenId>& key_locations,
-        absl::optional<bool> corporate_key,
+        std::optional<bool> corporate_key,
         Status status) {
   if (status != Status::kSuccess) {
     std::move(callback).Run(/*allowed=*/false);
@@ -131,10 +129,14 @@ void KeyPermissionsServiceImpl::IsCorporateKeyWithLocations(
     Status status) {
   if (status != Status::kSuccess) {
     LOG(ERROR) << "Key locations retrieval failed: " << StatusToString(status);
-    std::move(callback).Run(/*corporate=*/absl::nullopt, status);
+    std::move(callback).Run(/*corporate=*/std::nullopt, status);
     return;
   }
 
+  // Note: we considered an implementation that would also be correct if the key
+  // is on multiple tokens in https://crrev.com/c/2784967 but decided to keep
+  // the simple implementation for now, as corporate keys can only exist on one
+  // token on ChromeOS at the moment, and there are no plans to change it.
   bool key_on_user_token_only = false;
   for (const auto key_location : key_locations) {
     switch (key_location) {
@@ -167,7 +169,7 @@ void KeyPermissionsServiceImpl::IsCorporateKeyWithLocations(
 
 void KeyPermissionsServiceImpl::IsCorporateKeyWithKpmResponse(
     IsCorporateKeyCallback callback,
-    absl::optional<bool> allowed,
+    std::optional<bool> allowed,
     Status status) {
   if (allowed.has_value()) {
     std::move(callback).Run(allowed.value(), Status::kSuccess);
@@ -176,7 +178,7 @@ void KeyPermissionsServiceImpl::IsCorporateKeyWithKpmResponse(
 
   LOG(ERROR) << "Checking corporate flag via KeyPermissionsManager failed: "
              << StatusToString(status);
-  std::move(callback).Run(/*corporate=*/absl::nullopt, status);
+  std::move(callback).Run(/*corporate=*/std::nullopt, status);
 }
 
 void KeyPermissionsServiceImpl::SetCorporateKey(

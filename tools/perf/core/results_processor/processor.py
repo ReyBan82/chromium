@@ -32,9 +32,13 @@ from core.tbmv3 import trace_processor
 # while appending a proper sys.path does not help.
 from core import path_util
 
-path_util.AddDeviceInteractionToPath()
+path_util.AddAndroidDeviceInteractionToPath()
 from devil.android import device_utils  # pylint: disable=import-error
 from devil.android.sdk import adb_wrapper  # pylint: disable=import-error
+
+path_util.AddTelemetryToPath()
+from telemetry.core import cros_interface
+from telemetry.internal.platform import device_finder
 
 from tracing.trace_data import trace_data
 from tracing.value.diagnostics import all_diagnostics
@@ -71,37 +75,40 @@ def ProcessResults(options, is_unittest=False):
 
   test_results = _LoadTestResults(options.intermediate_dir)
   if not test_results:
-    # TODO(crbug.com/981349): Make sure that no one is expecting Results
+    # TODO(crbug.com/40634925): Make sure that no one is expecting Results
     # Processor to output results in the case of empty input
     # and make this an error.
     logging.warning('No test results to process.')
 
-  test_suite_start = (test_results[0]['startTime']
-                      if test_results and 'startTime' in test_results[0] else
-                      datetime.datetime.utcnow().isoformat() + 'Z')
+  test_suite_start = (
+    test_results[0]['startTime']
+    if test_results and 'startTime' in test_results[0]
+    else datetime.datetime.utcnow().isoformat() + 'Z'
+  )
   run_identifier = RunIdentifier(options.results_label, test_suite_start)
   should_compute_metrics = any(
-      fmt in FORMATS_WITH_METRICS for fmt in options.output_formats)
+    fmt in FORMATS_WITH_METRICS for fmt in options.output_formats
+  )
 
   if options.extra_metrics:
     _AddExtraMetrics(test_results, options.extra_metrics)
 
   begin_time = time.time()
   util.ApplyInParallel(
-      lambda result: ProcessTestResult(
-          test_result=result,
-          upload_bucket=options.upload_bucket,
-          results_label=options.results_label,
-          run_identifier=run_identifier,
-          test_suite_start=test_suite_start,
-          should_compute_metrics=should_compute_metrics,
-          max_num_values=options.max_values_per_test_case,
-          test_path_format=options.test_path_format,
-          trace_processor_path=options.trace_processor_path,
-          enable_tbmv3=options.experimental_tbmv3_metrics,
-          fetch_power_profile=options.fetch_power_profile),
-      test_results,
-      on_failure=util.SetUnexpectedFailure,
+    lambda result: ProcessTestResult(
+      test_result=result,
+      upload_bucket=options.upload_bucket,
+      results_label=options.results_label,
+      run_identifier=run_identifier,
+      test_suite_start=test_suite_start,
+      should_compute_metrics=should_compute_metrics,
+      max_num_values=options.max_values_per_test_case,
+      test_path_format=options.test_path_format,
+      trace_processor_path=options.trace_processor_path,
+      fetch_power_profile=options.fetch_power_profile,
+    ),
+    test_results,
+    on_failure=util.SetUnexpectedFailure,
   )
   processing_duration = time.time() - begin_time
   _AmortizeProcessingDuration(processing_duration, test_results)
@@ -122,10 +129,15 @@ def ProcessResults(options, is_unittest=False):
 
     print('View results at file://', output_file, sep='')
 
-  if options.fetch_device_data:
-    PullDeviceArtifacts(options.device_data_path, options.local_data_path)
+  exit_code = GenerateExitCode(test_results)
 
-  return GenerateExitCode(test_results)
+  if options.fetch_device_data:
+    if options.fetch_device_data_on_success and exit_code != 0:
+      logging.warning('Not fetching device data due to non zero exit code.')
+    else:
+      PullDeviceArtifacts(options)
+
+  return exit_code
 
 
 def _AmortizeProcessingDuration(processing_duration, test_results):
@@ -133,8 +145,9 @@ def _AmortizeProcessingDuration(processing_duration, test_results):
   if test_results_count:
     per_story_cost = processing_duration / len(test_results)
     logging.info(
-        'Amortizing processing cost to story runtimes: %.2fs per story.',
-        per_story_cost)
+      'Amortizing processing cost to story runtimes: %.2fs per story.',
+      per_story_cost,
+    )
     for result in test_results:
       if 'runDuration' in result and result['runDuration']:
         current_duration = float(result['runDuration'].rstrip('s'))
@@ -154,33 +167,45 @@ def _AddExtraMetrics(test_results, extra_metrics):
     test_result.setdefault('tags', []).extend(extra_metric_tags)
 
 
-def ProcessTestResult(test_result, upload_bucket, results_label, run_identifier,
-                      test_suite_start, should_compute_metrics, max_num_values,
-                      test_path_format, trace_processor_path, enable_tbmv3,
-                      fetch_power_profile):
+def ProcessTestResult(
+  test_result,
+  upload_bucket,
+  results_label,
+  run_identifier,
+  test_suite_start,
+  should_compute_metrics,
+  max_num_values,
+  test_path_format,
+  trace_processor_path,
+  fetch_power_profile,
+):
   ConvertProtoTraces(test_result, trace_processor_path)
   AggregateTBMv2Traces(test_result)
-  if enable_tbmv3:
-    AggregateTBMv3Traces(test_result)
+  AggregateTBMv3Traces(test_result)
   if upload_bucket is not None:
     UploadArtifacts(test_result, upload_bucket, run_identifier)
 
   if should_compute_metrics:
     test_result['_histograms'] = histogram_set.HistogramSet()
     compute_metrics.ComputeTBMv2Metrics(test_result)
-    if enable_tbmv3:
-      compute_metrics.ComputeTBMv3Metrics(test_result, trace_processor_path,
-                                          fetch_power_profile)
+    compute_metrics.ComputeTBMv3Metrics(
+      test_result, trace_processor_path, fetch_power_profile
+    )
     ExtractMeasurements(test_result)
     num_values = len(test_result['_histograms'])
     if max_num_values is not None and num_values > max_num_values:
-      logging.error('%s produced %d values, but only %d are allowed.',
-                    test_result['testPath'], num_values, max_num_values)
+      logging.error(
+        '%s produced %d values, but only %d are allowed.',
+        test_result['testPath'],
+        num_values,
+        max_num_values,
+      )
       util.SetUnexpectedFailure(test_result)
       del test_result['_histograms']
     else:
-      AddDiagnosticsToHistograms(test_result, test_suite_start, results_label,
-                                 test_path_format)
+      AddDiagnosticsToHistograms(
+        test_result, test_suite_start, results_label, test_path_format
+      )
 
 
 def ExtractHistograms(test_results):
@@ -220,20 +245,25 @@ def _LoadTestResults(intermediate_dir):
 
 
 def _IsProtoTrace(trace_name):
-  return (trace_name.startswith('trace/') and
-          (trace_name.endswith('.pb') or trace_name.endswith('.pb.gz')))
+  return trace_name.startswith('trace/') and (
+    trace_name.endswith('.pb') or trace_name.endswith('.pb.gz')
+  )
 
 
 def _IsTBMv2Trace(trace_name):
-  return (trace_name.startswith('trace/') and
-          (trace_name.endswith('.json') or trace_name.endswith('.json.gz')
-           or trace_name.endswith('.txt') or trace_name.endswith('.txt.gz')))
+  return trace_name.startswith('trace/') and (
+    trace_name.endswith('.json')
+    or trace_name.endswith('.json.gz')
+    or trace_name.endswith('.txt')
+    or trace_name.endswith('.txt.gz')
+  )
 
 
 def _BuildOutputPath(input_files, output_name):
   """Build a path to a file in the same folder as input_files."""
-  return os.path.join(os.path.dirname(os.path.commonprefix(input_files)),
-                      output_name)
+  return os.path.join(
+    os.path.dirname(os.path.commonprefix(input_files)), output_name
+  )
 
 
 def ConvertProtoTraces(test_result, trace_processor_path):
@@ -245,23 +275,30 @@ def ConvertProtoTraces(test_result, trace_processor_path):
   artifacts = test_result.get('outputArtifacts', {})
   proto_traces = [name for name in artifacts if _IsProtoTrace(name)]
 
-  # TODO(crbug.com/990304): After implementation of TBMv3-style clock sync,
+  # TODO(crbug.com/40638725): After implementation of TBMv3-style clock sync,
   # it will be possible to convert the aggregated proto trace, not
   # individual ones.
   for proto_trace_name in proto_traces:
     proto_file_path = artifacts[proto_trace_name]['filePath']
-    json_file_path = (os.path.splitext(proto_file_path)[0] +
-                      CONVERTED_JSON_SUFFIX)
-    json_trace_name = (posixpath.splitext(proto_trace_name)[0] +
-                       CONVERTED_JSON_SUFFIX)
+    json_file_path = (
+      os.path.splitext(proto_file_path)[0] + CONVERTED_JSON_SUFFIX
+    )
+    json_trace_name = (
+      posixpath.splitext(proto_trace_name)[0] + CONVERTED_JSON_SUFFIX
+    )
     trace_processor.ConvertProtoTraceToJson(
-        trace_processor_path, proto_file_path, json_file_path)
+      trace_processor_path, proto_file_path, json_file_path
+    )
     artifacts[json_trace_name] = {
-        'filePath': json_file_path,
-        'contentType': 'application/json',
+      'filePath': json_file_path,
+      'contentType': 'application/json',
     }
-    logging.info('%s: Proto trace converted. Source: %s. Destination: %s.',
-                 test_result['testPath'], proto_file_path, json_file_path)
+    logging.info(
+      '%s: Proto trace converted. Source: %s. Destination: %s.',
+      test_result['testPath'],
+      proto_file_path,
+      json_file_path,
+    )
 
 
 def AggregateTBMv2Traces(test_result):
@@ -278,11 +315,15 @@ def AggregateTBMv2Traces(test_result):
     html_path = _BuildOutputPath(trace_files, compute_metrics.HTML_TRACE_NAME)
     trace_data.SerializeAsHtml(trace_files, html_path)
     artifacts[compute_metrics.HTML_TRACE_NAME] = {
-        'filePath': html_path,
-        'contentType': 'text/html',
+      'filePath': html_path,
+      'contentType': 'text/html',
     }
-    logging.info('%s: TBMv2 traces aggregated. Sources: %s. Destination: %s.',
-                 test_result['testPath'], trace_files, html_path)
+    logging.info(
+      '%s: TBMv2 traces aggregated. Sources: %s. Destination: %s.',
+      test_result['testPath'],
+      trace_files,
+      html_path,
+    )
   for name in traces:
     del artifacts[name]
 
@@ -299,7 +340,8 @@ def AggregateTBMv3Traces(test_result):
   if traces:
     proto_files = [artifacts[name]['filePath'] for name in traces]
     concatenated_path = _BuildOutputPath(
-        proto_files, compute_metrics.CONCATENATED_PROTO_NAME)
+      proto_files, compute_metrics.CONCATENATED_PROTO_NAME
+    )
     with open(concatenated_path, 'wb') as concatenated_trace:
       for trace_file in proto_files:
         if trace_file.endswith('.pb.gz'):
@@ -309,11 +351,15 @@ def AggregateTBMv3Traces(test_result):
           with open(trace_file, 'rb') as f:
             shutil.copyfileobj(f, concatenated_trace)
     artifacts[compute_metrics.CONCATENATED_PROTO_NAME] = {
-        'filePath': concatenated_path,
-        'contentType': 'application/x-protobuf',
+      'filePath': concatenated_path,
+      'contentType': 'application/x-protobuf',
     }
-    logging.info('%s: Proto traces aggregated. Sources: %s. Destination: %s.',
-                 test_result['testPath'], proto_files, concatenated_path)
+    logging.info(
+      '%s: Proto traces aggregated. Sources: %s. Destination: %s.',
+      test_result['testPath'],
+      proto_files,
+      concatenated_path,
+    )
   for name in traces:
     del artifacts[name]
 
@@ -339,26 +385,32 @@ def UploadArtifacts(test_result, upload_bucket, run_identifier):
   """
   artifacts = test_result.get('outputArtifacts', {})
   for name, artifact in artifacts.items():
-    # TODO(crbug.com/981349): Think of a more general way to
+    # TODO(crbug.com/40634925): Think of a more general way to
     # specify which artifacts deserve uploading.
     if name in [DIAGNOSTICS_NAME, MEASUREMENTS_NAME]:
       continue
     retry_identifier = 'retry_%s' % test_result.get('resultId', '0')
     remote_name = '/'.join(
-        [run_identifier, test_result['testPath'], retry_identifier, name])
+      [run_identifier, test_result['testPath'], retry_identifier, name]
+    )
     urlsafe_remote_name = re.sub(r'[^A-Za-z0-9/.-]+', '_', remote_name)
-    cloud_filepath = cloud_storage.Upload(upload_bucket, urlsafe_remote_name,
-                                          artifact['filePath'])
+    cloud_filepath = cloud_storage.Upload(
+      upload_bucket, urlsafe_remote_name, artifact['filePath']
+    )
     # Per crbug.com/1033755 some services require fetchUrl.
     artifact['fetchUrl'] = cloud_filepath.fetch_url
     artifact['viewUrl'] = cloud_filepath.view_url
-    logging.info('%s: Uploaded %s to %s', test_result['testPath'], name,
-                 artifact['viewUrl'])
+    logging.info(
+      '%s: Uploaded %s to %s',
+      test_result['testPath'],
+      name,
+      artifact['viewUrl'],
+    )
 
 
 def GetTraceUrl(test_result):
   artifacts = test_result.get('outputArtifacts', {})
-  trace_artifact = artifacts.get(compute_metrics.HTML_TRACE_NAME, {})
+  trace_artifact = artifacts.get(compute_metrics.CONCATENATED_PROTO_NAME, {})
   if 'viewUrl' in trace_artifact:
     return trace_artifact['viewUrl']
   if 'filePath' in trace_artifact:
@@ -366,8 +418,9 @@ def GetTraceUrl(test_result):
   return None
 
 
-def AddDiagnosticsToHistograms(test_result, test_suite_start, results_label,
-                               test_path_format):
+def AddDiagnosticsToHistograms(
+  test_result, test_suite_start, results_label, test_path_format
+):
   """Add diagnostics to all histograms of a test result.
 
   Reads diagnostics from the test artifact and adds them to all histograms.
@@ -384,7 +437,8 @@ def AddDiagnosticsToHistograms(test_result, test_suite_start, results_label,
       # as lists of values.
       assert isinstance(diag, list)
       test_result['_histograms'].AddSharedDiagnosticToAllHistograms(
-          name, generic_set.GenericSet(diag))
+        name, generic_set.GenericSet(diag)
+      )
     del artifacts[DIAGNOSTICS_NAME]
 
   test_suite, test_case = util.SplitTestPath(test_result, test_path_format)
@@ -394,21 +448,22 @@ def AddDiagnosticsToHistograms(test_result, test_suite_start, results_label,
     test_start_ms = None
   test_suite_start_ms = util.IsoTimestampToEpoch(test_suite_start) * 1e3
   story_tags = [
-      tag['value'] for tag in test_result.get('tags', [])
-      if tag['key'] == 'story_tag'
+    tag['value']
+    for tag in test_result.get('tags', [])
+    if tag['key'] == 'story_tag'
   ]
   result_id = int(test_result.get('resultId', 0))
   trace_url = GetTraceUrl(test_result)
 
   additional_diagnostics = [
-      (reserved_infos.BENCHMARKS, test_suite),
-      (reserved_infos.BENCHMARK_START, test_suite_start_ms),
-      (reserved_infos.LABELS, results_label),
-      (reserved_infos.STORIES, test_case),
-      (reserved_infos.STORYSET_REPEATS, result_id),
-      (reserved_infos.STORY_TAGS, story_tags),
-      (reserved_infos.TRACE_START, test_start_ms),
-      (reserved_infos.TRACE_URLS, trace_url),
+    (reserved_infos.BENCHMARKS, test_suite),
+    (reserved_infos.BENCHMARK_START, test_suite_start_ms),
+    (reserved_infos.LABELS, results_label),
+    (reserved_infos.STORIES, test_case),
+    (reserved_infos.STORYSET_REPEATS, result_id),
+    (reserved_infos.STORY_TAGS, story_tags),
+    (reserved_infos.TRACE_START, test_start_ms),
+    (reserved_infos.TRACE_URLS, trace_url),
   ]
   for name, value in _WrapDiagnostics(additional_diagnostics):
     test_result['_histograms'].AddSharedDiagnosticToAllHistograms(name, value)
@@ -424,14 +479,19 @@ def MeasurementToHistogram(name, measurement):
     samples = [s * info.conversion_factor for s in samples]
   if unit not in histogram.UNIT_NAMES:
     raise ValueError(
-        ('Unknown unit: "%s". Valid options include:\n%s\n'
-         'Valid legacy options include:\n%s') %
-        (unit, pprint.pformat(histogram.UNIT_NAMES),
-         pprint.pformat(list(legacy_unit_info.LEGACY_UNIT_INFO.keys()))))
-  return histogram.Histogram.Create(name,
-                                    unit,
-                                    samples,
-                                    description=description)
+      (
+        'Unknown unit: "%s". Valid options include:\n%s\n'
+        'Valid legacy options include:\n%s'
+      )
+      % (
+        unit,
+        pprint.pformat(histogram.UNIT_NAMES),
+        pprint.pformat(list(legacy_unit_info.LEGACY_UNIT_INFO.keys())),
+      )
+    )
+  return histogram.Histogram.Create(
+    name, unit, samples, description=description
+  )
 
 
 def _WrapDiagnostics(info_value_pairs):
@@ -462,30 +522,122 @@ def ExtractMeasurements(test_result):
       measurements = json.load(f)['measurements']
     for name, measurement in measurements.items():
       test_result['_histograms'].AddHistogram(
-          MeasurementToHistogram(name, measurement))
+        MeasurementToHistogram(name, measurement)
+      )
     del artifacts[MEASUREMENTS_NAME]
 
 
-def PullDeviceArtifacts(device_path, local_path):
+def PullDeviceArtifacts(options):
   """Pull files from on-device path using `adb`
 
   Args:
     device_path: (string) absolute path to the file/folder on-device to pull.
     local_path: (string) absolute path to local destination.
+    platform: (string) platform associated with device.
+              one of 'android' or 'chromeos'.
 
   Raises:
     device_errors.AdbCommandFailedError
   """
+  device_path = options.device_data_path
+  local_path = options.local_data_path
+  platform = options.fetch_data_platform
+
   if not device_path:
-    logging.warning('No path to data specified to pull from device. '
-                    'Skipping.')
+    logging.warning('No path to data specified to pull from device. Skipping.')
     return
 
-  devices = adb_wrapper.AdbWrapper.Devices()
-  # Each docker host in chrome-swarming has one device attached, so we'll use
-  # the first AdbWrapper instance as the assumed attached device in question
-  utils = device_utils.DeviceUtils(devices[0])
-  utils.PullFile(device_path, local_path)
+  if platform == 'android':
+    logging.info('Getting devices...')
+    devices = adb_wrapper.AdbWrapper.Devices()
+    logging.info('Found devices: %s', ', '.join(str(d) for d in devices))
+    # Each docker host in chrome-swarming has one device attached, so we'll use
+    # the first AdbWrapper instance as the assumed attached device in question
+    utils = device_utils.DeviceUtils(devices[0])
+    if device_path == 'auto':
+      cmd = (
+        'find /data_mirror/data_ce/null -type f -name "*.profraw" '
+        '-print -quit | xargs dirname'
+      )
+      output = utils.RunShellCommand(cmd, shell=True)
+      if output:
+        device_path = output[0]
+        logging.info('Dynamically detected device path: %s', device_path)
+      else:
+        logging.warning('Could not dynamically detect device path.')
+        return
+
+    logging.info('Pulling files from %s to %s', device_path, local_path)
+    utils.PullFile(device_path, local_path)
+    local_profile_dir = os.path.join(local_path, os.path.basename(device_path))
+    for root, _, filenames in os.walk(local_profile_dir):
+      for filename in filenames:
+        relative_path = os.path.relpath(
+          os.path.join(root, filename), local_profile_dir
+        )
+        to_be_removed = f"{device_path}/{relative_path}"
+        utils.RemovePath(to_be_removed)
+        logging.info('Removed %s', to_be_removed)
+    logging.info('Finished pulling files.')
+  elif platform == 'chromeos':
+    logging.warning('Searching for devices')
+    # Each docker host in chrome-swarming should only have one local device.
+    devices = device_finder.GetDevicesMatchingOptions(options)
+
+    device = None
+    if options.remote:
+      target_identifier = 'cros:' + options.remote
+      logging.info('Target identifier: %s' % target_identifier)
+      for d in devices:
+        if d.guid == target_identifier:
+          # remote should be "variable_chromeos_device_hostname" so use the
+          # device that matches this.
+          # guid is cros:variable_chromeos_device_hostname.
+          # desktop guid should just be desktop.
+          # searching for devices usually returns 2:
+          # 1. variable_chromeos_device_hostname
+          # 2. desktop
+          # variable_chromeos_device_hostname is usually the first device, in
+          # the list of devices, but to be sure we verify before selecting it.
+          device = d
+          logging.info('Selecting %s' % device.name)
+          break
+    else:
+      # default behavior is to select the first one, since no identifier
+      # is provided.
+      device = devices[0]
+      logging.info('Defaulting to first selected device: %s' % device.name)
+
+    if not device:
+      logging.warning('No device found with name %s' % str(options.remote))
+      return
+
+    interface = cros_interface.CrOSInterface(
+      device.host_name, device.ssh_port, device.ssh_identity
+    )
+    # Search for all profraw files
+    logging.info('Searching for .profraw files at %s' % device_path)
+    stdout, _ = interface.RunCmdOnDevice(
+      ['find', device_path, '-regex', '.*.profraw']
+    )
+    files = stdout.splitlines()
+    if not files:
+      logging.warning('No profraw files found at %s' % device_path)
+      return
+    logging.info('Found %d profiles: %s' % (len(files), str(files)))
+
+    # profraw files are written to ${ISOLATED_DIR}/profraw/
+    write_path = os.path.join(local_path, 'profraw')
+    if not os.path.exists(write_path):
+      logging.warning('%s does not exist. creating it' % write_path)
+      os.mkdir(write_path)
+
+    for f in files:
+      logging.info('Copying file %s' % f)
+      interface.GetFile(f, os.path.join(write_path, os.path.basename(f)))
+  else:
+    logging.warning('No supported platform specified. Doing nothing.')
+    return
 
 
 def main(args=None):

@@ -6,8 +6,10 @@
 #define MEDIA_GPU_ANDROID_VIDEO_FRAME_FACTORY_IMPL_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/weak_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "gpu/config/gpu_preferences.h"
@@ -20,7 +22,6 @@
 #include "media/gpu/android/shared_image_video_provider.h"
 #include "media/gpu/android/video_frame_factory.h"
 #include "media/gpu/media_gpu_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gl/gl_bindings.h"
 
 namespace media {
@@ -69,9 +70,12 @@ class MEDIA_GPU_EXPORT VideoFrameFactoryImpl
       std::unique_ptr<CodecOutputBuffer> output_buffer,
       base::TimeDelta timestamp,
       gfx::Size natural_size,
+      const gfx::ColorSpace& color_space,
+      const gfx::HDRMetadata& hdr_metadata,
       PromotionHintAggregator::NotifyPromotionHintCB promotion_hint_cb,
       OnceOutputCB output_cb) override;
   void RunAfterPendingVideoFrames(base::OnceClosure closure) override;
+  bool IsStalled() const override;
 
   // This should be only used for testing.
   void SetCodecBufferWaitCorrdinatorForTesting(
@@ -81,6 +85,7 @@ class MEDIA_GPU_EXPORT VideoFrameFactoryImpl
 
  private:
   void RequestImage(std::unique_ptr<CodecOutputBufferRenderer> buffer_renderer,
+                    const gfx::ColorSpace& image_color_space,
                     ImageWithInfoReadyCB image_ready_cb);
   // ImageReadyCB that will construct a VideoFrame, and forward it to
   // |output_cb| if construction succeeds.  This is static for two reasons.
@@ -98,6 +103,7 @@ class MEDIA_GPU_EXPORT VideoFrameFactoryImpl
       OnceOutputCB output_cb,
       base::TimeDelta timestamp,
       gfx::Size natural_size,
+      gfx::HDRMetadata hdr_metadata,
       bool is_texture_owner_backed,
       PromotionHintAggregator::NotifyPromotionHintCB promotion_hint_cb,
       VideoPixelFormat pixel_format,
@@ -110,6 +116,7 @@ class MEDIA_GPU_EXPORT VideoFrameFactoryImpl
 
   void CreateVideoFrame_OnFrameInfoReady(
       ImageWithInfoReadyCB image_ready_cb,
+      gfx::ColorSpace image_color_space,
       std::unique_ptr<CodecOutputBufferRenderer> output_buffer_renderer,
       FrameInfoHelper::FrameInfo frame_info);
 

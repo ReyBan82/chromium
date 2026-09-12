@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 
 function $(id) {
   // Disable getElementById restriction here, because this UI uses non valid
@@ -26,13 +26,9 @@ let HOST_CHROME_VERSION;
 const queryParamsObject = {};
 let browserInspector = 'chrome://tracing';
 let browserInspectorTitle = 'trace';
+let staleDataCounter = 0;
 
 (function() {
-const chromeMatch = navigator.userAgent.match(/(?:^|\W)Chrome\/(\S+)/);
-if (chromeMatch && chromeMatch.length > 1) {
-  HOST_CHROME_VERSION = chromeMatch[1].split('.').map(s => Number(s) || 0);
-}
-
 const queryParams = window.location.search;
 if (!queryParams) {
   return;
@@ -100,6 +96,7 @@ function onload() {
   onHashChange();
   initSettings();
   sendCommand('init-ui');
+  initStaleDataWatch();
 }
 
 function onHashChange() {
@@ -120,13 +117,16 @@ function selectTab(id) {
   for (let i = 0; i !== tabContents.length; i++) {
     const tabContent = tabContents[i];
     const tabHeader = tabHeaders[i];
+    const tabButton = tabHeader.querySelector('button');
     if (tabContent.id === id) {
       tabContent.classList.add('selected');
       tabHeader.classList.add('selected');
+      tabButton.setAttribute('aria-current', 'true');
       found = true;
     } else {
       tabContent.classList.remove('selected');
       tabHeader.classList.remove('selected');
+      tabButton.removeAttribute('aria-current');
     }
   }
   if (!found) {
@@ -162,12 +162,18 @@ function showNativeUILaunchButton(enabled) {
   $('ui-devtools-enabled-text').hidden = !enabled;
 }
 
+function setHostVersion(version) {
+  version = version.split('.').map(s => Number(s) || 0);
+  HOST_CHROME_VERSION = version;
+}
+
 function populateLocalTargets(data) {
   removeChildren('pages-list');
   removeChildren('extensions-list');
   removeChildren('apps-list');
   removeChildren('workers-list');
   removeChildren('service-workers-list');
+  removeChildren('shared-storage-worklets-list');
   removeChildren('others-list');
 
   data.sort((a, b) => a.name.localeCompare(b.name));
@@ -183,6 +189,8 @@ function populateLocalTargets(data) {
       addToWorkersList(data[i]);
     } else if (data[i].type === 'service_worker') {
       addToServiceWorkersList(data[i]);
+    } else if (data[i].type === 'shared_storage_worklet') {
+      addToSharedStorageWorkletsList(data[i]);
     } else {
       addToOthersList(data[i]);
     }
@@ -231,6 +239,10 @@ function updateUsernameVisibility(deviceSection) {
 }
 
 function populateRemoteTargets(devices) {
+  staleDataCounter = 0;
+  $('devices-stale').hidden = true;
+  $('devices-not-responding').hidden = true;
+
   if (!devices) {
     return;
   }
@@ -328,9 +340,10 @@ function populateRemoteTargets(devices) {
 
     deviceSection.querySelector('.device-name').textContent = device.adbModel;
     deviceSection.querySelector('.device-auth').textContent =
-        device.adbConnected ? '' :
+        device.adbConnected ? '' : device.adbUnauthorized ?
                               'Pending authentication: please accept ' +
-            'debugging session on the device.';
+            'debugging session on the device.' : device.adbLocked ?
+            'Device is locked.' : 'Device is not responding.';
 
     const browserList = deviceSection.querySelector('.browsers');
     const newBrowserIds = device.browsers.map(function(b) {
@@ -361,7 +374,12 @@ function populateRemoteTargets(devices) {
         const browserName = document.createElement('div');
         browserName.className = 'browser-name';
         browserHeader.appendChild(browserName);
-        browserName.textContent = browser.adbBrowserName;
+        // Localhost targets are always named "Target".
+        // Let's use the ID instead as it's more expressive.
+        browserName.textContent = browser.adbBrowserName === 'Target' ?
+            browser.id :
+            browser.adbBrowserName;
+
         if (browser.adbBrowserVersion) {
           browserName.textContent += ' (' + browser.adbBrowserVersion + ')';
         }
@@ -463,12 +481,11 @@ function populateRemoteTargets(devices) {
                 row, 'close', sendTargetCommand.bind(null, 'close', page),
                 false);
           }
-          if (browserNeedsFallback) {
-            addActionLink(
-                row, 'inspect fallback',
-                sendTargetCommand.bind(null, 'inspect-fallback', page),
-                page.hasNoUniqueId || page.adbAttachedForeign);
-          }
+          addActionLink(
+              row, 'inspect fallback',
+              sendTargetCommand.bind(null, 'inspect-fallback', page),
+              page.hasNoUniqueId || page.adbAttachedForeign,
+              'Best-effort fallback to debug the target using this browser instance\'s potentially mismatching DevTools version.');
         }
       }
       updateBrowserVisibility(browserSection);
@@ -512,6 +529,31 @@ function addGuestViews(row, guests) {
 function addToWorkersList(data) {
   const row =
       addTargetToList(data, $('workers-list'), ['name', 'description', 'url']);
+
+  let description;
+  try {
+    description = JSON.parse(data.description);
+  } catch (e) {
+    // Not a JSON description, ignore and proceed.
+  }
+
+  if (description && description.extendedLifetime) {
+    const nameElement = row.querySelector('.name');
+    if (nameElement) {
+      const label = document.createElement('span');
+      label.className = 'extended-lifetime-label';
+      label.textContent = 'Extended Lifetime';
+      nameElement.appendChild(document.createTextNode(' '));
+      nameElement.appendChild(label);
+    }
+
+    // Hide the raw JSON description.
+    const descriptionElement = row.querySelector('.description');
+    if (descriptionElement) {
+      descriptionElement.style.display = 'none';
+    }
+  }
+
   addActionLink(
       row, 'terminate', sendTargetCommand.bind(null, 'close', data), false);
 }
@@ -521,6 +563,12 @@ function addToServiceWorkersList(data) {
       data, $('service-workers-list'), ['name', 'description', 'url']);
   addActionLink(
       row, 'terminate', sendTargetCommand.bind(null, 'close', data), false);
+}
+
+function addToSharedStorageWorkletsList(data) {
+  const row = addTargetToList(
+      data, $('shared-storage-worklets-list'), ['name', 'description', 'url']);
+  // TODO(yaoxia): add the "terminate" link when the backend supports it
 }
 
 function addToOthersList(data) {
@@ -698,10 +746,13 @@ function addTargetToList(data, list, properties) {
   return row;
 }
 
-function addActionLink(row, text, handler, opt_disabled) {
+function addActionLink(row, text, handler, opt_disabled, opt_title) {
   const link = document.createElement('span');
   link.classList.add('action');
   link.setAttribute('tabindex', 1);
+  if (opt_title) {
+    link.title = opt_title;
+  }
   if (opt_disabled) {
     link.classList.add('disabled');
   } else {
@@ -722,6 +773,8 @@ function addActionLink(row, text, handler, opt_disabled) {
 
 function initSettings() {
   checkboxSendsCommand(
+      'remote-debugging-enabled', 'set-remote-debugging-enabled');
+  checkboxSendsCommand(
       'discover-usb-devices-enable', 'set-discover-usb-devices-enabled');
   checkboxSendsCommand('port-forwarding-enable', 'set-port-forwarding-enabled');
   checkboxSendsCommand(
@@ -729,6 +782,8 @@ function initSettings() {
 
   $('launch-ui-devtools')
       .addEventListener('click', sendCommand.bind(null, 'launch-ui-devtools'));
+  checkboxSendsCommand('bubble-locking-checkbox', 'set-bubble-locking');
+
   $('port-forwarding-config-open')
       .addEventListener('click', openPortForwardingConfig);
   $('tcp-discovery-config-open').addEventListener('click', openTargetsConfig);
@@ -737,6 +792,31 @@ function initSettings() {
   });
   $('node-frontend')
       .addEventListener('click', sendCommand.bind(null, 'open-node-frontend'));
+}
+
+function initStaleDataWatch() {
+  let lastFocus = true;
+
+  setInterval(() => {
+    const newFocus = document.hasFocus();
+    if (newFocus !== lastFocus) {
+      lastFocus = newFocus;
+      sendCommand('set-focus', newFocus);
+      staleDataCounter = 0;
+    } else {
+      staleDataCounter++;
+      if (staleDataCounter > 3) {
+        // Unhide appropriate message.
+        if (newFocus) {
+          $('devices-stale').hidden = true;
+          $('devices-not-responding').hidden = false;
+        } else {
+          $('devices-stale').hidden = false;
+          $('devices-not-responding').hidden = true;
+        }
+      }
+    }
+  }, 5000);
 }
 
 function checkboxHandler(command, event) {
@@ -763,6 +843,8 @@ function handleKey(event) {
       } else {
         dialog.commit(true);
       }
+      break;
+    default:
       break;
   }
 }
@@ -919,6 +1001,40 @@ function updateTCPDiscoveryConfig(config) {
   $('tcp-discovery-config-open').disabled = !config;
 }
 
+function updateBubbleLockingCheckbox(enabled) {
+  updateCheckbox('bubble-locking-checkbox', enabled);
+}
+
+function updateRemoteDebuggingEnabled(enabled, allowed, hide, address) {
+  const remoteDebugging = $('remote-debugging');
+  const tab = $('tab-remote-debugging');
+  if (hide) {
+    remoteDebugging.hidden = true;
+    if (tab) {
+      tab.hidden = true;
+    }
+    return;
+  }
+  remoteDebugging.hidden = false;
+  if (tab) {
+    tab.hidden = false;
+  }
+
+  const checkbox = $('remote-debugging-enabled');
+  checkbox.checked = !!enabled;
+  checkbox.disabled = !allowed;
+
+  const addressContainer = $('remote-debugging-address-container');
+  if (enabled) {
+    const addressInput =
+        /** @type {!HTMLElement} */ ($('remote-debugging-address'));
+    addressInput.textContent = address ? address : 'starting…';
+    addressContainer.hidden = false;
+  } else {
+    addressContainer.hidden = true;
+  }
+}
+
 function appendRow(list, lineFactory, key, value) {
   const line = lineFactory(key, value);
   line.lastElementChild.addEventListener('keydown', function(e) {
@@ -975,11 +1091,12 @@ function validatePort(input) {
 }
 
 function validateLocation(input) {
-  const match = input.value.match(/^([a-zA-Z0-9\.\-_]+):(\d+)$/);
+  const match =
+      input.value.match(/^(?:[a-zA-Z0-9\.\-_]+|\[[a-fA-F0-9:]+\]):(\d+)$/);
   if (!match) {
     return false;
   }
-  const port = parseInt(match[2]);
+  const port = parseInt(match[1]);
   return port <= 65535;
 }
 
@@ -1154,11 +1271,14 @@ Object.assign(window, {
   updatePortForwardingConfig,
   updateTCPDiscoveryEnabled,
   updateTCPDiscoveryConfig,
+  updateBubbleLockingCheckbox,
+  updateRemoteDebuggingEnabled,
   populateNativeUITargets,
   populateTargets,
   populatePortStatus,
   showIncognitoWarning,
   showNativeUILaunchButton,
+  setHostVersion,
 });
 
 document.addEventListener('DOMContentLoaded', onload);

@@ -18,6 +18,7 @@ import org.robolectric.shadows.ShadowLooper;
 import org.robolectric.shadows.ShadowSystemClock;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.components.browser_ui.notifications.PendingNotificationTask;
 import org.chromium.components.browser_ui.notifications.ThrottlingNotificationScheduler;
 
@@ -27,14 +28,13 @@ import java.util.concurrent.TimeUnit;
 
 /** JUnit tests for the {@link ThrottlingNotificationScheduler} class. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, shadows = {ShadowSystemClock.class})
+@Config(shadows = {ShadowSystemClock.class})
 public class ThrottlingNotificationSchedulerTest {
     private static final long CURRENT_TIME_MS = 90000000L;
 
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    private Map<String, Integer> mTaskInvocationMap = new HashMap<>();
+    private final Map<String, Integer> mTaskInvocationMap = new HashMap<>();
 
     @Before
     public void setUp() throws Exception {
@@ -48,9 +48,14 @@ public class ThrottlingNotificationSchedulerTest {
     }
 
     private void addTask(String taskId, @PendingNotificationTask.Priority int priority) {
-        ThrottlingNotificationScheduler.getInstance().addPendingNotificationTask(
-                new PendingNotificationTask(
-                        taskId, priority, () -> { incrementTaskInvokeCount(taskId); }));
+        ThrottlingNotificationScheduler.getInstance()
+                .addPendingNotificationTask(
+                        new PendingNotificationTask(
+                                taskId,
+                                priority,
+                                () -> {
+                                    incrementTaskInvokeCount(taskId);
+                                }));
     }
 
     @Test
@@ -65,7 +70,7 @@ public class ThrottlingNotificationSchedulerTest {
         Assert.assertEquals(1, (int) mTaskInvocationMap.get("t1"));
         addTask("t2", PendingNotificationTask.Priority.LOW);
         addTask("t2", PendingNotificationTask.Priority.LOW);
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         Assert.assertEquals(1, (int) mTaskInvocationMap.get("t2"));
     }
 
@@ -75,7 +80,7 @@ public class ThrottlingNotificationSchedulerTest {
         Assert.assertEquals(1, (int) mTaskInvocationMap.get("t1"));
         addTask("t2", PendingNotificationTask.Priority.LOW);
         ThrottlingNotificationScheduler.getInstance().cancelPendingNotificationTask("t2");
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         Assert.assertFalse(mTaskInvocationMap.containsKey("t2"));
     }
 
@@ -86,7 +91,7 @@ public class ThrottlingNotificationSchedulerTest {
 
         // A bunch of tasks arrives in order.
         addTask("t1", PendingNotificationTask.Priority.LOW);
-        SystemClock.setCurrentTimeMillis(CURRENT_TIME_MS + 1 /* milliseconds */);
+        SystemClock.setCurrentTimeMillis(/* milliseconds= */ CURRENT_TIME_MS + 1);
 
         addTask("t2", PendingNotificationTask.Priority.HIGH);
         addTask("t3", PendingNotificationTask.Priority.LOW);

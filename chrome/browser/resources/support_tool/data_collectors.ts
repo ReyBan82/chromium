@@ -2,45 +2,41 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import './screenshot.js';
-import './support_tool_shared.css.js';
 import 'chrome://resources/cr_elements/cr_checkbox/cr_checkbox.js';
-import 'chrome://resources/polymer/v3_0/iron-list/iron-list.js';
 
-import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-import {BrowserProxy, BrowserProxyImpl, DataCollectorItem} from './browser_proxy.js';
-import {getTemplate} from './data_collectors.html.js';
-import {ScreenshotElement} from './screenshot.js';
-import {SupportToolPageMixin} from './support_tool_page_mixin.js';
+import type {BrowserProxy, DataCollectorItem} from './browser_proxy.js';
+import {BrowserProxyImpl} from './browser_proxy.js';
+import {getCss} from './data_collectors.css.js';
+import {getHtml} from './data_collectors.html.js';
+import {SupportToolPageMixinLit} from './support_tool_page_mixin_lit.js';
 
-const DataCollectorsElementBase = SupportToolPageMixin(PolymerElement);
+const DataCollectorsElementBase = SupportToolPageMixinLit(CrLitElement);
 
 export class DataCollectorsElement extends DataCollectorsElementBase {
   static get is() {
     return 'data-collectors';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
-      dataCollectors_: {
-        type: Array,
-        value: () => [],
-      },
-      enableScreenshot_: {
-        type: Boolean,
-        value: () => loadTimeData.getBoolean('enableScreenshot'),
-      },
+      dataCollectors_: {type: Array},
+      allSelected_: {type: Boolean},
     };
   }
 
-  private dataCollectors_: DataCollectorItem[];
-  private enableScreenshot_: boolean;
+  protected accessor dataCollectors_: DataCollectorItem[] = [];
+  protected accessor allSelected_: boolean = false;
   private browserProxy_: BrowserProxy = BrowserProxyImpl.getInstance();
 
   override connectedCallback() {
@@ -49,25 +45,38 @@ export class DataCollectorsElement extends DataCollectorsElementBase {
     this.browserProxy_.getDataCollectors().then(
         (dataCollectors: DataCollectorItem[]) => {
           this.dataCollectors_ = dataCollectors;
+          this.allSelected_ =
+              this.dataCollectors_.every((element) => element.isIncluded);
         });
+  }
+
+  override willUpdate(changedProperties: PropertyValues<this>) {
+    super.willUpdate(changedProperties);
+
+    const changedPrivateProperties =
+        changedProperties as Map<PropertyKey, unknown>;
+
+    if (changedPrivateProperties.has('allSelected_')) {
+      // Update this.dataCollectors_ to reflect the selection choice.
+      this.dataCollectors_ = this.dataCollectors_.map(
+          item => ({...item, isIncluded: this.allSelected_}));
+    }
   }
 
   getDataCollectors(): DataCollectorItem[] {
     return this.dataCollectors_;
   }
 
-  setScreenshotData(dataBase64: string) {
-    if (this.enableScreenshot_) {
-      this.$$<ScreenshotElement>('#screenshot')!.setScreenshotData(dataBase64);
-    }
+  protected onAllSelectedCheckedChanged_(e: CustomEvent<{value: boolean}>) {
+    this.allSelected_ = e.detail.value;
   }
 
-  getEditedScreenshotBase64(): string {
-    // `SupportToolMessageHandler` will handle the case when the screenshot
-    // feature is disabled.
-    return this.enableScreenshot_ ?
-        this.$$<ScreenshotElement>('#screenshot')!.getEditedScreenshotBase64() :
-        '';
+  protected onDataCollectorCheckedChanged_(e: CustomEvent<{value: boolean}>) {
+    const index = Number((e.target as HTMLElement).dataset['index']);
+    const isIncluded = e.detail.value;
+    this.dataCollectors_[index]!.isIncluded = isIncluded;
+    this.requestUpdate();  // Trigger Lit update
+    this.allSelected_ = this.dataCollectors_.every(item => item.isIncluded);
   }
 }
 

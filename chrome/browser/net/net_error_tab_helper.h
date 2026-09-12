@@ -22,12 +22,6 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-namespace ash {
-class NetworkPortalSigninController;
-}
-#endif
-
 namespace user_prefs {
 class PrefRegistrySyncable;
 }  // namespace user_prefs
@@ -99,7 +93,7 @@ class NetErrorTabHelper
   void SetIsShowingDownloadButtonInErrorPage(
       bool showing_download_button) override;
 #endif  // BUILDFLAG(ENABLE_OFFLINE_PAGES)
-#if BUILDFLAG(IS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
   void ShowPortalSignin() override;
 #endif
 
@@ -118,6 +112,16 @@ class NetErrorTabHelper
   content::RenderFrameHostReceiverSet<chrome::mojom::NetworkDiagnostics>&
   network_diagnostics_receivers_for_testing() {
     return network_diagnostics_receivers_;
+  }
+
+  content::RenderFrameHostReceiverSet<chrome::mojom::NetworkEasterEgg>&
+  network_easter_egg_receivers_for_testing() {
+    return network_easter_egg_receivers_;
+  }
+
+  content::RenderFrameHostReceiverSet<chrome::mojom::NetErrorPageSupport>&
+  net_error_page_support_for_testing() {
+    return net_error_page_support_;
   }
 
  private:
@@ -182,10 +186,6 @@ class NetErrorTabHelper
 
   // Preference storing the user's current easter egg game high score.
   IntegerPrefMember easter_egg_high_score_;
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  std::unique_ptr<ash::NetworkPortalSigninController> portal_signin_controller_;
-#endif
 
   base::WeakPtrFactory<NetErrorTabHelper> weak_factory_{this};
 

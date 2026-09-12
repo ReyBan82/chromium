@@ -34,6 +34,9 @@ class SVGFEDropShadowElement final
 
  public:
   explicit SVGFEDropShadowElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEDropShadowElement;
+  }
 
   void setStdDeviation(float std_deviation_x, float std_deviation_y);
 
@@ -50,6 +53,10 @@ class SVGFEDropShadowElement final
   bool SetFilterEffectAttribute(FilterEffect*, const QualifiedName&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumber> dx_;
   Member<SVGAnimatedNumber> dy_;

@@ -6,9 +6,7 @@ package org.chromium.base;
 
 import java.lang.ref.WeakReference;
 
-/**
- * Utils for doing garbage collection tests.
- */
+/** Utils for doing garbage collection tests. */
 public class GarbageCollectionTestUtils {
     /**
      * Relying on just one single GC might make instrumentation tests flaky.
@@ -16,6 +14,7 @@ public class GarbageCollectionTestUtils {
      * since there are tests asserting objects NOT garbage collected.
      */
     private static final int MAX_GC_ITERATIONS = 3;
+
     private static final long GC_SLEEP_TIME = 10;
 
     /**
@@ -40,6 +39,22 @@ public class GarbageCollectionTestUtils {
                 // Ignore any interrupts and just try again.
             }
         }
+
+        // clang-format off
+        // If this function returns false, uncomment the following code, use command "adb pull" to
+        // pull the generated .hprof file, and import it in the Android Studio's Profiler to
+        // analyze.
+        //
+        // if (reference.get() != null) {
+        //    // Determine a file path for the dump.
+        //    String filePath = PathUtils.getDataDirectory() + "/leak_investigation.hprof";
+        //
+        //    // Generate the heap dump.
+        //    if (JavaHeapDumpGenerator.generateHprof(filePath)) {
+        //       Log.e("MemoryDump", "Heap dump captured at: " + filePath);
+        //    }
+        // }
+        // clang-format on
 
         return reference.get() == null;
     }

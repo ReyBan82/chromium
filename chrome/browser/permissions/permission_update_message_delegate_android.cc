@@ -7,6 +7,7 @@
 #include <memory>
 #include <utility>
 
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/android/android_theme_resources.h"
 #include "chrome/browser/android/resource_mapper.h"
 #include "components/messages/android/message_dispatcher_bridge.h"
@@ -43,15 +44,27 @@ PermissionUpdateMessageDelegate::PermissionUpdateMessageDelegate(
   message_->SetTitle(l10n_util::GetStringUTF16(title_id));
   message_->SetDescription(l10n_util::GetStringUTF16(description_id));
   message_->SetPrimaryButtonText(
-      l10n_util::GetStringUTF16(IDS_INFOBAR_UPDATE_PERMISSIONS_BUTTON_TEXT));
+      l10n_util::GetStringUTF16(IDS_MESSAGE_UPDATE_PERMISSIONS_BUTTON_TEXT));
   message_->SetIconResourceId(ResourceMapper::MapToJavaDrawableId(icon_id));
-  messages::MessageDispatcherBridge::Get()->EnqueueMessage(
+  bool enqueued = messages::MessageDispatcherBridge::Get()->EnqueueMessage(
       message_.get(), web_contents, messages::MessageScopeType::NAVIGATION,
       messages::MessagePriority::kNormal);
   permission_update_requester_ = std::make_unique<PermissionUpdateRequester>(
       web_contents, required_android_permissions, optional_android_permissions,
       base::BindOnce(&PermissionUpdateMessageDelegate::OnPermissionResult,
                      base::Unretained(this)));
+  // `EnqueueMessage` fails when the WebContents is not attached to a window
+  // with a MessageDispatcher (for example, non-tab WebContents like custom
+  // overlays or Glic) or when the activity is being recreated/destroyed. In
+  // this case, fall back to triggering the Android OS permission request
+  // directly.
+  if (!enqueued) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            &PermissionUpdateMessageDelegate::HandlePrimaryActionCallback,
+            weak_factory_.GetWeakPtr()));
+  }
 }
 
 PermissionUpdateMessageDelegate::~PermissionUpdateMessageDelegate() {
@@ -83,9 +96,13 @@ void PermissionUpdateMessageDelegate::HandlePrimaryActionCallback() {
 
 void PermissionUpdateMessageDelegate::HandleDismissCallback(
     messages::DismissReason dismiss_reason) {
+  // The message is already being dismissed, prevent DismissInternal() from
+  // dismissing again. Do not reset message_ here: this method is called from
+  // within MessageWrapper::HandleDismissCallback, and destroying the
+  // MessageWrapper at this point would be a use-after-free.
+  should_dismiss_internal_ = false;
   // If it is dismissed by clicking on primary action, metrics and callback
-  // will be recorded and run in OnPermissionResult
-  message_.reset();
+  // will be recorded and run in OnPermissionResult.
   // PermissionUpdateRequester::RequestPermissions can invoke its callback
   // synchronously in some cases. In that case, |OnPermissionResult| will be
   // executed before this callback and |callbacks_| will be empty.
@@ -99,13 +116,19 @@ void PermissionUpdateMessageDelegate::HandleDismissCallback(
           : permissions::PermissionAction::IGNORED,
       content_settings_types_);
   RunCallbacks(/*all_permissions_granted=*/false);
+  // Prevent MessageWrapper destruction during delegate deletion below.
+  // Use DeleteSoon to ensure it is destroyed in a later task, after
+  // MessageWrapper::HandleDismissCallback has returned.
+  base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
+      FROM_HERE, std::move(message_));
   // This dismiss callback should be executed in the end, because this can
   // destroy the current object.
   std::move(delete_callback_).Run(this);
 }
 
 void PermissionUpdateMessageDelegate::DismissInternal() {
-  if (message_) {
+  // Skip if the message was already dismissed via HandleDismissCallback.
+  if (message_ && should_dismiss_internal_) {
     messages::MessageDispatcherBridge::Get()->DismissMessage(
         message_.get(), messages::DismissReason::UNKNOWN);
   }

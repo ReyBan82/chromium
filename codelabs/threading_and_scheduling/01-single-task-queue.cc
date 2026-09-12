@@ -50,7 +50,7 @@ int main() {
 
   // Create a default TaskQueue that feeds into the SequenceManager. Inside a
   // SequenceManager, TaskQueue is the basic unit of scheduling...
-  scoped_refptr<base::sequence_manager::TaskQueue> default_task_queue =
+  base::sequence_manager::TaskQueue::Handle default_task_queue =
       sequence_manager->CreateTaskQueue(base::sequence_manager::TaskQueue::Spec(
           base::sequence_manager::QueueName::DEFAULT_TQ));
 
@@ -64,7 +64,8 @@ int main() {
   // and get other interesting information about them.
   scoped_refptr<base::SingleThreadTaskRunner> task_runner =
       default_task_queue->CreateTaskRunner(static_cast<int>(TaskType::kMain));
-  sequence_manager->SetDefaultTaskRunner(task_runner);
+  sequence_manager->SetDefaultTaskRunner(
+      task_runner, default_task_queue->GetQueuePriority());
 
   // Now that this thread has a bound sequence manager set up, we can:
   //   1.) Start posting tasks to its queues which are not yet being processed

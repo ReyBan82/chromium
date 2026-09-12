@@ -6,6 +6,11 @@
 
 namespace translate {
 
-const char* const kUnknownLanguageCode = "und";
+const int kDesktopPartialTranslateTextSelectionMaxCharacters = 500;
+
+const int kDesktopPartialTranslateBubbleShowDelayMs = 500;
+
+const char kPdfMimeType[] = "application/pdf";
+const char kReadingModeSidePanelHost[] = "read-anything-side-panel.top-chrome";
 
 }  // namespace translate

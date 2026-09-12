@@ -5,36 +5,35 @@
 #include "extensions/browser/updater/update_service.h"
 
 #include <algorithm>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "base/barrier_closure.h"
 #include "base/feature_list.h"
-#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "components/update_client/crx_update_item.h"
+#include "components/update_client/protocol_definition.h"
 #include "components/update_client/update_client.h"
 #include "components/update_client/update_client_errors.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/notification_details.h"
-#include "content/public/browser/notification_service.h"
+#include "extensions/browser/delayed_install_manager.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/browser/extensions_browser_client.h"
-#include "extensions/browser/notification_types.h"
+#include "extensions/browser/scoped_extension_keep_alive.h"
 #include "extensions/browser/updater/extension_downloader.h"
 #include "extensions/browser/updater/extension_update_data.h"
-#include "extensions/browser/updater/scoped_extension_updater_keep_alive.h"
 #include "extensions/browser/updater/update_data_provider.h"
 #include "extensions/browser/updater/update_service_factory.h"
 #include "extensions/common/extension_features.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "extensions/common/extension_id.h"
 
 namespace extensions {
 
@@ -85,21 +84,26 @@ void UpdateService::SendUninstallPing(const std::string& id,
                                       int reason) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   DCHECK(update_client_);
+
   update_client::CrxComponent crx;
   crx.app_id = id;
   crx.version = version;
-  // A ScopedExtensionUpdaterKeepAlive is bound into the callback to keep the
+  // A ScopedBrowserContextKeepAlive is bound into the callback to keep the
   // context alive throughout the operation.
-  update_client_->SendUninstallPing(
-      crx, reason,
-      base::BindOnce([](std::unique_ptr<ScopedExtensionUpdaterKeepAlive>,
+  update_client_->SendPing(
+      crx,
+      {.event_type = update_client::protocol_request::kEventUninstall,
+       .result = update_client::protocol_request::kEventResultSuccess,
+       .error_code = 0,
+       .extra_code1 = reason},
+      base::BindOnce([](std::unique_ptr<ScopedBrowserContextKeepAlive>,
                         update_client::Error) {},
                      ExtensionsBrowserClient::Get()->CreateUpdaterKeepAlive(
                          browser_context_)));
 }
 
 void UpdateService::OnCrxStateChange(UpdateFoundCallback update_found_callback,
-                                     update_client::CrxUpdateItem item) {
+                                     const update_client::CrxUpdateItem& item) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   // Custom attributes can only be sent for NOT_UPDATED/UPDATE_FOUND events.
@@ -117,34 +121,33 @@ void UpdateService::OnCrxStateChange(UpdateFoundCallback update_found_callback,
       break;
     case update_client::ComponentState::kNew:
     case update_client::ComponentState::kChecking:
-    case update_client::ComponentState::kDownloadingDiff:
     case update_client::ComponentState::kDownloading:
-    case update_client::ComponentState::kDownloaded:
-    case update_client::ComponentState::kUpdatingDiff:
+    case update_client::ComponentState::kDecompressing:
+    case update_client::ComponentState::kPatching:
     case update_client::ComponentState::kUpdating:
     case update_client::ComponentState::kUpdated:
     case update_client::ComponentState::kUpdateError:
-    case update_client::ComponentState::kUninstalled:
-    case update_client::ComponentState::kRegistration:
     case update_client::ComponentState::kRun:
-    case update_client::ComponentState::kLastStatus:
       break;
   }
 
   if (should_perform_action_on_omaha_attributes) {
-    base::Value::Dict attributes = GetExtensionOmahaAttributes(item);
+    base::DictValue attributes = GetExtensionOmahaAttributes(item);
     // Note that it's important to perform actions even if |attributes| is
     // empty, missing values may default to false and have associated logic.
     ExtensionSystem::Get(browser_context_)
-        ->PerformActionBasedOnOmahaAttributes(
-            item.id, base::Value(std::move(attributes)));
+        ->PerformActionBasedOnOmahaAttributes(item.id, attributes);
   }
 }
 
 UpdateService::UpdateService(
     content::BrowserContext* browser_context,
-    scoped_refptr<update_client::UpdateClient> update_client)
-    : browser_context_(browser_context), update_client_(update_client) {
+    scoped_refptr<update_client::UpdateClient> update_client,
+    base::RepeatingCallback<void(const std::vector<std::string>&,
+                                 base::OnceClosure)> cache_retainer)
+    : browser_context_(browser_context),
+      update_client_(update_client),
+      cache_retainer_(cache_retainer) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   update_data_provider_ =
       base::MakeRefCounted<UpdateDataProvider>(browser_context_);
@@ -165,8 +168,9 @@ void UpdateService::StartUpdateCheck(
 
   if (!ExtensionsBrowserClient::Get()->IsBackgroundUpdateAllowed()) {
     VLOG(1) << "UpdateService - Extension update not allowed.";
-    if (!callback.is_null())
+    if (!callback.is_null()) {
       std::move(callback).Run();
+    }
     return;
   }
 
@@ -174,10 +178,12 @@ void UpdateService::StartUpdateCheck(
       InProgressUpdate(std::move(callback), update_params.install_immediately);
 
   ExtensionUpdateDataMap update_data;
+  std::vector<ExtensionId> all_ids;
+  all_ids.reserve(update_params.update_info.size());
   std::vector<std::vector<ExtensionId>> update_ids;
   update_ids.reserve(update_params.update_info.size());
   for (const auto& update_info : update_params.update_info) {
-    const std::string& extension_id = update_info.first;
+    const ExtensionId& extension_id = update_info.first;
 
     DCHECK(!extension_id.empty());
 
@@ -194,6 +200,7 @@ void UpdateService::StartUpdateCheck(
     if (update_ids.empty() || update_ids.back().size() >= 25) {
       update_ids.emplace_back();
     }
+    all_ids.push_back(extension_id);
     update_ids.back().push_back(extension_id);
     update_data.insert(std::make_pair(extension_id, data));
   }
@@ -203,24 +210,32 @@ void UpdateService::StartUpdateCheck(
       base::BindOnce(&UpdateService::UpdateCheckComplete,
                      weak_ptr_factory_.GetWeakPtr(), std::move(update)));
 
-  base::RepeatingCallback<
-      std::vector<absl::optional<update_client::CrxComponent>>(
-          const std::vector<std::string>&)>
+  base::RepeatingCallback<void(
+      const std::vector<std::string>&,
+      base::OnceCallback<void(
+          const std::vector<std::optional<update_client::CrxComponent>>&)>)>
       get_data = base::BindRepeating(
           &UpdateDataProvider::GetData, update_data_provider_,
           update_params.install_immediately, std::move(update_data));
 
+  base::OnceClosure do_update_check = base::DoNothing();
   for (const std::vector<std::string>& update_id_group : update_ids) {
-    update_client_->Update(
-        update_id_group, get_data,
-        base::BindRepeating(&UpdateService::OnCrxStateChange,
-                            weak_ptr_factory_.GetWeakPtr(),
-                            update_found_callback),
-        update_params.priority == ExtensionUpdateCheckParams::FOREGROUND,
-        base::BindOnce([](base::RepeatingClosure callback,
-                          update_client::Error /*error*/) { callback.Run(); },
-                       closure));
+    do_update_check =
+        std::move(do_update_check)
+            .Then(base::BindOnce(
+                &update_client::UpdateClient::Update, update_client_,
+                update_id_group, get_data,
+                base::BindRepeating(&UpdateService::OnCrxStateChange,
+                                    weak_ptr_factory_.GetWeakPtr(),
+                                    update_found_callback),
+                update_params.priority ==
+                    ExtensionUpdateCheckParams::FOREGROUND,
+                base::BindOnce(
+                    [](base::RepeatingClosure callback,
+                       update_client::Error /*error*/) { callback.Run(); },
+                    closure)));
   }
+  cache_retainer_.Run(all_ids, std::move(do_update_check));
 }
 
 void UpdateService::UpdateCheckComplete(InProgressUpdate update) {
@@ -231,33 +246,39 @@ void UpdateService::UpdateCheckComplete(InProgressUpdate update) {
   // check might have queued an update for this extension because it was in
   // use at the time. We should ask for the install of the queued update now
   // if it's ready.
+  DelayedInstallManager* delayed_install_manager =
+      DelayedInstallManager::Get(browser_context_);
   if (update.install_immediately) {
     for (const ExtensionId& extension_id : update.pending_extension_ids) {
-      ExtensionSystem::Get(browser_context_)
-          ->FinishDelayedInstallationIfReady(extension_id,
-                                             true /*install_immediately*/);
+      if (delayed_install_manager->GetPendingExtensionUpdate(extension_id)) {
+        delayed_install_manager->FinishDelayedInstallationIfReady(
+            extension_id, /*install_immediately=*/true);
+      }
     }
   }
 
-  if (!update.callback.is_null())
+  if (!update.callback.is_null()) {
     std::move(update.callback).Run();
+  }
 }
 
 void UpdateService::AddUpdateClientObserver(
     update_client::UpdateClient::Observer* observer) {
-  if (update_client_)
+  if (update_client_) {
     update_client_->AddObserver(observer);
+  }
 }
 
 void UpdateService::RemoveUpdateClientObserver(
     update_client::UpdateClient::Observer* observer) {
-  if (update_client_)
+  if (update_client_) {
     update_client_->RemoveObserver(observer);
+  }
 }
 
-base::Value::Dict UpdateService::GetExtensionOmahaAttributes(
-    update_client::CrxUpdateItem& update_item) {
-  base::Value::Dict attributes;
+base::DictValue UpdateService::GetExtensionOmahaAttributes(
+    const update_client::CrxUpdateItem& update_item) {
+  base::DictValue attributes;
 
   for (const char* key : kOmahaAttributes) {
     auto iter = update_item.custom_updatecheck_data.find(key);
@@ -265,8 +286,9 @@ base::Value::Dict UpdateService::GetExtensionOmahaAttributes(
     // or does not exist.
     // Only create the attribute if it's defined in the custom update check
     // data. We want to distinguish true, false and undefined values.
-    if (iter != update_item.custom_updatecheck_data.end())
+    if (iter != update_item.custom_updatecheck_data.end()) {
       attributes.Set(key, iter->second == "true");
+    }
   }
   return attributes;
 }

@@ -7,17 +7,11 @@
 #include "base/functional/bind.h"
 #include "build/build_config.h"
 
-#if BUILDFLAG(IS_LINUX)
-#include "remoting/host/linux/wayland_utils.h"
-#endif
-
 namespace remoting {
 
 DesktopAndCursorConditionalComposer::DesktopAndCursorConditionalComposer(
     std::unique_ptr<DesktopCapturer> desktop_capturer) {
-#if defined(WEBRTC_USE_GIO)
   desktop_capturer_ = desktop_capturer.get();
-#endif
   capturer_ = webrtc::DesktopAndCursorComposer::CreateWithoutMouseCursorMonitor(
       std::move(desktop_capturer));
 }
@@ -36,7 +30,8 @@ void DesktopAndCursorConditionalComposer::SetComposeEnabled(bool enabled) {
     }
   } else {
     webrtc::MouseCursor* empty = new webrtc::MouseCursor(
-        new webrtc::BasicDesktopFrame(webrtc::DesktopSize(0, 0)),
+        new webrtc::BasicDesktopFrame(webrtc::DesktopSize(0, 0),
+                                      webrtc::FOURCC_ARGB),
         webrtc::DesktopVector(0, 0));
     capturer_->OnMouseCursor(empty);
   }
@@ -95,17 +90,19 @@ bool DesktopAndCursorConditionalComposer::IsOccluded(
   return capturer_->IsOccluded(pos);
 }
 
-bool DesktopAndCursorConditionalComposer::SupportsFrameCallbacks() {
-#if BUILDFLAG(IS_LINUX)
-  return IsRunningWayland();
-#else
-  return false;
-#endif
-}
-
 void DesktopAndCursorConditionalComposer::SetMaxFrameRate(
     uint32_t max_frame_rate) {
   capturer_->SetMaxFrameRate(max_frame_rate);
+}
+
+void DesktopAndCursorConditionalComposer::Pause(bool pause) {
+  desktop_capturer_->Pause(pause);
+}
+
+void DesktopAndCursorConditionalComposer::BoostCaptureRate(
+    base::TimeDelta capture_interval,
+    base::TimeDelta duration) {
+  desktop_capturer_->BoostCaptureRate(capture_interval, duration);
 }
 
 #if defined(WEBRTC_USE_GIO)

@@ -10,6 +10,8 @@
 #include "base/json/json_file_value_serializer.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/test_simple_task_runner.h"
 #include "base/values.h"
@@ -21,6 +23,7 @@
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "components/pref_registry/pref_registry_syncable.h"
+#include "components/prefs/in_memory_pref_store.h"
 #include "components/safe_browsing/core/common/safe_browsing_prefs.h"
 #include "components/sync_preferences/pref_service_syncable.h"
 #include "components/sync_preferences/pref_service_syncable_factory.h"
@@ -41,12 +44,6 @@ namespace safe_browsing {
 // installs or other tests.
 class PlatformStateStoreTestBase : public ::testing::Test {
  protected:
-  PlatformStateStoreTestBase() {}
-
-  PlatformStateStoreTestBase(const PlatformStateStoreTestBase&) = delete;
-  PlatformStateStoreTestBase& operator=(const PlatformStateStoreTestBase&) =
-      delete;
-
   void SetUp() override {
     ::testing::Test::SetUp();
     ASSERT_NO_FATAL_FAILURE(
@@ -110,7 +107,7 @@ class StateStoreTest : public PlatformStateStoreTestBase {
     std::unique_ptr<base::Value> prefs(JSONFileValueDeserializer(GetPrefsPath())
                                            .Deserialize(nullptr, nullptr));
     ASSERT_NE(nullptr, prefs.get());
-    base::Value::Dict* dict = prefs->GetIfDict();
+    base::DictValue* dict = prefs->GetIfDict();
     ASSERT_TRUE(dict);
     ASSERT_TRUE(dict->RemoveByDottedPath(prefs::kSafeBrowsingIncidentsSent));
     ASSERT_TRUE(JSONFileValueSerializer(GetPrefsPath()).Serialize(*dict));
@@ -121,6 +118,7 @@ class StateStoreTest : public PlatformStateStoreTestBase {
     // Create the testing profile with a file-backed user pref store.
     sync_preferences::PrefServiceSyncableFactory factory;
     factory.SetUserPrefsFile(GetPrefsPath(), task_runner_.get());
+    factory.SetAccountPrefStore(base::MakeRefCounted<InMemoryPrefStore>());
     user_prefs::PrefRegistrySyncable* pref_registry =
         new user_prefs::PrefRegistrySyncable();
     RegisterUserProfilePrefs(pref_registry);
@@ -133,7 +131,7 @@ class StateStoreTest : public PlatformStateStoreTestBase {
   static const char kProfileName_[];
   static const TestData kTestData_[];
   content::BrowserTaskEnvironment task_environment_;
-  raw_ptr<TestingProfile> profile_;
+  raw_ptr<TestingProfile, DanglingUntriaged> profile_;
   scoped_refptr<base::TestSimpleTaskRunner> task_runner_;
 
  private:
@@ -287,6 +285,58 @@ TEST_F(StateStoreTest, PersistenceWithStoreDelete) {
     ASSERT_FALSE(state_store.HasBeenReported(data.type, data.key, data.digest));
 #endif
   }
+}
+
+TEST_F(StateStoreTest, ClearAfterTransaction) {
+  StateStore state_store(profile_);
+
+  // Perform a mutation in a first transaction.
+  {
+    StateStore::Transaction transaction(&state_store);
+    transaction.MarkAsReported(kTestData_[0].type, kTestData_[0].key,
+                               kTestData_[0].digest);
+  }
+
+  // Clear the preference in PrefService. This deallocates the previous
+  // dictionary from the user pref store.
+  profile_->GetPrefs()->ClearPref(prefs::kSafeBrowsingIncidentsSent);
+
+  // A subsequent transaction clearing the incident must safely read and update
+  // the preference rather than dereferencing a dangling incidents_sent_
+  // pointer to the deallocated dictionary.
+  {
+    StateStore::Transaction transaction(&state_store);
+    transaction.Clear(kTestData_[0].type, kTestData_[0].key);
+  }
+
+  EXPECT_FALSE(state_store.HasBeenReported(
+      kTestData_[0].type, kTestData_[0].key, kTestData_[0].digest));
+}
+
+TEST_F(StateStoreTest, ClearAfterConstructorMutation) {
+  // Populate the platform state store so that StateStore's constructor performs
+  // a mutation (calling ReplacePrefDict).
+  base::DictValue initial_state;
+  initial_state.SetByDottedPath(
+      base::StrCat({base::NumberToString(static_cast<int>(kTestData_[0].type)),
+                    ".", kTestData_[0].key}),
+      base::NumberToString(kTestData_[0].digest));
+  platform_state_store::Store(profile_, initial_state);
+
+  StateStore state_store(profile_);
+
+  // Clear the preference in PrefService to deallocate the old dictionary from
+  // the user pref store.
+  profile_->GetPrefs()->ClearPref(prefs::kSafeBrowsingIncidentsSent);
+
+  // Clear the incident in a subsequent transaction.
+  {
+    StateStore::Transaction transaction(&state_store);
+    transaction.Clear(kTestData_[0].type, kTestData_[0].key);
+  }
+
+  EXPECT_FALSE(state_store.HasBeenReported(
+      kTestData_[0].type, kTestData_[0].key, kTestData_[0].digest));
 }
 
 }  // namespace safe_browsing

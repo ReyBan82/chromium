@@ -6,6 +6,8 @@
 
 #include <windows.h>
 
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "printing/backend/win_helper.h"
 #include "printing/mojom/print.mojom.h"
 #include "printing/print_settings.h"
@@ -27,11 +29,10 @@ bool IsTechnology(HDC hdc, const char* technology) {
   if (!HasEscapeSupport(hdc, GETTECHNOLOGY))
     return false;
 
-  char buf[256];
-  memset(buf, 0, sizeof(buf));
+  char buf[256] = {};
   if (ExtEscape(hdc, GETTECHNOLOGY, 0, nullptr, sizeof(buf) - 1, buf) <= 0)
     return false;
-  return strcmp(buf, technology) == 0;
+  return std::string_view(buf) == technology;
 }
 
 void SetPrinterToGdiMode(HDC hdc) {
@@ -114,10 +115,6 @@ void PrintSettingsInitializerWin::InitPrintSettings(
   print_settings->set_dpi_xy(dpi_x, dpi_y);
   int dpi = print_settings->dpi();
   DCHECK_EQ(print_settings->device_units_per_inch(), dpi);
-
-  const int kAlphaCaps = SB_CONST_ALPHA | SB_PIXEL_ALPHA;
-  print_settings->set_supports_alpha_blend(
-      (GetDeviceCaps(hdc, SHADEBLENDCAPS) & kAlphaCaps) == kAlphaCaps);
 
   DCHECK_EQ(GetDeviceCaps(hdc, SCALINGFACTORX), 0);
   DCHECK_EQ(GetDeviceCaps(hdc, SCALINGFACTORY), 0);

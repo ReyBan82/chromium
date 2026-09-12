@@ -61,8 +61,11 @@ class UkmTestHelper {
   // Adds MSBB consent to the UkmService.
   void SetMsbbConsent();
 
+  // Deletes all unsent local data.
+  void PurgeData();
+
  private:
-  const raw_ptr<UkmService, DanglingUntriaged> ukm_service_;
+  const raw_ptr<UkmService> ukm_service_;
 };
 
 }  // namespace ukm

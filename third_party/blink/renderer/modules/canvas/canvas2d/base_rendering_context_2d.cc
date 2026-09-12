@@ -4,91 +4,140 @@
 
 #include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h"
 
-#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <memory>
+#include <optional>
+#include <utility>
 
-#include "base/logging.h"
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/location.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/notreached.h"
 #include "base/numerics/checked_math.h"
-#include "base/ranges/algorithm.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/task/single_thread_task_runner.h"
-#include "third_party/blink/public/common/features.h"
-#include "third_party/blink/public/common/privacy_budget/identifiability_metrics.h"
-#include "third_party/blink/renderer/bindings/modules/v8/v8_union_canvasfilter_string.h"
-#include "third_party/blink/renderer/core/css/cssom/css_color_value.h"
-#include "third_party/blink/renderer/core/css/parser/css_parser.h"
+#include "base/time/time.h"
+#include "cc/paint/paint_canvas.h"
+#include "cc/paint/paint_flags.h"
+#include "cc/paint/paint_image.h"
+#include "cc/paint/record_paint_canvas.h"
+#include "components/viz/common/resources/shared_image_format_utils.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+#include "third_party/blink/public/common/metrics/document_update_reason.h"
+#include "third_party/blink/public/mojom/devtools/console_message.mojom-blink-forward.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_align.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_baseline.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_text_cluster_options.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_element_elementimage.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_canvas_direction.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_canvas_font_kerning.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_canvas_font_stretch.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_canvas_font_variant_caps.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_canvas_text_rendering.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_draw_element_image_options.h"
+#include "third_party/blink/renderer/core/css/properties/computed_style_utils.h"
+#include "third_party/blink/renderer/core/css/style_change_reason.h"
+#include "third_party/blink/renderer/core/dom/dom_node_ids.h"
+#include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
+#include "third_party/blink/renderer/core/dom/node.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
-#include "third_party/blink/renderer/core/html/canvas/canvas_context_creation_attributes_core.h"
+#include "third_party/blink/renderer/core/geometry/dom_matrix.h"
+#include "third_party/blink/renderer/core/html/canvas/canvas_font_cache.h"
+#include "third_party/blink/renderer/core/html/canvas/canvas_performance_monitor.h"
+#include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h"
+#include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context_host.h"
+#include "third_party/blink/renderer/core/html/canvas/element_image.h"
+#include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
+#include "third_party/blink/renderer/core/html/canvas/image_data.h"
+#include "third_party/blink/renderer/core/html/canvas/text_cluster.h"
 #include "third_party/blink/renderer/core/html/canvas/text_metrics.h"
-#include "third_party/blink/renderer/core/html/media/html_video_element.h"
+#include "third_party/blink/renderer/core/html/canvas/unique_font_selector.h"
 #include "third_party/blink/renderer/core/inspector/console_message.h"
-#include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_color_cache.h"
-#include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_filter.h"
-#include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.h"
-#include "third_party/blink/renderer/modules/canvas/canvas2d/path_2d.h"
-#include "third_party/blink/renderer/modules/canvas/canvas2d/v8_canvas_style.h"
-#include "third_party/blink/renderer/modules/webcodecs/video_frame.h"
-#include "third_party/blink/renderer/platform/bindings/string_resource.h"
+#include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
+#include "third_party/blink/renderer/core/style/computed_style.h"
+#include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h"
+#include "third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_state.h"
+#include "third_party/blink/renderer/modules/canvas/htmlcanvas/canvas_context_creation_attributes_helpers.h"
+#include "third_party/blink/renderer/modules/webgpu/dawn_conversions.h"
+#include "third_party/blink/renderer/modules/webgpu/dawn_enum_conversions.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu_device.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu_texture.h"
+#include "third_party/blink/renderer/platform/bindings/exception_code.h"
+#include "third_party/blink/renderer/platform/fonts/font.h"
+#include "third_party/blink/renderer/platform/fonts/font_selection_types.h"
+#include "third_party/blink/renderer/platform/fonts/font_selector.h"
+#include "third_party/blink/renderer/platform/fonts/plain_text_painter.h"
+#include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+#include "third_party/blink/renderer/platform/geometry/path.h"
 #include "third_party/blink/renderer/platform/graphics/bitmap_image.h"
-#include "third_party/blink/renderer/platform/graphics/graphics_context.h"
+#include "third_party/blink/renderer/platform/graphics/blend_mode.h"
+#include "third_party/blink/renderer/platform/graphics/canvas_2d_bitmap_provider.h"
+#include "third_party/blink/renderer/platform/graphics/canvas_2d_resource_provider.h"
+#include "third_party/blink/renderer/platform/graphics/canvas_deferred_paint_record.h"
+#include "third_party/blink/renderer/platform/graphics/flush_reason.h"
+#include "third_party/blink/renderer/platform/graphics/gpu/shared_gpu_context.h"
+#include "third_party/blink/renderer/platform/graphics/gpu/webgpu_cpp.h"
+#include "third_party/blink/renderer/platform/graphics/gpu/webgpu_mailbox_texture.h"
+#include "third_party/blink/renderer/platform/graphics/image.h"
+#include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
+#include "third_party/blink/renderer/platform/graphics/paint/paint_image.h"
+#include "third_party/blink/renderer/platform/graphics/scoped_raster_timer.h"
 #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
-#include "third_party/blink/renderer/platform/graphics/stroke_data.h"
+#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
 #include "third_party/blink/renderer/platform/graphics/video_frame_image_util.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
-#include "third_party/skia/include/core/SkPathBuilder.h"
-#include "ui/gfx/geometry/quad_f.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/text/layout_locale.h"
+#include "third_party/blink/renderer/platform/text/text_direction.h"
+#include "third_party/blink/renderer/platform/text/text_run.h"
+#include "third_party/blink/renderer/platform/text/unicode_bidi.h"
+#include "third_party/blink/renderer/platform/timer.h"
+#include "third_party/blink/renderer/platform/wtf/casting.h"
+#include "third_party/blink/renderer/platform/wtf/forward.h"
+#include "third_party/blink/renderer/platform/wtf/math_extras.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "ui/gfx/geometry/skia_conversions.h"
+#include "ui/gfx/geometry/vector2d_f.h"
+
+// Including "base/time/time.h" triggers a bug in IWYU.
+// https://github.com/include-what-you-use/include-what-you-use/issues/1122
+// IWYU pragma: no_include "base/numerics/clamped_math.h"
 
 namespace blink {
 
-const char BaseRenderingContext2D::kDefaultFont[] = "10px sans-serif";
-const char BaseRenderingContext2D::kInheritDirectionString[] = "inherit";
-const char BaseRenderingContext2D::kRtlDirectionString[] = "rtl";
-const char BaseRenderingContext2D::kLtrDirectionString[] = "ltr";
-const char BaseRenderingContext2D::kAutoKerningString[] = "auto";
-const char BaseRenderingContext2D::kNormalKerningString[] = "normal";
-const char BaseRenderingContext2D::kNoneKerningString[] = "none";
-const char BaseRenderingContext2D::kUltraCondensedString[] = "ultra-condensed";
-const char BaseRenderingContext2D::kExtraCondensedString[] = "extra-condensed";
-const char BaseRenderingContext2D::kCondensedString[] = "condensed";
-const char BaseRenderingContext2D::kSemiCondensedString[] = "semi-condensed";
-const char BaseRenderingContext2D::kNormalStretchString[] = "normal";
-const char BaseRenderingContext2D::kSemiExpandedString[] = "semi-expanded";
-const char BaseRenderingContext2D::kExpandedString[] = "expanded";
-const char BaseRenderingContext2D::kExtraExpandedString[] = "extra-expanded";
-const char BaseRenderingContext2D::kUltraExpandedString[] = "ultra-expanded";
-const char BaseRenderingContext2D::kNormalVariantString[] = "normal";
-const char BaseRenderingContext2D::kSmallCapsVariantString[] = "small-caps";
-const char BaseRenderingContext2D::kAllSmallCapsVariantString[] =
-    "all-small-caps";
-const char BaseRenderingContext2D::kPetiteVariantString[] = "petite-caps";
-const char BaseRenderingContext2D::kAllPetiteVariantString[] =
-    "all-petite-caps";
-const char BaseRenderingContext2D::kUnicaseVariantString[] = "unicase";
-const char BaseRenderingContext2D::kTitlingCapsVariantString[] = "titling-caps";
-const char BaseRenderingContext2D::kAutoRendering[] = "auto";
-const char BaseRenderingContext2D::kOptimizeSpeedRendering[] = "optimizespeed";
-const char BaseRenderingContext2D::kOptimizeLegibilityRendering[] =
-    "optimizelegibility";
-const char BaseRenderingContext2D::kGeometricPrecisionRendering[] =
-    "geometricprecision";
+class MemoryManagedPaintCanvas;
 
-// Dummy overdraw test for ops that do not support overdraw detection
-const auto kNoOverdraw = [](const SkIRect& clip_bounds) { return false; };
+namespace {
 
-// After context lost, it waits |kTryRestoreContextInterval| before start the
-// restore the context. This wait needs to be long enough to avoid spamming the
-// GPU process with retry attempts and short enough to provide decent UX. It's
-// currently set to 500ms.
-const base::TimeDelta kTryRestoreContextInterval = base::Milliseconds(500);
+
+bool IsContextProviderValid() {
+  base::WeakPtr<WebGraphicsContext3DProviderWrapper> context_provider_wrapper =
+      SharedGpuContext::ContextProviderWrapper();
+  return context_provider_wrapper &&
+         !context_provider_wrapper->ContextProvider().IsContextLost();
+}
+
+}  // namespace
+
+constexpr char kDefaultFont[] = "10px sans-serif";
+const char BaseRenderingContext2D::kInheritString[] = "inherit";
 
 BaseRenderingContext2D::BaseRenderingContext2D(
+    CanvasRenderingContextHost* canvas,
+    const CanvasContextCreationAttributesCore& attrs,
     scoped_refptr<base::SingleThreadTaskRunner> task_runner)
-    : dispatch_context_lost_event_timer_(
+    : CanvasRenderingContext(canvas, attrs, CanvasRenderingAPI::k2D),
+      dispatch_context_lost_event_timer_(
           task_runner,
           this,
           &BaseRenderingContext2D::DispatchContextLostEvent),
@@ -100,1392 +149,29 @@ BaseRenderingContext2D::BaseRenderingContext2D(
           task_runner,
           this,
           &BaseRenderingContext2D::TryRestoreContextEvent),
-      clip_antialiasing_(kNotAntiAliased),
-      origin_tainted_by_content_(false),
-      path2d_use_paint_cache_(
-          base::FeatureList::IsEnabled(features::kPath2DPaintCache)
-              ? UsePaintCache::kEnabled
-              : UsePaintCache::kDisabled) {
-  state_stack_.push_back(MakeGarbageCollected<CanvasRenderingContext2DState>());
-  color_cache_ = CanvasColorCache::Create();
-}
-
-BaseRenderingContext2D::~BaseRenderingContext2D() {
-  UMA_HISTOGRAM_CUSTOM_COUNTS("Blink.Canvas.MaximumStateStackDepth",
-                              max_state_stack_depth_, 1, 33, 32);
-}
-
-void BaseRenderingContext2D::save() {
-  if (isContextLost())
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSave);
-  }
-
-  ValidateStateStack();
-
-  DCHECK_GE(state_stack_.size(), 1u);
-
-  // GetOrCreatePaintCanvas() can call RestoreMatrixClipStack which syncs
-  // canvas to state_stack_. Get the canvas before adjusting state_stack_ to
-  // ensure canvas is synced prior to adjusting state_stack_.
-  cc::PaintCanvas* canvas = GetOrCreatePaintCanvas();
-
-  state_stack_.push_back(MakeGarbageCollected<CanvasRenderingContext2DState>(
-      GetState(), CanvasRenderingContext2DState::kDontCopyClipList,
-      CanvasRenderingContext2DState::SaveType::kSaveRestore));
-  max_state_stack_depth_ =
-      std::max(state_stack_.size(), max_state_stack_depth_);
-
-  if (canvas)
-    canvas->save();
-
-  ValidateStateStack();
-}
-
-void BaseRenderingContext2D::restore() {
-  if (isContextLost())
-    return;
-
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kRestore);
-  }
-  ValidateStateStack();
-  if (state_stack_.size() <= 1)
-    return;
-
-  DCHECK_GT(state_stack_.size(), static_cast<WTF::wtf_size_t>(layer_count_));
-
-  // Verify that the top of the stack was pushed with Save.
-  if (RuntimeEnabledFeatures::Canvas2dLayersEnabled() &&
-      state_stack_.back()->GetSaveType() !=
-          CanvasRenderingContext2DState::SaveType::kSaveRestore) {
-    return;
-  }
-
-  // Verify that the current state's transform is invertible.
-  if (IsTransformInvertible())
-    path_.Transform(GetState().GetTransform());
-
-  PopAndRestore();
-}
-
-void BaseRenderingContext2D::beginLayer() {
-  if (isContextLost())
-    return;
-  // TODO(crbug.com/1234113): Instrument new canvas APIs.
-  identifiability_study_helper_.set_encountered_skipped_ops();
-
-  ValidateStateStack();
-
-  DCHECK_GE(state_stack_.size(), 1u);
-
-  // GetOrCreatePaintCanvas() can call RestoreMatrixClipStack which syncs
-  // canvas to state_stack_. Get the canvas before adjusting state_stack_ to
-  // ensure canvas is synced prior to adjusting state_stack_.
-  cc::PaintCanvas* canvas = GetOrCreatePaintCanvas();
-  if (!canvas)
-    return;
-
-  state_stack_.push_back(MakeGarbageCollected<CanvasRenderingContext2DState>(
-      GetState(), CanvasRenderingContext2DState::kDontCopyClipList,
-      CanvasRenderingContext2DState::SaveType::kBeginEndLayer));
-  max_state_stack_depth_ =
-      std::max(state_stack_.size(), max_state_stack_depth_);
-  layer_count_++;
-
-  if (globalAlpha() != 1 &&
-      (StateHasFilter() || GetState().ShouldDrawShadows())) {
-    // For alpha and either filters or shadows, we have to split the save into
-    // two layers, so the shadow and filter can properly interact with alpha.
-    // We also need to flip how and where the shadows and filter are applied
-    // if there are shadows.
-    cc::PaintFlags flags;
-    flags.setBlendMode(GetState().GlobalComposite());
-    flags.setImageFilter(GetState().ShouldDrawShadows()
-                             ? GetState().ShadowAndForegroundImageFilter()
-                             : StateGetFilter());
-    canvas->saveLayer(flags);
-
-    // Push to state stack to keep stack size up to date.
-    state_stack_.push_back(MakeGarbageCollected<CanvasRenderingContext2DState>(
-        GetState(), CanvasRenderingContext2DState::kDontCopyClipList,
-        CanvasRenderingContext2DState::SaveType::kInternalLayer));
-    max_state_stack_depth_ =
-        std::max(state_stack_.size(), max_state_stack_depth_);
-
-    if (StateHasFilter() && GetState().ShouldDrawShadows()) {
-      cc::PaintFlags extra_flags;
-      extra_flags.setAlphaf(static_cast<float>(globalAlpha()));
-      extra_flags.setImageFilter(StateGetFilter());
-      canvas->saveLayer(extra_flags);
-    } else {
-      canvas->saveLayerAlphaf(globalAlpha());
-    }
-  } else if (StateHasFilter() || GetState().ShouldDrawShadows() ||
-             GetState().GlobalComposite() != SkBlendMode::kSrcOver) {
-    cc::PaintFlags flags;
-    flags.setBlendMode(GetState().GlobalComposite());
-
-    if (StateHasFilter() && GetState().ShouldDrawShadows()) {
-      flags.setImageFilter(sk_make_sp<ComposePaintFilter>(
-          GetState().ShadowAndForegroundImageFilter(), StateGetFilter()));
-    } else if (GetState().ShouldDrawShadows()) {
-      flags.setImageFilter(GetState().ShadowAndForegroundImageFilter());
-    } else if (StateHasFilter()) {
-      flags.setImageFilter(StateGetFilter());
-    }
-    flags.setAlphaf(static_cast<float>(globalAlpha()));
-    canvas->saveLayer(flags);
-  } else {
-    canvas->saveLayerAlphaf(globalAlpha());
-  }
-
-  ValidateStateStack();
-
-  // Reset compositing attributes.
-  setShadowOffsetX(0);
-  setShadowOffsetY(0);
-  setShadowBlur(0);
-  GetState().SetShadowColor(Color::kTransparent);
-  DCHECK(!GetState().ShouldDrawShadows());
-  setGlobalAlpha(1.0);
-  setGlobalCompositeOperation("source-over");
-  V8UnionCanvasFilterOrString* filter =
-      MakeGarbageCollected<V8UnionCanvasFilterOrString>("none");
-  setFilter(GetTopExecutionContext(), filter);
-}
-
-void BaseRenderingContext2D::endLayer() {
-  if (isContextLost())
-    return;
-  // TODO(crbug.com/1234113): Instrument new canvas APIs.
-  identifiability_study_helper_.set_encountered_skipped_ops();
-
-  ValidateStateStack();
-  if (state_stack_.size() <= 1 || layer_count_ <= 0)
-    return;
-
-  DCHECK_GT(state_stack_.size(), static_cast<WTF::wtf_size_t>(layer_count_));
-
-  // Verify that the current state's transform is invertible.
-  if (IsTransformInvertible())
-    path_.Transform(GetState().GetTransform());
-
-  // All saves performed since the last beginLayer are no-ops.
-  while (state_stack_.back() &&
-         state_stack_.back()->GetSaveType() ==
-             CanvasRenderingContext2DState::SaveType::kSaveRestore) {
-    PopAndRestore();
-  }
-
-  // If we do an endLayer, we have to be sure that we did a beginLayer (that
-  // could have introduced an extra state).
-  DCHECK(state_stack_.back()->GetSaveType() ==
-             CanvasRenderingContext2DState::SaveType::kBeginEndLayer ||
-         state_stack_.back()->GetSaveType() ==
-             CanvasRenderingContext2DState::SaveType::kInternalLayer);
-  PopAndRestore();
-  layer_count_--;
-}
-
-void BaseRenderingContext2D::PopAndRestore() {
-  if (state_stack_.size() <= 1) {
-    NOTREACHED();
-    return;
-  }
-
-  cc::PaintCanvas* canvas = GetOrCreatePaintCanvas();
-
-  if (!canvas)
-    return;
-
-  if (state_stack_.back()->GetSaveType() ==
-      CanvasRenderingContext2DState::SaveType::kInternalLayer) {
-    // If this is a ExtraState state, it means we have to restore twice, as we
-    // added an extra state while doing a beginLayer.
-    state_stack_.pop_back();
-    DCHECK(state_stack_.back());
-    state_stack_.back()->ClearResolvedFilter();
-
-    SetIsTransformInvertible(GetState().IsTransformInvertible());
-    if (IsTransformInvertible())
-      path_.Transform(GetState().GetTransform().Inverse());
-
-    DCHECK(state_stack_.back()->GetSaveType() ==
-           CanvasRenderingContext2DState::SaveType::kBeginEndLayer);
-    canvas->restore();
-  }
-
-  state_stack_.pop_back();
-  state_stack_.back()->ClearResolvedFilter();
-
-  SetIsTransformInvertible(GetState().IsTransformInvertible());
-  if (IsTransformInvertible())
-    path_.Transform(GetState().GetTransform().Inverse());
-
-  canvas->restore();
-
-  ValidateStateStack();
-}
-
-void BaseRenderingContext2D::RestoreMatrixClipStack(cc::PaintCanvas* c) const {
-  if (!c)
-    return;
-  HeapVector<Member<CanvasRenderingContext2DState>>::const_iterator curr_state;
-  DCHECK(state_stack_.begin() < state_stack_.end());
-  for (curr_state = state_stack_.begin(); curr_state < state_stack_.end();
-       curr_state++) {
-    c->setMatrix(SkM44());
-    if (curr_state->Get()) {
-      curr_state->Get()->PlaybackClips(c);
-      c->setMatrix(AffineTransformToSkM44(curr_state->Get()->GetTransform()));
-    }
-    c->save();
-  }
-  c->restore();
-  ValidateStateStackWithCanvas(c);
-}
-
-void BaseRenderingContext2D::UnwindStateStack() {
-  if (size_t stack_size = state_stack_.size()) {
-    if (cc::PaintCanvas* sk_canvas = GetPaintCanvas()) {
-      while (--stack_size)
-        sk_canvas->restore();
-    }
-  }
-}
+      color_params_(attrs.color_space,
+                    attrs.hdr_metadata,
+                    attrs.pixel_format,
+                    attrs.alpha) {}
 
 void BaseRenderingContext2D::ResetInternal() {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kReset);
-  }
-  ValidateStateStack();
-  UnwindStateStack();
-  state_stack_.resize(1);
-  state_stack_.front() = MakeGarbageCollected<CanvasRenderingContext2DState>();
-  SetIsTransformInvertible(true);
-  path_.Clear();
-  if (cc::PaintCanvas* c = GetPaintCanvas()) {
-    // The canvas should always have an initial/unbalanced save frame, which
-    // we use to reset the top level matrix and clip here.
-    DCHECK_EQ(c->getSaveCount(), 2);
-    c->restore();
-    c->save();
-    DCHECK(c->getLocalToDevice() == SkM44());
-#if DCHECK_IS_ON()
-    SkIRect clip_bounds;
-    DCHECK(c->getDeviceClipBounds(&clip_bounds));
-    DCHECK(clip_bounds == c->imageInfo().bounds());
-#endif
-    // We only want to clear the backing buffer if the surface exists because
-    // this function is also used when the context is lost.
-    clearRect(0, 0, Width(), Height(), /*for_reset=*/true);
-  }
-  ValidateStateStack();
-  origin_tainted_by_content_ = false;
-}
-
-void BaseRenderingContext2D::reset() {
-  UseCounter::Count(GetTopExecutionContext(),
-                    WebFeature::kCanvasRenderingContext2DReset);
-  ResetInternal();
-}
-
-void BaseRenderingContext2D::IdentifiabilityUpdateForStyleUnion(
-    const V8CanvasStyle& style) {
-  switch (style.type) {
-    case V8CanvasStyleType::kCSSColorValue:
-      break;
-    case V8CanvasStyleType::kGradient:
-      identifiability_study_helper_.UpdateBuilder(
-          style.gradient->GetIdentifiableToken());
-      break;
-    case V8CanvasStyleType::kPattern:
-      identifiability_study_helper_.UpdateBuilder(
-          style.pattern->GetIdentifiableToken());
-      break;
-    case V8CanvasStyleType::kString:
-      identifiability_study_helper_.UpdateBuilder(
-          IdentifiabilityBenignStringToken(style.string));
-      break;
-  }
-}
-
-RespectImageOrientationEnum
-BaseRenderingContext2D::RespectImageOrientationInternal(
-    CanvasImageSource* image_source) {
-  if ((image_source->IsImageBitmap() || image_source->IsImageElement()) &&
-      image_source->WouldTaintOrigin())
-    return kRespectImageOrientation;
-  return RespectImageOrientation();
-}
-
-v8::Local<v8::Value> BaseRenderingContext2D::strokeStyle(
-    ScriptState* script_state) const {
-  return CanvasStyleToV8(script_state, GetState().StrokeStyle());
-}
-
-void BaseRenderingContext2D::
-    UpdateIdentifiabilityStudyBeforeSettingStrokeOrFill(
-        const V8CanvasStyle& v8_style,
-        CanvasOps op) {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(op);
-    IdentifiabilityUpdateForStyleUnion(v8_style);
-  }
-}
-
-bool BaseRenderingContext2D::ExtractColorFromV8ValueAndUpdateCache(
-    const V8CanvasStyle& v8_style,
-    Color& color) {
-  // This should only be called for string styles.
-  DCHECK_EQ(v8_style.type, V8CanvasStyleType::kString);
-  if (color_cache_) {
-    const CachedColor* cached_color =
-        color_cache_->GetCachedColor(v8_style.string);
-    if (cached_color) {
-      if (cached_color->parse_result == ColorParseResult::kColor) {
-        color = cached_color->color;
-        return true;
-      }
-      if (cached_color->parse_result == ColorParseResult::kCurrentColor) {
-        color = GetCurrentColor();
-        return true;
-      }
-      DCHECK_EQ(cached_color->parse_result, ColorParseResult::kParseFailed);
-      return false;
-    }
-  }
-  const ColorParseResult parse_result =
-      ParseColorOrCurrentColor(v8_style.string, color);
-  if (color_cache_) {
-    color_cache_->SetCachedColor(v8_style.string, color, parse_result);
-  }
-  return parse_result != ColorParseResult::kParseFailed;
-}
-
-void BaseRenderingContext2D::setStrokeStyle(v8::Isolate* isolate,
-                                            v8::Local<v8::Value> value,
-                                            ExceptionState& exception_state) {
-  V8CanvasStyle v8_style;
-  if (!ExtractV8CanvasStyle(isolate, value, v8_style, exception_state))
-    return;
-
-  UpdateIdentifiabilityStudyBeforeSettingStrokeOrFill(
-      v8_style, CanvasOps::kSetStrokeStyle);
-
-  switch (v8_style.type) {
-    case V8CanvasStyleType::kCSSColorValue:
-      // TODO (crbug.com/1399566): v8_style should probably store another format
-      // for color.
-      GetState().SetStrokeColor(Color::FromSkColor(v8_style.css_color_value));
-      break;
-    case V8CanvasStyleType::kGradient:
-      GetState().SetStrokeGradient(v8_style.gradient);
-      break;
-    case V8CanvasStyleType::kPattern:
-      if (!origin_tainted_by_content_ && !v8_style.pattern->OriginClean())
-        SetOriginTaintedByContent();
-      GetState().SetStrokePattern(v8_style.pattern);
-      break;
-    case V8CanvasStyleType::kString: {
-      if (v8_style.string == GetState().UnparsedStrokeColor())
-        return;
-      Color parsed_color = Color::kTransparent;
-      if (!ExtractColorFromV8ValueAndUpdateCache(v8_style, parsed_color)) {
-        return;
-      }
-      if (GetState().StrokeStyle()->IsEquivalentColor(parsed_color)) {
-        GetState().SetUnparsedStrokeColor(v8_style.string);
-        return;
-      }
-      GetState().SetStrokeColor(parsed_color);
-      break;
-    }
-  }
-
-  GetState().SetUnparsedStrokeColor(v8_style.string);
-  GetState().ClearResolvedFilter();
-}
-
-ColorParseResult BaseRenderingContext2D::ParseColorOrCurrentColor(
-    const String& color_string,
-    Color& color) const {
-  const ColorParseResult parse_result =
-      ParseCanvasColorString(color_string, color_scheme_, color);
-  if (parse_result == ColorParseResult::kCurrentColor) {
-    color = GetCurrentColor();
-  }
-  return parse_result;
-}
-
-v8::Local<v8::Value> BaseRenderingContext2D::fillStyle(
-    ScriptState* script_state) const {
-  return CanvasStyleToV8(script_state, GetState().FillStyle());
-}
-
-void BaseRenderingContext2D::setFillStyle(v8::Isolate* isolate,
-                                          v8::Local<v8::Value> value,
-                                          ExceptionState& exception_state) {
-  V8CanvasStyle v8_style;
-  if (!ExtractV8CanvasStyle(isolate, value, v8_style, exception_state))
-    return;
-
-  ValidateStateStack();
-
-  UpdateIdentifiabilityStudyBeforeSettingStrokeOrFill(v8_style,
-                                                      CanvasOps::kSetFillStyle);
-
-  switch (v8_style.type) {
-    case V8CanvasStyleType::kCSSColorValue:
-      // TODO (crbug.com/1399566): v8_style should probably store another format
-      // for color.
-      GetState().SetFillColor(Color::FromSkColor(v8_style.css_color_value));
-      break;
-    case V8CanvasStyleType::kGradient:
-      GetState().SetFillGradient(v8_style.gradient);
-      break;
-    case V8CanvasStyleType::kPattern:
-      if (!origin_tainted_by_content_ && !v8_style.pattern->OriginClean())
-        SetOriginTaintedByContent();
-      GetState().SetFillPattern(v8_style.pattern);
-      break;
-    case V8CanvasStyleType::kString: {
-      if (v8_style.string == GetState().UnparsedFillColor())
-        return;
-      Color parsed_color = Color::kTransparent;
-      if (!ExtractColorFromV8ValueAndUpdateCache(v8_style, parsed_color)) {
-        return;
-      }
-      if (GetState().FillStyle()->IsEquivalentColor(parsed_color)) {
-        GetState().SetUnparsedFillColor(v8_style.string);
-        return;
-      }
-      GetState().SetFillColor(parsed_color);
-      break;
-    }
-  }
-
-  GetState().SetUnparsedFillColor(v8_style.string);
-  GetState().ClearResolvedFilter();
-}
-
-double BaseRenderingContext2D::lineWidth() const {
-  return GetState().LineWidth();
-}
-
-void BaseRenderingContext2D::setLineWidth(double width) {
-  if (!std::isfinite(width) || width <= 0)
-    return;
-  if (GetState().LineWidth() == width)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetLineWidth,
-                                                width);
-  }
-  GetState().SetLineWidth(ClampTo<float>(width));
-}
-
-String BaseRenderingContext2D::lineCap() const {
-  return LineCapName(GetState().GetLineCap());
-}
-
-void BaseRenderingContext2D::setLineCap(const String& s) {
-  LineCap cap;
-  if (!ParseLineCap(s, cap))
-    return;
-  if (GetState().GetLineCap() == cap)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetLineCap, cap);
-  }
-  GetState().SetLineCap(cap);
-}
-
-String BaseRenderingContext2D::lineJoin() const {
-  return LineJoinName(GetState().GetLineJoin());
-}
-
-void BaseRenderingContext2D::setLineJoin(const String& s) {
-  LineJoin join;
-  if (!ParseLineJoin(s, join))
-    return;
-  if (GetState().GetLineJoin() == join)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetLineJoin, join);
-  }
-  GetState().SetLineJoin(join);
-}
-
-double BaseRenderingContext2D::miterLimit() const {
-  return GetState().MiterLimit();
-}
-
-void BaseRenderingContext2D::setMiterLimit(double limit) {
-  if (!std::isfinite(limit) || limit <= 0)
-    return;
-  if (GetState().MiterLimit() == limit)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetMiterLimit,
-                                                limit);
-  }
-  GetState().SetMiterLimit(ClampTo<float>(limit));
-}
-
-double BaseRenderingContext2D::shadowOffsetX() const {
-  return GetState().ShadowOffset().x();
-}
-
-void BaseRenderingContext2D::setShadowOffsetX(double x) {
-  if (!std::isfinite(x))
-    return;
-  if (GetState().ShadowOffset().x() == x)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetShadowOffsetX,
-                                                x);
-  }
-  GetState().SetShadowOffsetX(ClampTo<float>(x));
-}
-
-double BaseRenderingContext2D::shadowOffsetY() const {
-  return GetState().ShadowOffset().y();
-}
-
-void BaseRenderingContext2D::setShadowOffsetY(double y) {
-  if (!std::isfinite(y))
-    return;
-  if (GetState().ShadowOffset().y() == y)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetShadowOffsetY,
-                                                y);
-  }
-  GetState().SetShadowOffsetY(ClampTo<float>(y));
-}
-
-double BaseRenderingContext2D::shadowBlur() const {
-  return GetState().ShadowBlur();
-}
-
-void BaseRenderingContext2D::setShadowBlur(double blur) {
-  if (!std::isfinite(blur) || blur < 0)
-    return;
-  if (GetState().ShadowBlur() == blur)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetShadowBlur,
-                                                blur);
-  }
-  GetState().SetShadowBlur(ClampTo<float>(blur));
-}
-
-String BaseRenderingContext2D::shadowColor() const {
-  // TODO(https://1351544): CanvasRenderingContext2DState's shadow color should
-  // be a Color, not an SkColor or SkColor4f.
-  return GetState().ShadowColor().SerializeAsCanvasColor();
-}
-
-void BaseRenderingContext2D::setShadowColor(const String& color_string) {
-  Color color;
-  if (ParseColorOrCurrentColor(color_string, color) ==
-      ColorParseResult::kParseFailed) {
-    return;
-  }
-  if (GetState().ShadowColor() == color) {
-    return;
-  }
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetShadowColor,
-                                                color.Rgb());
-  }
-  GetState().SetShadowColor(color);
-}
-
-const Vector<double>& BaseRenderingContext2D::getLineDash() const {
-  return GetState().LineDash();
-}
-
-static bool LineDashSequenceIsValid(const Vector<double>& dash) {
-  return base::ranges::all_of(
-      dash, [](double d) { return std::isfinite(d) && d >= 0; });
-}
-
-void BaseRenderingContext2D::setLineDash(const Vector<double>& dash) {
-  if (!LineDashSequenceIsValid(dash))
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetLineDash,
-                                                base::make_span(dash));
-  }
-  GetState().SetLineDash(dash);
-}
-
-double BaseRenderingContext2D::lineDashOffset() const {
-  return GetState().LineDashOffset();
-}
-
-void BaseRenderingContext2D::setLineDashOffset(double offset) {
-  if (!std::isfinite(offset) || GetState().LineDashOffset() == offset)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetLineDashOffset,
-                                                offset);
-  }
-  GetState().SetLineDashOffset(ClampTo<float>(offset));
-}
-
-double BaseRenderingContext2D::globalAlpha() const {
-  return GetState().GlobalAlpha();
-}
-
-void BaseRenderingContext2D::setGlobalAlpha(double alpha) {
-  if (!(alpha >= 0 && alpha <= 1))
-    return;
-  if (GetState().GlobalAlpha() == alpha)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kSetGlobalAlpha,
-                                                alpha);
-  }
-  GetState().SetGlobalAlpha(alpha);
-}
-
-String BaseRenderingContext2D::globalCompositeOperation() const {
-  auto [composite_op, blend_mode] =
-      CompositeAndBlendOpsFromSkBlendMode(GetState().GlobalComposite());
-  return CanvasCompositeOperatorName(composite_op, blend_mode);
-}
-
-void BaseRenderingContext2D::setGlobalCompositeOperation(
-    const String& operation) {
-  CompositeOperator op = kCompositeSourceOver;
-  BlendMode blend_mode = BlendMode::kNormal;
-  if (!ParseCanvasCompositeAndBlendMode(operation, op, blend_mode))
-    return;
-  SkBlendMode sk_blend_mode = WebCoreCompositeToSkiaComposite(op, blend_mode);
-  if (GetState().GlobalComposite() == sk_blend_mode)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kSetGlobalCompositeOpertion, sk_blend_mode);
-  }
-  GetState().SetGlobalComposite(sk_blend_mode);
-}
-
-const V8UnionCanvasFilterOrString* BaseRenderingContext2D::filter() const {
-  if (CanvasFilter* filter = GetState().GetCanvasFilter()) {
-    return MakeGarbageCollected<V8UnionCanvasFilterOrString>(filter);
-  }
-  return MakeGarbageCollected<V8UnionCanvasFilterOrString>(
-      GetState().UnparsedCSSFilter());
-}
-
-void BaseRenderingContext2D::setFilter(
-    const ExecutionContext* execution_context,
-    const V8UnionCanvasFilterOrString* input) {
-  if (!input)
-    return;
-
-  switch (input->GetContentType()) {
-    case V8UnionCanvasFilterOrString::ContentType::kCanvasFilter:
-      UseCounter::Count(GetTopExecutionContext(),
-                        WebFeature::kCanvasRenderingContext2DCanvasFilter);
-      GetState().SetCanvasFilter(input->GetAsCanvasFilter());
-      SnapshotStateForFilter();
-      // TODO(crbug.com/1234113): Instrument new canvas APIs.
-      identifiability_study_helper_.set_encountered_skipped_ops();
-      break;
-    case V8UnionCanvasFilterOrString::ContentType::kString: {
-      const String& filter_string = input->GetAsString();
-      if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-        identifiability_study_helper_.UpdateBuilder(
-            CanvasOps::kSetFilter,
-            IdentifiabilitySensitiveStringToken(filter_string));
-      }
-      if (!GetState().GetCanvasFilter() && !GetState().IsFontDirtyForFilter() &&
-          filter_string == GetState().UnparsedCSSFilter()) {
-        return;
-      }
-      if (!execution_context)
-        return;
-      const CSSValue* css_value = CSSParser::ParseSingleValue(
-          CSSPropertyID::kFilter, filter_string,
-          MakeGarbageCollected<CSSParserContext>(
-              kHTMLStandardMode, execution_context->GetSecureContextMode()));
-      if (!css_value || css_value->IsCSSWideKeyword())
-        return;
-      GetState().SetUnparsedCSSFilter(filter_string);
-      GetState().SetCSSFilter(css_value);
-      SnapshotStateForFilter();
-      break;
-    }
-  }
-}
-
-void BaseRenderingContext2D::scale(double sx, double sy) {
-  // TODO(crbug.com/1140535): Investigate the performance impact of simply
-  // calling the 3d version of this function
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return;
-
-  if (!std::isfinite(sx) || !std::isfinite(sy))
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kScale, sx, sy);
-  }
-
-  AffineTransform new_transform = GetState().GetTransform();
-  float fsx = ClampTo<float>(sx);
-  float fsy = ClampTo<float>(sy);
-  new_transform.ScaleNonUniform(fsx, fsy);
-  if (GetState().GetTransform() == new_transform)
-    return;
-
-  SetTransform(new_transform);
-  if (!IsTransformInvertible())
-    return;
-
-  c->scale(fsx, fsy);
-  path_.Transform(AffineTransform().ScaleNonUniform(1.0 / fsx, 1.0 / fsy));
-}
-
-void BaseRenderingContext2D::rotate(double angle_in_radians) {
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return;
-
-  if (!std::isfinite(angle_in_radians))
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kRotate,
-                                                angle_in_radians);
-  }
-
-  AffineTransform new_transform = GetState().GetTransform();
-  new_transform.RotateRadians(angle_in_radians);
-  if (GetState().GetTransform() == new_transform)
-    return;
-
-  SetTransform(new_transform);
-  if (!IsTransformInvertible())
-    return;
-  c->rotate(ClampTo<float>(angle_in_radians * (180.0 / kPiFloat)));
-  path_.Transform(AffineTransform().RotateRadians(-angle_in_radians));
-}
-
-void BaseRenderingContext2D::translate(double tx, double ty) {
-  // TODO(crbug.com/1140535): Investigate the performance impact of simply
-  // calling the 3d version of this function
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return;
-
-  if (!IsTransformInvertible())
-    return;
-
-  if (!std::isfinite(tx) || !std::isfinite(ty))
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kTranslate, tx, ty);
-  }
-
-  AffineTransform new_transform = GetState().GetTransform();
-  // clamp to float to avoid float cast overflow when used as SkScalar
-  float ftx = ClampTo<float>(tx);
-  float fty = ClampTo<float>(ty);
-  new_transform.Translate(ftx, fty);
-  if (GetState().GetTransform() == new_transform)
-    return;
+  Canvas2DRecorderContext::ResetInternal();
 
-  SetTransform(new_transform);
-  if (!IsTransformInvertible())
-    return;
-
-  c->translate(ftx, fty);
-  path_.Transform(AffineTransform().Translate(-ftx, -fty));
-}
-
-void BaseRenderingContext2D::transform(double m11,
-                                       double m12,
-                                       double m21,
-                                       double m22,
-                                       double dx,
-                                       double dy) {
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return;
-
-  if (!std::isfinite(m11) || !std::isfinite(m21) || !std::isfinite(dx) ||
-      !std::isfinite(m12) || !std::isfinite(m22) || !std::isfinite(dy))
-    return;
-
-  // clamp to float to avoid float cast overflow when used as SkScalar
-  float fm11 = ClampTo<float>(m11);
-  float fm12 = ClampTo<float>(m12);
-  float fm21 = ClampTo<float>(m21);
-  float fm22 = ClampTo<float>(m22);
-  float fdx = ClampTo<float>(dx);
-  float fdy = ClampTo<float>(dy);
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kTransform, fm11,
-                                                fm12, fm21, fm22, fdx, fdy);
-  }
-
-  AffineTransform transform(fm11, fm12, fm21, fm22, fdx, fdy);
-  AffineTransform new_transform = GetState().GetTransform() * transform;
-  if (GetState().GetTransform() == new_transform)
-    return;
-
-  SetTransform(new_transform);
-  if (!IsTransformInvertible())
-    return;
-
-  c->concat(AffineTransformToSkM44(transform));
-  path_.Transform(transform.Inverse());
-}
-
-void BaseRenderingContext2D::resetTransform() {
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kResetTransform);
-  }
-
-  AffineTransform ctm = GetState().GetTransform();
-  bool invertible_ctm = IsTransformInvertible();
-  // It is possible that CTM is identity while CTM is not invertible.
-  // When CTM becomes non-invertible, realizeSaves() can make CTM identity.
-  if (ctm.IsIdentity() && invertible_ctm)
-    return;
-
-  // resetTransform() resolves the non-invertible CTM state.
-  GetState().ResetTransform();
-  SetIsTransformInvertible(true);
-  // Set the SkCanvas' matrix to identity.
-  c->setMatrix(SkM44());
-
-  if (invertible_ctm)
-    path_.Transform(ctm);
-  // When else, do nothing because all transform methods didn't update m_path
-  // when CTM became non-invertible.
-  // It means that resetTransform() restores m_path just before CTM became
-  // non-invertible.
-}
-
-void BaseRenderingContext2D::setTransform(double m11,
-                                          double m12,
-                                          double m21,
-                                          double m22,
-                                          double dx,
-                                          double dy) {
-  if (!std::isfinite(m11) || !std::isfinite(m21) || !std::isfinite(dx) ||
-      !std::isfinite(m12) || !std::isfinite(m22) || !std::isfinite(dy))
-    return;
-
-  resetTransform();
-  transform(m11, m12, m21, m22, dx, dy);
-}
-
-void BaseRenderingContext2D::setTransform(DOMMatrixInit* transform,
-                                          ExceptionState& exception_state) {
-  DOMMatrixReadOnly* m =
-      DOMMatrixReadOnly::fromMatrix(transform, exception_state);
-
-  if (!m)
-    return;
-
-  setTransform(m->m11(), m->m12(), m->m21(), m->m22(), m->m41(), m->m42());
-}
-
-DOMMatrix* BaseRenderingContext2D::getTransform() {
-  const AffineTransform& t = GetState().GetTransform();
-  DOMMatrix* m = DOMMatrix::Create();
-  m->setA(t.A());
-  m->setB(t.B());
-  m->setC(t.C());
-  m->setD(t.D());
-  m->setE(t.E());
-  m->setF(t.F());
-  return m;
-}
-
-AffineTransform BaseRenderingContext2D::GetTransform() const {
-  return GetState().GetTransform();
-}
-
-void BaseRenderingContext2D::beginPath() {
-  path_.Clear();
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kBeginPath);
-  }
-}
-
-void BaseRenderingContext2D::DrawPathInternal(
-    const Path& path,
-    CanvasRenderingContext2DState::PaintType paint_type,
-    SkPathFillType fill_type,
-    UsePaintCache use_paint_cache) {
-  if (path.IsEmpty())
-    return;
-
-  SkPath sk_path = path.GetSkPath();
-  gfx::RectF bounds(path.BoundingRect());
-  if (std::isnan(bounds.x()) || std::isnan(bounds.y()) ||
-      std::isnan(bounds.width()) || std::isnan(bounds.height()))
-    return;
-  sk_path.setFillType(fill_type);
-
-  if (paint_type == CanvasRenderingContext2DState::kStrokePaintType)
-    InflateStrokeRect(bounds);
-
-  Draw<OverdrawOp::kNone>(
-      [sk_path, use_paint_cache](cc::PaintCanvas* c,
-                                 const cc::PaintFlags* flags)  // draw lambda
-      { c->drawPath(sk_path, *flags, use_paint_cache); },
-      [](const SkIRect& rect)  // overdraw test lambda
-      { return false; },
-      bounds, paint_type,
-      GetState().HasPattern(paint_type)
-          ? CanvasRenderingContext2DState::kNonOpaqueImage
-          : CanvasRenderingContext2DState::kNoImage,
-      CanvasPerformanceMonitor::DrawType::kPath);
-}
-
-static SkPathFillType ParseWinding(const String& winding_rule_string) {
-  if (winding_rule_string == "nonzero")
-    return SkPathFillType::kWinding;
-  if (winding_rule_string == "evenodd")
-    return SkPathFillType::kEvenOdd;
-
-  NOTREACHED();
-  return SkPathFillType::kEvenOdd;
-}
-
-void BaseRenderingContext2D::fill(const String& winding_rule_string) {
-  const SkPathFillType winding_rule = ParseWinding(winding_rule_string);
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kFill, winding_rule);
-  }
-  DrawPathInternal(path_, CanvasRenderingContext2DState::kFillPaintType,
-                   winding_rule, UsePaintCache::kDisabled);
-}
-
-void BaseRenderingContext2D::fill(Path2D* dom_path,
-                                  const String& winding_rule_string) {
-  const SkPathFillType winding_rule = ParseWinding(winding_rule_string);
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kFill__Path, dom_path->GetIdentifiableToken(), winding_rule);
-  }
-  DrawPathInternal(dom_path->GetPath(),
-                   CanvasRenderingContext2DState::kFillPaintType, winding_rule,
-                   path2d_use_paint_cache_);
-}
-
-void BaseRenderingContext2D::stroke() {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kStroke);
-  }
-  DrawPathInternal(path_, CanvasRenderingContext2DState::kStrokePaintType,
-                   SkPathFillType::kWinding, UsePaintCache::kDisabled);
-}
-
-void BaseRenderingContext2D::stroke(Path2D* dom_path) {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kStroke__Path, dom_path->GetIdentifiableToken());
-  }
-  DrawPathInternal(dom_path->GetPath(),
-                   CanvasRenderingContext2DState::kStrokePaintType,
-                   SkPathFillType::kWinding, path2d_use_paint_cache_);
-}
-
-void BaseRenderingContext2D::fillRect(double x,
-                                      double y,
-                                      double width,
-                                      double height) {
-  if (!ValidateRectForCanvas(x, y, width, height))
-    return;
-
-  if (!GetOrCreatePaintCanvas())
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kFillRect, x, y,
-                                                width, height);
-  }
-
-  // We are assuming that if the pattern is not accelerated and the current
-  // canvas is accelerated, the texture of the pattern will not be able to be
-  // moved to the texture of the canvas receiving the pattern (because if the
-  // pattern was unaccelerated is because it was not possible to hold that image
-  // in an accelerated texture - that is, into the GPU). That's why we disable
-  // the acceleration to be sure that it will work.
-  if (IsAccelerated() &&
-      GetState().HasPattern(CanvasRenderingContext2DState::kFillPaintType) &&
-      !GetState().PatternIsAccelerated(
-          CanvasRenderingContext2DState::kFillPaintType)) {
-    DisableAcceleration();
-    base::UmaHistogramEnumeration(
-        "Blink.Canvas.GPUFallbackToCPU",
-        GPUFallbackToCPUScenario::kLargePatternDrawnToGPU);
-  }
-
-  // clamp to float to avoid float cast overflow when used as SkScalar
-  AdjustRectForCanvas(x, y, width, height);
-  gfx::RectF rect(ClampTo<float>(x), ClampTo<float>(y), ClampTo<float>(width),
-                  ClampTo<float>(height));
-  Draw<OverdrawOp::kNone>(
-      [rect](cc::PaintCanvas* c, const cc::PaintFlags* flags)  // draw lambda
-      { c->drawRect(gfx::RectFToSkRect(rect), *flags); },
-      [rect, this](const SkIRect& clip_bounds)  // overdraw test lambda
-      { return RectContainsTransformedRect(rect, clip_bounds); },
-      rect, CanvasRenderingContext2DState::kFillPaintType,
-      GetState().HasPattern(CanvasRenderingContext2DState::kFillPaintType)
-          ? CanvasRenderingContext2DState::kNonOpaqueImage
-          : CanvasRenderingContext2DState::kNoImage,
-      CanvasPerformanceMonitor::DrawType::kRectangle);
-}
-
-static void StrokeRectOnCanvas(const gfx::RectF& rect,
-                               cc::PaintCanvas* canvas,
-                               const cc::PaintFlags* flags) {
-  DCHECK_EQ(flags->getStyle(), cc::PaintFlags::kStroke_Style);
-  if ((rect.width() > 0) != (rect.height() > 0)) {
-    // When stroking, we must skip the zero-dimension segments
-    SkPathBuilder path;
-    path.moveTo(rect.x(), rect.y());
-    path.lineTo(rect.right(), rect.bottom());
-    path.close();
-    canvas->drawPath(path.detach(), *flags);
-    return;
-  }
-  canvas->drawRect(gfx::RectFToSkRect(rect), *flags);
 }
-
-void BaseRenderingContext2D::strokeRect(double x,
-                                        double y,
-                                        double width,
-                                        double height) {
-  if (!ValidateRectForCanvas(x, y, width, height))
-    return;
-
-  if (!GetOrCreatePaintCanvas())
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kStrokeRect, x, y,
-                                                width, height);
-  }
-
-  // clamp to float to avoid float cast overflow when used as SkScalar
-  AdjustRectForCanvas(x, y, width, height);
-  float fx = ClampTo<float>(x);
-  float fy = ClampTo<float>(y);
-  float fwidth = ClampTo<float>(width);
-  float fheight = ClampTo<float>(height);
-
-  gfx::RectF rect(fx, fy, fwidth, fheight);
-  gfx::RectF bounds = rect;
-  InflateStrokeRect(bounds);
-
-  if (!ValidateRectForCanvas(bounds.x(), bounds.y(), bounds.width(),
-                             bounds.height()))
-    return;
-
-  Draw<OverdrawOp::kNone>(
-      [rect](cc::PaintCanvas* c, const cc::PaintFlags* flags)  // draw lambda
-      { StrokeRectOnCanvas(rect, c, flags); },
-      kNoOverdraw, bounds, CanvasRenderingContext2DState::kStrokePaintType,
-      GetState().HasPattern(CanvasRenderingContext2DState::kStrokePaintType)
-          ? CanvasRenderingContext2DState::kNonOpaqueImage
-          : CanvasRenderingContext2DState::kNoImage,
-      CanvasPerformanceMonitor::DrawType::kRectangle);
-}
-
-void BaseRenderingContext2D::ClipInternal(const Path& path,
-                                          const String& winding_rule_string,
-                                          UsePaintCache use_paint_cache) {
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c) {
-    return;
-  }
-  if (!IsTransformInvertible()) {
-    return;
-  }
-
-  SkPath sk_path = path.GetSkPath();
-  sk_path.setFillType(ParseWinding(winding_rule_string));
-  GetState().ClipPath(sk_path, clip_antialiasing_);
-  c->clipPath(sk_path, SkClipOp::kIntersect, clip_antialiasing_ == kAntiAliased,
-              use_paint_cache);
-}
-
-void BaseRenderingContext2D::clip(const String& winding_rule_string) {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kClip,
-        IdentifiabilitySensitiveStringToken(winding_rule_string));
-  }
-  ClipInternal(path_, winding_rule_string, UsePaintCache::kDisabled);
-}
-
-void BaseRenderingContext2D::clip(Path2D* dom_path,
-                                  const String& winding_rule_string) {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kClip__Path, dom_path->GetIdentifiableToken(),
-        IdentifiabilitySensitiveStringToken(winding_rule_string));
-  }
-  ClipInternal(dom_path->GetPath(), winding_rule_string,
-               UsePaintCache::kEnabled);
-}
-
-bool BaseRenderingContext2D::isPointInPath(const double x,
-                                           const double y,
-                                           const String& winding_rule_string) {
-  return IsPointInPathInternal(path_, x, y, winding_rule_string);
-}
-
-bool BaseRenderingContext2D::isPointInPath(Path2D* dom_path,
-                                           const double x,
-                                           const double y,
-                                           const String& winding_rule_string) {
-  return IsPointInPathInternal(dom_path->GetPath(), x, y, winding_rule_string);
-}
-
-bool BaseRenderingContext2D::IsPointInPathInternal(
-    const Path& path,
-    const double x,
-    const double y,
-    const String& winding_rule_string) {
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return false;
-  if (!IsTransformInvertible())
-    return false;
-
-  if (!std::isfinite(x) || !std::isfinite(y))
-    return false;
-  gfx::PointF point(ClampTo<float>(x), ClampTo<float>(y));
-  AffineTransform ctm = GetState().GetTransform();
-  gfx::PointF transformed_point = ctm.Inverse().MapPoint(point);
-
-  return path.Contains(transformed_point,
-                       SkFillTypeToWindRule(ParseWinding(winding_rule_string)));
-}
-
-bool BaseRenderingContext2D::isPointInStroke(const double x, const double y) {
-  return IsPointInStrokeInternal(path_, x, y);
-}
-
-bool BaseRenderingContext2D::isPointInStroke(Path2D* dom_path,
-                                             const double x,
-                                             const double y) {
-  return IsPointInStrokeInternal(dom_path->GetPath(), x, y);
-}
-
-bool BaseRenderingContext2D::IsPointInStrokeInternal(const Path& path,
-                                                     const double x,
-                                                     const double y) {
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return false;
-  if (!IsTransformInvertible())
-    return false;
-
-  if (!std::isfinite(x) || !std::isfinite(y))
-    return false;
-  gfx::PointF point(ClampTo<float>(x), ClampTo<float>(y));
-  const AffineTransform& ctm = GetState().GetTransform();
-  gfx::PointF transformed_point = ctm.Inverse().MapPoint(point);
-
-  StrokeData stroke_data;
-  stroke_data.SetThickness(GetState().LineWidth());
-  stroke_data.SetLineCap(GetState().GetLineCap());
-  stroke_data.SetLineJoin(GetState().GetLineJoin());
-  stroke_data.SetMiterLimit(GetState().MiterLimit());
-  Vector<float> line_dash(GetState().LineDash().size());
-  base::ranges::copy(GetState().LineDash(), line_dash.begin());
-  stroke_data.SetLineDash(line_dash, GetState().LineDashOffset());
-  return path.StrokeContains(transformed_point, stroke_data, ctm);
-}
-
-void BaseRenderingContext2D::clearRect(double x,
-                                       double y,
-                                       double width,
-                                       double height,
-                                       bool for_reset) {
-  if (!ValidateRectForCanvas(x, y, width, height))
-    return;
-
-  cc::PaintCanvas* c = GetOrCreatePaintCanvas();
-  if (!c)
-    return;
-  if (!IsTransformInvertible())
-    return;
-
-  SkIRect clip_bounds;
-  if (!c->getDeviceClipBounds(&clip_bounds))
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(CanvasOps::kClearRect, x, y,
-                                                width, height);
-  }
-
-  cc::PaintFlags clear_flags;
-  clear_flags.setStyle(cc::PaintFlags::kFill_Style);
-  if (HasAlpha()) {
-    clear_flags.setBlendMode(SkBlendMode::kClear);
-  } else {
-    clear_flags.setColor(SK_ColorBLACK);
-  }
-
-  // clamp to float to avoid float cast overflow when used as SkScalar
-  AdjustRectForCanvas(x, y, width, height);
-  float fx = ClampTo<float>(x);
-  float fy = ClampTo<float>(y);
-  float fwidth = ClampTo<float>(width);
-  float fheight = ClampTo<float>(height);
-
-  gfx::RectF rect(fx, fy, fwidth, fheight);
-  if (RectContainsTransformedRect(rect, clip_bounds)) {
-    if (for_reset) {
-      // In the reset case, we can use kUntransformedUnclippedFill because we
-      // know the state state was reset.
-      CheckOverdraw(&clear_flags, CanvasRenderingContext2DState::kNoImage,
-                    OverdrawOp::kContextReset);
-    } else {
-      CheckOverdraw(&clear_flags, CanvasRenderingContext2DState::kNoImage,
-                    OverdrawOp::kClearRect);
-    }
-    WillDraw(clip_bounds, CanvasPerformanceMonitor::DrawType::kOther);
-    c->drawRect(gfx::RectFToSkRect(rect), clear_flags);
-  } else {
-    SkIRect dirty_rect;
-    if (ComputeDirtyRect(rect, clip_bounds, &dirty_rect)) {
-      WillDraw(clip_bounds, CanvasPerformanceMonitor::DrawType::kOther);
-      c->drawRect(gfx::RectFToSkRect(rect), clear_flags);
-    }
-  }
-}
-
-static inline void ClipRectsToImageRect(const gfx::RectF& image_rect,
-                                        gfx::RectF* src_rect,
-                                        gfx::RectF* dst_rect) {
-  if (image_rect.Contains(*src_rect))
-    return;
-
-  // Compute the src to dst transform
-  gfx::SizeF scale(dst_rect->size().width() / src_rect->size().width(),
-                   dst_rect->size().height() / src_rect->size().height());
-  gfx::PointF scaled_src_location = src_rect->origin();
-  scaled_src_location.Scale(scale.width(), scale.height());
-  gfx::Vector2dF offset = dst_rect->origin() - scaled_src_location;
-
-  src_rect->Intersect(image_rect);
-
-  // To clip the destination rectangle in the same proportion, transform the
-  // clipped src rect
-  *dst_rect = *src_rect;
-  dst_rect->Scale(scale.width(), scale.height());
-  dst_rect->Offset(offset);
-}
-
-void BaseRenderingContext2D::drawImage(const V8CanvasImageSource* image_source,
-                                       double x,
-                                       double y,
-                                       ExceptionState& exception_state) {
-  CanvasImageSource* image_source_internal =
-      ToCanvasImageSource(image_source, exception_state);
-  if (!image_source_internal)
-    return;
-  RespectImageOrientationEnum respect_orientation =
-      RespectImageOrientationInternal(image_source_internal);
-  gfx::SizeF default_object_size(Width(), Height());
-  gfx::SizeF source_rect_size = image_source_internal->ElementSize(
-      default_object_size, respect_orientation);
-  gfx::SizeF dest_rect_size = image_source_internal->DefaultDestinationSize(
-      default_object_size, respect_orientation);
-  drawImage(image_source_internal, 0, 0, source_rect_size.width(),
-            source_rect_size.height(), x, y, dest_rect_size.width(),
-            dest_rect_size.height(), exception_state);
-}
-
-void BaseRenderingContext2D::drawImage(const V8CanvasImageSource* image_source,
-                                       double x,
-                                       double y,
-                                       double width,
-                                       double height,
-                                       ExceptionState& exception_state) {
-  CanvasImageSource* image_source_internal =
-      ToCanvasImageSource(image_source, exception_state);
-  if (!image_source_internal)
-    return;
-  gfx::SizeF default_object_size(Width(), Height());
-  gfx::SizeF source_rect_size = image_source_internal->ElementSize(
-      default_object_size,
-      RespectImageOrientationInternal(image_source_internal));
-  drawImage(image_source_internal, 0, 0, source_rect_size.width(),
-            source_rect_size.height(), x, y, width, height, exception_state);
-}
-
-void BaseRenderingContext2D::drawImage(const V8CanvasImageSource* image_source,
-                                       double sx,
-                                       double sy,
-                                       double sw,
-                                       double sh,
-                                       double dx,
-                                       double dy,
-                                       double dw,
-                                       double dh,
-                                       ExceptionState& exception_state) {
-  CanvasImageSource* image_source_internal =
-      ToCanvasImageSource(image_source, exception_state);
-  if (!image_source_internal)
-    return;
-  drawImage(image_source_internal, sx, sy, sw, sh, dx, dy, dw, dh,
-            exception_state);
-}
-
-bool BaseRenderingContext2D::ShouldDrawImageAntialiased(
-    const gfx::RectF& dest_rect) const {
-  if (!GetState().ShouldAntialias())
-    return false;
-  const cc::PaintCanvas* c = GetPaintCanvas();
-  DCHECK(c);
 
-  const SkMatrix& ctm = c->getLocalToDevice().asM33();
-  // Don't disable anti-aliasing if we're rotated or skewed.
-  if (!ctm.rectStaysRect())
-    return true;
-  // Check if the dimensions of the destination are "small" (less than one
-  // device pixel). To prevent sudden drop-outs. Since we know that
-  // kRectStaysRect_Mask is set, the matrix either has scale and no skew or
-  // vice versa. We can query the kAffine_Mask flag to determine which case
-  // it is.
-  // FIXME: This queries the CTM while drawing, which is generally
-  // discouraged. Always drawing with AA can negatively impact performance
-  // though - that's why it's not always on.
-  SkScalar width_expansion, height_expansion;
-  if (ctm.getType() & SkMatrix::kAffine_Mask) {
-    width_expansion = ctm[SkMatrix::kMSkewY];
-    height_expansion = ctm[SkMatrix::kMSkewX];
-  } else {
-    width_expansion = ctm[SkMatrix::kMScaleX];
-    height_expansion = ctm[SkMatrix::kMScaleY];
-  }
-  return dest_rect.width() * fabs(width_expansion) < 1 ||
-         dest_rect.height() * fabs(height_expansion) < 1;
+CanvasRenderingContext2DSettings* BaseRenderingContext2D::getContextAttributes()
+    const {
+  return ToCanvasRenderingContext2DSettings(CreationAttributes());
 }
 
 void BaseRenderingContext2D::DispatchContextLostEvent(TimerBase*) {
+  CanvasRenderingContextHost* host = GetCanvasRenderingContextHost();
+  if (!host) {
+    return;
+  }
+
   Event* event = Event::CreateCancelable(event_type_names::kContextlost);
-  GetCanvasRenderingContextHost()->HostDispatchEvent(event);
+  host->HostDispatchEvent(event);
 
   UseCounter::Count(GetTopExecutionContext(),
                     WebFeature::kCanvasRenderingContext2DContextLostEvent);
@@ -1493,12 +179,24 @@ void BaseRenderingContext2D::DispatchContextLostEvent(TimerBase*) {
     context_restorable_ = false;
   }
 
-  if (context_restorable_ &&
-      (context_lost_mode_ == CanvasRenderingContext::kRealLostContext ||
-       context_lost_mode_ == CanvasRenderingContext::kSyntheticLostContext)) {
+  if (!context_restorable_) {
+    return;
+  }
+
+  if (context_lost_mode_ == CanvasRenderingContext::kInvalidCanvasSize &&
+      host->IsValidImageSize()) {
+    // The context is already restored (an invalid canvas size was probably
+    // fixed). We can send the restored event right away.
+    dispatch_context_restored_event_timer_.StartOneShot(base::TimeDelta(),
+                                                        FROM_HERE);
+    return;
+  }
+
+  if (context_lost_mode_ == CanvasRenderingContext::kRealLostContext ||
+      context_lost_mode_ == CanvasRenderingContext::kSyntheticLostContext) {
     try_restore_context_attempt_count_ = 0;
-    try_restore_context_event_timer_.StartOneShot(kTryRestoreContextInterval,
-                                                  FROM_HERE);
+    try_restore_context_event_timer_.StartRepeating(kTryRestoreContextInterval,
+                                                    FROM_HERE);
   }
 }
 
@@ -1507,392 +205,98 @@ void BaseRenderingContext2D::DispatchContextRestoredEvent(TimerBase*) {
   // gpu crashes and frame eviction), it's possible to triggeer this
   // function while the context is already restored. In this case, we
   // abort it here.
-  if (context_lost_mode_ == CanvasRenderingContext::kNotLostContext)
+  if (context_lost_mode_ == CanvasRenderingContext::kNotLostContext) {
     return;
+  }
+
+  if (!context_restorable_) {
+    return;
+  }
+
+  CanvasRenderingContextHost* host = GetCanvasRenderingContextHost();
+  if (host == nullptr) {
+    // This function can be called in a new task, via
+    // `dispatch_context_restored_event_timer_`. Abort if the host was disposed
+    // since the task was queued.
+    return;
+  }
+
+  host->ClearCanvas2DLayerTexture();
   ResetInternal();
   context_lost_mode_ = CanvasRenderingContext::kNotLostContext;
   Event* event(Event::Create(event_type_names::kContextrestored));
-  GetCanvasRenderingContextHost()->HostDispatchEvent(event);
+  host->HostDispatchEvent(event);
   UseCounter::Count(GetTopExecutionContext(),
                     WebFeature::kCanvasRenderingContext2DContextRestoredEvent);
 }
 
-void BaseRenderingContext2D::DrawImageInternal(
-    cc::PaintCanvas* c,
-    CanvasImageSource* image_source,
-    Image* image,
-    const gfx::RectF& src_rect,
-    const gfx::RectF& dst_rect,
-    const SkSamplingOptions& sampling,
-    const cc::PaintFlags* flags) {
-  cc::RecordPaintCanvas::DisableFlushCheckScope disable_flush_check_scope(
-      static_cast<cc::RecordPaintCanvas*>(c));
-  int initial_save_count = c->getSaveCount();
-  cc::PaintFlags image_flags = *flags;
-
-  if (flags->getImageFilter()) {
-    SkM44 ctm = c->getLocalToDevice();
-    SkM44 inv_ctm;
-    if (!ctm.invert(&inv_ctm)) {
-      // There is an earlier check for invertibility, but the arithmetic
-      // in AffineTransform is not exactly identical, so it is possible
-      // for SkMatrix to find the transform to be non-invertible at this stage.
-      // crbug.com/504687
-      return;
-    }
-    SkRect bounds = gfx::RectFToSkRect(dst_rect);
-    ctm.asM33().mapRect(&bounds);
-    if (!bounds.isFinite()) {
-      // There is an earlier check for the correctness of the bounds, but it is
-      // possible that after applying the matrix transformation we get a faulty
-      // set of bounds, so we want to catch this asap and avoid sending a draw
-      // command. crbug.com/1039125
-      // We want to do this before the save command is sent.
-      return;
-    }
-    c->save();
-    c->concat(inv_ctm);
-
-    cc::PaintFlags layer_flags;
-    layer_flags.setBlendMode(flags->getBlendMode());
-    layer_flags.setImageFilter(flags->getImageFilter());
-
-    c->saveLayer(bounds, layer_flags);
-    c->concat(ctm);
-    image_flags.setBlendMode(SkBlendMode::kSrcOver);
-    image_flags.setImageFilter(nullptr);
+void BaseRenderingContext2D::TryRestoreContextEvent(TimerBase* timer) {
+  const CanvasRenderingContextHost* host = GetCanvasRenderingContextHost();
+  if (host == nullptr) [[unlikely]] {
+    // The host was disposed while this callback was pending.
+    try_restore_context_event_timer_.Stop();
+    return;
   }
 
-  if (image_source->IsVideoElement()) {
-    c->save();
-    c->clipRect(gfx::RectFToSkRect(dst_rect));
-    c->translate(dst_rect.x(), dst_rect.y());
-    c->scale(dst_rect.width() / src_rect.width(),
-             dst_rect.height() / src_rect.height());
-    c->translate(-src_rect.x(), -src_rect.y());
-    HTMLVideoElement* video = static_cast<HTMLVideoElement*>(image_source);
-    video->PaintCurrentFrame(
-        c, gfx::Rect(video->videoWidth(), video->videoHeight()), &image_flags);
-  } else if (image_source->IsVideoFrame()) {
-    VideoFrame* frame = static_cast<VideoFrame*>(image_source);
-    auto media_frame = frame->frame();
-    bool ignore_transformation =
-        RespectImageOrientationInternal(image_source) ==
-        kDoNotRespectImageOrientation;
-    gfx::RectF corrected_src_rect = src_rect;
+  DCHECK(context_lost_mode_ !=
+         CanvasRenderingContext::kWebGLLoseContextLostContext);
 
-    if (!ignore_transformation) {
-      auto orientation_enum = VideoTransformationToImageOrientation(
-          media_frame->metadata().transformation.value_or(
-              media::kNoTransformation));
-      if (ImageOrientation(orientation_enum).UsesWidthAsHeight())
-        corrected_src_rect = gfx::TransposeRect(src_rect);
+  // The canvas was changed to an invalid size since the context was lost. We
+  // can't restore the context until the canvas is given a valid size. Abort
+  // here to avoid creating a shared GPU context we would not use.
+  if (!host->IsValidImageSize() && !host->Size().IsEmpty()) {
+    context_lost_mode_ = kInvalidCanvasSize;
+    try_restore_context_event_timer_.Stop();
+    return;
+  }
+
+  // For real context losses, we can only restore if the SharedGpuContext is
+  // ready.
+  if (context_lost_mode_ != CanvasRenderingContext::kRealLostContext ||
+      (SharedGpuContext::IsGpuCompositingEnabled() &&
+       IsContextProviderValid()) ||
+      (!SharedGpuContext::IsGpuCompositingEnabled() &&
+       SharedGpuContext::SharedImageInterfaceProvider())) {
+    RestoreGuard context_is_being_restored(*this);
+    if (InitializeResourceProvider()) {
+      try_restore_context_event_timer_.Stop();
+      DispatchContextRestoredEvent(nullptr);
+      return;
     }
+  }
 
-    c->save();
-    c->clipRect(gfx::RectFToSkRect(dst_rect));
-    c->translate(dst_rect.x(), dst_rect.y());
-    c->scale(dst_rect.width() / corrected_src_rect.width(),
-             dst_rect.height() / corrected_src_rect.height());
-    c->translate(-corrected_src_rect.x(), -corrected_src_rect.y());
-    DrawVideoFrameIntoCanvas(std::move(media_frame), c, image_flags,
-                             ignore_transformation);
+  // Retry up to `kMaxTryRestoreContextAttempts` times before giving up.
+  if (++try_restore_context_attempt_count_ > kMaxTryRestoreContextAttempts) {
+    try_restore_context_event_timer_.Stop();
+    if (on_restore_failed_callback_for_testing_) {
+      on_restore_failed_callback_for_testing_.Run();
+    }
+  }
+}
+
+void BaseRenderingContext2D::RestoreFromInvalidSizeIfNeeded() {
+  CanvasRenderingContextHost* host = GetCanvasRenderingContextHost();
+  if (!context_restorable_ || context_lost_mode_ != kInvalidCanvasSize ||
+      !host) {
+    return;
+  }
+
+  if (host->IsValidImageSize()) {
+    // The size was restored. Fire a contextrestored event, but only if there's
+    // no pending contextlost. contextlost needs to run first and it will take
+    // care of running contextrestored if the size is still valid at that point.
+    if (!dispatch_context_lost_event_timer_.IsActive()) {
+      dispatch_context_restored_event_timer_.StartOneShot(base::TimeDelta(),
+                                                          FROM_HERE);
+    }
   } else {
-    // We always use the image-orientation property on the canvas element
-    // because the alternative would result in complex rules depending on
-    // the source of the image.
-    RespectImageOrientationEnum respect_orientation =
-        RespectImageOrientationInternal(image_source);
-    gfx::RectF corrected_src_rect = src_rect;
-    if (respect_orientation == kRespectImageOrientation &&
-        !image->HasDefaultOrientation()) {
-      corrected_src_rect = image->CorrectSrcRectForImageOrientation(
-          image->SizeAsFloat(kRespectImageOrientation), src_rect);
+    // The canvas was given another invalid size. Abort any pending
+    // contextrestored event, these would have to wait until the canvas is given
+    // a valid size.
+    if (dispatch_context_restored_event_timer_.IsActive()) {
+      dispatch_context_restored_event_timer_.Stop();
     }
-    image_flags.setAntiAlias(ShouldDrawImageAntialiased(dst_rect));
-    ImageDrawOptions draw_options;
-    draw_options.sampling_options = sampling;
-    draw_options.respect_orientation = respect_orientation;
-    draw_options.clamping_mode = Image::kDoNotClampImageToSourceRect;
-    image->Draw(c, image_flags, dst_rect, corrected_src_rect, draw_options);
   }
-
-  c->restoreToCount(initial_save_count);
-}
-
-void BaseRenderingContext2D::SetOriginTaintedByContent() {
-  SetOriginTainted();
-  origin_tainted_by_content_ = true;
-  for (auto& state : state_stack_)
-    state->ClearResolvedFilter();
-}
-
-void BaseRenderingContext2D::drawImage(CanvasImageSource* image_source,
-                                       double sx,
-                                       double sy,
-                                       double sw,
-                                       double sh,
-                                       double dx,
-                                       double dy,
-                                       double dw,
-                                       double dh,
-                                       ExceptionState& exception_state) {
-  if (!GetOrCreatePaintCanvas())
-    return;
-
-  scoped_refptr<Image> image;
-  gfx::SizeF default_object_size(Width(), Height());
-  SourceImageStatus source_image_status = kInvalidSourceImageStatus;
-  if (!image_source->IsVideoElement()) {
-    image = image_source->GetSourceImageForCanvas(&source_image_status,
-                                                  default_object_size);
-    if (source_image_status == kUndecodableSourceImageStatus) {
-      exception_state.ThrowDOMException(
-          DOMExceptionCode::kInvalidStateError,
-          "The HTMLImageElement provided is in the 'broken' state.");
-    }
-    if (!image || !image->width() || !image->height())
-      return;
-  } else {
-    if (!static_cast<HTMLVideoElement*>(image_source)->HasAvailableVideoFrame())
-      return;
-  }
-
-  if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dw) ||
-      !std::isfinite(dh) || !std::isfinite(sx) || !std::isfinite(sy) ||
-      !std::isfinite(sw) || !std::isfinite(sh) || !dw || !dh || !sw || !sh)
-    return;
-
-  // clamp to float to avoid float cast overflow when used as SkScalar
-  AdjustRectForCanvas(sx, sy, sw, sh);
-  AdjustRectForCanvas(dx, dy, dw, dh);
-  float fsx = ClampTo<float>(sx);
-  float fsy = ClampTo<float>(sy);
-  float fsw = ClampTo<float>(sw);
-  float fsh = ClampTo<float>(sh);
-  float fdx = ClampTo<float>(dx);
-  float fdy = ClampTo<float>(dy);
-  float fdw = ClampTo<float>(dw);
-  float fdh = ClampTo<float>(dh);
-
-  gfx::RectF src_rect(fsx, fsy, fsw, fsh);
-  gfx::RectF dst_rect(fdx, fdy, fdw, fdh);
-  gfx::SizeF image_size = image_source->ElementSize(
-      default_object_size, RespectImageOrientationInternal(image_source));
-
-  ClipRectsToImageRect(gfx::RectF(image_size), &src_rect, &dst_rect);
-
-  if (src_rect.IsEmpty())
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kDrawImage, fsx, fsy, fsw, fsh, fdx, fdy, fdw, fdh,
-        image ? image->width() : 0, image ? image->height() : 0);
-    identifiability_study_helper_.set_encountered_partially_digested_image();
-  }
-
-  ValidateStateStack();
-
-  WillDrawImage(image_source);
-
-  if (!origin_tainted_by_content_ && WouldTaintOrigin(image_source))
-    SetOriginTaintedByContent();
-
-  Draw<OverdrawOp::kDrawImage>(
-      [this, image_source, image, src_rect, dst_rect](
-          cc::PaintCanvas* c, const cc::PaintFlags* flags)  // draw lambda
-      {
-        SkSamplingOptions sampling =
-            cc::PaintFlags::FilterQualityToSkSamplingOptions(
-                flags ? flags->getFilterQuality()
-                      : cc::PaintFlags::FilterQuality::kNone);
-        DrawImageInternal(c, image_source, image.get(), src_rect, dst_rect,
-                          sampling, flags);
-      },
-      [this, dst_rect](const SkIRect& clip_bounds)  // overdraw test lambda
-      { return RectContainsTransformedRect(dst_rect, clip_bounds); },
-      dst_rect, CanvasRenderingContext2DState::kImagePaintType,
-      image_source->IsOpaque() ? CanvasRenderingContext2DState::kOpaqueImage
-                               : CanvasRenderingContext2DState::kNonOpaqueImage,
-      CanvasPerformanceMonitor::DrawType::kImage);
-}
-
-bool BaseRenderingContext2D::RectContainsTransformedRect(
-    const gfx::RectF& rect,
-    const SkIRect& transformed_rect) const {
-  gfx::QuadF quad(rect);
-  gfx::QuadF transformed_quad(
-      gfx::RectF(transformed_rect.x(), transformed_rect.y(),
-                 transformed_rect.width(), transformed_rect.height()));
-  return GetState().GetTransform().MapQuad(quad).ContainsQuad(transformed_quad);
-}
-
-CanvasGradient* BaseRenderingContext2D::createLinearGradient(double x0,
-                                                             double y0,
-                                                             double x1,
-                                                             double y1) {
-  if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(x1) ||
-      !std::isfinite(y1))
-    return nullptr;
-
-  // clamp to float to avoid float cast overflow
-  float fx0 = ClampTo<float>(x0);
-  float fy0 = ClampTo<float>(y0);
-  float fx1 = ClampTo<float>(x1);
-  float fy1 = ClampTo<float>(y1);
-
-  auto* gradient = MakeGarbageCollected<CanvasGradient>(gfx::PointF(fx0, fy0),
-                                                        gfx::PointF(fx1, fy1));
-  gradient->SetExecutionContext(
-      identifiability_study_helper_.execution_context());
-  return gradient;
-}
-
-CanvasGradient* BaseRenderingContext2D::createRadialGradient(
-    double x0,
-    double y0,
-    double r0,
-    double x1,
-    double y1,
-    double r1,
-    ExceptionState& exception_state) {
-  if (r0 < 0 || r1 < 0) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kIndexSizeError,
-        String::Format("The %s provided is less than 0.",
-                       r0 < 0 ? "r0" : "r1"));
-    return nullptr;
-  }
-
-  if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(r0) ||
-      !std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(r1))
-    return nullptr;
-
-  // clamp to float to avoid float cast overflow
-  float fx0 = ClampTo<float>(x0);
-  float fy0 = ClampTo<float>(y0);
-  float fr0 = ClampTo<float>(r0);
-  float fx1 = ClampTo<float>(x1);
-  float fy1 = ClampTo<float>(y1);
-  float fr1 = ClampTo<float>(r1);
-
-  auto* gradient = MakeGarbageCollected<CanvasGradient>(
-      gfx::PointF(fx0, fy0), fr0, gfx::PointF(fx1, fy1), fr1);
-  gradient->SetExecutionContext(
-      identifiability_study_helper_.execution_context());
-  return gradient;
-}
-
-CanvasGradient* BaseRenderingContext2D::createConicGradient(double startAngle,
-                                                            double centerX,
-                                                            double centerY) {
-  UseCounter::Count(GetTopExecutionContext(),
-                    WebFeature::kCanvasRenderingContext2DConicGradient);
-  if (!std::isfinite(startAngle) || !std::isfinite(centerX) ||
-      !std::isfinite(centerY))
-    return nullptr;
-  // TODO(crbug.com/1234113): Instrument new canvas APIs.
-  identifiability_study_helper_.set_encountered_skipped_ops();
-
-  // clamp to float to avoid float cast overflow
-  float a = ClampTo<float>(startAngle);
-  float x = ClampTo<float>(centerX);
-  float y = ClampTo<float>(centerY);
-
-  // convert |startAngle| from radians to degree and rotate 90 degree, so
-  // |startAngle| at 0 starts from x-axis.
-  a = Rad2deg(a) + 90;
-
-  auto* gradient = MakeGarbageCollected<CanvasGradient>(a, gfx::PointF(x, y));
-  gradient->SetExecutionContext(
-      identifiability_study_helper_.execution_context());
-  return gradient;
-}
-
-CanvasPattern* BaseRenderingContext2D::createPattern(
-
-    const V8CanvasImageSource* image_source,
-    const String& repetition_type,
-    ExceptionState& exception_state) {
-  CanvasImageSource* image_source_internal =
-      ToCanvasImageSource(image_source, exception_state);
-  if (!image_source_internal) {
-    return nullptr;
-  }
-
-  return createPattern(image_source_internal, repetition_type, exception_state);
-}
-
-CanvasPattern* BaseRenderingContext2D::createPattern(
-    CanvasImageSource* image_source,
-    const String& repetition_type,
-    ExceptionState& exception_state) {
-  if (!image_source) {
-    return nullptr;
-  }
-
-  Pattern::RepeatMode repeat_mode =
-      CanvasPattern::ParseRepetitionType(repetition_type, exception_state);
-  if (exception_state.HadException())
-    return nullptr;
-
-  SourceImageStatus status;
-
-  gfx::SizeF default_object_size(Width(), Height());
-  scoped_refptr<Image> image_for_rendering =
-      image_source->GetSourceImageForCanvas(&status, default_object_size);
-
-  switch (status) {
-    case kNormalSourceImageStatus:
-      break;
-    case kZeroSizeCanvasSourceImageStatus:
-      exception_state.ThrowDOMException(
-          DOMExceptionCode::kInvalidStateError,
-          String::Format("The canvas %s is 0.",
-                         image_source
-                                 ->ElementSize(default_object_size,
-                                               RespectImageOrientationInternal(
-                                                   image_source))
-                                 .width()
-                             ? "height"
-                             : "width"));
-      return nullptr;
-    case kZeroSizeImageSourceStatus:
-      return nullptr;
-    case kUndecodableSourceImageStatus:
-      exception_state.ThrowDOMException(
-          DOMExceptionCode::kInvalidStateError,
-          "Source image is in the 'broken' state.");
-      return nullptr;
-    case kInvalidSourceImageStatus:
-      image_for_rendering = BitmapImage::Create();
-      break;
-    case kIncompleteSourceImageStatus:
-      return nullptr;
-    default:
-      NOTREACHED();
-      return nullptr;
-  }
-
-  if (!image_for_rendering)
-    return nullptr;
-
-  bool origin_clean = !WouldTaintOrigin(image_source);
-
-  auto* pattern = MakeGarbageCollected<CanvasPattern>(
-      std::move(image_for_rendering), repeat_mode, origin_clean);
-  pattern->SetExecutionContext(
-      identifiability_study_helper_.execution_context());
-  return pattern;
-}
-
-bool BaseRenderingContext2D::ComputeDirtyRect(const gfx::RectF& local_rect,
-                                              SkIRect* dirty_rect) {
-  SkIRect clip_bounds;
-  cc::PaintCanvas* paint_canvas = GetOrCreatePaintCanvas();
-  if (!paint_canvas || !paint_canvas->getDeviceClipBounds(&clip_bounds))
-    return false;
-  return ComputeDirtyRect(local_rect, clip_bounds, dirty_rect);
 }
 
 ImageData* BaseRenderingContext2D::createImageData(
@@ -1901,7 +305,7 @@ ImageData* BaseRenderingContext2D::createImageData(
   ImageData::ValidateAndCreateParams params;
   params.context_2d_error_mode = true;
   return ImageData::ValidateAndCreate(
-      image_data->Size().width(), image_data->Size().height(), absl::nullopt,
+      image_data->Size().width(), image_data->Size().height(), std::nullopt,
       image_data->getSettings(), params, exception_state);
 }
 
@@ -1912,7 +316,7 @@ ImageData* BaseRenderingContext2D::createImageData(
   ImageData::ValidateAndCreateParams params;
   params.context_2d_error_mode = true;
   params.default_color_space = GetDefaultImageDataColorSpace();
-  return ImageData::ValidateAndCreate(std::abs(sw), std::abs(sh), absl::nullopt,
+  return ImageData::ValidateAndCreate(std::abs(sw), std::abs(sh), std::nullopt,
                                       /*settings=*/nullptr, params,
                                       exception_state);
 }
@@ -1925,7 +329,7 @@ ImageData* BaseRenderingContext2D::createImageData(
   ImageData::ValidateAndCreateParams params;
   params.context_2d_error_mode = true;
   params.default_color_space = GetDefaultImageDataColorSpace();
-  return ImageData::ValidateAndCreate(std::abs(sw), std::abs(sh), absl::nullopt,
+  return ImageData::ValidateAndCreate(std::abs(sw), std::abs(sh), std::nullopt,
                                       image_data_settings, params,
                                       exception_state);
 }
@@ -1950,6 +354,7 @@ ImageData* BaseRenderingContext2D::getImageData(
   return getImageDataInternal(sx, sy, sw, sh, image_data_settings,
                               exception_state);
 }
+perfetto::EventContext GetEventContext();
 
 ImageData* BaseRenderingContext2D::getImageDataInternal(
     int sx,
@@ -1963,13 +368,20 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
     return nullptr;
   }
 
+  if (layer_count_ != 0) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidStateError,
+        "`getImageData()` cannot be called with open layers.");
+    return nullptr;
+  }
+
   if (!OriginClean()) {
     exception_state.ThrowSecurityError(
         "The canvas has been tainted by cross-origin data.");
   } else if (!sw || !sh) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kIndexSizeError,
-        String::Format("The source %s is 0.", sw ? "height" : "width"));
+        sw ? "The source height is 0." : "The source width is 0.");
   }
 
   if (exception_state.HadException())
@@ -2005,15 +417,15 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
   validate_and_create_params.default_color_space =
       GetDefaultImageDataColorSpace();
 
-  if (!CanCreateCanvas2dResourceProvider() || isContextLost()) {
+  if (isContextLost()) {
     return ImageData::ValidateAndCreate(
-        sw, sh, absl::nullopt, image_data_settings, validate_and_create_params,
+        sw, sh, std::nullopt, image_data_settings, validate_and_create_params,
         exception_state);
   }
 
   // Deferred offscreen canvases might have recorded commands, make sure
   // that those get drawn here
-  FinalizeFrame();
+  FinalizeFrame(FlushReason::kOther);
 
   num_readbacks_performed_++;
   CanvasContextCreationAttributesCore::WillReadFrequently
@@ -2023,19 +435,19 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
                                        .will_read_frequently;
   if (num_readbacks_performed_ == 2 && GetCanvasRenderingContextHost() &&
       GetCanvasRenderingContextHost()->RenderingContext()) {
-    if (will_read_frequently_value == CanvasContextCreationAttributesCore::
-                                          WillReadFrequently::kUndefined ||
-        will_read_frequently_value ==
-            CanvasContextCreationAttributesCore::WillReadFrequently::kFalse) {
-      const String& message =
-          "Canvas2D: Multiple readback operations using getImageData are "
-          "faster with the willReadFrequently attribute set to true. See: "
-          "https://html.spec.whatwg.org/multipage/"
-          "canvas.html#concept-canvas-will-read-frequently";
-      GetTopExecutionContext()->AddConsoleMessage(
-          MakeGarbageCollected<ConsoleMessage>(
-              mojom::blink::ConsoleMessageSource::kRendering,
-              mojom::blink::ConsoleMessageLevel::kWarning, message));
+    if (will_read_frequently_value ==
+        CanvasContextCreationAttributesCore::WillReadFrequently::kUndefined) {
+      if (auto* execution_context = GetTopExecutionContext()) {
+        const String& message =
+            "Canvas2D: Multiple readback operations using getImageData are "
+            "faster with the willReadFrequently attribute set to true. See: "
+            "https://html.spec.whatwg.org/multipage/"
+            "canvas.html#concept-canvas-will-read-frequently";
+        execution_context->AddConsoleMessage(
+            MakeGarbageCollected<ConsoleMessage>(
+                mojom::blink::ConsoleMessageSource::kRendering,
+                mojom::blink::ConsoleMessageLevel::kWarning, message));
+      }
     }
   }
 
@@ -2048,7 +460,8 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
     // putImageData: crbug.com/1112060.
     if (IsAccelerated() && !IsDesynchronized()) {
       read_count_++;
-      if (read_count_ >= kFallbackToCPUAfterReadbacks) {
+      if (read_count_ >= kFallbackToCPUAfterReadbacks ||
+          ShouldDisableAccelerationBecauseOfReadback()) {
         DisableAcceleration();
         base::UmaHistogramEnumeration("Blink.Canvas.GPUFallbackToCPU",
                                       GPUFallbackToCPUScenario::kGetImageData);
@@ -2071,16 +484,28 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
         image_data_rect.bottom() > snapshot->Size().height()) {
       validate_and_create_params.zero_initialize = true;
     }
+  } else {
+    // If there's no snapshot, the buffer will not be overwritten and hence must
+    // be zero-initialized.
+    validate_and_create_params.zero_initialize = true;
   }
 
   ImageData* image_data =
-      ImageData::ValidateAndCreate(sw, sh, absl::nullopt, image_data_settings,
+      ImageData::ValidateAndCreate(sw, sh, std::nullopt, image_data_settings,
                                    validate_and_create_params, exception_state);
   if (!image_data)
     return nullptr;
 
   // Read pixels into |image_data|.
   if (snapshot) {
+    gfx::Rect snapshot_rect{snapshot->Size()};
+    if (!snapshot_rect.Intersects(image_data_rect)) {
+      // If the readback area is completely out of bounds just return a zero
+      // initialized buffer. No point in trying to perform out of bounds read.
+      CHECK(validate_and_create_params.zero_initialize);
+      return image_data;
+    }
+
     SkPixmap image_data_pixmap = image_data->GetSkPixmap();
     const bool read_pixels_successful =
         snapshot->PaintImageForCurrentFrame().readPixels(
@@ -2122,16 +547,15 @@ void BaseRenderingContext2D::putImageData(ImageData* data,
     return;
   }
 
-  bool hasResourceProvider = CanCreateCanvas2dResourceProvider();
-  if (!hasResourceProvider)
+  if (layer_count_ != 0) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidStateError,
+        "`putImageData()` cannot be called with open layers.");
     return;
+  }
 
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kPutImageData, data->width(), data->height(),
-        data->GetPredefinedColorSpace(), data->GetImageDataStorageFormat(), dx,
-        dy, dirty_x, dirty_y, dirty_width, dirty_height);
-    identifiability_study_helper_.set_encountered_partially_digested_image();
+  if (isContextLost() || !CanCreateResourceProvider()) [[unlikely]] {
+    return;
   }
 
   if (dirty_width < 0) {
@@ -2169,43 +593,37 @@ void BaseRenderingContext2D::putImageData(ImageData* data,
 
   // WritePixels (called by PutByteArray) requires that the source and
   // destination pixel formats have the same bytes per pixel.
-  if (auto* host = GetCanvasRenderingContextHost()) {
-    SkColorType dest_color_type =
-        host->GetRenderingContextSkColorInfo().colorType();
-    if (SkColorTypeBytesPerPixel(dest_color_type) !=
-        SkColorTypeBytesPerPixel(data_pixmap.colorType())) {
-      SkImageInfo converted_info =
-          data_pixmap.info().makeColorType(dest_color_type);
-      SkBitmap converted_bitmap;
-      if (!converted_bitmap.tryAllocPixels(converted_info)) {
-        exception_state.ThrowRangeError("Out of memory in putImageData");
-        return;
-      }
-      if (!converted_bitmap.writePixels(data_pixmap, 0, 0))
-        NOTREACHED() << "Failed to convert ImageData with writePixels.";
-
-      PutByteArray(converted_bitmap.pixmap(), source_rect, dest_offset);
-      if (GetPaintCanvas()) {
-        WillDraw(gfx::RectToSkIRect(dest_rect),
-                 CanvasPerformanceMonitor::DrawType::kImageData);
-      }
+  SkColorType dest_color_type =
+      viz::ToClosestSkColorType(color_params_.GetSharedImageFormat());
+  if (SkColorTypeBytesPerPixel(dest_color_type) !=
+      SkColorTypeBytesPerPixel(data_pixmap.colorType())) {
+    SkImageInfo converted_info =
+        data_pixmap.info().makeColorType(dest_color_type);
+    SkBitmap converted_bitmap;
+    if (!converted_bitmap.tryAllocPixels(converted_info)) {
+      exception_state.ThrowRangeError("Out of memory in putImageData");
       return;
     }
+    if (!converted_bitmap.writePixels(data_pixmap, 0, 0)) {
+      NOTREACHED() << "Failed to convert ImageData with writePixels.";
+    }
+
+    PutByteArray(converted_bitmap.pixmap(), source_rect, dest_offset);
+    if (GetPaintCanvas()) {
+      WillDraw(dest_rect, CanvasPerformanceMonitor::DrawType::kImageData);
+    }
+    return;
   }
 
   PutByteArray(data_pixmap, source_rect, dest_offset);
   if (GetPaintCanvas()) {
-    WillDraw(gfx::RectToSkIRect(dest_rect),
-             CanvasPerformanceMonitor::DrawType::kImageData);
+    WillDraw(dest_rect, CanvasPerformanceMonitor::DrawType::kImageData);
   }
 }
 
 void BaseRenderingContext2D::PutByteArray(const SkPixmap& source,
                                           const gfx::Rect& source_rect,
                                           const gfx::Vector2d& dest_offset) {
-  if (!IsCanvas2DBufferValid())
-    return;
-
   DCHECK(gfx::Rect(source.width(), source.height()).Contains(source_rect));
   int dest_x = dest_offset.x() + source_rect.x();
   DCHECK_GE(dest_x, 0);
@@ -2231,51 +649,6 @@ void BaseRenderingContext2D::PutByteArray(const SkPixmap& source,
               source.rowBytes(), dest_x, dest_y);
 }
 
-void BaseRenderingContext2D::InflateStrokeRect(gfx::RectF& rect) const {
-  // Fast approximation of the stroke's bounding rect.
-  // This yields a slightly oversized rect but is very fast
-  // compared to Path::strokeBoundingRect().
-  static const double kRoot2 = sqrtf(2);
-  double delta = GetState().LineWidth() / 2;
-  if (GetState().GetLineJoin() == kMiterJoin)
-    delta *= GetState().MiterLimit();
-  else if (GetState().GetLineCap() == kSquareCap)
-    delta *= kRoot2;
-
-  rect.Outset(ClampTo<float>(delta));
-}
-
-bool BaseRenderingContext2D::imageSmoothingEnabled() const {
-  return GetState().ImageSmoothingEnabled();
-}
-
-void BaseRenderingContext2D::setImageSmoothingEnabled(bool enabled) {
-  if (enabled == GetState().ImageSmoothingEnabled())
-    return;
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kSetImageSmoothingEnabled, enabled);
-  }
-
-  GetState().SetImageSmoothingEnabled(enabled);
-}
-
-String BaseRenderingContext2D::imageSmoothingQuality() const {
-  return GetState().ImageSmoothingQuality();
-}
-
-void BaseRenderingContext2D::setImageSmoothingQuality(const String& quality) {
-  if (quality == GetState().ImageSmoothingQuality())
-    return;
-
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kSetImageSmoothingQuality,
-        IdentifiabilitySensitiveStringToken(quality));
-  }
-  GetState().SetImageSmoothingQuality(quality);
-}
-
 String BaseRenderingContext2D::letterSpacing() const {
   return GetState().GetLetterSpacing();
 }
@@ -2284,127 +657,998 @@ String BaseRenderingContext2D::wordSpacing() const {
   return GetState().GetWordSpacing();
 }
 
-String BaseRenderingContext2D::textRendering() const {
-  return ToStringForIdl(GetState().GetTextRendering());
+V8CanvasTextRendering BaseRenderingContext2D::textRendering() const {
+  return V8CanvasTextRendering(GetState().GetTextRendering());
 }
 
-float BaseRenderingContext2D::GetFontBaseline(
-    const SimpleFontData& font_data) const {
-  return TextMetrics::GetFontBaseline(GetState().GetTextBaseline(), font_data);
+V8CanvasTextAlign BaseRenderingContext2D::textAlign() const {
+  return V8CanvasTextAlign(GetState().GetTextAlign());
 }
 
-String BaseRenderingContext2D::textAlign() const {
-  return TextAlignName(GetState().GetTextAlign());
+void BaseRenderingContext2D::setTextAlign(const V8CanvasTextAlign align) {
+  GetState().SetTextAlign(align.AsEnum());
 }
 
-void BaseRenderingContext2D::setTextAlign(const String& s) {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kSetTextAlign, IdentifiabilityBenignStringToken(s));
+V8CanvasTextBaseline BaseRenderingContext2D::textBaseline() const {
+  return V8CanvasTextBaseline(GetState().GetTextBaseline());
+}
+
+void BaseRenderingContext2D::setTextBaseline(
+    const V8CanvasTextBaseline baseline) {
+  GetState().SetTextBaseline(baseline.AsEnum());
+}
+
+V8CanvasFontKerning BaseRenderingContext2D::fontKerning() const {
+  switch (GetState().GetFontKerning()) {
+    case (FontDescription::Kerning::kAutoKerning):
+      return V8CanvasFontKerning(V8CanvasFontKerning::Enum::kAuto);
+    case (FontDescription::Kerning::kNoneKerning):
+      return V8CanvasFontKerning(V8CanvasFontKerning::Enum::kNone);
+    case (FontDescription::Kerning::kNormalKerning):
+      return V8CanvasFontKerning(V8CanvasFontKerning::Enum::kNormal);
   }
-  TextAlign align;
-  if (!ParseTextAlign(s, align))
-    return;
-  if (GetState().GetTextAlign() == align)
-    return;
-  GetState().SetTextAlign(align);
 }
 
-String BaseRenderingContext2D::textBaseline() const {
-  return TextBaselineName(GetState().GetTextBaseline());
+V8CanvasFontStretch BaseRenderingContext2D::fontStretch() const {
+  return V8CanvasFontStretch(GetState().GetFontStretch());
 }
 
-void BaseRenderingContext2D::setTextBaseline(const String& s) {
-  if (identifiability_study_helper_.ShouldUpdateBuilder()) {
-    identifiability_study_helper_.UpdateBuilder(
-        CanvasOps::kSetTextBaseline, IdentifiabilityBenignStringToken(s));
+V8CanvasFontVariantCaps BaseRenderingContext2D::fontVariantCaps() const {
+  switch (GetState().GetFontVariantCaps()) {
+    case (FontDescription::FontVariantCaps::kCapsNormal):
+      return V8CanvasFontVariantCaps(V8CanvasFontVariantCaps::Enum::kNormal);
+    case (FontDescription::FontVariantCaps::kSmallCaps):
+      return V8CanvasFontVariantCaps(V8CanvasFontVariantCaps::Enum::kSmallCaps);
+    case (FontDescription::FontVariantCaps::kAllSmallCaps):
+      return V8CanvasFontVariantCaps(
+          V8CanvasFontVariantCaps::Enum::kAllSmallCaps);
+    case (FontDescription::FontVariantCaps::kPetiteCaps):
+      return V8CanvasFontVariantCaps(
+          V8CanvasFontVariantCaps::Enum::kPetiteCaps);
+    case (FontDescription::FontVariantCaps::kAllPetiteCaps):
+      return V8CanvasFontVariantCaps(
+          V8CanvasFontVariantCaps::Enum::kAllPetiteCaps);
+    case (FontDescription::FontVariantCaps::kTitlingCaps):
+      return V8CanvasFontVariantCaps(
+          V8CanvasFontVariantCaps::Enum::kTitlingCaps);
+    case (FontDescription::FontVariantCaps::kUnicase):
+      return V8CanvasFontVariantCaps(V8CanvasFontVariantCaps::Enum::kUnicase);
   }
-  TextBaseline baseline;
-  if (!ParseTextBaseline(s, baseline))
-    return;
-  if (GetState().GetTextBaseline() == baseline)
-    return;
-  GetState().SetTextBaseline(baseline);
-}
-
-String BaseRenderingContext2D::fontKerning() const {
-  return FontDescription::ToString(GetState().GetFontKerning()).LowerASCII();
-}
-
-String BaseRenderingContext2D::fontStretch() const {
-  return FontDescription::ToString(GetState().GetFontStretch()).LowerASCII();
-}
-
-String BaseRenderingContext2D::fontVariantCaps() const {
-  return FontDescription::ToStringForIdl(GetState().GetFontVariantCaps());
 }
 
 void BaseRenderingContext2D::Trace(Visitor* visitor) const {
-  visitor->Trace(state_stack_);
   visitor->Trace(dispatch_context_lost_event_timer_);
   visitor->Trace(dispatch_context_restored_event_timer_);
   visitor->Trace(try_restore_context_event_timer_);
-  CanvasPath::Trace(visitor);
+  CanvasRenderingContext::Trace(visitor);
+  Canvas2DRecorderContext::Trace(visitor);
 }
 
-BaseRenderingContext2D::UsageCounters::UsageCounters()
-    : num_draw_calls{0, 0, 0, 0, 0, 0, 0},
-      bounding_box_perimeter_draw_calls{0.0f, 0.0f, 0.0f, 0.0f,
-                                        0.0f, 0.0f, 0.0f},
-      bounding_box_area_draw_calls{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
-      bounding_box_area_fill_type{0.0f, 0.0f, 0.0f, 0.0f},
-      num_non_convex_fill_path_calls(0),
-      non_convex_fill_path_area(0.0f),
-      num_radial_gradients(0),
-      num_linear_gradients(0),
-      num_patterns(0),
-      num_draw_with_complex_clips(0),
-      num_blurred_shadows(0),
-      bounding_box_area_times_shadow_blur_squared(0.0f),
-      bounding_box_perimeter_times_shadow_blur_squared(0.0f),
-      num_filters(0),
-      num_get_image_data_calls(0),
-      area_get_image_data_calls(0.0),
-      num_put_image_data_calls(0),
-      area_put_image_data_calls(0.0),
-      num_clear_rect_calls(0),
-      num_draw_focus_calls(0),
-      num_frames_since_reset(0) {}
-
-namespace {
-
-void CanvasOverdrawHistogram(BaseRenderingContext2D::OverdrawOp op) {
-  UMA_HISTOGRAM_ENUMERATION("Blink.Canvas.OverdrawOp", op);
+void BaseRenderingContext2D::InitializeForRecording(
+    cc::PaintCanvas* canvas) const {
+  RestoreMatrixClipStack(canvas);
 }
 
-}  // unnamed namespace
+void BaseRenderingContext2D::RecordingCleared() {
+  clear_frame_ = true;
+}
 
-void BaseRenderingContext2D::WillOverwriteCanvas(
-    BaseRenderingContext2D::OverdrawOp op) {
-  auto* host = GetCanvasRenderingContextHost();
-  if (host) {  // CSS paint use cases not counted.
+void BaseRenderingContext2D::Reset() {
+  ResetInternal();
+}
+
+std::optional<cc::PaintRecord> BaseRenderingContext2D::FlushCanvasInternal(
+    Canvas2DResourceProvider* shared_image_provider,
+    Canvas2DBitmapProvider* bitmap_provider,
+    FlushReason reason) {
+  MemoryManagedPaintRecorder* recorder = Recorder();
+  if (!recorder || !recorder->HasReleasableDrawOps()) {
+    return std::nullopt;
+  }
+
+  cc::PaintRecord recording = recorder->ReleaseMainRecording();
+  DidFlushRecording(recording, clear_frame_, reason);
+  clear_frame_ = false;
+  if (shared_image_provider) {
+    ScopedRasterTimer timer(shared_image_provider->IsAccelerated()
+                                ? shared_image_provider->RasterInterface()
+                                : nullptr,
+                            *shared_image_provider);
+    shared_image_provider->RasterRecord(recording);
+    shared_image_provider->ReleaseImageProviderImages();
+  } else if (bitmap_provider) {
+    ScopedRasterTimer timer(nullptr, *bitmap_provider);
+    bitmap_provider->RasterRecord(recording);
+    bitmap_provider->ReleaseImageProviderImages();
+  }
+  if (Host()) {
+    Host()->DidFlush();
+  }
+  return recording;
+}
+
+void BaseRenderingContext2D::WillUseCurrentFont() const {
+  if (HTMLCanvasElement* canvas = HostAsHTMLCanvasElement();
+      canvas != nullptr) {
+    canvas->GetDocument().GetCanvasFontCache()->WillUseCurrentFont();
+  }
+}
+
+String BaseRenderingContext2D::font() const {
+  const CanvasRenderingContext2DState& state = GetState();
+  if (!state.HasRealizedFont()) {
+    return kDefaultFont;
+  }
+
+  WillUseCurrentFont();
+  StringBuilder serialized_font;
+  const FontDescription& font_description = state.GetFontDescription();
+
+  if (font_description.Style() == kItalicSlopeValue) {
+    serialized_font.Append("italic ");
+  }
+  if (font_description.Weight() == kBoldWeightValue) {
+    serialized_font.Append("bold ");
+  } else if (font_description.Weight() != kNormalWeightValue) {
+    int weight_as_int = static_cast<int>((float)font_description.Weight());
+    serialized_font.AppendNumber(weight_as_int);
+    serialized_font.Append(" ");
+  }
+  if (font_description.VariantCaps() == FontDescription::kSmallCaps) {
+    serialized_font.Append("small-caps ");
+  }
+
+  serialized_font.AppendNumber(font_description.ComputedSize());
+  serialized_font.Append("px ");
+
+  serialized_font.Append(
+      ComputedStyleUtils::ValueForFontFamily(font_description.Family())
+          ->CssText());
+
+  return serialized_font.ToString();
+}
+
+bool BaseRenderingContext2D::WillSetFont() const {
+  return true;
+}
+
+bool BaseRenderingContext2D::CurrentFontResolvedAndUpToDate() const {
+  const CanvasRenderingContext2DState& state = GetState();
+  return state.HasRealizedFont() && !state.LangIsDirty();
+}
+
+void BaseRenderingContext2D::setFont(const String& new_font) {
+  if (!WillSetFont()) [[unlikely]] {
+    return;
+  }
+
+  CanvasRenderingContext2DState& state = GetState();
+  if (new_font == state.UnparsedFont() && CurrentFontResolvedAndUpToDate()) {
+    return;
+  }
+
+  if (!ResolveFont(new_font)) {
+    return;
+  }
+
+  // The parse succeeded.
+  state.SetUnparsedFont(new_font);
+}
+
+static inline TextDirection ToTextDirection(
+    V8CanvasDirection::Enum direction,
+    CanvasRenderingContextHost* host,
+    const ComputedStyle* style = nullptr) {
+  switch (direction) {
+    case V8CanvasDirection::Enum::kInherit:
+      return host ? host->GetTextDirection(style) : TextDirection::kLtr;
+    case V8CanvasDirection::Enum::kRtl:
+      return TextDirection::kRtl;
+    case V8CanvasDirection::Enum::kLtr:
+      return TextDirection::kLtr;
+  }
+  NOTREACHED();
+}
+
+V8CanvasDirection BaseRenderingContext2D::direction() const {
+  const CanvasRenderingContext2DState& state = GetState();
+  bool value_is_inherit =
+      state.GetDirection() == V8CanvasDirection::Enum::kInherit;
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasTextDirectionGet);
+  if (value_is_inherit) {
     UseCounter::Count(GetTopExecutionContext(),
-                      WebFeature::kCanvasRenderingContext2DHasOverdraw);
-    CanvasOverdrawHistogram(op);
-    CanvasOverdrawHistogram(OverdrawOp::kTotal);
+                      WebFeature::kCanvasTextDirectionGetInherit);
+  }
+  return ToTextDirection(state.GetDirection(),
+                         GetCanvasRenderingContextHost()) == TextDirection::kRtl
+             ? V8CanvasDirection(V8CanvasDirection::Enum::kRtl)
+             : V8CanvasDirection(V8CanvasDirection::Enum::kLtr);
+}
+
+void BaseRenderingContext2D::setDirection(const V8CanvasDirection direction) {
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasTextDirectionSet);
+  if (direction == V8CanvasDirection::Enum::kInherit) {
+    UseCounter::Count(GetTopExecutionContext(),
+                      WebFeature::kCanvasTextDirectionSetInherit);
   }
 
-  // We only hit the kHasTransform bucket if the op is affected by transforms.
-  if (op == OverdrawOp::kClearRect || op == OverdrawOp::kDrawImage) {
-    bool has_clip = GetState().HasClip();
-    bool has_transform = !GetState().GetTransform().IsIdentity();
-    if (has_clip && has_transform) {
-      CanvasOverdrawHistogram(OverdrawOp::kHasClipAndTransform);
+  CanvasRenderingContext2DState& state = GetState();
+  state.SetDirection(direction.AsEnum());
+}
+
+void BaseRenderingContext2D::fillText(const String& text, double x, double y) {
+  CanvasRenderingContext2DState& state = GetState();
+  DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kFillPaintType,
+                   state.GetTextAlign(), state.GetTextBaseline(), 0,
+                   text.length());
+}
+
+void BaseRenderingContext2D::fillText(const String& text,
+                                      double x,
+                                      double y,
+                                      double max_width) {
+  CanvasRenderingContext2DState& state = GetState();
+  DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kFillPaintType,
+                   state.GetTextAlign(), state.GetTextBaseline(), 0,
+                   text.length(), &max_width);
+}
+
+void BaseRenderingContext2D::fillTextCluster(const TextCluster* text_cluster,
+                                             double x,
+                                             double y) {
+  fillTextCluster(text_cluster, x, y, /*cluster_options=*/nullptr);
+}
+
+void BaseRenderingContext2D::fillTextCluster(
+    const TextCluster* text_cluster,
+    double x,
+    double y,
+    const TextClusterOptions* cluster_options) {
+  DCHECK(text_cluster);
+  V8CanvasTextAlign::Enum cluster_align = text_cluster->align().AsEnum();
+  V8CanvasTextBaseline::Enum cluster_baseline =
+      text_cluster->baseline().AsEnum();
+  double cluster_x = text_cluster->x();
+  double cluster_y = text_cluster->y();
+  if (cluster_options != nullptr) {
+    if (cluster_options->hasX()) {
+      cluster_x = cluster_options->x();
     }
-    if (has_clip) {
-      CanvasOverdrawHistogram(OverdrawOp::kHasClip);
+    if (cluster_options->hasY()) {
+      cluster_y = cluster_options->y();
     }
-    if (has_transform) {
-      CanvasOverdrawHistogram(OverdrawOp::kHasTransform);
+    if (cluster_options->hasAlign()) {
+      cluster_align = cluster_options->align().AsEnum();
+    }
+    if (cluster_options->hasBaseline()) {
+      cluster_baseline = cluster_options->baseline().AsEnum();
+    }
+  }
+  DrawTextInternal(text_cluster->text(), cluster_x + x, cluster_y + y,
+                   CanvasRenderingContext2DState::kFillPaintType, cluster_align,
+                   cluster_baseline, text_cluster->start(), text_cluster->end(),
+                   nullptr, text_cluster->textMetrics()->GetFont());
+}
+
+void BaseRenderingContext2D::strokeText(const String& text,
+                                        double x,
+                                        double y) {
+  CanvasRenderingContext2DState& state = GetState();
+  DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
+                   state.GetTextAlign(), state.GetTextBaseline(), 0,
+                   text.length());
+}
+
+void BaseRenderingContext2D::strokeText(const String& text,
+                                        double x,
+                                        double y,
+                                        double max_width) {
+  CanvasRenderingContext2DState& state = GetState();
+  DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
+                   state.GetTextAlign(), state.GetTextBaseline(), 0,
+                   text.length(), &max_width);
+}
+
+void BaseRenderingContext2D::strokeTextCluster(const TextCluster* text_cluster,
+                                               double x,
+                                               double y) {
+  strokeTextCluster(text_cluster, x, y, /*cluster_options=*/nullptr);
+}
+
+void BaseRenderingContext2D::strokeTextCluster(
+    const TextCluster* text_cluster,
+    double x,
+    double y,
+    const TextClusterOptions* cluster_options) {
+  DCHECK(text_cluster);
+  V8CanvasTextAlign::Enum cluster_align = text_cluster->align().AsEnum();
+  V8CanvasTextBaseline::Enum cluster_baseline =
+      text_cluster->baseline().AsEnum();
+  double cluster_x = text_cluster->x();
+  double cluster_y = text_cluster->y();
+  if (cluster_options != nullptr) {
+    if (cluster_options->hasX()) {
+      cluster_x = cluster_options->x();
+    }
+    if (cluster_options->hasY()) {
+      cluster_y = cluster_options->y();
+    }
+    if (cluster_options->hasAlign()) {
+      cluster_align = cluster_options->align().AsEnum();
+    }
+    if (cluster_options->hasBaseline()) {
+      cluster_baseline = cluster_options->baseline().AsEnum();
+    }
+  }
+  DrawTextInternal(text_cluster->text(), cluster_x + x, cluster_y + y,
+                   CanvasRenderingContext2DState::kStrokePaintType,
+                   cluster_align, cluster_baseline, text_cluster->start(),
+                   text_cluster->end(), nullptr,
+                   text_cluster->textMetrics()->GetFont());
+}
+
+void BaseRenderingContext2D::DrawTextInternal(
+    const String& text,
+    double x,
+    double y,
+    CanvasRenderingContext2DState::PaintType paint_type,
+    V8CanvasTextAlign::Enum align,
+    V8CanvasTextBaseline::Enum baseline,
+    unsigned run_start,
+    unsigned run_end,
+    double* max_width,
+    const Font* cluster_font) {
+  HTMLCanvasElement* canvas = HostAsHTMLCanvasElement();
+  if (canvas) {
+    // The style resolution required for fonts is not available in frame-less
+    // documents.
+    if (!canvas->GetDocument().GetFrame()) {
+      return;
+    }
+
+    // accessFont needs the style to be up to date, but updating style can cause
+    // script to run, (e.g. due to autofocus) which can free the canvas (set
+    // size to 0, for example), so update style before grabbing the PaintCanvas.
+    canvas->GetDocument().UpdateStyleAndLayoutTreeForElement(
+        canvas, DocumentUpdateReason::kCanvas);
+  }
+
+  // Abort if we don't have a paint canvas (e.g. the context was lost).
+  cc::PaintCanvas* paint_canvas = GetOrCreatePaintCanvas();
+  if (!paint_canvas) {
+    return;
+  }
+
+  if (!std::isfinite(x) || !std::isfinite(y)) {
+    return;
+  }
+  if (max_width && (!std::isfinite(*max_width) || *max_width <= 0)) {
+    return;
+  }
+
+  const Font* font =
+      (cluster_font != nullptr) ? cluster_font : AccessFont(canvas);
+  const SimpleFontData* font_data = font->PrimaryFont();
+  DCHECK(font_data);
+  if (!font_data) {
+    return;
+  }
+
+  // FIXME: Need to turn off font smoothing.
+
+  const CanvasRenderingContext2DState& state = GetState();
+  const ComputedStyle* computed_style =
+      canvas ? canvas->EnsureComputedStyle() : nullptr;
+  CanvasRenderingContextHost* host = GetCanvasRenderingContextHost();
+  TextDirection direction =
+      ToTextDirection(state.GetDirection(), host, computed_style);
+  bool is_rtl = direction == TextDirection::kRtl;
+  bool bidi_override =
+      computed_style ? IsOverride(computed_style->GetUnicodeBidi()) : false;
+
+  PlainTextPainter& text_painter = host->GetPlainTextPainter();
+  TextRun text_run(text, direction, bidi_override);
+  // Draw the item text at the correct point.
+  gfx::PointF location(ClampTo<float>(x), ClampTo<float>(y));
+  gfx::RectF bounds;
+  double font_width = 0;
+  if (run_start == 0 && run_end == text.length()) [[likely]] {
+    font_width = text_painter.ComputeInlineSize(text_run, *font, &bounds);
+  } else {
+    font_width = text_painter.ComputeSubInlineSize(text_run, run_start, run_end,
+                                                   *font, &bounds);
+  }
+
+  bool use_max_width = (max_width && *max_width < font_width);
+  double width = use_max_width ? *max_width : font_width;
+
+  if (align == V8CanvasTextAlign::Enum::kStart) {
+    align = is_rtl ? V8CanvasTextAlign::Enum::kRight
+                   : V8CanvasTextAlign::Enum::kLeft;
+  } else if (align == V8CanvasTextAlign::Enum::kEnd) {
+    align = is_rtl ? V8CanvasTextAlign::Enum::kLeft
+                   : V8CanvasTextAlign::Enum::kRight;
+  }
+
+  switch (align) {
+    case V8CanvasTextAlign::Enum::kCenter:
+      location.set_x(location.x() - width / 2);
+      break;
+    case V8CanvasTextAlign::Enum::kRight:
+      location.set_x(location.x() - width);
+      break;
+    case V8CanvasTextAlign::Enum::kEnd:
+    case V8CanvasTextAlign::Enum::kLeft:
+    case V8CanvasTextAlign::Enum::kStart:
+      break;
+  }
+
+  location.Offset(0, TextMetrics::GetFontBaseline(baseline, *font_data));
+
+  if (host && host->ShouldCaptureRenderedText()) {
+    gfx::RectF exact_bounds = bounds;
+    // If the text is scaled horizontally to fit maxWidth, scale the bounding
+    // box by the same factor.
+    if (use_max_width) {
+      float scale_x = width / font_width;
+      exact_bounds.set_x(exact_bounds.x() * scale_x);
+      exact_bounds.set_width(exact_bounds.width() * scale_x);
+    }
+
+    // Offset the bounding box to the actual draw location.
+    exact_bounds.Offset(location.x(), location.y());
+
+    // Inflate the bounding box to account for stroke width if we are stroking.
+    if (paint_type == CanvasRenderingContext2DState::kStrokePaintType) {
+      InflateStrokeRect(exact_bounds);
+    }
+
+    // Map the bounds to the canvas coordinate system and record the text.
+    exact_bounds = state.GetTransform().MapRect(exact_bounds);
+    host->RecordRenderedText(text.substr(run_start, run_end - run_start),
+                             exact_bounds,
+                             font_data->GetFontMetrics().FloatHeight());
+  }
+
+  bounds.Offset(location.x(), location.y());
+  if (paint_type == CanvasRenderingContext2DState::kStrokePaintType) {
+    InflateStrokeRect(bounds);
+  }
+
+  if (use_max_width) {
+    paint_canvas->save();
+    // We draw when fontWidth is 0 so compositing operations (eg, a "copy" op)
+    // still work. As the width of canvas is scaled, so text can be scaled to
+    // match the given maxwidth, update text location so it appears on desired
+    // place.
+    paint_canvas->scale(ClampTo<float>(width / font_width), 1);
+    location.set_x(location.x() / ClampTo<float>(width / font_width));
+  }
+
+  Draw<OverdrawOp::kNone>(
+      /*draw_func=*/
+      [font, text = std::move(text), direction, bidi_override, location,
+       run_start, run_end, canvas, &text_painter](MemoryManagedPaintCanvas* c,
+                                                  const cc::PaintFlags* flags) {
+        TextRun text_run(text, direction, bidi_override);
+        // Font::DrawType::kGlyphsAndClusters is required for printing to PDF,
+        // otherwise the character to glyph mapping will not be reversible,
+        // which prevents text data from being extracted from PDF files or
+        // from the print preview. This is only needed in vector printing mode
+        // (i.e. when rendering inside the beforeprint event listener),
+        // because in all other cases the canvas is just a rectangle of pixels.
+        // Note: Test coverage for this is assured by manual (non-automated)
+        // web test printing/manual/canvas2d-vector-text.html
+        // That test should be run manually against CLs that touch this code.
+        Font::DrawType draw_type = (canvas && canvas->IsPrinting())
+                                       ? Font::DrawType::kGlyphsAndClusters
+                                       : Font::DrawType::kGlyphsOnly;
+        text_painter.DrawWithBidiReorder(text_run, run_start, run_end, *font,
+                                         Font::kUseFallbackIfFontNotReady, *c,
+                                         location, *flags, draw_type);
+      },
+      NoOverdraw, bounds, paint_type, CanvasRenderingContext2DState::kNoImage,
+      CanvasPerformanceMonitor::DrawType::kText);
+
+  if (use_max_width) {
+    // Make sure that `paint_canvas` is still valid and active. Calling `Draw`
+    // might reset `paint_canvas`. If that happens, `GetOrCreatePaintCanvas`
+    // will create a new `paint_canvas` and return a new address. This new
+    // canvas won't have the `save()` added above, so it would be invalid to
+    // call `restore()` here.
+    if (paint_canvas == GetOrCreatePaintCanvas()) {
+      paint_canvas->restore();
+    }
+  }
+  ValidateStateStack();
+}
+
+TextMetrics* BaseRenderingContext2D::measureText(const String& text) {
+  // The style resolution required for fonts is not available in frame-less
+  // documents.
+  HTMLCanvasElement* canvas = HostAsHTMLCanvasElement();
+
+  if (canvas) {
+    if (!canvas->GetDocument().GetFrame()) {
+      return MakeGarbageCollected<TextMetrics>();
+    }
+
+    canvas->GetDocument().UpdateStyleAndLayoutTreeForElement(
+        canvas, DocumentUpdateReason::kCanvas);
+  }
+
+  const Font* font = AccessFont(canvas);
+
+  const CanvasRenderingContext2DState& state = GetState();
+  const ComputedStyle* computed_style =
+      canvas ? canvas->EnsureComputedStyle() : nullptr;
+  CanvasRenderingContextHost* host = GetCanvasRenderingContextHost();
+  TextDirection direction =
+      ToTextDirection(state.GetDirection(), host, computed_style);
+
+  return MakeGarbageCollected<TextMetrics>(
+      font, direction, state.GetTextBaseline(), state.GetTextAlign(), text,
+      host->GetPlainTextPainter());
+}
+
+String BaseRenderingContext2D::lang() const {
+  return GetState().GetLang();
+}
+
+void BaseRenderingContext2D::setLang(const String& lang_string) {
+  CanvasRenderingContext2DState& state = GetState();
+  if (state.GetLang() == lang_string) {
+    return;
+  }
+
+  state.SetLang(lang_string);
+
+  // If the font has been realized, reset it to account for the new lang
+  // setting. When not yet realized, the lang will be accounted for the first
+  // time the font is realized.
+  if (state.HasRealizedFont()) {
+    setFont(font());
+  }
+}
+
+const LayoutLocale* BaseRenderingContext2D::LocaleFromLang() {
+  String lang_string = GetState().GetLang();
+  if (lang_string == kInheritString) {
+    return GetCanvasRenderingContextHost()->GetLocale();
+  }
+
+  return &LayoutLocale::ValueOrDefault(
+      LayoutLocale::Get(AtomicString(lang_string)));
+}
+
+void BaseRenderingContext2D::setLetterSpacing(const String& letter_spacing) {
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasRenderingContext2DLetterSpacing);
+  CanvasRenderingContext2DState& state = GetState();
+  if (!state.HasRealizedFont()) {
+    setFont(font());
+  }
+
+  state.SetLetterSpacing(letter_spacing, GetFontSelector());
+}
+
+void BaseRenderingContext2D::setWordSpacing(const String& word_spacing) {
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasRenderingContext2DWordSpacing);
+  CanvasRenderingContext2DState& state = GetState();
+  if (!state.HasRealizedFont()) {
+    setFont(font());
+  }
+
+  state.SetWordSpacing(word_spacing, GetFontSelector());
+}
+
+void BaseRenderingContext2D::setTextRendering(
+    const V8CanvasTextRendering& text_rendering) {
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasRenderingContext2DTextRendering);
+  CanvasRenderingContext2DState& state = GetState();
+  if (!state.HasRealizedFont()) {
+    setFont(font());
+  }
+
+  if (state.GetTextRendering() == text_rendering) {
+    return;
+  }
+  state.SetTextRendering(text_rendering.AsEnum(), GetFontSelector());
+}
+
+void BaseRenderingContext2D::setFontKerning(
+    const V8CanvasFontKerning font_kerning) {
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasRenderingContext2DFontKerning);
+  CanvasRenderingContext2DState& state = GetState();
+  if (!state.HasRealizedFont()) {
+    setFont(font());
+  }
+  FontDescription::Kerning kerning = state.GetFontKerning();
+  switch (font_kerning.AsEnum()) {
+    case V8CanvasFontKerning::Enum::kAuto:
+      kerning = FontDescription::kAutoKerning;
+      break;
+    case V8CanvasFontKerning::Enum::kNone:
+      kerning = FontDescription::kNoneKerning;
+      break;
+    case V8CanvasFontKerning::Enum::kNormal:
+      kerning = FontDescription::kNormalKerning;
+      break;
+  }
+
+  state.SetFontKerning(kerning, GetFontSelector());
+}
+
+void BaseRenderingContext2D::setFontStretch(
+    const V8CanvasFontStretch& font_stretch) {
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasRenderingContext2DFontStretch);
+  CanvasRenderingContext2DState& state = GetState();
+  if (!state.HasRealizedFont()) {
+    setFont(font());
+  }
+
+  if (state.GetFontStretch() == font_stretch) {
+    return;
+  }
+  state.SetFontStretch(font_stretch.AsEnum(), GetFontSelector());
+}
+
+void BaseRenderingContext2D::setFontVariantCaps(
+    const V8CanvasFontVariantCaps& font_variant_caps) {
+  UseCounter::Count(GetTopExecutionContext(),
+                    WebFeature::kCanvasRenderingContext2DFontVariantCaps);
+  CanvasRenderingContext2DState& state = GetState();
+  if (!state.HasRealizedFont()) {
+    setFont(font());
+  }
+  FontDescription::FontVariantCaps variant_caps = state.GetFontVariantCaps();
+  switch (font_variant_caps.AsEnum()) {
+    case (V8CanvasFontVariantCaps::Enum::kNormal):
+      variant_caps = FontDescription::kCapsNormal;
+      break;
+    case (V8CanvasFontVariantCaps::Enum::kSmallCaps):
+      variant_caps = FontDescription::kSmallCaps;
+      break;
+    case (V8CanvasFontVariantCaps::Enum::kAllSmallCaps):
+      variant_caps = FontDescription::kAllSmallCaps;
+      break;
+    case (V8CanvasFontVariantCaps::Enum::kPetiteCaps):
+      variant_caps = FontDescription::kPetiteCaps;
+      break;
+    case (V8CanvasFontVariantCaps::Enum::kAllPetiteCaps):
+      variant_caps = FontDescription::kAllPetiteCaps;
+      break;
+    case (V8CanvasFontVariantCaps::Enum::kUnicase):
+      variant_caps = FontDescription::kUnicase;
+      break;
+    case (V8CanvasFontVariantCaps::Enum::kTitlingCaps):
+      variant_caps = FontDescription::kTitlingCaps;
+      break;
+  }
+
+  state.SetFontVariantCaps(variant_caps, GetFontSelector());
+}
+
+UniqueFontSelector* BaseRenderingContext2D::GetFontSelector() const {
+  return nullptr;
+}
+int BaseRenderingContext2D::LayerCount() const {
+  return Canvas2DRecorderContext::LayerCount();
+}
+
+V8UnionDOMMatrixOrUndefined::Ret BaseRenderingContext2D::drawElementImage(
+    ScriptState* script_state,
+    const V8UnionElementOrElementImage* element,
+    double dx,
+    double dy,
+    const DrawElementImageOptions* options,
+    ExceptionState& exception_state) {
+  return DrawElementInternal(script_state, element,
+                             /*sx*/ std::nullopt, /*sy*/ std::nullopt,
+                             /*swidth*/ std::nullopt, /*sheight*/ std::nullopt,
+                             dx, dy,
+                             /*dwidth*/ std::nullopt, /*dheight*/ std::nullopt,
+                             options, exception_state);
+}
+
+V8UnionDOMMatrixOrUndefined::Ret BaseRenderingContext2D::drawElementImage(
+    ScriptState* script_state,
+    const V8UnionElementOrElementImage* element,
+    double dx,
+    double dy,
+    double dwidth,
+    double dheight,
+    const DrawElementImageOptions* options,
+    ExceptionState& exception_state) {
+  return DrawElementInternal(script_state, element,
+                             /*sx*/ std::nullopt, /*sy*/ std::nullopt,
+                             /*swidth*/ std::nullopt, /*sheight*/ std::nullopt,
+                             dx, dy, dwidth, dheight, options, exception_state);
+}
+
+V8UnionDOMMatrixOrUndefined::Ret BaseRenderingContext2D::drawElementImage(
+    ScriptState* script_state,
+    const V8UnionElementOrElementImage* element,
+    double sx,
+    double sy,
+    double swidth,
+    double sheight,
+    double dx,
+    double dy,
+    const DrawElementImageOptions* options,
+    ExceptionState& exception_state) {
+  return DrawElementInternal(script_state, element, sx, sy, swidth, sheight, dx,
+                             dy, /*dwidth*/ std::nullopt,
+                             /*dheight*/ std::nullopt, options,
+                             exception_state);
+}
+
+V8UnionDOMMatrixOrUndefined::Ret BaseRenderingContext2D::drawElementImage(
+    ScriptState* script_state,
+    const V8UnionElementOrElementImage* element,
+    double sx,
+    double sy,
+    double swidth,
+    double sheight,
+    double dx,
+    double dy,
+    double dwidth,
+    double dheight,
+    const DrawElementImageOptions* options,
+    ExceptionState& exception_state) {
+  return DrawElementInternal(script_state, element, sx, sy, swidth, sheight, dx,
+                             dy, dwidth, dheight, options, exception_state);
+}
+
+V8UnionDOMMatrixOrUndefined::Ret BaseRenderingContext2D::DrawElementInternal(
+    ScriptState* script_state,
+    const V8UnionElementOrElementImage* element,
+    std::optional<double> sx,
+    std::optional<double> sy,
+    std::optional<double> swidth,
+    std::optional<double> sheight,
+    double x,
+    double y,
+    std::optional<double> dwidth,
+    std::optional<double> dheight,
+    const DrawElementImageOptions* options,
+    ExceptionState& exception_state) {
+  CHECK(RuntimeEnabledFeatures::CanvasDrawElementEnabled(
+      GetCanvasRenderingContextHost()->GetTopExecutionContext()));
+
+  bool element_canvas_transform_enabled =
+      RuntimeEnabledFeatures::ElementCanvasTransformEnabled(
+          GetCanvasRenderingContextHost()->GetTopExecutionContext());
+
+  auto degenerate_return_value = [&script_state,
+                                  element_canvas_transform_enabled]() {
+    if (element_canvas_transform_enabled) {
+      return V8UnionDOMMatrixOrUndefined::Ret(script_state,
+                                              ToV8UndefinedGenerator());
+    }
+    return V8UnionDOMMatrixOrUndefined::Ret(script_state, DOMMatrix::Create());
+  };
+
+  if (!GetOrCreatePaintCanvas()) {
+    return degenerate_return_value();
+  }
+
+  if (!IsDrawElementImageEligible(element, "DrawElementImage",
+                                  exception_state)) {
+    return V8UnionDOMMatrixOrUndefined::Ret(script_state,
+                                            ToV8UndefinedGenerator());
+  }
+
+  std::optional<CanvasChildPaintRecord> child_paint_record;
+  if (element->IsElement()) {
+    child_paint_record = GetChildPaintRecord(element->GetAsElement());
+  } else if (element->IsElementImage()) {
+    if (const auto& record = element->GetAsElementImage()->PaintRecord()) {
+      child_paint_record = *record;
     }
   }
 
-  WillOverwriteCanvas();
+  TRACE_EVENT0("blink", "DrawElementImage");
+
+  if (!child_paint_record) {
+    if (element->IsElementImage()) {
+      exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                        "The ElementImage has been closed.");
+    } else {
+      exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                        "No cached paint record for element.");
+    }
+    return V8UnionDOMMatrixOrUndefined::Ret(script_state,
+                                            ToV8UndefinedGenerator());
+  }
+
+  float dpr = child_paint_record->paint_state.effective_zoom;
+  gfx::RectF src_rect(child_paint_record->paint_state.box_size);
+  if (sx && sy && swidth && sheight) {
+    AdjustRectForCanvas(*sx, *sy, *swidth, *sheight);
+    src_rect = gfx::RectF(*sx * dpr, *sy * dpr, *swidth * dpr, *sheight * dpr);
+  }
+
+  if (src_rect.IsEmpty()) {
+    return degenerate_return_value();
+  }
+
+  // The filter needs to be resolved before calling Draw, because it
+  // immediately checks IsFilterResolved() and uses a null canvas if not.
+  StateGetFilter();
+
+  // The ideal size is the source content size, represented in canvas grid
+  // coordinates. This will cause the element to have the same proportions when
+  // appearing inside the canvas as it would have were it painted outside the
+  // canvas.
+  gfx::SizeF ideal_dst_size(src_rect.size());
+  gfx::Vector2dF scale_factor =
+      GetCanvasGridScaleFactor(child_paint_record->paint_state, Host()->Size());
+  ideal_dst_size.Scale(scale_factor.x(), scale_factor.y());
+
+  double dw = ideal_dst_size.width();
+  double dh = ideal_dst_size.height();
+  if (dwidth && dheight) {
+    dw = *dwidth;
+    dh = *dheight;
+    AdjustRectForCanvas(x, y, dw, dh);
+  }
+  gfx::RectF dst_rect(x, y, dw, dh);
+
+  if (dst_rect.IsEmpty()) {
+    return degenerate_return_value();
+  }
+
+  cc::PaintRecord paint_record = std::move(child_paint_record->record);
+  uint32_t animated_image_frame_index_map_pos =
+      animated_image_frame_index_maps_.size();
+  animated_image_frame_index_maps_.emplace_back(
+      child_paint_record->paint_state.animated_image_frame_index_map);
+  // TODO(crbug.com/421834883): This code is based on image drawing. Maybe we
+  // need a distinct paint_type: kImagePaintType seems to do the right thing
+  // but maybe its treatment of anti-aliasing is incorrect. The kNonOpaqueImage
+  // type controls drop shadow painting under transforms. It's not clear if we
+  // should behave like a non-opaque image here, but the element may not be
+  // opaque so going with that for now.
+  Draw<OverdrawOp::kNone>(
+      /*draw_func=*/
+      [paint_record, dst_rect, src_rect, animated_image_frame_index_map_pos](
+          MemoryManagedPaintCanvas* c, const cc::PaintFlags* flags) {
+        cc::RecordPaintCanvas::DisableFlushCheckScope disable_flush_check_scope(
+            static_cast<cc::RecordPaintCanvas*>(c));
+        int initial_save_count = c->getSaveCount();
+
+        if (flags->getImageFilter() ||
+            flags->getBlendMode() != SkBlendMode::kSrcOver ||
+            SkColorGetA(flags->getColor()) < 255) {
+          SkM44 ctm = c->getLocalToDevice();
+          SkM44 inv_ctm;
+          if (!ctm.invert(&inv_ctm)) {
+            // There is an earlier check for invertibility, but the arithmetic
+            // in AffineTransform is not exactly identical, so it is possible
+            // for SkMatrix to find the transform to be non-invertible at this
+            // stage. crbug.com/504687
+            return;
+          }
+          SkRect bounds = gfx::RectFToSkRect(dst_rect);
+          ctm.asM33().mapRect(&bounds);
+          if (!bounds.isFinite()) {
+            // There is an earlier check for the correctness of the bounds, but
+            // it is possible that after applying the matrix transformation we
+            // get a faulty set of bounds, so we want to catch this asap and
+            // avoid sending a draw command. crbug.com/1039125 We want to do
+            // this before the save command is sent.
+            return;
+          }
+          c->save();
+          c->concat(inv_ctm);
+
+          cc::PaintFlags layer_flags;
+          layer_flags.setBlendMode(flags->getBlendMode());
+          layer_flags.setImageFilter(flags->getImageFilter());
+          layer_flags.setColor(flags->getColor());
+
+          c->saveLayer(bounds, layer_flags);
+          c->concat(ctm);
+        }
+
+        c->save();
+        c->translate(dst_rect.x(), dst_rect.y());
+        if (dst_rect.width() != src_rect.width() ||
+            dst_rect.height() != src_rect.height()) {
+          c->scale(dst_rect.width() / src_rect.width(),
+                   dst_rect.height() / src_rect.height());
+        }
+        c->translate(-src_rect.x(), -src_rect.y());
+
+        c->clipRect(SkRect::MakeXYWH(src_rect.x(), src_rect.y(),
+                                     src_rect.width(), src_rect.height()));
+
+        // A CustomDataOp callback will be used to apply the animated image
+        // frame index map for this ElementImage prior to processing
+        // DrawImage(Rect)Op's in this paint_record.
+        c->recordCustomData(animated_image_frame_index_map_pos);
+
+        c->drawPicture(std::move(paint_record),
+                       // use a save at the beginning of the record to keep
+                       // transforms local:
+                       true);
+
+        // Reset the animated image frame index map
+        c->recordCustomData(std::numeric_limits<uint32_t>::max());
+
+        c->restoreToCount(initial_save_count);
+      },
+      NoOverdraw, /*bounds=*/dst_rect,
+      CanvasRenderingContext2DState::kImagePaintType,
+      CanvasRenderingContext2DState::kNonOpaqueImage,
+      CanvasPerformanceMonitor::DrawType::kElement);
+
+  // Compute the transform, in canvas grid coordinates, that we just drew with.
+  // We start from the context's CTM, then offset by x,y, and finally apply any
+  // dest scaling.
+  gfx::Transform draw_transform = GetState().GetTransform().ToTransform();
+  draw_transform.Translate(dst_rect.x(), dst_rect.y());
+  // The drawing commands above scale by `dst_rect.size() / src_rect.size()`,
+  // which does two things: 1) scales the drawing commands of `paint_record` (in
+  // physical pixels) to canvas grid coordinates, and 2) applies any additional
+  // dest scaling. We are only returning #2 in the logic below.
+  draw_transform.Scale(dst_rect.width() / ideal_dst_size.width(),
+                       dst_rect.height() / ideal_dst_size.height());
+
+  if (sx && sy) {
+    draw_transform.Translate(-src_rect.x() * scale_factor.x(),
+                             -src_rect.y() * scale_factor.y());
+  }
+
+  // This call will take our draw transform in canvas grid coordinates, and
+  // convert it to a transform in CSS pixels suitable for positioning the
+  // element.
+  gfx::Transform result_transform = blink::GetElementTransform(
+      child_paint_record->paint_state, Host()->Size(), draw_transform,
+      element_canvas_transform_enabled);
+
+  if ((!options || !options->preserveElementGeometry()) &&
+      element_canvas_transform_enabled) {
+    if (element->IsElement()) {
+      Host()->UpdateDrawnElementGeometry(*element->GetAsElement(),
+                                         &result_transform,
+                                         /*update_hit_test_geometry*/ true);
+    } else if (element->IsElementImage()) {
+      Host()->UpdateDrawnElementGeometry(*element->GetAsElementImage(),
+                                         &result_transform,
+                                         /*update_hit_test_geometry*/ true);
+    }
+  }
+
+  if (element_canvas_transform_enabled) {
+    return V8UnionDOMMatrixOrUndefined::Ret(script_state,
+                                            ToV8UndefinedGenerator());
+  }
+
+  return V8UnionDOMMatrixOrUndefined::Ret(
+      script_state, MakeGarbageCollected<DOMMatrix>(
+                        result_transform, result_transform.Is2dTransform()));
+}
+
+scoped_refptr<const cc::AnimatedImageFrameIndexMap>
+BaseRenderingContext2D::GetAnimatedImageFrameIndexMap(uint32_t id) const {
+  DCHECK(id == std::numeric_limits<uint32_t>::max() ||
+         id < animated_image_frame_index_maps_.size());
+  if (id < animated_image_frame_index_maps_.size()) {
+    return animated_image_frame_index_maps_[id];
+  }
+  return nullptr;
+}
+
+void BaseRenderingContext2D::DidFlush() {
+  animated_image_frame_index_maps_.clear();
 }
 
 }  // namespace blink

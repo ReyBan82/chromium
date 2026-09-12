@@ -11,11 +11,11 @@
 #include "chrome/browser/ash/attestation/soft_bind_attestation_flow_impl.h"
 #include "chrome/browser/ash/cryptauth/client_app_metadata_provider_service.h"
 #include "chrome/browser/ash/cryptauth/client_app_metadata_provider_service_factory.h"
-#include "chrome/browser/ash/cryptauth/gcm_device_info_provider_impl.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/gcm/gcm_profile_service_factory.h"
+#include "chrome/browser/gcm/instance_id/instance_id_profile_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "chromeos/ash/components/multidevice/stub_multidevice_util.h"
 #include "chromeos/ash/services/device_sync/device_sync_impl.h"
 #include "chromeos/ash/services/device_sync/public/cpp/device_sync_client.h"
@@ -24,6 +24,7 @@
 #include "chromeos/ash/services/multidevice_setup/public/cpp/prefs.h"
 #include "components/account_id/account_id.h"
 #include "components/gcm_driver/gcm_profile_service.h"
+#include "components/gcm_driver/instance_id/instance_id_profile_service.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/prefs/pref_service.h"
 #include "components/user_manager/user.h"
@@ -80,7 +81,9 @@ class DeviceSyncClientHolder : public KeyedService {
     return DeviceSyncImpl::Factory::Create(
         IdentityManagerFactory::GetForProfile(profile),
         gcm::GCMProfileServiceFactory::GetForProfile(profile)->driver(),
-        profile->GetPrefs(), GcmDeviceInfoProviderImpl::GetInstance(),
+        instance_id::InstanceIDProfileServiceFactory::GetForProfile(profile)
+            ->driver(),
+        profile->GetPrefs(),
         ClientAppMetadataProviderServiceFactory::GetForProfile(profile),
         profile->GetURLLoaderFactory(), std::make_unique<base::OneShotTimer>(),
         base::BindRepeating(&DeviceSyncClientHolder::GetAttestationCertificates,
@@ -92,7 +95,7 @@ class DeviceSyncClientHolder : public KeyedService {
       attestation::SoftBindAttestationFlow::Callback notify_callback,
       const std::string& user_key) {
     const user_manager::User* user =
-        ProfileHelper::Get()->GetUserByProfile(profile);
+        BrowserContextHelper::Get()->GetUserByBrowserContext(profile);
     soft_bind_attestation_flow_->GetCertificate(
         std::move(notify_callback),
         user ? user->GetAccountId() : EmptyAccountId(), user_key);
@@ -106,10 +109,20 @@ class DeviceSyncClientHolder : public KeyedService {
 };
 
 DeviceSyncClientFactory::DeviceSyncClientFactory()
-    : ProfileKeyedServiceFactory("DeviceSyncClient") {
+    : ProfileKeyedServiceFactory(
+          "DeviceSyncClient",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOriginalOnly)
+              .Build()) {
   DependsOn(ClientAppMetadataProviderServiceFactory::GetInstance());
   DependsOn(IdentityManagerFactory::GetInstance());
-  DependsOn(gcm::GCMProfileServiceFactory::GetInstance());
+  DependsOn(instance_id::InstanceIDProfileServiceFactory::GetInstance());
 
   // If ShouldUseMultideviceStubs() is true, set a stub factory to facilitate
   // fake devices for testing in the Linux Chrome OS build. Note that this is
@@ -120,7 +133,7 @@ DeviceSyncClientFactory::DeviceSyncClientFactory()
   }
 }
 
-DeviceSyncClientFactory::~DeviceSyncClientFactory() {}
+DeviceSyncClientFactory::~DeviceSyncClientFactory() = default;
 
 // static
 DeviceSyncClient* DeviceSyncClientFactory::GetForProfile(Profile* profile) {
@@ -132,15 +145,17 @@ DeviceSyncClient* DeviceSyncClientFactory::GetForProfile(Profile* profile) {
 
 // static
 DeviceSyncClientFactory* DeviceSyncClientFactory::GetInstance() {
-  return base::Singleton<DeviceSyncClientFactory>::get();
+  static base::NoDestructor<DeviceSyncClientFactory> instance;
+  return instance.get();
 }
 
-KeyedService* DeviceSyncClientFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+DeviceSyncClientFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  // TODO(crbug.com/848347): Check prohibited by policy in services that depend
-  // on this Factory, not here.
+  // TODO(crbug.com/208930612): Check prohibited by policy in services that
+  // depend on this Factory, not here.
   if (IsEnrollmentAllowedByPolicy(context))
-    return new DeviceSyncClientHolder(context);
+    return std::make_unique<DeviceSyncClientHolder>(context);
 
   return nullptr;
 }

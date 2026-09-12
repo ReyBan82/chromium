@@ -17,7 +17,7 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "ui/base/l10n/l10n_util.h"
-#include "ui/chromeos/events/keyboard_capability.h"
+#include "ui/events/ash/keyboard_capability.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_types.h"
@@ -81,7 +81,7 @@ void DeprecationNotificationController::ShowNotificationFromIdWithLauncherKey(
     const std::string& id,
     int message_id) {
   const int launcher_key_name_id =
-      Shell::Get()->keyboard_capability()->HasLauncherButton()
+      Shell::Get()->keyboard_capability()->HasLauncherButtonOnAnyKeyboard()
           ? IDS_ASH_SHORTCUT_MODIFIER_LAUNCHER
           : IDS_ASH_SHORTCUT_MODIFIER_SEARCH;
   const std::u16string launcher_key_name =
@@ -105,7 +105,7 @@ void DeprecationNotificationController::ShowNotification(
   auto notification = CreateSystemNotificationPtr(
       message_center::NOTIFICATION_TYPE_SIMPLE, id,
       l10n_util::GetStringUTF16(IDS_DEPRECATED_SHORTCUT_TITLE), message_body,
-      std::u16string(), GURL(),
+      std::u16string(),
       message_center::NotifierId(
           message_center::NotifierType::SYSTEM_COMPONENT, kNotifierId,
           NotificationCatalogName::kEventRewriterDeprecation),
@@ -149,7 +149,6 @@ int DeprecationNotificationController::GetSixPackKeyDeprecationMessageId(
       return IDS_ASH_SHORTCUT_DEPRECATION_ALT_BASED_PAGE_DOWN;
     default:
       NOTREACHED();
-      return -1;
   }
 }
 

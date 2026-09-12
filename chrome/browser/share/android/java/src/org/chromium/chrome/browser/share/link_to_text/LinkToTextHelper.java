@@ -4,11 +4,14 @@
 
 package org.chromium.chrome.browser.share.link_to_text;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.net.Uri;
 
 import org.chromium.base.Callback;
 import org.chromium.blink.mojom.TextFragmentReceiver;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.tab.SadTab;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.content_public.browser.RenderFrameHost;
@@ -19,9 +22,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * This class provides the utility methods for link to text.
- */
+/** This class provides the utility methods for link to text. */
+@NullMarked
 public class LinkToTextHelper {
     public static final String SHARED_HIGHLIGHTING_SUPPORT_URL =
             "https://support.google.com/chrome?p=shared_highlighting";
@@ -44,7 +46,7 @@ public class LinkToTextHelper {
         for (RenderFrameHost renderFrameHost : renderFrameHosts) {
             TextFragmentReceiver producer =
                     renderFrameHost.getInterfaceToRendererFrame(TextFragmentReceiver.MANAGER);
-            producer.removeFragments();
+            assumeNonNull(producer).removeFragments();
         }
     }
 
@@ -70,20 +72,15 @@ public class LinkToTextHelper {
      * Fetch the canonical url for sharing
      *
      * @param tab The tab to fetch the canonical url from.
-     * @param callback The {@link Callback} to return the tab's canonical url or an empty string
+     * @param callback The {@link Callback} to return the tab's canonical url or null.
      */
-    public static void requestCanonicalUrl(Tab tab, Callback<String> callback) {
+    public static void requestCanonicalUrl(Tab tab, Callback<@Nullable GURL> callback) {
         if (!shouldRequestCanonicalUrl(tab)) {
-            callback.onResult("");
+            callback.onResult(null);
             return;
         }
 
-        tab.getWebContents().getMainFrame().getCanonicalUrlForSharing(new Callback<GURL>() {
-            @Override
-            public void onResult(GURL result) {
-                callback.onResult(result.getSpec());
-            }
-        });
+        assumeNonNull(tab.getWebContents()).getMainFrame().getCanonicalUrlForSharing(callback);
     }
 
     private static boolean shouldRequestCanonicalUrl(Tab tab) {
@@ -102,11 +99,11 @@ public class LinkToTextHelper {
      *
      * @param tab The tab to get all <link RenderFrameHost> in the current page.
      * @param callback The {@link Callback} to handle whether or not there is a highlight on the
-     *         current page.
+     *     current page.
      */
     public static void hasExistingSelectors(Tab tab, Callback<Boolean> callback) {
         List<RenderFrameHost> renderFrameHosts =
-                tab.getWebContents().getMainFrame().getAllRenderFrameHosts();
+                assumeNonNull(tab.getWebContents()).getMainFrame().getAllRenderFrameHosts();
 
         for (RenderFrameHost renderFrameHost : renderFrameHosts) {
             TextFragmentReceiver producer =
@@ -115,14 +112,16 @@ public class LinkToTextHelper {
                 continue;
             }
 
-            getExistingSelectorsForFrame(producer, (text) -> {
-                if (text.length > 0) {
-                    callback.onResult(true);
-                } else {
-                    callback.onResult(false);
-                }
-                producer.close();
-            });
+            getExistingSelectorsForFrame(
+                    producer,
+                    (text) -> {
+                        if (text.length > 0) {
+                            callback.onResult(true);
+                        } else {
+                            callback.onResult(false);
+                        }
+                        producer.close();
+                    });
         }
     }
 
@@ -149,9 +148,9 @@ public class LinkToTextHelper {
      */
     public static void getExistingSelectorsAllFrames(Tab tab, Callback<String> callback) {
         List<RenderFrameHost> renderFrameHosts =
-                tab.getWebContents().getMainFrame().getAllRenderFrameHosts();
+                assumeNonNull(tab.getWebContents()).getMainFrame().getAllRenderFrameHosts();
         getExistingSelectorsFromFrameAtIndex(
-                new ArrayList<String>(), renderFrameHosts, callback, /* index= */ 0);
+                new ArrayList<>(), renderFrameHosts, callback, /* index= */ 0);
     }
 
     /**
@@ -163,8 +162,11 @@ public class LinkToTextHelper {
      * @param callback The {@link Callback} to handle the existing selectors result.
      * @param index The index of the item in {@link List<RenderFrameHost>}
      */
-    private static void getExistingSelectorsFromFrameAtIndex(List<String> selectorsList,
-            List<RenderFrameHost> renderFrameHosts, Callback<String> callback, int index) {
+    private static void getExistingSelectorsFromFrameAtIndex(
+            List<String> selectorsList,
+            List<RenderFrameHost> renderFrameHosts,
+            Callback<String> callback,
+            int index) {
         if (index >= renderFrameHosts.size()) {
             String selectors = String.join(ADDITIONAL_TEXT_FRAGMENT_SELECTOR, selectorsList);
             callback.onResult(selectors);
@@ -178,16 +180,19 @@ public class LinkToTextHelper {
         if (producer == null) {
             getExistingSelectorsFromFrameAtIndex(
                     selectorsList, renderFrameHosts, callback, index + 1);
+            return;
         }
 
-        getExistingSelectorsForFrame(producer, (selectors) -> {
-            if (selectors.length > 0) {
-                selectorsList.addAll(Arrays.asList(selectors));
-            }
-            getExistingSelectorsFromFrameAtIndex(
-                    selectorsList, renderFrameHosts, callback, index + 1);
-            producer.close();
-        });
+        getExistingSelectorsForFrame(
+                producer,
+                (selectors) -> {
+                    if (selectors.length > 0) {
+                        selectorsList.addAll(Arrays.asList(selectors));
+                    }
+                    getExistingSelectorsFromFrameAtIndex(
+                            selectorsList, renderFrameHosts, callback, index + 1);
+                    producer.close();
+                });
     }
 
     /**
@@ -199,45 +204,65 @@ public class LinkToTextHelper {
      */
     public static void getExistingSelectorsForFrame(
             TextFragmentReceiver producer, Callback<String[]> callback) {
-        producer.getExistingSelectors(new TextFragmentReceiver.GetExistingSelectors_Response() {
-            @Override
-            public void call(String[] text) {
-                callback.onResult(text);
-            }
-        });
+        producer.getExistingSelectors(
+                new TextFragmentReceiver.GetExistingSelectors_Response() {
+                    @Override
+                    public void call(String[] text) {
+                        callback.onResult(text);
+                    }
+                });
+    }
+
+    /**
+     * Fetch the generated selector for the text in the viewport's center for the main frame.
+     *
+     * @param webContents The webContents to get the main frame from.
+     * @param callback The {@link Callback} to handle the generated selector.
+     */
+    public static void requestSelectorForViewportCenter(
+            WebContents webContents, Callback<String> callback) {
+        RenderFrameHost mainFrame = webContents.getMainFrame();
+        TextFragmentReceiver producer =
+                mainFrame.getInterfaceToRendererFrame(TextFragmentReceiver.MANAGER);
+
+        if (producer == null) {
+            callback.onResult("");
+            return;
+        }
+
+        producer.requestSelectorForViewportCenter(
+                (String selector, int error, int readyStatus) -> {
+                    callback.onResult(selector);
+                    producer.close();
+                });
     }
 
     /**
      * Fetch the generated selector that uniquely identify the highlighted text selected text.
      *
      * @param producer The {@link TextFragmentReceiver} to make the renderer call for the current
-     *         frame.
+     *     frame.
      * @param callback The {@link Callback} to handle the generated selector.
      */
     public static void requestSelector(
             TextFragmentReceiver producer, RequestSelectorCallback callback) {
-        producer.requestSelector(new TextFragmentReceiver.RequestSelector_Response() {
-            @Override
-            public void call(String selector, Integer error, Integer readyStatus) {
-                if (ChromeFeatureList.isEnabled(
-                            ChromeFeatureList.PREEMPTIVE_LINK_TO_TEXT_GENERATION)) {
+        producer.requestSelector(
+                (String selector, int error, int readyStatus) -> {
                     LinkToTextMetricsHelper.recordLinkToTextDiagnoseStatus(
                             LinkToTextMetricsHelper.LinkToTextDiagnoseStatus.SELECTOR_RECEIVED);
-                }
-                callback.apply(selector, error, readyStatus);
-            }
-        });
+                    callback.apply(selector, error, readyStatus);
+                });
     }
 
     /**
      * This checks that the URL has a text fragment selector (e.g: #:~:text=selector) attached.
      *
      * @param url The url which may include the text fragment.
-     * @returns whether or not the url had a text fragment selector.
+     * @return whether or not the url had a text fragment selector.
      */
     public static boolean hasTextFragment(GURL url) {
         Uri uri = Uri.parse(url.getSpec());
         String fragment = uri.getEncodedFragment();
-        return fragment != null ? fragment.contains(TEXT_FRAGMENT_PREFIX) : false;
+        return (fragment != null) && fragment.contains(TEXT_FRAGMENT_PREFIX);
     }
 }

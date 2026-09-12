@@ -32,6 +32,8 @@ class PageDelegate {
 
   // Called when `page` becomes primary in its FrameTree.
   virtual void NotifyPageBecamePrimary(PageImpl& page) = 0;
+
+
 };
 
 }  // namespace content

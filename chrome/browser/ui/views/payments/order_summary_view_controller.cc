@@ -9,17 +9,14 @@
 #include <vector>
 
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/browser_process.h"
 #include "chrome/browser/ui/views/payments/payment_request_dialog_view.h"
 #include "chrome/browser/ui/views/payments/payment_request_dialog_view_ids.h"
 #include "chrome/browser/ui/views/payments/payment_request_views_util.h"
-#include "components/payments/core/currency_formatter.h"
 #include "components/strings/grit/components_strings.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
-#include "ui/gfx/font.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/views/border.h"
 #include "ui/views/controls/button/md_text_button.h"
@@ -39,9 +36,9 @@ namespace {
 constexpr int kLineItemRowVerticalInset = 4;
 
 class LineItemRow : public views::View {
- public:
-  METADATA_HEADER(LineItemRow);
+  METADATA_HEADER(LineItemRow, views::View)
 
+ public:
   LineItemRow()
       : row_insets_(
             gfx::Insets::TLBR(kLineItemRowVerticalInset,
@@ -65,7 +62,7 @@ class LineItemRow : public views::View {
   gfx::Insets row_insets_;
 };
 
-BEGIN_METADATA(LineItemRow, views::View)
+BEGIN_METADATA(LineItemRow)
 END_METADATA
 
 // Creates a view for a line item to be displayed in the Order Summary Sheet.
@@ -147,10 +144,13 @@ OrderSummaryViewController::OrderSummaryViewController(
 }
 
 OrderSummaryViewController::~OrderSummaryViewController() {
-  if (spec())
+  if (spec()) {
     spec()->RemoveObserver(this);
+  }
 
-  state()->RemoveObserver(this);
+  if (state()) {
+    state()->RemoveObserver(this);
+  }
 }
 
 void OrderSummaryViewController::OnSpecUpdated() {
@@ -170,8 +170,9 @@ std::u16string OrderSummaryViewController::GetSheetTitle() {
 }
 
 void OrderSummaryViewController::FillContentView(views::View* content_view) {
-  if (!spec())
+  if (!spec()) {
     return;
+  }
 
   auto layout = std::make_unique<views::BoxLayout>(
       views::BoxLayout::Orientation::kVertical);
@@ -195,7 +196,7 @@ void OrderSummaryViewController::FillContentView(views::View* content_view) {
       currency = base::UTF8ToUTF16((*display_items[i])->amount->currency);
     }
 
-    content_view->AddChildView(
+    content_view->AddChildViewRaw(
         CreateLineItemView(
             base::UTF8ToUTF16((*display_items[i])->label), currency,
             spec()->GetFormattedCurrencyAmount((*display_items[i])->amount),
@@ -210,7 +211,7 @@ void OrderSummaryViewController::FillContentView(views::View* content_view) {
       spec()->GetFormattedCurrencyAmount(
           spec()->GetTotal(state()->selected_app())->amount));
 
-  content_view->AddChildView(
+  content_view->AddChildViewRaw(
       CreateLineItemView(
           base::UTF8ToUTF16(spec()->GetTotal(state()->selected_app())->label),
           base::UTF8ToUTF16(

@@ -4,12 +4,13 @@
 
 import 'chrome://history/history.js';
 
-import {BrowserServiceImpl, HistoryItemElement, HistoryListElement} from 'chrome://history/history.js';
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import type {CriticalAction, HistoryEntry, HistoryItemElement, HistoryListElement} from 'chrome://history/history.js';
+import {BrowserProxyImpl, CriticalActionType} from 'chrome://history/history.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
 import {assertEquals, assertFalse, assertNotEquals, assertTrue} from 'chrome://webui-test/chai_assert.js';
-import {flushTasks} from 'chrome://webui-test/polymer_test_util.js';
+import {eventToPromise, isVisible, microtasksFinished} from 'chrome://webui-test/test_util.js';
 
-import {TestBrowserService} from './test_browser_service.js';
+import {TestHistoryBrowserProxy} from './test_browser_proxy.js';
 import {createHistoryEntry, createSearchEntry} from './test_util.js';
 
 const TEST_HISTORY_RESULTS = [
@@ -32,14 +33,14 @@ suite('<history-item> unit test', function() {
 
   setup(function() {
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
-    BrowserServiceImpl.setInstance(new TestBrowserService());
+    BrowserProxyImpl.setInstance(new TestHistoryBrowserProxy());
 
     item = document.createElement('history-item');
     item.item = TEST_HISTORY_RESULTS[0]!;
     document.body.appendChild(item);
   });
 
-  test('click targets for selection', function() {
+  test('click targets for selection', async function() {
     let selectionCount = 0;
     item.addEventListener('history-checkbox-select', function() {
       selectionCount++;
@@ -47,117 +48,358 @@ suite('<history-item> unit test', function() {
 
     // Checkbox should trigger selection.
     item.$.checkbox.click();
+    await microtasksFinished();
     assertEquals(1, selectionCount);
 
     // Non-interactive text should trigger selection.
-    item.$['time-accessed'].click();
+    item.$.timeAccessed.click();
     assertEquals(2, selectionCount);
 
     // Menu button should not trigger selection.
-    item.$['menu-button'].click();
+    item.$.menuButton.click();
     assertEquals(2, selectionCount);
   });
 
-  test('title changes with item', function() {
-    const time = item.$['time-accessed'];
+  test('title changes with item', async function() {
+    const time = item.$.timeAccessed;
     assertEquals('', time.title);
 
     time.dispatchEvent(new CustomEvent('mouseover'));
     const initialTitle = time.title;
     item.item = TEST_HISTORY_RESULTS[5]!;
+    await microtasksFinished();
     time.dispatchEvent(new CustomEvent('mouseover'));
     assertNotEquals(initialTitle, time.title);
   });
+
+  test(
+      'website title margin adapts to critical actions flag', async function() {
+        loadTimeData.overrideValues({isCriticalActionsEnabled: true});
+        const enabledItem = document.createElement('history-item');
+        document.body.appendChild(enabledItem);
+        await microtasksFinished();
+        assertTrue(enabledItem.hasAttribute('is-critical-actions-enabled_'));
+        assertEquals(
+            '24px',
+            window.getComputedStyle(enabledItem)
+                .getPropertyValue('--website-title-margin-start')
+                .trim());
+
+        loadTimeData.overrideValues({isCriticalActionsEnabled: false});
+        const disabledItem = document.createElement('history-item');
+        document.body.appendChild(disabledItem);
+        await microtasksFinished();
+        assertFalse(disabledItem.hasAttribute('is-critical-actions-enabled_'));
+        assertEquals(
+            '8px',
+            window.getComputedStyle(disabledItem)
+                .getPropertyValue('--website-title-margin-start')
+                .trim());
+      });
 });
 
 suite('<history-item> integration test', function() {
   let element: HistoryListElement;
+  let testProxy: TestHistoryBrowserProxy;
 
   setup(function() {
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
-    const testService = new TestBrowserService();
-    BrowserServiceImpl.setInstance(testService);
-
+    testProxy = new TestHistoryBrowserProxy();
+    BrowserProxyImpl.setInstance(testProxy);
+    // Force a super tall body so that cr-lazy-list renders all items.
+    document.body.style.height = '1000px';
     const app = document.createElement('history-app');
     document.body.appendChild(app);
     element = app.$.history;
-    return testService.whenCalled('queryHistory');
+    return Promise.all([
+      testProxy.handler.whenCalled('queryHistory'),
+      microtasksFinished(),
+    ]);
   });
 
-  function getHistoryData() {
-    return element.$['infinite-list'].items!;
+  function getHistoryData(): HistoryEntry[] {
+    return (element.$.infiniteList.items || []);
   }
 
-  test('basic separator insertion', function() {
+  test('basic separator insertion', async function() {
     element.addNewResults(TEST_HISTORY_RESULTS, false, true);
-    return flushTasks().then(function() {
-      flush();
-      // Check that the correct number of time gaps are inserted.
-      const items = element.shadowRoot!.querySelectorAll('history-item');
+    await eventToPromise('viewport-filled', element.$.infiniteList);
 
-      assertTrue(items[0]!.hasTimeGap);
-      assertTrue(items[1]!.hasTimeGap);
-      assertFalse(items[2]!.hasTimeGap);
-      assertTrue(items[3]!.hasTimeGap);
-      assertFalse(items[4]!.hasTimeGap);
-      assertFalse(items[5]!.hasTimeGap);
-    });
+    // Check that the correct number of time gaps are inserted.
+    const items = element.shadowRoot.querySelectorAll('history-item');
+    assertEquals(TEST_HISTORY_RESULTS.length, items.length);
+    assertTrue(items[0]!.hasTimeGap);
+    assertTrue(items[1]!.hasTimeGap);
+    assertFalse(items[2]!.hasTimeGap);
+    assertTrue(items[3]!.hasTimeGap);
+    assertFalse(items[4]!.hasTimeGap);
+    assertFalse(items[5]!.hasTimeGap);
   });
 
-  test('separator insertion for search', function() {
+  test('separator insertion for search', async function() {
     element.addNewResults(SEARCH_HISTORY_RESULTS, false, true);
     element.searchedTerm = 'search';
 
-    return flushTasks().then(function() {
-      flush();
-      const items = element.shadowRoot!.querySelectorAll('history-item');
+    await microtasksFinished();
+    const items = element.shadowRoot.querySelectorAll('history-item');
 
-      assertTrue(items[0]!.hasTimeGap);
-      assertFalse(items[1]!.hasTimeGap);
-      assertFalse(items[2]!.hasTimeGap);
-    });
+    assertTrue(items[0]!.hasTimeGap, '0');
+    assertFalse(items[1]!.hasTimeGap, '1');
+    assertFalse(items[2]!.hasTimeGap, '2');
   });
 
   test('separator insertion after deletion', async function() {
     element.addNewResults(TEST_HISTORY_RESULTS, false, true);
-    await flushTasks();
-    const items = element.shadowRoot!.querySelectorAll('history-item');
+    await microtasksFinished();
+    const items = element.shadowRoot.querySelectorAll('history-item');
 
     element.removeItemsByIndexForTesting([3]);
-    await flushTasks();
+    await microtasksFinished();
 
     // Checks that a new time gap separator has been inserted.
     assertEquals(5, getHistoryData().length);
     assertTrue(items[2]!.hasTimeGap);
 
     element.removeItemsByIndexForTesting([3]);
-    await flushTasks();
+    await microtasksFinished();
 
     // Checks time gap separator is removed.
-    assertEquals(4, element.$['infinite-list'].items!.length);
+    assertEquals(4, element.$.infiniteList.items.length);
     assertFalse(items[2]!.hasTimeGap);
   });
 
-  test('remove bookmarks', function() {
-    element.addNewResults(TEST_HISTORY_RESULTS, false, true);
-    return flushTasks()
-        .then(function() {
-          element.set('historyData_.1.starred', true);
-          element.set('historyData_.5.starred', true);
-          return flushTasks();
-        })
-        .then(function() {
-          const items = element.shadowRoot!.querySelectorAll('history-item');
+  test('remove bookmarks', async function() {
+    const newResults = [...TEST_HISTORY_RESULTS];
+    newResults[1]!.starred = true;
+    newResults[5]!.starred = true;
+    element.addNewResults(newResults, false, true);
+    await microtasksFinished();
 
-          const star = items[1]!.shadowRoot!.querySelector<HTMLElement>(
-              '#bookmark-star');
-          assertTrue(!!star);
-          star.focus();
-          star.click();
+    const items = element.shadowRoot.querySelectorAll('history-item');
+    assertEquals(TEST_HISTORY_RESULTS.length, items.length);
+    const star =
+        items[1]!.shadowRoot.querySelector<HTMLElement>('#bookmark-star');
+    assertTrue(!!star);
+    star.focus();
+    star.click();
+    await microtasksFinished();
 
-          // Check that all items matching this url are unstarred.
-          assertEquals(getHistoryData()[1].starred, false);
-          assertEquals(getHistoryData()[5].starred, false);
+    // Check that all items matching this url are unstarred.
+    assertFalse(getHistoryData()[1]!.starred);
+    assertFalse(getHistoryData()[5]!.starred);
+  });
+
+  test('actor-initiated visit annotation enabled', async function() {
+    loadTimeData.overrideValues(
+        {enableBrowsingHistoryActorIntegrationM1: true});
+
+    const newResults = [...TEST_HISTORY_RESULTS];
+    // Actor initiated history visit.
+    newResults[1]!.isActorVisit = true;
+    // Actor initiated history visit that is also bookmarked.
+    newResults[5]!.isActorVisit = true;
+    newResults[5]!.starred = true;
+    element.addNewResults(newResults, false, true);
+    await microtasksFinished();
+
+    const items = element.shadowRoot.querySelectorAll('history-item');
+    assertEquals(TEST_HISTORY_RESULTS.length, items.length);
+    assertFalse(isVisible(
+        items[0]!.shadowRoot.querySelector<HTMLElement>('#actor-icon')));
+    assertTrue(isVisible(
+        items[1]!.shadowRoot.querySelector<HTMLElement>('#actor-icon')));
+    assertFalse(isVisible(
+        items[2]!.shadowRoot.querySelector<HTMLElement>('#actor-icon')));
+    assertFalse(isVisible(
+        items[3]!.shadowRoot.querySelector<HTMLElement>('#actor-icon')));
+    assertFalse(isVisible(
+        items[4]!.shadowRoot.querySelector<HTMLElement>('#actor-icon')));
+    assertTrue(isVisible(
+        items[5]!.shadowRoot.querySelector<HTMLElement>('#actor-icon')));
+    assertTrue(isVisible(
+        items[5]!.shadowRoot.querySelector<HTMLElement>('#bookmark-star')));
+  });
+
+  test('actor-initiated visit with critical actions enabled', async function() {
+    loadTimeData.overrideValues({
+      enableBrowsingHistoryActorIntegrationM1: true,
+      isCriticalActionsEnabled: true,
+    });
+
+    const expectedCriticalActions: CriticalAction[] = [
+      {
+        id: 'phone',
+        label: 'Phone number filled',
+        tooltip: 'Contact info',
+        linkoutUrl: 'chrome://settings/addresses',
+        actionType: CriticalActionType.kFormFill,
+      },
+      {
+        id: 'email',
+        label: 'Email filled',
+        tooltip: 'Contact info',
+        linkoutUrl: 'chrome://settings/addresses',
+        actionType: CriticalActionType.kFormFill,
+      },
+      {
+        id: 'payment',
+        label: 'Payment method filled',
+        tooltip: 'Payment methods',
+        linkoutUrl: 'chrome://settings/payments',
+        actionType: CriticalActionType.kFormFill,
+      },
+    ];
+
+    const newResults = [...TEST_HISTORY_RESULTS];
+    newResults[1]!.isActorVisit = true;
+    newResults[1]!.criticalActions = expectedCriticalActions;
+    element.addNewResults(newResults, false, true);
+    await microtasksFinished();
+
+    const items = element.shadowRoot.querySelectorAll('history-item');
+    const startActorIcon = items[1]!.shadowRoot.querySelector<HTMLElement>(
+        '#title-and-domain #actor-icon');
+    const endActorIcon =
+        items[1]!.shadowRoot.querySelector<HTMLElement>('#icons #actor-icon');
+    assertTrue(isVisible(startActorIcon));
+    assertEquals('CR-ICON', startActorIcon!.tagName);
+    assertFalse(isVisible(endActorIcon));
+
+    // Verify expand button for actor visit item.
+    const nonActorExpandBtn =
+        items[0]!.shadowRoot.querySelector<HTMLElement>('#expand-button');
+    assertFalse(isVisible(nonActorExpandBtn));
+
+    const actorExpandBtn =
+        items[1]!.shadowRoot.querySelector<HTMLElement>('#expand-button');
+    assertTrue(isVisible(actorExpandBtn));
+    assertEquals(
+        'cr:keyboard-arrow-down', actorExpandBtn!.getAttribute('iron-icon'));
+    const menuBtn =
+        items[1]!.shadowRoot.querySelector<HTMLElement>('#menuButton');
+    assertEquals(
+        menuBtn!.getAttribute('aria-describedby'),
+        actorExpandBtn!.getAttribute('aria-describedby'));
+
+    const collapse =
+        items[1]!.shadowRoot.querySelector<HTMLElement>('#collapse');
+    assertTrue(!!collapse);
+    assertFalse(collapse.hasAttribute('opened'));
+
+    actorExpandBtn!.click();
+    await microtasksFinished();
+
+    assertEquals(
+        'cr:keyboard-arrow-up', actorExpandBtn!.getAttribute('iron-icon'));
+    assertTrue(collapse.hasAttribute('opened'));
+    assertEquals(1, testProxy.actionMap['HistoryPage_CriticalActionsExpanded']);
+
+    const criticalActionsTitle =
+        items[1]!.shadowRoot.querySelector<HTMLElement>(
+            '.critical-actions-title');
+    assertTrue(!!criticalActionsTitle);
+    assertTrue(isVisible(criticalActionsTitle));
+    assertEquals(
+        loadTimeData.getString('geminiKeyBrowsingActionsTitle'),
+        criticalActionsTitle.textContent.trim());
+
+    const actionsList = items[1]!.shadowRoot.querySelector<HTMLElement>(
+        '.critical-actions-list');
+    assertTrue(!!actionsList);
+    assertEquals('list', actionsList.getAttribute('role'));
+
+    const actionRows = items[1]!.shadowRoot.querySelectorAll<HTMLElement>(
+        '.critical-action-row');
+    assertEquals(expectedCriticalActions.length, actionRows.length);
+
+    actionRows.forEach((row, i) => {
+      const expectedAction = expectedCriticalActions[i]!;
+      assertEquals('listitem', row.getAttribute('role'));
+      assertEquals('critical-action', row.getAttribute('focus-type'));
+      assertEquals(expectedAction.label, row.getAttribute('aria-label'));
+      assertEquals(
+          `critical-action-icon-${i}`, row.getAttribute('aria-describedby'));
+
+      const label = row.querySelector('.critical-action-label');
+      assertTrue(!!label);
+      assertEquals(expectedAction.label, label.textContent.trim());
+
+      const icon = row.querySelector<HTMLElement>('.critical-action-button');
+      assertTrue(!!icon);
+      assertEquals('CR-ICON', icon.tagName);
+      assertEquals(`critical-action-icon-${i}`, icon.id);
+      assertEquals('cr:open-in-new', icon.getAttribute('icon'));
+      assertEquals('img', icon.getAttribute('role'));
+      assertEquals(expectedAction.tooltip, icon.getAttribute('title'));
+      assertEquals(
+          `${expectedAction.tooltip}, opens in a new tab`,
+          icon.getAttribute('aria-label'));
+    });
+
+    let openedUrl = '';
+    const originalOpen = window.open;
+    try {
+      window.open = (url) => {
+        openedUrl = url as string;
+        return null;
+      };
+      actionRows[0]!.click();
+      assertEquals(expectedCriticalActions[0]!.linkoutUrl, openedUrl);
+      assertEquals(
+          1,
+          testProxy.histogramMap['HistoryPage.CriticalAction.Click']!
+              [CriticalActionType.kFormFill]);
+    } finally {
+      window.open = originalOpen;
+    }
+
+    actorExpandBtn!.click();
+    await microtasksFinished();
+    assertEquals(
+        1, testProxy.actionMap['HistoryPage_CriticalActionsCollapsed']);
+  });
+
+  test(
+      'actor visit without critical actions has no expand button',
+      async function() {
+        loadTimeData.overrideValues({
+          enableBrowsingHistoryActorIntegrationM1: true,
+          isCriticalActionsEnabled: true,
         });
+
+        const newResults = [...TEST_HISTORY_RESULTS];
+        newResults[1]!.isActorVisit = true;
+        newResults[1]!.criticalActions = [];
+        element.addNewResults(newResults, false, true);
+        await microtasksFinished();
+
+        const items = element.shadowRoot.querySelectorAll('history-item');
+        const expandBtn =
+            items[1]!.shadowRoot.querySelector<HTMLElement>('#expand-button');
+        assertFalse(isVisible(expandBtn));
+        const collapse =
+            items[1]!.shadowRoot.querySelector<HTMLElement>('#collapse');
+        assertFalse(isVisible(collapse));
+      });
+
+  test('non-actor visit with critical actions enabled', async function() {
+    loadTimeData.overrideValues({
+      enableBrowsingHistoryActorIntegrationM1: true,
+      isCriticalActionsEnabled: true,
+    });
+
+    const newResults = [...TEST_HISTORY_RESULTS];
+    newResults[0]!.isActorVisit = false;
+    newResults[0]!.criticalActions = [];
+    element.addNewResults(newResults, false, true);
+    await microtasksFinished();
+
+    const items = element.shadowRoot.querySelectorAll('history-item');
+    const expandBtn =
+        items[0]!.shadowRoot.querySelector<HTMLElement>('#expand-button');
+    assertFalse(isVisible(expandBtn));
+    const collapse =
+        items[0]!.shadowRoot.querySelector<HTMLElement>('#collapse');
+    assertFalse(isVisible(collapse));
   });
 });

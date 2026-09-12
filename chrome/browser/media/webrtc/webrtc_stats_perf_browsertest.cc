@@ -16,6 +16,7 @@
 #include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
 #include "media/base/media_switches.h"
+#include "media/media_buildflags.h"
 #include "testing/perf/perf_test.h"
 #include "third_party/blink/public/common/features.h"
 
@@ -27,11 +28,6 @@ const char kMainWebrtcTestHtmlPage[] = "/webrtc/webrtc_jsep01_test.html";
 
 const char kInboundRtp[] = "inbound-rtp";
 const char kOutboundRtp[] = "outbound-rtp";
-
-enum class GetStatsVariation {
-  PROMISE_BASED,
-  CALLBACK_BASED
-};
 
 // Sums up "RTC[In/Out]boundRTPStreamStats.bytes_[received/sent]" values.
 double GetTotalRTPStreamBytes(
@@ -234,33 +230,17 @@ class WebRtcStatsPerfBrowserTest : public WebRtcTestBase {
     EndCall();
   }
 
-  void RunsAudioAndVideoCallMeasuringGetStatsPerformance(
-      GetStatsVariation variation) {
+  void RunsAudioAndVideoCallMeasuringGetStatsPerformance() {
     EXPECT_TRUE(base::TimeTicks::IsHighResolution());
 
     StartCall(kUseDefaultAudioCodec, kUseDefaultVideoCodec,
               false /* prefer_hw_video_codec */, "");
 
-    double invocation_time = 0.0;
-    switch (variation) {
-      case GetStatsVariation::PROMISE_BASED:
-        invocation_time = (MeasureGetStatsPerformance(left_tab_) +
-                           MeasureGetStatsPerformance(right_tab_)) / 2.0;
-        break;
-      case GetStatsVariation::CALLBACK_BASED:
-        invocation_time =
-            (MeasureGetStatsCallbackPerformance(left_tab_) +
-             MeasureGetStatsCallbackPerformance(right_tab_)) / 2.0;
-        break;
-    }
-    perf_test::PrintResult(
-        "getStats",
-        (variation == GetStatsVariation::PROMISE_BASED) ?
-            "_promise" : "_callback",
-        "invocation_time",
-        invocation_time,
-        "milliseconds",
-        false);
+    double invocation_time = (MeasureGetStatsPerformance(left_tab_) +
+                              MeasureGetStatsPerformance(right_tab_)) /
+                             2.0;
+    perf_test::PrintResult("getStats", "_promise", "invocation_time",
+                           invocation_time, "milliseconds", false);
 
     EndCall();
   }
@@ -312,7 +292,7 @@ IN_PROC_BROWSER_TEST_F(
   RunsAudioAndVideoCallCollectingMetricsWithVideoCodec("VP9");
 }
 
-// TODO(crbug.com/1241344): test fails on some mac bots.
+// TODO(crbug.com/40194627): test fails on some mac bots.
 #if BUILDFLAG(IS_MAC)
 #define MAYBE_MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_VP9Profile2 \
   DISABLED_MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_VP9Profile2
@@ -330,16 +310,24 @@ IN_PROC_BROWSER_TEST_F(
       WebRtcTestBase::kVP9Profile2Specifier, "VP9p2");
 }
 
-#if BUILDFLAG(RTC_USE_H264)
+#if BUILDFLAG(ENABLE_OPENH264)
+
+// TODO(crbug.com/359253692): test fails on some mac bots.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_H264 \
+  DISABLED_MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_H264
+#else
+#define MAYBE_MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_H264 \
+  MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_H264
+#endif
 
 IN_PROC_BROWSER_TEST_F(
     WebRtcStatsPerfBrowserTest,
-    MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_H264) {
+    MAYBE_MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_H264) {
   base::ScopedAllowBlockingForTesting allow_blocking;
-  // Only run test if run-time feature corresponding to |rtc_use_h264| is on.
-  if (!base::FeatureList::IsEnabled(
-          blink::features::kWebRtcH264WithOpenH264FFmpeg)) {
-    LOG(WARNING) << "Run-time feature WebRTC-H264WithOpenH264FFmpeg disabled. "
+  // Only run test if run-time feature corresponding to OpenH264 is on.
+  if (!base::FeatureList::IsEnabled(media::kOpenH264SoftwareEncoder)) {
+    LOG(WARNING) << "Run-time feature OpenH264SoftwareEncoder disabled. "
                     "Skipping WebRtcPerfBrowserTest."
                     "MANUAL_RunsAudioAndVideoCallCollectingMetrics_VideoCodec_"
                     "H264 (test "
@@ -350,22 +338,13 @@ IN_PROC_BROWSER_TEST_F(
       "H264", true /* prefer_hw_video_codec */);
 }
 
-#endif  // BUILDFLAG(RTC_USE_H264)
+#endif  // BUILDFLAG(ENABLE_OPENH264)
 
 IN_PROC_BROWSER_TEST_F(
     WebRtcStatsPerfBrowserTest,
     MANUAL_RunsAudioAndVideoCallMeasuringGetStatsPerformance_Promise) {
   base::ScopedAllowBlockingForTesting allow_blocking;
-  RunsAudioAndVideoCallMeasuringGetStatsPerformance(
-      GetStatsVariation::PROMISE_BASED);
-}
-
-IN_PROC_BROWSER_TEST_F(
-    WebRtcStatsPerfBrowserTest,
-    MANUAL_RunsAudioAndVideoCallMeasuringGetStatsPerformance_Callback) {
-  base::ScopedAllowBlockingForTesting allow_blocking;
-  RunsAudioAndVideoCallMeasuringGetStatsPerformance(
-      GetStatsVariation::CALLBACK_BASED);
+  RunsAudioAndVideoCallMeasuringGetStatsPerformance();
 }
 
 }  // namespace

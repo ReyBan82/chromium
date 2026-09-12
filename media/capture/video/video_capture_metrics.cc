@@ -9,7 +9,6 @@
 #include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "ui/gfx/geometry/size.h"
 
 namespace {
@@ -140,7 +139,7 @@ VideoResolutionDesignation ResolutionNameFromSize(gfx::Size frame_size) {
     frame_size.set_width(frame_size.height());
     frame_size.set_width(tmp);
   }
-  auto* it = kResolutions.find(frame_size);
+  auto it = kResolutions.find(frame_size);
   return it != kResolutions.end() ? it->second
                                   : VideoResolutionDesignation::kUnknown;
 }
@@ -165,7 +164,8 @@ void LogCaptureDeviceMetrics(
       if (inserted) {
         base::UmaHistogramEnumeration(
             "Media.VideoCapture.Device.SupportedPixelFormat", pixel_format,
-            media::VideoPixelFormat::PIXEL_FORMAT_MAX);
+            static_cast<media::VideoPixelFormat>(
+                media::VideoPixelFormat::PIXEL_FORMAT_MAX + 1));
       }
       if (!resolutions.contains(format.frame_size)) {
         resolutions.insert(format.frame_size);
@@ -175,6 +175,14 @@ void LogCaptureDeviceMetrics(
       }
     }
   }
+}
+
+void LogCaptureCurrentDevicePixelFormat(
+    const media::VideoPixelFormat pixel_format) {
+  base::UmaHistogramEnumeration("Media.VideoCapture.Device.Opened.PixelFormat",
+                                pixel_format,
+                                static_cast<media::VideoPixelFormat>(
+                                    media::VideoPixelFormat::PIXEL_FORMAT_MAX + 1));
 }
 
 }  // namespace media

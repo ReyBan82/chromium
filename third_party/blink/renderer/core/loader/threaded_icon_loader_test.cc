@@ -4,14 +4,14 @@
 
 #include "third_party/blink/renderer/core/loader/threaded_icon_loader.h"
 
+#include <optional>
+
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
-#include "third_party/blink/renderer/platform/testing/histogram_tester.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/url_loader_mock_factory.h"
@@ -52,7 +52,7 @@ class ThreadedIconLoaderTest : public PageTestBase {
 
   std::pair<SkBitmap, double> LoadIcon(
       const KURL& url,
-      absl::optional<gfx::Size> resize_dimensions = absl::nullopt) {
+      std::optional<gfx::Size> resize_dimensions = std::nullopt) {
     auto* icon_loader = MakeGarbageCollected<ThreadedIconLoader>();
 
     ResourceRequest resource_request(url);
@@ -65,9 +65,9 @@ class ThreadedIconLoaderTest : public PageTestBase {
     icon_loader->Start(
         GetDocument().GetExecutionContext(), resource_request,
         resize_dimensions,
-        WTF::BindOnce(&ThreadedIconLoaderTest::DidGetIcon,
-                      WTF::Unretained(this), run_loop.QuitClosure(),
-                      WTF::Unretained(&icon), WTF::Unretained(&resize_scale)));
+        blink::BindOnce(&ThreadedIconLoaderTest::DidGetIcon, Unretained(this),
+                        run_loop.QuitClosure(), Unretained(&icon),
+                        Unretained(&resize_scale)));
     URLLoaderMockFactory::GetSingletonInstance()->ServeAsynchronousRequests();
     run_loop.Run();
 

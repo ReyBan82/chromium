@@ -4,7 +4,6 @@
 
 #include "ash/system/unified/feature_tiles_container_view.h"
 
-#include "ash/constants/ash_features.h"
 #include "ash/constants/quick_settings_catalogs.h"
 #include "ash/public/cpp/pagination/pagination_model.h"
 #include "ash/shell.h"
@@ -16,9 +15,10 @@
 #include "ash/system/unified/unified_system_tray_bubble.h"
 #include "ash/system/unified/unified_system_tray_controller.h"
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/test/scoped_feature_list.h"
 #include "components/vector_icons/vector_icons.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/events/test/event_generator.h"
 #include "ui/views/test/views_test_utils.h"
 
@@ -33,10 +33,6 @@ class MockFeaturePodController : public FeaturePodControllerBase {
   MockFeaturePodController& operator=(const MockFeaturePodController&) = delete;
   ~MockFeaturePodController() override = default;
 
-  FeaturePodButton* CreateButton() override {
-    return new FeaturePodButton(/*controller=*/this);
-  }
-
   std::unique_ptr<FeatureTile> CreateTile(bool compact = false) override {
     auto tile = std::make_unique<FeatureTile>(
         base::BindRepeating(&FeaturePodControllerBase::OnIconPressed,
@@ -44,7 +40,9 @@ class MockFeaturePodController : public FeaturePodControllerBase {
         /*togglable=*/true,
         compact ? FeatureTile::TileType::kCompact
                 : FeatureTile::TileType::kPrimary);
-    tile->SetVectorIcon(vector_icons::kDogfoodIcon);
+    tile->SetVectorIcon(::features::IsRoundedIconsEnabled()
+                            ? vector_icons::kPetsIcon
+                            : vector_icons::kDogfoodOldIcon);
     return tile;
   }
 
@@ -66,10 +64,7 @@ constexpr int kMaxPrimaryTilesPerRow = 2;
 class FeatureTilesContainerViewTest : public AshTestBase,
                                       public views::ViewObserver {
  public:
-  FeatureTilesContainerViewTest() {
-    feature_list_.InitAndEnableFeature(features::kQsRevamp);
-  }
-
+  FeatureTilesContainerViewTest() = default;
   FeatureTilesContainerViewTest(const FeatureTilesContainerViewTest&) = delete;
   FeatureTilesContainerViewTest& operator=(
       const FeatureTilesContainerViewTest&) = delete;
@@ -93,6 +88,7 @@ class FeatureTilesContainerViewTest : public AshTestBase,
 
   void TearDown() override {
     container_->RemoveObserver(this);
+    container_ = nullptr;
     widget_.reset();
     tray_controller_.reset();
     tray_model_.reset();
@@ -126,9 +122,19 @@ class FeatureTilesContainerViewTest : public AshTestBase,
     return container()->CalculateRowsFromHeight(height);
   }
 
+  void AdjustRowsForMediaViewVisibility(int height) {
+    container()->AdjustRowsForMediaViewVisibility(true, height);
+  }
+
   int GetRowCount() { return container()->row_count(); }
 
   int GetPageCount() { return container()->page_count(); }
+
+  int GetVisibleCount() { return container()->GetVisibleFeatureTileCount(); }
+
+  std::vector<raw_ptr<views::View, VectorExperimental>> pages() {
+    return container()->children();
+  }
 
   // Fills the container with a number of `pages` given the max amount of
   // displayable primary tiles per page.
@@ -149,11 +155,10 @@ class FeatureTilesContainerViewTest : public AshTestBase,
   }
 
  private:
-  base::test::ScopedFeatureList feature_list_;
   std::unique_ptr<views::Widget> widget_;
   std::unique_ptr<UnifiedSystemTrayController> tray_controller_;
   scoped_refptr<UnifiedSystemTrayModel> tray_model_;
-  FeatureTilesContainerView* container_;
+  raw_ptr<FeatureTilesContainerView> container_;
 };
 
 // Tests `CalculateRowsFromHeight()` which returns the number of max displayable
@@ -172,6 +177,23 @@ TEST_F(FeatureTilesContainerViewTest, DisplayableRows) {
   EXPECT_EQ(kFeatureTileMinRows, CalculateRowsFromHeight(0));
 }
 
+TEST_F(FeatureTilesContainerViewTest,
+       DisplayableRowsIsLessWhenMediaViewIsShowing) {
+  int row_height = kFeatureTileHeight;
+  // Set height to equivalent of max+1 rows.
+  const int max_height = (kFeatureTileMaxRows + 1) * row_height;
+
+  // Expect default to cap at `kFeatureTileMaxRows`.
+  EXPECT_EQ(kFeatureTileMaxRows, CalculateRowsFromHeight(max_height));
+
+  AdjustRowsForMediaViewVisibility(max_height);
+
+  // Expect height to be capped at `kFeatureTileMaxRowsWhenMediaViewIsShowing`
+  // when media view is showing.
+  EXPECT_EQ(kFeatureTileMaxRowsWhenMediaViewIsShowing,
+            CalculateRowsFromHeight(max_height));
+}
+
 // Tests that rows are dynamically added by adding `FeatureTile` elements to the
 // container.
 TEST_F(FeatureTilesContainerViewTest, FeatureTileRows) {
@@ -182,9 +204,10 @@ TEST_F(FeatureTilesContainerViewTest, FeatureTileRows) {
   two_primary_tiles.push_back(mock_controller->CreateTile());
   two_primary_tiles.push_back(mock_controller->CreateTile());
   container()->AddTiles(std::move(two_primary_tiles));
-  EXPECT_EQ(GetRowCount(), 1);
+  EXPECT_EQ(1, GetRowCount());
+  EXPECT_EQ(2, GetVisibleCount());
 
-  // Expect one other row by adding a primary and two compact tiles.
+  // Add one primary, and two compact tiles. This should create a second row.
   std::vector<std::unique_ptr<FeatureTile>> one_primary_two_compact_tiles;
   one_primary_two_compact_tiles.push_back(mock_controller->CreateTile());
   one_primary_two_compact_tiles.push_back(
@@ -192,13 +215,15 @@ TEST_F(FeatureTilesContainerViewTest, FeatureTileRows) {
   one_primary_two_compact_tiles.push_back(
       mock_controller->CreateTile(/*compact=*/true));
   container()->AddTiles(std::move(one_primary_two_compact_tiles));
-  EXPECT_EQ(GetRowCount(), 2);
+  EXPECT_EQ(2, GetRowCount());
+  EXPECT_EQ(5, GetVisibleCount());
 
-  // Expect one other row by adding a single primary tile.
+  // Add one primary tile, this should result in a third row.
   std::vector<std::unique_ptr<FeatureTile>> one_primary_tile;
   one_primary_tile.push_back(mock_controller->CreateTile());
   container()->AddTiles(std::move(one_primary_tile));
-  EXPECT_EQ(GetRowCount(), 3);
+  EXPECT_EQ(3, GetRowCount());
+  EXPECT_EQ(6, GetVisibleCount());
 }
 
 TEST_F(FeatureTilesContainerViewTest, ChangeTileVisibility) {
@@ -220,15 +245,18 @@ TEST_F(FeatureTilesContainerViewTest, ChangeTileVisibility) {
   AddTiles(std::move(tiles));
 
   // Only one row is created because the first tile is not visible.
-  EXPECT_EQ(GetRowCount(), 1);
+  EXPECT_EQ(1, GetRowCount());
+  EXPECT_EQ(2, GetVisibleCount());
 
   // Making the tile visible causes a second row to be created.
   tile1_ptr->SetVisible(true);
-  EXPECT_EQ(GetRowCount(), 2);
+  EXPECT_EQ(2, GetRowCount());
+  EXPECT_EQ(3, GetVisibleCount());
 
   // Making the tile invisible causes the second row to be removed.
   tile1_ptr->SetVisible(false);
-  EXPECT_EQ(GetRowCount(), 1);
+  EXPECT_EQ(1, GetRowCount());
+  EXPECT_EQ(2, GetVisibleCount());
 }
 
 TEST_F(FeatureTilesContainerViewTest, PageCountUpdated) {
@@ -252,16 +280,19 @@ TEST_F(FeatureTilesContainerViewTest, PageCountUpdated) {
   // Since a row fits two primary tiles, expect two pages for five primary
   // tiles.
   AddTiles(std::move(tiles));
-  EXPECT_EQ(GetPageCount(), 2);
+  EXPECT_EQ(2, GetPageCount());
+  EXPECT_EQ(5, GetVisibleCount());
 
   // Expect change in page count after updating visibility of a tile.
   tile1_ptr->SetVisible(false);
-  EXPECT_EQ(GetPageCount(), 1);
+  EXPECT_EQ(1, GetPageCount());
+  EXPECT_EQ(4, GetVisibleCount());
 
   // Expect change in page count after updating max displayable rows by updating
   // the available height.
   SetRowsFromHeight(kFeatureTileHeight);
-  EXPECT_EQ(GetPageCount(), 2);
+  EXPECT_EQ(2, GetPageCount());
+  EXPECT_EQ(4, GetVisibleCount());
 }
 
 // TODO(b/263185068): Use EventGenerator.
@@ -272,19 +303,19 @@ TEST_F(FeatureTilesContainerViewTest, PaginationGesture) {
   gfx::Point container_origin = container()->GetBoundsInScreen().origin();
   ui::GestureEvent swipe_left_begin(
       container_origin.x(), container_origin.y(), 0, base::TimeTicks(),
-      ui::GestureEventDetails(ui::ET_GESTURE_SCROLL_BEGIN, -1, 0));
+      ui::GestureEventDetails(ui::EventType::kGestureScrollBegin, -1, 0));
   ui::GestureEvent swipe_left_update(
       container_origin.x(), container_origin.y(), 0, base::TimeTicks(),
-      ui::GestureEventDetails(ui::ET_GESTURE_SCROLL_UPDATE, -1000, 0));
+      ui::GestureEventDetails(ui::EventType::kGestureScrollUpdate, -1000, 0));
   ui::GestureEvent swipe_right_begin(
       container_origin.x(), container_origin.y(), 0, base::TimeTicks(),
-      ui::GestureEventDetails(ui::ET_GESTURE_SCROLL_BEGIN, 1, 0));
+      ui::GestureEventDetails(ui::EventType::kGestureScrollBegin, 1, 0));
   ui::GestureEvent swipe_right_update(
       container_origin.x(), container_origin.y(), 0, base::TimeTicks(),
-      ui::GestureEventDetails(ui::ET_GESTURE_SCROLL_UPDATE, 1000, 0));
-  ui::GestureEvent swipe_end(container_origin.x(), container_origin.y(), 0,
-                             base::TimeTicks(),
-                             ui::GestureEventDetails(ui::ET_GESTURE_END));
+      ui::GestureEventDetails(ui::EventType::kGestureScrollUpdate, 1000, 0));
+  ui::GestureEvent swipe_end(
+      container_origin.x(), container_origin.y(), 0, base::TimeTicks(),
+      ui::GestureEventDetails(ui::EventType::kGestureEnd));
 
   int previous_page = pagination_model()->selected_page();
 
@@ -337,17 +368,17 @@ TEST_F(FeatureTilesContainerViewTest, PaginationScroll) {
 
   gfx::Point container_origin = container()->GetBoundsInScreen().origin();
 
-  ui::ScrollEvent fling_up_start(ui::ET_SCROLL_FLING_START, container_origin,
-                                 base::TimeTicks(), 0, 0, 100, 0, 10,
-                                 kNumberOfFingers);
+  ui::ScrollEvent fling_up_start(ui::EventType::kScrollFlingStart,
+                                 container_origin, base::TimeTicks(), 0, 0, 100,
+                                 0, 10, kNumberOfFingers);
 
-  ui::ScrollEvent fling_down_start(ui::ET_SCROLL_FLING_START, container_origin,
-                                   base::TimeTicks(), 0, 0, -100, 0, 10,
-                                   kNumberOfFingers);
+  ui::ScrollEvent fling_down_start(ui::EventType::kScrollFlingStart,
+                                   container_origin, base::TimeTicks(), 0, 0,
+                                   -100, 0, 10, kNumberOfFingers);
 
-  ui::ScrollEvent fling_cancel(ui::ET_SCROLL_FLING_CANCEL, container_origin,
-                               base::TimeTicks(), 0, 0, 0, 0, 0,
-                               kNumberOfFingers);
+  ui::ScrollEvent fling_cancel(ui::EventType::kScrollFlingCancel,
+                               container_origin, base::TimeTicks(), 0, 0, 0, 0,
+                               0, kNumberOfFingers);
 
   int previous_page = pagination_model()->selected_page();
 
@@ -432,6 +463,41 @@ TEST_F(FeatureTilesContainerViewTest, SwitchPageWithFocus) {
   // Pressing shift tab returns to the previous page.
   PressShiftTab();
   EXPECT_EQ(0, pagination_model()->selected_page());
+}
+
+TEST_F(FeatureTilesContainerViewTest, PaginationTransition) {
+  FillContainerWithPrimaryTiles(/*pages=*/3);
+  views::test::RunScheduledLayout(container());
+
+  gfx::Rect initial_bounds = pages()[0]->bounds();
+  gfx::Rect current_bounds;
+  gfx::Rect previous_bounds = initial_bounds;
+
+  // Page bounds should slide to the left during a transition to the next page.
+  PaginationModel::Transition transition(
+      pagination_model()->selected_page() + 1, 0);
+
+  for (double i = 0.1; i <= 1.0; i += 0.1) {
+    transition.progress = i;
+    pagination_model()->SetTransition(transition);
+
+    current_bounds = pages()[0]->bounds();
+
+    EXPECT_LT(current_bounds.x(), previous_bounds.x());
+    EXPECT_EQ(current_bounds.y(), previous_bounds.y());
+
+    previous_bounds = current_bounds;
+  }
+
+  // Page position after the transition ends should be a page offset to the
+  // left.
+  int page_offset = kWideTrayMenuWidth;
+  gfx::Rect final_bounds =
+      gfx::Rect(initial_bounds.x() - page_offset, initial_bounds.y(),
+                initial_bounds.width(), initial_bounds.height());
+  pagination_model()->SelectPage(1, false);
+  views::test::RunScheduledLayout(container());
+  EXPECT_EQ(final_bounds, pages()[0]->bounds());
 }
 
 }  // namespace ash

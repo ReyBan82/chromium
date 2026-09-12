@@ -36,6 +36,7 @@
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/css_property_names.h"
 #include "third_party/blink/renderer/core/css_value_keywords.h"
+#include "third_party/blink/renderer/core/dom/qualified_name.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
@@ -47,7 +48,6 @@ namespace blink {
 
 class CSSStyleDeclaration;
 class CSSComputedStyleDeclaration;
-class ContainerNode;
 class Document;
 class Element;
 class ExecutionContext;
@@ -79,14 +79,16 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
   static constexpr float kNoFontDelta = 0.0f;
 
   EditingStyle() = default;
-  EditingStyle(ContainerNode*,
-               PropertiesToInclude = kOnlyEditingInheritableProperties);
-  EditingStyle(const Position&,
-               PropertiesToInclude = kOnlyEditingInheritableProperties);
+  explicit EditingStyle(
+      Element*,
+      PropertiesToInclude = kOnlyEditingInheritableProperties);
+  explicit EditingStyle(
+      const Position&,
+      PropertiesToInclude = kOnlyEditingInheritableProperties);
   explicit EditingStyle(const CSSPropertyValueSet*);
   EditingStyle(CSSPropertyID, const String& value, SecureContextMode);
 
-  MutableCSSPropertyValueSet* Style() { return mutable_style_.Get(); }
+  MutableCSSPropertyValueSet* Style() const { return mutable_style_.Get(); }
   bool GetTextDirection(mojo_base::mojom::blink::TextDirection&) const;
   bool IsEmpty() const;
   void OverrideWithStyle(const CSSPropertyValueSet*);
@@ -130,7 +132,7 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
       ShouldExtractMatchingStyle) const;
   bool StyleIsPresentInComputedStyleOfNode(Node*) const;
 
-  static bool ElementIsStyledSpanOrHTMLEquivalent(const HTMLElement*);
+  static bool ElementIsStyledSpanOrHtmlEquivalent(const HTMLElement*);
 
   void PrepareToApplyAt(
       const Position&,
@@ -145,7 +147,8 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
                                             PropertiesToInclude);
   void MergeStyleFromRules(Element*);
   void MergeStyleFromRulesForSerialization(Element*);
-  void RemoveStyleFromRulesAndContext(Element*, ContainerNode* context);
+  void RemoveStyleFromContext(Element*, Element* context);
+  void RemoveStyleFromRulesAndContext(Element*, Element* context);
   void RemovePropertiesInElementDefaultStyle(Element*);
   void ForceInline();
   int LegacyFontSize(Document*) const;
@@ -159,14 +162,37 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
                    bool important,
                    SecureContextMode);
 
+  // Records the original HTML equivalent tag that produced a CSS
+  // property/value. For example, recording that font-weight:bold came from
+  // <strong> rather than <b>, or vertical-align:sub came from <sub>, so the tag
+  // can be preserved when re-applying the style.
+  void RecordOriginalHtmlEquivalentTag(CSSPropertyID property,
+                                       CSSValueID value_id,
+                                       const QualifiedName& tag);
+  const QualifiedName* OriginalHtmlEquivalentTag(CSSPropertyID property,
+                                                 CSSValueID value_id) const;
+
   void Trace(Visitor*) const;
   static EditingTriState SelectionHasStyle(const LocalFrame&,
                                            CSSPropertyID,
                                            const String& value);
 
+  // Returns the read-only cascaded style produced by merging all rules from
+  // the given origins (see StyleResolver::CSSRuleFilter) that matched
+  // `element`. Note this does not include the element's inline style
+  // attribute, only its matched stylesheet rules.
+  static const CSSPropertyValueSet* MatchedRulesStyleForElement(
+      Element* element,
+      wtf_size_t rules_to_include);
+
  private:
   void Init(Node*, PropertiesToInclude);
   void RemoveInheritedColorsIfNeeded(const ComputedStyle*);
+  // There are some scenarios, like when copying rich text while in ForcedColors
+  // mode where we don't want to keep the ForcedColors styling, so that if it is
+  // pasted and sent to someone with no ForcedColors applied it does not affect
+  // their styling.
+  void RemoveForcedColorsIfNeeded(const ComputedStyle* computed_style);
   void ReplaceFontSizeByKeywordIfPossible(const ComputedStyle*,
                                           SecureContextMode,
                                           CSSComputedStyleDeclaration*);
@@ -180,6 +206,7 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
       EditingStyle* extracted_style,
       Vector<CSSPropertyID>* conflicting_properties) const;
   void MergeStyle(const CSSPropertyValueSet*, CSSPropertyOverrideMode);
+  void ComputeValues(Element*);
 
   Member<MutableCSSPropertyValueSet> mutable_style_;
   // This |EditingStyle| is constructed from |node_|. |node_| is null when
@@ -190,6 +217,16 @@ class CORE_EXPORT EditingStyle final : public GarbageCollected<EditingStyle> {
   float font_size_delta_ = kNoFontDelta;
   bool is_vertical_align_ = false;
 
+  // Maps CSS property/value pairs to their original HTML equivalent tags.
+  // Used to preserve tags (e.g. <strong> vs <b>) when re-applying styles after
+  // deletion.
+  struct HtmlEquivalentTagMapping {
+    CSSPropertyID property;
+    CSSValueID value_id;
+    QualifiedName tag;
+  };
+  Vector<HtmlEquivalentTagMapping> original_html_equivalent_tags_;
+
   friend class HTMLElementEquivalent;
   friend class HTMLAttributeEquivalent;
 };
@@ -198,13 +235,7 @@ class StyleChange {
   DISALLOW_NEW();
 
  public:
-  StyleChange()
-      : apply_bold_(false),
-        apply_italic_(false),
-        apply_underline_(false),
-        apply_line_through_(false),
-        apply_subscript_(false),
-        apply_superscript_(false) {}
+  StyleChange() = default;
 
   StyleChange(EditingStyle*, const Position&);
 
@@ -223,7 +254,14 @@ class StyleChange {
   String FontFace() { return apply_font_face_; }
   String FontSize() { return apply_font_size_; }
 
-  bool operator==(const StyleChange& other) {
+  const QualifiedName& BoldTag() const { return bold_tag_; }
+  const QualifiedName& ItalicTag() const { return italic_tag_; }
+  const QualifiedName& UnderlineTag() const { return underline_tag_; }
+  const QualifiedName& LineThroughTag() const { return line_through_tag_; }
+  const QualifiedName& SubscriptTag() const { return subscript_tag_; }
+  const QualifiedName& SuperscriptTag() const { return superscript_tag_; }
+
+  bool operator==(const StyleChange& other) const {
     return css_style_ == other.css_style_ && apply_bold_ == other.apply_bold_ &&
            apply_italic_ == other.apply_italic_ &&
            apply_underline_ == other.apply_underline_ &&
@@ -232,25 +270,43 @@ class StyleChange {
            apply_superscript_ == other.apply_superscript_ &&
            apply_font_color_ == other.apply_font_color_ &&
            apply_font_face_ == other.apply_font_face_ &&
-           apply_font_size_ == other.apply_font_size_;
+           apply_font_size_ == other.apply_font_size_ &&
+           bold_tag_ == other.bold_tag_ && italic_tag_ == other.italic_tag_ &&
+           underline_tag_ == other.underline_tag_ &&
+           line_through_tag_ == other.line_through_tag_ &&
+           subscript_tag_ == other.subscript_tag_ &&
+           superscript_tag_ == other.superscript_tag_;
   }
-  bool operator!=(const StyleChange& other) { return !(*this == other); }
 
  private:
   void ExtractTextStyles(Document*,
                          MutableCSSPropertyValueSet*,
                          bool is_monospace_font);
+  void MaybeApplyOriginalSubOrSupTag(const EditingStyle& style,
+                                     MutableCSSPropertyValueSet* mutable_style);
+  void MaybeApplyOriginalHtmlEquivalentTags(
+      const EditingStyle& style,
+      MutableCSSPropertyValueSet* mutable_style);
 
   String css_style_;
-  bool apply_bold_;
-  bool apply_italic_;
-  bool apply_underline_;
-  bool apply_line_through_;
-  bool apply_subscript_;
-  bool apply_superscript_;
+  bool apply_bold_ = false;
+  bool apply_italic_ = false;
+  bool apply_underline_ = false;
+  bool apply_line_through_ = false;
+  bool apply_subscript_ = false;
+  bool apply_superscript_ = false;
   String apply_font_color_;
   String apply_font_face_;
   String apply_font_size_;
+
+  // Original HTML equivalent tag names to use instead of hardcoded tags.
+  // Defaults are <b>, <i>, <u>, <strike>, <sub>, and <sup>.
+  QualifiedName bold_tag_ = g_null_name;
+  QualifiedName italic_tag_ = g_null_name;
+  QualifiedName underline_tag_ = g_null_name;
+  QualifiedName line_through_tag_ = g_null_name;
+  QualifiedName subscript_tag_ = g_null_name;
+  QualifiedName superscript_tag_ = g_null_name;
 };
 
 // FIXME: Remove these functions or make them non-global to discourage using

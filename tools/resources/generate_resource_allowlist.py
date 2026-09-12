@@ -1,12 +1,12 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-__doc__ = """generate_resource_allowlist.py [-o OUTPUT] INPUTS...
+__doc__ = """generate_resource_allowlist.py [-o OUTPUT] [--depfile DEPFILE] INPUTS...
 
 INPUTS are paths to unstripped binaries or PDBs containing references to
-resources in their debug info.
+resources in their debug info, or linker input files.
 
 This script generates a resource allowlist by reading debug info from
 INPUTS and writes it to OUTPUT.
@@ -21,11 +21,19 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), '..', '..', 'build'))
+import action_helpers
 import ar
 
-llvm_bindir = os.path.join(os.path.dirname(sys.argv[0]), '..', '..',
-                           'third_party', 'llvm-build', 'Release+Asserts',
-                           'bin')
+llvm_bindir = os.path.join(
+  os.path.dirname(__file__),
+  '..',
+  '..',
+  'third_party',
+  'llvm-build',
+  'Release+Asserts',
+  'bin',
+)
 
 
 def ExtractAllowlistFromFile(path, resource_ids):
@@ -39,7 +47,7 @@ def ExtractAllowlistFromFile(path, resource_ids):
     start_idx = data.find(prefix, start_idx)
     if start_idx != -1:
       end_idx = data.find(b'E', start_idx)
-      resource_ids.add(int(data[start_idx + len(prefix):end_idx]))
+      resource_ids.add(int(data[start_idx + len(prefix) : end_idx]))
       start_idx = end_idx
 
 
@@ -50,7 +58,7 @@ def GetResourceAllowlistELF(path):
   # use_debug_fission=true. Reading the raw file is faster anyways.
   resource_ids = set()
   ExtractAllowlistFromFile(path, resource_ids)
-  return resource_ids
+  return resource_ids, []
 
 
 def GetResourceAllowlistPDB(path):
@@ -59,8 +67,9 @@ def GetResourceAllowlistPDB(path):
   # instantiations of AllowlistedResource. Any such instantiations are demangled
   # to extract the resource identifier.
   pdbutil = subprocess.Popen(
-      [os.path.join(llvm_bindir, 'llvm-pdbutil'), 'dump', '-publics', path],
-      stdout=subprocess.PIPE)
+    [os.path.join(llvm_bindir, 'llvm-pdbutil'), 'dump', '-publics', path],
+    stdout=subprocess.PIPE,
+  )
   names = ''
   for line in pdbutil.stdout:
     line = line.decode('utf8')
@@ -68,7 +77,7 @@ def GetResourceAllowlistPDB(path):
     # "733352 | S_PUB32 [size = 56] `??$AllowlistedResource@$0BFGM@@ui@@YAXXZ`".
     if '`' not in line:
       continue
-    sym_name = line[line.find('`') + 1:line.rfind('`')]
+    sym_name = line[line.find('`') + 1 : line.rfind('`')]
     # Under certain conditions such as the GN arg `use_clang_coverage = true` it
     # is possible for the compiler to emit additional symbols that do not match
     # the standard mangled-name format.
@@ -80,9 +89,11 @@ def GetResourceAllowlistPDB(path):
   if exit_code != 0:
     raise Exception('llvm-pdbutil exited with exit code %d' % exit_code)
 
-  undname = subprocess.Popen([os.path.join(llvm_bindir, 'llvm-undname')],
-                             stdin=subprocess.PIPE,
-                             stdout=subprocess.PIPE)
+  undname = subprocess.Popen(
+    [os.path.join(llvm_bindir, 'llvm-undname')],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+  )
   stdout, _ = undname.communicate(names.encode('utf8'))
   resource_ids = set()
   for line in stdout.split(b'\n'):
@@ -94,33 +105,34 @@ def GetResourceAllowlistPDB(path):
     if pos == -1:
       continue
     try:
-      resource_ids.add(int(line[pos + len(prefix):line.rfind('>')]))
+      resource_ids.add(int(line[pos + len(prefix) : line.rfind('>')]))
     except ValueError:
       continue
   exit_code = undname.wait()
   if exit_code != 0:
     raise Exception('llvm-undname exited with exit code %d' % exit_code)
-  return resource_ids
+  return resource_ids, []
 
 
 def GetResourceAllowlistFileList(file_list_path):
   # Creates a list of resources given the list of linker input files.
   # Simply grep's them for AllowlistedResource<...>.
-  with open(file_list_path) as f:
+  with open(file_list_path, encoding='utf-8') as f:
     paths = f.read().splitlines()
 
-  paths = ar.ExpandThinArchives(paths)
+  expanded_paths = ar.ExpandThinArchives(paths)
 
   resource_ids = set()
-  for p in paths:
+  for p in expanded_paths:
     ExtractAllowlistFromFile(p, resource_ids)
-  return resource_ids
+  return resource_ids, set(paths) | set(expanded_paths)
 
 
 def WriteResourceAllowlist(args):
   resource_ids = set()
-  for input in args.inputs:
-    with open(input, 'rb') as f:
+  deps = set()
+  for input_path in args.inputs:
+    with open(input_path, 'rb') as f:
       magic = f.read(4)
       chunk = f.read(60)
     if magic == b'\x7fELF':
@@ -133,27 +145,45 @@ def WriteResourceAllowlist(args):
     else:
       raise Exception('unknown file format')
 
-    resource_ids.update(func(input))
+    cur_resource_ids, cur_deps = func(input_path)
+    resource_ids.update(cur_resource_ids)
+    deps.update(cur_deps)
 
   # The last time this broke, exactly two resources were still being found.
   if len(resource_ids) < 100:
-    raise Exception('Suspiciously few resources found. Likely an issue with '
-                    'the regular expression in this script. Found: ' +
-                    ','.join(sorted(resource_ids)))
-  for id in sorted(resource_ids):
-    args.output.write(str(id) + '\n')
+    raise Exception(
+      'Suspiciously few resources found. Likely an issue with '
+      'the regular expression in this script. Found: '
+      + ','.join(str(x) for x in sorted(resource_ids))
+    )
+
+  output_content = ''.join(
+    f'{resource_id}\n' for resource_id in sorted(resource_ids)
+  )
+  if args.output:
+    with action_helpers.atomic_output(
+      args.output, mode='w', encoding='utf-8'
+    ) as f:
+      f.write(output_content)
+  else:
+    sys.stdout.write(output_content)
+
+  if args.depfile:
+    action_helpers.write_depfile(args.depfile, args.output, deps)
 
 
 def main():
   parser = argparse.ArgumentParser(usage=__doc__)
   parser.add_argument('inputs', nargs='+', help='An unstripped binary or PDB.')
-  parser.add_argument('-o',
-                      dest='output',
-                      type=argparse.FileType('w'),
-                      default=sys.stdout,
-                      help='The resource list path to write (default stdout)')
+  parser.add_argument(
+    '-o', '--output', help='The resource list path to write (default stdout)'
+  )
+  action_helpers.add_depfile_arg(parser)
 
   args = parser.parse_args()
+  if args.depfile and not args.output:
+    parser.error('--depfile requires -o/--output')
+
   WriteResourceAllowlist(args)
 
 

@@ -7,7 +7,9 @@
 
 #include <memory>
 
+#include "base/scoped_observation.h"
 #include "base/time/time.h"
+#include "content/browser/preloading/prerender/prerender_host.h"
 #include "content/public/browser/commit_deferring_condition.h"
 #include "content/public/browser/web_contents_observer.h"
 
@@ -24,37 +26,46 @@ class NavigationRequest;
 // the main frame during prerender activation i.e., between the ongoing
 // navigation commit until the prerender activates.
 class PrerenderCommitDeferringCondition : public CommitDeferringCondition,
-                                          public WebContentsObserver {
+                                          public WebContentsObserver,
+                                          public PrerenderHost::Observer {
  public:
   ~PrerenderCommitDeferringCondition() override;
 
   static std::unique_ptr<CommitDeferringCondition> MaybeCreate(
       NavigationRequest& navigation_request,
       NavigationType navigation_type,
-      absl::optional<int> candidate_prerender_frame_tree_node_id);
+      std::optional<FrameTreeNodeId> candidate_prerender_frame_tree_node_id);
 
   Result WillCommitNavigation(base::OnceClosure resume) override;
+  const char* TraceEventName() const override;
 
  private:
-  PrerenderCommitDeferringCondition(NavigationRequest& navigation_request,
-                                    int candidate_prerender_frame_tree_node_id);
+  PrerenderCommitDeferringCondition(
+      NavigationRequest& navigation_request,
+      FrameTreeNodeId candidate_prerender_frame_tree_node_id);
 
   // WebContentsObserver
   // Tracks the ongoing navigation commit in prerender frame tree to resume the
   // activation.
   void DidFinishNavigation(NavigationHandle* handle) override;
 
+  // PrerenderHost::Observer
+  void OnHostDestroyed(PrerenderFinalStatus status) override;
+
   // The root frame tree node id of the prerendered page that this navigation
   // will attempt to activate. See comments on
   // `CommitDeferringConditionRunner::candidate_prerender_frame_tree_node_id_`
   // for details.
-  const int candidate_prerender_frame_tree_node_id_;
+  const FrameTreeNodeId candidate_prerender_frame_tree_node_id_;
 
   // The time PrerenderCommitDeferringCondition started deferring the
   // navigation.
   base::TimeTicks defer_start_time_;
 
   base::OnceClosure done_closure_;
+
+  base::ScopedObservation<PrerenderHost, PrerenderCommitDeferringCondition>
+      observation_{this};
 };
 
 }  // namespace content

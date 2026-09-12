@@ -4,7 +4,11 @@
 
 #include "third_party/blink/renderer/core/css/parser/css_at_rule_id.h"
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <algorithm>
+#include <iterator>
+#include <optional>
+#include <string_view>
+
 #include "third_party/blink/renderer/core/css/parser/css_parser_context.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
@@ -12,181 +16,162 @@
 
 namespace blink {
 
+namespace {
+
+// Metadata for at-rules. Sorted by name for binary search.
+struct AtRuleEntry {
+  const char* name;
+  CSSAtRuleID id;
+  WebFeature feature;
+};
+
+// clang-format off
+constexpr AtRuleEntry kAtRuleEntries[] = {
+    {"-webkit-keyframes", CSSAtRuleID::kCSSAtRuleWebkitKeyframes, WebFeature::kCSSAtRuleWebkitKeyframes},
+    {"annotation", CSSAtRuleID::kCSSAtRuleAnnotation, WebFeature::kCSSAtRuleAnnotation},
+    {"bottom-center", CSSAtRuleID::kCSSAtRuleBottomCenter, WebFeature::kCSSAtRulePageMargin},
+    {"bottom-left", CSSAtRuleID::kCSSAtRuleBottomLeft, WebFeature::kCSSAtRulePageMargin},
+    {"bottom-left-corner", CSSAtRuleID::kCSSAtRuleBottomLeftCorner, WebFeature::kCSSAtRulePageMargin},
+    {"bottom-right", CSSAtRuleID::kCSSAtRuleBottomRight, WebFeature::kCSSAtRulePageMargin},
+    {"bottom-right-corner", CSSAtRuleID::kCSSAtRuleBottomRightCorner, WebFeature::kCSSAtRulePageMargin},
+    {"character-variant", CSSAtRuleID::kCSSAtRuleCharacterVariant, WebFeature::kCSSAtRuleCharacterVariant},
+    {"charset", CSSAtRuleID::kCSSAtRuleCharset, WebFeature::kCSSAtRuleCharset},
+    {"container", CSSAtRuleID::kCSSAtRuleContainer, WebFeature::kCSSAtRuleContainer},
+    {"counter-style", CSSAtRuleID::kCSSAtRuleCounterStyle, WebFeature::kCSSAtRuleCounterStyle},
+    {"font-face", CSSAtRuleID::kCSSAtRuleFontFace, WebFeature::kCSSAtRuleFontFace},
+    {"font-feature-values", CSSAtRuleID::kCSSAtRuleFontFeatureValues, WebFeature::kCSSAtRuleFontFeatureValues},
+    {"font-palette-values", CSSAtRuleID::kCSSAtRuleFontPaletteValues, WebFeature::kCSSAtRuleFontPaletteValues},
+    {"import", CSSAtRuleID::kCSSAtRuleImport, WebFeature::kCSSAtRuleImport},
+    {"keyframes", CSSAtRuleID::kCSSAtRuleKeyframes, WebFeature::kCSSAtRuleKeyframes},
+    {"layer", CSSAtRuleID::kCSSAtRuleLayer, WebFeature::kCSSCascadeLayers},
+    {"left-bottom", CSSAtRuleID::kCSSAtRuleLeftBottom, WebFeature::kCSSAtRulePageMargin},
+    {"left-middle", CSSAtRuleID::kCSSAtRuleLeftMiddle, WebFeature::kCSSAtRulePageMargin},
+    {"left-top", CSSAtRuleID::kCSSAtRuleLeftTop, WebFeature::kCSSAtRulePageMargin},
+    {"media", CSSAtRuleID::kCSSAtRuleMedia, WebFeature::kCSSAtRuleMedia},
+    {"namespace", CSSAtRuleID::kCSSAtRuleNamespace, WebFeature::kCSSAtRuleNamespace},
+    {"ornaments", CSSAtRuleID::kCSSAtRuleOrnaments, WebFeature::kCSSAtRuleOrnaments},
+    {"page", CSSAtRuleID::kCSSAtRulePage, WebFeature::kCSSAtRulePage},
+    {"position-try", CSSAtRuleID::kCSSAtRulePositionTry, WebFeature::kCSSAnchorPositioning},
+    {"property", CSSAtRuleID::kCSSAtRuleProperty, WebFeature::kCSSAtRuleProperty},
+    {"right-bottom", CSSAtRuleID::kCSSAtRuleRightBottom, WebFeature::kCSSAtRulePageMargin},
+    {"right-middle", CSSAtRuleID::kCSSAtRuleRightMiddle, WebFeature::kCSSAtRulePageMargin},
+    {"right-top", CSSAtRuleID::kCSSAtRuleRightTop, WebFeature::kCSSAtRulePageMargin},
+    {"scope", CSSAtRuleID::kCSSAtRuleScope, WebFeature::kCSSAtRuleScope},
+    {"starting-style", CSSAtRuleID::kCSSAtRuleStartingStyle, WebFeature::kCSSAtRuleStartingStyle},
+    {"styleset", CSSAtRuleID::kCSSAtRuleStyleset, WebFeature::kCSSAtRuleStylistic},
+    {"stylistic", CSSAtRuleID::kCSSAtRuleStylistic, WebFeature::kCSSAtRuleStylistic},
+    {"supports", CSSAtRuleID::kCSSAtRuleSupports, WebFeature::kCSSAtRuleSupports},
+    {"swash", CSSAtRuleID::kCSSAtRuleSwash, WebFeature::kCSSAtRuleSwash},
+    {"top-center", CSSAtRuleID::kCSSAtRuleTopCenter, WebFeature::kCSSAtRulePageMargin},
+    {"top-left", CSSAtRuleID::kCSSAtRuleTopLeft, WebFeature::kCSSAtRulePageMargin},
+    {"top-left-corner", CSSAtRuleID::kCSSAtRuleTopLeftCorner, WebFeature::kCSSAtRulePageMargin},
+    {"top-right", CSSAtRuleID::kCSSAtRuleTopRight, WebFeature::kCSSAtRulePageMargin},
+    {"top-right-corner", CSSAtRuleID::kCSSAtRuleTopRightCorner, WebFeature::kCSSAtRulePageMargin},
+    {"view-transition", CSSAtRuleID::kCSSAtRuleViewTransition, WebFeature::kCSSAtRuleViewTransition},
+};
+// clang-format on
+
+// At-rules gated behind runtime flags.
+// Sorted by name for consistency with kAtRuleEntries.
+struct FlaggedAtRuleEntry {
+  const char* name;
+  CSSAtRuleID id;
+  WebFeature feature;
+  bool (*is_enabled)();
+};
+
+// clang-format off
+constexpr FlaggedAtRuleEntry kFlaggedAtRuleEntries[] = {
+    {"apply", CSSAtRuleID::kCSSAtRuleApplyMixin, WebFeature::kCSSMixins,
+     &RuntimeEnabledFeatures::CSSMixinsEnabled},
+    {"contents", CSSAtRuleID::kCSSAtRuleContents, WebFeature::kCSSMixins,
+     &RuntimeEnabledFeatures::CSSMixinsEnabled},
+    {"custom-media", CSSAtRuleID::kCSSAtRuleCustomMedia, WebFeature::kCSSCustomMedia,
+     &RuntimeEnabledFeatures::CSSCustomMediaEnabled},
+    {"function", CSSAtRuleID::kCSSAtRuleFunction, WebFeature::kCSSFunctions,
+     &RuntimeEnabledFeatures::CSSFunctionsEnabled},
+    {"location", CSSAtRuleID::kCSSAtRuleLocation, WebFeature::kCSSAtRuleRoute,
+     &RuntimeEnabledFeatures::RouteMatchingEnabled},
+    {"mixin", CSSAtRuleID::kCSSAtRuleMixin, WebFeature::kCSSMixins,
+     &RuntimeEnabledFeatures::CSSMixinsEnabled},
+    {"navigation", CSSAtRuleID::kCSSAtRuleNavigation, WebFeature::kCSSAtRuleRoute,
+     &RuntimeEnabledFeatures::RouteMatchingEnabled},
+    {"private", CSSAtRuleID::kCSSAtRulePrivate, WebFeature::kCSSAtPrivate,
+     &RuntimeEnabledFeatures::CSSPrivateEnabled},
+    {"result", CSSAtRuleID::kCSSAtRuleResult, WebFeature::kCSSMixins,
+     &RuntimeEnabledFeatures::CSSMixinsEnabled},
+};
+// clang-format on
+
+// Compile-time validation that tables are sorted for binary search.
+constexpr auto AtRuleNameProjection = [](const auto& entry) {
+  return std::string_view(entry.name);
+};
+
+static_assert(std::ranges::is_sorted(kAtRuleEntries, {}, AtRuleNameProjection),
+              "kAtRuleEntries must be sorted by name for binary search");
+static_assert(std::ranges::is_sorted(kFlaggedAtRuleEntries,
+                                     {},
+                                     AtRuleNameProjection),
+              "kFlaggedAtRuleEntries must be sorted by name");
+
+}  // namespace
+
 CSSAtRuleID CssAtRuleID(StringView name) {
-  if (EqualIgnoringASCIICase(name, "charset")) {
-    return CSSAtRuleID::kCSSAtRuleCharset;
+  // Binary search the main table.
+  const auto* it = std::lower_bound(
+      std::begin(kAtRuleEntries), std::end(kAtRuleEntries), name,
+      [](const AtRuleEntry& entry, const StringView& target) {
+        return CodeUnitCompareIgnoringAsciiCase(StringView(entry.name),
+                                                target) < 0;
+      });
+  if (it != std::end(kAtRuleEntries) &&
+      EqualIgnoringAsciiCase(name, it->name)) {
+    return it->id;
   }
-  if (EqualIgnoringASCIICase(name, "font-face")) {
-    return CSSAtRuleID::kCSSAtRuleFontFace;
-  }
-  if (EqualIgnoringASCIICase(name, "font-palette-values")) {
-    return CSSAtRuleID::kCSSAtRuleFontPaletteValues;
-  }
-  if (EqualIgnoringASCIICase(name, "font-feature-values")) {
-    if (RuntimeEnabledFeatures::FontVariantAlternatesEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleFontFeatureValues;
+  // Linear search the smaller flagged entries table.
+  for (const auto& entry : kFlaggedAtRuleEntries) {
+    if (entry.is_enabled() && EqualIgnoringAsciiCase(name, entry.name)) {
+      return entry.id;
     }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "stylistic")) {
-    if (RuntimeEnabledFeatures::FontVariantAlternatesEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleStylistic;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "styleset")) {
-    if (RuntimeEnabledFeatures::FontVariantAlternatesEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleStyleset;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "character-variant")) {
-    if (RuntimeEnabledFeatures::FontVariantAlternatesEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleCharacterVariant;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "swash")) {
-    if (RuntimeEnabledFeatures::FontVariantAlternatesEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleSwash;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "ornaments")) {
-    if (RuntimeEnabledFeatures::FontVariantAlternatesEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleOrnaments;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "annotation")) {
-    if (RuntimeEnabledFeatures::FontVariantAlternatesEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleAnnotation;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "import")) {
-    return CSSAtRuleID::kCSSAtRuleImport;
-  }
-  if (EqualIgnoringASCIICase(name, "keyframes")) {
-    return CSSAtRuleID::kCSSAtRuleKeyframes;
-  }
-  if (EqualIgnoringASCIICase(name, "layer")) {
-    return CSSAtRuleID::kCSSAtRuleLayer;
-  }
-  if (EqualIgnoringASCIICase(name, "media")) {
-    return CSSAtRuleID::kCSSAtRuleMedia;
-  }
-  if (EqualIgnoringASCIICase(name, "namespace")) {
-    return CSSAtRuleID::kCSSAtRuleNamespace;
-  }
-  if (EqualIgnoringASCIICase(name, "page")) {
-    return CSSAtRuleID::kCSSAtRulePage;
-  }
-  if (EqualIgnoringASCIICase(name, "position-fallback")) {
-    if (RuntimeEnabledFeatures::CSSAnchorPositioningEnabled()) {
-      return CSSAtRuleID::kCSSAtRulePositionFallback;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "property")) {
-    return CSSAtRuleID::kCSSAtRuleProperty;
-  }
-  if (EqualIgnoringASCIICase(name, "container")) {
-    return CSSAtRuleID::kCSSAtRuleContainer;
-  }
-  if (EqualIgnoringASCIICase(name, "counter-style")) {
-    return CSSAtRuleID::kCSSAtRuleCounterStyle;
-  }
-  if (EqualIgnoringASCIICase(name, "scroll-timeline")) {
-    if (RuntimeEnabledFeatures::CSSScrollTimelineEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleScrollTimeline;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "scope")) {
-    if (RuntimeEnabledFeatures::CSSScopeEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleScope;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "supports")) {
-    return CSSAtRuleID::kCSSAtRuleSupports;
-  }
-  if (EqualIgnoringASCIICase(name, "try")) {
-    if (RuntimeEnabledFeatures::CSSAnchorPositioningEnabled()) {
-      return CSSAtRuleID::kCSSAtRuleTry;
-    }
-    return CSSAtRuleID::kCSSAtRuleInvalid;
-  }
-  if (EqualIgnoringASCIICase(name, "-webkit-keyframes")) {
-    return CSSAtRuleID::kCSSAtRuleWebkitKeyframes;
   }
   return CSSAtRuleID::kCSSAtRuleInvalid;
 }
 
+StringView CssAtRuleIDToString(CSSAtRuleID id) {
+  for (const auto& entry : kAtRuleEntries) {
+    if (entry.id == id) {
+      return entry.name;
+    }
+  }
+  for (const auto& entry : kFlaggedAtRuleEntries) {
+    if (entry.id == id) {
+      return entry.name;
+    }
+  }
+  NOTREACHED();
+}
+
 namespace {
 
-absl::optional<WebFeature> AtRuleFeature(CSSAtRuleID rule_id) {
-  switch (rule_id) {
-    case CSSAtRuleID::kCSSAtRuleAnnotation:
-      return WebFeature::kCSSAtRuleAnnotation;
-    case CSSAtRuleID::kCSSAtRuleCharset:
-      return WebFeature::kCSSAtRuleCharset;
-    case CSSAtRuleID::kCSSAtRuleCharacterVariant:
-      return WebFeature::kCSSAtRuleCharacterVariant;
-    case CSSAtRuleID::kCSSAtRuleFontFace:
-      return WebFeature::kCSSAtRuleFontFace;
-    case CSSAtRuleID::kCSSAtRuleFontPaletteValues:
-      return WebFeature::kCSSAtRuleFontPaletteValues;
-    case CSSAtRuleID::kCSSAtRuleFontFeatureValues:
-      return WebFeature::kCSSAtRuleFontFeatureValues;
-    case CSSAtRuleID::kCSSAtRuleImport:
-      return WebFeature::kCSSAtRuleImport;
-    case CSSAtRuleID::kCSSAtRuleKeyframes:
-      return WebFeature::kCSSAtRuleKeyframes;
-    case CSSAtRuleID::kCSSAtRuleLayer:
-      return WebFeature::kCSSCascadeLayers;
-    case CSSAtRuleID::kCSSAtRuleMedia:
-      return WebFeature::kCSSAtRuleMedia;
-    case CSSAtRuleID::kCSSAtRuleNamespace:
-      return WebFeature::kCSSAtRuleNamespace;
-    case CSSAtRuleID::kCSSAtRulePage:
-      return WebFeature::kCSSAtRulePage;
-    case CSSAtRuleID::kCSSAtRuleProperty:
-      return WebFeature::kCSSAtRuleProperty;
-    case CSSAtRuleID::kCSSAtRuleContainer:
-      return WebFeature::kCSSAtRuleContainer;
-    case CSSAtRuleID::kCSSAtRuleCounterStyle:
-      return WebFeature::kCSSAtRuleCounterStyle;
-    case CSSAtRuleID::kCSSAtRuleOrnaments:
-      return WebFeature::kCSSAtRuleOrnaments;
-    case CSSAtRuleID::kCSSAtRuleScope:
-      return WebFeature::kCSSAtRuleScope;
-    case CSSAtRuleID::kCSSAtRuleStyleset:
-      return WebFeature::kCSSAtRuleStylistic;
-    case CSSAtRuleID::kCSSAtRuleStylistic:
-      return WebFeature::kCSSAtRuleStylistic;
-    case CSSAtRuleID::kCSSAtRuleSwash:
-      return WebFeature::kCSSAtRuleSwash;
-    case CSSAtRuleID::kCSSAtRuleScrollTimeline:
-      return WebFeature::kCSSAtRuleScrollTimeline;
-    case CSSAtRuleID::kCSSAtRuleSupports:
-      return WebFeature::kCSSAtRuleSupports;
-    case CSSAtRuleID::kCSSAtRulePositionFallback:
-    case CSSAtRuleID::kCSSAtRuleTry:
-      return WebFeature::kCSSAnchorPositioning;
-    case CSSAtRuleID::kCSSAtRuleWebkitKeyframes:
-      return WebFeature::kCSSAtRuleWebkitKeyframes;
-    case CSSAtRuleID::kCSSAtRuleInvalid:
-      NOTREACHED();
-      return absl::nullopt;
+std::optional<WebFeature> AtRuleFeature(CSSAtRuleID rule_id) {
+  for (const auto& entry : kAtRuleEntries) {
+    if (entry.id == rule_id) {
+      return entry.feature;
+    }
   }
+  for (const auto& entry : kFlaggedAtRuleEntries) {
+    if (entry.id == rule_id) {
+      return entry.feature;
+    }
+  }
+  NOTREACHED();
 }
 
 }  // namespace
 
 void CountAtRule(const CSSParserContext* context, CSSAtRuleID rule_id) {
-  if (absl::optional<WebFeature> feature = AtRuleFeature(rule_id)) {
+  if (std::optional<WebFeature> feature = AtRuleFeature(rule_id)) {
     context->Count(*feature);
   }
 }

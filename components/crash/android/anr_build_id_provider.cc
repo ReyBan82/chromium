@@ -2,18 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/crash/android/anr_build_id_provider.h"
+
 #include <string>
 
-#include "base/android/jni_android.h"
-#include "base/android/jni_string.h"
 #include "base/debug/elf_reader.h"
-#include "components/crash/android/anr_collector_jni_headers/AnrCollector_jni.h"
+#include "base/logging.h"
 
 extern char __executable_start;
 
-base::android::ScopedJavaLocalRef<jstring>
-JNI_AnrCollector_GetSharedLibraryBuildId(JNIEnv* env) {
+namespace crash_reporter {
+std::string GetElfBuildId() {
   base::debug::ElfBuildIdBuffer build_id;
-  base::debug::ReadElfBuildId(&__executable_start, false, build_id);
-  return base::android::ConvertUTF8ToJavaString(env, std::string(build_id));
+  size_t size =
+      base::debug::ReadElfBuildId(&__executable_start, false, build_id);
+  CHECK(size) << "Failed to read BuildId";
+
+  // Official builds use SHA1 (40 chars), but debug builds use whatever is
+  // default. For non-lld linkers, this can be sha256, which triggers an
+  // exception in AnrCollector that enforces it stays under 128 bytes.
+  return std::string(build_id).substr(0, 40);
 }
+
+}  // namespace crash_reporter

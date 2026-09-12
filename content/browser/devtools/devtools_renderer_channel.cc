@@ -6,13 +6,20 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/safety_checks.h"
+#include "content/browser/bad_message.h"
+#include "content/browser/devtools/dedicated_worker_devtools_agent_host.h"
 #include "content/browser/devtools/devtools_agent_host_impl.h"
+#include "content/browser/devtools/devtools_manager.h"
 #include "content/browser/devtools/devtools_session.h"
 #include "content/browser/devtools/protocol/devtools_domain_handler.h"
-#include "content/browser/devtools/worker_devtools_agent_host.h"
 #include "content/browser/devtools/worker_devtools_manager.h"
+#include "content/browser/devtools/worklet_devtools_agent_host.h"
+#include "content/common/features.h"
 #include "content/public/browser/child_process_host.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_contents_delegate.h"
 #include "third_party/blink/public/common/features.h"
 #include "ui/gfx/geometry/point.h"
 
@@ -69,8 +76,9 @@ void DevToolsRendererChannel::CleanupConnection() {
 }
 
 void DevToolsRendererChannel::ForceDetachWorkerSessions() {
-  for (WorkerDevToolsAgentHost* host : child_targets_)
+  for (WorkerOrWorkletDevToolsAgentHost* host : child_targets_) {
     host->ForceDetachAllSessions();
+  }
 }
 
 void DevToolsRendererChannel::SetRendererInternal(
@@ -118,7 +126,7 @@ void DevToolsRendererChannel::SetReportChildTargets(
     ChildTargetCreatedCallback report_callback,
     bool wait_for_debugger,
     base::OnceClosure completion_callback) {
-  DCHECK(report_callback || !wait_for_debugger);
+  CHECK(report_callback || !wait_for_debugger, base::NotFatalUntil::M159);
   ReportChildTargetsCallback();
   set_report_completion_callback_ = std::move(completion_callback);
 
@@ -161,57 +169,95 @@ void DevToolsRendererChannel::ChildTargetCreated(
     const base::UnguessableToken& devtools_worker_token,
     bool waiting_for_debugger,
     blink::mojom::DevToolsExecutionContextType context_type) {
+  // This function is known to be heap allocation heavy and performance
+  // critical. Extra memory safety checks can introduce regression
+  // (https://crbug.com/414710225) and these are disabled here.
+  base::ScopedSafetyChecksExclusion scoped_unsafe;
+
   RenderProcessHost* process = RenderProcessHost::FromID(process_id_);
-  if (!process)
+  if (!process) {
     return;
+  }
 
   GURL filtered_url = url;
-  process->FilterURL(true /* empty_allowed */, &filtered_url);
+  process->FilterURL(/*empty_allowed=*/true, &filtered_url);
 
-  if (context_type ==
-          blink::mojom::DevToolsExecutionContextType::kDedicatedWorker &&
-      base::FeatureList::IsEnabled(blink::features::kPlzDedicatedWorker)) {
-    // WorkerDevToolsAgentHost for dedicated workers is already created on the
-    // browser process when PlzDedicatedWorker is enabled.
-    DCHECK(
-        content::DevToolsAgentHost::GetForId(devtools_worker_token.ToString()));
-    scoped_refptr<WorkerDevToolsAgentHost> agent_host =
-        WorkerDevToolsManager::GetInstance().GetDevToolsHostFromToken(
-            devtools_worker_token);
-    agent_host->ChildWorkerCreated(
-        url, name,
-        base::BindOnce(&DevToolsRendererChannel::ChildTargetDestroyed,
-                       weak_factory_.GetWeakPtr()));
-    agent_host->SetRenderer(process_id_, std::move(worker_devtools_agent),
-                            std::move(host_receiver));
+  scoped_refptr<WorkerOrWorkletDevToolsAgentHost> agent_host;
+  switch (context_type) {
+    case blink::mojom::DevToolsExecutionContextType::kDedicatedWorker: {
+      // WorkerDevToolsAgentHost for dedicated workers is already created in the
+      // browser process.
+      DedicatedWorkerDevToolsAgentHost* dedicated_worker_agent_host =
+          WorkerDevToolsManager::GetInstance().GetDevToolsHostFromToken(
+              devtools_worker_token);
+      if (!dedicated_worker_agent_host ||
+          dedicated_worker_agent_host->state_terminating()) {
+        // If `dedicated_worker_agent_host` is nullptr or terminating, we can
+        // assume that `DedicatedWorkerHost` has been destructed while handling
+        // `DedicatedWorker::ContinueStart`. We do not need to continue in that
+        // case.
+        return;
+      }
+      CHECK(content::DevToolsAgentHost::GetForId(
+          devtools_worker_token.ToString()));
+      if (base::FeatureList::IsEnabled(
+              ::features::kWorkerOrWorkletAgentDoubleReleaseFix) &&
+          dedicated_worker_agent_host->child_worker_created()) {
+        // If `child_worker_created()` is true, the renderer is attempting to
+        // initialize the same worker again, which is not allowed.
+        bad_message::ReceivedBadMessage(
+            process, bad_message::DT_DUPLICATE_CHILD_TARGET_CREATED);
+        return;
+      }
+      dedicated_worker_agent_host->ChildWorkerCreated(
+          url, name,
+          base::BindOnce(&DevToolsRendererChannel::ChildTargetDestroyed,
+                         weak_factory_.GetWeakPtr()));
 
-    child_targets_.insert(agent_host.get());
-    if (child_target_created_callback_) {
-      child_target_created_callback_.Run(agent_host.get(),
-                                         waiting_for_debugger);
+      agent_host = dedicated_worker_agent_host;
+      break;
     }
-    return;
-  }
+    case blink::mojom::DevToolsExecutionContextType::kWorklet:
+      if (content::DevToolsAgentHost::GetForId(
+              devtools_worker_token.ToString())) {
+        mojo::ReportBadMessage("Workers should have unique tokens.");
+        return;
+      }
 
-  DCHECK(context_type == blink::mojom::DevToolsExecutionContextType::kWorklet ||
-         !base::FeatureList::IsEnabled(blink::features::kPlzDedicatedWorker));
-  if (content::DevToolsAgentHost::GetForId(devtools_worker_token.ToString())) {
-    mojo::ReportBadMessage("Workers should have unique tokens.");
-    return;
+      agent_host = base::MakeRefCounted<WorkletDevToolsAgentHost>(
+          process_id_, filtered_url, std::move(name), devtools_worker_token,
+          owner_->GetId(),
+          base::BindOnce(&DevToolsRendererChannel::ChildTargetDestroyed,
+                         weak_factory_.GetWeakPtr()));
+      break;
   }
-  auto agent_host = base::MakeRefCounted<WorkerDevToolsAgentHost>(
-      process_id_, std::move(worker_devtools_agent), std::move(host_receiver),
-      filtered_url, std::move(name), devtools_worker_token, owner_->GetId(),
-      base::BindOnce(&DevToolsRendererChannel::ChildTargetDestroyed,
-                     weak_factory_.GetWeakPtr()));
+  agent_host->SetRenderer(process_id_, std::move(worker_devtools_agent),
+                          std::move(host_receiver));
+
   child_targets_.insert(agent_host.get());
-  if (child_target_created_callback_)
+  if (child_target_created_callback_) {
     child_target_created_callback_.Run(agent_host.get(), waiting_for_debugger);
+  }
 }
 
 void DevToolsRendererChannel::ChildTargetDestroyed(
     DevToolsAgentHostImpl* host) {
   child_targets_.erase(host);
+}
+
+void DevToolsRendererChannel::MainThreadDebuggerPaused() {
+  owner_->MainThreadDebuggerPaused();
+}
+
+void DevToolsRendererChannel::MainThreadDebuggerResumed() {
+  owner_->MainThreadDebuggerResumed();
+}
+
+void DevToolsRendererChannel::BringToForeground() {
+  DevToolsManager* manager = DevToolsManager::GetInstance();
+  if (manager->delegate()) {
+    manager->delegate()->Activate(owner_);
+  }
 }
 
 }  // namespace content

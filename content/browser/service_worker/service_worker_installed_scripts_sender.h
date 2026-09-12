@@ -6,6 +6,8 @@
 #define CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_INSTALLED_SCRIPTS_SENDER_H_
 
 #include "base/containers/queue.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/advanced_memory_safety_checks.h"
 #include "base/memory/raw_ptr.h"
 #include "content/browser/service_worker/service_worker_installed_script_reader.h"
 #include "content/common/content_export.h"
@@ -35,6 +37,8 @@ class ServiceWorkerVersion;
 class CONTENT_EXPORT ServiceWorkerInstalledScriptsSender
     : public blink::mojom::ServiceWorkerInstalledScriptsManagerHost,
       public ServiceWorkerInstalledScriptReader::Client {
+  ADVANCED_MEMORY_SAFETY_CHECKS();
+
  public:
   // |owner| must be an installed service worker.
   explicit ServiceWorkerInstalledScriptsSender(ServiceWorkerVersion* owner);
@@ -61,6 +65,9 @@ class CONTENT_EXPORT ServiceWorkerInstalledScriptsSender
     return last_finished_reason_;
   }
 
+  // Set a callback function to callback when all the update finished.
+  void SetFinishCallback(base::OnceClosure callback);
+
  private:
   enum class State {
     kNotStarted,
@@ -81,7 +88,7 @@ class CONTENT_EXPORT ServiceWorkerInstalledScriptsSender
 
   // Implements ServiceWorkerInstalledScriptReader::Client.
   void OnStarted(network::mojom::URLResponseHeadPtr response_head,
-                 absl::optional<mojo_base::BigBuffer> metadata,
+                 std::optional<mojo_base::BigBuffer> metadata,
                  mojo::ScopedDataPipeConsumerHandle body_handle,
                  mojo::ScopedDataPipeConsumerHandle meta_data_handle) override;
   void OnFinished(
@@ -96,6 +103,7 @@ class CONTENT_EXPORT ServiceWorkerInstalledScriptsSender
   const GURL main_script_url_;
   const int64_t main_script_id_;
   bool sent_main_script_;
+  base::OnceClosure finish_callback_;
 
   mojo::Receiver<blink::mojom::ServiceWorkerInstalledScriptsManagerHost>
       receiver_{this};
@@ -107,6 +115,11 @@ class CONTENT_EXPORT ServiceWorkerInstalledScriptsSender
 
   GURL current_sending_url_;
   base::queue<std::pair<int64_t /* resource_id */, GURL>> pending_scripts_;
+  // Queues script infos that are read from the disk cache before the connection
+  // to the renderer-side manager is established (i.e., before
+  // `CreateInfoAndBind()` is called). They will be transferred to the renderer
+  // immediately after the connection is established.
+  std::vector<blink::mojom::ServiceWorkerScriptInfoPtr> queued_script_infos_;
 };
 
 }  // namespace content

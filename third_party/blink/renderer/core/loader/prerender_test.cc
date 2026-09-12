@@ -35,8 +35,8 @@
 #include "base/memory/ptr_util.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/mojom/prerender/prerender.mojom-blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/web_cache.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/web/web_frame.h"
@@ -49,6 +49,7 @@
 #include "third_party/blink/renderer/core/frame/frame_test_helpers.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
 #include "third_party/blink/renderer/core/html_element_type_helpers.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/url_loader_mock_factory.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
@@ -110,15 +111,15 @@ class PrerenderTest : public testing::Test {
     // TODO(crbug.com/751425): We should use the mock functionality
     // via |web_view_helper_|.
     url_test_helpers::RegisterMockedURLLoadFromBase(
-        WebString::FromUTF8(base_url), test::CoreTestDataPath(),
-        WebString::FromUTF8(file_name));
+        WebString::FromUtf8(base_url), test::CoreTestDataPath(),
+        WebString::FromUtf8(file_name));
     web_view_helper_.Initialize();
     web_view_helper_.GetWebView()->SetNoStatePrefetchClient(
         &no_state_prefetch_client_);
 
     GetBrowserInterfaceBroker().SetBinderForTesting(
         mojom::blink::NoStatePrefetchProcessor::Name_,
-        WTF::BindRepeating(&PrerenderTest::Bind, WTF::Unretained(this)));
+        BindRepeating(&PrerenderTest::Bind, Unretained(this)));
 
     frame_test_helpers::LoadFrame(
         web_view_helper_.GetWebView()->MainFrameImpl(),
@@ -150,7 +151,7 @@ class PrerenderTest : public testing::Test {
 
   void ExecuteScript(const char* code) {
     web_view_helper_.LocalMainFrame()->ExecuteScript(
-        WebScriptSource(WebString::FromUTF8(code)));
+        WebScriptSource(WebString::FromUtf8(code)));
     test::RunPendingTasks();
   }
 
@@ -171,11 +172,12 @@ class PrerenderTest : public testing::Test {
         mojom::blink::NoStatePrefetchProcessor::Name_, {});
   }
 
-  BrowserInterfaceBrokerProxy& GetBrowserInterfaceBroker() {
+  const BrowserInterfaceBrokerProxy& GetBrowserInterfaceBroker() {
     return web_view_helper_.LocalMainFrame()
         ->GetFrame()
         ->GetBrowserInterfaceBroker();
   }
+  test::TaskEnvironment task_environment_;
 
   std::vector<std::unique_ptr<MockNoStatePrefetchProcessor>> processors_;
 

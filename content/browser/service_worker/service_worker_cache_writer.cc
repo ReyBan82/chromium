@@ -7,12 +7,14 @@
 #include <algorithm>
 #include <string>
 
+#include "base/byte_size.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
+#include "base/numerics/safe_conversions.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
-#include "crypto/secure_hash.h"
-#include "crypto/sha2.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/system/simple_watcher.h"
 #include "net/base/completion_once_callback.h"
@@ -21,7 +23,7 @@
 
 namespace {
 
-const size_t kCopyBufferSize = 16 * 1024;
+constexpr base::ByteSize kCopyBufferSize = base::KiB(16);
 
 // Shim class used to turn always-async functions into async-or-result
 // functions. See the comments below near ReadResponseHead.
@@ -66,12 +68,12 @@ class ServiceWorkerCacheWriter::ReadResponseHeadCallbackAdapter
   explicit ReadResponseHeadCallbackAdapter(
       base::WeakPtr<ServiceWorkerCacheWriter> owner)
       : owner_(std::move(owner)) {
-    DCHECK(owner_);
+    CHECK(owner_, base::NotFatalUntil::M159);
   }
 
   void DidReadResponseHead(int result,
                            network::mojom::URLResponseHeadPtr response_head,
-                           absl::optional<mojo_base::BigBuffer>) {
+                           std::optional<mojo_base::BigBuffer>) {
     result_ = result;
     if (!owner_)
       return;
@@ -90,6 +92,100 @@ class ServiceWorkerCacheWriter::ReadResponseHeadCallbackAdapter
   base::WeakPtr<ServiceWorkerCacheWriter> owner_;
   bool async_ = false;
   int result_ = net::ERR_IO_PENDING;
+};
+
+class ServiceWorkerCacheWriter::DataPipeReader {
+ public:
+  DataPipeReader(storage::mojom::ServiceWorkerResourceReader* reader,
+                 ServiceWorkerCacheWriter* owner,
+                 scoped_refptr<base::SequencedTaskRunner> runner)
+      : reader_(reader),
+        owner_(owner),
+        watcher_(FROM_HERE, mojo::SimpleWatcher::ArmingPolicy::MANUAL, runner),
+        task_runner_(runner) {}
+
+  // Reads the body up to |num_bytes| bytes. |callback| is always called
+  // asynchronously.
+  using ReadCallback = base::OnceCallback<void(int /* result */)>;
+  void Read(scoped_refptr<net::IOBuffer> buffer,
+            int num_bytes,
+            ReadCallback callback) {
+    CHECK(buffer, base::NotFatalUntil::M159);
+    buffer_ = std::move(buffer);
+    num_bytes_to_read_ = base::checked_cast<size_t>(num_bytes);
+    callback_ = std::move(callback);
+
+    if (!data_.is_valid()) {
+      // This is the initial call of Read(). Call PrepareReadData() to get a
+      // data pipe to read the body.
+      reader_->PrepareReadData(
+          -1, base::BindOnce(
+                  &ServiceWorkerCacheWriter::DataPipeReader::OnReadDataPrepared,
+                  weak_factory_.GetWeakPtr()));
+      return;
+    }
+    task_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&ServiceWorkerCacheWriter::DataPipeReader::ReadInternal,
+                       weak_factory_.GetWeakPtr(), MOJO_RESULT_OK));
+  }
+
+ private:
+  void ReadInternal(MojoResult) {
+    MojoResult result =
+        data_->ReadData(MOJO_READ_DATA_FLAG_NONE,
+                        buffer_->first(num_bytes_to_read_), num_bytes_to_read_);
+    if (result == MOJO_RESULT_SHOULD_WAIT) {
+      watcher_.ArmOrNotify();
+      return;
+    }
+    if (result != MOJO_RESULT_OK) {
+      // Disconnected means it's the end of the body or an error occurs during
+      // reading the body.
+      // TODO(crbug.com/40120038): notify of errors.
+      num_bytes_to_read_ = 0;
+    }
+    owner_->AsyncDoLoop(base::checked_cast<int>(num_bytes_to_read_));
+  }
+
+  void OnReadDataPrepared(mojo::ScopedDataPipeConsumerHandle data) {
+    // An invalid handle can be returned when creating a data pipe fails on the
+    // other side of the endpoint.
+    if (!data) {
+      owner_->AsyncDoLoop(net::ERR_FAILED);
+      return;
+    }
+
+    data_ = std::move(data);
+    watcher_.Watch(data_.get(),
+                   MOJO_HANDLE_SIGNAL_READABLE | MOJO_HANDLE_SIGNAL_PEER_CLOSED,
+                   base::BindRepeating(
+                       &ServiceWorkerCacheWriter::DataPipeReader::ReadInternal,
+                       weak_factory_.GetWeakPtr()));
+    ReadInternal(MOJO_RESULT_OK);
+
+    // TODO(crbug.com/40120038): provide a callback to notify of errors
+    // if any.
+    reader_->ReadData({});
+  }
+
+  // Parameters set on Read().
+  scoped_refptr<net::IOBuffer> buffer_;
+  size_t num_bytes_to_read_ = 0;
+  ReadCallback callback_;
+
+  // |reader_| is safe to be kept as a rawptr because |owner_| owns |this| and
+  // |reader_|, and |owner_| keeps |reader_| until it's destroyed.
+  const raw_ptr<storage::mojom::ServiceWorkerResourceReader> reader_;
+  const raw_ptr<ServiceWorkerCacheWriter> owner_;
+
+  // Mojo data pipe and the watcher is set up when Read() is called for the
+  // first time.
+  mojo::ScopedDataPipeConsumerHandle data_;
+  mojo::SimpleWatcher watcher_;
+  scoped_refptr<base::SequencedTaskRunner> task_runner_;
+
+  base::WeakPtrFactory<DataPipeReader> weak_factory_{this};
 };
 
 int ServiceWorkerCacheWriter::DoLoop(int status) {
@@ -151,8 +247,6 @@ int ServiceWorkerCacheWriter::DoLoop(int status) {
         break;
       default:
         NOTREACHED() << "Unknown state in DoLoop";
-        state_ = STATE_DONE;
-        break;
     }
   } while (status != net::ERR_IO_PENDING && state_ != STATE_DONE);
   io_pending_ = (status == net::ERR_IO_PENDING);
@@ -174,8 +268,7 @@ ServiceWorkerCacheWriter::ServiceWorkerCacheWriter(
       copy_reader_(std::move(copy_reader)),
       writer_(std::move(writer)),
       writer_resource_id_(writer_resource_id),
-      checksum_update_timing_(checksum_update_timing),
-      checksum_(crypto::SecureHash::Create(crypto::SecureHash::SHA256)) {
+      checksum_update_timing_(checksum_update_timing) {
   if (compare_reader_) {
     compare_reader_.set_disconnect_handler(
         base::BindOnce(&ServiceWorkerCacheWriter::OnRemoteDisconnected,
@@ -186,7 +279,7 @@ ServiceWorkerCacheWriter::ServiceWorkerCacheWriter(
         base::BindOnce(&ServiceWorkerCacheWriter::OnRemoteDisconnected,
                        weak_factory_.GetWeakPtr()));
   }
-  DCHECK(writer_);
+  CHECK(writer_, base::NotFatalUntil::M159);
   writer_.set_disconnect_handler(
       base::BindOnce(&ServiceWorkerCacheWriter::OnRemoteDisconnected,
                      weak_factory_.GetWeakPtr()));
@@ -199,10 +292,10 @@ ServiceWorkerCacheWriter::CreateForCopy(
     mojo::Remote<storage::mojom::ServiceWorkerResourceReader> copy_reader,
     mojo::Remote<storage::mojom::ServiceWorkerResourceWriter> writer,
     int64_t writer_resource_id) {
-  DCHECK(copy_reader);
-  DCHECK(copy_reader.is_connected());
-  DCHECK(writer);
-  DCHECK(writer.is_connected());
+  CHECK(copy_reader, base::NotFatalUntil::M159);
+  CHECK(copy_reader.is_connected(), base::NotFatalUntil::M159);
+  CHECK(writer, base::NotFatalUntil::M159);
+  CHECK(writer.is_connected(), base::NotFatalUntil::M159);
   mojo::Remote<storage::mojom::ServiceWorkerResourceReader> null_remote;
   return base::WrapUnique(new ServiceWorkerCacheWriter(
       std::move(null_remote) /* compare_reader */, std::move(copy_reader),
@@ -215,8 +308,8 @@ std::unique_ptr<ServiceWorkerCacheWriter>
 ServiceWorkerCacheWriter::CreateForWriteBack(
     mojo::Remote<storage::mojom::ServiceWorkerResourceWriter> writer,
     int64_t writer_resource_id) {
-  DCHECK(writer);
-  DCHECK(writer.is_connected());
+  CHECK(writer, base::NotFatalUntil::M159);
+  CHECK(writer.is_connected(), base::NotFatalUntil::M159);
   return base::WrapUnique(new ServiceWorkerCacheWriter(
       /*compare_reader=*/{}, /*copy_reader=*/{}, std::move(writer),
       writer_resource_id,
@@ -234,119 +327,125 @@ ServiceWorkerCacheWriter::CreateForComparison(
     ChecksumUpdateTiming checksum_update_timing) {
   // |compare_reader| reads data for the comparison. |copy_reader| reads
   // data for copy.
-  DCHECK(compare_reader);
-  DCHECK(compare_reader.is_connected());
-  DCHECK(copy_reader);
-  DCHECK(copy_reader.is_connected());
-  DCHECK(writer);
-  DCHECK(writer.is_connected());
+  CHECK(compare_reader, base::NotFatalUntil::M159);
+  CHECK(compare_reader.is_connected(), base::NotFatalUntil::M159);
+  CHECK(copy_reader, base::NotFatalUntil::M159);
+  CHECK(copy_reader.is_connected(), base::NotFatalUntil::M159);
+  CHECK(writer, base::NotFatalUntil::M159);
+  CHECK(writer.is_connected(), base::NotFatalUntil::M159);
   return base::WrapUnique(new ServiceWorkerCacheWriter(
       std::move(compare_reader), std::move(copy_reader), std::move(writer),
       writer_resource_id, pause_when_not_identical, checksum_update_timing));
 }
 
-net::Error ServiceWorkerCacheWriter::MaybeWriteHeaders(
+void ServiceWorkerCacheWriter::MaybeWriteHeaders(
     network::mojom::URLResponseHeadPtr response_head,
     OnWriteCompleteCallback callback) {
-  DCHECK(!io_pending_);
-  DCHECK(!IsCopying());
+  CHECK(!io_pending_, base::NotFatalUntil::M159);
+  CHECK(!IsCopying(), base::NotFatalUntil::M159);
 
-  if (!writer_.is_connected())
-    return net::ERR_FAILED;
+  if (!writer_.is_connected()) {
+    std::move(callback).Run(net::ERR_FAILED);
+    return;
+  }
 
   response_head_to_write_ = std::move(response_head);
-  pending_callback_ = std::move(callback);
-  DCHECK_EQ(STATE_START, state_);
+  CHECK_EQ(STATE_START, state_, base::NotFatalUntil::M159);
   int result = DoLoop(net::OK);
 
-  // Synchronous errors and successes always go to STATE_DONE.
-  if (result != net::ERR_IO_PENDING)
-    DCHECK_EQ(STATE_DONE, state_);
-
-  // ERR_IO_PENDING has to have one of the STATE_*_DONE states as the next state
-  // (not STATE_DONE itself).
   if (result == net::ERR_IO_PENDING) {
+    // ERR_IO_PENDING has to have one of the STATE_*_DONE states as the next
+    // state (not STATE_DONE itself).
     DCHECK(state_ == STATE_READ_HEADERS_FOR_COMPARE_DONE ||
            state_ == STATE_WRITE_HEADERS_FOR_COPY_DONE ||
            state_ == STATE_WRITE_HEADERS_FOR_PASSTHROUGH_DONE)
         << "Unexpected state: " << state_;
     io_pending_ = true;
+    pending_callback_ = std::move(callback);
+    return;
   }
 
-  return result >= 0 ? net::OK : static_cast<net::Error>(result);
+  // Synchronous errors and successes always go to STATE_DONE.
+  CHECK_EQ(STATE_DONE, state_, base::NotFatalUntil::M159);
+  std::move(callback).Run(result >= 0 ? net::OK
+                                      : static_cast<net::Error>(result));
 }
 
-net::Error ServiceWorkerCacheWriter::MaybeWriteData(
+void ServiceWorkerCacheWriter::MaybeWriteData(
     net::IOBuffer* buf,
     size_t buf_size,
     OnWriteCompleteCallback callback) {
-  DCHECK(!io_pending_);
-  DCHECK(!IsCopying());
+  CHECK(!io_pending_, base::NotFatalUntil::M159);
+  CHECK(!IsCopying(), base::NotFatalUntil::M159);
 
-  if (!writer_.is_connected())
-    return net::ERR_FAILED;
-
-  data_to_write_ = buf;
-  len_to_write_ = buf_size;
-  pending_callback_ = std::move(callback);
-
-  if (checksum_update_timing_ == ChecksumUpdateTiming::kAlways &&
-      len_to_write_ > 0) {
-    checksum_->Update(data_to_write_->data(), len_to_write_);
+  if (!writer_.is_connected()) {
+    std::move(callback).Run(net::ERR_FAILED);
+    return;
   }
 
-  if (comparing_)
+  data_to_write_ = buf;
+  len_to_write_ = base::ByteSize(buf_size);
+
+  if (checksum_update_timing_ == ChecksumUpdateTiming::kAlways &&
+      len_to_write_.is_positive()) {
+    checksum_.Update(data_to_write_->first(len_to_write_.InBytes()));
+  }
+
+  if (comparing_) {
     state_ = STATE_READ_DATA_FOR_COMPARE;
-  else
+  } else {
     state_ = STATE_WRITE_DATA_FOR_PASSTHROUGH;
+  }
 
   int result = DoLoop(net::OK);
 
-  // Synchronous completions are always STATE_DONE.
-  if (result != net::ERR_IO_PENDING)
-    DCHECK_EQ(STATE_DONE, state_);
-
-  // Asynchronous completion means the state machine must be waiting in one of
-  // the Done states for an IO operation to complete:
   if (result == net::ERR_IO_PENDING) {
+    if (state_ == STATE_PAUSING) {
+      std::move(callback).Run(net::ERR_IO_PENDING);
+      return;
+    }
+    // Asynchronous completion means the state machine must be waiting in one of
+    // the Done states for an IO operation to complete:
     // Note that STATE_READ_HEADERS_FOR_COMPARE_DONE is excluded because the
     // headers are compared in MaybeWriteHeaders, not here, and
     // STATE_WRITE_HEADERS_FOR_PASSTHROUGH_DONE is excluded because that write
     // is done by MaybeWriteHeaders.
     DCHECK(state_ == STATE_READ_DATA_FOR_COMPARE_DONE ||
-           state_ == STATE_PAUSING ||
            state_ == STATE_READ_HEADERS_FOR_COPY_DONE ||
            state_ == STATE_READ_DATA_FOR_COPY_DONE ||
            state_ == STATE_WRITE_HEADERS_FOR_COPY_DONE ||
            state_ == STATE_WRITE_DATA_FOR_COPY_DONE ||
            state_ == STATE_WRITE_DATA_FOR_PASSTHROUGH_DONE)
         << "Unexpected state: " << state_;
+    pending_callback_ = std::move(callback);
+    return;
   }
-  return result >= 0 ? net::OK : static_cast<net::Error>(result);
+
+  // Synchronous completions are always STATE_DONE.
+  CHECK_EQ(STATE_DONE, state_, base::NotFatalUntil::M159);
+  std::move(callback).Run(result >= 0 ? net::OK
+                                      : static_cast<net::Error>(result));
 }
 
-net::Error ServiceWorkerCacheWriter::Resume(OnWriteCompleteCallback callback) {
-  DCHECK(pause_when_not_identical_);
-  DCHECK_EQ(STATE_PAUSING, state_);
-  DCHECK(io_pending_);
-  DCHECK(!IsCopying());
+void ServiceWorkerCacheWriter::Resume(OnWriteCompleteCallback callback) {
+  CHECK(pause_when_not_identical_, base::NotFatalUntil::M159);
+  CHECK_EQ(STATE_PAUSING, state_, base::NotFatalUntil::M159);
+  CHECK(io_pending_, base::NotFatalUntil::M159);
+  CHECK(!IsCopying(), base::NotFatalUntil::M159);
 
-  if (!copy_reader_.is_connected())
-    return net::ERR_FAILED;
+  if (!copy_reader_.is_connected()) {
+    std::move(callback).Run(net::ERR_FAILED);
+    return;
+  }
 
   io_pending_ = false;
-  pending_callback_ = std::move(callback);
   state_ = STATE_READ_HEADERS_FOR_COPY;
 
   int result = DoLoop(net::OK);
 
-  // Synchronous completions are always STATE_DONE.
-  if (result != net::ERR_IO_PENDING)
-    DCHECK_EQ(STATE_DONE, state_);
-
-  // Asynchronous completion means the state machine must be waiting in one of
-  // the Done states for an IO operation to complete:
   if (result == net::ERR_IO_PENDING) {
+    // Asynchronous completion means the state machine must be waiting in one of
+    // the Done states for an IO operation to complete:
     // Note that STATE_READ_HEADERS_FOR_COMPARE_DONE is excluded because the
     // headers are compared in MaybeWriteHeaders, not here, and
     // STATE_WRITE_HEADERS_FOR_PASSTHROUGH_DONE is excluded because that write
@@ -357,36 +456,42 @@ net::Error ServiceWorkerCacheWriter::Resume(OnWriteCompleteCallback callback) {
            state_ == STATE_WRITE_DATA_FOR_COPY_DONE ||
            state_ == STATE_WRITE_DATA_FOR_PASSTHROUGH_DONE)
         << "Unexpected state: " << state_;
+    pending_callback_ = std::move(callback);
+    return;
   }
 
-  return result >= 0 ? net::OK : static_cast<net::Error>(result);
+  // Synchronous completions are always STATE_DONE.
+  CHECK_EQ(STATE_DONE, state_, base::NotFatalUntil::M159);
+  std::move(callback).Run(result >= 0 ? net::OK
+                                      : static_cast<net::Error>(result));
 }
 
-net::Error ServiceWorkerCacheWriter::StartCopy(
-    OnWriteCompleteCallback callback) {
-  DCHECK(IsCopying());
+void ServiceWorkerCacheWriter::StartCopy(OnWriteCompleteCallback callback) {
+  CHECK(IsCopying(), base::NotFatalUntil::M159);
 
-  if (!copy_reader_.is_connected())
-    return net::ERR_FAILED;
+  if (!copy_reader_.is_connected()) {
+    std::move(callback).Run(net::ERR_FAILED);
+    return;
+  }
 
-  pending_callback_ = std::move(callback);
   int result = DoLoop(net::OK);
 
-  // Synchronous completions are always STATE_DONE.
-  if (result != net::ERR_IO_PENDING)
-    DCHECK_EQ(STATE_DONE, state_);
-
-  // Asynchronous completion means the state machine must be waiting in one of
-  // the Done states for an IO operation to complete:
   if (result == net::ERR_IO_PENDING) {
+    // Asynchronous completion means the state machine must be waiting in one of
+    // the Done states for an IO operation to complete:
     DCHECK(state_ == STATE_READ_HEADERS_FOR_COPY_DONE ||
            state_ == STATE_WRITE_HEADERS_FOR_COPY_DONE ||
            state_ == STATE_READ_DATA_FOR_COPY_DONE ||
            state_ == STATE_WRITE_DATA_FOR_COPY_DONE)
         << "Unexpected state: " << state_;
+    pending_callback_ = std::move(callback);
+    return;
   }
 
-  return result >= 0 ? net::OK : static_cast<net::Error>(result);
+  // Synchronous completions are always STATE_DONE.
+  CHECK_EQ(STATE_DONE, state_, base::NotFatalUntil::M159);
+  std::move(callback).Run(result >= 0 ? net::OK
+                                      : static_cast<net::Error>(result));
 }
 
 bool ServiceWorkerCacheWriter::IsCopying() const {
@@ -398,17 +503,18 @@ void ServiceWorkerCacheWriter::FlushRemotesForTesting() {
     copy_reader_.FlushForTesting();  // IN-TEST
   if (compare_reader_)
     compare_reader_.FlushForTesting();  // IN-TEST
-  DCHECK(writer_);
+  CHECK(writer_, base::NotFatalUntil::M159);
   writer_.FlushForTesting();  // IN-TEST
 }
 
 int64_t ServiceWorkerCacheWriter::writer_resource_id() const {
-  DCHECK_NE(writer_resource_id_, blink::mojom::kInvalidServiceWorkerResourceId);
+  CHECK_NE(writer_resource_id_, blink::mojom::kInvalidServiceWorkerResourceId,
+           base::NotFatalUntil::M159);
   return writer_resource_id_;
 }
 
 int ServiceWorkerCacheWriter::DoStart(int result) {
-  bytes_written_ = 0;
+  bytes_written_ = base::ByteSize(0);
   if (compare_reader_) {
     state_ = STATE_READ_HEADERS_FOR_COMPARE;
     comparing_ = true;
@@ -424,9 +530,9 @@ int ServiceWorkerCacheWriter::DoStart(int result) {
 }
 
 int ServiceWorkerCacheWriter::DoReadHeadersForCompare(int result) {
-  DCHECK_GE(result, 0);
-  DCHECK(response_head_to_write_);
-  DCHECK(compare_reader_);
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
+  CHECK(response_head_to_write_, base::NotFatalUntil::M159);
+  CHECK(compare_reader_, base::NotFatalUntil::M159);
 
   if (!compare_reader_.is_connected()) {
     state_ = STATE_DONE;
@@ -442,60 +548,72 @@ int ServiceWorkerCacheWriter::DoReadHeadersForCompareDone(int result) {
     state_ = STATE_DONE;
     return result;
   }
-  DCHECK(response_head_to_read_);
-  cached_length_ = response_head_to_read_->content_length;
-  bytes_compared_ = 0;
+  CHECK(response_head_to_read_, base::NotFatalUntil::M159);
+  cached_length_ = base::ByteSize(
+      base::checked_cast<uint64_t>(response_head_to_read_->content_length));
+  bytes_compared_ = base::ByteSize(0);
   state_ = STATE_DONE;
   return net::OK;
 }
 
 int ServiceWorkerCacheWriter::DoReadDataForCompare(int result) {
-  DCHECK_GE(result, 0);
-  DCHECK(data_to_write_);
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
+  CHECK(data_to_write_, base::NotFatalUntil::M159);
 
-  data_to_read_ = base::MakeRefCounted<net::IOBuffer>(len_to_write_);
+  data_to_read_ =
+      base::MakeRefCounted<net::IOBufferWithSize>(len_to_write_.InBytes());
   len_to_read_ = len_to_write_;
   state_ = STATE_READ_DATA_FOR_COMPARE_DONE;
-  compare_offset_ = 0;
+  compare_offset_ = base::ByteSize(0);
   // If this was an EOF, don't issue a read.
-  if (len_to_write_ > 0) {
-    DCHECK(compare_reader_);
+  if (len_to_write_.is_positive()) {
+    CHECK(compare_reader_, base::NotFatalUntil::M159);
     if (!compare_reader_.is_connected()) {
       state_ = STATE_DONE;
       return net::ERR_FAILED;
     }
     result = ReadDataHelper(compare_reader_.get(), compare_data_pipe_reader_,
-                            data_to_read_, len_to_read_);
+                            data_to_read_, len_to_read_.InBytes());
   }
   return result;
 }
 
 int ServiceWorkerCacheWriter::DoReadDataForCompareDone(int result) {
-  DCHECK_EQ(len_to_read_, len_to_write_);
+  CHECK_EQ(len_to_read_, len_to_write_, base::NotFatalUntil::M159);
 
   if (result < 0) {
     state_ = STATE_DONE;
     return result;
   }
+  base::ByteSize result_bytes =
+      base::ByteSize(base::checked_cast<uint64_t>(result));
 
-  DCHECK_LE(result + compare_offset_, static_cast<size_t>(len_to_write_));
+  CHECK_LE(result_bytes + compare_offset_, len_to_write_,
+           base::NotFatalUntil::M159);
 
   // Premature EOF while reading the service worker script cache data to
   // compare. Fail the comparison.
-  if (result == 0 && len_to_write_ != 0) {
+  if (result_bytes.is_zero() && len_to_write_.is_positive()) {
     comparing_ = false;
     state_ =
         pause_when_not_identical_ ? STATE_PAUSING : STATE_READ_HEADERS_FOR_COPY;
     return pause_when_not_identical_ ? net::ERR_IO_PENDING : net::OK;
   }
 
-  DCHECK(data_to_read_);
-  DCHECK(data_to_write_);
+  CHECK(data_to_read_, base::NotFatalUntil::M159);
+  CHECK(data_to_write_, base::NotFatalUntil::M159);
+
+  // checked_casts because on some platforms, size_t (as used in the span calls)
+  // is smaller than uint64_t as is used in base::ByteSize.
+  const size_t result_as_size = base::checked_cast<size_t>(result);
+  const size_t compare_offset_as_size =
+      base::checked_cast<size_t>(compare_offset_.InBytes());
 
   // Compare the data from the ServiceWorker script cache to the data from the
   // network.
-  if (memcmp(data_to_read_->data(), data_to_write_->data() + compare_offset_,
-             result)) {
+  if (!std::ranges::equal(data_to_read_->span().first(result_as_size),
+                          data_to_write_->span().subspan(compare_offset_as_size,
+                                                         result_as_size))) {
     // Data mismatched. This method already validated that all the bytes through
     // |bytes_compared_| were identical, so copy the first |bytes_compared_|
     // over, then start writing network data back after the changed point.
@@ -505,7 +623,7 @@ int ServiceWorkerCacheWriter::DoReadDataForCompareDone(int result) {
     return pause_when_not_identical_ ? net::ERR_IO_PENDING : net::OK;
   }
 
-  compare_offset_ += result;
+  compare_offset_ += result_bytes;
 
   // This is a little bit tricky. It is possible that not enough data was read
   // to finish comparing the entire block of data from the network (which is
@@ -514,20 +632,22 @@ int ServiceWorkerCacheWriter::DoReadDataForCompareDone(int result) {
   //
   // Compare isn't complete yet. Issue another read for the remaining data. Note
   // that this reuses the same IOBuffer.
-  if (compare_offset_ < static_cast<size_t>(len_to_read_)) {
-    DCHECK(compare_reader_);
+  if (compare_offset_ < len_to_read_) {
+    CHECK(compare_reader_, base::NotFatalUntil::M159);
     if (!compare_reader_.is_connected()) {
       state_ = STATE_DONE;
       return net::ERR_FAILED;
     }
     state_ = STATE_READ_DATA_FOR_COMPARE_DONE;
     return ReadDataHelper(compare_reader_.get(), compare_data_pipe_reader_,
-                          data_to_read_.get(), len_to_read_ - compare_offset_);
+                          data_to_read_.get(),
+                          (len_to_read_ - compare_offset_).InBytes());
   }
 
   // Cached entry is longer than the network entry but the prefix matches. Copy
   // just the prefix.
-  if (len_to_read_ == 0 && bytes_compared_ + compare_offset_ < cached_length_) {
+  if (len_to_read_.is_zero() &&
+      bytes_compared_ + compare_offset_ < cached_length_) {
     comparing_ = false;
     state_ =
         pause_when_not_identical_ ? STATE_PAUSING : STATE_READ_HEADERS_FOR_COPY;
@@ -540,16 +660,17 @@ int ServiceWorkerCacheWriter::DoReadDataForCompareDone(int result) {
 }
 
 int ServiceWorkerCacheWriter::DoReadHeadersForCopy(int result) {
-  DCHECK_GE(result, 0);
-  DCHECK(copy_reader_);
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
+  CHECK(copy_reader_, base::NotFatalUntil::M159);
 
   if (!copy_reader_.is_connected()) {
     state_ = STATE_DONE;
     return net::ERR_FAILED;
   }
 
-  bytes_copied_ = 0;
-  data_to_copy_ = base::MakeRefCounted<net::IOBuffer>(kCopyBufferSize);
+  bytes_copied_ = base::ByteSize(0);
+  data_to_copy_ =
+      base::MakeRefCounted<net::IOBufferWithSize>(kCopyBufferSize.InBytes());
   state_ = STATE_READ_HEADERS_FOR_COPY_DONE;
   return ReadResponseHead(copy_reader_.get());
 }
@@ -568,15 +689,29 @@ int ServiceWorkerCacheWriter::DoReadHeadersForCopyDone(int result) {
 // headers if the cache writer is not for copy, otherwise write the read
 // headers.
 int ServiceWorkerCacheWriter::DoWriteHeadersForCopy(int result) {
-  DCHECK_GE(result, 0);
-  DCHECK(writer_);
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
+  CHECK(writer_, base::NotFatalUntil::M159);
   state_ = STATE_WRITE_HEADERS_FOR_COPY_DONE;
   if (IsCopying()) {
-    DCHECK(response_head_to_read_);
-    bytes_to_copy_ = response_head_to_read_->content_length;
+    CHECK(response_head_to_read_, base::NotFatalUntil::M159);
+    // In past versions of this code, `response_head_to_read_->content_length`
+    // was blindly copied to `bytes_to_copy_` without checking for the possible
+    // error value of -1.
+    //
+    // Now that `bytes_to_copy_` can no longer hold such a value, in case of an
+    // error, assign an unlimited value which will make the code behave in the
+    // same way in the past.
+    if (response_head_to_read_->content_length < 0) {
+      // TODO(https://crbug.com/474382520): Add in proper error handling and
+      // remove this workaround.
+      bytes_to_copy_ = base::ByteSize::Max();
+    } else {
+      bytes_to_copy_ = base::ByteSize(
+          base::checked_cast<uint64_t>(response_head_to_read_->content_length));
+    }
     return WriteResponseHead(std::move(response_head_to_read_));
   } else {
-    DCHECK(response_head_to_write_);
+    CHECK(response_head_to_write_, base::NotFatalUntil::M159);
     return WriteResponseHead(std::move(response_head_to_write_));
   }
 }
@@ -591,8 +726,8 @@ int ServiceWorkerCacheWriter::DoWriteHeadersForCopyDone(int result) {
 }
 
 int ServiceWorkerCacheWriter::DoReadDataForCopy(int result) {
-  DCHECK_GE(result, 0);
-  DCHECK(copy_reader_);
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
+  CHECK(copy_reader_, base::NotFatalUntil::M159);
 
   if (!copy_reader_.is_connected()) {
     state_ = STATE_DONE;
@@ -601,9 +736,10 @@ int ServiceWorkerCacheWriter::DoReadDataForCopy(int result) {
 
   // If the cache writer is only for copy, get the total size to read from
   // header data instead of |bytes_compared_| as no comparison is done.
-  size_t total_size_to_read = IsCopying() ? bytes_to_copy_ : bytes_compared_;
-  size_t to_read =
-      std::min(kCopyBufferSize, total_size_to_read - bytes_copied_);
+  base::ByteSize total_size_to_read =
+      IsCopying() ? bytes_to_copy_ : bytes_compared_;
+  base::ByteSize to_read = std::min(
+      kCopyBufferSize, (total_size_to_read - bytes_copied_).AsByteSize());
 
   // At this point, all compared bytes have been read. Currently
   // If the cache write is not just for copy, |data_to_write_| and
@@ -611,13 +747,13 @@ int ServiceWorkerCacheWriter::DoReadDataForCopy(int result) {
   // failure, so those need to be written back and this object needs to go into
   // passthrough mode. If the cache writer is just for copy, change state to
   // STATE_DONE as there is no more data to copy.
-  if (to_read == 0) {
+  if (to_read.is_zero()) {
     state_ = IsCopying() ? STATE_DONE : STATE_WRITE_DATA_FOR_PASSTHROUGH;
     return net::OK;
   }
   state_ = STATE_READ_DATA_FOR_COPY_DONE;
   return ReadDataHelper(copy_reader_.get(), copy_data_pipe_reader_,
-                        data_to_copy_.get(), to_read);
+                        data_to_copy_.get(), to_read.InBytes());
 }
 
 int ServiceWorkerCacheWriter::DoReadDataForCopyDone(int result) {
@@ -640,16 +776,16 @@ int ServiceWorkerCacheWriter::DoWriteDataForCopyDone(int result) {
     state_ = STATE_DONE;
     return result;
   }
-  bytes_written_ += result;
-  bytes_copied_ += result;
+  bytes_written_ += base::ByteSize(base::checked_cast<uint64_t>(result));
+  bytes_copied_ += base::ByteSize(base::checked_cast<uint64_t>(result));
   state_ = STATE_READ_DATA_FOR_COPY;
   return result;
 }
 
 int ServiceWorkerCacheWriter::DoWriteHeadersForPassthrough(int result) {
-  DCHECK_GE(result, 0);
-  DCHECK(writer_);
-  DCHECK(response_head_to_write_);
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
+  CHECK(writer_, base::NotFatalUntil::M159);
+  CHECK(response_head_to_write_, base::NotFatalUntil::M159);
   state_ = STATE_WRITE_HEADERS_FOR_PASSTHROUGH_DONE;
   return WriteResponseHead(std::move(response_head_to_write_));
 }
@@ -660,10 +796,11 @@ int ServiceWorkerCacheWriter::DoWriteHeadersForPassthroughDone(int result) {
 }
 
 int ServiceWorkerCacheWriter::DoWriteDataForPassthrough(int result) {
-  DCHECK_GE(result, 0);
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
   state_ = STATE_WRITE_DATA_FOR_PASSTHROUGH_DONE;
-  if (len_to_write_ > 0)
-    result = WriteData(data_to_write_, len_to_write_);
+  if (len_to_write_.is_positive()) {
+    result = WriteData(data_to_write_, len_to_write_.InBytes());
+  }
   return result;
 }
 
@@ -672,7 +809,7 @@ int ServiceWorkerCacheWriter::DoWriteDataForPassthroughDone(int result) {
     state_ = STATE_DONE;
     return result;
   }
-  bytes_written_ += result;
+  bytes_written_ += base::ByteSize(base::checked_cast<uint64_t>(result));
   state_ = STATE_DONE;
   return net::OK;
 }
@@ -700,99 +837,6 @@ int ServiceWorkerCacheWriter::ReadResponseHead(
   return adapter->result();
 }
 
-class ServiceWorkerCacheWriter::DataPipeReader {
- public:
-  DataPipeReader(storage::mojom::ServiceWorkerResourceReader* reader,
-                 ServiceWorkerCacheWriter* owner,
-                 scoped_refptr<base::SequencedTaskRunner> runner)
-      : reader_(reader),
-        owner_(owner),
-        watcher_(FROM_HERE, mojo::SimpleWatcher::ArmingPolicy::MANUAL, runner),
-        task_runner_(runner) {}
-
-  // Reads the body up to |num_bytes| bytes. |callback| is always called
-  // asynchronously.
-  using ReadCallback = base::OnceCallback<void(int /* result */)>;
-  void Read(scoped_refptr<net::IOBuffer> buffer,
-            int num_bytes,
-            ReadCallback callback) {
-    DCHECK(buffer);
-    buffer_ = std::move(buffer);
-    num_bytes_to_read_ = num_bytes;
-    callback_ = std::move(callback);
-
-    if (!data_.is_valid()) {
-      // This is the initial call of Read(). Call PrepareReadData() to get a
-      // data pipe to read the body.
-      reader_->PrepareReadData(
-          -1, base::BindOnce(
-                  &ServiceWorkerCacheWriter::DataPipeReader::OnReadDataPrepared,
-                  weak_factory_.GetWeakPtr()));
-      return;
-    }
-    task_runner_->PostTask(
-        FROM_HERE,
-        base::BindOnce(&ServiceWorkerCacheWriter::DataPipeReader::ReadInternal,
-                       weak_factory_.GetWeakPtr(), MOJO_RESULT_OK));
-  }
-
- private:
-  void ReadInternal(MojoResult) {
-    MojoResult result = data_->ReadData(buffer_->data(), &num_bytes_to_read_,
-                                        MOJO_READ_DATA_FLAG_NONE);
-    if (result == MOJO_RESULT_SHOULD_WAIT) {
-      watcher_.ArmOrNotify();
-      return;
-    }
-    if (result != MOJO_RESULT_OK) {
-      // Disconnected means it's the end of the body or an error occurs during
-      // reading the body.
-      // TODO(https://crbug.com/1055677): notify of errors.
-      num_bytes_to_read_ = 0;
-    }
-    owner_->AsyncDoLoop(num_bytes_to_read_);
-  }
-
-  void OnReadDataPrepared(mojo::ScopedDataPipeConsumerHandle data) {
-    // An invalid handle can be returned when creating a data pipe fails on the
-    // other side of the endpoint.
-    if (!data) {
-      owner_->AsyncDoLoop(net::ERR_FAILED);
-      return;
-    }
-
-    data_ = std::move(data);
-    watcher_.Watch(data_.get(),
-                   MOJO_HANDLE_SIGNAL_READABLE | MOJO_HANDLE_SIGNAL_PEER_CLOSED,
-                   base::BindRepeating(
-                       &ServiceWorkerCacheWriter::DataPipeReader::ReadInternal,
-                       weak_factory_.GetWeakPtr()));
-    ReadInternal(MOJO_RESULT_OK);
-
-    // TODO(https://crbug.com/1055677): provide a callback to notify of errors
-    // if any.
-    reader_->ReadData({});
-  }
-
-  // Parameters set on Read().
-  scoped_refptr<net::IOBuffer> buffer_;
-  uint32_t num_bytes_to_read_ = 0;
-  ReadCallback callback_;
-
-  // |reader_| is safe to be kept as a rawptr because |owner_| owns |this| and
-  // |reader_|, and |owner_| keeps |reader_| until it's destroyed.
-  const raw_ptr<storage::mojom::ServiceWorkerResourceReader> reader_;
-  const raw_ptr<ServiceWorkerCacheWriter> owner_;
-
-  // Mojo data pipe and the watcher is set up when Read() is called for the
-  // first time.
-  mojo::ScopedDataPipeConsumerHandle data_;
-  mojo::SimpleWatcher watcher_;
-  scoped_refptr<base::SequencedTaskRunner> task_runner_;
-
-  base::WeakPtrFactory<DataPipeReader> weak_factory_{this};
-};
-
 int ServiceWorkerCacheWriter::ReadDataHelper(
     storage::mojom::ServiceWorkerResourceReader* reader,
     std::unique_ptr<DataPipeReader>& data_pipe_reader,
@@ -815,7 +859,7 @@ int ServiceWorkerCacheWriter::WriteResponseHeadToResponseWriter(
     return net::ERR_FAILED;
   }
 
-  DCHECK(response_head);
+  CHECK(response_head, base::NotFatalUntil::M159);
   did_replace_ = true;
   net::CompletionOnceCallback run_callback = base::BindOnce(
       &ServiceWorkerCacheWriter::AsyncDoLoop, weak_factory_.GetWeakPtr());
@@ -831,11 +875,11 @@ int ServiceWorkerCacheWriter::WriteResponseHeadToResponseWriter(
 
 int ServiceWorkerCacheWriter::WriteResponseHead(
     network::mojom::URLResponseHeadPtr response_head) {
-  DCHECK(response_head);
+  CHECK(response_head, base::NotFatalUntil::M159);
   if (write_observer_) {
     int result = write_observer_->WillWriteResponseHead(*response_head);
     if (result != net::OK) {
-      DCHECK_NE(result, net::ERR_IO_PENDING);
+      CHECK_NE(result, net::ERR_IO_PENDING, base::NotFatalUntil::M159);
       state_ = STATE_DONE;
       return result;
     }
@@ -859,11 +903,10 @@ int ServiceWorkerCacheWriter::WriteDataToResponseWriter(
   // If |checksum_update_timing_| is kAlways, the checksum update should be
   // handled in MaybeWriteData().
   if (checksum_update_timing_ == ChecksumUpdateTiming::kCacheMismatch) {
-    checksum_->Update(data->data(), length);
+    checksum_.Update(data->first(length));
   }
 
-  mojo_base::BigBuffer big_buffer(
-      base::as_bytes(base::make_span(data->data(), length)));
+  mojo_base::BigBuffer big_buffer(base::as_bytes(data->first(length)));
   writer_->WriteData(
       std::move(big_buffer),
       base::BindOnce(&AsyncOnlyCompletionCallbackAdaptor::WrappedCallback,
@@ -898,7 +941,7 @@ void ServiceWorkerCacheWriter::OnWillWriteDataCompleted(
     scoped_refptr<net::IOBuffer> data,
     size_t length,
     net::Error error) {
-  DCHECK_NE(error, net::ERR_IO_PENDING);
+  CHECK_NE(error, net::ERR_IO_PENDING, base::NotFatalUntil::M159);
   io_pending_ = false;
   if (error != net::OK) {
     state_ = STATE_DONE;
@@ -936,18 +979,16 @@ void ServiceWorkerCacheWriter::AsyncDoLoop(int result) {
     return;
   }
   if (state_ == STATE_PAUSING) {
-    DCHECK(pause_when_not_identical_);
+    CHECK(pause_when_not_identical_, base::NotFatalUntil::M159);
     OnWriteCompleteCallback callback = std::move(pending_callback_);
     std::move(callback).Run(net::ERR_IO_PENDING);
   }
 }
 
 std::string ServiceWorkerCacheWriter::GetSha256Checksum() {
-  DCHECK_EQ(STATE_DONE, state_);
-  DCHECK(checksum_);
-  uint8_t result[crypto::kSHA256Length];
-  checksum_->Finish(result, crypto::kSHA256Length);
-  checksum_ = nullptr;
+  CHECK_EQ(STATE_DONE, state_, base::NotFatalUntil::M159);
+  std::array<uint8_t, crypto::hash::kSha256Size> result;
+  checksum_.Finish(result);
   return base::HexEncode(result);
 }
 

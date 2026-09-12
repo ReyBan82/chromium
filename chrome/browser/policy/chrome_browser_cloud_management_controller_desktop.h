@@ -5,24 +5,30 @@
 #ifndef CHROME_BROWSER_POLICY_CHROME_BROWSER_CLOUD_MANAGEMENT_CONTROLLER_DESKTOP_H_
 #define CHROME_BROWSER_POLICY_CHROME_BROWSER_CLOUD_MANAGEMENT_CONTROLLER_DESKTOP_H_
 
-#include "components/enterprise/browser/controller/chrome_browser_cloud_management_controller.h"
+#include <stdint.h>
+
+#include <map>
+#include <vector>
 
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/policy/cbcm_invalidations_initializer.h"
-
-class DeviceIdentityProvider;
+#include "components/enterprise/browser/controller/chrome_browser_cloud_management_controller.h"
+#include "components/enterprise/client_certificates/core/prefs_certificate_store.h"
+#include "extensions/buildflags/buildflags.h"
 
 namespace instance_id {
 class InstanceIDDriver;
 }
 
 namespace invalidation {
-class FCMInvalidationService;
-}
+class InvalidationListener;
+}  // namespace invalidation
 
 namespace policy {
 class ChromeBrowserCloudManagementRegisterWatcher;
 class CloudPolicyInvalidator;
+class ExtensionInstallPolicyInvalidator;
+class FmRegistrationTokenUploader;
 class RemoteCommandsInvalidator;
 
 // Desktop implementation of the platform-specific operations of CBCMController.
@@ -44,6 +50,8 @@ class ChromeBrowserCloudManagementControllerDesktop
   base::FilePath GetExternalPolicyDir() override;
   NetworkConnectionTrackerGetter CreateNetworkConnectionTrackerGetter()
       override;
+  // TODO(crbug.com/341377023): Check if any other service needs the factory
+  // initialized.
   void InitializeOAuthTokenFactory(
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
       PrefService* local_state) override;
@@ -63,6 +71,10 @@ class ChromeBrowserCloudManagementControllerDesktop
       override;
   std::unique_ptr<enterprise_reporting::ReportingDelegateFactory>
   GetReportingDelegateFactory() override;
+  std::unique_ptr<enterprise_reporting::SaasUsageReportingDelegateFactory>
+  GetSaasUsageReportingDelegateFactory() override;
+  std::unique_ptr<enterprise_reporting::BrowserLaunchEventController>
+  CreateBrowserLaunchEventController() override;
   void SetGaiaURLLoaderFactory(scoped_refptr<network::SharedURLLoaderFactory>
                                    url_loader_factory) override;
   bool ReadyToCreatePolicyManager() override;
@@ -70,6 +82,8 @@ class ChromeBrowserCloudManagementControllerDesktop
   std::unique_ptr<ClientDataDelegate> CreateClientDataDelegate() override;
   std::unique_ptr<enterprise_connectors::DeviceTrustKeyManager>
   CreateDeviceTrustKeyManager() override;
+  std::unique_ptr<client_certificates::CertificateProvisioningService>
+  CreateCertificateProvisioningService() override;
 
   // CBCMInvalidationsInitializer::Delegate:
   // Starts the services required for Policy Invalidations over FCM to be
@@ -77,6 +91,8 @@ class ChromeBrowserCloudManagementControllerDesktop
   void StartInvalidations() override;
   scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory() override;
   bool IsInvalidationsServiceStarted() const override;
+  void StartExtensionInstallPolicyInvalidator() override;
+  bool CanStartExtensionInstallPolicyInvalidator() const override;
 
  private:
   std::unique_ptr<ChromeBrowserCloudManagementRegisterWatcher>
@@ -85,13 +101,22 @@ class ChromeBrowserCloudManagementControllerDesktop
   // These objects are all involved in Policy Invalidations.
   CBCMInvalidationsInitializer invalidations_initializer_;
   scoped_refptr<network::SharedURLLoaderFactory> gaia_url_loader_factory_;
-  std::unique_ptr<DeviceIdentityProvider> identity_provider_;
   std::unique_ptr<instance_id::InstanceIDDriver> device_instance_id_driver_;
-  std::unique_ptr<invalidation::FCMInvalidationService> invalidation_service_;
+  std::map<int64_t, std::unique_ptr<invalidation::InvalidationListener>>
+      invalidation_listener_per_project_;
   std::unique_ptr<CloudPolicyInvalidator> policy_invalidator_;
+#if BUILDFLAG(ENABLE_EXTENSIONS)
+  std::unique_ptr<ExtensionInstallPolicyInvalidator>
+      extension_install_invalidator_;
+#endif
+  std::vector<std::unique_ptr<FmRegistrationTokenUploader>>
+      fm_registration_token_uploaders_;
 
   // This invalidator is responsible for receiving remote commands invalidations
   std::unique_ptr<RemoteCommandsInvalidator> commands_invalidator_;
+
+  // Responsible for storing and retrieving browser-level managed identities.
+  std::unique_ptr<client_certificates::CertificateStore> certificate_store_;
 };
 
 }  // namespace policy

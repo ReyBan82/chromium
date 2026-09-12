@@ -4,10 +4,11 @@
 
 #include "mojo/public/cpp/bindings/lib/send_message_helper.h"
 
-#include <cstring>
 #include <tuple>
+#include <utility>
 
 #include "base/trace_event/typed_macros.h"
+#include "mojo/public/cpp/bindings/lib/responder_thunk.h"
 #include "mojo/public/cpp/bindings/message.h"
 
 namespace mojo {
@@ -17,7 +18,7 @@ void SendMojoMessage(MessageReceiver& receiver, Message& message) {
   uint64_t flow_id = message.GetTraceId();
   bool is_sync_non_response = message.has_flag(Message::kFlagIsSync) &&
                               !message.has_flag(Message::kFlagIsResponse);
-  TRACE_EVENT_INSTANT("toplevel.flow", "Send mojo message",
+  TRACE_EVENT_INSTANT("toplevel.flow,mojom.flow", "Send mojo message",
                       perfetto::Flow::Global(flow_id));
 
   std::ignore = receiver.Accept(&message);
@@ -25,7 +26,7 @@ void SendMojoMessage(MessageReceiver& receiver, Message& message) {
   // If this is a sync message which has received just received a reply, connect
   // the point which received the sync reply (us) to the flow.
   if (is_sync_non_response) {
-    TRACE_EVENT_INSTANT("toplevel.flow", "Receive mojo sync reply",
+    TRACE_EVENT_INSTANT("toplevel.flow,mojom.flow", "Receive mojo sync reply",
                         perfetto::Flow::Global(flow_id));
   }
 }
@@ -36,7 +37,7 @@ void SendMojoMessage(MessageReceiverWithResponder& receiver,
   uint64_t flow_id = message.GetTraceId();
   bool is_sync_non_response = message.has_flag(Message::kFlagIsSync) &&
                               !message.has_flag(Message::kFlagIsResponse);
-  TRACE_EVENT_INSTANT("toplevel.flow", "Send mojo message",
+  TRACE_EVENT_INSTANT("toplevel.flow,mojom.flow", "Send mojo message",
                       perfetto::Flow::Global(flow_id));
 
   std::ignore = receiver.AcceptWithResponder(&message, std::move(responder));
@@ -44,9 +45,17 @@ void SendMojoMessage(MessageReceiverWithResponder& receiver,
   // If this is a sync message which has received just received a reply, connect
   // the point which received the sync reply (us) to the flow.
   if (is_sync_non_response) {
-    TRACE_EVENT_INSTANT("toplevel.flow", "Receive mojo sync reply",
+    TRACE_EVENT_INSTANT("toplevel.flow,mojom.flow", "Receive mojo sync reply",
                         perfetto::Flow::Global(flow_id));
   }
+}
+
+void SendMojoMessage(ResponderThunk& responder, Message& message) {
+  uint64_t flow_id = message.GetTraceId();
+  TRACE_EVENT_INSTANT("toplevel.flow,mojom.flow", "Send mojo message",
+                      perfetto::Flow::Global(flow_id));
+
+  std::ignore = responder.Accept(&message);
 }
 
 }  // namespace internal

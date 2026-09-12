@@ -23,6 +23,8 @@
     Exposed=Window
 ] interface DocumentFragment : Node {
   [CallWith=Document] constructor();
+
+  // No DOM Parts API
 };
 
 DocumentFragment includes ParentNode;

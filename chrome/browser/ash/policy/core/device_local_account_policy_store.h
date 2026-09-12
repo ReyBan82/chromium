@@ -9,7 +9,8 @@
 #include <string>
 
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/settings/device_settings_service.h"
 #include "chromeos/ash/components/dbus/session_manager/session_manager_client.h"
@@ -34,7 +35,8 @@ class DeviceLocalAccountPolicyStore : public UserCloudPolicyStoreBase {
       const std::string& account_id,
       ash::SessionManagerClient* client,
       ash::DeviceSettingsService* device_settings_service,
-      scoped_refptr<base::SequencedTaskRunner> background_task_runner);
+      scoped_refptr<base::SequencedTaskRunner> background_task_runner,
+      scoped_refptr<base::SequencedTaskRunner> first_load_task_runner);
 
   DeviceLocalAccountPolicyStore(const DeviceLocalAccountPolicyStore&) = delete;
   DeviceLocalAccountPolicyStore& operator=(
@@ -56,7 +58,7 @@ class DeviceLocalAccountPolicyStore : public UserCloudPolicyStoreBase {
 
  protected:
   // UserCloudPolicyStoreBase:
-  std::unique_ptr<UserCloudPolicyValidator> CreateValidator(
+  std::unique_ptr<CloudPolicyValidatorBase> CreateValidator(
       std::unique_ptr<enterprise_management::PolicyFetchResponse> policy,
       CloudPolicyValidatorBase::ValidateTimestampOption option) override;
 
@@ -64,7 +66,7 @@ class DeviceLocalAccountPolicyStore : public UserCloudPolicyStoreBase {
   // The callback invoked once policy validation is complete. Passed are the
   // used public key and the validator.
   using ValidateCompletionCallback =
-      base::OnceCallback<void(const std::string&, UserCloudPolicyValidator*)>;
+      base::OnceCallback<void(const std::string&, CloudPolicyValidatorBase*)>;
 
   // Called back by |session_manager_client_| after policy retrieval. Checks for
   // success and triggers policy validation.
@@ -75,12 +77,12 @@ class DeviceLocalAccountPolicyStore : public UserCloudPolicyStoreBase {
 
   // Updates state after validation and notifies observers.
   void UpdatePolicy(const std::string& signature_validation_public_key,
-                    UserCloudPolicyValidator* validator);
+                    CloudPolicyValidatorBase* validator);
 
   // Sends the policy blob to session_manager for storing after validation.
   void OnPolicyToStoreValidated(
       const std::string& signature_validation_public_key_unused,
-      UserCloudPolicyValidator* validator);
+      CloudPolicyValidatorBase* validator);
 
   // Called back when a store operation completes, updates state and reloads the
   // policy if applicable.
@@ -101,9 +103,14 @@ class DeviceLocalAccountPolicyStore : public UserCloudPolicyStoreBase {
       bool validate_in_background,
       ash::DeviceSettingsService::OwnershipStatus ownership_status);
 
+  scoped_refptr<base::SequencedTaskRunner> GetValidationTaskRunner() const;
+
+  // Hish priority task runner to be used for the first policy load.
+  scoped_refptr<base::SequencedTaskRunner> first_load_task_runner_;
+
   const std::string account_id_;
-  ash::SessionManagerClient* session_manager_client_;
-  ash::DeviceSettingsService* device_settings_service_;
+  raw_ptr<ash::SessionManagerClient> session_manager_client_;
+  raw_ptr<ash::DeviceSettingsService> device_settings_service_;
 
   base::WeakPtrFactory<DeviceLocalAccountPolicyStore> weak_factory_{this};
 };

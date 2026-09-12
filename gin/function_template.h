@@ -6,6 +6,8 @@
 #define GIN_FUNCTION_TEMPLATE_H_
 
 #include <stddef.h>
+
+#include <type_traits>
 #include <utility>
 
 #include "base/check.h"
@@ -15,9 +17,12 @@
 #include "gin/arguments.h"
 #include "gin/converter.h"
 #include "gin/gin_export.h"
-#include "v8/include/v8-external.h"
+#include "gin/public/wrappable_pointer_tags.h"
+#include "gin/wrappable.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/cppgc/macros.h"
+#include "v8/include/v8-cppgc.h"
 #include "v8/include/v8-forward.h"
-#include "v8/include/v8-persistent-handle.h"
 #include "v8/include/v8-template.h"
 
 namespace gin {
@@ -29,18 +34,26 @@ struct InvokerOptions {
 
 namespace internal {
 
-template<typename T>
+template <typename T>
 struct CallbackParamTraits {
   typedef T LocalType;
 };
-template<typename T>
+template <typename T>
 struct CallbackParamTraits<const T&> {
   typedef T LocalType;
 };
-template<typename T>
+template <typename T>
 struct CallbackParamTraits<const T*> {
   typedef T* LocalType;
 };
+
+// kSignatureId provides a unique memory address for each function signature.
+// This identifier is stored in CallbackHolderBase and used for runtime type
+// checks before casting to a specific CallbackHolder in DispatchToCallbackImpl.
+// This allows all gin callbacks to share a single WrappablePointerTag tag,
+// avoiding the need to register unique tags for every possible signature.
+template <typename Sig>
+inline constexpr int kSignatureId = 0;
 
 // CallbackHolder and CallbackHolderBase are used to pass a
 // base::RepeatingCallback from CreateFunctionTemplate through v8 (via
@@ -48,33 +61,32 @@ struct CallbackParamTraits<const T*> {
 
 // This simple base class is used so that we can share a single object template
 // among every CallbackHolder instance.
-class GIN_EXPORT CallbackHolderBase {
+class GIN_EXPORT CallbackHolderBase : public Wrappable<CallbackHolderBase> {
  public:
+  static constexpr WrapperInfo kWrapperInfo = {{kEmbedderNativeGin},
+                                               kCallbackHolderBase};
+
   CallbackHolderBase(const CallbackHolderBase&) = delete;
   CallbackHolderBase& operator=(const CallbackHolderBase&) = delete;
 
-  v8::Local<v8::External> GetHandle(v8::Isolate* isolate);
+  const WrapperInfo* wrapper_info() const override;
+
+  uintptr_t type_identifier() const { return type_identifier_; }
 
  protected:
-  explicit CallbackHolderBase(v8::Isolate* isolate);
-  virtual ~CallbackHolderBase();
+  explicit CallbackHolderBase(const uintptr_t type_identifier);
+  ~CallbackHolderBase() override;
 
  private:
-  static void FirstWeakCallback(
-      const v8::WeakCallbackInfo<CallbackHolderBase>& data);
-  static void SecondWeakCallback(
-      const v8::WeakCallbackInfo<CallbackHolderBase>& data);
-
-  v8::Global<v8::External> v8_ref_;
+  uintptr_t type_identifier_;
 };
 
-template<typename Sig>
+template <typename Sig>
 class CallbackHolder : public CallbackHolderBase {
  public:
-  CallbackHolder(v8::Isolate* isolate,
-                 base::RepeatingCallback<Sig> callback,
+  CallbackHolder(base::RepeatingCallback<Sig> callback,
                  InvokerOptions invoker_options)
-      : CallbackHolderBase(isolate),
+      : CallbackHolderBase(reinterpret_cast<uintptr_t>(&kSignatureId<Sig>)),
         callback(std::move(callback)),
         invoker_options(std::move(invoker_options)) {}
   CallbackHolder(const CallbackHolder&) = delete;
@@ -83,7 +95,6 @@ class CallbackHolder : public CallbackHolderBase {
   base::RepeatingCallback<Sig> callback;
   InvokerOptions invoker_options;
 
- private:
   ~CallbackHolder() override = default;
 };
 
@@ -132,8 +143,11 @@ GIN_EXPORT void ThrowConversionError(Arguments* args,
 
 // Class template for extracting and storing single argument for callback
 // at position |index|.
-template <size_t index, typename ArgType>
+template <size_t index, typename ArgType, typename = void>
 struct ArgumentHolder {
+  CPPGC_STACK_ALLOCATED();
+
+ public:
   using ArgLocalType = typename CallbackParamTraits<ArgType>::LocalType;
 
   ArgLocalType value;
@@ -141,8 +155,36 @@ struct ArgumentHolder {
 
   ArgumentHolder(Arguments* args, const InvokerOptions& invoker_options)
       : ok(GetNextArgument(args, invoker_options, index == 0, &value)) {
-    if (!ok)
+    if (!ok) {
       ThrowConversionError(args, invoker_options, index);
+    }
+  }
+};
+
+// This is required for types such as v8::LocalVector<T>, which don't have
+// a default constructor. To create an element of such a type, the isolate
+// has to be provided.
+template <size_t index, typename ArgType>
+  requires(
+      !std::is_default_constructible_v<
+          typename CallbackParamTraits<ArgType>::LocalType> &&
+      std::is_constructible_v<typename CallbackParamTraits<ArgType>::LocalType,
+                              v8::Isolate*>)
+struct ArgumentHolder<index, ArgType> {
+  CPPGC_STACK_ALLOCATED();
+
+ public:
+  using ArgLocalType = typename CallbackParamTraits<ArgType>::LocalType;
+
+  ArgLocalType value;
+  bool ok;
+
+  ArgumentHolder(Arguments* args, const InvokerOptions& invoker_options)
+      : value(args->isolate()),
+        ok(GetNextArgument(args, invoker_options, index == 0, &value)) {
+    if (!ok) {
+      ThrowConversionError(args, invoker_options, index);
+    }
   }
 };
 
@@ -163,9 +205,7 @@ class Invoker<std::index_sequence<indices...>, ArgTypes...>
       : ArgumentHolder<indices, ArgTypes>(args, invoker_options)...,
         args_(args) {}
 
-  bool IsOK() {
-    return And(ArgumentHolder<indices, ArgTypes>::ok...);
-  }
+  bool IsOK() { return And(ArgumentHolder<indices, ArgTypes>::ok...); }
 
   template <typename ReturnType>
   void DispatchToCallback(
@@ -199,18 +239,21 @@ struct Dispatcher {};
 template <typename ReturnType, typename... ArgTypes>
 struct Dispatcher<ReturnType(ArgTypes...)> {
   static void DispatchToCallbackImpl(Arguments* args) {
-    v8::Local<v8::External> v8_holder;
-    CHECK(args->GetData(&v8_holder));
-    CallbackHolderBase* holder_base = reinterpret_cast<CallbackHolderBase*>(
-        v8_holder->Value());
+    CallbackHolderBase* holder_base = nullptr;
+    CHECK(args->GetData(&holder_base));
+    CHECK(holder_base);
 
     typedef CallbackHolder<ReturnType(ArgTypes...)> HolderT;
+    CHECK_EQ(
+        holder_base->type_identifier(),
+        reinterpret_cast<uintptr_t>(&kSignatureId<ReturnType(ArgTypes...)>));
     HolderT* holder = static_cast<HolderT*>(holder_base);
 
     using Indices = std::index_sequence_for<ArgTypes...>;
     Invoker<Indices, ArgTypes...> invoker(args, holder->invoker_options);
-    if (invoker.IsOK())
+    if (invoker.IsOK()) {
       invoker.DispatchToCallback(holder->callback);
+    }
   }
 
   static void DispatchToCallback(
@@ -242,19 +285,26 @@ struct Dispatcher<ReturnType(ArgTypes...)> {
 // internal reasons, thus it is generally a good idea to cache the template
 // returned by this function.  Otherwise, repeated method invocations from JS
 // will create substantial memory leaks. See http://crbug.com/463487.
+//
+// The callback will be destroyed if either the function template gets garbage
+// collected or _after_ the isolate is disposed. Garbage collection can never be
+// relied upon. As such, any destructors for objects bound to the callback must
+// not depend on the isolate being alive at the point they are called. The order
+// in which callbacks are destroyed is not guaranteed.
 template <typename Sig>
 v8::Local<v8::FunctionTemplate> CreateFunctionTemplate(
     v8::Isolate* isolate,
     base::RepeatingCallback<Sig> callback,
     InvokerOptions invoker_options = {}) {
   typedef internal::CallbackHolder<Sig> HolderT;
-  HolderT* holder =
-      new HolderT(isolate, std::move(callback), std::move(invoker_options));
+  HolderT* holder = cppgc::MakeGarbageCollected<HolderT>(
+      isolate->GetCppHeap()->GetAllocationHandle(), std::move(callback),
+      std::move(invoker_options));
 
   v8::Local<v8::FunctionTemplate> tmpl = v8::FunctionTemplate::New(
       isolate, &internal::Dispatcher<Sig>::DispatchToCallback,
-      ConvertToV8<v8::Local<v8::External>>(isolate, holder->GetHandle(isolate)),
-      v8::Local<v8::Signature>(), 0, v8::ConstructorBehavior::kThrow);
+      ConvertToV8(isolate, holder).ToLocalChecked(), v8::Local<v8::Signature>(),
+      0, v8::ConstructorBehavior::kThrow);
   return tmpl;
 }
 
@@ -271,11 +321,11 @@ CreateDataPropertyCallback(v8::Isolate* isolate,
                            base::RepeatingCallback<Sig> callback,
                            InvokerOptions invoker_options = {}) {
   typedef internal::CallbackHolder<Sig> HolderT;
-  HolderT* holder =
-      new HolderT(isolate, std::move(callback), std::move(invoker_options));
+  HolderT* holder = cppgc::MakeGarbageCollected<HolderT>(
+      isolate->GetCppHeap()->GetAllocationHandle(), std::move(callback),
+      std::move(invoker_options));
   return {&internal::Dispatcher<Sig>::DispatchToCallbackForProperty,
-          ConvertToV8<v8::Local<v8::External>>(isolate,
-                                               holder->GetHandle(isolate))};
+          ConvertToV8(isolate, holder).ToLocalChecked()};
 }
 
 }  // namespace gin

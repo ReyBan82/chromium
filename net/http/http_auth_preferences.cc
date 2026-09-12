@@ -5,10 +5,11 @@
 #include "net/http/http_auth_preferences.h"
 
 #include <utility>
+#include <vector>
 
 #include "base/strings/string_split.h"
+#include "base/strings/string_util.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "net/http/http_auth_filter.h"
 #include "net/http/url_security_manager.h"
 
@@ -39,11 +40,11 @@ std::string HttpAuthPreferences::AuthAndroidNegotiateAccountType() const {
 }
 #endif  // BUILDFLAG(IS_ANDROID)
 
-#if BUILDFLAG(IS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
 bool HttpAuthPreferences::AllowGssapiLibraryLoad() const {
   return allow_gssapi_library_load_;
 }
-#endif  // BUILDFLAG(IS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
 
 bool HttpAuthPreferences::CanUseDefaultCredentials(
     const url::SchemeHostPort& auth_scheme_host_port) const {
@@ -66,6 +67,18 @@ DelegationType HttpAuthPreferences::GetDelegationType(
 
 void HttpAuthPreferences::SetAllowDefaultCredentials(DefaultCredentials creds) {
   allow_default_credentials_ = creds;
+}
+
+void HttpAuthPreferences::SetAllowedSchemes(
+    const std::optional<base::flat_set<std::string>>& allowed_schemes) {
+  if (allowed_schemes) {
+    allowed_schemes_ = base::MakeFlatSet<std::string>(
+        *allowed_schemes,
+        /*comp=*/{},
+        [](const auto& scheme) { return base::ToLowerASCII(scheme); });
+  } else {
+    allowed_schemes_ = std::nullopt;
+  }
 }
 
 bool HttpAuthPreferences::IsAllowedToUseAllHttpAuthSchemes(

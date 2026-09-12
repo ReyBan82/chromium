@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "ash/constants/ash_features.h"
 #include "ash/webui/os_feedback_ui/backend/histogram_util.h"
 #include "ash/webui/os_feedback_ui/backend/os_feedback_delegate.h"
 #include "ash/webui/os_feedback_ui/mojom/os_feedback_ui.mojom.h"
@@ -45,7 +46,7 @@ void EmitTimeOnEachPageMetrics(
   }
 }
 
-bool IsInternalAccount(const absl::optional<std::string>& email) {
+bool IsInternalAccount(const std::optional<std::string>& email) {
   return email.has_value() && gaia::IsGoogleInternalAccountEmail(email.value());
 }
 
@@ -71,8 +72,9 @@ void FeedbackServiceProvider::GetFeedbackContext(
   FeedbackContextPtr feedback_context = FeedbackContext::New();
   feedback_context->page_url = feedback_delegate_->GetLastActivePageUrl();
   feedback_context->email = feedback_delegate_->GetSignedInUserEmail();
+  feedback_context->wifi_debug_logs_allowed =
+      feedback_delegate_->IsWifiDebugLogsAllowed();
   feedback_context->trace_id = feedback_delegate_->GetPerformanceTraceId();
-
   feedback_context->is_internal_account =
       IsInternalAccount(feedback_context->email);
   std::move(callback).Run(std::move(feedback_context));
@@ -106,6 +108,11 @@ void FeedbackServiceProvider::OpenMetricsDialog() {
 
 void FeedbackServiceProvider::OpenSystemInfoDialog() {
   feedback_delegate_->OpenSystemInfoDialog();
+}
+
+void FeedbackServiceProvider::OpenAutofillDialog(
+    const std::string& autofill_metadata) {
+  feedback_delegate_->OpenAutofillMetadataDialog(autofill_metadata);
 }
 
 void FeedbackServiceProvider::RecordPostSubmitAction(

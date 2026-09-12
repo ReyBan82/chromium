@@ -3,61 +3,35 @@
 // found in the LICENSE file.
 
 // clang-format off
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
-import {LanguagesBrowserProxyImpl, SettingsEditDictionaryPageElement} from 'chrome://settings/lazy_load.js';
-import {CrSettingsPrefs, SettingsPrefsElement} from 'chrome://settings/settings.js';
+import type {SettingsEditDictionaryPageElement} from 'chrome://settings/lazy_load.js';
+import {LanguagesBrowserProxyImpl} from 'chrome://settings/lazy_load.js';
+import {CrSettingsPrefs, PrefsBrowserProxy, PrefService} from 'chrome://settings/settings.js';
 import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+import {keyDownOn} from 'chrome://webui-test/keyboard_mock_interactions.js';
+import {microtasksFinished} from 'chrome://webui-test/test_util.js';
 
-import {FakeLanguageSettingsPrivate} from './fake_language_settings_private.js';
-import {FakeSettingsPrivate} from './fake_settings_private.js';
+import {FakeLanguageSettingsPrivate, getFakeLanguagePrefs} from './fake_language_settings_private.js';
 import {TestLanguagesBrowserProxy} from './test_languages_browser_proxy.js';
+import {TestPrefsBrowserProxy} from './test_prefs_browser_proxy.js';
 
 // clang-format on
 
-suite('settings-edit-dictionary-page', function() {
-  function getFakePrefs() {
-    const fakePrefs = [
-      {
-        key: 'intl.app_locale',
-        type: chrome.settingsPrivate.PrefType.STRING,
-        value: 'en-US',
-      },
-      {
-        key: 'intl.accept_languages',
-        type: chrome.settingsPrivate.PrefType.STRING,
-        value: 'en-US,sw',
-      },
-      {
-        key: 'spellcheck.dictionaries',
-        type: chrome.settingsPrivate.PrefType.LIST,
-        value: ['en-US'],
-      },
-      {
-        key: 'translate_blocked_languages',
-        type: chrome.settingsPrivate.PrefType.LIST,
-        value: ['en-US'],
-      },
-    ];
-    return fakePrefs;
-  }
-
+suite('EditDictionaryPage', function() {
   let editDictPage: SettingsEditDictionaryPageElement;
   let languageSettingsPrivate: FakeLanguageSettingsPrivate;
-  let settingsPrefs: SettingsPrefsElement;
 
   suiteSetup(function() {
     CrSettingsPrefs.deferInitialization = true;
   });
 
-  setup(function() {
+  setup(async function() {
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
-    settingsPrefs = document.createElement('settings-prefs');
-    const settingsPrivate = new FakeSettingsPrivate(getFakePrefs()) as
-        unknown as typeof chrome.settingsPrivate;
-    settingsPrefs.initialize(settingsPrivate);
+    const prefsBrowserProxy = new TestPrefsBrowserProxy(getFakeLanguagePrefs());
+    PrefsBrowserProxy.setInstance(prefsBrowserProxy);
+    PrefService.resetInstanceForTesting();
+    await PrefService.getInstance().whenInitialized();
 
     languageSettingsPrivate = new FakeLanguageSettingsPrivate();
-    languageSettingsPrivate.setSettingsPrefs(settingsPrefs);
     const browserProxy = new TestLanguagesBrowserProxy();
     LanguagesBrowserProxyImpl.setInstance(browserProxy);
     browserProxy.setLanguageSettingsPrivate(
@@ -65,22 +39,19 @@ suite('settings-edit-dictionary-page', function() {
         typeof chrome.languageSettingsPrivate);
 
     editDictPage = document.createElement('settings-edit-dictionary-page');
-
-    // Prefs would normally be data-bound to settings-languages.
     document.body.appendChild(editDictPage);
+    return languageSettingsPrivate.whenCalled('getSpellcheckWords');
   });
 
-  teardown(function() {
-    editDictPage.remove();
-  });
-
-  test('add word validation', function() {
+  test('add word validation', async () => {
     // Check addWord enable/disable logic
     const addWordButton = editDictPage.$.addWord;
     assertTrue(!!addWordButton);
     editDictPage.$.newWord.value = '';
+    await microtasksFinished();
     assertTrue(addWordButton.disabled);
     editDictPage.$.newWord.value = 'valid word';
+    await microtasksFinished();
     assertFalse(addWordButton.disabled);
     assertFalse(
         window.getComputedStyle(addWordButton)
@@ -88,77 +59,160 @@ suite('settings-edit-dictionary-page', function() {
         'none');  // Make sure add-word button actually clickable.
   });
 
-  test('add duplicate word', function() {
+  test('add duplicate word', async () => {
     const WORD = 'unique';
     languageSettingsPrivate.onCustomDictionaryChanged.callListeners([WORD], []);
     editDictPage.$.newWord.value = `${WORD} ${WORD}`;
-    flush();
+    await microtasksFinished();
     assertFalse(editDictPage.$.addWord.disabled);
 
     editDictPage.$.newWord.value = WORD;
-    flush();
+    await microtasksFinished();
     assertTrue(editDictPage.$.addWord.disabled);
 
     languageSettingsPrivate.onCustomDictionaryChanged.callListeners([], [WORD]);
-    flush();
+    await microtasksFinished();
     assertFalse(editDictPage.$.addWord.disabled);
+  });
+
+  test('Enter/Escape key event', async () => {
+    // Add a new word by pressing Enter.
+    const WORD = 'testEnter';
+    editDictPage.$.newWord.value = WORD;
+    await microtasksFinished();
+    keyDownOn(editDictPage.$.newWord, 0, [], 'Enter');
+    assertEquals(
+        WORD, await languageSettingsPrivate.whenCalled('addSpellcheckWord'));
+
+    await microtasksFinished();
+
+    // Clear input by pressing Escape.
+    editDictPage.$.newWord.value = 'testEscape';
+    await microtasksFinished();
+    keyDownOn(editDictPage.$.newWord, 0, [], 'Escape');
+    await microtasksFinished();
+    assertEquals('', editDictPage.$.newWord.value);
   });
 
   test('spellcheck edit dictionary page message when empty', async function() {
     assertTrue(!!editDictPage);
     await languageSettingsPrivate.whenCalled('getSpellcheckWords');
 
-    flush();
+    await microtasksFinished();
 
     assertFalse(editDictPage.$.noWordsLabel.hidden);
-    assertFalse(!!editDictPage.shadowRoot!.querySelector('iron-list'));
+    assertFalse(!!editDictPage.shadowRoot.querySelector('#list'));
   });
 
-  test('spellcheck edit dictionary page list has words', function() {
+  test('spellcheck edit dictionary page list has words', async () => {
     const addWordButton = editDictPage.$.addWord;
     editDictPage.$.newWord.value = 'valid word';
+    await microtasksFinished();
     addWordButton.click();
+    await microtasksFinished();
     editDictPage.$.newWord.value = 'valid word2';
+    await microtasksFinished();
     addWordButton.click();
-    flush();
+    await microtasksFinished();
 
     assertTrue(editDictPage.$.noWordsLabel.hidden);
-    assertTrue(!!editDictPage.shadowRoot!.querySelector('iron-list'));
-    assertEquals(
-        2, editDictPage.shadowRoot!.querySelector('iron-list')!.items!.length);
+    assertTrue(!!editDictPage.shadowRoot.querySelector('#list'));
+    assertEquals(2, editDictPage.shadowRoot.querySelectorAll('.word').length);
   });
 
-  test('spellcheck edit dictionary page remove is in tab order', function() {
+  test('spellcheck edit dictionary page remove is in tab order', async () => {
     const addWordButton = editDictPage.$.addWord;
     editDictPage.$.newWord.value = 'valid word';
+    await microtasksFinished();
     addWordButton.click();
-    flush();
+    await microtasksFinished();
 
     assertTrue(editDictPage.$.noWordsLabel.hidden);
-    assertTrue(!!editDictPage.shadowRoot!.querySelector('iron-list'));
-    assertEquals(
-        1, editDictPage.shadowRoot!.querySelector('iron-list')!.items!.length);
+    assertTrue(!!editDictPage.shadowRoot.querySelector('#list'));
+    assertEquals(1, editDictPage.shadowRoot.querySelectorAll('.word').length);
 
     const removeWordButton =
-        editDictPage.shadowRoot!.querySelector('cr-icon-button')!;
+        editDictPage.shadowRoot.querySelector('cr-icon-button')!;
     // Button should be reachable in the tab order.
     assertEquals('0', removeWordButton.getAttribute('tabindex'));
     removeWordButton.click();
-    flush();
+    await microtasksFinished();
 
     assertFalse(editDictPage.$.noWordsLabel.hidden);
 
     editDictPage.$.newWord.value = 'valid word2';
+    await microtasksFinished();
     addWordButton.click();
-    flush();
+    await microtasksFinished();
 
     assertTrue(editDictPage.$.noWordsLabel.hidden);
-    assertTrue(!!editDictPage.shadowRoot!.querySelector('iron-list'));
-    assertEquals(
-        1, editDictPage.shadowRoot!.querySelector('iron-list')!.items!.length);
+    assertTrue(!!editDictPage.shadowRoot.querySelector('#list'));
+    assertEquals(1, editDictPage.shadowRoot.querySelectorAll('.word').length);
     const newRemoveWordButton =
-        editDictPage.shadowRoot!.querySelector('cr-icon-button')!;
+        editDictPage.shadowRoot.querySelector('cr-icon-button')!;
     // Button should be reachable in the tab order.
     assertEquals('0', newRemoveWordButton.getAttribute('tabindex'));
+  });
+
+  test('EditDictionaryPageFocusgroup', async () => {
+    const addWordButton = editDictPage.$.addWord;
+    editDictPage.$.newWord.value = 'valid word';
+    await microtasksFinished();
+    addWordButton.click();
+    await microtasksFinished();
+
+    const list = editDictPage.shadowRoot.querySelector('#list')!;
+    assertEquals('listbox block', list.getAttribute('focusgroup'));
+  });
+});
+
+suite('EditDictionaryPageFocus', function() {
+  let editDictPage: SettingsEditDictionaryPageElement;
+  let languageSettingsPrivate: FakeLanguageSettingsPrivate;
+
+  suiteSetup(function() {
+    CrSettingsPrefs.deferInitialization = true;
+  });
+
+  setup(async function() {
+    document.body.innerHTML = window.trustedTypes!.emptyHTML;
+    const prefsBrowserProxy = new TestPrefsBrowserProxy(getFakeLanguagePrefs());
+    PrefsBrowserProxy.setInstance(prefsBrowserProxy);
+    PrefService.resetInstanceForTesting();
+    await PrefService.getInstance().whenInitialized();
+
+    languageSettingsPrivate = new FakeLanguageSettingsPrivate();
+    const browserProxy = new TestLanguagesBrowserProxy();
+    LanguagesBrowserProxyImpl.setInstance(browserProxy);
+    browserProxy.setLanguageSettingsPrivate(
+        languageSettingsPrivate as unknown as
+        typeof chrome.languageSettingsPrivate);
+
+    editDictPage = document.createElement('settings-edit-dictionary-page');
+    document.body.appendChild(editDictPage);
+    return languageSettingsPrivate.whenCalled('getSpellcheckWords');
+  });
+
+  test('focus restored when last item deleted', async () => {
+    const addWordButton = editDictPage.$.addWord;
+    editDictPage.$.newWord.value = 'word1';
+    await microtasksFinished();
+    addWordButton.click();
+    await microtasksFinished();
+    editDictPage.$.newWord.value = 'word2';
+    await microtasksFinished();
+    addWordButton.click();
+    await microtasksFinished();
+
+    const buttons = editDictPage.shadowRoot.querySelectorAll('cr-icon-button');
+    assertEquals(2, buttons.length);
+
+    // Focus the second item's delete button and click it.
+    buttons[1]!.focus();
+    buttons[1]!.click();
+    await microtasksFinished();
+
+    // Focus should be restored to the remaining item's delete button.
+    assertEquals(buttons[0], editDictPage.shadowRoot.activeElement);
   });
 });

@@ -4,16 +4,23 @@
 
 #include "device/gamepad/gamepad_device_mac.h"
 
+#include <CoreFoundation/CoreFoundation.h>
 #import <Foundation/Foundation.h>
 
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_cftyperef.h"
+#include <algorithm>
+
+#include "base/apple/bridging.h"
+#include "base/apple/foundation_util.h"
+#include "base/apple/scoped_cftyperef.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/strings/sys_string_conversions.h"
 #include "device/gamepad/dualshock4_controller.h"
 #include "device/gamepad/gamepad_data_fetcher.h"
 #include "device/gamepad/gamepad_id_list.h"
 #include "device/gamepad/hid_haptic_gamepad.h"
 #include "device/gamepad/hid_writer_mac.h"
+#include "device/gamepad/public/cpp/gamepad.h"
 #include "device/gamepad/xbox_hid_controller.h"
 
 namespace device {
@@ -41,7 +48,8 @@ const int kRumbleMagnitudeMax = 10000;
 struct SpecialUsages {
   const uint16_t usage_page;
   const uint16_t usage;
-} kSpecialUsages[] = {
+};
+const std::array<SpecialUsages, 6> kSpecialUsages = {{
     // Xbox One S pre-FW update reports Xbox button as SystemMainMenu over BT.
     {kGenericDesktopUsagePage, kSystemMainMenuUsageNumber},
     // Power is used for the Guide button on the Nvidia Shield 2015 gamepad.
@@ -53,8 +61,7 @@ struct SpecialUsages {
     {kConsumerUsagePage, kHomeUsageNumber},
     {kConsumerUsagePage, kBackUsageNumber},
     {kConsumerUsagePage, kRecordUsageNumber},
-};
-const size_t kSpecialUsagesLen = std::size(kSpecialUsages);
+}};
 
 float NormalizeAxis(CFIndex value, CFIndex min, CFIndex max) {
   return (2.f * (value - min) / static_cast<float>(max - min)) - 1.f;
@@ -73,7 +80,7 @@ float NormalizeUInt32Axis(uint32_t value, uint32_t min, uint32_t max) {
 }
 
 GamepadBusType QueryBusType(IOHIDDeviceRef device) {
-  CFStringRef transport_cf = base::mac::CFCast<CFStringRef>(
+  CFStringRef transport_cf = base::apple::CFCast<CFStringRef>(
       IOHIDDeviceGetProperty(device, CFSTR(kIOHIDTransportKey)));
   if (transport_cf) {
     std::string transport = base::SysCFStringRefToUTF8(transport_cf);
@@ -91,12 +98,13 @@ GamepadBusType QueryBusType(IOHIDDeviceRef device) {
 
 GamepadDeviceMac::GamepadDeviceMac(int location_id,
                                    IOHIDDeviceRef device_ref,
-                                   base::StringPiece product_name,
+                                   std::string_view product_name,
                                    int vendor_id,
                                    int product_id)
     : location_id_(location_id),
       device_ref_(device_ref),
       bus_type_(QueryBusType(device_ref_)),
+      product_name_(product_name),
       ff_device_ref_(nullptr),
       ff_effect_ref_(nullptr) {
   auto gamepad_id =
@@ -177,20 +185,26 @@ bool GamepadDeviceMac::AddButtonsAndAxes(Gamepad* gamepad) {
 }
 
 bool GamepadDeviceMac::AddButtons(Gamepad* gamepad) {
-  base::ScopedCFTypeRef<CFArrayRef> elements_cf(IOHIDDeviceCopyMatchingElements(
-      device_ref_, nullptr, kIOHIDOptionsTypeNone));
-  NSArray* elements = base::mac::CFToNSCast(elements_cf);
-  DCHECK(elements);
   DCHECK(gamepad);
-  memset(gamepad->buttons, 0, sizeof(gamepad->buttons));
-  std::fill(button_elements_, button_elements_ + Gamepad::kButtonsLengthCap,
-            nullptr);
+  std::ranges::fill(gamepad->buttons, GamepadButton());
+  button_elements_.fill(nullptr);
 
-  std::vector<IOHIDElementRef> special_element(kSpecialUsagesLen, nullptr);
+  base::apple::ScopedCFTypeRef<CFArrayRef> elements(
+      IOHIDDeviceCopyMatchingElements(device_ref_, /*matching=*/nullptr,
+                                      kIOHIDOptionsTypeNone));
+  if (!elements) {
+    // IOHIDDeviceCopyMatchingElements returns nullptr if we don't have
+    // permission to access the referenced IOHIDDevice.
+    return false;
+  }
+
+  std::vector<IOHIDElementRef> special_element(kSpecialUsages.size(), nullptr);
   size_t button_count = 0;
   size_t unmapped_button_count = 0;
-  for (id elem in elements) {
-    IOHIDElementRef element = reinterpret_cast<IOHIDElementRef>(elem);
+
+  for (CFIndex i = 0; i < CFArrayGetCount(elements.get()); ++i) {
+    IOHIDElementRef element =
+        (IOHIDElementRef)CFArrayGetValueAtIndex(elements.get(), i);
     if (!CheckCollection(element))
       continue;
 
@@ -205,8 +219,9 @@ bool GamepadDeviceMac::AddButtons(Gamepad* gamepad) {
           continue;
 
         // Button index already assigned, ignore.
-        if (button_elements_[button_index])
+        if (button_elements_[button_index]) {
           continue;
+        }
 
         button_elements_[button_index] = element;
         gamepad->buttons[button_index].used = true;
@@ -214,7 +229,7 @@ bool GamepadDeviceMac::AddButtons(Gamepad* gamepad) {
       } else {
         // Check for common gamepad buttons that are not on the Button usage
         // page. Button indices are assigned in a second pass.
-        for (size_t special_index = 0; special_index < kSpecialUsagesLen;
+        for (size_t special_index = 0; special_index < kSpecialUsages.size();
              ++special_index) {
           const auto& special = kSpecialUsages[special_index];
           if (usage_page == special.usage_page && usage == special.usage) {
@@ -229,7 +244,7 @@ bool GamepadDeviceMac::AddButtons(Gamepad* gamepad) {
   if (unmapped_button_count > 0) {
     // Insert unmapped buttons at unused button indices.
     size_t button_index = 0;
-    for (size_t special_index = 0; special_index < kSpecialUsagesLen;
+    for (size_t special_index = 0; special_index < kSpecialUsages.size();
          ++special_index) {
       if (!special_element[special_index])
         continue;
@@ -256,17 +271,21 @@ bool GamepadDeviceMac::AddButtons(Gamepad* gamepad) {
 }
 
 bool GamepadDeviceMac::AddAxes(Gamepad* gamepad) {
-  base::ScopedCFTypeRef<CFArrayRef> elements_cf(IOHIDDeviceCopyMatchingElements(
-      device_ref_, nullptr, kIOHIDOptionsTypeNone));
-  NSArray* elements = base::mac::CFToNSCast(elements_cf);
-  DCHECK(elements);
   DCHECK(gamepad);
-  memset(gamepad->axes, 0, sizeof(gamepad->axes));
-  std::fill(axis_elements_, axis_elements_ + Gamepad::kAxesLengthCap, nullptr);
-  std::fill(axis_minimums_, axis_minimums_ + Gamepad::kAxesLengthCap, 0);
-  std::fill(axis_maximums_, axis_maximums_ + Gamepad::kAxesLengthCap, 0);
-  std::fill(axis_report_sizes_, axis_report_sizes_ + Gamepad::kAxesLengthCap,
-            0);
+  std::ranges::fill(gamepad->axes, 0.0);
+  axis_elements_.fill(nullptr);
+  axis_minimums_.fill(0);
+  axis_maximums_.fill(0);
+  axis_report_sizes_.fill(0);
+
+  base::apple::ScopedCFTypeRef<CFArrayRef> elements(
+      IOHIDDeviceCopyMatchingElements(device_ref_, /*matching=*/nullptr,
+                                      kIOHIDOptionsTypeNone));
+  if (!elements) {
+    // IOHIDDeviceCopyMatchingElements returns nullptr if we don't have
+    // permission to access the referenced IOHIDDevice.
+    return false;
+  }
 
   // Most axes are mapped so that their index in the Gamepad axes array
   // corresponds to the usage ID. However, this is not possible when the usage
@@ -275,8 +294,9 @@ bool GamepadDeviceMac::AddAxes(Gamepad* gamepad) {
   size_t axis_count = 0;
   size_t unmapped_axis_count = 0;
 
-  for (id elem in elements) {
-    IOHIDElementRef element = reinterpret_cast<IOHIDElementRef>(elem);
+  for (CFIndex i = 0; i < CFArrayGetCount(elements.get()); ++i) {
+    IOHIDElementRef element =
+        (IOHIDElementRef)CFArrayGetValueAtIndex(elements.get(), i);
     if (!CheckCollection(element))
       continue;
 
@@ -290,8 +310,9 @@ bool GamepadDeviceMac::AddAxes(Gamepad* gamepad) {
     size_t axis_index = size_t{usage - kAxisMinimumUsageNumber};
     if (axis_index < Gamepad::kAxesLengthCap) {
       // Axis index already assigned, ignore.
-      if (axis_elements_[axis_index])
+      if (axis_elements_[axis_index]) {
         continue;
+      }
       axis_elements_[axis_index] = element;
       axis_count = std::max(axis_count, axis_index + 1);
     } else if (usage_page <= kGameControlsUsagePage) {
@@ -303,8 +324,9 @@ bool GamepadDeviceMac::AddAxes(Gamepad* gamepad) {
   if (unmapped_axis_count > 0) {
     // Insert unmapped axes at unused axis indices.
     size_t axis_index = 0;
-    for (id elem in elements) {
-      IOHIDElementRef element = reinterpret_cast<IOHIDElementRef>(elem);
+    for (CFIndex i = 0; i < CFArrayGetCount(elements.get()); ++i) {
+      IOHIDElementRef element =
+          (IOHIDElementRef)CFArrayGetValueAtIndex(elements.get(), i);
       if (!CheckCollection(element))
         continue;
 
@@ -373,7 +395,8 @@ void GamepadDeviceMac::UpdateGamepadForValue(IOHIDValueRef value,
     // Handle Dualshock4 input reports that do not specify HID gamepad usages
     // in the report descriptor.
     uint32_t report_id = IOHIDElementGetReportID(element);
-    auto report = base::make_span(IOHIDValueGetBytePtr(value), value_length);
+    auto report =
+        UNSAFE_TODO(base::span(IOHIDValueGetBytePtr(value), value_length));
     if (dualshock4_->ProcessInputReport(report_id, report, gamepad))
       return;
   }
@@ -445,15 +468,15 @@ void GamepadDeviceMac::SetVibration(mojom::GamepadEffectParametersPtr params) {
     return;
   }
 
-  if (ff_device_ref_) {
+  if (ff_effect_ref_) {
     FFCUSTOMFORCE* ff_custom_force =
         static_cast<FFCUSTOMFORCE*>(ff_effect_.lpvTypeSpecificParams);
     DCHECK(ff_custom_force);
-    DCHECK(ff_custom_force->rglForceData);
+    DCHECK_EQ(ff_custom_force->rglForceData, force_data_.data());
 
-    ff_custom_force->rglForceData[0] =
+    force_data_[0] =
         static_cast<LONG>(params->strong_magnitude * kRumbleMagnitudeMax);
-    ff_custom_force->rglForceData[1] =
+    force_data_[1] =
         static_cast<LONG>(params->weak_magnitude * kRumbleMagnitudeMax);
 
     // Download the effect to the device and start the effect.
@@ -510,14 +533,11 @@ FFEffectObjectReference GamepadDeviceMac::CreateForceFeedbackEffect(
     FFDeviceObjectReference ff_device_ref,
     FFEFFECT* ff_effect,
     FFCUSTOMFORCE* ff_custom_force,
-    LONG* force_data,
-    DWORD* axes_data,
-    LONG* direction_data) {
+    base::span<LONG, 2> force_data,
+    base::span<DWORD, 2> axes_data,
+    base::span<LONG, 2> direction_data) {
   DCHECK(ff_effect);
   DCHECK(ff_custom_force);
-  DCHECK(force_data);
-  DCHECK(axes_data);
-  DCHECK(direction_data);
 
   FFCAPABILITIES caps;
   HRESULT res = FFDeviceGetForceFeedbackCapabilities(ff_device_ref, &caps);
@@ -535,7 +555,7 @@ FFEffectObjectReference GamepadDeviceMac::CreateForceFeedbackEffect(
   direction_data[1] = 0;
   ff_custom_force->cChannels = 2;
   ff_custom_force->cSamples = 2;
-  ff_custom_force->rglForceData = force_data;
+  ff_custom_force->rglForceData = force_data.data();
   ff_custom_force->dwSamplePeriod = 100000;  // 100 ms
   ff_effect->dwSize = sizeof(FFEFFECT);
   ff_effect->dwFlags = FFEFF_OBJECTOFFSETS | FFEFF_SPHERICAL;
@@ -545,8 +565,8 @@ FFEffectObjectReference GamepadDeviceMac::CreateForceFeedbackEffect(
   ff_effect->dwTriggerButton = FFEB_NOTRIGGER;
   ff_effect->dwTriggerRepeatInterval = 0;
   ff_effect->cAxes = caps.numFfAxes;
-  ff_effect->rgdwAxes = axes_data;
-  ff_effect->rglDirection = direction_data;
+  ff_effect->rgdwAxes = axes_data.data();
+  ff_effect->rglDirection = direction_data.data();
   ff_effect->lpEnvelope = nullptr;
   ff_effect->cbTypeSpecificParams = sizeof(FFCUSTOMFORCE);
   ff_effect->lpvTypeSpecificParams = ff_custom_force;

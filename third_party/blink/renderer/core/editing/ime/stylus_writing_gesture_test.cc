@@ -3,17 +3,25 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/editing/ime/stylus_writing_gesture.h"
+
 #include <gtest/gtest.h>
-#include "third_party/blink/public/mojom/input/stylus_writing_gesture.mojom-blink.h"
-#include "third_party/blink/renderer/core/css/style_engine.h"
-#include "third_party/blink/renderer/core/dom/text.h"
-#include "third_party/blink/renderer/core/html/forms/html_input_element.h"
-#include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
-#include "third_party/blink/renderer/core/testing/sim/sim_request.h"
-#include "third_party/blink/renderer/core/testing/sim/sim_test.h"
-#include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 
 #include <vector>
+
+#include "third_party/blink/public/mojom/input/stylus_writing_gesture.mojom-blink.h"
+#include "third_party/blink/renderer/core/css/style_engine.h"
+#include "third_party/blink/renderer/core/editing/frame_selection.h"
+#include "third_party/blink/renderer/core/editing/markers/document_marker.h"
+#include "third_party/blink/renderer/core/editing/markers/document_marker_controller.h"
+#include "third_party/blink/renderer/core/html/forms/html_input_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
+#include "third_party/blink/renderer/core/layout/layout_theme.h"
+#include "third_party/blink/renderer/core/testing/sim/sim_request.h"
+#include "third_party/blink/renderer/core/testing/sim/sim_test.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
+#include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
+#include "third_party/blink/renderer/platform/wtf/casting.h"
+#include "third_party/blink/renderer/platform/wtf/functional.h"
 
 namespace blink {
 
@@ -39,6 +47,23 @@ auto BoolToDirection(const testing::TestParamInfo<bool> is_RTL) {
   return is_RTL.param ? "RTL" : "LTR";
 }
 
+class TestWebFrameClientImpl : public frame_test_helpers::TestWebFrameClient {
+ public:
+  void UpdateContextMenuDataForTesting(
+      const ContextMenuData& data,
+      const std::optional<gfx::Point>& /*host_context_menu_location*/)
+      override {
+    context_menu_data_ = data;
+  }
+
+  const ContextMenuData& GetContextMenuData() const {
+    return context_menu_data_;
+  }
+
+ private:
+  ContextMenuData context_menu_data_;
+};
+
 }  // namespace
 
 class StylusWritingGestureTest : public SimTest,
@@ -46,10 +71,15 @@ class StylusWritingGestureTest : public SimTest,
  public:
   StylusWritingGestureTest() = default;
 
+  // Callback to pass into HandleStylusWritingGestureAction which stores the
+  // result of the last gesture.
+  void ResultCallback(mojom::blink::HandwritingGestureResult result) {
+    last_gesture_result = result;
+  }
+
  protected:
   static Vector<char> ReadAhemWoff2() {
-    return test::ReadFromFile(test::CoreTestDataPath("Ahem.woff2"))
-        ->CopyAs<Vector<char>>();
+    return *test::ReadFromFile(test::CoreTestDataPath("Ahem.woff2"));
   }
 
   HTMLInputElement* SetUpSingleInput(bool);
@@ -66,6 +96,17 @@ class StylusWritingGestureTest : public SimTest,
     return WidgetImpl()->GetActiveWebInputMethodController();
   }
 
+  std::unique_ptr<frame_test_helpers::TestWebFrameClient>
+  CreateWebFrameClientForMainFrame() override {
+    return std::make_unique<TestWebFrameClientImpl>();
+  }
+
+  TestWebFrameClientImpl& GetWebFrameClient() {
+    return static_cast<TestWebFrameClientImpl&>(WebFrameClient());
+  }
+
+  mojom::blink::HandwritingGestureResult last_gesture_result =
+      mojom::blink::HandwritingGestureResult::kUnknown;
   String text_alternative = "XX";
 
  private:
@@ -104,7 +145,7 @@ Element& StylusWritingGestureTest::SetUpElement(String element) {
   font_resource.Complete(ReadAhemWoff2());
   GetDocument().GetStyleEngine().InvalidateStyleAndLayoutForFontUpdates();
   Compositor().BeginFrame();
-  return *GetDocument().getElementById("target");
+  return *GetDocument().getElementById(AtomicString("target"));
 }
 
 HTMLInputElement* StylusWritingGestureTest::SetUpSingleInput(bool is_RTL) {
@@ -153,11 +194,15 @@ TEST_P(StylusWritingGestureTest, TestGestureDelete) {
   gesture_data->end_rect = GetRect(40, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("A EFGH", input->Value());
   EXPECT_EQ(1, range.StartOffset());
   EXPECT_EQ(1, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 
   // Try to do delete gesture outside the current input range.
   // This should insert the text alternative at current cursor.
@@ -168,11 +213,15 @@ TEST_P(StylusWritingGestureTest, TestGestureDelete) {
   gesture_data2->end_rect = GetRect(100, 6, 0, 0, width, is_RTL);
   gesture_data2->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data2));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data2),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("AXX EFGH", input->Value());
   EXPECT_EQ(3, range.StartOffset());
   EXPECT_EQ(3, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kFallback,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureDeleteWithWordGranularity) {
@@ -187,15 +236,21 @@ TEST_P(StylusWritingGestureTest, TestGestureDeleteWithWordGranularity) {
       // Deleting a word and its trailing space in between two other words
       // should leave the words either side with a single space between them.
       TestCase(28, 52, "A BC DEF", "A DEF"),
+      // Deleting a word and its leading space in between two other words
+      // should leave the words either side with a single space between them.
+      TestCase(10, 40, "A BC DEF", "A DEF"),
       // Same as above but with the spaces on both sides.
       TestCase(12, 48, "A BC DEF", "A DEF"),
+      // Similar to above but spaces aren't originally part of the selection.
+      TestCase(30, 50, "AB CD EF GH", "AB EF GH"),
       // Removing the last word is an edge case as there's no word past it to
       // check.
       TestCase(32, 72, "ABCDE FGH", "ABCDE"),
       // Crossing out inside a word without crossing over the middle should not
       // affect the word.
       TestCase(0, 24, "ABCDEFG", "ABCDEFG"),
-  };
+      // Deleting a word with spaces either side removes one space.
+      TestCase(32, 45, "AB CDE FGH", "AB FGH")};
   for (auto test_case : test_cases) {
     input->SetValue(test_case.initial);
     const int width = input->BoundsInWidget().width();
@@ -209,8 +264,12 @@ TEST_P(StylusWritingGestureTest, TestGestureDeleteWithWordGranularity) {
     gesture_data->end_rect = GetRect(test_case.end, 6, 0, 0, width, is_RTL);
     gesture_data->text_alternative = text_alternative;
 
-    WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+    WidgetImpl()->HandleStylusWritingGestureAction(
+        std::move(gesture_data),
+        BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
     EXPECT_EQ(test_case.expected, input->Value());
+    EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+              last_gesture_result);
   }
 }
 
@@ -229,19 +288,19 @@ TEST_P(StylusWritingGestureTest, TestGestureDeleteNotFirstLine) {
   gesture_data->end_rect = GetRect(20, 16, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   EXPECT_EQ("ABCD\nGH", input->Value());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 }
 
 // https://crbug.com/1407262
 TEST_P(StylusWritingGestureTest, TestGestureAtEndOfLineWithWordGranularity) {
   const bool is_RTL = GetParam();
   auto* input = SetUpMultilineInput(is_RTL);
-  auto* inner_editor = input->InnerEditorElement();
-  Document& doc = GetDocument();
-  inner_editor->appendChild(Text::Create(doc, "ABCD"));
-  inner_editor->appendChild(Text::Create(doc, "\n"));
-  inner_editor->appendChild(Text::Create(doc, "EFGH"));
+  input->SetValue("ABCD\nEFGH");
   const int width = input->BoundsInWidget().width();
 
   mojom::blink::StylusWritingGestureDataPtr gesture_data(
@@ -253,8 +312,12 @@ TEST_P(StylusWritingGestureTest, TestGestureAtEndOfLineWithWordGranularity) {
   gesture_data->end_rect = GetRect(60, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   EXPECT_EQ("\nEFGH", input->Value());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureDeleteMultiline) {
@@ -272,8 +335,37 @@ TEST_P(StylusWritingGestureTest, TestGestureDeleteMultiline) {
   gesture_data->end_rect = GetRect(0, 16, 20, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   EXPECT_EQ("ABGH", input->Value());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
+}
+
+TEST_P(StylusWritingGestureTest,
+       TestGestureDeleteMultilinePartiallyOutsideBounds) {
+  const bool is_RTL = GetParam();
+  auto* input = SetUpMultilineInput(is_RTL);
+  input->SetValue("ABCD\nEFGH");
+  const int width = input->BoundsInWidget().width();
+
+  mojom::blink::StylusWritingGestureDataPtr gesture_data(
+      mojom::blink::StylusWritingGestureData::New());
+  gesture_data->action = mojom::blink::StylusWritingGestureAction::DELETE_TEXT;
+  gesture_data->start_rect = GetRect(20, 2, 100, 4, width, is_RTL);
+  gesture_data->end_rect = GetRect(-10, 16, 30, 0, width, is_RTL);
+  gesture_data->text_alternative = text_alternative;
+
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
+  WebRange range = Controller()->GetSelectionOffsets();
+  EXPECT_EQ("ABGH", input->Value());
+  EXPECT_EQ(2, range.StartOffset());
+  EXPECT_EQ(2, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureRemoveSpaces) {
@@ -293,11 +385,15 @@ TEST_P(StylusWritingGestureTest, TestGestureRemoveSpaces) {
   gesture_data->end_rect = GetRect(90, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCDEFGH", input->Value());
   EXPECT_EQ(4, range.StartOffset());
   EXPECT_EQ(4, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 
   // Try to do remove space gesture outside the current input range.
   // This should insert the text alternative at current cursor.
@@ -309,11 +405,15 @@ TEST_P(StylusWritingGestureTest, TestGestureRemoveSpaces) {
   gesture_data2->end_rect = GetRect(120, 6, 0, 0, width, is_RTL);
   gesture_data2->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data2));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data2),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCDXXEFGH", input->Value());
   EXPECT_EQ(6, range.StartOffset());
   EXPECT_EQ(6, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kFallback,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureRemoveFirstSpace) {
@@ -332,11 +432,15 @@ TEST_P(StylusWritingGestureTest, TestGestureRemoveFirstSpace) {
   gesture_data->end_rect = GetRect(100, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCD EF GH", input->Value());
   EXPECT_EQ(2, range.StartOffset());
   EXPECT_EQ(2, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureSelect) {
@@ -352,11 +456,49 @@ TEST_P(StylusWritingGestureTest, TestGestureSelect) {
   gesture_data->end_rect = GetRect(40, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("AB CD EF GH", input->Value());
   EXPECT_EQ(1, range.StartOffset());
   EXPECT_EQ(4, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
+
+  ContextMenuData context_menu_data = GetWebFrameClient().GetContextMenuData();
+  EXPECT_EQ("B C", context_menu_data.selected_text);
+  EXPECT_TRUE(GetDocument().GetFrame()->Selection().IsHandleVisible());
+}
+
+TEST_P(StylusWritingGestureTest, TestGestureSelectsNoSpacesEitherSide) {
+  const bool is_RTL = GetParam();
+  auto* input = SetUpSingleInput(is_RTL);
+  input->SetValue("AB CD EF GH");
+  const int width = input->BoundsInWidget().width();
+
+  mojom::blink::StylusWritingGestureDataPtr gesture_data(
+      mojom::blink::StylusWritingGestureData::New());
+  gesture_data->action = mojom::blink::StylusWritingGestureAction::SELECT_TEXT;
+  gesture_data->start_rect = GetRect(20, 6, 0, 0, width, is_RTL);
+  gesture_data->end_rect = GetRect(90, 6, 0, 0, width, is_RTL);
+  gesture_data->text_alternative = text_alternative;
+  gesture_data->granularity =
+      mojom::blink::StylusWritingGestureGranularity::WORD;
+
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
+  WebRange range = Controller()->GetSelectionOffsets();
+  EXPECT_EQ("AB CD EF GH", input->Value());
+  EXPECT_EQ(3, range.StartOffset());
+  EXPECT_EQ(8, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
+
+  ContextMenuData context_menu_data = GetWebFrameClient().GetContextMenuData();
+  EXPECT_EQ("CD EF", context_menu_data.selected_text);
+  EXPECT_TRUE(GetDocument().GetFrame()->Selection().IsHandleVisible());
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureSelectMultiline) {
@@ -372,11 +514,47 @@ TEST_P(StylusWritingGestureTest, TestGestureSelectMultiline) {
   gesture_data->end_rect = GetRect(0, 12, 20, 4, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCD\nEFGH", input->Value());
   EXPECT_EQ(2, range.StartOffset());
   EXPECT_EQ(7, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
+
+  ContextMenuData context_menu_data = GetWebFrameClient().GetContextMenuData();
+  EXPECT_EQ("CD\nEF", context_menu_data.selected_text);
+  EXPECT_TRUE(GetDocument().GetFrame()->Selection().IsHandleVisible());
+}
+
+TEST_P(StylusWritingGestureTest, TestGestureSelectPartiallyOutsideBounds) {
+  const bool is_RTL = GetParam();
+  auto* input = SetUpSingleInput(is_RTL);
+  input->SetValue("ABCD EFGH");
+  const int width = input->BoundsInWidget().width();
+
+  mojom::blink::StylusWritingGestureDataPtr gesture_data(
+      mojom::blink::StylusWritingGestureData::New());
+  gesture_data->action = mojom::blink::StylusWritingGestureAction::SELECT_TEXT;
+  gesture_data->start_rect = GetRect(-10, 6, 0, 0, width, is_RTL);
+  gesture_data->end_rect = GetRect(30, 6, 0, 0, width, is_RTL);
+  gesture_data->text_alternative = text_alternative;
+
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
+  WebRange range = Controller()->GetSelectionOffsets();
+  EXPECT_EQ("ABCD EFGH", input->Value());
+  EXPECT_EQ(0, range.StartOffset());
+  EXPECT_EQ(3, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
+
+  ContextMenuData context_menu_data = GetWebFrameClient().GetContextMenuData();
+  EXPECT_EQ("ABC", context_menu_data.selected_text);
+  EXPECT_TRUE(GetDocument().GetFrame()->Selection().IsHandleVisible());
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureAddSpaceOrText) {
@@ -395,11 +573,15 @@ TEST_P(StylusWritingGestureTest, TestGestureAddSpaceOrText) {
   gesture_data->text_to_insert = " ";
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCD EFGH", input->Value());
   EXPECT_EQ(5, range.StartOffset());
   EXPECT_EQ(5, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 
   // Try to do add space gesture outside the current input range.
   // This should insert the text alternative at current cursor.
@@ -411,11 +593,15 @@ TEST_P(StylusWritingGestureTest, TestGestureAddSpaceOrText) {
   gesture_data2->text_to_insert = " ";
   gesture_data2->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data2));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data2),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCD XXEFGH", input->Value());
   EXPECT_EQ(7, range.StartOffset());
   EXPECT_EQ(7, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kFallback,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_RemovesAllSpaces) {
@@ -432,11 +618,15 @@ TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_RemovesAllSpaces) {
   gesture_data->start_rect = GetRect(42, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCDEFGH", input->Value());
   EXPECT_EQ(4, range.StartOffset());
   EXPECT_EQ(4, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 
   input->SetValue("ABCD    EFGH");
   // Input value = "ABCD    EFGH". Try to merge before |EFGH.
@@ -448,11 +638,15 @@ TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_RemovesAllSpaces) {
   gesture_data1->start_rect = GetRect(78, 6, 0, 0, width, is_RTL);
   gesture_data1->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data1));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data1),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCDEFGH", input->Value());
   EXPECT_EQ(4, range.StartOffset());
   EXPECT_EQ(4, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_NonEmptyInput) {
@@ -470,11 +664,15 @@ TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_NonEmptyInput) {
   gesture_data->start_rect = GetRect(42, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCD EFGH", input->Value());
   EXPECT_EQ(5, range.StartOffset());
   EXPECT_EQ(5, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 
   // Input value = "ABCD EFGH". Try to merge after ABCD|.
   // Expected value after gesture = "ABCDEFGH". And cursor to be after ABCD.
@@ -485,11 +683,15 @@ TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_NonEmptyInput) {
   gesture_data1->start_rect = GetRect(42, 6, 0, 0, width, is_RTL);
   gesture_data1->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data1));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data1),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCDEFGH", input->Value());
   EXPECT_EQ(4, range.StartOffset());
   EXPECT_EQ(4, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
 
   // Try to do split-merge gesture outside the current input range.
   // This should insert the text alternative at current cursor.
@@ -500,11 +702,15 @@ TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_NonEmptyInput) {
   gesture_data2->start_rect = GetRect(120, 6, 0, 0, width, is_RTL);
   gesture_data2->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data2));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data2),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCDXXEFGH", input->Value());
   EXPECT_EQ(6, range.StartOffset());
   EXPECT_EQ(6, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kFallback,
+            last_gesture_result);
 
   // Try to do split-merge gesture at the start of input text. Space should not
   // be inserted. Fallback text is inserted at cursor.
@@ -515,11 +721,15 @@ TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_NonEmptyInput) {
   gesture_data3->start_rect = GetRect(4, 6, 0, 0, width, is_RTL);
   gesture_data3->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data3));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data3),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("ABCDXXXXEFGH", input->Value());
   EXPECT_EQ(8, range.StartOffset());
   EXPECT_EQ(8, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kFallback,
+            last_gesture_result);
 }
 
 TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_EmptyInput) {
@@ -536,11 +746,121 @@ TEST_P(StylusWritingGestureTest, TestGestureSplitOrMerge_EmptyInput) {
   gesture_data->start_rect = GetRect(105, 6, 0, 0, width, is_RTL);
   gesture_data->text_alternative = text_alternative;
 
-  WidgetImpl()->HandleStylusWritingGestureAction(std::move(gesture_data));
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
   WebRange range = Controller()->GetSelectionOffsets();
   EXPECT_EQ("XX", input->Value());
   EXPECT_EQ(2, range.StartOffset());
   EXPECT_EQ(2, range.EndOffset());
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kFallback,
+            last_gesture_result);
+}
+
+TEST_P(StylusWritingGestureTest, TestPreviewHandwritingGesture_Select) {
+  const bool is_RTL = GetParam();
+  auto* input = SetUpSingleInput(is_RTL);
+  input->SetValue("Example text for select");
+  const int width = input->BoundsInWidget().width();
+  WebRange initial_range = Controller()->GetSelectionOffsets();
+
+  mojom::blink::StylusWritingGestureDataPtr gesture_data(
+      mojom::blink::StylusWritingGestureData::New());
+  gesture_data->action = mojom::blink::StylusWritingGestureAction::SELECT_TEXT;
+  gesture_data->is_preview = true;
+  gesture_data->start_rect = GetRect(80, 6, 0, 0, width, is_RTL);
+  gesture_data->end_rect = GetRect(120, 6, 0, 0, width, is_RTL);
+  gesture_data->granularity =
+      mojom::blink::StylusWritingGestureGranularity::WORD;
+
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
+
+  // Input value should NOT change.
+  EXPECT_EQ("Example text for select", input->Value());
+
+  // Selection range should NOT change.
+  WebRange current_range = Controller()->GetSelectionOffsets();
+  EXPECT_EQ(initial_range.StartOffset(), current_range.StartOffset());
+  EXPECT_EQ(initial_range.EndOffset(), current_range.EndOffset());
+
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
+
+  // Verify the preview span is added.
+  DocumentMarkerController& marker_controller = GetDocument().Markers();
+  DocumentMarkerVector all_markers = marker_controller.Markers();
+  HeapVector<Member<DocumentMarker>> preview_markers;
+  for (DocumentMarker* marker : all_markers) {
+    if (marker->GetType() == DocumentMarker::kPreviewStylusGesture) {
+      preview_markers.push_back(marker);
+    }
+  }
+  EXPECT_EQ(1u, preview_markers.size());
+
+  const auto& marker = preview_markers[0];
+  // Start and end of the word "text"
+  EXPECT_EQ(8u, marker->StartOffset());
+  EXPECT_EQ(12u, marker->EndOffset());
+
+  EXPECT_EQ(DocumentMarker::kPreviewStylusGesture, marker->GetType());
+  Color preview_color = LayoutTheme::GetTheme().TapHighlightColor();
+  const auto* styleable_marker = To<StyleableMarker>(marker.Get());
+  EXPECT_EQ(preview_color, styleable_marker->BackgroundColor());
+}
+
+TEST_P(StylusWritingGestureTest, TestPreviewHandwritingGesture_Delete) {
+  const bool is_RTL = GetParam();
+  auto* input = SetUpSingleInput(is_RTL);
+  input->SetValue("Example text for delete");
+  const int width = input->BoundsInWidget().width();
+  WebRange initial_range = Controller()->GetSelectionOffsets();
+
+  mojom::blink::StylusWritingGestureDataPtr gesture_data(
+      mojom::blink::StylusWritingGestureData::New());
+  gesture_data->action = mojom::blink::StylusWritingGestureAction::DELETE_TEXT;
+  gesture_data->is_preview = true;
+  gesture_data->start_rect = GetRect(80, 6, 0, 0, width, is_RTL);
+  gesture_data->end_rect = GetRect(120, 6, 0, 0, width, is_RTL);
+  gesture_data->granularity =
+      mojom::blink::StylusWritingGestureGranularity::CHARACTER;
+
+  WidgetImpl()->HandleStylusWritingGestureAction(
+      std::move(gesture_data),
+      BindOnce(&StylusWritingGestureTest::ResultCallback, Unretained(this)));
+
+  // Input value should NOT change.
+  EXPECT_EQ("Example text for delete", input->Value());
+
+  // Selection range should NOT change.
+  WebRange current_range = Controller()->GetSelectionOffsets();
+  EXPECT_EQ(initial_range.StartOffset(), current_range.StartOffset());
+  EXPECT_EQ(initial_range.EndOffset(), current_range.EndOffset());
+
+  EXPECT_EQ(mojom::blink::HandwritingGestureResult::kSuccess,
+            last_gesture_result);
+
+  // Verify the preview span is added.
+  DocumentMarkerController& marker_controller = GetDocument().Markers();
+  DocumentMarkerVector all_markers = marker_controller.Markers();
+  HeapVector<Member<DocumentMarker>> preview_markers;
+  for (DocumentMarker* marker : all_markers) {
+    if (marker->GetType() == DocumentMarker::kPreviewStylusGesture) {
+      preview_markers.push_back(marker);
+    }
+  }
+  EXPECT_EQ(1u, preview_markers.size());
+  const auto& marker = preview_markers[0];
+  // Start and end of the word "text" (with the space before 'text')
+  EXPECT_EQ(7u, marker->StartOffset());
+  EXPECT_EQ(12u, marker->EndOffset());
+
+  EXPECT_EQ(DocumentMarker::kPreviewStylusGesture, marker->GetType());
+  Color preview_color = Color::kBlack;
+  preview_color.SetAlpha(0.2 * (preview_color.Alpha()));
+  const auto* styleable_marker = To<StyleableMarker>(marker.Get());
+  EXPECT_EQ(preview_color, styleable_marker->BackgroundColor());
 }
 
 INSTANTIATE_TEST_SUITE_P(BiDirectional,

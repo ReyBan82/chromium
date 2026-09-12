@@ -26,21 +26,21 @@ namespace mojo {
 //      from |input|.
 //
 //      Serializable form of a field:
-//        Value or reference of the same type used in the generated stuct
+//        Value or reference of the same type used in the generated struct
 //        wrapper type, or the following alternatives:
 //        - string:
 //          Value or reference of any type that has a StringTraits defined.
-//          Supported by default: base::StringPiece, std::string,
-//          WTF::String (in blink).
+//          Supported by default: std::string_view, std::string,
+//          blink::String (in blink).
 //
 //        - array:
 //          Value or reference of any type that has an ArrayTraits defined.
-//          Supported by default: std::vector, CArray, WTF::Vector (in blink)
+//          Supported by default: std::vector, CArray, blink::Vector (in blink)
 //
 //        - map:
 //          Value or reference of any type that has a MapTraits defined.
 //          Supported by default: std::map, std::unordered_map, base::flat_map,
-//          WTF::HashMap (in blink).
+//          blink::HashMap (in blink).
 //
 //        - struct:
 //          Value or reference of any type that has a StructTraits defined.
@@ -49,7 +49,7 @@ namespace mojo {
 //          Value of any type that has an EnumTraits defined.
 //
 //      For any nullable string/struct/array/map/union field you could also
-//      return value or reference of absl::optional<T>, if T has the right
+//      return value or reference of std::optional<T>, if T has the right
 //      *Traits defined.
 //
 //      During serialization, getters for all fields are called exactly once. It
@@ -57,18 +57,30 @@ namespace mojo {
 //      temporary value in the event that it cannot return a readily
 //      serializable reference to some existing object.
 //
-//   2. A static Read() method to set the contents of a |T| instance from a
+//   2. A static Read() method to set the contents of a `T` instance from a
 //      DataViewType.
 //
 //        static bool Read(DataViewType data, T* output);
 //
 //      The generated DataViewType provides a convenient, inexpensive view of a
-//      serialized struct's field data. The caller guarantees that
-//      |!data.is_null()|.
+//      serialized struct's field data. Mojo guarantees that `!data.is_null()`.
 //
 //      Returning false indicates invalid incoming data and causes the message
 //      pipe receiving it to be disconnected. Therefore, you can do custom
-//      validation for |T| in this method.
+//      validation for `T` in this method.
+//
+//      To provide additional context for validation errors, `Read()` methods
+//      can have the following signature instead:
+//
+//        static base::expected<void, DeserializationError> Read(
+//            DataViewType data, T* output);
+//
+//      Returning `base::unexpected(DeserializationError())` will add a
+//      trace entry with the `base::Location` of the `return` statement;
+//      optionally, `DeserializationError::CustomCode(...)` will include a
+//      32-bit signed integer alongside the location. Up to four trace entries
+//      will be stored in crash keys (`mojo-bad-message-trace-1` through
+//      `mojo-bad-message-trace-4`) before invoking the bad message callback.
 //
 //   3. [Optional] A static IsNull() method indicating whether a given |T|
 //      instance is null:
@@ -101,7 +113,7 @@ namespace mojo {
 // In the description above, methods having an |input| parameter define it as
 // const reference of T. Actually, it can be a non-const reference of T too.
 // E.g., if T contains Mojo handles or interfaces whose ownership needs to be
-// transferred. Correspondingly, it requies you to always give non-const T
+// transferred. Correspondingly, it requires you to always give non-const T
 // reference/value to the Mojo bindings for serialization:
 //    - if T is used in the "type_mappings" section of a typemap config file,
 //      you need to declare it as pass-by-value:
@@ -143,9 +155,15 @@ namespace mojo {
 //
 template <typename DataViewType, typename T>
 struct StructTraits {
-  static_assert(internal::AlwaysFalse<T>::value,
-                "Cannot find the mojo::StructTraits specialization. Did you "
-                "forget to include the corresponding header file?");
+  static_assert(
+      false,
+      "Cannot find the mojo::StructTraits specialization. Did you confirm "
+      "that:"
+      "  * the corresponding header file is included in your build file"
+      "    typemap?"
+      "  * the mojom::StructTraits specialization you've created is defined"
+      "    *exactly* the same as the mojom::StructTraits specialization"
+      "    specified in this stack trace?");
 };
 
 }  // namespace mojo

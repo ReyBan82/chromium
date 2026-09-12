@@ -4,7 +4,6 @@
 
 #include <memory>
 
-#include "base/containers/contains.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
@@ -61,8 +60,9 @@ class ContentHashFetcherTest : public ExtensionsTest {
     // fetched verified_contents.json file there.
     extension_ =
         UnzipToTempDirAndLoad(test_dir_base_.AppendASCII("source.zip"));
-    if (!extension_.get())
+    if (!extension_.get()) {
       return false;
+    }
 
     // Make sure there isn't already a verified_contents.json file there.
     EXPECT_FALSE(VerifiedContentsFileExists());
@@ -146,7 +146,7 @@ class ContentHashFetcherTest : public ExtensionsTest {
     base::FilePath destination = temp_dir_.GetPath();
     EXPECT_TRUE(zip::Unzip(extension_zip, destination));
 
-    std::string error;
+    std::u16string error;
     static constexpr char kTestExtensionId[] =
         "jmllhlobpjcnnomjlipadejplhmheiif";
     scoped_refptr<Extension> extension = file_util::LoadExtension(
@@ -248,7 +248,7 @@ TEST_F(ContentHashFetcherTest, MissingVerifiedContentsAndCorrupt) {
   ASSERT_NE(nullptr, result.get());
   EXPECT_TRUE(result->success);
   EXPECT_FALSE(result->was_cancelled);
-  EXPECT_TRUE(base::Contains(result->mismatch_paths, script_path.BaseName()));
+  EXPECT_TRUE(result->mismatch_paths.contains(script_path.BaseName()));
 
   // Make sure the verified_contents.json file was written into the extension's
   // install dir.

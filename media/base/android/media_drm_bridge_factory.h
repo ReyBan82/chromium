@@ -42,16 +42,13 @@ class MEDIA_EXPORT MediaDrmBridgeFactory final : public CdmFactory {
               CdmCreatedCB cdm_created_cb) override;
 
  private:
-  // Callback for Initialize() on |storage_|.
+  // Callback for Initialize() on storage.
   void OnStorageInitialized(bool success);
 
-  // Creates |media_drm_bridge_|, and call SetMediaCryptoReadyCB() to wait for
-  // MediaCrypto to be ready.
-  void CreateMediaDrmBridge(const std::string& origin_id);
-
   // Callback for SetMediaCryptoReadyCB() on |media_drm_bridge_|.
-  void OnMediaCryptoReady(JavaObjectPtr media_crypto,
-                          bool requires_secure_video_codec);
+  void OnMediaCryptoReady(
+      base::android::ScopedJavaGlobalRef<jobject> media_crypto,
+      bool requires_secure_video_codec);
 
   CreateFetcherCB create_fetcher_cb_;
   CreateStorageCB create_storage_cb_;
@@ -59,18 +56,15 @@ class MEDIA_EXPORT MediaDrmBridgeFactory final : public CdmFactory {
   std::vector<uint8_t> scheme_uuid_;
 
   MediaDrmBridge::SecurityLevel security_level_ =
-      MediaDrmBridge::SECURITY_LEVEL_DEFAULT;
+      MediaDrmBridge::SECURITY_LEVEL_UNKNOWN;
 
   SessionMessageCB session_message_cb_;
   SessionClosedCB session_closed_cb_;
   SessionKeysChangeCB session_keys_change_cb_;
   SessionExpirationUpdateCB session_expiration_update_cb_;
 
-  // TODO(xhwang): Make CdmCreatedCB an OnceCallback.
-  using CdmCreatedOnceCB = base::OnceCallback<CdmCreatedCB::RunType>;
-  CdmCreatedOnceCB cdm_created_cb_;
+  CdmCreatedCB cdm_created_cb_;
 
-  std::unique_ptr<MediaDrmStorageBridge> storage_;
   scoped_refptr<MediaDrmBridge> media_drm_bridge_;
 
   base::WeakPtrFactory<MediaDrmBridgeFactory> weak_factory_{this};

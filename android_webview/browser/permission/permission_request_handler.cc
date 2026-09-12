@@ -11,6 +11,8 @@
 #include "android_webview/browser/permission/permission_request_handler_client.h"
 #include "base/android/scoped_java_ref.h"
 #include "base/functional/bind.h"
+#include "base/logging.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_details.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/web_contents.h"
@@ -50,11 +52,11 @@ void PermissionRequestHandler::SendRequest(
     return;
   }
 
-  base::WeakPtr<AwPermissionRequest> weak_request;
-  base::android::ScopedJavaLocalRef<jobject> java_peer =
-      AwPermissionRequest::Create(std::move(request), &weak_request);
-  requests_.push_back(weak_request);
-  client_->OnPermissionRequest(java_peer, weak_request.get());
+  base::WeakPtr<AwPermissionRequest> weak_request =
+      client_->OnPermissionRequest(std::move(request));
+  if (weak_request) {
+    requests_.push_back(weak_request);
+  }
   PruneRequests();
 }
 
@@ -109,10 +111,16 @@ PermissionRequestHandler::RequestIterator PermissionRequestHandler::FindRequest(
 }
 
 void PermissionRequestHandler::CancelRequestInternal(RequestIterator i) {
-  AwPermissionRequest* request = i->get();
+  // Use a WeakPtr to check if the request is still alive after the synchronous
+  // JNI call to OnPermissionRequestCanceled. The embedder might synchronously
+  // delete the request (e.g., by calling grant() or deny()) inside the
+  // cancellation callback.
+  base::WeakPtr<AwPermissionRequest> request = *i;
   if (request) {
-    client_->OnPermissionRequestCanceled(request);
-    request->CancelAndDelete();
+    client_->OnPermissionRequestCanceled(request.get());
+    if (request) {
+      request->CancelAndDelete();
+    }
   }
 }
 

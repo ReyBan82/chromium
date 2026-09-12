@@ -34,9 +34,9 @@
 #include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/dom_token_list.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/editing/frame_selection.h"
+#include "third_party/blink/renderer/core/events/before_text_inserted_event.h"
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
@@ -46,7 +46,8 @@
 #include "third_party/blink/renderer/core/html/shadow/shadow_element_names.h"
 #include "third_party/blink/renderer/core/input/keyboard_event_manager.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
-#include "third_party/blink/renderer/core/layout/layout_text_control_single_line.h"
+#include "third_party/blink/renderer/core/layout/layout_object.h"
+#include "third_party/blink/renderer/core/style/computed_style.h"
 
 namespace blink {
 
@@ -56,10 +57,6 @@ void PasswordInputType::CountUsage() {
     CountUsageIfVisible(WebFeature::kInputTypePasswordMaxLength);
 }
 
-const AtomicString& PasswordInputType::FormControlType() const {
-  return input_type_names::kPassword;
-}
-
 bool PasswordInputType::ShouldSaveAndRestoreFormControlState() const {
   return false;
 }
@@ -67,7 +64,6 @@ bool PasswordInputType::ShouldSaveAndRestoreFormControlState() const {
 FormControlState PasswordInputType::SaveFormControlState() const {
   // Should never save/restore password fields.
   NOTREACHED();
-  return FormControlState();
 }
 
 void PasswordInputType::RestoreFormControlState(const FormControlState&) {
@@ -106,6 +102,7 @@ void PasswordInputType::DidSetValueByUserEdit() {
     }
     UpdatePasswordRevealButton();
   }
+
   BaseTextInputType::DidSetValueByUserEdit();
 }
 
@@ -117,6 +114,7 @@ void PasswordInputType::DidSetValue(const String& string, bool value_changed) {
       UpdatePasswordRevealButton();
     }
   }
+
   BaseTextInputType::DidSetValue(string, value_changed);
 }
 
@@ -152,7 +150,7 @@ bool PasswordInputType::ShouldDrawCapsLockIndicator() const {
 }
 
 void PasswordInputType::UpdatePasswordRevealButton() {
-  Element* button = GetElement().UserAgentShadowRoot()->getElementById(
+  Element* button = GetElement().EnsureShadowSubtree()->getElementById(
       shadow_element_names::kIdPasswordRevealButton);
 
   // Update the glyph.
@@ -172,7 +170,7 @@ void PasswordInputType::UpdatePasswordRevealButton() {
         0.7;                       // 0.7em which is enough for ~2 chars.
     const int kLeftMarginPx = 3;   // 3px
     const int kRightMarginPx = 3;  // 3px
-    float current_width = GetElement().getBoundingClientRect()->width();
+    float current_width = GetElement().GetBoundingClientRect()->width();
     float width_needed = GetElement().ComputedStyleRef().FontSize() *
                              (kRevealButtonWidthEm + kPasswordMinWidthEm) +
                          kLeftMarginPx + kRightMarginPx;
@@ -209,21 +207,27 @@ void PasswordInputType::HandleBlurEvent() {
 
 void PasswordInputType::HandleBeforeTextInsertedEvent(
     BeforeTextInsertedEvent& event) {
+  DCHECK(!RuntimeEnabledFeatures::CleanUpActivationBehaviorEnabled());
+  event.SetText(FilterBeforeTextInserted(event.GetText()));
+}
+
+String PasswordInputType::FilterBeforeTextInserted(const String& text) {
   if (RuntimeEnabledFeatures::PasswordRevealEnabled()) {
     // This is the only scenario we go from no reveal button to showing the
     // reveal button: the password is empty and we have some user input.
-    if (GetElement().Value().empty())
+    if (GetElement().Value().empty()) {
       should_show_reveal_button_ = true;
+    }
   }
 
-  TextFieldInputType::HandleBeforeTextInsertedEvent(event);
+  return TextFieldInputType::FilterBeforeTextInserted(text);
 }
 
 void PasswordInputType::HandleKeydownEvent(KeyboardEvent& event) {
   if (RuntimeEnabledFeatures::PasswordRevealEnabled()) {
     if (should_show_reveal_button_) {
       // Alt-F8 to reveal/obscure password
-      if (event.getModifierState("Alt") && event.key() == "F8") {
+      if (event.altKey() && event.key() == "F8") {
         GetElement().SetShouldRevealPassword(
             !GetElement().ShouldRevealPassword());
         UpdatePasswordRevealButton();

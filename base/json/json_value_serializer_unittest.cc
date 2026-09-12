@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
@@ -12,13 +14,11 @@
 #include "base/json/json_string_value_serializer.h"
 #include "base/json/json_writer.h"
 #include "base/path_service.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 
@@ -77,9 +77,10 @@ void CheckJSONIsStillTheSame(const Value& value) {
 }
 
 void ValidateJsonList(const std::string& json) {
-  absl::optional<Value> value = JSONReader::Read(json);
+  std::optional<Value> value =
+      JSONReader::Read(json, JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(value);
-  Value::List* list = value->GetIfList();
+  ListValue* list = value->GetIfList();
   ASSERT_TRUE(list);
   ASSERT_EQ(1U, list->size());
   const Value& elt = (*list)[0];
@@ -103,11 +104,11 @@ TEST(JSONValueDeserializerTest, ReadProperJSONFromString) {
   CheckJSONIsStillTheSame(*value);
 }
 
-// Test proper JSON deserialization from a StringPiece substring.
+// Test proper JSON deserialization from a std::string_view substring.
 TEST(JSONValueDeserializerTest, ReadProperJSONFromStringPiece) {
-  // Create a StringPiece for the substring of kProperJSONPadded that matches
-  // kProperJSON.
-  StringPiece proper_json(kProperJSONPadded);
+  // Create a std::string_view for the substring of kProperJSONPadded that
+  // matches kProperJSON.
+  std::string_view proper_json(kProperJSONPadded);
   proper_json = proper_json.substr(5, proper_json.length() - 10);
   JSONStringValueDeserializer str_deserializer(proper_json);
 
@@ -223,7 +224,7 @@ TEST(JSONValueSerializerTest, Roundtrip) {
   JSONStringValueDeserializer deserializer(kOriginalSerialization);
   std::unique_ptr<Value> root = deserializer.Deserialize(nullptr, nullptr);
   ASSERT_TRUE(root);
-  const Value::Dict* root_dict = root->GetIfDict();
+  const DictValue* root_dict = root->GetIfDict();
   ASSERT_TRUE(root_dict);
 
   const Value* null_value = root_dict->Find("null");
@@ -292,7 +293,7 @@ TEST(JSONValueSerializerTest, StringEscape) {
       "{\"all_chars\":\"" + all_chars_expected + "\"}";
   // Test JSONWriter interface
   std::string output_js;
-  Value::Dict valueRoot;
+  DictValue valueRoot;
   valueRoot.Set("all_chars", all_chars);
   JSONWriter::Write(valueRoot, &output_js);
   ASSERT_EQ(expected_output, output_js);
@@ -305,7 +306,7 @@ TEST(JSONValueSerializerTest, StringEscape) {
 
 TEST(JSONValueSerializerTest, UnicodeStrings) {
   // unicode string json -> escaped ascii text
-  Value::Dict root;
+  DictValue root;
   std::u16string test(u"\x7F51\x9875");
   root.Set("web", test);
 
@@ -321,7 +322,7 @@ TEST(JSONValueSerializerTest, UnicodeStrings) {
   std::unique_ptr<Value> deserial_root =
       deserializer.Deserialize(nullptr, nullptr);
   ASSERT_TRUE(deserial_root);
-  const Value::Dict* deserial_root_dict = deserial_root->GetIfDict();
+  const DictValue* deserial_root_dict = deserial_root->GetIfDict();
   const std::string* web_value = deserial_root_dict->FindString("web");
   ASSERT_TRUE(web_value);
   ASSERT_EQ("\xE7\xBD\x91\xE9\xA1\xB5", *web_value);
@@ -329,7 +330,7 @@ TEST(JSONValueSerializerTest, UnicodeStrings) {
 
 TEST(JSONValueSerializerTest, HexStrings) {
   // hex string json -> escaped ascii text
-  Value::Dict root;
+  DictValue root;
   std::u16string test(u"\x01\x02");
   root.Set("test", test);
 
@@ -345,7 +346,7 @@ TEST(JSONValueSerializerTest, HexStrings) {
   std::unique_ptr<Value> deserial_root =
       deserializer.Deserialize(nullptr, nullptr);
   ASSERT_TRUE(deserial_root);
-  Value::Dict* deserial_root_dict = deserial_root->GetIfDict();
+  DictValue* deserial_root_dict = deserial_root->GetIfDict();
   const std::string* test_value = deserial_root_dict->FindString("test");
   ASSERT_TRUE(test_value);
   ASSERT_EQ("\u0001\u0002", *test_value);
@@ -370,9 +371,10 @@ TEST(JSONValueSerializerTest, JSONReaderComments) {
   ValidateJsonList("[ 1 //// ,2\r\n ]");
 
   // It's ok to have a comment in a string.
-  absl::optional<Value> value = JSONReader::Read("[\"// ok\\n /* foo */ \"]");
+  std::optional<Value> value = JSONReader::Read("[\"// ok\\n /* foo */ \"]",
+                                                JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(value);
-  Value::List* list = value->GetIfList();
+  ListValue* list = value->GetIfList();
   ASSERT_TRUE(list);
   ASSERT_EQ(1U, list->size());
   const Value& elt = (*list)[0];
@@ -380,10 +382,11 @@ TEST(JSONValueSerializerTest, JSONReaderComments) {
   ASSERT_EQ("// ok\n /* foo */ ", elt.GetString());
 
   // You can't nest comments.
-  ASSERT_FALSE(JSONReader::Read("/* /* inner */ outer */ [ 1 ]"));
+  ASSERT_FALSE(JSONReader::Read("/* /* inner */ outer */ [ 1 ]",
+                                JSON_PARSE_CHROMIUM_EXTENSIONS));
 
   // Not a open comment token.
-  ASSERT_FALSE(JSONReader::Read("/ * * / [1]"));
+  ASSERT_FALSE(JSONReader::Read("/ * * / [1]", JSON_PARSE_CHROMIUM_EXTENSIONS));
 }
 
 class JSONFileValueSerializerTest : public testing::Test {
@@ -403,7 +406,7 @@ TEST_F(JSONFileValueSerializerTest, Roundtrip) {
   JSONFileValueDeserializer deserializer(original_file_path);
   std::unique_ptr<Value> root = deserializer.Deserialize(nullptr, nullptr);
   ASSERT_TRUE(root);
-  const Value::Dict* root_dict = root->GetIfDict();
+  const DictValue* root_dict = root->GetIfDict();
   ASSERT_TRUE(root_dict);
 
   const Value* null_value = root_dict->Find("null");

@@ -5,7 +5,6 @@
 #include "chrome/browser/policy/printing_restrictions_policy_handler.h"
 
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/common/pref_names.h"
 #include "components/policy/core/browser/policy_error_map.h"
 #include "components/policy/core/common/schema.h"
@@ -13,6 +12,10 @@
 #include "components/prefs/pref_value_map.h"
 #include "components/strings/grit/components_strings.h"
 #include "printing/buildflags/buildflags.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/ash_pref_names.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace policy {
 
@@ -52,7 +55,7 @@ bool PrintingEnumPolicyHandler<Mode>::GetValue(const PolicyMap& policies,
                                                Mode* result) {
   const base::Value* value;
   if (CheckAndGetValue(policies, errors, &value) && value) {
-    absl::optional<Mode> mode;
+    std::optional<Mode> mode;
     auto it = policy_value_to_mode_.find(value->GetString());
     if (it != policy_value_to_mode_.end())
       mode = it->second;
@@ -68,11 +71,11 @@ bool PrintingEnumPolicyHandler<Mode>::GetValue(const PolicyMap& policies,
   return false;
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 PrintingAllowedColorModesPolicyHandler::PrintingAllowedColorModesPolicyHandler()
     : PrintingEnumPolicyHandler<printing::ColorModeRestriction>(
           key::kPrintingAllowedColorModes,
-          prefs::kPrintingAllowedColorModes,
+          ash::prefs::kPrintingAllowedColorModes,
           {
               {"any", printing::ColorModeRestriction::kUnset},
               {"monochrome", printing::ColorModeRestriction::kMonochrome},
@@ -85,7 +88,7 @@ PrintingAllowedColorModesPolicyHandler::
 PrintingColorDefaultPolicyHandler::PrintingColorDefaultPolicyHandler()
     : PrintingEnumPolicyHandler<printing::ColorModeRestriction>(
           key::kPrintingColorDefault,
-          prefs::kPrintingColorDefault,
+          ash::prefs::kPrintingColorDefault,
           {
               {"monochrome", printing::ColorModeRestriction::kMonochrome},
               {"color", printing::ColorModeRestriction::kColor},
@@ -98,7 +101,7 @@ PrintingAllowedDuplexModesPolicyHandler::
     PrintingAllowedDuplexModesPolicyHandler()
     : PrintingEnumPolicyHandler<printing::DuplexModeRestriction>(
           key::kPrintingAllowedDuplexModes,
-          prefs::kPrintingAllowedDuplexModes,
+          ash::prefs::kPrintingAllowedDuplexModes,
           {
               {"any", printing::DuplexModeRestriction::kUnset},
               {"simplex", printing::DuplexModeRestriction::kSimplex},
@@ -111,7 +114,7 @@ PrintingAllowedDuplexModesPolicyHandler::
 PrintingDuplexDefaultPolicyHandler::PrintingDuplexDefaultPolicyHandler()
     : PrintingEnumPolicyHandler<printing::DuplexModeRestriction>(
           key::kPrintingDuplexDefault,
-          prefs::kPrintingDuplexDefault,
+          ash::prefs::kPrintingDuplexDefault,
           {
               {"simplex", printing::DuplexModeRestriction::kSimplex},
               {"long-edge", printing::DuplexModeRestriction::kLongEdge},
@@ -124,7 +127,7 @@ PrintingDuplexDefaultPolicyHandler::~PrintingDuplexDefaultPolicyHandler() =
 PrintingAllowedPinModesPolicyHandler::PrintingAllowedPinModesPolicyHandler()
     : PrintingEnumPolicyHandler<printing::PinModeRestriction>(
           key::kPrintingAllowedPinModes,
-          prefs::kPrintingAllowedPinModes,
+          ash::prefs::kPrintingAllowedPinModes,
           {
               {"any", printing::PinModeRestriction::kUnset},
               {"pin", printing::PinModeRestriction::kPin},
@@ -137,14 +140,14 @@ PrintingAllowedPinModesPolicyHandler::~PrintingAllowedPinModesPolicyHandler() =
 PrintingPinDefaultPolicyHandler::PrintingPinDefaultPolicyHandler()
     : PrintingEnumPolicyHandler<printing::PinModeRestriction>(
           key::kPrintingPinDefault,
-          prefs::kPrintingPinDefault,
+          ash::prefs::kPrintingPinDefault,
           {
               {"pin", printing::PinModeRestriction::kPin},
               {"no_pin", printing::PinModeRestriction::kNoPin},
           }) {}
 
 PrintingPinDefaultPolicyHandler::~PrintingPinDefaultPolicyHandler() = default;
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(ENABLE_PRINT_PREVIEW)
 PrintingAllowedBackgroundGraphicsModesPolicyHandler::
@@ -186,7 +189,7 @@ PrintingPaperSizeDefaultPolicyHandler::
     ~PrintingPaperSizeDefaultPolicyHandler() = default;
 
 bool PrintingPaperSizeDefaultPolicyHandler::CheckIntSubkey(
-    const base::Value::Dict& dict,
+    const base::DictValue& dict,
     const std::string& key,
     PolicyErrorMap* errors) {
   const base::Value* value = dict.Find(key);

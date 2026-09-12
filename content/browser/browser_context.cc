@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "base/base64.h"
 #include "base/check_op.h"
 #include "base/command_line.h"
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/lazy_instance.h"
@@ -24,18 +26,20 @@
 #include "base/memory/weak_ptr.h"
 #include "base/metrics/field_trial_params.h"
 #include "base/notreached.h"
-#include "base/trace_event/typed_macros.h"
+#include "base/trace_event/trace_event.h"
 #include "base/unguessable_token.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/download/public/common/in_progress_download_manager.h"
+#include "components/leveldb_proto/public/proto_database_provider.h"
 #include "components/services/storage/privileged/mojom/indexed_db_control.mojom.h"
 #include "content/browser/blob_storage/chrome_blob_storage_context.h"
 #include "content/browser/browser_context_impl.h"
 #include "content/browser/browsing_data/browsing_data_remover_impl.h"
 #include "content/browser/child_process_host_impl.h"
-#include "content/browser/child_process_security_policy_impl.h"
-#include "content/browser/media/browser_feature_provider.h"
+#include "content/browser/in_memory_federated_permission_context.h"
+#include "content/browser/preloading/prefetch/prefetch_request.h"
+#include "content/browser/preloading/prefetch/prefetch_service.h"
+#include "content/browser/preloading/prefetch/prefetch_type.h"
 #include "content/browser/push_messaging/push_messaging_router.h"
 #include "content/browser/site_info.h"
 #include "content/browser/storage_partition_impl_map.h"
@@ -45,6 +49,9 @@
 #include "content/public/browser/content_browser_client.h"
 #include "content/public/browser/download_manager.h"
 #include "content/public/browser/permission_controller.h"
+#include "content/public/browser/pre_prefetch_handle.h"
+#include "content/public/browser/prefetch_service_delegate.h"
+#include "content/public/browser/preloading_trigger_type.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/site_instance.h"
 #include "content/public/browser/storage_partition_config.h"
@@ -55,14 +62,19 @@
 #include "media/capabilities/video_decode_stats_db_impl.h"
 #include "media/mojo/services/video_decode_perf_history.h"
 #include "media/mojo/services/webrtc_video_perf_history.h"
+#include "net/http/http_request_headers.h"
 #include "storage/browser/blob/blob_storage_context.h"
-#include "storage/browser/database/database_tracker.h"
 #include "storage/browser/file_system/external_mount_points.h"
+#include "third_party/blink/public/mojom/loader/referrer.mojom.h"
 #include "third_party/blink/public/mojom/push_messaging/push_messaging.mojom.h"
 #include "third_party/perfetto/include/perfetto/tracing/traced_proto.h"
 #include "third_party/perfetto/include/perfetto/tracing/traced_value.h"
+#include "url/gurl.h"
 
 namespace content {
+
+class PrefetchService;
+class PrefetchServiceDelegate;
 
 namespace {
 
@@ -71,7 +83,7 @@ using perfetto::protos::pbzero::ChromeTrackEvent;
 
 base::WeakPtr<storage::BlobStorageContext> BlobStorageContextGetterForBrowser(
     scoped_refptr<ChromeBlobStorageContext> blob_context) {
-  DCHECK_CURRENTLY_ON(BrowserThread::IO);
+  CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M159);
   return blob_context->context()->AsWeakPtr();
 }
 
@@ -98,7 +110,7 @@ BrowserContext::~BrowserContext() {
 }
 
 DownloadManager* BrowserContext::GetDownloadManager() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   return impl()->GetDownloadManager();
 }
 
@@ -111,7 +123,7 @@ BrowsingDataRemover* BrowserContext::GetBrowsingDataRemover() {
 }
 
 PermissionController* BrowserContext::GetPermissionController() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   return impl()->GetPermissionController();
 }
 
@@ -119,11 +131,13 @@ StoragePartition* BrowserContext::GetStoragePartition(
     SiteInstance* site_instance,
     bool can_create) {
   if (site_instance)
-    DCHECK_EQ(this, site_instance->GetBrowserContext());
+    CHECK_EQ(this, site_instance->GetBrowserContext(),
+             base::NotFatalUntil::M159);
 
-  auto partition_config = site_instance
-                              ? site_instance->GetStoragePartitionConfig()
-                              : StoragePartitionConfig::CreateDefault(this);
+  auto partition_config =
+      site_instance
+          ? site_instance->GetSecurityPrincipal().GetStoragePartitionConfig()
+          : StoragePartitionConfig::CreateDefault(this);
   return GetStoragePartition(partition_config, can_create);
 }
 
@@ -142,19 +156,19 @@ StoragePartition* BrowserContext::GetStoragePartition(
 StoragePartition* BrowserContext::GetStoragePartitionForUrl(
     const GURL& url,
     bool can_create) {
-  auto storage_partition_config = SiteInfo::GetStoragePartitionConfigForUrl(
-      this, url, /*is_site_url=*/false);
+  auto storage_partition_config =
+      SiteInfo::GetStoragePartitionConfigForUrl(this, url);
 
   return GetStoragePartition(storage_partition_config, can_create);
 }
 
 void BrowserContext::ForEachLoadedStoragePartition(
-    StoragePartitionCallback callback) {
+    base::FunctionRef<void(StoragePartition*)> fn) {
   StoragePartitionImplMap* partition_map = impl()->storage_partition_map();
   if (!partition_map)
     return;
 
-  partition_map->ForEach(std::move(callback));
+  partition_map->ForEach(fn);
 }
 
 size_t BrowserContext::GetLoadedStoragePartitionCount() {
@@ -181,10 +195,104 @@ StoragePartition* BrowserContext::GetDefaultStoragePartition() {
   return GetStoragePartition(StoragePartitionConfig::CreateDefault(this));
 }
 
+scoped_refptr<network::SharedURLLoaderFactory>
+BrowserContext::GetURLLoaderFactory() {
+  return GetDefaultStoragePartition()->GetURLLoaderFactoryForBrowserProcess();
+}
+
+std::unique_ptr<content::PrefetchHandle>
+BrowserContext::StartBrowserPrefetchRequest(
+    const GURL& url,
+    const std::string& embedder_histogram_suffix,
+    bool javascript_enabled,
+    std::optional<net::HttpNoVarySearchData> no_vary_search_hint,
+    std::optional<PrefetchPriority> priority,
+    scoped_refptr<PreloadPipelineInfo> preload_pipeline_info,
+    const net::HttpRequestHeaders& additional_headers,
+    std::unique_ptr<PrefetchRequestStatusListener> request_status_listener,
+    base::TimeDelta ttl,
+    bool should_append_variations_header,
+    bool should_disable_block_until_head_timeout,
+    bool should_bypass_http_cache) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  TRACE_EVENT0("loading", "BrowserContext::StartBrowserPrefetchRequest");
+
+  PrefetchService* prefetch_service =
+      BrowserContextImpl::From(this)->GetPrefetchService();
+  if (!prefetch_service) {
+    if (request_status_listener) {
+      if (base::FeatureList::IsEnabled(
+              features::kPrefetchRequestStatusListenerAsync)) {
+        base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+            FROM_HERE,
+            base::BindOnce(
+                &PrefetchRequestStatusListener::OnPrefetchStartFailedGeneric,
+                std::move(request_status_listener)));
+      } else {
+        request_status_listener->OnPrefetchStartFailedGeneric();
+      }
+    }
+    return nullptr;
+  }
+
+  PrefetchType prefetch_type(PreloadingTriggerType::kEmbedder,
+                             /*use_prefetch_proxy=*/false);
+  auto request = PrefetchRequest::CreateBrowserInitiatedWithoutWebContents(
+      this, url, prefetch_type, embedder_histogram_suffix,
+      blink::mojom::Referrer(), javascript_enabled,
+      /*referring_origin=*/std::nullopt, std::move(no_vary_search_hint),
+      std::move(priority), std::move(preload_pipeline_info),
+      /*attempt=*/nullptr, additional_headers,
+      std::move(request_status_listener), ttl, should_append_variations_header,
+      should_disable_block_until_head_timeout, should_bypass_http_cache);
+  return prefetch_service->AddPrefetchRequestWithHandle(std::move(request));
+}
+
+std::unique_ptr<content::PrefetchHandle>
+BrowserContext::StartPrefetchFromPrePrefetch(
+    std::unique_ptr<content::PrePrefetchHandle> pre_prefetch_handle) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  TRACE_EVENT0("loading", "BrowserContext::StartPrefetchFromPrePrefetch");
+
+  PrefetchService* prefetch_service =
+      BrowserContextImpl::From(this)->GetPrefetchService();
+  if (!prefetch_service) {
+    // TODO(crbug.com/452406598): Call `PrefetchRequestStatusListener`'s
+    // `OnPrefetchStartFailedGeneric()`, like `StartBrowserPrefetchRequest()`
+    // does.
+    return nullptr;
+  }
+
+  return prefetch_service->AddPrefetchRequestFromPrePrefetch(
+      std::move(pre_prefetch_handle));
+}
+
+void BrowserContext::UpdatePrefetchServiceDelegateAcceptLanguageHeader(
+    std::string accept_language_header) {
+  PrefetchService* prefetch_service =
+      BrowserContextImpl::From(this)->GetPrefetchService();
+  if (!prefetch_service) {
+    return;
+  }
+  prefetch_service->GetPrefetchServiceDelegate()->SetAcceptLanguageHeader(
+      accept_language_header);
+}
+
+bool BrowserContext::IsPrefetchDuplicate(
+    const GURL& url,
+    const std::optional<net::HttpNoVarySearchData>& no_vary_search_hint) {
+  PrefetchService* prefetch_service =
+      BrowserContextImpl::From(this)->GetPrefetchService();
+  // `CHECK` is used here because this method should not be called unless there
+  // is a `prefetch_service` created for `this` browser context.
+  CHECK(prefetch_service);
+  return prefetch_service->IsPrefetchDuplicate(url, no_vary_search_hint);
+}
+
 void BrowserContext::CreateMemoryBackedBlob(base::span<const uint8_t> data,
                                             const std::string& content_type,
                                             BlobCallback callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   ChromeBlobStorageContext* blob_context =
       ChromeBlobStorageContext::GetFor(this);
@@ -196,7 +304,7 @@ void BrowserContext::CreateMemoryBackedBlob(base::span<const uint8_t> data,
 }
 
 BrowserContext::BlobContextGetter BrowserContext::GetBlobStorageContext() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   scoped_refptr<ChromeBlobStorageContext> chrome_blob_context =
       ChromeBlobStorageContext::GetFor(this);
   return base::BindRepeating(&BlobStorageContextGetterForBrowser,
@@ -205,7 +313,7 @@ BrowserContext::BlobContextGetter BrowserContext::GetBlobStorageContext() {
 
 mojo::PendingRemote<blink::mojom::Blob> BrowserContext::GetBlobRemote(
     const std::string& uuid) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   return ChromeBlobStorageContext::GetBlobRemote(this, uuid);
 }
 
@@ -213,12 +321,13 @@ void BrowserContext::DeliverPushMessage(
     const GURL& origin,
     int64_t service_worker_registration_id,
     const std::string& message_id,
-    absl::optional<std::string> payload,
+    std::optional<std::string> payload,
+    bool record_network_requests,
     base::OnceCallback<void(blink::mojom::PushEventStatus)> callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   PushMessagingRouter::DeliverMessage(
       this, origin, service_worker_registration_id, message_id,
-      std::move(payload), std::move(callback));
+      std::move(payload), record_network_requests, std::move(callback));
 }
 
 void BrowserContext::FirePushSubscriptionChangeEvent(
@@ -227,7 +336,7 @@ void BrowserContext::FirePushSubscriptionChangeEvent(
     blink::mojom::PushSubscriptionPtr new_subscription,
     blink::mojom::PushSubscriptionPtr old_subscription,
     base::OnceCallback<void(blink::mojom::PushEventStatus)> callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   PushMessagingRouter::FireSubscriptionChangeEvent(
       this, origin, service_worker_registration_id, std::move(new_subscription),
       std::move(old_subscription), std::move(callback));
@@ -252,13 +361,6 @@ void BrowserContext::EnsureResourceContextInitialized() {
 void BrowserContext::SaveSessionState() {
   StoragePartition* storage_partition = GetDefaultStoragePartition();
 
-  storage::DatabaseTracker* database_tracker =
-      storage_partition->GetDatabaseTracker();
-  database_tracker->task_runner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&storage::DatabaseTracker::SetForceKeepSessionState,
-                     base::WrapRefCounted(database_tracker)));
-
   storage_partition->GetCookieManagerForBrowserProcess()
       ->SetForceKeepSessionState();
 
@@ -267,8 +369,7 @@ void BrowserContext::SaveSessionState() {
           storage_partition->GetDOMStorageContext());
   dom_storage_context_proxy->SetForceKeepSessionState();
 
-  auto& indexed_db_control = storage_partition->GetIndexedDBControl();
-  indexed_db_control.SetForceKeepSessionState();
+  storage_partition->GetIndexedDBControl().SetForceKeepSessionState();
 }
 
 void BrowserContext::SetDownloadManagerForTesting(
@@ -278,8 +379,8 @@ void BrowserContext::SetDownloadManagerForTesting(
 
 void BrowserContext::SetPermissionControllerForTesting(
     std::unique_ptr<PermissionController> permission_controller) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(permission_controller);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  CHECK(permission_controller, base::NotFatalUntil::M159);
   impl()->SetPermissionControllerForTesting(  // IN-TEST
       std::move(permission_controller));
 }
@@ -296,8 +397,12 @@ bool BrowserContext::ShutdownStarted() {
   return impl()->ShutdownStarted();
 }
 
-const std::string& BrowserContext::UniqueId() {
+const std::string& BrowserContext::UniqueId() const {
   return impl()->UniqueId();
+}
+
+const base::UnguessableToken& BrowserContext::UniqueToken() const {
+  return impl()->UniqueToken();
 }
 
 media::VideoDecodePerfHistory* BrowserContext::GetVideoDecodePerfHistory() {
@@ -308,18 +413,9 @@ media::WebrtcVideoPerfHistory* BrowserContext::GetWebrtcVideoPerfHistory() {
   return impl()->GetWebrtcVideoPerfHistory();
 }
 
-media::learning::LearningSession* BrowserContext::GetLearningSession() {
-  return impl()->GetLearningSession();
-}
-
 std::unique_ptr<download::InProgressDownloadManager>
 BrowserContext::RetrieveInProgressDownloadManager() {
   return nullptr;
-}
-
-// static
-std::string BrowserContext::CreateRandomMediaDeviceIDSalt() {
-  return base::UnguessableToken::Create().ToString();
 }
 
 void BrowserContext::WriteIntoTrace(
@@ -327,18 +423,18 @@ void BrowserContext::WriteIntoTrace(
   perfetto::WriteIntoTracedProto(std::move(proto), impl());
 }
 
+base::WeakPtr<BrowserContext> BrowserContext::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // The //content embedder can override the methods below to change or extend
 // how the //content layer interacts with a BrowserContext.  The code below
 // provides default implementations where appropriate.
 //
-// TODO(https://crbug.com/1179776): Migrate method definitions from this
+// TODO(crbug.com/40169693): Migrate method definitions from this
 // section into a separate BrowserContextDelegate class and a separate
 // browser_context_delegate.cc source file.
-
-std::string BrowserContext::GetMediaDeviceIDSalt() {
-  return UniqueId();
-}
 
 FileSystemAccessPermissionContext*
 BrowserContext::GetFileSystemAccessPermissionContext() {
@@ -353,13 +449,17 @@ bool BrowserContext::CanUseDiskWhenOffTheRecord() {
   return false;
 }
 
+bool BrowserContext::ShouldClearSessionStorageOnStartup() {
+  return false;
+}
+
 variations::VariationsClient* BrowserContext::GetVariationsClient() {
   return nullptr;
 }
 
 std::unique_ptr<media::VideoDecodePerfHistory>
 BrowserContext::CreateVideoDecodePerfHistory() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   const char kUseInMemoryDBParamName[] = "db_in_memory";
   const bool kUseInMemoryDBDefault = false;
@@ -378,32 +478,38 @@ BrowserContext::CreateVideoDecodePerfHistory() {
         GetPath().Append(FILE_PATH_LITERAL("VideoDecodeStats")), db_provider);
   }
 
-  return std::make_unique<media::VideoDecodePerfHistory>(
-      std::move(stats_db), BrowserFeatureProvider::GetFactoryCB());
+  return std::make_unique<media::VideoDecodePerfHistory>(std::move(stats_db));
 }
 
 FederatedIdentityApiPermissionContextDelegate*
 BrowserContext::GetFederatedIdentityApiPermissionContext() {
-  return nullptr;
+  return impl()->GetFederatedPermissionContext();
 }
 
 FederatedIdentityAutoReauthnPermissionContextDelegate*
 BrowserContext::GetFederatedIdentityAutoReauthnPermissionContext() {
-  return nullptr;
+  return impl()->GetFederatedPermissionContext();
 }
 
 FederatedIdentityPermissionContextDelegate*
 BrowserContext::GetFederatedIdentityPermissionContext() {
-  return nullptr;
-}
-
-KAnonymityServiceDelegate* BrowserContext::GetKAnonymityServiceDelegate() {
-  return nullptr;
+  return impl()->GetFederatedPermissionContext();
 }
 
 OriginTrialsControllerDelegate*
 BrowserContext::GetOriginTrialsControllerDelegate() {
   return nullptr;
 }
+
+std::unique_ptr<leveldb_proto::ProtoDatabaseProvider>
+BrowserContext::TakeDefaultProtoDatabaseProvider() {
+  return nullptr;
+}
+
+#if BUILDFLAG(IS_ANDROID)
+std::string BrowserContext::GetExtraHeadersForUrl(const GURL& url) {
+  return std::string();
+}
+#endif  // BUILDFLAG(IS_ANDROID)
 
 }  // namespace content

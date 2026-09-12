@@ -22,9 +22,10 @@
 // N.B.: Web IDL doesn't support multiple inheritance of dictionaries.
 
 enum CanvasPixelFormat {
-    "uint8", // default
+    "unorm8", // default
     "float16",
 };
+
 
 enum CanvasPowerPreference {
     "default",
@@ -33,9 +34,9 @@ enum CanvasPowerPreference {
 };
 
 enum CanvasWillReadFrequently {
-  "true",
-  "false",
-  "undefined" // default
+    "true",
+    "false",
+    "undefined" // default
 };
 
 // The PermissiveDictionaryConversion extended attribute is needed to allow the
@@ -50,7 +51,8 @@ dictionary CanvasContextCreationAttributesModule {
     // Canvas 2D attributes
     boolean alpha = true;  // Also used for WebGL.
     PredefinedColorSpace colorSpace = "srgb";
-    [RuntimeEnabled=CanvasFloatingPoint] CanvasPixelFormat pixelFormat = "uint8";
+    [RuntimeEnabled=CanvasToneMapping] CanvasToneMapping toneMapping = {};
+    CanvasPixelFormat colorType = "unorm8";
     CanvasWillReadFrequently willReadFrequently = "undefined";
 
     // WebGL attributes

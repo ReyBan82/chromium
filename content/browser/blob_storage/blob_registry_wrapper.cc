@@ -4,13 +4,10 @@
 
 #include "content/browser/blob_storage/blob_registry_wrapper.h"
 
-#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "content/browser/blob_storage/chrome_blob_storage_context.h"
-#include "content/browser/child_process_security_policy_impl.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "content/public/common/content_features.h"
-#include "net/base/features.h"
+#include "content/browser/security/cpsp/child_process_security_policy_impl.h"
+#include "content/public/browser/browser_thread.h"
 #include "storage/browser/blob/blob_registry_impl.h"
 #include "storage/browser/blob/blob_storage_context.h"
 
@@ -23,7 +20,7 @@ class BindingDelegate : public storage::BlobRegistryImpl::Delegate {
   explicit BindingDelegate(
       ChildProcessSecurityPolicyImpl::Handle security_policy_handle)
       : security_policy_handle_(std::move(security_policy_handle)) {}
-  ~BindingDelegate() override {}
+  ~BindingDelegate() override = default;
 
   bool CanReadFile(const base::FilePath& file) override {
     return security_policy_handle_.CanReadFile(file);
@@ -40,24 +37,7 @@ class BindingDelegate : public storage::BlobRegistryImpl::Delegate {
 
 // static
 scoped_refptr<BlobRegistryWrapper> BlobRegistryWrapper::Create(
-    scoped_refptr<ChromeBlobStorageContext> blob_storage_context,
-    base::WeakPtr<storage::BlobUrlRegistry> blob_url_registry) {
-  DCHECK(
-      !base::FeatureList::IsEnabled(net::features::kSupportPartitionedBlobUrl));
-  scoped_refptr<BlobRegistryWrapper> result(new BlobRegistryWrapper());
-  GetIOThreadTaskRunner({})->PostTask(
-      FROM_HERE,
-      base::BindOnce(&BlobRegistryWrapper::InitializeOnIOThreadDeprecated,
-                     result, std::move(blob_storage_context),
-                     std::move(blob_url_registry)));
-  return result;
-}
-
-// static
-scoped_refptr<BlobRegistryWrapper> BlobRegistryWrapper::Create(
     scoped_refptr<ChromeBlobStorageContext> blob_storage_context) {
-  DCHECK(
-      base::FeatureList::IsEnabled(net::features::kSupportPartitionedBlobUrl));
   scoped_refptr<BlobRegistryWrapper> result(new BlobRegistryWrapper());
   GetIOThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(&BlobRegistryWrapper::InitializeOnIOThread,
@@ -65,13 +45,12 @@ scoped_refptr<BlobRegistryWrapper> BlobRegistryWrapper::Create(
   return result;
 }
 
-BlobRegistryWrapper::BlobRegistryWrapper() {
-}
+BlobRegistryWrapper::BlobRegistryWrapper() = default;
 
 void BlobRegistryWrapper::Bind(
-    int process_id,
+    ChildProcessId process_id,
     mojo::PendingReceiver<blink::mojom::BlobRegistry> receiver) {
-  DCHECK_CURRENTLY_ON(BrowserThread::IO);
+  CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M159);
   blob_registry_->Bind(
       std::move(receiver),
       std::make_unique<BindingDelegate>(
@@ -79,24 +58,11 @@ void BlobRegistryWrapper::Bind(
               process_id)));
 }
 
-BlobRegistryWrapper::~BlobRegistryWrapper() {}
-
-void BlobRegistryWrapper::InitializeOnIOThreadDeprecated(
-    scoped_refptr<ChromeBlobStorageContext> blob_storage_context,
-    base::WeakPtr<storage::BlobUrlRegistry> blob_url_registry) {
-  DCHECK(
-      !base::FeatureList::IsEnabled(net::features::kSupportPartitionedBlobUrl));
-  DCHECK_CURRENTLY_ON(BrowserThread::IO);
-  blob_registry_ = std::make_unique<storage::BlobRegistryImpl>(
-      blob_storage_context->context()->AsWeakPtr(),
-      std::move(blob_url_registry), GetUIThreadTaskRunner({}));
-}
+BlobRegistryWrapper::~BlobRegistryWrapper() = default;
 
 void BlobRegistryWrapper::InitializeOnIOThread(
     scoped_refptr<ChromeBlobStorageContext> blob_storage_context) {
-  DCHECK(
-      base::FeatureList::IsEnabled(net::features::kSupportPartitionedBlobUrl));
-  DCHECK_CURRENTLY_ON(BrowserThread::IO);
+  CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M159);
   blob_registry_ = std::make_unique<storage::BlobRegistryImpl>(
       blob_storage_context->context()->AsWeakPtr());
 }

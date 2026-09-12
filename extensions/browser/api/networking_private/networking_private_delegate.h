@@ -6,6 +6,7 @@
 #define EXTENSIONS_BROWSER_API_NETWORKING_PRIVATE_NETWORKING_PRIVATE_DELEGATE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,7 +14,6 @@
 #include "base/values.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "extensions/common/api/networking_private.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace extensions {
 
@@ -21,30 +21,29 @@ class NetworkingPrivateDelegateObserver;
 
 // Base class for platform dependent networkingPrivate API implementations.
 // All inputs and results for this class use ONC values. See
-// networking_private.idl for descriptions of the expected inputs and results.
+// networking_private.webidl for descriptions of the expected inputs and
+// results.
 class NetworkingPrivateDelegate : public KeyedService {
  public:
-  using DictionaryCallback = base::OnceCallback<void(base::Value::Dict)>;
+  using DictionaryCallback = base::OnceCallback<void(base::DictValue)>;
   using VoidCallback = base::OnceCallback<void()>;
   using BoolCallback = base::OnceCallback<void(bool)>;
   using StringCallback = base::OnceCallback<void(const std::string&)>;
-  using NetworkListCallback = base::OnceCallback<void(base::Value::List)>;
-  using EnabledNetworkTypesCallback =
-      base::OnceCallback<void(base::Value::List)>;
+  using NetworkListCallback = base::OnceCallback<void(base::ListValue)>;
+  using EnabledNetworkTypesCallback = base::OnceCallback<void(base::ListValue)>;
   using FailureCallback = base::OnceCallback<void(const std::string&)>;
-  using DeviceStateList = std::vector<
-      std::unique_ptr<api::networking_private::DeviceStateProperties>>;
+  using DeviceStateList =
+      std::vector<api::networking_private::DeviceStateProperties>;
   using DeviceStateListCallback =
-      base::OnceCallback<void(std::unique_ptr<DeviceStateList>)>;
+      base::OnceCallback<void(std::optional<DeviceStateList>)>;
   using GetGlobalPolicyCallback =
-      base::OnceCallback<void(absl::optional<base::Value::Dict>)>;
-  using GetCertificateListsCallback =
-      base::OnceCallback<void(absl::optional<base::Value::Dict>)>;
+      base::OnceCallback<void(std::optional<base::DictValue>)>;
+  using GetCertificateListsCallback = base::OnceCallback<void(base::DictValue)>;
 
   // Returns |result| on success, or |result|=nullopt and |error| on failure.
   using PropertiesCallback =
-      base::OnceCallback<void(absl::optional<base::Value::Dict> result,
-                              const absl::optional<std::string>& error)>;
+      base::OnceCallback<void(std::optional<base::DictValue> result,
+                              const std::optional<std::string>& error)>;
 
   // Delegate for forwarding UI requests, e.g. for showing the account UI.
   class UIDelegate {
@@ -84,12 +83,12 @@ class NetworkingPrivateDelegate : public KeyedService {
                         DictionaryCallback success_callback,
                         FailureCallback failure_callback) = 0;
   virtual void SetProperties(const std::string& guid,
-                             base::Value::Dict properties,
+                             base::DictValue properties,
                              bool allow_set_shared_config,
                              VoidCallback success_callback,
                              FailureCallback failure_callback) = 0;
   virtual void CreateNetwork(bool shared,
-                             base::Value properties,
+                             base::DictValue properties,
                              StringCallback success_callback,
                              FailureCallback failure_callback) = 0;
   virtual void ForgetNetwork(const std::string& guid,

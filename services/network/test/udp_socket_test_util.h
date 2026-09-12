@@ -8,17 +8,15 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/containers/span.h"
-#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/run_loop.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/ip_endpoint.h"
-#include "net/base/net_errors.h"
-#include "services/network/public/mojom/udp_socket.mojom-test-utils.h"
 #include "services/network/public/mojom/udp_socket.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace network::test {
 
@@ -40,11 +38,15 @@ class UDPSocketTestHelper {
   int SetBroadcastSync(bool broadcast);
   int SetSendBufferSizeSync(int send_buffer_size);
   int SetReceiveBufferSizeSync(int receive_buffer_size);
-  int JoinGroupSync(const net::IPAddress& group_address);
-  int LeaveGroupSync(const net::IPAddress& group_address);
+  int JoinGroupSync(
+      const net::IPAddress& group_address,
+      const std::optional<net::IPAddress>& source_address = std::nullopt);
+  int LeaveGroupSync(
+      const net::IPAddress& group_address,
+      const std::optional<net::IPAddress>& source_address = std::nullopt);
 
  private:
-  std::unique_ptr<mojom::UDPSocketAsyncWaiter> socket_;
+  const raw_ref<mojom::UDPSocket> socket_;
 };
 
 // An implementation of mojom::UDPSocketListener that records received results.
@@ -52,14 +54,14 @@ class UDPSocketListenerImpl : public mojom::UDPSocketListener {
  public:
   struct ReceivedResult {
     ReceivedResult(int net_error_arg,
-                   const absl::optional<net::IPEndPoint>& src_addr_arg,
-                   absl::optional<std::vector<uint8_t>> data_arg);
+                   const std::optional<net::IPEndPoint>& src_addr_arg,
+                   std::optional<std::vector<uint8_t>> data_arg);
     ReceivedResult(const ReceivedResult& other);
     ~ReceivedResult();
 
     int net_error;
-    absl::optional<net::IPEndPoint> src_addr;
-    absl::optional<std::vector<uint8_t>> data;
+    std::optional<net::IPEndPoint> src_addr;
+    std::optional<std::vector<uint8_t>> data;
   };
 
   UDPSocketListenerImpl();
@@ -75,8 +77,8 @@ class UDPSocketListenerImpl : public mojom::UDPSocketListener {
 
  private:
   void OnReceived(int32_t result,
-                  const absl::optional<net::IPEndPoint>& src_addr,
-                  absl::optional<base::span<const uint8_t>> data) override;
+                  const std::optional<net::IPEndPoint>& src_addr,
+                  std::optional<base::span<const uint8_t>> data) override;
   std::unique_ptr<base::RunLoop> run_loop_;
   std::vector<ReceivedResult> results_;
   size_t expected_receive_count_;

@@ -31,17 +31,20 @@
 #include "third_party/blink/renderer/platform/bindings/v8_per_context_data.h"
 
 #include <stdlib.h>
+
 #include <memory>
 #include <utility>
 
 #include "base/memory/ptr_util.h"
 #include "components/crash/core/common/crash_key.h"
+#include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
 #include "third_party/blink/renderer/platform/bindings/origin_trial_features.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
 #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
 #include "third_party/blink/renderer/platform/bindings/v8_object_constructor.h"
 #include "third_party/blink/renderer/platform/bindings/wrapper_type_info.h"
 #include "third_party/blink/renderer/platform/instrumentation/instance_counters.h"
+#include "third_party/blink/renderer/platform/scheduler/public/event_loop.h"
 
 namespace blink {
 
@@ -51,11 +54,13 @@ constexpr char kContextLabel[] = "V8PerContextData::context_";
 
 }  // namespace
 
-V8PerContextData::V8PerContextData(v8::Local<v8::Context> context)
-    : isolate_(context->GetIsolate()),
+V8PerContextData::V8PerContextData(v8::Local<v8::Context> context,
+                                   scheduler::EventLoop* event_loop)
+    : isolate_(v8::Isolate::GetCurrent()),
       context_holder_(std::make_unique<gin::ContextHolder>(isolate_)),
       context_(isolate_, context),
-      activity_logger_(nullptr) {
+      activity_logger_(nullptr),
+      event_loop_(event_loop) {
   context_holder_->SetContext(context);
   context_.Get().AnnotateStrongRetainer(kContextLabel);
 
@@ -77,6 +82,7 @@ void V8PerContextData::Dispose() {
   // strong GC roots that prevent `this` from otherwise being collected, so
   // explicitly break any potential cycles in the ownership graph now.
   context_holder_ = nullptr;
+  event_loop_ = nullptr;
   if (!context_.IsEmpty())
     context_.SetPhantom();
 }
@@ -87,16 +93,13 @@ void V8PerContextData::Trace(Visitor* visitor) const {
   visitor->Trace(data_map_);
 }
 
-V8PerContextData* V8PerContextData::From(v8::Local<v8::Context> context) {
-  return ScriptState::From(context)->PerContextData();
-}
-
 v8::Local<v8::Object> V8PerContextData::CreateWrapperFromCacheSlowCase(
+    v8::Isolate* isolate,
     const WrapperTypeInfo* type) {
   DCHECK(!wrapper_boilerplates_.Contains(type));
   v8::Context::Scope scope(GetContext());
   v8::Local<v8::Function> interface_object = ConstructorForType(type);
-  if (UNLIKELY(interface_object.IsEmpty())) {
+  if (interface_object.IsEmpty()) [[unlikely]] {
     // For investigation of crbug.com/1199223
     static crash_reporter::CrashKeyString<64> crash_key(
         "blink__create_interface_object");
@@ -110,7 +113,7 @@ v8::Local<v8::Object> V8PerContextData::CreateWrapperFromCacheSlowCase(
   wrapper_boilerplates_.insert(
       type, TraceWrapperV8Reference<v8::Object>(isolate_, instance_template));
 
-  return instance_template->Clone();
+  return instance_template->Clone(isolate);
 }
 
 v8::Local<v8::Function> V8PerContextData::ConstructorForTypeSlowCase(
@@ -120,11 +123,34 @@ v8::Local<v8::Function> V8PerContextData::ConstructorForTypeSlowCase(
   v8::Context::Scope scope(context);
 
   v8::Local<v8::Function> parent_interface_object;
-  if (type->parent_class) {
-    parent_interface_object = ConstructorForType(type->parent_class);
+  if (auto* parent = type->parent_class) {
+    if (parent->is_skipped_in_interface_object_prototype_chain) [[unlikely]] {
+      // This is a special case for WindowProperties.
+      // We need to set up the inheritance of Window as the following:
+      //   Window.__proto__ === EventTarget
+      // although the prototype chain is the following:
+      //   Window.prototype.__proto__           === the named properties object
+      //   Window.prototype.__proto__.__proto__ === EventTarget.prototype
+      // where the named properties object is WindowProperties.prototype in
+      // our implementation (although WindowProperties is not JS observable).
+      // Let WindowProperties be skipped and make
+      // Window.__proto__ == EventTarget.
+      DCHECK(parent->parent_class);
+      DCHECK(!parent->parent_class
+                  ->is_skipped_in_interface_object_prototype_chain);
+
+      // We still need to initialize the interface object for the parent being
+      // skipped to ensure that the object is initialized properly. It will
+      // also populate the cache with the parent interface object, making the
+      // next call a cache hit.
+      std::ignore = ConstructorForType(parent);
+
+      parent = parent->parent_class;
+    }
+    parent_interface_object = ConstructorForType(parent);
   }
 
-  const DOMWrapperWorld& world = DOMWrapperWorld::World(context);
+  const DOMWrapperWorld& world = DOMWrapperWorld::World(isolate_, context);
   v8::Local<v8::Function> interface_object =
       V8ObjectConstructor::CreateInterfaceObject(
           type, context, world, isolate_, parent_interface_object,

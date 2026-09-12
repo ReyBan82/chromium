@@ -4,9 +4,7 @@
 
 #include "base/task/sequence_manager/sequenced_task_source.h"
 
-namespace base {
-namespace sequence_manager {
-namespace internal {
+namespace base::sequence_manager::internal {
 
 SequencedTaskSource::SelectedTask::SelectedTask(const SelectedTask&) = default;
 
@@ -14,14 +12,14 @@ SequencedTaskSource::SelectedTask::SelectedTask(
     Task& task,
     TaskExecutionTraceLogger task_execution_trace_logger,
     TaskQueue::QueuePriority priority,
+    ThreadType thread_type,
     QueueName task_queue_name)
     : task(task),
       task_execution_trace_logger(task_execution_trace_logger),
       priority(priority),
+      thread_type(thread_type),
       task_queue_name(task_queue_name) {}
 
 SequencedTaskSource::SelectedTask::~SelectedTask() = default;
 
-}  // namespace internal
-}  // namespace sequence_manager
-}  // namespace base
+}  // namespace base::sequence_manager::internal

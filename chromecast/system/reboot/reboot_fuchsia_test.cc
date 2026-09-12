@@ -13,7 +13,9 @@
 #include <lib/fpromise/result.h>
 #include <lib/sys/cpp/outgoing_directory.h>
 #include <lib/sys/cpp/service_directory.h>
+
 #include <memory>
+#include <string_view>
 #include <tuple>
 
 #include "base/files/file_util.h"
@@ -41,15 +43,16 @@ using ::testing::Eq;
 using ::testing::Ne;
 
 using fuchsia::feedback::RebootReason;
-using StateControlRebootReason =
-    fuchsia::hardware::power::statecontrol::RebootReason;
+using fuchsia::hardware::power::statecontrol::ShutdownOptions;
+using StateControlShutdownReason =
+    fuchsia::hardware::power::statecontrol::ShutdownReason;
 
 struct RebootReasonParam {
   RebootReason reason;
   RebootShlib::RebootSource source;
   bool graceful;
-  StateControlRebootReason state_control_reason =
-      StateControlRebootReason::USER_REQUEST;
+  StateControlShutdownReason state_control_reason =
+      StateControlShutdownReason::USER_REQUEST;
 };
 
 const RebootReasonParam kRebootReasonParams[] = {
@@ -68,11 +71,11 @@ const RebootReasonParam kRebootReasonParams[] = {
 
     // Graceful reboot reasons.
     {RebootReason::USER_REQUEST, RebootShlib::RebootSource::API, true,
-     StateControlRebootReason::USER_REQUEST},
+     StateControlShutdownReason::USER_REQUEST},
     {RebootReason::SYSTEM_UPDATE, RebootShlib::RebootSource::OTA, true,
-     StateControlRebootReason::SYSTEM_UPDATE},
+     StateControlShutdownReason::SYSTEM_UPDATE},
     {RebootReason::HIGH_TEMPERATURE, RebootShlib::RebootSource::OVERHEAT, true,
-     StateControlRebootReason::HIGH_TEMPERATURE},
+     StateControlShutdownReason::HIGH_TEMPERATURE},
     {RebootReason::SESSION_FAILURE, RebootShlib::RebootSource::SW_OTHER, true},
 };
 
@@ -96,13 +99,21 @@ class FakeAdmin
   explicit FakeAdmin(sys::OutgoingDirectory* outgoing_directory)
       : binding_(outgoing_directory, this) {}
 
-  void GetLastRebootReason(StateControlRebootReason* reason) {
+  void GetLastRebootReason(StateControlShutdownReason* reason) {
     *reason = last_reboot_reason_;
   }
 
  private:
-  void Reboot(StateControlRebootReason reason, RebootCallback callback) final {
-    last_reboot_reason_ = reason;
+  void Shutdown(fuchsia::hardware::power::statecontrol::ShutdownOptions options,
+                ShutdownCallback callback) final {
+    if (options.has_action() &&
+        options.action() ==
+            fuchsia::hardware::power::statecontrol::ShutdownAction::REBOOT) {
+      if (options.has_reasons() && !options.reasons().empty()) {
+        last_reboot_reason_ = options.reasons()[0];
+      }
+    }
+
     callback(fpromise::ok());
   }
 
@@ -112,7 +123,7 @@ class FakeAdmin
 
   base::ScopedServiceBinding<fuchsia::hardware::power::statecontrol::Admin>
       binding_;
-  StateControlRebootReason last_reboot_reason_;
+  StateControlShutdownReason last_reboot_reason_;
 };
 
 class FakeLastRebootInfoProvider
@@ -204,8 +215,8 @@ class RebootFuchsiaTest : public ::testing::Test {
     full_path_ = InitializeFlagFileDirForTesting(dir_.GetPath());
   }
 
-  StateControlRebootReason GetLastRebootReason() {
-    StateControlRebootReason reason;
+  StateControlShutdownReason GetLastRebootReason() {
+    StateControlShutdownReason reason;
     admin_.AsyncCall(&FakeAdmin::GetLastRebootReason).WithArgs(&reason);
     thread_.FlushForTesting();
     return reason;
@@ -231,9 +242,8 @@ class RebootFuchsiaTest : public ::testing::Test {
       fidl::InterfaceRequest<fuchsia::io::Directory> channel) {
     outgoing_directory_ = std::make_unique<sys::OutgoingDirectory>();
     outgoing_directory_->GetOrCreateDirectory("svc")->Serve(
-        fuchsia::io::OpenFlags::RIGHT_READABLE |
-            fuchsia::io::OpenFlags::RIGHT_WRITABLE,
-        channel.TakeChannel());
+        fuchsia_io::wire::kPermReadable,
+        fidl::ServerEnd<fuchsia_io::Directory>(channel.TakeChannel()));
   }
 
   const base::test::SingleThreadTaskEnvironment task_environment_;
@@ -246,7 +256,7 @@ class RebootFuchsiaTest : public ::testing::Test {
   base::FilePath full_path_;
 
  protected:
-  base::FilePath GenerateFlagFilePath(const base::StringPiece& name) {
+  base::FilePath GenerateFlagFilePath(std::string_view name) {
     return full_path_.Append(name);
   }
 
@@ -278,7 +288,7 @@ fuchsia::feedback::LastReboot GenerateLastReboot(bool graceful,
 
 // RetrySystemUpdate must be handled separately because it does not work with
 // the RebootFuchsiaParamTest family of tests. Those tests expect
-// RebootSource::OTA to map to exactly one StateControlRebootReason, which is
+// RebootSource::OTA to map to exactly one StateControlShutdownReason, which is
 // now not the case.
 TEST_F(RebootFuchsiaTest, RebootReasonRetrySystemUpdateTranslatesFromFuchsia) {
   SetLastReboot(GenerateLastReboot(true, RebootReason::RETRY_SYSTEM_UPDATE));

@@ -4,10 +4,11 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "chrome/browser/ui/views/payments/payment_request_browsertest_base.h"
 #include "chrome/browser/ui/views/payments/payment_request_dialog_view_ids.h"
-#include "components/autofill/core/browser/autofill_test_utils.h"
-#include "components/autofill/core/browser/data_model/autofill_profile.h"
+#include "components/autofill/core/browser/test_utils/autofill_test_util.h"
+#include "components/payments/core/features.h"
 #include "components/web_modal/web_contents_modal_dialog_manager.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -25,7 +26,7 @@ class PaymentRequestShowPromiseTest : public PaymentRequestBrowserTestBase {
       const PaymentRequestShowPromiseTest&) = delete;
 
  protected:
-  PaymentRequestShowPromiseTest() = default;
+  PaymentRequestShowPromiseTest() { SetBypassUserInteractionForTesting(); }
   ~PaymentRequestShowPromiseTest() override = default;
 
   // Installs the payment handler for window.location.origin payment method that
@@ -42,9 +43,9 @@ class PaymentRequestShowPromiseTest : public PaymentRequestBrowserTestBase {
                                  DialogEvent::PROCESSING_SPINNER_HIDDEN,
                                  DialogEvent::DIALOG_OPENED});
     ASSERT_TRUE(
-        content::ExecuteScript(GetActiveWebContents(),
-                               content::JsReplace("buy($1)", payment_method_)));
-    WaitForObservedEvent();
+        content::ExecJs(GetActiveWebContents(),
+                        content::JsReplace("buy($1)", payment_method_)));
+    ASSERT_TRUE(WaitForObservedEvent());
     EXPECT_TRUE(web_modal::WebContentsModalDialogManager::FromWebContents(
                     GetActiveWebContents())
                     ->IsDialogActive());
@@ -71,8 +72,9 @@ class PaymentRequestShowPromiseTest : public PaymentRequestBrowserTestBase {
   void ExpectNoShippingWarningMessage() {
     views::View* view = dialog_view()->GetViewByID(
         static_cast<int>(DialogViewID::WARNING_LABEL));
-    if (!view || !view->GetVisible())
+    if (!view || !view->GetVisible()) {
       return;
+    }
 
     EXPECT_EQ(std::u16string(), static_cast<views::Label*>(view)->GetText());
   }
@@ -113,11 +115,15 @@ class PaymentRequestShowPromiseTest : public PaymentRequestBrowserTestBase {
   // Clicks the "Pay" button and waits for the dialog to close.
   void Pay() {
     ResetEventWaiterForSequence(
-        {DialogEvent::PROCESSING_SPINNER_SHOWN, DialogEvent::DIALOG_CLOSED});
+        {DialogEvent::LOADING_VIEW_SHOWN, DialogEvent::DIALOG_CLOSED});
     ClickOnDialogViewAndWait(DialogViewID::PAY_BUTTON, dialog_view());
   }
 
   std::string payment_method_;
+
+ private:
+  base::test::ScopedFeatureList feature_list_{
+      features::kPaymentRequestMandatoryPaymentAppUi};
 };
 
 IN_PROC_BROWSER_TEST_F(PaymentRequestShowPromiseTest, SingleOptionShipping) {
@@ -226,16 +232,16 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestShowPromiseTest, SkipUI) {
   base::HistogramTester histogram_tester;
   NavigateTo("/show_promise/digital_goods.html");
   InstallEchoPaymentHandler();
-  ASSERT_TRUE(content::ExecuteScript(
-      GetActiveWebContents(),
-      content::JsReplace("create($1)", payment_method_)));
+  ASSERT_TRUE(
+      content::ExecJs(GetActiveWebContents(),
+                      content::JsReplace("create($1)", payment_method_)));
   ResetEventWaiterForSequence(
       {DialogEvent::PROCESSING_SPINNER_SHOWN,
        DialogEvent::PROCESSING_SPINNER_HIDDEN, DialogEvent::SPEC_DONE_UPDATING,
        DialogEvent::PROCESSING_SPINNER_HIDDEN, DialogEvent::DIALOG_OPENED,
-       DialogEvent::PROCESSING_SPINNER_SHOWN, DialogEvent::DIALOG_CLOSED});
-  ASSERT_TRUE(content::ExecuteScript(GetActiveWebContents(), "buy();"));
-  WaitForObservedEvent();
+       DialogEvent::LOADING_VIEW_SHOWN, DialogEvent::DIALOG_CLOSED});
+  ASSERT_TRUE(content::ExecJs(GetActiveWebContents(), "buy();"));
+  ASSERT_TRUE(WaitForObservedEvent());
 
   ExpectBodyContains({R"({"currency":"USD","value":"1.00"})"});
 }

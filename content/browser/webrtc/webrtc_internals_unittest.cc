@@ -4,8 +4,10 @@
 
 #include "content/browser/webrtc/webrtc_internals.h"
 
+#include <array>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/memory/raw_ptr.h"
@@ -28,13 +30,12 @@ const GlobalRenderFrameHostId kFrameId = {20, 30};
 const int kLid = 40;
 const int kPid = 123;
 const int kRequestId = 1;
-const char kConstraints[] = "c";
 const char kRtcConfiguration[] = "r";
 const char kUrl[] = "u";
-const char* const kWakeLockConnectingValues[] = {"checking", "connected",
-                                                 "completed"};
-const char* const kWakeLockDisconnectingValues[] = {"disconnected", "closed",
-                                                    "failed", "new"};
+const char* const kWakeLockConnectingValues[] = {
+    "\"checking\"", "\"connected\"", "\"completed\""};
+const char* const kWakeLockDisconnectingValues[] = {
+    "\"disconnected\"", "\"closed\"", "\"failed\"", "\"new\""};
 const char kAudioConstraint[] = "aaa";
 const char kVideoConstraint[] = "vvv";
 
@@ -133,7 +134,7 @@ class WebRTCInternalsForTest : public WebRTCInternals {
 
 class WebRtcInternalsTest : public testing::Test {
  protected:
-  void VerifyString(const base::Value::Dict& dict,
+  void VerifyString(const base::DictValue& dict,
                     const std::string& key,
                     const std::string& expected) {
     const std::string* actual = dict.FindString(key);
@@ -141,18 +142,18 @@ class WebRtcInternalsTest : public testing::Test {
     EXPECT_EQ(expected, *actual);
   }
 
-  void VerifyInt(const base::Value::Dict& dict,
+  void VerifyInt(const base::DictValue& dict,
                  const std::string& key,
                  int expected) {
-    absl::optional<int> actual = dict.FindInt(key);
+    std::optional<int> actual = dict.FindInt(key);
     ASSERT_TRUE(actual.has_value());
     EXPECT_EQ(expected, actual.value());
   }
 
-  void VerifyList(const base::Value::Dict& dict,
-                  base::StringPiece key,
-                  const base::Value::List& expected) {
-    const base::Value::List* actual = dict.FindList(key);
+  void VerifyList(const base::DictValue& dict,
+                  std::string_view key,
+                  const base::ListValue& expected) {
+    const base::ListValue* actual = dict.FindList(key);
     ASSERT_TRUE(actual);
     EXPECT_EQ(expected, *actual);
   }
@@ -165,12 +166,13 @@ class WebRtcInternalsTest : public testing::Test {
                               const std::string& audio,
                               const std::string& video) {
     ASSERT_TRUE(actual_data->is_dict());
-    const base::Value::Dict& dict = actual_data->GetDict();
+    const base::DictValue& dict = actual_data->GetDict();
 
-    VerifyInt(dict, "rid", frame_id.child_id);
+    VerifyInt(dict, "rid", frame_id.child_id.GetUnsafeValue());
     VerifyInt(dict, "pid", pid);
-    // origin is the empty string in tests.
+    // origin/url is the empty string in tests.
     VerifyString(dict, "origin", "");
+    VerifyString(dict, "url", "");
     VerifyInt(dict, "request_id", request_id);
     VerifyString(dict, "request_type", request_type);
     VerifyString(dict, "audio", audio);
@@ -185,9 +187,9 @@ class WebRtcInternalsTest : public testing::Test {
                                      const std::string& audio_track_info,
                                      const std::string& video_track_info) {
     ASSERT_TRUE(actual_data->is_dict());
-    const base::Value::Dict& dict = actual_data->GetDict();
+    const base::DictValue& dict = actual_data->GetDict();
 
-    VerifyInt(dict, "rid", frame_id.child_id);
+    VerifyInt(dict, "rid", frame_id.child_id.GetUnsafeValue());
     VerifyInt(dict, "pid", pid);
     VerifyInt(dict, "request_id", request_id);
     VerifyString(dict, "stream_id", stream_id);
@@ -202,9 +204,9 @@ class WebRtcInternalsTest : public testing::Test {
                                      const std::string& error,
                                      const std::string& error_message) {
     ASSERT_TRUE(actual_data->is_dict());
-    const base::Value::Dict& dict = actual_data->GetDict();
+    const base::DictValue& dict = actual_data->GetDict();
 
-    VerifyInt(dict, "rid", frame_id.child_id);
+    VerifyInt(dict, "rid", frame_id.child_id.GetUnsafeValue());
     VerifyInt(dict, "pid", pid);
     VerifyInt(dict, "request_id", request_id);
     VerifyString(dict, "error", error);
@@ -223,7 +225,7 @@ TEST_F(WebRtcInternalsTest, AddRemoveObserver) {
   webrtc_internals.RemoveObserver(&observer);
   // The observer should not get notified of this activity.
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
 
   GetUIThreadTaskRunner({})->PostTask(FROM_HERE, loop.QuitClosure());
   loop.Run();
@@ -239,7 +241,7 @@ TEST_F(WebRtcInternalsTest, EnsureNoLogWhenNoObserver) {
   base::RunLoop loop;
   WebRTCInternalsForTest webrtc_internals;
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   webrtc_internals.OnPeerConnectionUpdated(kFrameId, kLid, "update_type",
                                            "update_value");
   GetUIThreadTaskRunner({})->PostTask(FROM_HERE, loop.QuitClosure());
@@ -252,9 +254,9 @@ TEST_F(WebRtcInternalsTest, EnsureNoLogWhenNoObserver) {
 
   ASSERT_TRUE(observer.event_data()->is_list());
   EXPECT_EQ(1U, observer.event_data()->GetList().size());
-  base::Value& dict = observer.event_data()->GetList()[0];
-  ASSERT_TRUE(dict.is_dict());
-  ASSERT_FALSE(dict.FindPath("log"));
+  const base::DictValue* dict = observer.event_data()->GetList()[0].GetIfDict();
+  ASSERT_TRUE(dict);
+  ASSERT_FALSE(dict->Find("log"));
 
   webrtc_internals.OnPeerConnectionRemoved(kFrameId, kLid);
 
@@ -267,7 +269,7 @@ TEST_F(WebRtcInternalsTest, EnsureLogIsRemovedWhenObserverIsRemoved) {
   MockWebRtcInternalsProxy observer;
   webrtc_internals.AddObserver(&observer);
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   webrtc_internals.OnPeerConnectionUpdated(kFrameId, kLid, "update_type",
                                            "update_value");
   GetUIThreadTaskRunner({})->PostTask(FROM_HERE, loop.QuitClosure());
@@ -279,9 +281,9 @@ TEST_F(WebRtcInternalsTest, EnsureLogIsRemovedWhenObserverIsRemoved) {
 
   ASSERT_TRUE(observer.event_data()->is_list());
   EXPECT_EQ(1U, observer.event_data()->GetList().size());
-  base::Value& dict = observer.event_data()->GetList()[0];
-  ASSERT_TRUE(dict.is_dict());
-  ASSERT_TRUE(dict.FindPath("log")->is_list());
+  const base::DictValue* dict = observer.event_data()->GetList()[0].GetIfDict();
+  ASSERT_TRUE(dict);
+  ASSERT_TRUE(dict->FindList("log"));
 
   // Make sure we the log entry was removed when the last observer was removed.
   webrtc_internals.RemoveObserver(&observer);
@@ -290,9 +292,9 @@ TEST_F(WebRtcInternalsTest, EnsureLogIsRemovedWhenObserverIsRemoved) {
 
   ASSERT_TRUE(observer.event_data()->is_list());
   EXPECT_EQ(1U, observer.event_data()->GetList().size());
-  base::Value& updated_dict = observer.event_data()->GetList()[0];
-  ASSERT_TRUE(updated_dict.is_dict());
-  ASSERT_FALSE(updated_dict.FindPath("log"));
+  const base::DictValue* updated_dict =
+      observer.event_data()->GetList()[0].GetIfDict();
+  ASSERT_FALSE(updated_dict->Find("log"));
 
   webrtc_internals.OnPeerConnectionRemoved(kFrameId, kLid);
 
@@ -305,21 +307,20 @@ TEST_F(WebRtcInternalsTest, SendAddPeerConnectionUpdate) {
   WebRTCInternalsForTest webrtc_internals;
   webrtc_internals.AddObserver(&observer);
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
 
   loop.Run();
 
   ASSERT_EQ("add-peer-connection", observer.event_name());
 
   ASSERT_TRUE(observer.event_data()->is_dict());
-  const base::Value::Dict& dict = observer.event_data()->GetDict();
+  const base::DictValue& dict = observer.event_data()->GetDict();
 
-  VerifyInt(dict, "rid", kFrameId.child_id);
+  VerifyInt(dict, "rid", kFrameId.child_id.GetUnsafeValue());
   VerifyInt(dict, "lid", kLid);
   VerifyInt(dict, "pid", kPid);
   VerifyString(dict, "url", kUrl);
   VerifyString(dict, "rtcConfiguration", kRtcConfiguration);
-  VerifyString(dict, "constraints", kConstraints);
 
   webrtc_internals.RemoveObserver(&observer);
   webrtc_internals.OnPeerConnectionRemoved(kFrameId, kLid);
@@ -333,7 +334,7 @@ TEST_F(WebRtcInternalsTest, SendRemovePeerConnectionUpdate) {
   WebRTCInternalsForTest webrtc_internals;
   webrtc_internals.AddObserver(&observer);
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   webrtc_internals.OnPeerConnectionRemoved(kFrameId, kLid);
 
   loop.Run();
@@ -341,9 +342,9 @@ TEST_F(WebRtcInternalsTest, SendRemovePeerConnectionUpdate) {
   ASSERT_EQ("remove-peer-connection", observer.event_name());
 
   ASSERT_TRUE(observer.event_data()->is_dict());
-  const base::Value::Dict& dict = observer.event_data()->GetDict();
+  const base::DictValue& dict = observer.event_data()->GetDict();
 
-  VerifyInt(dict, "rid", kFrameId.child_id);
+  VerifyInt(dict, "rid", kFrameId.child_id.GetUnsafeValue());
   VerifyInt(dict, "lid", kLid);
 
   webrtc_internals.RemoveObserver(&observer);
@@ -357,7 +358,7 @@ TEST_F(WebRtcInternalsTest, SendUpdatePeerConnectionUpdate) {
   WebRTCInternalsForTest webrtc_internals;
   webrtc_internals.AddObserver(&observer);
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
 
   const std::string update_type = "fakeType";
   const std::string update_value = "fakeValue";
@@ -369,16 +370,13 @@ TEST_F(WebRtcInternalsTest, SendUpdatePeerConnectionUpdate) {
   ASSERT_EQ("update-peer-connection", observer.event_name());
 
   ASSERT_TRUE(observer.event_data()->is_dict());
-  const base::Value::Dict& dict = observer.event_data()->GetDict();
+  const base::DictValue& dict = observer.event_data()->GetDict();
 
-  VerifyInt(dict, "rid", kFrameId.child_id);
+  VerifyInt(dict, "rid", kFrameId.child_id.GetUnsafeValue());
   VerifyInt(dict, "lid", kLid);
   VerifyString(dict, "type", update_type);
   VerifyString(dict, "value", update_value);
-
-  const std::string* time = dict.FindString("time");
-  ASSERT_TRUE(time);
-  EXPECT_FALSE(time->empty());
+  EXPECT_TRUE(dict.FindDouble("timestamp"));
 
   webrtc_internals.OnPeerConnectionRemoved(kFrameId, kLid);
   webrtc_internals.RemoveObserver(&observer);
@@ -574,7 +572,7 @@ TEST_F(WebRtcInternalsTest, SendAllUpdatesWithPeerConnectionUpdate) {
   webrtc_internals.AddObserver(&observer);
 
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   webrtc_internals.OnPeerConnectionUpdated(kFrameId, kLid, update_type,
                                            update_value);
 
@@ -584,33 +582,97 @@ TEST_F(WebRtcInternalsTest, SendAllUpdatesWithPeerConnectionUpdate) {
   ASSERT_TRUE(observer.event_data());
 
   ASSERT_TRUE(observer.event_data()->is_list());
-  const base::Value::List& list = observer.event_data()->GetList();
+  const base::ListValue& list = observer.event_data()->GetList();
   EXPECT_EQ(1U, list.size());
 
   ASSERT_TRUE(list.begin()->is_dict());
-  const base::Value::Dict& dict = list.begin()->GetDict();
+  const base::DictValue& dict = list.begin()->GetDict();
 
-  VerifyInt(dict, "rid", kFrameId.child_id);
+  VerifyInt(dict, "rid", kFrameId.child_id.GetUnsafeValue());
   VerifyInt(dict, "lid", kLid);
   VerifyInt(dict, "pid", kPid);
   VerifyString(dict, "url", kUrl);
   VerifyString(dict, "rtcConfiguration", kRtcConfiguration);
-  VerifyString(dict, "constraints", kConstraints);
+  EXPECT_TRUE(dict.FindDouble("timestamp"));
 
-  const base::Value::List* log_value = dict.FindList("log");
+  const base::ListValue* log_value = dict.FindList("log");
   ASSERT_TRUE(log_value);
   EXPECT_EQ(1U, log_value->size());
 
   ASSERT_TRUE(log_value->begin()->is_dict());
-  const base::Value::Dict& inner_dict = log_value->begin()->GetDict();
+  const base::DictValue& inner_dict = log_value->begin()->GetDict();
   VerifyString(inner_dict, "type", update_type);
   VerifyString(inner_dict, "value", update_value);
 
-  const std::string* time = inner_dict.FindString("time");
-  ASSERT_TRUE(time);
-  EXPECT_FALSE(time->empty());
-
   base::RunLoop().RunUntilIdle();
+}
+
+// Regression test for crbug.com/521719721: if a PeerConnection is already
+// connected (e.g. a call running on another page) before webrtc-internals is
+// opened, attaching an observer must start polling stats and update the wake
+// lock. The real flow is AddObserver() followed by UpdateObserver() when the
+// page finishes loading.
+TEST_F(WebRtcInternalsTest, StatsTimerStartsWhenObserverAddedAfterConnection) {
+  WebRTCInternalsForTest webrtc_internals;
+
+  // Simulate a call that started on a separate page before webrtc-internals
+  // was opened: a PeerConnection is added and becomes connected while no
+  // observer is present.
+  webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
+                                         kRtcConfiguration);
+  webrtc_internals.OnPeerConnectionUpdated(
+      kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
+  EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
+
+  // Without an observer, stats are not being polled even though the wake lock
+  // is held for the active connection.
+  EXPECT_FALSE(webrtc_internals.IsStatsTimerRunningForTesting());
+  EXPECT_TRUE(webrtc_internals.HasWakeLock());
+
+  // Open webrtc-internals: an observer is added and then asked to sync the
+  // current state.
+  MockWebRtcInternalsProxy observer;
+  webrtc_internals.AddObserver(&observer);
+  webrtc_internals.UpdateObserver(&observer);
+
+  // Stats polling should now be running and the wake lock still held.
+  EXPECT_TRUE(webrtc_internals.IsStatsTimerRunningForTesting());
+  EXPECT_TRUE(webrtc_internals.HasWakeLock());
+
+  // Removing the last connected PeerConnection stops the polling again
+  // and releases the wake lock.
+  webrtc_internals.OnPeerConnectionRemoved(kFrameId, kLid);
+  EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
+  EXPECT_FALSE(webrtc_internals.IsStatsTimerRunningForTesting());
+  EXPECT_FALSE(webrtc_internals.HasWakeLock());
+
+  webrtc_internals.RemoveObserver(&observer);
+}
+
+// Closing the last webrtc-internals page must stop stats polling even if a
+// PeerConnection is still active, otherwise stats keep being requested from all
+// renderers with nobody to display them.
+TEST_F(WebRtcInternalsTest, StatsTimerStopsWhenLastObserverRemoved) {
+  WebRTCInternalsForTest webrtc_internals;
+
+  // Open webrtc-internals while a call is active: stats are being polled.
+  MockWebRtcInternalsProxy observer;
+  webrtc_internals.AddObserver(&observer);
+  webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
+                                         kRtcConfiguration);
+  webrtc_internals.OnPeerConnectionUpdated(
+      kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
+  EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
+  EXPECT_TRUE(webrtc_internals.IsStatsTimerRunningForTesting());
+
+  // Close webrtc-internals while the PeerConnection stays connected. Polling
+  // should stop, but the wake lock remains held for the active connection.
+  webrtc_internals.RemoveObserver(&observer);
+  EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
+  EXPECT_FALSE(webrtc_internals.IsStatsTimerRunningForTesting());
+  EXPECT_TRUE(webrtc_internals.HasWakeLock());
+
+  webrtc_internals.OnPeerConnectionRemoved(kFrameId, kLid);
 }
 
 TEST_F(WebRtcInternalsTest, OnAddStandardStats) {
@@ -619,9 +681,9 @@ TEST_F(WebRtcInternalsTest, OnAddStandardStats) {
   WebRTCInternalsForTest webrtc_internals;
   webrtc_internals.AddObserver(&observer);
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
 
-  base::Value::List list;
+  base::ListValue list;
   list.Append("xxx");
   list.Append("yyy");
   webrtc_internals.OnAddStandardStats(kFrameId, kLid, list.Clone());
@@ -632,37 +694,9 @@ TEST_F(WebRtcInternalsTest, OnAddStandardStats) {
   ASSERT_TRUE(observer.event_data());
 
   ASSERT_TRUE(observer.event_data()->is_dict());
-  const base::Value::Dict& dict = observer.event_data()->GetDict();
+  const base::DictValue& dict = observer.event_data()->GetDict();
 
-  VerifyInt(dict, "rid", kFrameId.child_id);
-  VerifyInt(dict, "lid", kLid);
-  VerifyList(dict, "reports", list);
-
-  base::RunLoop().RunUntilIdle();
-}
-
-TEST_F(WebRtcInternalsTest, OnAddLegacyStats) {
-  base::RunLoop loop;
-  MockWebRtcInternalsProxy observer(&loop);
-  WebRTCInternalsForTest webrtc_internals;
-  webrtc_internals.AddObserver(&observer);
-  webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
-
-  base::Value::List list;
-  list.Append("xxx");
-  list.Append("yyy");
-  webrtc_internals.OnAddLegacyStats(kFrameId, kLid, list.Clone());
-
-  loop.Run();
-
-  EXPECT_EQ("add-legacy-stats", observer.event_name());
-  ASSERT_TRUE(observer.event_data());
-
-  ASSERT_TRUE(observer.event_data()->is_dict());
-  const base::Value::Dict& dict = observer.event_data()->GetDict();
-
-  VerifyInt(dict, "rid", kFrameId.child_id);
+  VerifyInt(dict, "rid", kFrameId.child_id.GetUnsafeValue());
   VerifyInt(dict, "lid", kLid);
   VerifyList(dict, "reports", list);
 
@@ -676,7 +710,7 @@ TEST_F(WebRtcInternalsTest, AudioDebugRecordingsFileSelectionCanceled) {
   WebRTCInternalsForTest webrtc_internals;
 
   webrtc_internals.AddObserver(&observer);
-  webrtc_internals.FileSelectionCanceled(nullptr);
+  webrtc_internals.FileSelectionCanceled();
 
   loop.Run();
 
@@ -693,7 +727,7 @@ TEST_F(WebRtcInternalsTest, WakeLockCreateRemove) {
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
@@ -711,12 +745,12 @@ TEST_F(WebRtcInternalsTest, WakeLockConnecting) {
     EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
     webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                           kRtcConfiguration, kConstraints);
+                                           kRtcConfiguration);
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
     EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
-    webrtc_internals.OnPeerConnectionUpdated(kFrameId, kLid,
-                                             "iceconnectionstatechange", value);
+    webrtc_internals.OnPeerConnectionUpdated(
+        kFrameId, kLid, "oniceconnectionstatechange", value);
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
     EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
@@ -734,15 +768,15 @@ TEST_F(WebRtcInternalsTest, WakeLockConnectingSequence) {
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   // A sequence of connecting messages should not increase the number of
   // connected connections beyond 1.
   for (const char* value : kWakeLockConnectingValues) {
-    webrtc_internals.OnPeerConnectionUpdated(kFrameId, kLid,
-                                             "iceconnectionstatechange", value);
+    webrtc_internals.OnPeerConnectionUpdated(
+        kFrameId, kLid, "oniceconnectionstatechange", value);
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
     EXPECT_TRUE(webrtc_internals.HasWakeLock());
   }
@@ -761,17 +795,17 @@ TEST_F(WebRtcInternalsTest, WakeLockDisconnecting) {
     EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
     webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                           kRtcConfiguration, kConstraints);
+                                           kRtcConfiguration);
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
     EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
     webrtc_internals.OnPeerConnectionUpdated(
-        kFrameId, kLid, "iceconnectionstatechange", "connected");
+        kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
     EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
-    webrtc_internals.OnPeerConnectionUpdated(kFrameId, kLid,
-                                             "iceconnectionstatechange", value);
+    webrtc_internals.OnPeerConnectionUpdated(
+        kFrameId, kLid, "oniceconnectionstatechange", value);
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
     EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
@@ -789,20 +823,20 @@ TEST_F(WebRtcInternalsTest, WakeLockDisconnectingSequence) {
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLid, "iceconnectionstatechange", "connected");
+      kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
   // A sequence of disconnecting messages should not decrease the number of
   // connected connections below zero.
   for (const char* value : kWakeLockDisconnectingValues) {
-    webrtc_internals.OnPeerConnectionUpdated(kFrameId, kLid,
-                                             "iceconnectionstatechange", value);
+    webrtc_internals.OnPeerConnectionUpdated(
+        kFrameId, kLid, "oniceconnectionstatechange", value);
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
     EXPECT_FALSE(webrtc_internals.HasWakeLock());
   }
@@ -820,22 +854,22 @@ TEST_F(WebRtcInternalsTest, WakeLockReconnect) {
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLid, "iceconnectionstatechange", "connected");
+      kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLid, "iceconnectionstatechange", "disconnected");
+      kFrameId, kLid, "oniceconnectionstatechange", "\"disconnected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
   EXPECT_FALSE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLid, "iceconnectionstatechange", "connected");
+      kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
@@ -847,7 +881,7 @@ TEST_F(WebRtcInternalsTest, WakeLockReconnect) {
 }
 
 TEST_F(WebRtcInternalsTest, WakeLockMultplePeerConnections) {
-  const int kLids[] = {71, 72, 73};
+  const auto kLids = std::to_array<int>({71, 72, 73});
 
   WebRTCInternalsForTest webrtc_internals;
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
@@ -855,34 +889,34 @@ TEST_F(WebRtcInternalsTest, WakeLockMultplePeerConnections) {
 
   for (const int lid : kLids) {
     webrtc_internals.OnPeerConnectionAdded(kFrameId, lid, kPid, kUrl,
-                                           kRtcConfiguration, kConstraints);
+                                           kRtcConfiguration);
     EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
     EXPECT_FALSE(webrtc_internals.HasWakeLock());
   }
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLids[0], "iceconnectionstatechange", "connected");
+      kFrameId, kLids[0], "oniceconnectionstatechange", "\"connected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLids[1], "iceconnectionstatechange", "completed");
+      kFrameId, kLids[1], "oniceconnectionstatechange", "\"completed\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 2);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLids[2], "iceconnectionstatechange", "checking");
+      kFrameId, kLids[2], "oniceconnectionstatechange", "\"checking\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 3);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
   // A duplicate message should not alter the number of connected connections.
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLids[2], "iceconnectionstatechange", "checking");
+      kFrameId, kLids[2], "oniceconnectionstatechange", "\"checking\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 3);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLids[0], "iceconnectionstatechange", "closed");
+      kFrameId, kLids[0], "oniceconnectionstatechange", "\"closed\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 2);
   EXPECT_TRUE(webrtc_internals.HasWakeLock());
 
@@ -916,22 +950,22 @@ TEST_F(WebRtcInternalsTest, TestWebRtcConnectionsObserver) {
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
 
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kLid, kPid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
   EXPECT_EQ(0u, observer.latest_connections_count());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLid, "iceconnectionstatechange", "connected");
+      kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
   EXPECT_EQ(1u, observer.latest_connections_count());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLid, "iceconnectionstatechange", "disconnected");
+      kFrameId, kLid, "oniceconnectionstatechange", "\"disconnected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 0);
   EXPECT_EQ(0u, observer.latest_connections_count());
 
   webrtc_internals.OnPeerConnectionUpdated(
-      kFrameId, kLid, "iceconnectionstatechange", "connected");
+      kFrameId, kLid, "oniceconnectionstatechange", "\"connected\"");
   EXPECT_EQ(webrtc_internals.num_connected_connections(), 1);
   EXPECT_EQ(1u, observer.latest_connections_count());
 

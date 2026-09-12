@@ -10,6 +10,8 @@
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/referrer.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 
 void PluginObserverAndroid::BindPluginHost(
     mojo::PendingAssociatedReceiver<chrome::mojom::PluginHost> receiver,
@@ -30,8 +32,8 @@ PluginObserverAndroid::PluginObserverAndroid(content::WebContents* web_contents)
 PluginObserverAndroid::~PluginObserverAndroid() = default;
 
 void PluginObserverAndroid::OpenPDF(const GURL& url) {
-  content::RenderFrameHost* render_frame_host =
-      plugin_host_receivers_.GetCurrentTargetFrame();
+  content::RenderFrameHost& render_frame_host =
+      plugin_host_receivers_.CurrentTargetFrame();
 
   content::Referrer referrer;
   if (!CanOpenPdfUrl(render_frame_host, url,
@@ -44,7 +46,7 @@ void PluginObserverAndroid::OpenPDF(const GURL& url) {
       ui::PAGE_TRANSITION_AUTO_BOOKMARK, false);
   // On Android, PDFs downloaded with a user gesture are auto-opened.
   open_url_params.user_gesture = true;
-  GetWebContents().OpenURL(open_url_params);
+  GetWebContents().OpenURL(open_url_params, /*navigation_handle_callback=*/{});
 }
 
 WEB_CONTENTS_USER_DATA_KEY_IMPL(PluginObserverAndroid);

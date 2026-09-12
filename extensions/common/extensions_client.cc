@@ -4,13 +4,16 @@
 
 #include "extensions/common/extensions_client.h"
 
+#include <string_view>
+
 #include "base/check.h"
 #include "base/notreached.h"
-#include "extensions/common/extension_icon_set.h"
 #include "extensions/common/extensions_api_provider.h"
 #include "extensions/common/features/feature_provider.h"
 #include "extensions/common/features/json_feature_provider_source.h"
+#include "extensions/common/icons/extension_icon_set.h"
 #include "extensions/common/manifest_handler.h"
+#include "extensions/common/manifest_handler_registry.h"
 #include "extensions/common/manifest_handlers/icons_handler.h"
 #include "extensions/common/permissions/permissions_info.h"
 
@@ -37,6 +40,19 @@ void ExtensionsClient::Set(ExtensionsClient* client) {
 
 ExtensionsClient::ExtensionsClient() = default;
 ExtensionsClient::~ExtensionsClient() = default;
+
+const Feature::FeatureDelegatedAvailabilityCheckMap&
+ExtensionsClient::GetFeatureDelegatedAvailabilityCheckMap() const {
+  return availability_check_map_;
+}
+
+void ExtensionsClient::SetFeatureDelegatedAvailabilityCheckMap(
+    Feature::FeatureDelegatedAvailabilityCheckMap map) {
+  for (const auto& [name, handler] : map) {
+    CHECK(handler) << "Null delegated availability check handler for " << name;
+  }
+  availability_check_map_ = std::move(map);
+}
 
 std::unique_ptr<FeatureProvider> ExtensionsClient::CreateFeatureProvider(
     const std::string& name) const {
@@ -76,14 +92,13 @@ bool ExtensionsClient::IsAPISchemaGenerated(const std::string& name) const {
   return false;
 }
 
-base::StringPiece ExtensionsClient::GetAPISchema(
-    const std::string& name) const {
+std::string_view ExtensionsClient::GetAPISchema(const std::string& name) const {
   for (const auto& provider : api_providers_) {
-    base::StringPiece api = provider->GetAPISchema(name);
+    std::string_view api = provider->GetAPISchema(name);
     if (!api.empty())
       return api;
   }
-  return base::StringPiece();
+  return std::string_view();
 }
 
 void ExtensionsClient::AddAPIProvider(
@@ -105,8 +120,8 @@ void ExtensionsClient::AddOriginAccessPermissions(
     bool is_extension_active,
     std::vector<network::mojom::CorsOriginPatternPtr>* origin_patterns) const {}
 
-absl::optional<int> ExtensionsClient::GetExtensionExtendedErrorCode() const {
-  return absl::nullopt;
+std::optional<int> ExtensionsClient::GetExtensionExtendedErrorCode() const {
+  return std::nullopt;
 }
 
 void ExtensionsClient::DoInitialize() {
@@ -114,8 +129,11 @@ void ExtensionsClient::DoInitialize() {
 
   DCHECK(!ManifestHandler::IsRegistrationFinalized());
   PermissionsInfo* permissions_info = PermissionsInfo::GetInstance();
+
+  ManifestHandlerRegistry* registry = ManifestHandlerRegistry::Get();
+
   for (const auto& provider : api_providers_) {
-    provider->RegisterManifestHandlers();
+    provider->RegisterManifestHandlers(registry);
     provider->RegisterPermissions(permissions_info);
   }
   ManifestHandler::FinalizeRegistration();

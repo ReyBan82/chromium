@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/containers/contains.h"
+#include <algorithm>
+
 #include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/hash/hash.h"
 #include "base/logging.h"
 #include "base/path_service.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/time/time.h"
@@ -17,8 +17,9 @@
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -26,6 +27,8 @@
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "url/gurl.h"
 
 namespace {
@@ -35,9 +38,9 @@ namespace {
 // For ChromeOS, a copy of all members of |kAllowListPrefixesForAllPlatforms|
 // that start with "/Default" is added to the allow list, replacing "/Default"
 // with "/test-user".
-// TODO(http://crbug.com/1234755): Add audit comment (or fix the issue) for all
+// TODO(http://crbug.com/40781663): Add audit comment (or fix the issue) for all
 // paths that do not have a comment.
-const char* kAllowListPrefixesForAllPlatforms[] = {
+constexpr const char* kAllowListPrefixesForAllPlatforms[] = {
     "/Default/data_reduction_proxy_leveldb",
     "/Default/Extension State",
     "/Default/GCM Store/",
@@ -51,9 +54,10 @@ const char* kAllowListPrefixesForAllPlatforms[] = {
     "/GrShaderCache/GPUCache",
     "/Local State"};
 #if BUILDFLAG(IS_MAC)
-const char* kAllowListPrefixesForPlatform[] = {"/Default/Visited Links"};
+constexpr const char* kAllowListPrefixesForPlatform[] = {
+    "/Default/Visited Links"};
 #elif BUILDFLAG(IS_WIN)
-const char* kAllowListPrefixesForPlatform[] = {
+constexpr const char* kAllowListPrefixesForPlatform[] = {
     "/Default/databases-off-the-record",
     "/Default/heavy_ad_intervention_opt_out.db", "/Default/Top Sites",
     "/GrShaderCache/old_GPUCache",
@@ -62,21 +66,21 @@ const char* kAllowListPrefixesForPlatform[] = {
     // therefore it's safe to be written in Incognito.
     "/Last Browser"};
 #elif BUILDFLAG(IS_CHROMEOS)
-const char* kAllowListPrefixesForPlatform[] = {
+constexpr const char* kAllowListPrefixesForPlatform[] = {
     "/Default/Local Storage/leveldb/CURRENT",
     "/Default/Site Characteristics Database", "/Default/Sync Data/LevelDB",
     "/test-user/.variations-list.txt"};
 #elif BUILDFLAG(IS_LINUX)
-const char* kAllowListPrefixesForPlatform[] = {"/Default/Web Data"};
+constexpr const char* kAllowListPrefixesForPlatform[] = {"/Default/Web Data"};
 #else
-const char* kAllowListPrefixesForPlatform[] = {};
+constexpr const char* kAllowListPrefixesForPlatform[] = {};
 #endif
 
 // List of directory prefixes that are known to be added as an empty directory
 // during an Incognito session.
-// TODO(http://crbug.com/1234755): Add audit comment (or fix the issue) for all
+// TODO(http://crbug.com/40781663): Add audit comment (or fix the issue) for all
 // paths that do not have a comment.
-const char* kAllowListEmptyDirectoryPrefixesForAllPlatforms[] = {
+constexpr const char* kAllowListEmptyDirectoryPrefixesForAllPlatforms[] = {
     "/Default/AutofillStrikeDatabase",
     "/Default/Download Service",
     "/Default/Feature Engagement Tracker",
@@ -96,8 +100,8 @@ struct FileData {
 };
 
 struct Snapshot {
-  std::unordered_map<std::string, FileData> files;
-  std::unordered_set<std::string> directories;
+  absl::flat_hash_map<std::string, FileData> files;
+  absl::flat_hash_set<std::string> directories;
 };
 
 bool ComputeFileHash(const base::FilePath& file_path, uint32_t* hash_code) {
@@ -141,7 +145,7 @@ void GetUserDirectorySnapshot(Snapshot& snapshot, bool compute_file_hashes) {
 }
 
 bool IsFileModified(FileData& before, FileData& after) {
-  // TODO(http://crbug.com/1234755): Also consider auditing files that are
+  // TODO(http://crbug.com/40781663): Also consider auditing files that are
   // touched or are unreadable.
   // If it was readable before, and is readable now, compare hash codes.
   if (before.file_hash_is_valid) {
@@ -162,18 +166,18 @@ bool AreDirectoriesModified(Snapshot& snapshot_before,
 
   // Check for new directories.
   for (const std::string& directory : snapshot_after.directories) {
-    if (!base::Contains(snapshot_before.directories, directory)) {
+    if (!snapshot_before.directories.contains(directory)) {
       // If a file/prefix in this directory is allowlisted, ignore directory
       // addition.
-      if (base::ranges::any_of(allow_list,
-                               [&directory](const std::string& prefix) {
-                                 return prefix.find(directory) == 0;
-                               })) {
+      if (std::ranges::any_of(allow_list,
+                              [&directory](const std::string& prefix) {
+                                return prefix.find(directory) == 0;
+                              })) {
         continue;
       }
 
       // If directory is specifically allow list, ignore.
-      if (base::ranges::any_of(
+      if (std::ranges::any_of(
               kAllowListEmptyDirectoryPrefixesForAllPlatforms,
               [&directory](const std::string& allow_listed_directory) {
                 return directory.find(allow_listed_directory) == 0;
@@ -194,7 +198,7 @@ bool AreFilesModified(Snapshot& snapshot_before,
                       std::set<std::string>& allow_list) {
   bool modified = false;
 
-  // TODO(http://crbug.com/1234755): Consider deleted files as well. Currently
+  // TODO(http://crbug.com/40781663): Consider deleted files as well. Currently
   // we only look for added and modified files, but file deletion is also
   // modifying disk and is best to be prevented.
   for (auto& fd : snapshot_after.files) {
@@ -203,14 +207,14 @@ bool AreFilesModified(Snapshot& snapshot_before,
     if (is_new ||
         fd.second.last_modified_time != before->second.last_modified_time) {
       // Ignore allow-listed paths.
-      if (base::ranges::any_of(allow_list, [&fd](const std::string& prefix) {
+      if (std::ranges::any_of(allow_list, [&fd](const std::string& prefix) {
             return fd.first.find(prefix) == 0;
           })) {
         continue;
       }
 
       // If an empty file is added or modified, ignore for now.
-      // TODO(http://crbug.com/1234755): Consider newly added empty files.
+      // TODO(http://crbug.com/40781663): Consider newly added empty files.
       if (!fd.second.size)
         continue;
 
@@ -285,7 +289,7 @@ IN_PROC_BROWSER_TEST_F(IncognitoProfileContainmentBrowserTest,
 // state even if user did not explicitly open the browser in regular mode and if
 // so, please add the file to the allow_list at the top and file a bug to follow
 // up.
-// TODO(https://crbug.com/1277824): Flakes on Win 7.
+// TODO(crbug.com/40809832): Flakes on Win 7.
 IN_PROC_BROWSER_TEST_F(IncognitoProfileContainmentBrowserTest,
                        DISABLED_StoringDataDoesNotModifyProfileFolder) {
   // Take a snapshot of regular profile.
@@ -293,8 +297,9 @@ IN_PROC_BROWSER_TEST_F(IncognitoProfileContainmentBrowserTest,
   GetUserDirectorySnapshot(before_incognito, /*compute_file_hashes=*/true);
 
   // Run an Incognito session.
-  Browser* browser = chrome::FindLastActive();
-  EXPECT_TRUE(browser->profile()->IsOffTheRecord());
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->GetLastActiveBrowser();
+  EXPECT_TRUE(browser->GetProfile()->IsOffTheRecord());
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser,
       embedded_test_server()->GetURL("/browsing_data/site_data.html")));
@@ -304,12 +309,11 @@ IN_PROC_BROWSER_TEST_F(IncognitoProfileContainmentBrowserTest,
       "LocalStorage", "ServiceWorker", "SessionCookie", "WebSql"};
 
   for (const std::string& type : kStorageTypes) {
-    bool data = false;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractBool(
-        browser->tab_strip_model()->GetActiveWebContents(), "set" + type + "()",
-        &data));
-
-    ASSERT_TRUE(data) << "Couldn't create data for: " << type;
+    ASSERT_TRUE(
+        content::EvalJs(browser->GetTabStripModel()->GetActiveWebContents(),
+                        "set" + type + "()")
+            .ExtractBool())
+        << "Couldn't create data for: " << type;
   }
 
   CloseBrowserSynchronously(browser);
@@ -322,11 +326,11 @@ IN_PROC_BROWSER_TEST_F(IncognitoProfileContainmentBrowserTest,
   EXPECT_FALSE(
       AreFilesModified(before_incognito, after_incognito, allow_list_));
 
-  // TODO(http://crbug.com/1234755): Change to EXPECT_FALSE.
+  // TODO(http://crbug.com/40781663): Change to EXPECT_FALSE.
   if (AreDirectoriesModified(before_incognito, after_incognito, allow_list_)) {
     LOG(ERROR) << "Empty directories added.";
   }
 }
 
-// TODO(http://crbug.com/1234755): Add more complex naviagtions, triggering
+// TODO(http://crbug.com/40781663): Add more complex naviagtions, triggering
 // different APIs in "browsing_data/site_data.html" and more.

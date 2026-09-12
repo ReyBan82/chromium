@@ -5,9 +5,7 @@
 #ifndef CHROME_CREDENTIAL_PROVIDER_TEST_COM_FAKES_H_
 #define CHROME_CREDENTIAL_PROVIDER_TEST_COM_FAKES_H_
 
-#include "base/win/atl.h"
 
-#include <atlcomcli.h>
 #include <credentialprovider.h>
 #include <propkey.h>
 
@@ -15,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "base/win/atl.h"
+#include "base/win/scoped_bstr.h"
 #include "chrome/credential_provider/gaiacp/gaia_credential_provider.h"
 #include "chrome/credential_provider/gaiacp/gaia_credential_provider_i.h"
 #include "chrome/credential_provider/test/test_credential_provider.h"
@@ -162,9 +162,9 @@ class FakeCredentialProviderCredentialEvents
 class CTestGaiaCredentialProvider : public CGaiaCredentialProvider,
                                     public ITestCredentialProvider {
  public:
-  const CComBSTR& STDMETHODCALLTYPE username() const override;
-  const CComBSTR& STDMETHODCALLTYPE password() const override;
-  const CComBSTR& STDMETHODCALLTYPE sid() const override;
+  const base::win::ScopedBstr& STDMETHODCALLTYPE username() const override;
+  const base::win::ScopedBstr& STDMETHODCALLTYPE password() const override;
+  const base::win::ScopedBstr& STDMETHODCALLTYPE sid() const override;
   bool STDMETHODCALLTYPE credentials_changed_fired() const override;
   void STDMETHODCALLTYPE ResetCredentialsChangedFired() override;
 
@@ -188,9 +188,9 @@ class CTestGaiaCredentialProvider : public CGaiaCredentialProvider,
   ~CTestGaiaCredentialProvider() override;
 
  private:
-  CComBSTR username_;
-  CComBSTR password_;
-  CComBSTR sid_;
+  base::win::ScopedBstr username_;
+  base::win::ScopedBstr password_;
+  base::win::ScopedBstr sid_;
   BOOL credentials_changed_fired_ = FALSE;
 };
 

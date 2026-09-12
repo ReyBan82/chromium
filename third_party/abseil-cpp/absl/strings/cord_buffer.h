@@ -32,10 +32,12 @@
 #include <utility>
 
 #include "absl/base/config.h"
+#include "absl/base/internal/hardening.h"
 #include "absl/base/macros.h"
 #include "absl/numeric/bits.h"
 #include "absl/strings/internal/cord_internal.h"
 #include "absl/strings/internal/cord_rep_flat.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 
 namespace absl {
@@ -159,7 +161,6 @@ class CordBuffer {
   // capacity of at least `min(kDefaultLimit, capacity)`. See the class comments
   // for more information on buffer capacities and intended usage.
   static CordBuffer CreateWithDefaultLimit(size_t capacity);
-
 
   // CordBuffer::CreateWithCustomLimit()
   //
@@ -290,7 +291,7 @@ class CordBuffer {
 
  private:
   // Make sure we don't accidentally over promise.
-  static_assert(kCustomLimit <= cord_internal::kMaxLargeFlatSize, "");
+  static_assert(kCustomLimit <= cord_internal::kMaxLargeFlatSize);
 
   // Assume the cost of an 'uprounded' allocation to CeilPow2(size) versus
   // the cost of allocating at least 1 extra flat <= 4KB:
@@ -336,7 +337,7 @@ class CordBuffer {
     }
 
     // Returns the available area of the internal SSO data
-    absl::Span<char> long_available() {
+    absl::Span<char> long_available() const {
       assert(!is_short());
       const size_t length = long_rep.rep->length;
       return absl::Span<char>(long_rep.rep->Data() + length,
@@ -460,9 +461,7 @@ inline constexpr size_t CordBuffer::MaximumPayload() {
 }
 
 inline constexpr size_t CordBuffer::MaximumPayload(size_t block_size) {
-  // TODO(absl-team): Use std::min when C++11 support is dropped.
-  return (kCustomLimit < block_size ? kCustomLimit : block_size) -
-         cord_internal::kFlatOverhead;
+  return (std::min)(kCustomLimit, block_size) - cord_internal::kFlatOverhead;
 }
 
 inline CordBuffer CordBuffer::CreateWithDefaultLimit(size_t capacity) {
@@ -552,7 +551,7 @@ inline size_t CordBuffer::length() const {
 }
 
 inline void CordBuffer::SetLength(size_t length) {
-  ABSL_HARDENING_ASSERT(length <= capacity());
+  absl::base_internal::HardeningAssertLE(length, capacity());
   if (rep_.is_short()) {
     rep_.set_short_length(length);
   } else {
@@ -561,7 +560,8 @@ inline void CordBuffer::SetLength(size_t length) {
 }
 
 inline void CordBuffer::IncreaseLengthBy(size_t n) {
-  ABSL_HARDENING_ASSERT(n <= capacity() && length() + n <= capacity());
+  absl::base_internal::HardeningAssertLE(n, capacity());
+  absl::base_internal::HardeningAssertLE(length() + n, capacity());
   if (rep_.is_short()) {
     rep_.add_short_length(n);
   } else {

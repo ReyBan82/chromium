@@ -6,11 +6,11 @@
 #define ASH_WM_TABLET_MODE_TABLET_MODE_MULTITASK_MENU_H_
 
 #include "ash/ash_export.h"
-#include "ash/wm/tablet_mode/tablet_mode_multitask_menu_event_handler.h"
-#include "base/scoped_observation.h"
+#include "ash/wm/tablet_mode/tablet_mode_multitask_menu_controller.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/aura/window.h"
 #include "ui/display/display_observer.h"
-#include "ui/views/focus/widget_focus_manager.h"
+#include "ui/views/focus/native_view_focus_manager.h"
 #include "ui/views/widget/unique_widget_ptr.h"
 
 namespace chromeos {
@@ -19,17 +19,16 @@ class MultitaskMenuView;
 
 namespace ash {
 
-class TabletModeMultitaskMenuEventHandler;
+class TabletModeMultitaskMenuController;
 class TabletModeMultitaskMenuView;
 
 // Creates and maintains the multitask menu. Responsible for showing,
 // hiding, and animating the menu.
 class ASH_EXPORT TabletModeMultitaskMenu
-    : public aura::WindowObserver,
-      public views::WidgetFocusChangeListener,
+    : public views::NativeViewFocusChangeListener,
       public display::DisplayObserver {
  public:
-  TabletModeMultitaskMenu(TabletModeMultitaskMenuEventHandler* event_handler,
+  TabletModeMultitaskMenu(TabletModeMultitaskMenuController* controller,
                           aura::Window* window);
 
   TabletModeMultitaskMenu(const TabletModeMultitaskMenu&) = delete;
@@ -37,21 +36,19 @@ class ASH_EXPORT TabletModeMultitaskMenu
 
   ~TabletModeMultitaskMenu() override;
 
-  aura::Window* window() { return window_; }
-
   views::Widget* widget() { return widget_.get(); }
 
-  // Performs a slide down animation on the menu if `show` is true, otherwise
-  // slide up animation.
+  // Performs a slide down animation on the menu (and cue if visible) if `show`
+  // is true, otherwise a slide up animation.
   void Animate(bool show);
 
-  // Performs a fade out animation and closes the menu. Called when tap outside
-  // the menu dismisses it.
+  // Performs a fade out animation and closes the menu.
   void AnimateFadeOut();
 
   // Actions called by the event handler, where `initial_y` and `current_y` are
   // in `window_`'s coordinates. If `down` is true, we are dragging down to show
-  // the menu, else we are dragging up to hide the menu.
+  // the menu, else we are dragging up to hide the menu. Also makes the cue
+  // follow the menu's movement if it is showing.
   void BeginDrag(float initial_y, bool down);
   void UpdateDrag(float current_y, bool down);
   void EndDrag();
@@ -59,10 +56,7 @@ class ASH_EXPORT TabletModeMultitaskMenu
   // Calls the event handler to destroy `this`.
   void Reset();
 
-  // aura::WindowObserver:
-  void OnWindowDestroying(aura::Window* window) override;
-
-  // views::WidgetFocusChangeListener:
+  // views::NativeViewFocusChangeListener:
   void OnNativeFocusChanged(gfx::NativeView focused_now) override;
 
   // display::DisplayObserver:
@@ -74,10 +68,7 @@ class ASH_EXPORT TabletModeMultitaskMenu
  private:
   // The event handler that created this multitask menu. Guaranteed to outlive
   // `this`.
-  TabletModeMultitaskMenuEventHandler* event_handler_;
-
-  // The window that opened this multitask menu.
-  aura::Window* window_ = nullptr;
+  raw_ptr<TabletModeMultitaskMenuController> controller_;
 
   // Widget implementation that is created and maintained by `this`.
   views::UniqueWidgetPtr widget_ = std::make_unique<views::Widget>();
@@ -87,10 +78,6 @@ class ASH_EXPORT TabletModeMultitaskMenu
 
   // Initial y location in `window_` coordinates. Only relevant for drags.
   float initial_y_;
-
-  // Window observer for `window_`.
-  base::ScopedObservation<aura::Window, aura::WindowObserver> observed_window_{
-      this};
 
   display::ScopedOptionalDisplayObserver display_observer_{this};
 

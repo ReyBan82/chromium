@@ -27,9 +27,9 @@ constexpr char kBatteryPercentageKey[] = "battery_percentage";
 constexpr char kSignalStrengthKey[] = "signal_strength";
 constexpr char kSetupRequiredKey[] = "setup_required";
 
-base::Value::Dict HostScanCacheEntryToDictionary(
+base::DictValue HostScanCacheEntryToDictionary(
     const HostScanCacheEntry& entry) {
-  base::Value::Dict dictionary;
+  base::DictValue dictionary;
 
   dictionary.Set(kTetherNetworkGuidKey, entry.tether_network_guid);
   dictionary.Set(kDeviceNameKey, entry.device_name);
@@ -42,7 +42,7 @@ base::Value::Dict HostScanCacheEntryToDictionary(
 }
 
 std::unique_ptr<HostScanCacheEntry> DictionaryToHostScanCacheEntry(
-    const base::Value::Dict& dictionary) {
+    const base::DictValue& dictionary) {
   HostScanCacheEntry::Builder builder;
 
   const std::string* tether_network_guid =
@@ -61,7 +61,7 @@ std::unique_ptr<HostScanCacheEntry> DictionaryToHostScanCacheEntry(
     return nullptr;
   builder.SetCarrier(*carrier);
 
-  absl::optional<int> battery_percentage =
+  std::optional<int> battery_percentage =
       dictionary.FindInt(kBatteryPercentageKey);
   if (!battery_percentage || *battery_percentage < 0 ||
       *battery_percentage > 100) {
@@ -69,13 +69,13 @@ std::unique_ptr<HostScanCacheEntry> DictionaryToHostScanCacheEntry(
   }
   builder.SetBatteryPercentage(*battery_percentage);
 
-  absl::optional<int> signal_strength = dictionary.FindInt(kSignalStrengthKey);
+  std::optional<int> signal_strength = dictionary.FindInt(kSignalStrengthKey);
   if (!signal_strength || *signal_strength < 0 || *signal_strength > 100) {
     return nullptr;
   }
   builder.SetSignalStrength(*signal_strength);
 
-  absl::optional<bool> setup_required = dictionary.FindBool(kSetupRequiredKey);
+  std::optional<bool> setup_required = dictionary.FindBool(kSetupRequiredKey);
   if (!setup_required)
     return nullptr;
 
@@ -99,7 +99,7 @@ PersistentHostScanCacheImpl::~PersistentHostScanCacheImpl() = default;
 
 std::unordered_map<std::string, HostScanCacheEntry>
 PersistentHostScanCacheImpl::GetStoredCacheEntries() {
-  const base::Value::List& cache_entry_list =
+  const base::ListValue& cache_entry_list =
       pref_service_->GetList(prefs::kHostScanCache);
 
   std::unordered_map<std::string, HostScanCacheEntry> entries;
@@ -188,7 +188,7 @@ bool PersistentHostScanCacheImpl::DoesHostRequireSetup(
 
 void PersistentHostScanCacheImpl::StoreCacheEntriesToPrefs(
     const std::unordered_map<std::string, HostScanCacheEntry>& entries) {
-  base::Value::List entries_list;
+  base::ListValue entries_list;
 
   for (const auto& it : entries) {
     entries_list.Append(base::Value(HostScanCacheEntryToDictionary(it.second)));

@@ -5,13 +5,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/files/file_util.h"
 #include "base/no_destructor.h"
 #include "third_party/lzma_sdk/google/seven_zip_reader.h"
 
 extern "C" {
-#include "third_party/lzma_sdk/C/7zCrc.h"
+#include "third_party/lzma_sdk/src/C/7zCrc.h"
 }
 
 namespace {
@@ -30,11 +31,10 @@ class Delegate : public seven_zip::Delegate {
                base::span<uint8_t>& output) override {
     if (entry.file_size < 4096) {
       buffer_.resize(entry.file_size);
-      output = base::make_span(buffer_);
+      output = base::span(buffer_);
       return true;
-    } else {
-      return false;
     }
+    return false;
   }
   bool OnDirectory(const seven_zip::EntryInfo& entry) override { return true; }
   bool EntryDone(seven_zip::Result result,
@@ -73,7 +73,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     // headers. The values here were chosen to keep the CRC internal state as
     // 0xffffffff in CrcUpdateT8. Other processors may choose a different CRC
     // update function, and would need different values here. See the
-    // CrcGenerateTable function in //third_party/lzma_sdk/C/7zCrc.c.
+    // CrcGenerateTable function in //third_party/lzma_sdk/src/C/7zCrc.c.
     seven_zip::EnsureLzmaSdkInitialized();
     for (size_t i = 0; i < 256; i++) {
       g_CrcTable[i] = 0xff000000;
@@ -96,10 +96,15 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     return 0;
 
   archive_file->SetLength(size);
-  archive_file->Write(0, reinterpret_cast<const char*>(data), size);
+  archive_file->Write(0, base::span(data, size));
 
   Delegate delegate;
-  seven_zip::Extract(archive_file->Duplicate(), delegate);
+
+  std::unique_ptr<seven_zip::SevenZipReader> reader =
+      seven_zip::SevenZipReader::Create(archive_file->Duplicate(), delegate);
+  if (reader) {
+    reader->Extract();
+  }
 
   return 0;
 }

@@ -5,8 +5,6 @@
 #include "ash/webui/eche_app_ui/system_info_provider.h"
 
 #include "ash/constants/ash_features.h"
-#include "ash/public/cpp/tablet_mode.h"
-#include "ash/public/cpp/tablet_mode_observer.h"
 #include "ash/webui/eche_app_ui/mojom/types_mojom_traits.h"
 #include "ash/webui/eche_app_ui/system_info.h"
 #include "base/json/json_reader.h"
@@ -15,9 +13,10 @@
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/services/network_config/public/mojom/cros_network_config.mojom.h"
 #include "crypto/sha2.h"
+#include "ui/display/screen.h"
+#include "ui/display/tablet_state.h"
 
-namespace ash {
-namespace eche_app {
+namespace ash::eche_app {
 
 namespace network_config = ::chromeos::network_config;
 using network_config::mojom::ConnectionStateType;
@@ -29,10 +28,13 @@ const char kJsonWifiConnectionStateKey[] = "wifi_connection_state";
 const char kJsonDebugModeKey[] = "debug_mode";
 const char kJsonGaiaIdKey[] = "gaia_id";
 const char kJsonDeviceTypeKey[] = "device_type";
+const char kJsonOsVersionKey[] = "os_version";
+const char kJsonChannelKey[] = "channel";
 const char kJsonMeasureLatencyKey[] = "measure_latency";
 const char kJsonSendStartSignalingKey[] = "send_start_signaling";
 const char kJsonDisableStunServerKey[] = "disable_stun_server";
 const char kJsonCheckAndroidNetworkInfoKey[] = "check_android_network_info";
+const char kJsonProcessAndroidAccessibilityTreeKey[] = "process_android_accessibility_tree";
 
 const std::map<ConnectionStateType, const char*> CONNECTION_STATE_TYPE{
     {ConnectionStateType::kOnline, "online"},
@@ -52,9 +54,6 @@ SystemInfoProvider::SystemInfoProvider(
   if (ScreenBacklight::Get()) {
     ScreenBacklight::Get()->AddObserver(this);
   }
-  if (TabletMode::Get()) {
-    TabletMode::Get()->AddObserver(this);
-  }
   cros_network_config_->AddObserver(
       cros_network_config_receiver_.BindNewPipeAndPassRemote());
   FetchWifiNetworkList();
@@ -72,9 +71,6 @@ SystemInfoProvider::~SystemInfoProvider() {
   if (ScreenBacklight::Get()) {
     ScreenBacklight::Get()->RemoveObserver(this);
   }
-  if (TabletMode::Get()) {
-    TabletMode::Get()->RemoveObserver(this);
-  }
 }
 
 std::string SystemInfoProvider::GetHashedWiFiSsid() {
@@ -84,12 +80,15 @@ std::string SystemInfoProvider::GetHashedWiFiSsid() {
 void SystemInfoProvider::GetSystemInfo(
     base::OnceCallback<void(const std::string&)> callback) {
   PA_LOG(INFO) << "echeapi SystemInfoProvider GetSystemInfo";
-  base::Value::Dict json_dictionary;
+  base::DictValue json_dictionary;
   json_dictionary.Set(kJsonDeviceNameKey, system_info_->GetDeviceName());
   json_dictionary.Set(kJsonBoardNameKey, system_info_->GetBoardName());
-  json_dictionary.Set(kJsonTabletModeKey, TabletMode::Get()->InTabletMode());
-  json_dictionary.Set(kJsonGaiaIdKey, system_info_->GetGaiaId());
+  json_dictionary.Set(kJsonTabletModeKey,
+                      display::Screen::Get()->InTabletMode());
+  json_dictionary.Set(kJsonGaiaIdKey, system_info_->GetGaiaId().ToString());
   json_dictionary.Set(kJsonDeviceTypeKey, system_info_->GetDeviceType());
+  json_dictionary.Set(kJsonOsVersionKey, system_info_->GetOsVersion());
+  json_dictionary.Set(kJsonChannelKey, system_info_->GetChannel());
   auto found_type = CONNECTION_STATE_TYPE.find(wifi_connection_state_);
   std::string connecton_state_string =
       found_type == CONNECTION_STATE_TYPE.end() ? "" : found_type->second;
@@ -108,10 +107,9 @@ void SystemInfoProvider::GetSystemInfo(
   json_dictionary.Set(
       kJsonCheckAndroidNetworkInfoKey,
       base::FeatureList::IsEnabled(features::kEcheSWACheckAndroidNetworkInfo));
+  json_dictionary.Set(kJsonProcessAndroidAccessibilityTreeKey, true);
 
-  std::string json_message;
-  base::JSONWriter::Write(json_dictionary, &json_message);
-  std::move(callback).Run(json_message);
+  std::move(callback).Run(base::WriteJson(json_dictionary).value_or(""));
 }
 
 void SystemInfoProvider::SetSystemInfoObserver(
@@ -137,12 +135,26 @@ void SystemInfoProvider::OnScreenBacklightStateChanged(
   observer_remote_->OnScreenBacklightStateChanged(screen_state);
 }
 
+void SystemInfoProvider::OnDisplayTabletStateChanged(
+    display::TabletState state) {
+  switch (state) {
+    case display::TabletState::kEnteringTabletMode:
+    case display::TabletState::kExitingTabletMode:
+      break;
+    case display::TabletState::kInTabletMode:
+      SetTabletModeChanged(true);
+      break;
+    case display::TabletState::kInClamshellMode:
+      SetTabletModeChanged(false);
+      break;
+  }
+}
+
 void SystemInfoProvider::SetTabletModeChanged(bool enabled) {
   PA_LOG(INFO) << "echeapi SystemInfoProvider SetTabletModeChanged";
   if (!observer_remote_.is_bound()) {
     return;
   }
-
   PA_LOG(VERBOSE) << "OnReceivedTabletModeChanged:" << enabled;
   observer_remote_->OnReceivedTabletModeChanged(enabled);
 }
@@ -157,6 +169,10 @@ void SystemInfoProvider::SetAndroidDeviceNetworkInfoChanged(
       << "echeapi SystemInfoProvider "
          "SetAndroidDeviceNetworkInfoChanged android_device_on_cellular:"
       << android_device_on_cellular;
+
+  is_different_network_ = is_different_network;
+  android_device_on_cellular_ = android_device_on_cellular;
+
   if (!observer_remote_.is_bound()) {
     return;
   }
@@ -166,19 +182,9 @@ void SystemInfoProvider::SetAndroidDeviceNetworkInfoChanged(
       is_different_network, android_device_on_cellular);
 }
 
-// TabletModeObserver implementation:
-void SystemInfoProvider::OnTabletModeStarted() {
-  SetTabletModeChanged(true);
-}
-
-void SystemInfoProvider::OnTabletModeEnded() {
-  SetTabletModeChanged(false);
-}
-
 // network_config::mojom::CrosNetworkConfigObserver implementation:
-void SystemInfoProvider::OnNetworkStateChanged(
-    network_config::mojom::NetworkStatePropertiesPtr network) {
-  PA_LOG(INFO) << "echeapi SystemInfoProvider OnNetworkStateChanged";
+void SystemInfoProvider::OnActiveNetworksChanged(
+    std::vector<network_config::mojom::NetworkStatePropertiesPtr> networks) {
   FetchWifiNetworkList();
 }
 
@@ -186,48 +192,37 @@ void SystemInfoProvider::FetchWifiNetworkSsidHash() {
   PA_LOG(INFO) << "echeapi SystemInfoProvider FetchWifiNetworkSsidHash";
   cros_network_config_->GetNetworkStateList(
       network_config::mojom::NetworkFilter::New(
-          network_config::mojom::FilterType::kVisible,
+          network_config::mojom::FilterType::kActive,
           network_config::mojom::NetworkType::kWiFi,
           network_config::mojom::kNoLimit),
-      base::BindOnce(&SystemInfoProvider::OnWifiNetworkListSsidFetch,
+      base::BindOnce(&SystemInfoProvider::OnActiveWifiNetworkListFetched,
                      base::Unretained(this)));
-}
-
-void SystemInfoProvider::OnWifiNetworkListSsidFetch(
-    std::vector<network_config::mojom::NetworkStatePropertiesPtr> networks) {
-  PA_LOG(INFO) << "echeapi SystemInfoProvider OnWifiNetworkListSsidFetch";
-  for (const auto& network : networks) {
-    if (network->type == chromeos::network_config::mojom::NetworkType::kWiFi) {
-      std::string wifi_ssid = network->type_state->get_wifi()->ssid;
-      std::string hashed_wifi_ssid = crypto::SHA256HashString(wifi_ssid);
-      hashed_wifi_ssid_ = hashed_wifi_ssid;
-      return;
-    }
-  }
-  hashed_wifi_ssid_ = std::string();
 }
 
 void SystemInfoProvider::FetchWifiNetworkList() {
   cros_network_config_->GetNetworkStateList(
       network_config::mojom::NetworkFilter::New(
-          network_config::mojom::FilterType::kVisible,
+          network_config::mojom::FilterType::kActive,
           network_config::mojom::NetworkType::kWiFi,
           network_config::mojom::kNoLimit),
-      base::BindOnce(&SystemInfoProvider::OnWifiNetworkList,
+      base::BindOnce(&SystemInfoProvider::OnActiveWifiNetworkListFetched,
                      base::Unretained(this)));
 }
 
-void SystemInfoProvider::OnWifiNetworkList(
+void SystemInfoProvider::OnActiveWifiNetworkListFetched(
     std::vector<network_config::mojom::NetworkStatePropertiesPtr> networks) {
-  using network_config::mojom::NetworkType;
-
   for (const auto& network : networks) {
-    if (network->type == NetworkType::kWiFi) {
+    if (network->type == chromeos::network_config::mojom::NetworkType::kWiFi) {
+      hashed_wifi_ssid_ =
+          crypto::SHA256HashString(network->type_state->get_wifi()->ssid);
       wifi_connection_state_ = network->connection_state;
       return;
     }
   }
+
+  // Reset connection state and SSID hash if there is no active WiFi network.
+  wifi_connection_state_ = ConnectionStateType::kNotConnected;
+  hashed_wifi_ssid_ = std::string();
 }
 
-}  // namespace eche_app
-}  // namespace ash
+}  // namespace ash::eche_app

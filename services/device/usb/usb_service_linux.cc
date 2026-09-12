@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
+#include "base/compiler_specific.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -23,7 +23,6 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/device_event_log/device_event_log.h"
 #include "device/udev_linux/udev_watcher.h"
 #include "services/device/usb/usb_device_handle.h"
@@ -33,6 +32,8 @@
 namespace device {
 
 namespace {
+
+constexpr std::string_view kUsbSubsystem = "usb";
 
 // Standard USB requests and descriptor types:
 const uint16_t kUsbVersion2_1 = 0x0210;
@@ -45,7 +46,7 @@ bool ShouldReadDescriptors(const UsbDeviceLinux& device) {
     return false;
 
   // Avoid detaching the usb-storage driver.
-  // TODO(crbug.com/1176107): We should read descriptors for composite mass
+  // TODO(crbug.com/40168206): We should read descriptors for composite mass
   // storage devices.
   auto* configuration = device.GetActiveConfiguration();
   if (configuration) {
@@ -123,7 +124,8 @@ UsbServiceLinux::BlockingTaskRunnerHelper::BlockingTaskRunnerHelper(
 
   // Initializing udev for device enumeration and monitoring may fail. In that
   // case this service will continue to exist but no devices will be found.
-  watcher_ = UdevWatcher::StartWatching(this);
+  const std::vector<UdevWatcher::Filter> filters = {{kUsbSubsystem, ""}};
+  watcher_ = UdevWatcher::StartWatching(this, filters);
   if (watcher_)
     watcher_->EnumerateExistingDevices();
 
@@ -142,8 +144,9 @@ void UsbServiceLinux::BlockingTaskRunnerHelper::OnDeviceAdded(
   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
                                                 base::BlockingType::MAY_BLOCK);
   const char* subsystem = udev_device_get_subsystem(device.get());
-  if (!subsystem || strcmp(subsystem, "usb") != 0)
+  if (!subsystem || subsystem != kUsbSubsystem) {
     return;
+  }
 
   const char* value = udev_device_get_devnode(device.get());
   if (!value)
@@ -161,9 +164,7 @@ void UsbServiceLinux::BlockingTaskRunnerHelper::OnDeviceAdded(
     return;
 
   std::unique_ptr<UsbDeviceDescriptor> descriptor(new UsbDeviceDescriptor());
-  if (!descriptor->Parse(base::make_span(
-          reinterpret_cast<const uint8_t*>(descriptors_str.data()),
-          descriptors_str.size()))) {
+  if (!descriptor->Parse(base::as_byte_span(descriptors_str))) {
     return;
   }
 
@@ -248,7 +249,7 @@ void UsbServiceLinux::OnDeviceAdded(
     std::unique_ptr<UsbDeviceDescriptor> descriptor) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (base::Contains(devices_by_path_, device_path)) {
+  if (devices_by_path_.contains(device_path)) {
     USB_LOG(ERROR) << "Got duplicate add event for path: " << device_path;
     return;
   }
@@ -286,9 +287,9 @@ void UsbServiceLinux::DeviceReady(scoped_refptr<UsbDeviceLinux> device) {
 
   // If |device| was disconnected while descriptors were being read then it
   // will have been removed from |devices_by_path_|.
-  bool device_added = base::Contains(devices_by_path_, device->device_path());
+  bool device_added = devices_by_path_.contains(device->device_path());
   if (device_added) {
-    DCHECK(!base::Contains(devices(), device->guid()));
+    DCHECK(!devices().contains(device->guid()));
     devices()[device->guid()] = device;
 
     USB_LOG(USER) << "USB device added: path=" << device->device_path()

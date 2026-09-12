@@ -13,7 +13,7 @@ from infra import ChromeEnterpriseTestCase
 class ExtensionInstallForcelistTest(ChromeEnterpriseTestCase):
   """Test the ExtensionInstallForcelist policy.
 
-  See https://cloud.google.com/docs/chrome-enterprise/policies/?policy=ExtensionInstallForcelist"""
+  See https://chromeenterprise.google/policies/?policy=ExtensionInstallForcelist"""
 
   # This is the extension id of the Google Keep extension.
   ExtensionId = 'lpcaedmchfhocbbapmcbpinfpgnhiddi'
@@ -26,20 +26,23 @@ class ExtensionInstallForcelistTest(ChromeEnterpriseTestCase):
   def isExtensionInstalled(self, incognito=False):
     dir = os.path.dirname(os.path.abspath(__file__))
     output = self.RunWebDriverTest(
-        self.win_config['client'],
-        os.path.join(dir, 'is_extension_installed.py'),
-        args=["--extension_id", ExtensionInstallForcelistTest.ExtensionId])
+      self.win_config['client'],
+      os.path.join(dir, 'is_extension_installed.py'),
+      args=["--extension_id", ExtensionInstallForcelistTest.ExtensionId],
+    )
 
     if "ERROR" in output:
       raise Exception(
-          "is_extension_installed.py returned an error: %s" % output)
+        "is_extension_installed.py returned an error: %s" % output
+      )
 
     return "TRUE" in output
 
   @test
   def test_NoForcelistNoExtensionInstalled(self):
-    self.SetPolicy(self.win_config['dc'], r'ExtensionInstallForcelist\1', '""',
-                   'String')
+    self.SetPolicy(
+      self.win_config['dc'], r'ExtensionInstallForcelist\1', '""', 'String'
+    )
     self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
     installed = self.isExtensionInstalled()
@@ -49,8 +52,9 @@ class ExtensionInstallForcelistTest(ChromeEnterpriseTestCase):
   def test_ForcelistExtensionInstalled(self):
     url = 'https://clients2.google.com/service/update2/crx'
     extension = '"%s;%s"' % (ExtensionInstallForcelistTest.ExtensionId, url)
-    self.SetPolicy(self.win_config['dc'], r'ExtensionInstallForcelist\1',
-                   extension, 'String')
+    self.SetPolicy(
+      self.win_config['dc'], r'ExtensionInstallForcelist\1', extension, 'String'
+    )
     self.RunCommand(self.win_config['client'], 'gpupdate /force')
 
     installed = self.isExtensionInstalled()

@@ -5,17 +5,20 @@
 #include "components/openscreen_platform/tls_connection_factory.h"
 
 #include <openssl/pool.h>
+
 #include <utility>
 
-#include "base/notreached.h"
-#include "components/openscreen_platform/network_context.h"
+#include "base/containers/span.h"
+#include "base/notimplemented.h"
 #include "components/openscreen_platform/network_util.h"
+#include "components/openscreen_platform/socket_factory.h"
 #include "components/openscreen_platform/tls_client_connection.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/net_errors.h"
+#include "net/cert/x509_util.h"
 #include "net/ssl/ssl_info.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
-#include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/mojom/socket_factory.mojom.h"
 #include "third_party/openscreen/src/platform/api/tls_connection.h"
 #include "third_party/openscreen/src/platform/base/tls_connect_options.h"
 #include "third_party/openscreen/src/platform/base/tls_credentials.h"
@@ -23,11 +26,12 @@
 
 namespace openscreen {
 
+class TaskRunner;
+
 std::unique_ptr<TlsConnectionFactory> TlsConnectionFactory::CreateFactory(
-    Client* client,
-    TaskRunner* task_runner) {
-  return std::make_unique<openscreen_platform::TlsConnectionFactory>(
-      client, task_runner);
+    Client& client,
+    TaskRunner& task_runner) {
+  return std::make_unique<openscreen_platform::TlsConnectionFactory>(client);
 }
 
 }  // namespace openscreen
@@ -72,9 +76,9 @@ TlsConnectionFactory::~TlsConnectionFactory() = default;
 
 void TlsConnectionFactory::Connect(const IPEndpoint& remote_address,
                                    const TlsConnectOptions& options) {
-  network::mojom::NetworkContext* network_context =
-      openscreen_platform::GetNetworkContext();
-  if (!network_context) {
+  network::mojom::SocketFactory* socket_factory =
+      openscreen_platform::GetSocketFactory();
+  if (!socket_factory) {
     client_->OnError(this, openscreen::Error::Code::kItemNotFound);
     return;
   }
@@ -88,8 +92,8 @@ void TlsConnectionFactory::Connect(const IPEndpoint& remote_address,
   mojo::PendingReceiver<network::mojom::TCPConnectedSocket> receiver =
       request.tcp_socket.BindNewPipeAndPassReceiver();
 
-  network_context->CreateTCPConnectedSocket(
-      absl::nullopt /* local_addr */, address_list,
+  socket_factory->CreateTCPConnectedSocket(
+      std::nullopt /* local_addr */, address_list,
       nullptr /* tcp_connected_socket_options */,
       net::MutableNetworkTrafficAnnotationTag(kTrafficAnnotation),
       std::move(receiver), mojo::NullRemote(), /* observer */
@@ -108,9 +112,8 @@ void TlsConnectionFactory::Listen(const IPEndpoint& local_address,
 }
 
 TlsConnectionFactory::TlsConnectionFactory(
-    openscreen::TlsConnectionFactory::Client* client,
-    openscreen::TaskRunner* task_runner)
-    : client_(client), task_runner_(task_runner) {}
+    openscreen::TlsConnectionFactory::Client& client)
+    : client_(client) {}
 
 TlsConnectionFactory::TcpConnectRequest::TcpConnectRequest(
     openscreen::TlsConnectOptions options_in,
@@ -146,8 +149,8 @@ TlsConnectionFactory::TlsUpgradeRequest::~TlsUpgradeRequest() = default;
 void TlsConnectionFactory::OnTcpConnect(
     TcpConnectRequest request,
     int32_t net_result,
-    const absl::optional<net::IPEndPoint>& local_address,
-    const absl::optional<net::IPEndPoint>& remote_address,
+    const std::optional<net::IPEndPoint>& local_address,
+    const std::optional<net::IPEndPoint>& remote_address,
     mojo::ScopedDataPipeConsumerHandle receive_stream,
     mojo::ScopedDataPipeProducerHandle send_stream) {
   // We only care about net_result, since local_address doesn't matter,
@@ -194,21 +197,21 @@ void TlsConnectionFactory::OnTlsUpgrade(
     int32_t net_result,
     mojo::ScopedDataPipeConsumerHandle receive_stream,
     mojo::ScopedDataPipeProducerHandle send_stream,
-    const absl::optional<net::SSLInfo>& ssl_info) {
+    const std::optional<net::SSLInfo>& ssl_info) {
   if (net_result != net::OK) {
     client_->OnConnectionFailed(this, request.remote_address);
     return;
   }
 
   auto tls_connection = std::make_unique<TlsClientConnection>(
-      task_runner_, request.local_address, request.remote_address,
-      std::move(receive_stream), std::move(send_stream),
-      std::move(request.tcp_socket), std::move(request.tls_socket));
+      request.local_address, request.remote_address, std::move(receive_stream),
+      std::move(send_stream), std::move(request.tcp_socket),
+      std::move(request.tls_socket));
 
   CRYPTO_BUFFER* der_buffer = ssl_info.value().unverified_cert->cert_buffer();
-  const uint8_t* data = CRYPTO_BUFFER_data(der_buffer);
-  std::vector<uint8_t> der_x509_certificate(
-      data, data + CRYPTO_BUFFER_len(der_buffer));
+  base::span<const uint8_t> data =
+      net::x509_util::CryptoBufferAsSpan(der_buffer);
+  std::vector<uint8_t> der_x509_certificate(data.begin(), data.end());
   client_->OnConnected(this, std::move(der_x509_certificate),
                        std::move(tls_connection));
 }

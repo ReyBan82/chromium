@@ -14,10 +14,6 @@ bool ShellDelegate::ShouldWaitForTouchPressAck(gfx::NativeWindow window) {
   return false;
 }
 
-bool ShellDelegate::IsTabDrag(const ui::OSExchangeData& drop_data) {
-  return false;
-}
-
 media_session::MediaSessionService* ShellDelegate::GetMediaSessionService() {
   return nullptr;
 }
@@ -35,9 +31,8 @@ const GURL& ShellDelegate::GetLastCommittedURLForWindowIfAny(
   return GURL::EmptyGURL();
 }
 
-void ShellDelegate::ShouldExitFullscreenBeforeLock(
-    ShellDelegate::ShouldExitFullscreenCallback callback) {
-  std::move(callback).Run(false);
+bool ShellDelegate::IsNoFirstRunSwitchOn() const {
+  return false;
 }
 
 }  // namespace ash

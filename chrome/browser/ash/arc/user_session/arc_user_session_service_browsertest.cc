@@ -2,19 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ash/arc/user_session/arc_user_session_service.h"
+#include "chromeos/ash/experiences/arc/user_session/arc_user_session_service.h"
 
 #include <memory>
 
-#include "ash/components/arc/session/arc_bridge_service.h"
-#include "ash/components/arc/session/arc_service_manager.h"
-#include "ash/components/arc/test/arc_util_test_support.h"
-#include "ash/components/arc/test/connection_holder_util.h"
 #include "base/run_loop.h"
 #include "base/task/current_thread.h"
 #include "chrome/browser/ui/ash/shelf/chrome_shelf_prefs.h"
 #include "chrome/test/base/in_process_browser_test.h"
-#include "components/arc/test/fake_intent_helper_instance.h"
+#include "chromeos/ash/experiences/arc/session/arc_bridge_service.h"
+#include "chromeos/ash/experiences/arc/session/arc_service_manager.h"
+#include "chromeos/ash/experiences/arc/test/arc_util_test_support.h"
+#include "chromeos/ash/experiences/arc/test/connection_holder_util.h"
+#include "chromeos/ash/experiences/arc/test/fake_intent_helper_instance.h"
 #include "components/session_manager/core/session_manager.h"
 #include "content/public/test/browser_test.h"
 
@@ -46,12 +46,7 @@ void RunUntilIdle() {
 
 class ArcUserSessionServiceTest : public InProcessBrowserTest {
  public:
-  ArcUserSessionServiceTest() {
-    // App pin syncing code makes an untitled Play Store icon appear in the
-    // shelf. Sync isn't relevant to this test, so skip pinned app sync.
-    // https://crbug.com/1085597
-    ChromeShelfPrefs::SkipPinnedAppsFromSyncForTest();
-  }
+  ArcUserSessionServiceTest() = default;
 
   ArcUserSessionServiceTest(const ArcUserSessionServiceTest&) = delete;
   ArcUserSessionServiceTest& operator=(const ArcUserSessionServiceTest&) =

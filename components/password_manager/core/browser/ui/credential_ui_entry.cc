@@ -4,17 +4,24 @@
 
 #include "components/password_manager/core/browser/ui/credential_ui_entry.h"
 
-#include "components/password_manager/core/browser/affiliation/affiliation_utils.h"
-#include "components/password_manager/core/browser/form_parsing/form_parser.h"
-#include "components/password_manager/core/browser/import/csv_password.h"
-#include "components/password_manager/core/browser/password_form.h"
-#include "components/password_manager/core/browser/password_list_sorter.h"
-#include "components/password_manager/core/browser/password_ui_utils.h"
+#include "base/i18n/time_formatting.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_split.h"
+#include "base/strings/string_util.h"
+#include "base/strings/utf_string_conversions.h"
+#include "components/affiliations/core/browser/affiliation_utils.h"
+#include "components/password_manager/core/browser/features/password_features.h"
+#include "components/password_manager/core/browser/form_parsing/form_data_parser.h"
+#include "components/password_manager/core/browser/passkey_credential.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/well_known_change_password/well_known_change_password_util.h"
 #include "components/url_formatter/elide_url.h"
 
 namespace password_manager {
 
 namespace {
+
+using affiliations::FacetURI;
 
 constexpr char kPlayStoreAppPrefix[] =
     "https://play.google.com/store/apps/details?id=";
@@ -22,6 +29,38 @@ constexpr char kPlayStoreAppPrefix[] =
 std::string GetOrigin(const url::Origin& origin) {
   return base::UTF16ToUTF8(url_formatter::FormatOriginForSecurityDisplay(
       origin, url_formatter::SchemeDisplay::OMIT_CRYPTOGRAPHIC));
+}
+
+CredentialSortKey CreateCredentialSortKey(
+    const std::string& signon_realm,
+    const GURL& credential_url,
+    bool blocked_by_user,
+    const std::u16string& username,
+    const url::SchemeHostPort& federation_origin) {
+  const FacetURI facet_uri = FacetURI::FromPotentiallyInvalidSpec(signon_realm);
+
+  CredentialSortKey key;
+  if (facet_uri.IsValidAndroidFacetURI()) {
+    // Android credentials are sorted by reversed package name. Retain the
+    // canonical facet as a separate field to distinguish app certificates.
+    key.sort_origin = facet_uri.GetAndroidPackageDisplayName();
+    key.android_facet = facet_uri.canonical_spec();
+  } else {
+    key.sort_origin =
+        base::UTF16ToUTF8(url_formatter::FormatOriginForSecurityDisplay(
+            url::Origin::Create(credential_url),
+            url_formatter::SchemeDisplay::OMIT_HTTP_AND_HTTPS));
+  }
+
+  key.scheme = credential_url.GetScheme();
+  key.blocked_by_user = blocked_by_user;
+  if (!blocked_by_user) {
+    key.username = username;
+    if (federation_origin.IsValid()) {
+      key.federation_host = federation_origin.host();
+    }
+  }
+  return key;
 }
 
 }  // namespace
@@ -54,73 +93,109 @@ CredentialFacet& CredentialFacet::operator=(CredentialFacet&& other) = default;
 
 bool CredentialUIEntry::Less::operator()(const CredentialUIEntry& lhs,
                                          const CredentialUIEntry& rhs) const {
-  return CreateSortKey(lhs) < CreateSortKey(rhs);
+  return CreateCredentialSortKey(lhs) < CreateCredentialSortKey(rhs);
 }
 
 CredentialUIEntry::CredentialUIEntry() = default;
 
-CredentialUIEntry::CredentialUIEntry(const PasswordForm& form)
-    : username(form.username_value),
-      password(form.password_value),
-      federation_origin(form.federation_origin),
-      password_issues(form.password_issues),
-      blocked_by_user(form.blocked_by_user),
-      last_used_time(form.date_last_used) {
-  // Only one-note with an empty `unique_display_name` is supported in the
-  // settings UI.
-  note = form.GetNoteWithEmptyUniqueDisplayName().value_or(std::u16string());
-
+CredentialUIEntry::CredentialUIEntry(const StoredCredential& credential)
+    : username(credential.username_value),
+      password(credential.password_value.value()),
+      federation_origin(credential.federation_origin),
+      creation_time(credential.date_created),
+      password_issues(credential.password_issues),
+      note(credential.GetPasswordNote()),
+      blocked_by_user(credential.blocked_by_user),
+      last_used_time(credential.date_last_used) {
+  if (credential.GetPasswordBackup()) {
+    backup_password = {.value = credential.GetPasswordBackup().value(),
+                       .creation_timestamp =
+                           credential.GetPasswordBackupDateCreated().value()};
+  }
   CredentialFacet facet;
-  facet.display_name = form.app_display_name;
-  facet.url = form.url;
-  facet.signon_realm = form.signon_realm;
-  facet.affiliated_web_realm = form.affiliated_web_realm;
+  facet.display_name = credential.app_display_name;
+  facet.url = credential.url;
+  facet.signon_realm = credential.signon_realm;
+  facet.affiliated_web_realm = credential.affiliated_web_realm;
 
   facets.push_back(std::move(facet));
 
-  if (form.IsUsingAccountStore())
+  if (credential.IsUsingAccountStore()) {
     stored_in.insert(PasswordForm::Store::kAccountStore);
-  if (form.IsUsingProfileStore())
+  }
+  if (credential.IsUsingProfileStore()) {
     stored_in.insert(PasswordForm::Store::kProfileStore);
+  }
 }
 
-CredentialUIEntry::CredentialUIEntry(const std::vector<PasswordForm>& forms) {
-  CHECK(!forms.empty());
+CredentialUIEntry::CredentialUIEntry(
+    const std::vector<StoredCredential>& credentials) {
+  CHECK(!credentials.empty());
 
-  username = forms[0].username_value;
-  password = forms[0].password_value;
-  federation_origin = forms[0].federation_origin;
-  password_issues = forms[0].password_issues;
-  blocked_by_user = forms[0].blocked_by_user;
-  last_used_time = forms[0].date_last_used;
+  username = credentials[0].username_value;
+  password = credentials[0].password_value.value();
+  federation_origin = credentials[0].federation_origin;
+  password_issues = credentials[0].password_issues;
+  blocked_by_user = credentials[0].blocked_by_user;
+  last_used_time = credentials[0].date_last_used;
+  creation_time = credentials[0].date_created;
 
   // For cases when the notes differ within grouped passwords (e.g: a
   // credential exists in both account and profile stores), respective notes
   // should be concatenated and linebreak used as a delimiter.
-  auto unique_notes =
-      base::MakeFlatSet<std::u16string>(forms, {}, [](const auto& form) {
-        return form.GetNoteWithEmptyUniqueDisplayName().value_or(u"");
-      });
-  // Only notes with an empty `unique_display_name` are supported in the
-  // settings UI.
+  auto unique_notes = base::MakeFlatSet<std::u16string>(
+      credentials, {}, [](const auto& cred) { return cred.GetPasswordNote(); });
   unique_notes.erase(u"");
   note = base::JoinString(std::move(unique_notes).extract(), u"\n");
 
   // Add credential facets.
-  for (const auto& form : forms) {
+  for (const auto& credential : credentials) {
     CredentialFacet facet;
-    facet.display_name = form.app_display_name;
-    facet.url = form.url;
-    facet.signon_realm = form.signon_realm;
-    facet.affiliated_web_realm = form.affiliated_web_realm;
+    facet.display_name = credential.app_display_name;
+    facet.url = credential.url;
+    facet.signon_realm = credential.signon_realm;
+    facet.affiliated_web_realm = credential.affiliated_web_realm;
 
     facets.push_back(std::move(facet));
 
-    if (form.IsUsingAccountStore())
+    if (credential.IsUsingAccountStore()) {
       stored_in.insert(PasswordForm::Store::kAccountStore);
-    if (form.IsUsingProfileStore())
+    }
+    if (credential.IsUsingProfileStore()) {
       stored_in.insert(PasswordForm::Store::kProfileStore);
+    }
+    // TODO(crbug.com/407501259): instead of saving the last non-empty backup,
+    // consider storing all backups in the credential UI entry and create a
+    // separate card for each of them.
+    if (credential.GetPasswordBackup()) {
+      backup_password = {.value = credential.GetPasswordBackup().value(),
+                         .creation_timestamp =
+                             credential.GetPasswordBackupDateCreated().value()};
+    }
   }
+}
+
+CredentialUIEntry::CredentialUIEntry(const PasswordForm& form)
+    : CredentialUIEntry(FromPasswordForm(form)) {}
+
+CredentialUIEntry::CredentialUIEntry(const std::vector<PasswordForm>& forms)
+    : CredentialUIEntry(FromPasswordForms(forms)) {}
+
+CredentialUIEntry::CredentialUIEntry(const PasskeyCredential& passkey)
+    : passkey_credential_id(passkey.credential_id()),
+      username(base::UTF8ToUTF16(passkey.username())),
+      user_display_name(base::UTF8ToUTF16(passkey.display_name())),
+      creation_time(passkey.creation_time()),
+      hidden(passkey.hidden()),
+      rp_id(passkey.rp_id()) {
+  CHECK(!passkey.credential_id().empty());
+  CredentialFacet facet;
+  facet.url = GURL(base::StrCat(
+      {url::kHttpsScheme, url::kStandardSchemeSeparator, passkey.rp_id()}));
+  facet.signon_realm =
+      FacetURI::FromPotentiallyInvalidSpec(facet.url.possibly_invalid_spec())
+          .potentially_invalid_spec();
+  facets.push_back(std::move(facet));
 }
 
 CredentialUIEntry::CredentialUIEntry(const CSVPassword& csv_password,
@@ -131,7 +206,7 @@ CredentialUIEntry::CredentialUIEntry(const CSVPassword& csv_password,
   CredentialFacet facet;
   facet.url = csv_password.GetURL().value();
   facet.signon_realm =
-      IsValidAndroidFacetURI(csv_password.GetURL().value().spec())
+      affiliations::IsValidAndroidFacetURI(csv_password.GetURL().value().spec())
           ? csv_password.GetURL().value().spec()
           : GetSignonRealm(csv_password.GetURL().value());
   facets.push_back(std::move(facet));
@@ -205,42 +280,87 @@ GURL CredentialUIEntry::GetURL() const {
   return facets[0].url;
 }
 
+std::optional<GURL> CredentialUIEntry::GetChangePasswordURL() const {
+  GURL change_password_origin;
+  auto facetUri = FacetURI::FromPotentiallyInvalidSpec(GetFirstSignonRealm());
+
+  if (facetUri.IsValidAndroidFacetURI()) {
+    // Change url needs special handling for Android. Here we use
+    // affiliation information instead of the origin.
+    if (!GetAffiliatedWebRealm().empty()) {
+      return CreateChangePasswordUrl(GURL(GetAffiliatedWebRealm()));
+    }
+  } else if (GetURL().is_valid()) {
+    return CreateChangePasswordUrl(GetURL());
+  }
+
+  return std::nullopt;
+}
+
 std::vector<CredentialUIEntry::DomainInfo>
 CredentialUIEntry::GetAffiliatedDomains() const {
   std::vector<CredentialUIEntry::DomainInfo> domains;
+  std::set<std::string> unique_urls;
+  CHECK(!facets.empty());
   for (const auto& facet : facets) {
     CredentialUIEntry::DomainInfo domain;
-    password_manager::FacetURI facet_uri =
-        password_manager::FacetURI::FromPotentiallyInvalidSpec(
-            facet.signon_realm);
+    domain.signon_realm = facet.signon_realm;
+    FacetURI facet_uri =
+        FacetURI::FromPotentiallyInvalidSpec(facet.signon_realm);
     if (facet_uri.IsValidAndroidFacetURI()) {
       domain.name = facet.display_name.empty()
-                        ? password_manager::SplitByDotAndReverse(
-                              facet_uri.android_package_name())
+                        ? facet_uri.GetAndroidPackageDisplayName()
                         : facet.display_name;
       domain.url =
           facet.affiliated_web_realm.empty()
               ? GURL(kPlayStoreAppPrefix + facet_uri.android_package_name())
               : GURL(facet.affiliated_web_realm);
     } else {
-      domain.name = GetOrigin(url::Origin::Create(facet.url));
       domain.url = facet.url;
+      std::string origin = GetOrigin(url::Origin::Create(facet.url));
+      domain.name =
+          origin.empty() ? domain.url.possibly_invalid_spec() : origin;
     }
-    domains.push_back(std::move(domain));
+    if (unique_urls.insert(domain.url.possibly_invalid_spec()).second) {
+      domains.push_back(std::move(domain));
+    }
   }
   return domains;
 }
 
-bool operator==(const CredentialUIEntry& lhs, const CredentialUIEntry& rhs) {
-  return CreateSortKey(lhs) == CreateSortKey(rhs);
+CredentialSortKey CreateCredentialSortKey(const CredentialUIEntry& credential) {
+  CredentialSortKey key = CreateCredentialSortKey(
+      credential.GetFirstSignonRealm(), credential.GetURL(),
+      credential.blocked_by_user, credential.username,
+      credential.federation_origin);
+  if (!credential.passkey_credential_id.empty()) {
+    key.passkey_display_name = credential.user_display_name;
+    key.passkey_credential_id = credential.passkey_credential_id;
+  }
+  return key;
 }
 
-bool operator!=(const CredentialUIEntry& lhs, const CredentialUIEntry& rhs) {
-  return !(lhs == rhs);
+CredentialSortKey CreateCredentialSortKey(const StoredCredential& credential) {
+  return CreateCredentialSortKey(
+      credential.signon_realm, credential.url, credential.blocked_by_user,
+      credential.username_value, credential.federation_origin);
+}
+
+bool operator==(const CredentialUIEntry& lhs, const CredentialUIEntry& rhs) {
+  return CreateCredentialSortKey(lhs) == CreateCredentialSortKey(rhs) &&
+         (lhs.blocked_by_user || lhs.password == rhs.password);
 }
 
 bool operator<(const CredentialUIEntry& lhs, const CredentialUIEntry& rhs) {
-  return CreateSortKey(lhs) < CreateSortKey(rhs);
+  // Intentionally does not include password. While it would be trivial to do
+  // now, a follow up CL will change |password| to a |PasswordString| object,
+  // which uses base::ProcessBoundString to encrypt the password in memory and
+  // thus doesn't expose a |operator<|.
+  return CreateCredentialSortKey(lhs) < CreateCredentialSortKey(rhs);
+}
+
+bool IsCompromised(const CredentialUIEntry& credential) {
+  return credential.IsLeaked() || credential.IsPhished();
 }
 
 }  // namespace password_manager

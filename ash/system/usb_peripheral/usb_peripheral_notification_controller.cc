@@ -4,6 +4,8 @@
 
 #include "ash/system/usb_peripheral/usb_peripheral_notification_controller.h"
 
+#include <optional>
+
 #include "ash/constants/ash_pref_names.h"
 #include "ash/constants/notifier_catalogs.h"
 #include "ash/public/cpp/new_window_delegate.h"
@@ -12,11 +14,13 @@
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
+#include "base/functional/callback_helpers.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/vector_icons/vector_icons.h"
 #include "third_party/cros_system_api/dbus/typecd/dbus-constants.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_types.h"
@@ -36,6 +40,8 @@ const char kUsbPeripheralInvalidTBTCableNotificationId[] =
     "cros_usb_peripheral_invalid_tbt_cable_notification_id";
 const char kUsbPeripheralSpeedLimitingCableNotificationId[] =
     "cros_usb_peripheral_speed_limiting_cable_notification_id";
+const char kUsbPeripheralDeviceOrEndpointLimitNotificationId[] =
+    "cros_usb_peripheral_device_or_endpoint_limit_notification_id";
 const char kNotificationDisplayLandingPageUrl[] =
     "https://support.google.com/chromebook?p=cable_notification";
 const char kNotificationDeviceLandingPageUrl[] =
@@ -61,7 +67,7 @@ bool ShouldDisplayNotification() {
 
 void OnCableNotificationClicked(const std::string& notification_id,
                                 const std::string& landing_page,
-                                absl::optional<int> button_index) {
+                                std::optional<int> button_index) {
   if (notification_id == kUsbPeripheralSpeedLimitingCableNotificationId)
     SetCableSpeedNotificationShownPref(true);
 
@@ -118,7 +124,7 @@ void UsbPeripheralNotificationController::OnInvalidDpCableWarning() {
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_DISPLAY_TITLE),
           l10n_util::GetStringUTF16(
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_DISPLAY_BODY),
-          /*display_source=*/std::u16string(), GURL(),
+          /*display_source=*/std::u16string(),
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kNotifierUsbPeripheral,
@@ -151,7 +157,7 @@ void UsbPeripheralNotificationController::OnInvalidUSB4ValidTBTCableWarning() {
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_PERFORMANCE_TITLE),
           l10n_util::GetStringUTF16(
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_NO_USB4_SUPPORT_BODY),
-          /*display_source=*/std::u16string(), GURL(),
+          /*display_source=*/std::u16string(),
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kNotifierUsbPeripheral,
@@ -186,7 +192,7 @@ void UsbPeripheralNotificationController::OnInvalidUSB4CableWarning() {
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_PERFORMANCE_TITLE),
           l10n_util::GetStringUTF16(
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_NO_USB4_SUPPORT_BODY),
-          /*display_source=*/std::u16string(), GURL(),
+          /*display_source=*/std::u16string(),
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kNotifierUsbPeripheral,
@@ -220,7 +226,7 @@ void UsbPeripheralNotificationController::OnInvalidTBTCableWarning() {
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_PERFORMANCE_TITLE),
           l10n_util::GetStringUTF16(
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_NO_TBT_SUPPORT_BODY),
-          /*display_source=*/std::u16string(), GURL(),
+          /*display_source=*/std::u16string(),
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kNotifierUsbPeripheral,
@@ -253,7 +259,7 @@ void UsbPeripheralNotificationController::OnSpeedLimitingCableWarning() {
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_PERFORMANCE_TITLE),
           l10n_util::GetStringUTF16(
               IDS_ASH_USB_NOTIFICATION_V2_CABLE_WARNING_SPEED_LIMITED_BODY),
-          /*display_source=*/std::u16string(), GURL(),
+          /*display_source=*/std::u16string(),
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kNotifierUsbPeripheral,
@@ -265,6 +271,38 @@ void UsbPeripheralNotificationController::OnSpeedLimitingCableWarning() {
                   kUsbPeripheralSpeedLimitingCableNotificationId,
                   kNotificationDeviceLandingPageUrl)),
           kSettingsIcon,
+          message_center::SystemNotificationWarningLevel::WARNING);
+
+  message_center_->AddNotification(std::move(notification));
+}
+
+// Notify the user that they have reached a USB device or endpoint limit.
+void UsbPeripheralNotificationController::OnUsbDeviceOrEndpointLimit() {
+  if (!ShouldDisplayNotification()) {
+    return;
+  }
+
+  message_center::RichNotificationData optional;
+  optional.pinned = false;
+  std::unique_ptr<message_center::Notification> notification =
+      CreateSystemNotificationPtr(
+          message_center::NOTIFICATION_TYPE_SIMPLE,
+          kUsbPeripheralDeviceOrEndpointLimitNotificationId,
+          l10n_util::GetStringUTF16(
+              IDS_ASH_USB_NOTIFICATION_LIMIT_REACHED_TITLE),
+          l10n_util::GetStringUTF16(
+              IDS_ASH_USB_NOTIFICATION_LIMIT_REACHED_BODY),
+          /*display_source=*/std::u16string(),
+          message_center::NotifierId(
+              message_center::NotifierType::SYSTEM_COMPONENT,
+              kNotifierUsbPeripheral,
+              NotificationCatalogName::kUsbPeripheralDeviceOrEndpointLimit),
+          optional,
+          base::MakeRefCounted<message_center::HandleNotificationClickDelegate>(
+              message_center::HandleNotificationClickDelegate::
+                  ButtonClickCallback(base::DoNothing())),
+          ::features::IsRoundedIconsEnabled() ? vector_icons::kUsbIcon
+                                              : vector_icons::kUsbOldIcon,
           message_center::SystemNotificationWarningLevel::WARNING);
 
   message_center_->AddNotification(std::move(notification));

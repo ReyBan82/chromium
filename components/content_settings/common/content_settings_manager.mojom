@@ -4,8 +4,10 @@
 
 module content_settings.mojom;
 
+import "components/content_settings/core/common/content_settings_types.mojom";
 import "components/content_settings/core/common/content_settings.mojom";
 import "services/network/public/mojom/site_for_cookies.mojom";
+import "third_party/blink/public/mojom/tokens/tokens.mojom";
 import "url/mojom/origin.mojom";
 
 // An interface to the content settings manager running in the browser process
@@ -16,7 +18,6 @@ interface ContentSettingsManager {
   Clone(pending_receiver<ContentSettingsManager> clone);
 
   enum StorageType {
-    DATABASE,
     LOCAL_STORAGE,
     SESSION_STORAGE,
     FILE_SYSTEM,
@@ -25,15 +26,26 @@ interface ContentSettingsManager {
     WEB_LOCKS,
   };
 
-  // Sent by the renderer process to check whether access to a particular
-  // storage system is granted by content settings. Sync support is optional
-  // for when needed; prefer async whenever possible!
+  // Sent by the renderer process to check storage permissions.
+  //
+  // Note: This returns the same value as AllowStorageAccess() below, but
+  // without the side effect of requesting storage access (e.g. eager
+  // pre-fetching during navigation commit).
+  IsStorageAccessAllowed(
+      url.mojom.Origin origin,
+      network.mojom.SiteForCookies site_for_cookies,
+      url.mojom.Origin top_frame_origin) => (bool allowed);
+
+  // Sent by the renderer process when it attempts to access a storage system.
+  // Evaluates permissions, triggers delegate logic, and logs UI/metrics usage.
+  // Sync support is optional for when needed; prefer async whenever possible!
+  //
   // TODO(darin): Ideally this interface would be attached to a document-
   // specific browser-side object that would already know the origin info.
   // Then these parameters would not need to be passed here.
   [Sync]
   AllowStorageAccess(
-      int32 render_frame_id,
+      blink.mojom.LocalFrameToken frame_token,
       StorageType storage_type,
       url.mojom.Origin origin,
       network.mojom.SiteForCookies site_for_cookies,
@@ -41,5 +53,6 @@ interface ContentSettingsManager {
 
   // Tells the browser that content in the current page was blocked due to the
   // user's content settings.
-  OnContentBlocked(int32 render_frame_id, ContentSettingsType type);
+  OnContentBlocked(blink.mojom.LocalFrameToken frame_token,
+                   ContentSettingsType type);
 };

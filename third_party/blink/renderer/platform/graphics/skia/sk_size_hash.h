@@ -29,11 +29,11 @@
 #include "third_party/skia/include/core/SkScalar.h"
 #include "third_party/skia/include/core/SkSize.h"
 
-namespace WTF {
+namespace blink {
 
 template <>
 struct HashTraits<SkSize> : GenericHashTraits<SkSize> {
-  static unsigned GetHash(const SkSize& key) {
+  static uint32_t GetHash(const SkSize& key) {
     return HashInts(key.width(), key.height());
   }
   static constexpr bool kEmptyValueIsZero = true;
@@ -43,7 +43,7 @@ struct HashTraits<SkSize> : GenericHashTraits<SkSize> {
 
 template <>
 struct HashTraits<SkISize> : GenericHashTraits<SkISize> {
-  static unsigned GetHash(const SkISize& key) {
+  static uint32_t GetHash(const SkISize& key) {
     return HashInts(key.width(), key.height());
   }
   static constexpr bool kEmptyValueIsZero = true;
@@ -51,6 +51,6 @@ struct HashTraits<SkISize> : GenericHashTraits<SkISize> {
   static SkISize DeletedValue() { return SkISize::Make(-1, -1); }
 };
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_SKIA_SK_SIZE_HASH_H_

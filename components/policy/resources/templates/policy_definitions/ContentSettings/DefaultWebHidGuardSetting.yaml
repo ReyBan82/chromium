@@ -30,6 +30,7 @@ schema:
 supported_on:
 - chrome_os:100-
 - chrome.*:100-
+- android:155-
 tags:
 - website-sharing
 type: int-enum

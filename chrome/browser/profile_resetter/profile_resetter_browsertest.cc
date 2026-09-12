@@ -6,15 +6,23 @@
 
 #include <memory>
 
+#include "base/files/file_util.h"
+#include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
+#include "base/threading/thread_restrictions.h"
+#include "chrome/browser/file_system_access/chrome_file_system_access_permission_context.h"
+#include "chrome/browser/file_system_access/file_system_access_permission_context_factory.h"
 #include "chrome/browser/profile_resetter/profile_resetter_test_base.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
+#include "content/public/test/file_system_chooser_test_helpers.h"
 #include "content/public/test/test_utils.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/cookies/canonical_cookie.h"
@@ -22,6 +30,20 @@
 #include "net/cookies/cookie_util.h"
 #include "services/network/public/mojom/cookie_manager.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
+#include "ui/base/window_open_disposition.h"
+#include "ui/shell_dialogs/select_file_dialog.h"
+#include "url/origin.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "base/containers/to_vector.h"
+#include "chromeos/ash/components/dbus/hermes/hermes_euicc_client.h"
+#include "chromeos/ash/components/dbus/hermes/hermes_manager_client.h"
+#include "chromeos/ash/components/dbus/hermes/hermes_profile_client.h"
+#include "chromeos/ash/components/dbus/shill/shill_clients.h"
+#include "chromeos/ash/components/dbus/shill/shill_service_client.h"
+#include "chromeos/ash/components/network/managed_network_configuration_handler_impl.h"
+#include "third_party/cros_system_api/dbus/shill/dbus-constants.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace {
 
@@ -72,7 +94,7 @@ RemoveCookieTester::RemoveCookieTester(Profile* profile)
       cookie_manager_.BindNewPipeAndPassReceiver());
 }
 
-RemoveCookieTester::~RemoveCookieTester() {}
+RemoveCookieTester::~RemoveCookieTester() = default;
 
 // Returns true and sets |*cookie| if the given cookie exists in
 // the cookie store.
@@ -106,7 +128,7 @@ void RemoveCookieTester::AddCookie(const std::string& host,
       name, value, host, "/", base::Time(), base::Time(), base::Time(),
       base::Time(), /*secure=*/true, /*httponly=*/false,
       net::CookieSameSite::NO_RESTRICTION, net::COOKIE_PRIORITY_MEDIUM,
-      /*same_party=*/false);
+      net::CookieSourceType::kOther);
   cookie_manager_->SetCanonicalCookie(
       *cookie, net::cookie_util::SimulatedCookieSource(*cookie, "https"),
       options,
@@ -148,13 +170,13 @@ class ProfileResetTest : public InProcessBrowserTest,
                          public ProfileResetterTestBase {
  protected:
   void SetUpOnMainThread() override {
-    resetter_ = std::make_unique<ProfileResetter>(browser()->profile());
+    resetter_ = std::make_unique<ProfileResetter>(browser()->GetProfile());
   }
 };
 
 
 IN_PROC_BROWSER_TEST_F(ProfileResetTest, ResetCookiesAndSiteData) {
-  RemoveCookieTester tester(browser()->profile());
+  RemoveCookieTester tester(browser()->GetProfile());
   tester.AddCookie(kCookieHostname, kCookieName, kCookieValue);
   net::CanonicalCookie cookie;
   ASSERT_TRUE(tester.GetCookie(kCookieHostname, &cookie));
@@ -165,5 +187,189 @@ IN_PROC_BROWSER_TEST_F(ProfileResetTest, ResetCookiesAndSiteData) {
 
   EXPECT_FALSE(tester.GetCookie(kCookieHostname, &cookie));
 }
+
+IN_PROC_BROWSER_TEST_F(
+    ProfileResetTest,
+    ResetContentSettingsRevokesActiveFileSystemAccessGrants) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  base::FilePath test_file;
+  ASSERT_TRUE(base::CreateTemporaryFileInDir(temp_dir.GetPath(), &test_file));
+
+  ASSERT_TRUE(embedded_test_server()->Start());
+  const GURL url = embedded_test_server()->GetURL("/title1.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  ui::SelectFileDialog::SetFactory(
+      std::make_unique<content::FakeSelectFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
+  content::WebContents* web_contents =
+      browser()->tab_strip_model()->GetActiveWebContents();
+  ASSERT_TRUE(content::ExecJs(
+      web_contents,
+      "(async () => { self.handle = await self.showSaveFilePicker(); })()"));
+  ui::SelectFileDialog::SetFactory(nullptr);
+
+  ChromeFileSystemAccessPermissionContext* permission_context =
+      FileSystemAccessPermissionContextFactory::GetForProfile(
+          browser()->GetProfile());
+  const url::Origin origin = url::Origin::Create(url);
+  ASSERT_TRUE(permission_context->OriginHasReadAccess(origin));
+  ASSERT_TRUE(permission_context->OriginHasWriteAccess(origin));
+
+  ResetAndWait(ProfileResetter::CONTENT_SETTINGS);
+
+  EXPECT_FALSE(permission_context->OriginHasReadAccess(origin));
+  EXPECT_FALSE(permission_context->OriginHasWriteAccess(origin));
+}
+
+// PinnedTabsResetTest --------------------------------------------------------
+
+class PinnedTabsResetTest : public InProcessBrowserTest,
+                            public ProfileResetterTestBase {
+ protected:
+  // InProcessBrowserTest:
+  void SetUpOnMainThread() override {
+    InProcessBrowserTest::SetUpOnMainThread();
+    resetter_ = std::make_unique<ProfileResetter>(browser()->GetProfile());
+  }
+
+  content::WebContents* AddTab(const GURL& url) {
+    ui_test_utils::NavigateToURLWithDisposition(
+        browser(), url, WindowOpenDisposition::NEW_FOREGROUND_TAB,
+        ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
+    return browser()->tab_strip_model()->GetActiveWebContents();
+  }
+};
+
+// TODO(434716727): The test is flaky on Mac machines.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_ResetPinnedTabs DISABLED_ResetPinnedTabs
+#else
+#define MAYBE_ResetPinnedTabs ResetPinnedTabs
+#endif
+IN_PROC_BROWSER_TEST_F(PinnedTabsResetTest, MAYBE_ResetPinnedTabs) {
+  TabStripModel* tab_strip_model = browser()->tab_strip_model();
+  const GURL kTestURLs[] = {GURL("https://example.com/0"),
+                            GURL("https://example.com/1"),
+                            GURL("https://example.com/2"),
+                            GURL("https://example.com/3"),
+                            GURL("https://example.com/4")};
+
+  // Start with one tab (about:blank). Navigating it.
+  content::WebContents* initial_contents = tab_strip_model->GetWebContentsAt(0);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), kTestURLs[0]));
+  initial_contents = tab_strip_model->GetWebContentsAt(0);
+
+  // Add 4 tabs
+  content::WebContents* tab_contents1 = AddTab(kTestURLs[1]);
+  content::WebContents* tab_contents2 = AddTab(kTestURLs[2]);
+  content::WebContents* tab_contents3 = AddTab(kTestURLs[3]);
+  content::WebContents* tab_contents4 = AddTab(kTestURLs[4]);
+
+  // Current order: initial, tab_contents1, tab_contents2, tab_contents3,
+  // tab_contents4
+
+  // Pin tab_contents2 and tab_contents1
+  tab_strip_model->SetTabPinned(
+      tab_strip_model->GetIndexOfWebContents(tab_contents2), true);
+  tab_strip_model->SetTabPinned(
+      tab_strip_model->GetIndexOfWebContents(tab_contents1), true);
+
+  // Expected order after pinning: tab_contents2, tab_contents1, initial,
+  // tab_contents3, tab_contents4
+  EXPECT_EQ(5, tab_strip_model->count());
+  EXPECT_EQ(tab_contents2, tab_strip_model->GetWebContentsAt(0));
+  EXPECT_EQ(tab_contents1, tab_strip_model->GetWebContentsAt(1));
+  EXPECT_EQ(initial_contents, tab_strip_model->GetWebContentsAt(2));
+  EXPECT_EQ(tab_contents3, tab_strip_model->GetWebContentsAt(3));
+  EXPECT_EQ(tab_contents4, tab_strip_model->GetWebContentsAt(4));
+  EXPECT_EQ(2, tab_strip_model->IndexOfFirstNonPinnedTab());
+
+  // Note: unpinning in the function below occurs in reverse order, because
+  // if we unpin the tab, it could be moved to the right, and traversing
+  // in left-to-right order would skip some pinned tabs.
+  ResetAndWait(ProfileResetter::PINNED_TABS);
+
+  // The order should be preserved, just all unpinned.
+  EXPECT_EQ(kTestURLs[2], tab_strip_model->GetWebContentsAt(0)->GetURL());
+  EXPECT_EQ(kTestURLs[1], tab_strip_model->GetWebContentsAt(1)->GetURL());
+  EXPECT_EQ(kTestURLs[0], tab_strip_model->GetWebContentsAt(2)->GetURL());
+  EXPECT_EQ(kTestURLs[3], tab_strip_model->GetWebContentsAt(3)->GetURL());
+  EXPECT_EQ(kTestURLs[4], tab_strip_model->GetWebContentsAt(4)->GetURL());
+
+  EXPECT_EQ(0, tab_strip_model->IndexOfFirstNonPinnedTab());
+}
+
+#if BUILDFLAG(IS_CHROMEOS)
+// Returns the configured static name servers from `shill_properties`, or an
+// empty vector if no static name servers are configured.
+std::vector<std::string> GetStaticNameServersFromShillProperties(
+    const base::DictValue& shill_properties) {
+  const base::DictValue* static_ip_config =
+      shill_properties.FindDict(shill::kStaticIPConfigProperty);
+  if (!static_ip_config) {
+    return {};
+  }
+  const base::ListValue* nameservers =
+      static_ip_config->FindList(shill::kNameServersProperty);
+  if (!nameservers) {
+    return {};
+  }
+  return base::ToVector(*nameservers, [](const base::Value& nameserver) {
+    return nameserver.GetString();
+  });
+}
+
+// DnsConfigResetTest --------------------------------------------------------
+
+class DnsConfigResetTest : public InProcessBrowserTest,
+                           public ProfileResetterTestBase {
+ protected:
+  void SetUpOnMainThread() override {
+    InProcessBrowserTest::SetUpOnMainThread();
+    resetter_ = std::make_unique<ProfileResetter>(browser()->GetProfile());
+  }
+};
+
+IN_PROC_BROWSER_TEST_F(DnsConfigResetTest, ResetDnsConfigurations) {
+  ash::ShillServiceClient::TestInterface* shill_service_client =
+      ash::ShillServiceClient::Get()->GetTestInterface();
+
+  // DNS settings.
+  // Set the profile so this shows up as a configured network.
+  const std::string kWifi1Path = "/service/wifi1";
+  ash::NetworkHandler::Get()
+      ->managed_network_configuration_handler()
+      ->SetPolicy(::onc::ONC_SOURCE_DEVICE_POLICY, std::string(),
+                  base::ListValue(), base::DictValue());
+  // Set a static NameServers config.
+  base::DictValue static_ip_config;
+  base::ListValue name_servers;
+  name_servers.Append("8.8.3.1");
+  name_servers.Append("8.8.2.1");
+  name_servers.Append("0.0.0.0");
+  name_servers.Append("0.0.0.0");
+  static_ip_config.Set(shill::kNameServersProperty, std::move(name_servers));
+  shill_service_client->SetServiceProperty(
+      kWifi1Path, shill::kStaticIPConfigProperty,
+      base::Value(std::move(static_ip_config)));
+
+  // Verify that network exists and the custom name server has been applied.
+  const base::DictValue* shill_properties =
+      shill_service_client->GetServiceProperties(kWifi1Path);
+  ASSERT_TRUE(shill_properties);
+  EXPECT_THAT(GetStaticNameServersFromShillProperties(*shill_properties),
+              testing::ElementsAre("8.8.3.1", "8.8.2.1", "0.0.0.0", "0.0.0.0"));
+
+  ResetAndWait(ProfileResetter::DNS_CONFIGURATIONS);
+
+  // Check DNS settings have changed to expected defaults.
+  // Verify that the given network has it's NameServers field cleared.
+  EXPECT_THAT(GetStaticNameServersFromShillProperties(*shill_properties),
+              testing::IsEmpty());
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace

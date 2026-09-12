@@ -6,70 +6,113 @@
 
 import argparse
 import re
-import xml.dom.minidom
+import sys
+import xml.etree.ElementTree as ET
 
-import extract_histograms
-import histogram_paths
-import histogram_configuration_model
-import merge_xml
+import setup_modules  # pylint: disable=unused-import
+
+import chromium_src.tools.metrics.common.utf8_encoding as utf8_encoding
+import chromium_src.tools.metrics.histograms.extract_histograms as extract_histograms
+import chromium_src.tools.metrics.histograms.histogram_configuration_model as histogram_configuration_model
+import chromium_src.tools.metrics.histograms.histogram_paths as histogram_paths
+import chromium_src.tools.metrics.histograms.merge_xml as merge_xml
 
 
-def ConstructHistogram(doc, name, histogram_dict):
+def _ConstructHistogram(name, histogram_dict):
   """Constructs a histogram node based on the |histogram_dict|."""
-  histogram = doc.createElement('histogram')
+  histogram = ET.Element('histogram')
   # Set histogram node attributes.
-  histogram.setAttribute('name', name)
-  if 'enum' in histogram_dict:
-    histogram.setAttribute('enum', histogram_dict['enum']['name'])
-  else:
-    histogram.setAttribute('units', histogram_dict['units'])
+  histogram.set('name', name)
+  if 'enumDetails' in histogram_dict:
+    histogram.set('enum', histogram_dict['enumDetails']['name'])
+  elif 'units' in histogram_dict:
+    histogram.set('units', histogram_dict['units'])
   if 'expires_after' in histogram_dict:
-    histogram.setAttribute('expires_after', histogram_dict['expires_after'])
-  if histogram_dict.get('base', False):
-    histogram.setAttribute('base', 'true')
-  # Populate the obsolete node.
-  if 'obsolete' in histogram_dict:
-    obsolete_node = doc.createElement('obsolete')
-    obsolete_node.appendChild(doc.createTextNode(histogram_dict['obsolete']))
-    histogram.appendChild(obsolete_node)
+    histogram.set('expires_after', histogram_dict['expires_after'])
   # Populate owner nodes.
   for owner in histogram_dict.get('owners', []):
-    owner_node = doc.createElement('owner')
-    owner_node.appendChild(doc.createTextNode(owner))
-    histogram.appendChild(owner_node)
-  # Populate the summary nodes.
-  if 'summary' in histogram_dict:
-    summary_node = doc.createElement('summary')
-    summary_node.appendChild(doc.createTextNode(histogram_dict['summary']))
-    histogram.appendChild(summary_node)
+    owner_node = ET.SubElement(histogram, 'owner')
+    owner_node.text = owner
+  # Populate the summary node - stored as description.
+  if 'description' in histogram_dict:
+    summary_node = ET.SubElement(histogram, 'summary')
+    summary_node.text = histogram_dict['description']
   return histogram
 
 
-def main(args):
-  # Extract all histograms into a dict.
-  doc = merge_xml.MergeFiles(filenames=histogram_paths.ALL_XMLS,
-                             should_expand_owners=True)
-  histograms, had_errors = extract_histograms.ExtractHistogramsFromDom(doc)
+def main(argv=sys.argv[1:]):
+  """Prints expanded histograms."""
+  parser = argparse.ArgumentParser(description='Print expanded histograms.')
+  parser.add_argument(
+    '--pattern',
+    type=str,
+    default='.*',
+    help='The histogram name regex for histograms to be printed.',
+  )
+  parser.add_argument(
+    '--print-names-only',
+    action='store_true',
+    help='If set, only prints the histogram names.',
+  )
+  parser.add_argument(
+    '--histograms-xml-file',
+    type=str,
+    default=None,
+    help=(
+      'Path to histograms.xml file. If omitted, all Chromium '
+      'histograms.xml files are processed.'
+    ),
+  )
+  args = parser.parse_args(argv)
+
+  utf8_encoding.setup_stdout_and_stderr_utf8_encoding()
+
+  try:
+    pattern = re.compile(args.pattern)
+  except re.error:
+    print('Non valid regex pattern.')
+    return 1
+
+  if args.histograms_xml_file:
+    files = [args.histograms_xml_file]
+    # If a file is provided, don't do expansion as the file may not
+    # be in Chromium.
+    expand_owners_and_extract_components = False
+  else:
+    files = histogram_paths.ALL_XMLS
+    # No owner expansion is needed if we're printing names only.
+    expand_owners_and_extract_components = not args.print_names_only
+
+  # Extract all histograms into a dict. This is the expensive part that
+  # handles expansion of suffixes and variants.
+  merged_root = merge_xml.MergeFiles(
+    filenames=files,
+    expand_owners_and_extract_components=expand_owners_and_extract_components,
+  )
+  histograms, had_errors = extract_histograms.ExtractHistogramsFromXmlET(
+    merged_root
+  )
   if had_errors:
-    raise ValueError("Error parsing inputs.")
-  # Construct a dom tree that is similar to the normal histograms.xml so that
-  # we can use histogram_configuration_model to pretty print it.
-  doc = xml.dom.minidom.Document()
-  configuration = doc.createElement('histogram-configuration')
-  histograms_node = doc.createElement('histograms')
-  for name, histogram in histograms.items():
-    if re.match(args.pattern, name):
-      histograms_node.appendChild(ConstructHistogram(doc, name, histogram))
-  configuration.appendChild(histograms_node)
-  doc.appendChild(configuration)
-  print(histogram_configuration_model.PrettifyTree(doc))
+    raise ValueError('Error parsing inputs.')
+
+  # If only names are requested, print them and exit. This is much faster as
+  # it skips the expensive XML construction and pretty-printing.
+  if args.print_names_only:
+    for name in sorted(histograms.keys()):
+      if re.match(pattern, name):
+        print(name)
+    return 0
+
+  # Construct an ElementTree tree that is similar to the normal histograms.xml
+  # so that we can use histogram_configuration_model to pretty print it.
+  root = ET.Element('histogram-configuration')
+  histograms_node = ET.SubElement(root, 'histograms')
+  for name, histogram in sorted(histograms.items()):
+    if re.match(pattern, name):
+      histograms_node.append(_ConstructHistogram(name, histogram))
+  print(histogram_configuration_model.PrettifyTree(root))
+  return 0
 
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser(description='Print expanded histograms.')
-  parser.add_argument('--pattern',
-                      type=str,
-                      default='*',
-                      help='The histogram regex you want to print.')
-  args = parser.parse_args()
-  main(args)
+  sys.exit(main())

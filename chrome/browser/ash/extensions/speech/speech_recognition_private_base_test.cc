@@ -13,7 +13,8 @@ const char kBasePath[] = "speech/speech_recognition_private/";
 namespace extensions {
 
 SpeechRecognitionPrivateBaseTest::SpeechRecognitionPrivateBaseTest()
-    : test_helper_(GetParam()) {}
+    : test_helper_(GetParam(), media::mojom::RecognizerClientType::kDictation) {
+}
 
 SpeechRecognitionPrivateBaseTest::~SpeechRecognitionPrivateBaseTest() = default;
 
@@ -29,7 +30,7 @@ void SpeechRecognitionPrivateBaseTest::SetUpCommandLine(
 }
 
 void SpeechRecognitionPrivateBaseTest::SetUpOnMainThread() {
-  test_helper_.SetUp(browser()->profile());
+  test_helper_.SetUp(browser()->GetProfile());
   ExtensionApiTest::SetUpOnMainThread();
 }
 

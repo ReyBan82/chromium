@@ -4,8 +4,11 @@
 
 #include "third_party/blink/renderer/bindings/core/v8/serialization/unpacked_serialized_script_value.h"
 
+#include <algorithm>
+
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value_factory.h"
+#include "third_party/blink/renderer/core/html/canvas/element_image.h"
 #include "third_party/blink/renderer/core/imagebitmap/image_bitmap.h"
 #include "third_party/blink/renderer/core/typed_arrays/array_buffer/array_buffer_contents.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
@@ -21,25 +24,38 @@ UnpackedSerializedScriptValue::UnpackedSerializedScriptValue(
   auto& array_buffer_contents = value_->array_buffer_contents_array_;
   if (!array_buffer_contents.empty()) {
     array_buffers_.Grow(array_buffer_contents.size());
-    std::transform(array_buffer_contents.begin(), array_buffer_contents.end(),
-                   array_buffers_.begin(),
-                   [](ArrayBufferContents& contents) -> DOMArrayBufferBase* {
-                     if (contents.IsShared())
-                       return DOMSharedArrayBuffer::Create(contents);
-                     return DOMArrayBuffer::Create(contents);
-                   });
+    std::ranges::transform(
+        array_buffer_contents, array_buffers_.begin(),
+        [](ArrayBufferContents& contents) {
+          return contents.IsShared()
+                     ? static_cast<DOMArrayBufferBase*>(
+                           DOMSharedArrayBuffer::Create(contents))
+                     : DOMArrayBuffer::Create(contents);
+        });
     array_buffer_contents.clear();
   }
 
   auto& image_bitmap_contents = value_->image_bitmap_contents_array_;
   if (!image_bitmap_contents.empty()) {
     image_bitmaps_.Grow(image_bitmap_contents.size());
-    std::transform(
-        image_bitmap_contents.begin(), image_bitmap_contents.end(),
-        image_bitmaps_.begin(), [](scoped_refptr<StaticBitmapImage>& contents) {
+    std::ranges::transform(
+        image_bitmap_contents, image_bitmaps_.begin(),
+        [](scoped_refptr<StaticBitmapImage>& contents) {
           return MakeGarbageCollected<ImageBitmap>(std::move(contents));
         });
     image_bitmap_contents.clear();
+  }
+
+  auto& element_image_contents = value_->element_image_contents_array_;
+  if (!element_image_contents.empty()) {
+    element_images_.Grow(element_image_contents.size());
+    std::ranges::transform(
+        element_image_contents, element_images_.begin(),
+        [](CanvasChildPaintRecord& contents) {
+          return MakeGarbageCollected<ElementImage>(
+              std::make_unique<CanvasChildPaintRecord>(std::move(contents)));
+        });
+    element_image_contents.clear();
   }
 }
 
@@ -48,6 +64,7 @@ UnpackedSerializedScriptValue::~UnpackedSerializedScriptValue() = default;
 void UnpackedSerializedScriptValue::Trace(Visitor* visitor) const {
   visitor->Trace(array_buffers_);
   visitor->Trace(image_bitmaps_);
+  visitor->Trace(element_images_);
 }
 
 v8::Local<v8::Value> UnpackedSerializedScriptValue::Deserialize(

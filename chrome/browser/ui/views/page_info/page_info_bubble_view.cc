@@ -6,44 +6,97 @@
 
 #include <memory>
 
+#include "chrome/browser/page_info/page_info_features.h"
 #include "chrome/browser/platform_util.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/page_info/chrome_page_info_delegate.h"
 #include "chrome/browser/ui/page_info/chrome_page_info_ui_delegate.h"
 #include "chrome/browser/ui/page_info/page_info_dialog.h"
 #include "chrome/browser/ui/views/bubble_anchor_util_views.h"
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/browser/ui/views/controls/page_switcher_view.h"
+#include "chrome/browser/ui/views/page_info/page_info_bubble_specification.h"
 #include "chrome/browser/ui/views/page_info/page_info_main_view.h"
+#include "chrome/browser/ui/views/page_info/page_info_merchant_trust_content_view.h"
+#include "chrome/browser/ui/views/page_info/page_info_merchant_trust_coordinator.h"
 #include "chrome/browser/ui/views/page_info/page_info_security_content_view.h"
 #include "chrome/browser/ui/views/page_info/page_info_view_factory.h"
 #include "components/dom_distiller/core/url_constants.h"
 #include "components/dom_distiller/core/url_utils.h"
 #include "components/page_info/core/features.h"
 #include "components/privacy_sandbox/privacy_sandbox_features.h"
-#include "components/strings/grit/components_chromium_strings.h"
+#include "components/strings/grit/components_branded_strings.h"
 #include "components/strings/grit/components_strings.h"
+#include "components/strings/grit/privacy_sandbox_strings.h"
 #include "content/public/common/url_constants.h"
-#include "extensions/common/constants.h"
+#include "extensions/buildflags/buildflags.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/layout/box_layout.h"
+#include "url/gurl.h"
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/browser/extensions/extension_ui_util.h"
+#include "extensions/common/constants.h"
+#endif
 
 using bubble_anchor_util::AnchorConfiguration;
 using bubble_anchor_util::GetPageInfoAnchorConfiguration;
 using bubble_anchor_util::GetPageInfoAnchorRect;
 
+namespace {
+
+bool IsExtensionPageInfoBubble(const GURL& url,
+                               content::WebContents* web_contents) {
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  // The chrome-extension:// scheme is checked unconditionally, not via
+  // `GetEnabledExtensionNameForUrl()`, because the latter returns empty for an
+  // extension that is not currently enabled (or not installed). Such URLs still
+  // reach this routing -- e.g. via tests that navigate to a synthetic extension
+  // URL, or via stale entries left after an extension is uninstalled -- and the
+  // regular `PageInfoBubbleView` is unsafe for them:
+  // `PageInfo::ComputeUIInputs()` DCHECKs on the chrome-extension scheme.
+  // https://source.chromium.org/chromium/chromium/src/+/main:components/page_info/page_info.cc;l=1043;drc=a37b1257f15512a39c54e6b651dc28be3a50e4c5
+  return url.SchemeIs(extensions::kExtensionScheme) ||
+         !extensions::ui_util::GetEnabledExtensionNameForUrl(url, *web_contents)
+              .empty();
+#else
+  return false;
+#endif
+}
+
+// Returns true if the page-info bubble for `(url, web_contents)` should route
+// to `InternalPageInfoBubbleView` (the minimal "Page Info" surface) rather than
+// the regular `PageInfoBubbleView` with site-info / security controls.
+//
+// Routes to the internal bubble for:
+//  - File / internal pages (chrome://, chrome-untrusted://, etc).
+//  - Enabled extension pages.
+//  - chrome-distiller:// reader-mode pages.
+//  - Top-level MIME-handler-rendered tabs.
+bool ShouldRouteToInternalBubble(const GURL& url,
+                                 content::WebContents* web_contents) {
+  if (PageInfo::IsFileOrInternalPage(url) ||
+      url.SchemeIs(dom_distiller::kDomDistillerScheme)) {
+    return true;
+  }
+  return IsExtensionPageInfoBubble(url, web_contents);
+}
+
+}  // namespace
+
 // The regular PageInfoBubbleView is not supported for internal Chrome pages and
 // extension pages. Instead of the |PageInfoBubbleView|, the
 // |InternalPageInfoBubbleView| is displayed.
 class InternalPageInfoBubbleView : public PageInfoBubbleViewBase {
+  METADATA_HEADER(InternalPageInfoBubbleView, PageInfoBubbleViewBase)
+
  public:
-  METADATA_HEADER(InternalPageInfoBubbleView);
-  // If |anchor_view| is nullptr, or has no Widget, |parent_window| may be
+  // If |anchor| is nullptr, or has no Widget, |parent_window| may be
   // provided to ensure this bubble is closed when the parent closes.
-  InternalPageInfoBubbleView(views::View* anchor_view,
+  InternalPageInfoBubbleView(views::BubbleAnchor anchor,
                              const gfx::Rect& anchor_rect,
                              gfx::NativeView parent_window,
                              content::WebContents* web_contents,
@@ -59,18 +112,18 @@ class InternalPageInfoBubbleView : public PageInfoBubbleViewBase {
 ////////////////////////////////////////////////////////////////////////////////
 
 InternalPageInfoBubbleView::InternalPageInfoBubbleView(
-    views::View* anchor_view,
+    views::BubbleAnchor anchor,
     const gfx::Rect& anchor_rect,
     gfx::NativeView parent_window,
     content::WebContents* web_contents,
     const GURL& url)
-    : PageInfoBubbleViewBase(anchor_view,
+    : PageInfoBubbleViewBase(anchor,
                              anchor_rect,
                              parent_window,
                              PageInfoBubbleViewBase::BUBBLE_INTERNAL_PAGE,
                              web_contents) {
   int text = IDS_PAGE_INFO_INTERNAL_PAGE;
-  if (url.SchemeIs(extensions::kExtensionScheme)) {
+  if (IsExtensionPageInfoBubble(url, web_contents)) {
     text = IDS_PAGE_INFO_EXTENSION_PAGE;
   } else if (url.SchemeIs(content::kViewSourceScheme)) {
     text = IDS_PAGE_INFO_VIEW_SOURCE_PAGE;
@@ -85,15 +138,15 @@ InternalPageInfoBubbleView::InternalPageInfoBubbleView(
     } else {
       text = IDS_PAGE_INFO_READER_MODE_PAGE;
     }
-  } else if (!url.SchemeIs(content::kChromeUIScheme)) {
-    NOTREACHED();
+  } else {
+    CHECK(url.SchemeIs(content::kChromeUIScheme));
   }
 
   // Title insets assume there is content (and thus have no bottom padding). Use
   // dialog insets to get the bottom margin back.
-  set_title_margins(
-      ChromeLayoutProvider::Get()->GetInsetsMetric(views::INSETS_DIALOG));
-  set_margins(gfx::Insets());
+  set_frame_margins({.contents = gfx::Insets(),
+                     .title = ChromeLayoutProvider::Get()->GetInsetsMetric(
+                         views::INSETS_DIALOG)});
 
   set_fixed_width(ChromeLayoutProvider::Get()->GetDistanceMetric(
       views::DISTANCE_BUBBLE_PREFERRED_WIDTH));
@@ -114,23 +167,28 @@ InternalPageInfoBubbleView::InternalPageInfoBubbleView(
   title_label->SetMultiLine(true);
   title_label->SetElideBehavior(gfx::NO_ELIDE);
 
+  // TODO(crbug.com/343325197) Remove this SizeToContents() once this bug is
+  // fixed.
   SizeToContents();
 }
 
 InternalPageInfoBubbleView::~InternalPageInfoBubbleView() = default;
 
-BEGIN_METADATA(InternalPageInfoBubbleView, PageInfoBubbleViewBase)
+BEGIN_METADATA(InternalPageInfoBubbleView)
 END_METADATA
 
 PageInfoBubbleView::PageInfoBubbleView(
-    views::View* anchor_view,
+    views::BubbleAnchor anchor,
     const gfx::Rect& anchor_rect,
     gfx::NativeView parent_window,
     content::WebContents* associated_web_contents,
     const GURL& url,
     base::OnceClosure initialized_callback,
-    PageInfoClosingCallback closing_callback)
-    : PageInfoBubbleViewBase(anchor_view,
+    PageInfoClosingCallback closing_callback,
+    bool allow_extended_site_info,
+    ChromePageInfoDelegate::GetBrowserCallback get_browser_callback,
+    base::RepeatingClosure open_extensions_menu_callback)
+    : PageInfoBubbleViewBase(anchor,
                              anchor_rect,
                              parent_window,
                              PageInfoBubbleViewBase::BUBBLE_PAGE_INFO,
@@ -140,31 +198,26 @@ PageInfoBubbleView::PageInfoBubbleView(
   DCHECK(web_contents());
   ChromeLayoutProvider* layout_provider = ChromeLayoutProvider::Get();
 
-  // In Harmony, the last view is a HoverButton, which overrides the bottom
-  // dialog inset in favor of its own. Note the multi-button value is used here
-  // assuming that the "Cookies" & "Site settings" buttons will always be shown.
-  const int bottom_margin =
-      layout_provider->GetDistanceMetric(DISTANCE_CONTENT_LIST_VERTICAL_MULTI);
+  // Only set the top margin. The bottom margin is set for each subpage
+  // separately, depending the content.
   const int top_margin =
       layout_provider->GetInsetsMetric(views::INSETS_DIALOG).top();
-  set_margins(gfx::Insets::TLBR(top_margin, 0, bottom_margin, 0));
+  set_margins(gfx::Insets().set_top(top_margin));
   ui_delegate_ =
       std::make_unique<ChromePageInfoUiDelegate>(web_contents(), url);
   presenter_ = std::make_unique<PageInfo>(
-      std::make_unique<ChromePageInfoDelegate>(web_contents()), web_contents(),
-      url);
-  if (base::FeatureList::IsEnabled(page_info::kPageInfoHistoryDesktop)) {
-    history_controller_ =
-        std::make_unique<PageInfoHistoryController>(web_contents(), url);
-  }
+      std::make_unique<ChromePageInfoDelegate>(web_contents(),
+                                               std::move(get_browser_callback)),
+      web_contents(), url);
   view_factory_ = std::make_unique<PageInfoViewFactory>(
-      presenter_.get(), ui_delegate_.get(), this, history_controller_.get());
+      presenter_.get(), ui_delegate_.get(), this, allow_extended_site_info,
+      std::move(open_extensions_menu_callback));
 
   SetShowTitle(false);
   SetShowCloseButton(false);
   // The title isn't visible, it is set for a11y purposes and the actual visible
   // title is a custom label in the content view.
-  SetTitle(presenter_->GetSiteNameOrAppNameToDisplay());
+  SetTitle(presenter_->GetSubjectNameForDisplay());
 
   SetLayoutManager(std::make_unique<views::BoxLayout>(
       views::BoxLayout::Orientation::kVertical));
@@ -174,33 +227,46 @@ PageInfoBubbleView::PageInfoBubbleView(
   page_container_ = AddChildView(
       std::make_unique<PageSwitcherView>(std::move(main_page_view)));
 
+  if (page_info::IsMerchantTrustFeatureEnabled()) {
+    merchant_trust_coordinator_ =
+        std::make_unique<PageInfoMerchantTrustCoordinator>(web_contents());
+  }
+
   views::BubbleDialogDelegateView::CreateBubble(this);
 }
 
-PageInfoBubbleView::~PageInfoBubbleView() = default;
+PageInfoBubbleView::~PageInfoBubbleView() {
+  page_container_ = nullptr;
+  RemoveAllChildViews();
+}
 
 // static
 views::BubbleDialogDelegateView* PageInfoBubbleView::CreatePageInfoBubble(
-    views::View* anchor_view,
-    const gfx::Rect& anchor_rect,
-    gfx::NativeWindow parent_window,
-    content::WebContents* web_contents,
-    const GURL& url,
-    base::OnceClosure initialized_callback,
-    PageInfoClosingCallback closing_callback) {
-  DCHECK(web_contents);
-  gfx::NativeView parent_view = platform_util::GetViewForWindow(parent_window);
+    std::unique_ptr<PageInfoBubbleSpecification> specification) {
+  views::BubbleAnchor const anchor = specification->anchor();
+  const gfx::Rect& anchor_rect = specification->anchor_rect();
+  content::WebContents* const web_contents = specification->web_contents();
 
-  if (PageInfo::IsFileOrInternalPage(url) ||
-      url.SchemeIs(extensions::kExtensionScheme) ||
-      url.SchemeIs(dom_distiller::kDomDistillerScheme)) {
-    return new InternalPageInfoBubbleView(anchor_view, anchor_rect, parent_view,
+  gfx::NativeView parent_view =
+      platform_util::GetViewForWindow(specification->parent_window());
+  const GURL& url = specification->url();
+
+  if (ShouldRouteToInternalBubble(url, web_contents)) {
+    return new InternalPageInfoBubbleView(anchor, anchor_rect, parent_view,
                                           web_contents, url);
   }
 
-  return new PageInfoBubbleView(
-      anchor_view, anchor_rect, parent_view, web_contents, url,
-      std::move(initialized_callback), std::move(closing_callback));
+  PageInfoBubbleView* const bubble = new PageInfoBubbleView(
+      anchor, anchor_rect, parent_view, web_contents, url,
+      specification->initialized_callback(),
+      specification->page_info_closing_callback(),
+      specification->show_extended_site_info(),
+      specification->get_browser_callback(),
+      specification->get_open_extensions_menu_callback());
+  if (specification->permission_page_type().has_value()) {
+    bubble->OpenPermissionPage(specification->permission_page_type().value());
+  }
+  return bubble;
 }
 
 void PageInfoBubbleView::OpenMainPage(base::OnceClosure initialized_callback) {
@@ -208,11 +274,15 @@ void PageInfoBubbleView::OpenMainPage(base::OnceClosure initialized_callback) {
       view_factory_->CreateMainPageView(std::move(initialized_callback));
   main_page_view->SetID(PageInfoViewFactory::VIEW_ID_PAGE_INFO_CURRENT_VIEW);
   page_container_->SwitchToPage(std::move(main_page_view));
+
+  auto* close_button = page_container_->GetViewByID(
+      PageInfoViewFactory::VIEW_ID_PAGE_INFO_CLOSE_BUTTON);
+  close_button->RequestFocus();
 }
 
 void PageInfoBubbleView::OpenSecurityPage() {
   presenter_->RecordPageInfoAction(
-      PageInfo::PageInfoAction::PAGE_INFO_SECURITY_DETAILS_OPENED);
+      page_info::PAGE_INFO_SECURITY_DETAILS_OPENED);
   std::unique_ptr<views::View> security_page_view =
       view_factory_->CreateSecurityPageView();
   security_page_view->SetID(
@@ -224,51 +294,39 @@ void PageInfoBubbleView::OpenSecurityPage() {
 
 void PageInfoBubbleView::OpenPermissionPage(ContentSettingsType type) {
   presenter_->RecordPageInfoAction(
-      PageInfo::PageInfoAction::PAGE_INFO_PERMISSION_DIALOG_OPENED);
+      page_info::PAGE_INFO_PERMISSION_DIALOG_OPENED);
   std::unique_ptr<views::View> permissions_page_view =
-      view_factory_->CreatePermissionPageView(type);
+      view_factory_->CreatePermissionPageView(type, web_contents());
   permissions_page_view->SetID(
       PageInfoViewFactory::VIEW_ID_PAGE_INFO_CURRENT_VIEW);
   page_container_->SwitchToPage(std::move(permissions_page_view));
   AnnouncePageOpened(PageInfoUI::PermissionTypeToUIString(type));
 }
 
-void PageInfoBubbleView::OpenAboutThisSitePage(
-    const page_info::proto::SiteInfo& info) {
-  presenter_->RecordPageInfoAction(
-      PageInfo::PageInfoAction::PAGE_INFO_ABOUT_THIS_SITE_PAGE_OPENED);
-  std::unique_ptr<views::View> about_this_site_page_view =
-      view_factory_->CreateAboutThisSitePageView(info);
-  about_this_site_page_view->SetID(
-      PageInfoViewFactory::VIEW_ID_PAGE_INFO_CURRENT_VIEW);
-  page_container_->SwitchToPage(std::move(about_this_site_page_view));
-  AnnouncePageOpened(
-      l10n_util::GetStringUTF16(IDS_PAGE_INFO_ABOUT_THIS_SITE_HEADER));
-}
-
-void PageInfoBubbleView::OpenAdPersonalizationPage() {
-  presenter_->RecordPageInfoAction(
-      PageInfo::PageInfoAction::PAGE_INFO_AD_PERSONALIZATION_PAGE_OPENED);
-  std::unique_ptr<views::View> ad_personalization_page_view =
-      view_factory_->CreateAdPersonalizationPageView();
-  ad_personalization_page_view->SetID(
-      PageInfoViewFactory::VIEW_ID_PAGE_INFO_CURRENT_VIEW);
-  page_container_->SwitchToPage(std::move(ad_personalization_page_view));
-  const auto header_id =
-      base::FeatureList::IsEnabled(privacy_sandbox::kPrivacySandboxSettings4)
-          ? IDS_PAGE_INFO_AD_PRIVACY_HEADER
-          : IDS_PAGE_INFO_AD_PERSONALIZATION_HEADER;
-  AnnouncePageOpened(l10n_util::GetStringUTF16(header_id));
-}
 
 void PageInfoBubbleView::OpenCookiesPage() {
-  presenter_->RecordPageInfoAction(
-      PageInfo::PageInfoAction::PAGE_INFO_COOKIES_PAGE_OPENED);
+  presenter_->OnCookiesPageOpened();
   std::unique_ptr<views::View> cookies_page_view =
       view_factory_->CreateCookiesPageView();
   cookies_page_view->SetID(PageInfoViewFactory::VIEW_ID_PAGE_INFO_CURRENT_VIEW);
   page_container_->SwitchToPage(std::move(cookies_page_view));
   AnnouncePageOpened(l10n_util::GetStringUTF16(IDS_PAGE_INFO_COOKIES));
+}
+
+void PageInfoBubbleView::OpenMerchantTrustPage() {
+  CHECK(merchant_trust_coordinator_);
+  auto title = l10n_util::GetStringUTF16(IDS_PAGE_INFO_MERCHANT_TRUST_HEADER);
+  auto page_content = merchant_trust_coordinator_->CreatePageContent();
+  // TODO(crbug.com/390370438): Remove this call after the presenter is
+  // refactored since merchant trust page doesn't implement any of the
+  // PageInfoUI methods.
+  presenter_->InitializeUiState(page_content.get(), base::DoNothing());
+  auto page_view =
+      view_factory_->CreatePageView(title, std::move(page_content));
+  page_view->SetID(PageInfoViewFactory::VIEW_ID_PAGE_INFO_CURRENT_VIEW);
+  page_container_->SwitchToPage(std::move(page_view));
+  AnnouncePageOpened(title);
+  merchant_trust_coordinator_->OnBubbleOpened();
 }
 
 void PageInfoBubbleView::CloseBubble() {
@@ -284,10 +342,10 @@ void PageInfoBubbleView::OnWidgetDestroying(views::Widget* widget) {
   PageInfoBubbleViewBase::OnWidgetDestroying(widget);
 
   // This method mostly shouldn't be re-entrant but there are a few cases where
-  // it can be (see crbug/966308). In that case, we have already run the closing
-  // callback so should not attempt to do it again. As there will always be a
-  // |closing_callback_|, this is also used to ensure that the |presenter_| is
-  // informed exactly once.
+  // it can be (see crbug.com/41460626). In that case, we have already run the
+  // closing callback so should not attempt to do it again. As there will always
+  // be a |closing_callback_|, this is also used to ensure that the |presenter_|
+  // is informed exactly once.
   if (closing_callback_) {
     bool reload_prompt;
     presenter_->OnUIClosing(&reload_prompt);
@@ -301,9 +359,10 @@ void PageInfoBubbleView::WebContentsDestroyed() {
   weak_factory_.InvalidateWeakPtrs();
 }
 
-gfx::Size PageInfoBubbleView::CalculatePreferredSize() const {
+gfx::Size PageInfoBubbleView::CalculatePreferredSize(
+    const views::SizeBounds& available_size) const {
   if (page_container_ == nullptr) {
-    return views::View::CalculatePreferredSize();
+    return views::View::CalculatePreferredSize(available_size);
   }
 
   int width = PageInfoViewFactory::kMinBubbleWidth;
@@ -311,24 +370,20 @@ gfx::Size PageInfoBubbleView::CalculatePreferredSize() const {
     width = std::max(width, page_container_->GetPreferredSize().width());
     width = std::min(width, PageInfoViewFactory::kMaxBubbleWidth);
   }
-  return gfx::Size(width, views::View::GetHeightForWidth(width));
+  return gfx::Size(width,
+                   GetLayoutManager()->GetPreferredHeightForWidth(this, width));
 }
 
 void PageInfoBubbleView::ChildPreferredSizeChanged(views::View* child) {
-  Layout();
+  // TODO(crbug.com/343325197) Remove this SizeToContents() once this bug is
+  // fixed.
   SizeToContents();
 }
 
 void PageInfoBubbleView::AnnouncePageOpened(std::u16string announcement) {
   // Announce that the subpage was opened to inform the user about the changes
   // in the UI.
-#if BUILDFLAG(IS_MAC)
-  GetViewAccessibility().OverrideRole(ax::mojom::Role::kAlert);
-  GetViewAccessibility().OverrideName(announcement);
-  NotifyAccessibilityEvent(ax::mojom::Event::kAlert, true);
-#else
   GetViewAccessibility().AnnounceText(announcement);
-#endif
 
   // Focus the back button by default to ensure that focus is set when new
   // content is displayed.
@@ -337,24 +392,38 @@ void PageInfoBubbleView::AnnouncePageOpened(std::u16string announcement) {
   back_button->RequestFocus();
 }
 
-void ShowPageInfoDialogImpl(Browser* browser,
+void ShowPageInfoDialogImpl(BrowserWindowInterface* browser,
                             content::WebContents* web_contents,
                             const GURL& virtual_url,
                             bubble_anchor_util::Anchor anchor,
                             base::OnceClosure initialized_callback,
-                            PageInfoClosingCallback closing_callback) {
+                            PageInfoClosingCallback closing_callback,
+                            std::optional<ContentSettingsType> type) {
   AnchorConfiguration configuration =
       GetPageInfoAnchorConfiguration(browser, anchor);
-  gfx::Rect anchor_rect =
-      configuration.anchor_view ? gfx::Rect() : GetPageInfoAnchorRect(browser);
-  gfx::NativeWindow parent_window = browser->window()->GetNativeWindow();
-  DCHECK(web_contents);
-  views::BubbleDialogDelegateView* bubble =
+  gfx::Rect anchor_rect = configuration.anchor.IsNull()
+                              ? GetPageInfoAnchorRect(browser)
+                              : gfx::Rect();
+  gfx::NativeWindow parent_window = browser->GetWindow()->GetNativeWindow();
+
+  PageInfoBubbleSpecification::Builder page_info_bubble_builder(
+      configuration.anchor, parent_window, web_contents, virtual_url);
+  page_info_bubble_builder.AddAnchorRect(anchor_rect)
+      .AddInitializedCallback(std::move(initialized_callback))
+      .AddPageInfoClosingCallback(std::move(closing_callback));
+  if (type.has_value()) {
+    page_info_bubble_builder.ShowPermissionPage(type.value());
+  }
+
+  views::BubbleDialogDelegateView* const bubble =
       PageInfoBubbleView::CreatePageInfoBubble(
-          configuration.anchor_view, anchor_rect, parent_window, web_contents,
-          virtual_url, std::move(initialized_callback),
-          std::move(closing_callback));
-  bubble->SetHighlightedButton(configuration.highlighted_button);
+          page_info_bubble_builder.Build());
+  if (configuration.highlighted_element) {
+    bubble->SetHighlightedElement(*configuration.highlighted_element);
+  }
   bubble->SetArrow(configuration.bubble_arrow);
   bubble->GetWidget()->Show();
 }
+
+BEGIN_METADATA(PageInfoBubbleView)
+END_METADATA

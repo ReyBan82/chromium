@@ -27,6 +27,7 @@ function GuestViewContainer(element, viewType) {
   this.setupGuestProperty();
   this.guest = new GuestView(viewType);
   this.setupAttributes();
+  this.setupEvents();
 
   this.internalElement = this.createInternalElement();
   this.shadowRoot = $Element.attachShadow(this.element, {mode: 'closed'});
@@ -89,9 +90,15 @@ GuestViewContainer.prototype.prepareForReattach = function() {
 };
 
 GuestViewContainer.prototype.focus = function() {
+  if (!$Element.checkVisibility(this.internalElement)) {
+    console.warn(
+        '<webview>.focus() might be ineffective because ' +
+        'the <webview> is not visible.');
+  }
+
   // Focus the internal element when focus() is called on the GuestView element.
   $HTMLElement.focus(this.internalElement);
-}
+};
 
 GuestViewContainer.prototype.attachWindow = function() {
   var generatedId = IdGenerator.GetNextId();
@@ -110,22 +117,12 @@ GuestViewContainer.prototype.onInternalInstanceId = function(
   this.internalInstanceId = internalInstanceId;
   this.makeGCOwnContainer(this.internalInstanceId);
 
-  // Track when the element resizes using the element resize callback.
-  GuestViewInternalNatives.RegisterElementResizeCallback(
-      this.internalInstanceId, this.weakWrapper(this.onElementResize));
-
   if (!this.guest.getId()) {
     return;
   }
   this.guest.attach(this.internalInstanceId,
                     this.viewInstanceId,
                     this.buildParams());
-};
-
-GuestViewContainer.prototype.onElementResize = function(newWidth, newHeight) {
-  if (!this.guest.getId())
-    return;
-  this.guest.setSize({normal: {width: newWidth, height: newHeight}});
 };
 
 GuestViewContainer.prototype.buildParams = function() {
@@ -174,6 +171,7 @@ GuestViewContainer.prototype.buildContainerParams = function() {
 GuestViewContainer.prototype.onElementAttached = function() {};
 GuestViewContainer.prototype.onElementDetached = function() {};
 GuestViewContainer.prototype.setupAttributes = function() {};
+GuestViewContainer.prototype.setupEvents = function() {};
 
 // Exports.
 exports.$set('GuestViewContainer', GuestViewContainer);

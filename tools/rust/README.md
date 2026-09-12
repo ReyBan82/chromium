@@ -18,202 +18,172 @@ It would not be reasonable to build the tooling for every Chromium build, so we
 build it centrally (with the scripts here) and distribute it for all to use
 (also fetched with the scripts here).
 
+Similar to the Clang package which exists as a tarball that is unpacked into
+`third_party/llvm-build`, the Rust package exists as a tarball that is unpacked
+into `third_party/rust-toolchain`.
 
 ## Rust build overview
 
-Each Rust package is built from an official Rust nightly source release and a
-corresponding LLVM revision. Hence a new Rust package must be built whenever
-either Rust or Clang is updated.
+Each Rust package is built from an Rust git, usually from HEAD directly, along
+with the current Clang/LLVM revision in use in Chromium. Hence a new Rust
+package must be built whenever either Rust or Clang is updated. When building
+Rust we also build additional tools such as clippy and rustfmt, and interop
+tools including bindgen and crubit.
 
-Chromium's Clang build process leaves behind several artifacts needed for the
-Rust build. Each Rust build begins after a Clang build and uses these artifacts,
-which include `clang`, LLVM libraries, etc.
+The Rust build also includes building LLVM for rustc to use, and Clang for
+bindgen and crubit to use.
 
-A special CI job is used to build Clang and Rust from the revisions specified in
-the Chromium source tree. These are uploaded to a storage bucket. After being
-manually blessed by a developer, they can then be fetched by Chromium checkouts.
+The `*_upload_clang` and `*_upload_rust` trybots are used to build Clang and
+Rust respectively from the revisions specified in the Chromium source tree.
+These are uploaded to a storage bucket when the build succeeds. After being
+copied from staging to production by a developer (see
+[cs/copy_staging_to_prod_and_goma.sh](
+http://cs/copy_staging_to_prod_and_goma.sh)), they can then be fetched by
+`gclient sync`.
 
-Scripts are provided in tree to fetch the packages for the specified revisions.
+The `update_rust.py` script is used by `gclient sync` to fetch the Rust
+toolchain for the revisions specified in the script.
 
-Whenever a Chromium checkout is updated, `gclient` hooks will update the
-toolchain packages to match the revisions listed in tree.
+## Rolling Rust
 
+Follow the directions in [//docs/updating_clang.md](
+../../docs/updating_clang.md) to roll Clang and Rust together. To just
+roll Rust on its own, use the `--skip-clang` argument when running
+`upload_revision.py`.
 
-## Updating Rust
+The upload_revision.py script will update the revision of Rust to be
+built and used in `update_rust.py` and will start the trybots that
+will build the Rust toolchain.
 
-### Set the revision
+After the build has succeeded and the new toolchain has been copied to
+production, the CQ will run trybots to verify that our code still builds
+and tests pass with the new Rust toolchain.
 
-First, pick a new instance of the [CIPD `rust_src`
-package](https://chrome-infra-packages.appspot.com/p/chromium/third_party/rust_src/+/).
-Click it and copy the version ID (e.g. `version:2@2022-01-01`) to the `//DEPS` entry for
-`src/third_party/rust_src/src`. For example (though don't change the other parts
-of the entry):
+### An overview of what is updated in a Rust roll
 
+During Rust packaging, the upstream Rust sources are checked out into
+`third_party/rust-src`.
+
+During a Rust roll, a couple of things get updated. The most obvious one is
+various toolchain binaries like `rustc` that live in
+`third_party/rust-toolchain/bin`. These are the direct outputs of a Rust
+toolchain build.
+
+We also update the Rust standard library. We actually provide two copies of the
+standard library in Chromium: a prebuilt version only for use in host tools
+(e.g. build scripts, proc macros), and a version built from source as part of
+the normal Chromium build for use in target artifacts. These are the same
+version of the standard library that the Rust toolchain revision provides.
+
+The reason we have a prebuilt version of the standard library for use in host
+tools is that they are often loaded into `rustc` as a module, so to be safe we
+use the same prebuilts that the toolchain linked against. These are copied from
+the Rust toolchain build to
+`third_party/rust-toolchain/lib/rustlib/$PLATFORM/lib/*.rlib`. We use these
+when the gn arg `rust_prebuilt_stdlib` is true, which is manually set to true
+for gn host toolchains.
+
+The sources of the standard library we build from source for target artifacts
+live in `third_party/rust-toolchain/lib/rustlib/src/rust`. These are copied
+from `third_party/rust-src`. Since Chromium uses gn as its build system, we
+need some way to translate build files from Rust's build system, cargo, to gn
+rules. This is the responsibility of `gnrt`, which is a Chromium-specific tool
+that lives in [`tools/crates/gnrt`](https://crsrc.org/c/tools/crates/gnrt/),
+written in Rust. `gnrt gen` takes a cargo workspace, runs `cargo metadata`
+(or, more accurately `cargo guppy`) on
+it to get information about sources and dependencies, and outputs gn rules
+corresponding to the cargo build rules. Rust has a
+[`sysroot`](https://github.com/rust-lang/rust/tree/master/library/sysroot)
+crate roughly corresponding to a top level cargo workspace we want for the
+standard library. However, we want a couple of customizations without having to
+patch the Rust sources, so we have another crate
+[`fake_root`](https://crsrc.org/c/build/rust/std/fake_root/) above that depends
+on `sysroot`.
+[`tools/rust/gnrt_stdlib.py`](https://crsrc.org/c/tools/rust/gnrt_stdlib.py)
+fetches and invokes the pinned `cargo` (see [`rustc` bootstrapping
+explanation](https://rustc-dev-guide.rust-lang.org/building/bootstrapping/what-bootstrapping-does.html),
+"pinned" is the "stage0" toolchain) to build and run `gnrt` with `fake_root` as
+the base workspace, generating an updated
+[`build/rust/std/rules/BUILD.gn`](https://crsrc.org/c/build/rust/std/rules/BUILD.gn)
+that has gn rules for the new standard library sources. For convenience when
+rolling Rust, this is one big `BUILD.gn` file as opposed to multiple files per
+crate. Note that because we do not ship cargo build files in
+`third_party/rust-toolchain`, we must run `gnrt` against `third_party/rust-src`
+instead of `third_party/rust-toolchain`. But end users do not have
+`third_party/rust-src` checked out, so we must rewrite the
+`third_party/rust-src` paths to the copies of the sources in
+`third_party/rust-toolchain/lib/rustlib/src/rust`, which is checked out by end
+users as part of the Rust toolchain.
+
+As an aside, `gnrt` is also used to generate gn build rules for
+non-standard-library Rust packages in `third_party/rust` used in Chromium's
+build. It uses
+[`third_party/rust/chromium_crates_io`](https://crsrc.org/c/third_party/rust/chromium_crates_io)
+as the base workspace and vendors sources into
+`third_party/rust/chromium_crates_io/vendor`. The `--for-std` argument to `gnrt
+gen` does different things for creating gn rules for the standard library
+versus for various non-standard-library packages, such as producing a single
+BUILD.gn file.
+
+### Possible failure: Missing sources or inputs
+
+A build error when building the stdlib in Chromium may look like:
 ```
-  'src/third_party/rust_src/src': {
-    'packages': [
-      {
-        'package': 'chromium/third_party/rust_src',
-        'version': 'version:2@2022-01-01',
-      },
-    ],
-    'dep_type': 'cipd',
-    'condition': 'checkout_rust_toolchain_deps or use_rust',
-  },
-```
-
-Similarly, update the `RUST_REVISION` named in `//tools/rust/update_rust.py`,
-removing dashes from the date (e.g. `version:2@2022-01-01` becomes
-`RUST_REVISION = '20220101'`). Reset `RUST_SUB_REVISION = 1`.
-
-Run the following to check for changes to Rust's `src/stage0.json`, which
-contains revisions of upstream binaries to be fetched and used in the Rust
-build:
-
-```
-tools/rust/build_rust.py --verify-stage0-hash
-```
-
-If it exists without printing anything, the stage0 hash is up-to-date and
-nothing needs to be done. Otherwise, it will print the actual hash like so:
-
-```
-...
-Actual hash:   6b1c61d494ad447f41c8ae3b9b3239626eecac00e0f0b793b844e0761133dc37
-...
-```
-
-...in which case you should check the `stage0.json` changes for trustworthiness
-(criteria TBD) and then update `STAGE0_JSON_SHA256` in update_rust.py with the
-new hash. Re-run the above and confirm it succeeds.
-
-
-### Optional: build locally and run tests
-
-This step is not strictly necessary since the CI tooling will catch any errors.
-But the CI build process is slow and this can save some time.
-
-To fetch the new Rust sources, and avoid errors during `gclient sync`:
-1. Ensure your `.gclient` file has `checkout_rust_toolchain_deps` set to `True`,
-but avoid setting `use_rust` to `True`. The latter will try to download the
-compiled rustc but as you've just updated the version there is no compiled rustc
-to download so it will fail.
-1. Additionally, to aid in testing, turn off rust support in GN, with
-`enable_rust = false`, since it requires the presence of a Rust toolchain, but
-building the toolchain destroys your local toolchain until the build succeeds.
-
-Running this will do a full build and provide a local toolchain that works for
-the host machine, albeit not the same as the CI-provided one:
-
-```
-tools/rust/build_rust.py --fetch-llvm-libs --use-final-llvm-build-dir
-```
-
-To do a full build, first build Clang locally (TODO: provide instructions) then
-simply run `tools/rust/build_rust.py` with no arguments.
-
-However, for most cases simply doing
-
-```
-tools/rust/build_rust.py --fetch-llvm-libs --use-final-llvm-build-dir --run-xpy -- build --stage 1 library/std
-```
-
-will catch most errors and will be fast.
-
-### Upload CL
-
-Run `tools/clang/scripts/upload_revision.py` to roll Clang and Rust to the
-latest revision. It will update `//DEPS` and `/tools/rust/update_rust.py` with
-new Rust version info, upload a CL to gerrit, and start tryjobs to build the
-toolchain.
-
-See [//docs/updating_clang.md](../../docs/updating_clang.md) for more info
-on to roll Clang and Rust.
-
-To roll Rust only, (make sure you are synced to HEAD and) pass the current Clang
-version to `tools/clang/scripts/upload_revision.py`, as:
-```
-tools/clang/scripts/upload_revision.py --clang-git-hash HASH --clang-sub-revision SUBREV
+FAILED: local_rustc_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd.rlib
+...build command...
+ERROR: Rust source file or input not in GN sources: ../../third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/../../portable-simd/crates/std_float/src/lib.rs
 ```
 
-The `HASH` and `SUBREV` can be found from:
+Or:
 ```
-# HASH
-grep ^CLANG_REVISION tools/clang/scripts/update.py | sed -E 's/.*-g([0-9a-z]+).*/\1/'
-# SUBREV
-grep ^CLANG_SUB_REVISION tools/clang/scripts/update.py | sed -E 's/.*([0-9a-z]+).*/\1/'
-```
-
-If you want to use an older version of Rust, use `cipd` to find the version
-you want to use.
-
-To find all instances of the Rust toolchain sources available:
-```
-cipd instances chromium/third_party/rust_src
+FAILED: local_rustc_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd.rlib
+...build command...
+ERROR: Rust source file or input not in GN inputs: ../../third_party/rust-toolchain/lib/rustlib/src/rust/library/std/src/../../stdarch/crates/core_arch/src/core_arch_docs.md
 ```
 
-This will output something like:
-```
-Instance ID                                  │ Timestamp             │ Uploader                  │ Refs
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-6fLkoaoLWCFzVUlkhDevcLHj18bTXF5DxSCQTtNTJaMC │ Dec 15 06:16 EST 2022 │ chromium-cipd-builder@... │ latest
-ohKW73PweFtV25O9vCbRzZoF1nxHGfurbLc0NWV2io8C │ Dec 14 06:13 EST 2022 │ chromium-cipd-builder@... │
-J6zeUMnPfukyu5fo0NFdAH6w9HEDyJzo1D0YhrP15bcC │ Dec 13 06:10 EST 2022 │ chromium-cipd-builder@... │
-pd-8U_6sH8y0dUwfFNUqKcu9GkMYnZmE2e6dOVG7ONUC │ Dec 12 06:12 EST 2022 │ chromium-cipd-builder@... │
-```
+How to fix such errors is described in
+[`//docs/rust/build_errors_guide.md`](../../docs/rust/build_errors_guide.md)
+(search for "Rust source file or input not in GN inputs").
+Note that regenerating `BUILD.gn` for Rust standard library requires a slightly
+different `gnrt` invocation - you should use the `tools/rust/gnrt_stdlib.py`
+script.
 
-From here, you may get the version info for an intance with:
-```
-cipd describe chromium/third_party/rust_src -version INSTANCE_ID
-```
+### Generating `BUILD.gn` files for stdlib crates
 
-With `INSTANCE_ID` as `ohKW73PweFtV25O9vCbRzZoF1nxHGfurbLc0NWV2io8C`, the
-describe output looks something like:
-```
-Package:       chromium/third_party/rust_src
-Instance ID:   ohKW73PweFtV25O9vCbRzZoF1nxHGfurbLc0NWV2io8C
-Tags:
-  version:2@2022-12-14
-```
+If the build structure changes in any way during a roll, the GN files need
+to be regenerated.
 
-The Rust toolchain version is what comes after `version:` in the tags. In this
-case, it would be `2@2022-12-14`.
+#### Simple way:
 
-Then, pass this version to `tools/clang/scripts/upload_revision.py` as in:
-```
-tools/clang/scripts/upload_revision.py --rust-cipd-version 2@2022-12-14
-```
+Run `tools/rust/gnrt_stdlib.py`.
 
-This will generate a patch and upload it to Gerrit with the specified Rust
-toolchain version.
+#### Longer way
 
-### Verify that Rust compiled
+This requires Rust to be installed and available in your system, typically
+through [https://rustup.rs](https://rustup.rs).
 
-The `tools/clang/scripts/upload_revision.py` starts builders that will compile
-Clang and Rust. At this time, the builders succeed **even if Rust failed**. To
-see if Rust did compile, check the build page (e.g.
-https://ci.chromium.org/ui/p/chromium/builders/try/linux_upload_clang/2611/overview)
-and confirm the "package rust" step succeeded. If it did not, further
-investigation is needed.
+To generate `BUILD.gn` files for the crates with the `gnrt` tool:
+1. Change directory to the root `src/` dir of Chromium.
+1. Build `gnrt` to run on host machine: `cargo build --release --manifest-path
+   tools/crates/gnrt/Cargo.toml --target-dir out/gnrt`.
+1. Ensure you have a checkout of the Rust source tree in `third_party/rust-src`
+   which can be done with `tools/rust/build_rust.py --sync-for-gnrt`.
+1. Run `gnrt` with the `gen` action:
+   `out/gnrt/release/gnrt gen --for-std third_party/rust-src`.
 
-### Upload to production
+This will generate the `//build/rust/std/rules/BUILD.gn` file, with the changes
+visible in `git status` and can be added with `git add`.
 
-After the package is built, a developer with permissions must copy the uploaded
-(Clang and) Rust packages from staging to production, in order for `gclient
-sync` to find them. This must be done before submitting the CL or it will break
-`gclient sync` for all Rust users. As of writing, anyone in [Clang
-OWNERS](/tools/clang/scripts/OWNERS) or collinbaker@chromium.org can perform
-this task.
+## Local development
 
-### Submit CL
+To build the Rust toolchain locally, run `//tools/rust/build_rust.py`. It
+has additional flags to skip steps if you're making local changes and want
+to retry a build. The script will produce its outputs in
+`//third_party/rust-toolchain/`, which is the same place that `gclient sync`
+places them.
 
-Once the package has been uploaded to production (see above), it is ready to be
-fetched from any Chromium checkout.
-
-Submit the CL. CQ tryjobs will use the specified toolchain package
-version. Any build failures will need to be investigated, as these indicate
-breaking changes to Rust.
-
+Building the `rust_build_tests` GN target is a good way to quickly verify the
+toolchain is working.
 
 ## Rolling Crubit tools
 
@@ -229,22 +199,13 @@ to a new version:
 
 - Run manual tests locally (see the "Building and testing the tools locally"
   section below).
-  TODO(https://crbug.com/1329611): These manual steps should
+  TODO(crbug.com/40226863): These manual steps should
   be made obsolete once Rust-specific tryjobs cover Crubit
   tests.
 
-
-## Building and testing the tools locally
+## Building and testing Crubit locally
 
 ### Prerequisites
-
-#### LLVM/Clang build
-
-`build_crubit.py` depends on having a locally-built LLVM/Clang:
-`tools/clang/scripts/build.py --bootstrap --without-android --without-fuchsia`.
-Among other things this prerequisite is required to generate
-`third_party/llvm-bootstrap-install` where `build_crubit.py` will look for
-LLVM/Clang libs and headers).
 
 #### Bazel
 
@@ -262,24 +223,18 @@ solutions = [
     ...
     "custom_vars": {
       "checkout_bazel": True,
-      "use_rust": True,
+      "checkout_crubit": True,
     },
   },
 ]
 ```
 
-#### Supported host platforms
-
-So far `build_crubit.py` has only been tested on Linux hosts.
-
 ### Building
 
-Just run `tools/rust/build_rust.py` or `tools/rust/build_crubit.py`.
+Just run `tools/rust/build_crubit.py`. So far `build_crubit.py` has only been
+tested on Linux hosts.
 
 ### Deploying
-
-`build_rust.py` by default copies the newly build executables/binaries into
-`//third_party/rust-toolchain`.
 
 `build_crubit.py` will copy files into the directory specified in the
 (optional) `--install-to` cmdline parameter - for example:
@@ -290,29 +245,8 @@ $ tools/rust/build_crubit.py --install-to=third_party/rust-toolchain/bin/
 
 ### Testing
 
-Ensure that `args.gn` contains `enable_rust = true` and then build
-`//build/rust/tests` directory - e.g. `ninja -C out/rust build/rust/tests`.
-
-Native Rust tests from `//build/rust` can be run via
-`out/rust/bin/run_build_rust_tests`.
-
 Crubit tests are under `//build/rust/tests/test_rs_bindings_from_cc`.  Until
 Crubit is built on the bots, the tests are commented out in
 `//build/rust/tests/BUILD.gn`, but they should still be built and run before
-rolling Crubit.  TODO(https://crbug.com/1329611): Rephrase this paragraph
+rolling Crubit.  TODO(crbug.com/40226863): Rephrase this paragraph
 after Crubit is built and tested on the bots.
-
-## Possible Failures
-
-### Missing dependencies
-
-`build_rust.py` will vendor all dependencies before starting the build. To do
-this it first initializes git submodules. Then it runs `cargo vendor`. However
-some parts of the compiler build are excluded from the top level Cargo.toml
-workspace. Thus it passes `--sync dir` for a number of subdirectories, based
-on [dist.rs, the nightly tarball packager](
-https://github.com/rust-lang/rust/blob/master/src/bootstrap/dist.rs#L986-L995).
-
-If another Cargo.toml is required in the future, and not part of the workspace
-it would produce missing dependencies, and the set of directories in
-`build_rust.py` would need to be updated.

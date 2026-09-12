@@ -10,12 +10,14 @@
 
 #include "base/check.h"
 #include "base/fuchsia/fuchsia_logging.h"
+#include "base/run_loop.h"
 #include "fuchsia_web/common/test/fake_feedback_service.h"
 #include "fuchsia_web/common/test/test_realm_support.h"
 
 namespace {
 
-::component_testing::RealmRoot BuildRealm(base::CommandLine command_line) {
+::component_testing::RealmBuilder MakeRealmBuilder(
+    base::CommandLine command_line) {
   DCHECK(command_line.argv()[0].empty()) << "Must use NO_PROGRAM.";
 
   auto realm_builder = ::component_testing::RealmBuilder::Create();
@@ -23,9 +25,9 @@ namespace {
   static constexpr char kContextProviderService[] = "context_provider";
   realm_builder.AddChild(kContextProviderService, "#meta/context_provider.cm");
 
-  constexpr char const* kSwitchesToCopy[] = {"ozone-platform"};
+  static constexpr char const* kSwitchesToCopy[] = {"ozone-platform"};
   command_line.CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(),
-                                kSwitchesToCopy, std::size(kSwitchesToCopy));
+                                kSwitchesToCopy);
 
   test::AppendCommandLineArguments(realm_builder, kContextProviderService,
                                    command_line);
@@ -37,9 +39,32 @@ namespace {
 
   realm_builder
       .AddRoute(::component_testing::Route{
-          .capabilities = {::component_testing::Protocol{
-                               "fuchsia.sys.Environment"},
-                           ::component_testing::Protocol{"fuchsia.sys.Loader"}},
+          .capabilities =
+              {// Capabilities used/routed by WebInstanceHost:
+               ::component_testing::Directory{"config-data-for-web-instance"},
+               ::component_testing::Directory{"tzdata-icu"},
+               // Required capabilities offered to web-instance.cm:
+               ::component_testing::Directory{"root-ssl-certificates"},
+               ::component_testing::Protocol{"fuchsia.buildinfo.Provider"},
+               ::component_testing::Protocol{"fuchsia.device.NameProvider"},
+               ::component_testing::Protocol{"fuchsia.fonts.Provider"},
+               ::component_testing::Protocol{"fuchsia.hwinfo.Product"},
+               ::component_testing::Protocol{"fuchsia.intl.PropertyProvider"},
+               ::component_testing::Protocol{"fuchsia.kernel.VmexResource"},
+               ::component_testing::Dictionary{"diagnostics"},
+               ::component_testing::Protocol{"fuchsia.memorypressure.Provider"},
+               ::component_testing::Protocol{"fuchsia.process.Launcher"},
+               ::component_testing::Protocol{"fuchsia.sysmem.Allocator"},
+               ::component_testing::Protocol{"fuchsia.sysmem2.Allocator"},
+               // Optional capabilities offered to web-instance.cm:
+               ::component_testing::Protocol{"fuchsia.camera3.DeviceWatcher"},
+               ::component_testing::Protocol{"fuchsia.media.ProfileProvider"},
+               ::component_testing::Protocol{"fuchsia.scheduler.RoleManager"},
+               ::component_testing::Protocol{"fuchsia.settings.Display"},
+               ::component_testing::Protocol{
+                   "fuchsia.tracing.perfetto.ProducerConnector"},
+               ::component_testing::Protocol{
+                   "fuchsia.tracing.provider.Registry"}},
           .source = ::component_testing::ParentRef{},
           .targets = {::component_testing::ChildRef{kContextProviderService}}})
       .AddRoute(::component_testing::Route{
@@ -49,7 +74,7 @@ namespace {
           .source = ::component_testing::ChildRef{kContextProviderService},
           .targets = {::component_testing::ParentRef{}}});
 
-  return realm_builder.Build();
+  return realm_builder;
 }
 
 }  // namespace
@@ -57,10 +82,12 @@ namespace {
 // static
 ContextProviderForTest ContextProviderForTest::Create(
     const base::CommandLine& command_line) {
-  auto realm_root = BuildRealm(command_line);
+  auto realm_builder = MakeRealmBuilder(command_line);
+  auto realm_root =
+      std::make_unique<test::TestRealmRoot>(std::move(realm_builder));
   ::fuchsia::web::ContextProviderPtr context_provider;
   zx_status_t status =
-      realm_root.component().Connect(context_provider.NewRequest());
+      (*realm_root)->component().Connect(context_provider.NewRequest());
   ZX_CHECK(status == ZX_OK, status) << "Connect to ContextProvider";
   return ContextProviderForTest(std::move(realm_root),
                                 std::move(context_provider));
@@ -70,10 +97,13 @@ ContextProviderForTest::ContextProviderForTest(
     ContextProviderForTest&&) noexcept = default;
 ContextProviderForTest& ContextProviderForTest::operator=(
     ContextProviderForTest&&) noexcept = default;
-ContextProviderForTest::~ContextProviderForTest() = default;
+ContextProviderForTest::~ContextProviderForTest() {
+  // We're about to shut down the realm; unbind to unhook the error handler.
+  context_provider_.Unbind();
+}
 
 ContextProviderForTest::ContextProviderForTest(
-    ::component_testing::RealmRoot realm_root,
+    std::unique_ptr<test::TestRealmRoot> realm_root,
     ::fuchsia::web::ContextProviderPtr context_provider)
     : realm_root_(std::move(realm_root)),
       context_provider_(std::move(context_provider)) {}
@@ -93,7 +123,7 @@ ContextProviderForDebugTest::~ContextProviderForDebugTest() = default;
 
 void ContextProviderForDebugTest::ConnectToDebug(
     ::fidl::InterfaceRequest<::fuchsia::web::Debug> debug_request) {
-  zx_status_t status = context_provider_.realm_root().component().Connect(
+  zx_status_t status = context_provider_.realm_root()->component().Connect(
       std::move(debug_request));
   ZX_CHECK(status == ZX_OK, status) << "Connect to Debug";
 }

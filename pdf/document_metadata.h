@@ -5,8 +5,10 @@
 #ifndef PDF_DOCUMENT_METADATA_H_
 #define PDF_DOCUMENT_METADATA_H_
 
+#include <optional>
 #include <string>
 
+#include "base/i18n/language_tag.h"
 #include "base/time/time.h"
 
 namespace chrome_pdf {
@@ -43,8 +45,8 @@ enum class FormType {
 // 32000-1:2008 spec).
 struct DocumentMetadata {
   DocumentMetadata();
-  DocumentMetadata(const DocumentMetadata&) = delete;
-  DocumentMetadata& operator=(const DocumentMetadata&) = delete;
+  DocumentMetadata(DocumentMetadata&&) noexcept;
+  DocumentMetadata& operator=(DocumentMetadata&& other) noexcept;
   ~DocumentMetadata();
 
   // Version of the document.
@@ -91,6 +93,9 @@ struct DocumentMetadata {
 
   // The date and time the document was most recently modified.
   base::Time mod_date;
+
+  // The document's language tag.
+  std::optional<base::i18n::LanguageTag> language_tag;
 };
 
 }  // namespace chrome_pdf

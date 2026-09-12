@@ -10,44 +10,31 @@
 
 #include "base/functional/callback.h"
 #include "base/values.h"
+#include "components/enterprise/common/proto/upload_request_response.pb.h"
 #include "components/policy/core/common/cloud/device_management_service.h"
 #include "components/policy/core/common/cloud/reporting_job_configuration_base.h"
 #include "components/policy/policy_export.h"
 
 namespace policy {
 
+
 class CloudPolicyClient;
 
 class POLICY_EXPORT RealtimeReportingJobConfiguration
     : public ReportingJobConfigurationBase {
  public:
-  // Keys used in report dictionary.
-  static const char kContextKey[];
-  static const char kEventListKey[];
-
   // Keys used to parse the response.
   static const char kEventIdKey[];
   static const char kUploadedEventsKey[];
   static const char kFailedUploadsKey[];
   static const char kPermanentFailedUploadsKey[];
 
-  // Combines the info given in |events| that corresponds to Event proto, and
-  // info given in |context| that corresponds to the Device, Browser and Profile
-  // proto, to a UploadEventsRequest proto defined in
-  // google3/google/internal/chrome/reporting/v1/chromereporting.proto.
-  static base::Value::Dict BuildReport(base::Value::List events,
-                                       base::Value::Dict context);
 
   // Configures a request to send real-time reports to the |server_url|
-  // endpoint.  If |add_connector_url_params| is true then URL parameters
-  // specific to enterprise connectors are added to the request uploading
-  // the report.  |callback| is invoked once the report is uploaded.
-  // |add_connector_url_params| will flip whether the service provider endpoint
-  // parameters will be used.
+  // endpoint. |callback| is invoked once the report is uploaded.
   RealtimeReportingJobConfiguration(CloudPolicyClient* client,
                                     const std::string& server_url,
                                     bool include_device_info,
-                                    bool add_connector_url_params,
                                     UploadCompleteCallback callback);
   RealtimeReportingJobConfiguration(const RealtimeReportingJobConfiguration&) =
       delete;
@@ -56,16 +43,14 @@ class POLICY_EXPORT RealtimeReportingJobConfiguration
 
   ~RealtimeReportingJobConfiguration() override;
 
-  // Add a new report to the payload.  A report is a dictionary that
-  // contains two keys: "events" and "context".  The first key is a list of
-  // dictionaries, where dictionary is defined by the Event message described at
-  // google/internal/chrome/reporting/v1/chromereporting.proto.
-  //
-  // The second is context information about this instance of chrome that
-  // is not specific to the event.
-  //
-  // Returns true if the report was added successfully.
-  bool AddReport(base::Value::Dict report);
+  // ReportingJobConfigurationBase.
+  std::string GetPayload() override;
+
+  std::string GetContentType() override;
+
+  // Add a new Event proto to the payload.
+  bool AddRequest(::chrome::cros::reporting::proto::UploadEventsRequest event);
+
 
  protected:
   // ReportingJobConfigurationBase
@@ -75,13 +60,23 @@ class POLICY_EXPORT RealtimeReportingJobConfiguration
   void OnBeforeRetryInternal(int response_code,
                              const std::string& response_body) override;
 
+  bool ShouldRecordUma() const override;
   std::string GetUmaString() const override;
 
  private:
-  // Does one time initialization of the payload when the configuration is
-  // created.
-  void InitializePayloadInternal(CloudPolicyClient* client,
-                                 bool add_connector_url_params);
+  void InitializeUploadRequest(CloudPolicyClient* client,
+                               bool include_device_info);
+
+  void OnUploadComplete(DeviceManagementService::Job* job,
+                        DeviceManagementStatus status,
+                        int response_code,
+                        std::optional<base::DictValue> response);
+
+  // The request to be sent to the server, use this instead of |payload_| for
+  // realtime reporting.
+  ::chrome::cros::reporting::proto::UploadEventsRequest upload_request_;
+
+  UploadCompleteCallback complete_callback_;
 
   // Gathers the ids of the uploads that failed
   std::set<std::string> GetFailedUploadIds(

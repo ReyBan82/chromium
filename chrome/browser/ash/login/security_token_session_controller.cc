@@ -5,34 +5,35 @@
 #include "chrome/browser/ash/login/security_token_session_controller.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "ash/constants/ash_login_pref_names.h"
 #include "ash/constants/notifier_catalogs.h"
 #include "ash/public/cpp/notification_utils.h"
+#include "ash/strings/grit/ash_strings.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/notreached.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/syslog_logging.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
-#include "chrome/browser/ash/crosapi/browser_util.h"
-#include "chrome/browser/ash/login/lock/screen_locker.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/certificate_provider/certificate_provider.h"
-#include "chrome/browser/certificate_provider/certificate_provider_service.h"
-#include "chrome/browser/certificate_provider/certificate_provider_service_factory.h"
+#include "base/trace_event/trace_event.h"
+#include "chrome/browser/ash/certificate_provider/certificate_provider_service.h"
+#include "chrome/browser/ash/certificate_provider/certificate_provider_service_factory.h"
+#include "chrome/browser/ash/login/lock/screen_locker_controller.h"
 #include "chrome/browser/enterprise/util/managed_browser_utils.h"
-#include "chrome/browser/lifetime/application_lifetime.h"
-#include "chrome/browser/notifications/system_notification_helper.h"
+#include "chrome/browser/extensions/forced_extensions/force_installed_tracker.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/ash/security_token_session_restriction_view.h"
-#include "chrome/common/pref_names.h"
-#include "chrome/grit/generated_resources.h"
+#include "chrome/browser/ui/ash/security_token_restriction/security_token_session_restriction_view.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_types.h"
 #include "chromeos/ash/components/login/auth/challenge_response/known_user_pref_utils.h"
 #include "chromeos/ash/components/login/auth/public/challenge_response_key.h"
 #include "chromeos/components/certificate_provider/certificate_info.h"
+#include "chromeos/components/certificate_provider/certificate_provider.h"
 #include "chromeos/ui/vector_icons/vector_icons.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/prefs/pref_registry_simple.h"
@@ -41,12 +42,14 @@
 #include "components/session_manager/session_manager_types.h"
 #include "components/user_manager/known_user.h"
 #include "components/user_manager/user.h"
+#include "extensions/browser/extension_registry.h"
 #include "extensions/common/extension_id.h"
 #include "google_apis/gaia/gaia_auth_util.h"
 #include "net/cert/asn1_util.h"
 #include "net/cert/x509_util.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/chromeos/devicetype_utils.h"
+#include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/views/widget/widget.h"
 #include "ui/views/window/dialog_delegate.h"
@@ -57,8 +60,8 @@ namespace ash {
 namespace login {
 namespace {
 
-// Possible values of prefs::kSecurityTokenSessionBehavior. This needs to match
-// the values of the SecurityTokenSessionBehavior policy defined in
+// Possible values of ash::prefs::kSecurityTokenSessionBehavior. This needs to
+// match the values of the SecurityTokenSessionBehavior policy defined in
 // policy_templates.json.
 constexpr char kIgnorePrefValue[] = "IGNORE";
 constexpr char kLogoutPrefValue[] = "LOGOUT";
@@ -68,6 +71,13 @@ constexpr char kNotifierSecurityTokenSession[] =
     "ash.security_token_session_controller";
 constexpr char kNotificationId[] =
     "security_token_session_controller_notification";
+
+// How long we allow before smart card middleware extensions start reporting
+// the user's certificates after all extensions become installed and ready
+// during login or unlock process. This is needed because of the time it takes
+// because USB devices can temporarily remain occupied by the login/lock-screen
+// extensions.
+constexpr base::TimeDelta kSessionActivationTimeout = base::Seconds(20);
 
 SecurityTokenSessionController::Behavior ParseBehaviorPrefValue(
     const std::string& behavior) {
@@ -79,6 +89,19 @@ SecurityTokenSessionController::Behavior ParseBehaviorPrefValue(
     return SecurityTokenSessionController::Behavior::kLock;
 
   return SecurityTokenSessionController::Behavior::kIgnore;
+}
+
+std::string SerializeBehaviorValue(
+    const SecurityTokenSessionController::Behavior& behavior) {
+  switch (behavior) {
+    case SecurityTokenSessionController::Behavior::kIgnore:
+      return std::string(kIgnorePrefValue);
+    case SecurityTokenSessionController::Behavior::kLogout:
+      return std::string(kLogoutPrefValue);
+    case SecurityTokenSessionController::Behavior::kLock:
+      return std::string(kLockPrefValue);
+  }
+  NOTREACHED();
 }
 
 // Checks if `domain` represents a valid domain. Returns false if `domain` is
@@ -93,15 +116,15 @@ bool SanitizeDomain(const std::string& domain, std::string& sanitized_domain) {
     return false;
   if (!url.has_host())
     return false;
-  sanitized_domain = url.host();
+  sanitized_domain = url.GetHost();
   return true;
 }
 
 void DisplayNotification(const std::u16string& title,
                          const std::u16string& text) {
-  message_center::Notification notification = CreateSystemNotification(
+  auto notification = CreateSystemNotificationPtr(
       message_center::NOTIFICATION_TYPE_SIMPLE, kNotificationId, title, text,
-      /*display_source=*/std::u16string(), /*origin_url=*/GURL(),
+      /*display_source=*/std::u16string(),
       message_center::NotifierId(message_center::NotifierType::SYSTEM_COMPONENT,
                                  kNotifierSecurityTokenSession,
                                  NotificationCatalogName::kSecurityToken),
@@ -110,10 +133,11 @@ void DisplayNotification(const std::u16string& title,
           base::DoNothingAs<void()>()),
       chromeos::kEnterpriseIcon,
       message_center::SystemNotificationWarningLevel::NORMAL);
-  notification.set_fullscreen_visibility(
+  notification->set_fullscreen_visibility(
       message_center::FullscreenVisibility::OVER_USER);
-  notification.SetSystemPriority();
-  SystemNotificationHelper::GetInstance()->Display(notification);
+  notification->SetSystemPriority();
+  message_center::MessageCenter::Get()->AddNotification(
+      std::move(notification));
 }
 
 // Loads the persistently stored information about the challenge-response keys
@@ -125,7 +149,7 @@ void LoadStoredChallengeResponseSpkiKeysForUser(
     base::flat_set<std::string>* extension_ids) {
   // TODO(crbug.com/1164373) This approach does not work for ephemeral users.
   // Instead, only get the certificate that was actually used on the last login.
-  const base::Value::List known_user_value =
+  const base::ListValue known_user_value =
       user_manager::KnownUser(local_state).GetChallengeResponseKeys(account_id);
   std::vector<DeserializedChallengeResponseKey>
       deserialized_challenge_response_keys;
@@ -137,18 +161,17 @@ void LoadStoredChallengeResponseSpkiKeysForUser(
       continue;
 
     extension_ids->insert(challenge_response_key.extension_id);
-    if (!extension_to_spkis->contains(challenge_response_key.extension_id)) {
-      (*extension_to_spkis)[challenge_response_key.extension_id] = {};
-    }
-    if (!challenge_response_key.public_key_spki_der.empty()) {
-      (*extension_to_spkis)[challenge_response_key.extension_id].push_back(
-          challenge_response_key.public_key_spki_der);
+    if (auto it =
+            extension_to_spkis->try_emplace(challenge_response_key.extension_id)
+                .first;
+        !challenge_response_key.public_key_spki_der.empty()) {
+      it->second.push_back(challenge_response_key.public_key_spki_der);
     }
   }
 }
 
 std::string GetSubjectPublicKeyInfo(const net::X509Certificate& certificate) {
-  base::StringPiece spki_bytes;
+  std::string_view spki_bytes;
   if (!net::asn1::ExtractSPKIFromDERCert(
           net::x509_util::CryptoBufferAsStringPiece(certificate.cert_buffer()),
           &spki_bytes)) {
@@ -164,19 +187,21 @@ const char* const
         "security_token_session_notification_displayed";
 
 SecurityTokenSessionController::SecurityTokenSessionController(
-    bool is_user_profile,
+    Profile* profile,
     PrefService* local_state,
     const user_manager::User* primary_user,
     chromeos::CertificateProviderService* certificate_provider_service)
-    : is_user_profile_(is_user_profile),
+    : is_user_profile_(IsUserBrowserContext(profile)),
       local_state_(local_state),
       primary_user_(primary_user),
       certificate_provider_service_(certificate_provider_service),
-      session_manager_(session_manager::SessionManager::Get()) {
+      extensions_tracker_(extensions::ExtensionRegistry::Get(profile), profile),
+      session_manager_(session_manager::SessionManager::Get()),
+      session_activation_seconds_(kSessionActivationTimeout) {
   DCHECK(local_state_);
   DCHECK(primary_user_);
   DCHECK(certificate_provider_service_);
-  session_manager_observation_.Observe(session_manager_);
+  session_manager_observation_.Observe(session_manager_.get());
   certificate_provider_ =
       certificate_provider_service_->CreateCertificateProvider();
   LoadStoredChallengeResponseSpkiKeysForUser(
@@ -184,7 +209,6 @@ SecurityTokenSessionController::SecurityTokenSessionController(
       &observed_extensions_);
   UpdateNotificationPref();
   behavior_ = GetBehaviorFromPrefAndSessionState();
-  UpdateKeepAlive();
   pref_change_registrar_.Init(local_state_);
   base::RepeatingClosure behavior_pref_changed_callback =
       base::BindRepeating(&SecurityTokenSessionController::UpdateBehavior,
@@ -193,14 +217,17 @@ SecurityTokenSessionController::SecurityTokenSessionController(
       base::BindRepeating(
           &SecurityTokenSessionController::UpdateNotificationPref,
           weak_ptr_factory_.GetWeakPtr());
-  pref_change_registrar_.Add(prefs::kSecurityTokenSessionBehavior,
+  pref_change_registrar_.Add(ash::prefs::kSecurityTokenSessionBehavior,
                              behavior_pref_changed_callback);
-  pref_change_registrar_.Add(prefs::kSecurityTokenSessionNotificationSeconds,
-                             notification_pref_changed_callback);
+  pref_change_registrar_.Add(
+      ash::prefs::kSecurityTokenSessionNotificationSeconds,
+      notification_pref_changed_callback);
   certificate_provider_service_->AddObserver(this);
+  extensions_tracker_.AddObserver(this);
 }
 
 SecurityTokenSessionController::~SecurityTokenSessionController() {
+  extensions_tracker_.RemoveObserver(this);
   certificate_provider_service_->RemoveObserver(this);
 }
 
@@ -226,19 +253,20 @@ void SecurityTokenSessionController::OnCertificatesUpdated(
   if (!observed_extensions_.contains(extension_id))
     return;
 
-  if (extension_to_spkis_[extension_id].empty())
+  auto& expected_spkis = extension_to_spkis_[extension_id];
+  if (expected_spkis.empty()) {
     return;
+  }
 
   bool extension_provides_all_required_certificates = true;
 
   std::vector<std::string> provided_spki_vector;
+  provided_spki_vector.reserve(certificate_infos.size());
   for (auto certificate_info : certificate_infos) {
     provided_spki_vector.emplace_back(
         GetSubjectPublicKeyInfo(*certificate_info.certificate.get()));
   }
-  base::flat_set<std::string> provided_spkis(provided_spki_vector.begin(),
-                                             provided_spki_vector.end());
-  auto& expected_spkis = extension_to_spkis_[extension_id];
+  base::flat_set<std::string> provided_spkis(std::move(provided_spki_vector));
   for (const auto& expected_spki : expected_spkis) {
     if (!provided_spkis.contains(expected_spki)) {
       extension_provides_all_required_certificates = false;
@@ -249,21 +277,57 @@ void SecurityTokenSessionController::OnCertificatesUpdated(
   if (extension_provides_all_required_certificates) {
     ExtensionProvidesAllRequiredCertificates(extension_id);
   } else {
-    ExtensionStopsProvidingCertificate(extension_id);
+    extensions_missing_required_certificates_.insert(extension_id);
+    ExtensionStopsProvidingCertificate();
   }
 }
 
+void SecurityTokenSessionController::OnForceInstalledExtensionsReady() {
+  if (session_manager_->session_state() !=
+          session_manager::SessionState::ACTIVE ||
+      is_session_activation_complete_ ||
+      session_activation_timer_.IsRunning()) {
+    return;
+  }
+  StartSessionActivation();
+}
+
 void SecurityTokenSessionController::OnSessionStateChanged() {
+  TRACE_EVENT0("login",
+               "SecurityTokenSessionController::OnSessionStateChanged");
   if (session_manager_->session_state() ==
       session_manager::SessionState::LOCKED) {
     had_lock_screen_transition_ = true;
   }
 
+  is_session_activation_complete_ = false;
   // Reset the flag, so that after the certificates are collected from all
   // extensions we know whether the absence of some should be tolerated.
   all_required_certificates_were_observed_ = false;
 
   UpdateBehavior();
+
+  // In case kInstallForceList preference wouldn't load yet, it would still
+  // mean that all extensions are installed and ready. However, IsComplete()
+  // call also ensures there is at least one extension that is installed and
+  // ready. That will always be the case because reading smartcards depends on
+  // Smart Card Connector App being installed.
+  if (session_manager_->session_state() ==
+          session_manager::SessionState::ACTIVE &&
+      extensions_tracker_.IsComplete()) {
+    StartSessionActivation();
+  }
+}
+
+void SecurityTokenSessionController::SetSessionActivationTimeoutForTest(
+    base::TimeDelta session_activation_seconds) {
+  session_activation_seconds_ = session_activation_seconds;
+}
+
+void SecurityTokenSessionController::TriggerSessionActivationTimeoutForTest() {
+  if (session_activation_timer_.IsRunning()) {
+    session_activation_timer_.FireNow();
+  }
 }
 
 // static
@@ -273,21 +337,21 @@ void SecurityTokenSessionController::RegisterLocalStatePrefs(
   // the values are available for the controller regardless of the profile it's
   // attached to (the policy stack has code to automatically copy the primary
   // profile's policies into the Local State).
-  registry->RegisterStringPref(prefs::kSecurityTokenSessionBehavior,
+  registry->RegisterStringPref(ash::prefs::kSecurityTokenSessionBehavior,
                                kIgnorePrefValue);
-  registry->RegisterIntegerPref(prefs::kSecurityTokenSessionNotificationSeconds,
-                                0);
+  registry->RegisterIntegerPref(
+      ash::prefs::kSecurityTokenSessionNotificationSeconds, 0);
   // Prefs that contain state that needs to be persisted across Chrome restarts.
   registry->RegisterStringPref(
-      prefs::kSecurityTokenSessionNotificationScheduledDomain, "");
+      ash::prefs::kSecurityTokenSessionNotificationScheduledDomain, "");
 }
 
 // static
-void SecurityTokenSessionController::MaybeDisplayLoginScreenNotification() {
-  PrefService* local_state = g_browser_process->local_state();
+void SecurityTokenSessionController::MaybeDisplayLoginScreenNotification(
+    PrefService& local_state) {
   const PrefService::Preference* scheduled_notification_domain =
-      local_state->FindPreference(
-          prefs::kSecurityTokenSessionNotificationScheduledDomain);
+      local_state.FindPreference(
+          ash::prefs::kSecurityTokenSessionNotificationScheduledDomain);
   if (!scheduled_notification_domain ||
       scheduled_notification_domain->IsDefaultValue() ||
       !scheduled_notification_domain->GetValue()->is_string()) {
@@ -297,8 +361,8 @@ void SecurityTokenSessionController::MaybeDisplayLoginScreenNotification() {
   // Sanitize `scheduled_notification_domain`, as values coming from local state
   // are not trusted.
   std::string domain = scheduled_notification_domain->GetValue()->GetString();
-  local_state->ClearPref(
-      prefs::kSecurityTokenSessionNotificationScheduledDomain);
+  local_state.ClearPref(
+      ash::prefs::kSecurityTokenSessionNotificationScheduledDomain);
   std::string sanitized_domain;
   if (!SanitizeDomain(domain, sanitized_domain)) {
     // The pref value is invalid.
@@ -314,7 +378,6 @@ void SecurityTokenSessionController::MaybeDisplayLoginScreenNotification() {
 void SecurityTokenSessionController::UpdateBehavior() {
   Behavior previous_behavior = behavior_;
   behavior_ = GetBehaviorFromPrefAndSessionState();
-  UpdateKeepAlive();
   if (behavior_ == Behavior::kIgnore) {
     Reset();
   } else if (previous_behavior == Behavior::kIgnore) {
@@ -324,19 +387,9 @@ void SecurityTokenSessionController::UpdateBehavior() {
   }
 }
 
-void SecurityTokenSessionController::UpdateKeepAlive() {
-  if (behavior_ == Behavior::kIgnore ||
-      crosapi::browser_util::IsAshWebBrowserEnabled()) {
-    keep_alive_.reset();
-  } else if (!keep_alive_) {
-    keep_alive_ = crosapi::BrowserManager::Get()->KeepAlive(
-        crosapi::BrowserManager::Feature::kSmartCardSessionController);
-  }
-}
-
 void SecurityTokenSessionController::UpdateNotificationPref() {
   notification_seconds_ = base::Seconds(local_state_->GetInteger(
-      prefs::kSecurityTokenSessionNotificationSeconds));
+      ash::prefs::kSecurityTokenSessionNotificationSeconds));
 }
 
 bool SecurityTokenSessionController::ShouldApplyPolicyInCurrentSessionState()
@@ -365,7 +418,6 @@ bool SecurityTokenSessionController::ShouldApplyPolicyInCurrentSessionState()
       return true;
   }
   NOTREACHED();
-  return false;
 }
 
 SecurityTokenSessionController::Behavior
@@ -377,7 +429,7 @@ SecurityTokenSessionController::GetBehaviorFromPrefAndSessionState() const {
   // After passing the session state checks, use the policy value as the desired
   // behavior.
   return ParseBehaviorPrefValue(
-      local_state_->GetString(prefs::kSecurityTokenSessionBehavior));
+      local_state_->GetString(ash::prefs::kSecurityTokenSessionBehavior));
 }
 
 void SecurityTokenSessionController::TriggerAction() {
@@ -390,15 +442,29 @@ void SecurityTokenSessionController::TriggerAction() {
     case Behavior::kIgnore:
       return;
     case Behavior::kLock:
-      ScreenLocker::Show();
+      ScreenLockerController::Get().ShowLockScreen();
       AddLockNotification();
       return;
     case Behavior::kLogout:
-      chrome::AttemptExit();
+      session_manager::SessionManager::Get()->RequestSignOut();
       ScheduleLogoutNotification();
       return;
   }
   NOTREACHED();
+}
+
+void SecurityTokenSessionController::StartSessionActivation() {
+  session_activation_timer_.Start(
+      FROM_HERE, session_activation_seconds_,
+      base::BindOnce(&SecurityTokenSessionController::CompleteSessionActivation,
+                     weak_ptr_factory_.GetWeakPtr()));
+}
+
+void SecurityTokenSessionController::CompleteSessionActivation() {
+  is_session_activation_complete_ = true;
+  if (!all_required_certificates_were_observed_) {
+    ExtensionStopsProvidingCertificate();
+  }
 }
 
 void SecurityTokenSessionController::ExtensionProvidesAllRequiredCertificates(
@@ -410,10 +476,7 @@ void SecurityTokenSessionController::ExtensionProvidesAllRequiredCertificates(
   }
 }
 
-void SecurityTokenSessionController::ExtensionStopsProvidingCertificate(
-    const extensions::ExtensionId& extension_id) {
-  extensions_missing_required_certificates_.insert(extension_id);
-
+void SecurityTokenSessionController::ExtensionStopsProvidingCertificate() {
   if (!all_required_certificates_were_observed_ &&
       had_lock_screen_transition_) {
     // When transitioning to/from the Lock Screen, we delay applying the policy
@@ -423,11 +486,24 @@ void SecurityTokenSessionController::ExtensionStopsProvidingCertificate(
     // access conflicts between two profiles.
     return;
   }
+  if (!all_required_certificates_were_observed_ &&
+      session_manager_->session_state() ==
+          session_manager::SessionState::ACTIVE &&
+      !is_session_activation_complete_) {
+    return;
+  }
 
   if (fullscreen_notification_) {
     // There was already a security token missing.
     return;
   }
+
+  if (behavior_ == Behavior::kIgnore) {
+    return;
+  }
+  SYSLOG(WARNING) << "Missing certificate is about to trigger "
+                  << SerializeBehaviorValue(behavior_)
+                  << " action with a delay " << notification_seconds_ << ".";
 
   // Schedule session lock / logout.
   action_timer_.Start(
@@ -442,7 +518,7 @@ void SecurityTokenSessionController::ExtensionStopsProvidingCertificate(
             base::BindOnce(&SecurityTokenSessionController::TriggerAction,
                            weak_ptr_factory_.GetWeakPtr()),
             behavior_,
-            chrome::enterprise_util::GetDomainFromEmail(
+            enterprise_util::GetDomainFromEmail(
                 primary_user_->GetDisplayEmail())),
         nullptr, nullptr);
     fullscreen_notification_->Show();
@@ -456,8 +532,8 @@ void SecurityTokenSessionController::AddLockNotification() {
     return;
   SetNotificationDisplayedKnownUserFlag();
 
-  std::string domain = chrome::enterprise_util::GetDomainFromEmail(
-      primary_user_->GetDisplayEmail());
+  std::string domain =
+      enterprise_util::GetDomainFromEmail(primary_user_->GetDisplayEmail());
   DisplayNotification(
       l10n_util::GetStringFUTF16(IDS_SECURITY_TOKEN_SESSION_LOCK_MESSAGE_TITLE,
                                  ui::GetChromeOSDeviceName()),
@@ -474,13 +550,13 @@ void SecurityTokenSessionController::ScheduleLogoutNotification() {
   SetNotificationDisplayedKnownUserFlag();
 
   local_state_->SetString(
-      prefs::kSecurityTokenSessionNotificationScheduledDomain,
-      chrome::enterprise_util::GetDomainFromEmail(
-          primary_user_->GetDisplayEmail()));
+      ash::prefs::kSecurityTokenSessionNotificationScheduledDomain,
+      enterprise_util::GetDomainFromEmail(primary_user_->GetDisplayEmail()));
 }
 
 void SecurityTokenSessionController::Reset() {
   action_timer_.Stop();
+  session_activation_timer_.Stop();
   extensions_missing_required_certificates_.clear();
   if (fullscreen_notification_) {
     if (!fullscreen_notification_->IsClosed()) {

@@ -32,10 +32,11 @@
 #include <memory>
 #include <utility>
 
+#include "base/debug/crash_logging.h"
 #include "third_party/blink/public/strings/grit/blink_strings.h"
 #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
 #include "third_party/blink/renderer/core/dom/events/scoped_event_queue.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
+#include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/core/fileapi/file_list.h"
 #include "third_party/blink/renderer/core/html/forms/button_input_type.h"
@@ -69,13 +70,65 @@
 #include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/core/layout/layout_theme.h"
 #include "third_party/blink/renderer/core/page/page.h"
+#include "third_party/blink/renderer/core/style/computed_style.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/json/json_values.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
 #include "third_party/blink/renderer/platform/text/text_break_iterator.h"
 
 namespace blink {
+
+const AtomicString& InputType::TypeToString(Type type) {
+  switch (type) {
+    case Type::kButton:
+      return input_type_names::kButton;
+    case Type::kCheckbox:
+      return input_type_names::kCheckbox;
+    case Type::kColor:
+      return input_type_names::kColor;
+    case Type::kDate:
+      return input_type_names::kDate;
+    case Type::kDateTimeLocal:
+      return input_type_names::kDatetimeLocal;
+    case Type::kEmail:
+      return input_type_names::kEmail;
+    case Type::kFile:
+      return input_type_names::kFile;
+    case Type::kHidden:
+      return input_type_names::kHidden;
+    case Type::kImage:
+      return input_type_names::kImage;
+    case Type::kMonth:
+      return input_type_names::kMonth;
+    case Type::kNumber:
+      return input_type_names::kNumber;
+    case Type::kPassword:
+      return input_type_names::kPassword;
+    case Type::kRadio:
+      return input_type_names::kRadio;
+    case Type::kRange:
+      return input_type_names::kRange;
+    case Type::kReset:
+      return input_type_names::kReset;
+    case Type::kSearch:
+      return input_type_names::kSearch;
+    case Type::kSubmit:
+      return input_type_names::kSubmit;
+    case Type::kTelephone:
+      return input_type_names::kTel;
+    case Type::kText:
+      return input_type_names::kText;
+    case Type::kTime:
+      return input_type_names::kTime;
+    case Type::kURL:
+      return input_type_names::kUrl;
+    case Type::kWeek:
+      return input_type_names::kWeek;
+  }
+  NOTREACHED();
+}
 
 // Listed once to avoid any discrepancy between InputType::Create and
 // InputType::NormalizeTypeName.
@@ -123,7 +176,7 @@ const AtomicString& InputType::NormalizeTypeName(
   if (type_name.empty())
     return input_type_names::kText;
 
-  AtomicString type_name_lower = type_name.LowerASCII();
+  AtomicString type_name_lower = type_name.ToAsciiLower();
 
 #define NORMALIZE_INPUT_TYPE(input_type, class_name)   \
   if (type_name_lower == input_type_names::input_type) \
@@ -140,7 +193,11 @@ void InputType::Trace(Visitor* visitor) const {
   visitor->Trace(element_);
 }
 
-bool InputType::IsTextField() const {
+const AtomicString& InputType::FormControlTypeAsString() const {
+  return TypeToString(type_);
+}
+
+bool InputType::IsAutoDirectionalityFormAssociated() const {
   return false;
 }
 
@@ -148,7 +205,6 @@ template <typename T>
 bool ValidateInputType(const T& input_type, const String& value) {
   if (!input_type.CanSetStringValue()) {
     NOTREACHED();
-    return false;
   }
   return !input_type.TypeMismatchFor(value) &&
          !input_type.StepMismatch(value) && !input_type.RangeUnderflow(value) &&
@@ -205,7 +261,6 @@ bool InputType::IsValidValue(const String& value) const {
       return ValidateInputType(To<TextInputType>(*this), value);
   }
   NOTREACHED();
-  return false;
 }
 
 bool InputType::ShouldSaveAndRestoreFormControlState() const {
@@ -218,7 +273,17 @@ bool InputType::IsFormDataAppendable() const {
 }
 
 void InputType::AppendToFormData(FormData& form_data) const {
-  form_data.AppendFromElement(GetElement().GetName(), GetElement().Value());
+  if (!IsSubmitInputType()) {
+    form_data.AppendFromElement(GetElement().GetName(), GetElement().Value());
+  }
+  if (IsAutoDirectionalityFormAssociated()) {
+    const AtomicString& dirname_attr_value =
+        GetElement().FastGetAttribute(html_names::kDirnameAttr);
+    if (!dirname_attr_value.IsNull()) {
+      form_data.AppendFromElement(dirname_attr_value,
+                                  GetElement().DirectionForFormData());
+    }
+  }
 }
 
 String InputType::ResultForDialogSubmit() const {
@@ -229,7 +294,7 @@ double InputType::ValueAsDate() const {
   return DateComponents::InvalidMilliseconds();
 }
 
-void InputType::SetValueAsDate(const absl::optional<base::Time>&,
+void InputType::SetValueAsDate(const std::optional<base::Time>&,
                                ExceptionState& exception_state) const {
   exception_state.ThrowDOMException(
       DOMExceptionCode::kInvalidStateError,
@@ -249,8 +314,7 @@ void InputType::SetValueAsDouble(double double_value,
 }
 
 void InputType::SetValueAsDecimal(const Decimal& new_value,
-                                  TextFieldEventBehavior event_behavior,
-                                  ExceptionState&) const {
+                                  TextFieldEventBehavior event_behavior) const {
   GetElement().SetValue(Serialize(new_value), event_behavior);
 }
 
@@ -295,7 +359,6 @@ bool InputType::TypeMismatchFor(const String& value) const {
       return false;
   }
   NOTREACHED();
-  return false;
 }
 
 bool InputType::TypeMismatch() const {
@@ -340,7 +403,6 @@ bool InputType::ValueMissing(const String& value) const {
       return false;
   }
   NOTREACHED();
-  return false;
 }
 
 bool InputType::TooLong(const String&,
@@ -382,7 +444,6 @@ bool InputType::PatternMismatch(const String& value) const {
       return false;
   }
   NOTREACHED();
-  return false;
 }
 
 bool InputType::RangeUnderflow(const String& value) const {
@@ -447,6 +508,13 @@ bool InputType::IsInRange(const String& value) const {
     return true;
 
   StepRange step_range(CreateStepRange(kRejectAny));
+  if (RuntimeEnabledFeatures::CSSInRangeOutOfRangeReversedRangesEnabled() &&
+      step_range.HasReversedRange()) {
+    // With a reversed range, any value outside of the midnight-crossing valid
+    // range is considered underflow and overflow.
+    return numeric_value >= step_range.Minimum() ||
+           numeric_value <= step_range.Maximum();
+  }
   return step_range.HasRangeLimitations() &&
          numeric_value >= step_range.Minimum() &&
          numeric_value <= step_range.Maximum();
@@ -464,6 +532,13 @@ bool InputType::IsOutOfRange(const String& value) const {
     return false;
 
   StepRange step_range(CreateStepRange(kRejectAny));
+  if (RuntimeEnabledFeatures::CSSInRangeOutOfRangeReversedRangesEnabled() &&
+      step_range.HasReversedRange()) {
+    // With a reversed range, any value outside of the midnight-crossing valid
+    // range is considered underflow and overflow.
+    return numeric_value > step_range.Maximum() &&
+           numeric_value < step_range.Minimum();
+  }
   return step_range.HasRangeLimitations() &&
          (numeric_value < step_range.Minimum() ||
           numeric_value > step_range.Maximum());
@@ -489,33 +564,49 @@ bool InputType::StepMismatch(const String& value) const {
 
 String InputType::BadInputText() const {
   NOTREACHED();
-  return GetLocale().QueryString(IDS_FORM_VALIDATION_TYPE_MISMATCH);
 }
 
 String InputType::ValueNotEqualText(const Decimal& value) const {
-  NOTREACHED();
+  DUMP_WILL_BE_NOTREACHED();
   return String();
 }
 
 String InputType::RangeOverflowText(const Decimal&) const {
-  NOTREACHED();
-  return String();
+  static auto* input_type = base::debug::AllocateCrashKeyString(
+      "input-type", base::debug::CrashKeySize::Size32);
+  base::debug::SetCrashKeyString(
+      input_type, FormControlTypeAsString().GetString().Utf8().c_str());
+  NOTREACHED() << "This should not get called. Check if input type '"
+               << FormControlTypeAsString()
+               << "' should have a RangeOverflowText implementation."
+               << "See crbug.com/1423280";
 }
 
 String InputType::RangeUnderflowText(const Decimal&) const {
-  NOTREACHED();
-  return String();
+  static auto* input_type = base::debug::AllocateCrashKeyString(
+      "input-type", base::debug::CrashKeySize::Size32);
+  base::debug::SetCrashKeyString(
+      input_type, FormControlTypeAsString().GetString().Utf8().c_str());
+  NOTREACHED() << "This should not get called. Check if input type '"
+               << FormControlTypeAsString()
+               << "' should have a RangeUnderflowText implementation."
+               << "See crbug.com/1423280";
 }
 
 String InputType::ReversedRangeOutOfRangeText(const Decimal&,
                                               const Decimal&) const {
   NOTREACHED();
-  return String();
 }
 
 String InputType::RangeInvalidText(const Decimal&, const Decimal&) const {
-  NOTREACHED();
-  return String();
+  static auto* input_type = base::debug::AllocateCrashKeyString(
+      "input-type", base::debug::CrashKeySize::Size32);
+  base::debug::SetCrashKeyString(
+      input_type, FormControlTypeAsString().GetString().Utf8().c_str());
+  NOTREACHED() << "This should not get called. Check if input type '"
+               << FormControlTypeAsString()
+               << "' should have a RangeInvalidText implementation."
+               << "See crbug.com/1474270";
 }
 
 String InputType::TypeMismatchText() const {
@@ -635,7 +726,6 @@ std::pair<String, String> InputType::ValidationMessage(
 Decimal InputType::ParseToNumber(const String&,
                                  const Decimal& default_value) const {
   NOTREACHED();
-  return default_value;
 }
 
 Decimal InputType::ParseToNumberOrNaN(const String& string) const {
@@ -644,7 +734,6 @@ Decimal InputType::ParseToNumberOrNaN(const String& string) const {
 
 String InputType::Serialize(const Decimal&) const {
   NOTREACHED();
-  return String();
 }
 
 ChromeClient* InputType::GetChromeClient() const {
@@ -687,11 +776,14 @@ bool InputType::CanSetStringValue() const {
       return true;
   }
   NOTREACHED();
-  return false;
 }
 
-bool InputType::IsKeyboardFocusable() const {
-  return GetElement().IsBaseElementFocusable();
+bool InputType::IsKeyboardFocusableSlow(
+    Element::UpdateBehavior update_behavior) const {
+  // Inputs are always keyboard focusable if they are focusable at all,
+  // and don't have a negative tabindex set.
+  return GetElement().IsFocusable(update_behavior) &&
+         GetElement().tabIndex() >= 0;
 }
 
 bool InputType::MayTriggerVirtualKeyboard() const {
@@ -700,11 +792,15 @@ bool InputType::MayTriggerVirtualKeyboard() const {
 
 void InputType::CountUsage() {}
 
+void InputType::DidRecalcStyle(const StyleRecalcChange) {}
+
 bool InputType::ShouldRespectAlignAttribute() {
   return false;
 }
 
 void InputType::SanitizeValueInResponseToMinOrMaxAttributeChange() {}
+
+void InputType::ColorSpaceOrAlphaAttributeChanged() {}
 
 bool InputType::CanBeSuccessfulSubmitButton() {
   return false;
@@ -732,7 +828,6 @@ void InputType::SetFilesFromPaths(const Vector<String>& paths) {}
 
 String InputType::ValueInFilenameValueMode() const {
   NOTREACHED();
-  return String();
 }
 
 String InputType::DefaultLabel() const {
@@ -791,6 +886,10 @@ String InputType::VisibleValue() const {
   return GetElement().Value();
 }
 
+String InputType::ConvertFromVisibleValue(const String& visible_value) const {
+  return SanitizeValue(visible_value);
+}
+
 String InputType::SanitizeValue(const String& proposed_value) const {
   return proposed_value;
 }
@@ -803,27 +902,22 @@ void InputType::WarnIfValueIsInvalidAndElementIsVisible(
     const String& value) const {
   // Don't warn if the value is set in Modernizr.
   const ComputedStyle* style = GetElement().GetComputedStyle();
-  if (style && style->Visibility() != EVisibility::kHidden)
+  if (style && style->Visibility() != EVisibility::kHidden) {
     WarnIfValueIsInvalid(value);
+  }
 }
 
 void InputType::WarnIfValueIsInvalid(const String&) const {}
 
 bool InputType::ReceiveDroppedFiles(const DragData*) {
   NOTREACHED();
-  return false;
 }
 
 String InputType::DroppedFileSystemId() {
   NOTREACHED();
-  return String();
 }
 
 bool InputType::ShouldRespectListAttribute() {
-  return false;
-}
-
-bool InputType::IsTextButton() const {
   return false;
 }
 
@@ -868,7 +962,6 @@ bool InputType::IsSteppable() const {
       return false;
   }
   NOTREACHED();
-  return false;
 }
 
 HTMLFormControlElement::PopoverTriggerSupport
@@ -904,20 +997,19 @@ String InputType::DefaultToolTip(const InputTypeView& input_type_view) const {
 
 Decimal InputType::FindClosestTickMarkValue(const Decimal&) {
   NOTREACHED();
-  return Decimal::Nan();
 }
 
 bool InputType::HasLegalLinkAttribute(const QualifiedName&) const {
   return false;
 }
 
-const QualifiedName& InputType::SubResourceAttributeName() const {
-  return QualifiedName::Null();
-}
-
 void InputType::CopyNonAttributeProperties(const HTMLInputElement&) {}
 
 void InputType::OnAttachWithLayoutObject() {}
+
+void InputType::OnDetachWithLayoutObject() {}
+
+void InputType::UpdateWheelEventRegistration(bool is_detaching) {}
 
 bool InputType::ShouldAppearIndeterminate() const {
   return false;
@@ -944,6 +1036,7 @@ ColorChooserClient* InputType::GetColorChooserClient() {
 }
 
 void InputType::ApplyStep(const Decimal& current,
+                          const bool current_was_invalid,
                           double count,
                           AnyStepHandling any_step_handling,
                           TextFieldEventBehavior event_behavior,
@@ -979,7 +1072,7 @@ void InputType::ApplyStep(const Decimal& current,
   Decimal new_value = current;
   const AtomicString& step_string =
       GetElement().FastGetAttribute(html_names::kStepAttr);
-  if (!EqualIgnoringASCIICase(step_string, "any") &&
+  if (!EqualIgnoringAsciiCase(step_string, "any") &&
       step_range.StepMismatch(current)) {
     // Snap-to-step / clamping steps
     // If the current value is not matched to step value:
@@ -1000,8 +1093,9 @@ void InputType::ApplyStep(const Decimal& current,
   }
   new_value = new_value + step_range.Step() * Decimal::FromDouble(count);
 
-  if (!EqualIgnoringASCIICase(step_string, "any"))
+  if (!EqualIgnoringAsciiCase(step_string, "any")) {
     new_value = step_range.AlignValueForStep(current, new_value);
+  }
 
   // 8. If the element has a minimum, and value is less than that minimum,
   // then set value to the smallest value that, when subtracted from the step
@@ -1024,14 +1118,23 @@ void InputType::ApplyStep(const Decimal& current,
   // 10. If either the method invoked was the stepDown() method and value is
   // greater than valueBeforeStepping, or the method invoked was the stepUp()
   // method and value is less than valueBeforeStepping, then return.
-  if ((count < 0 && current < new_value) || (count > 0 && current > new_value))
+  DCHECK(!current_was_invalid || current == 0);
+  if (!current_was_invalid && ((count < 0 && current < new_value) ||
+                               (count > 0 && current > new_value))) {
     return;
+  }
 
   // 11. Let value as string be the result of running the algorithm to convert
   // a number to a string, as defined for the input element's type attribute's
   // current state, on value.
   // 12. Set the value of the element to value as string.
-  SetValueAsDecimal(new_value, event_behavior, exception_state);
+  if (event_behavior == TextFieldEventBehavior::kDispatchChangeEvent &&
+      DispatchBeforeInputInsertText(
+          EventTargetNodeForDocument(&GetElement().GetDocument()),
+          new_value.ToString()) != DispatchEventResult::kNotCanceled) {
+    return;
+  }
+  SetValueAsDecimal(new_value, event_behavior);
 
   if (AXObjectCache* cache = GetElement().GetDocument().ExistingAXObjectCache())
     cache->HandleValueChanged(&GetElement());
@@ -1045,18 +1148,31 @@ bool InputType::GetAllowedValueStep(Decimal* step) const {
 
 StepRange InputType::CreateStepRange(AnyStepHandling) const {
   NOTREACHED();
-  return StepRange();
 }
 
 void InputType::StepUp(double n, ExceptionState& exception_state) {
+  // https://html.spec.whatwg.org/C/#dom-input-stepup
+
+  // 1. If the stepDown() and stepUp() methods do not apply, as defined for the
+  // input element's type attribute's current state, then throw an
+  // "InvalidStateError" DOMException.
   if (!IsSteppable()) {
     exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
                                       "This form element is not steppable.");
     return;
   }
-  const Decimal current = ParseToNumber(GetElement().Value(), 0);
-  ApplyStep(current, n, kRejectAny, TextFieldEventBehavior::kDispatchNoEvent,
-            exception_state);
+
+  // 5. If applying the algorithm to convert a string to a number to the string
+  // given by the element's value does not result in an error, then let value be
+  // the result of that algorithm. Otherwise, let value be zero.
+  Decimal current = ParseToNumberOrNaN(GetElement().Value());
+  bool current_was_invalid = current.IsNaN();
+  if (current_was_invalid) {
+    current = 0;
+  }
+
+  ApplyStep(current, current_was_invalid, n, kRejectAny,
+            TextFieldEventBehavior::kDispatchNoEvent, exception_state);
 }
 
 void InputType::StepUpFromLayoutObject(int n) {
@@ -1126,28 +1242,32 @@ void InputType::StepUpFromLayoutObject(int n) {
       current = step_range.Minimum() - next_diff;
     if (current > step_range.Maximum() - next_diff)
       current = step_range.Maximum() - next_diff;
-    SetValueAsDecimal(current, TextFieldEventBehavior::kDispatchNoEvent,
-                      IGNORE_EXCEPTION_FOR_TESTING);
+    SetValueAsDecimal(current, TextFieldEventBehavior::kDispatchNoEvent);
   }
   if ((sign > 0 && current < step_range.Minimum()) ||
       (sign < 0 && current > step_range.Maximum())) {
     SetValueAsDecimal(sign > 0 ? step_range.Minimum() : step_range.Maximum(),
-                      TextFieldEventBehavior::kDispatchChangeEvent,
-                      IGNORE_EXCEPTION_FOR_TESTING);
+                      TextFieldEventBehavior::kDispatchChangeEvent);
     return;
   }
   if ((sign > 0 && current >= step_range.Maximum()) ||
       (sign < 0 && current <= step_range.Minimum()))
     return;
-  ApplyStep(current, n, kAnyIsDefaultStep,
+
+  // Given the extra treatment the current value gets in the above 3 blocks, at
+  // this point we can assume it is valid.
+  bool current_was_invalid = false;
+
+  ApplyStep(current, current_was_invalid, n, kAnyIsDefaultStep,
             TextFieldEventBehavior::kDispatchChangeEvent,
             IGNORE_EXCEPTION_FOR_TESTING);
 }
 
 void InputType::CountUsageIfVisible(WebFeature feature) const {
   if (const ComputedStyle* style = GetElement().GetComputedStyle()) {
-    if (style->Visibility() != EVisibility::kHidden)
+    if (style->Visibility() != EVisibility::kHidden) {
       UseCounter::Count(GetElement().GetDocument(), feature);
+    }
   }
 }
 
@@ -1190,37 +1310,43 @@ StepRange InputType::CreateStepRange(
     const Decimal& maximum_default,
     const StepRange::StepDescription& step_description,
     bool supports_reversed_range) const {
-  bool has_range_limitations = false;
+  bool has_min = false;
+  bool has_max = false;
   const Decimal step_base = FindStepBase(step_base_default);
   Decimal minimum =
       ParseToNumberOrNaN(GetElement().FastGetAttribute(html_names::kMinAttr));
-  if (minimum.IsFinite())
-    has_range_limitations = true;
-  else
+  if (minimum.IsFinite()) {
+    has_min = true;
+  } else {
     minimum = minimum_default;
+  }
   Decimal maximum =
       ParseToNumberOrNaN(GetElement().FastGetAttribute(html_names::kMaxAttr));
-  if (maximum.IsFinite())
-    has_range_limitations = true;
-  else
+  if (maximum.IsFinite()) {
+    has_max = true;
+  } else {
     maximum = maximum_default;
+  }
   const Decimal step = StepRange::ParseStep(
       any_step_handling, step_description,
       GetElement().FastGetAttribute(html_names::kStepAttr));
   bool has_reversed_range =
-      has_range_limitations && supports_reversed_range && maximum < minimum;
-  return StepRange(step_base, minimum, maximum, has_range_limitations,
+      (has_min || has_max) && supports_reversed_range && maximum < minimum;
+  return StepRange(step_base, minimum, maximum, has_min, has_max,
                    has_reversed_range, step, step_description);
 }
 
-void InputType::AddWarningToConsole(const char* message_format,
-                                    const String& value) const {
+void InputType::AddWarningToConsole(
+    const FormatString<const StringView&>& format,
+    const StringView& value) const {
   GetElement().GetDocument().AddConsoleMessage(
       MakeGarbageCollected<ConsoleMessage>(
-          mojom::ConsoleMessageSource::kRendering,
-          mojom::ConsoleMessageLevel::kWarning,
-          String::Format(message_format,
-                         JSONValue::QuoteString(value).Utf8().c_str())));
+          ConsoleMessage::Source::kRendering, ConsoleMessage::Level::kWarning,
+          Format<const StringView&>(format, JSONValue::QuoteString(value))));
+}
+
+bool InputType::SupportsBaseAppearance(Element::BaseAppearanceValue) const {
+  return false;
 }
 
 }  // namespace blink

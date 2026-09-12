@@ -5,15 +5,18 @@
 #ifndef CHROME_BROWSER_PREDICTORS_NETWORK_HINTS_HANDLER_IMPL_H_
 #define CHROME_BROWSER_PREDICTORS_NETWORK_HINTS_HANDLER_IMPL_H_
 
+#include <vector>
+
 #include "base/memory/weak_ptr.h"
 #include "components/network_hints/common/network_hints.mojom.h"
+#include "content/public/browser/global_routing_id.h"
 
 namespace content {
+class PreconnectManager;
 class RenderFrameHost;
 }
 
 namespace predictors {
-class PreconnectManager;
 
 class NetworkHintsHandlerImpl
     : public network_hints::mojom::NetworkHintsHandler {
@@ -36,9 +39,8 @@ class NetworkHintsHandlerImpl
  private:
   explicit NetworkHintsHandlerImpl(content::RenderFrameHost* frame_host);
 
-  const int32_t render_process_id_;
-  const int32_t render_frame_id_;
-  base::WeakPtr<PreconnectManager> preconnect_manager_;
+  const content::GlobalRenderFrameHostId render_frame_host_id_;
+  base::WeakPtr<content::PreconnectManager> preconnect_manager_;
 };
 
 }  // namespace predictors

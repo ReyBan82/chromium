@@ -4,9 +4,9 @@
 
 package org.chromium.ui.modelutil;
 
-import androidx.annotation.Nullable;
-
 import org.chromium.base.ObserverList;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * Helper class for implementations of {@link ListObservable}, with some convenience methods for
@@ -14,6 +14,7 @@ import org.chromium.base.ObserverList;
  * @param <P> The parameter type for the payload for partial updates. Use {@link Void} for
  *         implementations that don't support partial updates.
  */
+@NullMarked
 public abstract class ListObservableImpl<P> implements ListObservable<P> {
     private final ObserverList<ListObserver<P>> mObservers = new ObserverList<>();
 
@@ -101,18 +102,6 @@ public abstract class ListObservableImpl<P> implements ListObservable<P> {
     protected void notifyItemMoved(int curIndex, int newIndex) {
         for (ListObserver observer : mObservers) {
             observer.onItemMoved(this, curIndex, newIndex);
-        }
-    }
-
-    /**
-     * Notifies that the items as {@code firstIndex} and {@code secondIndex} have been swapped.
-     *
-     * @param firstIndex The first position of the swap.
-     * @param secondIndex The second position of the swap.
-     */
-    protected void notifyItemSwapped(int firstIndex, int secondIndex) {
-        for (ListObserver observer : mObservers) {
-            observer.onItemSwapped(this, firstIndex, secondIndex);
         }
     }
 }

@@ -5,7 +5,7 @@
 #ifndef CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_CONTENT_SETTINGS_PROXY_IMPL_H_
 #define CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_CONTENT_SETTINGS_PROXY_IMPL_H_
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
@@ -29,7 +29,8 @@ class ServiceWorkerContentSettingsProxyImpl final
   ServiceWorkerContentSettingsProxyImpl(
       const GURL& script_url,
       scoped_refptr<ServiceWorkerContextWrapper> context_wrapper,
-      mojo::PendingReceiver<blink::mojom::WorkerContentSettingsProxy> receiver);
+      mojo::PendingReceiver<blink::mojom::WorkerContentSettingsProxy> receiver,
+      blink::StorageKey storage_key);
 
   ~ServiceWorkerContentSettingsProxyImpl() override;
 
@@ -37,13 +38,13 @@ class ServiceWorkerContentSettingsProxyImpl final
   void AllowIndexedDB(AllowIndexedDBCallback callback) override;
   void AllowCacheStorage(AllowCacheStorageCallback callback) override;
   void AllowWebLocks(AllowCacheStorageCallback callback) override;
-  void RequestFileSystemAccessSync(
-      RequestFileSystemAccessSyncCallback callback) override;
+  void AllowFileSystem(AllowFileSystemCallback callback) override;
 
  private:
   const url::Origin origin_;
   scoped_refptr<ServiceWorkerContextWrapper> context_wrapper_;
   mojo::Receiver<blink::mojom::WorkerContentSettingsProxy> receiver_;
+  const blink::StorageKey storage_key_;
 };
 
 }  // namespace content

@@ -5,6 +5,8 @@
 #ifndef COMPONENTS_EXO_WAYLAND_WAYLAND_POINTER_DELEGATE_H_
 #define COMPONENTS_EXO_WAYLAND_WAYLAND_POINTER_DELEGATE_H_
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "components/exo/pointer_delegate.h"
 #include "components/exo/wayland/wayland_input_delegate.h"
 
@@ -26,6 +28,8 @@ class WaylandPointerDelegate : public WaylandInputDelegate,
   WaylandPointerDelegate(const WaylandPointerDelegate&) = delete;
   WaylandPointerDelegate& operator=(const WaylandPointerDelegate&) = delete;
 
+  ~WaylandPointerDelegate() override;
+
   // Overridden from PointerDelegate:
   void OnPointerDestroying(Pointer* pointer) override;
   bool CanAcceptPointerEventsForSurface(Surface* surface) const override;
@@ -41,18 +45,21 @@ class WaylandPointerDelegate : public WaylandInputDelegate,
   void OnPointerScroll(base::TimeTicks time_stamp,
                        const gfx::Vector2dF& offset,
                        bool discrete) override;
-  void OnPointerScrollStop(base::TimeTicks time_stamp) override;
+  void OnFingerScrollStop(base::TimeTicks time_stamp) override;
   void OnPointerFrame() override;
+  base::WeakPtr<PointerDelegate> GetWeakPtr() override;
 
  private:
   // The client who own this pointer instance.
   wl_client* client() const;
 
   // The pointer resource associated with the pointer.
-  wl_resource* const pointer_resource_;
+  const raw_ptr<wl_resource> pointer_resource_;
 
   // Owned by Server, which always outlives this delegate.
-  SerialTracker* const serial_tracker_;
+  const raw_ptr<SerialTracker> serial_tracker_;
+
+  base::WeakPtrFactory<WaylandPointerDelegate> weak_factory_{this};
 };
 
 }  // namespace wayland

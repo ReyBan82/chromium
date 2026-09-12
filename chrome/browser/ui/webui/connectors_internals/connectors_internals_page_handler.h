@@ -7,12 +7,20 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "base/values.h"
-#include "chrome/browser/ui/webui/connectors_internals/connectors_internals.mojom.h"
+#include "build/build_config.h"
+#include "components/enterprise/browser/reporting/report_request.h"
+#include "components/enterprise/connectors/connectors_internals.mojom.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 
 class Profile;
+
+namespace enterprise_reporting {
+class ChromeProfileRequestGenerator;
+enum class ReportGenerationError;
+}  // namespace enterprise_reporting
 
 namespace enterprise_connectors {
 
@@ -34,13 +42,30 @@ class ConnectorsInternalsPageHandler
  private:
   // connectors_internals::mojom::ConnectorsInternalsPageHandler
   void GetDeviceTrustState(GetDeviceTrustStateCallback callback) override;
+  void DeleteDeviceTrustKey(DeleteDeviceTrustKeyCallback callback) override;
+  void GetClientCertificateState(
+      GetClientCertificateStateCallback callback) override;
+  void GetSignalsReportingState(
+      GetSignalsReportingStateCallback callback) override;
+  void GetProvisioningDomainState(
+      GetProvisioningDomainStateCallback callback) override;
 
+  void OnReportGenerated(
+      GetSignalsReportingStateCallback callback,
+      connectors_internals::mojom::SignalsReportingStatePtr state,
+      base::expected<enterprise_reporting::ReportRequestQueue,
+                     enterprise_reporting::ReportGenerationError> result);
+
+#if !BUILDFLAG(IS_ANDROID)
   void OnSignalsCollected(GetDeviceTrustStateCallback callback,
                           bool is_device_trust_enabled,
-                          const base::Value::Dict signals);
+                          const base::DictValue signals);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   mojo::Receiver<connectors_internals::mojom::PageHandler> receiver_;
   raw_ptr<Profile> profile_;
+  std::unique_ptr<enterprise_reporting::ChromeProfileRequestGenerator>
+      request_generator_;
 
   base::WeakPtrFactory<ConnectorsInternalsPageHandler> weak_ptr_factory_{this};
 };

@@ -4,7 +4,9 @@
 
 #include "chrome/browser/ui/views/controls/page_switcher_view.h"
 
-#include "chrome/browser/ui/views/page_info/page_info_view_factory.h"
+#include <utility>
+
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/views/layout/fill_layout.h"
 
 PageSwitcherView::PageSwitcherView(std::unique_ptr<views::View> initial_page) {
@@ -15,8 +17,9 @@ PageSwitcherView::PageSwitcherView(std::unique_ptr<views::View> initial_page) {
 PageSwitcherView::~PageSwitcherView() = default;
 
 void PageSwitcherView::SwitchToPage(std::unique_ptr<views::View> page) {
-  if (current_page_)
-    RemoveChildViewT(current_page_.get());
+  if (current_page_) {
+    RemoveChildViewT(std::exchange(current_page_, nullptr));
+  }
   current_page_ = AddChildView(std::move(page));
   PreferredSizeChanged();
 }
@@ -28,3 +31,6 @@ views::View* PageSwitcherView::GetCurrentPage() {
 void PageSwitcherView::ChildPreferredSizeChanged(views::View* child) {
   PreferredSizeChanged();
 }
+
+BEGIN_METADATA(PageSwitcherView)
+END_METADATA

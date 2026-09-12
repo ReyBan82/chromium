@@ -6,12 +6,13 @@
 #define COMPONENTS_PERMISSIONS_ANDROID_BLUETOOTH_SCANNING_PROMPT_ANDROID_H_
 
 #include "base/android/jni_android.h"
-#include "base/android/jni_int_wrapper.h"
 #include "base/android/jni_string.h"
 #include "base/android/scoped_java_ref.h"
 #include "base/memory/raw_ptr.h"
+#include "components/permissions/android/jni_headers/BluetoothScanningPermissionDialog_shared_jni.h"
 #include "content/public/browser/bluetooth_scanning_prompt.h"
 #include "content/public/browser/web_contents.h"
+#include "third_party/jni_zero/jni_zero.h"
 
 namespace permissions {
 
@@ -27,10 +28,10 @@ class BluetoothScanningPromptAndroid : public content::BluetoothScanningPrompt {
       base::OnceCallback<base::android::ScopedJavaLocalRef<jobject>(
           JNIEnv*,
           const base::android::JavaRef<jobject>&,
-          const base::android::JavaRef<jstring>&,
+          const std::u16string&,
           JniIntWrapper,
           const base::android::JavaRef<jobject>&,
-          jlong)>;
+          int64_t)>;
 
   BluetoothScanningPromptAndroid(
       content::RenderFrameHost* frame,
@@ -50,18 +51,14 @@ class BluetoothScanningPromptAndroid : public content::BluetoothScanningPrompt {
                          const std::u16string& device_name) override;
 
   // Report the dialog's result.
-  void OnDialogFinished(JNIEnv* env, jint event_type);
+  void OnDialogFinished(JNIEnv* env,
+                        content::BluetoothScanningPrompt::Event event);
 
   static std::unique_ptr<BluetoothScanningPromptAndroid> CreateForTesting(
       content::RenderFrameHost* frame,
       const EventHandler& event_handler,
       std::unique_ptr<BluetoothScanningPromptAndroidDelegate> delegate,
-      CreateJavaDialogCallback create_java_dialog_callback) {
-    // Using `new` to access a non-public constructor.
-    return base::WrapUnique(new BluetoothScanningPromptAndroid(
-        frame, event_handler, std::move(delegate),
-        std::move(create_java_dialog_callback)));
-  }
+      CreateJavaDialogCallback create_java_dialog_callback);
 
  private:
   BluetoothScanningPromptAndroid(

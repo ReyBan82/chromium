@@ -5,7 +5,8 @@
 #ifndef CHROME_BROWSER_WEB_APPLICATIONS_WEB_APP_PROVIDER_FACTORY_H_
 #define CHROME_BROWSER_WEB_APPLICATIONS_WEB_APP_PROVIDER_FACTORY_H_
 
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
+#include "build/build_config.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 
 namespace content {
@@ -15,6 +16,17 @@ class BrowserContext;
 class Profile;
 
 namespace web_app {
+
+#if BUILDFLAG(IS_CHROMEOS)
+// The possible states of the link capturing preference migration. This state is
+// persisted in the preference system to prevent running the migration multiple
+// times when the feature flag remains in the same state.
+enum class MigrationState {
+  kDefaultOff = 0,
+  kDefaultOn = 1,
+  kOnViaClientMode = 2,
+};
+#endif
 
 class WebAppProvider;
 
@@ -32,7 +44,7 @@ class WebAppProviderFactory : public BrowserContextKeyedServiceFactory {
   static bool IsServiceCreatedForProfile(Profile* profile);
 
  private:
-  friend struct base::DefaultSingletonTraits<WebAppProviderFactory>;
+  friend base::NoDestructor<WebAppProviderFactory>;
   friend class WebAppProvider;
 
   WebAppProviderFactory();
@@ -42,7 +54,7 @@ class WebAppProviderFactory : public BrowserContextKeyedServiceFactory {
   static WebAppProvider* GetForProfile(Profile* profile);
 
   // BrowserContextKeyedServiceFactory
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
   bool ServiceIsCreatedWithBrowserContext() const override;
   content::BrowserContext* GetBrowserContextToUse(

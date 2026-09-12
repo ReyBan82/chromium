@@ -5,29 +5,30 @@
 #include "chrome/browser/ash/system_web_apps/test_support/system_web_app_integration_test.h"
 
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/apps/app_service/app_launch_params.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/web_applications/app_browser_controller.h"
 #include "chrome/browser/web_applications/web_app_helpers.h"
 #include "chrome/browser/web_applications/web_app_provider.h"
+#include "chrome/browser/web_applications/web_app_registrar.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/aura/window.h"
+#include "ui/base/base_window.h"
 
 namespace ash {
 
-SystemWebAppIntegrationTest::SystemWebAppIntegrationTest()
-    : SystemWebAppManagerBrowserTest(false /* install_mock */) {}
+SystemWebAppIntegrationTest::SystemWebAppIntegrationTest() = default;
 
 SystemWebAppIntegrationTest::~SystemWebAppIntegrationTest() = default;
 
 Profile* SystemWebAppIntegrationTest::profile() {
-  return browser()->profile();
+  return browser()->GetProfile();
 }
 
 void SystemWebAppIntegrationTest::ExpectSystemWebAppValid(
@@ -38,12 +39,13 @@ void SystemWebAppIntegrationTest::ExpectSystemWebAppValid(
 
   // Launch but don't wait for page load here because we want to check the
   // browser window's title is set before the page loads.
-  // TODO(crbug.com/1107285): This isn't a strong guarantee that we check the
+  // TODO(crbug.com/40140789): This isn't a strong guarantee that we check the
   // title before the page loads. We should improve this.
-  Browser* app_browser;
+  BrowserWindowInterface* app_browser = nullptr;
   LaunchAppWithoutWaiting(app_type, &app_browser);
 
-  web_app::AppId app_id = app_browser->app_controller()->app_id();
+  webapps::AppId app_id =
+      web_app::AppBrowserController::From(app_browser)->app_id();
   EXPECT_EQ(GetManager().GetAppIdForSystemApp(app_type), app_id);
   EXPECT_TRUE(GetManager().IsSystemWebApp(app_id));
 
@@ -51,12 +53,12 @@ void SystemWebAppIntegrationTest::ExpectSystemWebAppValid(
       web_app::WebAppProvider::GetForTest(profile())->registrar_unsafe();
   EXPECT_EQ(title, registrar.GetAppShortName(app_id));
   EXPECT_EQ(base::ASCIIToUTF16(title),
-            app_browser->window()->GetNativeWindow()->GetTitle());
+            app_browser->GetWindow()->GetNativeWindow()->GetTitle());
   EXPECT_TRUE(registrar.HasExternalAppWithInstallSource(
       app_id, web_app::ExternalInstallSource::kSystemInstalled));
 
   content::WebContents* web_contents =
-      app_browser->tab_strip_model()->GetActiveWebContents();
+      app_browser->GetTabStripModel()->GetActiveWebContents();
 
   // The opened window should be showing the url with attached WebUI.
   EXPECT_EQ(url, web_contents->GetVisibleURL());
@@ -71,7 +73,7 @@ void SystemWebAppIntegrationTest::ExpectSystemWebAppValid(
 
   // A completed navigation could change the window title. Check again.
   EXPECT_EQ(base::ASCIIToUTF16(title),
-            app_browser->window()->GetNativeWindow()->GetTitle());
+            app_browser->GetWindow()->GetNativeWindow()->GetTitle());
 }
 
 content::WebContents* SystemWebAppIntegrationTest::LaunchAppWithFile(

@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import logging
 from datetime import datetime
 
 from chrome_ent_test.infra.core import before_all
@@ -12,10 +13,10 @@ from chrome_ent_test.infra.core import test
 from .. import ChromeReportingConnectorTestCase, VerifyContent
 from .crowdstrike_humio_api_service import CrowdStrikeHumioApiService
 
+
 @category("chrome_only")
 @environment(file="../connector_test.asset.textpb")
 class ReportingConnectorwithCrowdStrikeTest(ChromeReportingConnectorTestCase):
-
   @before_all
   def setup(self):
     self.InstallBrowserAndEnableUITest()
@@ -29,11 +30,14 @@ class ReportingConnectorwithCrowdStrikeTest(ChromeReportingConnectorTestCase):
     testStartTime = datetime.utcnow()
 
     # trigger malware event & get device id from browser
-    deviceId = self.TriggerUnsafeBrowsingEvent()
+    deviceId, histogram = self.TriggerUnsafeBrowsingEvent()
+    logging.info('histogram: %s', histogram)
 
     # read service account private key from gs-bucket & write into local
     apiService = CrowdStrikeHumioApiService(
-        self.GetFileFromGCSBucket('secrets/humio_user_token'))
+      self.GetFileFromGCSBucket('secrets/humio_user_token')
+    )
     self.TryVerifyUntilTimeout(
-        verifyClass=apiService,
-        content=VerifyContent(deviceId=deviceId, timestamp=testStartTime))
+      verifyClass=apiService,
+      content=VerifyContent(deviceId=deviceId, timestamp=testStartTime),
+    )

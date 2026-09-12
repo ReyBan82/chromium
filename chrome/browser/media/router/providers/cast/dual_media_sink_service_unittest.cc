@@ -7,6 +7,7 @@
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/test/mock_callback.h"
 #include "chrome/browser/media/router/test/provider_test_helpers.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -58,9 +59,10 @@ class DualMediaSinkServiceTest : public testing::Test {
 
   ~DualMediaSinkServiceTest() override = default;
 
-  MOCK_METHOD2(OnSinksDiscovered,
-               void(const std::string& provider_name,
-                    const std::vector<MediaSinkInternal>& sinks));
+  MOCK_METHOD(void,
+              OnSinksDiscovered,
+              (const std::string& provider_name,
+               const std::vector<MediaSinkInternal>& sinks));
 
  protected:
   // Must outlive the raw_ptrs below.
@@ -115,6 +117,13 @@ TEST_F(DualMediaSinkServiceTest, AddSinksDiscoveredCallbackAfterDiscovery) {
   auto subscription = dual_media_sink_service_->AddSinksDiscoveredCallback(
       base::BindRepeating(&DualMediaSinkServiceTest::OnSinksDiscovered,
                           base::Unretained(this)));
+}
+
+TEST_F(DualMediaSinkServiceTest, SetPermissionRejectedCallback) {
+  base::MockCallback<base::RepeatingClosure> cb;
+  dual_media_sink_service_->SetDiscoveryPermissionRejectedCallback(cb.Get());
+  EXPECT_CALL(cb, Run());
+  dual_media_sink_service_->OnDiscoveryPermissionRejected();
 }
 
 }  // namespace media_router

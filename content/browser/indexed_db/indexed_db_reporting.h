@@ -5,23 +5,31 @@
 #ifndef CONTENT_BROWSER_INDEXED_DB_INDEXED_DB_REPORTING_H_
 #define CONTENT_BROWSER_INDEXED_DB_INDEXED_DB_REPORTING_H_
 
+#include <cmath>
 #include <string>
 
+#include "base/functional/callback.h"
 #include "base/logging.h"
+#include "base/memory/raw_ref.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
+#include "base/time/time.h"
+#include "content/browser/indexed_db/status.h"
+#include "net/base/net_errors.h"
 #include "third_party/leveldatabase/src/include/leveldb/status.h"
 
 namespace storage {
 struct BucketLocator;
 }  // namespace storage
 
-namespace content {
-namespace indexed_db {
+namespace content::indexed_db {
+
 constexpr static const char* kBackingStoreActionUmaName =
     "WebCore.IndexedDB.BackingStore.Action";
 
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
-enum IndexedDBBackingStoreErrorSource {
+enum BackingStoreErrorSource {
   // 0 - 2 are no longer used.
   FIND_KEY_IN_INDEX = 3,
   GET_IDBDATABASE_METADATA = 4,
@@ -51,33 +59,99 @@ enum IndexedDBBackingStoreErrorSource {
   GET_BLOB_KEY_GENERATOR_CURRENT_NUMBER = 28,
   GET_BLOB_INFO_FOR_RECORD = 29,
   UPGRADING_SCHEMA_CORRUPTED_BLOBS = 30,
-  REVERT_SCHEMA_TO_V2 = 31,
+  // REVERT_SCHEMA_TO_V2 = 31,
   CREATE_ITERATOR = 32,
   INTERNAL_ERROR_MAX,
 };
 
 // These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum IndexedDBBackingStoreOpenResult {
-  INDEXED_DB_BACKING_STORE_OPEN_MEMORY_SUCCESS,
-  INDEXED_DB_BACKING_STORE_OPEN_SUCCESS,
-  INDEXED_DB_BACKING_STORE_OPEN_FAILED_DIRECTORY,
-  INDEXED_DB_BACKING_STORE_OPEN_FAILED_UNKNOWN_SCHEMA,
-  INDEXED_DB_BACKING_STORE_OPEN_CLEANUP_DESTROY_FAILED,
-  INDEXED_DB_BACKING_STORE_OPEN_CLEANUP_REOPEN_FAILED,
-  INDEXED_DB_BACKING_STORE_OPEN_CLEANUP_REOPEN_SUCCESS,
-  INDEXED_DB_BACKING_STORE_OPEN_FAILED_IO_ERROR_CHECKING_SCHEMA,
-  INDEXED_DB_BACKING_STORE_OPEN_FAILED_UNKNOWN_ERR_DEPRECATED,
-  INDEXED_DB_BACKING_STORE_OPEN_MEMORY_FAILED,
-  INDEXED_DB_BACKING_STORE_OPEN_ATTEMPT_NON_ASCII,
-  INDEXED_DB_BACKING_STORE_OPEN_DISK_FULL_DEPRECATED,
-  INDEXED_DB_BACKING_STORE_OPEN_ORIGIN_TOO_LONG,
-  INDEXED_DB_BACKING_STORE_OPEN_NO_RECOVERY,
-  INDEXED_DB_BACKING_STORE_OPEN_FAILED_PRIOR_CORRUPTION,
-  INDEXED_DB_BACKING_STORE_OPEN_FAILED_CLEANUP_JOURNAL_ERROR,
-  INDEXED_DB_BACKING_STORE_OPEN_FAILED_METADATA_SETUP,
+// numeric values should never be reused. Commented out values are deprecated.
+enum BackingStoreOpenResult {
+  // INDEXED_DB_BACKING_STORE_OPEN_MEMORY_SUCCESS = 0,
+  INDEXED_DB_BACKING_STORE_OPEN_SUCCESS = 1,
+  INDEXED_DB_BACKING_STORE_OPEN_FAILED_DIRECTORY = 2,
+  INDEXED_DB_BACKING_STORE_OPEN_FAILED_UNKNOWN_SCHEMA = 3,
+  INDEXED_DB_BACKING_STORE_OPEN_CLEANUP_DESTROY_FAILED = 4,
+  INDEXED_DB_BACKING_STORE_OPEN_CLEANUP_REOPEN_FAILED = 5,
+  INDEXED_DB_BACKING_STORE_OPEN_CLEANUP_REOPEN_SUCCESS = 6,
+  INDEXED_DB_BACKING_STORE_OPEN_FAILED_IO_ERROR_CHECKING_SCHEMA = 7,
+  // INDEXED_DB_BACKING_STORE_OPEN_FAILED_UNKNOWN_ERR_DEPRECATED = 8,
+  // INDEXED_DB_BACKING_STORE_OPEN_MEMORY_FAILED = 9,
+  INDEXED_DB_BACKING_STORE_OPEN_ATTEMPT_NON_ASCII = 10,
+  INDEXED_DB_BACKING_STORE_OPEN_DISK_FULL = 11,
+  INDEXED_DB_BACKING_STORE_OPEN_ORIGIN_TOO_LONG = 12,
+  INDEXED_DB_BACKING_STORE_OPEN_NO_RECOVERY = 13,
+  INDEXED_DB_BACKING_STORE_OPEN_FAILED_PRIOR_CORRUPTION = 14,
+  INDEXED_DB_BACKING_STORE_OPEN_FAILED_CLEANUP_JOURNAL_ERROR = 15,
+  INDEXED_DB_BACKING_STORE_OPEN_FAILED_METADATA_SETUP = 16,
   INDEXED_DB_BACKING_STORE_OPEN_MAX,
 };
+
+// The outcome of an `IDBFactory::Open` request from the browser's perspective,
+// after which subsequent outcomes are dependent on the client's behaviour.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+// LINT.IfChange(DatabaseConnectionOpenResult)
+enum class DatabaseConnectionOpenResult {
+  // Logged for all ostensibly valid requests before processing begins.
+  kReceivedRequest = 0,
+  // The connection was opened directly without a version change.
+  kSuccessDirectOpen = 1,
+  // The connection was opened successfully and a version change was needed.
+  kSuccessUpgradeNeeded = 2,
+  // A version change was needed, but the database had to be recreated due to
+  // data loss (e.g. corruption).
+  kSuccessUpgradeNeededWithDataLoss = 3,
+  // The backing store could not be initialized.
+  kErrorBackingStoreInitFailed = 4,
+  // Creating/opening the database in the backing store failed.
+  kErrorDatabaseOpenFailed = 5,
+  // The requested version was lower than the existing version.
+  kErrorVersionTooLow = 6,
+  kMaxValue = kErrorVersionTooLow,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/storage/enums.xml:DatabaseConnectionOpenResult)
+
+// Each value in this enum corresponds to a particular check in code that
+// validates an IPC from a renderer. Each enum value should appear in code
+// exactly once. These are used for logging to help track down invalid
+// assumptions in our code; if any value is logged more than a trivial amount,
+// there is likely a bug, and these validations should ideally only fail due to
+// misbehaving renderers.
+// LINT.IfChange(BadMessageReason)
+enum class BadMessageReason {
+  kBucketContextOpenInvalidVersion = 0,
+  kConnectionCreateTransactionInvalidMode = 1,
+  kConnectionCreateTransactionAlreadyExists = 2,
+  kConnectionGetAllInvalidMaxCount = 3,
+  kConnectionOpenCursorInvalidTaskType = 4,
+  kConnectionOpenCursorInvalidIteration = 5,
+  kConnectionCreateIndexInvalidMetadata = 6,
+  kConnectionWrongTransactionMode = 7,
+  kCursorAdvanceInvalidCount = 8,
+  kCursorContinueInvalidPrimaryKey = 9,
+  kCursorPrefetchResetInvalidCount = 10,
+  kCursorPrefetchResetFailedToReset = 11,
+  kCursorPrefetchResetInvalidUsedPrefetches = 12,
+  kTransactionCreateObjectStoreInvalidId = 13,
+  kTransactionPutReadOnly = 14,
+  // kTransactionPutInvalidValue = 15,
+  kTransactionPutInvalidExternalObjects = 16,
+  kTransactionDoPutInvalidObjectStoreId = 17,
+  kTransactionDoPutInvalidIndexId = 18,
+  kTransactionDoPutInvalidKey = 19,
+  kTransactionDoPutInvalidIndexKey = 20,
+  kTransactionDoPutInvalidRecord = 21,
+  kTransactionSetIndexKeysWrongMode = 22,
+  kTransactionSetIndexKeysInvalidKey = 23,
+  kTransactionSetIndexKeysDoneWrongMode = 24,
+  kTransactionSetIndexKeysDoneWithoutIndexing = 25,
+  kTransactionObjectStoreMustExistInvalidId = 26,
+  kTransactionObjectStoreAndIndexMustExistInvalidIndexId = 27,
+  kTransactionObjectStoreAndIndexMustExistInvalidIds = 28,
+  kMaxValue = kTransactionObjectStoreAndIndexMustExistInvalidIds,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/storage/enums.xml:IndexedDBBadMessageReason)
 
 // These values are used for UMA metrics and should never be changed.
 enum class IndexedDBAction {
@@ -91,14 +165,81 @@ enum class IndexedDBAction {
   kMaxValue = kDatabaseDeleteAttempt,
 };
 
-void ReportOpenStatus(IndexedDBBackingStoreOpenResult result,
+// Accumulates the elapsed time between construction and destruction into
+// `duration`.
+class ScopedTimeAccumulator {
+ public:
+  explicit ScopedTimeAccumulator(base::TimeDelta& duration)
+      : duration_(duration), start_time_(base::TimeTicks::Now()) {}
+  ~ScopedTimeAccumulator() {
+    *duration_ += base::TimeTicks::Now() - start_time_;
+  }
+
+  ScopedTimeAccumulator(const ScopedTimeAccumulator&) = delete;
+  ScopedTimeAccumulator& operator=(const ScopedTimeAccumulator&) = delete;
+  ScopedTimeAccumulator(ScopedTimeAccumulator&&) = delete;
+  ScopedTimeAccumulator& operator=(ScopedTimeAccumulator&&) = delete;
+
+ private:
+  const raw_ref<base::TimeDelta> duration_;
+  base::TimeTicks start_time_;
+};
+
+void ReportOpenStatus(BackingStoreOpenResult result,
                       const storage::BucketLocator& bucket_locator);
 
-void ReportInternalError(const char* type,
-                         IndexedDBBackingStoreErrorSource location);
+void ReportInternalError(const char* type, BackingStoreErrorSource location);
 
 void ReportLevelDBError(const std::string& histogram_name,
                         const leveldb::Status& s);
+
+inline void Log(DatabaseConnectionOpenResult result,
+                std::string_view histogram_suffix) {
+  base::UmaHistogramEnumeration(
+      base::StrCat(
+          {"IndexedDB.DatabaseConnectionOpenResult", histogram_suffix}),
+      result);
+}
+
+// Logs `duration` to `histogram_name` concatenated with `histogram_suffix`.
+inline void LogDuration(const base::TimeDelta& duration,
+                        std::string_view histogram_name,
+                        std::string_view histogram_suffix) {
+  base::UmaHistogramTimes(base::StrCat({histogram_name, histogram_suffix}),
+                          duration);
+}
+
+// Logs `status` to `histogram_name` concatenated with `histogram_suffix`.
+inline Status LogStatus(Status status,
+                        std::string_view histogram_name,
+                        std::string_view histogram_suffix) {
+  status.Log(base::StrCat({histogram_name, histogram_suffix}));
+  return status;
+}
+
+// Logs the `net::Error` `result` to `histogram_name` concatenated with
+// `histogram_suffix`.
+inline void LogNetError(std::string_view histogram_name,
+                        std::string_view histogram_suffix,
+                        net::Error result) {
+  base::UmaHistogramSparse(base::StrCat({histogram_name, histogram_suffix}),
+                           std::abs(result));
+}
+
+void ReportBadMessage(BadMessageReason reason,
+                      std::string_view message,
+                      base::OnceCallback<void(std::string_view)>
+                          report_bad_message_callback = {});
+
+// Performs `action` and logs its result (expected to be a `StatusOr<>`) to
+// `histogram_name` concatenated with `histogram_suffix`.
+#define LOG_RESULT(action, histogram_name, histogram_suffix)                  \
+  [&](std::string_view _histogram_name, std::string_view _histogram_suffix) { \
+    auto _result = action;                                                    \
+    LogStatus(_result.error_or(Status::OK()), _histogram_name,                \
+              _histogram_suffix);                                             \
+    return _result;                                                           \
+  }(histogram_name, histogram_suffix)
 
 // Use to signal conditions caused by data corruption.
 // A macro is used instead of an inline function so that the assert and log
@@ -115,7 +256,6 @@ void ReportLevelDBError(const std::string& histogram_name,
   REPORT_ERROR("Consistency", location)
 #define INTERNAL_WRITE_ERROR(location) REPORT_ERROR("Write", location)
 
-}  // namespace indexed_db
-}  // namespace content
+}  // namespace content::indexed_db
 
 #endif  // CONTENT_BROWSER_INDEXED_DB_INDEXED_DB_REPORTING_H_

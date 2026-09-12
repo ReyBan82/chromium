@@ -4,14 +4,13 @@
 
 #include "ash/system/network/fake_network_detailed_network_view.h"
 
-#include "ash/system/network/fake_network_list_mobile_header_view.h"
-#include "ash/system/network/fake_network_list_wifi_header_view.h"
 #include "ash/system/network/network_detailed_network_view.h"
 #include "ash/system/network/network_list_item_view.h"
-#include "ash/system/network/network_list_mobile_header_view_impl.h"
+#include "ash/system/network/network_list_mobile_header_view.h"
 #include "ash/system/network/network_list_network_item_view.h"
 #include "ash/system/network/network_list_view_controller_impl.h"
-#include "ash/system/network/network_list_wifi_header_view_impl.h"
+#include "ash/system/network/network_list_wifi_header_view.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 
 namespace ash {
 
@@ -50,8 +49,8 @@ NetworkListNetworkItemView* FakeNetworkDetailedNetworkView::AddNetworkListItem(
 
 NetworkListWifiHeaderView*
 FakeNetworkDetailedNetworkView::AddWifiSectionHeader() {
-  std::unique_ptr<FakeNetworkListWifiHeaderView> wifi_header_view =
-      std::make_unique<FakeNetworkListWifiHeaderView>(/*delegate=*/nullptr);
+  std::unique_ptr<NetworkListWifiHeaderView> wifi_header_view =
+      std::make_unique<NetworkListWifiHeaderView>(/*delegate=*/nullptr);
   wifi_header_view->SetID(static_cast<int>(
       NetworkListViewControllerImpl::NetworkListViewControllerViewChildId::
           kWifiSectionHeader));
@@ -59,14 +58,15 @@ FakeNetworkDetailedNetworkView::AddWifiSectionHeader() {
   return network_list_->AddChildView(std::move(wifi_header_view));
 }
 
-HoverHighlightView* FakeNetworkDetailedNetworkView::AddJoinNetworkEntry() {
+HoverHighlightView* FakeNetworkDetailedNetworkView::AddConfigureNetworkEntry(
+    NetworkType type) {
   return nullptr;
 }
 
 NetworkListMobileHeaderView*
 FakeNetworkDetailedNetworkView::AddMobileSectionHeader() {
-  std::unique_ptr<FakeNetworkListMobileHeaderView> mobile_header_view =
-      std::make_unique<FakeNetworkListMobileHeaderView>(/*delegate=*/nullptr);
+  std::unique_ptr<NetworkListMobileHeaderView> mobile_header_view =
+      std::make_unique<NetworkListMobileHeaderView>(/*delegate=*/nullptr);
   mobile_header_view->SetID(static_cast<int>(
       NetworkListViewControllerImpl::NetworkListViewControllerViewChildId::
           kMobileSectionHeader));
@@ -77,5 +77,8 @@ FakeNetworkDetailedNetworkView::AddMobileSectionHeader() {
 void FakeNetworkDetailedNetworkView::UpdateScanningBarVisibility(bool visible) {
   last_scan_bar_visibility_ = visible;
 }
+
+BEGIN_METADATA(FakeNetworkDetailedNetworkView)
+END_METADATA
 
 }  // namespace ash

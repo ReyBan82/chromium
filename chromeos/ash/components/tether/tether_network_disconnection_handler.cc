@@ -7,7 +7,6 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/ptr_util.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/task/single_thread_task_runner.h"
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/components/network/network_state.h"
@@ -32,7 +31,7 @@ TetherNetworkDisconnectionHandler::TetherNetworkDisconnectionHandler(
       disconnect_tethering_request_sender_(disconnect_tethering_request_sender),
       tether_session_completion_logger_(tether_session_completion_logger),
       task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {
-  network_state_handler_observer_.Observe(network_state_handler_);
+  network_state_handler_observer_.Observe(network_state_handler_.get());
 }
 
 TetherNetworkDisconnectionHandler::~TetherNetworkDisconnectionHandler() =

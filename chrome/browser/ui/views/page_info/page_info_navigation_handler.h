@@ -7,10 +7,7 @@
 
 #include "base/functional/callback_forward.h"
 #include "components/content_settings/core/common/content_settings_types.h"
-
-namespace page_info::proto {
-class SiteInfo;
-}  // namespace page_info::proto
+#include "components/page_info/core/page_info_types.h"
 
 // An interface that provides methods to navigate between pages of the page
 // info. Note that `OpenMainPage` must update the set of ignored empty storage
@@ -21,10 +18,8 @@ class PageInfoNavigationHandler {
   virtual void OpenMainPage(base::OnceClosure initialized_callback) = 0;
   virtual void OpenSecurityPage() = 0;
   virtual void OpenPermissionPage(ContentSettingsType type) = 0;
-  virtual void OpenAboutThisSitePage(
-      const page_info::proto::SiteInfo& info) = 0;
-  virtual void OpenAdPersonalizationPage() = 0;
   virtual void OpenCookiesPage() = 0;
+  virtual void OpenMerchantTrustPage() = 0;
   virtual void CloseBubble() = 0;
 };
 

@@ -10,22 +10,29 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/time/time.h"
 #include "chrome/browser/browsing_data/chrome_browsing_data_remover_constants.h"
+#include "chrome/browser/lifetime/application_lifetime_desktop.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "content/public/browser/browsing_data_remover.h"
 
 namespace {
 
 // TODO(maleksandrov, b:258196743) Move the logic into BrowserList class.
 bool HasBrowsersForProfile(Profile* profile) {
-  for (Browser* browser : *BrowserList::GetInstance()) {
-    if (browser->profile()->GetOriginalProfile() ==
-        profile->GetOriginalProfile())
-      return true;
-  }
-  return false;
+  bool found = false;
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [profile, &found](BrowserWindowInterface* browser_window_interface) {
+        if (browser_window_interface->GetProfile()->GetOriginalProfile() ==
+            profile->GetOriginalProfile()) {
+          found = true;
+          return false;
+        }
+        return true;
+      });
+  return found;
 }
 
 }  // namespace
@@ -52,30 +59,27 @@ void BrowserCleanupHandler::Cleanup(CleanupHandlerCallback callback) {
     return;
   }
 
-  BrowserList::AddObserver(this);
+  browser_collection_observation_.Observe(
+      GlobalBrowserCollection::GetInstance());
 
   // `on_close_success` doesn't wait for browser to close and is therefore not
   // used. `on_close_aborted` cannot be reached because `skip_beforeunload` is
   // true. Instead, this process should trigger `OnBrowserRemoved` method.
-  BrowserList::CloseAllBrowsersWithProfile(
-      profile_,
-      /*on_close_success=*/BrowserList::CloseCallback(),
-      /*on_close_aborted=*/BrowserList::CloseCallback(),
-      /*skip_beforeunload=*/true);
+  chrome::CloseAllBrowsersWithProfile(profile_, /*skip_beforeunload=*/true);
 }
 
-void BrowserCleanupHandler::OnBrowserRemoved(Browser* browser) {
-  if (browser->profile() != profile_)
+void BrowserCleanupHandler::OnBrowserClosed(BrowserWindowInterface* browser) {
+  if (browser->GetProfile() != profile_) {
     return;
+  }
 
   // In case any browser window is still open for current profile the cleanup
   // must not proceed otherwise some open tabs can remain in browser data.
-  for (Browser* open_browser : *BrowserList::GetInstance()) {
-    if (open_browser->profile() == profile_)
-      return;
+  if (HasBrowsersForProfile(profile_)) {
+    return;
   }
 
-  BrowserList::RemoveObserver(this);
+  browser_collection_observation_.Reset();
   RemoveBrowserHistory();
 }
 
@@ -99,7 +103,7 @@ void BrowserCleanupHandler::OnBrowsingDataRemoverDone(
   data_remover_->RemoveObserver(this);
 
   if (failed_data_types == 0) {
-    std::move(callback_).Run(absl::nullopt);
+    std::move(callback_).Run(std::nullopt);
     return;
   }
 

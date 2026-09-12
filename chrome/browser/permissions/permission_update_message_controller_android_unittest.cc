@@ -8,10 +8,11 @@
 #include "base/memory/raw_ptr.h"
 #include "base/test/mock_callback.h"
 #include "chrome/browser/android/android_theme_resources.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "components/messages/android/mock_message_dispatcher_bridge.h"
 #include "components/strings/grit/components_strings.h"
+#include "content/public/browser/navigation_controller.h"
 
 class PermissionUpdateMessageControllerAndroidTest
     : public ChromeRenderViewHostTestHarness {
@@ -41,15 +42,12 @@ class PermissionUpdateMessageControllerAndroidTest
         std::move(callback));
   }
 
-  void ShowDownload(base::OnceCallback<void(bool)> callback,
-                    bool expected_enqueue) {
-    if (expected_enqueue)
-      EXPECT_CALL(message_dispatcher_bridge_, EnqueueMessage);
-
+  void ShowLocalNetwork(base::OnceCallback<void(bool)> callback) {
+    EXPECT_CALL(message_dispatcher_bridge_, EnqueueMessage);
     GetController()->ShowMessageInternal(
-        {}, {}, {}, IDR_ANDORID_MESSAGE_PERMISSION_STORAGE,
-        IDS_MESSAGE_MISSING_STORAGE_ACCESS_PERMISSION_TITLE,
-        IDS_MESSAGE_STORAGE_ACCESS_PERMISSION_TEXT, std::move(callback));
+        {}, {}, {}, IDR_ANDROID_INFOBAR_LOCAL_NETWORK,
+        IDS_MESSAGE_MISSING_LOCAL_NETWORK_PERMISSION_TITLE,
+        IDS_MESSAGE_MISSING_LOCAL_NETWORK_PERMISSION_TEXT, std::move(callback));
   }
 
   size_t GetMessageDelegatesSize() {
@@ -150,22 +148,18 @@ TEST_F(PermissionUpdateMessageControllerAndroidTest, OnPermissionResult) {
   EXPECT_EQ(0u, GetMessageDelegatesSize());
 }
 
+// Tests that Local Network Access permission missing reprompt messages are
+// correctly enqueued with IDR_ANDROID_INFOBAR_LOCAL_NETWORK (router icon
+// R.drawable.router_24), missing title, and missing text string resource IDs.
 TEST_F(PermissionUpdateMessageControllerAndroidTest,
-       OnEnqueuingDuplciatedMessage) {
-  base::MockOnceCallback<void(bool)> mock_permission_update_callback1;
-  base::MockOnceCallback<void(bool)> mock_permission_update_callback2;
-  ShowDownload(mock_permission_update_callback1.Get(), true);
+       ShowLocalNetworkPermission) {
+  base::MockOnceCallback<void(bool)> mock_permission_update_callback;
+  ShowLocalNetwork(mock_permission_update_callback.Get());
   EXPECT_EQ(1u, GetMessageDelegatesSize());
-  ShowDownload(mock_permission_update_callback2.Get(), false);
-  EXPECT_EQ(1u, GetMessageDelegatesSize());
-  EXPECT_CALL(mock_permission_update_callback1, Run(false));
-  EXPECT_CALL(mock_permission_update_callback2, Run(false));
+  EXPECT_CALL(mock_permission_update_callback, Run(true));
 
-  // Message is dismissed first by primary action, and then permission update
-  // callback is invoked. In this case, the dismiss reason should be
-  // PRIMARY_ACTION.
   ExpectDismiss(messages::DismissReason::PRIMARY_ACTION);
   DismissedByPrimaryAction();
-  OnPermissionGranted(false);
+  OnPermissionGranted(true);
   EXPECT_EQ(0u, GetMessageDelegatesSize());
 }

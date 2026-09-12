@@ -11,6 +11,7 @@
 #include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/cancelable_task_tracker.h"
+#include "chrome/browser/content_settings/generated_permission_prompting_behavior_pref.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/favicon/favicon_service_factory.h"
 #include "chrome/browser/notifications/notification_permission_context.h"
@@ -20,19 +21,20 @@
 #include "components/content_settings/core/browser/host_content_settings_map.h"
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/favicon/core/favicon_service.h"
+#include "extensions/common/constants.h"
 
 WebPageNotifierController::WebPageNotifierController(Observer* observer)
     : observer_(observer) {}
 
-WebPageNotifierController::~WebPageNotifierController() {}
+WebPageNotifierController::~WebPageNotifierController() = default;
 
 std::vector<ash::NotifierMetadata> WebPageNotifierController::GetNotifierList(
     Profile* profile) {
   std::vector<ash::NotifierMetadata> notifiers;
 
-  ContentSettingsForOneType settings;
-  HostContentSettingsMapFactory::GetForProfile(profile)->GetSettingsForOneType(
-      ContentSettingsType::NOTIFICATIONS, &settings);
+  ContentSettingsForOneType settings =
+      HostContentSettingsMapFactory::GetForProfile(profile)
+          ->GetSettingsForOneType(ContentSettingsType::NOTIFICATIONS);
 
   favicon::FaviconService* const favicon_service =
       FaviconServiceFactory::GetForProfile(profile,
@@ -43,7 +45,16 @@ std::vector<ash::NotifierMetadata> WebPageNotifierController::GetNotifierList(
        iter != settings.end(); ++iter) {
     if (iter->primary_pattern == ContentSettingsPattern::Wildcard() &&
         iter->secondary_pattern == ContentSettingsPattern::Wildcard() &&
-        iter->source != "preference") {
+        iter->source != content_settings::ProviderType::kPrefProvider) {
+      continue;
+    }
+    // Ignore extensions which are handled by
+    // ExtensionInstallTimePermissionProvider. HostContentSettingsMap was
+    // updated with new ExtensionInstallTimePermissionProvider to include
+    // extension permissions.  MessageCenter previously required and and still
+    // uses ExtensionNotifierController, but it could likely be removed and have
+    // extensions included in WebPageNotifierController.
+    if (iter->primary_pattern.GetScheme() == extensions::kExtensionScheme) {
       continue;
     }
 
@@ -59,7 +70,7 @@ std::vector<ash::NotifierMetadata> WebPageNotifierController::GetNotifierList(
     notifiers.emplace_back(
         notifier_id, name,
         notifier_state_tracker->IsNotifierEnabled(notifier_id),
-        info.source == content_settings::SETTING_SOURCE_POLICY,
+        info.source == content_settings::SettingSource::kPolicy,
         gfx::ImageSkia());
     patterns_[url_pattern] = iter->primary_pattern;
     // Note that favicon service obtains the favicon from history. This means

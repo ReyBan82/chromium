@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "absl/synchronization/mutex.h"
-
-#include <cstdlib>
 #include <string>
 
 #include "gtest/gtest.h"
-#include "absl/base/config.h"
+
+#ifdef _MSC_VER
+#include "absl/synchronization/mutex.h"
+#endif
 
 namespace {
 
@@ -26,8 +26,8 @@ class IncompleteClass;
 
 #ifdef _MSC_VER
 // These tests verify expectations about sizes of MSVC pointers to methods.
-// Pointers to methods are distinguished by whether their class hierachies
-// contain single inheritance, multiple inheritance, or virtual inheritence.
+// Pointers to methods are distinguished by whether their class hierarchies
+// contain single inheritance, multiple inheritance, or virtual inheritance.
 
 // Declare classes of the various MSVC inheritance types.
 class __single_inheritance SingleInheritance{};

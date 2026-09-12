@@ -3,17 +3,15 @@
 // found in the LICENSE file.
 
 #import <UIKit/UIKit.h>
+
 #import <ostream>
 
 #import "base/functional/bind.h"
 #import "base/notreached.h"
 #import "ios/public/provider/chrome/browser/lens/lens_api.h"
 #import "ios/public/provider/chrome/browser/lens/lens_configuration.h"
+#import "ios/public/provider/chrome/browser/lens/lens_overlay_api.h"
 #import "ios/web/public/navigation/navigation_manager.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace ios {
 namespace provider {
@@ -28,12 +26,19 @@ enum ChromiumLensProviderErrors : NSInteger {
   kChromiumLensProviderErrorNotImplemented,
 };
 
+}  // namespace
+
+UIViewController<ChromeLensViewFinderController>*
+NewChromeLensViewFinderController(LensConfiguration* config) {
+  // Lens is not supported in Chromium.
+  return nil;
 }
 
-using LensWebParamsCallback =
-    base::OnceCallback<void(web::NavigationManager::WebLoadParams)>;
-
-id<ChromeLensController> NewChromeLensController(LensConfiguration* config) {
+UIViewController<ChromeLensOverlay>* NewChromeLensOverlay(
+    LensImageSource* imageSource,
+    LensConfiguration* config,
+    NSArray<UIAction*>* precedingMenuItems,
+    NSArray<UIAction*>* additionalMenuItems) {
   // Lens is not supported in Chromium.
   return nil;
 }
@@ -43,18 +48,13 @@ bool IsLensSupported() {
   return false;
 }
 
-bool IsLensWebResultsURL(const GURL& url) {
-  // Lens is not supported in Chromium.
-  return false;
-}
-
-absl::optional<LensEntrypoint> GetLensEntryPointFromURL(const GURL& url) {
-  return absl::nullopt;
-}
-
-void GenerateLensLoadParamsAsync(LensQuery* query,
-                                 LensWebParamsCallback completion) {
-  NOTREACHED() << "Lens is not supported.";
+std::optional<std::string> GenerateLensSapisidHash(
+    const std::string& email,
+    const std::string& sapisid_cookie,
+    const std::string& origin,
+    base::Time timestamp) {
+  // Lens identity delegation is not supported in Chromium.
+  return std::nullopt;
 }
 
 }  // namespace provider

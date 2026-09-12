@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/utility/safe_browsing/mac/hfs.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -9,16 +11,17 @@
 #include <tuple>
 #include <vector>
 
-#include "chrome/utility/safe_browsing/mac/hfs.h"
+#include "base/containers/span.h"
 #include "chrome/utility/safe_browsing/mac/read_stream.h"
-#include "testing/libfuzzer/libfuzzer_exports.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  safe_browsing::dmg::MemoryReadStream input(data, size);
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(const base::span<const uint8_t> data) {
+  safe_browsing::dmg::MemoryReadStream input(data);
   safe_browsing::dmg::HFSIterator hfs_iterator(&input);
 
-  if (!hfs_iterator.Open())
+  if (!hfs_iterator.Open()) {
     return 0;
+  }
 
   std::vector<uint8_t> buffer(getpagesize(), 0);
 
@@ -28,16 +31,18 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     std::ignore = hfs_iterator.IsDecmpfsCompressed();
     std::ignore = hfs_iterator.GetPath();
 
-    if (hfs_iterator.IsDirectory() || hfs_iterator.IsHardLink())
+    if (hfs_iterator.IsDirectory() || hfs_iterator.IsHardLink()) {
       continue;
+    }
 
     // Read out file contents.
     std::unique_ptr<safe_browsing::dmg::ReadStream> file(
         hfs_iterator.GetReadStream());
     size_t read_this_pass = 0;
     do {
-      if (!file->Read(buffer.data(), buffer.size(), &read_this_pass))
+      if (!file->Read(buffer, &read_this_pass)) {
         break;
+      }
     } while (read_this_pass != 0);
   }
 

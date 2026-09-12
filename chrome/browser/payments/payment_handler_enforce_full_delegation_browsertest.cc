@@ -81,8 +81,17 @@ IN_PROC_BROWSER_TEST_P(PaymentHandlerEnforceFullDelegationTest,
   }
 }
 
+// crbug.com/40924829: Flaky test on Android.
+// crbug.com/40926997: Flaky test on ChromeOS and Windows.
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN)
+#define MAYBE_WhenEnabled_ShowPaymentSheet_WhenDisabled_Reject \
+  DISABLED_WhenEnabled_ShowPaymentSheet_WhenDisabled_Reject
+#else
+#define MAYBE_WhenEnabled_ShowPaymentSheet_WhenDisabled_Reject \
+  WhenEnabled_ShowPaymentSheet_WhenDisabled_Reject
+#endif
 IN_PROC_BROWSER_TEST_P(PaymentHandlerEnforceFullDelegationTest,
-                       WhenEnabled_ShowPaymentSheet_WhenDisabled_Reject) {
+                       MAYBE_WhenEnabled_ShowPaymentSheet_WhenDisabled_Reject) {
   NavigateTo("a.com", "/enforce_full_delegation.test/index.html");
 
   std::string method_name;

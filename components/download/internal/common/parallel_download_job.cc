@@ -7,7 +7,6 @@
 #include <algorithm>
 
 #include "base/functional/bind.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/time/time.h"
 #include "components/download/internal/common/parallel_download_utils.h"
 #include "components/download/public/common/download_create_info.h"
@@ -109,7 +108,7 @@ void ParallelDownloadJob::CancelRequestWithOffset(int64_t offset) {
   }
 
   auto it = workers_.find(offset);
-  DCHECK(it != workers_.end());
+  CHECK(it != workers_.end());
   it->second->Cancel(false);
 }
 
@@ -200,8 +199,7 @@ void ParallelDownloadJob::BuildParallelRequests() {
     return;
 
   ForkSubRequests(slices_to_download);
-  RecordParallelDownloadRequestCount(
-      static_cast<int>(slices_to_download.size()));
+
   requests_sent_ = true;
 }
 

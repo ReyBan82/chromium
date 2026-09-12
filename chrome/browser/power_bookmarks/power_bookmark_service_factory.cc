@@ -23,23 +23,28 @@ PowerBookmarkServiceFactory::GetForBrowserContext(
 
 // static
 PowerBookmarkServiceFactory* PowerBookmarkServiceFactory::GetInstance() {
-  return base::Singleton<PowerBookmarkServiceFactory>::get();
+  static base::NoDestructor<PowerBookmarkServiceFactory> instance;
+  return instance.get();
 }
 
 PowerBookmarkServiceFactory::PowerBookmarkServiceFactory()
-    : ProfileKeyedServiceFactory("PowerBookmarkService") {
+    : ProfileKeyedServiceFactory(
+          "PowerBookmarkService",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kRedirectedToOriginal)
+              .WithGuest(ProfileSelection::kRedirectedToOriginal)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kRedirectedToOriginal)
+              .Build()) {
   DependsOn(BookmarkModelFactory::GetInstance());
 }
 
 PowerBookmarkServiceFactory::~PowerBookmarkServiceFactory() = default;
 
-KeyedService* PowerBookmarkServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+PowerBookmarkServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new power_bookmarks::PowerBookmarkService(
-      BookmarkModelFactory::GetInstance()->GetForBrowserContext(context),
-      context->GetPath().AppendASCII("power_bookmarks"),
-      content::GetUIThreadTaskRunner({}),
-      base::ThreadPool::CreateSequencedTaskRunner(
-          {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
-           base::TaskShutdownBehavior::BLOCK_SHUTDOWN}));
+  return std::make_unique<power_bookmarks::PowerBookmarkService>(
+      BookmarkModelFactory::GetInstance()->GetForBrowserContext(context));
 }

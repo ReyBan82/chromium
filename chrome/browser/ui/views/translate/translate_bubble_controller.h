@@ -5,31 +5,46 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_TRANSLATE_TRANSLATE_BUBBLE_CONTROLLER_H_
 #define CHROME_BROWSER_UI_VIEWS_TRANSLATE_TRANSLATE_BUBBLE_CONTROLLER_H_
 
+#include <optional>
+
 #include "base/functional/callback_forward.h"
-#include "base/memory/weak_ptr.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/translate/translate_controller.h"
 #include "chrome/browser/ui/views/translate/partial_translate_bubble_view.h"
 #include "chrome/browser/ui/views/translate/translate_bubble_view.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/browser/web_contents_user_data.h"
+#include "ui/base/interaction/element_identifier.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
 
-class TranslateBubbleController
-    : public content::WebContentsUserData<TranslateBubbleController>,
-      public PartialTranslateBubbleModel::Observer {
+namespace views {
+class View;
+}  // namespace views
+
+// Controls both TranslateBubbleView and PartialTranslateBubbleView shown for
+// a given browser. This controller ensures only one of the two are shown at
+// a time, and is responsible for creating/hiding the bubbles.
+class TranslateBubbleController : public TranslateController,
+                                  public PartialTranslateBubbleModel::Observer {
  public:
+  DECLARE_USER_DATA(TranslateBubbleController);
+
+  // `root_action_item` is used to retrieve the correct Translate ActionItem.
+  TranslateBubbleController(BrowserWindowInterface* browser_window,
+                            actions::ActionItem* root_action_item);
   ~TranslateBubbleController() override;
   TranslateBubbleController(const TranslateBubbleController&) = delete;
   TranslateBubbleController& operator=(const TranslateBubbleController&) =
       delete;
 
-  static TranslateBubbleController* GetOrCreate(
-      content::WebContents* web_contents);
+  static TranslateBubbleController* From(BrowserWindowInterface* window);
 
   // Shows the Full Page Translate bubble. Returns the newly created bubble's
   // Widget or nullptr in cases when the bubble already exists or when the
   // bubble is not created.
   views::Widget* ShowTranslateBubble(
-      views::View* anchor_view,
-      views::Button* highlighted_button,
+      content::WebContents* web_contents,
+      views::BubbleAnchor anchor,
+      std::optional<ui::ElementIdentifier> highlighted_element,
       translate::TranslateStep step,
       const std::string& source_language,
       const std::string& target_language,
@@ -38,11 +53,9 @@ class TranslateBubbleController
 
   // Initiates the Partial Translate request, showing the bubble after a delay
   // dependent on the Partial Translate response.
-  void StartPartialTranslate(views::View* anchor_view,
-                             views::Button* highlighted_button,
-                             const std::string& source_language,
+  void StartPartialTranslate(const std::string& source_language,
                              const std::string& target_language,
-                             const std::u16string& text_selection);
+                             const std::u16string& text_selection) override;
 
   // Closes the current Partial or Full Page Translate bubble, if either exists.
   // At most one of these bubbles should be non-null at any given time.
@@ -63,11 +76,10 @@ class TranslateBubbleController
       base::RepeatingCallback<std::unique_ptr<PartialTranslateBubbleModel>()>
           callback);
 
+  void SetAnchorViewForTesting(views::View* anchor_view);
+
   base::OnceClosure GetOnTranslateBubbleClosedCallback();
   base::OnceClosure GetOnPartialTranslateBubbleClosedCallback();
-
- protected:
-  explicit TranslateBubbleController(content::WebContents* contents);
 
  private:
   // Weak references for the two possible Translate bubble views. These will be
@@ -88,8 +100,9 @@ class TranslateBubbleController
   // Creates the Partial Translate bubble or updates the bubble if it already
   // exists.
   void CreatePartialTranslateBubble(
-      views::View* anchor_view,
-      views::Button* highlighted_button,
+      content::WebContents* web_contents,
+      views::BubbleAnchor anchor,
+      std::optional<ui::ElementIdentifier> highlighted_element,
       PartialTranslateBubbleModel::ViewState view_state,
       const std::string& source_language,
       const std::string& target_language,
@@ -111,9 +124,22 @@ class TranslateBubbleController
   // Timer used for handling the delay before showing Partial Translate bubble.
   base::OneShotTimer partial_translate_timer_;
 
-  friend class content::WebContentsUserData<TranslateBubbleController>;
   friend class TranslateBubbleControllerTest;
   WEB_CONTENTS_USER_DATA_KEY_DECL();
+
+  const raw_ptr<BrowserWindowInterface> browser_window_;
+
+  // The action item associated with showing a Translate UI.
+  // The bubbles use this to appropriately configure its "IsBubbleShowing"
+  // property.
+  const raw_ptr<actions::ActionItem> action_item_;
+
+  ui::ScopedUnownedUserData<TranslateBubbleController>
+      scoped_unowned_user_data_;
+
+  ui::ScopedUnownedUserData<TranslateController> scoped_translate_controller_;
+
+  raw_ptr<views::View> anchor_view_for_testing_ = nullptr;
 
   base::WeakPtrFactory<TranslateBubbleController> weak_ptr_factory_{this};
 };

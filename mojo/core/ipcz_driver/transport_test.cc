@@ -4,23 +4,33 @@
 
 #include "mojo/core/ipcz_driver/transport.h"
 
+#include <algorithm>
 #include <cstring>
 #include <queue>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
+#include "base/containers/to_vector.h"
 #include "base/files/file.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/ranges/algorithm.h"
+#include "base/memory/unsafe_shared_memory_region.h"
+#include "base/path_service.h"
+#include "base/strings/string_view_util.h"
 #include "base/synchronization/condition_variable.h"
 #include "base/synchronization/lock.h"
 #include "base/synchronization/waitable_event.h"
+#include "base/test/gtest_util.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/test/task_environment.h"
 #include "build/build_config.h"
+#include "mojo/core/embedder/features.h"
 #include "mojo/core/ipcz_driver/driver.h"
 #include "mojo/core/ipcz_driver/shared_buffer.h"
 #include "mojo/core/ipcz_driver/transmissible_platform_handle.h"
@@ -41,12 +51,10 @@ struct TestMessage {
       : bytes(str.begin(), str.end()),
         handles(handles.begin(), handles.end()) {}
 
-  std::string as_string() const {
-    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
-  }
+  std::string as_string() const { return std::string(std::from_range, bytes); }
 
   void Transmit(Transport& transmitter) {
-    transmitter.Transmit(base::make_span(bytes), base::make_span(handles));
+    transmitter.Transmit(base::span(bytes), base::span(handles));
   }
 
   std::vector<uint8_t> bytes;
@@ -63,7 +71,14 @@ class MojoIpczTransportTest : public test::MojoTestBase {
   // `pipe` to `process`.
   static scoped_refptr<Transport> CreateAndSendTransport(
       MojoHandle pipe,
-      const base::Process& process) {
+      const base::Process& process,
+#if BUILDFLAG(IS_WIN)
+      Transport::ProcessTrust process_trust = Transport::ProcessTrust::kTrusted
+#else
+      // Parameter is not tracked on non-Windows platforms.
+      Transport::ProcessTrust process_trust = Transport::ProcessTrust{}
+#endif
+  ) {
     PlatformChannel channel;
     MojoHandle transport_for_client =
         WrapPlatformHandle(channel.TakeRemoteEndpoint().TakePlatformHandle())
@@ -72,7 +87,7 @@ class MojoIpczTransportTest : public test::MojoTestBase {
     WriteMessageWithHandles(pipe, "", &transport_for_client, 1);
     return Transport::Create(
         {.source = Transport::kBroker, .destination = Transport::kNonBroker},
-        channel.TakeLocalEndpoint(), process.Duplicate());
+        channel.TakeLocalEndpoint(), process.Duplicate(), process_trust);
   }
 
   // Retrieves a PlatformChannel endpoint from `pipe` and returns a newly
@@ -108,9 +123,8 @@ class MojoIpczTransportTest : public test::MojoTestBase {
   static scoped_refptr<T> DeserializeObjectFrom(Transport& receiver,
                                                 const TestMessage& message) {
     scoped_refptr<ObjectBase> object;
-    const IpczResult result =
-        receiver.DeserializeObject(base::make_span(message.bytes),
-                                   base::make_span(message.handles), object);
+    const IpczResult result = receiver.DeserializeObject(
+        base::span(message.bytes), base::span(message.handles), object);
     CHECK_EQ(result, IPCZ_RESULT_OK);
     CHECK_EQ(object->type(), T::object_type());
     return base::WrapRefCounted(static_cast<T*>(object.get()));
@@ -183,11 +197,15 @@ class TransportListener {
                                const IpczDriverHandle* handles,
                                size_t num_handles,
                                IpczTransportActivityFlags flags,
-                               const void*) {
+                               const struct IpczTransportActivityOptions*) {
     auto* listener = reinterpret_cast<TransportListener*>(transport);
-    auto bytes = base::make_span(static_cast<const uint8_t*>(data), num_bytes);
-    listener->HandleActivity(bytes, base::make_span(handles, num_handles),
-                             flags);
+    // SAFETY: `data` and `handles` originate from the Ipcz driver callback,
+    // which guarantees they point to at least `num_bytes` and `num_handles`
+    // elements, respectively.
+    UNSAFE_BUFFERS({
+      auto bytes = base::span(static_cast<const uint8_t*>(data), num_bytes);
+      listener->HandleActivity(bytes, base::span(handles, num_handles), flags);
+    });
     return IPCZ_RESULT_OK;
   }
 
@@ -205,10 +223,8 @@ class TransportListener {
     }
 
     TestMessage message;
-    message.bytes.resize(bytes.size());
-    message.handles.resize(handles.size());
-    base::ranges::copy(bytes, message.bytes.begin());
-    base::ranges::copy(handles, message.handles.begin());
+    message.bytes = base::ToVector(bytes);
+    message.handles = base::ToVector(handles);
 
     base::AutoLock lock(lock_);
     messages_.push(std::move(message));
@@ -254,6 +270,152 @@ TEST_F(MojoIpczTransportTest, BasicTransmit) {
     EXPECT_EQ(kMessage4, listener.WaitForNextMessage().as_string());
     listener.WaitForDisconnect();
   });
+}
+
+DEFINE_TEST_CLIENT_TEST_WITH_PIPE(MalformedObjectsClient,
+                                  MojoIpczTransportTest,
+                                  h) {
+  // Offsets of enums that should be validated on receipt. Serialized objects
+  // use types internal to transport.cc e.g. [ObjectHeader][TransportHeader]...
+  // so supply direct offsets here.
+
+  // offsetof(ObjectHeader, type).
+  constexpr size_t object_type_offset = 4;
+  // offsetof(TransportHeader, destination_type) + sizeof(ObjectHeader)
+#if BUILDFLAG(IS_WIN)
+  // offsetof(TransportHeader, destination_type) + sizeof(ObjectHeader)
+  constexpr size_t transport_destination_type_offset = 0x18;
+  // offsetof(BufferHeader, mode) + sizeof(ObjectHeader)
+  constexpr size_t shared_bufffer_mode_offset = 0x20;
+  // offsetof(WrappedPlatformHandleHeader, type) + sizeof(ObjectHeader)
+  constexpr size_t wrapped_platform_type_offset = 0x1c;
+#else
+  constexpr size_t transport_destination_type_offset = 0x08;
+  constexpr size_t shared_bufffer_mode_offset = 0x10;
+  constexpr size_t wrapped_platform_type_offset = 0x0c;
+#endif
+
+  scoped_refptr<Transport> transport = ReceiveTransport(h);
+
+  TransportListener listener(*transport);
+  EXPECT_EQ("ready", listener.WaitForNextMessage().as_string());
+
+  {
+    auto [our_new_transport, their_new_transport] =
+        Transport::CreatePair(Transport::kNonBroker, Transport::kNonBroker);
+
+    TestMessage msg =
+        SerializeObjectFor(*transport, std::move(their_new_transport));
+    // Peek into the message to break the encoded object type by using an out
+    // of range enum value. This is uint32_t sized.
+    msg.bytes[object_type_offset] = 22;
+    msg.Transmit(*transport);
+
+    EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+  }
+
+  {
+    auto [our_new_transport, their_new_transport] =
+        Transport::CreatePair(Transport::kNonBroker, Transport::kNonBroker);
+
+    TestMessage msg =
+        SerializeObjectFor(*transport, std::move(their_new_transport));
+    // Peek into the message to break the encoded transport type by using an out
+    // of range enum value. This is uint8_t sized.
+    msg.bytes[transport_destination_type_offset] = 22;
+    msg.Transmit(*transport);
+
+    EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+  }
+
+  {
+    auto shared_buffer = SharedBuffer::MakeForRegion(
+        base::UnsafeSharedMemoryRegion::Create(128));
+    TestMessage msg = SerializeObjectFor(*transport, std::move(shared_buffer));
+    // Peek into the message to break the encoded mode.
+    msg.bytes[shared_bufffer_mode_offset] = 22;
+    msg.Transmit(*transport);
+    EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+  }
+
+  {
+    base::ScopedTempDir temp_dir;
+    CHECK(temp_dir.CreateUniqueTempDir());
+    base::File read_only_file = base::File(
+        temp_dir.GetPath().AppendASCII("testfile-for-malformed-object"),
+        base::File::FLAG_CREATE | base::File::FLAG_WRITE);
+    auto wrapper = base::MakeRefCounted<WrappedPlatformHandle>(PlatformHandle(
+        base::ScopedPlatformFile(read_only_file.TakePlatformFile())));
+    TestMessage msg = SerializeObjectFor(*transport, std::move(wrapper));
+    // Peek into the message to break the encoded wrapper type.
+    msg.bytes[wrapped_platform_type_offset] = 22;
+    msg.Transmit(*transport);
+    EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+  }
+
+  TestMessage("done").Transmit(*transport);
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+}
+
+TEST_F(MojoIpczTransportTest, MalformedObjects) {
+  RunTestClientWithController(
+      "MalformedObjectsClient", [&](ClientController& c) {
+        scoped_refptr<Transport> transport =
+            CreateAndSendTransport(c.pipe(), c.process());
+
+        TransportListener listener(*transport);
+        TestMessage("ready").Transmit(*transport);
+
+        {
+          // Object type is invalid so the object should be rejected.
+          TestMessage message = listener.WaitForNextMessage();
+          scoped_refptr<ObjectBase> object;
+          const IpczResult result = transport->DeserializeObject(
+              base::span(message.bytes), base::span(message.handles), object);
+          EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+#if !BUILDFLAG(IS_WIN)
+          // Adopt and free memory tracking this handle, as DeserializeObject
+          // does not get far enough in to do so itself - this is ok to fake up
+          // in this test as it validates that invalid messages are rejected.
+          TransmissiblePlatformHandle::TakeFromHandle(message.handles[0]);
+#endif  // !BUILDFLAG(IS_WIN)
+          TestMessage("got null").Transmit(*transport);
+        }
+
+        {
+          // Transport type is invalid so the object should be rejected.
+          TestMessage message = listener.WaitForNextMessage();
+          scoped_refptr<ObjectBase> object;
+          const IpczResult result = transport->DeserializeObject(
+              base::span(message.bytes), base::span(message.handles), object);
+          EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+          TestMessage("got null").Transmit(*transport);
+        }
+
+        {
+          // Shared memory mode is invalid so the object should be rejected.
+          TestMessage message = listener.WaitForNextMessage();
+          scoped_refptr<ObjectBase> object;
+          const IpczResult result = transport->DeserializeObject(
+              base::span(message.bytes), base::span(message.handles), object);
+          EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+          TestMessage("got null").Transmit(*transport);
+        }
+
+        {
+          // Wrapped platform handle type is invalid so the object should be
+          // rejected.
+          TestMessage message = listener.WaitForNextMessage();
+          scoped_refptr<ObjectBase> object;
+          const IpczResult result = transport->DeserializeObject(
+              base::span(message.bytes), base::span(message.handles), object);
+          EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+          TestMessage("got null").Transmit(*transport);
+        }
+
+        EXPECT_EQ("done", listener.WaitForNextMessage().as_string());
+        listener.WaitForDisconnect();
+      });
 }
 
 // Transport on Windows does not support out-of-band handle transfer, so this
@@ -320,8 +482,8 @@ TEST_F(MojoIpczTransportTest, TransmitHandle) {
         MakeHandleFromEndpoint(channel2.TakeRemoteEndpoint());
     {
       TransportListener listener(*transport);
-      TestMessage("!", {&handle1, 1u}).Transmit(*transport);
-      TestMessage("!", {&handle2, 1u}).Transmit(*transport);
+      TestMessage("!", base::span_from_ref(handle1)).Transmit(*transport);
+      TestMessage("!", base::span_from_ref(handle2)).Transmit(*transport);
       listener.WaitForDisconnect();
     }
 
@@ -388,29 +550,82 @@ DEFINE_TEST_CLIENT_TEST_WITH_PIPE(TransmitFileClient,
   base::File file =
       DeserializeFileFrom(*transport, listener.WaitForNextMessage());
 
-  std::vector<char> data(file.GetLength());
-  file.Read(0, data.data(), data.size());
-  EXPECT_EQ(kMessage1, std::string(data.begin(), data.end()));
+  std::vector<uint8_t> data(file.GetLength());
+  ASSERT_TRUE(file.ReadAndCheck(0, data));
+  EXPECT_EQ(kMessage1, base::as_string_view(data));
   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
 }
 
-TEST_F(MojoIpczTransportTest, TransmitFile) {
+class MojoIpczTransportSecurityTest
+    : public MojoIpczTransportTest,
+      public ::testing::WithParamInterface<
+          std::tuple</*enforcement_enabled=*/bool,
+                     /*add_no_execute_flags=*/bool>> {
+ protected:
+  bool IsEnforcementEnabled() {
+// Enforcement only happens on Windows.
+#if BUILDFLAG(IS_WIN)
+    return std::get<0>(GetParam());
+#else
+    return false;
+#endif
+  }
+  Transport::ProcessTrust TransportProcessTrust() {
+// Enforcement only happens on Windows.
+#if BUILDFLAG(IS_WIN)
+    return IsEnforcementEnabled() ? Transport::ProcessTrust::kUntrusted
+                                  : Transport::ProcessTrust::kTrusted;
+#else
+    return Transport::ProcessTrust::kUntracked;
+#endif
+  }
+  bool ShouldMarkNoExecute() { return std::get<1>(GetParam()); }
+};
+
+TEST_P(MojoIpczTransportSecurityTest, TransmitFile) {
   RunTestClientWithController("TransmitFileClient", [&](ClientController& c) {
     scoped_refptr<Transport> transport =
-        CreateAndSendTransport(c.pipe(), c.process());
-
+        CreateAndSendTransport(c.pipe(), c.process(), TransportProcessTrust());
     base::ScopedTempDir temp_dir;
     CHECK(temp_dir.CreateUniqueTempDir());
-    base::File new_file(temp_dir.GetPath().AppendASCII("testfile"),
-                        base::File::FLAG_CREATE | base::File::FLAG_READ |
-                            base::File::FLAG_WRITE);
-    new_file.Write(0, kMessage1.data(), kMessage1.size());
+    int32_t flags = base::File::FLAG_CREATE | base::File::FLAG_READ |
+                    base::File::FLAG_WRITE;
+    if (ShouldMarkNoExecute()) {
+      flags = base::File::AddFlagsForPassingToUntrustedProcess(flags);
+    }
+    base::File new_file(temp_dir.GetPath().AppendASCII("testfile"), flags);
+    ASSERT_TRUE(new_file.WriteAndCheck(0, base::as_byte_span(kMessage1)));
 
     TransportListener listener(*transport);
-    SerializeFileFor(*transport, std::move(new_file)).Transmit(*transport);
+    if (IsEnforcementEnabled() && !ShouldMarkNoExecute()) {
+      EXPECT_DCHECK_DEATH_WITH(
+          {
+            SerializeFileFor(*transport, std::move(new_file))
+                .Transmit(*transport);
+          },
+          "Transfer of writable handle to executable file to an untrusted "
+          "process");
+      // In this case, the message was never sent, because either DCHECK was
+      // disabled so SerializeFileFor was never called, or the transport crashed
+      // the process. In either case, the client is sitting there waiting for a
+      // file to arrive, so send a read-only version to complete the test.
+      base::File read_only_file =
+          base::File(temp_dir.GetPath().AppendASCII("testfile"),
+                     base::File::FLAG_OPEN | base::File::FLAG_READ);
+      SerializeFileFor(*transport, std::move(read_only_file))
+          .Transmit(*transport);
+    } else {
+      SerializeFileFor(*transport, std::move(new_file)).Transmit(*transport);
+    }
     listener.WaitForDisconnect();
   });
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    MojoIpczTransportSecurityTest,
+    testing::Combine(/*enforcement_enabled=*/testing::Bool(),
+                     /*add_no_execute_flags=*/testing::Bool()));
 
 constexpr std::string_view kMemoryMessage = "mojo wuz here";
 
@@ -437,13 +652,489 @@ TEST_F(MojoIpczTransportTest, TransmitMemory) {
 
     auto region = base::UnsafeSharedMemoryRegion::Create(kMemoryMessage.size());
     auto mapping = region.Map();
-    memcpy(mapping.memory(), kMemoryMessage.data(), kMemoryMessage.size());
+    mapping.GetMemoryAsSpan<char>(kMemoryMessage.size())
+        .copy_from(kMemoryMessage);
     auto buffer = SharedBuffer::MakeForRegion(std::move(region));
 
     TransportListener listener(*transport);
     SerializeObjectFor(*transport, std::move(buffer)).Transmit(*transport);
     listener.WaitForDisconnect();
   });
+}
+
+#if BUILDFLAG(IS_WIN)
+constexpr std::string_view kGotInvalid = "got an invalid handle as expected";
+DEFINE_TEST_CLIENT_TEST_WITH_PIPE(InvalidHandleClient,
+                                  MojoIpczTransportTest,
+                                  h) {
+  scoped_refptr<Transport> transport = ReceiveTransport(h);
+
+  TransportListener listener(*transport);
+  // Arbitrary handle value (simulate a closed handle).
+  {
+    TestMessage message = listener.WaitForNextMessage();
+    scoped_refptr<ObjectBase> object;
+    // We nerfed the handle between serialization and sending so this fails.
+    const IpczResult result = transport->DeserializeObject(
+        base::span(message.bytes), base::span(message.handles), object);
+    EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+    TestMessage(kGotInvalid).Transmit(*transport);
+  }
+  // Zero value.
+  {
+    TestMessage message = listener.WaitForNextMessage();
+    scoped_refptr<ObjectBase> object;
+    const IpczResult result = transport->DeserializeObject(
+        base::span(message.bytes), base::span(message.handles), object);
+    EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+    TestMessage(kGotInvalid).Transmit(*transport);
+  }
+  // GetCurrentThread() pseudo handle value.
+  {
+    TestMessage message = listener.WaitForNextMessage();
+    scoped_refptr<ObjectBase> object;
+    const IpczResult result = transport->DeserializeObject(
+        base::span(message.bytes), base::span(message.handles), object);
+    EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+    TestMessage(kGotInvalid).Transmit(*transport);
+  }
+
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+}
+
+TEST_F(MojoIpczTransportTest, InvalidHandle) {
+  RunTestClientWithController("InvalidHandleClient", [&](ClientController& c) {
+    scoped_refptr<Transport> transport =
+        CreateAndSendTransport(c.pipe(), c.process());
+
+    TransportListener listener(*transport);
+    {
+      auto region = base::UnsafeSharedMemoryRegion::Create(kGotInvalid.size());
+      auto fake_buffer = SharedBuffer::MakeForRegion(std::move(region));
+      size_t num_bytes = 0;
+      size_t num_handles = 0;
+      TestMessage message;
+      message.handles.resize(num_handles);
+      EXPECT_EQ(IPCZ_RESULT_RESOURCE_EXHAUSTED,
+                transport->SerializeObject(*fake_buffer, message.bytes.data(),
+                                           &num_bytes, message.handles.data(),
+                                           &num_handles));
+      message.bytes.resize(num_bytes);
+      EXPECT_EQ(IPCZ_RESULT_OK,
+                transport->SerializeObject(*fake_buffer, message.bytes.data(),
+                                           &num_bytes, message.handles.data(),
+                                           &num_handles));
+      // Nerf the handle to a value that could be a handle.
+      uint32_t fake_handle = 0x12345678u;
+      base::span(message.bytes)
+          .subspan(Transport::FirstHandleOffsetForTesting())
+          .first<sizeof(uint32_t)>()
+          .copy_from(base::byte_span_from_ref(fake_handle));
+      // Also close the region in the parent.
+      ::CloseHandle(fake_buffer->region().GetPlatformHandle());
+      message.Transmit(*transport);
+      EXPECT_EQ(kGotInvalid, listener.WaitForNextMessage().as_string());
+    }
+    // Send null.
+    {
+      base::win::ScopedHandle handle(
+          ::CreateEvent(nullptr, FALSE, FALSE, nullptr));
+      auto wrapper = base::MakeRefCounted<WrappedPlatformHandle>(
+          PlatformHandle(std::move(handle)));
+      TestMessage message = SerializeObjectFor(*transport, std::move(wrapper));
+      // Nerf to nullptr.
+      uint64_t fake_handle = 0;
+      base::span(message.bytes)
+          .subspan(Transport::FirstHandleOffsetForTesting())
+          .first<sizeof(uint64_t)>()
+          .copy_from(base::byte_span_from_ref(fake_handle));
+      message.Transmit(*transport);
+      EXPECT_EQ(kGotInvalid, listener.WaitForNextMessage().as_string());
+    }
+    // Send pseudothread.
+    {
+      base::win::ScopedHandle handle(
+          ::CreateEvent(nullptr, FALSE, FALSE, nullptr));
+      auto wrapper = base::MakeRefCounted<WrappedPlatformHandle>(
+          PlatformHandle(std::move(handle)));
+      TestMessage message = SerializeObjectFor(*transport, std::move(wrapper));
+      // Nerf to nullptr.
+      uint64_t fake_handle = 0xfffffffffffffffe;
+      base::span(message.bytes)
+          .subspan(Transport::FirstHandleOffsetForTesting())
+          .first<sizeof(uint64_t)>()
+          .copy_from(base::byte_span_from_ref(fake_handle));
+      message.Transmit(*transport);
+      EXPECT_EQ(kGotInvalid, listener.WaitForNextMessage().as_string());
+    }
+
+    listener.WaitForDisconnect();
+  });
+}
+
+constexpr std::string_view kFromUntrusted = "from untrusted";
+constexpr std::string_view kFromTrusted = "from trusted";
+DEFINE_TEST_CLIENT_TEST_WITH_PIPE(InvalidHandleUntrustedClient,
+                                  MojoIpczTransportTest,
+                                  h) {
+  scoped_refptr<Transport> transport = ReceiveTransport(h);
+
+  TransportListener listener(*transport);
+
+  // Send pseudothread.
+  {
+    EXPECT_EQ(kFromTrusted, listener.WaitForNextMessage().as_string());
+    base::win::ScopedHandle handle(
+        ::CreateEvent(nullptr, FALSE, FALSE, nullptr));
+    auto wrapper = base::MakeRefCounted<WrappedPlatformHandle>(
+        PlatformHandle(std::move(handle)));
+    TestMessage message = SerializeObjectFor(*transport, std::move(wrapper));
+    // Nerf to nullptr.
+    uint64_t fake_handle = 0xfffffffffffffffe;
+    base::span(message.bytes)
+        .subspan(Transport::FirstHandleOffsetForTesting())
+        .first<sizeof(uint64_t)>()
+        .copy_from(base::as_bytes(base::span_from_ref(fake_handle)));
+    message.Transmit(*transport);
+  }
+
+  EXPECT_EQ(kGotInvalid, listener.WaitForNextMessage().as_string());
+  TestMessage(kFromUntrusted).Transmit(*transport);
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+}
+
+TEST_F(MojoIpczTransportTest, InvalidHandleUntrusted) {
+  RunTestClientWithController(
+      "InvalidHandleUntrustedClient", [&](ClientController& c) {
+        scoped_refptr<Transport> transport = CreateAndSendTransport(
+            c.pipe(), c.process(), Transport::ProcessTrust{});
+
+        TransportListener listener(*transport);
+        TestMessage(kFromTrusted).Transmit(*transport);
+        // GetCurrentThread() pseudo handle value.
+        {
+          TestMessage message = listener.WaitForNextMessage();
+          scoped_refptr<ObjectBase> object;
+          const IpczResult result = transport->DeserializeObject(
+              base::span(message.bytes), base::span(message.handles), object);
+          EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+          TestMessage(kGotInvalid).Transmit(*transport);
+        }
+
+        EXPECT_EQ(kFromUntrusted, listener.WaitForNextMessage().as_string());
+        listener.WaitForDisconnect();
+      });
+}
+
+DEFINE_TEST_CLIENT_TEST_WITH_PIPE(RecipientHandleFromUntrustedBrokerClient,
+                                  MojoIpczTransportTest,
+                                  h) {
+  // This client is connected to a broker but is running in an elevated process
+  // relative to that broker (as is the case for an elevated process accepting
+  // an invitation), so it must not accept handles which the broker claims to
+  // already belong to this client.
+  scoped_refptr<Transport> transport = ReceiveTransport(h);
+  transport->set_is_elevated(true);
+  transport->set_is_trusted_by_peer(true);
+
+  TransportListener listener(*transport);
+
+  // Hold a local handle which the deserializer must not adopt.
+  HANDLE event = ::CreateEvent(nullptr, FALSE, FALSE, nullptr);
+  ASSERT_NE(event, nullptr);
+
+  TestMessage message = listener.WaitForNextMessage();
+  // Substitute the local handle for the one encoded by the host. The host
+  // encoded the message with handles owned by the recipient.
+  uint64_t value = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(event));
+  base::span(message.bytes)
+      .subspan(Transport::FirstHandleOffsetForTesting())
+      .first<sizeof(uint64_t)>()
+      .copy_from(base::byte_span_from_ref(value));
+
+  scoped_refptr<ObjectBase> object;
+  const IpczResult result = transport->DeserializeObject(
+      base::span(message.bytes), base::span(message.handles), object);
+  EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+  EXPECT_FALSE(object);
+
+  // The local handle must still be live and owned solely by this scope.
+  EXPECT_TRUE(::SetEvent(event));
+  ::CloseHandle(event);
+
+  TestMessage("done").Transmit(*transport);
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+}
+
+TEST_F(MojoIpczTransportTest, RecipientHandleFromUntrustedBroker) {
+  RunTestClientWithController(
+      "RecipientHandleFromUntrustedBrokerClient", [&](ClientController& c) {
+        scoped_refptr<Transport> transport =
+            CreateAndSendTransport(c.pipe(), c.process());
+
+        TransportListener listener(*transport);
+
+        // Serialize a wrapped handle. With a known remote process and a broker
+        // source, handles are encoded as already owned by the recipient. The
+        // client substitutes its own local handle value before deserializing.
+        base::win::ScopedHandle handle(
+            ::CreateEvent(nullptr, FALSE, FALSE, nullptr));
+        auto wrapper = base::MakeRefCounted<WrappedPlatformHandle>(
+            PlatformHandle(std::move(handle)));
+        SerializeObjectFor(*transport, std::move(wrapper)).Transmit(*transport);
+
+        EXPECT_EQ("done", listener.WaitForNextMessage().as_string());
+        listener.WaitForDisconnect();
+      });
+}
+
+DEFINE_TEST_CLIENT_TEST_WITH_PIPE(TransmitThreadClient,
+                                  MojoIpczTransportTest,
+                                  h) {
+  scoped_refptr<Transport> transport = ReceiveTransport(h);
+
+  TransportListener listener(*transport);
+
+  scoped_refptr<WrappedPlatformHandle> wrapper =
+      DeserializeObjectFrom<WrappedPlatformHandle>(
+          *transport, listener.WaitForNextMessage());
+  CHECK(wrapper);
+  auto handle = wrapper->TakeHandle().TakeHandle();
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+}
+
+class MojoIpczTransportHandleTest
+    : public MojoIpczTransportTest,
+      public ::testing::WithParamInterface</*feature_enabled=*/bool> {
+ public:
+  MojoIpczTransportHandleTest() {
+    features_.InitWithFeatureState(core::kMojoHandleTypeProtections,
+                                   GetParam());
+  }
+
+ private:
+  base::test::ScopedFeatureList features_;
+};
+
+// Tests that only the allowlisted set of object types can be transmitted. See
+// `MaybeCheckIfHandleIsUnsafe` for the allowlist. An object of type "Thread" is
+// used here.
+TEST_P(MojoIpczTransportHandleTest, TransmitThread) {
+  RunTestClientWithController("TransmitThreadClient", [&](ClientController& c) {
+    scoped_refptr<Transport> transport = CreateAndSendTransport(
+        c.pipe(), c.process(), Transport::ProcessTrust::kUntrusted);
+
+    TransportListener listener(*transport);
+    HANDLE thread;
+    // Create a real Thread handle, not a psuedohandle. Psuedohandles are
+    // blocked elsewhere.
+    CHECK(::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(),
+                            ::GetCurrentProcess(), &thread,
+                            /*dwDesiredAccess=*/0, /*bInheritHandle=*/FALSE,
+                            DUPLICATE_SAME_ACCESS));
+    auto thread_wrapper = base::MakeRefCounted<WrappedPlatformHandle>(
+        PlatformHandle(base::win::ScopedHandle(thread)));
+    if (GetParam()) {
+      EXPECT_NOTREACHED_DEATH({
+        SerializeObjectFor(*transport, std::move(thread_wrapper))
+            .Transmit(*transport);
+      });
+      // Handler will never get this message as the controller has crashed in
+      // death check, so send over a valid handle in the form of a file to
+      // unblock the handler.
+      SerializeFileFor(
+          *transport, base::File(base::PathService::CheckedGet(base::FILE_EXE),
+                                 base::File::FLAG_OPEN | base::File::FLAG_READ))
+          .Transmit(*transport);
+    } else {
+      SerializeObjectFor(*transport, std::move(thread_wrapper))
+          .Transmit(*transport);
+    }
+    listener.WaitForDisconnect();
+  });
+}
+
+INSTANTIATE_TEST_SUITE_P(/*empty prefix*/,
+                         MojoIpczTransportHandleTest,
+                         testing::Bool(),
+                         [](auto& info) {
+                           return info.param ? "FeatureEnabled"
+                                             : "FeatureDisabled";
+                         });
+
+#endif  // BUILDFLAG(IS_WIN)
+
+DEFINE_TEST_CLIENT_TEST_WITH_PIPE(TransportFromUntrustedClient,
+                                  MojoIpczTransportTest,
+                                  h) {
+  scoped_refptr<Transport> transport = ReceiveTransport(h);
+  TransportListener listener(*transport);
+  EXPECT_EQ("ready", listener.WaitForNextMessage().as_string());
+
+  for (int i = 0; i < 2; i++) {
+    auto ours = i == 0 ? Transport::kNonBroker : Transport::kBroker;
+    auto theirs = i == 0 ? Transport::kBroker : Transport::kNonBroker;
+    {
+      auto [our_new_transport, their_new_transport] =
+          Transport::CreatePair(ours, theirs);
+
+      their_new_transport->set_is_peer_trusted(true);
+
+      SerializeObjectFor(*transport, std::move(their_new_transport))
+          .Transmit(*transport);
+      EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+    }
+
+    {
+      auto [our_new_transport, their_new_transport] =
+          Transport::CreatePair(ours, theirs);
+
+      their_new_transport->set_is_trusted_by_peer(true);
+
+      SerializeObjectFor(*transport, std::move(their_new_transport))
+          .Transmit(*transport);
+      if (ours == Transport::kNonBroker) {
+        EXPECT_EQ("got untrusted", listener.WaitForNextMessage().as_string());
+      } else {
+        EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+      }
+    }
+  }
+
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+}
+
+DEFINE_TEST_CLIENT_TEST_WITH_PIPE(TransportFromUntrustedBrokerClient,
+                                  MojoIpczTransportTest,
+                                  h) {
+  scoped_refptr<Transport> transport = ReceiveTransport(h);
+  TransportListener listener(*transport);
+  EXPECT_EQ("ready", listener.WaitForNextMessage().as_string());
+
+  {
+    auto [our_new_transport, their_new_transport] =
+        Transport::CreatePair(Transport::kBroker, Transport::kNonBroker);
+    EXPECT_EQ(Transport::kBroker, their_new_transport->destination_type());
+    SerializeObjectFor(*transport, std::move(their_new_transport))
+        .Transmit(*transport);
+    EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+  }
+
+  {
+    auto [our_new_transport, their_new_transport] =
+        Transport::CreatePair(Transport::kNonBroker, Transport::kNonBroker);
+    their_new_transport->set_is_peer_trusted(true);
+    SerializeObjectFor(*transport, std::move(their_new_transport))
+        .Transmit(*transport);
+    EXPECT_EQ("got null", listener.WaitForNextMessage().as_string());
+  }
+
+  {
+    auto [our_new_transport, their_new_transport] =
+        Transport::CreatePair(Transport::kNonBroker, Transport::kNonBroker);
+    SerializeObjectFor(*transport, std::move(their_new_transport))
+        .Transmit(*transport);
+    EXPECT_EQ("got untrusted", listener.WaitForNextMessage().as_string());
+  }
+
+  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(h));
+}
+
+TEST_F(MojoIpczTransportTest, TransportFromUntrustedBroker) {
+  // When both endpoints of a transport are brokers, the peer being a broker
+  // does not by itself grant it any additional trust on this end. A broker
+  // receiving a serialized transport over such a link must reject it if it
+  // claims its own peer is trusted or is itself a broker.
+  RunTestClientWithController(
+      "TransportFromUntrustedBrokerClient", [&](ClientController& c) {
+        PlatformChannel channel;
+        MojoHandle transport_for_client =
+            WrapPlatformHandle(
+                channel.TakeRemoteEndpoint().TakePlatformHandle())
+                .release()
+                .value();
+        WriteMessageWithHandles(c.pipe(), "", &transport_for_client, 1);
+        scoped_refptr<Transport> transport = Transport::Create(
+            {.source = Transport::kBroker, .destination = Transport::kBroker},
+            channel.TakeLocalEndpoint(), c.process().Duplicate());
+        EXPECT_FALSE(transport->is_peer_trusted());
+
+        TransportListener listener(*transport);
+        TestMessage("ready").Transmit(*transport);
+
+        for (int i = 0; i < 2; i++) {
+          TestMessage message = listener.WaitForNextMessage();
+          scoped_refptr<ObjectBase> object;
+          const IpczResult result = transport->DeserializeObject(
+              base::span(message.bytes), base::span(message.handles), object);
+          EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+          TestMessage("got null").Transmit(*transport);
+        }
+
+        {
+          TestMessage message = listener.WaitForNextMessage();
+          scoped_refptr<Transport> received =
+              DeserializeObjectFrom<Transport>(*transport, message);
+          EXPECT_FALSE(received->is_peer_trusted());
+          EXPECT_EQ(Transport::kNonBroker, received->destination_type());
+          TestMessage("got untrusted").Transmit(*transport);
+        }
+
+        listener.WaitForDisconnect();
+      });
+}
+
+TEST_F(MojoIpczTransportTest, TransportFromUntrusted) {
+#if BUILDFLAG(IS_WIN)
+  // TODO(crbug.com/414392683) default to untrusted/untracked.
+  Transport::ProcessTrust process_trust = Transport::ProcessTrust::kUntrusted;
+#else
+  Transport::ProcessTrust process_trust{};
+#endif
+  RunTestClientWithController(
+      "TransportFromUntrustedClient", [&](ClientController& c) {
+        scoped_refptr<Transport> transport =
+            CreateAndSendTransport(c.pipe(), c.process(), process_trust);
+
+        TransportListener listener(*transport);
+        TestMessage("ready").Transmit(*transport);
+
+        // A broker (this process) should reject transports from untrusted
+        // clients if they claim the transport's peer is trusted or is a broker.
+        // It is ok to allow transports from a client that indicates they trust
+        // the peer, as a broker will not make trust decisions based on that.
+        for (int i = 0; i < 2; i++) {
+          auto theirs = i == 0 ? Transport::kNonBroker : Transport::kBroker;
+          {
+            TestMessage message = listener.WaitForNextMessage();
+            scoped_refptr<ObjectBase> object;
+            const IpczResult result = transport->DeserializeObject(
+                base::span(message.bytes), base::span(message.handles), object);
+            EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+            TestMessage("got null").Transmit(*transport);
+          }
+
+          {
+            TestMessage message = listener.WaitForNextMessage();
+            if (theirs == Transport::kNonBroker) {
+              scoped_refptr<Transport> transport2 =
+                  DeserializeObjectFrom<Transport>(*transport, message);
+              EXPECT_TRUE(transport2->is_trusted_by_peer());
+              EXPECT_FALSE(transport2->is_peer_trusted());
+              TestMessage("got untrusted").Transmit(*transport);
+            } else {
+              scoped_refptr<ObjectBase> object;
+              const IpczResult result = transport->DeserializeObject(
+                  base::span(message.bytes), base::span(message.handles),
+                  object);
+              EXPECT_EQ(result, IPCZ_RESULT_INVALID_ARGUMENT);
+              TestMessage("got null").Transmit(*transport);
+            }
+          }
+        }
+
+        listener.WaitForDisconnect();
+      });
 }
 
 }  // namespace

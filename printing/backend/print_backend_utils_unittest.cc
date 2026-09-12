@@ -56,93 +56,68 @@ TEST(PrintBackendUtilsTest, ParsePaperSizeBadOneDimension) {
 
 #if BUILDFLAG(USE_CUPS)
 
-TEST(PrintBackendUtilsCupsTest, ParsePaperA4) {
-  constexpr CupsPrinter::CupsMediaMargins kMargins = {500, 500, 500, 500};
-  PrinterSemanticCapsAndDefaults::Paper paper =
-      ParsePaper("iso_a4_210x297mm", kMargins);
-  EXPECT_EQ(gfx::Size(210000, 297000), paper.size_um);
-  EXPECT_EQ("iso_a4_210x297mm", paper.vendor_id);
-  EXPECT_EQ("iso a4", paper.display_name);
-  EXPECT_EQ(gfx::Rect(5000, 5000, 200000, 287000), paper.printable_area_um);
+TEST(PrintBackendUtilsTest, GetDisplayName) {
+#if BUILDFLAG(IS_MAC)
+  EXPECT_EQ(GetDisplayName("HP Printer", "Detailed Printer Info"),
+            "Detailed Printer Info");
+  EXPECT_EQ(GetDisplayName("HP Printer", ""), "HP Printer");
+#else
+  EXPECT_EQ(GetDisplayName("HP Printer", "Detailed Printer Info"),
+            "HP Printer");
+  EXPECT_EQ(GetDisplayName("HP Printer", ""), "HP Printer");
+#endif
 }
 
-TEST(PrintBackendUtilsCupsTest, ParsePaperNaLetter) {
-  constexpr CupsPrinter::CupsMediaMargins kMargins = {500, 500, 500, 500};
-  PrinterSemanticCapsAndDefaults::Paper paper =
-      ParsePaper("na_letter_8.5x11in", kMargins);
-  EXPECT_EQ(gfx::Size(215900, 279400), paper.size_um);
-  EXPECT_EQ("na_letter_8.5x11in", paper.vendor_id);
-  EXPECT_EQ("na letter", paper.display_name);
-  EXPECT_EQ(gfx::Rect(5000, 5000, 205900, 269400), paper.printable_area_um);
+TEST(PrintBackendUtilsTest, GetPrinterDescription) {
+#if BUILDFLAG(IS_MAC)
+  EXPECT_EQ(GetPrinterDescription("Driver Info", "Some Description"),
+            "Driver Info");
+  EXPECT_EQ(GetPrinterDescription("", "Some Description"), "");
+#else
+  EXPECT_EQ(GetPrinterDescription("Driver Info", "Some Description"),
+            "Some Description");
+  EXPECT_EQ(GetPrinterDescription("Driver Info", ""), "");
+#endif
 }
 
-TEST(PrintBackendUtilsCupsTest, ParsePaperNaIndex4x6) {
-  // Note that "na_index-4x6_4x6in" has a dimension within the media name. Test
-  // that parsing is not affected.
-  constexpr CupsPrinter::CupsMediaMargins kMargins = {500, 500, 500, 500};
-  PrinterSemanticCapsAndDefaults::Paper paper =
-      ParsePaper("na_index-4x6_4x6in", kMargins);
-  EXPECT_EQ(gfx::Size(101600, 152400), paper.size_um);
-  EXPECT_EQ("na_index-4x6_4x6in", paper.vendor_id);
-  EXPECT_EQ("na index-4x6", paper.display_name);
-  EXPECT_EQ(gfx::Rect(5000, 5000, 91600, 142400), paper.printable_area_um);
+TEST(PrintBackendUtilsCupsTest, PrintableAreaFromMarginsA4) {
+  // margins in PWG units (1 PWG unit = 1/100 mm = 10 um)
+  int bottom = 100;
+  int left = 200;
+  int right = 300;
+  int top = 400;
+  gfx::Size size_um = {210000, 297000};
+  gfx::Rect printable_area_um =
+      PrintableAreaFromSizeAndPwgMargins(size_um, bottom, left, right, top);
+  EXPECT_EQ(gfx::Rect(2000, 1000, 205000, 292000), printable_area_um);
 }
 
-TEST(PrintBackendUtilsCupsTest, ParsePaperNaNumber10) {
-  // Test that a paper size with a fractional dimension is not affected by
-  // rounding errors.
-  constexpr CupsPrinter::CupsMediaMargins kMargins = {1000, 1000, 1000, 1000};
-  PrinterSemanticCapsAndDefaults::Paper paper =
-      ParsePaper("na_number-10_4.125x9.5in", kMargins);
-  EXPECT_EQ(gfx::Size(104775, 241300), paper.size_um);
-  EXPECT_EQ("na_number-10_4.125x9.5in", paper.vendor_id);
-  EXPECT_EQ("na number-10", paper.display_name);
-  EXPECT_EQ(gfx::Rect(10000, 10000, 84775, 221300), paper.printable_area_um);
-}
+TEST(PrintBackendUtilsCupsTest, MarginsPWGFromPrintableAreaA4) {
+  static constexpr int kBottomUm = 1000;
+  static constexpr int kLeftUm = 2000;
+  static constexpr int kRightUm = 3000;
+  static constexpr int kTopUm = 4000;
 
-TEST(PrintBackendUtilsCupsTest, ParsePaperBadUnit) {
-  PrinterSemanticCapsAndDefaults::Paper paper_bad =
-      ParsePaper("bad_unit_666x666bad", CupsPrinter::CupsMediaMargins());
-  EXPECT_EQ(PrinterSemanticCapsAndDefaults::Paper(), paper_bad);
-}
+  int bottom_um = 0;
+  int left_um = 0;
+  int right_um = 0;
+  int top_um = 0;
+  MarginsMicronsFromSizeAndPrintableArea(
+      {210000, 297000}, {2000, 1000, 205000, 292000}, &bottom_um, &left_um,
+      &right_um, &top_um);
 
-TEST(PrintBackendUtilsCupsTest, ParsePaperBadOneDimension) {
-  PrinterSemanticCapsAndDefaults::Paper paper_bad =
-      ParsePaper("bad_one_dimension_666mm", CupsPrinter::CupsMediaMargins());
-  EXPECT_EQ(PrinterSemanticCapsAndDefaults::Paper(), paper_bad);
-}
+  // Verify margins in microns are correct.
+  EXPECT_EQ(kBottomUm, bottom_um);
+  EXPECT_EQ(kLeftUm, left_um);
+  EXPECT_EQ(kRightUm, right_um);
+  EXPECT_EQ(kTopUm, top_um);
 
-TEST(PrintBackendUtilsCupsTest, ParsePaperOutOfBoundsMargins) {
-  // Given invalid margins, the printable area cannot be calculated correctly.
-  // The printable area should be set to the paper size as default.
-  constexpr CupsPrinter::CupsMediaMargins kMargins = {100, 100, 300000, 100};
-  PrinterSemanticCapsAndDefaults::Paper paper =
-      ParsePaper("iso_a4_210x297mm", kMargins);
-  EXPECT_EQ(gfx::Size(210000, 297000), paper.size_um);
-  EXPECT_EQ("iso_a4_210x297mm", paper.vendor_id);
-  EXPECT_EQ("iso a4", paper.display_name);
-  EXPECT_EQ(gfx::Rect(0, 0, 210000, 297000), paper.printable_area_um);
-}
-
-TEST(PrintBackendUtilsCupsTest, ParsePaperEmptyPrintableArea) {
-  // If the printable area is empty, the printable area should be set to the
-  // paper size.
-  constexpr CupsPrinter::CupsMediaMargins kMargins = {29700, 0, 0, 0};
-  PrinterSemanticCapsAndDefaults::Paper paper =
-      ParsePaper("iso_a4_210x297mm", kMargins);
-  EXPECT_EQ(gfx::Size(210000, 297000), paper.size_um);
-  EXPECT_EQ("iso_a4_210x297mm", paper.vendor_id);
-  EXPECT_EQ("iso a4", paper.display_name);
-  EXPECT_EQ(gfx::Rect(0, 0, 210000, 297000), paper.printable_area_um);
-}
-
-TEST(PrintBackendUtilsCupsTest, ParsePaperEmptySizeWithPrintableArea) {
-  // If the paper size is empty, the Paper should be invalid, even when provided
-  // a printable area.
-  constexpr CupsPrinter::CupsMediaMargins kMargins = {1000, 1000, 1000, 1000};
-  PrinterSemanticCapsAndDefaults::Paper paper_bad =
-      ParsePaper("bad_unit_666x666bad", kMargins);
-  EXPECT_EQ(PrinterSemanticCapsAndDefaults::Paper(), paper_bad);
+  ASSERT_EQ(kMicronsPerPwgUnit, 10);
+  // Verify margins in PWG units are correct.
+  EXPECT_EQ(kBottomUm / kMicronsPerPwgUnit, MarginMicronsToPWG(bottom_um));
+  EXPECT_EQ(kLeftUm / kMicronsPerPwgUnit, MarginMicronsToPWG(left_um));
+  EXPECT_EQ(kRightUm / kMicronsPerPwgUnit, MarginMicronsToPWG(right_um));
+  EXPECT_EQ(kTopUm / kMicronsPerPwgUnit, MarginMicronsToPWG(top_um));
 }
 
 #endif  // BUILDFLAG(USE_CUPS)

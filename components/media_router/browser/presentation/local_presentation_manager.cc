@@ -6,20 +6,21 @@
 
 #include <utility>
 
-#include "base/containers/contains.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
+using blink::mojom::PresentationConnectionResult;
 using blink::mojom::PresentationInfo;
 
 namespace media_router {
 
 // LocalPresentationManager implementation.
-LocalPresentationManager::LocalPresentationManager() {}
+LocalPresentationManager::LocalPresentationManager() = default;
 
-LocalPresentationManager::~LocalPresentationManager() {}
+LocalPresentationManager::~LocalPresentationManager() = default;
 
 LocalPresentationManager::LocalPresentation*
 LocalPresentationManager::GetOrCreateLocalPresentation(
@@ -45,6 +46,10 @@ void LocalPresentationManager::RegisterLocalPresentationController(
     const MediaRoute& route) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   auto* presentation = GetOrCreateLocalPresentation(presentation_info);
+  if (url::Origin::Create(presentation->presentation_info_.url) !=
+      url::Origin::Create(presentation_info.url)) {
+    return;
+  }
   presentation->RegisterController(
       render_frame_host_id, std::move(controller_connection_remote),
       std::move(receiver_connection_receiver), route);
@@ -55,8 +60,9 @@ void LocalPresentationManager::UnregisterLocalPresentationController(
     const content::GlobalRenderFrameHostId& render_frame_host_id) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   auto it = local_presentations_.find(presentation_id);
-  if (it == local_presentations_.end())
+  if (it == local_presentations_.end()) {
     return;
+  }
 
   // Remove presentation if no controller and receiver.
   it->second->UnregisterController(render_frame_host_id);
@@ -71,6 +77,10 @@ void LocalPresentationManager::OnLocalPresentationReceiverCreated(
     content::WebContents* receiver_web_contents) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   auto* presentation = GetOrCreateLocalPresentation(presentation_info);
+  if (url::Origin::Create(presentation->presentation_info_.url) !=
+      url::Origin::Create(presentation_info.url)) {
+    return;
+  }
   presentation->RegisterReceiver(receiver_callback, receiver_web_contents);
 }
 
@@ -82,14 +92,15 @@ void LocalPresentationManager::OnLocalPresentationReceiverTerminated(
 
 bool LocalPresentationManager::IsLocalPresentation(
     const std::string& presentation_id) {
-  return base::Contains(local_presentations_, presentation_id);
+  return local_presentations_.contains(presentation_id);
 }
 
 bool LocalPresentationManager::IsLocalPresentation(
     content::WebContents* web_contents) {
   for (auto& local_presentation : local_presentations_) {
-    if (local_presentation.second->receiver_web_contents_ == web_contents)
+    if (local_presentation.second->receiver_web_contents_ == web_contents) {
       return true;
+    }
   }
   return false;
 }
@@ -107,7 +118,7 @@ LocalPresentationManager::LocalPresentation::LocalPresentation(
     const PresentationInfo& presentation_info)
     : presentation_info_(presentation_info) {}
 
-LocalPresentationManager::LocalPresentation::~LocalPresentation() {}
+LocalPresentationManager::LocalPresentation::~LocalPresentation() = default;
 
 void LocalPresentationManager::LocalPresentation::RegisterController(
     const content::GlobalRenderFrameHostId& render_frame_host_id,
@@ -117,9 +128,10 @@ void LocalPresentationManager::LocalPresentation::RegisterController(
         receiver_connection_receiver,
     const MediaRoute& route) {
   if (!receiver_callback_.is_null()) {
-    receiver_callback_.Run(PresentationInfo::New(presentation_info_),
-                           std::move(controller_connection_remote),
-                           std::move(receiver_connection_receiver));
+    receiver_callback_.Run(PresentationConnectionResult::New(
+        PresentationInfo::New(presentation_info_),
+        std::move(controller_connection_remote),
+        std::move(receiver_connection_receiver)));
   } else {
     pending_controllers_.insert(std::make_pair(
         render_frame_host_id, std::make_unique<ControllerConnection>(
@@ -137,13 +149,15 @@ void LocalPresentationManager::LocalPresentation::UnregisterController(
 void LocalPresentationManager::LocalPresentation::RegisterReceiver(
     const content::ReceiverConnectionAvailableCallback& receiver_callback,
     content::WebContents* receiver_web_contents) {
-  DCHECK(receiver_callback_.is_null());
+  if (!receiver_callback_.is_null()) {
+    return;
+  }
   DCHECK(receiver_web_contents);
   for (auto& controller : pending_controllers_) {
-    receiver_callback.Run(
+    receiver_callback.Run(PresentationConnectionResult::New(
         PresentationInfo::New(presentation_info_),
         std::move(controller.second->controller_connection_remote),
-        std::move(controller.second->receiver_connection_receiver));
+        std::move(controller.second->receiver_connection_receiver)));
   }
   receiver_callback_ = receiver_callback;
   receiver_web_contents_ = receiver_web_contents;
@@ -164,6 +178,6 @@ LocalPresentationManager::LocalPresentation::ControllerConnection::
       receiver_connection_receiver(std::move(receiver_connection_receiver)) {}
 
 LocalPresentationManager::LocalPresentation::ControllerConnection::
-    ~ControllerConnection() {}
+    ~ControllerConnection() = default;
 
 }  // namespace media_router

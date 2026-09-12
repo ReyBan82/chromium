@@ -80,6 +80,10 @@ TEST(TextIteratorBehaviorTest, Values) {
                   .SetSuppressesExtraNewlineEmission(true)
                   .Build()
                   .SuppressesExtraNewlineEmission());
+  EXPECT_TRUE(TextIteratorBehavior::Builder()
+                  .SetIgnoresCssTextTransforms(true)
+                  .Build()
+                  .IgnoresCssTextTransforms());
 }
 
 }  // namespace blink

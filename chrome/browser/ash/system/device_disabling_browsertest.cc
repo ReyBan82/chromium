@@ -18,18 +18,19 @@
 #include "chrome/browser/ash/login/test/network_portal_detector_mixin.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
 #include "chrome/browser/ash/login/test/oobe_screen_waiter.h"
-#include "chrome/browser/ash/login/ui/login_display_host.h"
+#include "chrome/browser/ash/login/test/scoped_policy_update.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
 #include "chrome/browser/ash/system/device_disabling_manager.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/browser_process_platform_part.h"
+#include "chrome/browser/ui/ash/login/login_display_host.h"
 #include "chrome/browser/ui/webui/ash/login/device_disabled_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/network_state_informer.h"
 #include "chrome/browser/ui/webui/ash/login/oobe_ui.h"
 #include "chromeos/ash/components/dbus/session_manager/fake_session_manager_client.h"
 #include "chromeos/ash/components/dbus/shill/shill_manager_client.h"
 #include "chromeos/ash/components/dbus/shill/shill_service_client.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
 #include "chromeos/ash/components/settings/cros_settings_names.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #include "content/public/browser/web_contents.h"
@@ -166,7 +167,7 @@ IN_PROC_BROWSER_TEST_F(DeviceDisablingTest, DisableWithEphemeralUsers) {
   ASSERT_TRUE(network_state_informer);
   network_state_informer->AddObserver(this);
   network_portal_detector_.SimulateDefaultNetworkState(
-      NetworkPortalDetector::CAPTIVE_PORTAL_STATUS_OFFLINE);
+      NetworkPortalDetectorMixin::NetworkStatus::kOffline);
   network_state_change_wait_run_loop_->Run();
   network_state_informer->RemoveObserver(this);
   base::RunLoop().RunUntilIdle();
@@ -218,9 +219,9 @@ class PresetPolicyDeviceDisablingTest : public DeviceDisablingTest {
 };
 
 // Same test as the one in DeviceDisablingTest, except the policy is being set
-// before Chrome process is started. This test covers a crash (crbug.com/709518)
-// in DeviceDisabledScreen where it would try to access DeviceDisablingManager
-// even though it wasn't yet constructed fully.
+// before Chrome process is started. This test covers a crash
+// (crbug.com/41311924) in DeviceDisabledScreen where it would try to access
+// DeviceDisablingManager even though it wasn't yet constructed fully.
 IN_PROC_BROWSER_TEST_F(PresetPolicyDeviceDisablingTest,
                        DisableBeforeStartup) {
   EXPECT_TRUE(DeviceDisabledScreenShown());
@@ -252,7 +253,7 @@ class DeviceDisablingBeforeLoginHostCreated
 };
 
 // Sometimes LoginHost creation postponed (e.g. due to language switch
-// https://crbug.com/1065569). This tests checks this flow.
+// https://crbug.com/40681894). This tests checks this flow.
 IN_PROC_BROWSER_TEST_F(DeviceDisablingBeforeLoginHostCreated,
                        ShowsDisabledScreen) {
   EXPECT_TRUE(

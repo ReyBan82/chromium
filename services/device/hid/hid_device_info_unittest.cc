@@ -6,7 +6,8 @@
 
 #include "base/containers/flat_map.h"
 #include "build/build_config.h"
-#include "services/device/hid/hid_report_type.h"
+#include "services/device/public/cpp/hid/hid_report_type.h"
+#include "services/device/public/cpp/hid/hid_report_utils.h"
 #include "services/device/public/cpp/test/test_report_descriptors.h"
 #include "services/device/public/mojom/hid.mojom.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -78,46 +79,46 @@ TEST(HidDeviceInfoTest, FindCollectionWithReport_MultipleCollections) {
   EXPECT_EQ(0u, collections[4]->feature_reports.size());
 
   // Ensure the correct collection is returned for each report.
-  EXPECT_EQ(collections[1],
-            device->FindCollectionWithReport(0x10, HidReportType::kInput));
-  EXPECT_EQ(collections[1],
-            device->FindCollectionWithReport(0x10, HidReportType::kOutput));
-  EXPECT_EQ(collections[2],
-            device->FindCollectionWithReport(0x11, HidReportType::kInput));
-  EXPECT_EQ(collections[2],
-            device->FindCollectionWithReport(0x11, HidReportType::kOutput));
-  EXPECT_EQ(collections[4],
-            device->FindCollectionWithReport(0x20, HidReportType::kInput));
-  EXPECT_EQ(collections[4],
-            device->FindCollectionWithReport(0x20, HidReportType::kOutput));
-  EXPECT_EQ(collections[4],
-            device->FindCollectionWithReport(0x21, HidReportType::kInput));
-  EXPECT_EQ(collections[4],
-            device->FindCollectionWithReport(0x21, HidReportType::kOutput));
+  EXPECT_EQ(collections[1], FindCollectionWithReport(*device->device(), 0x10,
+                                                     HidReportType::kInput));
+  EXPECT_EQ(collections[1], FindCollectionWithReport(*device->device(), 0x10,
+                                                     HidReportType::kOutput));
+  EXPECT_EQ(collections[2], FindCollectionWithReport(*device->device(), 0x11,
+                                                     HidReportType::kInput));
+  EXPECT_EQ(collections[2], FindCollectionWithReport(*device->device(), 0x11,
+                                                     HidReportType::kOutput));
+  EXPECT_EQ(collections[4], FindCollectionWithReport(*device->device(), 0x20,
+                                                     HidReportType::kInput));
+  EXPECT_EQ(collections[4], FindCollectionWithReport(*device->device(), 0x20,
+                                                     HidReportType::kOutput));
+  EXPECT_EQ(collections[4], FindCollectionWithReport(*device->device(), 0x21,
+                                                     HidReportType::kInput));
+  EXPECT_EQ(collections[4], FindCollectionWithReport(*device->device(), 0x21,
+                                                     HidReportType::kOutput));
 
   // Zero is not a valid report ID. Ensure no collection info is returned.
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0, HidReportType::kInput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0, HidReportType::kOutput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0, HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0,
+                                              HidReportType::kInput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0,
+                                              HidReportType::kOutput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0,
+                                              HidReportType::kFeature));
 
   // Ensure no collection is returned for reports not supported by the device.
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x10, HidReportType::kFeature));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x11, HidReportType::kFeature));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x20, HidReportType::kFeature));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x21, HidReportType::kFeature));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x30, HidReportType::kInput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x30, HidReportType::kOutput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x30, HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x10,
+                                              HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x11,
+                                              HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x20,
+                                              HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x21,
+                                              HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x30,
+                                              HidReportType::kInput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x30,
+                                              HidReportType::kOutput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x30,
+                                              HidReportType::kFeature));
 }
 
 TEST(HidDeviceInfoTest, FindCollectionWithReport_SameReportId) {
@@ -139,34 +140,34 @@ TEST(HidDeviceInfoTest, FindCollectionWithReport_SameReportId) {
   EXPECT_THAT(feature_report_ids, UnorderedElementsAre(0x01, 0x02, 0xee, 0xef));
 
   // Ensure the correct collection is returned for each report.
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0x01, HidReportType::kInput));
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0x01, HidReportType::kOutput));
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0x01, HidReportType::kFeature));
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0x02, HidReportType::kFeature));
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0xee, HidReportType::kFeature));
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0xef, HidReportType::kFeature));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0x01,
+                                                 HidReportType::kInput));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0x01,
+                                                 HidReportType::kOutput));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0x01,
+                                                 HidReportType::kFeature));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0x02,
+                                                 HidReportType::kFeature));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0xee,
+                                                 HidReportType::kFeature));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0xef,
+                                                 HidReportType::kFeature));
 
   // Zero is not a valid report ID. Ensure no collection info is returned.
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0, HidReportType::kInput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0, HidReportType::kOutput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0, HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0,
+                                              HidReportType::kInput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0,
+                                              HidReportType::kOutput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0,
+                                              HidReportType::kFeature));
 
   // Ensure no collection is returned for reports not supported by the device.
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x02, HidReportType::kInput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x02, HidReportType::kOutput));
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0x03, HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x02,
+                                              HidReportType::kInput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x02,
+                                              HidReportType::kOutput));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0x03,
+                                              HidReportType::kFeature));
 }
 
 TEST(HidDeviceInfoTest, FindCollectionWithReport_NoReportIds) {
@@ -183,24 +184,108 @@ TEST(HidDeviceInfoTest, FindCollectionWithReport_NoReportIds) {
   EXPECT_TRUE(collection->feature_reports.empty());
 
   // Ensure the correct collection is returned for each report.
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0, HidReportType::kInput));
-  EXPECT_EQ(collection,
-            device->FindCollectionWithReport(0, HidReportType::kOutput));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0,
+                                                 HidReportType::kInput));
+  EXPECT_EQ(collection, FindCollectionWithReport(*device->device(), 0,
+                                                 HidReportType::kOutput));
 
   // Ensure no collection is found containing a feature report.
-  EXPECT_EQ(nullptr,
-            device->FindCollectionWithReport(0, HidReportType::kFeature));
+  EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), 0,
+                                              HidReportType::kFeature));
 
   // No collections should be found for any non-zero report ID.
   for (uint32_t report_id = 0x01; report_id <= 0xff; ++report_id) {
-    EXPECT_EQ(nullptr, device->FindCollectionWithReport(report_id,
-                                                        HidReportType::kInput));
-    EXPECT_EQ(nullptr, device->FindCollectionWithReport(
-                           report_id, HidReportType::kOutput));
-    EXPECT_EQ(nullptr, device->FindCollectionWithReport(
-                           report_id, HidReportType::kFeature));
+    EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), report_id,
+                                                HidReportType::kInput));
+    EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), report_id,
+                                                HidReportType::kOutput));
+    EXPECT_EQ(nullptr, FindCollectionWithReport(*device->device(), report_id,
+                                                HidReportType::kFeature));
   }
+}
+
+TEST(HidDeviceInfoTest, ReportInNestedKeyboardCollectionIsAlwaysProtected) {
+  // The device has a vendor-defined top-level collection containing a nested
+  // keyboard collection that defines an input report.
+  auto device =
+      CreateHidDeviceInfo(TestReportDescriptors::VendorWithNestedKeyboard());
+  EXPECT_TRUE(device->has_report_id());
+  ASSERT_EQ(1u, device->collections().size());
+  const auto* collection = device->collections()[0].get();
+  EXPECT_EQ(mojom::kPageVendor, collection->usage->usage_page);
+  ASSERT_EQ(1u, collection->children.size());
+  EXPECT_EQ(mojom::kPageGenericDesktop,
+            collection->children[0]->usage->usage_page);
+
+  // The input report is in the nested keyboard collection and is always
+  // protected even though the top-level collection has a vendor-defined usage.
+  EXPECT_TRUE(HasReportInAlwaysProtectedCollection(
+      *collection, /*report_id=*/0x01, HidReportType::kInput));
+  EXPECT_FALSE(HasReportInAlwaysProtectedCollection(
+      *collection, /*report_id=*/0x01, HidReportType::kOutput));
+}
+
+TEST(HidDeviceInfoTest, ReportInNestedFidoCollectionHasUsagePage) {
+  // The device has a vendor-defined top-level collection containing a nested
+  // FIDO collection that defines input and output reports.
+  auto device =
+      CreateHidDeviceInfo(TestReportDescriptors::VendorWithNestedFido());
+  EXPECT_TRUE(device->has_report_id());
+  ASSERT_EQ(1u, device->collections().size());
+  const auto* collection = device->collections()[0].get();
+  EXPECT_EQ(mojom::kPageVendor, collection->usage->usage_page);
+  ASSERT_EQ(1u, collection->children.size());
+  EXPECT_EQ(mojom::kPageFido, collection->children[0]->usage->usage_page);
+
+  // The reports are in the nested FIDO collection.
+  EXPECT_TRUE(HasReportInCollectionWithUsagePage(
+      *collection, /*report_id=*/0x01, HidReportType::kInput,
+      mojom::kPageFido));
+  EXPECT_TRUE(HasReportInCollectionWithUsagePage(
+      *collection, /*report_id=*/0x01, HidReportType::kOutput,
+      mojom::kPageFido));
+
+  // The reports are not in a keyboard collection.
+  EXPECT_FALSE(HasReportInCollectionWithUsagePage(
+      *collection, /*report_id=*/0x01, HidReportType::kInput,
+      mojom::kPageKeyboard));
+
+  // The reports are not always protected.
+  EXPECT_FALSE(HasReportInAlwaysProtectedCollection(
+      *collection, /*report_id=*/0x01, HidReportType::kInput));
+}
+
+TEST(HidDeviceInfoTest, ReportInNestedPhysicalPointerCollectionNotProtected) {
+  // The device has a top-level joystick collection containing nested logical
+  // and physical collections with the Generic Desktop Pointer usage.
+  auto device = CreateHidDeviceInfo(TestReportDescriptors::SonyDualshock3Usb());
+  ASSERT_EQ(1u, device->collections().size());
+  const auto* collection = device->collections()[0].get();
+
+  // The nested pointer collections are not application collections so the
+  // input and output reports are not always protected.
+  EXPECT_FALSE(HasReportInAlwaysProtectedCollection(
+      *collection, /*report_id=*/0x01, HidReportType::kInput));
+  EXPECT_FALSE(HasReportInAlwaysProtectedCollection(
+      *collection, /*report_id=*/0x01, HidReportType::kOutput));
+  EXPECT_FALSE(HasReportInAlwaysProtectedCollection(
+      *collection, /*report_id=*/0x01, HidReportType::kFeature));
+}
+
+TEST(HidDeviceInfoTest, ReportInTopLevelFidoCollection) {
+  // The device has a single top-level FIDO collection without report IDs.
+  auto device = CreateHidDeviceInfo(TestReportDescriptors::FidoU2fHid());
+  ASSERT_EQ(1u, device->collections().size());
+  const auto* collection = device->collections()[0].get();
+
+  EXPECT_TRUE(HasReportInCollectionWithUsagePage(
+      *collection, /*report_id=*/0, HidReportType::kInput, mojom::kPageFido));
+  EXPECT_TRUE(HasReportInCollectionWithUsagePage(
+      *collection, /*report_id=*/0, HidReportType::kOutput, mojom::kPageFido));
+  EXPECT_FALSE(HasReportInCollectionWithUsagePage(
+      *collection, /*report_id=*/0, HidReportType::kFeature, mojom::kPageFido));
+  EXPECT_FALSE(HasReportInAlwaysProtectedCollection(
+      *collection, /*report_id=*/0, HidReportType::kInput));
 }
 
 }  // namespace

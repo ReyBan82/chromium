@@ -10,20 +10,19 @@
 #include <string>
 #include <vector>
 
+#include "ash/constants/webui_url_constants.h"
+#include "base/check.h"
+#include "base/check_deref.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/memory/weak_ptr.h"
 #include "base/no_destructor.h"
 #include "base/scoped_observation.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
-#include "chrome/browser/ash/mobile/mobile_activator.h"
-#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/url_constants.h"
 #include "chrome/grit/browser_resources.h"
 #include "chrome/grit/generated_resources.h"
 #include "chromeos/ash/components/network/device_state.h"
@@ -31,6 +30,7 @@
 #include "chromeos/ash/components/network/network_state.h"
 #include "chromeos/ash/components/network/network_state_handler.h"
 #include "chromeos/ash/components/network/network_state_handler_observer.h"
+#include "components/application_locale_storage/application_locale_storage.h"
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/url_data_source.h"
 #include "content/public/browser/web_contents.h"
@@ -51,76 +51,21 @@ namespace {
 // Host page JS API function names.
 const char kJsGetDeviceInfo[] = "getDeviceInfo";
 
-const char kJsDeviceStatusChangedCallback[] =
-    "mobile.MobileSetup.deviceStateChanged";
 const char kJsGetDeviceInfoCallback[] =
     "mobile.MobileSetupPortal.onGotDeviceInfo";
 const char kJsConnectivityChangedCallback[] =
     "mobile.MobileSetupPortal.onConnectivityChanged";
 
-// TODO(tbarzic): Localize these strings.
-const char16_t kDefaultActivationError[] =
-    u"$1 is unable to connect to $2 at this time. Please try again later.";
-const char16_t kCellularDisabledError[] =
-    u"Mobile network connections are not currently enabled on this device.";
-const char16_t kNoCellularDeviceError[] =
-    u"Mobile network modem is not present.";
-const char16_t kNoCellularServiceError[] =
-    u"$1 is unable to connect at this time due to insufficient coverage.";
-
-bool ActivationErrorRequiresCarrier(MobileActivator::ActivationError error) {
-  return error == MobileActivator::ActivationError::kActivationFailed;
-}
-
-std::u16string GetActivationErrorMessage(MobileActivator::ActivationError error,
-                                         const std::string& carrier) {
-  // If the activation error message requires the carrier name, and none was
-  // provider, fallback to kNoCellularServiceError.
-  if (carrier.empty() && ActivationErrorRequiresCarrier(error)) {
-    CHECK(!ActivationErrorRequiresCarrier(
-        MobileActivator::ActivationError::kNoCellularService));
-    return GetActivationErrorMessage(
-        MobileActivator::ActivationError::kNoCellularService, carrier);
-  }
-
-  switch (error) {
-    case MobileActivator::ActivationError::kNone:
-      return std::u16string();
-    case MobileActivator::ActivationError::kActivationFailed: {
-      return base::ReplaceStringPlaceholders(
-          kDefaultActivationError,
-          std::vector<std::u16string>(
-              {ui::GetChromeOSDeviceName(), base::UTF8ToUTF16(carrier)}),
-          nullptr);
-    }
-    case MobileActivator::ActivationError::kCellularDisabled:
-      return kCellularDisabledError;
-    case MobileActivator::ActivationError::kNoCellularDevice:
-      return kNoCellularDeviceError;
-    case MobileActivator::ActivationError::kNoCellularService:
-      return base::ReplaceStringPlaceholders(
-          kNoCellularServiceError, ui::GetChromeOSDeviceName(), nullptr);
-  }
-  NOTREACHED() << "Unexpected activation error";
-  return GetActivationErrorMessage(
-      MobileActivator::ActivationError::kActivationFailed, carrier);
-}
-
 void DataRequestFailed(const std::string& service_path,
                        content::URLDataSource::GotDataCallback callback) {
   NET_LOG(ERROR) << "Data Request Failed for Mobile Setup: "
                  << NetworkPathId(service_path);
-  scoped_refptr<base::RefCountedBytes> html_bytes(new base::RefCountedBytes);
-  std::move(callback).Run(html_bytes.get());
+  std::move(callback).Run(base::MakeRefCounted<base::RefCountedBytes>());
 }
 
 // Keys for the dictionary that is set to activation UI and that contains the
 // cellular network information.
 namespace keys {
-
-// The current activation state:
-constexpr char kActivationState[] = "state";
-constexpr char kActivationErrorMessage[] = "error";
 
 // The cellular service properties:
 constexpr char kCellularActivationType[] = "activation_type";
@@ -142,9 +87,10 @@ constexpr char kMdn[] = "MDN";
 // return an empty dictionary if either is not set.
 base::Value GetCellularNetworkInfoValue(const NetworkState* network,
                                         const DeviceState* device) {
-  base::Value::Dict info;
-  if (!device || !network)
+  base::DictValue info;
+  if (!device || !network) {
     return base::Value(std::move(info));
+  }
 
   DCHECK_EQ(network->device_path(), device->path());
 
@@ -165,12 +111,14 @@ base::Value GetCellularNetworkInfoValue(const NetworkState* network,
 
 class MobileSetupUIHTMLSource : public content::URLDataSource {
  public:
-  MobileSetupUIHTMLSource();
+  // `application_locale_storage` must not be null and must outlive `this`.
+  explicit MobileSetupUIHTMLSource(
+      const ApplicationLocaleStorage* application_locale_storage);
 
   MobileSetupUIHTMLSource(const MobileSetupUIHTMLSource&) = delete;
   MobileSetupUIHTMLSource& operator=(const MobileSetupUIHTMLSource&) = delete;
 
-  ~MobileSetupUIHTMLSource() override {}
+  ~MobileSetupUIHTMLSource() override = default;
 
   // content::URLDataSource implementation.
   std::string GetSource() override;
@@ -187,12 +135,13 @@ class MobileSetupUIHTMLSource : public content::URLDataSource {
   }
 
  private:
+  const raw_ref<const ApplicationLocaleStorage> application_locale_storage_;
+
   base::WeakPtrFactory<MobileSetupUIHTMLSource> weak_ptr_factory_{this};
 };
 
 // The handler for Javascript messages related to the "register" view.
 class MobileSetupHandler : public content::WebUIMessageHandler,
-                           public MobileActivator::Observer,
                            public NetworkStateHandlerObserver {
  public:
   MobileSetupHandler();
@@ -206,17 +155,9 @@ class MobileSetupHandler : public content::WebUIMessageHandler,
   void RegisterMessages() override;
   void OnJavascriptDisallowed() override;
 
-  // MobileActivator::Observer.
-  void OnActivationStateChanged(
-      const NetworkState* network,
-      MobileActivator::PlanActivationState new_state,
-      MobileActivator::ActivationError error) override;
-
  private:
   enum Type {
     TYPE_UNDETERMINED,
-    // The network is not yet activated, and the webui is in activation flow.
-    TYPE_ACTIVATION,
     // The network is activated, the webui displays network portal.
     TYPE_PORTAL,
     // Same as TYPE_PORTAL, but the network technology is LTE. The webui is
@@ -228,7 +169,7 @@ class MobileSetupHandler : public content::WebUIMessageHandler,
   void Reset();
 
   // Handlers for JS WebUI messages.
-  void HandleGetDeviceInfo(const base::Value::List& args);
+  void HandleGetDeviceInfo(const base::ListValue& args);
 
   // NetworkStateHandlerObserver implementation.
   void NetworkConnectionStateChanged(const NetworkState* network) override;
@@ -261,10 +202,12 @@ class MobileSetupHandler : public content::WebUIMessageHandler,
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-MobileSetupUIHTMLSource::MobileSetupUIHTMLSource() {}
+MobileSetupUIHTMLSource::MobileSetupUIHTMLSource(
+    const ApplicationLocaleStorage* application_locale_storage)
+    : application_locale_storage_(CHECK_DEREF(application_locale_storage)) {}
 
 std::string MobileSetupUIHTMLSource::GetSource() {
-  return chrome::kChromeUIMobileSetupHost;
+  return ash::kChromeUIMobileSetupHost;
 }
 
 void MobileSetupUIHTMLSource::StartDataRequest(
@@ -310,7 +253,7 @@ void MobileSetupUIHTMLSource::StartDataRequest(
   }
 
   NET_LOG(EVENT) << "Starting mobile setup: " << NetworkId(network);
-  base::Value::Dict strings;
+  base::DictValue strings;
 
   strings.Set("view_account_error_title",
               l10n_util::GetStringUTF16(IDS_MOBILE_VIEW_ACCOUNT_ERROR_TITLE));
@@ -321,8 +264,7 @@ void MobileSetupUIHTMLSource::StartDataRequest(
   strings.Set("cancel_button", l10n_util::GetStringUTF16(IDS_CANCEL));
   strings.Set("ok_button", l10n_util::GetStringUTF16(IDS_OK));
 
-  const std::string& app_locale = g_browser_process->GetApplicationLocale();
-  webui::SetLoadTimeDataDefaults(app_locale, &strings);
+  webui::SetLoadTimeDataDefaults(application_locale_storage_->Get(), &strings);
 
   // mobile_setup_ui.cc will only be triggered from the detail page for
   // activated cellular network.
@@ -347,46 +289,17 @@ MobileSetupHandler::~MobileSetupHandler() {
   Reset();
 }
 
-void MobileSetupHandler::OnActivationStateChanged(
-    const NetworkState* network,
-    MobileActivator::PlanActivationState state,
-    MobileActivator::ActivationError error) {
-  DCHECK_EQ(TYPE_ACTIVATION, type_);
-  if (!web_ui())
-    return;
-
-  NetworkStateHandler* network_state_handler =
-      NetworkHandler::Get()->network_state_handler();
-  const DeviceState* device =
-      network ? network_state_handler->GetDeviceState(network->device_path())
-              : nullptr;
-
-  // First generate cellular properties dictionary, if cellular service and
-  // device are available.
-  base::Value info = GetCellularNetworkInfoValue(network, device);
-
-  // Add the current activation flow state.
-  info.SetKey(keys::kActivationState, base::Value(static_cast<int>(state)));
-  info.SetKey(keys::kActivationErrorMessage,
-              base::Value(GetActivationErrorMessage(
-                  error, device ? device->operator_name() : "")));
-
-  CallJavascriptFunction(kJsDeviceStatusChangedCallback, info);
-}
-
 void MobileSetupHandler::OnJavascriptDisallowed() {
   Reset();
 }
 
 void MobileSetupHandler::Reset() {
-  if (!active_)
+  if (!active_) {
     return;
+  }
   active_ = false;
 
-  if (type_ == TYPE_ACTIVATION) {
-    MobileActivator::GetInstance()->RemoveObserver(this);
-    MobileActivator::GetInstance()->TerminateActivation();
-  } else if (type_ == TYPE_PORTAL_LTE) {
+  if (type_ == TYPE_PORTAL_LTE) {
     network_state_handler_observer_.Reset();
   }
 }
@@ -398,14 +311,15 @@ void MobileSetupHandler::RegisterMessages() {
                           base::Unretained(this)));
 }
 
-void MobileSetupHandler::HandleGetDeviceInfo(const base::Value::List& args) {
-  DCHECK_NE(TYPE_ACTIVATION, type_);
-  if (!web_ui())
+void MobileSetupHandler::HandleGetDeviceInfo(const base::ListValue& args) {
+  if (!web_ui()) {
     return;
+  }
 
-  std::string path = web_ui()->GetWebContents()->GetURL().path();
-  if (path.empty())
+  std::string path = web_ui()->GetWebContents()->GetURL().GetPath();
+  if (path.empty()) {
     return;
+  }
 
   active_ = true;
   AllowJavascript();
@@ -448,12 +362,14 @@ void MobileSetupHandler::HandleGetDeviceInfo(const base::Value::List& args) {
 
 void MobileSetupHandler::DefaultNetworkChanged(
     const NetworkState* default_network) {
-  if (!web_ui())
+  if (!web_ui()) {
     return;
+  }
 
-  std::string path = web_ui()->GetWebContents()->GetURL().path().substr(1);
-  if (path.empty())
+  std::string path = web_ui()->GetWebContents()->GetURL().GetPath().substr(1);
+  if (path.empty()) {
     return;
+  }
 
   const NetworkState* network =
       NetworkHandler::Get()->network_state_handler()->GetNetworkState(path);
@@ -468,12 +384,14 @@ void MobileSetupHandler::DefaultNetworkChanged(
 
 void MobileSetupHandler::NetworkConnectionStateChanged(
     const NetworkState* network) {
-  if (!web_ui())
+  if (!web_ui()) {
     return;
+  }
 
-  std::string path = web_ui()->GetWebContents()->GetURL().path().substr(1);
-  if (path.empty() || path != network->path())
+  std::string path = web_ui()->GetWebContents()->GetURL().GetPath().substr(1);
+  if (path.empty() || path != network->path()) {
     return;
+  }
 
   UpdatePortalReachability(network, false /* do not force notification */);
 }
@@ -500,16 +418,41 @@ void MobileSetupHandler::UpdatePortalReachability(const NetworkState* network,
 
 ////////////////////////////////////////////////////////////////////////////////
 //
+// MobileSetupUIConfig
+//
+////////////////////////////////////////////////////////////////////////////////
+
+MobileSetupUIConfig::MobileSetupUIConfig(
+    const ApplicationLocaleStorage* application_locale_storage)
+    : WebUIConfig(content::kChromeUIScheme, ash::kChromeUIMobileSetupHost),
+      application_locale_storage_(CHECK_DEREF(application_locale_storage)) {}
+
+MobileSetupUIConfig::~MobileSetupUIConfig() = default;
+
+std::unique_ptr<content::WebUIController>
+MobileSetupUIConfig::CreateWebUIController(content::WebUI* web_ui,
+                                           const GURL& url) {
+  return std::make_unique<MobileSetupUI>(web_ui,
+                                         &application_locale_storage_.get());
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
 // MobileSetupUI
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-MobileSetupUI::MobileSetupUI(content::WebUI* web_ui) : ui::WebDialogUI(web_ui) {
+MobileSetupUI::MobileSetupUI(
+    content::WebUI* web_ui,
+    const ApplicationLocaleStorage* application_locale_storage)
+    : ui::WebDialogUI(web_ui) {
+  CHECK(application_locale_storage);
   web_ui->AddMessageHandler(std::make_unique<MobileSetupHandler>());
 
   // Set up the chrome://mobilesetup/ source.
-  content::URLDataSource::Add(Profile::FromWebUI(web_ui),
-                              std::make_unique<MobileSetupUIHTMLSource>());
+  content::URLDataSource::Add(
+      Profile::FromWebUI(web_ui),
+      std::make_unique<MobileSetupUIHTMLSource>(application_locale_storage));
 }
 
 MobileSetupUI::~MobileSetupUI() = default;

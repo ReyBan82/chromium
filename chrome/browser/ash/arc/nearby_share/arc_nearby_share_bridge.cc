@@ -6,20 +6,18 @@
 
 #include <utility>
 
-#include "ash/components/arc/arc_browser_context_keyed_service_factory_base.h"
-#include "ash/components/arc/arc_util.h"
-#include "ash/components/arc/mojom/nearby_share.mojom.h"
-#include "ash/components/arc/session/arc_bridge_service.h"
 #include "ash/public/cpp/app_types_util.h"
-#include "base/files/file_util.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "base/task/thread_pool.h"
 #include "chrome/browser/ash/arc/arc_util.h"
 #include "chrome/browser/ash/arc/nearby_share/arc_nearby_share_uma.h"
 #include "chrome/browser/ash/arc/nearby_share/nearby_share_session_impl.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "components/arc/intent_helper/custom_tab.h"
+#include "chromeos/ash/experiences/arc/arc_browser_context_keyed_service_factory_base.h"
+#include "chromeos/ash/experiences/arc/arc_util.h"
+#include "chromeos/ash/experiences/arc/intent_helper/custom_tab.h"
+#include "chromeos/ash/experiences/arc/mojom/nearby_share.mojom.h"
+#include "chromeos/ash/experiences/arc/session/arc_bridge_service.h"
 #include "content/public/browser/browser_thread.h"
 
 // Enable VLOG level 1.
@@ -40,11 +38,12 @@ class ArcNearbyShareBridgeFactory
   static constexpr const char* kName = "ArcNearbyShareBridgeFactory";
 
   static ArcNearbyShareBridgeFactory* GetInstance() {
-    return base::Singleton<ArcNearbyShareBridgeFactory>::get();
+    static base::NoDestructor<ArcNearbyShareBridgeFactory> instance;
+    return instance.get();
   }
 
  private:
-  friend base::DefaultSingletonTraits<ArcNearbyShareBridgeFactory>;
+  friend base::NoDestructor<ArcNearbyShareBridgeFactory>;
   ArcNearbyShareBridgeFactory() = default;
   ~ArcNearbyShareBridgeFactory() override = default;
 };

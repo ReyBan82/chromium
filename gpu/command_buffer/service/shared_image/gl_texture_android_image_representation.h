@@ -30,7 +30,7 @@ class GLTextureAndroidImageRepresentation
   GLTextureAndroidImageRepresentation& operator=(
       const GLTextureAndroidImageRepresentation&) = delete;
 
-  gles2::Texture* GetTexture(int plane_index) override;
+  gles2::Texture* GetTexture(size_t plane_index) override;
 
   bool BeginAccess(GLenum mode) override;
   void EndAccess() override;
@@ -41,7 +41,7 @@ class GLTextureAndroidImageRepresentation
   }
 
   gl::ScopedEGLImage egl_image_;
-  const raw_ptr<gles2::Texture, DanglingUntriaged> texture_;
+  raw_ptr<gles2::Texture> texture_;
   RepresentationAccessMode mode_ = RepresentationAccessMode::kNone;
 };
 

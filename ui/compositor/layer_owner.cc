@@ -6,18 +6,25 @@
 
 #include <utility>
 
+#include "base/auto_reset.h"
+#include "base/check.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "ui/compositor/compositor.h"
 #include "ui/compositor/layer.h"
 
 namespace ui {
 
+LayerOwner::LayerOwner() = default;
+
 LayerOwner::LayerOwner(std::unique_ptr<Layer> layer) {
   if (layer)
     SetLayer(std::move(layer));
 }
 
-LayerOwner::~LayerOwner() = default;
+LayerOwner::~LayerOwner() {
+  CHECK(!recreating_layer_);
+}
 
 void LayerOwner::AddObserver(Observer* observer) {
   observers_.AddObserver(observer);
@@ -51,9 +58,13 @@ void LayerOwner::Reset(std::unique_ptr<Layer> layer) {
 }
 
 std::unique_ptr<Layer> LayerOwner::RecreateLayer() {
+  CHECK(!recreating_layer_);
+  base::AutoReset<bool> auto_reset(&recreating_layer_, true);
+
   std::unique_ptr<ui::Layer> old_layer(AcquireLayer());
-  if (!old_layer)
+  if (!old_layer) {
     return old_layer;
+  }
 
   LayerDelegate* old_delegate = old_layer->delegate();
   old_layer->set_delegate(nullptr);
@@ -72,10 +83,11 @@ std::unique_ptr<Layer> LayerOwner::RecreateLayer() {
 
   // Migrate all the child layers over to the new layer. Copy the list because
   // the items are removed during iteration.
-  std::vector<ui::Layer*> children_copy = old_layer->children();
-  for (std::vector<ui::Layer*>::const_iterator it = children_copy.begin();
-       it != children_copy.end();
-       ++it) {
+  std::vector<raw_ptr<ui::Layer, VectorExperimental>> children_copy =
+      old_layer->children();
+  for (std::vector<raw_ptr<ui::Layer, VectorExperimental>>::const_iterator it =
+           children_copy.begin();
+       it != children_copy.end(); ++it) {
     ui::Layer* child = *it;
     layer_->Add(child);
   }
@@ -84,8 +96,7 @@ std::unique_ptr<Layer> LayerOwner::RecreateLayer() {
   // state to the new layer.
   layer_->set_delegate(old_delegate);
 
-  for (auto& observer : observers_)
-    observer.OnLayerRecreated(old_layer.get());
+  observers_.Notify(&Observer::OnLayerRecreated, old_layer.get());
 
   return old_layer;
 }

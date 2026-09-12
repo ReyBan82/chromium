@@ -4,21 +4,26 @@
 
 package org.chromium.chrome.browser.customtabs.features.partialcustomtab;
 
+import static org.chromium.build.NullUtil.assertNonNull;
+
 import org.chromium.base.Callback;
-import org.chromium.chrome.browser.tab.EmptyTabObserver;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.TabObserver;
 import org.chromium.content_public.browser.ImeAdapter;
 import org.chromium.content_public.browser.WebContents;
 
 /**
- * {@link TabObserver} monitoring {@link WebContents} updates to set
- * {@link PartialCustomTabInputMethodManagerWrapper}. This lets the tab detect the event of
- * soft keyboard showing up.
+ * {@link TabObserver} monitoring {@link WebContents} updates to set {@link
+ * PartialCustomTabInputMethodManagerWrapper}. This lets the tab detect the event of soft keyboard
+ * showing up.
  */
-public class PartialCustomTabTabObserver extends EmptyTabObserver {
+@NullMarked
+public class PartialCustomTabTabObserver implements TabObserver {
     private final Callback<Runnable> mShowSoftInputCallback;
-    private PartialCustomTabInputMethodWrapper mImmWrapper;
-    private Tab mCurrentTab;
+    private @Nullable PartialCustomTabInputMethodWrapper mImmWrapper;
+    private @Nullable Tab mCurrentTab;
 
     /**
      * @param showSoftInputCallback Callback to invoke when {@link #onShowSoftInput}
@@ -31,8 +36,11 @@ public class PartialCustomTabTabObserver extends EmptyTabObserver {
     @Override
     public void onUrlUpdated(Tab tab) {
         if (mImmWrapper == null) {
-            mImmWrapper = new PartialCustomTabInputMethodWrapper(
-                    tab.getContext(), tab.getWindowAndroid(), mShowSoftInputCallback);
+            mImmWrapper =
+                    new PartialCustomTabInputMethodWrapper(
+                            tab.getContext(),
+                            tab.getWindowAndroidChecked(),
+                            mShowSoftInputCallback);
         }
         if (mCurrentTab != tab) {
             updateImmWrapper(tab);
@@ -40,14 +48,19 @@ public class PartialCustomTabTabObserver extends EmptyTabObserver {
         }
     }
 
-    @Override
-    public void onWebContentsSwapped(Tab tab, boolean didStartLoad, boolean didFinishLoad) {
-        updateImmWrapper(tab);
-    }
-
+    // Suppress NullAway since |mImmWrapper| might be null, but it's unclear what to do in this case
+    // and it wouldn't immediately crash.
+    @SuppressWarnings("NullAway")
     private void updateImmWrapper(Tab tab) {
         WebContents webContents = tab.getWebContents();
-        ImeAdapter imeAdapter = ImeAdapter.fromWebContents(webContents);
+        // WebContents can be null or already destroyed when this is invoked.
+        if (webContents == null || webContents.isDestroyed()) return;
+
+        ImeAdapter imeAdapter = assertNonNull(ImeAdapter.fromWebContents(webContents));
+
+        // Gracefully handle a null adapter in non-debug builds.
+        if (imeAdapter == null) return;
+
         imeAdapter.setInputMethodManagerWrapper(mImmWrapper);
     }
 }

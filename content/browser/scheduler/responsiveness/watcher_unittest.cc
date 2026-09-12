@@ -34,6 +34,8 @@ struct TaskTiming {
 
 class FakeCalculator : public Calculator {
  public:
+  using Calculator::Calculator;
+
   void TaskOrEventFinishedOnUIThread(
       base::TimeTicks queue_time,
       base::TimeTicks execution_start_time,
@@ -88,7 +90,8 @@ class FakeMetricSource : public MetricSource {
       MetricSource::RegisterMessageLoopObserverIO();
   }
 
-  std::unique_ptr<NativeEventObserver> CreateNativeEventObserver() override {
+  std::unique_ptr<BrowserUINativeEventObserver> CreateNativeEventObserver()
+      override {
     return nullptr;
   }
 
@@ -100,7 +103,7 @@ class FakeWatcher : public Watcher {
  public:
   std::unique_ptr<Calculator> CreateCalculator() override {
     std::unique_ptr<FakeCalculator> calculator =
-        std::make_unique<FakeCalculator>();
+        std::make_unique<FakeCalculator>(nullptr);
     calculator_ = calculator.get();
     return calculator;
   }
@@ -230,7 +233,7 @@ TEST_F(ResponsivenessWatcherTest, TaskNesting) {
 TEST_F(ResponsivenessWatcherTest, NativeEvents) {
   const base::TimeTicks start_time = base::TimeTicks::Now();
 
-  void* opaque_identifier = reinterpret_cast<void*>(0x1234);
+  uintptr_t opaque_identifier = 0x1234;
   watcher_->WillRunEventOnUIThread(opaque_identifier);
 
   task_environment_.FastForwardBy(base::Milliseconds(1));
@@ -332,7 +335,7 @@ class ResponsivenessWatcherRealIOThreadTest : public testing::Test {
 
 TEST_F(ResponsivenessWatcherRealIOThreadTest, MessageLoopObserver) {
   // Post a do-nothing task onto the UI thread.
-  content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, base::DoNothing());
+  GetUIThreadTaskRunner({})->PostTask(FROM_HERE, base::DoNothing());
 
   // Post a do-nothing task onto the IO thread.
   content::GetIOThreadTaskRunner({})->PostTask(FROM_HERE, base::DoNothing());
@@ -343,7 +346,7 @@ TEST_F(ResponsivenessWatcherRealIOThreadTest, MessageLoopObserver) {
   content::GetIOThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce(
                      [](base::OnceClosure quit_closure) {
-                       content::GetUIThreadTaskRunner({})->PostTask(
+                       GetUIThreadTaskRunner({})->PostTask(
                            FROM_HERE, std::move(quit_closure));
                      },
                      run_loop.QuitClosure()));

@@ -5,16 +5,16 @@
 #ifndef COMPONENTS_SERVICES_STORAGE_DOM_STORAGE_SESSION_STORAGE_AREA_IMPL_H_
 #define COMPONENTS_SERVICES_STORAGE_DOM_STORAGE_SESSION_STORAGE_AREA_IMPL_H_
 
+#include <optional>
 #include <vector>
 
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/services/storage/dom_storage/session_storage_metadata.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/remote_set.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/dom_storage/storage_area.mojom.h"
 
@@ -27,7 +27,7 @@ class SessionStorageDataMap;
 // namespace-StorageKey area.
 //
 // This class delegates calls to SessionStorageDataMap objects, and can share
-// them with other SessionStorageLevelDBImpl instances to support shallow
+// them with other SessionStorageAreaImpl instances to support shallow
 // cloning (copy-on-write). This should be done through the |Clone()| method and
 // not manually.
 //
@@ -40,16 +40,16 @@ class SessionStorageDataMap;
 // SessionStorageDataMap's StorageArea.
 class SessionStorageAreaImpl : public blink::mojom::StorageArea {
  public:
-  using RegisterNewAreaMap =
-      base::RepeatingCallback<scoped_refptr<SessionStorageMetadata::MapData>(
-          SessionStorageMetadata::NamespaceEntry namespace_entry,
+  using RegisterNewAreaMap = base::RepeatingCallback<
+      scoped_refptr<DomStorageDatabase::SharedMapLocator>(
+          const std::string& namespace_id,
           const blink::StorageKey& storage_key)>;
 
   // Creates a area for the given |namespace_entry|-|storage_key| data area. All
   // StorageArea calls are delegated to the |data_map|. The
   // |register_new_map_callback| is called when a shared |data_map| needs to be
   // forked for the copy-on-write behavior and a new map needs to be registered.
-  SessionStorageAreaImpl(SessionStorageMetadata::NamespaceEntry namespace_entry,
+  SessionStorageAreaImpl(std::string namespace_id,
                          blink::StorageKey storage_key,
                          scoped_refptr<SessionStorageDataMap> data_map,
                          RegisterNewAreaMap register_new_map_callback);
@@ -59,12 +59,11 @@ class SessionStorageAreaImpl : public blink::mojom::StorageArea {
 
   ~SessionStorageAreaImpl() override;
 
-  // Creates a shallow copy clone for the new namespace entry.
+  // Creates a shallow copy clone for the new namespace.
   // This doesn't change the refcount of the underlying map - that operation
   // must be done using
   // SessionStorageMetadata::RegisterShallowClonedNamespace.
-  std::unique_ptr<SessionStorageAreaImpl> Clone(
-      SessionStorageMetadata::NamespaceEntry namespace_entry);
+  std::unique_ptr<SessionStorageAreaImpl> Clone(std::string namespace_id);
 
   void Bind(mojo::PendingReceiver<blink::mojom::StorageArea> receiver);
 
@@ -80,18 +79,17 @@ class SessionStorageAreaImpl : public blink::mojom::StorageArea {
       mojo::PendingRemote<blink::mojom::StorageAreaObserver> observer) override;
   void Put(const std::vector<uint8_t>& key,
            const std::vector<uint8_t>& value,
-           const absl::optional<std::vector<uint8_t>>& client_old_value,
-           const std::string& source,
+           const std::optional<std::vector<uint8_t>>& client_old_value,
+           blink::mojom::StorageAreaSourcePtr source,
            PutCallback callback) override;
   void Delete(const std::vector<uint8_t>& key,
-              const absl::optional<std::vector<uint8_t>>& client_old_value,
-              const std::string& source,
+              const std::optional<std::vector<uint8_t>>& client_old_value,
+              blink::mojom::StorageAreaSourcePtr source,
               DeleteCallback callback) override;
   void DeleteAll(
-      const std::string& source,
+      blink::mojom::StorageAreaSourcePtr source,
       mojo::PendingRemote<blink::mojom::StorageAreaObserver> new_observer,
       DeleteAllCallback callback) override;
-  void Get(const std::vector<uint8_t>& key, GetCallback callback) override;
   void GetAll(
       mojo::PendingRemote<blink::mojom::StorageAreaObserver> new_observer,
       GetAllCallback callback) override;
@@ -106,15 +104,13 @@ class SessionStorageAreaImpl : public blink::mojom::StorageArea {
       std::vector<blink::mojom::KeyValuePtr> entries);
   void OnDeleteAllResult(
       mojo::PendingRemote<blink::mojom::StorageAreaObserver> new_observer,
-      DeleteAllCallback callback,
-      bool success);
+      DeleteAllCallback callback);
 
   enum class NewMapType { FORKED, EMPTY_FROM_DELETE_ALL };
 
-  void CreateNewMap(NewMapType map_type,
-                    const absl::optional<std::string>& delete_all_source);
+  void CreateNewMap(NewMapType map_type);
 
-  SessionStorageMetadata::NamespaceEntry namespace_entry_;
+  std::string namespace_id_;
   blink::StorageKey storage_key_;
   scoped_refptr<SessionStorageDataMap> shared_data_map_;
   RegisterNewAreaMap register_new_map_callback_;

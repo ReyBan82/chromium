@@ -9,10 +9,6 @@
 namespace site_isolation {
 namespace features {
 
-BASE_FEATURE(kCacheSiteIsolationMemoryThreshold,
-             "CacheSiteIsolationMemoryThreshold",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
 // Controls a mode for dynamically process-isolating sites where the user has
 // entered a password.  This is intended to be used primarily when full site
 // isolation is turned off.  To check whether this mode is enabled, use
@@ -42,7 +38,6 @@ BASE_FEATURE(kSiteIsolationForPasswordSites,
 // This feature does not affect Android Webview, which does not include this
 // code.
 BASE_FEATURE(kSiteIsolationForOAuthSites,
-             "SiteIsolationForOAuthSites",
 // Enabled by default on Android only; see https://crbug.com/1206770.
 #if BUILDFLAG(IS_ANDROID)
              base::FEATURE_ENABLED_BY_DEFAULT
@@ -51,8 +46,9 @@ BASE_FEATURE(kSiteIsolationForOAuthSites,
 #endif
 );
 
-// kSiteIsolationMemoryThresholds is checked before individual site isolation
-// mode base::Features (such as kSitePerProcess or
+#if BUILDFLAG(IS_ANDROID)
+// kSiteIsolationMemoryThresholdsAndroid is checked before individual site
+// isolation mode base::Features (such as kSitePerProcess or
 // kSiteIsolationForPasswordSites), and (if enabled) can restrict those modes
 // to not apply to low-memory devices below a certain memory threshold.  The
 // threshold for what is considered a "low memory" device can be set (in MB)
@@ -63,13 +59,60 @@ BASE_FEATURE(kSiteIsolationForOAuthSites,
 // On devices below the memory threshold, the site isolation features such as
 // kSitePerProcess won't be checked at all, and field trials won't activate
 // either the control or the experiment group.
-BASE_FEATURE(kSiteIsolationMemoryThresholds,
+BASE_FEATURE(kSiteIsolationMemoryThresholdsAndroid,
              "SiteIsolationMemoryThresholds",
              base::FEATURE_DISABLED_BY_DEFAULT);
 const char kStrictSiteIsolationMemoryThresholdParamName[] =
     "strict_site_isolation_threshold_mb";
 const char kPartialSiteIsolationMemoryThresholdParamName[] =
     "partial_site_isolation_threshold_mb";
+
+// Controls whether to enable the memory threshold for site isolation on
+// Android. This flag was disabled on Android Desktop to ensure site isolation
+// is always active regardless of memory thresholds.
+//
+// This flag differs from kSiteIsolationMemoryThresholdsAndroid in that
+// kSiteIsolationMemoryThresholdsAndroid typically defines the memory
+// threshold values in field trials. In contrast,
+// kSiteIsolationEnableMemoryThresholdAndroid flag, if DISABLED, it bypasses all
+// memory threshold checks, including any thresholds that might be set by
+// kSiteIsolationMemoryThresholdsAndroid or default values.
+BASE_FEATURE(kSiteIsolationEnableMemoryThresholdAndroid,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+#endif  // BUILDFLAG(IS_ANDROID)
+
+// Controls the rollout of the IsolateOriginsShortlist policy, which allows
+// isolating a shortlist of critical origins on resource-constrained devices
+// (like low-end Android phones) instead of the full IsolateOrigins list.
+BASE_FEATURE(kIsolateOriginsShortlist,
+             "IsolateOriginsShortlistPolicyUpdate",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// In order to have broader support for JavaScript optimizer exceptions, we'll
+// apply origin isolation on navigation for URLs that match rules in the
+// JAVASCRIPT_OPTIMIZER content setting that don't match the default setting.
+// TODO(crbug.com/413695645): we want this feature to start isolating any origin
+// that was specified in the rules but there currently isn't a way to determine
+// this from the host_content_settings_map API, so we'll improve this in the
+// future.
+//
+// On Android, this implicitly starts isolating origins under partial site
+// isolation. If full site isolation is enabled (examples: through opt-in or an
+// enterprise policy), then this feature behaves the same as on Desktop.
+//
+// On Desktop, this feature starts isolating origins where the custom policy
+// targets an origin that is not already origin-isolated.
+BASE_FEATURE(kOriginIsolationForJsOptExceptions,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Desktop-only: kOriginIsolationMemoryThreshold (if enabled) is used to
+// determine if a device has the necessary resources to participate in origin
+// isolation (a stronger model than site isolation, but with potentially higher
+// resource usage).
+BASE_FEATURE(kOriginIsolationMemoryThreshold,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+const char kOriginIsolationMemoryThresholdParamName[] =
+    "origin_isolation_threshold_mb";
 
 }  // namespace features
 }  // namespace site_isolation

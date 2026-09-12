@@ -6,630 +6,1652 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/files/file_enumerator.h"
-#include "base/files/file_util.h"
+#include "base/check_deref.h"
+#include "base/containers/flat_set.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/json/json_writer.h"
+#include "base/run_loop.h"
+#include "base/strings/to_string.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/test/bind.h"
+#include "base/test/gmock_expected_support.h"
+#include "base/test/metrics/histogram_tester.h"
+#include "base/test/repeating_test_future.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
+#include "base/test/values_test_util.h"
+#include "base/threading/thread_restrictions.h"
+#include "base/time/time.h"
+#include "base/types/expected.h"
 #include "base/values.h"
+#include "base/version.h"
+#include "chrome/browser/component_updater/iwa_key_distribution_component_installer.h"
 #include "chrome/browser/profiles/profile_test_util.h"
+#include "chrome/browser/ui/web_applications/test/isolated_web_app_test_utils.h"
+#include "chrome/browser/web_applications/isolated_web_apps/commands/cleanup_orphaned_isolated_web_apps_command.h"
+#include "chrome/browser/web_applications/isolated_web_apps/commands/install_isolated_web_app_command.h"
+#include "chrome/browser/web_applications/isolated_web_apps/install/isolated_web_app_install_source.h"
 #include "chrome/browser/web_applications/isolated_web_apps/isolated_web_app_url_info.h"
-#include "chrome/browser/web_applications/isolated_web_apps/policy/isolated_web_app_external_install_options.h"
-#include "chrome/browser/web_applications/isolated_web_apps/policy/isolated_web_app_policy_constants.h"
-#include "services/data_decoder/public/cpp/test_support/in_process_data_decoder.h"
-#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
+#include "chrome/browser/web_applications/isolated_web_apps/test/isolated_web_app_builder.h"
+#include "chrome/browser/web_applications/isolated_web_apps/test/isolated_web_app_test.h"
+#include "chrome/browser/web_applications/isolated_web_apps/test/iwa_test_server_configurator.h"
+#include "chrome/browser/web_applications/isolated_web_apps/test/key_distribution/test_utils.h"
+#include "chrome/browser/web_applications/isolated_web_apps/test/policy_generator.h"
+#include "chrome/browser/web_applications/isolated_web_apps/test/policy_test_utils.h"
+#include "chrome/browser/web_applications/isolated_web_apps/update/isolated_web_app_update_check_and_prepare_task.h"
+#include "chrome/browser/web_applications/isolated_web_apps/update/isolated_web_app_update_manager.h"
+#include "chrome/browser/web_applications/model/isolation_data.h"
+#include "chrome/browser/web_applications/model/iwa_update_info.h"
+#include "chrome/browser/web_applications/test/fake_web_app_provider.h"
+#include "chrome/browser/web_applications/test/fake_web_contents_manager.h"
+#include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
+#include "chrome/browser/web_applications/test/web_app_test.h"
+#include "chrome/browser/web_applications/test/web_app_test_observers.h"
+#include "chrome/browser/web_applications/web_app_command_scheduler.h"
+#include "chrome/browser/web_applications/web_app_constants.h"
+#include "chrome/browser/web_applications/web_app_filter.h"
+#include "chrome/browser/web_applications/web_app_management_type.h"
+#include "chrome/common/pref_names.h"
+#include "chrome/test/base/testing_browser_process.h"
+#include "components/component_updater/component_updater_paths.h"
+#include "components/component_updater/component_updater_service.h"
+#include "components/component_updater/installer_policies/iwa_key_distribution_component_installer_policy.h"
+#include "components/component_updater/mock_component_updater_service.h"
+#include "components/prefs/scoped_user_pref_update.h"
+#include "components/user_manager/user.h"
+#include "components/web_package/signed_web_bundles/signed_web_bundle_id.h"
+#include "components/web_package/test_support/signed_web_bundles/ed25519_key_pair.h"
+#include "components/webapps/common/web_app_id.h"
+#include "components/webapps/isolated_web_apps/key_distribution/iwa_key_distribution_histograms.h"
+#include "components/webapps/isolated_web_apps/key_distribution/iwa_key_distribution_info_provider.h"
+#include "components/webapps/isolated_web_apps/key_distribution/proto/key_distribution.pb.h"
+#include "components/webapps/isolated_web_apps/test_support/signing_keys.h"
+#include "components/webapps/isolated_web_apps/types/storage_location.h"
+#include "content/public/common/content_features.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
-#include "services/network/test/test_url_loader_factory.h"
 #include "services/network/test/test_utils.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+#if BUILDFLAG(IS_MAC)
+#include "base/mac/mac_util.h"
+#endif
 
 namespace web_app {
 
 namespace {
 
-constexpr char kUpdateManifestUrl1[] =
-    "https://example.com/1/update-manifest-1.json";
-constexpr char kUpdateManifestUrl2[] =
-    "https://example.com/2/update-manifest-2.json";
-constexpr char kUpdateManifestUrl3[] =
-    "https://example.com/3/update-manifest-3.json";
-constexpr char kUpdateManifestUrl4[] =
-    "https://example.com/4/update-manifest-4.json";
-constexpr char kUpdateManifestUrl5[] =
-    "https://example.com/5/update-manifest-5.json";
-constexpr char kUpdateManifestUrl6[] =
-    "https://example.com/6/update-manifest-6.json";
-constexpr char kUpdateManifestUrl7[] =
-    "https://example.com/7/update-manifest-7.json";
-constexpr char kUpdateManifestUrl8[] =
-    "https://example.com/8/update-manifest-8.json";
+constexpr std::string_view kIwaKeyDistributionComponentId =
+    "iebhnlpddlcpcfpfalldikcoeakpeoah";
 
-constexpr char kUpdateManifestValue1[] = R"(
-    {"versions":[
-      {"version": "1.0.0", "src": "https://example.com/not-used.swbn"},
-      {"version": "7.0.6", "src": "https://example.com/app1.swbn"}]
-    })";
-constexpr char kUpdateManifestValue2[] = R"(
-    {"versions":
-    [{"version": "3.0.0","src": "https://example.com/app2.swbn"}]})";
-constexpr char kUpdateManifestValue3[] =
-    "This update manifest should return error 404";
-constexpr char kUpdateManifestValue4[] = R"(This is not JSON)";
-constexpr char kUpdateManifestValue5[] = R"(
-    {"versions":
-    [{"version": "1.0.0", "src": "Ooops! Wrong Web Bundle URL!"}]})";
-constexpr char kUpdateManifestValue6[] = R"(
-    {"versions":
-    [{"version": "1.0.0", "src": "https://example.com/app6.swbn"}]})";
-constexpr char kUpdateManifestValue7[] = R"(
-    {"versions":
-    [{"version": "1.0.0", "src": "https://example.com/app7.swbn"}]})";
-constexpr char kUpdateManifestValue8[] = R"(
-    {"versions":
-    [{"version": "1.0.0","src": "https://example.com/app8.swbn"}]})";
+using Component = component_updater::IwaKeyDistributionComponentInstallerPolicy;
+using ComponentRegistration = component_updater::ComponentRegistration;
 
-constexpr char kWebBundleId1[] =
-    "aerugqztij5biqquuk3mfwpsaibuegaqcitgfchwuosuofdjabzqaaic";
-constexpr char kWebBundleId2[] =
-    "berugqztij5biqquuk3mfwpsaibuegaqcitgfchwuosuofdjabzqaaic";
-constexpr char kWebBundleId3[] =
-    "cerugqztij5biqquuk3mfwpsaibuegaqcitgfchwuosuofdjabzqaaic";
-constexpr char kWebBundleId4[] =
-    "derugqztij5biqquuk3mfwpsaibuegaqcitgfchwuosuofdjabzqaaic";
-constexpr char kWebBundleId5[] =
-    "eerugqztij5biqquuk3mfwpsaibuegaqcitgfchwuosuofdjabzqaaic";
-constexpr base::StringPiece kWebBundleId6 = kWebBundleId1;
-constexpr char kWebBundleId7[] =
-    "gerugqztij5biqquuk3mfwpsaibuegaqcitgfchwuosuofdjabzqaaic";
-constexpr char kWebBundleId8[] =
-    "herugqztij5biqquuk3mfwpsaibuegaqcitgfchwuosuofdjabzqaaic";
+using ::testing::_;
+using ::testing::DoAll;
+using ::testing::Eq;
+using ::testing::Field;
+using ::testing::IsNull;
+using ::testing::NotNull;
+using ::testing::Return;
+using ::testing::ReturnRef;
+using ::testing::UnorderedElementsAre;
+using ::testing::WithoutArgs;
 
-base::Value CreatePolicyEntry(base::StringPiece web_bundle_id,
-                              base::StringPiece update_manifest_url) {
-  base::Value policy_entry(base::Value::Type::DICT);
-  policy_entry.SetStringKey(web_app::kPolicyWebBundleIdKey, web_bundle_id);
-  policy_entry.SetStringKey(web_app::kPolicyUpdateManifestUrlKey,
-                            update_manifest_url);
-  return policy_entry;
-}
-
-std::vector<IsolatedWebAppExternalInstallOptions> GenerateInstallOptions() {
-  // App 1 represents the most general case: the Update Manifest has several
-  // records. We should determine the latest version, download the appropreate
-  // file and install the app. It is successful case.
-  const base::Value policy_value_1 =
-      CreatePolicyEntry(kWebBundleId1, kUpdateManifestUrl1);
-  IsolatedWebAppExternalInstallOptions app_options_1 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_1)
-          .value();
-  // App 2 is similar to App 1 but has only one record in the Update Manifest.
-  const base::Value policy_value_2 =
-      CreatePolicyEntry(kWebBundleId2, kUpdateManifestUrl2);
-  IsolatedWebAppExternalInstallOptions app_options_2 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_2)
-          .value();
-  // We can't download Update Manifest for the app 3.
-  const base::Value policy_value_3 =
-      CreatePolicyEntry(kWebBundleId3, kUpdateManifestUrl3);
-  IsolatedWebAppExternalInstallOptions app_options_3 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_3)
-          .value();
-  // App 4 represents the case where the Update Manifest if not parceable.
-  const base::Value policy_value_4 =
-      CreatePolicyEntry(kWebBundleId4, kUpdateManifestUrl4);
-  IsolatedWebAppExternalInstallOptions app_options_4 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_4)
-          .value();
-  // The Web Bundle URL of the App 5 is not valid.
-  const base::Value policy_value_5 =
-      CreatePolicyEntry(kWebBundleId5, kUpdateManifestUrl5);
-  IsolatedWebAppExternalInstallOptions app_options_5 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_5)
-          .value();
-  // ID of the App 6 is the same as ID of the App 1.
-  const base::Value policy_value_6 =
-      CreatePolicyEntry(kWebBundleId6, kUpdateManifestUrl6);
-  IsolatedWebAppExternalInstallOptions app_options_6 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_6)
-          .value();
-  // The Web Bundle file of the App 7 can't be downloaded.
-  const base::Value policy_value_7 =
-      CreatePolicyEntry(kWebBundleId7, kUpdateManifestUrl7);
-  IsolatedWebAppExternalInstallOptions app_options_7 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_7)
-          .value();
-  // The Web Bundle of the App 8 can't be installed.
-  const base::Value policy_value_8 =
-      CreatePolicyEntry(kWebBundleId8, kUpdateManifestUrl8);
-  IsolatedWebAppExternalInstallOptions app_options_8 =
-      IsolatedWebAppExternalInstallOptions::FromPolicyPrefValue(policy_value_8)
-          .value();
-
-  std::vector<IsolatedWebAppExternalInstallOptions> options;
-  options.push_back(std::move(app_options_1));
-  options.push_back(std::move(app_options_2));
-  options.push_back(std::move(app_options_3));
-  options.push_back(std::move(app_options_4));
-  options.push_back(std::move(app_options_5));
-  options.push_back(std::move(app_options_6));
-  options.push_back(std::move(app_options_7));
-  options.push_back(std::move(app_options_8));
-  return options;
-}
-
-class TestIwaInstallCommandWrapper
-    : public IsolatedWebAppPolicyManager::IwaInstallCommandWrapper {
+class TestOrphanedCleanupWebAppCommandScheduler
+    : public WebAppCommandScheduler {
  public:
-  TestIwaInstallCommandWrapper() = default;
-  void Install(
-      const IsolatedWebAppLocation& location,
-      const IsolatedWebAppUrlInfo& url_info,
-      WebAppCommandScheduler::InstallIsolatedWebAppCallback callback) override {
-    if (url_info.web_bundle_id().id() == kWebBundleId1 ||
-        url_info.web_bundle_id().id() == kWebBundleId2) {
-      std::move(callback).Run(InstallIsolatedWebAppCommandSuccess{});
-      return;
-    }
+  explicit TestOrphanedCleanupWebAppCommandScheduler(Profile& profile)
+      : WebAppCommandScheduler(profile) {}
 
-    std::move(callback).Run(base::unexpected{InstallIsolatedWebAppCommandError{
-        .message = std::string{"Install error message"}}});
+  void CleanupOrphanedIsolatedApps(
+      CleanupOrphanedIsolatedWebAppsCallback callback,
+      const base::Location& call_location) override {
+    ++number_of_calls_;
+    std::move(callback).Run(CleanupOrphanedIsolatedWebAppsCommandSuccess(0u));
+    command_done_closure_.Run();
   }
-  ~TestIwaInstallCommandWrapper() override = default;
+
+  size_t GetNumberOfCalls() { return number_of_calls_; }
+
+  void SetCommandDoneClosure(base::RepeatingClosure closure) {
+    command_done_closure_ = std::move(closure);
+  }
+
+ private:
+  base::RepeatingClosure command_done_closure_;
+  size_t number_of_calls_ = 0;
+};
+
+class MockOnDemandUpdater : public component_updater::OnDemandUpdater {
+ public:
+  MOCK_METHOD(void,
+              OnDemandUpdate,
+              (const std::string&,
+               component_updater::OnDemandUpdater::Priority,
+               component_updater::Callback),
+              (override));
+};
+
+std::unique_ptr<base::ScopedTempDir> CreateIwaComponentDir(
+    const base::Version& version,
+    const IwaKeyDistribution& component_data,
+    bool is_preloaded) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+  auto dir = std::make_unique<base::ScopedTempDir>();
+  CHECK(dir->CreateUniqueTempDir());
+
+  auto manifest = base::DictValue()
+                      .Set("manifest_version", 1)
+                      .Set("name", Component::kManifestName)
+                      .Set("version", version.GetString());
+  if (is_preloaded) {
+    manifest.Set("is_preloaded", true);
+  }
+
+  CHECK(
+      base::WriteFile(dir->GetPath().Append(FILE_PATH_LITERAL("manifest.json")),
+                      *base::WriteJson(manifest)));
+  CHECK(base::WriteFile(dir->GetPath().Append(Component::kDataFileName),
+                        component_data.SerializeAsString()));
+
+  return dir;
+}
+
+class IwaComponentWrapper {
+ public:
+  IwaComponentWrapper() {
+    auto cus = std::make_unique<
+        testing::NiceMock<component_updater::MockComponentUpdateService>>();
+    cus_ = cus.get();
+    TestingBrowserProcess::GetGlobal()->SetComponentUpdater(std::move(cus));
+
+    ON_CALL(*cus_, GetOnDemandUpdater)
+        .WillByDefault(ReturnRef(on_demand_updater()));
+    ON_CALL(*cus_, RegisterComponent(Field(&ComponentRegistration::app_id,
+                                           Eq(kIwaKeyDistributionComponentId))))
+        .WillByDefault(DoAll(
+            [&](const ComponentRegistration& component) {
+              CHECK(!on_component_registered_.is_signaled())
+                  << " Component registration is supposed to only happen once.";
+              installer_ = component.installer;
+              on_component_registered_.Signal();
+            },
+            Return(true)));
+    component_updater::RegisterIwaKeyDistributionComponent(cus_);
+  }
+
+  void InstallComponentAsync(const base::Version& version,
+                             const IwaKeyDistribution& component_data,
+                             bool is_preloaded) {
+    auto component_dir_path =
+        WriteIwaComponentData(version, component_data, is_preloaded);
+    on_component_registered_.Post(
+        FROM_HERE, base::BindLambdaForTesting([&, component_dir_path] {
+          base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+              FROM_HERE,
+              base::BindOnce(&update_client::CrxInstaller::Install, installer_,
+                             component_dir_path,
+                             /*public_key=*/"", /*install_params=*/nullptr,
+                             base::DoNothing(), base::DoNothing()));
+        }));
+  }
+
+  MockOnDemandUpdater& on_demand_updater() { return on_demand_updater_; }
+
+ private:
+  base::FilePath WriteIwaComponentData(const base::Version& version,
+                                       const IwaKeyDistribution& component_data,
+                                       bool is_preloaded) {
+    CHECK(!component_dirs_.contains(version))
+        << " There's already an installed component with version " << version;
+    std::unique_ptr<base::ScopedTempDir> dir =
+        CreateIwaComponentDir(version, component_data, is_preloaded);
+    auto path = dir->GetPath();
+    component_dirs_[version] = std::move(dir);
+    return path;
+  }
+
+  // Owned by `g_browser_process`.
+  raw_ptr<component_updater::MockComponentUpdateService> cus_ = nullptr;
+
+  // `on_demand_updater_` is defined as StrictMock to prevent situations where
+  // `OnDemandUpdate()` is dispatched to an empty implementation; this is only a
+  // likely case if the initial component data is marked as preloaded by the
+  // inheriting test suite.
+  testing::StrictMock<MockOnDemandUpdater> on_demand_updater_;
+
+  base::OneShotEvent on_component_registered_;
+  scoped_refptr<update_client::CrxInstaller> installer_;
+
+  base::flat_map<base::Version, std::unique_ptr<base::ScopedTempDir>>
+      component_dirs_;
 };
 
 }  // namespace
 
-class IsolatedWebAppPolicyManagerTest : public ::testing::Test {
+class IsolatedWebAppPolicyManagerTestBase : public IsolatedWebAppTest {
+ public:
+  explicit IsolatedWebAppPolicyManagerTestBase(
+      bool is_user_session,
+      base::test::TaskEnvironment::TimeSource time_source =
+          base::test::TaskEnvironment::TimeSource::MOCK_TIME)
+      : IsolatedWebAppTest(time_source, WithDevMode{}),
+        is_user_session_(is_user_session) {}
+
+  void SetUpServedIwas() {
+    std::unique_ptr<ScopedBundledIsolatedWebApp> app1 =
+        IsolatedWebAppBuilder(ManifestBuilder().SetVersion("1.0.0"))
+            .BuildBundle(test::GetDefaultEd25519KeyPair());
+    app1->FakeInstallPageState(profile());
+
+    std::unique_ptr<ScopedBundledIsolatedWebApp> app2 =
+        IsolatedWebAppBuilder(ManifestBuilder().SetVersion("1.0.0"))
+            .BuildBundle(test::GetDefaultEcdsaP256KeyPair());
+    app2->FakeInstallPageState(profile());
+
+    lazy_app1_id_ = app1->web_bundle_id();
+    lazy_app2_id_ = app2->web_bundle_id();
+
+    test_update_server().AddBundle(std::move(app1));
+    test_update_server().AddBundle(std::move(app2));
+  }
+
+  void SetUp() override {
+    IwaKeyDistributionInfoProvider::GetInstanceForTesting()
+        .SkipManagedAllowlistChecksForTesting(true);
+
+    IsolatedWebAppTest::SetUp();
+    SetCommandScheduler();
+
+    if (ShouldStartWebAppProvider()) {
+      test::AwaitStartWebAppProviderAndSubsystems(profile());
+      SetUpServedIwas();
+    }
+
+#if BUILDFLAG(IS_CHROMEOS)
+    if (!is_user_session_) {
+      test_managed_guest_session_ =
+          std::make_unique<profiles::testing::ScopedTestManagedGuestSession>();
+    }
+#else
+    // Suppress -Wunused-private-field warning.
+    (void)is_user_session_;
+#endif  // BUILDFLAG(IS_CHROMEOS)
+  }
+
+  void TearDown() override {
+    IwaKeyDistributionInfoProvider::GetInstanceForTesting()
+        .SkipManagedAllowlistChecksForTesting(false);
+    IsolatedWebAppTest::TearDown();
+  }
+
+  virtual void SetCommandScheduler() = 0;
+  virtual bool ShouldStartWebAppProvider() const { return true; }
+
+  sync_preferences::TestingPrefServiceSyncable* pref_service() {
+    return profile()->GetTestingPrefService();
+  }
+
+  FakeWebContentsManager& fake_web_contents_manager() {
+    return static_cast<FakeWebContentsManager&>(
+        provider().web_contents_manager());
+  }
+
+  void AssertAppInstalled(const web_package::SignedWebBundleId& swbn_id) {
+    const WebApp* web_app = provider().registrar_unsafe().GetAppById(
+        IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(swbn_id).app_id());
+    ASSERT_THAT(web_app, testing::NotNull()) << "The app in not installed :(";
+  }
+
+  const web_package::SignedWebBundleId& web_bundle_id_1() {
+    return *lazy_app1_id_;
+  }
+  const web_package::SignedWebBundleId& web_bundle_id_2() {
+    return *lazy_app2_id_;
+  }
+
+ private:
+  const bool is_user_session_;
+#if BUILDFLAG(IS_CHROMEOS)
+  std::unique_ptr<profiles::testing::ScopedTestManagedGuestSession>
+      test_managed_guest_session_;
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+  std::optional<web_package::SignedWebBundleId> lazy_app1_id_;
+  std::optional<web_package::SignedWebBundleId> lazy_app2_id_;
+};
+
+class IsolatedWebAppPolicyManagerTest
+    : public IsolatedWebAppPolicyManagerTestBase {
  public:
   IsolatedWebAppPolicyManagerTest()
-      : shared_url_loader_factory_(
-            base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
-                &test_factory_)) {}
+      : IsolatedWebAppPolicyManagerTestBase(/*is_user_session=*/true) {}
+
+  // `IsolatedWebAppPolicyManagerTestBase`:
+  void SetCommandScheduler() override {
+    // For these tests we are fine with regular command scheduler.
+  }
+};
+
+TEST_F(IsolatedWebAppPolicyManagerTest, AppInstalled) {
+  auto url_info =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+  task_environment().RunUntilIdle();
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app, NotNull());
+  EXPECT_THAT(web_app->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+}
+
+TEST_F(IsolatedWebAppPolicyManagerTest, AppInstalledAtPinnedVersion) {
+  const IwaVersion pinned_version = *IwaVersion::Create("1.0.0");
+  auto url_info =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          web_bundle_id_1(), /*update_channel=*/std::nullopt,
+          /*pinned_version=*/pinned_version));
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+  task_environment().RunUntilIdle();
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app, NotNull());
+  ASSERT_EQ(web_app->isolation_data()->version(), pinned_version);
+  EXPECT_THAT(web_app->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+}
+
+TEST_F(IsolatedWebAppPolicyManagerTest, AppNotInstalledIncorrectPinnedVersion) {
+  const IwaVersion pinned_version = *IwaVersion::Create("1.9.0");
+  auto url_info =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          web_bundle_id_1(), /*update_channel=*/std::nullopt,
+          /*pinned_version=*/pinned_version));
+
+  task_environment().RunUntilIdle();
+  EXPECT_FALSE(provider().registrar_unsafe().AppMatches(
+      url_info.app_id(), WebAppFilter::PolicyInstalledIsolatedWebApp()));
+}
+
+TEST_F(IsolatedWebAppPolicyManagerTest,
+       AddForceInstalledSourceToUserInstalledIwa) {
+  const std::unique_ptr<ScopedBundledIsolatedWebApp> bundle =
+      IsolatedWebAppBuilder(ManifestBuilder().SetVersion("1.0.0"))
+          .BuildBundle(test::GetDefaultEd25519KeyPair());
+
+  bundle->FakeInstallPageState(profile());
+  const IsolatedWebAppUrlInfo url_info = bundle->InstallChecked(profile());
+  {
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    ASSERT_THAT(web_app, NotNull());
+    EXPECT_THAT(
+        web_app->GetSources(),
+        Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaUserInstalled})));
+    EXPECT_FALSE(provider().registrar_unsafe().AppMatches(
+        url_info.app_id(), WebAppFilter::PolicyInstalledIsolatedWebApp()));
+  }
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+  task_environment().RunUntilIdle();
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app, NotNull());
+  EXPECT_THAT(
+      web_app->GetSources(),
+      Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy,
+                                WebAppManagement::Type::kIwaUserInstalled})));
+  EXPECT_TRUE(provider().registrar_unsafe().AppMatches(
+      url_info.app_id(), WebAppFilter::PolicyInstalledIsolatedWebApp()));
+}
+
+TEST_F(IsolatedWebAppPolicyManagerTest, AppForceInstallSourceRemoved) {
+  const std::unique_ptr<ScopedBundledIsolatedWebApp> bundle =
+      IsolatedWebAppBuilder(ManifestBuilder().SetVersion("1.0.0"))
+          .BuildBundle(test::GetDefaultEd25519KeyPair());
+
+  bundle->FakeInstallPageState(profile());
+  const IsolatedWebAppUrlInfo url_info = bundle->InstallChecked(profile());
+  {
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    ASSERT_THAT(web_app, NotNull());
+    EXPECT_THAT(
+        web_app->GetSources(),
+        Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaUserInstalled})));
+    EXPECT_FALSE(provider().registrar_unsafe().AppMatches(
+        url_info.app_id(), WebAppFilter::PolicyInstalledIsolatedWebApp()));
+  }
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+  task_environment().RunUntilIdle();
+
+  {
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    EXPECT_THAT(
+        web_app->GetSources(),
+        Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy,
+                                  WebAppManagement::Type::kIwaUserInstalled})));
+  }
+
+  {
+    test::RemoveForceInstalledIwaFromPolicy(profile()->GetPrefs(),
+                                            url_info.web_bundle_id());
+    task_environment().RunUntilIdle();
+
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    EXPECT_THAT(
+        web_app->GetSources(),
+        Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaUserInstalled})));
+  }
+}
+
+TEST_F(IsolatedWebAppPolicyManagerTest, CantUserInstallAppWhenForceInstalled) {
+  const std::unique_ptr<ScopedBundledIsolatedWebApp> bundle =
+      IsolatedWebAppBuilder(ManifestBuilder().SetVersion("1.0.0"))
+          .BuildBundle(test::GetDefaultEd25519KeyPair());
+  auto url_info = IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(
+      bundle->web_bundle_id());
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+  task_environment().RunUntilIdle();
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app, NotNull());
+  EXPECT_THAT(web_app->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+
+  EXPECT_EQ(bundle
+                ->InstallWithSource(profile(),
+                                    &IsolatedWebAppInstallSource::FromDevUi)
+                .error(),
+            "App is already installed");
+}
+
+TEST_F(IsolatedWebAppPolicyManagerTest, DevModeAppRemovedWhenForceInstalled) {
+  const std::unique_ptr<ScopedBundledIsolatedWebApp> bundle =
+      IsolatedWebAppBuilder(ManifestBuilder().SetVersion("1.0.0"))
+          .BuildBundle(test::GetDefaultEd25519KeyPair());
+
+  ASSERT_OK_AND_ASSIGN(const IsolatedWebAppUrlInfo url_info,
+                       bundle->InstallWithSource(
+                           profile(), &IsolatedWebAppInstallSource::FromDevUi));
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+  task_environment().RunUntilIdle();
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app, NotNull());
+  EXPECT_THAT(web_app->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+}
+
+#if BUILDFLAG(IS_CHROMEOS)
+class ManagedGuestSessionInstallTest
+    : public IsolatedWebAppPolicyManagerTestBase {
+ public:
+  ManagedGuestSessionInstallTest()
+      : IsolatedWebAppPolicyManagerTestBase(/*is_user_session=*/false) {}
+
+  // `IsolatedWebAppPolicyManagerTestBase`:
+  void SetCommandScheduler() override {
+    // For these tests we are fine with regular command scheduler.
+  }
+};
+
+TEST_F(ManagedGuestSessionInstallTest, AppInstalled) {
+  auto url_info =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  task_environment().RunUntilIdle();
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app, NotNull());
+  EXPECT_THAT(web_app->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+}
+
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+class IsolatedWebAppManagedAllowlistTest
+    : public IsolatedWebAppPolicyManagerTestBase {
+ public:
+  IsolatedWebAppManagedAllowlistTest()
+      : IsolatedWebAppPolicyManagerTestBase(/*is_user_session=*/true) {}
+
+  // `IsolatedWebAppPolicyManagerTestBase`:
+  void SetCommandScheduler() override {
+    // For these tests we are fine with regular command scheduler.
+  }
+
+  void SetUp() override {
+    IsolatedWebAppPolicyManagerTestBase::SetUp();
+    IwaKeyDistributionInfoProvider::GetInstanceForTesting()
+        .SkipManagedAllowlistChecksForTesting(false);
+  }
+};
+using base::test::HasValue;
+
+TEST_F(IsolatedWebAppManagedAllowlistTest, AllowedAppInstalled) {
+  base::HistogramTester ht;
+  const auto url_info =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  base::test::TestFuture<web_package::SignedWebBundleId, IwaInstallerResult>
+      future;
+  IsolatedWebAppPolicyManager::SetOnInstallTaskCompletedCallbackForTesting(
+      future.GetRepeatingCallback());
+
+  // Update allowlist
+  EXPECT_OK(test::KeyDistributionComponentBuilder(base::Version("1.0.1"))
+                .AddToManagedAllowlist(web_bundle_id_1())
+                .Build()
+                .UploadFromComponentFolder());
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  auto [web_bundle_id, result] = future.Take();
+  EXPECT_EQ(web_bundle_id, web_bundle_id_1());
+  EXPECT_EQ(result.type(), IwaInstallerResultType::kSuccess);
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+
+  EXPECT_THAT(
+      ht.GetAllSamples(kIwaKeyDistributionManagedInstallAllowedHistogramName),
+      base::BucketsAre(base::Bucket(true, 2)));
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app, NotNull());
+  EXPECT_THAT(web_app->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+}
+
+TEST_F(IsolatedWebAppManagedAllowlistTest, NotAllowedAppInstallationRefused) {
+  base::HistogramTester ht;
+  auto url_info =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+
+  base::test::TestFuture<web_package::SignedWebBundleId, IwaInstallerResult>
+      future;
+  IsolatedWebAppPolicyManager::SetOnInstallTaskCompletedCallbackForTesting(
+      future.GetRepeatingCallback());
+
+  // Ensure allowlist is empty
+  EXPECT_OK(test::KeyDistributionComponentBuilder(base::Version("1.0.1"))
+                .WithManagedAllowlist({})  // For clarity only
+                .Build()
+                .UploadFromComponentFolder());
+
+  EXPECT_FALSE(IwaKeyDistributionInfoProvider::GetInstanceForTesting()
+                   .IsManagedInstallPermitted(web_bundle_id_1().id()));
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          url_info.web_bundle_id()));
+
+  auto [web_bundle_id, result] = future.Take();
+  EXPECT_EQ(web_bundle_id, web_bundle_id_1());
+  EXPECT_EQ(result.type(), IwaInstallerResultType::kErrorAppNotInAllowlist);
+
+  EXPECT_THAT(
+      ht.GetAllSamples(kIwaKeyDistributionManagedInstallAllowedHistogramName),
+      base::BucketsAre(base::Bucket(false, 2)));
+
+  const WebApp* web_app =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  EXPECT_THAT(web_app, testing::IsNull());
+}
+
+// This implementation of the command scheduler can't install an IWA. Instead
+// it hangs and waits for the signal to signalize the
+// invoker that the install failed.
+class TestWebAppCommandScheduler : public WebAppCommandScheduler {
+ public:
+  using WebAppCommandScheduler::WebAppCommandScheduler;
+
+  void InstallIsolatedWebApp(
+      const IsolatedWebAppUrlInfo& url_info,
+      const IsolatedWebAppInstallSource& install_source,
+      const std::optional<IwaVersion>& expected_version,
+      std::unique_ptr<ScopedKeepAlive> keep_alive,
+      std::unique_ptr<ScopedProfileKeepAlive> profile_keep_alive,
+      InstallIsolatedWebAppCallback callback,
+      std::optional<IwaUpdateInfo> optional_update_info,
+      const base::Location& call_location) override {
+    EXPECT_TRUE(stashed_callback_.is_null());
+    EXPECT_EQ(install_source.install_surface(),
+              webapps::WebappInstallSource::IWA_EXTERNAL_POLICY);
+    id_ = url_info.web_bundle_id();
+    stashed_callback_ = std::move(callback);
+  }
+
+  web_package::SignedWebBundleId FinishWithError() {
+    std::move(stashed_callback_)
+        .Run(base::unexpected<InstallIsolatedWebAppCommandError>(
+            InstallIsolatedWebAppCommandError{
+                .message = "Just test error. We even didn't try..."}));
+    return id_.value();
+  }
+
+ private:
+  InstallIsolatedWebAppCallback stashed_callback_;
+  std::optional<web_package::SignedWebBundleId> id_;
+};
+
+template <typename T>
+class IsolatedWebAppPolicyManagerCustomSchedulerTest
+    : public IsolatedWebAppPolicyManagerTestBase {
+ public:
+  IsolatedWebAppPolicyManagerCustomSchedulerTest()
+      : IsolatedWebAppPolicyManagerTestBase(/*is_user_session=*/true) {}
+
+  T* get_command_scheduler() { return scheduler_; }
+  // `IsolatedWebAppPolicyManagerTestBase`:
+  void SetCommandScheduler() override {
+    std::unique_ptr<T> scheduler = std::make_unique<T>(*profile());
+    scheduler_ = scheduler.get();
+    provider().SetScheduler(std::move(scheduler));
+  }
+
+  void TearDown() override {
+    scheduler_ = nullptr;
+    IsolatedWebAppPolicyManagerTestBase::TearDown();
+  }
+
+ private:
+  raw_ptr<T> scheduler_;
+};
+
+using IsolatedWebAppPolicyManagerPolicyRaceTest =
+    IsolatedWebAppPolicyManagerCustomSchedulerTest<TestWebAppCommandScheduler>;
+
+// Verifies that the updating of policy during previous policy processing
+// is handled correctly.
+TEST_F(IsolatedWebAppPolicyManagerPolicyRaceTest,
+       PolicyUpdateWhileInstallInProgress) {
+  {
+    test::AddForceInstalledIwaToPolicy(
+        profile()->GetPrefs(),
+        IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+            web_bundle_id_1()));
+  }
+
+  task_environment().RunUntilIdle();
+
+  // Update the policy at the moment when first policy update is being
+  // processed. We set the policy to force install not existing app.
+  // This policy variant will not be processed because it will be replaced
+  // by the third policy update.
+  {
+    PolicyGenerator policy_generator;
+    const web_package::SignedWebBundleId id =
+        web_package::SignedWebBundleId::Create(
+            "xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzaaaic")
+            .value();
+    policy_generator.AddForceInstalledIwa(
+        id, GURL("https://update/manifest/does/not/exist"));
+    profile()->GetPrefs()->Set(prefs::kIsolatedWebAppInstallForceList,
+                               policy_generator.Generate());
+  }
+
+  task_environment().RunUntilIdle();
+
+  // The third policy update. This one must be processed.
+  {
+    profile()->GetPrefs()->SetList(
+        prefs::kIsolatedWebAppInstallForceList,
+        base::ListValue()
+            .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_1()))
+            .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_2())));
+  }
+
+  // Finish the installation of the app1 from the first policy update.
+  EXPECT_THAT(get_command_scheduler()->FinishWithError(),
+              Eq(web_bundle_id_1()));
+  task_environment().RunUntilIdle();
+
+  // The second policy update is ignored as it was replaced by the third one.
+
+  // Processing the third policy update.
+  std::vector<web_package::SignedWebBundleId> ids;
+
+  // Finish app1 from the third policy update.
+  ids.push_back(get_command_scheduler()->FinishWithError());
+  task_environment().RunUntilIdle();
+
+  // Finish app2 from the third policy update.
+  ids.push_back(get_command_scheduler()->FinishWithError());
+  task_environment().RunUntilIdle();
+
+  EXPECT_THAT(ids, UnorderedElementsAre(web_bundle_id_1(), web_bundle_id_2()));
+}
+
+// This scheduler is intercepting scheduling of the uninstall command,
+// verifying if the App ID is expected for removal.
+class UninstallWebAppCommandScheduler : public WebAppCommandScheduler {
+ public:
+  using WebAppCommandScheduler::WebAppCommandScheduler;
+
+  void RemoveInstallManagementMaybeUninstall(
+      const webapps::AppId& app_id,
+      WebAppManagement::Type management_type,
+      webapps::WebappUninstallSource uninstall_source,
+      UninstallCallback callback,
+      const base::Location& location) override {
+    tried_to_uninstall_ = true;
+    EXPECT_TRUE(expected_apps_to_remove_.contains(app_id));
+    EXPECT_EQ(management_type, expected_management_type_to_remove_.value_or(
+                                   WebAppManagement::Type::kIwaPolicy));
+    EXPECT_EQ(uninstall_source,
+              webapps::WebappUninstallSource::kIwaEnterprisePolicy);
+    auto app = expected_apps_to_remove_.find(app_id);
+    expected_apps_to_remove_.erase(app);
+
+    WebAppCommandScheduler::RemoveInstallManagementMaybeUninstall(
+        app_id, management_type, uninstall_source, std::move(callback),
+        location);
+  }
+
+  void AddExpectedToUninstallApp(const webapps::AppId& app_id) {
+    expected_apps_to_remove_.insert(app_id);
+  }
+
+  size_t GetNumberOfAppsRemainingToUninstall() const {
+    return expected_apps_to_remove_.size();
+  }
+
+  bool TriedToUninstall() { return tried_to_uninstall_; }
+
+  void SetMaybeExpectedManagementTypeToUninstall(
+      std::optional<WebAppManagement::Type> management_type) {
+    expected_management_type_to_remove_ = management_type;
+  }
+
+ private:
+  base::flat_set<webapps::AppId> expected_apps_to_remove_;
+  std::optional<WebAppManagement::Type> expected_management_type_to_remove_;
+  bool tried_to_uninstall_ = false;
+};
+
+using IsolatedWebAppPolicyManagerUninstallTest =
+    IsolatedWebAppPolicyManagerCustomSchedulerTest<
+        UninstallWebAppCommandScheduler>;
+
+// Remove the app from policy and check if there will be attempt to uninstall
+// that app.
+TEST_F(IsolatedWebAppPolicyManagerUninstallTest, OneAppUninstalled) {
+  // Force install 2 apps.
+  {
+    profile()->GetPrefs()->SetList(
+        prefs::kIsolatedWebAppInstallForceList,
+        base::ListValue()
+            .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_1()))
+            .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_2())));
+
+    task_environment().RunUntilIdle();
+
+    AssertAppInstalled(web_bundle_id_1());
+    AssertAppInstalled(web_bundle_id_2());
+  }
+
+  // Now generate a policy with 1 app and expect an attempt to
+  // remove the other app.
+  {
+    const webapps::AppId app2_id =
+        IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_2())
+            .app_id();
+    get_command_scheduler()->AddExpectedToUninstallApp(app2_id);
+    EXPECT_EQ(get_command_scheduler()->GetNumberOfAppsRemainingToUninstall(),
+              1U);
+
+    profile()->GetPrefs()->SetList(
+        prefs::kIsolatedWebAppInstallForceList,
+        base::ListValue().Append(
+            IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_1())));
+
+    task_environment().RunUntilIdle();
+
+    EXPECT_EQ(get_command_scheduler()->GetNumberOfAppsRemainingToUninstall(),
+              0U);
+  }
+}
+
+TEST_F(IsolatedWebAppPolicyManagerUninstallTest, BothAppUninstalled) {
+  // Force install 2 apps.
+  {
+    profile()->GetPrefs()->SetList(
+        prefs::kIsolatedWebAppInstallForceList,
+        base::ListValue()
+            .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_1()))
+            .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_2())));
+
+    task_environment().RunUntilIdle();
+
+    AssertAppInstalled(web_bundle_id_1());
+    AssertAppInstalled(web_bundle_id_2());
+  }
+
+  // Set the policy without any app and expect an attempt to uninstall
+  // both previously installed apps.
+  {
+    const webapps::AppId app1_id =
+        IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1())
+            .app_id();
+    const webapps::AppId app2_id =
+        IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_2())
+            .app_id();
+
+    WebAppTestUninstallObserver uninstall_observer(profile());
+    uninstall_observer.BeginListening({app1_id, app2_id});
+
+    get_command_scheduler()->AddExpectedToUninstallApp(app1_id);
+    get_command_scheduler()->AddExpectedToUninstallApp(app2_id);
+    EXPECT_EQ(get_command_scheduler()->GetNumberOfAppsRemainingToUninstall(),
+              2U);
+
+    profile()->GetPrefs()->SetList(prefs::kIsolatedWebAppInstallForceList,
+                                   base::ListValue());
+
+    uninstall_observer.Wait();
+
+    // WebAppTestUninstallObserver already triggers when the app is not fully
+    // uninstalled. This causes issues with references to destroyed profiles
+    // (see https://crbug.com/41484323#comment7). Wait until the app is actually
+    // uninstalled here.
+    task_environment().RunUntilIdle();
+
+    EXPECT_EQ(get_command_scheduler()->GetNumberOfAppsRemainingToUninstall(),
+              0U);
+  }
+}
+
+TEST_F(IsolatedWebAppPolicyManagerUninstallTest,
+       UserInstalledAppStaysInstalled) {
+  const std::unique_ptr<ScopedBundledIsolatedWebApp> bundle =
+      IsolatedWebAppBuilder(ManifestBuilder().SetVersion("1.0.0"))
+          .BuildBundle(test::GetDefaultEd25519KeyPair());
+
+  const IsolatedWebAppUrlInfo url_info = bundle->InstallChecked(profile());
+  // User-install the app.
+  {
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    ASSERT_THAT(web_app, NotNull());
+    EXPECT_THAT(
+        web_app->GetSources(),
+        Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaUserInstalled})));
+  }
+
+  // Force install the app via policy.
+  {
+    WebAppTestInstallObserver install_observer(profile());
+    install_observer.BeginListening({url_info.app_id()});
+
+    profile()->GetPrefs()->SetList(
+        prefs::kIsolatedWebAppInstallForceList,
+        base::ListValue().Append(
+            IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+                web_bundle_id_1())));
+
+    install_observer.Wait();
+
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    ASSERT_THAT(web_app, NotNull());
+    EXPECT_THAT(
+        web_app->GetSources(),
+        Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy,
+                                  WebAppManagement::Type::kIwaUserInstalled})));
+  }
+
+  {
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    EXPECT_TRUE(web_app->WasInstalledByUser());
+  }
+}
+
+// There should not be any attempt to uninstall an app if no apps have been
+// removed from the apps.
+TEST_F(IsolatedWebAppPolicyManagerUninstallTest, NoAppsUninstalled) {
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          web_bundle_id_1()));
+
+  task_environment().RunUntilIdle();
+
+  AssertAppInstalled(web_bundle_id_1());
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          web_bundle_id_2()));
+
+  task_environment().RunUntilIdle();
+
+  AssertAppInstalled(web_bundle_id_1());
+  AssertAppInstalled(web_bundle_id_2());
+  EXPECT_FALSE(get_command_scheduler()->TriedToUninstall());
+}
+
+class RetryTestWebAppCommandScheduler : public WebAppCommandScheduler {
+ public:
+  using WebAppCommandScheduler::WebAppCommandScheduler;
+
+  enum class ExecutionMode {
+    kRunCommand,
+    kSimulateSuccess,
+    kSimulateFailure,
+  };
+
+  void InstallIsolatedWebApp(
+      const IsolatedWebAppUrlInfo& url_info,
+      const IsolatedWebAppInstallSource& install_source,
+      const std::optional<IwaVersion>& expected_version,
+      std::unique_ptr<ScopedKeepAlive> keep_alive,
+      std::unique_ptr<ScopedProfileKeepAlive> profile_keep_alive,
+      InstallIsolatedWebAppCallback callback,
+      std::optional<IwaUpdateInfo> optional_update_info,
+      const base::Location& call_location) override {
+    number_of_install_tasks_created_++;
+    const webapps::AppId& app_id = url_info.app_id();
+
+    auto& behavior = command_behaviors_[app_id];
+    ExecutionMode mode = behavior.first;
+    bool execute_immediately = behavior.second;
+
+    if (execute_immediately) {
+      CompleteTask(url_info, install_source, expected_version,
+                   std::move(keep_alive), std::move(profile_keep_alive), mode,
+                   std::move(callback));
+    } else {
+      stashed_callbacks_[app_id] = base::BindOnce(
+          &RetryTestWebAppCommandScheduler::CompleteTask,
+          base::Unretained(this), url_info, install_source, expected_version,
+          std::move(keep_alive), std::move(profile_keep_alive), mode,
+          std::move(callback));
+    }
+  }
+
+  void SetCommandBehavior(const webapps::AppId& app_id,
+                          ExecutionMode mode,
+                          bool execute_immediately) {
+    command_behaviors_[app_id] = {mode, execute_immediately};
+  }
+
+  void ScheduleCommand(const webapps::AppId& app_id) {
+    CHECK(stashed_callbacks_.contains(app_id));
+    std::move(stashed_callbacks_[app_id]).Run();
+    stashed_callbacks_.erase(app_id);
+  }
+
+  bool IsCommandStashed(const webapps::AppId& app_id) const {
+    return stashed_callbacks_.contains(app_id);
+  }
+
+  size_t GetNumberOfCreatedInstallTasks() const {
+    return number_of_install_tasks_created_;
+  }
+
+  void SetInstallCompletedClosure(base::RepeatingClosure closure) {
+    completed_closure_ = std::move(closure);
+  }
+
+ private:
+  void CompleteTask(const IsolatedWebAppUrlInfo& url_info,
+                    const IsolatedWebAppInstallSource& install_source,
+                    const std::optional<IwaVersion>& expected_version,
+                    std::unique_ptr<ScopedKeepAlive> keep_alive,
+                    std::unique_ptr<ScopedProfileKeepAlive> profile_keep_alive,
+                    ExecutionMode mode,
+                    InstallIsolatedWebAppCallback callback) {
+    if (mode == ExecutionMode::kRunCommand) {
+      WebAppCommandScheduler::InstallIsolatedWebApp(
+          url_info, install_source, expected_version, std::move(keep_alive),
+          std::move(profile_keep_alive), std::move(callback));
+    } else if (mode == ExecutionMode::kSimulateSuccess) {
+      std::move(callback).Run(InstallIsolatedWebAppCommandSuccess(
+          url_info, expected_version.value_or(*IwaVersion::Create("1.0.0")),
+          IsolatedWebAppStorageLocation::OwnedBundle(
+              /*dir_name_ascii=*/"some_dir", /*dev_mode=*/false)));
+    } else {
+      std::move(callback).Run(
+          base::unexpected<InstallIsolatedWebAppCommandError>(
+              InstallIsolatedWebAppCommandError{.message =
+                                                    "Simulated failure"}));
+    }
+    if (!completed_closure_.is_null()) {
+      completed_closure_.Run();
+    }
+  }
+
+  std::map<webapps::AppId, std::pair<ExecutionMode, bool>> command_behaviors_;
+  std::map<webapps::AppId, base::OnceClosure> stashed_callbacks_;
+  size_t number_of_install_tasks_created_ = 0;
+  base::RepeatingClosure completed_closure_;
+};
+
+class IsolatedWebAppRetryTest : public IsolatedWebAppPolicyManagerTestBase {
+ public:
+  IsolatedWebAppRetryTest()
+      : IsolatedWebAppPolicyManagerTestBase(
+            /*is_user_session=*/true,
+            base::test::TaskEnvironment::TimeSource::MOCK_TIME) {
+    features_.InitAndDisableFeature(kIwaPolicyManagerOnDemandComponentUpdate);
+  }
+
+ protected:
+  RetryTestWebAppCommandScheduler* get_mock_scheduler() {
+    return mock_scheduler_;
+  }
+
+ private:
+  void SetUp() override {
+    IsolatedWebAppPolicyManagerTestBase::SetUp();
+  }
+
+  void SetCommandScheduler() override {
+    auto scheduler =
+        std::make_unique<RetryTestWebAppCommandScheduler>(*profile());
+    mock_scheduler_ = scheduler.get();
+    provider().SetScheduler(std::move(scheduler));
+  }
+
+  void TearDown() override {
+    mock_scheduler_ = nullptr;
+    IsolatedWebAppPolicyManagerTestBase::TearDown();
+  }
+
+  raw_ptr<RetryTestWebAppCommandScheduler> mock_scheduler_ = nullptr;
+  base::test::ScopedFeatureList features_;
+};
+
+TEST_F(IsolatedWebAppRetryTest, FirstInstallFailsRetrySucceeds) {
+  auto url_info =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+  get_mock_scheduler()->SetCommandBehavior(
+      url_info.app_id(),
+      RetryTestWebAppCommandScheduler::ExecutionMode::kSimulateFailure,
+      /*execute_immediately=*/true);
+
+  test::AddForceInstalledIwaToPolicy(
+      profile()->GetPrefs(),
+      IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+          web_bundle_id_1()));
+
+  // Run the first attempt to install the isolated web app (which should fail).
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+
+  ASSERT_EQ(1u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+  const WebApp* web_app_t0 =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app_t0, IsNull());
+
+  // Fast forward right before the retry should happen --> retry to process the
+  // policy is still scheduled, but the isolated web app is not yet installed.
+  get_mock_scheduler()->SetCommandBehavior(
+      url_info.app_id(),
+      RetryTestWebAppCommandScheduler::ExecutionMode::kRunCommand,
+      /*execute_immediately=*/true);
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(58)));
+
+  const WebApp* web_app_t1 =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app_t1, IsNull());
+
+  WebAppTestInstallObserver install_observer(profile());
+  install_observer.BeginListening({url_info.app_id()});
+
+  // Fast forward another second and the app should be installed.
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+
+  ASSERT_EQ(2u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+
+  // Make sure that even if there are further install tasks scheduled, they are
+  // failing and therefore do not accidentally make this test pass.
+  get_mock_scheduler()->SetCommandBehavior(
+      url_info.app_id(),
+      RetryTestWebAppCommandScheduler::ExecutionMode::kSimulateFailure,
+      /*execute_immediately=*/true);
+
+  EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+
+  ASSERT_EQ(2u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+  const WebApp* web_app_t2 =
+      provider().registrar_unsafe().GetAppById(url_info.app_id());
+  ASSERT_THAT(web_app_t2, NotNull());
+  EXPECT_THAT(web_app_t2->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+}
+
+TEST_F(IsolatedWebAppRetryTest, RetryTimeStepsCorrect) {
+#if BUILDFLAG(IS_MAC)
+  // TODO(crbug.com/434660312): Re-enable on macOS 26 once issues with
+  // unexpected test timeout failures are resolved.
+  if (base::mac::MacOSMajorVersion() == 26) {
+    GTEST_SKIP() << "Disabled on macOS Tahoe.";
+  }
+#endif
+  const std::array<web_package::SignedWebBundleId, 2> kApps = {
+      web_bundle_id_1(), web_bundle_id_2()};
+
+  const std::vector<int> desired_retry_time_steps_in_seconds = {
+      // Continuously increasing delay by i * 60.
+      0,
+      60,
+      180,
+      420,
+      900,
+      1860,
+      3780,
+      7620,
+      15300,
+      30660,
+      // From here on the delay saturates at 5 hours.
+      48660,
+      66660,
+      84660,
+  };
+
+  // Try multiple apps to make sure that the delay gets reset after a successful
+  // installation.
+  unsigned int expected_number_install_tasks = 1u;
+  for (const auto& web_bundle_id : kApps) {
+    auto url_info =
+        IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id);
+    get_mock_scheduler()->SetCommandBehavior(
+        url_info.app_id(),
+        RetryTestWebAppCommandScheduler::ExecutionMode::kSimulateFailure,
+        /*execute_immediately=*/true);
+
+    // Make sure all the scheduled policy process calls related to startup have
+    // already been executed
+    task_environment().RunUntilIdle();
+
+    test::AddForceInstalledIwaToPolicy(
+        profile()->GetPrefs(),
+        IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+            web_bundle_id));
+
+    for (size_t i = 0; i < desired_retry_time_steps_in_seconds.size() - 1;
+         ++i) {
+      const int& current_time_step = desired_retry_time_steps_in_seconds[i];
+      const int& next_time_step = desired_retry_time_steps_in_seconds[i + 1];
+
+      // Another (failed) attempt to install the isolated web app
+      task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+
+      ASSERT_EQ(expected_number_install_tasks,
+                get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+      const WebApp* web_app_t0 =
+          provider().registrar_unsafe().GetAppById(url_info.app_id());
+      ASSERT_THAT(web_app_t0, IsNull());
+
+      // Fast forward right before the retry should happen --> retry to process
+      // the policy is still scheduled, but the install task is not yet created.
+      task_environment().FastForwardBy(base::TimeDelta(
+          base::Seconds(next_time_step - current_time_step - 2)));
+
+      const WebApp* web_app_t1 =
+          provider().registrar_unsafe().GetAppById(url_info.app_id());
+      ASSERT_THAT(web_app_t1, IsNull());
+
+      // Fast forward another second and the next retry should happen.
+      task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+      ASSERT_EQ(++expected_number_install_tasks,
+                get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+    }
+
+    WebAppTestInstallObserver install_observer(profile());
+    install_observer.BeginListening({url_info.app_id()});
+
+    // Finally make the installation work. This should reset the delay for the
+    // next install.
+    get_mock_scheduler()->SetCommandBehavior(
+        url_info.app_id(),
+        RetryTestWebAppCommandScheduler::ExecutionMode::kRunCommand,
+        /*execute_immediately=*/true);
+    task_environment().FastForwardBy(base::TimeDelta(base::Seconds(18000)));
+
+    EXPECT_EQ(install_observer.Wait(), url_info.app_id());
+
+    const WebApp* web_app =
+        provider().registrar_unsafe().GetAppById(url_info.app_id());
+    ASSERT_THAT(web_app, NotNull());
+    EXPECT_THAT(
+        web_app->GetSources(),
+        Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+    expected_number_install_tasks += 2;
+  }
+}
+
+// This test checks that retries are only scheduled once all install tasks are
+// done. It does so by installing two isolated web apps. The first app install
+// finishes immediately (but fails), while the second app does not finish for 60
+// seconds. In these 60 seconds, no retry should be scheduled. The test then
+// manually triggers the completion of the second install task (which succeeds).
+// From that point in time, a retry should be scheduled with a delay of another
+// 60 seconds.
+TEST_F(IsolatedWebAppRetryTest, RetryTriggeredWhenAllTasksDone) {
+  auto url_info_1 =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_1());
+  auto url_info_2 =
+      IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(web_bundle_id_2());
+
+  // Determine the alphabetical queue sorting order
+  bool is_1_first = url_info_1.web_bundle_id() < url_info_2.web_bundle_id();
+  const auto& first_url_info = is_1_first ? url_info_1 : url_info_2;
+  const auto& second_url_info = is_1_first ? url_info_2 : url_info_1;
+
+  profile()->GetPrefs()->SetList(
+      prefs::kIsolatedWebAppInstallForceList,
+      base::ListValue()
+          .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+              web_bundle_id_1()))
+          .Append(IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+              web_bundle_id_2())));
+
+  // The first app installation finishes immediately, but fails. The second app
+  // installation does not finish immediately and completion has to be triggered
+  // later by the test (this simulates a completion delay), but will succeed.
+  get_mock_scheduler()->SetCommandBehavior(
+      first_url_info.app_id(),
+      RetryTestWebAppCommandScheduler::ExecutionMode::kSimulateFailure,
+      /*execute_immediately=*/true);
+  get_mock_scheduler()->SetCommandBehavior(
+      second_url_info.app_id(),
+      RetryTestWebAppCommandScheduler::ExecutionMode::kRunCommand,
+      /*execute_immediately=*/false);
+
+  // Run the first attempt to install the isolated apps (the first one fails
+  // immediately, the second one is still busy).
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+
+  ASSERT_EQ(2u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+  const WebApp* web_app1_t0 =
+      provider().registrar_unsafe().GetAppById(first_url_info.app_id());
+  ASSERT_THAT(web_app1_t0, IsNull());
+  const WebApp* web_app2_t0 =
+      provider().registrar_unsafe().GetAppById(second_url_info.app_id());
+  ASSERT_THAT(web_app2_t0, IsNull());
+
+  // Forward by 60 seconds. Because the second app was not completed yet, still
+  // no retry should be scheduled.
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(60)));
+  ASSERT_EQ(2u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+
+  ASSERT_TRUE(get_mock_scheduler()->IsCommandStashed(second_url_info.app_id()));
+
+  // Complete install task for the second app (which succeeds).
+  WebAppTestInstallObserver app2_install_observer(profile());
+  app2_install_observer.BeginListening({second_url_info.app_id()});
+
+  task_environment().GetMainThreadTaskRunner()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&RetryTestWebAppCommandScheduler::ScheduleCommand,
+                     base::Unretained(get_mock_scheduler()),
+                     second_url_info.app_id()));
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+
+  EXPECT_EQ(app2_install_observer.Wait(), second_url_info.app_id());
+
+  // The retry command for the first app should be successful. The second app
+  // doesn't need a retry.
+  get_mock_scheduler()->SetCommandBehavior(
+      first_url_info.app_id(),
+      RetryTestWebAppCommandScheduler::ExecutionMode::kRunCommand,
+      /*execute_immediately=*/true);
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+  // The retry is scheduled, but the install task for the remaining app is not
+  // yet created.
+  ASSERT_EQ(2u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+
+  // Forward to right before an additional install task for the first app is
+  // scheduled.
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(57)));
+  ASSERT_EQ(2u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+
+  WebAppTestInstallObserver app1_install_observer(profile());
+  app1_install_observer.BeginListening({first_url_info.app_id()});
+
+  // Moving the clock forward will finally install the second app.
+  task_environment().FastForwardBy(base::TimeDelta(base::Seconds(1)));
+  ASSERT_EQ(3u, get_mock_scheduler()->GetNumberOfCreatedInstallTasks());
+
+  EXPECT_EQ(app1_install_observer.Wait(), first_url_info.app_id());
+
+  const WebApp* web_app1_t2 =
+      provider().registrar_unsafe().GetAppById(first_url_info.app_id());
+  ASSERT_THAT(web_app1_t2, NotNull());
+  EXPECT_THAT(web_app1_t2->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+  const WebApp* web_app2_t2 =
+      provider().registrar_unsafe().GetAppById(second_url_info.app_id());
+  ASSERT_THAT(web_app2_t2, NotNull());
+  EXPECT_THAT(web_app2_t2->GetSources(),
+              Eq(WebAppManagementTypes({WebAppManagement::Type::kIwaPolicy})));
+}
+
+class CleanupOrphanedBundlesTest : public IsolatedWebAppPolicyManagerTestBase {
+ public:
+  CleanupOrphanedBundlesTest()
+      : IsolatedWebAppPolicyManagerTestBase(/*is_user_session=*/true) {}
+
+  void TearDown() override {
+    command_scheduler_ = nullptr;
+    IsolatedWebAppPolicyManagerTestBase::TearDown();
+  }
+
+ protected:
+  raw_ptr<TestOrphanedCleanupWebAppCommandScheduler> command_scheduler_ =
+      nullptr;
+  base::test::TestFuture<void> command_done_future_;
+
+ private:
+  // `IsolatedWebAppPolicyManagerTestBase`:
+  void SetCommandScheduler() override {
+    auto command_scheduler =
+        std::make_unique<TestOrphanedCleanupWebAppCommandScheduler>(*profile());
+    command_scheduler_ = command_scheduler.get();
+    command_scheduler_->SetCommandDoneClosure(
+        command_done_future_.GetRepeatingCallback());
+    provider().SetScheduler(std::move(command_scheduler));
+  }
+};
+
+TEST_F(CleanupOrphanedBundlesTest, CleanUpCalledOnSessionStart) {
+  // Nothing to do here. The session start is automatically performed and the
+  // expectations are therefore set early in
+  // `CleanupOrphanedBundlesTest::SetCommandScheduler`.
+  command_scheduler_->SetCommandDoneClosure(
+      command_done_future_.GetRepeatingCallback());
+  ASSERT_TRUE(command_done_future_.Wait());
+  EXPECT_EQ(1u, command_scheduler_->GetNumberOfCalls());
+}
+
+class IsolatedWebAppPolicyManagerOnDemandUpdateDownloadedTest
+    : public IsolatedWebAppTest {
+ public:
+  IsolatedWebAppPolicyManagerOnDemandUpdateDownloadedTest()
+      : IsolatedWebAppTest(base::test::TaskEnvironment::TimeSource::MOCK_TIME) {
+  }
+
+  MockOnDemandUpdater& on_demand_updater() {
+    return component_wrapper_->on_demand_updater();
+  }
+
+  void InstallComponentAsync(const base::Version& version,
+                             const IwaKeyDistribution& component_data) {
+    component_wrapper_->InstallComponentAsync(version, component_data,
+                                              /*is_preloaded=*/false);
+  }
 
  protected:
   void SetUp() override {
-    ASSERT_TRUE(dir_.CreateUniqueTempDir());
-    AddJsonResponse(kUpdateManifestUrl1, kUpdateManifestValue1);
-    AddJsonResponse(kUpdateManifestUrl2, kUpdateManifestValue2);
-    test_factory_.AddResponse(kUpdateManifestUrl3, kUpdateManifestValue3,
-                              net::HttpStatusCode::HTTP_NOT_FOUND);
-    AddJsonResponse(kUpdateManifestUrl4, kUpdateManifestValue4);
-    AddJsonResponse(kUpdateManifestUrl5, kUpdateManifestValue5);
-    AddJsonResponse(kUpdateManifestUrl6, kUpdateManifestValue6);
-    AddJsonResponse(kUpdateManifestUrl7, kUpdateManifestValue7);
-    AddJsonResponse(kUpdateManifestUrl8, kUpdateManifestValue8);
-    test_factory_.AddResponse("https://example.com/app1.swbn",
-                              "Content of app1");
-    test_factory_.AddResponse("https://example.com/app2.swbn",
-                              "Content of app2");
-    test_factory_.AddResponse("https://example.com/app7.swbn", "",
-                              net::HttpStatusCode::HTTP_NOT_FOUND);
-    test_factory_.AddResponse("https://example.com/app8.swbn",
-                              "Content of app8");
-    test_managed_guest_session_ =
-        std::make_unique<profiles::testing::ScopedTestManagedGuestSession>();
+    IsolatedWebAppTest::SetUp();
+    IwaKeyDistributionInfoProvider::GetInstanceForTesting()
+        .SkipManagedAllowlistChecksForTesting(true);
+    component_wrapper_ = std::make_unique<IwaComponentWrapper>();
+    component_wrapper_->InstallComponentAsync(base::Version("1.0.0"),
+                                              /*component_data=*/{},
+                                              IsIwaComponentPreloaded());
   }
 
-  void TearDown() override { test_factory_.ClearResponses(); }
-
-  void AddJsonResponse(base::StringPiece url, base::StringPiece content) {
-    network::mojom::URLResponseHeadPtr head =
-        network::CreateURLResponseHead(net::HttpStatusCode::HTTP_OK);
-    head->mime_type = "application/json";
-    network::URLLoaderCompletionStatus status;
-    test_factory_.AddResponse(GURL(url), std::move(head), std::string(content),
-                              status);
+  void TearDown() override {
+    IsolatedWebAppTest::TearDown();
+    IwaKeyDistributionInfoProvider::DestroyInstanceForTesting();
   }
-  base::test::TaskEnvironment task_environment_;
-  base::ScopedTempDir dir_;
-  network::TestURLLoaderFactory test_factory_;
-  scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory_;
-  data_decoder::test::InProcessDataDecoder in_process_data_decoder_;
-  const std::vector<IsolatedWebAppExternalInstallOptions> all_install_options_ =
-      GenerateInstallOptions();
-  std::unique_ptr<profiles::testing::ScopedTestManagedGuestSession>
-      test_managed_guest_session_;
+
+  IsolatedWebAppUrlInfo url_info() const {
+    return IsolatedWebAppUrlInfo::CreateFromSignedWebBundleId(
+        test::GetDefaultEd25519WebBundleId());
+  }
+
+  void SetUpForceInstallPolicyForOneApp() {
+    test::AddForceInstalledIwaToPolicy(
+        profile()->GetPrefs(),
+        IwaTestServerConfigurator::CreateForceInstallPolicyEntry(
+            url_info().web_bundle_id()));
+  }
+
+ private:
+  virtual bool IsIwaComponentPreloaded() const { return false; }
+
+  std::unique_ptr<IwaComponentWrapper> component_wrapper_;
+
+  base::ScopedPathOverride preinstalled_dir_override_{
+      component_updater::DIR_COMPONENT_PREINSTALLED};
 };
 
-// This test case represents the regular flow of force installing IWA for
-// ephemeral session. The install options will cover cases of success as well as
-// legitimate failures.
-TEST_F(IsolatedWebAppPolicyManagerTest, MgsRegularFlow) {
-  auto expected_results =
-      std::vector<IsolatedWebAppPolicyManager::EphemeralAppInstallResult>(
-          all_install_options_.size());
+class IsolatedWebAppPolicyManagerOnDemandUpdatePreloadedTest
+    : public IsolatedWebAppPolicyManagerOnDemandUpdateDownloadedTest {
+ protected:
+  // `IsolatedWebAppPolicyManagerOnDemandUpdateDownloadedTest`:
+  bool IsIwaComponentPreloaded() const override { return true; }
+};
 
-  expected_results.at(0) =
-      IsolatedWebAppPolicyManager::EphemeralAppInstallResult::kSuccess;
-  expected_results.at(1) =
-      IsolatedWebAppPolicyManager::EphemeralAppInstallResult::kSuccess;
-  expected_results.at(2) = IsolatedWebAppPolicyManager::
-      EphemeralAppInstallResult::kErrorUpdateManifestDownloadFailed;
-  expected_results.at(3) = IsolatedWebAppPolicyManager::
-      EphemeralAppInstallResult::kErrorUpdateManifestParsingFailed;
-  expected_results.at(4) = IsolatedWebAppPolicyManager::
-      EphemeralAppInstallResult::kErrorWebBundleUrlCantBeDetermined;
-  expected_results.at(5) = IsolatedWebAppPolicyManager::
-      EphemeralAppInstallResult::kErrorCantCreateIwaDirectory;
-  expected_results.at(6) = IsolatedWebAppPolicyManager::
-      EphemeralAppInstallResult::kErrorCantDownloadWebBundle;
-  expected_results.at(7) = IsolatedWebAppPolicyManager::
-      EphemeralAppInstallResult::kErrorCantInstallFromWebBundle;
-  base::test::TestFuture<
-      std::vector<IsolatedWebAppPolicyManager::EphemeralAppInstallResult>>
-      future;
-  IsolatedWebAppPolicyManager manager(
-      dir_.GetPath(), all_install_options_, shared_url_loader_factory_,
-      std::make_unique<TestIwaInstallCommandWrapper>(), future.GetCallback());
-  manager.InstallEphemeralApps();
+// The on-demand is dispatched, but without success. In this case the policy
+// processing will take place in 15 seconds.
+TEST_F(IsolatedWebAppPolicyManagerOnDemandUpdatePreloadedTest,
+       ComponentUpdateQueuedButNoUpdate) {
+  EXPECT_CALL(on_demand_updater(),
+              OnDemandUpdate(Eq(kIwaKeyDistributionComponentId), _, _))
+      .Times(1);
 
-  EXPECT_EQ(future.Get(), expected_results);
-
-  const base::FilePath iwa_root_dir = dir_.GetPath().Append(
-      IsolatedWebAppPolicyManager::kEphemeralIwaRootDirectory);
-  ASSERT_TRUE(base::DirectoryExists(iwa_root_dir));
-
-  // There should be 2 directories that represent successfully installed apps.
-  base::FileEnumerator iter(
-      iwa_root_dir, /*recursive=*/false,
-      base::FileEnumerator::FILES | base::FileEnumerator::DIRECTORIES);
-  int counter = 0;
-  while (!iter.Next().empty()) {
-    EXPECT_TRUE(iter.GetInfo().IsDirectory());
-    ++counter;
+  SetUpForceInstallPolicyForOneApp();
+  test::AwaitStartWebAppProviderAndSubsystems(profile());
+  {
+    auto bundle = IsolatedWebAppBuilder(ManifestBuilder())
+                      .BuildBundle(test::GetDefaultEd25519KeyPair());
+    bundle->FakeInstallPageState(profile());
+    test_update_server().AddBundle(std::move(bundle));
   }
-  EXPECT_EQ(counter, 2);
 
-  EXPECT_TRUE(base::PathExists(
-      iwa_root_dir.Append(kWebBundleId1)
-          .Append(IsolatedWebAppPolicyManager::kMainSignedWebBundleFileName)));
-  EXPECT_TRUE(base::PathExists(
-      iwa_root_dir.Append(kWebBundleId2)
-          .Append(IsolatedWebAppPolicyManager::kMainSignedWebBundleFileName)));
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(0u, provider().registrar_unsafe().GetAppIds().size());
+
+  task_environment().FastForwardBy(base::Seconds(5));
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(0u, provider().registrar_unsafe().GetAppIds().size());
+
+  task_environment().FastForwardBy(base::Seconds(10));
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(1u, provider().registrar_unsafe().GetAppIds().size());
 }
 
-// If there is no MGS we don't create root directory for the IWAs.
-TEST_F(IsolatedWebAppPolicyManagerTest, RegularUserDirectoryForIwaNotCreated) {
-  test_managed_guest_session_.reset();
-  auto expected_results =
-      std::vector<IsolatedWebAppPolicyManager::EphemeralAppInstallResult>(
-          all_install_options_.size(),
-          IsolatedWebAppPolicyManager::EphemeralAppInstallResult::
-              kErrorNotEphemeralSession);
-  base::test::TestFuture<
-      std::vector<IsolatedWebAppPolicyManager::EphemeralAppInstallResult>>
-      future;
-  IsolatedWebAppPolicyManager manager(
-      dir_.GetPath(), all_install_options_, shared_url_loader_factory_,
-      std::make_unique<TestIwaInstallCommandWrapper>(), future.GetCallback());
-  manager.InstallEphemeralApps();
+// The on-demand is dispatched successfully -- the policy reprocessing is
+// triggered upon successful update.
+TEST_F(IsolatedWebAppPolicyManagerOnDemandUpdatePreloadedTest,
+       ComponentUpdateQueuedSuccessfully) {
+  EXPECT_CALL(on_demand_updater(),
+              OnDemandUpdate(Eq(kIwaKeyDistributionComponentId), _, _))
+      .Times(1)
+      .WillOnce(WithoutArgs([&] {
+        InstallComponentAsync(base::Version("1.0.1"), IwaKeyDistribution());
+      }));
 
-  EXPECT_EQ(future.Get(), expected_results);
-  EXPECT_FALSE(base::DirectoryExists(dir_.GetPath().Append(
-      IsolatedWebAppPolicyManager::kEphemeralIwaRootDirectory)));
+  SetUpForceInstallPolicyForOneApp();
+  test::AwaitStartWebAppProviderAndSubsystems(profile());
+  {
+    auto bundle = IsolatedWebAppBuilder(ManifestBuilder())
+                      .BuildBundle(test::GetDefaultEd25519KeyPair());
+    bundle->FakeInstallPageState(profile());
+    test_update_server().AddBundle(std::move(bundle));
+  }
+
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(0u, provider().registrar_unsafe().GetAppIds().size());
+
+  // Wait for the policy reprocessing triggered by the component installation.
+  WebAppTestInstallObserver(profile()).BeginListeningAndWait(
+      {url_info().app_id()});
+
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(1u, provider().registrar_unsafe().GetAppIds().size());
 }
 
-// Return error if the root directory exists.
-TEST_F(IsolatedWebAppPolicyManagerTest, RootDirectoryExists) {
-  base::CreateDirectory(dir_.GetPath().Append(
-      IsolatedWebAppPolicyManager::kEphemeralIwaRootDirectory));
+// The on-demand must not be triggered if a non-preloaded version is present.
+TEST_F(IsolatedWebAppPolicyManagerOnDemandUpdateDownloadedTest,
+       ComponentUpdateNotQueuedWhenComponentIsAlreadyLoaded) {
+  EXPECT_CALL(on_demand_updater(),
+              OnDemandUpdate(Eq(kIwaKeyDistributionComponentId), _, _))
+      .Times(0);
 
-  auto expected_results =
-      std::vector<IsolatedWebAppPolicyManager::EphemeralAppInstallResult>(
-          all_install_options_.size(),
-          IsolatedWebAppPolicyManager::EphemeralAppInstallResult::
-              kErrorCantCreateRootDirectory);
+  SetUpForceInstallPolicyForOneApp();
+  test::AwaitStartWebAppProviderAndSubsystems(profile());
+  {
+    auto bundle = IsolatedWebAppBuilder(ManifestBuilder())
+                      .BuildBundle(test::GetDefaultEd25519KeyPair());
+    bundle->FakeInstallPageState(profile());
+    test_update_server().AddBundle(std::move(bundle));
+  }
 
-  base::test::TestFuture<
-      std::vector<IsolatedWebAppPolicyManager::EphemeralAppInstallResult>>
-      future;
-  IsolatedWebAppPolicyManager manager(
-      dir_.GetPath(), all_install_options_, shared_url_loader_factory_,
-      std::make_unique<TestIwaInstallCommandWrapper>(), future.GetCallback());
-  manager.InstallEphemeralApps();
+  WebAppTestInstallObserver(profile()).BeginListeningAndWait(
+      {url_info().app_id()});
 
-  EXPECT_EQ(future.Get(), expected_results);
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(1u, provider().registrar_unsafe().GetAppIds().size());
 }
 
-// Empty install list should not lead to unexpected behavior.
-TEST_F(IsolatedWebAppPolicyManagerTest, EmptyInstallList) {
-  const std::vector<IsolatedWebAppExternalInstallOptions> empty_install_options;
+// The on-demand must not be triggered if the policy is empty.
+TEST_F(IsolatedWebAppPolicyManagerOnDemandUpdatePreloadedTest,
+       ComponentUpdateNotQueuedWhenPolicyEmpty) {
+  EXPECT_CALL(on_demand_updater(),
+              OnDemandUpdate(Eq(kIwaKeyDistributionComponentId), _, _))
+      .Times(0);
 
-  base::test::TestFuture<
-      std::vector<IsolatedWebAppPolicyManager::EphemeralAppInstallResult>>
-      future;
-  IsolatedWebAppPolicyManager manager(
-      dir_.GetPath(), empty_install_options, shared_url_loader_factory_,
-      std::make_unique<TestIwaInstallCommandWrapper>(), future.GetCallback());
-  manager.InstallEphemeralApps();
+  test::AwaitStartWebAppProviderAndSubsystems(profile());
 
-  // No apps to install leads to zero install results.
-  EXPECT_TRUE(future.Get().empty());
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(0u, provider().registrar_unsafe().GetAppIds().size());
 }
 
-TEST(IsolatedWebAppPolicyManagerStaticFunctionsTest,
-     ExtractWebBundleURLErrorTest) {
-  {
-    // Providing a non-dictionary value should not be handled correctly.
-    const base::Value string_value("A string value");
-    EXPECT_FALSE(string_value.is_dict());
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(string_value)
-                     .has_value());
-  }
+TEST_F(IsolatedWebAppPolicyManagerOnDemandUpdatePreloadedTest,
+       ComponentUpdateTriggeredWhenEmptyPolicyChangesToNonEmpty) {
+  // The on-demand update must not be triggered during the initial policy
+  // processing.
+  EXPECT_CALL(on_demand_updater(), OnDemandUpdate).Times(0);
+
+  test::AwaitStartWebAppProviderAndSubsystems(profile());
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+
+  testing::Mock::VerifyAndClearExpectations(&on_demand_updater());
+
+  // The on-demand update will now be triggered once the policy changes.
+  EXPECT_CALL(on_demand_updater(),
+              OnDemandUpdate(Eq(kIwaKeyDistributionComponentId), _, _))
+      .Times(1)
+      .WillOnce(WithoutArgs([&] {
+        InstallComponentAsync(base::Version("1.0.1"), IwaKeyDistribution());
+      }));
 
   {
-    // Empty dictionary should be handled correctly as well.
-    base::Value::Dict empty_dict;
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(empty_dict)))
-                     .has_value());
+    auto bundle = IsolatedWebAppBuilder(ManifestBuilder())
+                      .BuildBundle(test::GetDefaultEd25519KeyPair());
+    bundle->FakeInstallPageState(profile());
+    test_update_server().AddBundle(std::move(bundle));
   }
+  SetUpForceInstallPolicyForOneApp();
 
-  {
-    // Dictionary contains string instead of list.
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey,
-             "Instead of this string we expect a base::Value::List here");
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
+  // Wait for the policy reprocessing triggered by the component installation.
+  WebAppTestInstallObserver(profile()).BeginListeningAndWait(
+      {url_info().app_id()});
 
-  {
-    // Dictionary with empty version records.
-    base::Value::List apps;
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // Dictionary with empty random strings instead of the version/URL
-    // dictionary.
-    base::Value::List apps;
-    apps.Append("aaa");
-    apps.Append("bbb");
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // There is no version.
-    base::Value::List apps;
-
-    base::Value::Dict no_version_record;
-    no_version_record.Set(kUpdateManifestSrcKey,
-                          "https://example.com/a/b.json");
-    apps.Append(std::move(no_version_record));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // There is no Web bundle URL.
-    base::Value::List apps;
-
-    base::Value::Dict no_web_bundle_url;
-    no_web_bundle_url.Set(kUpdateManifestVersionKey, "1.0.0");
-    apps.Append(std::move(no_web_bundle_url));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // Version is not parseble.
-    base::Value::List apps;
-
-    base::Value::Dict invalid_version_record;
-    invalid_version_record.Set(kUpdateManifestVersionKey,
-                               "It is not a correct version");
-    invalid_version_record.Set(kUpdateManifestSrcKey,
-                               "https://example.com/a/b.json");
-    apps.Append(std::move(invalid_version_record));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // Web bundle URL is not parsable.
-    base::Value::List apps;
-
-    base::Value::Dict invalid_web_bundle_url;
-    invalid_web_bundle_url.Set(kUpdateManifestVersionKey, "1.0.0");
-    invalid_web_bundle_url.Set(kUpdateManifestSrcKey, "It is not a valid URL");
-    apps.Append(std::move(invalid_web_bundle_url));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // If at least one version is not parsable return nullptr.
-    base::Value::List apps;
-
-    base::Value::Dict ok_app;
-    ok_app.Set(kUpdateManifestVersionKey, "1.0.0");
-    ok_app.Set(kUpdateManifestSrcKey, "http://example.com/a/b.json");
-    apps.Append(std::move(ok_app));
-
-    base::Value::Dict ok_app_1;
-    ok_app_1.Set(kUpdateManifestVersionKey, "2.0.0");
-    ok_app_1.Set(kUpdateManifestSrcKey, "http://example.com/a/b.json");
-    apps.Append(std::move(ok_app_1));
-
-    base::Value::Dict invalid_version_record;
-    invalid_version_record.Set(kUpdateManifestVersionKey,
-                               "It is not a correct version");
-    invalid_version_record.Set(kUpdateManifestSrcKey,
-                               "https://example.com/a/b.json");
-    apps.Append(std::move(invalid_version_record));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // Unparsable URL of the latest app version leads to return of nullptr.
-    base::Value::List apps;
-
-    base::Value::Dict ok_app;
-    ok_app.Set(kUpdateManifestVersionKey, "1.0.0");
-    ok_app.Set(kUpdateManifestSrcKey, "http://example.com/a/b.json");
-    apps.Append(std::move(ok_app));
-
-    base::Value::Dict invalid_web_bundle_url;
-    invalid_web_bundle_url.Set(kUpdateManifestVersionKey, "2.0.0");
-    invalid_web_bundle_url.Set(kUpdateManifestSrcKey, "It is not a valid URL");
-    apps.Append(std::move(invalid_web_bundle_url));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-
-  {
-    // Two equal versions in the one update manifest are not acceptable.
-    base::Value::List apps;
-
-    base::Value::Dict ok_app;
-    ok_app.Set(kUpdateManifestVersionKey, "1.0.0");
-    ok_app.Set(kUpdateManifestSrcKey, "http://example.com/v100.json");
-    apps.Append(std::move(ok_app));
-
-    base::Value::Dict ok_app_1;
-    ok_app_1.Set(kUpdateManifestVersionKey, "1.0.0");
-    ok_app_1.Set(kUpdateManifestSrcKey, "http://example.com/xyz.json");
-    apps.Append(std::move(ok_app_1));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    EXPECT_FALSE(IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-                     base::Value(std::move(dict)))
-                     .has_value());
-  }
-}
-
-TEST(IsolatedWebAppPolicyManagerStaticFunctionsTest,
-     ExtractWebBundleURLSuccessTest) {
-  {
-    // One app case.
-    base::Value::List apps;
-
-    base::Value::Dict ok_app;
-    ok_app.Set(kUpdateManifestVersionKey, "1.0.1");
-    ok_app.Set(kUpdateManifestSrcKey, "http://example.com/v101.json");
-    apps.Append(std::move(ok_app));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    auto result = IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-        base::Value(std::move(dict)));
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value(), "http://example.com/v101.json");
-  }
-
-  {
-    // Several apps use case.
-    base::Value::List apps;
-
-    base::Value::Dict ok_app;
-    ok_app.Set(kUpdateManifestVersionKey, "1.0.0");
-    ok_app.Set(kUpdateManifestSrcKey, "http://example.com/v100.json");
-    apps.Append(std::move(ok_app));
-
-    base::Value::Dict ok_app_1;
-    ok_app_1.Set(kUpdateManifestVersionKey, "2.0.0");
-    ok_app_1.Set(kUpdateManifestSrcKey, "http://example.com/v200.json");
-    apps.Append(std::move(ok_app_1));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    auto result = IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-        base::Value(std::move(dict)));
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value(), "http://example.com/v200.json");
-  }
-
-  {
-    // The invalid URL of the stale app version doesn't affect result.
-    base::Value::List apps;
-
-    base::Value::Dict ok_app;
-    ok_app.Set(kUpdateManifestVersionKey, "1.0.0");
-    ok_app.Set(kUpdateManifestSrcKey, "http://example.com/v100.json");
-    apps.Append(std::move(ok_app));
-
-    base::Value::Dict ok_app_1;
-    ok_app_1.Set(kUpdateManifestVersionKey, "2.0.0");
-    ok_app_1.Set(kUpdateManifestSrcKey, "http://example.com/v200.json");
-    apps.Append(std::move(ok_app_1));
-
-    base::Value::Dict invalid_web_bundle_url;
-    invalid_web_bundle_url.Set(kUpdateManifestVersionKey, "1.4.0");
-    invalid_web_bundle_url.Set(kUpdateManifestSrcKey, "It is not a valid URL");
-    apps.Append(std::move(invalid_web_bundle_url));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    auto result = IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-        base::Value(std::move(dict)));
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value(), "http://example.com/v200.json");
-  }
-
-  {
-    // We don't mind the update manifest has other fields.
-    base::Value::List apps;
-
-    base::Value::Dict ok_app;
-    ok_app.Set(kUpdateManifestVersionKey, "1.0.1");
-    ok_app.Set(kUpdateManifestSrcKey, "http://example.com/v101.json");
-    ok_app.Set("comment", "This is app v1.0.1");
-    apps.Append(std::move(ok_app));
-
-    base::Value::Dict dict;
-    dict.Set(kUpdateManifestAllVersionsKey, std::move(apps));
-
-    auto result = IsolatedWebAppPolicyManager::ExtractWebBundleURL(
-        base::Value(std::move(dict)));
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result.value(), "http://example.com/v101.json");
-  }
+  provider().command_manager().AwaitAllCommandsCompleteForTesting();
+  EXPECT_EQ(1u, provider().registrar_unsafe().GetAppIds().size());
 }
 
 }  // namespace web_app

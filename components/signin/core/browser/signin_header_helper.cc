@@ -6,15 +6,17 @@
 
 #include <stddef.h>
 
-#include "base/containers/contains.h"
+#include <algorithm>
+#include <string_view>
+
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/ranges/algorithm.h"
+#include "base/notreached.h"
 #include "base/strings/escape.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "components/google/core/common/google_util.h"
 #include "components/signin/core/browser/chrome_connected_header_helper.h"
+#include "components/signin/core/browser/dice_response_params.h"
 #include "google_apis/gaia/gaia_auth_util.h"
 #include "net/http/http_request_headers.h"
 
@@ -29,6 +31,8 @@ const char kChromeManageAccountsHeader[] = "X-Chrome-Manage-Accounts";
 const char kAutoLoginHeader[] = "X-Auto-Login";
 const char kDiceRequestHeader[] = "X-Chrome-ID-Consistency-Request";
 const char kDiceResponseHeader[] = "X-Chrome-ID-Consistency-Response";
+const char kDiceLinkedAccountsMetaHeader[] =
+    "X-Chrome-ID-Consistency-Linked-Accounts-Meta";
 
 ManageAccountsParams::ManageAccountsParams() = default;
 
@@ -37,34 +41,6 @@ ManageAccountsParams::ManageAccountsParams(const ManageAccountsParams&) =
 
 ManageAccountsParams& ManageAccountsParams::operator=(
     const ManageAccountsParams&) = default;
-
-// Trivial constructors and destructors.
-DiceResponseParams::DiceResponseParams() {}
-DiceResponseParams::~DiceResponseParams() {}
-DiceResponseParams::DiceResponseParams(DiceResponseParams&&) = default;
-DiceResponseParams& DiceResponseParams::operator=(DiceResponseParams&&) =
-    default;
-
-DiceResponseParams::AccountInfo::AccountInfo() {}
-DiceResponseParams::AccountInfo::AccountInfo(const std::string& gaia_id,
-                                             const std::string& email,
-                                             int session_index)
-    : gaia_id(gaia_id), email(email), session_index(session_index) {}
-DiceResponseParams::AccountInfo::~AccountInfo() {}
-DiceResponseParams::AccountInfo::AccountInfo(const AccountInfo&) = default;
-
-DiceResponseParams::SigninInfo::SigninInfo() {}
-DiceResponseParams::SigninInfo::~SigninInfo() {}
-DiceResponseParams::SigninInfo::SigninInfo(const SigninInfo&) = default;
-
-DiceResponseParams::SignoutInfo::SignoutInfo() {}
-DiceResponseParams::SignoutInfo::~SignoutInfo() {}
-DiceResponseParams::SignoutInfo::SignoutInfo(const SignoutInfo&) = default;
-
-DiceResponseParams::EnableSyncInfo::EnableSyncInfo() {}
-DiceResponseParams::EnableSyncInfo::~EnableSyncInfo() {}
-DiceResponseParams::EnableSyncInfo::EnableSyncInfo(const EnableSyncInfo&) =
-    default;
 
 RequestAdapter::RequestAdapter(const GURL& url,
                                const net::HttpRequestHeaders& original_headers,
@@ -87,26 +63,28 @@ const GURL& RequestAdapter::GetUrl() {
 bool RequestAdapter::HasHeader(const std::string& name) {
   return (original_headers_->HasHeader(name) ||
           modified_headers_->HasHeader(name)) &&
-         !base::Contains(*headers_to_remove_, name);
+         !std::ranges::contains(*headers_to_remove_, name);
 }
 
 void RequestAdapter::RemoveRequestHeaderByName(const std::string& name) {
-  if (!base::Contains(*headers_to_remove_, name))
+  if (!std::ranges::contains(*headers_to_remove_, name)) {
     headers_to_remove_->push_back(name);
+  }
 }
 
 void RequestAdapter::SetExtraHeaderByName(const std::string& name,
                                           const std::string& value) {
   modified_headers_->SetHeader(name, value);
 
-  auto it = base::ranges::find(*headers_to_remove_, name);
-  if (it != headers_to_remove_->end())
+  auto it = std::ranges::find(*headers_to_remove_, name);
+  if (it != headers_to_remove_->end()) {
     headers_to_remove_->erase(it);
+  }
 }
 
 std::string BuildMirrorRequestCookieIfPossible(
     const GURL& url,
-    const std::string& gaia_id,
+    const GaiaId& gaia_id,
     AccountConsistencyMethod account_consistency,
     const content_settings::CookieSettings* cookie_settings,
     int profile_mode_mask) {
@@ -144,7 +122,7 @@ SigninHeaderHelper::ResponseHeaderDictionary
 SigninHeaderHelper::ParseAccountConsistencyResponseHeader(
     const std::string& header_value) {
   ResponseHeaderDictionary dictionary;
-  for (const base::StringPiece& field :
+  for (std::string_view field :
        base::SplitStringPiece(header_value, ",", base::TRIM_WHITESPACE,
                               base::SPLIT_WANT_NONEMPTY)) {
     size_t delim = field.find_first_of('=');
@@ -171,7 +149,7 @@ bool IsUrlEligibleForMirrorCookie(const GURL& url) {
 void AppendOrRemoveMirrorRequestHeader(
     RequestAdapter* request,
     const GURL& redirect_url,
-    const std::string& gaia_id,
+    const GaiaId& gaia_id,
     Tribool is_child_account,
     AccountConsistencyMethod account_consistency,
     const content_settings::CookieSettings* cookie_settings,
@@ -181,7 +159,30 @@ void AppendOrRemoveMirrorRequestHeader(
   const GURL& url = redirect_url.is_empty() ? request->GetUrl() : redirect_url;
   ChromeConnectedHeaderHelper chrome_connected_helper(account_consistency);
   std::string chrome_connected_header_value;
-  if (chrome_connected_helper.ShouldBuildRequestHeader(url, cookie_settings)) {
+
+#if BUILDFLAG(IS_CHROMEOS)
+  bool is_secondary_account_addition_disallowed =
+      (profile_mode_mask & PROFILE_MODE_ADD_ACCOUNT_DISABLED) != 0 &&
+      account_consistency == AccountConsistencyMethod::kMirror;
+#else
+  bool is_secondary_account_addition_disallowed = false;
+#endif
+
+  // If Gaia cookies are not allowed, the signin will fail anyway. Do not attach
+  // the header, so that the signin goes through the web and the page can show a
+  // friendly error message.
+  // If Gaia cookies are allowed but other google cookies are not (see
+  // https://crbug.com/463848190), then the signin may succeed initially, but
+  // the AccountReconcilor may not work properly. To avoid this, Mirror headers
+  // are generally not attached, which causes the user to be signed in to the
+  // web only and as a result Chrome is unaware of the account. However, when
+  // secondary accounts are disallowed by policy, this web-only signin state is
+  // not acceptable. In this case send the header anyway, and assume that the
+  // Chrome UI will block the signin (if this assumption is not true, then the
+  // user may experience inconsistencies due to AccountReconcilor malfunction).
+  if (chrome_connected_helper.ShouldBuildRequestHeader(
+          url, cookie_settings, /* check_only_gaia_url= */
+          is_secondary_account_addition_disallowed)) {
     chrome_connected_header_value = chrome_connected_helper.BuildRequestHeader(
         true /* is_header_request */, url, gaia_id, is_child_account,
         profile_mode_mask, source, force_account_consistency);
@@ -191,44 +192,9 @@ void AppendOrRemoveMirrorRequestHeader(
       chrome_connected_header_value);
 }
 
-bool AppendOrRemoveDiceRequestHeader(
-    RequestAdapter* request,
-    const GURL& redirect_url,
-    const std::string& gaia_id,
-    bool sync_enabled,
-    AccountConsistencyMethod account_consistency,
-    const content_settings::CookieSettings* cookie_settings,
-    const std::string& device_id) {
-#if BUILDFLAG(ENABLE_DICE_SUPPORT)
-  const GURL& url = redirect_url.is_empty() ? request->GetUrl() : redirect_url;
-  DiceHeaderHelper dice_helper(account_consistency);
-  std::string dice_header_value;
-  if (dice_helper.ShouldBuildRequestHeader(url, cookie_settings)) {
-    dice_header_value = dice_helper.BuildRequestHeader(
-        sync_enabled ? gaia_id : std::string(), device_id);
-  }
-  return dice_helper.AppendOrRemoveRequestHeader(
-      request, redirect_url, kDiceRequestHeader, dice_header_value);
-#else
-  return false;
-#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
-}
-
 ManageAccountsParams BuildManageAccountsParams(
     const std::string& header_value) {
   return ChromeConnectedHeaderHelper::BuildManageAccountsParams(header_value);
 }
-
-#if BUILDFLAG(ENABLE_DICE_SUPPORT)
-DiceResponseParams BuildDiceSigninResponseParams(
-    const std::string& header_value) {
-  return DiceHeaderHelper::BuildDiceSigninResponseParams(header_value);
-}
-
-DiceResponseParams BuildDiceSignoutResponseParams(
-    const std::string& header_value) {
-  return DiceHeaderHelper::BuildDiceSignoutResponseParams(header_value);
-}
-#endif
 
 }  // namespace signin

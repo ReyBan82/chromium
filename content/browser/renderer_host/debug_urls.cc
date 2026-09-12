@@ -4,13 +4,18 @@
 
 #include "content/browser/renderer_host/debug_urls.h"
 
+#include <optional>
 #include <vector>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/debug/alias.h"
 #include "base/debug/asan_invalid_access.h"
 #include "base/debug/profiler.h"
 #include "base/functional/bind.h"
+#include "base/immediate_crash.h"
 #include "base/memory/memory_pressure_listener.h"
+#include "base/notreached.h"
 #include "base/sanitizer_buildflags.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/synchronization/waitable_event.h"
@@ -22,14 +27,9 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/common/content_constants.h"
 #include "content/public/common/url_constants.h"
-#include "ppapi/buildflags/buildflags.h"
+#include "services/viz/privileged/mojom/gl/gpu_service.mojom.h"
 #include "third_party/blink/public/common/chrome_debug_urls.h"
 #include "url/gurl.h"
-
-#if BUILDFLAG(ENABLE_PLUGINS)
-#include "content/browser/ppapi_plugin_process_host.h"  // nogncheck
-#include "ppapi/proxy/ppapi_messages.h"                 // nogncheck
-#endif
 
 #if BUILDFLAG(IS_WIN)
 #include "base/debug/invalid_access_win.h"
@@ -44,32 +44,65 @@ class ScopedAllowWaitForDebugURL {
 
 namespace {
 
-// Define the Asan debug URLs.
-const char kAsanCrashDomain[] = "crash";
-const char kAsanHeapOverflow[] = "/browser-heap-overflow";
-const char kAsanHeapUnderflow[] = "/browser-heap-underflow";
-const char kAsanUseAfterFree[] = "/browser-use-after-free";
-
 #if BUILDFLAG(IS_WIN)
+const char kAsanCrashDomain[] = "crash";
 const char kAsanCorruptHeapBlock[] = "/browser-corrupt-heap-block";
 const char kAsanCorruptHeap[] = "/browser-corrupt-heap";
 #endif
 
+std::optional<viz::mojom::MemoryInvalidAccessType> MapCrashTypeToMojom(
+    const std::string& crash_type) {
+  if (crash_type == blink::kAsanHeapOverflowAction) {
+    return viz::mojom::MemoryInvalidAccessType::kHeapOverflow;
+  }
+  if (crash_type == blink::kAsanHeapUnderflowAction) {
+    return viz::mojom::MemoryInvalidAccessType::kHeapUnderflow;
+  }
+  if (crash_type == blink::kAsanUseAfterFreeAction) {
+    return viz::mojom::MemoryInvalidAccessType::kUseAfterFree;
+  }
+  if (crash_type == blink::kAsanMemberDereferenceAfterFreeAction) {
+    return viz::mojom::MemoryInvalidAccessType::kMemberDereferenceAfterFree;
+  }
+  return std::nullopt;
+}
+
+void ExecuteBrowserCrashAction(viz::mojom::MemoryInvalidAccessType action) {
+  switch (action) {
+    case viz::mojom::MemoryInvalidAccessType::kHeapOverflow:
+      base::debug::AsanHeapOverflow();
+      return;
+    case viz::mojom::MemoryInvalidAccessType::kHeapUnderflow:
+      base::debug::AsanHeapUnderflow();
+      return;
+    case viz::mojom::MemoryInvalidAccessType::kUseAfterFree:
+      base::debug::AsanHeapUseAfterFree();
+      return;
+    case viz::mojom::MemoryInvalidAccessType::kMemberDereferenceAfterFree:
+      base::debug::AsanHeapMemberDereferenceAfterFree();
+      return;
+  }
+  NOTREACHED();
+}
+
+// The conditions here must stay in sync with |HandleAsanDebugURL|.
 bool IsAsanDebugURL(const GURL& url) {
+  std::string process;
+  std::string crash_type;
+  if (blink::ParseCrashURL(url, &process, &crash_type)) {
+    if (process == blink::kAsanBrowserProcess ||
+        process == blink::kAsanGpuProcess) {
+      return MapCrashTypeToMojom(crash_type).has_value();
+    }
+    return false;
+  }
+
+#if BUILDFLAG(IS_WIN)
   if (!(url.is_valid() && url.SchemeIs(kChromeUIScheme) &&
         url.DomainIs(kAsanCrashDomain) && url.has_path())) {
     return false;
   }
-
-  if (url.path_piece() == kAsanHeapOverflow ||
-      url.path_piece() == kAsanHeapUnderflow ||
-      url.path_piece() == kAsanUseAfterFree) {
-    return true;
-  }
-
-#if BUILDFLAG(IS_WIN)
-  if (url.path_piece() == kAsanCorruptHeapBlock ||
-      url.path_piece() == kAsanCorruptHeap) {
+  if (url.path() == kAsanCorruptHeapBlock || url.path() == kAsanCorruptHeap) {
     return true;
   }
 #endif
@@ -77,145 +110,187 @@ bool IsAsanDebugURL(const GURL& url) {
   return false;
 }
 
-bool HandleAsanDebugURL(const GURL& url) {
+// The URLs handled here must exactly match those that return true from
+// |IsAsanDebugURL|.
+void HandleAsanDebugURL(const GURL& url) {
+  CHECK(IsAsanDebugURL(url));
+
+  std::string process;
+  std::string crash_type;
+  if (blink::ParseCrashURL(url, &process, &crash_type)) {
+    if (process == blink::kAsanBrowserProcess) {
+      auto mapped_type = MapCrashTypeToMojom(crash_type);
+      if (mapped_type) {
+        ExecuteBrowserCrashAction(*mapped_type);
+      } else {
+        NOTREACHED();
+      }
+      return;
+    }
+    if (process == blink::kAsanGpuProcess) {
+      auto* host = GpuProcessHost::Get();
+      if (host) {
+        auto mapped_type = MapCrashTypeToMojom(crash_type);
+        if (mapped_type) {
+          host->gpu_service()->InduceMemoryInvalidAccess(*mapped_type);
+        }
+      }
+      return;
+    }
+  }
+
 #if defined(ADDRESS_SANITIZER) || BUILDFLAG(IS_HWASAN)
 #if BUILDFLAG(IS_WIN)
-  if (url.path_piece() == kAsanCorruptHeapBlock) {
+  if (url.path() == kAsanCorruptHeapBlock) {
     base::debug::AsanCorruptHeapBlock();
-    return true;
-  } else if (url.path_piece() == kAsanCorruptHeap) {
+    return;
+  }
+  if (url.path() == kAsanCorruptHeap) {
     base::debug::AsanCorruptHeap();
-    return true;
+    return;
   }
 #endif  // BUILDFLAG(IS_WIN)
 
-  if (url.path_piece() == kAsanHeapOverflow) {
-    base::debug::AsanHeapOverflow();
-  } else if (url.path_piece() == kAsanHeapUnderflow) {
-    base::debug::AsanHeapUnderflow();
-  } else if (url.path_piece() == kAsanUseAfterFree) {
-    base::debug::AsanHeapUseAfterFree();
-  } else {
-    return false;
-  }
 #endif
-
-  return true;
 }
 
-void HangCurrentThread() {
+NOINLINE void HangCurrentThread() {
   ScopedAllowWaitForDebugURL allow_wait;
   base::WaitableEvent(base::WaitableEvent::ResetPolicy::AUTOMATIC,
                       base::WaitableEvent::InitialState::NOT_SIGNALED)
       .Wait();
 }
 
+NOINLINE void CrashBrowserProcessIntentionally() {
+  // Don't fold so that crash reports will clearly show this method. This helps
+  // with crash triage.
+  NO_CODE_FOLDING();
+  // Induce an intentional crash in the browser process.
+  base::ImmediateCrash();
+}
+
 }  // namespace
 
-bool HandleDebugURL(const GURL& url,
+// The conditions here must stay in sync with |HandleDebugURL|.
+bool IsDebugURL(const GURL& url) {
+  if (!(url.is_valid() && url.SchemeIs(kChromeUIScheme))) {
+    return false;
+  }
+
+  if (IsAsanDebugURL(url)) {
+    return true;
+  }
+
+  if (url == blink::kChromeUIBrowserCrashURL ||
+      url == blink::kChromeUIBrowserDcheckURL ||
+#if BUILDFLAG(IS_WIN)
+      url == blink::kChromeUIBrowserHeapCorruptionURL ||
+#endif
+      url == blink::kChromeUIBrowserUIHang ||
+      url == blink::kChromeUIDelayedBrowserUIHang ||
+      url == blink::kChromeUIGpuCleanURL ||
+      url == blink::kChromeUIGpuCrashURL ||
+#if BUILDFLAG(IS_ANDROID)
+      url == blink::kChromeUIGpuJavaCrashURL ||
+#endif
+      url == blink::kChromeUIGpuHangURL ||
+      url == blink::kChromeUIMemoryPressureCriticalURL ||
+      url == blink::kChromeUIMemoryPressureModerateURL) {
+    return true;
+  }
+
+  return false;
+}
+
+// The URLs handled here must exactly match those that return true from
+// |IsDebugURL|.
+void HandleDebugURL(const GURL& url,
                     ui::PageTransition transition,
                     bool is_explicit_navigation) {
+  CHECK(IsDebugURL(url));
   // We want to handle the debug URL if the user explicitly navigated to this
   // URL, unless kEnableGpuBenchmarking is enabled by Telemetry.
   bool is_telemetry_navigation =
       base::CommandLine::ForCurrentProcess()->HasSwitch(
-          cc::switches::kEnableGpuBenchmarking) &&
+          switches::kEnableGpuBenchmarking) &&
       (PageTransitionCoreTypeIs(transition, ui::PAGE_TRANSITION_TYPED));
-
-  if (!is_explicit_navigation && !is_telemetry_navigation)
-    return false;
-
-  if (IsAsanDebugURL(url))
-    return HandleAsanDebugURL(url);
-
-  if (url == blink::kChromeUIBrowserCrashURL) {
-    // Induce an intentional crash in the browser process.
-    CHECK(false);
-    return true;
+  if (!is_explicit_navigation && !is_telemetry_navigation) {
+    return;
   }
 
+  if (IsAsanDebugURL(url)) {
+    HandleAsanDebugURL(url);
+    return;
+  }
+  if (url == blink::kChromeUIBrowserCrashURL) {
+    CrashBrowserProcessIntentionally();
+    return;
+  }
   if (url == blink::kChromeUIBrowserDcheckURL) {
     // Induce an intentional DCHECK in the browser process. This is used to
     // see if a DCHECK will bring down the current process (is FATAL).
+    // CHECK-exclusion: This is an experimental DCHECK on purpose, and no need
+    // to convert it to CHECK.
     DCHECK(false);
-    return true;
+    return;
   }
-
 #if BUILDFLAG(IS_WIN)
   if (url == blink::kChromeUIBrowserHeapCorruptionURL) {
     // Induce an intentional heap corruption in the browser process.
     base::debug::win::TerminateWithHeapCorruption();
   }
 #endif
-
   if (url == blink::kChromeUIBrowserUIHang) {
     HangCurrentThread();
-    return true;
+    return;
   }
-
   if (url == blink::kChromeUIDelayedBrowserUIHang) {
     // Webdriver-safe url to hang the ui thread. Webdriver waits for the onload
     // event in javascript which needs a little more time to fire.
     GetUIThreadTaskRunner({})->PostDelayedTask(
         FROM_HERE, base::BindOnce(&HangCurrentThread), base::Seconds(2));
-    return true;
+    return;
   }
-
   if (url == blink::kChromeUIGpuCleanURL) {
-    GpuProcessHost::CallOnIO(FROM_HERE, GPU_PROCESS_KIND_SANDBOXED,
-                             false /* force_create */,
-                             base::BindOnce([](GpuProcessHost* host) {
-                               if (host)
-                                 host->gpu_service()->DestroyAllChannels();
-                             }));
-    return true;
+    auto* host = GpuProcessHost::Get();
+    if (host) {
+      host->gpu_service()->DestroyAllChannels();
+    }
+    return;
   }
-
   if (url == blink::kChromeUIGpuCrashURL) {
-    GpuProcessHost::CallOnIO(FROM_HERE, GPU_PROCESS_KIND_SANDBOXED,
-                             false /* force_create */,
-                             base::BindOnce([](GpuProcessHost* host) {
-                               if (host)
-                                 host->gpu_service()->Crash();
-                             }));
-    return true;
+    auto* host = GpuProcessHost::Get();
+    if (host) {
+      host->gpu_service()->Crash();
+    }
+    return;
   }
-
 #if BUILDFLAG(IS_ANDROID)
   if (url == blink::kChromeUIGpuJavaCrashURL) {
-    GpuProcessHost::CallOnIO(FROM_HERE, GPU_PROCESS_KIND_SANDBOXED,
-                             false /* force_create */,
-                             base::BindOnce([](GpuProcessHost* host) {
-                               if (host)
-                                 host->gpu_service()->ThrowJavaException();
-                             }));
-    return true;
+    auto* host = GpuProcessHost::Get();
+    if (host) {
+      host->gpu_service()->ThrowJavaException();
+    }
+    return;
   }
 #endif
-
   if (url == blink::kChromeUIGpuHangURL) {
-    GpuProcessHost::CallOnIO(FROM_HERE, GPU_PROCESS_KIND_SANDBOXED,
-                             false /* force_create */,
-                             base::BindOnce([](GpuProcessHost* host) {
-                               if (host)
-                                 host->gpu_service()->Hang();
-                             }));
-    return true;
+    auto* host = GpuProcessHost::Get();
+    if (host) {
+      host->gpu_service()->Hang();
+    }
+    return;
   }
-
   if (url == blink::kChromeUIMemoryPressureCriticalURL) {
     base::MemoryPressureListener::NotifyMemoryPressure(
-        base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_CRITICAL);
-    return true;
+        base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+    return;
   }
-
   if (url == blink::kChromeUIMemoryPressureModerateURL) {
     base::MemoryPressureListener::NotifyMemoryPressure(
-        base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_MODERATE);
-    return true;
+        base::MEMORY_PRESSURE_LEVEL_MODERATE);
+    return;
   }
-
-  return false;
 }
 
 }  // namespace content

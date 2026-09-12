@@ -4,40 +4,35 @@
 
 #include "device/fido/attested_credential_data.h"
 
+#include <algorithm>
 #include <utility>
 
-#include "base/memory/raw_ptr_exclusion.h"
+#include "base/containers/extend.h"
+#include "base/containers/span_reader.h"
+#include "base/containers/to_array.h"
+#include "base/containers/to_vector.h"
 #include "base/numerics/safe_math.h"
-#include "base/ranges/algorithm.h"
 #include "components/cbor/reader.h"
 #include "components/device_event_log/device_event_log.h"
-#include "device/fido/cbor_extract.h"
-#include "device/fido/ed25519_public_key.h"
-#include "device/fido/fido_constants.h"
-#include "device/fido/fido_parsing_utils.h"
-#include "device/fido/p256_public_key.h"
+#include "device/fido/public/fido_constants.h"
 #include "device/fido/public_key.h"
-#include "device/fido/rsa_public_key.h"
-
-using device::cbor_extract::IntKey;
-using device::cbor_extract::Is;
-using device::cbor_extract::StepOrByte;
-using device::cbor_extract::Stop;
 
 namespace device {
 
 // static
-absl::optional<std::pair<AttestedCredentialData, base::span<const uint8_t>>>
+std::optional<std::pair<AttestedCredentialData, base::span<const uint8_t>>>
 AttestedCredentialData::ConsumeFromCtapResponse(
     base::span<const uint8_t> buffer) {
-  if (buffer.size() < kAaguidLength)
-    return absl::nullopt;
+  if (buffer.size() < kAaguidLength) {
+    return std::nullopt;
+  }
 
   auto aaguid = buffer.first<kAaguidLength>();
   buffer = buffer.subspan(kAaguidLength);
 
-  if (buffer.size() < kCredentialIdLengthLength)
-    return absl::nullopt;
+  if (buffer.size() < kCredentialIdLengthLength) {
+    return std::nullopt;
+  }
 
   auto credential_id_length_span = buffer.first<kCredentialIdLengthLength>();
   const size_t credential_id_length =
@@ -45,18 +40,19 @@ AttestedCredentialData::ConsumeFromCtapResponse(
       base::strict_cast<size_t>(credential_id_length_span[1]);
   buffer = buffer.subspan(kCredentialIdLengthLength);
 
-  if (buffer.size() < credential_id_length)
-    return absl::nullopt;
+  if (buffer.size() < credential_id_length) {
+    return std::nullopt;
+  }
 
   auto credential_id = buffer.first(credential_id_length);
   buffer = buffer.subspan(credential_id_length);
 
   size_t public_key_byte_len;
-  absl::optional<cbor::Value> public_key_cbor =
+  std::optional<cbor::Value> public_key_cbor =
       cbor::Reader::Read(buffer, &public_key_byte_len);
   if (!public_key_cbor || !public_key_cbor->is_map()) {
     FIDO_LOG(ERROR) << "CBOR error in COSE public key";
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   const base::span<const uint8_t> public_key_cbor_bytes(
@@ -65,118 +61,66 @@ AttestedCredentialData::ConsumeFromCtapResponse(
 
   const cbor::Value::MapValue& public_key_map = public_key_cbor->GetMap();
 
-  struct COSEKey {
-    // Both fields below are not a raw_ptr<int64_t>, because ELEMENT() treats
-    // the raw_ptr<T> as a void*, skipping AddRef() call and causing a
-    // ref-counting mismatch.
-    RAW_PTR_EXCLUSION const int64_t* alg;
-    RAW_PTR_EXCLUSION const int64_t* kty;
-  } cose_key;
+  // kAlg is required to be present. See
+  // https://www.w3.org/TR/webauthn/#credentialpublickey
+  // COSE allows it to be a string or an integer. However, WebAuthn defines
+  // COSEAlgorithmIdentifier to be a long[1], thus only integer-based
+  // algorithms can be negotiated.
+  //
+  // [1] https://www.w3.org/TR/webauthn/#alg-identifier
+  const auto alg_it =
+      public_key_map.find(cbor::Value(static_cast<int64_t>(CoseKeyKey::kAlg)));
+  if (alg_it == public_key_map.end() || !alg_it->second.is_integer()) {
+    FIDO_LOG(ERROR) << "Failed to parse COSE key algorithm";
+    return std::nullopt;
+  }
 
-  static constexpr cbor_extract::StepOrByte<COSEKey> kSteps[] = {
-      // clang-format off
-
-      // kAlg is required to be present. See
-      // https://www.w3.org/TR/webauthn/#credentialpublickey
-      // COSE allows it to be a string or an integer. However, WebAuthn defines
-      // COSEAlgorithmIdentifier to be a long[1], thus only integer-based
-      // algorithms can be negotiated.
-      //
-      // [1] https://www.w3.org/TR/webauthn/#alg-identifier
-      ELEMENT(Is::kRequired, COSEKey, alg),
-      IntKey<COSEKey>(static_cast<int>(CoseKeyKey::kAlg)),
-
-      // kKty is required in COSE keys:
-      // https://tools.ietf.org/html/rfc8152#section-7
-      ELEMENT(Is::kRequired, COSEKey, kty),
-      IntKey<COSEKey>(static_cast<int>(CoseKeyKey::kKty)),
-
-      Stop<COSEKey>(),
-      // clang-format on
-  };
-
-  if (!cbor_extract::Extract<COSEKey>(&cose_key, kSteps, public_key_map)) {
-    FIDO_LOG(ERROR) << "Failed to parse COSE key";
-    return absl::nullopt;
+  // kKty is required in COSE keys:
+  // https://tools.ietf.org/html/rfc8152#section-7
+  if (const auto kty_it = public_key_map.find(
+          cbor::Value(static_cast<int64_t>(CoseKeyKey::kKty)));
+      kty_it == public_key_map.end() || !kty_it->second.is_integer()) {
+    FIDO_LOG(ERROR) << "Failed to parse COSE key type";
+    return std::nullopt;
   }
 
   // In WebIDL, a |long| is an |int32_t|[1].
   //
   // [1] https://heycam.github.io/webidl/#idl-long
-  const int64_t algorithm64 = *cose_key.alg;
+  const int64_t algorithm64 = alg_it->second.GetInteger();
   if (algorithm64 > std::numeric_limits<int32_t>::max() ||
       algorithm64 < std::numeric_limits<int32_t>::min()) {
     FIDO_LOG(ERROR) << "COSE algorithm in public key is out of range";
-    return absl::nullopt;
+    return std::nullopt;
   }
   const int32_t algorithm = static_cast<int32_t>(algorithm64);
-  const int64_t key_type = *cose_key.kty;
 
-  std::unique_ptr<PublicKey> public_key;
-
-  if (key_type == static_cast<int64_t>(CoseKeyTypes::kEC2) ||
-      key_type == static_cast<int64_t>(CoseKeyTypes::kOKP)) {
-    auto curve = public_key_map.find(
-        cbor::Value(static_cast<int64_t>(CoseKeyKey::kEllipticCurve)));
-    if (curve == public_key_map.end() || !curve->second.is_integer()) {
-      return absl::nullopt;
-    }
-    const int64_t curve_id = curve->second.GetInteger();
-
-    if (key_type == static_cast<int64_t>(CoseKeyTypes::kEC2) &&
-        curve_id == static_cast<int64_t>(CoseCurves::kP256)) {
-      auto p256_key = P256PublicKey::ExtractFromCOSEKey(
-          algorithm, public_key_cbor_bytes, public_key_map);
-      if (!p256_key) {
-        FIDO_LOG(ERROR) << "Invalid P-256 public key";
-        return absl::nullopt;
-      }
-      public_key = std::move(p256_key);
-    } else if (key_type == static_cast<int64_t>(CoseKeyTypes::kOKP) &&
-               curve_id == static_cast<int64_t>(CoseCurves::kEd25519)) {
-      auto ed25519_key = Ed25519PublicKey::ExtractFromCOSEKey(
-          algorithm, public_key_cbor_bytes, public_key_map);
-      if (!ed25519_key) {
-        FIDO_LOG(ERROR) << "Invalid Ed25519 public key";
-        return absl::nullopt;
-      }
-      public_key = std::move(ed25519_key);
-    }
-  } else if (key_type == static_cast<int64_t>(CoseKeyTypes::kRSA)) {
-    auto rsa_key = RSAPublicKey::ExtractFromCOSEKey(
-        algorithm, public_key_cbor_bytes, public_key_map);
-    if (!rsa_key) {
-      FIDO_LOG(ERROR) << "Invalid RSA public key";
-      return absl::nullopt;
-    }
-    public_key = std::move(rsa_key);
-  }
-
+  std::unique_ptr<PublicKey> public_key =
+      PublicKey::FromCOSEKey(algorithm, public_key_cbor_bytes, public_key_map);
   if (!public_key) {
-    public_key = std::make_unique<PublicKey>(algorithm, public_key_cbor_bytes,
-                                             absl::nullopt);
+    return std::nullopt;
   }
 
   return std::make_pair(
       AttestedCredentialData(aaguid, credential_id_length_span,
-                             fido_parsing_utils::Materialize(credential_id),
+                             base::ToVector(credential_id),
                              std::move(public_key)),
       buffer);
 }
 
 // static
-absl::optional<AttestedCredentialData>
+std::optional<AttestedCredentialData>
 AttestedCredentialData::CreateFromU2fRegisterResponse(
     base::span<const uint8_t> u2f_data,
     std::unique_ptr<PublicKey> public_key) {
-  // TODO(crbug/799075): Introduce a CredentialID class to do this extraction.
-  // Extract the length of the credential (i.e. of the U2FResponse key
-  // handle). Length is big endian.
-  std::vector<uint8_t> extracted_length =
-      fido_parsing_utils::Extract(u2f_data, kU2fKeyHandleLengthOffset, 1);
-
-  if (extracted_length.empty()) {
-    return absl::nullopt;
+  // TODO(crbug.com/41363164): Introduce a CredentialID class to do this
+  // extraction. Extract the length of the credential (i.e. of the U2FResponse
+  // key handle). Length is big endian.
+  base::SpanReader<const uint8_t> reader(u2f_data);
+  reader.Skip(kU2fKeyHandleLengthOffset);
+  uint8_t extracted_length;
+  if (!reader.ReadU8BigEndian(extracted_length)) {
+    return std::nullopt;
   }
 
   // For U2F register request, device AAGUID is set to zeros.
@@ -184,19 +128,18 @@ AttestedCredentialData::CreateFromU2fRegisterResponse(
 
   // Note that U2F responses only use one byte for length.
   std::array<uint8_t, kCredentialIdLengthLength> credential_id_length = {
-      0, extracted_length[0]};
+      0, extracted_length};
 
   // Extract the credential id (i.e. key handle).
-  std::vector<uint8_t> credential_id = fido_parsing_utils::Extract(
-      u2f_data, kU2fKeyHandleOffset,
-      base::strict_cast<size_t>(credential_id_length[1]));
+  std::optional<base::span<const uint8_t>> credential_id =
+      reader.Read(extracted_length);
 
-  if (credential_id.empty()) {
-    return absl::nullopt;
+  if (!credential_id.has_value()) {
+    return std::nullopt;
   }
 
   return AttestedCredentialData(aaguid, credential_id_length,
-                                std::move(credential_id),
+                                base::ToVector(*credential_id),
                                 std::move(public_key));
 }
 
@@ -205,14 +148,33 @@ AttestedCredentialData::AttestedCredentialData(AttestedCredentialData&& other) =
 
 AttestedCredentialData::AttestedCredentialData(
     base::span<const uint8_t, kAaguidLength> aaguid,
-    base::span<const uint8_t, kCredentialIdLengthLength> credential_id_length,
+    base::span<const uint8_t, kCredentialIdLengthLength>
+        credential_id_length_bytes,
     std::vector<uint8_t> credential_id,
     std::unique_ptr<PublicKey> public_key)
-    : aaguid_(fido_parsing_utils::Materialize(aaguid)),
-      credential_id_length_(
-          fido_parsing_utils::Materialize(credential_id_length)),
+    : aaguid_(base::ToArray(aaguid)),
+      credential_id_length_(base::ToArray(credential_id_length_bytes)),
       credential_id_(std::move(credential_id)),
-      public_key_(std::move(public_key)) {}
+      public_key_(std::move(public_key)) {
+  const size_t credential_id_length =
+      (base::strict_cast<size_t>(credential_id_length_[0]) << 8) |
+      base::strict_cast<size_t>(credential_id_length_[1]);
+  CHECK_EQ(credential_id_length, credential_id_.size());
+}
+
+AttestedCredentialData::AttestedCredentialData(
+    base::span<const uint8_t, kAaguidLength> aaguid,
+    base::span<const uint8_t> credential_id,
+    std::unique_ptr<PublicKey> public_key)
+    : AttestedCredentialData(
+          aaguid,
+          std::array<uint8_t, kCredentialIdLengthLength>{
+              base::checked_cast<uint8_t>((0xff00 & credential_id.size()) >> 8),
+              base::checked_cast<uint8_t>(0xff & credential_id.size())},
+          base::ToVector(credential_id),
+          std::move(public_key)) {
+  CHECK_LE(credential_id.size(), 0xffffu);
+}
 
 AttestedCredentialData& AttestedCredentialData::operator=(
     AttestedCredentialData&& other) = default;
@@ -220,7 +182,7 @@ AttestedCredentialData& AttestedCredentialData::operator=(
 AttestedCredentialData::~AttestedCredentialData() = default;
 
 bool AttestedCredentialData::IsAaguidZero() const {
-  return base::ranges::all_of(aaguid_, [](uint8_t v) { return v == 0; });
+  return std::ranges::all_of(aaguid_, [](uint8_t v) { return v == 0; });
 }
 
 bool AttestedCredentialData::DeleteAaguid() {
@@ -233,10 +195,10 @@ bool AttestedCredentialData::DeleteAaguid() {
 
 std::vector<uint8_t> AttestedCredentialData::SerializeAsBytes() const {
   std::vector<uint8_t> attestation_data;
-  fido_parsing_utils::Append(&attestation_data, aaguid_);
-  fido_parsing_utils::Append(&attestation_data, credential_id_length_);
-  fido_parsing_utils::Append(&attestation_data, credential_id_);
-  fido_parsing_utils::Append(&attestation_data, public_key_->cose_key_bytes);
+  base::Extend(attestation_data, aaguid_);
+  base::Extend(attestation_data, credential_id_length_);
+  base::Extend(attestation_data, credential_id_);
+  base::Extend(attestation_data, public_key_->cose_key_bytes);
   return attestation_data;
 }
 

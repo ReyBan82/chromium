@@ -5,7 +5,10 @@
 #ifndef CHROME_BROWSER_EXTENSIONS_ACTIVITY_LOG_ACTIVITY_LOG_TASK_RUNNER_H_
 #define CHROME_BROWSER_EXTENSIONS_ACTIVITY_LOG_ACTIVITY_LOG_TASK_RUNNER_H_
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace base {
 class SingleThreadTaskRunner;
@@ -20,7 +23,7 @@ const scoped_refptr<base::SingleThreadTaskRunner> GetActivityLogTaskRunner();
 
 // TODO(devlin): It would be great to remove this, but we can't create a valid
 // SQL database in unittests using the normal ActivityLogTaskRunner. Might be
-// related to https://crbug.com/739945.
+// related to https://crbug.com/41329138.
 void SetActivityLogTaskRunnerForTesting(
     base::SingleThreadTaskRunner* task_runner);
 

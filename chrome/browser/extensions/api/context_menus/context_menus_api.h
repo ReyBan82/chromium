@@ -6,6 +6,9 @@
 #define CHROME_BROWSER_EXTENSIONS_API_CONTEXT_MENUS_CONTEXT_MENUS_API_H_
 
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -14,7 +17,7 @@ class ContextMenusCreateFunction : public ExtensionFunction {
   DECLARE_EXTENSION_FUNCTION("contextMenus.create", CONTEXTMENUS_CREATE)
 
  protected:
-  ~ContextMenusCreateFunction() override {}
+  ~ContextMenusCreateFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -25,7 +28,7 @@ class ContextMenusUpdateFunction : public ExtensionFunction {
   DECLARE_EXTENSION_FUNCTION("contextMenus.update", CONTEXTMENUS_UPDATE)
 
  protected:
-  ~ContextMenusUpdateFunction() override {}
+  ~ContextMenusUpdateFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -36,7 +39,7 @@ class ContextMenusRemoveFunction : public ExtensionFunction {
   DECLARE_EXTENSION_FUNCTION("contextMenus.remove", CONTEXTMENUS_REMOVE)
 
  protected:
-  ~ContextMenusRemoveFunction() override {}
+  ~ContextMenusRemoveFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -47,7 +50,7 @@ class ContextMenusRemoveAllFunction : public ExtensionFunction {
   DECLARE_EXTENSION_FUNCTION("contextMenus.removeAll", CONTEXTMENUS_REMOVEALL)
 
  protected:
-  ~ContextMenusRemoveAllFunction() override {}
+  ~ContextMenusRemoveAllFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;

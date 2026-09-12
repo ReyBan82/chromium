@@ -4,79 +4,172 @@
 
 package org.chromium.chrome.browser.accessibility.settings;
 
-import androidx.preference.PreferenceFragmentCompat;
+import android.content.Context;
 
-import org.chromium.base.metrics.RecordHistogram;
-import org.chromium.chrome.R;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.dom_distiller.DomDistillerServiceFactory;
 import org.chromium.chrome.browser.image_descriptions.ImageDescriptionsController;
-import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
 import org.chromium.chrome.browser.preferences.Pref;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.util.ChromeAccessibilityUtil;
+import org.chromium.chrome.browser.settings.SettingsNavigationFactory;
 import org.chromium.components.browser_ui.accessibility.AccessibilitySettingsDelegate;
-import org.chromium.components.browser_ui.accessibility.PageZoomUtils;
+import org.chromium.components.browser_ui.settings.SettingsNavigation;
+import org.chromium.components.dom_distiller.core.DistilledPagePrefs;
 import org.chromium.components.user_prefs.UserPrefs;
 import org.chromium.content_public.browser.BrowserContextHandle;
 
 /** The Chrome implementation of AccessibilitySettingsDelegate. */
+@NullMarked
 public class ChromeAccessibilitySettingsDelegate implements AccessibilitySettingsDelegate {
-    private static final String READER_MODE_SELECTED_HISTOGRAM =
-            "DomDistiller.ReaderModeAccessibilitySettingSelected";
+    private static class TextSizeContrastAccessibilityDelegate
+            implements IntegerPreferenceDelegate {
+        private final BrowserContextHandle mBrowserContextHandle;
 
-    private static class AccessibilityTabSwitcherDelegate implements BooleanPreferenceDelegate {
-        @Override
-        public boolean isEnabled() {
-            return SharedPreferencesManager.getInstance().readBoolean(
-                    ChromePreferenceKeys.ACCESSIBILITY_TAB_SWITCHER, true);
+        public TextSizeContrastAccessibilityDelegate(BrowserContextHandle browserContextHandle) {
+            mBrowserContextHandle = browserContextHandle;
         }
 
         @Override
-        public void setEnabled(boolean value) {}
+        public int getValue() {
+            return UserPrefs.get(mBrowserContextHandle)
+                    .getInteger(Pref.ACCESSIBILITY_TEXT_SIZE_CONTRAST_FACTOR);
+        }
+
+        @Override
+        public void setValue(int value) {
+            UserPrefs.get(mBrowserContextHandle)
+                    .setInteger(Pref.ACCESSIBILITY_TEXT_SIZE_CONTRAST_FACTOR, value);
+        }
     }
 
-    private static class ReaderForAccessibilityDelegate implements BooleanPreferenceDelegate {
-        @Override
-        public boolean isEnabled() {
-            return UserPrefs.get(Profile.getLastUsedRegularProfile())
-                    .getBoolean(Pref.READER_FOR_ACCESSIBILITY);
+    private static class ChromeBooleanPreferenceDelegate implements BooleanPreferenceDelegate {
+        private final BrowserContextHandle mBrowserContextHandle;
+        private final String mPreferenceKey;
+
+        public ChromeBooleanPreferenceDelegate(
+                BrowserContextHandle browserContextHandle, String preferenceKey) {
+            mBrowserContextHandle = browserContextHandle;
+            mPreferenceKey = preferenceKey;
         }
 
         @Override
-        public void setEnabled(boolean value) {
-            RecordHistogram.recordBooleanHistogram(READER_MODE_SELECTED_HISTOGRAM, (Boolean) value);
-            UserPrefs.get(Profile.getLastUsedRegularProfile())
-                    .setBoolean(Pref.READER_FOR_ACCESSIBILITY, (Boolean) value);
+        public boolean getValue() {
+            return UserPrefs.get(mBrowserContextHandle).getBoolean(mPreferenceKey);
         }
+
+        @Override
+        public void setValue(boolean value) {
+            UserPrefs.get(mBrowserContextHandle).setBoolean(mPreferenceKey, value);
+        }
+    }
+
+    private final @Nullable Context mContext;
+    private final Profile mProfile;
+
+    /**
+     * Constructs a delegate for the given profile.
+     *
+     * @param profile The profile associated with the delegate.
+     */
+    public ChromeAccessibilitySettingsDelegate(Profile profile) {
+        this(null, profile);
+    }
+
+    /**
+     * Constructs a delegate for the given context and profile.
+     *
+     * @param context Context associated with the delegate.
+     * @param profile The profile associated with the delegate.
+     */
+    public ChromeAccessibilitySettingsDelegate(@Nullable Context context, Profile profile) {
+        mContext = context;
+        mProfile = profile;
     }
 
     @Override
     public BrowserContextHandle getBrowserContextHandle() {
-        return Profile.getLastUsedRegularProfile();
+        return mProfile;
     }
 
     @Override
-    public BooleanPreferenceDelegate getAccessibilityTabSwitcherDelegate() {
-        if (!ChromeAccessibilityUtil.get().isAccessibilityEnabled()) {
-            return null;
-        }
-        return new AccessibilityTabSwitcherDelegate();
+    public boolean shouldShowImageDescriptionsSetting() {
+        return ImageDescriptionsController.getInstance().shouldShowImageDescriptionsMenuItem();
     }
 
     @Override
-    public BooleanPreferenceDelegate getReaderForAccessibilityDelegate() {
-        return new ReaderForAccessibilityDelegate();
+    public SettingsNavigation getSiteSettingsNavigation() {
+        return mContext != null
+                ? SettingsNavigationFactory.createSettingsNavigation(mContext)
+                : SettingsNavigationFactory.createSettingsNavigation();
     }
 
     @Override
-    public void addExtraPreferences(PreferenceFragmentCompat fragment) {
-        if (ImageDescriptionsController.getInstance().shouldShowImageDescriptionsMenuItem()) {
-            fragment.addPreferencesFromResource(R.xml.image_descriptions_settings_preference);
-        }
+    public SettingsNavigation getSiteSettingsNavigation(Context context) {
+        return SettingsNavigationFactory.createSettingsNavigation(context);
     }
 
     @Override
-    public boolean showPageZoomSettingsUI() {
-        return PageZoomUtils.shouldShowSettingsUI();
+    public IntegerPreferenceDelegate getTextSizeContrastAccessibilityDelegate() {
+        return new TextSizeContrastAccessibilityDelegate(getBrowserContextHandle());
+    }
+
+    @Override
+    public BooleanPreferenceDelegate getForceEnableZoomAccessibilityDelegate() {
+        return new ChromeBooleanPreferenceDelegate(
+                getBrowserContextHandle(), Pref.ACCESSIBILITY_FORCE_ENABLE_ZOOM);
+    }
+
+    @Override
+    public BooleanPreferenceDelegate getTouchpadOverscrollHistoryNavigationAccessibilityDelegate() {
+        return new ChromeBooleanPreferenceDelegate(
+                getBrowserContextHandle(),
+                Pref.ACCESSIBILITY_TOUCHPAD_OVERSCROLL_HISTORY_NAVIGATION);
+    }
+
+    @Override
+    public BooleanPreferenceDelegate getReaderAccessibilityDelegate() {
+        return new ChromeBooleanPreferenceDelegate(
+                getBrowserContextHandle(), Pref.READER_FOR_ACCESSIBILITY);
+    }
+
+    @Override
+    public DistilledPagePrefs getDistilledPagePrefs() {
+        return DomDistillerServiceFactory.getForProfile(mProfile).getDistilledPagePrefs();
+    }
+
+    /**
+     * Returns whether the material slider should be used for the page zoom preference.
+     *
+     * @return True if the slider should be used, false otherwise.
+     */
+    @Override
+    public boolean shouldUseSlider() {
+        return true;
+    }
+
+    /**
+     * Checks if the caret browsing feature is currently enabled for the associated profile.
+     *
+     * @return True if caret browsing is enabled, false otherwise.
+     */
+    @Override
+    public boolean isCaretBrowsingEnabled() {
+        return AccessibilitySettingsBridge.isCaretBrowsingEnabled(mProfile);
+    }
+
+    /**
+     * Sets the enabled state of the caret browsing feature for the associated profile.
+     *
+     * @param enabled True to enable caret browsing, false to disable it.
+     */
+    @Override
+    public void setCaretBrowsingEnabled(boolean enabled) {
+        AccessibilitySettingsBridge.setCaretBrowsingEnabled(mProfile, enabled);
+    }
+
+    @Override
+    public String getCaretBrowsingPreferenceKey() {
+        return Pref.CARET_BROWSING_ENABLED;
     }
 }

@@ -5,11 +5,14 @@
 #ifndef CHROME_BROWSER_ASH_LOGIN_SIGNIN_AUTH_ERROR_OBSERVER_H_
 #define CHROME_BROWSER_ASH_LOGIN_SIGNIN_AUTH_ERROR_OBSERVER_H_
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/signin/core/browser/signin_error_controller.h"
-#include "components/sync/driver/sync_service_observer.h"
+#include "components/sync/service/sync_service_observer.h"
 
 class GoogleServiceAuthError;
+class PrefService;
 class Profile;
 
 namespace ash {
@@ -24,7 +27,10 @@ class AuthErrorObserver : public KeyedService,
   // when `profile` is a user profile of a gaia user or a supervised user.
   static bool ShouldObserve(Profile* profile);
 
-  explicit AuthErrorObserver(Profile* profile);
+  // `local_state` must be non-null and must outlive `this`.
+  AuthErrorObserver(PrefService* local_state,
+                    Profile* profile,
+                    syncer::SyncService* sync_service);
 
   AuthErrorObserver(const AuthErrorObserver&) = delete;
   AuthErrorObserver& operator=(const AuthErrorObserver&) = delete;
@@ -42,6 +48,7 @@ class AuthErrorObserver : public KeyedService,
 
   // syncer::SyncServiceObserver implementation.
   void OnStateChanged(syncer::SyncService* sync) override;
+  void OnSyncShutdown(syncer::SyncService* sync) override;
 
   // SigninErrorController::Observer implementation.
   void OnErrorChanged() override;
@@ -52,7 +59,9 @@ class AuthErrorObserver : public KeyedService,
   // in the Primary / Sync account and not a Secondary Account.
   void HandleAuthError(const GoogleServiceAuthError& auth_error);
 
-  Profile* const profile_;
+  const raw_ref<PrefService> local_state_;
+  const raw_ptr<Profile> profile_;
+  const raw_ptr<syncer::SyncService> sync_service_;
 };
 
 }  // namespace ash

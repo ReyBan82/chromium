@@ -6,6 +6,7 @@
 #define DEVICE_FIDO_FIDO_AUTHENTICATOR_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "base/component_export.h"
@@ -13,19 +14,17 @@
 #include "base/functional/callback_forward.h"
 #include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "device/fido/authenticator_get_assertion_response.h"
 #include "device/fido/authenticator_make_credential_response.h"
 #include "device/fido/authenticator_supported_options.h"
 #include "device/fido/bio/enrollment.h"
 #include "device/fido/credential_management.h"
 #include "device/fido/discoverable_credential_metadata.h"
-#include "device/fido/fido_constants.h"
 #include "device/fido/fido_request_handler_base.h"
-#include "device/fido/fido_transport_protocol.h"
 #include "device/fido/large_blob.h"
-#include "device/fido/make_credential_request_handler.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "device/fido/public/fido_constants.h"
+#include "device/fido/public/fido_transport_protocol.h"
+#include "device/fido/public/fido_types.h"
 
 namespace device {
 
@@ -34,11 +33,61 @@ struct CtapGetAssertionOptions;
 struct CtapMakeCredentialRequest;
 struct MakeCredentialOptions;
 
+namespace cablev2 {
+class FidoTunnelDevice;
+}
+
 namespace pin {
 struct RetriesResponse;
 struct EmptyResponse;
 class TokenResponse;
 }  // namespace pin
+
+enum class GetAssertionStatus {
+  kSuccess,
+  kAuthenticatorResponseInvalid,
+  kUserConsentButCredentialNotRecognized,
+  kUserConsentDenied,
+  kAuthenticatorRemovedDuringPINEntry,
+  kSoftPINBlock,
+  kHardPINBlock,
+  kAuthenticatorMissingResidentKeys,
+  // TODO(agl): kAuthenticatorMissingUserVerification can
+  // also be returned when the authenticator supports UV, but
+  // there's no UI support for collecting a PIN. This could
+  // be clearer.
+  kAuthenticatorMissingUserVerification,
+  kWinNotAllowedError,
+  kHybridTransportError,
+  kICloudKeychainNoCredentials,
+  kEnclaveError,
+  kEnclaveCancel,
+  kCrossDeviceFallback,
+};
+
+enum class MakeCredentialStatus {
+  kSuccess,
+  kAuthenticatorResponseInvalid,
+  kUserConsentButCredentialExcluded,
+  kUserConsentDenied,
+  kAuthenticatorRemovedDuringPINEntry,
+  kSoftPINBlock,
+  kHardPINBlock,
+  kAuthenticatorMissingResidentKeys,
+  // TODO(agl): kAuthenticatorMissingUserVerification can
+  // also be returned when the authenticator supports UV, but
+  // there's no UI support for collecting a PIN. This could
+  // be clearer.
+  kAuthenticatorMissingUserVerification,
+  kAuthenticatorMissingLargeBlob,
+  kNoCommonAlgorithms,
+  kStorageFull,
+  kWinInvalidStateError,
+  kWinNotAllowedError,
+  kHybridTransportError,
+  kEnclaveError,
+  kEnclaveCancel,
+};
 
 // FidoAuthenticator is an authenticator from the WebAuthn Authenticator model
 // (https://www.w3.org/TR/webauthn/#sctn-authenticator-model). It may be a
@@ -46,10 +95,10 @@ class TokenResponse;
 class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
  public:
   using MakeCredentialCallback = base::OnceCallback<void(
-      CtapDeviceResponseCode,
-      absl::optional<AuthenticatorMakeCredentialResponse>)>;
+      MakeCredentialStatus,
+      std::optional<AuthenticatorMakeCredentialResponse>)>;
   using GetAssertionCallback =
-      base::OnceCallback<void(CtapDeviceResponseCode,
+      base::OnceCallback<void(GetAssertionStatus,
                               std::vector<AuthenticatorGetAssertionResponse>)>;
   using GetPlatformCredentialInfoForRequestCallback = base::OnceCallback<void(
       std::vector<DiscoverableCredentialMetadata> credentials,
@@ -57,31 +106,31 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
 
   using GetRetriesCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<pin::RetriesResponse>)>;
+                              std::optional<pin::RetriesResponse>)>;
   using GetTokenCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<pin::TokenResponse>)>;
+                              std::optional<pin::TokenResponse>)>;
   using SetPINCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<pin::EmptyResponse>)>;
+                              std::optional<pin::EmptyResponse>)>;
   using ResetCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<pin::EmptyResponse>)>;
+                              std::optional<pin::EmptyResponse>)>;
   using GetCredentialsMetadataCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<CredentialsMetadataResponse>)>;
+                              std::optional<CredentialsMetadataResponse>)>;
   using EnumerateCredentialsCallback = base::OnceCallback<void(
       CtapDeviceResponseCode,
-      absl::optional<std::vector<AggregatedEnumerateCredentialsResponse>>)>;
+      std::optional<std::vector<AggregatedEnumerateCredentialsResponse>>)>;
   using DeleteCredentialCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<DeleteCredentialResponse>)>;
+                              std::optional<DeleteCredentialResponse>)>;
   using UpdateUserInformationCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<UpdateUserInformationResponse>)>;
+                              std::optional<UpdateUserInformationResponse>)>;
   using BioEnrollmentCallback =
       base::OnceCallback<void(CtapDeviceResponseCode,
-                              absl::optional<BioEnrollmentResponse>)>;
+                              std::optional<BioEnrollmentResponse>)>;
 
   FidoAuthenticator() = default;
 
@@ -107,7 +156,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   virtual void ExcludeAppIdCredentialsBeforeMakeCredential(
       CtapMakeCredentialRequest request,
       MakeCredentialOptions options,
-      base::OnceCallback<void(CtapDeviceResponseCode, absl::optional<bool>)>);
+      base::OnceCallback<void(CtapDeviceResponseCode, std::optional<bool>)>);
 
   // Makes a FIDO credential given |request| and |options|.
   // https://drafts.fidoalliance.org/fido-2/stable-links-to-latest/fido-client-to-authenticator-protocol.html#authenticatorMakeCredential
@@ -160,7 +209,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   // must be set if |permissions| includes MakeCredential or GetAssertion.
   virtual void GetPINToken(std::string pin,
                            std::vector<pin::Permissions> permissions,
-                           absl::optional<std::string> rp_id,
+                           std::optional<std::string> rp_id,
                            GetTokenCallback callback);
   // Returns |true| if the authenticator supports GetUvToken.
   virtual bool CanGetUvToken();
@@ -170,7 +219,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   // |rp_id| must be set if the PinUvAuthToken will be used for MakeCredential
   // or GetAssertion.
   virtual void GetUvToken(std::vector<pin::Permissions> permissions,
-                          absl::optional<std::string> rp_id,
+                          std::optional<std::string> rp_id,
                           GetTokenCallback callback);
   // Returns the minimum PIN length for this authenticator's currently set PIN.
   virtual uint32_t CurrentMinPINLength();
@@ -196,9 +245,12 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   // PINUVDisposition enumerates the possible options for obtaining user
   // verification when making a CTAP2 request.
   enum class PINUVDisposition {
+    // The authenticator doesn't support user verification, which is ok because
+    // the request doesn't require it.
+    kUVNotSupportedNorRequired,
     // No UV (neither clientPIN nor internal) is needed to make this
     // credential.
-    kNoUV,
+    kNoUVRequired,
     // A PIN/UV Auth Token should be used to make this credential. The token
     // needs to be obtained via clientPIN or internal UV, depending on which
     // modality the device supports. The modality may need to be set up first.
@@ -247,7 +299,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   virtual void GetSensorInfo(BioEnrollmentCallback callback);
   virtual void BioEnrollFingerprint(
       const pin::TokenResponse&,
-      absl::optional<std::vector<uint8_t>> template_id,
+      std::optional<std::vector<uint8_t>> template_id,
       BioEnrollmentCallback);
   virtual void BioEnrollCancel(BioEnrollmentCallback);
   virtual void BioEnrollEnumerate(const pin::TokenResponse&,
@@ -269,7 +321,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   // GetAlgorithms returns the list of supported COSEAlgorithmIdentifiers, or
   // |nullopt| if this is unknown and thus all requests should be tried in case
   // they work.
-  virtual absl::optional<base::span<const int32_t>> GetAlgorithms();
+  virtual std::optional<base::span<const int32_t>> GetAlgorithms();
 
   // DiscoverableCredentialStorageFull returns true if creation of a
   // discoverable credential is likely to fail because authenticator storage is
@@ -282,14 +334,12 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   virtual void Reset(ResetCallback callback);
   virtual void Cancel() = 0;
 
-  enum class Type {
-    kWinNative,  // i.e. webauthn.dll
-    kTouchID,    // the Chrome-native Touch ID integration on macOS
-    kChromeOS,   // the platform authenticator on Chrome OS
-    kOther,
-  };
   // GetType returns the type of the authenticator.
-  virtual Type GetType() const;
+  virtual AuthenticatorType GetType() const;
+
+  // Returns this object, as a tunnel device, or null if this object isn't of
+  // the correct type.
+  virtual cablev2::FidoTunnelDevice* GetTunnelDevice();
 
   // GetId returns a unique string representing this device. This string should
   // be distinct from all other devices concurrently discovered.
@@ -301,7 +351,7 @@ class COMPONENT_EXPORT(DEVICE_FIDO) FidoAuthenticator {
   virtual std::string GetDisplayName() const;
   virtual ProtocolVersion SupportedProtocol() const;
   virtual const AuthenticatorSupportedOptions& Options() const = 0;
-  virtual absl::optional<FidoTransportProtocol> AuthenticatorTransport()
+  virtual std::optional<FidoTransportProtocol> AuthenticatorTransport()
       const = 0;
   virtual base::WeakPtr<FidoAuthenticator> GetWeakPtr() = 0;
 };

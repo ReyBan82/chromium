@@ -7,6 +7,7 @@
 #include <mferror.h>
 
 #include "base/task/sequenced_task_runner.h"
+#include "media/audio/win/core_audio_util_win.h"
 #include "media/base/audio_decoder_config.h"
 #include "media/base/demuxer_stream.h"
 #include "media/base/media_log.h"
@@ -34,23 +35,61 @@ MediaFoundationSourceWrapper::~MediaFoundationSourceWrapper() {
   }
 }
 
+IFACEMETHODIMP_(ULONG) MediaFoundationSourceWrapper::Release() {
+  ULONG ref_count = InternalRelease();
+  if (ref_count == 0) {
+    if (!task_runner_->RunsTasksInCurrentSequence()) {
+      task_runner_->DeleteSoon(FROM_HERE, this);
+    } else {
+      delete this;
+    }
+  }
+  return ref_count;
+}
+
 HRESULT MediaFoundationSourceWrapper::RuntimeClassInitialize(
     MediaResource* media_resource,
     MediaLog* media_log,
-    scoped_refptr<base::SequencedTaskRunner> task_runner) {
+    scoped_refptr<base::SequencedTaskRunner> task_runner,
+    bool has_cdm) {
   DVLOG_FUNC(1);
-
-  if (media_resource->GetType() != MediaResource::Type::STREAM) {
-    DLOG(ERROR) << "MediaResource is not of Type STREAM";
-    return E_INVALIDARG;
-  }
-
   task_runner_ = task_runner;
+  has_cdm_ = has_cdm;
 
   auto demuxer_streams = media_resource->GetAllStreams();
 
+  bool has_video_stream = false;
+  for (DemuxerStream* demuxer_stream : demuxer_streams) {
+    if (demuxer_stream->type() == DemuxerStream::Type::VIDEO) {
+      has_video_stream = true;
+      break;
+    }
+  }
   int stream_id = 0;
   for (DemuxerStream* demuxer_stream : demuxer_streams) {
+    // TODO(crbug.com/40272014): MediaFoundationRenderer playback won't end
+    // after hitting the end of the video stream if no audio device. If any
+    // video stream is available but no audio device, do not create an instance
+    // of the MediaFoundationStreamWrapper so that the video playback can end
+    // properly at the end of the video stream. Remove this workaround once
+    // the permenent solution is implemented (i.e., a null sink for no audio
+    // device).
+    if (has_video_stream &&
+        demuxer_stream->type() == DemuxerStream::Type::AUDIO) {
+      auto default_audio_output_device_id =
+          media::CoreAudioUtil::GetDefaultOutputDeviceID();
+      DVLOG_FUNC(3) << "default_audio_output_device_id="
+                    << default_audio_output_device_id;
+
+      if (default_audio_output_device_id.empty()) {
+        DLOG(WARNING) << __func__
+                      << ": No default audio output device available! Not "
+                         "creating an instance of the "
+                         "MediaFoundationStreamWrapper for this audio stream.";
+        continue;
+      }
+    }
+
     ComPtr<MediaFoundationStreamWrapper> mf_stream;
     RETURN_IF_FAILED(MediaFoundationStreamWrapper::Create(
         stream_id++, this, demuxer_stream, media_log->Clone(), task_runner,
@@ -192,8 +231,10 @@ HRESULT MediaFoundationSourceWrapper::Start(
       continue;
     }
 
+    // TODO(crbug.com/460732308): Need to add unittest coverage to prevent
+    // regression in race condition where stream samples are processed in
+    // parallel just prior to stream start/seek event is sent.
     ComPtr<MediaFoundationStreamWrapper> stream = media_streams_[stream_id];
-    stream->SetFlushed(false);
     if (selected) {
       MediaEventType event_type = MENewStream;
       if (stream->IsSelected()) {
@@ -338,7 +379,7 @@ HRESULT MediaFoundationSourceWrapper::GetInputTrustAuthority(
     DWORD stream_id,
     REFIID riid,
     IUnknown** object_out) {
-  DVLOG_FUNC(1);
+  DVLOG_FUNC(1) << "stream_id=" << stream_id;
 
   if (state_ == State::kShutdown)
     return MF_E_SHUTDOWN;
@@ -352,9 +393,21 @@ HRESULT MediaFoundationSourceWrapper::GetInputTrustAuthority(
   }
 
   if (!media_streams_[stream_id]->IsEncrypted()) {
-    DVLOG_FUNC(1) << "Unprotected stream; stream_id=" << stream_id;
+    DVLOG_FUNC(1) << "Unprotected stream; stream_id=" << stream_id
+                  << " stream_type=" << media_streams_[stream_id]->StreamType();
 
-    return MF_E_NOT_PROTECTED;
+    if (media_streams_[stream_id]->StreamType() != DemuxerStream::VIDEO) {
+      DVLOG_FUNC(1) << "MF_E_NOT_PROTECTED";
+      return MF_E_NOT_PROTECTED;
+    }
+
+    // For video streams, intentionally do not return MF_E_NOT_PROTECTED here.
+    // During clear video playback (e.g., clear pre-roll ads), the initial
+    // stream config is unencrypted. However, if a CDM is attached, we forced
+    // MF_SD_PROTECTED to 1 in GenerateStreamDescriptor() for video streams to
+    // prepare for an eventual clear-to-encrypted transition. Because we marked
+    // it as protected, MF expects us to provide a trust authority. Returning
+    // MF_E_NOT_PROTECTED would cause topology resolution to fail.
   }
 
   // Use |nullptr| for content init_data and |0| for its size.
@@ -557,7 +610,7 @@ void MediaFoundationSourceWrapper::FlushStreams() {
   DCHECK(task_runner_->RunsTasksInCurrentSequence());
 
   for (auto stream : media_streams_) {
-    stream->SetFlushed(true);
+    stream->Flush();
   }
 }
 

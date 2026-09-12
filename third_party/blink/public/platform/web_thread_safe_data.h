@@ -31,13 +31,13 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEB_THREAD_SAFE_DATA_H_
 #define THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEB_THREAD_SAFE_DATA_H_
 
+#include "base/containers/checked_iterators.h"
+#include "base/containers/span.h"
 #include "third_party/blink/public/platform/web_common.h"
 #include "third_party/blink/public/platform/web_private_ptr.h"
 
 #if INSIDE_BLINK
 #include "base/memory/scoped_refptr.h"
-#else
-#include <string>
 #endif
 
 namespace blink {
@@ -48,8 +48,16 @@ class RawData;
 // object.  It is safe to pass a WebThreadSafeData across threads.
 class BLINK_PLATFORM_EXPORT WebThreadSafeData {
  public:
+  // Ideally, instead of defining this, `begin()`/`end()` below would return
+  // `auto` and just pass through the underlying storage types' iterators, so
+  // that they could decide what to do. However, since those types are defined
+  // outside /public/, that would be a layering violation. So be conservative
+  // and use `CheckedContiguousIterator` directyly, regardless of what the
+  // underlying type does.
+  using iterator = base::CheckedContiguousIterator<const uint8_t>;
+
   WebThreadSafeData() = default;
-  WebThreadSafeData(const char* data, size_t length);
+  explicit WebThreadSafeData(base::span<const uint8_t> data);
 
   ~WebThreadSafeData() { Reset(); }
 
@@ -57,7 +65,11 @@ class BLINK_PLATFORM_EXPORT WebThreadSafeData {
   void Reset();
 
   size_t size() const;
-  const char* Data() const;
+  const uint8_t* data() const;
+
+  // Iterators, required to satisfy the `std::ranges::contiguous_range` concept.
+  iterator begin() const;
+  iterator end() const;
 
   bool IsEmpty() const { return !size(); }
 
@@ -65,18 +77,12 @@ class BLINK_PLATFORM_EXPORT WebThreadSafeData {
   WebThreadSafeData& operator=(const WebThreadSafeData&);
 
 #if INSIDE_BLINK
-  WebThreadSafeData(scoped_refptr<RawData>);
-  WebThreadSafeData(scoped_refptr<RawData>&&);
+  explicit WebThreadSafeData(scoped_refptr<RawData>);
   WebThreadSafeData& operator=(scoped_refptr<RawData>);
-#else
-  operator std::string() const {
-    size_t len = size();
-    return len ? std::string(Data(), len) : std::string();
-  }
 #endif
 
  private:
-  WebPrivatePtr<RawData> private_;
+  WebPrivatePtrForRefCounted<RawData> private_;
 };
 
 }  // namespace blink

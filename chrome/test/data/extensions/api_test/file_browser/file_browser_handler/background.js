@@ -21,9 +21,9 @@
 
 // Initial content of handled files. The content is set in
 // external_filesystem_apitest.cc.
-var kInitialTestFileContent = 'This is some test content.';
+const INITIAL_TEST_FILE_CONTENT = 'This is some test content.';
 // Content written by write test.
-var kTextToWrite = ' Yay!';
+const TEXT_TO_WRITE = ' Yay!';
 
 /**
  * Asserts that |value| equals |expectedValue|. If the assert fails, current
@@ -47,18 +47,18 @@ function assertEqAndRunCallback(expectedValue, value, errorMessage, callback) {
  *     |expectSuccess| and |expectedContent|.
  */
 function readAndExpectContent(entry, expectSuccess, expectedContent, callback) {
-  var error = 'Reading file \'' + entry.fullPath + '\'.';
-  var reader = new FileReader();
+  const error = `Reading file '${entry.fullPath}'.`;
+  const reader = new FileReader();
 
   reader.onload = function() {
     chrome.test.assertTrue(expectSuccess, error);
     assertEqAndRunCallback(expectedContent, reader.result, error, callback);
   };
 
-  entry.file(reader.readAsText.bind(reader),
-             assertEqAndRunCallback.bind(null,
-                 false, expectSuccess, error, callback));
-};
+  entry.file(
+      reader.readAsText.bind(reader),
+      assertEqAndRunCallback.bind(null, false, expectSuccess, error, callback));
+}
 
 /**
  * Attempts to write |content| to the end of the |entry| and verifies that the
@@ -72,21 +72,23 @@ function readAndExpectContent(entry, expectSuccess, expectedContent, callback) {
  *     |expectSuccess|.
  */
 function write(entry, content, expectSuccess, callback) {
-  var error = 'Writing to: \'' + entry.fullPath + '\'.';
+  const error = `Writing to: '${entry.fullPath}'.`;
 
-  entry.createWriter(function(writer) {
-    writer.onerror = assertEqAndRunCallback.bind(null, expectSuccess, false,
-                                                 error, callback);
-    writer.onwrite = assertEqAndRunCallback.bind(null, expectSuccess, true,
-                                                 error, callback);
+  entry.createWriter(
+      function(writer) {
+        writer.onerror = assertEqAndRunCallback.bind(
+            null, expectSuccess, false, error, callback);
+        writer.onwrite = assertEqAndRunCallback.bind(
+            null, expectSuccess, true, error, callback);
 
-    writer.seek(kInitialTestFileContent.length);
-    var blob = new Blob([kTextToWrite], {type: 'text/plain'});
-    writer.write(blob);
-  },
-  assertEqAndRunCallback.bind(null, expectSuccess, false,
-      'Getting writer for: \'' + entry.fullPath + '\'.', callback));
-};
+        writer.seek(INITIAL_TEST_FILE_CONTENT.length);
+        const blob = new Blob([TEXT_TO_WRITE], {type: 'text/plain'});
+        writer.write(blob);
+      },
+      assertEqAndRunCallback.bind(
+          null, expectSuccess, false, `Getting writer for: '${entry.fullPath}'`,
+          callback));
+}
 
 /**
  * Runs read test.
@@ -95,8 +97,8 @@ function write(entry, content, expectSuccess, callback) {
  * @params {boolean} expectSuccess Whether the read should succeed.
  */
 function readTest(entry, expectSuccess) {
-  readAndExpectContent(entry, expectSuccess, kInitialTestFileContent,
-                       chrome.test.succeed)
+  readAndExpectContent(
+      entry, expectSuccess, INITIAL_TEST_FILE_CONTENT, chrome.test.succeed);
 }
 
 /**
@@ -107,11 +109,12 @@ function readTest(entry, expectSuccess) {
  * fail.
  */
 function getSiblingTest(entry) {
-  var error = 'Got file (\'' + entry.fullPath.concat('.foo') + '\') for which' +
-              'file access was not granted.';
-  entry.filesystem.root.getFile(entry.fullPath.concat('.foo'), {},
-                                function(entry) { chrome.test.fail(error); },
-                                chrome.test.succeed);
+  const error = `Got file ('${entry.fullPath.concat('.foo')}') for which` +
+      ' file access was not granted.';
+  entry.filesystem.root.getFile(
+      entry.fullPath.concat('.foo'), {}, function(entry) {
+        chrome.test.fail(error);
+      }, chrome.test.succeed);
 }
 
 /**
@@ -123,24 +126,25 @@ function getSiblingTest(entry) {
  * @param {boolean} expectSuccess Whether the test should succeed.
  */
 function writeTest(entry, expectSuccess) {
-  var verifyFileContent = function() {
-    var expectedContent = kInitialTestFileContent;
+  const verifyFileContent = function() {
+    let expectedContent = INITIAL_TEST_FILE_CONTENT;
     // The test file content should change only if the write operatino
     // succeeded.
-    if (expectSuccess)
-      expectedContent = expectedContent.concat(kTextToWrite);
+    if (expectSuccess) {
+      expectedContent = expectedContent.concat(TEXT_TO_WRITE);
+    }
 
     readAndExpectContent(entry, true, expectedContent, chrome.test.succeed);
   };
 
-  write(entry, kTextToWrite, expectSuccess, verifyFileContent);
+  write(entry, TEXT_TO_WRITE, expectSuccess, verifyFileContent);
 }
 
 /**
  * Object that follows the extensions's status before chrome.test.runTests is
  * called (i.e. while it's waiting for onExecute events).
  */
-var testPreRunStatus = {
+const testPreRunStatus = {
   // Whether the 'ReadOnly' handler has been executed.
   gotReadOnlyAction: false,
   // Whether the 'ReadWrite' handler has been executed.
@@ -155,7 +159,7 @@ var testPreRunStatus = {
  *
  * @type {Array<function()>}
  */
-var handlerTests = [];
+const handlerTests = [];
 
 /**
  * Called if an error is detected before chrome.test.runTests. It sends failure
@@ -173,43 +177,54 @@ function onError(message) {
  * received.
  */
 function onExecuteListener(id, details) {
-  if (testPreRunStatus.done)
+  if (testPreRunStatus.done) {
     return;
+  }
 
-  var fileEntries = details.entries;
-  if (!fileEntries || fileEntries.length != 1) {
+  const fileEntries = details.entries;
+  if (!fileEntries || fileEntries.length !== 1) {
     onError('Unexpected file entries size.');
     return;
   }
 
-  if ((id == 'ReadOnly' && testPreRunStatus.gotReadOnlyAction) ||
-      (id == 'ReadWrite' && testPreRunStatus.gotReadWriteAction)) {
-    onError('Action \'' + id + '\' executed more than once.');
+  if ((id === 'ReadOnly' && testPreRunStatus.gotReadOnlyAction) ||
+      (id === 'ReadWrite' && testPreRunStatus.gotReadWriteAction)) {
+    onError(`Action '${id}' executed more than once.`);
     return;
   }
 
-  if (id == 'ReadOnly') {
-    var entry = fileEntries[0];
+  if (id === 'ReadOnly') {
+    const entry = fileEntries[0];
 
     // Add tests for read-only handler.
-    handlerTests.push(function readReadOnly() { readTest(entry, true); });
-    handlerTests.push(
-        function getSiblingReadOnly() { getSiblingTest(entry); });
-    handlerTests.push(function writeReadOnly() { writeTest(entry, false); });
+    handlerTests.push(function readReadOnly() {
+      readTest(entry, true);
+    });
+    handlerTests.push(function getSiblingReadOnly() {
+      getSiblingTest(entry);
+    });
+    handlerTests.push(function writeReadOnly() {
+      writeTest(entry, false);
+    });
 
     testPreRunStatus.gotReadOnlyAction = true;
-  } else if (id == 'ReadWrite') {
-    var entry = fileEntries[0];
+  } else if (id === 'ReadWrite') {
+    const entry = fileEntries[0];
 
     // Add tests for read-write handler.
-    handlerTests.push(function readReadWrite() { readTest(entry, true); });
-    handlerTests.push(
-        function getSilblingReadWrite() { getSiblingTest(entry); });
-    handlerTests.push(function writeReadWrite() { writeTest(entry, true); });
+    handlerTests.push(function readReadWrite() {
+      readTest(entry, true);
+    });
+    handlerTests.push(function getSilblingReadWrite() {
+      getSiblingTest(entry);
+    });
+    handlerTests.push(function writeReadWrite() {
+      writeTest(entry, true);
+    });
 
     testPreRunStatus.gotReadWriteAction = true;
   } else {
-    onError('Unexpected action id: ' + id);
+    onError(`Unexpected action id: ${id}`);
     return;
   }
 

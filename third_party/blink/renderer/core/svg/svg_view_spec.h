@@ -20,9 +20,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_VIEW_SPEC_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_VIEW_SPEC_H_
 
+#include "third_party/blink/renderer/core/layout/natural_sizing_info.h"
 #include "third_party/blink/renderer/core/svg/svg_zoom_and_pan.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/heap/member.h"
+#include "ui/gfx/geometry/size_f.h"
 
 namespace blink {
 
@@ -35,14 +37,17 @@ class SVGViewSpec final : public GarbageCollected<SVGViewSpec> {
  public:
   static const SVGViewSpec* CreateFromFragment(const String&);
   static const SVGViewSpec* CreateForViewElement(const SVGViewElement&);
+  static const SVGViewSpec* CreateFromAspectRatio(
+      const SVGPreserveAspectRatio*);
+  static const SVGViewSpec* CreateFromSpatialFragment(
+      const String& fragment,
+      const NaturalSizingInfo& sizing_info);
 
-  SVGViewSpec();
-
-  const SVGRect* ViewBox() const { return view_box_; }
+  const SVGRect* ViewBox() const { return view_box_.Get(); }
   const SVGPreserveAspectRatio* PreserveAspectRatio() const {
-    return preserve_aspect_ratio_;
+    return preserve_aspect_ratio_.Get();
   }
-  const SVGTransformList* Transform() const { return transform_; }
+  const SVGTransformList* Transform() const { return transform_.Get(); }
   SVGZoomAndPanType ZoomAndPan() const { return zoom_and_pan_; }
 
   void Trace(Visitor*) const;
@@ -50,12 +55,12 @@ class SVGViewSpec final : public GarbageCollected<SVGViewSpec> {
  private:
   bool ParseViewSpec(const String&);
   template <typename CharType>
-  bool ParseViewSpecInternal(const CharType* ptr, const CharType* end);
+  bool ParseViewSpecInternal(base::span<const CharType> chars);
 
-  Member<SVGRect> view_box_;
-  Member<SVGPreserveAspectRatio> preserve_aspect_ratio_;
-  Member<SVGTransformList> transform_;
-  SVGZoomAndPanType zoom_and_pan_;
+  Member<const SVGRect> view_box_;
+  Member<const SVGPreserveAspectRatio> preserve_aspect_ratio_;
+  Member<const SVGTransformList> transform_;
+  SVGZoomAndPanType zoom_and_pan_ = kSVGZoomAndPanUnknown;
 };
 
 }  // namespace blink

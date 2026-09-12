@@ -7,16 +7,19 @@
 
 #include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
-#include "chrome/browser/ui/browser_list_observer.h"
+#include "base/scoped_observation.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 #include "components/keyed_service/core/keyed_service.h"
 
 class Profile;
+class BrowserWindowInterface;
+class GlobalBrowserCollection;
 
 // PinnedTabService is responsible for updating preferences with the set of
 // pinned tabs to restore at startup. PinnedTabService listens for the
 // appropriate set of notifications to know it should update preferences.
-class PinnedTabService : public BrowserListObserver,
+class PinnedTabService : public BrowserCollectionObserver,
                          public TabStripModelObserver,
                          public KeyedService {
  public:
@@ -29,18 +32,19 @@ class PinnedTabService : public BrowserListObserver,
   // Invoked with true when all browsers start closing.
   void OnClosingAllBrowsersChanged(bool closing);
 
-  // BrowserListObserver:
-  void OnBrowserAdded(Browser* browser) override;
-  void OnBrowserClosing(Browser* browser) override;
-  void OnBrowserRemoved(Browser* browser) override;
+  // BrowserCollectionObserver:
+  void OnBrowserCreated(BrowserWindowInterface* browser) override;
+  void OnBrowserClosed(BrowserWindowInterface* browser) override;
 
   // TabStripModelObserver:
   void OnTabStripModelChanged(
       TabStripModel* tab_strip_model,
       const TabStripModelChange& change,
       const TabStripSelectionChange& selection) override;
+  void OnTabPinnedStateChanged(tabs::TabInterface* tab, int index) override;
+  void WillCloseAllTabs(TabStripModel* tab_strip_model) override;
 
-  // Writes the pinned tabs for |profile_|, but only if a new tab or browser
+  // Writes the pinned tabs for `profile_`, but only if a new tab or browser
   // window has been added since the last time the method was called.
   void WritePinnedTabsIfNecessary();
 
@@ -50,6 +54,9 @@ class PinnedTabService : public BrowserListObserver,
   // user exits the application. This is set to false after writing pinned tabs,
   // and set back to true when new tabs or windows are added.
   bool need_to_write_pinned_tabs_ = true;
+
+  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
+      browser_collection_observation_{this};
 
   base::CallbackListSubscription closing_all_browsers_subscription_;
 };

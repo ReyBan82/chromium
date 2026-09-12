@@ -44,7 +44,10 @@ class AdsInterventionManagerTest : public testing::Test {
     ads_intervention_manager_->set_clock_for_testing(test_clock_.get());
   }
 
-  void TearDown() override { settings_map_->ShutdownOnUIThread(); }
+  void TearDown() override {
+    ads_intervention_manager_.reset();
+    settings_map_->ShutdownOnUIThread();
+  }
 
   base::SimpleTestClock* test_clock() { return test_clock_.get(); }
 
@@ -71,7 +74,7 @@ TEST_F(AdsInterventionManagerTest,
        NoIntervention_NoActiveInterventionReturned) {
   GURL url("https://example.test/");
 
-  absl::optional<AdsInterventionManager::LastAdsIntervention> ads_intervention =
+  std::optional<AdsInterventionManager::LastAdsIntervention> ads_intervention =
       ads_intervention_manager_->GetLastAdsIntervention(url);
   EXPECT_FALSE(ads_intervention.has_value());
 }
@@ -83,7 +86,7 @@ TEST_F(AdsInterventionManagerTest, SingleIntervention_TimeSinceMatchesClock) {
       url, mojom::AdsViolation::kMobileAdDensityByHeightAbove30);
   test_clock()->Advance(base::Hours(1));
 
-  absl::optional<AdsInterventionManager::LastAdsIntervention> ads_intervention =
+  std::optional<AdsInterventionManager::LastAdsIntervention> ads_intervention =
       ads_intervention_manager_->GetLastAdsIntervention(url);
   EXPECT_TRUE(ads_intervention.has_value());
   EXPECT_EQ(ads_intervention->ads_violation,

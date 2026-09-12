@@ -8,13 +8,17 @@
 
 #include "base/feature_list.h"
 #include "base/test/scoped_feature_list.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/net/secure_dns_config.h"
 #include "chrome/browser/net/stub_resolver_config_reader.h"
 #include "chrome/browser/net/system_network_context_manager.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_features.h"
+#include "chrome/common/pref_names.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "components/prefs/pref_service.h"
 #include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_navigation_observer.h"
@@ -29,7 +33,7 @@
 namespace {
 
 struct DohParameter {
-  DohParameter(std::string provider,
+  DohParameter(std::string_view provider,
                net::DnsOverHttpsServerConfig server,
                bool valid,
                bool provider_feature_enabled)
@@ -38,7 +42,7 @@ struct DohParameter {
         is_valid(valid),
         provider_feature_enabled(provider_feature_enabled) {}
 
-  std::string doh_provider;
+  std::string_view doh_provider;
   net::DnsOverHttpsServerConfig server_config;
   bool is_valid;
   bool provider_feature_enabled;
@@ -46,8 +50,9 @@ struct DohParameter {
 
 std::vector<DohParameter> GetDohServerTestCases() {
   std::vector<DohParameter> doh_test_cases;
-  for (const auto* entry : net::DohProviderEntry::GetList()) {
-    const bool feature_enabled = base::FeatureList::IsEnabled(entry->feature);
+  for (const net::DohProviderEntry* entry : net::DohProviderEntry::GetList()) {
+    const bool feature_enabled =
+        base::FeatureList::IsEnabled(entry->feature.get());
     doh_test_cases.emplace_back(entry->provider, entry->doh_server_config,
                                 /*valid=*/true, feature_enabled);
   }
@@ -69,30 +74,30 @@ class DohBrowserTest : public InProcessBrowserTest,
     SetAllowNetworkAccessToHostResolutions();
   }
 
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    scoped_feature_list_.InitWithFeaturesAndParameters(
-        {// {features::kNetworkServiceInProcess, {}}, // Turn on for debugging
-         {features::kDnsOverHttps,
-          {{"Fallback", "false"},
-           {"Templates",
-            net::DnsOverHttpsConfig({GetParam().server_config}).ToString()}}}},
-        {});
-  }
-
  protected:
-  base::test::ScopedFeatureList scoped_feature_list_;
   const GURL test_url_;
 };
 
 IN_PROC_BROWSER_TEST_P(DohBrowserTest, MANUAL_ExternalDohServers) {
   SCOPED_TRACE(testing::Message() << "Provider's base::Feature is enabled: "
                                   << GetParam().provider_feature_enabled);
+  PrefService* pref_service = g_browser_process->local_state();
+
+  std::string original_mode = pref_service->GetString(prefs::kDnsOverHttpsMode);
+  std::string original_template =
+      pref_service->GetString(prefs::kDnsOverHttpsTemplates);
+
+  pref_service->SetString(prefs::kDnsOverHttpsMode,
+                          SecureDnsConfig::kModeSecure);
+  pref_service->SetString(
+      prefs::kDnsOverHttpsTemplates,
+      net::DnsOverHttpsConfig({GetParam().server_config}).ToString());
 
   SecureDnsConfig secure_dns_config =
       SystemNetworkContextManager::GetStubResolverConfigReader()
           ->GetSecureDnsConfiguration(
-              false /* force_check_parental_controls_for_automatic_mode */);
-  // Ensure that DoH is enabled in secure mode
+              /*force_check_parental_controls_for_automatic_mode=*/false);
+  // Ensure that DoH is enabled in secure mode.
   EXPECT_EQ(net::SecureDnsMode::kSecure, secure_dns_config.mode());
 
   content::TestNavigationObserver nav_observer(
@@ -100,6 +105,9 @@ IN_PROC_BROWSER_TEST_P(DohBrowserTest, MANUAL_ExternalDohServers) {
   EXPECT_TRUE(ui_test_utils::NavigateToURL(browser(), test_url_));
   nav_observer.WaitForNavigationFinished();
   EXPECT_EQ(GetParam().is_valid, nav_observer.last_navigation_succeeded());
+
+  pref_service->SetString(prefs::kDnsOverHttpsMode, original_mode);
+  pref_service->SetString(prefs::kDnsOverHttpsTemplates, original_template);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -107,5 +115,5 @@ INSTANTIATE_TEST_SUITE_P(
     DohBrowserTest,
     ::testing::ValuesIn(GetDohServerTestCases()),
     [](const testing::TestParamInfo<DohBrowserTest::ParamType>& info) {
-      return info.param.doh_provider;
+      return std::string(info.param.doh_provider);
     });

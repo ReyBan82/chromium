@@ -8,9 +8,10 @@
 #define COMPONENTS_SAFE_BROWSING_CORE_COMMON_UTILS_H_
 
 #include "base/time/time.h"
+#include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
 #include "components/safe_browsing/core/common/proto/csd.pb.h"
 #include "components/safe_browsing/core/common/safebrowsing_constants.h"
-#include "services/network/public/mojom/fetch_api.mojom-shared.h"
+#include "services/network/public/cpp/simple_url_loader.h"
 #include "url/gurl.h"
 
 namespace policy {
@@ -24,6 +25,10 @@ class TimeDelta;
 namespace network {
 struct ResourceRequest;
 }  // namespace network
+
+namespace security_interstitials {
+struct UnsafeResource;
+}
 
 class PrefService;
 
@@ -56,11 +61,9 @@ base::TimeDelta GetDelayFromPref(PrefService* prefs, const char* pref_name);
 // (6) Its hostname is less than 4 characters.
 bool CanGetReputationOfUrl(const GURL& url);
 
-// Set |access_token| in |resource_request|. Remove cookies in the request
-// since we only need one identifier.
-void SetAccessTokenAndClearCookieInResourceRequest(
-    network::ResourceRequest* resource_request,
-    const std::string& access_token);
+// Set |access_token| in |resource_request|.
+void SetAccessToken(network::ResourceRequest* resource_request,
+                    const std::string& access_token);
 
 // Record HTTP response code when there's no error in fetching an HTTP
 // request, and the error code, when there is.
@@ -71,6 +74,28 @@ void SetAccessTokenAndClearCookieInResourceRequest(
 void RecordHttpResponseOrErrorCode(const char* metric_name,
                                    int net_error,
                                    int response_code);
+
+// If the network response for a request has errors, the corresponding service
+// usually increments the backoff counter. However, some errors are not related
+// to the network infrastructure and therefore don't require this. This function
+// returns whether an error is considered retriable and doesn't need to
+// increment backoff.
+bool ErrorIsRetriable(int net_error, int http_error);
+
+// We populate a parallel set of metrics to differentiate some threat sources.
+std::string_view GetExtraMetricsSuffix(
+    security_interstitials::UnsafeResource unsafe_resource);
+
+// We populate a parallel set of metrics to differentiate some threat subtypes.
+std::string_view GetExtraExtraMetricsSuffix(
+    security_interstitials::UnsafeResource unsafe_resource);
+
+// Return the threat_type string for unsafe site visits.
+std::string GetThreatTypeStringForInterstitial(
+    safe_browsing::SBThreatType threat_type);
+
+// Returns the tier value for the given ClientSideDetectionType.
+int GetClientSideDetectionTypeTier(ClientSideDetectionType type);
 
 }  // namespace safe_browsing
 

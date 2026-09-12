@@ -4,13 +4,20 @@
 
 #include "chrome/browser/ash/file_manager/volume_manager_factory.h"
 
+#include "ash/constants/ash_features.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/ash/drive/drive_integration_service.h"
+#include "chrome/browser/ash/drive/drive_integration_service_factory.h"
 #include "chrome/browser/ash/file_manager/volume_manager.h"
 #include "chrome/browser/ash/file_system_provider/service_factory.h"
+#include "chrome/browser/ash/policy/skyvault/local_files_migration_manager.h"
+#include "chrome/browser/ash/smb_client/smb_service_factory.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/incognito_helpers.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_types.h"
 #include "chromeos/ash/components/disks/disk_mount_manager.h"
 #include "chromeos/dbus/power/power_manager_client.h"
 #include "components/storage_monitor/storage_monitor.h"
@@ -23,7 +30,8 @@ VolumeManager* VolumeManagerFactory::Get(content::BrowserContext* context) {
 }
 
 VolumeManagerFactory* VolumeManagerFactory::GetInstance() {
-  return base::Singleton<VolumeManagerFactory>::get();
+  static base::NoDestructor<VolumeManagerFactory> instance;
+  return instance.get();
 }
 
 bool VolumeManagerFactory::ServiceIsCreatedWithBrowserContext() const {
@@ -34,11 +42,20 @@ bool VolumeManagerFactory::ServiceIsNULLWhileTesting() const {
   return true;
 }
 
-KeyedService* VolumeManagerFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+VolumeManagerFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
+  // Ignore signin and lock screen apps profile.
+  if (!ash::IsUserBrowserContext(context)) {
+    return nullptr;
+  }
+
   Profile* const profile = Profile::FromBrowserContext(context);
-  VolumeManager* instance = new VolumeManager(
-      profile, drive::DriveIntegrationServiceFactory::GetForProfile(profile),
+  // NOTE: Allow g_browser_process here as this class is initialized lazily with
+  // base::NoDestructor.
+  std::unique_ptr<VolumeManager> instance = std::make_unique<VolumeManager>(
+      g_browser_process->local_state(), profile,
+      drive::DriveIntegrationServiceFactory::GetForProfile(profile),
       chromeos::PowerManagerClient::Get(),
       ash::disks::DiskMountManager::GetInstance(),
       ash::file_system_provider::ServiceFactory::Get(context),
@@ -50,10 +67,20 @@ KeyedService* VolumeManagerFactory::BuildServiceInstanceFor(
 VolumeManagerFactory::VolumeManagerFactory()
     : ProfileKeyedServiceFactory(
           "VolumeManagerFactory",
-          // Explicitly allow this manager in guest login mode.
-          ProfileSelections::BuildForRegularAndIncognito()) {
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kRedirectedToOriginal)
+              .WithGuest(ProfileSelection::kOwnInstance)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kRedirectedToOriginal)
+              .Build()) {
   DependsOn(drive::DriveIntegrationServiceFactory::GetInstance());
   DependsOn(ash::file_system_provider::ServiceFactory::GetInstance());
+  DependsOn(ash::smb_client::SmbServiceFactory::GetInstance());
+  if (base::FeatureList::IsEnabled(ash::features::kSkyVaultV2)) {
+    DependsOn(policy::local_user_files::LocalFilesMigrationManagerFactory::
+                  GetInstance());
+  }
 }
 
 VolumeManagerFactory::~VolumeManagerFactory() = default;

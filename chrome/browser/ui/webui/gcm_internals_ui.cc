@@ -19,11 +19,17 @@
 #include "components/gcm_driver/gcm_internals_constants.h"
 #include "components/gcm_driver/gcm_internals_helper.h"
 #include "components/gcm_driver/gcm_profile_service.h"
-#include "components/grit/dev_ui_components_resources.h"
+#include "components/grit/gcm_internals_resources.h"
+#include "components/grit/gcm_internals_resources_map.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/browser/web_ui_controller.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "content/public/browser/web_ui_message_handler.h"
+#include "ui/webui/webui_util.h"
+
+GCMInternalsUIConfig::GCMInternalsUIConfig()
+    : DefaultWebUIConfig(content::kChromeUIScheme,
+                         chrome::kChromeUIGCMInternalsHost) {}
 
 namespace {
 
@@ -51,10 +57,10 @@ class GcmInternalsUIMessageHandler : public content::WebUIMessageHandler {
                      const gcm::GCMClient::GCMStatistics* stats);
 
   // Request all of the GCM related infos through gcm profile service.
-  void RequestAllInfo(const base::Value::List& args);
+  void RequestAllInfo(const base::ListValue& args);
 
   // Enables/disables GCM activity recording through gcm profile service.
-  void SetRecording(const base::Value::List& args);
+  void SetRecording(const base::ListValue& args);
 
   // Callback function of the request for all gcm related infos.
   void RequestGCMStatisticsFinished(const gcm::GCMClient::GCMStatistics& args);
@@ -63,25 +69,23 @@ class GcmInternalsUIMessageHandler : public content::WebUIMessageHandler {
   base::WeakPtrFactory<GcmInternalsUIMessageHandler> weak_ptr_factory_{this};
 };
 
-GcmInternalsUIMessageHandler::GcmInternalsUIMessageHandler() {}
+GcmInternalsUIMessageHandler::GcmInternalsUIMessageHandler() = default;
 
-GcmInternalsUIMessageHandler::~GcmInternalsUIMessageHandler() {}
+GcmInternalsUIMessageHandler::~GcmInternalsUIMessageHandler() = default;
 
 void GcmInternalsUIMessageHandler::ReturnResults(
     Profile* profile,
     gcm::GCMProfileService* profile_service,
     const gcm::GCMClient::GCMStatistics* stats) {
-  base::Value::Dict results = gcm_driver::SetGCMInternalsInfo(
+  base::DictValue results = gcm_driver::SetGCMInternalsInfo(
       stats, profile_service, profile->GetPrefs());
   FireWebUIListener(gcm_driver::kSetGcmInternalsInfo, results);
 }
 
-void GcmInternalsUIMessageHandler::RequestAllInfo(
-    const base::Value::List& list) {
+void GcmInternalsUIMessageHandler::RequestAllInfo(const base::ListValue& list) {
   AllowJavascript();
   if (list.size() != 1) {
     NOTREACHED();
-    return;
   }
   const bool clear_logs = list[0].GetBool();
 
@@ -90,7 +94,7 @@ void GcmInternalsUIMessageHandler::RequestAllInfo(
 
   Profile* profile = Profile::FromWebUI(web_ui());
   gcm::GCMProfileService* profile_service =
-    gcm::GCMProfileServiceFactory::GetForProfile(profile);
+      gcm::GCMProfileServiceFactory::GetForProfile(profile);
 
   if (!profile_service || !profile_service->driver()) {
     ReturnResults(profile, nullptr, nullptr);
@@ -103,10 +107,9 @@ void GcmInternalsUIMessageHandler::RequestAllInfo(
   }
 }
 
-void GcmInternalsUIMessageHandler::SetRecording(const base::Value::List& list) {
+void GcmInternalsUIMessageHandler::SetRecording(const base::ListValue& list) {
   if (list.size() != 1) {
     NOTREACHED();
-    return;
   }
   const bool recording = list[0].GetBool();
 
@@ -168,16 +171,11 @@ GCMInternalsUI::GCMInternalsUI(content::WebUI* web_ui)
       content::WebUIDataSource::CreateAndAdd(Profile::FromWebUI(web_ui),
                                              chrome::kChromeUIGCMInternalsHost);
 
-  html_source->UseStringsJs();
-
   // Add required resources.
-  html_source->AddResourcePath(gcm_driver::kGcmInternalsCSS,
-                               IDR_GCM_DRIVER_GCM_INTERNALS_CSS);
-  html_source->AddResourcePath(gcm_driver::kGcmInternalsJS,
-                               IDR_GCM_DRIVER_GCM_INTERNALS_JS);
-  html_source->SetDefaultResource(IDR_GCM_DRIVER_GCM_INTERNALS_HTML);
+  webui::SetupWebUIDataSource(html_source, kGcmInternalsResources,
+                              IDR_GCM_INTERNALS_GCM_INTERNALS_HTML);
 
   web_ui->AddMessageHandler(std::make_unique<GcmInternalsUIMessageHandler>());
 }
 
-GCMInternalsUI::~GCMInternalsUI() {}
+GCMInternalsUI::~GCMInternalsUI() = default;

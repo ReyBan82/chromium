@@ -1,41 +1,20 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 #ifndef GOOGLE_PROTOBUF_PYTHON_CPP_DESCRIPTOR_POOL_H__
 #define GOOGLE_PROTOBUF_PYTHON_CPP_DESCRIPTOR_POOL_H__
 
+#include <memory>
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
-#include <unordered_map>
-#include <google/protobuf/descriptor.h>
+#include "absl/container/flat_hash_map.h"
+#include "google/protobuf/descriptor.h"
+#include "google/protobuf/pyext/free_threading_mutex.h"
 
 namespace google {
 namespace protobuf {
@@ -55,16 +34,14 @@ struct CMessageClass;
 // "Methods" that interacts with this DescriptorPool are in the cdescriptor_pool
 // namespace.
 typedef struct PyDescriptorPool {
-  PyObject_HEAD;
+  // clang-format off
+  PyObject_HEAD
 
   // The C++ pool containing Descriptors.
-  const DescriptorPool* pool;
-
-  // True if we should free the pointer above.
-  bool is_owned;
+  std::shared_ptr<const DescriptorPool>* pool;
+  // clang-format on
 
   // True if this pool accepts new proto definitions.
-  // In this case it is allowed to const_cast<DescriptorPool*>(pool).
   bool is_mutable;
 
 
@@ -77,20 +54,19 @@ typedef struct PyDescriptorPool {
   const DescriptorPool* underlay;
 
   // The C++ descriptor database used to fetch unknown protos. Can be NULL.
-  // This pointer is owned.
-  const DescriptorDatabase* database;
+  std::shared_ptr<const DescriptorDatabase>* database;
 
   // The preferred MessageFactory to be used by descriptors.
-  // TODO(amauryfa): Don't create the Factory from the DescriptorPool, but
-  // use the one passed while creating message classes. And remove this member.
   PyMessageFactory* py_message_factory;
 
   // Cache the options for any kind of descriptor.
-  // Descriptor pointers are owned by the DescriptorPool above.
-  // Python objects are owned by the map.
-  std::unordered_map<const void*, PyObject*>* descriptor_options;
-} PyDescriptorPool;
+  absl::flat_hash_map<const void*, PyObject*>* descriptor_options;
+  // Similar cache for features.
+  absl::flat_hash_map<const void*, PyObject*>* descriptor_features;
 
+  // Mutex protecting the caching maps above.
+  FreeThreadingMutex* cache_mutex;
+} PyDescriptorPool;
 
 extern PyTypeObject PyDescriptorPool_Type;
 
@@ -138,6 +114,22 @@ PyDescriptorPool* GetDescriptorPool_FromPool(const DescriptorPool* pool);
 // Wraps a C++ descriptor pool in a Python object, creates it if necessary.
 // Returns a new reference.
 PyObject* PyDescriptorPool_FromPool(const DescriptorPool* pool);
+
+// Wraps a C++ descriptor pool (held by shared_ptr) in a Python object.
+// The Python object extends the lifetime of the C++ pool and optional database.
+PyObject* PyDescriptorPool_FromSharedPool(
+    std::shared_ptr<const DescriptorPool> pool,
+    std::shared_ptr<const DescriptorDatabase> database = nullptr);
+
+// Takes ownership of a C++ DescriptorPool and returns a new Python
+// DescriptorPool that wraps it.
+// If set, the DescriptorDatabase is also managed by the returned object.
+PyObject* PyDescriptorPool_FromPool(
+    std::unique_ptr<const google::protobuf::DescriptorPool> pool,
+    std::unique_ptr<const google::protobuf::DescriptorDatabase> database);
+
+// Returns the C++ descriptor pool wrapped by a Python object.
+const DescriptorPool* PyDescriptorPool_AsPool(PyObject* pool);
 
 // Initialize objects used by this module.
 bool InitDescriptorPool();

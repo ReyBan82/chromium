@@ -7,27 +7,16 @@
 
 namespace blink {
 
-/*
- The value must be multiple of 360deg.
- Reference:  https://drafts.csswg.org/css-values/#numeric-types
-
- This constant is the biggest multiple of 360 that a double can accurately
- represent, and after converting to rads, the sin() value is close enough to 0.
-
- The details: https://bit.ly/349gXjq
-*/
-
-constexpr static double kApproxDoubleInfinityAngle = 2867080569122160;
-
 double CSSValueClampingUtils::ClampDouble(double value) {
-  if (std::isnan(value)) {
-    value = std::numeric_limits<double>::max();
-  }
-  return ClampTo<double>(value);
+  return ClampTo<double>(CensorNaNToZero(value));
 }
 
 double CSSValueClampingUtils::ClampLength(double value) {
   return ClampDouble(value);
+}
+
+float CSSValueClampingUtils::ClampLength(float value) {
+  return ClampTo<float>(CensorNaNToZero(value));
 }
 
 double CSSValueClampingUtils::ClampTime(double value) {
@@ -35,18 +24,17 @@ double CSSValueClampingUtils::ClampTime(double value) {
 }
 
 double CSSValueClampingUtils::ClampAngle(double value) {
-  if (std::isnan(value)) {
-    value = kApproxDoubleInfinityAngle;
-  }
-  return ClampTo<double>(value, -kApproxDoubleInfinityAngle,
+  // The value must be multiple of 360deg.
+  // Reference:  https://drafts.csswg.org/css-values/#numeric-types
+  //
+  // This constant is the biggest multiple of 360 that a double can accurately
+  // represent, and after converting to rads, the sin() value is close enough
+  // to 0.
+  //
+  // The details: https://bit.ly/349gXjq
+  static constexpr double kApproxDoubleInfinityAngle = 2867080569122160;
+  return ClampTo<double>(CensorNaNToZero(value), -kApproxDoubleInfinityAngle,
                          kApproxDoubleInfinityAngle);
-}
-
-float CSSValueClampingUtils::ClampLength(float value) {
-  if (std::isnan(value)) {
-    value = std::numeric_limits<float>::max();
-  }
-  return ClampTo<float>(value);
 }
 
 }  // namespace blink

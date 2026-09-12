@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ui/views/interaction/interaction_test_util_mouse.h"
+#include "ui/views/interaction/mouse/interaction_test_util_mouse.h"
 
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/bind.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_element_identifiers.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/interaction/browser_elements.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/toolbar/app_menu_model.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/tabs/tab_strip.h"
@@ -22,7 +23,9 @@
 #include "ui/views/interaction/element_tracker_views.h"
 #include "ui/views/view_utils.h"
 
-class InteractionTestUtilMouseUiTest : public InProcessBrowserTest {
+class InteractionTestUtilMouseUiTest
+    : public InProcessBrowserTest,
+      public testing::WithParamInterface<bool> {
  public:
   InteractionTestUtilMouseUiTest() = default;
   ~InteractionTestUtilMouseUiTest() override = default;
@@ -31,8 +34,8 @@ class InteractionTestUtilMouseUiTest : public InProcessBrowserTest {
 
   void SetUpOnMainThread() override {
     InProcessBrowserTest::SetUpOnMainThread();
-    mouse_ = std::make_unique<Mouse>(
-        BrowserView::GetBrowserViewForBrowser(browser())->GetWidget());
+    mouse_ = std::make_unique<Mouse>(browser()->GetWindow()->GetNativeWindow());
+    CHECK(mouse_->SetTouchMode(GetParam()));
   }
 
   void TearDownOnMainThread() override {
@@ -44,18 +47,28 @@ class InteractionTestUtilMouseUiTest : public InProcessBrowserTest {
   std::unique_ptr<Mouse> mouse_;
 };
 
-IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, MoveAndClick) {
+#if BUILDFLAG(IS_CHROMEOS)
+INSTANTIATE_TEST_SUITE_P(TouchMode,
+                         InteractionTestUtilMouseUiTest,
+                         testing::Bool());
+#else
+INSTANTIATE_TEST_SUITE_P(TouchMode,
+                         InteractionTestUtilMouseUiTest,
+                         testing::Values(false));
+#endif
+
+IN_PROC_BROWSER_TEST_P(InteractionTestUtilMouseUiTest, MoveAndClick) {
   UNCALLED_MOCK_CALLBACK(ui::InteractionSequence::AbortedCallback, aborted);
   UNCALLED_MOCK_CALLBACK(ui::InteractionSequence::CompletedCallback, completed);
 
   auto sequence =
       ui::InteractionSequence::Builder()
-          .SetContext(browser()->window()->GetElementContext())
+          .SetContext(BrowserElements::From(browser())->GetContext())
           .SetAbortedCallback(aborted.Get())
           .SetCompletedCallback(completed.Get())
           // Find the app menu button.
           .AddStep(ui::InteractionSequence::StepBuilder()
-                       .SetElementID(kAppMenuButtonElementId)
+                       .SetElementID(kToolbarAppMenuButtonElementId)
                        .SetStartCallback(base::BindLambdaForTesting(
                            [this](ui::InteractionSequence* seq,
                                   ui::TrackedElement* el) {
@@ -68,7 +81,8 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, MoveAndClick) {
                              // button
                              // - click the left mouse button
                              if (!mouse_->PerformGestures(
-                                     view->GetWidget()->GetNativeWindow(),
+                                     Mouse::GestureParams(
+                                         view->GetWidget()->GetNativeWindow()),
                                      Mouse::MoveTo(pos),
                                      Mouse::Click(ui_controls::LEFT))) {
                                seq->FailForTesting();
@@ -83,7 +97,7 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, MoveAndClick) {
   EXPECT_CALL_IN_SCOPE(completed, Run, sequence->RunSynchronouslyForTesting());
 }
 
-IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, GestureAborted) {
+IN_PROC_BROWSER_TEST_P(InteractionTestUtilMouseUiTest, GestureAborted) {
   UNCALLED_MOCK_CALLBACK(ui::InteractionSequence::AbortedCallback, aborted);
   UNCALLED_MOCK_CALLBACK(ui::InteractionSequence::CompletedCallback, completed);
 
@@ -92,12 +106,12 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, GestureAborted) {
 
   auto sequence =
       ui::InteractionSequence::Builder()
-          .SetContext(browser()->window()->GetElementContext())
+          .SetContext(BrowserElements::From(browser())->GetContext())
           .SetAbortedCallback(aborted.Get())
           .SetCompletedCallback(completed.Get())
           // Find the app menu button.
           .AddStep(ui::InteractionSequence::StepBuilder()
-                       .SetElementID(kAppMenuButtonElementId)
+                       .SetElementID(kToolbarAppMenuButtonElementId)
                        .SetStartCallback(base::BindLambdaForTesting(
                            [this, &cancel](ui::TrackedElement* el) {
                              auto* const view =
@@ -113,7 +127,8 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, GestureAborted) {
                              // button
                              // - click the left mouse button
                              EXPECT_FALSE(mouse_->PerformGestures(
-                                 view->GetWidget()->GetNativeWindow(),
+                                 Mouse::GestureParams(
+                                     view->GetWidget()->GetNativeWindow()),
                                  Mouse::MoveTo(pos),
                                  Mouse::Click(ui_controls::LEFT)));
                            })))
@@ -122,18 +137,18 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, GestureAborted) {
   EXPECT_CALL_IN_SCOPE(completed, Run, sequence->RunSynchronouslyForTesting());
 }
 
-IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, Drag) {
+IN_PROC_BROWSER_TEST_P(InteractionTestUtilMouseUiTest, Drag) {
   UNCALLED_MOCK_CALLBACK(ui::InteractionSequence::AbortedCallback, aborted);
   UNCALLED_MOCK_CALLBACK(ui::InteractionSequence::CompletedCallback, completed);
 
   const GURL first_url =
-      browser()->tab_strip_model()->GetWebContentsAt(0)->GetURL();
+      browser()->GetTabStripModel()->GetWebContentsAt(0)->GetURL();
   const GURL kSecondUrl("chrome://version");
   ASSERT_TRUE(AddTabAtIndex(-1, kSecondUrl, ui::PAGE_TRANSITION_LINK));
 
   auto sequence =
       ui::InteractionSequence::Builder()
-          .SetContext(browser()->window()->GetElementContext())
+          .SetContext(BrowserElements::From(browser())->GetContext())
           .SetAbortedCallback(aborted.Get())
           .SetCompletedCallback(completed.Get())
           // Find the tab strip.
@@ -147,7 +162,7 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, Drag) {
                             el->AsA<views::TrackedElementViews>()->view());
                         // The second tab might still be animating in, which
                         // could cause weirdness if we try to drag.
-                        tab_strip->StopAnimating(/* layout =*/true);
+                        tab_strip->StopAnimating();
 
                         const gfx::Point start = tab_strip->tab_at(0)
                                                      ->GetBoundsInScreen()
@@ -157,7 +172,8 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, Drag) {
                                                    .CenterPoint();
                         // Drag the first tab into the second spot.
                         if (!mouse_->PerformGestures(
-                                tab_strip->GetWidget()->GetNativeWindow(),
+                                Mouse::GestureParams(
+                                    tab_strip->GetWidget()->GetNativeWindow()),
                                 Mouse::MoveTo(start),
                                 Mouse::DragAndRelease(end))) {
                           seq->FailForTesting();
@@ -174,14 +190,14 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilMouseUiTest, Drag) {
                         // tab was moved.
                         auto* const tab_strip = views::AsViewClass<TabStrip>(
                             el->AsA<views::TrackedElementViews>()->view());
-                        tab_strip->StopAnimating(/* layout =*/true);
+                        tab_strip->StopAnimating();
 
                         EXPECT_EQ(kSecondUrl, browser()
-                                                  ->tab_strip_model()
+                                                  ->GetTabStripModel()
                                                   ->GetWebContentsAt(0)
                                                   ->GetURL());
                         EXPECT_EQ(first_url, browser()
-                                                 ->tab_strip_model()
+                                                 ->GetTabStripModel()
                                                  ->GetWebContentsAt(1)
                                                  ->GetURL());
                         // Clean up any drag gestures that have not yet properly

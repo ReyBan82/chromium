@@ -1,13 +1,19 @@
 // Copyright 2021 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 #ifndef CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_DIALOG_UI_FOR_TEST_H_
 #define CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_DIALOG_UI_FOR_TEST_H_
 
 #include <string>
+
 #include "base/functional/callback.h"
 
-class Browser;
+namespace global_media_controls {
+class MediaItemManager;
+}  // namespace global_media_controls
+
+class BrowserWindowInterface;
 class MediaToolbarButtonView;
 
 // A helper object for interacting with the Global Media Control dialog inside
@@ -17,7 +23,8 @@ class MediaDialogUiForTest {
   // Ideally this constructor would just take a Browser* as a parameter, but in
   // subclasses of InProcessBrowserTest, the browser isn't available until
   // SetUp() is called, and the tests are executed before SetUp() returns.
-  explicit MediaDialogUiForTest(base::RepeatingCallback<Browser*()> callback);
+  explicit MediaDialogUiForTest(
+      base::RepeatingCallback<BrowserWindowInterface*()> callback);
 
   MediaDialogUiForTest(const MediaDialogUiForTest&) = delete;
   MediaDialogUiForTest& operator=(const MediaDialogUiForTest&) = delete;
@@ -57,7 +64,9 @@ class MediaDialogUiForTest {
   void WaitForPictureInPictureButtonVisibility(bool visible);
 
  private:
-  base::RepeatingCallback<Browser*()> browser_callback_;
+  global_media_controls::MediaItemManager* GetItemManager() const;
+
+  base::RepeatingCallback<BrowserWindowInterface*()> browser_callback_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_GLOBAL_MEDIA_CONTROLS_MEDIA_DIALOG_UI_FOR_TEST_H_

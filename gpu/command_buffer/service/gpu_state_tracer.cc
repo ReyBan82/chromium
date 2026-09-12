@@ -4,11 +4,15 @@
 
 #include "gpu/command_buffer/service/gpu_state_tracer.h"
 
+#include <string_view>
+#include <vector>
+
 #include "base/base64.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/trace_event/trace_event.h"
 #include "context_state.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 #include "ui/gfx/codec/png_codec.h"
 #include "ui/gl/gl_bindings.h"
 
@@ -80,21 +84,14 @@ bool Snapshot::SaveScreenshot(const gfx::Size& size) {
 void Snapshot::AppendAsTraceFormat(std::string* out) const {
   *out += "{";
   if (screenshot_pixels_.size()) {
-    std::vector<unsigned char> png_data;
-    int bytes_per_row = screenshot_size_.width() * kBytesPerPixel;
-    bool png_ok = gfx::PNGCodec::Encode(&screenshot_pixels_[0],
-                                        gfx::PNGCodec::FORMAT_RGBA,
-                                        screenshot_size_,
-                                        bytes_per_row,
-                                        false,
-                                        std::vector<gfx::PNGCodec::Comment>(),
-                                        &png_data);
-    DCHECK(png_ok);
+    std::optional<std::vector<uint8_t>> png_data = gfx::PNGCodec::Encode(
+        screenshot_pixels_.data(), gfx::PNGCodec::FORMAT_RGBA, screenshot_size_,
+        /*row_byte_width=*/screenshot_size_.width() * kBytesPerPixel,
+        /*discard_transparency=*/false, std::vector<gfx::PNGCodec::Comment>());
 
-    base::StringPiece base64_input(reinterpret_cast<const char*>(&png_data[0]),
-                                   png_data.size());
-    std::string base64_output;
-    base::Base64Encode(base64_input, &base64_output);
+    DCHECK(png_data);
+    std::string base64_output =
+        base::Base64Encode(png_data.value_or(std::vector<uint8_t>()));
 
     *out += "\"screenshot\":\"" + base64_output + "\"";
   }
@@ -107,13 +104,15 @@ std::unique_ptr<GPUStateTracer> GPUStateTracer::Create(
 }
 
 GPUStateTracer::GPUStateTracer(const ContextState* state) : state_(state) {
-  TRACE_EVENT_OBJECT_CREATED_WITH_ID(
-      TRACE_DISABLED_BY_DEFAULT("gpu.debug"), "gpu::State", state_);
+  TRACE_EVENT_INSTANT(TRACE_DISABLED_BY_DEFAULT("gpu.debug"),
+                      "gpu::State:created",
+                      perfetto::Flow::FromPointer(state_, "GPUStateTracer"));
 }
 
 GPUStateTracer::~GPUStateTracer() {
-  TRACE_EVENT_OBJECT_DELETED_WITH_ID(
-      TRACE_DISABLED_BY_DEFAULT("gpu.debug"), "gpu::State", state_);
+  TRACE_EVENT_INSTANT(
+      TRACE_DISABLED_BY_DEFAULT("gpu.debug"), "gpu::State:deleted",
+      perfetto::TerminatingFlow::FromPointer(state_, "GPUStateTracer"));
 }
 
 void GPUStateTracer::TakeSnapshotWithCurrentFramebuffer(const gfx::Size& size) {
@@ -126,9 +125,10 @@ void GPUStateTracer::TakeSnapshotWithCurrentFramebuffer(const gfx::Size& size) {
   if (!snapshot->SaveScreenshot(size))
     return;
 
-  TRACE_EVENT_OBJECT_SNAPSHOT_WITH_ID(TRACE_DISABLED_BY_DEFAULT("gpu.debug"),
-                                      "gpu::State", state_,
-                                      std::move(snapshot));
+  TRACE_EVENT_INSTANT(TRACE_DISABLED_BY_DEFAULT("gpu.debug"),
+                      "gpu::State:screenshot",
+                      perfetto::Flow::FromPointer(state_, "GPUStateTracer"),
+                      "snapshot", std::move(snapshot));
 }
 
 }  // namespace gles2

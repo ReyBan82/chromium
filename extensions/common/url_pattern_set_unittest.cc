@@ -6,9 +6,9 @@
 
 #include <stddef.h>
 
+#include <algorithm>
 #include <sstream>
 
-#include "base/containers/contains.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
@@ -353,12 +353,13 @@ TEST(URLPatternSetTest, ToValueAndPopulate) {
   patterns.push_back("http://www.google.com/*");
   patterns.push_back("http://www.yahoo.com/*");
 
-  for (size_t i = 0; i < patterns.size(); ++i)
-    AddPattern(&set1, patterns[i]);
+  for (const auto& pattern : patterns) {
+    AddPattern(&set1, pattern);
+  }
 
   std::string error;
   bool allow_file_access = false;
-  base::Value::List value = set1.ToValue();
+  base::ListValue value = set1.ToValue();
   set2.Populate(value, URLPattern::SCHEME_ALL, allow_file_access, &error);
   EXPECT_EQ(set1, set2);
 
@@ -408,8 +409,8 @@ TEST(URLPatternSetTest, ToStringVector) {
 
   EXPECT_EQ(2UL, string_vector.size());
 
-  EXPECT_TRUE(base::Contains(string_vector, "https://google.com/"));
-  EXPECT_TRUE(base::Contains(string_vector, "https://yahoo.com/"));
+  EXPECT_TRUE(std::ranges::contains(string_vector, "https://google.com/"));
+  EXPECT_TRUE(std::ranges::contains(string_vector, "https://yahoo.com/"));
 }
 
 TEST(URLPatternSetTest, MatchesHost) {
@@ -452,6 +453,36 @@ TEST(URLPatternSetTest, MatchesHost) {
 
   AddPattern(&set, "<all_urls>");
   EXPECT_TRUE(set.MatchesHost(GURL("http://anything.ca"), true));
+}
+
+TEST(URLPatternSetTest, CaseInsensitiveMatchesURL) {
+  URLPatternSet set;
+  AddPattern(&set, "chrome-extension://*/path.html");
+
+  GURL lowercase_url(
+      "chrome-extension://abcdefghijklmnoabcdefghijklmno/path.html");
+  GURL uppercase_url(
+      "chrome-extension://abcdefghijklmnoabcdefghijklmno/Path.html");
+
+  EXPECT_TRUE(set.MatchesURL(lowercase_url));
+  EXPECT_FALSE(set.MatchesURL(uppercase_url));
+
+  EXPECT_TRUE(set.MatchesURL(lowercase_url, /*case_sensitive=*/false));
+  EXPECT_TRUE(set.MatchesURL(uppercase_url, /*case_sensitive=*/false));
+
+  URLPatternSet utf_set;
+  AddPattern(&utf_set, "chrome-extension://*/caf%C3%A9.html");
+
+  GURL lowercase_utf_url(
+      "chrome-extension://abcdefghijklmnoabcdefghijklmno/caf%C3%A9.html");
+  GURL uppercase_utf_url(
+      "chrome-extension://abcdefghijklmnoabcdefghijklmno/CAF%C3%89.html");
+
+  EXPECT_TRUE(utf_set.MatchesURL(lowercase_utf_url));
+  EXPECT_FALSE(utf_set.MatchesURL(uppercase_utf_url));
+
+  EXPECT_TRUE(utf_set.MatchesURL(lowercase_utf_url, /*case_sensitive=*/false));
+  EXPECT_TRUE(utf_set.MatchesURL(uppercase_utf_url, /*case_sensitive=*/false));
 }
 
 }  // namespace extensions

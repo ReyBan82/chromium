@@ -24,6 +24,58 @@ namespace storage {
 
 namespace {
 
+class MockFileChangeObserver : public FileChangeObserver {
+ public:
+  MockFileChangeObserver() = default;
+  ~MockFileChangeObserver() override = default;
+
+  void AddRef() const override {}
+  void Release() const override {}
+
+  void Disable() override { is_disabled_ = true; }
+
+  void OnCreateFile(const FileSystemURL& url) override {
+    if (is_disabled_) {
+      return;
+    }
+  }
+  void OnCreateFileFrom(const FileSystemURL& url,
+                        const FileSystemURL& src) override {
+    if (is_disabled_) {
+      return;
+    }
+  }
+  void OnMoveFileFrom(const FileSystemURL& url,
+                      const FileSystemURL& src) override {
+    if (is_disabled_) {
+      return;
+    }
+  }
+  void OnRemoveFile(const FileSystemURL& url) override {
+    if (is_disabled_) {
+      return;
+    }
+  }
+  void OnModifyFile(const FileSystemURL& url) override {
+    if (is_disabled_) {
+      return;
+    }
+  }
+  void OnCreateDirectory(const FileSystemURL& url) override {
+    if (is_disabled_) {
+      return;
+    }
+  }
+  void OnRemoveDirectory(const FileSystemURL& url) override {
+    if (is_disabled_) {
+      return;
+    }
+  }
+
+ private:
+  bool is_disabled_ = false;
+};
+
 FileSystemURL CreateFileSystemURL(const char* path) {
   return FileSystemURL::CreateForTest(
       blink::StorageKey::CreateFromStringForTesting("http://foo/"),
@@ -34,6 +86,8 @@ FileSystemURL CreateFileSystemURL(const char* path) {
 
 class SandboxFileSystemBackendDelegateTest : public testing::Test {
  protected:
+  std::unique_ptr<SandboxFileSystemBackendDelegate> delegate_;
+
   void SetUp() override {
     ASSERT_TRUE(data_dir_.CreateUniqueTempDir());
     quota_manager_proxy_ = base::MakeRefCounted<MockQuotaManagerProxy>(
@@ -80,7 +134,6 @@ class SandboxFileSystemBackendDelegateTest : public testing::Test {
   base::ScopedTempDir data_dir_;
   base::test::TaskEnvironment task_environment_;
   scoped_refptr<MockQuotaManagerProxy> quota_manager_proxy_;
-  std::unique_ptr<SandboxFileSystemBackendDelegate> delegate_;
 
   int callback_count_ = 0;
   base::File::Error last_error_ = base::File::FILE_OK;
@@ -102,6 +155,7 @@ TEST_F(SandboxFileSystemBackendDelegateTest, IsAccessValid) {
   EXPECT_FALSE(IsAccessValid(CreateFileSystemURL(".")));
   EXPECT_FALSE(IsAccessValid(CreateFileSystemURL("..")));
 
+#if BUILDFLAG(IS_WIN)
   // This is also disallowed due to Windows XP parent path handling.
   EXPECT_FALSE(IsAccessValid(CreateFileSystemURL("...")));
 
@@ -109,6 +163,11 @@ TEST_F(SandboxFileSystemBackendDelegateTest, IsAccessValid) {
   // on Windows.
   EXPECT_FALSE(IsAccessValid(CreateFileSystemURL(" ..")));
   EXPECT_FALSE(IsAccessValid(CreateFileSystemURL(".. ")));
+#else
+  EXPECT_TRUE(IsAccessValid(CreateFileSystemURL("...")));
+  EXPECT_TRUE(IsAccessValid(CreateFileSystemURL(" ..")));
+  EXPECT_TRUE(IsAccessValid(CreateFileSystemURL(".. ")));
+#endif
 
   // Similar but safe cases.
   EXPECT_TRUE(IsAccessValid(CreateFileSystemURL(" .")));
@@ -127,7 +186,7 @@ TEST_F(SandboxFileSystemBackendDelegateTest, OpenFileSystemAccessesStorage) {
   const blink::StorageKey& storage_key =
       blink::StorageKey::CreateFromStringForTesting("http://example.com");
 
-  // TODO(https://crbug.com/1330608): ensure that this test suite properly
+  // TODO(crbug.com/40227222): ensure that this test suite properly
   // integrates non-default BucketLocators into OpenFileSystem.
   OpenFileSystem(BucketLocator::ForDefaultBucket(storage_key),
                  kFileSystemTypeTemporary,
@@ -137,8 +196,6 @@ TEST_F(SandboxFileSystemBackendDelegateTest, OpenFileSystemAccessesStorage) {
   EXPECT_EQ(last_error(), base::File::FILE_OK);
   EXPECT_EQ(quota_manager_proxy()->notify_bucket_accessed_count(), 1);
   EXPECT_EQ(quota_manager_proxy()->last_notified_storage_key(), storage_key);
-  EXPECT_EQ(quota_manager_proxy()->last_notified_type(),
-            blink::mojom::StorageType::kTemporary);
 }
 
 }  // namespace storage

@@ -19,15 +19,15 @@ namespace blink {
 // indices of all custom spaces form a sequence starting at 0. See
 // `cppgc::CustomSpace` for details.
 
-class PLATFORM_EXPORT HeapVectorBackingSpace
-    : public cppgc::CustomSpace<HeapVectorBackingSpace> {
+class PLATFORM_EXPORT CompactableHeapVectorBackingSpace
+    : public cppgc::CustomSpace<CompactableHeapVectorBackingSpace> {
  public:
   static constexpr cppgc::CustomSpaceIndex kSpaceIndex = 0;
   static constexpr bool kSupportsCompaction = true;
 };
 
-class PLATFORM_EXPORT HeapHashTableBackingSpace
-    : public cppgc::CustomSpace<HeapHashTableBackingSpace> {
+class PLATFORM_EXPORT CompactableHeapHashTableBackingSpace
+    : public cppgc::CustomSpace<CompactableHeapHashTableBackingSpace> {
  public:
   static constexpr cppgc::CustomSpaceIndex kSpaceIndex = 1;
   static constexpr bool kSupportsCompaction = true;
@@ -49,17 +49,18 @@ class PLATFORM_EXPORT LayoutObjectSpace
   static constexpr cppgc::CustomSpaceIndex kSpaceIndex = 4;
 };
 
-struct CustomSpaces {
+// Element-derived classes get their own space so that pages backing DOM
+// traversal (which walks only Elements, skipping Text/Comment nodes) hold
+// pure Element payload. This keeps the per-element cache footprint of hot
+// loops like ContainerNode::RecalcDescendantStyles dense.
+class PLATFORM_EXPORT ElementSpace : public cppgc::CustomSpace<ElementSpace> {
+ public:
+  static constexpr cppgc::CustomSpaceIndex kSpaceIndex = 5;
+};
+
+struct PLATFORM_EXPORT CustomSpaces final {
   static std::vector<std::unique_ptr<cppgc::CustomSpaceBase>>
-  CreateCustomSpaces() {
-    std::vector<std::unique_ptr<cppgc::CustomSpaceBase>> spaces;
-    spaces.emplace_back(std::make_unique<HeapVectorBackingSpace>());
-    spaces.emplace_back(std::make_unique<HeapHashTableBackingSpace>());
-    spaces.emplace_back(std::make_unique<NodeSpace>());
-    spaces.emplace_back(std::make_unique<CSSValueSpace>());
-    spaces.emplace_back(std::make_unique<LayoutObjectSpace>());
-    return spaces;
-  }
+  CreateCustomSpaces();
 };
 
 }  // namespace blink

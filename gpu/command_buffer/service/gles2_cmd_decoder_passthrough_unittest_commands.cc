@@ -65,7 +65,6 @@ using ES3FixedCommandTypes0 =
                      cmds::CopyTexSubImage3D,
                      cmds::DeleteSync,
                      cmds::FenceSync,
-                     cmds::FlushMappedBufferRange,
                      cmds::FramebufferTextureLayer,
                      cmds::GetActiveUniformBlockiv,
                      cmds::GetActiveUniformBlockName,
@@ -91,7 +90,6 @@ using ES3FixedCommandTypes0 =
                      cmds::IsSampler,
                      cmds::IsSync,
                      cmds::IsTransformFeedback,
-                     cmds::MapBufferRange,
                      cmds::PauseTransformFeedback,
                      cmds::ReadBuffer,
                      cmds::ResumeTransformFeedback,
@@ -108,7 +106,6 @@ using ES3FixedCommandTypes1 =
                      cmds::Uniform3ui,
                      cmds::Uniform4ui,
                      cmds::UniformBlockBinding,
-                     cmds::UnmapBuffer,
                      cmds::VertexAttribI4i,
                      cmds::VertexAttribI4ui,
                      cmds::VertexAttribIPointer,
@@ -155,6 +152,23 @@ INSTANTIATE_TYPED_TEST_SUITE_P(
     0,
     GLES2DecoderPassthroughImmediateSizeArgCommandTest,
     ES3ImmediateSizeArgCommandTypes0);
+
+// GL_TEXTURE_RECTANGLE_ANGLE is only for internal use and should not be
+// reachable through the command buffer.
+TEST_F(GLES2WebGLDecoderPassthroughTest, EnableDisableTextureRectangle) {
+  {
+    cmds::Enable cmd;
+    cmd.Init(GL_TEXTURE_RECTANGLE_ANGLE);
+    EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
+    EXPECT_EQ(GL_INVALID_ENUM, GetGLError());
+  }
+  {
+    cmds::Disable cmd;
+    cmd.Init(GL_TEXTURE_RECTANGLE_ANGLE);
+    EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
+    EXPECT_EQ(GL_INVALID_ENUM, GetGLError());
+  }
+}
 
 }  // namespace gles2
 }  // namespace gpu

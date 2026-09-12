@@ -9,6 +9,7 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/web_url.h"
+#include "third_party/blink/public/web/web_settings.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/frame_test_helpers.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
@@ -28,8 +29,8 @@ namespace {
 void RegisterMockedURL(const std::string& base_url,
                        const std::string& file_name) {
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(base_url), test::CoreTestDataPath(),
-      WebString::FromUTF8(file_name));
+      WebString::FromUtf8(base_url), test::CoreTestDataPath(),
+      WebString::FromUtf8(file_name));
 }
 
 }  // namespace
@@ -72,7 +73,8 @@ TEST_F(ManifestManagerTest, ManifestURL) {
   // Check that we use the first manifest with <link rel=manifest>
   auto* link_manifest = MakeGarbageCollected<HTMLLinkElement>(
       GetDocument(), CreateElementFlags());
-  link_manifest->setAttribute(blink::html_names::kRelAttr, "manifest");
+  link_manifest->setAttribute(blink::html_names::kRelAttr,
+                              AtomicString("manifest"));
   GetDocument().head()->AppendChild(link_manifest);
   EXPECT_EQ(link_manifest, GetDocument().LinkManifest());
 
@@ -81,11 +83,12 @@ TEST_F(ManifestManagerTest, ManifestURL) {
 
   // Set to some absolute url.
   link_manifest->setAttribute(html_names::kHrefAttr,
-                              "http://example.com/manifest.json");
+                              AtomicString("http://example.com/manifest.json"));
   ASSERT_EQ(link_manifest->Href(), GetManifestManager()->ManifestURL());
 
   // Set to some relative url.
-  link_manifest->setAttribute(html_names::kHrefAttr, "static/manifest.json");
+  link_manifest->setAttribute(html_names::kHrefAttr,
+                              AtomicString("static/manifest.json"));
   ASSERT_EQ(link_manifest->Href(), GetManifestManager()->ManifestURL());
 }
 
@@ -96,7 +99,8 @@ TEST_F(ManifestManagerTest, ManifestUseCredentials) {
   // Check that we use the first manifest with <link rel=manifest>
   auto* link_manifest = MakeGarbageCollected<HTMLLinkElement>(
       GetDocument(), CreateElementFlags());
-  link_manifest->setAttribute(blink::html_names::kRelAttr, "manifest");
+  link_manifest->setAttribute(blink::html_names::kRelAttr,
+                              AtomicString("manifest"));
   GetDocument().head()->AppendChild(link_manifest);
 
   // No crossorigin attribute was set so credentials shouldn't be used.
@@ -104,15 +108,18 @@ TEST_F(ManifestManagerTest, ManifestUseCredentials) {
   ASSERT_FALSE(GetManifestManager()->ManifestUseCredentials());
 
   // Crossorigin set to a random string shouldn't trigger using credentials.
-  link_manifest->setAttribute(html_names::kCrossoriginAttr, "foobar");
+  link_manifest->setAttribute(html_names::kCrossoriginAttr,
+                              AtomicString("foobar"));
   ASSERT_FALSE(GetManifestManager()->ManifestUseCredentials());
 
   // Crossorigin set to 'anonymous' shouldn't trigger using credentials.
-  link_manifest->setAttribute(html_names::kCrossoriginAttr, "anonymous");
+  link_manifest->setAttribute(html_names::kCrossoriginAttr,
+                              AtomicString("anonymous"));
   ASSERT_FALSE(GetManifestManager()->ManifestUseCredentials());
 
   // Crossorigin set to 'use-credentials' should trigger using credentials.
-  link_manifest->setAttribute(html_names::kCrossoriginAttr, "use-credentials");
+  link_manifest->setAttribute(html_names::kCrossoriginAttr,
+                              AtomicString("use-credentials"));
   ASSERT_TRUE(GetManifestManager()->ManifestUseCredentials());
 }
 
@@ -148,6 +155,40 @@ TEST_F(ManifestManagerTest, NotifyManifestChange) {
   frame_test_helpers::LoadFrame(frame, base_url_ + "link-manifest-change.html");
 
   EXPECT_EQ(14, client.GetNotifier()->ManifestChangeCount());
+}
+
+TEST_F(ManifestManagerTest,
+       RequestManifestDebugInfoWithCustomManifestUrlSetting) {
+  RegisterMockedURL(base_url_, "link-manifest-fetch.json");
+  RegisterMockedURL(base_url_, "bar.html");
+
+  frame_test_helpers::WebViewHelper web_view_helper;
+  web_view_helper.Initialize();
+
+  auto* frame = web_view_helper.GetWebView()->MainFrameImpl();
+  frame_test_helpers::LoadFrame(frame, base_url_ + "bar.html");
+
+  KURL custom_url(
+      AtomicString((base_url_ + "link-manifest-fetch.json").c_str()));
+  web_view_helper.GetWebView()->GetSettings()->SetWebAppCustomManifestUrl(
+      WebURL(custom_url));
+
+  ManifestManager* manifest_manager =
+      ManifestManager::From(*frame->GetFrame()->DomWindow());
+
+  bool callback_called = false;
+  manifest_manager->RequestManifestDebugInfo(base::BindOnce(
+      [](bool* callback_called, const KURL& expected_url,
+         const KURL& manifest_url, mojom::blink::ManifestPtr manifest,
+         mojom::blink::ManifestDebugInfoPtr debug_info) {
+        *callback_called = true;
+        EXPECT_EQ(expected_url, manifest_url);
+        EXPECT_EQ(u"Super Racer 2000", manifest->name);
+      },
+      &callback_called, custom_url));
+
+  url_test_helpers::ServeAsynchronousRequests();
+  EXPECT_TRUE(callback_called);
 }
 
 }  // namespace blink

@@ -6,8 +6,14 @@
 
 #include "base/functional/callback_helpers.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "components/strings/grit/components_strings.h"
 #include "content/public/test/browser_test.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/accessibility/ax_enums.mojom.h"
+#include "ui/base/l10n/l10n_util.h"
+#include "ui/views/accessibility/view_accessibility.h"
+#include "ui/views/controls/styled_label.h"
 #include "ui/views/test/widget_test.h"
 #include "ui/views/widget/widget.h"
 
@@ -31,8 +37,8 @@ class MockDlpDataTransferNotifier : public DlpDataTransferNotifier {
 
   // DlpDataTransferNotifier:
   void NotifyBlockedAction(
-      const ui::DataTransferEndpoint* const data_src,
-      const ui::DataTransferEndpoint* const data_dst) override {}
+      base::optional_ref<const ui::DataTransferEndpoint> data_src,
+      base::optional_ref<const ui::DataTransferEndpoint> data_dst) override {}
 
   MOCK_METHOD(void, OnWidgetDestroying, (views::Widget*), (override));
 
@@ -59,18 +65,23 @@ class DlpDataTransferNotifierBrowserTest : public InProcessBrowserTest {
 };
 
 IN_PROC_BROWSER_TEST_F(DlpDataTransferNotifierBrowserTest, ShowBlockBubble) {
+  const std::u16string text = u"example.com";
   EXPECT_FALSE(notifier_.widget_.get());
-  notifier_.ShowBlockBubble(std::u16string());
+  notifier_.ShowBlockBubble(text);
   ASSERT_TRUE(notifier_.widget_.get());
 
   views::test::WidgetDestroyedWaiter waiter(notifier_.widget_.get());
   EXPECT_TRUE(notifier_.widget_->IsVisible());
-
-  // The DLP notification bubble widget is initialized but never activated on
-  // Lacros.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
   EXPECT_TRUE(notifier_.widget_->IsActive());
-#endif
+  views::View* label = views::test::AnyViewWithClassName(
+      notifier_.widget_.get(), views::StyledLabel::kViewClassName);
+  ASSERT_TRUE(label);
+  EXPECT_EQ(label->GetViewAccessibility().GetCachedRole(),
+            ax::mojom::Role::kParagraph);
+  EXPECT_EQ(
+      label->GetViewAccessibility().GetCachedName(),
+      l10n_util::GetStringFUTF16(IDS_POLICY_DLP_CLIPBOARD_BUBBLE_MESSAGE, text,
+                                 l10n_util::GetStringUTF16(IDS_LEARN_MORE)));
 
   // By the time OnWidgetDestroying() is called, notifier_.widget_ is already
   // NULL so the assertion would fail if we pass it as expected arg here.
@@ -93,12 +104,7 @@ IN_PROC_BROWSER_TEST_F(DlpDataTransferNotifierBrowserTest, ShowWarningBubble) {
 
   views::test::WidgetDestroyedWaiter waiter(notifier_.widget_.get());
   EXPECT_TRUE(notifier_.widget_->IsVisible());
-
-  // The DLP notification bubble widget is initialized but never activated on
-  // Lacros.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
   EXPECT_TRUE(notifier_.widget_->IsActive());
-#endif
 
   // By the time OnWidgetDestroying() is called, notifier_.widget_ is already
   // NULL so the assertion would fail if we pass it as expected arg here.
@@ -118,12 +124,7 @@ IN_PROC_BROWSER_TEST_F(DlpDataTransferNotifierBrowserTest, OnWidgetDestroying) {
   ASSERT_TRUE(notifier_.widget_.get());
 
   EXPECT_TRUE(notifier_.widget_->IsVisible());
-
-  // The DLP notification bubble widget is initialized but never activated on
-  // Lacros.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
   EXPECT_TRUE(notifier_.widget_->IsActive());
-#endif
 
   // Fake that widget is being destroyed, so we can check that the notifier_ is
   // no longer observing it.

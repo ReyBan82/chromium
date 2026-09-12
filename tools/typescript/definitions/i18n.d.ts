@@ -2,29 +2,36 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-/** @fileoverview Definitions for chrome.i18n API */
-// TODO(crbug.com/1203307): Auto-generate this file.
+/**
+ * @fileoverview Definitions for chrome.i18n API
+ * Generated from: extensions/common/api/i18n.json
+ * run `tools/json_schema_compiler/compiler.py extensions/common/api/i18n.json
+ * -g definitions` to regenerate.
+ */
+
+
+
 declare namespace chrome {
   export namespace i18n {
 
-    export function getAcceptLanguages(callback: (languages: string[]) => void):
-        void;
+    export type LanguageCode = string;
+
+    export function getAcceptLanguages(): Promise<LanguageCode[]>;
 
     export function getMessage(
-        messageName: string, args?: string|string[],
-        options?: {escapeLt: boolean}): string;
+        messageName: string, substitutions?: any, options?: {
+          escapeLt?: boolean,
+        }): string;
 
     export function getUILanguage(): string;
 
-    interface DetectLanguageResult {
-      isReliable: boolean;
+    export function detectLanguage(text: string): Promise<{
+      isReliable: boolean,
       languages: Array<{
-        language: string,
+        language: LanguageCode,
         percentage: number,
-      }>;
-    }
+      }>,
+    }>;
 
-    export function detectLanguage(
-        text: string, callback: (result: DetectLanguageResult) => void): void;
   }
 }

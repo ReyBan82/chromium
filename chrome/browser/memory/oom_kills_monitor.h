@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_MEMORY_OOM_KILLS_MONITOR_H_
 #define CHROME_BROWSER_MEMORY_OOM_KILLS_MONITOR_H_
 
+#include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/synchronization/atomic_flag.h"
@@ -29,6 +30,10 @@ class OOMKillsMonitor {
   static void RegisterPrefs(PrefRegistrySimple* registry);
 
   void Initialize(PrefService* pref_service);
+
+  // Stops timers and clears the PrefService pointer. Must be called before
+  // the PrefService is destroyed (e.g., during browser shutdown).
+  void Shutdown();
 
   void LogArcOOMKill(unsigned long current_oom_kills);
 
@@ -101,7 +106,12 @@ class OOMKillsMonitor {
   static const char kDailyEventHistogramName[];
 
   // A raw pointer to the PrefService used to read and write the statistics.
+  // Cleared by Shutdown().
   raw_ptr<PrefService> pref_service_;
+
+  // Set to true after Shutdown() is called. Used to guard against post-shutdown
+  // calls rather than relying on pref_service_ null checks.
+  bool is_shutdown_ = false;
 };
 
 }  // namespace memory

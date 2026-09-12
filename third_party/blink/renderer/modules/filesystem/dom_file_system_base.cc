@@ -85,7 +85,7 @@ bool DOMFileSystemBase::IsValidType(mojom::blink::FileSystemType type) {
 KURL DOMFileSystemBase::CreateFileSystemRootURL(
     const String& origin,
     mojom::blink::FileSystemType type) {
-  String type_string;
+  StringView type_string;
   if (type == mojom::blink::FileSystemType::kTemporary)
     type_string = kTemporaryPathPrefix;
   else if (type == mojom::blink::FileSystemType::kPersistent)
@@ -95,7 +95,7 @@ KURL DOMFileSystemBase::CreateFileSystemRootURL(
   else
     return KURL();
 
-  String result = "filesystem:" + origin + "/" + type_string + "/";
+  String result = StrCat({"filesystem:", origin, "/", type_string, "/"});
   return KURL(result);
 }
 
@@ -111,6 +111,10 @@ KURL DOMFileSystemBase::CreateFileSystemURL(const EntryBase* entry) const {
 KURL DOMFileSystemBase::CreateFileSystemURL(const String& full_path) const {
   DCHECK(DOMFilePath::IsAbsolute(full_path));
 
+  // Remove the extra leading slash and URI encode.
+  String encoded_full_path =
+      EncodeWithUrlEscapeSequences(StringView(full_path, 1));
+
   if (GetType() == mojom::blink::FileSystemType::kExternal) {
     // For external filesystem originString could be different from what we have
     // in m_filesystemRootURL.
@@ -120,9 +124,8 @@ KURL DOMFileSystemBase::CreateFileSystemURL(const String& full_path) const {
     result.Append('/');
     result.Append(kExternalPathPrefix);
     result.Append(filesystem_root_url_.GetPath());
-    // Remove the extra leading slash.
-    result.Append(EncodeWithURLEscapeSequences(full_path.Substring(1)));
-    return KURL(result.ToString());
+    result.Append(encoded_full_path);
+    return KURL(result.ReleaseString());
   }
 
   // For regular types we can just append the entry's fullPath to the
@@ -130,9 +133,7 @@ KURL DOMFileSystemBase::CreateFileSystemURL(const String& full_path) const {
   // 'filesystem:<origin>/<typePrefix>'.
   DCHECK(!filesystem_root_url_.IsEmpty());
   KURL url = filesystem_root_url_;
-  // Remove the extra leading slash.
-  url.SetPath(url.GetPath() +
-              EncodeWithURLEscapeSequences(full_path.Substring(1)));
+  url.SetPath(StrCat({url.GetPath(), encoded_full_path}));
   return url;
 }
 
@@ -188,8 +189,9 @@ File* DOMFileSystemBase::CreateFile(ExecutionContext* context,
   // https://www.w3.org/Bugs/Public/show_bug.cgi?id=17746
   if (!metadata.platform_path.empty() &&
       (type == mojom::blink::FileSystemType::kTemporary ||
-       type == mojom::blink::FileSystemType::kPersistent))
+       type == mojom::blink::FileSystemType::kPersistent)) {
     return File::CreateForFileSystemFile(metadata.platform_path, name);
+  }
 
   const File::UserVisibility user_visibility =
       (type == mojom::blink::FileSystemType::kExternal)
@@ -199,7 +201,8 @@ File* DOMFileSystemBase::CreateFile(ExecutionContext* context,
   if (!metadata.platform_path.empty()) {
     // If the platformPath in the returned metadata is given, we create a File
     // object for the snapshot path.
-    return File::CreateForFileSystemFile(name, metadata, user_visibility);
+    return File::CreateForFileSystemFile(context, name, metadata,
+                                         user_visibility);
   } else {
     // Otherwise we create a File object for the fileSystemURL.
     return File::CreateForFileSystemFile(*context, file_system_url, metadata,

@@ -19,11 +19,12 @@ import android.graphics.drawable.shapes.RoundRectShape;
 import androidx.annotation.ColorInt;
 import androidx.core.graphics.drawable.DrawableCompat;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.browser_ui.widget.R;
 
-/**
- * A {@link Drawable} that is a bubble with an arrow pointing out of either the top or bottom.
- */
+/** A {@link Drawable} that is a bubble with an arrow pointing out of either the top or bottom. */
+@NullMarked
 class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
     private final Rect mCachedBubblePadding = new Rect();
 
@@ -45,9 +46,10 @@ class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
 
     /**
      * Constructs an {@link ArrowBubbleDrawable} instance.
-     * @param context  Context to draw resources from.
+     *
+     * @param context Context to draw resources from.
      * @param isRoundBubble Whether the bubble should be round.
-     **/
+     */
     public ArrowBubbleDrawable(Context context, boolean isRoundBubble) {
         mContext = context;
         mIsRoundBubble = isRoundBubble;
@@ -92,6 +94,7 @@ class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
      * @return The spacing needed on the left side of the {@link Drawable} for the arrow to fit.
      */
     public int getArrowLeftSpacing() {
+        if (!mShowArrow) return 0;
         mBubbleDrawable.getPadding(mCachedBubblePadding);
         return mRadiusPx + mCachedBubblePadding.left + mArrowWidthPx / 2;
     }
@@ -100,20 +103,17 @@ class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
      * @return The spacing needed on the right side of the {@link Drawable} for the arrow to fit.
      */
     public int getArrowRightSpacing() {
+        if (!mShowArrow) return 0;
         mBubbleDrawable.getPadding(mCachedBubblePadding);
         return mRadiusPx + mCachedBubblePadding.right + mArrowWidthPx / 2;
     }
 
-    /**
-     * @return Whether or not the arrow is currently drawing on top of this {@link Drawable}.
-     */
+    /** @return Whether or not the arrow is currently drawing on top of this {@link Drawable}. */
     public boolean isArrowOnTop() {
         return mArrowOnTop;
     }
 
-    /**
-     * @return Whether or not an arrow is currently shown.
-     */
+    /** @return Whether or not an arrow is currently shown. */
     public boolean isShowingArrow() {
         return mShowArrow;
     }
@@ -129,9 +129,7 @@ class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
         invalidateSelf();
     }
 
-    /**
-     * @param color The color to make the bubble and arrow.
-     */
+    /** @param color The color to make the bubble and arrow. */
     public void setBubbleColor(@ColorInt int color) {
         DrawableCompat.setTint(mBubbleDrawable, color);
         mArrowPaint.setColor(color);
@@ -182,20 +180,32 @@ class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
         if (mIsRoundBubble) {
             mRadiusPx = bounds.height() / 2;
         } else {
-            mRadiusPx = mContext.getResources().getDimensionPixelSize(
-                    R.dimen.text_bubble_corner_radius);
+            mRadiusPx =
+                    mContext.getResources()
+                            .getDimensionPixelSize(R.dimen.text_bubble_corner_radius);
         }
         mBubbleDrawable.setShape(
-                new RoundRectShape(new float[] {mRadiusPx, mRadiusPx, mRadiusPx, mRadiusPx,
-                                           mRadiusPx, mRadiusPx, mRadiusPx, mRadiusPx},
-                        null, null));
+                new RoundRectShape(
+                        new float[] {
+                            mRadiusPx, mRadiusPx, mRadiusPx, mRadiusPx, mRadiusPx, mRadiusPx,
+                            mRadiusPx, mRadiusPx
+                        },
+                        null,
+                        null));
 
-        // Calculate the bubble bounds.  Account for the arrow size requiring more space.
+        // Calculate the bubble bounds. If there's no arrow, the bubble occupies the entire
+        // bounds. Otherwise, we shrink the bubble to make room for the arrow.
         mBubbleDrawable.getPadding(mCachedBubblePadding);
-        mBubbleDrawable.setBounds(bounds.left,
-                bounds.top + (mArrowOnTop ? (mArrowHeightPx - mCachedBubblePadding.top) : 0),
-                bounds.right,
-                bounds.bottom - (mArrowOnTop ? 0 : (mArrowHeightPx - mCachedBubblePadding.bottom)));
+        if (!mShowArrow) {
+            mBubbleDrawable.setBounds(bounds);
+        } else {
+            mBubbleDrawable.setBounds(
+                    bounds.left,
+                    bounds.top + (mArrowOnTop ? (mArrowHeightPx - mCachedBubblePadding.top) : 0),
+                    bounds.right,
+                    bounds.bottom
+                            - (mArrowOnTop ? 0 : (mArrowHeightPx - mCachedBubblePadding.bottom)));
+        }
     }
 
     @Override
@@ -206,7 +216,7 @@ class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
     }
 
     @Override
-    public void setColorFilter(ColorFilter cf) {
+    public void setColorFilter(@Nullable ColorFilter cf) {
         assert false : "Unsupported";
     }
 
@@ -219,8 +229,13 @@ class ArrowBubbleDrawable extends Drawable implements Drawable.Callback {
     public boolean getPadding(Rect padding) {
         mBubbleDrawable.getPadding(padding);
 
-        padding.set(padding.left, Math.max(padding.top, mArrowOnTop ? mArrowHeightPx : 0),
-                padding.right, Math.max(padding.bottom, mArrowOnTop ? 0 : mArrowHeightPx));
+        if (!mShowArrow) return true;
+
+        padding.set(
+                padding.left,
+                Math.max(padding.top, mArrowOnTop ? mArrowHeightPx : 0),
+                padding.right,
+                Math.max(padding.bottom, mArrowOnTop ? 0 : mArrowHeightPx));
         return true;
     }
 }

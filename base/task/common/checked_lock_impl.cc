@@ -4,20 +4,23 @@
 
 #include "base/task/common/checked_lock_impl.h"
 
+#include <algorithm>
+#include <optional>
 #include <ostream>
 #include <unordered_map>
 #include <vector>
 
 #include "base/check_op.h"
-#include "base/lazy_instance.h"
-#include "base/ranges/algorithm.h"
+#include "base/compiler_specific.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/no_destructor.h"
 #include "base/synchronization/condition_variable.h"
 #include "base/task/common/checked_lock.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread_local.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
 namespace {
 
@@ -48,8 +51,8 @@ class SafeAcquisitionTracker {
 
   void RecordRelease(const CheckedLockImpl* const lock) {
     LockVector* acquired_locks = GetAcquiredLocksOnCurrentThread();
-    const auto iter_at_lock = ranges::find(*acquired_locks, lock);
-    DCHECK(iter_at_lock != acquired_locks->end());
+    const auto iter_at_lock = std::ranges::find(*acquired_locks, lock);
+    CHECK(iter_at_lock != acquired_locks->end());
     acquired_locks->erase(iter_at_lock);
   }
 
@@ -68,8 +71,9 @@ class SafeAcquisitionTracker {
     const LockVector* acquired_locks = GetAcquiredLocksOnCurrentThread();
 
     // If the thread currently holds no locks, this is inherently safe.
-    if (acquired_locks->empty())
+    if (acquired_locks->empty()) {
       return;
+    }
 
     // A universal predecessor may not be acquired after any other lock.
     DCHECK(!lock->is_universal_predecessor());
@@ -77,8 +81,9 @@ class SafeAcquisitionTracker {
     // Otherwise, make sure that the previous lock acquired is either an
     // allowed predecessor for this lock or a universal predecessor.
     const CheckedLockImpl* previous_lock = acquired_locks->back();
-    if (previous_lock->is_universal_predecessor())
+    if (previous_lock->is_universal_predecessor()) {
       return;
+    }
 
     AutoLock auto_lock(allowed_predecessor_map_lock_);
     // Using at() is exception-safe here as |lock| was registered already.
@@ -114,8 +119,9 @@ class SafeAcquisitionTracker {
   }
 
   LockVector* GetAcquiredLocksOnCurrentThread() {
-    if (!tls_acquired_locks_.Get())
+    if (!tls_acquired_locks_.Get()) {
       tls_acquired_locks_.Set(std::make_unique<LockVector>());
+    }
 
     return tls_acquired_locks_.Get();
   }
@@ -128,20 +134,29 @@ class SafeAcquisitionTracker {
 
   // A thread-local slot holding a vector of locks currently acquired on the
   // current thread.
-  ThreadLocalOwnedPointer<LockVector> tls_acquired_locks_;
+  // LockVector is not a vector<raw_ptr> due to performance regressions detected
+  // in blink_perf.accessibility tests.
+  RAW_PTR_EXCLUSION ThreadLocalOwnedPointer<LockVector> tls_acquired_locks_;
 };
 
-LazyInstance<SafeAcquisitionTracker>::Leaky g_safe_acquisition_tracker =
-    LAZY_INSTANCE_INITIALIZER;
+SafeAcquisitionTracker& GetSafeAcquisitionTracker() {
+  static base::NoDestructor<SafeAcquisitionTracker> tracker;
+  return *tracker;
+}
 
 }  // namespace
 
 CheckedLockImpl::CheckedLockImpl() : CheckedLockImpl(nullptr) {}
 
-CheckedLockImpl::CheckedLockImpl(const CheckedLockImpl* predecessor)
-    : is_universal_predecessor_(false) {
+// Specific to `CheckedLockTest.PredecessorCycle*`: an ill-formed lock
+// cycle is constructed from two members of the same struct. Although
+// `is_universal_successor_` is defaulted `false`, at initialization
+// time the very first lock in the cycle will point at a `predecessor`
+// whose contents are indeterminate.
+NO_SANITIZE("bool")
+CheckedLockImpl::CheckedLockImpl(const CheckedLockImpl* predecessor) {
   DCHECK(predecessor == nullptr || !predecessor->is_universal_successor_);
-  g_safe_acquisition_tracker.Get().RegisterLock(this, predecessor);
+  GetSafeAcquisitionTracker().RegisterLock(this, predecessor);
 }
 
 CheckedLockImpl::CheckedLockImpl(UniversalPredecessor)
@@ -149,34 +164,42 @@ CheckedLockImpl::CheckedLockImpl(UniversalPredecessor)
 
 CheckedLockImpl::CheckedLockImpl(UniversalSuccessor)
     : is_universal_successor_(true) {
-  g_safe_acquisition_tracker.Get().RegisterLock(this, nullptr);
+  GetSafeAcquisitionTracker().RegisterLock(this, nullptr);
 }
 
 CheckedLockImpl::~CheckedLockImpl() {
-  g_safe_acquisition_tracker.Get().UnregisterLock(this);
+  GetSafeAcquisitionTracker().UnregisterLock(this);
 }
 
 void CheckedLockImpl::AssertNoLockHeldOnCurrentThread() {
-  g_safe_acquisition_tracker.Get().AssertNoLockHeldOnCurrentThread();
+  GetSafeAcquisitionTracker().AssertNoLockHeldOnCurrentThread();
 }
 
-void CheckedLockImpl::Acquire() {
-  lock_.Acquire();
-  g_safe_acquisition_tracker.Get().RecordAcquisition(this);
+void CheckedLockImpl::Acquire(subtle::LockTracking tracking) {
+  lock_.Acquire(tracking);
+  GetSafeAcquisitionTracker().RecordAcquisition(this);
 }
 
 void CheckedLockImpl::Release() {
   lock_.Release();
-  g_safe_acquisition_tracker.Get().RecordRelease(this);
+  GetSafeAcquisitionTracker().RecordRelease(this);
 }
 
 void CheckedLockImpl::AssertAcquired() const {
   lock_.AssertAcquired();
 }
 
-std::unique_ptr<ConditionVariable> CheckedLockImpl::CreateConditionVariable() {
-  return std::make_unique<ConditionVariable>(&lock_);
+void CheckedLockImpl::AssertNotHeld() const {
+  lock_.AssertNotHeld();
 }
 
-}  // namespace internal
-}  // namespace base
+ConditionVariable CheckedLockImpl::CreateConditionVariable() {
+  return ConditionVariable(&lock_);
+}
+
+void CheckedLockImpl::CreateConditionVariableAndEmplace(
+    std::optional<ConditionVariable>& opt) {
+  opt.emplace(&lock_);
+}
+
+}  // namespace base::internal

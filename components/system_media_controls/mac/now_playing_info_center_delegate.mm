@@ -10,15 +10,14 @@
 #include "base/mac/mac_util.h"
 #include "base/notreached.h"
 #include "base/strings/sys_string_conversions.h"
+#include "base/time/time.h"
 #include "components/system_media_controls/mac/now_playing_info_center_delegate_cocoa.h"
 #include "skia/ext/skia_utils_mac.h"
 
-namespace system_media_controls {
-namespace internal {
+namespace system_media_controls::internal {
 
 namespace {
 
-API_AVAILABLE(macos(10.13.1))
 MPNowPlayingPlaybackState PlaybackStatusToMPNowPlayingPlaybackState(
     SystemMediaControls::PlaybackStatus status) {
   switch (status) {
@@ -31,14 +30,13 @@ MPNowPlayingPlaybackState PlaybackStatusToMPNowPlayingPlaybackState(
     default:
       NOTREACHED();
   }
-  return MPNowPlayingPlaybackStateUnknown;
 }
 
 }  // anonymous namespace
 
 NowPlayingInfoCenterDelegate::NowPlayingInfoCenterDelegate() {
-  now_playing_info_center_delegate_cocoa_.reset(
-      [[NowPlayingInfoCenterDelegateCocoa alloc] init]);
+  now_playing_info_center_delegate_cocoa_ =
+      [[NowPlayingInfoCenterDelegateCocoa alloc] init];
 }
 
 NowPlayingInfoCenterDelegate::~NowPlayingInfoCenterDelegate() {
@@ -71,8 +69,7 @@ void NowPlayingInfoCenterDelegate::SetAlbum(const std::u16string& album) {
 }
 
 void NowPlayingInfoCenterDelegate::SetThumbnail(const SkBitmap& bitmap) {
-  NSImage* image = skia::SkBitmapToNSImageWithColorSpace(
-      bitmap, base::mac::GetSystemColorSpace());
+  NSImage* image = skia::SkBitmapToNSImage(bitmap);
   [now_playing_info_center_delegate_cocoa_ setThumbnail:image];
   [now_playing_info_center_delegate_cocoa_ updateNowPlayingInfo];
 }
@@ -92,7 +89,6 @@ void NowPlayingInfoCenterDelegate::StartTimer() {
 }
 
 void NowPlayingInfoCenterDelegate::UpdatePlaybackStatusAndPosition() {
-  auto position = position_.value_or(media_session::MediaPosition());
   auto playback_status =
       playback_status_.value_or(SystemMediaControls::PlaybackStatus::kStopped);
 
@@ -100,29 +96,41 @@ void NowPlayingInfoCenterDelegate::UpdatePlaybackStatusAndPosition() {
       PlaybackStatusToMPNowPlayingPlaybackState(playback_status);
   [now_playing_info_center_delegate_cocoa_ setPlaybackState:state];
 
-  auto time_since_epoch =
-      position.last_updated_time() - base::TimeTicks::UnixEpoch();
+  if (!position_) {
+    [now_playing_info_center_delegate_cocoa_ clearPosition];
+    return;
+  }
+
+  const media_session::MediaPosition& position = *position_;
+
+  // Convert the TimeTicks timestamp to wall-clock Time by subtracting the
+  // elapsed tick duration from the current wall-clock time.
+  const base::Time last_updated_time =
+      base::Time::Now() -
+      (base::TimeTicks::Now() - position.last_updated_time());
   [now_playing_info_center_delegate_cocoa_
-      setCurrentPlaybackDate:
-          [NSDate dateWithTimeIntervalSince1970:time_since_epoch.InSecondsF()]];
+      setCurrentPlaybackDate:last_updated_time.ToNSDate()];
   [now_playing_info_center_delegate_cocoa_
-      setDuration:[NSNumber numberWithFloat:position.duration().InSecondsF()]];
+      setDuration:@(position.duration().InSecondsF())];
 
   // If we're not currently playing, then set the rate to zero.
   double rate =
       (playback_status == SystemMediaControls::PlaybackStatus::kPlaying)
           ? position.playback_rate()
           : 0;
+  [now_playing_info_center_delegate_cocoa_ setPlaybackRate:@(rate)];
   [now_playing_info_center_delegate_cocoa_
-      setPlaybackRate:[NSNumber numberWithDouble:rate]];
-  [now_playing_info_center_delegate_cocoa_
-      setElapsedPlaybackTime:
-          [NSNumber numberWithFloat:position
-                                        .GetPositionAtTime(
-                                            position.last_updated_time())
-                                        .InSecondsF()]];
+      setElapsedPlaybackTime:@(position
+                                   .GetPositionAtTime(
+                                       position.last_updated_time())
+                                   .InSecondsF())];
 
   [now_playing_info_center_delegate_cocoa_ updateNowPlayingInfo];
+}
+
+void NowPlayingInfoCenterDelegate::ClearPosition() {
+  position_.reset();
+  [now_playing_info_center_delegate_cocoa_ clearPosition];
 }
 
 void NowPlayingInfoCenterDelegate::ClearMetadata() {
@@ -132,5 +140,4 @@ void NowPlayingInfoCenterDelegate::ClearMetadata() {
   timer_->Stop();
 }
 
-}  // namespace internal
-}  // namespace system_media_controls
+}  // namespace system_media_controls::internal

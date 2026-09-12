@@ -14,13 +14,19 @@ class ChromeOSLoginAndLockMediaAccessHandler : public MediaAccessHandler {
   ChromeOSLoginAndLockMediaAccessHandler();
   ~ChromeOSLoginAndLockMediaAccessHandler() override;
 
+  // Returns true if the origin is permitted video capture access by policy
+  // (ash::kLoginVideoCaptureAllowedUrls) on the SAML login/lock screen.
+  // May only be called on the browser UI thread.
+  static bool IsVideoCaptureAllowedForOrigin(
+      const url::Origin& security_origin);
+
   // MediaAccessHandler implementation.
-  bool SupportsStreamType(content::WebContents* web_contents,
+  bool SupportsStreamType(content::RenderFrameHost* render_frame_host,
                           const blink::mojom::MediaStreamType type,
                           const extensions::Extension* extension) override;
   bool CheckMediaAccessPermission(
       content::RenderFrameHost* render_frame_host,
-      const GURL& security_origin,
+      const url::Origin& security_origin,
       blink::mojom::MediaStreamType type,
       const extensions::Extension* extension) override;
   void HandleRequest(content::WebContents* web_contents,

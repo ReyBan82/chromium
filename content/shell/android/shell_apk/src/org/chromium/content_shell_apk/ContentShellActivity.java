@@ -8,25 +8,26 @@ import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.text.TextUtils;
-import android.util.Log;
 import android.view.KeyEvent;
 import android.widget.Toast;
 
 import org.chromium.base.CommandLine;
+import org.chromium.base.Log;
 import org.chromium.base.MemoryPressureListener;
 import org.chromium.base.library_loader.LibraryLoader;
 import org.chromium.base.library_loader.LibraryProcessType;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.content_public.browser.BrowserStartupController;
+import org.chromium.content_public.browser.BrowserStartupController.StartupMetrics;
 import org.chromium.content_public.browser.DeviceUtils;
+import org.chromium.content_public.browser.Visibility;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.content_shell.Shell;
 import org.chromium.content_shell.ShellManager;
 import org.chromium.ui.base.ActivityWindowAndroid;
 import org.chromium.ui.base.IntentRequestTracker;
 
-/**
- * Activity for managing the Content Shell.
- */
+/** Activity for managing the Content Shell. */
 public class ContentShellActivity extends Activity {
 
     private static final String TAG = "ContentShellActivity";
@@ -56,7 +57,7 @@ public class ContentShellActivity extends Activity {
             }
         }
 
-        DeviceUtils.addDeviceSpecificUserAgentSwitch();
+        DeviceUtils.updateDeviceSpecificUserAgentSwitch(this);
 
         LibraryLoader.getInstance().ensureInitialized();
 
@@ -65,7 +66,12 @@ public class ContentShellActivity extends Activity {
         final boolean listenToActivityState = true;
         mIntentRequestTracker = IntentRequestTracker.createFromActivity(this);
         mWindowAndroid =
-                new ActivityWindowAndroid(this, listenToActivityState, mIntentRequestTracker);
+                new ActivityWindowAndroid(
+                        this,
+                        listenToActivityState,
+                        mIntentRequestTracker,
+                        /* insetObserver= */ null,
+                        /* occlusionTrackingAllowed= */ true);
         mIntentRequestTracker.restoreInstanceState(savedInstanceState);
         mShellManager.setWindow(mWindowAndroid);
         // Set up the animation placeholder to be the SurfaceView. This disables the
@@ -74,27 +80,28 @@ public class ContentShellActivity extends Activity {
                 mShellManager.getContentViewRenderView().getSurfaceView());
 
         mStartupUrl = getUrlFromIntent(getIntent());
-        if (!TextUtils.isEmpty(mStartupUrl)) {
-            mShellManager.setStartupUrl(Shell.sanitizeUrl(mStartupUrl));
-        }
 
         if (CommandLine.getInstance().hasSwitch(RUN_WEB_TESTS_SWITCH)) {
-            BrowserStartupController.getInstance().startBrowserProcessesSync(
-                    LibraryProcessType.PROCESS_BROWSER, false, false);
+            BrowserStartupController.getInstance()
+                    .startBrowserProcessesSync(LibraryProcessType.PROCESS_BROWSER, false, false);
         } else {
-            BrowserStartupController.getInstance().startBrowserProcessesAsync(
-                    LibraryProcessType.PROCESS_BROWSER, true, false,
-                    new BrowserStartupController.StartupCallback() {
-                        @Override
-                        public void onSuccess() {
-                            finishInitialization(savedInstanceState);
-                        }
+            BrowserStartupController.getInstance()
+                    .startBrowserProcessesAsync(
+                            LibraryProcessType.PROCESS_BROWSER,
+                            true,
+                            false,
+                            false,
+                            new BrowserStartupController.StartupCallback() {
+                                @Override
+                                public void onSuccess(@Nullable StartupMetrics metrics) {
+                                    finishInitialization(savedInstanceState);
+                                }
 
-                        @Override
-                        public void onFailure() {
-                            initializationFailed();
-                        }
-                    });
+                                @Override
+                                public void onFailure() {
+                                    initializationFailed();
+                                }
+                            });
         }
     }
 
@@ -106,8 +113,7 @@ public class ContentShellActivity extends Activity {
             shellUrl = ShellManager.DEFAULT_SHELL_URL;
         }
 
-        if (savedInstanceState != null
-                && savedInstanceState.containsKey(ACTIVE_SHELL_URL_KEY)) {
+        if (savedInstanceState != null && savedInstanceState.containsKey(ACTIVE_SHELL_URL_KEY)) {
             shellUrl = savedInstanceState.getString(ACTIVE_SHELL_URL_KEY);
         }
         mShellManager.launchShell(shellUrl);
@@ -115,9 +121,11 @@ public class ContentShellActivity extends Activity {
 
     private void initializationFailed() {
         Log.e(TAG, "ContentView initialization failed.");
-        Toast.makeText(ContentShellActivity.this,
-                R.string.browser_process_initialization_failed,
-                Toast.LENGTH_SHORT).show();
+        Toast.makeText(
+                        ContentShellActivity.this,
+                        R.string.browser_process_initialization_failed,
+                        Toast.LENGTH_SHORT)
+                .show();
         finish();
     }
 
@@ -168,7 +176,15 @@ public class ContentShellActivity extends Activity {
         super.onStart();
 
         WebContents webContents = getActiveWebContents();
-        if (webContents != null) webContents.onShow();
+        if (webContents != null) webContents.updateWebContentsVisibility(Visibility.VISIBLE);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+
+        WebContents webContents = getActiveWebContents();
+        if (webContents != null) webContents.updateWebContentsVisibility(Visibility.HIDDEN);
     }
 
     @Override
@@ -204,7 +220,7 @@ public class ContentShellActivity extends Activity {
 
     /**
      * @return The {@link ShellManager} configured for the activity or null if it has not been
-     *         created yet.
+     *     created yet.
      */
     public ShellManager getShellManager() {
         return mShellManager;
@@ -218,12 +234,11 @@ public class ContentShellActivity extends Activity {
     }
 
     /**
-     * @return The {@link WebContents} owned by the currently visible {@link Shell} or null if
-     *         one is not showing.
+     * @return The {@link WebContents} owned by the currently visible {@link Shell} or null if one
+     *     is not showing.
      */
     public WebContents getActiveWebContents() {
         Shell shell = getActiveShell();
         return shell != null ? shell.getWebContents() : null;
     }
-
 }

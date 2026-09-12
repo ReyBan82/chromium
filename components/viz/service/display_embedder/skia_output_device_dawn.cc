@@ -5,92 +5,173 @@
 #include "components/viz/service/display_embedder/skia_output_device_dawn.h"
 
 #include <utility>
+#include <variant>
 
+#include "base/check.h"
 #include "base/check_op.h"
-#include "base/notreached.h"
+#include "base/logging.h"
 #include "base/time/time.h"
-#include "components/viz/common/gpu/dawn_context_provider.h"
-#include "third_party/dawn/include/dawn/native/D3D12Backend.h"
+#include "base/trace_event/trace_event.h"
+#include "gpu/command_buffer/service/dawn_context_provider.h"
+#include "gpu/command_buffer/service/shared_context_state.h"
+#include "gpu/ipc/common/surface_handle.h"
+#include "third_party/skia/include/gpu/graphite/BackendTexture.h"
+#include "third_party/skia/include/gpu/graphite/Surface.h"
+#include "third_party/skia/include/gpu/graphite/dawn/DawnTypes.h"
 #include "ui/gfx/presentation_feedback.h"
 #include "ui/gfx/vsync_provider.h"
+
+#if BUILDFLAG(IS_WIN)
+#include "components/viz/service/display_embedder/skia_output_device_dawn_d3d11_blt_mode.h"
+#include "ui/gl/child_window_win.h"
 #include "ui/gl/vsync_provider_win.h"
+#endif
+
+#if BUILDFLAG(IS_ANDROID)
+#include "gpu/ipc/common/gpu_surface_lookup.h"
+#include "ui/gl/android/scoped_a_native_window.h"
+#endif
 
 namespace viz {
-
 namespace {
 
-// Some Vulkan drivers do not support kRGB_888x_SkColorType. Always use
-// kRGBA_8888_SkColorType instead and initialize surface to opaque as necessary.
+// TODO(crbug.com/dawn/286): Dawn requires that surface format is BGRA8Unorm for
+// desktop and RGBA8Unorm for Android. Use GetPreferredSurfaceFormat when ready.
+#if BUILDFLAG(IS_ANDROID)
 constexpr SkColorType kSurfaceColorType = kRGBA_8888_SkColorType;
 constexpr wgpu::TextureFormat kSwapChainFormat =
     wgpu::TextureFormat::RGBA8Unorm;
+#else
+constexpr SkColorType kSurfaceColorType = kBGRA_8888_SkColorType;
+constexpr wgpu::TextureFormat kSwapChainFormat =
+    wgpu::TextureFormat::BGRA8Unorm;
+#endif
 
 constexpr wgpu::TextureUsage kUsage =
-    wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+    wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding |
+    wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::CopyDst;
+
+// Presents via Dawn's own wgpu::Surface swap chain. On Windows this requires
+// a GPU-process-owned child window (flip model swap chains can't bind to a
+// foreign-process HWND), reparented into the browser's window.
+class SkiaOutputDeviceDawnSwapChain : public SkiaOutputDeviceDawn {
+ public:
+  SkiaOutputDeviceDawnSwapChain(
+      scoped_refptr<gpu::SharedContextState> context_state,
+      gfx::SurfaceOrigin origin,
+      gpu::MemoryTracker* memory_tracker,
+      DidSwapBufferCompleteCallback did_swap_buffer_complete_callback,
+      base::PassKey<SkiaOutputDeviceDawn> pass_key);
+
+  bool Initialize(gpu::SurfaceHandle surface_handle) override;
+
+#if BUILDFLAG(IS_WIN)
+  gpu::SurfaceHandle GetChildSurfaceHandle() const override;
+#endif
+
+ protected:
+  bool ResizeBackbuffer() override;
+  wgpu::Texture AcquireSwapChainTexture() override;
+  void ReleaseSwapChainTexture() override;
+  void PresentImpl(const std::optional<gfx::Rect>& rect) override;
+
+ private:
+  wgpu::Surface surface_;
+
+#if BUILDFLAG(IS_WIN)
+  // D3D requires that we use flip model swap chains. Flip swap chains
+  // require that the swap chain be connected with DWM. DWM requires that the
+  // rendering windows are owned by the process that's currently doing the
+  // rendering. gl::ChildWindowWin creates and owns a window which is
+  // reparented by the browser to be a child of its window.
+  gl::ChildWindowWin child_window_;
+#endif
+
+#if BUILDFLAG(IS_ANDROID)
+  // Use ScopedANativeWindow to keep the window alive
+  gl::ScopedANativeWindow android_native_window_;
+#endif
+};
 
 }  // namespace
 
+std::unique_ptr<SkiaOutputDeviceDawn> SkiaOutputDeviceDawn::Create(
+    scoped_refptr<gpu::SharedContextState> context_state,
+    gfx::SurfaceOrigin origin,
+    gpu::SurfaceHandle surface_handle,
+    gpu::MemoryTracker* memory_tracker,
+    DidSwapBufferCompleteCallback did_swap_buffer_complete_callback) {
+#if BUILDFLAG(IS_WIN)
+  if (context_state->dawn_context_provider()->backend_type() ==
+      wgpu::BackendType::D3D11) {
+    auto output_device = std::make_unique<SkiaOutputDeviceDawnD3D11BltMode>(
+        context_state, origin, memory_tracker,
+        std::move(did_swap_buffer_complete_callback), PassKey());
+    if (!output_device->Initialize(surface_handle)) {
+      return nullptr;
+    }
+    return output_device;
+  }
+#endif
+
+  auto output_device = std::make_unique<SkiaOutputDeviceDawnSwapChain>(
+      context_state, origin, memory_tracker,
+      std::move(did_swap_buffer_complete_callback), PassKey());
+  if (!output_device->Initialize(surface_handle)) {
+    return nullptr;
+  }
+  return output_device;
+}
+
 SkiaOutputDeviceDawn::SkiaOutputDeviceDawn(
-    DawnContextProvider* context_provider,
+    scoped_refptr<gpu::SharedContextState> context_state,
     gfx::SurfaceOrigin origin,
     gpu::MemoryTracker* memory_tracker,
-    DidSwapBufferCompleteCallback did_swap_buffer_complete_callback)
-    : SkiaOutputDevice(context_provider->GetGrContext(),
-                       memory_tracker,
-                       did_swap_buffer_complete_callback),
-      context_provider_(context_provider) {
+    DidSwapBufferCompleteCallback did_swap_buffer_complete_callback,
+    base::PassKey<SkiaOutputDeviceDawn>)
+    : SkiaOutputDevice(
+          /*gr_context=*/nullptr,
+          context_state->graphite_shared_context(),
+          memory_tracker,
+          did_swap_buffer_complete_callback),
+      context_state_(std::move(context_state)) {
   capabilities_.output_surface_origin = origin;
   capabilities_.uses_default_gl_framebuffer = false;
   capabilities_.supports_post_sub_buffer = false;
 
-  // TODO(https://crbug.com/1108406): use buffer format from Reshape().
-  capabilities_.sk_color_types[static_cast<int>(gfx::BufferFormat::RGBA_8888)] =
+  capabilities_.sk_color_type_map[SinglePlaneFormat::kRGBA_8888] =
       kSurfaceColorType;
-  capabilities_.sk_color_types[static_cast<int>(gfx::BufferFormat::RGBX_8888)] =
+  capabilities_.sk_color_type_map[SinglePlaneFormat::kRGBX_8888] =
       kSurfaceColorType;
-  capabilities_.sk_color_types[static_cast<int>(gfx::BufferFormat::BGRA_8888)] =
+  capabilities_.sk_color_type_map[SinglePlaneFormat::kBGRA_8888] =
       kSurfaceColorType;
-  capabilities_.sk_color_types[static_cast<int>(gfx::BufferFormat::BGRX_8888)] =
+  capabilities_.sk_color_type_map[SinglePlaneFormat::kBGRX_8888] =
       kSurfaceColorType;
-  child_window_.Initialize();
-  vsync_provider_ =
-      std::make_unique<gl::VSyncProviderWin>(child_window_.window());
 }
 
 SkiaOutputDeviceDawn::~SkiaOutputDeviceDawn() = default;
 
+#if BUILDFLAG(IS_WIN)
 gpu::SurfaceHandle SkiaOutputDeviceDawn::GetChildSurfaceHandle() const {
-  return child_window_.window();
+  return gpu::kNullSurfaceHandle;
+}
+#endif
+
+bool SkiaOutputDeviceDawn::Reshape(const ReshapeParams& params) {
+  DCHECK_EQ(params.transform, gfx::OVERLAY_TRANSFORM_NONE);
+
+  size_ = params.GfxSize();
+  sk_color_space_ = params.image_info.refColorSpace();
+  sample_count_ = params.sample_count;
+
+  return ResizeBackbuffer();
 }
 
-bool SkiaOutputDeviceDawn::Reshape(
-    const SkSurfaceCharacterization& characterization,
-    const gfx::ColorSpace& color_space,
-    float device_scale_factor,
-    gfx::OverlayTransform transform) {
-  DCHECK_EQ(transform, gfx::OVERLAY_TRANSFORM_NONE);
-
-  size_ = gfx::SkISizeToSize(characterization.dimensions());
-  sk_color_space_ = characterization.refColorSpace();
-  sample_count_ = characterization.sampleCount();
-
-  CreateSwapChainImplementation();
-  wgpu::SwapChainDescriptor desc;
-  desc.implementation = reinterpret_cast<int64_t>(&swap_chain_implementation_);
-  // TODO(rivr): Use a wgpu::Surface in this call once the Surface-based
-  // SwapChain API is ready.
-  swap_chain_ = context_provider_->GetDevice().CreateSwapChain(nullptr, &desc);
-  if (!swap_chain_)
-    return false;
-  swap_chain_.Configure(kSwapChainFormat, kUsage, size_.width(),
-                        size_.height());
-  return true;
-}
-
-void SkiaOutputDeviceDawn::SwapBuffers(BufferPresentedCallback feedback,
-                                       OutputSurfaceFrame frame) {
+void SkiaOutputDeviceDawn::Present(const std::optional<gfx::Rect>& update_rect,
+                                   BufferPresentedCallback feedback,
+                                   OutputSurfaceFrame frame) {
   StartSwapBuffers({});
-  swap_chain_.Present();
+  PresentImpl(update_rect);
   FinishSwapBuffers(gfx::SwapCompletionResult(gfx::SwapResult::SWAP_ACK),
                     gfx::Size(size_.width(), size_.height()), std::move(frame));
 
@@ -114,32 +195,146 @@ void SkiaOutputDeviceDawn::SwapBuffers(BufferPresentedCallback feedback,
 
 SkSurface* SkiaOutputDeviceDawn::BeginPaint(
     std::vector<GrBackendSemaphore>* end_semaphores) {
-  GrDawnRenderTargetInfo info;
-  info.fTextureView = swap_chain_.GetCurrentTextureView();
-  info.fFormat = kSwapChainFormat;
-  info.fLevelCount = 1;
-  GrBackendRenderTarget backend_target(size_.width(), size_.height(),
-                                       sample_count_, /*stencilBits=*/0, info);
-  DCHECK(backend_target.isValid());
-  SkSurfaceProps surface_props{0, kUnknown_SkPixelGeometry};
-  sk_surface_ = SkSurface::MakeFromBackendRenderTarget(
-      context_provider_->GetGrContext(), backend_target,
-      capabilities_.output_surface_origin == gfx::SurfaceOrigin::kTopLeft
-          ? kTopLeft_GrSurfaceOrigin
-          : kBottomLeft_GrSurfaceOrigin,
+  wgpu::Texture texture = AcquireSwapChainTexture();
+  auto backend_texture =
+      skgpu::graphite::BackendTextures::MakeDawn(texture.Get());
+
+  SkSurfaceProps surface_props;
+  sk_surface_ = SkSurfaces::WrapBackendTexture(
+      context_state_->gpu_main_graphite_recorder(), backend_texture,
       kSurfaceColorType, sk_color_space_, &surface_props);
   return sk_surface_.get();
 }
 
 void SkiaOutputDeviceDawn::EndPaint() {
-  GrFlushInfo flush_info;
-  sk_surface_->flush(SkSurface::BackendSurfaceAccess::kPresent, flush_info);
+  CHECK(sk_surface_);
+  ReleaseSwapChainTexture();
   sk_surface_.reset();
 }
 
-void SkiaOutputDeviceDawn::CreateSwapChainImplementation() {
-  swap_chain_implementation_ = dawn::native::d3d12::CreateNativeSwapChainImpl(
-      context_provider_->GetDevice().Get(), child_window_.window());
+SkiaOutputDeviceDawnSwapChain::SkiaOutputDeviceDawnSwapChain(
+    scoped_refptr<gpu::SharedContextState> context_state,
+    gfx::SurfaceOrigin origin,
+    gpu::MemoryTracker* memory_tracker,
+    DidSwapBufferCompleteCallback did_swap_buffer_complete_callback,
+    base::PassKey<SkiaOutputDeviceDawn> pass_key)
+    : SkiaOutputDeviceDawn(std::move(context_state),
+                           origin,
+                           memory_tracker,
+                           std::move(did_swap_buffer_complete_callback),
+                           pass_key) {}
+
+#if BUILDFLAG(IS_WIN)
+gpu::SurfaceHandle SkiaOutputDeviceDawnSwapChain::GetChildSurfaceHandle()
+    const {
+  return child_window_.window();
+}
+#endif
+
+bool SkiaOutputDeviceDawnSwapChain::Initialize(
+    gpu::SurfaceHandle surface_handle) {
+  wgpu::SurfaceDescriptor surface_desc;
+
+#if BUILDFLAG(IS_WIN)
+  gpu::SurfaceHandle window_handle_to_draw_to;
+
+  // Only D3D swapchain requires that the rendering windows are owned by the
+  // process that's currently doing the rendering.
+  switch (context_state_->dawn_context_provider()->backend_type()) {
+    case wgpu::BackendType::D3D11:
+    case wgpu::BackendType::D3D12:
+      child_window_.Initialize();
+      window_handle_to_draw_to = child_window_.window();
+      break;
+    default:
+      window_handle_to_draw_to = surface_handle;
+  }
+
+  vsync_provider_ =
+      std::make_unique<gl::VSyncProviderWin>(window_handle_to_draw_to);
+
+  // Create the wgpu::Surface from our HWND.
+  wgpu::SurfaceSourceWindowsHWND hwnd_desc;
+  hwnd_desc.hwnd = window_handle_to_draw_to;
+  hwnd_desc.hinstance = GetModuleHandle(nullptr);
+
+  surface_desc.nextInChain = &hwnd_desc;
+#endif
+
+#if BUILDFLAG(IS_ANDROID)
+  auto surface_record =
+      gpu::GpuSurfaceLookup::GetInstance()->AcquireJavaSurface(
+          surface_handle);
+  // Should only reach here if surface control is disabled. In which case
+  // browser should not be sending ScopedJavaSurfaceControl variant.
+  CHECK(std::holds_alternative<gl::ScopedJavaSurface>(
+      surface_record.surface_variant));
+  auto& scoped_java_surface =
+      std::get<gl::ScopedJavaSurface>(surface_record.surface_variant);
+  android_native_window_ = gl::ScopedANativeWindow(scoped_java_surface);
+
+  wgpu::SurfaceSourceAndroidNativeWindow android_native_window_desc;
+  android_native_window_desc.window =
+      android_native_window_.a_native_window();
+  surface_desc.nextInChain = &android_native_window_desc;
+#endif
+
+  auto* context_provider = context_state_->dawn_context_provider();
+  CHECK(context_provider && context_provider->GetDevice());
+
+  surface_ = context_provider->GetInstance().CreateSurface(&surface_desc);
+
+  wgpu::SurfaceCapabilities caps;
+  wgpu::Status result =
+      surface_.GetCapabilities(context_provider->GetAdapter(), &caps);
+  if (result == wgpu::Status::Error) {
+    // With Dawn/Vulkan the Vulkan surface is created lazily when needed,
+    // like here for GetCapabilities(), and not when `surface_` is created.
+    LOG(ERROR) << "Surface::GetCapabilities() failed";
+    return false;
+  }
+
+  // Verify `surface_` supports all the required usage for the swap chain.
+  CHECK_EQ(~caps.usages & kUsage, 0);
+
+  return true;
+}
+
+bool SkiaOutputDeviceDawnSwapChain::ResizeBackbuffer() {
+#if BUILDFLAG(IS_WIN)
+  if (child_window_.window()) {
+    child_window_.Resize(size_);
+  }
+#endif
+
+  wgpu::SurfaceConfiguration config;
+  config.device = context_state_->dawn_context_provider()->GetDevice();
+  config.format = kSwapChainFormat;
+  config.usage = kUsage;
+  config.viewFormatCount = 0;
+  config.viewFormats = nullptr;
+  config.alphaMode = wgpu::CompositeAlphaMode::Auto;
+  config.width = size_.width();
+  config.height = size_.height();
+  config.presentMode = wgpu::PresentMode::Mailbox;
+  surface_.Configure(&config);
+
+  return true;
+}
+
+wgpu::Texture SkiaOutputDeviceDawnSwapChain::AcquireSwapChainTexture() {
+  wgpu::SurfaceTexture texture;
+  surface_.GetCurrentTexture(&texture);
+  return texture.texture;
+}
+
+void SkiaOutputDeviceDawnSwapChain::ReleaseSwapChainTexture() {}
+
+void SkiaOutputDeviceDawnSwapChain::PresentImpl(
+    const std::optional<gfx::Rect>& rect) {
+  TRACE_EVENT0("viz", "SkiaOutputDeviceDawnSwapChain::PresentImpl");
+  DCHECK(!rect);
+  surface_.Present();
 }
 
 }  // namespace viz

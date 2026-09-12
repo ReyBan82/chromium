@@ -4,37 +4,41 @@
 
 #include "remoting/host/webauthn/remote_webauthn_native_messaging_host.h"
 
+#include <algorithm>
 #include <memory>
 
 #include "base/functional/bind.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
-#include "base/ranges/algorithm.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "remoting/base/logging.h"
 #include "remoting/host/chromoting_host_services_client.h"
 #include "remoting/host/mojom/webauthn_proxy.mojom.h"
 #include "remoting/host/native_messaging/native_messaging_constants.h"
 #include "remoting/host/native_messaging/native_messaging_helpers.h"
+#include "remoting/host/webauthn/desktop_session_type_util.h"
 #include "remoting/host/webauthn/remote_webauthn_constants.h"
 
 namespace remoting {
 
 namespace {
 
-base::Value CreateWebAuthnExceptionDetailsDict(const std::string& name,
-                                               const std::string& message) {
-  base::Value details(base::Value::Type::DICT);
-  details.SetStringKey(kWebAuthnErrorNameKey, name);
-  details.SetStringKey(kWebAuthnErrorMessageKey, message);
-  return details;
+// Delay to wait for a response to `remote_.QueryVersion()`. If we don't get a
+// response after it, we will treat the IPC connection as disconnected.
+constexpr base::TimeDelta kQueryRemoteStateTimeout = base::Seconds(5);
+
+base::DictValue CreateWebAuthnExceptionDetailsDict(const std::string& name,
+                                                   const std::string& message) {
+  return base::DictValue()
+      .Set(kWebAuthnErrorNameKey, name)
+      .Set(kWebAuthnErrorMessageKey, message);
 }
 
-base::Value MojoErrorToErrorDict(
+base::DictValue MojoErrorToErrorDict(
     const mojom::WebAuthnExceptionDetailsPtr& mojo_error) {
   return CreateWebAuthnExceptionDetailsDict(mojo_error->name,
                                             mojo_error->message);
@@ -61,11 +65,11 @@ RemoteWebAuthnNativeMessagingHost::RemoteWebAuthnNativeMessagingHost(
 RemoteWebAuthnNativeMessagingHost::~RemoteWebAuthnNativeMessagingHost() {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   // This makes sure the log messages below get sent to the extension before the
   // caller sequence gets terminated.
   log_message_handler_->set_log_synchronously_if_possible(true);
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
   if (!id_to_request_canceller_.empty()) {
     LOG(WARNING) << id_to_request_canceller_.size()
@@ -78,12 +82,12 @@ void RemoteWebAuthnNativeMessagingHost::OnMessage(const std::string& message) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
   std::string type;
-  base::Value::Dict request;
+  base::DictValue request;
   if (!ParseNativeMessageJson(message, type, request)) {
     return;
   }
 
-  absl::optional<base::Value::Dict> response =
+  std::optional<base::DictValue> response =
       CreateNativeMessageResponse(request);
   if (!response.has_value()) {
     return;
@@ -91,31 +95,40 @@ void RemoteWebAuthnNativeMessagingHost::OnMessage(const std::string& message) {
 
   if (type == kHelloMessage) {
     ProcessHello(std::move(*response));
-  } else if (type == kIsUvpaaMessageType) {
-    ProcessIsUvpaa(request, std::move(*response));
+    return;
   } else if (type == kGetRemoteStateMessageType) {
     ProcessGetRemoteState(std::move(*response));
+    return;
+  }
+
+  void (RemoteWebAuthnNativeMessagingHost::*fn)(const base::DictValue& request,
+                                                base::DictValue response);
+  if (type == kIsUvpaaMessageType) {
+    fn = &RemoteWebAuthnNativeMessagingHost::ProcessIsUvpaa;
   } else if (type == kCreateMessageType) {
-    ProcessCreate(request, std::move(*response));
+    fn = &RemoteWebAuthnNativeMessagingHost::ProcessCreate;
   } else if (type == kGetMessageType) {
-    ProcessGet(request, std::move(*response));
+    fn = &RemoteWebAuthnNativeMessagingHost::ProcessGet;
   } else if (type == kCancelMessageType) {
-    ProcessCancel(request, std::move(*response));
+    fn = &RemoteWebAuthnNativeMessagingHost::ProcessCancel;
   } else {
     LOG(ERROR) << "Unsupported request type: " << type;
+    return;
   }
+  EnsureIpcConnectionThenProcess(base::BindOnce(
+      fn, base::Unretained(this), std::move(request), std::move(*response)));
 }
 
 void RemoteWebAuthnNativeMessagingHost::Start(
     extensions::NativeMessageHost::Client* client) {
   DCHECK(task_runner_->BelongsToCurrentThread());
   client_ = client;
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   log_message_handler_ =
       std::make_unique<LogMessageHandler>(base::BindRepeating(
           &RemoteWebAuthnNativeMessagingHost::SendMessageToClient,
           base::Unretained(this)));
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
   HOST_LOG << "Remote WebAuthn native messaging host has started";
 }
 
@@ -124,8 +137,7 @@ RemoteWebAuthnNativeMessagingHost::task_runner() const {
   return task_runner_;
 }
 
-void RemoteWebAuthnNativeMessagingHost::ProcessHello(
-    base::Value::Dict response) {
+void RemoteWebAuthnNativeMessagingHost::ProcessHello(base::DictValue response) {
   // Hello request: {id: string, type: 'hello'}
   // Hello response: {id: string, type: 'helloResponse', hostVersion: string}
 
@@ -136,18 +148,13 @@ void RemoteWebAuthnNativeMessagingHost::ProcessHello(
 }
 
 void RemoteWebAuthnNativeMessagingHost::ProcessIsUvpaa(
-    const base::Value::Dict& request,
-    base::Value::Dict response) {
+    const base::DictValue& request,
+    base::DictValue response) {
   // IsUvpaa request: {id: string, type: 'isUvpaa'}
   // IsUvpaa response:
   //   {id: string, type: 'isUvpaaResponse', isAvailable: boolean}
 
   DCHECK(task_runner_->BelongsToCurrentThread());
-
-  if (!EnsureIpcConnection()) {
-    SendClientDisconnectedMessage();
-    return;
-  }
 
   remote_->IsUserVerifyingPlatformAuthenticatorAvailable(
       base::BindOnce(&RemoteWebAuthnNativeMessagingHost::OnIsUvpaaResponse,
@@ -155,8 +162,8 @@ void RemoteWebAuthnNativeMessagingHost::ProcessIsUvpaa(
 }
 
 void RemoteWebAuthnNativeMessagingHost::ProcessCreate(
-    const base::Value::Dict& request,
-    base::Value::Dict response) {
+    const base::DictValue& request,
+    base::DictValue response) {
   // Create request: {id: string, type: 'create', requestData: string}
   // Create response: {
   //   id: string, type: 'createResponse', responseData?: string,
@@ -164,10 +171,6 @@ void RemoteWebAuthnNativeMessagingHost::ProcessCreate(
 
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  if (!EnsureIpcConnection()) {
-    SendClientDisconnectedMessage();
-    return;
-  }
   const base::Value* message_id = FindMessageIdOrSendError(response);
   if (!message_id) {
     return;
@@ -185,8 +188,8 @@ void RemoteWebAuthnNativeMessagingHost::ProcessCreate(
 }
 
 void RemoteWebAuthnNativeMessagingHost::ProcessGet(
-    const base::Value::Dict& request,
-    base::Value::Dict response) {
+    const base::DictValue& request,
+    base::DictValue response) {
   // Get request: {id: string, type: 'get', requestData: string}
   // Get response: {
   //   id: string, type: 'getResponse', responseData?: string,
@@ -194,10 +197,6 @@ void RemoteWebAuthnNativeMessagingHost::ProcessGet(
 
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  if (!EnsureIpcConnection()) {
-    SendClientDisconnectedMessage();
-    return;
-  }
   const base::Value* message_id = FindMessageIdOrSendError(response);
   if (!message_id) {
     return;
@@ -214,16 +213,11 @@ void RemoteWebAuthnNativeMessagingHost::ProcessGet(
 }
 
 void RemoteWebAuthnNativeMessagingHost::ProcessCancel(
-    const base::Value::Dict& request,
-    base::Value::Dict response) {
+    const base::DictValue& request,
+    base::DictValue response) {
   // Cancel request: {id: string, type: 'cancel'}
   // Cancel response:
   //   {id: string, type: 'cancelResponse', wasCanceled: boolean}
-
-  if (!EnsureIpcConnection()) {
-    SendClientDisconnectedMessage();
-    return;
-  }
 
   const base::Value* message_id = request.Find(kMessageId);
   if (!message_id) {
@@ -249,18 +243,20 @@ void RemoteWebAuthnNativeMessagingHost::ProcessCancel(
 }
 
 void RemoteWebAuthnNativeMessagingHost::ProcessGetRemoteState(
-    base::Value::Dict response) {
+    base::DictValue response) {
   // GetRemoteState request: {id: string, type: 'getRemoteState'}
-  // GetRemoteState response: {id: string, type: 'getRemoteStateResponse'}
+  // GetRemoteState response:
+  //   {id: string, type: 'getRemoteStateResponse', isRemoted: boolean,
+  //    desktopSessionType: 'unspecified'|'remote-only'|'local-only'}
 
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  // We query and report the remote state one at a time to prevent race
-  // conditions caused by multiple requests coming in while there is already a
-  // pending request (e.g. WebAuthn channel connected and AttachToDesktop on
-  // Windows).
-  get_remote_state_responses_.push(std::move(response));
-  if (get_remote_state_responses_.size() == 1) {
+  // The browser sends getRemoteState whenever it detects a remote state change.
+  // It is possible that a stale state is received after a second getRemoteState
+  // request is received, so we need to make one query at a time to prevent race
+  // conditions.
+  pending_get_remote_state_requests_.push(std::move(response));
+  if (pending_get_remote_state_requests_.size() == 1) {
     QueryNextRemoteState();
   }
   // Otherwise it means there is already a pending remote state request.
@@ -269,14 +265,36 @@ void RemoteWebAuthnNativeMessagingHost::ProcessGetRemoteState(
 void RemoteWebAuthnNativeMessagingHost::OnQueryVersionResult(uint32_t version) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  SendNextRemoteState(true);
+  query_remote_state_timeout_timer_.Stop();
+  is_connection_valid_ = true;
+  while (!pending_process_requests_.empty()) {
+    std::move(pending_process_requests_.front()).Run();
+    pending_process_requests_.pop();
+  }
+
+  if (!pending_get_remote_state_requests_.empty()) {
+    SendNextRemoteState(true);
+  }
+}
+
+void RemoteWebAuthnNativeMessagingHost::OnQueryNextRemoteStateTimeout() {
+  LOG(ERROR) << "Timed out waiting for the response of QueryVersion";
+  OnIpcDisconnected();
 }
 
 void RemoteWebAuthnNativeMessagingHost::OnIpcDisconnected() {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
+  query_remote_state_timeout_timer_.Stop();
+  is_connection_valid_ = false;
   remote_.reset();
-  if (!get_remote_state_responses_.empty()) {
+  // base::queue does not have a clear() method.
+  base::queue<base::OnceClosure> empty_queue;
+  pending_process_requests_.swap(empty_queue);
+  id_to_request_canceller_.clear();
+  request_cancellers_.Clear();
+
+  if (!pending_get_remote_state_requests_.empty()) {
     SendNextRemoteState(false);
   } else {
     SendClientDisconnectedMessage();
@@ -284,7 +302,7 @@ void RemoteWebAuthnNativeMessagingHost::OnIpcDisconnected() {
 }
 
 void RemoteWebAuthnNativeMessagingHost::OnIsUvpaaResponse(
-    base::Value::Dict response,
+    base::DictValue response,
     bool is_available) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
@@ -293,7 +311,7 @@ void RemoteWebAuthnNativeMessagingHost::OnIsUvpaaResponse(
 }
 
 void RemoteWebAuthnNativeMessagingHost::OnCreateResponse(
-    base::Value::Dict response,
+    base::DictValue response,
     mojom::WebAuthnCreateResponsePtr remote_response) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
@@ -326,7 +344,7 @@ void RemoteWebAuthnNativeMessagingHost::OnCreateResponse(
 }
 
 void RemoteWebAuthnNativeMessagingHost::OnGetResponse(
-    base::Value::Dict response,
+    base::DictValue response,
     mojom::WebAuthnGetResponsePtr remote_response) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
@@ -358,7 +376,7 @@ void RemoteWebAuthnNativeMessagingHost::OnGetResponse(
 }
 
 void RemoteWebAuthnNativeMessagingHost::OnCancelResponse(
-    base::Value::Dict response,
+    base::DictValue response,
     bool was_canceled) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
@@ -374,10 +392,14 @@ void RemoteWebAuthnNativeMessagingHost::OnCancelResponse(
 void RemoteWebAuthnNativeMessagingHost::QueryNextRemoteState() {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  if (!EnsureIpcConnection()) {
-    SendNextRemoteState(false);
+  if (!EnsureRemoteBound()) {
+    OnIpcDisconnected();
     return;
   }
+
+  query_remote_state_timeout_timer_.Start(
+      FROM_HERE, kQueryRemoteStateTimeout, this,
+      &RemoteWebAuthnNativeMessagingHost::OnQueryNextRemoteStateTimeout);
 
   // QueryVersion() is simply used to determine if the receiving end actually
   // accepts the connection. If it doesn't, then the callback will be silently
@@ -389,50 +411,88 @@ void RemoteWebAuthnNativeMessagingHost::QueryNextRemoteState() {
 
 void RemoteWebAuthnNativeMessagingHost::SendNextRemoteState(bool is_remoted) {
   DCHECK(task_runner_->BelongsToCurrentThread());
-  DCHECK(!get_remote_state_responses_.empty());
+  DCHECK(!pending_get_remote_state_requests_.empty());
 
-  auto response = std::move(get_remote_state_responses_.front());
-  get_remote_state_responses_.pop();
+  auto response = std::move(pending_get_remote_state_requests_.front());
+  pending_get_remote_state_requests_.pop();
 
   response.Set(kGetRemoteStateResponseIsRemotedKey, is_remoted);
+  std::string desktop_session_type;
+  switch (GetDesktopSessionType()) {
+    case DesktopSessionType::UNSPECIFIED:
+      desktop_session_type = "unspecified";
+      break;
+    case DesktopSessionType::REMOTE_ONLY:
+      desktop_session_type = "remote-only";
+      break;
+    case DesktopSessionType::LOCAL_ONLY:
+      desktop_session_type = "local-only";
+      break;
+  }
+  response.Set(kGetRemoteStateResponseDesktopSessionTypeKey,
+               desktop_session_type);
   SendMessageToClient(std::move(response));
-  if (!get_remote_state_responses_.empty()) {
+  if (!pending_get_remote_state_requests_.empty()) {
     QueryNextRemoteState();
   }
 }
 
-bool RemoteWebAuthnNativeMessagingHost::EnsureIpcConnection() {
+void RemoteWebAuthnNativeMessagingHost::EnsureIpcConnectionThenProcess(
+    base::OnceClosure closure) {
+  DCHECK(task_runner_->BelongsToCurrentThread());
+  DCHECK(!closure.is_null());
+
+  if (is_connection_valid_) {
+    std::move(closure).Run();
+    return;
+  }
+
+  pending_process_requests_.push(std::move(closure));
+
+  QueryNextRemoteState();
+}
+
+bool RemoteWebAuthnNativeMessagingHost::EnsureRemoteBound() {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
   if (remote_.is_bound()) {
     return true;
   }
 
+  auto disconnect_handler =
+      base::BindRepeating(&RemoteWebAuthnNativeMessagingHost::OnIpcDisconnected,
+                          base::Unretained(this));
+  // There is a bug in Mojo, such that if the host rejects binding of session
+  // services, there is a chance that binding of WebAuthnProxy appears to be
+  // successful and the disconnect handler of `remote_` is never called, so
+  // `remote_` will remain invalid forever.
+  // The disconnect handler of session services is still called, so we set a
+  // disconnect handler on it.
+  // See https://crbug.com/425759818#comment8 for more context.
+  host_service_api_client_->set_disconnect_handler(disconnect_handler);
   auto* api = host_service_api_client_->GetSessionServices();
   if (!api) {
     return false;
   }
   api->BindWebAuthnProxy(remote_.BindNewPipeAndPassReceiver());
-  remote_.set_disconnect_handler(
-      base::BindOnce(&RemoteWebAuthnNativeMessagingHost::OnIpcDisconnected,
-                     base::Unretained(this)));
+  remote_.set_disconnect_handler(disconnect_handler);
   return true;
 }
 
 void RemoteWebAuthnNativeMessagingHost::SendMessageToClient(
-    base::Value::Dict message) {
+    base::DictValue message) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  std::string message_json;
-  if (!base::JSONWriter::Write(message, &message_json)) {
+  std::optional<std::string> message_json = base::WriteJson(message);
+  if (!message_json.has_value()) {
     LOG(ERROR) << "Failed to write message to JSON";
     return;
   }
-  client_->PostMessageFromNativeHost(message_json);
+  client_->PostMessageFromNativeHost(message_json.value());
 }
 
 const base::Value* RemoteWebAuthnNativeMessagingHost::FindMessageIdOrSendError(
-    base::Value::Dict& response) {
+    base::DictValue& response) {
   const base::Value* message_id = response.Find(kMessageId);
   if (message_id) {
     return message_id;
@@ -446,9 +506,9 @@ const base::Value* RemoteWebAuthnNativeMessagingHost::FindMessageIdOrSendError(
 
 const std::string*
 RemoteWebAuthnNativeMessagingHost::FindRequestDataOrSendError(
-    const base::Value::Dict& request,
+    const base::DictValue& request,
     const std::string& request_data_key,
-    base::Value::Dict& response) {
+    base::DictValue& response) {
   const std::string* request_data = request.FindString(request_data_key);
   if (request_data) {
     return request_data;
@@ -494,9 +554,8 @@ void RemoteWebAuthnNativeMessagingHost::OnRequestCancellerDisconnected(
     mojo::RemoteSetElementId disconnecting_canceller) {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  auto it =
-      base::ranges::find(id_to_request_canceller_, disconnecting_canceller,
-                         &IdToRequestMap::value_type::second);
+  auto it = std::ranges::find(id_to_request_canceller_, disconnecting_canceller,
+                              &IdToRequestMap::value_type::second);
   if (it != id_to_request_canceller_.end()) {
     id_to_request_canceller_.erase(it);
   }
@@ -509,7 +568,7 @@ void RemoteWebAuthnNativeMessagingHost::OnRequestCancellerDisconnected(
 void RemoteWebAuthnNativeMessagingHost::SendClientDisconnectedMessage() {
   DCHECK(task_runner_->BelongsToCurrentThread());
 
-  base::Value::Dict message;
+  base::DictValue message;
   message.Set(kMessageType, kClientDisconnectedMessageType);
   SendMessageToClient(std::move(message));
 }

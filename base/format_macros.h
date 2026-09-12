@@ -39,60 +39,8 @@
 
 #include <inttypes.h>
 
-#if BUILDFLAG(IS_WIN)
-
-#if !defined(PRId64) || !defined(PRIu64) || !defined(PRIx64)
-#error "inttypes.h provided by win toolchain should define these."
-#endif
-
-#define WidePRId64 L"I64d"
-#define WidePRIu64 L"I64u"
-#define WidePRIx64 L"I64x"
-
-#if !defined(PRIuS)
-#define PRIuS "Iu"
-#endif
-
-#elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
-
-// GCC will concatenate wide and narrow strings correctly, so nothing needs to
-// be done here.
-#define WidePRId64 PRId64
-#define WidePRIu64 PRIu64
-#define WidePRIx64 PRIx64
-
 #if !defined(PRIuS)
 #define PRIuS "zu"
 #endif
-
-#endif  // BUILDFLAG(IS_WIN)
-
-// The size of NSInteger and NSUInteger varies between 32-bit and 64-bit
-// architectures and Apple does not provides standard format macros and
-// recommends casting. This has many drawbacks, so instead define macros
-// for formatting those types.
-#if BUILDFLAG(IS_APPLE)
-#if defined(ARCH_CPU_64_BITS)
-#if !defined(PRIdNS)
-#define PRIdNS "ld"
-#endif
-#if !defined(PRIuNS)
-#define PRIuNS "lu"
-#endif
-#if !defined(PRIxNS)
-#define PRIxNS "lx"
-#endif
-#else  // defined(ARCH_CPU_64_BITS)
-#if !defined(PRIdNS)
-#define PRIdNS "d"
-#endif
-#if !defined(PRIuNS)
-#define PRIuNS "u"
-#endif
-#if !defined(PRIxNS)
-#define PRIxNS "x"
-#endif
-#endif
-#endif  // BUILDFLAG(IS_APPLE)
 
 #endif  // BASE_FORMAT_MACROS_H_

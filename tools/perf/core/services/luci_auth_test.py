@@ -3,9 +3,15 @@
 # found in the LICENSE file.
 
 import subprocess
+import sys
 import unittest
+from unittest import mock
 
-import mock
+from pathlib import Path
+
+# Add tools/perf to sys.path.
+FILE_PATH = Path(__file__).resolve()
+sys.path.append(str(FILE_PATH.parents[2]))
 
 from core.services import luci_auth
 
@@ -18,10 +24,12 @@ class TestLuciAuth(unittest.TestCase):
     if not return_code:
       self.check_output.return_value = output
     else:
+
       def SideEffect(cmd, *args, **kwargs):
         del args  # Unused.
         del kwargs  # Unused.
         raise subprocess.CalledProcessError(return_code, cmd, output=output)
+
       self.check_output.side_effect = SideEffect
 
   def tearDown(self):
@@ -51,9 +59,14 @@ class TestLuciAuth(unittest.TestCase):
 
   def testGetUserEmail(self):
     self._MockSubprocessOutput(
-        'Logged in as someone@example.com.\n'
-        'OAuth token details:\n'
-        '  Client ID: abcd1234foo.bar.example.com\n'
-        '  Scopes:\n'
-        '    https://www.example.com/auth/userinfo.email\n')
+      'Logged in as someone@example.com.\n'
+      'OAuth token details:\n'
+      '  Client ID: abcd1234foo.bar.example.com\n'
+      '  Scopes:\n'
+      '    https://www.example.com/auth/userinfo.email\n'
+    )
     self.assertEqual(luci_auth.GetUserEmail(), 'someone@example.com')
+
+
+if __name__ == '__main__':
+  unittest.main()

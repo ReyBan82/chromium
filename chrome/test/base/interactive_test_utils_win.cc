@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -20,7 +21,6 @@
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/test/base/interactive_test_utils_aura.h"
 #include "chrome/test/base/process_lineage_win.h"
 #include "chrome/test/base/save_desktop_snapshot.h"
@@ -33,20 +33,13 @@
 namespace ui_test_utils {
 
 void HideNativeWindow(gfx::NativeWindow window) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  HideNativeWindowAura(window);
-#else
   HWND hwnd = window->GetHost()->GetAcceleratedWidget();
   ::ShowWindow(hwnd, SW_HIDE);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
 }
 
 bool ShowAndFocusNativeWindow(gfx::NativeWindow window) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  ShowAndFocusNativeWindowAura(window);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
   window->Show();
-  // Always make sure the window hosting ash is visible and focused.
+  // Always make sure the window is visible and focused.
   HWND hwnd = window->GetHost()->GetAcceleratedWidget();
 
   ::ShowWindow(hwnd, SW_SHOW);
@@ -133,8 +126,10 @@ bool ShowAndFocusNativeWindow(gfx::NativeWindow window) {
         base::BindRepeating(
             [](HWND foreground_window,
                const base::RepeatingClosure& quit_closure, int* polls) {
-              if (!*polls-- || ::GetForegroundWindow() != foreground_window)
+              if (UNSAFE_TODO(!*polls--) ||
+                  ::GetForegroundWindow() != foreground_window) {
                 quit_closure.Run();
+              }
             },
             foreground_window, run_loop.QuitClosure(),
             base::Owned(std::make_unique<int>(

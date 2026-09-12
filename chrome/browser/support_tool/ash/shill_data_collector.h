@@ -7,6 +7,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -22,7 +23,6 @@
 #include "components/feedback/redaction_tool/pii_types.h"
 #include "components/feedback/redaction_tool/redaction_tool.h"
 #include "components/feedback/system_logs/system_logs_source.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 // ShillDataCollector collects support debug data from shill. It detects
 // shill-specific PII and it also uses redaction::RedactionTool to further remove
@@ -73,29 +73,29 @@ class ShillDataCollector : public DataCollector {
                       bool success);
 
   // These are functions originated from `system_logs::ShillLogSource`.
-  void OnGetManagerProperties(absl::optional<base::Value::Dict> result);
+  void OnGetManagerProperties(std::optional<base::DictValue> result);
 
   void OnGetDevice(const std::string& device_path,
-                   absl::optional<base::Value::Dict> properties);
+                   std::optional<base::DictValue> properties);
 
   void AddDeviceAndRequestIPConfigs(const std::string& device_path,
-                                    const base::Value::Dict& properties);
+                                    const base::DictValue& properties);
 
   void OnGetIPConfig(const std::string& device_path,
                      const std::string& ip_config_path,
-                     absl::optional<base::Value::Dict> properties);
+                     std::optional<base::DictValue> properties);
 
   void AddIPConfig(const std::string& device_path,
                    const std::string& ip_config_path,
-                   const base::Value::Dict& properties);
+                   const base::DictValue& properties);
 
   void OnGetService(const std::string& service_path,
-                    absl::optional<base::Value::Dict> properties);
+                    std::optional<base::DictValue> properties);
 
   // Expands UIData from JSON into a dictionary if present. Also detects PII
   // such as the device and service names.
-  base::Value::Dict ExpandProperties(const std::string& object_path,
-                                     const base::Value::Dict& properties);
+  base::DictValue ExpandProperties(const std::string& object_path,
+                                   const base::DictValue& properties);
 
   // Check whether all property requests have been completed. If so, runs
   // redaction::RedactionTool on the collected log.
@@ -107,7 +107,7 @@ class ShillDataCollector : public DataCollector {
   scoped_refptr<base::SequencedTaskRunner> task_runner_for_redaction_tool_;
   scoped_refptr<redaction::RedactionToolContainer> redaction_tool_container_;
   // Contains the retrieved shill log.
-  base::Value::Dict shill_log_;
+  base::DictValue shill_log_;
   PIIMap pii_map_;
   // Records the number of pending entries to be processed.
   int num_entries_left_;

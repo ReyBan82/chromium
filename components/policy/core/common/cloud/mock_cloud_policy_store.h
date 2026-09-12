@@ -12,7 +12,7 @@ namespace policy {
 
 class MockCloudPolicyStore : public CloudPolicyStore {
  public:
-  MockCloudPolicyStore();
+  explicit MockCloudPolicyStore(const std::string& policy_type);
   MockCloudPolicyStore(const MockCloudPolicyStore&) = delete;
   MockCloudPolicyStore& operator=(const MockCloudPolicyStore&) = delete;
   ~MockCloudPolicyStore() override;
@@ -21,8 +21,9 @@ class MockCloudPolicyStore : public CloudPolicyStore {
   MOCK_METHOD0(Load, void(void));
 
   // Publish the protected members.
-  using CloudPolicyStore::NotifyStoreLoaded;
   using CloudPolicyStore::NotifyStoreError;
+  using CloudPolicyStore::NotifyStoreLoaded;
+  using CloudPolicyStore::SetPolicy;
 
   using CloudPolicyStore::invalidation_version_;
   using CloudPolicyStore::policy_map_;

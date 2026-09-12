@@ -7,7 +7,7 @@
 
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/iterators/text_iterator_behavior.h"
-#include "third_party/blink/renderer/core/layout/ng/inline/ng_offset_mapping.h"
+#include "third_party/blink/renderer/core/layout/inline/offset_mapping.h"
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -38,11 +38,11 @@ class TextIteratorTextNodeHandler {
   void HandleTextNodeWhole(const Text*);
 
   // Variants that emit plain text within the given DOM offset range.
-  void HandleTextNodeStartFrom(const Text*, unsigned start_offset);
-  void HandleTextNodeEndAt(const Text*, unsigned end_offset);
+  void HandleTextNodeStartFrom(const Text*, wtf_size_t start_offset);
+  void HandleTextNodeEndAt(const Text*, wtf_size_t end_offset);
   void HandleTextNodeInRange(const Text*,
-                             unsigned start_offset,
-                             unsigned end_offset);
+                             wtf_size_t start_offset,
+                             wtf_size_t end_offset);
 
  private:
   void HandleTextNodeWithLayoutNG();
@@ -54,11 +54,11 @@ class TextIteratorTextNodeHandler {
 
   // The current text node and offset range, from which text should be emitted.
   const Text* text_node_ = nullptr;
-  unsigned offset_ = 0;
-  unsigned end_offset_ = 0;
+  wtf_size_t offset_ = 0;
+  wtf_size_t end_offset_ = 0;
 
   // UnitVector for text_node_. This is available only if uses_layout_ng_.
-  NGOffsetMapping::UnitVector mapping_units_;
+  OffsetMapping::UnitVector mapping_units_;
   wtf_size_t mapping_units_index_ = 0;
 
   const TextIteratorBehavior behavior_;

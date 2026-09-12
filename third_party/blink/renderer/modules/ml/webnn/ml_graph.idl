@@ -8,4 +8,7 @@
   RuntimeEnabled=MachineLearningNeuralNetwork,
   Exposed=(Window, DedicatedWorker)
 ] interface MLGraph {
+  readonly attribute FrozenArray<MLDeviceType> devices;
+
+  void destroy();
 };

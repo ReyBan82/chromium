@@ -8,10 +8,10 @@
 #include <string>
 #include <vector>
 
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "components/services/app_service/public/cpp/intent.h"
 
-class Browser;
+class BrowserWindowInterface;
 
 namespace apps {
 struct ShareTarget;
@@ -20,11 +20,10 @@ struct ShareTarget;
 namespace web_app {
 
 struct SharedField {
+  friend bool operator==(const SharedField&, const SharedField&) = default;
+
   std::string name;
   std::string value;
-
-  bool operator==(const SharedField& other) const;
-  bool operator!=(const SharedField& other) const { return !(*this == other); }
 };
 
 std::vector<SharedField> ExtractSharedFields(
@@ -32,7 +31,7 @@ std::vector<SharedField> ExtractSharedFields(
     const apps::Intent& intent);
 
 NavigateParams NavigateParamsForShareTarget(
-    Browser* browser,
+    BrowserWindowInterface* browser,
     const apps::ShareTarget& share_target,
     const apps::Intent& intent,
     const std::vector<base::FilePath>& launch_files);

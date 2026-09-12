@@ -14,8 +14,10 @@
 #include "base/feature_list.h"
 #include "chrome/browser/flags/android/chrome_feature_list.h"
 #else
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/browser/ui/tabs/tab_change_type.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #endif
 
 using blink::web_pref::WebPreferences;
@@ -26,11 +28,12 @@ namespace vr {
 VrTabHelper::VrTabHelper(content::WebContents* contents)
     : content::WebContentsUserData<VrTabHelper>(*contents) {}
 
-VrTabHelper::~VrTabHelper() {}
+VrTabHelper::~VrTabHelper() = default;
 
 void VrTabHelper::SetIsInVr(bool is_in_vr) {
-  if (is_in_vr_ == is_in_vr)
+  if (is_in_vr_ == is_in_vr) {
     return;
+  }
 
   is_in_vr_ = is_in_vr;
 
@@ -81,13 +84,12 @@ void VrTabHelper::SetIsContentDisplayedInHeadset(content::WebContents* contents,
   vr_tab_helper->SetIsContentDisplayedInHeadset(state);
   if (old_state != state) {
 #if !BUILDFLAG(IS_ANDROID)
-    Browser* browser = chrome::FindBrowserWithWebContents(contents);
+    BrowserWindowInterface* browser =
+        GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(contents);
     if (browser) {
-      TabStripModel* tab_strip_model = browser->tab_strip_model();
+      TabStripModel* tab_strip_model = browser->GetTabStripModel();
       if (tab_strip_model) {
-        tab_strip_model->UpdateWebContentsStateAt(
-            tab_strip_model->GetIndexOfWebContents(contents),
-            TabChangeType::kAll);
+        tab_strip_model->UpdateWebContentsState(contents, TabChangeType::kAll);
       }
     }
 #endif
@@ -103,6 +105,15 @@ void VrTabHelper::ExitVrPresentation() {
 
 void VrTabHelper::SetIsContentDisplayedInHeadset(bool state) {
   is_content_displayed_in_headset_ = state;
+  observers_.Notify(&Observer::OnIsContentDisplayedInHeadsetChanged, state);
+}
+
+void VrTabHelper::AddObserver(Observer* observer) {
+  observers_.AddObserver(observer);
+}
+
+void VrTabHelper::RemoveObserver(Observer* observer) {
+  observers_.RemoveObserver(observer);
 }
 
 WEB_CONTENTS_USER_DATA_KEY_IMPL(VrTabHelper);

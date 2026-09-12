@@ -5,6 +5,7 @@
 import("//mojo/public/tools/bindings/mojom.gni")
 
 mojom("common") {
+  generate_blink = true
   sources = [
     "dmabuf.mojom",
     "jpeg_encode_accelerator.mojom",
@@ -12,7 +13,7 @@ mojom("common") {
   ]
 
   public_deps = [
-    "//media/mojo/mojom",
+    "//media/mojo/mojom:media_types",
     "//mojo/public/mojom/base",
     "//ui/gfx/geometry/mojom",
   ]

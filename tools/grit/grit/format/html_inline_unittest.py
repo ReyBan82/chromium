@@ -5,10 +5,10 @@
 
 '''Unit tests for grit.format.html_inline'''
 
-
 import os
 import re
 import sys
+
 if __name__ == '__main__':
   sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
 
@@ -26,6 +26,10 @@ class FakeGrdNode:
 class HtmlInlineUnittest(unittest.TestCase):
   '''Unit tests for HtmlInline.'''
 
+  @classmethod
+  def setUpClass(cls):
+    os.environ["root_gen_dir"] = "gen"
+
   def testGetResourceFilenames(self):
     '''Tests that all included files are returned by GetResourceFilenames.'''
 
@@ -42,35 +46,33 @@ class HtmlInlineUnittest(unittest.TestCase):
           <include src='test.html'>
           <include
               src="really-long-long-long-long-long-test-file-omg-so-long.html">
+          <script src="foo.js"></script>
         </body>
       </html>
       ''',
-
       'test.html': '''
       <include src="test2.html">
       ''',
-
       'really-long-long-long-long-long-test-file-omg-so-long.html': '''
       <!-- This really long named resource should be included. -->
       ''',
-
       'test2.html': '''
       <!-- This second level resource should also be included. -->
       ''',
-
       'test.css': '''
       .image {
         background: url('test.png');
       }
       ''',
-
       'really-long-long-long-long-long-test.css': '''
       a:hover {
         font-weight: bold;  /* Awesome effect is awesome! */
       }
       ''',
-
       'test.png': 'PNG DATA',
+      'foo.js': '''
+      console.log('hello foo');
+      ''',
     }
 
     source_resources = set()
@@ -78,9 +80,49 @@ class HtmlInlineUnittest(unittest.TestCase):
     for filename in files:
       source_resources.add(tmp_dir.GetPath(filename))
 
-    resources = html_inline.GetResourceFilenames(tmp_dir.GetPath('index.html'),
-                                                 None)
+    resources = html_inline.GetResourceFilenames(
+      tmp_dir.GetPath('index.html'), None
+    )
     resources.add(tmp_dir.GetPath('index.html'))
+    self.assertEqual(resources, source_resources)
+    tmp_dir.CleanUp()
+
+  def testGetResourceFilenamesWithGeneratedFile(self):
+    '''Tests that included files are returned by GetResourceFilenames, even when
+    generated files are inlined, and that no exception is thrown by
+    accidentally trying to read generated files which are not guaranteed to
+    exist yet (prod case is when this is invoked from grit_info.py).'''
+
+    # Create an HTML file that attempts to inline a generated JS file.
+    # Intentionally don't create the generated JS file to simulate he case where
+    # it does not exist yet, by the time GetResourceFilenames() is invoked.
+    files = {
+      'index.html': '''
+      <!DOCTYPE HTML>
+      <html>
+        <body>
+          <script src="%ROOT_GEN_DIR%/does_not_exist.js"></script>
+        </body>
+      </html>
+      ''',
+    }
+
+    source_resources = set()
+    tmp_dir = util.TempDir(files)
+    # `root_gen_dir` environment valiable must be specified relative to the
+    # current working directory.
+    os.environ["root_gen_dir"] = os.path.relpath(
+      os.path.join(tmp_dir.GetPath(), 'gen')
+    )
+
+    source_resources.add(
+      tmp_dir.GetPath(os.path.join('gen', 'does_not_exist.js'))
+    )
+
+    resources = html_inline.GetResourceFilenames(
+      tmp_dir.GetPath('index.html'), None
+    )
+
     self.assertEqual(resources, source_resources)
     tmp_dir.CleanUp()
 
@@ -123,15 +165,15 @@ class HtmlInlineUnittest(unittest.TestCase):
     for filename in files:
       source_resources.add(tmp_dir.GetPath(filename))
 
-    resources = html_inline.GetResourceFilenames(tmp_dir.GetPath('index.js'),
-                                                 None)
+    resources = html_inline.GetResourceFilenames(
+      tmp_dir.GetPath('index.js'), None
+    )
     resources.add(tmp_dir.GetPath('index.js'))
     self.assertEqual(resources, source_resources)
     tmp_dir.CleanUp()
 
   def testInlineCSSImports(self):
-    '''Tests that @import directives in inlined CSS files are inlined too.
-    '''
+    '''Tests that @import directives in inlined CSS files are inlined too.'''
 
     files = {
       'index.html': '''
@@ -141,21 +183,18 @@ class HtmlInlineUnittest(unittest.TestCase):
       </head>
       </html>
       ''',
-
       'css/test.css': '''
       @import url('test2.css');
       blink {
         display: none;
       }
       ''',
-
       'css/test2.css': '''
       .image {
         background: url('../images/test.png');
       }
       '''.strip(),
-
-      'images/test.png': 'PNG DATA'
+      'images/test.png': 'PNG DATA',
     }
 
     expected_inlined = '''
@@ -182,14 +221,14 @@ class HtmlInlineUnittest(unittest.TestCase):
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
 
     tmp_dir.CleanUp()
 
   def testInlineIgnoresPolymerBindings(self):
-    '''Tests that polymer bindings are ignored when inlining.
-    '''
+    '''Tests that polymer bindings are ignored when inlining.'''
 
     files = {
       'index.html': '''
@@ -210,7 +249,6 @@ class HtmlInlineUnittest(unittest.TestCase):
       </body>
       </html>
       ''',
-
       'test.css': '''
       .image {
         background: url('test.png');
@@ -221,8 +259,7 @@ class HtmlInlineUnittest(unittest.TestCase):
             url('test.png') 2x);
       }
       ''',
-
-      'test.png': 'PNG DATA'
+      'test.png': 'PNG DATA',
     }
 
     expected_inlined = '''
@@ -262,8 +299,9 @@ class HtmlInlineUnittest(unittest.TestCase):
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
 
     tmp_dir.CleanUp()
 
@@ -278,9 +316,7 @@ class HtmlInlineUnittest(unittest.TestCase):
       </head>
       </html>
       ''',
-
       'foo.css': '''<include src="style.css">''',
-
       'style.css': '''
       <include src="style2.css">
       blink {
@@ -312,8 +348,9 @@ class HtmlInlineUnittest(unittest.TestCase):
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
 
   def testCssIncludedFileNames(self):
@@ -330,21 +367,17 @@ class HtmlInlineUnittest(unittest.TestCase):
         </body>
       </html>
       ''',
-
       'test.css': '''
       <include src="test2.css">
       ''',
-
       'test2.css': '''
       <include src="test3.css">
       .image {
         background: url('test.png');
       }
       ''',
-
       'test3.css': '''h1 {}''',
-
-      'test.png': 'PNG DATA'
+      'test.png': 'PNG DATA',
     }
 
     source_resources = set()
@@ -352,8 +385,9 @@ class HtmlInlineUnittest(unittest.TestCase):
     for filename in files:
       source_resources.add(tmp_dir.GetPath(filename))
 
-    resources = html_inline.GetResourceFilenames(tmp_dir.GetPath('index.html'),
-                                                 None)
+    resources = html_inline.GetResourceFilenames(
+      tmp_dir.GetPath('index.html'), None
+    )
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
     tmp_dir.CleanUp()
@@ -370,7 +404,6 @@ class HtmlInlineUnittest(unittest.TestCase):
       </head>
       </html>
       ''',
-
       'foo.css': '''
       @import url(chrome://resources/blurp.css);
       blink {
@@ -402,9 +435,48 @@ class HtmlInlineUnittest(unittest.TestCase):
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
+
+  def testFilenameRootGenDirExpansion(self):
+    '''Tests that %ROOT_GEN_DIR tokens in filenames are properly expanded'''
+
+    files = {
+      'index.html': '''
+      <html>
+      <body>
+      <script src="%ROOT_GEN_DIR%/foo/bar/generated.js"></script>
+      </body>
+      </html>
+      ''',
+    }
+    files[os.path.join('gen', 'foo', 'bar', 'generated.js')] = (
+      '''console.log('hello generated');'''
+    )
+
+    expected_inlined = '''
+      <html>
+      <body>
+      <script>console.log('hello generated');</script>
+      </body>
+      </html>
+      '''
+
+    source_resources = set()
+    tmp_dir = util.TempDir(files)
+    os.environ["root_gen_dir"] = os.path.relpath(
+      os.path.join(tmp_dir.GetPath(), 'gen')
+    )
+    for filename in files:
+      source_resources.add(tmp_dir.GetPath(filename))
+
+    result = html_inline.DoInline(tmp_dir.GetPath('index.html'), None)
+    resources = result.inlined_files
+    resources.add(tmp_dir.GetPath('index.html'))
+    self.assertEqual(resources, source_resources)
+    self.assertMultiLineEqual(expected_inlined, result.inlined_data)
 
   def testFilenameVariableExpansion(self):
     '''Tests that variables are expanded in filenames before inlining.'''
@@ -447,21 +519,24 @@ class HtmlInlineUnittest(unittest.TestCase):
 
     # Test normal inlining.
     result = html_inline.DoInline(
-        tmp_dir.GetPath('index.html'),
-        None,
-        filename_expansion_function=replacer('WHICH', '1'))
+      tmp_dir.GetPath('index.html'),
+      None,
+      filename_expansion_function=replacer('WHICH', '1'),
+    )
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
 
     # Test names-only inlining.
     result = html_inline.DoInline(
-        tmp_dir.GetPath('index.html'),
-        None,
-        names_only=True,
-        filename_expansion_function=replacer('WHICH', '1'))
+      tmp_dir.GetPath('index.html'),
+      None,
+      names_only=True,
+      filename_expansion_function=replacer('WHICH', '1'),
+    )
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
@@ -524,14 +599,13 @@ class HtmlInlineUnittest(unittest.TestCase):
       source_resources.add(tmp_dir.GetPath(filename))
 
     # Test normal inlining.
-    result = html_inline.DoInline(
-        tmp_dir.GetPath('index.html'),
-        None)
+    result = html_inline.DoInline(tmp_dir.GetPath('index.html'), None)
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
 
   def testCommentedJsInclude(self):
@@ -553,8 +627,9 @@ class HtmlInlineUnittest(unittest.TestCase):
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('include.js'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
 
   def testCommentedJsIf(self):
@@ -590,8 +665,9 @@ class HtmlInlineUnittest(unittest.TestCase):
 
     resources.add(tmp_dir.GetPath('if.js'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
 
   def testBasicRemovalComments(self):
@@ -678,8 +754,10 @@ Line 2 /*grit-removed-lines:2*/ Line 4
     self.assertMultiLineEqual(result, expected_result)
 
   def testRemovePartOfLine(self):
-    input = ('Long line<if expr="False">stuff</if>and more<'
-             'if expr="True">stuff</if> and done')
+    input = (
+      'Long line<if expr="False">stuff</if>and more<'
+      'if expr="True">stuff</if> and done'
+    )
     expected_result = 'Long lineand morestuff and done'
     result = html_inline.CheckConditionalElements(FakeGrdNode(), input)
     self.assertEqual(result, expected_result)
@@ -772,8 +850,8 @@ L17 /*grit-removed-lines:4*/
       <html>
       <img src="img1.png" srcset="img2.png 1x, img3.png 2x">
       <img src="img4.png" srcset=" img5.png   1x , img6.png 2x ">
-      <img src="chrome://theme/img11.png" srcset="img7.png 1x, '''\
-          '''chrome://theme/img13.png 2x">
+      <img src="chrome://theme/img11.png" srcset="img7.png 1x, '''
+      '''chrome://theme/img13.png 2x">
       <img srcset="img8.png 300w, img9.png 11E-2w,img10.png -1e2w">
       <img srcset="img11.png">
       <img srcset="img11.png, img2.png 1x">
@@ -793,21 +871,23 @@ L17 /*grit-removed-lines:4*/
       'img11.png': '''a11''',
     }
 
-    expected_inlined = '''
+    expected_inlined = (
+      '''
       <html>
-      <img src="data:image/png;base64,YTE=" srcset="data:image/png;base64,'''\
-          '''YTI= 1x,data:image/png;base64,YTM= 2x">
-      <img src="data:image/png;base64,YTQ=" srcset="data:image/png;base64,'''\
-          '''YTU= 1x,data:image/png;base64,YTY= 2x">
-      <img src="chrome://theme/img11.png" srcset="data:image/png;base64,'''\
-          '''YTc= 1x,chrome://theme/img13.png 2x">
-      <img srcset="data:image/png;base64,YTg= 300w,data:image/png;base64,'''\
-          '''YTk= 11E-2w,data:image/png;base64,YTEw -1e2w">
+      <img src="data:image/png;base64,YTE=" srcset="data:image/png;base64,'''
+      '''YTI= 1x,data:image/png;base64,YTM= 2x">
+      <img src="data:image/png;base64,YTQ=" srcset="data:image/png;base64,'''
+      '''YTU= 1x,data:image/png;base64,YTY= 2x">
+      <img src="chrome://theme/img11.png" srcset="data:image/png;base64,'''
+      '''YTc= 1x,chrome://theme/img13.png 2x">
+      <img srcset="data:image/png;base64,YTg= 300w,data:image/png;base64,'''
+      '''YTk= 11E-2w,data:image/png;base64,YTEw -1e2w">
       <img srcset="data:image/png;base64,YTEx">
       <img srcset="data:image/png;base64,YTEx,data:image/png;base64,YTI= 1x">
       <img srcset="data:image/png;base64,YTI= 1x,data:image/png;base64,YTEx">
       </html>
       '''
+    )
 
     source_resources = set()
     tmp_dir = util.TempDir(files)
@@ -815,19 +895,17 @@ L17 /*grit-removed-lines:4*/
       source_resources.add(tmp_dir.GetPath(filename))
 
     # Test normal inlining.
-    result = html_inline.DoInline(
-        tmp_dir.GetPath('index.html'),
-        None)
+    result = html_inline.DoInline(tmp_dir.GetPath('index.html'), None)
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
 
   def testImgSrcsetIgnoresI18n(self):
-    '''Tests that $i18n{...} strings are ignored when inlining.
-    '''
+    '''Tests that $i18n{...} strings are ignored when inlining.'''
 
     src_html = '''
       <html>
@@ -853,8 +931,9 @@ L17 /*grit-removed-lines:4*/
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
 
   def testSourceSrcset(self):
@@ -867,8 +946,8 @@ L17 /*grit-removed-lines:4*/
       <html>
       <source src="img1.png" srcset="img2.png 1x, img3.png 2x">
       <source src="img4.png" srcset=" img5.png   1x , img6.png 2x ">
-      <source src="chrome://theme/img11.png" srcset="img7.png 1x, '''\
-          '''chrome://theme/img13.png 2x">
+      <source src="chrome://theme/img11.png" srcset="img7.png 1x, '''
+      '''chrome://theme/img13.png 2x">
       <source srcset="img8.png 300w, img9.png 11E-2w,img10.png -1e2w">
       <source srcset="img11.png">
       </html>
@@ -886,19 +965,21 @@ L17 /*grit-removed-lines:4*/
       'img11.png': '''a11''',
     }
 
-    expected_inlined = '''
+    expected_inlined = (
+      '''
       <html>
-      <source src="data:image/png;base64,YTE=" srcset="data:image/png;'''\
-          '''base64,YTI= 1x,data:image/png;base64,YTM= 2x">
-      <source src="data:image/png;base64,YTQ=" srcset="data:image/png;'''\
-          '''base64,YTU= 1x,data:image/png;base64,YTY= 2x">
-      <source src="chrome://theme/img11.png" srcset="data:image/png;'''\
-          '''base64,YTc= 1x,chrome://theme/img13.png 2x">
-      <source srcset="data:image/png;base64,YTg= 300w,data:image/png;'''\
-          '''base64,YTk= 11E-2w,data:image/png;base64,YTEw -1e2w">
+      <source src="data:image/png;base64,YTE=" srcset="data:image/png;'''
+      '''base64,YTI= 1x,data:image/png;base64,YTM= 2x">
+      <source src="data:image/png;base64,YTQ=" srcset="data:image/png;'''
+      '''base64,YTU= 1x,data:image/png;base64,YTY= 2x">
+      <source src="chrome://theme/img11.png" srcset="data:image/png;'''
+      '''base64,YTc= 1x,chrome://theme/img13.png 2x">
+      <source srcset="data:image/png;base64,YTg= 300w,data:image/png;'''
+      '''base64,YTk= 11E-2w,data:image/png;base64,YTEw -1e2w">
       <source srcset="data:image/png;base64,YTEx">
       </html>
       '''
+    )
 
     source_resources = set()
     tmp_dir = util.TempDir(files)
@@ -910,13 +991,16 @@ L17 /*grit-removed-lines:4*/
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
-    self.assertEqual(expected_inlined,
-                         util.FixLineEnd(result.inlined_data, '\n'))
+    self.assertEqual(
+      expected_inlined, util.FixLineEnd(result.inlined_data, '\n')
+    )
     tmp_dir.CleanUp()
 
   def testConditionalInclude(self):
-    '''Tests that output and dependency generation includes only files not'''\
-        ''' blocked by  <if> macros.'''
+    (
+      '''Tests that output and dependency generation includes only files not'''
+      ''' blocked by  <if> macros.'''
+    )
 
     files = {
       'index.html': '''
@@ -928,8 +1012,8 @@ L17 /*grit-removed-lines:4*/
         <img src="img4.png" srcset=" img5.png 1x, img6.png 2x ">
       </if>
       <if expr="True">
-        <img src="chrome://theme/img11.png" srcset="img7.png 1x, '''\
-            '''chrome://theme/img13.png 2x">
+        <img src="chrome://theme/img11.png" srcset="img7.png 1x, '''
+      '''chrome://theme/img13.png 2x">
       </if>
       <img srcset="img8.png 300w, img9.png 11E-2w,img10.png -1e2w">
       </html>
@@ -946,16 +1030,18 @@ L17 /*grit-removed-lines:4*/
       'img10.png': '''a10''',
     }
 
-    expected_inlined = '''
+    expected_inlined = (
+      '''
       <html>
-      <img src="data:image/png;base64,YTE=" srcset="data:image/png;base64,'''\
-          '''YTI= 1x,data:image/png;base64,YTM= 2x">
-      <img src="chrome://theme/img11.png" srcset="data:image/png;base64,'''\
-          '''YTc= 1x,chrome://theme/img13.png 2x">
-      <img srcset="data:image/png;base64,YTg= 300w,data:image/png;base64,'''\
-          '''YTk= 11E-2w,data:image/png;base64,YTEw -1e2w">
+      <img src="data:image/png;base64,YTE=" srcset="data:image/png;base64,'''
+      '''YTI= 1x,data:image/png;base64,YTM= 2x">
+      <img src="chrome://theme/img11.png" srcset="data:image/png;base64,'''
+      '''YTc= 1x,chrome://theme/img13.png 2x">
+      <img srcset="data:image/png;base64,YTg= 300w,data:image/png;base64,'''
+      '''YTk= 11E-2w,data:image/png;base64,YTEw -1e2w">
       </html>
       '''
+    )
 
     expected_files = [
       'index.html',
@@ -965,7 +1051,7 @@ L17 /*grit-removed-lines:4*/
       'img7.png',
       'img8.png',
       'img9.png',
-      'img10.png'
+      'img10.png',
     ]
 
     source_resources = set()
@@ -974,22 +1060,21 @@ L17 /*grit-removed-lines:4*/
       source_resources.add(tmp_dir.GetPath(filename))
 
     # Test normal inlining.
-    result = html_inline.DoInline(
-        tmp_dir.GetPath('index.html'),
-        FakeGrdNode())
+    result = html_inline.DoInline(tmp_dir.GetPath('index.html'), FakeGrdNode())
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
 
     # ignore whitespace
     expected_inlined = re.sub(r'\s+', ' ', expected_inlined)
-    actually_inlined = re.sub(r'\s+', ' ',
-                              util.FixLineEnd(result.inlined_data, '\n'))
-    self.assertEqual(expected_inlined, actually_inlined);
+    actually_inlined = re.sub(
+      r'\s+', ' ', util.FixLineEnd(result.inlined_data, '\n')
+    )
+    self.assertEqual(expected_inlined, actually_inlined)
     tmp_dir.CleanUp()
 
   def testPreprocessOnlyEvaluatesIncludeAndIf(self):
-    '''Tests that preprocess_only=true evaluates <include> and <if> only.  '''
+    '''Tests that preprocess_only=true evaluates <include> and <if> only.'''
 
     files = {
       'index.html': '''
@@ -1008,7 +1093,7 @@ L17 /*grit-removed-lines:4*/
       ''',
       'not_inlined.css': ''' /* <link> should not be inlined. */ ''',
       'also_not_inlined.js': ''' // <script> should not be inlined. ''',
-      'inline_this.html': ''' <p>'include' should be inlined.</p> '''
+      'inline_this.html': ''' <p>'include' should be inlined.</p> ''',
     }
 
     expected_inlined = '''
@@ -1029,22 +1114,24 @@ L17 /*grit-removed-lines:4*/
     source_resources.add(tmp_dir.GetPath('index.html'))
     source_resources.add(tmp_dir.GetPath('inline_this.html'))
 
-    result = html_inline.DoInline(tmp_dir.GetPath('index.html'), None,
-                                  preprocess_only=True)
+    result = html_inline.DoInline(
+      tmp_dir.GetPath('index.html'), None, preprocess_only=True
+    )
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
 
     # Ignore whitespace
     expected_inlined = re.sub(r'\s+', ' ', expected_inlined)
-    actually_inlined = re.sub(r'\s+', ' ',
-                              util.FixLineEnd(result.inlined_data, '\n'))
+    actually_inlined = re.sub(
+      r'\s+', ' ', util.FixLineEnd(result.inlined_data, '\n')
+    )
     self.assertEqual(expected_inlined, actually_inlined)
 
     tmp_dir.CleanUp()
 
   def testPreprocessOnlyAppliesRecursively(self):
-    '''Tests that preprocess_only=true propagates to included files. '''
+    '''Tests that preprocess_only=true propagates to included files.'''
 
     files = {
       'index.html': '''
@@ -1057,7 +1144,7 @@ L17 /*grit-removed-lines:4*/
       <link rel="stylesheet" href="not_inlined.css">
       ''',
       'inner_include.html': ''' <p>This should be inlined in index.html</p> ''',
-      'not_inlined.css': ''' /* This should not be inlined. */ '''
+      'not_inlined.css': ''' /* This should not be inlined. */ ''',
     }
 
     expected_inlined = '''
@@ -1073,19 +1160,22 @@ L17 /*grit-removed-lines:4*/
     source_resources.add(tmp_dir.GetPath('outer_include.html'))
     source_resources.add(tmp_dir.GetPath('inner_include.html'))
 
-    result = html_inline.DoInline(tmp_dir.GetPath('index.html'), None,
-                                  preprocess_only=True)
+    result = html_inline.DoInline(
+      tmp_dir.GetPath('index.html'), None, preprocess_only=True
+    )
     resources = result.inlined_files
     resources.add(tmp_dir.GetPath('index.html'))
     self.assertEqual(resources, source_resources)
 
     # Ignore whitespace
     expected_inlined = re.sub(r'\s+', ' ', expected_inlined)
-    actually_inlined = re.sub(r'\s+', ' ',
-                              util.FixLineEnd(result.inlined_data, '\n'))
+    actually_inlined = re.sub(
+      r'\s+', ' ', util.FixLineEnd(result.inlined_data, '\n')
+    )
     self.assertEqual(expected_inlined, actually_inlined)
 
     tmp_dir.CleanUp()
+
 
 if __name__ == '__main__':
   unittest.main()

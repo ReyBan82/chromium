@@ -4,15 +4,18 @@
 
 #include "device/bluetooth/bluetooth_remote_gatt_descriptor_mac.h"
 
+#import "base/apple/foundation_util.h"
 #include "base/functional/bind.h"
-#import "base/mac/foundation_util.h"
+#include "base/notimplemented.h"
+#include "base/strings/strcat.h"
 #include "base/strings/sys_string_conversions.h"
 #import "base/task/single_thread_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
-#import "device/bluetooth/bluetooth_adapter_mac.h"
+#include "base/unguessable_token.h"
+#include "device/bluetooth/bluetooth_low_energy_adapter_apple.h"
 #import "device/bluetooth/bluetooth_remote_gatt_characteristic_mac.h"
 
-using base::mac::ObjCCast;
+using base::apple::ObjCCast;
 
 namespace device {
 
@@ -46,12 +49,11 @@ std::vector<uint8_t> VectorValueFromObjC(id objc_value) {
 BluetoothRemoteGattDescriptorMac::BluetoothRemoteGattDescriptorMac(
     BluetoothRemoteGattCharacteristicMac* characteristic,
     CBDescriptor* descriptor)
-    : gatt_characteristic_(characteristic),
-      cb_descriptor_(descriptor, base::scoped_policy::RETAIN) {
-  uuid_ = BluetoothAdapterMac::BluetoothUUIDWithCBUUID([cb_descriptor_ UUID]);
-  identifier_ = base::SysNSStringToUTF8(
-      [NSString stringWithFormat:@"%s-%p", uuid_.canonical_value().c_str(),
-                                 cb_descriptor_.get()]);
+    : gatt_characteristic_(characteristic), cb_descriptor_(descriptor) {
+  uuid_ = BluetoothLowEnergyAdapterApple::BluetoothUUIDWithCBUUID(
+      [cb_descriptor_ UUID]);
+  identifier_ = base::StrCat({uuid_.canonical_value(), "-",
+                              base::UnguessableToken::Create().ToString()});
 }
 
 std::string BluetoothRemoteGattDescriptorMac::GetIdentifier() const {
@@ -110,7 +112,7 @@ void BluetoothRemoteGattDescriptorMac::ReadRemoteDescriptor(
 }
 
 void BluetoothRemoteGattDescriptorMac::WriteRemoteDescriptor(
-    const std::vector<uint8_t>& value,
+    base::span<const uint8_t> value,
     base::OnceClosure callback,
     ErrorCallback error_callback) {
   if (destructor_called_ || HasPendingRead() || HasPendingWrite()) {
@@ -124,8 +126,8 @@ void BluetoothRemoteGattDescriptorMac::WriteRemoteDescriptor(
   DVLOG(1) << *this << ": Write value.";
   write_value_callbacks_ =
       std::make_pair(std::move(callback), std::move(error_callback));
-  base::scoped_nsobject<NSData> nsdata_value(
-      [[NSData alloc] initWithBytes:value.data() length:value.size()]);
+  NSData* nsdata_value = [[NSData alloc] initWithBytes:value.data()
+                                                length:value.size()];
   [GetCBPeripheral() writeValue:nsdata_value forDescriptor:GetCBDescriptor()];
 }
 
@@ -139,7 +141,7 @@ void BluetoothRemoteGattDescriptorMac::DidUpdateValueForDescriptor(
     BluetoothGattService::GattErrorCode error_code =
         BluetoothDeviceMac::GetGattErrorCodeFromNSError(error);
     DVLOG(1) << *this << ": Read value failed with error: "
-             << BluetoothAdapterMac::String(error)
+             << BluetoothLowEnergyAdapterApple::String(error)
              << ", converted to error code: " << static_cast<int>(error_code);
     std::move(read_value_callback_)
         .Run(error_code,
@@ -148,7 +150,7 @@ void BluetoothRemoteGattDescriptorMac::DidUpdateValueForDescriptor(
   }
   DVLOG(1) << *this << ": Value read.";
   value_ = VectorValueFromObjC([cb_descriptor_ value]);
-  std::move(read_value_callback_).Run(/*error_code=*/absl::nullopt, value_);
+  std::move(read_value_callback_).Run(/*error_code=*/std::nullopt, value_);
 }
 
 void BluetoothRemoteGattDescriptorMac::DidWriteValueForDescriptor(
@@ -163,7 +165,7 @@ void BluetoothRemoteGattDescriptorMac::DidWriteValueForDescriptor(
     BluetoothGattService::GattErrorCode error_code =
         BluetoothDeviceMac::GetGattErrorCodeFromNSError(error);
     DVLOG(1) << *this << ": Write value failed with error: "
-             << BluetoothAdapterMac::String(error)
+             << BluetoothLowEnergyAdapterApple::String(error)
              << ", converted to error code: " << static_cast<int>(error_code);
     std::move(callbacks.second).Run(error_code);
     return;
@@ -187,10 +189,9 @@ DEVICE_BLUETOOTH_EXPORT std::ostream& operator<<(
       static_cast<const BluetoothRemoteGattCharacteristicMac*>(
           descriptor.GetCharacteristic());
   return out << "<BluetoothRemoteGattDescriptorMac "
-             << descriptor.GetUUID().canonical_value() << "/" << &descriptor
-             << ", characteristic: "
-             << characteristic_mac->GetUUID().canonical_value() << "/"
-             << characteristic_mac << ">";
+             << descriptor.GetIdentifier()
+             << ", characteristic: " << characteristic_mac->GetIdentifier()
+             << ">";
 }
 
 }  // namespace device.

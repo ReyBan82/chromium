@@ -46,7 +46,6 @@ class GLSurfaceEglReadbackWayland : public GLSurfaceEglReadback,
               float scale_factor,
               const gfx::ColorSpace& color_space,
               bool has_alpha) override;
-  bool IsOffscreen() override;
   gfx::SwapResult SwapBuffers(PresentationCallback callback,
                               gfx::FrameData data) override;
   bool SupportsAsyncSwap() override;
@@ -88,8 +87,6 @@ class GLSurfaceEglReadbackWayland : public GLSurfaceEglReadback,
 
   const raw_ptr<WaylandBufferManagerGpu> buffer_manager_;
 
-  // Size of the buffer.
-  gfx::Size size_;
   float surface_scale_factor_ = 1.f;
 
   // Available pixel buffers based on shared memory.

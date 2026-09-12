@@ -49,14 +49,14 @@ class TestObserver : public ArcSupportMessageHost::Observer {
 
   ~TestObserver() override = default;
 
-  void OnMessage(const base::Value::Dict& message) override {
+  void OnMessage(const base::DictValue& message) override {
     values_.push_back(message.Clone());
   }
 
-  const std::vector<base::Value::Dict>& values() const { return values_; }
+  const std::vector<base::DictValue>& values() const { return values_; }
 
  private:
-  std::vector<base::Value::Dict> values_;
+  std::vector<base::DictValue> values_;
 };
 
 class ArcSupportMessageHostTest : public testing::Test {
@@ -99,29 +99,27 @@ class ArcSupportMessageHostTest : public testing::Test {
 };
 
 TEST_F(ArcSupportMessageHostTest, SendMessage) {
-  base::Value::Dict value;
+  base::DictValue value;
   value.Set("foo", "bar");
   value.Set("baz", true);
 
   message_host()->SendMessage(value);
 
   ASSERT_EQ(1u, client()->messages().size());
-  absl::optional<base::Value> recieved_value =
-      base::JSONReader::Read(client()->messages()[0]);
+  std::optional<base::Value> recieved_value = base::JSONReader::Read(
+      client()->messages()[0], base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   EXPECT_EQ(value, recieved_value->GetDict());
 }
 
 TEST_F(ArcSupportMessageHostTest, ReceiveMessage) {
-  base::Value::Dict value;
+  base::DictValue value;
   value.Set("foo", "bar");
   value.Set("baz", true);
 
   TestObserver observer;
   message_host()->SetObserver(&observer);
 
-  std::string value_string;
-  base::JSONWriter::Write(value, &value_string);
-  OnMessage(value_string);
+  OnMessage(base::WriteJson(value).value_or(""));
 
   message_host()->SetObserver(nullptr);
 

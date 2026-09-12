@@ -10,27 +10,48 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
-#include "chrome/browser/ui/search/ntp_user_data_logger.h"
-#include "chrome/browser/web_applications/preinstalled_web_app_manager.h"
+#include "chrome/browser/ui/search/most_visited_metrics_logger.h"
 #include "chrome/common/search/ntp_logging_events.h"
 #include "components/ntp_tiles/most_visited_sites.h"
 #include "components/ntp_tiles/ntp_tile.h"
 #include "components/ntp_tiles/section_type.h"
+#include "components/ntp_tiles/tile_source.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "ui/webui/resources/cr_components/most_visited/most_visited.mojom.h"
+#if BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/profiles/profile.h"
+#include "url/gurl.h"
+#else
+#include "chrome/browser/web_applications/preinstalled_web_app_manager.h"
+#endif
 
 class GURL;
 class Profile;
+class NewTabPagePreloadPipelineManager;
 
 namespace content {
 class WebContents;
 }  // namespace content
 
+// LINT.IfChange(MostVisitedShowActions)
+enum class MostVisitedShowActions {
+  kShowMore = 0,
+  kShowLess = 1,
+  kMaxValue = kShowLess,
+};
+// LINT.ThenChange(//tools/metrics/histograms/enums.xml:MostVisitedShowActions)
+
+
 // Handles bidirectional communication between MV tiles and the browser.
 class MostVisitedHandler : public most_visited::mojom::MostVisitedPageHandler,
-                           public ntp_tiles::MostVisitedSites::Observer,
-                           public web_app::PreinstalledWebAppManager::Observer {
+                           public ntp_tiles::MostVisitedSites::Observer
+// TODO(b/502297163): Implement for Android.
+#if !BUILDFLAG(IS_ANDROID)
+    ,
+                           public web_app::PreinstalledWebAppManager::Observer
+#endif
+{
  public:
   MostVisitedHandler(
       mojo::PendingReceiver<most_visited::mojom::MostVisitedPageHandler>
@@ -38,30 +59,41 @@ class MostVisitedHandler : public most_visited::mojom::MostVisitedPageHandler,
       mojo::PendingRemote<most_visited::mojom::MostVisitedPage> pending_page,
       Profile* profile,
       content::WebContents* web_contents,
-      const GURL& ntp_url,
-      const base::Time& ntp_navigation_start_time);
+      std::unique_ptr<MostVisitedMetricsLogger> logger,
+      const base::Time& navigation_start_time = base::Time());
   MostVisitedHandler(const MostVisitedHandler&) = delete;
   MostVisitedHandler& operator=(const MostVisitedHandler&) = delete;
   ~MostVisitedHandler() override;
 
-  // See MostVisitedSites::EnableCustomLinks.
-  void EnableCustomLinks(bool enable);
+  // See MostVisitedSites::EnableTileTypes.
+  virtual void EnableTileTypes(
+      const ntp_tiles::MostVisitedSites::EnableTileTypesOptions& options);
   // See MostVisitedSites::SetShortcutsVisible.
-  void SetShortcutsVisible(bool visible);
+  virtual void SetShortcutsVisible(bool visible);
 
   // most_visited::mojom::MostVisitedPageHandler:
   void AddMostVisitedTile(const GURL& url,
                           const std::string& title,
                           AddMostVisitedTileCallback callback) override;
-  void DeleteMostVisitedTile(const GURL& url) override;
-  void RestoreMostVisitedDefaults() override;
-  void ReorderMostVisitedTile(const GURL& url, uint8_t new_pos) override;
-  void UndoMostVisitedTileAction() override;
+  void DeleteMostVisitedTile(
+      most_visited::mojom::MostVisitedTilePtr tile) override;
+  void RestoreMostVisitedDefaults(ntp_tiles::TileSource source) override;
+  void ReorderMostVisitedTile(most_visited::mojom::MostVisitedTilePtr tile,
+                              uint8_t new_pos) override;
+  void UndoMostVisitedAutoRemoval() override;
+  void UndoMostVisitedTileAction(ntp_tiles::TileSource source) override;
   void UpdateMostVisitedInfo() override;
-  void UpdateMostVisitedTile(const GURL& url,
+  void UpdateMostVisitedTile(most_visited::mojom::MostVisitedTilePtr tile,
                              const GURL& new_url,
                              const std::string& new_title,
                              UpdateMostVisitedTileCallback callback) override;
+  void PrerenderMostVisitedTile(
+      most_visited::mojom::MostVisitedTilePtr tile) override;
+  void PrefetchMostVisitedTile(
+      most_visited::mojom::MostVisitedTilePtr tile) override;
+  void PreconnectMostVisitedTile(
+      most_visited::mojom::MostVisitedTilePtr tile) override;
+  void CancelPrerender() override;
   void OnMostVisitedTilesRendered(
       std::vector<most_visited::mojom::MostVisitedTilePtr> tiles,
       double time) override;
@@ -72,31 +104,45 @@ class MostVisitedHandler : public most_visited::mojom::MostVisitedPageHandler,
                                    bool ctrl_key,
                                    bool meta_key,
                                    bool shift_key) override;
+  void GetMostVisitedExpandedState(
+      GetMostVisitedExpandedStateCallback callback) override;
+  void SetMostVisitedExpandedState(bool is_expanded) override;
 
  private:
   // ntp_tiles::MostVisitedSites::Observer:
   void OnURLsAvailable(
+      bool is_user_triggered,
       const std::map<ntp_tiles::SectionType, ntp_tiles::NTPTilesVector>&
           sections) override;
   void OnIconMadeAvailable(const GURL& site_url) override;
 
+  NewTabPagePreloadPipelineManager* GetNewTabPagePreloadPipelineManager();
+
+  bool MaybeRemoveStaleShortcuts();
+
   raw_ptr<Profile> profile_;
+// TODO(b/502297163): Implement for Android.
+#if !BUILDFLAG(IS_ANDROID)
   // web_app::PreinstalledWebAppManager::Observer
   void OnMigrationRun() override;
   void OnDestroyed() override;
+#endif
 
   std::unique_ptr<ntp_tiles::MostVisitedSites> most_visited_sites_;
   raw_ptr<content::WebContents> web_contents_;
-  NTPUserDataLogger logger_;
-  base::Time ntp_navigation_start_time_;
+  std::unique_ptr<MostVisitedMetricsLogger> logger_;
+  base::Time navigation_start_time_;
   GURL last_blocklisted_;
 
   mojo::Receiver<most_visited::mojom::MostVisitedPageHandler> page_handler_;
   mojo::Remote<most_visited::mojom::MostVisitedPage> page_;
 
+// TODO(b/502297163): Implement for Android.
+#if !BUILDFLAG(IS_ANDROID)
   base::ScopedObservation<web_app::PreinstalledWebAppManager,
                           web_app::PreinstalledWebAppManager::Observer>
       preinstalled_web_app_observer_{this};
+#endif
 
   base::WeakPtrFactory<MostVisitedHandler> weak_ptr_factory_{this};
 };

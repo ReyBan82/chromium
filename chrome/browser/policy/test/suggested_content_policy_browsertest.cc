@@ -5,7 +5,6 @@
 #include "ash/constants/ash_pref_names.h"
 #include "chrome/browser/policy/policy_test_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/policy_constants.h"
 #include "components/prefs/pref_service.h"
@@ -17,7 +16,7 @@ class SuggestedContentPolicyTest : public PolicyTest {};
 
 IN_PROC_BROWSER_TEST_F(SuggestedContentPolicyTest, SuggestedContentEnabled) {
   // Verify Suggested Content pref behavior before policy.
-  PrefService* prefs = browser()->profile()->GetPrefs();
+  PrefService* prefs = browser()->GetProfile()->GetPrefs();
   EXPECT_FALSE(
       prefs->IsManagedPreference(ash::prefs::kSuggestedContentEnabled));
   EXPECT_TRUE(prefs->GetBoolean(ash::prefs::kSuggestedContentEnabled));

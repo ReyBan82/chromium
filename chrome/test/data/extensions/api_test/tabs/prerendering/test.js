@@ -23,7 +23,7 @@ async function setup() {
         ((resolve, details) => {
           prerenderingFrameId = details.frameId;
           prerenderingDocumentId = details.documentId;
-          chrome.test.assertTrue(prerenderingFrameId != 0);
+          chrome.test.assertNe(0, prerenderingFrameId);
           chrome.webRequest.onBeforeRequest.removeListener(onBeforeRequest);
           resolve();
         }).bind(this, resolve);
@@ -33,7 +33,7 @@ async function setup() {
       chrome.tabs.update(tabId, {url: kInitiatorUrl});
     });
   });
-  chrome.test.assertTrue(prerenderingDocumentId != 0);
+  chrome.test.assertNe(0, prerenderingDocumentId);
 }
 
 // Checks if `allFrames: true` doesn't order to include pre-rendered frames.
@@ -62,12 +62,12 @@ async function testGetTitleByFrameId() {
 // Checks if manifest v2 doesn't support `documentId`.
 async function testGetTitleByDocumentId() {
   await setup();
+  // Verify `executeScript` throws when using `documentId` in manifest v2.
   chrome.test.assertThrows(
-      chrome.tabs.executeScript,
-      [
-        tabId, {documentId: prerenderingDocumentId, code: 'document.title;'},
-        results => chrome.test.fail('should not succeed.')
-      ],
+      chrome.tabs.executeScript.bind(
+          null, tabId,
+          {documentId: prerenderingDocumentId, code: 'document.title;'},
+          results => chrome.test.fail('should not succeed.')),
       'Error in invocation of tabs.executeScript(optional integer tabId, ' +
           'extensionTypes.InjectDetails details, optional function ' +
           'callback): Error at parameter \'details\': Unexpected property: \'' +
@@ -86,7 +86,7 @@ async function testActivateOnExecution() {
           frameId: prerenderingFrameId,
           code: `document.addEventListener('prerenderingchange', () => {
                document.title = 'activated';
-             });`
+             });`,
         },
         result => {
           // No results, but just checks if it doesn't crash.
@@ -119,13 +119,12 @@ async function testExecuteAfterActivation() {
       // could not know it, but it should just work as 0 is just an alternative
       // and internal FrameTreeNodeId should also work like a frameId.
       chrome.tabs.executeScript(
-        tabId, { frameId: 1, code: 'document.title' },
-        results => {
-          chrome.tabs.onUpdated.removeListener(cb);
-          chrome.test.assertEq(1, results.length);
-          chrome.test.assertEq('prerendering', results[0]);
-          chrome.test.succeed();
-        });
+          tabId, {frameId: 1, code: 'document.title'}, results => {
+            chrome.tabs.onUpdated.removeListener(cb);
+            chrome.test.assertEq(1, results.length);
+            chrome.test.assertEq('prerendering', results[0]);
+            chrome.test.succeed();
+          });
     }
   });
 
@@ -156,7 +155,7 @@ async function testDontActivateByUpdate() {
 
 chrome.test.getConfig(async config => {
   testServerPort = config.testServer.port;
-  chrome.test.assertTrue(testServerPort != 0);
+  chrome.test.assertNe(0, testServerPort);
 
   const tabs = await new Promise(
       resolve => chrome.tabs.query({active: true}, tabs => resolve(tabs)));

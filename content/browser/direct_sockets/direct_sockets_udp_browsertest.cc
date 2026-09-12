@@ -4,34 +4,44 @@
 
 #include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/test/bind.h"
 #include "base/test/scoped_feature_list.h"
+#include "base/test/values_test_util.h"
 #include "content/browser/direct_sockets/direct_sockets_service_impl.h"
 #include "content/browser/direct_sockets/direct_sockets_test_utils.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/common/content_client.h"
-#include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
+#include "content/public/test/direct_sockets_test_helpers.h"
 #include "content/shell/browser/shell.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
 #include "net/dns/host_resolver.h"
+#include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "services/network/public/cpp/features.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/udp_socket.mojom.h"
 #include "services/network/test/test_network_context.h"
 #include "services/network/test/test_udp_socket.h"
 #include "services/network/test/udp_socket_test_util.h"
 #include "testing/gmock/include/gmock/gmock-matchers.h"
+#include "third_party/blink/public/common/features_generated.h"
+#include "third_party/blink/public/mojom/navigation/navigation_params.mojom.h"
 #include "url/gurl.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chromeos/dbus/permission_broker/fake_permission_broker_client.h"  // nogncheck
+#include "content/browser/direct_sockets/firewall_hole_delegate.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 // The tests in this file use the Network Service implementation of
 // NetworkContext, to test sending and receiving of data over UDP sockets.
@@ -46,10 +56,20 @@ constexpr char kLocalhostAddress[] = "127.0.0.1";
 
 class DirectSocketsUdpBrowserTest : public ContentBrowserTest {
  public:
-  ~DirectSocketsUdpBrowserTest() override = default;
+  DirectSocketsUdpBrowserTest() {
+    scoped_feature_list_.InitWithFeatures(
+        {blink::features::kSourceSpecificMulticastInDirectSockets}, {});
+  }
 
-  GURL GetTestPageURL() {
-    return embedded_test_server()->GetURL("/direct_sockets/udp.html");
+  virtual GURL GetTestPageURL() {
+    return test::FileWithHeaders("/direct_sockets/udp.html")
+        .WithCOIHeaders()
+        .WithPermissionsPolicy("cross-origin-isolated", "(self)")
+        .WithPermissionsPolicy("direct-sockets", "(self)")
+        .WithPermissionsPolicy("local-network", "(self)")
+        .WithPermissionsPolicy("loopback-network", "(self)")
+        .WithPermissionsPolicy("direct-sockets-multicast", "(self)")
+        .Build(embedded_test_server());
   }
 
   network::mojom::NetworkContext* GetNetworkContext() {
@@ -68,16 +88,15 @@ class DirectSocketsUdpBrowserTest : public ContentBrowserTest {
         )",
         kLocalhostAddress, port);
 
-    ASSERT_TRUE(
-        EvalJs(shell(), content::test::WrapAsync(open_socket)).value.is_none());
+    ASSERT_EQ(EvalJs(shell(), content::test::WrapAsync(open_socket)),
+              base::Value());
   }
 
  protected:
   void SetUpOnMainThread() override {
     ContentBrowserTest::SetUpOnMainThread();
 
-    client_ = std::make_unique<test::IsolatedWebAppContentBrowserClient>(
-        url::Origin::Create(GetTestPageURL()));
+    client_ = CreateContentBrowserClient();
     runner_ =
         std::make_unique<content::test::AsyncJsRunner>(shell()->web_contents());
 
@@ -85,10 +104,16 @@ class DirectSocketsUdpBrowserTest : public ContentBrowserTest {
   }
 
   void SetUp() override {
-    embedded_test_server()->AddDefaultHandlers(GetTestDataFilePath());
+    embedded_test_server()->AddDefaultHandlers();
     ASSERT_TRUE(embedded_test_server()->Start());
 
     ContentBrowserTest::SetUp();
+  }
+
+  virtual std::unique_ptr<test::IsolatedWebAppContentBrowserClient>
+  CreateContentBrowserClient() {
+    return std::make_unique<test::IsolatedWebAppContentBrowserClient>(
+        url::Origin::Create(GetTestPageURL()));
   }
 
   std::pair<net::IPEndPoint,
@@ -114,16 +139,18 @@ class DirectSocketsUdpBrowserTest : public ContentBrowserTest {
     return server_socket_;
   }
 
+ protected:
+  std::unique_ptr<test::IsolatedWebAppContentBrowserClient> client_;
+  std::unique_ptr<content::test::AsyncJsRunner> runner_;
+
  private:
   BrowserContext* browser_context() {
     return shell()->web_contents()->GetBrowserContext();
   }
 
-  base::test::ScopedFeatureList feature_list_{features::kIsolatedWebApps};
   mojo::Remote<network::mojom::UDPSocket> server_socket_;
 
-  std::unique_ptr<test::IsolatedWebAppContentBrowserClient> client_;
-  std::unique_ptr<content::test::AsyncJsRunner> runner_;
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, CloseUdp) {
@@ -131,6 +158,39 @@ IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, CloseUdp) {
       "closeUdp({ remoteAddress: '::1', remotePort: 993 })";
 
   EXPECT_EQ("closeUdp succeeded", EvalJs(shell(), script));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, MulticastTimeToLiveParam) {
+  EXPECT_EQ(
+      "closeUdp succeeded",
+      EvalJs(
+          shell(),
+          "closeUdp({ localAddress: '127.0.0.1', multicastTimeToLive: 0 })"));
+  EXPECT_EQ(
+      "closeUdp succeeded",
+      EvalJs(
+          shell(),
+          "closeUdp({ localAddress: '127.0.0.1', multicastTimeToLive: 255 })"));
+
+  EXPECT_THAT(
+      EvalJs(shell(),
+             "closeUdp({ localAddress: '127.0.0.1', multicastTimeToLive: -1 })")
+          .ExtractString(),
+      ::testing::StartsWith("closeUdp failed"));
+  EXPECT_THAT(
+      EvalJs(
+          shell(),
+          "closeUdp({ localAddress: '127.0.0.1', multicastTimeToLive: 256 })")
+          .ExtractString(),
+      ::testing::StartsWith("closeUdp failed"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, MulticastParamsAllowed) {
+  EXPECT_EQ(
+      "closeUdp succeeded",
+      EvalJs(shell(),
+             "closeUdp({ localAddress: '127.0.0.1', multicastTimeToLive: 100, "
+             "multicastAllowAddressSharing: true, multicastLoopback: true })"));
 }
 
 IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, SendUdpAfterClose) {
@@ -215,7 +275,8 @@ IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, ReadWriteUdpOnSendError) {
   ConnectJsSocket();
 
   const std::string async_read = "readWriteUdpOnError(socket);";
-  auto future = GetAsyncJsRunner()->RunScript(async_read);
+  base::test::TestFuture<std::string> future =
+      GetAsyncJsRunner()->RunScript(async_read);
 
   // Next attempt to write to the socket will result in ERR_UNEXPECTED and close
   // the writable stream.
@@ -231,7 +292,7 @@ IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, ReadWriteUdpOnSendError) {
           },
           &mock_network_context));
 
-  EXPECT_THAT(future->Get(),
+  EXPECT_THAT(future.Get(),
               ::testing::HasSubstr("readWriteUdpOnError succeeded"));
 }
 
@@ -255,17 +316,275 @@ IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, ReadWriteUdpOnSocketError) {
           &mock_network_context));
 
   const std::string script = "readWriteUdpOnError(socket)";
-  auto future = GetAsyncJsRunner()->RunScript(script);
+  base::test::TestFuture<std::string> future =
+      GetAsyncJsRunner()->RunScript(script);
 
-  EXPECT_THAT(future->Get(),
+  EXPECT_THAT(future.Get(),
               ::testing::HasSubstr("readWriteUdpOnError succeeded"));
 }
 
-IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, ExchangeUdp) {
+class DirectSocketsBoundUdpBrowserTest : public DirectSocketsUdpBrowserTest {
+ public:
+#if BUILDFLAG(IS_CHROMEOS)
+  DirectSocketsBoundUdpBrowserTest() {
+    chromeos::PermissionBrokerClient::InitializeFake();
+    FirewallHoleDelegate::SetAlwaysOpenFirewallHoleForTesting(true);
+  }
+
+  ~DirectSocketsBoundUdpBrowserTest() override {
+    chromeos::PermissionBrokerClient::Shutdown();
+    // Need to reset the flag because there are other tests that
+    // use FirewallHoleDelegate.
+    FirewallHoleDelegate::SetAlwaysOpenFirewallHoleForTesting(false);
+  }
+#endif  // BUILDFLAG(IS_CHROMEOS)
+};
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, ExchangeUdp) {
   ASSERT_THAT(EvalJs(shell(), "exchangeUdpPacketsBetweenClientAndServer()")
                   .ExtractString(),
               testing::HasSubstr("succeeded"));
 }
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, JoinGroup) {
+  // Invalid ip.
+  EXPECT_THAT(
+      EvalJs(shell(), "joinGroup({ localAddress: '0.0.0.0' }, '256.255.20.11')")
+          .ExtractString(),
+      ::testing::StartsWith("joinGroup failed:"));
+
+  // Ip is not multicast.
+  EXPECT_THAT(
+      EvalJs(shell(), "joinGroup({ localAddress: '0.0.0.0' }, '10.10.10.10')")
+          .ExtractString(),
+      ::testing::StartsWith("joinGroup failed:"));
+
+  // Valid multicast ip.
+  EXPECT_EQ("joinGroup succeeded.",
+            EvalJs(shell(),
+                   "joinGroup({ localAddress: '0.0.0.0' }, '237.132.100.17')"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, JoinGroupTwice) {
+  const std::string script = "joinGroupTwice({ localAddress: '0.0.0.0' })";
+
+  EXPECT_THAT(EvalJs(shell(), script).ExtractString(),
+              ::testing::StartsWith("joinGroupTwice failed:"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, LeaveGroupAfterJoin) {
+  EXPECT_EQ(
+      "leaveGroupAfterJoin succeeded.",
+      EvalJs(shell(), "leaveGroupAfterJoin({ localAddress: '0.0.0.0' })"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest,
+                       LeaveGroupTwiceAfterJoin) {
+  const std::string script =
+      "leaveGroupTwiceAfterJoin({ localAddress: '0.0.0.0' })";
+
+  EXPECT_THAT(EvalJs(shell(), script).ExtractString(),
+              ::testing::StartsWith("leaveGroupTwiceAfterJoin failed:"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, JoinGroupAfterClose) {
+  const std::string script = "joinGroupAfterClose({ localAddress: '0.0.0.0' })";
+
+  EXPECT_THAT(EvalJs(shell(), script).ExtractString(),
+              ::testing::StartsWith("joinGroupAfterClose failed:"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, LeaveGroupAfterClose) {
+  const std::string script =
+      "leaveGroupAfterClose({ localAddress: '0.0.0.0' })";
+
+  EXPECT_THAT(EvalJs(shell(), script).ExtractString(),
+              ::testing::StartsWith("leaveGroupAfterClose failed:"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, JoinGroupSSM) {
+  auto sources = DeriveSsmSourceAddresses(1);
+  if (sources.empty()) {
+    GTEST_SKIP() << "No IPv4 interface found";
+  }
+
+  EXPECT_EQ("joinGroupSSM succeeded.",
+            EvalJs(shell(), content::JsReplace(
+                                "joinGroupSSM({ localAddress: '0.0.0.0' }, "
+                                "'232.1.1.1', $1)",
+                                sources[0])));
+}
+
+// TODO(crbug.com/443716695): Joining the same SSM group a second time with a
+// different source-specific membership fails with "NetworkError: Network Error"
+// on the macOS 15 bots (mac15-x64-rel-tests) while passing on macOS 26. This
+// gap caused the first reland (crrev.com/c/8027359) to be reverted; keep the
+// test disabled on mac until the macOS 15 membership path is understood.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_JoinGroupSSMSameGroupDifferentSources \
+  DISABLED_JoinGroupSSMSameGroupDifferentSources
+#else
+#define MAYBE_JoinGroupSSMSameGroupDifferentSources \
+  JoinGroupSSMSameGroupDifferentSources
+#endif
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest,
+                       MAYBE_JoinGroupSSMSameGroupDifferentSources) {
+  auto sources = DeriveSsmSourceAddresses(2);
+  if (sources.empty()) {
+    GTEST_SKIP() << "No IPv4 interface found";
+  }
+
+  EXPECT_EQ("joinGroupSSMSameGroupDifferentSources succeeded.",
+            EvalJs(shell(),
+                   content::JsReplace(
+                       "joinGroupSSMSameGroupDifferentSources({ localAddress: "
+                       "'0.0.0.0' }, $1, $2)",
+                       sources[0], sources[1])));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest,
+                       LeaveGroupSSMMustMatchSource) {
+  auto sources = DeriveSsmSourceAddresses(2);
+  if (sources.empty()) {
+    GTEST_SKIP() << "No IPv4 interface found";
+  }
+
+  // Test expects the leave operation to FAIL (mismatched source)
+  EXPECT_EQ("leaveGroupSSMMustMatchSource succeeded.",
+            EvalJs(shell(), content::JsReplace(
+                                "leaveGroupSSMMustMatchSource({ localAddress: "
+                                "'0.0.0.0' }, $1, $2)",
+                                sources[0], sources[1])));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, CannotMixASMAndSSM) {
+  auto sources = DeriveSsmSourceAddresses(1);
+  if (sources.empty()) {
+    GTEST_SKIP() << "No IPv4 interface found";
+  }
+
+  // Test expects joining SSM after ASM to FAIL
+  EXPECT_EQ(
+      "cannotMixASMAndSSM succeeded.",
+      EvalJs(shell(), content::JsReplace(
+                          "cannotMixASMAndSSM({ localAddress: '0.0.0.0' }, $1)",
+                          sources[0])));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest,
+                       JoinGroupSSMTwiceWithSameSource) {
+  auto sources = DeriveSsmSourceAddresses(1);
+  if (sources.empty()) {
+    GTEST_SKIP() << "No IPv4 interface found";
+  }
+
+  // Test expects duplicate SSM join to FAIL
+  EXPECT_EQ(
+      "joinGroupSSMTwiceWithSameSource succeeded.",
+      EvalJs(shell(), content::JsReplace(
+                          "joinGroupSSMTwiceWithSameSource({ localAddress: "
+                          "'0.0.0.0' }, $1)",
+                          sources[0])));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest,
+                       JoinGroupSSMInvalidSource) {
+  // Test expects invalid source address to FAIL
+  EXPECT_EQ("joinGroupSSMInvalidSource succeeded.",
+            EvalJs(shell(),
+                   "joinGroupSSMInvalidSource({ localAddress: '0.0.0.0' })"));
+}
+
+// TODO(crbug.com/443716695): The multicast loopback exchange fails on mac-rel
+// bots with ERR_CONNECTION_RESET on the sender socket. The macOS kernel
+// loopback path is fine (verified on macOS 26.5.1); the failure is specific to
+// the bot environment.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_MulticastExchangeUdp DISABLED_MulticastExchangeUdp
+#else
+#define MAYBE_MulticastExchangeUdp MulticastExchangeUdp
+#endif
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest,
+                       MAYBE_MulticastExchangeUdp) {
+  ASSERT_THAT(EvalJs(shell(), "exchangeUdpMulticastPackets()").ExtractString(),
+              testing::HasSubstr("succeeded"));
+}
+
+// TODO(crbug.com/443716695): Fails on mac-rel bots; see MulticastExchangeUdp.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_MulticastExchangeUdpMultipleReceivers \
+  DISABLED_MulticastExchangeUdpMultipleReceivers
+#else
+#define MAYBE_MulticastExchangeUdpMultipleReceivers \
+  MulticastExchangeUdpMultipleReceivers
+#endif
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest,
+                       MAYBE_MulticastExchangeUdpMultipleReceivers) {
+  ASSERT_THAT(EvalJs(shell(), "exchangeUdpMulticastPacketsMultipleReceivers()")
+                  .ExtractString(),
+              testing::HasSubstr("succeeded"));
+}
+
+#if BUILDFLAG(IS_CHROMEOS)
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, HasFirewallHole) {
+  class DelegateImpl : public chromeos::FakePermissionBrokerClient::Delegate {
+   public:
+    DelegateImpl(uint16_t port, base::OnceClosure quit_closure)
+        : port_(port), quit_closure_(std::move(quit_closure)) {}
+
+    void OnUdpPortReleased(uint16_t port,
+                           const std::string& interface) override {
+      if (port == port_) {
+        ASSERT_EQ(interface, "");
+        ASSERT_TRUE(quit_closure_);
+        std::move(quit_closure_).Run();
+      }
+    }
+
+   private:
+    uint16_t port_;
+    base::OnceClosure quit_closure_;
+  };
+
+  auto* client = static_cast<chromeos::FakePermissionBrokerClient*>(
+      chromeos::PermissionBrokerClient::Get());
+
+  const std::string open_script = R"(
+    (async () => {
+      socket = new UDPSocket({ localAddress: '127.0.0.1' });
+      const { localPort } = await socket.opened;
+      return localPort;
+    })();
+  )";
+
+  const int32_t local_port = EvalJs(shell(), open_script).ExtractInt();
+  ASSERT_TRUE(client->HasUdpHole(local_port, "" /* all interfaces */));
+
+  base::RunLoop run_loop;
+  auto delegate =
+      std::make_unique<DelegateImpl>(local_port, run_loop.QuitClosure());
+  client->AttachDelegate(delegate.get());
+
+  EXPECT_TRUE(
+      EvalJs(shell(), content::test::WrapAsync("socket.close()")).is_ok());
+  run_loop.Run();
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsBoundUdpBrowserTest, FirewallHoleDenied) {
+  auto* client = chromeos::FakePermissionBrokerClient::Get();
+  client->SetUdpDenyAll();
+
+  const std::string open_script = R"(
+    (async () => {
+      socket = new UDPSocket({ localAddress: '127.0.0.1' });
+      return await socket.opened.catch(err => err.message);
+    })();
+  )";
+
+  EXPECT_THAT(EvalJs(shell(), open_script).ExtractString(),
+              testing::HasSubstr("Firewall"));
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, UdpMessageConfigurations) {
   {
@@ -349,6 +668,223 @@ IN_PROC_BROWSER_TEST_F(DirectSocketsUdpBrowserTest, UdpMessageConfigurations) {
                 testing::HasSubstr(
                     "UDPMessage: 'remoteAddress' and "
                     "'remotePort' must not be specified in 'connected'"));
+  }
+}
+
+class DirectSocketsUdpNoMulticastPolicyBrowserTest
+    : public DirectSocketsUdpBrowserTest {
+ protected:
+  std::unique_ptr<test::IsolatedWebAppContentBrowserClient>
+  CreateContentBrowserClient() override {
+    return std::make_unique<test::IsolatedWebAppContentBrowserClient>(
+        url::Origin::Create(GetTestPageURL()));
+  }
+
+  GURL GetTestPageURL() override {
+    return test::FileWithHeaders("/direct_sockets/udp.html")
+        .WithCOIHeaders()
+        .WithPermissionsPolicy("cross-origin-isolated", "(self)")
+        .WithPermissionsPolicy("direct-sockets", "(self)")
+        .WithPermissionsPolicy("local-network", "(self)")
+        .WithPermissionsPolicy("loopback-network", "(self)")
+        .WithPermissionsPolicy("direct-sockets-multicast", "()")
+        .Build(embedded_test_server());
+  }
+};
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsUdpNoMulticastPolicyBrowserTest,
+                       NoMulticastPermissionPolicy) {
+  EXPECT_EQ("multicastControllerAbsent succeeded.",
+            EvalJs(shell(),
+                   "multicastControllerAbsent({ localAddress: '127.0.0.1' })"));
+}
+
+IN_PROC_BROWSER_TEST_F(DirectSocketsUdpNoMulticastPolicyBrowserTest,
+                       MulticastParamsNotAllowedWithoutPolicy) {
+  EXPECT_THAT(
+      EvalJs(
+          shell(),
+          "closeUdp({ localAddress: '127.0.0.1', multicastTimeToLive: 100 })")
+          .ExtractString(),
+      ::testing::StartsWith("closeUdp failed"));
+
+  EXPECT_THAT(EvalJs(shell(),
+                     "closeUdp({ localAddress: '127.0.0.1', "
+                     "multicastAllowAddressSharing: true })")
+                  .ExtractString(),
+              ::testing::StartsWith("closeUdp failed"));
+
+  EXPECT_THAT(
+      EvalJs(
+          shell(),
+          "closeUdp({ localAddress: '127.0.0.1', multicastLoopback: false })")
+          .ExtractString(),
+      ::testing::StartsWith("closeUdp failed"));
+}
+
+struct DirectSocketsMulticastBrowserTestParams {
+  bool flag_enabled;
+  bool has_permission_policy;
+  bool connected_else_bound_socket;
+  bool use_hostname;
+};
+
+class DirectSocketsMulticastBrowserTest
+    : public DirectSocketsUdpBrowserTest,
+      public testing::WithParamInterface<
+          DirectSocketsMulticastBrowserTestParams> {
+ public:
+#if BUILDFLAG(IS_CHROMEOS)
+  DirectSocketsMulticastBrowserTest() {
+    chromeos::PermissionBrokerClient::InitializeFake();
+    FirewallHoleDelegate::SetAlwaysOpenFirewallHoleForTesting(true);
+  }
+
+  ~DirectSocketsMulticastBrowserTest() override {
+    chromeos::PermissionBrokerClient::Shutdown();
+    FirewallHoleDelegate::SetAlwaysOpenFirewallHoleForTesting(false);
+  }
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+  void SetUpInProcessBrowserTestFixture() override {
+    DirectSocketsUdpBrowserTest::SetUpInProcessBrowserTestFixture();
+    if (GetParam().flag_enabled) {
+      feature_list_.InitAndEnableFeature(
+          network::features::
+              kDirectSocketsUdpSendRequireMulticastPermissionPolicy);
+    } else {
+      feature_list_.InitAndDisableFeature(
+          network::features::
+              kDirectSocketsUdpSendRequireMulticastPermissionPolicy);
+    }
+  }
+
+ protected:
+  void SetUpOnMainThread() override {
+    ContentBrowserTest::SetUpOnMainThread();
+
+    // The mock DNS rule must be added before `NavigateToURL` is called.
+    // Calling `NavigateToURL` initiates host resolution, which locks the
+    // resolver and prevents subsequent modifications (triggering a check
+    // failure).
+    host_resolver()->AddRule("mcast.test", "224.0.0.251");
+
+    client_ = CreateContentBrowserClient();
+    runner_ =
+        std::make_unique<content::test::AsyncJsRunner>(shell()->web_contents());
+
+    ASSERT_TRUE(NavigateToURL(shell(), GetTestPageURL()));
+  }
+
+  std::unique_ptr<test::IsolatedWebAppContentBrowserClient>
+  CreateContentBrowserClient() override {
+    return std::make_unique<test::IsolatedWebAppContentBrowserClient>(
+        url::Origin::Create(GetTestPageURL()));
+  }
+
+  GURL GetTestPageURL() override {
+    return test::FileWithHeaders("/direct_sockets/udp.html")
+        .WithCOIHeaders()
+        .WithPermissionsPolicy("cross-origin-isolated", "(self)")
+        .WithPermissionsPolicy("direct-sockets", "(self)")
+        .WithPermissionsPolicy("local-network", "(self)")
+        .WithPermissionsPolicy("loopback-network", "(self)")
+        .WithPermissionsPolicy(
+            "direct-sockets-multicast",
+            GetParam().has_permission_policy ? "(self)" : "()")
+        .Build(embedded_test_server());
+  }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    DirectSocketsMulticastBrowserTest,
+    testing::Values(
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/true},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/true},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/true},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/false, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/true},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/true},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/false,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/true},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/false, /*use_hostname=*/true},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/false},
+        DirectSocketsMulticastBrowserTestParams{
+            /*flag_enabled=*/true, /*has_permission_policy=*/true,
+            /*connected_else_bound_socket=*/true, /*use_hostname=*/true}),
+    [](const testing::TestParamInfo<DirectSocketsMulticastBrowserTestParams>&
+           info) {
+      return base::StringPrintf(
+          "%s_%s_%s_%s",
+          info.param.flag_enabled ? "FlagEnabled" : "FlagDisabled",
+          info.param.has_permission_policy ? "WithPolicy" : "NoPolicy",
+          info.param.connected_else_bound_socket ? "Connected" : "Bound",
+          info.param.use_hostname ? "Hostname" : "IPLiteral");
+    });
+
+IN_PROC_BROWSER_TEST_P(DirectSocketsMulticastBrowserTest,
+                       SendToOrConnectMulticast) {
+  const auto& params = GetParam();
+  std::string target = params.use_hostname ? "mcast.test" : "237.132.100.17";
+  bool should_succeed = !params.flag_enabled || params.has_permission_policy;
+
+  if (params.connected_else_bound_socket) {
+    std::string js =
+        base::StringPrintf("openUdpToMulticastConnected('%s')", target.c_str());
+    if (should_succeed) {
+      EXPECT_EQ("openUdpToMulticastConnected succeeded.", EvalJs(shell(), js));
+    } else {
+      EXPECT_THAT(EvalJs(shell(), js).ExtractString(),
+                  ::testing::StartsWith("openUdpToMulticastConnected failed"));
+    }
+  } else {
+    std::string js =
+        base::StringPrintf("sendUdpToMulticastBound('%s')", target.c_str());
+    if (should_succeed) {
+      EXPECT_EQ("sendUdpToMulticastBound succeeded.", EvalJs(shell(), js));
+    } else {
+      EXPECT_THAT(EvalJs(shell(), js).ExtractString(),
+                  ::testing::StartsWith("sendUdpToMulticastBound failed"));
+    }
   }
 }
 

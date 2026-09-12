@@ -4,6 +4,8 @@
 
 #include <stddef.h>
 
+#include <utility>
+
 #include "ui/compositor/layer_animation_sequence.h"
 #include "ui/compositor/test/layer_animator_test_controller.h"
 #include "ui/gfx/geometry/rect.h"
@@ -12,8 +14,7 @@ namespace ui {
 
 LayerAnimatorTestController::LayerAnimatorTestController(
     scoped_refptr<LayerAnimator> animator)
-    : animator_(animator) {
-}
+    : animator_(std::move(animator)) {}
 
 LayerAnimatorTestController::~LayerAnimatorTestController() {
 }
@@ -34,9 +35,9 @@ void LayerAnimatorTestController::StartThreadedAnimationsIfNeeded(
   threaded_properties.push_back(cc::TargetProperty::OPACITY);
   threaded_properties.push_back(cc::TargetProperty::TRANSFORM);
 
-  for (size_t i = 0; i < threaded_properties.size(); i++) {
+  for (auto& threaded_propertie : threaded_properties) {
     LayerAnimationElement::AnimatableProperty animatable_property =
-        LayerAnimationElement::ToAnimatableProperty(threaded_properties[i]);
+        LayerAnimationElement::ToAnimatableProperty(threaded_propertie);
     LayerAnimationSequence* sequence = GetRunningSequence(animatable_property);
     if (!sequence)
       continue;
@@ -49,7 +50,7 @@ void LayerAnimatorTestController::StartThreadedAnimationsIfNeeded(
         element->effective_start_time() != base::TimeTicks())
       continue;
 
-    animator_->OnThreadedAnimationStarted(started_time, threaded_properties[i],
+    animator_->OnThreadedAnimationStarted(started_time, threaded_propertie,
                                           element->animation_group_id());
   }
 }

@@ -2,22 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import './strings.m.js';
+import '/strings.m.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {addWebUiListener, sendWithPromise} from 'chrome://resources/js/cr.js';
 import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
 import {isChromeOS} from 'chrome://resources/js/platform.js';
-import {$, getRequiredElement} from 'chrome://resources/js/util_ts.js';
+import {getRequiredElement} from 'chrome://resources/js/util.js';
+import {render} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-declare global {
-  class JsEvalContext {
-    constructor(data: any);
-  }
-  function jstProcess(context: JsEvalContext, template: HTMLElement): void;
-
-  const trustedTypes: {emptyHTML: string};
-}
+import {getHtml} from './component.html.js';
 
 interface Component {
   id: string;
@@ -26,9 +20,9 @@ interface Component {
   version: string;
 }
 
-interface ComponentsData {
+export interface ComponentsData {
   components: Component[];
-  showOsLink: boolean;
+  showUninstallButton?: boolean;
 }
 
 /**
@@ -40,46 +34,22 @@ let currentComponentsData: Component[]|null = null;
 
 /**
  * Takes the |componentsData| input argument which represents data about the
- * currently installed components and populates the html jstemplate with
+ * currently installed components and populates the Lit HTML template with
  * that data. It expects an object structure like the above.
  * @param componentsData Detailed info about installed components.
  *      Same expected format as returnComponentsData().
  */
 function renderTemplate(componentsData: ComponentsData) {
-  // This is the javascript code that processes the template:
-  const input = new JsEvalContext(componentsData);
-  const output =
-      document.body.querySelector<HTMLElement>(
-                       '#component-template')!.cloneNode(true) as HTMLElement;
-  getRequiredElement('component-placeholder').innerHTML =
-      trustedTypes.emptyHTML;
-  getRequiredElement('component-placeholder').appendChild(output);
-  jstProcess(input, output);
-  output.removeAttribute('hidden');
-
-  // <if expr="is_chromeos">
-  const crosUrlRedirectButton = $('os-link-href');
-  if (crosUrlRedirectButton) {
-    crosUrlRedirectButton.onclick = crosUrlComponentRedirect;
-  }
-  // </if>
+  render(getHtml(componentsData), getRequiredElement('component-placeholder'));
 }
-
-// <if expr="is_chromeos">
-/**
- * Called when the user clicks on the os-link-href button.
- */
-function crosUrlComponentRedirect() {
-  chrome.send('crosUrlComponentsRedirect');
-}
-// </if>
 
 /**
  * Asks the C++ ComponentsDOMHandler to get details about the installed
  * components.
  */
 function requestComponentsData() {
-  sendWithPromise('requestComponentsData').then(returnComponentsData);
+  sendWithPromise<ComponentsData>('requestComponentsData')
+      .then(returnComponentsData);
 }
 
 /**
@@ -95,9 +65,17 @@ function returnComponentsData(componentsData: ComponentsData) {
   bodyContainer.style.visibility = 'hidden';
   body.className = '';
 
+  componentsData.components.sort((a, b) => {
+    const nameA = a.name || a.id;
+    const nameB = b.name || b.id;
+    return nameA.localeCompare(nameB) || a.id.localeCompare(b.id);
+  });
+
   // Initialize |currentComponentsData|, which can also be updated in
   // onComponentEvent() later.
   currentComponentsData = componentsData.components;
+  componentsData.showUninstallButton =
+      loadTimeData.getBoolean('showUninstallButton');
 
   renderTemplate(componentsData);
 
@@ -111,17 +89,21 @@ function returnComponentsData(componentsData: ComponentsData) {
     };
   }
 
+  const uninstallButtons =
+      document.body.querySelectorAll<HTMLButtonElement>('.button-uninstall');
+  for (const btn of uninstallButtons) {
+    btn.onclick = function(e) {
+      handleUninstall(btn);
+      e.preventDefault();
+    };
+  }
+
   // Disable some controls for Guest mode in ChromeOS.
   if (isChromeOS && loadTimeData.getBoolean('isGuest')) {
     document.body.querySelectorAll<HTMLButtonElement>('[guest-disabled]')
         .forEach(function(element) {
           element.disabled = true;
         });
-  }
-
-  const systemFlagsLinkDiv = $('os-link-container');
-  if (systemFlagsLinkDiv) {
-    systemFlagsLinkDiv.hidden = !componentsData.showOsLink;
   }
 
   bodyContainer.style.visibility = 'visible';
@@ -177,11 +159,22 @@ function onComponentEvent(event: ComponentEvent) {
  *     update.
  */
 function handleCheckUpdate(node: HTMLElement) {
-  getRequiredElement('status-' + String(node.id)).textContent =
+  getRequiredElement('status-' + node.id).textContent =
       loadTimeData.getString('checkingLabel');
 
   // Tell the C++ ComponentssDOMHandler to check for update.
-  chrome.send('checkUpdate', [String(node.id)]);
+  chrome.send('checkUpdate', [node.id]);
+}
+
+/**
+ * Handles an 'uninstall' button getting clicked.
+ * @param node The HTML element representing the component being uninstalled.
+ */
+function handleUninstall(node: HTMLElement) {
+  node.setAttribute('disabled', 'true');
+
+  // Tell the C++ ComponentsDOMHandler to uninstall the component.
+  chrome.send('uninstallComponent', [node.id]);
 }
 
 // Get data and have it displayed upon loading.

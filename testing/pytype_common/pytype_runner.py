@@ -11,26 +11,26 @@ import time
 import typing
 
 CHROMIUM_SRC_DIR = os.path.realpath(
-    os.path.join(os.path.abspath(os.path.dirname(__file__)), '..', '..'))
+    os.path.join(os.path.abspath(os.path.dirname(__file__)), '..', '..')
+)
 
+# //build/util imports.
 sys.path.append(os.path.join(CHROMIUM_SRC_DIR, 'build', 'util'))
-
-# pylint: disable=wrong-import-position
 from lib.results import result_sink
 from lib.results import result_types
 
-# pylint: disable=wrong-import-position
-
 
 # pylint: disable=too-many-arguments
-def report_results(test_name: str,
-                   test_location: str,
-                   status: str,
-                   duration: float,
-                   log: str,
-                   output_file: typing.Optional[str],
-                   sink_client: typing.Optional[result_sink.ResultSinkClient],
-                   failure_reason: typing.Optional[str] = None) -> None:
+def report_results(
+    test_name: str,
+    test_location: str,
+    status: str,
+    duration: float,
+    log: str,
+    output_file: typing.Optional[str],
+    sink_client: typing.Optional[result_sink.ResultSinkClient],
+    failure_reason: typing.Optional[str] = None,
+) -> None:
     """Report results on bots.
 
     Args:
@@ -50,12 +50,22 @@ def report_results(test_name: str,
     if output_file:
         report_json_results(output_file)
     if sink_client:
-        sink_client.Post(test_id=test_name,
-                         status=status,
-                         duration=(duration * 1000),
-                         test_log=log,
-                         test_file=test_location,
-                         failure_reason=failure_reason)
+        # Source comes from:
+        # luci/resultdb/sink/proto/v1/test_result.proto
+        struct_test_dict = {
+            'coarseName': None,  # Not used for single tests.
+            'fineName': None,  # Not used for single tests.
+            'caseNameComponents': ['*fixture'],
+        }
+        sink_client.Post(
+            test_id=test_name,
+            status=status,
+            duration=(duration * 1000),
+            test_log=log,
+            test_file=test_location,
+            failure_reason=failure_reason,
+            test_id_structured=struct_test_dict,
+        )
 
 
 # pylint: enable=too-many-arguments
@@ -77,17 +87,24 @@ def report_json_results(output_file: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--isolated-script-test-output',
-                        dest='output_file',
-                        help=('Path to JSON output file.'))
+    parser.add_argument(
+        '--isolated-script-test-output',
+        dest='output_file',
+        help=('Path to JSON output file.'),
+    )
 
     args, _ = parser.parse_known_args()
     return args
 
 
-def run_pytype(test_name: str, test_location: str,
-               files_to_check: typing.Iterable[str],
-               python_paths: typing.Iterable[str], cwd: str) -> int:
+def run_pytype(  # pylint: disable=too-many-arguments
+    test_name: str,
+    test_location: str,
+    files_to_check: typing.Iterable[str],
+    python_paths: typing.Iterable[str],
+    cwd: str,
+    files_to_exclude: typing.Optional[typing.Iterable[str]] = None,
+) -> int:
     """Runs pytype on a given list of files/directories.
 
     Args:
@@ -100,6 +117,7 @@ def run_pytype(test_name: str, test_location: str,
         python_paths: Any paths that should be set as PYTHONPATH when running
             pytype.
         cwd: The directory that pytype should be run from.
+        files_to_exclude: Files and directories to exclude from pytype analysis.
 
     Returns:
         0 on success, non-zero on failure.
@@ -108,11 +126,19 @@ def run_pytype(test_name: str, test_location: str,
     args = parse_args()
 
     if sys.platform != 'linux':
-        print('pytype is currently only supported on Linux, see '
-              'https://github.com/google/pytype/issues/1154')
-        report_results(test_name, test_location, result_types.SKIP, 0,
-                       'Skipped due to unsupported platform.',
-                       args.output_file, sink_client)
+        print(
+            'pytype is currently only supported on Linux, see '
+            'https://github.com/google/pytype/issues/1154'
+        )
+        report_results(
+            test_name,
+            test_location,
+            result_types.SKIP,
+            0,
+            'Skipped due to unsupported platform.',
+            args.output_file,
+            sink_client,
+        )
         return 0
 
     # Strangely, pytype won't complain if you tell it to analyze a directory
@@ -123,7 +149,8 @@ def run_pytype(test_name: str, test_location: str,
     for f in files_to_check:
         if not os.path.exists(f):
             raise RuntimeError(
-                'Requested file or directory %s does not exist.' % f)
+                'Requested file or directory %s does not exist.' % f
+            )
 
     # pytype looks for a 'python' or 'python3' executable in PATH, so make sure
     # that the Python 3 executable from vpython is in the path.
@@ -143,6 +170,9 @@ def run_pytype(test_name: str, test_location: str,
         'auto',
     ]
     pytype_cmd.extend(files_to_check)
+    if files_to_exclude:
+        pytype_cmd.append('--exclude')
+        pytype_cmd.extend(files_to_exclude)
 
     if sink_client:
         stdout_handle = subprocess.PIPE
@@ -153,12 +183,14 @@ def run_pytype(test_name: str, test_location: str,
 
     start_time = time.time()
     try:
-        proc = subprocess.run(pytype_cmd,
-                              check=True,
-                              cwd=cwd,
-                              stdout=stdout_handle,
-                              stderr=stderr_handle,
-                              text=True)
+        proc = subprocess.run(
+            pytype_cmd,
+            check=True,
+            cwd=cwd,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+        )
         stdout = proc.stdout
         status = result_types.PASS
         failure_reason = None
@@ -166,12 +198,20 @@ def run_pytype(test_name: str, test_location: str,
         stdout = e.stdout
         status = result_types.FAIL
         failure_reason = 'Checking Python 3 type hinting failed.'
-    duration = (time.time() - start_time)
+    duration = time.time() - start_time
 
     if stdout:
         print(stdout)
-    report_results(test_name, test_location, status, duration, stdout or '',
-                   args.output_file, sink_client, failure_reason)
+    report_results(
+        test_name,
+        test_location,
+        status,
+        duration,
+        stdout or '',
+        args.output_file,
+        sink_client,
+        failure_reason,
+    )
 
     if status == result_types.FAIL:
         return 1

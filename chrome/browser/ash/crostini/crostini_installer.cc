@@ -4,29 +4,27 @@
 
 #include "chrome/browser/ash/crostini/crostini_installer.h"
 
+#include <algorithm>
 #include <string>
 
-#include "base/cxx17_backports.h"
+#include "ash/constants/ash_features.h"
 #include "base/functional/bind.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
-#include "base/no_destructor.h"
 #include "base/system/sys_info.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
-#include "chrome/browser/ash/crostini/ansible/ansible_management_service_factory.h"
 #include "chrome/browser/ash/crostini/crostini_disk.h"
 #include "chrome/browser/ash/crostini/crostini_features.h"
-#include "chrome/browser/ash/crostini/crostini_manager_factory.h"
+#include "chrome/browser/ash/crostini/crostini_manager.h"
 #include "chrome/browser/ash/crostini/crostini_pref_names.h"
 #include "chrome/browser/ash/crostini/crostini_types.mojom.h"
 #include "chrome/browser/ash/crostini/crostini_util.h"
+#include "chrome/browser/ash/guest_os/guest_id.h"
 #include "chrome/browser/ash/guest_os/guest_os_terminal.h"
 #include "chrome/browser/ash/login/startup_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/profiles/profile_keyed_service_factory.h"
-#include "chrome/browser/ui/webui/ash/crostini_installer/crostini_installer_dialog.h"
 #include "chromeos/ash/components/dbus/spaced/spaced_client.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/prefs/pref_service.h"
@@ -44,35 +42,6 @@ namespace crostini {
 
 namespace {
 using SetupResult = CrostiniInstaller::SetupResult;
-constexpr char kCrostiniSetupSourceHistogram[] = "Crostini.SetupSource";
-
-class CrostiniInstallerFactory : public ProfileKeyedServiceFactory {
- public:
-  static crostini::CrostiniInstaller* GetForProfile(Profile* profile) {
-    return static_cast<crostini::CrostiniInstaller*>(
-        GetInstance()->GetServiceForBrowserContext(profile, true));
-  }
-
-  static CrostiniInstallerFactory* GetInstance() {
-    static base::NoDestructor<CrostiniInstallerFactory> factory;
-    return factory.get();
-  }
-
- private:
-  friend class base::NoDestructor<CrostiniInstallerFactory>;
-
-  CrostiniInstallerFactory()
-      : ProfileKeyedServiceFactory("CrostiniInstallerService") {
-    DependsOn(crostini::CrostiniManagerFactory::GetInstance());
-  }
-
-  // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
-      content::BrowserContext* context) const override {
-    Profile* profile = Profile::FromBrowserContext(context);
-    return new crostini::CrostiniInstaller(profile);
-  }
-};
 
 constexpr int kUninitializedDiskSpace = -1;
 
@@ -93,8 +62,9 @@ void RecordTimeFromDeviceSetupToInstallMetric() {
       FROM_HERE, {base::MayBlock()},
       base::BindOnce(&ash::StartupUtils::GetTimeSinceOobeFlagFileCreation),
       base::BindOnce([](base::TimeDelta time_from_device_setup) {
-        if (time_from_device_setup.is_zero())
+        if (time_from_device_setup.is_zero()) {
           return;
+        }
 
         // The magic number 1471228928 is used for legacy reasons and changing
         // it would invalidate already logged data.
@@ -156,6 +126,9 @@ SetupResult InstallStateToCancelledSetupResult(
       return SetupResult::kUserCancelledSetupContainer;
     case InstallerState::kStartContainer:
       return SetupResult::kUserCancelledStartContainer;
+    case InstallerState::kFetchSshKeys_DEPRECATED:
+    case InstallerState::kMountContainer_DEPRECATED:
+      NOTREACHED();
     case InstallerState::kConfigureContainer:
       return SetupResult::kUserCancelledConfiguringContainer;
   }
@@ -178,7 +151,6 @@ crostini::mojom::InstallerError CrostiniResultToInstallerError(
     default:
     case InstallerState::kStart:
       NOTREACHED();
-      return InstallerError::kErrorUnknown;
     case InstallerState::kInstallImageLoader:
       if (offline) {
         return InstallerError::kErrorOffline;
@@ -214,10 +186,6 @@ crostini::mojom::InstallerError CrostiniResultToInstallerError(
 
 }  // namespace
 
-CrostiniInstaller* CrostiniInstaller::GetForProfile(Profile* profile) {
-  return CrostiniInstallerFactory::GetForProfile(profile);
-}
-
 CrostiniInstaller::CrostiniInstaller(Profile* profile) : profile_(profile) {}
 
 CrostiniInstaller::~CrostiniInstaller() {
@@ -231,20 +199,6 @@ void CrostiniInstaller::Shutdown() {
         restart_id_);
     restart_id_ = CrostiniManager::kUninitializedRestartId;
   }
-}
-
-void CrostiniInstaller::ShowDialog(CrostiniUISurface ui_surface) {
-  // Defensive check to prevent showing the installer when crostini is not
-  // allowed.
-  if (!CrostiniFeatures::Get()->IsAllowedNow(profile_)) {
-    return;
-  }
-  base::UmaHistogramEnumeration(kCrostiniSetupSourceHistogram, ui_surface,
-                                crostini::CrostiniUISurface::kCount);
-
-  // TODO(lxj): We should pass the dialog |this| here instead of letting the
-  // webui to call |GetForProfile()| later.
-  ash::CrostiniInstallerDialog::Show(profile_);
 }
 
 void CrostiniInstaller::Install(CrostiniManager::RestartOptions options,
@@ -263,14 +217,6 @@ void CrostiniInstaller::Install(CrostiniManager::RestartOptions options,
   restart_options_.restart_source = RestartSource::kInstaller;
   progress_callback_ = std::move(progress_callback);
   result_callback_ = std::move(result_callback);
-
-  // Check if there's additional setup required in the case of enterprise
-  // specifying an Ansible playbook to be run for a pre-determined configuration
-  // on the container.
-  if (ShouldConfigureDefaultContainer(profile_)) {
-    restart_options_.ansible_playbook = profile_->GetPrefs()->GetFilePath(
-        prefs::kCrostiniAnsiblePlaybookFilePath);
-  }
 
   install_start_time_ = base::TimeTicks::Now();
   require_cleanup_ = true;
@@ -378,7 +324,7 @@ void CrostiniInstaller::OnDiskImageCreated(bool success,
 }
 
 void CrostiniInstaller::OnContainerDownloading(int32_t download_percent) {
-  container_download_percent_ = base::clamp(download_percent, 0, 100);
+  container_download_percent_ = std::clamp(download_percent, 0, 100);
   RunProgressCallback();
 }
 
@@ -440,7 +386,6 @@ void CrostiniInstaller::RunProgressCallback() {
     case InstallerState::kConfigureContainer:
       state_start_mark = 0.79;
       state_end_mark = 1;
-      // Ansible installation and playbook application.
       state_max_time = base::Seconds(140 + 300);
       break;
     default:
@@ -455,10 +400,7 @@ void CrostiniInstaller::RunProgressCallback() {
     state_fraction =
         0.5 * (state_fraction + 0.01 * container_download_percent_);
   }
-  // TODO(https://crbug.com/1000173): Calculate configure container step
-  // progress based on real progress.
-
-  double progress = state_start_mark + base::clamp(state_fraction, 0.0, 1.0) *
+  double progress = state_start_mark + std::clamp(state_fraction, 0.0, 1.0) *
                                            (state_end_mark - state_start_mark);
   progress_callback_.Run(installing_state_, progress);
 }
@@ -480,7 +422,7 @@ void CrostiniInstaller::UpdateState(State new_state) {
         base::BindRepeating(&CrostiniInstaller::RunProgressCallback,
                             weak_ptr_factory_.GetWeakPtr()));
   } else {
-    state_progress_timer_.AbandonAndStop();
+    state_progress_timer_.Stop();
   }
 }
 
@@ -563,12 +505,19 @@ void CrostiniInstaller::OnCrostiniRestartFinished(CrostiniResult result) {
 
   if (!skip_launching_terminal_for_testing_) {
     // kInvalidDisplayId will launch terminal on the current active display.
+    const guest_os::GuestId* container_id;
+    if (CrostiniManager::GetTerminaFlavor(profile_) ==
+        CrostiniManager::TerminaFlavor::BAGUETTE) {
+      container_id = &crostini::DefaultBaguetteContainerId();
+    } else {
+      container_id = &crostini::DefaultContainerId();
+    }
     guest_os::LaunchTerminal(profile_, display::kInvalidDisplayId,
-                             crostini::DefaultContainerId());
+                             *container_id);
   }
 }
 
-void CrostiniInstaller::OnAvailableDiskSpace(absl::optional<int64_t> bytes) {
+void CrostiniInstaller::OnAvailableDiskSpace(std::optional<int64_t> bytes) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   // |Cancel()| might be called immediately after |Install()|.
@@ -581,8 +530,9 @@ void CrostiniInstaller::OnAvailableDiskSpace(absl::optional<int64_t> bytes) {
 
   DCHECK_EQ(installing_state_, InstallerState::kStart);
 
-  if (bytes.has_value())
+  if (bytes.has_value()) {
     free_disk_space_ = bytes.value();
+  }
   // Don't enforce minimum disk size on dev box or trybots because
   // base::SysInfo::AmountOfFreeDiskSpace returns zero in testing.
   if (base::SysInfo::IsRunningOnChromeOS() &&
@@ -600,11 +550,31 @@ void CrostiniInstaller::OnAvailableDiskSpace(absl::optional<int64_t> bytes) {
 
   UpdateInstallingState(InstallerState::kInstallImageLoader);
 
-  // Kick off the Crostini Restart sequence. We will be added as an observer.
+  // In general, we should always try to start the guest that exists on the
+  // device. We should also only try to install baguette if the flag is enabled
+  // (for now).
+  //
+  // After this point, we can assume that the current local state is correct and
+  // no longer need concern ourself with the feature flag value.
+  CrostiniManager::TerminaFlavor termina_flavor =
+      CrostiniManager::GetTerminaFlavor(profile_);
+  bool baguette_enabled =
+      base::FeatureList::IsEnabled(ash::features::kCrostiniContainerless);
+  bool start_baguette =
+      (baguette_enabled &&
+       !(termina_flavor == CrostiniManager::TerminaFlavor::CROSTINI)) ||
+      termina_flavor == CrostiniManager::TerminaFlavor::BAGUETTE;
+  const guest_os::GuestId* container_id;
+  if (start_baguette) {
+    container_id = &crostini::DefaultBaguetteContainerId();
+  } else {
+    container_id = &crostini::DefaultContainerId();
+  }
+
   restart_id_ =
       crostini::CrostiniManager::GetForProfile(profile_)
           ->RestartCrostiniWithOptions(
-              crostini::DefaultContainerId(), std::move(restart_options_),
+              *container_id, std::move(restart_options_),
               base::BindOnce(&CrostiniInstaller::OnCrostiniRestartFinished,
                              weak_ptr_factory_.GetWeakPtr()),
               this);

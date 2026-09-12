@@ -10,20 +10,24 @@
 #include <sys/types.h>
 
 #include <memory>
+#include <optional>
+#include <utility>
 
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/message_loop/message_pump_for_io.h"
 #include "base/threading/thread_checker.h"
-#include "base/timer/timer.h"
 #include "net/base/address_family.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/io_buffer.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_export.h"
 #include "net/base/network_handle.h"
+#include "net/base/sockaddr_storage.h"
 #include "net/log/net_log_with_source.h"
+#include "net/socket/datagram_client_socket.h"
 #include "net/socket/datagram_socket.h"
 #include "net/socket/diff_serv_code_point.h"
 #include "net/socket/socket_descriptor.h"
@@ -38,39 +42,24 @@ class NetLog;
 struct NetLogSource;
 class SocketTag;
 
+// These values are persisted to logs, entries should not be renumbered.
+// LINT.IfChange(SetSocketOptionGroResult)
+enum class SetSocketOptionGroResult {
+  kSuccess = 0,
+  kUnsupportedKernel = 1,
+  kOtherError = 2,
+  kMaxValue = kOtherError,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/net/enums.xml:SetSocketOptionGroResult)
+
 class NET_EXPORT UDPSocketPosix {
  public:
-  // Performance helper for net::activity_monitor, it batches
-  // throughput samples, subject to a byte limit threshold (64 KB) or
-  // timer (100 ms), whichever comes first.  The batching is subject
-  // to a minimum number of samples (2) required by NQE to update its
-  // throughput estimate.
-  class ReceivedActivityMonitor {
-   public:
-    ReceivedActivityMonitor() = default;
-
-    ReceivedActivityMonitor(const ReceivedActivityMonitor&) = delete;
-    ReceivedActivityMonitor& operator=(const ReceivedActivityMonitor&) = delete;
-
-    ~ReceivedActivityMonitor() = default;
-    // Provided by sent/received subclass.
-    // Update throughput, but batch to limit overhead of net::activity_monitor.
-    void Increment(uint32_t bytes);
-    // For flushing cached values.
-    void OnClose();
-
-   private:
-    void Update();
-    void OnTimerFired();
-
-    uint32_t bytes_ = 0;
-    uint32_t increments_ = 0;
-    base::RepeatingTimer timer_;
-  };
-
   UDPSocketPosix(DatagramSocket::BindType bind_type,
                  net::NetLog* net_log,
                  const net::NetLogSource& source);
+
+  UDPSocketPosix(DatagramSocket::BindType bind_type,
+                 NetLogWithSource source_net_log);
 
   UDPSocketPosix(const UDPSocketPosix&) = delete;
   UDPSocketPosix& operator=(const UDPSocketPosix&) = delete;
@@ -99,7 +88,6 @@ class NET_EXPORT UDPSocketPosix {
   int Bind(const IPEndPoint& address);
 
   // Closes the socket.
-  // TODO(rvargas, hidehiko): Disallow re-Open() after Close().
   void Close();
 
   // Copies the remote udp address into |address| and returns a net error code.
@@ -117,6 +105,22 @@ class NET_EXPORT UDPSocketPosix {
   // Only usable from the client-side of a UDP socket, after the socket
   // has been connected.
   int Read(IOBuffer* buf, int buf_len, CompletionOnceCallback callback);
+
+  // Reads multiple datagrams from a connected socket.
+  //
+  // NOTE: When UDP GRO (Generic Receive Offload) is enabled on
+  // Linux/Android/ChromeOS, the kernel can coalesce incoming UDP datagrams into
+  // a single superpacket up to 64KB (64 * 1024 bytes). If the caller provides a
+  // buffer (`buf_len`) smaller than 64KB, recvmsg() sets MSG_TRUNC and returns
+  // ERR_MSG_TOO_BIG whenever enough packets happen to be coalesced to exceed
+  // the buffer size. Callers must pass a buffer of at least
+  // `kMinimumReadMultipleBufferSize` (64KB) to prevent packet truncation.
+  base::expected<DatagramsMetadata, Error> ReadMultiple(
+      IOBuffer* buffer,
+      size_t buf_len,
+      size_t maximum_packet_size,
+      base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
+          callback);
 
   // Writes to the socket.
   // Only usable from the client-side of a UDP socket, after the socket
@@ -171,6 +175,10 @@ class NET_EXPORT UDPSocketPosix {
   // return ERR_IO_PENDING.
   int SetDoNotFragment();
 
+  // Requests that packets received by this socket have the ECN bit set. Returns
+  // a network error code if there was a problem.
+  int SetRecvTos();
+
   // If |confirm| is true, then the MSG_CONFIRM flag will be passed to
   // subsequent writes if it's supported by the platform.
   void SetMsgConfirm(bool confirm);
@@ -204,13 +212,13 @@ class NET_EXPORT UDPSocketPosix {
   int AllowAddressSharingForMulticast();
 
   // Joins the multicast group.
-  // |group_address| is the group address to join, could be either
+  // `group_address` is the group address to join, could be either
   // an IPv4 or IPv6 address.
   // Returns a net error code.
   int JoinGroup(const IPAddress& group_address) const;
 
   // Leaves the multicast group.
-  // |group_address| is the group address to leave, could be either
+  // `group_address` is the group address to leave, could be either
   // an IPv4 or IPv6 address. If the socket hasn't joined the group,
   // it will be ignored.
   // It's optional to leave the multicast group before destroying
@@ -218,7 +226,24 @@ class NET_EXPORT UDPSocketPosix {
   // Returns a net error code.
   int LeaveGroup(const IPAddress& group_address) const;
 
-  // Sets interface to use for multicast. If |interface_index| set to 0,
+  // Joins a source-specific multicast (SSM) group as defined in RFC 4607.
+  // `group_address` must be in the SSM range (232.0.0.0/8 for IPv4 or
+  // ff3x::/32 for IPv6).
+  // `source_address` specifies the unicast source to receive traffic from.
+  // Both addresses must be the same IP version.
+  // Uses IGMPv3 (IPv4) or MLDv2 (IPv6) protocol operations.
+  // Returns a net error code.
+  int JoinSourceGroup(const IPAddress& group_address,
+                      const IPAddress& source_address) const;
+
+  // Leaves a source-specific multicast (SSM) group.
+  // `group_address` and `source_address` must match a previous JoinSourceGroup
+  // call. Both addresses must be the same IP version.
+  // Returns a net error code.
+  int LeaveSourceGroup(const IPAddress& group_address,
+                       const IPAddress& source_address) const;
+
+  // Sets interface to use for multicast. If `interface_index` set to 0,
   // default interface is used.
   // Should be called before Bind().
   // Returns a net error code.
@@ -252,6 +277,18 @@ class NET_EXPORT UDPSocketPosix {
   // Returns a net error code.
   int SetDiffServCodePoint(DiffServCodePoint dscp);
 
+  // Requests that packets sent by this socket have the DSCP and/or ECN
+  // bits set. Returns a network error code if there was a problem. If
+  // DSCP_NO_CHANGE or ECN_NO_CHANGE are set, will preserve those parts of
+  // the original setting.
+  // ECN values other than ECN_DEFAULT must not be used outside of tests,
+  // without appropriate congestion control.
+  int SetTos(DiffServCodePoint dscp, EcnCodePoint ecn);
+
+  // Sets IPV6_V6ONLY on the socket. If this flag is true, the socket will be
+  // restricted to only IPv6; false allows both IPv4 and IPv6 traffic.
+  int SetIPv6Only(bool ipv6_only);
+
   // Exposes the underlying socket descriptor for testing its state. Does not
   // release ownership of the descriptor.
   SocketDescriptor SocketDescriptorForTesting() const { return socket_; }
@@ -272,15 +309,45 @@ class NET_EXPORT UDPSocketPosix {
   // Sets iOS Network Service Type for option SO_NET_SERVICE_TYPE.
   int SetIOSNetworkServiceType(int ios_network_service_type);
 
-  // Sets "don't close" flag for the socket.
-  void SetDontClose(bool dont_close);
+  // Register a socket and a QUIC UDP payload that can close a QUIC connection
+  // to the Android system server.
+  // When the app loses network access, the system server destroys the
+  // registered socket and sends the registered UDP payload to the server.
+  void RegisterQuicConnectionClosePayload(base::span<uint8_t> payload);
+
+  // Unregister the socket and its associated UDP payload that were
+  // previously registered by RegisterQuicConnectionClosePayload
+  void UnregisterQuicConnectionClosePayload();
 
   // Takes ownership of `socket`, which should be a socket descriptor opened
   // with the specified address family. The socket should only be created but
   // not bound or connected to an address.
   int AdoptOpenedSocket(AddressFamily address_family, int socket);
 
+  uint32_t get_multicast_interface_for_testing() const {
+    return multicast_interface_;
+  }
+  bool get_msg_confirm_for_testing() const { return sendto_flags_; }
+  bool get_experimental_recv_optimization_enabled_for_testing() const {
+    return experimental_recv_optimization_enabled_;
+  }
+  void set_gro_enabled_for_testing(bool gro_enabled) {
+    gro_status_ = gro_enabled ? GroStatus::kEnabled : GroStatus::kDisabled;
+  }
+  bool is_gro_enabled_for_testing() const {
+    return gro_status_ == GroStatus::kEnabled;
+  }
+  void ConfigureGroSocketOptionForTesting() { ConfigureGroSocketOption(); }
+
+  DscpAndEcn GetLastTos() const { return TosToDscpAndEcn(last_tos_); }
+
  private:
+  enum class GroStatus : uint8_t {
+    kUnconfigured,
+    kEnabled,
+    kDisabled,
+  };
+
   enum SocketOptions {
     SOCKET_OPTION_MULTICAST_LOOP = 1 << 0
   };
@@ -320,8 +387,14 @@ class NET_EXPORT UDPSocketPosix {
   };
 
   void DoReadCallback(int rv);
+  void DoReadMultipleCallback(base::expected<DatagramsMetadata, Error> rv);
   void DoWriteCallback(int rv);
   void DidCompleteRead();
+  void DidCompleteMultipleRead();
+  void OnFallbackReadComplete(
+      base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
+          callback,
+      int rv);
   void DidCompleteWrite();
 
   // Handles stats and logging. |result| is the number of bytes transferred, on
@@ -332,7 +405,9 @@ class NET_EXPORT UDPSocketPosix {
                const char* bytes,
                socklen_t addr_len,
                const sockaddr* addr);
+  void LogRead(int result, const char* bytes, const IPEndPoint* address);
   void LogWrite(int result, const char* bytes, const IPEndPoint* address);
+  void ConfigureGroSocketOption();
 
   // Same as SendTo(), except that address is passed by pointer
   // instead of by reference. It is called from Write() with |address|
@@ -358,6 +433,41 @@ class NET_EXPORT UDPSocketPosix {
                                       int buf_len,
                                       IPEndPoint* address);
 
+  struct RecvmsgResult {
+    size_t bytes_read = 0;
+    int msg_flags = 0;
+    std::optional<uint8_t> tos;
+    std::optional<size_t> gso_size;
+    SockaddrStorage storage;
+  };
+  base::expected<RecvmsgResult, Error> DoRecvmsg(IOBuffer* buf,
+                                                 size_t buf_len,
+                                                 bool populate_remote_address);
+  void FillResultFromMessageHeader(struct msghdr* msg, RecvmsgResult* result);
+
+  base::expected<DatagramsMetadata, Error> InternalReadMultiple(
+      IOBuffer* buffer,
+      size_t buf_len,
+      size_t maximum_packet_size);
+
+  // recvmmsg() and GRO are only available on Linux, ChromeOS, and Android.
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+  base::expected<DatagramsMetadata, Error> InternalReadMultipleWithGro(
+      IOBuffer* buffer,
+      size_t buf_len,
+      size_t maximum_packet_size);
+  base::expected<DatagramsMetadata, Error> InternalRecvMmsg(
+      IOBuffer* buffer,
+      size_t num_messages,
+      size_t maximum_packet_size);
+  base::expected<DatagramsMetadata, Error> ProcessRecvMmsgResults(
+      base::span<struct mmsghdr> mmsg,
+      size_t maximum_packet_size);
+  static base::expected<DatagramsMetadata, Error> ProcessGroResult(
+      const RecvmsgResult& res,
+      size_t maximum_packet_size);
+#endif
+
   // An implementation of the InternalRecvFrom() method for reading data
   // from non-connected sockets. Internally the method uses the recvmsg()
   // system call.
@@ -369,6 +479,14 @@ class NET_EXPORT UDPSocketPosix {
   // Applies |socket_options_| to |socket_|. Should be called before
   // Bind().
   int SetMulticastOptions();
+
+  // Helper for JoinSourceGroup/LeaveSourceGroup. Performs the setsockopt call
+  // with the specified `option` (MCAST_JOIN_SOURCE_GROUP or
+  // MCAST_LEAVE_SOURCE_GROUP).
+  int SetSourceGroupMembership(const IPAddress& group_address,
+                               const IPAddress& source_address,
+                               int option) const;
+
   int DoBind(const IPEndPoint& address);
   // Binds to a random port on |address|.
   int RandomBind(const IPAddress& address);
@@ -380,7 +498,7 @@ class NET_EXPORT UDPSocketPosix {
 
   // Hash of |socket_| to verify that it is not corrupted when calling close().
   // Used to debug https://crbug.com/906005.
-  // TODO(crbug.com/906005): Remove this once the bug is fixed.
+  // TODO(crbug.com/41426706): Remove this once the bug is fixed.
   int socket_hash_ = 0;
 
   int addr_family_ = 0;
@@ -422,6 +540,10 @@ class NET_EXPORT UDPSocketPosix {
   int read_buf_len_ = 0;
   raw_ptr<IPEndPoint> recv_from_address_ = nullptr;
 
+  // The maximum packet size passed to ReadMultiple(), used to retrieve the
+  // packet size when completing an asynchronous ReadMultiple() operation.
+  size_t read_multiple_maximum_packet_size_ = 0;
+
   // The buffer used by InternalWrite() to retry Write requests
   scoped_refptr<IOBuffer> write_buf_;
   int write_buf_len_ = 0;
@@ -429,6 +551,8 @@ class NET_EXPORT UDPSocketPosix {
 
   // External callback; called when read is complete.
   CompletionOnceCallback read_callback_;
+  base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
+      read_multiple_callback_;
 
   // External callback; called when write is complete.
   CompletionOnceCallback write_callback_;
@@ -437,16 +561,6 @@ class NET_EXPORT UDPSocketPosix {
 
   // Network that this socket is bound to via BindToNetwork().
   handles::NetworkHandle bound_network_;
-
-  // Whether net::activity_monitor should be updated every time bytes are
-  // received, without batching through |received_activity_monitor_|. This is
-  // initialized with the state of the "UdpSocketPosixAlwaysUpdateBytesReceived"
-  // feature. It is cached to avoid accessing the FeatureList every time bytes
-  // are received.
-  const bool always_update_bytes_received_;
-
-  // Used to lower the overhead updating activity monitor.
-  ReceivedActivityMonitor received_activity_monitor_;
 
   // Current socket tag if |socket_| is valid, otherwise the tag to apply when
   // |socket_| is opened.
@@ -458,12 +572,15 @@ class NET_EXPORT UDPSocketPosix {
   // enable_experimental_recv_optimization() method.
   bool experimental_recv_optimization_enabled_ = false;
 
+  // Tracks the configuration status of UDP Generic Receive Offload (UDP_GRO).
+  GroStatus gro_status_ = GroStatus::kUnconfigured;
+
   // Manages decrementing the global open UDP socket counter when this
   // UDPSocket is destroyed.
   OwnedUDPSocketCount owned_socket_count_;
 
-  // Flag to signify if |socket_| should not be closed.
-  bool dont_close_ = false;
+  // The last TOS byte received on the socket.
+  uint8_t last_tos_ = 0;
 
   THREAD_CHECKER(thread_checker_);
 };

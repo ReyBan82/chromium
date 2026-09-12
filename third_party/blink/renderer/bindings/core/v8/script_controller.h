@@ -31,9 +31,7 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_BINDINGS_CORE_V8_SCRIPT_CONTROLLER_H_
 #define THIRD_PARTY_BLINK_RENDERER_BINDINGS_CORE_V8_SCRIPT_CONTROLLER_H_
 
-#include <memory>
-
-#include "third_party/blink/renderer/bindings/core/v8/window_proxy_manager.h"
+#include "services/network/public/mojom/content_security_policy.mojom-forward.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
@@ -46,6 +44,8 @@ namespace blink {
 class DOMWrapperWorld;
 class KURL;
 class LocalDOMWindow;
+class LocalWindowProxy;
+class LocalWindowProxyManager;
 class SecurityOrigin;
 
 enum class ExecuteScriptPolicy;
@@ -67,9 +67,7 @@ class CORE_EXPORT ScriptController final
 
   // This returns an initialized window proxy. (If the window proxy is not
   // yet initialized, it's implicitly initialized at the first access.)
-  LocalWindowProxy* WindowProxy(DOMWrapperWorld& world) {
-    return window_proxy_manager_->WindowProxy(world);
-  }
+  LocalWindowProxy* WindowProxy(DOMWrapperWorld& world);
 
   v8::Local<v8::Value> EvaluateMethodInMainWorld(
       v8::Local<v8::Function> function,
@@ -77,17 +75,17 @@ class CORE_EXPORT ScriptController final
       int argc,
       v8::Local<v8::Value> argv[]);
 
+  // Clears frame resources for a discard operation by replacing the current
+  // document with a new empty document, deleting the current document and its
+  // children.
+  void DiscardFrame();
+
   // Executes a javascript url in the main world. |world_for_csp| denotes the
   // javascript world in which this navigation initiated and which should be
   // used for CSP checks.
   void ExecuteJavaScriptURL(const KURL&,
                             network::mojom::CSPDisposition,
                             const DOMWrapperWorld* world_for_csp);
-
-  // Creates a new isolated world for DevTools with the given human readable
-  // |world_name| and returns it id or nullptr on failure.
-  scoped_refptr<DOMWrapperWorld> CreateNewInspectorIsolatedWorld(
-      const String& world_name);
 
   // Disables eval for the main world.
   void DisableEval(const String& error_message);
@@ -110,17 +108,9 @@ class CORE_EXPORT ScriptController final
   void UpdateDocument();
   void UpdateSecurityOrigin(const SecurityOrigin*);
 
-  // Registers a v8 extension to be available on webpages. Will only
-  // affect v8 contexts initialized after this call.
-  static void RegisterExtensionIfNeeded(std::unique_ptr<v8::Extension>);
-  static v8::ExtensionConfiguration ExtensionsFor(const ExecutionContext*);
-
  private:
   bool CanExecuteScript(ExecuteScriptPolicy policy);
-  v8::Isolate* GetIsolate() const {
-    return window_proxy_manager_->GetIsolate();
-  }
-  void EnableEval();
+  v8::Isolate* GetIsolate() const;
 
   // Sets whether eval is enabled for the context corresponding to the given
   // |world|. |error_message| is used only when |allow_eval| is false.

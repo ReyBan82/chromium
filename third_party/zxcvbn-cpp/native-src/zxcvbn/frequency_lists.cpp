@@ -11,6 +11,7 @@
 #include "base/no_destructor.h"
 #include "base/notreached.h"
 #include "base/task/thread_pool.h"
+#include "base/synchronization/lock.h"
 #include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/abseil-cpp/absl/types/variant.h"
 
@@ -52,7 +53,7 @@ static_assert(
 
 struct MergedEntry {
   size_t rank;
-  base::StringPiece value;
+  std::string_view value;
 };
 
 // A reference to an entry inside a dictionary.
@@ -80,13 +81,13 @@ class RankedDictEntryRef {
       }
       value_end++;
     }
-    value_ = base::StringPiece(data + value_start, value_end - value_start);
+    value_ = std::string_view(data + value_start, value_end - value_start);
   }
   RankedDictEntryRef(RankedDictEntryRef&) = delete;
   RankedDictEntryRef& operator=(const RankedDictEntryRef&) = delete;
 
   uint16_t rank() const { return rank_; }
-  base::StringPiece value() const { return value_; }
+  std::string_view value() const { return value_; }
 
   static void AppendToVector(MergedEntry entry, std::vector<char>& vec) {
     if (entry.rank > MarkedBigEndianU15::MAX_VALUE) {
@@ -99,13 +100,24 @@ class RankedDictEntryRef {
 
  private:
   size_t rank_;
-  base::StringPiece value_;
+  std::string_view value_;
 };
 
 // Helper function that does nothing with the RankedDicts apart from letting
 // it destruct as it goes out of scope. This is called on the ThreadPool to
 // allow for potentially blocking behavior of `RankedDicts` destructor.
-void DoNothing(RankedDicts dicts) {}
+void DoNothing(scoped_refptr<RefCountedRankedDicts> dicts) {}
+
+base::Lock& GetRankedDictsLock() {
+  static base::NoDestructor<base::Lock> lock;
+  return *lock;
+}
+
+scoped_refptr<RefCountedRankedDicts>& GetRankedDictsPointer() {
+  static base::NoDestructor<scoped_refptr<RefCountedRankedDicts>> ptr(
+      base::MakeRefCounted<RefCountedRankedDicts>(RankedDicts()));
+  return *ptr;
+}
 
 }  // namespace
 
@@ -114,28 +126,25 @@ RankedDicts::Datawrapper::Datawrapper(std::vector<char> data)
 
 RankedDicts::Datawrapper::Datawrapper(
     std::unique_ptr<base::MemoryMappedFile> map)
-    : size_((map && map->IsValid()) ? map->length() : 0u),
-      data_(map && map->IsValid() ? reinterpret_cast<const char*>(map->data())
-                                  : nullptr),
+    : size_((map && map->IsValid()) ? map->bytes().size() : 0u),
+      data_(map && map->IsValid()
+                ? reinterpret_cast<const char*>(map->bytes().data())
+                : nullptr),
       content_(std::move(map)) {}
 
 RankedDicts::RankedDicts(
-    const std::vector<std::vector<base::StringPiece>>& ordered_dicts) {
+    const std::vector<std::vector<std::string_view>>& ordered_dicts) {
   std::vector<MergedEntry> merged_dicts;
-  for (const std::vector<base::StringPiece>& strings : ordered_dicts) {
+  for (const std::vector<std::string_view>& strings : ordered_dicts) {
     size_t rank = 1;
-    for (const base::StringPiece& s : strings) {
-      bool clean_string = true;
+    for (const std::string_view& s : strings) {
       for (char c : s) {
         if (MarkedBigEndianU15::IsPossibleMarkerByte(c)) {
           NOTREACHED() << "RankedDicts bad character "
                        << static_cast<unsigned char>(c);
-          clean_string = false;
         }
       }
-      if (clean_string) {
-        merged_dicts.push_back({rank++, s});
-      }
+      merged_dicts.push_back({rank++, s});
     }
   }
   std::sort(merged_dicts.begin(), merged_dicts.end(),
@@ -168,7 +177,7 @@ RankedDicts::RankedDicts(std::unique_ptr<base::MemoryMappedFile> map)
 // To find an element in the middle between two others, we first locate the
 // *byte* in the middle, then seek forward until we hit a marker byte that
 // will only appear at the start of an allocation.
-absl::optional<rank_t> RankedDicts::Find(base::StringPiece needle) const {
+absl::optional<rank_t> RankedDicts::Find(std::string_view needle) const {
   // Special case for empty dictionary.
   size_t size = data_.size();
   if (size == 0) {
@@ -193,7 +202,7 @@ absl::optional<rank_t> RankedDicts::Find(base::StringPiece needle) const {
 
     // Perform the actual comparison.
     RankedDictEntryRef mid_entry(data_, adjusted_midpoint);
-    base::StringPiece mid_value = mid_entry.value();
+    std::string_view mid_value = mid_entry.value();
     int cmp_result = mid_value.compare(needle);
     if (cmp_result == 0)
       return mid_entry.rank();
@@ -228,22 +237,31 @@ bool RankedDicts::IsRealMarker(size_t offset) const {
   return false;
 }
 
-void SetRankedDictsImplementation(RankedDicts dicts) {
-  default_ranked_dicts() = std::move(dicts);
-}
-
+// Safely updates the global `RankedDicts` using a read-copy-update (RCU) pattern.
+// A lock is held briefly to safely update the global `scoped_refptr`, preventing
+// data races against reader threads. The old `RankedDicts` obj is safely unmapped
+// asynchronously if it was using a `MemoryMappedFile`.
 void SetRankedDicts(RankedDicts dicts) {
-  // Destroying a `RankedDict` may block if it is based on a `MemoryMappedFile`.
-  // Therefore this helper moves the task of doing it to a thread pool.
-  base::ThreadPool::PostTask(
-      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
-      base::BindOnce(&DoNothing, std::move(default_ranked_dicts())));
-  default_ranked_dicts() = std::move(dicts);
+  scoped_refptr<RefCountedRankedDicts> new_dicts =
+      base::MakeRefCounted<RefCountedRankedDicts>(std::move(dicts));
+  scoped_refptr<RefCountedRankedDicts> old_dicts;
+  {
+    base::AutoLock lock(GetRankedDictsLock());
+    old_dicts = std::exchange(GetRankedDictsPointer(), std::move(new_dicts));
+  }
+  if (old_dicts) {
+    base::ThreadPool::PostTask(
+        FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+        base::BindOnce(&DoNothing, std::move(old_dicts)));
+  }
 }
 
-RankedDicts& default_ranked_dicts() {
-  static base::NoDestructor<RankedDicts> default_dicts;
-  return *default_dicts;
+// Safely grabs a reference to the global `RankedDicts`. The background threads
+// reading dictionaries will hold this snapshot safely across multiple lookups
+// via their own `scoped_refptr` ensuring thread-safe reads.
+scoped_refptr<RefCountedRankedDicts> default_ranked_dicts() {
+  base::AutoLock lock(GetRankedDictsLock());
+  return GetRankedDictsPointer();
 }
 
 }  // namespace zxcvbn

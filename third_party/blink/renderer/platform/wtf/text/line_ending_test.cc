@@ -7,15 +7,42 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
-namespace WTF {
+namespace blink {
 
-TEST(LineEndingTest, NormalizeLineEndingsToCRLF) {
-  EXPECT_EQ(String(""), NormalizeLineEndingsToCRLF(""));
-  EXPECT_EQ(String("\r\n"), NormalizeLineEndingsToCRLF("\n"));
-  EXPECT_EQ(String("\r\n"), NormalizeLineEndingsToCRLF("\r\n"));
-  EXPECT_EQ(String("\r\n"), NormalizeLineEndingsToCRLF("\r"));
+TEST(LineEndingTest, NormalizeLineEndingsToCrLf) {
+  EXPECT_EQ(String(""), NormalizeLineEndingsToCrLf(""));
+  EXPECT_EQ(String("\r\n"), NormalizeLineEndingsToCrLf("\n"));
+  EXPECT_EQ(String("\r\n"), NormalizeLineEndingsToCrLf("\r\n"));
+  EXPECT_EQ(String("\r\n"), NormalizeLineEndingsToCrLf("\r"));
 
-  EXPECT_EQ(String("abc\r\ndef\r\n"), NormalizeLineEndingsToCRLF("abc\rdef\n"));
+  EXPECT_EQ(String("abc\r\ndef\r\n"), NormalizeLineEndingsToCrLf("abc\rdef\n"));
 }
 
-}  // namespace WTF
+TEST(LineEndingTest, NormalizeLineEndingsToLf) {
+  const struct {
+    const char* const test;
+    const char* const expected;
+  } kTestCases[] = {
+      {"", ""},
+      {"\n", "\n"},
+      {"\r\n", "\n"},
+      {"\r", "\n"},
+      {"abc\rdef\nghi\r\n", "abc\ndef\nghi\n"},
+  };
+
+  for (const auto& test : kTestCases) {
+    EXPECT_EQ(test.expected, NormalizeLineEndingsToLf(test.test));
+  }
+
+  for (const auto& test : kTestCases) {
+    Vector<uint8_t> out;
+    NormalizeLineEndingsToLf(test.test, out);
+    EXPECT_EQ(std::string_view(test.expected), base::as_string_view(out));
+  }
+
+  // If no modification is needed, we should get the same StringImpl back.
+  String no_change("foo\nbar\nbaz\n");
+  EXPECT_EQ(no_change.Impl(), NormalizeLineEndingsToLf(no_change).Impl());
+}
+
+}  // namespace blink

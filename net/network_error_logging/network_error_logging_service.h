@@ -13,6 +13,7 @@
 
 #include "base/feature_list.h"
 #include "base/memory/raw_ptr.h"
+#include "base/rand_util.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
 #include "net/base/ip_address.h"
@@ -44,7 +45,7 @@ class NET_EXPORT NetworkErrorLoggingService {
  public:
   class PersistentNelStore;
 
-  // Every (NIK, origin) pair can have at most one policy.
+  // Every (NAK, origin) pair can have at most one policy.
   struct NET_EXPORT NelPolicyKey {
     NelPolicyKey();
     NelPolicyKey(const NetworkAnonymizationKey& network_anonymization_key,
@@ -52,11 +53,10 @@ class NET_EXPORT NetworkErrorLoggingService {
     NelPolicyKey(const NelPolicyKey& other);
     ~NelPolicyKey();
 
-    bool operator<(const NelPolicyKey& other) const;
-    bool operator==(const NelPolicyKey& other) const;
-    bool operator!=(const NelPolicyKey& other) const;
+    friend bool operator==(const NelPolicyKey&, const NelPolicyKey&) = default;
+    friend auto operator<=>(const NelPolicyKey&, const NelPolicyKey&) = default;
 
-    // The NIK of the request this policy was received from. This will be used
+    // The NAK of the request this policy was received from. This will be used
     // for any requests uploading reports according to this policy. (Not
     // included in the report itself.)
     NetworkAnonymizationKey network_anonymization_key;
@@ -77,7 +77,7 @@ class NET_EXPORT NetworkErrorLoggingService {
 
     bool operator<(const WildcardNelPolicyKey& other) const;
 
-    // The NIK of the request this policy was received from. This will be used
+    // The NAK of the request this policy was received from. This will be used
     // for any requests uploading reports according to this policy. (Not
     // included in the report itself.)
     NetworkAnonymizationKey network_anonymization_key;
@@ -116,6 +116,9 @@ class NET_EXPORT NetworkErrorLoggingService {
   struct NET_EXPORT RequestDetails {
     RequestDetails();
     RequestDetails(const RequestDetails& other);
+    RequestDetails(RequestDetails&& other);
+    RequestDetails& operator=(const RequestDetails& other);
+    RequestDetails& operator=(RequestDetails&& other);
     ~RequestDetails();
 
     // NetworkAnonymizationKey of the request triggering the error. Not included
@@ -126,6 +129,13 @@ class NET_EXPORT NetworkErrorLoggingService {
     GURL referrer;
     std::string user_agent;
     IPAddress server_ip;
+    // Addresses other than `server_ip` that were also contacted while
+    // establishing the connection (e.g., earlier addresses in the resolved
+    // address list that the socket layer attempted before falling back). Not
+    // included in the uploaded report. Used when deciding whether to downgrade
+    // the report: the report is downgraded if any of these differ from the
+    // policy's `received_ip_address`.
+    std::vector<IPAddress> other_server_ips;
     std::string protocol;
     std::string method;
     int status_code;
@@ -146,6 +156,10 @@ class NET_EXPORT NetworkErrorLoggingService {
   struct NET_EXPORT SignedExchangeReportDetails {
     SignedExchangeReportDetails();
     SignedExchangeReportDetails(const SignedExchangeReportDetails& other);
+    SignedExchangeReportDetails(SignedExchangeReportDetails&& other);
+    SignedExchangeReportDetails& operator=(
+        const SignedExchangeReportDetails& other);
+    SignedExchangeReportDetails& operator=(SignedExchangeReportDetails&& other);
     ~SignedExchangeReportDetails();
 
     // NetworkAnonymizationKey of the request triggering the error. Not included
@@ -282,12 +296,16 @@ class NET_EXPORT NetworkErrorLoggingService {
   // Used to display information about NEL policies on the NetLog Reporting tab.
   virtual base::Value StatusAsValue() const;
 
-  // Gets the (NIK, origin) keys of all currently stored policies, including
+  // Gets the (NAK, origin) keys of all currently stored policies, including
   // expired ones.
   virtual std::set<NelPolicyKey> GetPolicyKeysForTesting();
 
   virtual PersistentNelStore* GetPersistentNelStoreForTesting();
   virtual ReportingService* GetReportingServiceForTesting();
+
+  // Loads a specified list of Nel policies and marks the service as
+  // initialized.
+  virtual void LoadPoliciesForTesting(std::vector<NelPolicy> policies);
 
  protected:
   NetworkErrorLoggingService();

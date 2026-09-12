@@ -6,11 +6,11 @@
 #include "ash/shell.h"
 #include "ash/wm/desks/desks_util.h"
 #include "ash/wm/work_area_insets.h"
+#include "components/exo/security_delegate.h"
 #include "components/exo/wayland/server_util.h"
 #include "components/exo/wayland/zcr_remote_shell_impl.h"
 
-namespace exo {
-namespace wayland {
+namespace exo::wayland {
 namespace {
 
 const struct zcr_remote_surface_v1_interface remote_surface_implementation = {
@@ -62,7 +62,7 @@ const struct zcr_remote_surface_v1_interface remote_surface_implementation = {
     zcr_remote_shell::remote_surface_set_aspect_ratio,
     zcr_remote_shell::remote_surface_block_ime,
     zcr_remote_shell::remote_surface_unblock_ime,
-    zcr_remote_shell::remote_surface_set_accessibility_id,
+    zcr_remote_shell::remote_surface_set_accessibility_id_DEPRECATED,
     zcr_remote_shell::remote_surface_set_pip_original_window,
     zcr_remote_shell::remote_surface_unset_pip_original_window,
     zcr_remote_shell::remote_surface_set_system_gesture_exclusion,
@@ -161,15 +161,9 @@ void remote_shell_get_remote_surface(wl_client* client,
                                      wl_resource* surface,
                                      uint32_t container) {
   WaylandRemoteShell* shell = GetUserDataAs<WaylandRemoteShell>(resource);
-  double default_scale_factor =
-      wl_resource_get_version(resource) >= 8
-          ? zcr_remote_shell::GetDefaultDeviceScaleFactor()
-          : 1.0;
-
   std::unique_ptr<ClientControlledShellSurface> shell_surface =
       shell->CreateShellSurface(GetUserDataAs<Surface>(surface),
-                                RemoteSurfaceContainer(container),
-                                default_scale_factor);
+                                RemoteSurfaceContainer(container));
   if (!shell_surface) {
     wl_resource_post_error(resource, ZCR_REMOTE_SHELL_V1_ERROR_ROLE,
                            "surface has already been assigned a role");
@@ -180,8 +174,7 @@ void remote_shell_get_remote_surface(wl_client* client,
       wl_resource_create(client, &zcr_remote_surface_v1_interface,
                          wl_resource_get_version(resource), id);
 
-  if (wl_resource_get_version(remote_surface_resource) < 18)
-    shell_surface->set_server_reparent_window(true);
+  CHECK(wl_resource_get_version(remote_surface_resource) >= 18);
 
   shell_surface->SetSecurityDelegate(GetSecurityDelegate(client));
 
@@ -238,10 +231,11 @@ void remote_shell_get_input_method_surface(wl_client* client,
     return;
   }
 
+  CHECK(GetSecurityDelegate(client)->CanAccessRemoteShell());
+
   std::unique_ptr<ClientControlledShellSurface> input_method_surface =
       GetUserDataAs<WaylandRemoteShell>(resource)->CreateInputMethodSurface(
-          GetUserDataAs<Surface>(surface),
-          zcr_remote_shell::GetDefaultDeviceScaleFactor());
+          GetUserDataAs<Surface>(surface));
   if (!input_method_surface) {
     wl_resource_post_error(resource, ZCR_REMOTE_SHELL_V1_ERROR_ROLE,
                            "Cannot create an IME surface");
@@ -268,8 +262,7 @@ void remote_shell_get_toast_surface(wl_client* client,
 
   std::unique_ptr<ClientControlledShellSurface> toast_surface =
       GetUserDataAs<WaylandRemoteShell>(resource)->CreateToastSurface(
-          GetUserDataAs<Surface>(surface),
-          zcr_remote_shell::GetDefaultDeviceScaleFactor());
+          GetUserDataAs<Surface>(surface));
   if (!toast_surface) {
     wl_resource_post_error(resource, ZCR_REMOTE_SHELL_V1_ERROR_ROLE,
                            "Cannot create an toast surface");
@@ -318,7 +311,7 @@ WaylandRemoteShellData::WaylandRemoteShellData(
     Display* display,
     OutputResourceProvider output_provider)
     : display(display), output_provider(output_provider) {}
-WaylandRemoteShellData::~WaylandRemoteShellData() {}
+WaylandRemoteShellData::~WaylandRemoteShellData() = default;
 
 void bind_remote_shell(wl_client* client,
                        void* data,
@@ -375,5 +368,4 @@ gfx::Rect GetStableWorkArea(const display::Display& display) {
   return ash::WorkAreaInsets::ForWindow(root)->ComputeStableWorkArea();
 }
 
-}  // namespace wayland
-}  // namespace exo
+}  // namespace exo::wayland

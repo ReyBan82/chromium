@@ -5,6 +5,7 @@
 #include "fuchsia_web/webengine/browser/web_engine_config.h"
 
 #include "base/command_line.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/field_trial.h"
 #include "base/values.h"
 #include "fuchsia_web/webengine/switches.h"
@@ -14,10 +15,10 @@ namespace {
 
 constexpr char kCommandLineArgs[] = "command-line-args";
 
-base::Value::Dict CreateConfigWithSwitchValue(std::string switch_name,
-                                              std::string switch_value) {
-  base::Value::Dict config_dict;
-  base::Value::Dict args;
+base::DictValue CreateConfigWithSwitchValue(std::string switch_name,
+                                            std::string switch_value) {
+  base::DictValue config_dict;
+  base::DictValue args;
   args.Set(switch_name, switch_value);
   config_dict.Set(kCommandLineArgs, std::move(args));
   return config_dict;
@@ -43,7 +44,7 @@ class WebEngineConfigTest : public testing::Test {
   }
 
  private:
-  base::FieldTrialList* backup_field_trial_list_ = nullptr;
+  raw_ptr<base::FieldTrialList> backup_field_trial_list_ = nullptr;
 };
 
 TEST_F(WebEngineConfigTest, CommandLineArgs) {
@@ -63,10 +64,10 @@ TEST_F(WebEngineConfigTest, DisallowedCommandLineArgs) {
 }
 
 TEST_F(WebEngineConfigTest, WronglyTypedCommandLineArgs) {
-  base::Value::Dict config;
+  base::DictValue config;
 
   // Specify a configuration that sets valid args with invalid value.
-  base::Value::Dict args;
+  base::DictValue args;
   args.Set("renderer-process-limit", false);
   config.Set(kCommandLineArgs, std::move(args));
 

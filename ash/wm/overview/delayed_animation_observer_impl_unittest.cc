@@ -10,7 +10,6 @@
 
 #include "ash/test/ash_test_base.h"
 #include "ash/wm/overview/overview_delegate.h"
-#include "base/containers/cxx20_erase.h"
 #include "base/containers/unique_ptr_adapters.h"
 #include "base/test/task_environment.h"
 #include "ui/aura/window.h"
@@ -39,7 +38,7 @@ class TestOverviewDelegate : public OverviewDelegate {
   }
   void RemoveAndDestroyExitAnimationObserver(
       DelayedAnimationObserver* animation_observer) override {
-    base::EraseIf(exit_observers_, base::MatchesUniquePtr(animation_observer));
+    std::erase_if(exit_observers_, base::MatchesUniquePtr(animation_observer));
   }
   void AddEnterAnimationObserver(
       std::unique_ptr<DelayedAnimationObserver> animation_observer) override {
@@ -48,7 +47,7 @@ class TestOverviewDelegate : public OverviewDelegate {
   }
   void RemoveAndDestroyEnterAnimationObserver(
       DelayedAnimationObserver* animation_observer) override {
-    base::EraseIf(enter_observers_, base::MatchesUniquePtr(animation_observer));
+    std::erase_if(enter_observers_, base::MatchesUniquePtr(animation_observer));
   }
 
   size_t num_exit_observers() const { return exit_observers_.size(); }
@@ -92,7 +91,7 @@ using EnterAnimationObserverTest = AshTestBase;
 // Tests that adding a EnterAnimationObserver works as intended.
 TEST_F(EnterAnimationObserverTest, Basic) {
   TestOverviewDelegate delegate;
-  std::unique_ptr<aura::Window> window = CreateTestWindow();
+  std::unique_ptr<aura::Window> window = CreateWindowWithAppType();
 
   {
     ui::ScopedLayerAnimationSettings animation_settings(
@@ -119,7 +118,7 @@ using ExitAnimationObserverTest = AshTestBase;
 // Tests that adding a ExitAnimationObserver works as intended.
 TEST_F(ExitAnimationObserverTest, Basic) {
   TestOverviewDelegate delegate;
-  std::unique_ptr<aura::Window> window = CreateTestWindow();
+  std::unique_ptr<aura::Window> window = CreateWindowWithAppType();
 
   {
     ui::ScopedLayerAnimationSettings animation_settings(

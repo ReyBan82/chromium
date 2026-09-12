@@ -7,7 +7,8 @@
 
 #include <memory>
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/policy/core/device_cloud_policy_validator.h"
 #include "chrome/browser/ash/settings/device_settings_service.h"
@@ -73,7 +74,7 @@ class DeviceCloudPolicyStoreAsh : public CloudPolicyStore,
 
   // Called on completion on the policy validation prior to storing policy.
   // Starts the actual store operation.
-  void OnPolicyToStoreValidated(DeviceCloudPolicyValidator* validator);
+  void OnPolicyToStoreValidated(CloudPolicyValidatorBase* validator);
 
   // Handles store completion operations updates status.
   void OnPolicyStored();
@@ -92,8 +93,8 @@ class DeviceCloudPolicyStoreAsh : public CloudPolicyStore,
   // Whether DM token check has yet been done.
   bool dm_token_checked_ = false;
 
-  ash::DeviceSettingsService* device_settings_service_;
-  ash::InstallAttributes* install_attributes_;
+  raw_ptr<ash::DeviceSettingsService> device_settings_service_;
+  raw_ptr<ash::InstallAttributes> install_attributes_;
 
   scoped_refptr<base::SequencedTaskRunner> background_task_runner_;
 

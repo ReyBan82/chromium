@@ -3,33 +3,13 @@
 // found in the LICENSE file.
 
 /** @fileoverview Definitions for chrome.developerPrivate API */
-// TODO(crbug.com/1203307): Auto-generate this file.
+// TODO(crbug.com/40179454): Auto-generate this file.
 
 import {ChromeEvent} from './chrome_event.js';
 
 declare global {
   export namespace chrome {
     export namespace developerPrivate {
-
-      export enum ItemType {
-        HOSTED_APP = 'hosted_app',
-        PACKAGED_APP = 'packaged_app',
-        LEGACY_PACKAGED_APP = 'legacy_packaged_app',
-        EXTENSION = 'extension',
-        THEME = 'theme',
-      }
-
-      export interface ItemInspectView {
-        path: string;
-        render_process_id: number;
-        render_view_id: number;
-        incognito: boolean;
-        generatedBackgroundPage: boolean;
-      }
-
-      export interface InstallWarning {
-        message: string;
-      }
 
       export enum ExtensionType {
         HOSTED_APP = 'HOSTED_APP',
@@ -60,6 +40,7 @@ declare global {
             'EXTENSION_SERVICE_WORKER_BACKGROUND',
         TAB_CONTENTS = 'TAB_CONTENTS',
         EXTENSION_SIDE_PANEL = 'EXTENSION_SIDE_PANEL',
+        DEVELOPER_TOOLS = 'DEVELOPER_TOOLS',
       }
 
       export enum ErrorType {
@@ -77,7 +58,7 @@ declare global {
         ENABLED = 'ENABLED',
         DISABLED = 'DISABLED',
         TERMINATED = 'TERMINATED',
-        BLACKLISTED = 'BLACKLISTED',
+        BLOCKLISTED = 'BLOCKLISTED',
       }
 
       export enum ComandScope {
@@ -93,6 +74,15 @@ declare global {
       export enum CommandScope {
         GLOBAL = 'GLOBAL',
         CHROME = 'CHROME',
+      }
+
+      export enum SafetyCheckWarningReason {
+        UNPUBLISHED = 'UNPUBLISHED',
+        POLICY = 'POLICY',
+        MALWARE = 'MALWARE',
+        OFFSTORE = 'OFFSTORE',
+        UNWANTED = 'UNWANTED',
+        NO_PRIVACY_PRACTICE = 'NO_PRIVACY_PRACTICE',
       }
 
       export interface AccessModifier {
@@ -131,6 +121,7 @@ declare global {
         renderViewId: number;
         renderProcessId: number;
         canInspect: boolean;
+        isServiceWorker: boolean;
         stackTrace: StackFrame[];
       }
 
@@ -138,10 +129,15 @@ declare global {
         suspiciousInstall: boolean;
         corruptInstall: boolean;
         updateRequired: boolean;
+        publishedInStoreRequired: boolean;
         blockedByPolicy: boolean;
         reloading: boolean;
         custodianApprovalRequired: boolean;
         parentDisabledPermissions: boolean;
+        unsupportedManifestVersion: boolean;
+        unsupportedDeveloperExtension: boolean;
+        disabledByAnotherExtension: boolean;
+        disabledByExtensionName?: string;
       }
 
       export interface OptionsPage {
@@ -167,6 +163,11 @@ declare global {
         ON_CLICK = 'ON_CLICK',
         ON_SPECIFIC_SITES = 'ON_SPECIFIC_SITES',
         ON_ALL_SITES = 'ON_ALL_SITES',
+      }
+
+      export interface  SafetyCheckStrings {
+        panelString?: string;
+        detailString?: string;
       }
 
       export interface ControlledInfo {
@@ -209,7 +210,8 @@ declare global {
       }
 
       export interface ExtensionInfo {
-        blacklistText?: string;
+        blocklistText?: string;
+        safetyCheckText?: SafetyCheckStrings;
         commands: Command[];
         controlledInfo?: ControlledInfo;
         dependentExtensions: DependentExtension[];
@@ -217,11 +219,15 @@ declare global {
         disableReasons: DisableReasons;
         errorCollection: AccessModifier;
         fileAccess: AccessModifier;
+        fileAccessPendingChange: boolean;
         homePage: HomePage;
         iconUrl: string;
         id: string;
         incognitoAccess: AccessModifier;
+        userScriptsAccess: AccessModifier;
+        incognitoAccessPendingChange: boolean;
         installWarnings: string[];
+        isCommandRegistrationHandledExternally: boolean;
         launchUrl?: string;
         location: Location;
         locationText?: string;
@@ -234,6 +240,7 @@ declare global {
         path?: string;
         permissions: Permissions;
         prettifiedPath?: string;
+        recommendationsUrl?: string;
         runtimeErrors: RuntimeError[];
         runtimeWarnings: string[];
         state: ExtensionState;
@@ -245,6 +252,10 @@ declare global {
         webStoreUrl: string;
         showSafeBrowsingAllowlistWarning: boolean;
         showAccessRequestsInToolbar: boolean;
+        safetyCheckWarningReason: SafetyCheckWarningReason;
+        pinnedToToolbar?: boolean;
+        isAffectedByMV2Deprecation: boolean;
+        canUploadAsAccountExtension: boolean;
       }
 
       export interface ProfileInfo {
@@ -253,19 +264,26 @@ declare global {
         isDeveloperModeControlledByPolicy: boolean;
         isIncognitoAvailable: boolean;
         isChildAccount: boolean;
+        isMv2DeprecationNoticeDismissed: boolean;
+        extensionsPinnedByDefault: boolean;
       }
 
       export interface ExtensionConfigurationUpdate {
         extensionId: string;
         fileAccess?: boolean;
         incognitoAccess?: boolean;
+        userScriptsAccess?: boolean;
         errorCollection?: boolean;
         hostAccess?: HostAccess;
         showAccessRequestsInToolbar?: boolean;
+        acknowledgeSafetyCheckWarningReason?: SafetyCheckWarningReason;
+        pinnedToToolbar?: boolean;
       }
 
       export interface ProfileConfigurationUpdate {
-        inDeveloperMode: boolean;
+        inDeveloperMode?: boolean;
+        isMv2DeprecationNoticeDismissed?: boolean;
+        extensionsPinnedByDefault?: boolean;
       }
 
       export interface ExtensionCommandUpdate {
@@ -319,6 +337,8 @@ declare global {
         PERMISSIONS_CHANGED = 'PERMISSIONS_CHANGED',
         SERVICE_WORKER_STARTED = 'SERVICE_WORKER_STARTED',
         SERVICE_WORKER_STOPPED = 'SERVICE_WORKER_STOPPED',
+        CONFIGURATION_CHANGED = 'CONFIGURATION_CHANGED',
+        PINNED_ACTIONS_CHANGED = 'PINNED_ACTIONS_CHANGED',
       }
 
       export enum SiteSet {
@@ -364,9 +384,7 @@ declare global {
       }
 
       export interface RequestFileSourceResponse {
-        highlight: string;
-        beforeHighlight: string;
-        afterHighlight: string;
+        source?: ErrorFileSource;
         title: string;
         message: string;
       }
@@ -413,6 +431,7 @@ declare global {
       export interface MatchingExtensionInfo {
         id: string;
         siteAccess: HostAccess;
+        canRequestAllSites: boolean;
       }
 
       export interface ExtensionSiteAccessUpdate {
@@ -447,6 +466,8 @@ declare global {
           Promise<LoadError|null>;
       export function removeHostPermission(extensionId: string, host: string):
           Promise<void>;
+      export function removeMultipleExtensions(extensionIds: string[]):
+          Promise<void>;
       export function repairExtension(extensionId: string): Promise<void>;
       export function requestFileSource(properties:
                                             RequestFileSourceProperties):
@@ -455,6 +476,7 @@ declare global {
           Promise<void>;
       export function showOptions(extensionId: string): Promise<void>;
       export function showPath(extensionId: string): Promise<void>;
+      export function openReviewPage(extensionId: string): Promise<void>;
       export function updateExtensionCommand(update: ExtensionCommandUpdate):
           Promise<void>;
       export function updateExtensionConfiguration(
@@ -471,6 +493,11 @@ declare global {
           Promise<MatchingExtensionInfo[]>;
       export function updateSiteAccess(
           site: string, updates: ExtensionSiteAccessUpdate[]): Promise<void>;
+      export function dismissSafetyHubExtensionsMenuNotification(): void;
+      export function dismissMv2DeprecationPanel(): void;
+      export function uploadExtensionToAccount(extensionId: string):
+          Promise<boolean>;
+      export function showSiteSettings(extensionId: string): Promise<void>;
 
       export const onItemStateChanged: ChromeEvent<(data: EventData) => void>;
       export const onProfileStateChanged:

@@ -8,8 +8,10 @@
 #include "base/strings/utf_string_conversions.h"
 #include "components/vector_icons/vector_icons.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
+#include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/image/image_unittest_util.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/gfx/vector_icon_types.h"
@@ -21,7 +23,7 @@ namespace {
 const gfx::VectorIcon& GetCircleVectorIcon() {
   static constexpr gfx::PathElement path[] = {gfx::CommandType::CIRCLE, 24, 18,
                                               5};
-  static const gfx::VectorIconRep rep[] = {{path, 4}};
+  static const gfx::VectorIconRep rep[] = {{path}};
   static constexpr gfx::VectorIcon circle_icon = {rep, 1, "circle"};
 
   return circle_icon;
@@ -31,7 +33,7 @@ const gfx::VectorIcon& GetRectVectorIcon() {
   static constexpr gfx::PathElement path[] = {
       gfx::CommandType::LINE_TO, 0,  10, gfx::CommandType::LINE_TO, 10, 10,
       gfx::CommandType::LINE_TO, 10, 0,  gfx::CommandType::CLOSE};
-  static const gfx::VectorIconRep rep[] = {{path, 10}};
+  static const gfx::VectorIconRep rep[] = {{path}};
   static constexpr gfx::VectorIcon rect_icon = {rep, 1, "rect"};
 
   return rect_icon;
@@ -224,9 +226,10 @@ TEST(ImageModelTest, ShouldRasterizeEmptyModel) {
 
 TEST(ImageModelTest, ShouldRasterizeVectorIcon) {
   ui::ColorProvider color_provider;
-  color_provider.GenerateColorMap();
   gfx::ImageSkia image_skia =
-      ui::ImageModel::FromVectorIcon(vector_icons::kSyncIcon)
+      ui::ImageModel::FromVectorIcon(features::IsRoundedIconsEnabled()
+                                         ? vector_icons::kSyncIcon
+                                         : vector_icons::kSyncOldIcon)
           .Rasterize(&color_provider);
   EXPECT_FALSE(image_skia.isNull());
 }

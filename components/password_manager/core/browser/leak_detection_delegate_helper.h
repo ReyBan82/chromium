@@ -12,9 +12,12 @@
 #include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "components/password_manager/core/browser/leak_detection_dialog_utils.h"
 #include "components/password_manager/core/browser/password_form.h"
-#include "components/password_manager/core/browser/password_store_consumer.h"
+#include "components/password_manager/core/browser/password_store/password_store_backend_error.h"
+#include "components/password_manager/core/browser/password_store/password_store_consumer.h"
+#include "components/password_manager/core/browser/password_store/stored_credential.h"
 #include "url/gurl.h"
 
 namespace password_manager {
@@ -29,8 +32,8 @@ class LeakDetectionDelegateHelper : public PasswordStoreConsumer {
   // Type alias for `callback_`.
   using LeakTypeReply = base::OnceCallback<void(PasswordForm::Store,
                                                 IsReused,
-                                                GURL,
-                                                std::u16string,
+                                                IsSavedAsBackup,
+                                                StoredCredential,
                                                 std::vector<GURL>)>;
 
   LeakDetectionDelegateHelper(
@@ -46,16 +49,16 @@ class LeakDetectionDelegateHelper : public PasswordStoreConsumer {
 
   // Request all credentials with `password` from the store.
   // Results are passed to `OnGetPasswordStoreResults`.
-  void ProcessLeakedPassword(GURL url,
-                             std::u16string username,
-                             std::u16string password);
+  void ProcessLeakedPassword(StoredCredential credentials);
 
  private:
   // PasswordStoreConsumer:
   // Is called by the `PasswordStoreInterface` once all credentials with the
   // specific password are retrieved.
-  void OnGetPasswordStoreResults(
-      std::vector<std::unique_ptr<PasswordForm>> results) override;
+  void OnGetPasswordStoreResultsOrErrorFrom(
+      PasswordStoreInterface* store,
+      base::expected<std::vector<StoredCredential>, PasswordStoreBackendError>
+          results_or_error) override;
 
   // Called when all password store results are available. Computes the
   // resulting credential type and invokes `callback_`.
@@ -64,12 +67,10 @@ class LeakDetectionDelegateHelper : public PasswordStoreConsumer {
   scoped_refptr<PasswordStoreInterface> profile_store_;
   scoped_refptr<PasswordStoreInterface> account_store_;
   LeakTypeReply callback_;
-  GURL url_;
-  std::u16string username_;
-  std::u16string password_;
+  StoredCredential credentials_;
 
   base::RepeatingClosure barrier_closure_;
-  std::vector<std::unique_ptr<PasswordForm>> partial_results_;
+  std::vector<StoredCredential> partial_results_;
 
   base::WeakPtrFactory<LeakDetectionDelegateHelper> weak_ptr_factory_{this};
 };

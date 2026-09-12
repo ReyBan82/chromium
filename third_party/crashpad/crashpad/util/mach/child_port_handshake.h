@@ -97,7 +97,7 @@ class ChildPortHandshakeTest;
 //!     // server_write_fd. Let the child know what file descriptor to use for
 //!     // server_write_fd by passing it as argv[1]. Example code for the child
 //!     // process is below.
-//!     CloseMultipleNowOrOnExec(STDERR_FILENO + 1, server_write_fd.get());
+//!     CloseMultipleNowOrOnExec(STDERR_FILENO + 1, {server_write_fd.get()});
 //!     execlp("./child", "child", server_write_fd_string.c_str(), nullptr);
 //!   }
 //!
@@ -107,7 +107,7 @@ class ChildPortHandshakeTest;
 //!   server_write_fd.reset();
 //!
 //!   // Make a new Mach receive right.
-//!   base::mac::ScopedMachReceiveRight
+//!   base::apple::ScopedMachReceiveRight
 //!       receive_right(NewMachPort(MACH_PORT_RIGHT_RECEIVE));
 //!
 //!   // Make a send right corresponding to the receive right.
@@ -118,7 +118,7 @@ class ChildPortHandshakeTest;
 //!                           MACH_MSG_TYPE_MAKE_SEND,
 //!                           &send_right,
 //!                           &send_right_type);
-//!   base::mac::ScopedMachSendRight send_right_owner(send_right);
+//!   base::apple::ScopedMachSendRight send_right_owner(send_right);
 //!
 //!   // Send the receive right to the child process, retaining the send right
 //!   // for use in the parent process.
@@ -136,7 +136,7 @@ class ChildPortHandshakeTest;
 //!     base::ScopedFD server_write_fd(atoi(argv[1]));
 //!
 //!     // Obtain a receive right from the parent process.
-//!     base::mac::ScopedMachReceiveRight receive_right(
+//!     base::apple::ScopedMachReceiveRight receive_right(
 //!         ChildPortHandshake::RunServerForFD(
 //!             std::move(server_write_fd),
 //!             ChildPortHandshake::PortRightType::kReceiveRight));

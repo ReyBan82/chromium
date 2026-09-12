@@ -10,6 +10,7 @@ import android.graphics.PorterDuff.Mode;
 import android.util.AttributeSet;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.animation.Animation;
 import android.view.animation.Animation.AnimationListener;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -19,6 +20,8 @@ import androidx.annotation.DrawableRes;
 import androidx.annotation.IntDef;
 import androidx.core.widget.ImageViewCompat;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.components.browser_ui.styles.SemanticColorUtils;
 import org.chromium.ui.util.ColorUtils;
@@ -30,6 +33,7 @@ import java.lang.annotation.RetentionPolicy;
  * View class for a bubble used in gesture navigation UI that consists of an icon
  * and an optional text.
  */
+@NullMarked
 public class NavigationBubble extends LinearLayout {
     /**
      * Target to close when gesture navigation takes place on the beginning
@@ -68,7 +72,8 @@ public class NavigationBubble extends LinearLayout {
         @Override
         public void onAnimationUpdate(ValueAnimator animation) {
             float fraction = (float) animation.getAnimatedValue();
-            ImageViewCompat.setImageTintList(mIcon,
+            ImageViewCompat.setImageTintList(
+                    mIcon,
                     ColorStateList.valueOf(ColorUtils.getColorWithOverlay(mStart, mEnd, fraction)));
         }
     }
@@ -77,21 +82,20 @@ public class NavigationBubble extends LinearLayout {
 
     private TextView mText;
     private ImageView mIcon;
-    private AnimationListener mListener;
+    private @Nullable AnimationListener mListener;
+    private @Nullable Animation mCurrentAnimation;
 
     // True if arrow bubble is faded out.
     private boolean mArrowFaded;
 
     private @CloseTarget int mCloseTarget;
 
-    /**
-     * Constructor for inflating from XML.
-     */
+    /** Constructor for inflating from XML. */
     public NavigationBubble(Context context) {
         this(context, null);
     }
 
-    public NavigationBubble(Context context, AttributeSet attrs) {
+    public NavigationBubble(Context context, @Nullable AttributeSet attrs) {
         super(context, attrs);
 
         mBlack = getContext().getColor(R.color.navigation_bubble_arrow);
@@ -100,10 +104,15 @@ public class NavigationBubble extends LinearLayout {
         mColorUpdateListener = new ColorUpdateListener();
         mColorAnimator = ValueAnimator.ofFloat(0, 1).setDuration(COLOR_TRANSITION_DURATION_MS);
         mColorAnimator.addUpdateListener(mColorUpdateListener);
-        getBackground().setColorFilter(
-                SemanticColorUtils.getNavigationBubbleBackgroundColor(context), Mode.MULTIPLY);
-        mCloseApp = getResources().getString(R.string.overscroll_navigation_close_chrome,
-                getContext().getString(R.string.app_name));
+        getBackground()
+                .setColorFilter(
+                        SemanticColorUtils.getNavigationBubbleBackgroundColor(context),
+                        Mode.MULTIPLY);
+        mCloseApp =
+                getResources()
+                        .getString(
+                                R.string.overscroll_navigation_close_chrome,
+                                getContext().getString(R.string.app_name));
         mCloseTab = getResources().getString(R.string.overscroll_navigation_close_tab);
         mCloseTarget = CloseTarget.NONE;
     }
@@ -154,18 +163,27 @@ public class NavigationBubble extends LinearLayout {
     }
 
     @Override
+    public void startAnimation(Animation animation) {
+        mCurrentAnimation = animation;
+        super.startAnimation(animation);
+    }
+
+    @Override
     public void onAnimationStart() {
         super.onAnimationStart();
         if (mListener != null) {
-            mListener.onAnimationStart(getAnimation());
+            mListener.onAnimationStart(
+                    mCurrentAnimation != null ? mCurrentAnimation : getAnimation());
         }
     }
 
     @Override
     public void onAnimationEnd() {
         super.onAnimationEnd();
+        Animation anim = mCurrentAnimation;
+        mCurrentAnimation = null;
         if (mListener != null) {
-            mListener.onAnimationEnd(getAnimation());
+            mListener.onAnimationEnd(anim != null ? anim : getAnimation());
         }
     }
 
@@ -179,9 +197,7 @@ public class NavigationBubble extends LinearLayout {
         setImageTint(false);
     }
 
-    /**
-     * Sets the correct tinting on the arrow icon.
-     */
+    /** Sets the correct tinting on the arrow icon. */
     public void setImageTint(boolean navigate) {
         assert mIcon != null;
         mColorUpdateListener.setTransitionColors(

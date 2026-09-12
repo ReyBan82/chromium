@@ -31,10 +31,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/containers/stack.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -108,25 +111,21 @@ static void DumpDirectoryTree(const std::string& origin_name,
         paths.push(make_pair(children[j - 1], name));
     }
 
-    // +1 for the leading extra slash.
-    const char* display_name = name.c_str() + 1;
-    const char* directory_suffix = info.is_directory() ? "/" : "";
+    // Skip the leading slash.
+    const std::string display_name =
+        name.substr(1u) + (info.is_directory() ? "/" : "");
     if (g_opt_long) {
       int64_t size;
       if (info.is_directory()) {
         size = static_cast<int64_t>(children.size());
       } else {
-        base::GetFileSize(origin_dir.Append(info.data_path), &size);
+        size = base::GetFileSize(origin_dir.Append(info.data_path)).value_or(0);
       }
       // TODO(hamaji): Modification time?
-      printf("%s%s %" PRId64 " %" PRId64 " %s\n",
-             display_name,
-             directory_suffix,
-             id,
-             size,
+      printf("%s %" PRId64 " %" PRId64 " %s\n", display_name.c_str(), id, size,
              FilePathToString(info.data_path).c_str());
     } else {
-      printf("%s%s\n", display_name, directory_suffix);
+      printf("%s\n", display_name.c_str());
     }
   }
 }
@@ -168,42 +167,43 @@ static void DumpFileSystem(const base::FilePath& file_system_dir) {
 }  // namespace storage
 
 int main(int argc, char* argv[]) {
-  const char* arg0 = argv[0];
-  while (true) {
-    if (argc < 2)
-      ShowUsageAndExit(arg0);
-
-    if (std::string(argv[1]) == "-l") {
+  // SAFETY: argc and argv are provided by the OS.
+  base::span<char*> args =
+      UNSAFE_TODO(base::span(argv, static_cast<size_t>(argc)));
+  const char* arg0 = args[0];
+  size_t arg_index = 1u;
+  while (arg_index < args.size()) {
+    const std::string_view arg = args[arg_index];
+    if (arg == "-l") {
       g_opt_long = true;
-      argc--;
-      argv++;
-    } else if (std::string(argv[1]) == "-t") {
+      ++arg_index;
+    } else if (arg == "-t") {
       g_opt_fs_type = FILE_PATH_LITERAL("t");
-      argc--;
-      argv++;
-    } else if (std::string(argv[1]) == "-s") {
+      ++arg_index;
+    } else if (arg == "-s") {
       g_opt_fs_type = FILE_PATH_LITERAL("s");
-      argc--;
-      argv++;
+      ++arg_index;
     } else {
       break;
     }
   }
 
-  if (argc < 2)
+  if (arg_index >= args.size()) {
     ShowUsageAndExit(arg0);
+  }
 
-  const base::FilePath file_system_dir = storage::StringToFilePath(argv[1]);
+  const base::FilePath file_system_dir =
+      storage::StringToFilePath(args[arg_index]);
   if (!base::DirectoryExists(file_system_dir)) {
     ShowMessageAndExit(storage::FilePathToString(file_system_dir) +
                        " is not a filesystem directory");
   }
 
-  if (argc == 2) {
+  if (arg_index + 1u >= args.size()) {
     storage::DumpFileSystem(file_system_dir);
   } else {
-    for (int i = 2; i < argc; i++) {
-      storage::DumpOrigin(file_system_dir, argv[i]);
+    for (size_t i = arg_index + 1u; i < args.size(); ++i) {
+      storage::DumpOrigin(file_system_dir, args[i]);
     }
   }
   return 0;

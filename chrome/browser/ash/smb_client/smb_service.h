@@ -5,7 +5,6 @@
 #ifndef CHROME_BROWSER_ASH_SMB_CLIENT_SMB_SERVICE_H_
 #define CHROME_BROWSER_ASH_SMB_CLIENT_SMB_SERVICE_H_
 
-#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -14,7 +13,10 @@
 #include "base/files/file.h"
 #include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/file_system_provider/provided_file_system_info.h"
 #include "chrome/browser/ash/file_system_provider/provider_interface.h"
@@ -36,8 +38,7 @@ namespace user_prefs {
 class PrefRegistrySyncable;
 }  // namespace user_prefs
 
-namespace ash {
-namespace smb_client {
+namespace ash::smb_client {
 
 class SmbKerberosCredentialsUpdater;
 class SmbShareInfo;
@@ -45,8 +46,20 @@ class SmbShareInfo;
 // Creates and manages an smb file system.
 class SmbService : public KeyedService,
                    public net::NetworkChangeNotifier::NetworkChangeObserver,
-                   public base::SupportsWeakPtr<SmbService> {
+                   public SmbFsShare::MountObserver {
  public:
+  class Observer : public base::CheckedObserver {
+   public:
+    ~Observer() override = default;
+
+    virtual void OnSmbFsMounted(const base::FilePath& mount_path,
+                                const std::string& display_name) {}
+    virtual void OnSmbFsUnmounted(const base::FilePath& mount_path) {}
+  };
+
+  void AddObserver(Observer* observer);
+  void RemoveObserver(Observer* observer);
+
   using MountResponse = base::OnceCallback<void(SmbMountResult result)>;
   using StartReadDirIfSuccessfulCallback =
       base::OnceCallback<void(bool should_retry_start_read_dir)>;
@@ -116,6 +129,9 @@ class SmbService : public KeyedService,
   // created.
   void SetSmbFsMounterCreationCallbackForTesting(
       SmbFsShare::MounterCreationCallback callback);
+
+  // Returns true if any SMB shares have been configured or saved before.
+  bool IsAnySmbShareConfigured();
 
  private:
   FRIEND_TEST_ALL_PREFIXES(SmbServiceWithSmbfsTest, MountInvalidSaved);
@@ -240,8 +256,9 @@ class SmbService : public KeyedService,
   static bool disable_share_discovery_for_testing_;
 
   const file_system_provider::ProviderId provider_id_;
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
   std::unique_ptr<SmbShareFinder> share_finder_;
+  base::ObserverList<Observer> observers_;
   // |smbfs_mount_id| -> SmbFsShare
   // Note, mount ID for smbfs is a randomly generated string. For smbprovider
   // shares, it is an integer.
@@ -250,12 +267,17 @@ class SmbService : public KeyedService,
 
   std::unique_ptr<SmbKerberosCredentialsUpdater> kerberos_credentials_updater_;
 
+  // SmbFsShare::MountObserver overrides:
+  void OnSmbFsMounted(const base::FilePath& mount_path,
+                      const std::string& display_name) override;
+  void OnSmbFsUnmounted(const base::FilePath& mount_path) override;
+
   base::OnceClosure setup_complete_callback_;
   SmbFsShare::MounterCreationCallback smbfs_mounter_creation_callback_;
   MountInternalCallback restored_share_mount_done_callback_;
+  base::WeakPtrFactory<SmbService> weak_ptr_factory_{this};
 };
 
-}  // namespace smb_client
-}  // namespace ash
+}  // namespace ash::smb_client
 
 #endif  // CHROME_BROWSER_ASH_SMB_CLIENT_SMB_SERVICE_H_

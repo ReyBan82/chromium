@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "base/at_exit.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
@@ -75,8 +76,7 @@ void ServiceTypePrinter::Start() {
   watcher_->DiscoverNewServices();
 }
 
-ServiceTypePrinter::~ServiceTypePrinter() {
-}
+ServiceTypePrinter::~ServiceTypePrinter() = default;
 
 void ServiceTypePrinter::OnServiceUpdated(ServiceWatcher::UpdateType update,
                                           const std::string& service_name) {
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
     // To guarantee/make explicit the ordering constraint.
     local_discovery::ServiceTypePrinter print_changes(
         service_discovery_client.get(),
-        std::string(argv[1]) + "._tcp.local");
+        std::string(UNSAFE_TODO(argv[1])) + "._tcp.local");
 
     print_changes.Start();
     base::RunLoop().Run();

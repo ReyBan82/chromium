@@ -10,14 +10,15 @@ Example: build clangd and clangd-indexer
        clangd-indexer
 """
 
-from __future__ import print_function
-
 import argparse
 import errno
 import os
 import subprocess
 import sys
 import update
+
+
+from build import CheckoutGitRepo, LLVM_GIT_URL
 
 
 def GetCheckoutDir(out_dir):
@@ -35,26 +36,11 @@ def CreateDirIfNotExists(dir):
 
 
 def FetchLLVM(checkout_dir, revision):
-  """Clone llvm repo into |out_dir| or update if it already exists."""
+  """Clone llvm repo into |checkout_dir| or update if it already exists."""
   CreateDirIfNotExists(os.path.dirname(checkout_dir))
-
-  try:
-    # First, try to clone the repo.
-    args = [
-        'git',
-        'clone',
-        'https://github.com/llvm/llvm-project.git',
-        checkout_dir,
-    ]
-    subprocess.check_call(args, shell=sys.platform == 'win32')
-  except subprocess.CalledProcessError:
-    # Otherwise, try to update it.
-    print('-- Attempting to update existing repo')
-    args = ['git', 'pull', '--rebase', 'origin', 'main']
-    subprocess.check_call(args, cwd=checkout_dir, shell=sys.platform == 'win32')
-  if revision:
-    args = ['git', 'checkout', revision]
-    subprocess.check_call(args, cwd=checkout_dir, shell=sys.platform == 'win32')
+  cwd = os.getcwd()
+  CheckoutGitRepo('LLVM monorepo', LLVM_GIT_URL, revision, checkout_dir)
+  os.chdir(cwd)
 
 
 def BuildTargets(build_dir, targets):
@@ -63,12 +49,12 @@ def BuildTargets(build_dir, targets):
 
   # From that dir, run cmake
   cmake_args = [
-      'cmake',
-      '-GNinja',
-      '-DLLVM_ENABLE_PROJECTS=clang;clang-tools-extra',
-      '-DCMAKE_BUILD_TYPE=Release',
-      '-DLLVM_ENABLE_ASSERTIONS=On',
-      '../llvm',
+    'cmake',
+    '-GNinja',
+    '-DLLVM_ENABLE_PROJECTS=clang;clang-tools-extra',
+    '-DCMAKE_BUILD_TYPE=Release',
+    '-DLLVM_ENABLE_ASSERTIONS=On',
+    '../llvm',
   ]
   subprocess.check_call(cmake_args, cwd=build_dir)
 
@@ -80,7 +66,8 @@ def main():
   parser = argparse.ArgumentParser(description='Build clang_tools_extra.')
   parser.add_argument('--fetch', action='store_true', help='fetch LLVM source')
   parser.add_argument(
-      '--revision', help='LLVM revision to use', default=update.CLANG_REVISION)
+    '--revision', help='LLVM revision to use', default=update.CLANG_REVISION
+  )
   parser.add_argument('OUT_DIR', help='where we put the LLVM source repository')
   parser.add_argument('TARGETS', nargs='+', help='targets being built')
   args = parser.parse_args()

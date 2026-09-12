@@ -5,7 +5,10 @@
 #ifndef CHROMEOS_ASH_SERVICES_NETWORK_CONFIG_CROS_NETWORK_CONFIG_H_
 #define CHROMEOS_ASH_SERVICES_NETWORK_CONFIG_CROS_NETWORK_CONFIG_H_
 
+#include <string>
+
 #include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chromeos/ash/components/network/cellular_inhibitor.h"
 #include "chromeos/ash/components/network/network_certificate_handler.h"
@@ -111,14 +114,17 @@ class CrosNetworkConfig
   void RequestTrafficCounters(const std::string& guid,
                               RequestTrafficCountersCallback callback) override;
   void ResetTrafficCounters(const std::string& guid) override;
-  void SetTrafficCountersAutoReset(
+  void SetTrafficCountersResetDay(
       const std::string& guid,
-      bool auto_reset,
       chromeos::network_config::mojom::UInt32ValuePtr day,
-      SetTrafficCountersAutoResetCallback callback) override;
-  void CreateCustomApn(
+      SetTrafficCountersResetDayCallback callback) override;
+  void CreateCustomApn(const std::string& network_guid,
+                       chromeos::network_config::mojom::ApnPropertiesPtr apn,
+                       CreateCustomApnCallback callback) override;
+  void CreateExclusivelyEnabledCustomApn(
       const std::string& network_guid,
-      chromeos::network_config::mojom::ApnPropertiesPtr apn) override;
+      chromeos::network_config::mojom::ApnPropertiesPtr apn,
+      CreateExclusivelyEnabledCustomApnCallback callback) override;
   void RemoveCustomApn(const std::string& network_guid,
                        const std::string& apn_id) override;
   void ModifyCustomApn(
@@ -133,17 +139,17 @@ class CrosNetworkConfig
   void OnGetManagedProperties(GetManagedPropertiesCallback callback,
                               std::string guid,
                               const std::string& service_path,
-                              absl::optional<base::Value::Dict> properties,
-                              absl::optional<std::string> error);
+                              std::optional<base::DictValue> properties,
+                              std::optional<std::string> error);
   void OnGetManagedPropertiesEap(
       GetManagedPropertiesCallback callback,
       chromeos::network_config::mojom::ManagedPropertiesPtr managed_properties,
       const std::string& service_path,
-      absl::optional<base::Value::Dict> properties,
-      absl::optional<std::string> error);
+      std::optional<base::DictValue> properties,
+      std::optional<std::string> error);
   void SetPropertiesInternal(const std::string& guid,
                              const NetworkState& network,
-                             base::Value::Dict onc,
+                             base::DictValue onc,
                              SetPropertiesCallback callback);
   void SetPropertiesSuccess(int callback_id);
   void SetPropertiesConfigureSuccess(int callback_id,
@@ -181,9 +187,9 @@ class CrosNetworkConfig
                         std::string service_path);
   void OnGetSupportedVpnTypes(
       GetSupportedVpnTypesCallback callback,
-      absl::optional<base::Value::Dict> manager_properties);
+      std::optional<base::DictValue> manager_properties);
   void PopulateTrafficCounters(RequestTrafficCountersCallback callback,
-                               absl::optional<base::Value> traffic_counters);
+                               std::optional<base::Value> traffic_counters);
 
   // NetworkStateHandlerObserver:
   void NetworkListChanged() override;
@@ -209,24 +215,33 @@ class CrosNetworkConfig
 
   const std::string& GetServicePathFromGuid(const std::string& guid);
 
-  NetworkStateHandler* network_state_handler_;  // Unowned
+  raw_ptr<NetworkStateHandler> network_state_handler_;  // Unowned
 
   NetworkStateHandlerScopedObservation network_state_handler_observer_{this};
 
-  NetworkDeviceHandler* network_device_handler_;               // Unowned
-  CellularInhibitor* cellular_inhibitor_;                      // Unowned
-  CellularESimProfileHandler* cellular_esim_profile_handler_;  // Unowned
-  ManagedNetworkConfigurationHandler*
-      network_configuration_handler_;                       // Unowned
-  NetworkConnectionHandler* network_connection_handler_;    // Unowned
-  NetworkCertificateHandler* network_certificate_handler_;  // Unowned
-  NetworkProfileHandler* network_profile_handler_;          // Unowned
-  TechnologyStateController* technology_state_controller_;  // Unowned
+  raw_ptr<NetworkDeviceHandler, LeakedDanglingUntriaged>
+      network_device_handler_;  // Unowned
+  raw_ptr<CellularInhibitor, LeakedDanglingUntriaged>
+      cellular_inhibitor_;  // Unowned
+  raw_ptr<CellularESimProfileHandler, LeakedDanglingUntriaged>
+      cellular_esim_profile_handler_;  // Unowned
+  raw_ptr<ManagedNetworkConfigurationHandler>
+      network_configuration_handler_;  // Unowned
+  raw_ptr<NetworkConnectionHandler, LeakedDanglingUntriaged>
+      network_connection_handler_;  // Unowned
+  raw_ptr<NetworkCertificateHandler, LeakedDanglingUntriaged>
+      network_certificate_handler_;  // Unowned
+  raw_ptr<NetworkProfileHandler, LeakedDanglingUntriaged>
+      network_profile_handler_;  // Unowned
+  raw_ptr<TechnologyStateController, LeakedDanglingUntriaged>
+      technology_state_controller_;  // Unowned
 
   mojo::RemoteSet<chromeos::network_config::mojom::CrosNetworkConfigObserver>
       observers_;
   mojo::ReceiverSet<chromeos::network_config::mojom::CrosNetworkConfig>
       receivers_;
+
+  std::optional<std::string> serial_number_;
 
   int callback_id_ = 1;
   base::flat_map<int, SetPropertiesCallback> set_properties_callbacks_;

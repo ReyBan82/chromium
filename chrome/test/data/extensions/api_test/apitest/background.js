@@ -3,28 +3,28 @@
 // found in the LICENSE file.
 
 chrome.test.runTests([
-    // TODO(battre, mkwst): add more tests.
+  // TODO(battre, mkwst): add more tests.
 
-    function testAssertEq() {
-      var chromeTestFail = chrome.test.fail;
-      var messages = "";
-      chrome.test.fail = function (message) { messages += "\n" + message; };
+  function testAssertEq() {
+    const chromeTestFail = chrome.test.fail;
+    let messages = '';
+    chrome.test.fail = function(message) {
+      messages += '\n' + message;
+    };
 
-      // Check that assertEq(..., null) doesn't crash.
-      chrome.test.assertEq({test: 1}, null);
+    // Check that assertEq(..., null) doesn't crash.
+    chrome.test.assertEq({test: 1}, null);
 
-      // Check that assertEq(null, ...) doesn't crash.
-      chrome.test.assertEq(null, {test: 1});
+    // Check that assertEq(null, ...) doesn't crash.
+    chrome.test.assertEq(null, {test: 1});
 
-      chrome.test.fail = chromeTestFail;
-      chrome.test.assertEq(
-        "\nAPI Test Error in testAssertEq" +
-        "\nActual: null" +
-        "\nExpected: {\"test\":1}" +
-        "\nAPI Test Error in testAssertEq" +
-        "\nActual: {\"test\":1}" +
-        "\nExpected: null",
+    chrome.test.fail = chromeTestFail;
+    chrome.test.assertEq(
+        '\nAPI Test Error in testAssertEq\n' +
+            '{"test":1} did not deep-equal null\n' +
+            'API Test Error in testAssertEq\n' +
+            'null did not deep-equal {"test":1}',
         messages);
-      chrome.test.notifyPass();
-    }
+    chrome.test.notifyPass();
+  },
 ]);

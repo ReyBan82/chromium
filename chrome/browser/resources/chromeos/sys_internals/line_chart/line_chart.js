@@ -121,7 +121,7 @@ export class LineChart {
     /**
      * Passive event will disable |preventDefault()|, set passive to false to
      * make sure this feature is disabled. The default value of passive is true
-     * on some Chromebooks. see https://crbug.com/761698.
+     * on some Chromebooks. see https://crbug.com/40538366.
      * @param {Element} element
      * @param {string} name
      * @param {function(Event): undefined} handler
@@ -160,7 +160,7 @@ export class LineChart {
   onWheel_(event) {
     event.preventDefault();
     /* WheelEvent.deltaMode will never be set to anything else but
-     * DOM_DELTA_PIXEL. See crbug.com/227454 */
+     * DOM_DELTA_PIXEL. See crbug.com/40311553 */
     if (event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) {
       console.warn(
           'WheelEvent.deltaMode is not set to WheelEvent.DOM_DELTA_PIXEL.');
@@ -222,9 +222,9 @@ export class LineChart {
     event.preventDefault();
     this.isTouching_ = true;
     const /** TouchList */ touches = event.targetTouches;
-    if (touches.length == 1) {
+    if (touches.length === 1) {
       this.touchX_ = touches[0].clientX;
-    } else if (touches.length == 2) {
+    } else if (touches.length === 2) {
       this.touchZoomBase_ =
           this.constructor.touchDistance_(touches[0], touches[1]);
     }
@@ -239,11 +239,11 @@ export class LineChart {
       return;
     }
     const /** TouchList */ touches = event.targetTouches;
-    if (touches.length == 1) {
+    if (touches.length === 1) {
       const /** number */ dragDeltaX = this.touchX_ - touches[0].clientX;
       this.scroll(DRAG_RATE * dragDeltaX);
       this.touchX_ = touches[0].clientX;
-    } else if (touches.length == 2) {
+    } else if (touches.length === 2) {
       const /** number */ newDistance =
           this.constructor.touchDistance_(touches[0], touches[1]);
       const /** number */ zoomDelta =
@@ -278,7 +278,7 @@ export class LineChart {
     const /** number */ newScale = this.scale_ * rate;
     this.scale_ = Math.max(MIN_SCALE, Math.min(newScale, MAX_SCALE));
 
-    if (this.scale_ == oldScale) {
+    if (this.scale_ === oldScale) {
       return;
     }
 
@@ -312,7 +312,7 @@ export class LineChart {
     const /** number */ newPosition = oldPosition + Math.round(delta);
 
     this.scrollbar_.setPosition(newPosition);
-    if (this.scrollbar_.getPosition() == oldPosition) {
+    if (this.scrollbar_.getPosition() === oldPosition) {
       return;
     }
 
@@ -338,7 +338,7 @@ export class LineChart {
   resize_() {
     const width = this.getChartVisibleWidth();
     const height = this.getChartVisibleHeight();
-    if (this.canvas_.width == width && this.canvas_.height == height) {
+    if (this.canvas_.width === width && this.canvas_.height === height) {
       return;
     }
 
@@ -527,7 +527,7 @@ export class LineChart {
     }
 
     let /** number */ position = this.scrollbar_.getPosition();
-    if (this.scrollbar_.getRange() == 0) {
+    if (this.scrollbar_.getRange() === 0) {
       /* If the chart width less than the visible width, make the chart align
        * right by setting the negative position. */
       position = this.getChartWidth_() - this.canvas_.width;
@@ -571,7 +571,7 @@ export class LineChart {
         MIN_TIME_LABEL_HORIZONTAL_SPACING;
     const /** number */ timeStep =
         this.constructor.getSuitableTimeStep_(minSpacing, this.scale_);
-    if (timeStep == 0) {
+    if (timeStep === 0) {
       console.warn('Render time label failed. Cannot find suitable time unit.');
       return;
     }
@@ -646,7 +646,7 @@ export class LineChart {
      * chart will render the data points at the same absolute position. */
     const /** number */ offset = position % SAMPLE_RATE;
     for (let /** number */ i = 0; i < subCharts.length; ++i) {
-      if (subCharts[i] == undefined) {
+      if (subCharts[i] === undefined) {
         continue;
       }
       subCharts[i].setLayout(

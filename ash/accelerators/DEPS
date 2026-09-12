@@ -1,8 +1,8 @@
 specific_include_rules = {
-  "accelerator_controller_delegate_classic\.cc": [
-    "+ash/host"
+  "accelerator_alias_converter_unittest\\.cc": [
+    "+device/udev_linux/fake_udev_loader.h",
   ],
-  "accelerator_interactive_uitest_chromeos\.cc": [
-    "+mojo/core/embedder/embedder.h"
+  "accelerator_lookup_unittest\\.cc": [
+    "+device/udev_linux/fake_udev_loader.h",
   ],
 }

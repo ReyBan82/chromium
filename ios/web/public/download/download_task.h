@@ -6,13 +6,13 @@
 #define IOS_WEB_PUBLIC_DOWNLOAD_DOWNLOAD_TASK_H_
 
 #import <Foundation/Foundation.h>
-
 #include <stdint.h>
 
 #include <memory>
 #include <string>
 
 #include "base/functional/callback_forward.h"
+#include "base/memory/weak_ptr.h"
 #include "ui/base/page_transition_types.h"
 
 class GURL;
@@ -91,6 +91,13 @@ class DownloadTask {
   // differ from the final download URL if there were redirects.
   virtual const GURL& GetOriginalUrl() const = 0;
 
+  // The URL that the download request attempted to fetch after redirection.
+  // This may differ from the Original download URL if there were redirects.
+  virtual const GURL& GetRedirectedUrl() const = 0;
+
+  // The host of the frame that initiated the download (if available).
+  virtual NSString* GetOriginatingHost() const = 0;
+
   // HTTP method for this download task (only @"GET" and @"POST" are currently
   // supported).
   virtual NSString* GetHttpMethod() const = 0;
@@ -131,6 +138,9 @@ class DownloadTask {
 
   // Suggested name for the downloaded file.
   virtual base::FilePath GenerateFileName() const = 0;
+
+  // Returns a weak pointer to DownloadTask.
+  virtual base::WeakPtr<DownloadTask> GetWeakPtr() = 0;
 
   // Returns true if the last download operation was fully or partially
   // performed while the application was not active.

@@ -7,6 +7,7 @@
 #include "chrome/browser/ui/views/apps/app_window_desktop_window_tree_host_win.h"
 #include "chrome/browser/ui/views/apps/chrome_native_app_window_views_win.h"
 #include "ui/aura/window.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/views/widget/desktop_aura/desktop_window_tree_host.h"
 
 AppWindowDesktopNativeWidgetAuraWin::AppWindowDesktopNativeWidgetAuraWin(
@@ -16,8 +17,8 @@ AppWindowDesktopNativeWidgetAuraWin::AppWindowDesktopNativeWidgetAuraWin(
   GetNativeWindow()->SetName("AppWindowAura");
 }
 
-AppWindowDesktopNativeWidgetAuraWin::~AppWindowDesktopNativeWidgetAuraWin() {
-}
+AppWindowDesktopNativeWidgetAuraWin::~AppWindowDesktopNativeWidgetAuraWin() =
+    default;
 
 void AppWindowDesktopNativeWidgetAuraWin::InitNativeWidget(
     views::Widget::InitParams params) {
@@ -28,20 +29,31 @@ void AppWindowDesktopNativeWidgetAuraWin::InitNativeWidget(
 
 void AppWindowDesktopNativeWidgetAuraWin::Maximize() {
   // Maximizing on Windows causes the window to be shown. Call Show() first to
-  // ensure the content view is also made visible. See http://crbug.com/436867.
+  // ensure the content view is also made visible. See
+  // http://crbug.com/41144994.
   // TODO(jackhou): Make this behavior the same as other platforms, i.e. calling
   // Maximize() does not also show the window.
-  if (!tree_host_->IsVisible())
-    DesktopNativeWidgetAura::Show(ui::SHOW_STATE_NORMAL, gfx::Rect());
+  if (tree_host_ && !tree_host_->IsVisible()) {
+    DesktopNativeWidgetAura::Show(ui::mojom::WindowShowState::kNormal,
+                                  gfx::Rect());
+  }
   DesktopNativeWidgetAura::Maximize();
 }
 
 void AppWindowDesktopNativeWidgetAuraWin::Minimize() {
   // Minimizing on Windows causes the window to be shown. Call Show() first to
-  // ensure the content view is also made visible. See http://crbug.com/436867.
+  // ensure the content view is also made visible. See
+  // http://crbug.com/41144994.
   // TODO(jackhou): Make this behavior the same as other platforms, i.e. calling
   // Minimize() does not also show the window.
-  if (!tree_host_->IsVisible())
-    DesktopNativeWidgetAura::Show(ui::SHOW_STATE_NORMAL, gfx::Rect());
+  if (tree_host_ && !tree_host_->IsVisible()) {
+    DesktopNativeWidgetAura::Show(ui::mojom::WindowShowState::kNormal,
+                                  gfx::Rect());
+  }
   DesktopNativeWidgetAura::Minimize();
+}
+
+void AppWindowDesktopNativeWidgetAuraWin::OnHostClosed() {
+  tree_host_ = nullptr;
+  views::DesktopNativeWidgetAura::OnHostClosed();
 }

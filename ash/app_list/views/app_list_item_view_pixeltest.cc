@@ -16,28 +16,48 @@
 #include "ash/app_list/views/apps_grid_view_test_api.h"
 #include "ash/app_list/views/paged_apps_grid_view.h"
 #include "ash/app_list/views/scrollable_apps_grid_view.h"
+#include "ash/drag_drop/drag_drop_controller.h"
+#include "ash/drag_drop/drag_drop_controller_test_api.h"
+#include "ash/public/cpp/test/shell_test_api.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
 #include "ash/test/pixel/ash_pixel_differ.h"
+#include "ash/test/pixel/ash_pixel_test_helper.h"
 #include "ash/test/pixel/ash_pixel_test_init_params.h"
-#include "ash/wm/tablet_mode/tablet_mode_controller.h"
+#include "ash/wm/tablet_mode/tablet_mode_controller_test_api.h"
+#include "base/functional/bind.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/test/bind.h"
+#include "ui/gfx/image/image_skia.h"
 
 namespace ash {
 
-class AppListItemViewPixelTest : public AshTestBase,
-                                 public testing::WithParamInterface<
-                                     std::tuple</*use_tablet_mode=*/bool,
-                                                /*use_dense_ui=*/bool,
-                                                /*use_rtl=*/bool,
-                                                /*is_new_install=*/bool,
-                                                /*has_notification=*/bool>> {
+class AppListItemViewPixelTestBase : public AshTestBase {
  public:
+  AppListItemViewPixelTestBase(bool use_folder_icon_refresh,
+                               bool use_tablet_mode,
+                               bool use_dense_ui,
+                               bool use_rtl,
+                               bool is_new_install,
+                               bool has_notification,
+                               bool enable_promise_icons,
+                               bool enable_system_blur)
+      : use_folder_icon_refresh_(use_folder_icon_refresh),
+        use_tablet_mode_(use_tablet_mode),
+        use_dense_ui_(use_dense_ui),
+        use_rtl_(use_rtl),
+        is_new_install_(is_new_install),
+        has_notification_(has_notification),
+        enable_promise_icons_(enable_promise_icons),
+        enable_system_blur_(enable_system_blur) {}
+
   // AshTestBase:
-  absl::optional<pixel_test::InitParams> CreatePixelTestInitParams()
+  std::optional<pixel_test::InitParams> CreatePixelTestInitParams()
       const override {
     pixel_test::InitParams init_params;
     init_params.under_rtl = use_rtl();
+    init_params.system_blur_enabled = enable_system_blur();
     return init_params;
   }
 
@@ -48,11 +68,15 @@ class AppListItemViewPixelTest : public AshTestBase,
     // As per `app_list_config_provider.cc`, dense values are used for screens
     // with width OR height <= 675.
     UpdateDisplay(use_dense_ui() ? "800x600" : "1200x800");
+      auto* drag_controller = ShellTestApi().drag_drop_controller();
+      drag_drop_controller_test_api_ =
+          std::make_unique<DragDropControllerTestApi>(drag_controller);
+      drag_controller->SetDisableNestedLoopForTesting(true);
+  }
 
-    app_list_test_model_ = std::make_unique<test::AppListTestModel>();
-    search_model_ = std::make_unique<SearchModel>();
-    Shell::Get()->app_list_controller()->SetActiveModel(
-        /*profile_id=*/1, app_list_test_model_.get(), search_model_.get());
+  void TearDown() override {
+    drag_drop_controller_test_api_.reset();
+    AshTestBase::TearDown();
   }
 
   // Creates multiple folders that contain from 1 app to `max_items` apps
@@ -61,10 +85,11 @@ class AppListItemViewPixelTest : public AshTestBase,
     AppListFolderItem* folder_item;
     for (int i = 1; i <= max_items; ++i) {
       if (i == 1) {
-        folder_item = app_list_test_model_->CreateSingleItemFolder("folder_id",
-                                                                   "item_id");
+        folder_item = GetAppListTestHelper()->model()->CreateSingleItemFolder(
+            "folder_id", "item_id");
       } else {
-        folder_item = app_list_test_model_->CreateAndPopulateFolderWithApps(i);
+        folder_item =
+            GetAppListTestHelper()->model()->CreateAndPopulateFolderWithApps(i);
       }
       // Update the notification state of the first app in the folder to
       // simulate that there exists an app with notifications in the folder.
@@ -74,7 +99,8 @@ class AppListItemViewPixelTest : public AshTestBase,
   }
 
   void CreateAppListItem(const std::string& name) {
-    AppListItem* item = app_list_test_model_->CreateAndAddItem(name + "_id");
+    AppListItem* item =
+        GetAppListTestHelper()->model()->CreateAndAddItem(name + "_id");
     item->SetName(name);
     item->SetIsNewInstall(is_new_install());
     item->UpdateNotificationBadge(has_notification());
@@ -82,7 +108,7 @@ class AppListItemViewPixelTest : public AshTestBase,
 
   void ShowAppList() {
     if (use_tablet_mode()) {
-      Shell::Get()->tablet_mode_controller()->SetEnabledForTest(true);
+      ash::TabletModeControllerTestApi().EnterTabletMode();
     } else {
       GetAppListTestHelper()->ShowAppList();
     }
@@ -100,76 +126,131 @@ class AppListItemViewPixelTest : public AshTestBase,
     return GetAppsGridView()->GetItemViewAt(index);
   }
 
-  std::string GenerateScreenshotName() {
-    std::string stringified_params = base::JoinString(
-        {use_tablet_mode() ? "tablet_mode" : "clamshell_mode",
-         use_dense_ui() ? "dense_ui" : "regular_ui", use_rtl() ? "rtl" : "ltr",
-         is_new_install() ? "new_install=true" : "new_install=false",
-         has_notification() ? "has_notification=true"
-                            : "has_notification=false"},
-        "|");
-    return base::JoinString({"app_list_item_view", stringified_params}, ".");
+  std::string GenerateScreenshotName(const std::string& title) override {
+    std::vector<std::string> parameters = {
+        use_tablet_mode() ? "tablet_mode" : "clamshell_mode",
+        use_dense_ui() ? "dense_ui" : "regular_ui",
+        use_rtl() ? "rtl" : "ltr",
+        is_new_install() ? "new_install=true" : "new_install=false",
+        has_notification() ? "has_notification=true" : "has_notification=false",
+        enable_system_blur() ? "with_system_blur" : "without_system_blur"};
+    std::string stringified_params = base::JoinString(parameters, "|");
+    return base::JoinString({title, stringified_params}, ".");
   }
 
-  bool use_tablet_mode() const { return std::get<0>(GetParam()); }
-  bool use_dense_ui() const { return std::get<1>(GetParam()); }
-  bool use_rtl() const { return std::get<2>(GetParam()); }
-  bool is_new_install() const { return std::get<3>(GetParam()); }
-  bool has_notification() const { return std::get<4>(GetParam()); }
+  views::Widget* GetDraggedWidget() {
+    return drag_drop_controller_test_api_->drag_image_widget();
+  }
 
- protected:
-  std::unique_ptr<test::AppListTestModel> app_list_test_model_;
-  std::unique_ptr<SearchModel> search_model_;
+  bool use_folder_icon_refresh() const { return use_folder_icon_refresh_; }
+  bool use_tablet_mode() const { return use_tablet_mode_; }
+  bool use_dense_ui() const { return use_dense_ui_; }
+  bool use_rtl() const { return use_rtl_; }
+  bool is_new_install() const { return is_new_install_; }
+  bool has_notification() const { return has_notification_; }
+  bool enable_promise_icons() const { return enable_promise_icons_; }
+  bool enable_system_blur() const { return enable_system_blur_; }
+
+ private:
+  const bool use_folder_icon_refresh_;
+  const bool use_tablet_mode_;
+  const bool use_dense_ui_;
+  const bool use_rtl_;
+  const bool is_new_install_;
+  const bool has_notification_;
+  const bool enable_promise_icons_;
+  const bool enable_system_blur_;
+
+  std::unique_ptr<DragDropControllerTestApi> drag_drop_controller_test_api_;
 };
 
-INSTANTIATE_TEST_SUITE_P(
-    All,
-    AppListItemViewPixelTest,
-    testing::Combine(/*use_tablet_mode=*/testing::Bool(),
-                     /*use_dense_ui=*/testing::Bool(),
-                     /*use_rtl=*/testing::Bool(),
-                     /*is_new_install=*/testing::Bool(),
-                     /*has_notification=*/testing::Bool()));
+class AppListItemViewPixelTest
+    : public AppListItemViewPixelTestBase,
+      public testing::WithParamInterface<
+          std::tuple</*use_folder_icon_refresh=*/bool,
+                     /*use_tablet_mode=*/bool,
+                     /*use_dense_ui=*/bool,
+                     /*use_rtl=*/bool,
+                     /*is_new_install=*/bool,
+                     /*has_notification=*/bool,
+                     /*enable_system_blur=*/bool>> {
+ public:
+  AppListItemViewPixelTest()
+      : AppListItemViewPixelTestBase(
+            /*use_folder_icon_refresh=*/std::get<0>(GetParam()),
+            /*use_tablet_mode=*/std::get<1>(GetParam()),
+            /*use_dense_ui=*/std::get<2>(GetParam()),
+            /*use_rtl=*/std::get<3>(GetParam()),
+            /*is_new_install=*/std::get<4>(GetParam()),
+            /*has_notification=*/std::get<5>(GetParam()),
+            /*enable_promise_icons=*/false,
+            /*enable_system_blur=*/std::get<6>(GetParam())) {}
+};
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         AppListItemViewPixelTest,
+                         testing::Combine(
+                             /*use_folder_icon_refresh=*/testing::Bool(),
+                             /*use_tablet_mode=*/testing::Bool(),
+                             /*use_dense_ui=*/testing::Bool(),
+                             /*use_rtl=*/testing::Bool(),
+                             /*is_new_install=*/testing::Bool(),
+                             /*has_notification=*/testing::Bool(),
+                             /*enable_system_blur=*/testing::Bool()));
 
 TEST_P(AppListItemViewPixelTest, AppListItemView) {
   CreateAppListItem("App");
   CreateAppListItem("App with a loooooooong name");
 
   ShowAppList();
-
   EXPECT_TRUE(GetPixelDiffer()->CompareUiComponentsOnPrimaryScreen(
-      GenerateScreenshotName(), /*revision_number=*/0, GetItemViewAt(0),
-      GetItemViewAt(1)));
+      GenerateScreenshotName("app_list_item_view"),
+      /*revision_number=*/pixel_test_helper()->IsSystemBlurEnabled() ? 6 : 0,
+      GetItemViewAt(0), GetItemViewAt(1)));
 }
 
 // Verifies the layout of the item icons inside a folder.
 TEST_P(AppListItemViewPixelTest, AppListFolderItemsLayoutInIcon) {
   // Skip the case where the apps are newly installed as it doesn't change the
   // folder icons.
-  if (is_new_install()) {
+  if (!use_folder_icon_refresh() || is_new_install()) {
     return;
   }
 
-  // Set the maximum number of the items in a folder that we want to test to 4.
-  const int max_items_in_folder = 4;
+  // Reset any configs set by previous tests so that
+  // ItemIconInFolderIconMargin() in app_list_config.cc is correctly
+  // initialized. Can be removed if folder icon refresh is set as default.
+  AppListConfigProvider::Get().ResetForTesting();
+
+  // To test the item counter on folder icons, set the maximum number of the
+  // items in a folder to 5.
+  const int max_items_in_folder = 5;
   CreateFoldersContainingDifferentNumOfItems(max_items_in_folder);
   ShowAppList();
 
   EXPECT_TRUE(GetPixelDiffer()->CompareUiComponentsOnPrimaryScreen(
-      GenerateScreenshotName(), /*revision_number=*/0, GetItemViewAt(0),
-      GetItemViewAt(1), GetItemViewAt(2), GetItemViewAt(3)));
+      GenerateScreenshotName("app_list_item_view"),
+      /*revision_number=*/pixel_test_helper()->IsSystemBlurEnabled() ? 10 : 0,
+      GetItemViewAt(0), GetItemViewAt(1), GetItemViewAt(2), GetItemViewAt(3),
+      GetItemViewAt(4)));
 }
 
 // Verifies the folder icon is extended when an app is dragged upon it.
 TEST_P(AppListItemViewPixelTest, AppListFolderIconExtendedState) {
   // Skip the case where the apps are newly installed as it doesn't change the
   // folder icons.
-  if (is_new_install()) {
+  if (!use_folder_icon_refresh() || is_new_install()) {
     return;
   }
 
-  // Set the maximum number of the items in a folder that we want to test to 4.
-  const int max_items_in_folder = 4;
+  // Reset any configs set by previous tests so that
+  // ItemIconInFolderIconMargin() in app_list_config.cc is correctly
+  // initialized. Can be removed if folder icon refresh is set as default.
+  AppListConfigProvider::Get().ResetForTesting();
+
+  // To test the item counter on folder icons, set the maximum number of the
+  // items in a folder to 5.
+  const int max_items_in_folder = 5;
   CreateFoldersContainingDifferentNumOfItems(max_items_in_folder);
   CreateAppListItem("App");
   ShowAppList();
@@ -187,8 +268,10 @@ TEST_P(AppListItemViewPixelTest, AppListFolderIconExtendedState) {
   }
 
   EXPECT_TRUE(GetPixelDiffer()->CompareUiComponentsOnPrimaryScreen(
-      GenerateScreenshotName(), /*revision_number=*/0, GetItemViewAt(0),
-      GetItemViewAt(1), GetItemViewAt(2), GetItemViewAt(3)));
+      GenerateScreenshotName("app_list_item_view"),
+      /*revision_number=*/pixel_test_helper()->IsSystemBlurEnabled() ? 12 : 0,
+      GetItemViewAt(0), GetItemViewAt(1), GetItemViewAt(2), GetItemViewAt(3),
+      GetItemViewAt(4)));
 
   // Reset the states.
   for (int i = 0; i < max_items_in_folder; ++i) {
@@ -203,9 +286,14 @@ TEST_P(AppListItemViewPixelTest, AppListFolderIconExtendedState) {
 TEST_P(AppListItemViewPixelTest, DraggedAppListFolderIcon) {
   // Skip the case where the apps are newly installed or have notifications as
   // they don't change the folder icons.
-  if (is_new_install() || has_notification()) {
+  if (!use_folder_icon_refresh() || is_new_install() || has_notification()) {
     return;
   }
+
+  // Reset any configs set by previous tests so that
+  // ItemIconInFolderIconMargin() in app_list_config.cc is correctly
+  // initialized. Can be removed if folder icon refresh is set as default.
+  AppListConfigProvider::Get().ResetForTesting();
 
   // Set the maximum number of the items in a folder that we want to test to 4.
   const int max_items_in_folder = 4;
@@ -224,38 +312,141 @@ TEST_P(AppListItemViewPixelTest, DraggedAppListFolderIcon) {
     folder_list.push_back(GetItemViewAt(i));
   }
 
-  for (int i = 0; i < max_items_in_folder; ++i) {
+  auto verify_folder_widget =
+      [&](int number_of_items) {
+        std::string filename =
+            base::NumberToString(number_of_items) + "_items_folder";
+        EXPECT_TRUE(GetPixelDiffer()->CompareUiComponentsOnPrimaryScreen(
+            base::JoinString(
+                {GenerateScreenshotName("app_list_item_view"), filename}, "."),
+            /*revision_number=*/pixel_test_helper()->IsSystemBlurEnabled() ? 6
+                                                                           : 0,
+            GetDraggedWidget()));
+      };
+
+  for (size_t i = 0; i < max_items_in_folder; ++i) {
     gfx::Point folder_icon_center =
         folder_list[i]->GetIconBoundsInScreen().CenterPoint();
 
-    // Start dragging the folder icon.
-    if (use_tablet_mode()) {
-      event_generator->PressTouch(folder_icon_center);
-      folder_list[i]->FireTouchDragTimerForTest();
-      event_generator->MoveTouch(grid_center);
-      std::unique_ptr<test::AppsGridViewTestApi> test_api =
-          std::make_unique<test::AppsGridViewTestApi>(apps_grid_view);
-      test_api->WaitForItemMoveAnimationDone();
-    } else {
-      event_generator->MoveMouseTo(folder_icon_center);
-      event_generator->PressLeftButton();
-      folder_list[i]->FireMouseDragTimerForTest();
-      event_generator->MoveMouseTo(grid_center);
-    }
+    std::list<base::OnceClosure> tasks;
+    tasks.push_back(base::BindLambdaForTesting([&]() {
+      if (use_tablet_mode()) {
+        event_generator->PressTouch(folder_icon_center);
+        folder_list[i]->FireTouchDragTimerForTest();
+      } else {
+        event_generator->MoveMouseTo(folder_icon_center);
+        event_generator->PressLeftButton();
+        folder_list[i]->FireMouseDragTimerForTest();
+      }
+    }));
+    tasks.push_back(base::BindLambdaForTesting([&]() {
+      if (use_tablet_mode()) {
+        event_generator->MoveTouch(grid_center);
+      } else {
+        event_generator->MoveMouseTo(grid_center);
+      }
+      test::AppsGridViewTestApi(apps_grid_view).WaitForItemMoveAnimationDone();
+    }));
+    tasks.push_back(base::BindLambdaForTesting(
+        [&]() { verify_folder_widget(/*number_of_items=*/i + 1); }));
+    tasks.push_back(base::BindLambdaForTesting([&]() {
+      if (use_tablet_mode()) {
+        event_generator->ReleaseTouch();
+      } else {
+        event_generator->ReleaseLeftButton();
+      }
+    }));
 
-    std::string filename = base::NumberToString(i + 1) + "_items_folder";
-    EXPECT_TRUE(GetPixelDiffer()->CompareUiComponentsOnPrimaryScreen(
-        base::JoinString({GenerateScreenshotName(), filename}, "."),
-        /*revision_number=*/1,
-        apps_grid_view->app_drag_icon_proxy_for_test()->GetWidgetForTesting()));
-
-    // Release the drag.
-    if (use_tablet_mode()) {
-      event_generator->ReleaseTouch();
-    } else {
-      event_generator->ReleaseLeftButton();
-    }
+    MaybeRunDragAndDropSequenceForAppList(&tasks,
+                                          /*is_touch=*/use_tablet_mode());
   }
+}
+
+class AppListViewPromiseAppPixelTest
+    : public AppListItemViewPixelTestBase,
+      public testing::WithParamInterface<std::tuple<
+          /*use_tablet_mode=*/bool,
+          /*use_dense_ui=*/bool,
+          /*use_rtl=*/bool,
+          /*enable_system_blur=*/bool>> {
+ public:
+  AppListViewPromiseAppPixelTest()
+      : AppListItemViewPixelTestBase(
+            /*use_folder_icon_refresh=*/false,
+            /*use_tablet_mode=*/std::get<0>(GetParam()),
+            /*use_dense_ui=*/std::get<1>(GetParam()),
+            /*use_rtl=*/std::get<2>(GetParam()),
+            /*is_new_install=*/false,
+            /*has_notification=*/false,
+            /*enable_promise_icons=*/true,
+            /*enable_system_blur=*/std::get<3>(GetParam())) {}
+
+  AppListItem* CreateAppListPromiseItem(const std::string& name) {
+    return GetAppListTestHelper()->model()->CreateAndAddPromiseItem(name +
+                                                                    "_id");
+  }
+};
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         AppListViewPromiseAppPixelTest,
+                         testing::Combine(
+                             /*use_tablet_mode=*/testing::Bool(),
+                             /*use_dense_ui=*/testing::Bool(),
+                             /*use_rtl=*/testing::Bool(),
+                             /*enable_system_blur=*/testing::Bool()));
+
+TEST_P(AppListViewPromiseAppPixelTest, PromiseAppWaiting) {
+  // Reset any configs set by previous tests so that
+  // ItemIconInFolderIconMargin() in app_list_config.cc is correctly
+  // initialized. Can be removed if folder icon refresh is set as default.
+  AppListConfigProvider::Get().ResetForTesting();
+  CreateAppListPromiseItem("PromiseApp");
+  AppListItem* placeholder = CreateAppListPromiseItem("PromiseApp_placeholder");
+  placeholder->SetDefaultIconAndColor(placeholder->GetDefaultIcon(),
+                                      placeholder->GetDefaultIconColor(),
+                                      /*is_placeholder_icon=*/true);
+  ShowAppList();
+  EXPECT_EQ(GetItemViewAt(0)->item()->progress(), -1.0f);
+  EXPECT_EQ(GetItemViewAt(0)->item()->app_status(), AppStatus::kPending);
+  EXPECT_EQ(GetItemViewAt(1)->item()->progress(), -1.0f);
+  EXPECT_EQ(GetItemViewAt(1)->item()->app_status(), AppStatus::kPending);
+
+  EXPECT_TRUE(GetPixelDiffer()->CompareUiComponentsOnPrimaryScreen(
+      base::JoinString(
+          {"promise_app_waiting", GenerateScreenshotName("app_list_item_view")},
+          "."),
+      /*revision_number=*/pixel_test_helper()->IsSystemBlurEnabled() ? 4 : 0,
+      GetItemViewAt(0), GetItemViewAt(1)));
+}
+
+TEST_P(AppListViewPromiseAppPixelTest, PromiseAppInstalling) {
+  // Reset any configs set by previous tests so that
+  // ItemIconInFolderIconMargin() in app_list_config.cc is correctly
+  // initialized. Can be removed if folder icon refresh is set as default.
+  AppListConfigProvider::Get().ResetForTesting();
+  AppListItem* item = CreateAppListPromiseItem("PromiseApp");
+  AppListItem* placeholder = CreateAppListPromiseItem("PromiseApp_placeholder");
+  placeholder->SetDefaultIconAndColor(placeholder->GetDefaultIcon(),
+                                      placeholder->GetDefaultIconColor(),
+                                      /*is_placeholder_icon=*/true);
+
+  // Start install progress bar.
+  item->SetAppStatus(AppStatus::kInstalling);
+  item->SetProgress(0.8f);
+  placeholder->SetAppStatus(AppStatus::kInstalling);
+  placeholder->SetProgress(0.8f);
+  ShowAppList();
+
+  EXPECT_EQ(GetItemViewAt(0)->item()->progress(), 0.8f);
+  EXPECT_EQ(GetItemViewAt(0)->item()->app_status(), AppStatus::kInstalling);
+  EXPECT_EQ(GetItemViewAt(1)->item()->progress(), 0.8f);
+  EXPECT_EQ(GetItemViewAt(1)->item()->app_status(), AppStatus::kInstalling);
+  EXPECT_TRUE(GetPixelDiffer()->CompareUiComponentsOnPrimaryScreen(
+      base::JoinString({"promise_app_installing",
+                        GenerateScreenshotName("app_list_item_view")},
+                       "."),
+      /*revision_number=*/pixel_test_helper()->IsSystemBlurEnabled() ? 4 : 0,
+      GetItemViewAt(0), GetItemViewAt(1)));
 }
 
 }  // namespace ash

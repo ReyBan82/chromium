@@ -37,15 +37,78 @@
 #include "third_party/blink/renderer/core/editing/visible_position.h"
 #include "third_party/blink/renderer/core/editing/visible_selection.h"
 #include "third_party/blink/renderer/core/editing/visible_units.h"
+#include "third_party/blink/renderer/core/html/forms/html_form_element.h"
 #include "third_party/blink/renderer/core/html/html_br_element.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/core/html/html_hr_element.h"
 #include "third_party/blink/renderer/core/html/html_quote_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/layout/layout_text.h"
+#include "third_party/blink/renderer/core/mathml_names.h"
+#include "third_party/blink/renderer/core/svg_names.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
+
+namespace {
+
+// 3.2.5.2.5 Phrasing content
+// https://html.spec.whatwg.org/multipage/dom.html#phrasing-content
+bool IsPhrasingContent(const Node* node) {
+  DEFINE_STATIC_LOCAL(HashSet<QualifiedName>, phrasing_content_names,
+                      ({
+                          html_names::kATag,        html_names::kAbbrTag,
+                          html_names::kAreaTag,     html_names::kAudioTag,
+                          html_names::kBTag,        html_names::kBdiTag,
+                          html_names::kBdoTag,      html_names::kBrTag,
+                          html_names::kButtonTag,   html_names::kCanvasTag,
+                          html_names::kCiteTag,     html_names::kCodeTag,
+                          html_names::kDataTag,     html_names::kDatalistTag,
+                          html_names::kDelTag,      html_names::kDfnTag,
+                          html_names::kEmTag,       html_names::kEmbedTag,
+                          html_names::kITag,        html_names::kIFrameTag,
+                          html_names::kImgTag,      html_names::kInputTag,
+                          html_names::kInsTag,      html_names::kKbdTag,
+                          html_names::kLabelTag,    html_names::kLinkTag,
+                          html_names::kMapTag,      html_names::kMarkTag,
+                          mathml_names::kMathTag,   html_names::kMetaTag,
+                          html_names::kMeterTag,    html_names::kNoscriptTag,
+                          html_names::kObjectTag,   html_names::kOutputTag,
+                          html_names::kPictureTag,  html_names::kProgressTag,
+                          html_names::kQTag,        html_names::kRubyTag,
+                          html_names::kSTag,        html_names::kSampTag,
+                          html_names::kScriptTag,   html_names::kSelectTag,
+                          html_names::kSlotTag,     html_names::kSmallTag,
+                          html_names::kSpanTag,     html_names::kStrongTag,
+                          html_names::kSubTag,      html_names::kSupTag,
+                          svg_names::kSVGTag,       html_names::kTemplateTag,
+                          html_names::kTextareaTag, html_names::kTimeTag,
+                          html_names::kUTag,        html_names::kVarTag,
+                          html_names::kVideoTag,    html_names::kWbrTag,
+                      }));
+  if (const auto* element = DynamicTo<Element>(node)) {
+    return phrasing_content_names.Contains(element->TagQName());
+  }
+  return false;
+}
+
+bool IsEditableRootPhrasingContent(const Position& position) {
+  const ContainerNode* editable_root = HighestEditableRoot(position);
+  if (!editable_root) {
+    return false;
+  }
+  return EnclosingNodeOfType(FirstPositionInOrBeforeNode(*editable_root),
+                             IsPhrasingContent);
+}
+
+bool IsDisplayInlineType(const HTMLElement* element) {
+  const ComputedStyle* style = element ? element->GetComputedStyle() : nullptr;
+  return style && style->IsDisplayInlineType();
+}
+
+}  // namespace
 
 // When inserting a new line, we want to avoid nesting empty divs if we can.
 // Otherwise, when pasting, it's easy to have each new line be a div deeper than
@@ -216,13 +279,15 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
   Position canonical_pos =
       CreateVisiblePosition(insertion_position).DeepEquivalent();
   if (!start_block || !start_block->NonShadowBoundaryParentNode() ||
-      IsTableCell(start_block) ||
-      IsA<HTMLFormElement>(*start_block)
+      IsEditableRootPhrasingContent(insertion_position) ||
+      IsDisplayInlineType(list_child) || IsTableCell(start_block) ||
+      IsA<HTMLFormElement>(*start_block) ||
+      start_block->HasTagName(html_names::kPreTag) ||
       // FIXME: If the node is hidden, we don't have a canonical position so we
       // will do the wrong thing for tables and <hr>.
       // https://bugs.webkit.org/show_bug.cgi?id=40342
-      || (!canonical_pos.IsNull() &&
-          IsDisplayInsideTable(canonical_pos.AnchorNode())) ||
+      (!canonical_pos.IsNull() &&
+       IsDisplayInsideTable(canonical_pos.AnchorNode())) ||
       (!canonical_pos.IsNull() &&
        IsA<HTMLHRElement>(*canonical_pos.AnchorNode()))) {
     ApplyCommandToComposite(
@@ -308,8 +373,9 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
       if (paste_blockquote_into_unquoted_area_) {
         if (auto* highest_blockquote =
                 To<HTMLQuoteElement>(HighestEnclosingNodeOfType(
-                    canonical_pos, &IsMailHTMLBlockquoteElement)))
+                    canonical_pos, &IsMailHtmlBlockquoteElement))) {
           start_block = highest_blockquote;
+        }
       }
 
       if (list_child && list_child != start_block) {
@@ -347,9 +413,15 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
       return;
 
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
+        SelectionInDomTree::Builder()
             .Collapse(Position::FirstPositionInNode(*parent))
             .Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder()
+              .Collapse(Position::FirstPositionInNode(*parent))
+              .Build()));
+    }
     return;
   }
 
@@ -419,9 +491,11 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
 
     // In this case, we need to set the new ending selection.
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
-            .Collapse(insertion_position)
-            .Build()));
+        SelectionInDomTree::Builder().Collapse(insertion_position).Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder().Collapse(insertion_position).Build()));
+    }
     return;
   }
 
@@ -446,9 +520,13 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
     if (visible_pos.IsNotNull() &&
         visible_pos.DeepEquivalent().AnchorNode()->GetLayoutObject()->IsBR()) {
       SetEndingSelection(SelectionForUndoStep::From(
-          SelectionInDOMTree::Builder()
-              .Collapse(insertion_position)
-              .Build()));
+          SelectionInDomTree::Builder().Collapse(insertion_position).Build()));
+      if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+        SetEndingDomSelection(
+            SelectionForUndoStep::From(SelectionInDomTree::Builder()
+                                           .Collapse(insertion_position)
+                                           .Build()));
+      }
       return;
     }
   }
@@ -488,12 +566,14 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
   // causing the newline to be turned into a nbsp.
   if (leading_whitespace.IsNotNull()) {
     if (auto* text_node = DynamicTo<Text>(leading_whitespace.AnchorNode())) {
-      DCHECK(!text_node->GetLayoutObject() ||
-             text_node->GetLayoutObject()->Style()->CollapseWhiteSpace())
+      DCHECK(
+          !text_node->GetLayoutObject() ||
+          text_node->GetLayoutObject()->StyleRef().ShouldCollapseWhiteSpaces())
           << text_node;
       ReplaceTextInNode(text_node,
                         leading_whitespace.ComputeOffsetInContainerNode(), 1,
-                        NonBreakingSpaceString());
+                        NonBreakingSpaceString(),
+                        EditCommand::PasswordEchoBehavior::kDoNotEcho);
       GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
     }
   }
@@ -503,8 +583,8 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
   if (insertion_position.IsOffsetInAnchor()) {
     if (auto* text_node =
             DynamicTo<Text>(insertion_position.ComputeContainerNode())) {
-      int text_offset = insertion_position.OffsetInContainerNode();
-      bool at_end = static_cast<unsigned>(text_offset) >= text_node->length();
+      wtf_size_t text_offset = insertion_position.OffsetInContainerNode();
+      bool at_end = text_offset >= text_node->length();
       if (text_offset > 0 && !at_end) {
         SplitTextNode(text_node, text_offset);
         GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
@@ -516,7 +596,7 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
     }
   }
 
-  // If we got detached due to mutation events, just bail out.
+  // If we got detached due to synchronous events, just bail out.
   if (!start_block->parentNode())
     return;
 
@@ -591,22 +671,28 @@ void InsertParagraphSeparatorCommand::DoApply(EditingState* editing_state) {
       DCHECK(!position_after_split.ComputeContainerNode()->GetLayoutObject() ||
              position_after_split.ComputeContainerNode()
                  ->GetLayoutObject()
-                 ->Style()
-                 ->CollapseWhiteSpace())
+                 ->StyleRef()
+                 .ShouldCollapseWhiteSpaces())
           << position_after_split;
       DeleteInsignificantTextDownstream(position_after_split);
       if (position_after_split.AnchorNode()->IsTextNode()) {
         InsertTextIntoNode(
             To<Text>(position_after_split.ComputeContainerNode()), 0,
-            NonBreakingSpaceString());
+            NonBreakingSpaceString(), PasswordEchoBehavior::kDoNotEcho);
       }
     }
   }
 
   SetEndingSelection(SelectionForUndoStep::From(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .Collapse(Position::FirstPositionInNode(*block_to_insert))
           .Build()));
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    SetEndingDomSelection(SelectionForUndoStep::From(
+        SelectionInDomTree::Builder()
+            .Collapse(Position::FirstPositionInNode(*block_to_insert))
+            .Build()));
+  }
   ApplyStyleAfterInsertion(start_block, editing_state);
 }
 

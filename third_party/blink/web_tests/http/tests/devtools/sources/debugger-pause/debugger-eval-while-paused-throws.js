@@ -2,11 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+
 (async function() {
   TestRunner.addResult(
       `Tests that evaluation in console that throws works fine when script is paused.\n`);
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
-  await TestRunner.loadLegacyModule('sources'); await TestRunner.loadTestModule('sources_test_runner');
   await TestRunner.showPanel('sources');
   await TestRunner.evaluateInPagePromise(`
       var globalObj = {
@@ -61,11 +63,10 @@
         'globalObj.func()', dumpConsoleMessages);
   }
 
-  function dumpConsoleMessages() {
-    TestRunner.deprecatedRunAfterPendingDispatches(async () => {
-      TestRunner.addResult('Dumping console messages:\n');
-      await ConsoleTestRunner.dumpConsoleMessages();
-      SourcesTestRunner.completeDebuggerTest();
-    });
+  async function dumpConsoleMessages() {
+    TestRunner.addResult('Dumping console messages:\n');
+    await ConsoleTestRunner.waitForPendingViewportUpdates();
+    await ConsoleTestRunner.dumpConsoleMessages();
+    SourcesTestRunner.completeDebuggerTest();
   }
 })();

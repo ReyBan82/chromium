@@ -17,7 +17,11 @@ class AccountCapabilitiesFetcherAndroid : public AccountCapabilitiesFetcher {
  public:
   AccountCapabilitiesFetcherAndroid(
       const CoreAccountInfo& account_info,
-      AccountCapabilitiesFetcher::OnCompleteCallback on_complete_callback);
+      AccountCapabilitiesFetcher::FetchPriority fetch_priority,
+      AccountCapabilitiesFetcher::OnSomeCapabilitiesFetchedCallback
+          on_some_capabilities_fetched_callback,
+      AccountCapabilitiesFetcher::OnAllFetchesCompleteCallback
+          on_all_fetches_complete_callback);
   ~AccountCapabilitiesFetcherAndroid() override;
 
   AccountCapabilitiesFetcherAndroid(const AccountCapabilitiesFetcherAndroid&) =

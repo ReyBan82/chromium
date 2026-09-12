@@ -5,6 +5,7 @@
 #ifndef COMPONENTS_DOWNLOAD_PUBLIC_COMMON_DOWNLOAD_RESPONSE_HANDLER_H_
 #define COMPONENTS_DOWNLOAD_PUBLIC_COMMON_DOWNLOAD_RESPONSE_HANDLER_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,7 +21,6 @@
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/origin.h"
 
 namespace download {
@@ -69,7 +69,7 @@ class COMPONENTS_DOWNLOAD_EXPORT DownloadResponseHandler
   void OnReceiveResponse(
       network::mojom::URLResponseHeadPtr head,
       mojo::ScopedDataPipeConsumerHandle body,
-      absl::optional<mojo_base::BigBuffer> cached_metadata) override;
+      std::optional<mojo_base::BigBuffer> cached_metadata) override;
   void OnReceiveRedirect(const net::RedirectInfo& redirect_info,
                          network::mojom::URLResponseHeadPtr head) override;
   void OnUploadProgress(int64_t current_position,
@@ -91,7 +91,11 @@ class COMPONENTS_DOWNLOAD_EXPORT DownloadResponseHandler
 
   bool started_;
 
-  // Information needed to create DownloadCreateInfo when the time comes.
+  const url::Origin first_origin_;
+
+  // Information needed to create DownloadCreateInfo when the time comes. These
+  // members are consumed by CreateDownloadCreateInfo() and must not be used
+  // afterwards.
   std::unique_ptr<DownloadSaveInfo> save_info_;
   std::vector<GURL> url_chain_;
   std::string method_;
@@ -100,15 +104,17 @@ class COMPONENTS_DOWNLOAD_EXPORT DownloadResponseHandler
   bool is_transient_;
   bool fetch_error_body_;
   network::mojom::RedirectMode cross_origin_redirects_;
-  url::Origin first_origin_;
   DownloadUrlParameters::RequestHeadersType request_headers_;
   std::string request_origin_;
   DownloadSource download_source_;
-  net::CertStatus cert_status_;
+  net::CertStatus cert_status_ = 0;
   bool has_strong_validators_;
-  absl::optional<url::Origin> request_initiator_;
+  // Whether the response was served by a Service Worker. Captured in
+  // OnReceiveResponse so it is available when mapping the completion status.
+  bool fetched_via_service_worker_ = false;
+  std::optional<url::Origin> request_initiator_;
   ::network::mojom::CredentialsMode credentials_mode_;
-  absl::optional<net::IsolationInfo> isolation_info_;
+  std::optional<net::IsolationInfo> isolation_info_;
   bool is_partial_request_;
   bool completed_;
   bool require_safety_checks_;

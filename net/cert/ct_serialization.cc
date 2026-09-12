@@ -4,8 +4,12 @@
 
 #include "net/cert/ct_serialization.h"
 
+#include <string_view>
+
 #include "base/logging.h"
 #include "base/numerics/checked_math.h"
+#include "base/strings/string_view_util.h"
+#include "crypto/openssl_util.h"
 #include "crypto/sha2.h"
 #include "net/cert/merkle_tree_leaf.h"
 #include "net/cert/signed_certificate_timestamp.h"
@@ -28,8 +32,8 @@ enum SignatureType {
 // |max_list_length| contains the overall length of the encoded list.
 // |max_item_length| contains the maximum length of a single item.
 // On success, returns true and updates |*out| with the encoded list.
-bool ReadSCTList(CBS* in, std::vector<base::StringPiece>* out) {
-  std::vector<base::StringPiece> result;
+bool ReadSCTList(CBS* in, std::vector<std::string_view>* out) {
+  std::vector<std::string_view> result;
 
   CBS sct_list_data;
 
@@ -112,10 +116,7 @@ bool EncodeAsn1CertSignedEntry(const SignedEntryData& input, CBB* output) {
 // does not exceed kMaxTbsCertificateLength and so can be written to |output|.
 bool EncodePrecertSignedEntry(const SignedEntryData& input, CBB* output) {
   CBB child;
-  return CBB_add_bytes(
-             output,
-             reinterpret_cast<const uint8_t*>(input.issuer_key_hash.data),
-             kLogIdLength) &&
+  return CBB_add_bytes(output, input.issuer_key_hash.data(), kLogIdLength) &&
          CBB_add_u24_length_prefixed(output, &child) &&
          CBB_add_bytes(
              &child,
@@ -147,8 +148,7 @@ bool EncodeDigitallySigned(const DigitallySigned& input,
     return false;
   }
 
-  output->append(reinterpret_cast<const char*>(CBB_data(output_cbb.get())),
-                 CBB_len(output_cbb.get()));
+  output->append(base::as_string_view(crypto::CbbAsSpan(output_cbb.get())));
   return true;
 }
 
@@ -175,7 +175,7 @@ bool DecodeDigitallySigned(CBS* input, DigitallySigned* output) {
   return true;
 }
 
-bool DecodeDigitallySigned(base::StringPiece* input, DigitallySigned* output) {
+bool DecodeDigitallySigned(std::string_view* input, DigitallySigned* output) {
   CBS input_cbs;
   CBS_init(&input_cbs, reinterpret_cast<const uint8_t*>(input->data()),
            input->size());
@@ -206,8 +206,7 @@ bool EncodeSignedEntry(const SignedEntryData& input, std::string* output) {
     return false;
   }
 
-  output->append(reinterpret_cast<const char*>(CBB_data(output_cbb.get())),
-                 CBB_len(output_cbb.get()));
+  output->append(base::as_string_view(crypto::CbbAsSpan(output_cbb.get())));
   return true;
 }
 
@@ -228,7 +227,7 @@ static bool ReadTimeSinceEpoch(CBS* input, base::Time* output) {
   return true;
 }
 
-static bool WriteTimeSinceEpoch(const base::Time& timestamp, CBB* output) {
+static bool WriteTimeSinceEpoch(base::Time timestamp, CBB* output) {
   base::TimeDelta time_since_epoch = timestamp - base::Time::UnixEpoch();
   return CBB_add_u64(output, time_since_epoch.InMilliseconds());
 }
@@ -248,12 +247,11 @@ bool EncodeTreeLeaf(const MerkleTreeLeaf& leaf, std::string* output) {
       !CBB_flush(output_cbb.get())) {
     return false;
   }
-  output->append(reinterpret_cast<const char*>(CBB_data(output_cbb.get())),
-                 CBB_len(output_cbb.get()));
+  output->append(base::as_string_view(crypto::CbbAsSpan(output_cbb.get())));
   return true;
 }
 
-bool EncodeV1SCTSignedData(const base::Time& timestamp,
+bool EncodeV1SCTSignedData(base::Time timestamp,
                            const std::string& serialized_log_entry,
                            const std::string& extensions,
                            std::string* output) {
@@ -276,8 +274,7 @@ bool EncodeV1SCTSignedData(const base::Time& timestamp,
       !CBB_flush(output_cbb.get())) {
     return false;
   }
-  output->append(reinterpret_cast<const char*>(CBB_data(output_cbb.get())),
-                 CBB_len(output_cbb.get()));
+  output->append(base::as_string_view(crypto::CbbAsSpan(output_cbb.get())));
   return true;
 }
 
@@ -289,20 +286,17 @@ bool EncodeTreeHeadSignature(const SignedTreeHead& signed_tree_head,
       !CBB_add_u8(output_cbb.get(), TREE_HASH) ||
       !WriteTimeSinceEpoch(signed_tree_head.timestamp, output_cbb.get()) ||
       !CBB_add_u64(output_cbb.get(), signed_tree_head.tree_size) ||
-      !CBB_add_bytes(
-          output_cbb.get(),
-          reinterpret_cast<const uint8_t*>(signed_tree_head.sha256_root_hash),
-          kSthRootHashLength)) {
+      !CBB_add_bytes(output_cbb.get(), signed_tree_head.sha256_root_hash.data(),
+                     signed_tree_head.sha256_root_hash.size())) {
     return false;
   }
-  output->append(reinterpret_cast<const char*>(CBB_data(output_cbb.get())),
-                 CBB_len(output_cbb.get()));
+  output->append(base::as_string_view(crypto::CbbAsSpan(output_cbb.get())));
   return true;
 }
 
-bool DecodeSCTList(base::StringPiece input,
-                   std::vector<base::StringPiece>* output) {
-  std::vector<base::StringPiece> result;
+bool DecodeSCTList(std::string_view input,
+                   std::vector<std::string_view>* output) {
+  std::vector<std::string_view> result;
   CBS input_cbs;
   CBS_init(&input_cbs, reinterpret_cast<const uint8_t*>(input.data()),
            input.size());
@@ -316,7 +310,7 @@ bool DecodeSCTList(base::StringPiece input,
 }
 
 bool DecodeSignedCertificateTimestamp(
-    base::StringPiece* input,
+    std::string_view* input,
     scoped_refptr<SignedCertificateTimestamp>* output) {
   auto result = base::MakeRefCounted<SignedCertificateTimestamp>();
   uint8_t version;
@@ -371,29 +365,38 @@ bool EncodeSignedCertificateTimestamp(
       !CBB_flush(output_cbb.get())) {
     return false;
   }
-  output->append(reinterpret_cast<const char*>(CBB_data(output_cbb.get())),
-                 CBB_len(output_cbb.get()));
+  output->append(base::as_string_view(crypto::CbbAsSpan(output_cbb.get())));
   return true;
 }
 
-bool EncodeSCTListForTesting(base::StringPiece sct, std::string* output) {
-  bssl::ScopedCBB encoded_sct, output_cbb;
-  CBB encoded_sct_child, output_child;
-  if (!CBB_init(encoded_sct.get(), 64) || !CBB_init(output_cbb.get(), 64) ||
-      !CBB_add_u16_length_prefixed(encoded_sct.get(), &encoded_sct_child) ||
-      !CBB_add_bytes(&encoded_sct_child,
-                     reinterpret_cast<const uint8_t*>(sct.data()),
-                     sct.size()) ||
-      !CBB_flush(encoded_sct.get()) ||
-      !CBB_add_u16_length_prefixed(output_cbb.get(), &output_child) ||
-      !CBB_add_bytes(&output_child, CBB_data(encoded_sct.get()),
-                     CBB_len(encoded_sct.get())) ||
-      !CBB_flush(output_cbb.get())) {
+bool EncodeSCTListForTesting(const std::vector<std::string>& scts,
+                             std::string* output) {
+  bssl::ScopedCBB output_cbb;
+  CBB output_child;
+  if (!CBB_init(output_cbb.get(), 64) ||
+      !CBB_add_u16_length_prefixed(output_cbb.get(), &output_child)) {
     return false;
   }
 
-  output->append(reinterpret_cast<const char*>(CBB_data(output_cbb.get())),
-                 CBB_len(output_cbb.get()));
+  for (const std::string& sct : scts) {
+    bssl::ScopedCBB encoded_sct;
+    CBB encoded_sct_child;
+    if (!CBB_init(encoded_sct.get(), 64) ||
+        !CBB_add_u16_length_prefixed(encoded_sct.get(), &encoded_sct_child) ||
+        !CBB_add_bytes(&encoded_sct_child,
+                       reinterpret_cast<const uint8_t*>(sct.data()),
+                       sct.size()) ||
+        !CBB_flush(encoded_sct.get()) ||
+        !CBB_add_bytes(&output_child, CBB_data(encoded_sct.get()),
+                       CBB_len(encoded_sct.get()))) {
+      return false;
+    }
+  }
+
+  if (!CBB_flush(output_cbb.get())) {
+    return false;
+  }
+  output->append(base::as_string_view(crypto::CbbAsSpan(output_cbb.get())));
   return true;
 }
 

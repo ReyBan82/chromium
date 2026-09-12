@@ -12,20 +12,17 @@
 #include "third_party/blink/renderer/core/css/css_primitive_value.h"
 #include "third_party/blink/renderer/core/css/css_value_list.h"
 #include "third_party/blink/renderer/core/css/css_value_pair.h"
+#include "third_party/blink/renderer/core/css/media_values.h"
+#include "third_party/blink/renderer/core/css/resolver/style_builder_converter.h"
 #include "third_party/blink/renderer/core/css/style_color.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 
 namespace blink {
 
 StyleRuleFontPaletteValues::StyleRuleFontPaletteValues(
     const AtomicString& name,
     CSSPropertyValueSet* properties)
-    : StyleRuleBase(kFontPaletteValues),
-      name_(name),
-      font_family_(properties->GetPropertyCSSValue(CSSPropertyID::kFontFamily)),
-      base_palette_(
-          properties->GetPropertyCSSValue(CSSPropertyID::kBasePalette)),
-      override_colors_(
-          properties->GetPropertyCSSValue(CSSPropertyID::kOverrideColors)) {
+    : StyleRuleBase(kFontPaletteValues), name_(name), properties_(properties) {
   DCHECK(properties);
 }
 
@@ -34,24 +31,26 @@ StyleRuleFontPaletteValues::StyleRuleFontPaletteValues(
 
 StyleRuleFontPaletteValues::~StyleRuleFontPaletteValues() = default;
 
-AtomicString StyleRuleFontPaletteValues::GetFontFamilyAsString() const {
-  if (!font_family_ || !font_family_->IsFontFamilyValue()) {
-    return g_empty_atom;
-  }
-
-  return To<CSSFontFamilyValue>(*font_family_).Value();
+const CSSValue* StyleRuleFontPaletteValues::GetFontFamily() const {
+  return properties_->GetPropertyCSSValue(CSSPropertyID::kFontFamily);
 }
-
-FontPalette::BasePaletteValue StyleRuleFontPaletteValues::GetBasePaletteIndex()
-    const {
+const CSSValue* StyleRuleFontPaletteValues::GetBasePalette() const {
+  return properties_->GetPropertyCSSValue(CSSPropertyID::kBasePalette);
+}
+const CSSValue* StyleRuleFontPaletteValues::GetOverrideColors() const {
+  return properties_->GetPropertyCSSValue(CSSPropertyID::kOverrideColors);
+}
+FontPalette::BasePaletteValue StyleRuleFontPaletteValues::GetBasePaletteIndex(
+    const Document& document) const {
   constexpr FontPalette::BasePaletteValue kNoBasePaletteValue = {
       FontPalette::kNoBasePalette, 0};
-  if (!base_palette_) {
+  const CSSValue* base_palette = GetBasePalette();
+  if (!base_palette) {
     return kNoBasePaletteValue;
   }
 
   if (auto* base_palette_identifier =
-          DynamicTo<CSSIdentifierValue>(*base_palette_)) {
+          DynamicTo<CSSIdentifierValue>(*base_palette)) {
     switch (base_palette_identifier->GetValueID()) {
       case CSSValueID::kLight:
         return FontPalette::BasePaletteValue(
@@ -61,48 +60,64 @@ FontPalette::BasePaletteValue StyleRuleFontPaletteValues::GetBasePaletteIndex()
             {FontPalette::kDarkBasePalette, 0});
       default:
         NOTREACHED();
-        return kNoBasePaletteValue;
     }
   }
 
-  const CSSPrimitiveValue& palette_primitive =
-      To<CSSPrimitiveValue>(*base_palette_);
-  return FontPalette::BasePaletteValue(
-      {FontPalette::kIndexBasePalette, palette_primitive.GetIntValue()});
+  MediaValues* media_values =
+      MediaValues::CreateDynamicIfFrameExists(document.GetFrame());
+  int index =
+      To<CSSPrimitiveValue>(*base_palette).ComputeInteger(*media_values);
+  return FontPalette::BasePaletteValue({FontPalette::kIndexBasePalette, index});
 }
 
 Vector<FontPalette::FontPaletteOverride>
-StyleRuleFontPaletteValues::GetOverrideColorsAsVector() const {
-  if (!override_colors_ || !override_colors_->IsValueList()) {
+StyleRuleFontPaletteValues::GetOverrideColorsAsVector(
+    const Document& document) const {
+  const CSSValue* override_colors = GetOverrideColors();
+  if (!override_colors || !override_colors->IsValueList()) {
     return {};
   }
+  // Colors depending on color scheme are not valid here, so this value
+  // doesn't matter.
+  // https://drafts.csswg.org/css-fonts/#override-color
+  const mojom::blink::ColorScheme used_color_scheme =
+      mojom::blink::ColorScheme::kLight;
+  MediaValues* media_values =
+      MediaValues::CreateDynamicIfFrameExists(document.GetFrame());
+  const ResolveColorValueContext color_context{
+      .length_resolver = *media_values,
+      .text_link_colors = document.GetTextLinkColors(),
+      .used_color_scheme = used_color_scheme,
+      .color_provider = document.GetColorProviderForPainting(used_color_scheme),
+      .can_expose_accent_color =
+          document.IsInWebAppScope() && document.IsInitialProfile(),
+      .for_visited_link = false};
 
-  // Note: This function should not allocate Oilpan object, e.g. `CSSValue`,
-  // because this function is called in font threads to determine primary
-  // font data via `CSSFontSelector::GetFontData()`.
-  // The test[1] reaches here.
-  // [1] https://wpt.live/css/css-fonts/font-palette-35.html
-  // TODO(yosin): Should we use ` ThreadState::NoAllocationScope` for main
-  // thread? Font threads hit `DCHECK` because they don't have `ThreadState'.
+  auto ConvertToColor =
+      [&color_context](
+          const CSSValuePair& override_pair) -> std::optional<Color> {
+    const CSSValue& color_value = override_pair.Second();
 
-  auto ConvertToSkColor = [](const CSSValuePair& override_pair) -> SkColor {
-    if (override_pair.Second().IsIdentifierValue()) {
+    if (color_value.IsIdentifierValue()) {
       const CSSIdentifierValue& color_identifier =
-          To<CSSIdentifierValue>(override_pair.Second());
-      // The value won't be a system color according to parsing, so we can pass
-      // a fixed color scheme here.
-      return static_cast<SkColor>(
-          StyleColor::ColorFromKeyword(color_identifier.GetValueID(),
-                                       mojom::blink::ColorScheme::kLight)
-              .Rgb());
+          To<CSSIdentifierValue>(color_value);
+      return StyleColor::ColorFromKeyword(
+          color_identifier.GetValueID(), color_context.used_color_scheme,
+          color_context.color_provider, color_context.can_expose_accent_color);
     }
-    const cssvalue::CSSColor& css_color =
-        To<cssvalue::CSSColor>(override_pair.Second());
-    return css_color.Value().ToSkColorDeprecated();
+    if (const cssvalue::CSSColor* css_color =
+            DynamicTo<cssvalue::CSSColor>(color_value)) {
+      return css_color->Value();
+    }
+    StyleColor style_color = ResolveColorValue(color_value, color_context);
+    if (style_color.IsAbsoluteColor()) {
+      return style_color.GetColor();
+    }
+    return std::nullopt;
   };
 
   Vector<FontPalette::FontPaletteOverride> return_overrides;
-  const CSSValueList& overrides_list = To<CSSValueList>(*override_colors_);
+  const CSSValueList& overrides_list = To<CSSValueList>(*override_colors);
   for (auto& item : overrides_list) {
     const CSSValuePair& override_pair = To<CSSValuePair>(*item);
 
@@ -110,21 +125,30 @@ StyleRuleFontPaletteValues::GetOverrideColorsAsVector() const {
         To<CSSPrimitiveValue>(override_pair.First());
     DCHECK(palette_index.IsInteger());
 
-    const SkColor override_color = ConvertToSkColor(override_pair);
-
+    std::optional<const Color> override_color = ConvertToColor(override_pair);
+    if (!override_color.has_value()) {
+      // See comment in ConvertToColor() above.
+      continue;
+    }
     FontPalette::FontPaletteOverride palette_override{
-        palette_index.GetIntValue(), override_color};
+        ClampTo<uint16_t>(palette_index.ComputeInteger(*media_values)),
+        override_color.value()};
     return_overrides.push_back(palette_override);
   }
 
   return return_overrides;
 }
 
+MutableCSSPropertyValueSet& StyleRuleFontPaletteValues::MutableProperties() {
+  if (!properties_->IsMutable()) {
+    properties_ = properties_->MutableCopy();
+  }
+  return *To<MutableCSSPropertyValueSet>(properties_.Get());
+}
+
 void StyleRuleFontPaletteValues::TraceAfterDispatch(
     blink::Visitor* visitor) const {
-  visitor->Trace(font_family_);
-  visitor->Trace(base_palette_);
-  visitor->Trace(override_colors_);
+  visitor->Trace(properties_);
   StyleRuleBase::TraceAfterDispatch(visitor);
 }
 

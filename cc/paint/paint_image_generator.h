@@ -14,6 +14,7 @@
 #include "third_party/skia/include/core/SkImageInfo.h"
 #include "third_party/skia/include/core/SkSize.h"
 #include "third_party/skia/include/core/SkYUVAPixmaps.h"
+#include "ui/gfx/hdr_metadata.h"
 
 namespace cc {
 
@@ -29,7 +30,7 @@ class CC_PAINT_EXPORT PaintImageGenerator : public SkRefCnt {
   PaintImageGenerator& operator=(const PaintImageGenerator&) = delete;
 
   // Returns a reference to the encoded content of this image.
-  virtual sk_sp<SkData> GetEncodedData() const = 0;
+  virtual sk_sp<const SkData> GetEncodedData() const = 0;
 
   // Decode into the given SkPixmap. This will modify the pixels pointed to by
   // `dst_pixmap`, but will not modify any of its properties (e.g, its
@@ -73,6 +74,7 @@ class CC_PAINT_EXPORT PaintImageGenerator : public SkRefCnt {
   virtual PaintImage::ContentId GetContentIdForFrame(size_t frame_index) const;
 
   const SkImageInfo& GetSkImageInfo() const { return info_; }
+  const gfx::HDRMetadata& GetHdrMetadata() const { return hdr_metadata_; }
   const std::vector<FrameMetadata>& GetFrameMetadata() const { return frames_; }
 
   // Returns the information required to decide whether or not hardware
@@ -82,10 +84,12 @@ class CC_PAINT_EXPORT PaintImageGenerator : public SkRefCnt {
  protected:
   // |info| is the info for this paint image generator.
   PaintImageGenerator(const SkImageInfo& info,
+                      const gfx::HDRMetadata& hdr_metadata,
                       std::vector<FrameMetadata> frames = {FrameMetadata()});
 
  private:
   const SkImageInfo info_;
+  gfx::HDRMetadata hdr_metadata_;
   const PaintImage::ContentId generator_content_id_;
   const std::vector<FrameMetadata> frames_;
 };

@@ -4,8 +4,10 @@
 
 #include "services/device/usb/usb_configuration_android.h"
 
-#include "services/device/usb/jni_headers/ChromeUsbConfiguration_jni.h"
 #include "services/device/usb/usb_interface_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "services/device/usb/jni_headers/ChromeUsbConfiguration_jni.h"
 
 using base::android::ScopedJavaLocalRef;
 
@@ -24,8 +26,9 @@ mojom::UsbConfigurationInfoPtr UsbConfigurationAndroid::Convert(
       Java_ChromeUsbConfiguration_isRemoteWakeup(env, wrapper),
       Java_ChromeUsbConfiguration_getMaxPower(env, wrapper));
 
-  base::android::JavaObjectArrayReader<jobject> interfaces(
-      Java_ChromeUsbConfiguration_getInterfaces(env, wrapper));
+  ScopedJavaLocalRef<jobjectArray> interfaces_array =
+      Java_ChromeUsbConfiguration_getInterfaces(env, wrapper);
+  jni_zero::JArrayView<jobject> interfaces = interfaces_array.CreateView(env);
   config->interfaces.reserve(interfaces.size());
   for (auto interface : interfaces) {
     config->interfaces.push_back(UsbInterfaceAndroid::Convert(env, interface));
@@ -36,3 +39,5 @@ mojom::UsbConfigurationInfoPtr UsbConfigurationAndroid::Convert(
 }
 
 }  // namespace device
+
+DEFINE_JNI(ChromeUsbConfiguration)

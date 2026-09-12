@@ -21,15 +21,14 @@ namespace extensions {
 // Container that holds the parsed app launch data.
 class AppLaunchInfo : public Extension::ManifestData {
  public:
+  static const char* kManifestDataKey;
+
   AppLaunchInfo();
 
   AppLaunchInfo(const AppLaunchInfo&) = delete;
   AppLaunchInfo& operator=(const AppLaunchInfo&) = delete;
 
   ~AppLaunchInfo() override;
-
-  // Get the local path inside the extension to use with the launcher.
-  static const std::string& GetLaunchLocalPath(const Extension* extension);
 
   // Get the absolute web url to use with the launcher.
   static const GURL& GetLaunchWebURL(const Extension* extension);
@@ -54,9 +53,8 @@ class AppLaunchInfo : public Extension::ManifestData {
  private:
   bool LoadLaunchURL(Extension* extension, std::u16string* error);
   bool LoadLaunchContainer(Extension* extension, std::u16string* error);
-  void OverrideLaunchURL(Extension* extension, GURL override_url);
 
-  std::string launch_local_path_;
+  GURL launch_local_url_;
 
   GURL launch_web_url_;
 
@@ -82,6 +80,11 @@ class AppLaunchManifestHandler : public ManifestHandler {
 
  private:
   base::span<const char* const> Keys() const override;
+
+  // AppLaunchManifestHandler::Parse() requires "app.urls" to be parsed in
+  // advance so that extension->web_extent().is_empty() reflects information
+  // from AppURLsHandler::Parse().
+  const std::vector<std::string> PrerequisiteKeys() const override;
 };
 
 }  // namespace extensions

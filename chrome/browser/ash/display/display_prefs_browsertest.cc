@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 #include "ash/constants/ash_pref_names.h"
+#include "ash/constants/ash_switches.h"
 #include "ash/shell.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "chrome/browser/browser_process.h"
@@ -22,32 +24,41 @@ class DisplayPrefsBrowserTest : public InProcessBrowserTest {
 
   ~DisplayPrefsBrowserTest() override = default;
 
+  // InProcessBrowserTest:
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    std::string test_name =
+        ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    // Make sure that display prefs are created in PRE_ test.
+    if (test_name.find("PRE_") != std::string::npos) {
+      command_line->AppendSwitch(ash::switches::kFirstExecAfterBoot);
+    }
+  }
   void SetUpOnMainThread() override {
     local_state_ = g_browser_process->local_state();
   }
 
  protected:
-  const base::Value::Dict* GetDisplayProperties(int index) {
+  const base::DictValue* GetDisplayProperties(int index) {
     int64_t display_id =
         ash::Shell::Get()->display_manager()->GetDisplayAt(index).id();
 
-    const base::Value::Dict& display_properties =
+    const base::DictValue& display_properties =
         local_state_->GetDict(ash::prefs::kDisplayProperties);
     return display_properties.FindDict(base::NumberToString(display_id));
   }
 
   display::Display::Rotation GetRotation(int index) {
-    const base::Value::Dict* properties = GetDisplayProperties(index);
+    const base::DictValue* properties = GetDisplayProperties(index);
     EXPECT_TRUE(properties);
     display::Display::Rotation result = display::Display::ROTATE_0;
-    absl::optional<int> rot_value = properties->FindInt("rotation");
+    std::optional<int> rot_value = properties->FindInt("rotation");
     EXPECT_TRUE(rot_value);
     if (rot_value)
       result = static_cast<display::Display::Rotation>(rot_value.value());
     return result;
   }
 
-  PrefService* local_state_;
+  raw_ptr<PrefService, DanglingUntriaged> local_state_;
 };
 
 // Test that display prefs are registered in the browser local_state
@@ -82,7 +93,9 @@ IN_PROC_BROWSER_TEST_F(DisplayPrefsBrowserTest, PRE_DisplayRotation) {
   display_manager->SetDisplayRotation(display.id(),
                                       display::Display::ROTATE_180,
                                       display::Display::RotationSource::USER);
-  base::RunLoop().RunUntilIdle();
+  base::RunLoop run_loop;
+  local_state_->CommitPendingWrite(run_loop.QuitClosure());
+  run_loop.Run();
 
   // Verify new rotation and pref value.
   rotation = GetRotation(0);

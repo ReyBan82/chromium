@@ -5,7 +5,6 @@
 #ifndef IOS_WEB_WEB_THREAD_IMPL_H_
 #define IOS_WEB_WEB_THREAD_IMPL_H_
 
-#include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread.h"
@@ -29,12 +28,22 @@ class WebThreadImpl : public WebThread {
  public:
   ~WebThreadImpl();
 
+  // WebThread static implementation:
+  static scoped_refptr<base::SingleThreadTaskRunner> GetUIThreadTaskRunner(
+      const WebTaskTraits& traits);
+  static scoped_refptr<base::SingleThreadTaskRunner> GetIOThreadTaskRunner(
+      const WebTaskTraits& traits);
+  static bool IsThreadInitialized(ID identifier);
+  static bool CurrentlyOn(ID identifier);
+  static std::string GetCurrentlyOnErrorMessage(ID expected);
+  static bool GetCurrentThreadIdentifier(ID* identifier);
+
   // Returns the thread name for `identifier`.
   static const char* GetThreadName(WebThread::ID identifier);
 
   // Creates and registers a TaskExecutor that facilitates posting tasks to a
   // WebThread via //base/task/post_task.h.
-  // TODO(crbug.com/1026641): Remove this now that post_task.h is deprecated.
+  // TODO(crbug.com/40108370): Remove this now that post_task.h is deprecated.
   static void CreateTaskExecutor();
 
   // Unregister and delete the TaskExecutor after a test.

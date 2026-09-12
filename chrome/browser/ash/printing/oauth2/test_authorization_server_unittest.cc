@@ -5,6 +5,7 @@
 #include "chrome/browser/ash/printing/oauth2/test_authorization_server.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -28,10 +29,10 @@ namespace {
 
 // Helper function that moves the content of `response_body` to `target`.
 void SavePayload(std::string* target,
-                 std::unique_ptr<std::string> response_body) {
+                 std::optional<std::string> response_body) {
   CHECK(target);
   if (response_body) {
-    *target = std::move(*response_body);
+    *target = std::move(response_body).value();
   } else {
     target->clear();
   }
@@ -86,7 +87,7 @@ TEST(PrintingOAuth2TestAuthorizationServerTest, ReceiveGETAndResponse) {
 
   // Process and check the request and send the response.
   ASSERT_EQ(server.ReceiveGET("https://abc/def"), "");
-  base::Value::Dict content;
+  base::DictValue content;
   server.ResponseWithJSON(net::HttpStatusCode::HTTP_CREATED, content);
 
   // Check the response.
@@ -113,7 +114,7 @@ TEST(PrintingOAuth2TestAuthorizationServerTest,
                                1024);
 
   // Process and check the request and send the response.
-  base::Value::Dict content;
+  base::DictValue content;
   ASSERT_EQ(server.ReceivePOSTWithJSON("https://abc/def", content), "");
   EXPECT_EQ(content.size(), 2u);
   EXPECT_EQ(*content.FindString("field1"), "val1");

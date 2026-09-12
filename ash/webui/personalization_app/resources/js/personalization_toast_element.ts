@@ -6,10 +6,10 @@
  * @fileoverview This component displays toast notifications to the user.
  */
 
-import 'chrome://resources/cr_elements/cr_button/cr_button.js';
+import 'chrome://resources/ash/common/cr_elements/cr_button/cr_button.js';
 
 import {dismissErrorAction} from './personalization_actions.js';
-import {PersonalizationStateError} from './personalization_state.js';
+import type {PersonalizationStateError} from './personalization_state.js';
 import {WithPersonalizationStore} from './personalization_store.js';
 import {getTemplate} from './personalization_toast_element.html.js';
 
@@ -44,9 +44,9 @@ export class PersonalizationToastElement extends WithPersonalizationStore {
     return ['onErrorOrShowErrorChanged_(error_, showError_)'];
   }
 
-  private error_: PersonalizationStateError|null;
-  private isLoading_: boolean;
-  private showError_: boolean;
+  declare private error_: PersonalizationStateError|null;
+  declare private isLoading_: boolean;
+  declare private showError_: boolean;
   private autoDismissTimeout_: number;
 
   override connectedCallback() {
@@ -55,7 +55,8 @@ export class PersonalizationToastElement extends WithPersonalizationStore {
     this.watch(
         'isLoading_',
         state => state.wallpaper.loading.setImage > 0 ||
-            state.wallpaper.loading.selected ||
+            state.wallpaper.loading.selected.attribution ||
+            state.wallpaper.loading.selected.image ||
             state.wallpaper.loading.refreshWallpaper);
   }
 

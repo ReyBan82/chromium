@@ -4,10 +4,11 @@
 
 #include "net/dns/dns_server_iterator.h"
 
+#include <optional>
+
 #include "base/time/time.h"
 #include "net/dns/dns_session.h"
 #include "net/dns/resolve_context.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace net {
 DnsServerIterator::DnsServerIterator(size_t nameservers_size,
@@ -19,14 +20,18 @@ DnsServerIterator::DnsServerIterator(size_t nameservers_size,
     : times_returned_(nameservers_size, 0),
       max_times_returned_(max_times_returned),
       max_failures_(max_failures),
-      resolve_context_(resolve_context),
+      resolve_context_(resolve_context ? resolve_context->GetWeakPtr() : nullptr),
       next_index_(starting_index),
-      session_(session) {}
+      session_(session ? session->GetWeakPtr() : nullptr) {
+  CHECK(starting_index < nameservers_size || nameservers_size == 0);
+}
 
 DnsServerIterator::~DnsServerIterator() = default;
 
 size_t DohDnsServerIterator::GetNextAttemptIndex() {
-  DCHECK(resolve_context_->IsCurrentSession(session_));
+  CHECK(resolve_context_);
+  CHECK(session_);
+  DCHECK(resolve_context_->IsCurrentSession(session_.get()));
   DCHECK(AttemptAvailable());
 
   // Because AttemptAvailable() should always be true before running this
@@ -34,7 +39,7 @@ size_t DohDnsServerIterator::GetNextAttemptIndex() {
 
   // Check if the next index is available and hasn't hit its failure limit. If
   // not, try the next one and so on until we've tried them all.
-  absl::optional<size_t> least_recently_failed_index;
+  std::optional<size_t> least_recently_failed_index;
   base::TimeTicks least_recently_failed_time;
 
   size_t previous_index = next_index_;
@@ -48,7 +53,7 @@ size_t DohDnsServerIterator::GetNextAttemptIndex() {
     // because we try every server regardless of availability.
     bool secure_or_available_server =
         secure_dns_mode_ == SecureDnsMode::kSecure ||
-        resolve_context_->GetDohServerAvailability(curr_index, session_);
+        resolve_context_->GetDohServerAvailability(curr_index, session_.get());
 
     // If we've tried this server |max_times_returned_| already, then we're done
     // with it. Similarly skip this server if it isn't available and we're not
@@ -83,15 +88,17 @@ size_t DohDnsServerIterator::GetNextAttemptIndex() {
 }
 
 bool DohDnsServerIterator::AttemptAvailable() {
-  if (!resolve_context_->IsCurrentSession(session_))
+  if (!resolve_context_ || !session_ ||
+      !resolve_context_->IsCurrentSession(session_.get())) {
     return false;
+  }
 
   for (size_t i = 0; i < times_returned_.size(); i++) {
     // If the DoH mode is "secure" then don't check GetDohServerAvailability()
     // because we try every server regardless of availability.
     bool secure_or_available_server =
         secure_dns_mode_ == SecureDnsMode::kSecure ||
-        resolve_context_->GetDohServerAvailability(i, session_);
+        resolve_context_->GetDohServerAvailability(i, session_.get());
 
     if (times_returned_[i] < max_times_returned_ && secure_or_available_server)
       return true;
@@ -100,7 +107,9 @@ bool DohDnsServerIterator::AttemptAvailable() {
 }
 
 size_t ClassicDnsServerIterator::GetNextAttemptIndex() {
-  DCHECK(resolve_context_->IsCurrentSession(session_));
+  CHECK(resolve_context_);
+  CHECK(session_);
+  DCHECK(resolve_context_->IsCurrentSession(session_.get()));
   DCHECK(AttemptAvailable());
 
   // Because AttemptAvailable() should always be true before running this
@@ -108,7 +117,7 @@ size_t ClassicDnsServerIterator::GetNextAttemptIndex() {
 
   // Check if the next index is available and hasn't hit its failure limit. If
   // not, try the next one and so on until we've tried them all.
-  absl::optional<size_t> least_recently_failed_index;
+  std::optional<size_t> least_recently_failed_index;
   base::TimeTicks least_recently_failed_time;
 
   size_t previous_index = next_index_;
@@ -149,14 +158,26 @@ size_t ClassicDnsServerIterator::GetNextAttemptIndex() {
 }
 
 bool ClassicDnsServerIterator::AttemptAvailable() {
-  if (!resolve_context_->IsCurrentSession(session_))
+  if (!resolve_context_ || !session_ ||
+      !resolve_context_->IsCurrentSession(session_.get())) {
     return false;
+  }
 
   for (int i : times_returned_) {
     if (i < max_times_returned_)
       return true;
   }
   return false;
+}
+
+size_t PlatformDnsServerIterator::GetNextAttemptIndex() {
+  DCHECK(AttemptAvailable());
+  times_returned_[0]++;
+  return 0;
+}
+
+bool PlatformDnsServerIterator::AttemptAvailable() {
+  return times_returned_[0] < max_times_returned_;
 }
 
 }  // namespace net

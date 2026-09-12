@@ -5,21 +5,34 @@
 #include "chrome/browser/ui/views/autofill/popup/popup_view_utils.h"
 
 #include <algorithm>
+#include <optional>
 
-#include "base/cxx17_backports.h"
+#include "base/containers/to_vector.h"
+#include "base/feature_list.h"
+#include "build/build_config.h"
 #include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
 #include "chrome/browser/platform_util.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/browser/ui/views/autofill/popup/popup_base_view.h"
+#include "chrome/browser/ui/views/autofill/popup/popup_view_views.h"
 #include "chrome/browser/ui/views/extensions/extension_popup.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
-#include "chrome/browser/ui/views/permissions/permission_prompt_bubble_view.h"
-#include "components/autofill/core/browser/ui/popup_item_ids.h"
-#include "components/autofill/core/common/autofill_features.h"
+#include "chrome/browser/ui/views/interaction/browser_elements_views.h"
+#include "chrome/browser/ui/views/permissions/embedded_permission_prompt_base_view.h"
+#include "chrome/browser/ui/views/permissions/permission_prompt_bubble_base_view.h"
+#include "components/autofill/core/browser/suggestions/suggestion_type.h"
+#include "components/autofill/core/browser/ui/popup_open_enums.h"
+#include "components/feature_engagement/public/feature_constants.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "extensions/common/constants.h"
-#include "ui/base/interaction/element_tracker.h"
-#include "ui/views/interaction/element_tracker_views.h"
+#include "ui/display/screen.h"
 #include "ui/views/widget/widget.h"
+
+#if BUILDFLAG(IS_OZONE)
+#include "ui/ozone/public/ozone_platform.h"
+#endif
 
 using views::BubbleBorder;
 
@@ -38,21 +51,21 @@ bool IsVerticalArrowSide(views::BubbleArrowSide side) {
          side == views::BubbleArrowSide::kBottom;
 }
 
-// Returns false if the element is not sufficiently visible to place an arrow.
+// Returns false if the element is not sufficiently wide to place an arrow.
+// A vertical arrow points upwards or downwards and we require an input element
+// to be at least 3x wider than the arrow for esthetic reasons.
+// This must only be called for vertical arrows (pointing up or down).
 bool IsElementSufficientlyVisibleForAVerticalArrow(
-    const gfx::Rect& content_area_bounds,
+    const gfx::Rect& visible_content_area_bounds,
     const gfx::Rect& element_bounds,
     views::BubbleArrowSide side) {
-  // Only consider the visible size of the element for vertical arrows.
-  if (!IsVerticalArrowSide(side)) {
-    return true;
-  }
+  CHECK(IsVerticalArrowSide(side));
 
   int visible_width =
-      base::clamp(element_bounds.right(), content_area_bounds.x(),
-                  content_area_bounds.right()) -
-      base::clamp(element_bounds.x(), content_area_bounds.x(),
-                  content_area_bounds.right());
+      std::clamp(element_bounds.right(), visible_content_area_bounds.x(),
+                 visible_content_area_bounds.right()) -
+      std::clamp(element_bounds.x(), visible_content_area_bounds.x(),
+                 visible_content_area_bounds.right());
 
   return visible_width > 3 * BubbleBorder::kVisibleArrowRadius;
 }
@@ -81,17 +94,17 @@ BubbleBorder::Arrow GetBubbleArrowForBubbleArrowSide(
 
 // Returns the size of popup placed on the |side| of the |element_bounds| once
 // the popup is expanded to its |popup_preferred_size| or the maximum size
-// available on the |content_area_bounds|.
-gfx::Size GetExpandedPopupSize(const gfx::Rect& content_area_bounds,
+// available on the |visible_content_area_bounds|.
+gfx::Size GetExpandedPopupSize(const gfx::Rect& visible_content_area_bounds,
                                const gfx::Rect& element_bounds,
                                const gfx::Size& popup_preferred_size,
                                int scrollbar_width,
                                views::BubbleArrowSide side) {
   // Get the maximum available space for the popup
   int available_height = GetAvailableVerticalSpaceOnSideOfElement(
-      content_area_bounds, element_bounds, side);
+      visible_content_area_bounds, element_bounds, side);
   int available_width = GetAvailableHorizontalSpaceOnSideOfElement(
-      content_area_bounds, element_bounds, side);
+      visible_content_area_bounds, element_bounds, side);
 
   int height = std::min(available_height, popup_preferred_size.height());
   int width = std::min(
@@ -102,168 +115,143 @@ gfx::Size GetExpandedPopupSize(const gfx::Rect& content_area_bounds,
   return {width, height};
 }
 
-}  // namespace
-
-void CalculatePopupXAndWidthHorizontallyCentered(
-    int popup_preferred_width,
-    const gfx::Rect& content_area_bounds,
-    const gfx::Rect& element_bounds,
-    bool is_rtl,
-    gfx::Rect* popup_bounds) {
-  // The preferred horizontal starting point for the pop-up is at the horizontal
-  // center of the field.
-  int preferred_starting_point =
-      base::clamp(element_bounds.x() + (element_bounds.size().width() / 2),
-                  content_area_bounds.x(), content_area_bounds.right());
-
-  // The space available to the left and to the right.
-  int space_to_right = content_area_bounds.right() - preferred_starting_point;
-  int space_to_left = preferred_starting_point - content_area_bounds.x();
-
-  // Calculate the pop-up width. This is either the preferred pop-up width, or
-  // alternatively the maximum space available if there is not sufficient space
-  // for the preferred width.
-  int popup_width =
-      std::min(popup_preferred_width, space_to_left + space_to_right);
-
-  // Calculates the space that is available to grow into the preferred
-  // direction. In RTL, this is the space to the right side of the content
-  // area, in LTR this is the space to the left side of the content area.
-  int space_to_grow_in_preferred_direction =
-      is_rtl ? space_to_left : space_to_right;
-
-  // Calculate how much the pop-up needs to grow into the non-preferred
-  // direction.
-  int amount_to_grow_in_unpreffered_direction =
-      std::max(0, popup_width - space_to_grow_in_preferred_direction);
-
-  popup_bounds->set_width(popup_width);
-  if (is_rtl) {
-    // Note, in RTL the |pop_up_width| must be subtracted to achieve
-    // right-alignment of the pop-up with the element.
-    popup_bounds->set_x(preferred_starting_point - popup_width +
-                        amount_to_grow_in_unpreffered_direction);
-  } else {
-    popup_bounds->set_x(preferred_starting_point -
-                        amount_to_grow_in_unpreffered_direction);
-  }
+// Returns whether there is a visible view with `view_id` that overlaps
+// `screen_bounds`.
+bool BoundsOverlapWithView(const gfx::Rect& screen_bounds,
+                           BrowserView* browser_view,
+                           ui::ElementIdentifier view_id) {
+  auto* const view =
+      BrowserElementsViews::From(browser_view->browser())->GetView(view_id);
+  return view &&
+         view->GetWidget()->GetWindowBoundsInScreen().Intersects(screen_bounds);
 }
 
-void CalculatePopupXAndWidth(int popup_preferred_width,
-                             const gfx::Rect& content_area_bounds,
-                             const gfx::Rect& element_bounds,
-                             bool is_rtl,
-                             gfx::Rect* popup_bounds) {
-  int right_growth_start = base::clamp(
-      element_bounds.x(), content_area_bounds.x(), content_area_bounds.right());
-  int left_growth_end =
-      base::clamp(element_bounds.right(), content_area_bounds.x(),
-                  content_area_bounds.right());
+}  // namespace
 
-  int right_available = content_area_bounds.right() - right_growth_start;
-  int left_available = left_growth_end - content_area_bounds.x();
+namespace internal {
+bool BoundsOverlapWithHtmlFormPopup(
+    const gfx::Rect& popup_bounds,
+    const std::vector<PopupWidgetProperties>& widget_properties) {
+  return std::ranges::any_of(
+      widget_properties, [&popup_bounds](const auto& view) {
+        return view.is_showing && view.is_html_form_popup &&
+               view.bounds.Intersects(popup_bounds);
+      });
+}
+}  // namespace internal
 
-  int popup_width = std::min(popup_preferred_width,
-                             std::max(left_available, right_available));
+bool BoundsOverlapWithHtmlFormPopup(const gfx::Rect& popup_bounds,
+                                    content::WebContents* web_contents) {
+  // Currently HTML Form Popup overlap problem occurs only on Windows. On other
+  // platforms the Autofill popup correctly shows up above the HTML Form Popup.
+  // But the fix is enabled on other platforms as well, just in case.
 
-  // Prefer to grow towards the end (right for LTR, left for RTL). But if there
-  // is not enough space available in the desired direction and more space in
-  // the other direction, reverse it.
-  bool grow_left = false;
-  if (is_rtl) {
-    grow_left =
-        left_available >= popup_width || left_available >= right_available;
-  } else {
-    grow_left =
-        right_available < popup_width && right_available < left_available;
-  }
-
-  popup_bounds->set_width(popup_width);
-  popup_bounds->set_x(grow_left ? left_growth_end - popup_width
-                                : right_growth_start);
+  // GetPopupWidgets() only returns popups associated with the current tab.
+  std::vector<internal::PopupWidgetProperties> widget_properties =
+      base::ToVector(web_contents->GetPopupWidgets(),
+                     [](content::RenderWidgetHostView* view) {
+                       return internal::PopupWidgetProperties({
+                           .is_showing = view->IsShowing(),
+                           .is_html_form_popup = view->IsHTMLFormPopup(),
+                           .bounds = view->GetViewBounds(),
+                       });
+                     });
+  return internal::BoundsOverlapWithHtmlFormPopup(popup_bounds,
+                                                  widget_properties);
 }
 
 void CalculatePopupYAndHeight(int popup_preferred_height,
-                              const gfx::Rect& content_area_bounds,
+                              const gfx::Rect& visible_content_area_bounds,
                               const gfx::Rect& element_bounds,
                               gfx::Rect* popup_bounds) {
-  int top_growth_end = base::clamp(element_bounds.y(), content_area_bounds.y(),
-                                   content_area_bounds.bottom());
+  int top_growth_end =
+      std::clamp(element_bounds.y(), visible_content_area_bounds.y(),
+                 visible_content_area_bounds.bottom());
   int bottom_growth_start =
-      base::clamp(element_bounds.bottom(), content_area_bounds.y(),
-                  content_area_bounds.bottom());
+      std::clamp(element_bounds.bottom(), visible_content_area_bounds.y(),
+                 visible_content_area_bounds.bottom());
 
-  int top_available = top_growth_end - content_area_bounds.y();
-  int bottom_available = content_area_bounds.bottom() - bottom_growth_start;
+  int top_available = top_growth_end - visible_content_area_bounds.y();
+  int bottom_available =
+      visible_content_area_bounds.bottom() - bottom_growth_start;
 
   popup_bounds->set_height(popup_preferred_height);
   popup_bounds->set_y(top_growth_end);
 
-  if (bottom_available >= popup_preferred_height ||
-      bottom_available >= top_available) {
-    popup_bounds->AdjustToFit(
-        gfx::Rect(popup_bounds->x(), element_bounds.bottom(),
-                  popup_bounds->width(), bottom_available));
-  } else {
-    popup_bounds->AdjustToFit(gfx::Rect(popup_bounds->x(),
-                                        content_area_bounds.y(),
-                                        popup_bounds->width(), top_available));
-  }
-}
-
-gfx::Rect CalculatePopupBounds(const gfx::Size& desired_size,
-                               const gfx::Rect& content_area_bounds,
-                               const gfx::Rect& element_bounds,
-                               bool is_rtl,
-                               bool horizontally_centered) {
-  gfx::Rect popup_bounds;
-
-  if (horizontally_centered) {
-    CalculatePopupXAndWidthHorizontallyCentered(
-        desired_size.width(), content_area_bounds, element_bounds, is_rtl,
-        &popup_bounds);
-  } else {
-    CalculatePopupXAndWidth(desired_size.width(), content_area_bounds,
-                            element_bounds, is_rtl, &popup_bounds);
-  }
-  CalculatePopupYAndHeight(desired_size.height(), content_area_bounds,
-                           element_bounds, &popup_bounds);
-
-  return popup_bounds;
+  int y_adjustment = (bottom_available >= popup_preferred_height ||
+                      bottom_available >= top_available)
+                         ? element_bounds.bottom()
+                         : visible_content_area_bounds.y();
+  popup_bounds->AdjustToFit(gfx::Rect(popup_bounds->x(), y_adjustment,
+                                      popup_bounds->width(),
+                                      visible_content_area_bounds.height()));
 }
 
 bool CanShowDropdownHere(int item_height,
-                         const gfx::Rect& content_area_bounds,
+                         const gfx::Rect& visible_content_area_bounds,
                          const gfx::Rect& element_bounds) {
-  // Ensure that at least one row of the popup will be displayed within the
+  // Ensure that at least one row of the popup can be displayed within the
   // bounds of the content area so that the user notices the presence of the
   // popup.
+  // It is sufficient to check if the element can be placed above or below the
+  // element (and not on the left or right) because positioning on the sides
+  // is only allowed if the "preferred size" of the popup fully fits to the
+  // sides of the element. If that's not the case, the popup is placed above or
+  // below the element as a fallback. This function ensures that the fallback
+  // location provides enough space for at least one item in the content area
+  // above the element.
   bool enough_space_for_one_item_in_content_area_above_element =
-      element_bounds.y() - content_area_bounds.y() >= item_height;
+      element_bounds.y() - visible_content_area_bounds.y() >= item_height;
   bool element_top_is_within_content_area_bounds =
-      element_bounds.y() >= content_area_bounds.y() &&
-      element_bounds.y() < content_area_bounds.bottom();
+      element_bounds.y() >= visible_content_area_bounds.y() &&
+      element_bounds.y() < visible_content_area_bounds.bottom();
 
   bool enough_space_for_one_item_in_content_area_below_element =
-      content_area_bounds.bottom() - element_bounds.bottom() >= item_height;
+      visible_content_area_bounds.bottom() - element_bounds.bottom() >=
+      item_height;
   bool element_bottom_is_within_content_area_bounds =
-      element_bounds.bottom() > content_area_bounds.y() &&
-      element_bounds.bottom() <= content_area_bounds.bottom();
+      element_bounds.bottom() > visible_content_area_bounds.y() &&
+      element_bounds.bottom() <= visible_content_area_bounds.bottom();
 
-  return (enough_space_for_one_item_in_content_area_above_element &&
-          element_top_is_within_content_area_bounds) ||
-         (enough_space_for_one_item_in_content_area_below_element &&
-          element_bottom_is_within_content_area_bounds);
+  bool enough_space_vertically =
+      (enough_space_for_one_item_in_content_area_above_element &&
+       element_top_is_within_content_area_bounds) ||
+      (enough_space_for_one_item_in_content_area_below_element &&
+       element_bottom_is_within_content_area_bounds);
+
+  // Ensure that the element is visible horizontally by
+  // at least kMinHorizontalOverlapForPopup (100px).
+  bool enough_space_horizontally =
+      (element_bounds.right() - visible_content_area_bounds.x() >=
+       kMinHorizontalOverlapForPopup) &&
+      (visible_content_area_bounds.right() - element_bounds.x() >=
+       kMinHorizontalOverlapForPopup);
+
+  // Or, alternatively, the element fully fits horizontally into the screen.
+  // It's useful for small elements, sized less then
+  // kMinHorizontalOverlapForPopup. In that case, we would also want to show the
+  // popup, since the whole element is visible.
+  bool element_fully_fits_horizontally =
+      visible_content_area_bounds.x() <= element_bounds.x() &&
+      element_bounds.right() <= visible_content_area_bounds.right();
+
+  enough_space_horizontally |= element_fully_fits_horizontally;
+
+  return enough_space_vertically && enough_space_horizontally;
 }
 
 // Keep in sync with TryToCloseAllPrompts() from autofill_uitest.cc.
 bool BoundsOverlapWithAnyOpenPrompt(const gfx::Rect& screen_bounds,
                                     content::WebContents* web_contents) {
-  gfx::NativeView top_level_view =
-      platform_util::GetViewForWindow(web_contents->GetTopLevelNativeWindow());
-  if (!top_level_view) {
+  gfx::NativeWindow top_level_window = web_contents->GetTopLevelNativeWindow();
+  // `top_level_window` can be `nullptr` if `web_contents` is not attached to
+  // a window, e.g. in unit test runs.
+  if (!top_level_window) {
     return false;
   }
+  gfx::NativeView top_level_view =
+      platform_util::GetViewForWindow(top_level_window);
+
   // We generally want to ensure that no prompt overlaps with |screen_bounds|.
   // It is possible, however, that a <datalist> is part of a prompt (e.g. an
   // extension popup can render a <datalist>). Therefore, we exclude the widget
@@ -279,11 +267,11 @@ bool BoundsOverlapWithAnyOpenPrompt(const gfx::Rect& screen_bounds,
   top_level_view = platform_util::GetParent(top_level_view)
                        ? platform_util::GetParent(top_level_view)
                        : top_level_view;
-  views::Widget::Widgets all_widgets;
-  views::Widget::GetAllChildWidgets(top_level_view, &all_widgets);
-  return base::ranges::any_of(
+  views::Widget::Widgets all_widgets =
+      views::Widget::GetAllChildWidgets(top_level_view);
+  return std::ranges::any_of(
       all_widgets, [&screen_bounds, web_contents_widget](views::Widget* w) {
-        return w->IsDialogBox() &&
+        return w->IsDialogBox() && w->IsVisible() &&
                w->GetWindowBoundsInScreen().Intersects(screen_bounds) &&
                w != web_contents_widget;
       });
@@ -292,7 +280,8 @@ bool BoundsOverlapWithAnyOpenPrompt(const gfx::Rect& screen_bounds,
 bool BoundsOverlapWithOpenPermissionsPrompt(
     const gfx::Rect& screen_bounds,
     content::WebContents* web_contents) {
-  Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
   if (!browser) {
     return false;
   }
@@ -302,24 +291,16 @@ bool BoundsOverlapWithOpenPermissionsPrompt(
     return false;
   }
 
-  views::View* const permission_bubble_view =
-      views::ElementTrackerViews::GetInstance()->GetFirstMatchingView(
-          PermissionPromptBubbleView::kPermissionPromptBubbleViewIdentifier,
-          views::ElementTrackerViews::GetInstance()->GetContextForView(
-              browser_view));
-  if (!permission_bubble_view) {
-    return false;
-  }
-
-  return permission_bubble_view->GetWidget()
-      ->GetWindowBoundsInScreen()
-      .Intersects(screen_bounds);
+  return BoundsOverlapWithView(screen_bounds, browser_view,
+                               PermissionPromptBubbleBaseView::kMainViewId) ||
+         BoundsOverlapWithView(screen_bounds, browser_view,
+                               EmbeddedPermissionPromptBaseView::kMainViewId);
 }
 
 bool BoundsOverlapWithPictureInPictureWindow(const gfx::Rect& screen_bounds) {
-  absl::optional<gfx::Rect> pip_window_bounds =
+  std::optional<gfx::Rect> pip_window_bounds =
       PictureInPictureWindowManager::GetInstance()
-          ->GetPictureInPictureWindowBounds();
+          ->GetPictureInPictureWindowBoundsInScreen();
   return pip_window_bounds && pip_window_bounds->Intersects(screen_bounds);
 }
 
@@ -340,7 +321,7 @@ bool PopupMayExceedContentAreaBounds(content::WebContents* web_contents) {
 }
 
 int GetAvailableVerticalSpaceOnSideOfElement(
-    const gfx::Rect& content_area_bounds,
+    const gfx::Rect& visible_content_area_bounds,
     const gfx::Rect& element_bounds,
     views::BubbleArrowSide side) {
   // Note that the side of the arrow is opposite to the side of the element the
@@ -350,84 +331,149 @@ int GetAvailableVerticalSpaceOnSideOfElement(
     case views::BubbleArrowSide::kRight:
       // For a bubble that is either on the left of the right side of the
       // element, the height of the content area is the total available space.
-      return content_area_bounds.height();
+      return visible_content_area_bounds.height();
 
     case views::BubbleArrowSide::kBottom:
       // If the bubble sits above the element, return the space between the
       // upper edge of the element and the content area.
-      return element_bounds.y() - content_area_bounds.y();
+      return element_bounds.y() - visible_content_area_bounds.y();
 
     case views::BubbleArrowSide::kTop:
       // If the bubble sits below the element, return the space between the
       // lower edge of the element and the content area.
-      return content_area_bounds.bottom() - element_bounds.bottom();
+      return visible_content_area_bounds.bottom() - element_bounds.bottom();
   }
 }
 
 int GetAvailableHorizontalSpaceOnSideOfElement(
-    const gfx::Rect& content_area_bounds,
+    const gfx::Rect& visible_content_area_bounds,
     const gfx::Rect& element_bounds,
     views::BubbleArrowSide side) {
   // Note that the side of the arrow is opposite to the side of the element the
   // popup is located on.
   switch (side) {
     case views::BubbleArrowSide::kRight:
-      return element_bounds.x() - content_area_bounds.x() -
+      return element_bounds.x() - visible_content_area_bounds.x() -
              kMinimalPopupDistanceToContentAreaEdge;
 
     case views::BubbleArrowSide::kLeft:
-      return content_area_bounds.right() - element_bounds.right() -
+      return visible_content_area_bounds.right() - element_bounds.right() -
              kMinimalPopupDistanceToContentAreaEdge;
 
     case views::BubbleArrowSide::kTop:
     case views::BubbleArrowSide::kBottom:
-      return content_area_bounds.width() -
+      return visible_content_area_bounds.width() -
              2 * kMinimalPopupDistanceToContentAreaEdge;
   }
 }
 
-bool IsPopupPlaceableOnSideOfElement(const gfx::Rect& content_area_bounds,
-                                     const gfx::Rect& element_bounds,
-                                     const gfx::Size& popup_preferred_size,
-                                     int additional_spacing,
-                                     views::BubbleArrowSide side) {
+bool IsPopupPlaceableOnSideOfElement(
+    const gfx::Rect& visible_content_area_bounds,
+    const gfx::Rect& element_bounds,
+    const gfx::Size& popup_preferred_size,
+    int additional_spacing,
+    views::BubbleArrowSide side) {
   switch (side) {
     case views::BubbleArrowSide::kLeft:
     case views::BubbleArrowSide::kRight:
       return popup_preferred_size.width() + additional_spacing <=
-             GetAvailableHorizontalSpaceOnSideOfElement(content_area_bounds,
-                                                        element_bounds, side);
+             GetAvailableHorizontalSpaceOnSideOfElement(
+                 visible_content_area_bounds, element_bounds, side);
 
     case views::BubbleArrowSide::kTop:
     case views::BubbleArrowSide::kBottom:
       return popup_preferred_size.height() + additional_spacing <=
-             GetAvailableVerticalSpaceOnSideOfElement(content_area_bounds,
-                                                      element_bounds, side);
+             GetAvailableVerticalSpaceOnSideOfElement(
+                 visible_content_area_bounds, element_bounds, side);
   }
 }
 
+gfx::Rect IntersectWithDisplayBounds(content::WebContents* web_contents,
+                                     const gfx::Rect& element_bounds) {
+  std::optional<gfx::Rect> display_bounds =
+      GetDisplayBounds(web_contents, element_bounds);
+  if (display_bounds == std::nullopt) {
+    return element_bounds;
+  }
+  display_bounds->Intersect(element_bounds);
+  return display_bounds.value();
+}
+
+std::optional<gfx::Rect> GetDisplayBounds(content::WebContents* web_contents,
+                                          const gfx::Rect& element_bounds) {
+  display::Screen* screen = display::Screen::Get();
+  if (!screen) {
+    return std::nullopt;
+  }
+
+#if BUILDFLAG(IS_OZONE)
+  // On Ozone/Wayland platforms that don't support global screen coordinates,
+  // the display returned by `GetDisplayMatching` may be incorrect because the
+  // coordinates for `element_bounds` aren't global. Instead, fall back to
+  // getting the display from the native window hosting the web contents.
+  if (ui::OzonePlatform::IsInitialized() &&
+      !ui::OzonePlatform::GetInstance()
+           ->GetPlatformProperties()
+           .supports_global_screen_coordinates) {
+    gfx::Rect work_area;
+    if (web_contents && web_contents->GetTopLevelNativeWindow()) {
+      work_area =
+          screen
+              ->GetDisplayNearestWindow(web_contents->GetTopLevelNativeWindow())
+              .work_area();
+    } else {
+      work_area = screen->GetDisplayMatching(element_bounds).work_area();
+    }
+
+    // When global screen coordinates aren't supported, shift the work area to
+    // (0,0) to translate the global display bounds into local coordinate space
+    // used by the Views layer.
+    work_area.set_origin(gfx::Point(0, 0));
+    return work_area;
+  }
+#endif
+
+  return screen->GetDisplayMatching(element_bounds).work_area();
+}
+
+// Returns the first side (in the order of `popup_preferred_sides`) where the
+// popup can be rendered in the preferred size. If no such site exists, falls
+// back to the top of bottom of the element, depending on where more space is
+// available.
 views::BubbleArrowSide GetOptimalArrowSide(
-    const gfx::Rect& content_area_bounds,
+    const gfx::Rect& visible_content_area_bounds,
     const gfx::Rect& element_bounds,
-    const gfx::Size& popup_preferred_size) {
+    const gfx::Size& popup_preferred_size,
+    base::span<const views::BubbleArrowSide> popup_preferred_sides,
+    PopupAnchorType anchor_type) {
   // Probe for a side of the element on which the popup can be shown entirely.
-  const std::vector<views::BubbleArrowSide> sides_by_preference(
-      {views::BubbleArrowSide::kTop, views::BubbleArrowSide::kBottom,
-       views::BubbleArrowSide::kLeft, views::BubbleArrowSide::kRight});
-  for (views::BubbleArrowSide possible_side : sides_by_preference) {
-    if (IsPopupPlaceableOnSideOfElement(
-            content_area_bounds, element_bounds, popup_preferred_size,
-            BubbleBorder::kVisibleArrowLength, possible_side) &&
+  for (views::BubbleArrowSide possible_side : popup_preferred_sides) {
+    // If the popup is anchored on the cursor position (kCaret), do not check
+    // whether the bounds of the element are sufficiently large to place a
+    // vertical arrow because a caret is just one pixel wide.
+    const bool
+        skip_element_bounds_sufficiently_visible_for_vertical_arrow_check =
+            anchor_type == PopupAnchorType::kCaret;
+    // Is the element wide enough to place an arrow on the side. For arrows
+    // pointing left or right, this is always true. For arrows pointing up or
+    // down, the element must be sufficiently wide to place an arrow.
+    const bool vertical_size_requirements_sufficient =
+        !IsVerticalArrowSide(possible_side) ||
+        skip_element_bounds_sufficiently_visible_for_vertical_arrow_check ||
         IsElementSufficientlyVisibleForAVerticalArrow(
-            content_area_bounds, element_bounds, possible_side)) {
+            visible_content_area_bounds, element_bounds, possible_side);
+    if (IsPopupPlaceableOnSideOfElement(
+            visible_content_area_bounds, element_bounds, popup_preferred_size,
+            BubbleBorder::kVisibleArrowLength, possible_side) &&
+        vertical_size_requirements_sufficient) {
       return possible_side;
     }
   }
 
   // As a fallback, render the popup on top of the element if there is more
   // space than below the element.
-  if (element_bounds.y() - content_area_bounds.y() >
-      content_area_bounds.bottom() - element_bounds.bottom()) {
+  if (element_bounds.y() - visible_content_area_bounds.y() >
+      visible_content_area_bounds.bottom() - element_bounds.bottom()) {
     return views::BubbleArrowSide::kBottom;
   }
 
@@ -435,24 +481,29 @@ views::BubbleArrowSide GetOptimalArrowSide(
 }
 
 BubbleBorder::Arrow GetOptimalPopupPlacement(
-    const gfx::Rect& content_area_bounds,
+    const gfx::Rect& visible_content_area_bounds,
     const gfx::Rect& element_bounds,
     const gfx::Size& popup_preferred_size,
     bool right_to_left,
     int scrollbar_width,
     int maximum_pixel_offset_to_center,
     int maximum_width_percentage_to_center,
-    gfx::Rect& popup_bounds) {
+    gfx::Rect& popup_bounds,
+    base::span<const views::BubbleArrowSide> popup_preferred_sides,
+    PopupAnchorType anchor_type) {
   // Determine the best side of the element to put the popup and get a
-  // corresponding arrow.
+  // corresponding arrow. In the best case, this side fully fits the popup at
+  // the `popup_preferred_size`. Otherwise, the popup is rendered on top or
+  // below the element, depending on where more space is available.
   views::BubbleArrowSide side = GetOptimalArrowSide(
-      content_area_bounds, element_bounds, popup_preferred_size);
+      visible_content_area_bounds, element_bounds, popup_preferred_size,
+      popup_preferred_sides, anchor_type);
   BubbleBorder::Arrow arrow =
       GetBubbleArrowForBubbleArrowSide(side, right_to_left);
 
   // Set the actual size of the popup.
   popup_bounds.set_size(
-      GetExpandedPopupSize(content_area_bounds, element_bounds,
+      GetExpandedPopupSize(visible_content_area_bounds, element_bounds,
                            popup_preferred_size, scrollbar_width, side));
 
   // Move the origin of the popup to the anchor position on the element
@@ -475,8 +526,11 @@ BubbleBorder::Arrow GetOptimalPopupPlacement(
     // aligned with the field.
     // The popup top can never go above the content area since the popup size
     // computed to fit in the screen by GetExpandedPopupSize.
-    popup_bounds.Offset(0, -1 * std::max(0, popup_bounds.bottom() -
-                                                content_area_bounds.bottom()));
+    popup_bounds.Offset(
+        0,
+        std::max(visible_content_area_bounds.y() - popup_bounds.y(),
+                 -1 * std::max(0, popup_bounds.bottom() -
+                                      visible_content_area_bounds.bottom())));
     return arrow;
   }
 
@@ -520,38 +574,160 @@ BubbleBorder::Arrow GetOptimalPopupPlacement(
   //                                   |
   //                          content_area.right()
   popup_bounds.Offset(
-      std::min(0, content_area_bounds.right() - popup_bounds.right() -
+      std::min(0, visible_content_area_bounds.right() - popup_bounds.right() -
                       kMinimalPopupDistanceToContentAreaEdge),
       0);
 
   // Analogously, make move the popup to the right if it exceeds the left edge
   // of the content area.
-  popup_bounds.Offset(std::max(0, content_area_bounds.x() - popup_bounds.x() +
-                                      kMinimalPopupDistanceToContentAreaEdge),
-                      0);
+  popup_bounds.Offset(
+      std::max(0, visible_content_area_bounds.x() - popup_bounds.x() +
+                      kMinimalPopupDistanceToContentAreaEdge),
+      0);
 
   return arrow;
 }
 
-bool IsFooterFrontendId(int frontend_id) {
-  switch (frontend_id) {
-    case PopupItemId::POPUP_ITEM_ID_SCAN_CREDIT_CARD:
-    case PopupItemId::POPUP_ITEM_ID_CREDIT_CARD_SIGNIN_PROMO:
-    case PopupItemId::POPUP_ITEM_ID_PASSWORD_ACCOUNT_STORAGE_EMPTY:
-    case PopupItemId::POPUP_ITEM_ID_PASSWORD_ACCOUNT_STORAGE_OPT_IN:
-    case PopupItemId::POPUP_ITEM_ID_PASSWORD_ACCOUNT_STORAGE_RE_SIGNIN:
-    case PopupItemId::
-        POPUP_ITEM_ID_PASSWORD_ACCOUNT_STORAGE_OPT_IN_AND_GENERATE:
-    case PopupItemId::POPUP_ITEM_ID_SHOW_ACCOUNT_CARDS:
-    case PopupItemId::POPUP_ITEM_ID_USE_VIRTUAL_CARD:
-    case PopupItemId::POPUP_ITEM_ID_ALL_SAVED_PASSWORDS_ENTRY:
-    case PopupItemId::POPUP_ITEM_ID_CLEAR_FORM:
-    case PopupItemId::POPUP_ITEM_ID_AUTOFILL_OPTIONS:
-    case PopupItemId::POPUP_ITEM_ID_SEE_PROMO_CODE_DETAILS:
+bool IsExpandableSuggestionType(SuggestionType type) {
+  switch (type) {
+    // This opens the non-affiliated loyalty cards submenu.
+    case SuggestionType::kAllLoyaltyCardsEntry:
+    // This opens a submenu with footer-like suggestions around the compose
+    // nudge (e.g., Go to settings).
+    case SuggestionType::kComposeProactiveNudge:
+    // This opens the submenu where one of many test addresses can be selected.
+    case SuggestionType::kDevtoolsTestAddresses:
+    // This opens a submenu, only during password manual fallback, so that the
+    // user can decide whether to fill the username or password into the field.
+    case SuggestionType::kPasswordEntry:
+    // This opens the submenu where different suggestions related to the same
+    // query response are present.
+    case SuggestionType::kAtMemorySearchResult:
+    // This opens the submenu with all other Autofill AI orders/shipments
+    // suggestions that are not displayed in the first level.
+    case SuggestionType::kAutofillAiOtherOrders:
+    case SuggestionType::kAutofillAiOtherShipments:
+    case SuggestionType::kFillAutofillAi:
       return true;
-    default:
+    case SuggestionType::kAccountStoragePasswordEntry:
+    case SuggestionType::kAddressEntry:
+    case SuggestionType::kAddressEntryOnTyping:
+    case SuggestionType::kAddressFieldByFieldFilling:
+    case SuggestionType::kAllSavedPasswordsEntry:
+    case SuggestionType::kAtMemoryAiDisclosure:
+    case SuggestionType::kAtMemoryFetching:
+    case SuggestionType::kAtMemoryGenericError:
+    case SuggestionType::kAtMemoryInactivityNudge:
+    case SuggestionType::kAtMemoryNoConnection:
+    case SuggestionType::kAtMemoryOpenGemini:
+    case SuggestionType::kAtMemorySearchAffordance:
+    case SuggestionType::kAtMemorySourceAttribution:
+    case SuggestionType::kAutocompleteAtMemoryButton:
+    case SuggestionType::kAutocompleteEntry:
+    case SuggestionType::kAutofillAiPrivateInferenceNotice:
+    case SuggestionType::kAutofillAiSourceAttribution:
+    case SuggestionType::kBackupPasswordEntry:
+    case SuggestionType::kBnplEntry:
+    case SuggestionType::kBnplFootnote:
+    case SuggestionType::kComposeDisable:
+    case SuggestionType::kComposeGoToSettings:
+    case SuggestionType::kComposeNeverShowOnThisSiteAgain:
+    case SuggestionType::kComposeResumeNudge:
+    case SuggestionType::kComposeSavedStateNotification:
+    case SuggestionType::kCreditCardEntry:
+    case SuggestionType::kDatalistEntry:
+    case SuggestionType::kDevtoolsTestAddressByCountry:
+    case SuggestionType::kDevtoolsTestAddressEntry:
+    case SuggestionType::kFetchingAmbientData:
+    case SuggestionType::kRemoveAutofillAi:
+    case SuggestionType::kFillPassword:
+    case SuggestionType::kFreeformFooter:
+    case SuggestionType::kGeneratePasswordEntry:
+    case SuggestionType::kIbanEntry:
+    case SuggestionType::kIdentityCredential:
+    case SuggestionType::kInsecureContextPaymentDisabledMessage:
+    case SuggestionType::kLoadingThrobber:
+    case SuggestionType::kLoyaltyCardEntry:
+    case SuggestionType::kManageAddress:
+    case SuggestionType::kManageAutofillAi:
+    case SuggestionType::kManageAutofillAiIdentityDocs:
+    case SuggestionType::kManageAutofillAiShopping:
+    case SuggestionType::kManageAutofillAiTravel:
+    case SuggestionType::kManageCreditCard:
+    case SuggestionType::kManageIban:
+    case SuggestionType::kManageLoyaltyCard:
+    case SuggestionType::kManageEnhancedAutofill:
+    case SuggestionType::kMaximizeCreditCardBenefitsEntry:
+    case SuggestionType::kMerchantPromoCodeEntry:
+    case SuggestionType::kOneTimePasswordEntry:
+    case SuggestionType::kPasswordFieldByFieldFilling:
+    case SuggestionType::kPendingStateSignin:
+    case SuggestionType::kPersonalContextNotice:
+    case SuggestionType::kSaveAndFillCreditCardEntry:
+    case SuggestionType::kScanCreditCard:
+    case SuggestionType::kSeePromoCodeDetails:
+    case SuggestionType::kSeparator:
+    case SuggestionType::kTitle:
+    case SuggestionType::kTroubleSigningInEntry:
+    case SuggestionType::kUndo:
+    case SuggestionType::kViewPasswordDetails:
+    case SuggestionType::kVirtualCreditCardEntry:
+    case SuggestionType::kWebauthnCredential:
+    case SuggestionType::kWebauthnPasskeyQrCode:
+    case SuggestionType::kWebauthnSignInWithAnotherDevice:
       return false;
   }
+}
+
+ui::ElementIdentifier GetAutofillPopupCellElementIdentifier(
+    const base::Feature* feature) {
+  if (!feature) {
+    return ui::ElementIdentifier();
+  }
+  if (feature ==
+          &feature_engagement::kIPHAutofillVirtualCardSuggestionFeature ||
+      feature == &feature_engagement::
+                     kIPHAutofillDisabledVirtualCardSuggestionFeature ||
+      feature ==
+          &feature_engagement::kIPHAutofillCardInfoRetrievalSuggestionFeature ||
+      feature ==
+          &feature_engagement::kIPHAutofillDownstreamCardAwarenessFeature) {
+    return PopupViewViews::kAutofillCreditCardSuggestionEntryElementId;
+  }
+  if (feature ==
+      &feature_engagement::kIPHAutofillVirtualCardCVCSuggestionFeature) {
+    return PopupViewViews::kAutofillStandaloneCvcSuggestionElementId;
+  }
+  if (feature == &feature_engagement::
+                     kIPHAutofillExternalAccountProfileSuggestionFeature) {
+    return PopupViewViews::kAutofillSuggestionElementId;
+  }
+  if (feature == &feature_engagement::kIPHAutofillCreditCardBenefitFeature) {
+    return PopupViewViews::kAutofillCreditCardBenefitElementId;
+  }
+  if (feature ==
+      &feature_engagement::kIPHAutofillBnplAffirmOrZipSuggestionFeature) {
+    return PopupViewViews::kAutofillBnplAffirmOrZipSuggestionElementId;
+  }
+  if (feature ==
+      &feature_engagement::kIPHAutofillBnplAffirmZipOrKlarnaSuggestionFeature) {
+    return PopupViewViews::kAutofillBnplAffirmZipOrKlarnaSuggestionElementId;
+  }
+  if (feature ==
+      &feature_engagement::kIPHAutofillHomeWorkProfileSuggestionFeature) {
+    return PopupViewViews::kAutofillHomeWorkSuggestionElementId;
+  }
+  if (feature == &feature_engagement::kIPHAutofillEnableLoyaltyCardsFeature) {
+    return PopupViewViews::kAutofillEnableLoyaltyCardsElementId;
+  }
+  if (feature ==
+      &feature_engagement::kIPHAutofillAccountNameEmailSuggestionFeature) {
+    return PopupViewViews::kAutofillAccountNameEmailSuggestionElementId;
+  }
+  if (feature == &feature_engagement::kIPHAutofillAiValuablesFeature) {
+    return PopupViewViews::kAutofillAiValuablesElementId;
+  }
+  return ui::ElementIdentifier();
 }
 
 }  // namespace autofill

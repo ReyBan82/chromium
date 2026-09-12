@@ -44,7 +44,7 @@ cast_source_set("processing") {
   # Use fastest possible float math.
   configs -= [ "//build/config/compiler:default_optimization" ]
   configs += [ "//build/config/compiler:optimize_speed" ]
-  cflags = [ "-ffast-math" ]
+  cflags = [ "-Wno-nan-infinity-disabled" ]
 }
 
 cast_source_set("playback_rate_shifter") {
@@ -81,7 +81,6 @@ cast_source_set("cma_audio_output") {
   deps = [
     "//base",
     "//chromecast/base",
-    "//chromecast/common/mojom",
     "//chromecast/media/base",
     "//chromecast/media/cma/backend",
     "//chromecast/media/cma/base",
@@ -110,41 +109,13 @@ cast_source_set("channel_mixer") {
   ]
 }
 
-cast_source_set("audio_renderer") {
-  sources = [
-    "cast_audio_renderer.cc",
-    "cast_audio_renderer.h",
-  ]
-
-  public_deps = [ "//chromecast/media/audio/audio_output_service:proto" ]
-
-  deps = [
-    ":audio_io_thread",
-    "//base",
-    "//chromecast/common/mojom",
-    "//chromecast/media/audio/audio_output_service:output_connection",
-    "//chromecast/media/audio/net:common",
-    "//chromecast/media/cma/base",
-    "//chromecast/public/media",
-    "//media",
-    "//media/mojo/mojom",
-    "//mojo/public/cpp/bindings",
-    "//net",
-    "//third_party/blink/public/common",
-  ]
-}
-
 cast_source_set("audio") {
   sources = [
     "audio_clock_simulator_impl.cc",
-    "cast_audio_input_stream.cc",
-    "cast_audio_input_stream.h",
     "cast_audio_manager.cc",
     "cast_audio_manager.h",
     "cast_audio_manager_helper.cc",
     "cast_audio_manager_helper.h",
-    "cast_audio_mixer.cc",
-    "cast_audio_mixer.h",
     "cast_audio_output_stream.cc",
     "cast_audio_output_stream.h",
     "cast_audio_output_utils.cc",
@@ -158,15 +129,7 @@ cast_source_set("audio") {
     ":cma_audio_output",
     "//base",
     "//chromecast/base",
-    "//chromecast/common/mojom",
-    "//chromecast/external_mojo/external_service_support:external_service",
     "//chromecast/media/api",
-    "//chromecast/media/audio/capture_service:common",
-    "//chromecast/media/audio/capture_service:receiver",
-    "//chromecast/media/audio/capture_service:utils",
-    "//chromecast/media/audio/mixer_service:common",
-    "//chromecast/media/audio/mixer_service:output_stream_connection",
-    "//chromecast/media/audio/mixer_service:proto",
     "//chromecast/media/audio/net:proto",
     "//chromecast/media/base",
     "//chromecast/media/base:monotonic_clock",
@@ -174,8 +137,6 @@ cast_source_set("audio") {
     "//chromecast/media/cma/base",
     "//chromecast/public/media",
     "//media",
-    "//media:shared_memory_support",
-    "//services/service_manager/public/cpp",
   ]
 
   if (use_alsa) {
@@ -209,7 +170,7 @@ cast_source_set("cast_audio_output_device") {
     "//chromecast/media/audio/audio_output_service:output_connection",
     "//chromecast/media/audio/audio_output_service:proto",
     "//chromecast/media/base:monotonic_clock",
-    "//content/renderer:renderer",
+    "//content/renderer",
     "//media",
     "//media/mojo/mojom",
     "//net",
@@ -228,7 +189,7 @@ if (is_android) {
       "//base",
       "//chromecast/base",
       "//content/public/renderer",
-      "//content/renderer:renderer",
+      "//content/renderer",
       "//media",
       "//third_party/blink/public:blink",
       "//third_party/blink/public/common",
@@ -262,7 +223,7 @@ source_set("fake_external_audio_pipeline") {
 buildflag_header("audio_buildflags") {
   header = "audio_buildflags.h"
 
-  flags = [ "ENABLE_AUDIO_CAPTURE_SERVICE=$enable_audio_capture_service" ]
+  flags = []
 
   if (use_alsa) {
     # Currently, this flag will only be used in cast_audio_manager_alsa.cc

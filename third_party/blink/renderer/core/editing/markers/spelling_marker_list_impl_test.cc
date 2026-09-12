@@ -1,5 +1,5 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.  Use of
-// this source code is governed by a BSD-style license that can be
+// Copyright 2017 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/editing/markers/spell_check_marker_list_impl.h"
@@ -19,7 +19,7 @@ class SpellingMarkerListImplTest : public testing::Test {
   SpellingMarkerListImplTest()
       : marker_list_(MakeGarbageCollected<SpellingMarkerListImpl>()) {}
 
-  DocumentMarker* CreateMarker(unsigned start_offset, unsigned end_offset) {
+  DocumentMarker* CreateMarker(wtf_size_t start_offset, wtf_size_t end_offset) {
     return MakeGarbageCollected<SpellingMarker>(start_offset, end_offset,
                                                 g_empty_string);
   }

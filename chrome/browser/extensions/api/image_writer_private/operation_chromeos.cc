@@ -2,12 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/extensions/api/image_writer_private/operation.h"
+
 #include <stdint.h>
+
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/logging.h"
 #include "chrome/browser/extensions/api/image_writer_private/error_constants.h"
-#include "chrome/browser/extensions/api/image_writer_private/operation.h"
 #include "chromeos/ash/components/dbus/image_burner/image_burner_client.h"
 #include "chromeos/ash/components/disks/disk.h"
 #include "chromeos/ash/components/disks/disk_mount_manager.h"
@@ -37,7 +40,7 @@ void ClearImageBurner() {
 
 void Operation::Write(base::OnceClosure continuation) {
   DCHECK(IsRunningInCorrectSequence());
-  SetStage(image_writer_api::STAGE_WRITE);
+  SetStage(image_writer_api::Stage::kWrite);
 
   // Note this has to be run on the FILE thread to avoid concurrent access.
   AddCleanUpFunction(base::BindOnce(&ClearImageBurner));
@@ -91,7 +94,7 @@ void Operation::StartWriteOnUIThread(const std::string& target_path,
                                      base::OnceClosure continuation) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
-  // TODO(haven): Image Burner cannot handle multiple burns. crbug.com/373575
+  // TODO(haven): Image Burner cannot handle multiple burns. crbug.com/41107511
   ImageBurnerClient* burner = ImageBurnerClient::Get();
 
   burner->SetEventHandlers(

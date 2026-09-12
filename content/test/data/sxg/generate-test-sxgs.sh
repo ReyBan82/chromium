@@ -12,7 +12,7 @@ set -e
 for cmd in gen-signedexchange gen-certurl dump-signedexchange; do
     if ! command -v $cmd > /dev/null 2>&1; then
         echo "$cmd is not installed. Please run:"
-        echo "  go get -u github.com/WICG/webpackage/go/signedexchange/cmd/..."
+        echo "  GO111MODULE=on go install github.com/WICG/webpackage/go/signedexchange/cmd/{gen-signedexchange,gen-certurl,dump-signedexchange}@latest"
         echo '  export PATH=$PATH:$(go env GOPATH)/bin'
         exit 1
     fi
@@ -95,6 +95,9 @@ cp test.example.org_test.sxg test.example.org_test_invalid_content_type.sxg
 
 # Generate the signed exchange for downloading test case.
 cp test.example.org_test.sxg test.example.org_test_download.sxg
+
+# Generate the compressed signed exchange.
+gzip -c test.example.org_test.sxg > test.example.org_test.sxg.gz
 
 # Generate the signed exchange file with invalid magic string
 xxd -p test.example.org_test.sxg |

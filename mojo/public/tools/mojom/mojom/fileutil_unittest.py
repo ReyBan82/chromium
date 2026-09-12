@@ -2,10 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import imp
 import os.path
 import shutil
-import sys
 import tempfile
 import unittest
 
@@ -14,7 +12,7 @@ from mojom import fileutil
 
 class FileUtilTest(unittest.TestCase):
   def testEnsureDirectoryExists(self):
-    """Test that EnsureDirectoryExists fuctions correctly."""
+    """Test that EnsureDirectoryExists functions correctly."""
 
     temp_dir = tempfile.mkdtemp()
     try:

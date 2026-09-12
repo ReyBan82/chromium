@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'chrome://resources/cr_elements/cr_hidden_style.css.js';
-import 'chrome://resources/cr_elements/cr_shared_vars.css.js';
-import 'chrome://resources/polymer/v3_0/paper-styles/color.js';
-import './strings.m.js';
+import '/strings.m.js';
+import './shared_vars.css.js';
 
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
+import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
 import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-import {getTemplate} from './code_section.html.js';
+import {getCss} from './code_section.css.js';
+import {getHtml} from './code_section.html.js';
 
 
 function visibleLineCount(totalCount: number, oppositeCount: number): number {
@@ -22,7 +22,13 @@ function visibleLineCount(totalCount: number, oppositeCount: number): number {
   return Math.min(max, totalCount);
 }
 
-const ExtensionsCodeSectionElementBase = I18nMixin(PolymerElement);
+export interface ExtensionsCodeSectionElement {
+  $: {
+    scrollContainer: HTMLElement,
+  };
+}
+
+const ExtensionsCodeSectionElementBase = I18nMixinLit(CrLitElement);
 
 export class ExtensionsCodeSectionElement extends
     ExtensionsCodeSectionElementBase {
@@ -30,68 +36,64 @@ export class ExtensionsCodeSectionElement extends
     return 'extensions-code-section';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
-    return {
-      code: {
-        type: Object,
-        value: null,
-      },
+  override render() {
+    return getHtml.bind(this)();
+  }
 
-      isActive: Boolean,
+  static override get properties() {
+    return {
+      code: {type: Object},
+      isActive: {type: Boolean},
 
       /** Highlighted code. */
-      highlighted_: String,
+      highlighted_: {type: String},
 
       /** Code before the highlighted section. */
-      before_: String,
+      before_: {type: String},
 
       /** Code after the highlighted section. */
-      after_: String,
-
-      showNoCode_: {
-        type: Boolean,
-        computed: 'computeShowNoCode_(isActive, highlighted_)',
-      },
+      after_: {type: String},
 
       /** Description for the highlighted section. */
-      highlightDescription_: String,
+      highlightDescription_: {type: String},
 
-      lineNumbers_: String,
-      truncatedBefore_: Number,
-      truncatedAfter_: Number,
+      lineNumbers_: {type: String},
+      truncatedBefore_: {type: Number},
+      truncatedAfter_: {type: Number},
 
       /**
        * The string to display if no |code| is set (e.g. because we couldn't
        * load the relevant source file).
        */
-      couldNotDisplayCode: String,
+      couldNotDisplayCode: {type: String},
     };
   }
 
-  code: chrome.developerPrivate.RequestFileSourceResponse|null;
-  isActive: boolean;
-  couldNotDisplayCode: string;
-  private highlighted_: string;
-  private before_: string;
-  private after_: string;
-  private showNoCode_: boolean;
-  private highlightDescription_: string;
-  private lineNumbers_: string;
-  private truncatedBefore_: number;
-  private truncatedAfter_: number;
+  accessor code: chrome.developerPrivate.RequestFileSourceResponse|null = null;
+  accessor isActive: boolean|undefined;
+  accessor couldNotDisplayCode: string = '';
+  protected accessor highlighted_: string = '';
+  protected accessor before_: string = '';
+  protected accessor after_: string = '';
+  protected accessor highlightDescription_: string = '';
+  protected accessor lineNumbers_: string = '';
+  protected accessor truncatedBefore_: number = 0;
+  protected accessor truncatedAfter_: number = 0;
 
-  static get observers() {
-    return ['onCodeChanged_(code.*)'];
+  override willUpdate(changedProperties: PropertyValues<this>) {
+    super.willUpdate(changedProperties);
+
+    if (changedProperties.has('code')) {
+      this.onCodeChanged_();
+    }
   }
 
-  private onCodeChanged_() {
-    if (!this.code ||
-        (!this.code.beforeHighlight && !this.code.highlight &&
-         !this.code.afterHighlight)) {
+  private async onCodeChanged_() {
+    if (!(this.code?.source)) {
       this.highlighted_ = '';
       this.highlightDescription_ = '';
       this.before_ = '';
@@ -100,9 +102,9 @@ export class ExtensionsCodeSectionElement extends
       return;
     }
 
-    const before = this.code.beforeHighlight;
-    const highlight = this.code.highlight;
-    const after = this.code.afterHighlight;
+    const before = this.code.source.beforeHighlight;
+    const highlight = this.code.source.highlight;
+    const after = this.code.source.afterHighlight;
 
     const linesBefore = before ? before.split('\n') : [];
     const linesAfter = after ? after.split('\n') : [];
@@ -133,15 +135,17 @@ export class ExtensionsCodeSectionElement extends
     this.setLineNumbers_(
         this.truncatedBefore_ + 1,
         this.truncatedBefore_ + visibleCode.split('\n').length);
+
+    // Happens asynchronously after the update completes
+    await this.updateComplete;
     this.scrollToHighlight_(visibleLineCountBefore);
   }
 
-  private getLinesNotShownLabel_(
-      lineCount: number, stringSingular: string,
-      stringPluralTemplate: string): string {
+  protected getLinesNotShownLabel_(lineCount: number): string {
     return lineCount === 1 ?
-        stringSingular :
-        loadTimeData.substituteString(stringPluralTemplate, lineCount);
+        loadTimeData.getString('errorLinesNotShownSingular') :
+        loadTimeData.substituteString(
+            loadTimeData.getString('errorLinesNotShownPlural'), lineCount);
   }
 
   private setLineNumbers_(start: number, end: number) {
@@ -162,7 +166,7 @@ export class ExtensionsCodeSectionElement extends
     // Find the position to show the highlight roughly in the middle.
     const targetTop = highlightTop - this.clientHeight * 0.5;
 
-    this.$['scroll-container'].scrollTo({top: targetTop});
+    this.$.scrollContainer.scrollTo({top: targetTop});
   }
 
   private getAccessibilityHighlightDescription_(
@@ -176,8 +180,8 @@ export class ExtensionsCodeSectionElement extends
     }
   }
 
-  private computeShowNoCode_(): boolean {
-    return this.isActive && !this.highlighted_;
+  protected shouldShowNoCode_(): boolean {
+    return (this.isActive === undefined || this.isActive) && !this.highlighted_;
   }
 }
 

@@ -6,7 +6,9 @@
 #define COMPONENTS_UI_DEVTOOLS_DEVTOOLS_CLIENT_H_
 
 #include <string>
+#include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "components/ui_devtools/devtools_base_agent.h"
 #include "components/ui_devtools/devtools_export.h"
 #include "components/ui_devtools/dom.h"
@@ -52,16 +54,13 @@ class UI_DEVTOOLS_EXPORT UiDevToolsClient : public protocol::FrontendChannel {
   void SendProtocolNotification(
       std::unique_ptr<protocol::Serializable> message) override;
   void FlushProtocolNotifications() override;
-  void FallThrough(int call_id,
-                   crdtp::span<uint8_t> method,
-                   crdtp::span<uint8_t> message) override;
 
   std::string name_;
   int connection_id_;
 
   std::vector<std::unique_ptr<UiDevToolsAgent>> agents_;
   protocol::UberDispatcher dispatcher_;
-  UiDevToolsServer* server_;
+  raw_ptr<UiDevToolsServer> server_;
 };
 
 }  // namespace ui_devtools

@@ -8,8 +8,8 @@
 
 #include "base/feature_list.h"
 #include "base/metrics/field_trial_params.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/metrics/metrics_scheduler.h"
 
@@ -42,35 +42,32 @@ base::TimeDelta BackOffUploadInterval(base::TimeDelta interval) {
   return interval;
 }
 
-// Time delay after a log is uploaded successfully before attempting another.
-// On mobile, keeping the radio on is very expensive, so prefer to keep this
-// short and send in bursts.
-base::TimeDelta GetUnsentLogsInterval() {
-  return base::Seconds(3);
-}
-
-// Initial time delay after a log uploaded fails before retrying it.
-base::TimeDelta GetInitialBackoffInterval() {
-  return base::Minutes(5);
-}
-
 }  // namespace
 
 MetricsUploadScheduler::MetricsUploadScheduler(
     const base::RepeatingClosure& upload_callback,
-    bool fast_startup_for_testing)
-    : MetricsScheduler(upload_callback, fast_startup_for_testing),
+    bool fast_startup)
+    : MetricsScheduler(upload_callback, fast_startup),
       unsent_logs_interval_(GetUnsentLogsInterval()),
       initial_backoff_interval_(GetInitialBackoffInterval()),
       backoff_interval_(initial_backoff_interval_) {}
 
-MetricsUploadScheduler::~MetricsUploadScheduler() {}
+MetricsUploadScheduler::~MetricsUploadScheduler() = default;
 
-void MetricsUploadScheduler::UploadFinished(bool server_is_healthy) {
-  // If the server is having issues, back off. Otherwise, reset to default
-  // (unless there are more logs to send, in which case the next upload should
-  // happen sooner).
-  if (!server_is_healthy) {
+// static
+base::TimeDelta MetricsUploadScheduler::GetUnsentLogsInterval() {
+  return base::Seconds(3);
+}
+
+// static
+base::TimeDelta MetricsUploadScheduler::GetInitialBackoffInterval() {
+  return base::Minutes(5);
+}
+
+void MetricsUploadScheduler::UploadFinished(bool backoff) {
+  // Wait longer for the next upload if `backoff` is set. Otherwise, reset to
+  // default.
+  if (backoff) {
     TaskDone(backoff_interval_);
     backoff_interval_ = BackOffUploadInterval(backoff_interval_);
   } else {
@@ -82,6 +79,14 @@ void MetricsUploadScheduler::UploadFinished(bool server_is_healthy) {
 void MetricsUploadScheduler::StopAndUploadCancelled() {
   Stop();
   TaskDone(unsent_logs_interval_);
+}
+
+void MetricsUploadScheduler::RestartWithUnsentLogsInterval() {
+  CHECK(IsRunning());
+  CHECK(!IsCallbackPending());
+  Stop();
+  SetInterval(unsent_logs_interval_);
+  Start();
 }
 
 void MetricsUploadScheduler::UploadOverDataUsageCap() {

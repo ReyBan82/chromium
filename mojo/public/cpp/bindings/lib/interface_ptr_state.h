@@ -7,9 +7,9 @@
 
 #include <stdint.h>
 
-#include <algorithm>  // For |std::swap()|.
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/check.h"
@@ -17,6 +17,7 @@
 #include "base/dcheck_is_on.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/location.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
@@ -72,8 +73,9 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) InterfacePtrStateBase {
   }
 
   scoped_refptr<ThreadSafeProxy> CreateThreadSafeProxy(
-      scoped_refptr<ThreadSafeProxy::Target> target) {
-    return endpoint_client_->CreateThreadSafeProxy(std::move(target));
+      scoped_refptr<ThreadSafeProxy::Target> target,
+      const base::Location& location) {
+    return endpoint_client_->CreateThreadSafeProxy(std::move(target), location);
   }
 
 #if DCHECK_IS_ON()
@@ -184,7 +186,7 @@ class InterfacePtrState : public InterfacePtrStateBase {
     endpoint_client()->FlushAsyncForTesting(std::move(callback));
   }
 
-  void CloseWithReason(uint32_t custom_reason, const std::string& description) {
+  void CloseWithReason(uint32_t custom_reason, std::string_view description) {
     ConfigureProxyIfNecessary();
     endpoint_client()->CloseWithReason(custom_reason, description);
   }
@@ -193,6 +195,11 @@ class InterfacePtrState : public InterfacePtrStateBase {
     using std::swap;
     swap(other->proxy_, proxy_);
     InterfacePtrStateBase::Swap(other);
+  }
+
+  void SetFilter(std::unique_ptr<MessageFilter> filter) {
+    ConfigureProxyIfNecessary();
+    endpoint_client()->SetFilter(std::move(filter));
   }
 
   void Bind(PendingRemoteState* remote_state,

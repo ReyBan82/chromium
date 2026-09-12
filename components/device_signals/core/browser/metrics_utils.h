@@ -5,8 +5,9 @@
 #ifndef COMPONENTS_DEVICE_SIGNALS_CORE_BROWSER_METRICS_UTILS_H_
 #define COMPONENTS_DEVICE_SIGNALS_CORE_BROWSER_METRICS_UTILS_H_
 
+#include <optional>
+
 #include "base/time/time.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace device_signals {
 
@@ -26,11 +27,28 @@ enum class SignalsParsingError {
   kMaxValue = kMissingRequiredProperty
 };
 
+// Set of possible errors encountered when collecting certificates.
+// Do not reorder the values. Also change
+// DeviceSignalsCertificateCollectionError in enums.xml if adding new values
+// here.
+// LINT.IfChange(CertificateCollectionError)
+enum class CertificateCollectionError {
+  kPrivateKeyAcquisitionFailed = 0,
+  kSerializationFailed = 1,
+  kSigningFailed = 2,
+  kNoSupportedAlgorithm = 3,
+  kMaxValue = kNoSupportedAlgorithm
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/enterprise/enums.xml:DeviceSignalsCertificateCollectionError)
+
 // Records that `permission` was the outcome of a permission check.
 void LogUserPermissionChecked(UserPermission permission);
 
 // Records that a request to collect `signal_name` was received.
 void LogSignalCollectionRequested(SignalName signal_name);
+
+// Records that a request to collect `number_of_signals` was received.
+void LogSignalsCountRequested(size_t number_of_signals);
 
 // Records that a request to collect the parameterized signal named
 // `signal_name` was received with `number_of_items` parameters.
@@ -54,12 +72,22 @@ void LogSignalCollectionFailed(SignalName signal_name,
 void LogSignalCollectionSucceeded(
     SignalName signal_name,
     base::TimeTicks start_time,
-    absl::optional<size_t> signal_collection_size,
-    absl::optional<size_t> signal_request_size = absl::nullopt);
+    std::optional<size_t> signal_collection_size,
+    std::optional<size_t> signal_request_size = std::nullopt);
 
 // Records that an error occurred when trying to parse signals from the
 // CrowdStrike data.zta file.
 void LogCrowdStrikeParsingError(SignalsParsingError error);
+
+// Records a failure encountered while collecting certificates.
+void LogCertificateCollectionError(CertificateCollectionError error);
+
+// Records that the system signals service was disconnected with a given number
+// of `pending_requests`.
+void LogSystemSignalCollectionDisconnect(size_t pending_requests);
+
+// Records that the system signals service is running in another process.
+void LogSystemSignalCollectionMissingPendingCallback();
 
 }  // namespace device_signals
 

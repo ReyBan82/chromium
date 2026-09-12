@@ -6,7 +6,7 @@
 
 #include <utility>
 
-#include "base/lazy_instance.h"
+#include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "net/socket/ssl_client_socket.h"
 #include "net/socket/tcp_client_socket.h"
@@ -27,20 +27,23 @@ class DefaultClientSocketFactory : public ClientSocketFactory {
 
   std::unique_ptr<DatagramClientSocket> CreateDatagramClientSocket(
       DatagramSocket::BindType bind_type,
+      handles::NetworkHandle target_network,
       NetLog* net_log,
       const NetLogSource& source) override {
-    return std::make_unique<UDPClientSocket>(bind_type, net_log, source);
+    return std::make_unique<UDPClientSocket>(bind_type, net_log, source,
+                                             target_network);
   }
 
   std::unique_ptr<TransportClientSocket> CreateTransportClientSocket(
       const AddressList& addresses,
+      handles::NetworkHandle target_network,
       std::unique_ptr<SocketPerformanceWatcher> socket_performance_watcher,
       NetworkQualityEstimator* network_quality_estimator,
       NetLog* net_log,
       const NetLogSource& source) override {
     return std::make_unique<TCPClientSocket>(
         addresses, std::move(socket_performance_watcher),
-        network_quality_estimator, net_log, source);
+        network_quality_estimator, net_log, source, target_network);
   }
 
   std::unique_ptr<SSLClientSocket> CreateSSLClientSocket(
@@ -53,14 +56,12 @@ class DefaultClientSocketFactory : public ClientSocketFactory {
   }
 };
 
-static base::LazyInstance<DefaultClientSocketFactory>::Leaky
-    g_default_client_socket_factory = LAZY_INSTANCE_INITIALIZER;
-
 }  // namespace
 
 // static
 ClientSocketFactory* ClientSocketFactory::GetDefaultFactory() {
-  return g_default_client_socket_factory.Pointer();
+  static base::NoDestructor<DefaultClientSocketFactory> factory;
+  return factory.get();
 }
 
 }  // namespace net

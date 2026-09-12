@@ -5,6 +5,9 @@
 #ifndef MEDIA_CDM_CLEAR_KEY_CDM_COMMON_H_
 #define MEDIA_CDM_CLEAR_KEY_CDM_COMMON_H_
 
+#include <array>
+#include <cstdint>
+
 #include "build/build_config.h"
 #include "media/cdm/cdm_type.h"
 #include "media/media_buildflags.h"
@@ -13,6 +16,19 @@ namespace media {
 
 // Clear Key key system defined in the EME spec.
 inline constexpr char kClearKeyKeySystem[] = "org.w3.clearkey";
+
+// This is used by UMA. Do not change it!
+inline constexpr char kClearKeyKeySystemNameForUMA[] = "ClearKey";
+
+// UUID from http://dashif.org/identifiers/content_protection/. UUIDs are used
+// in Android for creating MediaDRM objects that support the DRM scheme required
+// by content.
+#if BUILDFLAG(IS_ANDROID)
+inline constexpr auto kClearKeyUuid = std::to_array<uint8_t>({
+    0xE2, 0x71, 0x9D, 0x58, 0xA9, 0x85, 0xB3, 0xC9,  //
+    0x78, 0x1A, 0xB0, 0X30, 0xAF, 0x78, 0xD3, 0x0E   //
+});
+#endif
 
 // External Clear Key key system ("org.chromium.externalclearkey" and variants)
 // only for testing.
@@ -25,12 +41,14 @@ inline constexpr char kExternalClearKeyKeySystem[] =
 // - media/test/data/eme_player_js/player_utils.js
 // - CreateCdmInstance() in clear_key_cdm.cc
 
+#if BUILDFLAG(IS_WIN)
 // MediaFoundation Clear Key key system only for testing.
 inline constexpr char kMediaFoundationClearKeyKeySystem[] =
     "org.chromium.externalclearkey.mediafoundation";
 
 inline constexpr wchar_t kMediaFoundationClearKeyKeySystemWideString[] =
     L"org.chromium.externalclearkey.mediafoundation";
+#endif  // BUILDFLAG(IS_WIN)
 
 // A sub key system that is invalid for testing purpose.
 inline constexpr char kExternalClearKeyInvalidKeySystem[] =

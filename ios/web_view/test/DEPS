@@ -1,5 +1,7 @@
 include_rules = [
+  # keep-sorted start
   "+base",
+  "+components/autofill/ios/form_util",
   "+components/url_formatter",
   "+components/variations",
   "+ios/testing",
@@ -8,4 +10,5 @@ include_rules = [
   "+mojo/core/embedder",
   "+net",
   "+ui/base",
+  # keep-sorted end
 ]

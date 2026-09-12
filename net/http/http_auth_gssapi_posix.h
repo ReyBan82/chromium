@@ -6,11 +6,11 @@
 #define NET_HTTP_HTTP_AUTH_GSSAPI_POSIX_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/native_library.h"
-#include "base/strings/string_piece_forward.h"
 #include "base/values.h"
 #include "build/build_config.h"
 #include "net/base/completion_once_callback.h"
@@ -178,7 +178,7 @@ class NET_EXPORT_PRIVATE GSSAPISharedLibrary : public GSSAPILibrary {
   //   2. The library must export the functions we need.
   base::NativeLibrary LoadSharedLibrary(const NetLogWithSource& net_log);
   bool BindMethods(base::NativeLibrary lib,
-                   base::StringPiece library_name,
+                   std::string_view library_name,
                    const NetLogWithSource& net_log);
 
   bool initialized_ = false;
@@ -256,7 +256,7 @@ class NET_EXPORT_PRIVATE HttpAuthGSSAPI : public HttpAuthMechanism {
 
 // Diagnostics
 
-// GetGssStatusCodeValue constructs a base::Value::Dict containing a status code
+// GetGssStatusCodeValue constructs a base::DictValue containing a status code
 // and a message.
 //
 //     {
@@ -274,16 +274,16 @@ class NET_EXPORT_PRIVATE HttpAuthGSSAPI : public HttpAuthMechanism {
 // identified to look up messages if |status_code_type| is |GSS_C_MECH_CODE|.
 // Since no mechanism OIDs are passed in, mechanism specific status codes will
 // likely not have messages.
-NET_EXPORT_PRIVATE base::Value::Dict GetGssStatusCodeValue(
+NET_EXPORT_PRIVATE base::DictValue GetGssStatusCodeValue(
     GSSAPILibrary* gssapi_lib,
     OM_uint32 status,
     OM_uint32 status_code_type);
 
-// Given major and minor GSSAPI status codes, returns a base::Value::Dict
+// Given major and minor GSSAPI status codes, returns a base::DictValue
 // encapsulating the codes as well as their meanings as expanded via
 // gss_display_status().
 //
-// The base::Value has the following structure:
+// The base::DictValue has the following structure:
 //   {
 //     "function": <name of GSSAPI function that returned the error>
 //     "major_status": {
@@ -304,22 +304,21 @@ NET_EXPORT_PRIVATE base::Value::Dict GetGssStatusCodeValue(
 // returned value will be missing the "message" fields. The same is true if the
 // message lookup failed for some reason, or if the lookups succeeded but
 // yielded an empty message.
-NET_EXPORT_PRIVATE base::Value::Dict GetGssStatusValue(
-    GSSAPILibrary* gssapi_lib,
-    base::StringPiece method,
-    OM_uint32 major_status,
-    OM_uint32 minor_status);
+NET_EXPORT_PRIVATE base::DictValue GetGssStatusValue(GSSAPILibrary* gssapi_lib,
+                                                     std::string_view method,
+                                                     OM_uint32 major_status,
+                                                     OM_uint32 minor_status);
 
-// OidToValue returns a base::Value::Dict representing an OID. The structure of
+// OidToValue returns a base::DictValue representing an OID. The structure of
 // the value is:
 //   {
 //     "oid":    <symbolic name of OID if it is known>
 //     "length": <length in bytes of serialized OID>,
 //     "bytes":  <hexdump of up to 1024 bytes of serialized OID>
 //   }
-NET_EXPORT_PRIVATE base::Value::Dict OidToValue(const gss_OID oid);
+NET_EXPORT_PRIVATE base::DictValue OidToValue(const gss_OID oid);
 
-// GetDisplayNameValue returns a base::Value::Dict representing a gss_name_t. It
+// GetDisplayNameValue returns a base::DictValue representing a gss_name_t. It
 // invokes |gss_display_name()| via |gssapi_lib| to determine the display name
 // associated with |gss_name|.
 //
@@ -337,12 +336,12 @@ NET_EXPORT_PRIVATE base::Value::Dict OidToValue(const gss_OID oid);
 //
 // Note that |gss_name_t| is platform dependent. If |gss_display_name| fails,
 // there's no good value to display in its stead.
-NET_EXPORT_PRIVATE base::Value::Dict GetDisplayNameValue(
+NET_EXPORT_PRIVATE base::DictValue GetDisplayNameValue(
     GSSAPILibrary* gssapi_lib,
     const gss_name_t gss_name);
 
-// GetContextStateAsValue returns a base::Value that describes the state of a
-// GSSAPI context. The structure of the value is:
+// GetContextStateAsValue returns a base::DictValue that describes the state
+// of a GSSAPI context. The structure of the value is:
 //
 //   {
 //     "source": {
@@ -364,7 +363,7 @@ NET_EXPORT_PRIVATE base::Value::Dict GetDisplayNameValue(
 //   {
 //     "error": <error. See GetGssStatusValue() for structure.>
 //   }
-NET_EXPORT_PRIVATE base::Value GetContextStateAsValue(
+NET_EXPORT_PRIVATE base::DictValue GetContextStateAsValue(
     GSSAPILibrary* gssapi_lib,
     const gss_ctx_id_t context_handle);
 }  // namespace net

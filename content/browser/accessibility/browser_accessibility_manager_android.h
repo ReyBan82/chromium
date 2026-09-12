@@ -5,22 +5,22 @@
 #ifndef CONTENT_BROWSER_ACCESSIBILITY_BROWSER_ACCESSIBILITY_MANAGER_ANDROID_H_
 #define CONTENT_BROWSER_ACCESSIBILITY_BROWSER_ACCESSIBILITY_MANAGER_ANDROID_H_
 
-#include <unordered_set>
+#include <optional>
 #include <utility>
 
-#include "content/browser/accessibility/browser_accessibility_manager.h"
+#include "base/memory/raw_ptr.h"
 #include "content/common/content_export.h"
-#include "third_party/blink/public/mojom/render_accessibility.mojom-forward.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+#include "ui/accessibility/platform/browser_accessibility_manager.h"
 
 namespace ui {
 
 class MotionEventAndroid;
+class AXPlatformTreeManagerDelegate;
 
 }  // namespace ui
 
 namespace content {
-
-class WebAXPlatformTreeManagerDelegate;
 
 // A Java counterpart will be generated for this enum.
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.content.browser.accessibility
@@ -33,23 +33,55 @@ enum AndroidMovementGranularity {
   ANDROID_ACCESSIBILITY_NODE_INFO_MOVEMENT_GRANULARITY_LINE = 4
 };
 
+// From androidx.core.view.accessibility.AccessibilityNodeInfoCompat
+enum class ExtendedSelectionOffsetType {
+  OFFSET_TYPE_TEXT = 0,
+  OFFSET_TYPE_CHILD = 1,
+};
+
 // From android.view.accessibility.AccessibilityEvent in Java:
 enum {
+  ANDROID_ACCESSIBILITY_EVENT_CONTENT_CHANGE_TYPE_UNDEFINED = 0,
+  ANDROID_ACCESSIBILITY_EVENT_CONTENT_CHANGE_TYPE_TEXT = 2,
+  ANDROID_ACCESSIBILITY_EVENT_CONTENT_CHANGE_TYPE_PANE_TITLE = 8,
   ANDROID_ACCESSIBILITY_EVENT_TEXT_CHANGED = 16,
+  ANDROID_ACCESSIBILITY_EVENT_CONTENT_CHANGE_TYPE_STATE_DESCRIPTION = 64,
+  ANDROID_ACCESSIBILITY_EVENT_CONTENT_CHANGE_TYPE_CONTENT_INVALID = 1024,
   ANDROID_ACCESSIBILITY_EVENT_TEXT_SELECTION_CHANGED = 8192,
+  ANDROID_ACCESSIBILITY_EVENT_CONTENT_CHANGE_TYPE_EXPANDED = 16384,
   ANDROID_ACCESSIBILITY_EVENT_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY = 131072
+};
+
+// From android.view.accessibility.AccessibilityEvent in Java:
+enum {
+  ANDROID_ACCESSIBILITY_EVENT_TEXT_CHANGE_TYPE_UNDEFINED = 0,
+  ANDROID_ACCESSIBILITY_EVENT_TEXT_CHANGE_TYPE_IN_COMPOSITION = 1,
+  ANDROID_ACCESSIBILITY_EVENT_TEXT_CHANGE_TYPE_COMMITTED_BY_IME = 2,
+  ANDROID_ACCESSIBILITY_EVENT_TEXT_CHANGE_TYPE_CONVERSION_SUGGESTION_SELECTED_BY_IME =
+      4,
 };
 
 class BrowserAccessibilityAndroid;
 class WebContentsAccessibilityAndroid;
 
 class CONTENT_EXPORT BrowserAccessibilityManagerAndroid
-    : public BrowserAccessibilityManager {
+    : public ui::BrowserAccessibilityManager {
  public:
+  // Creates the platform-specific BrowserAccessibilityManager.
+  static BrowserAccessibilityManager* Create(
+      const ui::AXTreeUpdate& initial_tree,
+      ui::AXNodeIdDelegate& node_id_delegate,
+      ui::AXPlatformTreeManagerDelegate* delegate);
+
+  static BrowserAccessibilityManager* Create(
+      ui::AXNodeIdDelegate& node_id_delegate,
+      ui::AXPlatformTreeManagerDelegate* delegate);
+
   BrowserAccessibilityManagerAndroid(
       const ui::AXTreeUpdate& initial_tree,
       base::WeakPtr<WebContentsAccessibilityAndroid> web_contents_accessibility,
-      WebAXPlatformTreeManagerDelegate* delegate);
+      ui::AXNodeIdDelegate& node_id_delegate,
+      ui::AXPlatformTreeManagerDelegate* delegate);
 
   BrowserAccessibilityManagerAndroid(
       const BrowserAccessibilityManagerAndroid&) = delete;
@@ -64,27 +96,18 @@ class CONTENT_EXPORT BrowserAccessibilityManagerAndroid
     allow_image_descriptions_for_testing_ = is_allowed;
   }
 
-  // By default, the tree is pruned for a better screen reading experience,
-  // including:
-  //   * If the node has only static text children
-  //   * If the node is focusable and has no focusable children
-  //   * If the node is a heading
-  // This can be turned off to generate a tree that more accurately reflects
-  // the DOM and includes style changes within these nodes.
-  void set_prune_tree_for_screen_reader(bool prune) {
-    prune_tree_for_screen_reader_ = prune;
+  const absl::flat_hash_set<int32_t>& nodes_already_cleared_for_test() const {
+    return nodes_already_cleared_;
   }
-  bool prune_tree_for_screen_reader() { return prune_tree_for_screen_reader_; }
 
   void set_web_contents_accessibility(
       base::WeakPtr<WebContentsAccessibilityAndroid> wcax) {
     web_contents_accessibility_ = std::move(wcax);
   }
+  void ResetWebContentsAccessibility();
 
   // State properties defined from Java-side code.
   bool ShouldAllowImageDescriptions();
-  bool ShouldRespectDisplayedPasswordText();
-  bool ShouldExposePasswordText();
 
   // Consume hover event if necessary, and return true if it did.
   bool OnHoverEvent(const ui::MotionEventAndroid& event);
@@ -93,25 +116,34 @@ class CONTENT_EXPORT BrowserAccessibilityManagerAndroid
   void FireFocusEvent(ui::AXNode* node) override;
 
   // BrowserAccessibilityManager overrides.
-  BrowserAccessibility* GetFocus() const override;
+  ui::BrowserAccessibility* GetFocus() const override;
+  ui::BrowserAccessibility* GetAccessibilityFocus() const override;
   void SendLocationChangeEvents(
-      const std::vector<blink::mojom::LocationChangesPtr>& changes) override;
+      const std::vector<ui::AXLocationChange>& changes) override;
   ui::AXNode* RetargetForEvents(ui::AXNode* node,
                                 RetargetEventType type) const override;
-  void FireBlinkEvent(ax::mojom::Event event_type,
-                      BrowserAccessibility* node,
-                      int action_request_id) override;
+  void FireSourceEvent(ax::mojom::Event event_type,
+                       ui::BrowserAccessibility* node,
+                       int action_request_id) override;
   void FireGeneratedEvent(ui::AXEventGenerator::Event event_type,
                           const ui::AXNode* node) override;
 
-  void FireLocationChanged(BrowserAccessibility* node);
+  void FireAriaNotificationEvent(
+      ui::BrowserAccessibility* node,
+      const std::string& announcement,
+      ax::mojom::AriaNotificationPriority priority_property,
+      ax::mojom::AriaNotificationInterrupt interrupt_property,
+      const std::string& type) override;
+
+  void FireLocationChanged(ui::BrowserAccessibility* node);
 
   // Helper functions to compute the next start and end index when moving
   // forwards or backwards by character, word, or line. This part is
   // unit-tested; the Java interfaces above are just wrappers. Both of these
   // take a single cursor index as input and return the boundaries surrounding
-  // the next word or line. If moving by character, the output start and
-  // end index will be the same.
+  // the next character, word or line.
+  // The function returns false if the cursor cannot be moved further in the
+  // given direction and granularity.
   bool NextAtGranularity(int32_t granularity,
                          int cursor_index,
                          BrowserAccessibilityAndroid* node,
@@ -126,62 +158,87 @@ class CONTENT_EXPORT BrowserAccessibilityManagerAndroid
   // Helper method to clear AccessibilityNodeInfo cache on given node
   void ClearNodeInfoCacheForGivenId(int32_t unique_id);
 
-  // Only set on the root BrowserAccessibilityManager. Keeps track of if
-  // any node uses touch passthrough in any frame - if so, any incoming
-  // touch event needs to be processed for possible forwarding. This is
-  // just an optimization; once touch passthrough is enabled it stays
-  // on for this main frame until the page is reloaded. In the future if
-  // there's a need to optimize for touch passthrough being enabled only
-  // temporarily, this would need to be more sophisticated.
-  void EnableTouchPassthrough() { touch_passthrough_enabled_ = true; }
-  bool touch_passthrough_enabled() const { return touch_passthrough_enabled_; }
-
   std::u16string GenerateAccessibilityNodeInfoString(int32_t unique_id);
+
+  std::optional<std::vector<std::string>> GetMetadataForTree() const;
+
+  struct AndroidPosition {
+    raw_ptr<BrowserAccessibilityAndroid> node = nullptr;
+    int offset = -1;
+    ExtendedSelectionOffsetType offset_type =
+        ExtendedSelectionOffsetType::OFFSET_TYPE_TEXT;
+  };
+
+  struct SelectionRange {
+    AndroidPosition anchor;
+    AndroidPosition focus;
+  };
+
+  // Returns the selection fitted to Android accessibility tree and Selection
+  // API restrictions. If the output has value, all fields of the
+  // `SelectionRange` are populated.
+  std::optional<SelectionRange> GetSelectionRange() const;
+
+  // Creates an AXPosition for the given `node`, `offset`, and `offset_type`
+  // that are received from Android. Returns Null Position if the offset is not
+  // valid.
+  ui::BrowserAccessibility::AXPosition ConvertAndroidSelectionPositionToChrome(
+      BrowserAccessibilityAndroid* node,
+      int32_t offset,
+      ExtendedSelectionOffsetType offset_type);
+
+ protected:
+  std::unique_ptr<ui::BrowserAccessibility> CreateBrowserAccessibility(
+      ui::AXNode* node) override;
+
+  void OnAccessibilityEventsProcessedForExperiment();
 
  private:
   // AXTreeObserver overrides.
+  void OnAtomicUpdateStarting(
+      ui::AXTree* tree,
+      const absl::flat_hash_set<ui::AXNodeID>& deleting_nodes,
+      const absl::flat_hash_set<ui::AXNodeID>& reparenting_nodes) override;
   void OnAtomicUpdateFinished(
       ui::AXTree* tree,
       bool root_changed,
       const std::vector<ui::AXTreeObserver::Change>& changes) override;
-  void OnNodeWillBeDeleted(ui::AXTree* tree, ui::AXNode* node) override;
-  void OnNodeCreated(ui::AXTree* tree, ui::AXNode* node) override;
-  void OnBoolAttributeChanged(ui::AXTree* tree,
-                              ui::AXNode* node,
-                              ax::mojom::BoolAttribute attr,
-                              bool new_value) override;
 
-  WebContentsAccessibilityAndroid* GetWebContentsAXFromRootManager();
+  WebContentsAccessibilityAndroid* GetWebContentsAXFromRootManager() const;
 
   // This gives BrowserAccessibilityManager::Create access to the class
   // constructor.
-  friend class BrowserAccessibilityManager;
+  friend class ui::BrowserAccessibilityManager;
 
   // Handle a hover event from the renderer process.
-  void HandleHoverEvent(BrowserAccessibility* node);
+  void HandleHoverEvent(ui::BrowserAccessibility* node);
+
+  void FireDocumentSelectionChangedEvent(WebContentsAccessibilityAndroid* wcax);
+
+  // Given `node_id`, `offset`, and `affinity` which represent a selection
+  // position in Chrome accessibility tree, creates an appropriate selection
+  // position in Android accessibility tree. This is done by ensuring that the
+  // anchor node exists on Android (if not, moves to the highest leaf node which
+  // is ancestor of the node). Returns empty if conversion is not possible.
+  std::optional<AndroidPosition> ConvertChromeSelectionPositionToAndroid(
+      ui::AXNodeID node_id,
+      int offset,
+      ax::mojom::TextAffinity affinity,
+      bool is_backward) const;
 
   // A weak reference to WebContentsAccessibility for reaching Java layer.
   // Only the root manager has the reference. Should be accessed through
   // |GetWebContentsAXFromRootManager| rather than directly.
   base::WeakPtr<WebContentsAccessibilityAndroid> web_contents_accessibility_;
 
-  // See docs for set_prune_tree_for_screen_reader, above.
-  bool prune_tree_for_screen_reader_;
-
   // True if this instance should force enable the image descriptions feature
   // for testing. This allows us to mock generated image descriptions and test
   // tree dumps for nodes without creating web_contents_accessibility_android.
   bool allow_image_descriptions_for_testing_ = false;
 
-  // Only set on the root BrowserAccessibilityManager. Keeps track of if
-  // any node uses touch passthrough in any frame. See comment next to
-  // any_node_uses_touch_passthrough(), above, for details.
-  bool touch_passthrough_enabled_ = false;
-
-  // An unordered_set of |unique_id| values for nodes cleared from the cache
+  // A set of |unique_id| values for nodes cleared from the cache
   // with each atomic update to prevent superfluous cache clear calls.
-  std::unordered_set<int32_t> nodes_already_cleared_ =
-      std::unordered_set<int32_t>();
+  absl::flat_hash_set<int32_t> nodes_already_cleared_;
 };
 
 }  // namespace content

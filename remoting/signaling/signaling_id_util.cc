@@ -8,12 +8,12 @@
 
 #include "base/logging.h"
 #include "base/strings/string_util.h"
+#include "base/uuid.h"
 
 namespace remoting {
 
 namespace {
 
-constexpr char kFtlResourcePrefix[] = "chromoting_ftl_";
 constexpr char kGmailDomain[] = "gmail.com";
 constexpr char kGooglemailDomain[] = "googlemail.com";
 
@@ -23,7 +23,7 @@ std::string NormalizeSignalingId(const std::string& id) {
   std::string email;
   std::string resource;
   if (SplitSignalingIdResource(id, &email, &resource)) {
-    std::string normalized_email = resource.find(kFtlResourcePrefix) == 0
+    std::string normalized_email = resource.starts_with(kFtlResourcePrefix)
                                        ? GetCanonicalEmail(email)
                                        : base::ToLowerASCII(email);
     return normalized_email + "/" + resource;
@@ -54,7 +54,7 @@ std::string GetCanonicalEmail(const std::string& email) {
   return canonical_email;
 }
 
-bool SplitSignalingIdResource(const std::string& full_id,
+bool SplitSignalingIdResource(std::string_view full_id,
                               std::string* email,
                               std::string* resource) {
   size_t slash_index = full_id.find('/');
@@ -73,6 +73,27 @@ bool SplitSignalingIdResource(const std::string& full_id,
   }
   if (resource) {
     *resource = full_id.substr(slash_index + 1);
+  }
+  return true;
+}
+
+bool IsValidFtlSignalingId(const std::string& signaling_id) {
+  std::string email;
+  std::string resource;
+  if (!SplitSignalingIdResource(signaling_id, &email, &resource)) {
+    LOG(ERROR) << "Failed to split signaling id: " << signaling_id;
+    return false;
+  }
+  if (!resource.starts_with(kFtlResourcePrefix)) {
+    LOG(ERROR) << "Signaling id resource does not start with a valid prefix: "
+               << resource;
+    return false;
+  }
+  std::string registration_id = resource.substr(kFtlResourcePrefix.length());
+  if (!base::Uuid::ParseLowercase(registration_id).is_valid()) {
+    LOG(ERROR) << "Signaling id contains an invalid registration id: "
+               << registration_id;
+    return false;
   }
   return true;
 }

@@ -32,6 +32,13 @@ namespace history {
 class KeywordSearchTermVisitEnumerator;
 struct KeywordSearchTermRow;
 
+struct URLCountAndLastVisitRow {
+  bool operator==(const URLCountAndLastVisitRow&) const = default;
+
+  int count = 0;
+  base::Time last_visit_time;
+};
+
 class VisitDatabase;  // For friend statement.
 
 // Encapsulates an SQL database that holds URL info.  This is a subset of the
@@ -100,6 +107,10 @@ class URLDatabase {
   // The caller than adds the URLs it wants to preserve to the temporary table,
   // and then deletes everything else by calling CommitTemporaryURLTable().
   // Returns true on success.
+  //
+  // WARNING: if the temporary table already exists, it is dropped and a new
+  // one created. This is done as the temporary table is only intended to
+  // exist for a short amount of time before it's renamed.
   bool CreateTemporaryURLTable();
 
   // Adds a row to the temporary URL table. This must be called between
@@ -186,6 +197,12 @@ class URLDatabase {
 
   // History search ------------------------------------------------------------
 
+  // Returns the number of URLs and the latest visit time for URLs whose URL
+  // begins with `prefix`. Fills `row` with the data and returns true on
+  // success, or false if `prefix` is empty or the query fails.
+  bool GetURLCountAndLastVisitForPrefix(const std::string& prefix,
+                                        URLCountAndLastVisitRow* row);
+
   // Performs a brute force search over the database to find any URLs or titles
   // which match the `query` string, using the default text matching algorithm.
   // Returns any matches.
@@ -203,6 +220,13 @@ class URLDatabase {
   bool SetKeywordSearchTermsForURL(URLID url_id,
                                    KeywordID keyword_id,
                                    const std::u16string& term);
+
+  // Retrieves aggregate values for a subset of fields across all URLs
+  // associated with the given `term`.
+  // Fills `url_info` with the relevant aggregate URL data.
+  // Returns true on success.
+  bool GetAggregateURLDataForKeywordSearchTerm(const std::u16string& term,
+                                               URLRow* url_info);
 
   // Looks up a keyword search term given a url id. Returns all the search terms
   // in `rows`. Returns true on success.
@@ -266,7 +290,8 @@ class URLDatabase {
   //
   // is_temporary is false when generating the "regular" URLs table. The expirer
   // sets this to true to generate the temporary table, which will have a
-  // different name but the same schema.
+  // different name but the same schema. See comment in
+  // CreateTemporaryURLTable() for details on temporary creation.
   bool CreateURLTable(bool is_temporary);
 
   // Creates the index over URLs so we can quickly look up based on URL.
@@ -297,8 +322,9 @@ class URLDatabase {
   bool URLTableContainsAutoincrement();
 
   // Convenience to fill a URLRow. Must be in sync with the fields in
-  // kHistoryURLRowFields.
-  static void FillURLRow(sql::Statement& s, URLRow* i);
+  // kHistoryURLRowFields. Returns true if the data was valid and |*i| was
+  // actually populated.
+  [[nodiscard]] static bool FillURLRow(sql::Statement& s, URLRow* i);
 
   // Returns the database for the functions in this interface. The descendant of
   // this class implements these functions to return its objects.

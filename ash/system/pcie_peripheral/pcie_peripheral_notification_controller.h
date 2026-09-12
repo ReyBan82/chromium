@@ -6,6 +6,7 @@
 #define ASH_SYSTEM_PCIE_PERIPHERAL_PCIE_PERIPHERAL_NOTIFICATION_CONTROLLER_H_
 
 #include "ash/ash_export.h"
+#include "base/memory/raw_ptr.h"
 #include "chromeos/ash/components/peripheral_notification/peripheral_notification_manager.h"
 
 class PrefRegistrySimple;
@@ -43,7 +44,6 @@ class ASH_EXPORT PciePeripheralNotificationController
   void OnLimitedPerformancePeripheralReceived() override;
   void OnGuestModeNotificationReceived(bool is_thunderbolt_only) override;
   void OnPeripheralBlockedReceived() override;
-  void OnBillboardDeviceConnected() override;
 
   // Call to show a notification to indicate that the recently plugged in
   // Thunderbolt/USB4 peripheral performance is limited.
@@ -57,22 +57,19 @@ class ASH_EXPORT PciePeripheralNotificationController
   // Thunderbolt/USB4 peripheral is not allowed due to security reasons.
   void NotifyPeripheralBlockedNotification();
 
-  // Call to show a notification that a billboard device that was connected
-  // is not supported by the board.
-  void NotifyBillboardDevice();
-
   // Stubs from usb peripheral notification controller
   void OnInvalidDpCableWarning() override {}
   void OnInvalidUSB4ValidTBTCableWarning() override {}
   void OnInvalidUSB4CableWarning() override {}
   void OnInvalidTBTCableWarning() override {}
   void OnSpeedLimitingCableWarning() override {}
+  void OnUsbDeviceOrEndpointLimit() override {}
 
  private:
   friend class PciePeripheralNotificationControllerTest;
 
   // MessageCenter for adding notifications.
-  message_center::MessageCenter* const message_center_;
+  const raw_ptr<message_center::MessageCenter> message_center_;
 };
 
 }  // namespace ash

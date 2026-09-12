@@ -29,10 +29,12 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEB_AUDIO_DEVICE_H_
 #define THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEB_AUDIO_DEVICE_H_
 
+#include <utility>
+
+#include "base/functional/callback.h"
 #include "media/base/output_device_info.h"
 #include "third_party/blink/public/platform/web_audio_sink_descriptor.h"
 #include "third_party/blink/public/platform/web_common.h"
-#include "third_party/blink/public/platform/web_vector.h"
 
 namespace blink {
 
@@ -60,11 +62,27 @@ class WebAudioDevice {
   virtual int MaxChannelCount() = 0;
 
   // Sets the detect silence flag for |RendererWebAudioDeviceImpl|.
-  virtual void SetDetectSilence(bool detect_silence) {}
+  virtual void SetDetectSilence(bool detect_silence) = 0;
 
-  // Creates a new sink and return its device status. If the status is OK,
-  // replace the existing sink with the new one.
-  virtual media::OutputDeviceStatus CreateSinkAndGetDeviceStatus() = 0;
+  // Creates a new sink if one hasn't been created yet, and returns the sink
+  // status.
+  // TODO(crbug.com/41475094): Deprecate and remove this synchronous method once
+  // callers and embedders migrate to InitializeAsync().
+  virtual media::OutputDeviceStatus MaybeCreateSinkAndGetStatus() = 0;
+
+  // Asynchronously initializes the audio device and queries hardware
+  // parameters. The callback is guaranteed to be executed on the calling
+  // sequence / TaskRunner.
+  //
+  // Note: The default fallback implementation executes |callback|
+  // SYNCHRONOUSLY before InitializeAsync() returns. Callers must not assume
+  // stack unwinding or rely on asynchronous execution when managing locks and
+  // object lifetimes.
+  virtual void InitializeAsync(
+      base::OnceCallback<void(media::OutputDeviceStatus)> callback) {
+    CHECK(callback);
+    std::move(callback).Run(MaybeCreateSinkAndGetStatus());
+  }
 };
 
 }  // namespace blink

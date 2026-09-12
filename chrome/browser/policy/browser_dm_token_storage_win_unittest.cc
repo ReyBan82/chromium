@@ -7,8 +7,10 @@
 #include <tuple>
 
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/test/test_reg_util_win.h"
 #include "base/win/registry.h"
+#include "base/win/win_util.h"
 #include "chrome/installer/util/install_util.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -30,8 +32,8 @@ constexpr char kDMToken2[] = "fake-dm-token-2";
 
 class BrowserDMTokenStorageWinTest : public testing::Test {
  protected:
-  BrowserDMTokenStorageWinTest() {}
-  ~BrowserDMTokenStorageWinTest() override {}
+  BrowserDMTokenStorageWinTest() = default;
+  ~BrowserDMTokenStorageWinTest() override = default;
 
   void SetUp() override {
     ASSERT_NO_FATAL_FAILURE(
@@ -84,6 +86,10 @@ class BrowserDMTokenStorageWinTest : public testing::Test {
 
   content::BrowserTaskEnvironment task_environment_;
   registry_util::RegistryOverrideManager registry_override_manager_;
+  base::win::ScopedDomainStateForTesting scoped_domain_{false};
+  base::win::ScopedDeviceRegisteredWithManagementForTesting scoped_management_{
+      false};
+  base::win::ScopedAzureADJoinStateForTesting scoped_azure_ad_{std::nullopt};
 };
 
 TEST_F(BrowserDMTokenStorageWinTest, InitClientId) {
@@ -126,6 +132,35 @@ TEST_F(BrowserDMTokenStorageWinTest, InitDMTokenFromBrowserLocation) {
   ASSERT_TRUE(SetDMToken(kDMToken2, InstallUtil::BrowserLocation(true)));
   BrowserDMTokenStorageWin storage;
   EXPECT_EQ(std::string(kDMToken2), storage.InitDMToken());
+}
+
+TEST_F(BrowserDMTokenStorageWinTest, CollectMetricsNotManaged) {
+  ASSERT_TRUE(SetMachineGuid(kClientId1));
+  base::HistogramTester histogram_tester;
+  BrowserDMTokenStorageWin storage;
+  storage.OnTokenInitialized();
+
+  histogram_tester.ExpectBucketCount(
+      "EnterpriseCheck.IsManagedOrEnterpriseDeviceAndCBCM",
+      DeviceManagementAndCBCMState::kNeither, 1);
+  histogram_tester.ExpectBucketCount(
+      "EnterpriseCheck.IsManagedOrEnterpriseDeviceAndCBCM2",
+      DeviceManagementAndCBCMState::kNeither, 1);
+}
+
+TEST_F(BrowserDMTokenStorageWinTest, CollectMetricsCBCMOnly) {
+  ASSERT_TRUE(SetMachineGuid(kClientId1));
+  ASSERT_TRUE(SetDMToken(kDMToken1, InstallUtil::BrowserLocation(false)));
+  base::HistogramTester histogram_tester;
+  BrowserDMTokenStorageWin storage;
+  storage.OnTokenInitialized();
+
+  histogram_tester.ExpectBucketCount(
+      "EnterpriseCheck.IsManagedOrEnterpriseDeviceAndCBCM",
+      DeviceManagementAndCBCMState::kCBCMOnly, 1);
+  histogram_tester.ExpectBucketCount(
+      "EnterpriseCheck.IsManagedOrEnterpriseDeviceAndCBCM2",
+      DeviceManagementAndCBCMState::kCBCMOnly, 1);
 }
 
 }  // namespace policy

@@ -4,25 +4,26 @@
 
 package org.chromium.chrome.browser.app.tab_activity_glue;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.compositor.CompositorViewHolder;
 import org.chromium.chrome.browser.tab.TabDelegateFactory;
-import org.chromium.chrome.browser.tabmodel.TabModelSelector;
-import org.chromium.components.embedder_support.util.UrlUtilities;
 import org.chromium.ui.base.WindowAndroid;
-import org.chromium.url.GURL;
 
 /** Constructs delegates needed for reparenting tabs. */
+@NullMarked
 public class ReparentingDelegateFactory {
     /**
      * @return Creates an implementation of {@link ReparentingTask.Delegate} that supplies
-     *         dependencies for {@link ReparentingTask} to reparent a Tab.
+     *     dependencies for {@link ReparentingTask} to reparent a Tab.
      */
     public static ReparentingTask.Delegate createReparentingTaskDelegate(
-            final CompositorViewHolder compositorViewHolder, final WindowAndroid windowAndroid,
-            TabDelegateFactory tabDelegateFactory) {
+            final @Nullable CompositorViewHolder compositorViewHolder,
+            final WindowAndroid windowAndroid,
+            @Nullable TabDelegateFactory tabDelegateFactory) {
         return new ReparentingTask.Delegate() {
             @Override
-            public CompositorViewHolder getCompositorViewHolder() {
+            public @Nullable CompositorViewHolder getCompositorViewHolder() {
                 return compositorViewHolder;
             }
 
@@ -32,27 +33,8 @@ public class ReparentingDelegateFactory {
             }
 
             @Override
-            public TabDelegateFactory getTabDelegateFactory() {
+            public @Nullable TabDelegateFactory getTabDelegateFactory() {
                 return tabDelegateFactory;
-            }
-        };
-    }
-
-    /**
-     * @return Creates an implementation of {@link TabReparentingController.Delegate} that
-     *         supplies dependencies to {@link TabReparentingController}.
-     */
-    public static TabReparentingController.Delegate createReparentingControllerDelegate(
-            final TabModelSelector tabModelSelector) {
-        return new TabReparentingController.Delegate() {
-            @Override
-            public TabModelSelector getTabModelSelector() {
-                return tabModelSelector;
-            }
-
-            @Override
-            public boolean isNTPUrl(GURL url) {
-                return UrlUtilities.isNTPUrl(url);
             }
         };
     }

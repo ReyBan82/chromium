@@ -31,11 +31,11 @@ class ModelValidatorKeyedServiceFactory : public ProfileKeyedServiceFactory {
   ~ModelValidatorKeyedServiceFactory() override;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
   bool ServiceIsCreatedWithBrowserContext() const override;
 };
 
 }  // namespace optimization_guide
 
-#endif  //  CHROME_BROWSER_OPTIMIZATION_GUIDE_MODEL_VALIDATOR_KEYED_SERVICE_FACTORY_H_
+#endif  // CHROME_BROWSER_OPTIMIZATION_GUIDE_MODEL_VALIDATOR_KEYED_SERVICE_FACTORY_H_

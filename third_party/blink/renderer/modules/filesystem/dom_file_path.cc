@@ -30,7 +30,9 @@
 
 #include "third_party/blink/renderer/modules/filesystem/dom_file_path.h"
 
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
@@ -40,28 +42,32 @@ const char DOMFilePath::kSeparator = '/';
 const char DOMFilePath::kRoot[] = "/";
 
 String DOMFilePath::Append(const String& base, const String& components) {
-  return EnsureDirectoryPath(base) + components;
+  return StrCat({EnsureDirectoryPath(base), components});
 }
 
 String DOMFilePath::EnsureDirectoryPath(const String& path) {
-  if (!DOMFilePath::EndsWithSeparator(path))
-    return path + DOMFilePath::kSeparator;
+  if (!DOMFilePath::EndsWithSeparator(path)) {
+    return StrCat(
+        {path, StringView(base::byte_span_from_ref(DOMFilePath::kSeparator))});
+  }
   return path;
 }
 
 String DOMFilePath::GetName(const String& path) {
-  int index = path.ReverseFind(DOMFilePath::kSeparator);
-  if (index != -1)
-    return path.Substring(index + 1);
+  auto index = path.rfind(DOMFilePath::kSeparator);
+  if (index != String::npos) {
+    return path.substr(index + 1);
+  }
   return path;
 }
 
 String DOMFilePath::GetDirectory(const String& path) {
-  int index = path.ReverseFind(DOMFilePath::kSeparator);
+  auto index = path.rfind(DOMFilePath::kSeparator);
   if (!index)
     return DOMFilePath::kRoot;
-  if (index != -1)
-    return path.Substring(0, index);
+  if (index != String::npos) {
+    return path.substr(0, index);
+  }
   return ".";
 }
 
@@ -71,8 +77,9 @@ bool DOMFilePath::IsParentOf(const String& parent, const String& may_be_child) {
   if (parent == DOMFilePath::kRoot && may_be_child != DOMFilePath::kRoot)
     return true;
   if (parent.length() >= may_be_child.length() ||
-      !may_be_child.StartsWithIgnoringCase(parent))
+      !may_be_child.DeprecatedStartsWithIgnoringCase(parent)) {
     return false;
+  }
   if (may_be_child[parent.length()] != DOMFilePath::kSeparator)
     return false;
   return true;
@@ -80,9 +87,9 @@ bool DOMFilePath::IsParentOf(const String& parent, const String& may_be_child) {
 
 String DOMFilePath::RemoveExtraParentReferences(const String& path) {
   DCHECK(DOMFilePath::IsAbsolute(path));
-  Vector<String> components;
-  Vector<String> canonicalized;
-  path.Split(DOMFilePath::kSeparator, components);
+  Vector<StringView> canonicalized;
+  Vector<StringView> components =
+      StringView(path).SplitSkippingEmpty(DOMFilePath::kSeparator);
   for (const auto& component : components) {
     if (component == ".")
       continue;
@@ -100,7 +107,7 @@ String DOMFilePath::RemoveExtraParentReferences(const String& path) {
     result.Append(DOMFilePath::kSeparator);
     result.Append(component);
   }
-  return result.ToString();
+  return result.ReleaseString();
 }
 
 bool DOMFilePath::IsValidPath(const String& path) {
@@ -108,19 +115,21 @@ bool DOMFilePath::IsValidPath(const String& path) {
     return true;
 
   // Embedded NULs are not allowed.
-  if (path.find(static_cast<UChar>(0)) != WTF::kNotFound)
+  if (path.contains('\0')) {
     return false;
+  }
 
   // While not [yet] restricted by the spec, '\\' complicates implementation for
   // Chromium.
-  if (path.find('\\') != WTF::kNotFound)
+  if (path.contains('\\')) {
     return false;
+  }
 
   // This method is only called on fully-evaluated absolute paths. Any sign of
   // ".." or "." is likely an attempt to break out of the sandbox.
-  Vector<String> components;
-  path.Split(DOMFilePath::kSeparator, components);
-  return base::ranges::none_of(components, [](const String& component) {
+  Vector<StringView> components =
+      StringView(path).SplitSkippingEmpty(DOMFilePath::kSeparator);
+  return std::ranges::none_of(components, [](const StringView& component) {
     return component == "." || component == "..";
   });
 }
@@ -129,8 +138,9 @@ bool DOMFilePath::IsValidName(const String& name) {
   if (name.empty())
     return true;
   // '/' is not allowed in name.
-  if (name.Contains('/'))
+  if (name.contains('/')) {
     return false;
+  }
   return IsValidPath(name);
 }
 

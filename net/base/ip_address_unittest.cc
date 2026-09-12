@@ -4,6 +4,9 @@
 
 #include "net/base/ip_address.h"
 
+#include <array>
+#include <optional>
+#include <tuple>
 #include <vector>
 
 #include "base/format_macros.h"
@@ -11,7 +14,6 @@
 #include "base/strings/stringprintf.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using testing::Optional;
 
@@ -36,8 +38,8 @@ TEST(IPAddressBytesTest, ConstructEmpty) {
 }
 
 TEST(IPAddressBytesTest, ConstructIPv4) {
-  uint8_t data[] = {192, 168, 1, 1};
-  IPAddressBytes bytes(data, std::size(data));
+  auto data = std::to_array<uint8_t>({192, 168, 1, 1});
+  IPAddressBytes bytes(data);
   ASSERT_EQ(std::size(data), bytes.size());
   size_t i = 0;
   for (uint8_t byte : bytes)
@@ -46,8 +48,25 @@ TEST(IPAddressBytesTest, ConstructIPv4) {
 }
 
 TEST(IPAddressBytesTest, ConstructIPv6) {
-  uint8_t data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
-  IPAddressBytes bytes(data, std::size(data));
+  auto data = std::to_array<uint8_t>({
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+  });
+  IPAddressBytes bytes(data);
   ASSERT_EQ(std::size(data), bytes.size());
   size_t i = 0;
   for (uint8_t byte : bytes)
@@ -58,8 +77,8 @@ TEST(IPAddressBytesTest, ConstructIPv6) {
 TEST(IPAddressBytesTest, Assign) {
   uint8_t data[] = {192, 168, 1, 1};
   IPAddressBytes copy;
-  copy.Assign(data, std::size(data));
-  EXPECT_EQ(IPAddressBytes(data, std::size(data)), copy);
+  copy.Assign(data);
+  EXPECT_EQ(IPAddressBytes(data), copy);
 }
 
 TEST(IPAddressTest, ConstructIPv4) {
@@ -304,6 +323,79 @@ TEST(IPAddressTest, IsPubliclyRoutableIPv6) {
   }
 }
 
+TEST(IPAddressTest, IsMulticast) {
+  IPAddress ipv4_multicast;
+  ASSERT_TRUE(ipv4_multicast.AssignFromIPLiteral("224.0.0.1"));
+  EXPECT_TRUE(ipv4_multicast.IsMulticast());
+
+  IPAddress ipv4_last_multicast;
+  ASSERT_TRUE(ipv4_last_multicast.AssignFromIPLiteral("239.255.255.255"));
+  EXPECT_TRUE(ipv4_last_multicast.IsMulticast());
+
+  IPAddress ipv4_non_multicast;
+  ASSERT_TRUE(ipv4_non_multicast.AssignFromIPLiteral("223.255.255.255"));
+  EXPECT_FALSE(ipv4_non_multicast.IsMulticast());
+
+  IPAddress ipv4_after_multicast;
+  ASSERT_TRUE(ipv4_after_multicast.AssignFromIPLiteral("240.0.0.0"));
+  EXPECT_FALSE(ipv4_after_multicast.IsMulticast());
+
+  IPAddress ipv6_multicast;
+  ASSERT_TRUE(ipv6_multicast.AssignFromIPLiteral("ff02::1"));
+  EXPECT_TRUE(ipv6_multicast.IsMulticast());
+
+  IPAddress ipv6_non_multicast;
+  ASSERT_TRUE(ipv6_non_multicast.AssignFromIPLiteral("fe80::1"));
+  EXPECT_FALSE(ipv6_non_multicast.IsMulticast());
+
+  IPAddress ipv4_mapped_multicast;
+  ASSERT_TRUE(ipv4_mapped_multicast.AssignFromIPLiteral("::ffff:224.0.0.1"));
+  EXPECT_TRUE(ipv4_mapped_multicast.IsMulticast());
+
+  IPAddress ipv4_mapped_last_multicast;
+  ASSERT_TRUE(
+      ipv4_mapped_last_multicast.AssignFromIPLiteral("::ffff:239.255.255.255"));
+  EXPECT_TRUE(ipv4_mapped_last_multicast.IsMulticast());
+
+  IPAddress ipv4_mapped_non_multicast;
+  ASSERT_TRUE(
+      ipv4_mapped_non_multicast.AssignFromIPLiteral("::ffff:223.255.255.255"));
+  EXPECT_FALSE(ipv4_mapped_non_multicast.IsMulticast());
+
+  IPAddress ipv4_mapped_after_multicast;
+  ASSERT_TRUE(
+      ipv4_mapped_after_multicast.AssignFromIPLiteral("::ffff:240.0.0.0"));
+  EXPECT_FALSE(ipv4_mapped_after_multicast.IsMulticast());
+
+  IPAddress invalid;
+  EXPECT_FALSE(invalid.IsMulticast());
+}
+
+TEST(IPAddressTest, IsLoopback) {
+  IPAddress ipv4_loopback;
+  ASSERT_TRUE(ipv4_loopback.AssignFromIPLiteral("127.0.0.1"));
+  EXPECT_TRUE(ipv4_loopback.IsLoopback());
+
+  IPAddress ipv4_non_loopback;
+  ASSERT_TRUE(ipv4_non_loopback.AssignFromIPLiteral("128.0.0.1"));
+  EXPECT_FALSE(ipv4_non_loopback.IsLoopback());
+
+  IPAddress ipv6_loopback;
+  ASSERT_TRUE(ipv6_loopback.AssignFromIPLiteral("::1"));
+  EXPECT_TRUE(ipv6_loopback.IsLoopback());
+
+  IPAddress ipv6_not_loopback_last_byte;
+  ASSERT_TRUE(ipv6_not_loopback_last_byte.AssignFromIPLiteral("::2"));
+  EXPECT_FALSE(ipv6_not_loopback_last_byte.IsLoopback());
+
+  IPAddress ipv6_not_loopback_prefix;
+  ASSERT_TRUE(ipv6_not_loopback_prefix.AssignFromIPLiteral("1::1"));
+  EXPECT_FALSE(ipv6_not_loopback_prefix.IsLoopback());
+
+  IPAddress invalid;
+  EXPECT_FALSE(invalid.IsLoopback());
+}
+
 TEST(IPAddressTest, IsZero) {
   uint8_t address1[4] = {};
   IPAddress zero_ipv4_address(address1);
@@ -377,21 +469,6 @@ TEST(IPAddressTest, IPAddressToStringWithPort) {
   // IPAddressToStringWithPort() shouldn't crash on invalid addresses.
   uint8_t addr3[2];
   EXPECT_EQ("", IPAddressToStringWithPort(IPAddress(addr3), 8080));
-}
-
-TEST(IPAddressTest, IPAddressToPackedString) {
-  IPAddress ipv4_address;
-  EXPECT_TRUE(ipv4_address.AssignFromIPLiteral("4.31.198.44"));
-  std::string expected_ipv4_address("\x04\x1f\xc6\x2c", 4);
-  EXPECT_EQ(expected_ipv4_address, IPAddressToPackedString(ipv4_address));
-
-  IPAddress ipv6_address;
-  EXPECT_TRUE(ipv6_address.AssignFromIPLiteral("2001:0700:0300:1800::000f"));
-  std::string expected_ipv6_address(
-      "\x20\x01\x07\x00\x03\x00\x18\x00"
-      "\x00\x00\x00\x00\x00\x00\x00\x0f",
-      16);
-  EXPECT_EQ(expected_ipv6_address, IPAddressToPackedString(ipv6_address));
 }
 
 // Test that invalid IP literals fail to parse.
@@ -585,6 +662,56 @@ TEST(IPAddressTest, ParseCIDRBlock_Valid) {
   EXPECT_EQ("0,0,0,0,0,0,0,0,0,0,255,255,192,168,0,1",
             DumpIPAddress(ip_address));
   EXPECT_EQ(112u, prefix_length_in_bits);
+
+  EXPECT_TRUE(
+      ParseCIDRBlock("192.168.0.1/32", &ip_address, &prefix_length_in_bits));
+  EXPECT_EQ("192,168,0,1", DumpIPAddress(ip_address));
+  EXPECT_EQ(32u, prefix_length_in_bits);
+
+  EXPECT_TRUE(ParseCIDRBlock("::1/128", &ip_address, &prefix_length_in_bits));
+  EXPECT_EQ("0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1", DumpIPAddress(ip_address));
+  EXPECT_EQ(128u, prefix_length_in_bits);
+}
+
+// Test parsing invalid CIDR notation literals specific to the URL-Hostname
+// version of this function.
+TEST(IPAddressTest, ParseCIDRBlockNonStandardURLFormat_Invalid) {
+  const char* const bad_literals[] = {"foobar",
+                                      "",
+                                      "192.168.0.1",
+                                      "::1",
+                                      "/",
+                                      "/1",
+                                      "1",
+                                      "192.168.1.1/-1",
+                                      "[192.168.1.1]/16",
+                                      "::1/10"};
+
+  for (auto* bad_literal : bad_literals) {
+    size_t prefix_length_in_bits;
+
+    EXPECT_FALSE(ParseCIDRBlockNonStandardURLFormat(bad_literal,
+                                                    &prefix_length_in_bits));
+  }
+}
+
+// Test parsing a valid CIDR notation literal using the URLHostnameIP version of
+// ParseCIDRBlock.
+TEST(IPAddressTest, ParseCIDRBlockNonStandardURLFormat_Valid) {
+  size_t prefix_length_in_bits;
+
+  auto ip_address = ParseCIDRBlockNonStandardURLFormat("192.168.0.1/11",
+                                                       &prefix_length_in_bits);
+  EXPECT_TRUE(ip_address);
+  EXPECT_EQ("192,168,0,1", DumpIPAddress(*ip_address));
+  EXPECT_EQ(11u, prefix_length_in_bits);
+
+  ip_address = ParseCIDRBlockNonStandardURLFormat("[::ffff:192.168.0.1]/112",
+                                                  &prefix_length_in_bits);
+  EXPECT_TRUE(ip_address);
+  EXPECT_EQ("0,0,0,0,0,0,0,0,0,0,255,255,192,168,0,1",
+            DumpIPAddress(*ip_address));
+  EXPECT_EQ(112u, prefix_length_in_bits);
 }
 
 TEST(IPAddressTest, ParseURLHostnameToAddress_FailParse) {
@@ -596,6 +723,7 @@ TEST(IPAddressTest, ParseURLHostnameToAddress_FailParse) {
   EXPECT_FALSE(ParseURLHostnameToAddress("  192.168.0.1  ", &address));
   EXPECT_FALSE(ParseURLHostnameToAddress("::1", &address));
   EXPECT_FALSE(ParseURLHostnameToAddress("[192.169.0.1]", &address));
+  EXPECT_FALSE(ParseURLHostnameToAddress("[]", &address));
 }
 
 TEST(IPAddressTest, ParseURLHostnameToAddress_IPv4) {
@@ -678,6 +806,32 @@ TEST(IPAddressTest, IsLinkLocal) {
     IPAddress ip_address;
     ASSERT_TRUE(ip_address.AssignFromIPLiteral(literal));
     EXPECT_FALSE(ip_address.IsLinkLocal()) << literal;
+  }
+}
+
+TEST(IPAddressTest, IsUniqueLocalIPv6) {
+  const char* kPositive[] = {
+      "fc00::1",
+      "fc80::1",
+      "fd00::1",
+  };
+
+  for (const char* literal : kPositive) {
+    IPAddress ip_address;
+    ASSERT_TRUE(ip_address.AssignFromIPLiteral(literal));
+    EXPECT_TRUE(ip_address.IsUniqueLocalIPv6()) << literal;
+  }
+
+  const char* kNegative[] = {
+      "fe00::1",
+      "ff00::1",
+      "252.0.0.1",
+  };
+
+  for (const char* literal : kNegative) {
+    IPAddress ip_address;
+    ASSERT_TRUE(ip_address.AssignFromIPLiteral(literal));
+    EXPECT_FALSE(ip_address.IsUniqueLocalIPv6()) << literal;
   }
 }
 
@@ -851,6 +1005,100 @@ TEST(IPAddressTest, FromGarbageValue) {
 TEST(IPAddressTest, FromInvalidValue) {
   base::Value value("1.2.3.4.5");
   EXPECT_FALSE(IPAddress::FromValue(value).has_value());
+}
+
+TEST(IPAddressTest, IPv4Mask) {
+  IPAddress mask;
+  EXPECT_FALSE(
+      IPAddress::CreateIPv4Mask(&mask, IPAddress::kIPv6AddressSize * 8));
+  EXPECT_FALSE(
+      IPAddress::CreateIPv4Mask(&mask, (IPAddress::kIPv4AddressSize + 1) * 8));
+  EXPECT_FALSE(
+      IPAddress::CreateIPv4Mask(&mask, IPAddress::kIPv4AddressSize * 8 + 1));
+  EXPECT_TRUE(
+      IPAddress::CreateIPv4Mask(&mask, IPAddress::kIPv4AddressSize * 8));
+  EXPECT_EQ("255.255.255.255", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 31));
+  EXPECT_EQ("255.255.255.254", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 24));
+  EXPECT_EQ("255.255.255.0", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 23));
+  EXPECT_EQ("255.255.254.0", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 18));
+  EXPECT_EQ("255.255.192.0", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 16));
+  EXPECT_EQ("255.255.0.0", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 8));
+  EXPECT_EQ("255.0.0.0", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 1));
+  EXPECT_EQ("128.0.0.0", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv4Mask(&mask, 0));
+  EXPECT_EQ("0.0.0.0", mask.ToString());
+}
+
+TEST(IPAddressTest, IPv6Mask) {
+  IPAddress mask;
+  EXPECT_FALSE(
+      IPAddress::CreateIPv6Mask(&mask, (IPAddress::kIPv6AddressSize * 8) + 1));
+  EXPECT_TRUE(
+      IPAddress::CreateIPv6Mask(&mask, IPAddress::kIPv6AddressSize * 8));
+  EXPECT_EQ("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv6Mask(&mask, 112));
+  EXPECT_EQ("ffff:ffff:ffff:ffff:ffff:ffff:ffff:0", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv6Mask(&mask, 32));
+  EXPECT_EQ("ffff:ffff::", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv6Mask(&mask, 1));
+  EXPECT_EQ("8000::", mask.ToString());
+  EXPECT_TRUE(IPAddress::CreateIPv6Mask(&mask, 0));
+  EXPECT_EQ("::", mask.ToString());
+}
+
+// Test that IPAddress can be created at compile time.
+template <size_t N>
+constexpr bool VerifyIPBytes(const IPAddress& addr,
+                             const std::array<uint8_t, N> ip_bytes) {
+  return addr.bytes().span() == ip_bytes;
+}
+
+constexpr IPAddress CreateIPAddress(std::string_view ip_address) {
+  IPAddress addr;
+  std::ignore = addr.AssignFromIPLiteral(ip_address);
+  return addr;
+}
+
+constexpr std::array<uint8_t, 4> ipv4_bytes = {192, 168, 2, 3};
+constexpr auto ipv4_address = CreateIPAddress("192.168.2.3");
+static_assert(VerifyIPBytes(ipv4_address, ipv4_bytes));
+
+constexpr auto ipv6_address = CreateIPAddress("2001:0700:0300:1800::000f");
+constexpr std::array<uint8_t, 16> ipv6_bytes = {
+    0x20, 0x01, 0x07, 0x00, 0x03, 0x00, 0x18, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f};
+static_assert(VerifyIPBytes(ipv6_address, ipv6_bytes));
+
+// This test exists mainly to prevent the compiler from optimizing away
+// the compile-time checks above. All actual validation is done at compile time.
+TEST(IPAddressTest, VerifyIPAddressCreatedAtCompileTime) {
+  EXPECT_TRUE(VerifyIPBytes(ipv4_address, ipv4_bytes));
+  EXPECT_TRUE(VerifyIPBytes(ipv6_address, ipv6_bytes));
+}
+
+TEST(IPAddressTest, CommonPrefixLength) {
+  IPAddress ipv4_1(192, 168, 0, 1);
+  EXPECT_EQ(32u, CommonPrefixLength(ipv4_1, ipv4_1));
+
+  IPAddress ipv4_2(192, 168, 0, 2);
+  // First 3 bytes (192.168.0) match. Of the last byte, first 6 bits match.
+  EXPECT_EQ(30u, CommonPrefixLength(ipv4_1, ipv4_2));
+
+  IPAddress ipv6_1;
+  ASSERT_TRUE(ipv6_1.AssignFromIPLiteral("2001:db8::1"));
+  EXPECT_EQ(128u, CommonPrefixLength(ipv6_1, ipv6_1));
+
+  IPAddress ipv6_2;
+  ASSERT_TRUE(ipv6_2.AssignFromIPLiteral("2001:db8::2"));
+  // First 15 bytes match, followed by 6 bits matching of the last byte.
+  EXPECT_EQ(126u, CommonPrefixLength(ipv6_1, ipv6_2));
 }
 
 }  // anonymous namespace

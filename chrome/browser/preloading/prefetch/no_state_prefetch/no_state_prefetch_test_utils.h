@@ -20,20 +20,27 @@
 #include "base/synchronization/lock.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "chrome/browser/external_protocol/external_protocol_handler.h"
-#include "chrome/browser/preloading/prefetch/no_state_prefetch/chrome_no_state_prefetch_contents_delegate.h"
-#include "chrome/browser/safe_browsing/test_safe_browsing_service.h"
+#include "components/safe_browsing/buildflags.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/no_state_prefetch/browser/no_state_prefetch_contents.h"
 #include "components/no_state_prefetch/browser/no_state_prefetch_contents_delegate.h"
 #include "components/no_state_prefetch/browser/no_state_prefetch_manager.h"
-#include "components/safe_browsing/core/browser/db/fake_database_manager.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_widget_host_observer.h"
 #include "url/gurl.h"
 
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
+#include "chrome/browser/safe_browsing/test_safe_browsing_service.h"  // nogncheck
+#include "components/safe_browsing/core/browser/db/fake_database_manager.h"  // nogncheck
+#endif
+
+class BrowserWindowInterface;
+
 namespace prerender {
 
 namespace test_utils {
+
+extern const char kSecondaryDomain[];
 
 class TestNoStatePrefetchContents : public NoStatePrefetchContents,
                                     public content::RenderWidgetHostObserver {
@@ -43,7 +50,7 @@ class TestNoStatePrefetchContents : public NoStatePrefetchContents,
       content::BrowserContext* browser_context,
       const GURL& url,
       const content::Referrer& referrer,
-      const absl::optional<url::Origin>& initiator_origin,
+      const std::optional<url::Origin>& initiator_origin,
       Origin origin,
       FinalStatus expected_final_status,
       bool ignore_final_status);
@@ -89,8 +96,7 @@ class TestNoStatePrefetchContents : public NoStatePrefetchContents,
 // A handle to a TestNoStatePrefetchContents whose lifetime is under the
 // caller's control. A NoStatePrefetchContents may be destroyed at any point.
 // This allows tracking the FinalStatus.
-class TestPrerender : public NoStatePrefetchContents::Observer,
-                      public base::SupportsWeakPtr<TestPrerender> {
+class TestPrerender : public NoStatePrefetchContents::Observer {
  public:
   TestPrerender();
 
@@ -122,6 +128,10 @@ class TestPrerender : public NoStatePrefetchContents::Observer,
 
   void OnPrefetchStop(NoStatePrefetchContents* contents) override;
 
+  base::WeakPtr<TestPrerender> AsWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
  private:
   raw_ptr<TestNoStatePrefetchContents> contents_;
   FinalStatus final_status_;
@@ -136,6 +146,7 @@ class TestPrerender : public NoStatePrefetchContents::Observer,
   base::RunLoop create_loop_;
   base::RunLoop start_loop_;
   base::RunLoop stop_loop_;
+  base::WeakPtrFactory<TestPrerender> weak_ptr_factory_{this};
 };
 
 // Blocks until a TestNoStatePrefetchContents has been destroyed with the given
@@ -238,7 +249,7 @@ class TestNoStatePrefetchContentsFactory
       content::BrowserContext* browser_context,
       const GURL& url,
       const content::Referrer& referrer,
-      const absl::optional<url::Origin>& initiator_origin,
+      const std::optional<url::Origin>& initiator_origin,
       Origin origin) override;
 
  private:
@@ -272,7 +283,7 @@ class PrerenderInProcessBrowserTest : virtual public InProcessBrowserTest {
       content::BrowserMainParts* browser_main_parts) override;
   void TearDownInProcessBrowserTestFixture() override;
   void SetUpOnMainThread() override;
-  content::SessionStorageNamespace* GetSessionStorageNamespace() const;
+  content::SessionStorageNamespaceHandle* GetSessionStorageNamespace() const;
 
   // Many of the file and server manipulation commands are fussy about paths
   // being relative or absolute. This makes path absolute if it is not
@@ -297,12 +308,14 @@ class PrerenderInProcessBrowserTest : virtual public InProcessBrowserTest {
   // Returns the currently active server. See |UseHttpsSrcServer|.
   net::EmbeddedTestServer* src_server();
 
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
   safe_browsing::TestSafeBrowsingServiceFactory* safe_browsing_factory() const {
     return safe_browsing_factory_.get();
   }
 
   safe_browsing::FakeSafeBrowsingDatabaseManager*
   GetFakeSafeBrowsingDatabaseManager();
+#endif
 
   TestNoStatePrefetchContentsFactory* no_state_prefetch_contents_factory()
       const {
@@ -311,9 +324,11 @@ class PrerenderInProcessBrowserTest : virtual public InProcessBrowserTest {
 
   void set_autostart_test_server(bool value) { autostart_test_server_ = value; }
 
-  void set_browser(Browser* browser) { explicitly_set_browser_ = browser; }
+  void set_browser(BrowserWindowInterface* browser) {
+    explicitly_set_browser_ = browser;
+  }
 
-  Browser* current_browser() const {
+  BrowserWindowInterface* current_browser() const {
     return explicitly_set_browser_ ? explicitly_set_browser_.get() : browser();
   }
 
@@ -363,11 +378,14 @@ class PrerenderInProcessBrowserTest : virtual public InProcessBrowserTest {
   void MonitorResourceRequest(const net::test_server::HttpRequest& request);
   std::unique_ptr<ExternalProtocolHandler::Delegate>
       external_protocol_handler_delegate_;
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
   std::unique_ptr<safe_browsing::TestSafeBrowsingServiceFactory>
       safe_browsing_factory_;
-  raw_ptr<TestNoStatePrefetchContentsFactory, DanglingUntriaged>
+#endif
+  raw_ptr<TestNoStatePrefetchContentsFactory, AcrossTasksDanglingUntriaged>
       no_state_prefetch_contents_factory_;
-  raw_ptr<Browser, DanglingUntriaged> explicitly_set_browser_;
+  raw_ptr<BrowserWindowInterface, AcrossTasksDanglingUntriaged>
+      explicitly_set_browser_;
   bool autostart_test_server_;
   base::HistogramTester histogram_tester_;
   std::unique_ptr<net::EmbeddedTestServer> https_src_server_;

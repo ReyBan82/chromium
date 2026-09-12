@@ -9,6 +9,8 @@
 #include <stddef.h>
 
 #include <list>
+#include <optional>
+#include <variant>
 
 #include "base/check.h"
 #include "base/strings/string_number_conversions.h"
@@ -21,8 +23,6 @@
 #include "net/cert/nss_cert_database.h"
 #include "net/cert/scoped_nss_types.h"
 #include "net/cert/x509_certificate.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 
 namespace ash::client_cert {
@@ -37,7 +37,7 @@ namespace {
 // (|dict_with_client_cert|) and stores it in |cert_config|.
 void GetClientCertTypeAndDescriptor(
     onc::ONCSource onc_source,
-    const base::Value::Dict& dict_with_client_cert,
+    const base::DictValue& dict_with_client_cert,
     ClientCertConfig* cert_config) {
   cert_config->onc_source = onc_source;
 
@@ -52,10 +52,10 @@ void GetClientCertTypeAndDescriptor(
     cert_config->client_cert_type = *client_cert_type;
 
   if (cert_config->client_cert_type == ::onc::client_cert::kPattern) {
-    const base::Value::Dict* pattern_value =
+    const base::DictValue* pattern_value =
         dict_with_client_cert.FindDict(::onc::client_cert::kClientCertPattern);
     if (pattern_value) {
-      absl::optional<OncCertificatePattern> pattern =
+      std::optional<OncCertificatePattern> pattern =
           OncCertificatePattern::ReadFromONCDictionary(*pattern_value);
       if (!pattern.has_value()) {
         LOG(ERROR) << "ClientCertPattern invalid";
@@ -106,7 +106,7 @@ std::string GetPkcs11AndSlotIdFromEapCertId(const std::string& cert_id,
   return cert_id.substr(delimiter_pos + 1);
 }
 
-void GetClientCertFromShillProperties(const base::Value::Dict& shill_properties,
+void GetClientCertFromShillProperties(const base::DictValue& shill_properties,
                                       ConfigType* cert_config_type,
                                       int* tpm_slot,
                                       std::string* pkcs11_id) {
@@ -118,7 +118,7 @@ void GetClientCertFromShillProperties(const base::Value::Dict& shill_properties,
   //
   // VPN Provider values are read from the "Provider" dictionary, not the
   // "Provider.Type", etc keys (which are used only to set the values).
-  const base::Value::Dict* provider_properties =
+  const base::DictValue* provider_properties =
       shill_properties.FindDict(shill::kProviderProperty);
   if (provider_properties) {
     const std::string* pkcs11_id_str = nullptr;
@@ -195,7 +195,7 @@ void GetClientCertFromShillProperties(const base::Value::Dict& shill_properties,
 void SetShillProperties(const ConfigType cert_config_type,
                         const int tpm_slot,
                         const std::string& pkcs11_id,
-                        base::Value::Dict& properties) {
+                        base::DictValue& properties) {
   switch (cert_config_type) {
     case ConfigType::kNone: {
       return;
@@ -237,7 +237,7 @@ void SetShillProperties(const ConfigType cert_config_type,
 }
 
 void SetEmptyShillProperties(const ConfigType cert_config_type,
-                             base::Value::Dict& properties) {
+                             base::DictValue& properties) {
   switch (cert_config_type) {
     case ConfigType::kNone: {
       return;
@@ -399,11 +399,11 @@ DictType* GetOncClientCertConfigDict(DictType& network_config,
 }
 
 void OncToClientCertConfig(::onc::ONCSource onc_source,
-                           const base::Value::Dict& network_config,
+                           const base::DictValue& network_config,
                            ClientCertConfig* cert_config) {
   *cert_config = ClientCertConfig();
 
-  const base::Value::Dict* dict_with_client_cert =
+  const base::DictValue* dict_with_client_cert =
       GetOncClientCertConfigDict(network_config, &(cert_config->location));
   if (dict_with_client_cert) {
     GetClientCertTypeAndDescriptor(onc_source, *dict_with_client_cert,
@@ -412,16 +412,16 @@ void OncToClientCertConfig(::onc::ONCSource onc_source,
 }
 
 void SetResolvedCertInOnc(const ResolvedCert& resolved_cert,
-                          base::Value& network_config) {
+                          base::DictValue& network_config) {
   if (resolved_cert.status() == ResolvedCert::Status::kNotKnownYet)
     return;
 
-  base::Value::Dict* dict_with_client_cert = GetOncClientCertConfigDict(
-      network_config.GetDict(), /*out_config_type=*/nullptr);
+  base::DictValue* dict_with_client_cert =
+      GetOncClientCertConfigDict(network_config, /*out_config_type=*/nullptr);
   if (!dict_with_client_cert)
     return;
   dict_with_client_cert->Set(::onc::client_cert::kClientCertType,
-                             base::Value(::onc::client_cert::kPKCS11Id));
+                             ::onc::client_cert::kPKCS11Id);
   if (resolved_cert.status() == ResolvedCert::Status::kNothingMatched) {
     // Empty PKCS11Id means that no certificate has been selected and it
     // should be cleared in shill.
@@ -430,8 +430,8 @@ void SetResolvedCertInOnc(const ResolvedCert& resolved_cert,
   } else {
     dict_with_client_cert->Set(
         ::onc::client_cert::kClientCertPKCS11Id,
-        base::Value(base::StringPrintf("%i:%s", resolved_cert.slot_id(),
-                                       resolved_cert.pkcs11_id().c_str())));
+        base::StringPrintf("%i:%s", resolved_cert.slot_id(),
+                           resolved_cert.pkcs11_id().c_str()));
   }
   dict_with_client_cert->Remove(::onc::client_cert::kClientCertPattern);
 }

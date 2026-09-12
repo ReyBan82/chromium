@@ -10,13 +10,12 @@
 #include <string>
 
 #include "base/functional/callback_forward.h"
+#include "base/memory/weak_ptr.h"
 #include "base/supports_user_data.h"
 #include "base/time/time.h"
+#include "base/values.h"
 #include "url/gurl.h"
-
-namespace base {
-class Value;
-}
+#include "url/origin.h"
 
 namespace web {
 
@@ -26,25 +25,28 @@ class WebFrameInternal;
 // Default timeout in milliseconds for `CallJavaScriptFunction`.
 extern const double kJavaScriptFunctionCallDefaultTimeout;
 
+using ExecuteJavaScriptCallbackWithError =
+    base::OnceCallback<void(const base::Value*, NSError* error)>;
+
 class WebFrame : public base::SupportsUserData {
  public:
   // The frame identifier which uniquely identifies this frame across the
   // application's lifetime.
   virtual std::string GetFrameId() const = 0;
   // Whether or not the receiver represents the main frame of the webpage.
-  // TODO(crbug.com/1300655): Rename IsMainFrame to IsAnyMainFrame
   virtual bool IsMainFrame() const = 0;
   // The security origin associated with this frame.
-  virtual GURL GetSecurityOrigin() const = 0;
-  // Whether or not the receiver represents a frame which supports calling
-  // JavaScript functions using `CallJavaScriptFunction()`.
-  virtual bool CanCallJavaScriptFunction() const = 0;
+  virtual url::Origin GetSecurityOrigin() const = 0;
+  // The URL associated with this frame. Important: for security-relevant
+  // decisions, do not use this function. Instead, use `GetSecurityOrigin()`. A
+  // `GURL` and an `Origin` are not interchangeable.
+  virtual GURL GetUrl() const = 0;
 
   // Returns the BrowserState associated with this WebFrame.
   virtual BrowserState* GetBrowserState() = 0;
 
   // Calls the JavaScript function `name` in the frame context. For example, to
-  // call __gCrWeb.formHandlers.trackFormMutations(delay), pass
+  // call trackFormMutations(delay) function from formHandlers API, pass
   // 'form.trackFormMutations' as `name` and the value for the delay parameter
   // to `parameters`. `name` must point to a function in the __gCrWeb object.
   // `parameters` is a vector of values that will be passed to the function.
@@ -53,23 +55,20 @@ class WebFrame : public base::SupportsUserData {
   // webpage DOM could change in a way which prevents the function from
   // executing.
   // Returns true if function call was requested, false otherwise. Function call
-  // may still fail even if this function returns true. Always returns false if
-  // `CanCallJavaScriptFunction` is false.
-  virtual bool CallJavaScriptFunction(
-      const std::string& name,
-      const std::vector<base::Value>& parameters) = 0;
+  // may still fail even if this function returns true.
+  virtual bool CallJavaScriptFunction(const std::string& name,
+                                      const base::ListValue& parameters) = 0;
 
   // Calls the JavaScript function in the same condition as
-  // CallJavaScriptFunction(std::string, const std::vector<base::Value>&).
+  // CallJavaScriptFunction(std::string, const base::ListValue&).
   // `callback` will be called with the value returned by the method.
   // If `timeout` is reached, callback is called with the nullptr parameter
   // and no result received later will be sent.
   // Returns true if function call was requested, false otherwise. Function call
-  // may still fail even if this function returns true. Always returns false if
-  // `CanCallJavaScriptFunction` is false.
+  // may still fail even if this function returns true.
   virtual bool CallJavaScriptFunction(
       const std::string& name,
-      const std::vector<base::Value>& parameters,
+      const base::ListValue& parameters,
       base::OnceCallback<void(const base::Value*)> callback,
       base::TimeDelta timeout) = 0;
 
@@ -83,8 +82,6 @@ class WebFrame : public base::SupportsUserData {
       const std::u16string& script,
       base::OnceCallback<void(const base::Value*)> callback) = 0;
 
-  using ExecuteJavaScriptCallbackWithError =
-      base::OnceCallback<void(const base::Value*, NSError* error)>;
   // Executes the given `script` and returns whether the script was run.
   // If the script is successfully executed, `callback` is called with
   // the result. Otherwise, `callback` is called with the bool. The
@@ -94,8 +91,31 @@ class WebFrame : public base::SupportsUserData {
       const std::u16string& script,
       ExecuteJavaScriptCallbackWithError callback) = 0;
 
+  // Executes the given async `script` with `parameters` and returns whether
+  // the script was run. `parameters` is a dictionary of arguments to pass
+  // to the function. The keys become the parameter names in the function.
+  // For more information about WebKit API we call internally, see:
+  // https://developer.apple.com/documentation/webkit/wkwebview/callasyncjavascript(_:arguments:in:in:completionhandler:)
+  virtual bool ExecuteAsyncJavaScript(
+      const std::u16string& script,
+      const base::DictValue& parameters,
+      ExecuteJavaScriptCallbackWithError callback) = 0;
+
+  // Calls the JavaScript function `name` in the frame context. The call is
+  // synchronous, but the target function may perform asynchronous operations
+  // (e.g., returning a Promise). `parameters` is a dictionary of values that
+  // will be passed to the function. `callback` will be called with the result
+  // or error.
+  virtual bool CallAsyncJavaScriptFunction(
+      const std::string& name,
+      const base::DictValue& parameters,
+      ExecuteJavaScriptCallbackWithError callback) = 0;
+
   // Returns the WebFrameInternal instance for this object.
   virtual WebFrameInternal* GetWebFrameInternal() = 0;
+
+  // Gets a weak pointer to the instance.
+  virtual base::WeakPtr<WebFrame> AsWeakPtr() = 0;
 
   WebFrame(const WebFrame&) = delete;
   WebFrame& operator=(const WebFrame&) = delete;

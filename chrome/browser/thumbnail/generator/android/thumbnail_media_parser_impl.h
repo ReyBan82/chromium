@@ -17,7 +17,7 @@
 #include "base/timer/timer.h"
 #include "chrome/browser/thumbnail/generator/android/stats.h"
 #include "chrome/browser/thumbnail/generator/android/thumbnail_media_parser.h"
-#include "chrome/common/media_galleries/metadata_types.h"
+#include "components/media_gallery_util/metadata_types.h"
 #include "media/base/media_log.h"
 #include "media/mojo/mojom/interface_factory.mojom.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -50,7 +50,7 @@ class ThumbnailMediaParserImpl : public ThumbnailMediaParser,
   void Start(ParseCompleteCB parse_complete_cb) override;
 
  private:
-  void OnReadFileSize(int64_t file_size);
+  void OnReadFileSize(std::optional<int64_t> file_size);
 
   // MediaParserProvider implementation:
   void OnMediaParserCreated() override;
@@ -81,7 +81,7 @@ class ThumbnailMediaParserImpl : public ThumbnailMediaParser,
   // Overlays media data source read operation. Gradually read data from media
   // file.
   void OnMediaDataReady(chrome::mojom::MediaDataSource::ReadCallback callback,
-                        std::unique_ptr<std::string> data);
+                        std::string data);
 
   void NotifyComplete(SkBitmap bitmap);
   void OnError(MediaParserEvent event);
@@ -111,9 +111,10 @@ class ThumbnailMediaParserImpl : public ThumbnailMediaParser,
   // Objects used to decode the video into media::VideoFrame with
   // MojoVideoDecoder.
   media::VideoDecoderConfig config_;
+  // `gpu_factories_` must outlive `decoder_`.
+  std::unique_ptr<media::GpuVideoAcceleratorFactories> gpu_factories_;
   std::unique_ptr<media::VideoThumbnailDecoder> decoder_;
   mojo::Remote<media::mojom::InterfaceFactory> media_interface_factory_;
-  std::unique_ptr<media::GpuVideoAcceleratorFactories> gpu_factories_;
   bool decode_done_;
 
   base::WeakPtrFactory<ThumbnailMediaParserImpl> weak_factory_{this};

@@ -2,43 +2,59 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "media/renderers/paint_canvas_video_renderer.h"
+
 #include <GLES3/gl3.h>
 #include <stdint.h>
 
+#include <algorithm>
+#include <array>
+#include <bit>
+
+#include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/containers/span_writer.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/aligned_memory.h"
 #include "base/memory/raw_ptr.h"
-#include "base/sys_byteorder.h"
+#include "base/numerics/byte_conversions.h"
+#include "base/numerics/checked_math.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
 #include "cc/paint/paint_flags.h"
+#include "cc/paint/paint_op.h"
+#include "cc/paint/paint_op_buffer_iterator.h"
+#include "cc/paint/record_paint_canvas.h"
 #include "cc/paint/skia_paint_canvas.h"
 #include "components/viz/common/gpu/context_provider.h"
 #include "components/viz/test/test_context_provider.h"
 #include "components/viz/test/test_gpu_service_holder.h"
 #include "components/viz/test/test_in_process_context_provider.h"
 #include "gpu/GLES2/gl2extchromium.h"
+#include "gpu/command_buffer/client/client_shared_image.h"
 #include "gpu/command_buffer/client/gles2_interface_stub.h"
 #include "gpu/command_buffer/common/capabilities.h"
 #include "gpu/command_buffer/common/shared_image_usage.h"
 #include "gpu/config/gpu_feature_info.h"
+#include "media/base/format_utils.h"
 #include "media/base/timestamp_constants.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_util.h"
-#include "media/renderers/paint_canvas_video_renderer.h"
-#include "media/renderers/shared_image_video_frame_test_utils.h"
+#include "media/renderers/video_frame_test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/fp16/src/include/fp16.h"
 #include "third_party/libyuv/include/libyuv/convert.h"
 #include "third_party/libyuv/include/libyuv/scale.h"
-#include "third_party/skia/include/core/SkColorPriv.h"
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
 #include "third_party/skia/include/core/SkSurface.h"
-#include "third_party/skia/include/gpu/GrDirectContext.h"
+#include "third_party/skia/include/private/chromium/SkPMColor.h"
 #include "ui/gfx/color_space.h"
 #include "ui/gfx/geometry/rect_f.h"
 #include "ui/gl/gl_implementation.h"
+#include "ui/gl/gl_switches.h"
 #include "ui/gl/test/gl_surface_test_support.h"
 
 using media::VideoFrame;
@@ -50,43 +66,49 @@ static const int kHeight = 240;
 static const gfx::RectF kNaturalRect(kWidth, kHeight);
 
 // Generate frame pixels to provided |external_memory| and wrap it as frame.
-scoped_refptr<VideoFrame> CreateTestY16Frame(const gfx::Size& coded_size,
-                                             const gfx::Rect& visible_rect,
-                                             void* external_memory,
-                                             base::TimeDelta timestamp) {
-  const int offset_x = visible_rect.x();
-  const int offset_y = visible_rect.y();
-  const int stride = coded_size.width();
-  const size_t byte_size = stride * coded_size.height() * 2;
+scoped_refptr<VideoFrame> CreateTestY16Frame(
+    const gfx::Size& coded_size,
+    const gfx::Rect& visible_rect,
+    base::span<uint8_t> external_memory,
+    base::TimeDelta timestamp) {
+  static constexpr size_t kBytesPerPixel = 2;
+
+  const size_t offset_x = visible_rect.x();
+  const size_t offset_y = visible_rect.y();
+  const size_t stride = coded_size.width();
+  const size_t byte_size = stride * coded_size.height() * kBytesPerPixel;
 
   // In the visible rect, fill upper byte with [0-255] and lower with [255-0].
-  uint16_t* data = static_cast<uint16_t*>(external_memory);
+  base::SpanWriter writer(external_memory);
+  writer.Skip(offset_y * stride * kBytesPerPixel);
+
+  const size_t extra_size = stride - visible_rect.width() - offset_x;
   for (int j = 0; j < visible_rect.height(); j++) {
+    writer.Skip(offset_x * kBytesPerPixel);
     for (int i = 0; i < visible_rect.width(); i++) {
       const int value = i + j * visible_rect.width();
-      data[(stride * (j + offset_y)) + i + offset_x] =
-          ((value & 0xFF) << 8) | (~value & 0xFF);
+      writer.WriteU16NativeEndian(((value & 0xFF) << 8) | (~value & 0xFF));
     }
+    writer.Skip(extra_size * kBytesPerPixel);
   }
 
   return media::VideoFrame::WrapExternalData(
       media::PIXEL_FORMAT_Y16, coded_size, visible_rect, visible_rect.size(),
-      static_cast<uint8_t*>(external_memory), byte_size, timestamp);
+      external_memory.first(byte_size), timestamp);
 }
 
 // Readback the contents of a RGBA texture into an array of RGBA values.
-static std::unique_ptr<uint8_t[]> ReadbackTexture(
-    gpu::gles2::GLES2Interface* gl,
-    GLuint texture,
-    const gfx::Size& size) {
+static base::HeapArray<uint8_t> ReadbackTexture(gpu::gles2::GLES2Interface* gl,
+                                                GLuint texture,
+                                                const gfx::Size& size) {
   size_t pixel_count = size.width() * size.height();
   GLuint fbo = 0;
   gl->GenFramebuffers(1, &fbo);
   gl->BindFramebuffer(GL_FRAMEBUFFER, fbo);
   gl->FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            texture, 0);
-  auto pixels = std::make_unique<uint8_t[]>(pixel_count * 4);
-  uint8_t* raw_pixels = pixels.get();
+  auto pixels = base::HeapArray<uint8_t>::Uninit(pixel_count * 4);
+  uint8_t* raw_pixels = pixels.data();
   gl->ReadPixels(0, 0, size.width(), size.height(), GL_RGBA, GL_UNSIGNED_BYTE,
                  raw_pixels);
   gl->DeleteFramebuffers(1, &fbo);
@@ -95,9 +117,9 @@ static std::unique_ptr<uint8_t[]> ReadbackTexture(
 
 // Returns a functor that retrieves a SkColor for a given pixel, from raw RGBA
 // data.
-static auto ColorGetter(uint8_t* pixels, const gfx::Size& size) {
+static auto ColorGetter(base::span<uint8_t> pixels, const gfx::Size& size) {
   return [pixels, size](size_t x, size_t y) {
-    uint8_t* p = pixels + (size.width() * y + x) * 4;
+    base::span<uint8_t> p = pixels.subspan((size.width() * y + x) * 4);
     return SkColorSetARGB(p[3], p[0], p[1], p[2]);
   };
 }
@@ -121,6 +143,9 @@ class PaintCanvasVideoRendererTest : public testing::Test {
 
   // Paints to |canvas| using |renderer_| without any frame data.
   void PaintWithoutFrame(cc::PaintCanvas* canvas);
+
+  // Set `video_frame` to `color`.
+  void FillFrameWithColor(scoped_refptr<VideoFrame> video_frame, Color color);
 
   // Paints the |video_frame| to the |canvas| using |renderer_|, setting the
   // color of |video_frame| to |color| first.
@@ -159,96 +184,38 @@ class PaintCanvasVideoRendererTest : public testing::Test {
   base::test::TaskEnvironment task_environment_;
 };
 
-static SkBitmap AllocBitmap(int width, int height) {
+static SkBitmap AllocBitmap(int width,
+                            int height,
+                            SkColorType color_type = kN32_SkColorType) {
   SkBitmap bitmap;
-  bitmap.allocPixels(SkImageInfo::MakeN32(width, height, kPremul_SkAlphaType));
+  bitmap.allocPixels(
+      SkImageInfo::Make(width, height, color_type, kPremul_SkAlphaType));
   bitmap.eraseColor(0);
   return bitmap;
 }
 
-static scoped_refptr<VideoFrame> CreateCroppedFrame() {
-  scoped_refptr<VideoFrame> cropped_frame = VideoFrame::CreateFrame(
-      PIXEL_FORMAT_I420, gfx::Size(16, 16), gfx::Rect(6, 6, 8, 6),
-      gfx::Size(8, 6), base::Milliseconds(4));
-  // Make sure the cropped video frame's aspect ratio matches the output device.
-  // Update cropped_frame_'s crop dimensions if this is not the case.
-  EXPECT_EQ(cropped_frame->visible_rect().width() * kHeight,
-            cropped_frame->visible_rect().height() * kWidth);
+static scoped_refptr<VideoFrame> CreateRGBA16TestFrame(
+    const gfx::Size& coded_size) {
+  auto frame = VideoFrame::CreateFrame(PIXEL_FORMAT_RGBAF16, coded_size,
+                                       gfx::Rect(coded_size), coded_size,
+                                       base::TimeDelta());
+  CHECK(frame);
+  frame->set_color_space(gfx::ColorSpace::CreateSRGBLinear());
 
-  // Fill in the cropped frame's entire data with colors:
-  //
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   Bl Bl Bl Bl Bl Bl Bl Bl R  R  R  R  R  R  R  R
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //   G  G  G  G  G  G  G  G  B  B  B  B  B  B  B  B
-  //
-  // The visible crop of the frame (as set by its visible_rect_) has contents:
-  //
-  //   Bl Bl R  R  R  R  R  R
-  //   Bl Bl R  R  R  R  R  R
-  //   G  G  B  B  B  B  B  B
-  //   G  G  B  B  B  B  B  B
-  //   G  G  B  B  B  B  B  B
-  //   G  G  B  B  B  B  B  B
-  //
-  // Each color region in the cropped frame is on a 2x2 block granularity, to
-  // avoid sharing UV samples between regions.
-
-  static const uint8_t cropped_y_plane[] = {
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      0,   0,   0,   0,   0,   0,   0,   0,   76, 76, 76, 76, 76, 76, 76, 76,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-      149, 149, 149, 149, 149, 149, 149, 149, 29, 29, 29, 29, 29, 29, 29, 29,
-  };
-
-  static const uint8_t cropped_u_plane[] = {
-      128, 128, 128, 128, 84,  84,  84,  84,  128, 128, 128, 128, 84,
-      84,  84,  84,  128, 128, 128, 128, 84,  84,  84,  84,  128, 128,
-      128, 128, 84,  84,  84,  84,  43,  43,  43,  43,  255, 255, 255,
-      255, 43,  43,  43,  43,  255, 255, 255, 255, 43,  43,  43,  43,
-      255, 255, 255, 255, 43,  43,  43,  43,  255, 255, 255, 255,
-  };
-  static const uint8_t cropped_v_plane[] = {
-      128, 128, 128, 128, 255, 255, 255, 255, 128, 128, 128, 128, 255,
-      255, 255, 255, 128, 128, 128, 128, 255, 255, 255, 255, 128, 128,
-      128, 128, 255, 255, 255, 255, 21,  21,  21,  21,  107, 107, 107,
-      107, 21,  21,  21,  21,  107, 107, 107, 107, 21,  21,  21,  21,
-      107, 107, 107, 107, 21,  21,  21,  21,  107, 107, 107, 107,
-  };
-
-  libyuv::I420Copy(cropped_y_plane, 16, cropped_u_plane, 8, cropped_v_plane, 8,
-                   cropped_frame->writable_data(VideoFrame::kYPlane),
-                   cropped_frame->stride(VideoFrame::kYPlane),
-                   cropped_frame->writable_data(VideoFrame::kUPlane),
-                   cropped_frame->stride(VideoFrame::kUPlane),
-                   cropped_frame->writable_data(VideoFrame::kVPlane),
-                   cropped_frame->stride(VideoFrame::kVPlane), 16, 16);
-
-  return cropped_frame;
+  // Draw full red in RGBA F16 frame.
+  auto frame_span = frame->GetWritableVisiblePlaneData(0);
+  const uint16_t result[] = {
+      fp16_ieee_from_fp32_value(1), fp16_ieee_from_fp32_value(0),
+      fp16_ieee_from_fp32_value(0), fp16_ieee_from_fp32_value(1)};
+  for (int y = 0; y < kHeight; ++y) {
+    auto row_span = frame_span.take_first(frame->stride(0));
+    for (int x = 0; x < kWidth; ++x) {
+      // Fill the frame with red color.
+      row_span.take_first<4 * sizeof(uint16_t)>().copy_from_nonoverlapping(
+          base::as_byte_span(result));
+    }
+  }
+  return frame;
 }
 
 PaintCanvasVideoRendererTest::PaintCanvasVideoRendererTest()
@@ -268,11 +235,30 @@ PaintCanvasVideoRendererTest::PaintCanvasVideoRendererTest()
 
 PaintCanvasVideoRendererTest::~PaintCanvasVideoRendererTest() = default;
 
+void PaintCanvasVideoRendererTest::FillFrameWithColor(
+    scoped_refptr<VideoFrame> video_frame,
+    Color color) {
+  switch (color) {
+    case kNone:
+      break;
+    case kRed:
+      media::FillYUV(video_frame.get(), 76, 84, 255);
+      break;
+    case kGreen:
+      media::FillYUV(video_frame.get(), 149, 43, 21);
+      break;
+    case kBlue:
+      media::FillYUV(video_frame.get(), 29, 255, 107);
+      break;
+  }
+}
+
 void PaintCanvasVideoRendererTest::PaintWithoutFrame(cc::PaintCanvas* canvas) {
   cc::PaintFlags flags;
   flags.setFilterQuality(cc::PaintFlags::FilterQuality::kLow);
-  renderer_.Paint(nullptr, canvas, kNaturalRect, flags, kNoTransformation,
-                  nullptr);
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = kNaturalRect;
+  renderer_.Paint(nullptr, canvas, flags, params, nullptr);
 }
 
 void PaintCanvasVideoRendererTest::Paint(scoped_refptr<VideoFrame> video_frame,
@@ -289,24 +275,14 @@ void PaintCanvasVideoRendererTest::PaintRotated(
     Color color,
     SkBlendMode mode,
     VideoTransformation video_transformation) {
-  switch (color) {
-    case kNone:
-      break;
-    case kRed:
-      media::FillYUV(video_frame.get(), 76, 84, 255);
-      break;
-    case kGreen:
-      media::FillYUV(video_frame.get(), 149, 43, 21);
-      break;
-    case kBlue:
-      media::FillYUV(video_frame.get(), 29, 255, 107);
-      break;
-  }
+  FillFrameWithColor(video_frame, color);
   cc::PaintFlags flags;
   flags.setBlendMode(mode);
   flags.setFilterQuality(cc::PaintFlags::FilterQuality::kLow);
-  renderer_.Paint(std::move(video_frame), canvas, dest_rect, flags,
-                  video_transformation, nullptr);
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = dest_rect;
+  params.transformation = video_transformation;
+  renderer_.Paint(std::move(video_frame), canvas, flags, params, nullptr);
 }
 
 void PaintCanvasVideoRendererTest::Copy(scoped_refptr<VideoFrame> video_frame,
@@ -357,6 +333,113 @@ TEST_F(PaintCanvasVideoRendererTest, CopyTransparentFrame) {
        target_canvas());
   EXPECT_EQ(static_cast<SkColor>(SK_ColorTRANSPARENT),
             bitmap()->getColor(0, 0));
+}
+
+TEST_F(PaintCanvasVideoRendererTest, ReinterpretAsSRGB) {
+  FillFrameWithColor(natural_frame(), kRed);
+  // Set to HDR PQ color space but with default 601 matrix and range as I420
+  // formats cannot convert to RGB color spaces with RGB matrix.
+  auto hdr_cs = gfx::ColorSpace(
+      gfx::ColorSpace::PrimaryID::BT2020, gfx::ColorSpace::TransferID::PQ,
+      gfx::ColorSpace::MatrixID::SMPTE170M, gfx::ColorSpace::RangeID::LIMITED);
+  natural_frame()->set_color_space(hdr_cs);
+
+  cc::PaintFlags flags;
+  flags.setBlendMode(SkBlendMode::kSrcOver);
+  flags.setFilterQuality(cc::PaintFlags::FilterQuality::kLow);
+
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = kNaturalRect;
+  renderer_.Paint(natural_frame(), target_canvas(), flags, params, nullptr);
+  EXPECT_NE(SK_ColorRED, bitmap()->getColor(0, 0));
+
+  params.reinterpret_as_srgb = true;
+  renderer_.Paint(natural_frame(), target_canvas(), flags, params, nullptr);
+  EXPECT_EQ(SK_ColorRED, bitmap()->getColor(0, 0));
+}
+
+TEST_F(PaintCanvasVideoRendererTest, RGBAF16) {
+  SkBitmap bitmap = AllocBitmap(kWidth, kHeight, kRGBA_F16_SkColorType);
+  cc::SkiaPaintCanvas canvas(bitmap);
+
+  auto frame = CreateRGBA16TestFrame(gfx::Size(kWidth, kHeight));
+
+  cc::PaintFlags flags;
+  flags.setBlendMode(SkBlendMode::kSrcOver);
+  flags.setFilterQuality(cc::PaintFlags::FilterQuality::kLow);
+
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = kNaturalRect;
+  renderer_.Paint(frame, &canvas, flags, params, nullptr);
+  EXPECT_EQ(SK_ColorRED, bitmap.getColor(0, 0));
+}
+
+TEST_F(PaintCanvasVideoRendererTest, YUVToRGBAF16) {
+  SkBitmap bitmap = AllocBitmap(kWidth, kHeight, kRGBA_F16_SkColorType);
+  cc::SkiaPaintCanvas canvas(bitmap);
+
+  ASSERT_EQ(natural_frame()->format(), PIXEL_FORMAT_I420);
+  FillFrameWithColor(natural_frame(), kRed);
+
+  cc::PaintFlags flags;
+  flags.setBlendMode(SkBlendMode::kSrcOver);
+  flags.setFilterQuality(cc::PaintFlags::FilterQuality::kLow);
+
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = kNaturalRect;
+  renderer_.Paint(natural_frame(), &canvas, flags, params, nullptr);
+  EXPECT_EQ(SK_ColorRED, bitmap.getColor(0, 0));
+}
+
+TEST_F(PaintCanvasVideoRendererTest, LazyYUVToRGBAF16) {
+  ASSERT_EQ(natural_frame()->format(), PIXEL_FORMAT_I420);
+  FillFrameWithColor(natural_frame(), kRed);
+
+  cc::RecordPaintCanvas record_canvas;
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = kNaturalRect;
+  renderer_.Paint(natural_frame(), &record_canvas, cc::PaintFlags(), params,
+                  nullptr);
+
+  cc::PaintRecord record = record_canvas.ReleaseAsRecord();
+
+  cc::PaintImage paint_image;
+  for (const cc::PaintOp& op : record.buffer()) {
+    if (op.GetType() == cc::PaintOpType::kDrawImageRect) {
+      paint_image = static_cast<const cc::DrawImageRectOp*>(&op)->image;
+      break;
+    } else if (op.GetType() == cc::PaintOpType::kDrawImage) {
+      paint_image = static_cast<const cc::DrawImageOp*>(&op)->image;
+      break;
+    }
+  }
+  ASSERT_TRUE(paint_image);
+  EXPECT_TRUE(paint_image.IsLazyGenerated());
+
+  SkImageInfo dst_info = SkImageInfo::Make(
+      kWidth, kHeight, kRGBA_F16_SkColorType, kPremul_SkAlphaType);
+  std::vector<uint8_t> dst_pixels(dst_info.computeMinByteSize());
+  SkPixmap dst_pixmap(dst_info, dst_pixels.data(), dst_info.minRowBytes());
+
+  bool success = paint_image.Decode(dst_pixmap, 0, cc::AuxImage::kDefault,
+                                    cc::PaintImage::kDefaultGeneratorClientId);
+  EXPECT_TRUE(success);
+}
+
+TEST_F(PaintCanvasVideoRendererTest, RGBAF16_N32_Output) {
+  SkBitmap bitmap = AllocBitmap(kWidth, kHeight, kN32_SkColorType);
+  cc::SkiaPaintCanvas canvas(bitmap);
+
+  auto frame = CreateRGBA16TestFrame(gfx::Size(kWidth, kHeight));
+
+  cc::PaintFlags flags;
+  flags.setBlendMode(SkBlendMode::kSrcOver);
+  flags.setFilterQuality(cc::PaintFlags::FilterQuality::kLow);
+
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = kNaturalRect;
+  renderer_.Paint(frame, &canvas, flags, params, nullptr);
+  EXPECT_EQ(SK_ColorRED, bitmap.getColor(0, 0));
 }
 
 TEST_F(PaintCanvasVideoRendererTest, Natural) {
@@ -411,7 +494,7 @@ uint32_t MaybeConvertABGRToARGB(uint32_t abgr) {
     SK_A32_SHIFT == 24
   return abgr;
 #else
-  return (base::ByteSwap(abgr & 0x00FFFFFF) >> 8) | (abgr & 0xFF000000);
+  return (std::byteswap(abgr & 0x00FFFFFF) >> 8) | (abgr & 0xFF000000);
 #endif
 }
 
@@ -437,26 +520,22 @@ TEST_F(PaintCanvasVideoRendererTest, CroppedFrameToRGBParallel) {
 
   const gfx::Size visible_size = test_frame->visible_rect().size();
   const size_t row_bytes = visible_size.width() * sizeof(SkColor);
-  const size_t allocation_size = row_bytes * visible_size.height();
-
-  std::unique_ptr<uint8_t, base::AlignedFreeDeleter> memory(
-      static_cast<uint8_t*>(base::AlignedAlloc(
-          allocation_size, media::VideoFrame::kFrameAddressAlignment)));
-  memset(memory.get(), 0, allocation_size);
+  auto memory = base::AlignedUninit<uint32_t>(
+      visible_size.width() * visible_size.height(),
+      media::VideoFrame::kFrameAddressAlignment);
+  std::ranges::fill(memory, 0);
 
   PaintCanvasVideoRenderer::ConvertVideoFrameToRGBPixels(
-      test_frame.get(), memory.get(), row_bytes);
-
-  const uint32_t* rgb_pixels = reinterpret_cast<uint32_t*>(memory.get());
+      test_frame.get(), base::as_writable_byte_span(memory), row_bytes);
 
   // Check the corners; this is sufficient to reveal https://crbug.com/1027442.
-  EXPECT_EQ(SK_ColorBLACK, rgb_pixels[0]);
+  EXPECT_EQ(SK_ColorBLACK, memory[0]);
   EXPECT_EQ(MaybeConvertABGRToARGB(SK_ColorRED),
-            rgb_pixels[visible_size.width() - 1]);
+            memory[visible_size.width() - 1]);
   EXPECT_EQ(SK_ColorGREEN,
-            rgb_pixels[visible_size.width() * (visible_size.height() - 1)]);
+            memory[visible_size.width() * (visible_size.height() - 1)]);
   EXPECT_EQ(MaybeConvertABGRToARGB(SK_ColorBLUE),
-            rgb_pixels[(visible_size.width() - 1) * visible_size.height()]);
+            memory[(visible_size.width() - 1) * visible_size.height()]);
 }
 
 TEST_F(PaintCanvasVideoRendererTest, CroppedFrame_NoScaling) {
@@ -610,8 +689,7 @@ TEST_F(PaintCanvasVideoRendererTest, HighBitDepth) {
   struct params {
     int bit_depth;
     VideoPixelFormat format;
-  } kBitDepthAndFormats[] = {{9, PIXEL_FORMAT_YUV420P9},
-                             {10, PIXEL_FORMAT_YUV420P10},
+  } kBitDepthAndFormats[] = {{10, PIXEL_FORMAT_YUV420P10},
                              {12, PIXEL_FORMAT_YUV420P12}};
   for (const auto param : kBitDepthAndFormats) {
     // Copy cropped_frame into a highbit frame.
@@ -619,17 +697,19 @@ TEST_F(PaintCanvasVideoRendererTest, HighBitDepth) {
         param.format, cropped_frame()->coded_size(),
         cropped_frame()->visible_rect(), cropped_frame()->natural_size(),
         cropped_frame()->timestamp()));
-    for (int plane = VideoFrame::kYPlane; plane <= VideoFrame::kVPlane;
+    for (int plane = VideoFrame::Plane::kY; plane <= VideoFrame::Plane::kV;
          ++plane) {
       int width = cropped_frame()->row_bytes(plane);
-      uint16_t* dst = reinterpret_cast<uint16_t*>(frame->writable_data(plane));
-      const uint8_t* src = cropped_frame()->data(plane);
+      base::span<const uint8_t> src = cropped_frame()->data_span(plane);
+      base::span<uint8_t> dest = frame->writable_span(plane);
       for (int row = 0; row < cropped_frame()->rows(plane); row++) {
+        auto src_row = src.take_first(cropped_frame()->stride(plane));
+        auto dest_row = dest.take_first(frame->stride(plane));
         for (int col = 0; col < width; col++) {
-          dst[col] = src[col] << (param.bit_depth - 8);
+          const uint16_t value = src_row[col] << (param.bit_depth - 8);
+          dest_row.take_first<sizeof(uint16_t)>().copy_from_nonoverlapping(
+              base::byte_span_from_ref(value));
         }
-        src += cropped_frame()->stride(plane);
-        dst += frame->stride(plane) / 2;
       }
     }
 
@@ -662,20 +742,20 @@ TEST_F(PaintCanvasVideoRendererTest, Y16) {
   const int offset_y = 5;
   const int stride = bitmap.width() + offset_x;
   const size_t byte_size = stride * (bitmap.height() + offset_y) * 2;
-  std::unique_ptr<unsigned char, base::AlignedFreeDeleter> memory(
-      static_cast<unsigned char*>(base::AlignedAlloc(
-          byte_size, media::VideoFrame::kFrameAddressAlignment)));
+  auto memory = base::AlignedUninit<uint8_t>(
+      byte_size, media::VideoFrame::kFrameAddressAlignment);
   const gfx::Rect rect(offset_x, offset_y, bitmap.width(), bitmap.height());
   auto video_frame =
       CreateTestY16Frame(gfx::Size(stride, offset_y + bitmap.height()), rect,
-                         memory.get(), cropped_frame()->timestamp());
+                         memory, cropped_frame()->timestamp());
 
   cc::SkiaPaintCanvas canvas(bitmap);
   cc::PaintFlags flags;
   flags.setFilterQuality(cc::PaintFlags::FilterQuality::kNone);
-  renderer_.Paint(std::move(video_frame), &canvas,
-                  gfx::RectF(bitmap.width(), bitmap.height()), flags,
-                  kNoTransformation, nullptr);
+  PaintCanvasVideoRenderer::PaintParams paint_params;
+  paint_params.dest_rect = gfx::RectF(bitmap.width(), bitmap.height());
+  renderer_.Paint(std::move(video_frame), &canvas, flags, paint_params,
+                  nullptr);
   for (int j = 0; j < bitmap.height(); j++) {
     for (int i = 0; i < bitmap.width(); i++) {
       const int value = i + j * bitmap.width();
@@ -692,39 +772,26 @@ TEST_F(PaintCanvasVideoRendererTest, Yuv420P12OddWidth) {
   constexpr int kImgHeight = 3;
   constexpr int kUvWidth = (kImgWidth + 1) / 2;
   constexpr int kUvHeight = (kImgHeight + 1) / 2;
-  std::unique_ptr<uint16_t[]> y_plane =
-      std::make_unique<uint16_t[]>(kImgWidth * kImgHeight);
-  std::unique_ptr<uint16_t[]> u_plane =
-      std::make_unique<uint16_t[]>(kUvWidth * kUvHeight);
-  std::unique_ptr<uint16_t[]> v_plane =
-      std::make_unique<uint16_t[]>(kUvWidth * kUvHeight);
-  // Set all pixels to white.
-  for (int i = 0; i < kImgHeight; ++i) {
-    for (int j = 0; j < kImgWidth; ++j) {
-      y_plane[i * kImgWidth + j] = 4095;
-    }
-  }
-  for (int i = 0; i < kUvHeight; ++i) {
-    for (int j = 0; j < kUvWidth; ++j) {
-      u_plane[i * kUvWidth + j] = 2048;
-      v_plane[i * kUvWidth + j] = 2048;
-    }
-  }
+  auto y_plane = base::HeapArray<uint16_t>::Uninit(kImgWidth * kImgHeight);
+  auto u_plane = base::HeapArray<uint16_t>::Uninit(kUvWidth * kUvHeight);
+  auto v_plane = base::HeapArray<uint16_t>::Uninit(kUvWidth * kUvHeight);
   const int32_t y_stride = sizeof(uint16_t) * kImgWidth;
   const int32_t uv_stride = sizeof(uint16_t) * kUvWidth;
-  uint8_t* const y_data = reinterpret_cast<uint8_t*>(y_plane.get());
-  uint8_t* const u_data = reinterpret_cast<uint8_t*>(u_plane.get());
-  uint8_t* const v_data = reinterpret_cast<uint8_t*>(v_plane.get());
+  // Set all pixels to white.
+  std::ranges::fill(y_plane, 4095);
+  std::ranges::fill(u_plane, 2048);
+  std::ranges::fill(v_plane, 2048);
 
   auto size = gfx::Size(kImgWidth, kImgHeight);
   scoped_refptr<VideoFrame> frame = VideoFrame::WrapExternalYuvData(
       PIXEL_FORMAT_YUV420P12, size, gfx::Rect(size), size, y_stride, uv_stride,
-      uv_stride, y_data, u_data, v_data, base::TimeDelta());
+      uv_stride, base::as_byte_span(y_plane), base::as_byte_span(u_plane),
+      base::as_byte_span(v_plane), base::TimeDelta());
 
-  std::unique_ptr<uint32_t[]> rgba =
-      std::make_unique<uint32_t[]>(kImgWidth * kImgHeight);
+  auto rgba = base::HeapArray<uint32_t>::Uninit(kImgWidth * kImgHeight);
   PaintCanvasVideoRenderer::ConvertVideoFrameToRGBPixels(
-      frame.get(), rgba.get(), frame->visible_rect().width() * 4,
+      frame.get(), base::as_writable_byte_span(rgba),
+      frame->visible_rect().width() * 4, kN32_SkColorType,
       /*premultiply_alpha=*/true);
   for (int i = 0; i < kImgHeight; ++i) {
     for (int j = 0; j < kImgWidth; ++j) {
@@ -740,17 +807,14 @@ TEST_F(PaintCanvasVideoRendererTest, I420WithFilters) {
   constexpr int kImgHeight = 4;
   constexpr int kUvWidth = (kImgWidth + 1) / 2;
   constexpr int kUvHeight = (kImgHeight + 1) / 2;
-  std::unique_ptr<uint8_t[]> y_plane =
-      std::make_unique<uint8_t[]>(kImgWidth * kImgHeight);
-  std::unique_ptr<uint8_t[]> u_plane =
-      std::make_unique<uint8_t[]>(kUvWidth * kUvHeight);
-  std::unique_ptr<uint8_t[]> v_plane =
-      std::make_unique<uint8_t[]>(kUvWidth * kUvHeight);
+  auto y_plane = base::HeapArray<uint8_t>::Uninit(kImgWidth * kImgHeight);
+  auto u_plane = base::HeapArray<uint8_t>::Uninit(kUvWidth * kUvHeight);
+  auto v_plane = base::HeapArray<uint8_t>::Uninit(kUvWidth * kUvHeight);
   // In the JPEG color space (K_R = 0.299, K_B = 0.114, full range), red
   // (R = 255, G = 0, B = 0) is Y = 76, U = 85, V = 255.
   //
   // Set Y to 76 for all pixels.
-  memset(y_plane.get(), 76, kImgWidth * kImgHeight);
+  std::ranges::fill(y_plane, 76);
   // Set U = 85 and V = 255 for the upperleft pixel. Then vary U and V with a
   // linear, diagonal slope over the UV planes with a step size of 4 and -4,
   // respectively.
@@ -782,15 +846,15 @@ TEST_F(PaintCanvasVideoRendererTest, I420WithFilters) {
   auto size = gfx::Size(kImgWidth, kImgHeight);
   scoped_refptr<VideoFrame> frame = VideoFrame::WrapExternalYuvData(
       PIXEL_FORMAT_I420, size, gfx::Rect(size), size, kImgWidth, kUvWidth,
-      kUvWidth, y_plane.get(), u_plane.get(), v_plane.get(), base::TimeDelta());
+      kUvWidth, y_plane, u_plane, v_plane, base::TimeDelta());
   frame->set_color_space(gfx::ColorSpace::CreateJpeg());
 
-  std::unique_ptr<uint32_t[]> rgba =
-      std::make_unique<uint32_t[]>(kImgWidth * kImgHeight);
+  auto rgba = base::HeapArray<uint32_t>::Uninit(kImgWidth * kImgHeight);
 
   // First convert with kFilterNone (nearest neighbor).
   PaintCanvasVideoRenderer::ConvertVideoFrameToRGBPixels(
-      frame.get(), rgba.get(), frame->visible_rect().width() * 4,
+      frame.get(), base::as_writable_byte_span(rgba),
+      frame->visible_rect().width() * 4, kN32_SkColorType,
       /*premultiply_alpha=*/true);
 
   // The pixel at coordinates (1, 1) will have U = 89 and V = 251 if nearest
@@ -798,23 +862,24 @@ TEST_F(PaintCanvasVideoRendererTest, I420WithFilters) {
   int i = 1;
   int j = 1;
   uint32_t color = rgba[i * kImgWidth + j];
-  EXPECT_EQ(SkGetPackedA32(color), 255u);
-  EXPECT_EQ(SkGetPackedR32(color), 249u);
-  EXPECT_EQ(SkGetPackedG32(color), 1u);
-  EXPECT_EQ(SkGetPackedB32(color), 7u);
+  EXPECT_EQ(SkPMColorGetA(color), 255u);
+  EXPECT_EQ(SkPMColorGetR(color), 249u);
+  EXPECT_EQ(SkPMColorGetG(color), 1u);
+  EXPECT_EQ(SkPMColorGetB(color), 7u);
   // The pixel at coordinates (2, 2) will have U = 105 and V = 235 if nearest
   // neighbor is used. (The correct values are U = 101 and V = 239.)
   i = 2;
   j = 2;
   color = rgba[i * kImgWidth + j];
-  EXPECT_EQ(SkGetPackedA32(color), 255u);
-  EXPECT_EQ(SkGetPackedR32(color), 226u);
-  EXPECT_EQ(SkGetPackedG32(color), 7u);
-  EXPECT_EQ(SkGetPackedB32(color), 35u);
+  EXPECT_EQ(SkPMColorGetA(color), 255u);
+  EXPECT_EQ(SkPMColorGetR(color), 226u);
+  EXPECT_EQ(SkPMColorGetG(color), 7u);
+  EXPECT_EQ(SkPMColorGetB(color), 35u);
 
   // Then convert with kFilterBilinear (bilinear interpolation).
   PaintCanvasVideoRenderer::ConvertVideoFrameToRGBPixels(
-      frame.get(), rgba.get(), frame->visible_rect().width() * 4,
+      frame.get(), base::as_writable_byte_span(rgba),
+      frame->visible_rect().width() * 4, kN32_SkColorType,
       /*premultiply_alpha=*/true, PaintCanvasVideoRenderer::kFilterBilinear);
 
   // The pixel at coordinates (1, 1) will have the correct values U = 93 and
@@ -822,19 +887,19 @@ TEST_F(PaintCanvasVideoRendererTest, I420WithFilters) {
   i = 1;
   j = 1;
   color = rgba[i * kImgWidth + j];
-  EXPECT_EQ(SkGetPackedA32(color), 255u);
-  EXPECT_EQ(SkGetPackedR32(color), 243u);
-  EXPECT_EQ(SkGetPackedG32(color), 2u);
-  EXPECT_EQ(SkGetPackedB32(color), 14u);
+  EXPECT_EQ(SkPMColorGetA(color), 255u);
+  EXPECT_EQ(SkPMColorGetR(color), 243u);
+  EXPECT_EQ(SkPMColorGetG(color), 2u);
+  EXPECT_EQ(SkPMColorGetB(color), 14u);
   // The pixel at coordinates (2, 2) will have the correct values U = 101 and
   // V = 239 if bilinear interpolation is used.
   i = 2;
   j = 2;
   color = rgba[i * kImgWidth + j];
-  EXPECT_EQ(SkGetPackedA32(color), 255u);
-  EXPECT_EQ(SkGetPackedR32(color), 232u);
-  EXPECT_EQ(SkGetPackedG32(color), 5u);
-  EXPECT_EQ(SkGetPackedB32(color), 28u);
+  EXPECT_EQ(SkPMColorGetA(color), 255u);
+  EXPECT_EQ(SkPMColorGetR(color), 232u);
+  EXPECT_EQ(SkPMColorGetG(color), 5u);
+  EXPECT_EQ(SkPMColorGetB(color), 28u);
 }
 
 namespace {
@@ -898,33 +963,7 @@ class TestGLES2Interface : public gpu::gles2::GLES2InterfaceStub {
       texsubimage2d_callback_;
 };
 
-void MailboxHoldersReleased(const gpu::SyncToken& sync_token) {}
 }  // namespace
-
-// Test that PaintCanvasVideoRenderer::Paint doesn't crash when GrContext is
-// unable to wrap a video frame texture (eg due to being abandoned).
-TEST_F(PaintCanvasVideoRendererTest, ContextLost) {
-  auto context_provider = viz::TestContextProvider::Create();
-  context_provider->BindToCurrentSequence();
-  context_provider->GrContext()->abandonContext();
-
-  cc::SkiaPaintCanvas canvas(AllocBitmap(kWidth, kHeight));
-
-  gfx::Size size(kWidth, kHeight);
-  gpu::MailboxHolder holders[VideoFrame::kMaxPlanes] = {
-      gpu::MailboxHolder(gpu::Mailbox::GenerateForSharedImage(),
-                         gpu::SyncToken(), GL_TEXTURE_RECTANGLE_ARB)};
-  auto video_frame = VideoFrame::WrapNativeTextures(
-      PIXEL_FORMAT_NV12, holders, base::BindOnce(MailboxHoldersReleased), size,
-      gfx::Rect(size), size, kNoTimestamp);
-
-  cc::PaintFlags flags;
-  flags.setFilterQuality(cc::PaintFlags::FilterQuality::kLow);
-  renderer_.Paint(std::move(video_frame), &canvas, kNaturalRect, flags,
-                  kNoTransformation, context_provider.get());
-}
-
-void EmptyCallback(const gpu::SyncToken& sync_token) {}
 
 TEST_F(PaintCanvasVideoRendererTest, CorrectFrameSizeToVisibleRect) {
   constexpr int fWidth{16}, fHeight{16};
@@ -936,16 +975,16 @@ TEST_F(PaintCanvasVideoRendererTest, CorrectFrameSizeToVisibleRect) {
   gfx::Size coded_size(fWidth, fHeight);
   gfx::Size visible_size(fWidth / 2, fHeight / 2);
 
-  uint8_t memory[fWidth * fHeight * 2] = {0};
+  std::array<uint8_t, fWidth * fHeight * 2> memory = {};
 
   auto video_frame = media::VideoFrame::WrapExternalData(
       media::PIXEL_FORMAT_Y16, coded_size, gfx::Rect(visible_size),
-      visible_size, &memory[0], fWidth * fHeight * 2, base::Milliseconds(4));
+      visible_size, memory, base::Milliseconds(4));
 
-  gfx::RectF visible_rect(visible_size.width(), visible_size.height());
   cc::PaintFlags flags;
-  renderer_.Paint(std::move(video_frame), &canvas, visible_rect, flags,
-                  kNoTransformation, nullptr);
+  PaintCanvasVideoRenderer::PaintParams params;
+  params.dest_rect = gfx::RectF(visible_size.width(), visible_size.height());
+  renderer_.Paint(std::move(video_frame), &canvas, flags, params, nullptr);
 
   EXPECT_EQ(fWidth / 2, renderer_.LastImageDimensionsForTesting().width());
   EXPECT_EQ(fWidth / 2, renderer_.LastImageDimensionsForTesting().height());
@@ -960,13 +999,12 @@ TEST_F(PaintCanvasVideoRendererTest, TexImage2D_Y16_RGBA32F) {
   const int height = 16;
   const int stride = width + offset_x;
   const size_t byte_size = stride * (height + offset_y) * 2;
-  std::unique_ptr<unsigned char, base::AlignedFreeDeleter> memory(
-      static_cast<unsigned char*>(base::AlignedAlloc(
-          byte_size, media::VideoFrame::kFrameAddressAlignment)));
+  auto memory = base::AlignedUninit<uint8_t>(
+      byte_size, media::VideoFrame::kFrameAddressAlignment);
   const gfx::Rect rect(offset_x, offset_y, width, height);
   auto video_frame =
-      CreateTestY16Frame(gfx::Size(stride, offset_y + height), rect,
-                         memory.get(), cropped_frame()->timestamp());
+      CreateTestY16Frame(gfx::Size(stride, offset_y + height), rect, memory,
+                         cropped_frame()->timestamp());
 
   TestGLES2Interface gles2;
   // Bind the texImage2D callback to verify the uint16 to float32 conversion.
@@ -981,7 +1019,13 @@ TEST_F(PaintCanvasVideoRendererTest, TexImage2D_Y16_RGBA32F) {
         EXPECT_EQ(16, width);
         EXPECT_EQ(16, height);
         EXPECT_EQ(static_cast<unsigned>(GL_TEXTURE_2D), target);
-        const float* data = static_cast<const float*>(pixels);
+        // SAFETY: When we convert Y16 data to RGBAF32 data, our size will
+        // become four times the original. Width and height will remain
+        // unchanged.
+        auto data = UNSAFE_BUFFERS(base::span<const float>(
+            static_cast<const float*>(pixels),
+            base::CheckMul<size_t>(width, height, 4).ValueOrDie()));
+
         for (int j = 0; j < height; j++) {
           for (int i = 0; i < width; i++) {
             const int value = i + (height - j - 1) * width;  // flip_y is true.
@@ -996,7 +1040,8 @@ TEST_F(PaintCanvasVideoRendererTest, TexImage2D_Y16_RGBA32F) {
       });
   PaintCanvasVideoRenderer::TexImage2D(
       GL_TEXTURE_2D, 0, &gles2, gpu::Capabilities(), video_frame.get(), 0,
-      GL_RGBA, GL_RGBA, GL_FLOAT, true /*flip_y*/, true);
+      GL_RGBA, GL_RGBA, GL_FLOAT, kBottomLeft_GrSurfaceOrigin,
+      kPremul_SkAlphaType);
 }
 
 TEST_F(PaintCanvasVideoRendererTest, TexSubImage2D_Y16_R32F) {
@@ -1008,13 +1053,13 @@ TEST_F(PaintCanvasVideoRendererTest, TexSubImage2D_Y16_R32F) {
   const int height = 16;
   const int stride = width + offset_x;
   const size_t byte_size = stride * (height + offset_y) * 2;
-  std::unique_ptr<unsigned char, base::AlignedFreeDeleter> memory(
-      static_cast<unsigned char*>(base::AlignedAlloc(
-          byte_size, media::VideoFrame::kFrameAddressAlignment)));
+  auto memory = base::AlignedUninit<uint8_t>(
+      byte_size, media::VideoFrame::kFrameAddressAlignment);
+
   const gfx::Rect rect(offset_x, offset_y, width, height);
   auto video_frame =
-      CreateTestY16Frame(gfx::Size(stride, offset_y + height), rect,
-                         memory.get(), cropped_frame()->timestamp());
+      CreateTestY16Frame(gfx::Size(stride, offset_y + height), rect, memory,
+                         cropped_frame()->timestamp());
 
   TestGLES2Interface gles2;
   // Bind the texImage2D callback to verify the uint16 to float32 conversion.
@@ -1029,7 +1074,12 @@ TEST_F(PaintCanvasVideoRendererTest, TexSubImage2D_Y16_R32F) {
         EXPECT_EQ(16, width);
         EXPECT_EQ(16, height);
         EXPECT_EQ(static_cast<unsigned>(GL_TEXTURE_2D), target);
-        const float* data = static_cast<const float*>(pixels);
+        // SAFETY: When we convert Y16 to R32, our data size is equal to the
+        // original size.
+        auto data = UNSAFE_BUFFERS(base::span<const float>(
+            static_cast<const float*>(pixels),
+            base::CheckMul<size_t>(width, height).ValueOrDie()));
+
         for (int j = 0; j < height; j++) {
           for (int i = 0; i < width; i++) {
             const int value = i + j * width;  // flip_y is false.
@@ -1041,25 +1091,35 @@ TEST_F(PaintCanvasVideoRendererTest, TexSubImage2D_Y16_R32F) {
       });
   PaintCanvasVideoRenderer::TexSubImage2D(
       GL_TEXTURE_2D, &gles2, video_frame.get(), 0, GL_RED, GL_FLOAT,
-      2 /*xoffset*/, 1 /*yoffset*/, false /*flip_y*/, true);
+      2 /*xoffset*/, 1 /*yoffset*/, kTopLeft_GrSurfaceOrigin,
+      kPremul_SkAlphaType);
 }
 
-// Fixture for tests that require a GL context.
+// Fixture for tests that require a GL context as destination.
 class PaintCanvasVideoRendererWithGLTest : public testing::Test {
  public:
   using GetColorCallback = base::RepeatingCallback<SkColor(int, int)>;
 
   void SetUp() override {
+    if (base::FeatureList::IsEnabled(features::kVulkanFromANGLE)) {
+      // TODO (crbug.com/440128352):
+      // If kVulkanFromANGLE = true (e.g. Desktop Android)
+      // this test fails like this
+      // "Failed to create and initialize Vulkan implementation."
+      GTEST_SKIP() << "Temporarily skipped for Android Desktop devices. See: "
+                      "crbug.com/440128352";
+    }
+
     display_ = gl::GLSurfaceTestSupport::InitializeOneOff();
     enable_pixels_.emplace();
     media_context_ = base::MakeRefCounted<viz::TestInProcessContextProvider>(
-        viz::TestContextType::kGpuRaster, /*support_locking=*/false);
+        viz::TestContextType::kRaster, /*support_locking=*/false);
     gpu::ContextResult result = media_context_->BindToCurrentSequence();
     ASSERT_EQ(result, gpu::ContextResult::kSuccess);
 
-    gles2_context_ = base::MakeRefCounted<viz::TestInProcessContextProvider>(
-        viz::TestContextType::kGLES2, /*support_locking=*/false);
-    result = gles2_context_->BindToCurrentSequence();
+    raster_context_ = base::MakeRefCounted<viz::TestInProcessContextProvider>(
+        viz::TestContextType::kRaster, /*support_locking=*/false);
+    result = raster_context_->BindToCurrentSequence();
     ASSERT_EQ(result, gpu::ContextResult::kSuccess);
 
     destination_context_ =
@@ -1072,16 +1132,32 @@ class PaintCanvasVideoRendererWithGLTest : public testing::Test {
 
   void TearDown() override {
     renderer_.ResetCache();
+    rgb_shared_image_cache_.reset();
+    yuv_shared_image_cache_.reset();
     destination_context_.reset();
-    gles2_context_.reset();
+    raster_context_.reset();
     media_context_.reset();
     enable_pixels_.reset();
     viz::TestGpuServiceHolder::ResetInstance();
     gl::GLSurfaceTestSupport::ShutdownGL(display_);
   }
 
-  // Uses CopyVideoFrameTexturesToGLTexture to copy |frame| into a GL texture,
-  // reads back its contents, and runs |check_pixels| to validate it.
+  VideoFrameSharedImageCache* GetRGBSharedImageCache() {
+    if (!rgb_shared_image_cache_) {
+      rgb_shared_image_cache_ = std::make_unique<VideoFrameSharedImageCache>();
+    }
+    return rgb_shared_image_cache_.get();
+  }
+
+  VideoFrameSharedImageCache* GetYUVSharedImageCache() {
+    if (!yuv_shared_image_cache_) {
+      yuv_shared_image_cache_ = std::make_unique<VideoFrameSharedImageCache>();
+    }
+    return yuv_shared_image_cache_.get();
+  }
+
+  // Copies |frame| into a GL texture, reads back its contents, and runs
+  // |check_pixels| to validate it.
   template <class CheckPixels>
   void CopyVideoFrameTexturesAndCheckPixels(scoped_refptr<VideoFrame> frame,
                                             CheckPixels check_pixels) {
@@ -1090,25 +1166,39 @@ class PaintCanvasVideoRendererWithGLTest : public testing::Test {
     GLenum target = GL_TEXTURE_2D;
     GLuint texture = 0;
     destination_gl->GenTextures(1, &texture);
-    destination_gl->BindTexture(target, texture);
-
-    renderer_.CopyVideoFrameTexturesToGLTexture(
-        media_context_.get(), destination_gl, frame, target, texture, GL_RGBA,
-        GL_RGBA, GL_UNSIGNED_BYTE, 0, false /* premultiply_alpha */,
-        false /* flip_y */);
 
     gfx::Size expected_size = frame->visible_rect().size();
 
-    std::unique_ptr<uint8_t[]> pixels =
+    const auto shared_image = frame->shared_image();
+    CHECK(destination_gl->CanCopySharedImageDirectlyToGLTexture(
+        media::IsOpaque(frame->format()), shared_image.get(), target, GL_RGBA,
+        GL_UNSIGNED_BYTE, 0, kUnpremul_SkAlphaType));
+    destination_gl->BindTexture(target, texture);
+    destination_gl->TexImage2D(target, 0, GL_RGBA, expected_size.width(),
+                               expected_size.height(), 0, GL_RGBA,
+                               GL_UNSIGNED_BYTE, nullptr);
+    base::OnceCallback<gpu::SyncToken()> sync_callback =
+        destination_gl->CopySharedImageDirectlyToGLTexture(
+            frame->visible_rect(), shared_image.get(),
+            frame->acquire_sync_token(), media::IsOpaque(frame->format()),
+            target, texture, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, 0,
+            kUnpremul_SkAlphaType, kTopLeft_GrSurfaceOrigin);
+
+    media::PaintCanvasVideoRenderer::SynchronizeVideoFrameRead(
+        std::move(frame), destination_gl,
+        destination_context_->ContextSupport(), std::move(sync_callback));
+
+    base::HeapArray<uint8_t> pixels =
         ReadbackTexture(destination_gl, texture, expected_size);
     destination_gl->DeleteTextures(1, &texture);
 
     auto get_color = base::BindRepeating(
-        [](uint8_t* pixels, const gfx::Size& size, int x, int y) {
-          uint8_t* p = pixels + (size.width() * y + x) * 4;
+        [](base::span<uint8_t> pixels, const gfx::Size& size, int x, int y) {
+          base::span<uint8_t> p = pixels.subspan(
+              base::CheckMul<size_t>(size.width() * y + x, 4).ValueOrDie());
           return SkColorSetARGB(p[3], p[0], p[1], p[2]);
         },
-        pixels.get(), expected_size);
+        pixels.as_span(), expected_size);
     check_pixels(get_color);
   }
 
@@ -1133,7 +1223,7 @@ class PaintCanvasVideoRendererWithGLTest : public testing::Test {
   // Creates a cropped RGBA VideoFrame. |closure| is run once the shared images
   // backing the VideoFrame have been destroyed.
   scoped_refptr<VideoFrame> CreateTestRGBAFrame(base::OnceClosure closure) {
-    return CreateSharedImageRGBAFrame(gles2_context_, gfx::Size(16, 8),
+    return CreateSharedImageRGBAFrame(raster_context_, gfx::Size(16, 8),
                                       gfx::Rect(3, 3, 12, 4),
                                       std::move(closure));
   }
@@ -1165,7 +1255,7 @@ class PaintCanvasVideoRendererWithGLTest : public testing::Test {
   // Creates a cropped I420 VideoFrame. |closure| is run once the shared images
   // backing the VideoFrame have been destroyed.
   scoped_refptr<VideoFrame> CreateTestI420Frame(base::OnceClosure closure) {
-    return CreateSharedImageI420Frame(gles2_context_, gfx::Size(16, 8),
+    return CreateSharedImageI420Frame(raster_context_, gfx::Size(16, 8),
                                       gfx::Rect(2, 2, 12, 4),
                                       std::move(closure));
   }
@@ -1173,7 +1263,7 @@ class PaintCanvasVideoRendererWithGLTest : public testing::Test {
   // backing the VideoFrame have been destroyed.
   scoped_refptr<VideoFrame> CreateTestI420FrameNotSubset(
       base::OnceClosure closure) {
-    return CreateSharedImageI420Frame(gles2_context_, gfx::Size(16, 8),
+    return CreateSharedImageI420Frame(raster_context_, gfx::Size(16, 8),
                                       gfx::Rect(0, 0, 16, 8),
                                       std::move(closure));
   }
@@ -1216,7 +1306,7 @@ class PaintCanvasVideoRendererWithGLTest : public testing::Test {
   // not available. |closure| is run once the shared images backing the
   // VideoFrame have been destroyed.
   scoped_refptr<VideoFrame> CreateTestNV12Frame(base::OnceClosure closure) {
-    return CreateSharedImageNV12Frame(gles2_context_, gfx::Size(16, 8),
+    return CreateSharedImageNV12Frame(raster_context_, gfx::Size(16, 8),
                                       gfx::Rect(2, 2, 12, 4),
                                       std::move(closure));
   }
@@ -1232,12 +1322,14 @@ class PaintCanvasVideoRendererWithGLTest : public testing::Test {
   scoped_refptr<VideoFrame> cropped_frame() { return cropped_frame_; }
 
  protected:
-  absl::optional<gl::DisableNullDrawGLBindings> enable_pixels_;
+  std::optional<gl::DisableNullDrawGLBindings> enable_pixels_;
   scoped_refptr<viz::TestInProcessContextProvider> media_context_;
-  scoped_refptr<viz::TestInProcessContextProvider> gles2_context_;
+  scoped_refptr<viz::TestInProcessContextProvider> raster_context_;
   scoped_refptr<viz::TestInProcessContextProvider> destination_context_;
 
   PaintCanvasVideoRenderer renderer_;
+  std::unique_ptr<VideoFrameSharedImageCache> rgb_shared_image_cache_;
+  std::unique_ptr<VideoFrameSharedImageCache> yuv_shared_image_cache_;
   scoped_refptr<VideoFrame> cropped_frame_;
   base::test::TaskEnvironment task_environment_;
   raw_ptr<gl::GLDisplay> display_ = nullptr;
@@ -1251,16 +1343,17 @@ TEST_F(PaintCanvasVideoRendererWithGLTest, CopyVideoFrameYUVDataToGLTexture) {
   destination_gl->GenTextures(1, &texture);
   destination_gl->BindTexture(target, texture);
 
-  renderer_.CopyVideoFrameYUVDataToGLTexture(
-      media_context_.get(), destination_gl, cropped_frame(), target, texture,
-      GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, 0, false /* premultiply_alpha */,
-      false /* flip_y */);
+  PaintCanvasVideoRenderer::CopyVideoFrameYUVDataToGLTexture(
+      media_context_.get(), destination_gl, cropped_frame(),
+      GetRGBSharedImageCache(), GetYUVSharedImageCache(), target, texture,
+      GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, 0, kUnpremul_SkAlphaType,
+      kTopLeft_GrSurfaceOrigin);
 
   gfx::Size expected_size = cropped_frame()->visible_rect().size();
 
-  std::unique_ptr<uint8_t[]> pixels =
+  base::HeapArray<uint8_t> pixels =
       ReadbackTexture(destination_gl, texture, expected_size);
-  auto get_color = ColorGetter(pixels.get(), expected_size);
+  auto get_color = ColorGetter(pixels, expected_size);
 
   // Avoid checking around the seams.
   EXPECT_EQ(SK_ColorBLACK, get_color(0, 0));
@@ -1283,16 +1376,17 @@ TEST_F(PaintCanvasVideoRendererWithGLTest,
   destination_gl->GenTextures(1, &texture);
   destination_gl->BindTexture(target, texture);
 
-  renderer_.CopyVideoFrameYUVDataToGLTexture(
-      media_context_.get(), destination_gl, cropped_frame(), target, texture,
-      GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, 0, false /* premultiply_alpha */,
-      true /* flip_y */);
+  PaintCanvasVideoRenderer::CopyVideoFrameYUVDataToGLTexture(
+      media_context_.get(), destination_gl, cropped_frame(),
+      GetRGBSharedImageCache(), GetYUVSharedImageCache(), target, texture,
+      GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, 0, kUnpremul_SkAlphaType,
+      kBottomLeft_GrSurfaceOrigin);
 
   gfx::Size expected_size = cropped_frame()->visible_rect().size();
 
-  std::unique_ptr<uint8_t[]> pixels =
+  base::HeapArray<uint8_t> pixels =
       ReadbackTexture(destination_gl, texture, expected_size);
-  auto get_color = ColorGetter(pixels.get(), expected_size);
+  auto get_color = ColorGetter(pixels, expected_size);
 
   // Avoid checking around the seams.
   EXPECT_EQ(SK_ColorBLACK, get_color(0, 5));
@@ -1346,6 +1440,13 @@ TEST_F(PaintCanvasVideoRendererWithGLTest, PaintRGBA) {
   run_loop.Run();
 }
 
+// This test cannot take the direct-copy codepath on
+// android-desktop-x64-rel-15-tests, which causes it to fail there. Disable it
+// temporarily on Android.
+// TODO(crbug.com/343011436): Move these tests to be on
+// WebGLRenderingContextBase, where they can use the two-copy path and be
+// re-enabled on Android.
+#if !BUILDFLAG(IS_ANDROID)
 // Checks that we correctly copy an I420 shared image VideoFrame when using
 // CopyVideoFrameYUVDataToGLTexture, including correct cropping.
 TEST_F(PaintCanvasVideoRendererWithGLTest,
@@ -1358,6 +1459,7 @@ TEST_F(PaintCanvasVideoRendererWithGLTest,
   frame.reset();
   run_loop.Run();
 }
+#endif
 
 // Checks that we correctly paint a I420 shared image VideoFrame, including
 // correct cropping.
@@ -1384,6 +1486,13 @@ TEST_F(PaintCanvasVideoRendererWithGLTest, PaintI420NotSubset) {
   run_loop.Run();
 }
 
+// This test cannot take the direct-copy codepath on
+// android-desktop-x64-rel-15-tests, which causes it to fail there. Disable it
+// temporarily on Android.
+// TODO(crbug.com/343011436): Move these tests to be on
+// WebGLRenderingContextBase, where they can use the two-copy path and be
+// re-enabled on Android.
+#if !BUILDFLAG(IS_ANDROID)
 // Checks that we correctly copy a NV12 shared image VideoFrame when using
 // CopyVideoFrameYUVDataToGLTexture, including correct cropping.
 TEST_F(PaintCanvasVideoRendererWithGLTest,
@@ -1400,6 +1509,7 @@ TEST_F(PaintCanvasVideoRendererWithGLTest,
   frame.reset();
   run_loop.Run();
 }
+#endif
 
 // Checks that we correctly paint a NV12 shared image VideoFrame, including
 // correct cropping.

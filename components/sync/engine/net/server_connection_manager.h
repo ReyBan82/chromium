@@ -12,7 +12,9 @@
 #include <string>
 
 #include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "base/sequence_checker.h"
+#include "components/signin/public/identity_manager/access_token_info.h"
 
 namespace syncer {
 
@@ -27,9 +29,6 @@ struct HttpResponse {
     // CONNECTION_UNAVAILABLE means either the request got canceled or it
     // encountered a network error.
     CONNECTION_UNAVAILABLE,
-
-    // IO_ERROR is returned when reading/writing to a buffer has failed.
-    IO_ERROR,
 
     // SYNC_SERVER_ERROR is returned when the HTTP status code indicates that
     // a non-auth error has occurred.
@@ -55,9 +54,6 @@ struct HttpResponse {
   // The value of the Content-length header.
   int64_t content_length;
 
-  // The size of a download request's payload.
-  int64_t payload_length;
-
   static HttpResponse Uninitialized();
   static HttpResponse ForNetError(int net_error_code);
   static HttpResponse ForUnspecifiedError();
@@ -65,7 +61,6 @@ struct HttpResponse {
 
   // For testing only.
   static HttpResponse ForSuccessForTest();
-  static HttpResponse ForIoErrorForTest();
 
  private:
   // Private to prevent accidental usage. Use Uninitialized() if you really need
@@ -79,12 +74,12 @@ struct ServerConnectionEvent {
       : connection_code(code) {}
 };
 
-class ServerConnectionEventListener {
+class ServerConnectionEventListener : public base::CheckedObserver {
  public:
   virtual void OnServerConnectionEvent(const ServerConnectionEvent& event) = 0;
 
  protected:
-  virtual ~ServerConnectionEventListener() = default;
+  ~ServerConnectionEventListener() override = default;
 };
 
 // Use this class to interact with the sync server.
@@ -99,14 +94,16 @@ class ServerConnectionManager {
 
   virtual ~ServerConnectionManager();
 
-  // POSTs |buffer_in| and reads the body of the response into |buffer_out|.
-  // Uses the currently set access token in the headers. When |allow_batching|
-  // is true, the embedder's network stack may batch the post request depending
-  // on the network quality to streamline network access.
-  // TODO(https://crbug.com/1293657): Consider integrating batching logic into
-  // the sync code rather than relying on the embedder's network stack.
+  // POSTs `buffer_in` and reads the body of the response into `buffer_out`.
+  // Uses the given `access_token_info` or the cached one in the headers.
+  HttpResponse PostBufferWithAccessToken(
+      const std::string& buffer_in,
+      std::string* buffer_out,
+      const signin::AccessTokenInfo& access_token_info);
+
+  // POSTs `buffer_in` and reads the body of the response into `buffer_out`.
+  // Uses the cached access token in the headers.
   HttpResponse PostBufferWithCachedAuth(const std::string& buffer_in,
-                                        bool allow_batching,
                                         std::string* buffer_out);
 
   void AddListener(ServerConnectionEventListener* listener);
@@ -127,34 +124,41 @@ class ServerConnectionManager {
     return server_response_.http_status_code;
   }
 
-  // Sets a new access token. If |access_token| is empty, the current token is
-  // invalidated and cleared. Returns false if the server is in authentication
-  // error state.
-  bool SetAccessToken(const std::string& access_token);
+  // Sets a new access token. If `access_token_info` is empty, the cached token
+  // is invalidated and cleared. Returns false if the server is in
+  // authentication error state.
+  bool SetAccessTokenInfo(const signin::AccessTokenInfo& access_token_info);
 
-  bool HasInvalidAccessToken() { return access_token_.empty(); }
+  // Returns true if the cached access token is not empty.
+  bool HasCachedAccessToken() const;
 
  protected:
-  // Updates |server_response_| and notifies listeners if the server status
+  // Updates `server_response_` and notifies listeners if the server status
   // changed.
   void SetServerResponse(const HttpResponse& server_response);
 
   // Internal PostBuffer base function which subclasses are expected to
   // implement.
-  virtual HttpResponse PostBuffer(const std::string& buffer_in,
-                                  const std::string& access_token,
-                                  bool allow_batching,
-                                  std::string* buffer_out) = 0;
+  virtual HttpResponse PostBuffer(
+      const std::string& buffer_in,
+      std::string* buffer_out,
+      const signin::AccessTokenInfo& access_token_info) = 0;
 
-  void ClearAccessToken();
+  // Clears the current cached access token.
+  void ClearCachedAccessToken();
+
+  // Returns true if `access_token_info` has a non-empty token and is not
+  // expired (unless token validation is disabled via kSyncValidateAccessToken).
+  static bool IsAccessTokenInfoValid(
+      const signin::AccessTokenInfo& access_token_info);
 
  private:
   void NotifyStatusChanged();
 
   // The access token to use in authenticated requests.
-  std::string access_token_;
+  signin::AccessTokenInfo cached_access_token_info_;
 
-  base::ObserverList<ServerConnectionEventListener>::Unchecked listeners_;
+  base::ObserverList<ServerConnectionEventListener> listeners_;
 
   HttpResponse server_response_;
 

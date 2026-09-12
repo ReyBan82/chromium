@@ -47,10 +47,9 @@ namespace container_internal {
 
 template <class Reference, class Policy>
 struct node_slot_policy {
-  static_assert(std::is_lvalue_reference<Reference>::value, "");
+  static_assert(std::is_lvalue_reference_v<Reference>);
 
-  using slot_type = typename std::remove_cv<
-      typename std::remove_reference<Reference>::type>::type*;
+  using slot_type = std::remove_cv_t<std::remove_reference_t<Reference>>*;
 
   template <class Alloc, class... Args>
   static void construct(Alloc* alloc, slot_type* slot, Args&&... args) {
@@ -62,9 +61,12 @@ struct node_slot_policy {
     Policy::delete_element(alloc, *slot);
   }
 
+  // Returns true_type to indicate that transfer can use memcpy.
   template <class Alloc>
-  static void transfer(Alloc*, slot_type* new_slot, slot_type* old_slot) {
+  static std::true_type transfer(Alloc*, slot_type* new_slot,
+                                 slot_type* old_slot) {
     *new_slot = *old_slot;
+    return {};
   }
 
   static size_t space_used(const slot_type* slot) {

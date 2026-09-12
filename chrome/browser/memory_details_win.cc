@@ -2,14 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Windows headers must come first.
+#include "chrome/browser/memory_details.h"
+
 #include <windows.h>
 
+#include <TlHelp32.h>
 #include <psapi.h>
 #include <stddef.h>
-#include <TlHelp32.h>
-
-#include "chrome/browser/memory_details.h"
 
 #include <memory>
 
@@ -24,7 +23,6 @@
 #include "base/win/scoped_handle.h"
 #include "base/win/windows_version.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/grit/chromium_strings.h"
 #include "components/version_info/version_info.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -36,7 +34,7 @@ MemoryDetails::MemoryDetails() {
   base::PathService::Get(base::FILE_EXE, &browser_process_path);
 
   ProcessData process;
-  process.name = l10n_util::GetStringUTF16(IDS_PRODUCT_NAME);
+  process.name = base::ASCIIToUTF16(version_info::GetProductName());
   process.process_name = browser_process_path.BaseName().AsUTF16Unsafe();
   process_data_.push_back(process);
 }
@@ -56,11 +54,11 @@ void MemoryDetails::CollectProcessData(
   base::win::ScopedHandle snapshot(
       ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
   PROCESSENTRY32 process_entry = {sizeof(PROCESSENTRY32)};
-  if (!snapshot.Get()) {
+  if (!snapshot.get()) {
     LOG(ERROR) << "CreateToolhelp32Snapshot failed: " << GetLastError();
     return;
   }
-  if (!::Process32First(snapshot.Get(), &process_entry)) {
+  if (!::Process32First(snapshot.get(), &process_entry)) {
     LOG(ERROR) << "Process32First failed: " << GetLastError();
     return;
   }
@@ -68,8 +66,9 @@ void MemoryDetails::CollectProcessData(
     base::ProcessId pid = process_entry.th32ProcessID;
     base::win::ScopedHandle process_handle(::OpenProcess(
         PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid));
-    if (!process_handle.IsValid())
+    if (!process_handle.is_valid()) {
       continue;
+    }
     if (_wcsicmp(base::as_wcstr(process_data_[0].process_name),
                  process_entry.szExeFile) != 0) {
       continue;
@@ -96,7 +95,7 @@ void MemoryDetails::CollectProcessData(
 
     // Add the process info to our list.
     process_data_[0].processes.push_back(info);
-  } while (::Process32Next(snapshot.Get(), &process_entry));
+  } while (::Process32Next(snapshot.get(), &process_entry));
 
   // Finally return to the browser thread.
   content::GetUIThreadTaskRunner({})->PostTask(

@@ -17,6 +17,7 @@ import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * Handles running cleanup tasks when an object becomes eligible for GC. Cleanup tasks
@@ -34,35 +35,37 @@ import java.util.Set;
 public class CleanupReference extends WeakReference<Object> {
     private static final String TAG = "CleanupReference";
 
-    private static final boolean DEBUG = false;  // Always check in as false!
+    private static final boolean DEBUG = false; // Always check in as false!
 
     // The VM will enqueue CleanupReference instance onto sGcQueue when it becomes eligible for
     // garbage collection (i.e. when all references to the underlying object are nullified).
     // |sReaperThread| processes this queue by forwarding the references on to the UI thread
     // (via REMOVE_REF message) to perform cleanup.
-    private static ReferenceQueue<Object> sGcQueue = new ReferenceQueue<Object>();
-    private static Object sCleanupMonitor = new Object();
+    private static final ReferenceQueue<Object> sGcQueue = new ReferenceQueue<Object>();
+    private static final Object sCleanupMonitor = new Object();
 
-    private static final Thread sReaperThread = new Thread(TAG) {
-        @Override
-        @SuppressWarnings("WaitNotInLoop")
-        public void run() {
-            while (true) {
-                try {
-                    CleanupReference ref = (CleanupReference) sGcQueue.remove();
-                    if (DEBUG) Log.d(TAG, "removed one ref from GC queue");
-                    synchronized (sCleanupMonitor) {
-                        Message.obtain(LazyHolder.sHandler, REMOVE_REF, ref).sendToTarget();
-                        // Give the UI thread chance to run cleanup before looping around and
-                        // taking the next item from the queue, to avoid Message bombing it.
-                        sCleanupMonitor.wait(500);
+    private static final Thread sReaperThread =
+            new Thread(TAG) {
+                @Override
+                @SuppressWarnings("WaitNotInLoop")
+                public void run() {
+                    while (true) {
+                        try {
+                            CleanupReference ref = (CleanupReference) sGcQueue.remove();
+                            if (DEBUG) Log.d(TAG, "removed one ref from GC queue");
+                            synchronized (sCleanupMonitor) {
+                                Message.obtain(LazyHolder.sHandler, REMOVE_REF, ref).sendToTarget();
+                                // Give the UI thread chance to run cleanup before looping around
+                                // and taking the next item from the queue, to avoid Message
+                                // bombing it.
+                                sCleanupMonitor.wait(500);
+                            }
+                        } catch (Exception e) {
+                            Log.e(TAG, "Queue remove exception:", e);
+                        }
                     }
-                } catch (Exception e) {
-                    Log.e(TAG, "Queue remove exception:", e);
                 }
-            }
-        }
-    };
+            };
 
     static {
         sReaperThread.setDaemon(true);
@@ -84,56 +87,72 @@ public class CleanupReference extends WeakReference<Object> {
      */
     @SuppressLint("HandlerLeak")
     private static class LazyHolder {
-        static final Handler sHandler = new Handler(ThreadUtils.getUiThreadLooper()) {
-            @Override
-            public void handleMessage(Message msg) {
-                try {
-                    TraceEvent.begin("CleanupReference.LazyHolder.handleMessage");
-                    CleanupReference ref = (CleanupReference) msg.obj;
-                    switch (msg.what) {
-                        case ADD_REF:
-                            sRefs.add(ref);
-                            break;
-                        case REMOVE_REF:
-                            ref.runCleanupTaskInternal();
-                            break;
-                        default:
-                            Log.e(TAG, "Bad message=%d", msg.what);
-                            break;
+        static final Handler sHandler =
+                new Handler(ThreadUtils.getUiThreadLooper()) {
+                    @Override
+                    public void handleMessage(Message msg) {
+                        doHandleMessage(msg, /* drainGcQueue= */ true);
                     }
+                };
+    }
 
-                    if (DEBUG) Log.d(TAG, "will try and cleanup; max = %d", sRefs.size());
+    /*
+     * Add or remove a reference, and maybe drain the GC queue.
+     *
+     * Draining the GC queue on each message can help to avoid falling behind on rapid garbage
+     * allocation inner loops, but needs to be done on a fairly clean stack to avoid reentrancy
+     * issues. (Draining the queue upon cleanup of one object could trigger the cleanup of another
+     * unrelated object, which could destroy a (native) object that's still in use on the stack.)
+     */
+    private static void doHandleMessage(Message msg, boolean drainGcQueue) {
+        try {
+            TraceEvent.begin("CleanupReference.LazyHolder.handleMessage");
+            CleanupReference ref = (CleanupReference) msg.obj;
+            switch (msg.what) {
+                case ADD_REF:
+                    sRefs.add(ref);
+                    break;
+                case REMOVE_REF:
+                    ref.runCleanupTaskInternal();
+                    break;
+                default:
+                    Log.e(TAG, "Bad message=%d", msg.what);
+                    break;
+            }
 
-                    synchronized (sCleanupMonitor) {
-                        // Always run the cleanup loop here even when adding or removing refs, to
-                        // avoid falling behind on rapid garbage allocation inner loops.
-                        while ((ref = (CleanupReference) sGcQueue.poll()) != null) {
-                            ref.runCleanupTaskInternal();
-                        }
-                        sCleanupMonitor.notifyAll();
+            if (drainGcQueue) {
+                if (DEBUG) Log.d(TAG, "will try and cleanup; max = %d", sRefs.size());
+
+                synchronized (sCleanupMonitor) {
+                    while ((ref = (CleanupReference) sGcQueue.poll()) != null) {
+                        ref.runCleanupTaskInternal();
                     }
-                } finally {
-                    TraceEvent.end("CleanupReference.LazyHolder.handleMessage");
+                    sCleanupMonitor.notifyAll();
                 }
             }
-        };
+        } finally {
+            TraceEvent.end("CleanupReference.LazyHolder.handleMessageWithoutPollingQueue");
+        }
     }
 
     /**
-     * Keep a strong reference to {@link CleanupReference} so that it will
-     * actually get enqueued.
+     * Keep a strong reference to {@link CleanupReference} so that it will actually get enqueued.
      * Only accessed on the UI thread.
      */
-    private static Set<CleanupReference> sRefs = new HashSet<CleanupReference>();
+    private static final Set<CleanupReference> sRefs = new HashSet<CleanupReference>();
 
-    private Runnable mCleanupTask;
+    private Consumer<Boolean> mCleanupTask;
+    // Whether the cleanup was triggered by an explicit call to cleanupNow() rather than
+    // a garbage collection event.
+    private boolean mExplicitCleanup;
 
     /**
-     * @param obj the object whose loss of reachability should trigger the
-     *            cleanup task.
-     * @param cleanupTask the task to run once obj loses reachability.
+     * @param obj the object whose loss of reachability should trigger the cleanup task.
+     * @param cleanupTask the boolean consumer task to run once obj loses reachability. The boolean
+     *     parameter indicates whether the cleanup was triggered by an explicit call to {@link
+     *     #cleanupNow()} rather than a garbage collection event.
      */
-    public CleanupReference(Object obj, Runnable cleanupTask) {
+    public CleanupReference(Object obj, Consumer<Boolean> cleanupTask) {
         super(obj, sGcQueue);
         if (DEBUG) Log.d(TAG, "+++ CREATED ONE REF");
         mCleanupTask = cleanupTask;
@@ -145,6 +164,7 @@ public class CleanupReference extends WeakReference<Object> {
      * after garbage collection.
      */
     public void cleanupNow() {
+        mExplicitCleanup = true;
         handleOnUiThread(REMOVE_REF);
     }
 
@@ -155,7 +175,7 @@ public class CleanupReference extends WeakReference<Object> {
     private void handleOnUiThread(int what) {
         Message msg = Message.obtain(LazyHolder.sHandler, what, this);
         if (Looper.myLooper() == msg.getTarget().getLooper()) {
-            msg.getTarget().handleMessage(msg);
+            doHandleMessage(msg, /* drainGcQueue= */ false);
             msg.recycle();
         } else {
             msg.sendToTarget();
@@ -165,11 +185,11 @@ public class CleanupReference extends WeakReference<Object> {
     private void runCleanupTaskInternal() {
         if (DEBUG) Log.d(TAG, "runCleanupTaskInternal");
         sRefs.remove(this);
-        Runnable cleanupTask = mCleanupTask;
+        Consumer<Boolean> cleanupTask = mCleanupTask;
         mCleanupTask = null;
         if (cleanupTask != null) {
             if (DEBUG) Log.i(TAG, "--- CLEANING ONE REF");
-            cleanupTask.run();
+            cleanupTask.accept(mExplicitCleanup);
         }
         clear();
     }

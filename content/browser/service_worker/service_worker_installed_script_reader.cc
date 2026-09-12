@@ -6,6 +6,8 @@
 
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/memory/ref_counted.h"
 #include "base/task/sequenced_task_runner.h"
@@ -23,7 +25,6 @@ class ServiceWorkerInstalledScriptReader::MetaDataSender {
   MetaDataSender(scoped_refptr<net::IOBufferWithSize> meta_data,
                  mojo::ScopedDataPipeProducerHandle handle)
       : meta_data_(std::move(meta_data)),
-        bytes_sent_(0),
         handle_(std::move(handle)),
         watcher_(FROM_HERE,
                  mojo::SimpleWatcher::ArmingPolicy::AUTOMATIC,
@@ -39,19 +40,20 @@ class ServiceWorkerInstalledScriptReader::MetaDataSender {
   void OnWritable(MojoResult) {
     // It isn't necessary to handle MojoResult here since WriteDataRaw()
     // returns an equivalent error.
-    uint32_t size = meta_data_->size() - bytes_sent_;
+    base::span<const uint8_t> bytes_to_write =
+        meta_data_->span().subspan(bytes_sent_);
+    size_t actually_written_bytes = 0;
     TRACE_EVENT2(
         "ServiceWorker",
         "ServiceWorkerInstalledScriptReader::MetaDataSender::OnWritable",
         "meta_data size", meta_data_->size(), "bytes_sent_", bytes_sent_);
-    MojoResult rv = handle_->WriteData(meta_data_->data() + bytes_sent_, &size,
-                                       MOJO_WRITE_DATA_FLAG_NONE);
+    MojoResult rv = handle_->WriteData(
+        bytes_to_write, MOJO_WRITE_DATA_FLAG_NONE, actually_written_bytes);
     switch (rv) {
       case MOJO_RESULT_INVALID_ARGUMENT:
       case MOJO_RESULT_OUT_OF_RANGE:
       case MOJO_RESULT_BUSY:
         NOTREACHED();
-        return;
       case MOJO_RESULT_FAILED_PRECONDITION:
         OnCompleted(false);
         return;
@@ -64,13 +66,14 @@ class ServiceWorkerInstalledScriptReader::MetaDataSender {
         OnCompleted(false);
         return;
     }
-    bytes_sent_ += size;
+    bytes_sent_ += actually_written_bytes;
     TRACE_EVENT2(
         "ServiceWorker",
         "ServiceWorkerInstalledScriptReader::MetaDataSender::OnWritable",
         "meta_data size", meta_data_->size(), "new bytes_sent_", bytes_sent_);
-    if (meta_data_->size() == bytes_sent_)
+    if (static_cast<size_t>(meta_data_->size()) == bytes_sent_) {
       OnCompleted(true);
+    }
   }
 
   void OnCompleted(bool success) {
@@ -86,7 +89,7 @@ class ServiceWorkerInstalledScriptReader::MetaDataSender {
   base::OnceCallback<void(bool /* success */)> callback_;
 
   scoped_refptr<net::IOBufferWithSize> meta_data_;
-  int64_t bytes_sent_;
+  size_t bytes_sent_ = 0;
   mojo::ScopedDataPipeProducerHandle handle_;
   mojo::SimpleWatcher watcher_;
 
@@ -97,7 +100,7 @@ ServiceWorkerInstalledScriptReader::ServiceWorkerInstalledScriptReader(
     mojo::Remote<storage::mojom::ServiceWorkerResourceReader> reader,
     Client* client)
     : reader_(std::move(reader)), client_(client) {
-  DCHECK(reader_.is_connected());
+  CHECK(reader_.is_connected(), base::NotFatalUntil::M159);
   reader_.set_disconnect_handler(base::BindOnce(
       &ServiceWorkerInstalledScriptReader::OnReaderDisconnected, AsWeakPtr()));
 }
@@ -106,7 +109,7 @@ ServiceWorkerInstalledScriptReader::~ServiceWorkerInstalledScriptReader() {}
 
 void ServiceWorkerInstalledScriptReader::Start() {
   TRACE_EVENT0("ServiceWorker", "ServiceWorkerInstalledScriptReader::Start");
-  DCHECK(reader_.is_connected());
+  CHECK(reader_.is_connected(), base::NotFatalUntil::M159);
   reader_->ReadResponseHead(base::BindOnce(
       &ServiceWorkerInstalledScriptReader::OnReadResponseHeadComplete,
       AsWeakPtr()));
@@ -115,21 +118,21 @@ void ServiceWorkerInstalledScriptReader::Start() {
 void ServiceWorkerInstalledScriptReader::OnReadResponseHeadComplete(
     int result,
     network::mojom::URLResponseHeadPtr response_head,
-    absl::optional<mojo_base::BigBuffer> metadata) {
-  DCHECK(client_);
+    std::optional<mojo_base::BigBuffer> metadata) {
+  CHECK(client_, base::NotFatalUntil::M159);
   TRACE_EVENT0(
       "ServiceWorker",
       "ServiceWorkerInstalledScriptReader::OnReadResponseHeadComplete");
   if (!response_head) {
-    DCHECK_LT(result, 0);
+    CHECK_LT(result, 0, base::NotFatalUntil::M159);
     ServiceWorkerMetrics::CountReadResponseResult(
         ServiceWorkerMetrics::READ_HEADERS_ERROR);
     CompleteSendIfNeeded(FinishedReason::kNoResponseHeadError);
     return;
   }
 
-  DCHECK_GE(result, 0);
-  DCHECK(reader_.is_connected());
+  CHECK_GE(result, 0, base::NotFatalUntil::M159);
+  CHECK(reader_.is_connected(), base::NotFatalUntil::M159);
 
   body_size_ = response_head->content_length;
   int64_t content_length = response_head->content_length;
@@ -142,7 +145,7 @@ void ServiceWorkerInstalledScriptReader::OnReadResponseHeadComplete(
 
 void ServiceWorkerInstalledScriptReader::OnReadDataPrepared(
     network::mojom::URLResponseHeadPtr response_head,
-    absl::optional<mojo_base::BigBuffer> metadata,
+    std::optional<mojo_base::BigBuffer> metadata,
     mojo::ScopedDataPipeConsumerHandle body_consumer_handle) {
   if (!body_consumer_handle) {
     CompleteSendIfNeeded(FinishedReason::kCreateDataPipeError);
@@ -153,7 +156,7 @@ void ServiceWorkerInstalledScriptReader::OnReadDataPrepared(
 
   // Start sending meta data (V8 code cache data).
   if (metadata) {
-    DCHECK_GT(metadata->size(), 0UL);
+    CHECK_GT(metadata->size(), 0UL, base::NotFatalUntil::M159);
 
     mojo::ScopedDataPipeProducerHandle meta_producer_handle;
     MojoCreateDataPipeOptions options;
@@ -169,10 +172,11 @@ void ServiceWorkerInstalledScriptReader::OnReadDataPrepared(
       return;
     }
 
-    // TODO(crbug.com/1055677): Avoid copying |metadata| if |client_| doesn't
+    // TODO(crbug.com/40120038): Avoid copying |metadata| if |client_| doesn't
     // need it.
     auto buffer = base::MakeRefCounted<net::IOBufferWithSize>(metadata->size());
-    memmove(buffer->data(), metadata->data(), metadata->size());
+    base::as_writable_bytes(buffer->span())
+        .copy_from(base::as_bytes(base::span(*metadata)));
     meta_data_sender_ = std::make_unique<MetaDataSender>(
         std::move(buffer), std::move(meta_producer_handle));
     meta_data_sender_->Start(base::BindOnce(

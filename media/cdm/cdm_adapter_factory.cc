@@ -15,7 +15,7 @@ namespace media {
 
 CdmAdapterFactory::CdmAdapterFactory(HelperCreationCB helper_creation_cb)
     : helper_creation_cb_(std::move(helper_creation_cb)) {
-  DCHECK(helper_creation_cb_);
+  CHECK(helper_creation_cb_);
 }
 
 CdmAdapterFactory::~CdmAdapterFactory() = default;
@@ -34,7 +34,7 @@ void CdmAdapterFactory::Create(
   if (!create_cdm_func) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(std::move(cdm_created_cb), nullptr,
-                                  "CreateCdmFunc not available."));
+                                  CreateCdmStatus::kCreateCdmFuncNotAvailable));
     return;
   }
 
@@ -42,14 +42,15 @@ void CdmAdapterFactory::Create(
   if (!cdm_helper) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(std::move(cdm_created_cb), nullptr,
-                                  "CDM helper creation failed."));
+                                  CreateCdmStatus::kCdmHelperCreationFailed));
     return;
   }
 
   CdmAdapter::Create(cdm_config, create_cdm_func, std::move(cdm_helper),
                      session_message_cb, session_closed_cb,
                      session_keys_change_cb, session_expiration_update_cb,
-                     std::move(cdm_created_cb));
+                     std::move(cdm_created_cb),
+                     CdmModule::GetInstance()->GetDebuggerAttached());
 }
 
 }  // namespace media

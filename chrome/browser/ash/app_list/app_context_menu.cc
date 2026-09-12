@@ -4,33 +4,52 @@
 
 #include "chrome/browser/ash/app_list/app_context_menu.h"
 
+#include <memory>
 #include <utility>
 
+#include "ash/public/cpp/app_list/app_list_types.h"
 #include "ash/public/cpp/app_menu_constants.h"
 #include "ash/public/cpp/shelf_model.h"
 #include "ash/resources/vector_icons/vector_icons.h"
+#include "ash/strings/grit/ash_strings.h"
 #include "chrome/app/vector_icons/vector_icons.h"
 #include "chrome/browser/apps/app_service/menu_util.h"
 #include "chrome/browser/ash/app_list/app_context_menu_delegate.h"
 #include "chrome/browser/ash/app_list/app_list_controller_delegate.h"
-#include "chrome/grit/generated_resources.h"
+#include "chrome/browser/ash/app_list/app_list_syncable_service_factory.h"
+#include "chrome/browser/ash/app_list/chrome_app_list_model_updater.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/color/color_id.h"
-#include "ui/gfx/paint_vector_icon.h"
 #include "ui/gfx/vector_icon_types.h"
 #include "ui/views/vector_icons.h"
+
+namespace {
+void RequestAppListSort(Profile* profile, ash::AppListSortOrder order) {
+  ChromeAppListModelUpdater* model_updater =
+      static_cast<ChromeAppListModelUpdater*>(
+          app_list::AppListSyncableServiceFactory::GetForProfile(profile)
+              ->GetModelUpdater());
+  model_updater->RequestAppListSort(order);
+}
+}  // namespace
 
 namespace app_list {
 
 AppContextMenu::AppContextMenu(AppContextMenuDelegate* delegate,
                                Profile* profile,
                                const std::string& app_id,
-                               AppListControllerDelegate* controller)
+                               AppListControllerDelegate* controller,
+                               ash::AppListItemContext item_context)
     : delegate_(delegate),
       profile_(profile),
       app_id_(app_id),
-      controller_(controller) {}
+      controller_(controller),
+      item_context_(item_context) {}
+
+AppContextMenu::~AppContextMenu() = default;
 
 void AppContextMenu::GetMenuModel(GetMenuModelCallback callback) {
   auto menu_model = std::make_unique<ui::SimpleMenuModel>(this);
@@ -69,6 +88,16 @@ void AppContextMenu::ExecuteCommand(int command_id, int event_flags) {
     case ash::TOGGLE_PIN:
       TogglePin(app_id_);
       break;
+    case ash::REORDER_BY_NAME_ALPHABETICAL:
+      RequestAppListSort(profile(), ash::AppListSortOrder::kNameAlphabetical);
+      break;
+    case ash::REORDER_BY_NAME_REVERSE_ALPHABETICAL:
+      RequestAppListSort(profile(),
+                         ash::AppListSortOrder::kNameReverseAlphabetical);
+      break;
+    case ash::REORDER_BY_COLOR:
+      RequestAppListSort(profile(), ash::AppListSortOrder::kColor);
+      break;
   }
 }
 
@@ -88,38 +117,51 @@ const gfx::VectorIcon& AppContextMenu::GetMenuItemVectorIcon(int command_id,
   switch (command_id) {
     case ash::LAUNCH_NEW:
       if (string_id == IDS_APP_LIST_CONTEXT_MENU_NEW_WINDOW)
-        return views::kNewWindowIcon;
+        return features::IsRoundedIconsEnabled() ? views::kNewWindowIcon
+                                                 : views::kNewWindowOldIcon;
       if (string_id == IDS_APP_LIST_CONTEXT_MENU_NEW_TAB)
-        return views::kNewTabIcon;
+        return features::IsRoundedIconsEnabled() ? views::kTabIcon
+                                                 : views::kNewTabOldIcon;
       // The LAUNCH_NEW command is for an ARC app.
-      return views::kLaunchIcon;
+      return features::IsRoundedIconsEnabled()   ? views::kOpenInNewIcon
+                                                 : views::kLaunchOldIcon;
     case ash::TOGGLE_PIN:
-      return string_id == IDS_APP_LIST_CONTEXT_MENU_PIN ? views::kPinIcon
-                                                        : views::kUnpinIcon;
+      return string_id == IDS_APP_LIST_CONTEXT_MENU_PIN
+                 ? features::IsRoundedIconsEnabled() ? views::kKeepIcon
+                                                     : views::kPinOldIcon
+             : features::IsRoundedIconsEnabled() ? views::kKeepFilledIcon
+                                                 : views::kUnpinOldIcon;
     case ash::SHOW_APP_INFO:
-      return views::kInfoIcon;
+      return features::IsRoundedIconsEnabled() ? views::kInfoIcon
+                                               : views::kInfoOldIcon;
     case ash::OPTIONS:
-      return views::kOptionsIcon;
+      return features::IsRoundedIconsEnabled() ? views::kMoreHorizIcon
+                                               : views::kOptionsOldIcon;
     case ash::UNINSTALL:
-      return views::kUninstallIcon;
+      return features::IsRoundedIconsEnabled() ? views::kDeleteIcon
+                                               : views::kUninstallOldIcon;
     case ash::APP_CONTEXT_MENU_NEW_WINDOW:
-      return views::kNewWindowIcon;
+      return features::IsRoundedIconsEnabled() ? views::kNewWindowIcon
+                                               : views::kNewWindowOldIcon;
     case ash::APP_CONTEXT_MENU_NEW_INCOGNITO_WINDOW:
-      return views::kNewIncognitoWindowIcon;
+      return features::IsRoundedIconsEnabled()
+                 ? views::kIncognitoIcon
+                 : views::kNewIncognitoWindowOldIcon;
     case ash::INSTALL:
       // Deprecated.
-      return gfx::kNoneIcon;
+      return gfx::VectorIcon::EmptyIcon();
     case ash::SETTINGS:
-      return vector_icons::kSettingsIcon;
+      return features::IsRoundedIconsEnabled()
+                 ? vector_icons::kSettingsFilledIcon
+                 : vector_icons::kSettingsOldIcon;
     case ash::USE_LAUNCH_TYPE_REGULAR:
     case ash::USE_LAUNCH_TYPE_WINDOW:
     case ash::USE_LAUNCH_TYPE_TABBED_WINDOW:
       // Check items use the default icon.
-      return gfx::kNoneIcon;
+      return gfx::VectorIcon::EmptyIcon();
     case ash::DEPRECATED_USE_LAUNCH_TYPE_PINNED:
     case ash::DEPRECATED_USE_LAUNCH_TYPE_FULLSCREEN:
       NOTREACHED();
-      return gfx::kNoneIcon;
     case ash::REORDER_SUBMENU:
       return ash::kReorderIcon;
     case ash::REORDER_BY_NAME_ALPHABETICAL:
@@ -129,12 +171,11 @@ const gfx::VectorIcon& AppContextMenu::GetMenuItemVectorIcon(int command_id,
     case ash::NOTIFICATION_CONTAINER:
       NOTREACHED() << "NOTIFICATION_CONTAINER does not have an icon, and it is "
                       "added to the model by NotificationMenuController.";
-      return gfx::kNoneIcon;
     case ash::SHUTDOWN_GUEST_OS:
-      return kShutdownGuestOsIcon;
+    case ash::SHUTDOWN_BRUSCHETTA_OS:
+      return ash::kShutdownGuestOsIcon;
     default:
       NOTREACHED() << "No icon for command_id: " << command_id;
-      return gfx::kNoneIcon;
   }
 }
 
@@ -183,9 +224,41 @@ void AppContextMenu::AddContextMenuOption(ui::SimpleMenuModel* menu_model,
   if (command_id == ash::NOTIFICATION_CONTAINER) {
     NOTREACHED()
         << "NOTIFICATION_CONTAINER is added by NotificationMenuController.";
-    return;
   }
   menu_model->AddItemWithStringId(command_id, string_id);
+}
+
+void AppContextMenu::AddReorderMenuOption(ui::SimpleMenuModel* menu_model) {
+  if (item_context_ != ash::AppListItemContext::kAppsGrid &&
+      item_context_ != ash::AppListItemContext::kAppsCollectionsGrid) {
+    return;
+  }
+  const ui::ColorId color_id = apps::GetColorIdForMenuItemIcon();
+  reorder_submenu_ = std::make_unique<ui::SimpleMenuModel>(this);
+  // As all the options below are only for tests and are expected to change in
+  // the future, the strings are directly written as the parameters.
+  reorder_submenu_->AddItemWithIcon(
+      ash::REORDER_BY_NAME_ALPHABETICAL,
+      l10n_util::GetStringUTF16(IDS_APP_LIST_CONTEXT_MENU_REORDER_BY_NAME),
+      ui::ImageModel::FromVectorIcon(
+          GetMenuItemVectorIcon(ash::REORDER_BY_NAME_ALPHABETICAL,
+                                /*string_id=*/-1),
+          color_id));
+  reorder_submenu_->AddItemWithIcon(
+      ash::REORDER_BY_COLOR,
+      l10n_util::GetStringUTF16(IDS_APP_LIST_CONTEXT_MENU_REORDER_BY_COLOR),
+      ui::ImageModel::FromVectorIcon(
+          GetMenuItemVectorIcon(ash::REORDER_BY_COLOR, /*string_id=*/-1),
+          color_id));
+  menu_model->AddSeparator(ui::NORMAL_SEPARATOR);
+
+  menu_model->AddSubMenuWithIcon(
+      ash::REORDER_SUBMENU,
+      l10n_util::GetStringUTF16(IDS_APP_LIST_CONTEXT_MENU_REORDER_TITLE),
+      reorder_submenu_.get(),
+      ui::ImageModel::FromVectorIcon(
+          GetMenuItemVectorIcon(ash::REORDER_SUBMENU, /*string_id=*/-1),
+          color_id));
 }
 
 }  // namespace app_list

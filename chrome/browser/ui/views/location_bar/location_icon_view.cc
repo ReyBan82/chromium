@@ -5,35 +5,60 @@
 #include "chrome/browser/ui/views/location_bar/location_icon_view.h"
 
 #include "base/functional/bind.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/time/time.h"
+#include "base/trace_event/trace_event.h"
+#include "build/branding_buildflags.h"
 #include "build/build_config.h"
 #include "chrome/browser/extensions/extension_ui_util.h"
 #include "chrome/browser/ui/browser_element_identifiers.h"
+#include "chrome/browser/ui/color/chrome_color_id.h"
 #include "chrome/browser/ui/layout_constants.h"
+#include "chrome/browser/ui/omnibox/omnibox_edit_model.h"
 #include "chrome/browser/ui/page_info/page_info_dialog.h"
+#include "chrome/browser/ui/ui_features.h"
 #include "chrome/browser/ui/view_ids.h"
+#include "chrome/browser/ui/views/location_bar/icon_label_bubble_view.h"
+#include "chrome/browser/ui/views/location_bar/location_bar_util.h"
+#include "chrome/browser/ui/views/location_bar/location_icon_state_helper.h"
 #include "chrome/browser/ui/views/page_info/page_info_bubble_view.h"
-#include "chrome/grit/chromium_strings.h"
-#include "chrome/grit/generated_resources.h"
-#include "components/dom_distiller/core/url_constants.h"
-#include "components/omnibox/browser/omnibox_edit_model.h"
-#include "components/omnibox/browser/omnibox_field_trial.h"
+#include "chrome/grit/browser_resources.h"
+#include "components/omnibox/browser/location_bar_model.h"
+#include "components/omnibox/browser/vector_icons.h"
 #include "components/security_state/core/security_state.h"
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/common/url_constants.h"
-#include "extensions/common/constants.h"
+#include "third_party/skia/include/core/SkColor.h"
 #include "ui/accessibility/ax_enums.mojom.h"
-#include "ui/accessibility/ax_node_data.h"
-#include "ui/base/clipboard/clipboard.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/color/color_id.h"
+#include "ui/gfx/animation/tween.h"
+#include "ui/gfx/geometry/insets.h"
+#include "ui/gfx/image/image_skia.h"
+#include "ui/views/accessibility/view_accessibility.h"
+#include "ui/views/animation/flood_fill_ink_drop_ripple.h"
 #include "ui/views/animation/ink_drop.h"
+#include "ui/views/animation/ink_drop_host.h"
+#include "ui/views/animation/ink_drop_impl.h"
+#include "ui/views/animation/ink_drop_ripple.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/style/platform_style.h"
 #include "ui/views/view_class_properties.h"
 
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#include "components/vector_icons/vector_icons.h"  // nogncheck
+#include "ui/gfx/vector_icon_types.h"
+#endif
+
 using content::WebContents;
 using security_state::SecurityLevel;
+
+std::optional<ui::ColorId>
+LocationIconView::Delegate::GetLocationIconBackgroundColorOverride() const {
+  return std::nullopt;
+}
 
 LocationIconView::LocationIconView(
     const gfx::FontList& font_list,
@@ -48,9 +73,16 @@ LocationIconView::LocationIconView(
 
   // Readability is guaranteed by the omnibox theme.
   label()->SetAutoColorReadabilityEnabled(false);
+
+  SetAccessibleProperties();
+
+  ConfigureInkDropForRefresh2023(this, kColorOmniboxIconHover,
+                                 kColorOmniboxIconPressed);
+
+  UpdateBorder();
 }
 
-LocationIconView::~LocationIconView() {}
+LocationIconView::~LocationIconView() = default;
 
 gfx::Size LocationIconView::GetMinimumSize() const {
   return GetMinimumSizeForPreferredSize(GetPreferredSize());
@@ -62,24 +94,46 @@ bool LocationIconView::OnMouseDragged(const ui::MouseEvent& event) {
 }
 
 SkColor LocationIconView::GetForegroundColor() const {
+  const std::u16string& display_text = GetText();
+  const bool is_text_dangerous =
+      display_text == l10n_util::GetStringUTF16(IDS_DANGEROUS_VERBOSE_STATE);
+
+  if (is_text_dangerous) {
+    return GetColorProvider()->GetColor(kColorOmniboxSecurityChipText);
+  }
+
   SecurityLevel security_level = SecurityLevel::NONE;
-  if (!delegate_->IsEditingOrEmpty())
-    security_level = delegate_->GetLocationBarModel()->GetSecurityLevel();
+  if (!delegate_->IsEditingOrEmpty()) {
+    security_level = GetSecurityLevel();
+  }
 
   return delegate_->GetSecurityChipColor(security_level);
 }
 
 bool LocationIconView::ShouldShowSeparator() const {
+  return false;
+}
+
+bool LocationIconView::ShouldShowLabelAfterAnimation() const {
   return ShouldShowLabel();
 }
 
 bool LocationIconView::ShowBubble(const ui::Event& event) {
-  return delegate_->ShowPageInfoDialog();
+  const bool success = delegate_->ShowPageInfoDialog();
+  if (success) {
+    MaybeAnimateIcon(true);
+  }
+  return success;
 }
 
 bool LocationIconView::IsBubbleShowing() const {
   return PageInfoBubbleView::GetShownBubbleType() !=
          PageInfoBubbleView::BUBBLE_NONE;
+}
+
+void LocationIconView::OnGestureEvent(ui::GestureEvent* event) {
+  delegate_->OnLocationIconGestureEvent(event);
+  IconLabelBubbleView::OnGestureEvent(event);
 }
 
 bool LocationIconView::OnMousePressed(const ui::MouseEvent& event) {
@@ -89,32 +143,35 @@ bool LocationIconView::OnMousePressed(const ui::MouseEvent& event) {
   return true;
 }
 
-void LocationIconView::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  if (delegate_->IsEditingOrEmpty()) {
-    node_data->role = ax::mojom::Role::kImage;
-    node_data->SetNameChecked(l10n_util::GetStringUTF8(IDS_ACC_SEARCH_ICON));
-    return;
-  }
-
-  // If no display text exists, ensure that the accessibility label is added.
-  auto accessibility_label = base::UTF16ToUTF8(
-      delegate_->GetLocationBarModel()->GetSecureAccessibilityText());
-  if (label()->GetText().empty() && !accessibility_label.empty()) {
-    node_data->AddStringAttribute(ax::mojom::StringAttribute::kDescription,
-                                  accessibility_label);
-  }
-
-  IconLabelBubbleView::GetAccessibleNodeData(node_data);
-  node_data->role = ax::mojom::Role::kPopUpButton;
-}
-
 void LocationIconView::AddedToWidget() {
   Update(true);
 }
 
 void LocationIconView::OnThemeChanged() {
   IconLabelBubbleView::OnThemeChanged();
+  // Update the background before the icon since the vector icon
+  // depends on the container background color in certain cases.
+  // E.g. different icons corresponding to the SuperGIcon are set
+  // depending on the background color of the container.
+  UpdateBackground();
   UpdateIcon();
+}
+
+security_state::SecurityLevel LocationIconView::GetSecurityLevel() const {
+  if (security_level_for_testing_.has_value()) {
+    return security_level_for_testing_.value();
+  }
+
+  return delegate_->GetLocationBarModel()->GetSecurityLevel();
+}
+
+bool LocationIconView::HasSecurityStateChanged() const {
+  return last_update_security_level_ != GetSecurityLevel();
+}
+
+void LocationIconView::SetSecurityLevelForTesting(
+    security_state::SecurityLevel security_level) {
+  security_level_for_testing_ = security_level;
 }
 
 int LocationIconView::GetMinimumLabelTextWidth() const {
@@ -125,7 +182,9 @@ int LocationIconView::GetMinimumLabelTextWidth() const {
     // Optimize this common case by not creating a new label.
     // GetPreferredSize is not dependent on the label's current
     // width, so this returns the same value as the branch below.
-    width = label()->GetPreferredSize().width();
+    width = label()
+                ->GetPreferredSize(views::SizeBounds(label()->width(), {}))
+                .width();
   } else {
     views::Label label(text, {font_list()});
     width = label.GetPreferredSize().width();
@@ -134,19 +193,51 @@ int LocationIconView::GetMinimumLabelTextWidth() const {
 }
 
 bool LocationIconView::GetShowText() const {
-  if (delegate_->IsEditingOrEmpty())
-    return false;
+  return location_bar::ShouldShowSecurityChipText(
+      delegate_->GetLocationBarModel(), delegate_->GetWebContents(),
+      delegate_->IsEditingOrEmpty());
+}
 
-  const auto* location_bar_model = delegate_->GetLocationBarModel();
-  const GURL& url = location_bar_model->GetURL();
-  if (url.SchemeIs(content::kChromeUIScheme) ||
-      url.SchemeIs(extensions::kExtensionScheme) ||
-      url.SchemeIs(url::kFileScheme) ||
-      url.SchemeIs(dom_distiller::kDomDistillerScheme)) {
-    return true;
+void LocationIconView::MaybeAnimateIcon(bool open) {
+  if (features::IsToolbarGlowUpEnabled()) {
+    ui::ImageModel icon = delegate_->GetLocationIcon(
+        base::DoNothingAs<void(const gfx::Image&)>());
+
+    const bool is_page_info_icon =
+        icon.IsVectorIcon() &&
+        icon.GetVectorIcon().vector_icon() ==
+            (features::IsRoundedIconsEnabled()
+                 ? &omnibox::kPageInfoCustomIcon
+                 : &omnibox::kSecurePageInfoChromeRefreshOldIcon);
+
+    if (!is_page_info_icon) {
+      return;
+    }
+
+    views::SingleAnimatedImageContainer::AnimationDefinition definition;
+    definition.resource_id = IDR_PAGE_INFO_LOTTIE;
+    definition.color = GetForegroundColor();
+
+    views::SingleAnimatedImageContainer::AnimationConfig config;
+    config.tween = gfx::Tween::FAST_OUT_SLOW_IN_3;
+    config.duration = base::Milliseconds(150);
+    config.boundary = views::SingleAnimatedImageContainer::AnimationBoundary{
+        .start_offset = 0.33f, .end_offset = 0.66f};
+
+    if (open) {
+      definition.direction =
+          views::SingleAnimatedImageContainer::AnimationDirection::kForward;
+      definition.end_behavior =
+          views::SingleAnimatedImageContainer::AnimationEndBehavior::kPause;
+    } else {
+      definition.direction =
+          views::SingleAnimatedImageContainer::AnimationDirection::kBackward;
+      definition.end_behavior =
+          views::SingleAnimatedImageContainer::AnimationEndBehavior::kReset;
+    }
+
+    animated_image_container().PlayAnimation(definition, config);
   }
-
-  return !location_bar_model->GetSecureDisplayText().empty();
 }
 
 const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
@@ -154,61 +245,51 @@ const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
 }
 
 std::u16string LocationIconView::GetText() const {
-  if (delegate_->IsEditingOrEmpty())
-    return std::u16string();
-
-  if (delegate_->GetLocationBarModel()->GetURL().SchemeIs(
-          content::kChromeUIScheme))
-    return l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME);
-
-  if (delegate_->GetLocationBarModel()->GetURL().SchemeIs(url::kFileScheme))
-    return l10n_util::GetStringUTF16(IDS_OMNIBOX_FILE);
-
-  if (delegate_->GetLocationBarModel()->GetURL().SchemeIs(
-          dom_distiller::kDomDistillerScheme)) {
-    return l10n_util::GetStringUTF16(IDS_OMNIBOX_READER_MODE);
-  }
-
-  if (delegate_->GetWebContents()) {
-    // On ChromeOS, this can be called using web_contents from
-    // SimpleWebViewDialog::GetWebContents() which always returns null.
-    // TODO(crbug.com/680329) Remove the null check and make
-    // SimpleWebViewDialog::GetWebContents return the proper web contents
-    // instead.
-    const std::u16string extension_name =
-        extensions::ui_util::GetEnabledExtensionNameForUrl(
-            delegate_->GetLocationBarModel()->GetURL(),
-            delegate_->GetWebContents()->GetBrowserContext());
-    if (!extension_name.empty())
-      return extension_name;
-  }
-
-  return delegate_->GetLocationBarModel()->GetSecureDisplayText();
+  return location_bar::GetSecurityChipText(delegate_->GetLocationBarModel(),
+                                           delegate_->GetWebContents(),
+                                           delegate_->IsEditingOrEmpty());
 }
 
 bool LocationIconView::GetAnimateTextVisibilityChange() const {
-  if (delegate_->IsEditingOrEmpty())
-    return false;
-
-  SecurityLevel level = delegate_->GetLocationBarModel()->GetSecurityLevel();
-  // Do not animate transitions from WARNING to DANGEROUS, since
-  // the transition can look confusing/messy.
-  if (level == SecurityLevel::DANGEROUS &&
-      last_update_security_level_ == SecurityLevel::WARNING)
-    return false;
-  return (level == SecurityLevel::DANGEROUS || level == SecurityLevel::WARNING);
+  return location_bar::ShouldAnimateSecurityChipTextChange(
+      delegate_->IsEditingOrEmpty(), last_update_security_level_,
+      GetSecurityLevel());
 }
 
 void LocationIconView::UpdateTextVisibility(bool suppress_animations) {
   SetLabel(GetText());
 
   bool should_show = GetShowText();
-  if (!GetAnimateTextVisibilityChange() || suppress_animations)
+  if (!GetAnimateTextVisibilityChange() || suppress_animations) {
     ResetSlideAnimation(should_show);
-  else if (should_show)
-    AnimateIn(absl::nullopt);
-  else
+  } else if (should_show) {
+    AnimateIn(std::nullopt);
+  } else {
     AnimateOut();
+  }
+}
+
+void LocationIconView::SetAccessibleProperties() {
+  auto state = location_bar::GetSecurityChipAccessibilityState(
+      delegate_->GetLocationBarModel(), delegate_->IsEditingOrEmpty(),
+      label()->GetText());
+
+  GetViewAccessibility().SetRole(state.role);
+  if (state.name.empty()) {
+    GetViewAccessibility().SetName(
+        std::u16string(), ax::mojom::NameFrom::kAttributeExplicitlyEmpty);
+  } else {
+    GetViewAccessibility().SetName(state.name);
+  }
+
+  if (!state.description.empty() || delegate_->IsEditingOrEmpty() ||
+      !label()->GetText().empty()) {
+    if (delegate_->IsEditingOrEmpty()) {
+      GetViewAccessibility().RemoveDescription();
+    } else {
+      GetViewAccessibility().SetDescription(state.description);
+    }
+  }
 }
 
 void LocationIconView::UpdateIcon() {
@@ -218,8 +299,60 @@ void LocationIconView::UpdateIcon() {
   ui::ImageModel icon = delegate_->GetLocationIcon(
       base::BindOnce(&LocationIconView::OnIconFetched,
                      icon_fetch_weak_ptr_factory_.GetWeakPtr()));
-  if (!icon.IsEmpty())
-    SetImageModel(icon);
+
+  if (icon.IsEmpty()) {
+    return;
+  }
+
+  // UpdateIcon() calls are for icon updates not related to the page info
+  // animation, so we stop the page info animation if it is playing.
+  animated_image_container().ResetAnimation();
+
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+  const bool is_super_g =
+      location_bar::MaybeGetGradientGoogleSuperGIcon(icon).has_value();
+  const bool is_monochrome_g =
+      icon.IsVectorIcon() && icon.GetVectorIcon().vector_icon() &&
+      icon.GetVectorIcon().vector_icon()->name ==
+          vector_icons::kGoogleGLogoMonochromeIcon.name;
+
+  if (is_super_g || is_monochrome_g) {
+    // Remove the inkdrop around the Google G logos since we cannot interact
+    // with them.
+    views::InkDrop::Get(this)->SetMode(views::InkDropHost::InkDropMode::OFF);
+
+    // Handle custom theme backgrounds specifically for the Super G icon.
+    if (is_super_g && GetWidget() && GetWidget()->GetCustomTheme()) {
+      SetBackgroundColor(SK_ColorWHITE);
+    }
+  } else {
+    views::InkDrop::Get(this)->SetMode(views::InkDropHost::InkDropMode::ON);
+  }
+#endif
+
+  SetImageModel(icon);
+}
+
+void LocationIconView::UpdateBackground() {
+  CHECK(GetColorProvider());
+  const std::u16string& display_text = GetText();
+  const bool is_text_dangerous =
+      display_text == l10n_util::GetStringUTF16(IDS_DANGEROUS_VERBOSE_STATE);
+
+  const ui::ColorId id =
+      delegate_->GetLocationIconBackgroundColorOverride().value_or(
+          is_text_dangerous ? kColorOmniboxSecurityChipDangerousBackground
+                            : kColorOmniboxIconBackground);
+
+  SetBackgroundColor(GetColorProvider()->GetColor(id));
+
+  if (is_text_dangerous) {
+    ConfigureInkDropForRefresh2023(this, kColorOmniboxSecurityChipInkDropHover,
+                                   kColorOmniboxSecurityChipInkDropRipple);
+  } else {
+    ConfigureInkDropForRefresh2023(this, kColorOmniboxIconHover,
+                                   kColorOmniboxIconPressed);
+  }
 }
 
 void LocationIconView::OnIconFetched(const gfx::Image& image) {
@@ -227,19 +360,30 @@ void LocationIconView::OnIconFetched(const gfx::Image& image) {
   SetImageModel(ui::ImageModel::FromImage(image));
 }
 
-void LocationIconView::Update(bool suppress_animations) {
+void LocationIconView::Update(bool suppress_animations,
+                              bool force_hide_background) {
+  TRACE_EVENT("omnibox", "LocationIconView::Update");
+  base::ScopedUmaHistogramTimer timer(
+      "Omnibox.LocationIconView.Update.Time",
+      base::ScopedUmaHistogramTimer::ScopedHistogramTiming::kMicrosecondTimes);
   UpdateTextVisibility(suppress_animations);
+  UpdateBorder();
+  // Update the background before the icon, since the vector icon
+  // can depend on the container background.
+  UpdateBackground();
   UpdateIcon();
-
+  SetAccessibleProperties();
   // The label text color may have changed in response to changes in security
   // level.
   UpdateLabelColors();
 
+  if (force_hide_background) {
+    SetBackgroundColor(SK_ColorTRANSPARENT);
+  }
+
   bool is_editing_or_empty = delegate_->IsEditingOrEmpty();
   // The tooltip should be shown if we are not editing or empty.
-  SetTooltipText(is_editing_or_empty
-                     ? std::u16string()
-                     : l10n_util::GetStringUTF16(IDS_TOOLTIP_LOCATION_ICON));
+  SetTooltipText(location_bar::GetSecurityChipTooltipText(is_editing_or_empty));
 
   // We should only enable/disable the InkDrop if the editing state has changed,
   // as the drop gets recreated when views::InkDrop::Get(this)->SetMode() is
@@ -261,25 +405,54 @@ void LocationIconView::Update(bool suppress_animations) {
 
   last_update_security_level_ = SecurityLevel::NONE;
   if (!is_editing_or_empty) {
-    last_update_security_level_ =
-        delegate_->GetLocationBarModel()->GetSecurityLevel();
+    last_update_security_level_ = GetSecurityLevel();
   }
 
   was_editing_or_empty_ = is_editing_or_empty;
 }
 
 bool LocationIconView::IsTriggerableEvent(const ui::Event& event) {
-  if (delegate_->IsEditingOrEmpty())
+  if (delegate_->IsEditingOrEmpty()) {
     return false;
+  }
 
   if (event.IsMouseEvent()) {
-    if (event.AsMouseEvent()->IsOnlyMiddleMouseButton())
+    if (event.AsMouseEvent()->IsOnlyMiddleMouseButton()) {
       return false;
-  } else if (event.IsGestureEvent() && event.type() != ui::ET_GESTURE_TAP) {
+    }
+  } else if (event.IsGestureEvent() &&
+             event.type() != ui::EventType::kGestureTap) {
     return false;
   }
 
   return IconLabelBubbleView::IsTriggerableEvent(event);
+}
+
+void LocationIconView::UpdateBorder() {
+  // Bubbles are given the full internal height of the location bar so that all
+  // child views in the location bar have the same height. The visible height of
+  // the bubble should be smaller, so use an empty border to shrink down the
+  // content bounds so the background gets painted correctly.
+  gfx::Insets insets = GetLayoutInsets(LOCATION_BAR_PAGE_INFO_ICON_PADDING);
+  if (ShouldShowLabel()) {
+    SecurityLevel level = GetSecurityLevel();
+    if (level == security_state::DANGEROUS) {
+      // Extra space between the left edge and label.
+      const int kLeftHorizontalPadding = GetLayoutConstant(
+          LayoutConstant::kLocationBarPageInfoIconDangerousLeadingPadding);
+      // Extra space between the label and right edge.
+      const int kRightHorizontalPadding = GetLayoutConstant(
+          LayoutConstant::kLocationBarPageInfoIconDangerousTrailingPadding);
+      insets.set_left(kLeftHorizontalPadding);
+      insets.set_right(kRightHorizontalPadding);
+    } else {
+      // An extra space between chip's label and right edge.
+      const int kExtraRightPadding = GetLayoutConstant(
+          LayoutConstant::kLocationBarPageInfoIconLabelExtraTrailingPadding);
+      insets.set_right(insets.right() + kExtraRightPadding);
+    }
+  }
+  SetBorder(views::CreateEmptyBorder(insets));
 }
 
 gfx::Size LocationIconView::GetMinimumSizeForPreferredSize(
@@ -290,7 +463,11 @@ gfx::Size LocationIconView::GetMinimumSizeForPreferredSize(
   return size;
 }
 
-BEGIN_METADATA(LocationIconView, IconLabelBubbleView)
+void LocationIconView::SetBackgroundColor(SkColor color) {
+  SetBackground(views::CreateRoundedRectBackground(color, GetCornerRadii()));
+}
+
+BEGIN_METADATA(LocationIconView)
 ADD_READONLY_PROPERTY_METADATA(int, MinimumLabelTextWidth)
 ADD_READONLY_PROPERTY_METADATA(std::u16string, Text)
 ADD_READONLY_PROPERTY_METADATA(bool, ShowText)

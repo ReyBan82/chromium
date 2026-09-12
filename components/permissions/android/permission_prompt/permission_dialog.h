@@ -22,7 +22,21 @@ class PermissionDialog : public PermissionPromptAndroid {
 
   ~PermissionDialog() override;
 
+  static std::unique_ptr<PermissionDialog> Create(
+      content::WebContents* web_contents,
+      Delegate* delegate);
+
+  // PermissionPrompt:
   PermissionPromptDisposition GetPromptDisposition() const override;
+
+  // PermissionPromptAndroid:
+  std::u16string GetPositiveButtonText(bool is_one_time) const override;
+  std::u16string GetNegativeButtonText(bool is_one_time) const override;
+  std::u16string GetPositiveEphemeralButtonText(
+      bool is_one_time) const override;
+
+ private:
+  bool IsUpgradeToPrecise() const;
 };
 
 }  // namespace permissions

@@ -109,7 +109,13 @@ class MediaSinkServiceBase {
   base::flat_map<MediaSink::Id, MediaSinkInternal> sinks_;
 
   // Observers to notify when a sink is added, updated, or removed.
-  base::ObserverList<Observer>::Unchecked observers_;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/false,
+      /*allow_reentrancy=*/
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
+      observers_;
 
   // Timer for recording device counts after a sink list has changed. To ensure
   // the metrics are recorded accurately, a small delay is introduced after a
@@ -119,7 +125,7 @@ class MediaSinkServiceBase {
 
   // The following fields exist temporarily for sending back discovered sinks to
   // the Media Router extension.
-  // TODO(https://crbug.com/809249): Remove once the extension no longer need
+  // TODO(crbug.com/40561499): Remove once the extension no longer need
   // the sinks.
 
   // Callback to MediaRouter to provide sinks to the MR extension.

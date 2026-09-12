@@ -5,14 +5,14 @@
 #include "chromeos/ash/components/phonehub/cros_state_sender.h"
 #include "ash/constants/ash_features.h"
 
+#include "base/metrics/histogram_functions.h"
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/components/phonehub/message_sender.h"
 #include "chromeos/ash/components/phonehub/phone_model.h"
 #include "chromeos/ash/components/phonehub/public/cpp/attestation_certificate_generator.h"
 #include "chromeos/ash/services/multidevice_setup/public/mojom/multidevice_setup.mojom.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 namespace {
 
@@ -67,14 +67,15 @@ CrosStateSender::CrosStateSender(
   DCHECK(phone_model_);
   DCHECK(retry_timer_);
 
-  connection_manager_->AddObserver(this);
-  multidevice_setup_client_->AddObserver(this);
+  connection_manager_observation_.Observe(connection_manager);
+  multidevice_setup_client_observation_.Observe(multidevice_setup_client);
+  if (attestation_certificate_generator_) {
+    attestation_certificate_generator_observation_.Observe(
+        attestation_certificate_generator_.get());
+  }
 }
 
-CrosStateSender::~CrosStateSender() {
-  connection_manager_->RemoveObserver(this);
-  multidevice_setup_client_->RemoveObserver(this);
-}
+CrosStateSender::~CrosStateSender() = default;
 
 void CrosStateSender::AttemptUpdateCrosState() {
   // Stop and cancel old timer if it is running, and reset the |retry_delay_| to
@@ -88,6 +89,7 @@ void CrosStateSender::AttemptUpdateCrosState() {
     PA_LOG(VERBOSE) << "Could not start AttemptUpdateCrosState() because "
                     << "connection manager status is: "
                     << connection_manager_->GetStatus();
+    is_certificate_requested_ = false;
     return;
   }
 
@@ -103,19 +105,20 @@ void CrosStateSender::PerformUpdateCrosState() {
     return;
   }
 
-  attestation_certificate_generator_->GenerateCertificate(
-      base::BindRepeating(&CrosStateSender::OnAttestationCertificateGenerated,
-                          weak_ptr_factory_.GetWeakPtr()));
+  attestation_generating_start_time_ = base::Time::Now();
+  is_certificate_requested_ = true;
+  attestation_certificate_generator_->RetrieveCertificate();
 }
 
-void CrosStateSender::OnAttestationCertificateGenerated(
-    const std::vector<std::string>& attestation_certs,
-    bool is_valid) {
-  if (!is_valid) {
-    SendCrosStateMessage(/*attestation_certs=*/nullptr);
-  }
-
-  SendCrosStateMessage(std::move(&attestation_certs));
+void CrosStateSender::RecordResultMetrics(
+    bool is_attestation_certificate_valid) {
+  base::UmaHistogramLongTimes(
+      is_attestation_certificate_valid
+          ? "PhoneHub.Attestation.GeneratingTime"
+          : "PhoneHub.Attestation.GeneratingTime.Invalid",
+      base::Time::NowFromSystemTime() - attestation_generating_start_time_);
+  base::UmaHistogramBoolean("PhoneHub.Attestation.Result",
+                            is_attestation_certificate_valid);
 }
 
 void CrosStateSender::SendCrosStateMessage(
@@ -132,8 +135,7 @@ void CrosStateSender::SendCrosStateMessage(
                << " and camera roll enabled state as: "
                << is_camera_roll_enabled;
   message_sender_->SendCrosState(are_notifications_enabled,
-                                 is_camera_roll_enabled,
-                                 /*attestation_certs=*/attestation_certs);
+                                 is_camera_roll_enabled, attestation_certs);
 
   retry_timer_->Start(FROM_HERE, retry_delay_,
                       base::BindOnce(&CrosStateSender::OnRetryTimerFired,
@@ -165,5 +167,27 @@ void CrosStateSender::OnFeatureStatesChanged(
   AttemptUpdateCrosState();
 }
 
-}  // namespace phonehub
-}  // namespace ash
+void CrosStateSender::OnCertificateGenerated(
+    const std::vector<std::string>& attestation_certs,
+    bool is_valid) {
+  if (connection_manager_->GetStatus() !=
+      secure_channel::ConnectionManager::Status::kConnected) {
+    return;
+  }
+
+  // Skip sending CrosState update messages when we don't have a valid
+  // certificate, unless this is the initial connection or there has been a
+  // feature status change.
+  if (!is_valid && !is_certificate_requested_) {
+    return;
+  }
+
+  if (is_certificate_requested_) {
+    is_certificate_requested_ = false;
+    RecordResultMetrics(is_valid);
+  }
+
+  SendCrosStateMessage(&attestation_certs);
+}
+
+}  // namespace ash::phonehub

@@ -32,12 +32,15 @@
 
 #include <memory>
 
+#include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/fdlibm/ieee754.h"
 
 namespace blink {
 
 namespace {
+
+constexpr size_t kKernelSize = 128;
 
 // Computes ideal band-limited filter coefficients to sample in between each
 // source sample-frame.  This filter will be used to compute the odd
@@ -78,25 +81,27 @@ std::unique_ptr<AudioFloatArray> MakeKernel(size_t size) {
 UpSampler::UpSampler(unsigned input_block_size)
     : input_block_size_(input_block_size),
       temp_buffer_(input_block_size),
-      input_buffer_(input_block_size * 2) {
-  std::unique_ptr<AudioFloatArray> convolution_kernel =
-      MakeKernel(kDefaultKernelSize);
-  if (input_block_size_ <= 128) {
-    // If the input block size is small enough, use direct convolution because
-    // it is faster than FFT convolution for such input block sizes.
+      input_buffer_(kKernelSize / 2 + input_block_size) {
+  std::unique_ptr<AudioFloatArray> convolution_kernel = MakeKernel(kKernelSize);
+  if (input_block_size_ <= kKernelSize) {
+    // Use direct convolution because SimpleFFTConvolver requires the block size
+    // to be at least as large as the kernel size.  Direct convolution is also
+    // faster than FFT convolution for small input block sizes.
     direct_convolver_ = std::make_unique<DirectConvolver>(
         input_block_size_, std::move(convolution_kernel));
   } else {
     // Otherwise, use FFT convolution because it is faster than direct
     // convolution for large input block sizes.
     simple_fft_convolver_ = std::make_unique<SimpleFFTConvolver>(
-        input_block_size_, std::move(convolution_kernel));
+        input_block_size_, *convolution_kernel);
   }
 }
 
-void UpSampler::Process(const float* source_p,
-                        float* dest_p,
-                        uint32_t source_frames_to_process) {
+void UpSampler::Process(base::span<const float> source,
+                        base::span<float> dest) {
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
+               "UpSampler::Process");
+  const size_t source_frames_to_process = source.size();
   const size_t convolution_kernel_size =
       direct_convolver_ ? direct_convolver_->ConvolutionKernelSize()
                         : simple_fft_convolver_->ConvolutionKernelSize();
@@ -105,43 +110,50 @@ void UpSampler::Process(const float* source_p,
 
   DCHECK_EQ(source_frames_to_process, temp_buffer_.size());
 
-  size_t half_size = convolution_kernel_size / 2;
+  size_t half_kernel_size = convolution_kernel_size / 2;
 
-  DCHECK_EQ(input_buffer_.size(), source_frames_to_process * 2);
-  DCHECK_LE(half_size, source_frames_to_process);
+  DCHECK_EQ(dest.size(), source_frames_to_process * 2);
+  DCHECK_EQ(input_buffer_.size(), half_kernel_size + source_frames_to_process);
 
-  // Copy source samples to 2nd half of input buffer.
-  float* input_p = input_buffer_.Data() + source_frames_to_process;
-  memcpy(input_p, source_p, sizeof(float) * source_frames_to_process);
+  base::span<float> input_buffer_span = input_buffer_.as_span();
+
+  // Copy source samples to the end of input buffer.
+  input_buffer_span.subspan(half_kernel_size, source_frames_to_process)
+      .copy_from(source);
 
   // Copy even sample-frames 0,2,4,6... (delayed by the linear phase delay)
-  // directly into destP.
-  for (unsigned i = 0; i < source_frames_to_process; ++i) {
-    dest_p[i * 2] = *((input_p - half_size) + i);
+  // directly into dest.
+  base::span<const float> delayed_input =
+      input_buffer_span.first(source_frames_to_process);
+  for (size_t i = 0; i < source_frames_to_process; ++i) {
+    dest[i * 2] = delayed_input[i];
   }
 
   // Compute odd sample-frames 1,3,5,7...
-  float* odd_samples_p = temp_buffer_.Data();
+  base::span<float> odd_samples = temp_buffer_.as_span();
   if (direct_convolver_) {
-    direct_convolver_->Process(source_p, odd_samples_p,
-                               source_frames_to_process);
+    direct_convolver_->Process(source, odd_samples);
   } else {
-    simple_fft_convolver_->Process(source_p, odd_samples_p,
-                                   source_frames_to_process);
+    simple_fft_convolver_->Process(source, odd_samples);
   }
 
   for (unsigned i = 0; i < source_frames_to_process; ++i) {
-    dest_p[i * 2 + 1] = odd_samples_p[i];
+    dest[i * 2 + 1] = odd_samples[i];
   }
 
-  // Copy 2nd half of input buffer to 1st half.
-  memcpy(input_buffer_.Data(), input_p,
-         sizeof(float) * source_frames_to_process);
+  // Shift the history buffer.
+  input_buffer_span.first(half_kernel_size)
+      .copy_from(input_buffer_span.subspan(source_frames_to_process,
+                                           half_kernel_size));
 }
 
 void UpSampler::Reset() {
-  direct_convolver_.reset();
-  simple_fft_convolver_.reset();
+  if (direct_convolver_) {
+    direct_convolver_->Reset();
+  }
+  if (simple_fft_convolver_) {
+    simple_fft_convolver_->Reset();
+  }
   input_buffer_.Zero();
 }
 

@@ -6,7 +6,7 @@
 #define UI_OZONE_PLATFORM_WAYLAND_GPU_WAYLAND_OVERLAY_MANAGER_H_
 
 #include "base/memory/raw_ptr.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/ozone/public/overlay_candidates_ozone.h"
 #include "ui/ozone/public/overlay_manager_ozone.h"
 
@@ -28,7 +28,6 @@ class WaylandOverlayManager : public OverlayManagerOzone {
   // OverlayManagerOzone:
   std::unique_ptr<OverlayCandidatesOzone> CreateOverlayCandidates(
       gfx::AcceleratedWidget w) override;
-  void SetContextDelegated() override;
 
   // Checks if overlay candidates can be displayed as overlays. Modifies
   // |candidates| to indicate if they can.
@@ -41,9 +40,6 @@ class WaylandOverlayManager : public OverlayManagerOzone {
                           gfx::AcceleratedWidget widget) const;
 
   const raw_ptr<WaylandBufferManagerGpu> manager_gpu_;
-
-  // Same as features::IsDelegatedCompositingEnabled.
-  bool is_delegated_context_ = false;
 };
 
 }  // namespace ui

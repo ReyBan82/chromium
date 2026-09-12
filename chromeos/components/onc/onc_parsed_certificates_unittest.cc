@@ -5,13 +5,13 @@
 #include "chromeos/components/onc/onc_parsed_certificates.h"
 
 #include <memory>
+#include <optional>
+#include <string_view>
 
 #include "base/json/json_reader.h"
-#include "base/strings/string_piece.h"
 #include "base/values.h"
 #include "net/cert/x509_certificate.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace chromeos::onc {
 
@@ -22,9 +22,9 @@ class OncParsedCertificatesTest : public testing::Test {
 
  protected:
   std::unique_ptr<OncParsedCertificates> ReadFromJSON(
-      base::StringPiece onc_certificates_json) {
-    absl::optional<base::Value> onc_certificates =
-        base::JSONReader::Read(onc_certificates_json);
+      std::string_view onc_certificates_json) {
+    std::optional<base::Value> onc_certificates = base::JSONReader::Read(
+        onc_certificates_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
     if (!onc_certificates || !onc_certificates->is_list()) {
       return nullptr;
     }
@@ -390,8 +390,8 @@ TEST_F(OncParsedCertificatesTest, EqualityChecks) {
       -----END CERTIFICATE-----" }
       ])";
 
-  absl::optional<base::Value> onc_certificates =
-      base::JSONReader::Read(onc_certificates_json);
+  std::optional<base::Value> onc_certificates = base::JSONReader::Read(
+      onc_certificates_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(onc_certificates);
   ASSERT_TRUE(onc_certificates->is_list());
 
@@ -404,9 +404,9 @@ TEST_F(OncParsedCertificatesTest, EqualityChecks) {
   // Mangle the TrustBits part and assume that authorities will not be equal
   // anymore.
   {
-    base::Value::List authority_web_trust_mangled =
+    base::ListValue authority_web_trust_mangled =
         onc_certificates->GetList().Clone();
-    base::Value::List* trust_bits =
+    base::ListValue* trust_bits =
         authority_web_trust_mangled[1].GetDict().FindList("TrustBits");
     ASSERT_TRUE(trust_bits);
     (*trust_bits)[0] = base::Value("UnknownTrustBit");
@@ -423,7 +423,7 @@ TEST_F(OncParsedCertificatesTest, EqualityChecks) {
 
   // Mangle the guid part of an authority certificate.
   {
-    base::Value::List authority_guid_mangled =
+    base::ListValue authority_guid_mangled =
         onc_certificates->GetList().Clone();
     authority_guid_mangled[1].GetDict().Set("GUID", "otherguid");
 
@@ -437,7 +437,7 @@ TEST_F(OncParsedCertificatesTest, EqualityChecks) {
 
   // Mangle the type part of an authority certificate.
   {
-    base::Value::List authority_type_mangled =
+    base::ListValue authority_type_mangled =
         onc_certificates->GetList().Clone();
     authority_type_mangled[1].GetDict().Set("Type", "Server");
 
@@ -451,7 +451,7 @@ TEST_F(OncParsedCertificatesTest, EqualityChecks) {
 
   // Mangle the X509 payload an authority certificate.
   {
-    base::Value::List authority_x509_mangled =
+    base::ListValue authority_x509_mangled =
         onc_certificates->GetList().Clone();
     authority_x509_mangled[1].GetDict().Set("X509", R"(
                             -----BEGIN CERTIFICATE-----
@@ -491,7 +491,7 @@ TEST_F(OncParsedCertificatesTest, EqualityChecks) {
 
   // Mangle the GUID of a client certificate.
   {
-    base::Value::List client_guid_mangled = onc_certificates->GetList().Clone();
+    base::ListValue client_guid_mangled = onc_certificates->GetList().Clone();
     client_guid_mangled[0].GetDict().Set("GUID", "other-guid");
 
     OncParsedCertificates parsed_client_guid_mangled(client_guid_mangled);
@@ -504,8 +504,7 @@ TEST_F(OncParsedCertificatesTest, EqualityChecks) {
 
   // Mangle the PKCS12 payload of a client certificate.
   {
-    base::Value::List client_pkcs12_mangled =
-        onc_certificates->GetList().Clone();
+    base::ListValue client_pkcs12_mangled = onc_certificates->GetList().Clone();
     client_pkcs12_mangled[0].GetDict().Set("PKCS12", "YQ==");
 
     OncParsedCertificates parsed_client_pkcs12_mangled(client_pkcs12_mangled);

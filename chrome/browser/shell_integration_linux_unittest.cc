@@ -3,36 +3,48 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/shell_integration_linux.h"
+#include "chrome/browser/shell_integration.h"
 
 #include <stddef.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <map>
+#include <optional>
 #include <vector>
 
 #include "base/base_paths.h"
 #include "base/command_line.h"
-#include "base/containers/contains.h"
 #include "base/environment.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/strings/string_piece.h"
+#include "base/memory/ptr_util.h"
+#include "base/path_service.h"
+#include "base/scoped_environment_variable_override.h"
+#include "base/strings/cstring_view.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/test/scoped_path_override.h"
 #include "build/branding_buildflags.h"
 #include "chrome/browser/web_applications/os_integration/web_app_shortcut.h"
 #include "chrome/browser/web_applications/web_app_helpers.h"
-#include "chrome/browser/web_applications/web_app_id.h"
+#include "chrome/common/channel_info.h"
 #include "chrome/common/chrome_constants.h"
 #include "components/services/app_service/public/cpp/file_handler.h"
+#include "components/version_info/channel.h"
+#include "components/webapps/common/web_app_id.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/ozone/public/ozone_platform.h"
 #include "url/gurl.h"
+#include "base/test/scoped_path_override.h"
+
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#include "chrome/test/base/scoped_channel_override.h"
+#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
 
 using ::testing::ElementsAre;
 
@@ -43,31 +55,29 @@ namespace {
 // Provides mock environment variables values based on a stored map.
 class MockEnvironment : public base::Environment {
  public:
-  MockEnvironment() {}
+  MockEnvironment() = default;
 
   MockEnvironment(const MockEnvironment&) = delete;
   MockEnvironment& operator=(const MockEnvironment&) = delete;
 
-  void Set(base::StringPiece name, const std::string& value) {
+  void Set(base::cstring_view name, const std::string& value) {
     variables_[std::string(name)] = value;
   }
 
-  bool GetVar(base::StringPiece variable_name, std::string* result) override {
-    if (base::Contains(variables_, std::string(variable_name))) {
-      *result = variables_[std::string(variable_name)];
-      return true;
+  std::optional<std::string> GetVar(base::cstring_view variable_name) override {
+    if (!variables_.contains(std::string(variable_name))) {
+      return std::nullopt;
     }
-
-    return false;
+    return variables_[std::string(variable_name)];
   }
 
-  bool SetVar(base::StringPiece variable_name,
+  bool SetVar(base::cstring_view variable_name,
               const std::string& new_value) override {
     ADD_FAILURE();
     return false;
   }
 
-  bool UnSetVar(base::StringPiece variable_name) override {
+  bool UnSetVar(base::cstring_view variable_name) override {
     ADD_FAILURE();
     return false;
   }
@@ -76,107 +86,7 @@ class MockEnvironment : public base::Environment {
   std::map<std::string, std::string> variables_;
 };
 
-// This helps EXPECT_THAT(..., ElementsAre(...)) print out more meaningful
-// failure messages.
-std::vector<std::string> FilePathsToStrings(
-    const std::vector<base::FilePath>& paths) {
-  std::vector<std::string> values;
-  for (const auto& path : paths)
-    values.push_back(path.value());
-  return values;
-}
-
 }  // namespace
-
-TEST(ShellIntegrationTest, GetDataWriteLocation) {
-  content::BrowserTaskEnvironment task_environment;
-
-  // Test that it returns $XDG_DATA_HOME.
-  {
-    MockEnvironment env;
-    base::ScopedPathOverride home_override(base::DIR_HOME,
-                                           base::FilePath("/home/user"),
-                                           true /* absolute? */,
-                                           false /* create? */);
-    env.Set("XDG_DATA_HOME", "/user/path");
-    base::FilePath path = GetDataWriteLocation(&env);
-    EXPECT_EQ("/user/path", path.value());
-  }
-
-  // Test that $XDG_DATA_HOME falls back to $HOME/.local/share.
-  {
-    MockEnvironment env;
-    base::ScopedPathOverride home_override(base::DIR_HOME,
-                                           base::FilePath("/home/user"),
-                                           true /* absolute? */,
-                                           false /* create? */);
-    base::FilePath path = GetDataWriteLocation(&env);
-    EXPECT_EQ("/home/user/.local/share", path.value());
-  }
-}
-
-TEST(ShellIntegrationTest, GetDataSearchLocations) {
-  content::BrowserTaskEnvironment task_environment;
-
-  // Test that it returns $XDG_DATA_HOME + $XDG_DATA_DIRS.
-  {
-    MockEnvironment env;
-    base::ScopedPathOverride home_override(base::DIR_HOME,
-                                           base::FilePath("/home/user"),
-                                           true /* absolute? */,
-                                           false /* create? */);
-    env.Set("XDG_DATA_HOME", "/user/path");
-    env.Set("XDG_DATA_DIRS", "/system/path/1:/system/path/2");
-    EXPECT_THAT(
-        FilePathsToStrings(GetDataSearchLocations(&env)),
-        ElementsAre("/user/path",
-                    "/system/path/1",
-                    "/system/path/2"));
-  }
-
-  // Test that $XDG_DATA_HOME falls back to $HOME/.local/share.
-  {
-    MockEnvironment env;
-    base::ScopedPathOverride home_override(base::DIR_HOME,
-                                           base::FilePath("/home/user"),
-                                           true /* absolute? */,
-                                           false /* create? */);
-    env.Set("XDG_DATA_DIRS", "/system/path/1:/system/path/2");
-    EXPECT_THAT(
-        FilePathsToStrings(GetDataSearchLocations(&env)),
-        ElementsAre("/home/user/.local/share",
-                    "/system/path/1",
-                    "/system/path/2"));
-  }
-
-  // Test that if neither $XDG_DATA_HOME nor $HOME are specified, it still
-  // succeeds.
-  {
-    MockEnvironment env;
-    env.Set("XDG_DATA_DIRS", "/system/path/1:/system/path/2");
-    std::vector<std::string> results =
-        FilePathsToStrings(GetDataSearchLocations(&env));
-    ASSERT_EQ(3U, results.size());
-    EXPECT_FALSE(results[0].empty());
-    EXPECT_EQ("/system/path/1", results[1]);
-    EXPECT_EQ("/system/path/2", results[2]);
-  }
-
-  // Test that $XDG_DATA_DIRS falls back to the two default paths.
-  {
-    MockEnvironment env;
-    base::ScopedPathOverride home_override(base::DIR_HOME,
-                                           base::FilePath("/home/user"),
-                                           true /* absolute? */,
-                                           false /* create? */);
-    env.Set("XDG_DATA_HOME", "/user/path");
-    EXPECT_THAT(
-        FilePathsToStrings(GetDataSearchLocations(&env)),
-        ElementsAre("/user/path",
-                    "/usr/local/share",
-                    "/usr/share"));
-  }
-}
 
 TEST(ShellIntegrationTest, GetExistingShortcutContents) {
   const char kTemplateFilename[] = "shortcut-test.desktop";
@@ -296,43 +206,86 @@ TEST(ShellIntegrationTest, GetExistingProfileShortcutFilenames) {
                           base::FilePath(kApp2Filename)));
 }
 
-TEST(ShellIntegrationTest, GetWebShortcutFilename) {
-  const struct {
-    const char* const path;
-    const char* const url;
-  } test_cases[] = {
-    { "http___foo_.desktop", "http://foo" },
-    { "http___foo_bar_.desktop", "http://foo/bar/" },
-    { "http___foo_bar_a=b&c=d.desktop", "http://foo/bar?a=b&c=d" },
+TEST(ShellIntegrationTest, GetUniqueWebShortcutFilenameFromUrl) {
+  std::vector<std::pair<std::string, GURL>> test_cases = {
+      {"http___foo_.desktop", GURL("http://foo")},
+      {"http___foo_bar_.desktop", GURL("http://foo/bar/")},
+      {"http___foo_bar_a=b&c=d.desktop", GURL("http://foo/bar?a=b&c=d")},
 
-    // Now we're starting to be more evil...
-    { "http___foo_.desktop", "http://foo/bar/baz/../../../../../" },
-    { "http___foo_.desktop", "http://foo/bar/././../baz/././../" },
-    { "http___.._.desktop", "http://../../../../" },
+      // Now we're starting to be more evil...
+      {"http___foo_.desktop", GURL("http://foo/bar/baz/../../../../../")},
+      {"http___foo_.desktop", GURL("http://foo/bar/././../baz/././../")},
+      {"http___.._.desktop", GURL("http://../../../../")},
   };
-  for (size_t i = 0; i < std::size(test_cases); i++) {
-    EXPECT_EQ(std::string(chrome::kBrowserProcessExecutableName) + "-" +
-              test_cases[i].path,
-              GetWebShortcutFilename(GURL(test_cases[i].url)).value()) <<
-        " while testing " << test_cases[i].url;
+  for (const auto& [expected, gurl_input] : test_cases) {
+    std::optional<base::SafeBaseName> file_base_name =
+        GetUniqueWebShortcutFilename(gurl_input.spec());
+    ASSERT_TRUE(file_base_name);
+    EXPECT_EQ(
+        base::StrCat({chrome::kBrowserProcessExecutableName, "-", expected}),
+        file_base_name->path().value())
+        << " while testing " << gurl_input.spec();
   }
+}
+
+TEST(ShellIntegrationTest, GetUniqueWebShortcutFilename) {
+  std::vector<std::pair<std::string, std::string>> test_cases = {
+      {"Test_test.desktop", "Test test"},
+      {"What_about__newlines.desktop", "What\nabout\n\rnewlines"},
+      {"______.desktop", "\\//\\//"},
+  };
+  for (const auto& [expected, input] : test_cases) {
+    std::optional<base::SafeBaseName> file_base_name =
+        GetUniqueWebShortcutFilename(input);
+    ASSERT_TRUE(file_base_name);
+    EXPECT_EQ(
+        base::StrCat({chrome::kBrowserProcessExecutableName, "-", expected}),
+        file_base_name->path().value())
+        << " while testing " << input;
+  }
+}
+TEST(ShellIntegrationTest, GetUniqueWebShortcutUnique) {
+  const std::string kTestName = "Test test";
+
+  base::ScopedPathOverride profile_override(base::DIR_USER_DESKTOP);
+  base::FilePath desktop_dir =
+      base::PathService::CheckedGet(base::DIR_USER_DESKTOP);
+
+  // Create the first file option.
+  std::optional<base::SafeBaseName> file_base_name =
+      GetUniqueWebShortcutFilename(kTestName);
+  ASSERT_TRUE(file_base_name);
+  std::string expected_name = base::StrCat(
+      {chrome::kBrowserProcessExecutableName, "-Test_test.desktop"});
+  EXPECT_EQ(expected_name, file_base_name->path().value());
+  ASSERT_TRUE(
+      base::WriteFile(desktop_dir.Append(file_base_name->path()), "test data"));
+
+  // The second call should guarantee uniqueness, and change the name without a
+  // whitespace.
+  std::optional<base::SafeBaseName> second_file_base_name =
+      GetUniqueWebShortcutFilename(kTestName);
+  ASSERT_TRUE(second_file_base_name);
+  std::string expected_second_name = base::StrCat(
+      {chrome::kBrowserProcessExecutableName, "-Test_test_1.desktop"});
+  EXPECT_EQ(expected_second_name, second_file_base_name->path().value());
 }
 
 TEST(ShellIntegrationTest, GetDesktopFileContents) {
   const base::FilePath kChromeExePath("/opt/google/chrome/google-chrome");
-  const struct {
+  struct TestCases {
     const char* const url;
     const char* const title;
     const char* const icon_name;
     const char* const categories;
     const char* const mime_type;
     bool nodisplay;
-    const char* const expected_output;
-  } test_cases[] = {
+    std::string expected_output;
+  };
+  const auto test_cases = std::to_array<TestCases>({
       // Real-world case.
       {"http://gmail.com", "GMail", "chrome-http__gmail.com", "", "", false,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
@@ -345,7 +298,6 @@ TEST(ShellIntegrationTest, GetDesktopFileContents) {
       // Make sure that empty icons are replaced by the chrome icon.
       {"http://gmail.com", "GMail", "", "", "", false,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
@@ -363,7 +315,6 @@ TEST(ShellIntegrationTest, GetDesktopFileContents) {
       {"http://gmail.com", "GMail", "chrome-http__gmail.com",
        "Graphics;Education;", "", true,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
@@ -379,46 +330,43 @@ TEST(ShellIntegrationTest, GetDesktopFileContents) {
       {"http://evil.com/evil --join-the-b0tnet", "Ownz0red\nExec=rm -rf /",
        "chrome-http__evil.com_evil", "", "", false,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
        "Type=Application\n"
        "Name=http://evil.com/evil%20--join-the-b0tnet\n"
        "Exec=/opt/google/chrome/google-chrome "
-       "--app=http://evil.com/evil%20--join-the-b0tnet\n"
+       "--app=http://evil.com/evil%%20--join-the-b0tnet\n"
        "Icon=chrome-http__evil.com_evil\n"
        "StartupWMClass=evil.com__evil%20--join-the-b0tnet\n"},
       {"http://evil.com/evil; rm -rf /; \"; rm -rf $HOME >ownz0red",
        "Innocent Title", "chrome-http__evil.com_evil", "", "", false,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
        "Type=Application\n"
        "Name=Innocent Title\n"
        "Exec=/opt/google/chrome/google-chrome "
-       "\"--app=http://evil.com/evil;%20rm%20-rf%20/;%20%22;%20rm%20"
+       "\"--app=http://evil.com/evil;%%20rm%%20-rf%%20/;%%20%%22;%%20rm%%20"
        // Note: $ is escaped as \$ within an arg to Exec, and then
        // the \ is escaped as \\ as all strings in a Desktop file should
        // be; finally, \\ becomes \\\\ when represented in a C++ string!
-       "-rf%20\\\\$HOME%20%3Eownz0red\"\n"
+       "-rf%%20\\\\$HOME%%20%%3Eownz0red\"\n"
        "Icon=chrome-http__evil.com_evil\n"
        "StartupWMClass=evil.com__evil;%20rm%20-rf%20_;%20%22;%20"
        "rm%20-rf%20$HOME%20%3Eownz0red\n"},
       {"http://evil.com/evil | cat `echo ownz0red` >/dev/null",
        "Innocent Title", "chrome-http__evil.com_evil", "", "", false,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
        "Type=Application\n"
        "Name=Innocent Title\n"
        "Exec=/opt/google/chrome/google-chrome "
-       "--app=http://evil.com/evil%20%7C%20cat%20%60echo%20ownz0red"
-       "%60%20%3E/dev/null\n"
+       "--app=http://evil.com/evil%%20%%7C%%20cat%%20%%60echo%%20ownz0red"
+       "%%60%%20%%3E/dev/null\n"
        "Icon=chrome-http__evil.com_evil\n"
        "StartupWMClass=evil.com__evil%20%7C%20cat%20%60echo%20ownz0red"
        "%60%20%3E_dev_null\n"},
@@ -426,23 +374,23 @@ TEST(ShellIntegrationTest, GetDesktopFileContents) {
       {"https://paint.app", "Paint", "chrome-https__paint.app", "Image",
        "image/png;image/jpg", false,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
        "Type=Application\n"
        "Name=Paint\n"
-       "MimeType=image/png;image/jpg\n"
-       "Exec=/opt/google/chrome/google-chrome --app=https://paint.app/ %U\n"
-       "Icon=chrome-https__paint.app\n"
-       "Categories=Image\n"
-       "StartupWMClass=paint.app\n"},
+       "MimeType=image/png;image/jpg;" +
+           shell_integration_linux::GetDirectLaunchMimeTypeHandler() +
+           "\n"
+           "Exec=/opt/google/chrome/google-chrome --app=https://paint.app/ %U\n"
+           "Icon=chrome-https__paint.app\n"
+           "Categories=Image\n"
+           "StartupWMClass=paint.app\n"},
 
       // Test evil mime type.
       {"https://paint.app", "Evil Paint", "chrome-https__paint.app", "Image",
        "image/png\nExec=rm -rf /", false,
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
@@ -451,7 +399,25 @@ TEST(ShellIntegrationTest, GetDesktopFileContents) {
        "Exec=/opt/google/chrome/google-chrome --app=https://paint.app/\n"
        "Icon=chrome-https__paint.app\n"
        "Categories=Image\n"
-       "StartupWMClass=paint.app\n"}};
+       "StartupWMClass=paint.app\n"},
+
+      // Test setting mime type with static scheme handlers.
+      {"https://test.app", "Test App", "chrome-https__test.app", "App",
+       "image/png;image/jpeg", false,
+
+       "[Desktop Entry]\n"
+       "Version=1.0\n"
+       "Terminal=false\n"
+       "Type=Application\n"
+       "Name=Test App\n"
+       "MimeType=image/png;image/jpeg;" +
+           shell_integration_linux::GetDirectLaunchMimeTypeHandler() +
+           "\n"
+           "Exec=/opt/google/chrome/google-chrome --app=https://test.app/ %U\n"
+           "Icon=chrome-https__test.app\n"
+           "Categories=App\n"
+           "StartupWMClass=test.app\n"},
+  });
 
   for (size_t i = 0; i < std::size(test_cases); i++) {
     SCOPED_TRACE(i);
@@ -469,14 +435,15 @@ TEST(ShellIntegrationTest, GetDesktopFileContents) {
 
 TEST(ShellIntegrationTest, GetDesktopFileContentsForApps) {
   const base::FilePath kChromeExePath("/opt/google/chrome/google-chrome");
-  const struct {
+  struct TestCases {
     const char* const url;
     const char* const title;
     const char* const icon_name;
     bool nodisplay;
     std::set<web_app::DesktopActionInfo> action_info;
     const char* const expected_output;
-  } test_cases[] = {
+  };
+  const auto test_cases = std::to_array<TestCases>({
       // Test Shortcut Menu actions.
       {"https://example.app",
        "Lawful example",
@@ -495,7 +462,6 @@ TEST(ShellIntegrationTest, GetDesktopFileContentsForApps) {
                                       GURL("https://example.com/action%205")),
        },
 
-       "#!/usr/bin/env xdg-open\n"
        "[Desktop Entry]\n"
        "Version=1.0\n"
        "Terminal=false\n"
@@ -530,7 +496,7 @@ TEST(ShellIntegrationTest, GetDesktopFileContentsForApps) {
        "Exec=/opt/google/chrome/google-chrome --app-id=TestAppId "
        "--app-launch-url-for-shortcuts-menu-item=https://example.com/"
        "action%%205\n"},
-  };
+  });
 
   for (size_t i = 0; i < std::size(test_cases); i++) {
     SCOPED_TRACE(i);
@@ -547,11 +513,12 @@ TEST(ShellIntegrationTest, GetDesktopFileContentsForApps) {
 }
 
 TEST(ShellIntegrationTest, GetDirectoryFileContents) {
-  const struct {
+  struct TestCases {
     const char* const title;
     const char* const icon_name;
     const char* const expected_output;
-  } test_cases[] = {
+  };
+  const auto test_cases = std::to_array<TestCases>({
       // Real-world case.
       {"Chrome Apps", "chrome-apps",
 
@@ -574,7 +541,7 @@ TEST(ShellIntegrationTest, GetDirectoryFileContents) {
        "Icon=chromium-browser\n"
 #endif
       },
-  };
+  });
 
   for (size_t i = 0; i < std::size(test_cases); i++) {
     SCOPED_TRACE(i);
@@ -599,7 +566,7 @@ TEST(ShellIntegrationTest, GetMimeTypesRegistrationFilename) {
   for (const auto& test_case : test_cases) {
     const base::FilePath filename =
         GetMimeTypesRegistrationFilename(base::FilePath(test_case.profile_path),
-                                         web_app::AppId(test_case.app_id));
+                                         webapps::AppId(test_case.app_id));
     EXPECT_EQ(browser_name + test_case.expected_filename, filename.value());
   }
 }
@@ -694,7 +661,6 @@ TEST(ShellIntegrationTest, WmClass) {
 
 TEST(ShellIntegrationTest, GetDesktopEntryStringValueFromFromDesktopFile) {
   const char* const kDesktopFileContents =
-      "#!/usr/bin/env xdg-open\n"
       "[Desktop Entry]\n"
       "Version=1.0\n"
       "Terminal=false\n"
@@ -737,4 +703,90 @@ TEST(ShellIntegrationTest, GetDesktopEntryStringValueFromFromDesktopFile) {
                         "Action1", kDesktopFileContents));
 }
 
+TEST(ShellIntegrationTest, GetXdgAppIdForWebApp) {
+  base::ScopedEnvironmentVariableOverride scoped_override(
+      "CHROME_WEB_APP_DESKTOP_ID_PREFIX");
+
+  EXPECT_EQ("chrome-extensionid-Profile_1",
+            GetXdgAppIdForWebApp("_crx_extensionid",
+                                 base::FilePath("/tmp/Profile 1")));
+}
+
+TEST(ShellIntegrationTest, GetXdgAppIdForWebAppWithDesktopIdPrefix) {
+  base::ScopedEnvironmentVariableOverride scoped_override(
+      "CHROME_WEB_APP_DESKTOP_ID_PREFIX", "org.example.Browser.");
+
+  EXPECT_EQ("org.example.Browser.chrome-extensionid-Profile_1",
+            GetXdgAppIdForWebApp("_crx_extensionid",
+                                 base::FilePath("/tmp/Profile 1")));
+}
+
+TEST(ShellIntegrationLinuxTest,
+     GetDesktopFileContentsForUrlShortcutEscapesPercent) {
+  std::string title = "A\" --gpu-launcher=\"xcalc\" \"B";
+  GURL url("https://evil.example/?q=%c");
+  base::FilePath icon_path("/tmp/icon.png");
+  base::FilePath profile_path("/tmp/profile");
+
+  std::string contents =
+      GetDesktopFileContentsForUrlShortcut(title, url, icon_path, profile_path);
+
+  // The URL in Exec should have % escaped as %%.
+  EXPECT_TRUE(contents.find("Exec=") != std::string::npos);
+  EXPECT_TRUE(contents.find("https://evil.example/?q=%%c") != std::string::npos)
+      << "Contents: " << contents;
+}
+
+TEST(ShellIntegrationLinuxTest, GetDesktopFileContentsEscapesPercent) {
+  const base::FilePath kChromeExePath("/opt/google/chrome/google-chrome");
+  GURL url("https://evil.example/?q=%c");
+  std::u16string title = u"Evil App";
+  std::string icon_name = "icon";
+
+  std::string contents = GetDesktopFileContents(
+      kChromeExePath, "evil-app", url, std::string(), title, icon_name,
+      base::FilePath(), "", "", false, "", {});
+
+  EXPECT_TRUE(contents.find("Exec=") != std::string::npos);
+  EXPECT_TRUE(contents.find("https://evil.example/?q=%%c") != std::string::npos)
+      << "Contents: " << contents;
+}
+
 }  // namespace shell_integration_linux
+
+namespace shell_integration {
+
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+// A test fixture that allows for overriding the channel on Linux.
+class ShellIntegrationLinuxTest : public testing::Test {};
+
+TEST_F(ShellIntegrationLinuxTest, GetDirectLaunchUrlScheme) {
+  // Test each channel on Linux.
+  {
+    chrome::ScopedChannelOverride channel_override(
+        chrome::ScopedChannelOverride::Channel::kStable);
+    EXPECT_EQ("google-chrome", GetDirectLaunchUrlScheme());
+  }
+  {
+    chrome::ScopedChannelOverride channel_override(
+        chrome::ScopedChannelOverride::Channel::kBeta);
+    EXPECT_EQ("google-chrome-beta", GetDirectLaunchUrlScheme());
+  }
+  {
+    chrome::ScopedChannelOverride channel_override(
+        chrome::ScopedChannelOverride::Channel::kDev);
+    EXPECT_EQ("google-chrome-dev", GetDirectLaunchUrlScheme());
+  }
+  {
+    chrome::ScopedChannelOverride channel_override(
+        chrome::ScopedChannelOverride::Channel::kCanary);
+    EXPECT_EQ("google-chrome-canary", GetDirectLaunchUrlScheme());
+  }
+}
+#else   // !BUILDFLAG(GOOGLE_CHROME_BRANDING)
+TEST(ShellIntegrationLinuxTest, GetDirectLaunchUrlSchemeUnbranded) {
+  EXPECT_EQ("chromium", GetDirectLaunchUrlScheme());
+}
+#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
+
+}  // namespace shell_integration

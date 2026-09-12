@@ -8,18 +8,20 @@
 #include <memory>
 #include <string>
 
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
-#include "chrome/browser/ash/accessibility/accessibility_manager.h"
 #include "chrome/browser/ui/webui/ash/login/base_screen_handler.h"
+
+class ApplicationLocaleStorage;
+class PrefService;
 
 namespace ash {
 
-class CoreOobeView;
 class WelcomeScreen;
 
 // Interface for WelcomeScreenHandler.
-class WelcomeView : public base::SupportsWeakPtr<WelcomeView> {
+class WelcomeView {
  public:
   inline constexpr static StaticOobeScreenId kScreenId{"connect",
                                                        "WelcomeScreen"};
@@ -30,7 +32,7 @@ class WelcomeView : public base::SupportsWeakPtr<WelcomeView> {
   virtual void Show() = 0;
 
   // Sets language list and reloads localized contents.
-  virtual void SetLanguageList(base::Value::List language_list) = 0;
+  virtual void SetLanguageList(base::ListValue language_list) = 0;
 
   // Change the current input method.
   virtual void SetInputMethodId(const std::string& input_method_id) = 0;
@@ -57,15 +59,22 @@ class WelcomeView : public base::SupportsWeakPtr<WelcomeView> {
   virtual void UpdateA11yState(const A11yState& state) = 0;
 
   virtual void SetQuickStartEnabled() = 0;
+
+  // Gets a WeakPtr to the instance.
+  virtual base::WeakPtr<WelcomeView> AsWeakPtr() = 0;
 };
 
 // WebUI implementation of WelcomeScreenView. It is used to interact with
 // the welcome screen (part of the page) of the OOBE.
-class WelcomeScreenHandler : public WelcomeView, public BaseScreenHandler {
+class WelcomeScreenHandler final : public WelcomeView,
+                                   public BaseScreenHandler {
  public:
   using TView = WelcomeView;
 
-  explicit WelcomeScreenHandler(CoreOobeView* core_oobe_view);
+  // `local_state` and `application_locale_storage` must be non-null and must
+  // outlive `this`.
+  WelcomeScreenHandler(PrefService* local_state,
+                       ApplicationLocaleStorage* application_locale_storage);
 
   WelcomeScreenHandler(const WelcomeScreenHandler&) = delete;
   WelcomeScreenHandler& operator=(const WelcomeScreenHandler&) = delete;
@@ -74,7 +83,7 @@ class WelcomeScreenHandler : public WelcomeView, public BaseScreenHandler {
 
   // WelcomeView:
   void Show() override;
-  void SetLanguageList(base::Value::List language_list) override;
+  void SetLanguageList(base::ListValue language_list) override;
   void SetInputMethodId(const std::string& input_method_id) override;
   void ShowDemoModeConfirmationDialog() override;
   void ShowEditRequisitionDialog(const std::string& requisition) override;
@@ -82,23 +91,27 @@ class WelcomeScreenHandler : public WelcomeView, public BaseScreenHandler {
   void GiveChromeVoxHint() override;
   void UpdateA11yState(const A11yState& state) override;
   void SetQuickStartEnabled() override;
+  base::WeakPtr<WelcomeView> AsWeakPtr() override;
 
   // BaseScreenHandler:
   void DeclareLocalizedValues(
       ::login::LocalizedValuesBuilder* builder) override;
   void DeclareJSCallbacks() override;
-  void GetAdditionalParameters(base::Value::Dict* dict) override;
+  void GetAdditionalParameters(base::DictValue* dict) override;
 
  private:
   // JS callbacks.
   void HandleRecordChromeVoxHintSpokenSuccess();
 
-  base::Value::List language_list_;
-
   // Returns available timezones.
-  static base::Value::List GetTimezoneList();
+  static base::ListValue GetTimezoneList();
 
-  const base::raw_ptr<CoreOobeView> core_oobe_view_;
+  const raw_ref<PrefService> local_state_;
+  const raw_ref<ApplicationLocaleStorage> application_locale_storage_;
+
+  base::ListValue language_list_;
+
+  base::WeakPtrFactory<WelcomeView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

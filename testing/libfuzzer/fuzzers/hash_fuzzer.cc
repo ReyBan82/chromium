@@ -2,15 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <stddef.h>
+#include "base/hash/hash.h"
+
 #include <stdint.h>
 
 #include "base/containers/span.h"
-#include "base/hash/hash.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 
 // Entry point for LibFuzzer.
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  base::PersistentHash(base::make_span(data, size));
-  base::FastHash(base::make_span(data, size));
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(const base::span<const uint8_t> data) {
+  base::PersistentHash(data);
+  base::FastHash(data);
   return 0;
 }

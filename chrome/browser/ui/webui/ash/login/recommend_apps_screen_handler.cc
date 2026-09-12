@@ -4,10 +4,10 @@
 
 #include "chrome/browser/ui/webui/ash/login/recommend_apps_screen_handler.h"
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/values.h"
 #include "chrome/grit/component_extension_resources.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/chromeos/devicetype_utils.h"
@@ -74,6 +74,10 @@ void RecommendAppsScreenHandler::OnParseResponseError() {
 void RecommendAppsScreenHandler::LoadAppListInUI(base::Value app_list) {
   RecordUmaScreenState(RecommendAppsScreenState::SHOW);
   CallExternalAPI("loadAppList", std::move(app_list));
+}
+
+base::WeakPtr<RecommendAppsScreenView> RecommendAppsScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace ash

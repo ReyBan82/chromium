@@ -4,14 +4,21 @@
 
 #include "chrome/browser/page_load_metrics/integration_tests/metric_integration_test.h"
 
+#include <string_view>
+
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
-#include "base/test/trace_event_analyzer.h"
-#include "chrome/browser/ui/browser.h"
+#include "base/test/tracing/trace_event_analyzer.h"
+#include "base/trace_event/trace_config.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/common/chrome_features.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/tracing_controller.h"
 #include "content/public/common/content_switches.h"
+#include "content/public/test/browser_test_utils.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/http_request.h"
 #include "net/test/embedded_test_server/http_response.h"
@@ -20,7 +27,6 @@
 using base::CommandLine;
 using base::OnceClosure;
 using base::RunLoop;
-using base::StringPiece;
 using base::trace_event::TraceConfig;
 using content::TracingController;
 using content::WebContents;
@@ -35,7 +41,12 @@ using ukm::TestUkmRecorder;
 using ukm::builders::PageLoad;
 using ukm::mojom::UkmEntry;
 
-MetricIntegrationTest::MetricIntegrationTest() = default;
+MetricIntegrationTest::MetricIntegrationTest() {
+  // TODO(crbug.com/40248833): Use HTTPS URLs in tests to avoid having to
+  // disable this feature.
+  feature_list_.InitAndDisableFeature(features::kHttpsUpgrades);
+}
+
 MetricIntegrationTest::~MetricIntegrationTest() = default;
 
 void MetricIntegrationTest::SetUpOnMainThread() {
@@ -113,7 +124,7 @@ std::unique_ptr<TraceAnalyzer> MetricIntegrationTest::StopTracingAndAnalyze() {
 }
 
 WebContents* MetricIntegrationTest::web_contents() const {
-  return browser()->tab_strip_model()->GetActiveWebContents();
+  return browser()->GetTabStripModel()->GetActiveWebContents();
 }
 
 void MetricIntegrationTest::SetUpCommandLine(CommandLine* command_line) {
@@ -148,21 +159,35 @@ const ukm::mojom::UkmEntryPtr MetricIntegrationTest::GetEntry() {
   return std::move(kv->second);
 }
 
-void MetricIntegrationTest::ExpectUKMPageLoadMetric(StringPiece metric_name,
-                                                    int64_t expected_value) {
-  TestUkmRecorder::ExpectEntryMetric(GetEntry().get(), metric_name,
-                                     expected_value);
+std::vector<double> MetricIntegrationTest::GetPageLoadMetricsAsList(
+    std::string_view metric_name) {
+  std::vector<double> metrics;
+  for (const ukm::mojom::UkmEntry* entry :
+       ukm_recorder_->GetEntriesByName(ukm::builders::PageLoad::kEntryName)) {
+    if (auto* rs = ukm_recorder_->GetEntryMetric(entry, metric_name)) {
+      metrics.push_back(*rs);
+    }
+  }
+  return metrics;
+}
+
+void MetricIntegrationTest::ExpectUKMPageLoadMetric(
+    std::string_view metric_name,
+    int64_t expected_value) {
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
+  TestUkmRecorder::ExpectEntryMetric(entry.get(), metric_name, expected_value);
 }
 
 void MetricIntegrationTest::ExpectUKMPageLoadMetricNonExistence(
-    StringPiece metric_name) {
-  EXPECT_FALSE(TestUkmRecorder::EntryHasMetric(GetEntry().get(), metric_name));
+    std::string_view metric_name) {
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
+  EXPECT_FALSE(TestUkmRecorder::EntryHasMetric(entry.get(), metric_name));
 }
 
 void MetricIntegrationTest::
     ExpectUKMPageLoadMetricNonExistenceWithExpectedPageLoadMetricsNum(
         unsigned long expected_num_page_load_metrics,
-        StringPiece metric_name) {
+        std::string_view metric_name) {
   auto merged_entries =
       ukm_recorder().GetMergedEntriesByName(PageLoad::kEntryName);
   EXPECT_EQ(expected_num_page_load_metrics, merged_entries.size());
@@ -171,60 +196,74 @@ void MetricIntegrationTest::
   }
 }
 
+void MetricIntegrationTest::ExpectUkmEventNotRecorded(
+    std::string_view event_name) {
+  auto merged_entries = ukm_recorder().GetMergedEntriesByName(event_name);
+  EXPECT_EQ(merged_entries.size(), 0u);
+}
+
 void MetricIntegrationTest::ExpectUKMPageLoadMetricGreaterThan(
-    base::StringPiece metric_name,
+    std::string_view metric_name,
     int64_t expected_value) {
-  // TODO(yoav): figure out why GetEntry fails on the bots.
-  auto merged_entries =
-      ukm_recorder().GetMergedEntriesByName(PageLoad::kEntryName);
-  EXPECT_EQ(1ul, merged_entries.size());
-  const auto& kv = merged_entries.begin();
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
   const int64_t* value =
-      TestUkmRecorder::GetEntryMetric(kv->second.get(), metric_name);
+      TestUkmRecorder::GetEntryMetric(entry.get(), metric_name);
   EXPECT_GT(*value, expected_value);
 }
 void MetricIntegrationTest::ExpectUKMPageLoadMetricLowerThan(
-    base::StringPiece metric_name,
+    std::string_view metric_name,
     int64_t expected_value) {
-  auto merged_entries =
-      ukm_recorder().GetMergedEntriesByName(PageLoad::kEntryName);
-  EXPECT_EQ(1ul, merged_entries.size());
-  const auto& kv = merged_entries.begin();
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
   const int64_t* value =
-      TestUkmRecorder::GetEntryMetric(kv->second.get(), metric_name);
+      TestUkmRecorder::GetEntryMetric(entry.get(), metric_name);
   EXPECT_LT(*value, expected_value);
 }
 
+bool MetricIntegrationTest::ExtractUKMPageLoadMetric(
+    std::string_view metric_name,
+    int64_t* extracted_value) {
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
+  if (!entry) {
+    return false;
+  }
+  const int64_t* value =
+      TestUkmRecorder::GetEntryMetric(entry.get(), metric_name);
+  if (!value) {
+    return false;
+  }
+  *extracted_value = *value;
+  return true;
+}
+
 void MetricIntegrationTest::ExpectUKMPageLoadMetricsInAscendingOrder(
-    base::StringPiece metric_name1,
-    base::StringPiece metric_name2) {
-  auto merged_entries =
-      ukm_recorder().GetMergedEntriesByName(PageLoad::kEntryName);
-  EXPECT_EQ(1ul, merged_entries.size());
-  const auto& kv = merged_entries.begin();
+    std::string_view metric_name1,
+    std::string_view metric_name2) {
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
   const int64_t* value1 =
-      TestUkmRecorder::GetEntryMetric(kv->second.get(), metric_name1);
+      TestUkmRecorder::GetEntryMetric(entry.get(), metric_name1);
   EXPECT_TRUE(value1 != nullptr);
   const int64_t* value2 =
-      TestUkmRecorder::GetEntryMetric(kv->second.get(), metric_name2);
+      TestUkmRecorder::GetEntryMetric(entry.get(), metric_name2);
   EXPECT_TRUE(value2 != nullptr);
   EXPECT_LE(*value1, *value2);
 }
 
 int64_t MetricIntegrationTest::GetUKMPageLoadMetricFlagSet(
-    base::StringPiece metric_name) {
-  std::map<ukm::SourceId, ukm::mojom::UkmEntryPtr> merged_entries =
-      ukm_recorder().GetMergedEntriesByName(PageLoad::kEntryName);
-  EXPECT_EQ(1ul, merged_entries.size());
-  const auto& kv = merged_entries.begin();
+    std::string_view metric_name) {
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
+  EXPECT_TRUE(entry);
+  if (!entry) {
+    return 0;
+  }
+
   const int64_t* flag_set =
-      TestUkmRecorder::GetEntryMetric(kv->second.get(), metric_name);
+      TestUkmRecorder::GetEntryMetric(entry.get(), metric_name);
   EXPECT_TRUE(flag_set != nullptr);
   return *flag_set;
 }
 
 void MetricIntegrationTest::ExpectUKMPageLoadMetricFlagSet(
-    base::StringPiece metric_name,
+    std::string_view metric_name,
     uint32_t flag_set,
     bool expected) {
   if (expected) {
@@ -238,30 +277,28 @@ void MetricIntegrationTest::ExpectUKMPageLoadMetricFlagSet(
 }
 
 void MetricIntegrationTest::ExpectUKMPageLoadMetricFlagSetExactMatch(
-    base::StringPiece metric_name,
+    std::string_view metric_name,
     uint32_t flag_set) {
   EXPECT_EQ(GetUKMPageLoadMetricFlagSet(metric_name),
             static_cast<int64_t>(flag_set));
 }
 
-void MetricIntegrationTest::ExpectUKMPageLoadMetricNear(StringPiece metric_name,
-                                                        double expected_value,
-                                                        double epsilon) {
-  std::map<ukm::SourceId, ukm::mojom::UkmEntryPtr> merged_entries =
-      ukm_recorder().GetMergedEntriesByName(PageLoad::kEntryName);
-
-  EXPECT_EQ(1ul, merged_entries.size());
-  const auto& kv = merged_entries.begin();
+void MetricIntegrationTest::ExpectUKMPageLoadMetricNear(
+    std::string_view metric_name,
+    double expected_value,
+    double epsilon) {
+  ukm::mojom::UkmEntryPtr entry = GetEntry();
   const int64_t* recorded =
-      TestUkmRecorder::GetEntryMetric(kv->second.get(), metric_name);
+      TestUkmRecorder::GetEntryMetric(entry.get(), metric_name);
   EXPECT_NE(recorded, nullptr);
   EXPECT_NEAR(*recorded, expected_value, epsilon);
 }
 
-void MetricIntegrationTest::ExpectUniqueUMAWithinRange(StringPiece metric_name,
-                                                       double expected_value,
-                                                       double below,
-                                                       double above) {
+void MetricIntegrationTest::ExpectUniqueUMAWithinRange(
+    std::string_view metric_name,
+    double expected_value,
+    double below,
+    double above) {
   EXPECT_EQ(histogram_tester_->GetAllSamples(metric_name).size(), 1u)
       << "There should be one sample for " << metric_name.data();
 
@@ -278,14 +315,14 @@ void MetricIntegrationTest::ExpectUniqueUMAWithinRange(StringPiece metric_name,
 }
 
 void MetricIntegrationTest::ExpectUniqueUMABucketCount(
-    StringPiece metric_name,
-    base::HistogramBase::Sample sample,
-    base::HistogramBase::Count count) {
+    std::string_view metric_name,
+    base::HistogramBase::Sample32 sample,
+    base::HistogramBase::Count32 count) {
   histogram_tester_->ExpectBucketCount(metric_name, sample, count);
 }
 
 void MetricIntegrationTest::ExpectUniqueUMAPageLoadMetricNear(
-    StringPiece metric_name,
+    std::string_view metric_name,
     double expected_value) {
   EXPECT_EQ(histogram_tester_->GetAllSamples(metric_name).size(), 1u)
       << "There should be one sample for " << metric_name.data();
@@ -300,14 +337,14 @@ void MetricIntegrationTest::ExpectUniqueUMAPageLoadMetricNear(
       << " is not near the expected value!";
 }
 
-void MetricIntegrationTest::ExpectUniqueUMA(StringPiece metric_name) {
+void MetricIntegrationTest::ExpectUniqueUMA(std::string_view metric_name) {
   EXPECT_EQ(histogram_tester_->GetAllSamples(metric_name).size(), 1u)
       << "There should be one sample for " << metric_name.data();
 }
 
 void MetricIntegrationTest::ExpectMetricInLastUKMUpdateTraceEventNear(
     TraceAnalyzer& trace_analyzer,
-    base::StringPiece metric_name,
+    std::string_view metric_name,
     double expected_value,
     double epsilon) {
   TraceEventVector ukm_update_events;
@@ -317,9 +354,9 @@ void MetricIntegrationTest::ExpectMetricInLastUKMUpdateTraceEventNear(
 
   const TraceEvent* last_update_event = ukm_update_events.back();
 
-  base::Value::Dict arg_dict;
+  base::DictValue arg_dict;
   last_update_event->GetArgAsDict("ukm_page_load_timing_update", &arg_dict);
-  absl::optional<double> metric_value = arg_dict.FindDouble(metric_name);
+  std::optional<double> metric_value = arg_dict.FindDouble(metric_name);
   ASSERT_TRUE(metric_value.has_value());
 
   EXPECT_NEAR(expected_value, *metric_value, epsilon);

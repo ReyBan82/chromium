@@ -6,7 +6,7 @@
 
 #include "chrome/browser/policy/policy_test_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/test/base/chrome_test_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -32,14 +32,14 @@ class ExplicitlyAllowedNetworkPortsBrowserTest : public policy::PolicyTest {
 
   network::mojom::NetworkContext* network_context() {
     return browser()
-        ->profile()
+        ->GetProfile()
         ->GetDefaultStoragePartition()
         ->GetNetworkContext();
   }
 
   void EnablePort79ByPolicy() {
     PolicyMap policies;
-    base::Value::List list;
+    base::ListValue list;
     // Port 25 is just ignored, because it is not on the allowable ports list.
     list.Append("25");
     list.Append("79");

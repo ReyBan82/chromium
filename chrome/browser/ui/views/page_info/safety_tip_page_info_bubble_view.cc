@@ -7,9 +7,9 @@
 #include "base/functional/bind.h"
 #include "chrome/browser/lookalikes/safety_tip_ui_helper.h"
 #include "chrome/browser/platform_util.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/views/accessibility/theme_tracking_non_accessible_image_view.h"
 #include "chrome/browser/ui/views/bubble_anchor_util_views.h"
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
@@ -20,27 +20,24 @@
 #include "content/public/browser/navigation_handle.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
-#include "ui/gfx/color_utils.h"
 #include "ui/views/bubble/bubble_frame_view.h"
-#include "ui/views/controls/button/button.h"
 #include "ui/views/controls/button/md_text_button.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/controls/styled_label.h"
 #include "ui/views/layout/box_layout.h"
 #include "ui/views/layout/box_layout_view.h"
-#include "ui/views/style/typography.h"
 #include "ui/views/widget/widget.h"
 #include "url/gurl.h"
 
 SafetyTipPageInfoBubbleView::SafetyTipPageInfoBubbleView(
-    views::View* anchor_view,
+    views::BubbleAnchor anchor,
     const gfx::Rect& anchor_rect,
     gfx::NativeView parent_window,
     content::WebContents* web_contents,
     security_state::SafetyTipStatus safety_tip_status,
     const GURL& suggested_url,
     base::OnceCallback<void(SafetyTipInteraction)> close_callback)
-    : PageInfoBubbleViewBase(anchor_view,
+    : PageInfoBubbleViewBase(anchor,
                              anchor_rect,
                              parent_window,
                              PageInfoBubbleViewBase::BUBBLE_SAFETY_TIP,
@@ -91,7 +88,7 @@ SafetyTipPageInfoBubbleView::SafetyTipPageInfoBubbleView(
   auto header_view = std::make_unique<ThemeTrackingNonAccessibleImageView>(
       *bundle.GetImageSkiaNamed(IDR_SAFETY_TIP_ILLUSTRATION_LIGHT),
       *bundle.GetImageSkiaNamed(IDR_SAFETY_TIP_ILLUSTRATION_DARK),
-      base::BindRepeating(&views::BubbleDialogDelegate::GetBackgroundColor,
+      base::BindRepeating(&views::BubbleDialogDelegate::background_color,
                           base::Unretained(this)));
   GetBubbleFrameView()->SetHeaderView(std::move(header_view));
 
@@ -128,12 +125,12 @@ SafetyTipPageInfoBubbleView::SafetyTipPageInfoBubbleView(
               this),
           l10n_util::GetStringUTF16(
               GetSafetyTipLeaveButtonId(safety_tip_status))));
-  leave_button_->SetProminent(true);
+  leave_button_->SetStyle(ui::ButtonStyle::kProminent);
   leave_button_->SetID(
       PageInfoViewFactory::VIEW_ID_PAGE_INFO_BUTTON_LEAVE_SITE);
 }
 
-SafetyTipPageInfoBubbleView::~SafetyTipPageInfoBubbleView() {}
+SafetyTipPageInfoBubbleView::~SafetyTipPageInfoBubbleView() = default;
 
 void SafetyTipPageInfoBubbleView::OnWidgetDestroying(views::Widget* widget) {
   PageInfoBubbleViewBase::OnWidgetDestroying(widget);
@@ -229,25 +226,29 @@ void ShowSafetyTipDialog(
     security_state::SafetyTipStatus safety_tip_status,
     const GURL& suggested_url,
     base::OnceCallback<void(SafetyTipInteraction)> close_callback) {
-  Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
-  if (!browser)
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
+  if (!browser) {
     return;
+  }
 
   bubble_anchor_util::AnchorConfiguration configuration =
       bubble_anchor_util::GetPageInfoAnchorConfiguration(
-          browser, bubble_anchor_util::kLocationBar);
+          browser, bubble_anchor_util::Anchor::kLocationBar);
   gfx::Rect anchor_rect =
-      configuration.anchor_view
-          ? gfx::Rect()
-          : bubble_anchor_util::GetPageInfoAnchorRect(browser);
-  gfx::NativeWindow parent_window = browser->window()->GetNativeWindow();
+      configuration.anchor.IsNull()
+          ? bubble_anchor_util::GetPageInfoAnchorRect(browser)
+          : gfx::Rect();
+  gfx::NativeWindow parent_window = browser->GetWindow()->GetNativeWindow();
   gfx::NativeView parent_view = platform_util::GetViewForWindow(parent_window);
 
   views::BubbleDialogDelegateView* bubble = new SafetyTipPageInfoBubbleView(
-      configuration.anchor_view, anchor_rect, parent_view, web_contents,
+      configuration.anchor, anchor_rect, parent_view, web_contents,
       safety_tip_status, suggested_url, std::move(close_callback));
 
-  bubble->SetHighlightedButton(configuration.highlighted_button);
+  if (configuration.highlighted_element) {
+    bubble->SetHighlightedElement(*configuration.highlighted_element);
+  }
   bubble->SetArrow(configuration.bubble_arrow);
   bubble->GetWidget()->Show();
 }
@@ -259,6 +260,6 @@ PageInfoBubbleViewBase* CreateSafetyTipBubbleForTesting(
     const GURL& suggested_url,
     base::OnceCallback<void(SafetyTipInteraction)> close_callback) {
   return new SafetyTipPageInfoBubbleView(
-      nullptr, gfx::Rect(), parent_view, web_contents, safety_tip_status,
-      suggested_url, std::move(close_callback));
+      views::BubbleAnchor(), gfx::Rect(), parent_view, web_contents,
+      safety_tip_status, suggested_url, std::move(close_callback));
 }

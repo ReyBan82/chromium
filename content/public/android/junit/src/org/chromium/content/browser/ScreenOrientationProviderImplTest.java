@@ -12,7 +12,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mockito;
 import org.robolectric.Robolectric;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.device.mojom.ScreenOrientationLockType;
@@ -22,7 +21,6 @@ import java.lang.ref.WeakReference;
 
 /** Unit tests for {@link ScreenOrientationProviderImpl } */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public final class ScreenOrientationProviderImplTest {
     /**
      * Tests that when screen orientation requests are delayed that newer requests overwrite older
@@ -54,7 +52,7 @@ public final class ScreenOrientationProviderImplTest {
 
         instance.runDelayedOrientationRequests(window);
         Assert.assertEquals(
-                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.getRequestedOrientation());
+                ActivityInfo.SCREEN_ORIENTATION_USER, activity.getRequestedOrientation());
     }
 
     /**

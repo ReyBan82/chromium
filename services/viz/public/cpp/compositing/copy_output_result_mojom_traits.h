@@ -6,18 +6,18 @@
 #define SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_COPY_OUTPUT_RESULT_MOJOM_TRAITS_H_
 
 #include <memory>
+#include <optional>
 
 #include "components/viz/common/frame_sinks/copy_output_result.h"
+#include "components/viz/common/surfaces/tracked_element_rects.h"
 #include "gpu/ipc/common/mailbox_mojom_traits.h"
-#include "gpu/ipc/common/sync_token_mojom_traits.h"
 #include "mojo/public/cpp/bindings/optional_as_pointer.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/viz/public/cpp/compositing/bitmap_in_shared_memory_mojom_traits.h"
+#include "services/viz/public/cpp/compositing/tracked_element_rects_mojom_traits.h"
 #include "services/viz/public/mojom/compositing/copy_output_result.mojom-shared.h"
 #include "services/viz/public/mojom/compositing/texture_releaser.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/mojom/geometry_mojom_traits.h"
-#include "ui/gfx/ipc/color/gfx_param_traits.h"
 #include "ui/gfx/mojom/color_space_mojom_traits.h"
 
 namespace mojo {
@@ -28,8 +28,8 @@ struct EnumTraits<viz::mojom::CopyOutputResultFormat,
   static viz::mojom::CopyOutputResultFormat ToMojom(
       viz::CopyOutputResult::Format format);
 
-  static bool FromMojom(viz::mojom::CopyOutputResultFormat input,
-                        viz::CopyOutputResult::Format* out);
+  static viz::CopyOutputResult::Format FromMojom(
+      viz::mojom::CopyOutputResultFormat input);
 };
 
 template <>
@@ -38,8 +38,18 @@ struct EnumTraits<viz::mojom::CopyOutputResultDestination,
   static viz::mojom::CopyOutputResultDestination ToMojom(
       viz::CopyOutputResult::Destination destination);
 
-  static bool FromMojom(viz::mojom::CopyOutputResultDestination input,
-                        viz::CopyOutputResult::Destination* out);
+  static viz::CopyOutputResult::Destination FromMojom(
+      viz::mojom::CopyOutputResultDestination input);
+};
+
+template <>
+struct EnumTraits<viz::mojom::CopyOutputResultError,
+                  viz::CopyOutputResult::Error> {
+  static viz::mojom::CopyOutputResultError ToMojom(
+      viz::CopyOutputResult::Error format);
+
+  static viz::CopyOutputResult::Error FromMojom(
+      viz::mojom::CopyOutputResultError input);
 };
 
 template <>
@@ -54,19 +64,22 @@ struct StructTraits<viz::mojom::CopyOutputResultDataView,
   static const gfx::Rect& rect(
       const std::unique_ptr<viz::CopyOutputResult>& result);
 
-  static absl::optional<viz::CopyOutputResult::ScopedSkBitmap> bitmap(
+  static viz::CopyOutputResult::Error error(
+      const std::unique_ptr<viz::CopyOutputResult>& result);
+
+  static std::optional<viz::CopyOutputResult::ScopedSkBitmap> bitmap(
       const std::unique_ptr<viz::CopyOutputResult>& result);
 
   static mojo::OptionalAsPointer<const gpu::Mailbox> mailbox(
-      const std::unique_ptr<viz::CopyOutputResult>& result);
-
-  static mojo::OptionalAsPointer<const gpu::SyncToken> sync_token(
       const std::unique_ptr<viz::CopyOutputResult>& result);
 
   static mojo::OptionalAsPointer<const gfx::ColorSpace> color_space(
       const std::unique_ptr<viz::CopyOutputResult>& result);
 
   static mojo::PendingRemote<viz::mojom::TextureReleaser> releaser(
+      const std::unique_ptr<viz::CopyOutputResult>& result);
+
+  static const viz::TrackedElementRects& tracked_element_rects(
       const std::unique_ptr<viz::CopyOutputResult>& result);
 
   static bool Read(viz::mojom::CopyOutputResultDataView data,

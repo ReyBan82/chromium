@@ -5,11 +5,13 @@
 #include <memory>
 
 #include "ash/app_list/views/apps_grid_view_test_api.h"
+#include "ash/drag_drop/drag_drop_controller.h"
 #include "ash/public/cpp/accelerators.h"
+#include "ash/public/cpp/app_list/app_list_features.h"
 #include "ash/public/cpp/test/app_list_test_api.h"
+#include "ash/public/cpp/test/shell_test_api.h"
 #include "ash/root_window_controller.h"
 #include "chrome/browser/ash/app_list/test/chrome_app_list_test_support.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/test/browser_test.h"
@@ -29,16 +31,19 @@ class AppsGridDragBrowserTest : public InProcessBrowserTest {
     // Ensure that there are enough app items for reordering.
     test::PopulateDummyAppListItems(5);
     event_generator_ = std::make_unique<ui::test::EventGenerator>(
-        browser()->window()->GetNativeWindow()->GetRootWindow());
+        browser()->GetWindow()->GetNativeWindow()->GetRootWindow());
 
     // Show the bubble launcher.
     ash::AcceleratorController::Get()->PerformActionIfEnabled(
-        ash::TOGGLE_APP_LIST, {});
+        ash::AcceleratorAction::kToggleAppList, {});
 
     app_list_test_api()->WaitForBubbleWindow(
         /*wait_for_opening_animation=*/true);
     root_apps_grid_test_api_ = std::make_unique<ash::test::AppsGridViewTestApi>(
         app_list_test_api()->GetTopLevelAppsGridView());
+
+    ash::ShellTestApi().drag_drop_controller()->SetDisableNestedLoopForTesting(
+        true);
   }
 
   // Starts mouse drag on the specified view.
@@ -173,7 +178,6 @@ IN_PROC_BROWSER_TEST_F(AppsGridDragBrowserTest, ItemMerge) {
       root_apps_grid_test_api_->GetViewAtVisualIndex(/*page=*/0, /*slot=*/2)
           ->GetBoundsInScreen()
           .CenterPoint());
-  folder_apps_grid_test_api.FireFolderItemReparentTimer();
   event_generator_->MoveMouseTo(
       CalculatePositionBetweenAdjacentTopLevelItems(/*prev_item_index=*/2));
   root_apps_grid_test_api_->FireReorderTimerAndWaitForAnimationDone();

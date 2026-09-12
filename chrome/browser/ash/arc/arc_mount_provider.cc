@@ -4,9 +4,9 @@
 
 #include "chrome/browser/ash/arc/arc_mount_provider.h"
 
-#include "ash/components/arc/arc_util.h"
 #include "ash/strings/grit/ash_strings.h"
 #include "chrome/browser/ash/guest_os/public/types.h"
+#include "chromeos/ash/experiences/arc/arc_util.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace arc {
@@ -17,8 +17,12 @@ constexpr uint32_t kVsockPort = 7780;
 
 }  // namespace
 
-ArcMountProvider::ArcMountProvider(Profile* profile, int cid)
-    : profile_(profile), cid_(cid) {}
+ArcMountProvider::ArcMountProvider(PrefService* local_state,
+                                   Profile* profile,
+                                   int cid)
+    : guest_os::GuestOsMountProvider(local_state),
+      profile_(profile),
+      cid_(cid) {}
 
 ArcMountProvider::~ArcMountProvider() = default;
 

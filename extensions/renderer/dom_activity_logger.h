@@ -5,13 +5,11 @@
 #ifndef EXTENSIONS_RENDERER_DOM_ACTIVITY_LOGGER_H_
 #define EXTENSIONS_RENDERER_DOM_ACTIVITY_LOGGER_H_
 
-#include <memory>
-#include <string>
-
+#include "base/containers/span.h"
 #include "base/values.h"
 #include "extensions/common/dom_action_types.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/mojom/renderer_host.mojom.h"
-#include "mojo/public/cpp/bindings/associated_remote.h"
 #include "third_party/blink/public/web/web_dom_activity_logger.h"
 #include "v8/include/v8-forward.h"
 
@@ -24,57 +22,66 @@ namespace extensions {
 
 // Used to log DOM API calls from within WebKit. The events are sent via IPC to
 // extensions::ActivityLog for recording and display.
-class DOMActivityLogger: public blink::WebDOMActivityLogger {
+class DOMActivityLogger : public blink::WebDOMActivityLogger {
  public:
   static const int kMainWorldId = 0;
-  explicit DOMActivityLogger(const std::string& extension_id);
+  explicit DOMActivityLogger(const ExtensionId& extension_id);
 
   DOMActivityLogger(const DOMActivityLogger&) = delete;
   DOMActivityLogger& operator=(const DOMActivityLogger&) = delete;
 
   ~DOMActivityLogger() override;
 
-  // Check (using the WebKit API) if there is no logger attached to the world
-  // corresponding to world_id, and if so, construct a new logger and attach it.
+  // If activity logging is enabled, constructs a new logger (if
+  // required) and attaches it to the world specified by world_id.
   // world_id = 0 indicates the main world.
-  static void AttachToWorld(int32_t world_id, const std::string& extension_id);
+  static void AttachToWorldIfEnabled(int32_t world_id,
+                                     const ExtensionId& extension_id);
 
- private:
+ protected:
+  virtual mojom::RendererHost* GetRendererHost(v8::Local<v8::Context> context);
+
   // blink::WebDOMActivityLogger implementation.
   // Marshals the arguments into an ExtensionHostMsg_DOMAction_Params and sends
   // it over to the browser (via IPC) for appending it to the extension activity
   // log.
   // These methods don't have the override keyword due to the complexities it
   // introduces when changes blink apis.
-  void LogGetter(const blink::WebString& api_name,
+  void LogGetter(v8::Isolate* isolate,
+                 v8::Local<v8::Context> context,
+                 const blink::WebString& api_name,
                  const blink::WebURL& url,
                  const blink::WebString& title) override;
-  void LogSetter(const blink::WebString& api_name,
+  void LogSetter(v8::Isolate* isolate,
+                 v8::Local<v8::Context> context,
+                 const blink::WebString& api_name,
                  const v8::Local<v8::Value>& new_value,
                  const blink::WebURL& url,
                  const blink::WebString& title) override;
-  virtual void logSetter(const blink::WebString& api_name,
-                         const v8::Local<v8::Value>& new_value,
-                         const v8::Local<v8::Value>& old_value,
-                         const blink::WebURL& url,
-                         const blink::WebString& title);
-  void LogMethod(const blink::WebString& api_name,
-                 int argc,
-                 const v8::Local<v8::Value>* argv,
+  void LogMethod(v8::Isolate* isolate,
+                 v8::Local<v8::Context> context,
+                 const blink::WebString& api_name,
+                 base::span<const v8::Local<v8::Value>> args,
                  const blink::WebURL& url,
                  const blink::WebString& title) override;
-  void LogEvent(const blink::WebString& event_name,
-                int argc,
-                const blink::WebString* argv,
+  void LogEvent(blink::WebLocalFrame& frame,
+                const blink::WebString& event_name,
+                base::span<const blink::WebString> args,
                 const blink::WebURL& url,
                 const blink::WebString& title) override;
 
-  mojom::RendererHost* GetRendererHost();
+ private:
+  static void AttachToWorld(int32_t world_id, const ExtensionId& extension_id);
+
+  void LogInternal(mojom::RendererHost* renderer_host,
+                   DomActionType::Type type,
+                   const std::string& api_name,
+                   base::ListValue args,
+                   const GURL& url,
+                   const std::u16string& title);
 
   // The id of the extension with which this logger is associated.
-  std::string extension_id_;
-
-  mojo::AssociatedRemote<mojom::RendererHost> renderer_host_;
+  ExtensionId extension_id_;
 };
 
 }  // namespace extensions

@@ -6,15 +6,9 @@
 
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader.h"
 
 namespace blink {
-
-BrowserInterfaceBrokerProxy* WebLocalFrameClient::GetBrowserInterfaceBroker() {
-  // TODO(dtapuska): We should make this interface a pure virtual so we don't
-  // have this implementation in the base class.
-  return &GetEmptyBrowserInterfaceBroker();
-}
 
 AssociatedInterfaceProvider*
 WebLocalFrameClient::GetRemoteNavigationAssociatedInterfaces() {
@@ -25,4 +19,10 @@ WebLocalFrameClient::GetRemoteNavigationAssociatedInterfaces() {
   // have this implementation in the base class.
   return AssociatedInterfaceProvider::GetEmptyAssociatedInterfaceProvider();
 }
+
+std::unique_ptr<URLLoader> WebLocalFrameClient::CreateURLLoaderForTesting() {
+  return nullptr;
+}
+
+
 }  // namespace blink

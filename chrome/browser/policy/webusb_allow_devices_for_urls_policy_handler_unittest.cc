@@ -362,7 +362,8 @@ TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest,
       u"Error at WebUsbAllowDevicesForUrls[0].devices[0]: Schema validation "
       u"error: Unknown property: serialNumber";
   EXPECT_EQ(kExpected,
-            errors.GetErrorMessages(key::kWebUsbAllowDevicesForUrls));
+            errors.GetErrorMessages(key::kWebUsbAllowDevicesForUrls,
+                                    PolicyMap::MessageType::kWarning));
 }
 
 TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest,
@@ -532,7 +533,7 @@ TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest, ApplyPolicySettings) {
   ASSERT_EQ(2ul, list.size());
 
   // Check the first item's devices list.
-  const base::Value::List* first_devices_list =
+  const base::ListValue* first_devices_list =
       list[0].GetDict().FindList(kDevicesKey);
   ASSERT_TRUE(first_devices_list);
 
@@ -556,8 +557,7 @@ TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest, ApplyPolicySettings) {
   EXPECT_FALSE(product_id);
 
   // Check the first item's urls list.
-  const base::Value::List* first_urls_list =
-      list[0].GetDict().FindList(kUrlsKey);
+  const base::ListValue* first_urls_list = list[0].GetDict().FindList(kUrlsKey);
   ASSERT_TRUE(first_urls_list);
 
   ASSERT_EQ(2ul, first_urls_list->size());
@@ -568,7 +568,7 @@ TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest, ApplyPolicySettings) {
   EXPECT_EQ("https://www.youtube.com", (*first_urls_list)[1].GetString());
 
   // Check the second item's devices list.
-  const base::Value::List* second_devices_list =
+  const base::ListValue* second_devices_list =
       list[1].GetDict().FindList(kDevicesKey);
   ASSERT_TRUE(second_devices_list);
 
@@ -581,7 +581,7 @@ TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest, ApplyPolicySettings) {
   EXPECT_FALSE(product_id);
 
   // Check the second item's urls list.
-  const base::Value::List* second_urls_list =
+  const base::ListValue* second_urls_list =
       list[1].GetDict().FindList(kUrlsKey);
   ASSERT_TRUE(second_urls_list);
 
@@ -658,7 +658,7 @@ TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest,
       store_->GetValue(prefs::kManagedWebUsbAllowDevicesForUrls, &pref_value));
   EXPECT_TRUE(pref_value);
 
-  absl::optional<base::Value> expected_pref_value =
+  std::optional<base::Value> expected_pref_value =
       ParseJson(kInvalidPolicyUnknownPropertyAfterCleanup);
   EXPECT_EQ(*expected_pref_value, *pref_value);
 }
@@ -831,7 +831,8 @@ TEST_F(WebUsbAllowDevicesForUrlsPolicyHandlerTest,
       u"Error at WebUsbAllowDevicesForUrls[0]: Schema validation error: "
       u"Unknown property: unknown_top_level_property";
   EXPECT_EQ(kExpected,
-            errors.GetErrorMessages(key::kWebUsbAllowDevicesForUrls));
+            errors.GetErrorMessages(key::kWebUsbAllowDevicesForUrls,
+                                    PolicyMap::MessageType::kWarning));
 
   EXPECT_FALSE(
       store_->GetValue(prefs::kManagedWebUsbAllowDevicesForUrls, nullptr));

@@ -5,16 +5,23 @@
 #include "device/fido/u2f_register_operation.h"
 
 #include <memory>
+#include <optional>
+#include <tuple>
 #include <utility>
+#include <vector>
 
+#include "base/containers/to_vector.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "device/fido/authenticator_make_credential_response.h"
 #include "device/fido/ctap_make_credential_request.h"
-#include "device/fido/fido_constants.h"
-#include "device/fido/fido_parsing_utils.h"
 #include "device/fido/fido_test_data.h"
 #include "device/fido/mock_fido_device.h"
-#include "device/fido/test_callback_receiver.h"
+#include "device/fido/public/fido_constants.h"
+#include "device/fido/public/fido_types.h"
+#include "device/fido/public/public_key_credential_params.h"
+#include "device/fido/public/public_key_credential_rp_entity.h"
+#include "device/fido/public/public_key_credential_user_entity.h"
 #include "device/fido/virtual_u2f_device.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -31,8 +38,7 @@ CtapMakeCredentialRequest CreateRegisterRequestWithRegisteredKeys(
     std::vector<PublicKeyCredentialDescriptor> registered_keys,
     bool is_individual_attestation = false) {
   PublicKeyCredentialRpEntity rp(test_data::kRelyingPartyId);
-  PublicKeyCredentialUserEntity user(
-      fido_parsing_utils::Materialize(test_data::kUserId));
+  PublicKeyCredentialUserEntity user(base::ToVector(test_data::kUserId));
 
   CtapMakeCredentialRequest request(
       test_data::kClientDataJson, std::move(rp), std::move(user),
@@ -54,21 +60,19 @@ CtapMakeCredentialRequest CreateRegisterRequest(
       std::vector<PublicKeyCredentialDescriptor>(), is_individual_attestation);
 }
 
-using TestRegisterCallback = ::device::test::StatusAndValueCallbackReceiver<
-    CtapDeviceResponseCode,
-    absl::optional<AuthenticatorMakeCredentialResponse>>;
+using TestRegisterFuture =
+    base::test::TestFuture<CtapDeviceResponseCode,
+                           std::optional<AuthenticatorMakeCredentialResponse>>;
 
 }  // namespace
 
 class U2fRegisterOperationTest : public ::testing::Test {
  public:
-  TestRegisterCallback& register_callback_receiver() {
-    return register_callback_receiver_;
-  }
+  TestRegisterFuture& register_future() { return register_future_; }
 
  private:
   base::test::TaskEnvironment task_environment_;
-  TestRegisterCallback register_callback_receiver_;
+  TestRegisterFuture register_future_;
 };
 
 TEST_F(U2fRegisterOperationTest, TestRegisterSuccess) {
@@ -81,16 +85,14 @@ TEST_F(U2fRegisterOperationTest, TestRegisterSuccess) {
       test_data::kApduEncodedNoErrorRegisterResponse);
 
   auto u2f_register = std::make_unique<U2fRegisterOperation>(
-      device.get(), std::move(request),
-      register_callback_receiver().callback());
+      device.get(), std::move(request), register_future().GetCallback());
   u2f_register->Start();
-  register_callback_receiver().WaitForCallback();
+  EXPECT_TRUE(register_future().Wait());
 
   EXPECT_EQ(CtapDeviceResponseCode::kSuccess,
-            register_callback_receiver().status());
-  ASSERT_TRUE(register_callback_receiver().value());
-  EXPECT_THAT(register_callback_receiver()
-                  .value()
+            std::get<0>(register_future().Get()));
+  ASSERT_TRUE(std::get<1>(register_future().Get()));
+  EXPECT_THAT(std::get<1>(register_future().Get())
                   ->attestation_object.GetCredentialId(),
               ::testing::ElementsAreArray(test_data::kU2fSignKeyHandle));
 }
@@ -100,17 +102,15 @@ TEST_F(U2fRegisterOperationTest, TestRegisterSuccessWithFake) {
 
   auto device = std::make_unique<VirtualU2fDevice>();
   auto u2f_register = std::make_unique<U2fRegisterOperation>(
-      device.get(), std::move(request),
-      register_callback_receiver().callback());
+      device.get(), std::move(request), register_future().GetCallback());
   u2f_register->Start();
-  register_callback_receiver().WaitForCallback();
+  EXPECT_TRUE(register_future().Wait());
 
   EXPECT_EQ(CtapDeviceResponseCode::kSuccess,
-            register_callback_receiver().status());
+            std::get<0>(register_future().Get()));
   // We don't verify the response from the fake, but do a quick sanity check.
-  ASSERT_TRUE(register_callback_receiver().value());
-  EXPECT_EQ(32ul, register_callback_receiver()
-                      .value()
+  ASSERT_TRUE(std::get<1>(register_future().Get()));
+  EXPECT_EQ(32ul, std::get<1>(register_future().Get())
                       ->attestation_object.GetCredentialId()
                       .size());
 }
@@ -133,16 +133,14 @@ TEST_F(U2fRegisterOperationTest, TestDelayedSuccess) {
       test_data::kApduEncodedNoErrorRegisterResponse);
 
   auto u2f_register = std::make_unique<U2fRegisterOperation>(
-      device.get(), std::move(request),
-      register_callback_receiver().callback());
+      device.get(), std::move(request), register_future().GetCallback());
   u2f_register->Start();
-  register_callback_receiver().WaitForCallback();
+  EXPECT_TRUE(register_future().Wait());
 
   EXPECT_EQ(CtapDeviceResponseCode::kSuccess,
-            register_callback_receiver().status());
-  ASSERT_TRUE(register_callback_receiver().value());
-  EXPECT_THAT(register_callback_receiver()
-                  .value()
+            std::get<0>(register_future().Get()));
+  ASSERT_TRUE(std::get<1>(register_future().Get()));
+  EXPECT_THAT(std::get<1>(register_future().Get())
                   ->attestation_object.GetCredentialId(),
               ::testing::ElementsAreArray(test_data::kU2fSignKeyHandle));
 }
@@ -154,10 +152,10 @@ TEST_F(U2fRegisterOperationTest, TestRegistrationWithExclusionList) {
   auto request = CreateRegisterRequestWithRegisteredKeys(
       {PublicKeyCredentialDescriptor(
            CredentialType::kPublicKey,
-           fido_parsing_utils::Materialize(test_data::kKeyHandleAlpha)),
+           base::ToVector(test_data::kKeyHandleAlpha)),
        PublicKeyCredentialDescriptor(
            CredentialType::kPublicKey,
-           fido_parsing_utils::Materialize(test_data::kKeyHandleBeta))});
+           base::ToVector(test_data::kKeyHandleBeta))});
 
   auto device = std::make_unique<MockFidoDevice>();
   EXPECT_CALL(*device, GetId()).WillRepeatedly(::testing::Return("device"));
@@ -180,16 +178,14 @@ TEST_F(U2fRegisterOperationTest, TestRegistrationWithExclusionList) {
       test_data::kApduEncodedNoErrorRegisterResponse);
 
   auto u2f_register = std::make_unique<U2fRegisterOperation>(
-      device.get(), std::move(request),
-      register_callback_receiver().callback());
+      device.get(), std::move(request), register_future().GetCallback());
   u2f_register->Start();
-  register_callback_receiver().WaitForCallback();
+  EXPECT_TRUE(register_future().Wait());
 
-  ASSERT_TRUE(register_callback_receiver().value());
+  ASSERT_TRUE(std::get<1>(register_future().Get()));
   EXPECT_EQ(CtapDeviceResponseCode::kSuccess,
-            register_callback_receiver().status());
-  EXPECT_THAT(register_callback_receiver()
-                  .value()
+            std::get<0>(register_future().Get()));
+  EXPECT_THAT(std::get<1>(register_future().Get())
                   ->attestation_object.GetCredentialId(),
               ::testing::ElementsAreArray(test_data::kU2fSignKeyHandle));
 }
@@ -204,13 +200,12 @@ TEST_F(U2fRegisterOperationTest, TestRegistrationWithDuplicateHandle) {
   auto request = CreateRegisterRequestWithRegisteredKeys(
       {PublicKeyCredentialDescriptor(
            CredentialType::kPublicKey,
-           fido_parsing_utils::Materialize(test_data::kKeyHandleAlpha)),
+           base::ToVector(test_data::kKeyHandleAlpha)),
+       PublicKeyCredentialDescriptor(CredentialType::kPublicKey,
+                                     base::ToVector(test_data::kKeyHandleBeta)),
        PublicKeyCredentialDescriptor(
            CredentialType::kPublicKey,
-           fido_parsing_utils::Materialize(test_data::kKeyHandleBeta)),
-       PublicKeyCredentialDescriptor(
-           CredentialType::kPublicKey,
-           fido_parsing_utils::Materialize(test_data::kKeyHandleGamma))});
+           base::ToVector(test_data::kKeyHandleGamma))});
 
   auto device = std::make_unique<MockFidoDevice>();
   EXPECT_CALL(*device, GetId()).WillRepeatedly(::testing::Return("device"));
@@ -233,14 +228,13 @@ TEST_F(U2fRegisterOperationTest, TestRegistrationWithDuplicateHandle) {
       test_data::kApduEncodedNoErrorSignResponse);
 
   auto u2f_register = std::make_unique<U2fRegisterOperation>(
-      device.get(), std::move(request),
-      register_callback_receiver().callback());
+      device.get(), std::move(request), register_future().GetCallback());
   u2f_register->Start();
-  register_callback_receiver().WaitForCallback();
+  EXPECT_TRUE(register_future().Wait());
 
   EXPECT_EQ(CtapDeviceResponseCode::kCtap2ErrCredentialExcluded,
-            register_callback_receiver().status());
-  EXPECT_FALSE(register_callback_receiver().value());
+            std::get<0>(register_future().Get()));
+  EXPECT_FALSE(std::get<1>(register_future().Get()));
 }
 
 MATCHER_P(IndicatesIndividualAttestation, expected, "") {
@@ -252,7 +246,7 @@ TEST_F(U2fRegisterOperationTest, TestIndividualAttestation) {
   // resulting registration APDU.
   for (const auto& individual_attestation : {false, true}) {
     SCOPED_TRACE(individual_attestation);
-    TestRegisterCallback cb;
+    TestRegisterFuture future;
     auto request = CreateRegisterRequest(individual_attestation);
 
     auto device = std::make_unique<MockFidoDevice>();
@@ -266,13 +260,13 @@ TEST_F(U2fRegisterOperationTest, TestIndividualAttestation) {
         test_data::kApduEncodedNoErrorRegisterResponse);
 
     auto u2f_register = std::make_unique<U2fRegisterOperation>(
-        device.get(), std::move(request), cb.callback());
+        device.get(), std::move(request), future.GetCallback());
     u2f_register->Start();
-    cb.WaitForCallback();
+    EXPECT_TRUE(future.Wait());
 
-    EXPECT_EQ(CtapDeviceResponseCode::kSuccess, cb.status());
-    ASSERT_TRUE(cb.value());
-    EXPECT_THAT(cb.value()->attestation_object.GetCredentialId(),
+    EXPECT_EQ(CtapDeviceResponseCode::kSuccess, std::get<0>(future.Get()));
+    ASSERT_TRUE(std::get<1>(future.Get()));
+    EXPECT_THAT(std::get<1>(future.Get())->attestation_object.GetCredentialId(),
                 ::testing::ElementsAreArray(test_data::kU2fSignKeyHandle));
   }
 }

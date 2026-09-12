@@ -20,36 +20,39 @@
 
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
-#include <CoreFoundation/CFString.h>
+#include <CoreFoundation/CoreFoundation.h>
 
-namespace WTF {
+#include "base/apple/bridging.h"
+
+namespace blink {
 
 String::String(NSString* str) {
   if (!str) {
     return;
   }
 
-  CFIndex size = CFStringGetLength(reinterpret_cast<CFStringRef>(str));
+  CFStringRef cf_str = base::apple::NSToCFPtrCast(str);
+
+  CFIndex size = CFStringGetLength(cf_str);
   if (size == 0) {
     impl_ = StringImpl::empty_;
   } else {
-    Vector<LChar, 1024> lchar_buffer(size);
+    Vector<LChar, 1024> lchar_buffer(base::checked_cast<wtf_size_t>(size));
     CFIndex used_buf_len;
-    CFIndex convertedsize =
-        CFStringGetBytes(reinterpret_cast<CFStringRef>(str),
-                         CFRangeMake(0, size), kCFStringEncodingISOLatin1, 0,
-                         false, lchar_buffer.data(), size, &used_buf_len);
-    if ((convertedsize == size) && (used_buf_len == size)) {
-      impl_ = StringImpl::Create(lchar_buffer.data(), size);
+    CFIndex converted_size = CFStringGetBytes(
+        cf_str, CFRangeMake(0, size), kCFStringEncodingISOLatin1,
+        /*lossByte=*/0, /*isExternalRepresentation=*/false, lchar_buffer.data(),
+        size, &used_buf_len);
+    if ((converted_size == size) && (used_buf_len == size)) {
+      impl_ = StringImpl::Create(lchar_buffer);
       return;
     }
 
-    Vector<UChar, 1024> uchar_buffer(size);
-    CFStringGetCharacters(reinterpret_cast<CFStringRef>(str),
-                          CFRangeMake(0, size),
+    Vector<UChar, 1024> uchar_buffer(base::checked_cast<wtf_size_t>(size));
+    CFStringGetCharacters(cf_str, CFRangeMake(0, size),
                           reinterpret_cast<UniChar*>(uchar_buffer.data()));
-    impl_ = StringImpl::Create(uchar_buffer.data(), size);
+    impl_ = StringImpl::Create(uchar_buffer);
   }
 }
 
-}  // namespace WTF
+}  // namespace blink

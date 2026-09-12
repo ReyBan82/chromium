@@ -10,12 +10,13 @@
 #include <string>
 #include <vector>
 
-#include "ash/components/arc/metrics/arc_metrics_constants.h"
-#include "ash/components/arc/mojom/app.mojom-forward.h"
-#include "base/observer_list_types.h"
-#include "chrome/browser/ash/app_list/arc/arc_app_list_prefs.h"
+#include "base/functional/callback_forward.h"
+#include "chromeos/ash/experiences/arc/metrics/arc_metrics_constants.h"
+#include "chromeos/ash/experiences/arc/mojom/app.mojom-forward.h"
 #include "components/services/app_service/public/cpp/intent.h"
 
+class ApplicationLocaleStorage;
+class PrefService;
 class Profile;
 
 namespace content {
@@ -23,36 +24,6 @@ class BrowserContext;
 }
 
 namespace arc {
-
-extern const char kPlayStoreActivity[];
-extern const char kPlayStorePackage[];
-
-extern const char kAndroidContactsAppId[];
-extern const char kCameraMigrationAppId[];
-extern const char kGmailAppId[];
-extern const char kGoogleCalendarAppId[];
-extern const char kGoogleDuoAppId[];
-extern const char kGoogleMapsAppId[];
-extern const char kGooglePhotosAppId[];
-extern const char kGoogleTVAppId[];
-extern const char kInfinitePainterAppId[];
-extern const char kLightRoomAppId[];
-extern const char kPlayBooksAppId[];
-extern const char kPlayGamesAppId[];
-extern const char kPlayMoviesAppId[];
-extern const char kPlayMusicAppId[];
-extern const char kPlayStoreAppId[];
-extern const char kSettingsAppId[];
-extern const char kYoutubeAppId[];
-extern const char kYoutubeMusicAppId[];
-extern const char kYoutubeMusicWebApkAppId[];
-
-// Observes ARC app launches.
-class AppLaunchObserver : public base::CheckedObserver {
- public:
-  // Called when an app launch is requested
-  virtual void OnAppLaunchRequested(const ArcAppListPrefs::AppInfo& app_info) {}
-};
 
 // Checks if a given app should be hidden in launcher.
 bool ShouldShowInLauncher(const std::string& app_id);
@@ -123,9 +94,11 @@ bool IsArcItem(content::BrowserContext* context, const std::string& id);
 
 // Returns current active locale and list of preferred languages for the given
 // |profile|.
-void GetLocaleAndPreferredLanguages(const Profile* profle,
-                                    std::string* out_locale,
-                                    std::string* out_preferred_languages);
+void GetLocaleAndPreferredLanguages(
+    const ApplicationLocaleStorage& application_locale_storage,
+    const Profile* profle,
+    std::string* out_locale,
+    std::string* out_preferred_languages);
 
 // Returns Android instance id. Result is returned in callback. |ok| is set to
 // true in case app instance is ready and Android id was successfully requested.
@@ -143,12 +116,6 @@ std::string AppIdToArcPackageName(const std::string& app_id, Profile* profile);
 // name of an ARC app or an empty string if name not found.
 std::string ArcPackageNameToAppId(const std::string& package_name,
                                   Profile* profile);
-
-// Add/remove an observer to be notified of app launches.
-void AddAppLaunchObserver(content::BrowserContext* context,
-                          AppLaunchObserver* observer);
-void RemoveAppLaunchObserver(content::BrowserContext* context,
-                             AppLaunchObserver* observer);
 
 // Returns the app id from the app id or the shelf group id.
 const std::string GetAppFromAppOrGroupId(content::BrowserContext* context,

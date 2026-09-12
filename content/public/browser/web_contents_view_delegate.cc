@@ -5,11 +5,13 @@
 #include "content/public/browser/web_contents_view_delegate.h"
 
 #include <stddef.h>
+
 #include <utility>
 
 #include "base/check.h"
 #include "base/functional/callback.h"
 #include "content/public/common/drop_data.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace content {
 
@@ -17,7 +19,7 @@ WebContentsViewDelegate::~WebContentsViewDelegate() {
 }
 
 gfx::NativeWindow WebContentsViewDelegate::GetNativeWindow() {
-  return nullptr;
+  return gfx::NativeWindow();
 }
 
 WebDragDestDelegate* WebContentsViewDelegate::GetDragDestDelegate() {
@@ -33,6 +35,10 @@ void WebContentsViewDelegate::DismissContextMenu() {}
 void WebContentsViewDelegate::ExecuteCommandForTesting(int command_id,
                                                        int event_flags) {
   NOTREACHED();
+}
+
+bool WebContentsViewDelegate::IsContextMenuShowingForTesting() {
+  return false;
 }
 
 void WebContentsViewDelegate::StoreFocus() {
@@ -52,15 +58,25 @@ bool WebContentsViewDelegate::TakeFocus(bool reverse) {
   return false;
 }
 
-void* WebContentsViewDelegate::CreateRenderWidgetHostViewDelegate(
+void* WebContentsViewDelegate::GetDelegateForHost(
     RenderWidgetHost* render_widget_host,
     bool is_popup) {
   return nullptr;
 }
 
-void WebContentsViewDelegate::OnPerformDrop(const DropData& drop_data,
-                                            DropCompletionCallback callback) {
+void WebContentsViewDelegate::OnPerformingDrop(
+    const DropData& drop_data,
+    DropCompletionCallback callback) {
   return std::move(callback).Run(drop_data);
 }
+
+void WebContentsViewDelegate::WebContentsDragEnded() {}
+
+#if BUILDFLAG(IS_ANDROID)
+bool WebContentsViewDelegate::ShouldShowBlurTransitionAnimation(
+    NavigationHandle* navigation_handle) {
+  return false;
+}
+#endif
 
 }  // namespace content

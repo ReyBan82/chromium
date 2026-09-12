@@ -4,6 +4,7 @@
 
 #include "extensions/browser/api/serial/serial_port_manager.h"
 
+#include <memory>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -16,6 +17,7 @@
 #include "extensions/browser/api/serial/serial_connection.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/extensions_browser_client.h"
+#include "extensions/common/extension_id.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 
 namespace extensions {
@@ -25,14 +27,14 @@ namespace api {
 namespace {
 
 bool ShouldPauseOnReceiveError(serial::ReceiveError error) {
-  return error == serial::RECEIVE_ERROR_DEVICE_LOST ||
-         error == serial::RECEIVE_ERROR_SYSTEM_ERROR ||
-         error == serial::RECEIVE_ERROR_DISCONNECTED ||
-         error == serial::RECEIVE_ERROR_BREAK ||
-         error == serial::RECEIVE_ERROR_FRAME_ERROR ||
-         error == serial::RECEIVE_ERROR_OVERRUN ||
-         error == serial::RECEIVE_ERROR_BUFFER_OVERFLOW ||
-         error == serial::RECEIVE_ERROR_PARITY_ERROR;
+  return error == serial::ReceiveError::kDeviceLost ||
+         error == serial::ReceiveError::kSystemError ||
+         error == serial::ReceiveError::kDisconnected ||
+         error == serial::ReceiveError::kBreak ||
+         error == serial::ReceiveError::kFrameError ||
+         error == serial::ReceiveError::kOverrun ||
+         error == serial::ReceiveError::kBufferOverflow ||
+         error == serial::ReceiveError::kParityError;
 }
 
 SerialPortManager::Binder& GetBinderOverride() {
@@ -77,7 +79,11 @@ void SerialPortManager::GetDevices(
     device::mojom::SerialPortManager::GetDevicesCallback callback) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   EnsureConnection();
-  port_manager_->GetDevices(std::move(callback));
+  // Pass false for `allow_bluetooth_system_prompt` to avoid unexpected system
+  // prompts in extensions when they list devices. Extensions will only see
+  // Bluetooth ports if permission has already been granted.
+  port_manager_->GetDevices(/*allow_bluetooth_system_prompt=*/false,
+                            std::move(callback));
 }
 
 void SerialPortManager::OpenPort(
@@ -87,12 +93,17 @@ void SerialPortManager::OpenPort(
     OpenPortCallback callback) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   EnsureConnection();
-  port_manager_->GetDevices(base::BindOnce(
-      &SerialPortManager::OnGotDevicesToGetPort, weak_factory_.GetWeakPtr(),
-      path, std::move(options), std::move(client), std::move(callback)));
+  // Pass false for `allow_bluetooth_system_prompt` to avoid unexpected system
+  // prompts in extensions. This means extensions can only use Bluetooth ports
+  // if permission has already been granted.
+  port_manager_->GetDevices(
+      /*allow_bluetooth_system_prompt=*/false,
+      base::BindOnce(&SerialPortManager::OnGotDevicesToGetPort,
+                     weak_factory_.GetWeakPtr(), path, std::move(options),
+                     std::move(client), std::move(callback)));
 }
 
-void SerialPortManager::StartConnectionPolling(const std::string& extension_id,
+void SerialPortManager::StartConnectionPolling(const ExtensionId& extension_id,
                                                int connection_id) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   auto* connection = connections_->Get(extension_id, connection_id);
@@ -132,7 +143,7 @@ void SerialPortManager::DispatchReceiveEvent(const ReceiveParams& params,
     DispatchEvent(params, std::move(event));
   }
 
-  if (error != serial::RECEIVE_ERROR_NONE) {
+  if (error != serial::ReceiveError::kNone) {
     if (ShouldPauseOnReceiveError(error)) {
       SerialConnection* connection =
           params.connections->Get(params.extension_id, params.connection_id);
@@ -143,9 +154,9 @@ void SerialPortManager::DispatchReceiveEvent(const ReceiveParams& params,
     error_info.connection_id = params.connection_id;
     error_info.error = error;
     auto args = serial::OnReceiveError::Create(error_info);
-    std::unique_ptr<extensions::Event> event(new extensions::Event(
+    auto event = std::make_unique<extensions::Event>(
         extensions::events::SERIAL_ON_RECEIVE_ERROR,
-        serial::OnReceiveError::kEventName, std::move(args)));
+        serial::OnReceiveError::kEventName, std::move(args));
     DispatchEvent(params, std::move(event));
   }
 }
@@ -154,10 +165,13 @@ void SerialPortManager::DispatchReceiveEvent(const ReceiveParams& params,
 void SerialPortManager::DispatchEvent(
     const ReceiveParams& params,
     std::unique_ptr<extensions::Event> event) {
+  if (!ExtensionsBrowserClient::Get()->IsValidContext(
+          params.browser_context_id.get())) {
+    return;
+  }
+
   content::BrowserContext* context = reinterpret_cast<content::BrowserContext*>(
       params.browser_context_id.get());
-  if (!extensions::ExtensionsBrowserClient::Get()->IsValidContext(context))
-    return;
 
   EventRouter* router = EventRouter::Get(context);
   if (router)
@@ -197,17 +211,6 @@ void SerialPortManager::OnGotDevicesToGetPort(
                               std::move(callback));
       return;
     }
-
-#if BUILDFLAG(IS_MAC)
-    if (device->alternate_path &&
-        device->alternate_path->AsUTF8Unsafe() == path) {
-      port_manager_->OpenPort(device->token, /*use_alternate_path=*/true,
-                              std::move(options), std::move(client),
-                              /*watcher=*/mojo::NullRemote(),
-                              std::move(callback));
-      return;
-    }
-#endif  // BUILDFLAG(IS_MAC)
   }
 }
 

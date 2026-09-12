@@ -19,7 +19,7 @@ ScreenCaptureNotificationUIAsh::~ScreenCaptureNotificationUIAsh() {
   // MediaStreamCaptureIndicator will delete ScreenCaptureNotificationUI object
   // after it stops screen capture.
   stop_callback_.Reset();
-  ash::Shell::Get()->system_tray_notifier()->NotifyScreenCaptureStop();
+  ash::Shell::Get()->system_tray_notifier()->NotifyScreenAccessStop();
 }
 
 gfx::NativeViewId ScreenCaptureNotificationUIAsh::OnStarted(
@@ -27,13 +27,15 @@ gfx::NativeViewId ScreenCaptureNotificationUIAsh::OnStarted(
     content::MediaStreamUI::SourceCallback source_callback,
     const std::vector<content::DesktopMediaID>& media_ids) {
   stop_callback_ = std::move(stop_callback);
-  ash::Shell::Get()->system_tray_notifier()->NotifyScreenCaptureStart(
+  ash::Shell::Get()->system_tray_notifier()->NotifyScreenAccessStart(
       base::BindRepeating(
           &ScreenCaptureNotificationUIAsh::ProcessStopRequestFromUI,
-          base::Unretained(this)),
-      source_callback ? base::BindRepeating(std::move(source_callback),
-                                            content::DesktopMediaID())
-                      : base::RepeatingClosure(),
+          weak_ptr_factory_.GetWeakPtr()),
+      source_callback
+          ? base::BindRepeating(std::move(source_callback),
+                                content::DesktopMediaID(),
+                                /*captured_surface_control_active=*/false)
+          : base::RepeatingClosure(),
       text_);
   return 0;
 }
@@ -48,6 +50,8 @@ void ScreenCaptureNotificationUIAsh::ProcessStopRequestFromUI() {
 
 // static
 std::unique_ptr<ScreenCaptureNotificationUI>
-ScreenCaptureNotificationUI::Create(const std::u16string& text) {
+ScreenCaptureNotificationUI::Create(
+    const std::u16string& text,
+    content::WebContents* capturing_web_contents) {
   return std::make_unique<ash::ScreenCaptureNotificationUIAsh>(text);
 }

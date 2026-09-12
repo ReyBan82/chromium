@@ -5,6 +5,7 @@
 #ifndef ANDROID_WEBVIEW_BROWSER_METRICS_VISIBILITY_METRICS_LOGGER_H_
 #define ANDROID_WEBVIEW_BROWSER_METRICS_VISIBILITY_METRICS_LOGGER_H_
 
+#include <array>
 #include <map>
 #include <string>
 #include <vector>
@@ -14,6 +15,10 @@
 
 namespace android_webview {
 
+// Records how much of the screen is covered by WebViews. This helps us
+// determine what WebView is being used for.
+//
+// Lifetime: Singleton
 class VisibilityMetricsLogger {
  public:
   // These values are persisted to logs and must match the WebViewUrlScheme enum
@@ -60,6 +65,13 @@ class VisibilityMetricsLogger {
     virtual VisibilityInfo GetVisibilityInfo() = 0;
   };
 
+  enum class ClientAction {
+    kAdded = 0,
+    kRemoved = 1,
+    kVisibilityChanged = 2,
+    kMaxValue = kVisibilityChanged,
+  };
+
   VisibilityMetricsLogger();
   virtual ~VisibilityMetricsLogger();
 
@@ -84,7 +96,9 @@ class VisibilityMetricsLogger {
 
  private:
   void UpdateDurations();
-  void ProcessClientUpdate(Client* client, const VisibilityInfo& info);
+  void ProcessClientUpdate(Client* client,
+                           const VisibilityInfo& info,
+                           ClientAction action);
   void RecordVisibilityMetrics();
   void RecordVisibleSchemeMetrics();
   void RecordScreenCoverageMetrics();
@@ -92,8 +106,8 @@ class VisibilityMetricsLogger {
   // Counts the number of visible clients.
   size_t all_clients_visible_count_ = 0;
   // Counts the number of visible clients per scheme.
-  size_t per_scheme_visible_counts_[static_cast<size_t>(Scheme::kMaxValue) +
-                                    1] = {};
+  std::array<size_t, static_cast<size_t>(Scheme::kMaxValue) + 1>
+      per_scheme_visible_counts_ = {};
 
   struct WebViewDurationTracker {
     // Duration any WebView meets the tracking criteria
@@ -108,8 +122,8 @@ class VisibilityMetricsLogger {
   };
 
   WebViewDurationTracker all_clients_tracker_;
-  WebViewDurationTracker
-      per_scheme_trackers_[static_cast<size_t>(Scheme::kMaxValue) + 1] = {};
+  std::array<WebViewDurationTracker, static_cast<size_t>(Scheme::kMaxValue) + 1>
+      per_scheme_trackers_ = {};
 
   base::TimeTicks last_update_time_;
   std::map<Client*, VisibilityInfo> client_visibility_;
@@ -119,7 +133,7 @@ class VisibilityMetricsLogger {
 
   // The durations by screen coverage percentage for all visible AwContents
   // merged together.
-  base::TimeDelta global_coverage_percentage_durations_[101] = {};
+  std::array<base::TimeDelta, 101> global_coverage_percentage_durations_ = {};
 
   // The currently visible schemes and their screen coverage percentages. A
   // scheme can occur more than once at a time so this uses a multimap.

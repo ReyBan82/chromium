@@ -12,12 +12,11 @@
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/profiles/profile_attributes_storage.h"
 #include "chrome/browser/ui/webui/settings/settings_page_ui_handler.h"
 #include "components/prefs/pref_change_registrar.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "components/user_manager/user_manager.h"
 #else
 #include "chrome/browser/profiles/profile_statistics_common.h"
@@ -28,7 +27,7 @@ class Profile;
 namespace settings {
 
 class ProfileInfoHandler : public SettingsPageUIHandler,
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
                            public user_manager::UserManager::Observer,
 #endif
                            public ProfileAttributesStorage::Observer {
@@ -48,7 +47,7 @@ class ProfileInfoHandler : public SettingsPageUIHandler,
   void OnJavascriptAllowed() override;
   void OnJavascriptDisallowed() override;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // user_manager::UserManager::Observer implementation.
   void OnUserImageChanged(const user_manager::User& user) override;
 #endif
@@ -63,23 +62,23 @@ class ProfileInfoHandler : public SettingsPageUIHandler,
   FRIEND_TEST_ALL_PREFIXES(ProfileInfoHandlerTest, PushProfileInfo);
 
   // Callbacks from the page.
-  void HandleGetProfileInfo(const base::Value::List& args);
+  void HandleGetProfileInfo(const base::ListValue& args);
   void PushProfileInfo();
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-  void HandleGetProfileStats(const base::Value::List& args);
+#if !BUILDFLAG(IS_CHROMEOS)
+  void HandleGetProfileStats(const base::ListValue& args);
 
   // Returns the sum of the counts of individual profile states. Returns 0 if
   // there exists a stat that was not successfully retrieved.
   void PushProfileStatsCount(profiles::ProfileCategoryStats stats);
 #endif
 
-  base::Value::Dict GetAccountNameAndIcon();
+  base::DictValue GetAccountNameAndIcon();
 
   // Weak pointer.
   raw_ptr<Profile> profile_;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   base::ScopedObservation<user_manager::UserManager,
                           user_manager::UserManager::Observer>
       user_manager_observation_{this};

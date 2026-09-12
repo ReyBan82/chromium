@@ -5,7 +5,7 @@
 #ifndef CHROME_BROWSER_UI_BLOCKED_CONTENT_CHROME_POPUP_NAVIGATION_DELEGATE_H_
 #define CHROME_BROWSER_UI_BLOCKED_CONTENT_CHROME_POPUP_NAVIGATION_DELEGATE_H_
 
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "components/blocked_content/popup_navigation_delegate.h"
 
 class ChromePopupNavigationDelegate
@@ -16,10 +16,10 @@ class ChromePopupNavigationDelegate
   // blocked_content::PopupNavigationDelegate:
   content::RenderFrameHost* GetOpener() override;
   bool GetOriginalUserGesture() override;
-  const GURL& GetURL() override;
+  GURL GetURL() override;
   NavigateResult NavigateWithGesture(
       const blink::mojom::WindowFeatures& window_features,
-      absl::optional<WindowOpenDisposition> updated_disposition) override;
+      std::optional<WindowOpenDisposition> updated_disposition) override;
   void OnPopupBlocked(content::WebContents* web_contents,
                       int total_popups_blocked_on_page) override;
 

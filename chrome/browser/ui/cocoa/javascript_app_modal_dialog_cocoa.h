@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/javascript_dialogs/app_modal_dialog_view.h"
 #include "components/remote_cocoa/app_shim/alert.h"
@@ -18,7 +19,7 @@ class PopunderPreventer;
 namespace javascript_dialogs {
 class AppModalDialogController;
 class AppModalDialogView;
-}
+}  // namespace javascript_dialogs
 
 namespace remote_cocoa {
 class AlertBridge;
@@ -28,7 +29,11 @@ class JavaScriptAppModalDialogCocoa
     : public javascript_dialogs::AppModalDialogView {
  public:
   static javascript_dialogs::AppModalDialogView* CreateNativeJavaScriptDialog(
-      javascript_dialogs::AppModalDialogController* controller);
+      std::unique_ptr<javascript_dialogs::AppModalDialogController> controller);
+
+  JavaScriptAppModalDialogCocoa(const JavaScriptAppModalDialogCocoa&) = delete;
+  JavaScriptAppModalDialogCocoa& operator=(
+      const JavaScriptAppModalDialogCocoa&) = delete;
 
   // Overridden from NativeAppModalDialog:
   void ShowAppModalDialog() override;
@@ -40,10 +45,7 @@ class JavaScriptAppModalDialogCocoa
 
  private:
   explicit JavaScriptAppModalDialogCocoa(
-      javascript_dialogs::AppModalDialogController* controller);
-  JavaScriptAppModalDialogCocoa(const JavaScriptAppModalDialogCocoa&) = delete;
-  JavaScriptAppModalDialogCocoa& operator=(
-      const JavaScriptAppModalDialogCocoa&) = delete;
+      std::unique_ptr<javascript_dialogs::AppModalDialogController> controller);
   ~JavaScriptAppModalDialogCocoa() override;
 
   // Return the parameters to use for the alert.
@@ -60,6 +62,7 @@ class JavaScriptAppModalDialogCocoa
 
   // Mojo interface to the NSAlert.
   mojo::Remote<remote_cocoa::mojom::AlertBridge> alert_bridge_remote_;
+  raw_ptr<remote_cocoa::mojom::AlertBridge, DanglingUntriaged> alert_bridge_;
 
   std::unique_ptr<javascript_dialogs::AppModalDialogController> controller_;
   std::unique_ptr<PopunderPreventer> popunder_preventer_;

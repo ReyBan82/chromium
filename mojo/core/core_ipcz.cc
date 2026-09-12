@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/memory/platform_shared_memory_region.h"
 #include "base/memory/ptr_util.h"
@@ -105,7 +106,6 @@ extern "C" {
 
 MojoResult MojoInitializeIpcz(const struct MojoInitializeOptions* options) {
   NOTREACHED();
-  return MOJO_RESULT_OK;
 }
 
 MojoTimeTicks MojoGetTimeTicksNowIpcz() {
@@ -215,8 +215,8 @@ MojoResult MojoReadMessageIpcz(MojoHandle message_pipe_handle,
                                MojoMessageHandle* message) {
   ScopedIpczHandle parcel;
   IpczResult result = GetIpczAPI().Get(
-      message_pipe_handle, IPCZ_GET_PARCEL_ONLY, nullptr, nullptr, nullptr,
-      nullptr, nullptr, ScopedIpczHandle::Receiver(parcel));
+      message_pipe_handle, IPCZ_GET_PARTIAL, nullptr, nullptr, nullptr, nullptr,
+      nullptr, ScopedIpczHandle::Receiver(parcel));
   if (result != IPCZ_RESULT_OK) {
     return GetMojoReadResultForIpczGet(result);
   }
@@ -276,6 +276,15 @@ MojoResult MojoSerializeMessageIpcz(
     const MojoSerializeMessageOptions* options) {
   if (auto* m = ipcz_driver::MojoMessage::FromHandle(message)) {
     return m->Serialize();
+  }
+  return MOJO_RESULT_INVALID_ARGUMENT;
+}
+
+MojoResult MojoReserveMessageCapacityIpcz(MojoMessageHandle message,
+                                          uint32_t payload_buffer_size,
+                                          uint32_t* buffer_size) {
+  if (auto* m = ipcz_driver::MojoMessage::FromHandle(message)) {
+    return m->ReserveCapacity(payload_buffer_size, buffer_size);
   }
   return MOJO_RESULT_INVALID_ARGUMENT;
 }
@@ -393,7 +402,11 @@ MojoResult MojoCreateDataPipeIpcz(const MojoCreateDataPipeOptions* options,
       config.byte_capacity = options->capacity_num_bytes;
     }
   }
-  absl::optional<DataPipe::Pair> pipe = DataPipe::CreatePair(config);
+  if (!config.byte_capacity || !config.element_size ||
+      config.byte_capacity < config.element_size) {
+    return MOJO_RESULT_INVALID_ARGUMENT;
+  }
+  std::optional<DataPipe::Pair> pipe = DataPipe::CreatePair(config);
   if (!pipe) {
     // This result implies that we failed to allocate or map a new shared memory
     // region and therefore have no transfer buffer for the pipe.
@@ -638,9 +651,12 @@ MojoResult MojoWrapPlatformSharedMemoryRegionIpcz(
   if (!platform_handles || !num_bytes || !guid || !mojo_handle) {
     return MOJO_RESULT_INVALID_ARGUMENT;
   }
+  // SAFETY: The caller is a C-API which cannot be spanified further
+  // up the stack. The caller guarantees that `platform_handles` points to
+  // `num_platform_handles` elements.
   auto buffer = ipcz_driver::SharedBuffer::CreateForMojoWrapper(
-      base::make_span(platform_handles, num_platform_handles), num_bytes, *guid,
-      access_mode);
+      UNSAFE_BUFFERS(base::span(platform_handles, num_platform_handles)),
+      num_bytes, *guid, access_mode);
   if (!buffer) {
     return MOJO_RESULT_INVALID_ARGUMENT;
   }
@@ -672,6 +688,11 @@ MojoResult MojoUnwrapPlatformSharedMemoryRegionIpcz(
   const base::UnguessableToken guid = buffer->region().GetGUID();
   const uint32_t size = static_cast<uint32_t>(buffer->region().GetSize());
 
+  // SAFETY: The caller is a C-API which cannot be spanified further
+  // up the stack. The caller guarantees that `platform_handles` points to
+  // `*num_platform_handles` elements.
+  auto platform_handles_span =
+      UNSAFE_BUFFERS(base::span(platform_handles, *num_platform_handles));
   uint32_t capacity = *num_platform_handles;
   uint32_t required_handles = 1;
 #if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_ANDROID)
@@ -685,7 +706,7 @@ MojoResult MojoUnwrapPlatformSharedMemoryRegionIpcz(
     return MOJO_RESULT_RESOURCE_EXHAUSTED;
   }
 
-  PlatformHandle handles[2];
+  std::array<PlatformHandle, 2> handles = {};
   base::subtle::ScopedPlatformSharedMemoryHandle region_handle =
       buffer->region().PassPlatformHandle();
 #if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_ANDROID)
@@ -697,7 +718,7 @@ MojoResult MojoUnwrapPlatformSharedMemoryRegionIpcz(
 
   for (size_t i = 0; i < required_handles; ++i) {
     PlatformHandle::ToMojoPlatformHandle(std::move(handles[i]),
-                                         &platform_handles[i]);
+                                         &platform_handles_span[i]);
   }
 
   *num_bytes = size;
@@ -715,7 +736,6 @@ MojoResult MojoUnwrapPlatformSharedMemoryRegionIpcz(
       *access_mode = MOJO_PLATFORM_SHARED_MEMORY_REGION_ACCESS_MODE_UNSAFE;
       break;
     default:
-      *access_mode = MOJO_PLATFORM_SHARED_MEMORY_REGION_ACCESS_MODE_READ_ONLY;
       NOTREACHED();
   }
 
@@ -744,8 +764,12 @@ MojoResult MojoAttachMessagePipeToInvitationIpcz(
       (options && options->struct_size < sizeof(*options))) {
     return MOJO_RESULT_INVALID_ARGUMENT;
   }
+  // SAFETY: The caller is a C-API which cannot be spanified further
+  // up the stack. The caller guarantees that `name` points to
+  // `name_num_bytes` bytes.
   return invitation->Attach(
-      base::make_span(static_cast<const uint8_t*>(name), name_num_bytes),
+      UNSAFE_BUFFERS(
+          base::span(static_cast<const uint8_t*>(name), name_num_bytes)),
       message_pipe_handle);
 }
 
@@ -760,8 +784,12 @@ MojoResult MojoExtractMessagePipeFromInvitationIpcz(
       (options && options->struct_size < sizeof(*options))) {
     return MOJO_RESULT_INVALID_ARGUMENT;
   }
+  // SAFETY: The caller is a C-API which cannot be spanified further
+  // up the stack. The caller guarantees that `name` points to
+  // `name_num_bytes` bytes.
   return invitation->Extract(
-      base::make_span(static_cast<const uint8_t*>(name), name_num_bytes),
+      UNSAFE_BUFFERS(
+          base::span(static_cast<const uint8_t*>(name), name_num_bytes)),
       message_pipe_handle);
 }
 
@@ -832,7 +860,6 @@ MojoResult MojoQueryQuotaIpcz(MojoHandle handle,
 
 MojoResult MojoShutdownIpcz(const MojoShutdownOptions* options) {
   NOTREACHED();
-  return MOJO_RESULT_OK;
 }
 
 MojoResult MojoSetDefaultProcessErrorHandlerIpcz(
@@ -890,7 +917,8 @@ MojoSystemThunks2 g_mojo_ipcz_thunks = {
     MojoSetQuotaIpcz,
     MojoQueryQuotaIpcz,
     MojoShutdownIpcz,
-    MojoSetDefaultProcessErrorHandlerIpcz};
+    MojoSetDefaultProcessErrorHandlerIpcz,
+    MojoReserveMessageCapacityIpcz};
 
 }  // namespace
 

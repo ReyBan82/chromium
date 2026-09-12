@@ -6,12 +6,12 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 
 #include "base/check.h"
 #include "base/json/json_reader.h"
 #include "base/memory/ptr_util.h"
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace i18n {
 namespace addressinput {
@@ -20,16 +20,16 @@ namespace {
 
 // Returns |json| parsed into a JSON dictionary. Sets |parser_error| to true if
 // parsing failed.
-base::Value::Dict Parse(const std::string& json, bool* parser_error) {
+base::DictValue Parse(const std::string& json, bool* parser_error) {
   DCHECK(parser_error);
 
   // |json| is converted to a |c_str()| here because rapidjson and other parts
   // of the standalone library use char* rather than std::string.
-  absl::optional<base::Value> parsed(base::JSONReader::Read(json.c_str()));
+  std::optional<base::Value> parsed(base::JSONReader::Read(json.c_str(), base::JSON_PARSE_CHROMIUM_EXTENSIONS));
   *parser_error = !parsed || !parsed->is_dict();
 
   if (*parser_error)
-    return base::Value::Dict();
+    return base::DictValue();
   else
     return std::move(*parsed).TakeDict();
 }
@@ -74,12 +74,12 @@ class Json::JsonImpl {
   }
 
  private:
-  explicit JsonImpl(const base::Value::Dict& dict)
+  explicit JsonImpl(const base::DictValue& dict)
       : parser_error_(false), dict_(dict) {}
 
-  base::Value::Dict owned_;
+  base::DictValue owned_;
   bool parser_error_;
-  const base::Value::Dict& dict_;
+  const base::DictValue& dict_;
   std::vector<const Json*> sub_dicts_;
   std::vector<std::unique_ptr<Json>> owned_sub_dicts_;
 };

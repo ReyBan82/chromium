@@ -13,7 +13,6 @@
 #include "chrome/browser/media/media_access_handler.h"
 #include "chrome/browser/tab_contents/web_contents_collection.h"
 #include "components/content_settings/core/common/content_settings.h"
-#include "third_party/blink/public/mojom/mediastream/media_stream.mojom-shared.h"
 #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
 
 namespace user_prefs {
@@ -29,12 +28,12 @@ class PermissionBubbleMediaAccessHandler
   ~PermissionBubbleMediaAccessHandler() override;
 
   // MediaAccessHandler implementation.
-  bool SupportsStreamType(content::WebContents* web_contents,
+  bool SupportsStreamType(content::RenderFrameHost* render_frame_host,
                           const blink::mojom::MediaStreamType type,
                           const extensions::Extension* extension) override;
   bool CheckMediaAccessPermission(
       content::RenderFrameHost* render_frame_host,
-      const GURL& security_origin,
+      const url::Origin& security_origin,
       blink::mojom::MediaStreamType type,
       const extensions::Extension* extension) override;
   void HandleRequest(content::WebContents* web_contents,
@@ -55,7 +54,8 @@ class PermissionBubbleMediaAccessHandler
   using RequestsMap = std::map<int64_t, PendingAccessRequest>;
   using RequestsMaps = std::map<content::WebContents*, RequestsMap>;
 
-  void ProcessQueuedAccessRequest(content::WebContents* web_contents);
+  void ProcessQueuedAccessRequest(
+      MayBeDangling<content::WebContents> web_contents);
   void OnMediaStreamRequestResponse(
       content::WebContents* web_contents,
       int64_t request_id,
@@ -76,7 +76,7 @@ class PermissionBubbleMediaAccessHandler
   // This method uses StreamDevicesSetPtr (movable) and forwards the data
   // to OnAccessRequestResponse when calling the callback.
   void OnAccessRequestResponseForBinding(
-      content::WebContents* web_contents,
+      MayBeDangling<content::WebContents> web_contents,
       int64_t request_id,
       blink::mojom::StreamDevicesSetPtr stream_devices_set,
       blink::mojom::MediaStreamRequestResult result,
@@ -85,8 +85,23 @@ class PermissionBubbleMediaAccessHandler
   // WebContentsCollection::Observer:
   void WebContentsDestroyed(content::WebContents* web_contents) override;
 
+  struct DismissalRecord {
+    GURL origin;
+    blink::mojom::MediaStreamRequestResult result;
+    base::TimeTicks timestamp;
+    bool has_audio = false;
+    bool has_video = false;
+  };
+
   int64_t next_request_id_ = 0;
   RequestsMaps pending_requests_;
+
+  // Records dismissed prompts to avoid duplicate permission prompts when speech
+  // API and mojo send follow up requests programmatically. Successful requests
+  // are ignored since prompts do not need to be created and shown after a
+  // prompt is accepted.
+  std::map<content::WebContents*, std::vector<DismissalRecord>>
+      recent_dismissals_;
 
   WebContentsCollection web_contents_collection_;
 

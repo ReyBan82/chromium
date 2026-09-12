@@ -6,13 +6,14 @@
 #define CONTENT_BROWSER_BACKGROUND_FETCH_BACKGROUND_FETCH_JOB_CONTROLLER_H_
 
 #include <stdint.h>
+
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "content/browser/background_fetch/background_fetch_delegate_proxy.h"
 #include "content/browser/background_fetch/background_fetch_registration_id.h"
@@ -21,11 +22,13 @@
 #include "content/common/background_fetch/background_fetch_types.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/browser_thread.h"
+#include "third_party/blink/public/common/service_worker/service_worker_status_code.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 
 namespace content {
 
 class BackgroundFetchDataManager;
+class ServiceWorkerRegistration;
 
 // The JobController will be responsible for coordinating communication with the
 // DownloadManager. It will get requests from the RequestManager and dispatch
@@ -83,7 +86,7 @@ class CONTENT_EXPORT BackgroundFetchJobController
       std::vector<scoped_refptr<BackgroundFetchRequestInfo>>
           active_fetch_requests,
       bool start_paused,
-      absl::optional<net::IsolationInfo> isolation_info);
+      std::optional<net::IsolationInfo> isolation_info);
 
   // Gets the number of bytes downloaded/uploaded for jobs that are currently
   // running.
@@ -127,6 +130,17 @@ class CONTENT_EXPORT BackgroundFetchJobController
       RequestFinishedCallback request_finished_callback,
       blink::mojom::BackgroundFetchError error,
       scoped_refptr<BackgroundFetchRequestInfo> request_info);
+  void DidGetRegistrationForRequest(
+      RequestStartedCallback request_started_callback,
+      RequestFinishedCallback request_finished_callback,
+      scoped_refptr<BackgroundFetchRequestInfo> request_info,
+      blink::ServiceWorkerStatusCode status,
+      scoped_refptr<ServiceWorkerRegistration> registration);
+  void DidGetRegistrationForUploadData(
+      const std::string& guid,
+      BackgroundFetchDelegate::GetUploadDataCallback callback,
+      blink::ServiceWorkerStatusCode status,
+      scoped_refptr<ServiceWorkerRegistration> registration);
   void StartRequest(scoped_refptr<BackgroundFetchRequestInfo> request,
                     RequestFinishedCallback request_finished_callback);
   void MarkRequestAsComplete(scoped_refptr<BackgroundFetchRequestInfo> request);
@@ -141,6 +155,11 @@ class CONTENT_EXPORT BackgroundFetchJobController
     uint64_t uploaded = 0u;
     uint64_t downloaded = 0u;
   };
+
+  // Ensures that `url_loader_factory_` is initialized for the given
+  // `registration`.
+  void InitializeUrlLoaderFactory(
+      scoped_refptr<ServiceWorkerRegistration> registration);
 
   // Called after the request is completely processed, and the next one can be
   // started.
@@ -221,6 +240,8 @@ class CONTENT_EXPORT BackgroundFetchJobController
 
   // Custom callback that runs after the controller is finished.
   FinishedCallback finished_callback_;
+
+  scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
 
   base::WeakPtrFactory<BackgroundFetchJobController> weak_ptr_factory_{this};
 };

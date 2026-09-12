@@ -7,33 +7,7 @@
 
 #include <stdint.h>
 
-#include <tuple>
-
 namespace gfx {
-
-// The format needs to be taken into account when mapping a buffer into the
-// client's address space.
-enum class BufferFormat {
-  R_8,
-  R_16,
-  RG_88,
-  RG_1616,
-  BGR_565,
-  RGBA_4444,
-  RGBX_8888,
-  RGBA_8888,
-  BGRX_8888,
-  BGRA_1010102,
-  RGBA_1010102,
-  BGRA_8888,
-  RGBA_F16,
-  YVU_420,
-  YUV_420_BIPLANAR,
-  YUVA_420_TRIPLANAR,
-  P010,
-
-  LAST = P010
-};
 
 // The usage mode affects how a buffer can be used. Only buffers created with
 // *_CPU_READ_WRITE_* can be mapped into the client's address space and accessed
@@ -55,6 +29,7 @@ enum class BufferUsage {
   CAMERA_AND_CPU_READ_WRITE,
   SCANOUT_CPU_READ_WRITE,
   SCANOUT_VDA_WRITE,
+  PROTECTED_SCANOUT,
   PROTECTED_SCANOUT_VDA_WRITE,
   GPU_READ_CPU_READ_WRITE,
   SCANOUT_VEA_CPU_READ,
@@ -62,42 +37,6 @@ enum class BufferUsage {
   VEA_READ_CAMERA_AND_CPU_READ_WRITE,
 
   LAST = VEA_READ_CAMERA_AND_CPU_READ_WRITE
-};
-
-struct BufferUsageAndFormat {
-  BufferUsageAndFormat()
-      : usage(BufferUsage::GPU_READ), format(BufferFormat::RGBA_8888) {}
-  BufferUsageAndFormat(BufferUsage usage, BufferFormat format)
-      : usage(usage), format(format) {}
-
-  bool operator==(const BufferUsageAndFormat& other) const {
-    return std::tie(usage, format) == std::tie(other.usage, other.format);
-  }
-
-  BufferUsage usage;
-  BufferFormat format;
-};
-
-// Used to identify the plane of a GpuMemoryBuffer to use when creating a
-// SharedImage.
-enum class BufferPlane {
-  // For single-plane GpuMemoryBuffer, this refers to that single plane. For
-  // YUV_420, YUV_420_BIPLANAR, YUVA_420_TRIPLANAR, and P010 GpuMemoryBuffers,
-  // this refers to an RGB representation of the planes (either bound directly
-  // as a texture or created through an extra copy).
-  DEFAULT,
-  // The Y plane for YUV_420, YUV_420_BIPLANAR, YUVA_420_TRIPLANAR, and P010.
-  Y,
-  // The UV plane for YUV_420_BIPLANAR, YUVA_420_TRIPLANAR and P010.
-  UV,
-  // The U plane for YUV_420.
-  U,
-  // The V plane for YUV_420.
-  V,
-  // The A plane for YUVA_420_TRIPLANAR.
-  A,
-
-  LAST = A
 };
 
 }  // namespace gfx

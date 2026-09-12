@@ -10,13 +10,17 @@
 namespace ash {
 
 // Interface for observing audio preference changes.
-class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_AUDIO) AudioPrefObserver {
+class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_AUDIO) AudioPrefObserver
+    : public base::CheckedObserver {
  public:
   // Called when audio policy prefs changed.
   virtual void OnAudioPolicyPrefChanged() = 0;
 
+  // Called when voice isolation prefs changed.
+  virtual void OnVoiceIsolationPrefChanged() = 0;
+
  protected:
-  virtual ~AudioPrefObserver() {}
+  ~AudioPrefObserver() override = default;
 };
 
 }  // namespace ash

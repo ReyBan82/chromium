@@ -5,14 +5,17 @@
 #ifndef UI_EVENTS_GESTURES_GESTURE_TYPES_H_
 #define UI_EVENTS_GESTURES_GESTURE_TYPES_H_
 
+#include <memory>
 #include <string>
 
+#include "base/memory/weak_ptr.h"
 #include "ui/events/events_export.h"
 
 namespace ui {
 
 class GestureEvent;
 class TouchEvent;
+class GestureProviderAura;
 
 // TransferTouchesBehavior customizes the behavior of
 // GestureRecognizer::TransferEventsTo.
@@ -29,7 +32,8 @@ enum class TransferTouchesBehavior {
 // gesture-recognizer.
 class EVENTS_EXPORT GestureConsumer {
  public:
-  virtual ~GestureConsumer() {}
+  GestureConsumer();
+  virtual ~GestureConsumer();
 
   // Supporting double tap events requires adding some extra delay before
   // sending single-tap events in order to determine whether its a potential
@@ -40,6 +44,18 @@ class EVENTS_EXPORT GestureConsumer {
   virtual bool RequiresDoubleTapGestureEvents() const;
 
   virtual const std::string& GetName() const;
+
+  // This is defined as virtual to allow its subclass to provide its own
+  // WeakPtr<SubType>, with single shared WeakPtrFactory.
+  virtual base::WeakPtr<GestureConsumer> GetWeakPtr() = 0;
+
+  std::unique_ptr<GestureProviderAura> TakeProvider();
+  void reset_gesture_provider();
+  void set_gesture_provider(std::unique_ptr<GestureProviderAura> provider);
+  GestureProviderAura* provider() const { return provider_.get(); }
+
+ private:
+  std::unique_ptr<GestureProviderAura> provider_;
 };
 
 // GestureEventHelper creates implementation-specific gesture events and
@@ -48,6 +64,8 @@ class EVENTS_EXPORT GestureEventHelper {
  public:
   virtual ~GestureEventHelper() {
   }
+
+  virtual base::WeakPtr<GestureEventHelper> GetWeakPtr() = 0;
 
   // Returns true if this helper can dispatch events to |consumer|.
   virtual bool CanDispatchToConsumer(GestureConsumer* consumer) = 0;

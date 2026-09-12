@@ -13,27 +13,44 @@ namespace net {
 // Use CookieSettingOverrides below for specifying any number of overrides
 // together. The notion of no overrides is conveyable via an empty set.
 enum class CookieSettingOverride {
-  // When specified, the user has indicated to force allowing third-party
-  // cookies.
-  kForceThirdPartyByUser = 0,
+  kMinValue = 0,
   // When specified, third-party cookies may be allowed based on existence of
   // TopLevelStorageAccess grants.
-  kTopLevelStorageAccessGrantEligible = 1,
+  kTopLevelStorageAccessGrantEligible = kMinValue,
   // When present, the caller may use an existing Storage Access API grant (if
-  // a matching grant exists) to access third-party cookies. Otherwise, Storage
-  // Access API grants do not apply.
-  // TODO(https://crbug.com/1401089): this description isn't true yet; these
-  // variants are currently ignored, and grants are always accessible. This will
-  // be updated once all callers have been updated to pass this variant when
-  // appropriate.
-  kStorageAccessGrantEligible = 2,
-  kMaxValue = kStorageAccessGrantEligible,
+  // a matching grant exists) to access third-party cookies. This "opt-in"
+  // signal is from script execution, i.e. `document.requestStorageAccess()`.
+  kStorageAccessGrantEligible = 1,
+  // kSkipTPCDHeuristicsGrant = 2,  // Deprecated
+  // kSkipTPCDMetadataGrant = 3,  // Deprecated
+  // kSkipTPCDTrial = 4,  // Deprecated
+  // kSkipTopLevelTPCDTrial = 5,  // Deprecated
+  // When specified, third party cookies should be forced disabled.
+  // Other cookie exceptions like the storage access API could result in
+  // third party cookies still being used when this is forced disabled. This
+  // override takes precedence over `kForceEnableThirdPartyCookies`.
+  kForceDisableThirdPartyCookies = 6,
+  // When present, the caller may use an existing Storage Access API grant to
+  // access third-party cookies. Note that some integrations which have more
+  // stringent requirements, such as the FedCM/SAA integration (which requires
+  // the `identity-credentials-get` policy), are not in scope for this variant.
+  kStorageAccessGrantEligibleViaHeader = 7,
+  // kForceEnableThirdPartyCookieMitigations = 8,  // Deprecated
+  // When present, the context is sandboxed in a frame that is same-site
+  // with the top-level up its entire ancestor chain. SameSite=None
+  // cookies should be included in same-site requests from sandboxed contexts
+  // that have the 'allow-same-site-none-cookies' value.
+  kAllowSameSiteNoneCookiesInSandbox = 9,
+  // When specified, third-party cookies should behave as they would when no
+  // setting or OT exists to restrict them. This override is secondary to
+  // `kForceDisableThirdPartyCookies` and will not have any effect if both
+  // exist.
+  kForceEnableThirdPartyCookies = 10,
+
+  kMaxValue = kForceEnableThirdPartyCookies,
 };
 
-using CookieSettingOverrides =
-    base::EnumSet<CookieSettingOverride,
-                  CookieSettingOverride::kForceThirdPartyByUser,
-                  CookieSettingOverride::kMaxValue>;
+using CookieSettingOverrides = base::EnumSet<CookieSettingOverride>;
 
 }  // namespace net
 

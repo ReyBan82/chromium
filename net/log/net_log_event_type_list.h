@@ -36,6 +36,20 @@ EVENT_TYPE(FAILED)
 // Marks the creation/destruction of a request (net::URLRequest).
 EVENT_TYPE(REQUEST_ALIVE)
 
+// Marks the lifecycle of a WebSocket connection (net::WebSocketChannel).
+// Emitted as a BEGIN event in the constructor, an END event in the destructor,
+// and replayed as a synthetic BEGIN event when NetLog capture starts to surface
+// pre-existing connections that were opened before logging began.
+EVENT_TYPE(WEBSOCKET_ALIVE)
+
+// Marks a WebSocket channel state transition.
+// The event parameters include:
+//   {
+//     "old_state": <string>,
+//     "new_state": <string>,
+//   }
+EVENT_TYPE(WEBSOCKET_STATE_CHANGED)
+
 // ------------------------------------------------------------------------
 // HostResolverManager (previously known as HostResolverImpl)
 // ------------------------------------------------------------------------
@@ -53,8 +67,8 @@ EVENT_TYPE(REQUEST_ALIVE)
 //                               the host cache>,
 //     "is_speculative": <Whether this request was started by the DNS
 //                        prefetcher>,
-//     "network_isolation_key": <NetworkAnonymizationKey associated with the
-//                               request>,
+//     "network_anonymization_key": <NetworkAnonymizationKey associated with the
+//                                   request>,
 //     "secure_dns_policy": <SecureDnsPolicy of the request>,
 //   }
 //
@@ -72,6 +86,13 @@ EVENT_TYPE(HOST_RESOLVER_MANAGER_REQUEST)
 //     "ipv6_available": <True if the probe indicates ipv6 connectivity>,
 //   }
 EVENT_TYPE(HOST_RESOLVER_MANAGER_IPV6_REACHABILITY_CHECK)
+
+// This event is created when the host resolver creates tasks for a request.
+// It contains the following parameter:
+//  {
+//     "tasks": <TaskTypes of a request>,
+//  }
+EVENT_TYPE(HOST_RESOLVER_MANAGER_TASK_SEQUENCE_CREATED)
 
 // This event is logged when a request is handled by a cache entry.
 // It contains the following parameter:
@@ -104,11 +125,13 @@ EVENT_TYPE(HOST_RESOLVER_MANAGER_CREATE_JOB)
 // The BEGIN phase contains the following parameters:
 //
 //   {
-//     "dns_query_type": <DnsQueryType of the job>,
+//     "dns_query_types": <DnsQueryTypes of the job>,
 //     "host": <Serialized scheme/host/port associated with the job>,
-//     "network_isolation_key": <NetworkAnonymizationKey associated with the
-//     job>, "secure_dns_mode": <SecureDnsMode of the job>, "source_dependency":
-//     <Source id, if any, of what created the job>,
+//     "tasks": <TaskTypes of the job>,
+//     "network_anonymization_key": <NetworkAnonymizationKey associated with the
+//                                   job>,
+//     "secure_dns_mode": <SecureDnsMode of the job>,
+//     "source_dependency": <Source id, if any, of what created the job>,
 //   }
 //
 // The END phase will contain these parameters:
@@ -201,8 +224,8 @@ EVENT_TYPE(HOST_RESOLVER_MANAGER_JOB_REQUEST_DETACH)
 //   }
 EVENT_TYPE(HOST_RESOLVER_SYSTEM_TASK)
 
-// The creation/completion of a HostResolverManager::DnsTask to manage a
-// DnsTransaction. The BEGIN phase contains the following parameters:
+// The creation/completion of a HostResolverDnsTask to manage a DnsTransaction.
+// The BEGIN phase contains the following parameters:
 //
 //   {
 //     "secure": <Whether or not the task will use secure DNS>,
@@ -223,20 +246,27 @@ EVENT_TYPE(HOST_RESOLVER_SYSTEM_TASK)
 //     "saved_results": <HostCache::Entry of any previously completed
 //                       transactions>,
 //   }
-EVENT_TYPE(HOST_RESOLVER_MANAGER_DNS_TASK)
+EVENT_TYPE(HOST_RESOLVER_DNS_TASK)
 
 // Logged when DnsResponseResultExtractor returns an error to
-// HostResolverManager::DnsTask when attempting to extract results from a
-// DnsResponse. Contains the following parameters:
+// HostResolverDnsTask when attempting to extract results from a DnsResponse.
+// Contains the following parameters:
 //
 //   {
 //     "extraction_error": <The DnsResponseResultExtractor::ExtractionError>
 //     "dns_query_type": <The DnsQueryType requested from the extractor>
-//     "results": <The HostCache::Entry returned by the extractor>
 //   }
-EVENT_TYPE(HOST_RESOLVER_MANAGER_DNS_TASK_EXTRACTION_FAILURE)
+EVENT_TYPE(HOST_RESOLVER_DNS_TASK_EXTRACTION_FAILURE)
 
-// Logged when a HostResolverManager::DnsTask times out and cancels unfinished
+// Logged when a HostResolverDnsTask extracted HostResolverInternalResults from
+// a DnsResponse. Contains the following parameters:
+//
+//   {
+//     "results": <List of HostResolverInternalResult>,
+//   }
+EVENT_TYPE(HOST_RESOLVER_DNS_TASK_EXTRACTION_RESULTS)
+
+// Logged when a HostResolverDnsTask times out and cancels unfinished
 // transactions.
 // The event contains the following parameters:
 //
@@ -249,7 +279,39 @@ EVENT_TYPE(HOST_RESOLVER_MANAGER_DNS_TASK_EXTRACTION_FAILURE)
 //       "dns_query_type": <DnsQueryType of a not-yet-started transaction>,
 //     }],
 //   }
-EVENT_TYPE(HOST_RESOLVER_MANAGER_DNS_TASK_TIMEOUT)
+EVENT_TYPE(HOST_RESOLVER_DNS_TASK_TIMEOUT)
+
+// Logged when a DnsTaskResultsManager updates intermediate service
+// endpoints. Contains the following parameters:
+//
+//   {
+//      "endpoints": [{
+//        "ipv4_endpoints": <List of IPv4 endpoint>,
+//        "ipv6_endpoints": <List of IPv6 endpoint>,
+//        "metadata": <ConnectionEndpointMetadata of this service endpoint>
+//      }]
+//   }
+EVENT_TYPE(HOST_RESOLVER_SERVICE_ENDPOINTS_UPDATED)
+
+// Logged when a DnsTaskResultsManager receives stale results. Contains the
+// following parameters:
+//
+//   {
+//      "endpoints": [{
+//        "ipv4_endpoints": <List of IPv4 endpoint>,
+//        "ipv6_endpoints": <List of IPv6 endpoint>,
+//        "metadata": <ConnectionEndpointMetadata of this service endpoint>
+//      }]
+//   }
+EVENT_TYPE(HOST_RESOLVER_SERVICE_ENDPOINTS_STALE_RESULTS)
+
+// Logged when a DnsTaskResultsManager's resolution timer is timed out,
+// or AAAA response is received before the timer timed out.
+//   {
+//      "timedout": <Whether or not the timer is timed out>,
+//      "elapsed": <Elapsed time in milliseconds>
+//   }
+EVENT_TYPE(HOST_RESOLVER_SERVICE_ENDPOINTS_RESOLUTION_DELAY)
 
 // ------------------------------------------------------------------------
 // InitProxyResolver
@@ -297,6 +359,10 @@ EVENT_TYPE(PROXY_RESOLUTION_SERVICE)
 // are found from ConfiguredProxyResolutionService::init_proxy_resolver_log().
 EVENT_TYPE(PROXY_RESOLUTION_SERVICE_WAITING_FOR_INIT_PAC)
 
+// The time while a request is waiting on dynamic proxy routing rules (e.g. from
+// an enterprise Provisioning Domain) to be updated/fetched.
+EVENT_TYPE(PROXY_RESOLUTION_SERVICE_WAITING_FOR_DYNAMIC_PROXY_CONFIGS)
+
 // This event is emitted to show what the PAC script returned. It can contain
 // extra parameters that are either:
 //   {
@@ -306,6 +372,14 @@ EVENT_TYPE(PROXY_RESOLUTION_SERVICE_WAITING_FOR_INIT_PAC)
 //  Or if the the resolver failed:
 //   {
 //      "net_error": <Net error code that resolver failed with>,
+//   }
+//
+// In the case of Windows system-based proxy resolution, the event also includes
+// WinHTTP status codes and Windows-specific error codes:
+//   {
+//      "winhttp_status": <WinHTTP status code (integer)>,
+//      "windows_error": <Windows system error code (integer)>,
+//      "proxy_info": <Debug string representation of the ProxyInfo result>,
 //   }
 EVENT_TYPE(PROXY_RESOLUTION_SERVICE_RESOLVED_PROXY_LIST)
 
@@ -402,6 +476,48 @@ EVENT_TYPE(SUBMITTED_TO_RESOLVER_THREAD)
 //   }
 EVENT_TYPE(SOCKET_ALIVE)
 
+// Records Open calls to sockets.
+//   {
+//     "net_error": <On failure; net integer error code>
+//   }
+EVENT_TYPE(SOCKET_OPEN)
+
+// Records Connect calls to sockets.
+//   {
+//     "address": <Remote address being connected to>
+//     "net_error": <On failure; net integer error code>
+//   }
+EVENT_TYPE(SOCKET_CONNECT)
+
+// Records BindToNetwork calls to sockets.
+//   {
+//     "network": <Network this socket is being bound to>
+//     "net_error": <On failure; net integer error code>
+//   }
+EVENT_TYPE(SOCKET_BIND_TO_NETWORK)
+
+// ------------------------------------------------------------------------
+// Brokered Socket (Shared by stream and datagram sockets)
+// ------------------------------------------------------------------------
+
+// Marks the begin/end of a brokered socket (TCP/UDP)
+// The BEGIN phase contains the following parameters:
+//
+//   {
+//     "source_dependency": <Source identifier for the controlling entity>,
+//   }
+EVENT_TYPE(BROKERED_SOCKET_ALIVE)
+
+// The start/end of creating a new socketfd in the network service sandbox. This
+// event is only used when a socket needs to be created outside of the network
+// sandbox.
+//
+// The END event wil contain the following parameters:
+//   {
+//     "net_error": <Net integer error code>
+//   }
+EVENT_TYPE(BROKERED_CREATE_SOCKET)
+
 // ------------------------------------------------------------------------
 // StreamSocket
 // ------------------------------------------------------------------------
@@ -448,6 +564,47 @@ EVENT_TYPE(TCP_CONNECT)
 //     "net_error": <Net integer error code>,
 //   }
 EVENT_TYPE(TCP_CONNECT_ATTEMPT)
+
+// The bind attempt by the EphemeralPortRandomizer nested within
+// TCP_CONNECT_ATTEMPT. There may be multiple attempts to bind different ports
+// for some failure cases. Currently MacOS only.
+//
+// The START event will describe the settings before a port is picked:
+//
+//   {
+//     "remote_endpoint": <The remote endpoint, as a string>,
+//     "attempt": <The index of the attempt, as an integer>,
+//     "randomizer_range_first": <The lowest possible port, as an integer>,
+//     "randomizer_range_last": <The highest possible port, as an integer>,
+//     "randomizer_recent_ports_by_remote_endpoint_size":
+//       <The number of ports believed to be in use for the remote endpoint,
+//        as an integer>,
+//   }
+//
+// The END event will contain one of the following:
+//
+// On EphemeralPortRandomizer::PickPort exhaustion:
+//   {
+//   }
+//
+// On SockaddrStorage::ToSockAddr failure:
+//   {
+//     "local_address": <The local address, as a string>,
+//     "attempted_port": <The local port attempted for use, as an integer>,
+//   }
+//
+// On bind success:
+//   {
+//     "local_endpoint": <The local endpoint, as a string>,
+//   }
+//
+// On bind failure:
+//   {
+//     "attempted_local_endpoint":
+//       <The local endpoint attempted for use, as a string>,
+//     "os_error": <Integer error code the operating system returned>
+//   }
+EVENT_TYPE(TCP_RANDOMIZER_BIND_ATTEMPT)
 
 // The start/end of a TCP accept(). This corresponds with a call to
 // TCPServerSocket::Accept().
@@ -527,6 +684,12 @@ EVENT_TYPE(SOCKS_UNKNOWN_ADDRESS_TYPE)
 //    "cipher_suite": <Integer code for the cipher suite>,
 //    "is_resumed": <Whether we resumed a session>,
 //    "next_proto": <The next protocol negotiated via ALPN>,
+//    "key_exchange_group": <ID of the (EC)DH group used for key exchange>,
+//    "peer_signature_algorithm": <signature algorithm used by peer>,
+//    "encrypted_client_hello": <if Encrypted Client Hello was used>,
+//    "requested_server_padding": <Whether server padding was requested>,
+//    "received_server_padding": <Whether server padding was received>,
+//
 //  }
 EVENT_TYPE(SSL_CONNECT)
 
@@ -536,6 +699,22 @@ EVENT_TYPE(SSL_CONNECT)
 //     "bytes": <The ECHConfigList used, base64 encoded>
 // }
 EVENT_TYPE(SSL_ECH_CONFIG_LIST)
+
+// Emitted in a TLS client handshake when a client is configured to send a list
+// of trust anchor IDs. The following parameters are attached:
+// {
+//   "trust_anchor_ids": <trust anchor ID relative OIDs converted to strings and
+//                        joined with commas.>,
+// }
+EVENT_TYPE(SSL_CLIENT_TRUST_ANCHOR_IDS_LIST)
+
+// Emitted in a TLS handshake when the client receives a list of trust anchor
+// IDs from the server. The following parameters are attached:
+// {
+//   "trust_anchor_ids": <trust anchor ID relative OIDs converted to strings and
+//                        joined with commas.>,
+// }
+EVENT_TYPE(SSL_CLIENT_RECEIVED_TRUST_ANCHOR_IDS)
 
 // The start/end of an SSL server handshake (aka "accept").
 EVENT_TYPE(SSL_SERVER_HANDSHAKE)
@@ -588,9 +767,9 @@ EVENT_TYPE(SSL_ALERT_SENT)
 EVENT_TYPE(SSL_CONFIRM_HANDSHAKE)
 
 // An SSL connection sent or received a handshake message.
-// `SSL_ENCYPTED_CLIENT_HELLO` means the handshake message was not sent over the
-// wire but encrypted with the Encrypted ClientHello (ECH) extension.
-// The following parameters are attached:
+// `SSL_ENCRYPTED_CLIENT_HELLO` means the handshake message was not sent over
+// the wire but encrypted with the Encrypted ClientHello (ECH) extension. The
+// following parameters are attached:
 //   {
 //     "type": <The type of the handshake message, as an integer>
 //     "bytes": <The exact bytes sent, Base64 encoded.
@@ -598,7 +777,14 @@ EVENT_TYPE(SSL_CONFIRM_HANDSHAKE)
 //   }
 EVENT_TYPE(SSL_HANDSHAKE_MESSAGE_RECEIVED)
 EVENT_TYPE(SSL_HANDSHAKE_MESSAGE_SENT)
-EVENT_TYPE(SSL_ENCYPTED_CLIENT_HELLO)
+EVENT_TYPE(SSL_ENCRYPTED_CLIENT_HELLO)
+
+// TLS 1.3 Early Data is accepted or rejected. This is logged when the handshake
+// fully completes. The following parameter is attached:
+//   {
+//     "early_data_reason": <The reason why Early Data is accepted or rejected>
+//   }
+EVENT_TYPE(SSL_HANDSHAKE_EARLY_DATA_REASON)
 
 // The specified number of bytes were sent on the socket.  Depending on the
 // source of the event, may be logged either once the data is sent, or when it
@@ -683,6 +869,7 @@ EVENT_TYPE(SIGNED_CERTIFICATE_TIMESTAMPS_CHECKED)
 //    "certificate": <An X.509 certificate, same format as in
 //                   CERT_VERIFIER_JOB.>
 //    "build_timely": <boolean>
+//    "log_list_timestamp": <timestamp in milliseconds since the Unix epoch>
 //    "ct_compliance_status": <string describing compliance status>
 // }
 EVENT_TYPE(CERT_CT_COMPLIANCE_CHECKED)
@@ -776,6 +963,9 @@ EVENT_TYPE(CONNECT_JOB_TIMED_OUT)
 // The start/end of the TransportConnectJob::Connect().
 EVENT_TYPE(TRANSPORT_CONNECT_JOB_CONNECT)
 
+// The start/end of the TcpConnectJob::Connect().
+EVENT_TYPE(TCP_CONNECT_JOB_CONNECT)
+
 // The start/end of the SSLConnectJob::Connect().
 EVENT_TYPE(SSL_CONNECT_JOB_CONNECT)
 
@@ -800,15 +990,71 @@ EVENT_TYPE(SSL_CONNECT_JOB_RESTART_WITH_ECH_CONFIG_LIST)
 EVENT_TYPE(TRANSPORT_CONNECT_JOB_IPV6_FALLBACK)
 
 // This event is logged whenever the ConnectJob attempts a new TCP connection.
-// association. The ConnectJob may attempt multiple addresses in parallel, so
-// this event does not log when the connection attempt succeeds or fails. The
-// source dependency may be used to determine this.
+// The ConnectJob may attempt multiple addresses in parallel, so this event does
+// not log when the connection attempt succeeds or fails. The source dependency
+// may be used to determine this.
 //
 //   {
 //     "address": <String of the network address being attempted>,
 //     "source_dependency": <The source identifier for the new socket.>,
 //   }
 EVENT_TYPE(TRANSPORT_CONNECT_JOB_CONNECT_ATTEMPT)
+
+// This event is logged whenever a TcpConnectJob::Connector attempts a new TCP
+// connection.
+//
+//   {
+//     "address": <The network address being attempted>,
+//     "connector": <Name of the Connector>,
+//     "source_dependency": <The source identifier for the new socket.>,
+//   }
+EVENT_TYPE(TCP_CONNECT_JOB_CONNECTOR_CONNECT_START)
+
+// This event is logged whenever a TcpConnectJob::Connector finishes trying to
+// establish a TCP connection to a particular address, either successfully or
+// with an error.
+//
+//   {
+//     "connector": <Name of the Connector>,
+//     "net_error": <Net error code, on error>,
+//   }
+EVENT_TYPE(TCP_CONNECT_JOB_CONNECTOR_CONNECT_COMPLETE)
+
+// This event is logged whenever a TcpConnectJob::Connector completely finishes
+// - it either gives up, or it finishes establishing a connection.
+//
+//   {
+//     "connector": <Name of the Connector>,
+//     "net_error": <Net error code, on error>,
+//   }
+EVENT_TYPE(TCP_CONNECT_JOB_CONNECTOR_DONE)
+
+// This event is logged whenever a TcpConnectJob::Connector determines whether a
+// successfully connected socket is usable or not.
+//
+//   {
+//     "connector": <Name of the Connector>,
+//     "is_usable": <true or false depending on if the endpoint is usable>,
+//   }
+EVENT_TYPE(TCP_CONNECT_JOB_VERIFY_IP_ENDPOINT_USABLE)
+
+// This event is logged when the TcpConnectJob slow timer triggers, and a second
+// connector is created.
+EVENT_TYPE(TCP_CONNECT_JOB_CREATE_SECOND_CONNECTOR)
+
+// This event is logged whenever the SSLConnectJob attempts a
+// SSLClientSocket::Connect().
+//
+//   {
+//     "ech_enabled": <True when ECH is enabled>,
+//     "ech_config_list": <The binary representation of ECH config list>,
+//     "selected_trust_anchor_ids": <Optional: comma-separated trust anchor IDs
+//                                   sent in the TLS ClientHello on first
+//                                   connection attempt>,
+//     "requested_server_padding": <Optional: Amount of server padding
+//                                  requested>,
+//   }
+EVENT_TYPE(SSL_CONNECT_JOB_SSL_CONNECT)
 
 // ------------------------------------------------------------------------
 // ClientSocketPoolBaseHelper
@@ -884,6 +1130,66 @@ EVENT_TYPE(SOCKET_POOL_CONNECTING_N_SOCKETS)
 EVENT_TYPE(SOCKET_POOL_CLOSING_SOCKET)
 
 // ------------------------------------------------------------------------
+// StreamAttempt and subclasses
+// ------------------------------------------------------------------------
+
+// Emitted when a TcpBasedAttempt is created by HttpStreamPool.
+EVENT_TYPE(TCP_BASED_ATTEMPT_BOUND_TO_POOL)
+
+// Marks the creation/destruction of a TcpStreamAttempt.
+// For the BEGIN phase, the following parameter is attached:
+//   {
+//      "ip_endpoint": <The IPEndPoint to connect>,
+//   }
+//
+// For the END phase, if there was an error, the following parameters are
+// attached:
+//   {
+//      "net_error": <Net error code of the failure>,
+//   }
+EVENT_TYPE(TCP_STREAM_ATTEMPT_ALIVE)
+
+// Logged when a TcpStreamAttempt connects a socket.
+// The event parameter is:
+//   {
+//     "source_dependency": <Source identifier of the socket>,
+//   }
+EVENT_TYPE(TCP_STREAM_ATTEMPT_CONNECT)
+
+// Marks the creation/destruction of a TlsStreamAttempt.
+// For the BEGIN phase, the following parameter is attached:
+//   {
+//      "host_port": <The host and port of the destination>,
+//   }
+//
+// For the END phase, if there was an error, the following parameters are
+// attached:
+//   {
+//      "net_error": <Net error code of the failure>,
+//   }
+EVENT_TYPE(TLS_STREAM_ATTEMPT_ALIVE)
+
+// Measures the time TlsStreamAttempt was waiting for the ServiceEndpoint to be
+// ready.
+EVENT_TYPE(TLS_STREAM_ATTEMPT_WAIT_FOR_SERVICE_ENDPOINT)
+
+// Measures the time TlsStreamAttempt took to connect (TLS handshake).
+// For the BEGIN phase, the following parameters are optionally attached:
+//   {
+//      "selected_trust_anchor_ids": <trust anchor IDs sent in the TLS
+//                                    ClientHello on first connection attempt>,
+//   }
+// For the END phase, the following parameters are attached:
+// attached:
+//   {
+//      "net_error": <Optional: net error code of the failure>,
+//      "server_available_trust_anchor_ids":
+//          <Optional: trust anchor IDs sent by the server in the handshake,
+//           converted to strings and joined with commas>,
+//   }
+EVENT_TYPE(TLS_STREAM_ATTEMPT_CONNECT)
+
+// ------------------------------------------------------------------------
 // URLRequest
 // ------------------------------------------------------------------------
 
@@ -922,6 +1228,10 @@ EVENT_TYPE(URL_REQUEST_START_JOB)
 //   }
 EVENT_TYPE(URL_REQUEST_REDIRECTED)
 
+// This event is sent once a net::URLRequest receives a (valid)
+// `Activate-Storage-Access: retry` response header.
+EVENT_TYPE(URL_REQUEST_RETRY_WITH_STORAGE_ACCESS)
+
 // Measures the time between when a net::URLRequest calls a delegate that can
 // block it, and when the delegate allows the request to resume. Each delegate
 // type has a corresponding event type.
@@ -932,6 +1242,8 @@ EVENT_TYPE(URL_REQUEST_DELEGATE_CERTIFICATE_REQUESTED)
 EVENT_TYPE(URL_REQUEST_DELEGATE_RECEIVED_REDIRECT)
 EVENT_TYPE(URL_REQUEST_DELEGATE_RESPONSE_STARTED)
 EVENT_TYPE(URL_REQUEST_DELEGATE_SSL_CERTIFICATE_ERROR)
+EVENT_TYPE(
+    URL_REQUEST_DELEGATE_PLATFORM_LOCAL_NETWORK_ACCESS_PERMISSION_REQUIRED)
 
 // Like the above events, but the END phase also has the following parameter:
 //   {
@@ -1038,6 +1350,45 @@ EVENT_TYPE(HTTP_CACHE_CALLER_REQUEST_HEADERS)
 EVENT_TYPE(HTTP_CACHE_RESTART_PARTIAL_REQUEST)
 EVENT_TYPE(HTTP_CACHE_RE_SEND_PARTIAL_REQUEST)
 
+// Brackets a zstd decompression session for a cached body. The BEGIN phase
+// is logged when the decompressor is initialized for a transaction; the END
+// phase is logged when decompression terminates, either by clean EOF or by
+// any error path. (Init failure is logged as a single non-bracketing event
+// because no decompression session ever started.)
+//
+// For the BEGIN phase, the following parameter is attached:
+//   {
+//     "expected_content_length": <int, decompressed Content-Length, or -1
+//                                 if not advertised>,
+//   }
+//
+// For the END phase, exactly one of the following parameter shapes is
+// attached:
+//   - On success:
+//     {
+//       "compressed_bytes":   <int, total compressed bytes consumed>,
+//       "decompressed_bytes": <int, total decompressed bytes delivered>,
+//     }
+//   - On failure (also used for the standalone "init_failed" event):
+//     {
+//       "reason": <"init_failed" | "zstd_error" | "truncated_frame" |
+//                  "size_mismatch">,
+//     }
+EVENT_TYPE(HTTP_CACHE_DECOMPRESS)
+
+// Indicates that an entry from the NoVarySearchCache was used to rewrite the
+// URL for this request.
+// For the BEGIN phase, the following parameters are attached:
+//   {
+//     "request_url": <String of the URL we were requested to retrieve>,
+//     "cached_url": <String of the URL that we will use instead>,
+//   }
+// For the END phase, the following parameter is optionally attached:
+//   {
+//     "restart_reason": <String of one of NoVarySearchUseResult enum's values>
+//   }
+EVENT_TYPE(HTTP_CACHE_USING_NO_VARY_SEARCH_CACHE_URL)
+
 // ------------------------------------------------------------------------
 // Disk Cache / Memory Cache
 // ------------------------------------------------------------------------
@@ -1135,9 +1486,17 @@ EVENT_TYPE(HTTP_STREAM_REQUEST)
 //   {
 //      "source_dependency": <Source identifier for the Request with started
 //                            this Job>,
-//      "original_url": <The URL to create a stream for>,
-//      "url": <The URL actually being used, possibly different from
-//              original_url if using an alternate service>,
+//      "logical_destination":
+//          <The scheme + origin + port that the connection is logically to.
+//           This has any host mapping rules already applied, and for https/wss
+//           is the host required for certificate validation>,
+//      "destination":
+//          <The scheme + origin + port that the connection will actually be
+//           made to. The difference from `logical_destination` is that
+//           this is after applying alternate protocol, if applicable, and
+//           replacing ws/wss with http/https. Host mappy rules have also been
+//           applied a second time, if there was an applicable alternate
+//           protocol applied>,
 //      "expect_spdy": <Boolean indicating whether the Job will use SPDY>,
 //      "using_quic": <Boolean indicating whether the Job will use QUIC>,
 //      "priority": <The priority of the Job>,
@@ -1177,16 +1536,16 @@ EVENT_TYPE(HTTP_STREAM_JOB_INIT_CONNECTION)
 //   }
 EVENT_TYPE(HTTP_STREAM_REQUEST_BOUND_TO_JOB)
 
-// Identifies the NetLogSource() for the QuicStreamFactory::Job that the
-// HttpStreamFactory::Job was attached to.
-// The event parameters are:
-//  {
-//      "source_dependency": <Source identifier for the QuicStreamFactory::Job
-//                            to which we were attached>,
-//  }
-EVENT_TYPE(HTTP_STREAM_JOB_BOUND_TO_QUIC_STREAM_FACTORY_JOB)
+// This event indicates that while an HttpStreamFactory::Job was trying to
+// establish a connection, a matching H2 became available, likely created
+// by another HttpStreamFactory::Job(). The event parameters are:
+//   {
+//     "source_dependency": <The session id>,
+//   }
+EVENT_TYPE(HTTP_STREAM_JOB_HTTP2_SESSION_AVAILABLE)
 
 // Identifies the NetLogSource() for the Request that the Job was attached to.
+// Event is logged to both the Request and the JobController.
 // The event parameters are:
 //   {
 //      "source_dependency": <Source identifier for the Request to which we were
@@ -1247,6 +1606,303 @@ EVENT_TYPE(HTTP_STREAM_JOB_CONTROLLER_PROXY_SERVER_RESOLVED)
 //      "broken": <boolean>
 //   }
 EVENT_TYPE(HTTP_STREAM_JOB_CONTROLLER_ALT_SVC_FOUND)
+
+// Logs that a WebSocket-over-HTTP/3 job was created to attempt reusing an
+// existing QUIC session with Extended CONNECT support.
+// The event parameters are:
+//   {
+//      "destination": The destination (scheme://host:port) for the WebSocket.
+//   }
+EVENT_TYPE(HTTP_STREAM_JOB_CONTROLLER_WS_OVER_H3_CREATED)
+
+// Logs that a WebSocket-over-HTTP/3 job was not created because no existing
+// QUIC session with Extended CONNECT support was found.
+// The event parameters are:
+//   {
+//      "destination": The destination (scheme://host:port) for the WebSocket.
+//      "reason": Why the job was skipped.
+//   }
+EVENT_TYPE(HTTP_STREAM_JOB_CONTROLLER_WS_OVER_H3_SKIPPED)
+
+// ------------------------------------------------------------------------
+// HttpStreamPool
+// ------------------------------------------------------------------------
+
+// Emitted when the HttpStreamPool checks stream counts consistency.
+// The event parameters are:
+//   {
+//      "pool_total_counts": <Total counts from the pool>,
+//      "group_total_counts": <Sum of total counts from each group>,
+//      "groups": <Per-group information>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_CONSISTENCY_CHECK_OK)
+EVENT_TYPE(HTTP_STREAM_POOL_CONSISTENCY_CHECK_FAIL)
+
+// Logged when the HttpStreamPool is closing a StreamSocket:
+//   {
+//      "reason": <Reason the socket was closed>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_CLOSING_SOCKET)
+
+// Marks the start/end of a HttpStreamPool::JobController.
+// The following parameters are attached:
+//   {
+//      "origin_destination": <The destination of the origin>,
+//      "alternative_destination": <The destination of the alternative, if
+//                                  exists>,
+//      "enable_ip_based_pooling": <True when the job enables IP based pooling>,
+//      "enable_alternative_services": <True when the job enables alternative
+//                                      services>,
+//      "respect_limits": <True when the job respects stream limits>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_JOB_CONTROLLER_ALIVE)
+
+// Emitted when an HttpStreamPool::JobController skips an alternative service
+// because its port is not allowed for the scheme.
+// The event parameters are:
+//   {
+//      "port": <The port of the alternative service>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_JOB_CONTROLLER_SKIPPED_ALTSVC_RESTRICTED_PORT)
+
+// Emitted when an HttpStreamPool::JobController found an existing SPDY session.
+EVENT_TYPE(HTTP_STREAM_POOL_JOB_CONTROLLER_FOUND_EXISTING_SPDY_SESSION)
+
+// Emitted when an HttpStreamPool::JobController found an existing QUIC session.
+EVENT_TYPE(HTTP_STREAM_POOL_JOB_CONTROLLER_FOUND_EXISTING_QUIC_SESSION)
+
+// Emitted when an HttpStreamPool::Job is bound to an
+// HttpStreamPool::JobController.
+EVENT_TYPE(HTTP_STREAM_POOL_JOB_CONTROLLER_JOB_BOUND)
+
+// Emitted when an preconnect request in an HttpStreamPool::AttemptManager is
+// bound to an HttpStreamPool::JobController.
+EVENT_TYPE(HTTP_STREAM_POOL_JOB_CONTROLLER_PRECONNECT_BOUND)
+
+// Marks the start/end of a HttpStreamPool::Job.
+// The BEGIN phase contains the following parameters:
+//   {
+//      "stream_key": <The HttpStreamKey of the job>,
+//      "quic_version": <The QUIC version to attempt>,
+//      "allowed_alpns": <List of allowed ALPNs>,
+//      "source_dependency": <The source identifier of the JobController>,
+//   }
+// The END phase contains the following parameters:
+//   {
+//      "net_error": <Optional; the result of the job>,
+//      "negotiated_protocol": <Optional; the negotiated protocol>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_JOB_ALIVE)
+
+// Marks the start/end of a HttpStreamPool::Group.
+// The following parameters are attached:
+//   {
+//      "stream_key": <The HttpStreamKey of the group>,
+//      "force_quic": <True when QUIC is forced for the group>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_GROUP_ALIVE)
+
+// Emitted when an HttpStreamPool::AttemptManager is created. Used to add a
+// reference to HttpStreamPool::Group's net log.
+EVENT_TYPE(HTTP_STREAM_POOL_GROUP_ATTEMPT_MANAGER_CREATED)
+
+// Emitted when an HttpStreamPool::Handle is created for a group. The event
+// parameters are:
+//   {
+//      "source_dependency": <The source identifier of the stream socket>,
+//      "reuse_type": <The reuse type of the handle>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_GROUP_HANDLE_CREATED)
+
+// Emitted when an HttpStreamPool::AttemptManager requests a stream. The event
+// parameters are:
+//   {
+//     "priority": <The priority of the erquest>,
+//     "allowed_bad_certs": <The list of allowed bad certs>,
+//     "enable_ip_based_pooling_for_h2": <True when the request enables IP based
+//                                        pooling for H2>,
+//     "allowed_alpns": <The list of allowed protocols>,
+//     "quic_version": <The QUIC version to attempt>,
+//     "source_dependency": <The source identifier of the request>
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_REQUEST_STREAM)
+
+// Records on the caller's NetLog to indicate that an
+// HttpStreamPool::AttemptManager starts a Job.
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_JOB_BOUND)
+
+// Emitted when an HttpStreamPool::AttemptManager calculated its initial
+// attempt state. The event parameter is:
+//   {
+//      "initial_state": <The initial state of the manager>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_INITIAL_ATTEMPT_STATE)
+
+// Emitted when an HttpStreamPool::AttemptManager is requested a preconnect. The
+// event parameter is:
+//   {
+//      "num_streams": <The number of streams requested>,
+//      "quic_version": <The QUIC version to attempt>,
+//      "source_dependency": <The source identifier of the preconnect request>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_PRECONNECT)
+
+// Emitted when an HttpStreamPool::AttemptManager is destroyed. Used to add a
+// reference to HttpStreamPool::Group's net log.
+EVENT_TYPE(HTTP_STREAM_POOL_GROUP_ATTEMPT_MANAGER_DESTROYED)
+
+// Marks the start/end of a HttpStreamPool::AttemptManager.
+// For the BEGIN event, the event parameters are:
+//   {
+//     "stream_key": <The HttpStreamKey of the AttemptManager>,
+//     "stream_attempt_delay": <The stream attempt delay in milliseconds>,
+//     "should_block_stream_attempt": <True when TCP-based stream attempts
+//                                     should be blocked>,
+//     "supports_spdy": <True when the destination is known to support HTTP/2>,
+//     "source_dependency": <The source identifier of the parent group>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_ALIVE)
+
+// Some HTTP_STREAM_POOL_ATTEMPT_MANAGER_* events have the following common
+// event parameters.
+//   {
+//     "num_active_sockets": <The number of active sockets>,
+//     "num_idle_sockets": <The number of idle sockets>,
+//     "num_handed_out_sockets": <The number of handed out sockets>,
+//     "num_total_sockets": <The number of total sockets>,
+//     "num_jobs": <The number of active jobs>,
+//     "num_notified_jobs": <The number of jobs that are notified results but
+//                           are still not destroyed yet>,
+//     "num_preconnects": <The number of preconnect requests>,
+//     "num_inflight_attempts": <The number of in-flight TCP/TLS attempts>,
+//     "num_slow_attempts": <The number of in-flight TCP/TLS attempts that are
+//                           treated as slow>,
+//     "num_tcp_based_attempt_slots": <The total number of slots for TCP-based
+//                           connection attempts.
+//     "enable_ip_based_pooling_for_h2": <True when the request enables IP based
+//                                        pooling for H2>,
+//     "allowed_alpns": <List of allowed ALPNs>,
+//     "quic_attempt_alive": <True when a QuicAttempt is alive>,
+//     "quic_attempt_result": <The result of a QuicAttempt, if it is already
+//                             finished>
+//   }
+
+// Emitted when an HttpStreamPool::AttemptManager started a TcpBasedAttempt.
+// This event has the common event parameters (see above).
+EVENT_TYPE(HTTP_STREAM_POOL_TCP_BASED_ATTEMPT_START)
+
+// Emitted when an HttpStreamPool::AttemptManager received completion from a
+// TcpBasedAttempt.
+// This event has the common event parameters (see above).
+// In addition to the common event parameters, this event has the following
+// parameter:
+//   {
+//     "result": <String representation of the result>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_TCP_BASED_ATTEMPT_END)
+
+// Emitted when an HttpStreamPool::AttemptManager is going to notify failure.
+// In addition to the common event parameters, this event has the following
+// parameter:
+//   {
+//     "net_error": <Net error code integer>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_NOTIFY_FAILURE)
+
+// Emitted when DNS resolution on an HttpStreamPool::AttemptManager is updated.
+// The event parameters are:
+//   {
+//     "endpoints": <The current endpoints of the resolution>,
+//     "endpoints_crypto_ready": <True when the manager is ready for
+//                                cryptographic handshake>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_DNS_RESOLUTION_UPDATED)
+
+// Emitted when DNS resolution on an HttpStreamPool::AttemptManager finishes.
+// The event parameters are:
+//   {
+//     "endpoints": <The current endpoints of the resolution>,
+//     "endpoints_crypto_ready": <True when the manager is ready for
+//                                cryptographic handshake>,
+//     "result": <String representation of the result>,
+//     "resolve_error": <DNS resolution error code integer>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_DNS_RESOLUTION_FINISHED)
+
+// Emitted when an HttpStreamPool::AttemptManager finds a matching SPDY session
+// after DNS resolution.
+//   {
+//     "source_dependency": <The source identifier of the SPDY session>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_EXISTING_SPDY_SESSION_MATCHED)
+
+// Emitted when an HttpStreamPool::AttemptManager finds a matching QUIC session
+// after DNS resolution.
+//   {
+//     "source_dependency": <The source identifier of the QUIC session>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_EXISTING_QUIC_SESSION_MATCHED)
+
+// Emitted when the slow timer of a TcpBasedAttempt is fired. The event
+// parameter is:
+//   {
+//     "ip_endpoint": <The IP endpoint of the attempt>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_TCP_BASED_ATTEMPT_SLOW)
+
+// Emitted when the slow timer of a QuicAttempt is fired. The event
+// parameter is:
+//   {
+//     "ip_endpoint": <The IP endpoint of the attempt>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_QUIC_ATTEMPT_SLOW)
+
+// Emitted when the stream attempt delay has passed on an
+// HttpStreamPool::AttemptManager. The event parameter is:
+//   {
+//     "stream_attempt_delay": <The stream attempt delay in milliseconds>
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_TCP_BASED_ATTEMPT_DELAY_PASSED)
+
+// Records on an HttpStreamPool::AttemptManager's NetLog to indicate that an
+// HttpStreamPool::AttemptManager::QuicAttempt is bound to the AttemptManager.
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_QUIC_ATTEMPT_BOUND)
+
+// Emitted when an HttpStreamPool::AttemptManager::QuicAttempt is completed.
+// This event has the common event parameters (see above).
+// In addition to the common event parameters, this event has the following
+// parameters:
+//   {
+//     "result": <String representation of the result>,
+//     "quic_error": <The QUIC error, if any>,
+//     "source_dependency": <The source identifier of the QUIC session, if the
+//                           task succeeded>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_QUIC_ATTEMPT_COMPLETED)
+
+// Emitted when an HttpStreamPool::AttemptManager checks whether it can attempt
+// a TCP based connection. The event parameter is:
+//  {
+//     "can_attempt": <The reason why AttemptManager can or cannot make an
+//                     attempt>,
+//  }
+EVENT_TYPE(HTTP_STREAM_POOL_ATTEMPT_MANAGER_CAN_ATTEMPT_TCP)
+
+// Marks the start/end of a HttpStreamPool::AttemptManager::QuicAttempt.
+// For the BEGIN phase, the following parameters are attached:
+//   {
+//     "quic_version": <The known QUIC version>,
+//     "ip_endpoint": <The IPEndPoint to connect>,
+//     "metadata": <ConnectionEndpointMetadata of the attempt>
+//     "source_dependency": <The source identifier of the parent AttemptManager>
+//   }
+//
+// For the END phase, if there is a result of the attempt, the the following
+// parameter is attached:
+//   {
+//      "net_error": <OK or net error code of the failure>,
+//   }
+EVENT_TYPE(HTTP_STREAM_POOL_QUIC_ATTEMPT_ALIVE)
 
 // ------------------------------------------------------------------------
 // HttpNetworkTransaction
@@ -1439,26 +2095,6 @@ EVENT_TYPE(BIDIRECTIONAL_STREAM_FAILED)
 EVENT_TYPE(BIDIRECTIONAL_STREAM_BOUND_TO_QUIC_SESSION)
 
 // ------------------------------------------------------------------------
-// SERVER_PUSH_LOOKUP_TRANSACTION
-// ------------------------------------------------------------------------
-
-// The start/end of a push lookup transaction for server push.
-//
-// The START event has the parameters:
-//   {
-//     "source_dependency": <Source identifier for the server push lookp.
-//                           It can be a QUIC_SESSION or a HTTP2_SESSION>,
-//     "pushed_url": <The url that has been pushed and looked up>,
-//   }
-//
-// If the transaction doesn't find the resource in cache, then the END phase
-// has these parameters:
-//   {
-//     "net_error": <Net error code integer>,
-//   }
-EVENT_TYPE(SERVER_PUSH_LOOKUP_TRANSACTION)
-
-// ------------------------------------------------------------------------
 // SpdySession
 // ------------------------------------------------------------------------
 
@@ -1617,15 +2253,6 @@ EVENT_TYPE(HTTP2_SESSION_SEND_DATA)
 //   }
 EVENT_TYPE(HTTP2_SESSION_RECV_DATA)
 
-// This event is sent for receiving an HTTP/2 PUSH_PROMISE frame.
-// The following parameters are attached:
-//   {
-//     "headers": <The list of header:value pairs>,
-//     "id": <The stream id>,
-//     "promised_stream_id": <The stream id>,
-//   }
-EVENT_TYPE(HTTP2_SESSION_RECV_PUSH_PROMISE)
-
 // A stream is stalled by the session send window being closed.
 EVENT_TYPE(HTTP2_SESSION_STREAM_STALLED_BY_SESSION_SEND_WINDOW)
 
@@ -1717,13 +2344,6 @@ EVENT_TYPE(HTTP2_SESSION_POOL_REMOVE_SESSION)
 // The begin and end of an HTTP/2 STREAM.
 EVENT_TYPE(HTTP2_STREAM)
 
-// A stream is attached to a pushed stream.
-//   {
-//     "stream_id":  <The stream id>,
-//     "url":        <The url of the pushed resource>,
-//   }
-EVENT_TYPE(HTTP2_STREAM_ADOPTED_PUSH_STREAM)
-
 // A stream is unstalled by flow control.
 EVENT_TYPE(HTTP2_STREAM_FLOW_CONTROL_UNSTALLED)
 
@@ -1771,52 +2391,276 @@ EVENT_TYPE(HTTP2_PROXY_CLIENT_SESSION)
 //   }
 
 // ------------------------------------------------------------------------
-// QuicStreamFactory::Job
+// QuicSessionPool
 // ------------------------------------------------------------------------
 
-// Measures the time taken to execute the QuicStreamFactory::Job.
+// This event is emitted when a session request ends up using an existing
+// session.
+//   {
+//     "destination": <The destination of the request>,
+//     "reason": <The reason for using the existing session>,
+//     "source_dependency": <Source identifier for the session>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_USE_EXISTING_SESSION)
+
+// This event is emitted for an existing session when an HttpStreamFactory::Job
+// is attached to the session.
+//   {
+//     "source_dependency": <Source identifier for the HttpStreamFactory::Job>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ATTACH_HTTP_STREAM_JOB_TO_EXISTING_SESSION)
+
+// This event is emitted whenever a platform notification is received that
+// could possibly trigger connection migration.
+//   {
+//     "signal": <Type of the platform notification>,
+//     "network": <The network that triggered the notification>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_PLATFORM_NOTIFICATION)
+
+// These events track QuicSessionPool's handling of OnIPAddressChanged and
+// whether QuicSessions are closed or marked as going away.
+
+EVENT_TYPE(QUIC_SESSION_POOL_ON_IP_ADDRESS_CHANGED)
+
+// This event is emitted when a session request ends up using an existing
+// session with the same IP after DNS resolution.
+EVENT_TYPE(QUIC_SESSION_POOL_MATCHING_IP_SESSION_FOUND)
+
+// This event is emitted when a session request ends up using an existing
+// session with different IP after DNS resolution. This scenario occurs when the
+// existing session receives an ORIGIN frame, and the received origins encompass
+// the request's destination.
+EVENT_TYPE(QUIC_SESSION_POOL_POOLED_WITH_DIFFERENT_IP_SESSION)
+
+// This event is emitted when a session request can use an existing session but
+// not due to IP mismatch.
+EVENT_TYPE(QUIC_SESSION_POOL_CAN_POOL_BUT_DIFFERENT_IP)
+
+// This event is emitted when a session request cannot use an existing session.
+EVENT_TYPE(QUIC_SESSION_POOL_CANNOT_POOL_WITH_EXISTING_SESSIONS)
+
+//   {
+//     "net_error": <Net error code for the closure>,
+//     "quic_error": <quic::QuicErrorCode in the frame>,
+//     "before_active_sessions_size": <The number of active session before
+//                                     closing>,
+//     "before_all_sessions_size": <The number of all session before
+//                                  closing>,
+//     "after_active_sessions_size": <The number of active session after
+//                                    closing>,
+//     "after_all_sessions_size": <The number of all session after closing>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_CLOSE_ALL_SESSIONS)
+
+EVENT_TYPE(QUIC_SESSION_POOL_MARK_ALL_ACTIVE_SESSIONS_GOING_AWAY)
+
+// ------------------------------------------------------------------------
+// QuicSessionPool::Job
+// ------------------------------------------------------------------------
+
+// Measures the time taken to execute the QuicSessionPool::Job.
 // The event parameters are:
 //   {
 //     "host": <The origin hostname that the Job serves>,
 //     "port": <The origin port>,
 //     "privacy_mode": <The privacy mode of the Job>,
+//     "proxy_chain": <The proxy chain of the Job>
 //     "network_anonymization_key": <The NetworkAnonymizationKey of the Job>,
 //   }
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB)
+EVENT_TYPE(QUIC_SESSION_POOL_JOB)
 
-// Identifies the NetLogSource() for the HttpStreamFactory::Job that the Job was
-// attached to.
+// Identifies the NetLogSource() requesting the Job. A Job may serve multiple
+// sources.
+//
 // The event parameters are:
 //  {
-//     "source_dependency": <Source identifier for the HttpStreamFactory::Job to
+//     "source_dependency": <Source identifier for the NetLogSource to
 //                           which we were attached>,
 //  }
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_BOUND_TO_HTTP_STREAM_JOB)
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_BOUND_TO)
 
-// Measures the time taken to establish a QUIC connection.
+// Identifies the NetLogSource() for the QuicSessionPool::Job that the
+// this source was bound to.
 // The event parameters are:
+//  {
+//      "source_dependency": <Source identifier for the QuicSessionPool::Job
+//                            to which we were attached>,
+//  }
+EVENT_TYPE(BOUND_TO_QUIC_SESSION_POOL_JOB)
+
+// Measures the time taken by a DirectJob to establish a QUIC connection.
+// The begin event parameters are:
 //  {
 //     "require_confirmation": <True if we require handshake confirmation
 //                              in the connection>
 //  }
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_CONNECT)
+//
+// The end event parameters are:
+//  {
+//     "net_error": <Net error code the connect failed with, on error>,
+//  }
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_CONNECT)
+
+// Measures the time taken by a ProxyJob to establish a connection to its
+// endpoint through the proxy.
+EVENT_TYPE(QUIC_SESSION_POOL_PROXY_JOB_CONNECT)
+
+// Measures the time taken by a ProxyJob to establish a session to the proxy.
+EVENT_TYPE(QUIC_SESSION_POOL_PROXY_JOB_CREATE_PROXY_SESSION)
 
 // This event indicates that the connection on the default network has failed
 // before the handshake completed and a new connection on the alternate network
 // will be attempted soon.
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_RETRY_ON_ALTERNATE_NETWORK)
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_RETRY_ON_ALTERNATE_NETWORK)
 
 // This event indicates that the stale host result is used to try connecting.
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_STALE_HOST_TRIED_ON_CONNECTION)
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_STALE_HOST_TRIED_ON_CONNECTION)
 
 // This event indicates that stale host was not used to try connecting.
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_STALE_HOST_NOT_USED_ON_CONNECTION)
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_STALE_HOST_NOT_USED_ON_CONNECTION)
 
 // This event indicates that the stale host doesn't match with fresh host.
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_STALE_HOST_RESOLUTION_NO_MATCH)
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_STALE_HOST_RESOLUTION_NO_MATCH)
 
 // This event indicates that stale host matches with fresh resolution.
-EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_STALE_HOST_RESOLUTION_MATCHED)
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_STALE_HOST_RESOLUTION_MATCHED)
+
+// This event indicates that a QuicSessionPool::Job has created a session.
+//
+// The event parameters are:
+//   {
+//      "source_dependency": <Source identifier for session that was used>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_JOB_RESULT)
+
+// This event indicates that a QuicSessionPool::AsyncDnsJob settled. The
+// enclosing QUIC_SESSION_POOL_JOB event marks the lifetime of the job.
+//
+// The event parameters are:
+//   {
+//     "net_error": <Net error code the job settled with>,
+//     "attempt_count": <Number of attempts the job started>,
+//     "completion_reason": <"attempt_succeeded", "active_session",
+//                           "ip_pooling", or "failed">,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_COMPLETE)
+
+// This event indicates that a connector of an AsyncDnsJob started an attempt.
+//
+// The event parameters are:
+//   {
+//     "attempt_id": <Job-wide identifier of the attempt>,
+//     "connector": <Stable name of the connector>,
+//     "ip_endpoint": <The IP endpoint the attempt connects to>,
+//     "address_family": <The address family of the IP endpoint>,
+//     "slot": <"primary" or "secondary", the slot of the connector>,
+//     "quic_version": <The QUIC version selected for the endpoint>,
+//     "metadata": <The endpoint metadata>,
+//     "resolution_in_flight": <True when DNS resolution had not finished>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_ATTEMPT_STARTED)
+
+// This event indicates that an attempt of an AsyncDnsJob failed.
+//
+// The event parameters are:
+//   {
+//     "attempt_id": <Job-wide identifier of the attempt>,
+//     "connector": <Stable name of the connector>,
+//     "slot": <"primary" or "secondary", the current slot of the connector>,
+//     "ip_endpoint": <The IP endpoint the attempt connected to>,
+//     "net_error": <Net error code the attempt failed with>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_ATTEMPT_FAILED)
+
+// This event indicates that an AsyncDnsJob armed its slow timer.
+//
+// The event parameters are:
+//   {
+//     "delay_ms": <The delay of the timer in milliseconds>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_SLOW_TIMER_ARMED)
+
+// This event indicates that the slow timer of an AsyncDnsJob fired.
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_SLOW_TIMER_FIRED)
+
+// This event indicates that an AsyncDnsJob moved its connectors into the other
+// slot, so that the IPv6 side is the primary one.
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_SLOTS_SWAPPED)
+
+// This event indicates that a connector settled an AsyncDnsJob, either by an
+// attempt succeeding or by finding an existing session through IP pooling.
+// The other connector is destroyed.
+//
+// The event parameters are:
+//   {
+//     "connector": <Stable name of the connector that settled the job>,
+//     "slot": <"primary" or "secondary", the slot of the connector that
+//              settled the job>,
+//     "completion_reason": <"attempt_succeeded" or "ip_pooling">,
+//     "attempt_id": <Identifier of the successful attempt, if there was one>,
+//     "ip_endpoint": <IP endpoint of the successful attempt, if there was
+//                     one>,
+//     "canceled_attempt_id": <Identifier of the other connector's canceled
+//                             attempt, if there was one>,
+//     "canceled_ip_endpoint": <IP endpoint of the other connector's canceled
+//                              attempt, if there was one>,
+//     "canceled_attempts": <List of dictionaries containing "attempt_id" and
+//                           "ip_endpoint" for all canceled attempts, if any>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_CONNECTOR_SETTLED_JOB)
+
+// This event indicates that an AsyncDnsJob received a partial resolver
+// update. The job acts on an update only when the endpoints are ready for the
+// cryptographic handshake.
+//
+// The event parameters are:
+//   {
+//     "endpoints_crypto_ready": <True when the endpoints are usable for the
+//                                cryptographic handshake>,
+//     "endpoint_count": <Number of service endpoints in the update>,
+//     "usable_endpoint_count": <Number of endpoints usable for QUIC, present
+//                               when endpoints_crypto_ready is true>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_SERVICE_ENDPOINTS_UPDATED)
+
+// This event indicates that the resolver request of an AsyncDnsJob finished.
+//
+// The event parameters are:
+//   {
+//     "net_error": <Net error code the resolution finished with>,
+//     "ignored_late_error": <True when the job kept going with a resolver
+//                            error because a connector already exists>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_SERVICE_ENDPOINT_REQUEST_FINISHED)
+
+// This event indicates that an AsyncDnsJob fired the host resolution signal of
+// its requests.
+//
+// The event parameters are:
+//   {
+//     "net_error": <Net error code the signal carried>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_HOST_RESOLUTION_SIGNALED)
+
+// This event indicates that an AsyncDnsJob held a failed session creation
+// result, because another attempt may still create a session.
+//
+// The event parameters are:
+//   {
+//     "net_error": <Net error code the held result carries>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_SESSION_CREATION_HELD)
+
+// This event indicates that an AsyncDnsJob fired the session creation signal
+// of its requests. ERR_IO_PENDING means the session was created and its
+// cryptographic handshake is still running.
+//
+// The event parameters are:
+//   {
+//     "net_error": <Net error code the signal carried>,
+//   }
+EVENT_TYPE(QUIC_SESSION_POOL_ASYNC_DNS_JOB_SESSION_CREATION_SIGNALED)
 
 // ------------------------------------------------------------------------
 // quic::QuicSession
@@ -1826,16 +2670,39 @@ EVENT_TYPE(QUIC_STREAM_FACTORY_JOB_STALE_HOST_RESOLUTION_MATCHED)
 //   {
 //     "host": <The origin hostname string>,
 //     "port": <The origin port>,
-//     "privacy_mode": <The privacy mode of the session>,
-//     "network_anonymization_key": <The NetworkAnonymizationKey of the
-//                                   session>,
+//     "connection_id": <The connection ID>,
+//     "versions": <The supported QUIC versions>,
 //     "require_confirmation": <True if the session will wait for a
 //                              successful QUIC handshake before vending
 //                              streams>,
 //     "cert_verify_flags": <The certificate verification flags for the
 //                           session>,
+//     "server_id_privacy_mode": <The privacy mode from the server ID>,
+//     "privacy_mode": <The privacy mode of the session>,
+//     "proxy_chain": <The proxy chain of the session>,
+//     "session_usage": <If the session is used for a connection to the
+//                       destination or through a proxy>,
+//     "network_anonymization_key": <The NetworkAnonymizationKey of the
+//                                   session>,
+//     "secure_dns_policy": <The policy for Secure DNS usage>,
+//     "require_dns_https_alpn": <True if the session requires the alpn value of
+//                                the HTTPS DNS record to exist>,
+//     "client_connection_id": <optional, The client connection ID if not
+//                              empty>,
+//     "ech_config_list": <optional, The ECH config list if not empty>,
+//     "source_dependency": <Source identifier for the attached Job>,
+//     "selected_trust_anchor_ids": <trust anchor IDs sent in the TLS
+//                                   ClientHello>,
+//     "server_padding": <optional, amount of server padding requested>
 //   }
 EVENT_TYPE(QUIC_SESSION)
+
+// This event is logged for the associated QuicSessionPool::Job to indicate
+// that a session is created.
+//   {
+//     "source_dependency": <Source identifier for the attached session>,
+//   }
+EVENT_TYPE(QUIC_SESSION_CREATED)
 
 // Session is closing because of an error.
 //   {
@@ -1845,12 +2712,20 @@ EVENT_TYPE(QUIC_SESSION_CLOSE_ON_ERROR)
 
 // Session verification of a certificate from the server failed.
 //   {
+//     "subjects": <list of DNS names that the certificate is valid for, not
+//                  present if cert could not be parsed>,
+//     "server_available_trust_anchors_ids":
+//         <Optional: trust anchor IDs sent by the server in the handshake,
+//          converted to strings and joined with commas>,
 //   }
 EVENT_TYPE(QUIC_SESSION_CERTIFICATE_VERIFY_FAILED)
 
 // Session verified a certificate from the server.
 //   {
 //     "subjects": <list of DNS names that the certificate is valid for>,
+//     "server_available_trust_anchors_ids":
+//         <Optional: trust anchor IDs sent by the server in the handshake,
+//          converted to strings and joined with commas>,
 //   }
 EVENT_TYPE(QUIC_SESSION_CERTIFICATE_VERIFIED)
 
@@ -2152,17 +3027,40 @@ EVENT_TYPE(QUIC_SESSION_WEBTRANSPORT_CLIENT_ALIVE)
 //   }
 EVENT_TYPE(QUIC_SESSION_WEBTRANSPORT_CLIENT_STATE_CHANGED)
 
+// A WebTransport session is ready.
+//   {
+//     "http_datagram_version": <Negotiated HTTP Datagram version>,
+//     "webtransport_http3_version": <Negotiated WebTransport over HTTP/3
+//      version>
+//   }
+EVENT_TYPE(QUIC_SESSION_WEBTRANSPORT_SESSION_READY)
+
 // QUIC with TLS gets 0-RTT rejected.
 EVENT_TYPE(QUIC_SESSION_ZERO_RTT_REJECTED)
 
-// A QUIC connection received a PUSH_PROMISE frame.  The following
-// parameters are attached:
+// Records the state of a QUIC 0-RTT handshake.
 //   {
-//     "headers": <The list of header:value pairs>,
-//     "id": <The stream id>,
-//     "promised_stream_id": <The stream id>,
+//     "state": <The state of 0-RTT handshake>
 //   }
-EVENT_TYPE(QUIC_SESSION_PUSH_PROMISE_RECEIVED)
+EVENT_TYPE(QUIC_SESSION_ZERO_RTT_STATE)
+
+// Records that the QUIC session received a default network change signal.
+//   {
+//     "new_default_network": <The new default network>
+//   }
+EVENT_TYPE(QUIC_SESSION_NETWORK_MADE_DEFAULT)
+
+// Records that the QUIC session received a network disconnected signal.
+//   {
+//     "disconnected_network": <The network which was disconnected>
+//   }
+EVENT_TYPE(QUIC_SESSION_NETWORK_DISCONNECTED)
+
+// Records that the QUIC session received a network connected signal.
+//   {
+//     "connected_network": <The network which was connected>
+//   }
+EVENT_TYPE(QUIC_SESSION_NETWORK_CONNECTED)
 
 // Session was closed, either remotely or by the peer.
 //   {
@@ -2220,6 +3118,12 @@ EVENT_TYPE(QUIC_SESSION_CRYPTO_FRAME_SENT)
 //    "offset": <The offset of the CRYPTO frame>
 //  }
 EVENT_TYPE(QUIC_SESSION_CRYPTO_FRAME_RECEIVED)
+
+// Session completed the Crypto Handshake
+//  {
+//    "received_server_padding": <Whether server padding was received>,
+//  }
+EVENT_TYPE(QUIC_SESSION_CRYPTO_HANDSHAKE_COMPLETE)
 
 // Session sent a STOP_SENDING frame.
 //  {
@@ -2375,26 +3279,14 @@ EVENT_TYPE(QUIC_SESSION_ATTEMPTING_TO_PROCESS_UNDECRYPTABLE_PACKET)
 // }
 EVENT_TYPE(QUIC_SESSION_KEY_UPDATE)
 
+// Session received an ORIGIN frame
+// {
+//   "origins" : <list of received origins>
+EVENT_TYPE(QUIC_SESSION_ORIGIN_FRAME_RECEIVED)
+
 // ------------------------------------------------------------------------
 // QuicHttpStream
 // ------------------------------------------------------------------------
-
-// A stream request's url matches a received push promise.  The
-// promised stream can be adopted for this request once vary header
-// validation is complete (as part of response header processing).
-//   {
-//     "stream_id":  <The stream id>,
-//     "url":        <The url of the pushed resource>,
-//   }
-EVENT_TYPE(QUIC_HTTP_STREAM_PUSH_PROMISE_RENDEZVOUS)
-
-// Vary validation has succeeded, a http stream is attached to
-// a pushed QUIC stream.
-//   {
-//     "stream_id":  <The stream id>,
-//     "url":        <The url of the pushed resource>,
-//   }
-EVENT_TYPE(QUIC_HTTP_STREAM_ADOPTED_PUSH_STREAM)
 
 // Identifies the NetLogSource() for the QuicSession that handled the stream.
 // The event parameters are:
@@ -2454,13 +3346,6 @@ EVENT_TYPE(QUIC_CONNECTION_MIGRATION_TRIGGERED)
 //  }
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_FAILURE)
 
-// This event is emitted whenenver a platform notification is received that
-// could possibly trigger connection migration.
-//   {
-//     "signal": <Type of the platform notification>
-//   }
-EVENT_TYPE(QUIC_CONNECTION_MIGRATION_PLATFORM_NOTIFICATION)
-
 // Records a successful QUIC connection migration attempt of the session
 // identified by connection_id.
 //  {
@@ -2470,19 +3355,35 @@ EVENT_TYPE(QUIC_CONNECTION_MIGRATION_SUCCESS)
 
 // Records that a QUIC connection migration attempt due to new network
 // being connected.
+// {
+//     "connected_network": <The network we will try to migrate to>
+// }
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_ON_NETWORK_CONNECTED)
 
 // Records that a QUIC connection migration attempt due to new network
 // being marked as default network.
+// {
+//     "new_default_network": <The new default network>
+// }
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_ON_NETWORK_MADE_DEFAULT)
 
 // Records that a QUIC connection migration attempt due to old network
 // being disconnected.
+// {
+//     "disconnected_network": <The network which was disconnected>
+// }
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_ON_NETWORK_DISCONNECTED)
 
 // Records that a QUIC connection migration attempt due to encountering
 // packet write error on the current network.
+// {
+//     "network": <Current network where we encountered the write error>
+// }
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_ON_WRITE_ERROR)
+
+// Records that no alternate networks were available after either the default
+// network was or a we encountered a packet write error.
+EVENT_TYPE(QUIC_CONNECTION_MIGRATION_WAITING_FOR_NEW_NETWORK)
 
 // Records that a QUIC connection migration attempt due to path
 // degrading on the current network.
@@ -2490,13 +3391,29 @@ EVENT_TYPE(QUIC_CONNECTION_MIGRATION_ON_PATH_DEGRADING)
 
 // Records that a QUIC connection migration attempt due to efforts to
 // migrate back to the default network.
+// {
+//     "retry_count": <Number of attempts to migrate back so far>
+// }
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_ON_MIGRATE_BACK)
 
 // Records a QUIC connection migration failure after probing.
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_FAILURE_AFTER_PROBING)
 
 // Records a QUIC connection migration success after probing.
+// {
+//     "migrate_to_network": <The network the probe was successful for>
+// }
 EVENT_TYPE(QUIC_CONNECTION_MIGRATION_SUCCESS_AFTER_PROBING)
+
+// Records a QUIC connection migration timeout while waiting for a new network.
+EVENT_TYPE(QUIC_CONNECTION_MIGRATION_FAILURE_WAITING_FOR_NETWORK)
+
+// Records that a new network was found before QUIC connection migration timed
+// out.
+// {
+//     "network": <The network that was found and we will try to migrate to>
+// }
+EVENT_TYPE(QUIC_CONNECTION_MIGRATION_SUCCESS_WAITING_FOR_NETWORK)
 
 // ------------------------------------------------------------------------
 // QuicConnectivityProbingManager
@@ -2915,6 +3832,32 @@ EVENT_TYPE(NETWORK_CONNECTIVITY_CHANGED)
 //   }
 EVENT_TYPE(NETWORK_CHANGED)
 
+// This event is emitted whenever the macOS's dynamic store entries of network
+// interface related keys (SCEntNetInterface, SCEntNetIPv4, and SCEntNetIPv6)
+// has been changed.
+//   {
+//     "result":              <Whether to notify as IP address changed>,
+//     "net_ipv4_key":        <Boolean indicating whether SCEntNetIPv4 entry has
+//                             been changed>,
+//     "net_ipv6_key":        <Boolean indicating whether SCEntNetIPv6 entry has
+//                             been changed>,
+//     "net_interface_key":   <Boolean indicating whether SCEntNetInterface
+//                             entry has been changed>,
+//     "old_ipv4_interface":  <The IPv4 primary interface name obtained before
+//                             the dynamic store entry change event>,
+//     "old_ipv6_interface":  <The IPv6 primary interface name obtained before
+//                             the dynamic store entry change event>,
+//     "new_ipv4_interface":  <The IPv4 primary interface name obtained after
+//                             the dynamic store entry change event>,
+//     "new_ipv6_interface":  <The IPv6 primary interface name obtained after
+//                             the dynamic store entry change event>,
+//     "old_interfaces":      <The list of network interfaces obtained before
+//                             the dynamic store entry change event>,
+//     "new_interfaces":      <The list of network interfaces obtained after
+//                             the dynamic store entry change event>
+//   }
+EVENT_TYPE(NETWORK_MAC_OS_CONFIG_CHANGED)
+
 // This event is emitted whenever DnsClient receives a new DnsConfig or
 // DnsConfigOverrides.
 //   {
@@ -2979,7 +3922,33 @@ EVENT_TYPE(SPECIFIC_NETWORK_MADE_DEFAULT)
 
 // This event is emitted whenever CertDatabase determines that the certificate
 // database has changed.
-EVENT_TYPE(CERTIFICATE_DATABASE_CHANGED)
+EVENT_TYPE(CERTIFICATE_DATABASE_TRUST_STORE_CHANGED)
+EVENT_TYPE(CERTIFICATE_DATABASE_CLIENT_CERT_STORE_CHANGED)
+
+// This event is logged when a request to conditionally clear the cached client
+// certificate for a specific host has been received. It contains the following
+// parameters:
+// {
+//    "host": <Serialized scheme/host/port of the request>,
+//    "certificates": <A list of PEM encoded certificates, the first one
+//                    being the new client certificate and the remaining
+//                    being intermediate certificates. May be an empty
+//                    list if no client certificate should be cached.>,
+//    "is_cleared": <boolean>,
+// }
+EVENT_TYPE(CLEAR_CACHED_CLIENT_CERT)
+
+// This event is logged when a request to conditionally clear the cached client
+// certificate matching a given certificate has been received. It contains the
+// following parameters:
+// {
+//    "hosts": <A list of serialized scheme/host/port which had a matching
+//             cached client certificate.>,
+//    "certificates": <A list of PEM encoded certificates, the first one
+//                    being the client certificate being matched and the
+//                    remaining being its certificate chain.>,
+// }
+EVENT_TYPE(CLEAR_MATCHING_CACHED_CLIENT_CERT)
 
 // ------------------------------------------------------------------------
 // Exponential back-off throttling events
@@ -3057,6 +4026,27 @@ EVENT_TYPE(DNS_TRANSACTION_ATTEMPT)
 //   }
 EVENT_TYPE(DNS_TRANSACTION_TCP_ATTEMPT)
 
+// This event is created when DnsTransaction creates a new DoH request and
+// tries to resolve the fully-qualified name.
+//
+// It has a single parameter:
+//
+//   {
+//     "source_dependency": <Source id of the DoH request created for the
+//                           attempt>,
+//   }
+EVENT_TYPE(DNS_TRANSACTION_HTTPS_ATTEMPT)
+
+// This event is created when DnsTransaction creates a new platform attempt.
+//
+// It has a single parameter:
+//
+//   {
+//     "source_dependency": <Source id of the platform API attempt created for
+//                           the attempt>,
+//   }
+EVENT_TYPE(DNS_TRANSACTION_PLATFORM_ATTEMPT)
+
 // This event is created when DnsTransaction receives a matching response.
 //
 // It has the following parameters:
@@ -3072,6 +4062,22 @@ EVENT_TYPE(DNS_TRANSACTION_TCP_ATTEMPT)
 //   }
 EVENT_TYPE(DNS_TRANSACTION_RESPONSE)
 
+// The start/end of a DoH request.
+//
+// The BEGIN phase contains the following parameters:
+//
+// {
+//   "hostname": <The hostname it is trying to resolve>,
+//   "query_type": <Type of the query>,
+// }
+//
+// The END phase contains the following parameters:
+//
+// {
+//   "net_error": <The net error code for the failure, if any>,
+// }
+EVENT_TYPE(DOH_URL_REQUEST)
+
 // ------------------------------------------------------------------------
 // CertVerifier
 // ------------------------------------------------------------------------
@@ -3086,8 +4092,8 @@ EVENT_TYPE(CERT_VERIFIER_REQUEST)
 //                    being the certificate to verify and the remaining
 //                    being intermediate certificates to assist path
 //                    building.>
-//   "ocsp_response": <Optionally, a PEM encoded stapled OCSP response.>
-//   "sct_list": <Optionally, a PEM encoded SignedCertificateTimestampList.>
+//   "stapled_ocsp_response": <Optionally, a PEM encoded stapled OCSP response.>
+//   "tls_sct_list": <Optionally, a PEM encoded SignedCertificateTimestampList.>
 //   "host": <The hostname verification is being performed for.>
 //   "verifier_flags": <The CertVerifier::VerifyFlags.>
 // }
@@ -3148,12 +4154,12 @@ EVENT_TYPE(CERT_VERIFIER_TASK)
 //   }
 EVENT_TYPE(CERT_VERIFIER_TASK_BOUND)
 
+// This event is created when a CertVerifyProc instance is created.
+EVENT_TYPE(CERT_VERIFY_PROC_CREATED)
+
 // This event is created when CertVerifyProc is verifying a certificate.
 // The BEGIN phase event parameters are:
 // {
-//   "additional_trust_anchors": <Optionally, a list of PEM encoded
-//                                certificates to be used as trust anchors
-//                                in addition to the trust store.>
 //   "certificates": <A list of PEM encoded certificates, the first one
 //                    being the certificate to verify and the remaining
 //                    being intermediate certificates to assist path
@@ -3161,8 +4167,8 @@ EVENT_TYPE(CERT_VERIFIER_TASK_BOUND)
 //   "crlset_sequence": <Sequence number of the CRLSet.>
 //   "crlset_is_expired": <Boolean indicating whether the CRLSet is considered
 //                         expired.>
-//   "ocsp_response": <Optionally, a PEM encoded stapled OCSP response.>
-//   "sct_list": <Optionally, a PEM encoded SignedCertificateTimestampList.>
+//   "stapled_ocsp_response": <Optionally, a PEM encoded stapled OCSP response.>
+//   "tls_sct_list": <Optionally, a PEM encoded SignedCertificateTimestampList.>
 //   "host": <The hostname verification is being performed for.>
 //   "verify_flags": <The CertVerifyProc::VerifyFlags.>
 // }
@@ -3204,6 +4210,37 @@ EVENT_TYPE(CERT_VERIFIER_TASK_BOUND)
 //   }
 EVENT_TYPE(CERT_VERIFY_PROC)
 
+// This event is created when CertVerifyProc is verifying a 2-QWAC certificate.
+// The BEGIN phase event parameters are:
+// {
+//   "certificates": <A list of PEM encoded certificates, the first one
+//                    being the certificate to verify and the remaining
+//                    being intermediate certificates to assist path
+//                    building.>
+//   "host": <The hostname verification is being performed for.>
+// }
+//
+// The END phase event parameters are the same as for CERT_VERIFY_PROC event.
+EVENT_TYPE(CERT_VERIFY_PROC_2QWAC)
+
+// This event is created when CertVerifyProc is verifying a 2-QWAC binding.
+// The BEGIN phase event parameters are:
+// {
+//   "binding": <The 2-QWAC binding.>
+//   "host": <The hostname verification is being performed for.>
+//   "tls_certificate": <A PEM encoded certificate of the TLS certificate that
+//                       is expected to be in the list of certs bound by the
+//                       binding.>
+// }
+//
+// The END phase event parameters are:
+// {
+//   "net_error": <Present if verification failed.>
+//   "error_description": <String description of error if verification failed.>
+//   "is_valid_2qwac_binding": <True if verification succeeded.>
+// }
+EVENT_TYPE(CERT_VERIFY_PROC_2QWAC_BINDING)
+
 // This event is created for the target cert passed into CertVerifyProcBulitin.
 // The event parameters are:
 //   {
@@ -3223,21 +4260,37 @@ EVENT_TYPE(CERT_VERIFY_PROC_INPUT_CERT)
 // The event parameters are:
 //   {
 //      "version_major": <The major version of the Chrome Root Store>
+//      "signer_set_timestamp": <Optionally, the timestamp of the SignerSet
+//                               in seconds since the unix epoch.>
+//      "mtc_metadata_update_time": <Optionally, the update time of the
+//                                   MtcMetadata in seconds since the unix
+//                                   epoch.>
 //   }
 EVENT_TYPE(CERT_VERIFY_PROC_CHROME_ROOT_STORE_VERSION)
 
-// This event is created for each additional trust anchor passed into
+// This event is created for each additional certificate added to
 // CertVerifyProcBuiltin.
-// The parameters are the same as for CERT_VERIFY_PROC_TARGET_CERT.
-EVENT_TYPE(CERT_VERIFY_PROC_ADDITIONAL_TRUST_ANCHOR)
+// The event parameters are:
+//   {
+//      "certificate": <The PEM encoded certificate.>
+//      "spki": <The SPKI that this applies to>
+//      "trust": <The trust setting used for this certificate.>
+//      "errors": <Optionally, a string describing any errors or warnings
+//                 encountered while parsing the certificate.>
+//   }
+// Only one of certificate or spki will be provided, never both.
+EVENT_TYPE(CERT_VERIFY_PROC_ADDITIONAL_CERT)
 
 // This event is created for each path building attempt performed by
 // CertVerifyProcBuiltin.
 // The BEGIN phase contains the following information:
 // {
-//      "digest_policy": <Specifies which digest methods are accepted in this
-//                        attempt.>
 //      "is_ev_attempt": <True if this is an EV verification attempt.>
+//      "is_qwac_attempt": <True if this is a QWAC verification attempt.>
+//      "is_network_time_attempt": <True if this attempt used the network time.>
+//      "network_time_value": <Int - time in milliseconds since the unix epoch,
+//                             only populated if is_network_time_attempt is
+//                             true.>
 // }
 //
 // The END phase contains the following information:
@@ -3266,24 +4319,32 @@ EVENT_TYPE(CERT_VERIFY_PROC_PATH_BUILD_ATTEMPT)
 //   }
 EVENT_TYPE(CERT_VERIFY_PROC_PATH_BUILT)
 
-// This event is created when a TrialComparisonCertVerifier starts a
-// verification using the trial verifier.
-//
-// The event parameters are:
-//   {
-//      "trial_success": <True if the trial verification had the same result>,
-//   }
-EVENT_TYPE(TRIAL_CERT_VERIFIER_JOB)
+// This event is created whenever a debugging message is sent from the path
+// builder.
+// parameters:
+// {
+//    "path_builder_debug": <String - message sent from the path builder>
+// }
+EVENT_TYPE(CERT_VERIFY_PROC_PATH_BUILDER_DEBUG)
 
-// This event is created when a TrialComparisonCertVerifier begins a trial
-// comparison job for a regular CertVerifier job.
+// This event is created when cosigner policy is checked for a Merkle Tree
+// Certificate.
+// parameters:
+// {
+//    "is_valid": <True if policy was satisfied for any reason.>
+//    "reason": <String - reason why policy was or was not satisfied.>
+//    "verified_cosigners": <List of cosigner status, only lists
+//                           mirrors that had a valid cosignature.>
+// }
 //
-// The event parameters are:
-//   {
-//      "source_dependency": <Source identifier for the trial comparison job
-//                            that was started>,
-//   }
-EVENT_TYPE(TRIAL_CERT_VERIFIER_JOB_COMPARISON_STARTED)
+// Where each cosigner status is an object:
+// {
+//    "id": <String - cosigner ID>,
+//    "status": <Optionally, a string describing the status of considering this
+//               cosigner. Absent if cosigner policy evaluation concluded
+//               before considering this consigner.>
+// }
+EVENT_TYPE(CERT_MTC_COSIGNER_POLICY_CHECKED)
 
 // -----------------------------------------------------------------------------
 // FTP events.
@@ -3842,7 +4903,8 @@ EVENT_TYPE(COOKIE_SET_BLOCKED_BY_NETWORK_DELEGATE)
 //    "name": <Name of the cookie>,
 //    "domain": <Domain of the cookie>,
 //    "path": <Path of the cookie>,
-//    "operation": <Operation, either "send" or "store">
+//    "partition_key": <partition key of the cookie, if any>
+//    "operation": <Operation: "send", "store", or "expire">
 //  }
 EVENT_TYPE(COOKIE_INCLUSION_STATUS)
 
@@ -3940,24 +5002,6 @@ EVENT_TYPE(HTTP3_HEADERS_RECEIVED)
 //    "headers": <A dictionary of the decoded headers>
 //  }
 EVENT_TYPE(HTTP3_HEADERS_DECODED)
-
-// Event emitted when the receipt of an HTTP/3 PUSH_PROMISE frame is complete.
-//  {
-//    "stream_id": <The ID of the stream on which the PUSH_PROMISE frame is
-//                  received>
-//    "push_id": <The push_id field of the PUSH_PROMISE frame>
-//  }
-EVENT_TYPE(HTTP3_PUSH_PROMISE_RECEIVED)
-
-// Event emitted when headers received in an HTTP/3 PUSH_PROMISE frame are
-// decoded.
-//  {
-//    "stream_id": <The ID of the stream on which the PUSH_PROMISE frame had
-//                  been received>
-//    "push_id": <The push_id field of the PUSH_PROMISE frame>
-//    "headers": <A dictionary of the decoded headers>
-//  }
-EVENT_TYPE(HTTP3_PUSH_PROMISE_DECODED)
 
 // Event emitted when the frame header of an HTTP/3 frame of unknown type is
 // received.
@@ -4146,10 +5190,10 @@ EVENT_TYPE(CORS_PREFLIGHT_URL_REQUEST)
 EVENT_TYPE(CORS_PREFLIGHT_CACHED_RESULT)
 
 // ------------------------------------------------------------------------
-// Private Network Access
+// Local Network Access
 // ------------------------------------------------------------------------
 
-// This event is logged when a new connection is checked against Private
+// This event is logged when a new connection is checked against Local
 // Network Access rules.
 //
 // It contains the following parameters:
@@ -4158,12 +5202,23 @@ EVENT_TYPE(CORS_PREFLIGHT_CACHED_RESULT)
 //    "resource_address_space": <the IP address space of the remote endpoint>,
 //    "result": <the result of the check>,
 //  }
+EVENT_TYPE(LOCAL_NETWORK_ACCESS_CHECK)
+
+// This event is logged when the result of a Local Network Access permission
+// request finishes.
 //
-// If the result is "unexpected-private-network", then the request is
-// interrupted and a preflight request is retried, this time with PNA headers
-// attached. If this second connection fails the check again, the request is
-// failed.
-EVENT_TYPE(PRIVATE_NETWORK_ACCESS_CHECK)
+// It contains the following parameters:
+//  {
+//    "address_space": <the IP address space for the prompt>,
+//    "transport_type": <the transport type>,
+//    "result": <the result of the permission request>,
+//  }
+EVENT_TYPE(LOCAL_NETWORK_ACCESS_PERMISSION_REQUESTED)
+
+// This event is logged when a Local Network Access request is retried due
+// to the resource being cached from a local IP address, in order to bypass
+// the cache and retry over the network.
+EVENT_TYPE(LOCAL_NETWORK_ACCESS_RETRY_DUE_TO_CACHE)
 
 // ------------------------------------------------------------------------
 // Initiator
@@ -4257,18 +5312,147 @@ EVENT_TYPE(TRANSPORT_SECURITY_STATE_SHOULD_UPGRADE_TO_SSL)
 // Oblivious HTTP
 // ------------------------------------------------------------------------
 
-// OBLIVIOUS_HTTP_REQUEST_START is emitted when an oblivious HTTP request is
-// started.
-EVENT_TYPE(OBLIVIOUS_HTTP_REQUEST_START)
+// OBLIVIOUS_HTTP_REQUEST measures the time between when Oblivoius HTTP
+// has begun and when Oblivious HTTP has ended (either success or failure).
+// The following parameters are attached:
+//   {
+//     "net_error": <The net error code integer, can be a failure or a success>,
+//     "outer_response_error_code": <The HTTP error code of the outer relay HTTP
+//     response, set iff the result fails because the outer HTTP response status
+//     code is not HTTP_OK>,
+//     "inner_response_code": <The HTTP code of the inner gateway HTTP response,
+//     parsed out from the binary HTTP structure>
+//   }
+EVENT_TYPE(OBLIVIOUS_HTTP_REQUEST)
 
-// OBLIVIOUS_HTTP_REQUEST_END is emitted when an oblivious HTTP request ends.
-// The net error "status" code for the request is attached.
-EVENT_TYPE(OBLIVIOUS_HTTP_REQUEST_END)
-
-// OBLIVIOUS_HTTP_REQUEST_DATA logs either just the headers of the request or
+// OBLIVIOUS_HTTP_REQUEST_DATA logs either just the byte count of the request or
 // the entire request (depending on capture settings), before encryption.
 EVENT_TYPE(OBLIVIOUS_HTTP_REQUEST_DATA)
 
-// OBLIVIOUS_HTTP_RESPONSE_DATA logs either just the headers of the response or
-//  the entire response (depending on capture settings), after decryption.
+// OBLIVIOUS_HTTP_RESPONSE_DATA logs either just the byte count of the response
+// or the entire response (depending on capture settings), after decryption.
 EVENT_TYPE(OBLIVIOUS_HTTP_RESPONSE_DATA)
+
+// OBLIVIOUS_HTTP_RESPONSE_HEADERS logs headers of the response, after
+// decryption.
+EVENT_TYPE(OBLIVIOUS_HTTP_RESPONSE_HEADERS)
+
+// This event is logged when First-Party Sets metadata is requested/received.
+// The following parameters are attached to the "end" event:
+//   {
+//     "cache_filter": <string>,
+//     "frame_entry": <string>,
+//     "top_frame_entry": <string>,
+//   }
+EVENT_TYPE(FIRST_PARTY_SETS_METADATA)
+
+// ------------------------------------------------------------------------
+// Device Bound Sessions
+// ------------------------------------------------------------------------
+
+// This event is logged when an HTTP request is detected to be part of a
+// device-bound session. It includes details of the session parameters:
+//   {
+//     "refresh_url": <string>,
+//     "scope": <string>,
+//     "credentials": <string>,
+//     "session_id": <string>,
+//   }
+EVENT_TYPE(DBSC_REQUEST)
+
+// This event is logged when we determine if an HTTP request needs to be
+// deferred to wait for a device-bound session refresh request.
+//   {
+//     "refresh_required_reason": <string>,
+//     "refresh_missing_cookie": <string>,
+//   }
+EVENT_TYPE(CHECK_DBSC_REFRESH_REQUIRED)
+
+// This event identifies the NetLogSource() for a URLRequest of the
+// device bound session refresh request.
+EVENT_TYPE(DBSC_REFRESH_REQUEST)
+
+// This event identifies the NetLogSource() for a URLRequest of the
+// device bound session registration request.
+EVENT_TYPE(DBSC_REGISTRATION_REQUEST)
+
+// This event is logged when a device bound session refresh request
+// completes. It contains the following parameters:
+//   {
+//     "status": <string>,
+//   }
+EVENT_TYPE(DBSC_REFRESH_RESULT)
+
+// This event is logged when a device bound session registration request
+// completes. It contains the following parameters:
+//   {
+//     "status": <string>,
+//   }
+EVENT_TYPE(DBSC_REGISTRATION_RESULT)
+
+// The evaluation start/end of proxy resolution override rules.
+EVENT_TYPE(PROXY_RESOLUTION_OVERRIDE_RULES)
+
+// This event is logged when an applicable proxy override rule starts a DNS
+// resolution as required by one of its conditions. It contains the following
+// parameters:
+//   {
+//      "source_dependency": <Source identifier for the override rule which
+//      started this host resolution>,
+//   }
+EVENT_TYPE(PROXY_OVERRIDE_HOST_RESOLUTION)
+
+// This event is logged when an applicable proxy override rule starts a DNS
+// resolution as required by one of its conditions. It contains the following
+// parameters:
+//   {
+//      "source_dependency": <Source identifier for the net log that will be
+//      used by the HostResolver request>, "dns_condition": {
+//         "host": <string>,
+//         "result": <string>
+//      }
+//   }
+EVENT_TYPE(PROXY_OVERRIDE_BEGIN_HOST_RESOLUTION)
+
+// This event is logged when an applicable proxy override rule's DNS resolution
+// request completed. It contains the following parameters:
+//   {
+//      "host": <string>,
+//      "was_resolved_sync": <bool>,
+//      "net_error": <Integer error code>,
+//      "is_address_list_empty": <bool>,
+//   }
+EVENT_TYPE(PROXY_OVERRIDE_END_HOST_RESOLUTION)
+
+// This event is logged when a proxy resolution override rule was applied
+// for a request. It contains the rule, captured in the following parameters:
+//   {
+//     "destination_matchers": <string>,
+//     "proxy_list": <List of proxy servers>,
+//     "dns_conditions": [{
+//         "host": <string>,
+//         "result": <string>
+//       }]
+//   }
+EVENT_TYPE(PROXY_RESOLUTION_OVERRIDE_RULE_APPLIED)
+
+// This event is logged when a dynamic proxy routing rule (e.g. from an
+// enterprise Provisioning Domain) was applied for a request.
+//   {
+//     "destination_matchers": <string>,
+//     "proxy_list": <List of proxy servers>
+//   }
+EVENT_TYPE(PROXY_RESOLUTION_DYNAMIC_RULE_APPLIED)
+
+// This event is logged by a TrustedHeaderClient when it modifies headers
+// during OnBeforeSendHeaders. The event can be logged by multiple clients,
+// each putting their own dictionary under a distinct key.
+//   {
+//      "http_header_injection_policy": {
+//         <header name>: {
+//           "value": <string>,
+//           "is_override": <bool>
+//         }, ...
+//      }
+//   }
+EVENT_TYPE(ON_BEFORE_SEND_HEADERS_RESULT)

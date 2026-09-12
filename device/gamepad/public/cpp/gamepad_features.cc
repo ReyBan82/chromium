@@ -10,42 +10,61 @@
 #include "base/feature_list.h"
 #include "base/metrics/field_trial_params.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "device/gamepad/public/cpp/gamepad_switches.h"
 
 namespace features {
 
-// Enables gamepadbuttondown, gamepadbuttonup, gamepadbuttonchange,
-// gamepadaxismove non-standard gamepad events.
-BASE_FEATURE(kEnableGamepadButtonAxisEvents,
-             "EnableGamepadButtonAxisEvents",
+// Enables gamepad multitouch
+BASE_FEATURE(kEnableGamepadMultitouch, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables gamepad simulation in GamepadService.
+BASE_FEATURE(kEnableSimulatedGamepadDataFetcher,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Enables the Windows.Gaming.Input data fetcher.
-BASE_FEATURE(kEnableWindowsGamingInputDataFetcher,
-             "EnableWindowsGamingInputDataFetcher",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+// Enables `OnGamepadRawInputChanged` for the `GamepadConsumer` interface.
+BASE_FEATURE(kGamepadRawInputChangeEvent, base::FEATURE_ENABLED_BY_DEFAULT);
 
-BASE_FEATURE(kRestrictGamepadAccess,
-             "RestrictGamepadAccess",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+// Enable claiming of enumerated gamepads by product identifier.
+BASE_FEATURE(kClaimDuplicateGamepadsProductIdentifier,
+             base::FEATURE_ENABLED_BY_DEFAULT);
 
 #if BUILDFLAG(IS_ANDROID)
-// Enables gamepad vibration on Android 12+.
-BASE_FEATURE(kEnableAndroidGamepadVibration,
-             "EnableAndroidGamepadVibration",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+// On Android, expose axes without a standard mapping as extra axes for
+// gamepads with unknown mappings, instead of dropping them or letting
+// multiple input axes alias the same canonical axis.
+BASE_FEATURE(kAndroidUnknownGamepadExtraAxes, base::FEATURE_ENABLED_BY_DEFAULT);
 #endif  // BUILDFLAG(IS_ANDROID)
 
-bool AreGamepadButtonAxisEventsEnabled() {
-  // Check if button and axis events are enabled by a field trial.
-  if (base::FeatureList::IsEnabled(kEnableGamepadButtonAxisEvents))
-    return true;
+#if BUILDFLAG(IS_WIN)
+// Ignores PlayStation 5 gamepads (DualSense, DualSense Edge) in
+// WgiDataFetcherWin to avoid double enumeration.
+BASE_FEATURE(kIgnorePS5GamepadsInWgi, base::FEATURE_ENABLED_BY_DEFAULT);
+#endif  // BUILDFLAG(IS_WIN)
 
-  // Check if button and axis events are enabled by a command-line flag.
-  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (command_line &&
-      command_line->HasSwitch(switches::kEnableGamepadButtonAxisEvents)) {
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+// Enabling this feature causes GamepadPlatformDataFetcherLinux to check device
+// IDs before opening the hidraw device node to avoid interfering with devices
+// that are not gamepads or do not require hidraw access.
+BASE_FEATURE(kAllowlistHidrawGamepads, base::FEATURE_ENABLED_BY_DEFAULT);
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(IS_APPLE)
+// Enable Xbox gamepad support in GameControllerDataFetcherMac
+BASE_FEATURE(kXboxUseGameControllerDataFetcherMac,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+// Enable PlayStation gamepad support in
+// GameControllerDataFetcherMac
+BASE_FEATURE(kPlayStationUseGameControllerDataFetcherMac,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+#endif  // BUILDFLAG(IS_APPLE)
+
+#if BUILDFLAG(IS_WIN)
+BASE_FEATURE(kEnableWindowsGameInputDataFetcher,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+#endif  // BUILDFLAG(IS_WIN)
+
+bool IsGamepadMultitouchEnabled() {
+  if (base::FeatureList::IsEnabled(kEnableGamepadMultitouch)) {
     return true;
   }
 

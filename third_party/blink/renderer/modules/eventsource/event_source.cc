@@ -32,9 +32,10 @@
 
 #include "third_party/blink/renderer/modules/eventsource/event_source.h"
 
+#include <algorithm>
 #include <memory>
 
-#include "base/ranges/algorithm.h"
+#include "base/numerics/safe_conversions.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/public/platform/web_url_request.h"
@@ -79,7 +80,7 @@ void ReportUMA(ExecutionContext& context,
                network::mojom::FetchResponseType response_type) {
   if (response_type == network::mojom::FetchResponseType::kCors &&
       (value.size() > 128 ||
-       base::ranges::any_of(value, IsCorsUnsafeRequestHeaderByte))) {
+       std::ranges::any_of(value, IsCorsUnsafeRequestHeaderByte))) {
     UseCounter::Count(context,
                       WebFeature::kFetchEventSourceLastEventIdCorsUnSafe);
   }
@@ -92,7 +93,8 @@ const uint64_t EventSource::kDefaultReconnectDelay = 3000;
 inline EventSource::EventSource(ExecutionContext* context,
                                 const KURL& url,
                                 const EventSourceInit* event_source_init)
-    : ExecutionContextLifecycleObserver(context),
+    : ActiveScriptWrappable<EventSource>({}),
+      ExecutionContextLifecycleObserver(context),
       url_(url),
       current_url_(url),
       with_credentials_(event_source_init->withCredentials()),
@@ -113,9 +115,9 @@ EventSource* EventSource::Create(ExecutionContext* context,
 
   KURL full_url = context->CompleteURL(url);
   if (!full_url.IsValid()) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kSyntaxError,
-        "Cannot open an EventSource to '" + url + "'. The URL is invalid.");
+    exception_state.ThrowDOMException(DOMExceptionCode::kSyntaxError,
+                                      StrCat({"Cannot open an EventSource to '",
+                                              url, "'. The URL is invalid."}));
     return nullptr;
   }
 
@@ -146,8 +148,8 @@ void EventSource::Connect() {
   ExecutionContext& execution_context = *GetExecutionContext();
   ResourceRequest request(current_url_);
   request.SetHttpMethod(http_names::kGET);
-  request.SetHttpHeaderField(http_names::kAccept, "text/event-stream");
-  request.SetHttpHeaderField(http_names::kCacheControl, "no-cache");
+  request.SetHttpHeaderField(http_names::kAccept,
+                             AtomicString("text/event-stream"));
   request.SetRequestContext(mojom::blink::RequestContextType::EVENT_SOURCE);
   request.SetFetchLikeAPI(true);
   request.SetMode(network::mojom::RequestMode::kCors);
@@ -159,15 +161,7 @@ void EventSource::Connect() {
   request.SetCorsPreflightPolicy(
       network::mojom::CorsPreflightPolicy::kPreventPreflight);
   if (parser_ && !parser_->LastEventId().empty()) {
-    // HTTP headers are Latin-1 byte strings, but the Last-Event-ID header is
-    // encoded as UTF-8.
-    // TODO(davidben): This should be captured in the type of
-    // setHTTPHeaderField's arguments.
-    std::string last_event_id_utf8 = parser_->LastEventId().Utf8();
-    request.SetHttpHeaderField(
-        http_names::kLastEventID,
-        AtomicString(reinterpret_cast<const LChar*>(last_event_id_utf8.c_str()),
-                     last_event_id_utf8.length()));
+    request.SetEventSourceLastEventId(parser_->LastEventId());
   }
 
   ResourceLoaderOptions resource_loader_options(world_);
@@ -246,8 +240,7 @@ void EventSource::DidReceiveResponse(uint64_t identifier,
 
   resource_identifier_ = identifier;
   current_url_ = response.CurrentRequestUrl();
-  event_stream_origin_ =
-      SecurityOrigin::Create(response.CurrentRequestUrl())->ToString();
+  event_stream_origin_ = SecurityOrigin::Create(response.CurrentRequestUrl());
   int status_code = response.HttpStatusCode();
   bool mime_type_is_valid = response.MimeType() == "text/event-stream";
   bool response_is_valid = status_code == 200 && mime_type_is_valid;
@@ -255,32 +248,29 @@ void EventSource::DidReceiveResponse(uint64_t identifier,
     const String& charset = response.TextEncodingName();
     // If we have a charset, the only allowed value is UTF-8 (case-insensitive).
     response_is_valid =
-        charset.empty() || EqualIgnoringASCIICase(charset, "UTF-8");
+        charset.empty() || EqualIgnoringAsciiCase(charset, "UTF-8");
     if (!response_is_valid) {
-      StringBuilder message;
-      message.Append("EventSource's response has a charset (\"");
-      message.Append(charset);
-      message.Append("\") that is not UTF-8. Aborting the connection.");
+      String message =
+          StrCat({"EventSource's response has a charset (\"", charset,
+                  "\") that is not UTF-8. Aborting the connection."});
       // FIXME: We are missing the source line.
       GetExecutionContext()->AddConsoleMessage(
           MakeGarbageCollected<ConsoleMessage>(
-              mojom::ConsoleMessageSource::kJavaScript,
-              mojom::ConsoleMessageLevel::kError, message.ToString()));
+              mojom::blink::ConsoleMessageSource::kJavaScript,
+              mojom::blink::ConsoleMessageLevel::kError, message));
     }
   } else {
     // To keep the signal-to-noise ratio low, we only log 200-response with an
     // invalid MIME type.
     if (status_code == 200 && !mime_type_is_valid) {
-      StringBuilder message;
-      message.Append("EventSource's response has a MIME type (\"");
-      message.Append(response.MimeType());
-      message.Append(
-          "\") that is not \"text/event-stream\". Aborting the connection.");
+      String message = StrCat(
+          {"EventSource's response has a MIME type (\"", response.MimeType(),
+           "\") that is not \"text/event-stream\". Aborting the connection."});
       // FIXME: We are missing the source line.
       GetExecutionContext()->AddConsoleMessage(
           MakeGarbageCollected<ConsoleMessage>(
-              mojom::ConsoleMessageSource::kJavaScript,
-              mojom::ConsoleMessageLevel::kError, message.ToString()));
+              mojom::blink::ConsoleMessageSource::kJavaScript,
+              mojom::blink::ConsoleMessageLevel::kError, message));
     }
   }
 
@@ -301,12 +291,12 @@ void EventSource::DidReceiveResponse(uint64_t identifier,
   }
 }
 
-void EventSource::DidReceiveData(const char* data, unsigned length) {
+void EventSource::DidReceiveData(base::span<const char> data) {
   DCHECK_EQ(kOpen, state_);
   DCHECK(loader_);
   DCHECK(parser_);
 
-  parser_->AddBytes(data, length);
+  parser_->AddBytes(data);
 }
 
 void EventSource::DidFinishLoading(uint64_t) {
@@ -384,7 +374,8 @@ void EventSource::Trace(Visitor* visitor) const {
   visitor->Trace(parser_);
   visitor->Trace(loader_);
   visitor->Trace(connect_timer_);
-  EventTargetWithInlineData::Trace(visitor);
+  visitor->Trace(world_);
+  EventTarget::Trace(visitor);
   ThreadableLoaderClient::Trace(visitor);
   ExecutionContextLifecycleObserver::Trace(visitor);
   EventSourceParser::Client::Trace(visitor);

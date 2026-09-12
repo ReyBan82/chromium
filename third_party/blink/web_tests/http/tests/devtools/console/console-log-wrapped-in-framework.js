@@ -2,9 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as Common from 'devtools/core/common/common.js';
+import * as Main from 'devtools/entrypoints/main/main.js';
+
 (async function() {
   TestRunner.addResult(`Tests console.log() anchor location when the skip-stack-frames feature is enabled.\n`);
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
   await TestRunner.addScriptTag('resources/framework.js');
   await TestRunner.evaluateInPagePromise(`
@@ -16,12 +21,13 @@
   `);
 
   var frameworkRegexString = '/framework\\.js$';
-  Common.settingForTest('skipStackFramesPattern').set(frameworkRegexString);
+  Main.MainImpl.MainImpl.universeForTest.settings.settingForTest('skip-stack-frames-pattern').set(frameworkRegexString);
 
+  const messagesPromise =
+      ConsoleTestRunner.waitUntilNthMessageReceivedPromise(2);
   TestRunner.evaluateInPage('runLogs()');
-  TestRunner.deprecatedRunAfterPendingDispatches(callback);
-  async function callback() {
-    await ConsoleTestRunner.dumpConsoleMessages();
-    TestRunner.completeTest();
-  }
+  await messagesPromise;
+  await ConsoleTestRunner.waitForPendingViewportUpdates();
+  await ConsoleTestRunner.dumpConsoleMessages();
+  TestRunner.completeTest();
 })();

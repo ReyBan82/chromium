@@ -32,7 +32,16 @@ AutoAdvancingVirtualTimeDomain::AutoAdvancingVirtualTimeDomain(
 }
 
 AutoAdvancingVirtualTimeDomain::~AutoAdvancingVirtualTimeDomain() {
-  helper_->RemoveTaskObserver(this);
+  if (helper_) {
+    helper_->RemoveTaskObserver(this);
+  }
+}
+
+void AutoAdvancingVirtualTimeDomain::ShutDown() {
+  if (helper_) {
+    helper_->RemoveTaskObserver(this);
+    helper_ = nullptr;
+  }
 }
 
 base::TimeTicks AutoAdvancingVirtualTimeDomain::NowTicks() const {
@@ -40,7 +49,7 @@ base::TimeTicks AutoAdvancingVirtualTimeDomain::NowTicks() const {
 }
 
 bool AutoAdvancingVirtualTimeDomain::MaybeFastForwardToWakeUp(
-    absl::optional<base::sequence_manager::WakeUp> wakeup,
+    std::optional<base::sequence_manager::WakeUp> wakeup,
     bool quit_when_idle_requested) {
   if (!can_advance_virtual_time_)
     return false;

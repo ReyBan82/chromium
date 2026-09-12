@@ -14,6 +14,10 @@ namespace network::mojom {
 class URLLoaderFactory;
 }  // namespace network::mojom
 
+namespace signin {
+class IdentityManager;
+}  // namespace signin
+
 class GURL;
 
 namespace ash {
@@ -22,24 +26,28 @@ namespace ash {
 // indexable text request is sent correctly.
 class MockXhrSender : public ProjectorXhrSender {
  public:
-  using OnSendCallback = base::OnceCallback<
-      void(const GURL&, const std::string&, const std::string&)>;
+  using OnSendCallback =
+      base::OnceCallback<void(const GURL&,
+                              projector::mojom::RequestType,
+                              const std::optional<std::string>&)>;
 
   MockXhrSender(OnSendCallback quit_closure,
+                signin::IdentityManager* identity_manager,
                 network::mojom::URLLoaderFactory* url_loader_factory);
   MockXhrSender(const MockXhrSender&) = delete;
   MockXhrSender& operator=(const MockXhrSender&) = delete;
   ~MockXhrSender() override;
 
   // ProjectorXhrSender:
-  void Send(const GURL& url,
-            const std::string& method,
-            const std::string& request_body,
-            bool use_credentials,
-            bool use_api_key,
-            SendRequestCallback callback,
-            const base::Value::Dict& headers,
-            const std::string& account_email) override;
+  void Send(
+      const GURL& url,
+      projector::mojom::RequestType method,
+      const std::optional<std::string>& request_body,
+      bool use_credentials,
+      bool use_api_key,
+      SendRequestCallback callback,
+      const std::optional<base::flat_map<std::string, std::string>>& headers,
+      const std::optional<std::string>& account_email) override;
 
  private:
   // Quits the current run loop. Used to verify the MockXhrSender::Send getting

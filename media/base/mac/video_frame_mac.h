@@ -6,25 +6,45 @@
 #define MEDIA_BASE_MAC_VIDEO_FRAME_MAC_H_
 
 #include <CoreVideo/CVPixelBuffer.h>
+#include <IOSurface/IOSurfaceRef.h>
 
-#include "base/mac/scoped_cftyperef.h"
+#include <optional>
+
+#include "base/apple/scoped_cftyperef.h"
 #include "base/memory/scoped_refptr.h"
 #include "media/base/media_export.h"
+#include "media/base/video_types.h"
+#include "ui/gfx/color_space.h"
 
 namespace media {
 
 class VideoFrame;
 
+// Returns the non-compressed `CVPixelFormatType` for `format` and `range`.
+MEDIA_EXPORT std::optional<OSType> CVPixelFormatForVideoFrame(
+    VideoPixelFormat format,
+    gfx::ColorSpace::RangeID range);
+
+// Returns whether `cv_pixel_format` is compatible with `format` for an
+// IOSurface-backed `VideoFrame`, including supported lossless formats.
+MEDIA_EXPORT bool IsAcceptableCvPixelFormat(VideoPixelFormat format,
+                                            OSType cv_pixel_format);
+
 // Wrap a VideoFrame's data in a CVPixelBuffer object. The frame's lifetime is
-// extended for the duration of the pixel buffer's lifetime. If the frame's data
-// is already managed by a CVPixelBuffer (the frame was created using
-// |WrapCVPixelBuffer()|, then the underlying CVPixelBuffer is returned.
+// extended for the duration of the pixel buffer's lifetime.
 //
-// The only supported formats are I420 and NV12. Frames with extended pixels
-// (the visible rect's size does not match the coded size) are not supported.
-// If an unsupported frame is specified, null is returned.
-MEDIA_EXPORT base::ScopedCFTypeRef<CVPixelBufferRef>
+// The only supported formats are I420, NV12, NV12A, NV16, NV24, P010LE, P210LE,
+// and P410LE. A visible rect smaller than the coded size is represented with a
+// clean-aperture attachment. If an unsupported frame is specified, null is
+// returned.
+MEDIA_EXPORT base::apple::ScopedCFTypeRef<CVPixelBufferRef>
 WrapVideoFrameInCVPixelBuffer(scoped_refptr<VideoFrame> frame);
+
+// Wraps IOSurface in a CVPixelBuffer, validates its format, and applies
+// attachments from frame. Returns null if the IOSurface cannot be wrapped or
+// its pixel format does not match frame.
+MEDIA_EXPORT base::apple::ScopedCFTypeRef<CVPixelBufferRef>
+WrapIOSurfaceInCVPixelBuffer(const VideoFrame& frame, IOSurfaceRef io_surface);
 
 }  // namespace media
 

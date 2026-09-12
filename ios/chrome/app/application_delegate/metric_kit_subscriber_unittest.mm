@@ -8,7 +8,6 @@
 #import <MetricKit/MetricKit.h>
 
 #import "base/files/file_path.h"
-#import "base/files/file_util.h"
 #import "base/files/scoped_temp_dir.h"
 #import "base/ios/ios_util.h"
 #import "base/run_loop.h"
@@ -18,15 +17,13 @@
 #import "base/test/task_environment.h"
 #import "components/crash/core/app/crashpad.h"
 #import "components/crash/core/common/reporter_running_ios.h"
+#import "components/previous_session_info/previous_session_info.h"
 #import "ios/chrome/app/application_delegate/mock_metrickit_metric_payload.h"
+#import "testing/gtest_mac.h"
 #import "testing/platform_test.h"
 #import "third_party/crashpad/crashpad/client/crash_report_database.h"
 #import "third_party/ocmock/OCMock/OCMock.h"
 #import "third_party/ocmock/gtest_support.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 class MetricKitSubscriberTest : public PlatformTest {
  public:
@@ -191,8 +188,7 @@ TEST_F(MetricKitSubscriberTest, SaveDiagnosticReport) {
   [[MetricKitSubscriber sharedInstance] didReceiveDiagnosticPayloads:array];
 
   EXPECT_TRUE(base::test::ios::WaitUntilConditionOrTimeout(
-      base::test::ios::kWaitForFileOperationTimeout, ^bool() {
-        base::RunLoop().RunUntilIdle();
+      base::test::ios::kWaitForFileOperationTimeout, true, ^bool() {
         std::vector<crash_reporter::Report> reports;
         crash_reporter::GetReports(&reports);
         return reports.size() == 1;
@@ -212,7 +208,7 @@ TEST_F(MetricKitSubscriberTest, SaveDiagnosticReport) {
   std::map<std::string, crashpad::FileReader*> attachments =
       upload_report->GetAttachments();
   EXPECT_EQ(attachments.size(), 1u);
-  ASSERT_NE(attachments.find("MetricKit"), attachments.end());
+  ASSERT_TRUE(attachments.contains("MetricKit"));
   char result_buffer[sizeof(file_data)];
   attachments["MetricKit"]->Read(result_buffer, sizeof(result_buffer));
 
@@ -223,6 +219,77 @@ TEST_F(MetricKitSubscriberTest, SaveDiagnosticReport) {
   result_data =
       [result_data decompressedDataUsingAlgorithm:NSDataCompressionAlgorithmZlib
                                             error:&error];
-  ASSERT_NE(result_data, nil);
-  EXPECT_EQ(memcmp([data bytes], [result_data bytes], data.length), 0);
+  EXPECT_NSEQ(data, result_data);
+}
+
+// Test that PreviousSessionInfo report parameters are snapshotted and passed
+// to Crashpad when saving diagnostic payloads.
+TEST_F(MetricKitSubscriberTest, SaveDiagnosticReportWithParameters) {
+  PreviousSessionInfo* previous_session = [PreviousSessionInfo sharedInstance];
+  [previous_session setReportParameterValue:@"test_value" forKey:@"test_param"];
+
+  id mock_report = OCMClassMock([MXDiagnosticPayload class]);
+  NSDate* date = [NSDate date];
+  std::string file_data("report content with params");
+  NSData* data = [NSData dataWithBytes:file_data.c_str()
+                                length:file_data.size()];
+  NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
+  [formatter setDateFormat:@"yyyyMMdd_HHmmss"];
+  [formatter setTimeZone:[NSTimeZone timeZoneWithName:@"UTC"]];
+  OCMStub([mock_report timeStampEnd]).andReturn(date);
+  OCMStub([mock_report JSONRepresentation]).andReturn(data);
+  NSArray* array = @[ mock_report ];
+
+  id mock_diagnostic = OCMClassMock([MXCrashDiagnostic class]);
+  OCMStub([mock_diagnostic JSONRepresentation]).andReturn(data);
+  NSArray* mock_diagnostics = @[ mock_diagnostic ];
+  OCMStub([mock_report crashDiagnostics]).andReturn(mock_diagnostics);
+  [[MetricKitSubscriber sharedInstance] didReceiveDiagnosticPayloads:array];
+
+  EXPECT_TRUE(base::test::ios::WaitUntilConditionOrTimeout(
+      base::test::ios::kWaitForFileOperationTimeout, true, ^bool() {
+        std::vector<crash_reporter::Report> reports;
+        crash_reporter::GetReports(&reports);
+        return reports.size() == 1;
+      }));
+
+  std::vector<crash_reporter::Report> reports;
+  crash_reporter::GetReports(&reports);
+  ASSERT_EQ(reports.size(), 1u);
+
+  [previous_session removeReportParameterForKey:@"test_param"];
+}
+
+// Test that enabling and disabling the subscriber registers and unregisters
+// with MXMetricManager, and that redundant setEnabled calls are no-ops.
+TEST_F(MetricKitSubscriberTest, EnableDisable) {
+  id mock_manager = OCMStrictClassMock([MXMetricManager class]);
+  OCMStub([mock_manager sharedManager]).andReturn(mock_manager);
+
+  MetricKitSubscriber* subscriber = [[MetricKitSubscriber alloc] init];
+
+  // Initial state is disabled (NO).
+  EXPECT_FALSE(subscriber.enabled);
+
+  // Calling setEnabled:NO when already NO is a no-op.
+  [subscriber setEnabled:NO];
+  EXPECT_FALSE(subscriber.enabled);
+
+  // Enabling sets enabled to YES and adds subscriber.
+  OCMExpect([mock_manager addSubscriber:subscriber]);
+  [subscriber setEnabled:YES];
+  EXPECT_TRUE(subscriber.enabled);
+  EXPECT_OCMOCK_VERIFY(mock_manager);
+
+  // Calling setEnabled:YES when already YES is a no-op.
+  [subscriber setEnabled:YES];
+  EXPECT_TRUE(subscriber.enabled);
+
+  // Disabling sets enabled to NO and removes subscriber.
+  OCMExpect([mock_manager removeSubscriber:subscriber]);
+  [subscriber setEnabled:NO];
+  EXPECT_FALSE(subscriber.enabled);
+  EXPECT_OCMOCK_VERIFY(mock_manager);
+
+  [mock_manager stopMocking];
 }

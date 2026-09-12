@@ -6,30 +6,36 @@
 
 #include "chrome/browser/policy/messaging_layer/util/test_request_payload.h"
 
+#include <algorithm>
 #include <string>
+#include <string_view>
 
 #include "base/json/json_reader.h"
+#include "base/strings/string_util.h"
+#include "chrome/browser/policy/messaging_layer/upload/encrypted_reporting_client.h"
+#include "chrome/browser/policy/messaging_layer/upload/record_upload_request_builder.h"
+#include "components/reporting/util/encrypted_reporting_json_keys.h"
+#include "third_party/abseil-cpp/absl/strings/ascii.h"
 
 namespace reporting {
 
 // Return true if s a properly formatted positive integer, i.e., is not empty,
 // contains digits only and does not start with 0.
-static bool IsPositiveInteger(base::StringPiece s) {
+static bool IsPositiveInteger(std::string_view s) {
   if (s.empty()) {
     return false;
-  } else if (s.size() == 1) {
-    return std::isdigit(s[0]);
-  } else {
-    return s[0] != '0' &&
-           s.find_first_not_of("0123456789") == std::string::npos;
   }
+  if (s.size() == 1) {
+    return absl::ascii_isdigit(static_cast<unsigned char>(s[0]));
+  }
+  return s[0] != '0' && s.find_first_not_of("0123456789") == std::string::npos;
 }
 
 // Get the record list. If it can't, print the message to listener and return a
 // null pointer.
-static const base::Value::List* GetRecordList(const base::Value::Dict& arg,
-                                              MatchResultListener* listener) {
-  const auto* const record_list = arg.FindList("encryptedRecord");
+static const base::ListValue* GetRecordList(const base::DictValue& arg,
+                                            MatchResultListener* listener) {
+  const auto* const record_list = arg.FindList(json_keys::kEncryptedRecordList);
   if (record_list == nullptr) {
     *listener << "No key named \"encryptedRecord\" in the argument or the "
                  "value is not a list.";
@@ -39,10 +45,10 @@ static const base::Value::List* GetRecordList(const base::Value::Dict& arg,
 }
 
 bool AttachEncryptionSettingsMatcher::MatchAndExplain(
-    const base::Value::Dict& arg,
+    const base::DictValue& arg,
     MatchResultListener* listener) const {
   const auto attach_encryption_settings =
-      arg.FindBool("attachEncryptionSettings");
+      arg.FindBool(json_keys::kAttachEncryptionSettings);
   if (!attach_encryption_settings) {
     *listener << "No key named \"attachEncryptionSettings\" in the argument or "
                  "the value is not of bool type.";
@@ -69,9 +75,9 @@ std::string AttachEncryptionSettingsMatcher::Name() const {
 }
 
 bool NoAttachEncryptionSettingsMatcher::MatchAndExplain(
-    const base::Value::Dict& arg,
+    const base::DictValue& arg,
     MatchResultListener* listener) const {
-  if (arg.Find("attachEncryptionSettings") != nullptr) {
+  if (arg.Find(json_keys::kAttachEncryptionSettings) != nullptr) {
     *listener << "Found \"attachEncryptionSettings\" in the argument.";
     return false;
   }
@@ -91,6 +97,98 @@ std::string NoAttachEncryptionSettingsMatcher::Name() const {
   return "no-attach-encryption-settings-matcher";
 }
 
+bool ConfigurationFileVersionMatcher::MatchAndExplain(
+    const base::DictValue& arg,
+    MatchResultListener* listener) const {
+  auto* attach_configuration_file =
+      arg.Find(json_keys::kConfigurationFileVersion);
+  if (!attach_configuration_file->GetIfInt().has_value()) {
+    *listener << "No key named \"configurationFileVersion\" in the argument or "
+                 "the value is not of int type.";
+    return false;
+  }
+  return true;
+}
+
+void ConfigurationFileVersionMatcher::DescribeTo(std::ostream* os) const {
+  *os << "has a valid configurationFileVersion field.";
+}
+
+void ConfigurationFileVersionMatcher::DescribeNegationTo(
+    std::ostream* os) const {
+  *os << "has an invalid configurationFileVersion field.";
+}
+
+std::string ConfigurationFileVersionMatcher::Name() const {
+  return "configuration-file-version-matcher";
+}
+
+bool NoConfigurationFileVersionMatcher::MatchAndExplain(
+    const base::DictValue& arg,
+    MatchResultListener* listener) const {
+  if (arg.Find(json_keys::kConfigurationFileVersion) != nullptr) {
+    *listener << "Found \"configurationFileVersion\" in the argument.";
+    return false;
+  }
+  return true;
+}
+
+void NoConfigurationFileVersionMatcher::DescribeTo(std::ostream* os) const {
+  *os << "expectedly has no configurationFileVersion field.";
+}
+
+void NoConfigurationFileVersionMatcher::DescribeNegationTo(
+    std::ostream* os) const {
+  *os << "unexpectedly has an configurationFileVersion field.";
+}
+
+std::string NoConfigurationFileVersionMatcher::Name() const {
+  return "no-configuration-file-version-matcher";
+}
+
+bool SourceMatcher::MatchAndExplain(const base::DictValue& arg,
+                                    MatchResultListener* listener) const {
+  if (arg.FindString(json_keys::kSource) == nullptr) {
+    *listener << "No key named \"source\" or the value "
+                 "is not a string in the argument.";
+    return false;
+  }
+  return true;
+}
+
+void SourceMatcher::DescribeTo(std::ostream* os) const {
+  *os << "has a valid source field.";
+}
+
+void SourceMatcher::DescribeNegationTo(std::ostream* os) const {
+  *os << "has an invalid source field.";
+}
+
+std::string SourceMatcher::Name() const {
+  return "source-test-matcher";
+}
+
+bool NoSourceMatcher::MatchAndExplain(const base::DictValue& arg,
+                                      MatchResultListener* listener) const {
+  if (arg.Find(json_keys::kSource) != nullptr) {
+    *listener << "Found \"source\" in the argument.";
+    return false;
+  }
+  return true;
+}
+
+void NoSourceMatcher::DescribeTo(std::ostream* os) const {
+  *os << "expectedly has no source field.";
+}
+
+void NoSourceMatcher::DescribeNegationTo(std::ostream* os) const {
+  *os << "unexpectedly has an Source field.";
+}
+
+std::string NoSourceMatcher::Name() const {
+  return "source-test-matcher";
+}
+
 void CompressionInformationMatcher::DescribeTo(std::ostream* os) const {
   *os << "has a valid compression information field.";
 }
@@ -104,7 +202,7 @@ std::string CompressionInformationMatcher::Name() const {
 }
 
 bool EncryptedRecordMatcher::MatchAndExplain(
-    const base::Value::Dict& arg,
+    const base::DictValue& arg,
     MatchResultListener* listener) const {
   const auto* const record_list = GetRecordList(arg, listener);
   return record_list != nullptr;
@@ -122,9 +220,9 @@ std::string EncryptedRecordMatcher::Name() const {
   return "encrypted-record-matcher";
 }
 
-bool RequestIdMatcher::MatchAndExplain(const base::Value::Dict& arg,
+bool RequestIdMatcher::MatchAndExplain(const base::DictValue& arg,
                                        MatchResultListener* listener) const {
-  const auto* const request_id = arg.FindString("requestId");
+  const auto* const request_id = arg.FindString(json_keys::kRequestId);
   if (request_id == nullptr) {
     *listener << "No key named \"requestId\" in the argument or the value "
                  "is not a string.";
@@ -134,8 +232,7 @@ bool RequestIdMatcher::MatchAndExplain(const base::Value::Dict& arg,
     *listener << "Request ID is empty.";
     return false;
   }
-  if (request_id->find_first_not_of("0123456789abcdefABCDEF") !=
-      std::string::npos) {
+  if (!std::ranges::all_of(*request_id, base::IsHexDigit<char>)) {
     *listener << "Request ID is not a hexadecimal number.";
     return false;
   }
@@ -155,7 +252,7 @@ std::string RequestIdMatcher::Name() const {
   return "request-id-matcher";
 }
 
-bool RecordMatcher::MatchAndExplain(const base::Value::Dict& arg,
+bool RecordMatcher::MatchAndExplain(const base::DictValue& arg,
                                     MatchResultListener* listener) const {
   switch (mode_) {
     case Mode::FullRequest: {
@@ -194,10 +291,10 @@ RecordMatcher& RecordMatcher::SetMode(RecordMatcher::Mode mode) {
 }
 
 bool CompressionInformationMatcher::MatchAndExplainRecord(
-    const base::Value::Dict& record,
+    const base::DictValue& record,
     MatchResultListener* listener) const {
   const auto* const compression_info =
-      record.FindDict("compressionInformation");
+      record.FindDict(json_keys::kCompressionInformation);
   if (compression_info == nullptr) {
     *listener << "No key named \"compressionInformation\" or the value is "
                  "not a dict in record "
@@ -206,7 +303,7 @@ bool CompressionInformationMatcher::MatchAndExplainRecord(
   }
 
   const auto compression_algorithm =
-      compression_info->FindInt("compressionAlgorithm");
+      compression_info->FindInt(json_keys::kCompressionAlgorithm);
   if (!compression_algorithm.has_value()) {
     *listener << "No key named \"compressionAlgorithm\" under "
                  "compressionInformation "
@@ -225,9 +322,9 @@ bool CompressionInformationMatcher::MatchAndExplainRecord(
 }
 
 bool EncryptedWrappedRecordRecordMatcher::MatchAndExplainRecord(
-    const base::Value::Dict& record,
+    const base::DictValue& record,
     MatchResultListener* listener) const {
-  if (record.FindString("encryptedWrappedRecord") == nullptr) {
+  if (record.FindString(json_keys::kEncryptedWrappedRecord) == nullptr) {
     *listener << "No key named \"encryptedWrappedRecord\" or the value "
                  "is not a string in record "
               << record << '.';
@@ -251,9 +348,9 @@ std::string EncryptedWrappedRecordRecordMatcher::Name() const {
 }
 
 bool NoEncryptedWrappedRecordRecordMatcher::MatchAndExplainRecord(
-    const base::Value::Dict& record,
+    const base::DictValue& record,
     MatchResultListener* listener) const {
-  if (record.Find("encryptedWrappedRecord") != nullptr) {
+  if (record.Find(json_keys::kEncryptedWrappedRecord) != nullptr) {
     *listener << "Found \"encryptedWrappedRecord\" in record " << record << '.';
     return false;
   }
@@ -274,10 +371,10 @@ std::string NoEncryptedWrappedRecordRecordMatcher::Name() const {
 }
 
 bool SequenceInformationRecordMatcher::MatchAndExplainRecord(
-    const base::Value::Dict& record,
+    const base::DictValue& record,
     MatchResultListener* listener) const {
   const auto* const sequence_information =
-      record.FindDict("sequenceInformation");
+      record.FindDict(json_keys::kSequenceInformation);
   if (sequence_information == nullptr) {
     *listener << "No key named \"sequenceInformation\" or the value is "
                  "not a dict in record "
@@ -285,14 +382,14 @@ bool SequenceInformationRecordMatcher::MatchAndExplainRecord(
     return false;
   }
 
-  if (!sequence_information->FindInt("priority").has_value()) {
+  if (!sequence_information->FindInt(json_keys::kPriority).has_value()) {
     *listener << "No key named \"sequenceInformation/priority\" or the "
                  "value is not an integer in record "
               << record << '.';
     return false;
   }
 
-  for (const char* id : {"sequencingId", "generationId"}) {
+  for (const char* id : {json_keys::kSequencingId, json_keys::kGenerationId}) {
     const auto* const id_val = sequence_information->FindString(id);
     if (id_val == nullptr) {
       *listener << "No key named \"sequenceInformation/" << id
@@ -307,6 +404,19 @@ bool SequenceInformationRecordMatcher::MatchAndExplainRecord(
       return false;
     }
   }
+
+#if BUILDFLAG(IS_CHROMEOS)
+  if (EncryptedReportingClient::GenerationGuidIsRequired()) {
+    const auto* generation_guid =
+        sequence_information->FindString(json_keys::kGenerationGuid);
+    if ((!generation_guid || generation_guid->empty())) {
+      *listener << "No key named \"sequenceInformation/generationGuid\" or the "
+                   "value is not a string in record "
+                << record << '.';
+      return false;
+    }
+  }
+#endif  // BUILDFLAG(IS_CHROMEOS)
   return true;
 }
 
@@ -323,8 +433,8 @@ std::string SequenceInformationRecordMatcher::Name() const {
   return "sequence-information-record-matcher";
 }
 
-bool RequestContainingRecordMatcher::IsSubDict(const base::Value::Dict& sub,
-                                               const base::Value::Dict& super) {
+bool RequestContainingRecordMatcher::IsSubDict(const base::DictValue& sub,
+                                               const base::DictValue& super) {
   for (auto&& [key, sub_value] : sub) {
     const auto* super_value = super.Find(key);
     if (super_value == nullptr || *super_value != sub_value) {
@@ -335,18 +445,19 @@ bool RequestContainingRecordMatcher::IsSubDict(const base::Value::Dict& sub,
 }
 
 RequestContainingRecordMatcher::RequestContainingRecordMatcher(
-    base::StringPiece matched_record_json)
+    std::string_view matched_record_json)
     : matched_record_json_(matched_record_json) {}
 
 bool RequestContainingRecordMatcher::MatchAndExplain(
-    const base::Value::Dict& arg,
+    const base::DictValue& arg,
     MatchResultListener* listener) const {
   const auto* record_list = GetRecordList(arg, listener);
   if (record_list == nullptr) {
     return false;
   }
 
-  const auto matched_record = base::JSONReader::Read(matched_record_json_);
+  const auto matched_record = base::JSONReader::Read(
+      matched_record_json_, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   if (!matched_record.has_value()) {
     *listener << "The specified record cannot be parsed as a JSON object.";
     return false;

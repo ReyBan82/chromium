@@ -6,16 +6,13 @@
 
 #import <Foundation/Foundation.h>
 
+#include "base/compiler_specific.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/strings/sys_string_conversions.h"
 #include "components/crash/core/app/crash_reporter_client.h"
 #import "components/crash/core/common/reporter_running_ios.h"
 #include "testing/platform_test.h"
 #include "third_party/crashpad/crashpad/client/crash_report_database.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace {
 
@@ -25,7 +22,7 @@ namespace {
 // them and restores null values on destruction.
 class ScopedTestCrashDatabaseDir {
  public:
-  ScopedTestCrashDatabaseDir() {}
+  ScopedTestCrashDatabaseDir() = default;
 
   void Init() {
     ASSERT_FALSE(crash_reporter::internal::GetCrashReportDatabase());
@@ -69,9 +66,9 @@ TEST_F(CrashpadIOS, ProcessExternalDump) {
   ASSERT_EQ(reports.size(), 0u);
   std::string attachment_name = "external-source";
   const char attachment_data[] = "external-dump-data";
-  base::span<const uint8_t> data(
+  base::span<const uint8_t> data = UNSAFE_TODO(base::span<const uint8_t>(
       reinterpret_cast<const uint8_t*>(attachment_data),
-      sizeof(attachment_data));
+      sizeof(attachment_data)));
   crash_reporter::ProcessExternalDump(attachment_name, data, {});
 
   reports.clear();
@@ -90,5 +87,7 @@ TEST_F(CrashpadIOS, ProcessExternalDump) {
   ASSERT_NE(attachments.find(attachment_name), attachments.end());
   char result_buffer[sizeof(attachment_data)];
   attachments[attachment_name]->Read(result_buffer, sizeof(result_buffer));
-  EXPECT_EQ(memcmp(attachment_data, result_buffer, sizeof(attachment_data)), 0);
+  EXPECT_EQ(UNSAFE_TODO(memcmp(attachment_data, result_buffer,
+                               sizeof(attachment_data))),
+            0);
 }

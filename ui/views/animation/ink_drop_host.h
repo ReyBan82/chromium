@@ -6,11 +6,14 @@
 #define UI_VIEWS_ANIMATION_INK_DROP_HOST_H_
 
 #include <memory>
+#include <variant>
 
 #include "base/memory/raw_ptr.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
+#include "ui/color/color_variant.h"
+#include "ui/gfx/color_palette.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/views/animation/ink_drop_event_handler.h"
@@ -35,10 +38,10 @@ namespace test {
 class InkDropHostTestApi;
 }  // namespace test
 
-// TODO(crbug.com/931964): Rename this type and move this header. Also consider
-// if InkDropHost should be what implements the InkDrop interface and have that
-// be the public interface.
-// The current division of labor is roughly as follows:
+// TODO(crbug.com/40613900): Rename this type and move this header. Also
+// consider if InkDropHost should be what implements the InkDrop interface and
+// have that be the public interface. The current division of labor is roughly
+// as follows:
 // * InkDropHost manages an InkDrop and is responsible for a lot of its
 //   configuration and creating the parts of the InkDrop.
 // * InkDrop manages the parts of the ink-drop effect once it's up and running.
@@ -97,23 +100,25 @@ class VIEWS_EXPORT InkDropHost {
 
   // Callback replacement of CreateInkDropMask().
   // TODO(pbos): Investigate removing this. It currently is only used by
-  // ToolbarButton.
+  // PieMenuView.
   void SetCreateMaskCallback(
       base::RepeatingCallback<std::unique_ptr<InkDropMask>()> callback);
+
+  // Toggles ink drop attention state on/off. If set on, a pulsing highlight
+  // is shown, prompting users to interact with `host_view_`.
+  // Called by components that want to call into user's attention, e.g. IPH.
+  void ToggleAttentionState(bool attention_on);
 
   // Returns the base color for the ink drop.
   SkColor GetBaseColor() const;
 
-  // Sets the base color for the ink drop.
-  // TODO(crbug.com/1341361): Replace SetBaseColor with SetBaseColorId.
-  void SetBaseColor(SkColor color);
-  void SetBaseColorId(ui::ColorId color_id);
+  // Sets the base color of the ink drop. If `SetBaseColor` is called, the
+  // effect of previous calls to  `SetBaseColorCallback` is
+  // overwritten and vice versa.
+  void SetBaseColor(ui::ColorVariant color);
 
-  // Callback version of GetBaseColor(). If possible, prefer using
-  // SetBaseColor(). If a callback has been set by previous configuration
-  // and you want to use the base version of GetBaseColor() that's reading
-  // SetBaseColor(), you need to reset the callback by calling
-  // SetBaseColorCallback({}).
+  // Callback version of `GetBaseColor`. If possible, prefer using
+  // `SetBaseColor`.
   void SetBaseColorCallback(base::RepeatingCallback<SkColor()> callback);
 
   // Toggle to enable/disable an InkDrop on this View.  Descendants can override
@@ -125,10 +130,15 @@ class VIEWS_EXPORT InkDropHost {
   void SetMode(InkDropMode ink_drop_mode);
   InkDropMode GetMode() const;
 
+  // Set whether the ink drop layers should be placed into the region above or
+  // below the view layer. The default is kBelow;
+  void SetLayerRegion(LayerRegion region);
+  LayerRegion GetLayerRegion() const;
+
   void SetVisibleOpacity(float visible_opacity);
   float GetVisibleOpacity() const;
 
-  void SetHighlightOpacity(absl::optional<float> opacity);
+  void SetHighlightOpacity(std::optional<float> opacity);
 
   void SetSmallCornerRadius(int small_radius);
   int GetSmallCornerRadius() const;
@@ -173,6 +183,9 @@ class VIEWS_EXPORT InkDropHost {
   // Size used by default for the SquareInkDropRipple.
   static constexpr gfx::Size kDefaultSquareInkDropSize = gfx::Size(24, 24);
 
+  // Returns a large scaled size used by SquareInkDropRipple and Highlight.
+  static gfx::Size GetLargeSize(gfx::Size small_size);
+
   // Creates a SquareInkDropRipple centered on |center_point|.
   std::unique_ptr<InkDropRipple> CreateSquareRipple(
       const gfx::Point& center_point,
@@ -180,6 +193,7 @@ class VIEWS_EXPORT InkDropHost {
 
   View* host_view() { return host_view_; }
   const View* host_view() const { return host_view_; }
+  bool in_attention_state_for_testing() const { return in_attention_state_; }
 
  private:
   friend class test::InkDropHostTestApi;
@@ -232,6 +246,9 @@ class VIEWS_EXPORT InkDropHost {
   // Defines what type of |ink_drop_| to create.
   InkDropMode ink_drop_mode_ = views::InkDropHost::InkDropMode::OFF;
 
+  // Into which region should the ink drop layers be placed.
+  LayerRegion layer_region_ = LayerRegion::kBelow;
+
   // Used to observe View and inform the InkDrop of host-transform changes.
   ViewLayerTransformObserver host_view_transform_observer_;
 
@@ -246,12 +263,12 @@ class VIEWS_EXPORT InkDropHost {
   float ink_drop_visible_opacity_ = 0.175f;
 
   // The color of the ripple and hover.
-  absl::optional<SkColor> ink_drop_base_color_;
-  absl::optional<ui::ColorId> ink_drop_base_color_id_;
+  std::variant<ui::ColorVariant, base::RepeatingCallback<SkColor()>>
+      ink_drop_base_color_ = gfx::kPlaceholderColor;
 
   // TODO(pbos): Audit call sites to make sure highlight opacity is either
   // always set or using the default value. Then make this a non-optional float.
-  absl::optional<float> ink_drop_highlight_opacity_;
+  std::optional<float> ink_drop_highlight_opacity_;
 
   // Radii used for the SquareInkDropRipple.
   int ink_drop_small_corner_radius_ = 2;
@@ -267,9 +284,15 @@ class VIEWS_EXPORT InkDropHost {
 
   base::RepeatingCallback<std::unique_ptr<InkDropMask>()>
       create_ink_drop_mask_callback_;
-  base::RepeatingCallback<SkColor()> ink_drop_base_color_callback_;
 
   base::RepeatingClosureList highlighted_changed_callbacks_;
+
+  // Attention is a state we apply on Buttons' ink drop when we want to draw
+  // users' attention to this button and prompt users' interaction.
+  // It consists of two visual effects: a default light blue color and a pulsing
+  // effect. Current use case is IPH. Go to chrome://user-education-internals
+  // and press e.g. IPH_TabSearch to see the effects.
+  bool in_attention_state_ = false;
 };
 
 }  // namespace views

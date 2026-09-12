@@ -5,6 +5,8 @@
 #ifndef CC_METRICS_VIDEO_PLAYBACK_ROUGHNESS_REPORTER_H_
 #define CC_METRICS_VIDEO_PLAYBACK_ROUGHNESS_REPORTER_H_
 
+#include <optional>
+
 #include "base/containers/circular_deque.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/callback.h"
@@ -12,7 +14,6 @@
 #include "cc/cc_export.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_types.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/size.h"
 
 namespace cc {
@@ -52,12 +53,11 @@ class CC_EXPORT VideoPlaybackRoughnessReporter {
     // |frame_size| - size of the video frames in the window
     gfx::Size frame_size;
 
-    // |freezing| maximum amount of time that any VideoFrame in measurement
-    // interval was on-screen beyond the amount of time it should have been.
-    //
-    // TODO(liberato): Should this be expressed in terms of the playback rate?
-    // As in, "twice as long as it should have been"?
-    base::TimeDelta freezing;
+    // |freezing_ratio| maximum ratio of excess on-screen duration to intended
+    // duration for any VideoFrame in the measurement interval (e.g., 0.0 is
+    // normal display time / no freeze, 1.0 means a frame froze for 1 extra
+    // frame duration beyond its intended time).
+    double freezing_ratio = 0.0;
 
     // |refresh_rate_hz| - display refresh rate, usually 60Hz
     int refresh_rate_hz = 0;
@@ -83,10 +83,14 @@ class CC_EXPORT VideoPlaybackRoughnessReporter {
   void ProcessFrameWindow();
   void Reset();
 
-  // A lower bund on how many frames can be in ConsecutiveFramesWindow
+  void set_is_media_stream(bool is_media_stream) {
+    is_media_stream_ = is_media_stream;
+  }
+
+  // A lower bound on how many frames can be in ConsecutiveFramesWindow
   static constexpr int kMinWindowSize = 6;
 
-  // An upper bund on how many frames can be in ConsecutiveFramesWindow
+  // An upper bound on how many frames can be in ConsecutiveFramesWindow
   static constexpr int kMaxWindowSize = 60;
 
   // How many frame windows should be observed before reporting smoothness
@@ -111,10 +115,10 @@ class CC_EXPORT VideoPlaybackRoughnessReporter {
     FrameInfo();
     FrameInfo(const FrameInfo&);
     TokenType token = 0;
-    absl::optional<base::TimeTicks> decode_time;
-    absl::optional<base::TimeTicks> presentation_time;
-    absl::optional<base::TimeDelta> actual_duration;
-    absl::optional<base::TimeDelta> intended_duration;
+    std::optional<base::TimeTicks> decode_time;
+    std::optional<base::TimeTicks> presentation_time;
+    std::optional<base::TimeDelta> actual_duration;
+    std::optional<base::TimeDelta> intended_duration;
     int refresh_rate_hz = 60;
     gfx::Size size;
   };
@@ -159,9 +163,11 @@ class CC_EXPORT VideoPlaybackRoughnessReporter {
   int windows_seen_ = 0;
   int frames_window_size_ = kMinWindowSize;
 
-  // Worst case difference between a frame's intended duration and
-  // actual duration, calculated for all frames in the reporting interval.
-  base::TimeDelta max_single_frame_error_;
+  // Worst case ratio between a frame's actual duration and intended duration,
+  // calculated for all frames in the reporting interval.
+  double max_freezing_ratio_ = 0.0;
+
+  bool is_media_stream_ = false;
 };
 
 }  // namespace cc

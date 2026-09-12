@@ -5,16 +5,17 @@
 #ifndef COMPONENTS_AUTOFILL_CORE_BROWSER_METRICS_PAYMENTS_BETTER_AUTH_METRICS_H_
 #define COMPONENTS_AUTOFILL_CORE_BROWSER_METRICS_PAYMENTS_BETTER_AUTH_METRICS_H_
 
-#include "components/autofill/core/browser/metrics/autofill_metrics.h"
+#include "base/time/time.h"
+#include "components/autofill/core/browser/payments/payments_autofill_client.h"
 
 namespace autofill::autofill_metrics {
 
 // Metric for tracking which authentication method was used for a user with
 // FIDO authentication enabled.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
 enum class CardUnmaskTypeDecisionMetric {
-  // These values are persisted to logs. Entries should not be renumbered and
-  // numeric values should never be reused.
-
   // Only WebAuthn prompt was shown.
   kFidoOnly = 0,
   // CVC authentication was required in addition to WebAuthn.
@@ -24,10 +25,10 @@ enum class CardUnmaskTypeDecisionMetric {
 
 // Events related to user-perceived latency due to GetDetailsForGetRealPan
 // call.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
 enum class PreflightCallEvent {
-  // These values are persisted to logs. Entries should not be renumbered and
-  // numeric values should never be reused.
-
   // Returned before card chosen.
   kPreflightCallReturnedBeforeCardChosen = 0,
   // Did not return before card was chosen. When opted-in, this means
@@ -40,10 +41,10 @@ enum class PreflightCallEvent {
 };
 
 // Possible scenarios where a WebAuthn prompt may show.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
 enum class WebauthnFlowEvent {
-  // These values are persisted to logs. Entries should not be renumbered and
-  // numeric values should never be reused.
-
   // WebAuthn is immediately prompted for unmasking.
   kImmediateAuthentication = 0,
   // WebAuthn is prompted after a CVC check.
@@ -57,10 +58,10 @@ enum class WebauthnFlowEvent {
 };
 
 // The parameters with which opt change was called.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
 enum class WebauthnOptInParameters {
-  // These values are persisted to logs. Entries should not be renumbered and
-  // numeric values should never be reused.
-
   // Call made to fetch a challenge.
   kFetchingChallenge = 0,
   // Call made with signature of creation challenge.
@@ -70,11 +71,38 @@ enum class WebauthnOptInParameters {
   kMaxValue = kWithRequestChallenge,
 };
 
-// The user decision for the WebAuthn opt-in promo.
-enum class WebauthnOptInPromoUserDecisionMetric {
-  // These values are persisted to logs. Entries should not be renumbered and
-  // numeric values should never be reused.
+// On Desktop, this enum represents the reason that the FIDO opt-in dialog was
+// not offered to the user. On Android, it represents whether the checkbox
+// was shown to the user.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class WebauthnOptInPromoNotOfferedReason {
+  // Default value, should never be used.
+  kUnknown = 0,
+  // Not offered because we authenticated a virtual card, and we do not offer
+  // FIDO opt-in for virtual cards.
+  kVirtualCard = 1,
+  // Not offered because the UnmaskDetails response denoted that we should not
+  // offer FIDO opt-in.
+  kUnmaskDetailsOfferFidoOptInFalse = 2,
+  // Not offered because the card authorization token was empty.
+  kCardAuthorizationTokenEmpty = 3,
+  // Not offered because it was blocked by the FidoAuthenticationStrikeDatabase.
+  kBlockedByStrikeDatabase = 4,
+  // Used only on Android. Checkbox not shown to the user because the user has
+  // previously opted-in from Settings.
+  kOptedInFromSettings = 5,
+  // According to the server, the user is already opted into FIDO auth.
+  kAlreadyOptedIn = 6,
+  kMaxValue = kAlreadyOptedIn,
+};
 
+// The user decision for the WebAuthn opt-in promo.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class WebauthnOptInPromoUserDecisionMetric {
   // User accepted promo.
   kAccepted = 0,
   // User immediately declined promo.
@@ -87,10 +115,10 @@ enum class WebauthnOptInPromoUserDecisionMetric {
 };
 
 // The result of a WebAuthn user-verification prompt.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
 enum class WebauthnResultMetric {
-  // These values are persisted to logs. Entries should not be renumbered and
-  // numeric values should never be reused.
-
   // User-verification succeeded.
   kSuccess = 0,
   // Other checks failed (e.g. invalid domain, algorithm unsupported, etc.)
@@ -104,9 +132,9 @@ enum class WebauthnResultMetric {
 // indicates whether the unmasking request was successful or not. |card_type|
 // indicates the type of the credit card that the request fetched.
 void LogCardUnmaskDurationAfterWebauthn(
-    const base::TimeDelta& duration,
-    AutofillClient::PaymentsRpcResult result,
-    AutofillClient::PaymentsRpcCardType card_type);
+    base::TimeDelta duration,
+    payments::PaymentsAutofillClient::PaymentsRpcResult result,
+    payments::PaymentsAutofillClient::PaymentsRpcCardType card_type);
 
 // Logs the number of times that we initiate the card unmask preflight flow.
 // This will log both when the user is verifiable as well as when the user is
@@ -114,19 +142,25 @@ void LogCardUnmaskDurationAfterWebauthn(
 // verifiable.
 void LogCardUnmaskPreflightInitiated();
 
-// Logs the count of calls to PaymentsClient::GetUnmaskDetails() (aka
+// Logs the count of calls to PaymentsNetworkInterface::GetUnmaskDetails() (aka
 // GetDetailsForGetRealPan). If `is_user_opted_in` is true, then the user is
 // opted-in to FIDO auth, and if the user is not opted-in to FIDO auth then
 // `is_user_opted_in` is false.
 void LogCardUnmaskPreflightCalled(bool is_user_opted_in);
 
-// Logs the duration of the PaymentsClient::GetUnmaskDetails() call (aka
-// GetDetailsForGetRealPan).
-void LogCardUnmaskPreflightDuration(const base::TimeDelta& duration);
+// Logs the duration of the PaymentsNetworkInterface::GetUnmaskDetails() call
+// (aka GetDetailsForGetRealPan).
+void LogCardUnmaskPreflightDuration(base::TimeDelta duration);
 
 // Logs which unmask type was used for a user with FIDO authentication
 // enabled.
 void LogCardUnmaskTypeDecision(CardUnmaskTypeDecisionMetric metric);
+
+// Tracks whether the response is received before a card is chosen by the user.
+void LogPreflightCallResponseReceivedOnCardSelection(
+    PreflightCallEvent event,
+    bool fido_opted_in,
+    CreditCard::RecordType record_type);
 
 // Logs the existence of any user-perceived latency between selecting a Google
 // Payments server card and seeing a card unmask prompt.
@@ -145,22 +179,32 @@ void LogUserPerceivedLatencyOnCardSelectionTimedOut(bool did_time_out);
 // Logs the duration of WebAuthn's
 // IsUserVerifiablePlatformAuthenticatorAvailable() call. It is supposedly an
 // extremely quick IPC.
-void LogUserVerifiabilityCheckDuration(const base::TimeDelta& duration);
+void LogUserVerifiabilityCheckDuration(base::TimeDelta duration);
 
-// Logs the count of calls to PaymentsClient::OptChange() (aka
+// Logs the count of calls to PaymentsNetworkInterface::OptChange() (aka
 // UpdateAutofillUserPreference).
-void LogWebauthnOptChangeCalled(bool request_to_opt_in,
-                                bool is_checkout_flow,
-                                WebauthnOptInParameters metric);
+void LogWebauthnOptChangeCalled(WebauthnOptInParameters metric);
+
+// Records when the Better Auth (FIDO) opt-in promo could have been offered on
+// Desktop, but wasn't. Logged at the time of the promo not being shown. This
+// metric can only be logged from the checkout flow, as we do not block opting
+// in to FIDO from the settings page. `reason` will be used to log the reason
+// why we are not offering the FIDO opt-in dialog.
+void LogWebauthnOptInPromoNotOfferedReason(
+    WebauthnOptInPromoNotOfferedReason reason);
+
+// Logs true if the Better Auth (FIDO) enrollment prompt was offered, false
+// otherwise. Logged at the time of showing or not showing the FIDO enrollment
+// prompt.
+void LogWebauthnEnrollmentPromptOffered(bool offered);
 
 // Logs the number of times the opt-in promo for enabling FIDO authentication
 // for card unmasking has been shown.
-void LogWebauthnOptInPromoShown(bool is_checkout_flow);
+void LogWebauthnOptInPromoShown();
 
 // Logs the user response to the opt-in promo for enabling FIDO authentication
 // for card unmasking.
 void LogWebauthnOptInPromoUserDecision(
-    bool is_checkout_flow,
     WebauthnOptInPromoUserDecisionMetric metric);
 
 // Logs the result of a WebAuthn prompt.

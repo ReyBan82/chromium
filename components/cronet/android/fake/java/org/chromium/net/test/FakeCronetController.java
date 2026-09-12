@@ -14,11 +14,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 
 /**
- * Controller for fake Cronet implementation. Allows a test to setup responses for
- * {@link UrlRequest}s. If multiple {@link ResponseMatcher}s match a specific request, the first
- * {@link ResponseMatcher} added takes precedence.
+ * Controller for fake Cronet implementation. Allows a test to setup responses for {@link
+ * UrlRequest}s. If multiple {@link ResponseMatcher}s match a specific request, the first {@link
+ * ResponseMatcher} added takes precedence.
  */
 public final class FakeCronetController {
     // List of FakeCronetEngines so that FakeCronetEngine can be accessed when created with
@@ -48,12 +49,28 @@ public final class FakeCronetController {
     }
 
     /**
+     * Creates a fake {@link CronetEngine.Builder} that uses the provided {@link ExecutorService}
+     * for background tasks.
+     *
+     * @param context the Android context to build the fake {@link CronetEngine} from.
+     * @param executorService the executor service to use for fake Cronet work.
+     * @return a fake CronetEngine.Builder that uses this {@link FakeCronetController}.
+     */
+    public CronetEngine.Builder newFakeCronetEngineBuilder(
+            Context context, ExecutorService executorService) {
+        FakeCronetEngine.Builder builder = new FakeCronetEngine.Builder(context);
+        builder.setController(this);
+        builder.setExecutorService(executorService);
+        return new ExperimentalCronetEngine.Builder(builder);
+    }
+
+    /**
      * Adds a {@link UrlResponseMatcher} that will respond to the provided URL with the provided
-     * {@link FakeUrlResponse}. Equivalent to:
-     * addResponseMatcher(new UrlResponseMatcher(url, response)).
+     * {@link FakeUrlResponse}. Equivalent to: addResponseMatcher(new UrlResponseMatcher(url,
+     * response)).
      *
      * @param response a {@link FakeUrlResponse} to respond with
-     * @param url      a url for which the response should be returned
+     * @param url a url for which the response should be returned
      */
     public void addResponseForUrl(FakeUrlResponse response, String url) {
         addResponseMatcher(new UrlResponseMatcher(url, response));
@@ -77,9 +94,7 @@ public final class FakeCronetController {
         mResponseMatchers.remove(matcher);
     }
 
-    /**
-     * Removes all {@link ResponseMatcher}s from the list of {@link ResponseMatcher}s.
-     */
+    /** Removes all {@link ResponseMatcher}s from the list of {@link ResponseMatcher}s. */
     public void clearResponseMatchers() {
         mResponseMatchers.clear();
     }
@@ -92,10 +107,11 @@ public final class FakeCronetController {
      * @param url              the URL that will trigger the redirect
      */
     public void addRedirectResponse(String redirectLocation, String url) {
-        FakeUrlResponse redirectResponse = new FakeUrlResponse.Builder()
-                                                   .setHttpStatusCode(302)
-                                                   .addHeader("location", redirectLocation)
-                                                   .build();
+        FakeUrlResponse redirectResponse =
+                new FakeUrlResponse.Builder()
+                        .setHttpStatusCode(302)
+                        .addHeader("location", redirectLocation)
+                        .build();
         addResponseForUrl(redirectResponse, url);
     }
 

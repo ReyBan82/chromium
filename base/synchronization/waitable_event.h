@@ -9,6 +9,12 @@
 
 #include "base/base_export.h"
 #include "base/compiler_specific.h"
+#include "base/containers/circular_deque.h"
+#include "base/containers/span.h"
+#include "base/functional/callback.h"
+#include "base/location.h"
+#include "base/memory/raw_ptr.h"
+#include "build/blink_buildflags.h"
 #include "build/build_config.h"
 
 #if BUILDFLAG(IS_WIN)
@@ -16,14 +22,12 @@
 #elif BUILDFLAG(IS_APPLE)
 #include <mach/mach.h>
 
-#include <list>
+#include <atomic>
 #include <memory>
 
-#include "base/functional/callback_forward.h"
-#include "base/mac/scoped_mach_port.h"
+#include "base/apple/scoped_mach_port.h"
 #include "base/memory/ref_counted.h"
 #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
-#include <list>
 #include <utility>
 
 #include "base/memory/ref_counted.h"
@@ -86,7 +90,7 @@ class BASE_EXPORT WaitableEvent {
 
   // Returns true if the event is in the signaled state, else false.  If this
   // is not a manual reset event, then this test will cause a reset.
-  bool IsSignaled();
+  bool IsSignaled() const;
 
   // Wait indefinitely for the event to be signaled. Wait's return "happens
   // after" |Signal| has completed. This means that it's safe for a
@@ -96,7 +100,7 @@ class BASE_EXPORT WaitableEvent {
   //   SendToOtherThread(e);
   //   e->Wait();
   //   delete e;
-  void NOT_TAIL_CALLED Wait();
+  NOT_TAIL_CALLED void Wait(const Location& location = Location::Current());
 
   // Wait up until wait_delta has passed for the event to be signaled
   // (real-time; ignores time overrides).  Returns true if the event was
@@ -104,7 +108,9 @@ class BASE_EXPORT WaitableEvent {
   // have elapsed if this returns false.
   //
   // TimedWait can synchronise its own destruction like |Wait|.
-  bool NOT_TAIL_CALLED TimedWait(TimeDelta wait_delta);
+  NOT_TAIL_CALLED bool TimedWait(
+      TimeDelta wait_delta,
+      const Location& location = Location::Current());
 
 #if BUILDFLAG(IS_WIN)
   HANDLE handle() const { return handle_.get(); }
@@ -121,10 +127,10 @@ class BASE_EXPORT WaitableEvent {
   void declare_only_used_while_idle() { only_used_while_idle_ = true; }
 
   // Wait, synchronously, on multiple events.
-  //   waitables: an array of WaitableEvent pointers
-  //   count: the number of elements in @waitables
+  //   waitables: a span of WaitableEvent pointers
   //
-  // returns: the index of a WaitableEvent which has been signaled.
+  // returns: the index of a WaitableEvent within the span which has been
+  //          signaled.
   //
   // You MUST NOT delete any of the WaitableEvent objects while this wait is
   // happening, however WaitMany's return "happens after" the |Signal| call
@@ -132,8 +138,11 @@ class BASE_EXPORT WaitableEvent {
   //
   // If more than one WaitableEvent is signaled to unblock WaitMany, the lowest
   // index among them is returned.
-  static size_t NOT_TAIL_CALLED WaitMany(WaitableEvent** waitables,
-                                         size_t count);
+  NOT_TAIL_CALLED static size_t WaitMany(base::span<WaitableEvent*> waitables);
+
+  // Convenience method which returns a callback which calls Wait() on this
+  // object. The callback must *not* outlive this object.
+  OnceClosure GetWaitCallbackForTesting();
 
   // For asynchronous waiting, see WaitableEventWatcher
 
@@ -170,19 +179,32 @@ class BASE_EXPORT WaitableEvent {
  private:
   friend class WaitableEventWatcher;
 
-  // The platform specific portions of Signal and TimedWait (which do the actual
-  // signaling and waiting).
+  // Returns a faster estimate of IsSignaled(); true if confirmed to be signaled
+  // (which may call IsSignaled()), false if likely not signaled. If this is not
+  // a manual reset event, then this test will cause a reset.
+  bool IsDefinitelySignaled() const;
+
+  // The platform specific portions of Signal, TimedWait, and WaitMany (which do
+  // the actual signaling and waiting).
   void SignalImpl();
   bool TimedWaitImpl(TimeDelta wait_delta);
+  static size_t WaitManyImpl(base::span<WaitableEvent*> waitables);
 
 #if BUILDFLAG(IS_WIN)
   win::ScopedHandle handle_;
-#elif BUILDFLAG(IS_APPLE)
+#elif BUILDFLAG(IS_APPLE) && (!BUILDFLAG(IS_IOS) || !BUILDFLAG(USE_BLINK))
+  // iOS which supports blink must use the posix variant since opening
+  // mach_ports is prevented inside sandbox profiles.
+  //
   // Peeks the message queue named by |port| and returns true if a message
   // is present and false if not. If |dequeue| is true, the messsage will be
   // drained from the queue. If |dequeue| is false, the queue will only be
   // peeked. |port| must be a receive right.
-  static bool PeekPort(mach_port_t port, bool dequeue);
+  static bool PeekPortImpl(mach_port_t port, bool dequeue);
+
+  // Member helper that calls PeekPortImpl and updates the
+  // `signal_estimate_` cache.
+  bool PeekPort(bool dequeue) const;
 
   // The Mach receive right is waited on by both WaitableEvent and
   // WaitableEventWatcher. It is valid to signal and then delete an event, and
@@ -203,7 +225,7 @@ class BASE_EXPORT WaitableEvent {
     friend class RefCountedThreadSafe<ReceiveRight>;
     ~ReceiveRight();
 
-    mac::ScopedMachReceiveRight right_;
+    apple::ScopedMachReceiveRight right_;
   };
 
   const ResetPolicy policy_;
@@ -214,7 +236,9 @@ class BASE_EXPORT WaitableEvent {
   // The send right used to signal the event. This can be disposed of with
   // the event, unlike the receive right, since a deleted event cannot be
   // signaled.
-  mac::ScopedMachSendRight send_right_;
+  apple::ScopedMachSendRight send_right_;
+
+  mutable std::atomic<bool> signal_estimate_{false};
 #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
   // On Windows, you must not close a HANDLE which is currently being waited on.
   // The MSDN documentation says that the resulting behaviour is 'undefined'.
@@ -227,8 +251,8 @@ class BASE_EXPORT WaitableEvent {
   // so we have a kernel of the WaitableEvent, which is reference counted.
   // WaitableEventWatchers may then take a reference and thus match the Windows
   // behaviour.
-  struct WaitableEventKernel :
-      public RefCountedThreadSafe<WaitableEventKernel> {
+  struct WaitableEventKernel
+      : public RefCountedThreadSafe<WaitableEventKernel> {
    public:
     WaitableEventKernel(ResetPolicy reset_policy, InitialState initial_state);
 
@@ -237,22 +261,22 @@ class BASE_EXPORT WaitableEvent {
     base::Lock lock_;
     const bool manual_reset_;
     bool signaled_;
-    std::list<Waiter*> waiters_;
+    base::circular_deque<raw_ptr<Waiter, CtnExperimental>> waiters_;
 
    private:
     friend class RefCountedThreadSafe<WaitableEventKernel>;
     ~WaitableEventKernel();
   };
 
-  typedef std::pair<WaitableEvent*, size_t> WaiterAndIndex;
+  using WaiterAndIndex = std::pair<WaitableEvent*, size_t>;
 
   // When dealing with arrays of WaitableEvent*, we want to sort by the address
   // of the WaitableEvent in order to have a globally consistent locking order.
   // In that case we keep them, in sorted order, in an array of pairs where the
   // second element is the index of the WaitableEvent in the original,
   // unsorted, array.
-  static size_t EnqueueMany(WaiterAndIndex* waitables,
-                            size_t count, Waiter* waiter);
+  static size_t EnqueueMany(base::span<WaiterAndIndex> waitables,
+                            Waiter* waiter);
 
   bool SignalAll();
   bool SignalOne();

@@ -32,6 +32,7 @@
 
 #include "third_party/blink/renderer/core/layout/layout_theme.h"
 #include "third_party/blink/renderer/core/layout/layout_theme_default.h"
+#include "third_party/blink/renderer/platform/fonts/font_cache.h"
 #include "third_party/blink/renderer/platform/graphics/color.h"
 
 namespace blink {
@@ -63,12 +64,14 @@ void SystemColorsChanged() {
   LayoutTheme::GetTheme().PlatformColorsDidChange();
 }
 
-void ColorSchemeChanged() {
-  LayoutTheme::GetTheme().ColorSchemeDidChange();
+void RegisteredFontsChanged() {
+#if BUILDFLAG(IS_MAC)
+  FontCache::InvalidateFromAnyThread();
+#endif
 }
 
-void ColorProvidersChanged() {
-  LayoutTheme::GetTheme().ColorProvidersDidChange();
+void ColorSchemeChanged() {
+  LayoutTheme::GetTheme().ColorSchemeDidChange();
 }
 
 }  // namespace blink

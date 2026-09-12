@@ -6,13 +6,14 @@
 
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include <algorithm>
+
+#import "base/apple/foundation_util.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
-#include "base/functional/callback_forward.h"
-#import "base/mac/foundation_util.h"
 #include "base/mac/mac_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
-#include "base/ranges/algorithm.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
@@ -21,6 +22,8 @@
 #include "components/remote_cocoa/app_shim/select_file_dialog_bridge.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/gtest_mac.h"
+#include "testing/platform_test.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/shell_dialogs/select_file_policy.h"
 
 #define EXPECT_EQ_BOOL(a, b) \
@@ -48,18 +51,13 @@ NSPopUpButton* GetPopup(NSSavePanel* panel) {
 namespace ui::test {
 
 // Helper test base to initialize SelectFileDialogImpl.
-class SelectFileDialogMacTest : public ::testing::Test,
+class SelectFileDialogMacTest : public PlatformTest,
                                 public SelectFileDialog::Listener {
  public:
   SelectFileDialogMacTest()
       : dialog_(new SelectFileDialogImpl(this, nullptr)) {}
   SelectFileDialogMacTest(const SelectFileDialogMacTest&) = delete;
   SelectFileDialogMacTest& operator=(const SelectFileDialogMacTest&) = delete;
-
-  // Overridden from SelectFileDialog::Listener.
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override {}
 
  protected:
   base::test::TaskEnvironment task_environment_ = base::test::TaskEnvironment(
@@ -72,24 +70,27 @@ class SelectFileDialogMacTest : public ::testing::Test,
     raw_ptr<SelectFileDialog::FileTypeInfo> file_types = nullptr;
     int file_type_index = 0;
     base::FilePath::StringType default_extension;
-    raw_ptr<void> params = nullptr;
   };
 
   // Helper method to create a dialog with the given `args`. Returns the created
   // NSSavePanel.
-  NSSavePanel* SelectFileWithParams(FileDialogArguments args) {
-    base::scoped_nsobject<NSWindow> parent_window([[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 100, 100)
-                  styleMask:NSWindowStyleMaskTitled
-                    backing:NSBackingStoreBuffered
-                      defer:NO]);
-    [parent_window setReleasedWhenClosed:NO];
+  NSSavePanel* SelectFileWithParams(
+      FileDialogArguments args,
+      NSWindowStyleMask style_mask = NSWindowStyleMaskTitled,
+      NSInteger level = NSNormalWindowLevel) {
+    NSWindow* parent_window =
+        [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 100, 100)
+                                    styleMask:style_mask
+                                      backing:NSBackingStoreBuffered
+                                        defer:NO];
+    parent_window.releasedWhenClosed = NO;
+    parent_window.level = level;
     parent_windows_.push_back(parent_window);
 
     dialog_->SelectFile(args.type, args.title, args.default_path,
                         args.file_types, args.file_type_index,
-                        args.default_extension, parent_window.get(),
-                        args.params);
+                        args.default_extension,
+                        gfx::NativeWindow(parent_window), nullptr);
 
     // At this point, the Mojo IPC to show the dialog is queued up. Spin the
     // message loop to get the Mojo IPC to happen.
@@ -138,7 +139,7 @@ class SelectFileDialogMacTest : public ::testing::Test,
  private:
   scoped_refptr<SelectFileDialogImpl> dialog_;
 
-  std::vector<base::scoped_nsobject<NSWindow>> parent_windows_;
+  std::vector<NSWindow*> parent_windows_;
 };
 
 class SelectFileDialogMacOpenAndSaveTest
@@ -178,32 +179,33 @@ TEST_F(SelectFileDialogMacTest, ExtensionPopup) {
   // passed and no default extension was provided.
   EXPECT_EQ(0, popup.indexOfSelectedItem);
 
-  if (@available(macOS 11, *)) {
-    ASSERT_EQ(1lu, panel.allowedContentTypes.count);
-    EXPECT_NSEQ(UTTypeHTML, panel.allowedContentTypes[0]);
-  } else {
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"htm"]);
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"html"]);
-    // Extensions should appear in order of input.
-    EXPECT_LT([panel.allowedFileTypes indexOfObject:@"html"],
-              [panel.allowedFileTypes indexOfObject:@"htm"]);
-    EXPECT_FALSE([panel.allowedFileTypes containsObject:@"jpg"]);
-  }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  NSArray<NSString*>* file_types = panel.allowedFileTypes;
+#pragma clang diagnostic pop
+
+  EXPECT_TRUE([file_types containsObject:@"htm"]);
+  EXPECT_TRUE([file_types containsObject:@"html"]);
+  // Extensions should appear in order of input.
+  EXPECT_LT([file_types indexOfObject:@"html"],
+            [file_types indexOfObject:@"htm"]);
+  EXPECT_FALSE([file_types containsObject:@"jpg"]);
 
   // Select the second item.
   [popup.menu performActionForItemAtIndex:1];
   EXPECT_EQ(1, popup.indexOfSelectedItem);
-  if (@available(macOS 11, *)) {
-    ASSERT_EQ(1lu, panel.allowedContentTypes.count);
-    EXPECT_NSEQ(UTTypeJPEG, panel.allowedContentTypes[0]);
-  } else {
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"jpg"]);
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"jpeg"]);
-    // Extensions should appear in order of input.
-    EXPECT_LT([panel.allowedFileTypes indexOfObject:@"jpeg"],
-              [panel.allowedFileTypes indexOfObject:@"jpg"]);
-    EXPECT_FALSE([panel.allowedFileTypes containsObject:@"html"]);
-  }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  file_types = panel.allowedFileTypes;
+#pragma clang diagnostic pop
+
+  EXPECT_TRUE([file_types containsObject:@"jpg"]);
+  EXPECT_TRUE([file_types containsObject:@"jpeg"]);
+  // Extensions should appear in order of input.
+  EXPECT_LT([file_types indexOfObject:@"jpeg"],
+            [file_types indexOfObject:@"jpg"]);
+  EXPECT_FALSE([file_types containsObject:@"html"]);
 }
 
 // Verify file_type_info.include_all_files argument is respected.
@@ -264,14 +266,15 @@ TEST_F(SelectFileDialogMacTest, InitialSelection) {
   // Verify that the `file_type_index` causes the second item to be initially
   // selected.
   EXPECT_EQ(1, popup.indexOfSelectedItem);
-  if (@available(macOS 11, *)) {
-    ASSERT_EQ(1lu, panel.allowedContentTypes.count);
-    EXPECT_NSEQ(UTTypeJPEG, panel.allowedContentTypes[0]);
-  } else {
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"jpg"]);
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"jpeg"]);
-    EXPECT_FALSE([panel.allowedFileTypes containsObject:@"html"]);
-  }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  NSArray<NSString*>* file_types = panel.allowedFileTypes;
+#pragma clang diagnostic pop
+
+  EXPECT_TRUE([file_types containsObject:@"jpg"]);
+  EXPECT_TRUE([file_types containsObject:@"jpeg"]);
+  EXPECT_FALSE([file_types containsObject:@"html"]);
 
   ResetDialog();
   args.file_type_index = 0;
@@ -283,15 +286,16 @@ TEST_F(SelectFileDialogMacTest, InitialSelection) {
   // Verify that the first item was selected, since the default extension passed
   // was not present in the extension list.
   EXPECT_EQ(0, popup.indexOfSelectedItem);
-  if (@available(macOS 11, *)) {
-    ASSERT_EQ(1lu, panel.allowedContentTypes.count);
-    EXPECT_NSEQ(UTTypeHTML, panel.allowedContentTypes[0]);
-  } else {
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"html"]);
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"htm"]);
-    EXPECT_FALSE([panel.allowedFileTypes containsObject:@"pdf"]);
-    EXPECT_FALSE([panel.allowedFileTypes containsObject:@"jpeg"]);
-  }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  file_types = panel.allowedFileTypes;
+#pragma clang diagnostic pop
+
+  EXPECT_TRUE([file_types containsObject:@"html"]);
+  EXPECT_TRUE([file_types containsObject:@"htm"]);
+  EXPECT_FALSE([file_types containsObject:@"pdf"]);
+  EXPECT_FALSE([file_types containsObject:@"jpeg"]);
 
   ResetDialog();
   args.file_type_index = 0;
@@ -303,14 +307,15 @@ TEST_F(SelectFileDialogMacTest, InitialSelection) {
   // Verify that the extension group corresponding to the default extension is
   // initially selected.
   EXPECT_EQ(1, popup.indexOfSelectedItem);
-  if (@available(macOS 11, *)) {
-    ASSERT_EQ(1lu, panel.allowedContentTypes.count);
-    EXPECT_NSEQ(UTTypeJPEG, panel.allowedContentTypes[0]);
-  } else {
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"jpg"]);
-    EXPECT_TRUE([panel.allowedFileTypes containsObject:@"jpeg"]);
-    EXPECT_FALSE([panel.allowedFileTypes containsObject:@"html"]);
-  }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  file_types = panel.allowedFileTypes;
+#pragma clang diagnostic pop
+
+  EXPECT_TRUE([file_types containsObject:@"jpg"]);
+  EXPECT_TRUE([file_types containsObject:@"jpeg"]);
+  EXPECT_FALSE([file_types containsObject:@"html"]);
 }
 
 // Verify that an appropriate extension description is shown even if an empty
@@ -400,29 +405,25 @@ TEST_F(SelectFileDialogMacTest, SelectionType) {
        PICK_FILES | MULTIPLE_SELECTION, "Open"},
   };
 
-  for (size_t i = 0; i < std::size(test_cases); i++) {
-    SCOPED_TRACE(
-        base::StringPrintf("i=%lu file_dialog_type=%d", i, test_cases[i].type));
-    args.type = test_cases[i].type;
+  for (const auto& test_case : test_cases) {
+    SCOPED_TRACE(base::StringPrintf("file_dialog_type=%d", test_case.type));
+    args.type = test_case.type;
     ResetDialog();
     NSSavePanel* panel = SelectFileWithParams(args);
 
-    EXPECT_EQ_BOOL(test_cases[i].options & HAS_ACCESSORY_VIEW,
-                   panel.accessoryView);
-    EXPECT_EQ_BOOL(test_cases[i].options & CREATE_DIRS,
-                   panel.canCreateDirectories);
-    EXPECT_EQ(test_cases[i].prompt, base::SysNSStringToUTF8([panel prompt]));
+    EXPECT_EQ_BOOL(test_case.options & HAS_ACCESSORY_VIEW, panel.accessoryView);
+    EXPECT_EQ_BOOL(test_case.options & CREATE_DIRS, panel.canCreateDirectories);
+    EXPECT_EQ(test_case.prompt, base::SysNSStringToUTF8([panel prompt]));
 
     if (args.type != SelectFileDialog::SELECT_SAVEAS_FILE) {
-      NSOpenPanel* open_panel = base::mac::ObjCCast<NSOpenPanel>(panel);
+      NSOpenPanel* open_panel = base::apple::ObjCCast<NSOpenPanel>(panel);
       // Verify that for types other than save file dialogs, an NSOpenPanel is
       // created.
       ASSERT_TRUE(open_panel);
-      EXPECT_EQ_BOOL(test_cases[i].options & PICK_FILES,
-                     open_panel.canChooseFiles);
-      EXPECT_EQ_BOOL(test_cases[i].options & PICK_DIRS,
+      EXPECT_EQ_BOOL(test_case.options & PICK_FILES, open_panel.canChooseFiles);
+      EXPECT_EQ_BOOL(test_case.options & PICK_DIRS,
                      open_panel.canChooseDirectories);
-      EXPECT_EQ_BOOL(test_cases[i].options & MULTIPLE_SELECTION,
+      EXPECT_EQ_BOOL(test_case.options & MULTIPLE_SELECTION,
                      open_panel.allowsMultipleSelection);
     }
   }
@@ -453,15 +454,11 @@ TEST_F(SelectFileDialogMacTest, MultipleDialogs) {
 
   // In 10.15, file picker dialogs are remote, and the restriction of apps not
   // being allowed to OK their own file requests has been extended from just
-  // sandboxed apps to all apps. If we can test OK-ing our own dialogs, sure,
-  // but if not, at least try to close them all.
+  // sandboxed apps to all apps. Since the dialogs can't be OKed, at least close
+  // them all.
   base::RunLoop run_loop2;
   SetDialogClosedCallback(run_loop2.QuitClosure());
-  if (base::mac::IsAtMostOS10_14()) {
-    [panel2 ok:nil];
-  } else {
-    [panel2 cancel:nil];
-  }
+  [panel2 cancel:nil];
   run_loop2.Run();
   EXPECT_EQ(0lu, GetActivePanelCount());
 
@@ -478,9 +475,9 @@ TEST_F(SelectFileDialogMacTest, DefaultPath) {
   panel.extensionHidden = NO;
 
   EXPECT_EQ(args.default_path.DirName(),
-            base::mac::NSStringToFilePath(panel.directoryURL.path));
+            base::apple::NSStringToFilePath(panel.directoryURL.path));
   EXPECT_EQ(args.default_path.BaseName(),
-            base::mac::NSStringToFilePath(panel.nameFieldStringValue));
+            base::apple::NSStringToFilePath(panel.nameFieldStringValue));
 }
 
 // Verify that the file dialog does not hide extension for filenames with
@@ -524,34 +521,36 @@ TEST_F(SelectFileDialogMacTest, KeepExtensionVisible) {
   EXPECT_FALSE(panel.extensionHidden);
 }
 
-// Test to ensure lifetime is sound if a reference to
-// the panel outlives the delegate.
-TEST_F(SelectFileDialogMacTest, Lifetime) {
-  base::scoped_nsobject<NSSavePanel> panel;
-  @autoreleasepool {
-    FileDialogArguments args;
-    // Set a type (Save dialogs do not have a delegate).
-    args.type = SelectFileDialog::SELECT_OPEN_MULTI_FILE;
-    panel.reset([SelectFileWithParams(args) retain]);
+TEST_F(SelectFileDialogMacTest, DontCrashWithBogusExtension) {
+  SelectFileDialog::FileTypeInfo file_type_info;
+  file_type_info.extensions = {{"bogus type", "j.pg"}};
 
-    EXPECT_TRUE([panel isVisible]);
-    EXPECT_NE(nil, [panel delegate]);
+  FileDialogArguments args;
+  args.file_types = &file_type_info;
 
-    // Newer versions of AppKit (>= 10.13) appear to clear out weak delegate
-    // pointers when dealloc is called on the delegate. Put a ref into the
-    // autorelease pool to simulate what happens on older versions.
-    [[[panel delegate] retain] autorelease];
+  NSSavePanel* panel = SelectFileWithParams(args);
+  // If execution gets this far, there was no crash.
+  EXPECT_TRUE(panel);
+}
 
-    // This will cause the `SelectFileDialogImpl` destructor to be called, and
-    // it will tear down the `SelectFileDialogBridge` via a Mojo IPC.
-    ResetDialog();
+TEST_F(SelectFileDialogMacTest, NonTitledParentWindow) {
+  FileDialogArguments args;
+  NSSavePanel* panel =
+      SelectFileWithParams(args, NSWindowStyleMaskBorderless);
+  EXPECT_TRUE(panel);
+  EXPECT_TRUE(panel.visible);
+  EXPECT_EQ(panel.level, NSModalPanelWindowLevel);
+}
 
-    // The `SelectFileDialogBridge` destructor invokes `[panel cancel]`. That
-    // should close the panel, and run the completion handler.
-    EXPECT_EQ(nil, [panel delegate]);
-    EXPECT_FALSE([panel isVisible]);
-  }
-  EXPECT_EQ(nil, [panel delegate]);
+TEST_F(SelectFileDialogMacTest, FloatingParentWindow) {
+  FileDialogArguments args;
+  NSSavePanel* panel =
+      SelectFileWithParams(args, NSWindowStyleMaskBorderless,
+                           NSFloatingWindowLevel);
+  EXPECT_TRUE(panel);
+  EXPECT_TRUE(panel.visible);
+  EXPECT_GE(panel.level, NSModalPanelWindowLevel);
+  EXPECT_GT(panel.level, NSFloatingWindowLevel);
 }
 
 }  // namespace ui::test

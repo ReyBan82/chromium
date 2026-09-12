@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -38,27 +38,11 @@ bool ComputeUnignoredSelectionEndpoint(
   // The reason is that |position| becomes null because no AXTreeManager is
   // registered for that |tree|'s AXTreeID.
   // TODO(accessibility): investigate and fix this if needed.
-  if (!position->IsIgnored())
+  if (!position->IsIgnored()) {
     return true;  // We assume that unignored positions are already valid.
-
-  position =
-      position->AsValidPosition()->AsUnignoredPosition(adjustment_behavior);
-
-  // Moving to an unignored position might have placed the position on a leaf
-  // node. Any selection endpoint that is inside a leaf node is expressed as a
-  // text position in AXTreeData. (Note that in this context "leaf node" means
-  // a node with no children or with only ignored children. This does not
-  // refer to a platform leaf.)
-  if (position->IsLeafTreePosition())
-    position = position->AsTextPosition();
-
-  // We do not expect the selection to have an endpoint on an inline text
-  // box as this will create issues with parts of the code that don't use
-  // inline text boxes.
-  if (position->IsTextPosition() &&
-      position->GetRole() == ax::mojom::Role::kInlineTextBox) {
-    position = position->CreateParentPosition();
   }
+
+  position = position->AsUnignoredSelectionPosition(adjustment_behavior);
 
   switch (position->kind()) {
     case AXPositionKind::NULL_POSITION:
@@ -97,8 +81,8 @@ AXSelection::AXSelection(const AXTree& tree)
       tree_id_(tree.GetAXTreeID()) {}
 
 AXSelection& AXSelection::ToUnignoredSelection() {
-  DCHECK_NE(tree_id_, AXTreeIDUnknown())
-      << "Tree is not registered with a tree manager";
+  // If the tree is not registered with an AXTreeManager, it
+  // is a initial tree with no data, do not calculate selection.
   const AXTreeManager* manager = AXTreeManager::FromID(tree_id_);
   if (!manager)
     return *this;

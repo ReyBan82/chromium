@@ -11,7 +11,7 @@ namespace ash {
 
 class OfflineLoginScreen;
 
-class OfflineLoginView : public base::SupportsWeakPtr<OfflineLoginView> {
+class OfflineLoginView {
  public:
   inline constexpr static StaticOobeScreenId kScreenId{"offline-login",
                                                        "OfflineLoginScreen"};
@@ -20,7 +20,7 @@ class OfflineLoginView : public base::SupportsWeakPtr<OfflineLoginView> {
   virtual ~OfflineLoginView() = default;
 
   // Shows the contents of the screen.
-  virtual void Show(base::Value::Dict params) = 0;
+  virtual void Show(base::DictValue params) = 0;
 
   // Hide the contents of the screen.
   virtual void Hide() = 0;
@@ -29,17 +29,20 @@ class OfflineLoginView : public base::SupportsWeakPtr<OfflineLoginView> {
   virtual void Reset() = 0;
 
   // Proceeds to the password input dialog.
-  virtual void ShowPasswordPage() = 0;
+  virtual void ShowPasswordPage(bool authenticate_by_pin) = 0;
 
   // Shows error pop-up when the user cannot login offline.
   virtual void ShowOnlineRequiredDialog() = 0;
 
   // Shows error message for not matching email/password pair.
   virtual void ShowPasswordMismatchMessage() = 0;
+
+  // Gets a WeakPtr to the instance.
+  virtual base::WeakPtr<OfflineLoginView> AsWeakPtr() = 0;
 };
 
-class OfflineLoginScreenHandler : public BaseScreenHandler,
-                                  public OfflineLoginView {
+class OfflineLoginScreenHandler final : public BaseScreenHandler,
+                                        public OfflineLoginView {
  public:
   using TView = OfflineLoginView;
   OfflineLoginScreenHandler();
@@ -54,16 +57,20 @@ class OfflineLoginScreenHandler : public BaseScreenHandler,
                           const std::string& password);
 
   // OfflineLoginView:
-  void Show(base::Value::Dict params) override;
+  void Show(base::DictValue params) override;
   void Hide() override;
   void Reset() override;
-  void ShowPasswordPage() override;
+  void ShowPasswordPage(bool authenticate_by_pin) override;
   void ShowOnlineRequiredDialog() override;
   void ShowPasswordMismatchMessage() override;
+  base::WeakPtr<OfflineLoginView> AsWeakPtr() override;
 
   // BaseScreenHandler:
   void DeclareLocalizedValues(
       ::login::LocalizedValuesBuilder* builder) override;
+
+ private:
+  base::WeakPtrFactory<OfflineLoginView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

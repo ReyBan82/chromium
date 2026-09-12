@@ -71,6 +71,8 @@ GesturePropertiesService::GesturePropertiesService(
     mojo::PendingReceiver<ozone::mojom::GesturePropertiesService> receiver)
     : prop_provider_(provider), receiver_(this, std::move(receiver)) {}
 
+GesturePropertiesService::~GesturePropertiesService() = default;
+
 void GesturePropertiesService::ListDevices(ListDevicesCallback reply) {
   base::flat_map<int, std::string> response = {};
   std::vector<int> ids;
@@ -112,6 +114,12 @@ void GesturePropertiesService::SetProperty(
     return;
   }
   if (property->IsReadOnly()) {
+    std::move(reply).Run(ozone::mojom::SetGesturePropErrorCode::READ_ONLY);
+    return;
+  }
+  // Block modification of sensitive properties via D-Bus.
+  // See b/485918079.
+  if (name == "Log Path") {
     std::move(reply).Run(ozone::mojom::SetGesturePropErrorCode::READ_ONLY);
     return;
   }

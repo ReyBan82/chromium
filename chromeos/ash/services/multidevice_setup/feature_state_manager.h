@@ -21,13 +21,14 @@ class FeatureStateManager {
  public:
   using FeatureStatesMap = base::flat_map<mojom::Feature, mojom::FeatureState>;
 
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
-    virtual ~Observer() = default;
-
     // Invoked when one or more features have changed state.
     virtual void OnFeatureStatesChange(
         const FeatureStatesMap& feature_states_map) = 0;
+
+   protected:
+    ~Observer() override = default;
   };
 
   FeatureStateManager(const FeatureStateManager&) = delete;
@@ -39,8 +40,7 @@ class FeatureStateManager {
 
   // Attempts to enable or disable the feature; returns whether this operation
   // succeeded. A feature can only be changed via this function if the current
-  // state is mojom::FeatureState::kEnabledByUser,
-  // mojom::FeatureState::kFurtherSetupRequired or
+  // state is mojom::FeatureState::kEnabledByUser or
   // mojom::FeatureState::kDisabledByUser.
   bool SetFeatureEnabledState(mojom::Feature feature, bool enabled);
 
@@ -58,7 +58,7 @@ class FeatureStateManager {
   void NotifyFeatureStatesChange(const FeatureStatesMap& feature_states_map);
 
  private:
-  base::ObserverList<Observer>::Unchecked observer_list_;
+  base::ObserverList<Observer> observer_list_;
 };
 
 std::ostream& operator<<(std::ostream& stream,

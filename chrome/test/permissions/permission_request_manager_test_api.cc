@@ -5,62 +5,46 @@
 #include "chrome/test/permissions/permission_request_manager_test_api.h"
 
 #include <memory>
+
 #include "base/functional/bind.h"
-#include "chrome/browser/ui/browser.h"
+#include "base/functional/callback_helpers.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/browser/ui/views/permissions/permission_prompt_bubble_view.h"
+#include "chrome/browser/ui/views/permissions/permission_prompt_bubble_base_view.h"
 #include "chrome/browser/ui/views/permissions/permission_prompt_desktop.h"
 #include "components/permissions/permission_request.h"
+#include "components/permissions/permission_request_data.h"
+#include "components/permissions/request_type.h"
+#include "components/permissions/resolvers/content_setting_permission_resolver.h"
 #include "ui/views/widget/widget.h"
 
 namespace test {
-namespace {
-
-// Wraps a PermissionRequest so that it can pass a closure to itself to the
-// PermissionRequest constructor. Without this wrapper, there's no way to
-// handle all destruction paths.
-class TestPermissionRequestOwner {
- public:
-  explicit TestPermissionRequestOwner(permissions::RequestType type) {
-    const bool user_gesture = true;
-    auto decided = [](ContentSetting, bool, bool) {};
-    request_ = std::make_unique<permissions::PermissionRequest>(
-        GURL("https://example.com"), type, user_gesture,
-        base::BindRepeating(decided),
-        base::BindOnce(&TestPermissionRequestOwner::DeleteThis,
-                       base::Unretained(this)));
-  }
-
-  TestPermissionRequestOwner(const TestPermissionRequestOwner&) = delete;
-  TestPermissionRequestOwner& operator=(const TestPermissionRequestOwner&) =
-      delete;
-
-  permissions::PermissionRequest* request() { return request_.get(); }
-
- private:
-  void DeleteThis() { delete this; }
-
-  std::unique_ptr<permissions::PermissionRequest> request_;
-};
-
-}  // namespace
 
 PermissionRequestManagerTestApi::PermissionRequestManagerTestApi(
     permissions::PermissionRequestManager* manager)
     : manager_(manager) {}
 
 PermissionRequestManagerTestApi::PermissionRequestManagerTestApi(
-    Browser* browser)
+    BrowserWindowInterface* browser)
     : PermissionRequestManagerTestApi(
           permissions::PermissionRequestManager::FromWebContents(
-              browser->tab_strip_model()->GetActiveWebContents())) {}
+              browser->GetTabStripModel()->GetActiveWebContents())) {}
 
 void PermissionRequestManagerTestApi::AddSimpleRequest(
     content::RenderFrameHost* source_frame,
     permissions::RequestType type) {
-  TestPermissionRequestOwner* request_owner =
-      new TestPermissionRequestOwner(type);
-  manager_->AddRequest(source_frame, request_owner->request());
+  const bool user_gesture = true;
+  manager_->AddRequest(
+      source_frame,
+      std::make_unique<permissions::PermissionRequest>(
+          std::make_unique<permissions::PermissionRequestData>(
+              type, /*user_gesture=*/user_gesture, permission_request_origin_),
+          base::DoNothing()));
+}
+
+void PermissionRequestManagerTestApi::SetOrigin(
+    const GURL& permission_request_origin) {
+  permission_request_origin_ = permission_request_origin;
 }
 
 views::Widget* PermissionRequestManagerTestApi::GetPromptWindow() {

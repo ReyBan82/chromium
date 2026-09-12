@@ -6,14 +6,14 @@
 
 #include <string>
 
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
 #include "content/public/test/browser_test.h"
 
 class ImportLockDialogViewBrowserTest : public DialogBrowserTest {
  public:
-  ImportLockDialogViewBrowserTest() {}
+  ImportLockDialogViewBrowserTest() = default;
 
   ImportLockDialogViewBrowserTest(const ImportLockDialogViewBrowserTest&) =
       delete;
@@ -22,7 +22,7 @@ class ImportLockDialogViewBrowserTest : public DialogBrowserTest {
 
   // DialogBrowserTest:
   void ShowUi(const std::string& name) override {
-    gfx::NativeWindow native_window = browser()->window()->GetNativeWindow();
+    gfx::NativeWindow native_window = browser()->GetWindow()->GetNativeWindow();
     ImportLockDialogView::Show(native_window, base::OnceCallback<void(bool)>());
   }
 };

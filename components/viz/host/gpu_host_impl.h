@@ -6,7 +6,7 @@
 #define COMPONENTS_VIZ_HOST_GPU_HOST_IMPL_H_
 
 #include <map>
-#include <queue>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -23,9 +23,12 @@
 #include "base/values.h"
 #include "build/build_config.h"
 #include "components/discardable_memory/public/mojom/discardable_shared_memory_manager.mojom.h"
+#include "components/persistent_cache/pending_backend.h"
 #include "components/viz/common/buildflags.h"
 #include "components/viz/host/viz_host_export.h"
-#include "gpu/command_buffer/common/activity_flags.h"
+#include "components/viz/service/debugger/mojom/viz_debugger.mojom.h"
+#include "gpu/command_buffer/common/shared_image_capabilities.h"
+#include "gpu/command_buffer/common/shm_count.h"
 #include "gpu/config/gpu_domain_guilt.h"
 #include "gpu/ipc/common/gpu_disk_cache_type.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
@@ -36,9 +39,9 @@
 #include "services/service_manager/public/mojom/service.mojom.h"
 #include "services/viz/privileged/mojom/compositing/frame_sink_manager.mojom.h"
 #include "services/viz/privileged/mojom/gl/gpu_host.mojom.h"
+#include "services/viz/privileged/mojom/gl/gpu_logging.mojom.h"
 #include "services/viz/privileged/mojom/gl/gpu_service.mojom.h"
 #include "services/viz/privileged/mojom/viz_main.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/gpu_extra_info.h"
 #include "url/gurl.h"
 
@@ -58,7 +61,8 @@ class GpuDiskCache;
 
 namespace viz {
 
-class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
+class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost,
+                                    public mojom::GpuLogging
 #if BUILDFLAG(USE_VIZ_DEBUGGER)
     ,
                                     public mojom::VizDebugOutput
@@ -72,8 +76,8 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
     virtual void DidInitialize(
         const gpu::GPUInfo& gpu_info,
         const gpu::GpuFeatureInfo& gpu_feature_info,
-        const absl::optional<gpu::GPUInfo>& gpu_info_for_hardware_gpu,
-        const absl::optional<gpu::GpuFeatureInfo>&
+        const std::optional<gpu::GPUInfo>& gpu_info_for_hardware_gpu,
+        const std::optional<gpu::GpuFeatureInfo>&
             gpu_feature_info_for_hardware_gpu,
         const gfx::GpuExtraInfo& gpu_extra_info) = 0;
     virtual void DidFailInitialize() = 0;
@@ -107,7 +111,7 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
 #endif
 
    protected:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
   };
 
   struct VIZ_HOST_EXPORT InitParams {
@@ -126,13 +130,16 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
     std::string product;
 
     // Number of frames to CompositorFrame activation deadline.
-    absl::optional<uint32_t> deadline_to_synchronize_surfaces;
+    std::optional<uint32_t> deadline_to_synchronize_surfaces;
 
     // Task runner corresponding to the main thread.
     scoped_refptr<base::SingleThreadTaskRunner> main_thread_task_runner;
 
     // Whether this GPU process is used for GPU info collection only.
     bool info_collection_gpu_process = false;
+
+    // Whether the GPU service is running in the host process.
+    bool gpu_service_running_in_process = false;
   };
 
   enum class EstablishChannelStatus {
@@ -144,9 +151,9 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
     kSuccess,
   };
   using EstablishChannelCallback =
-      base::OnceCallback<void(mojo::ScopedMessagePipeHandle,
-                              const gpu::GPUInfo&,
+      base::OnceCallback<void(const gpu::GPUInfo&,
                               const gpu::GpuFeatureInfo&,
+                              const gpu::SharedImageCapabilities&,
                               EstablishChannelStatus)>;
 
   GpuHostImpl(Delegate* delegate,
@@ -163,6 +170,7 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
 
   void SetProcessId(base::ProcessId pid);
   void OnProcessCrashed();
+  void NotifyWorkloadIncrease();
 
   // Adds a connection error handler for the GpuService.
   void AddConnectionErrorHandler(base::OnceClosure handler);
@@ -183,18 +191,21 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
   void EstablishGpuChannel(int client_id,
                            uint64_t client_tracing_id,
                            bool is_gpu_host,
+                           bool enable_extra_handles_validation,
                            bool sync,
+                           mojo::ScopedMessagePipeHandle handle,
                            EstablishChannelCallback callback);
   void SetChannelClientPid(int client_id, base::ProcessId client_pid);
   void SetChannelDiskCacheHandle(int client_id,
                                  const gpu::GpuDiskCacheHandle& handle);
   void RemoveChannelDiskCacheHandles(int client_id);
   void CloseChannel(int client_id);
+  void CancelEstablishGpuChannel(int client_id);
 
 #if BUILDFLAG(USE_VIZ_DEBUGGER)
   // Command as a Json string that the visual debugging instance interprets as
   // stream filtering.
-  void FilterVisualDebugStream(base::Value filter_data);
+  void FilterVisualDebugStream(base::DictValue filter_data);
 
   // Establishes the connection between the visual debugging instance and the
   // output stream.
@@ -217,6 +228,9 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
                       gpu::SurfaceHandle child_window);
 #endif
 
+  void MaybeSendFontRenderParams();
+  gpu::GpuProcessHostShmCount* GetShaderCacheShmCountForTesting();
+
  private:
   friend class GpuHostImplTestApi;
 
@@ -225,6 +239,12 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
   void TerminateGpuProcess(const std::string& message);
 #endif  // BUILDFLAG(IS_OZONE)
 
+  void InitPersistentCache();
+  void SetChannelPersistentCachePendingBackend(
+      int client_id,
+      const gpu::GpuDiskCacheHandle& handle,
+      persistent_cache::PendingBackend pending_backend);
+
   std::string GetShaderPrefixKey();
 
   void LoadedBlob(const gpu::GpuDiskCacheHandle& handle,
@@ -232,19 +252,21 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
                   const std::string& data);
   void OnDiskCacheHandleDestoyed(const gpu::GpuDiskCacheHandle& handle);
 
-  void OnChannelEstablished(int client_id,
-                            bool sync,
-                            mojo::ScopedMessagePipeHandle channel_handle,
-                            const gpu::GPUInfo& gpu_info,
-                            const gpu::GpuFeatureInfo& gpu_feature_info);
+  void OnChannelEstablished(
+      int client_id,
+      bool sync,
+      bool success,
+      const gpu::GPUInfo& gpu_info,
+      const gpu::GpuFeatureInfo& gpu_feature_info,
+      const gpu::SharedImageCapabilities& shared_image_capabilities);
   void MaybeShutdownGpuProcess();
 
   // mojom::GpuHost:
   void DidInitialize(
       const gpu::GPUInfo& gpu_info,
       const gpu::GpuFeatureInfo& gpu_feature_info,
-      const absl::optional<gpu::GPUInfo>& gpu_info_for_hardware_gpu,
-      const absl::optional<gpu::GpuFeatureInfo>&
+      const std::optional<gpu::GPUInfo>& gpu_info_for_hardware_gpu,
+      const std::optional<gpu::GpuFeatureInfo>&
           gpu_feature_info_for_hardware_gpu,
       const gfx::GpuExtraInfo& gpu_extra_info) override;
   void DidFailInitialize() override;
@@ -253,8 +275,7 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
   void DidDestroyOffscreenContext(const GURL& url) override;
   void DidDestroyChannel(int32_t client_id) override;
   void DidDestroyAllChannels() override;
-  void DidLoseContext(bool offscreen,
-                      gpu::error::ContextLostReason reason,
+  void DidLoseContext(gpu::error::ContextLostReason reason,
                       const GURL& active_url) override;
   void DisableGpuCompositing() override;
   void DidUpdateGPUInfo(const gpu::GPUInfo& gpu_info) override;
@@ -268,6 +289,9 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
   void StoreBlobToDisk(const gpu::GpuDiskCacheHandle& handle,
                        const std::string& key,
                        const std::string& blob) override;
+  void ClearGrShaderDiskCache() override;
+
+  // mojom::GpuLogging:
   void RecordLogMessage(int32_t severity,
                         const std::string& header,
                         const std::string& message) override;
@@ -276,6 +300,11 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
 #if BUILDFLAG(USE_VIZ_DEBUGGER)
   void LogFrame(base::Value frame_data) override;
 #endif
+
+  void ClearPersistentCaches(bool delete_cache_files);
+  void OnPersistentCacheFilesCreated(
+      gpu::GpuDiskCacheHandle handle,
+      persistent_cache::PendingBackend pending_backend);
 
   // Can be modified in tests by GpuHostImplTestApi.
   raw_ptr<Delegate> delegate_;
@@ -289,7 +318,9 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
       info_collection_gpu_service_remote_;
 #endif
   mojo::Receiver<mojom::GpuHost> gpu_host_receiver_{this};
-  gpu::GpuProcessHostActivityFlags activity_flags_;
+  mojo::Receiver<mojom::GpuLogging> gpu_logging_receiver_{this};
+
+  gpu::GpuProcessHostShmCount use_shader_cache_shm_count_;
 
 #if BUILDFLAG(USE_VIZ_DEBUGGER)
   mojo::Receiver<mojom::VizDebugOutput> viz_debug_output_{this};
@@ -314,7 +345,24 @@ class VIZ_HOST_EXPORT GpuHostImpl : public mojom::GpuHost
   // service, but haven't heard back about yet.
   base::flat_map<int, EstablishChannelCallback> channel_requests_;
 
+  // Track the client IDs of requests that were cancelled. The value is the
+  // number of cancelled requests for that client ID. Their replies will be
+  // ignored.
+  base::flat_map<int, int> cancelled_channel_requests_;
+
   base::OneShotTimer shutdown_timeout_;
+
+  // Opened persistent cache files which have not been forwarded to the GPU
+  // process yet.
+  std::map<gpu::GpuDiskCacheHandle, persistent_cache::PendingBackend>
+      persistent_cache_files_;
+
+  // Signal that the GPU process is ready to accept persistent cache files. They
+  // should be forwarded as soon as they are loaded.
+  bool send_persistent_cache_files_to_service_ = false;
+
+  // This is only set in GpuHostImpl::DidInitialize().
+  std::optional<bool> gpu_uses_graphite_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 

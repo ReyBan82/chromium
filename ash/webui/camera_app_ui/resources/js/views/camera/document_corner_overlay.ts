@@ -4,22 +4,14 @@
 
 import {assert, assertInstanceof, assertString} from '../../assert.js';
 import * as dom from '../../dom.js';
-import {
-  Point,
-  PolarVector,
-  Vector,
-  vectorFromPoints,
-} from '../../geometry.js';
+import {Point, PolarVector, Vector, vectorFromPoints} from '../../geometry.js';
 import {I18nString} from '../../i18n_string.js';
 import {DeviceOperator} from '../../mojo/device_operator.js';
-import {
-  PointF,
-} from '../../mojo/type.js';
-import {
-  closeEndpoint,
-  MojoEndpoint,
-} from '../../mojo/util.js';
+import type {PointF} from '../../mojo/type.js';
+import type {MojoEndpoint} from '../../mojo/util.js';
+import {closeEndpoint} from '../../mojo/util.js';
 import {speak} from '../../spoken_msg.js';
+import * as state from '../../state.js';
 import * as util from '../../util.js';
 
 /**
@@ -236,7 +228,10 @@ export class DocumentCornerOverlay {
             this.onNoCornerDetected();
             return;
           }
-          this.maybeUpdatePointOfInterest(corners);
+          // Updating POI shouldn't block showing the new document corner
+          // indicators, and multiple updates to POI can be called at the same
+          // time (the new one will override the old one).
+          void this.maybeUpdatePointOfInterest(corners);
           const rect = this.cornerContainer.getBoundingClientRect();
           function toOverlaySpace(pt: Point) {
             return new Point(rect.width * pt.x, rect.height * pt.y);
@@ -256,6 +251,7 @@ export class DocumentCornerOverlay {
     this.observer = null;
     this.hide();
     this.clearNoDocumentTimer();
+    state.set(state.State.ENABLE_SCAN_DOCUMENT, false);
   }
 
   isEnabled(): boolean {
@@ -279,8 +275,8 @@ export class DocumentCornerOverlay {
       let centerX = 0;
       let centerY = 0;
       let maxEdgeLength = 0;
-      const shouldUpdatePOI = (() => {
-        let isPreviousPOIOutsideNewDoc = this.prevDocArea === null;
+      const shouldUpdatePoi = (() => {
+        let isPreviousPoiOutsideNewDoc = this.prevDocArea === null;
         const {x: xp, y: yp} = this.prevDocArea?.center ?? {x: 0, y: 0};
         for (let i = 0; i < corners.length; ++i) {
           const {x: x1, y: y1} = corners[i];
@@ -294,16 +290,16 @@ export class DocumentCornerOverlay {
 
           const d = (x2 - x1) * (yp - y1) - (xp - x1) * (y2 - y1);
           if (d >= 0) {
-            isPreviousPOIOutsideNewDoc = true;
+            isPreviousPoiOutsideNewDoc = true;
           }
         }
         const isDocScaleChanges = this.prevDocArea === null ||
             Math.abs(maxEdgeLength - this.prevDocArea.scale) /
                     this.prevDocArea.scale >
                 THRESHOLD_SCALE_DIFF;
-        return isPreviousPOIOutsideNewDoc || isDocScaleChanges;
+        return isPreviousPoiOutsideNewDoc || isDocScaleChanges;
       })();
-      if (!shouldUpdatePOI) {
+      if (!shouldUpdatePoi) {
         return null;
       }
       return {center: new Point(centerX, centerY), scale: maxEdgeLength};

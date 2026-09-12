@@ -2,10 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as Common from 'devtools/core/common/common.js';
+import * as Main from 'devtools/entrypoints/main/main.js';
+
 (async function() {
   TestRunner.addResult(`Tests that console is cleared via console.clear() method\n`);
 
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
   await TestRunner.evaluateInPagePromise(`
     function log()
@@ -24,11 +29,11 @@
 
   TestRunner.runTestSuite([
     async function clearFromConsoleAPI(next) {
-      await TestRunner.RuntimeAgent.evaluate('log();');
+      await TestRunner.RuntimeAgent.invoke_evaluate({expression: 'log();'});
       TestRunner.addResult('=== Before clear ===');
       await ConsoleTestRunner.dumpConsoleMessages();
 
-      await TestRunner.RuntimeAgent.evaluate('clearConsoleFromPage();');
+      await TestRunner.RuntimeAgent.invoke_evaluate({expression: 'clearConsoleFromPage();'});
 
       TestRunner.addResult('=== After clear ===');
       await ConsoleTestRunner.dumpConsoleMessages();
@@ -36,16 +41,16 @@
     },
 
     async function shouldNotClearWithPreserveLog(next) {
-      await TestRunner.RuntimeAgent.evaluate('log();');
+      await TestRunner.RuntimeAgent.invoke_evaluate({expression: 'log();'});
       TestRunner.addResult('=== Before clear ===');
       await ConsoleTestRunner.dumpConsoleMessages();
-      Common.moduleSetting('preserveConsoleLog').set(true);
+      Main.MainImpl.MainImpl.universeForTest.settings.moduleSetting('preserve-console-log').set(true);
 
-      await TestRunner.RuntimeAgent.evaluate('clearConsoleFromPage();');
+      await TestRunner.RuntimeAgent.invoke_evaluate({expression: 'clearConsoleFromPage();'});
 
       TestRunner.addResult('=== After clear ===');
       await ConsoleTestRunner.dumpConsoleMessages();
-      Common.moduleSetting('preserveConsoleLog').set(false);
+      Main.MainImpl.MainImpl.universeForTest.settings.moduleSetting('preserve-console-log').set(false);
       next();
     }
   ]);

@@ -5,11 +5,10 @@
 #ifndef COMPONENTS_ENTERPRISE_CONTENT_CLIPBOARD_RESTRICTION_SERVICE_H_
 #define COMPONENTS_ENTERPRISE_CONTENT_CLIPBOARD_RESTRICTION_SERVICE_H_
 
-#include <map>
 #include <memory>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/prefs/pref_change_registrar.h"
@@ -21,8 +20,12 @@ class BrowserContext;
 
 class PrefService;
 
-class ClipboardRestrictionService : KeyedService {
+class ClipboardRestrictionService : public KeyedService {
  public:
+  // Use
+  // ClipboardRestrictionServiceFactory::BuildServiceInstanceForBrowserContext
+  // instead.
+  explicit ClipboardRestrictionService(PrefService* pref_service);
   ClipboardRestrictionService(const ClipboardRestrictionService&) = delete;
   ClipboardRestrictionService& operator=(const ClipboardRestrictionService&) =
       delete;
@@ -44,8 +47,6 @@ class ClipboardRestrictionService : KeyedService {
  private:
   friend class ClipboardRestrictionServiceTest;
   friend class ClipboardRestrictionServiceFactory;
-
-  explicit ClipboardRestrictionService(PrefService* pref_service);
 
   void UpdateSettings();
 
@@ -73,13 +74,12 @@ class ClipboardRestrictionServiceFactory : BrowserContextKeyedServiceFactory {
  private:
   ClipboardRestrictionServiceFactory();
   ~ClipboardRestrictionServiceFactory() override;
-  friend struct base::DefaultSingletonTraits<
-      ClipboardRestrictionServiceFactory>;
+  friend base::NoDestructor<ClipboardRestrictionServiceFactory>;
 
   // BrowserContextKeyedServiceFactory:
   content::BrowserContext* GetBrowserContextToUse(
       content::BrowserContext* context) const override;
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
 };
 

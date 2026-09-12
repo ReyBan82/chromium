@@ -6,7 +6,6 @@
 
 #include <utility>
 
-#include "base/metrics/histogram_macros.h"
 #include "cc/base/math_util.h"
 
 namespace cc {
@@ -23,15 +22,14 @@ void TileDrawInfo::AsValueInto(base::trace_event::TracedValue* state) const {
 }
 
 void TileDrawInfo::SetResource(ResourcePool::InUsePoolResource resource,
-                               bool resource_is_checker_imaged,
-                               bool is_premultiplied) {
+                               bool resource_is_checker_imaged) {
   DCHECK(!resource_);
   DCHECK(resource);
 
   mode_ = RESOURCE_MODE;
   is_resource_ready_to_draw_ = false;
   resource_is_checker_imaged_ = resource_is_checker_imaged;
-  is_premultiplied_ = is_premultiplied;
+
   resource_ = std::move(resource);
 }
 
@@ -46,7 +44,6 @@ ResourcePool::InUsePoolResource TileDrawInfo::TakeResource() {
   DCHECK(resource_);
   is_resource_ready_to_draw_ = false;
   resource_is_checker_imaged_ = false;
-  is_premultiplied_ = false;
   return std::move(resource_);
 }
 

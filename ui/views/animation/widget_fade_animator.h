@@ -11,7 +11,6 @@
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "ui/gfx/animation/linear_animation.h"
 #include "ui/gfx/animation/tween.h"
 #include "ui/views/animation/animation_delegate_views.h"
@@ -24,7 +23,8 @@ namespace views {
 class Widget;
 
 // Animates a widget's opacity between fully hidden and fully shown, providing
-// a fade-in/fade-out effect.
+// a fade-in/fade-out effect. Also provides an optional slide to animate
+// simultaneously with the fade.
 class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
                                         public WidgetObserver {
  public:
@@ -34,6 +34,16 @@ class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
     kFadeIn,
     kFadeOut,
   };
+
+  // Controls the window show type.
+  enum class WidgetShowType {
+    kNone,
+    kShowActive,
+    kShowInactive,
+  };
+
+  // Controls the direction we slide the hover card during the fade animation.
+  enum class SlideDirection { kNone, kUp, kDown, kLeading, kTrailing };
 
   // Defines a callback for when a fade completes. Not called on cancel. The
   // |animation_type| of the completed animation is specified (it will never be
@@ -66,6 +76,9 @@ class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
   void set_close_on_hide(bool close_on_hide) { close_on_hide_ = close_on_hide; }
   bool close_on_hide() const { return close_on_hide_; }
 
+  void set_show_type(WidgetShowType show_type) { show_type_ = show_type; }
+  WidgetShowType show_type() const { return show_type_; }
+
   Widget* widget() { return widget_; }
 
   bool IsFadingIn() const { return animation_type_ == FadeType::kFadeIn; }
@@ -74,7 +87,8 @@ class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
 
   // Plays the fade-in animation. If the widget is not currently visible, it
   // will be made visible.
-  void FadeIn();
+  void FadeIn(int slide_distance = 0,
+              SlideDirection slide_direction = SlideDirection::kNone);
 
   // Cancels any pending fade-in, leaves the widget at the current opacity to
   // avoid abrupt visual changes. CancelFadeIn() should be followed with
@@ -85,7 +99,8 @@ class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
   // Plays the fade-out animation. At the end of the fade, the widget will be
   // hidden or closed, as per |close_on_hide|. If the widget is already hidden
   // or closed, completes immediately.
-  void FadeOut();
+  void FadeOut(int slide_distance = 0,
+               SlideDirection slide_direction = SlideDirection::kNone);
 
   // Cancels any pending fade-out, returning the widget to 100% opacity. Has no
   // effect if the widget is not fading out.
@@ -95,6 +110,9 @@ class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
   base::CallbackListSubscription AddFadeCompleteCallback(
       FadeCompleteCallback callback);
 
+  // Cancels any pending slide if we are in a slide animation.
+  void CancelSlide(bool snap_to_target);
+
  private:
   // AnimationDelegateViews:
   void AnimationProgressed(const gfx::Animation* animation) override;
@@ -103,10 +121,16 @@ class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
   // WidgetObserver:
   void OnWidgetDestroying(Widget* widget) override;
 
+  bool IsSliding() const;
+  void SetBoundsForSliding(int slide_distance, SlideDirection slide_direction);
+
   raw_ptr<Widget> widget_;
   base::ScopedObservation<Widget, WidgetObserver> widget_observation_{this};
   gfx::LinearAnimation fade_animation_{this};
   FadeType animation_type_ = FadeType::kNone;
+
+  gfx::Rect start_bounds_;
+  gfx::Rect target_bounds_;
 
   // Duration for fade-in animations. The default should be visually pleasing
   // for most applications.
@@ -122,6 +146,10 @@ class VIEWS_EXPORT WidgetFadeAnimator : public AnimationDelegateViews,
 
   // Whether the widget should be closed at the end of a fade-out animation.
   bool close_on_hide_ = false;
+
+  // Controls the window show type. Specifically whether to show the window as
+  // active/inactive, or not show it at all.
+  WidgetShowType show_type_ = WidgetShowType::kShowActive;
 
   base::RepeatingCallbackList<FadeCompleteCallbackSignature>
       fade_complete_callbacks_;

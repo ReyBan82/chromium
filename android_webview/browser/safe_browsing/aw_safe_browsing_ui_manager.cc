@@ -17,10 +17,11 @@
 #include "base/functional/bind.h"
 #include "base/path_service.h"
 #include "components/safe_browsing/content/browser/base_ui_manager.h"
+#include "components/safe_browsing/content/browser/content_unsafe_resource_util.h"
 #include "components/safe_browsing/content/browser/safe_browsing_network_context.h"
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "components/safe_browsing/core/common/safebrowsing_constants.h"
-#include "components/security_interstitials/content/unsafe_resource_util.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_controller.h"
@@ -43,6 +44,7 @@ network::mojom::NetworkContextParamsPtr CreateDefaultNetworkContextParams() {
   network_context_params->cert_verifier_params = content::GetCertVerifierParams(
       cert_verifier::mojom::CertVerifierCreationParams::New());
   network_context_params->user_agent = GetUserAgent();
+  network_context_params->use_platform_ech_policy = true;
   return network_context_params;
 }
 
@@ -70,7 +72,7 @@ void AwSafeBrowsingUIManager::DisplayBlockingPage(
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   WebContents* web_contents =
-      security_interstitials::GetWebContentsForResource(resource);
+      safe_browsing::unsafe_resource_util::GetWebContentsForResource(resource);
   // Check the size of the view
   UIManagerClient* client = UIManagerClient::FromWebContents(web_contents);
   if (!client || !client->CanShowInterstitial()) {
@@ -80,22 +82,6 @@ void AwSafeBrowsingUIManager::DisplayBlockingPage(
     return;
   }
   safe_browsing::BaseUIManager::DisplayBlockingPage(resource);
-}
-
-scoped_refptr<network::SharedURLLoaderFactory>
-AwSafeBrowsingUIManager::GetURLLoaderFactoryOnIOThread() {
-  DCHECK_CURRENTLY_ON(BrowserThread::IO);
-  if (!shared_url_loader_factory_on_io_) {
-    content::GetUIThreadTaskRunner({})->PostTask(
-        FROM_HERE,
-        base::BindOnce(&AwSafeBrowsingUIManager::CreateURLLoaderFactoryForIO,
-                       this,
-                       url_loader_factory_on_io_.BindNewPipeAndPassReceiver()));
-    shared_url_loader_factory_on_io_ =
-        base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
-            url_loader_factory_on_io_.get());
-  }
-  return shared_url_loader_factory_on_io_;
 }
 
 int AwSafeBrowsingUIManager::GetErrorUiType(
@@ -115,29 +101,21 @@ void AwSafeBrowsingUIManager::SendThreatDetails(
       ->ReportThreatDetails(std::move(report));
 }
 
-safe_browsing::BaseBlockingPage*
-AwSafeBrowsingUIManager::CreateBlockingPageForSubresource(
+security_interstitials::SecurityInterstitialPage*
+AwSafeBrowsingUIManager::CreateBlockingPage(
     content::WebContents* contents,
     const GURL& blocked_url,
-    const UnsafeResource& unsafe_resource) {
+    const UnsafeResource& unsafe_resource,
+    bool forward_extension_event,
+    std::optional<base::TimeTicks> blocked_page_shown_timestamp) {
   // The AwWebResourceRequest can't be provided yet, since the navigation hasn't
   // started. Once it has, it will be provided via
   // AwSafeBrowsingBlockingPage::CreatedErrorPageNavigation.
   AwSafeBrowsingBlockingPage* blocking_page =
       AwSafeBrowsingBlockingPage::CreateBlockingPage(
-          this, contents, blocked_url, unsafe_resource, nullptr);
+          this, contents, blocked_url, unsafe_resource, nullptr,
+          blocked_page_shown_timestamp);
   return blocking_page;
-}
-
-void AwSafeBrowsingUIManager::CreateURLLoaderFactoryForIO(
-    mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  auto url_loader_factory_params =
-      network::mojom::URLLoaderFactoryParams::New();
-  url_loader_factory_params->process_id = network::mojom::kBrowserProcessId;
-  url_loader_factory_params->is_corb_enabled = false;
-  network_context_->GetNetworkContext()->CreateURLLoaderFactory(
-      std::move(receiver), std::move(url_loader_factory_params));
 }
 
 scoped_refptr<network::SharedURLLoaderFactory>

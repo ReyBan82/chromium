@@ -4,9 +4,13 @@
 
 package org.chromium.chrome.browser.tabmodel;
 
+import org.chromium.base.Callback;
 import org.chromium.base.ObserverList;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /** A provider that notifies its observers when incognito mode is entered or exited. */
+@NullMarked
 public class IncognitoStateProvider {
     /** An interface to be notified about changes to the incognito state. */
     public interface IncognitoStateObserver {
@@ -17,22 +21,25 @@ public class IncognitoStateProvider {
     /** List of {@link IncognitoStateObserver}s. These are used to broadcast events to listeners. */
     private final ObserverList<IncognitoStateObserver> mIncognitoStateObservers;
 
-    /** A {@link TabModelSelectorObserver} used to know when incognito mode is entered or exited. */
-    private final TabModelSelectorObserver mTabModelSelectorObserver;
+    /** Used to know when incognito mode is entered or exited. */
+    private final Callback<TabModel> mCurrentTabModelObserver;
 
     /** A {@link TabModelSelector} used to know when incognito mode is entered or exited. */
-    private TabModelSelector mTabModelSelector;
+    private @Nullable TabModelSelector mTabModelSelector;
+
+    /**
+     * The last emitted incognito state, or {@code null} if no state has been emitted yet. Used to
+     * prevent redundant observer broadcasts.
+     */
+    private @Nullable Boolean mLastIncognitoState;
 
     public IncognitoStateProvider() {
-        mIncognitoStateObservers = new ObserverList<IncognitoStateObserver>();
+        mIncognitoStateObservers = new ObserverList<>();
 
-        mTabModelSelectorObserver = new TabModelSelectorObserver() {
-            @Override
-            public void onTabModelSelected(TabModel newModel, TabModel oldModel) {
-                // TODO(jinsukkim): Emit this only if the state is different.
-                emitIncognitoStateChanged(newModel.isIncognito());
-            }
-        };
+        mCurrentTabModelObserver =
+                (tabModel) -> {
+                    maybeEmitIncognitoStateChanged(tabModel.isIncognito());
+                };
     }
 
     /**
@@ -44,11 +51,13 @@ public class IncognitoStateProvider {
 
     /**
      * @param observer Add an observer to be notified of incognito state changes. Calls
-     *                 #onIncognitoStateChanged() on the added observer.
+     *     #onIncognitoStateChanged() on the added observer.
      */
     public void addIncognitoStateObserverAndTrigger(IncognitoStateObserver observer) {
         mIncognitoStateObservers.addObserver(observer);
-        observer.onIncognitoStateChanged(isIncognitoSelected());
+        boolean isIncognito = isIncognitoSelected();
+        mLastIncognitoState = isIncognito;
+        observer.onIncognitoStateChanged(isIncognito);
     }
 
     /**
@@ -63,28 +72,44 @@ public class IncognitoStateProvider {
      */
     public void setTabModelSelector(TabModelSelector tabModelSelector) {
         mTabModelSelector = tabModelSelector;
-        mTabModelSelector.addObserver(mTabModelSelectorObserver);
-        emitIncognitoStateChanged(mTabModelSelector.isIncognitoSelected());
+        mTabModelSelector
+                .getCurrentTabModelSupplier()
+                .addSyncObserverAndPostIfNonNull(mCurrentTabModelObserver);
+        maybeEmitIncognitoStateChanged(mTabModelSelector.isIncognitoSelected());
     }
 
-    /**
-     * Destroy {@link IncognitoStateProvider} object.
-     */
+    /** Destroy {@link IncognitoStateProvider} object. */
     public void destroy() {
         if (mTabModelSelector != null) {
-            mTabModelSelector.removeObserver(mTabModelSelectorObserver);
+            mTabModelSelector.getCurrentTabModelSupplier().removeObserver(mCurrentTabModelObserver);
             mTabModelSelector = null;
         }
         mIncognitoStateObservers.clear();
+        mLastIncognitoState = null;
     }
 
     /**
-     * Update incognito-selected state.
+     * Emits an incognito state change notification to registered observers if the state differs
+     * from the last emitted state.
+     *
      * @param isIncognito Whether incognito mode is selected.
      */
-    private void emitIncognitoStateChanged(boolean isIncognito) {
+    private void maybeEmitIncognitoStateChanged(boolean isIncognito) {
+        if (Boolean.valueOf(isIncognito).equals(mLastIncognitoState)) {
+            return;
+        }
+        mLastIncognitoState = isIncognito;
+
         for (IncognitoStateObserver observer : mIncognitoStateObservers) {
             observer.onIncognitoStateChanged(isIncognito);
         }
+    }
+
+    public void setIncognitoStateForTesting(boolean isIncognito) {
+        maybeEmitIncognitoStateChanged(isIncognito);
+    }
+
+    public int getObserverCountForTesting() {
+        return mIncognitoStateObservers.size();
     }
 }

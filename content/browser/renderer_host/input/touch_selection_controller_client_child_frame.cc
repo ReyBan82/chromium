@@ -4,30 +4,54 @@
 
 #include "content/browser/renderer_host/input/touch_selection_controller_client_child_frame.h"
 
+#include <algorithm>
+
 #include "base/check.h"
 #include "base/notreached.h"
-#include "build/chromeos_buildflags.h"
 #include "content/browser/renderer_host/render_widget_host_delegate.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
 #include "content/browser/renderer_host/render_widget_host_view_child_frame.h"
 #include "content/public/browser/touch_selection_controller_client_manager.h"
+#include "third_party/blink/public/mojom/input/input_handler.mojom-shared.h"
 #include "ui/base/clipboard/clipboard.h"
 #include "ui/base/data_transfer_policy/data_transfer_endpoint.h"
-#include "ui/base/pointer/touch_editing_controller.h"
+#include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/base/ui_base_features.h"
-#include "ui/base/ui_base_types.h"
 #include "ui/gfx/geometry/point_conversions.h"
+#include "ui/gfx/geometry/rect_f.h"
+#include "ui/gfx/geometry/size_f.h"
 #include "ui/strings/grit/ui_strings.h"
+#include "ui/touch_selection/touch_editing_controller.h"
 
 namespace content {
+
+namespace {
+
+gfx::PointF ClampPointToRect(const gfx::PointF& point, const gfx::RectF& rect) {
+  return gfx::PointF(std::clamp(point.x(), rect.x(), rect.right()),
+                     std::clamp(point.y(), rect.y(), rect.bottom()));
+}
+
+gfx::SelectionBound ClampSelectionBoundToRect(const gfx::SelectionBound& bound,
+                                              const gfx::RectF& rect) {
+  gfx::SelectionBound clamped_bound(bound);
+  clamped_bound.SetEdge(ClampPointToRect(bound.edge_start(), rect),
+                        ClampPointToRect(bound.edge_end(), rect));
+  clamped_bound.SetVisibleEdge(
+      ClampPointToRect(bound.visible_edge_start(), rect),
+      ClampPointToRect(bound.visible_edge_end(), rect));
+  return clamped_bound;
+}
+
+}  // namespace
 
 TouchSelectionControllerClientChildFrame::
     TouchSelectionControllerClientChildFrame(
         RenderWidgetHostViewChildFrame* rwhv,
         TouchSelectionControllerClientManager* manager)
     : rwhv_(rwhv), manager_(manager) {
-  DCHECK(rwhv);
-  DCHECK(manager_);
+  CHECK(rwhv, base::NotFatalUntil::M152);
+  CHECK(manager_, base::NotFatalUntil::M152);
 }
 
 TouchSelectionControllerClientChildFrame::
@@ -40,29 +64,48 @@ void TouchSelectionControllerClientChildFrame::DidStopFlinging() {
   manager_->DidStopFlinging();
 }
 
+void TouchSelectionControllerClientChildFrame::OnSwipeToMoveCursorBegin() {
+  manager_->OnSwipeToMoveCursorBegin();
+}
+
+void TouchSelectionControllerClientChildFrame::OnSwipeToMoveCursorEnd() {
+  manager_->OnSwipeToMoveCursorEnd();
+}
+
+void TouchSelectionControllerClientChildFrame::OnHitTestRegionUpdated() {
+  manager_->OnClientHitTestRegionUpdated(this);
+}
+
 void TouchSelectionControllerClientChildFrame::
     TransformSelectionBoundsAndUpdate() {
-  gfx::SelectionBound transformed_selection_start(selection_start_);
-  gfx::SelectionBound transformed_selection_end(selection_end_);
+  gfx::RectF local_bounds(gfx::SizeF(rwhv_->GetViewBounds().size()));
+  gfx::SelectionBound clamped_selection_start =
+      ClampSelectionBoundToRect(selection_start_, local_bounds);
+  gfx::SelectionBound clamped_selection_end =
+      ClampSelectionBoundToRect(selection_end_, local_bounds);
+  gfx::SelectionBound transformed_selection_start(clamped_selection_start);
+  gfx::SelectionBound transformed_selection_end(clamped_selection_end);
 
   // TODO(wjmaclean): Get the transform between the views to lower the
   // overhead here, instead of calling the transform functions four times.
-  transformed_selection_start.SetEdge(
-      rwhv_->TransformPointToRootCoordSpaceF(selection_start_.edge_start()),
-      rwhv_->TransformPointToRootCoordSpaceF(selection_start_.edge_end()));
+  transformed_selection_start.SetEdge(rwhv_->TransformPointToRootCoordSpaceF(
+                                          clamped_selection_start.edge_start()),
+                                      rwhv_->TransformPointToRootCoordSpaceF(
+                                          clamped_selection_start.edge_end()));
   transformed_selection_start.SetVisibleEdge(
       rwhv_->TransformPointToRootCoordSpaceF(
-          selection_start_.visible_edge_start()),
+          clamped_selection_start.visible_edge_start()),
       rwhv_->TransformPointToRootCoordSpaceF(
-          selection_start_.visible_edge_end()));
+          clamped_selection_start.visible_edge_end()));
   transformed_selection_end.SetEdge(
-      rwhv_->TransformPointToRootCoordSpaceF(selection_end_.edge_start()),
-      rwhv_->TransformPointToRootCoordSpaceF(selection_end_.edge_end()));
+      rwhv_->TransformPointToRootCoordSpaceF(
+          clamped_selection_end.edge_start()),
+      rwhv_->TransformPointToRootCoordSpaceF(clamped_selection_end.edge_end()));
   transformed_selection_end.SetVisibleEdge(
       rwhv_->TransformPointToRootCoordSpaceF(
-          selection_end_.visible_edge_start()),
+          clamped_selection_end.visible_edge_start()),
       rwhv_->TransformPointToRootCoordSpaceF(
-          selection_end_.visible_edge_end()));
+          clamped_selection_end.visible_edge_end()));
 
   manager_->UpdateClientSelectionBounds(transformed_selection_start,
                                         transformed_selection_end, this, this);
@@ -83,7 +126,8 @@ void TouchSelectionControllerClientChildFrame::ShowTouchSelectionContextMenu(
     const gfx::Point& location) {
   // |location| should be in root-view coordinates, and RenderWidgetHostImpl
   // will do the conversion to renderer coordinates.
-  rwhv_->host()->ShowContextMenuAtPoint(location, ui::MENU_SOURCE_TOUCH_HANDLE);
+  rwhv_->host()->ShowContextMenuAtPoint(
+      location, ui::mojom::MenuSourceType::kTouchHandle);
 }
 
 // Since an active touch selection in a child frame can have its screen position
@@ -94,13 +138,24 @@ void TouchSelectionControllerClientChildFrame::DidScroll() {
   TransformSelectionBoundsAndUpdate();
 }
 
-gfx::Point TouchSelectionControllerClientChildFrame::ConvertFromRoot(
+std::optional<gfx::Point>
+TouchSelectionControllerClientChildFrame::ConvertFromRoot(
     const gfx::PointF& point_f) const {
-  gfx::PointF transformed_point(point_f);
   RenderWidgetHostViewBase* root_view = rwhv_->GetRootRenderWidgetHostView();
-  if (root_view) {
-    root_view->TransformPointToCoordSpaceForView(point_f, rwhv_,
-                                                 &transformed_point);
+  if (!root_view) {
+    return std::nullopt;
+  }
+
+  gfx::PointF transformed_point(point_f);
+  // The root->child transform walks the renderer-supplied aggregated
+  // HitTestRegionList. If the (potentially compromised) embedding renderer
+  // omitted this child's FrameSinkId, the transform fails and the out-param
+  // is left holding the *root* coordinate. Drop the request in that case
+  // rather than dispatching root coordinates to the child renderer.
+  // See https://crbug.com/522399466
+  if (!root_view->TransformPointToCoordSpaceForView(point_f, rwhv_,
+                                                    &transformed_point)) {
+    return std::nullopt;
   }
 
   return gfx::ToRoundedPoint(transformed_point);
@@ -108,7 +163,6 @@ gfx::Point TouchSelectionControllerClientChildFrame::ConvertFromRoot(
 
 bool TouchSelectionControllerClientChildFrame::SupportsAnimation() const {
   NOTREACHED();
-  return false;
 }
 
 void TouchSelectionControllerClientChildFrame::SetNeedsAnimate() {
@@ -118,24 +172,48 @@ void TouchSelectionControllerClientChildFrame::SetNeedsAnimate() {
 void TouchSelectionControllerClientChildFrame::MoveCaret(
     const gfx::PointF& position) {
   RenderWidgetHostDelegate* host_delegate = rwhv_->host()->delegate();
-  if (host_delegate)
-    host_delegate->MoveCaret(ConvertFromRoot(position));
+  if (!host_delegate) {
+    return;
+  }
+  std::optional<gfx::Point> child_position = ConvertFromRoot(position);
+  if (!child_position) {
+    manager_->GetTouchSelectionController()
+        ->HideAndDisallowShowingAutomatically();
+    return;
+  }
+  host_delegate->MoveCaret(*child_position);
 }
 
 void TouchSelectionControllerClientChildFrame::MoveRangeSelectionExtent(
     const gfx::PointF& extent) {
   RenderWidgetHostDelegate* host_delegate = rwhv_->host()->delegate();
-  if (host_delegate)
-    host_delegate->MoveRangeSelectionExtent(ConvertFromRoot(extent));
+  if (!host_delegate) {
+    return;
+  }
+  std::optional<gfx::Point> child_extent = ConvertFromRoot(extent);
+  if (!child_extent) {
+    manager_->GetTouchSelectionController()
+        ->HideAndDisallowShowingAutomatically();
+    return;
+  }
+  host_delegate->MoveRangeSelectionExtent(*child_extent);
 }
 
 void TouchSelectionControllerClientChildFrame::SelectBetweenCoordinates(
     const gfx::PointF& base,
     const gfx::PointF& extent) {
   RenderWidgetHostDelegate* host_delegate = rwhv_->host()->delegate();
-  if (host_delegate) {
-    host_delegate->SelectRange(ConvertFromRoot(base), ConvertFromRoot(extent));
+  if (!host_delegate) {
+    return;
   }
+  std::optional<gfx::Point> child_base = ConvertFromRoot(base);
+  std::optional<gfx::Point> child_extent = ConvertFromRoot(extent);
+  if (!child_base || !child_extent) {
+    manager_->GetTouchSelectionController()
+        ->HideAndDisallowShowingAutomatically();
+    return;
+  }
+  host_delegate->SelectRange(*child_base, *child_extent);
 }
 
 void TouchSelectionControllerClientChildFrame::OnSelectionEvent(
@@ -152,32 +230,36 @@ void TouchSelectionControllerClientChildFrame::OnDragUpdate(
 std::unique_ptr<ui::TouchHandleDrawable>
 TouchSelectionControllerClientChildFrame::CreateDrawable() {
   NOTREACHED();
-  return nullptr;
 }
 
 bool TouchSelectionControllerClientChildFrame::IsCommandIdEnabled(
-    int command_id) const {
+    int command_id,
+    bool can_paste) const {
   bool editable = rwhv_->GetTextInputType() != ui::TEXT_INPUT_TYPE_NONE;
   bool readable = rwhv_->GetTextInputType() != ui::TEXT_INPUT_TYPE_PASSWORD;
-
   bool has_selection = !rwhv_->GetSelectedText().empty();
   switch (command_id) {
-    case ui::TouchEditable::kCut:
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kCut):
       return editable && readable && has_selection;
-    case ui::TouchEditable::kCopy:
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kCopy):
       return readable && has_selection;
-    case ui::TouchEditable::kPaste: {
-      std::u16string result;
-      ui::DataTransferEndpoint data_dst = ui::DataTransferEndpoint(
-          ui::EndpointType::kDefault, /*notify_if_restricted=*/false);
-      ui::Clipboard::GetForCurrentThread()->ReadText(
-          ui::ClipboardBuffer::kCopyPaste, &data_dst, &result);
-      return editable && !result.empty();
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kPaste): {
+      return editable && can_paste;
     }
-#if BUILDFLAG(IS_CHROMEOS)
-    case ui::TouchEditable::kSelectAll:
-      return readable && features::IsTouchTextEditingRedesignEnabled();
-#endif
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kSelectAll): {
+      gfx::Range text_range;
+      if (rwhv_->GetTextRange(&text_range)) {
+        return text_range.length() > rwhv_->GetSelectedText().length();
+      }
+      return true;
+    }
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kSelectWord): {
+      gfx::Range text_range;
+      if (rwhv_->GetTextRange(&text_range)) {
+        return readable && !has_selection && !text_range.is_empty();
+      }
+      return readable && !has_selection;
+    }
     default:
       return false;
   }
@@ -185,28 +267,38 @@ bool TouchSelectionControllerClientChildFrame::IsCommandIdEnabled(
 
 void TouchSelectionControllerClientChildFrame::ExecuteCommand(int command_id,
                                                               int event_flags) {
-  manager_->GetTouchSelectionController()
-      ->HideAndDisallowShowingAutomatically();
+  if (command_id !=
+          std::to_underlying(ui::TouchEditable::MenuCommands::kSelectAll) &&
+      command_id !=
+          std::to_underlying(ui::TouchEditable::MenuCommands::kSelectWord)) {
+    manager_->GetTouchSelectionController()
+        ->HideAndDisallowShowingAutomatically();
+  }
   RenderWidgetHostDelegate* host_delegate = rwhv_->host()->delegate();
   if (!host_delegate)
     return;
 
   switch (command_id) {
-    case ui::TouchEditable::kCut:
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kCut):
       host_delegate->Cut();
       break;
-    case ui::TouchEditable::kCopy:
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kCopy):
       host_delegate->Copy();
       break;
-    case ui::TouchEditable::kPaste:
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kPaste):
       host_delegate->Paste();
       break;
-    case ui::TouchEditable::kSelectAll:
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kSelectAll):
       host_delegate->SelectAll();
+      break;
+    case std::to_underlying(ui::TouchEditable::MenuCommands::kSelectWord):
+      host_delegate->SelectAroundCaret(
+          blink::mojom::SelectionGranularity::kWord,
+          /*should_show_handle=*/true,
+          /*should_show_context_menu=*/false);
       break;
     default:
       NOTREACHED();
-      break;
   }
 }
 
@@ -218,8 +310,9 @@ void TouchSelectionControllerClientChildFrame::RunContextMenu() {
   gfx::PointF origin = rwhv_->TransformPointToRootCoordSpaceF(gfx::PointF());
   anchor_point.Offset(-origin.x(), -origin.y());
   RenderWidgetHostImpl* host = rwhv_->host();
-  host->GetAssociatedFrameWidget()->ShowContextMenu(
-      ui::MENU_SOURCE_TOUCH_EDIT_MENU, gfx::ToRoundedPoint(anchor_point));
+  host->GetRenderInputRouter()->ShowContextMenuAtPoint(
+      gfx::ToRoundedPoint(anchor_point),
+      ui::mojom::MenuSourceType::kTouchEditMenu);
 
   // Hide selection handles after getting rect-between-bounds from touch
   // selection controller; otherwise, rect would be empty and the above
@@ -228,7 +321,8 @@ void TouchSelectionControllerClientChildFrame::RunContextMenu() {
       ->HideAndDisallowShowingAutomatically();
 }
 
-bool TouchSelectionControllerClientChildFrame::ShouldShowQuickMenu() {
+bool TouchSelectionControllerClientChildFrame::ShouldShowQuickMenu(
+    bool can_paste) {
   return true;
 }
 

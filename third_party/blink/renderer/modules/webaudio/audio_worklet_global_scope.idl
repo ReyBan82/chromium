@@ -11,7 +11,9 @@
     [RaisesException, MeasureAs=AudioWorkletGlobalScopeRegisterProcessor] void registerProcessor(DOMString name, BlinkAudioWorkletProcessorConstructor processorCtor);
     readonly attribute unsigned long long currentFrame;
     readonly attribute double currentTime;
+    [RuntimeEnabled=AudioWorkletSharedPort] readonly attribute MessagePort port;
     readonly attribute float sampleRate;
+    [RuntimeEnabled=WebAudioConfigurableRenderQuantum, MeasureAs=WebAudioRenderQuantumSize] readonly attribute unsigned long renderQuantumSize;
 };
 
 // Blink-specific types

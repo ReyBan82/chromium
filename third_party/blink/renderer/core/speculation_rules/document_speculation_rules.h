@@ -13,16 +13,18 @@
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
 #include "third_party/blink/renderer/platform/supplementable.h"
+#include "third_party/blink/renderer/platform/wtf/hash_map.h"
 
 namespace blink {
 
+class HTMLAnchorElementBase;
+class SpeculationCandidate;
 class SpeculationRuleLoader;
-class HTMLAnchorElement;
 
 // This corresponds to the document's list of speculation rule sets.
 //
 // Updates are pushed asynchronously.
-class CORE_EXPORT DocumentSpeculationRules
+class CORE_EXPORT DocumentSpeculationRules final
     : public GarbageCollected<DocumentSpeculationRules>,
       public Supplement<Document> {
  public:
@@ -46,20 +48,70 @@ class CORE_EXPORT DocumentSpeculationRules
   void AddSpeculationRuleLoader(SpeculationRuleLoader*);
   void RemoveSpeculationRuleLoader(SpeculationRuleLoader*);
 
-  void LinkInserted(HTMLAnchorElement* link);
-  void LinkRemoved(HTMLAnchorElement* link);
-  void HrefAttributeChanged(HTMLAnchorElement* link,
+  void LinkInserted(HTMLAnchorElementBase* link);
+  void LinkRemoved(HTMLAnchorElementBase* link);
+  void HrefAttributeChanged(HTMLAnchorElementBase* link,
                             const AtomicString& old_value,
                             const AtomicString& new_value);
-  void ReferrerPolicyAttributeChanged(HTMLAnchorElement* link);
-  void RelAttributeChanged(HTMLAnchorElement* link);
+  void ReferrerPolicyAttributeChanged(HTMLAnchorElementBase* link);
+  void RelAttributeChanged(HTMLAnchorElementBase* link);
+  void TargetAttributeChanged(HTMLAnchorElementBase* link);
   void DocumentReferrerPolicyChanged();
   void DocumentBaseURLChanged();
-  void LinkMatchedSelectorsUpdated(HTMLAnchorElement* link);
-  void LinkGainedOrLostComputedStyle(HTMLAnchorElement* link);
+  void DocumentBaseTargetChanged();
+  void LinkMatchedSelectorsUpdated(HTMLAnchorElementBase* link);
+  void LinkGainedOrLostComputedStyle(HTMLAnchorElementBase* link);
   void DocumentStyleUpdated();
+  void ChildStyleRecalcBlocked(Element* root);
+  void DisplayLockedRootsForceUpdateEnded(
+      const HeapVector<Member<Element>>& roots);
+  void DidStyleChildren(Element* root);
+  void DisplayLockedElementDisconnected(Element* root);
+
+  void DocumentRestoredFromBFCache();
 
   const HeapVector<Member<StyleRule>>& selectors() { return selectors_; }
+
+  // Returns the "moderate_viewport_heuristics" author overrides from the first
+  // rule set that specifies them, or nullopt if none do. There is intentionally
+  // no conflict resolution between rule sets: the first match wins.
+  std::optional<ModerateViewportHeuristicsParams>
+  GetModerateViewportHeuristicsParams() const;
+
+  // Returns all speculation candidates ever sent to the browser process.
+  // Candidates are accumulated and never removed.
+  // Used by performance.getSpeculations() to expose navigation data.
+  const HeapVector<Member<SpeculationCandidate>>& sent_candidates() const {
+    return sent_candidates_;
+  }
+
+  // Returns the speculation candidates the renderer has actually activated: a
+  // superset-free view of what was prefetched/prerendered, rather than merely
+  // proposed. Contains immediate-eagerness candidates (enacted as soon as they
+  // are sent) plus non-immediate candidates enacted by the renderer-side
+  // link-selection heuristics (pointerdown/hover/viewport). Populated only
+  // when SpeculationRulesRendererSideHeuristics is enabled; used by
+  // performance.getSpeculations() to report the enacted navigation set.
+  const HeapVector<Member<SpeculationCandidate>>& activated_candidates() const {
+    return activated_candidates_;
+  }
+
+  // Renderer-driven enactment (SpeculationRulesRendererSideHeuristics). Each
+  // returns whether a candidate was enacted, which the caller reports to the
+  // browser so that it doesn't handle the same interaction as well.
+  [[nodiscard]] bool OnPointerDownHeuristic(const KURL& url);
+  [[nodiscard]] bool OnHoverHeuristic(
+      const KURL& url,
+      mojom::blink::SpeculationEagerness triggered_eagerness);
+  [[nodiscard]] bool OnViewportHeuristic(
+      const KURL& url,
+      mojom::blink::SpeculationEagerness triggered_eagerness);
+
+  // Requests a future call to UpdateSpeculationCandidates, if none is yet
+  // scheduled.
+  void QueueUpdateSpeculationCandidates(bool force_style_update = false);
+
+  void FlushMojoMessageForTesting();
 
   void Trace(Visitor*) const override;
 
@@ -68,52 +120,77 @@ class CORE_EXPORT DocumentSpeculationRules
   // May be null if the execution context does not exist.
   mojom::blink::SpeculationHost* GetHost();
 
-  // Requests a future call to UpdateSpeculationCandidates, if none is yet
-  // scheduled.
-  void QueueUpdateSpeculationCandidates();
+  // Shared implementation for the renderer-driven heuristics above: asks the
+  // browser to enact every sent candidate whose URL equals `url` and whose
+  // eagerness is in `eagernesses`, attributing the enactment to `heuristic`.
+  // Returns whether any candidate was enacted.
+  [[nodiscard]] bool EnactMatchingCandidates(
+      const KURL& url,
+      const Vector<mojom::blink::SpeculationEagerness>& eagernesses,
+      mojom::blink::SpeculationHeuristic heuristic);
+
+  // Records `candidate` as activated for the SpeculationMeasurement API,
+  // deduplicating against already-recorded candidates.
+  void MarkCandidateActivated(SpeculationCandidate* candidate);
+
+  // Executes in a microtask after QueueUpdateSpeculationCandidates.
+  void UpdateSpeculationCandidatesMicrotask();
 
   // Pushes the current speculation candidates to the browser, immediately.
+  // Can be entered either through `UpdateSpeculationCandidatesMicrotask` or
+  // `DocumentStyleUpdated`.
   void UpdateSpeculationCandidates();
 
   // Appends all candidates populated from links in the document (based on
   // document rules in all the rule sets).
   void AddLinkBasedSpeculationCandidates(
-      Vector<mojom::blink::SpeculationCandidatePtr>& candidates);
+      HeapVector<Member<SpeculationCandidate>>& candidates);
 
   // Initializes |link_map_| with all links in the document by traversing
   // through the document in shadow-including tree order.
   void InitializeIfNecessary();
 
+  // Helper methods that are used to deal with link/document attribute changes
+  // that could invalidate the list of speculation candidates.
+  void LinkAttributeChanged(HTMLAnchorElementBase* link);
+  void DocumentPropertyChanged();
+
   // Helper methods to modify |link_map_|.
-  void AddLink(HTMLAnchorElement* link);
-  void RemoveLink(HTMLAnchorElement* link);
-  void InvalidateLink(HTMLAnchorElement* link);
+  void AddLink(HTMLAnchorElementBase* link);
+  void RemoveLink(HTMLAnchorElementBase* link);
+  void InvalidateLink(HTMLAnchorElementBase* link);
   void InvalidateAllLinks();
 
   // Populates |selectors_| and notifies the StyleEngine.
   void UpdateSelectors();
 
-  // Tracks the state of a pending update of speculation candidates
-  // (UpdateSpeculationCandidates); and whether it requires style to be clean.
-  enum class PendingUpdateState {
-    // There is no update queued (either as a microtask or after the next style
-    // update).
-    kNoUpdatePending,
-    // There is a microtask queued to perform an update. A style update will
-    // not run UpdateSpeculationCandidates in this state.
-    kUpdatePending,
-    // An update will be performed after the next style update. We should
-    // never reach this state unless there are 'selector_matches' predicates
-    // present. There will be no microtask queued to perform an update in this
-    // state.
-    kUpdateWithCleanStylePending
-  };
-  void SetPendingUpdateState(PendingUpdateState state);
+  // Called when LCP is predicted.
+  void OnLCPPredicted(const Element* lcp_candidate);
 
-  // Checks the RuntimeEnabledFeature to see if the feature is enabled. If the
-  // feature is found to be enabled once, it is considered to be enabled for the
-  // rest of the document's lifetime.
-  bool SelectorMatchesEnabled();
+  // Tracks when the next update to speculation candidates is scheduled to
+  // occur. See `SetPendingUpdateState` for details.
+  enum class PendingUpdateState : uint8_t {
+    kNoUpdate = 0,
+
+    // A microtask to run `UpdateSpeculationRulesMicrotask` is queued.
+    // It does not need a forced style update.
+    kMicrotaskQueued,
+
+    // Candidates should be updated the next time the style engine updates
+    // style.
+    kOnNextStyleUpdate,
+
+    // A microtask to run `UpdateSpeculationRulesMicrotask` is queued.
+    // It must update style when it does so.
+    kMicrotaskQueuedWithForcedStyleUpdate,
+  };
+  friend std::ostream& operator<<(std::ostream&, const PendingUpdateState&);
+  void SetPendingUpdateState(PendingUpdateState state);
+  bool IsMicrotaskQueued() const {
+    return pending_update_state_ == PendingUpdateState::kMicrotaskQueued ||
+           pending_update_state_ ==
+               PendingUpdateState::kMicrotaskQueuedWithForcedStyleUpdate;
+  }
 
   HeapVector<Member<SpeculationRuleSet>> rule_sets_;
   HeapMojoRemote<mojom::blink::SpeculationHost> host_;
@@ -128,21 +205,49 @@ class CORE_EXPORT DocumentSpeculationRules
   // TODO(crbug.com/1371522): Consider removing |unmatched_links_| and
   // re-traverse the document to find all links when a new ruleset is
   // added/removed.
-  HeapHashMap<Member<HTMLAnchorElement>,
-              Vector<mojom::blink::SpeculationCandidatePtr>>
+  HeapHashMap<Member<HTMLAnchorElementBase>,
+              Member<GCedHeapVector<Member<SpeculationCandidate>>>>
       matched_links_;
-  HeapHashSet<Member<HTMLAnchorElement>> unmatched_links_;
-  HeapHashSet<Member<HTMLAnchorElement>> pending_links_;
+  HeapHashSet<Member<HTMLAnchorElementBase>> unmatched_links_;
+  HeapHashSet<Member<HTMLAnchorElementBase>> pending_links_;
+
+  // Links with ComputedStyle that wasn't updated after the most recent style
+  // update (due to having a display-locked ancestor).
+  HeapHashSet<Member<HTMLAnchorElementBase>> stale_links_;
+  HeapHashSet<Member<Element>> elements_blocking_child_style_recalc_;
 
   // Collects every CSS selector from every CSS selector document rule predicate
   // in this document's speculation rules.
   HeapVector<Member<StyleRule>> selectors_;
 
   bool initialized_ = false;
-  bool sent_is_part_of_no_vary_search_trial_ = false;
-  bool was_selector_matches_enabled_ = false;
-  PendingUpdateState pending_update_state_ =
-      PendingUpdateState::kNoUpdatePending;
+  PendingUpdateState pending_update_state_ = PendingUpdateState::kNoUpdate;
+
+  // Set to true if the EventHandlerRegistry has recorded this object's need to
+  // observe pointer events.
+  // TODO(crbug.com/1425870): This can be deleted when/if these discrete events
+  // are no longer filtered by default.
+  bool wants_pointer_events_ = false;
+
+  bool first_update_after_restored_from_bfcache_ = false;
+
+  // Stores the current speculation candidates for the
+  // SpeculationMeasurement API. These are populated when candidates are
+  // sent to the browser and represent what the page has requested via
+  // speculation rules.
+  HeapVector<Member<SpeculationCandidate>> sent_candidates_;
+
+  // Subset of `sent_candidates_` that the renderer has actually activated
+  // (immediate candidates + heuristic-enacted candidates). See
+  // activated_candidates(). Deduplicated the same way as `sent_candidates_`.
+  HeapVector<Member<SpeculationCandidate>> activated_candidates_;
+
+  // Indexes `sent_candidates_` by each candidate's URL with the query and
+  // fragment removed. An exact or No-Vary-Search match requires an identical
+  // scheme/host/port/path, so EnactMatchingCandidates only has to look at the
+  // bucket for the interaction URL instead of scanning every candidate. The
+  // stored indices stay valid because `sent_candidates_` is append-only.
+  HashMap<String, Vector<wtf_size_t>> sent_candidates_by_match_key_;
 };
 
 }  // namespace blink

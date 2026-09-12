@@ -6,7 +6,7 @@
 
 #include <utility>
 
-#include "base/android/build_info.h"
+#include "base/android/android_info.h"
 #include "base/check.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -19,10 +19,10 @@
 #include "gin/arguments.h"
 #include "gin/function_template.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/public/platform/web_url_request.h"
-#include "third_party/blink/public/web/blink.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "v8/include/v8.h"
 
@@ -37,7 +37,7 @@ SandboxStatusExtension::SandboxStatusExtension(content::RenderFrame* frame)
           base::RetainedRef(this)));
 }
 
-SandboxStatusExtension::~SandboxStatusExtension() {}
+SandboxStatusExtension::~SandboxStatusExtension() = default;
 
 // static
 void SandboxStatusExtension::Create(content::RenderFrame* frame) {
@@ -68,10 +68,10 @@ void SandboxStatusExtension::Install() {
   if (!should_install_)
     return;
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context =
-      render_frame()->GetWebFrame()->MainWorldScriptContext();
+  v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
   if (context.IsEmpty())
     return;
 
@@ -124,7 +124,7 @@ void SandboxStatusExtension::GetSandboxStatus(gin::Arguments* args) {
                      std::move(global_callback)));
 }
 
-base::Value::Dict SandboxStatusExtension::ReadSandboxStatus() {
+base::DictValue SandboxStatusExtension::ReadSandboxStatus() {
   std::string secontext;
   base::FilePath path(FILE_PATH_LITERAL("/proc/self/attr/current"));
   base::ReadFileToString(path, &secontext);
@@ -133,34 +133,33 @@ base::Value::Dict SandboxStatusExtension::ReadSandboxStatus() {
   path = base::FilePath(FILE_PATH_LITERAL("/proc/self/status"));
   base::ReadFileToString(path, &proc_status);
 
-  base::Value::Dict status;
+  base::DictValue status;
   status.Set("uid", static_cast<int>(getuid()));
   status.Set("pid", getpid());
   status.Set("secontext", secontext);
   status.Set("seccompStatus",
              static_cast<int>(content::GetSeccompSandboxStatus()));
   status.Set("procStatus", proc_status);
-  status.Set("androidBuildId",
-             base::android::BuildInfo::GetInstance()->android_build_id());
+  status.Set("androidBuildId", base::android::android_info::android_build_id());
   return status;
 }
 
 void SandboxStatusExtension::RunCallback(
     std::unique_ptr<v8::Global<v8::Function>> callback,
-    base::Value::Dict status) {
+    base::DictValue status) {
   if (!render_frame())
     return;
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context =
-      render_frame()->GetWebFrame()->MainWorldScriptContext();
+  v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
   v8::Context::Scope context_scope(context);
   v8::Local<v8::Function> callback_local =
       v8::Local<v8::Function>::New(isolate, *callback);
 
   v8::Local<v8::Value> argv[] = {
       content::V8ValueConverter::Create()->ToV8Value(status, context)};
-  render_frame()->GetWebFrame()->CallFunctionEvenIfScriptDisabled(
+  web_frame->CallFunctionEvenIfScriptDisabled(
       callback_local, v8::Object::New(isolate), 1, argv);
 }

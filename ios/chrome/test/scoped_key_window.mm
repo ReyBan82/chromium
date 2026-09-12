@@ -6,33 +6,25 @@
 
 #import "base/check_op.h"
 #import "base/ios/ios_util.h"
-#import "ios/chrome/browser/ui/util/uikit_ui_util.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/chrome/browser/shared/ui/chrome_overlay_window/chrome_overlay_window.h"
+#import "ios/chrome/browser/shared/ui/util/uikit_ui_util.h"
+#import "ios/chrome/test/app/uikit_test_util.h"
 
 ScopedKeyWindow::ScopedKeyWindow() {
   NSSet<UIScene*>* scenes =
       ([[UIApplication sharedApplication] connectedScenes]);
   // Only one scene is supported in unittests at the moment.
   DCHECK_EQ([scenes count], 1u);
-  UIScene* scene =
-      [[[UIApplication sharedApplication] connectedScenes] anyObject];
-  DCHECK([scene isKindOfClass:[UIWindowScene class]]);
-  UIWindowScene* windowScene = static_cast<UIWindowScene*>(scene);
-  for (UIWindow* window in windowScene.windows) {
-    if ([window isKeyWindow]) {
-      original_key_window_ = window;
-    }
-  }
+
+  scene_ = chrome_test_util::GetAnyWindowScene();
+  original_key_window_ = scene_.keyWindow;
   DCHECK(original_key_window_);
-  current_key_window_ = [[UIWindow alloc] initWithWindowScene:windowScene];
-  if (!current_key_window_) {
-    current_key_window_ =
-        [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    original_key_window_ = GetAnyKeyWindow();
-  }
+
+  current_key_window_ =
+      [[ChromeOverlayWindow alloc] initWithWindowScene:scene_];
+  DCHECK(current_key_window_);
+
+  current_key_window_.rootViewController = [[UIViewController alloc] init];
   [current_key_window_ makeKeyAndVisible];
 }
 
@@ -42,4 +34,8 @@ ScopedKeyWindow::~ScopedKeyWindow() {
 
 UIWindow* ScopedKeyWindow::Get() {
   return current_key_window_;
+}
+
+UIWindowScene* ScopedKeyWindow::GetScene() {
+  return scene_;
 }

@@ -13,9 +13,9 @@
 namespace value_store {
 
 base::Value ValueStoreChange::ToValue(ValueStoreChangeList changes) {
-  base::Value::Dict changes_dict;
+  base::DictValue changes_dict;
   for (auto& change : changes) {
-    base::Value::Dict change_dict;
+    base::DictValue change_dict;
     if (change.old_value) {
       change_dict.Set("oldValue", std::move(*change.old_value));
     }
@@ -28,8 +28,8 @@ base::Value ValueStoreChange::ToValue(ValueStoreChangeList changes) {
 }
 
 ValueStoreChange::ValueStoreChange(const std::string& key,
-                                   absl::optional<base::Value> old_value,
-                                   absl::optional<base::Value> new_value)
+                                   std::optional<base::Value> old_value,
+                                   std::optional<base::Value> new_value)
     : key(key),
       old_value(std::move(old_value)),
       new_value(std::move(new_value)) {}

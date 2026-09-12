@@ -7,6 +7,9 @@
 
 #include <memory>
 
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
+
 class RenderViewContextMenuBase;
 
 namespace content {
@@ -22,6 +25,8 @@ class ContextMenuDelegate {
 
   ContextMenuDelegate(const ContextMenuDelegate&) = delete;
   ContextMenuDelegate& operator=(const ContextMenuDelegate&) = delete;
+
+  void ClearWebContents();
 
   virtual ~ContextMenuDelegate();
 
@@ -39,8 +44,19 @@ class ContextMenuDelegate {
       content::RenderFrameHost& render_frame_host,
       const content::ContextMenuParams& params) = 0;
 
+  // Asynchronous version of BuildMenu. This should be used when the clipboard
+  // state needs to be updated before building the menu.
+  virtual void BuildMenuAsync(
+      content::RenderFrameHost& render_frame_host,
+      const content::ContextMenuParams& params,
+      base::OnceCallback<void(std::unique_ptr<RenderViewContextMenuBase>)>
+          callback) = 0;
+
   // Displays the context menu.
   virtual void ShowMenu(std::unique_ptr<RenderViewContextMenuBase> menu) = 0;
+
+ private:
+  raw_ptr<content::WebContents> web_contents_ = nullptr;
 };
 
 #endif  // COMPONENTS_RENDERER_CONTEXT_MENU_CONTEXT_MENU_DELEGATE_H_

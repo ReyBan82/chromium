@@ -12,7 +12,7 @@
 #include "chrome/browser/ui/views/toolbar/toolbar_button.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 
-class BrowserView;
+class BrowserWindowInterface;
 
 namespace views {
 class BubbleDialogModelHost;
@@ -25,10 +25,10 @@ class BubbleDialogModelHost;
 class BatterySaverButton : public ToolbarButton,
                            public BatterySaverBubbleObserver,
                            public BatterySaverButtonControllerDelegate {
- public:
-  METADATA_HEADER(BatterySaverButton);
+  METADATA_HEADER(BatterySaverButton, ToolbarButton)
 
-  explicit BatterySaverButton(BrowserView* browser_view);
+ public:
+  explicit BatterySaverButton(BrowserWindowInterface* browser);
   ~BatterySaverButton() override;
 
   BatterySaverButton(const BatterySaverButton&) = delete;
@@ -55,10 +55,10 @@ class BatterySaverButton : public ToolbarButton,
   void OnClicked();
 
   void MaybeShowFeaturePromo();
-  void CloseFeaturePromo();
+  void CloseFeaturePromo(bool engaged);
 
  private:
-  const raw_ptr<BrowserView> browser_view_;
+  const raw_ptr<BrowserWindowInterface> browser_;
   BatterySaverButtonController controller_;
   raw_ptr<views::BubbleDialogModelHost> bubble_ = nullptr;
   bool pending_promo_ = false;

@@ -7,9 +7,12 @@
 #include <vector>
 
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "media/base/decoder_buffer.h"
 #include "media/base/media_util.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/geometry/size.h"
 
 using testing::_;
 using testing::Invoke;
@@ -22,8 +25,8 @@ FakeDemuxerStream::FakeDemuxerStream(bool is_audio) {
   type_ = is_audio ? DemuxerStream::AUDIO : DemuxerStream::VIDEO;
   if (is_audio) {
     audio_config_.Initialize(
-        AudioCodec::kAAC, kSampleFormatS16, CHANNEL_LAYOUT_STEREO, 38400,
-        std::vector<uint8_t>(), EncryptionScheme::kUnencrypted,
+        AudioCodec::kAAC, kSampleFormatS16, ChannelLayoutConfig::Stereo(),
+        38400, std::vector<uint8_t>(), EncryptionScheme::kUnencrypted,
         base::TimeDelta(), 0);
   } else {
     gfx::Size size(640, 480);
@@ -83,8 +86,7 @@ void FakeDemuxerStream::CreateFakeFrame(size_t size,
   base::TimeDelta pts = base::Milliseconds(pts_ms);
 
   // To DecoderBuffer
-  scoped_refptr<DecoderBuffer> input_buffer =
-      DecoderBuffer::CopyFrom(buffer.data(), size);
+  scoped_refptr<DecoderBuffer> input_buffer = DecoderBuffer::CopyFrom(buffer);
   input_buffer->set_timestamp(pts);
   input_buffer->set_is_key_frame(key_frame);
 
@@ -103,8 +105,8 @@ FakeMediaResource::FakeMediaResource()
 
 FakeMediaResource::~FakeMediaResource() = default;
 
-std::vector<DemuxerStream*> FakeMediaResource::GetAllStreams() {
-  std::vector<DemuxerStream*> streams;
+std::vector<raw_ptr<DemuxerStream>> FakeMediaResource::GetAllStreams() {
+  std::vector<raw_ptr<DemuxerStream>> streams;
   streams.push_back(audio_stream_.get());
   streams.push_back(video_stream_.get());
   return streams;

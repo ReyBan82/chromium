@@ -2,12 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 
-import {fakeSearchResults} from '../fake_data.js';
-import {ShortcutSearchHandlerInterface} from '../shortcut_types.js';
-
-import {FakeShortcutSearchHandler} from './fake_shortcut_search_handler.js';
+import type {ShortcutSearchHandlerInterface} from '../shortcut_types.js';
+import {ShortcutSearchHandler} from '../shortcut_types.js';
 
 /**
  * @fileoverview
@@ -21,25 +19,9 @@ export function setShortcutSearchHandlerForTesting(
   shortcutSearchHandler = testHandler;
 }
 
-/**
- * Create a Fake ShortcutSearchHandler with reasonable fake data.
- * TODO(longbowei): Remove once mojo bindings are implemented.
- */
-function setupFakeShortcutSearchHandler(): void {
-  // Create handler.
-  const handler = new FakeShortcutSearchHandler();
-
-  // Setup search response.
-  handler.setFakeSearchResult(fakeSearchResults);
-
-  // Set the fake handler.
-  setShortcutSearchHandlerForTesting(handler);
-}
-
 export function getShortcutSearchHandler(): ShortcutSearchHandlerInterface {
   if (!shortcutSearchHandler) {
-    // TODO(longbowei): Instantiate a real mojo interface here.
-    setupFakeShortcutSearchHandler();
+    shortcutSearchHandler = ShortcutSearchHandler.getRemote();
   }
   assert(!!shortcutSearchHandler);
   return shortcutSearchHandler;

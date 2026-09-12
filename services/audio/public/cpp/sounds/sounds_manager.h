@@ -5,10 +5,12 @@
 #ifndef SERVICES_AUDIO_PUBLIC_CPP_SOUNDS_SOUNDS_MANAGER_H_
 #define SERVICES_AUDIO_PUBLIC_CPP_SOUNDS_SOUNDS_MANAGER_H_
 
+#include <memory>
+#include <string_view>
+
 #include "base/component_export.h"
 #include "base/functional/callback.h"
 #include "base/sequence_checker.h"
-#include "base/strings/string_piece.h"
 #include "base/time/time.h"
 #include "media/base/audio_codecs.h"
 #include "media/base/media_export.h"
@@ -21,33 +23,29 @@ namespace audio {
 // should be accessed from the Audio thread.
 class COMPONENT_EXPORT(AUDIO_PUBLIC_CPP) SoundsManager {
  public:
-  typedef int SoundKey;
+  using SoundKey = int;
 
   // Creates a singleton instance of the SoundsManager.
   using StreamFactoryBinder = base::RepeatingCallback<void(
       mojo::PendingReceiver<media::mojom::AudioStreamFactory>)>;
-  static void Create(StreamFactoryBinder stream_factory_binder);
 
-  // Removes a singleton instance of the SoundsManager.
-  static void Shutdown();
+  // Creates an instance of the `SoundsManager`.
+  static std::unique_ptr<SoundsManager> Create(
+      StreamFactoryBinder stream_factory_binder);
 
-  // Returns a pointer to a singleton instance of the SoundsManager.
-  static SoundsManager* Get();
+  virtual ~SoundsManager();
 
   SoundsManager(const SoundsManager&) = delete;
   SoundsManager& operator=(const SoundsManager&) = delete;
 
-  // Initializes sounds manager for testing. The |manager| will be owned
-  // by the internal pointer and will be deleted by Shutdown().
-  static void InitializeForTesting(SoundsManager* manager);
-
-  // Initializes SoundsManager with the wav data or the flac data for the system
-  // sounds. The `codec` should be `kPCM` for the wav audio data or `kFLAC` for
-  // the flac audio data. Returns true if SoundsManager was successfully
-  // initialized.
+  // Initializes `SoundsManager` with the wav data or the flac data from the
+  // `resource_id`. The `codec` should be `kPCM` for the wav audio data or
+  // `kFLAC` for the flac audio data. Returns `true` if `SoundsManager` was
+  // successfully initialized.
   virtual bool Initialize(SoundKey key,
-                          const base::StringPiece& data,
-                          media::AudioCodec codec) = 0;
+                          int resource_id,
+                          media::AudioCodec codec,
+                          bool loop) = 0;
 
   // Plays sound identified by |key|, returns false if SoundsManager
   // was not properly initialized.
@@ -57,6 +55,10 @@ class COMPONENT_EXPORT(AUDIO_PUBLIC_CPP) SoundsManager {
   // was not properly initialized.
   virtual bool Stop(SoundKey key) = 0;
 
+  // Pauses playing sound identified by |key|, returns false if SoundsManager
+  // was not properly initialized.
+  virtual bool Pause(SoundKey key) = 0;
+
   // Returns duration of the sound identified by |key|. If SoundsManager
   // was not properly initialized or |key| was not registered, this
   // method returns an empty value.
@@ -64,7 +66,6 @@ class COMPONENT_EXPORT(AUDIO_PUBLIC_CPP) SoundsManager {
 
  protected:
   SoundsManager();
-  virtual ~SoundsManager();
 
   SEQUENCE_CHECKER(sequence_checker_);
 };

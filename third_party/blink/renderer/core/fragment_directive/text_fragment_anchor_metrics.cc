@@ -21,6 +21,8 @@ TextFragmentAnchorMetrics::TextFragmentAnchorMetrics(Document* document)
 void TextFragmentAnchorMetrics::DidCreateAnchor(int selector_count) {
   UseCounter::Count(document_, WebFeature::kTextFragmentAnchor);
   selector_count_ = selector_count;
+  CHECK(search_start_time_.is_null());
+  search_start_time_ = tick_clock_->NowTicks();
 }
 
 void TextFragmentAnchorMetrics::DidFindMatch() {
@@ -29,11 +31,6 @@ void TextFragmentAnchorMetrics::DidFindMatch() {
 
 void TextFragmentAnchorMetrics::DidFindAmbiguousMatch() {
   ambiguous_match_ = true;
-}
-
-void TextFragmentAnchorMetrics::DidStartSearch() {
-  if (search_start_time_.is_null())
-    search_start_time_ = tick_clock_->NowTicks();
 }
 
 void TextFragmentAnchorMetrics::DidInvokeScrollIntoView() {
@@ -45,12 +42,20 @@ void TextFragmentAnchorMetrics::ReportMetrics() {
 #ifndef NDEBUG
   DCHECK(!metrics_reported_);
 #endif
+  if (selector_count_ == 0) {
+#ifndef NDEBUG
+    metrics_reported_ = true;
+#endif
+    return;
+  }
+
   DCHECK_GT(selector_count_, 0);
   DCHECK_GE(matches_count_, 0);
   DCHECK_LE(matches_count_, selector_count_);
   DCHECK(!search_start_time_.is_null());
 
-  if (matches_count_ > 0) {
+  if (matches_count_ > 0 &&
+      open_source_ != TextFragmentLinkOpenSource::kSendTabToSelf) {
     UseCounter::Count(document_, WebFeature::kTextFragmentAnchorMatchFound);
   }
 
@@ -65,15 +70,13 @@ void TextFragmentAnchorMetrics::ReportMetrics() {
       base::ClampFloor((100.0 * matches_count_) / selector_count_);
   base::UmaHistogramPercentage(base::StrCat({uma_prefix, "MatchRate"}),
                                match_rate_percent);
-  TRACE_EVENT_INSTANT1("blink", "TextFragmentAnchorMetrics::ReportMetrics",
-                       TRACE_EVENT_SCOPE_THREAD, "match_rate",
-                       match_rate_percent);
+  TRACE_EVENT_INSTANT("blink", "TextFragmentAnchorMetrics::ReportMetrics",
+                      "match_rate", match_rate_percent);
 
   base::UmaHistogramBoolean(base::StrCat({uma_prefix, "AmbiguousMatch"}),
                             ambiguous_match_);
-  TRACE_EVENT_INSTANT1("blink", "TextFragmentAnchorMetrics::ReportMetrics",
-                       TRACE_EVENT_SCOPE_THREAD, "ambiguous_match",
-                       ambiguous_match_);
+  TRACE_EVENT_INSTANT("blink", "TextFragmentAnchorMetrics::ReportMetrics",
+                      "ambiguous_match", ambiguous_match_);
 
   if (!first_scroll_into_view_time_.is_null()) {
     DCHECK(first_scroll_into_view_time_ >= search_start_time_);
@@ -82,15 +85,13 @@ void TextFragmentAnchorMetrics::ReportMetrics() {
                                              search_start_time_);
     base::UmaHistogramTimes(base::StrCat({uma_prefix, "TimeToScrollIntoView"}),
                             time_to_scroll_into_view);
-    TRACE_EVENT_INSTANT1("blink", "TextFragmentAnchorMetrics::ReportMetrics",
-                         TRACE_EVENT_SCOPE_THREAD, "time_to_scroll_into_view",
-                         time_to_scroll_into_view.InMilliseconds());
+    TRACE_EVENT_INSTANT("blink", "TextFragmentAnchorMetrics::ReportMetrics",
+                        "time_to_scroll_into_view",
+                        time_to_scroll_into_view.InMilliseconds());
   }
 
   base::UmaHistogramEnumeration("TextFragmentAnchor.LinkOpenSource",
-                                has_search_engine_source_
-                                    ? TextFragmentLinkOpenSource::kSearchEngine
-                                    : TextFragmentLinkOpenSource::kUnknown);
+                                open_source_);
 #ifndef NDEBUG
   metrics_reported_ = true;
 #endif
@@ -134,15 +135,25 @@ void TextFragmentAnchorMetrics::SetTickClockForTesting(
   tick_clock_ = tick_clock;
 }
 
-void TextFragmentAnchorMetrics::SetSearchEngineSource(
-    bool has_search_engine_source) {
-  has_search_engine_source_ = has_search_engine_source;
+void TextFragmentAnchorMetrics::SetLinkOpenSource(
+    TextFragmentLinkOpenSource open_source) {
+  open_source_ = open_source;
 }
 
 std::string TextFragmentAnchorMetrics::GetPrefixForHistograms() const {
-  std::string source = has_search_engine_source_ ? "SearchEngine" : "Unknown";
-  std::string uma_prefix = base::StrCat({"TextFragmentAnchor.", source, "."});
-  return uma_prefix;
+  const char* source = "Unknown";
+  switch (open_source_) {
+    case TextFragmentLinkOpenSource::kSendTabToSelf:
+      source = "SendTabToSelf";
+      break;
+    case TextFragmentLinkOpenSource::kSearchEngine:
+      source = "SearchEngine";
+      break;
+    case TextFragmentLinkOpenSource::kUnknown:
+      source = "Unknown";
+      break;
+  }
+  return base::StrCat({"TextFragmentAnchor.", source, "."});
 }
 
 }  // namespace blink

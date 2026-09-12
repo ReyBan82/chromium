@@ -9,15 +9,18 @@ for more details on the presubmit API built into depot_tools.
 
 import pathlib
 
-USE_PYTHON3 = True
 PRESUBMIT_VERSION = '2.0.0'
 
 
 def _PythonChecks(input_api, output_api):
-    _CHROMIUM_SRC_ROOT = pathlib.Path(
-        input_api.PresubmitLocalPath()).parents[3].resolve(strict=True)
-    _JAVALANG_SRC_PATH = (_CHROMIUM_SRC_ROOT / 'third_party' / 'javalang' /
-                          'src').resolve(strict=False)
+    _CHROMIUM_SRC_ROOT = (
+        pathlib.Path(input_api.PresubmitLocalPath())
+        .parents[3]
+        .resolve(strict=True)
+    )
+    _JAVALANG_SRC_PATH = (
+        _CHROMIUM_SRC_ROOT / 'third_party' / 'javalang' / 'src'
+    ).resolve(strict=False)
     if not _JAVALANG_SRC_PATH.exists():
         return []
 
@@ -27,8 +30,7 @@ def _PythonChecks(input_api, output_api):
         input_api.PresubmitLocalPath(),
         files_to_check=[r'.+_unittest\.py$'],
         files_to_skip=[],
-        run_on_python2=False,
-        run_on_python3=True)
+    )
 
     return input_api.RunTests(checks, False)
 

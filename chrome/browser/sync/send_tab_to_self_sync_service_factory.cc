@@ -5,14 +5,15 @@
 #include "chrome/browser/sync/send_tab_to_self_sync_service_factory.h"
 
 #include "base/functional/bind.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/sync/data_type_store_service_factory.h"
 #include "chrome/browser/sync/device_info_sync_service_factory.h"
-#include "chrome/browser/sync/model_type_store_service_factory.h"
+#include "chrome/browser/sync/session_sync_service_factory.h"
 #include "chrome/common/channel_info.h"
 #include "components/send_tab_to_self/send_tab_to_self_sync_service.h"
-#include "components/sync/model/model_type_store_service.h"
+#include "components/sync/model/data_type_store_service.h"
 #include "components/sync_device_info/device_info_sync_service.h"
 
 // static
@@ -25,24 +26,33 @@ SendTabToSelfSyncServiceFactory::GetForProfile(Profile* profile) {
 // static
 SendTabToSelfSyncServiceFactory*
 SendTabToSelfSyncServiceFactory::GetInstance() {
-  return base::Singleton<SendTabToSelfSyncServiceFactory>::get();
+  static base::NoDestructor<SendTabToSelfSyncServiceFactory> instance;
+  return instance.get();
 }
 
 SendTabToSelfSyncServiceFactory::SendTabToSelfSyncServiceFactory()
-    : ProfileKeyedServiceFactory("SendTabToSelfSyncService") {
-  DependsOn(ModelTypeStoreServiceFactory::GetInstance());
-  DependsOn(HistoryServiceFactory::GetInstance());
+    : ProfileKeyedServiceFactory(
+          "SendTabToSelfSyncService",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              .WithGuest(ProfileSelection::kNone)
+              .WithAshInternals(ProfileSelection::kNone)
+              .Build()) {
+  DependsOn(DataTypeStoreServiceFactory::GetInstance());
   DependsOn(DeviceInfoSyncServiceFactory::GetInstance());
+  DependsOn(HistoryServiceFactory::GetInstance());
+  DependsOn(SessionSyncServiceFactory::GetInstance());
 }
 
 SendTabToSelfSyncServiceFactory::~SendTabToSelfSyncServiceFactory() = default;
 
-KeyedService* SendTabToSelfSyncServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+SendTabToSelfSyncServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   Profile* profile = Profile::FromBrowserContext(context);
 
-  syncer::OnceModelTypeStoreFactory store_factory =
-      ModelTypeStoreServiceFactory::GetForProfile(profile)->GetStoreFactory();
+  syncer::OnceDataTypeStoreFactory store_factory =
+      DataTypeStoreServiceFactory::GetForProfile(profile)->GetStoreFactory();
 
   history::HistoryService* history_service =
       HistoryServiceFactory::GetForProfile(profile,
@@ -52,7 +62,10 @@ KeyedService* SendTabToSelfSyncServiceFactory::BuildServiceInstanceFor(
       DeviceInfoSyncServiceFactory::GetForProfile(profile)
           ->GetDeviceInfoTracker();
 
-  return new send_tab_to_self::SendTabToSelfSyncService(
+  sync_sessions::SessionSyncService* session_sync_service =
+      SessionSyncServiceFactory::GetForProfile(profile);
+
+  return std::make_unique<send_tab_to_self::SendTabToSelfSyncService>(
       chrome::GetChannel(), std::move(store_factory), history_service,
-      device_info_tracker);
+      profile->GetPrefs(), device_info_tracker, session_sync_service);
 }

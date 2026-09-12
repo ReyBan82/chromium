@@ -8,9 +8,11 @@
 
 #include "base/memory/raw_ptr.h"
 #include "chrome/test/views/chrome_views_test_base.h"
+#include "components/autofill/core/browser/suggestions/suggestion_type.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/accessibility/ax_node_data.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/widget/widget.h"
 
 namespace autofill {
@@ -20,7 +22,8 @@ class PopupWarningViewTest : public ChromeViewsTestBase {
   // views::ViewsTestBase:
   void SetUp() override {
     ChromeViewsTestBase::SetUp();
-    widget_ = CreateTestWidget();
+    widget_ =
+        CreateTestWidget(views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET);
   }
 
   void ShowView(const Suggestion& suggestion) {
@@ -44,12 +47,12 @@ class PopupWarningViewTest : public ChromeViewsTestBase {
   raw_ptr<PopupWarningView> view_ = nullptr;
 };
 
-TEST_F(PopupWarningViewTest, AccessibleNodeData) {
+TEST_F(PopupWarningViewTest, AccessibleProperties) {
   constexpr char16_t kText[] = u"Sample text";
-  ShowView(Suggestion(kText));
-
+  ShowView(Suggestion(kText, SuggestionType::kAutocompleteEntry));
   ui::AXNodeData node_data;
-  view().GetAccessibleNodeData(&node_data);
+
+  view().GetViewAccessibility().GetAccessibleNodeData(&node_data);
   EXPECT_EQ(ax::mojom::Role::kStaticText, node_data.role);
   EXPECT_EQ(kText,
             node_data.GetString16Attribute(ax::mojom::StringAttribute::kName));

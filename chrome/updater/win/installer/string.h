@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #ifndef CHROME_UPDATER_WIN_INSTALLER_STRING_H_
 #define CHROME_UPDATER_WIN_INSTALLER_STRING_H_
 
@@ -46,7 +47,6 @@ bool StrStartsWith(const wchar_t* str, const wchar_t* start_str);
 // Note: |size| is the number of characters in |path| not including the string
 // terminator.
 const wchar_t* GetNameFromPathExt(const wchar_t* path, size_t size);
-wchar_t* GetNameFromPathExt(wchar_t* path, size_t size);
 
 // A string class that manages a fixed size buffer on the stack.
 // The methods in the class are based on the above string methods and the

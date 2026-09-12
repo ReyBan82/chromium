@@ -5,10 +5,11 @@
 #ifndef UI_WEBUI_RESOURCES_CR_COMPONENTS_APP_MANAGEMENT_APP_MANAGEMENT_MOJOM_TRAITS_H_
 #define UI_WEBUI_RESOURCES_CR_COMPONENTS_APP_MANAGEMENT_APP_MANAGEMENT_MOJOM_TRAITS_H_
 
+#include <variant>
+
 #include "components/services/app_service/public/cpp/app_types.h"
 #include "components/services/app_service/public/cpp/permission.h"
 #include "components/services/app_service/public/cpp/run_on_os_login_types.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "ui/webui/resources/cr_components/app_management/app_management.mojom.h"
 
 namespace mojo {
@@ -31,7 +32,7 @@ using RunOnOsLoginDataView = app_management::mojom::RunOnOsLoginDataView;
 template <>
 struct EnumTraits<AppType, apps::AppType> {
   static AppType ToMojom(apps::AppType input);
-  static bool FromMojom(AppType input, apps::AppType* output);
+  static apps::AppType FromMojom(AppType input);
 };
 
 template <>
@@ -40,11 +41,17 @@ struct StructTraits<PermissionDataView, apps::PermissionPtr> {
     return r->permission_type;
   }
 
-  static const apps::PermissionValuePtr& value(const apps::PermissionPtr& r) {
+  static const apps::Permission::PermissionValue& value(
+      const apps::PermissionPtr& r) {
     return r->value;
   }
 
   static bool is_managed(const apps::PermissionPtr& r) { return r->is_managed; }
+
+  static const std::optional<std::string>& details(
+      const apps::PermissionPtr& r) {
+    return r->details;
+  }
 
   static bool Read(PermissionDataView, apps::PermissionPtr* out);
 };
@@ -52,65 +59,67 @@ struct StructTraits<PermissionDataView, apps::PermissionPtr> {
 template <>
 struct EnumTraits<PermissionType, apps::PermissionType> {
   static PermissionType ToMojom(apps::PermissionType input);
-  static bool FromMojom(PermissionType input, apps::PermissionType* output);
+  static apps::PermissionType FromMojom(PermissionType input);
 };
 
 template <>
 struct EnumTraits<TriState, apps::TriState> {
   static TriState ToMojom(apps::TriState input);
-  static bool FromMojom(TriState input, apps::TriState* output);
+  static apps::TriState FromMojom(TriState input);
 };
 
 template <>
-struct UnionTraits<PermissionValueDataView, apps::PermissionValuePtr> {
-  static PermissionValueDataView::Tag GetTag(const apps::PermissionValuePtr& r);
+struct UnionTraits<PermissionValueDataView, apps::Permission::PermissionValue> {
+  static PermissionValueDataView::Tag GetTag(
+      const apps::Permission::PermissionValue& r);
 
-  static bool IsNull(const apps::PermissionValuePtr& r) {
-    return !absl::holds_alternative<bool>(r->value) &&
-           !absl::holds_alternative<apps::TriState>(r->value);
+  static bool IsNull(const apps::Permission::PermissionValue& r) {
+    return false;
   }
 
-  static void SetToNull(apps::PermissionValuePtr* out) { out->reset(); }
+  static void SetToNull(apps::Permission::PermissionValue* out) {}
 
-  static bool bool_value(const apps::PermissionValuePtr& r) {
-    if (absl::holds_alternative<bool>(r->value)) {
-      return absl::get<bool>(r->value);
+  static bool bool_value(const apps::Permission::PermissionValue& r) {
+    if (std::holds_alternative<bool>(r)) {
+      return std::get<bool>(r);
     }
     return false;
   }
 
-  static apps::TriState tristate_value(const apps::PermissionValuePtr& r) {
-    if (absl::holds_alternative<apps::TriState>(r->value)) {
-      return absl::get<apps::TriState>(r->value);
+  static apps::TriState tristate_value(
+      const apps::Permission::PermissionValue& r) {
+    if (std::holds_alternative<apps::TriState>(r)) {
+      return std::get<apps::TriState>(r);
     }
     return apps::TriState::kBlock;
   }
 
-  static bool Read(PermissionValueDataView data, apps::PermissionValuePtr* out);
+  static bool Read(PermissionValueDataView data,
+                   apps::Permission::PermissionValue* out);
 };
 
 template <>
 struct EnumTraits<InstallReason, apps::InstallReason> {
   static InstallReason ToMojom(apps::InstallReason input);
-  static bool FromMojom(InstallReason input, apps::InstallReason* output);
+  static apps::InstallReason FromMojom(InstallReason input);
 };
 
 template <>
 struct EnumTraits<InstallSource, apps::InstallSource> {
   static InstallSource ToMojom(apps::InstallSource input);
-  static bool FromMojom(InstallSource input, apps::InstallSource* output);
+  static apps::InstallSource FromMojom(InstallSource input);
 };
 
 template <>
 struct EnumTraits<WindowMode, apps::WindowMode> {
   static WindowMode ToMojom(apps::WindowMode input);
-  static bool FromMojom(WindowMode input, apps::WindowMode* output);
+  static apps::WindowMode FromMojom(WindowMode input);
 };
 
 template <>
 struct EnumTraits<RunOnOsLoginMode, apps::RunOnOsLoginMode> {
   static RunOnOsLoginMode ToMojom(apps::RunOnOsLoginMode input);
-  static bool FromMojom(RunOnOsLoginMode input, apps::RunOnOsLoginMode* output);
+  static apps::RunOnOsLoginMode FromMojom(RunOnOsLoginMode input);
 };
 
 template <>

@@ -4,8 +4,9 @@
 
 #include "gpu/ipc/common/gpu_disk_cache_type_mojom_traits.h"
 
+#include <variant>
+
 #include "base/notreached.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 
 namespace mojo {
 
@@ -18,35 +19,35 @@ EnumTraits<gpu::mojom::GpuDiskCacheType, gpu::GpuDiskCacheType>::ToMojom(
       return gpu::mojom::GpuDiskCacheType::kGlShaders;
     case gpu::GpuDiskCacheType::kDawnWebGPU:
       return gpu::mojom::GpuDiskCacheType::kDawnWebGPU;
+    case gpu::GpuDiskCacheType::kDawnGraphite:
+      return gpu::mojom::GpuDiskCacheType::kDawnGraphite;
   }
 
   NOTREACHED() << "Invalid gpu::GpuDiskCacheType: " << gpu_disk_cache_type;
-  return gpu::mojom::GpuDiskCacheType::kGlShaders;
 }
 
 // static
-bool EnumTraits<gpu::mojom::GpuDiskCacheType, gpu::GpuDiskCacheType>::FromMojom(
-    gpu::mojom::GpuDiskCacheType input,
-    gpu::GpuDiskCacheType* out) {
+gpu::GpuDiskCacheType
+EnumTraits<gpu::mojom::GpuDiskCacheType, gpu::GpuDiskCacheType>::FromMojom(
+    gpu::mojom::GpuDiskCacheType input) {
   switch (input) {
     case gpu::mojom::GpuDiskCacheType::kGlShaders:
-      *out = gpu::GpuDiskCacheType::kGlShaders;
-      return true;
+      return gpu::GpuDiskCacheType::kGlShaders;
     case gpu::mojom::GpuDiskCacheType::kDawnWebGPU:
-      *out = gpu::GpuDiskCacheType::kDawnWebGPU;
-      return true;
+      return gpu::GpuDiskCacheType::kDawnWebGPU;
+    case gpu::mojom::GpuDiskCacheType::kDawnGraphite:
+      return gpu::GpuDiskCacheType::kDawnGraphite;
     default:
       break;
   }
   NOTREACHED() << "Invalid gpu::mojom::GpuDiskCacheType: " << input;
-  return false;
 }
 
 // static
 bool UnionTraits<gpu::mojom::GpuDiskCacheHandleDataView,
                  gpu::GpuDiskCacheHandle>::IsNull(const gpu::GpuDiskCacheHandle&
                                                       handle) {
-  return absl::holds_alternative<absl::monostate>(handle);
+  return std::holds_alternative<std::monostate>(handle);
 }
 
 void UnionTraits<gpu::mojom::GpuDiskCacheHandleDataView,
@@ -74,6 +75,12 @@ bool UnionTraits<
       *output = handle;
       return ret;
     }
+    case Tag::kDawnGraphiteHandle: {
+      gpu::GpuDiskCacheDawnGraphiteHandle handle;
+      bool ret = input.ReadDawnGraphiteHandle(&handle);
+      *output = handle;
+      return ret;
+    }
   }
   return false;
 }
@@ -83,24 +90,35 @@ gpu::mojom::GpuDiskCacheHandleDataView::Tag UnionTraits<
     gpu::mojom::GpuDiskCacheHandleDataView,
     gpu::GpuDiskCacheHandle>::GetTag(const gpu::GpuDiskCacheHandle& handle) {
   using Tag = gpu::mojom::GpuDiskCacheHandleDataView::Tag;
-  if (absl::holds_alternative<gpu::GpuDiskCacheGlShaderHandle>(handle))
+  if (std::holds_alternative<gpu::GpuDiskCacheGlShaderHandle>(handle)) {
     return Tag::kGlShaderHandle;
-  DCHECK(absl::holds_alternative<gpu::GpuDiskCacheDawnWebGPUHandle>(handle));
-  return Tag::kDawnWebgpuHandle;
+  }
+  if (std::holds_alternative<gpu::GpuDiskCacheDawnWebGPUHandle>(handle)) {
+    return Tag::kDawnWebgpuHandle;
+  }
+  DCHECK(std::holds_alternative<gpu::GpuDiskCacheDawnGraphiteHandle>(handle));
+  return Tag::kDawnGraphiteHandle;
 }
 
 // static
 gpu::GpuDiskCacheGlShaderHandle
 UnionTraits<gpu::mojom::GpuDiskCacheHandleDataView, gpu::GpuDiskCacheHandle>::
     gl_shader_handle(const gpu::GpuDiskCacheHandle& handle) {
-  return absl::get<gpu::GpuDiskCacheGlShaderHandle>(handle);
+  return std::get<gpu::GpuDiskCacheGlShaderHandle>(handle);
 }
 
 // static
 gpu::GpuDiskCacheDawnWebGPUHandle
 UnionTraits<gpu::mojom::GpuDiskCacheHandleDataView, gpu::GpuDiskCacheHandle>::
     dawn_webgpu_handle(const gpu::GpuDiskCacheHandle& handle) {
-  return absl::get<gpu::GpuDiskCacheDawnWebGPUHandle>(handle);
+  return std::get<gpu::GpuDiskCacheDawnWebGPUHandle>(handle);
+}
+
+// static
+gpu::GpuDiskCacheDawnGraphiteHandle
+UnionTraits<gpu::mojom::GpuDiskCacheHandleDataView, gpu::GpuDiskCacheHandle>::
+    dawn_graphite_handle(const gpu::GpuDiskCacheHandle& handle) {
+  return std::get<gpu::GpuDiskCacheDawnGraphiteHandle>(handle);
 }
 
 }  // namespace mojo

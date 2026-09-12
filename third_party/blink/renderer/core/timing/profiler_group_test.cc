@@ -8,7 +8,9 @@
 #include "third_party/blink/renderer/bindings/core/v8/script_function.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_profiler_init_options.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_profiler_trace.h"
 #include "third_party/blink/renderer/core/timing/profiler.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 
 namespace blink {
@@ -20,11 +22,17 @@ static constexpr int kMaxConcurrentProfilerCount = 100;
 
 }  // namespace
 
-TEST(ProfilerGroupTest, StopProfiler) {
+class ProfilerGroupTest : public testing::Test {
+ protected:
+  test::TaskEnvironment task_environment_;
+};
+
+TEST_F(ProfilerGroupTest, StopProfiler) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(0);
@@ -39,11 +47,12 @@ TEST(ProfilerGroupTest, StopProfiler) {
 }
 
 // Tests that attached profilers are stopped on ProfilerGroup deallocation.
-TEST(ProfilerGroupTest, StopProfilerOnGroupDeallocate) {
+TEST_F(ProfilerGroupTest, StopProfilerOnGroupDeallocate) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(0);
@@ -57,11 +66,12 @@ TEST(ProfilerGroupTest, StopProfilerOnGroupDeallocate) {
   EXPECT_TRUE(profiler->stopped());
 }
 
-TEST(ProfilerGroupTest, CreateProfiler) {
+TEST_F(ProfilerGroupTest, CreateProfiler) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(10);
@@ -76,11 +86,12 @@ TEST(ProfilerGroupTest, CreateProfiler) {
   profiler->stop(scope.GetScriptState());
 }
 
-TEST(ProfilerGroupTest, ClampedSamplingIntervalZero) {
+TEST_F(ProfilerGroupTest, ClampedSamplingIntervalZero) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(0);
@@ -99,11 +110,12 @@ TEST(ProfilerGroupTest, ClampedSamplingIntervalZero) {
   profiler->stop(scope.GetScriptState());
 }
 
-TEST(ProfilerGroupTest, ClampedSamplingIntervalNext) {
+TEST_F(ProfilerGroupTest, ClampedSamplingIntervalNext) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(
@@ -124,12 +136,14 @@ TEST(ProfilerGroupTest, ClampedSamplingIntervalNext) {
   profiler->stop(scope.GetScriptState());
 }
 
-TEST(ProfilerGroupTest, V8ProfileLimitThrowsExceptionWhenMaxConcurrentReached) {
+TEST_F(ProfilerGroupTest,
+       V8ProfileLimitThrowsExceptionWhenMaxConcurrentReached) {
   V8TestingScope scope;
 
   HeapVector<Member<Profiler>> profilers;
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
 
   for (auto i = 0; i < kMaxConcurrentProfilerCount; i++) {
@@ -158,11 +172,12 @@ TEST(ProfilerGroupTest, V8ProfileLimitThrowsExceptionWhenMaxConcurrentReached) {
   }
 }
 
-TEST(ProfilerGroupTest, NegativeSamplingInterval) {
+TEST_F(ProfilerGroupTest, NegativeSamplingInterval) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(-10);
@@ -172,11 +187,12 @@ TEST(ProfilerGroupTest, NegativeSamplingInterval) {
   EXPECT_TRUE(scope.GetExceptionState().HadException());
 }
 
-TEST(ProfilerGroupTest, OverflowSamplingInterval) {
+TEST_F(ProfilerGroupTest, OverflowSamplingInterval) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval((double)std::numeric_limits<int>::max() +
@@ -187,20 +203,21 @@ TEST(ProfilerGroupTest, OverflowSamplingInterval) {
   EXPECT_TRUE(scope.GetExceptionState().HadException());
 }
 
-TEST(ProfilerGroupTest, Bug1119865) {
-  class ExpectNoCallFunction : public ScriptFunction::Callable {
+TEST_F(ProfilerGroupTest, Bug1119865) {
+  class ExpectNoCallFunction
+      : public ThenCallable<ProfilerTrace, ExpectNoCallFunction> {
    public:
-    ScriptValue Call(ScriptState*, ScriptValue) override {
+    void React(ScriptState*, ProfilerTrace*) {
       EXPECT_FALSE(true)
           << "Promise should not resolve without dispatching a task";
-      return ScriptValue();
     }
   };
 
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(0);
@@ -209,9 +226,64 @@ TEST(ProfilerGroupTest, Bug1119865) {
       scope.GetScriptState(), *init_options, base::TimeTicks(),
       scope.GetExceptionState());
 
-  auto* function = MakeGarbageCollected<ScriptFunction>(
-      scope.GetScriptState(), MakeGarbageCollected<ExpectNoCallFunction>());
-  profiler->stop(scope.GetScriptState()).Then(function);
+  profiler->stop(scope.GetScriptState())
+      .Then(scope.GetScriptState(),
+            MakeGarbageCollected<ExpectNoCallFunction>());
+}
+
+// Tests that lazy mode allows profiling after context add. The specific V8
+// logging mode (kLazyLogging vs kEagerLogging) is not observable via public
+// API and is not verified here.
+TEST_F(ProfilerGroupTest, LazyModeAllowsProfiling) {
+  V8TestingScope scope;
+
+  ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kLazy);
+
+  // Creating a profiler should succeed.
+  ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
+  init_options->setSampleInterval(0);
+  init_options->setMaxBufferSize(0);
+  Profiler* profiler = profiler_group->CreateProfiler(
+      scope.GetScriptState(), *init_options, base::TimeTicks(),
+      scope.GetExceptionState());
+
+  EXPECT_FALSE(scope.GetExceptionState().HadException());
+  EXPECT_FALSE(profiler->stopped());
+
+  // clean up
+  profiler->stop(scope.GetScriptState());
+}
+
+// Tests that lazy mode allows multiple profilers after lazy init.
+TEST_F(ProfilerGroupTest, LazyModeMultipleProfilers) {
+  V8TestingScope scope;
+
+  ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kLazy);
+
+  ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
+  init_options->setSampleInterval(0);
+  init_options->setMaxBufferSize(0);
+
+  Profiler* profiler1 = profiler_group->CreateProfiler(
+      scope.GetScriptState(), *init_options, base::TimeTicks(),
+      scope.GetExceptionState());
+  EXPECT_FALSE(scope.GetExceptionState().HadException());
+
+  Profiler* profiler2 = profiler_group->CreateProfiler(
+      scope.GetScriptState(), *init_options, base::TimeTicks(),
+      scope.GetExceptionState());
+  EXPECT_FALSE(scope.GetExceptionState().HadException());
+
+  EXPECT_FALSE(profiler1->stopped());
+  EXPECT_FALSE(profiler2->stopped());
+
+  // clean up
+  profiler1->stop(scope.GetScriptState());
+  profiler2->stop(scope.GetScriptState());
 }
 
 /*
@@ -220,11 +292,12 @@ TEST(ProfilerGroupTest, Bug1119865) {
 
 // Tests that a leaked profiler doesn't crash the isolate on heap teardown.
 // These should run last
-TEST(ProfilerGroupTest, LeakProfiler) {
+TEST_F(ProfilerGroupTest, LeakProfiler) {
   V8TestingScope scope;
 
   ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+  profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                          JSProfilingMode::kEager);
 
   ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
   init_options->setSampleInterval(0);
@@ -238,12 +311,13 @@ TEST(ProfilerGroupTest, LeakProfiler) {
 
 // Tests that a leaked profiler doesn't crash when disposed alongside its
 // context.
-TEST(ProfilerGroupTest, LeakProfilerWithContext) {
+TEST_F(ProfilerGroupTest, LeakProfilerWithContext) {
   Profiler* profiler;
   {
     V8TestingScope scope;
     ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-    profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+    profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                            JSProfilingMode::kEager);
 
     ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
     init_options->setSampleInterval(0);
@@ -264,11 +338,12 @@ TEST(ProfilerGroupTest, LeakProfilerWithContext) {
 
 // Tests that a ProfilerGroup doesn't crash if the ProfilerGroup is destroyed
 // before a Profiler::Dispose is ran.
-TEST(ProfilerGroupTest, Bug1297283) {
+TEST_F(ProfilerGroupTest, Bug1297283) {
   {
     V8TestingScope scope;
     ProfilerGroup* profiler_group = ProfilerGroup::From(scope.GetIsolate());
-    profiler_group->OnProfilingContextAdded(scope.GetExecutionContext());
+    profiler_group->OnProfilingContextAdded(scope.GetExecutionContext(),
+                                            JSProfilingMode::kEager);
 
     ProfilerInitOptions* init_options = ProfilerInitOptions::Create();
     init_options->setSampleInterval(0);

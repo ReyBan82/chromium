@@ -8,18 +8,20 @@
 #include <memory>
 #include <string>
 
-#include "base/containers/fixed_flat_set.h"
 #include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
-#include "chrome/browser/ash/accessibility/accessibility_manager.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
 #include "chrome/browser/ash/login/screens/error_screen.h"
 #include "chrome/browser/ash/login/version_updater/version_updater.h"
 #include "chromeos/dbus/power/power_manager_client.h"
+
+class PrefService;
 
 namespace base {
 class TickClock;
@@ -27,6 +29,7 @@ class TickClock;
 
 namespace ash {
 
+struct AccessibilityStatusEventDetails;
 class ErrorScreensHistogramHelper;
 class UpdateView;
 
@@ -67,7 +70,9 @@ class UpdateScreen : public BaseScreen,
 
   using ScreenExitCallback = base::RepeatingCallback<void(Result result)>;
 
-  UpdateScreen(base::WeakPtr<UpdateView> view,
+  // `local_state` must be non-null and must outlive `this`.
+  UpdateScreen(PrefService* local_state,
+               base::WeakPtr<UpdateView> view,
                ErrorScreen* error_screen,
                const ScreenExitCallback& exit_callback);
 
@@ -125,7 +130,7 @@ class UpdateScreen : public BaseScreen,
   bool MaybeSkip(WizardContext& context) override;
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   void ExitUpdate(Result result);
 
@@ -165,11 +170,10 @@ class UpdateScreen : public BaseScreen,
   // Set update status message.
   void SetUpdateStatusMessage(int percent, base::TimeDelta time_left);
 
-  // Determines if the device is in EU zone to show info about opt out.
-  static bool CheckIfOptOutIsEnabled();
+  const raw_ref<PrefService> local_state_;
 
   base::WeakPtr<UpdateView> view_;
-  ErrorScreen* error_screen_;
+  raw_ptr<ErrorScreen> error_screen_;
   ScreenExitCallback exit_callback_;
 
   // Whether the update screen is shown.
@@ -183,7 +187,7 @@ class UpdateScreen : public BaseScreen,
   bool is_critical_checked_ = false;
 
   // Caches the result of HasCriticalUpdate function.
-  absl::optional<bool> has_critical_update_;
+  std::optional<bool> has_critical_update_;
 
   // True if the update progress should be hidden even if update_info suggests
   // the opposite.
@@ -195,12 +199,9 @@ class UpdateScreen : public BaseScreen,
   // check for update is done.
   bool is_opt_out_enabled_ = false;
 
-  // EU country list.
-  inline static constexpr auto kEUCountriesSet =
-      base::MakeFixedFlatSet<base::StringPiece>(
-          {"at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi",
-           "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu",
-           "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"});
+  // Whether Quick Start was notified of an update. True for users who
+  // previously started Quick Start and will install an update.
+  bool did_prepare_quick_start_for_update_ = false;
 
   std::unique_ptr<ErrorScreensHistogramHelper> histogram_helper_;
 
@@ -229,7 +230,7 @@ class UpdateScreen : public BaseScreen,
   // Time to delay showing the screen.
   base::TimeDelta show_delay_;
 
-  const base::TickClock* tick_clock_;
+  raw_ptr<const base::TickClock> tick_clock_;
 
   base::TimeTicks start_update_downloading_;
   // Support variables for update stages time recording.

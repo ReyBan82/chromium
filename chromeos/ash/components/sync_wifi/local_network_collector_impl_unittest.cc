@@ -2,20 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <memory>
+#include "chromeos/ash/components/sync_wifi/local_network_collector_impl.h"
 
+#include <memory>
+#include <optional>
+
+#include "ash/constants/ash_features.h"
 #include "ash/public/cpp/network_config_service.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "chromeos/ash/components/dbus/shill/fake_shill_simulated_result.h"
 #include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_metadata_store.h"
 #include "chromeos/ash/components/network/network_profile_handler.h"
 #include "chromeos/ash/components/sync_wifi/local_network_collector.h"
-#include "chromeos/ash/components/sync_wifi/local_network_collector_impl.h"
 #include "chromeos/ash/components/sync_wifi/network_identifier.h"
 #include "chromeos/ash/components/sync_wifi/network_test_helper.h"
 #include "chromeos/ash/components/sync_wifi/network_type_conversions.h"
@@ -26,7 +30,6 @@
 #include "chromeos/ash/services/network_config/public/cpp/cros_network_config_test_helper.h"
 #include "chromeos/services/network_config/public/mojom/cros_network_config.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash::sync_wifi {
 
@@ -82,12 +85,14 @@ class LocalNetworkCollectorImplTest : public testing::Test {
 
   void OnGetSyncableNetwork(
       std::string expected_ssid,
-      absl::optional<sync_pb::WifiConfigurationSpecifics> result) {
+      bool has_proxy,
+      std::optional<sync_pb::WifiConfigurationSpecifics> result) {
     if (expected_ssid.empty()) {
-      ASSERT_EQ(absl::nullopt, result);
+      ASSERT_EQ(std::nullopt, result);
       return;
     }
     EXPECT_EQ(expected_ssid, DecodeHexString(result->hex_ssid()));
+    EXPECT_EQ(has_proxy, result->has_proxy_configuration());
   }
 
   void OnGetManagedPropertiesResult(
@@ -103,11 +108,12 @@ class LocalNetworkCollectorImplTest : public testing::Test {
   }
 
   void TestGetSyncableNetwork(const std::string& guid,
-                              const std::string& expected_ssid) {
+                              const std::string& expected_ssid,
+                              bool has_proxy = false) {
     local_network_collector()->GetSyncableNetwork(
         guid,
         base::BindOnce(&LocalNetworkCollectorImplTest::OnGetSyncableNetwork,
-                       base::Unretained(this), expected_ssid));
+                       base::Unretained(this), expected_ssid, has_proxy));
     base::RunLoop().RunUntilIdle();
   }
 
@@ -138,7 +144,8 @@ class LocalNetworkCollectorImplTest : public testing::Test {
 
 TEST_F(LocalNetworkCollectorImplTest, TestGetAllSyncableNetworks) {
   helper()->ConfigureWiFiNetwork(kFredSsid, /*is_secured=*/true,
-                                 /*in_profile=*/true, /*has_connected=*/true);
+                                 helper()->primary_user(),
+                                 /*has_connected=*/true);
 
   std::vector<std::string> expected;
   expected.push_back(kFredSsid);
@@ -188,21 +195,27 @@ TEST_F(LocalNetworkCollectorImplTest,
 TEST_F(LocalNetworkCollectorImplTest,
        TestGetAllSyncableNetworks_WithFiltering) {
   helper()->ConfigureWiFiNetwork(kFredSsid, /*is_secured=*/true,
-                                 /*in_profile=*/true, /*has_connected=*/true);
+                                 helper()->primary_user(),
+                                 /*has_connected=*/true);
   helper()->ConfigureWiFiNetwork(kMangoSsid, /*is_secured=*/true,
-                                 /*in_profile=*/false, /*has_connected=*/true,
+                                 /*user=*/nullptr, /*has_connected=*/true,
                                  /*owned_by_user=*/false);
   helper()->ConfigureWiFiNetwork(kAnnieSsid, /*is_secured=*/false,
-                                 /*in_profile=*/true, /*has_connected=*/true);
+                                 helper()->primary_user(),
+                                 /*has_connected=*/true);
   helper()->ConfigureWiFiNetwork(kOzzySsid, /*is_secured=*/true,
-                                 /*in_profile=*/true, /*has_connected=*/true);
+                                 helper()->primary_user(),
+                                 /*has_connected=*/true);
   helper()->ConfigureWiFiNetwork(kHopperSsid, /*is_secured=*/true,
-                                 /*in_profile=*/true, /*has_connected=*/false);
+                                 helper()->primary_user(),
+                                 /*has_connected=*/false);
   helper()->ConfigureWiFiNetwork(kByteSsid, /*is_secured=*/true,
-                                 /*in_profile=*/false, /*has_connected=*/true,
+                                 helper()->primary_user(),
+                                 /*has_connected=*/true,
                                  /*owned_by_user=*/true);
   helper()->ConfigureWiFiNetwork(kWalterSsid, /*is_secured=*/true,
-                                 /*in_profile=*/false, /*has_connected=*/true,
+                                 /*user=*/nullptr,
+                                 /*has_connected=*/true,
                                  /*owned_by_user=*/true,
                                  /*configured_by_sync=*/false,
                                  /*is_from_policy=*/true);
@@ -223,17 +236,18 @@ TEST_F(LocalNetworkCollectorImplTest,
 TEST_F(LocalNetworkCollectorImplTest, TestRecordZeroNetworksEligibleForSync) {
   base::HistogramTester histogram_tester;
   helper()->ConfigureWiFiNetwork(kMangoSsid, /*is_secured=*/true,
-                                 /*in_profile=*/false, /*has_connected=*/true,
+                                 /*user=*/nullptr, /*has_connected=*/true,
                                  /*owned_by_user=*/false);
   helper()->ConfigureWiFiNetwork(kAnnieSsid, /*is_secured=*/false,
-                                 /*in_profile=*/true, /*has_connected=*/true);
+                                 helper()->primary_user(),
+                                 /*has_connected=*/true);
   helper()->ConfigureWiFiNetwork(kWalterSsid, /*is_secured=*/true,
-                                 /*in_profile=*/false, /*has_connected=*/true,
+                                 /*user=*/nullptr, /*has_connected=*/true,
                                  /*owned_by_user=*/true,
                                  /*configured_by_sync=*/false,
                                  /*is_from_policy=*/true);
   helper()->ConfigureWiFiNetwork(kHopperSsid, /*is_secured=*/true,
-                                 /*in_profile=*/false, /*has_connected=*/true,
+                                 /*user=*/nullptr, /*has_connected=*/true,
                                  /*owned_by_user=*/true,
                                  /*configured_by_sync=*/false,
                                  /*is_from_policy=*/false,
@@ -257,16 +271,37 @@ TEST_F(LocalNetworkCollectorImplTest, TestRecordZeroNetworksEligibleForSync) {
 
 TEST_F(LocalNetworkCollectorImplTest, TestGetSyncableNetwork) {
   std::string guid = helper()->ConfigureWiFiNetwork(
-      kFredSsid, /*is_secured=*/true,
-      /*in_profile=*/true, /*has_connected=*/true);
+      kFredSsid, /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/true);
   TestGetSyncableNetwork(guid, kFredSsid);
+}
+
+TEST_F(LocalNetworkCollectorImplTest,
+       TestGetSyncableNetwork_HasProxy_UploadProxies) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kWifiSyncUploadProxyConfigs);
+
+  std::string guid = helper()->ConfigureWiFiNetwork(
+      kFredSsid, /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/true, /*has_proxy=*/true);
+
+  TestGetSyncableNetwork(guid, kFredSsid, /*has_proxy*/ true);
+}
+
+TEST_F(LocalNetworkCollectorImplTest,
+       TestGetSyncableNetwork_HasProxy_DoesntUploadProxies) {
+  std::string guid = helper()->ConfigureWiFiNetwork(
+      kFredSsid, /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/true, /*has_proxy=*/true);
+
+  TestGetSyncableNetwork(guid, kFredSsid, /*has_proxy*/ false);
 }
 
 TEST_F(LocalNetworkCollectorImplTest,
        TestGetSyncableNetwork_Shared_OwnedByUser) {
   std::string guid = helper()->ConfigureWiFiNetwork(
       kFredSsid, /*is_secured=*/true,
-      /*in_profile=*/false, /*has_connected=*/true, /*owned_by_user=*/true);
+      /*user=*/nullptr, /*has_connected=*/true, /*owned_by_user=*/true);
   TestGetSyncableNetwork(guid, kFredSsid);
 }
 
@@ -274,7 +309,7 @@ TEST_F(LocalNetworkCollectorImplTest,
        TestGetSyncableNetwork_Shared_OwnedByOther) {
   std::string guid = helper()->ConfigureWiFiNetwork(
       kFredSsid, /*is_secured=*/true,
-      /*in_profile=*/false, /*has_connected=*/true, /*owned_by_user=*/false);
+      /*user=*/nullptr, /*has_connected=*/true, /*owned_by_user=*/false);
   TestGetSyncableNetwork(guid, /*expected_ssid=*/std::string());
 }
 
@@ -284,15 +319,15 @@ TEST_F(LocalNetworkCollectorImplTest, TestGetSyncableNetwork_DoesntExist) {
 
 TEST_F(LocalNetworkCollectorImplTest, TestGetSyncableNetwork_NeverConnected) {
   std::string guid = helper()->ConfigureWiFiNetwork(
-      kFredSsid, /*is_secured=*/true,
-      /*in_profile=*/true, /*has_connected=*/false);
+      kFredSsid, /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/false);
   TestGetSyncableNetwork(guid, kFredSsid);
 }
 
 TEST_F(LocalNetworkCollectorImplTest, TestGetSyncableNetwork_FromPolicy) {
   std::string guid = helper()->ConfigureWiFiNetwork(
-      kFredSsid, /*is_secured=*/true,
-      /*in_profile=*/true, /*has_connected=*/true, /*owned_by_user=*/true,
+      kFredSsid, /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/true, /*owned_by_user=*/true,
       /*configured_by_sync=*/false, /*is_from_policy=*/true);
   TestGetSyncableNetwork(guid, /*expected_ssid=*/std::string());
 }
@@ -315,36 +350,33 @@ TEST_F(LocalNetworkCollectorImplTest, TestFixAutoconnect) {
   protos.push_back(walt_network);
   protos.push_back(mango_network);
 
-  std::string fred_guid =
-      helper()->ConfigureWiFiNetwork(kFredSsid,
-                                     /*is_secured=*/true,
-                                     /*in_profile=*/true,
-                                     /*has_connected=*/true,
-                                     /*owned_by_user=*/true,
-                                     /*configured_by_sync=*/false,
-                                     /*is_from_policy=*/false,
-                                     /*is_hidden=*/false,
-                                     /*auto_connect=*/false);
-  std::string walt_guid =
-      helper()->ConfigureWiFiNetwork(kWalterSsid,
-                                     /*is_secured=*/true,
-                                     /*in_profile=*/true,
-                                     /*has_connected=*/true,
-                                     /*owned_by_user=*/true,
-                                     /*configured_by_sync=*/true,
-                                     /*is_from_policy=*/false,
-                                     /*is_hidden=*/false,
-                                     /*auto_connect=*/false);
-  std::string mango_guid =
-      helper()->ConfigureWiFiNetwork(kMangoSsid,
-                                     /*is_secured=*/true,
-                                     /*in_profile=*/true,
-                                     /*has_connected=*/true,
-                                     /*owned_by_user=*/true,
-                                     /*configured_by_sync=*/true,
-                                     /*is_from_policy=*/false,
-                                     /*is_hidden=*/false,
-                                     /*auto_connect=*/false);
+  std::string fred_guid = helper()->ConfigureWiFiNetwork(
+      kFredSsid,
+      /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/true,
+      /*owned_by_user=*/true,
+      /*configured_by_sync=*/false,
+      /*is_from_policy=*/false,
+      /*is_hidden=*/false,
+      /*auto_connect=*/false);
+  std::string walt_guid = helper()->ConfigureWiFiNetwork(
+      kWalterSsid,
+      /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/true,
+      /*owned_by_user=*/true,
+      /*configured_by_sync=*/true,
+      /*is_from_policy=*/false,
+      /*is_hidden=*/false,
+      /*auto_connect=*/false);
+  std::string mango_guid = helper()->ConfigureWiFiNetwork(
+      kMangoSsid,
+      /*is_secured=*/true, helper()->primary_user(),
+      /*has_connected=*/true,
+      /*owned_by_user=*/true,
+      /*configured_by_sync=*/true,
+      /*is_from_policy=*/false,
+      /*is_hidden=*/false,
+      /*auto_connect=*/false);
   base::RunLoop().RunUntilIdle();
   VerifyAutoconnect(fred_guid, false);
   VerifyAutoconnect(walt_guid, false);

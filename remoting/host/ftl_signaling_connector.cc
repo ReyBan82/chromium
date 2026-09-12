@@ -85,7 +85,7 @@ void FtlSignalingConnector::Start() {
   TryReconnect(base::TimeDelta());
 }
 
-void FtlSignalingConnector::OnSignalStrategyStateChange(
+void FtlSignalingConnector::OnSignalingStateChanged(
     SignalStrategy::State state) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
@@ -97,7 +97,7 @@ void FtlSignalingConnector::OnSignalStrategyStateChange(
   } else if (state == SignalStrategy::DISCONNECTED) {
     HOST_LOG << "Signaling disconnected. error="
              << SignalStrategyErrorToString(signal_strategy_->GetError());
-    backoff_reset_timer_.AbandonAndStop();
+    backoff_reset_timer_.Stop();
     backoff_.InformOfRequest(false);
     if (signal_strategy_->IsSignInError() &&
         signal_strategy_->GetError() == SignalStrategy::AUTHENTICATION_FAILED) {
@@ -108,11 +108,6 @@ void FtlSignalingConnector::OnSignalStrategyStateChange(
     }
     TryReconnect(backoff_.GetTimeUntilRelease());
   }
-}
-
-bool FtlSignalingConnector::OnSignalStrategyIncomingStanza(
-    const jingle_xmpp::XmlElement* stanza) {
-  return false;
 }
 
 void FtlSignalingConnector::OnNetworkChanged(

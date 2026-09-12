@@ -4,10 +4,10 @@
 
 #include "chrome/browser/ui/views/incognito_clear_browsing_data_dialog_coordinator.h"
 
-#include "chrome/browser/ui/views/frame/browser_view.h"
-#include "chrome/browser/ui/views/frame/toolbar_button_provider.h"
+#include <memory>
+
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/views/incognito_clear_browsing_data_dialog.h"
-#include "chrome/browser/ui/views/profiles/avatar_toolbar_button.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/view_utils.h"
 
@@ -15,20 +15,22 @@ IncognitoClearBrowsingDataDialogCoordinator::
     ~IncognitoClearBrowsingDataDialogCoordinator() {
   // Forcefully close the Widget if it hasn't been closed by the time the
   // browser is torn down to avoid dangling references.
-  if (IsShowing())
+  if (IsShowing()) {
     bubble_tracker_.view()->GetWidget()->CloseNow();
+  }
 }
 
 void IncognitoClearBrowsingDataDialogCoordinator::Show(
-    IncognitoClearBrowsingDataDialogInterface::Type type) {
-  auto* avatar_toolbar_button =
-      BrowserView::GetBrowserViewForBrowser(&GetBrowser())
-          ->toolbar_button_provider()
-          ->GetAvatarToolbarButton();
+    IncognitoClearBrowsingDataDialogInterface::Type type,
+    views::BubbleAnchor anchor) {
+  if (bubble_tracker_.view() && bubble_tracker_.view()->GetWidget()) {
+    // Ensure the previous bubble is closed before creating and showing the new
+    // one.
+    bubble_tracker_.view()->GetWidget()->Close();
+  }
 
   auto bubble = std::make_unique<IncognitoClearBrowsingDataDialog>(
-      avatar_toolbar_button, GetBrowser().profile(), type);
-  DCHECK_EQ(nullptr, bubble_tracker_.view());
+      anchor, profile_, type);
   bubble_tracker_.SetView(bubble.get());
 
   auto* widget =
@@ -47,8 +49,16 @@ IncognitoClearBrowsingDataDialog* IncognitoClearBrowsingDataDialogCoordinator::
                      : nullptr;
 }
 
-IncognitoClearBrowsingDataDialogCoordinator::
-    IncognitoClearBrowsingDataDialogCoordinator(Browser* browser)
-    : BrowserUserData<IncognitoClearBrowsingDataDialogCoordinator>(*browser) {}
+DEFINE_USER_DATA(IncognitoClearBrowsingDataDialogCoordinator);
 
-BROWSER_USER_DATA_KEY_IMPL(IncognitoClearBrowsingDataDialogCoordinator);
+// static
+IncognitoClearBrowsingDataDialogCoordinator*
+IncognitoClearBrowsingDataDialogCoordinator::From(
+    BrowserWindowInterface* browser) {
+  return Get(browser->GetUnownedUserDataHost());
+}
+
+IncognitoClearBrowsingDataDialogCoordinator::
+    IncognitoClearBrowsingDataDialogCoordinator(Profile* profile,
+                                                ui::UnownedUserDataHost& host)
+    : scoped_unowned_user_data_(host, *this), profile_(profile) {}

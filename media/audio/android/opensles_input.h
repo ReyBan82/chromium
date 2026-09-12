@@ -9,15 +9,19 @@
 #include <SLES/OpenSLES_Android.h>
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 
 #include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/synchronization/lock.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
 #include "media/audio/android/opensles_util.h"
 #include "media/audio/audio_io.h"
+#include "media/base/amplitude_peak_detector.h"
 #include "media/base/audio_parameters.h"
 
 namespace media {
@@ -31,6 +35,8 @@ class AudioManagerAndroid;
 // methods should be called on the Audio Manager thread.
 class OpenSLESInputStream : public AudioInputStream {
  public:
+  using Error = AudioInputStream::AudioInputCallback::Error;
+
   static const int kMaxNumOfBuffersInQueue = 2;
 
   OpenSLESInputStream(AudioManagerAndroid* manager,
@@ -68,42 +74,41 @@ class OpenSLESInputStream : public AudioInputStream {
   // Called in Open();
   void SetupAudioBuffer();
 
-  // Called in Close();
-  void ReleaseAudioBuffer();
-
   // If OpenSLES reports an error this function handles it and passes it to
   // the attached AudioInputCallback::OnError().
-  void HandleError(SLresult error);
+  void HandleError(SLresult error, Error error_code);
 
   base::ThreadChecker thread_checker_;
+
+  AmplitudePeakDetector peak_detector_;
 
   // Protects |callback_|, |active_buffer_index_|, |audio_data_|,
   // |buffer_size_bytes_| and |simple_buffer_queue_|.
   base::Lock lock_;
 
-  raw_ptr<AudioManagerAndroid> audio_manager_;
+  raw_ref<AudioManagerAndroid> audio_manager_;
 
-  raw_ptr<AudioInputCallback> callback_;
+  raw_ptr<AudioInputCallback> callback_ = nullptr;
 
   // Shared engine interfaces for the app.
   media::ScopedSLObjectItf recorder_object_;
   media::ScopedSLObjectItf engine_object_;
 
-  SLRecordItf recorder_;
+  SLRecordItf recorder_ = nullptr;
 
   // Buffer queue recorder interface.
-  SLAndroidSimpleBufferQueueItf simple_buffer_queue_;
+  SLAndroidSimpleBufferQueueItf simple_buffer_queue_ = nullptr;
 
   SLDataFormat_PCM format_;
 
   // Audio buffers that are allocated in the constructor based on
   // info from audio parameters.
-  uint8_t* audio_data_[kMaxNumOfBuffersInQueue];
+  std::array<base::HeapArray<uint8_t>, kMaxNumOfBuffersInQueue> audio_data_;
 
-  int active_buffer_index_;
-  int buffer_size_bytes_;
+  int active_buffer_index_ = 0;
+  int buffer_size_bytes_ = 0;
 
-  bool started_;
+  bool started_ = false;
 
   base::TimeDelta hardware_delay_;
 

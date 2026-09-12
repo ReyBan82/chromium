@@ -57,7 +57,7 @@ EditorCommand GetCommand(Document* document, const String& command_name) {
 
   document->UpdateStyleAndLayoutTree();
   return frame->GetEditor().CreateCommand(command_name,
-                                          EditorCommandSource::kDOM);
+                                          EditorCommandSource::kDom);
 }
 
 // Trusted Types requires that HTML (or Script, or script URLs) to be
@@ -82,8 +82,9 @@ String TrustedTypesCheck(Document* document,
   // We received a plain string. Most editor commands won't read the value as
   // HTML. Those commands can pass.
   DCHECK(value->IsString());
-  if (!editor_command.IsValueInterpretedAsHTML())
+  if (!editor_command.IsValueInterpretedAsHtml()) {
     return value->GetAsString();
+  }
 
   // We received plain string, and it's one of the commands of interest.
   // Run the TT check.
@@ -97,8 +98,9 @@ bool Document::execCommand(const String& command_name,
                            bool unused_bool,
                            const String& value,
                            ExceptionState& exception_state) {
-  V8UnionStringOrTrustedHTML tmp(value);
-  return execCommand(command_name, unused_bool, &tmp, exception_state);
+  V8UnionStringOrTrustedHTML* tmp =
+      MakeGarbageCollected<V8UnionStringOrTrustedHTML>(value);
+  return execCommand(command_name, unused_bool, tmp, exception_state);
 }
 
 bool Document::execCommand(const String& command_name,
@@ -111,6 +113,8 @@ bool Document::execCommand(const String& command_name,
         "execCommand is only supported on HTML documents.");
     return false;
   }
+
+  UseCounter::Count(*this, WebFeature::kExecCommand);
   if (FocusedElement() && IsTextControl(*FocusedElement()))
     UseCounter::Count(*this, WebFeature::kExecCommandOnInputOrTextarea);
 
@@ -130,10 +134,10 @@ bool Document::execCommand(const String& command_name,
   }
   base::AutoReset<bool> execute_scope(&is_running_exec_command_, true);
 
-  // Postpone DOM mutation events, which can execute scripts and change
+  // Postpone synchronous events, which can execute scripts and change
   // DOM tree against implementation assumption.
   EventQueueScope event_queue_scope;
-  TidyUpHTMLStructure(*this);
+  TidyUpHtmlStructure(*this);
   const EditorCommand editor_command = GetCommand(this, command_name);
 
   String checked_value =

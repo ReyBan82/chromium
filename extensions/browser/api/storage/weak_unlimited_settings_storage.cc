@@ -28,6 +28,10 @@ size_t WeakUnlimitedSettingsStorage::GetBytesInUse() {
   return delegate_->GetBytesInUse();
 }
 
+ValueStore::ReadResult WeakUnlimitedSettingsStorage::GetKeys() {
+  return delegate_->GetKeys();
+}
+
 ValueStore::ReadResult WeakUnlimitedSettingsStorage::Get(
     const std::string& key) {
   return delegate_->Get(key);
@@ -49,7 +53,7 @@ ValueStore::WriteResult WeakUnlimitedSettingsStorage::Set(
 
 ValueStore::WriteResult WeakUnlimitedSettingsStorage::Set(
     WriteOptions options,
-    const base::Value::Dict& values) {
+    const base::DictValue& values) {
   return delegate_->Set(IGNORE_QUOTA, values);
 }
 

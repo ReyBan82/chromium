@@ -4,6 +4,9 @@
 
 #include "chrome/browser/ui/omnibox/chrome_omnibox_navigation_observer.h"
 
+#include <optional>
+#include <string>
+
 #include "base/functional/bind.h"
 #include "base/trace_event/typed_macros.h"
 #include "chrome/browser/autocomplete/shortcuts_backend_factory.h"
@@ -16,14 +19,13 @@
 #include "components/omnibox/browser/shortcuts_backend.h"
 #include "components/search_engines/template_url.h"
 #include "components/search_engines/template_url_service.h"
+#include "components/search_engines/template_url_starter_pack_data.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_details.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/navigation_handle_user_data.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_types.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
@@ -67,8 +69,9 @@ bool IsValidNavigation(const GURL& original_url, const GURL& final_url) {
 bool OnlyChangeIsFromHTTPToHTTPS(const GURL& origin, const GURL& destination) {
   // Exit early if possible.
   if (!origin.SchemeIs(url::kHttpScheme) ||
-      !destination.SchemeIs(url::kHttpsScheme))
+      !destination.SchemeIs(url::kHttpsScheme)) {
     return false;
+  }
 
   GURL::Replacements replace_scheme;
   replace_scheme.SetSchemeStr(url::kHttpsScheme);
@@ -81,8 +84,9 @@ bool OnlyChangeIsFromHTTPToHTTPS(const GURL& origin, const GURL& destination) {
 network::mojom::URLLoaderFactory* GetURLLoaderFactory(
     network::mojom::URLLoaderFactory* loader_factory,
     Profile* profile) {
-  if (loader_factory)
+  if (loader_factory) {
     return loader_factory;
+  }
   return profile->GetDefaultStoragePartition()
       ->GetURLLoaderFactoryForBrowserProcess()
       .get();
@@ -208,10 +212,11 @@ class ChromeOmniboxNavigationObserver::AlternativeNavigationURLLoader {
     // |this| may be deleted at this point.
   }
 
-  void OnURLLoadComplete(std::unique_ptr<std::string> body) {
+  void OnURLLoadComplete(std::optional<std::string> body) {
     int response_code = -1;
-    if (loader_->ResponseInfo() && loader_->ResponseInfo()->headers)
+    if (loader_->ResponseInfo() && loader_->ResponseInfo()->headers) {
       response_code = loader_->ResponseInfo()->headers->response_code();
+    }
     // We may see ERR_INSUFFICIENT_RESOURCES here even if everything is workable
     // if the server includes a body in response to a HEAD, as a size limit was
     // set while fetching.
@@ -262,8 +267,9 @@ ChromeOmniboxNavigationObserver::ChromeOmniboxNavigationObserver(
 }
 
 ChromeOmniboxNavigationObserver::~ChromeOmniboxNavigationObserver() {
-  if (!web_contents())
+  if (!web_contents()) {
     return;
+  }
   if (fetch_state_ == AlternativeFetchState::kFetchSucceeded) {
     std::move(show_infobar_).Run(this);
   }
@@ -271,8 +277,9 @@ ChromeOmniboxNavigationObserver::~ChromeOmniboxNavigationObserver() {
 
 void ChromeOmniboxNavigationObserver::DidFinishNavigation(
     content::NavigationHandle* navigation_handle) {
-  if (navigation_handle->GetNavigationId() != navigation_id_)
+  if (navigation_handle->GetNavigationId() != navigation_id_) {
     return;
+  }
 
   // This is the navigation we've started ourselves in the primary main frame
   // of the WebContents.
@@ -304,18 +311,21 @@ void ChromeOmniboxNavigationObserver::DidFinishNavigation(
 void ChromeOmniboxNavigationObserver::On404() {
   TemplateURLService* template_url_service =
       TemplateURLServiceFactory::GetForProfile(profile_);
-  TemplateURL* template_url = match_.GetTemplateURL(
-      template_url_service, false /* allow_fallback_to_destination_host */);
+  const TemplateURL* template_url = match_.GetTemplateURL(template_url_service);
   // If the omnibox navigation was to a URL (and hence did not involve a
   // TemplateURL / search at all) or the invoked search engine has been
   // deleted or otherwise modified, doing nothing is the right thing.
-  if (template_url == nullptr)
+  if (template_url == nullptr) {
     return;
+  }
   // If there's any hint that we should keep this search engine around, don't
   // mess with it.
   if (template_url_service->ShowInDefaultList(template_url) ||
-      !template_url->safe_for_autoreplace())
+      !template_url->safe_for_autoreplace() ||
+      template_url->starter_pack_id() !=
+          template_url_starter_pack_data::StarterPackId::kNone) {
     return;
+  }
   // This custom search engine is safe to delete.
   template_url_service->Remove(template_url);
 }
@@ -349,8 +359,9 @@ void ChromeOmniboxNavigationObserver::Create(
               "navigation", navigation, "match", match, "alternative_nav_match",
               alternative_nav_match);
 
-  if (!navigation)
+  if (!navigation) {
     return;
+  }
 
   // The observer will be kept alive until both navigation and the loading
   // fetcher finish.
@@ -369,8 +380,9 @@ void ChromeOmniboxNavigationObserver::CreateForTesting(
     const AutocompleteMatch& alternative_nav_match,
     network::mojom::URLLoaderFactory* loader_factory,
     ShowInfobarCallback show_infobar) {
-  if (!navigation)
+  if (!navigation) {
     return;
+  }
 
   // The observer will be kept alive until both navigation and the loading
   // fetcher finish.

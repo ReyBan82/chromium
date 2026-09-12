@@ -28,58 +28,69 @@ namespace ash {
 
 // It is possible that we are capturing and sharing screen at the same time, so
 // we cannot share the notification IDs for capturing and sharing.
-const char kScreenCaptureNotificationId[] = "chrome://screen/capture";
-const char kScreenShareNotificationId[] = "chrome://screen/share";
-const char kNotifierScreenCapture[] = "ash.screen-capture";
-const char kNotifierScreenShare[] = "ash.screen-share";
+const char kScreenAccessNotificationId[] = "chrome://screen/access";
+const char kRemotingScreenShareNotificationId[] =
+    "chrome://screen/remoting-share";
 
 ScreenSecurityController::ScreenSecurityController() {
   Shell::Get()->AddShellObserver(this);
-  Shell::Get()->system_tray_notifier()->AddScreenCaptureObserver(this);
-  Shell::Get()->system_tray_notifier()->AddScreenShareObserver(this);
+  Shell::Get()->system_tray_notifier()->AddScreenSecurityObserver(this);
 }
 
 ScreenSecurityController::~ScreenSecurityController() {
-  Shell::Get()->system_tray_notifier()->RemoveScreenShareObserver(this);
-  Shell::Get()->system_tray_notifier()->RemoveScreenCaptureObserver(this);
+  Shell::Get()->system_tray_notifier()->RemoveScreenSecurityObserver(this);
   Shell::Get()->RemoveShellObserver(this);
 }
 
-void ScreenSecurityController::CreateNotification(const std::u16string& message,
-                                                  bool is_capture) {
-  if (features::IsVideoConferenceEnabled()) {
-    // Don't send screen share notifications, because the VideoConferenceTray
-    // serves as the notifier for screen share. As for screen capture, continue
-    // to show these notifications for now, although they may end up in the
-    // `VideoConferenceTray` as well. See b/269486186 for details.
-    DCHECK(is_capture);
+void ScreenSecurityController::StopAllSessions(bool is_screen_access) {
+  if (!features::IsVideoConferenceEnabled() || !is_screen_access) {
+    message_center::MessageCenter::Get()->RemoveNotification(
+        is_screen_access ? kScreenAccessNotificationId
+                         : kRemotingScreenShareNotificationId,
+        /*by_user=*/false);
   }
 
+  std::vector<base::OnceClosure> callbacks;
+  std::swap(callbacks, is_screen_access ? screen_access_stop_callbacks_
+                                        : remoting_share_stop_callbacks_);
+  for (base::OnceClosure& callback : callbacks) {
+    if (callback) {
+      std::move(callback).Run();
+    }
+  }
+
+  change_source_callback_.Reset();
+}
+
+void ScreenSecurityController::CreateNotification(
+    const std::u16string& message,
+    bool is_screen_access_notification) {
   message_center::RichNotificationData data;
-  data.buttons.push_back(message_center::ButtonInfo(l10n_util::GetStringUTF16(
-      is_capture ? IDS_ASH_STATUS_TRAY_SCREEN_CAPTURE_STOP
-                 : IDS_ASH_STATUS_TRAY_SCREEN_SHARE_STOP)));
+  data.buttons.emplace_back(
+      l10n_util::GetStringUTF16(IDS_ASH_STATUS_TRAY_SCREEN_ACCESS_STOP));
   // Only add "Change source" button when there is one session, since there
   // isn't a good UI to distinguish between the different sessions.
-  if (is_capture && change_source_callback_ &&
-      capture_stop_callbacks_.size() == 1) {
-    data.buttons.push_back(message_center::ButtonInfo(l10n_util::GetStringUTF16(
-        IDS_ASH_STATUS_TRAY_SCREEN_CAPTURE_CHANGE_SOURCE)));
+  if (is_screen_access_notification && change_source_callback_ &&
+      screen_access_stop_callbacks_.size() == 1) {
+    data.buttons.emplace_back(l10n_util::GetStringUTF16(
+        IDS_ASH_STATUS_TRAY_SCREEN_CAPTURE_CHANGE_SOURCE));
   }
 
   auto delegate =
       base::MakeRefCounted<message_center::HandleNotificationClickDelegate>(
           base::BindRepeating(
               [](base::WeakPtr<ScreenSecurityController> controller,
-                 bool is_capture, absl::optional<int> button_index) {
+                 bool is_screen_access_notification,
+                 std::optional<int> button_index) {
                 if (!button_index)
                   return;
 
                 if (*button_index == 0) {
-                  controller->StopAllSessions(is_capture);
+                  controller->StopAllSessions(
+                      /*is_screen_access=*/is_screen_access_notification);
                 } else if (*button_index == 1) {
                   controller->ChangeSource();
-                  if (is_capture) {
+                  if (is_screen_access_notification) {
                     base::RecordAction(base::UserMetricsAction(
                         "StatusArea_ScreenCapture_Change_Source"));
                   }
@@ -87,72 +98,47 @@ void ScreenSecurityController::CreateNotification(const std::u16string& message,
                   NOTREACHED();
                 }
               },
-              weak_ptr_factory_.GetWeakPtr(), is_capture));
-
-  // If the feature is enabled, the notification should have the style of
-  // privacy indicators notification.
-  auto* notifier_id =
-      features::IsPrivacyIndicatorsEnabled()
-          ? kPrivacyIndicatorsNotifierId
-          : (is_capture ? kNotifierScreenCapture : kNotifierScreenShare);
+              weak_ptr_factory_.GetWeakPtr(), is_screen_access_notification));
 
   std::unique_ptr<Notification> notification = CreateSystemNotificationPtr(
       message_center::NOTIFICATION_TYPE_SIMPLE,
-      is_capture ? kScreenCaptureNotificationId : kScreenShareNotificationId,
+      is_screen_access_notification ? kScreenAccessNotificationId
+                                    : kRemotingScreenShareNotificationId,
       l10n_util::GetStringUTF16(IDS_ASH_STATUS_TRAY_SCREEN_SHARE_TITLE),
-      message, std::u16string() /* display_source */, GURL(),
-      message_center::NotifierId(
-          message_center::NotifierType::SYSTEM_COMPONENT, notifier_id,
-          features::IsPrivacyIndicatorsEnabled()
-              ? NotificationCatalogName::kPrivacyIndicators
-              : NotificationCatalogName::kScreenSecurity),
+      message, std::u16string() /* display_source */,
+      message_center::NotifierId(message_center::NotifierType::SYSTEM_COMPONENT,
+                                 kPrivacyIndicatorsNotifierId,
+                                 NotificationCatalogName::kPrivacyIndicators),
       data, std::move(delegate),
-      features::IsPrivacyIndicatorsEnabled() ? kPrivacyIndicatorsScreenShareIcon
-                                             : kNotificationScreenshareIcon,
+      /*small_image=*/kPrivacyIndicatorsScreenShareIcon,
       message_center::SystemNotificationWarningLevel::NORMAL);
 
   notification->set_pinned(true);
-
-  if (features::IsPrivacyIndicatorsEnabled()) {
-    notification->set_accent_color_id(ui::kColorAshPrivacyIndicatorsBackground);
-    notification->set_parent_vector_small_image(kPrivacyIndicatorsIcon);
-  }
+  notification->set_accent_color_id(ui::kColorAshPrivacyIndicatorsBackground);
+  notification->set_parent_vector_small_image(kPrivacyIndicatorsIcon);
 
   message_center::MessageCenter::Get()->AddNotification(
       std::move(notification));
 }
 
-void ScreenSecurityController::StopAllSessions(bool is_capture) {
-  if (features::IsVideoConferenceEnabled() && !is_capture) {
-    return;
-  }
-
-  message_center::MessageCenter::Get()->RemoveNotification(
-      is_capture ? kScreenCaptureNotificationId : kScreenShareNotificationId,
-      false /* by_user */);
-
-  std::vector<base::OnceClosure> callbacks;
-  std::swap(callbacks,
-            is_capture ? capture_stop_callbacks_ : share_stop_callbacks_);
-  for (base::OnceClosure& callback : callbacks) {
-    if (callback)
-      std::move(callback).Run();
-  }
-
-  change_source_callback_.Reset();
-}
-
 void ScreenSecurityController::ChangeSource() {
-  if (change_source_callback_ && capture_stop_callbacks_.size() == 1)
+  if (change_source_callback_ && screen_access_stop_callbacks_.size() == 1) {
     change_source_callback_.Run();
+  }
 }
 
-void ScreenSecurityController::OnScreenCaptureStart(
+void ScreenSecurityController::OnScreenAccessStart(
     base::OnceClosure stop_callback,
     const base::RepeatingClosure& source_callback,
-    const std::u16string& screen_capture_status) {
-  capture_stop_callbacks_.emplace_back(std::move(stop_callback));
+    const std::u16string& access_app_name) {
+  screen_access_stop_callbacks_.emplace_back(std::move(stop_callback));
   change_source_callback_ = source_callback;
+
+  // Don't send screen access notifications, because the VideoConferenceTray
+  // serves as the notifier for this.
+  if (features::IsVideoConferenceEnabled()) {
+    return;
+  }
 
   // We do not want to show the screen capture notification and the chromecast
   // casting tray notification at the same time.
@@ -164,49 +150,41 @@ void ScreenSecurityController::OnScreenCaptureStart(
   if (is_casting_)
     return;
 
-  CreateNotification(screen_capture_status, true /* is_capture */);
+  CreateNotification(access_app_name, /*is_screen_access_notification=*/true);
+  UpdatePrivacyIndicatorsScreenShareStatus(
+      /*is_screen_sharing=*/true,
+      /*is_remote_screen_sharing_notification=*/false);
 }
 
-void ScreenSecurityController::OnScreenCaptureStop() {
-  StopAllSessions(true /* is_capture */);
-}
+void ScreenSecurityController::OnScreenAccessStop() {
+  StopAllSessions(/*is_screen_access=*/true);
 
-void ScreenSecurityController::OnScreenShareStart(
-    base::OnceClosure stop_callback,
-    const std::u16string& helper_name) {
-  // Don't send screen share notifications, because the VideoConferenceTray
-  // serves as the notifier for screen share. As for screen capture, continue to
-  // show these notifications for now, although they may end up in the
-  // `VideoConferenceTray` as well. See b/269486186 for details.
   if (features::IsVideoConferenceEnabled()) {
     return;
   }
 
-  share_stop_callbacks_.emplace_back(std::move(stop_callback));
-
-  std::u16string help_label_text;
-  if (!helper_name.empty()) {
-    help_label_text = l10n_util::GetStringFUTF16(
-        IDS_ASH_STATUS_TRAY_SCREEN_SHARE_BEING_HELPED_NAME, helper_name);
-  } else {
-    help_label_text = l10n_util::GetStringUTF16(
-        IDS_ASH_STATUS_TRAY_SCREEN_SHARE_BEING_HELPED);
-  }
-
-  CreateNotification(help_label_text, false /* is_capture */);
-
-  if (features::IsPrivacyIndicatorsEnabled())
-    UpdatePrivacyIndicatorsScreenShareStatus(/*is_screen_sharing=*/true);
+  UpdatePrivacyIndicatorsScreenShareStatus(
+      /*is_screen_sharing=*/false,
+      /*is_remote_screen_sharing_notification=*/false);
 }
 
-void ScreenSecurityController::OnScreenShareStop() {
-  if (features::IsVideoConferenceEnabled()) {
-    return;
-  }
-  StopAllSessions(false /* is_capture */);
+void ScreenSecurityController::OnRemotingScreenShareStart(
+    base::OnceClosure stop_callback) {
+  remoting_share_stop_callbacks_.emplace_back(std::move(stop_callback));
 
-  if (features::IsPrivacyIndicatorsEnabled())
-    UpdatePrivacyIndicatorsScreenShareStatus(/*is_screen_sharing=*/false);
+  CreateNotification(
+      l10n_util::GetStringUTF16(IDS_ASH_STATUS_TRAY_SCREEN_SHARE_BEING_HELPED),
+      /*is_screen_access_notification=*/false);
+  UpdatePrivacyIndicatorsScreenShareStatus(
+      /*is_screen_sharing=*/true,
+      /*is_remote_screen_sharing_notification=*/true);
+}
+
+void ScreenSecurityController::OnRemotingScreenShareStop() {
+  StopAllSessions(/*is_screen_access=*/false);
+  UpdatePrivacyIndicatorsScreenShareStatus(
+      /*is_screen_sharing=*/false,
+      /*is_remote_screen_sharing_notification=*/true);
 }
 
 void ScreenSecurityController::OnCastingSessionStartedOrStopped(bool started) {

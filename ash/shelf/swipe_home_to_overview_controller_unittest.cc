@@ -4,6 +4,7 @@
 
 #include "ash/shelf/swipe_home_to_overview_controller.h"
 
+#include <optional>
 #include <tuple>
 
 #include "ash/app_list/app_list_controller_impl.h"
@@ -23,15 +24,14 @@
 #include "base/run_loop.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/simple_test_tick_clock.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/compositor/compositor.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animator.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
 #include "ui/compositor/test/layer_animation_stopped_waiter.h"
 #include "ui/compositor/test/test_utils.h"
 #include "ui/gfx/geometry/point_f.h"
 #include "ui/gfx/geometry/rect_f.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 
 namespace ash {
 
@@ -87,7 +87,7 @@ class SwipeHomeToOverviewControllerTest : public AshTestBase {
   }
 
   void EndDrag(const gfx::PointF& location_in_screen,
-               absl::optional<float> velocity_y) {
+               std::optional<float> velocity_y) {
     home_to_overview_controller_->EndDrag(location_in_screen, velocity_y);
   }
 
@@ -149,8 +149,8 @@ class SwipeHomeToOverviewControllerTest : public AshTestBase {
 // when entering/exiting overview mode.
 TEST_F(SwipeHomeToOverviewControllerTest, VerifyHomeLauncherMetrics) {
   // Set non-zero animation duration to report animation metrics.
-  ui::ScopedAnimationDurationScaleMode non_zero_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode non_zero_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
 
   base::HistogramTester histogram_tester;
 
@@ -184,8 +184,9 @@ TEST_F(SwipeHomeToOverviewControllerTest, VerifyHomeLauncherMetrics) {
         base::BindRepeating(
             [](int* update_count, ui::EventType event_type,
                const gfx::Vector2dF& delta) {
-              if (event_type != ui::ET_GESTURE_SCROLL_UPDATE)
+              if (event_type != ui::EventType::kGestureScrollUpdate) {
                 return;
+              }
 
               *update_count = *update_count + 1;
               if (*update_count == steps) {
@@ -223,10 +224,6 @@ TEST_F(SwipeHomeToOverviewControllerTest, VerifyHomeLauncherMetrics) {
 TEST_F(SwipeHomeToOverviewControllerTest, BasicFlow) {
   const gfx::RectF shelf_bounds = GetShelfBoundsInFloat();
 
-  base::HistogramTester histogram_tester;
-  histogram_tester.ExpectBucketCount(
-      kEnterOverviewHistogramName, EnterOverviewFromHomeLauncher::kOverview, 0);
-
   StartDrag();
   // Drag to a point within shelf bounds - verify that app list has not been
   // scaled, and the transition to overview transition timer has not started.
@@ -240,8 +237,6 @@ TEST_F(SwipeHomeToOverviewControllerTest, BasicFlow) {
             home_screen_window->layer()->GetTargetTransform());
   EXPECT_FALSE(OverviewTransitionTimerRunning());
   EXPECT_FALSE(OverviewStarted());
-  histogram_tester.ExpectBucketCount(
-      kEnterOverviewHistogramName, EnterOverviewFromHomeLauncher::kOverview, 0);
 
   const int transition_threshold =
       SwipeHomeToOverviewController::kVerticalThresholdForOverviewTransition;
@@ -257,8 +252,6 @@ TEST_F(SwipeHomeToOverviewControllerTest, BasicFlow) {
   EXPECT_TRUE(home_screen_window->transform().IsScaleOrTranslation());
   EXPECT_FALSE(home_screen_window->transform().IsIdentityOrTranslation());
   EXPECT_EQ(1.f, home_screen_window->layer()->opacity());
-  histogram_tester.ExpectBucketCount(
-      kEnterOverviewHistogramName, EnterOverviewFromHomeLauncher::kOverview, 0);
 
   // Move above the transition threshold - verify the overview transition timer
   // has started.
@@ -272,15 +265,11 @@ TEST_F(SwipeHomeToOverviewControllerTest, BasicFlow) {
 
   EXPECT_TRUE(OverviewTransitionTimerRunning());
   EXPECT_FALSE(OverviewStarted());
-  histogram_tester.ExpectBucketCount(
-      kEnterOverviewHistogramName, EnterOverviewFromHomeLauncher::kOverview, 0);
 
   // Fire overview transition timer, and verify the overview has started.
   FireOverviewTransitionTimer();
 
   EXPECT_TRUE(OverviewStarted());
-  histogram_tester.ExpectBucketCount(
-      kEnterOverviewHistogramName, EnterOverviewFromHomeLauncher::kOverview, 1);
 
   // Home screen is still scaled down, and not visible.
   EXPECT_EQ(home_screen_window->transform(),
@@ -295,8 +284,6 @@ TEST_F(SwipeHomeToOverviewControllerTest, BasicFlow) {
       1.f);
 
   EXPECT_TRUE(OverviewStarted());
-  histogram_tester.ExpectBucketCount(
-      kEnterOverviewHistogramName, EnterOverviewFromHomeLauncher::kOverview, 1);
 
   // Home screen is still scaled down, and not visible.
   EXPECT_EQ(home_screen_window->transform(),

@@ -9,10 +9,9 @@
 #include "base/time/time.h"
 #include "chrome/browser/ash/login/test/guest_session_mixin.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/metrics/testing/sync_metrics_test_utils.h"
 #include "chrome/browser/sync/test/integration/sync_service_impl_harness.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/test/base/mixin_based_in_process_browser_test.h"
 #include "components/metrics/delegating_provider.h"
 #include "components/metrics/demographics/demographic_metrics_provider.h"
@@ -86,12 +85,13 @@ IN_PROC_BROWSER_TEST_P(MajorityAgeUserMetricsProviderTest,
   metrics::test::AddUserBirthYearAndGenderToSyncServer(
       GetFakeServer()->AsWeakPtr(), test_birth_year, test_gender);
 
-  // TODO(crbug/1076461): Try to replace the below set-up code with functions
-  // from SyncTest.
+  // TODO(crbug.com/40688248): Try to replace the below set-up code with
+  // functions from SyncTest.
   std::unique_ptr<SyncServiceImplHarness> harness =
-      metrics::test::InitializeProfileForSync(browser()->profile(),
-                                              GetFakeServer()->AsWeakPtr());
-  harness->SetupSync();
+      SyncServiceImplHarness::Create(
+          browser()->GetProfile(),
+          SyncServiceImplHarness::SigninType::FAKE_SIGNIN);
+  ASSERT_TRUE(harness->SetupSync());
 
   // Simulate calling ProvideCurrentSessionData() after logging in.
   ProvideCurrentSessionData();

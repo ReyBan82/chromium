@@ -4,9 +4,11 @@
 
 #include "chrome/browser/ash/child_accounts/child_user_service.h"
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/check.h"
 #include "base/functional/bind.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/time/time.h"
 #include "base/values.h"
@@ -15,7 +17,6 @@
 #include "chrome/browser/ash/child_accounts/time_limits/app_types.h"
 #include "chrome/browser/ash/child_accounts/usage_time_limit_processor.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
 #include "components/app_constants/constants.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_context.h"
@@ -56,14 +57,6 @@ ChildUserService::TimeLimitPolicyType GetTimeLimitPolicyType(
 }
 }  // namespace
 
-// static
-const char ChildUserService::kFamilyLinkHelperAppPackageName[] =
-    "com.google.android.apps.kids.familylinkhelper";
-// static
-const char ChildUserService::kFamilyLinkHelperAppPlayStoreURL[] =
-    "https://play.google.com/store/apps/"
-    "details?id=com.google.android.apps.kids.familylinkhelper";
-
 ChildUserService::TestApi::TestApi(ChildUserService* service)
     : service_(service) {}
 
@@ -90,7 +83,7 @@ ChildUserService::ChildUserService(content::BrowserContext* context)
 
   pref_change_registrar_.Init(profile_->GetPrefs());
   pref_change_registrar_.Add(
-      prefs::kUsageTimeLimit,
+      ash::prefs::kUsageTimeLimit,
       base::BindRepeating(&ChildUserService::ReportTimeLimitPolicy,
                           base::Unretained(this)));
 }
@@ -105,11 +98,11 @@ void ChildUserService::ResumeWebActivity(const std::string& app_service_id) {
   NOTIMPLEMENTED();
 }
 
-absl::optional<base::TimeDelta> ChildUserService::GetTimeLimitForApp(
+std::optional<base::TimeDelta> ChildUserService::GetTimeLimitForApp(
     const std::string& app_service_id,
     apps::AppType app_type) {
   if (!app_time_controller_)
-    return absl::nullopt;
+    return std::nullopt;
 
   return app_time_controller_->GetTimeLimitForApp(app_service_id, app_type);
 }
@@ -138,8 +131,8 @@ bool ChildUserService::AppTimeLimitAllowlistedApp(
 }
 
 void ChildUserService ::ReportTimeLimitPolicy() const {
-  const base::Value::Dict& time_limit_prefs =
-      profile_->GetPrefs()->GetDict(prefs::kUsageTimeLimit);
+  const base::DictValue& time_limit_prefs =
+      profile_->GetPrefs()->GetDict(ash::prefs::kUsageTimeLimit);
 
   std::set<usage_time_limit::PolicyType> enabled_policies =
       usage_time_limit::GetEnabledTimeLimitPolicies(time_limit_prefs);
@@ -180,7 +173,7 @@ void ChildUserService::Shutdown() {
     app_time_controller_->RecordMetricsOnShutdown();
     app_time_controller_.reset();
   }
-  pref_change_registrar_.Remove(prefs::kUsageTimeLimit);
+  pref_change_registrar_.Remove(ash::prefs::kUsageTimeLimit);
 }
 
 }  // namespace ash

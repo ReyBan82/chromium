@@ -4,36 +4,46 @@
 
 #include "chromeos/ash/components/phonehub/ping_manager_impl.h"
 
+#include "ash/constants/ash_features.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/no_destructor.h"
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/components/phonehub/message_receiver_impl.h"
 #include "chromeos/ash/components/phonehub/message_sender.h"
 #include "chromeos/ash/components/phonehub/message_sender_impl.h"
 #include "chromeos/ash/components/phonehub/proto/phonehub_api.pb.h"
 #include "chromeos/ash/services/secure_channel/public/cpp/client/connection_manager.h"
+#include "feature_status.h"
 
 namespace ash::phonehub {
 
-const proto::PingRequest kDefaultPingRequest;
-constexpr base::TimeDelta kPingTimeout = base::Seconds(2);
+namespace {
+
+const proto::PingRequest& GetDefaultPingRequest() {
+  static const base::NoDestructor<proto::PingRequest> request;
+  return *request;
+}
+
+}  // namespace
 
 PingManagerImpl::PingManagerImpl(
     secure_channel::ConnectionManager* connection_manager,
+    FeatureStatusProvider* feature_status_provider,
     MessageReceiver* message_receiver,
     MessageSender* message_sender)
     : connection_manager_(connection_manager),
-      message_receiver_(message_receiver),
+      feature_status_provider_(feature_status_provider),
       message_sender_(message_sender) {
   DCHECK(connection_manager);
+  DCHECK(feature_status_provider);
   DCHECK(message_receiver);
   DCHECK(message_sender);
 
-  message_receiver_->AddObserver(this);
+  feature_status_provider_observation_.Observe(feature_status_provider);
+  message_receiver_observation_.Observe(message_receiver);
 }
 
-PingManagerImpl::~PingManagerImpl() {
-  message_receiver_->RemoveObserver(this);
-}
+PingManagerImpl::~PingManagerImpl() = default;
 
 void PingManagerImpl::OnPhoneStatusSnapshotReceived(
     proto::PhoneStatusSnapshot phone_status_snapshot) {
@@ -45,9 +55,20 @@ void PingManagerImpl::OnPhoneStatusUpdateReceived(
   UpdatePhoneSupport(phone_status_update.properties());
 }
 
+void PingManagerImpl::OnFeatureStatusChanged() {
+  if (!is_waiting_for_response_ || !IsPingTimeoutTimerRunning()) {
+    return;
+  }
+
+  if (feature_status_provider_->GetStatus() !=
+      FeatureStatus::kEnabledAndConnected) {
+    Reset();
+  }
+}
+
 void PingManagerImpl::OnPingResponseReceived() {
   is_waiting_for_response_ = false;
-  ping_timeout_timer_.AbandonAndStop();
+  ping_timeout_timer_.Stop();
   base::UmaHistogramBoolean("PhoneHub.PhoneAvailabilityCheck.Result", true);
   base::UmaHistogramTimes("PhoneHub.PhoneAvailabilityCheck.Latency",
                           base::TimeTicks::Now() - ping_sent_timestamp_);
@@ -64,13 +85,24 @@ void PingManagerImpl::SendPingRequest() {
   }
 
   PA_LOG(INFO) << "Sending Ping Request";
-  message_sender_->SendPingRequest(kDefaultPingRequest);
+  message_sender_->SendPingRequest(GetDefaultPingRequest());
 
   ping_sent_timestamp_ = base::TimeTicks::Now();
-  ping_timeout_timer_.Start(FROM_HERE, kPingTimeout,
+  // Maximum number of seconds to wait for ping response before disconnecting
+  const base::TimeDelta kPhoneHubPingTimeout = base::Seconds(5);
+  ping_timeout_timer_.Start(FROM_HERE, kPhoneHubPingTimeout,
                             base::BindOnce(&PingManagerImpl::OnPingTimerFired,
                                            base::Unretained(this)));
   is_waiting_for_response_ = true;
+}
+
+void PingManagerImpl::Reset() {
+  PA_LOG(INFO) << "Reseting ping state.";
+  is_waiting_for_response_ = false;
+
+  if (IsPingTimeoutTimerRunning()) {
+    ping_timeout_timer_.Stop();
+  }
 }
 
 void PingManagerImpl::OnPingTimerFired() {

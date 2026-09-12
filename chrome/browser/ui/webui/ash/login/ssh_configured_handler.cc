@@ -4,8 +4,8 @@
 
 #include "chrome/browser/ui/webui/ash/login/ssh_configured_handler.h"
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "chrome/browser/ui/webui/ash/login/base_webui_handler.h"
-#include "chrome/grit/generated_resources.h"
 #include "chromeos/ash/components/dbus/debug_daemon/debug_daemon_client.h"
 #include "components/login/localized_values_builder.h"
 #include "third_party/cros_system_api/dbus/debugd/dbus-constants.h"
@@ -47,10 +47,12 @@ void SshConfiguredHandler::DeclareLocalizedValues(
 }
 
 void SshConfiguredHandler::InitAfterJavascriptAllowed() {
-  if (callback_ids_.empty())
+  if (callback_ids_.empty()) {
     return;
-  if (!is_ssh_configured_.has_value())
+  }
+  if (!is_ssh_configured_.has_value()) {
     return;
+  }
   ResolveCallbacks();
 }
 
@@ -83,8 +85,9 @@ void SshConfiguredHandler::OnGetDebuggingFeatures(bool succeeded,
 }
 
 void SshConfiguredHandler::ResolveCallbacks() {
-  if (!IsJavascriptAllowed())
+  if (!IsJavascriptAllowed()) {
     return;
+  }
   DCHECK(is_ssh_configured_.has_value());
   for (const std::string& callback_id : callback_ids_) {
     ResolveJavascriptCallback(base::Value(callback_id),

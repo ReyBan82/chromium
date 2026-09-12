@@ -10,6 +10,10 @@
 #include "content/public/browser/speech_recognition_manager_delegate.h"
 #include "content/public/browser/speech_recognition_session_config.h"
 
+namespace content {
+struct GlobalRenderFrameHostId;
+}  // namespace content
+
 namespace android_webview {
 
 // Android WebView implementation of the SpeechRecognitionManagerDelgate
@@ -31,18 +35,17 @@ class AwSpeechRecognitionManagerDelegate
   // SpeechRecognitionEventListener methods.
   void OnRecognitionStart(int session_id) override;
   void OnAudioStart(int session_id) override;
-  void OnEnvironmentEstimationComplete(int session_id) override;
   void OnSoundStart(int session_id) override;
   void OnSoundEnd(int session_id) override;
   void OnAudioEnd(int session_id) override;
   void OnRecognitionEnd(int session_id) override;
   void OnRecognitionResults(
       int session_id,
-      const std::vector<blink::mojom::SpeechRecognitionResultPtr>& result)
+      const std::vector<media::mojom::WebSpeechRecognitionResultPtr>& result)
       override;
   void OnRecognitionError(
       int session_id,
-      const blink::mojom::SpeechRecognitionError& error) override;
+      const media::mojom::SpeechRecognitionError& error) override;
   void OnAudioLevelsChange(int session_id,
                            float volume,
                            float noise_volume) override;
@@ -53,15 +56,13 @@ class AwSpeechRecognitionManagerDelegate
       base::OnceCallback<void(bool ask_user, bool is_allowed)> callback)
       override;
   content::SpeechRecognitionEventListener* GetEventListener() override;
-  bool FilterProfanities(int render_process_id) override;
 
  private:
   // Checks for mojom::ViewType::kTabContents host in the UI thread and notifies
   // back the result in the IO thread through |callback|.
   static void CheckRenderFrameType(
       base::OnceCallback<void(bool ask_user, bool is_allowed)> callback,
-      int render_process_id,
-      int render_frame_id);
+      content::GlobalRenderFrameHostId global_id);
 };
 
 }  // namespace android_webview

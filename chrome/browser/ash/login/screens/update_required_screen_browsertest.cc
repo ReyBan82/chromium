@@ -5,10 +5,13 @@
 #include "chrome/browser/ash/login/screens/update_required_screen.h"
 
 #include <memory>
+#include <optional>
 
+#include "ash/strings/grit/ash_strings.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/time/default_clock.h"
 #include "base/time/time.h"
@@ -19,28 +22,27 @@
 #include "chrome/browser/ash/login/test/login_manager_mixin.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
 #include "chrome/browser/ash/login/test/oobe_screen_waiter.h"
-#include "chrome/browser/ash/login/ui/login_display_host.h"
 #include "chrome/browser/ash/login/version_updater/version_updater.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
-#include "chrome/browser/ash/net/network_portal_detector_test_impl.h"
-#include "chrome/browser/ash/policy/core/device_policy_builder.h"
 #include "chrome/browser/ash/policy/core/device_policy_cros_browser_test.h"
 #include "chrome/browser/ash/policy/handlers/minimum_version_policy_test_helpers.h"
+#include "chrome/browser/ui/ash/login/login_display_host.h"
 #include "chrome/browser/ui/webui/ash/login/error_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/gaia_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/oobe_ui.h"
 #include "chrome/browser/ui/webui/ash/login/update_required_screen_handler.h"
-#include "chrome/grit/chromium_strings.h"
-#include "chrome/grit/generated_resources.h"
 #include "chromeos/ash/components/dbus/dbus_thread_manager.h"
 #include "chromeos/ash/components/dbus/update_engine/fake_update_engine_client.h"
+#include "chromeos/ash/components/network/network_handler.h"
+#include "chromeos/ash/components/network/network_state_handler.h"
+#include "chromeos/ash/components/network/network_state_handler_observer.h"
 #include "chromeos/ash/components/network/network_state_test_helper.h"
+#include "chromeos/ash/components/policy/device_policy/device_policy_builder.h"
 #include "chromeos/ash/components/settings/cros_settings_names.h"
 #include "chromeos/dbus/constants/dbus_switches.h"
 #include "components/user_manager/user_manager.h"
 #include "content/public/test/browser_test.h"
 #include "dbus/object_path.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/chromeos/devicetype_utils.h"
@@ -123,19 +125,50 @@ void SetConnected(const std::string& service_path) {
 
 void WaitForConfirmationDialogToOpen() {
   test::OobeJS()
-      .CreateWaiter(
-          test::GetOobeElementPath({kEolDeleteUsersDataConfirmDialog}) +
-          ".open")
+      .CreateWaiter(test::GetOobeElementPath(kEolDeleteUsersDataConfirmDialog) +
+                    ".open")
       ->Wait();
 }
 
 void WaitForConfirmationDialogToClose() {
   test::OobeJS()
-      .CreateWaiter(
-          test::GetOobeElementPath({kEolDeleteUsersDataConfirmDialog}) +
-          ".open === false")
+      .CreateWaiter(test::GetOobeElementPath(kEolDeleteUsersDataConfirmDialog) +
+                    ".open === false")
       ->Wait();
 }
+
+class NoDefaultNetworkWaiter : public NetworkStateHandlerObserver {
+ public:
+  explicit NoDefaultNetworkWaiter(NetworkStateHandler* network_state_handler)
+      : network_state_handler_(network_state_handler) {
+    observation_.Observe(network_state_handler_);
+  }
+
+  NoDefaultNetworkWaiter(const NoDefaultNetworkWaiter&) = delete;
+  NoDefaultNetworkWaiter& operator=(const NoDefaultNetworkWaiter&) = delete;
+
+  ~NoDefaultNetworkWaiter() override = default;
+
+  void Wait() {
+    if (!network_state_handler_->DefaultNetwork()) {
+      return;
+    }
+
+    run_loop_.Run();
+  }
+
+ private:
+  // NetworkStateHandlerObserver:
+  void DefaultNetworkChanged(const NetworkState* network) override {
+    if (!network) {
+      run_loop_.Quit();
+    }
+  }
+
+  const raw_ptr<NetworkStateHandler> network_state_handler_;
+  base::RunLoop run_loop_;
+  NetworkStateHandlerScopedObservation observation_{this};
+};
 
 class UpdateRequiredScreenTest : public OobeBaseTest {
  public:
@@ -155,7 +188,7 @@ class UpdateRequiredScreenTest : public OobeBaseTest {
 
     // Set up fake networks.
     network_state_test_helper_ = std::make_unique<NetworkStateTestHelper>(
-        true /*use_default_devices_and_services*/);
+        /*use_default_devices_and_services=*/true);
     network_state_test_helper_->manager_test()->SetupDefaultEnvironment();
     // Fake networks have been set up. Connect to WiFi network.
     SetConnected(kWifiServicePath);
@@ -198,10 +231,10 @@ class UpdateRequiredScreenTest : public OobeBaseTest {
   }
 
  protected:
-  UpdateRequiredScreen* update_required_screen_;
+  raw_ptr<UpdateRequiredScreen> update_required_screen_;
   // Error screen - owned by OobeUI.
   // Version updater - owned by `update_required_screen_`.
-  VersionUpdater* version_updater_ = nullptr;
+  raw_ptr<VersionUpdater> version_updater_ = nullptr;
 
   // Handles network connections
   std::unique_ptr<NetworkStateTestHelper> network_state_test_helper_;
@@ -217,10 +250,6 @@ IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestCaptivePortal) {
   network_state_test_helper_->ResetDevicesAndServices();
   std::string wifi_path =
       network_state_test_helper_->ConfigureWiFi(shill::kStateRedirectFound);
-
-  network_portal_detector::InitializeForTesting(
-      new NetworkPortalDetectorTestImpl());
-  network_portal_detector::GetInstance()->Enable();
 
   static_cast<UpdateRequiredScreen*>(
       WizardController::default_controller()->current_screen())
@@ -256,7 +285,6 @@ IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestCaptivePortal) {
 
   test::OobeJS().ExpectVisiblePath(kUpdateRequiredScreen);
   test::OobeJS().ExpectVisiblePath(kUpdateProcessStep);
-  network_portal_detector::Shutdown();
 }
 
 IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestEolReached) {
@@ -273,7 +301,7 @@ IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestEolReached) {
 // Test to verify that clicking on the confirm button on the popup in case of
 // update required and end-of-life reached, deletes all users on the device.
 IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestEolDeleteUsersConfirm) {
-  EXPECT_EQ(user_manager::UserManager::Get()->GetUsers().size(), 2u);
+  EXPECT_EQ(user_manager::UserManager::Get()->GetPersistedUsers().size(), 2u);
   update_engine_client()->set_eol_date(
       base::DefaultClock::GetInstance()->Now() - base::Days(1));
   ShowUpdateRequiredScreen();
@@ -289,13 +317,13 @@ IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestEolDeleteUsersConfirm) {
 
   test::OobeJS().CreateVisibilityWaiter(true, kEolNoUsersDataMsg)->Wait();
   test::OobeJS().ExpectHiddenPath(kEolDeleteUsersDataMessage);
-  EXPECT_EQ(user_manager::UserManager::Get()->GetUsers().size(), 0u);
+  EXPECT_EQ(user_manager::UserManager::Get()->GetPersistedUsers().size(), 0u);
 }
 
 // Test to verify that clicking on the cancel button on the popup in case of
 // update required and end-of-life reached, does not delete any user.
 IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestEolDeleteUsersCancel) {
-  EXPECT_EQ(user_manager::UserManager::Get()->GetUsers().size(), 2u);
+  EXPECT_EQ(user_manager::UserManager::Get()->GetPersistedUsers().size(), 2u);
   update_engine_client()->set_eol_date(
       base::DefaultClock::GetInstance()->Now() - base::Days(1));
   ShowUpdateRequiredScreen();
@@ -311,7 +339,7 @@ IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestEolDeleteUsersCancel) {
 
   test::OobeJS().ExpectVisiblePath(kEolDeleteUsersDataMessage);
   test::OobeJS().ExpectHiddenPath(kEolNoUsersDataMsg);
-  EXPECT_EQ(user_manager::UserManager::Get()->GetUsers().size(), 2u);
+  EXPECT_EQ(user_manager::UserManager::Get()->GetPersistedUsers().size(), 2u);
 }
 
 IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestEolReachedAdminMessage) {
@@ -370,8 +398,10 @@ IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestUpdateOverMeteredNetwork) {
 // required screen.
 IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenTest, TestUpdateRequiredNoNetwork) {
   // Disconnect from all networks and show update required screen.
+  NoDefaultNetworkWaiter no_default_network_waiter(
+      NetworkHandler::Get()->network_state_handler());
   network_state_test_helper_->service_test()->ClearServices();
-  base::RunLoop().RunUntilIdle();
+  no_default_network_waiter.Wait();
 
   ShowUpdateRequiredScreen();
 
@@ -551,7 +581,7 @@ class UpdateRequiredScreenPolicyPresentTest : public OobeBaseTest {
         base::DefaultClock::GetInstance()->Now() - base::Days(1));
   }
 
-  void SetAndRefreshMinimumChromeVersionPolicy(base::Value::Dict value) {
+  void SetAndRefreshMinimumChromeVersionPolicy(base::DictValue value) {
     policy::DevicePolicyBuilder* const device_policy(
         policy_helper_.device_policy());
     em::ChromeDeviceSettingsProto& proto(device_policy->payload());
@@ -571,7 +601,7 @@ class UpdateRequiredScreenPolicyPresentTest : public OobeBaseTest {
 // still shows the update required screen to block user sign in.
 IN_PROC_BROWSER_TEST_F(UpdateRequiredScreenPolicyPresentTest,
                        TestUpdateRequiredScreen) {
-  EXPECT_EQ(user_manager::UserManager::Get()->GetUsers().size(), 0u);
+  EXPECT_EQ(user_manager::UserManager::Get()->GetPersistedUsers().size(), 0u);
   OobeScreenWaiter update_screen_waiter(UpdateRequiredView::kScreenId);
   update_screen_waiter.set_assert_next_screen();
   update_screen_waiter.Wait();

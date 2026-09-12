@@ -15,12 +15,11 @@ enum XRLayerLayout {
 [
   SecureContext,
   Exposed=Window,
-  RuntimeEnabled=WebXRLayers
+  RuntimeEnabled=WebXRLayersCommon
 ] interface XRCompositionLayer : XRLayer {
   readonly attribute XRLayerLayout layout;
 
   attribute boolean blendTextureSourceAlpha;
-  attribute boolean? chromaticAberrationCorrection;
   attribute boolean forceMonoPresentation;
   attribute float opacity;
   readonly attribute unsigned long mipLevels;

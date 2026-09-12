@@ -15,9 +15,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * Factory to generate delegate class runners for ParameterizedRunner
- */
+/** Factory to generate delegate class runners for ParameterizedRunner */
 public class ParameterizedRunnerDelegateFactory {
     /**
      * Create a runner that implements ParameterizedRunner and extends BlockJUnit4ClassRunner
@@ -25,16 +23,19 @@ public class ParameterizedRunnerDelegateFactory {
      * @param testClass the TestClass object for current test class
      * @param classParameterSet A parameter set for test constructor arguments
      * @param parameterizedRunnerDelegateClass the parameterized runner delegate class specified
-     *                                         through {@code @UseRunnerDelegate}
+     *     through {@code @UseRunnerDelegate}
      */
-    <T extends ParameterizedRunnerDelegate> T createRunner(TestClass testClass,
-            ParameterSet classParameterSet, Class<T> parameterizedRunnerDelegateClass)
+    <T extends ParameterizedRunnerDelegate> T createRunner(
+            TestClass testClass,
+            ParameterSet classParameterSet,
+            Class<T> parameterizedRunnerDelegateClass)
             throws ParameterizedRunnerDelegateInstantiationException {
         String testMethodPostfix = classParameterSet == null ? null : classParameterSet.getName();
         List<FrameworkMethod> unmodifiableFrameworkMethodList =
                 generateUnmodifiableFrameworkMethodList(testClass, testMethodPostfix);
-        ParameterizedRunnerDelegateCommon delegateCommon = new ParameterizedRunnerDelegateCommon(
-                testClass, classParameterSet, unmodifiableFrameworkMethodList);
+        ParameterizedRunnerDelegateCommon delegateCommon =
+                new ParameterizedRunnerDelegateCommon(
+                        testClass, classParameterSet, unmodifiableFrameworkMethodList);
         try {
             return parameterizedRunnerDelegateClass
                     .getDeclaredConstructor(Class.class, ParameterizedRunnerDelegateCommon.class)
@@ -46,16 +47,15 @@ public class ParameterizedRunnerDelegateFactory {
     }
 
     /**
-     * Match test methods annotated by @UseMethodParameter(X) with
-     * ParameterSetList annotated by @MethodParameter(X)
+     * Match test methods annotated by @UseMethodParameter(X) with ParameterSetList annotated
+     * by @MethodParameter(X)
      *
-     * @param testClass a {@code TestClass} that wraps around the actual java
-     *            test class
-     * @param postFix a name postfix for each test
+     * @param testClass a {@code TestClass} that wraps around the actual java test class
+     * @param suffix a name suffix for each test
      * @return a list of ParameterizedFrameworkMethod
      */
     static List<FrameworkMethod> generateUnmodifiableFrameworkMethodList(
-            TestClass testClass, String postFix) {
+            TestClass testClass, String suffix) {
         // Represent the list of all ParameterizedFrameworkMethod in this test class
         List<FrameworkMethod> returnList = new ArrayList<>();
 
@@ -63,10 +63,11 @@ public class ParameterizedRunnerDelegateFactory {
             if (method.getMethod().isAnnotationPresent(UseMethodParameter.class)) {
                 Iterable<ParameterSet> parameterSets =
                         getParameters(method.getAnnotation(UseMethodParameter.class).value());
-                returnList.addAll(createParameterizedMethods(method, parameterSets, postFix));
+                returnList.addAll(createParameterizedMethods(method, parameterSets, suffix));
             } else {
                 // If test method is not parameterized (does not have UseMethodParameter annotation)
-                returnList.add(new ParameterizedFrameworkMethod(method.getMethod(), null, postFix));
+                returnList.add(
+                        new ParameterizedFrameworkMethod(method.getMethod(), null, suffix, null));
             }
         }
 
@@ -81,8 +82,10 @@ public class ParameterizedRunnerDelegateFactory {
     public static class ParameterizedRunnerDelegateInstantiationException extends Exception {
         private ParameterizedRunnerDelegateInstantiationException(
                 String runnerDelegateClass, Exception e) {
-            super(String.format("Current class runner delegate %s can not be instantiated.",
-                          runnerDelegateClass),
+            super(
+                    String.format(
+                            "Current class runner delegate %s can not be instantiated.",
+                            runnerDelegateClass),
                     e);
         }
     }
@@ -107,8 +110,15 @@ public class ParameterizedRunnerDelegateFactory {
             FrameworkMethod baseMethod, Iterable<ParameterSet> parameterSetList, String suffix) {
         ParameterizedRunner.validateWidth(parameterSetList);
         List<FrameworkMethod> returnList = new ArrayList<>();
+        int i = 0;
         for (ParameterSet set : parameterSetList) {
-            returnList.add(new ParameterizedFrameworkMethod(baseMethod.getMethod(), set, suffix));
+            String name = set.getName();
+            if (name.isEmpty()) {
+                name = String.valueOf(i);
+            }
+            returnList.add(
+                    new ParameterizedFrameworkMethod(baseMethod.getMethod(), set, suffix, name));
+            i++;
         }
         return returnList;
     }

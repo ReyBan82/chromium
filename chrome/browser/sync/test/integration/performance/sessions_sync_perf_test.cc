@@ -7,17 +7,19 @@
 #include "chrome/browser/sync/test/integration/performance/sync_timing_helper.h"
 #include "chrome/browser/sync/test/integration/sessions_helper.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/common/webui_url_constants.h"
 #include "content/public/test/browser_test.h"
 #include "testing/perf/perf_result_reporter.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 
 using content::OpenURLParams;
 using sessions_helper::GetLocalSession;
 using sessions_helper::GetSessionData;
 using sessions_helper::OpenMultipleTabs;
-using sessions_helper::SessionWindowMap;
 using sessions_helper::SyncedSessionVector;
 using sessions_helper::WaitForTabsToLoad;
 using sync_timing_helper::TimeMutualSyncCycle;
@@ -48,14 +50,19 @@ class SessionsSyncPerfTest : public SyncTest {
   SessionsSyncPerfTest(const SessionsSyncPerfTest&) = delete;
   SessionsSyncPerfTest& operator=(const SessionsSyncPerfTest&) = delete;
 
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return SetupSyncMode::kSyncTransportOnly;
+  }
+
+  GURL GetInitialURL() const override {
+    return chrome::ChromeUINewTabURLAsGURL();
+  }
+
   // Opens |num_tabs| new tabs on |profile|.
   void AddTabs(int profile, int num_tabs);
 
   // Update all tabs in |profile| by visiting a new URL.
   void UpdateTabs(int profile);
-
-  // Close all tabs in |profile|.
-  void RemoveTabs(int profile);
 
   // Returns the number of open tabs in all sessions (local + foreign) for
   // |profile|.  Returns -1 on failure.
@@ -80,24 +87,23 @@ void SessionsSyncPerfTest::AddTabs(int profile, int num_tabs) {
 }
 
 void SessionsSyncPerfTest::UpdateTabs(int profile) {
-  Browser* browser = GetBrowser(profile);
+  BrowserWindowInterface* browser = GetBrowser(profile);
   GURL url;
   std::vector<GURL> urls;
-  for (int i = 0; i < browser->tab_strip_model()->count(); ++i) {
+  for (int i = 0; i < browser->GetTabStripModel()->count(); ++i) {
     chrome::SelectNumberedTab(browser, i);
     url = NextURL();
-    browser->OpenURL(OpenURLParams(
-        url,
-        content::Referrer(GURL("http://localhost"),
-                          network::mojom::ReferrerPolicy::kDefault),
-        WindowOpenDisposition::CURRENT_TAB, ui::PAGE_TRANSITION_LINK, false));
+    browser->OpenURL(
+        OpenURLParams(
+            url,
+            content::Referrer(GURL("http://localhost"),
+                              network::mojom::ReferrerPolicy::kDefault),
+            WindowOpenDisposition::CURRENT_TAB, ui::PAGE_TRANSITION_LINK,
+            false),
+        /*navigation_handle_callback=*/{});
     urls.push_back(url);
   }
   WaitForTabsToLoad(profile, urls);
-}
-
-void SessionsSyncPerfTest::RemoveTabs(int profile) {
-  GetBrowser(profile)->tab_strip_model()->CloseAllTabs();
 }
 
 int SessionsSyncPerfTest::GetTabCount(int profile) {
@@ -133,9 +139,8 @@ GURL SessionsSyncPerfTest::IntToURL(int n) {
   return GURL(base::StringPrintf("http://localhost/%d", n));
 }
 
-// TODO(lipalani): Re-enable after crbug.com/96921 is fixed.
-IN_PROC_BROWSER_TEST_F(SessionsSyncPerfTest, DISABLED_P0) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+IN_PROC_BROWSER_TEST_F(SessionsSyncPerfTest, P0) {
+  ASSERT_TRUE(SetupSync());
 
   perf_test::PerfResultReporter reporter =
       SetUpReporter(base::NumberToString(kNumTabs) + "_tabs");
@@ -150,11 +155,4 @@ IN_PROC_BROWSER_TEST_F(SessionsSyncPerfTest, DISABLED_P0) {
   ASSERT_EQ(kNumTabs, GetTabCount(0));
   ASSERT_EQ(kNumTabs, GetTabCount(1));
   reporter.AddResult(kMetricUpdateTabSyncTime, dt);
-
-  RemoveTabs(0);
-  dt = TimeMutualSyncCycle(GetClient(0), GetClient(1));
-  // New tab page remains open on profile 0 after closing all tabs.
-  ASSERT_EQ(1, GetTabCount(0));
-  ASSERT_EQ(0, GetTabCount(1));
-  reporter.AddResult(kMetricDeleteTabSyncTime, dt);
 }

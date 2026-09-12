@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 // https://w3c.github.io/mathml-core/#dom-mathmlelement
 
-[RuntimeEnabled=MathMLCore, Exposed=Window]
+[Exposed=Window]
 interface MathMLElement : Element { };
 
 MathMLElement includes GlobalEventHandlers;
 MathMLElement includes DocumentAndElementEventHandlers;
-MathMLElement includes HTMLOrForeignElement;
+MathMLElement includes HTMLOrSVGOrMathMLElement;
 MathMLElement includes ElementCSSInlineStyle;

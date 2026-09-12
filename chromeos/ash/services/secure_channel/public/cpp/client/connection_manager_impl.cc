@@ -8,14 +8,12 @@
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/time/clock.h"
 #include "base/time/default_clock.h"
 #include "base/time/time.h"
 #include "chromeos/ash/services/device_sync/public/cpp/device_sync_client.h"
 #include "chromeos/ash/services/multidevice_setup/public/cpp/multidevice_setup_client.h"
 #include "chromeos/ash/services/secure_channel/public/cpp/client/secure_channel_client.h"
-#include "chromeos/ash/services/secure_channel/public/mojom/secure_channel.mojom-shared.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel.mojom.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel_types.mojom.h"
 
@@ -32,13 +30,16 @@ ConnectionManagerImpl::ConnectionManagerImpl(
     device_sync::DeviceSyncClient* device_sync_client,
     SecureChannelClient* secure_channel_client,
     const std::string& feature_name,
-    std::unique_ptr<NearbyMetricsRecorder> metrics_recorder)
+    std::unique_ptr<NearbyMetricsRecorder> metrics_recorder,
+    SecureChannelStructuredMetricsLogger*
+        secure_channel_structured_metrics_logger)
     : ConnectionManagerImpl(multidevice_setup_client,
                             device_sync_client,
                             secure_channel_client,
                             std::make_unique<base::OneShotTimer>(),
                             feature_name,
                             std::move(metrics_recorder),
+                            secure_channel_structured_metrics_logger,
                             base::DefaultClock::GetInstance()) {}
 
 ConnectionManagerImpl::ConnectionManagerImpl(
@@ -48,6 +49,8 @@ ConnectionManagerImpl::ConnectionManagerImpl(
     std::unique_ptr<base::OneShotTimer> timer,
     const std::string& feature_name,
     std::unique_ptr<NearbyMetricsRecorder> metrics_recorder,
+    SecureChannelStructuredMetricsLogger*
+        secure_channel_structured_metrics_logger,
     base::Clock* clock)
     : multidevice_setup_client_(multidevice_setup_client),
       device_sync_client_(device_sync_client),
@@ -55,6 +58,8 @@ ConnectionManagerImpl::ConnectionManagerImpl(
       timer_(std::move(timer)),
       feature_name_(feature_name),
       metrics_recorder_(std::move(metrics_recorder)),
+      secure_channel_structured_metrics_logger_(
+          secure_channel_structured_metrics_logger),
       last_status_(Status::kDisconnected),
       status_change_timestamp_(clock->Now()),
       clock_(clock) {
@@ -65,11 +70,7 @@ ConnectionManagerImpl::ConnectionManagerImpl(
   DCHECK(metrics_recorder_);
 }
 
-ConnectionManagerImpl::~ConnectionManagerImpl() {
-  metrics_recorder_.reset();
-  if (channel_)
-    channel_->RemoveObserver(this);
-}
+ConnectionManagerImpl::~ConnectionManagerImpl() = default;
 
 ConnectionManager::Status ConnectionManagerImpl::GetStatus() const {
   // Connection attempt was successful and with an active channel between
@@ -86,28 +87,29 @@ ConnectionManager::Status ConnectionManagerImpl::GetStatus() const {
   return Status::kDisconnected;
 }
 
-void ConnectionManagerImpl::AttemptNearbyConnection() {
+bool ConnectionManagerImpl::AttemptNearbyConnection() {
   if (GetStatus() != Status::kDisconnected) {
     PA_LOG(WARNING) << "Connection to host already established or is "
                     << "currently attempting to establish, exiting "
                     << "AttemptConnection().";
-    return;
+    return false;
   }
 
-  const absl::optional<multidevice::RemoteDeviceRef> remote_device =
+  const std::optional<multidevice::RemoteDeviceRef> remote_device =
       multidevice_setup_client_->GetHostStatus().second;
-  const absl::optional<multidevice::RemoteDeviceRef> local_device =
+  const std::optional<multidevice::RemoteDeviceRef> local_device =
       device_sync_client_->GetLocalDeviceMetadata();
 
   if (!remote_device || !local_device) {
     PA_LOG(ERROR) << "AttemptConnection() failed because either remote or "
                   << "local device is null.";
-    return;
+    return false;
   }
 
   connection_attempt_ = secure_channel_client_->InitiateConnectionToDevice(
       *remote_device, *local_device, feature_name_,
-      ConnectionMedium::kNearbyConnections, ConnectionPriority::kMedium);
+      ConnectionMedium::kNearbyConnections, ConnectionPriority::kMedium,
+      secure_channel_structured_metrics_logger_);
   connection_attempt_->SetDelegate(this);
 
   PA_LOG(INFO) << "ConnectionManager status updated to: " << GetStatus();
@@ -116,6 +118,7 @@ void ConnectionManagerImpl::AttemptNearbyConnection() {
   timer_->Start(FROM_HERE, kConnectionTimeout,
                 base::BindOnce(&ConnectionManagerImpl::OnConnectionTimeout,
                                weak_ptr_factory_.GetWeakPtr()));
+  return true;
 }
 
 void ConnectionManagerImpl::Disconnect() {
@@ -154,11 +157,11 @@ void ConnectionManagerImpl::RegisterPayloadFile(
 }
 
 void ConnectionManagerImpl::GetHostLastSeenTimestamp(
-    base::OnceCallback<void(absl::optional<base::Time>)> callback) {
-  const absl::optional<multidevice::RemoteDeviceRef> remote_device =
+    base::OnceCallback<void(std::optional<base::Time>)> callback) {
+  const std::optional<multidevice::RemoteDeviceRef> remote_device =
       multidevice_setup_client_->GetHostStatus().second;
   if (!remote_device) {
-    std::move(callback).Run(/*timestamp=*/absl::nullopt);
+    std::move(callback).Run(/*timestamp=*/std::nullopt);
     return;
   }
 
@@ -172,6 +175,9 @@ void ConnectionManagerImpl::OnConnectionAttemptFailure(
                   << "error: " << reason << ".";
   timer_->Stop();
   connection_attempt_.reset();
+  if (secure_channel_structured_metrics_logger_) {
+    secure_channel_structured_metrics_logger_->UnbindReceiver();
+  }
   metrics_recorder_->RecordConnectionFailure(reason);
   OnStatusChanged();
 }
@@ -182,7 +188,7 @@ void ConnectionManagerImpl::OnConnection(
                   << "connection between local and remote device.";
   timer_->Stop();
   channel_ = std::move(channel);
-  channel_->AddObserver(this);
+  client_channel_observation_.Observe(channel_.get());
   if (last_status_ == Status::kConnecting) {
     metrics_recorder_->RecordConnectionSuccess(clock_->Now() -
                                                status_change_timestamp_);
@@ -199,10 +205,23 @@ void ConnectionManagerImpl::OnMessageReceived(const std::string& payload) {
   NotifyMessageReceived(payload);
 }
 
+void ConnectionManagerImpl::OnNearbyConnectionStateChanged(
+    mojom::NearbyConnectionStep step,
+    mojom::NearbyConnectionStepResult result) {
+  if (secure_channel_structured_metrics_logger_) {
+    secure_channel_structured_metrics_logger_->LogNearbyConnectionState(step,
+                                                                        result);
+  }
+}
+
 void ConnectionManagerImpl::OnConnectionTimeout() {
   PA_LOG(WARNING) << "AttemptConnection() has timed out. Closing connection "
                   << "attempt.";
 
+  if (secure_channel_structured_metrics_logger_) {
+    secure_channel_structured_metrics_logger_->LogDiscoveryAttempt(
+        mojom::DiscoveryResult::kFailure, mojom::DiscoveryErrorCode::kTimeout);
+  }
   OnConnectionAttemptFailure(
       mojom::ConnectionAttemptFailureReason::TIMEOUT_FINDING_DEVICE);
 }
@@ -211,8 +230,10 @@ void ConnectionManagerImpl::TearDownConnection() {
   // Stop timer in case we are disconnected before the connection timed out.
   timer_->Stop();
   connection_attempt_.reset();
-  if (channel_)
-    channel_->RemoveObserver(this);
+  if (secure_channel_structured_metrics_logger_) {
+    secure_channel_structured_metrics_logger_->UnbindReceiver();
+  }
+  client_channel_observation_.Reset();
   channel_.reset();
   if (last_status_ == Status::kConnected) {
     metrics_recorder_->RecordConnectionDuration(clock_->Now() -

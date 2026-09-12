@@ -15,14 +15,18 @@
 #ifndef ABSL_STRINGS_INTERNAL_CORD_REP_FLAT_H_
 #define ABSL_STRINGS_INTERNAL_CORD_REP_FLAT_H_
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 
+#include "absl/base/attributes.h"
 #include "absl/base/config.h"
 #include "absl/base/macros.h"
 #include "absl/strings/internal/cord_internal.h"
+#include "absl/strings/string_view.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -69,9 +73,8 @@ constexpr size_t TagToAllocatedSize(uint8_t tag) {
                    ((512 / 8) + ((8192 - 512) / 64)) * 4096;
 }
 
-static_assert(AllocatedSizeToTagUnchecked(kMinFlatSize) == FLAT, "");
-static_assert(AllocatedSizeToTagUnchecked(kMaxLargeFlatSize) == MAX_FLAT_TAG,
-              "");
+static_assert(AllocatedSizeToTagUnchecked(kMinFlatSize) == FLAT);
+static_assert(AllocatedSizeToTagUnchecked(kMaxLargeFlatSize) == MAX_FLAT_TAG);
 
 // RoundUp logically performs `((n + m - 1) / m) * m` to round up to the nearest
 // multiple of `m`, optimized for the invariant that `m` is a power of 2.
@@ -110,7 +113,7 @@ struct CordRepFlat : public CordRep {
 
   // Creates a new flat node.
   template <size_t max_flat_size, typename... Args>
-  static CordRepFlat* NewImpl(size_t len, Args... args ABSL_ATTRIBUTE_UNUSED) {
+  static CordRepFlat* NewImpl(size_t len, Args... args [[maybe_unused]]) {
     if (len <= kMinFlatLength) {
       len = kMinFlatLength;
     } else if (len > max_flat_size - kFlatOverhead) {
@@ -120,8 +123,16 @@ struct CordRepFlat : public CordRep {
     // Round size up so it matches a size we can exactly express in a tag.
     const size_t size = RoundUpForTag(len + kFlatOverhead);
     void* const raw_rep = ::operator new(size);
+    // GCC 13 has a false-positive -Wstringop-overflow warning here.
+    #if ABSL_INTERNAL_HAVE_MIN_GNUC_VERSION(13, 0)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wstringop-overflow"
+    #endif
     CordRepFlat* rep = new (raw_rep) CordRepFlat();
     rep->tag = AllocatedSizeToTag(size);
+    #if ABSL_INTERNAL_HAVE_MIN_GNUC_VERSION(13, 0)
+    #pragma GCC diagnostic pop
+    #endif
     return rep;
   }
 

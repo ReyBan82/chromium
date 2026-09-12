@@ -49,7 +49,6 @@ UnionTraits<mojo_base::mojom::BigBufferDataView, mojo_base::BigBuffer>::GetTag(
   }
 
   NOTREACHED();
-  return mojo_base::mojom::BigBufferDataView::Tag::kBytes;
 }
 
 // static
@@ -80,14 +79,22 @@ bool UnionTraits<mojo_base::mojom::BigBufferDataView, mojo_base::BigBuffer>::
     case mojo_base::mojom::BigBufferDataView::Tag::kBytes: {
       mojo::ArrayDataView<uint8_t> bytes_view;
       data.GetBytesDataView(&bytes_view);
-      *out = mojo_base::BigBuffer(bytes_view);
+      // The normal `BigBuffer` constructor might try to create shared memory,
+      // i.e. if the data is large but previous shmem allocation failed. No
+      // point in doing that now that IPC is already done, so make sure the
+      // bytes stay inlined.
+      mojo_base::BigBufferView view;
+      view.SetBytes(bytes_view);
+      *out = mojo_base::BigBufferView::ToBigBuffer(std::move(view));
+      CHECK_EQ(out->storage_type(), mojo_base::BigBuffer::StorageType::kBytes);
       return true;
     }
 
     case mojo_base::mojom::BigBufferDataView::Tag::kSharedMemory: {
       mojo_base::internal::BigBufferSharedMemoryRegion shared_memory;
-      if (!data.ReadSharedMemory(&shared_memory))
+      if (!data.ReadSharedMemory(&shared_memory)) {
         return false;
+      }
       *out = mojo_base::BigBuffer(std::move(shared_memory));
       return true;
     }
@@ -114,7 +121,6 @@ mojo_base::mojom::BigBufferDataView::Tag UnionTraits<
   }
 
   NOTREACHED();
-  return mojo_base::mojom::BigBufferDataView::Tag::kBytes;
 }
 
 // static
@@ -153,8 +159,9 @@ bool UnionTraits<
 
     case mojo_base::mojom::BigBufferDataView::Tag::kSharedMemory: {
       mojo_base::internal::BigBufferSharedMemoryRegion shared_memory;
-      if (!data.ReadSharedMemory(&shared_memory))
+      if (!data.ReadSharedMemory(&shared_memory)) {
         return false;
+      }
       out->SetSharedMemory(std::move(shared_memory));
       return true;
     }

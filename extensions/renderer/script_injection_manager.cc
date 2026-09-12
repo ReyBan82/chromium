@@ -4,22 +4,25 @@
 
 #include "extensions/renderer/script_injection_manager.h"
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <utility>
+#include <vector>
 
-#include "base/auto_reset.h"
-#include "base/containers/cxx20_erase.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/ranges/algorithm.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/values.h"
 #include "content/public/renderer/render_frame.h"
 #include "content/public/renderer/render_frame_observer.h"
 #include "content/public/renderer/render_thread.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_features.h"
-#include "extensions/common/extension_messages.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/extension_set.h"
 #include "extensions/common/mojom/host_id.mojom.h"
 #include "extensions/renderer/extension_frame_helper.h"
@@ -29,8 +32,7 @@
 #include "extensions/renderer/script_injection.h"
 #include "extensions/renderer/scripts_run_info.h"
 #include "extensions/renderer/web_ui_injection_host.h"
-#include "ipc/ipc_message_macros.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/platform/web_url_error.h"
 #include "third_party/blink/public/web/web_document.h"
 #include "third_party/blink/public/web/web_frame.h"
@@ -47,7 +49,7 @@ namespace {
 const int kScriptIdleTimeoutInMs = 200;
 
 // Returns the RunLocation that follows |run_location|.
-absl::optional<mojom::RunLocation> NextRunLocation(
+std::optional<mojom::RunLocation> NextRunLocation(
     mojom::RunLocation run_location) {
   switch (run_location) {
     case mojom::RunLocation::kDocumentStart:
@@ -55,11 +57,11 @@ absl::optional<mojom::RunLocation> NextRunLocation(
     case mojom::RunLocation::kDocumentEnd:
       return mojom::RunLocation::kDocumentIdle;
     case mojom::RunLocation::kDocumentIdle:
-      return absl::nullopt;
+      return std::nullopt;
     case mojom::RunLocation::kUndefined:
     case mojom::RunLocation::kRunDeferred:
     case mojom::RunLocation::kBrowserDriven:
-      return absl::nullopt;
+      return std::nullopt;
   }
   NOTREACHED();
 }
@@ -80,7 +82,7 @@ class ScriptInjectionManager::RFOHelper : public content::RenderFrameObserver {
   void DidCreateDocumentElement() override;
   void DidFailProvisionalLoad() override;
   void DidDispatchDOMContentLoadedEvent() override;
-  void WillDetach() override;
+  void WillDetach(blink::DetachReason detach_reason) override;
   void OnDestruct() override;
   void OnStop() override;
 
@@ -95,7 +97,7 @@ class ScriptInjectionManager::RFOHelper : public content::RenderFrameObserver {
   void InvalidateAndResetFrame(bool force_reset);
 
   // The owning ScriptInjectionManager.
-  ScriptInjectionManager* manager_;
+  raw_ptr<ScriptInjectionManager> manager_;
 
   bool should_run_idle_ = true;
 
@@ -196,7 +198,8 @@ void ScriptInjectionManager::RFOHelper::DidDispatchDOMContentLoadedEvent() {
                          weak_factory_.GetWeakPtr()));
 }
 
-void ScriptInjectionManager::RFOHelper::WillDetach() {
+void ScriptInjectionManager::RFOHelper::WillDetach(
+    blink::DetachReason detach_reason) {
   // The frame is closing - invalidate.
   constexpr bool kForceReset = true;
   InvalidateAndResetFrame(kForceReset);
@@ -246,7 +249,7 @@ void ScriptInjectionManager::RFOHelper::InvalidateAndResetFrame(
 ScriptInjectionManager::ScriptInjectionManager(
     UserScriptSetManager* user_script_set_manager)
     : user_script_set_manager_(user_script_set_manager) {
-  user_script_set_manager_observation_.Observe(user_script_set_manager_);
+  user_script_set_manager_observation_.Observe(user_script_set_manager_.get());
 }
 
 ScriptInjectionManager::~ScriptInjectionManager() {
@@ -263,7 +266,7 @@ void ScriptInjectionManager::OnRenderFrameCreated(
 }
 
 void ScriptInjectionManager::OnExtensionUnloaded(
-    const std::string& extension_id) {
+    const ExtensionId& extension_id) {
   for (auto iter = pending_injections_.begin();
       iter != pending_injections_.end();) {
     if ((*iter)->host_id().id == extension_id) {
@@ -276,7 +279,7 @@ void ScriptInjectionManager::OnExtensionUnloaded(
 }
 
 void ScriptInjectionManager::OnInjectionFinished(ScriptInjection* injection) {
-  base::EraseIf(running_injections_,
+  std::erase_if(running_injections_,
                 [&injection](const std::unique_ptr<ScriptInjection>& mode) {
                   return injection == mode.get();
                 });
@@ -284,7 +287,7 @@ void ScriptInjectionManager::OnInjectionFinished(ScriptInjection* injection) {
 
 void ScriptInjectionManager::OnUserScriptsUpdated(
     const mojom::HostID& changed_host) {
-  base::EraseIf(
+  std::erase_if(
       pending_injections_,
       [&changed_host](const std::unique_ptr<ScriptInjection>& injection) {
         return changed_host == injection->host_id();
@@ -305,7 +308,7 @@ void ScriptInjectionManager::InvalidateForFrame(content::RenderFrame* frame) {
   // note it.
   active_injection_frames_.erase(frame);
 
-  base::EraseIf(pending_injections_,
+  std::erase_if(pending_injections_,
                 [&frame](const std::unique_ptr<ScriptInjection>& injection) {
                   return injection->render_frame() == frame;
                 });
@@ -332,7 +335,7 @@ void ScriptInjectionManager::StartInjectScripts(
   if (iter == frame_statuses_.end()) {
     invalid_run_order = (run_location != mojom::RunLocation::kDocumentStart);
   } else {
-    absl::optional<mojom::RunLocation> next = NextRunLocation(iter->second);
+    std::optional<mojom::RunLocation> next = NextRunLocation(iter->second);
     if (next)
       invalid_run_order = run_location > next.value();
   }
@@ -419,13 +422,13 @@ void ScriptInjectionManager::TryToInject(
       run_location, scripts_run_info,
       base::BindOnce(&ScriptInjectionManager::OnInjectionStatusUpdated,
                      base::Unretained(this)))) {
-    case ScriptInjection::INJECTION_WAITING:
+    case ScriptInjection::InjectionResult::kWaiting:
       pending_injections_.push_back(std::move(injection));
       break;
-    case ScriptInjection::INJECTION_BLOCKED:
+    case ScriptInjection::InjectionResult::kBlocked:
       running_injections_.push_back(std::move(injection));
       break;
-    case ScriptInjection::INJECTION_FINISHED:
+    case ScriptInjection::InjectionResult::kFinished:
       break;
   }
 }
@@ -435,15 +438,18 @@ void ScriptInjectionManager::HandleExecuteCode(
     mojom::LocalFrame::ExecuteCodeCallback callback,
     content::RenderFrame* render_frame) {
   std::unique_ptr<const InjectionHost> injection_host;
-  if (params->host_id->type == mojom::HostID::HostType::kExtensions) {
-    injection_host = ExtensionInjectionHost::Create(params->host_id->id);
-    if (!injection_host) {
-      std::move(callback).Run(base::EmptyString(), GURL::EmptyGURL(),
-                              absl::nullopt);
-      return;
-    }
-  } else if (params->host_id->type == mojom::HostID::HostType::kWebUi) {
-    injection_host = std::make_unique<WebUIInjectionHost>(*params->host_id);
+  switch (params->host_id->type) {
+    case mojom::HostID::HostType::kExtensions:
+      injection_host = ExtensionInjectionHost::Create(params->host_id->id);
+      if (!injection_host) {
+        std::move(callback).Run(std::string(), GURL(), std::nullopt);
+        return;
+      }
+      break;
+    case mojom::HostID::HostType::kControlledFrameEmbedder:
+    case mojom::HostID::HostType::kWebUi:
+      injection_host = std::make_unique<WebUIInjectionHost>(*params->host_id);
+      break;
   }
 
   mojom::RunLocation run_at = params->run_at;
@@ -474,7 +480,7 @@ void ScriptInjectionManager::ExecuteDeclarativeScript(
   if (injection.get()) {
     ScriptsRunInfo scripts_run_info(render_frame,
                                     mojom::RunLocation::kBrowserDriven);
-    // TODO(https://crbug.com/1186525): Use return value of TryToInject for
+    // TODO(crbug.com/40753782): Use return value of TryToInject for
     // error handling.
     TryToInject(std::move(injection), mojom::RunLocation::kBrowserDriven,
                 &scripts_run_info);
@@ -485,8 +491,8 @@ void ScriptInjectionManager::ExecuteDeclarativeScript(
 
 void ScriptInjectionManager::OnPermitScriptInjectionHandled(
     ScriptInjection* injection) {
-  auto iter = base::ranges::find(pending_injections_, injection,
-                                 &std::unique_ptr<ScriptInjection>::get);
+  auto iter = std::ranges::find(pending_injections_, injection,
+                                &std::unique_ptr<ScriptInjection>::get);
   if (iter == pending_injections_.end())
     return;
   DCHECK((*iter)->host_id().type == mojom::HostID::HostType::kExtensions);
@@ -502,9 +508,41 @@ void ScriptInjectionManager::OnPermitScriptInjectionHandled(
                                   mojom::RunLocation::kRunDeferred);
   ScriptInjection::InjectionResult res =
       script_injection->OnPermissionGranted(&scripts_run_info);
-  if (res == ScriptInjection::INJECTION_BLOCKED)
+  if (res == ScriptInjection::InjectionResult::kBlocked) {
     running_injections_.push_back(std::move(script_injection));
+  }
   scripts_run_info.LogRun(activity_logging_enabled_);
+}
+
+void ScriptInjectionManager::StartStreamingJSSources(
+    blink::WebLocalFrame* web_frame,
+    const GURL& document_url,
+    ExtensionFrameHelper* frame_helper) {
+  CHECK(base::FeatureList::IsEnabled(
+      extensions_features::kExtensionsBackgroundCompilation));
+  // TODO(https://crbug.com/436274244): filter out frames that will not have any
+  // script injections.
+
+  std::map<GURL, std::optional<blink::ExtensionScriptStreamer>>&
+      script_streamers = frame_helper->GetScriptStreamersMap();
+
+  uint64_t streamed_scripts_count = 0;
+  uint64_t injected_scripts_count = 0;
+  user_script_set_manager_->InsertStreamersForInjectionsAtDocumentStart(
+      document_url, web_frame, script_streamers, streamed_scripts_count,
+      injected_scripts_count);
+
+  if (injected_scripts_count == 0) {
+    return;
+  }
+
+  UMA_HISTOGRAM_EXACT_LINEAR(
+      "Extensions.BackgroundCompileInjectedScripts.EligibleScriptsCount",
+      streamed_scripts_count, 101);
+
+  UMA_HISTOGRAM_PERCENTAGE(
+      "Extensions.BackgroundCompileInjectedScripts.EligibleScriptsPercentage",
+      (streamed_scripts_count * 100) / injected_scripts_count);
 }
 
 }  // namespace extensions

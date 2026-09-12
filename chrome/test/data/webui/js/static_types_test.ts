@@ -3,8 +3,7 @@
 // found in the LICENSE file.
 
 import {getTrustedHTML, getTrustedScript, getTrustedScriptURL} from 'chrome://resources/js/static_types.js';
-
-import {assertEquals, assertNotReached, assertThrows} from 'chrome://webui-test/chai_assert.js';
+import {assertEquals, assertNotReached, assertThrows, assertTrue} from 'chrome://webui-test/chai_assert.js';
 
 suite('StaticTypesTest', function() {
   test('compatible with Trusted Types', () => {
@@ -22,9 +21,9 @@ suite('StaticTypesTest', function() {
   });
 
   test('returns Trusted Types', () => {
-    assertEquals(getTrustedHTML`test` instanceof TrustedHTML, true);
-    assertEquals(getTrustedScript`test` instanceof TrustedScript, true);
-    assertEquals(getTrustedScriptURL`test` instanceof TrustedScriptURL, true);
+    assertTrue(getTrustedHTML`test` instanceof window.TrustedHTML);
+    assertTrue(getTrustedScript`test` instanceof window.TrustedScript);
+    assertTrue(getTrustedScriptURL`test` instanceof window.TrustedScriptURL);
   });
 
   test('accepts single and mutiple lines', () => {
@@ -43,7 +42,7 @@ suite('StaticTypesTest', function() {
   });
 
   test('throws when invalid', () => {
-    function ensureThrows(arg: any) {
+    function ensureThrows(arg: TemplateStringsArray) {
       assertThrows(() => {
         getTrustedHTML(arg);
       });
@@ -55,14 +54,17 @@ suite('StaticTypesTest', function() {
       });
     }
 
-    const a = 'test';
+    // Casting since purposefully passing incorrect value.
+    const a = 'test' as unknown as TemplateStringsArray;
     ensureThrows(a);
 
-    const b = [a];
+    // Casting since purposefully passing incorrect value.
+    const b = [a] as unknown as TemplateStringsArray;
     ensureThrows(b);
 
     // c holds stringified value of `test`, which isn't a template literal.
-    const c = `test`;
+    // Casting since purposefully passing incorrect value.
+    const c = `test` as unknown as TemplateStringsArray;
     ensureThrows(c);
   });
 });

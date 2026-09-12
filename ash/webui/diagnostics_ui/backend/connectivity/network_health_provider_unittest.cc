@@ -6,7 +6,10 @@
 
 #include <utility>
 
+#include "ash/system/diagnostics/diagnostics_log_controller.h"
+#include "ash/system/diagnostics/fake_diagnostics_browser_delegate.h"
 #include "ash/system/diagnostics/networking_log.h"
+#include "ash/test/ash_test_base.h"
 #include "ash/webui/diagnostics_ui/backend/common/histogram_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/memory/ptr_util.h"
@@ -14,7 +17,6 @@
 #include "base/test/task_environment.h"
 #include "base/values.h"
 #include "chromeos/ash/components/dbus/shill/shill_ipconfig_client.h"
-#include "chromeos/ash/components/login/login_state/login_state.h"
 #include "chromeos/ash/components/network/managed_network_configuration_handler.h"
 #include "chromeos/ash/components/network/network_cert_loader.h"
 #include "chromeos/ash/components/network/network_device_handler.h"
@@ -26,19 +28,24 @@
 #include "chromeos/ash/components/network/onc/network_onc_utils.h"
 #include "chromeos/ash/components/network/system_token_cert_db_storage.h"
 #include "chromeos/ash/components/network/technology_state_controller.h"
+#include "chromeos/ash/components/test/ash_test_suite.h"
 #include "chromeos/ash/services/network_config/cros_network_config.h"
 #include "chromeos/ash/services/network_config/in_process_instance.h"
 #include "chromeos/services/network_config/public/mojom/cros_network_config.mojom.h"
 #include "chromeos/services/network_config/public/mojom/network_types.mojom-shared.h"
+#include "components/account_id/account_id.h"
 #include "components/onc/onc_constants.h"
 #include "components/onc/onc_pref_names.h"
 #include "components/prefs/testing_pref_service.h"
 #include "components/proxy_config/pref_proxy_config_tracker_impl.h"
 #include "components/proxy_config/proxy_config_pref_names.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
+#include "components/user_manager/user_manager.h"
 #include "dbus/object_path.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/cros_system_api/dbus/shill/dbus-constants.h"
+#include "ui/base/resource/resource_bundle.h"
 
 namespace ash::diagnostics {
 
@@ -149,11 +156,32 @@ void VerifyNetworkDataErrorBucketCounts(
 
 }  // namespace
 
-class NetworkHealthProviderTest : public testing::Test {
+class NetworkHealthProviderTest : public AshTestBase {
  public:
-  NetworkHealthProviderTest() {
-    LoginState::Initialize();
+  NetworkHealthProviderTest() { set_start_session(false); }
+
+  NetworkHealthProviderTest(const NetworkHealthProviderTest&) = delete;
+  NetworkHealthProviderTest& operator=(const NetworkHealthProviderTest&) =
+      delete;
+
+  ~NetworkHealthProviderTest() override = default;
+
+  void SetUp() override {
+    ui::ResourceBundle::CleanupSharedInstance();
+    AshTestSuite::LoadTestResources();
+
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(local_state());
+    const AccountId account_id =
+        AccountId::FromUserEmailGaiaId("test@test", GaiaId("fakegaia"));
+    user_manager::User* user =
+        user_session_test_environment_->AddRegularUser(account_id);
+    ASSERT_TRUE(user);
+
     SystemTokenCertDbStorage::Initialize();
+
+    AshTestBase::SetUp();
+    user_session_test_environment_->LogIn(account_id);
 
     // NetworkHandler has pieces that depend on NetworkCertLoader so it's better
     // to initialize NetworkHandlerTestHelper after
@@ -163,12 +191,16 @@ class NetworkHealthProviderTest : public testing::Test {
     network_handler_test_helper_ = std::make_unique<NetworkHandlerTestHelper>();
     network_handler_test_helper_->AddDefaultProfiles();
     network_handler_test_helper_->RegisterPrefs(user_prefs_.registry(),
-                                                local_state_.registry());
+                                                local_state()->registry());
     PrefProxyConfigTrackerImpl::RegisterProfilePrefs(user_prefs_.registry());
-    PrefProxyConfigTrackerImpl::RegisterPrefs(local_state_.registry());
+    PrefProxyConfigTrackerImpl::RegisterPrefs(local_state()->registry());
 
-    network_handler_test_helper_->InitializePrefs(&user_prefs_, &local_state_);
+    network_handler_test_helper_->InitializePrefs(&user_prefs_, local_state());
     ClearDevicesAndServices();
+
+    NetworkHandler::Get()->managed_network_configuration_handler()->SetPolicy(
+        ::onc::ONC_SOURCE_USER_POLICY, user->username_hash(), base::ListValue(),
+        base::DictValue());
 
     cros_network_config_ =
         std::make_unique<network_config::CrosNetworkConfig>();
@@ -182,14 +214,16 @@ class NetworkHealthProviderTest : public testing::Test {
     managed_network_configuration_handler->SetPolicy(
         ::onc::ONC_SOURCE_DEVICE_POLICY,
         /*userhash=*/std::string(),
-        /*network_configs_onc=*/base::Value(base::Value::Type::LIST),
-        /*global_network_config=*/base::Value(base::Value::Type::DICT));
+        /*network_configs_onc=*/base::ListValue(),
+        /*global_network_config=*/base::DictValue());
 
     EXPECT_TRUE(temp_dir_.CreateUniqueTempDir());
     network_health_provider_ = std::make_unique<NetworkHealthProvider>();
+    DiagnosticsLogController::Initialize(
+        std::make_unique<FakeDiagnosticsBrowserDelegate>());
   }
 
-  ~NetworkHealthProviderTest() override {
+  void TearDown() override {
     // Clear in process instance prior to destroying cros_network_config_ to
     // avoid UaF errors.
     network_config::OverrideInProcessInstanceForTesting(nullptr);
@@ -200,8 +234,9 @@ class NetworkHealthProviderTest : public testing::Test {
     cros_network_config_.reset();
     network_handler_test_helper_.reset();
     NetworkCertLoader::Shutdown();
+    AshTestBase::TearDown();
     SystemTokenCertDbStorage::Shutdown();
-    LoginState::Shutdown();
+    user_session_test_environment_.reset();
   }
 
  protected:
@@ -382,7 +417,7 @@ class NetworkHealthProviderTest : public testing::Test {
   }
 
   void SetCellularSimLockStatus(std::string lock_type, bool sim_locked) {
-    base::Value::Dict sim_lock_status;
+    base::DictValue sim_lock_status;
     sim_lock_status.Set(shill::kSIMLockEnabledProperty, sim_locked);
     sim_lock_status.Set(shill::kSIMLockTypeProperty, lock_type);
     sim_lock_status.Set(shill::kSIMLockRetriesLeftProperty, 3);
@@ -444,7 +479,7 @@ class NetworkHealthProviderTest : public testing::Test {
     base::RunLoop().RunUntilIdle();
   }
 
-  void SetNameServersForIPConfig(base::Value::List dns_servers) {
+  void SetNameServersForIPConfig(base::ListValue dns_servers) {
     ShillIPConfigClient::Get()->SetProperty(
         dbus::ObjectPath(kTestIPConfigPath), shill::kNameServersProperty,
         base::Value(std::move(dns_servers)), base::DoNothing());
@@ -482,10 +517,10 @@ class NetworkHealthProviderTest : public testing::Test {
 
   void ClearDevicesAndServices() {
     // Clear test devices and services.
-    task_environment_.RunUntilIdle();
+    task_environment()->RunUntilIdle();
     network_handler_test_helper_->ClearDevices();
     network_handler_test_helper_->ClearServices();
-    task_environment_.RunUntilIdle();
+    task_environment()->RunUntilIdle();
   }
 
   mojom::IPConfigPropertiesPtr SetupRoutingPrefixToTestDataError(
@@ -515,9 +550,9 @@ class NetworkHealthProviderTest : public testing::Test {
     return ip_config;
   }
 
-  base::test::TaskEnvironment task_environment_;
   sync_preferences::TestingPrefServiceSyncable user_prefs_;
-  TestingPrefServiceSimple local_state_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
   std::unique_ptr<NetworkHandlerTestHelper> network_handler_test_helper_;
   std::unique_ptr<network_config::CrosNetworkConfig> cros_network_config_;
   std::unique_ptr<NetworkHealthProvider> network_health_provider_;
@@ -1044,6 +1079,15 @@ TEST_F(NetworkHealthProviderTest, ChangingCellularProperties) {
       observer.GetLatestState()->type_properties->get_cellular()->sim_locked,
       true);
 
+  SetCellularSimLockStatus(shill::kSIMLockNetworkPin, /**sim_locked=*/true);
+  ExpectStateObserverFired(observer, &state_call_count);
+  EXPECT_EQ(
+      mojom::LockType::kNetworkPin,
+      observer.GetLatestState()->type_properties->get_cellular()->lock_type);
+  EXPECT_EQ(
+      true,
+      observer.GetLatestState()->type_properties->get_cellular()->sim_locked);
+
   SetCellularSimLockStatus(/**lock_type=*/"", /**sim_locked=*/false);
   ExpectStateObserverFired(observer, &state_call_count);
   EXPECT_EQ(
@@ -1241,7 +1285,7 @@ TEST_F(NetworkHealthProviderTest, IPConfig) {
   SetIPAddressForIPConfig(ip_address);
   const int routing_prefix = 1;
   SetRoutingPrefixForIPConfig(routing_prefix);
-  base::Value::List dns_servers;
+  base::ListValue dns_servers;
   const std::string dns_server_1 = "192.168.1.100";
   const std::string dns_server_2 = "192.168.1.101";
   dns_servers.Append(dns_server_1);
@@ -1437,8 +1481,9 @@ TEST_F(NetworkHealthProviderTest, EthernetAndWifiOrderedCorrectly) {
 }
 
 TEST_F(NetworkHealthProviderTest, NetworkingLog) {
-  NetworkingLog log(temp_dir_.GetPath());
-  network_health_provider_->SetNetworkingLogForTesting(&log);
+  DiagnosticsLogController::Get()->SetNetworkingLogForTesting(
+      std::make_unique<NetworkingLog>(temp_dir_.GetPath()));
+  size_t list_call_count = 0;
 
   // Observe the network list.
   FakeNetworkListObserver list_observer;
@@ -1452,10 +1497,19 @@ TEST_F(NetworkHealthProviderTest, NetworkingLog) {
 
   SetupObserver(&observer, list_observer.observer_guids()[0]);
   AssociateWifi();
+  ExpectListObserverFired(list_observer, &list_call_count);
+  // List Oberver is fired but UpdateNetworkList() is not called because
+  // active_guid_ is empty.
+  EXPECT_EQ(0u, DiagnosticsLogController::Get()
+                    ->GetNetworkingLog()
+                    .update_network_list_call_count_for_testing());
   EXPECT_TRUE(list_observer.active_guid().empty());
 
   // The non-active network still appears in the log.
-  EXPECT_FALSE(log.GetNetworkInfo().empty());
+  EXPECT_FALSE(DiagnosticsLogController::Get()
+                   ->GetNetworkingLog()
+                   .GetNetworkInfo()
+                   .empty());
 
   // Put wifi into online state.
   SetWifiOnline();
@@ -1463,7 +1517,19 @@ TEST_F(NetworkHealthProviderTest, NetworkingLog) {
   // Log is populated with network info now that WiFi is online.
   // Log contents tested in networking_log_unittest.cc -
   // NetworkingLogTest.DetailedLogContentsWiFi.
-  EXPECT_FALSE(log.GetNetworkInfo().empty());
+  EXPECT_FALSE(DiagnosticsLogController::Get()
+                   ->GetNetworkingLog()
+                   .GetNetworkInfo()
+                   .empty());
+
+  // List Oberver is fired and UpdateNetworkList() is called because
+  // active_guid_ is not empty.
+  ExpectListObserverFired(list_observer, &list_call_count);
+  EXPECT_GE(DiagnosticsLogController::Get()
+                ->GetNetworkingLog()
+                .update_network_list_call_count_for_testing(),
+            0u);
+  EXPECT_FALSE(list_observer.active_guid().empty());
 }
 
 TEST_F(NetworkHealthProviderTest, ResetReceiverOnBindInterface) {

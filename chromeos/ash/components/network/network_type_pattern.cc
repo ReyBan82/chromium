@@ -42,9 +42,10 @@ struct ShillToBitFlagEntry {
                           {kTypeTether, kNetworkTypeTether}};
 
 NetworkTypeBitFlag ShillNetworkTypeToFlag(const std::string& shill_type) {
-  for (size_t i = 0; i < std::size(shill_type_to_flag); ++i) {
-    if (shill_type_to_flag[i].shill_network_type == shill_type)
-      return shill_type_to_flag[i].bit_flag;
+  for (const ShillToBitFlagEntry& entry : shill_type_to_flag) {
+    if (entry.shill_network_type == shill_type) {
+      return entry.bit_flag;
+    }
   }
   NET_LOG(ERROR) << "ShillNetworkTypeToFlag unknown type: " << shill_type;
   return kNetworkTypeNone;
@@ -156,12 +157,13 @@ std::string NetworkTypePattern::ToDebugString() const {
 
   // Note: shill_type_to_flag includes kTypeTether.
   std::string str;
-  for (size_t i = 0; i < std::size(shill_type_to_flag); ++i) {
-    if (!(pattern_ & shill_type_to_flag[i].bit_flag))
+  for (const ShillToBitFlagEntry& entry : shill_type_to_flag) {
+    if (!(pattern_ & entry.bit_flag)) {
       continue;
+    }
     if (!str.empty())
       str += "|";
-    str += shill_type_to_flag[i].shill_network_type;
+    str += entry.shill_network_type;
   }
   return str;
 }

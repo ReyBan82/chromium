@@ -8,7 +8,7 @@
 #include <utility>
 
 #include "base/barrier_closure.h"
-#include "base/containers/contains.h"
+#include "base/debug/crash_logging.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
@@ -20,7 +20,6 @@
 #include "build/build_config.h"
 #include "content/browser/background_sync/background_sync_metrics.h"
 #include "content/browser/background_sync/background_sync_network_observer.h"
-#include "content/browser/service_worker/embedded_worker_status.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "content/browser/storage_partition_impl.h"
 #include "content/public/browser/background_sync_controller.h"
@@ -28,8 +27,10 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/permission_controller.h"
+#include "content/public/browser/permission_descriptor_util.h"
 #include "content/public/browser/render_process_host.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
+#include "third_party/blink/public/common/service_worker/embedded_worker_status.h"
 #include "third_party/blink/public/common/service_worker/service_worker_type_converters.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/service_worker/service_worker.mojom.h"
@@ -48,7 +49,7 @@ using SyncAndNotificationPermissions =
 
 namespace content {
 
-// TODO(crbug.com/932591): Use blink::mojom::BackgroundSyncError
+// TODO(crbug.com/40614176): Use blink::mojom::BackgroundSyncError
 // directly and eliminate these checks.
 #define COMPILE_ASSERT_MATCHING_ENUM(mojo_name, manager_name) \
   static_assert(static_cast<int>(blink::mojo_name) ==         \
@@ -92,7 +93,7 @@ void RecordFailureAndPostError(
 // Returns nullptr if the browser context cannot be accessed for any reason.
 BrowserContext* GetBrowserContext(
     scoped_refptr<ServiceWorkerContextWrapper> service_worker_context) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   if (!service_worker_context)
     return nullptr;
@@ -107,7 +108,7 @@ BrowserContext* GetBrowserContext(
 // Returns nullptr if the controller cannot be accessed for any reason.
 BackgroundSyncController* GetBackgroundSyncController(
     scoped_refptr<ServiceWorkerContextWrapper> service_worker_context) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BrowserContext* browser_context =
       GetBrowserContext(std::move(service_worker_context));
@@ -122,7 +123,7 @@ SyncAndNotificationPermissions GetBackgroundSyncPermission(
     const url::Origin& origin,
     RenderProcessHost* render_process_host,
     BackgroundSyncType sync_type) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BrowserContext* browser_context =
       GetBrowserContext(std::move(service_worker_context));
@@ -131,17 +132,22 @@ SyncAndNotificationPermissions GetBackgroundSyncPermission(
 
   PermissionController* permission_controller =
       browser_context->GetPermissionController();
-  DCHECK(permission_controller);
+  CHECK(permission_controller, base::NotFatalUntil::M159);
 
   // The requesting origin always matches the embedding origin.
   auto sync_permission = permission_controller->GetPermissionStatusForWorker(
-      sync_type == BackgroundSyncType::ONE_SHOT
-          ? blink::PermissionType::BACKGROUND_SYNC
-          : blink::PermissionType::PERIODIC_BACKGROUND_SYNC,
+      content::PermissionDescriptorUtil::
+          CreatePermissionDescriptorForPermissionType(
+              sync_type == BackgroundSyncType::ONE_SHOT
+                  ? blink::PermissionType::BACKGROUND_SYNC
+                  : blink::PermissionType::PERIODIC_BACKGROUND_SYNC),
       render_process_host, origin);
   auto notification_permission =
       permission_controller->GetPermissionStatusForWorker(
-          blink::PermissionType::NOTIFICATIONS, render_process_host, origin);
+          content::PermissionDescriptorUtil::
+              CreatePermissionDescriptorForPermissionType(
+                  blink::PermissionType::NOTIFICATIONS),
+          render_process_host, origin);
   return {sync_permission, notification_permission};
 }
 
@@ -150,7 +156,7 @@ void NotifyOneShotBackgroundSyncRegistered(
     const url::Origin& origin,
     bool can_fire,
     bool is_reregistered) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BackgroundSyncController* background_sync_controller =
       GetBackgroundSyncController(std::move(sw_context_wrapper));
@@ -167,7 +173,7 @@ void NotifyPeriodicBackgroundSyncRegistered(
     const url::Origin& origin,
     int min_interval,
     bool is_reregistered) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   BackgroundSyncController* background_sync_controller =
       GetBackgroundSyncController(std::move(sw_context_wrapper));
 
@@ -184,7 +190,7 @@ void NotifyOneShotBackgroundSyncCompleted(
     blink::ServiceWorkerStatusCode status_code,
     int num_attempts,
     int max_attempts) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BackgroundSyncController* background_sync_controller =
       GetBackgroundSyncController(std::move(sw_context_wrapper));
@@ -202,7 +208,7 @@ void NotifyPeriodicBackgroundSyncCompleted(
     blink::ServiceWorkerStatusCode status_code,
     int num_attempts,
     int max_attempts) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BackgroundSyncController* background_sync_controller =
       GetBackgroundSyncController(std::move(sw_context_wrapper));
@@ -217,7 +223,7 @@ void NotifyPeriodicBackgroundSyncCompleted(
 std::unique_ptr<BackgroundSyncParameters> GetControllerParameters(
     scoped_refptr<ServiceWorkerContextWrapper> sw_context_wrapper,
     std::unique_ptr<BackgroundSyncParameters> parameters) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BackgroundSyncController* background_sync_controller =
       GetBackgroundSyncController(sw_context_wrapper);
@@ -238,7 +244,7 @@ base::TimeDelta GetNextEventDelay(
     const BackgroundSyncRegistration& registration,
     std::unique_ptr<BackgroundSyncParameters> parameters,
     base::TimeDelta time_till_soonest_scheduled_event_for_origin) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BackgroundSyncController* background_sync_controller =
       GetBackgroundSyncController(sw_context_wrapper);
@@ -281,7 +287,7 @@ BackgroundSyncType GetBackgroundSyncType(
                                     : BackgroundSyncType::PERIODIC;
 }
 
-std::string GetSyncEventName(const BackgroundSyncType sync_type) {
+std::string_view GetSyncEventName(const BackgroundSyncType sync_type) {
   if (sync_type == BackgroundSyncType::ONE_SHOT)
     return "sync";
   else
@@ -316,7 +322,10 @@ std::string GetEventStatusString(blink::ServiceWorkerStatusCode status_code) {
     case blink::ServiceWorkerStatusCode::kErrorTimeout:
       return "timeout";
     default:
-      NOTREACHED();
+      SCOPED_CRASH_KEY_NUMBER("BGSM", "status_code",
+                              static_cast<int>(status_code));
+      DUMP_WILL_BE_NOTREACHED()
+          << "status_code " << static_cast<int>(status_code);
       return "unknown error";
   }
 }
@@ -349,7 +358,7 @@ std::unique_ptr<BackgroundSyncController::BackgroundSyncEventKeepAlive>
 CreateBackgroundSyncEventKeepAlive(
     scoped_refptr<ServiceWorkerContextWrapper> sw_context_wrapper,
     const blink::mojom::BackgroundSyncRegistrationInfo& registration_info) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BackgroundSyncController* controller =
       GetBackgroundSyncController(sw_context_wrapper);
@@ -375,11 +384,11 @@ BackgroundSyncManager::BackgroundSyncRegistrations::
 // static
 std::unique_ptr<BackgroundSyncManager> BackgroundSyncManager::Create(
     scoped_refptr<ServiceWorkerContextWrapper> service_worker_context,
-    scoped_refptr<DevToolsBackgroundServicesContextImpl> devtools_context) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    DevToolsBackgroundServicesContextImpl& devtools_context) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   BackgroundSyncManager* sync_manager = new BackgroundSyncManager(
-      std::move(service_worker_context), std::move(devtools_context));
+      std::move(service_worker_context), devtools_context);
   sync_manager->Init();
   return base::WrapUnique(sync_manager);
 }
@@ -403,8 +412,9 @@ void BackgroundSyncManager::Register(
     return;
   }
 
-  DCHECK(options.min_interval >= 0 ||
-         options.min_interval == kMinIntervalForOneShotSync);
+  CHECK(options.min_interval >= 0 ||
+            options.min_interval == kMinIntervalForOneShotSync,
+        base::NotFatalUntil::M159);
 
   op_scheduler_.ScheduleOperation(
       base::BindOnce(&BackgroundSyncManager::RegisterCheckIfHasMainFrame,
@@ -647,20 +657,20 @@ void BackgroundSyncManager::EmulateServiceWorkerOffline(
 
 BackgroundSyncManager::BackgroundSyncManager(
     scoped_refptr<ServiceWorkerContextWrapper> service_worker_context,
-    scoped_refptr<DevToolsBackgroundServicesContextImpl> devtools_context)
+    DevToolsBackgroundServicesContextImpl& devtools_context)
     : op_scheduler_(base::SingleThreadTaskRunner::GetCurrentDefault()),
       service_worker_context_(std::move(service_worker_context)),
       proxy_(std::make_unique<BackgroundSyncProxy>(service_worker_context_)),
-      devtools_context_(std::move(devtools_context)),
+      devtools_context_(&devtools_context),
       parameters_(std::make_unique<BackgroundSyncParameters>()),
       disabled_(false),
       num_firing_registrations_one_shot_(0),
       num_firing_registrations_periodic_(0),
       clock_(base::DefaultClock::GetInstance()) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(devtools_context_);
-  DCHECK(service_worker_context_);
+  CHECK(devtools_context_, base::NotFatalUntil::M159);
+  CHECK(service_worker_context_, base::NotFatalUntil::M159);
 
   service_worker_context_->AddObserver(this);
 
@@ -677,8 +687,8 @@ BackgroundSyncManager::BackgroundSyncManager(
 
 void BackgroundSyncManager::Init() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!op_scheduler_.ScheduledOperations());
-  DCHECK(!disabled_);
+  CHECK(!op_scheduler_.ScheduledOperations(), base::NotFatalUntil::M159);
+  CHECK(!disabled_, base::NotFatalUntil::M159);
 
   op_scheduler_.ScheduleOperation(
       base::BindOnce(&BackgroundSyncManager::InitImpl,
@@ -916,7 +926,8 @@ void BackgroundSyncManager::RegisterDidAskForPermission(
                               std::move(callback));
     return;
   }
-  DCHECK_EQ(permission_statuses.first, PermissionStatus::GRANTED);
+  CHECK_EQ(permission_statuses.first, PermissionStatus::GRANTED,
+           base::NotFatalUntil::M159);
 
   scoped_refptr<ServiceWorkerRegistration> sw_registration =
       service_worker_context_->GetLiveRegistration(sw_registration_id);
@@ -948,9 +959,10 @@ void BackgroundSyncManager::RegisterDidAskForPermission(
   }
 
   if (existing_registration) {
-    DCHECK_EQ(existing_registration->options()->tag, options.tag);
-    DCHECK_EQ(existing_registration->sync_type(),
-              GetBackgroundSyncType(options));
+    CHECK_EQ(existing_registration->options()->tag, options.tag,
+             base::NotFatalUntil::M159);
+    CHECK_EQ(existing_registration->sync_type(), GetBackgroundSyncType(options),
+             base::NotFatalUntil::M159);
 
     if (existing_registration->options()->Equals(options)) {
       BackgroundSyncMetrics::RegistrationCouldFire registration_could_fire =
@@ -981,7 +993,7 @@ void BackgroundSyncManager::RegisterDidAskForPermission(
   registration.set_origin(origin);
   *registration.options() = std::move(options);
 
-  // TODO(crbug.com/963487): This section below is really confusing. Add a
+  // TODO(crbug.com/40627578): This section below is really confusing. Add a
   // comment explaining what's going on here, or annotate permission_statuses.
   registration.set_max_attempts(
       permission_statuses.second == PermissionStatus::GRANTED
@@ -1159,7 +1171,7 @@ BackgroundSyncRegistration* BackgroundSyncManager::LookupActiveRegistration(
     return nullptr;
 
   BackgroundSyncRegistrations& registrations = it->second;
-  DCHECK(!registrations.origin.opaque());
+  CHECK(!registrations.origin.opaque(), base::NotFatalUntil::M159);
 
   auto key_and_registration_iter = registrations.registration_map.find(
       {registration_info.tag, registration_info.sync_type});
@@ -1197,7 +1209,7 @@ void BackgroundSyncManager::StoreRegistrations(
   }
   std::string serialized;
   bool success = registrations_proto.SerializeToString(&serialized);
-  DCHECK(success);
+  CHECK(success, base::NotFatalUntil::M159);
 
   StoreDataInBackend(sw_registration_id, registrations.origin,
                      kBackgroundSyncUserDataKey, serialized,
@@ -1283,7 +1295,7 @@ void BackgroundSyncManager::ResolveRegistrationDidCreateKeepAlive(
 void BackgroundSyncManager::RemoveActiveRegistration(
     const blink::mojom::BackgroundSyncRegistrationInfo& registration_info) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(LookupActiveRegistration(registration_info));
+  CHECK(LookupActiveRegistration(registration_info), base::NotFatalUntil::M159);
 
   BackgroundSyncRegistrations* registrations =
       &active_registrations_[registration_info.service_worker_registration_id];
@@ -1344,8 +1356,9 @@ void BackgroundSyncManager::AddOrUpdateActiveRegistration(
     devtools_context_->LogBackgroundServiceEvent(
         sw_registration_id, blink::StorageKey::CreateFirstParty(origin),
         GetDevToolsBackgroundService(sync_type),
-        /* event_name= */ "Registered " + GetSyncEventName(sync_type),
-        /* instance_id= */ sync_registration.options()->tag, event_metadata);
+        /*event_name=*/
+        base::StrCat({"Registered ", GetSyncEventName(sync_type)}),
+        /*instance_id=*/sync_registration.options()->tag, event_metadata);
   }
 }
 
@@ -1377,9 +1390,10 @@ void BackgroundSyncManager::DispatchSyncEvent(
     bool last_chance,
     ServiceWorkerVersion::StatusCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(active_version);
+  CHECK(active_version, base::NotFatalUntil::M159);
 
-  if (active_version->running_status() != EmbeddedWorkerStatus::RUNNING) {
+  if (active_version->running_status() !=
+      blink::EmbeddedWorkerStatus::kRunning) {
     active_version->RunAfterStartWorker(
         ServiceWorkerMetrics::EventType::SYNC,
         base::BindOnce(&DidStartWorkerForSyncEvent,
@@ -1419,9 +1433,10 @@ void BackgroundSyncManager::DispatchPeriodicSyncEvent(
     scoped_refptr<ServiceWorkerVersion> active_version,
     ServiceWorkerVersion::StatusCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(active_version);
+  CHECK(active_version, base::NotFatalUntil::M159);
 
-  if (active_version->running_status() != EmbeddedWorkerStatus::RUNNING) {
+  if (active_version->running_status() !=
+      blink::EmbeddedWorkerStatus::kRunning) {
     active_version->RunAfterStartWorker(
         ServiceWorkerMetrics::EventType::PERIODIC_SYNC,
         base::BindOnce(
@@ -1519,7 +1534,7 @@ bool BackgroundSyncManager::AllConditionsExceptConnectivitySatisfied(
   if (registration.is_suspended())
     return false;
 
-  if (base::Contains(emulated_offline_sw_, service_worker_id))
+  if (emulated_offline_sw_.contains(service_worker_id))
     return false;
 
   return true;
@@ -1943,7 +1958,7 @@ void BackgroundSyncManager::FireReadyEventsImpl(
   }
 
   if (to_fire.empty()) {
-    // TODO(crbug.com/996166): Reschedule wakeup after a non-zero delay if
+    // TODO(crbug.com/40641360): Reschedule wakeup after a non-zero delay if
     // called from a wakeup task.
     if (reschedule)
       ScheduleOrCancelDelayedProcessing(sync_type);
@@ -1990,7 +2005,7 @@ void BackgroundSyncManager::FireReadyEventsImpl(
   for (auto& registration_info : to_fire) {
     const BackgroundSyncRegistration* registration =
         LookupActiveRegistration(*registration_info);
-    DCHECK(registration);
+    CHECK(registration, base::NotFatalUntil::M159);
 
     int64_t service_worker_registration_id =
         registration_info->service_worker_registration_id;
@@ -2030,9 +2045,9 @@ void BackgroundSyncManager::FireReadyEventsDidFindRegistration(
     return;
   }
 
-  DCHECK_EQ(registration_info->service_worker_registration_id,
-            service_worker_registration->id());
-  DCHECK(registration);
+  CHECK_EQ(registration_info->service_worker_registration_id,
+           service_worker_registration->id(), base::NotFatalUntil::M159);
+  CHECK(registration, base::NotFatalUntil::M159);
 
   // The connectivity was lost before dispatching the sync event, so there is
   // no point in going through with it.
@@ -2143,8 +2158,8 @@ void BackgroundSyncManager::EventCompleteImpl(
         FROM_HERE, std::move(callback));
     return;
   }
-  DCHECK_NE(blink::mojom::BackgroundSyncState::PENDING,
-            registration->sync_state());
+  CHECK_NE(blink::mojom::BackgroundSyncState::PENDING,
+           registration->sync_state(), base::NotFatalUntil::M159);
 
   // It's important to update |num_attempts| before we update |delay_until|.
   bool succeeded = status_code == blink::ServiceWorkerStatusCode::kOk;
@@ -2213,8 +2228,9 @@ void BackgroundSyncManager::EventCompleteDidGetDelay(
     registration_completed = false;
     registration->set_delay_until(clock_->Now() + delay);
 
-    std::string event_name = GetSyncEventName(registration->sync_type()) +
-                             (succeeded ? " event completed" : " event failed");
+    std::string event_name =
+        base::StrCat({GetSyncEventName(registration->sync_type()),
+                      (succeeded ? " event completed" : " event failed")});
     base::TimeDelta display_delay =
         registration->sync_type() == BackgroundSyncType::ONE_SHOT
             ? delay
@@ -2235,8 +2251,7 @@ void BackgroundSyncManager::EventCompleteDidGetDelay(
   }
 
   if (registration_completed) {
-    BackgroundSyncMetrics::RecordRegistrationComplete(
-        succeeded, registration->num_attempts());
+    BackgroundSyncMetrics::RecordRegistrationComplete(succeeded);
 
     if (ShouldLogToDevTools(registration->sync_type())) {
       devtools_context_->LogBackgroundServiceEvent(
@@ -2361,7 +2376,7 @@ blink::ServiceWorkerStatusCode BackgroundSyncManager::CanEmulateSyncEvent(
   if (!network_observer_->NetworkSufficient())
     return blink::ServiceWorkerStatusCode::kErrorEventWaitUntilRejected;
   int64_t registration_id = active_version->registration_id();
-  if (base::Contains(emulated_offline_sw_, registration_id))
+  if (emulated_offline_sw_.contains(registration_id))
     return blink::ServiceWorkerStatusCode::kErrorEventWaitUntilRejected;
   return blink::ServiceWorkerStatusCode::kOk;
 }

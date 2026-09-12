@@ -5,104 +5,144 @@
 #include "chrome/browser/ash/release_notes/release_notes_notification.h"
 
 #include "ash/constants/ash_features.h"
+#include "ash/constants/ash_pref_names.h"
+#include "ash/webui/help_app_ui/help_app_prefs.h"
 #include "base/feature_list.h"
+#include "base/scoped_observation.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/version.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
-#include "chrome/browser/notifications/system_notification_helper.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
-#include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "components/prefs/testing_pref_service.h"
 #include "components/version_info/version_info.h"
 #include "ui/chromeos/devicetype_utils.h"
+#include "ui/message_center/message_center.h"
+#include "ui/message_center/message_center_observer.h"
 
 namespace ash {
 
-class ReleaseNotesNotificationTest : public BrowserWithTestWindowTest {
+class ReleaseNotesNotificationTest
+    : public BrowserWithTestWindowTest,
+      public ::testing::WithParamInterface</*notification_eligible=*/bool>,
+      public message_center::MessageCenterObserver {
  public:
-  ReleaseNotesNotificationTest() {}
-
+  ReleaseNotesNotificationTest() : notification_eligible_(GetParam()) {}
   ReleaseNotesNotificationTest(const ReleaseNotesNotificationTest&) = delete;
   ReleaseNotesNotificationTest& operator=(const ReleaseNotesNotificationTest&) =
       delete;
-
   ~ReleaseNotesNotificationTest() override = default;
 
   // BrowserWithTestWindowTest:
-  TestingProfile* CreateProfile() override {
-    return profile_manager()->CreateTestingProfile("googler@google.com");
-  }
-
   void SetUp() override {
     BrowserWithTestWindowTest::SetUp();
-    TestingBrowserProcess::GetGlobal()->SetSystemNotificationHelper(
-        std::make_unique<SystemNotificationHelper>());
-    tester_ = std::make_unique<NotificationDisplayServiceTester>(nullptr);
-    tester_->SetNotificationAddedClosure(
-        base::BindRepeating(&ReleaseNotesNotificationTest::OnNotificationAdded,
-                            base::Unretained(this)));
+    message_center_observation_.Observe(message_center::MessageCenter::Get());
     release_notes_notification_ =
         std::make_unique<ReleaseNotesNotification>(profile());
-    scoped_feature_list_.InitWithFeatures(
-        /*enabled_features=*/{features::kReleaseNotesNotificationAllChannels},
-        /*disabled_features=*/{});
+    if (notification_eligible()) {
+      scoped_feature_list_.InitWithFeatures(
+          /*enabled_features=*/{features::kReleaseNotesNotificationAllChannels,
+                                features::
+                                    kReleaseNotesNotificationAlwaysEligible},
+          /*disabled_features=*/{});
+    } else {
+      scoped_feature_list_.InitWithFeatures(
+          /*enabled_features=*/{features::kReleaseNotesNotificationAllChannels},
+          /*disabled_features=*/{
+              features::kReleaseNotesNotificationAlwaysEligible});
+    }
   }
 
   void TearDown() override {
     release_notes_notification_.reset();
-    tester_.reset();
+    message_center_observation_.Reset();
     BrowserWithTestWindowTest::TearDown();
   }
 
-  void OnNotificationAdded() { notification_count_++; }
+  std::optional<std::string> GetDefaultProfileName() override {
+    // TODO(crbug.com/40286020): Use google.com domain to forcibly enable
+    // release note notification. Will merge into BrowserWithTestWindowTest.
+    return "primary_profile@google.com";
+  }
+
+  bool notification_eligible() const { return notification_eligible_; }
 
  protected:
   bool HasReleaseNotesNotification() {
-    return tester_->GetNotification("show_release_notes_notification")
-        .has_value();
+    return GetReleaseNotesNotification() != nullptr;
   }
 
-  message_center::Notification GetReleaseNotesNotification() {
-    return tester_->GetNotification("show_release_notes_notification").value();
+  const message_center::Notification* GetReleaseNotesNotification() {
+    return message_center::MessageCenter::Get()->FindVisibleNotificationById(
+        "show_release_notes_notification");
   }
 
+  base::ScopedObservation<message_center::MessageCenter,
+                          message_center::MessageCenterObserver>
+      message_center_observation_{this};
   int notification_count_ = 0;
   std::unique_ptr<ReleaseNotesNotification> release_notes_notification_;
 
  private:
-  std::unique_ptr<NotificationDisplayServiceTester> tester_;
+  void OnNotificationAdded(const std::string& notification_id) override {
+    if (notification_id == "show_release_notes_notification") {
+      ++notification_count_;
+    }
+  }
+
   base::test::ScopedFeatureList scoped_feature_list_;
+  const bool notification_eligible_;
 };
 
-TEST_F(ReleaseNotesNotificationTest, DoNotShowReleaseNotesNotification) {
-  std::unique_ptr<ReleaseNotesStorage> release_notes_storage =
-      std::make_unique<ReleaseNotesStorage>(profile());
+INSTANTIATE_TEST_SUITE_P(All,
+                         ReleaseNotesNotificationTest,
+                         /*notification_eligible=*/testing::Bool());
+
+TEST_P(ReleaseNotesNotificationTest, DoNotShowReleaseNotesNotification) {
+  if (notification_eligible()) {
+    GTEST_SKIP() << "Notification is always shown with the notification "
+                    "eligible feature turned on.";
+  }
+  auto release_notes_storage = std::make_unique<ReleaseNotesStorage>(profile());
+
+  // Set the pref to the last shown milestone to ensure release notes do not
+  // show.
   profile()->GetPrefs()->SetInteger(
-      prefs::kHelpAppNotificationLastShownMilestone,
+      ash::help_app::prefs::kHelpAppNotificationLastShownMilestone,
       version_info::GetVersion().components()[0]);
+
   release_notes_notification_->MaybeShowReleaseNotes();
-  EXPECT_EQ(false, HasReleaseNotesNotification());
+  EXPECT_FALSE(HasReleaseNotesNotification());
   EXPECT_EQ(0, notification_count_);
 }
 
-TEST_F(ReleaseNotesNotificationTest, ShowReleaseNotesNotification) {
-  std::unique_ptr<ReleaseNotesStorage> release_notes_storage =
-      std::make_unique<ReleaseNotesStorage>(profile());
+TEST_P(ReleaseNotesNotificationTest, ShowReleaseNotesNotification) {
+  auto release_notes_storage = std::make_unique<ReleaseNotesStorage>(profile());
+
+  // Set the pref to an older milestone to ensure release notes do show.
   profile()->GetPrefs()->SetInteger(
-      prefs::kHelpAppNotificationLastShownMilestone, 20);
+      ash::help_app::prefs::kHelpAppNotificationLastShownMilestone, 20);
+
   release_notes_notification_->MaybeShowReleaseNotes();
-  EXPECT_EQ(true, HasReleaseNotesNotification());
-  EXPECT_EQ(ui::SubstituteChromeOSDeviceType(
-                IDS_RELEASE_NOTES_DEVICE_SPECIFIC_NOTIFICATION_TITLE),
-            GetReleaseNotesNotification().title());
-  EXPECT_EQ("Get highlights from the latest update",
-            base::UTF16ToASCII(GetReleaseNotesNotification().message()));
-  EXPECT_EQ(1, notification_count_);
+
+  // If notification eligible is enabled, then release notes should show.
+  EXPECT_EQ(notification_eligible(), HasReleaseNotesNotification());
+  EXPECT_EQ(notification_eligible() ? 1 : 0, notification_count_);
+  EXPECT_EQ(notification_eligible(),
+            release_notes_storage->ShouldShowSuggestionChip());
+  if (HasReleaseNotesNotification()) {
+    EXPECT_TRUE(HasReleaseNotesNotification());
+    EXPECT_EQ(ui::SubstituteChromeOSDeviceType(
+                  IDS_RELEASE_NOTES_DEVICE_SPECIFIC_NOTIFICATION_TITLE),
+              GetReleaseNotesNotification()->title());
+    EXPECT_EQ("Get highlights from the latest update",
+              base::UTF16ToASCII(GetReleaseNotesNotification()->message()));
+    // And it show the release notes suggestion chip.
+    EXPECT_EQ(3, profile()->GetPrefs()->GetInteger(
+                     ash::prefs::kReleaseNotesSuggestionChipTimesLeftToShow));
+  }
 }
 
 }  // namespace ash

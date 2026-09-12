@@ -8,11 +8,14 @@
 #include <memory>
 #include <string>
 
+#include "base/feature_list.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "build/buildflag.h"
 #include "media/base/decoder_factory.h"
 #include "media/base/decoder_status.h"
+#include "media/base/media_switches.h"
 #include "media/base/media_util.h"
 #include "media/base/video_decoder_config.h"
 #include "media/mojo/buildflags.h"
@@ -44,28 +47,6 @@
 
 using DecoderDetails = blink::VideoDecoderBroker::DecoderDetails;
 
-namespace WTF {
-
-template <>
-struct CrossThreadCopier<media::VideoDecoderConfig>
-    : public CrossThreadCopierPassThrough<media::VideoDecoderConfig> {
-  STATIC_ONLY(CrossThreadCopier);
-};
-
-template <>
-struct CrossThreadCopier<media::DecoderStatus>
-    : public CrossThreadCopierPassThrough<media::DecoderStatus> {
-  STATIC_ONLY(CrossThreadCopier);
-};
-
-template <>
-struct CrossThreadCopier<absl::optional<DecoderDetails>>
-    : public CrossThreadCopierPassThrough<absl::optional<DecoderDetails>> {
-  STATIC_ONLY(CrossThreadCopier);
-};
-
-}  // namespace WTF
-
 namespace blink {
 
 // Wrapper class for state and API calls that must be made from the
@@ -75,11 +56,11 @@ namespace blink {
 class MediaVideoTaskWrapper {
  public:
   using CrossThreadOnceInitCB =
-      WTF::CrossThreadOnceFunction<void(media::DecoderStatus status,
-                                        absl::optional<DecoderDetails>)>;
+      CrossThreadOnceFunction<void(media::DecoderStatus status,
+                                   std::optional<DecoderDetails>)>;
   using CrossThreadOnceDecodeCB =
-      WTF::CrossThreadOnceFunction<void(const media::DecoderStatus&)>;
-  using CrossThreadOnceResetCB = WTF::CrossThreadOnceClosure;
+      CrossThreadOnceFunction<void(const media::DecoderStatus&)>;
+  using CrossThreadOnceResetCB = CrossThreadOnceClosure;
 
   MediaVideoTaskWrapper(
       base::WeakPtr<CrossThreadVideoDecoderClient> weak_client,
@@ -108,9 +89,9 @@ class MediaVideoTaskWrapper {
     // runner.
     PostCrossThreadTask(
         *media_task_runner_, FROM_HERE,
-        WTF::CrossThreadBindOnce(&MediaVideoTaskWrapper::BindOnTaskRunner,
-                                 WTF::CrossThreadUnretained(this),
-                                 std::move(media_interface_factory)));
+        CrossThreadBindOnce(&MediaVideoTaskWrapper::BindOnTaskRunner,
+                            CrossThreadUnretained(this),
+                            std::move(media_interface_factory)));
 
 #if BUILDFLAG(IS_FUCHSIA)
     execution_context.GetBrowserInterfaceBroker().GetInterface(
@@ -144,15 +125,28 @@ class MediaVideoTaskWrapper {
         // to be safe given the way the callback is called (never posted), but
         // we should refactor the return to be an out-param so we can be
         // consistent in using weak pointers.
-        WTF::BindRepeating(&MediaVideoTaskWrapper::OnCreateDecoders,
-                           WTF::Unretained(this)),
-        WTF::BindRepeating(&MediaVideoTaskWrapper::OnDecodeOutput,
-                           weak_factory_.GetWeakPtr()));
+        BindRepeating(&MediaVideoTaskWrapper::OnCreateDecoders,
+                      Unretained(this)),
+        media_log_.get(),
+        blink::BindRepeating(&MediaVideoTaskWrapper::OnDecodeOutput,
+                             weak_factory_.GetWeakPtr()));
+
+    // Prefer the existing decoder if the `config` is still supported by it.
+    // This avoids unnecessary decoder churn during repeated flush() operations.
+    // This also works around an issue with flushing on Android where the
+    // automatic call to Initialize() after Flush() destroys the codec;
+    // invalidating any unrendered output buffers.
+    // See https://crbug.com/474398415
+    if (decoder_ && !decoder_factory_needs_update_ &&
+        base::FeatureList::IsEnabled(
+            media::kWebCodecsDecoderFlushOptimizations)) {
+      selector_->PrependDecoder(std::move(decoder_));
+    }
 
     selector_->SelectDecoder(
         config, low_delay,
-        WTF::BindOnce(&MediaVideoTaskWrapper::OnDecoderSelected,
-                      weak_factory_.GetWeakPtr()));
+        blink::BindOnce(&MediaVideoTaskWrapper::OnDecoderSelected,
+                        weak_factory_.GetWeakPtr()));
   }
 
   void Decode(scoped_refptr<media::DecoderBuffer> buffer, int cb_id) {
@@ -165,8 +159,8 @@ class MediaVideoTaskWrapper {
     }
 
     decoder_->Decode(std::move(buffer),
-                     WTF::BindOnce(&MediaVideoTaskWrapper::OnDecodeDone,
-                                   weak_factory_.GetWeakPtr(), cb_id));
+                     blink::BindOnce(&MediaVideoTaskWrapper::OnDecodeDone,
+                                     weak_factory_.GetWeakPtr(), cb_id));
   }
 
   void Reset(int cb_id) {
@@ -178,8 +172,8 @@ class MediaVideoTaskWrapper {
       return;
     }
 
-    decoder_->Reset(WTF::BindOnce(&MediaVideoTaskWrapper::OnReset,
-                                  weak_factory_.GetWeakPtr(), cb_id));
+    decoder_->Reset(blink::BindOnce(&MediaVideoTaskWrapper::OnReset,
+                                    weak_factory_.GetWeakPtr(), cb_id));
   }
 
   void UpdateHardwarePreference(HardwarePreference preference) {
@@ -229,8 +223,7 @@ class MediaVideoTaskWrapper {
         std::move(external_decoder_factory));
   }
 
-  void OnRequestOverlayInfo(bool decoder_requires_restart_for_overlay,
-                            media::ProvideOverlayInfoCB overlay_info_cb) {
+  void OnRequestOverlayInfo(media::ProvideOverlayInfoCB overlay_info_cb) {
     DVLOG(2) << __func__;
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
@@ -253,15 +246,16 @@ class MediaVideoTaskWrapper {
     if (decoder_factory_) {
       decoder_factory_->CreateVideoDecoders(
           media_task_runner_, gpu_factories_, media_log_.get(),
-          WTF::BindRepeating(&MediaVideoTaskWrapper::OnRequestOverlayInfo,
-                             weak_factory_.GetWeakPtr()),
+          blink::BindRepeating(&MediaVideoTaskWrapper::OnRequestOverlayInfo,
+                               weak_factory_.GetWeakPtr()),
           target_color_space_, &video_decoders);
     }
 
     return video_decoders;
   }
 
-  void OnDecoderSelected(std::unique_ptr<media::VideoDecoder> decoder) {
+  void OnDecoderSelected(
+      WebCodecsVideoDecoderSelector::DecoderOrError decoder_or_error) {
     DVLOG(2) << __func__;
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
@@ -269,25 +263,24 @@ class MediaVideoTaskWrapper {
     DCHECK(selector_);
     selector_.reset();
 
-    decoder_ = std::move(decoder);
-
     media::DecoderStatus status = media::DecoderStatus::Codes::kOk;
-    absl::optional<DecoderDetails> decoder_details = absl::nullopt;
+    std::optional<DecoderDetails> decoder_details = std::nullopt;
 
-    if (decoder_) {
+    if (decoder_or_error.has_value()) {
+      decoder_ = std::move(decoder_or_error).value();
       decoder_details = DecoderDetails({decoder_->GetDecoderType(),
                                         decoder_->IsPlatformDecoder(),
                                         decoder_->NeedsBitstreamConversion(),
                                         decoder_->GetMaxDecodeRequests()});
     } else {
-      status = media::DecoderStatus::Codes::kUnsupportedConfig;
+      status = std::move(decoder_or_error).error();
     }
 
     // Fire |init_cb|.
     PostCrossThreadTask(
         *main_task_runner_, FROM_HERE,
-        WTF::CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnInitialize,
-                                 weak_client_, status, decoder_details));
+        CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnInitialize,
+                            weak_client_, status, decoder_details));
   }
 
   void OnDecodeOutput(scoped_refptr<media::VideoFrame> frame) {
@@ -296,9 +289,9 @@ class MediaVideoTaskWrapper {
 
     PostCrossThreadTask(
         *main_task_runner_, FROM_HERE,
-        WTF::CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnDecodeOutput,
-                                 weak_client_, std::move(frame),
-                                 decoder_->CanReadWithoutStalling()));
+        CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnDecodeOutput,
+                            weak_client_, std::move(frame),
+                            decoder_->CanReadWithoutStalling()));
   }
 
   void OnDecodeDone(int cb_id, media::DecoderStatus status) {
@@ -307,8 +300,8 @@ class MediaVideoTaskWrapper {
 
     PostCrossThreadTask(
         *main_task_runner_, FROM_HERE,
-        WTF::CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnDecodeDone,
-                                 weak_client_, cb_id, std::move(status)));
+        CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnDecodeDone,
+                            weak_client_, cb_id, std::move(status)));
   }
 
   void OnReset(int cb_id) {
@@ -316,14 +309,16 @@ class MediaVideoTaskWrapper {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     PostCrossThreadTask(
         *main_task_runner_, FROM_HERE,
-        WTF::CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnReset,
-                                 weak_client_, cb_id));
+        CrossThreadBindOnce(&CrossThreadVideoDecoderClient::OnReset,
+                            weak_client_, cb_id));
   }
 
   base::WeakPtr<CrossThreadVideoDecoderClient> weak_client_;
   scoped_refptr<base::SequencedTaskRunner> media_task_runner_;
   scoped_refptr<base::SequencedTaskRunner> main_task_runner_;
-  media::GpuVideoAcceleratorFactories* gpu_factories_;
+  raw_ptr<media::GpuVideoAcceleratorFactories, DanglingUntriaged>
+      gpu_factories_;
+  std::unique_ptr<media::MediaLog> media_log_;
   mojo::Remote<media::mojom::InterfaceFactory> media_interface_factory_;
   std::unique_ptr<WebCodecsVideoDecoderSelector> selector_;
   std::unique_ptr<media::DecoderFactory> decoder_factory_;
@@ -336,8 +331,6 @@ class MediaVideoTaskWrapper {
   mojo::PendingRemote<media::mojom::FuchsiaMediaCodecProvider>
       fuchsia_media_codec_provider_;
 #endif
-
-  std::unique_ptr<media::MediaLog> media_log_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 
@@ -357,7 +350,7 @@ VideoDecoderBroker::VideoDecoderBroker(
               ? gpu_factories->GetTaskRunner()
               // Otherwise, use a worker task runner to avoid scheduling decoder
               // work on the main thread.
-              : worker_pool::CreateSequencedTaskRunner({})) {
+              : worker_pool::CreateSequencedTaskRunner({base::MayBlock()})) {
   DVLOG(2) << __func__;
   media_tasks_ = std::make_unique<MediaVideoTaskWrapper>(
       weak_factory_.GetWeakPtr(), execution_context, gpu_factories,
@@ -385,9 +378,9 @@ void VideoDecoderBroker::SetHardwarePreference(
     HardwarePreference hardware_preference) {
   PostCrossThreadTask(
       *media_task_runner_, FROM_HERE,
-      WTF::CrossThreadBindOnce(&MediaVideoTaskWrapper::UpdateHardwarePreference,
-                               WTF::CrossThreadUnretained(media_tasks_.get()),
-                               hardware_preference));
+      CrossThreadBindOnce(&MediaVideoTaskWrapper::UpdateHardwarePreference,
+                          CrossThreadUnretained(media_tasks_.get()),
+                          hardware_preference));
 }
 
 void VideoDecoderBroker::Initialize(const media::VideoDecoderConfig& config,
@@ -413,15 +406,15 @@ void VideoDecoderBroker::Initialize(const media::VideoDecoderConfig& config,
 
   PostCrossThreadTask(
       *media_task_runner_, FROM_HERE,
-      WTF::CrossThreadBindOnce(&MediaVideoTaskWrapper::Initialize,
-                               WTF::CrossThreadUnretained(media_tasks_.get()),
-                               config, low_delay));
+      CrossThreadBindOnce(&MediaVideoTaskWrapper::Initialize,
+                          CrossThreadUnretained(media_tasks_.get()), config,
+                          low_delay));
 }
 
 int VideoDecoderBroker::CreateCallbackId() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  // 0 and -1 are reserved by wtf::HashMap ("empty" and "deleted").
+  // 0 and -1 are reserved by HashMap ("empty" and "deleted").
   while (++last_callback_id_ == 0 ||
          last_callback_id_ == std::numeric_limits<uint32_t>::max() ||
          pending_decode_cb_map_.Contains(last_callback_id_) ||
@@ -432,7 +425,7 @@ int VideoDecoderBroker::CreateCallbackId() {
 }
 
 void VideoDecoderBroker::OnInitialize(media::DecoderStatus status,
-                                      absl::optional<DecoderDetails> details) {
+                                      std::optional<DecoderDetails> details) {
   DVLOG(2) << __func__;
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(init_cb_);
@@ -450,9 +443,9 @@ void VideoDecoderBroker::Decode(scoped_refptr<media::DecoderBuffer> buffer,
 
   PostCrossThreadTask(
       *media_task_runner_, FROM_HERE,
-      WTF::CrossThreadBindOnce(&MediaVideoTaskWrapper::Decode,
-                               WTF::CrossThreadUnretained(media_tasks_.get()),
-                               buffer, callback_id));
+      CrossThreadBindOnce(&MediaVideoTaskWrapper::Decode,
+                          CrossThreadUnretained(media_tasks_.get()), buffer,
+                          callback_id));
 }
 
 void VideoDecoderBroker::OnDecodeDone(int cb_id, media::DecoderStatus status) {
@@ -478,9 +471,9 @@ void VideoDecoderBroker::Reset(base::OnceClosure reset_cb) {
 
   PostCrossThreadTask(
       *media_task_runner_, FROM_HERE,
-      WTF::CrossThreadBindOnce(&MediaVideoTaskWrapper::Reset,
-                               WTF::CrossThreadUnretained(media_tasks_.get()),
-                               callback_id));
+      CrossThreadBindOnce(&MediaVideoTaskWrapper::Reset,
+                          CrossThreadUnretained(media_tasks_.get()),
+                          callback_id));
 }
 
 bool VideoDecoderBroker::NeedsBitstreamConversion() const {

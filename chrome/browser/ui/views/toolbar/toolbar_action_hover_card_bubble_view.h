@@ -5,36 +5,54 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_TOOLBAR_TOOLBAR_ACTION_HOVER_CARD_BUBBLE_VIEW_H_
 #define CHROME_BROWSER_UI_VIEWS_TOOLBAR_TOOLBAR_ACTION_HOVER_CARD_BUBBLE_VIEW_H_
 
-#include "chrome/browser/ui/toolbar/toolbar_action_view_controller.h"
+#include <string_view>
+
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "chrome/browser/ui/toolbar/toolbar_action_view_model.h"
+#include "chrome/browser/ui/views/tabs/hovercard/fade_label_view.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_action_view.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/controls/separator.h"
 
+class ToolbarActionHoverCardController;
 class ToolbarActionView;
-class WebContents;
 
 // Dialog that displays a hover card with extensions information.
 class ToolbarActionHoverCardBubbleView
     : public views::BubbleDialogDelegateView {
+  METADATA_HEADER(ToolbarActionHoverCardBubbleView,
+                  views::BubbleDialogDelegateView)
+
  public:
-  METADATA_HEADER(ToolbarActionHoverCardBubbleView);
-  explicit ToolbarActionHoverCardBubbleView(ToolbarActionView* action_view);
+  explicit ToolbarActionHoverCardBubbleView(
+      ToolbarActionView* action_view,
+      base::WeakPtr<ToolbarActionHoverCardController> controller);
   ToolbarActionHoverCardBubbleView(const ToolbarActionHoverCardBubbleView&) =
       delete;
   ToolbarActionHoverCardBubbleView& operator=(
       const ToolbarActionHoverCardBubbleView&) = delete;
   ~ToolbarActionHoverCardBubbleView() override;
 
-  // Updates the hover card content for `action_controller` in `web_contents`.
-  void UpdateCardContent(const ToolbarActionViewController* action_controller,
-                         content::WebContents* web_contents);
+  // views::BubbleDialogDelegateView:
+  void OnMouseEntered(const ui::MouseEvent& event) override;
+  void OnMouseExited(const ui::MouseEvent& event) override;
+
+  // Updates the hover card content.
+  void UpdateCardContent(const std::u16string& extension_name,
+                         const std::u16string& action_title,
+                         ToolbarActionViewModel::HoverCardUiState ui_state);
 
   // Update the text fade to the given percent, which should be between 0 and 1.
   void SetTextFade(double percent);
 
   // Accessors used by tests.
-  std::u16string GetTitleTextForTesting() const;
+  std::u16string_view GetTitleTextForTesting() const;
+  std::u16string_view GetActionTitleTextForTesting() const;
+  std::u16string_view GetSiteAccessTitleTextForTesting() const;
+  std::u16string_view GetSiteAccessDescriptionTextForTesting() const;
+  bool IsActionTitleVisible() const;
   bool IsSiteAccessSeparatorVisible() const;
   bool IsSiteAccessTitleVisible() const;
   bool IsSiteAccessDescriptionVisible() const;
@@ -47,20 +65,16 @@ class ToolbarActionHoverCardBubbleView
   class FadeLabel;
   class FootnoteView;
 
-  bool using_rounded_corners() const { return corner_radius_.has_value(); }
-
-  // views::BubbleDialogDelegateView:
-  void OnThemeChanged() override;
-
-  raw_ptr<FadeLabel> title_label_ = nullptr;
-  raw_ptr<FadeLabel> site_access_title_label_ = nullptr;
-  raw_ptr<FadeLabel> site_access_description_label_ = nullptr;
-  raw_ptr<FadeLabel> policy_label_ = nullptr;
+  // TODO(emiliapaz): rename to `extension_name_label_`.
+  raw_ptr<FadeLabelView> title_label_ = nullptr;
+  raw_ptr<FadeLabelView> action_title_label_ = nullptr;
+  raw_ptr<FadeLabelView> site_access_title_label_ = nullptr;
+  raw_ptr<FadeLabelView> site_access_description_label_ = nullptr;
+  raw_ptr<FadeLabelView> policy_label_ = nullptr;
 
   raw_ptr<views::Separator> site_access_separator_;
   raw_ptr<views::Separator> policy_separator_;
-
-  absl::optional<int> corner_radius_;
+  base::WeakPtr<ToolbarActionHoverCardController> controller_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_TOOLBAR_TOOLBAR_ACTION_HOVER_CARD_BUBBLE_VIEW_H_

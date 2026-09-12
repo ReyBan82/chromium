@@ -8,68 +8,72 @@
 #include <memory>
 #include <vector>
 
+#include "base/types/pass_key.h"
 #include "build/build_config.h"
 #include "components/viz/service/display_embedder/skia_output_device.h"
-#include "third_party/dawn/include/dawn/dawn_wsi.h"
 #include "third_party/dawn/include/dawn/native/DawnNative.h"
 #include "third_party/dawn/include/dawn/webgpu.h"
 #include "third_party/skia/include/core/SkColorSpace.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
-#include "third_party/skia/include/gpu/GrBackendSurface.h"
-#include "ui/gfx/native_widget_types.h"
-#include "ui/gl/child_window_win.h"
+#include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
+#include "ui/gfx/native_ui_types.h"
+
+namespace gpu {
+class SharedContextState;
+}  // namespace gpu
 
 namespace viz {
 
-class DawnContextProvider;
-
 class SkiaOutputDeviceDawn : public SkiaOutputDevice {
  public:
-  SkiaOutputDeviceDawn(
-      DawnContextProvider* context_provider,
+  using PassKey = base::PassKey<SkiaOutputDeviceDawn>;
+
+  static std::unique_ptr<SkiaOutputDeviceDawn> Create(
+      scoped_refptr<gpu::SharedContextState> context_state,
       gfx::SurfaceOrigin origin,
+      gpu::SurfaceHandle surface_handle,
       gpu::MemoryTracker* memory_tracker,
       DidSwapBufferCompleteCallback did_swap_buffer_complete_callback);
+
+  SkiaOutputDeviceDawn(
+      scoped_refptr<gpu::SharedContextState> context_state,
+      gfx::SurfaceOrigin origin,
+      gpu::MemoryTracker* memory_tracker,
+      DidSwapBufferCompleteCallback did_swap_buffer_complete_callback,
+      base::PassKey<SkiaOutputDeviceDawn>);
 
   SkiaOutputDeviceDawn(const SkiaOutputDeviceDawn&) = delete;
   SkiaOutputDeviceDawn& operator=(const SkiaOutputDeviceDawn&) = delete;
 
   ~SkiaOutputDeviceDawn() override;
 
-  gpu::SurfaceHandle GetChildSurfaceHandle() const;
+#if BUILDFLAG(IS_WIN)
+  virtual gpu::SurfaceHandle GetChildSurfaceHandle() const;
+#endif
 
   // SkiaOutputDevice implementation:
-  bool Reshape(const SkSurfaceCharacterization& characterization,
-               const gfx::ColorSpace& color_space,
-               float device_scale_factor,
-               gfx::OverlayTransform transform) override;
-  void SwapBuffers(BufferPresentedCallback feedback,
-                   OutputSurfaceFrame frame) override;
+  bool Reshape(const ReshapeParams& params) override;
+  void Present(const std::optional<gfx::Rect>& update_rect,
+               BufferPresentedCallback feedback,
+               OutputSurfaceFrame frame) override;
   SkSurface* BeginPaint(
       std::vector<GrBackendSemaphore>* end_semaphores) override;
   void EndPaint() override;
 
- private:
-  // Create a platform-specific swapchain implementation.
-  void CreateSwapChainImplementation();
+ protected:
+  virtual bool Initialize(gpu::SurfaceHandle surface_handle) = 0;
+  virtual bool ResizeBackbuffer() = 0;
+  virtual wgpu::Texture AcquireSwapChainTexture() = 0;
+  virtual void ReleaseSwapChainTexture() = 0;
+  virtual void PresentImpl(const std::optional<gfx::Rect>& rect) = 0;
 
-  DawnContextProvider* const context_provider_;
-  DawnSwapChainImplementation swap_chain_implementation_;
-  wgpu::SwapChain swap_chain_;
-  wgpu::Texture texture_;
+  scoped_refptr<gpu::SharedContextState> context_state_;
   sk_sp<SkSurface> sk_surface_;
   std::unique_ptr<gfx::VSyncProvider> vsync_provider_;
 
   gfx::Size size_;
   sk_sp<SkColorSpace> sk_color_space_;
   int sample_count_ = 1;
-
-  // D3D12 requires that we use flip model swap chains. Flip swap chains
-  // require that the swap chain be connected with DWM. DWM requires that
-  // the rendering windows are owned by the process that's currently doing
-  // the rendering. gl::ChildWindowWin creates and owns a window which is
-  // reparented by the browser to be a child of its window.
-  gl::ChildWindowWin child_window_;
 };
 
 }  // namespace viz

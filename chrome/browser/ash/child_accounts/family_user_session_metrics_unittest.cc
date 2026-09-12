@@ -6,16 +6,17 @@
 
 #include <memory>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/logging.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/metrics/user_action_tester.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
-#include "chrome/common/pref_names.h"
 #include "chromeos/dbus/power/fake_power_manager_client.h"
 #include "chromeos/dbus/power_manager/idle.pb.h"
 #include "chromeos/dbus/power_manager/suspend.pb.h"
 #include "components/prefs/testing_pref_service.h"
+#include "components/session_manager/core/fake_session_manager_delegate.h"
 #include "components/session_manager/core/session_manager.h"
 #include "components/session_manager/session_manager_types.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -99,7 +100,8 @@ class FamilyUserSessionMetricsTest : public testing::Test {
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 
  private:
-  session_manager::SessionManager session_manager_;
+  session_manager::SessionManager session_manager_{
+      std::make_unique<session_manager::FakeSessionManagerDelegate>()};
   TestingPrefServiceSimple pref_service_;
   std::unique_ptr<FamilyUserSessionMetrics> family_user_session_metrics_;
 };
@@ -159,8 +161,9 @@ TEST_F(FamilyUserSessionMetricsTest, SessionStateChange) {
   histogram_tester.ExpectUniqueTimeSample(
       FamilyUserSessionMetrics::kSessionEngagementDurationHistogramName,
       kTenMinutes, 1);
-  EXPECT_EQ(kOneHour, pref_service()->GetTimeDelta(
-                          prefs::kFamilyUserMetricsSessionEngagementDuration));
+  EXPECT_EQ(kOneHour,
+            pref_service()->GetTimeDelta(
+                ash::prefs::kFamilyUserMetricsSessionEngagementDuration));
 }
 
 TEST_F(FamilyUserSessionMetricsTest, ScreenStateChange) {
@@ -196,7 +199,7 @@ TEST_F(FamilyUserSessionMetricsTest, ScreenStateChange) {
       kOneHour, 1);
   EXPECT_EQ(base::TimeDelta(),
             pref_service()->GetTimeDelta(
-                prefs::kFamilyUserMetricsSessionEngagementDuration));
+                ash::prefs::kFamilyUserMetricsSessionEngagementDuration));
 
   // Test screen on on 4 Jan 2020 0:10:00.
   SetScreenOff(false);
@@ -256,7 +259,7 @@ TEST_F(FamilyUserSessionMetricsTest, ScreenStateChange) {
       FamilyUserSessionMetrics::kSessionEngagementDurationHistogramName, 2);
   EXPECT_EQ(base::TimeDelta(),
             pref_service()->GetTimeDelta(
-                prefs::kFamilyUserMetricsSessionEngagementDuration));
+                ash::prefs::kFamilyUserMetricsSessionEngagementDuration));
 }
 
 TEST_F(FamilyUserSessionMetricsTest, SuspendStateChange) {
@@ -300,7 +303,7 @@ TEST_F(FamilyUserSessionMetricsTest, SuspendStateChange) {
       FamilyUserSessionMetrics::kSessionEngagementDurationHistogramName, 0);
   EXPECT_EQ(base::Minutes(20),
             pref_service()->GetTimeDelta(
-                prefs::kFamilyUserMetricsSessionEngagementDuration));
+                ash::prefs::kFamilyUserMetricsSessionEngagementDuration));
 }
 
 TEST_F(FamilyUserSessionMetricsTest, ClockBackward) {
@@ -338,7 +341,7 @@ TEST_F(FamilyUserSessionMetricsTest, ClockBackward) {
       FamilyUserSessionMetrics::kSessionEngagementDurationHistogramName, 0);
   EXPECT_EQ(base::TimeDelta(),
             pref_service()->GetTimeDelta(
-                prefs::kFamilyUserMetricsSessionEngagementDuration));
+                ash::prefs::kFamilyUserMetricsSessionEngagementDuration));
 }
 
 // Tests destroying FamilyUserSessionMetrics without invoking
@@ -368,10 +371,10 @@ TEST_F(FamilyUserSessionMetricsTest,
 
   // Duration metric result:
   histogram_tester.ExpectTotalCount(
-      prefs::kFamilyUserMetricsSessionEngagementDuration, 0);
+      ash::prefs::kFamilyUserMetricsSessionEngagementDuration, 0);
   EXPECT_EQ(kTenMinutes,
             pref_service()->GetTimeDelta(
-                prefs::kFamilyUserMetricsSessionEngagementDuration));
+                ash::prefs::kFamilyUserMetricsSessionEngagementDuration));
 
   // Test restart.
   InitiateFamilyUserSessionMetrics();
@@ -394,10 +397,10 @@ TEST_F(FamilyUserSessionMetricsTest,
 
   // Duration metric result:
   histogram_tester.ExpectTotalCount(
-      prefs::kFamilyUserMetricsSessionEngagementDuration, 0);
+      ash::prefs::kFamilyUserMetricsSessionEngagementDuration, 0);
   EXPECT_EQ(base::Minutes(20),
             pref_service()->GetTimeDelta(
-                prefs::kFamilyUserMetricsSessionEngagementDuration));
+                ash::prefs::kFamilyUserMetricsSessionEngagementDuration));
 }
 
 }  // namespace ash

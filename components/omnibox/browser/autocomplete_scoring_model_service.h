@@ -6,20 +6,27 @@
 #define COMPONENTS_OMNIBOX_BROWSER_AUTOCOMPLETE_SCORING_MODEL_SERVICE_H_
 
 #include <memory>
+#include <optional>
+#include <vector>
 
+#include "base/containers/lru_cache.h"
 #include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/omnibox/browser/autocomplete_scoring_model_executor.h"
 #include "components/omnibox/browser/autocomplete_scoring_model_handler.h"
-#include "components/optimization_guide/core/optimization_guide_model_provider.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/optimization_guide/core/delivery/optimization_guide_model_provider.h"
+#include "third_party/metrics_proto/omnibox_scoring_signals.pb.h"
 
 // Autocomplete scoring service using machine learning models via
 // OptimizationGuide's model handler.
 class AutocompleteScoringModelService : public KeyedService {
  public:
+  using Result = std::optional<float>;
+  using ModelOutput = AutocompleteScoringModelExecutor::ModelOutput;
+  using ScoringSignals = ::metrics::OmniboxScoringSignals;
+
   explicit AutocompleteScoringModelService(
       optimization_guide::OptimizationGuideModelProvider* model_provider);
   ~AutocompleteScoringModelService() override;
@@ -30,19 +37,31 @@ class AutocompleteScoringModelService : public KeyedService {
   AutocompleteScoringModelService& operator=(
       const AutocompleteScoringModelService&) = delete;
 
-  // Scores an autocomplete URL match with scoring signals.
-  void ScoreAutocompleteUrlMatch(
-      AutocompleteScoringModelExecutor::ModelInput input_signals,
-      base::OnceCallback<void(
-          const absl::optional<AutocompleteScoringModelExecutor::ModelOutput>&)>
-          scoring_callback);
+  // Passthrough to
+  // `AutocompleteScoringModelHandler::AddOnModelUpdatedCallback()`.
+  void AddOnModelUpdatedCallback(base::OnceClosure callback);
+
+  // Returns the version from the model info.
+  int GetModelVersion() const;
+
+  // Synchronous batch scoring. Returns a vector of batch results.
+  // Returns an empty vector if model is not available or the input signals are
+  // invalid.
+  virtual std::vector<Result> BatchScoreAutocompleteUrlMatchesSync(
+      const std::vector<const ScoringSignals*>& batch_scoring_signals);
 
  private:
-  scoped_refptr<base::SequencedTaskRunner> model_executor_task_runner_;
+  // Returns whether the scoring model is enabled and loaded.
+  bool UrlScoringModelAvailable();
 
   // Autocomplete URL scoring model.
-  std::unique_ptr<AutocompleteScoringModelHandler> url_scoring_model_handler_ =
-      nullptr;
+  std::unique_ptr<AutocompleteScoringModelHandler> url_scoring_model_handler_;
+
+  // Cache mapping each ML model input vector to the corresponding ML model
+  // output score.
+  base::LRUCache<std::vector<float>, float> score_cache_;
+
+  base::WeakPtrFactory<AutocompleteScoringModelService> weak_ptr_factory_{this};
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_AUTOCOMPLETE_SCORING_MODEL_SERVICE_H_

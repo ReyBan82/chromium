@@ -1,61 +1,52 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
+import static com.google.protobuf.WireFormat.FIXED64_SIZE;
 import static org.junit.Assert.assertArrayEquals;
-import protobuf_unittest.UnittestProto.BoolMessage;
-import protobuf_unittest.UnittestProto.Int32Message;
-import protobuf_unittest.UnittestProto.Int64Message;
-import protobuf_unittest.UnittestProto.TestAllTypes;
-import protobuf_unittest.UnittestProto.TestRecursiveMessage;
+import static org.junit.Assert.assertThrows;
+
+import com.google.common.primitives.Bytes;
+import map_test.MapTestProto.MapContainer;
+import proto2_unittest.UnittestProto.BoolMessage;
+import proto2_unittest.UnittestProto.Int32Message;
+import proto2_unittest.UnittestProto.Int64Message;
+import proto2_unittest.UnittestProto.TestAllTypes;
+import proto2_unittest.UnittestProto.TestRecursiveMessage;
+import com.google.testing.junit.testparameterinjector.TestParameter;
+import com.google.testing.junit.testparameterinjector.TestParameterInjector;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Supplier;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.junit.runners.JUnit4;
 
 /** Unit test for {@link CodedInputStream}. */
-@RunWith(JUnit4.class)
+@RunWith(TestParameterInjector.class)
 public class CodedInputStreamTest {
 
   private static final int DEFAULT_BLOCK_SIZE = 4096;
+
+  private static final int GROUP_TAP = WireFormat.makeTag(3, WireFormat.WIRETYPE_START_GROUP);
+
+  private static final byte[] NESTING_SGROUP = generateSGroupTags();
+
+  private static final byte[] NESTING_SGROUP_WITH_INITIAL_BYTES = generateSGroupTagsForMapField();
 
   private enum InputType {
     ARRAY {
@@ -139,6 +130,17 @@ public class CodedInputStreamTest {
     return bytes;
   }
 
+  private static byte[] generateSGroupTags() {
+    byte[] bytes = new byte[100000];
+    Arrays.fill(bytes, (byte) GROUP_TAP);
+    return bytes;
+  }
+
+  private static byte[] generateSGroupTagsForMapField() {
+    byte[] initialBytes = {18, 1, 75, 26, (byte) 198, (byte) 154, 12};
+    return Bytes.concat(initialBytes, NESTING_SGROUP);
+  }
+
   /**
    * An InputStream which limits the number of bytes it reads at a time. We use this to make sure
    * that CodedInputStream doesn't screw up when reading in small blocks.
@@ -149,7 +151,7 @@ public class CodedInputStreamTest {
     private int readCalls;
 
     public SmallBlockInputStream(byte[] data, int blockSize) {
-      super(new ByteArrayInputStream(data));
+      super(new ByteArrayInputStreamMatchingZeroLengthReadSemantics(data));
       this.blockSize = blockSize;
     }
 
@@ -217,7 +219,7 @@ public class CodedInputStreamTest {
     // array first.
     byte[] longerData = new byte[data.length + 1];
     System.arraycopy(data, 0, longerData, 0, data.length);
-    InputStream rawInput = new ByteArrayInputStream(longerData);
+    InputStream rawInput = new ByteArrayInputStreamMatchingZeroLengthReadSemantics(longerData);
     assertThat(CodedInputStream.readRawVarint32(rawInput)).isEqualTo((int) value);
     assertThat(rawInput.available()).isEqualTo(1);
   }
@@ -253,7 +255,8 @@ public class CodedInputStreamTest {
 
     // Make sure we get the same error when reading direct from an InputStream.
     try {
-      CodedInputStream.readRawVarint32(new ByteArrayInputStream(data));
+      CodedInputStream.readRawVarint32(
+          new ByteArrayInputStreamMatchingZeroLengthReadSemantics(data));
       assertWithMessage("Should have thrown an exception.").fail();
     } catch (InvalidProtocolBufferException e) {
       assertThat(e).hasMessageThat().isEqualTo(expected.getMessage());
@@ -302,6 +305,15 @@ public class CodedInputStreamTest {
             | (0x05L << 49)
             | (0x26L << 56)
             | (0x01L << 63));
+
+    assertReadVarint(bytes(0x85, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00), 5);
+    assertReadVarint(bytes(0x85, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02), 5);
+
+    // Test that the last bit decides the sign of the long value.
+    assertReadVarint(
+        bytes(0x85, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01), Long.MIN_VALUE + 5L);
+    assertReadVarint(
+        bytes(0x85, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x03), Long.MIN_VALUE + 5L);
 
     // Failures
     assertReadVarintFailure(
@@ -424,7 +436,6 @@ public class CodedInputStreamTest {
     }
   }
 
-
   /**
    * Test that a bug in skipRawBytes() has been fixed: if the skip skips exactly up to a limit, this
    * should not break things.
@@ -493,10 +504,239 @@ public class CodedInputStreamTest {
     }
   }
 
+  @Test
+  public void testSkipRawBytesSizeLimit() throws Exception {
+    InputStream input =
+        new InputStream() {
+          private long remaining = 5L * Integer.MAX_VALUE; // 10GB
+
+          @Override
+          public int read() throws IOException {
+            if (remaining <= 0) {
+              return -1;
+            }
+            remaining--;
+            return 0;
+          }
+
+          @Override
+          public int read(byte[] b, int off, int len) throws IOException {
+            if (remaining <= 0) {
+              return -1;
+            }
+            int toRead = (int) Math.min(len, remaining);
+            Arrays.fill(b, off, off + toRead, (byte) 0);
+            remaining -= toRead;
+            return toRead;
+          }
+
+          @Override
+          public long skip(long n) throws IOException {
+            long toSkip = Math.min(n, remaining);
+            remaining -= toSkip;
+            return toSkip;
+          }
+
+          @Override
+          public int available() {
+            return remaining > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) remaining;
+          }
+        };
+
+    CodedInputStream stream = CodedInputStream.newInstance(input);
+    stream.setSizeLimit(100);
+
+    // Skip 50 bytes (should succeed)
+    stream.skipRawBytes(50);
+
+    // Attempting to skip beyond the size limit should throw sizeLimitExceeded.
+    // We try to skip 100 bytes more (total 150, exceeds sizeLimit 100)
+    assertThrows(InvalidProtocolBufferException.class, () -> stream.skipRawBytes(100));
+
+    // Also try to skip a huge amount that would overflow the old naive check.
+    // In old code, this would succeed and allow further reads.
+    CodedInputStream stream2 = CodedInputStream.newInstance(input);
+    stream2.setSizeLimit(Integer.MAX_VALUE);
+    stream2.skipRawBytes(Integer.MAX_VALUE - 50); // should succeed
+
+    // This second skip will overflow A + size in buggy code, but in fixed code it should throw.
+    assertThrows(
+        InvalidProtocolBufferException.class, () -> stream2.skipRawBytes(Integer.MAX_VALUE));
+  }
+
+  @Test
+  public void testStreamRawBytesWholeResult() throws Exception {
+    // Allocate and initialize a 1MB blob.
+    int blobSize = 1 << 20;
+    byte[] blob = new byte[blobSize];
+    for (int i = 0; i < blob.length; i++) {
+      blob[i] = (byte) i;
+    }
+
+    for (InputType inputType : InputType.values()) {
+      try {
+        CodedInputStream decoder = inputType.newDecoder(blob);
+        decoder.pushLimit(123456);
+        decoder.skipRawBytes(39394);
+        byte[] results = new byte[blob.length];
+        int totalBytesRead = 0;
+        while (true) {
+          int bytesRead =
+              decoder.streamRawBytes(
+                  results, totalBytesRead, Math.min(results.length - totalBytesRead, 45));
+          if (bytesRead == -1) {
+            break;
+          }
+          totalBytesRead += bytesRead;
+        }
+        assertArrayEquals(
+            Arrays.copyOfRange(blob, 39394, 123456),
+            Arrays.copyOfRange(results, 0, 123456 - 39394));
+        // Verify we didn't read past the length arg
+        for (int i = 123456 - 39384; i > results.length; i++) {
+          assertThat(results[i]).isEqualTo(0);
+        }
+      } catch (Throwable e) {
+        e.addSuppressed(new RuntimeException("With stream type " + inputType));
+        throw e;
+      }
+    }
+  }
+
+  /** Match the InputStream contract around reading zero bytes at a time */
+  @Test
+  public void testStreamZeroBytes() throws Exception {
+    byte[] blob = new byte[0];
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThat(decoder.streamRawBytes(new byte[4], 0, 0)).isEqualTo(0);
+    }
+    blob = new byte[4];
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      decoder.pushLimit(0);
+      assertThat(decoder.streamRawBytes(new byte[4], 0, 0)).isEqualTo(0);
+    }
+    blob = new byte[4];
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      decoder.skipRawBytes(4);
+      assertThat(decoder.streamRawBytes(new byte[4], 0, 0)).isEqualTo(0);
+    }
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThat(decoder.streamRawBytes(new byte[0], 0, 0)).isEqualTo(0);
+    }
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThat(decoder.streamRawBytes(new byte[5], 5, 0)).isEqualTo(0);
+    }
+  }
+
+  @Test
+  public void testBoundsChecksStreamingRead() throws Exception {
+    // We throw IndexOutOfBoundsException for cases where the provided args are outside the provided
+    // array, to match InputStream's behavior
+    byte[] blob = new byte[4];
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThrows(
+          IndexOutOfBoundsException.class, () -> decoder.streamRawBytes(new byte[0], 0, 15));
+    }
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThrows(
+          IndexOutOfBoundsException.class, () -> decoder.streamRawBytes(new byte[5], 5, 15));
+    }
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThrows(
+          IndexOutOfBoundsException.class, () -> decoder.streamRawBytes(new byte[5], -1, 2));
+    }
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThrows(
+          IndexOutOfBoundsException.class, () -> decoder.streamRawBytes(new byte[5], 2, -1));
+    }
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThrows(
+          IndexOutOfBoundsException.class, () -> decoder.streamRawBytes(new byte[5], -2, -1));
+    }
+  }
+
+  @Test
+  public void testStreamRawBytesShortRead() throws Exception {
+    // 10 bytes of data
+    byte[] data = new byte[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    // SmallBlockInputStream with block size 4 (to limit the initial fill)
+    SmallBlockInputStream is = new SmallBlockInputStream(data, 4);
+    // CodedInputStream with buffer size 4
+    CodedInputStream input = CodedInputStream.newInstance(is, 4);
+
+    // Read 1 byte. This should trigger a buffer refill of 4 bytes.
+    assertThat(input.readRawByte()).isEqualTo((byte) 0);
+
+    // We expect 1 read call so far.
+    assertThat(is.readCalls).isEqualTo(1);
+
+    // Buffer now contains [1, 2, 3]. pos=1, limit=4.
+    // Request 5 bytes.
+    byte[] buffer = new byte[5];
+    int bytesRead = input.streamRawBytes(buffer, 0, 5);
+
+    // It should return the 3 bytes available in the buffer.
+    assertThat(bytesRead).isEqualTo(3);
+    assertThat(buffer[0]).isEqualTo((byte) 1);
+    assertThat(buffer[1]).isEqualTo((byte) 2);
+    assertThat(buffer[2]).isEqualTo((byte) 3);
+
+    // It should NOT have hit the stream again.
+    assertThat(is.readCalls).isEqualTo(1);
+  }
+
+  @Test
+  public void testNpeStreamingRead() throws Exception {
+    byte[] blob = new byte[4];
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream decoder = inputType.newDecoder(blob);
+      assertThrows(NullPointerException.class, () -> decoder.streamRawBytes(null, 0, 15));
+    }
+  }
+
+  @Test
+  public void testStreamRawBytesPropagatesInvalidProtocolBufferException() throws Exception {
+    InputStream throwingStream =
+        new InputStream() {
+          @Override
+          public int read() throws IOException {
+            throw new InvalidProtocolBufferException("Test exception");
+          }
+
+          @Override
+          public int read(byte[] b, int off, int len) throws IOException {
+            throw new InvalidProtocolBufferException("Test exception");
+          }
+        };
+
+    // Test the streaming variant: readRawBytes(byte[], int, int)
+    CodedInputStream input1 = CodedInputStream.newInstance(throwingStream);
+    InvalidProtocolBufferException thrown1 =
+        assertThrows(
+            InvalidProtocolBufferException.class, () -> input1.streamRawBytes(new byte[10], 0, 10));
+    assertThat(thrown1.getThrownFromInputStream()).isTrue();
+
+    // Test the non-streaming variant: readRawBytes(int)
+    CodedInputStream input2 = CodedInputStream.newInstance(throwingStream);
+    InvalidProtocolBufferException thrown2 =
+        assertThrows(InvalidProtocolBufferException.class, () -> input2.readRawBytes(10));
+    assertThat(thrown2.getThrownFromInputStream()).isTrue();
+  }
+
   /** Skipping a huge blob should not allocate excessive memory, so there should be no limit */
   @Test
   public void testSkipMaliciouslyHugeBlob() throws Exception {
-    InputStream is = new RepeatingInputStream(new byte[]{1}, Integer.MAX_VALUE);
+    InputStream is = new RepeatingInputStream(new byte[] {1}, Integer.MAX_VALUE);
     CodedInputStream.newInstance(is).skipRawBytes(Integer.MAX_VALUE);
   }
 
@@ -558,6 +798,86 @@ public class CodedInputStreamTest {
     }
   }
 
+  @Test
+  public void testReadStringWithSizeOverflow_throwsInvalidProtocolBufferException()
+      throws Exception {
+    ByteString.Output rawOutput = ByteString.newOutput();
+    CodedOutputStream output = CodedOutputStream.newInstance(rawOutput);
+
+    output.writeUInt32NoTag(0xFFFFFFFF); // Larger than Integer.MAX_VALUE.
+    output.writeRawBytes(new byte[32]); // Pad with a few random bytes.
+    output.flush();
+    byte[] data = rawOutput.toByteString().toByteArray();
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream input = inputType.newDecoder(data);
+      assertThrows(InvalidProtocolBufferException.class, input::readString);
+    }
+  }
+
+  @Test
+  public void testReadStringRequireUtf8WithSizeOverflow_throwsInvalidProtocolBufferException()
+      throws Exception {
+    ByteString.Output rawOutput = ByteString.newOutput();
+    CodedOutputStream output = CodedOutputStream.newInstance(rawOutput);
+
+    output.writeUInt32NoTag(0xFFFFFFFF); // Larger than Integer.MAX_VALUE.
+    output.writeRawBytes(new byte[32]); // Pad with a few random bytes.
+    output.flush();
+    byte[] data = rawOutput.toByteString().toByteArray();
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream input = inputType.newDecoder(data);
+      assertThrows(InvalidProtocolBufferException.class, input::readStringRequireUtf8);
+    }
+  }
+
+  @Test
+  public void testReadBytesWithHugeSizeOverflow_throwsInvalidProtocolBufferException()
+      throws Exception {
+    ByteString.Output rawOutput = ByteString.newOutput();
+    CodedOutputStream output = CodedOutputStream.newInstance(rawOutput);
+
+    output.writeUInt32NoTag(0xFFFFFFFF); // Larger than Integer.MAX_VALUE.
+    output.writeRawBytes(new byte[32]); // Pad with a few random bytes.
+    output.flush();
+    byte[] data = rawOutput.toByteString().toByteArray();
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream input = inputType.newDecoder(data);
+      assertThrows(InvalidProtocolBufferException.class, input::readBytes);
+    }
+  }
+
+  @Test
+  public void testReadByteArrayWithHugeSizeOverflow_throwsInvalidProtocolBufferException()
+      throws Exception {
+    ByteString.Output rawOutput = ByteString.newOutput();
+    CodedOutputStream output = CodedOutputStream.newInstance(rawOutput);
+
+    output.writeUInt32NoTag(0xFFFFFFFF); // Larger than Integer.MAX_VALUE.
+    output.writeRawBytes(new byte[32]); // Pad with a few random bytes.
+    output.flush();
+    byte[] data = rawOutput.toByteString().toByteArray();
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream input = inputType.newDecoder(data);
+      assertThrows(InvalidProtocolBufferException.class, input::readByteArray);
+    }
+  }
+
+  @Test
+  public void testReadByteBufferWithSizeOverflow_throwsInvalidProtocolBufferException()
+      throws Exception {
+    ByteString.Output rawOutput = ByteString.newOutput();
+    CodedOutputStream output = CodedOutputStream.newInstance(rawOutput);
+
+    output.writeUInt32NoTag(0xFFFFFFFF); // Larger than Integer.MAX_VALUE.
+    output.writeRawBytes(new byte[32]); // Pad with a few random bytes.
+    output.flush();
+    byte[] data = rawOutput.toByteString().toByteArray();
+    for (InputType inputType : InputType.values()) {
+      CodedInputStream input = inputType.newDecoder(data);
+      assertThrows(InvalidProtocolBufferException.class, input::readByteBuffer);
+    }
+  }
+
   /**
    * Test we can do messages that are up to CodedInputStream#DEFAULT_SIZE_LIMIT in size (2G or
    * Integer#MAX_SIZE).
@@ -573,7 +893,7 @@ public class CodedInputStreamTest {
     // returning our big serialized message 'count' times.
     InputStream is = new RepeatingInputStream(serializedMessage, count);
     // Parse should succeed!
-    TestAllTypes.parseFrom(is);
+    TestAllTypes unused = TestAllTypes.parseFrom(is);
   }
 
   /**
@@ -600,7 +920,7 @@ public class CodedInputStreamTest {
     }
   }
 
-  /*
+  /**
    * @return A serialized big message.
    */
   private static byte[] getBigSerializedMessage() {
@@ -672,7 +992,6 @@ public class CodedInputStreamTest {
         // success.
       }
 
-
       CodedInputStream input = inputType.newDecoder(data100);
       input.setRecursionLimit(8);
       try {
@@ -682,6 +1001,147 @@ public class CodedInputStreamTest {
         // success.
       }
     }
+  }
+
+  @Test
+  public void testMaliciousRecursion_unknownFields() throws Exception {
+    Throwable thrown =
+        assertThrows(
+            InvalidProtocolBufferException.class,
+            () -> TestRecursiveMessage.parseFrom(NESTING_SGROUP));
+
+    assertThat(thrown).hasMessageThat().contains("Protocol message had too many levels of nesting");
+  }
+
+  @Test
+  public void testMaliciousRecursion_skippingUnknownField() throws Exception {
+    Throwable thrown =
+        assertThrows(
+            InvalidProtocolBufferException.class,
+            () ->
+                DiscardUnknownFieldsParser.wrap(TestRecursiveMessage.parser())
+                    .parseFrom(NESTING_SGROUP));
+
+    assertThat(thrown).hasMessageThat().contains("Protocol message had too many levels of nesting");
+  }
+
+  @Test
+  public void testMaliciousSGroupTagsWithMapField_fromInputStream() throws Exception {
+    Throwable parseFromThrown =
+        assertThrows(
+            InvalidProtocolBufferException.class,
+            () ->
+                MapContainer.parseFrom(
+                    new ByteArrayInputStreamMatchingZeroLengthReadSemantics(
+                        NESTING_SGROUP_WITH_INITIAL_BYTES)));
+    Throwable mergeFromThrown =
+        assertThrows(
+            InvalidProtocolBufferException.class,
+            () ->
+                MapContainer.newBuilder()
+                    .mergeFrom(
+                        new ByteArrayInputStreamMatchingZeroLengthReadSemantics(
+                            NESTING_SGROUP_WITH_INITIAL_BYTES)));
+
+    assertThat(parseFromThrown)
+        .hasMessageThat()
+        .contains("Protocol message had too many levels of nesting");
+    assertThat(mergeFromThrown)
+        .hasMessageThat()
+        .contains("Protocol message had too many levels of nesting");
+  }
+
+  @Test
+  public void testMaliciousSGroupTags_inputStream_skipMessage() throws Exception {
+    InputStream inputSteam =
+        new ByteArrayInputStreamMatchingZeroLengthReadSemantics(NESTING_SGROUP);
+    CodedInputStream input = CodedInputStream.newInstance(inputSteam);
+    CodedOutputStream output = CodedOutputStream.newInstance(new byte[NESTING_SGROUP.length]);
+
+    Throwable thrown = assertThrows(InvalidProtocolBufferException.class, input::skipMessage);
+    Throwable thrown2 =
+        assertThrows(InvalidProtocolBufferException.class, () -> input.skipMessage(output));
+
+    assertThat(thrown).hasMessageThat().contains("Protocol message had too many levels of nesting");
+    assertThat(thrown2)
+        .hasMessageThat()
+        .contains("Protocol message had too many levels of nesting");
+  }
+
+  @Test
+  public void testMaliciousSGroupTagsWithMapField_fromByteArray() throws Exception {
+    Throwable parseFromThrown =
+        assertThrows(
+            InvalidProtocolBufferException.class,
+            () -> MapContainer.parseFrom(NESTING_SGROUP_WITH_INITIAL_BYTES));
+    Throwable mergeFromThrown =
+        assertThrows(
+            InvalidProtocolBufferException.class,
+            () -> MapContainer.newBuilder().mergeFrom(NESTING_SGROUP_WITH_INITIAL_BYTES));
+
+    assertThat(parseFromThrown)
+        .hasMessageThat()
+        .contains("the input ended unexpectedly in the middle of a field");
+    assertThat(mergeFromThrown)
+        .hasMessageThat()
+        .contains("the input ended unexpectedly in the middle of a field");
+  }
+
+  @Test
+  public void testMaliciousSGroupTags_arrayDecoder_skipMessage() throws Exception {
+    CodedInputStream input = CodedInputStream.newInstance(NESTING_SGROUP);
+    CodedOutputStream output = CodedOutputStream.newInstance(new byte[NESTING_SGROUP.length]);
+
+    Throwable thrown = assertThrows(InvalidProtocolBufferException.class, input::skipMessage);
+    Throwable thrown2 =
+        assertThrows(InvalidProtocolBufferException.class, () -> input.skipMessage(output));
+
+    assertThat(thrown).hasMessageThat().contains("Protocol message had too many levels of nesting");
+    assertThat(thrown2)
+        .hasMessageThat()
+        .contains("Protocol message had too many levels of nesting");
+  }
+
+  @Test
+  public void testMaliciousSGroupTagsWithMapField_fromByteBuffer() throws Exception {
+    Throwable thrown =
+        assertThrows(
+            InvalidProtocolBufferException.class,
+            () -> MapContainer.parseFrom(ByteBuffer.wrap(NESTING_SGROUP_WITH_INITIAL_BYTES)));
+
+    assertThat(thrown)
+        .hasMessageThat()
+        .contains("the input ended unexpectedly in the middle of a field");
+  }
+
+  @Test
+  public void testMaliciousSGroupTags_byteBuffer_skipMessage() throws Exception {
+    CodedInputStream input = InputType.NIO_DIRECT.newDecoder(NESTING_SGROUP);
+    CodedOutputStream output = CodedOutputStream.newInstance(new byte[NESTING_SGROUP.length]);
+
+    Throwable thrown = assertThrows(InvalidProtocolBufferException.class, input::skipMessage);
+    Throwable thrown2 =
+        assertThrows(InvalidProtocolBufferException.class, () -> input.skipMessage(output));
+
+    assertThat(thrown).hasMessageThat().contains("Protocol message had too many levels of nesting");
+    assertThat(thrown2)
+        .hasMessageThat()
+        .contains("Protocol message had too many levels of nesting");
+  }
+
+  @Test
+  public void testMaliciousSGroupTags_iterableByteBuffer() throws Exception {
+    CodedInputStream input = InputType.ITER_DIRECT.newDecoder(NESTING_SGROUP);
+    CodedOutputStream output = CodedOutputStream.newInstance(new byte[NESTING_SGROUP.length]);
+
+    Throwable thrown = assertThrows(InvalidProtocolBufferException.class, input::skipMessage);
+    Throwable thrown2 =
+        assertThrows(InvalidProtocolBufferException.class, () -> input.skipMessage(output));
+
+    assertThat(thrown).hasMessageThat().contains("Protocol message had too many levels of nesting");
+    assertThat(thrown2)
+        .hasMessageThat()
+        .contains("Protocol message had too many levels of nesting");
   }
 
   private void checkSizeLimitExceeded(InvalidProtocolBufferException e) {
@@ -762,7 +1222,9 @@ public class CodedInputStreamTest {
         inputStreamBufferLength <= rawInput.length + 1;
         inputStreamBufferLength++) {
       CodedInputStream input =
-          CodedInputStream.newInstance(new ByteArrayInputStream(rawInput), inputStreamBufferLength);
+          CodedInputStream.newInstance(
+              new ByteArrayInputStreamMatchingZeroLengthReadSemantics(rawInput),
+              inputStreamBufferLength);
       input.setSizeLimit(rawInput.length - 1);
       input.readString();
       input.readString();
@@ -777,7 +1239,9 @@ public class CodedInputStreamTest {
 
   @Test
   public void testIsAtEnd() throws Exception {
-    CodedInputStream input = CodedInputStream.newInstance(new ByteArrayInputStream(new byte[5]));
+    CodedInputStream input =
+        CodedInputStream.newInstance(
+            new ByteArrayInputStreamMatchingZeroLengthReadSemantics(new byte[5]));
     try {
       for (int i = 0; i < 5; i++) {
         assertThat(input.isAtEnd()).isFalse();
@@ -802,7 +1266,9 @@ public class CodedInputStreamTest {
     output.flush();
 
     byte[] rawInput = rawOutput.toByteArray();
-    CodedInputStream input = CodedInputStream.newInstance(new ByteArrayInputStream(rawInput));
+    CodedInputStream input =
+        CodedInputStream.newInstance(
+            new ByteArrayInputStreamMatchingZeroLengthReadSemantics(rawInput));
     // The length of the whole rawInput
     input.setSizeLimit(11);
     // Some number that is smaller than the rawInput's length
@@ -1036,7 +1502,7 @@ public class CodedInputStreamTest {
 
     CodedInputStream input =
         CodedInputStream.newInstance(
-            new ByteArrayInputStream(data) {
+            new ByteArrayInputStreamMatchingZeroLengthReadSemantics(data) {
               @Override
               public synchronized int available() {
                 return 0;
@@ -1061,7 +1527,7 @@ public class CodedInputStreamTest {
 
     CodedInputStream input =
         CodedInputStream.newInstance(
-            new ByteArrayInputStream(data) {
+            new ByteArrayInputStreamMatchingZeroLengthReadSemantics(data) {
               @Override
               public synchronized int available() {
                 return 0;
@@ -1139,8 +1605,9 @@ public class CodedInputStreamTest {
     for (InputType inputType : InputType.values()) {
       if (inputType == InputType.STREAM
           || inputType == InputType.STREAM_ITER_DIRECT
-          || inputType == InputType.ITER_DIRECT) {
-        // Aliasing doesn't apply to stream-backed CIS.
+          || inputType == InputType.ITER_DIRECT
+          || inputType == InputType.NIO_DIRECT) {
+        // Aliasing doesn't apply to stream-backed or direct-backed CIS.
         continue;
       }
 
@@ -1188,6 +1655,41 @@ public class CodedInputStreamTest {
       assertWithMessage(inputType.name()).that(result.get()).isEqualTo((byte) 67);
       result.position(bytesLength - 1);
       assertWithMessage(inputType.name()).that(result.get()).isEqualTo((byte) 89);
+    }
+  }
+
+  @Test
+  public void testByteBufferInputStreamReadBytesWithAliasConcurrently() {
+    int size = 127;
+    assertThat(CodedOutputStream.computeInt32SizeNoTag(size)).isEqualTo(1);
+    ByteBuffer input = ByteBuffer.allocateDirect(1 + size);
+    input.put(0, (byte) size);
+
+    Supplier<ByteString> embeddedBytes =
+        () -> {
+          try {
+            final CodedInputStream inputStream = CodedInputStream.newInstance(input, true);
+            inputStream.enableAliasing(true);
+            return inputStream.readBytes();
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        };
+
+    assertThat(embeddedBytes.get().size()).isEqualTo(size);
+
+    // Concurrent reader should have no impact.
+    int iterations = 100000;
+    new Thread(
+            () -> {
+              for (int i = 0; i < iterations; i++) {
+                ByteString unused = embeddedBytes.get();
+              }
+            })
+        .start();
+
+    for (int i = 0; i < iterations; i++) {
+      assertThat(embeddedBytes.get().size()).isEqualTo(size);
     }
   }
 
@@ -1275,9 +1777,43 @@ public class CodedInputStreamTest {
   }
 
   @Test
+  public void testSkipInvalidEndGroup(@TestParameter InputType inputType) throws Exception {
+    byte[] data = new byte[] {(byte) WireFormat.makeTag(1, WireFormat.WIRETYPE_END_GROUP)};
+
+    CodedInputStream input = CodedInputStream.newInstance(data);
+    assertThrows(InvalidProtocolBufferException.class, () -> input.skipField(input.readTag()));
+
+    CodedInputStream input2 = CodedInputStream.newInstance(data);
+    CodedOutputStream output = CodedOutputStream.newInstance(new byte[1]);
+    assertThrows(
+        InvalidProtocolBufferException.class, () -> input2.skipField(input2.readTag(), output));
+  }
+
+  @Test
+  public void testSkipInvalidEndGroup_nested(@TestParameter InputType inputType) throws Exception {
+    ByteString.Output output = ByteString.newOutput();
+    CodedOutputStream codedOutput = CodedOutputStream.newInstance(output);
+    codedOutput.writeTag(1, WireFormat.WIRETYPE_START_GROUP);
+    codedOutput.writeTag(2, WireFormat.WIRETYPE_END_GROUP);
+    codedOutput.writeTag(1, WireFormat.WIRETYPE_END_GROUP);
+    codedOutput.flush();
+    byte[] data = output.toByteString().toByteArray();
+
+    CodedInputStream input = CodedInputStream.newInstance(data);
+    assertThrows(InvalidProtocolBufferException.class, () -> input.skipField(input.readTag()));
+
+    CodedInputStream input2 = CodedInputStream.newInstance(data);
+    assertThrows(
+        InvalidProtocolBufferException.class,
+        () -> input2.skipField(input2.readTag(), codedOutput));
+  }
+
+  @Test
   public void testSkipPastEndOfByteArrayInput() throws Exception {
     try {
-      CodedInputStream.newInstance(new ByteArrayInputStream(new byte[100])).skipRawBytes(101);
+      CodedInputStream.newInstance(
+              new ByteArrayInputStreamMatchingZeroLengthReadSemantics(new byte[100]))
+          .skipRawBytes(101);
       assertWithMessage("Should have thrown an exception").fail();
     } catch (InvalidProtocolBufferException e) {
       // Expected
@@ -1288,16 +1824,17 @@ public class CodedInputStreamTest {
   public void testMaliciousInputStream() throws Exception {
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
     CodedOutputStream codedOutputStream = CodedOutputStream.newInstance(outputStream);
-    codedOutputStream.writeByteArrayNoTag(new byte[] { 0x0, 0x1, 0x2, 0x3, 0x4, 0x5 });
+    codedOutputStream.writeByteArrayNoTag(new byte[] {0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8});
     codedOutputStream.flush();
     final List<byte[]> maliciousCapture = new ArrayList<>();
-    InputStream inputStream = new ByteArrayInputStream(outputStream.toByteArray()) {
-      @Override
-      public synchronized int read(byte[] b, int off, int len) {
-        maliciousCapture.add(b);
-        return super.read(b, off, len);
-      }
-    };
+    InputStream inputStream =
+        new ByteArrayInputStreamMatchingZeroLengthReadSemantics(outputStream.toByteArray()) {
+          @Override
+          public synchronized int read(byte[] b, int off, int len) {
+            maliciousCapture.add(b);
+            return super.read(b, off, len);
+          }
+        };
 
     // test ByteString
 
@@ -1367,6 +1904,134 @@ public class CodedInputStreamTest {
       assertWithMessage("Should have thrown an exception").fail();
     } catch (InvalidProtocolBufferException ex) {
       // Expected.
+    }
+  }
+
+  @Test
+  public void testCodedInputStreamWithEmptyBuffers_isAtEnd() throws Exception {
+    ArrayList<ByteBuffer> inputList = new ArrayList<>();
+    inputList.add(ByteBuffer.wrap(new byte[0]));
+    CodedInputStream cis = CodedInputStream.newInstance(inputList);
+    assertThat(cis.isAtEnd()).isTrue();
+  }
+
+  @Test
+  public void testCodedInputStreamWithEmptyBuffers_isAtEndAfterRead() throws Exception {
+    ArrayList<ByteBuffer> inputList = new ArrayList<>();
+    inputList.add(ByteBuffer.wrap(new byte[4096]));
+    inputList.add(ByteBuffer.wrap(new byte[0]));
+    CodedInputStream cis = CodedInputStream.newInstance(inputList);
+    cis.readRawBytes(4096);
+    assertThat(cis.isAtEnd()).isTrue();
+  }
+
+  @Test
+  public void testStreamDecoderReadFixed64_inputTooSmall(@TestParameter boolean bufferTooSmall)
+      throws Exception {
+    byte[] data = bytes(0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12);
+    InputStream input = new ByteArrayInputStreamMatchingZeroLengthReadSemantics(data);
+    CodedInputStream cis =
+        CodedInputStream.newInstance(input, FIXED64_SIZE - (bufferTooSmall ? 1 : 0));
+    try {
+      cis.readFixed64();
+      assertWithMessage("Should have thrown an exception").fail();
+    } catch (InvalidProtocolBufferException expected) {
+      assertThat(expected)
+          .hasMessageThat()
+          .isEqualTo(InvalidProtocolBufferException.truncatedMessage().getMessage());
+    }
+  }
+
+  @Test
+  public void testStreamDecoderReadFixed64_bufferBounds(@TestParameter boolean bufferTooSmall)
+      throws Exception {
+    byte[] data = bytes(0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12);
+    InputStream input = new ByteArrayInputStreamMatchingZeroLengthReadSemantics(data);
+    CodedInputStream cis =
+        CodedInputStream.newInstance(input, FIXED64_SIZE - (bufferTooSmall ? 1 : 0));
+    assertThat(cis.readFixed64()).isEqualTo(0x123456789abcdef0L);
+  }
+
+  @Test
+  public void testReadRawBytesPastLimitAligns() throws Exception {
+    byte[] data = bytes(1, 2, 3, 4, 5);
+    CodedInputStream input = InputType.STREAM.newDecoder(data);
+    int limit = input.pushLimit(3); // Limit covers [1, 2, 3]
+
+    // Try to read 4 bytes, which exceeds the limit of 3.
+    try {
+      input.readRawBytes(4);
+      assertWithMessage("Should have thrown truncatedMessage").fail();
+    } catch (InvalidProtocolBufferException expected) {
+      assertThat(expected.getMessage())
+          .isEqualTo(InvalidProtocolBufferException.truncatedMessage().getMessage());
+    }
+
+    // Pop the limit.
+    input.popLimit(limit);
+
+    // The guaranteed behavior in the case of a truncated message is the stream should have been
+    // aligned to the limit (index 3, value 4). So the next byte read should be 4.
+    // This maybe shouldn't be guaranteed, but has been the behavior since 2008.
+    assertThat(input.readRawByte()).isEqualTo(4);
+  }
+
+  @Test
+  public void testSkipRawBytesPastLimitAligns() throws Exception {
+    byte[] data = bytes(1, 2, 3, 4, 5);
+    CodedInputStream input = InputType.STREAM.newDecoder(data);
+    int limit = input.pushLimit(3); // Limit covers [1, 2, 3]
+
+    // Try to skip 4 bytes, which exceeds the limit of 3.
+    try {
+      input.skipRawBytes(4);
+      assertWithMessage("Should have thrown truncatedMessage").fail();
+    } catch (InvalidProtocolBufferException expected) {
+      assertThat(expected.getMessage())
+          .isEqualTo(InvalidProtocolBufferException.truncatedMessage().getMessage());
+    }
+
+    // Pop the limit.
+    input.popLimit(limit);
+
+    // The guaranteed behavior in the case of a truncated message is the stream should have been
+    // aligned to the limit (index 3, value 4). So the next byte read should be 4.
+    // This maybe shouldn't be guaranteed, but has been the behavior since 2008.
+    assertThat(input.readRawByte()).isEqualTo(4);
+  }
+
+  /**
+   * A {@link ByteArrayInputStream} that matches the behavior of {@link
+   * InputStream#read(byte[],int,int)} when the requested length is 0.
+   */
+  private static class ByteArrayInputStreamMatchingZeroLengthReadSemantics
+      extends ByteArrayInputStream {
+    private ByteArrayInputStreamMatchingZeroLengthReadSemantics(byte[] data) {
+      super(data);
+    }
+
+    @Override
+    public synchronized int read(byte[] b, int off, int len) {
+      // Inline Objects.checkFromIndexSize() which is API 30+.
+      if ((b.length | off | len) < 0 || len > b.length - off) {
+        throw new IndexOutOfBoundsException();
+      }
+      // Eagerly return 0 if the requested length is 0 to match InputStream behavior.
+      if (len == 0) {
+        return 0;
+      }
+
+      if (pos >= count) {
+        return -1;
+      }
+
+      int avail = count - pos;
+      if (len > avail) {
+        len = avail;
+      }
+      System.arraycopy(buf, pos, b, off, len);
+      pos += len;
+      return len;
     }
   }
 }

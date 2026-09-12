@@ -25,7 +25,9 @@ namespace file_manager::file_tasks {
 
 // Returns true if a file handler is enabled. Some handlers such as
 // import-crostini-image can be disabled at runtime by enterprise policy.
-bool FileHandlerIsEnabled(Profile* profile, const std::string& file_handler_id);
+bool FileHandlerIsEnabled(Profile* profile,
+                          const std::string& app_id,
+                          const std::string& file_handler_id);
 
 // Returns a profile that has App Service available. App Service doesn't exist
 // in Incognito mode, so when the user opens a file from the downloads page
@@ -52,12 +54,6 @@ void ExecuteAppServiceTask(
     const std::vector<storage::FileSystemURL>& file_system_urls,
     const std::vector<std::string>& mime_types,
     FileTaskFinishedCallback done);
-
-// Returns the default handler specified in `DefaultHandlersForFileExtensions`
-// policy for the given |file_extension|, if any.
-absl::optional<std::string> GetPolicyDefaultHandlerForFileExtension(
-    Profile* profile,
-    const std::string& file_extension);
 
 // Checks `DefaultHandlersForFileExtensions` policy and maybe sets the default
 // task. Returns false to indicate that the caller may set the default task and

@@ -10,13 +10,13 @@
 
 #include "base/containers/flat_map.h"
 #include "base/memory/raw_ptr.h"
+#include "base/moving_window.h"
 #include "base/time/time.h"
 #include "media/base/audio_decoder.h"
 #include "media/base/audio_decoder_config.h"
 #include "media/base/channel_layout.h"
 #include "media/base/demuxer_stream.h"
 #include "media/base/media_log_properties.h"
-#include "media/base/moving_average.h"
 #include "media/base/pipeline_status.h"
 #include "media/base/sample_format.h"
 #include "media/base/video_decoder.h"
@@ -56,7 +56,7 @@ class MEDIA_EXPORT DecoderStreamTraits<DemuxerStream::AUDIO> {
   static scoped_refptr<OutputType> CreateEOSOutput();
 
   DecoderStreamTraits(MediaLog* media_log,
-                      ChannelLayout initial_hw_layout,
+                      ChannelLayoutConfig initial_hw_layout,
                       SampleFormat initial_hw_sample_format);
 
   void ReportStatistics(const StatisticsCB& statistics_cb, int bytes_decoded);
@@ -86,10 +86,10 @@ class MEDIA_EXPORT DecoderStreamTraits<DemuxerStream::AUDIO> {
   // if timestamp gaps are detected. Sufficiently large gaps can lead to AV sync
   // drift.
   std::unique_ptr<AudioTimestampValidator> audio_ts_validator_;
-  raw_ptr<MediaLog> media_log_;
+  const std::unique_ptr<MediaLog> media_log_;
   // HW layout at the time pipeline was started. Will not reflect possible
   // device changes.
-  ChannelLayout initial_hw_layout_;
+  ChannelLayoutConfig initial_hw_layout_;
   // HW sample format at the time pipeline was started. Will not reflect
   // possible device changes.
   SampleFormat initial_hw_sample_format_;
@@ -142,13 +142,10 @@ class MEDIA_EXPORT DecoderStreamTraits<DemuxerStream::VIDEO> {
   void OnStreamReset(DemuxerStream* stream);
   void OnOutputReady(OutputType* output);
 
-  // Set whether or not software decoder implementations will be preferred.
-  void SetPreferNonPlatformDecoders(bool);
-  bool GetPreferNonPlatformDecoders() const;
-
  private:
   base::TimeDelta last_keyframe_timestamp_;
-  MovingAverage keyframe_distance_average_;
+  base::MovingAverage<base::TimeDelta, base::TimeDelta>
+      keyframe_distance_average_;
 
   // Tracks the duration of incoming packets over time.
   struct FrameMetadata {
@@ -161,8 +158,6 @@ class MEDIA_EXPORT DecoderStreamTraits<DemuxerStream::VIDEO> {
   PipelineStatistics stats_;
 
   VideoTransformation transform_ = kNoTransformation;
-
-  bool prefer_non_platform_decoders_ = false;
 
   base::WeakPtr<DecoderStreamTraits<DemuxerStream::VIDEO>> weak_this_;
   base::WeakPtrFactory<DecoderStreamTraits<DemuxerStream::VIDEO>> weak_factory_{

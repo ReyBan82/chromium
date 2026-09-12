@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import "base/test/ios/wait_util.h"
-
 #import "base/functional/bind.h"
 #import "base/ios/ios_util.h"
 #import "base/strings/sys_string_conversions.h"
@@ -12,16 +10,12 @@
 #import "ios/web/public/js_messaging/content_world.h"
 #import "ios/web/public/js_messaging/java_script_feature_util.h"
 #import "ios/web/public/js_messaging/script_message.h"
-#import "ios/web/public/js_messaging/web_frame_util.h"
+#import "ios/web/public/js_messaging/web_frames_manager.h"
 #import "ios/web/public/test/fakes/fake_web_client.h"
 #import "ios/web/public/test/web_test_with_web_state.h"
 #import "ios/web/public/test/web_view_content_test_util.h"
 #import "ios/web/test/fakes/fake_java_script_feature.h"
 #import "ios/web/web_state/ui/wk_web_view_configuration_provider.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 using base::test::ios::kWaitForJSCompletionTimeout;
 using base::test::ios::WaitUntilConditionOrTimeout;
@@ -31,9 +25,11 @@ static NSString* kPageHTML =
      "  <div id=\"div\">contents1</div><div id=\"div2\">contents2</div>"
      "</body></html>";
 
+// String to be sent back to the page after a message.
+const char kReplyString[] = "reply_string";
+
 namespace web {
 
-// typedef WebTestWithWebState JavaScriptFeatureTest;
 // Sets up a FakeJavaScriptFeature in the page content world.
 class JavaScriptFeaturePageContentWorldTest : public WebTestWithWebState {
  protected:
@@ -46,6 +42,10 @@ class JavaScriptFeaturePageContentWorldTest : public WebTestWithWebState {
 
     static_cast<web::FakeWebClient*>(WebTestWithWebState::GetWebClient())
         ->SetJavaScriptFeatures({feature()});
+  }
+
+  WebFrame* GetMainFrame() {
+    return feature()->GetWebFramesManager(web_state())->GetMainWebFrame();
   }
 
   FakeJavaScriptFeature* feature() { return &feature_; }
@@ -72,7 +72,7 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
   ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
   ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents2"));
 
-  feature()->ReplaceDivContents(GetMainFrame(web_state()));
+  feature()->ReplaceDivContents(GetMainFrame());
 
   EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "updated"));
   EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents2"));
@@ -87,10 +87,9 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
   ASSERT_FALSE(feature()->last_received_web_state());
   ASSERT_FALSE(feature()->last_received_message());
 
-  std::vector<base::Value> parameters;
-  parameters.push_back(
-      base::Value(kFakeJavaScriptFeaturePostMessageReplyValue));
-  feature()->ReplyWithPostMessage(GetMainFrame(web_state()), parameters);
+  auto parameters =
+      base::ListValue().Append(kFakeJavaScriptFeaturePostMessageReplyValue);
+  feature()->ReplyWithPostMessage(GetMainFrame(), parameters);
 
   ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
     return feature()->last_received_web_state();
@@ -98,11 +97,70 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
 
   EXPECT_EQ(web_state(), feature()->last_received_web_state());
 
-  ASSERT_TRUE(feature()->last_received_message()->body());
+  ASSERT_TRUE(feature()->last_received_message()->legacy_body());
   const std::string* reply =
-      feature()->last_received_message()->body()->GetIfString();
+      feature()->last_received_message()->legacy_body()->GetIfString();
   ASSERT_TRUE(reply);
   EXPECT_STREQ(kFakeJavaScriptFeaturePostMessageReplyValue, reply->c_str());
+}
+
+// Tests that a JavaScriptFeature receives post messages from JavaScript for
+// registered names in the page content world and can reply to it.
+TEST_F(JavaScriptFeaturePageContentWorldTest,
+       MessageHandlerWithReplyInPageContentWorld) {
+  feature()->SetReplyToMessages(true);
+  LoadHtml(kPageHTML);
+
+  ASSERT_FALSE(feature()->last_received_web_state());
+  ASSERT_FALSE(feature()->last_received_message());
+
+  auto parameters =
+      base::ListValue().Append(kFakeJavaScriptFeaturePostMessageReplyValue);
+  feature()->SetResponseToNextMessage(kReplyString);
+  feature()->ReplyWithPostMessage(GetMainFrame(), parameters);
+
+  ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
+    return feature()->received_message_count() == 2;
+  }));
+
+  EXPECT_EQ(web_state(), feature()->last_received_web_state());
+
+  ASSERT_TRUE(feature()->last_received_message()->legacy_body());
+  const std::string* reply =
+      feature()->last_received_message()->legacy_body()->GetIfString();
+  ASSERT_TRUE(reply);
+  EXPECT_STREQ(kReplyString, reply->c_str());
+}
+
+// Tests that a JavaScriptFeature correctly calls async JavaScript functions.
+TEST_F(JavaScriptFeaturePageContentWorldTest, CallAsyncJavaScriptFunction) {
+  LoadHtml(kPageHTML);
+  ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+
+  __block bool completion_block_called = false;
+  __block std::optional<base::Value> result_value;
+  __block NSError* result_error = nil;
+
+  auto completion_block = ^(const base::Value* value, NSError* error) {
+    completion_block_called = true;
+    if (value) {
+      result_value = value->Clone();
+    }
+    result_error = error;
+  };
+
+  EXPECT_TRUE(feature()->CallAsyncSum(GetMainFrame(), /*addend1=*/2,
+                                      /*addend2=*/3,
+                                      base::BindOnce(completion_block)));
+
+  EXPECT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
+    return completion_block_called;
+  }));
+
+  ASSERT_FALSE(result_error);
+  ASSERT_TRUE(result_value.has_value());
+  ASSERT_TRUE(result_value->is_double());
+  EXPECT_EQ(result_value->GetDouble(), 5.0);
 }
 
 // Tests that a page which overrides the window.webkit object does not break the
@@ -116,10 +174,9 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
   ASSERT_FALSE(feature()->last_received_web_state());
   ASSERT_FALSE(feature()->last_received_message());
 
-  std::vector<base::Value> parameters;
-  parameters.push_back(
-      base::Value(kFakeJavaScriptFeaturePostMessageReplyValue));
-  feature()->ReplyWithPostMessage(GetMainFrame(web_state()), parameters);
+  auto parameters =
+      base::ListValue().Append(kFakeJavaScriptFeaturePostMessageReplyValue);
+  feature()->ReplyWithPostMessage(GetMainFrame(), parameters);
 
   ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
     return feature()->last_received_web_state();
@@ -127,39 +184,9 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
 
   EXPECT_EQ(web_state(), feature()->last_received_web_state());
 
-  ASSERT_TRUE(feature()->last_received_message()->body());
+  ASSERT_TRUE(feature()->last_received_message()->legacy_body());
   const std::string* reply =
-      feature()->last_received_message()->body()->GetIfString();
-  ASSERT_TRUE(reply);
-  EXPECT_STREQ(kFakeJavaScriptFeaturePostMessageReplyValue, reply->c_str());
-}
-
-// Tests that a page which overrides the window.webkit object does not break the
-// JavaScriptFeature JS->native messaging system when the feature script is
-// using `__gCrWeb.common.sendWebKitMessage`
-TEST_F(JavaScriptFeaturePageContentWorldTest,
-       MessagingWithOverriddenWebkitObjectCommonJS) {
-  LoadHtml(kPageHTML);
-  ExecuteJavaScript(@"webkit = undefined;");
-
-  ASSERT_FALSE(feature()->last_received_web_state());
-  ASSERT_FALSE(feature()->last_received_message());
-
-  std::vector<base::Value> parameters;
-  parameters.push_back(
-      base::Value(kFakeJavaScriptFeaturePostMessageReplyValue));
-  feature()->ReplyWithPostMessageCommonJS(GetMainFrame(web_state()),
-                                          parameters);
-
-  ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
-    return feature()->last_received_web_state();
-  }));
-
-  EXPECT_EQ(web_state(), feature()->last_received_web_state());
-
-  ASSERT_TRUE(feature()->last_received_message()->body());
-  const std::string* reply =
-      feature()->last_received_message()->body()->GetIfString();
+      feature()->last_received_message()->legacy_body()->GetIfString();
   ASSERT_TRUE(reply);
   EXPECT_STREQ(kFakeJavaScriptFeaturePostMessageReplyValue, reply->c_str());
 }
@@ -175,7 +202,7 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
   ASSERT_FALSE(feature()->last_received_message());
 
   __block bool count_received = false;
-  feature()->GetErrorCount(GetMainFrame(web_state()),
+  feature()->GetErrorCount(GetMainFrame(),
                            base::BindOnce(^void(const base::Value* count) {
                              ASSERT_TRUE(count);
                              ASSERT_TRUE(count->is_double());
@@ -189,7 +216,7 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
   ExecuteJavaScript(@"invalidFunction();");
 
   count_received = false;
-  feature()->GetErrorCount(GetMainFrame(web_state()),
+  feature()->GetErrorCount(GetMainFrame(),
                            base::BindOnce(^void(const base::Value* count) {
                              ASSERT_TRUE(count);
                              ASSERT_TRUE(count->is_double());
@@ -206,7 +233,7 @@ TEST_F(JavaScriptFeaturePageContentWorldTest,
   ExecuteJavaScript(@"invalidFunction();");
 
   count_received = false;
-  feature()->GetErrorCount(GetMainFrame(web_state()),
+  feature()->GetErrorCount(GetMainFrame(),
                            base::BindOnce(^void(const base::Value* count) {
                              ASSERT_TRUE(count);
                              ASSERT_TRUE(count->is_double());
@@ -230,6 +257,10 @@ class JavaScriptFeatureAnyContentWorldTest : public WebTestWithWebState {
 
     static_cast<web::FakeWebClient*>(WebTestWithWebState::GetWebClient())
         ->SetJavaScriptFeatures({feature()});
+  }
+
+  WebFrame* GetMainFrame() {
+    return feature()->GetWebFramesManager(web_state())->GetMainWebFrame();
   }
 
   FakeJavaScriptFeature* feature() { return &feature_; }
@@ -256,7 +287,7 @@ TEST_F(JavaScriptFeatureAnyContentWorldTest,
   ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
   ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents2"));
 
-  feature()->ReplaceDivContents(GetMainFrame(web_state()));
+  feature()->ReplaceDivContents(GetMainFrame());
 
   EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "updated"));
   EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents2"));
@@ -270,10 +301,9 @@ TEST_F(JavaScriptFeatureAnyContentWorldTest, MessageHandlerInIsolatedWorld) {
   ASSERT_FALSE(feature()->last_received_web_state());
   ASSERT_FALSE(feature()->last_received_message());
 
-  std::vector<base::Value> parameters;
-  parameters.push_back(
-      base::Value(kFakeJavaScriptFeaturePostMessageReplyValue));
-  feature()->ReplyWithPostMessage(GetMainFrame(web_state()), parameters);
+  auto parameters =
+      base::ListValue().Append(kFakeJavaScriptFeaturePostMessageReplyValue);
+  feature()->ReplyWithPostMessage(GetMainFrame(), parameters);
 
   ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
     return feature()->last_received_web_state();
@@ -281,11 +311,39 @@ TEST_F(JavaScriptFeatureAnyContentWorldTest, MessageHandlerInIsolatedWorld) {
 
   EXPECT_EQ(web_state(), feature()->last_received_web_state());
 
-  ASSERT_TRUE(feature()->last_received_message()->body());
+  ASSERT_TRUE(feature()->last_received_message()->legacy_body());
   const std::string* reply =
-      feature()->last_received_message()->body()->GetIfString();
+      feature()->last_received_message()->legacy_body()->GetIfString();
   ASSERT_TRUE(reply);
   EXPECT_STREQ(kFakeJavaScriptFeaturePostMessageReplyValue, reply->c_str());
+}
+
+// Tests that a JavaScriptFeature receives post messages from JavaScript for
+// registered names in an isolated world and can reply to it.
+TEST_F(JavaScriptFeatureAnyContentWorldTest,
+       MessageHandlerWithReplyInIsolatedWorld) {
+  feature()->SetReplyToMessages(true);
+  LoadHtml(kPageHTML);
+
+  ASSERT_FALSE(feature()->last_received_web_state());
+  ASSERT_FALSE(feature()->last_received_message());
+
+  auto parameters =
+      base::ListValue().Append(kFakeJavaScriptFeaturePostMessageReplyValue);
+  feature()->SetResponseToNextMessage(kReplyString);
+  feature()->ReplyWithPostMessage(GetMainFrame(), parameters);
+
+  ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
+    return feature()->received_message_count() == 2;
+  }));
+
+  EXPECT_EQ(web_state(), feature()->last_received_web_state());
+
+  ASSERT_TRUE(feature()->last_received_message()->legacy_body());
+  const std::string* reply =
+      feature()->last_received_message()->legacy_body()->GetIfString();
+  ASSERT_TRUE(reply);
+  EXPECT_STREQ(kReplyString, reply->c_str());
 }
 
 // Tests that a JavaScriptFeature with
@@ -298,7 +356,7 @@ TEST_F(JavaScriptFeatureAnyContentWorldTest, ReinjectionBehaviorIsolatedWorld) {
   ASSERT_FALSE(feature()->last_received_message());
 
   __block bool count_received = false;
-  feature()->GetErrorCount(GetMainFrame(web_state()),
+  feature()->GetErrorCount(GetMainFrame(),
                            base::BindOnce(^void(const base::Value* count) {
                              ASSERT_TRUE(count);
                              ASSERT_TRUE(count->is_double());
@@ -312,7 +370,7 @@ TEST_F(JavaScriptFeatureAnyContentWorldTest, ReinjectionBehaviorIsolatedWorld) {
   ExecuteJavaScript(@"invalidFunction();");
 
   count_received = false;
-  feature()->GetErrorCount(GetMainFrame(web_state()),
+  feature()->GetErrorCount(GetMainFrame(),
                            base::BindOnce(^void(const base::Value* count) {
                              ASSERT_TRUE(count);
                              ASSERT_TRUE(count->is_double());
@@ -329,7 +387,7 @@ TEST_F(JavaScriptFeatureAnyContentWorldTest, ReinjectionBehaviorIsolatedWorld) {
   ExecuteJavaScript(@"invalidFunction();");
 
   count_received = false;
-  feature()->GetErrorCount(GetMainFrame(web_state()),
+  feature()->GetErrorCount(GetMainFrame(),
                            base::BindOnce(^void(const base::Value* count) {
                              ASSERT_TRUE(count);
                              ASSERT_TRUE(count->is_double());
@@ -370,10 +428,184 @@ TEST_F(JavaScriptFeatureIsolatedWorldTest,
   ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
   ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents2"));
 
-  feature()->ReplaceDivContents(GetMainFrame(web_state()));
+  WebFrame* frame =
+      feature()->GetWebFramesManager(web_state())->GetMainWebFrame();
+  feature()->ReplaceDivContents(frame);
 
   EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "updated"));
   EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents2"));
+}
+
+// Sets up a private FakeJavaScriptFeature.
+class JavaScriptFeaturePrivateTest : public WebTestWithWebState {
+ protected:
+  JavaScriptFeaturePrivateTest()
+      : WebTestWithWebState(std::make_unique<web::FakeWebClient>()),
+        feature_(ContentWorld::kPageContentWorld,
+                 OriginFilter::kValidTestOriginForTesting) {}
+
+  void SetUp() override {
+    WebTestWithWebState::SetUp();
+
+    static_cast<web::FakeWebClient*>(WebTestWithWebState::GetWebClient())
+        ->SetJavaScriptFeatures({feature()});
+  }
+
+  WebFrame* GetMainFrame() {
+    return feature()->GetWebFramesManager(web_state())->GetMainWebFrame();
+  }
+
+  FakeJavaScriptFeature* feature() { return &feature_; }
+
+ private:
+  FakeJavaScriptFeature feature_;
+};
+
+// Tests that a JavaScriptFeature executes its injected JavaScript when
+// in an authorized domain
+TEST_F(JavaScriptFeaturePrivateTest, JavaScriptFeatureInjectJavaScript) {
+  LoadHtml(kPageHTML, GURL("https://test.test"));
+  ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+  EXPECT_TRUE(test::WaitForWebViewContainingText(
+      web_state(), kFakeJavaScriptFeatureLoadedText));
+}
+
+// Tests that a JavaScriptFeature executes its injected JavaScript when
+// in an authorized domain (case insensitive).
+TEST_F(JavaScriptFeaturePrivateTest,
+       JavaScriptFeatureInjectJavaScriptCaseInsensitive) {
+  LoadHtml(kPageHTML, GURL("https://TEST.test"));
+  ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+  EXPECT_TRUE(test::WaitForWebViewContainingText(
+      web_state(), kFakeJavaScriptFeatureLoadedText));
+}
+
+// Tests that a JavaScriptFeature executes its injected JavaScript when
+// in an unauthorized domain
+TEST_F(JavaScriptFeaturePrivateTest, JavaScriptFeatureDoNotInjectJavaScript) {
+  LoadHtml(kPageHTML, GURL("http://invalid.test"));
+  ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+  // Shorter timeout on this as it is expected to fail.
+  EXPECT_FALSE(test::WaitForWebViewContainingText(
+      web_state(), kFakeJavaScriptFeatureLoadedText, base::Seconds(1)));
+}
+
+// Tests that a malicious page cannot bypass the private origin check of a
+// JavaScriptFeature by poisoning Array.prototype.includes and calling
+// document.open().
+TEST_F(JavaScriptFeaturePrivateTest,
+       OriginGateBypassViaPrototypePoisoningAndDocumentOpen) {
+  LoadHtml(kPageHTML, GURL("http://invalid.test"));
+  ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+
+  // Confirm the private script did not run initially.
+  EXPECT_FALSE(test::WaitForWebViewContainingText(
+      web_state(), kFakeJavaScriptFeatureLoadedText, base::Seconds(1)));
+
+  // Poison Array.prototype.includes and force script re-injection via
+  // document.open()
+  ExecuteJavaScript(@"Array.prototype.includes = function() { return true; };"
+                     "document.open();"
+                     "document.write('<html><body><div "
+                     "id=\"div\">contents1</div></body></html>');"
+                     "document.close();");
+
+  // Verify that the private script still was NOT injected/executed after
+  // re-injection on the unauthorized origin.
+  EXPECT_FALSE(test::WaitForWebViewContainingText(
+      web_state(), kFakeJavaScriptFeatureLoadedText, base::Seconds(1)));
+}
+
+// Tests that a private JavaScriptFeature can call JavaScript when on an
+// authorized page.
+TEST_F(JavaScriptFeaturePrivateTest, CallFunctionOnAllowedPage) {
+  LoadHtml(kPageHTML, GURL("https://test.test"));
+
+  ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+
+  EXPECT_TRUE(feature()->ReplaceDivContents(GetMainFrame()));
+
+  EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "updated"));
+}
+
+// Tests that a private JavaScriptFeature can not call JavaScript when on an
+// unauthorized domain.
+TEST_F(JavaScriptFeaturePrivateTest, CallFunctionOnUnauthorizedPage) {
+  LoadHtml(kPageHTML, GURL("http://invalid.test"));
+
+  ASSERT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+
+  EXPECT_FALSE(feature()->ReplaceDivContents(GetMainFrame()));
+
+  // The JavaScript call should not be executed.
+  EXPECT_TRUE(test::WaitForWebViewContainingText(web_state(), "contents1"));
+  EXPECT_FALSE(test::WaitForWebViewContainingText(web_state(), "updated"));
+}
+
+// Tests that a private JavaScriptFeature receives post messages from JavaScript
+// for registered names in the page content world when on an authorized page.
+TEST_F(JavaScriptFeaturePrivateTest, MessageHandler) {
+  LoadHtml(kPageHTML, GURL("https://test.test/subpage"));
+
+  ASSERT_FALSE(feature()->last_received_web_state());
+  ASSERT_FALSE(feature()->last_received_message());
+
+  auto parameters =
+      base::ListValue().Append(kFakeJavaScriptFeaturePostMessageReplyValue);
+  feature()->ReplyWithPostMessage(GetMainFrame(), parameters);
+
+  ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
+    return feature()->last_received_web_state();
+  }));
+
+  EXPECT_EQ(web_state(), feature()->last_received_web_state());
+
+  ASSERT_TRUE(feature()->last_received_message()->legacy_body());
+  const std::string* reply =
+      feature()->last_received_message()->legacy_body()->GetIfString();
+  ASSERT_TRUE(reply);
+  EXPECT_STREQ(kFakeJavaScriptFeaturePostMessageReplyValue, reply->c_str());
+}
+
+// Tests that a private JavaScriptFeature receives direct post messages from
+// JavaScript for registered names in the page content world when on an
+// authorized page.
+TEST_F(JavaScriptFeaturePrivateTest, DirectMessageHandlerOnAllowedPage) {
+  LoadHtml(kPageHTML, GURL("https://test.test"));
+  // Send message directly without using any JavaScriptFeature
+  ExecuteJavaScript(
+      @"window.webkit.messageHandlers['FakeHandlerName'].postMessage('test');");
+  ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
+    return feature()->last_received_web_state();
+  }));
+}
+
+// Tests that a private JavaScriptFeature receives direct post messages from
+// JavaScript for registered names in the page content world when on an
+// authorized page (case insensitive).
+TEST_F(JavaScriptFeaturePrivateTest,
+       DirectMessageHandlerOnCaseInsensitivePage) {
+  LoadHtml(kPageHTML, GURL("https://TEST.test"));
+  // Send message directly without using any JavaScriptFeature
+  ExecuteJavaScript(
+      @"window.webkit.messageHandlers['FakeHandlerName'].postMessage('test');");
+  ASSERT_TRUE(WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^bool {
+    return feature()->last_received_web_state();
+  }));
+}
+
+// Tests that a private JavaScriptFeature receives direct post messages from
+// JavaScript for registered names in the page content world when on an
+// filtered page.
+TEST_F(JavaScriptFeaturePrivateTest, DirectMessageHandlerOnFilteredPage) {
+  LoadHtml(kPageHTML, GURL("https://invalid.test"));
+  // Send message directly without using any JavaScriptFeature
+  ExecuteJavaScript(
+      @"window.webkit.messageHandlers['FakeHandlerName'].postMessage('test');");
+  // Shorter timeout on this as it is expected to fail.
+  ASSERT_FALSE(WaitUntilConditionOrTimeout(base::Seconds(1), ^bool {
+    return feature()->last_received_web_state();
+  }));
 }
 
 }  // namespace web

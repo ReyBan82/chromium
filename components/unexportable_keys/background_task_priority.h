@@ -6,11 +6,15 @@
 #define COMPONENTS_UNEXPORTABLE_KEYS_BACKGROUND_TASK_PRIORITY_H_
 
 #include <cstddef>
+#include <string_view>
+
+#include "base/component_export.h"
 
 namespace unexportable_keys {
 
 // Ordered list of priorities supported by the unexportable key task manager.
 // The priorities are ordered from the lowest one to the highest one.
+// LINT.IfChange
 enum class BackgroundTaskPriority {
   // For non-urgent work, that will only execute if there's nothing else to do.
   kBestEffort = 0,
@@ -25,9 +29,17 @@ enum class BackgroundTaskPriority {
 
   kMaxValue = kUserBlocking
 };
+// LINT.ThenChange(/components/unexportable_keys/mojom/unexportable_key_service.mojom)
 
 constexpr size_t kNumTaskPriorities =
     static_cast<size_t>(BackgroundTaskPriority::kMaxValue) + 1;
+
+// Converts `BackgroundTaskPriority` to a histogram suffix string. The string is
+// prepended with "." symbol so it can be directly concatenated with a base
+// histogram name.
+COMPONENT_EXPORT(UNEXPORTABLE_KEYS)
+std::string_view GetBackgroundTaskPrioritySuffixForHistograms(
+    BackgroundTaskPriority priority);
 
 }  // namespace unexportable_keys
 

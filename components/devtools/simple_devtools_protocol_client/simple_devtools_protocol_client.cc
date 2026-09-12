@@ -5,6 +5,8 @@
 #include "components/devtools/simple_devtools_protocol_client/simple_devtools_protocol_client.h"
 
 #include <algorithm>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #include "base/functional/bind.h"
@@ -14,11 +16,9 @@
 #include "base/memory/ptr_util.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_split.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using content::DevToolsAgentHost;
 
@@ -39,7 +39,6 @@ int g_next_message_id = 0;
 }  // namespace
 
 SimpleDevToolsProtocolClient::SimpleDevToolsProtocolClient() = default;
-
 SimpleDevToolsProtocolClient::SimpleDevToolsProtocolClient(
     const std::string& session_id)
     : session_id_(session_id) {}
@@ -92,10 +91,11 @@ void SimpleDevToolsProtocolClient::DispatchProtocolMessage(
     base::span<const uint8_t> json_message) {
   DCHECK_EQ(agent_host, agent_host_);
 
-  base::StringPiece str_message(
+  std::string_view str_message(
       reinterpret_cast<const char*>(json_message.data()), json_message.size());
-  base::Value message_value = *base::JSONReader::Read(str_message);
-  base::Value::Dict& message = message_value.GetDict();
+  base::Value message_value = *base::JSONReader::Read(
+      str_message, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  base::DictValue& message = message_value.GetDict();
 
   if (const std::string* session_id = message.FindString("sessionId")) {
     auto it = sessions_.find(*session_id);
@@ -104,7 +104,7 @@ void SimpleDevToolsProtocolClient::DispatchProtocolMessage(
           FROM_HERE,
           base::BindOnce(
               &SimpleDevToolsProtocolClient::DispatchProtocolMessageTask,
-              base::Unretained(it->second), std::move(message)));
+              it->second->GetWeakPtr(), std::move(message)));
       return;
     }
   }
@@ -112,7 +112,7 @@ void SimpleDevToolsProtocolClient::DispatchProtocolMessage(
   content::GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE,
       base::BindOnce(&SimpleDevToolsProtocolClient::DispatchProtocolMessageTask,
-                     base::Unretained(this), std::move(message)));
+                     GetWeakPtr(), std::move(message)));
 }
 
 void SimpleDevToolsProtocolClient::AgentHostClosed(
@@ -124,16 +124,19 @@ void SimpleDevToolsProtocolClient::AgentHostClosed(
 }
 
 void SimpleDevToolsProtocolClient::DispatchProtocolMessageTask(
-    base::Value::Dict message) {
+    base::DictValue message) {
   VLOG(kVLogLevel) << "\n[CDP RECV] " << message.DebugString();
 
   // Handle response message shutting down the host if it's unexpected.
-  if (absl::optional<int> id = message.FindInt(kId)) {
+  if (std::optional<int> id = message.FindInt(kId)) {
     auto it = pending_response_map_.find(*id);
     if (it == pending_response_map_.cend()) {
       LOG(ERROR) << "Unexpected message id=" << *id;
-      agent_host_->GetProcessHost()->ShutdownForBadMessage(
-          content::RenderProcessHost::CrashReportMode::GENERATE_CRASH_DUMP);
+      if (agent_host_) {
+        agent_host_->GetProcessHost()->ShutdownForBadMessage(
+            content::RenderProcessHost::CrashReportMode::GENERATE_CRASH_DUMP);
+      }
+      return;
     }
 
     // Result handler callback may add more callbacks, so make sure we use
@@ -170,7 +173,7 @@ void SimpleDevToolsProtocolClient::DispatchProtocolMessageTask(
 }
 
 void SimpleDevToolsProtocolClient::SendProtocolMessage(
-    base::Value::Dict message) {
+    base::DictValue message) {
   if (parent_client_ && !agent_host_) {
     parent_client_->SendProtocolMessage(std::move(message));
     return;
@@ -178,19 +181,17 @@ void SimpleDevToolsProtocolClient::SendProtocolMessage(
 
   VLOG(kVLogLevel) << "\n[CDP SEND] " << message.DebugString();
 
-  std::string json_message;
-  base::JSONWriter::Write(base::Value(std::move(message)), &json_message);
-  agent_host_->DispatchProtocolMessage(
-      this, base::as_bytes(base::make_span(json_message)));
+  std::string json_message = base::WriteJson(message).value_or("");
+  agent_host_->DispatchProtocolMessage(this, base::as_byte_span(json_message));
 }
 
 void SimpleDevToolsProtocolClient::SendCommand(
     const std::string& method,
-    base::Value::Dict params,
+    base::DictValue params,
     ResponseCallback response_callback) {
   int id = g_next_message_id++;
 
-  base::Value::Dict message;
+  base::DictValue message;
   message.Set(kId, id);
   message.Set(kMethod, method);
   if (params.size())
@@ -206,16 +207,16 @@ void SimpleDevToolsProtocolClient::SendCommand(
 void SimpleDevToolsProtocolClient::SendCommand(
     const std::string& method,
     ResponseCallback response_callback) {
-  SendCommand(method, base::Value::Dict(), std::move(response_callback));
+  SendCommand(method, base::DictValue(), std::move(response_callback));
 }
 
 void SimpleDevToolsProtocolClient::SendCommand(const std::string& method,
-                                               base::Value::Dict params) {
+                                               base::DictValue params) {
   SendCommand(method, std::move(params), base::DoNothing());
 }
 
 void SimpleDevToolsProtocolClient::SendCommand(const std::string& method) {
-  SendCommand(method, base::Value::Dict(), base::DoNothing());
+  SendCommand(method, base::DictValue(), base::DoNothing());
 }
 
 void SimpleDevToolsProtocolClient::AddEventHandler(
@@ -252,6 +253,11 @@ bool SimpleDevToolsProtocolClient::HasEventHandler(
   auto handler = std::find(handlers.cbegin(), handlers.cend(), event_callback);
 
   return handler != handlers.cend();
+}
+
+base::WeakPtr<SimpleDevToolsProtocolClient>
+SimpleDevToolsProtocolClient::GetWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace simple_devtools_protocol_client

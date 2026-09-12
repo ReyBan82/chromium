@@ -9,6 +9,7 @@
 #include <memory>
 #include <set>
 
+#include "base/memory/raw_ptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/tracing/perfetto_task_runner.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
@@ -51,18 +52,12 @@ class PerfettoService : public mojom::PerfettoService {
       uint64_t shared_memory_buffer_page_size_bytes) override;
 
   perfetto::TracingService* GetService() const;
+  bool GetSessionPrivacyFilteringEnabled(const std::string& session_name) const;
 
   // Called when a ConsumerHost::TracingSession is created/destroyed (i.e. when
   // a consumer starts/finishes tracing.
   void RegisterTracingSession(ConsumerHost::TracingSession* consumer_host);
   void UnregisterTracingSession(ConsumerHost::TracingSession* consumer_host);
-
-  // Make a request of the service for whether or not a TracingSession
-  // should be allowed to start tracing, in case of pre-existing sessions.
-  // |callback| will eventually be called once a session is allowed, or it
-  // will be destroyed.
-  void RequestTracingSession(mojom::TracingClientPriority priority,
-                             base::OnceClosure callback);
 
   // Called by TracingService to notify the perfetto service of the PIDs of
   // actively running services (whenever a service starts or stops).
@@ -80,8 +75,9 @@ class PerfettoService : public mojom::PerfettoService {
     return active_service_pids_initialized_;
   }
 
-  base::tracing::PerfettoTaskRunner* perfetto_task_runner() {
-    return &perfetto_task_runner_;
+  void DisconnectAllProducersForTesting() {
+    producer_receivers_.Clear();
+    receivers_.Clear();
   }
 
  private:
@@ -95,7 +91,8 @@ class PerfettoService : public mojom::PerfettoService {
   std::unique_ptr<perfetto::TracingService> service_;
   mojo::ReceiverSet<mojom::PerfettoService, uint32_t> receivers_;
   mojo::UniqueReceiverSet<mojom::ProducerHost, uint32_t> producer_receivers_;
-  std::set<ConsumerHost::TracingSession*> tracing_sessions_;  // Not owned.
+  std::set<raw_ptr<ConsumerHost::TracingSession, SetExperimental>>
+      tracing_sessions_;  // Not owned.
   // Protects access to |active_service_pids_|. We need this lock because
   // CustomEventRecorder calls active_service_pids() from a possibly different
   // thread on incremental state reset.

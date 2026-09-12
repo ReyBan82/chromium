@@ -9,13 +9,11 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/trace_event/common/trace_event_common.h"
+#include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "content/browser/child_process_host_impl.h"
 #include "content/browser/renderer_host/media/service_video_capture_device_launcher.h"
 #include "content/browser/renderer_host/media/virtual_video_capture_devices_changed_observer.h"
-#include "content/browser/video_capture_service_impl.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/gpu_data_manager.h"
@@ -28,33 +26,22 @@
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "services/video_capture/public/mojom/video_capture_service.mojom.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "content/public/browser/chromeos/delegate_to_browser_gpu_service_accelerator_factory.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace {
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+using GetSourceInfosResult =
+    video_capture::mojom::VideoSourceProvider::GetSourceInfosResult;
+
+#if BUILDFLAG(IS_CHROMEOS)
 std::unique_ptr<video_capture::mojom::AcceleratorFactory>
 CreateAcceleratorFactory() {
   return std::make_unique<
       content::DelegateToBrowserGpuServiceAcceleratorFactory>();
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
-
-// Do not reorder, used for UMA Media.VideoCapture.GetDeviceInfosResult
-enum class GetDeviceInfosResult {
-  kSucessNoRetry = 0,
-  kFailureNoRetry = 1,
-  kSucessAfterRetry = 2,
-  kFailureAfterRetry = 3,
-  kMaxValue = kFailureAfterRetry,
-};
-
-void LogGetDeviceInfosResult(GetDeviceInfosResult result) {
-  base::UmaHistogramEnumeration("Media.VideoCapture.GetDeviceInfosResult",
-                                result);
-}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 }  // anonymous namespace
 
@@ -68,7 +55,7 @@ class ServiceVideoCaptureProvider::ServiceProcessObserver
       : io_task_runner_(GetIOThreadTaskRunner({})),
         start_callback_(std::move(start_callback)),
         stop_callback_(std::move(stop_callback)) {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M154);
     ServiceProcessHost::AddObserver(this);
   }
 
@@ -76,7 +63,7 @@ class ServiceVideoCaptureProvider::ServiceProcessObserver
   ServiceProcessObserver& operator=(const ServiceProcessObserver&) = delete;
 
   ~ServiceProcessObserver() override {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M154);
     ServiceProcessHost::RemoveObserver(this);
   }
 
@@ -105,7 +92,7 @@ class ServiceVideoCaptureProvider::ServiceProcessObserver
   const base::RepeatingClosure stop_callback_;
 };
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 ServiceVideoCaptureProvider::ServiceVideoCaptureProvider(
     base::RepeatingCallback<void(const std::string&)> emit_log_message_cb)
     : ServiceVideoCaptureProvider(base::NullCallback(),
@@ -117,12 +104,12 @@ ServiceVideoCaptureProvider::ServiceVideoCaptureProvider(
     : create_accelerator_factory_cb_(std::move(create_accelerator_factory_cb)),
       emit_log_message_cb_(std::move(emit_log_message_cb)),
       launcher_has_connected_to_source_provider_(false) {
-#else   // BUILDFLAG(IS_CHROMEOS_ASH)
+#else   // BUILDFLAG(IS_CHROMEOS)
 ServiceVideoCaptureProvider::ServiceVideoCaptureProvider(
     base::RepeatingCallback<void(const std::string&)> emit_log_message_cb)
     : emit_log_message_cb_(std::move(emit_log_message_cb)),
       launcher_has_connected_to_source_provider_(false) {
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
   if (features::IsVideoCaptureServiceEnabledForOutOfProcess()) {
     service_process_observer_.emplace(
         GetUIThreadTaskRunner({}),
@@ -147,31 +134,55 @@ ServiceVideoCaptureProvider::ServiceVideoCaptureProvider(
 }
 
 ServiceVideoCaptureProvider::~ServiceVideoCaptureProvider() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M154);
   OnServiceConnectionClosed(ReasonForDisconnect::kShutdown);
   content::GpuDataManager::GetInstance()->RemoveObserver(this);
 }
 
 void ServiceVideoCaptureProvider::GetDeviceInfosAsync(
     GetDeviceInfosCallback result_callback) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M154);
   emit_log_message_cb_.Run("ServiceVideoCaptureProvider::GetDeviceInfosAsync");
-  get_device_infos_retried_ = false;
   get_device_infos_pending_callbacks_.push_back(std::move(result_callback));
   GetDeviceInfosAsyncForRetry();
 }
 
 std::unique_ptr<VideoCaptureDeviceLauncher>
 ServiceVideoCaptureProvider::CreateDeviceLauncher() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   return std::make_unique<ServiceVideoCaptureDeviceLauncher>(
       base::BindRepeating(
           &ServiceVideoCaptureProvider::OnLauncherConnectingToSourceProvider,
           weak_ptr_factory_.GetWeakPtr()));
 }
 
+void ServiceVideoCaptureProvider::OpenNativeScreenCapturePicker(
+    DesktopMediaID::Type type,
+    base::OnceCallback<void(DesktopMediaID::Id)> created_callback,
+    base::OnceCallback<void(webrtc::DesktopCapturer::Source)> picker_callback,
+    base::OnceCallback<void()> cancel_callback,
+    base::OnceCallback<void()> error_callback,
+    base::OnceCallback<void(DesktopMediaID::Id)> stop_audio_callback) {
+  NOTREACHED();
+}
+
+void ServiceVideoCaptureProvider::CloseNativeScreenCapturePicker(
+    DesktopMediaID device_id) {
+  NOTREACHED();
+}
+
+#if BUILDFLAG(IS_MAC)
+void ServiceVideoCaptureProvider::GetApplicationAudioCaptureId(
+    DesktopMediaID::Id session_id,
+    base::OnceCallback<
+        void(const std::optional<desktop_capture::ApplicationAudioCaptureId>&)>
+        callback) {
+  std::move(callback).Run(std::nullopt);
+}
+#endif
+
 void ServiceVideoCaptureProvider::OnServiceStarted() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   // Whenever the video capture service starts, we register a
   // VirtualVideoCaptureDevicesChangedObserver in order to propagate device
   // change events when virtual devices are added to or removed from the
@@ -187,7 +198,7 @@ void ServiceVideoCaptureProvider::OnServiceStarted() {
 }
 
 void ServiceVideoCaptureProvider::OnServiceStopped() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   if (!get_device_infos_pending_callbacks_.empty()) {
     // The service stopped during a device info query.
     TRACE_EVENT_INSTANT0(
@@ -200,19 +211,19 @@ void ServiceVideoCaptureProvider::OnServiceStopped() {
 
 void ServiceVideoCaptureProvider::OnLauncherConnectingToSourceProvider(
     scoped_refptr<RefCountedVideoSourceProvider>* out_provider) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   launcher_has_connected_to_source_provider_ = true;
   *out_provider = LazyConnectToService();
 }
 
 void ServiceVideoCaptureProvider::RegisterWithGpuDataManager() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   content::GpuDataManager::GetInstance()->AddObserver(this);
 }
 
 scoped_refptr<RefCountedVideoSourceProvider>
 ServiceVideoCaptureProvider::LazyConnectToService() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
 
   if (weak_service_connection_) {
     // There already is a connection.
@@ -223,7 +234,7 @@ ServiceVideoCaptureProvider::LazyConnectToService() {
   time_of_last_connect_ = base::TimeTicks::Now();
 
   auto ui_task_runner = GetUIThreadTaskRunner({});
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   mojo::PendingRemote<video_capture::mojom::AcceleratorFactory>
       accelerator_factory;
   if (!create_accelerator_factory_cb_)
@@ -234,7 +245,7 @@ ServiceVideoCaptureProvider::LazyConnectToService() {
       accelerator_factory.InitWithNewPipeAndPassReceiver());
   GetVideoCaptureService().InjectGpuDependencies(
       std::move(accelerator_factory));
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_WIN)
   // Pass active gpu info.
@@ -243,13 +254,6 @@ ServiceVideoCaptureProvider::LazyConnectToService() {
 #endif
 
   mojo::Remote<video_capture::mojom::VideoSourceProvider> source_provider;
-#if BUILDFLAG(IS_MAC)
-  if (get_device_infos_retried_) {
-    // If the service crashed once during a device info query, enable the
-    // safe-mode VideoCaptureService.
-    EnableVideoCaptureServiceSafeMode();
-  }
-#endif
   GetVideoCaptureService().ConnectToVideoSourceProvider(
       source_provider.BindNewPipeAndPassReceiver());
   source_provider.set_disconnect_handler(base::BindOnce(
@@ -265,7 +269,7 @@ ServiceVideoCaptureProvider::LazyConnectToService() {
 }
 
 void ServiceVideoCaptureProvider::GetDeviceInfosAsyncForRetry() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   auto service_connection = LazyConnectToService();
   // Make sure that the callback gets invoked with an empty result in case
   // that the service drops the request.
@@ -280,39 +284,30 @@ void ServiceVideoCaptureProvider::GetDeviceInfosAsyncForRetry() {
 
 void ServiceVideoCaptureProvider::OnDeviceInfosReceived(
     scoped_refptr<RefCountedVideoSourceProvider> service_connection,
+    GetSourceInfosResult result,
     const std::vector<media::VideoCaptureDeviceInfo>& infos) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
-  LogGetDeviceInfosResult(get_device_infos_retried_
-                              ? GetDeviceInfosResult::kSucessAfterRetry
-                              : GetDeviceInfosResult::kSucessNoRetry);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   for (GetDeviceInfosCallback& callback : get_device_infos_pending_callbacks_) {
-    std::move(callback).Run(media::mojom::DeviceEnumerationResult::kSuccess,
-                            infos);
+    media::mojom::DeviceEnumerationResult callback_result;
+    switch (result) {
+      case GetSourceInfosResult::kSuccess:
+        callback_result = media::mojom::DeviceEnumerationResult::kSuccess;
+        break;
+      case GetSourceInfosResult::kErrorDroppedRequest:
+        callback_result = media::mojom::DeviceEnumerationResult::
+            kErrorCaptureServiceDroppedRequest;
+        break;
+      default:
+        NOTREACHED() << "Invalid GetSourceInfosResult result " << result;
+    }
+    std::move(callback).Run(callback_result, infos);
   }
   get_device_infos_pending_callbacks_.clear();
 }
 
 void ServiceVideoCaptureProvider::OnDeviceInfosRequestDropped(
     scoped_refptr<RefCountedVideoSourceProvider> service_connection) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
-  if (base::FeatureList::IsEnabled(
-          features::kRetryGetVideoCaptureDeviceInfos)) {
-    if (!get_device_infos_retried_) {
-      get_device_infos_retried_ = true;
-      // Do nothing, OnServiceStopped will retry the query automatically when
-      // the service has been torn down.
-      return;
-    }
-    LOG(WARNING) << "Too many GetDeviceInfos() retries";
-    emit_log_message_cb_.Run(
-        "ServiceVideoCaptureProvider::OnDeviceInfosRequestDropped: Too many "
-        "retries");
-  }
-
-  LogGetDeviceInfosResult(get_device_infos_retried_
-                              ? GetDeviceInfosResult::kFailureAfterRetry
-                              : GetDeviceInfosResult::kFailureNoRetry);
-
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   // After too many retries, we just return an empty list
   for (GetDeviceInfosCallback& callback : get_device_infos_pending_callbacks_) {
     std::move(callback).Run(
@@ -323,7 +318,7 @@ void ServiceVideoCaptureProvider::OnDeviceInfosRequestDropped(
 }
 
 void ServiceVideoCaptureProvider::OnLostConnectionToSourceProvider() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   emit_log_message_cb_.Run(
       "ServiceVideoCaptureProvider::OnLostConnectionToSourceProvider");
   // This may indicate that the video capture service has crashed. Uninitialize
@@ -334,13 +329,13 @@ void ServiceVideoCaptureProvider::OnLostConnectionToSourceProvider() {
 
 void ServiceVideoCaptureProvider::OnServiceConnectionClosed(
     ReasonForDisconnect reason) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
 
   time_of_last_uninitialize_ = base::TimeTicks::Now();
 }
 
 void ServiceVideoCaptureProvider::OnGpuInfoUpdate() {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M152);
   if (!weak_service_connection_) {
     // Only need to notify the service if it's already running.
     return;

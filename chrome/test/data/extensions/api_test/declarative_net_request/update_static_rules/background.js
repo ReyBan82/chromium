@@ -5,24 +5,24 @@
 async function updateStaticRules(options, expectedError) {
   if (expectedError) {
     await chrome.test.assertPromiseRejects(
-        chrome.declarativeNetRequest.updateStaticRules(options),
-        expectedError);
+        chrome.declarativeNetRequest.updateStaticRules(options), expectedError);
   } else {
     await chrome.declarativeNetRequest.updateStaticRules(options);
   }
 }
 
 async function getActiveRules() {
-  let activeRules = [];
+  const activeRules = [];
   for (const rulesetId of ['rules1', 'rules2']) {
     for (const ruleId of [1, 2, 3]) {
-      let result = await chrome.declarativeNetRequest.testMatchOutcome(
-          {url: `https://${rulesetId}-${ruleId}.example.com/`,
-           type: 'main_frame', method: 'get'});
+      const result = await chrome.declarativeNetRequest.testMatchOutcome({
+        url: `https://${rulesetId}-${ruleId}.example.com/`,
+        type: 'main_frame',
+        method: 'get',
+      });
       if (result.matchedRules.length > 0) {
         chrome.test.assertEq(
-            {matchedRules: [{ruleId: ruleId, rulesetId: rulesetId}]},
-             result);
+            {matchedRules: [{ruleId: ruleId, rulesetId: rulesetId}]}, result);
         activeRules.push(`${rulesetId}-${ruleId}`);
       } else {
         chrome.test.assertEq({matchedRules: []}, result);
@@ -51,21 +51,29 @@ chrome.test.runTests([
     await chrome.declarativeNetRequest.updateEnabledRulesets(
         {enableRulesetIds: ['rules1', 'rules2']});
 
-    chrome.test.assertEq(['rules1-1', 'rules1-2', 'rules1-3', 'rules2-1',
-                          'rules2-2', 'rules2-3'],
-                         await getActiveRules());
-    chrome.test.assertEq([], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq(
+        [
+          'rules1-1',
+          'rules1-2',
+          'rules1-3',
+          'rules2-1',
+          'rules2-2',
+          'rules2-3',
+        ],
+        await getActiveRules());
+    chrome.test.assertEq([], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function disableRuleset1Rules() {
     // Disable rules1-2 and rules1-3.
     await updateStaticRules({rulesetId: 'rules1', disableRuleIds: [2, 3]});
 
-    chrome.test.assertEq(['rules1-1', 'rules2-1', 'rules2-2', 'rules2-3'],
-                         await getActiveRules());
-    chrome.test.assertEq([2, 3], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq(
+        ['rules1-1', 'rules2-1', 'rules2-2', 'rules2-3'],
+        await getActiveRules());
+    chrome.test.assertEq([2, 3], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function disableRulesets() {
@@ -75,8 +83,8 @@ chrome.test.runTests([
         {disableRulesetIds: ['rules1', 'rules2']});
 
     chrome.test.assertEq([], await getActiveRules());
-    chrome.test.assertEq([2, 3], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq([2, 3], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function enableRuleset1Rule() {
@@ -85,8 +93,8 @@ chrome.test.runTests([
     await updateStaticRules({rulesetId: 'rules1', enableRuleIds: [3]});
 
     chrome.test.assertEq([], await getActiveRules());
-    chrome.test.assertEq([2], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq([2], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function disableRuleset2Rules() {
@@ -95,8 +103,8 @@ chrome.test.runTests([
     await updateStaticRules({rulesetId: 'rules2', disableRuleIds: [2, 3]});
 
     chrome.test.assertEq([], await getActiveRules());
-    chrome.test.assertEq([2], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([2, 3], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq([2], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([2, 3], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function enableRulesetsAgain() {
@@ -105,45 +113,51 @@ chrome.test.runTests([
     await chrome.declarativeNetRequest.updateEnabledRulesets(
         {enableRulesetIds: ['rules1', 'rules2']});
 
-    chrome.test.assertEq(['rules1-1', 'rules1-3', 'rules2-1'],
-                         await getActiveRules());
-    chrome.test.assertEq([2], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([2, 3], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq(
+        ['rules1-1', 'rules1-3', 'rules2-1'], await getActiveRules());
+    chrome.test.assertEq([2], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([2, 3], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function enableRuleset2Rule() {
     // Enable rules2-2.
     await updateStaticRules({rulesetId: 'rules2', enableRuleIds: [2]});
 
-    chrome.test.assertEq(['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
-                         await getActiveRules());
-    chrome.test.assertEq([2], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([3], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq(
+        ['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
+        await getActiveRules());
+    chrome.test.assertEq([2], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([3], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function disableInvalidRulesetRules() {
     // updateStaticRules() must be failed with invalid ruleset id.
-    await updateStaticRules({rulesetId: 'invalid_rules', disableRuleIds: [2]},
-                            'Error: Invalid ruleset id: invalid_rules.');
+    await updateStaticRules(
+        {rulesetId: 'invalid_rules', disableRuleIds: [2]},
+        'Error: Invalid ruleset id: invalid_rules.');
 
-    chrome.test.assertEq(['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
-                         await getActiveRules());
-    chrome.test.assertEq([2], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([3], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq(
+        ['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
+        await getActiveRules());
+    chrome.test.assertEq([2], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([3], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function disableRulesetRulesExceedingLimits() {
     // updateStaticRules() must be failed when the result exceeds limit.
     await updateStaticRules(
-              {rulesetId: 'rules2',
-               disableRuleIds: Array.from({length: 5000}, (_, i) => i + 10)},
-              'Error: The number of disabled static rules exceeds ' +
-                  'the disabled rule count limit.');
+        {
+          rulesetId: 'rules2',
+          disableRuleIds: Array.from({length: 5000}, (_, i) => i + 10),
+        },
+        'Error: The number of disabled static rules exceeds ' +
+            'the disabled rule count limit.');
 
-    chrome.test.assertEq(['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
-                         await getActiveRules());
-    chrome.test.assertEq([2], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([3], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq(
+        ['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
+        await getActiveRules());
+    chrome.test.assertEq([2], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([3], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function updateStaticRulesWithEmptyList() {
@@ -151,15 +165,16 @@ chrome.test.runTests([
     // anything.
     await updateStaticRules({rulesetId: 'rules2'});
 
-    chrome.test.assertEq(['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
-                         await getActiveRules());
-    chrome.test.assertEq([2], await getDisabledRuleIds("rules1"));
-    chrome.test.assertEq([3], await getDisabledRuleIds("rules2"));
+    chrome.test.assertEq(
+        ['rules1-1', 'rules1-3', 'rules2-1', 'rules2-2'],
+        await getActiveRules());
+    chrome.test.assertEq([2], await getDisabledRuleIds('rules1'));
+    chrome.test.assertEq([3], await getDisabledRuleIds('rules2'));
     chrome.test.succeed();
   },
   async function getDisabledRuleIdsErrorForInvalidRuleset() {
     await verifyGetDisabledRuleIdsError(
-        "invalid_rules", "Error: Invalid ruleset id: invalid_rules.");
+        'invalid_rules', 'Error: Invalid ruleset id: invalid_rules.');
     chrome.test.succeed();
   },
 ]);

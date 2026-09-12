@@ -4,18 +4,34 @@
 
 package org.chromium.android_webview.common;
 
-import androidx.annotation.NonNull;
+import org.chromium.build.annotations.NullMarked;
 
-/**
- * An interface for defining a precaution WebView may take during SafeMode.
- */
-public interface SafeModeAction {
+/** An interface for defining a precaution WebView may take during SafeMode. */
+@NullMarked
+public abstract class SafeModeAction {
+    private boolean mIsEnabled;
+
+    public final void enable() {
+        mIsEnabled = true;
+    }
+
+    /**
+     * This should only be used by the non-embedded process which keeps track of enabled actions
+     * separately to the model used by embedded WebView.
+     */
+    public final void disable() {
+        mIsEnabled = false;
+    }
+
+    public final boolean isEnabled() {
+        return mIsEnabled;
+    }
+
     /**
      * Returns a unique identifier for this action. This must not be used by any other registered
      * action.
      */
-    @NonNull
-    public String getId();
+    public abstract String getId();
 
     /**
      * Executes the given action. Implementations of this method should be Java-only (no JNI/C++)
@@ -24,5 +40,7 @@ public interface SafeModeAction {
      *
      * @return {@code true} if the action succeeded, {@code false} otherwise.
      */
-    boolean execute();
+    public boolean executeAtStartup() {
+        return true;
+    }
 }

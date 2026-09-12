@@ -5,8 +5,10 @@
 #ifndef SANDBOX_WIN_SRC_APP_CONTAINER_H_
 #define SANDBOX_WIN_SRC_APP_CONTAINER_H_
 
+#include <string_view>
 #include <vector>
 
+#include "base/strings/cstring_view.h"
 #include "base/win/security_descriptor.h"
 #include "base/win/sid.h"
 #include "base/win/windows_types.h"
@@ -18,42 +20,33 @@ enum AppContainerType { kNone, kDerived, kProfile, kLowbox };
 
 class [[clang::lto_visibility_public]] AppContainer {
  public:
-  // Increments the reference count of this object. The reference count must
-  // be incremented if this interface is given to another component.
-  virtual void AddRef() = 0;
-
-  // Decrements the reference count of this object. When the reference count
-  // is zero the object is automatically destroyed.
-  // Indicates that the caller is done with this interface. After calling
-  // release no other method should be called.
-  virtual void Release() = 0;
-
   // Do an access check based on this profile for a named object. If method
   // returns true then access_status reflects whether access was granted and
   // granted_access gives the final access rights. The object_type can be one of
   // kFile or kRegistry which correspond to SE_FILE_OBJECT or SE_REGISTRY_KEY.
   // See ::GetNamedSecurityInfo for more information about how the enumeration
   // is used and what format object_name needs to be.
-  virtual bool AccessCheck(const wchar_t* object_name,
+  virtual bool AccessCheck(base::wcstring_view object_name,
                            base::win::SecurityObjectType object_type,
                            DWORD desired_access,
                            DWORD* granted_access,
                            BOOL* access_status) = 0;
 
   // Adds a capability by name to this profile.
-  virtual void AddCapability(const wchar_t* capability_name) = 0;
+  virtual void AddCapability(std::wstring_view capability_name) = 0;
   // Adds a capability from a known list.
   virtual void AddCapability(base::win::WellKnownCapability capability) = 0;
   // Adds a capability from a SID
-  virtual bool AddCapabilitySddl(const wchar_t* sddl_sid) = 0;
+  virtual bool AddCapabilitySddl(base::wcstring_view sddl_sid) = 0;
 
   // Adds an impersonation capability by name to this profile.
-  virtual void AddImpersonationCapability(const wchar_t* capability_name) = 0;
+  virtual void AddImpersonationCapability(
+      std::wstring_view capability_name) = 0;
   // Adds an impersonation capability from a known list.
   virtual void AddImpersonationCapability(
       base::win::WellKnownCapability capability) = 0;
   // Adds an impersonation capability from a SID
-  virtual bool AddImpersonationCapabilitySddl(const wchar_t* sddl_sid) = 0;
+  virtual bool AddImpersonationCapabilitySddl(base::wcstring_view sddl_sid) = 0;
 
   // Enable Low Privilege AC.
   virtual void SetEnableLowPrivilegeAppContainer(bool enable) = 0;

@@ -48,7 +48,7 @@ class WebrtcFrameSchedulerTest : public ::testing::Test {
 
   int capture_callback_count_ = 0;
   bool simulate_capture_ = true;
-  BasicDesktopFrame frame_{DesktopSize(1, 1)};
+  BasicDesktopFrame frame_{DesktopSize(1, 1), webrtc::FOURCC_ARGB};
 };
 
 TEST_F(WebrtcFrameSchedulerTest, NoCapturesIfZeroFps) {
@@ -57,7 +57,7 @@ TEST_F(WebrtcFrameSchedulerTest, NoCapturesIfZeroFps) {
 
   task_environment_.FastForwardBy(base::Seconds(1));
 
-  EXPECT_EQ(0, capture_callback_count_);
+  EXPECT_EQ(capture_callback_count_, 0);
 }
 
 TEST_F(WebrtcFrameSchedulerTest, CapturesAtRequestedFramerate) {
@@ -94,7 +94,7 @@ TEST_F(WebrtcFrameSchedulerTest, NoCaptureWhileCapturePending) {
 
   // Only 1 capture callback, because the fake "capturer" never returns a
   // captured frame. The scheduler should only do 1 capture at a time.
-  EXPECT_EQ(1, capture_callback_count_);
+  EXPECT_EQ(capture_callback_count_, 1);
 }
 
 TEST_F(WebrtcFrameSchedulerTest, NoCaptureWhilePaused) {
@@ -104,7 +104,7 @@ TEST_F(WebrtcFrameSchedulerTest, NoCaptureWhilePaused) {
 
   task_environment_.FastForwardBy(base::Seconds(1));
 
-  EXPECT_EQ(0, capture_callback_count_);
+  EXPECT_EQ(capture_callback_count_, 0);
 
   scheduler_->Pause(false);
   task_environment_.FastForwardBy(base::Seconds(1));

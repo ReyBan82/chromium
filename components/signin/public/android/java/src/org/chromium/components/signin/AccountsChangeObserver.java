@@ -6,22 +6,19 @@ package org.chromium.components.signin;
 
 import androidx.annotation.MainThread;
 
+import org.chromium.build.annotations.NullMarked;
+
 /**
  * Observer that receives account change notifications. Use {@link AccountManagerFacade#addObserver}
  * and {@link AccountManagerFacade#removeObserver} to update registrations.
+ *
+ * @deprecated New code should implement either {@link IdentityManager.Observer} or {@link
+ *     ProfileDataCache.Observer} instead.
  */
+@Deprecated
+@NullMarked
 public interface AccountsChangeObserver {
-    /**
-     * Called on every change to the accounts or to the error condition that occurred while getting
-     * accounts.
-     */
+    /** Called on every change to the accounts or if getting accounts fails. */
     @MainThread
     void onAccountsChanged();
-
-    /**
-     * Called after updating {@link org.chromium.components.signin.base.CoreAccountInfo} on every
-     * change to the accounts or to the error condition that occurred while getting accounts.
-     */
-    @MainThread
-    default void onCoreAccountInfosChanged() {}
 }

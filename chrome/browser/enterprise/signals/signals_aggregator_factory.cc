@@ -8,20 +8,47 @@
 #include <utility>
 #include <vector>
 
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "build/build_config.h"
-#include "chrome/browser/enterprise/signals/system_signals_service_host_factory.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/enterprise/browser_management/management_service_factory.h"
+#include "chrome/browser/enterprise/identifiers/profile_id_service_factory.h"
+#include "chrome/browser/enterprise/signals/profile_signals_collector.h"
 #include "chrome/browser/enterprise/signals/user_permission_service_factory.h"
+#include "chrome/browser/net/profile_network_context_service.h"
+#include "chrome/browser/net/profile_network_context_service_factory.h"
+#include "chrome/browser/policy/chrome_browser_policy_connector.h"
 #include "chrome/browser/profiles/profile.h"
+#include "components/enterprise/buildflags/buildflags.h"
+
+#include "components/device_signals/core/browser/certificate_signals_collector.h"
 #include "components/device_signals/core/browser/file_system_signals_collector.h"
 #include "components/device_signals/core/browser/settings_signals_collector.h"
 #include "components/device_signals/core/browser/signals_aggregator.h"
 #include "components/device_signals/core/browser/signals_aggregator_impl.h"
 #include "components/device_signals/core/browser/signals_collector.h"
-#include "components/device_signals/core/browser/system_signals_service_host.h"
 #include "components/device_signals/core/browser/user_permission_service.h"
+#include "components/device_signals/core/common/signals_features.h"
 #include "components/keyed_service/core/keyed_service.h"
+#include "components/policy/core/common/cloud/machine_level_user_cloud_policy_manager.h"
+#include "components/policy/core/common/management/management_service.h"
 #include "content/public/browser/browser_context.h"
+#include "net/ssl/client_cert_store.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
+#include "chrome/browser/ash/policy/core/device_cloud_policy_manager_ash.h"
+#include "chrome/browser/browser_process_platform_part.h"
+#include "chrome/browser/enterprise/util/affiliation.h"
+#endif
+
+#if BUILDFLAG(IS_ANDROID)
+#include "components/device_signals/core/browser/android/android_os_signals_collector.h"
+#else
+#include "chrome/browser/enterprise/signals/system_signals_service_host_factory.h"
+#include "components/device_signals/core/browser/desktop/desktop_os_signals_collector.h"
+#include "components/device_signals/core/browser/system_signals_service_host.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(IS_MAC)
 #include "components/device_signals/core/browser/mac/plist_settings_client.h"
@@ -33,10 +60,13 @@
 #endif  // BUILDFLAG(IS_WIN)
 
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
-#include "components/device_signals/core/browser/agent_signals_collector.h"
-#include "components/device_signals/core/browser/crowdstrike_client.h"
 #include "components/device_signals/core/browser/settings_client.h"
 #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+#include "components/device_signals/core/browser/agent_signals_collector.h"
+#include "components/device_signals/core/browser/crowdstrike_client.h"
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 
 namespace enterprise_signals {
 
@@ -52,7 +82,8 @@ std::unique_ptr<device_signals::SettingsClient> CreateSettingsClient() {
 
 // static
 SignalsAggregatorFactory* SignalsAggregatorFactory::GetInstance() {
-  return base::Singleton<SignalsAggregatorFactory>::get();
+  static base::NoDestructor<SignalsAggregatorFactory> instance;
+  return instance.get();
 }
 
 // static
@@ -63,41 +94,119 @@ device_signals::SignalsAggregator* SignalsAggregatorFactory::GetForProfile(
 }
 
 SignalsAggregatorFactory::SignalsAggregatorFactory()
-    : ProfileKeyedServiceFactory("SignalsAggregator") {
+    : ProfileKeyedServiceFactory(
+          "SignalsAggregator",
+          ProfileSelections::BuildForRegularAndIncognito()) {
+#if !BUILDFLAG(IS_ANDROID)
   DependsOn(SystemSignalsServiceHostFactory::GetInstance());
+#endif  // !BUILDFLAG(IS_ANDROID)
   DependsOn(UserPermissionServiceFactory::GetInstance());
+  DependsOn(enterprise::ProfileIdServiceFactory::GetInstance());
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS)
+  DependsOn(ProfileNetworkContextServiceFactory::GetInstance());
+#endif
 }
 
 SignalsAggregatorFactory::~SignalsAggregatorFactory() = default;
 
-KeyedService* SignalsAggregatorFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+SignalsAggregatorFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   auto* profile = Profile::FromBrowserContext(context);
 
   auto* user_permission_service =
       UserPermissionServiceFactory::GetForProfile(profile);
+  if (!user_permission_service) {
+    // Unsupported configuration (e.g. CrOS login Profile supported, but not
+    // incognito).
+    return nullptr;
+  }
 
   std::vector<std::unique_ptr<device_signals::SignalsCollector>> collectors;
+#if !BUILDFLAG(IS_ANDROID)
   auto* service_host = SystemSignalsServiceHostFactory::GetForProfile(profile);
   collectors.push_back(
       std::make_unique<device_signals::FileSystemSignalsCollector>(
           service_host));
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  collectors.push_back(std::make_unique<device_signals::AgentSignalsCollector>(
+      device_signals::CrowdStrikeClient::Create()));
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
   collectors.push_back(
       std::make_unique<device_signals::SettingsSignalsCollector>(
           CreateSettingsClient()));
-  collectors.push_back(std::make_unique<device_signals::AgentSignalsCollector>(
-      device_signals::CrowdStrikeClient::Create()));
 #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS)
+  if (enterprise_signals::features::IsCertificateCollectionEnabled()) {
+    auto* profile_network_service =
+        ProfileNetworkContextServiceFactory::GetForContext(profile);
+    std::unique_ptr<net::ClientCertStore> cert_store =
+        profile_network_service
+            ? profile_network_service->CreateClientCertStore()
+            : nullptr;
+    if (cert_store) {
+      collectors.push_back(
+          std::make_unique<device_signals::CertificateSignalsCollector>(
+              std::move(cert_store)));
+    }
+  }
+
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) ||
+        // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_WIN)
   collectors.push_back(
       std::make_unique<device_signals::WinSignalsCollector>(service_host));
 #endif  // BUILDFLAG(IS_WIN)
 
-  return new device_signals::SignalsAggregatorImpl(user_permission_service,
-                                                   std::move(collectors));
+  auto* management_service =
+      policy::ManagementServiceFactory::GetForProfile(profile);
+
+  policy::CloudPolicyManager* browser_policy_manager = nullptr;
+
+  if (management_service->HasManagementAuthority(
+          policy::EnterpriseManagementAuthority::CLOUD_DOMAIN)) {
+    auto* browser_policy_connector =
+        g_browser_process->browser_policy_connector();
+
+    if (browser_policy_connector) {
+#if BUILDFLAG(IS_CHROMEOS)
+      // Only fetch the device-level CloudPolicyManager if the user is
+      // affiliated, as we should only expose device-level signals (like
+      // the enrollment domain) to affiliated users.
+      if (enterprise_util::IsProfileAffiliated(profile)) {
+        browser_policy_manager = g_browser_process->platform_part()
+                                     ->browser_policy_connector_ash()
+                                     ->GetDeviceCloudPolicyManager();
+      }
+#else
+      browser_policy_manager =
+          browser_policy_connector->machine_level_user_cloud_policy_manager();
+#endif
+    }
+  }
+
+#if BUILDFLAG(IS_ANDROID)
+  collectors.push_back(
+      std::make_unique<device_signals::AndroidOsSignalsCollector>(
+          browser_policy_manager));
+#else
+  collectors.push_back(
+      std::make_unique<device_signals::DesktopOsSignalsCollector>(
+          browser_policy_manager));
+#endif  // BUILDFLAG(IS_ANDROID)
+  collectors.push_back(
+      std::make_unique<device_signals::ProfileSignalsCollector>(profile));
+
+  return std::make_unique<device_signals::SignalsAggregatorImpl>(
+      user_permission_service, std::move(collectors));
 }
 
 }  // namespace enterprise_signals

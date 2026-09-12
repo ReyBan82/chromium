@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "gpu/command_buffer/service/gl_utils.h"
 #include "gpu/command_buffer/service/indexed_buffer_binding_host.h"
 #include "gpu/gpu_gles2_export.h"
@@ -18,6 +18,7 @@ namespace gpu {
 namespace gles2 {
 
 class Buffer;
+class Program;
 class TransformFeedbackManager;
 
 // Info about TransformFeedbacks currently in the system.
@@ -58,6 +59,13 @@ class GPU_GLES2_EXPORT TransformFeedback : public IndexedBufferBindingHost {
     return paused_;
   }
 
+  bool AttachedBuffersAreLocked() const override;
+
+  void SetActiveProgram(Program* program);
+  void ClearActiveProgram();
+
+  Program* active_program() const { return active_program_.get(); }
+
   GLenum primitive_mode() const {
     return primitive_mode_;
   }
@@ -96,6 +104,24 @@ class GPU_GLES2_EXPORT TransformFeedback : public IndexedBufferBindingHost {
 
   GLenum primitive_mode_;
   GLsizei vertices_drawn_;
+
+  scoped_refptr<Program> active_program_;
+};
+
+class GPU_GLES2_EXPORT ScopedPauseResumeTransformFeedback {
+ public:
+  explicit ScopedPauseResumeTransformFeedback(
+      TransformFeedback* transform_feedback);
+
+  ScopedPauseResumeTransformFeedback(
+      const ScopedPauseResumeTransformFeedback&) = delete;
+  ScopedPauseResumeTransformFeedback& operator=(
+      const ScopedPauseResumeTransformFeedback&) = delete;
+
+  ~ScopedPauseResumeTransformFeedback();
+
+ private:
+  raw_ptr<TransformFeedback> transform_feedback_;
 };
 
 // This class keeps tracks of the transform feedbacks and their states.

@@ -8,31 +8,38 @@
 #include <map>
 
 #include "chrome/browser/web_applications/web_app_origin_association_manager.h"
+#include "components/webapps/common/web_app_id.h"
 
 namespace web_app {
 
 // Fake implementation of WebAppOriginAssociationManager.
+// When tested components need to validate origin associations (e.g. for scope
+// extensions or migrations), tests can either use `SetData` to mock specific
+// validation responses, or call `set_pass_through(true)` to simply bypass the
+// network request entirely and return the inputted associations as valid.
 class FakeWebAppOriginAssociationManager
     : public WebAppOriginAssociationManager {
  public:
-  FakeWebAppOriginAssociationManager();
+  explicit FakeWebAppOriginAssociationManager(Profile& profile);
   ~FakeWebAppOriginAssociationManager() override;
 
   // Sends back preset data.
-  // Sends back |url_handlers| as is if pass_through_ is set.
+  // Sends back |scope_extensions| as is if pass_through_ is set.
   void GetWebAppOriginAssociations(
-      const GURL& manifest_url,
-      apps::UrlHandlers url_handlers,
+      const GURL& web_app_identity,
+      OriginAssociations origin_associations,
       OnDidGetWebAppOriginAssociations callback) override;
 
-  void SetData(std::map<apps::UrlHandlerInfo, apps::UrlHandlerInfo> data);
+  void SetData(std::map<ScopeExtensionInfo, ScopeExtensionInfo> data);
+  void SetMigrationSourcesData(base::flat_set<webapps::ManifestId> data);
 
   void set_pass_through(bool value) { pass_through_ = value; }
 
  private:
   // Maps a url handler to the corresponding result to send back in the
   // callback.
-  std::map<apps::UrlHandlerInfo, apps::UrlHandlerInfo> data_;
+  std::map<ScopeExtensionInfo, ScopeExtensionInfo> data_;
+  base::flat_set<webapps::ManifestId> migration_sources_data_;
   bool pass_through_ = false;
 };
 

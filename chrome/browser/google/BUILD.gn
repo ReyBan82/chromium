@@ -3,34 +3,29 @@
 # found in the LICENSE file.
 
 import("//build/config/chrome_build.gni")
-import("//build/config/chromeos/ui_mode.gni")
+
+assert(!is_fuchsia, "Fuchsia shouldn't use anything in //chrome")
 
 source_set("google") {
   sources = [
     "google_brand.cc",
     "google_brand.h",
-    "google_search_domain_mixing_metrics_emitter.cc",
-    "google_search_domain_mixing_metrics_emitter.h",
-    "google_search_domain_mixing_metrics_emitter_factory.cc",
-    "google_search_domain_mixing_metrics_emitter_factory.h",
+    "google_update_policy_fetcher.cc",
+    "google_update_policy_fetcher.h",
   ]
+
+  public_deps = [ "//chrome/browser:browser_public_dependencies" ]
 
   deps = [
     "//base",
-    "//chrome/browser/profiles:profile",
     "//chrome/common:constants",
-    "//components/history/core/browser:browser",
-    "//components/keyed_service/core:core",
-    "//components/pref_registry:pref_registry",
-    "//components/prefs:prefs",
+    "//components/policy/core/browser",
+    "//components/policy/core/common",
+    "//components/prefs",
     "//content/public/browser",
   ]
 
-  if (is_mac) {
-    deps += [ "//chrome/browser/mac:keystone_glue" ]
-  }
-
-  if (is_chromeos_ash) {
+  if (is_chromeos) {
     sources += [
       "google_brand_chromeos.cc",
       "google_brand_chromeos.h",
@@ -40,7 +35,9 @@ source_set("google") {
 
     deps += [
       "//chrome/browser:browser_process",
-      "//chromeos/ash/components/system:system",
+      "//chrome/browser:browser_process_platform_part",
+      "//chrome/browser/ash/policy/core",
+      "//chromeos/ash/components/system",
       "//components/policy/core/common:common_constants",
     ]
   }
@@ -49,37 +46,33 @@ source_set("google") {
     sources += [
       "did_run_updater_win.cc",
       "did_run_updater_win.h",
+      "google_update_app_command.cc",
+      "google_update_app_command.h",
+      "google_update_win.cc",
+      "google_update_win.h",
+      "switches.cc",
+      "switches.h",
     ]
-    if (is_chrome_branded) {
-      sources += [
-        "google_update_policy_fetcher_win.cc",
-        "google_update_policy_fetcher_win.h",
-        "google_update_policy_fetcher_win_util.cc",
-        "google_update_policy_fetcher_win_util.h",
-        "google_update_win.cc",
-        "google_update_win.h",
-        "switches.cc",
-        "switches.h",
-      ]
-
-      deps += [ "//google_update" ]
-    }
 
     deps += [
       "//chrome/app:generated_resources_grit",
+      "//chrome/browser/component_updater",
       "//chrome/common",
       "//chrome/install_static:install_static_util",
       "//chrome/installer/util:with_no_strings",
+      "//chrome/updater/app/server/win:updater_legacy_idl",
+      "//components/activity_reporter:buildflags",
       "//components/policy/core/browser",
       "//components/policy/core/common",
     ]
   }
 
-  if (is_posix || is_fuchsia) {
-    sources += [ "google_update_settings_posix.cc" ]
-  }
-  if (is_posix) {
-    deps += [ "//components/crash/core/app" ]
+  if (is_mac) {
+    sources += [ "google_brand_mac.mm" ]
+    deps += [
+      "//chrome/common:channel_info",
+      "//chrome/updater:tagging",
+    ]
   }
 }
 
@@ -87,8 +80,7 @@ source_set("unit_tests") {
   testonly = true
 
   sources = [
-    "google_search_domain_mixing_metrics_emitter_factory_unittest.cc",
-    "google_search_domain_mixing_metrics_emitter_unittest.cc",
+    "google_update_policy_fetcher_unittest.cc",
     "google_update_settings_unittest.cc",
   ]
 
@@ -97,30 +89,23 @@ source_set("unit_tests") {
     "//base",
     "//base/test:test_support",
     "//chrome/common:constants",
-    "//chrome/common:version_header",
     "//chrome/installer/util:with_no_strings",
-    "//components/history/core/browser:browser",
-    "//components/history/core/test:test",
-    "//components/prefs:test_support",
+    "//components/policy/core/common",
     "//content/test:test_support",
-    "//testing/gtest:gtest",
-    "//url:url",
+    "//testing/gtest",
   ]
 
-  if (is_chromeos_ash) {
+  if (is_chromeos) {
     sources += [ "google_brand_code_map_chromeos_unittest.cc" ]
   }
 
   if (is_win && is_chrome_branded) {
-    sources += [
-      "google_update_policy_fetcher_win_util_unittest.cc",
-      "google_update_win_unittest.cc",
-    ]
-
+    sources += [ "google_update_win_unittest.cc" ]
     deps += [
+      "//chrome/common:version_header",
       "//chrome/install_static/test:test_support",
+      "//chrome/updater/app/server/win:updater_legacy_idl",
       "//components/policy/core/common",
-      "//google_update",
     ]
   }
 }

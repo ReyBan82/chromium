@@ -16,6 +16,7 @@
 #include "third_party/blink/public/platform/file_path_conversion.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/platform/wtf/assertions.h"
+#include "third_party/blink/renderer/platform/wtf/text/character_visitor.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -34,25 +35,26 @@ struct MimeRegistryPtrHolder {
 };
 
 std::string ToASCIIOrEmpty(const WebString& string) {
-  return string.ContainsOnlyASCII() ? string.Ascii() : std::string();
+  return string.ContainsOnlyAscii() ? string.Ascii() : std::string();
 }
 
-template <typename CHARTYPE, typename SIZETYPE>
-std::string ToLowerASCIIInternal(CHARTYPE* str, SIZETYPE length) {
+template <typename CharType>
+std::string ToLowerASCIIInternal(base::span<const CharType> chars) {
   std::string lower_ascii;
-  lower_ascii.reserve(length);
-  for (CHARTYPE* p = str; p < str + length; p++)
-    lower_ascii.push_back(base::ToLowerASCII(static_cast<char>(*p)));
+  lower_ascii.reserve(chars.size());
+  for (size_t i = 0; i < chars.size(); i++) {
+    lower_ascii.push_back(base::ToLowerASCII(static_cast<char>(chars[i])));
+  }
   return lower_ascii;
 }
 
 // Does the same as ToASCIIOrEmpty, but also makes the chars lower.
 std::string ToLowerASCIIOrEmpty(const String& str) {
-  if (str.empty() || !str.ContainsOnlyASCIIOrEmpty())
+  if (str.empty() || !str.ContainsOnlyAsciiOrEmpty()) {
     return std::string();
-  if (str.Is8Bit())
-    return ToLowerASCIIInternal(str.Characters8(), str.length());
-  return ToLowerASCIIInternal(str.Characters16(), str.length());
+  }
+  return VisitCharacters(
+      str, [](auto chars) { return ToLowerASCIIInternal(chars); });
 }
 
 STATIC_ASSERT_ENUM(MIMETypeRegistry::kNotSupported,
@@ -64,24 +66,26 @@ STATIC_ASSERT_ENUM(MIMETypeRegistry::kMaybeSupported,
 
 }  // namespace
 
-String MIMETypeRegistry::GetMIMETypeForExtension(const String& ext) {
+String MIMETypeRegistry::GetMIMETypeForExtension(const StringView& ext_view) {
   // The sandbox restricts our access to the registry, so we need to proxy
   // these calls over to the browser process.
   DEFINE_STATIC_LOCAL(MimeRegistryPtrHolder, registry_holder, ());
+  String ext = ext_view.IsNull() ? g_empty_string : ext_view.ToString();
   String mime_type;
-  if (!registry_holder.mime_registry->GetMimeTypeFromExtension(
-          ext.IsNull() ? "" : ext, &mime_type)) {
+  if (!registry_holder.mime_registry->GetMimeTypeFromExtension(ext,
+                                                               &mime_type)) {
     return String();
   }
   return mime_type;
 }
 
-String MIMETypeRegistry::GetWellKnownMIMETypeForExtension(const String& ext) {
+String MIMETypeRegistry::GetWellKnownMIMETypeForExtension(
+    const StringView& ext) {
   // This method must be thread safe and should not consult the OS/registry.
   std::string mime_type;
-  net::GetWellKnownMimeTypeFromExtension(WebStringToFilePath(ext).value(),
+  net::GetWellKnownMimeTypeFromExtension(StringViewToFilePath(ext).value(),
                                          &mime_type);
-  return String::FromUTF8(mime_type.data(), mime_type.length());
+  return String::FromUtf8(mime_type);
 }
 
 bool MIMETypeRegistry::IsSupportedMIMEType(const String& mime_type) {
@@ -101,20 +105,23 @@ bool MIMETypeRegistry::IsSupportedImagePrefixedMIMEType(
     const String& mime_type) {
   std::string ascii_mime_type = ToLowerASCIIOrEmpty(mime_type);
   return (blink::IsSupportedImageMimeType(ascii_mime_type) ||
-          (base::StartsWith(ascii_mime_type, "image/",
-                            base::CompareCase::SENSITIVE) &&
+          (ascii_mime_type.starts_with("image/") &&
            blink::IsSupportedNonImageMimeType(ascii_mime_type)));
 }
 
 bool MIMETypeRegistry::IsSupportedImageMIMETypeForEncoding(
     const String& mime_type) {
-  return (EqualIgnoringASCIICase(mime_type, "image/jpeg") ||
-          EqualIgnoringASCIICase(mime_type, "image/png") ||
-          EqualIgnoringASCIICase(mime_type, "image/webp"));
+  return (EqualIgnoringAsciiCase(mime_type, "image/jpeg") ||
+          EqualIgnoringAsciiCase(mime_type, "image/png") ||
+          EqualIgnoringAsciiCase(mime_type, "image/webp"));
 }
 
 bool MIMETypeRegistry::IsSupportedJavaScriptMIMEType(const String& mime_type) {
   return blink::IsSupportedJavascriptMimeType(ToLowerASCIIOrEmpty(mime_type));
+}
+
+bool MIMETypeRegistry::IsWasmMIMEType(const String& mime_type) {
+  return blink::IsWasmMIMEType(ToLowerASCIIOrEmpty(mime_type));
 }
 
 bool MIMETypeRegistry::IsJSONMimeType(const String& mime_type) {
@@ -157,69 +164,53 @@ bool MIMETypeRegistry::IsJavaAppletMIMEType(const String& mime_type) {
   // with the overhead of using a hash set.  Any of the MIME types below may be
   // followed by any number of specific versions of the JVM, which is why we use
   // startsWith()
-  return mime_type.StartsWithIgnoringASCIICase("application/x-java-applet") ||
-         mime_type.StartsWithIgnoringASCIICase("application/x-java-bean") ||
-         mime_type.StartsWithIgnoringASCIICase("application/x-java-vm");
+  return mime_type.StartsWithIgnoringAsciiCase("application/x-java-applet") ||
+         mime_type.StartsWithIgnoringAsciiCase("application/x-java-bean") ||
+         mime_type.StartsWithIgnoringAsciiCase("application/x-java-vm");
 }
 
 bool MIMETypeRegistry::IsSupportedStyleSheetMIMEType(const String& mime_type) {
-  return EqualIgnoringASCIICase(mime_type, "text/css");
+  return EqualIgnoringAsciiCase(mime_type, "text/css");
 }
 
 bool MIMETypeRegistry::IsSupportedFontMIMEType(const String& mime_type) {
   static const unsigned kFontLen = 5;
-  if (!mime_type.StartsWithIgnoringASCIICase("font/"))
+  if (!mime_type.StartsWithIgnoringAsciiCase("font/")) {
     return false;
-  String sub_type = mime_type.Substring(kFontLen).LowerASCII();
+  }
+  String sub_type = mime_type.substr(kFontLen).ToAsciiLower();
   return sub_type == "woff" || sub_type == "woff2" || sub_type == "otf" ||
          sub_type == "ttf" || sub_type == "sfnt";
 }
 
 bool MIMETypeRegistry::IsSupportedTextTrackMIMEType(const String& mime_type) {
-  return EqualIgnoringASCIICase(mime_type, "text/vtt");
-}
-
-bool MIMETypeRegistry::IsLossyImageMIMEType(const String& mime_type) {
-  return EqualIgnoringASCIICase(mime_type, "image/jpeg") ||
-         EqualIgnoringASCIICase(mime_type, "image/jpg") ||
-         EqualIgnoringASCIICase(mime_type, "image/pjpeg");
-}
-
-bool MIMETypeRegistry::IsLosslessImageMIMEType(const String& mime_type) {
-  return EqualIgnoringASCIICase(mime_type, "image/bmp") ||
-         EqualIgnoringASCIICase(mime_type, "image/gif") ||
-         EqualIgnoringASCIICase(mime_type, "image/png") ||
-         EqualIgnoringASCIICase(mime_type, "image/webp") ||
-         EqualIgnoringASCIICase(mime_type, "image/x-xbitmap") ||
-         EqualIgnoringASCIICase(mime_type, "image/x-png");
+  return EqualIgnoringAsciiCase(mime_type, "text/vtt");
 }
 
 bool MIMETypeRegistry::IsXMLMIMEType(const String& mime_type) {
-  if (EqualIgnoringASCIICase(mime_type, "text/xml") ||
-      EqualIgnoringASCIICase(mime_type, "application/xml") ||
-      EqualIgnoringASCIICase(mime_type, "text/xsl"))
+  if (EqualIgnoringAsciiCase(mime_type, "text/xml") ||
+      EqualIgnoringAsciiCase(mime_type, "application/xml")) {
     return true;
+  }
 
   // Per RFCs 3023 and 2045, an XML MIME type is of the form:
   // ^[0-9a-zA-Z_\\-+~!$\\^{}|.%'`#&*]+/[0-9a-zA-Z_\\-+~!$\\^{}|.%'`#&*]+\+xml$
 
-  int length = mime_type.length();
+  String::size_type length = mime_type.length();
   if (length < 7)
     return false;
 
   if (mime_type[0] == '/' || mime_type[length - 5] == '/' ||
-      !mime_type.EndsWithIgnoringASCIICase("+xml"))
+      !mime_type.EndsWithIgnoringAsciiCase("+xml")) {
     return false;
+  }
 
   bool has_slash = false;
-  for (int i = 0; i < length - 4; ++i) {
+  for (String::size_type i = 0; i < length - 4; ++i) {
     UChar ch = mime_type[i];
-    if (ch >= '0' && ch <= '9')
+    if (IsAsciiAlphanumeric(ch)) {
       continue;
-    if (ch >= 'a' && ch <= 'z')
-      continue;
-    if (ch >= 'A' && ch <= 'Z')
-      continue;
+    }
     switch (ch) {
       case '_':
       case '-':
@@ -252,11 +243,17 @@ bool MIMETypeRegistry::IsXMLMIMEType(const String& mime_type) {
   return true;
 }
 
+bool MIMETypeRegistry::IsXMLExternalEntityMIMEType(const String& mime_type) {
+  return EqualIgnoringAsciiCase(mime_type,
+                                "application/xml-external-parsed-entity") ||
+         EqualIgnoringAsciiCase(mime_type, "text/xml-external-parsed-entity");
+}
+
 bool MIMETypeRegistry::IsPlainTextMIMEType(const String& mime_type) {
-  return mime_type.StartsWithIgnoringASCIICase("text/") &&
-         !(EqualIgnoringASCIICase(mime_type, "text/html") ||
-           EqualIgnoringASCIICase(mime_type, "text/xml") ||
-           EqualIgnoringASCIICase(mime_type, "text/xsl"));
+  return mime_type.StartsWithIgnoringAsciiCase("text/") &&
+         !(EqualIgnoringAsciiCase(mime_type, "text/html") ||
+           EqualIgnoringAsciiCase(mime_type, "text/xml") ||
+           EqualIgnoringAsciiCase(mime_type, "text/xsl"));
 }
 
 }  // namespace blink

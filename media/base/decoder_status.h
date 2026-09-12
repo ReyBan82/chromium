@@ -5,12 +5,20 @@
 #ifndef MEDIA_BASE_DECODER_STATUS_H_
 #define MEDIA_BASE_DECODER_STATUS_H_
 
+#include <ostream>
+
+#include "base/time/time.h"
 #include "media/base/decoder_buffer.h"
+#include "media/base/media_export.h"
 #include "media/base/status.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 
 namespace media {
 
 struct DecoderStatusTraits {
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused. Please keep the consistency with
+  // DecoderStatus in tools/metrics/histograms/metadata/media/enums.xml.
   enum class Codes : StatusCodeType {
     // Shared & General errors
     kOk = 0,
@@ -19,6 +27,7 @@ struct DecoderStatusTraits {
     kInvalidArgument = 3,
     kInterrupted = 4,
     kDisconnected = 5,  // Lost mojo connection, e.g remote crashed or teardown
+    kOutOfMemory = 6,
 
     // Reasons for failing to decode
     kNotInitialized = 100,
@@ -41,11 +50,19 @@ struct DecoderStatusTraits {
     kFailedToCreateDecoder = 205,
     kTooManyDecoders = 206,
     kMediaFoundationNotAvailable = 207,
+
+    // Success, but requires action by downstream recipient.
+    kElidedEndOfStreamForConfigChange = 300,
+
+    kMaxValue = kElidedEndOfStreamForConfigChange
   };
   static constexpr StatusGroupType Group() { return "DecoderStatus"; }
 };
 
 using DecoderStatus = TypedStatus<DecoderStatusTraits>;
+
+MEDIA_EXPORT std::ostream& operator<<(std::ostream& os,
+                                      const DecoderStatus& status);
 
 // Helper class for ensuring that Decode() traces are properly unique and closed
 // if the Decode is aborted via a WeakPtr invalidation. We use the |this|
@@ -60,6 +77,9 @@ class MEDIA_EXPORT ScopedDecodeTrace {
                     bool is_key_frame,
                     base::TimeDelta timestamp);
 
+  // For EOS decodes.
+  explicit ScopedDecodeTrace(const char* trace_name);
+
   ScopedDecodeTrace(const ScopedDecodeTrace&) = delete;
   ScopedDecodeTrace& operator=(const ScopedDecodeTrace&) = delete;
 
@@ -68,9 +88,12 @@ class MEDIA_EXPORT ScopedDecodeTrace {
   // Completes the Decode() trace with the given status.
   void EndTrace(const DecoderStatus& status);
 
+  const perfetto::Track& track() const { return trace_track_; }
+
  private:
   const char* trace_name_;
   bool closed_ = false;
+  const perfetto::Track trace_track_;
 };
 
 }  // namespace media

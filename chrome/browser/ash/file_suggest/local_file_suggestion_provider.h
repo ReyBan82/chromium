@@ -7,6 +7,8 @@
 
 #include "base/callback_list.h"
 #include "base/files/file_path.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/task/sequenced_task_runner.h"
@@ -17,6 +19,7 @@
 #include "chrome/browser/ash/file_suggest/file_suggest_util.h"
 #include "chrome/browser/ash/file_suggest/file_suggestion_provider.h"
 
+class PrefService;
 class Profile;
 
 namespace ash {
@@ -33,9 +36,9 @@ class LocalFileSuggestionProvider
     base::File::Info info;
   };
 
-  static const int kDefaultMaxLastModifiedTimeInDays = 8;
-
+  // `local_state` must be non-null and must outlive `this`.
   LocalFileSuggestionProvider(
+      PrefService* local_state,
       Profile* profile,
       base::RepeatingCallback<void(FileSuggestionType)> notify_update_callback);
   LocalFileSuggestionProvider(const LocalFileSuggestionProvider&) = delete;
@@ -52,15 +55,13 @@ class LocalFileSuggestionProvider
   // file_manager::file_tasks::FileTaskObserver:
   void OnFilesOpened(const std::vector<FileOpenEvent>& file_opens) override;
 
-  // Returns true if there is pending fetch on file suggestions.
-  bool HasPendingLocalSuggestionFetchForTest() const;
-
  private:
-  void OnProtoInitialized(app_list::ReadStatus status);
+  void OnProtoInitialized();
   void OnValidationComplete(std::pair<std::vector<LocalFileData>,
                                       std::vector<base::FilePath>> results);
 
-  Profile* const profile_;
+  const raw_ref<PrefService> local_state_;
+  const raw_ptr<Profile> profile_;
 
   // Any file not modified at least as recently as `max_last_modified_time_` ago
   // will be filtered out of results.

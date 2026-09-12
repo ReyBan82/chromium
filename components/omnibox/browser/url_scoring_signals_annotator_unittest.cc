@@ -4,6 +4,7 @@
 
 #include "components/omnibox/browser/url_scoring_signals_annotator.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,8 +16,11 @@
 #include "components/omnibox/browser/autocomplete_scoring_signals_annotator.h"
 #include "components/omnibox/browser/test_scheme_classifier.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/metrics_proto/omnibox_event.pb.h"
+#include "third_party/metrics_proto/omnibox_scoring_signals.pb.h"
 #include "url/gurl.h"
+
+using ScoringSignals = ::metrics::OmniboxScoringSignals;
 
 namespace {
 
@@ -32,9 +36,9 @@ AutocompleteMatch CreateUrlAutocompleteMatch(
 ScoringSignals CreateUrlMatchingScoringSignals(
     bool is_host_only,
     size_t length_of_url,
-    absl::optional<size_t> first_url_match_position,
-    absl::optional<bool> host_match_at_word_boundary,
-    absl::optional<bool> has_non_scheme_www_match,
+    std::optional<size_t> first_url_match_position,
+    std::optional<bool> host_match_at_word_boundary,
+    std::optional<bool> has_non_scheme_www_match,
     size_t total_url_match_length,
     size_t total_host_match_length,
     size_t total_path_match_length,
@@ -143,7 +147,7 @@ TEST_F(UrlScoringSignalsAnnotatorTest, AnnotateResultHostOnly) {
       /*total_query_or_ref_match_length=*/0,
       /*num_input_terms_matched_by_url=*/1,
       /*allowed_to_be_default_match=*/false);
-  CompareScoringSignals(result.match_at(0)->scoring_signals,
+  CompareScoringSignals(*result.match_at(0)->scoring_signals,
                         expected_scoring_signals);
 }
 
@@ -169,7 +173,7 @@ TEST_F(UrlScoringSignalsAnnotatorTest, AnnotateResultUrlWithPath) {
       /*total_query_or_ref_match_length=*/0,
       /*num_input_terms_matched_by_url=*/2,
       /*allowed_to_be_default_match=*/false);
-  CompareScoringSignals(result.match_at(0)->scoring_signals,
+  CompareScoringSignals(*result.match_at(0)->scoring_signals,
                         expected_scoring_signals);
 }
 
@@ -189,14 +193,14 @@ TEST_F(UrlScoringSignalsAnnotatorTest, AnnotateResultPathMatchOnly) {
   const auto expected_scoring_signals = CreateUrlMatchingScoringSignals(
       /*is_host_only=*/false,
       /*length_of_url=*/22, /*first_url_match_position=*/16,
-      /*host_match_at_word_boundary=*/absl::nullopt,
-      /*has_non_scheme_www_match=*/absl::nullopt,
+      /*host_match_at_word_boundary=*/std::nullopt,
+      /*has_non_scheme_www_match=*/std::nullopt,
       /*total_url_match_length=*/4,
       /*total_host_match_length=*/0, /*total_path_match_length=*/4,
       /*total_query_or_ref_match_length=*/0,
       /*num_input_terms_matched_by_url=*/1,
       /*allowed_to_be_default_match=*/false);
-  CompareScoringSignals(result.match_at(0)->scoring_signals,
+  CompareScoringSignals(*result.match_at(0)->scoring_signals,
                         expected_scoring_signals);
 }
 
@@ -221,6 +225,6 @@ TEST_F(UrlScoringSignalsAnnotatorTest, AnnotateResultWWWOnly) {
       /*total_query_or_ref_match_length=*/0,
       /*num_input_terms_matched_by_url=*/1,
       /*allowed_to_be_default_match=*/false);
-  CompareScoringSignals(result.match_at(0)->scoring_signals,
+  CompareScoringSignals(*result.match_at(0)->scoring_signals,
                         expected_scoring_signals);
 }

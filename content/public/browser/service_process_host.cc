@@ -6,6 +6,7 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "content/public/common/content_client.h"
+#include "media/media_buildflags.h"
 
 namespace content {
 
@@ -52,9 +53,49 @@ ServiceProcessHost::Options::WithExtraCommandLineSwitches(
   return *this;
 }
 
+ServiceProcessHost::Options&
+ServiceProcessHost::Options::WithExtraCommandLineSwitchKeyValues(
+    std::vector<std::pair<std::string, std::string>> switch_key_values) {
+  extra_switch_key_values = std::move(switch_key_values);
+  return *this;
+}
+
 ServiceProcessHost::Options& ServiceProcessHost::Options::WithProcessCallback(
     base::OnceCallback<void(const base::Process&)> callback) {
   process_callback = std::move(callback);
+  return *this;
+}
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithObserver(
+    base::WeakPtr<Observer> obs) {
+  CHECK(!observer) << "Only one per-instance observer may be registered. "
+                      "Use a service-specific manager to fan out to multiple "
+                      "observers.";
+  observer = std::move(obs);
+  return *this;
+}
+
+#if BUILDFLAG(IS_WIN)
+ServiceProcessHost::Options&
+ServiceProcessHost::Options::WithPreloadedLibraries(
+    std::vector<base::FilePath> preloads,
+    base::PassKey<ServiceProcessHostPreloadLibraries> passkey) {
+  preload_libraries = std::move(preloads);
+  return *this;
+}
+#endif  // #if BUILDFLAG(IS_WIN)
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithGpuClient(
+    base::PassKey<ServiceProcessHostGpuClient> passkey) {
+#if BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+  allow_gpu_client = true;
+#endif  // BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+  return *this;
+}
+
+ServiceProcessHost::Options& ServiceProcessHost::Options::WithPriority(
+    base::Process::Priority pri) {
+  priority = pri;
   return *this;
 }
 

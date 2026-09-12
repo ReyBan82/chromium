@@ -4,14 +4,13 @@
 
 #include "chrome/browser/safe_browsing/incident_reporting/extension_data_collection.h"
 
-#include "base/containers/contains.h"
+#include <utility>
+
 #include "base/json/json_string_value_serializer.h"
 #include "base/time/time.h"
 #include "base/version.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/extensions/chrome_content_browser_client_extensions_part.h"
 #include "chrome/browser/extensions/extension_util.h"
-#include "chrome/browser/extensions/install_signer.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/safe_browsing/incident_reporting/incident_reporting_service.h"
 #include "components/safe_browsing/core/common/proto/csd.pb.h"
@@ -19,9 +18,16 @@
 #include "extensions/browser/extension_prefs_factory.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_factory.h"
+#include "extensions/browser/install_prefs_helper.h"
+#include "extensions/browser/install_signer.h"
 #include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension_set.h"
 #include "extensions/common/manifest_constants.h"
+#include "extensions/common/manifest_handlers/description_info.h"
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/browser/extensions/chrome_content_browser_client_extensions_part.h"
+#endif
 
 namespace safe_browsing {
 
@@ -38,7 +44,8 @@ void PopulateExtensionInfo(
   extension_info->set_id(extension_id);
   extension_info->set_version(extension.version().GetString());
   extension_info->set_name(extension.name());
-  extension_info->set_description(extension.description());
+  extension_info->set_description(
+      extensions::DescriptionInfo::GetDescription(extension));
 
   typedef ClientIncidentReport_ExtensionData_ExtensionInfo Info;
   if (extension_registry.enabled_extensions().Contains(extension_id))
@@ -52,7 +59,7 @@ void PopulateExtensionInfo(
   else if (extension_registry.terminated_extensions().Contains(extension_id))
     extension_info->set_state(Info::STATE_TERMINATED);
 
-  extension_info->set_type(extension.GetType());
+  extension_info->set_type(std::to_underlying(extension.GetType()));
   if (const std::string* update_url = extension.manifest()->FindStringPath(
           extensions::manifest_keys::kUpdateURL)) {
     extension_info->set_update_url(*update_url);
@@ -61,24 +68,24 @@ void PopulateExtensionInfo(
   extension_info->set_installed_by_default(
       extension.was_installed_by_default());
   extension_info->set_installed_by_oem(extension.was_installed_by_oem());
-  // TODO(crbug.com/1065748): Remove this setter.
+  // TODO(crbug.com/40124309): Remove this setter.
   extension_info->set_from_bookmark(false);
   extension_info->set_from_webstore(extension.from_webstore());
   extension_info->set_converted_from_user_script(
       extension.converted_from_user_script());
   extension_info->set_may_be_untrusted(extension.may_be_untrusted());
   extension_info->set_install_time_msec(
-      extension_prefs.GetLastUpdateTime(extension.id()).ToJavaTime());
+      GetLastUpdateTime(&extension_prefs, extension.id())
+          .InMillisecondsSinceUnixEpoch());
 
   std::unique_ptr<extensions::InstallSignature> signature_from_prefs =
       extensions::InstallSignature::FromDict(
           extension_prefs.GetInstallSignature());
   if (signature_from_prefs) {
-    if (base::Contains(signature_from_prefs->ids, extension_id)) {
+    if (signature_from_prefs->ids.contains(extension_id)) {
       extension_info->set_has_signature_validation(true);
       extension_info->set_signature_is_valid(true);
-    } else if (base::Contains(signature_from_prefs->invalid_ids,
-                              extension_id)) {
+    } else if (signature_from_prefs->invalid_ids.contains(extension_id)) {
       extension_info->set_has_signature_validation(true);
       extension_info->set_signature_is_valid(false);
     }
@@ -98,7 +105,7 @@ void PopulateExtensionInfo(
 // Finds the last installed extension and adds relevant information to data's
 // last_installed_extension field.
 void CollectExtensionData(ClientIncidentReport_ExtensionData* data) {
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   scoped_refptr<const extensions::Extension> last_installed_extension;
   Profile* profile_for_last_installed_extension = nullptr;
   base::Time last_install_time;
@@ -114,14 +121,14 @@ void CollectExtensionData(ClientIncidentReport_ExtensionData* data) {
       continue;
     }
 
-    std::unique_ptr<const extensions::ExtensionSet> extensions(
+    const extensions::ExtensionSet extensions =
         extensions::ExtensionRegistryFactory::GetForBrowserContext(profile)
-            ->GenerateInstalledExtensionsSet());
+            ->GenerateInstalledExtensionsSet();
     extensions::ExtensionPrefs* extension_prefs =
         extensions::ExtensionPrefsFactory::GetForBrowserContext(profile);
-    for (const auto& extension : *extensions) {
+    for (const auto& extension : extensions) {
       base::Time install_time =
-          extension_prefs->GetLastUpdateTime(extension->id());
+          GetLastUpdateTime(extension_prefs, extension->id());
       if (install_time > last_install_time) {
         last_install_time = install_time;
         last_installed_extension = extension;

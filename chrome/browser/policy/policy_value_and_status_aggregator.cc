@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,27 +7,32 @@
 #include <memory>
 #include <utility>
 
+#include "base/feature_list.h"
 #include "base/memory/ptr_util.h"
 #include "base/time/time.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/enterprise/browser_management/management_service_factory.h"
 #include "chrome/browser/policy/chrome_browser_policy_connector.h"
 #include "chrome/browser/policy/value_provider/chrome_policies_value_provider.h"
 #include "chrome/browser/policy/value_provider/policy_value_provider.h"
 #include "components/policy/core/browser/webui/policy_status_provider.h"
 #include "components/policy/core/browser/webui/policy_webui_constants.h"
+#include "components/policy/core/common/features.h"
+#include "components/policy/core/common/management/management_service.h"
+#include "components/policy/core/common/policy_logger.h"
+#include "components/policy/resources/webui/mojom/policy.mojom.h"
+#include "extensions/buildflags/buildflags.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/policy/active_directory/active_directory_policy_manager.h"
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
 #include "chrome/browser/ash/policy/core/device_local_account_policy_service.h"
 #include "chrome/browser/ash/policy/core/user_cloud_policy_manager_ash.h"
 #include "chrome/browser/browser_process_platform_part.h"
 #include "chrome/browser/browser_process_platform_part_ash.h"
-#include "chrome/browser/policy/status_provider/device_active_directory_policy_status_provider.h"
 #include "chrome/browser/policy/status_provider/device_cloud_policy_status_provider_chromeos.h"
 #include "chrome/browser/policy/status_provider/device_local_account_policy_status_provider.h"
-#include "chrome/browser/policy/status_provider/user_active_directory_policy_status_provider.h"
 #include "chrome/browser/policy/status_provider/user_cloud_policy_status_provider_chromeos.h"
 #include "components/user_manager/user_manager.h"
 #else
@@ -38,24 +43,25 @@
 #include "components/policy/core/common/cloud/machine_level_user_cloud_policy_manager.h"
 #include "components/policy/core/common/cloud/user_cloud_policy_manager.h"
 #include "components/prefs/pref_service.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "chrome/browser/policy/status_provider/ash_lacros_policy_stack_bridge.h"
-#include "chrome/browser/policy/status_provider/user_policy_status_provider_lacros.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
-
-#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 #include "chrome/browser/policy/status_provider/updater_status_and_value_provider.h"
-#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/browser/policy/cloud/extension_install_policy_service_factory.h"
+#include "chrome/browser/policy/value_provider/extension_install_policies_value_provider.h"
 #include "chrome/browser/policy/value_provider/extension_policies_value_provider.h"
-#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+#include "components/policy/core/common/cloud/profile_cloud_policy_manager.h"
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 
 namespace {
-void AppendPolicyIdsToList(const base::Value::Dict& policy_values,
-                           base::Value::List& policy_ids) {
+void AppendPolicyIdsToList(const base::DictValue& policy_values,
+                           base::ListValue& policy_ids) {
   for (const auto id_policy_pair : policy_values) {
     policy_ids.Append(id_policy_pair.first);
   }
@@ -63,9 +69,9 @@ void AppendPolicyIdsToList(const base::Value::Dict& policy_values,
 
 // Appends the ID of `policy_values` to `policy_ids` and merges it to
 // `out_policy_values`.
-void MergePolicyValuesAndIds(base::Value::Dict policy_values,
-                             base::Value::Dict& out_policy_values,
-                             base::Value::List& out_policy_ids) {
+void MergePolicyValuesAndIds(base::DictValue policy_values,
+                             base::DictValue& out_policy_values,
+                             base::ListValue& out_policy_ids) {
   AppendPolicyIdsToList(policy_values, out_policy_ids);
   out_policy_values.Merge(std::move(policy_values));
 }
@@ -73,66 +79,46 @@ void MergePolicyValuesAndIds(base::Value::Dict policy_values,
 // Returns the PolicyStatusProvider for user policies for the current platform.
 std::unique_ptr<policy::PolicyStatusProvider> GetUserPolicyStatusProvider(
     Profile* profile) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   policy::BrowserPolicyConnectorAsh* connector =
       g_browser_process->platform_part()->browser_policy_connector_ash();
   const user_manager::UserManager* user_manager =
       user_manager::UserManager::Get();
   policy::DeviceLocalAccountPolicyService* local_account_service =
-      user_manager->IsLoggedInAsPublicAccount()
+      user_manager->IsLoggedInAsManagedGuestSession()
           ? connector->GetDeviceLocalAccountPolicyService()
           : nullptr;
   policy::UserCloudPolicyManagerAsh* user_cloud_policy =
       profile->GetUserCloudPolicyManagerAsh();
-  policy::ActiveDirectoryPolicyManager* active_directory_policy =
-      profile->GetActiveDirectoryPolicyManager();
   if (local_account_service) {
     return std::make_unique<DeviceLocalAccountPolicyStatusProvider>(
         user_manager->GetActiveUser()->GetAccountId().GetUserEmail(),
         local_account_service);
   } else if (user_cloud_policy) {
     return std::make_unique<UserCloudPolicyStatusProviderChromeOS>(
-        user_cloud_policy->core(), profile);
-  } else if (active_directory_policy) {
-    return std::make_unique<UserActiveDirectoryPolicyStatusProvider>(
-        active_directory_policy, profile);
+        user_cloud_policy, profile);
   }
-#else  // BUILDFLAG(IS_CHROMEOS_ASH)
-  policy::UserCloudPolicyManager* user_cloud_policy_manager =
-      profile->GetUserCloudPolicyManager();
-  if (user_cloud_policy_manager) {
-    return std::make_unique<UserCloudPolicyStatusProvider>(
-        user_cloud_policy_manager->core(), profile);
-  } else {
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-    if (profile->IsMainProfile()) {
-      return std::make_unique<UserPolicyStatusProviderLacros>(
-          g_browser_process->browser_policy_connector()
-              ->device_account_policy_loader(),
-          profile);
-    }
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
+#else   // BUILDFLAG(IS_CHROMEOS)
+  policy::CloudPolicyManager* cloud_policy_manager =
+      profile->GetCloudPolicyManager();
+  if (cloud_policy_manager) {
+    return std::make_unique<UserCloudPolicyStatusProvider>(cloud_policy_manager,
+                                                           profile);
   }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
   return std::make_unique<policy::PolicyStatusProvider>();
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 // Returns the PolicyStatusProvider for ChromeOS device policies.
 std::unique_ptr<policy::PolicyStatusProvider>
 GetChromeOSDevicePolicyStatusProvider(
     Profile* profile,
     policy::BrowserPolicyConnectorAsh* connector) {
-  if (connector->GetDeviceActiveDirectoryPolicyManager()) {
-    return std::make_unique<DeviceActiveDirectoryPolicyStatusProvider>(
-        connector->GetDeviceActiveDirectoryPolicyManager(),
-        connector->GetEnterpriseDomainManager());
-  }
-  return std::make_unique<DeviceCloudPolicyStatusProviderChromeOS>(connector);
+  return std::make_unique<DeviceCloudPolicyStatusProviderChromeOS>(connector,
+                                                                   profile);
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
-
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#else
 // Returns policy status provider for machine policies for non-ChromeOS
 // platforms.
 std::unique_ptr<policy::PolicyStatusProvider> GetMachinePolicyStatusProvider(
@@ -141,13 +127,14 @@ std::unique_ptr<policy::PolicyStatusProvider> GetMachinePolicyStatusProvider(
       policy::BrowserDMTokenStorage::Get();
 
   return std::make_unique<policy::MachineLevelUserCloudPolicyStatusProvider>(
-      manager->core(), g_browser_process->local_state(),
+      manager->core(), manager->extension_install_core(),
+      g_browser_process->local_state(),
       new policy::MachineLevelUserCloudPolicyContext(
           {dmTokenStorage->RetrieveEnrollmentToken(),
            dmTokenStorage->RetrieveClientId(),
            enterprise_reporting::kLastUploadSucceededTimestamp}));
 }
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace
 
@@ -155,31 +142,41 @@ namespace policy {
 
 const char kUserStatusKey[] = "user";
 
-#if BUILDFLAG(IS_CHROMEOS_ASH) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_CHROMEOS)
 const char kDeviceStatusKey[] = "device";
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 constexpr char kMachineStatusKey[] = "machine";
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
-#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 constexpr char kUpdaterStatusKey[] = "updater";
-#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 
 std::unique_ptr<PolicyValueAndStatusAggregator>
 PolicyValueAndStatusAggregator::CreateDefaultPolicyValueAndStatusAggregator(
     Profile* profile) {
   std::unique_ptr<PolicyValueAndStatusAggregator> aggregator =
-      base::WrapUnique(new PolicyValueAndStatusAggregator());
+      base::WrapUnique(new PolicyValueAndStatusAggregator(profile));
 
   // Add PolicyValueProviders.
   aggregator->AddPolicyValueProvider(
       std::make_unique<ChromePoliciesValueProvider>(profile));
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  if (base::FeatureList::IsEnabled(
+          policy::features::kEnableExtensionInstallPolicyFetching)) {
+    if (auto* extension_install_policy_service =
+            policy::ExtensionInstallPolicyServiceFactory::GetForBrowserContext(
+                profile)) {
+      aggregator->AddPolicyValueProvider(
+          std::make_unique<ExtensionInstallPoliciesValueProvider>(
+              profile, extension_install_policy_service));
+    }
+  }
   aggregator->AddPolicyValueProvider(
       std::make_unique<ExtensionPoliciesValueProvider>(profile));
-#endif  // BUILDFLAG(ENABLE_EXTENSIONS)
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
   // Add PolicyStatusProviders.
   // User policies.
@@ -187,90 +184,110 @@ PolicyValueAndStatusAggregator::CreateDefaultPolicyValueAndStatusAggregator(
                                       GetUserPolicyStatusProvider(profile));
 
   // Device policies.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  // Add status provider for ChromeOS device policies if the device is managed.
-  policy::BrowserPolicyConnectorAsh* connector =
-      g_browser_process->platform_part()->browser_policy_connector_ash();
-  if (connector->IsDeviceEnterpriseManaged())
+  if (policy::ManagementServiceFactory::GetForPlatform()->IsManaged()) {
+#if BUILDFLAG(IS_CHROMEOS)
     aggregator->AddPolicyStatusProvider(
-        kDeviceStatusKey,
-        GetChromeOSDevicePolicyStatusProvider(profile, connector));
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  // We will use AshLacrosPolicyStackBridge to retrieve device policies in
-  // Lacros.
-  aggregator->AddPolicyStatusAndValueProvider(
-      kDeviceStatusKey, std::make_unique<AshLacrosPolicyStackBridge>());
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
+        kDeviceStatusKey, GetChromeOSDevicePolicyStatusProvider(
+                              profile, g_browser_process->platform_part()
+                                           ->browser_policy_connector_ash()));
+#endif  // BUILDFLAG(IS_CHROMEOS)
+  }
 
   // Machine policies.
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   policy::MachineLevelUserCloudPolicyManager* manager =
       g_browser_process->browser_policy_connector()
           ->machine_level_user_cloud_policy_manager();
-  if (manager)
+  if (manager) {
+    policy::BrowserDMTokenStorage* dmTokenStorage =
+        policy::BrowserDMTokenStorage::Get();
+    LOG_POLICY(INFO, POLICY_PROCESSING)
+        << "Retrieved Enrollment Token = "
+        << dmTokenStorage->RetrieveEnrollmentToken()
+        << " and client ID = " << dmTokenStorage->RetrieveClientId();
+
     aggregator->AddPolicyStatusProvider(
         kMachineStatusKey, GetMachinePolicyStatusProvider(manager));
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+  }
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
-    // Updater policies.
-#if BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+  // Updater policies.
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
   aggregator->AddPolicyStatusAndValueProvider(
       kUpdaterStatusKey,
       std::make_unique<UpdaterStatusAndValueProvider>(profile));
-#endif  // BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
   return aggregator;
 }
 
-PolicyValueAndStatusAggregator::PolicyValueAndStatusAggregator() = default;
+PolicyValueAndStatusAggregator::PolicyValueAndStatusAggregator(
+    Profile* profile) {
+  if (profile) {
+    profile_observation_.Observe(profile);
+  }
+}
+
 PolicyValueAndStatusAggregator::~PolicyValueAndStatusAggregator() = default;
 
-base::Value::Dict PolicyValueAndStatusAggregator::GetAggregatedPolicyStatus() {
-  base::Value::Dict status;
+base::DictValue PolicyValueAndStatusAggregator::GetAggregatedPolicyStatus() {
+  base::DictValue status;
   for (auto& status_provider_description_pair : status_providers_) {
+    DVLOG_POLICY(3, POLICY_PROCESSING)
+        << status_provider_description_pair.first
+        << " status: " << status_provider_description_pair.second->GetStatus();
     status.Set(status_provider_description_pair.first,
                status_provider_description_pair.second->GetStatus());
   }
   return status;
 }
 
-base::Value::Dict PolicyValueAndStatusAggregator::GetAggregatedPolicyValues() {
-  base::Value::Dict policy_values;
-  base::Value::List policy_ids;
+base::flat_map<std::string, policy::mojom::StatusPtr>
+PolicyValueAndStatusAggregator::GetAggregatedPolicyStatusMojo() {
+  std::vector<std::pair<std::string, policy::mojom::StatusPtr>> entries;
+  for (const auto& status_provider_description_pair : status_providers_) {
+    DVLOG_POLICY(3, POLICY_PROCESSING)
+        << status_provider_description_pair.first
+        << " status: " << status_provider_description_pair.second->GetStatus();
+
+    entries.emplace_back(
+        status_provider_description_pair.first,
+        status_provider_description_pair.second->GetStatusMojo());
+  }
+  return base::flat_map<std::string, policy::mojom::StatusPtr>(
+      std::move(entries));
+}
+
+base::DictValue PolicyValueAndStatusAggregator::GetAggregatedPolicyValues() {
+  base::DictValue policy_values;
+  base::ListValue policy_ids;
   for (auto& value_provider : value_providers_) {
     MergePolicyValuesAndIds(value_provider->GetValues(), policy_values,
                             policy_ids);
   }
 
-  for (auto* value_provider : value_providers_unowned_) {
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-    // We only merge policy values for Lacros since policy ID is the same as
-    // Chrome policies.
-    policy_values.Merge(value_provider->GetValues());
-#else
+  for (policy::PolicyValueProvider* value_provider : value_providers_unowned_) {
     MergePolicyValuesAndIds(value_provider->GetValues(), policy_values,
                             policy_ids);
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
   }
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set(kPolicyValuesKey, std::move(policy_values));
   dict.Set(kPolicyIdsKey, std::move(policy_ids));
   return dict;
 }
 
-base::Value::Dict PolicyValueAndStatusAggregator::GetAggregatedPolicyNames() {
-  base::Value::Dict policy_names;
+base::DictValue PolicyValueAndStatusAggregator::GetAggregatedPolicyNames() {
+  base::DictValue policy_names;
   for (auto& value_provider : value_providers_) {
     policy_names.Merge(value_provider->GetNames());
   }
-  for (auto* value_provider : value_providers_unowned_) {
+  for (policy::PolicyValueProvider* value_provider : value_providers_unowned_) {
     policy_names.Merge(value_provider->GetNames());
   }
   return policy_names;
 }
 
 void PolicyValueAndStatusAggregator::Refresh() {
-  for (auto* value_provider : value_providers_unowned_) {
+  for (policy::PolicyValueProvider* value_provider : value_providers_unowned_) {
     value_provider->Refresh();
   }
   for (auto& value_provider : value_providers_) {
@@ -294,9 +311,18 @@ void PolicyValueAndStatusAggregator::OnPolicyStatusChanged() {
   NotifyValueAndStatusChange();
 }
 
+void PolicyValueAndStatusAggregator::OnProfileWillBeDestroyed(
+    Profile* profile) {
+  DCHECK(profile_observation_.IsObservingSource(profile));
+  profile_observation_.Reset();
+  policy_value_provider_observations_.RemoveAllObservations();
+  value_providers_.clear();
+}
+
 void PolicyValueAndStatusAggregator::NotifyValueAndStatusChange() {
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.OnPolicyValueAndStatusChanged();
+  }
 }
 
 void PolicyValueAndStatusAggregator::AddPolicyValueProvider(

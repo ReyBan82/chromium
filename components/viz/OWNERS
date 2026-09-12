@@ -1,35 +1,32 @@
 # For patches touching specific topics, try the topic-specific OWNERS. For
 # patches that touch multiple areas or if you aren't sure, try the general
 # OWNERS at the bottom.
-#
-# Folks listed as unofficial can't do OWNERS approvals but are good people to
-# ask for informal reviews.
 
 # display / resources / quads / passes
 vmpstr@chromium.org
 
-# renderers (GL/Skia/Software)
-rjkroege@chromium.org
+# renderers (Skia/Software)
 ccameron@chromium.org
-penghuang@chromium.org
 vasilyt@chromium.org
+hitawala@chromium.org
 
 # Skia renderer
 per-file skia_*=michaelludwig@google.com
-per-file skia_*=bsalomon@google.com
 
 # display_embedder / ozone
-rjkroege@chromium.org
 
 # frame sinks / surfaces
 kylechar@chromium.org
 jonross@chromium.org
+amanvr@google.com
+kartarsingh@google.com
+gaiko@google.com
 
 # gpu
 kylechar@chromium.org
 
 # hit testing
-rjkroege@chromium.org
+jonross@chromium.org
 
 # math / geometry
 dbaron@chromium.org
@@ -39,13 +36,15 @@ flackr@chromium.org
 ccameron@chromium.org
 vasilyt@chromium.org
 magchen@chromium.org
-petermcneeley@chromium.org
 
 # viz debugger
-petermcneeley@chromium.org
 
 # scheduling / begin frames
-sunnyps@chromium.org
+jonross@chromium.org
+
+# overdraw/occlusion
+per-file occlusion_culler*=zoraiznaeem@chromium.org
+per-file overdraw_tracker*=zoraiznaeem@chromium.org
 
 # general
 vmpstr@chromium.org

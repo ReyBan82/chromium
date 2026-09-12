@@ -6,7 +6,9 @@
 
 #include <utility>
 
+#include "base/metrics/histogram_functions.h"
 #include "net/base/net_errors.h"
+#include "net/base/network_anonymization_key.h"
 #include "net/proxy_resolution/proxy_info.h"
 #include "net/proxy_resolution/proxy_list.h"
 #include "net/proxy_resolution/win/windows_system_proxy_resolution_service.h"
@@ -48,41 +50,42 @@ constexpr net::NetworkTrafficAnnotationTag kWindowsResolverTrafficAnnotation =
 
 WindowsSystemProxyResolutionRequest::WindowsSystemProxyResolutionRequest(
     WindowsSystemProxyResolutionService* service,
-    const GURL& url,
-    const std::string& method,
+    GURL url,
+    std::string method,
+    NetworkAnonymizationKey network_anonymization_key,
     ProxyInfo* results,
     CompletionOnceCallback user_callback,
     const NetLogWithSource& net_log,
     WindowsSystemProxyResolver* windows_system_proxy_resolver)
-    : service_(service),
-      user_callback_(std::move(user_callback)),
-      results_(results),
-      url_(url),
-      method_(method),
-      net_log_(net_log),
-      creation_time_(base::TimeTicks::Now()) {
-  DCHECK(!user_callback_.is_null());
+    : SystemProxyResolutionRequest(service,
+                                   std::move(url),
+                                   std::move(method),
+                                   std::move(network_anonymization_key),
+                                   results,
+                                   std::move(user_callback),
+                                   net_log) {
   DCHECK(windows_system_proxy_resolver);
   proxy_resolution_request_ =
-      windows_system_proxy_resolver->GetProxyForUrl(url, this);
+      windows_system_proxy_resolver->GetProxyForUrl(url_, this);
 }
 
 WindowsSystemProxyResolutionRequest::~WindowsSystemProxyResolutionRequest() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (service_) {
-    service_->RemovePendingRequest(this);
-    net_log_.AddEvent(NetLogEventType::CANCELLED);
-
-    CancelResolveRequest();
-
-    net_log_.EndEvent(NetLogEventType::PROXY_RESOLUTION_SERVICE);
-  }
+  // Cancel the platform-specific resolver request before the base destructor
+  // runs (which handles removing from pending requests and net log events).
+  // C++ destructor ordering guarantees this runs before
+  // ~SystemProxyResolutionRequest.
+  // Safe to call even after completion — proxy_resolution_request_.reset() is
+  // a no-op when already null.
+  CancelResolveRequest();
 }
 
-LoadState WindowsSystemProxyResolutionRequest::GetLoadState() const {
-  // TODO(https://crbug.com/1032820): Consider adding a LoadState for "We're
-  // waiting on system APIs to do their thing".
-  return LOAD_STATE_RESOLVING_PROXY_FOR_URL;
+WindowsSystemProxyResolutionService*
+WindowsSystemProxyResolutionRequest::windows_service() const {
+  DCHECK(service_);
+  // The constructor guarantees service_ is a
+  // WindowsSystemProxyResolutionService, so this downcast is safe.
+  return static_cast<WindowsSystemProxyResolutionService*>(service_.get());
 }
 
 void WindowsSystemProxyResolutionRequest::CancelResolveRequest() {
@@ -96,14 +99,19 @@ void WindowsSystemProxyResolutionRequest::ProxyResolutionComplete(
     int windows_error) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(!was_completed());
-  // TODO(https://crbug.com/1032820): Log Windows error |windows_error|.
+
+  if (windows_error != 0) {
+    base::UmaHistogramSparse("Net.HttpProxy.WindowsSystemResolver.WinError",
+                             windows_error);
+  }
 
   proxy_resolution_request_.reset();
   results_->UseProxyList(proxy_list);
 
   // Note that DidFinishResolvingProxy might modify |results_|.
-  int net_error = service_->DidFinishResolvingProxy(url_, method_, results_,
-                                                    winhttp_status, net_log_);
+  int net_error = windows_service()->DidFinishResolvingProxy(
+      url_, method_, network_anonymization_key_, results_, winhttp_status,
+      windows_error, net_log_);
 
   // Make a note in the results which configuration was in use at the
   // time of the resolve.
@@ -114,9 +122,7 @@ void WindowsSystemProxyResolutionRequest::ProxyResolutionComplete(
 
   CompletionOnceCallback callback = std::move(user_callback_);
 
-  service_->RemovePendingRequest(this);
-  service_ = nullptr;
-  user_callback_.Reset();
+  MarkCompleted();
   std::move(callback).Run(net_error);
 }
 

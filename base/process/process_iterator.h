@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "base/base_export.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
 #include "base/process/process.h"
@@ -38,7 +39,7 @@ namespace base {
 struct ProcessEntry : public PROCESSENTRY32 {
   ProcessId pid() const { return th32ProcessID; }
   ProcessId parent_pid() const { return th32ParentProcessID; }
-  const wchar_t* exe_file() const { return szExeFile; }
+  const FilePath::CharType* exe_file() const { return szExeFile; }
 };
 #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
 struct BASE_EXPORT ProcessEntry {
@@ -49,8 +50,8 @@ struct BASE_EXPORT ProcessEntry {
   ProcessId pid() const { return pid_; }
   ProcessId parent_pid() const { return ppid_; }
   ProcessId gid() const { return gid_; }
-  const char* exe_file() const { return exe_file_.c_str(); }
-  const std::vector<std::string>& cmd_line_args() const {
+  const FilePath::CharType* exe_file() const { return exe_file_.c_str(); }
+  const std::vector<std::string>& cmd_line_args() const LIFETIME_BOUND {
     return cmd_line_args_;
   }
 
@@ -100,17 +101,13 @@ class BASE_EXPORT ProcessIterator {
 
  protected:
   virtual bool IncludeEntry();
-  const ProcessEntry& entry() { return entry_; }
+  const ProcessEntry& entry() const LIFETIME_BOUND { return entry_; }
 
  private:
   // Determines whether there's another process (regardless of executable)
   // left in the list of all processes.  Returns true and sets entry_ to
   // that process's info if there is one, false otherwise.
   bool CheckForNextProcess();
-
-  // Initializes a PROCESSENTRY32 data structure so that it's ready for
-  // use with Process32First/Process32Next.
-  void InitProcessEntry(ProcessEntry* entry);
 
 #if BUILDFLAG(IS_WIN)
   HANDLE snapshot_;
@@ -121,8 +118,9 @@ class BASE_EXPORT ProcessIterator {
 #elif BUILDFLAG(IS_POSIX)
   struct DIRClose {
     inline void operator()(DIR* x) const {
-      if (x)
+      if (x) {
         closedir(x);
+      }
     }
   };
   std::unique_ptr<DIR, DIRClose> procfs_dir_;

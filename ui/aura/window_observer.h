@@ -19,6 +19,9 @@ namespace aura {
 
 class Window;
 
+// Window lifetime and safely: A WindowObserver implementation should not delete
+// the observing window, except for OnWindowVisibilityChanged. Such an attempt
+// to delete the window will result in CHECK failure.
 class AURA_EXPORT WindowObserver : public base::CheckedObserver {
  public:
   struct HierarchyChangeParams {
@@ -27,11 +30,13 @@ class AURA_EXPORT WindowObserver : public base::CheckedObserver {
       HIERARCHY_CHANGED
     };
 
-    raw_ptr<Window> target;  // The window that was added or removed.
-    raw_ptr<Window> new_parent;
-    raw_ptr<Window> old_parent;
+    raw_ptr<Window, DanglingUntriaged>
+        target;  // The window that was added or removed.
+    raw_ptr<Window, DanglingUntriaged> new_parent;
+    raw_ptr<Window, DanglingUntriaged> old_parent;
     HierarchyChangePhase phase;
-    raw_ptr<Window> receiver;  // The window receiving the notification.
+    raw_ptr<Window, DanglingUntriaged>
+        receiver;  // The window receiving the notification.
   };
 
   WindowObserver();
@@ -80,7 +85,7 @@ class AURA_EXPORT WindowObserver : public base::CheckedObserver {
   // called for all observers attached to descendants of the Window as well
   // as all observers attached to ancestors of the Window. The Window supplied
   // to OnWindowVisibilityChanged() is the Window that Show()/Hide() was called
-  // on.
+  // on. This method is allowed to delete the observing window.
   virtual void OnWindowVisibilityChanged(Window* window, bool visible) {}
 
   // Invoked when the bounds of the |window|'s layer change. |old_bounds| and
@@ -185,6 +190,13 @@ class AURA_EXPORT WindowObserver : public base::CheckedObserver {
   // Called when the window manager ends an interactive resize loop. This is not
   // called if the window is destroyed during the loop.
   virtual void OnResizeLoopEnded(Window* window) {}
+
+  // Called when the window manager starts an interactive window drag move.
+  virtual void OnMoveLoopStarted(Window* window) {}
+
+  // Called when the window manager ends an interactive window drag move. This
+  // is not called if the window is destroyed during the drag.
+  virtual void OnMoveLoopEnded(Window* window) {}
 
   // Called when the opaque regions for occlusion of |window| is changed.
   virtual void OnWindowOpaqueRegionsForOcclusionChanged(Window* window) {}

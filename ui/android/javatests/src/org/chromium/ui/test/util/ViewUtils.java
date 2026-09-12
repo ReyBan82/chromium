@@ -3,6 +3,11 @@
 // found in the LICENSE file.
 
 package org.chromium.ui.test.util;
+
+import static androidx.test.espresso.matcher.ViewMatchers.isDescendantOfA;
+import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
+
+import static org.hamcrest.CoreMatchers.allOf;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
@@ -22,20 +27,20 @@ import android.view.ViewGroup;
 import android.widget.TextView;
 
 import androidx.annotation.IntDef;
-import androidx.appcompat.content.res.AppCompatResources;
-import androidx.test.espresso.Espresso;
 import androidx.test.espresso.NoMatchingViewException;
 import androidx.test.espresso.UiController;
 import androidx.test.espresso.ViewAction;
 import androidx.test.espresso.ViewAssertion;
 import androidx.test.espresso.ViewInteraction;
 import androidx.test.espresso.matcher.BoundedMatcher;
-import androidx.test.espresso.matcher.ViewMatchers;
 
 import org.hamcrest.Description;
 import org.hamcrest.Matcher;
 import org.junit.Assert;
 
+import org.chromium.base.test.transit.ViewElement;
+import org.chromium.base.test.transit.ViewFinder;
+import org.chromium.base.test.transit.ViewPresence;
 import org.chromium.base.test.util.Criteria;
 import org.chromium.base.test.util.CriteriaHelper;
 
@@ -43,13 +48,16 @@ import java.lang.annotation.Retention;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Collection of utilities helping to clarify expectations on views in tests.
- */
+import javax.annotation.CheckReturnValue;
+
+/** Collection of utilities helping to clarify expectations on views in tests. */
 public class ViewUtils {
     @Retention(SOURCE)
-    @IntDef(flag = true, value = {VIEW_VISIBLE, VIEW_INVISIBLE, VIEW_GONE, VIEW_NULL})
+    @IntDef(
+            flag = true,
+            value = {VIEW_VISIBLE, VIEW_INVISIBLE, VIEW_GONE, VIEW_NULL})
     public @interface ExpectedViewState {}
+
     public static final int VIEW_VISIBLE = 1;
     public static final int VIEW_INVISIBLE = 1 << 1;
     public static final int VIEW_GONE = 1 << 2;
@@ -87,26 +95,35 @@ public class ViewUtils {
 
         private void assertViewExpectedState(View view) {
             if (view == null) {
-                Criteria.checkThat("No view found to match: " + mViewMatcher.toString(),
-                        (mViewState & VIEW_NULL) != 0, is(true));
+                Criteria.checkThat(
+                        "No view found to match: " + mViewMatcher.toString(),
+                        (mViewState & VIEW_NULL) != 0,
+                        is(true));
                 return;
             }
 
             switch (view.getVisibility()) {
                 case View.VISIBLE:
-                    Criteria.checkThat("View matching '" + mViewMatcher.toString()
+                    Criteria.checkThat(
+                            "View matching '"
+                                    + mViewMatcher.toString()
                                     + "' is unexpectedly visible!",
-                            (mViewState & VIEW_VISIBLE) != 0, is(true));
+                            (mViewState & VIEW_VISIBLE) != 0,
+                            is(true));
                     break;
                 case View.INVISIBLE:
-                    Criteria.checkThat("View matching '" + mViewMatcher.toString()
+                    Criteria.checkThat(
+                            "View matching '"
+                                    + mViewMatcher.toString()
                                     + "' is unexpectedly invisible!",
-                            (mViewState & VIEW_INVISIBLE) != 0, is(true));
+                            (mViewState & VIEW_INVISIBLE) != 0,
+                            is(true));
                     break;
                 case View.GONE:
                     Criteria.checkThat(
                             "View matching '" + mViewMatcher.toString() + "' is unexpectedly gone!",
-                            (mViewState & VIEW_GONE) != 0, is(true));
+                            (mViewState & VIEW_GONE) != 0,
+                            is(true));
                     break;
             }
         }
@@ -115,33 +132,40 @@ public class ViewUtils {
     private ViewUtils() {}
 
     /**
-     * Waits until a view matching the given matches any of the given {@link ExpectedViewState}s.
-     * Fails if the matcher applies to multiple views. Times out if no view was found while waiting
-     * up to {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
-     * @param root The view group to search in.
+     * Waits until a visible view matches the given matcher. Fails if the matcher applies to
+     * multiple views. Times out after {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     *
+     * <p>By default, also waits for the view to be displayed >= 51% and enabled.
+     *
      * @param viewMatcher The matcher matching the view that should be waited for.
-     * @param viewState State that the matching view should be in. If multiple states are passed,
-     *                  the waiting will stop if at least one applies.
      */
-    public static void waitForView(
-            ViewGroup root, Matcher<View> viewMatcher, @ExpectedViewState int viewState) {
-        CriteriaHelper.pollUiThread(new ExpectedViewCriteria(viewMatcher, viewState, root));
+    public static void waitForVisibleView(Matcher<View> viewMatcher) {
+        ViewFinder.waitForView(viewMatcher);
     }
 
     /**
-     * Waits until a view matching the given matches any of the given {@link ExpectedViewState}s.
-     * Fails if the matcher applies to multiple views. Times out if no view was found while waiting
-     * up to {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
-     * This should be used on {@link ViewInteraction#check} with a {@link ViewGroup}. For example,
+     * Returns a ViewAssertion that, upon being called, polls until either a view matches both the
+     * given |viewMatcher| and any of the given {@link ExpectedViewState}s - or the polling times
+     * out after {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     *
+     * Calling this and ignoring the return value does not do anything. This should be used on
+     * {@link ViewInteraction#check} with a {@link ViewGroup}. For example,
      * the following usage assumes the root view is a {@link ViewGroup}.
      * <pre>
-     *   onView(isRoot()).check(waitForView(withId(R.id.example_id), VIEW_GONE));
+     *   onView(isRoot()).check(withEventualExpectedViewState(withId(R.id.example_id), VIEW_GONE));
      * </pre>
+     *
+     * A convenience method is provided equivalent to the exact code above:
+     * <pre>
+     *   waitForViewCheckingState(withId(R.id.example_id), VIEW_GONE);
+     * </pre>
+     *
      * @param viewMatcher The matcher matching the view that should be waited for.
      * @param viewState State that the matching view should be in. If multiple states are passed,
      *                  the waiting will stop if at least one applies.
      */
-    public static ViewAssertion waitForView(
+    @CheckReturnValue
+    public static ViewAssertion withEventualExpectedViewState(
             Matcher<View> viewMatcher, @ExpectedViewState int viewState) {
         return (View view, NoMatchingViewException noMatchException) -> {
             if (noMatchException != null) throw noMatchException;
@@ -151,54 +175,70 @@ public class ViewUtils {
     }
 
     /**
-     * Waits until a visible view matching the given matcher appears. Fails if the matcher applies
-     * to multiple views.  Times out if no view was found while waiting up to
-     * {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     * Waits until a visible view matches the given matcher. Fails if the matcher applies to
+     * multiple views. Times out after {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     *
      * @param root The view group to search in.
      * @param viewMatcher The matcher matching the view that should be waited for.
      */
     public static void waitForView(ViewGroup root, Matcher<View> viewMatcher) {
-        waitForView(root, viewMatcher, VIEW_VISIBLE);
+        ViewFinder.waitForView(allOf(viewMatcher, isDescendantOfA(is(root))));
     }
 
     /**
      * Waits until a visible view matching the given matcher appears. Fails if the matcher applies
-     * to multiple views.  Times out if no view was found while waiting up to
-     * {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     * to multiple views. Times out after {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL}
+     * milliseconds.
+     *
      * @param viewMatcher The matcher matching the view that should be waited for.
      */
-    public static ViewAssertion waitForView(Matcher<View> viewMatcher) {
-        return waitForView(viewMatcher, VIEW_VISIBLE);
+    @CheckReturnValue
+    public static ViewAssertion isEventuallyVisible(Matcher<View> viewMatcher) {
+        return withEventualExpectedViewState(viewMatcher, VIEW_VISIBLE);
     }
 
     /**
-     * Waits until a visible view matching the given matcher appears. Fails if the matcher applies
-     * to multiple views.  Times out if no view was found while waiting up to
-     * {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     * Waits until a visible view matches the given matcher. Fails if the matcher applies to
+     * multiple views. Times out after {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     *
+     * <p>By default, also waits for the view to be displayed >= 51% and enabled.
+     *
+     * @param viewMatcher The matcher matching the view that should be waited for.
+     * @param options The options to override expectations for the View (e.g. displayed %).
+     * @return An interaction on the matching view.
+     */
+    public static ViewInteraction onViewWaiting(
+            Matcher<View> viewMatcher, ViewElement.Options options) {
+        ViewPresence<View> viewPresence = ViewFinder.waitForView(viewMatcher, options);
+        return viewPresence.onView();
+    }
+
+    /**
+     * Waits until a visible view matches the given matcher. Fails if the matcher applies to
+     * multiple views. Times out after {@link CriteriaHelper#DEFAULT_MAX_TIME_TO_POLL} milliseconds.
+     *
+     * <p>By default, also waits for the view to be displayed >= 51% and enabled.
+     *
      * @param viewMatcher The matcher matching the view that should be waited for.
      * @return An interaction on the matching view.
      */
     public static ViewInteraction onViewWaiting(Matcher<View> viewMatcher) {
-        CriteriaHelper.pollInstrumentationThread(() -> {
-            Espresso.onView(ViewMatchers.isRoot())
-                    .check((View view, NoMatchingViewException noMatchException) -> {
-                        if (noMatchException != null) throw noMatchException;
-                        new ExpectedViewCriteria(viewMatcher, VIEW_VISIBLE, (ViewGroup) view).run();
-                    });
-        });
-        return Espresso.onView(viewMatcher);
+        ViewPresence<View> viewPresence = ViewFinder.waitForView(viewMatcher);
+        return viewPresence.onView();
     }
 
     /**
      * Wait until the specified view has finished layout updates.
+     *
      * @param view The specified view.
      */
     public static void waitForStableView(final View view) {
-        CriteriaHelper.pollUiThread(() -> {
-            Criteria.checkThat("The view is dirty.", view.isDirty(), is(false));
-            Criteria.checkThat(
-                    "The view has layout requested.", view.isLayoutRequested(), is(false));
-        });
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    Criteria.checkThat("The view is dirty.", view.isDirty(), is(false));
+                    Criteria.checkThat(
+                            "The view has layout requested.", view.isLayoutRequested(), is(false));
+                });
     }
 
     public static MotionEvent createMotionEvent(float x, float y) {
@@ -207,6 +247,7 @@ public class ViewUtils {
 
     /**
      * Creates a view matcher for the given color resource id.
+     *
      * @param colorResId The color resource id to be tested against the view.for the search engine
      *         icon.
      * @return Returns the view matcher.
@@ -220,8 +261,7 @@ public class ViewUtils {
                 this.mContext = imageView.getContext();
                 Drawable background = imageView.getBackground();
                 if (!(background instanceof ColorDrawable)) return false;
-                int expectedColor = AppCompatResources.getColorStateList(mContext, colorResId)
-                                            .getDefaultColor();
+                int expectedColor = mContext.getColorStateList(colorResId).getDefaultColor();
                 return ((ColorDrawable) background).getColor() == expectedColor;
             }
 
@@ -239,6 +279,7 @@ public class ViewUtils {
 
     /**
      * Creates a {@link ViewAction} to click on a text view with one or more clickable spans.
+     *
      * @param spanIndex Index of clickable span to click on.
      * @return A {@link ViewAction} on the matching view.
      */
@@ -268,6 +309,31 @@ public class ViewUtils {
                 }
                 Assert.assertTrue("Span index out of bounds", spans.length > spanIndex);
                 spans[spanIndex].onClick(view);
+            }
+        };
+    }
+
+    /**
+     * Creates a {@link ViewAction} that performs an accessibility action on the matched view.
+     *
+     * @param action The accessibility action to perform (e.g. AccessibilityNodeInfo.ACTION_CLICK).
+     * @return A {@link ViewAction} on the matching view.
+     */
+    public static ViewAction performAccessibilityAction(int action) {
+        return new ViewAction() {
+            @Override
+            public Matcher<View> getConstraints() {
+                return isDisplayed();
+            }
+
+            @Override
+            public String getDescription() {
+                return "perform accessibility action " + action;
+            }
+
+            @Override
+            public void perform(UiController uiController, View view) {
+                view.performAccessibilityAction(action, null);
             }
         };
     }

@@ -5,6 +5,7 @@
 #include "base/task/thread_pool/thread_pool_instance.h"
 
 #include <algorithm>
+#include <string_view>
 
 #include "base/check.h"
 #include "base/memory/ptr_util.h"
@@ -25,9 +26,11 @@ size_t GetDefaultMaxNumUtilityThreads(size_t max_num_foreground_threads_in) {
   int num_of_efficient_processors = SysInfo::NumberOfEfficientProcessors();
   if (num_of_efficient_processors != 0) {
     DCHECK_GT(num_of_efficient_processors, 0);
-    return static_cast<size_t>(num_of_efficient_processors);
+    return std::max<size_t>(
+        2, std::min(max_num_foreground_threads_in,
+                    static_cast<size_t>(num_of_efficient_processors)));
   }
-  return std::max<size_t>(1, max_num_foreground_threads_in / 2);
+  return std::max<size_t>(2, max_num_foreground_threads_in / 2);
 }
 
 }  // namespace
@@ -35,54 +38,47 @@ size_t GetDefaultMaxNumUtilityThreads(size_t max_num_foreground_threads_in) {
 ThreadPoolInstance::InitParams::InitParams(size_t max_num_foreground_threads_in)
     : max_num_foreground_threads(max_num_foreground_threads_in),
       max_num_utility_threads(
-          GetDefaultMaxNumUtilityThreads(max_num_foreground_threads_in)) {}
+          GetDefaultMaxNumUtilityThreads(max_num_foreground_threads_in)),
+      max_num_audio_threads(2) {}
 
 ThreadPoolInstance::InitParams::InitParams(size_t max_num_foreground_threads_in,
-                                           size_t max_num_utility_threads_in)
+                                           size_t max_num_utility_threads_in,
+                                           size_t max_num_audio_threads_in)
     : max_num_foreground_threads(max_num_foreground_threads_in),
-      max_num_utility_threads(max_num_utility_threads_in) {}
+      max_num_utility_threads(max_num_utility_threads_in),
+      max_num_audio_threads(max_num_audio_threads_in) {}
 
 ThreadPoolInstance::InitParams::~InitParams() = default;
 
-ThreadPoolInstance::ScopedExecutionFence::ScopedExecutionFence() {
+ThreadPoolInstance::ScopedRestrictedTasks::ScopedRestrictedTasks() {
   DCHECK(g_thread_pool);
-  g_thread_pool->BeginFence();
+  g_thread_pool->BeginRestrictedTasks();
 }
 
-ThreadPoolInstance::ScopedExecutionFence::~ScopedExecutionFence() {
+ThreadPoolInstance::ScopedRestrictedTasks::~ScopedRestrictedTasks() {
   DCHECK(g_thread_pool);
-  g_thread_pool->EndFence();
-}
-
-ThreadPoolInstance::ScopedBestEffortExecutionFence::
-    ScopedBestEffortExecutionFence() {
-  DCHECK(g_thread_pool);
-  g_thread_pool->BeginBestEffortFence();
-}
-
-ThreadPoolInstance::ScopedBestEffortExecutionFence::
-    ~ScopedBestEffortExecutionFence() {
-  DCHECK(g_thread_pool);
-  g_thread_pool->EndBestEffortFence();
+  g_thread_pool->EndRestrictedTasks();
 }
 
 ThreadPoolInstance::ScopedFizzleBlockShutdownTasks::
     ScopedFizzleBlockShutdownTasks() {
   // It's possible for this to be called without a ThreadPool present in tests.
-  if (g_thread_pool)
+  if (g_thread_pool) {
     g_thread_pool->BeginFizzlingBlockShutdownTasks();
+  }
 }
 
 ThreadPoolInstance::ScopedFizzleBlockShutdownTasks::
     ~ScopedFizzleBlockShutdownTasks() {
   // It's possible for this to be called without a ThreadPool present in tests.
-  if (g_thread_pool)
+  if (g_thread_pool) {
     g_thread_pool->EndFizzlingBlockShutdownTasks();
+  }
 }
 
-#if !BUILDFLAG(IS_NACL)
 // static
-void ThreadPoolInstance::CreateAndStartWithDefaultParams(StringPiece name) {
+void ThreadPoolInstance::CreateAndStartWithDefaultParams(
+    std::string_view name) {
   Create(name);
   g_thread_pool->StartWithDefaultParams();
 }
@@ -98,10 +94,13 @@ void ThreadPoolInstance::StartWithDefaultParams() {
       static_cast<size_t>(std::max(3, SysInfo::NumberOfProcessors() - 1));
   Start({max_num_foreground_threads});
 }
-#endif  // !BUILDFLAG(IS_NACL)
 
-void ThreadPoolInstance::Create(StringPiece name) {
-  Set(std::make_unique<internal::ThreadPoolImpl>(name));
+void ThreadPoolInstance::Create(std::string_view name,
+                                RecordLockContention record_lock_contention) {
+  Set(std::make_unique<internal::ThreadPoolImpl>(
+      name, std::make_unique<internal::ThreadPoolImpl::TaskTrackerImpl>(),
+      /*use_background_threads=*/true,
+      /*monitor_worker_thread_priorities=*/true, record_lock_contention));
 }
 
 // static

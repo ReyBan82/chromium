@@ -54,19 +54,23 @@ class HeadlessBrowserContextIsolationTest
     EXPECT_TRUE(embedded_test_server()->Start());
   }
 
-  // HeadlessWebContentsObserver implementation:
-  void DevToolsTargetReady() override {
+  // content::WebContentsObserver implementation:
+  void RenderViewReady() override {
     if (!web_contents2_) {
-      browser_context_ = browser()->CreateBrowserContextBuilder().Build();
-      web_contents2_ = browser_context_->CreateWebContentsBuilder().Build();
-      web_contents2_->AddObserver(this);
+      browser_context_ = browser()->CreateBrowserContext();
+      ASSERT_TRUE(browser_context_);
+
+      web_contents2_ = browser_context_->CreateWebContents();
+      ASSERT_TRUE(web_contents2_);
+
+      Observe(HeadlessWebContentsImpl::From(web_contents2_)->web_contents());
       return;
     }
 
     devtools_client2_.AttachToWebContents(
         HeadlessWebContentsImpl::From(web_contents2_)->web_contents());
 
-    HeadlessDevTooledBrowserTest::DevToolsTargetReady();
+    HeadlessDevTooledBrowserTest::RenderViewReady();
   }
 
   void RunDevTooledTest() override {
@@ -82,7 +86,7 @@ class HeadlessBrowserContextIsolationTest
         Param("url", embedded_test_server()->GetURL("/hello.html").spec()));
   }
 
-  void OnFirstLoadEventFired(const base::Value::Dict&) {
+  void OnFirstLoadEventFired(const base::DictValue&) {
     devtools_client2_.AddEventHandler(
         "Page.loadEventFired",
         base::BindRepeating(
@@ -95,7 +99,7 @@ class HeadlessBrowserContextIsolationTest
         Param("url", embedded_test_server()->GetURL("/hello.html").spec()));
   }
 
-  void OnSecondLoadEventFired(const base::Value::Dict&) {
+  void OnSecondLoadEventFired(const base::DictValue&) {
     // Set cookies on both pages.
     EXPECT_THAT(EvaluateScript(web_contents_,
                                base::StringPrintf("document.cookie = '%s'",
@@ -114,7 +118,6 @@ class HeadlessBrowserContextIsolationTest
     EXPECT_THAT(EvaluateScript(web_contents2_, "document.cookie"),
                 DictHasValue("result.result.value", kIsolatedPageCookie));
 
-    web_contents2_->RemoveObserver(this);
     web_contents2_->Close();
     browser_context_->Close();
 
@@ -122,8 +125,10 @@ class HeadlessBrowserContextIsolationTest
   }
 
  private:
-  raw_ptr<HeadlessBrowserContext, DanglingUntriaged> browser_context_ = nullptr;
-  raw_ptr<HeadlessWebContents, DanglingUntriaged> web_contents2_ = nullptr;
+  raw_ptr<HeadlessBrowserContext, AcrossTasksDanglingUntriaged>
+      browser_context_ = nullptr;
+  raw_ptr<HeadlessWebContents, AcrossTasksDanglingUntriaged> web_contents2_ =
+      nullptr;
   SimpleDevToolsProtocolClient devtools_client2_;
 };
 
@@ -159,20 +164,19 @@ class HeadlessBrowserUserDataDirTest : public HeadlessBrowserTest {
 IN_PROC_BROWSER_TEST_F(HeadlessBrowserUserDataDirTest, Do) {
   base::ScopedAllowBlockingForTesting allow_blocking;
 
-  EXPECT_TRUE(embedded_test_server()->Start());
+  ASSERT_TRUE(embedded_test_server()->Start());
 
-  HeadlessBrowserContext* browser_context = browser()
-                                                ->CreateBrowserContextBuilder()
-                                                .SetUserDataDir(user_data_dir())
-                                                .SetIncognitoMode(false)
-                                                .Build();
+  HeadlessBrowserContext::CreateParams params;
+  params.user_data_dir = user_data_dir();
+  params.incognito_mode = false;
+  HeadlessBrowserContext* browser_context =
+      browser()->CreateBrowserContext(std::move(params));
+  ASSERT_TRUE(browser_context);
 
-  HeadlessWebContents* web_contents =
-      browser_context->CreateWebContentsBuilder()
-          .SetInitialURL(embedded_test_server()->GetURL("/hello.html"))
-          .Build();
+  HeadlessWebContents* web_contents = browser_context->CreateWebContents(
+      embedded_test_server()->GetURL("/hello.html"));
 
-  EXPECT_TRUE(WaitForLoad(web_contents));
+  ASSERT_TRUE(WaitForLoad(web_contents));
 
   // Something should be written to this directory.
   // If it is not the case, more complex page may be needed.
@@ -185,7 +189,7 @@ IN_PROC_BROWSER_TEST_F(HeadlessBrowserTest, IncognitoMode) {
   // Just allow blocking from main thread for now.
   base::ScopedAllowBlockingForTesting allow_blocking;
 
-  EXPECT_TRUE(embedded_test_server()->Start());
+  ASSERT_TRUE(embedded_test_server()->Start());
 
   base::ScopedTempDir user_data_dir;
   ASSERT_TRUE(user_data_dir.CreateUniqueTempDir());
@@ -193,19 +197,17 @@ IN_PROC_BROWSER_TEST_F(HeadlessBrowserTest, IncognitoMode) {
   // Newly created temp directory should be empty.
   EXPECT_TRUE(base::IsDirectoryEmpty(user_data_dir.GetPath()));
 
+  HeadlessBrowserContext::CreateParams params;
+  params.user_data_dir = user_data_dir.GetPath();
+  params.incognito_mode = true;
   HeadlessBrowserContext* browser_context =
-      browser()
-          ->CreateBrowserContextBuilder()
-          .SetUserDataDir(user_data_dir.GetPath())
-          .SetIncognitoMode(true)
-          .Build();
+      browser()->CreateBrowserContext(std::move(params));
+  ASSERT_TRUE(browser_context);
 
-  HeadlessWebContents* web_contents =
-      browser_context->CreateWebContentsBuilder()
-          .SetInitialURL(embedded_test_server()->GetURL("/hello.html"))
-          .Build();
+  HeadlessWebContents* web_contents = browser_context->CreateWebContents(
+      embedded_test_server()->GetURL("/hello.html"));
 
-  EXPECT_TRUE(WaitForLoad(web_contents));
+  ASSERT_TRUE(WaitForLoad(web_contents));
 
   // Similar to test above, but now we are in incognito mode,
   // so nothing should be written to this directory.
@@ -242,18 +244,17 @@ IN_PROC_BROWSER_TEST_P(HeadlessBrowserTestWithUserDataDirAndMaybeIncognito,
   base::ScopedAllowBlockingForTesting allow_blocking;
   ASSERT_TRUE(embedded_test_server()->Start());
 
-  HeadlessBrowserContext* browser_context = browser()
-                                                ->CreateBrowserContextBuilder()
-                                                .SetUserDataDir(user_data_dir())
-                                                .SetIncognitoMode(incognito())
-                                                .Build();
+  HeadlessBrowserContext::CreateParams params;
+  params.user_data_dir = user_data_dir();
+  params.incognito_mode = incognito();
+  HeadlessBrowserContext* browser_context =
+      browser()->CreateBrowserContext(std::move(params));
+  ASSERT_TRUE(browser_context);
 
-  HeadlessWebContents* web_contents =
-      browser_context->CreateWebContentsBuilder()
-          .SetInitialURL(embedded_test_server()->GetURL("/hello.html"))
-          .Build();
+  HeadlessWebContents* web_contents = browser_context->CreateWebContents(
+      embedded_test_server()->GetURL("/hello.html"));
 
-  EXPECT_TRUE(WaitForLoad(web_contents));
+  ASSERT_TRUE(WaitForLoad(web_contents));
 
   EXPECT_EQ(incognito(), base::IsDirectoryEmpty(user_data_dir()));
 }

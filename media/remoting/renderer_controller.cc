@@ -4,15 +4,16 @@
 
 #include "media/remoting/renderer_controller.h"
 
-#include "base/containers/contains.h"
+#include <algorithm>
+
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/time/default_tick_clock.h"
 #include "base/time/tick_clock.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
+#include "media/base/remoting_constants.h"
 #include "media/remoting/metrics.h"
-#include "media/remoting/remoting_constants.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "media/base/android/media_codec_util.h"
@@ -322,12 +323,12 @@ void RendererController::OnDataSourceInitialized(
 }
 
 void RendererController::OnHlsManifestDetected() {
-#if BUILDFLAG(IS_ANDROID)
   is_hls_ = true;
+  // TODO(crbug.com/40057824) Android used to rely solely on MediaPlayer for HLS
+  // playback, but now there is an alternative native player. Should we still
+  // be doing this in all cases? It does work in its current state, on both
+  // android and desktop, but it is not thoroughly tested.
   UpdateRemotePlaybackAvailabilityMonitoringState();
-#else
-  NOTREACHED();
-#endif
 }
 
 void RendererController::UpdateRemotePlaybackAvailabilityMonitoringState() {
@@ -335,17 +336,22 @@ void RendererController::UpdateRemotePlaybackAvailabilityMonitoringState() {
 // thus the source is supported when the URL is either http or https, video and
 // audio codecs are supported by the remote playback device; HLS is playable by
 // Chrome on Android (which is not detected by the pipeline metadata atm).
+// On Desktop, `sink_metadata_` is empty until a streaming session has been
+// established. So it's not possible to check if the receiver device supports
+// the media's codec.
 #if BUILDFLAG(IS_ANDROID)
   const bool is_media_supported = is_hls_ || IsRemotePlaybackSupported();
 #else
-  const bool is_media_supported = IsAudioOrVideoSupported();
+  const bool is_media_supported =
+      !pipeline_metadata_.video_decoder_config.is_encrypted() &&
+      !pipeline_metadata_.audio_decoder_config.is_encrypted();
 #endif
   // TODO(avayvod): add a check for CORS.
   bool is_source_supported = url_after_redirects_.has_scheme() &&
                              (url_after_redirects_.SchemeIs("http") ||
-                              url_after_redirects_.SchemeIs("https")) &&
+                              url_after_redirects_.SchemeIs("https") ||
+                              url_after_redirects_.SchemeIs("file")) &&
                              is_media_supported;
-
   if (client_)
     client_->UpdateRemotePlaybackCompatibility(is_source_supported);
 }
@@ -406,6 +412,9 @@ RemotingCompatibility RendererController::GetVideoCompatibility() const {
       break;
     case VideoCodec::kHEVC:
       compatible = HasVideoCapability(RemotingSinkVideoCapability::CODEC_HEVC);
+      break;
+    case VideoCodec::kAV1:
+      compatible = HasVideoCapability(RemotingSinkVideoCapability::CODEC_AV1);
       break;
     default:
       VLOG(2) << "Remoting does not support video codec: "
@@ -586,18 +595,19 @@ void RendererController::SetClient(MediaObserverClient* client) {
 bool RendererController::HasVideoCapability(
     mojom::RemotingSinkVideoCapability capability) const {
   return sink_metadata_ &&
-         base::Contains(sink_metadata_->video_capabilities, capability);
+         std::ranges::contains(sink_metadata_->video_capabilities, capability);
 }
 
 bool RendererController::HasAudioCapability(
     mojom::RemotingSinkAudioCapability capability) const {
   return sink_metadata_ &&
-         base::Contains(sink_metadata_->audio_capabilities, capability);
+         std::ranges::contains(sink_metadata_->audio_capabilities, capability);
 }
 
 bool RendererController::HasFeatureCapability(
     RemotingSinkFeature capability) const {
-  return sink_metadata_ && base::Contains(sink_metadata_->features, capability);
+  return sink_metadata_ &&
+         std::ranges::contains(sink_metadata_->features, capability);
 }
 
 bool RendererController::SinkSupportsRemoting() const {

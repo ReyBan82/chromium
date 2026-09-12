@@ -29,25 +29,25 @@ LinuxUiBackend LinuxUiDelegateWayland::GetBackend() const {
   return LinuxUiBackend::kWayland;
 }
 
-bool LinuxUiDelegateWayland::ExportWindowHandle(
-    gfx::AcceleratedWidget parent,
-    base::OnceCallback<void(const std::string&)> callback) {
-  auto* parent_window = connection_->window_manager()->GetWindow(parent);
-  auto* foreign = connection_->xdg_foreign();
-  if (!parent_window || !foreign)
-    return false;
-
-  DCHECK_EQ(parent_window->type(), PlatformWindowType::kWindow);
-
-  foreign->ExportSurfaceToForeign(parent_window, std::move(callback));
-  return true;
-}
-
-bool LinuxUiDelegateWayland::ExportWindowHandle(
+void LinuxUiDelegateWayland::ExportWindowHandle(
     gfx::AcceleratedWidget window_id,
     base::OnceCallback<void(std::string)> callback) {
-  return ui::LinuxUiDelegate::GetInstance()->ExportWindowHandle(
-      window_id,
+  auto* parent_window = connection_->window_manager()->GetWindow(window_id);
+  auto* toplevel_parent = parent_window;
+  while (toplevel_parent && !toplevel_parent->AsWaylandToplevelWindow()) {
+    toplevel_parent = toplevel_parent->parent_window();
+  }
+
+  auto* foreign = connection_->xdg_foreign();
+  if (!toplevel_parent || !foreign) {
+    std::move(callback).Run("");
+    return;
+  }
+
+  DCHECK_EQ(toplevel_parent->type(), PlatformWindowType::kWindow);
+
+  foreign->ExportSurfaceToForeign(
+      toplevel_parent,
       base::BindOnce(&LinuxUiDelegateWayland::OnHandleForward,
                      weak_factory_.GetWeakPtr(), std::move(callback)));
 }

@@ -4,12 +4,14 @@
 
 #include "chrome/browser/extensions/api/omnibox/suggestion_parser.h"
 
+#include <string_view>
+
 #include "base/functional/callback.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/common/extensions/api/omnibox.h"
-#include "components/omnibox/browser/autocomplete_match.h"
+#include "components/omnibox/browser/autocomplete_input.h"
 #include "services/data_decoder/public/cpp/data_decoder.h"
 #include "services/data_decoder/public/cpp/safe_xml_parser.h"
 #include "services/data_decoder/public/mojom/xml_parser.mojom.h"
@@ -31,26 +33,24 @@ std::string CheckedGetElementTag(const base::Value& node) {
 
 // Recursively walks an XML node, generating `result` as it goes along.
 void WalkNode(const base::Value& node, DescriptionAndStyles* result) {
-  const base::Value::List* children = data_decoder::GetXmlElementChildren(node);
-  if (!children)
+  const base::ListValue* children = data_decoder::GetXmlElementChildren(node);
+  if (!children) {
     return;
+  }
 
   for (const base::Value& child : *children) {
     // Append text nodes to our description.
     if (data_decoder::IsXmlElementOfType(
             child, data_decoder::mojom::XmlParser::kTextNodeType)) {
+      DCHECK(child.is_dict());
       const std::string* text =
-          child.FindStringPath(data_decoder::mojom::XmlParser::kTextKey);
+          child.GetDict().FindString(data_decoder::mojom::XmlParser::kTextKey);
       DCHECK(text);
       std::u16string sanitized_text = base::UTF8ToUTF16(*text);
-      // Note: We unfortunately can't just use
-      // `AutocompleteMatch::SanitizeString()` directly here, because it
-      // unconditionally trims leading whitespace, which we need to preserve
-      // for any non-first styles.
-      // TODO(devlin): Add a toggle to AutocompleteMatch::SanitizeString() for
-      // that?
-      base::RemoveChars(sanitized_text, AutocompleteMatch::kInvalidChars,
-                        &sanitized_text);
+      // Keep leading whitespace, which we need to preserve for any non-first
+      // styles.
+      sanitized_text = AutocompleteInput::SanitizeString(
+          sanitized_text, /*trim_whitespace=*/false);
       if (result->description.empty()) {
         base::TrimWhitespace(sanitized_text, base::TRIM_LEADING,
                              &sanitized_text);
@@ -69,7 +69,7 @@ void WalkNode(const base::Value& node, DescriptionAndStyles* result) {
     std::string tag = CheckedGetElementTag(child);
     omnibox::DescriptionStyleType style_type =
         omnibox::ParseDescriptionStyleType(tag);
-    if (style_type == omnibox::DESCRIPTION_STYLE_TYPE_NONE) {
+    if (style_type == omnibox::DescriptionStyleType::kNone) {
       // Unsupported style type. Even so, we walk all children in the node for
       // forward compatibility.
       WalkNode(child, result);
@@ -102,13 +102,15 @@ bool PopulateEntriesFromNode(const base::Value& root_node,
     return false;
   }
 
-  if (CheckedGetElementTag(root_node) != "fragment")
+  if (CheckedGetElementTag(root_node) != "fragment") {
     return false;
+  }
 
-  const base::Value::List* children =
+  const base::ListValue* children =
       data_decoder::GetXmlElementChildren(root_node);
-  if (!children)
+  if (!children) {
     return false;
+  }
 
   entries_out->reserve(children->size());
   for (const base::Value& child : *children) {
@@ -116,8 +118,9 @@ bool PopulateEntriesFromNode(const base::Value& root_node,
             child, data_decoder::mojom::XmlParser::kElementType)) {
       return false;
     }
-    if (CheckedGetElementTag(child) != "internal-suggestion")
+    if (CheckedGetElementTag(child) != "internal-suggestion") {
       return false;
+    }
     entries_out->push_back(&child);
   }
 
@@ -143,21 +146,19 @@ void ConstructResultFromValue(
     run_callback_with_error(std::move(value_or_error.error()));
     return;
   }
-
-  DCHECK(value_or_error.has_value());
+  const base::Value root_node = std::move(*value_or_error);
 
   // From this point on, we hope that everything is valid (e.g., that we don't
   // get non-dictionary values or unexpected top-level types. But, if we did,
   // emit a generic error.
   constexpr char kGenericError[] = "Invalid XML";
 
-  if (!value_or_error->is_dict()) {
+  if (!root_node.is_dict()) {
     run_callback_with_error(kGenericError);
     return;
   }
 
   std::vector<const base::Value*> entries;
-  const base::Value& root_node = *value_or_error;
   if (has_multiple_entries) {
     if (!PopulateEntriesFromNode(root_node, &entries)) {
       run_callback_with_error(kGenericError);
@@ -180,7 +181,7 @@ void ConstructResultFromValue(
 // A helper method for ParseDescriptionsAndStyles(). `contains_multiple_entries`
 // indicates whether `xml_input` contains a single suggestion or multiple
 // suggestions that have been wrapped in individual XML elements.
-void ParseDescriptionAndStylesImpl(base::StringPiece xml_input,
+void ParseDescriptionAndStylesImpl(std::string_view xml_input,
                                    bool contains_multiple_entries,
                                    DescriptionAndStylesCallback callback) {
   std::string wrapped_xml =
@@ -207,14 +208,14 @@ DescriptionAndStylesResult& DescriptionAndStylesResult::operator=(
     DescriptionAndStylesResult&&) = default;
 DescriptionAndStylesResult::~DescriptionAndStylesResult() = default;
 
-void ParseDescriptionAndStyles(base::StringPiece str,
+void ParseDescriptionAndStyles(std::string_view str,
                                DescriptionAndStylesCallback callback) {
   constexpr bool kContainsMultipleEntries = false;
   ParseDescriptionAndStylesImpl(str, kContainsMultipleEntries,
                                 std::move(callback));
 }
 
-void ParseDescriptionsAndStyles(const std::vector<base::StringPiece>& strs,
+void ParseDescriptionsAndStyles(const std::vector<std::string_view>& strs,
                                 DescriptionAndStylesCallback callback) {
   // When passed multiple suggestions, we synthesize them into a single XML
   // document. This allows us to parse all of them with a single call to the

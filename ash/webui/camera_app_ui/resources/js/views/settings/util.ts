@@ -6,12 +6,7 @@ import {assertNotReached} from '../../assert.js';
 import * as dom from '../../dom.js';
 import {I18nString} from '../../i18n_string.js';
 import * as loadTimeData from '../../models/load_time_data.js';
-import {
-  AspectRatioSet,
-  Facing,
-  PhotoResolutionLevel,
-  VideoResolutionLevel,
-} from '../../type.js';
+import {AspectRatioSet, Facing, PhotoResolutionLevel, VideoResolutionLevel} from '../../type.js';
 import * as util from '../../util.js';
 
 /**
@@ -50,8 +45,6 @@ export function addTextItemToMenu(
 
 /**
  * Clear all the items in the menu except the header.
- *
- * @param menu The menu to clean.
  */
 export function clearMenu(menu: ParentNode): void {
   const toBeRemoved = [];
@@ -127,7 +120,7 @@ export function toAspectRatioAriaLabel(aspectRatioSet: AspectRatioSet): string {
 /**
  * Gets the string with I18n from given video resolution level.
  */
-export function toVideoResoloutionOptionLabel(level: VideoResolutionLevel):
+export function toVideoResolutionOptionLabel(level: VideoResolutionLevel):
     string {
   let label;
   switch (level) {

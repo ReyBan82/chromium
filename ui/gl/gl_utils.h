@@ -7,6 +7,8 @@
 #ifndef UI_GL_GL_UTILS_H_
 #define UI_GL_GL_UTILS_H_
 
+#include <string_view>
+
 #include "base/command_line.h"
 #include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
@@ -23,12 +25,7 @@
 
 namespace gl {
 class GLApi;
-#if defined(USE_EGL)
 class GLDisplayEGL;
-#endif  // USE_EGL
-#if defined(USE_GLX)
-class GLDisplayX11;
-#endif  // USE_GLX
 class GLDisplay;
 
 GL_EXPORT void Crash();
@@ -36,28 +33,39 @@ GL_EXPORT void Hang();
 
 #if BUILDFLAG(IS_ANDROID)
 GL_EXPORT base::ScopedFD MergeFDs(base::ScopedFD a, base::ScopedFD b);
+
+// Disable ANGLE and force to use native or other GL implementation.
+GL_EXPORT void DisableANGLE();
 #endif
 
 GL_EXPORT bool UsePassthroughCommandDecoder(
     const base::CommandLine* command_line);
 
-GL_EXPORT bool PassthroughCommandDecoderSupported();
+// Defines a set of workarounds that can be passed to ui/gl using the
+// SetGlWorkarounds function below.
+struct GlWorkarounds {
+  bool disable_d3d11 = false;
+  bool disable_metal = false;
+  bool disable_direct_composition_video_overlays = false;
+  bool disable_vp_auto_hdr = false;
+};
+
+// Obtains the global GlWorkarounds. For use by ui/gl code to determine which
+// workarounds have been set by a call to SetGlWorkarounds.
+GL_EXPORT const GlWorkarounds& GetGlWorkarounds();
+
+// Sets the GlWorkarounds. This should be called from the code hosting ui/gl.
+GL_EXPORT void SetGlWorkarounds(const GlWorkarounds& workarounds);
 
 #if BUILDFLAG(IS_WIN)
-// Calculates present during in 100 ns from number of frames per second.
-GL_EXPORT unsigned int FrameRateToPresentDuration(float frame_rate);
-
-// BufferCount for the root surface swap chain.
-GL_EXPORT unsigned int DirectCompositionRootSurfaceBufferCount();
-
-// Labels swapchain with the name_prefix and ts buffers buffers with the string
+// Labels swapchain with the name_prefix and its buffers with the string
 // name_prefix + _Buffer_ + <buffer_number>.
-GL_EXPORT void LabelSwapChainAndBuffers(IDXGISwapChain* swap_chain,
+GL_EXPORT void LabelSwapChainAndBuffers(IDXGISwapChain3* swap_chain,
                                         const char* name_prefix);
 
 // Same as LabelSwapChainAndBuffers, but only does the buffers. Used for resize
 // operations.
-GL_EXPORT void LabelSwapChainBuffers(IDXGISwapChain* swap_chain,
+GL_EXPORT void LabelSwapChainBuffers(IDXGISwapChain3* swap_chain,
                                      const char* name_prefix);
 #endif
 
@@ -66,10 +74,12 @@ GL_EXPORT void LabelSwapChainBuffers(IDXGISwapChain* swap_chain,
 // the two GLDisplayManager classes are singletons and in component build,
 // calling GetInstance() directly returns different instances in different
 // components.
-#if defined(USE_EGL)
 // Add an entry <preference, system_device_id> to GLDisplayManagerEGL.
 GL_EXPORT void SetGpuPreferenceEGL(GpuPreference preference,
                                    uint64_t system_device_id);
+
+// Return the value for the entry at <preference> from GLDisplayManagerEGL.
+GL_EXPORT uint64_t GetSystemDeviceIdEGLForTesting(GpuPreference preference);
 
 // Remove the entry at <preference> from GLDisplayManagerEGL.
 GL_EXPORT void RemoveGpuPreferenceEGL(GpuPreference preference);
@@ -82,12 +92,16 @@ GL_EXPORT GLDisplay* GetDefaultDisplay();
 // GLDisplayX11.
 GL_EXPORT GLDisplay* GetDisplay(GpuPreference gpu_preference);
 
+// Query the GLDisplay by |gpu_preference| and |display_key|. May return either
+// a GLDisplayEGL or GLDisplayX11.
+GL_EXPORT GLDisplay* GetDisplay(GpuPreference gpu_preference,
+                                gl::DisplayKey display_key);
+
 // Query the default GLDisplayEGL.
 GL_EXPORT GLDisplayEGL* GetDefaultDisplayEGL();
 
 // Query the GLDisplayEGL by |gpu_preference|.
 GL_EXPORT GLDisplayEGL* GetDisplayEGL(GpuPreference gpu_preference);
-#endif  // USE_EGL
 
 // Temporarily allows compilation of shaders that use the
 // ARB_texture_rectangle/ANGLE_texture_rectangle extension. We don't want to
@@ -127,6 +141,9 @@ class GL_EXPORT ScopedPixelStore {
   const int value_;
 };
 
+GL_EXPORT std::string_view GetDebugSourceString(unsigned int source);
+GL_EXPORT std::string_view GetDebugTypeString(unsigned int type);
+GL_EXPORT std::string_view GetDebugSeverityString(unsigned int severity);
 }  // namespace gl
 
 #endif  // UI_GL_GL_UTILS_H_

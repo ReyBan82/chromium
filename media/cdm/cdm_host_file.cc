@@ -39,7 +39,8 @@ std::unique_ptr<CdmHostFile> CdmHostFile::Create(
            << sig_file_path.MaybeAsASCII();
 
   // Preread file at |file_path| for better performance.
-  std::ignore = PreReadFile(file_path, /*is_executable=*/false);
+  std::ignore =
+      PreReadFile(file_path, /*is_executable=*/false, /*sequential=*/false);
 
   return std::unique_ptr<CdmHostFile>(
       new CdmHostFile(file_path, std::move(file), std::move(sig_file)));
@@ -56,7 +57,7 @@ CdmHostFile::CdmHostFile(const base::FilePath& file_path,
     : file_path_(file_path),
       file_(std::move(file)),
       sig_file_(std::move(sig_file)) {
-  DCHECK(!file_path_.empty());
+  CHECK(!file_path_.empty());
 }
 
 }  // namespace media

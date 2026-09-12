@@ -10,11 +10,16 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/ref_counted.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "chrome/common/extensions/api/activity_log_private.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
 #include "url/gurl.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -55,7 +60,7 @@ class Action : public base::RefCountedThreadSafe<Action> {
   scoped_refptr<Action> Clone() const;
 
   // The extension which caused this record to be generated.
-  const std::string& extension_id() const { return extension_id_; }
+  const ExtensionId& extension_id() const { return extension_id_; }
 
   // The time the record was generated (or some approximation).
   const base::Time& time() const { return time_; }
@@ -74,9 +79,9 @@ class Action : public base::RefCountedThreadSafe<Action> {
   // mutable_args() returns a pointer to the list stored in the Action which
   // can be modified in place; if the list was null an empty list is created
   // first.
-  const absl::optional<base::Value::List>& args() const { return args_; }
-  void set_args(absl::optional<base::Value::List> args);
-  base::Value::List& mutable_args();
+  const std::optional<base::ListValue>& args() const { return args_; }
+  void set_args(std::optional<base::ListValue> args);
+  base::ListValue& mutable_args();
 
   // The URL of the page which was modified or accessed.
   const GURL& page_url() const { return page_url_; }
@@ -98,9 +103,9 @@ class Action : public base::RefCountedThreadSafe<Action> {
   void set_arg_incognito(bool incognito) { arg_incognito_ = incognito; }
 
   // A dictionary where any additional data can be stored.
-  const absl::optional<base::Value::Dict>& other() const { return other_; }
-  void set_other(absl::optional<base::Value::Dict> other);
-  base::Value::Dict& mutable_other();
+  const std::optional<base::DictValue>& other() const { return other_; }
+  void set_other(std::optional<base::DictValue> other);
+  base::DictValue& mutable_other();
 
   // An ID that identifies an action stored in the Activity Log database. If the
   // action is not retrieved from the database, e.g., live stream, then the ID
@@ -131,17 +136,17 @@ class Action : public base::RefCountedThreadSafe<Action> {
  private:
   friend class base::RefCountedThreadSafe<Action>;
 
-  std::string extension_id_;
+  ExtensionId extension_id_;
   base::Time time_;
   ActionType action_type_;
   std::string api_name_;
-  absl::optional<base::Value::List> args_;
+  std::optional<base::ListValue> args_;
   GURL page_url_;
   std::string page_title_;
   bool page_incognito_{false};
   GURL arg_url_;
   bool arg_incognito_{false};
-  absl::optional<base::Value::Dict> other_;
+  std::optional<base::DictValue> other_;
   int count_{0};
   int64_t action_id_;
 };

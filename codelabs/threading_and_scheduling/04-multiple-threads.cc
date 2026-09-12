@@ -48,7 +48,7 @@ class IOThreadDelegate : public base::Thread::Delegate {
             base::sequence_manager::TaskQueue::Spec(
                 base::sequence_manager::QueueName::IO_DEFAULT_TQ)));
     default_task_runner_ = task_queue_->task_runner();
-    owned_sequence_manager_->SetDefaultTaskRunner(default_task_runner_);
+    owned_sequence_manager_->SetDefaultTaskQueue(task_queue_.get());
     // Set the global TaskRunner-to-this-thread, so that the main thread can
     // post tasks to the IO thread.
     g_io_thread_task_runner = default_task_runner_;
@@ -58,11 +58,10 @@ class IOThreadDelegate : public base::Thread::Delegate {
   // This is similar to i.e.,
   // `content::BrowserIOThreadDelegate::BindToCurrentThread()`, and is the first
   // function to run on the new physical thread.
-  void BindToCurrentThread(base::TimerSlack timer_slack) override {
+  void BindToCurrentThread() override {
     owned_sequence_manager_->BindToMessagePump(
         base::MessagePump::Create(base::MessagePumpType::IO));
-    owned_sequence_manager_->SetTimerSlack(timer_slack);
-    owned_sequence_manager_->SetDefaultTaskRunner(GetDefaultTaskRunner());
+    owned_sequence_manager_->SetDefaultTaskQueue(task_queue_.get());
   }
   scoped_refptr<base::SingleThreadTaskRunner> GetDefaultTaskRunner() override {
     return default_task_runner_;
@@ -71,7 +70,7 @@ class IOThreadDelegate : public base::Thread::Delegate {
  private:
   std::unique_ptr<base::sequence_manager::SequenceManager>
       owned_sequence_manager_;
-  scoped_refptr<base::sequence_manager::TaskQueue> task_queue_;
+  base::sequence_manager::TaskQueue::Handle task_queue_;
   scoped_refptr<base::SingleThreadTaskRunner> default_task_runner_;
 };
 
@@ -86,17 +85,15 @@ int main() {
           std::move(pump));
 
   // Create a default TaskQueue that feeds into the SequenceManager.
-  scoped_refptr<base::sequence_manager::TaskQueue> main_task_queue =
-      sequence_manager
-          ->CreateTaskQueueWithType<base::sequence_manager::TaskQueue>(
-              base::sequence_manager::TaskQueue::Spec(
-                  base::sequence_manager::TaskQueue::Spec(
-                      base::sequence_manager::QueueName::DEFAULT_TQ)));
+  base::sequence_manager::TaskQueue::Handle main_task_queue =
+      sequence_manager->CreateTaskQueue(base::sequence_manager::TaskQueue::Spec(
+          base::sequence_manager::TaskQueue::Spec(
+              base::sequence_manager::QueueName::DEFAULT_TQ)));
 
   // Get a default TaskRunner for the main (UI) thread.
   scoped_refptr<base::SingleThreadTaskRunner> default_task_runner =
       main_task_queue->task_runner();
-  sequence_manager->SetDefaultTaskRunner(default_task_runner);
+  sequence_manager->SetDefaultTaskQueue(main_task_queue.get());
 
   // Set the global TaskRunner-to-this-thread, so that the IO thread can post
   // tasks to the main thread.
@@ -105,9 +102,8 @@ int main() {
   // Create an IO thread to run alongside the main thread.
   std::unique_ptr<IOThreadDelegate> delegate =
       std::make_unique<IOThreadDelegate>();
-  base::Thread io_thread("IOThread");
+  base::Thread io_thread("IOThread", std::move(delegate));
   base::Thread::Options options;
-  options.delegate = std::move(delegate);
   if (!io_thread.StartWithOptions(std::move(options))) {
     LOG(FATAL) << "The thread failed to start!";
   }

@@ -5,8 +5,11 @@
 #ifndef CONTENT_BROWSER_WEB_PACKAGE_SIGNED_EXCHANGE_HANDLER_H_
 #define CONTENT_BROWSER_WEB_PACKAGE_SIGNED_EXCHANGE_HANDLER_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 
+#include "base/byte_size.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
@@ -15,19 +18,18 @@
 #include "content/browser/web_package/signed_exchange_error.h"
 #include "content/browser/web_package/signed_exchange_prologue.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/frame_tree_node_id.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 #include "net/base/io_buffer.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/isolation_info.h"
-#include "net/base/network_anonymization_key.h"
 #include "net/cert/cert_verifier.h"
 #include "net/cert/cert_verify_result.h"
 #include "net/log/net_log_with_source.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/mojom/restricted_cookie_manager.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -39,8 +41,11 @@ namespace net {
 class CertVerifyResult;
 class DrainableIOBuffer;
 class SourceStream;
-struct OCSPVerifyResult;
 }  // namespace net
+
+namespace bssl {
+struct OCSPVerifyResult;
+}  // namespace bssl
 
 namespace network {
 namespace mojom {
@@ -96,25 +101,26 @@ class CONTENT_EXPORT SignedExchangeHandler {
   SignedExchangeHandler(
       bool is_secure_transport,
       bool has_nosniff,
-      std::string content_type,
+      std::string_view content_type,
       std::unique_ptr<net::SourceStream> body,
       ExchangeHeadersCallback headers_callback,
       std::unique_ptr<SignedExchangeCertFetcherFactory> cert_fetcher_factory,
-      const net::NetworkAnonymizationKey& network_anonymization_key,
-      const absl::optional<net::IsolationInfo> outer_request_isolation_info,
+      std::optional<net::IsolationInfo> outer_request_isolation_info,
       int load_flags,
       const net::IPEndPoint& remote_endpoint,
       std::unique_ptr<blink::WebPackageRequestMatcher> request_matcher,
       std::unique_ptr<SignedExchangeDevToolsProxy> devtools_proxy,
       SignedExchangeReporter* reporter,
-      int frame_tree_node_id);
+      FrameTreeNodeId frame_tree_node_id);
 
   SignedExchangeHandler(const SignedExchangeHandler&) = delete;
   SignedExchangeHandler& operator=(const SignedExchangeHandler&) = delete;
 
   virtual ~SignedExchangeHandler();
 
-  int64_t GetExchangeHeaderLength() const { return exchange_header_length_; }
+  base::ByteSize GetExchangeHeaderLength() const {
+    return exchange_header_length_;
+  }
 
   // Called to get the following information about the loaded signed exchange:
   //   - Header integrity value
@@ -154,12 +160,11 @@ class CONTENT_EXPORT SignedExchangeHandler {
       net::IPAddress cert_server_ip_address);
   SignedExchangeLoadResult CheckCertRequirements(
       const net::X509Certificate* verified_cert);
-  bool CheckOCSPStatus(const net::OCSPVerifyResult& ocsp_result);
+  bool CheckOCSPStatus(const bssl::OCSPVerifyResult& ocsp_result);
 
   void OnVerifyCert(int32_t error_code,
                     const net::CertVerifyResult& cv_result,
-                    bool pkp_bypassed,
-                    const std::string& pinning_failure_log);
+                    bool pkp_bypassed);
   void CheckAbsenceOfCookies(base::OnceClosure callback);
   void OnGetCookies(base::OnceClosure callback,
                     const std::vector<net::CookieWithAccessResult>& results);
@@ -169,7 +174,7 @@ class CONTENT_EXPORT SignedExchangeHandler {
   const bool is_secure_transport_;
   const bool has_nosniff_;
   ExchangeHeadersCallback headers_callback_;
-  absl::optional<SignedExchangeVersion> version_;
+  std::optional<SignedExchangeVersion> version_;
   std::unique_ptr<net::SourceStream> source_;
 
   State state_ = State::kReadingPrologueBeforeFallbackUrl;
@@ -177,12 +182,12 @@ class CONTENT_EXPORT SignedExchangeHandler {
   scoped_refptr<net::IOBuffer> header_buf_;
   // Wrapper around |header_buf_| to progressively read fixed-size data.
   scoped_refptr<net::DrainableIOBuffer> header_read_buf_;
-  int64_t exchange_header_length_ = 0;
+  base::ByteSize exchange_header_length_;
 
   signed_exchange_prologue::BeforeFallbackUrl prologue_before_fallback_url_;
   signed_exchange_prologue::FallbackUrlAndAfter
       prologue_fallback_url_and_after_;
-  absl::optional<SignedExchangeEnvelope> envelope_;
+  std::optional<SignedExchangeEnvelope> envelope_;
 
   std::unique_ptr<SignedExchangeCertFetcherFactory> cert_fetcher_factory_;
 
@@ -191,8 +196,9 @@ class CONTENT_EXPORT SignedExchangeHandler {
   // `cert_fetcher_` borrows reference from `devtools_proxy_`, so it needs to be
   // declared last, so that it is destroyed first.
   std::unique_ptr<SignedExchangeCertFetcher> cert_fetcher_;
-  const net::NetworkAnonymizationKey network_anonymization_key_;
-  absl::optional<net::IsolationInfo> outer_request_isolation_info_;
+  // `outer_request_isolation_info_` will be set unless this corresponds to a
+  // prefetch request.
+  std::optional<net::IsolationInfo> outer_request_isolation_info_;
   const int load_flags_ = 0;
   const net::IPEndPoint remote_endpoint_;
 
@@ -204,7 +210,7 @@ class CONTENT_EXPORT SignedExchangeHandler {
   // This is owned by SignedExchangeLoader which is the owner of |this|.
   raw_ptr<SignedExchangeReporter> reporter_;
 
-  const int frame_tree_node_id_;
+  const FrameTreeNodeId frame_tree_node_id_;
 
   base::TimeTicks cert_fetch_start_time_;
   net::IPAddress cert_server_ip_address_;

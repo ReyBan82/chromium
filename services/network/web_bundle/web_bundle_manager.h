@@ -6,17 +6,19 @@
 #define SERVICES_NETWORK_WEB_BUNDLE_WEB_BUNDLE_MANAGER_H_
 
 #include <map>
+#include <optional>
 
 #include "base/component_export.h"
 #include "base/memory/weak_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/unguessable_token.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/cpp/cross_origin_embedder_policy.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
 #include "services/network/web_bundle/web_bundle_url_loader_factory.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace network {
 
@@ -35,10 +37,9 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) WebBundleManager {
       const GURL& bundle_url,
       const ResourceRequest::WebBundleTokenParams& params,
       int32_t process_id,
-      mojo::PendingRemote<mojom::DevToolsObserver> devtools_observer,
-      absl::optional<std::string> devtools_request_id,
       const CrossOriginEmbedderPolicy& cross_origin_embedder_policy,
-      mojom::CrossOriginEmbedderPolicyReporter* coep_reporter);
+      mojo::PendingRemote<mojom::CrossOriginEmbedderPolicyReporter>
+          coep_reporter);
 
   void StartSubresourceRequest(
       mojo::PendingReceiver<mojom::URLLoader> receiver,

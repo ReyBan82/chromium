@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//base/allocator/allocator.gni")
+import("//build/config/rust.gni")
 import("//testing/test.gni")
 
 executable("test_cpp_including_rust") {
@@ -10,14 +11,28 @@ executable("test_cpp_including_rust") {
   deps = [ "//build/rust/tests/test_rust_static_library" ]
 }
 
-test("test_cpp_including_rust_unittests") {
-  sources = [ "unittests.cc" ]
+source_set("test_cpp_including_rust_unittest_sources") {
+  sources = [ "static_unittest.cc" ]
   deps = [
     "//base",
     "//base/allocator:buildflags",
-    "//base/test:run_all_unittests",
     "//build/rust/tests/test_rust_static_library",
     "//testing/gmock",
     "//testing/gtest",
   ]
+  testonly = true
+}
+
+if (is_component_build) {
+  test("test_cpp_including_rust_dylib_unittests") {
+    sources = [ "shared_unittest.cc" ]
+    deps = [
+      "//base",
+      "//base/allocator:buildflags",
+      "//base/test:run_all_unittests",
+      "//build/rust/tests/test_rust_shared_library",
+      "//testing/gmock",
+      "//testing/gtest",
+    ]
+  }
 }

@@ -7,34 +7,33 @@
 #include <stddef.h>
 
 #include <map>
+#include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/containers/span.h"
 #include "base/files/file_util.h"
-#include "base/hash/md5.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
-#include "base/strings/string_piece.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/time/time.h"
+#include "crypto/hash.h"
 #include "url/url_util.h"
 
 namespace coverage {
 
 namespace {
 
-base::StringPiece SpanToStringPiece(const base::span<const uint8_t>& s) {
+std::string_view SpanToStringPiece(const base::span<const uint8_t>& s) {
   return {reinterpret_cast<const char*>(s.data()), s.size()};
-}
-
-std::string EncodeURIComponent(const std::string& component) {
-  url::RawCanonOutputT<char> encoded;
-  url::EncodeURIComponent(component.c_str(), component.size(), &encoded);
-  return {encoded.data(), static_cast<size_t>(encoded.length())};
 }
 
 }  // namespace
@@ -133,9 +132,19 @@ void DevToolsListener::StopAndStoreJSCoverage(content::DevToolsAgentHost* host,
   std::string get_precise_coverage =
       "{\"id\":40,\"method\":\"Profiler.takePreciseCoverage\"}";
   SendCommandMessage(host, get_precise_coverage);
-  AwaitCommandResponse(40);
+  if (!AwaitCommandResponse(40)) {
+    LOG(ERROR) << "Host has been destroyed whilst getting precise coverage";
+    return;
+  }
 
   script_coverage_ = std::move(value_);
+  base::DictValue* result = script_coverage_.FindDict("result");
+  CHECK(result) << "result key is null: " << script_coverage_;
+
+  base::ListValue* coverage_entries = result->FindList("result");
+  CHECK(coverage_entries) << "Can't find result key: " << *result;
+
+  RetrieveMissingScripts(host, coverage_entries);
   StoreScripts(host, store);
 
   std::string stop_debugger = "{\"id\":41,\"method\":\"Debugger.disable\"}";
@@ -144,16 +153,10 @@ void DevToolsListener::StopAndStoreJSCoverage(content::DevToolsAgentHost* host,
   std::string stop_profiler = "{\"id\":42,\"method\":\"Profiler.disable\"}";
   SendCommandMessage(host, stop_profiler);
 
-  base::Value::Dict* result = script_coverage_.FindDict("result");
-  CHECK(result) << "result key is null: " << script_coverage_;
-
-  base::Value::List* coverage_entries = result->FindList("result");
-  CHECK(coverage_entries) << "Can't find result key: " << *result;
-
-  base::Value::List entries;
+  base::ListValue entries;
   for (base::Value& entry_value : *coverage_entries) {
     CHECK(entry_value.is_dict()) << "Entry is not dictionary: " << entry_value;
-    base::Value::Dict& entry = entry_value.GetDict();
+    base::DictValue& entry = entry_value.GetDict();
     std::string* script_id = entry.FindString("scriptId");
     CHECK(script_id) << "Can't find scriptId: " << entry;
     const auto it = script_id_map_.find(*script_id);
@@ -165,35 +168,115 @@ void DevToolsListener::StopAndStoreJSCoverage(content::DevToolsAgentHost* host,
   }
 
   std::string url = host->GetURL().spec();
-  result->Set("encodedHostURL", EncodeURIComponent(url));
+  result->Set("encodedHostURL", url::EncodeUriComponent(url));
   result->Set("hostTitle", host->GetTitle());
   result->Set("hostType", host->GetType());
   result->Set("hostTest", test);
   result->Set("hostURL", url);
 
-  std::string md5 = base::MD5String(HostString(host, test));
-  std::string coverage = base::StrCat({test, ".", md5, uuid_, ".cov.json"});
+  std::string sha256 =
+      base::HexEncode(crypto::hash::Sha256(HostString(host, test)));
+
+  // Parameterized tests contain a "/" character which is not a valid file path.
+  // Replace these with "_" to enable a valid file path.
+  std::string file_name;
+  base::ReplaceChars(test, "/", "_", &file_name);
+  std::string coverage =
+      base::StrCat({file_name, ".", sha256, uuid_, ".cov.json"});
   base::FilePath path = store.AppendASCII("tests").AppendASCII(coverage);
 
   result->Set("result", std::move(entries));
   CHECK(base::JSONWriter::Write(*result, &coverage));
-  base::WriteFile(path, coverage.data(), coverage.size());
+  base::WriteFile(path, coverage);
 
   script_coverage_.clear();
-  script_hash_map_.clear();
+  script_hash_set_.clear();
   script_id_map_.clear();
   scripts_.clear();
 
-  AwaitCommandResponse(42);
+  LOG_IF(ERROR, !AwaitCommandResponse(42))
+      << "Host has been destroyed whilst waiting, coverage coverage already "
+         "extracted though";
   value_.clear();
+}
+
+void DevToolsListener::RetrieveMissingScripts(
+    content::DevToolsAgentHost* host,
+    const base::ListValue* coverage_entries) {
+  std::set<std::string> known_script_ids;
+  for (const auto& script : scripts_) {
+    const std::string* id = script.FindStringByDottedPath("params.scriptId");
+    CHECK(id);
+    known_script_ids.insert(*id);
+  }
+
+  // Reuse the frame ID for all scripts to avoid repetitive calls to
+  // Page.getFrameTree.
+  std::string frame_id;
+  for (const auto& entry : *coverage_entries) {
+    const std::string* script_id = entry.GetDict().FindString("scriptId");
+    CHECK(script_id);
+    if (known_script_ids.contains(*script_id)) {
+      continue;
+    }
+
+    const std::string* url = entry.GetDict().FindString("url");
+    CHECK(url && !url->empty());
+
+    if (frame_id.empty()) {
+      SendCommandMessage(host, "{\"id\":52,\"method\":\"Page.getFrameTree\"}");
+      if (AwaitCommandResponse(52)) {
+        const std::string* id =
+            value_.FindStringByDottedPath("result.frameTree.frame.id");
+        if (!id) {
+          LOG(ERROR) << "Failed to obtain frame ID";
+          return;
+        }
+        frame_id = *id;
+      }
+    }
+
+    std::string script_source;
+    SendCommandMessage(host,
+                       base::StringPrintf("{\"id\":53,\"method\":\"Page."
+                                          "getResourceContent\",\"params\":{"
+                                          "\"frameId\":\"%s\",\"url\":\"%s\"}}",
+                                          frame_id.c_str(), url->c_str()));
+    if (AwaitCommandResponse(53)) {
+      const std::string* content =
+          value_.FindStringByDottedPath("result.content");
+      CHECK(content);
+      script_source = *content;
+    }
+
+    if (script_source.empty()) {
+      LOG(ERROR) << "Failed to retrieve script source for " << *script_id;
+      continue;
+    }
+
+    std::string hash = base::HexEncode(
+        crypto::hash::Sha256(base::as_byte_span(script_source)));
+
+    base::DictValue script_entry;
+    base::DictValue params;
+    params.Set("scriptId", *script_id);
+    params.Set("url", *url);
+    params.Set("hash", hash);
+    params.Set("scriptSource", std::move(script_source));
+    script_entry.Set("params", std::move(params));
+
+    scripts_.push_back(std::move(script_entry));
+    known_script_ids.insert(*script_id);
+  }
 }
 
 void DevToolsListener::StoreScripts(content::DevToolsAgentHost* host,
                                     const base::FilePath& store) {
-  for (base::Value::Dict& script : scripts_) {
+  for (base::DictValue& script : scripts_) {
     std::string id;
     {
-      std::string* id_ptr = script.FindStringByDottedPath("params.scriptId");
+      const std::string* id_ptr =
+          script.FindStringByDottedPath("params.scriptId");
       CHECK(id_ptr);
       CHECK(!id_ptr->empty());
       id = *id_ptr;
@@ -201,9 +284,10 @@ void DevToolsListener::StoreScripts(content::DevToolsAgentHost* host,
 
     std::string url;
     {
-      std::string* url_ptr = script.FindStringByDottedPath("params.url");
-      if (!url_ptr)
+      const std::string* url_ptr = script.FindStringByDottedPath("params.url");
+      if (!url_ptr) {
         url_ptr = script.FindStringByDottedPath("params.sourceURL");
+      }
       if (!url_ptr || url_ptr->empty()) {
         value_.clear();
         continue;
@@ -211,27 +295,38 @@ void DevToolsListener::StoreScripts(content::DevToolsAgentHost* host,
       url = *url_ptr;
     }
 
-    std::string get_script_source = base::StringPrintf(
-        "{\"id\":50,\"method\":\"Debugger.getScriptSource\""
-        ",\"params\":{\"scriptId\":\"%s\"}}",
-        id.c_str());
-    SendCommandMessage(host, get_script_source);
-    AwaitCommandResponse(50);
-
     std::string text;
-    {
-      base::Value::Dict* result = value_.FindDict("result");
-      // TODO(crbug/1206082): In some cases the v8 isolate may clear out the
-      // script source during execution. This can lead to the Debugger seeing a
-      // scriptId during execution but when it comes time to retrieving the
-      // source can no longer find the ID. For now we simply ignore these, but
-      // we need to find a better way to handle this.
+    // Scripts retrieved by `RetrieveMissingScripts()` already have their source
+    // code in the `scriptSource` DictValue.
+    if (const std::string* source =
+            script.FindStringByDottedPath("params.scriptSource")) {
+      text = *source;
+    } else {
+      // Scripts received via the `Debugger.scriptParsed` needs to be retrieved
+      // via the `Debugger.getScriptSource` CDP command.
+      std::string get_script_source = base::StringPrintf(
+          "{\"id\":50,\"method\":\"Debugger.getScriptSource\""
+          ",\"params\":{\"scriptId\":\"%s\"}}",
+          id.c_str());
+      SendCommandMessage(host, get_script_source);
+      if (!AwaitCommandResponse(50)) {
+        LOG(ERROR) << "Host has been destroyed whilst getting script source, "
+                      "skipping remaining script sources";
+        return;
+      }
+
+      const base::DictValue* result = value_.FindDict("result");
+      // TODO(crbug.com/40180762): In some cases the v8 isolate may clear out
+      // the script source during execution. This can lead to the Debugger
+      // seeing a scriptId during execution but when it comes time to retrieving
+      // the source can no longer find the ID. For now we simply ignore these,
+      // but we need to find a better way to handle this.
       if (!result) {
         LOG(ERROR) << "Can't find result from Debugger.getScriptSource: "
                    << value_;
         return;
       }
-      std::string* text_ptr = result->FindString("scriptSource");
+      const std::string* text_ptr = result->FindString("scriptSource");
       if (!text_ptr || text_ptr->empty()) {
         value_.clear();
         continue;
@@ -241,25 +336,26 @@ void DevToolsListener::StoreScripts(content::DevToolsAgentHost* host,
 
     std::string hash;
     {
-      std::string* hash_ptr = script.FindStringByDottedPath("params.hash");
+      const std::string* hash_ptr =
+          script.FindStringByDottedPath("params.hash");
       CHECK(hash_ptr);
       hash = *hash_ptr;
     }
 
-    if (script_id_map_.find(id) != script_id_map_.end())
-      LOG(FATAL) << "Duplicate script by id " << url;
-    script_id_map_[id] = hash;
+    bool inserted = script_id_map_.try_emplace(id, hash).second;
+    CHECK(inserted) << "Duplicate script by id " << url;
+
     CHECK(!hash.empty());
-    if (script_hash_map_.find(hash) != script_hash_map_.end()) {
+    inserted = script_hash_set_.insert(hash).second;
+    if (!inserted) {
       value_.clear();
       continue;
     }
-    script_hash_map_[hash] = id;
 
-    base::Value::Dict* params = script.FindDict("params");
+    base::DictValue* params = script.FindDict("params");
     CHECK(params) << "Can't find params from script: " << script;
 
-    params->Set("encodedURL", EncodeURIComponent(url));
+    params->Set("encodedURL", url::EncodeUriComponent(url));
     params->Set("hash", hash);
     params->Set("text", text);
     params->Set("url", url);
@@ -268,24 +364,27 @@ void DevToolsListener::StoreScripts(content::DevToolsAgentHost* host,
         store.AppendASCII("scripts").AppendASCII(hash.append(".js.json"));
     CHECK(base::JSONWriter::Write(*params, &text));
     if (!base::PathExists(path))  // script de-duplication
-      base::WriteFile(path, text.data(), text.size());
+      base::WriteFile(path, text);
     value_.clear();
   }
 }
 
 void DevToolsListener::SendCommandMessage(content::DevToolsAgentHost* host,
                                           const std::string& command) {
-  auto message = base::as_bytes(base::make_span(command));
-  host->DispatchProtocolMessage(this, message);
+  host->DispatchProtocolMessage(this, base::as_byte_span(command));
 }
 
-void DevToolsListener::AwaitCommandResponse(int id) {
+bool DevToolsListener::AwaitCommandResponse(int id) {
+  if (!attached_ && !navigated_) {
+    return false;
+  }
   value_.clear();
   value_id_ = id;
 
   base::RunLoop run_loop;
   value_closure_ = run_loop.QuitClosure();
   run_loop.Run();
+  return attached_ && navigated_;
 }
 
 void DevToolsListener::DispatchProtocolMessage(
@@ -297,22 +396,24 @@ void DevToolsListener::DispatchProtocolMessage(
   if (VLOG_IS_ON(2))
     VLOG(2) << SpanToStringPiece(message);
 
-  absl::optional<base::Value> value =
-      base::JSONReader::Read(SpanToStringPiece(message));
+  std::optional<base::Value> value = base::JSONReader::Read(
+      SpanToStringPiece(message), base::JSON_PARSE_CHROMIUM_EXTENSIONS,
+      base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   CHECK(value.has_value()) << "Cannot parse as JSON: "
                            << SpanToStringPiece(message);
 
-  base::Value::Dict dict_value = std::move(value.value().GetDict());
+  base::DictValue dict_value = std::move(value.value().GetDict());
   std::string* method = dict_value.FindString("method");
   if (method) {
-    if (*method == "Runtime.executionContextsCreated")
+    if (*method == "Runtime.executionContextsCreated") {
       scripts_.clear();
-    else if (*method == "Debugger.scriptParsed")
+    } else if (*method == "Debugger.scriptParsed") {
       scripts_.push_back(std::move(dict_value));
+    }
     return;
   }
 
-  absl::optional<int> id = dict_value.FindInt("id");
+  std::optional<int> id = dict_value.FindInt("id");
   if (id.has_value() && id.value() == value_id_) {
     value_ = std::move(dict_value);
     CHECK(value_closure_);
@@ -325,9 +426,11 @@ bool DevToolsListener::MayAttachToURL(const GURL& url, bool is_webui) {
 }
 
 void DevToolsListener::AgentHostClosed(content::DevToolsAgentHost* host) {
-  CHECK(!value_closure_);
   navigated_ = false;
   attached_ = false;
+  if (value_closure_) {
+    std::move(value_closure_).Run();
+  }
 }
 
 }  // namespace coverage

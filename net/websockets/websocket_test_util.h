@@ -8,34 +8,52 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/test/test_future.h"
+#include "net/base/ip_endpoint.h"
+#include "net/base/net_errors.h"
+#include "net/base/transport_info.h"
 #include "net/http/http_basic_state.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_stream_parser.h"
 #include "net/socket/client_socket_handle.h"
-#include "net/third_party/quiche/src/quiche/spdy/core/http2_header_block.h"
+#include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
+#include "net/url_request/url_request_context.h"
 #include "net/url_request/url_request_test_util.h"
+#include "net/websockets/websocket_event_interface.h"
+#include "net/websockets/websocket_handshake_response_info.h"
 #include "net/websockets/websocket_handshake_stream_create_helper.h"
 #include "net/websockets/websocket_stream.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace url {
 class Origin;
 }  // namespace url
 
 namespace net {
+class AuthChallengeInfo;
+class AuthCredentials;
+class HttpResponseHeaders;
+class IPEndPoint;
+class MockClientSocketFactory;
+class SSLInfo;
+class SequencedSocketData;
+class URLRequest;
+class URLRequestContextBuilder;
+class WebSocketBasicHandshakeStream;
+class WebSocketHttp2HandshakeStream;
+class WebSocketHttp3HandshakeStream;
+struct SSLSocketDataProvider;
+struct WebSocketHandshakeRequestInfo;
+struct WebSocketHandshakeResponseInfo;
 
 using WebSocketExtraHeaders = std::vector<std::pair<std::string, std::string>>;
-
-class MockClientSocketFactory;
-class WebSocketBasicHandshakeStream;
-class SequencedSocketData;
-class IPEndPoint;
-struct SSLSocketDataProvider;
 
 class LinearCongruentialGenerator {
  public:
@@ -84,7 +102,7 @@ std::string WebSocketStandardResponse(const std::string& extra_headers);
 HttpRequestHeaders WebSocketCommonTestHeaders();
 
 // Generates a handshake request header block when using WebSockets over HTTP/2.
-spdy::Http2HeaderBlock WebSocketHttp2Request(
+quiche::HttpHeaderBlock WebSocketHttp2Request(
     const std::string& path,
     const std::string& authority,
     const std::string& origin,
@@ -92,7 +110,7 @@ spdy::Http2HeaderBlock WebSocketHttp2Request(
 
 // Generates a handshake response header block when using WebSockets over
 // HTTP/2.
-spdy::Http2HeaderBlock WebSocketHttp2Response(
+quiche::HttpHeaderBlock WebSocketHttp2Response(
     const WebSocketExtraHeaders& extra_headers);
 
 // This class provides a convenient way to construct a MockClientSocketFactory
@@ -111,9 +129,9 @@ class WebSocketMockClientSocketFactoryMaker {
   // Tell the factory to create a socket which expects |expect_written| to be
   // written, and responds with |return_to_read|. The test will fail if the
   // expected text is not written, or all the bytes are not read. This adds data
-  // for a new mock-socket using AddRawExpections(), and so can be called
+  // for a new mock-socket using AddRawExpectations(), and so can be called
   // multiple times to queue up multiple mock sockets, but usually in those
-  // cases the lower-level AddRawExpections() interface is more appropriate.
+  // cases the lower-level AddRawExpectations() interface is more appropriate.
   void SetExpectations(const std::string& expect_written,
                        const std::string& return_to_read);
 
@@ -168,7 +186,7 @@ struct WebSocketTestURLRequestContextHost {
   // Do not call after GetURLRequestContext() has been called.
   void SetProxyConfig(const std::string& proxy_rules);
 
-  // Call after calling one of SetExpections() or AddRawExpectations(). The
+  // Call after calling one of SetExpectations() or AddRawExpectations(). The
   // returned pointer remains owned by this object.
   URLRequestContext* GetURLRequestContext();
 
@@ -191,13 +209,16 @@ class DummyConnectDelegate : public WebSocketStream::ConnectDelegate {
  public:
   DummyConnectDelegate() = default;
   ~DummyConnectDelegate() override = default;
+  int OnURLRequestConnected(URLRequest* request,
+                            const TransportInfo& info,
+                            CompletionOnceCallback callback) override;
   void OnCreateRequest(URLRequest* url_request) override {}
   void OnSuccess(
       std::unique_ptr<WebSocketStream> stream,
       std::unique_ptr<WebSocketHandshakeResponseInfo> response) override {}
   void OnFailure(const std::string& message,
                  int net_error,
-                 absl::optional<int> response_code) override {}
+                 std::optional<int> response_code) override {}
   void OnStartOpeningHandshake(
       std::unique_ptr<WebSocketHandshakeRequestInfo> request) override {}
   void OnSSLCertificateError(
@@ -210,7 +231,7 @@ class DummyConnectDelegate : public WebSocketStream::ConnectDelegate {
                      scoped_refptr<HttpResponseHeaders> response_headers,
                      const IPEndPoint& remote_endpoint,
                      base::OnceCallback<void(const AuthCredentials*)> callback,
-                     absl::optional<AuthCredentials>* credentials) override;
+                     std::optional<AuthCredentials>* credentials) override;
 };
 
 // WebSocketStreamRequestAPI implementation that sets the value of
@@ -227,7 +248,7 @@ class TestWebSocketStreamRequestAPI : public WebSocketStreamRequestAPI {
       WebSocketHttp3HandshakeStream* handshake_stream) override;
   void OnFailure(const std::string& message,
                  int net_error,
-                 absl::optional<int> response_code) override {}
+                 std::optional<int> response_code) override {}
 };
 
 // A sub-class of WebSocketHandshakeStreamCreateHelper which sets a
@@ -252,6 +273,102 @@ class TestWebSocketHandshakeStreamCreateHelper
  private:
   DummyConnectDelegate connect_delegate_;
   TestWebSocketStreamRequestAPI request_;
+};
+
+// An implementation of WebSocketEventInterface that waits for and records the
+// results of the connect.
+class ConnectTestingEventInterface : public WebSocketEventInterface {
+ public:
+  ConnectTestingEventInterface();
+
+  ConnectTestingEventInterface(const ConnectTestingEventInterface&) = delete;
+  ConnectTestingEventInterface& operator=(const ConnectTestingEventInterface&) =
+      delete;
+
+  ~ConnectTestingEventInterface() override;
+
+  void WaitForResponse() { on_response_future_.Get(); }
+
+  bool failed() const { return failed_; }
+
+  const std::unique_ptr<WebSocketHandshakeResponseInfo>& response() const {
+    return response_;
+  }
+
+  // Only set if the handshake failed, otherwise empty.
+  std::string failure_message() const;
+  int net_error() const { return net_error_; }
+  std::optional<int> response_code() const { return response_code_; }
+
+  std::string selected_subprotocol() const;
+
+  std::string extensions() const;
+
+  // Implementation of WebSocketEventInterface.
+  void OnCreateURLRequest(URLRequest* request) override;
+
+  int OnURLRequestConnected(URLRequest* request,
+                            const TransportInfo& info,
+                            CompletionOnceCallback callback) override;
+
+  void OnAddChannelResponse(
+      std::unique_ptr<WebSocketHandshakeResponseInfo> response,
+      const std::string& selected_subprotocol,
+      const std::string& extensions) override;
+
+  void OnDataFrame(bool fin,
+                   WebSocketMessageType type,
+                   base::span<const char> payload) override;
+
+  bool HasPendingDataFrames() override;
+
+  void OnSendDataFrameDone() override;
+
+  void OnClosingHandshake() override;
+
+  void OnDropChannel(bool was_clean,
+                     uint16_t code,
+                     const std::string& reason) override;
+
+  void OnFailChannel(const std::string& message,
+                     int net_error,
+                     std::optional<int> response_code) override;
+
+  void OnStartOpeningHandshake(
+      std::unique_ptr<WebSocketHandshakeRequestInfo> request) override;
+
+  void OnSSLCertificateError(
+      std::unique_ptr<SSLErrorCallbacks> ssl_error_callbacks,
+      const GURL& url,
+      int net_error,
+      const SSLInfo& ssl_info,
+      bool fatal) override;
+
+  int OnAuthRequired(const AuthChallengeInfo& auth_info,
+                     scoped_refptr<HttpResponseHeaders> response_headers,
+                     const IPEndPoint& remote_endpoint,
+                     base::OnceCallback<void(const AuthCredentials*)> callback,
+                     std::optional<AuthCredentials>* credentials) override;
+
+  std::string GetDataFramePayload();
+
+  void WaitForDropChannel() { drop_channel_future_.Get(); }
+
+ private:
+  void SetReceivedMessageFuture(std::string received_message);
+
+  // failed_ is true if the handshake failed (i.e., OnFailChannel was called).
+  bool failed_ = false;
+  std::unique_ptr<WebSocketHandshakeResponseInfo> response_;
+  std::string selected_subprotocol_;
+  std::string extensions_;
+  std::string failure_message_;
+  int net_error_ = OK;
+  std::optional<int> response_code_;
+
+  base::test::TestFuture<std::string> received_message_future_;
+  base::test::TestFuture<void> drop_channel_future_;
+  base::test::TestFuture<void> on_response_future_;
 };
 
 }  // namespace net

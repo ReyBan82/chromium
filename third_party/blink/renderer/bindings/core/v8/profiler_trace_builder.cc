@@ -3,14 +3,19 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/bindings/core/v8/profiler_trace_builder.h"
+
 #include "base/time/time.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/webdx_feature.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_profiler_frame.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_profiler_marker.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_profiler_sample.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_profiler_stack.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_profiler_trace.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/timing/performance.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 #include "v8/include/v8.h"
@@ -43,13 +48,43 @@ ProfilerTraceBuilder::ProfilerTraceBuilder(ScriptState* script_state,
                                            base::TimeTicks time_origin)
     : script_state_(script_state),
       allowed_origin_(allowed_origin),
-      time_origin_(time_origin) {}
+      time_origin_(time_origin) {
+  ExecutionContext* execution_context = ExecutionContext::From(script_state_);
+  if (execution_context) {
+    is_cross_origin_isolated_ =
+        execution_context->CrossOriginIsolatedCapabilityOrDisabledWebSecurity();
+  }
+}
 
 void ProfilerTraceBuilder::Trace(Visitor* visitor) const {
   visitor->Trace(script_state_);
   visitor->Trace(frames_);
   visitor->Trace(stacks_);
   visitor->Trace(samples_);
+}
+
+std::optional<V8ProfilerMarker> ProfilerTraceBuilder::GetMarker(
+    const v8::EmbedderStateTag embedder_state,
+    const v8::StateTag fallback_state) {
+  ExecutionContext* execution_context = ExecutionContext::From(script_state_);
+  if (!RuntimeEnabledFeatures::ExperimentalJSProfilerMarkersEnabled(
+          execution_context)) {
+    return std::nullopt;
+  }
+
+  std::optional<V8ProfilerMarker> marker =
+      BlinkStateToMarker(embedder_state, fallback_state);
+  if (!marker.has_value()) {
+    return marker;
+  }
+  if (!is_cross_origin_isolated_) {
+    marker = ProfileMarkerToPublicMarker(marker->AsEnum());
+  }
+  if (marker && execution_context) {
+    UseCounter::CountWebDXFeature(
+        execution_context, mojom::blink::WebDXFeature::kJSSelfProfilingMarkers);
+  }
+  return marker;
 }
 
 void ProfilerTraceBuilder::AddSample(
@@ -67,20 +102,22 @@ void ProfilerTraceBuilder::AddSample(
       /*cross_origin_isolated_capability=*/true);
 
   sample->setTimestamp(relative_timestamp);
-  if (absl::optional<wtf_size_t> stack_id = GetOrInsertStackId(node))
+  if (std::optional<wtf_size_t> stack_id = GetOrInsertStackId(node)) {
     sample->setStackId(*stack_id);
+  }
 
-  if (absl::optional<blink::V8ProfilerMarker> marker =
-          BlinkStateToMarker(embedder_state, state))
+  if (std::optional<blink::V8ProfilerMarker> marker =
+          GetMarker(embedder_state, state)) {
     sample->setMarker(*marker);
+  }
 
   samples_.push_back(sample);
 }
 
-absl::optional<wtf_size_t> ProfilerTraceBuilder::GetOrInsertStackId(
+std::optional<wtf_size_t> ProfilerTraceBuilder::GetOrInsertStackId(
     const v8::CpuProfileNode* node) {
   if (!node)
-    return absl::optional<wtf_size_t>();
+    return std::optional<wtf_size_t>();
 
   if (!ShouldIncludeStackFrame(node))
     return GetOrInsertStackId(node->GetParent());
@@ -95,9 +132,10 @@ absl::optional<wtf_size_t> ProfilerTraceBuilder::GetOrInsertStackId(
   auto* stack = ProfilerStack::Create();
   wtf_size_t frame_id = GetOrInsertFrameId(node);
   stack->setFrameId(frame_id);
-  if (absl::optional<int> parent_stack_id =
-          GetOrInsertStackId(node->GetParent()))
+  if (std::optional<int> parent_stack_id =
+          GetOrInsertStackId(node->GetParent())) {
     stack->setParentId(*parent_stack_id);
+  }
 
   wtf_size_t stack_id = stacks_.size();
   stacks_.push_back(stack);

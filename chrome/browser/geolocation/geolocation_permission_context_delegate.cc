@@ -5,6 +5,7 @@
 #include "chrome/browser/geolocation/geolocation_permission_context_delegate.h"
 
 #include "base/functional/bind.h"
+#include "chrome/browser/geolocation/geolocation_permission_context_slim_web_view.h"
 #include "chrome/browser/profiles/profile.h"
 #include "components/permissions/permission_request_id.h"
 #include "components/permissions/permission_util.h"
@@ -21,32 +22,30 @@ GeolocationPermissionContextDelegate::~GeolocationPermissionContextDelegate() =
     default;
 
 bool GeolocationPermissionContextDelegate::DecidePermission(
-    const permissions::PermissionRequestID& id,
-    const GURL& requesting_origin,
-    bool user_gesture,
+    const permissions::PermissionRequestData& request_data,
     permissions::BrowserPermissionCallback* callback,
     permissions::GeolocationPermissionContext* context) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
-  bool permission_set;
-  bool new_permission;
-  if (extensions_context_.DecidePermission(id, requesting_origin, user_gesture,
-                                           callback, &permission_set,
-                                           &new_permission)) {
-    DCHECK_EQ(!!*callback, permission_set);
-    if (permission_set) {
-      content::RenderFrameHost* const render_frame_host =
-          content::RenderFrameHost::FromID(id.global_render_frame_host_id());
-      ContentSetting content_setting =
-          new_permission ? CONTENT_SETTING_ALLOW : CONTENT_SETTING_BLOCK;
-      context->NotifyPermissionSet(
-          id, requesting_origin,
-          permissions::PermissionUtil::GetLastCommittedOriginAsURL(
-              render_frame_host->GetMainFrame()),
-          std::move(*callback),
-          /*persist=*/false, content_setting, /*is_one_time=*/false,
-          /*is_final_decision=*/true);
+  if (std::optional<GeolocationPermissionContextExtensions::Decision>
+          extension_decision = extensions_context_.DecidePermission(
+              request_data.id, request_data.requesting_origin,
+              request_data.user_gesture, callback)) {
+    CHECK_EQ(!!*callback, extension_decision->permission_set);
+    if (extension_decision->permission_set) {
+      context->NotifyPermissionSet(request_data, std::move(*callback),
+                                   /*persist=*/false,
+                                   /*permission_result=*/nullptr,
+                                   extension_decision->decision);
     }
+    return true;
+  }
+  // Handle permission requests if the render frame is for a SlimWebView.
+  // Note that SlimWebView permissions are never persisted and don't have UI
+  // indicators.
+  if (GeolocationPermissionContextSlimWebView::DecidePermission(
+          request_data.id, request_data.requesting_origin,
+          request_data.user_gesture, callback)) {
     return true;
   }
   return false;

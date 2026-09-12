@@ -4,7 +4,6 @@
 
 #include "chrome/browser/ui/passwords/password_manager_navigation_throttle.h"
 
-#include "base/metrics/histogram_macros.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/password_manager/core/browser/manage_passwords_referrer.h"
 #include "components/password_manager/core/browser/password_manager_constants.h"
@@ -28,20 +27,25 @@ namespace {
 
 using content::NavigationHandle;
 using content::NavigationThrottle;
+using content::NavigationThrottleRegistry;
 using content::WebContents;
 
 bool IsTriggeredOnGoogleOwnedUI(NavigationHandle* handle) {
   // Only cover cases when the user clicked on a link.
   if (!ui::PageTransitionCoreTypeIs(handle->GetPageTransition(),
-                                    ui::PAGE_TRANSITION_LINK))
+                                    ui::PAGE_TRANSITION_LINK)) {
     return false;
+  }
 
   // Referrer origin and target URL must match.
-  if (handle->GetURL() != GURL(password_manager::kManageMyPasswordsURL))
+  if (handle->GetURL() != GURL(password_manager::kManageMyPasswordsURL)) {
     return false;
+  }
 
   url::Origin origin = handle->GetInitiatorOrigin().value_or(url::Origin());
-  if (origin != url::Origin::Create(GURL(password_manager::kReferrerURL))) {
+  if (origin != url::Origin::Create(GURL(password_manager::kReferrerURL)) &&
+      origin !=
+          url::Origin::Create(GURL(password_manager::kManageMyPasswordsURL))) {
     return false;
   }
 
@@ -51,40 +55,49 @@ bool IsTriggeredOnGoogleOwnedUI(NavigationHandle* handle) {
 }  // namespace
 
 PasswordManagerNavigationThrottle::PasswordManagerNavigationThrottle(
-    NavigationHandle* handle)
-    : NavigationThrottle(handle) {}
+    NavigationThrottleRegistry& registry)
+    : NavigationThrottle(registry) {}
 
 PasswordManagerNavigationThrottle::~PasswordManagerNavigationThrottle() =
     default;
 
 // static
-std::unique_ptr<PasswordManagerNavigationThrottle>
-PasswordManagerNavigationThrottle::MaybeCreateThrottleFor(
-    NavigationHandle* handle) {
+void PasswordManagerNavigationThrottle::MaybeCreateAndAdd(
+    NavigationThrottleRegistry& registry) {
   // Don't handle navigations in subframes or main frames that are in a nested
-  // frame tree (e.g. portals, fenced frames)
-  if (!handle->GetParentFrameOrOuterDocument() &&
-      IsTriggeredOnGoogleOwnedUI(handle)) {
-    return std::make_unique<PasswordManagerNavigationThrottle>(handle);
+  // frame tree (e.g. fenced frames)
+  auto& handle = registry.GetNavigationHandle();
+  if (!handle.GetParentFrameOrOuterDocument() &&
+      IsTriggeredOnGoogleOwnedUI(&handle)) {
+    registry.AddThrottle(
+        std::make_unique<PasswordManagerNavigationThrottle>(registry));
   }
-
-  return nullptr;
 }
 
 NavigationThrottle::ThrottleCheckResult
 PasswordManagerNavigationThrottle::WillStartRequest() {
   WebContents* web_contents = navigation_handle()->GetWebContents();
-  if (!web_contents)
+  if (!web_contents) {
     return NavigationThrottle::PROCEED;
+  }
 
 #if BUILDFLAG(IS_ANDROID)
   password_manager_launcher::ShowPasswordSettings(
       web_contents,
-      password_manager::ManagePasswordsReferrer::kPasswordsGoogleWebsite);
+      password_manager::ManagePasswordsReferrer::kPasswordsGoogleWebsite,
+      /*manage_passkeys=*/false);
 #else
-  ChromePasswordManagerClient::FromWebContents(web_contents)
-      ->NavigateToManagePasswordsPage(
-          password_manager::ManagePasswordsReferrer::kPasswordsGoogleWebsite);
+  ChromePasswordManagerClient* client =
+      ChromePasswordManagerClient::FromWebContents(web_contents);
+  if (!client) {
+    // WebContents without a password manager client (non-tab surfaces such
+    // as the presentation receiver window) have no passwords UI to redirect
+    // to. Let the navigation proceed in place instead of cancelling it and
+    // closing the WebContents below.
+    return NavigationThrottle::PROCEED;
+  }
+  client->NavigateToManagePasswordsPage(
+      password_manager::ManagePasswordsReferrer::kPasswordsGoogleWebsite);
 #endif
   // Schedule a task to close current tab since on Android Password Manager is
   // shown in the Native UI, and on desktop NavigateToManagePasswordsPage()

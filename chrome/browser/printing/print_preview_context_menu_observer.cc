@@ -4,6 +4,7 @@
 
 #include "chrome/browser/printing/print_preview_context_menu_observer.h"
 
+#include "base/check.h"
 #include "base/notreached.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/printing/print_preview_dialog_controller.h"
@@ -12,15 +13,12 @@ PrintPreviewContextMenuObserver::PrintPreviewContextMenuObserver(
     content::WebContents* contents) : contents_(contents) {
 }
 
-PrintPreviewContextMenuObserver::~PrintPreviewContextMenuObserver() {
-}
+PrintPreviewContextMenuObserver::~PrintPreviewContextMenuObserver() = default;
 
 bool PrintPreviewContextMenuObserver::IsPrintPreviewDialog() {
-  printing::PrintPreviewDialogController* controller =
-      printing::PrintPreviewDialogController::GetInstance();
-  if (!controller)
-    return false;
-  return (controller->GetPrintPreviewForContents(contents_) != nullptr);
+  auto* controller = printing::PrintPreviewDialogController::GetInstance();
+  CHECK(controller);
+  return !!controller->GetPrintPreviewForContents(contents_);
 }
 
 bool PrintPreviewContextMenuObserver::IsCommandIdSupported(int command_id) {
@@ -28,7 +26,6 @@ bool PrintPreviewContextMenuObserver::IsCommandIdSupported(int command_id) {
     case IDC_PRINT:
     case IDC_VIEW_SOURCE:
     case IDC_CONTENT_CONTEXT_VIEWFRAMESOURCE:
-    case IDC_CONTENT_CONTEXT_SEARCHWEBFOR:
       return IsPrintPreviewDialog();
 
     default:
@@ -41,11 +38,9 @@ bool PrintPreviewContextMenuObserver::IsCommandIdEnabled(int command_id) {
     case IDC_PRINT:
     case IDC_VIEW_SOURCE:
     case IDC_CONTENT_CONTEXT_VIEWFRAMESOURCE:
-    case IDC_CONTENT_CONTEXT_SEARCHWEBFOR:
       return false;
 
     default:
       NOTREACHED();
-      return true;
   }
 }

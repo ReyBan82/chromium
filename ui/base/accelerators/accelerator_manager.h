@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/accelerators/accelerator_map.h"
@@ -85,6 +86,9 @@ class COMPONENT_EXPORT(UI_BASE) AcceleratorManager {
   // Whether the given |accelerator| has a priority handler associated with it.
   bool HasPriorityHandler(const Accelerator& accelerator) const;
 
+  // Returns true if there are no accelerators registered.
+  bool IsEmpty() const { return accelerators_.empty(); }
+
 #if BUILDFLAG(IS_CHROMEOS)
   void SetUsePositionalLookup(bool use_positional_lookup) {
     DCHECK(::features::IsImprovedKeyboardShortcutsEnabled());
@@ -129,7 +133,7 @@ class COMPONENT_EXPORT(UI_BASE) AcceleratorManager {
     size_t size() const { return targets_.size(); }
 
    private:
-    std::list<AcceleratorTarget*> targets_;
+    std::list<raw_ptr<AcceleratorTarget, CtnExperimental>> targets_;
     bool has_priority_handler_ = false;
   };
 

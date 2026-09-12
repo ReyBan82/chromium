@@ -10,34 +10,30 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/login_delegate.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
+#include "net/http/http_response_headers.h"
 #include "net/http/http_status_code.h"
 #include "services/network/public/mojom/network_context.mojom.h"
+#include "url/scheme_host_port.h"
 
-LoginTabHelper::~LoginTabHelper() {}
+namespace {
 
-std::unique_ptr<content::LoginDelegate>
-LoginTabHelper::CreateAndStartMainFrameLoginDelegate(
-    const net::AuthChallengeInfo& auth_info,
-    content::WebContents* web_contents,
-    const content::GlobalRequestID& request_id,
-    const GURL& url,
-    scoped_refptr<net::HttpResponseHeaders> response_headers,
-    LoginAuthRequiredCallback auth_required_callback) {
-  std::unique_ptr<LoginHandler> login_handler = LoginHandler::Create(
-      auth_info, web_contents, std::move(auth_required_callback));
-  login_handler->StartMainFrame(
-      request_id, url, response_headers,
-      // The caller owns the created LoginHandler, and there's no guarantee that
-      // |this| outlives it, so use a weak pointer to receive a callback when an
-      // extension has cancelled the auth request for a navigation.
-      base::BindOnce(&LoginTabHelper::RegisterExtensionCancelledNavigation,
-                     weak_ptr_factory_.GetWeakPtr()));
-  return login_handler;
+// Returns true if `challenge` is consistent with a navigation to `url`. The
+// login prompt displays the navigation URL as the origin asking for
+// credentials, so a server challenge for a different origin must not be shown
+// to the user or used to populate the auth cache.
+bool ChallengeMatchesNavigation(const net::AuthChallengeInfo& challenge,
+                                const GURL& url) {
+  return challenge.is_proxy || challenge.challenger == url::SchemeHostPort(url);
 }
+
+}  // namespace
+
+LoginTabHelper::~LoginTabHelper() = default;
 
 void LoginTabHelper::DidStartNavigation(
     content::NavigationHandle* navigation_handle) {
@@ -49,14 +45,11 @@ void LoginTabHelper::DidStartNavigation(
   // response bodies that have subframes or can trigger same-document
   // navigations.
   if (!navigation_handle->IsInPrimaryMainFrame() ||
-      navigation_handle->IsSameDocument())
+      navigation_handle->IsSameDocument()) {
     return;
-
-  if (!login_handler_)
-    return;
+  }
 
   login_handler_.reset();
-  url_for_login_handler_ = GURL();
 }
 
 void LoginTabHelper::DidFinishNavigation(
@@ -94,7 +87,10 @@ void LoginTabHelper::DidFinishNavigation(
     return;
   }
 
-  if (!navigation_handle->GetAuthChallengeInfo()) {
+  if (!navigation_handle->GetAuthChallengeInfo() ||
+      !ChallengeMatchesNavigation(
+          navigation_handle->GetAuthChallengeInfo().value(),
+          navigation_handle->GetURL())) {
     return;
   }
 
@@ -111,8 +107,7 @@ void LoginTabHelper::DidFinishNavigation(
   network_anonymization_key_ =
       navigation_handle->GetIsolationInfo().network_anonymization_key();
 
-  url_for_login_handler_ = navigation_handle->GetURL();
-  login_handler_ = LoginHandler::Create(
+  login_handler_ = CreateLoginHandler(
       navigation_handle->GetAuthChallengeInfo().value(),
       navigation_handle->GetWebContents(),
       base::BindOnce(
@@ -121,7 +116,7 @@ void LoginTabHelper::DidFinishNavigation(
           // callback, it's safe to use base::Unretained here; the
           // |login_handler_| cannot outlive its owning LoginTabHelper.
           base::Unretained(this)));
-  login_handler_->ShowLoginPromptAfterCommit(navigation_handle->GetURL());
+  login_handler_->ShowLoginPrompt(navigation_handle->GetURL());
 
   // If the challenge comes from a proxy, the URL should be hidden in the
   // omnibox to avoid origin confusion. Call DidChangeVisibleSecurityState() to
@@ -177,10 +172,14 @@ LoginTabHelper::WillProcessMainFrameUnauthorizedResponse(
     return content::NavigationThrottle::PROCEED;
   }
 
-  // Do not cancel the navigation if there is no auth challenge. We only want to
-  // cancel the navigation below to show a blank page if there is an auth
-  // challenge for which to show a login prompt.
-  if (!navigation_handle->GetAuthChallengeInfo()) {
+  // Do not cancel the navigation if there is no auth challenge, or if the
+  // challenge does not match the navigation URL. We only want to cancel the
+  // navigation below to show a blank page if there is an auth challenge for
+  // which to show a login prompt.
+  if (!navigation_handle->GetAuthChallengeInfo() ||
+      !ChallengeMatchesNavigation(
+          navigation_handle->GetAuthChallengeInfo().value(),
+          navigation_handle->GetURL())) {
     return content::NavigationThrottle::PROCEED;
   }
 
@@ -188,19 +187,13 @@ LoginTabHelper::WillProcessMainFrameUnauthorizedResponse(
   // cancelling auth. If so, remember the navigation handle ID so as to be able
   // to suppress a prompt for this navigation when it finishes in
   // DidFinishNavigation().
-  if (navigation_handle->GetGlobalRequestID().request_id ==
-      request_id_for_extension_cancelled_navigation_.request_id) {
-    // Navigation requests are always initiated in the browser process. Due to a
-    // bug (https://crbug.com/1078216), different |child_id|s are used in
-    // different places to represent the browser process. Therefore, we don't
-    // compare the two GlobalRequestIDs directly here but rather check that they
-    // each have the expected |child_id| value signifying the browser process
-    // initiated the request.
-    CHECK_EQ(request_id_for_extension_cancelled_navigation_.child_id, 0);
-    CHECK_EQ(navigation_handle->GetGlobalRequestID().child_id, -1);
+  if (navigation_handle->GetGlobalRequestID() ==
+      request_id_for_extension_cancelled_navigation_) {
+    // Navigation requests are always initiated in the browser process.
+    CHECK(request_id_for_extension_cancelled_navigation_.child_id.is_browser());
     navigation_handle_id_for_extension_cancelled_navigation_ =
         navigation_handle->GetNavigationId();
-    request_id_for_extension_cancelled_navigation_ = {0, -1};
+    request_id_for_extension_cancelled_navigation_.request_id = -1;
     return content::NavigationThrottle::PROCEED;
   }
 
@@ -214,10 +207,17 @@ LoginTabHelper::LoginTabHelper(content::WebContents* web_contents)
     : content::WebContentsObserver(web_contents),
       content::WebContentsUserData<LoginTabHelper>(*web_contents) {}
 
+std::unique_ptr<LoginHandler> LoginTabHelper::CreateLoginHandler(
+    const net::AuthChallengeInfo& auth_info,
+    content::WebContents* web_contents,
+    content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
+  return LoginHandler::Create(auth_info, web_contents,
+                              std::move(auth_required_callback));
+}
+
 void LoginTabHelper::HandleCredentials(
-    const absl::optional<net::AuthCredentials>& credentials) {
+    const std::optional<net::AuthCredentials>& credentials) {
   login_handler_.reset();
-  url_for_login_handler_ = GURL();
 
   if (credentials.has_value()) {
     content::StoragePartition* storage_partition =

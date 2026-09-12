@@ -40,8 +40,12 @@ class MockReportingServiceProxy {
   }
 
   queueCspViolationReport() {}
+  queueIntegrityViolationReport() {}
+  queueCSPHashReport(url, endpoint, subresourceUrl, integrityHash, type) {}
   queuePermissionsPolicyViolationReport() {}
+  queuePotentialPermissionsPolicyViolationReport() {}
   queueDocumentPolicyViolationReport() {}
+  queueConnectionAllowlistViolationReport() {}
 }
 
 // Make an instance and have it receive the request.

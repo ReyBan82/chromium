@@ -5,9 +5,10 @@
 #define CONTENT_BROWSER_DEVTOOLS_FRAME_AUTO_ATTACHER_H_
 
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "content/browser/devtools/protocol/target_auto_attacher.h"
 #include "content/browser/devtools/service_worker_devtools_manager.h"
-#include "content/browser/interest_group/debuggable_auction_worklet_tracker.h"
 
 namespace content {
 
@@ -18,15 +19,13 @@ class RenderFrameHostImpl;
 class ServiceWorkerDevToolsAgentHost;
 
 class FrameAutoAttacher : public protocol::RendererAutoAttacherBase,
-                          public ServiceWorkerDevToolsManager::Observer,
-                          public DebuggableAuctionWorkletTracker::Observer {
+                          public ServiceWorkerDevToolsManager::Observer {
  public:
   explicit FrameAutoAttacher(DevToolsRendererChannel* renderer_channel);
   ~FrameAutoAttacher() override;
 
   void SetRenderFrameHost(RenderFrameHostImpl* render_frame_host);
   void DidFinishNavigation(NavigationRequest* navigation_request);
-  void UpdatePages();
   void AutoAttachToPage(FrameTree* frame_tree, bool wait_for_debugger_on_start);
 
  protected:
@@ -38,17 +37,13 @@ class FrameAutoAttacher : public protocol::RendererAutoAttacherBase,
                      bool* should_pause_on_start) override;
   void WorkerDestroyed(ServiceWorkerDevToolsAgentHost* host) override;
 
-  // DebuggableAuctionWorkletTracker::Observer implementation.
-  void AuctionWorkletCreated(DebuggableAuctionWorklet* worklet,
-                             bool& should_pause_on_start) override;
-
   void ReattachServiceWorkers();
   void UpdateFrames();
 
  private:
-  RenderFrameHostImpl* render_frame_host_ = nullptr;
-  bool observing_service_workers_ = false;
-  bool observing_auction_worklets_ = false;
+  raw_ptr<RenderFrameHostImpl> render_frame_host_ = nullptr;
+  base::ScopedObservation<ServiceWorkerDevToolsManager, FrameAutoAttacher>
+      service_worker_devtools_manager_observation_{this};
 };
 
 }  // namespace content

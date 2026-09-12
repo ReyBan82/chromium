@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ash/policy/reporting/metrics_reporting/network/network_telemetry_sampler.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,13 +12,12 @@
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
 #include "base/test/bind.h"
-#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "base/values.h"
 #include "chrome/browser/ash/policy/reporting/metrics_reporting/metric_reporting_manager.h"
+#include "chrome/browser/browser_process.h"
 #include "chromeos/ash/components/dbus/shill/shill_ipconfig_client.h"
 #include "chromeos/ash/components/dbus/shill/shill_service_client.h"
-#include "chromeos/ash/components/login/login_state/login_state.h"
 #include "chromeos/ash/components/mojo_service_manager/fake_mojo_service_manager.h"
 #include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
@@ -27,9 +27,14 @@
 #include "components/reporting/metrics/fakes/fake_sampler.h"
 #include "components/reporting/proto/synced/metric_data.pb.h"
 #include "components/reporting/util/test_support_callbacks.h"
+#include "components/session_manager/core/session.h"
+#include "components/session_manager/core/session_manager.h"
+#include "components/session_manager/test/user_session_test_environment.h"
+#include "components/user_manager/user_manager.h"
+#include "components/user_manager/user_manager_impl.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/shill/dbus-constants.h"
 
 namespace reporting {
@@ -46,6 +51,13 @@ constexpr int64_t kTxPowerDbm = 2;
 constexpr int64_t kLinkQuality = 1;
 constexpr int64_t kSignalStrength = 70;
 
+constexpr char kIPv4Address[] = "192.168.86.25";
+constexpr char kIPv4Gateway[] = "192.168.86.1";
+constexpr char kIPv6Address1[] = "::ffff:c0a8:36";
+constexpr char kIPv6Address2[] = "::ffff:c0a8:37";
+constexpr char kIPv6Gateway[] = "::ffff:c0a8:38";
+constexpr uint32_t kMaxDownlinkSpeedKbps = 100000;
+
 struct FakeNetworkData {
   std::string guid;
   std::string connection_state;
@@ -56,6 +68,10 @@ struct FakeNetworkData {
   std::string gateway;
   bool is_visible;
   bool is_configured;
+  std::vector<std::string> ipv6_addresses;
+  std::string ipv6_gateway;
+  std::optional<int> max_downlink_speed_kbps;
+  bool is_metered;
 };
 
 void SetWifiInterfaceData() {
@@ -79,7 +95,7 @@ void SetWifiInterfaceData() {
   telemetry_info->network_interface_result =
       std::move(network_interface_result);
   ::ash::cros_healthd::FakeCrosHealthd::Get()
-      ->SetProbeTelemetryInfoResponseForTesting(telemetry_info);
+      ->SetProbeTelemetryInfoResponseForTesting(std::move(telemetry_info));
 }
 
 std::string DevicePath(const std::string& interface_name) {
@@ -89,11 +105,13 @@ std::string DevicePath(const std::string& interface_name) {
 class NetworkTelemetrySamplerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    ash::LoginState::Initialize();
-    ash::LoginState::Get()->SetLoggedInStateAndPrimaryUser(
-        ash::LoginState::LOGGED_IN_ACTIVE,
-        ash::LoginState::LOGGED_IN_USER_REGULAR,
-        network_handler_test_helper_.UserHash());
+    const AccountId account_id =
+        AccountId::FromUserEmailGaiaId("test@test", GaiaId("fakegaia"));
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            g_browser_process->local_state());
+    ASSERT_TRUE(user_session_test_environment_->AddRegularUser(account_id));
+    user_session_test_environment_->LogIn(account_id);
 
     network_handler_test_helper_.AddDefaultProfiles();
     network_handler_test_helper_.ResetDevicesAndServices();
@@ -103,15 +121,13 @@ class NetworkTelemetrySamplerTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    ash::LoginState::Shutdown();
+    user_session_test_environment_.reset();
     ash::cros_healthd::FakeCrosHealthd::Shutdown();
   }
 
   void SetNetworkData(const std::vector<FakeNetworkData>& networks_data) {
     auto* const service_client = network_handler_test_helper_.service_test();
     auto* const device_client = network_handler_test_helper_.device_test();
-    auto* const ip_config_client =
-        network_handler_test_helper_.ip_config_test();
     network_handler_test_helper_.manager_test()->AddTechnology(
         ::ash::kTypeTether, true);
 
@@ -135,16 +151,32 @@ class NetworkTelemetrySamplerTest : public ::testing::Test {
           base::Value(network_data.signal_strength));
       service_client->SetServiceProperty(service_path, shill::kDeviceProperty,
                                          base::Value(device_path));
-      base::Value::Dict ip_config_properties;
-      ip_config_properties.Set(shill::kAddressProperty,
-                               network_data.ip_address);
-      ip_config_properties.Set(shill::kGatewayProperty, network_data.gateway);
-      const std::string kIPConfigPath =
-          base::StrCat({"test_ip_config", network_data.guid});
-      ip_config_client->AddIPConfig(kIPConfigPath,
-                                    std::move(ip_config_properties));
-      service_client->SetServiceProperty(service_path, shill::kIPConfigProperty,
-                                         base::Value(kIPConfigPath));
+      base::DictValue network_config_dict;
+      // When kNetworkConfigProperty, IP address is parsed as CIDR address.
+      // Thus, add subnet mask to the IP address.
+      const std::string cidr_ipv4_address = network_data.ip_address + "/24";
+      network_config_dict.Set(shill::kNetworkConfigIPv4AddressProperty,
+                              cidr_ipv4_address);
+      network_config_dict.Set(shill::kNetworkConfigIPv4GatewayProperty,
+                              network_data.gateway);
+      if (!network_data.ipv6_addresses.empty()) {
+        base::ListValue ipv6_addresses;
+        for (const auto& ipv6_address : network_data.ipv6_addresses) {
+          // Same as ipv4 address, ipv6 address is parsed as CIDR address.
+          const std::string cidr_ipv6_address = ipv6_address + "/112";
+          ipv6_addresses.Append(cidr_ipv6_address);
+        }
+        network_config_dict.Set(shill::kNetworkConfigIPv6AddressesProperty,
+                                std::move(ipv6_addresses));
+      }
+
+      if (!network_data.ipv6_gateway.empty()) {
+        network_config_dict.Set(shill::kNetworkConfigIPv6GatewayProperty,
+                                network_data.ipv6_gateway);
+      }
+      service_client->SetServiceProperty(
+          service_path, shill::kNetworkConfigProperty,
+          base::Value(std::move(network_config_dict)));
       if (network_data.type == shill::kTypeCellular) {
         service_client->SetServiceProperty(service_path, shill::kIccidProperty,
                                            base::Value("test_iccid"));
@@ -154,30 +186,46 @@ class NetworkTelemetrySamplerTest : public ::testing::Test {
             service_path, shill::kProfileProperty,
             base::Value(network_handler_test_helper_.ProfilePathUser()));
       }
+      if (network_data.max_downlink_speed_kbps.has_value()) {
+        service_client->SetServiceProperty(
+            service_path, shill::kDownlinkSpeedPropertyKbps,
+            base::Value(network_data.max_downlink_speed_kbps.value()));
+      }
+      service_client->SetServiceProperty(service_path, shill::kMeteredProperty,
+                                         base::Value(network_data.is_metered));
     }
     base::RunLoop().RunUntilIdle();
   }
 
   base::test::TaskEnvironment task_environment_;
   ::ash::mojo_service_manager::FakeMojoServiceManager fake_service_manager_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
 
   ::ash::NetworkHandlerTestHelper network_handler_test_helper_;
-
-  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 TEST_F(NetworkTelemetrySamplerTest, CellularConnected) {
   const std::vector<FakeNetworkData> networks_data = {
-      {"guid1", shill::kStateReady, shill::kTypeCellular,
-       0 /* signal_strength */, "cellular0", "192.168.86.25" /* ip_address */,
-       "192.168.86.1" /* gateway */, true /* is_visible */,
-       true /* is_configured */}};
+      {"guid1",
+       shill::kStateReady,
+       shill::kTypeCellular,
+       0 /* signal_strength */,
+       "cellular0",
+       kIPv4Address,
+       kIPv4Gateway,
+       true /* is_visible */,
+       true /* is_configured */,
+       {kIPv6Address1, kIPv6Address2} /* ipv6_addresses */,
+       kIPv6Gateway /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       true /* is_metered */}};
 
   SetNetworkData(networks_data);
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> optional_result =
+  const std::optional<MetricData> optional_result =
       metric_collect_event.result();
 
   ASSERT_TRUE(optional_result.has_value());
@@ -199,6 +247,10 @@ TEST_F(NetworkTelemetrySamplerTest, CellularConnected) {
             networks_data[0].ip_address);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(0).gateway(),
             networks_data[0].gateway);
+  EXPECT_THAT(result.networks_telemetry().network_telemetry(0).ipv6_address(),
+              ::testing::ElementsAreArray(networks_data[0].ipv6_addresses));
+  EXPECT_EQ(result.networks_telemetry().network_telemetry(0).ipv6_gateway(),
+            networks_data[0].ipv6_gateway);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(0).type(),
             NetworkType::CELLULAR);
   // Make sure wireless interface info wasn't added.
@@ -215,15 +267,19 @@ TEST_F(NetworkTelemetrySamplerTest, CellularConnected) {
   EXPECT_FALSE(result.networks_telemetry()
                    .network_telemetry(0)
                    .has_power_management_enabled());
+  EXPECT_TRUE(result.networks_telemetry().network_telemetry(0).is_metered());
+  EXPECT_EQ(
+      result.networks_telemetry().network_telemetry(0).link_down_speed_kbps(),
+      networks_data[0].max_downlink_speed_kbps);
 }
 
 TEST_F(NetworkTelemetrySamplerTest, NoNetworkData) {
   SetNetworkData({});
 
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> result = metric_collect_event.result();
+  const std::optional<MetricData> result = metric_collect_event.result();
 
   ASSERT_FALSE(result.has_value());
 }
@@ -231,46 +287,75 @@ TEST_F(NetworkTelemetrySamplerTest, NoNetworkData) {
 TEST_F(NetworkTelemetrySamplerTest, CellularNotConnected) {
   // Signal strength should be ignored for non wifi networks even if it is set.
   const std::vector<FakeNetworkData> networks_data = {
-      {"guid1", shill::kStateIdle, shill::kTypeCellular, kSignalStrength,
-       "cellular0", "" /* ip_address */, "" /* gateway */,
-       true /* is_visible */, true /* is_configured */}};
+      {"guid1",
+       shill::kStateIdle,
+       shill::kTypeCellular,
+       kSignalStrength,
+       "cellular0",
+       "" /* ip_address */,
+       "" /* gateway */,
+       true /* is_visible */,
+       true /* is_configured */,
+       {kIPv6Address1, kIPv6Address2} /* ipv6_addresses */,
+       kIPv6Gateway /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       false /* is_metered */}};
 
   SetNetworkData(networks_data);
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> result = metric_collect_event.result();
+  const std::optional<MetricData> result = metric_collect_event.result();
 
   ASSERT_FALSE(result.has_value());
 }
 
 TEST_F(NetworkTelemetrySamplerTest, WifiNotConnected_NoSignalStrength) {
   const std::vector<FakeNetworkData> networks_data = {
-      {"guid1", shill::kStateIdle, shill::kTypeWifi, 0 /* signal_strength */,
-       kInterfaceName, "" /* ip_address */, "" /* gateway */,
-       false /* is_visible */, true /* is_configured */}};
+      {"guid1",
+       shill::kStateIdle,
+       shill::kTypeWifi,
+       0 /* signal_strength */,
+       kInterfaceName,
+       "" /* ip_address */,
+       "" /* gateway */,
+       false /* is_visible */,
+       true /* is_configured */,
+       {kIPv6Address1, kIPv6Address2} /* ipv6_addresses */,
+       kIPv6Gateway /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       false /* is_metered */}};
 
   SetNetworkData(networks_data);
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> result = metric_collect_event.result();
+  const std::optional<MetricData> result = metric_collect_event.result();
 
   ASSERT_FALSE(result.has_value());
 }
 
 TEST_F(NetworkTelemetrySamplerTest, EthernetPortal) {
   const std::vector<FakeNetworkData> networks_data = {
-      {"guid1", shill::kStateRedirectFound, shill::kTypeEthernet,
-       0 /* signal_strength */, "eth0", "192.168.86.25" /* ip_address */,
-       "192.168.86.1" /* gateway */, true /* is_visible */,
-       true /* is_configured */}};
+      {"guid1",
+       shill::kStateRedirectFound,
+       shill::kTypeEthernet,
+       0 /* signal_strength */,
+       "eth0",
+       "192.168.86.25" /* ip_address */,
+       "192.168.86.1" /* gateway */,
+       true /* is_visible */,
+       true /* is_configured */,
+       {kIPv6Address1, kIPv6Address2} /* ipv6_addresses */,
+       kIPv6Gateway /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       true /* is_metered */}};
 
   SetNetworkData(networks_data);
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> optional_result =
+  const std::optional<MetricData> optional_result =
       metric_collect_event.result();
 
   ASSERT_TRUE(optional_result.has_value());
@@ -294,6 +379,10 @@ TEST_F(NetworkTelemetrySamplerTest, EthernetPortal) {
             networks_data[0].gateway);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(0).type(),
             NetworkType::ETHERNET);
+  EXPECT_THAT(result.networks_telemetry().network_telemetry(0).ipv6_address(),
+              ::testing::ElementsAreArray(networks_data[0].ipv6_addresses));
+  EXPECT_EQ(result.networks_telemetry().network_telemetry(0).ipv6_gateway(),
+            networks_data[0].ipv6_gateway);
 
   // Make sure wireless interface info wasn't added.
   EXPECT_FALSE(
@@ -309,21 +398,35 @@ TEST_F(NetworkTelemetrySamplerTest, EthernetPortal) {
   EXPECT_FALSE(result.networks_telemetry()
                    .network_telemetry(0)
                    .has_power_management_enabled());
+
+  EXPECT_EQ(
+      result.networks_telemetry().network_telemetry(0).link_down_speed_kbps(),
+      networks_data[0].max_downlink_speed_kbps);
+  EXPECT_TRUE(result.networks_telemetry().network_telemetry(0).is_metered());
 }
 
 TEST_F(NetworkTelemetrySamplerTest, EmptyLatencyData) {
   const std::vector<FakeNetworkData> networks_data = {
-      {"guid1", shill::kStateOnline, shill::kTypeEthernet,
-       0 /* signal_strength */, "eth0", "192.168.86.25" /* ip_address */,
-       "192.168.86.1" /* gateway */, true /* is_visible */,
-       true /* is_configured */}};
+      {"guid1",
+       shill::kStateOnline,
+       shill::kTypeEthernet,
+       0 /* signal_strength */,
+       "eth0",
+       "192.168.86.25" /* ip_address */,
+       "192.168.86.1" /* gateway */,
+       true /* is_visible */,
+       true /* is_configured */,
+       {kIPv6Address1, kIPv6Address2} /* ipv6_addresses */,
+       kIPv6Gateway /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       true /* is_metered */}};
 
   SetNetworkData(networks_data);
 
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> optional_result =
+  const std::optional<MetricData> optional_result =
       metric_collect_event.result();
 
   ASSERT_TRUE(optional_result.has_value());
@@ -347,6 +450,10 @@ TEST_F(NetworkTelemetrySamplerTest, EmptyLatencyData) {
             networks_data[0].gateway);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(0).type(),
             NetworkType::ETHERNET);
+  EXPECT_THAT(result.networks_telemetry().network_telemetry(0).ipv6_address(),
+              ::testing::ElementsAreArray(networks_data[0].ipv6_addresses));
+  EXPECT_EQ(result.networks_telemetry().network_telemetry(0).ipv6_gateway(),
+            networks_data[0].ipv6_gateway);
 
   // Make sure wireless interface info wasn't added.
   EXPECT_FALSE(
@@ -362,21 +469,53 @@ TEST_F(NetworkTelemetrySamplerTest, EmptyLatencyData) {
   EXPECT_FALSE(result.networks_telemetry()
                    .network_telemetry(0)
                    .has_power_management_enabled());
+  EXPECT_EQ(
+      result.networks_telemetry().network_telemetry(0).link_down_speed_kbps(),
+      networks_data[0].max_downlink_speed_kbps);
+  EXPECT_TRUE(result.networks_telemetry().network_telemetry(0).is_metered());
 }
 
 TEST_F(NetworkTelemetrySamplerTest, MixTypesAndConfigurations) {
   const std::vector<FakeNetworkData> networks_data = {
-      {"guid1", shill::kStateReady, shill::kTypeWifi, 10 /* signal_strength */,
-       "wlan0", "192.168.86.25" /* ip_address */, "192.168.86.1" /* gateway */,
-       true /* is_visible */, false /* is_configured */},
-      {"guid2", shill::kStateOnline, shill::kTypeWifi, 50 /* signal_strength */,
-       kInterfaceName, "192.168.86.26" /* ip_address */,
-       "192.168.86.2" /* gateway */, true /* is_visible */,
-       true /* is_configured */},
-      {"guid3", shill::kStateReady, ::ash::kTypeTether,
-       0 /* signal_strength */, "tether1", "192.168.86.27" /* ip_address */,
-       "192.168.86.3" /* gateway */, true /* is_visible */,
-       true /* is_configured */}};
+      {"guid1",
+       shill::kStateReady,
+       shill::kTypeWifi,
+       10 /* signal_strength */,
+       "wlan0",
+       "192.168.86.25" /* ip_address */,
+       "192.168.86.1" /* gateway */,
+       true /* is_visible */,
+       false /* is_configured */,
+       {"::ffff:c0a8:3019", "::ffff:c0a8:301a"} /* ipv6_addresses */,
+       "::ffff:c0a8:301b" /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       true /* is_metered */},
+      {"guid2",
+       shill::kStateOnline,
+       shill::kTypeWifi,
+       50 /* signal_strength */,
+       kInterfaceName,
+       "192.168.86.26" /* ip_address */,
+       "192.168.86.2" /* gateway */,
+       true /* is_visible */,
+       true /* is_configured */,
+       {"::ffff:c0a8:301c", "::ffff:c0a8:301d"} /* ipv6_addresses */,
+       "::ffff:c0a8:301e" /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       true /* is_metered */},
+      {"guid3",
+       shill::kStateReady,
+       ::ash::kTypeTether,
+       0 /* signal_strength */,
+       "tether1",
+       "192.168.86.27" /* ip_address */,
+       "192.168.86.3" /* gateway */,
+       true /* is_visible */,
+       true /* is_configured */,
+       {kIPv6Address1, kIPv6Address2} /* ipv6_addresses */,
+       kIPv6Gateway /* ipv6_gateway */,
+       kMaxDownlinkSpeedKbps /* max_downlink_speed_kbps */,
+       true /* is_metered */}};
 
   SetNetworkData(networks_data);
 
@@ -388,9 +527,9 @@ TEST_F(NetworkTelemetrySamplerTest, MixTypesAndConfigurations) {
             "WiFi.SignalStrengthRssi": -60})");
 
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> optional_result =
+  const std::optional<MetricData> optional_result =
       metric_collect_event.result();
 
   ASSERT_TRUE(optional_result.has_value());
@@ -415,6 +554,10 @@ TEST_F(NetworkTelemetrySamplerTest, MixTypesAndConfigurations) {
             networks_data[1].ip_address);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(0).gateway(),
             networks_data[1].gateway);
+  EXPECT_THAT(result.networks_telemetry().network_telemetry(0).ipv6_address(),
+              ::testing::ElementsAreArray(networks_data[1].ipv6_addresses));
+  EXPECT_EQ(result.networks_telemetry().network_telemetry(0).ipv6_gateway(),
+            networks_data[1].ipv6_gateway);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(0).type(),
             NetworkType::WIFI);
   EXPECT_EQ(
@@ -435,6 +578,10 @@ TEST_F(NetworkTelemetrySamplerTest, MixTypesAndConfigurations) {
                 .network_telemetry(0)
                 .power_management_enabled(),
             kPowerManagementOn);
+  EXPECT_TRUE(result.networks_telemetry().network_telemetry(0).is_metered());
+  EXPECT_EQ(
+      result.networks_telemetry().network_telemetry(0).link_down_speed_kbps(),
+      networks_data[1].max_downlink_speed_kbps);
 
   // TETHER
   EXPECT_EQ(result.networks_telemetry().network_telemetry(1).guid(),
@@ -449,6 +596,10 @@ TEST_F(NetworkTelemetrySamplerTest, MixTypesAndConfigurations) {
             networks_data[2].ip_address);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(1).gateway(),
             networks_data[2].gateway);
+  EXPECT_THAT(result.networks_telemetry().network_telemetry(1).ipv6_address(),
+              ::testing::ElementsAreArray(networks_data[2].ipv6_addresses));
+  EXPECT_EQ(result.networks_telemetry().network_telemetry(1).ipv6_gateway(),
+            networks_data[2].ipv6_gateway);
   EXPECT_EQ(result.networks_telemetry().network_telemetry(1).type(),
             NetworkType::TETHER);
 
@@ -466,22 +617,36 @@ TEST_F(NetworkTelemetrySamplerTest, MixTypesAndConfigurations) {
   EXPECT_FALSE(result.networks_telemetry()
                    .network_telemetry(1)
                    .has_power_management_enabled());
+  EXPECT_EQ(
+      result.networks_telemetry().network_telemetry(1).link_down_speed_kbps(),
+      networks_data[2].max_downlink_speed_kbps);
+  EXPECT_TRUE(result.networks_telemetry().network_telemetry(1).is_metered());
 }
 
 TEST_F(NetworkTelemetrySamplerTest, WifiNotConnected) {
   const std::vector<FakeNetworkData> networks_data = {
-      {"guid1", shill::kStateIdle, shill::kTypeWifi, kSignalStrength,
-       kInterfaceName, "" /* ip_address */, "" /* gateway */,
-       true /* is_visible */, true /* is_configured */}};
+      {"guid1",
+       shill::kStateIdle,
+       shill::kTypeWifi,
+       kSignalStrength,
+       kInterfaceName,
+       "" /* ip_address */,
+       "" /* gateway */,
+       true /* is_visible */,
+       true /* is_configured */,
+       {""} /* ipv6_addresses */,
+       "" /* ipv6_gateway */,
+       std::nullopt /* max_downlink_speed_kbps */,
+       false /* is_metered */}};
 
   SetNetworkData(networks_data);
   network_handler_test_helper_.ConfigureService(
       R"({"GUID": "guid1", "Type": "wifi", "State": "idle",
             "WiFi.SignalStrengthRssi": -70})");
   NetworkTelemetrySampler network_telemetry_sampler;
-  test::TestEvent<absl::optional<MetricData>> metric_collect_event;
+  test::TestEvent<std::optional<MetricData>> metric_collect_event;
   network_telemetry_sampler.MaybeCollect(metric_collect_event.cb());
-  const absl::optional<MetricData> optional_result =
+  const std::optional<MetricData> optional_result =
       metric_collect_event.result();
 
   ASSERT_TRUE(optional_result.has_value());
@@ -502,6 +667,10 @@ TEST_F(NetworkTelemetrySamplerTest, WifiNotConnected) {
   EXPECT_FALSE(
       result.networks_telemetry().network_telemetry(0).has_ip_address());
   EXPECT_FALSE(result.networks_telemetry().network_telemetry(0).has_gateway());
+  EXPECT_THAT(result.networks_telemetry().network_telemetry(0).ipv6_address(),
+              ::testing::IsEmpty());
+  EXPECT_FALSE(
+      result.networks_telemetry().network_telemetry(0).has_ipv6_gateway());
   EXPECT_EQ(result.networks_telemetry().network_telemetry(0).type(),
             NetworkType::WIFI);
   EXPECT_EQ(
@@ -529,6 +698,11 @@ TEST_F(NetworkTelemetrySamplerTest, WifiNotConnected) {
                 .network_telemetry(0)
                 .power_management_enabled(),
             kPowerManagementOn);
+
+  EXPECT_FALSE(result.networks_telemetry()
+                   .network_telemetry(0)
+                   .has_link_down_speed_kbps());
+  EXPECT_FALSE(result.networks_telemetry().network_telemetry(0).is_metered());
 }
 
 }  // namespace

@@ -8,7 +8,10 @@
 #include <utility>
 #include <vector>
 
+#include "base/callback_list.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
+#include "base/location.h"
 #include "base/memory/ptr_util.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
@@ -21,17 +24,19 @@
 #include "net/url_request/url_request_context_getter.h"
 #include "remoting/base/constants.h"
 #include "remoting/protocol/authenticator.h"
-#include "remoting/protocol/channel_authenticator.h"
 #include "remoting/protocol/chromium_port_allocator_factory.h"
-#include "remoting/protocol/connection_tester.h"
+#include "remoting/protocol/errors.h"
 #include "remoting/protocol/fake_authenticator.h"
 #include "remoting/protocol/jingle_session_manager.h"
 #include "remoting/protocol/network_settings.h"
+#include "remoting/protocol/protocol_mock_objects.h"
+#include "remoting/protocol/session_observer.h"
 #include "remoting/protocol/session_plugin.h"
 #include "remoting/protocol/transport.h"
 #include "remoting/protocol/transport_context.h"
 #include "remoting/signaling/fake_signal_strategy.h"
-#include "remoting/signaling/xmpp_constants.h"
+#include "remoting/signaling/jingle_data_structures.h"
+#include "remoting/signaling/jingle_message_xml_converter.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -58,18 +63,26 @@ const char kClientJid[] = "Client@gmail.com/321";
 // kHostJid the way it would be stored in the directory.
 const char kNormalizedHostJid[] = "host@gmail.com/123";
 
+NOINLINE base::Location GetTestLocation() {
+  return FROM_HERE;
+}
+
 class MockSessionManagerListener {
  public:
-  MOCK_METHOD2(OnIncomingSession,
-               void(Session*, SessionManager::IncomingSessionResponse*));
+  MOCK_METHOD(void,
+              OnIncomingSession,
+              (Session*,
+               SessionManager::IncomingSessionResponse*,
+               std::string*,
+               base::Location*));
 };
 
 class MockSessionEventHandler : public Session::EventHandler {
  public:
-  MOCK_METHOD1(OnSessionStateChange, void(Session::State));
-  MOCK_METHOD2(OnSessionRouteChange,
-               void(const std::string& channel_name,
-                    const TransportRoute& route));
+  MOCK_METHOD(void, OnSessionStateChange, (Session::State), (override));
+  MOCK_METHOD(void,
+              OnSessionRouteChange,
+              (const std::string& channel_name, const TransportRoute& route));
 };
 
 class FakeTransport : public Transport {
@@ -78,8 +91,7 @@ class FakeTransport : public Transport {
     return send_transport_info_callback_;
   }
 
-  const std::vector<std::unique_ptr<jingle_xmpp::XmlElement>>&
-  received_messages() {
+  const std::vector<std::unique_ptr<JingleTransportInfo>>& received_messages() {
     return received_messages_;
   }
 
@@ -89,14 +101,15 @@ class FakeTransport : public Transport {
   }
 
   // Transport interface.
-  void Start(Authenticator* authenticator,
+  void Start(const std::string& auth_key,
              SendTransportInfoCallback send_transport_info_callback) override {
     send_transport_info_callback_ = send_transport_info_callback;
   }
 
-  bool ProcessTransportInfo(jingle_xmpp::XmlElement* transport_info) override {
+  bool ProcessTransportInfo(
+      const JingleTransportInfo& transport_info) override {
     received_messages_.push_back(
-        std::make_unique<jingle_xmpp::XmlElement>(*transport_info));
+        std::make_unique<JingleTransportInfo>(transport_info));
     if (on_message_callback_) {
       on_message_callback_.Run();
     }
@@ -105,34 +118,32 @@ class FakeTransport : public Transport {
 
  private:
   SendTransportInfoCallback send_transport_info_callback_;
-  std::vector<std::unique_ptr<jingle_xmpp::XmlElement>> received_messages_;
+  std::vector<std::unique_ptr<JingleTransportInfo>> received_messages_;
   base::RepeatingClosure on_message_callback_;
 };
 
 class FakePlugin : public SessionPlugin {
  public:
-  std::unique_ptr<jingle_xmpp::XmlElement> GetNextMessage() override {
-    std::string tag_name = "test-tag-";
-    tag_name += base::NumberToString(outgoing_messages_.size());
-    std::unique_ptr<jingle_xmpp::XmlElement> new_message(
-        new jingle_xmpp::XmlElement(
-            jingle_xmpp::QName("test-namespace", tag_name)));
-    outgoing_messages_.push_back(*new_message);
-    return new_message;
+  std::optional<Attachment> GetNextMessage() override {
+    Attachment attachment;
+    HostConfigAttachment config;
+    std::string key = "test-key-";
+    key += base::NumberToString(outgoing_messages_.size());
+    config.settings[key] = "test-value";
+    attachment.host_config = std::move(config);
+    outgoing_messages_.push_back(attachment);
+    return attachment;
   }
 
-  void OnIncomingMessage(const jingle_xmpp::XmlElement& attachments) override {
-    for (const jingle_xmpp::XmlElement* it = attachments.FirstElement();
-         it != nullptr; it = it->NextElement()) {
-      incoming_messages_.push_back(*it);
-    }
+  void OnIncomingMessage(const Attachment& attachment) override {
+    incoming_messages_.push_back(attachment);
   }
 
-  const std::vector<jingle_xmpp::XmlElement>& outgoing_messages() const {
+  const std::vector<Attachment>& outgoing_messages() const {
     return outgoing_messages_;
   }
 
-  const std::vector<jingle_xmpp::XmlElement>& incoming_messages() const {
+  const std::vector<Attachment>& incoming_messages() const {
     return incoming_messages_;
   }
 
@@ -142,16 +153,18 @@ class FakePlugin : public SessionPlugin {
   }
 
  private:
-  std::vector<jingle_xmpp::XmlElement> outgoing_messages_;
-  std::vector<jingle_xmpp::XmlElement> incoming_messages_;
+  std::vector<Attachment> outgoing_messages_;
+  std::vector<Attachment> incoming_messages_;
 };
 
-std::unique_ptr<jingle_xmpp::XmlElement> CreateTransportInfo(
+std::unique_ptr<JingleTransportInfo> CreateTransportInfo(
     const std::string& id) {
-  std::unique_ptr<jingle_xmpp::XmlElement> result(
-      jingle_xmpp::XmlElement::ForStr(
-          "<transport xmlns='google:remoting:ice'/>"));
-  result->AddAttr(kQNameId, id);
+  auto result = std::make_unique<JingleTransportInfo>();
+
+  // Store the ID in the candidate name so it can be verified in the test.
+  IceTransportInfo::NamedCandidate candidate;
+  candidate.name = id;
+  result->candidates.push_back(std::move(candidate));
   return result;
 }
 
@@ -225,7 +238,7 @@ class JingleSessionTest : public testing::Test {
   }
 
   void SetHostExpectation(bool expect_fail) {
-    EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _))
+    EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _, _, _))
         .WillOnce(
             DoAll(WithArg<0>(Invoke(this, &JingleSessionTest::SetHostSession)),
                   SetArgPointee<1>(protocol::SessionManager::ACCEPT)));
@@ -314,15 +327,15 @@ class JingleSessionTest : public testing::Test {
     ASSERT_EQ(client_plugin_.outgoing_messages().size(),
               host_plugin_.incoming_messages().size());
     for (size_t i = 0; i < client_plugin_.outgoing_messages().size(); i++) {
-      ASSERT_EQ(client_plugin_.outgoing_messages()[i].Str(),
-                host_plugin_.incoming_messages()[i].Str());
+      ASSERT_EQ(client_plugin_.outgoing_messages()[i].host_config->settings,
+                host_plugin_.incoming_messages()[i].host_config->settings);
     }
 
     ASSERT_EQ(client_plugin_.incoming_messages().size(),
               host_plugin_.outgoing_messages().size());
     for (size_t i = 0; i < client_plugin_.incoming_messages().size(); i++) {
-      ASSERT_EQ(client_plugin_.incoming_messages()[i].Str(),
-                host_plugin_.outgoing_messages()[i].Str());
+      ASSERT_EQ(client_plugin_.incoming_messages()[i].host_config->settings,
+                host_plugin_.outgoing_messages()[i].host_config->settings);
     }
   }
 
@@ -361,7 +374,7 @@ TEST_F(JingleSessionTest, RejectConnection) {
   CreateSessionManagers(FakeAuthenticator::Config(FakeAuthenticator::ACCEPT));
 
   // Reject incoming session.
-  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _))
+  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _, _, _))
       .WillOnce(SetArgPointee<1>(protocol::SessionManager::DECLINE));
 
   {
@@ -384,14 +397,11 @@ TEST_F(JingleSessionTest, Connect) {
 
   // Verify that the client specified correct initiator value.
   ASSERT_GT(host_signal_strategy_->received_messages().size(), 0U);
-  const jingle_xmpp::XmlElement* initiate_xml =
-      host_signal_strategy_->received_messages().front().get();
-  const jingle_xmpp::XmlElement* jingle_element = initiate_xml->FirstNamed(
-      jingle_xmpp::QName("urn:xmpp:jingle:1", "jingle"));
-  ASSERT_TRUE(jingle_element);
-  ASSERT_EQ(
-      client_signal_strategy_->GetLocalAddress().id(),
-      jingle_element->Attr(jingle_xmpp::QName(std::string(), "initiator")));
+  const auto* jingle_message = std::get_if<JingleMessage>(
+      &host_signal_strategy_->received_messages().front());
+  ASSERT_TRUE(jingle_message);
+  ASSERT_EQ(client_signal_strategy_->GetLocalAddress().id(),
+            jingle_message->initiator);
 }
 
 // Verify that we can connect two endpoints with multi-step authentication.
@@ -414,8 +424,8 @@ TEST_F(JingleSessionTest, ConnectWithOutOfOrderIqs) {
   base::RunLoop().RunUntilIdle();
 
   ASSERT_EQ(client_transport_.received_messages().size(), 2U);
-  EXPECT_EQ("1", client_transport_.received_messages()[0]->Attr(kQNameId));
-  EXPECT_EQ("2", client_transport_.received_messages()[1]->Attr(kQNameId));
+  EXPECT_EQ(client_transport_.received_messages()[0]->candidates[0].name, "1");
+  EXPECT_EQ(client_transport_.received_messages()[1]->candidates[0].name, "2");
 }
 
 // Verify that out-of-order messages are handled correctly when the session is
@@ -436,7 +446,7 @@ TEST_F(JingleSessionTest, ConnectWithOutOfOrderIqsDestroyOnFirstMessage) {
   base::RunLoop().RunUntilIdle();
 
   ASSERT_EQ(client_transport_.received_messages().size(), 1U);
-  EXPECT_EQ("1", client_transport_.received_messages()[0]->Attr(kQNameId));
+  EXPECT_EQ(client_transport_.received_messages()[0]->candidates[0].name, "1");
 }
 
 // Verify that connection is terminated when single-step auth fails.
@@ -455,54 +465,13 @@ TEST_F(JingleSessionTest, ConnectWithBadMultistepAuth) {
                      true);
 }
 
-// Verify that incompatible protocol configuration is handled properly.
-TEST_F(JingleSessionTest, TestIncompatibleProtocol) {
-  CreateSessionManagers(FakeAuthenticator::Config(FakeAuthenticator::ACCEPT));
-
-  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _)).Times(0);
-
-  EXPECT_CALL(client_session_event_handler_,
-              OnSessionStateChange(Session::FAILED))
-      .Times(1);
-
-  std::unique_ptr<CandidateSessionConfig> config =
-      CandidateSessionConfig::CreateDefault();
-  // Disable all video codecs so the host will reject connection.
-  config->mutable_video_configs()->clear();
-  client_server_->set_protocol_config(std::move(config));
-  ConnectClient(FakeAuthenticator::Config(FakeAuthenticator::ACCEPT));
-
-  EXPECT_EQ(INCOMPATIBLE_PROTOCOL, client_session_->error());
-  EXPECT_FALSE(host_session_);
-}
-
-// Verify that GICE-only client is rejected with an appropriate error code.
-TEST_F(JingleSessionTest, TestLegacyIceConnection) {
-  CreateSessionManagers(FakeAuthenticator::Config(FakeAuthenticator::ACCEPT));
-
-  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _)).Times(0);
-
-  EXPECT_CALL(client_session_event_handler_,
-              OnSessionStateChange(Session::FAILED))
-      .Times(1);
-
-  std::unique_ptr<CandidateSessionConfig> config =
-      CandidateSessionConfig::CreateDefault();
-  config->set_ice_supported(false);
-  client_server_->set_protocol_config(std::move(config));
-  ConnectClient(FakeAuthenticator::Config(FakeAuthenticator::ACCEPT));
-
-  EXPECT_EQ(INCOMPATIBLE_PROTOCOL, client_session_->error());
-  EXPECT_FALSE(host_session_);
-}
-
 TEST_F(JingleSessionTest, DeleteSessionOnIncomingConnection) {
   const int kAuthRoundtrips = 3;
   FakeAuthenticator::Config auth_config(kAuthRoundtrips,
                                         FakeAuthenticator::ACCEPT, true);
   CreateSessionManagers(auth_config);
 
-  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _))
+  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _, _, _))
       .WillOnce(
           DoAll(WithArg<0>(Invoke(this, &JingleSessionTest::SetHostSession)),
                 SetArgPointee<1>(protocol::SessionManager::ACCEPT)));
@@ -529,7 +498,7 @@ TEST_F(JingleSessionTest, DeleteSessionOnAuth) {
                                         FakeAuthenticator::ACCEPT, true);
   CreateSessionManagers(auth_config, kMessagesTillStarted);
 
-  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _))
+  EXPECT_CALL(host_server_listener_, OnIncomingSession(_, _, _, _))
       .WillOnce(
           DoAll(WithArg<0>(Invoke(this, &JingleSessionTest::SetHostSession)),
                 SetArgPointee<1>(protocol::SessionManager::ACCEPT)));
@@ -594,7 +563,7 @@ TEST_F(JingleSessionTest, TransportInfoDuringAuthentication) {
   // Verify that transport-info that the first transport-info message was
   // received.
   ASSERT_EQ(client_transport_.received_messages().size(), 1U);
-  EXPECT_EQ("1", client_transport_.received_messages()[0]->Attr(kQNameId));
+  EXPECT_EQ(client_transport_.received_messages()[0]->candidates[0].name, "1");
 }
 
 TEST_F(JingleSessionTest, TestSessionPlugin) {
@@ -633,11 +602,91 @@ TEST_F(JingleSessionTest, ImmediatelyCloseSessionAfterConnect) {
           FakeAuthenticator::CLIENT, auth_config,
           client_signal_strategy_->GetLocalAddress().id(), kNormalizedHostJid));
 
-  client_session_->Close(HOST_OVERLOAD);
+  client_session_->Close(ErrorCode::HOST_OVERLOAD, /* error_details= */ {},
+                         FROM_HERE);
   base::RunLoop().RunUntilIdle();
   // We should only send a SESSION_TERMINATE message if the session has been
   // closed before SESSION_INITIATE message.
   ASSERT_EQ(1U, host_signal_strategy_->received_messages().size());
+}
+
+TEST_F(JingleSessionTest, CloseWithErrorDetailsAndLocation) {
+  const int kAuthRoundtrips = 3;
+  FakeAuthenticator::Config auth_config(kAuthRoundtrips,
+                                        FakeAuthenticator::ACCEPT, true);
+  CreateSessionManagers(auth_config);
+  client_session_ = client_server_->Connect(
+      SignalingAddress(kNormalizedHostJid),
+      std::make_unique<FakeAuthenticator>(
+          FakeAuthenticator::CLIENT, auth_config,
+          client_signal_strategy_->GetLocalAddress().id(), kNormalizedHostJid));
+
+  client_session_->Close(ErrorCode::HOST_OVERLOAD, "fake_error_details",
+                         GetTestLocation());
+  base::RunLoop().RunUntilIdle();
+
+  ASSERT_EQ(host_signal_strategy_->received_messages().size(), 1U);
+  const auto* jingle_message = std::get_if<JingleMessage>(
+      &host_signal_strategy_->received_messages().front());
+  ASSERT_TRUE(jingle_message);
+  ASSERT_EQ(jingle_message->error_code, ErrorCode::HOST_OVERLOAD);
+  ASSERT_EQ(jingle_message->error_details, "fake_error_details");
+  // Make sure the error location captures the file name and the function name.
+  ASSERT_NE(jingle_message->error_location.find("jingle_session_unittest.cc"),
+            std::string::npos);
+  ASSERT_NE(jingle_message->error_location.find("GetTestLocation"),
+            std::string::npos);
+}
+
+TEST_F(JingleSessionTest, AuthenticatorRejectedAfterAccepted) {
+  constexpr int kAuthRoundtrips = 3;
+  base::RepeatingClosureList reject_after_accepted;
+  FakeAuthenticator::Config auth_config(kAuthRoundtrips,
+                                        FakeAuthenticator::ACCEPT, true);
+  auth_config.reject_after_accepted = &reject_after_accepted;
+
+  CreateSessionManagers(auth_config);
+  InitiateConnection(auth_config, false);
+  ASSERT_EQ(host_session_->error(), ErrorCode::OK);
+  ASSERT_EQ(client_session_->error(), ErrorCode::OK);
+
+  EXPECT_CALL(host_session_event_handler_,
+              OnSessionStateChange(Session::FAILED));
+  EXPECT_CALL(client_session_event_handler_,
+              OnSessionStateChange(Session::FAILED));
+  reject_after_accepted.Notify();
+  ASSERT_NE(host_session_->error(), ErrorCode::OK);
+  ASSERT_NE(client_session_->error(), ErrorCode::OK);
+}
+
+TEST_F(JingleSessionTest, ObserverIsNotified) {
+  MockSessionObserver observer;
+  const Session* accepted_session = nullptr;
+  EXPECT_CALL(observer, OnSessionStateChange(_, _))
+      .WillRepeatedly([&](const Session& session, Session::State state) {
+        if (state == Session::State::ACCEPTED) {
+          accepted_session = &session;
+        }
+      });
+  FakeAuthenticator::Config auth_config(FakeAuthenticator::ACCEPT);
+
+  CreateSessionManagers(auth_config);
+  auto subscription = host_server_->AddSessionObserver(&observer);
+  InitiateConnection(auth_config, false);
+
+  ASSERT_EQ(accepted_session, host_session_.get());
+}
+
+TEST_F(JingleSessionTest, ObserverIsNotNotifiedAfterSubscriptionIsDestroyed) {
+  MockSessionObserver observer;
+  EXPECT_CALL(observer, OnSessionStateChange(_, _)).Times(0);
+  FakeAuthenticator::Config auth_config(FakeAuthenticator::ACCEPT);
+
+  CreateSessionManagers(auth_config);
+  auto subscription = std::make_unique<SessionObserver::Subscription>(
+      host_server_->AddSessionObserver(&observer));
+  subscription.reset();
+  InitiateConnection(auth_config, false);
 }
 
 }  // namespace remoting::protocol

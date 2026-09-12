@@ -13,9 +13,13 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "components/bookmarks/browser/bookmark_node.h"
 #include "components/bookmarks/browser/titled_url_index.h"
+#include "components/bookmarks/common/bookmark_constants.h"
+#include "components/bookmarks/common/storage_file_encryption_type.h"
+#include "components/os_crypt/async/common/encryptor.h"
 
 namespace base {
 class SequencedTaskRunner;
@@ -35,23 +39,59 @@ class BookmarkStorage
   // How often the file is saved at most.
   static constexpr base::TimeDelta kSaveDelay = base::Milliseconds(2500);
 
-  // Creates a BookmarkStorage for the specified model. The data will saved to a
-  // file using the specified |file_path|. A backup file may be generated using
-  // a name derived from |file_path| (appending suffix kBackupExtension). All
-  // disk writes will be executed as a task in a backend task runner.
-  BookmarkStorage(BookmarkModel* model, const base::FilePath& file_path);
+  // Determines which subset of permanent folders need to be written to JSON.
+  enum PermanentNodeSelection {
+    kSelectLocalOrSyncableNodes,
+    kSelectAccountNodes,
+  };
+
+  // Creates a BookmarkStorage for the specified model. `model` must not be null
+  // and must outlive this object. This data includes the set of permanent nodes
+  // determined by `permanent_node_selection`.
+  //
+  // Based on ShouldWriteBookmarksToSecondaryFileOnDisk and
+  // ShouldUseEncryptedBookmarksAsPrimarySource defined in
+  // components/bookmarks/common/bookmark_features.h, the data will saved to a
+  // file using the specified `file_path` and/or will be encrypted and then
+  // saved to a file using the specified `encrypted_file_path`.
+  //
+  // If ShouldWriteBookmarksToSecondaryFileOnDisk and
+  // ShouldUseEncryptedBookmarksAsPrimarySource are both false, only save the
+  // data to `file_path`. This is the default behavior.
+  //
+  // If ShouldWriteBookmarksToSecondaryFileOnDisk is true and
+  // ShouldUseEncryptedBookmarksAsPrimarySource is false, first save the data to
+  // `file_path` and then encrypt the data and save it to `encrypted_file_path`.
+  //
+  // If ShouldWriteBookmarksToSecondaryFileOnDisk and
+  // ShouldUseEncryptedBookmarksAsPrimarySource are both true, first encrypt the
+  // data and save it to `encrypted_file_path` and then save the unencrypted
+  // data to `file_path`.
+  //
+  // If ShouldWriteBookmarksToSecondaryFileOnDisk is false and
+  // ShouldUseEncryptedBookmarksAsPrimarySource is true, only encrypt the
+  // data and save it to `encrypted_file_path`.
+  //
+  // If data is encrypted, an encryptor must be provided.
+  //
+  // Backup files may be generated using a name derived from `file_path` and/or
+  // `encrypted_file_path` (appending suffix kBackupExtension).
+  //
+  // All disk writes will be executed as a task in a backend task runner.
+  BookmarkStorage(const BookmarkModel* model,
+                  PermanentNodeSelection permanent_node_selection,
+                  scoped_refptr<const os_crypt_async::Encryptor> encryptor,
+                  const base::FilePath& clear_text_file_path,
+                  const base::FilePath& encrypted_file_path);
 
   BookmarkStorage(const BookmarkStorage&) = delete;
   BookmarkStorage& operator=(const BookmarkStorage&) = delete;
 
+  // Upon destruction, if there is a pending save, it is saved immediately.
   ~BookmarkStorage() override;
 
   // Schedules saving the bookmark bar model to disk.
   void ScheduleSave();
-
-  // Notification the bookmark bar model is going to be deleted. If there is
-  // a pending save, it is saved immediately.
-  void BookmarkModelDeleted();
 
   // ImportantFileWriter::BackgroundDataSerializer implementation.
   base::ImportantFileWriter::BackgroundDataProducerCallback
@@ -59,6 +99,26 @@ class BookmarkStorage
 
   // Returns whether there is still a pending write.
   bool HasScheduledSaveForTesting() const;
+
+  // If there is a pending write, performs it immediately.
+  void SaveNowIfScheduledForTesting();
+
+  // Saves the given `json_content` to the clear text or encrypted file right
+  // away based on `encryption_type`. The 'json_content' should be a clear text
+  // JSON string coming from a bookmarks file that was properly loaded. It will
+  // be encrypted if `encryption_type` is StorageFileEncryptionType::kEncrypted.
+  //
+  // The other file will not be touched. This write operation is scheduled on
+  // the backend task runner.
+  //
+  // This function will be a no-op if ScheduleSave() has been called at least
+  // once.
+  void SaveSingleFileIfNoPreviousSave(StorageFileEncryptionType encryption_type,
+                                      std::string json_content);
+
+  base::WeakPtr<BookmarkStorage> AsWeakPtr() {
+    return weak_factory_.GetWeakPtr();
+  }
 
  private:
   // The state of the bookmark file backup. We lazily backup this file in order
@@ -74,15 +134,29 @@ class BookmarkStorage
     BACKUP_ATTEMPTED
   };
 
-  // Serializes the data and schedules save using ImportantFileWriter.
-  // Returns true on successful serialization.
-  bool SaveNow();
+  // If there is a pending write, it performs it immediately.
+  void SaveNowIfScheduled();
 
-  // The model. The model is NULL once BookmarkModelDeleted has been invoked.
-  raw_ptr<BookmarkModel> model_;
+  // If primary file is encrypted, return the clear text file path and vice
+  // versa.
+  base::FilePath GetSecondaryFilePath() const;
+
+  const raw_ptr<const BookmarkModel> model_;
 
   // Sequenced task runner where disk writes will be performed at.
-  scoped_refptr<base::SequencedTaskRunner> backend_task_runner_;
+  const scoped_refptr<base::SequencedTaskRunner> backend_task_runner_;
+
+  const PermanentNodeSelection permanent_node_selection_;
+
+  // Used to hold the encryptor that is shared between BookmarkStorage and the
+  // background sequence.
+  const scoped_refptr<const os_crypt_async::Encryptor> encryptor_;
+
+  // The encryption type of the primary file.
+  const StorageFileEncryptionType primary_file_encryption_type_;
+
+  const base::FilePath clear_text_file_path_;
+  const base::FilePath encrypted_file_path_;
 
   // Helper to write bookmark data safely.
   base::ImportantFileWriter writer_;
@@ -93,6 +167,12 @@ class BookmarkStorage
 
   // Used to track the frequency of saves starting from the first save.
   base::TimeTicks last_scheduled_save_;
+
+  // Used to track whether the ScheduleSave() function has been called at least
+  // once.
+  bool was_scheduled_save_ever_called_ = false;
+
+  base::WeakPtrFactory<BookmarkStorage> weak_factory_{this};
 };
 
 }  // namespace bookmarks

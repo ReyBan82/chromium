@@ -7,6 +7,7 @@
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/test/allow_check_is_test_for_testing.h"
 #include "base/test/launcher/test_launcher.h"
 #include "build/build_config.h"
 #include "content/public/test/content_test_suite_base.h"
@@ -19,6 +20,9 @@
 #if BUILDFLAG(IS_WIN)
 #include "base/win/win_util.h"
 #endif  // BUILDFLAG(IS_WIN)
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+#include <sys/resource.h>
+#endif
 
 namespace headless {
 namespace {
@@ -52,11 +56,22 @@ class HeadlessTestLauncherDelegate : public content::TestLauncherDelegate {
 }  // namespace headless
 
 int main(int argc, char** argv) {
+  base::test::AllowCheckIsTestForTesting();
   base::CommandLine::Init(argc, argv);
   size_t parallel_jobs = base::NumParallelJobs(/*cores_per_job=*/2);
-  if (parallel_jobs == 0U)
+  if (parallel_jobs == 0U) {
     return 1;
+  }
 
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+  // Set core dump limit to 0 for Linux/ChromeOS.
+  // Some tests intentionally cause renderer crashes, which may cause a core
+  // dump on unix systems, which is slow and usually causes a test to time-out.
+  struct rlimit limit = {0, 0};
+  if (setrlimit(RLIMIT_CORE, &limit) != 0) {
+    PLOG(WARNING) << "Failed to set core dump limit";
+  }
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #if BUILDFLAG(IS_WIN)
   // Load and pin user32.dll to avoid having to load it once tests start while
   // on the main thread loop where blocking calls are disallowed.

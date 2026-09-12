@@ -4,6 +4,7 @@
 
 #include "ui/views/controls/editable_combobox/editable_password_combobox.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
@@ -11,51 +12,64 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
+#include "ui/base/ime/text_input_flags.h"
 #include "ui/base/ime/text_input_type.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/combobox_model.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/compositor/layer.h"
 #include "ui/gfx/render_text.h"
+#include "ui/views/border.h"
 #include "ui/views/controls/button/image_button.h"
 #include "ui/views/controls/button/image_button_factory.h"
+#include "ui/views/controls/combobox/combobox_util.h"
 #include "ui/views/controls/editable_combobox/editable_combobox.h"
+#include "ui/views/controls/focus_ring.h"
 #include "ui/views/controls/textfield/textfield.h"
+#include "ui/views/layout/box_layout_view.h"
+#include "ui/views/layout/layout_provider.h"
 #include "ui/views/vector_icons.h"
 
 namespace views {
 
 namespace {
 
-// The eye-styled icon that serves as a button to toggle the password
+constexpr int kEyePaddingWidth = 4;
+
+// Creates the eye-styled icon that serves as a button to toggle the password
 // visibility.
-class Eye : public ToggleImageButton {
- public:
-  METADATA_HEADER(Eye);
+std::unique_ptr<ToggleImageButton> CreateEye(
+    ImageButton::PressedCallback callback) {
+  auto button = Builder<ToggleImageButton>()
+                    .SetInstallFocusRingOnFocus(true)
+                    .SetRequestFocusOnPress(true)
+                    .SetImageVerticalAlignment(ImageButton::ALIGN_MIDDLE)
+                    .SetImageHorizontalAlignment(ImageButton::ALIGN_CENTER)
+                    .SetCallback(std::move(callback))
+                    .SetBorder(CreateEmptyBorder(kEyePaddingWidth))
+                    .Build();
+  // Add the outset for the focus ring to match the behavior of the `Arrow`
+  // element in `EditableCombobox`.
+  views::FocusRing::Get(button.get())->SetOutsetFocusRingDisabled(false);
+  SetImageFromVectorIconWithColor(
+      button.get(),
+      features::IsRoundedIconsEnabled() ? kVisibilityFilledIcon : kEyeOldIcon,
+      {ui::kColorIcon, ui::kColorIconDisabled});
+  SetToggledImageFromVectorIconWithColor(
+      button.get(),
+      features::IsRoundedIconsEnabled() ? kVisibilityOffFilledIcon
+                                        : kEyeCrossedOldIcon,
+      {ui::kColorIcon, ui::kColorIconDisabled});
 
-  constexpr static int kPaddingWidth = 4;
+  ConfigureComboboxButtonInkDrop(button.get());
+  // We need this so the eye icon is not covered when the combo box view is
+  // hovered
+  button->SetPaintToLayer();
+  button->layer()->SetFillsBoundsOpaquely(false);
 
-  explicit Eye(PressedCallback callback)
-      : ToggleImageButton(std::move(callback)) {
-    SetInstallFocusRingOnFocus(true);
-    SetRequestFocusOnPress(true);
-    SetBorder(CreateEmptyBorder(kPaddingWidth));
-
-    SetImageVerticalAlignment(ImageButton::ALIGN_MIDDLE);
-    SetImageHorizontalAlignment(ImageButton::ALIGN_CENTER);
-
-    SetImageFromVectorIconWithColorId(this, kEyeIcon, ui::kColorIcon,
-                                      ui::kColorIconDisabled);
-    SetToggledImageFromVectorIconWithColorId(
-        this, kEyeCrossedIcon, ui::kColorIcon, ui::kColorIconDisabled);
-  }
-
-  Eye(const Eye&) = delete;
-  Eye& operator=(const Eye&) = delete;
-  ~Eye() override = default;
-};
-
-BEGIN_METADATA(Eye, ToggleImageButton)
-END_METADATA
+  return button;
+}
 
 class PasswordMenuDecorationStrategy
     : public EditableCombobox::MenuDecorationStrategy {
@@ -85,16 +99,25 @@ EditablePasswordCombobox::EditablePasswordCombobox(
     std::unique_ptr<ui::ComboboxModel> combobox_model,
     int text_context,
     int text_style,
-    bool display_arrow)
+    bool display_arrow,
+    Button::PressedCallback eye_callback)
     : EditableCombobox(std::move(combobox_model),
                        /*filter_on_edit=*/false,
                        /*show_on_empty=*/true,
                        text_context,
                        text_style,
                        display_arrow) {
-  eye_ = AddControlElement(std::make_unique<Eye>(base::BindRepeating(
-      &EditablePasswordCombobox::RequestTogglePasswordVisibility,
-      base::Unretained(this))));
+  // By default, clicking on the eye reveals/hides passwords.
+  if (!eye_callback) {
+    eye_callback = base::BindRepeating(
+        [](views::EditablePasswordCombobox* combobox_ptr) {
+          combobox_ptr->RevealPasswords(!combobox_ptr->ArePasswordsRevealed());
+        },
+        base::Unretained(this));
+  }
+
+  eye_ = AddControlElement(CreateEye(std::move(eye_callback)));
+
   GetTextfield().SetTextInputType(ui::TEXT_INPUT_TYPE_PASSWORD);
   SetMenuDecorationStrategy(
       std::make_unique<PasswordMenuDecorationStrategy>(this));
@@ -107,6 +130,11 @@ void EditablePasswordCombobox::SetPasswordIconTooltips(
     const std::u16string& toggled_tooltip_text) {
   eye_->SetTooltipText(tooltip_text);
   eye_->SetToggledTooltipText(toggled_tooltip_text);
+  // The eye is implemented as a `ToggleImageButton`. Screen readers typically
+  // announce whether the toggle is selected, and as a result the accessible
+  // name should not change when selected. The state is conveyed by the
+  // "selected" or "unselected" status instead.
+  eye_->SetToggledAccessibleName(tooltip_text);
 }
 
 void EditablePasswordCombobox::RevealPasswords(bool revealed) {
@@ -116,6 +144,8 @@ void EditablePasswordCombobox::RevealPasswords(bool revealed) {
   are_passwords_revealed_ = revealed;
   GetTextfield().SetTextInputType(revealed ? ui::TEXT_INPUT_TYPE_TEXT
                                            : ui::TEXT_INPUT_TYPE_PASSWORD);
+  GetTextfield().SetTextInputFlags(GetTextfield().GetTextInputFlags() |
+                                   ui::TEXT_INPUT_FLAG_HAS_BEEN_PASSWORD);
   eye_->SetToggled(revealed);
   UpdateMenu();
 }
@@ -124,20 +154,7 @@ bool EditablePasswordCombobox::ArePasswordsRevealed() const {
   return are_passwords_revealed_;
 }
 
-void EditablePasswordCombobox::SetIsPasswordRevealPermittedCheck(
-    IsPasswordRevealPermittedCheck check) {
-  reveal_permitted_check_ = std::move(check);
-}
-
-void EditablePasswordCombobox::RequestTogglePasswordVisibility() {
-  if (!are_passwords_revealed_ && reveal_permitted_check_ &&
-      !reveal_permitted_check_.Run()) {
-    return;
-  }
-  RevealPasswords(!are_passwords_revealed_);
-}
-
-BEGIN_METADATA(EditablePasswordCombobox, View)
+BEGIN_METADATA(EditablePasswordCombobox)
 END_METADATA
 
 }  // namespace views

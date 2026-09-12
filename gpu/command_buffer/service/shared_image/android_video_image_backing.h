@@ -6,20 +6,18 @@
 #define GPU_COMMAND_BUFFER_SERVICE_SHARED_IMAGE_ANDROID_VIDEO_IMAGE_BACKING_H_
 
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "gpu/command_buffer/service/shared_image/android_image_backing.h"
 #include "gpu/gpu_gles2_export.h"
-#include "gpu/ipc/common/vulkan_ycbcr_info.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-
-namespace viz {
-class VulkanContextProvider;
-}  // namespace viz
+#include "gpu/vulkan/vulkan_ycbcr_info.h"
 
 namespace gpu {
+class DawnContextProvider;
+class VulkanContextProvider;
 struct Mailbox;
 struct VulkanYCbCrInfo;
-class AbstractTextureAndroid;
 class RefCountedLock;
 class StreamTextureSharedImageInterface;
 class SharedContextState;
@@ -31,19 +29,17 @@ class GPU_GLES2_EXPORT AndroidVideoImageBacking : public AndroidImageBacking {
  public:
   static std::unique_ptr<AndroidVideoImageBacking> Create(
       const Mailbox& mailbox,
-      const gfx::Size& size,
-      const gfx::ColorSpace color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
+      const SharedImageInfo& si_info,
       scoped_refptr<StreamTextureSharedImageInterface> stream_texture_sii,
       scoped_refptr<SharedContextState> context_state,
       scoped_refptr<RefCountedLock> drdc_lock);
 
-  // Returns ycbcr information. This is only valid in vulkan context and
-  // nullopt for other context.
-  static absl::optional<VulkanYCbCrInfo> GetYcbcrInfo(
+  // Returns ycbcr information. This is only valid in vulkan/dawn contexts and
+  // nullopt for other contexts.
+  static std::optional<VulkanYCbCrInfo> GetYcbcrInfo(
       TextureOwner* texture_owner,
-      viz::VulkanContextProvider* vulkan_context_provider);
+      VulkanContextProvider* vulkan_context_provider,
+      DawnContextProvider* dawn_context_provider);
 
   ~AndroidVideoImageBacking() override;
 
@@ -55,18 +51,13 @@ class GPU_GLES2_EXPORT AndroidVideoImageBacking : public AndroidImageBacking {
   SharedImageBackingType GetType() const override;
   gfx::Rect ClearedRect() const override;
   void SetClearedRect(const gfx::Rect& cleared_rect) override;
-  void Update(std::unique_ptr<gfx::GpuFence> in_fence) override;
+  void Update(gfx::GpuFenceHandle in_fence) override;
+  size_t GetEstimatedSizeForMemoryDump() const override;
 
  protected:
   AndroidVideoImageBacking(const Mailbox& mailbox,
-                           const gfx::Size& size,
-                           const gfx::ColorSpace color_space,
-                           GrSurfaceOrigin surface_origin,
-                           SkAlphaType alpha_type,
+                           const SharedImageInfo& si_info,
                            bool is_thread_safe);
-
-  std::unique_ptr<AbstractTextureAndroid> GenAbstractTexture(
-      const bool passthrough);
 };
 
 }  // namespace gpu

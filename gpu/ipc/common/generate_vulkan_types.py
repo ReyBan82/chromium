@@ -14,7 +14,7 @@ import typing
 
 from xml.etree import ElementTree
 
-_VK_XML_FILE = "third_party/vulkan-deps/vulkan-headers/src/registry/vk.xml"
+_VK_XML_FILE = "third_party/vulkan-headers/src/registry/vk.xml"
 
 _STRUCTS = [
   "VkExtensionProperties",
@@ -284,7 +284,7 @@ struct StructTraits<gpu::mojom::%sDataView, %s> {
       assert array_len
       traits_header_file.write(
 """
-  static base::StringPiece %s(const %s& input) {
+  static std::string_view %s(const %s& input) {
     return input.%s;
   }
 """ % (field_name, name, field_name))
@@ -334,11 +334,17 @@ bool StructTraits<gpu::mojom::%sDataView, %s>::Read(
       read_method = "Read%s" % (NormalizedCamelCase(field_name))
       traits_source_file.write(
 """
-  base::StringPiece %s;
-  if (!data.%s(&%s))
+  std::string_view {0};
+  if (!data.{1}(&{0})) {{
     return false;
-  %s.copy(out->%s, sizeof(out->%s));
-""" % (field_name, read_method, field_name, field_name, field_name, field_name))
+  }}
+  // There should be space for NUL.
+  if ({0}.size() >= sizeof(out->{0})) {{
+    return false;
+  }}
+  // Mojo zero-initializes `out` so it is guaranteed to be NUL-terminated.
+  {0}.copy(out->{0}, sizeof(out->{0}));
+  """.format(field_name, read_method))
     elif array_len:
       read_method = "Read%s" % (NormalizedCamelCase(field_name))
       traits_source_file.write(
@@ -390,30 +396,25 @@ struct EnumTraits<gpu::mojom::%s, %s> {
 """
       default:
         NOTREACHED();
-        return gpu::mojom::%s::INVALID_VALUE;
     }
   }
 
-  static bool FromMojom(gpu::mojom::%s input, %s* out) {
+  static %s FromMojom(gpu::mojom::%s input) {
     switch (input) {
-""" % (name, name, name))
+""" % (name, name))
 
   for value_name, _, mojom_value_name in _enums[name]:
     traits_header_file.write(
 """
      case gpu::mojom::%s::%s:
-       *out = %s::%s;
-       return true;""" % (name, mojom_value_name, name, value_name))
+       return %s::%s;""" % (name, mojom_value_name, name, value_name))
 
   traits_header_file.write(
 """
       case gpu::mojom::%s::INVALID_VALUE:
         NOTREACHED();
-        return false;
-
     }
     NOTREACHED();
-    return false;
   }
 };""" % name)
 
@@ -435,8 +436,10 @@ def GenerateTraitsFile(traits_header_file: typing.IO,
 #ifndef GPU_IPC_COMMON_VULKAN_TYPES_MOJOM_TRAITS_H_
 #define GPU_IPC_COMMON_VULKAN_TYPES_MOJOM_TRAITS_H_
 
+#include <string_view>
+
 #include "base/containers/span.h"
-#include "base/strings/string_piece.h"
+#include "base/notreached.h"
 #include "gpu/ipc/common/vulkan_types.h"
 #include "gpu/ipc/common/vulkan_types.mojom-shared.h"
 

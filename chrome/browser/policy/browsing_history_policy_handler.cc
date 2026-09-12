@@ -16,7 +16,7 @@ BrowsingHistoryPolicyHandler::BrowsingHistoryPolicyHandler()
     : TypeCheckingPolicyHandler(key::kAllowDeletingBrowserHistory,
                                 base::Value::Type::BOOLEAN) {}
 
-BrowsingHistoryPolicyHandler::~BrowsingHistoryPolicyHandler() {}
+BrowsingHistoryPolicyHandler::~BrowsingHistoryPolicyHandler() = default;
 
 void BrowsingHistoryPolicyHandler::ApplyPolicySettings(
     const PolicyMap& policies,
@@ -25,7 +25,6 @@ void BrowsingHistoryPolicyHandler::ApplyPolicySettings(
       policies.GetValue(policy_name(), base::Value::Type::BOOLEAN);
   if (value && !value->GetBool()) {
     prefs->SetBoolean(browsing_data::prefs::kDeleteBrowsingHistory, false);
-    prefs->SetBoolean(browsing_data::prefs::kDeleteBrowsingHistoryBasic, false);
     prefs->SetBoolean(browsing_data::prefs::kDeleteDownloadHistory, false);
   }
 }

@@ -4,8 +4,9 @@
  * found in the LICENSE file.
  */
 
-var gShowPromise = null;
-var gPaymentResponse = null;
+let gShowPromise = null;
+let gPaymentResponse = null;
+let gRetryPromise = null;
 
 /**
  * Launches the PaymentRequest UI
@@ -13,7 +14,7 @@ var gPaymentResponse = null;
  * Legacy entry-point for basic-card tests; to be removed.
  */
 function buy() {
-  var options = {
+  const options = {
     requestPayerEmail: true,
     requestPayerName: true,
     requestPayerPhone: true,
@@ -34,7 +35,7 @@ function buy() {
  *        objects.
  */
 function buyWithMethods(methodData) {
-  var options = {
+  const options = {
     requestPayerEmail: true,
     requestPayerName: true,
     requestPayerPhone: true,
@@ -66,5 +67,14 @@ function retry(validationErrors) {
     print(JSON.stringify(gPaymentResponse, undefined, 2));
   });
 
-  gPaymentResponse.retry(validationErrors);
+  gRetryPromise = gPaymentResponse.retry(validationErrors);
+}
+
+/**
+ * Waits for the outstanding gRetryPromise to resolve, and then updates the HTML
+ * body text with the retried response for test consumption.
+ */
+async function processRetryResponse() {
+  await gRetryPromise;
+  print(JSON.stringify(gPaymentResponse, undefined, 2));
 }

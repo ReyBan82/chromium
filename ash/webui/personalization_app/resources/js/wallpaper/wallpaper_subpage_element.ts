@@ -7,14 +7,18 @@
  * personalization SWA.
  */
 
-import {CurrentWallpaper, WallpaperType} from '../../personalization_app.mojom-webui.js';
+import {isSeaPenEnabled} from 'chrome://resources/ash/common/sea_pen/load_time_booleans.js';
+
+import type {CurrentWallpaper} from '../../personalization_app.mojom-webui.js';
+import {WallpaperType} from '../../personalization_app.mojom-webui.js';
 import {isGooglePhotosIntegrationEnabled} from '../load_time_booleans.js';
-import {Paths, PersonalizationRouter, QueryParams} from '../personalization_router_element.js';
+import type {QueryParams} from '../personalization_router_element.js';
+import {Paths, PersonalizationRouterElement} from '../personalization_router_element.js';
 import {WithPersonalizationStore} from '../personalization_store.js';
 
 import {getTemplate} from './wallpaper_subpage_element.html.js';
 
-export class WallpaperSubpage extends WithPersonalizationStore {
+export class WallpaperSubpageElement extends WithPersonalizationStore {
   static get is() {
     return 'wallpaper-subpage';
   }
@@ -42,14 +46,21 @@ export class WallpaperSubpage extends WithPersonalizationStore {
         type: Boolean,
         computed: 'computeIsGooglePhotosAlbumShared_(queryParams)',
       },
+      isSeaPenEnabled_: {
+        type: Boolean,
+        value() {
+          return isSeaPenEnabled();
+        },
+      },
     };
   }
 
-  path: string;
-  queryParams: QueryParams;
-  private currentSelected_: CurrentWallpaper|null;
-  private isGooglePhotosIntegrationEnabled_: boolean;
-  private isGooglePhotosAlbumShared_: boolean;
+  declare path: string;
+  declare queryParams: QueryParams;
+  declare private currentSelected_: CurrentWallpaper|null;
+  declare private isGooglePhotosIntegrationEnabled_: boolean;
+  declare private isGooglePhotosAlbumShared_: boolean;
+  declare private isSeaPenEnabled_: boolean;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -59,7 +70,7 @@ export class WallpaperSubpage extends WithPersonalizationStore {
 
   private onCurrentSelectedChanged_(value: CurrentWallpaper|null) {
     if (value && value.type === WallpaperType.kPolicy) {
-      PersonalizationRouter.reloadAtRoot();
+      PersonalizationRouterElement.reloadAtRoot();
     }
   }
 
@@ -86,4 +97,4 @@ export class WallpaperSubpage extends WithPersonalizationStore {
   }
 }
 
-customElements.define(WallpaperSubpage.is, WallpaperSubpage);
+customElements.define(WallpaperSubpageElement.is, WallpaperSubpageElement);

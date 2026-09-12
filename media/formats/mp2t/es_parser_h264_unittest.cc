@@ -2,21 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "media/formats/mp2t/es_parser_h264.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/containers/span_writer.h"
 #include "base/functional/bind.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
 #include "media/base/stream_parser_buffer.h"
-#include "media/formats/mp2t/es_parser_h264.h"
 #include "media/formats/mp2t/es_parser_test_base.h"
-#include "media/video/h264_parser.h"
+#include "media/parsers/h264_parser.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace media {
@@ -75,11 +80,11 @@ void EsParserH264Test::GetAccessUnits() {
   size_t offset = 0;
   while (true) {
     // Find the next start code.
-    off_t relative_offset = 0;
-    off_t start_code_size = 0;
-    bool success = H264Parser::FindStartCode(
-        &stream_[offset], stream_.size() - offset,
-        &relative_offset, &start_code_size);
+    size_t relative_offset = 0;
+    size_t start_code_size = 0;
+    bool success =
+        H264Parser::FindStartCode(base::span(stream_).subspan(offset),
+                                  &relative_offset, &start_code_size);
     if (!success)
       break;
     offset += relative_offset;
@@ -108,25 +113,23 @@ void EsParserH264Test::GetAccessUnits() {
 }
 
 void EsParserH264Test::InsertAUD() {
-  uint8_t aud[] = {0x00, 0x00, 0x01, 0x09};
+  constexpr auto kAud = std::to_array<uint8_t>({0x00, 0x00, 0x01, 0x09});
 
   std::vector<uint8_t> stream_with_aud(stream_.size() +
-                                       access_units_.size() * sizeof(aud));
+                                       access_units_.size() * kAud.size());
   std::vector<EsParserTestBase::Packet> access_units_with_aud(
       access_units_.size());
 
-  size_t offset = 0;
+  auto writer = base::SpanWriter(base::span(stream_with_aud));
   for (size_t k = 0; k < access_units_.size(); k++) {
-    access_units_with_aud[k].offset = offset;
-    access_units_with_aud[k].size = access_units_[k].size + sizeof(aud);
+    access_units_with_aud[k].offset = writer.num_written();
+    access_units_with_aud[k].size = access_units_[k].size + kAud.size();
 
-    memcpy(&stream_with_aud[offset], aud, sizeof(aud));
-    offset += sizeof(aud);
-
-    memcpy(&stream_with_aud[offset],
-           &stream_[access_units_[k].offset], access_units_[k].size);
-    offset += access_units_[k].size;
+    CHECK(writer.Write(kAud));
+    CHECK(writer.Write(base::span(stream_).subspan(access_units_[k].offset,
+                                                   access_units_[k].size)));
   }
+  stream_with_aud.resize(writer.num_written());
 
   // Update the stream and access units used for the test.
   stream_ = stream_with_aud;

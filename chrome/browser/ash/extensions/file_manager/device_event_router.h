@@ -8,6 +8,7 @@
 #include <map>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
@@ -48,6 +49,7 @@ class DeviceEventRouter : public VolumeManagerObserver,
 
   // VolumeManagerObserver overrides.
   void OnDiskAdded(const ash::disks::Disk& disk, bool mounting) override;
+  void OnDiskAddBlockedByPolicy(const std::string& device_path) override;
   void OnDiskRemoved(const ash::disks::Disk& disk) override;
   void OnDeviceAdded(const std::string& device_path) override;
   void OnDeviceRemoved(const std::string& device_path) override;
@@ -61,12 +63,6 @@ class DeviceEventRouter : public VolumeManagerObserver,
   void OnFormatCompleted(const std::string& device_path,
                          const std::string& device_label,
                          bool success) override;
-  void OnPartitionStarted(const std::string& device_path,
-                          const std::string& device_label,
-                          bool success) override;
-  void OnPartitionCompleted(const std::string& device_path,
-                            const std::string& device_label,
-                            bool success) override;
   void OnRenameStarted(const std::string& device_path,
                        const std::string& device_label,
                        bool success) override;
@@ -87,8 +83,6 @@ class DeviceEventRouter : public VolumeManagerObserver,
       extensions::api::file_manager_private::DeviceEventType type,
       const std::string& device_path,
       const std::string& device_label) = 0;
-  // Returns external storage is disabled or not.
-  virtual bool IsExternalStorageDisabled() = 0;
 
   SystemNotificationManager* system_notification_manager() {
     return notification_manager_;
@@ -104,7 +98,7 @@ class DeviceEventRouter : public VolumeManagerObserver,
   // Sets device state to the device having |device_path|.
   void SetDeviceState(const std::string& device_path, DeviceState state);
 
-  SystemNotificationManager* notification_manager_;
+  raw_ptr<SystemNotificationManager> notification_manager_;
 
   // Whether to use zero time delta for testing or not.
   const base::TimeDelta resume_time_delta_;

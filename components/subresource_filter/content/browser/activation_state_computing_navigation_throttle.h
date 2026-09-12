@@ -6,13 +6,17 @@
 #define COMPONENTS_SUBRESOURCE_FILTER_CONTENT_BROWSER_ACTIVATION_STATE_COMPUTING_NAVIGATION_THROTTLE_H_
 
 #include <memory>
+#include <optional>
+#include <string_view>
 
-#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "components/subresource_filter/content/browser/verified_ruleset_dealer.h"
+#include "components/subresource_filter/core/browser/verified_ruleset_dealer.h"
 #include "components/subresource_filter/core/mojom/subresource_filter.mojom.h"
 #include "content/public/browser/navigation_throttle.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+namespace content {
+class NavigationThrottleRegistry;
+}  // namespace content
 
 namespace subresource_filter {
 
@@ -41,15 +45,17 @@ class ActivationStateComputingNavigationThrottle
   // NotifyPageActivationWithRuleset once it has been established that
   // activation computation is needed.
   static std::unique_ptr<ActivationStateComputingNavigationThrottle>
-  CreateForRoot(content::NavigationHandle* navigation_handle);
+  CreateForRoot(content::NavigationThrottleRegistry& registry,
+                std::string_view uma_tag);
 
   // It is illegal to create an activation computing throttle for frames
   // whose parents are not activated. Similarly, |ruleset_handle| should be
   // non-null.
   static std::unique_ptr<ActivationStateComputingNavigationThrottle>
-  CreateForChild(content::NavigationHandle* navigation_handle,
+  CreateForChild(content::NavigationThrottleRegistry& registry,
                  VerifiedRuleset::Handle* ruleset_handle,
-                 const mojom::ActivationState& parent_activation_state);
+                 const mojom::ActivationState& parent_activation_state,
+                 std::string_view uma_tag);
 
   ActivationStateComputingNavigationThrottle(
       const ActivationStateComputingNavigationThrottle&) = delete;
@@ -92,7 +98,12 @@ class ActivationStateComputingNavigationThrottle
   void WillSendActivationToRenderer();
 
  private:
-  void CheckActivationState();
+  // Starts computing the activation state for this navigation. Returns true if
+  // an async computation was started (the throttle will later receive
+  // OnActivationStateComputed()). Returns false if it was skipped because the
+  // ruleset handle is no longer available; callers should proceed without
+  // subresource filter activation in that case. See crbug.com/534608620.
+  bool CheckActivationState();
   void OnActivationStateComputed(mojom::ActivationState state);
 
   // In the case when root frame navigations get notified of
@@ -103,18 +114,19 @@ class ActivationStateComputingNavigationThrottle
   void UpdateWithMoreAccurateState();
 
   ActivationStateComputingNavigationThrottle(
-      content::NavigationHandle* navigation_handle,
-      const absl::optional<mojom::ActivationState> parent_activation_state,
-      VerifiedRuleset::Handle* ruleset_handle);
+      content::NavigationThrottleRegistry& registry,
+      const std::optional<mojom::ActivationState> parent_activation_state,
+      VerifiedRuleset::Handle* ruleset_handle,
+      std::string_view uma_tag);
 
-  // Optional to allow for DCHECKing.
-  absl::optional<mojom::ActivationState> parent_activation_state_;
+  // Optional to allow for CHECKing.
+  std::optional<mojom::ActivationState> parent_activation_state_;
 
   std::unique_ptr<AsyncDocumentSubresourceFilter> async_filter_;
 
-  // Must outlive this class. For root frame navigations, this member will be
-  // nullptr until NotifyPageActivationWithRuleset is called.
-  raw_ptr<VerifiedRuleset::Handle, DanglingUntriaged> ruleset_handle_;
+  // For root frame navigations, this member will be nullptr until
+  // NotifyPageActivationWithRuleset is called.
+  base::WeakPtr<VerifiedRuleset::Handle> ruleset_handle_;
 
   // Will be set to true when DEFER is called in WillProcessResponse.
   bool deferred_ = false;
@@ -124,6 +136,8 @@ class ActivationStateComputingNavigationThrottle
   // the throttle has reached this point. After this point the throttle manager
   // will send an activation IPC to the render process.
   bool will_send_activation_to_renderer_ = false;
+
+  std::string_view uma_tag_;
 
   base::WeakPtrFactory<ActivationStateComputingNavigationThrottle>
       weak_ptr_factory_{this};

@@ -20,9 +20,9 @@
 
 // https://html.spec.whatwg.org/C/#htmlelement
 [
-    Exposed=Window,
-    HTMLConstructor
+    Exposed=Window
 ] interface HTMLElement : Element {
+    [HTMLConstructor] constructor();
     // metadata attributes
     [CEReactions, Reflect] attribute DOMString title;
     [CEReactions, Reflect] attribute DOMString lang;
@@ -30,20 +30,22 @@
     [CEReactions] attribute DOMString dir;
 
     // user interaction
-    [CEReactions] attribute (boolean or unrestricted double or DOMString)? hidden;
+    [CEReactions, GetterCallWith=ScriptState] attribute (boolean or unrestricted double or DOMString)? hidden;
 
     [RuntimeCallStatsCounter=HTMLElementClick] void click();
-    [CEReactions, RuntimeEnabled=InertAttribute, Reflect] attribute boolean inert;
+    [CEReactions, Reflect] attribute boolean inert;
     [CEReactions, Reflect] attribute DOMString accessKey;
+    [RuntimeEnabled=AccessKeyLabel] readonly attribute DOMString accessKeyLabel;
     [CEReactions] attribute boolean draggable;
     [CEReactions] attribute boolean spellcheck;
+    [RuntimeEnabled=WebAutocorrectByDefault, CEReactions] attribute boolean autocorrect;
     [Measure] attribute DOMString autocapitalize;
 
-    [RaisesException] ElementInternals attachInternals();
+    [RaisesException] ElementInternals attachInternals(optional AttachInternalsOptions options);
 
     // EditContext
     // https://w3c.github.io/edit-context/
-    [RuntimeEnabled=EditContext] attribute EditContext? editContext;
+    [RaisesException=Setter] attribute EditContext? editContext;
 
     // HTMLElement includes ElementContentEditable
     // https://html.spec.whatwg.org/C/#contenteditable
@@ -59,6 +61,7 @@
 
     // CSSOM View Module
     // https://drafts.csswg.org/cssom-view/#extensions-to-the-htmlelement-interface
+    [RuntimeEnabled=HTMLElementScrollParent, ImplementedAs=unclosedScrollParent] Element? scrollParent();
     [PerWorldBindings, ImplementedAs=unclosedOffsetParent] readonly attribute Element? offsetParent;
     [ImplementedAs=offsetTopForBinding] readonly attribute long offsetTop;
     [ImplementedAs=offsetLeftForBinding] readonly attribute long offsetLeft;
@@ -66,20 +69,28 @@
     [ImplementedAs=offsetHeightForBinding] readonly attribute long offsetHeight;
 
     // The Popover API
-    [MeasureAs=ElementTogglePopover,RuntimeEnabled=HTMLPopoverAttribute,RaisesException] void togglePopover(optional boolean force);
-    [MeasureAs=ElementShowPopover,RuntimeEnabled=HTMLPopoverAttribute,RaisesException] void showPopover();
-    [MeasureAs=ElementHidePopover,RuntimeEnabled=HTMLPopoverAttribute,RaisesException] void hidePopover();
-    [CEReactions,RuntimeEnabled=HTMLPopoverAttribute,Reflect,ReflectOnly=("auto","manual"),ReflectEmpty="auto",ReflectInvalid="manual"] attribute DOMString? popover;
+    [MeasureAs=ElementTogglePopover,RaisesException] boolean togglePopover(optional (TogglePopoverOptions or boolean) options);
+    [MeasureAs=ElementShowPopover,RaisesException] void showPopover(optional ShowPopoverOptions options);
+    [MeasureAs=ElementHidePopover,RaisesException] void hidePopover();
+    [CEReactions,Reflect,ReflectOnly=("auto","hint","manual"),ReflectEmpty="auto",ReflectInvalid="manual"] attribute DOMString? popover;
 
-    // Used by both Anchor Positioning and Popover
-    [CEReactions,RuntimeEnabled=CSSAnchorPositioning] attribute Element? anchorElement;
+    // Overscroll API
+    [RuntimeEnabled=OverscrollGestures,CEReactions,Reflect,ReflectOnly=("auto"),ReflectEmpty="auto",ReflectInvalid="auto"] attribute DOMString? overscrollcontainer;
+    [RuntimeEnabled=OverscrollGestures,CEReactions,Reflect,ReflectOnly=("auto"),ReflectEmpty="auto",ReflectInvalid="auto"] attribute DOMString? overscrollarea;
+
+    // Unbounded Element API
+    [ContextEnabled=UnboundedElement,CEReactions,Reflect] attribute boolean unbounded;
+    [ContextEnabled=UnboundedElement,CallWith=ScriptState] Promise<undefined> showUnboundedElement();
+    [ContextEnabled=UnboundedElement,CallWith=ScriptState] Promise<undefined> hideUnboundedElement();
 
     // Non-standard APIs
-    [CEReactions, RaisesException=Setter, MeasureAs=HTMLElementInnerText, ImplementedAs=innerTextForBinding] attribute ([TreatNullAs=EmptyString] DOMString or TrustedScript) innerText;
-    [CEReactions, RaisesException=Setter, MeasureAs=HTMLElementOuterText] attribute [TreatNullAs=EmptyString] DOMString outerText;
+    [CEReactions, RaisesException=Setter, MeasureAs=HTMLElementInnerText, ImplementedAs=innerTextForBinding] attribute ([LegacyNullToEmptyString] DOMString or TrustedScript) innerText;
+    [CEReactions, RaisesException=Setter, MeasureAs=HTMLElementOuterText] attribute [LegacyNullToEmptyString] DOMString outerText;
+
+    [CEReactions] attribute DOMString writingSuggestions;
 };
 
 HTMLElement includes GlobalEventHandlers;
 HTMLElement includes DocumentAndElementEventHandlers;
-HTMLElement includes HTMLOrForeignElement;
+HTMLElement includes HTMLOrSVGOrMathMLElement;
 HTMLElement includes ElementCSSInlineStyle;

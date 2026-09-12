@@ -12,7 +12,6 @@
 #include "base/task/single_thread_task_runner.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_destination_node.h"
-#include "third_party/blink/renderer/modules/webaudio/offline_audio_context.h"
 #include "third_party/blink/renderer/platform/scheduler/public/non_main_thread.h"
 
 namespace blink {
@@ -39,15 +38,13 @@ class OfflineAudioDestinationHandler final : public AudioDestinationHandler {
   double TailTime() const override { return 0; }
   double LatencyTime() const override { return 0; }
 
-  OfflineAudioContext* Context() const final;
-
   // AudioDestinationHandler
   void StartRendering() override;
   void StopRendering() override;
   void Pause() override;
   void Resume() override;
   uint32_t MaxChannelCount() const override;
-  void PrepareTaskRunnerForWorklet() override {}
+  void PrepareTaskRunnerForWorklet() override;
 
   void RestartRendering() override;
 
@@ -91,8 +88,7 @@ class OfflineAudioDestinationHandler final : public AudioDestinationHandler {
   // The offline version of render() method. If the rendering needs to be
   // suspended after checking, this stops the rendering and returns true.
   // Otherwise, it returns false after rendering one quantum.
-  bool RenderIfNotSuspended(AudioBus* source_bus,
-                            AudioBus* destination_bus,
+  bool RenderIfNotSuspended(AudioBus* destination_bus,
                             uint32_t number_of_frames);
 
   // Prepares a task runner for the rendering based on the operation mode

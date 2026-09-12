@@ -5,12 +5,12 @@
 #define DEVICE_BLUETOOTH_FLOSS_EXPORTED_CALLBACK_MANAGER_H_
 
 #include <memory>
+#include <sstream>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
 
 #include "base/barrier_closure.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/logging.h"
@@ -196,7 +196,7 @@ class ExportedCallbackManager {
 
     VLOG(1) << "Exporting callback at " << callback_path.value();
 
-    if (base::Contains(exported_callbacks_, callback_path.value())) {
+    if (exported_callbacks_.contains(callback_path.value())) {
       LOG(ERROR) << "Cannot export existing object path";
       return false;
     }
@@ -231,7 +231,7 @@ class ExportedCallbackManager {
 
   // Removes the D-Bus object from being exported.
   void UnexportCallback(const dbus::ObjectPath& callback_path) {
-    if (!base::Contains(exported_callbacks_, callback_path.value())) {
+    if (!exported_callbacks_.contains(callback_path.value())) {
       LOG(WARNING) << "Not yet exported: " << callback_path.value();
       return;
     }

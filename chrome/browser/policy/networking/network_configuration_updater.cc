@@ -4,7 +4,6 @@
 
 #include "chrome/browser/policy/networking/network_configuration_updater.h"
 
-#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
@@ -59,11 +58,10 @@ std::set<std::string> CollectExtensionIds(
 
 }  // namespace
 
-BASE_FEATURE(kDisablePolicyEthernetRecommendedWorkaround,
-             "DisablePolicyEthernetRecommendedWorkaround",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
 NetworkConfigurationUpdater::~NetworkConfigurationUpdater() {
+  for (auto& observer : observer_list_) {
+    observer.OnPolicyCertificateProviderDestroying();
+  }
   policy_service_->RemoveObserver(POLICY_DOMAIN_CHROME, this);
 }
 
@@ -175,9 +173,9 @@ void NetworkConfigurationUpdater::Init() {
 }
 
 void NetworkConfigurationUpdater::ParseCurrentPolicy(
-    base::Value::List* network_configs,
-    base::Value::Dict* global_network_config,
-    base::Value::List* certificates) {
+    base::ListValue* network_configs,
+    base::DictValue* global_network_config,
+    base::ListValue* certificates) {
   const PolicyMap& policies = policy_service_->GetPolicies(
       PolicyNamespace(POLICY_DOMAIN_CHROME, std::string()));
   const base::Value* policy_value =
@@ -192,8 +190,8 @@ void NetworkConfigurationUpdater::ParseCurrentPolicy(
                                    ? policy_value->GetString()
                                    : std::string();
   chromeos::onc::ParseAndValidateOncForImport(
-      onc_blob, onc_source_, std::string() /* no passphrase */, network_configs,
-      global_network_config, certificates);
+      onc_blob, onc_source_, network_configs, global_network_config,
+      certificates);
 }
 
 const std::vector<OncParsedCertificates::ClientCertificate>&
@@ -207,72 +205,13 @@ void NetworkConfigurationUpdater::OnPolicyChanged(const base::Value* previous,
 }
 
 void NetworkConfigurationUpdater::ApplyPolicy() {
-  base::Value::List network_configs;
-  base::Value::Dict global_network_config;
-  base::Value::List certificates;
+  base::ListValue network_configs;
+  base::DictValue global_network_config;
+  base::ListValue certificates;
   ParseCurrentPolicy(&network_configs, &global_network_config, &certificates);
 
   ImportCertificates(std::move(certificates));
-  MarkFieldsAsRecommendedForBackwardsCompatibility(network_configs);
-  ApplyNetworkPolicy(std::move(network_configs),
-                     std::move(global_network_config));
-}
-
-void NetworkConfigurationUpdater::
-    MarkFieldsAsRecommendedForBackwardsCompatibility(
-        base::Value::List& network_configs_onc) {
-  if (base::FeatureList::IsEnabled(
-          kDisablePolicyEthernetRecommendedWorkaround)) {
-    return;
-  }
-  for (auto& network_config_onc : network_configs_onc) {
-    DCHECK(network_config_onc.is_dict());
-    base::Value::Dict& network_config_onc_dict = network_config_onc.GetDict();
-    const std::string* type =
-        network_config_onc_dict.FindString(::onc::network_config::kType);
-    if (!type || *type != ::onc::network_type::kEthernet)
-      continue;
-    const base::Value::Dict* ethernet =
-        network_config_onc_dict.FindDict(::onc::network_config::kEthernet);
-    if (!ethernet)
-      continue;
-    const std::string* auth =
-        ethernet->FindString(::onc::ethernet::kAuthentication);
-    if (!auth || *auth != ::onc::ethernet::kAuthenticationNone)
-      continue;
-
-    // If anything has been recommended, trust the server and don't change
-    // anything.
-    if (network_config_onc_dict.contains(::onc::kRecommended)) {
-      continue;
-    }
-
-    // Ensure kStaticIPConfig exists because a "Recommended" field will be added
-    // to it, if not already present.
-    base::Value::Dict* static_ip_config = network_config_onc_dict.EnsureDict(
-        ::onc::network_config::kStaticIPConfig);
-    if (static_ip_config->contains(::onc::kRecommended)) {
-      continue;
-    }
-
-    SetRecommended(network_config_onc_dict,
-                   {::onc::network_config::kIPAddressConfigType,
-                    ::onc::network_config::kNameServersConfigType});
-    SetRecommended(*static_ip_config,
-                   {::onc::ipconfig::kGateway, ::onc::ipconfig::kIPAddress,
-                    ::onc::ipconfig::kRoutingPrefix, ::onc::ipconfig::kType,
-                    ::onc::ipconfig::kNameServers});
-  }
-}
-
-void NetworkConfigurationUpdater::SetRecommended(
-    base::Value::Dict& onc_dict,
-    std::initializer_list<base::StringPiece> recommended_field_names) {
-  base::Value::List recommended_list;
-  for (const auto& recommended_field_name : recommended_field_names) {
-    recommended_list.Append(recommended_field_name);
-  }
-  onc_dict.Set(::onc::kRecommended, std::move(recommended_list));
+  ApplyNetworkPolicy(network_configs, global_network_config);
 }
 
 std::string NetworkConfigurationUpdater::LogHeader() const {
@@ -280,7 +219,7 @@ std::string NetworkConfigurationUpdater::LogHeader() const {
 }
 
 void NetworkConfigurationUpdater::ImportCertificates(
-    base::Value::List certificates_onc) {
+    base::ListValue certificates_onc) {
   std::unique_ptr<OncParsedCertificates> incoming_certs =
       std::make_unique<OncParsedCertificates>(certificates_onc);
 

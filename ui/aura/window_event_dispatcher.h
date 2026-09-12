@@ -15,6 +15,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_multi_source_observation.h"
 #include "cc/metrics/events_metrics_manager.h"
+#include "cc/metrics/scroll_sequence_tracker.h"
 #include "ui/aura/aura_export.h"
 #include "ui/aura/client/capture_delegate.h"
 #include "ui/aura/env_observer.h"
@@ -28,7 +29,7 @@
 #include "ui/events/gestures/gesture_types.h"
 #include "ui/events/types/event_type.h"
 #include "ui/gfx/geometry/point.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace ui {
 class Event;
@@ -80,8 +81,9 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
   ui::EventTargeter* GetDefaultEventTargeter() override;
 
   // Repost event for re-processing. Used when exiting context menus.
-  // We support the ET_MOUSE_PRESSED, ET_TOUCH_PRESSED and ET_GESTURE_TAP_DOWN
-  // event types (although the latter is currently a no-op).
+  // We support the EventType::kMousePressed, EventType::kTouchPressed and
+  // EventType::kGestureTapDown event types (although the latter is currently a
+  // no-op).
   void RepostEvent(const ui::LocatedEvent* event);
 
   // Invoked when the mouse events get enabled or disabled.
@@ -89,7 +91,7 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
 
   void DispatchCancelModeEvent();
 
-  // Dispatches a ui::ET_MOUSE_EXITED event at |point| to the |target|
+  // Dispatches a ui::EventType::kMouseExited event at |point| to the |target|
   // If the |target| is NULL, we will dispatch the event to the root-window.
   // |event_flags| will be set on the dispatched exit event.
   // TODO(beng): needed only for WTH::OnCursorVisibilityChanged().
@@ -129,6 +131,9 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
   void OnHostLostMouseGrab();
   void OnCursorMovedToRootLocation(const gfx::Point& root_location);
 
+  // Invoked when mouse exit the underlying window tree host.
+  void OnHostCursorExit();
+
   // TODO(beng): This is only needed because this cleanup needs to happen after
   //             all other observers are notified of OnWindowDestroying() but
   //             before OnWindowDestroyed() is sent (i.e. while the window
@@ -149,23 +154,6 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
   friend class test::WindowEventDispatcherTestApi;
   friend class Window;
   friend class TestScreen;
-
-  // Used to call WindowEventDispatcherObserver when event processing starts
-  // (from the constructor) and finishes (from the destructor). Notification is
-  // handled by this object to ensure notification happens if the associated
-  // WindowEventDispatcher is destroyed during processing of the event.
-  class ObserverNotifier {
-   public:
-    ObserverNotifier(WindowEventDispatcher* dispatcher, const ui::Event& event);
-
-    ObserverNotifier(const ObserverNotifier&) = delete;
-    ObserverNotifier& operator=(const ObserverNotifier&) = delete;
-
-    ~ObserverNotifier();
-
-   private:
-    raw_ptr<WindowEventDispatcher> dispatcher_;
-  };
 
   // The parameter for OnWindowHidden() to specify why window is hidden.
   enum WindowHiddenReason {
@@ -222,10 +210,6 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
   // Overridden from ui::EventProcessor:
   ui::EventTarget* GetRootForEvent(ui::Event* event) override;
   void OnEventProcessingStarted(ui::Event* event) override;
-  void OnEventProcessingFinished(
-      ui::Event* event,
-      ui::EventTarget* target,
-      const ui::EventDispatchDetails& details) override;
 
   // Overridden from ui::EventDispatcherDelegate.
   bool CanDispatchToTarget(ui::EventTarget* target) override;
@@ -235,6 +219,7 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
                                              const ui::Event& event) override;
 
   // Overridden from ui::GestureEventHelper.
+  base::WeakPtr<ui::GestureEventHelper> GetWeakPtr() override;
   bool CanDispatchToConsumer(ui::GestureConsumer* consumer) override;
   void DispatchGestureEvent(ui::GestureConsumer* raw_input_consumer,
                             ui::GestureEvent* event) override;
@@ -272,7 +257,7 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
 
   // Posts a task to send synthesized mouse move event if there is no a pending
   // task.
-  void PostSynthesizeMouseMove();
+  void PostSynthesizeMouseMove(Window* window);
 
   // Creates and dispatches synthesized mouse move event using the current mouse
   // location.
@@ -281,10 +266,6 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
   // Calls SynthesizeMouseMove() if |window| is currently visible and contains
   // the mouse cursor.
   void SynthesizeMouseMoveAfterChangeToWindow(Window* window);
-
-  // Determines whether to report event latency.
-  bool ShouldReportEventLatency(ui::EventTarget* target,
-                                const ui::EventDispatchDetails& details);
 
   ui::EventDispatchDetails PreDispatchLocatedEvent(Window* target,
                                                    ui::LocatedEvent* event);
@@ -339,19 +320,16 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
   // pointer moves are released and there is no held move event.
   base::OnceClosure did_dispatch_held_move_event_callback_;
 
-  // See ObserverNotifier for details. This is a queue to handle the case of
-  // nested event dispatch.
-  std::queue<std::unique_ptr<ObserverNotifier>> observer_notifiers_;
+  // Tracks the current scroll sequence for metrics purposes. Among other
+  // things, it determines whether a scroll-update is the first one in a scroll
+  // sequence or not.
+  cc::ScrollSequenceTracker scroll_tracker_;
 
-  // Determines whether a scroll-update has been seen after the last
-  // scroll-begin. Used to determine whether a scroll-update is the first one in
-  // a scroll sequence or not.
-  bool has_seen_gesture_scroll_update_after_begin_ = false;
-
-  // A stack of scoped monitors for events to track metrics for the currently
-  // active event.
-  std::vector<std::unique_ptr<cc::EventsMetricsManager::ScopedMonitor>>
-      event_metrics_monitors_;
+  // Tracks metrics for the event currently being dispatched. For nested events,
+  // e.g. mouse drag events during dragging, the new event concludes the
+  // previous one.
+  std::unique_ptr<cc::EventsMetricsManager::ScopedMonitor>
+      event_metrics_monitor_;
 
   bool in_shutdown_ = false;
 
@@ -360,6 +338,8 @@ class AURA_EXPORT WindowEventDispatcher : public ui::EventProcessor,
 
   // Used to schedule DispatchHeldEvents() when |move_hold_count_| goes to 0.
   base::WeakPtrFactory<WindowEventDispatcher> held_event_factory_{this};
+
+  base::WeakPtrFactory<WindowEventDispatcher> weak_ptr_factory_{this};
 };
 
 }  // namespace aura

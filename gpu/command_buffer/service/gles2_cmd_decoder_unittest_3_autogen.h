@@ -12,21 +12,10 @@
 #ifndef GPU_COMMAND_BUFFER_SERVICE_GLES2_CMD_DECODER_UNITTEST_3_AUTOGEN_H_
 #define GPU_COMMAND_BUFFER_SERVICE_GLES2_CMD_DECODER_UNITTEST_3_AUTOGEN_H_
 
-TEST_P(GLES2DecoderTest3, Uniform4fValidArgs) {
-  EXPECT_CALL(*gl_, Uniform4fv(1, 1, _));
-  SpecializedSetup<cmds::Uniform4f, 0>(true);
-  cmds::Uniform4f cmd;
-  cmd.Init(1, 2, 3, 4, 5);
-  EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
-  EXPECT_EQ(GL_NO_ERROR, GetGLError());
-}
-
 TEST_P(GLES2DecoderTest3, Uniform4fvImmediateValidArgs) {
   cmds::Uniform4fvImmediate& cmd = *GetImmediateAs<cmds::Uniform4fvImmediate>();
   SpecializedSetup<cmds::Uniform4fvImmediate, 0>(true);
-  GLfloat temp[4 * 2] = {
-      0,
-  };
+  GLfloat temp[4 * 2] = {};
   EXPECT_CALL(*gl_, Uniform4fv(1, 2, PointsToArray(temp, 4)));
   cmd.Init(1, 2, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -45,9 +34,7 @@ TEST_P(GLES2DecoderTest3, Uniform4iValidArgs) {
 TEST_P(GLES2DecoderTest3, Uniform4ivImmediateValidArgs) {
   cmds::Uniform4ivImmediate& cmd = *GetImmediateAs<cmds::Uniform4ivImmediate>();
   SpecializedSetup<cmds::Uniform4ivImmediate, 0>(true);
-  GLint temp[4 * 2] = {
-      0,
-  };
+  GLint temp[4 * 2] = {};
   EXPECT_CALL(*gl_, Uniform4iv(1, 2, PointsToArray(temp, 4)));
   cmd.Init(1, 2, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -58,9 +45,7 @@ TEST_P(GLES3DecoderTest3, UniformMatrix2x3fvImmediateValidArgs) {
   cmds::UniformMatrix2x3fvImmediate& cmd =
       *GetImmediateAs<cmds::UniformMatrix2x3fvImmediate>();
   SpecializedSetup<cmds::UniformMatrix2x3fvImmediate, 0>(true);
-  GLfloat temp[6 * 2] = {
-      0,
-  };
+  GLfloat temp[6 * 2] = {};
   EXPECT_CALL(*gl_, UniformMatrix2x3fv(1, 2, true, PointsToArray(temp, 6)));
   cmd.Init(1, 2, true, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -71,9 +56,7 @@ TEST_P(GLES3DecoderTest3, UniformMatrix2x4fvImmediateValidArgs) {
   cmds::UniformMatrix2x4fvImmediate& cmd =
       *GetImmediateAs<cmds::UniformMatrix2x4fvImmediate>();
   SpecializedSetup<cmds::UniformMatrix2x4fvImmediate, 0>(true);
-  GLfloat temp[8 * 2] = {
-      0,
-  };
+  GLfloat temp[8 * 2] = {};
   EXPECT_CALL(*gl_, UniformMatrix2x4fv(1, 2, true, PointsToArray(temp, 8)));
   cmd.Init(1, 2, true, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -84,9 +67,7 @@ TEST_P(GLES3DecoderTest3, UniformMatrix3x2fvImmediateValidArgs) {
   cmds::UniformMatrix3x2fvImmediate& cmd =
       *GetImmediateAs<cmds::UniformMatrix3x2fvImmediate>();
   SpecializedSetup<cmds::UniformMatrix3x2fvImmediate, 0>(true);
-  GLfloat temp[6 * 2] = {
-      0,
-  };
+  GLfloat temp[6 * 2] = {};
   EXPECT_CALL(*gl_, UniformMatrix3x2fv(1, 2, true, PointsToArray(temp, 6)));
   cmd.Init(1, 2, true, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -97,9 +78,7 @@ TEST_P(GLES3DecoderTest3, UniformMatrix3x4fvImmediateValidArgs) {
   cmds::UniformMatrix3x4fvImmediate& cmd =
       *GetImmediateAs<cmds::UniformMatrix3x4fvImmediate>();
   SpecializedSetup<cmds::UniformMatrix3x4fvImmediate, 0>(true);
-  GLfloat temp[12 * 2] = {
-      0,
-  };
+  GLfloat temp[12 * 2] = {};
   EXPECT_CALL(*gl_, UniformMatrix3x4fv(1, 2, true, PointsToArray(temp, 12)));
   cmd.Init(1, 2, true, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -110,9 +89,7 @@ TEST_P(GLES3DecoderTest3, UniformMatrix4x2fvImmediateValidArgs) {
   cmds::UniformMatrix4x2fvImmediate& cmd =
       *GetImmediateAs<cmds::UniformMatrix4x2fvImmediate>();
   SpecializedSetup<cmds::UniformMatrix4x2fvImmediate, 0>(true);
-  GLfloat temp[8 * 2] = {
-      0,
-  };
+  GLfloat temp[8 * 2] = {};
   EXPECT_CALL(*gl_, UniformMatrix4x2fv(1, 2, true, PointsToArray(temp, 8)));
   cmd.Init(1, 2, true, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -123,9 +100,7 @@ TEST_P(GLES3DecoderTest3, UniformMatrix4x3fvImmediateValidArgs) {
   cmds::UniformMatrix4x3fvImmediate& cmd =
       *GetImmediateAs<cmds::UniformMatrix4x3fvImmediate>();
   SpecializedSetup<cmds::UniformMatrix4x3fvImmediate, 0>(true);
-  GLfloat temp[12 * 2] = {
-      0,
-  };
+  GLfloat temp[12 * 2] = {};
   EXPECT_CALL(*gl_, UniformMatrix4x3fv(1, 2, true, PointsToArray(temp, 12)));
   cmd.Init(1, 2, true, &temp[0]);
   EXPECT_EQ(error::kNoError, ExecuteImmediateCmd(cmd, sizeof(temp)));
@@ -322,14 +297,6 @@ TEST_P(GLES2DecoderTest3, PopGroupMarkerEXTValidArgs) {
   SpecializedSetup<cmds::PopGroupMarkerEXT, 0>(true);
   cmds::PopGroupMarkerEXT cmd;
   cmd.Init();
-  EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
-  EXPECT_EQ(GL_NO_ERROR, GetGLError());
-}
-
-TEST_P(GLES2DecoderTest3, SwapBuffersValidArgs) {
-  SpecializedSetup<cmds::SwapBuffers, 0>(true);
-  cmds::SwapBuffers cmd;
-  cmd.Init(1, 0);
   EXPECT_EQ(error::kNoError, ExecuteCmd(cmd));
   EXPECT_EQ(GL_NO_ERROR, GetGLError());
 }

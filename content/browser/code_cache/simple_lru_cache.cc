@@ -6,9 +6,10 @@
 
 #include <limits>
 
+#include "base/containers/span.h"
 #include "base/feature_list.h"
 #include "base/numerics/clamped_math.h"
-#include "content/public/common/content_features.h"
+#include "content/common/features.h"
 #include "net/base/url_util.h"
 
 namespace content {
@@ -24,7 +25,8 @@ GetResult& GetResult::operator=(GetResult&&) = default;
 
 SimpleLruCache::Value::Value(Age age, base::Time response_time, uint32_t size)
     : age(age), response_time(response_time), size(size) {
-  DCHECK(!base::FeatureList::IsEnabled(features::kInMemoryCodeCache));
+  CHECK(!base::FeatureList::IsEnabled(features::kInMemoryCodeCache),
+        base::NotFatalUntil::M159);
 }
 
 SimpleLruCache::Value::Value(Age age,
@@ -35,7 +37,8 @@ SimpleLruCache::Value::Value(Age age,
       response_time(response_time),
       size(size),
       data(data.begin(), data.end()) {
-  DCHECK(base::FeatureList::IsEnabled(features::kInMemoryCodeCache));
+  CHECK(base::FeatureList::IsEnabled(features::kInMemoryCodeCache),
+        base::NotFatalUntil::M159);
 }
 
 SimpleLruCache::Value::~Value() = default;
@@ -46,13 +49,13 @@ SimpleLruCache::Value& SimpleLruCache::Value::operator=(Value&&) = default;
 SimpleLruCache::SimpleLruCache(uint64_t capacity) : capacity_(capacity) {}
 SimpleLruCache::~SimpleLruCache() = default;
 
-absl::optional<GetResult> SimpleLruCache::Get(const std::string& key) {
+std::optional<GetResult> SimpleLruCache::Get(const std::string& key) {
   base::Time response_time;
   mojo_base::BigBuffer data;
   if (!GetInternal(key, &response_time, &data)) {
-    return absl::nullopt;
+    return std::nullopt;
   }
-  return absl::make_optional<GetResult>(response_time, std::move(data));
+  return std::make_optional<GetResult>(response_time, std::move(data));
 }
 
 bool SimpleLruCache::Has(const std::string& key) {
@@ -89,7 +92,7 @@ void SimpleLruCache::Delete(const std::string& key) {
     return;
   }
 
-  DCHECK_GE(size_, it->second.size);
+  CHECK_GE(size_, it->second.size, base::NotFatalUntil::M159);
   size_ -= it->second.size;
   access_list_.erase(it->second.age);
   entries_.erase(it);
@@ -129,7 +132,9 @@ bool SimpleLruCache::GetInternal(const std::string& key,
 void SimpleLruCache::Evict() {
   while (capacity_ < size_) {
     auto it = access_list_.begin();
-    DCHECK(it != access_list_.end());
+    CHECK(it != access_list_.end());
+    // TODO(crbug.com/558408632): CHECK-exclusion: Convert to a CHECK once we
+    // are confident it won't be triggered.
     DCHECK(entries_.find(it->second) != entries_.end());
 
     Delete(it->second);

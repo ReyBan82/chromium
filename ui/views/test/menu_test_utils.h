@@ -5,25 +5,30 @@
 #ifndef UI_VIEWS_TEST_MENU_TEST_UTILS_H_
 #define UI_VIEWS_TEST_MENU_TEST_UTILS_H_
 
+#include <memory>
 #include <utility>
 
+#include "base/containers/flat_set.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "ui/base/mojom/menu_source_type.mojom-forward.h"
+#include "ui/compositor/layer_tree_owner.h"
 #include "ui/views/controls/menu/menu_delegate.h"
 #include "ui/views/test/test_views_delegate.h"
 #include "ui/views/view.h"
 
 namespace views {
-
-class MenuController;
-
 namespace test {
 
 // Test implementation of MenuDelegate that tracks calls to MenuDelegate, along
 // with the provided parameters.
 class TestMenuDelegate : public MenuDelegate {
  public:
+  // Special value for `execute_command_id()` used if a command was never
+  // executed.
+  static constexpr int kInvalidExecuteCommandId = 0;
+
   TestMenuDelegate();
 
   TestMenuDelegate(const TestMenuDelegate&) = delete;
@@ -31,23 +36,31 @@ class TestMenuDelegate : public MenuDelegate {
 
   ~TestMenuDelegate() override;
 
-  int show_context_menu_count() { return show_context_menu_count_; }
+  int show_context_menu_count() const { return show_context_menu_count_; }
   MenuItemView* show_context_menu_source() { return show_context_menu_source_; }
   int execute_command_id() const { return execute_command_id_; }
   int on_menu_closed_called() const { return on_menu_closed_called_count_; }
   MenuItemView* on_menu_closed_menu() const { return on_menu_closed_menu_; }
-  bool is_drop_performed() { return is_drop_performed_; }
-  int will_hide_menu_count() { return will_hide_menu_count_; }
+  bool is_drop_performed() const { return is_drop_performed_; }
+  int will_hide_menu_count() const { return will_hide_menu_count_; }
   MenuItemView* will_hide_menu() { return will_hide_menu_; }
   void set_should_execute_command_without_closing_menu(bool val) {
     should_execute_command_without_closing_menu_ = val;
   }
+  void set_should_close_on_drag_complete(bool val) {
+    should_close_on_drag_complete_ = val;
+  }
+
+  // `ShowContextMenu()` will return false for the provided `command_id`.
+  void DisableContextMenuForCommandId(int command_id);
 
   // MenuDelegate:
   bool ShowContextMenu(MenuItemView* source,
                        int id,
                        const gfx::Point& p,
-                       ui::MenuSourceType source_type) override;
+                       ui::mojom::MenuSourceType source_type) override;
+  bool IsItemChecked(int id) const override;
+  void SetItemChecked(int id, bool checked);
   void ExecuteCommand(int id) override;
   void OnMenuClosed(MenuItemView* menu) override;
   views::View::DropCallback GetDropCallback(
@@ -59,64 +72,43 @@ class TestMenuDelegate : public MenuDelegate {
   void WillHideMenu(MenuItemView* menu) override;
   bool ShouldExecuteCommandWithoutClosingMenu(int id,
                                               const ui::Event& e) override;
+  bool ShouldCloseOnDragDropCompleted() override;
 
  private:
   // Performs the drop operation and updates |output_drag_op| accordingly.
   void PerformDrop(const ui::DropTargetEvent& event,
-                   ui::mojom::DragOperation& output_drag_op);
+                   ui::mojom::DragOperation& output_drag_op,
+                   std::unique_ptr<ui::LayerTreeOwner> drag_image_layer_owner);
 
   // The number of times ShowContextMenu was called.
   int show_context_menu_count_ = 0;
 
   // The value of the last call to ShowContextMenu.
-  raw_ptr<MenuItemView> show_context_menu_source_ = nullptr;
+  raw_ptr<MenuItemView, DanglingUntriaged> show_context_menu_source_ = nullptr;
 
   // ID of last executed command.
-  int execute_command_id_ = 0;
+  int execute_command_id_ = kInvalidExecuteCommandId;
 
   // The number of times OnMenuClosed was called.
   int on_menu_closed_called_count_ = 0;
 
   // The value of the last call to OnMenuClosed.
-  raw_ptr<MenuItemView> on_menu_closed_menu_ = nullptr;
+  raw_ptr<MenuItemView, DanglingUntriaged> on_menu_closed_menu_ = nullptr;
 
   // The number of times WillHideMenu was called.
   int will_hide_menu_count_ = 0;
 
   // The value of the last call to WillHideMenu.
-  raw_ptr<MenuItemView> will_hide_menu_ = nullptr;
+  raw_ptr<MenuItemView, DanglingUntriaged> will_hide_menu_ = nullptr;
 
   bool is_drop_performed_ = false;
 
   bool should_execute_command_without_closing_menu_ = false;
-};
 
-// Test api which caches the currently active MenuController. Can be used to
-// toggle visibility, and to clear seletion states, without performing full
-// shutdown. This is used to simulate menus with varing states, such as during
-// drags, without performing the entire operation. Used to test strange shutdown
-// ordering.
-class MenuControllerTestApi {
- public:
-  MenuControllerTestApi();
+  bool should_close_on_drag_complete_ = false;
 
-  MenuControllerTestApi(const MenuControllerTestApi&) = delete;
-  MenuControllerTestApi& operator=(const MenuControllerTestApi&) = delete;
-
-  ~MenuControllerTestApi();
-
-  MenuController* controller() { return controller_.get(); }
-
-  // Clears out the current and pending states, without notifying the associated
-  // menu items.
-  void ClearState();
-
-  // Toggles the internal showing state of |controller_| without attempting
-  // to change associated Widgets.
-  void SetShowing(bool showing);
-
- private:
-  base::WeakPtr<MenuController> controller_;
+  base::flat_set<int> commands_without_context_menus_;
+  base::flat_set<int> checked_commands_;
 };
 
 // On platforms which have menu closure animations, these functions are

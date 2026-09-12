@@ -16,8 +16,9 @@ namespace syncer {
 class CancelationSignal;
 class DebugInfoGetter;
 class ExtensionsActivity;
-class ModelTypeRegistry;
+class DataTypeRegistry;
 class ServerConnectionManager;
+class SyncAccessTokenFetcher;
 class SyncCycleContext;
 class SyncEngineEventListener;
 class SyncScheduler;
@@ -57,12 +58,13 @@ class EngineComponentsFactory {
       ExtensionsActivity* extensions_activity,
       const std::vector<SyncEngineEventListener*>& listeners,
       DebugInfoGetter* debug_info_getter,
-      ModelTypeRegistry* model_type_registry,
-      const std::string& invalidator_client_id,
+      DataTypeRegistry* data_type_registry,
       const std::string& cache_guid,
       const std::string& store_birthday,
       const std::string& bag_of_chips,
-      base::TimeDelta poll_interval) = 0;
+      base::TimeDelta poll_interval,
+      const std::string& account_email,
+      SyncAccessTokenFetcher* sync_access_token_fetcher) = 0;
 };
 
 }  // namespace syncer

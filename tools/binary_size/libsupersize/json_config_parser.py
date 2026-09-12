@@ -21,8 +21,8 @@ class JsonConfig:
 
   def ApkPathDefaults(self):
     return {
-        k: v['source_path']
-        for k, v in self._json_obj.get('apk_files', {}).items()
+      k: v['source_path']
+      for k, v in self._json_obj.get('apk_files', {}).items()
     }
 
   def ComponentForNativeFile(self, basename):
@@ -33,6 +33,10 @@ class JsonConfig:
 
   def SourcePathPrefixForNativeFile(self, basename):
     return self._NativeFile(basename).get('source_path_prefix')
+
+  def ComponentOverrides(self):
+    """Tuple of (path_prefix, component) tuples."""
+    return tuple(self._json_obj.get('component_overrides', {}).items())
 
 
 def Parse(path, on_config_error):

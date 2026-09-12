@@ -5,6 +5,7 @@
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/commands/linux_key_rotation_command.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/base64.h"
@@ -24,6 +25,7 @@
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/core/shared_command_constants.h"
 #include "mojo/public/cpp/platform/platform_channel.h"
 #include "mojo/public/cpp/system/invitation.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -76,8 +78,7 @@ class LinuxKeyRotationCommandTest : public testing::Test {
 
   static base::CommandLine GetMojoCommandLine(base::CommandLine command_line) {
     auto test_command_line = base::GetMultiProcessTestChildBaseCommandLine();
-    test_command_line.CopySwitchesFrom(command_line, kSwitches,
-                                       std::size(kSwitches));
+    test_command_line.CopySwitchesFrom(command_line, kSwitches);
     return test_command_line;
   }
 
@@ -115,8 +116,8 @@ class LinuxKeyRotationCommandTest : public testing::Test {
   }
 
   void CreateManagementServiceBinary() {
-    ASSERT_TRUE(base::WriteFile(GetBinaryFilePath(),
-                                base::StringPiece("test_content")));
+    ASSERT_TRUE(
+        base::WriteFile(GetBinaryFilePath(), std::string_view("test_content")));
   }
 
   void ExpectCommandErrorHistogram(KeyRotationCommandError error) {
@@ -159,11 +160,8 @@ MULTIPROCESS_TEST_MAIN(MojoInvitation) {
     return 6;
 
   // Validate command line arguments.
-  std::string token_base64;
-  base::Base64Encode(kFakeDMToken, &token_base64);
-  std::string nonce_base64;
-  base::Base64Encode(kFakeDMToken, &token_base64);
-  base::Base64Encode(kNonce, &nonce_base64);
+  std::string token_base64 = base::Base64Encode(kFakeDMToken);
+  std::string nonce_base64 = base::Base64Encode(kNonce);
 
   EXPECT_EQ(token_base64,
             command_line.GetSwitchValueNative(switches::kRotateDTKey));

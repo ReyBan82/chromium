@@ -1,4 +1,4 @@
-// Copyright 2016 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,48 +8,51 @@
 #include <memory>
 #include <string>
 
+#include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-
-namespace base {
-class FilePath;
-class SingleThreadTaskRunner;
-}  // namespace base
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "remoting/host/mojom/remote_security_key.mojom.h"
 
 namespace remoting {
-
-class ClientSessionDetails;
 
 // Class responsible for proxying authentication data between a local gnubbyd
 // and the client.
 class SecurityKeyAuthHandler {
  public:
-  virtual ~SecurityKeyAuthHandler() {}
+  virtual ~SecurityKeyAuthHandler() = default;
 
   // Used to send security key extension messages to the client.
   using SendMessageCallback =
       base::RepeatingCallback<void(int connection_id, const std::string& data)>;
 
+  static void set_use_mojo_handler(bool use_mojo_handler);
+
+  using CreateHandlerCallbackForTesting =
+      base::RepeatingCallback<std::unique_ptr<SecurityKeyAuthHandler>()>;
+  static void SetCreateHandlerCallbackForTesting(
+      CreateHandlerCallbackForTesting callback);
+
   // Creates a platform-specific SecurityKeyAuthHandler.
-  // All invocations of |send_message_callback| are guaranteed to occur before
-  // the underlying SecurityKeyAuthHandler object is destroyed.  It is not safe
-  // to destroy the SecurityKeyAuthHandler object within the callback.
-  // |client_session_details| will be valid until this instance is destroyed.
-  static std::unique_ptr<SecurityKeyAuthHandler> Create(
-      ClientSessionDetails* client_session_details,
-      const SendMessageCallback& send_message_callback,
-      scoped_refptr<base::SingleThreadTaskRunner> file_task_runner);
+  static std::unique_ptr<SecurityKeyAuthHandler> Create();
 
-#if BUILDFLAG(IS_POSIX)
-  // Specify the name of the socket to listen to security key requests on.
-  static void SetSecurityKeySocketName(
-      const base::FilePath& security_key_socket_name);
-#endif  // BUILDFLAG(IS_POSIX)
+  // Binds a SecurityKeyForwarder receiver for receiving SK forwarding requests.
+  virtual void BindSecurityKeyForwarder(
+      mojo::PendingReceiver<mojom::SecurityKeyForwarder> receiver);
 
-  // Sets the callback used to send messages to the client.
-  virtual void SetSendMessageCallback(const SendMessageCallback& callback) = 0;
+  // Sets the callback used to send messages to the client, associated with
+  // the given |client_id| (typically the transport's 'this' pointer).
+  virtual void SetSendMessageCallback(const SendMessageCallback& callback,
+                                      const void* client_id) = 0;
+
+  // Clears the callback if the registered |client_id| matches the caller.
+  virtual void ClearSendMessageCallback(const void* client_id) = 0;
+
+  // Returns a weak pointer to this handler.
+  virtual base::WeakPtr<SecurityKeyAuthHandler> GetWeakPtr() = 0;
 
   // Creates the platform specific connection to handle security key requests.
   virtual void CreateSecurityKeyConnection() = 0;

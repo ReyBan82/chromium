@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chromecast/app/linux/cast_crash_reporter_client.h"
+
 #include <fstream>
+#include <string_view>
 #include <vector>
 
 #include "base/base_paths.h"
@@ -14,7 +17,6 @@
 #include "base/threading/scoped_blocking_call.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/values.h"
-#include "chromecast/app/linux/cast_crash_reporter_client.h"
 #include "chromecast/base/scoped_temp_file.h"
 #include "chromecast/crash/app_state_tracker.h"
 #include "chromecast/crash/linux/crash_testing_utils.h"
@@ -25,15 +27,14 @@
 namespace chromecast {
 namespace {
 
-const char kFakeDumpstateContents[] = "Dumpstate Contents\nDumpdumpdumpdump\n";
+constexpr std::string_view kFakeDumpstateContents =
+    "Dumpstate Contents\nDumpdumpdumpdump\n";
 const char kFakeMinidumpContents[] = "Minidump Contents\nLine1\nLine2\n";
 
 int WriteFakeDumpStateFile(const std::string& path) {
   // Append the correct extension and write the data to file.
-  base::File dumpstate(base::FilePath(path).AddExtension(".txt.gz"),
-                       base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE);
-  dumpstate.Write(
-      0, kFakeDumpstateContents, sizeof(kFakeDumpstateContents) - 1);
+  base::WriteFile(base::FilePath(path).AddExtension(".txt.gz"),
+                  kFakeDumpstateContents);
   return 0;
 }
 

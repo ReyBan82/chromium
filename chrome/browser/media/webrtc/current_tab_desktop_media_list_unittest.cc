@@ -4,23 +4,23 @@
 
 #include "chrome/browser/media/webrtc/current_tab_desktop_media_list.h"
 
+#include <vector>
+
 #include "base/command_line.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/media/webrtc/desktop_media_list.h"
+#include "chrome/browser/media/webrtc/tab_desktop_media_list_mock_observer.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/fake_profile_manager.h"
-#include "chrome/test/base/scoped_testing_local_state.h"
-#include "chrome/test/base/test_browser_window.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
@@ -30,10 +30,14 @@
 #include "content/public/test/web_contents_tester.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/login/users/scoped_test_user_manager.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/ash/login/users/user_manager_delegate_impl.h"
 #include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#include "chromeos/ash/components/settings/cros_settings.h"
+#include "components/prefs/pref_service.h"
+#include "components/user_manager/scoped_user_manager.h"
+#include "components/user_manager/user_manager_impl.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 using content::WebContents;
 using content::WebContentsTester;
@@ -44,18 +48,6 @@ namespace {
 
 const base::TimeDelta kUpdatePeriod = base::Milliseconds(1000);
 
-class MockObserver : public DesktopMediaListObserver {
- public:
-  MOCK_METHOD1(OnSourceAdded, void(int index));
-  MOCK_METHOD1(OnSourceRemoved, void(int index));
-  MOCK_METHOD2(OnSourceMoved, void(int old_index, int new_index));
-  MOCK_METHOD1(OnSourceNameChanged, void(int index));
-  MOCK_METHOD1(OnSourceThumbnailChanged, void(int index));
-  MOCK_METHOD1(OnSourcePreviewChanged, void(size_t index));
-  MOCK_METHOD0(OnDelegatedSourceListSelection, void());
-  MOCK_METHOD0(OnDelegatedSourceListDismissed, void());
-};
-
 }  // namespace
 
 ACTION_P(QuitMessageLoop, run_loop) {
@@ -64,8 +56,7 @@ ACTION_P(QuitMessageLoop, run_loop) {
 
 class CurrentTabDesktopMediaListTest : public testing::Test {
  protected:
-  CurrentTabDesktopMediaListTest()
-      : local_state_(TestingBrowserProcess::GetGlobal()) {}
+  CurrentTabDesktopMediaListTest() = default;
 
   CurrentTabDesktopMediaListTest(const CurrentTabDesktopMediaListTest&) =
       delete;
@@ -81,15 +72,12 @@ class CurrentTabDesktopMediaListTest : public testing::Test {
 
     base::CommandLine* cl = base::CommandLine::ForCurrentProcess();
     cl->AppendSwitch(switches::kNoFirstRun);
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     cl->AppendSwitch(switches::kTestType);
 #endif
 
     profile_ = g_browser_process->profile_manager()
                    ->GetLastUsedProfileAllowedByPolicy();
-
-    Browser::CreateParams profile_params(profile_, true);
-    browser_ = CreateBrowserWithTestWindowForParams(profile_params);
 
     // Seed some tabs.
     for (int i = 0; i < 10; ++i) {  // Arbitrary value. kMainTab must be lower.
@@ -102,17 +90,7 @@ class CurrentTabDesktopMediaListTest : public testing::Test {
   void TearDown() override {
     list_.reset();
 
-    // TODO(crbug.com/832879): Tearing down the TabStripModel should just delete
-    // all its owned WebContents. Then |manually_added_web_contents_| won't be
-    // necessary.
-    TabStripModel* tab_strip_model = browser_->tab_strip_model();
-    for (WebContents* contents : all_web_contents_) {
-      tab_strip_model->DetachAndDeleteWebContentsAt(
-          tab_strip_model->GetIndexOfWebContents(contents));
-    }
     all_web_contents_.clear();
-
-    browser_.reset();
     TestingBrowserProcess::GetGlobal()->SetProfileManager(nullptr);
     rvh_test_enabler_.reset();
   }
@@ -137,18 +115,13 @@ class CurrentTabDesktopMediaListTest : public testing::Test {
       entry = web_contents->GetController().GetLastCommittedEntry();
     }
 
-    all_web_contents_.push_back(web_contents.get());
-    browser_->tab_strip_model()->AppendWebContents(std::move(web_contents),
-                                                   true);
+    all_web_contents_.push_back(std::move(web_contents));
   }
 
   void RemoveWebContents(WebContents* web_contents) {
-    TabStripModel* tab_strip_model = browser_->tab_strip_model();
-    tab_strip_model->DetachAndDeleteWebContentsAt(
-        tab_strip_model->GetIndexOfWebContents(web_contents));
-    all_web_contents_.erase(std::remove(all_web_contents_.begin(),
-                                        all_web_contents_.end(), web_contents),
-                            all_web_contents_.end());
+    std::erase_if(all_web_contents_, [web_contents](const auto& wc) {
+      return wc.get() == web_contents;
+    });
   }
 
   void Wait() {
@@ -162,25 +135,27 @@ class CurrentTabDesktopMediaListTest : public testing::Test {
 
   // The path to temporary directory used to contain the test operations.
   base::ScopedTempDir temp_dir_;
-  ScopedTestingLocalState local_state_;
 
   std::unique_ptr<content::RenderViewHostTestEnabler> rvh_test_enabler_;
-  raw_ptr<Profile> profile_;
-  std::unique_ptr<Browser> browser_;
+  raw_ptr<Profile, DanglingUntriaged> profile_;
 
-  StrictMock<MockObserver> observer_;
+  StrictMock<DesktopMediaListMockObserver> observer_;
   std::unique_ptr<CurrentTabDesktopMediaList> list_;
 
-  std::vector<WebContents*> all_web_contents_;
+  std::vector<std::unique_ptr<content::WebContents>> all_web_contents_;
 
   content::BrowserTaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 
   std::unique_ptr<base::RunLoop> run_loop_;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   ash::ScopedCrosSettingsTestHelper cros_settings_test_helper_;
-  ash::ScopedTestUserManager test_user_manager_;
+  user_manager::ScopedUserManager user_manager_{
+      std::make_unique<user_manager::UserManagerImpl>(
+          std::make_unique<ash::UserManagerDelegateImpl>(),
+          TestingBrowserProcess::GetGlobal()->local_state(),
+          ash::CrosSettings::Get())};
 #endif
 };
 
@@ -190,7 +165,7 @@ TEST_F(CurrentTabDesktopMediaListTest, UpdateSourcesListCalledWithCurrentTab) {
   EXPECT_CALL(observer_, OnSourceThumbnailChanged(0))
       .Times(1)
       .WillOnce(QuitMessageLoop(run_loop_.get()));
-  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab]);
+  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab].get());
   run_loop_->Run();
 }
 
@@ -202,7 +177,7 @@ TEST_F(CurrentTabDesktopMediaListTest,
   EXPECT_CALL(observer_, OnSourceThumbnailChanged(0))
       .Times(1)
       .WillOnce(QuitMessageLoop(run_loop_.get()));
-  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab]);
+  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab].get());
   run_loop_->Run();
 
   // Test focus.
@@ -218,12 +193,12 @@ TEST_F(CurrentTabDesktopMediaListTest,
   EXPECT_CALL(observer_, OnSourceThumbnailChanged(0))
       .Times(1)
       .WillOnce(QuitMessageLoop(run_loop_.get()));
-  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab]);
+  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab].get());
   run_loop_->Run();
 
   // Test focus.
   EXPECT_CALL(observer_, OnSourceRemoved(_)).Times(0);  // Not called.
-  RemoveWebContents(all_web_contents_[kMainTab + 1]);
+  RemoveWebContents(all_web_contents_[kMainTab + 1].get());
 }
 
 TEST_F(CurrentTabDesktopMediaListTest, OnSourceThumbnailCalledIfNewThumbnail) {
@@ -233,7 +208,7 @@ TEST_F(CurrentTabDesktopMediaListTest, OnSourceThumbnailCalledIfNewThumbnail) {
   EXPECT_CALL(observer_, OnSourceThumbnailChanged(0))
       .Times(1)
       .WillOnce(QuitMessageLoop(run_loop_.get()));
-  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab]);
+  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab].get());
   Wait();
 
   // Test focus.
@@ -253,7 +228,7 @@ TEST_F(CurrentTabDesktopMediaListTest,
   EXPECT_CALL(observer_, OnSourceThumbnailChanged(0))
       .Times(1)
       .WillOnce(QuitMessageLoop(run_loop_.get()));
-  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab]);
+  list_ = CreateCurrentTabDesktopMediaList(all_web_contents_[kMainTab].get());
   Wait();
 
   // Test focus.
@@ -263,7 +238,7 @@ TEST_F(CurrentTabDesktopMediaListTest,
 
 TEST_F(CurrentTabDesktopMediaListTest, CallingRefreshAfterTabFreedIsSafe) {
   constexpr size_t kMainTab = 3;
-  WebContents* const web_contents = all_web_contents_[kMainTab];
+  WebContents* const web_contents = all_web_contents_[kMainTab].get();
 
   // Setup.
   EXPECT_CALL(observer_, OnSourceAdded(0)).Times(1);
@@ -280,4 +255,4 @@ TEST_F(CurrentTabDesktopMediaListTest, CallingRefreshAfterTabFreedIsSafe) {
   RefreshList();
 }
 
-// TODO(crbug.com/1136942): Test rescaling of the thumbnails.
+// TODO(crbug.com/40724504): Test rescaling of the thumbnails.

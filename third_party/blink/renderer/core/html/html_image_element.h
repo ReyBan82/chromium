@@ -24,8 +24,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_IMAGE_ELEMENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_IMAGE_ELEMENT_H_
 
-#include <memory>
+#include <optional>
 
+#include "base/types/strong_alias.h"
+#include "third_party/blink/public/common/tokens/tokens.h"
 #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/create_element_flags.h"
@@ -34,22 +36,18 @@
 #include "third_party/blink/renderer/core/html/forms/form_associated.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/html/html_image_loader.h"
-#include "third_party/blink/renderer/core/html/lazy_load_image_observer.h"
-#include "third_party/blink/renderer/platform/graphics/graphics_types.h"
+#include "third_party/blink/renderer/core/resize_observer/resize_observer.h"
 #include "third_party/blink/renderer/platform/graphics/image_orientation.h"
-#include "third_party/blink/renderer/platform/loader/fetch/fetch_parameters.h"
-#include "third_party/blink/renderer/platform/loader/fetch/resource_response.h"
 #include "ui/gfx/geometry/size.h"
 
 namespace blink {
 
 class ExceptionState;
 class HTMLFormElement;
+class HTMLMapElement;
 class ImageCandidate;
-class LayoutSize;
-class ShadowRoot;
 
-class CORE_EXPORT HTMLImageElement final
+class CORE_EXPORT HTMLImageElement
     : public HTMLElement,
       public ImageElementBase,
       public ActiveScriptWrappable<HTMLImageElement>,
@@ -66,22 +64,14 @@ class CORE_EXPORT HTMLImageElement final
                                                   unsigned width,
                                                   unsigned height);
 
-  // Returns dimension type of the attribute value or inline dimensions usable
-  // for LazyLoad, whether the dimension is absolute or not and if the absolute
-  // value is small enough to be skipped for lazyloading.
-  enum class LazyLoadDimensionType {
-    kNotAbsolute,
-    kAbsoluteNotSmall,
-    kAbsoluteSmall,
-  };
-  static LazyLoadDimensionType GetAttributeLazyLoadDimensionType(
-      const String& attribute_value);
-  static LazyLoadDimensionType GetInlineStyleDimensionsType(
-      const CSSPropertyValueSet* property_set);
-
   HTMLImageElement(Document&, const CreateElementFlags);
   explicit HTMLImageElement(Document&, bool created_by_parser = false);
   ~HTMLImageElement() override;
+
+  ElementType GetElementType() const final {
+    return ElementType::kHTMLImageElement;
+  }
+
   void Trace(Visitor*) const override;
 
   unsigned width();
@@ -93,8 +83,12 @@ class CORE_EXPORT HTMLImageElement final
   unsigned LayoutBoxWidth() const;
   unsigned LayoutBoxHeight() const;
 
+  bool IsBeingRendered() const;
+  bool AllowAutoSizes() const;
+
   const String& currentSrc() const;
 
+  HTMLMapElement* GetImageMap() const;
   bool IsServerMap() const;
 
   String AltText() const final;
@@ -102,15 +96,16 @@ class CORE_EXPORT HTMLImageElement final
   ImageResourceContent* CachedImage() const {
     return GetImageLoader().GetContent();
   }
+
   void LoadDeferredImageFromMicrotask() {
-    GetImageLoader().LoadDeferredImage(referrer_policy_,
-                                       /*force_blocking*/ false,
+    GetImageLoader().LoadDeferredImage(/*force_blocking*/ false,
                                        /*update_from_microtask*/ true);
   }
+
   void LoadDeferredImageBlockingLoad() {
-    GetImageLoader().LoadDeferredImage(referrer_policy_,
-                                       /*force_blocking*/ true);
+    GetImageLoader().LoadDeferredImage(/*force_blocking*/ true);
   }
+
   void SetImageForTest(ImageResourceContent* content) {
     GetImageLoader().SetImageForTest(content);
   }
@@ -120,16 +115,14 @@ class CORE_EXPORT HTMLImageElement final
   void setHeight(unsigned);
   void setWidth(unsigned);
 
-  bool IsDefaultIntrinsicSize() const {
-    return is_default_overridden_intrinsic_size_;
-  }
-
   int x() const;
   int y() const;
 
-  ScriptPromise decode(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLUndefined> decode(ScriptState*, ExceptionState&);
 
   bool complete() const;
+
+  void OnResize();
 
   bool HasPendingActivity() const final {
     return GetImageLoader().HasPendingActivity();
@@ -144,7 +137,9 @@ class CORE_EXPORT HTMLImageElement final
   virtual void EnsureCollapsedOrFallbackContent();
   virtual void EnsureFallbackForGeneratedContent();
   virtual void EnsurePrimaryContent();
+  void OnImageLoadComplete();
   bool IsCollapsed() const;
+  bool IsPrimaryContent() const;
 
   void SetAutoSizesUsecounter();
 
@@ -154,11 +149,12 @@ class CORE_EXPORT HTMLImageElement final
       const RespectImageOrientationEnum) const override;
 
   // public so that HTMLPictureElement can call this as well.
-  void SelectSourceURL(ImageLoader::UpdateFromElementBehavior);
+  void SelectSourceURL(ImageLoader::UpdateFromElementBehavior behavior =
+                           ImageLoader::kUpdateNormal);
 
   void SetIsFallbackImage() { is_fallback_image_ = true; }
 
-  FetchParameters::ResourceWidth GetResourceWidth() const;
+  std::optional<float> GetResourceWidth() const;
   float SourceSize(Element&);
 
   void ForceReload() const;
@@ -167,15 +163,6 @@ class CORE_EXPORT HTMLImageElement final
   void AssociateWith(HTMLFormElement*) override;
 
   bool ElementCreatedByParser() const { return element_created_by_parser_; }
-
-  LazyLoadImageObserver::VisibleLoadTimeMetrics&
-  EnsureVisibleLoadTimeMetrics() {
-    if (!visible_load_time_metrics_) {
-      visible_load_time_metrics_ =
-          std::make_unique<LazyLoadImageObserver::VisibleLoadTimeMetrics>();
-    }
-    return *visible_load_time_metrics_;
-  }
 
   // Updates if any optimized image policy is violated. When any policy is
   // violated, the image should be rendered as a placeholder image.
@@ -186,17 +173,13 @@ class CORE_EXPORT HTMLImageElement final
     return is_legacy_format_or_unoptimized_image_;
   }
 
-  // Keeps track of whether the image comes from an ad.
-  void SetIsAdRelated();
-  bool IsAdRelated() const override { return is_ad_related_; }
-
   // Keeps track whether this image is an LCP element.
+  // If the element is reused for loading another image, this flag might be
+  // retained so use with caution.
   void SetIsLCPElement() { is_lcp_element_ = true; }
   bool IsLCPElement() const { return is_lcp_element_; }
-
-  bool IsChangedShortlyAfterMouseover() const {
-    return is_changed_shortly_after_mouseover_;
-  }
+  void SetPredictedLcpElement() { is_predicted_lcp_element_ = true; }
+  bool IsPredictedLcpElement() const { return is_predicted_lcp_element_; }
 
   void InvalidateAttributeMapping();
 
@@ -204,6 +187,33 @@ class CORE_EXPORT HTMLImageElement final
 
   static bool SupportedImageType(const String& type,
                                  const HashSet<String>* disabled_image_types);
+
+  // True if the `loading` attribute is present and the value is lazy. Note that
+  // additional conditions can prevent lazy loading even when this is true, such
+  // as script being disabled (see: `LazyImageHelper::ShouldDeferImageLoad`).
+  bool HasLazyLoadingAttribute() const;
+
+  // True if the `sizes` attribute is present.
+  bool HasSizesAttribute() const;
+
+  // Returns script urls that were in execution while this element was being
+  // created, if LCPScriptObserver was active.
+  const HashSet<String>& creator_scripts() const { return creator_scripts_; }
+
+  // Returns true if the image has an active image replacement.
+  bool HasImageReplacement() const;
+  // Returns the FrameToken of the replacement subframe if this element has
+  // an active image replacement, or std::nullopt otherwise.
+  std::optional<FrameToken> ReplacementFrameToken() const;
+  // Resets corresponding ImageReplacement (if any), and goes back to displaying
+  // the primary content (if StartImageReplacement() was previously called).
+  // Uses the element's current document if |document| is not specified.
+  void ResetImageReplacement(Document* document = nullptr);
+  void StartImageReplacement();
+
+  bool replacedByUserAgent() const;
+  DEFINE_ATTRIBUTE_EVENT_LISTENER(uareplacestart, kUareplacestart)
+  DEFINE_ATTRIBUTE_EVENT_LISTENER(uareplaceend, kUareplaceend)
 
  protected:
   // Controls how an image element appears in the layout. See:
@@ -219,39 +229,38 @@ class CORE_EXPORT HTMLImageElement final
     // No layout object. Corresponds to the `current request` being in the
     // `broken` state when the resource load failed with an error that has the
     // |shouldCollapseInitiator| flag set.
-    kCollapsed
+    kCollapsed,
+    // The image is being replaced by a remote image.
+    kImageReplacement,
   };
 
   void DidMoveToNewDocument(Document& old_document) override;
 
-  void DidAddUserAgentShadowRoot(ShadowRoot&) override;
   void AdjustStyle(ComputedStyleBuilder&) override;
 
  private:
-  bool AreAuthorShadowsAllowed() const override { return false; }
-
   void ParseAttribute(const AttributeModificationParams&) override;
   bool IsPresentationAttribute(const QualifiedName&) const override;
   void CollectStyleForPresentationAttribute(
       const QualifiedName&,
       const AtomicString&,
-      MutableCSSPropertyValueSet*) override;
+      HeapVector<CSSPropertyValue, 8>&) override;
   // For mapping attributes from the <source> element, if any.
   bool HasExtraStyleForPresentationAttribute() const override {
-    return source_;
+    return source_ != nullptr;
   }
   void CollectExtraStyleForPresentationAttribute(
-      MutableCSSPropertyValueSet*) override;
+      HeapVector<CSSPropertyValue, 8>&) override;
   void SetLayoutDisposition(LayoutDisposition, bool force_reattach = false);
+  void ResetLayoutDisposition();
 
   void AttachLayoutTree(AttachContext&) override;
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
   bool CanStartSelection() const override { return false; }
 
   bool IsURLAttribute(const Attribute&) const override;
   bool HasLegalLinkAttribute(const QualifiedName&) const override;
-  const QualifiedName& SubResourceAttributeName() const override;
 
   bool draggable() const override;
 
@@ -264,15 +273,18 @@ class CORE_EXPORT HTMLImageElement final
   Image* ImageContents() override;
 
   void ResetFormOwner();
+  bool IsUrlInCandidateSet(const AtomicString& url) const;
   ImageCandidate FindBestFitImageFromPictureParent();
   void SetBestFitURLAndDPRFromImageCandidate(const ImageCandidate&);
-  LayoutSize DensityCorrectedIntrinsicDimensions() const;
+  gfx::Size DensityCorrectedIntrinsicDimensions() const;
   HTMLImageLoader& GetImageLoader() const override { return *image_loader_; }
   void NotifyViewportChanged();
   void CreateMediaQueryListIfDoesNotExist();
 
   // LocalFrameView::LifecycleNotificationObserver
-  void DidFinishLifecycleUpdate(const LocalFrameView&) override;
+  void DidFinishLayout() override;
+
+  void ResetImageReplacementInternal(Document& document);
 
   Member<HTMLImageLoader> image_loader_;
   Member<ViewportChangeListener> listener_;
@@ -284,29 +296,17 @@ class CORE_EXPORT HTMLImageElement final
   bool form_was_set_by_parser_ : 1;
   bool element_created_by_parser_ : 1;
   bool is_fallback_image_ : 1;
-  bool is_default_overridden_intrinsic_size_ : 1;
   // This flag indicates if the image violates one or more optimized image
   // policies. When any policy is violated, the image should be rendered as a
   // placeholder image.
   bool is_legacy_format_or_unoptimized_image_ : 1;
   bool is_ad_related_ : 1;
   bool is_lcp_element_ : 1;
-  bool is_changed_shortly_after_mouseover_ : 1;
-  bool has_sizes_attribute_in_img_or_sibling_ : 1;
-  bool is_lazy_loaded_ : 1;
+  bool is_auto_sized_ : 1;
+  bool is_predicted_lcp_element_ : 1;
+  bool is_lazy_load_issue_reported_ : 1;
 
-  network::mojom::ReferrerPolicy referrer_policy_;
-
-  std::unique_ptr<LazyLoadImageObserver::VisibleLoadTimeMetrics>
-      visible_load_time_metrics_;
-
-  bool image_ad_use_counter_recorded_ = false;
-
-  // The last rectangle reported to the the `PageTimingMetricsSender`.
-  // `last_reported_ad_rect_` is empty if there's no report before, or if the
-  // last report was used to signal the removal of this element (i.e. both cases
-  // will be handled the same way).
-  gfx::Rect last_reported_ad_rect_;
+  HashSet<String> creator_scripts_;
 };
 
 }  // namespace blink

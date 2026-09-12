@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -42,6 +19,7 @@ import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -137,6 +115,15 @@ public class ByteStringTest {
   public void testSubstring_beginIndex() {
     byte[] bytes = getTestBytes();
     ByteString substring = ByteString.copyFrom(bytes).substring(500);
+    assertWithMessage("substring must contain the tail of the string")
+        .that(isArrayRange(substring.toByteArray(), bytes, 500, bytes.length - 500))
+        .isTrue();
+  }
+
+  @Test
+  public void testSubstringNoCopy_beginIndex() {
+    byte[] bytes = getTestBytes();
+    ByteString substring = ByteString.copyFrom(bytes).substringNoCopy(500);
     assertWithMessage("substring must contain the tail of the string")
         .that(isArrayRange(substring.toByteArray(), bytes, 500, bytes.length - 500))
         .isTrue();
@@ -257,7 +244,7 @@ public class ByteStringTest {
   public void testCopyFrom_utf8() {
     String testString = "I love unicode \u1234\u5678 characters";
     ByteString byteString = ByteString.copyFromUtf8(testString);
-    byte[] testBytes = testString.getBytes(Internal.UTF_8);
+    byte[] testBytes = testString.getBytes(StandardCharsets.UTF_8);
     assertWithMessage("copyFromUtf8 string must respect the charset")
         .that(isArrayRange(byteString.toByteArray(), testBytes, 0, testBytes.length))
         .isTrue();
@@ -575,7 +562,7 @@ public class ByteStringTest {
   @Test
   public void testToStringUtf8() {
     String testString = "I love unicode \u1234\u5678 characters";
-    byte[] testBytes = testString.getBytes(Internal.UTF_8);
+    byte[] testBytes = testString.getBytes(StandardCharsets.UTF_8);
     ByteString byteString = ByteString.copyFrom(testBytes);
     assertWithMessage("copyToStringUtf8 must respect the charset")
         .that(testString)
@@ -585,7 +572,7 @@ public class ByteStringTest {
   @Test
   public void testToString() {
     String toString =
-        ByteString.copyFrom("Here are some bytes: \t\u00a1".getBytes(Internal.UTF_8)).toString();
+        ByteString.copyFrom("Here are some bytes: \t\u00a1".getBytes(StandardCharsets.UTF_8)).toString();
     assertWithMessage(toString).that(toString.contains("size=24")).isTrue();
     assertWithMessage(toString)
         .that(toString.contains("contents=\"Here are some bytes: \\t\\302\\241\""))
@@ -597,7 +584,7 @@ public class ByteStringTest {
     String toString =
         ByteString.copyFrom(
                 "123456789012345678901234567890123456789012345678901234567890"
-                    .getBytes(Internal.UTF_8))
+                    .getBytes(StandardCharsets.UTF_8))
             .toString();
     assertWithMessage(toString).that(toString.contains("size=60")).isTrue();
     assertWithMessage(toString)
@@ -756,6 +743,27 @@ public class ByteStringTest {
   }
 
   @Test
+  public void testSubstringNoCopyParity() {
+    byte[] bigBytes = getTestBytes(2048 * 1024, 113344L);
+    int start = 512 * 1024 - 3333;
+    int end = 512 * 1024 + 7777;
+    ByteString concreteSubstring = ByteString.copyFrom(bigBytes).substringNoCopy(start, end);
+    boolean ok = true;
+    for (int i = start; ok && i < end; ++i) {
+      ok = (bigBytes[i] == concreteSubstring.byteAt(i - start));
+    }
+    assertWithMessage("Concrete substring didn't capture the right bytes").that(ok).isTrue();
+
+    ByteString literalString = ByteString.copyFrom(bigBytes, start, end - start);
+    assertWithMessage("Substring must be equal to literal string")
+        .that(literalString)
+        .isEqualTo(concreteSubstring);
+    assertWithMessage("Substring must have same hashcode as literal string")
+        .that(literalString.hashCode())
+        .isEqualTo(concreteSubstring.hashCode());
+  }
+
+  @Test
   public void testCompositeSubstring() {
     byte[] referenceBytes = getTestBytes(77748, 113344L);
 
@@ -765,6 +773,46 @@ public class ByteStringTest {
     int from = 1000;
     int to = 40000;
     ByteString compositeSubstring = listString.substring(from, to);
+    byte[] substringBytes = compositeSubstring.toByteArray();
+    boolean stillEqual = true;
+    for (int i = 0; stillEqual && i < to - from; ++i) {
+      stillEqual = referenceBytes[from + i] == substringBytes[i];
+    }
+    assertWithMessage("Substring must return correct bytes").that(stillEqual).isTrue();
+
+    stillEqual = true;
+    for (int i = 0; stillEqual && i < to - from; ++i) {
+      stillEqual = referenceBytes[from + i] == compositeSubstring.byteAt(i);
+    }
+    assertWithMessage("Substring must support byteAt() correctly").that(stillEqual).isTrue();
+
+    ByteString literalSubstring = ByteString.copyFrom(referenceBytes, from, to - from);
+    assertWithMessage("Composite substring must equal a literal substring over the same bytes")
+        .that(literalSubstring)
+        .isEqualTo(compositeSubstring);
+    assertWithMessage("Literal substring must equal a composite substring over the same bytes")
+        .that(compositeSubstring)
+        .isEqualTo(literalSubstring);
+
+    assertWithMessage("We must get the same hashcodes for composite and literal substrings")
+        .that(literalSubstring.hashCode())
+        .isEqualTo(compositeSubstring.hashCode());
+
+    assertWithMessage("We can't be equal to a proper substring")
+        .that(compositeSubstring.equals(literalSubstring.substring(0, literalSubstring.size() - 1)))
+        .isFalse();
+  }
+
+  @Test
+  public void testCompositeSubstringNoCopy() {
+    byte[] referenceBytes = getTestBytes(77748, 113344L);
+
+    List<ByteString> pieces = makeConcretePieces(referenceBytes);
+    ByteString listString = ByteString.copyFrom(pieces);
+
+    int from = 1000;
+    int to = 40000;
+    ByteString compositeSubstring = listString.substringNoCopy(from, to);
     byte[] substringBytes = compositeSubstring.toByteArray();
     boolean stillEqual = true;
     for (int i = 0; stillEqual && i < to - from; ++i) {

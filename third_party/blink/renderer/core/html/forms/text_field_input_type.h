@@ -53,15 +53,19 @@ class TextFieldInputType : public InputType,
   bool CanSetSuggestedValue() override;
   void HandleKeydownEvent(KeyboardEvent&) override;
 
+  bool SupportsBaseAppearance(Element::BaseAppearanceValue) const override;
+
+  bool IsInnerEditorValueEmpty() const final;
   void CreateShadowSubtree() override;
   void DestroyShadowSubtree() override;
   void ValueAttributeChanged() override;
-  void DisabledAttributeChanged() override;
+  void DisabledAttributeChanged(DisabledChangedReason) override;
   void ReadonlyAttributeChanged() override;
   bool SupportsReadOnly() const override;
   void ForwardEvent(Event&) override;
   void HandleBlurEvent() override;
   void HandleBeforeTextInsertedEvent(BeforeTextInsertedEvent&) override;
+  String FilterBeforeTextInserted(const String& text) override;
   String SanitizeValue(const String&) const override;
   void SetValue(const String&,
                 bool value_changed,
@@ -69,27 +73,30 @@ class TextFieldInputType : public InputType,
                 TextControlSetValueSelection) override;
   void UpdateView() override;
   void AdjustStyle(ComputedStyleBuilder&) override;
-  LayoutObject* CreateLayoutObject(const ComputedStyle&,
-                                   LegacyLayout) const override;
-  ControlPart AutoAppearance() const override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) const override;
+  void OnAttachWithLayoutObject() override;
+  void OnDetachWithLayoutObject() override;
+  AppearanceValue AutoAppearance() const override;
+  void HandleFocusInEvent(Element* old_focused_element,
+                          mojom::blink::FocusType) override;
 
   virtual bool NeedsContainer() const { return false; }
-  virtual String ConvertFromVisibleValue(const String&) const;
+  String ConvertFromVisibleValue(const String&) const override;
   virtual void DidSetValueByUserEdit();
 
   void HandleKeydownEventForSpinButton(KeyboardEvent&);
+  bool HandleKeydownForCustomizableCombobox(KeyboardEvent&);
+  bool HandleKeydownForFilterableSelect(KeyboardEvent&);
   Element* ContainerElement() const;
 
  private:
   InputTypeView* CreateView() override;
   ValueMode GetValueMode() const override;
   bool MayTriggerVirtualKeyboard() const final;
-  bool IsTextField() const final;
   bool ShouldSubmitImplicitly(const Event&) final;
   bool ShouldRespectListAttribute() override;
   void ListAttributeTargetChanged() override;
-  void UpdatePlaceholderText(bool is_suggested_value) final;
-  void AppendToFormData(FormData&) const override;
+  HTMLElement* UpdatePlaceholderText(bool is_suggested_value) final;
   void SubtreeHasChanged() final;
   void OpenPopupView() override;
 
@@ -102,7 +109,15 @@ class TextFieldInputType : public InputType,
   void SpinButtonDidReleaseMouseCapture(SpinButtonElement::EventDispatch) final;
 
   SpinButtonElement* GetSpinButtonElement() const;
-  void DisabledOrReadonlyAttributeChanged();
+  void DisabledOrReadonlyAttributeChanged(DisabledChangedReason);
+
+  // Applies the :filtered pseudo-class to the options of the corresponding
+  // datalist or filterable select this input is linked to, if there is one.
+  void FilterOptions();
+
+  void UpdateWheelEventRegistration(bool is_detaching) override;
+
+  bool has_registered_wheel_event_handler_ = false;
 };
 
 template <>

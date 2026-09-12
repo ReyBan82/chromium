@@ -5,23 +5,21 @@
 #include <map>
 #include <string>
 
-#include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
-
 #include "base/strings/pattern.h"
 #include "base/strings/strcat.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/test/scoped_feature_list.h"
 #include "chrome/browser/safe_browsing/test_safe_browsing_database_helper.h"
 #include "chrome/browser/safe_browsing/test_safe_browsing_service.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "components/metrics/content/subprocess_metrics_provider.h"
-#include "components/safe_browsing/core/browser/db/v4_test_util.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter_test_utils.h"
+#include "components/safe_browsing/core/browser/db/sb_test_util.h"
 #include "components/subresource_filter/content/browser/content_subresource_filter_throttle_manager.h"
 #include "components/subresource_filter/content/browser/ruleset_service.h"
 #include "components/subresource_filter/content/browser/test_ruleset_publisher.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter_test_utils.h"
 #include "components/subresource_filter/core/browser/subresource_filter_constants.h"
 #include "components/subresource_filter/core/browser/subresource_filter_features.h"
 #include "components/subresource_filter/core/browser/subresource_filter_features_test_support.h"
@@ -66,7 +64,6 @@ std::string PrintToString(Level level) {
       return "ActivationDisabled";
   }
   NOTREACHED();
-  return "";
 }
 
 namespace {
@@ -90,18 +87,31 @@ std::vector<Level> GetActivationLevels() {
 
 }  // namespace
 
+using DnsAliasTestParam = std::tuple<Level, bool>;
+
+struct DnsAliasParamToString {
+  std::string operator()(
+      const ::testing::TestParamInfo<DnsAliasTestParam>& info) const {
+    return base::StrCat({PrintToString(std::get<0>(info.param)), "_",
+                         std::get<1>(info.param) ? "V5" : "V4"});
+  }
+};
+
 class SubresourceFilterDnsAliasResourceLoaderBrowserTest
     : public SubresourceFilterBrowserTest,
-      public ::testing::WithParamInterface<Level> {
+      public ::testing::WithParamInterface<DnsAliasTestParam> {
  public:
-  SubresourceFilterDnsAliasResourceLoaderBrowserTest() {
-    feature_list_.InitWithFeatures(
-        {kAdTagging,
-         blink::features::kSendCnameAliasesToSubresourceFilterFromRenderer},
-        {} /* disabled_features */);
-  }
+  SubresourceFilterDnsAliasResourceLoaderBrowserTest() = default;
 
   ~SubresourceFilterDnsAliasResourceLoaderBrowserTest() override = default;
+
+  std::optional<bool> UseV5() const override { return std::get<1>(GetParam()); }
+
+  base::flat_set<base::test::FeatureRef> GetSubresourceFilterEnabledFeatures()
+      const override {
+    return {kAdTagging,
+            blink::features::kSendCnameAliasesToSubresourceFilterFromRenderer};
+  }
 
  protected:
   // InProcessBrowserTest:
@@ -109,18 +119,18 @@ class SubresourceFilterDnsAliasResourceLoaderBrowserTest
     AddHostResolverRules(host_resolver());
     SubresourceFilterBrowserTest::SetUpOnMainThread();
   }
-
-  base::test::ScopedFeatureList feature_list_;
 };
 
-INSTANTIATE_TEST_SUITE_P(Renderer,
-                         SubresourceFilterDnsAliasResourceLoaderBrowserTest,
-                         ::testing::ValuesIn(GetActivationLevels()),
-                         ::testing::PrintToStringParamName());
+INSTANTIATE_TEST_SUITE_P(
+    Renderer,
+    SubresourceFilterDnsAliasResourceLoaderBrowserTest,
+    ::testing::Combine(::testing::ValuesIn(GetActivationLevels()),
+                       ::testing::Bool()),
+    DnsAliasParamToString());
 
 IN_PROC_BROWSER_TEST_P(SubresourceFilterDnsAliasResourceLoaderBrowserTest,
                        CheckDnsAliasesFromRenderer) {
-  ActivationLevel level = GetParam().level;
+  ActivationLevel level = std::get<0>(GetParam()).level;
   Configuration config(
       level, subresource_filter::ActivationScope::ACTIVATION_LIST,
       subresource_filter::ActivationList::PHISHING_INTERSTITIAL);
@@ -149,15 +159,19 @@ IN_PROC_BROWSER_TEST_P(SubresourceFilterDnsAliasResourceLoaderBrowserTest,
 
 class SubresourceFilterDnsAliasFilteringThrottleBrowserTest
     : public SubresourceFilterBrowserTest,
-      public ::testing::WithParamInterface<Level> {
+      public ::testing::WithParamInterface<DnsAliasTestParam> {
  public:
-  SubresourceFilterDnsAliasFilteringThrottleBrowserTest() {
-    feature_list_.InitWithFeatures(
-        {kAdTagging, features::kSendCnameAliasesToSubresourceFilterFromBrowser},
-        {} /* disabled_features */);
-  }
+  SubresourceFilterDnsAliasFilteringThrottleBrowserTest() = default;
 
   ~SubresourceFilterDnsAliasFilteringThrottleBrowserTest() override = default;
+
+  std::optional<bool> UseV5() const override { return std::get<1>(GetParam()); }
+
+  base::flat_set<base::test::FeatureRef> GetSubresourceFilterEnabledFeatures()
+      const override {
+    return {kAdTagging,
+            features::kSendCnameAliasesToSubresourceFilterFromBrowser};
+  }
 
  protected:
   // InProcessBrowserTest:
@@ -165,18 +179,18 @@ class SubresourceFilterDnsAliasFilteringThrottleBrowserTest
     AddHostResolverRules(host_resolver());
     SubresourceFilterBrowserTest::SetUpOnMainThread();
   }
-
-  base::test::ScopedFeatureList feature_list_;
 };
 
-INSTANTIATE_TEST_SUITE_P(Browser,
-                         SubresourceFilterDnsAliasFilteringThrottleBrowserTest,
-                         ::testing::ValuesIn(GetActivationLevels()),
-                         ::testing::PrintToStringParamName());
+INSTANTIATE_TEST_SUITE_P(
+    Browser,
+    SubresourceFilterDnsAliasFilteringThrottleBrowserTest,
+    ::testing::Combine(::testing::ValuesIn(GetActivationLevels()),
+                       ::testing::Bool()),
+    DnsAliasParamToString());
 
 IN_PROC_BROWSER_TEST_P(SubresourceFilterDnsAliasFilteringThrottleBrowserTest,
                        CheckDnsAliasesFromBrowser) {
-  ActivationLevel level = GetParam().level;
+  ActivationLevel level = std::get<0>(GetParam()).level;
   Configuration config(
       level, subresource_filter::ActivationScope::ACTIVATION_LIST,
       subresource_filter::ActivationList::PHISHING_INTERSTITIAL);
@@ -203,7 +217,7 @@ IN_PROC_BROWSER_TEST_P(SubresourceFilterDnsAliasFilteringThrottleBrowserTest,
   } else {
     GURL main_url = main_rfh->GetLastCommittedURL();
     GURL expected_child_url(
-        base::StrCat({"http://cname-to-bad.com:", main_url.port(),
+        base::StrCat({"http://cname-to-bad.com:", main_url.GetPort(),
                       "/cross_site_iframe_factory.html?cname-to-bad()"}));
 
     EXPECT_EQ(expected_child_url, child_rfh->GetLastCommittedURL());

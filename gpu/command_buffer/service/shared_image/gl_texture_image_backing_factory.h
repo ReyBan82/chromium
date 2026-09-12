@@ -7,12 +7,12 @@
 
 #include <memory>
 
+#include "gpu/command_buffer/common/shared_image_info.h"
+#include "gpu/command_buffer/common/shared_image_usage.h"
 #include "gpu/command_buffer/service/shared_image/gl_common_image_backing_factory.h"
-#include "gpu/command_buffer/service/shared_image/gl_texture_image_backing_helper.h"
 
 namespace gfx {
 class Size;
-class ColorSpace;
 }  // namespace gfx
 
 namespace gl {
@@ -30,67 +30,55 @@ struct Mailbox;
 class GPU_GLES2_EXPORT GLTextureImageBackingFactory
     : public GLCommonImageBackingFactory {
  public:
-  // The `for_cpu_upload_usage` parameter controls if this factory accepts
-  // `SHARED_IMAGE_USAGE_CPU_UPLOAD`. It is strict, if true the usage must
-  // include CPU upload and if false it must not.
+  // The `supports_cpu_upload` parameter controls if this factory accepts
+  // `SHARED_IMAGE_USAGE_CPU_UPLOAD`.
   GLTextureImageBackingFactory(const GpuPreferences& gpu_preferences,
                                const GpuDriverBugWorkarounds& workarounds,
                                const gles2::FeatureInfo* feature_info,
                                gl::ProgressReporter* progress_reporter,
-                               bool for_cpu_upload_usage);
+                               bool supports_cpu_upload = true);
   ~GLTextureImageBackingFactory() override;
 
   // SharedImageBackingFactory implementation.
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
+      const SharedImageInfo& si_info,
       SurfaceHandle surface_handle,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
       bool is_thread_safe) override;
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
+      const SharedImageInfo& si_info,
+      bool is_thread_safe,
       base::span<const uint8_t> pixel_data) override;
-  std::unique_ptr<SharedImageBacking> CreateSharedImage(
-      const Mailbox& mailbox,
-      gfx::GpuMemoryBufferHandle handle,
-      gfx::BufferFormat format,
-      gfx::BufferPlane plane,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage) override;
-  bool IsSupported(uint32_t usage,
+  bool IsSupported(SharedImageUsageSet usage,
                    viz::SharedImageFormat format,
                    const gfx::Size& size,
                    bool thread_safe,
                    gfx::GpuMemoryBufferType gmb_type,
                    GrContextType gr_context_type,
                    base::span<const uint8_t> pixel_data) override;
+  SharedImageBackingType GetBackingType() override;
+  bool IsSupportedForAccessStream(SharedImageAccessStream stream,
+                                  viz::SharedImageFormat format,
+                                  const AccessParams* params) const override;
+
+  void EnableSupportForAllMetalUsagesForTesting(bool enable);
+  void ForceSetUsingANGLEMetalForTesting(bool value);
 
  private:
   std::unique_ptr<SharedImageBacking> CreateSharedImageInternal(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
+      const SharedImageInfo& si_info,
       SurfaceHandle surface_handle,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
       base::span<const uint8_t> pixel_data);
 
-  const bool for_cpu_upload_usage_;
+  const bool supports_cpu_upload_;
+
+  // Many shared image usages are disabled on Metal so that they fall back to an
+  // IOSurface backing. IOSurface backings are much better suited for cross-API
+  // or cross-GPU usages.
+  bool support_all_metal_usages_;
+  bool emulate_using_angle_metal_for_testing_ = false;
 };
 
 }  // namespace gpu

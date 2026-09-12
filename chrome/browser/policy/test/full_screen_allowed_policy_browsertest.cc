@@ -10,9 +10,9 @@
 #include "chrome/browser/apps/app_service/browser_app_launcher.h"
 #include "chrome/browser/policy/extension_policy_test_base.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_types.h"
 #include "components/policy/policy_constants.h"
@@ -82,7 +82,7 @@ IN_PROC_BROWSER_TEST_F(FullscreenPolicyTest, FullscreenAllowedBrowser) {
                nullptr);
   UpdateProviderPolicy(policies);
 
-  BrowserWindow* browser_window = browser()->window();
+  BrowserWindow* browser_window = BrowserWindow::FromBrowser(browser());
   ASSERT_TRUE(browser_window);
 
   EXPECT_FALSE(browser_window->IsFullscreen());
@@ -103,8 +103,8 @@ IN_PROC_BROWSER_TEST_F(FullscreenPolicyTest, FullscreenAllowedApp) {
 
   // Launch an app that tries to open a fullscreen window.
   TestAddAppWindowObserver add_window_observer(
-      extensions::AppWindowRegistry::Get(browser()->profile()));
-  apps::AppServiceProxyFactory::GetForProfile(browser()->profile())
+      extensions::AppWindowRegistry::Get(browser()->GetProfile()));
+  apps::AppServiceProxyFactory::GetForProfile(browser()->GetProfile())
       ->BrowserAppLauncher()
       ->LaunchAppWithParamsForTesting(apps::AppLaunchParams(
           extension->id(), apps::LaunchContainer::kLaunchContainerNone,
@@ -121,8 +121,8 @@ IN_PROC_BROWSER_TEST_F(FullscreenPolicyTest, FullscreenAllowedApp) {
 
   // Verify that the window cannot be toggled into fullscreen mode via apps
   // APIs.
-  EXPECT_TRUE(content::ExecuteScript(
-      window->web_contents(), "chrome.app.window.current().fullscreen();"));
+  EXPECT_TRUE(content::ExecJs(window->web_contents(),
+                              "chrome.app.window.current().fullscreen();"));
   EXPECT_FALSE(window->GetBaseWindow()->IsFullscreen());
 
   // Verify that the window cannot be toggled into fullscreen mode from within

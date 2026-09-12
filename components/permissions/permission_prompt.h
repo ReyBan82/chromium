@@ -6,19 +6,31 @@
 #define COMPONENTS_PERMISSIONS_PERMISSION_PROMPT_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/functional/callback.h"
-#include "components/permissions/permission_ui_selector.h"
+#include "base/memory/raw_ptr.h"
+#include "components/permissions/features.h"
+#include "components/permissions/permission_request_data.h"
+#include "components/permissions/permission_uma_constants.h"
+#include "components/permissions/prediction_service/permission_ui_selector.h"
+#include "components/permissions/resolvers/permission_prompt_options.h"
+#include "ui/gfx/geometry/rect.h"
 #include "url/gurl.h"
 
 namespace content {
 class WebContents;
 }
 
+namespace ui {
+class Event;
+}  // namespace ui
+
 namespace permissions {
 enum class PermissionPromptDisposition;
 
+class EmbeddedPermissionPromptFlowModel;
 class PermissionRequest;
 
 // This class is the platform-independent interface through which the permission
@@ -45,11 +57,12 @@ class PermissionPrompt {
   // be persisted in the per-tab UI state.
   class Delegate {
    public:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
 
     // These pointers should not be stored as the actual request objects may be
     // deleted upon navigation and so on.
-    virtual const std::vector<PermissionRequest*>& Requests() = 0;
+    virtual const std::vector<std::unique_ptr<PermissionRequest>>& Requests()
+        const = 0;
 
     // Get the single origin for the current set of requests.
     virtual GURL GetRequestingOrigin() const = 0;
@@ -58,11 +71,24 @@ class PermissionPrompt {
     // associated with the requests.
     virtual GURL GetEmbeddingOrigin() const = 0;
 
-    virtual void Accept() = 0;
-    virtual void AcceptThisTime() = 0;
-    virtual void Deny() = 0;
-    virtual void Dismiss() = 0;
-    virtual void Ignore() = 0;
+    virtual void Accept(const PromptOptions& prompt_options) = 0;
+    virtual void AcceptThisTime(const PromptOptions& prompt_options) = 0;
+    virtual void Deny(const PromptOptions& prompt_options) = 0;
+    virtual void Dismiss(const PromptOptions& prompt_options) = 0;
+    virtual void Ignore(const PromptOptions& prompt_options) = 0;
+    virtual void SwitchToLoudPrompt() = 0;
+
+    virtual GeolocationAccuracy GetInitialGeolocationAccuracySelection()
+        const = 0;
+
+    // Returns the type of geolocation prompt that should be shown.
+    virtual std::optional<GeolocationPromptType> GetGeolocationPromptType()
+        const = 0;
+
+    // Called to explicitly finalize the current requests.
+    virtual void FinalizeCurrentRequests() = 0;
+
+    virtual void OpenHelpCenterLink(const ui::Event& event) = 0;
 
     // This method preemptively ignores a permission request but does not
     // finalize a permission prompt. That is needed in case a permission prompt
@@ -71,9 +97,9 @@ class PermissionPrompt {
     virtual void PreIgnoreQuietPrompt() = 0;
 
     // If |ShouldCurrentRequestUseQuietUI| return true, this will provide a
-    // reason as to why the quiet UI needs to be used. Returns `absl::nullopt`
+    // reason as to why the quiet UI needs to be used. Returns `std::nullopt`
     // otherwise.
-    virtual absl::optional<PermissionUiSelector::QuietUiReason>
+    virtual std::optional<PermissionUiSelector::QuietUiReason>
     ReasonForUsingQuietUi() const = 0;
 
     // Notification permission requests might use a quiet UI when the
@@ -112,11 +138,22 @@ class PermissionPrompt {
     // survey is triggered to take appropriate actions.
     virtual void SetHatsShownCallback(base::OnceCallback<void()> callback) = 0;
 
+    virtual content::WebContents* GetAssociatedWebContents() = 0;
+
     virtual base::WeakPtr<Delegate> GetWeakPtr() = 0;
 
     // Recreate the UI view because the UI flavor needs to change. Returns true
     // iff successful.
     virtual bool RecreateView() = 0;
+
+    virtual const PermissionPrompt* GetCurrentPrompt() const = 0;
+
+    virtual EmbeddedPermissionPromptFlowModel* GetEmbeddedPromptFlowModel()
+        const;
+
+    virtual void CalculateCurrentVariantForEmbeddedPrompt();
+
+    virtual void AdvanceOrFinalizeEmbeddedPromptFlow();
   };
 
   typedef base::RepeatingCallback<
@@ -127,7 +164,8 @@ class PermissionPrompt {
   static std::unique_ptr<PermissionPrompt> Create(
       content::WebContents* web_contents,
       Delegate* delegate);
-  virtual ~PermissionPrompt() {}
+
+  virtual ~PermissionPrompt() = default;
 
   // Updates where the prompt should be anchored. ex: fullscreen toggle.
   // Returns true, if the update was successful, and false if the caller should
@@ -140,8 +178,23 @@ class PermissionPrompt {
 
   // Get the type of prompt UI shown for metrics.
   virtual PermissionPromptDisposition GetPromptDisposition() const = 0;
-};
 
+  // Check if the view shown is an "Ask" prompt for metrics. Currently this only
+  // distinguishes different prompt views displayed through the Page Embedded
+  // Permission Element.
+  virtual bool IsAskPrompt() const = 0;
+
+  // Get the prompt view bounds in screen coordinates.
+  virtual std::optional<gfx::Rect> GetViewBoundsInScreen() const = 0;
+
+  // Return what variant of the secondary UI is shown for Page Embedded
+  // Permission Element.
+  virtual std::vector<permissions::ElementAnchoredBubbleVariant>
+  GetPromptVariants() const = 0;
+
+  virtual std::optional<feature_params::PermissionElementPromptPosition>
+  GetPromptPosition() const = 0;
+};
 }  // namespace permissions
 
 #endif  // COMPONENTS_PERMISSIONS_PERMISSION_PROMPT_H_

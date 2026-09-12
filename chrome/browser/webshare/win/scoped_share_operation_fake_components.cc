@@ -7,7 +7,6 @@
 #include <windows.storage.streams.h>
 #include <wrl/implements.h>
 
-#include "base/strings/string_piece.h"
 #include "base/win/com_init_util.h"
 #include "base/win/core_winrt_util.h"
 #include "base/win/win_util.h"
@@ -44,7 +43,6 @@ static HRESULT FakeRoGetActivationFactory(HSTRING class_id,
 
   if (!instance) {
     NOTREACHED();
-    return E_NOTIMPL;
   }
 
   *out_factory = instance;
@@ -91,6 +89,11 @@ void ScopedShareOperationFakeComponents::SetUp() {
 FakeDataTransferManagerInterop&
 ScopedShareOperationFakeComponents::fake_data_transfer_manager_interop() {
   return scoped_fake_data_transfer_manager_interop_.instance();
+}
+
+FakeDataWriterFactory&
+ScopedShareOperationFakeComponents::fake_data_writer_factory() {
+  return *fake_data_writer_factory_.Get();
 }
 
 }  // namespace webshare

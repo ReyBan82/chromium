@@ -4,16 +4,22 @@
 
 #include "ash/events/accessibility_event_rewriter.h"
 
-#include "ash/accessibility/accessibility_controller_impl.h"
+#include "ash/accessibility/accessibility_controller.h"
 #include "ash/accessibility/magnifier/docked_magnifier_controller.h"
 #include "ash/accessibility/magnifier/fullscreen_magnifier_controller.h"
+#include "ash/accessibility/mouse_keys/mouse_keys_controller.h"
 #include "ash/accessibility/switch_access/point_scan_controller.h"
 #include "ash/constants/ash_constants.h"
+#include "ash/constants/ash_pref_names.h"
 #include "ash/keyboard/keyboard_util.h"
 #include "ash/public/cpp/accessibility_event_rewriter_delegate.h"
 #include "ash/shell.h"
+#include "base/functional/bind.h"
 #include "base/system/sys_info.h"
-#include "ui/chromeos/events/event_rewriter_chromeos.h"
+#include "base/task/sequenced_task_runner.h"
+#include "components/prefs/pref_service.h"
+#include "ui/accessibility/accessibility_features.h"
+#include "ui/events/ash/event_rewriter_ash.h"
 #include "ui/events/devices/device_data_manager.h"
 #include "ui/events/event.h"
 #include "ui/events/event_utils.h"
@@ -27,23 +33,60 @@ namespace {
 // Returns a ui::InputDeviceType given a Switch Access string device type.
 ui::InputDeviceType GetInputDeviceType(
     const std::string& switch_access_device_type) {
-  if (switch_access_device_type == kSwitchAccessInternalDevice)
+  if (switch_access_device_type == kSwitchAccessInternalDevice) {
     return ui::INPUT_DEVICE_INTERNAL;
-  if (switch_access_device_type == kSwitchAccessUsbDevice)
+  } else if (switch_access_device_type == kSwitchAccessUsbDevice) {
     return ui::INPUT_DEVICE_USB;
-  if (switch_access_device_type == kSwitchAccessBluetoothDevice)
+  } else if (switch_access_device_type == kSwitchAccessBluetoothDevice) {
     return ui::INPUT_DEVICE_BLUETOOTH;
-  // On Chrome OS emulated on Linux, the keyboard is always "UNKNOWN".
-  if (base::SysInfo::IsRunningOnChromeOS())
-    NOTREACHED();
-  return ui::INPUT_DEVICE_UNKNOWN;
+  } else {
+    return ui::INPUT_DEVICE_UNKNOWN;
+  }
 }
+
+#if !defined(NDEBUG)
+void MaybeLogEventDispatchError(
+    const ui::Event* event,
+    const ui::EventRewriter::Continuation& continuation,
+    const ui::EventDispatchDetails& details) {
+  const char* failure_reason = nullptr;
+  if (details.dispatcher_destroyed) {
+    failure_reason = "destroyed dispatcher";
+  } else if (details.target_destroyed) {
+    failure_reason = "destroyed target";
+  } else if (continuation.WasInvalidated()) {
+    failure_reason = "destroyed source";
+  } else {
+    failure_reason = "no prior rewrite";
+  }
+
+  if (failure_reason) {
+    VLOG(0) << "Undispatched key " << event->AsKeyEvent()->key_code()
+            << " due to " << failure_reason << ".";
+  }
+}
+#endif
+
 }  // namespace
 
+AccessibilityEventRewriter::PendingEventInfo::PendingEventInfo(
+    unsigned int id,
+    std::unique_ptr<ui::Event> event,
+    ui::EventRewriter::Continuation continuation)
+    : id(id), event(std::move(event)), continuation(std::move(continuation)) {}
+
+AccessibilityEventRewriter::PendingEventInfo::~PendingEventInfo() = default;
+
+AccessibilityEventRewriter::PendingEventInfo::PendingEventInfo(
+    PendingEventInfo&&) = default;
+AccessibilityEventRewriter::PendingEventInfo&
+AccessibilityEventRewriter::PendingEventInfo::operator=(PendingEventInfo&&) =
+    default;
+
 AccessibilityEventRewriter::AccessibilityEventRewriter(
-    ui::EventRewriterChromeOS* event_rewriter_chromeos,
+    ui::EventRewriterAsh* event_rewriter_ash,
     AccessibilityEventRewriterDelegate* delegate)
-    : delegate_(delegate), event_rewriter_chromeos_(event_rewriter_chromeos) {
+    : delegate_(delegate), event_rewriter_ash_(event_rewriter_ash) {
   Shell::Get()->accessibility_controller()->SetAccessibilityEventRewriter(this);
   observation_.Observe(input_method::InputMethodManager::Get());
   // InputMethodManagerImpl::AddObserver calls our InputMethodChanged, so no
@@ -58,27 +101,106 @@ AccessibilityEventRewriter::~AccessibilityEventRewriter() {
 void AccessibilityEventRewriter::OnUnhandledSpokenFeedbackEvent(
     std::unique_ptr<ui::Event> event) const {
   DCHECK(event->IsKeyEvent()) << "Unexpected unhandled event type";
+  if (::features::IsAccessibilityManifestV3EnabledForChromeVox()) {
+    // Unhandled events regularly come back in manifest v3 because DOM key
+    // events are only handled if the menu or learn mode are active.
+    return;
+  }
+
   // Send the event to the continuation for the most recent event rewritten by
   // ChromeVox, (that is, through its EventSource). Under the assumption that a
   // single AccessibilityEventRewriter is not registered to multiple
   // EventSources, this will be the same as this event's original source.
-  const char* failure_reason = nullptr;
   if (chromevox_continuation_) {
-    ui::EventDispatchDetails details =
-        SendEvent(chromevox_continuation_, event.get());
-    if (details.dispatcher_destroyed)
-      failure_reason = "destroyed dispatcher";
-    else if (details.target_destroyed)
-      failure_reason = "destroyed target";
-  } else if (chromevox_continuation_.WasInvalidated()) {
-    failure_reason = "destroyed source";
-  } else {
-    failure_reason = "no prior rewrite";
+    SendEventHelper(chromevox_continuation_, event.get());
   }
-  if (failure_reason) {
-    VLOG(0) << "Undispatched key " << event->AsKeyEvent()->key_code()
-            << " due to " << failure_reason << ".";
+}
+
+void AccessibilityEventRewriter::ProcessPendingSpokenFeedbackEvent(
+    unsigned int id,
+    bool propagate,
+    int64_t session_id) {
+  // This method is only allowed for ChromeVox in manifest v3.
+  CHECK(Shell::Get()->accessibility_controller()->spoken_feedback().enabled());
+  CHECK(::features::IsAccessibilityManifestV3EnabledForChromeVox());
+  CHECK(chromevox_mv3_key_handling_enabled_);
+
+  if (session_id < current_session_id_) {
+    // This event belongs to a stale ChromeVox instance. We can safely ignore
+    // it because the stale events were already flushed when the new session
+    // initialized.
+    return;
+  } else if (session_id > current_session_id_) {
+    // If we received an event from a newer session before the enable command
+    // reached us, automatically advance the current session ID. We don't need
+    // to explicitly flush the queue here because the loop below will flush
+    // all events with IDs less than the current event, which includes all
+    // events from the previous session since IDs are monotonically increasing.
+    current_session_id_ = session_id;
   }
+
+  if (pending_key_events_.empty()) {
+    // This is unexpected: We have the correct session ID but the queue is
+    // empty, so somehow the event was lost from the queue or the ChromeVox
+    // extension sent the wrong event ID, indicating a bug.
+    LOG(ERROR) << "AccessibilityEventRewriter: empty queue with correct "
+                  "session ID. Event ID: "
+               << id << ", session ID: " << session_id;
+    return;
+  }
+
+  // IDs are an ordered long. Assume that events are returned
+  // in the order they were sent. However, we must gracefully handle ChromeVox
+  // dropping an event (or sending an event from an old session ID) rather than
+  // assuming the next event in the queue is the one we want.
+  while (!pending_key_events_.empty() && pending_key_events_.front().id < id) {
+    PendingEventInfo pending_event_info = PopNextPendingEvent();
+    SendEventHelper(pending_event_info.continuation,
+                    pending_event_info.event.get());
+  }
+
+  if (session_id != current_session_id_) {
+    // If SendEventHelper inside the loop triggered a re-entrant session change,
+    // the remaining events were already flushed for the new session.
+    return;
+  }
+
+  if (pending_key_events_.empty()) {
+    // This is unexpected: We have the correct session ID but the queue is
+    // empty when we got to this ID, so somehow the event was lost from the
+    // queue.
+    LOG(ERROR) << "AccessibilityEventRewriter: emptied queue to reach "
+                  "event with correct session ID, but it was missing. "
+                  "Event ID: "
+               << id << ", session ID: " << session_id;
+    return;
+  }
+
+  if (id != pending_key_events_.front().id) {
+    // This is unexpected: it may happen if ChromeVox sends an event twice or
+    // if the events are not ordered.
+    LOG(ERROR) << "AccessibilityEventRewriter: mismatched event ID. Expected: "
+               << pending_key_events_.front().id << ", got: " << id;
+    return;
+  }
+
+  PendingEventInfo pending_event_info = PopNextPendingEvent();
+
+  if (propagate) {
+    SendEventHelper(pending_event_info.continuation,
+                    pending_event_info.event.get());
+  }
+}
+
+void AccessibilityEventRewriter::SendEventHelper(
+    const ui::EventRewriter::Continuation continuation,
+    const ui::Event* event) const {
+#if !defined(NDEBUG)
+  ui::EventDispatchDetails details = SendEvent(continuation, event);
+  MaybeLogEventDispatchError(event, continuation, details);
+#else
+  std::ignore = SendEvent(continuation, event);
+#endif
 }
 
 void AccessibilityEventRewriter::SetKeyCodesForSwitchAccessCommand(
@@ -102,8 +224,9 @@ void AccessibilityEventRewriter::SetKeyCodesForSwitchAccessCommand(
 
     // Map device types from Switch Access's internal representation.
     std::set<ui::InputDeviceType> device_types;
-    for (const std::string& switch_access_device : key_code.second)
+    for (const std::string& switch_access_device : key_code.second) {
       device_types.insert(GetInputDeviceType(switch_access_device));
+    }
 
     switch_access_key_codes_to_capture_.insert({key_code.first, device_types});
     key_code_to_switch_access_command_.insert({key_code.first, command});
@@ -113,85 +236,158 @@ void AccessibilityEventRewriter::SetKeyCodesForSwitchAccessCommand(
   // Switch Access).
 }
 
+void AccessibilityEventRewriter::SetSpokenFeedbackMv3KeyHandlingEnabled(
+    bool enabled,
+    int64_t session_id) {
+  CHECK(::features::IsAccessibilityManifestV3EnabledForChromeVox());
+
+  // If ChromeVox has initiated a new session, flush any leftover events from
+  // the old session.
+  if (enabled && session_id != current_session_id_) {
+    // Session ID should always be increasing since it is based on a timestamp.
+    // However, it's not worth crashing over this since it is set in JS and the
+    // user might change their system clock.
+    if (session_id <= current_session_id_) {
+      LOG(ERROR)
+          << "AccessibilityEventRewriter: Restarted with session ID less than "
+             "previous ID. New ID: "
+          << session_id << ", old ID: " << current_session_id_;
+    }
+    current_session_id_ = session_id;
+    // Immediately flush any leftover events from the old session.
+    SendAllPendingSpokenFeedbackEvents();
+  }
+
+  if (chromevox_mv3_key_handling_enabled_ == enabled) {
+    return;
+  }
+
+  if (!enabled) {
+    // Post a task to asynchronously flush pending events when ChromeVox key
+    // handling is disabled. Deferring the flush allows active event dispatch
+    // and accelerator callstacks to unwind safely before pending events are
+    // processed.
+    PostSendAllPendingSpokenFeedbackEvents();
+  }
+  chromevox_mv3_key_handling_enabled_ = enabled;
+}
+
 bool AccessibilityEventRewriter::RewriteEventForChromeVox(
     const ui::Event& event,
     const Continuation continuation) {
   // Save continuation for |OnUnhandledSpokenFeedbackEvent()|.
   chromevox_continuation_ = continuation;
 
-  if (!Shell::Get()->accessibility_controller()->spoken_feedback().enabled()) {
+  if (!Shell::Get()->accessibility_controller()->spoken_feedback().enabled() ||
+      !event.IsKeyEvent()) {
     return false;
   }
 
-  if (event.IsKeyEvent()) {
-    const ui::KeyEvent* key_event = event.AsKeyEvent();
-    ui::EventRewriterChromeOS::MutableKeyState state(key_event);
-    event_rewriter_chromeos_->RewriteModifierKeys(*key_event, &state);
-
-    // Remove the Search modifier before asking for function keys to be
-    // rewritten, then restore the flags. This allows ChromeVox to receive keys
-    // mappings for raw f1-f12 as e.g. back, but also Search+f1-f12 as
-    // Search+back (rather than just f1-f12).
-    int original_flags = state.flags;
-    state.flags = original_flags & ~ui::EF_COMMAND_DOWN;
-    event_rewriter_chromeos_->RewriteFunctionKeys(*key_event, &state);
-    state.flags = original_flags;
-
-    std::unique_ptr<ui::Event> rewritten_event;
-    ui::EventRewriterChromeOS::BuildRewrittenKeyEvent(*key_event, state,
-                                                      &rewritten_event);
-    ui::KeyEvent* rewritten_key_event = rewritten_event.get()->AsKeyEvent();
-
-    // Account for positional keys which we want to remap.
-    if (try_rewriting_positional_keys_for_chromevox_) {
-      const ui::KeyboardCode remapped_key_code =
-          ui::KeycodeConverter::MapPositionalDomCodeToUSShortcutKey(
-              key_event->code());
-      if (remapped_key_code != ui::VKEY_UNKNOWN)
-        rewritten_key_event->set_key_code(remapped_key_code);
-    }
-
-    bool capture = chromevox_capture_all_keys_;
-
-    // Always capture the Search key.
-    capture |= rewritten_key_event->IsCommandDown() ||
-               rewritten_key_event->key_code() == ui::VKEY_LWIN;
-
-    // Don't capture tab as it gets consumed by Blink so never comes back
-    // unhandled. In third_party/WebKit/Source/core/input/EventHandler.cpp, a
-    // default tab handler consumes tab even when no focusable nodes are found;
-    // it sets focus to Chrome and eats the event.
-    if (rewritten_key_event->GetDomKey() == ui::DomKey::TAB)
-      capture = false;
-
-    delegate_->DispatchKeyEventToChromeVox(rewritten_key_event->Clone(),
-                                           capture);
-    return capture;
+  if (::features::IsAccessibilityManifestV3EnabledForChromeVox() &&
+      !chromevox_mv3_key_handling_enabled_) {
+    return false;
   }
 
-  return false;
+  const ui::KeyEvent* key_event = event.AsKeyEvent();
+  ui::EventRewriterAsh::MutableKeyState state(key_event);
+
+  // Remove the Search modifier before asking for function keys to be
+  // rewritten, then restore the flags. This allows ChromeVox to receive keys
+  // mappings for raw f1-f12 as e.g. back, but also Search+f1-f12 as
+  // Search+back (rather than just f1-f12).
+  int original_flags = state.flags;
+  state.flags = original_flags & ~ui::EF_COMMAND_DOWN;
+  event_rewriter_ash_->RewriteFunctionKeys(*key_event, &state);
+  state.flags = original_flags;
+
+  std::unique_ptr<ui::Event> rewritten_event;
+  ui::EventRewriterAsh::BuildRewrittenKeyEvent(*key_event, state,
+                                               &rewritten_event);
+  ui::KeyEvent* rewritten_key_event = rewritten_event.get()->AsKeyEvent();
+
+  // Account for positional keys which we want to remap.
+  if (try_rewriting_positional_keys_for_chromevox_) {
+    const ui::KeyboardCode remapped_key_code =
+        ui::KeycodeConverter::MapPositionalDomCodeToUSShortcutKey(
+            key_event->code(), key_event->key_code());
+    if (remapped_key_code != ui::VKEY_UNKNOWN) {
+      rewritten_key_event->set_key_code(remapped_key_code);
+    }
+  }
+
+  if (::features::IsAccessibilityManifestV3EnabledForChromeVox() &&
+      chromevox_mv3_key_handling_enabled_) {
+    if (pending_key_events_.size() >= kMaxPendingEvents) {
+      LOG(ERROR)
+          << "AccessibilityEventRewriter: dropping key event due to full "
+             "queue: "
+          << rewritten_key_event->ToString();
+      return true;
+    }
+
+    // Try to forward the key event to the ChromeVox service worker.
+    if (!delegate_->DispatchKeyEventToChromeVoxMv3(
+            next_pending_event_id_, rewritten_key_event->Clone())) {
+      // Unable to send to the service worker. ChromeVox has probably crashed.
+      // Do not further forward this event, or enqueue it.
+      return false;
+    }
+
+    pending_key_events_.emplace(next_pending_event_id_,
+                                rewritten_key_event->Clone(), continuation);
+
+    // Forward the key event to other ChromeVox extension contexts, like learn
+    // mode and the panel.
+    delegate_->DispatchKeyEventToChromeVox(rewritten_key_event->Clone(), true);
+
+    ++next_pending_event_id_;
+
+    // Key events in manifest v3 are always captured initially. If the extension
+    // decides the key event should propagate, it will be propagated in
+    // `ProcessPendingSpokenFeedbackEvent`.
+    return true;
+  }
+
+  bool capture = chromevox_capture_all_keys_;
+
+  // Always capture the Search key.
+  capture |= rewritten_key_event->IsCommandDown() ||
+             rewritten_key_event->key_code() == ui::VKEY_LWIN ||
+             rewritten_key_event->key_code() == ui::VKEY_RWIN;
+
+  // Don't capture tab as it gets consumed by Blink so never comes back
+  // unhandled. In third_party/WebKit/Source/core/input/EventHandler.cpp, a
+  // default tab handler consumes tab even when no focusable nodes are found;
+  // it sets focus to Chrome and eats the event.
+  if (rewritten_key_event->GetDomKey() == ui::DomKey::TAB) {
+    capture = false;
+  }
+
+  delegate_->DispatchKeyEventToChromeVox(rewritten_key_event->Clone(), capture);
+  return capture;
 }
 
 bool AccessibilityEventRewriter::RewriteEventForSwitchAccess(
     const ui::Event& event,
     const Continuation continuation) {
-  if (!event.IsKeyEvent() || suspend_switch_access_key_handling_)
+  if (!event.IsKeyEvent() || suspend_switch_access_key_handling_) {
     return false;
+  }
 
   const ui::KeyEvent* key_event = event.AsKeyEvent();
-  ui::EventRewriterChromeOS::MutableKeyState state(key_event);
-  event_rewriter_chromeos_->RewriteModifierKeys(*key_event, &state);
-  event_rewriter_chromeos_->RewriteFunctionKeys(*key_event, &state);
+  ui::EventRewriterAsh::MutableKeyState state(key_event);
+  event_rewriter_ash_->RewriteFunctionKeys(*key_event, &state);
 
   std::unique_ptr<ui::Event> rewritten_event;
-  ui::EventRewriterChromeOS::BuildRewrittenKeyEvent(*key_event, state,
-                                                    &rewritten_event);
+  ui::EventRewriterAsh::BuildRewrittenKeyEvent(*key_event, state,
+                                               &rewritten_event);
   ui::KeyEvent* rewritten_key_event = rewritten_event.get()->AsKeyEvent();
 
   const auto& key =
       switch_access_key_codes_to_capture_.find(rewritten_key_event->key_code());
-  if (key == switch_access_key_codes_to_capture_.end())
+  if (key == switch_access_key_codes_to_capture_.end()) {
     return false;
+  }
 
   int source_device_id = key_event->source_device_id();
   ui::InputDeviceType keyboard_type = ui::INPUT_DEVICE_UNKNOWN;
@@ -210,15 +406,14 @@ bool AccessibilityEventRewriter::RewriteEventForSwitchAccess(
     return false;
   }
 
-  if (key_event->type() == ui::ET_KEY_PRESSED) {
-    AccessibilityControllerImpl* accessibility_controller =
+  if (key_event->type() == ui::EventType::kKeyPressed) {
+    AccessibilityController* accessibility_controller =
         Shell::Get()->accessibility_controller();
 
     if (accessibility_controller->IsPointScanEnabled()) {
       PointScanController* point_scan_controller =
           accessibility_controller->GetPointScanController();
-      absl::optional<gfx::PointF> point =
-          point_scan_controller->OnPointSelect();
+      std::optional<gfx::PointF> point = point_scan_controller->OnPointSelect();
       if (point.has_value()) {
         delegate_->SendPointScanPoint(point.value());
       }
@@ -234,8 +429,9 @@ bool AccessibilityEventRewriter::RewriteEventForSwitchAccess(
 bool AccessibilityEventRewriter::RewriteEventForMagnifier(
     const ui::Event& event,
     const Continuation continuation) {
-  if (!event.IsKeyEvent())
+  if (!event.IsKeyEvent()) {
     return false;
+  }
 
   const ui::KeyEvent* key_event = event.AsKeyEvent();
 
@@ -244,16 +440,17 @@ bool AccessibilityEventRewriter::RewriteEventForMagnifier(
     return false;
   }
 
-  if (key_event->type() == ui::ET_KEY_PRESSED) {
+  if (key_event->type() == ui::EventType::kKeyPressed) {
     // If first time key is pressed (e.g. not repeat), start scrolling.
-    if (!(key_event->flags() & ui::EF_IS_REPEAT))
+    if (!(key_event->flags() & ui::EF_IS_REPEAT)) {
       OnMagnifierKeyPressed(key_event);
+    }
 
     // Either way (first or repeat), capture key press.
     return true;
   }
 
-  if (key_event->type() == ui::ET_KEY_RELEASED) {
+  if (key_event->type() == ui::EventType::kKeyReleased) {
     OnMagnifierKeyReleased(key_event);
     return true;
   }
@@ -301,15 +498,15 @@ void AccessibilityEventRewriter::OnMagnifierKeyReleased(
 void AccessibilityEventRewriter::MaybeSendMouseEvent(const ui::Event& event) {
   // Mouse moves are the only pertinent event for accessibility component
   // extensions.
+  AccessibilityController* accessibility_controller =
+      Shell::Get()->accessibility_controller();
   if (send_mouse_events_ &&
-      (event.type() == ui::ET_MOUSE_MOVED ||
-       event.type() == ui::ET_MOUSE_DRAGGED) &&
-      (Shell::Get()
-           ->accessibility_controller()
-           ->fullscreen_magnifier()
-           .enabled() ||
-       Shell::Get()->accessibility_controller()->docked_magnifier().enabled() ||
-       Shell::Get()->accessibility_controller()->spoken_feedback().enabled())) {
+      (event.type() == ui::EventType::kMouseMoved ||
+       event.type() == ui::EventType::kMouseDragged) &&
+      (accessibility_controller->fullscreen_magnifier().enabled() ||
+       accessibility_controller->docked_magnifier().enabled() ||
+       accessibility_controller->spoken_feedback().enabled() ||
+       accessibility_controller->face_gaze().enabled())) {
     delegate_->DispatchMouseEvent(event.Clone());
   }
 }
@@ -318,10 +515,17 @@ ui::EventDispatchDetails AccessibilityEventRewriter::RewriteEvent(
     const ui::Event& event,
     const Continuation continuation) {
   bool captured = false;
-  if (!delegate_)
+  if (!delegate_) {
     return SendEvent(continuation, &event);
+  }
 
-  if (Shell::Get()->accessibility_controller()->IsSwitchAccessRunning()) {
+  // TODO(259372916): Switch to using the tray icon visibility.
+  if (::features::IsAccessibilityMouseKeysEnabled()) {
+    captured = Shell::Get()->mouse_keys_controller()->RewriteEvent(event);
+  }
+
+  if (!captured &&
+      Shell::Get()->accessibility_controller()->IsSwitchAccessRunning()) {
     captured = RewriteEventForSwitchAccess(event, continuation);
   }
 
@@ -350,6 +554,31 @@ void AccessibilityEventRewriter::InputMethodChanged(
     bool show_message) {
   try_rewriting_positional_keys_for_chromevox_ =
       manager->ArePositionalShortcutsUsedByCurrentInputMethod();
+}
+
+AccessibilityEventRewriter::PendingEventInfo
+AccessibilityEventRewriter::PopNextPendingEvent() {
+  CHECK(!pending_key_events_.empty());
+  PendingEventInfo pending_event_info = std::move(pending_key_events_.front());
+  pending_key_events_.pop();
+  return pending_event_info;
+}
+
+void AccessibilityEventRewriter::PostSendAllPendingSpokenFeedbackEvents() {
+  send_all_pending_events_callback_.Reset(base::BindOnce(
+      &AccessibilityEventRewriter::SendAllPendingSpokenFeedbackEvents,
+      GetWeakPtr()));
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, send_all_pending_events_callback_.callback());
+}
+
+void AccessibilityEventRewriter::SendAllPendingSpokenFeedbackEvents() {
+  send_all_pending_events_callback_.Cancel();
+  while (!pending_key_events_.empty()) {
+    PendingEventInfo pending_event_info = PopNextPendingEvent();
+    SendEventHelper(pending_event_info.continuation,
+                    pending_event_info.event.get());
+  }
 }
 
 }  // namespace ash

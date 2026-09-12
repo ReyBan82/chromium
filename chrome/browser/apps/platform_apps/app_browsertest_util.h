@@ -10,11 +10,12 @@
 #include <memory>
 #include <string>
 
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/extensions/extension_apitest.h"
+#include "base/auto_reset.h"
+#include "build/build_config.h"
+#include "chrome/browser/extensions/mixin_based_extension_apitest.h"
 #include "extensions/browser/app_window/app_window.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "components/media_router/browser/test/mock_media_router.h"
 #endif
 
@@ -27,13 +28,13 @@ class BrowserContext;
 class WebContents;
 }  // namespace content
 
-class Browser;
+class BrowserWindowInterface;
 class ExtensionTestMessageListener;
 
 namespace extensions {
 class Extension;
 
-class PlatformAppBrowserTest : public ExtensionApiTest {
+class PlatformAppBrowserTest : public MixinBasedExtensionApiTest {
  public:
   PlatformAppBrowserTest();
   PlatformAppBrowserTest(const PlatformAppBrowserTest&) = delete;
@@ -45,7 +46,8 @@ class PlatformAppBrowserTest : public ExtensionApiTest {
   void TearDownOnMainThread() override;
 
   // Gets the first app window that is found for a given browser.
-  static AppWindow* GetFirstAppWindowForBrowser(Browser* browser);
+  static AppWindow* GetFirstAppWindowForBrowser(
+      BrowserWindowInterface* browser);
 
  protected:
   // Runs the app named |name| out of the platform_apps subdirectory. Waits
@@ -122,6 +124,9 @@ class PlatformAppBrowserTest : public ExtensionApiTest {
       const gfx::Size& minimum_size,
       gfx::Rect* bounds);
 
+  // Call SetNativeWindowFullscreen of |window|.
+  void SetNativeWindowFullscreenForTesting(AppWindow* window);
+
   // Load a simple test app and create a window. The window must be closed by
   // the caller in order to terminate the test - use CloseAppWindow().
   // |window_create_options| are the options that will be passed to
@@ -132,9 +137,10 @@ class PlatformAppBrowserTest : public ExtensionApiTest {
   NativeAppWindow* GetNativeAppWindowForAppWindow(AppWindow* window);
 
  private:
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<media_router::MockMediaRouter> media_router_;
 #endif
+  base::AutoReset<bool> enable_chrome_apps_;
 };
 
 class ExperimentalPlatformAppBrowserTest : public PlatformAppBrowserTest {

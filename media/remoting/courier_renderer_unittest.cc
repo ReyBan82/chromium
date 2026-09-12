@@ -14,18 +14,19 @@
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/simple_test_tick_clock.h"
 #include "base/test/task_environment.h"
-#include "components/cast_streaming/public/remoting_proto_enum_utils.h"
-#include "components/cast_streaming/public/remoting_proto_utils.h"
 #include "media/base/media_util.h"
 #include "media/base/pipeline_status.h"
 #include "media/base/renderer_client.h"
 #include "media/base/test_helpers.h"
+#include "media/cast/openscreen/remoting_proto_enum_utils.h"
+#include "media/cast/openscreen/remoting_proto_utils.h"
 #include "media/remoting/fake_media_resource.h"
 #include "media/remoting/fake_remoter.h"
 #include "media/remoting/renderer_controller.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/openscreen/src/cast/streaming/rpc_messenger.h"
+#include "third_party/openscreen/src/cast/streaming/public/rpc_messenger.h"
+#include "ui/gfx/geometry/size.h"
 
 using openscreen::cast::RpcMessenger;
 using testing::_;
@@ -104,7 +105,7 @@ class RendererClientImpl final : public RendererClient {
   void OnWaiting(WaitingReason reason) override {}
   MOCK_METHOD1(OnVideoNaturalSizeChange, void(const gfx::Size& size));
   MOCK_METHOD1(OnVideoOpacityChange, void(bool opaque));
-  MOCK_METHOD1(OnVideoFrameRateChange, void(absl::optional<int>));
+  MOCK_METHOD1(OnVideoFrameRateChange, void(std::optional<int>));
   MOCK_METHOD1(OnRemotePlayStateChange, void(MediaStatus::State state));
 
   void DelegateOnStatisticsUpdate(const PipelineStatistics& stats) {
@@ -165,7 +166,7 @@ class CourierRendererTest : public testing::Test {
 
   // Use this function to mimic receiver to handle RPC message for renderer
   // initialization,
-  void RpcMessageResponseBot(std::vector<uint8_t> message) {
+  void RpcMessageResponseBot(base::span<const uint8_t> message) {
     openscreen::cast::RpcMessage rpc;
     ASSERT_TRUE(rpc.ParseFromArray(message.data(), message.size()));
     switch (rpc.proc()) {
@@ -302,17 +303,15 @@ class CourierRendererTest : public testing::Test {
   }
 
   // Callback from RpcMessenger when sending message to remote sink.
-  void OnSendMessageToSink(std::vector<uint8_t> message) {
+  void OnSendMessageToSink(base::span<const uint8_t> message) {
     openscreen::cast::RpcMessage rpc;
     ASSERT_TRUE(rpc.ParseFromArray(message.data(), message.size()));
     received_rpc_.push_back(std::move(rpc));
   }
 
   void RewireSendMessageCallbackToSink() {
-    controller_->GetRpcMessenger()->set_send_message_cb_for_testing(
-        [this](std::vector<uint8_t> message) {
-          this->OnSendMessageToSink(message);
-        });
+    current_rpc_cb_ = base::BindRepeating(
+        &CourierRendererTest::OnSendMessageToSink, base::Unretained(this));
   }
 
  protected:
@@ -323,10 +322,8 @@ class CourierRendererTest : public testing::Test {
     EXPECT_CALL(*render_client_, OnPipelineStatus(_)).Times(1);
     DCHECK(renderer_);
     // Redirect RPC message for simulate receiver scenario
-    controller_->GetRpcMessenger()->set_send_message_cb_for_testing(
-        [this](std::vector<uint8_t> message) {
-          this->RpcMessageResponseBot(message);
-        });
+    current_rpc_cb_ = base::BindRepeating(
+        &CourierRendererTest::RpcMessageResponseBot, base::Unretained(this));
     RunPendingTasks();
     renderer_->Initialize(
         media_resource_.get(), render_client_.get(),
@@ -358,7 +355,9 @@ class CourierRendererTest : public testing::Test {
   }
 
   void SetUp() override {
-    controller_ = FakeRemoterFactory::CreateController(false);
+    controller_ = FakeRemoterFactory::CreateController(
+        false, base::BindRepeating(&CourierRendererTest::OnSendRpc,
+                                   base::Unretained(this)));
     controller_->OnMetadataChanged(DefaultMetadata());
 
     RewireSendMessageCallbackToSink();
@@ -369,6 +368,12 @@ class CourierRendererTest : public testing::Test {
     clock_.Advance(base::Seconds(1));
 
     RunPendingTasks();
+  }
+
+  void OnSendRpc(base::span<const uint8_t> message) {
+    if (current_rpc_cb_) {
+      current_rpc_cb_.Run(message);
+    }
   }
 
   CourierRenderer::State state() const { return renderer_->state_; }
@@ -448,9 +453,8 @@ class CourierRendererTest : public testing::Test {
 
   // Issue RPC_RC_ONBUFFERINGSTATECHANGE RPC message.
   void IssuesBufferingStateRpc(BufferingState state) {
-    absl::optional<
-        openscreen::cast::RendererClientOnBufferingStateChange::State>
-        pb_state = cast_streaming::remoting::ToProtoMediaBufferingState(state);
+    std::optional<openscreen::cast::RendererClientOnBufferingStateChange::State>
+        pb_state = media::cast::ToProtoMediaBufferingState(state);
     if (!pb_state.has_value())
       return;
     std::unique_ptr<openscreen::cast::RpcMessage> rpc(
@@ -497,6 +501,8 @@ class CourierRendererTest : public testing::Test {
 
   // Stores RPC messages that have been sent to the remote sink.
   std::vector<openscreen::cast::RpcMessage> received_rpc_;
+
+  base::RepeatingCallback<void(base::span<const uint8_t>)> current_rpc_cb_;
 };
 
 TEST_F(CourierRendererTest, Initialize) {
@@ -556,10 +562,8 @@ TEST_F(CourierRendererTest, Flush) {
 
   // Flush Renderer.
   // Redirect RPC message for simulate receiver scenario
-  controller_->GetRpcMessenger()->set_send_message_cb_for_testing(
-      [this](std::vector<uint8_t> message) {
-        this->RpcMessageResponseBot(message);
-      });
+  current_rpc_cb_ = base::BindRepeating(
+      &CourierRendererTest::RpcMessageResponseBot, base::Unretained(this));
   RunPendingTasks();
   EXPECT_CALL(*render_client_, OnFlushCallback()).Times(1);
   renderer_->Flush(base::BindOnce(&RendererClientImpl::OnFlushCallback,
@@ -648,8 +652,9 @@ TEST_F(CourierRendererTest, OnBufferingStateChange) {
 
 TEST_F(CourierRendererTest, OnAudioConfigChange) {
   const AudioDecoderConfig kNewAudioConfig(
-      AudioCodec::kVorbis, kSampleFormatPlanarF32, CHANNEL_LAYOUT_STEREO, 44100,
-      EmptyExtraData(), EncryptionScheme::kUnencrypted);
+      AudioCodec::kVorbis, kSampleFormatPlanarF32,
+      ChannelLayoutConfig::Stereo(), 44100, EmptyExtraData(),
+      EncryptionScheme::kUnencrypted);
   InitializeRenderer();
   // Make sure initial audio config does not match the one we intend to send.
   ASSERT_FALSE(render_client_->audio_decoder_config().Matches(kNewAudioConfig));
@@ -666,8 +671,8 @@ TEST_F(CourierRendererTest, OnAudioConfigChange) {
       rpc->mutable_rendererclient_onaudioconfigchange_rpc();
   openscreen::cast::AudioDecoderConfig* proto_audio_config =
       audio_config_change_message->mutable_audio_decoder_config();
-  cast_streaming::remoting::ConvertAudioDecoderConfigToProto(
-      kNewAudioConfig, proto_audio_config);
+  media::cast::ConvertAudioDecoderConfigToProto(kNewAudioConfig,
+                                                proto_audio_config);
   OnReceivedRpc(std::move(rpc));
   RunPendingTasks();
   ASSERT_TRUE(render_client_->audio_decoder_config().Matches(kNewAudioConfig));
@@ -691,8 +696,8 @@ TEST_F(CourierRendererTest, OnVideoConfigChange) {
       rpc->mutable_rendererclient_onvideoconfigchange_rpc();
   openscreen::cast::VideoDecoderConfig* proto_video_config =
       video_config_change_message->mutable_video_decoder_config();
-  cast_streaming::remoting::ConvertVideoDecoderConfigToProto(
-      kNewVideoConfig, proto_video_config);
+  media::cast::ConvertVideoDecoderConfigToProto(kNewVideoConfig,
+                                                proto_video_config);
   OnReceivedRpc(std::move(rpc));
   RunPendingTasks();
   ASSERT_TRUE(render_client_->video_decoder_config().Matches(kNewVideoConfig));

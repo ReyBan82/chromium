@@ -7,15 +7,17 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/compiler_specific.h"
 #include "base/component_export.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ptr_exclusion.h"
 #include "base/task/sequenced_task_runner.h"
 #include "mojo/public/cpp/bindings/connection_error_callback.h"
@@ -23,9 +25,15 @@
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "mojo/public/cpp/bindings/runtime_features.h"
 #include "mojo/public/cpp/bindings/unique_ptr_impl_ref_traits.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 
 namespace mojo {
+
+namespace test {
+class ReceiverSetStaticAssertTests;
+}
 
 using ReceiverId = uint64_t;
 
@@ -48,10 +56,9 @@ struct ReceiverSetContextTraits {
 
 template <>
 struct ReceiverSetContextTraits<void> {
-  // NOTE: This choice of Type only matters insofar as it affects the size of
-  // the |context_| field of a ReceiverSetBase::Entry with void context. The
-  // context value is never used in this case.
-  using Type = bool;
+  struct Empty {};
+
+  using Type = Empty;
 
   static constexpr bool SupportsContext() { return false; }
 };
@@ -69,7 +76,7 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) ReceiverSetState {
         RepeatingConnectionErrorWithReasonCallback disconnect_handler) = 0;
     virtual void FlushForTesting() = 0;
     virtual void ResetWithReason(uint32_t custom_reason_code,
-                                 const std::string& description) = 0;
+                                 std::string_view description) = 0;
   };
 
   class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) Entry {
@@ -90,13 +97,13 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) ReceiverSetState {
     void OnDisconnect(uint32_t custom_reason_code,
                       const std::string& description);
 
-    // `state_` is not a raw_ref<...> as that leads to a binary size increase.
+    // RAW_PTR_EXCLUSION: Binary size increase.
     RAW_PTR_EXCLUSION ReceiverSetState& state_;
     const ReceiverId id_;
     const std::unique_ptr<ReceiverState> receiver_;
   };
 
-  using EntryMap = std::map<ReceiverId, std::unique_ptr<Entry>>;
+  using EntryMap = absl::flat_hash_map<ReceiverId, std::unique_ptr<Entry>>;
 
   ReceiverSetState();
   ReceiverSetState(const ReceiverSetState&) = delete;
@@ -131,7 +138,7 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) ReceiverSetState {
   bool Remove(ReceiverId id);
   bool RemoveWithReason(ReceiverId id,
                         uint32_t custom_reason_code,
-                        const std::string& description);
+                        std::string_view description);
   void FlushForTesting();
   void SetDispatchContext(void* context, ReceiverId receiver_id);
   void OnDisconnect(ReceiverId id,
@@ -143,9 +150,7 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) ReceiverSetState {
   RepeatingConnectionErrorWithReasonCallback disconnect_with_reason_handler_;
   ReceiverId next_receiver_id_ = 0;
   EntryMap entries_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION void* current_context_ = nullptr;
+  raw_ptr<void, DanglingUntriaged> current_context_ = nullptr;
   ReceiverId current_receiver_;
   base::WeakPtrFactory<ReceiverSetState> weak_ptr_factory_{this};
 };
@@ -178,6 +183,10 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS) ReceiverSetState {
 // method looks at the value of |current_context()|, it will see a value of 42
 // while executing the call from |foo1| and a value of 43 while executing the
 // call from |foo2|.
+//
+// RuntimeFeature guarded receivers should only be added to a set if they are
+// enabled - if an interface is feature guarded validate the enabled state of
+// the corresponding feature before calling Add().
 //
 // Finally, note that ContextType can be any type of thing, including move-only
 // objects like std::unique_ptrs.
@@ -218,23 +227,54 @@ class ReceiverSetBase {
   // |task_runner| is null, the value of
   // |base::SequencedTaskRunner::GetCurrentDefault()| at the time of the |Add()|
   // call will be used to run scheduled tasks for the receiver.
-  ReceiverId Add(
+  ReceiverId Add(ImplPointerType impl,
+                 PendingType receiver,
+                 scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr)
+    requires(!internal::kIsRuntimeFeatureGuarded<Interface>)
+  {
+    return AddImpl(std::move(impl), std::move(receiver), {},
+                   std::move(task_runner), /*filter=*/nullptr)
+        .value();
+  }
+
+  // Like Add() but allows an interface with a runtime enabled feature to be
+  // provided - if the feature is enabled or the interface does not have a
+  // RuntimeFeature attribute this behaves exactly like Add() and always returns
+  // a .value(). If the feature is disabled this will DCHECK in developer builds
+  // and return nullopt in production - `impl` will be immediately destroyed.
+  std::optional<ReceiverId> Add(
       ImplPointerType impl,
       PendingType receiver,
-      scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr) {
-    static_assert(!ContextTraits::SupportsContext(),
-                  "Context value required for non-void context type.");
-    return AddImpl(std::move(impl), std::move(receiver), false,
+      scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr)
+    requires(internal::kIsRuntimeFeatureGuarded<Interface>)
+  {
+    return AddImpl(std::move(impl), std::move(receiver), {},
                    std::move(task_runner), /*filter=*/nullptr);
   }
 
   // Adds a new receiver associated with |context|. See above method for all
   // other (identical) details.
-  ReceiverId Add(
+  ReceiverId Add(ImplPointerType impl,
+                 PendingType receiver,
+                 Context context,
+                 scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr)
+    requires(!internal::kIsRuntimeFeatureGuarded<Interface>)
+  {
+    static_assert(ContextTraits::SupportsContext(),
+                  "Context value unsupported for void context type.");
+    return AddImpl(std::move(impl), std::move(receiver), std::move(context),
+                   std::move(task_runner), /*filter=*/nullptr)
+        .value();
+  }
+
+  // See above.
+  std::optional<ReceiverId> Add(
       ImplPointerType impl,
       PendingType receiver,
       Context context,
-      scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr) {
+      scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr)
+    requires(internal::kIsRuntimeFeatureGuarded<Interface>)
+  {
     static_assert(ContextTraits::SupportsContext(),
                   "Context value unsupported for void context type.");
     return AddImpl(std::move(impl), std::move(receiver), std::move(context),
@@ -243,12 +283,29 @@ class ReceiverSetBase {
 
   // Adds a new receiver associated with |context| and which uses the
   // MessageFilter |filter|. See above for all other details.
-  ReceiverId Add(
+  ReceiverId Add(ImplPointerType impl,
+                 PendingType receiver,
+                 Context context,
+                 std::unique_ptr<MessageFilter> filter,
+                 scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr)
+    requires(!internal::kIsRuntimeFeatureGuarded<Interface>)
+  {
+    static_assert(ContextTraits::SupportsContext(),
+                  "Context value unsupported for void context type.");
+    return AddImpl(std::move(impl), std::move(receiver), std::move(context),
+                   std::move(task_runner), std::move(filter))
+        .value();
+  }
+
+  // See above.
+  std::optional<ReceiverId> Add(
       ImplPointerType impl,
       PendingType receiver,
       Context context,
       std::unique_ptr<MessageFilter> filter,
-      scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr) {
+      scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr)
+    requires(internal::kIsRuntimeFeatureGuarded<Interface>)
+  {
     static_assert(ContextTraits::SupportsContext(),
                   "Context value unsupported for void context type.");
     return AddImpl(std::move(impl), std::move(receiver), std::move(context),
@@ -267,7 +324,7 @@ class ReceiverSetBase {
   // Similar to the method above, but also specifies a disconnect reason.
   bool RemoveWithReason(ReceiverId id,
                         uint32_t custom_reason_code,
-                        const std::string& description) {
+                        std::string_view description) {
     return state_.RemoveWithReason(id, custom_reason_code, description);
   }
 
@@ -284,15 +341,34 @@ class ReceiverSetBase {
     return pending_receivers;
   }
 
+  // Similar to the method above, but it also includes the receiver's context.
+  std::vector<std::pair<PendingType, Context>> TakeReceiversWithContext() {
+    static_assert(ContextTraits::SupportsContext(),
+                  "TakeReceiversWithContext() requires non-void context type.");
+
+    ReceiverSetState::EntryMap entries;
+    std::swap(state_.entries(), entries);
+    std::vector<std::pair<PendingType, Context>> pending_receivers;
+    for (auto& entry : entries) {
+      ReceiverEntry& receiver =
+          static_cast<ReceiverEntry&>(entry.second->receiver());
+      pending_receivers.emplace_back(
+          receiver.Unbind(),
+          std::move(*static_cast<Context*>(receiver.GetContext())));
+    }
+    return pending_receivers;
+  }
+
   // Removes all receivers from the set, effectively closing all of them. This
   // ReceiverSet will not schedule or execute any further method invocations or
   // disconnection notifications until a new receiver is added to the set.
   void Clear() { state_.entries().clear(); }
   // Similar to the method above, but also specifies a disconnect reason.
   void ClearWithReason(uint32_t custom_reason_code,
-                       const std::string& description) {
-    for (auto& entry : state_.entries())
+                       std::string_view description) {
+    for (auto& entry : state_.entries()) {
       entry.second->receiver().ResetWithReason(custom_reason_code, description);
+    }
 
     Clear();
   }
@@ -301,7 +377,33 @@ class ReceiverSetBase {
   //
   // Returns |true| if the receiver is in the set and |false| if not.
   bool HasReceiver(ReceiverId id) const {
-    return base::Contains(state_.entries(), id);
+    return state_.entries().contains(id);
+  }
+
+  // Returns a pointer to the context associated with a receiver.
+  //
+  // Returns |nullptr| if the receiver is not in the set.
+  Context* GetContext(ReceiverId id) const {
+    static_assert(ContextTraits::SupportsContext(),
+                  "GetContext() requires non-void context type.");
+    auto it = state_.entries().find(id);
+    if (it == state_.entries().end()) {
+      return nullptr;
+    }
+    return static_cast<Context*>(it->second->receiver().GetContext());
+  }
+
+  // Returns a map from the ID to the associated context for each receiver in
+  // the set.
+  std::map<ReceiverId, Context*> GetAllContexts() const {
+    static_assert(ContextTraits::SupportsContext(),
+                  "GetAllContexts() requires non-void context type.");
+    std::map<ReceiverId, Context*> contexts;
+    for (const auto& [receiver_id, entry] : state_.entries()) {
+      contexts[receiver_id] =
+          static_cast<Context*>(entry->receiver().GetContext());
+    }
+    return contexts;
   }
 
   bool empty() const { return state_.entries().empty(); }
@@ -348,7 +450,7 @@ class ReceiverSetBase {
   // asynchronous work before you can determine the legitimacy of a message, use
   // GetBadMessageCallback() and retain its result until you're ready to invoke
   // or discard it.
-  NOT_TAIL_CALLED void ReportBadMessage(const std::string& error) {
+  NOT_TAIL_CALLED void ReportBadMessage(std::string_view error) {
     GetBadMessageCallback().Run(error);
   }
 
@@ -379,15 +481,16 @@ class ReceiverSetBase {
   [[nodiscard]] ImplPointerType SwapImplForTesting(ReceiverId id,
                                                    ImplPointerType new_impl) {
     auto it = state_.entries().find(id);
-    if (it == state_.entries().end())
+    if (it == state_.entries().end()) {
       return nullptr;
+    }
 
     ReceiverEntry& entry = static_cast<ReceiverEntry&>(it->second->receiver());
     return entry.SwapImplForTesting(std::move(new_impl));
   }
 
  private:
-  friend class ReceiverEntry;
+  friend test::ReceiverSetStaticAssertTests;
 
   class ReceiverEntry : public ReceiverSetState::ReceiverState {
    public:
@@ -418,7 +521,7 @@ class ReceiverSetBase {
     void FlushForTesting() override { receiver_.FlushForTesting(); }
 
     void ResetWithReason(uint32_t custom_reason_code,
-                         const std::string& description) override {
+                         std::string_view description) override {
       receiver_.ResetWithReason(custom_reason_code, description);
     }
 
@@ -430,15 +533,19 @@ class ReceiverSetBase {
 
    private:
     ReceiverType receiver_;
-    Context context_;
+    NO_UNIQUE_ADDRESS Context context_;
   };
 
-  ReceiverId AddImpl(ImplPointerType impl,
-                     PendingType receiver,
-                     Context context,
-                     scoped_refptr<base::SequencedTaskRunner> task_runner,
-                     std::unique_ptr<MessageFilter> filter) {
+  std::optional<ReceiverId> AddImpl(
+      ImplPointerType impl,
+      PendingType receiver,
+      Context context,
+      scoped_refptr<base::SequencedTaskRunner> task_runner,
+      std::unique_ptr<MessageFilter> filter) {
     DCHECK(receiver.is_valid());
+    if (!internal::GetRuntimeFeature_ExpectEnabled<Interface>()) {
+      return std::nullopt;
+    }
     return state_.Add(std::make_unique<ReceiverEntry>(
                           std::move(impl), std::move(receiver),
                           std::move(context), std::move(task_runner)),

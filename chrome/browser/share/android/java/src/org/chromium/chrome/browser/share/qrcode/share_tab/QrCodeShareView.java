@@ -16,14 +16,14 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.TextView;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.R;
-import org.chromium.ui.widget.ChromeImageView;
 
-/**
- * Manages the Android View representing the QrCode share panel.
- */
+/** Manages the Android View representing the QrCode share panel. */
+@NullMarked
 class QrCodeShareView {
     private final Context mContext;
     private final View mView;
@@ -35,19 +35,22 @@ class QrCodeShareView {
     public QrCodeShareView(Context context, View.OnClickListener listener) {
         mContext = context;
 
-        mView = (View) LayoutInflater.from(context).inflate(
-                R.layout.qrcode_share_layout, null, false);
+        mView =
+                (View)
+                        LayoutInflater.from(context)
+                                .inflate(R.layout.qrcode_share_layout, null, false);
 
-        Button downloadButton = (Button) mView.findViewById(R.id.download);
+        Button downloadButton = mView.findViewById(R.id.download);
         downloadButton.setOnClickListener(listener);
-        Button settingsButton = (Button) mView.findViewById(R.id.settings);
-        settingsButton.setOnClickListener(new OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Intent openSettingsIntent = getAppInfoIntent(mContext.getPackageName());
-                ((Activity) mContext).startActivity(openSettingsIntent);
-            }
-        });
+        Button settingsButton = mView.findViewById(R.id.settings);
+        settingsButton.setOnClickListener(
+                new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        Intent openSettingsIntent = getAppInfoIntent(mContext.getPackageName());
+                        ((Activity) mContext).startActivity(openSettingsIntent);
+                    }
+                });
         updateView();
     }
 
@@ -61,7 +64,7 @@ class QrCodeShareView {
      * @param bitmap The {@link Bitmap} to display on share panel.
      */
     public void updateQrCodeBitmap(Bitmap bitmap) {
-        ChromeImageView qrcodeImageView = mView.findViewById(R.id.qrcode);
+        ImageView qrcodeImageView = mView.findViewById(R.id.qrcode);
         Drawable drawable = new BitmapDrawable(mContext.getResources(), bitmap);
         qrcodeImageView.setImageDrawable(drawable);
 
@@ -113,8 +116,8 @@ class QrCodeShareView {
             return;
         }
 
-        Button downloadButton = (Button) mView.findViewById(R.id.download);
-        Button settingsButton = (Button) mView.findViewById(R.id.settings);
+        Button downloadButton = mView.findViewById(R.id.download);
+        Button settingsButton = mView.findViewById(R.id.settings);
         if (mHasStoragePermission) {
             downloadButton.setVisibility(View.VISIBLE);
             settingsButton.setVisibility(View.GONE);
@@ -127,9 +130,7 @@ class QrCodeShareView {
         }
     }
 
-    /**
-     * Returns an Intent to show the App Info page for the current app.
-     */
+    /** Returns an Intent to show the App Info page for the current app. */
     private Intent getAppInfoIntent(String packageName) {
         Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
         intent.setData(new Uri.Builder().scheme("package").opaquePart(packageName).build());

@@ -11,7 +11,6 @@
 #include "gpu/command_buffer/service/shared_image/dcomp_surface_image_backing.h"
 #include "gpu/command_buffer/service/shared_image/dxgi_swap_chain_image_backing.h"
 #include "ui/gfx/color_space_win.h"
-#include "ui/gl/direct_composition_child_surface_win.h"
 
 namespace gpu {
 
@@ -20,95 +19,60 @@ namespace {
 // Check if a format is supported by DXGI for DComp surfaces or swap chains.
 // https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/converting-data-color-space
 bool IsFormatSupportedForScanout(viz::SharedImageFormat format) {
-  if (format.is_multi_plane()) {
-    return false;
-  }
-
-  switch (format.resource_format()) {
-    case viz::ResourceFormat::RGBA_8888:
-    case viz::ResourceFormat::BGRA_8888:
-    case viz::ResourceFormat::RGBX_8888:
-    case viz::ResourceFormat::BGRX_8888:
-    case viz::ResourceFormat::RGBA_F16:
-    case viz::ResourceFormat::RGBA_1010102:
-      return true;
-
-    default:
-      return false;
-  }
+  return ((format == viz::SinglePlaneFormat::kRGBA_8888) ||
+          (format == viz::SinglePlaneFormat::kBGRA_8888) ||
+          (format == viz::SinglePlaneFormat::kRGBX_8888) ||
+          (format == viz::SinglePlaneFormat::kBGRX_8888) ||
+          (format == viz::SinglePlaneFormat::kRGBA_F16) ||
+          (format == viz::SinglePlaneFormat::kRGBA_1010102));
 }
-constexpr uint32_t kDXGISwapChainUsage = SHARED_IMAGE_USAGE_DISPLAY_READ |
-                                         SHARED_IMAGE_USAGE_DISPLAY_WRITE |
-                                         SHARED_IMAGE_USAGE_SCANOUT;
-constexpr uint32_t kDCompSurfaceUsage =
+
+constexpr SharedImageUsageSet kDXGISwapChainUsage =
+    SHARED_IMAGE_USAGE_DISPLAY_READ | SHARED_IMAGE_USAGE_DISPLAY_WRITE |
+    SHARED_IMAGE_USAGE_SCANOUT | SHARED_IMAGE_USAGE_SCANOUT_DXGI_SWAP_CHAIN;
+constexpr SharedImageUsageSet kDCompSurfaceUsage =
     SHARED_IMAGE_USAGE_DISPLAY_WRITE | SHARED_IMAGE_USAGE_SCANOUT |
     SHARED_IMAGE_USAGE_SCANOUT_DCOMP_SURFACE;
-constexpr uint32_t kSupportedUsage = kDXGISwapChainUsage | kDCompSurfaceUsage;
+constexpr SharedImageUsageSet kSupportedUsage =
+    kDXGISwapChainUsage | kDCompSurfaceUsage;
 
 }  // namespace
 
-DCompImageBackingFactory::DCompImageBackingFactory()
-    : SharedImageBackingFactory(kSupportedUsage) {}
+DCompImageBackingFactory::DCompImageBackingFactory(
+    scoped_refptr<SharedContextState> context_state)
+    : SharedImageBackingFactory(kSupportedUsage),
+      context_state_(std::move(context_state)) {}
 
 DCompImageBackingFactory::~DCompImageBackingFactory() = default;
 
 std::unique_ptr<SharedImageBacking> DCompImageBackingFactory::CreateSharedImage(
     const Mailbox& mailbox,
-    viz::SharedImageFormat format,
+    const SharedImageInfo& si_info,
     SurfaceHandle surface_handle,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
     bool is_thread_safe) {
+  const auto alpha_type = si_info.alpha_type;
+  const auto& color_space = si_info.color_space;
+  const auto usage = si_info.usage;
+
   DCHECK(!is_thread_safe);
+  CHECK(alpha_type == kOpaque_SkAlphaType || alpha_type == kPremul_SkAlphaType);
 
   // DXGI only supports a handful of formats for scan-out, so we map the
   // requested format to a supported compatible DXGI format.
   DXGI_FORMAT internal_format = gfx::ColorSpaceWin::GetDXGIFormat(color_space);
 
-  if (usage & SHARED_IMAGE_USAGE_SCANOUT_DCOMP_SURFACE) {
+  if (usage.Has(SHARED_IMAGE_USAGE_SCANOUT_DCOMP_SURFACE)) {
     DCHECK_NE(internal_format, DXGI_FORMAT_R10G10B10A2_UNORM);
-    return DCompSurfaceImageBacking::Create(mailbox, format, internal_format,
-                                            size, color_space, surface_origin,
-                                            alpha_type, usage);
+    return DCompSurfaceImageBacking::Create(mailbox, si_info, internal_format);
   } else {
-    return DXGISwapChainImageBacking::Create(mailbox, format, internal_format,
-                                             size, color_space, surface_origin,
-                                             alpha_type, usage);
+    return DXGISwapChainImageBacking::Create(context_state_->GetD3D11Device(),
+                                             mailbox, si_info, internal_format,
+                                             context_state_->gr_context_type());
   }
 }
 
-std::unique_ptr<SharedImageBacking> DCompImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
-    base::span<const uint8_t> pixel_data) {
-  NOTREACHED();
-  return nullptr;
-}
-
-std::unique_ptr<SharedImageBacking> DCompImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    gfx::GpuMemoryBufferHandle handle,
-    gfx::BufferFormat format,
-    gfx::BufferPlane plane,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage) {
-  NOTREACHED();
-  return nullptr;
-}
-
 bool DCompImageBackingFactory::IsSupported(
-    uint32_t usage,
+    SharedImageUsageSet usage,
     viz::SharedImageFormat format,
     const gfx::Size& size,
     bool thread_safe,
@@ -151,6 +115,29 @@ bool DCompImageBackingFactory::IsSupported(
   }
 
   return true;
+}
+
+bool DCompImageBackingFactory::IsSupportedForAccessStream(
+    SharedImageAccessStream stream,
+    viz::SharedImageFormat format,
+    const AccessParams* params) const {
+  // `DCompImageBackingFactory` is strictly bound to the `SharedContextState`
+  // it was created with. If a request is made from a different thread/context,
+  // we must return false early to protect the subsequent `IsSupported` call
+  // which accesses `context_state_`.
+  // Note that this currently restricts this factory to only be selected and
+  // used on the GPU main thread. If it's refactored in the future to remove its
+  // dependency on `SharedContextState` in `IsSupported`, this restriction can
+  // be relaxed.
+  if (params && params->context_state &&
+      params->context_state != context_state_) {
+    return false;
+  }
+  return true;
+}
+
+SharedImageBackingType DCompImageBackingFactory::GetBackingType() {
+  return SharedImageBackingType::kDCompSurface;
 }
 
 }  // namespace gpu

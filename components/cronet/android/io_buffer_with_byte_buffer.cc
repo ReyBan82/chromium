@@ -4,25 +4,27 @@
 
 #include "components/cronet/android/io_buffer_with_byte_buffer.h"
 
+#include "base/android/jni_bytebuffer.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/numerics/safe_conversions.h"
 
 namespace cronet {
 
 IOBufferWithByteBuffer::IOBufferWithByteBuffer(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& jbyte_buffer,
-    void* byte_buffer_data,
-    jint position,
-    jint limit)
-    : net::WrappedIOBuffer(static_cast<char*>(byte_buffer_data) + position),
+    const base::android::JavaRef<jobject>& jbyte_buffer,
+    int32_t position,
+    int32_t limit)
+    : net::WrappedIOBuffer(
+          base::android::JavaByteBufferToMutableSpan(env, jbyte_buffer)
+              .subspan(base::checked_cast<size_t>(position),
+                       base::checked_cast<size_t>(limit - position))),
       byte_buffer_(env, jbyte_buffer),
       initial_position_(position),
-      initial_limit_(limit) {
-  DCHECK(byte_buffer_data);
-  DCHECK_EQ(env->GetDirectBufferAddress(jbyte_buffer), byte_buffer_data);
-}
+      initial_limit_(limit) {}
 
-IOBufferWithByteBuffer::~IOBufferWithByteBuffer() {}
+IOBufferWithByteBuffer::~IOBufferWithByteBuffer() = default;
 
 ByteBufferWithIOBuffer::ByteBufferWithIOBuffer(
     JNIEnv* env,
@@ -31,11 +33,11 @@ ByteBufferWithIOBuffer::ByteBufferWithIOBuffer(
     : io_buffer_(std::move(io_buffer)), io_buffer_len_(io_buffer_len) {
   // An intermediate ScopedJavaLocalRef is needed here to release the local
   // reference created by env->NewDirectByteBuffer().
-  base::android::ScopedJavaLocalRef<jobject> java_buffer(
+  auto java_buffer = jni_zero::AdoptRef(
       env, env->NewDirectByteBuffer(io_buffer_->data(), io_buffer_len_));
-  byte_buffer_.Reset(env, java_buffer.obj());
+  byte_buffer_.Reset(env, java_buffer);
 }
 
-ByteBufferWithIOBuffer::~ByteBufferWithIOBuffer() {}
+ByteBufferWithIOBuffer::~ByteBufferWithIOBuffer() = default;
 
 }  // namespace cronet

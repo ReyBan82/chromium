@@ -7,13 +7,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <set>
+#include <string_view>
 
-#include "base/containers/contains.h"
 #include "base/logging.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_util.h"
+#include "components/variations/variations_layers.h"
 #include "components/variations/variations_seed_processor.h"
 
 namespace variations {
@@ -24,14 +26,47 @@ base::Time ConvertStudyDateToBaseTime(int64_t date_time) {
   return base::Time::UnixEpoch() + base::Seconds(date_time);
 }
 
-// Similar to base::Contains(), but specifically for ASCII strings and
+// Similar to std::ranges::contains(), but specifically for ASCII strings and
 // case-insensitive comparison.
 template <typename Collection>
 bool ContainsStringIgnoreCaseASCII(const Collection& collection,
                                    const std::string& value) {
-  return base::ranges::any_of(collection, [&value](const std::string& s) {
+  return std::ranges::any_of(collection, [&value](const std::string& s) {
     return base::EqualsCaseInsensitiveASCII(s, value);
   });
+}
+
+// Checks whether a study is applicable for |client_groups| per filter with
+// include/exclude groups.
+template <typename FilterGroupType,
+          typename ClientGroupType,
+          typename RepeatedFieldType>
+bool CheckStudyGroup(const RepeatedFieldType& include_groups,
+                     const RepeatedFieldType& exclude_groups,
+                     const base::flat_set<ClientGroupType>& client_groups) {
+  if (!include_groups.empty()) {
+    if (std::ranges::none_of(include_groups,
+                             [&client_groups](const FilterGroupType& group) {
+                               return client_groups.contains(group);
+                             })) {
+      // An include group filter was specified, and the client is not a member
+      // of any of the groups.
+      return false;
+    }
+  }
+
+  if (!exclude_groups.empty()) {
+    if (std::ranges::any_of(exclude_groups,
+                            [&client_groups](const FilterGroupType& group) {
+                              return client_groups.contains(group);
+                            })) {
+      // An exclude group filter was specified, and the client is a member of
+      // at least one of the groups.
+      return false;
+    }
+  }
+
+  return true;
 }
 
 }  // namespace
@@ -40,26 +75,30 @@ namespace internal {
 
 bool CheckStudyChannel(const Study::Filter& filter, Study::Channel channel) {
   // An empty channel list matches all channels.
-  if (filter.channel_size() == 0)
+  if (filter.channel_size() == 0) {
     return true;
+  }
 
-  return base::Contains(filter.channel(), channel);
+  return std::ranges::contains(filter.channel(), channel);
 }
 
 bool CheckStudyFormFactor(const Study::Filter& filter,
                           Study::FormFactor form_factor) {
   // If both filters are empty, match all values.
-  if (filter.form_factor_size() == 0 && filter.exclude_form_factor_size() == 0)
+  if (filter.form_factor_size() == 0 &&
+      filter.exclude_form_factor_size() == 0) {
     return true;
+  }
 
   // Allow the |form_factor| if it's in the allowlist.
   // Note if both are specified, the excludelist is ignored. We do not expect
   // both to be present for Chrome due to server-side checks.
-  if (filter.form_factor_size() > 0)
-    return base::Contains(filter.form_factor(), form_factor);
+  if (filter.form_factor_size() > 0) {
+    return std::ranges::contains(filter.form_factor(), form_factor);
+  }
 
   // Omit if there is a matching excludelist entry.
-  return !base::Contains(filter.exclude_form_factor(), form_factor);
+  return !std::ranges::contains(filter.exclude_form_factor(), form_factor);
 }
 
 bool CheckStudyCpuArchitecture(const Study::Filter& filter,
@@ -73,11 +112,13 @@ bool CheckStudyCpuArchitecture(const Study::Filter& filter,
   // Allow the |cpu_architecture| if it's in the allowlist.
   // Note if both are specified, the excludelist is ignored. We do not expect
   // both to be present for Chrome due to server-side checks.
-  if (filter.cpu_architecture_size() > 0)
-    return base::Contains(filter.cpu_architecture(), cpu_architecture);
+  if (filter.cpu_architecture_size() > 0) {
+    return std::ranges::contains(filter.cpu_architecture(), cpu_architecture);
+  }
 
   // Omit if there is a matching excludelist entry.
-  return !base::Contains(filter.exclude_cpu_architecture(), cpu_architecture);
+  return !std::ranges::contains(filter.exclude_cpu_architecture(),
+                                cpu_architecture);
 }
 
 bool CheckStudyHardwareClass(const Study::Filter& filter,
@@ -105,43 +146,62 @@ bool CheckStudyHardwareClass(const Study::Filter& filter,
                                         hardware_class);
 }
 
+bool CheckStudyHardwareManufacturer(const Study::Filter& filter,
+                                    const std::string& hardware_manufacturer) {
+  // If both filters are empty, match all values.
+  if (filter.hardware_manufacturer_size() == 0 &&
+      filter.exclude_hardware_manufacturer_size() == 0) {
+    return true;
+  }
+
+  // Allow the |hardware_manufacturer| if it's in the allowlist.
+  if (filter.hardware_manufacturer_size() > 0) {
+    return ContainsStringIgnoreCaseASCII(filter.hardware_manufacturer(),
+                                         hardware_manufacturer);
+  }
+
+  // Omit if there is a matching excludelist entry.
+  return !ContainsStringIgnoreCaseASCII(filter.exclude_hardware_manufacturer(),
+                                        hardware_manufacturer);
+}
+
 bool CheckStudyLocale(const Study::Filter& filter, const std::string& locale) {
   // If both filters are empty, match all values.
-  if (filter.locale_size() == 0 && filter.exclude_locale_size() == 0)
+  if (filter.locale_size() == 0 && filter.exclude_locale_size() == 0) {
     return true;
+  }
 
   // Allow the |locale| if it's in the allowlist.
   // Note if both are specified, the excludelist is ignored. We do not expect
   // both to be present for Chrome due to server-side checks.
-  if (filter.locale_size() > 0)
-    return base::Contains(filter.locale(), locale);
+  if (filter.locale_size() > 0) {
+    return std::ranges::contains(filter.locale(), locale);
+  }
 
   // Omit if there is a matching excludelist entry.
-  return !base::Contains(filter.exclude_locale(), locale);
+  return !std::ranges::contains(filter.exclude_locale(), locale);
 }
 
 bool CheckStudyCountry(const Study::Filter& filter,
                        const std::string& country) {
   // If both filters are empty, match all values.
-  if (filter.country_size() == 0 && filter.exclude_country_size() == 0)
+  if (filter.country_size() == 0 && filter.exclude_country_size() == 0) {
     return true;
+  }
 
   // Allow the |country| if it's in the allowlist.
   // Note if both are specified, the excludelist is ignored. We do not expect
   // both to be present for Chrome due to server-side checks.
-  if (filter.country_size() > 0)
-    return base::Contains(filter.country(), country);
+  if (filter.country_size() > 0) {
+    return std::ranges::contains(filter.country(), country);
+  }
 
   // Omit if there is a matching excludelist entry.
-  return !base::Contains(filter.exclude_country(), country);
+  return !std::ranges::contains(filter.exclude_country(), country);
 }
 
 bool CheckStudyPlatform(const Study::Filter& filter, Study::Platform platform) {
-  for (int i = 0; i < filter.platform_size(); ++i) {
-    if (filter.platform(i) == platform)
-      return true;
-  }
-  return false;
+  return std::ranges::contains(filter.platform(), platform);
 }
 
 bool CheckStudyLowEndDevice(const Study::Filter& filter,
@@ -192,13 +252,15 @@ bool CheckStudyEndDate(const Study::Filter& filter,
 bool CheckStudyVersion(const Study::Filter& filter,
                        const base::Version& version) {
   if (filter.has_min_version()) {
-    if (version.CompareToWildcardString(filter.min_version()) < 0)
+    if (version.CompareToWildcardString(filter.min_version()) < 0) {
       return false;
+    }
   }
 
   if (filter.has_max_version()) {
-    if (version.CompareToWildcardString(filter.max_version()) > 0)
+    if (version.CompareToWildcardString(filter.max_version()) > 0) {
       return false;
+    }
   }
 
   return true;
@@ -230,33 +292,17 @@ bool CheckStudyEnterprise(const Study::Filter& filter,
 }
 
 bool CheckStudyGoogleGroup(const Study::Filter& filter,
-                           const std::set<uint64_t>& client_groups) {
-  if (filter.google_group().size() > 0 &&
-      filter.exclude_google_group().size() > 0) {
-    // This is an invalid configuration; reject the study.
-    return false;
-  }
+                           const ClientFilterableState& client_state) {
+  return CheckStudyGroup<int64_t>(filter.google_group(),
+                                  filter.exclude_google_group(),
+                                  client_state.GoogleGroups());
+}
 
-  if (filter.google_group().size() > 0) {
-    for (int64_t filter_group : filter.google_group()) {
-      if (base::Contains(client_groups, filter_group)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  if (filter.exclude_google_group().size() > 0) {
-    for (int64_t filter_exclude_group : filter.exclude_google_group()) {
-      if (base::Contains(client_groups, filter_exclude_group)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  // No group filters specified.
-  return true;
+bool CheckStudyEnterpriseGroup(const Study::Filter& filter,
+                               const ClientFilterableState& client_state) {
+  return CheckStudyGroup<std::string>(filter.enterprise_group(),
+                                      filter.exclude_enterprise_group(),
+                                      client_state.EnterpriseGroups());
 }
 
 const std::string& GetClientCountryForStudy(
@@ -272,6 +318,15 @@ const std::string& GetClientCountryForStudy(
       // effects, this helps to avoid annoying users with experimental group
       // churn while traveling.
       return client_state.permanent_consistency_country;
+    // Note: Study_Consistency is an OPEN proto enum, so the below values appear
+    // in the generated code to indicate the field could have other values.
+    // However, we validate this in processed_study.cc to reject such studies,
+    // so in practice, only the cases above will be seen. We list them here
+    // instead of a "default" case to still get the benefit of the compiler
+    // reminding us to update this code if a new enum value is added.
+    case Study_Consistency_Study_Consistency_INT_MIN_SENTINEL_DO_NOT_USE_:
+    case Study_Consistency_Study_Consistency_INT_MAX_SENTINEL_DO_NOT_USE_:
+      break;
   }
 
   // Unless otherwise specified, use an empty country that won't pass any
@@ -284,28 +339,34 @@ bool ShouldAddStudy(const ProcessedStudy& processed_study,
                     const ClientFilterableState& client_state,
                     const VariationsLayers& layers) {
   const Study& study = *processed_study.study();
-  if (study.has_expiry_date()) {
-    DVLOG(1) << "Filtered out study " << study.name()
-             << " due to unsupported expiry_date field.";
-    return false;
-  }
-
   if (study.has_layer()) {
-    if (!layers.IsLayerMemberActive(study.layer().layer_id(),
-                                    study.layer().layer_member_id())) {
+    if (!layers.IsLayerMemberActive(study.layer())) {
       DVLOG(1) << "Filtered out study " << study.name()
                << " due to layer member not being active.";
       return false;
     }
 
-    if (processed_study.ShouldStudyUseLowEntropy() &&
+    if (!VariationsLayers::AllowsHighEntropy(study) &&
         layers.ActiveLayerMemberDependsOnHighEntropy(
             study.layer().layer_id())) {
-      DVLOG(1) << "Filtered out study " << study.name()
-               << " due to requiring a low entropy source yet being a member "
-                  "of a layer using the default entropy source.";
+      DVLOG(1)
+          << "Filtered out study " << study.name()
+          << " due to not allowing a high entropy source yet being a member "
+             "of a layer using the default (high) entropy source.";
       return false;
     }
+  }
+
+  // Check policy restrictions regardless of if the study has a filter or not.
+  // (E.g. if policies dictate that no studies should apply, then fitlerless
+  // studies should not apply).
+  // Note: a filterless study will default to having a policy_restriction of
+  // NONE.
+  if (!CheckStudyPolicyRestriction(study.filter(),
+                                    client_state.policy_restriction)) {
+    DVLOG(1) << "Filtered out study " << study.name()
+              << " due to policy restriction.";
+    return false;
   }
 
   if (study.has_filter()) {
@@ -359,17 +420,17 @@ bool ShouldAddStudy(const ProcessedStudy& processed_study,
       return false;
     }
 
+    if (!CheckStudyHardwareManufacturer(study.filter(),
+                                        client_state.hardware_manufacturer)) {
+      DVLOG(1) << "Filtered out study " << study.name()
+               << " due to hardware_manufacturer.";
+      return false;
+    }
+
     if (!CheckStudyLowEndDevice(study.filter(),
                                 client_state.is_low_end_device)) {
       DVLOG(1) << "Filtered out study " << study.name()
                << " due to is_low_end_device.";
-      return false;
-    }
-
-    if (!CheckStudyPolicyRestriction(study.filter(),
-                                     client_state.policy_restriction)) {
-      DVLOG(1) << "Filtered out study " << study.name()
-               << " due to policy restriction.";
       return false;
     }
 
@@ -393,9 +454,15 @@ bool ShouldAddStudy(const ProcessedStudy& processed_study,
       return false;
     }
 
-    if (!CheckStudyGoogleGroup(study.filter(), client_state.google_groups)) {
+    if (!CheckStudyGoogleGroup(study.filter(), client_state)) {
       DVLOG(1) << "Filtered out study " << study.name()
                << " due to Google groups membership checks.";
+      return false;
+    }
+
+    if (!CheckStudyEnterpriseGroup(study.filter(), client_state)) {
+      DVLOG(1) << "Filtered out study " << study.name()
+               << " due to enterprise groups membership checks.";
       return false;
     }
   }
@@ -409,28 +476,55 @@ bool ShouldAddStudy(const ProcessedStudy& processed_study,
 std::vector<ProcessedStudy> FilterAndValidateStudies(
     const VariationsSeed& seed,
     const ClientFilterableState& client_state,
-    const VariationsLayers& layers) {
+    const VariationsLayers& layers,
+    std::optional<base::FunctionRef<bool(const Study&)>> study_filter) {
   DCHECK(client_state.version.IsValid());
 
   std::vector<ProcessedStudy> filtered_studies;
+  filtered_studies.reserve(seed.study_size());
 
   // Don't create two studies with the same name.
-  std::set<std::string> created_studies;
+  // These `string_view`s contain pointers which point to memory owned by
+  // `seed`.
+  std::set<std::string_view, std::less<>> created_studies;
 
-  for (int i = 0; i < seed.study_size(); ++i) {
-    const Study& study = seed.study(i);
-    ProcessedStudy processed_study;
-    if (!processed_study.Init(&study))
+  for (const Study& study : seed.study()) {
+    if (study_filter && !(*study_filter)(study)) {
       continue;
-
-    if (!internal::ShouldAddStudy(processed_study, client_state, layers))
-      continue;
-
-    if (!base::Contains(created_studies, processed_study.study()->name())) {
-      filtered_studies.push_back(processed_study);
-      created_studies.insert(processed_study.study()->name());
     }
+
+    ProcessedStudy processed_study;
+    if (!processed_study.Init(&study)) {
+      continue;
+    }
+
+    if (!internal::ShouldAddStudy(processed_study, client_state, layers)) {
+      continue;
+    }
+
+    auto [it, inserted] =
+        created_studies.insert(processed_study.study()->name());
+    if (!inserted) {
+      // The study's name is already in `created_studies`, which means that a
+      // study with the same name was already added to `filtered_studies`.
+      continue;
+    }
+
+    filtered_studies.push_back(processed_study);
   }
+
+  // Reorder the studies so that kRuntimeMonitoringStudyName is processed
+  // first. (Note: stable_partition preserves the relative order of elements, so
+  // the order is still deterministic for a given seed).
+  // kRuntimeMonitoringStudyName is processed first because it is used to
+  // monitor the health of newly deployed seeds. This ensures that crash reports
+  // will properly report the newest group in case the application of a
+  // subsequent study is crashy.
+  std::ranges::stable_partition(
+      filtered_studies, [](const ProcessedStudy& study) {
+        return study.study()->name() == kRuntimeMonitoringStudyName;
+      });
+
   return filtered_studies;
 }
 

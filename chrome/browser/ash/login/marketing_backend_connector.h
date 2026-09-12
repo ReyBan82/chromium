@@ -6,11 +6,13 @@
 #define CHROME_BROWSER_ASH_LOGIN_MARKETING_BACKEND_CONNECTOR_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "chrome/browser/profiles/profile.h"
@@ -19,6 +21,10 @@
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
+
+namespace signin {
+class IdentityManager;
+}  // namespace signin
 
 namespace ash {
 
@@ -53,7 +59,10 @@ class MarketingBackendConnector
   friend class ScopedRequestCallbackSetter;
   friend class base::RefCountedThreadSafe<MarketingBackendConnector>;
 
-  explicit MarketingBackendConnector(Profile* user_profile);
+  // `profile` and its `identity_manager` must not be nullptr, and must outlive
+  // this.
+  MarketingBackendConnector(Profile* profile,
+                            signin::IdentityManager* identity_manager);
   virtual ~MarketingBackendConnector();
 
   // Sends a request to the server to subscribe the user to all campaigns.
@@ -70,7 +79,7 @@ class MarketingBackendConnector
   void SetTokenAndStartRequest();
 
   // Handles responses from the SimpleURLLoader
-  void OnSimpleLoaderComplete(std::unique_ptr<std::string> response_body);
+  void OnSimpleLoaderComplete(std::optional<std::string> response_body);
   void OnSimpleLoaderCompleteInternal(int response_code,
                                       const std::string& data);
 
@@ -78,12 +87,14 @@ class MarketingBackendConnector
   // the language.
   std::string GetRequestContent();
 
+  const raw_ptr<Profile> profile_ = nullptr;
+  const raw_ref<signin::IdentityManager> identity_manager_;
+
   // Internal
   std::unique_ptr<signin::PrimaryAccountAccessTokenFetcher> token_fetcher_;
   std::unique_ptr<network::SimpleURLLoader> simple_url_loader_;
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
   std::string access_token_;
-  Profile* profile_ = nullptr;
 
   static base::RepeatingCallback<void(std::string)>*
       request_finished_for_tests_;

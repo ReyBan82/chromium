@@ -4,6 +4,10 @@
 
 #include "services/device/hid/hid_service_win.h"
 
+#include <string_view>
+
+#include "services/device/public/mojom/hid.mojom.h"
+
 #define INITGUID
 
 #include <dbt.h>
@@ -13,12 +17,17 @@
 #include <wdmguid.h>
 #include <winioctl.h>
 
+// LogSeverity is both a macro in setupapi.h and an enum in absl, which is used
+// indirectly via //base.
+#undef LogSeverity
+
 #include <algorithm>
 #include <limits>
 #include <memory>
 #include <set>
 #include <utility>
 
+#include "base/command_line.h"
 #include "base/files/file.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
@@ -31,11 +40,14 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/win/scoped_devinfo.h"
-#include "base/win/win_util.h"
+#include "base/win/windows_handle_util.h"
 #include "components/device_event_log/device_event_log.h"
 #include "services/device/hid/hid_connection_win.h"
 #include "services/device/hid/hid_device_info.h"
 #include "services/device/hid/hid_preparsed_data.h"
+#include "services/device/public/cpp/hid/hid_switches.h"
+#include "services/device/public/proto/hid_gcpw.pb.h"
+#include "services/device/utils/setupdi_utils_win.h"
 
 namespace device {
 
@@ -66,74 +78,6 @@ void UnpackBitField(uint16_t bit_field, mojom::HidReportItem* item) {
   item->has_null_position = bit_field & kBitFieldFlagHasNullPosition;
   item->is_volatile = bit_field & kBitFieldFlagVolatile;
   item->is_buffered_bytes = bit_field & kBitFieldFlagBufferedBytes;
-}
-
-// Looks up the value of a string device property specified by |property_key|
-// for the device described by |device_info_data|. On success, returns the
-// property value as a wstring. Returns absl::nullopt if the property is not
-// present or has a different type.
-absl::optional<std::wstring> GetDeviceStringProperty(
-    HDEVINFO device_info_set,
-    SP_DEVINFO_DATA& device_info_data,
-    const DEVPROPKEY& property_key) {
-  DEVPROPTYPE property_type;
-  DWORD required_size;
-  if (SetupDiGetDeviceProperty(device_info_set, &device_info_data,
-                               &property_key, &property_type,
-                               /*PropertyBuffer=*/nullptr,
-                               /*PropertyBufferSize=*/0, &required_size,
-                               /*Flags=*/0)) {
-    HID_LOG(DEBUG) << "SetupDiGetDeviceProperty unexpectedly succeeded.";
-    return absl::nullopt;
-  }
-
-  DWORD last_error = GetLastError();
-  if (last_error == ERROR_NOT_FOUND)
-    return absl::nullopt;
-
-  if (last_error != ERROR_INSUFFICIENT_BUFFER) {
-    HID_PLOG(DEBUG) << "SetupDiGetDeviceProperty failed";
-    return absl::nullopt;
-  }
-
-  if (property_type != DEVPROP_TYPE_STRING)
-    return absl::nullopt;
-
-  std::wstring property_buffer;
-  if (!SetupDiGetDeviceProperty(
-          device_info_set, &device_info_data, &property_key, &property_type,
-          reinterpret_cast<PBYTE>(
-              base::WriteInto(&property_buffer, required_size)),
-          required_size, /*RequiredSize=*/nullptr, /*Flags=*/0)) {
-    HID_PLOG(DEBUG) << "SetupDiGetDeviceProperty failed";
-    return absl::nullopt;
-  }
-
-  return property_buffer;
-}
-
-// Looks up the value of a GUID-type device property specified by |property| for
-// the device described by |device_info_data|. On success, returns the property
-// value as a string. Returns absl::nullopt if the property is not present or
-// has a different type.
-absl::optional<std::string> GetDeviceGuidProperty(
-    HDEVINFO device_info_set,
-    SP_DEVINFO_DATA& device_info_data,
-    const DEVPROPKEY& property_key) {
-  DEVPROPTYPE property_type;
-  GUID property_buffer;
-  if (!SetupDiGetDeviceProperty(
-          device_info_set, &device_info_data, &property_key, &property_type,
-          reinterpret_cast<PBYTE>(&property_buffer), sizeof(property_buffer),
-          /*RequiredSize=*/nullptr, /*Flags=*/0)) {
-    HID_PLOG(DEBUG) << "SetupDiGetDeviceProperty failed";
-    return absl::nullopt;
-  }
-
-  if (property_type != DEVPROP_TYPE_GUID)
-    return absl::nullopt;
-
-  return base::SysWideToUTF8(base::win::WStringFromGUID(property_buffer));
 }
 
 // Looks up information about the device described by |device_interface_data|
@@ -219,7 +163,7 @@ base::win::ScopedDevInfo GetDeviceInfoSetFromDevicePath(
 // Returns the instance ID of the parent of the device described by
 // |device_interface_data| in |device_info_set|. Returns nullopt if the parent
 // instance ID could not be retrieved.
-absl::optional<std::wstring> GetParentInstanceId(
+std::optional<std::wstring> GetParentInstanceId(
     HDEVINFO device_info_set,
     SP_DEVICE_INTERFACE_DATA& device_interface_data) {
   // Get device info for |device_interface_data|.
@@ -227,21 +171,22 @@ absl::optional<std::wstring> GetParentInstanceId(
   std::wstring device_path;
   if (!GetDeviceInfoAndPathFromInterface(device_info_set, device_interface_data,
                                          &device_info_data, &device_path)) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Get the parent instance ID.
-  auto instance_id = GetDeviceStringProperty(device_info_set, device_info_data,
-                                             DEVPKEY_Device_Parent);
+  auto instance_id = GetDeviceStringProperty(device_info_set, &device_info_data,
+                                             DEVPKEY_Device_Parent,
+                                             device_event_log::LOG_TYPE_HID);
   if (!instance_id)
-    return absl::nullopt;
+    return std::nullopt;
 
   // Canonicalize the instance ID.
   DCHECK(base::IsStringASCII(*instance_id));
   instance_id = base::ToLowerASCII(*instance_id);
   // Remove trailing NUL bytes.
   return std::wstring(base::TrimString(
-      *instance_id, base::WStringPiece(L"\0", 1), base::TRIM_TRAILING));
+      *instance_id, std::wstring_view(L"\0", 1), base::TRIM_TRAILING));
 }
 
 mojom::HidReportItemPtr CreateHidReportItem(
@@ -298,7 +243,7 @@ std::vector<mojom::HidReportDescriptionPtr> CreateReportDescriptions(
   auto report_items = preparsed_data.GetReportItems(report_type);
 
   // Sort items by |report_id| and |bit_index|.
-  base::ranges::sort(report_items, [](const auto& a, const auto& b) {
+  std::ranges::sort(report_items, [](const auto& a, const auto& b) {
     if (a.report_id < b.report_id)
       return true;
     if (a.report_id == b.report_id)
@@ -380,7 +325,7 @@ std::string GetHidProductString(HANDLE device_handle) {
   // HidD_GetProductString is guaranteed to write a NUL-terminated string into
   // |buffer|. The characters following the string were value-initialized by
   // base::WriteInto and are also NUL. Trim the trailing NUL characters.
-  buffer = std::wstring(base::TrimString(buffer, base::WStringPiece(L"\0", 1),
+  buffer = std::wstring(base::TrimString(buffer, std::wstring_view(L"\0", 1),
                                          base::TRIM_TRAILING));
   return base::SysWideToUTF8(buffer);
 }
@@ -398,7 +343,7 @@ std::string GetHidSerialNumberString(HANDLE device_handle) {
   // HidD_GetSerialNumberString is guaranteed to write a NUL-terminated string
   // into |buffer|. The characters following the string were value-initialized
   // by base::WriteInto and are also NUL. Trim the trailing NUL characters.
-  buffer = std::wstring(base::TrimString(buffer, base::WStringPiece(L"\0", 1),
+  buffer = std::wstring(base::TrimString(buffer, std::wstring_view(L"\0", 1),
                                          base::TRIM_TRAILING));
   return base::SysWideToUTF8(buffer);
 }
@@ -411,6 +356,7 @@ HidServiceWin::PreparsedData::CreateHidCollectionInfo() const {
   auto collection_info = mojom::HidCollectionInfo::New();
   collection_info->usage =
       mojom::HidUsageAndPage::New(caps.Usage, caps.UsagePage);
+  collection_info->collection_type = mojom::kHIDCollectionTypeApplication;
   collection_info->input_reports = CreateReportDescriptions(*this, HidP_Input);
   collection_info->output_reports =
       CreateReportDescriptions(*this, HidP_Output);
@@ -452,7 +398,6 @@ uint16_t HidServiceWin::PreparsedData::GetReportByteLength(
       break;
     default:
       NOTREACHED();
-      break;
   }
   // Whether or not the device includes report IDs in its reports the size
   // of the report ID is included in the value provided by Windows. This
@@ -496,7 +441,7 @@ void HidServiceWin::Connect(const std::string& device_guid,
   std::vector<std::unique_ptr<HidConnectionWin::HidDeviceEntry>> file_handles;
   for (const auto& entry : platform_device_id_map) {
     base::win::ScopedHandle file_handle(OpenDevice(entry.platform_device_id));
-    if (!file_handle.IsValid()) {
+    if (!file_handle.is_valid()) {
       HID_PLOG(DEBUG) << "Failed to open device with deviceId='"
                       << entry.platform_device_id << "'";
       continue;
@@ -550,7 +495,8 @@ void HidServiceWin::EnumerateBlocking(
 
       // Get the container ID for the physical device.
       auto physical_device_id = GetDeviceGuidProperty(
-          device_info_set.get(), device_info_data, DEVPKEY_Device_ContainerId);
+          device_info_set.get(), &device_info_data, DEVPKEY_Device_ContainerId,
+          device_event_log::LOG_TYPE_HID);
       if (!physical_device_id)
         continue;
 
@@ -569,6 +515,77 @@ void HidServiceWin::EnumerateBlocking(
       base::BindOnce(&HidServiceWin::FirstEnumerationComplete, service));
 }
 
+HANDLE HidServiceWin::OpenDeviceThroughGcpw(std::wstring_view device_path) {
+  HID_LOG(ERROR) << "Going to open device through GCPW. " << device_path;
+  // LINT.IfChange
+  HANDLE pipe_handle = GetStdHandle(STD_INPUT_HANDLE);
+  if (pipe_handle == INVALID_HANDLE_VALUE) {
+    return INVALID_HANDLE_VALUE;
+  }
+
+  gcpw::HidOpenDeviceGcpwRequest request;
+  request.set_device_path(base::WideToUTF8(device_path));
+  std::vector<uint8_t> request_buffer(request.ByteSizeLong());
+  request.SerializeToArray(request_buffer.data(), request_buffer.size());
+
+  // First write the size of the message, then the message itself.
+  DWORD buffer_size = request_buffer.size();
+  DWORD bytes_written;
+  if (!WriteFile(pipe_handle, &buffer_size, sizeof(buffer_size), &bytes_written,
+                 nullptr) ||
+      bytes_written != sizeof(buffer_size)) {
+    return INVALID_HANDLE_VALUE;
+  }
+  if (buffer_size > 0) {
+    if (!WriteFile(pipe_handle, request_buffer.data(), buffer_size,
+                   &bytes_written, nullptr) ||
+        bytes_written != buffer_size) {
+      return INVALID_HANDLE_VALUE;
+    }
+  }
+
+  DWORD response_size;
+  DWORD bytes_read;
+  if (!ReadFile(pipe_handle, &response_size, sizeof(response_size), &bytes_read,
+                nullptr) ||
+      bytes_read != sizeof(response_size)) {
+    return INVALID_HANDLE_VALUE;
+  }
+  std::vector<uint8_t> response_buffer(response_size);
+  if (response_size > 0) {
+    if (!ReadFile(pipe_handle, response_buffer.data(), response_size,
+                  &bytes_read, nullptr) ||
+        bytes_read != response_size) {
+      return INVALID_HANDLE_VALUE;
+    }
+  }
+
+  gcpw::HidOpenDeviceGcpwResponse response;
+  if (!response.ParseFromArray(response_buffer.data(),
+                               response_buffer.size())) {
+    return INVALID_HANDLE_VALUE;
+  }
+
+  if (response.has_device_handle()) {
+    return base::win::Uint32ToHandle(response.device_handle());
+  }
+
+  return INVALID_HANDLE_VALUE;
+  // LINT.ThenChange(//chrome/credential_provider/gaiacp/gaia_credential_base.cc)
+}
+
+uint16_t HidServiceWin::GetUsagePage(HANDLE device_handle) {
+  if (device_handle == INVALID_HANDLE_VALUE) {
+    return 0;
+  }
+  auto preparsed_data = HidPreparsedData::Create(device_handle);
+  if (!preparsed_data) {
+    HID_LOG(ERROR) << "GCPW: Failed to get preparsed data for handle.";
+    return 0;
+  }
+  return preparsed_data->GetCaps().UsagePage;
+}
+
 // static
 void HidServiceWin::AddDeviceBlocking(
     base::WeakPtr<HidServiceWin> service,
@@ -577,8 +594,9 @@ void HidServiceWin::AddDeviceBlocking(
     const std::string& physical_device_id,
     const std::wstring& interface_id) {
   base::win::ScopedHandle device_handle(OpenDevice(device_path));
-  if (!device_handle.IsValid())
+  if (!device_handle.is_valid()) {
     return;
+  }
 
   auto preparsed_data = HidPreparsedData::Create(device_handle.Get());
   if (!preparsed_data)
@@ -610,7 +628,7 @@ void HidServiceWin::AddDeviceBlocking(
   auto device_info = base::MakeRefCounted<HidDeviceInfo>(
       device_path, physical_device_id, base::SysWideToUTF8(interface_id),
       vendor_id, product_id, product_string, serial_number,
-      // TODO(crbug.com/443335): Detect Bluetooth.
+      // TODO(crbug.com/40398791): Detect Bluetooth.
       mojom::HidBusType::kHIDBusTypeUSB, std::move(collection),
       max_input_report_size, max_output_report_size, max_feature_report_size);
 
@@ -639,7 +657,8 @@ void HidServiceWin::OnDeviceAdded(const GUID& class_guid,
 
   // Get the container ID for the physical device.
   auto physical_device_id = GetDeviceGuidProperty(
-      device_info_set.get(), device_info_data, DEVPKEY_Device_ContainerId);
+      device_info_set.get(), &device_info_data, DEVPKEY_Device_ContainerId,
+      device_event_log::LOG_TYPE_HID);
   if (!physical_device_id)
     return;
 
@@ -669,15 +688,41 @@ void HidServiceWin::OnDeviceRemoved(const GUID& class_guid,
 // static
 base::win::ScopedHandle HidServiceWin::OpenDevice(
     const std::wstring& device_path) {
-  base::win::ScopedHandle file(
-      CreateFile(device_path.c_str(), GENERIC_WRITE | GENERIC_READ,
-                 FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                 FILE_FLAG_OVERLAPPED, nullptr));
-  if (!file.IsValid() && GetLastError() == ERROR_ACCESS_DENIED) {
-    file.Set(CreateFile(device_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                        nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr));
+  base::win::ScopedHandle file;
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kGcpwSigninSwitch)) {
+    file.Set(OpenDeviceThroughGcpw(device_path));
+    // LINT.IfChange
+    if (file.is_valid()) {
+      uint16_t usage_page = GetUsagePage(file.Get());
+      if (usage_page != mojom::kPageFido) {
+        file.Close();
+      }
+    }
+    // LINT.ThenChange(//chrome/credential_provider/gaiacp/gcp_utils.cc)
+    return file;
+  }
+
+  // LINT.IfChange
+  constexpr DWORD kDesiredAccessModes[] = {
+      // Request read and write access.
+      GENERIC_WRITE | GENERIC_READ,
+      // Request read-only access.
+      GENERIC_READ,
+      // Don't request read or write access.
+      0,
+  };
+  for (const auto& desired_access : kDesiredAccessModes) {
+    file.Set(CreateFile(device_path.c_str(), desired_access,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        /*lpSecurityAttributes=*/nullptr, OPEN_EXISTING,
+                        FILE_FLAG_OVERLAPPED, /*hTemplateFile=*/nullptr));
+    if (file.is_valid() || GetLastError() != ERROR_ACCESS_DENIED) {
+      break;
+    }
   }
   return file;
+  // LINT.ThenChange(//chrome/credential_provider/gaiacp/os_device_manager.cc)
 }
 
 }  // namespace device

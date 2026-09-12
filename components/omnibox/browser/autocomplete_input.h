@@ -7,18 +7,27 @@
 
 #include <stddef.h>
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/lens/proto/server/lens_overlay_response.pb.h"
+#include "components/omnibox/common/input_state.h"
+#include "components/search_engines/search_terms_data.h"
 #include "third_party/metrics_proto/omnibox_event.pb.h"
 #include "third_party/metrics_proto/omnibox_focus_type.pb.h"
 #include "third_party/metrics_proto/omnibox_input_type.pb.h"
+#include "third_party/omnibox_proto/chrome_searchbox_stats.pb.h"
+#include "third_party/omnibox_proto/suggest_inventory.pb.h"
+#include "third_party/omnibox_proto/tool_mode.pb.h"
 #include "third_party/perfetto/include/perfetto/tracing/traced_value_forward.h"
 #include "url/gurl.h"
 #include "url/third_party/mozilla/url_parse.h"
 
 class AutocompleteSchemeClassifier;
+class TemplateURL;
+class TemplateURLService;
 
 // The user input for an autocomplete query.  Allows copying.
 class AutocompleteInput {
@@ -82,7 +91,7 @@ class AutocompleteInput {
   // canonicalized URL is stored in |canonicalized_url|; however, this URL is
   // not guaranteed to be valid, especially if the parsed type is, e.g., QUERY.
   static metrics::OmniboxInputType Parse(
-      const std::u16string& text,
+      std::u16string_view text,
       const std::string& desired_tld,
       const AutocompleteSchemeClassifier& scheme_classifier,
       url::Parsed* parts,
@@ -94,7 +103,7 @@ class AutocompleteInput {
   // is view-source, this function returns the positions of scheme and host
   // in the URL qualified by "view-source:" prefix.
   static void ParseForEmphasizeComponents(
-      const std::u16string& text,
+      std::u16string_view text,
       const AutocompleteSchemeClassifier& scheme_classifier,
       url::Component* scheme,
       url::Component* host);
@@ -134,6 +143,75 @@ class AutocompleteInput {
   // Returns whether |text| begins with "https:" or "view-source:https:".
   static bool HasHTTPSScheme(const std::u16string& text);
 
+  // Whether the text might be matching featured keyword suggestions.
+  enum class FeaturedKeywordMode {
+    kFalse,   // `text_` doesn't start with '@'.
+    kPrefix,  // `text_` starts with '@'.
+    kExact,   // `text_` is exactly '@'.
+  };
+  static FeaturedKeywordMode GetFeaturedKeywordMode(std::u16string_view text);
+
+  // Returns the matching substituting keyword for `input`, or NULL if there
+  // is no keyword for the specified input.  If the matching keyword was found,
+  // updates `input`'s text and cursor position.
+  // `model` must be non-null.
+  static const TemplateURL* GetSubstitutingTemplateURLForInput(
+      const TemplateURLService* model,
+      AutocompleteInput* input);
+
+  // Extracts the keyword from |input| into |keyword|. Any remaining characters
+  // after the keyword are placed in |remaining_input|. Returns true if |input|
+  // is valid and has a keyword. This makes use of SplitKeywordFromInput() to
+  // extract the keyword and remaining string, and uses |template_url_service|
+  // to validate and clean up the extracted keyword (e.g., to remove unnecessary
+  // characters).
+  // In general use this instead of SplitKeywordFromInput().
+  // Leading whitespace in |*remaining_input| will be trimmed.
+  // |template_url_service| must be non-null.
+  static bool ExtractKeywordFromInput(
+      const AutocompleteInput& input,
+      const TemplateURLService* template_url_service,
+      std::u16string* keyword,
+      std::u16string* remaining_input);
+
+  // Returns the replacement string from the user input. The replacement
+  // string is the portion of the input that does not contain the keyword.
+  // For example, the replacement string for "b blah" is blah.
+  // If |trim_leading_whitespace| is true then leading whitespace in
+  // replacement string will be trimmed.
+  static std::u16string SplitReplacementStringFromInput(
+      std::u16string_view input,
+      bool trim_leading_whitespace);
+
+  // Removes any unnecessary characters from a user input keyword, returning
+  // the resulting keyword.  Usually this means it does transformations such as
+  // removing any leading scheme, "www." and trailing slash and returning the
+  // resulting string regardless of whether it's a registered keyword.
+  // However, if a |template_url_service| is provided and the function finds a
+  // registered keyword at any point before finishing those transformations,
+  // it'll return that keyword.
+  // |template_url_service| must be non-null.
+  static std::u16string CleanUserInputKeyword(
+      const TemplateURLService* template_url_service,
+      const std::u16string& keyword);
+
+  // Extracts the next whitespace-delimited token from input and returns it.
+  // Sets |remaining_input| to everything after the first token (skipping over
+  // the first intervening whitespace).
+  // If |trim_leading_whitespace| is true then leading whitespace in
+  // |*remaining_input| will be trimmed.
+  static std::u16string SplitKeywordFromInput(std::u16string_view input,
+                                              bool trim_leading_whitespace,
+                                              std::u16string* remaining_input);
+
+  // Null-terminated array of characters that are not valid within `contents`
+  // and `description` strings.
+  static const char16_t kInvalidChars[];
+
+  // Removes invalid characters from `text`.
+  static std::u16string SanitizeString(std::u16string_view text,
+                                       bool trim_whitespace = true);
+
   // User-provided text to be completed.
   const std::u16string& text() const { return text_; }
 
@@ -157,17 +235,36 @@ class AutocompleteInput {
   // The title of the current page, corresponding to the current URL, or empty
   // if this is not available.
   const std::u16string& current_title() const { return current_title_; }
-  // This is sometimes set as the description if returning a
-  // URL-what-you-typed match for the current URL.
-  void set_current_title(const std::u16string& title) {
-    current_title_ = title;
-  }
+  // This is sometimes set as the description if returning a URL-what-you-typed
+  // match for the current URL. Titles are sanitized at set time.
+  void set_current_title(const std::u16string& title);
 
   // The type of page that is currently behind displayed and how it is
   // displayed (e.g., with search term replacement or without).
   metrics::OmniboxEventProto::PageClassification current_page_classification()
       const {
     return current_page_classification_;
+  }
+
+  // The Suggest or Search request source. Determines the client= (for Suggest
+  // request URLs) and source= or sourceid= (for Search request URLs).
+  SearchTermsData::RequestSource request_source() const {
+    switch (current_page_classification()) {
+      case metrics::OmniboxEventProto::CONTEXTUAL_SEARCHBOX:
+      case metrics::OmniboxEventProto::SEARCH_SIDE_PANEL_SEARCHBOX:
+      case metrics::OmniboxEventProto::LENS_SIDE_PANEL_SEARCHBOX:
+        return SearchTermsData::RequestSource::LENS_OVERLAY;
+      case metrics::OmniboxEventProto::NTP_COMPOSEBOX:
+      case metrics::OmniboxEventProto::LENS_SIDE_PANEL_COMPOSEBOX:
+      case metrics::OmniboxEventProto::NTP_OMNIBOX_COMPOSEBOX:
+      case metrics::OmniboxEventProto::SRP_OMNIBOX_COMPOSEBOX:
+      case metrics::OmniboxEventProto::OTHER_OMNIBOX_COMPOSEBOX:
+      case metrics::OmniboxEventProto::CO_BROWSING_COMPOSEBOX:
+      case metrics::OmniboxEventProto::COMPOSEBOX_EVERYWHERE:
+        return SearchTermsData::RequestSource::COMPOSEBOX;
+      default:
+        return SearchTermsData::RequestSource::SEARCHBOX;
+    }
   }
 
   // The type of input supplied.
@@ -199,16 +296,6 @@ class AutocompleteInput {
     prevent_inline_autocomplete_ = prevent_inline_autocomplete;
   }
 
-  // Returns whether, given an input string consisting solely of a substituting
-  // keyword, we should score it like a non-substituting keyword.
-  bool prefer_keyword() const { return prefer_keyword_; }
-  // |prefer_keyword| should be true when the keyword UI is onscreen; this
-  // will bias the autocomplete result set toward the keyword provider when
-  // the input string is a bare keyword.
-  void set_prefer_keyword(bool prefer_keyword) {
-    prefer_keyword_ = prefer_keyword;
-  }
-
   // Returns whether this input is allowed to be treated as an exact
   // keyword match.  If not, the default result is guaranteed not to be a
   // keyword search, even if the input is "<keyword> <search string>".
@@ -221,18 +308,13 @@ class AutocompleteInput {
     allow_exact_keyword_match_ = allow_exact_keyword_match;
   }
 
-  // Provides public read-only access to the method that the user used to
-  // get into keyword mode (which includes INVALID if they didn't enter it.)
-  metrics::OmniboxEventProto::KeywordModeEntryMethod keyword_mode_entry_method()
-      const {
-    return keyword_mode_entry_method_;
-  }
+  // Whether the user entered keyword mode.
+  bool in_keyword_mode() const { return in_keyword_mode_; }
 
-  // Used by code handling keyword entry to set the method by which the user
-  // used to enter it.
-  void set_keyword_mode_entry_method(
-      metrics::OmniboxEventProto::KeywordModeEntryMethod entry_method) {
-    keyword_mode_entry_method_ = entry_method;
+  // Set by the edit model or driver of autocompletion to inform autocomplete
+  // providers & controller.
+  void set_in_keyword_mode(bool in_keyword_mode) {
+    in_keyword_mode_ = in_keyword_mode;
   }
 
   // Returns whether providers should avoid obtaining matches asynchronously
@@ -265,17 +347,76 @@ class AutocompleteInput {
     return terms_prefixed_by_http_or_https_;
   }
 
-  // Returns the ID of the query tile selected by the user, if any.
-  // If no tile was selected, returns absl::nullopt.
-  const absl::optional<std::string>& query_tile_id() const {
-    return query_tile_id_;
+  const std::optional<lens::proto::LensOverlaySuggestInputs>&
+  lens_overlay_suggest_inputs() const {
+    return lens_overlay_suggest_inputs_;
   }
 
-  // Called to indicate that the query tile represented by |tile_id| was
-  // clicked by the user. In the absence of a |query_tile_id_|, top level tiles
-  // will be displayed.
-  void set_query_tile_id(const std::string& tile_id) {
-    query_tile_id_ = tile_id;
+  void set_lens_overlay_suggest_inputs(
+      const lens::proto::LensOverlaySuggestInputs&
+          lens_overlay_suggest_inputs) {
+    lens_overlay_suggest_inputs_ = lens_overlay_suggest_inputs;
+  }
+
+  // Variant of the set_lens_overlay_suggest_inputs that doesn't make copies
+  // and is better aligned with the value returned by ComposeboxQueryController.
+  void set_lens_overlay_suggest_inputs(
+      std::unique_ptr<lens::proto::LensOverlaySuggestInputs>
+          lens_overlay_suggest_inputs) {
+    lens_overlay_suggest_inputs_.emplace(
+        std::move(*lens_overlay_suggest_inputs.release()));
+  }
+
+  const omnibox::InputState& input_state() const { return input_state_; }
+
+  void set_input_state(const omnibox::InputState& input_state) {
+    input_state_ = input_state;
+  }
+
+  omnibox::SuggestInventory suggest_inventory() const {
+    return suggest_inventory_;
+  }
+
+  void set_suggest_inventory(omnibox::SuggestInventory suggest_inventory) {
+    suggest_inventory_ = suggest_inventory;
+  }
+  std::u16string context_tab_title() const { return context_tab_title_; }
+
+  void set_context_tab_title(std::u16string title) {
+    context_tab_title_ = title;
+  }
+
+  GURL context_tab_url() const { return context_tab_url_; }
+
+  void set_context_tab_url(GURL url) { context_tab_url_ = url; }
+
+  const std::string& previous_query() const { return previous_query_; }
+
+  void set_previous_query(const std::string& previous_query) {
+    previous_query_ = previous_query;
+  }
+
+  std::optional<omnibox::metrics::ChromeSearchboxStats::InputMethod>
+  input_method() const {
+    return input_method_;
+  }
+  void set_input_method(
+      omnibox::metrics::ChromeSearchboxStats::InputMethod input_method) {
+    input_method_ = input_method;
+  }
+
+  bool has_previous_submitted_thread_context() const {
+    return has_previous_submitted_thread_context_;
+  }
+  void set_has_previous_submitted_thread_context(
+      bool has_previous_submitted_thread_context) {
+    has_previous_submitted_thread_context_ =
+        has_previous_submitted_thread_context;
+  }
+
+  bool has_auto_suggested_tab() const { return has_auto_suggested_tab_; }
+  void set_has_auto_suggested_tab(bool has_auto_suggested_tab) {
+    has_auto_suggested_tab_ = has_auto_suggested_tab;
   }
 
   // Resets all internal variables to the null-constructed state.
@@ -294,12 +435,18 @@ class AutocompleteInput {
     return added_default_scheme_to_typed_url_;
   }
 
+  bool typed_url_had_http_scheme() const { return typed_url_had_http_scheme_; }
+
   void WriteIntoTrace(perfetto::TracedValue context) const;
 
   // Returns true if in zero prefix input state.
-  // Zero suggest state is determined implicitly from focus type and is
-  // used to inform autocomplete tab matching and action attachment.
+  // Zero-Suggest state is determined from focus type and is used to inform
+  // autocomplete providers, tab matching, and action attachment. Note that the
+  // Zero-Suggest state does NOT mean that `text_` is empty.
   bool IsZeroSuggest() const;
+
+  // Whether the input might be matching featured keyword suggestions.
+  FeaturedKeywordMode GetFeaturedKeywordMode() const;
 
  private:
   friend class AutocompleteProviderTest;
@@ -323,28 +470,52 @@ class AutocompleteInput {
   GURL canonicalized_url_;
   std::string desired_tld_;
   bool prevent_inline_autocomplete_;
-  bool prefer_keyword_;
   bool allow_exact_keyword_match_;
-  metrics::OmniboxEventProto::KeywordModeEntryMethod keyword_mode_entry_method_;
+  bool in_keyword_mode_;
   bool omit_asynchronous_matches_;
   metrics::OmniboxFocusType focus_type_ =
       metrics::OmniboxFocusType::INTERACTION_DEFAULT;
   std::vector<std::u16string> terms_prefixed_by_http_or_https_;
-  absl::optional<std::string> query_tile_id_;
+  // The lens overlay suggest inputs to be sent as query parameters in
+  // the suggest requests.
+  std::optional<lens::proto::LensOverlaySuggestInputs>
+      lens_overlay_suggest_inputs_;
+  // Input state. This is specifically the primitive state, with regards to
+  // the tools and models that may be selected.
+  omnibox::InputState input_state_;
+
+  // The suggest inventory to be sent as query parameters in the suggest
+  // requests.
+  omnibox::SuggestInventory suggest_inventory_ =
+      omnibox::SuggestInventory::SUGGEST_INVENTORY_DEFAULT;
 
   // Flags for OmniboxDefaultNavigationsToHttps feature.
   bool should_use_https_as_default_scheme_;
-  bool added_default_scheme_to_typed_url_;
+  bool added_default_scheme_to_typed_url_ = false;
+  bool typed_url_had_http_scheme_ = false;
   // Port used by the embedded https server in tests. This is used to determine
   // the correct port while upgrading URLs to https if the original URL has a
   // non-default port.
-  // TODO(crbug.com/1168371): Remove when URLLoaderInterceptor can simulate
+  // TODO(crbug.com/40743298): Remove when URLLoaderInterceptor can simulate
   // redirects.
   int https_port_for_testing_;
   // If true, indicates that the tests are using a faux-HTTPS server which is
   // actually an HTTP server that pretends to serve HTTPS responses. Should only
   // be true on iOS.
   bool use_fake_https_for_https_upgrade_testing_;
+  std::u16string context_tab_title_;
+  GURL context_tab_url_;
+  // This is only relevant for contextual tasks where a previous query might
+  // be submitted and follow-up queries can be asked in the same thread.
+  std::string previous_query_;
+  // The method the input was entered (e.g. voice). Passed to suggest requests
+  // for searchboxes that want a smart compose responses. Used to determine
+  // when to trigger smart compose. Optional since it's currently only needed
+  // for composebox inputs.
+  std::optional<omnibox::metrics::ChromeSearchboxStats::InputMethod>
+      input_method_;
+  bool has_previous_submitted_thread_context_ = false;
+  bool has_auto_suggested_tab_ = false;
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_AUTOCOMPLETE_INPUT_H_

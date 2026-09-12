@@ -13,7 +13,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.MockitoAnnotations.initMocks;
 
 import android.graphics.Rect;
 
@@ -23,31 +22,26 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.robolectric.annotation.Config;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.base.test.util.JniMocker;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.paint_preview.mojom.ClipCoordOverride;
 
 /** Unit tests for the Long Screenshot Tab Service Test. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class LongScreenshotsTabServiceJUnitTest {
     public static final long FAKE_NATIVE_ADDR = 345L;
 
-    @Rule
-    public JniMocker mJniMocker = new JniMocker();
-
-    @Mock
-    private Tab mTab;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private Tab mTab;
     private LongScreenshotsTabService mLongScreenshotsTabService;
-    @Mock
-    private LongScreenshotsTabService.Natives mLongScreenshotsTabServiceJniMock;
+    @Mock private LongScreenshotsTabService.Natives mLongScreenshotsTabServiceJniMock;
     private TestCaptureProcessor mProcessor;
 
-    class TestCaptureProcessor implements LongScreenshotsTabService.CaptureProcessor {
-        @Status
-        private int mActualStatus;
+    static class TestCaptureProcessor implements LongScreenshotsTabService.CaptureProcessor {
+        @Status private int mActualStatus;
         private boolean mProcessCapturedTabCalled;
         private long mNativeCaptureResultPtr;
 
@@ -73,9 +67,8 @@ public class LongScreenshotsTabServiceJUnitTest {
 
     @Before
     public void setUp() {
-        initMocks(this);
         when(mTab.getWebContents()).thenReturn(null);
-        mJniMocker.mock(LongScreenshotsTabServiceJni.TEST_HOOKS, mLongScreenshotsTabServiceJniMock);
+        LongScreenshotsTabServiceJni.setInstanceForTesting(mLongScreenshotsTabServiceJniMock);
         mProcessor = new TestCaptureProcessor();
         mLongScreenshotsTabService = new LongScreenshotsTabService(FAKE_NATIVE_ADDR);
         mLongScreenshotsTabService.setCaptureProcessor(mProcessor);
@@ -88,9 +81,7 @@ public class LongScreenshotsTabServiceJUnitTest {
         assertEquals(0, mLongScreenshotsTabService.getNativeBaseService());
     }
 
-    /**
-     * Verifies that an error status is propagated.
-     */
+    /** Verifies that an error status is propagated. */
     @Test
     public void testCapturedTabHasErrorStatus() {
         mLongScreenshotsTabService.processCaptureTabStatus(Status.CAPTURE_FAILED);
@@ -99,9 +90,7 @@ public class LongScreenshotsTabServiceJUnitTest {
         assertEquals(0, mProcessor.getNativeCaptureResultPtr());
     }
 
-    /**
-     * Verifies that a response won't crash if there is no processor.
-     */
+    /** Verifies that a response won't crash if there is no processor. */
     @Test
     public void testCapturedNoProcessor() {
         final long fakeAddr = 123L;
@@ -118,7 +107,8 @@ public class LongScreenshotsTabServiceJUnitTest {
      */
     @Test
     public void testCaptureTabError() {
-        mLongScreenshotsTabService.captureTab(mTab, new Rect(), false);
+        mLongScreenshotsTabService.captureTab(
+                mTab, new Rect(), false, ClipCoordOverride.NONE, ClipCoordOverride.NONE);
         assertTrue(mProcessor.getProcessCapturedTabCalled());
         assertEquals(Status.WEB_CONTENTS_GONE, mProcessor.getStatus());
         assertEquals(0, mProcessor.getNativeCaptureResultPtr());
@@ -126,7 +116,8 @@ public class LongScreenshotsTabServiceJUnitTest {
         mLongScreenshotsTabService.onNativeDestroyed();
         mProcessor = new TestCaptureProcessor();
         mLongScreenshotsTabService.setCaptureProcessor(mProcessor);
-        mLongScreenshotsTabService.captureTab(mTab, new Rect(), false);
+        mLongScreenshotsTabService.captureTab(
+                mTab, new Rect(), false, ClipCoordOverride.NONE, ClipCoordOverride.NONE);
 
         assertEquals(0, mLongScreenshotsTabService.getNativeBaseService());
         assertTrue(mProcessor.getProcessCapturedTabCalled());
@@ -135,5 +126,37 @@ public class LongScreenshotsTabServiceJUnitTest {
 
         mLongScreenshotsTabService.longScreenshotsClosed();
         verify(mLongScreenshotsTabServiceJniMock, never()).longScreenshotsClosedAndroid(anyInt());
+    }
+
+    /** Verifies clearCaptureProcessor clears the registration when it matches. */
+    @Test
+    public void testClearCaptureProcessor_clearIfMatch() {
+        // setUp already registered mProcessor.
+        mLongScreenshotsTabService.clearCaptureProcessor(mProcessor);
+
+        // A subsequent response should not reach the cleared processor.
+        final long fakeAddr = 456L;
+        mLongScreenshotsTabService.processPaintPreviewResponse(fakeAddr);
+        assertFalse(mProcessor.getProcessCapturedTabCalled());
+        verify(mLongScreenshotsTabServiceJniMock, times(1)).releaseCaptureResultPtr(eq(fakeAddr));
+    }
+
+    /**
+     * Verifies clearCaptureProcessor does NOT clear when the expected processor no longer matches.
+     */
+    @Test
+    public void testClearCaptureProcessor_notClearIfNoMatch() {
+        // setUp registered mProcessor. A newer caller registers a different processor.
+        TestCaptureProcessor newerProcessor = new TestCaptureProcessor();
+        mLongScreenshotsTabService.setCaptureProcessor(newerProcessor);
+
+        // The original caller now tries to clear — should be a no-op because it no longer
+        // owns the registration.
+        mLongScreenshotsTabService.clearCaptureProcessor(mProcessor);
+
+        // newerProcessor should still receive responses.
+        mLongScreenshotsTabService.processCaptureTabStatus(Status.OK);
+        assertTrue(newerProcessor.getProcessCapturedTabCalled());
+        assertFalse(mProcessor.getProcessCapturedTabCalled());
     }
 }

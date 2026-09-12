@@ -4,79 +4,149 @@
 
 /** @fileoverview Test implementation of PasswordManagerProxy. */
 
-import {BlockedSite, BlockedSitesListChangedListener, CredentialsChangedListener, PasswordCheckInteraction, PasswordCheckStatusChangedListener, PasswordManagerProxy, PasswordsFileExportProgressListener} from 'chrome://password-manager/password_manager.js';
+import {ExportPasswordsResult, ExportProgressStatus, ImportResultsStatus, PageCallbackRouter, PasswordManagerActionableError} from 'chrome://password-manager/password_manager.js';
+import type {AccountStorageActiveStateChangedListener, BlockedSite, BlockedSitesListChangedListener, CredentialsChangedListener, ImportResults, PasswordCheckInteraction, PasswordCheckStatusChangedListener, PasswordManagerActionableErrorChangedListener, PasswordManagerAuthTimeoutListener, PasswordManagerProxy, PasswordsFileExportProgressListener, PasswordViewPageInteractions} from 'chrome://password-manager/password_manager.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
 
-import {makePasswordCheckStatus} from './test_util.js';
+import type {ActorLoginPermission} from './password_manager.mojom-webui.js';
+import {makeFamilyFetchResults, makePasswordCheckStatus} from './test_util.js';
 
 /**
  * Test implementation
  */
 export class TestPasswordManagerProxy extends TestBrowserProxy implements
     PasswordManagerProxy {
+  callbackRouter: PageCallbackRouter = new PageCallbackRouter();
+  callbackRouterRemote = this.callbackRouter.$.bindNewPipeAndPassRemote();
   data: {
-    passwords: chrome.passwordsPrivate.PasswordUiEntry[],
-    groups: chrome.passwordsPrivate.CredentialGroup[],
     blockedSites: BlockedSite[],
+    actorLoginPermissions: ActorLoginPermission[],
     checkStatus: chrome.passwordsPrivate.PasswordCheckStatus,
-    insecureCredentials: chrome.passwordsPrivate.PasswordUiEntry[],
     credentialWithReusedPassword: chrome.passwordsPrivate.PasswordUiEntryList[],
+    familyFetchResults: chrome.passwordsPrivate.FamilyFetchResults,
+    groups: chrome.passwordsPrivate.CredentialGroup[],
+    insecureCredentials: chrome.passwordsPrivate.PasswordUiEntry[],
+    isAccountStorageActive: boolean,
+    passwords: chrome.passwordsPrivate.PasswordUiEntry[],
+    isPasswordManagerPinAvailable: boolean,
+    isCloudAuthenticatorConnected: boolean,
+    changePasswordManagerPinSuccessful: boolean,
+    disconnectCloudAuthenticatorSuccessful: boolean,
+    isConnectedToCloudAuthenticator: boolean,
+    deleteAllPasswordManagerData: boolean,
+    getActionableError: PasswordManagerActionableError,
   };
 
   listeners: {
+    accountStorageActiveStateListener: AccountStorageActiveStateChangedListener|
+    null,
     blockedSitesListChangedListener: BlockedSitesListChangedListener|null,
     savedPasswordListChangedListener: CredentialsChangedListener|null,
     passwordCheckStatusListener: PasswordCheckStatusChangedListener|null,
     insecureCredentialsListener: CredentialsChangedListener|null,
     passwordsFileExportProgressListener: PasswordsFileExportProgressListener|
     null,
+    passwordManagerAuthTimeoutListener: PasswordManagerAuthTimeoutListener|null,
+    passwordManagerActionableErrorChangedListener:
+        PasswordManagerActionableErrorChangedListener|null,
   };
 
   private requestCredentialsDetailsResponse_:
       chrome.passwordsPrivate.PasswordUiEntry[]|null = null;
 
+  private switchBiometricAuthBeforeFillingStateResult_: boolean = false;
+
+  private importResults_: ImportResults = {
+    status: ImportResultsStatus.kSuccess,
+    numberImported: 0,
+    displayedEntries: [],
+    fileName: '',
+  };
+
+  private exportPasswordsResult_: ExportPasswordsResult =
+      ExportPasswordsResult.kSuccess;
+
   constructor() {
     super([
+      'addPassword',
       'cancelExportPasswords',
+      'changeCredential',
+      'changePasswordManagerPin',
+      'continueImport',
+      'copyPlaintextBackupPassword',
+      'deleteAllPasswordManagerData',
+      'disconnectCloudAuthenticator',
+      'dismissSafetyHubPasswordMenuNotification',
       'exportPasswords',
+      'extendAuthValidity',
+      'fetchFamilyMembers',
+      'getActorLoginPermissions',
       'getBlockedSitesList',
       'getCredentialGroups',
       'getCredentialsWithReusedPassword',
       'getInsecureCredentials',
       'getPasswordCheckStatus',
       'getSavedPasswordList',
+      'getUrlCollection',
+      'importPasswords',
+      'isConnectedToCloudAuthenticator',
+      'isAccountStorageActive',
+      'isPasswordManagerPinAvailable',
+      'movePasswordsToAccount',
       'muteInsecureCredential',
       'recordPasswordCheckInteraction',
+      'recordPasswordViewInteraction',
       'removeBlockedSite',
-      'removeSavedPassword',
+      'removeCredential',
+      'removeBackupPassword',
       'requestCredentialsDetails',
       'requestExportProgressStatus',
       'requestPlaintextPassword',
+      'resetImporter',
+      'revokeActorLoginPermission',
+      'requestChangePassword',
+      'stopPasswordChange',
+      'openPasswordChangeTab',
+      'sharePassword',
       'showAddShortcutDialog',
-      'showExportedFileInShell',
+      'showLastExportedFileInShell',
       'startBulkPasswordCheck',
       'switchBiometricAuthBeforeFillingState',
       'undoRemoveSavedPasswordOrException',
       'unmuteInsecureCredential',
+      'getPasswordManagerActionableError',
+      'startTrustedVaultUnlock',
     ]);
 
     // Set these to have non-empty data.
     this.data = {
-      passwords: [],
-      groups: [],
       blockedSites: [],
+      actorLoginPermissions: [],
       checkStatus: makePasswordCheckStatus({}),
-      insecureCredentials: [],
       credentialWithReusedPassword: [],
+      familyFetchResults: makeFamilyFetchResults(),
+      groups: [],
+      insecureCredentials: [],
+      isAccountStorageActive: false,
+      passwords: [],
+      isPasswordManagerPinAvailable: false,
+      isCloudAuthenticatorConnected: false,
+      changePasswordManagerPinSuccessful: false,
+      disconnectCloudAuthenticatorSuccessful: false,
+      isConnectedToCloudAuthenticator: true,
+      deleteAllPasswordManagerData: true,
+      getActionableError: PasswordManagerActionableError.kNoError,
     };
-
     // Holds listeners so they can be called when needed.
     this.listeners = {
-      passwordCheckStatusListener: null,
+      accountStorageActiveStateListener: null,
       blockedSitesListChangedListener: null,
-      savedPasswordListChangedListener: null,
       insecureCredentialsListener: null,
+      passwordCheckStatusListener: null,
       passwordsFileExportProgressListener: null,
+      passwordManagerAuthTimeoutListener: null,
+      savedPasswordListChangedListener: null,
+      passwordManagerActionableErrorChangedListener: null,
     };
   }
 
@@ -148,15 +218,14 @@ export class TestPasswordManagerProxy extends TestBrowserProxy implements
 
   startBulkPasswordCheck() {
     this.methodCalled('startBulkPasswordCheck');
-    if (this.data.checkStatus.state ===
-        chrome.passwordsPrivate.PasswordCheckState.NO_PASSWORDS) {
-      return Promise.reject(new Error('error'));
-    }
-    return Promise.resolve();
   }
 
   recordPasswordCheckInteraction(interaction: PasswordCheckInteraction) {
     this.methodCalled('recordPasswordCheckInteraction', interaction);
+  }
+
+  recordPasswordViewInteraction(interaction: PasswordViewPageInteractions) {
+    this.methodCalled('recordPasswordViewInteraction', interaction);
   }
 
   muteInsecureCredential(insecureCredential:
@@ -192,9 +261,28 @@ export class TestPasswordManagerProxy extends TestBrowserProxy implements
     return Promise.resolve('plainTextPassword');
   }
 
-  removeSavedPassword(
+  copyPlaintextBackupPassword(id: number) {
+    this.methodCalled('copyPlaintextBackupPassword', {id});
+    return Promise.resolve(true);
+  }
+
+  addPassword(options: chrome.passwordsPrivate.AddPasswordOptions) {
+    this.methodCalled('addPassword', options);
+    return Promise.resolve();
+  }
+
+  changeCredential(credential: chrome.passwordsPrivate.PasswordUiEntry) {
+    this.methodCalled('changeCredential', credential);
+    return Promise.resolve();
+  }
+
+  removeCredential(
       id: number, fromStores: chrome.passwordsPrivate.PasswordStoreSet) {
-    this.methodCalled('removeSavedPassword', {id, fromStores});
+    this.methodCalled('removeCredential', {id, fromStores});
+  }
+
+  removeBackupPassword(id: number) {
+    this.methodCalled('removeBackupPassword', {id});
   }
 
   removeBlockedSite(id: number) {
@@ -203,13 +291,16 @@ export class TestPasswordManagerProxy extends TestBrowserProxy implements
 
   requestExportProgressStatus() {
     this.methodCalled('requestExportProgressStatus');
-    return Promise.resolve(
-        chrome.passwordsPrivate.ExportProgressStatus.NOT_STARTED);
+    return Promise.resolve(ExportProgressStatus.kNotStarted);
   }
 
   exportPasswords() {
     this.methodCalled('exportPasswords');
-    return Promise.resolve();
+    return Promise.resolve(this.exportPasswordsResult_);
+  }
+
+  setExportPasswordsResult(result: ExportPasswordsResult) {
+    this.exportPasswordsResult_ = result;
   }
 
   addPasswordsFileExportProgressListener(
@@ -228,13 +319,170 @@ export class TestPasswordManagerProxy extends TestBrowserProxy implements
 
   switchBiometricAuthBeforeFillingState() {
     this.methodCalled('switchBiometricAuthBeforeFillingState');
+    return Promise.resolve(this.switchBiometricAuthBeforeFillingStateResult_);
+  }
+
+  setSwitchBiometricAuthBeforeFillingStateResponse(result: boolean) {
+    this.switchBiometricAuthBeforeFillingStateResult_ = result;
   }
 
   undoRemoveSavedPasswordOrException() {
     this.methodCalled('undoRemoveSavedPasswordOrException');
   }
 
-  showExportedFileInShell() {
-    this.methodCalled('showExportedFileInShell');
+  showLastExportedFileInShell() {
+    this.methodCalled('showLastExportedFileInShell');
+  }
+
+  getUrlCollection(url: string) {
+    this.methodCalled('getUrlCollection', url);
+    if (url.includes('www')) {
+      return Promise.resolve({
+        signonRealm: `https://${url}/login`,
+        shown: url,
+        link: `https://${url}/login`,
+      });
+    } else {
+      return Promise.reject();
+    }
+  }
+
+  addPasswordManagerAuthTimeoutListener(
+      listener: PasswordManagerAuthTimeoutListener) {
+    this.listeners.passwordManagerAuthTimeoutListener = listener;
+  }
+
+  removePasswordManagerAuthTimeoutListener(
+      _listener: PasswordManagerAuthTimeoutListener) {
+    this.listeners.passwordManagerAuthTimeoutListener = null;
+  }
+
+  addPasswordManagerActionableErrorChangedListener(
+      listener: PasswordManagerActionableErrorChangedListener) {
+    this.listeners.passwordManagerActionableErrorChangedListener = listener;
+  }
+
+  removePasswordManagerActionableErrorChangedListener(
+      _listener: PasswordManagerActionableErrorChangedListener) {
+    this.listeners.passwordManagerActionableErrorChangedListener = null;
+  }
+
+  extendAuthValidity() {
+    this.methodCalled('extendAuthValidity');
+  }
+
+  addAccountStorageEnabledStateListener(
+      listener: AccountStorageActiveStateChangedListener) {
+    this.listeners.accountStorageActiveStateListener = listener;
+  }
+
+  removeAccountStorageEnabledStateListener(
+      _listener: AccountStorageActiveStateChangedListener) {
+    this.listeners.accountStorageActiveStateListener = null;
+  }
+
+  fetchFamilyMembers() {
+    this.methodCalled('fetchFamilyMembers');
+    return Promise.resolve(this.data.familyFetchResults);
+  }
+
+  sharePassword(
+      id: number, recipients: chrome.passwordsPrivate.RecipientInfo[]) {
+    this.methodCalled('sharePassword', id, recipients);
+  }
+
+  /**
+   * Sets the value to be returned by importPasswords.
+   */
+  setImportResults(results: ImportResults) {
+    this.importResults_ = results;
+  }
+
+  importPasswords(toStore: chrome.passwordsPrivate.PasswordStoreSet) {
+    this.methodCalled('importPasswords', toStore);
+    return Promise.resolve(this.importResults_);
+  }
+
+  continueImport(selectedIds: number[]) {
+    this.methodCalled('continueImport', selectedIds);
+    return Promise.resolve(this.importResults_);
+  }
+
+  resetImporter(deleteFile: boolean) {
+    this.methodCalled('resetImporter', deleteFile);
+    return Promise.resolve();
+  }
+
+  isAccountStorageActive() {
+    this.methodCalled('isAccountStorageActive');
+    return Promise.resolve(this.data.isAccountStorageActive);
+  }
+
+  movePasswordsToAccount(ids: number[]) {
+    this.methodCalled('movePasswordsToAccount', ids);
+  }
+
+  dismissSafetyHubPasswordMenuNotification() {
+    this.methodCalled('dismissSafetyHubPasswordMenuNotification');
+  }
+
+  changePasswordManagerPin() {
+    this.methodCalled('changePasswordManagerPin');
+    return Promise.resolve(this.data.changePasswordManagerPinSuccessful);
+  }
+
+  isPasswordManagerPinAvailable(): Promise<boolean> {
+    this.methodCalled('isPasswordManagerPinAvailable');
+    return Promise.resolve(this.data.isPasswordManagerPinAvailable);
+  }
+
+  disconnectCloudAuthenticator(): Promise<boolean> {
+    this.methodCalled('disconnectCloudAuthenticator');
+    this.data.isConnectedToCloudAuthenticator = false;
+    return Promise.resolve(this.data.disconnectCloudAuthenticatorSuccessful);
+  }
+
+  deleteAllPasswordManagerData(): Promise<boolean> {
+    this.methodCalled('deleteAllPasswordManagerData');
+    return Promise.resolve(this.data.deleteAllPasswordManagerData);
+  }
+
+  isConnectedToCloudAuthenticator(): Promise<boolean> {
+    this.methodCalled('isConnectedToCloudAuthenticator');
+    return Promise.resolve(this.data.isConnectedToCloudAuthenticator);
+  }
+
+  getActorLoginPermissions() {
+    this.methodCalled('getActorLoginPermissions');
+    return Promise.resolve(this.data.actorLoginPermissions.slice());
+  }
+
+  revokeActorLoginPermission(site: ActorLoginPermission) {
+    this.methodCalled('revokeActorLoginPermission', site);
+    this.data.actorLoginPermissions = this.data.actorLoginPermissions.filter(
+        s =>
+            !(s.domainInfo.signonRealm === site.domainInfo.signonRealm &&
+              s.username === site.username));
+  }
+
+  requestChangePassword(id: number): void {
+    this.methodCalled('requestChangePassword', id);
+  }
+
+  stopPasswordChange(id: number): void {
+    this.methodCalled('stopPasswordChange', id);
+  }
+
+  openPasswordChangeTab(id: number): void {
+    this.methodCalled('openPasswordChangeTab', id);
+  }
+
+  getPasswordManagerActionableError(): Promise<PasswordManagerActionableError> {
+    this.methodCalled('getPasswordManagerActionableError');
+    return Promise.resolve(this.data.getActionableError);
+  }
+
+  startTrustedVaultUnlock(): void {
+    this.methodCalled('startTrustedVaultUnlock');
   }
 }

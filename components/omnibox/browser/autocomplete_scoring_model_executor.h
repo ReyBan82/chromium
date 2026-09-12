@@ -5,10 +5,10 @@
 #ifndef COMPONENTS_OMNIBOX_BROWSER_AUTOCOMPLETE_SCORING_MODEL_EXECUTOR_H_
 #define COMPONENTS_OMNIBOX_BROWSER_AUTOCOMPLETE_SCORING_MODEL_EXECUTOR_H_
 
+#include <optional>
 #include <vector>
 
-#include "components/optimization_guide/core/base_model_executor.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/optimization_guide/core/inference/base_model_executor.h"
 #include "third_party/tflite/src/tensorflow/lite/c/common.h"
 
 // Implements BaseModelExecutor to execute models with float vector input and
@@ -34,9 +34,12 @@ class AutocompleteScoringModelExecutor
 
  protected:
   // optimization_guide::BaseModelExecutor:
+  //
+  // The autocomplete scoring model has multiple inputs, one for each input
+  // signal, and each should be added to a separate input tensor.
   bool Preprocess(const std::vector<TfLiteTensor*>& input_tensors,
                   ModelInput input) override;
-  absl::optional<ModelOutput> Postprocess(
+  std::optional<ModelOutput> Postprocess(
       const std::vector<const TfLiteTensor*>& output_tensors) override;
 };
 

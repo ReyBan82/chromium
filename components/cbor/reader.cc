@@ -2,21 +2,74 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// Crubit C++ FFI integration notes:
+// TODO(crbug.com/262737383): Update `ConvertRustMapKeyToCpp` and
+// `ConvertRustValueToCpp` to use Crubit's auto-generated C++ pattern matching
+// and accessor methods for non-repr(C) ADT enums (like `Value` and `MapKey`)
+// once available, completely replacing the manual `.tag` inspection switch
+// statements.
+// TODO(crbug.com/259749095): Call `cbor::rust::parse_with_config` directly
+// and remove `ParseResult` once Crubit supports returning generic `Result`
+// tuples (`Result<(Value, usize), Error>`) directly across FFI.
+// TODO(crbug.com/535682335): Remove `#if BUILDFLAG(USE_CBOR_RUST)` macros
+// throughout this file and unconditionally include rust headers/helpers once
+// Cronet supports Crubit dependencies.
 #include "components/cbor/reader.h"
 
 #include <math.h>
 
+#include <iterator>
+#include <limits>
 #include <map>
 #include <utility>
 
+#include "base/bit_cast.h"
 #include "base/check_op.h"
+#include "base/containers/to_vector.h"
+#include "base/memory/raw_ref.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/notreached.h"
 #include "base/numerics/checked_math.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
+#include "base/time/time.h"
+#include "base/timer/elapsed_timer.h"
+#include "components/cbor/cbor_buildflags.h"
 #include "components/cbor/constants.h"
 
+#if BUILDFLAG(USE_CBOR_RUST)
+#include "components/cbor/rust/cbor_rust.h"
+#endif
+
 namespace cbor {
+
+BASE_FEATURE(kUseRustCborParser, base::FEATURE_DISABLED_BY_DEFAULT);
+
+#if BUILDFLAG(USE_CBOR_RUST)
+#define ASSERT_DECODER_ERROR_EQ(cpp_err, rust_err)                   \
+  static_assert(std::to_underlying(Reader::DecoderError::cpp_err) == \
+                std::to_underlying(cbor::rust::Error::Tag::rust_err))
+// LINT.IfChange(DecoderErrorAsserts)
+ASSERT_DECODER_ERROR_EQ(UNSUPPORTED_MAJOR_TYPE, UnsupportedMajorType);
+ASSERT_DECODER_ERROR_EQ(UNKNOWN_ADDITIONAL_INFO, UnknownAdditionalInfo);
+ASSERT_DECODER_ERROR_EQ(INCOMPLETE_CBOR_DATA, IncompleteCborData);
+ASSERT_DECODER_ERROR_EQ(INCORRECT_MAP_KEY_TYPE, IncorrectMapKeyType);
+ASSERT_DECODER_ERROR_EQ(TOO_MUCH_NESTING, TooMuchNesting);
+ASSERT_DECODER_ERROR_EQ(INVALID_UTF8, InvalidUtf8);
+ASSERT_DECODER_ERROR_EQ(EXTRANEOUS_DATA, ExtraneousData);
+ASSERT_DECODER_ERROR_EQ(OUT_OF_ORDER_KEY, OutOfOrderKey);
+ASSERT_DECODER_ERROR_EQ(NON_MINIMAL_CBOR_ENCODING, NonMinimalCborEncoding);
+ASSERT_DECODER_ERROR_EQ(UNSUPPORTED_SIMPLE_VALUE, UnsupportedSimpleValue);
+ASSERT_DECODER_ERROR_EQ(UNSUPPORTED_FLOATING_POINT_VALUE,
+                        UnsupportedFloatingPointValue);
+ASSERT_DECODER_ERROR_EQ(OUT_OF_RANGE_INTEGER_VALUE, OutOfRangeIntegerValue);
+ASSERT_DECODER_ERROR_EQ(DUPLICATE_KEY, DuplicateKey);
+ASSERT_DECODER_ERROR_EQ(UNKNOWN_ERROR, UnknownError);
+// LINT.ThenChange(//components/cbor/reader.h:DecoderError,//components/cbor/rust/reader.rs:Error)
+#undef ASSERT_DECODER_ERROR_EQ
+#endif
 
 namespace constants {
 const char kUnsupportedMajorType[] = "Unsupported major type.";
@@ -62,19 +115,102 @@ const char kOutOfRangeIntegerValue[] =
 const char kMapKeyDuplicate[] = "Duplicate map keys are not allowed.";
 const char kUnknownError[] = "An unknown error occured.";
 
+#if BUILDFLAG(USE_CBOR_RUST)
+
+Value ConvertRustMapKeyToCpp(const cbor::rust::MapKey& rust_key) {
+  switch (rust_key.kind().tag) {
+    case cbor::rust::MapKeyKind::Tag::Int:
+      return Value(*rust_key.as_int());
+    case cbor::rust::MapKeyKind::Tag::String:
+      return Value(rust_key.as_string()->to_string_view(), Value::Type::STRING);
+    case cbor::rust::MapKeyKind::Tag::Bytestring:
+      return Value(rust_key.as_bytestring()->to_span());
+  }
+  NOTREACHED();
+}
+#endif
+
+class [[nodiscard]] ScopedMetricsReporter {
+ public:
+  ScopedMetricsReporter(bool is_rust,
+                        size_t payload_size,
+                        const Reader::DecoderError& error_code)
+      : backend_(is_rust ? ".Rust" : ".Cpp"),
+        payload_size_(payload_size),
+        error_code_(error_code) {}
+  ~ScopedMetricsReporter() {
+    base::UmaHistogramEnumeration(base::StrCat({"CBOR.ReadResult", backend_}),
+                                  *error_code_);
+    base::UmaHistogramCounts10M(base::StrCat({"CBOR.Read.Size", backend_}),
+                                payload_size_);
+    if (base::TimeTicks::IsHighResolution()) {
+      base::UmaHistogramCustomMicrosecondsTimes(
+          base::StrCat({"CBOR.Read.Duration", backend_}), timer_.Elapsed(),
+          base::Microseconds(1), base::Milliseconds(100), 50);
+    }
+  }
+
+  explicit ScopedMetricsReporter(ScopedMetricsReporter&&) = delete;
+  ScopedMetricsReporter& operator=(ScopedMetricsReporter&&) = delete;
+
+ private:
+  const std::string_view backend_;
+  const size_t payload_size_;
+  const base::raw_ref<const Reader::DecoderError> error_code_;
+  base::ElapsedTimer timer_;
+};
+
 }  // namespace
 
-Reader::Config::Config() = default;
+Reader::Config::Config()
+    : use_rust(base::FeatureList::IsEnabled(kUseRustCborParser)) {}
 Reader::Config::~Config() = default;
 
 Reader::Reader(base::span<const uint8_t> data)
     : rest_(data), error_code_(DecoderError::CBOR_NO_ERROR) {}
-Reader::~Reader() {}
+Reader::~Reader() = default;
+
+#if BUILDFLAG(USE_CBOR_RUST)
+Value Reader::ConvertRustValueToCpp(const cbor::rust::Value& rust_val) {
+  switch (rust_val.kind().tag) {
+    case cbor::rust::ValueKind::Tag::Int:
+      return Value(*rust_val.as_int());
+    case cbor::rust::ValueKind::Tag::Boolean:
+      return Value(*rust_val.as_bool());
+    case cbor::rust::ValueKind::Tag::Null:
+      return Value(Value::SimpleValue::NULL_VALUE);
+    case cbor::rust::ValueKind::Tag::Undefined:
+      return Value(Value::SimpleValue::UNDEFINED);
+    case cbor::rust::ValueKind::Tag::Bytestring:
+      return Value(rust_val.as_bytestring()->to_span(),
+                   Value::Type::BYTE_STRING);
+    case cbor::rust::ValueKind::Tag::String:
+      return Value(rust_val.as_string()->to_string_view(), Value::Type::STRING);
+    case cbor::rust::ValueKind::Tag::InvalidUtf8:
+      return Value(rust_val.as_invalid_utf8()->to_span(),
+                   Value::Type::INVALID_UTF8);
+    case cbor::rust::ValueKind::Tag::Array: {
+      return Value(base::ToVector(rust_val.as_array()->to_span(),
+                                  ConvertRustValueToCpp));
+    }
+    case cbor::rust::ValueKind::Tag::Map: {
+      return Value(Value::MapValue(
+          base::sorted_unique,
+          base::ToVector(rust_val.map_entries()->to_span(),
+                         [](const auto& entry) {
+                           return std::pair(ConvertRustMapKeyToCpp(entry.key),
+                                            ConvertRustValueToCpp(entry.value));
+                         })));
+    }
+  }
+  NOTREACHED();
+}
+#endif
 
 // static
-absl::optional<Value> Reader::Read(base::span<uint8_t const> data,
-                                   DecoderError* error_code_out,
-                                   int max_nesting_level) {
+std::optional<Value> Reader::Read(base::span<uint8_t const> data,
+                                  DecoderError* error_code_out,
+                                  int max_nesting_level) {
   Config config;
   config.error_code_out = error_code_out;
   config.max_nesting_level = max_nesting_level;
@@ -83,10 +219,10 @@ absl::optional<Value> Reader::Read(base::span<uint8_t const> data,
 }
 
 // static
-absl::optional<Value> Reader::Read(base::span<uint8_t const> data,
-                                   size_t* num_bytes_consumed,
-                                   DecoderError* error_code_out,
-                                   int max_nesting_level) {
+std::optional<Value> Reader::Read(base::span<uint8_t const> data,
+                                  size_t* num_bytes_consumed,
+                                  DecoderError* error_code_out,
+                                  int max_nesting_level) {
   DCHECK(num_bytes_consumed);
 
   Config config;
@@ -98,41 +234,80 @@ absl::optional<Value> Reader::Read(base::span<uint8_t const> data,
 }
 
 // static
-absl::optional<Value> Reader::Read(base::span<uint8_t const> data,
-                                   const Config& config) {
+std::optional<Value> Reader::Read(base::span<uint8_t const> data,
+                                  const Config& config) {
+  DecoderError ignored_error_code_out = DecoderError::CBOR_NO_ERROR;
+  DecoderError& error_code_out =
+      config.error_code_out ? *config.error_code_out : ignored_error_code_out;
+
+  ScopedMetricsReporter reporter(config.use_rust, data.size(), error_code_out);
+
+#if BUILDFLAG(USE_CBOR_RUST)
+  if (config.use_rust) {
+    cbor::rust::Config rust_config;
+    rust_config.allow_invalid_utf8 = config.allow_invalid_utf8;
+    rust_config.max_nesting_level = config.max_nesting_level;
+
+    size_t ignored_num_bytes_consumed;
+    size_t& num_bytes_consumed = config.num_bytes_consumed
+                                     ? *config.num_bytes_consumed
+                                     : ignored_num_bytes_consumed;
+
+    auto result = cbor::rust::parse_with_config(data, rust_config);
+
+    if (!result.has_value()) {
+      num_bytes_consumed = 0;
+      // The static_cast is currently safe because the enum values in
+      // cbor::Reader::DecoderError are initialized by the values of
+      // cbor::rust::Error.
+      error_code_out = static_cast<DecoderError>(result.err().tag);
+      return std::nullopt;
+    }
+
+    if (!config.num_bytes_consumed && result->bytes_consumed < data.size()) {
+      error_code_out = DecoderError::EXTRANEOUS_DATA;
+      return std::nullopt;
+    }
+
+    num_bytes_consumed = result->bytes_consumed;
+    error_code_out = DecoderError::CBOR_NO_ERROR;
+
+    return ConvertRustValueToCpp(result->value);
+  }
+#else
+  CHECK(!config.use_rust)
+      << "CBOR Rust parser is statically disabled in this build";
+#endif
+
   Reader reader(data);
-  absl::optional<Value> value =
+  std::optional<Value> value =
       reader.DecodeCompleteDataItem(config, config.max_nesting_level);
 
-  auto error = reader.GetErrorCode();
+  error_code_out = reader.GetErrorCode();
   const bool success = value.has_value();
-  DCHECK_EQ(success, error == DecoderError::CBOR_NO_ERROR);
+  DCHECK_EQ(success, error_code_out == DecoderError::CBOR_NO_ERROR);
 
   if (config.num_bytes_consumed) {
     *config.num_bytes_consumed =
         success ? data.size() - reader.num_bytes_remaining() : 0;
   } else if (success && reader.num_bytes_remaining() > 0) {
-    error = DecoderError::EXTRANEOUS_DATA;
+    error_code_out = DecoderError::EXTRANEOUS_DATA;
     value.reset();
-  }
-
-  if (config.error_code_out) {
-    *config.error_code_out = error;
   }
 
   return value;
 }
 
-absl::optional<Value> Reader::DecodeCompleteDataItem(const Config& config,
-                                                     int max_nesting_level) {
+std::optional<Value> Reader::DecodeCompleteDataItem(const Config& config,
+                                                    int max_nesting_level) {
   if (max_nesting_level < 0 || max_nesting_level > kCBORMaxDepth) {
     error_code_ = DecoderError::TOO_MUCH_NESTING;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
-  absl::optional<DataItemHeader> header = DecodeDataItemHeader();
+  std::optional<DataItemHeader> header = DecodeDataItemHeader();
   if (!header.has_value()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   switch (header->type) {
@@ -150,36 +325,35 @@ absl::optional<Value> Reader::DecodeCompleteDataItem(const Config& config,
       return ReadMapContent(*header, config, max_nesting_level);
     case Value::Type::SIMPLE_VALUE:
       return DecodeToSimpleValue(*header);
-    case Value::Type::TAG:  // We explicitly don't support TAG.
     case Value::Type::NONE:
     case Value::Type::INVALID_UTF8:
       break;
   }
 
   error_code_ = DecoderError::UNSUPPORTED_MAJOR_TYPE;
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<Reader::DataItemHeader> Reader::DecodeDataItemHeader() {
-  const absl::optional<uint8_t> initial_byte = ReadByte();
+std::optional<Reader::DataItemHeader> Reader::DecodeDataItemHeader() {
+  const std::optional<uint8_t> initial_byte = ReadByte();
   if (!initial_byte) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   const auto major_type = GetMajorType(initial_byte.value());
   const uint8_t additional_info = GetAdditionalInfo(initial_byte.value());
 
-  absl::optional<uint64_t> value = ReadVariadicLengthInteger(additional_info);
-  return value ? absl::make_optional(
+  std::optional<uint64_t> value = ReadVariadicLengthInteger(additional_info);
+  return value ? std::make_optional(
                      DataItemHeader{major_type, additional_info, value.value()})
-               : absl::nullopt;
+               : std::nullopt;
 }
 
-absl::optional<uint64_t> Reader::ReadVariadicLengthInteger(
+std::optional<uint64_t> Reader::ReadVariadicLengthInteger(
     uint8_t additional_info) {
   uint8_t additional_bytes = 0;
   if (additional_info < 24) {
-    return absl::make_optional(additional_info);
+    return std::make_optional(additional_info);
   } else if (additional_info == 24) {
     additional_bytes = 1;
   } else if (additional_info == 25) {
@@ -190,13 +364,13 @@ absl::optional<uint64_t> Reader::ReadVariadicLengthInteger(
     additional_bytes = 8;
   } else {
     error_code_ = DecoderError::UNKNOWN_ADDITIONAL_INFO;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
-  const absl::optional<base::span<const uint8_t>> bytes =
+  const std::optional<base::span<const uint8_t>> bytes =
       ReadBytes(additional_bytes);
   if (!bytes) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   uint64_t int_data = 0;
@@ -206,36 +380,35 @@ absl::optional<uint64_t> Reader::ReadVariadicLengthInteger(
   }
 
   return IsEncodingMinimal(additional_bytes, int_data)
-             ? absl::make_optional(int_data)
-             : absl::nullopt;
+             ? std::make_optional(int_data)
+             : std::nullopt;
 }
 
-absl::optional<Value> Reader::DecodeValueToNegative(uint64_t value) {
+std::optional<Value> Reader::DecodeValueToNegative(uint64_t value) {
   auto negative_value = -base::CheckedNumeric<int64_t>(value) - 1;
   if (!negative_value.IsValid()) {
     error_code_ = DecoderError::OUT_OF_RANGE_INTEGER_VALUE;
-    return absl::nullopt;
+    return std::nullopt;
   }
-  return Value(negative_value.ValueOrDie());
+  return Value(static_cast<int64_t>(negative_value.ValueOrDie()));
 }
 
-absl::optional<Value> Reader::DecodeValueToUnsigned(uint64_t value) {
+std::optional<Value> Reader::DecodeValueToUnsigned(uint64_t value) {
   auto unsigned_value = base::CheckedNumeric<int64_t>(value);
   if (!unsigned_value.IsValid()) {
     error_code_ = DecoderError::OUT_OF_RANGE_INTEGER_VALUE;
-    return absl::nullopt;
+    return std::nullopt;
   }
-  return Value(unsigned_value.ValueOrDie());
+  return Value(static_cast<int64_t>(unsigned_value.ValueOrDie()));
 }
 
-absl::optional<Value> Reader::DecodeToSimpleValue(
-    const DataItemHeader& header) {
+std::optional<Value> Reader::DecodeToSimpleValue(const DataItemHeader& header) {
   // ReadVariadicLengthInteger provides this bound.
   CHECK_LE(header.additional_info, 27);
-  // Floating point numbers are not supported.
+  // Floating point numbers.
   if (header.additional_info > 24) {
     error_code_ = DecoderError::UNSUPPORTED_FLOATING_POINT_VALUE;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Since |header.additional_info| <= 24, ReadVariadicLengthInteger also
@@ -254,21 +427,21 @@ absl::optional<Value> Reader::DecodeToSimpleValue(
   }
 
   error_code_ = DecoderError::UNSUPPORTED_SIMPLE_VALUE;
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<Value> Reader::ReadStringContent(
+std::optional<Value> Reader::ReadStringContent(
     const Reader::DataItemHeader& header,
     const Config& config) {
   uint64_t num_bytes = header.value;
-  const absl::optional<base::span<const uint8_t>> bytes = ReadBytes(num_bytes);
+  const std::optional<base::span<const uint8_t>> bytes = ReadBytes(num_bytes);
   if (!bytes) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
-  std::string cbor_string(bytes->begin(), bytes->end());
-  if (base::IsStringUTF8(cbor_string)) {
-    return Value(std::move(cbor_string));
+  if (std::string_view cbor_string_view = base::as_string_view(*bytes);
+      base::IsStringUTF8AllowingNoncharacters(cbor_string_view)) {
+    return Value(cbor_string_view);
   }
 
   if (config.allow_invalid_utf8) {
@@ -276,22 +449,21 @@ absl::optional<Value> Reader::ReadStringContent(
   }
 
   error_code_ = DecoderError::INVALID_UTF8;
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<Value> Reader::ReadByteStringContent(
+std::optional<Value> Reader::ReadByteStringContent(
     const Reader::DataItemHeader& header) {
   uint64_t num_bytes = header.value;
-  const absl::optional<base::span<const uint8_t>> bytes = ReadBytes(num_bytes);
+  const std::optional<base::span<const uint8_t>> bytes = ReadBytes(num_bytes);
   if (!bytes) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
-  std::vector<uint8_t> cbor_byte_string(bytes->begin(), bytes->end());
-  return Value(std::move(cbor_byte_string));
+  return Value(*bytes);
 }
 
-absl::optional<Value> Reader::ReadArrayContent(
+std::optional<Value> Reader::ReadArrayContent(
     const Reader::DataItemHeader& header,
     const Config& config,
     int max_nesting_level) {
@@ -299,17 +471,17 @@ absl::optional<Value> Reader::ReadArrayContent(
 
   Value::ArrayValue cbor_array;
   for (uint64_t i = 0; i < length; ++i) {
-    absl::optional<Value> cbor_element =
+    std::optional<Value> cbor_element =
         DecodeCompleteDataItem(config, max_nesting_level - 1);
     if (!cbor_element.has_value()) {
-      return absl::nullopt;
+      return std::nullopt;
     }
     cbor_array.push_back(std::move(cbor_element.value()));
   }
   return Value(std::move(cbor_array));
 }
 
-absl::optional<Value> Reader::ReadMapContent(
+std::optional<Value> Reader::ReadMapContent(
     const Reader::DataItemHeader& header,
     const Config& config,
     int max_nesting_level) {
@@ -317,12 +489,15 @@ absl::optional<Value> Reader::ReadMapContent(
 
   std::map<Value, Value, Value::Less> cbor_map;
   for (uint64_t i = 0; i < length; ++i) {
-    absl::optional<Value> key =
+    std::optional<Value> key =
         DecodeCompleteDataItem(config, max_nesting_level - 1);
-    absl::optional<Value> value =
+    if (!key.has_value()) {
+      return std::nullopt;
+    }
+    std::optional<Value> value =
         DecodeCompleteDataItem(config, max_nesting_level - 1);
-    if (!key.has_value() || !value.has_value()) {
-      return absl::nullopt;
+    if (!value.has_value()) {
+      return std::nullopt;
     }
 
     switch (key.value().type()) {
@@ -333,45 +508,49 @@ absl::optional<Value> Reader::ReadMapContent(
         break;
       case Value::Type::INVALID_UTF8:
         error_code_ = DecoderError::INVALID_UTF8;
-        return absl::nullopt;
+        return std::nullopt;
       default:
         error_code_ = DecoderError::INCORRECT_MAP_KEY_TYPE;
-        return absl::nullopt;
-    }
-    if (IsDuplicateKey(key.value(), cbor_map))
-      return absl::nullopt;
-
-    if (!config.allow_and_canonicalize_out_of_order_keys &&
-        !IsKeyInOrder(key.value(), cbor_map)) {
-      return absl::nullopt;
+        return std::nullopt;
     }
 
-    cbor_map.emplace(std::move(key.value()), std::move(value.value()));
+    auto [it, inserted] =
+        cbor_map.try_emplace(std::move(key.value()), std::move(value.value()));
+    if (!inserted) {
+      error_code_ = DecoderError::DUPLICATE_KEY;
+      return std::nullopt;
+    }
+
+    if (std::next(it) != cbor_map.end()) {
+      error_code_ = DecoderError::OUT_OF_ORDER_KEY;
+      return std::nullopt;
+    }
   }
 
-  Value::MapValue map;
-  map.reserve(cbor_map.size());
-  // TODO(crbug/1271599): when Chromium switches to C++17, this code can be
-  // optimized using std::map::extract().
-  for (auto& it : cbor_map)
-    map.emplace_hint(map.end(), it.first.Clone(), std::move(it.second));
-  return Value(std::move(map));
+  std::vector<std::pair<Value, Value>> items;
+  items.reserve(cbor_map.size());
+  while (!cbor_map.empty()) {
+    auto node = cbor_map.extract(cbor_map.begin());
+    items.emplace_back(std::move(node.key()), std::move(node.mapped()));
+  }
+  return Value(Value::MapValue(base::sorted_unique, std::move(items)));
 }
 
-absl::optional<uint8_t> Reader::ReadByte() {
-  const absl::optional<base::span<const uint8_t>> bytes = ReadBytes(1);
-  return bytes ? absl::make_optional(bytes.value()[0]) : absl::nullopt;
+std::optional<uint8_t> Reader::ReadByte() {
+  const std::optional<base::span<const uint8_t>> bytes = ReadBytes(1);
+  return bytes ? std::make_optional(bytes.value()[0]) : std::nullopt;
 }
 
-absl::optional<base::span<const uint8_t>> Reader::ReadBytes(
-    uint64_t num_bytes) {
+std::optional<base::span<const uint8_t>> Reader::ReadBytes(uint64_t num_bytes) {
   if (base::strict_cast<uint64_t>(rest_.size()) < num_bytes) {
     error_code_ = DecoderError::INCOMPLETE_CBOR_DATA;
-    return absl::nullopt;
+    return std::nullopt;
   }
-  const base::span<const uint8_t> ret = rest_.first(num_bytes);
-  rest_ = rest_.subspan(num_bytes);
-  return ret;
+
+  // The `uint64_t` => `size_t` conversion below will always succeed
+  // because the `if` condition above implies that `num_bytes` fits into a
+  // `size_t`.
+  return rest_.take_first(base::checked_cast<size_t>(num_bytes));
 }
 
 bool Reader::IsEncodingMinimal(uint8_t additional_bytes, uint64_t uint_data) {
@@ -380,30 +559,6 @@ bool Reader::IsEncodingMinimal(uint8_t additional_bytes, uint64_t uint_data) {
     error_code_ = DecoderError::NON_MINIMAL_CBOR_ENCODING;
     return false;
   }
-  return true;
-}
-
-bool Reader::IsKeyInOrder(const Value& new_key,
-                          const std::map<Value, Value, Value::Less>& map) {
-  if (map.empty()) {
-    return true;
-  }
-
-  const auto& max_current_key = map.rbegin()->first;
-  const auto less = map.key_comp();
-  if (!less(max_current_key, new_key)) {
-    error_code_ = DecoderError::OUT_OF_ORDER_KEY;
-    return false;
-  }
-  return true;
-}
-
-bool Reader::IsDuplicateKey(const Value& new_key,
-                            const std::map<Value, Value, Value::Less>& map) {
-  if (map.find(new_key) == map.end()) {
-    return false;
-  }
-  error_code_ = DecoderError::DUPLICATE_KEY;
   return true;
 }
 
@@ -442,7 +597,6 @@ const char* Reader::ErrorCodeToString(DecoderError error) {
       return kUnknownError;
     default:
       NOTREACHED();
-      return "Unknown error code.";
   }
 }
 

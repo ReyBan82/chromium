@@ -4,7 +4,20 @@
 
 #include "chrome/browser/webshare/win/share_operation.h"
 
+#include <shlobj.h>
+#include <windows.applicationmodel.datatransfer.h>
+#include <windows.foundation.collections.h>
+#include <windows.foundation.h>
+#include <windows.storage.h>
+#include <windows.storage.streams.h>
+#include <wininet.h>
+#include <wrl/client.h>
+#include <wrl/event.h>
+
+#include <utility>
+
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/win/core_winrt_util.h"
 #include "base/win/post_async_results.h"
@@ -25,16 +38,6 @@
 #include "ui/base/win/internal_constants.h"
 #include "ui/views/win/hwnd_util.h"
 #include "url/gurl.h"
-
-#include <shlobj.h>
-#include <windows.applicationmodel.datatransfer.h>
-#include <windows.foundation.collections.h>
-#include <windows.foundation.h>
-#include <windows.storage.h>
-#include <windows.storage.streams.h>
-#include <wininet.h>
-#include <wrl/client.h>
-#include <wrl/event.h>
 
 using ABI::Windows::ApplicationModel::DataTransfer::IDataPackage;
 using ABI::Windows::ApplicationModel::DataTransfer::IDataPackage2;
@@ -60,10 +63,7 @@ using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Make;
 
-namespace ABI {
-namespace Windows {
-namespace Foundation {
-namespace Collections {
+namespace ABI::Windows::Foundation::Collections {
 
 // Define template specializations for the types used. These uuids were randomly
 // generated.
@@ -76,10 +76,7 @@ struct __declspec(uuid("30BE4864-5EE5-4111-916E-15126649F3C9"))
     VectorChangedEventHandler<IStorageItem*>
     : VectorChangedEventHandler_impl<IStorageItem*> {};
 
-}  // namespace Collections
-}  // namespace Foundation
-}  // namespace Windows
-}  // namespace ABI
+}  // namespace ABI::Windows::Foundation::Collections
 
 namespace webshare {
 namespace {
@@ -144,7 +141,8 @@ class DataWriterFileStreamWriter final : public storage::FileStreamWriter {
     return net::OK;
   }
 
-  int Flush(net::CompletionOnceCallback callback) final {
+  int Flush(storage::FlushMode /*flush_mode*/,
+            net::CompletionOnceCallback callback) final {
     DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
     DCHECK(flush_callback_.is_null());
     DCHECK_EQ(flush_operation_, nullptr);
@@ -232,15 +230,17 @@ class DataWriterFileStreamWriter final : public storage::FileStreamWriter {
 
 // Represents an ongoing operation of writing to an IOutputStream.
 class OutputStreamWriteOperation
-    : public base::RefCounted<OutputStreamWriteOperation> {
+    : public base::RefCountedThreadSafe<
+          OutputStreamWriteOperation,
+          content::BrowserThread::DeleteOnIOThread> {
  public:
   OutputStreamWriteOperation(
       content::BrowserContext::BlobContextGetter blob_context_getter,
       scoped_refptr<base::RefCountedData<uint64_t>> file_bytes_shared,
-      std::string uuid)
+      mojo::PendingRemote<blink::mojom::Blob> blob)
       : blob_context_getter_(blob_context_getter),
         file_bytes_shared_(file_bytes_shared),
-        uuid_(uuid) {}
+        blob_(std::move(blob)) {}
 
   // Begins the write operation on the |stream|, maintaining a reference to the
   // |stream| until the operation is completed, at which point it will be closed
@@ -259,9 +259,23 @@ class OutputStreamWriteOperation
   }
 
  private:
-  friend class base::RefCounted<OutputStreamWriteOperation>;
+  friend class base::RefCountedThreadSafe<
+      OutputStreamWriteOperation,
+      content::BrowserThread::DeleteOnIOThread>;
+  friend struct content::BrowserThread::DeleteOnThread<
+      content::BrowserThread::IO>;
+  friend class base::DeleteHelper<OutputStreamWriteOperation>;
 
-  ~OutputStreamWriteOperation() = default;
+  ~OutputStreamWriteOperation() {
+    // Though at the time of this writing the only thing this class owns that
+    // needs to be destroyed on the IO thread is the FileWriterDelegate (because
+    // it owns a BlobReader, which owns a BlobDataSnapshot, which must be
+    // destroyed on the IO thread), this class is largely IO-centric, so to
+    // protect against future changes that may modify what needs to be destroyed
+    // on the IO thread we broadly enforce the class as a whole is always
+    // destroyed there.
+    DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  }
 
   void WriteStreamOnIOThread() {
     DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
@@ -273,8 +287,17 @@ class OutputStreamWriteOperation
       return;
     }
 
-    blob_handle_ = blob_storage_context->GetBlobDataFromUUID(uuid_);
+    blob_storage_context->GetBlobDataFromBlobRemote(
+        std::move(blob_),
+        base::BindOnce(&OutputStreamWriteOperation::BlobDataHandleReady,
+                       weak_factory_.GetWeakPtr()));
+  }
 
+  void BlobDataHandleReady(
+      std::unique_ptr<storage::BlobDataHandle> data_handle) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+
+    blob_handle_ = std::move(data_handle);
     ComPtr<IDataWriterFactory> data_writer_factory;
     auto hr =
         GetActivationFactory<IDataWriterFactory,
@@ -332,7 +355,7 @@ class OutputStreamWriteOperation
   scoped_refptr<base::RefCountedData<uint64_t>> file_bytes_shared_;
   base::OnceCallback<void()> on_complete_;
   ComPtr<IOutputStream> stream_;
-  const std::string uuid_;
+  mojo::PendingRemote<blink::mojom::Blob> blob_;
   std::unique_ptr<storage::FileWriterDelegate> writer_delegate_;
   base::WeakPtrFactory<OutputStreamWriteOperation> weak_factory_{this};
 };
@@ -352,13 +375,11 @@ void ShareOperation::SetRoGetActivationFactoryFunctionForTesting(
 ShareOperation::ShareOperation(const std::string& title,
                                const std::string& text,
                                const GURL& url,
-                               std::vector<blink::mojom::SharedFilePtr> files,
                                content::WebContents* web_contents)
     : web_contents_(web_contents->GetWeakPtr()),
       title_(std::move(title)),
       text_(std::move(text)),
-      url_(std::move(url)),
-      files_(std::move(files)) {}
+      url_(std::move(url)) {}
 
 ShareOperation::~ShareOperation() {
   if (callback_)
@@ -369,16 +390,10 @@ base::WeakPtr<ShareOperation> ShareOperation::AsWeakPtr() {
   return weak_factory_.GetWeakPtr();
 }
 
-void ShareOperation::Run(blink::mojom::ShareService::ShareCallback callback) {
+void ShareOperation::Run(SharedFiles files,
+                         blink::mojom::ShareService::ShareCallback callback) {
   DCHECK(!callback_);
   callback_ = std::move(callback);
-
-  // Ensure that the required WinRT functionality is available/loaded.
-  if (!base::win::ResolveCoreWinRTDelayload() ||
-      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
-    Complete(blink::mojom::ShareError::INTERNAL_ERROR);
-    return;
-  }
 
   // If the corresponding web_contents have already been cleaned up, cancel
   // the operation.
@@ -387,7 +402,14 @@ void ShareOperation::Run(blink::mojom::ShareService::ShareCallback callback) {
     return;
   }
 
-  if (files_.size() > 0) {
+  // If the tab is no longer active or visible, return permission denied.
+  if (!ShareServiceImpl::IsWebContentsForegroundAndVisible(
+          web_contents_.get())) {
+    Complete(blink::mojom::ShareError::PERMISSION_DENIED);
+    return;
+  }
+
+  if (files.size() > 0) {
     // Determine the source for use with the OS IAttachmentExecute.
     // If the source cannot be determined, does not appear to be valid,
     // or is longer than the max length supported by the IAttachmentExecute
@@ -402,7 +424,7 @@ void ShareOperation::Run(blink::mojom::ShareService::ShareCallback callback) {
     // The same instance cannot be used to check multiple files, so this
     // makes a new one per-file. For more details on this functionality, see
     // https://docs.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-iattachmentexecute-checkpolicy
-    for (auto& file : files_) {
+    for (auto& file : files) {
       ComPtr<IAttachmentExecute> attachment_services;
       if (FAILED(CoCreateInstance(CLSID_AttachmentServices, nullptr, CLSCTX_ALL,
                                   IID_PPV_ARGS(&attachment_services)))) {
@@ -451,17 +473,19 @@ void ShareOperation::Run(blink::mojom::ShareService::ShareCallback callback) {
 
   show_share_ui_for_window_operation_ =
       std::make_unique<ShowShareUIForWindowOperation>(hwnd);
-  show_share_ui_for_window_operation_->Run(base::BindOnce(
-      &ShareOperation::OnDataRequested, weak_factory_.GetWeakPtr()));
+  show_share_ui_for_window_operation_->Run(
+      base::BindOnce(&ShareOperation::OnDataRequested,
+                     weak_factory_.GetWeakPtr(), std::move(files)));
 }
 
-void ShareOperation::OnDataRequested(IDataRequestedEventArgs* event_args) {
+void ShareOperation::OnDataRequested(SharedFiles files,
+                                     IDataRequestedEventArgs* event_args) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   blink::mojom::ShareError share_result;
   if (!web_contents_) {
     share_result = blink::mojom::ShareError::CANCELED;
-  } else if (PutShareContentInEventArgs(event_args)) {
+  } else if (PutShareContentInEventArgs(std::move(files), event_args)) {
     share_result = blink::mojom::ShareError::OK;
   } else {
     share_result = blink::mojom::ShareError::INTERNAL_ERROR;
@@ -473,6 +497,7 @@ void ShareOperation::OnDataRequested(IDataRequestedEventArgs* event_args) {
 }
 
 bool ShareOperation::PutShareContentInEventArgs(
+    SharedFiles files,
     IDataRequestedEventArgs* event_args) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   if (!event_args)
@@ -497,10 +522,11 @@ bool ShareOperation::PutShareContentInEventArgs(
   if (FAILED(data_prop_sets->put_Title(title_h.get())))
     return false;
 
-  return PutShareContentInDataPackage(data_request.Get());
+  return PutShareContentInDataPackage(std::move(files), data_request.Get());
 }
 
-bool ShareOperation::PutShareContentInDataPackage(IDataRequest* data_request) {
+bool ShareOperation::PutShareContentInDataPackage(SharedFiles files,
+                                                  IDataRequest* data_request) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   if (!text_.empty()) {
@@ -530,7 +556,7 @@ bool ShareOperation::PutShareContentInDataPackage(IDataRequest* data_request) {
       return false;
   }
 
-  if (!files_.empty()) {
+  if (!files.empty()) {
     // Fetch a deferral to allow for async operations
     if (FAILED(data_request->GetDeferral(&data_request_deferral_)))
       return false;
@@ -555,7 +581,7 @@ bool ShareOperation::PutShareContentInDataPackage(IDataRequest* data_request) {
     if (FAILED(hr))
       return false;
 
-    for (auto& file : files_) {
+    for (auto& file : files) {
       // This operation for converting the corresponding blob to a stream is
       // maintained as a scoped_refptr because it may out live this
       // ShareOperation instance. It is only invoked when the user has chosen a
@@ -567,7 +593,7 @@ bool ShareOperation::PutShareContentInDataPackage(IDataRequest* data_request) {
       // be updated to be owned/maintained by this ShareOperation instance.
       auto operation = base::MakeRefCounted<OutputStreamWriteOperation>(
           web_contents_->GetBrowserContext()->GetBlobStorageContext(),
-          file_bytes_shared, file->blob->uuid);
+          file_bytes_shared, std::move(file->blob->blob));
       auto name_h = base::win::ScopedHString::Create(file->name.path().value());
       auto raw_data_requested_callback =
           Callback<IStreamedFileDataRequestedHandler>(
@@ -575,11 +601,8 @@ bool ShareOperation::PutShareContentInDataPackage(IDataRequest* data_request) {
                 // No additional work is needed when the write has been
                 // completed, but a callback is created to hold a reference
                 // to the |operation| until the operation has completed.
-                operation->WriteStream(
-                    stream,
-                    base::BindOnce(
-                        [](scoped_refptr<OutputStreamWriteOperation>) {},
-                        operation));
+                operation->WriteStream(stream,
+                                       base::DoNothingWithBoundArgs(operation));
                 return S_OK;
               });
       // The Callback function may return null in the E_OUTOFMEMORY case
@@ -597,7 +620,7 @@ bool ShareOperation::PutShareContentInDataPackage(IDataRequest* data_request) {
       if (FAILED(base::win::PostAsyncHandlers(
               async_operation.Get(),
               base::BindOnce(&ShareOperation::OnStreamedFileCreated,
-                             weak_factory_.GetWeakPtr())))) {
+                             weak_factory_.GetWeakPtr(), files.size())))) {
         return false;
       }
     }
@@ -606,7 +629,8 @@ bool ShareOperation::PutShareContentInDataPackage(IDataRequest* data_request) {
   return true;
 }
 
-void ShareOperation::OnStreamedFileCreated(ComPtr<IStorageFile> storage_file) {
+void ShareOperation::OnStreamedFileCreated(uint32_t expected_file_count,
+                                           ComPtr<IStorageFile> storage_file) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   // If there is no callback this ShareOperation already completed due to an
@@ -637,8 +661,9 @@ void ShareOperation::OnStreamedFileCreated(ComPtr<IStorageFile> storage_file) {
   }
 
   // If this is not the final file, no more work to do
-  if (size != files_.size())
+  if (size != expected_file_count) {
     return;
+  }
 
   if (FAILED(data_package_->SetStorageItems(storage_items_.Get(),
                                             true /*readonly*/))) {

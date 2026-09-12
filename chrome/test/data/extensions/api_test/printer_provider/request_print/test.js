@@ -7,34 +7,36 @@
 // @param {function(?string)} callback Called with the read blob content.
 //     the content will be null on error.
 function readBlob(blob, callback) {
-  var reader = new FileReader();
-  reader.onerror = function() { callback(null); };
-  reader.onloadend = function() {
+  const reader = new FileReader();
+  reader.onerror = function() {
+    callback(null);
+  };
+  reader.onload = function() {
     callback(reader.result);
-  }
-  reader.readAsText(blob)
+  };
+  reader.readAsText(blob);
 }
 
 // Invokes |callback| with |returnValue| and verified a subsequent callback
 // invocation throws an exception.
 function wrapPrintCallback(callback, returnValue) {
   callback(returnValue);
+  // Verify `callback` throws when called more than once.
   chrome.test.assertThrows(
-      callback,
-      ['OK'],
+      callback.bind(null, /* result */ 'OK'),
       'Event callback must not be called more than once.');
 }
 
 chrome.test.sendMessage('loaded', function(test) {
   chrome.test.runTests([function printTest() {
-    if (test == 'NO_LISTENER') {
+    if (test === 'NO_LISTENER') {
       chrome.test.sendMessage('ready');
       chrome.test.succeed();
       return;
     }
 
-    chrome.printerProvider.onPrintRequested.addListener(function(job,
-                                                                 callback) {
+    chrome.printerProvider.onPrintRequested.addListener(function(
+        job, callback) {
       chrome.test.assertFalse(!!chrome.printerProviderInternal);
       chrome.test.assertTrue(!!job);
 
@@ -42,13 +44,15 @@ chrome.test.sendMessage('loaded', function(test) {
         case 'IGNORE_CALLBACK':
           break;
         case 'ASYNC_RESPONSE':
-          setTimeout(callback.bind(null, 'OK'), 0);
+          setTimeout(callback.bind(null, /* result */ 'OK'), 0);
           break;
         case 'INVALID_VALUE':
-          var expectedError =
-              'Error at parameter \'result\': Value must be one of ' +
+          const expectedError =
+              `Error at parameter 'result': Value must be one of ` +
               'FAILED, INVALID_DATA, INVALID_TICKET, OK.';
-          chrome.test.assertThrows(callback, ['XXX'], expectedError);
+          // Verify `callback` throws when passed an invalid result value.
+          chrome.test.assertThrows(
+              callback.bind(null, /* result */ 'XXX'), expectedError);
           break;
         case 'FAILED':
         case 'INVALID_TICKET':
@@ -57,10 +61,11 @@ chrome.test.sendMessage('loaded', function(test) {
           break;
         case 'OK':
           readBlob(job.document, function(content) {
-            wrapPrintCallback(callback, !!content ? 'OK' : 'INVALID_DATA');
+            wrapPrintCallback(callback, content ? 'OK' : 'INVALID_DATA');
 
-            if (content)
+            if (content) {
               chrome.test.assertEq('bytes', content);
+            }
 
             chrome.test.assertEq('Print job', job.title);
 

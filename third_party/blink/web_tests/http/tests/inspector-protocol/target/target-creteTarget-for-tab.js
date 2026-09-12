@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   await testRunner.startBlank(
       `Tests that browser.Target.createTarget() creates a tab target when forTab is set.`);
 
@@ -8,7 +8,7 @@
   const response = await target.attachToBrowserTarget();
 
   const newBrowserSession =
-      new TestRunner.Session(testRunner, response.result.sessionId);
+      testRunner.createSessionFor(response.result.sessionId);
   const newUrl = testRunner.url('../resources/test-page.html');
   const {result} = await newBrowserSession.protocol.Target.createTarget({
                      url: newUrl,

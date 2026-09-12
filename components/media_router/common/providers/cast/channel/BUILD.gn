@@ -4,8 +4,13 @@
 
 import("//testing/libfuzzer/fuzzer_test.gni")
 import("//third_party/libprotobuf-mutator/fuzzable_proto_library.gni")
-import("//third_party/openscreen/src/build/config/data_headers_template.gni")
+import("//third_party/openscreen/src/build_overrides/data_headers_template.gni")
 import("//third_party/protobuf/proto_library.gni")
+
+source_set("capability") {
+  public = [ "cast_device_capability.h" ]
+  deps = [ "//base" ]
+}
 
 static_library("channel") {
   sources = [
@@ -33,16 +38,14 @@ static_library("channel") {
     "keep_alive_delegate.h",
     "keep_alive_handler.cc",
     "keep_alive_handler.h",
-    "libcast_socket_service.cc",
-    "libcast_socket_service.h",
     "logger.cc",
     "logger.h",
     "mojo_data_pump.cc",
     "mojo_data_pump.h",
   ]
   deps = [
+    ":capability",
     "//base",
-    "//build:chromeos_buildflags",
     "//components/keyed_service/content",
     "//components/keyed_service/core",
     "//components/media_router/common/providers/cast/certificate",
@@ -53,16 +56,13 @@ static_library("channel") {
     "//content/public/browser",
     "//crypto",
     "//net",
-    "//services/data_decoder/public/cpp",
-    "//third_party/openscreen/src/cast/common:channel",
     "//third_party/openscreen/src/cast/common/channel/proto:channel_proto",
-    "//third_party/openscreen/src/cast/sender:channel",
-    "//third_party/openscreen/src/platform",
   ]
   public_deps = [
-    "//services/data_decoder/public/cpp",
+    "//services/network/public/cpp",
     "//services/network/public/mojom",
   ]
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
 }
 
 static_library("test_support") {
@@ -95,7 +95,6 @@ source_set("unit_tests") {
     "cast_transport_unittest.cc",
     "enum_table_unittest.cc",
     "keep_alive_delegate_unittest.cc",
-    "libcast_socket_service_unittest.cc",
     "logger_unittest.cc",
   ]
   deps = [
@@ -105,16 +104,12 @@ source_set("unit_tests") {
     "//components/media_router/common/providers/cast/certificate",
     "//components/media_router/common/providers/cast/certificate:certificate_reader",
     "//components/media_router/common/providers/cast/certificate:test_support",
-    "//components/openscreen_platform",
     "//components/prefs",
     "//components/prefs:test_support",
     "//content/test:test_support",
     "//net:test_support",
-    "//services/data_decoder/public/cpp",
-    "//services/data_decoder/public/cpp:test_support",
     "//testing/gmock",
     "//testing/gtest",
-    "//third_party/openscreen/src/cast/common:test_helpers",
     "//third_party/openscreen/src/cast/common/certificate/proto:certificate_unittest_proto",
     "//third_party/openscreen/src/cast/common/channel/proto:channel_proto",
   ]
@@ -145,7 +140,7 @@ if (use_fuzzing_engine) {
       "//third_party/openscreen/src/cast/common/certificate/proto",
       "//third_party/openscreen/src/cast/common/channel/proto",
     ]
-    link_deps = [
+    deps = [
       "//third_party/openscreen/src/cast/common/certificate/proto:certificate_proto",
       "//third_party/openscreen/src/cast/common/channel/proto:channel_proto",
     ]
@@ -183,6 +178,7 @@ fuzzer_test("cast_auth_util_fuzzer") {
     ":cast_auth_util_fuzzer_shared",
     ":channel",
     ":channel_fuzzer_inputs",
+    ":channel_fuzzer_inputs_fuzzable",
     "//components/media_router/common/providers/cast/certificate",
     "//components/media_router/common/providers/cast/certificate:certificate_reader",
     "//components/media_router/common/providers/cast/certificate:test_support",
@@ -190,6 +186,7 @@ fuzzer_test("cast_auth_util_fuzzer") {
     "//net/data/ssl/certificates:generate_fuzzer_cert_includes",
     "//third_party/libprotobuf-mutator",
     "//third_party/openscreen/src/cast/common/certificate/proto:certificate_proto",
+    "//third_party/openscreen/src/cast/common/certificate/proto:certificate_proto_fuzzable",
   ]
   seed_corpus = "$target_gen_dir/cast_auth_util_fuzzer_corpus"
   seed_corpus_deps = [ ":cast_auth_util_fuzzer_convert_corpus" ]
@@ -205,6 +202,7 @@ fuzzer_test("cast_message_fuzzer") {
     "//base",
     "//components/media_router/common/providers/cast/channel",
     "//net",
+    "//testing/libfuzzer:libfuzzer_base_wrappers",
     "//third_party/openscreen/src/cast/common/channel/proto:channel_proto",
   ]
   seed_corpus = "fuzz_corpus"
@@ -218,9 +216,14 @@ fuzzer_test("cast_framer_serialize_fuzzer") {
   deps = [
     ":channel",
     ":channel_fuzzer_inputs",
+    ":channel_fuzzer_inputs_fuzzable",
     "//third_party/libprotobuf-mutator",
     "//third_party/openscreen/src/cast/common/channel/proto:channel_proto",
+    "//third_party/openscreen/src/cast/common/channel/proto:channel_proto_fuzzable",
   ]
+
+  # TODO(crbug.com/505034799): Migrate to FUZZ_TEST.
+  is_fuzztest_compatible = false
 }
 
 fuzzer_test("cast_message_util_fuzzer") {
@@ -229,8 +232,10 @@ fuzzer_test("cast_message_util_fuzzer") {
   deps = [
     ":channel",
     ":channel_fuzzer_inputs",
+    ":channel_fuzzer_inputs_fuzzable",
     "//third_party/libprotobuf-mutator",
     "//third_party/openscreen/src/cast/common/channel/proto:channel_proto",
+    "//third_party/openscreen/src/cast/common/channel/proto:channel_proto_fuzzable",
   ]
 }
 
@@ -240,6 +245,7 @@ fuzzer_test("openscreen_cast_auth_util_fuzzer") {
     ":cast_auth_util_fuzzer_certs",
     ":cast_auth_util_fuzzer_shared",
     ":channel_fuzzer_inputs",
+    ":channel_fuzzer_inputs_fuzzable",
     "//base",
     "//components/media_router/common/providers/cast/certificate:certificate_reader",
     "//components/openscreen_platform",
@@ -248,6 +254,7 @@ fuzzer_test("openscreen_cast_auth_util_fuzzer") {
     "//third_party/libprotobuf-mutator",
     "//third_party/openscreen/src/cast/common:certificate_boringssl",
     "//third_party/openscreen/src/cast/common/certificate/proto:certificate_proto",
+    "//third_party/openscreen/src/cast/common/certificate/proto:certificate_proto_fuzzable",
     "//third_party/openscreen/src/cast/sender:channel",
   ]
   seed_corpus = "$target_gen_dir/cast_auth_util_fuzzer_corpus"
@@ -270,8 +277,13 @@ fuzzer_test("openscreen_message_framer_serialize_fuzzer") {
   sources = [ "openscreen_message_framer_serialize_fuzzer.cc" ]
   deps = [
     ":channel_fuzzer_inputs",
+    ":channel_fuzzer_inputs_fuzzable",
     "//components/openscreen_platform",
     "//third_party/libprotobuf-mutator",
     "//third_party/openscreen/src/cast/common:channel",
+    "//third_party/openscreen/src/cast/common/channel/proto:channel_proto_fuzzable",
   ]
+
+  # TODO(crbug.com/505034799): Migrate to FUZZ_TEST.
+  is_fuzztest_compatible = false
 }

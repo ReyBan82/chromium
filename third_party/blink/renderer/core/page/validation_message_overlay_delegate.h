@@ -5,12 +5,17 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_VALIDATION_MESSAGE_OVERLAY_DELEGATE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_VALIDATION_MESSAGE_OVERLAY_DELEGATE_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/frame/frame_overlay.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/text/text_direction.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
+
+namespace gfx {
+class Rect;
+}
 
 namespace blink {
 
@@ -54,15 +59,13 @@ class CORE_EXPORT ValidationMessageOverlayDelegate
 
  private:
   LocalFrameView& FrameView() const;
-  void WriteDocument(SharedBuffer*);
+  void WriteDocument(SegmentedBuffer&);
   Element& GetElementById(const AtomicString&) const;
   void AdjustBubblePosition(const gfx::Rect& view_rect);
 
   // An internal Page and a ChromeClient for it.
   Persistent<Page> page_;
   Persistent<ChromeClient> chrome_client_;
-
-  gfx::Size bubble_size_;
 
   // A page which triggered this validation message.
   Persistent<Page> main_page_;
@@ -75,7 +78,8 @@ class CORE_EXPORT ValidationMessageOverlayDelegate
 
   // Used by CreatePage() to determine if this has been deleted in the middle of
   // the function.
-  bool* destroyed_ptr_ = nullptr;
+  raw_ptr<bool, UnprotectedInRelease | DanglingUntriaged> destroyed_ptr_ =
+      nullptr;
 };
 
 }  // namespace blink

@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/task/thread_pool.h"
 #include "base/test/bind.h"
@@ -19,8 +20,7 @@
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace nearby {
-namespace chrome {
+namespace nearby::chrome {
 
 namespace {
 
@@ -122,7 +122,7 @@ class BluetoothServerSocketTest : public testing::Test {
   }
 
  protected:
-  FakeServerSocket* fake_server_socket_ = nullptr;
+  raw_ptr<FakeServerSocket, DanglingUntriaged> fake_server_socket_ = nullptr;
 
   std::unique_ptr<BluetoothServerSocket> bluetooth_server_socket_;
 
@@ -217,5 +217,4 @@ TEST_F(BluetoothServerSocketTest, TestDestroy) {
   run_loop.Run();
 }
 
-}  // namespace chrome
-}  // namespace nearby
+}  // namespace nearby::chrome

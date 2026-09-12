@@ -4,10 +4,10 @@
 
 #include "chrome/browser/ui/webui/ash/login/saml_confirm_password_handler.h"
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/values.h"
 #include "chrome/browser/ash/login/screens/saml_confirm_password_screen.h"
 #include "chrome/browser/ui/webui/ash/login/base_screen_handler.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
 #include "ui/chromeos/devicetype_utils.h"
 
@@ -20,7 +20,7 @@ SamlConfirmPasswordHandler::~SamlConfirmPasswordHandler() = default;
 
 void SamlConfirmPasswordHandler::Show(const std::string& email,
                                       bool is_manual) {
-  base::Value::Dict data;
+  base::DictValue data;
   data.Set("email", email);
   data.Set("manualPasswordInput", is_manual);
   ShowInWebUI(std::move(data));
@@ -28,6 +28,10 @@ void SamlConfirmPasswordHandler::Show(const std::string& email,
 
 void SamlConfirmPasswordHandler::ShowPasswordStep(bool retry) {
   CallExternalAPI("showPasswordStep", retry);
+}
+
+base::WeakPtr<SamlConfirmPasswordView> SamlConfirmPasswordHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 void SamlConfirmPasswordHandler::DeclareLocalizedValues(

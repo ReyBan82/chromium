@@ -15,8 +15,8 @@
 namespace network {
 namespace {
 
-uint32_t kNetLogSourceId = 123;
-absl::optional<base::UnguessableToken> kThrottlingProfileId =
+constexpr uint32_t kNetLogSourceId = 123;
+std::optional<base::UnguessableToken> kThrottlingProfileId =
     base::UnguessableToken::Create();
 
 class MockCallback {
@@ -26,9 +26,14 @@ class MockCallback {
 
 class WebSocketInterceptorTest : public ::testing::Test {
  protected:
-  WebSocketInterceptorTest() {
-    interceptor_ = std::make_unique<WebSocketInterceptor>(kNetLogSourceId,
-                                                          kThrottlingProfileId);
+  WebSocketInterceptorTest() : client_id_(base::UnguessableToken::Create()) {
+    interceptor_ = std::make_unique<WebSocketInterceptor>(
+        kNetLogSourceId, GURL(), kThrottlingProfileId);
+  }
+
+  ~WebSocketInterceptorTest() override {
+    interceptor_.reset();
+    ThrottlingController::SetConditions(*kThrottlingProfileId, client_id_, {});
   }
 
   base::OnceClosure MakeCallback() {
@@ -40,11 +45,12 @@ class WebSocketInterceptorTest : public ::testing::Test {
   base::test::SingleThreadTaskEnvironment task_environment_{
       base::test::SingleThreadTaskEnvironment::TimeSource::MOCK_TIME};
   std::unique_ptr<WebSocketInterceptor> interceptor_;
+  base::UnguessableToken client_id_;
 };
 
 TEST_F(WebSocketInterceptorTest, DoesNotInterferWhenNoEmualatedConditions) {
   EXPECT_CALL(mock_callback_, Callback()).Times(0);
-  ThrottlingController::SetConditions(*kThrottlingProfileId, nullptr);
+  ThrottlingController::SetConditions(*kThrottlingProfileId, client_id_, {});
   EXPECT_EQ(WebSocketInterceptor::kContinue,
             interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 42,
                                     MakeCallback()));
@@ -56,8 +62,8 @@ TEST_F(WebSocketInterceptorTest, DoesNotInterferWhenNoEmualatedConditions) {
 TEST_F(WebSocketInterceptorTest, ShouldWaitWhenOffline) {
   EXPECT_CALL(mock_callback_, Callback()).Times(0);
   ThrottlingController::SetConditions(
-      *kThrottlingProfileId,
-      std::make_unique<NetworkConditions>(/*offline=*/true));
+      *kThrottlingProfileId, client_id_,
+      {{{}, NetworkConditions(/*offline=*/true)}});
   EXPECT_EQ(WebSocketInterceptor::kShouldWait,
             interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 42,
                                     MakeCallback()));
@@ -65,10 +71,11 @@ TEST_F(WebSocketInterceptorTest, ShouldWaitWhenOffline) {
 
 TEST_F(WebSocketInterceptorTest, ShouldWaitWhenSlow) {
   ThrottlingController::SetConditions(
-      *kThrottlingProfileId,
-      std::make_unique<NetworkConditions>(/*offline=*/false, /*latency=*/0,
-                                          /*download=*/0,
-                                          /*upload=*/1));
+      *kThrottlingProfileId, client_id_,
+      {{{},
+        NetworkConditions(/*offline=*/false, /*latency=*/0,
+                          /*download_throughput=*/0,
+                          /*upload_throughput=*/1)}});
   EXPECT_EQ(WebSocketInterceptor::kShouldWait,
             interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 42,
                                     MakeCallback()));
@@ -79,10 +86,11 @@ TEST_F(WebSocketInterceptorTest, ShouldWaitWhenSlow) {
 
 TEST_F(WebSocketInterceptorTest, SubsequentInterceptWhenSlow) {
   ThrottlingController::SetConditions(
-      *kThrottlingProfileId,
-      std::make_unique<NetworkConditions>(/*offline=*/false, /*latency=*/0,
-                                          /*download=*/0,
-                                          /*upload=*/1));
+      *kThrottlingProfileId, client_id_,
+      {{{},
+        NetworkConditions(/*offline=*/false, /*latency=*/0,
+                          /*download_throughput=*/0,
+                          /*upload_throughput=*/1)}});
   EXPECT_EQ(WebSocketInterceptor::kShouldWait,
             interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 42,
                                     MakeCallback()));
@@ -97,22 +105,22 @@ TEST_F(WebSocketInterceptorTest, SubsequentInterceptWhenSlow) {
 
 TEST_F(WebSocketInterceptorTest, OfflineCallbackInvokedWhenBackOnline) {
   ThrottlingController::SetConditions(
-      *kThrottlingProfileId,
-      std::make_unique<NetworkConditions>(/*offline=*/true));
+      *kThrottlingProfileId, client_id_,
+      {{{}, NetworkConditions(/*offline=*/true)}});
   EXPECT_CALL(mock_callback_, Callback()).Times(0);
   EXPECT_EQ(WebSocketInterceptor::kShouldWait,
             interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 42,
                                     MakeCallback()));
 
   EXPECT_CALL(mock_callback_, Callback()).Times(1);
-  ThrottlingController::SetConditions(*kThrottlingProfileId, nullptr);
+  ThrottlingController::SetConditions(*kThrottlingProfileId, client_id_, {});
   interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 42, MakeCallback());
 }
 
 TEST_F(WebSocketInterceptorTest, SlowAfterOffline) {
   ThrottlingController::SetConditions(
-      *kThrottlingProfileId,
-      std::make_unique<NetworkConditions>(/*offline=*/true));
+      *kThrottlingProfileId, client_id_,
+      {{{}, NetworkConditions(/*offline=*/true)}});
   EXPECT_CALL(mock_callback_, Callback()).Times(0);
   EXPECT_EQ(WebSocketInterceptor::kShouldWait,
             interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 42,
@@ -120,10 +128,11 @@ TEST_F(WebSocketInterceptorTest, SlowAfterOffline) {
 
   EXPECT_CALL(mock_callback_, Callback()).Times(1);
   ThrottlingController::SetConditions(
-      *kThrottlingProfileId,
-      std::make_unique<NetworkConditions>(/*offline=*/false, /*latency=*/0,
-                                          /*download=*/0,
-                                          /*upload=*/1));
+      *kThrottlingProfileId, client_id_,
+      {{{},
+        NetworkConditions(/*offline=*/false, /*latency=*/0,
+                          /*download_throughput=*/0,
+                          /*upload_throughput=*/1)}});
   task_environment_.FastForwardUntilNoTasksRemain();
   interceptor_->Intercept(WebSocketInterceptor::kOutgoing, 43, MakeCallback());
   EXPECT_CALL(mock_callback_, Callback()).Times(1);
@@ -132,10 +141,11 @@ TEST_F(WebSocketInterceptorTest, SlowAfterOffline) {
 
 TEST_F(WebSocketInterceptorTest, UsesRightDirection) {
   ThrottlingController::SetConditions(
-      *kThrottlingProfileId,
-      std::make_unique<NetworkConditions>(/*offline=*/false, /*latency=*/0,
-                                          /*download=*/1,
-                                          /*upload=*/0));
+      *kThrottlingProfileId, client_id_,
+      {{{},
+        NetworkConditions(/*offline=*/false, /*latency=*/0,
+                          /*download_throughput=*/1,
+                          /*upload_throughput=*/0)}});
   interceptor_->Intercept(WebSocketInterceptor::kIncoming, 42, MakeCallback());
   EXPECT_CALL(mock_callback_, Callback()).Times(1);
   task_environment_.FastForwardUntilNoTasksRemain();

@@ -14,7 +14,6 @@
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/task/cancelable_task_tracker.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/task_traits.h"
@@ -55,11 +54,10 @@ void TopSitesBackend::GetMostVisitedSites(
       std::move(callback));
 }
 
-void TopSitesBackend::UpdateTopSites(const TopSitesDelta& delta,
-                                     const RecordHistogram record_or_not) {
+void TopSitesBackend::UpdateTopSites(const TopSitesDelta& delta) {
   db_task_runner_->PostTask(
-      FROM_HERE, base::BindOnce(&TopSitesBackend::UpdateTopSitesOnDBThread,
-                                this, delta, record_or_not));
+      FROM_HERE,
+      base::BindOnce(&TopSitesBackend::UpdateTopSitesOnDBThread, this, delta));
 }
 
 void TopSitesBackend::ResetDatabase() {
@@ -91,21 +89,13 @@ MostVisitedURLList TopSitesBackend::GetMostVisitedSitesOnDBThread() {
   return db_ ? db_->GetSites() : MostVisitedURLList();
 }
 
-void TopSitesBackend::UpdateTopSitesOnDBThread(
-    const TopSitesDelta& delta, const RecordHistogram record_or_not) {
+void TopSitesBackend::UpdateTopSitesOnDBThread(const TopSitesDelta& delta) {
   TRACE_EVENT0("startup", "history::TopSitesBackend::UpdateTopSitesOnDBThread");
 
   if (!db_)
     return;
 
-  base::TimeTicks begin_time = base::TimeTicks::Now();
-
   db_->ApplyDelta(delta);
-
-  if (record_or_not == RECORD_HISTOGRAM_YES) {
-    UMA_HISTOGRAM_TIMES("History.FirstUpdateTime",
-                        base::TimeTicks::Now() - begin_time);
-  }
 }
 
 void TopSitesBackend::ResetDatabaseOnDBThread(const base::FilePath& file_path) {

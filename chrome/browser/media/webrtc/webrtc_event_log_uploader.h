@@ -6,6 +6,7 @@
 #define CHROME_BROWSER_MEDIA_WEBRTC_WEBRTC_EVENT_LOG_UPLOADER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/files/file_path.h"
@@ -13,13 +14,20 @@
 #include "base/task/sequenced_task_runner.h"
 #include "chrome/browser/media/webrtc/webrtc_event_log_history.h"
 #include "chrome/browser/media/webrtc/webrtc_event_log_manager_common.h"
-#include "services/network/public/mojom/url_loader_factory.mojom-forward.h"
 
 namespace network {
 class SimpleURLLoader;
 }  // namespace network
 
+namespace url {
+class Origin;
+}
+
 namespace webrtc_event_logging {
+
+inline constexpr char kUploadURL[] = "https://clients2.google.com/cr/report";
+
+bool IsOriginSameSiteWithUploadEndpoint(const url::Origin& origin);
 
 // A sublcass of this interface will take ownership of a file, and either
 // upload it to a remote server (actual implementation), or pretend to do so
@@ -103,7 +111,7 @@ class WebRtcEventLogUploaderImpl : public WebRtcEventLogUploader {
   // Primes the log file for uploading. Returns true if the file could be read,
   // in which case |upload_data| will be populated with the data to be uploaded
   // (both the log file's contents as well as history for Crash).
-  // TODO(crbug.com/775415): Avoid reading the entire file into memory.
+  // TODO(crbug.com/40545136): Avoid reading the entire file into memory.
   bool PrepareUploadData(std::string* upload_data);
 
   // Initiates the file's upload.
@@ -112,7 +120,7 @@ class WebRtcEventLogUploaderImpl : public WebRtcEventLogUploader {
   // Callback invoked when the file upload has finished.
   // If the |url_loader_| instance it was bound to is deleted before
   // its invocation, the callback will not be called.
-  void OnURLLoadComplete(std::unique_ptr<std::string> response_body);
+  void OnURLLoadComplete(std::optional<std::string> response_body);
 
   // Cleanup and posting of the result callback.
   void ReportResult(bool upload_successful, bool delete_history_file = false);
@@ -122,9 +130,6 @@ class WebRtcEventLogUploaderImpl : public WebRtcEventLogUploader {
 
   // Remove the log file which is owned by |this|.
   void DeleteHistoryFile();
-
-  // The URL used for uploading the logs.
-  static const char kUploadURL[];
 
   // The object lives on this IO-capable task runner.
   scoped_refptr<base::SequencedTaskRunner> task_runner_;

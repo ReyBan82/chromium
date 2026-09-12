@@ -25,4 +25,17 @@ const AtomicString& AudioTrackList::InterfaceName() const {
   return event_target_names::kAudioTrackList;
 }
 
+void AudioTrackList::TrackEnabled(const String& track_id, bool exclusive) {
+  for (unsigned i = 0; i < length(); ++i) {
+    AudioTrack* track = AnonymousIndexedGetter(i);
+    if (track->id() != track_id) {
+      if (exclusive || track->IsExclusive()) {
+        track->ClearEnabled();
+      }
+    } else {
+      DCHECK(track->enabled());
+    }
+  }
+}
+
 }  // namespace blink

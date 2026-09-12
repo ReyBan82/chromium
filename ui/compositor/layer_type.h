@@ -5,7 +5,8 @@
 #ifndef UI_COMPOSITOR_LAYER_TYPE_H_
 #define UI_COMPOSITOR_LAYER_TYPE_H_
 
-#include "base/strings/string_piece.h"
+#include <string_view>
+
 #include "ui/compositor/compositor_export.h"
 
 namespace ui {
@@ -23,9 +24,15 @@ enum LayerType {
 
   // A layer based on the NinePatchLayer class.
   LAYER_NINE_PATCH = 3,
+
+  // A layer based on the SurfaceLayer class.
+  LAYER_SURFACE = 4,
+
+  // A layer that has an external texture.
+  LAYER_WITH_EXTERNAL_TEXTURE = 5
 };
 
-COMPOSITOR_EXPORT base::StringPiece LayerTypeToString(LayerType type);
+COMPOSITOR_EXPORT std::string_view LayerTypeToString(LayerType type);
 
 }  // namespace ui
 

@@ -11,9 +11,8 @@
 
 #include "base/command_line.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback.h"
-#include "build/build_config.h"
 #include "chrome/browser/extensions/extension_apitest.h"
+#include "chrome/browser/profiles/profile.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/onc/onc_constants.h"
 #include "content/public/test/browser_test.h"
@@ -30,7 +29,7 @@ namespace extensions {
 // The implementations (which differ significantly between chromeos and
 // windows/mac) are tested independently in
 // networking_private_[chromeos|service_client]_apitest.cc.
-// See also crbug.com/460119.
+// See also crbug.com/41158448.
 
 namespace {
 
@@ -48,7 +47,7 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
   TestNetworkingPrivateDelegate& operator=(
       const TestNetworkingPrivateDelegate&) = delete;
 
-  ~TestNetworkingPrivateDelegate() override {}
+  ~TestNetworkingPrivateDelegate() override = default;
 
   // Asynchronous methods
   void GetProperties(const std::string& guid,
@@ -69,7 +68,7 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
   }
 
   void SetProperties(const std::string& guid,
-                     base::Value::Dict properties,
+                     base::DictValue properties,
                      bool allow_set_shared_config,
                      VoidCallback success_callback,
                      FailureCallback failure_callback) override {
@@ -77,7 +76,7 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
   }
 
   void CreateNetwork(bool shared,
-                     base::Value properties,
+                     base::DictValue properties,
                      StringCallback success_callback,
                      FailureCallback failure_callback) override {
     StringResult(std::move(success_callback), std::move(failure_callback),
@@ -100,8 +99,8 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
     if (fail_) {
       std::move(failure_callback).Run(kFailure);
     } else {
-      base::Value::List result;
-      base::Value::Dict network;
+      base::ListValue result;
+      base::DictValue network;
       network.Set(::onc::network_config::kType,
                   ::onc::network_config::kEthernet);
       network.Set(::onc::network_config::kGUID, kGuid);
@@ -161,7 +160,7 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
   }
 
   void GetEnabledNetworkTypes(EnabledNetworkTypesCallback callback) override {
-    base::Value::List result;
+    base::ListValue result;
     if (!fail_) {
       result.Append(::onc::network_config::kEthernet);
     }
@@ -169,24 +168,22 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
   }
 
   void GetDeviceStateList(DeviceStateListCallback callback) override {
-    std::unique_ptr<DeviceStateList> result;
+    DeviceStateList result;
     if (!fail_) {
-      result = std::make_unique<DeviceStateList>();
-      std::unique_ptr<api::networking_private::DeviceStateProperties>
-          properties(new api::networking_private::DeviceStateProperties);
-      properties->type = api::networking_private::NETWORK_TYPE_ETHERNET;
-      properties->state = api::networking_private::DEVICE_STATE_TYPE_ENABLED;
-      result->push_back(std::move(properties));
+      api::networking_private::DeviceStateProperties& properties =
+          result.emplace_back();
+      properties.type = api::networking_private::NetworkType::kEthernet;
+      properties.state = api::networking_private::DeviceStateType::kEnabled;
     }
     std::move(callback).Run(std::move(result));
   }
 
   void GetGlobalPolicy(GetGlobalPolicyCallback callback) override {
-    std::move(callback).Run(base::Value::Dict());
+    std::move(callback).Run(base::DictValue());
   }
 
   void GetCertificateLists(GetCertificateListsCallback callback) override {
-    std::move(callback).Run(base::Value::Dict());
+    std::move(callback).Run(base::DictValue());
   }
 
   // Synchronous methods
@@ -218,7 +215,7 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
     if (fail_) {
       std::move(failure_callback).Run(kFailure);
     } else {
-      base::Value::Dict result;
+      base::DictValue result;
       result.Set(::onc::network_config::kGUID, guid);
       result.Set(::onc::network_config::kType, ::onc::network_config::kWiFi);
       std::move(success_callback).Run(std::move(result));
@@ -255,13 +252,13 @@ class TestNetworkingPrivateDelegate : public NetworkingPrivateDelegate {
 
   void ValueResult(const std::string& guid, PropertiesCallback callback) {
     if (fail_) {
-      std::move(callback).Run(absl::nullopt, kFailure);
+      std::move(callback).Run(std::nullopt, kFailure);
       return;
     }
-    base::Value::Dict result;
+    base::DictValue result;
     result.Set(::onc::network_config::kGUID, guid);
     result.Set(::onc::network_config::kType, ::onc::network_config::kWiFi);
-    std::move(callback).Run(std::move(result), absl::nullopt);
+    std::move(callback).Run(std::move(result), std::nullopt);
   }
 
  private:

@@ -8,6 +8,7 @@
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_shape.h"
 #include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
 #include "third_party/blink/renderer/core/paint/paint_layer.h"
+#include "third_party/blink/renderer/core/svg_names.h"
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
 #include "third_party/blink/renderer/platform/testing/find_cc_layer.h"
 #include "third_party/blink/renderer/platform/testing/paint_test_configurations.h"
@@ -25,6 +26,7 @@ INSTANTIATE_PAINT_TEST_SUITE_P(LayoutSVGRootTest);
 
 TEST_P(LayoutSVGRootTest, VisualRectMappingWithoutViewportClipWithBorder) {
   SetBodyInnerHTML(R"HTML(
+    <style>body { margin: 0 }</style>
     <svg id='root' style='border: 10px solid red; width: 200px; height:
     100px; overflow: visible' viewBox='0 0 200 100'>
        <rect id='rect' x='80' y='80' width='100' height='100'/>
@@ -35,13 +37,13 @@ TEST_P(LayoutSVGRootTest, VisualRectMappingWithoutViewportClipWithBorder) {
   const auto& svg_rect =
       *To<LayoutSVGShape>(GetLayoutObjectByElementId("rect"));
 
-  auto rect = SVGLayoutSupport::VisualRectInAncestorSpace(svg_rect, root);
+  auto rect = VisualRectInDocument(svg_rect);
   // (80, 80, 100, 100) added by root's content rect offset from border rect,
   // not clipped.
   EXPECT_EQ(PhysicalRect(90, 90, 100, 100), rect);
 
   auto root_visual_rect =
-      static_cast<const LayoutObject&>(root).LocalVisualRect();
+      LocalVisualRect(static_cast<const LayoutObject&>(root));
   // SVG root's local overflow does not include overflow from descendants.
   EXPECT_EQ(PhysicalRect(0, 0, 220, 120), root_visual_rect);
 
@@ -51,6 +53,7 @@ TEST_P(LayoutSVGRootTest, VisualRectMappingWithoutViewportClipWithBorder) {
 
 TEST_P(LayoutSVGRootTest, VisualOverflowExpandsLayer) {
   SetBodyInnerHTML(R"HTML(
+    <style>body { margin: 0 }</style>
     <svg id='root' style='width: 100px; will-change: transform; height:
     100px; overflow: visible; position: absolute;'>
        <rect id='rect' x='0' y='0' width='100' height='100'/>
@@ -61,7 +64,8 @@ TEST_P(LayoutSVGRootTest, VisualOverflowExpandsLayer) {
       CcLayersByDOMElementId(GetDocument().View()->RootCcLayer(), "root")[0];
   EXPECT_EQ(gfx::Size(100, 100), layer->bounds());
 
-  GetDocument().getElementById("rect")->setAttribute("height", "200");
+  GetElementById("rect")->setAttribute(svg_names::kHeightAttr,
+                                       AtomicString("200"));
   UpdateAllLifecyclePhasesForTest();
 
   EXPECT_EQ(gfx::Size(100, 200), layer->bounds());
@@ -69,6 +73,7 @@ TEST_P(LayoutSVGRootTest, VisualOverflowExpandsLayer) {
 
 TEST_P(LayoutSVGRootTest, VisualRectMappingWithViewportClipAndBorder) {
   SetBodyInnerHTML(R"HTML(
+    <style>body { margin: 0 }</style>
     <svg id='root' style='border: 10px solid red; width: 200px; height:
     100px; overflow: hidden' viewBox='0 0 200 100'>
        <rect id='rect' x='80' y='80' width='100' height='100'/>
@@ -79,11 +84,11 @@ TEST_P(LayoutSVGRootTest, VisualRectMappingWithViewportClipAndBorder) {
   const auto& svg_rect =
       *To<LayoutSVGShape>(GetLayoutObjectByElementId("rect"));
 
-  auto rect = SVGLayoutSupport::VisualRectInAncestorSpace(svg_rect, root);
+  auto rect = VisualRectInDocument(svg_rect);
   EXPECT_EQ(PhysicalRect(90, 90, 100, 20), rect);
 
   auto root_visual_rect =
-      static_cast<const LayoutObject&>(root).LocalVisualRect();
+      LocalVisualRect(static_cast<const LayoutObject&>(root));
   // SVG root with overflow:hidden doesn't include overflow from children, just
   // border box rect.
   EXPECT_EQ(PhysicalRect(0, 0, 220, 120), root_visual_rect);
@@ -101,7 +106,7 @@ TEST_P(LayoutSVGRootTest, RectBasedHitTestPartialOverlap) {
     </svg>
   )HTML");
 
-  const auto& svg = *GetDocument().getElementById("svg");
+  const auto& svg = *GetElementById("svg");
   const auto& body = *GetDocument().body();
 
   // This is the center of the rect-based hit test below.
@@ -111,7 +116,7 @@ TEST_P(LayoutSVGRootTest, RectBasedHitTestPartialOverlap) {
 
   // The center of this rect does not overlap the SVG element, but the
   // rect itself does.
-  auto results = RectBasedHitTest(PhysicalRect(0, 0, 300, 300));
+  auto& results = RectBasedHitTest(PhysicalRect(0, 0, 300, 300));
   int count = 0;
   EXPECT_EQ(2u, results.size());
   for (auto result : results) {
@@ -135,16 +140,39 @@ TEST_P(LayoutSVGRootTest, PaintLayerType) {
   ASSERT_TRUE(root.Layer());
   EXPECT_FALSE(root.Layer()->IsSelfPaintingLayer());
 
-  GetDocument().getElementById("rect")->setAttribute("style",
-                                                     "will-change: transform");
+  GetElementById("rect")->setAttribute(svg_names::kStyleAttr,
+                                       AtomicString("will-change: transform"));
   UpdateAllLifecyclePhasesForTest();
   ASSERT_TRUE(root.Layer());
   EXPECT_FALSE(root.Layer()->IsSelfPaintingLayer());
 
-  GetDocument().getElementById("rect")->removeAttribute("style");
+  GetElementById("rect")->removeAttribute(svg_names::kStyleAttr);
   UpdateAllLifecyclePhasesForTest();
   ASSERT_TRUE(root.Layer());
   EXPECT_FALSE(root.Layer()->IsSelfPaintingLayer());
+}
+
+TEST_P(LayoutSVGRootTest, VisualRectMappingWithReferenceFilter) {
+  SetBodyInnerHTML(R"HTML(
+    <svg id='root' style='width: 300px; height: 300px; overflow: visible'>
+       <defs>
+         <filter id='shadow'>
+           <feDropShadow dx='50' dy='50' stdDeviation='0'/>
+         </filter>
+       </defs>
+       <g id='group' style='filter: url(#shadow)'>
+         <rect id='rect' x='50' y='50' width='100' height='100'/>
+       </g>
+    </svg>
+  )HTML");
+
+  UpdateAllLifecyclePhasesForTest();
+
+  const auto& rect = *GetLayoutObjectByElementId("rect");
+
+  auto visual_rect = VisualRectInDocument(rect);
+
+  EXPECT_EQ(PhysicalRect(58, 58, 110, 110), visual_rect);
 }
 
 }  // namespace blink

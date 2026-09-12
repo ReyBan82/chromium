@@ -5,9 +5,8 @@
 #ifndef ASH_WEBUI_SHORTCUT_CUSTOMIZATION_UI_SHORTCUT_CUSTOMIZATION_APP_UI_H_
 #define ASH_WEBUI_SHORTCUT_CUSTOMIZATION_UI_SHORTCUT_CUSTOMIZATION_APP_UI_H_
 
-#include <memory>
-
-#include "ash/webui/shortcut_customization_ui/backend/accelerator_configuration_provider.h"
+#include "ash/accelerators/accelerator_prefs.h"
+#include "ash/webui/common/mojom/shortcut_input_provider.mojom.h"
 #include "ash/webui/shortcut_customization_ui/backend/search/search.mojom.h"
 #include "ash/webui/shortcut_customization_ui/backend/search/search_handler.h"
 #include "ash/webui/shortcut_customization_ui/mojom/shortcut_customization.mojom.h"
@@ -33,7 +32,8 @@ class ShortcutCustomizationAppUIConfig
                              SystemWebAppType::SHORTCUT_CUSTOMIZATION) {}
 };
 
-class ShortcutCustomizationAppUI : public ui::MojoWebUIController {
+class ShortcutCustomizationAppUI : public ui::MojoWebUIController,
+                                   public AcceleratorPrefs::Observer {
  public:
   explicit ShortcutCustomizationAppUI(content::WebUI* web_ui);
   ShortcutCustomizationAppUI(const ShortcutCustomizationAppUI&) = delete;
@@ -41,18 +41,23 @@ class ShortcutCustomizationAppUI : public ui::MojoWebUIController {
       delete;
   ~ShortcutCustomizationAppUI() override;
 
+  // AcceleratorPrefs::Observer:
+  void OnShortcutPolicyUpdated() override;
+
   void BindInterface(
       mojo::PendingReceiver<
           shortcut_customization::mojom::AcceleratorConfigurationProvider>
           receiver);
 
   void BindInterface(
+      mojo::PendingReceiver<common::mojom::ShortcutInputProvider> receiver);
+
+  void BindInterface(
       mojo::PendingReceiver<shortcut_customization::mojom::SearchHandler>
           receiver);
 
  private:
-  std::unique_ptr<shortcut_ui::AcceleratorConfigurationProvider> provider_;
-  std::unique_ptr<shortcut_ui::SearchHandler> search_handler_;
+
   WEB_UI_CONTROLLER_TYPE_DECL();
 };
 

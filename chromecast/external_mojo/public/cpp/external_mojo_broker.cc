@@ -8,12 +8,17 @@
 #include <set>
 #include <utility>
 
+#include "base/notimplemented.h"
 #include "build/build_config.h"
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #include <sys/stat.h>
 #endif
 
+#include <optional>
+
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
@@ -41,7 +46,6 @@
 #include "services/service_manager/public/cpp/service_receiver.h"
 #include "services/service_manager/public/mojom/connector.mojom.h"
 #include "services/service_manager/public/mojom/service.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "base/android/bundle_utils.h"
@@ -65,7 +69,7 @@ void OnInternalBindResult(
     const std::string& service_name,
     const std::string& interface_name,
     service_manager::mojom::ConnectResult result,
-    const absl::optional<service_manager::Identity>& identity) {
+    const std::optional<service_manager::Identity>& identity) {
   if (result != service_manager::mojom::ConnectResult::SUCCEEDED) {
     LOG(ERROR) << "Failed to bind " << service_name << ":" << interface_name
                << ", result = " << result;
@@ -146,7 +150,7 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
       connector_->BindInterface(filter.service_name(), interface_name,
                                 std::move(interface_pipe));
       std::move(callback).Run(service_manager::mojom::ConnectResult::SUCCEEDED,
-                              absl::nullopt);
+                              std::nullopt);
     }
 
     void QueryService(const std::string& service_name,
@@ -158,7 +162,7 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
     void WarmService(const ::service_manager::ServiceFilter& filter,
                      WarmServiceCallback callback) override {
       std::move(callback).Run(service_manager::mojom::ConnectResult::SUCCEEDED,
-                              absl::nullopt);
+                              std::nullopt);
     }
 
     void RegisterServiceInstance(
@@ -236,12 +240,11 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
   void RegisterServiceInstance(
       const std::string& service_name,
       mojo::PendingRemote<mojom::ExternalService> service_remote) {
-    if (services_.find(service_name) != services_.end()) {
+    if (services_.contains(service_name)) {
       LOG(ERROR) << "Duplicate service " << service_name;
       return;
     }
-    TRACE_EVENT_INSTANT1("mojom", "RegisterService", TRACE_EVENT_SCOPE_THREAD,
-                         "service", service_name);
+    TRACE_EVENT_INSTANT("mojom", "RegisterService", "service", service_name);
     LOG(INFO) << "Register service " << service_name;
     mojo::Remote<mojom::ExternalService> service(std::move(service_remote));
     service.set_disconnect_handler(base::BindOnce(
@@ -277,8 +280,7 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
                      const std::string& interface_name,
                      mojo::ScopedMessagePipeHandle interface_pipe) override {
     LOG(INFO) << "Request for " << service_name << ":" << interface_name;
-    TRACE_EVENT_INSTANT1("mojom", "BindToService", TRACE_EVENT_SCOPE_THREAD,
-                         "service", service_name);
+    TRACE_EVENT_INSTANT("mojom", "BindToService", "service", service_name);
     auto it = services_.find(service_name);
     if (it != services_.end()) {
       LOG(INFO) << "Found externally-registered " << service_name;
@@ -355,8 +357,8 @@ class ExternalMojoBroker::ConnectorImpl : public mojom::ExternalConnector {
 
   void OnServiceLost(const std::string& service_name) {
     LOG(INFO) << service_name << " disconnected";
-    TRACE_EVENT_INSTANT1("mojom", "ServiceDisconnected",
-                         TRACE_EVENT_SCOPE_THREAD, "service", service_name);
+    TRACE_EVENT_INSTANT("mojom", "ServiceDisconnected", "service",
+                        service_name);
     services_.erase(service_name);
     services_info_[service_name].disconnect_time = base::TimeTicks::Now();
   }
@@ -425,7 +427,7 @@ ExternalMojoBroker::ExternalMojoBroker(const std::string& broker_path) {
 #if BUILDFLAG(IS_ANDROID)
   // Monolithic MediaShell can just access the service broker directly in the
   // same process, so there's no need to stand up a server.
-  if (!base::android::BundleUtils::IsBundle()) {
+  if (!base::android::BundleUtils::HasAnyInstalledSplits()) {
     return;
   }
   // On Android, use the abstract namespace to avoid filesystem access.
@@ -435,6 +437,10 @@ ExternalMojoBroker::ExternalMojoBroker(const std::string& broker_path) {
 #endif  // BUILDFLAG(IS_ANDROID)
 
   LOG(INFO) << "Initializing external mojo broker at: " << broker_path;
+
+  if (!use_abstract_namespace) {
+    base::DeleteFile(base::FilePath(broker_path));
+  }
 
   mojo::NamedPlatformChannel::Options channel_options;
   channel_options.server_name = broker_path;

@@ -5,9 +5,18 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_MANAGEMENT_MANAGEMENT_UI_H_
 #define CHROME_BROWSER_UI_WEBUI_MANAGEMENT_MANAGEMENT_UI_H_
 
+#include <vector>
+
+#include "base/memory/scoped_refptr.h"
 #include "chrome/browser/profiles/profile.h"
-#include "content/public/browser/web_ui_controller.h"
+#include "chrome/common/webui_url_constants.h"
+#include "components/prefs/pref_registry_simple.h"
+#include "content/public/browser/webui_config.h"
+#include "content/public/common/url_constants.h"
+#include "extensions/buildflags/buildflags.h"
 #include "ui/base/resource/resource_scale_factor.h"
+#include "ui/base/webui/web_ui_util.h"
+#include "ui/webui/mojo_web_ui_controller.h"
 
 namespace base {
 class RefCountedMemory;
@@ -17,8 +26,20 @@ namespace content {
 class WebUI;
 }
 
+class ManagementUI;
+
+class ManagementUIConfig : public content::DefaultWebUIConfig<ManagementUI> {
+ public:
+  ManagementUIConfig()
+      : DefaultWebUIConfig(content::kChromeUIScheme,
+                           chrome::kChromeUIManagementHost) {}
+#if !BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  bool IsWebUIEnabled(content::BrowserContext* browser_context) override;
+#endif
+};
+
 // The Web UI controller for the chrome://management page.
-class ManagementUI : public content::WebUIController {
+class ManagementUI : public ui::MojoWebUIController {
  public:
   explicit ManagementUI(content::WebUI* web_ui);
 
@@ -27,10 +48,18 @@ class ManagementUI : public content::WebUIController {
 
   ~ManagementUI() override;
 
-  static base::RefCountedMemory* GetFaviconResourceBytes(
+  static scoped_refptr<base::RefCountedMemory> GetFaviconResourceBytes(
       ui::ResourceScaleFactor scale_factor);
 
   static std::u16string GetManagementPageSubtitle(Profile* profile);
+
+  // Returns the localized strings used on the management page.
+  // If `remove_links` is true, it will use the NO_LINK versions
+  // of device disclosure strings to be displayed on the management disclosure
+  // dialog.
+  static void GetLocalizedStrings(std::vector<webui::LocalizedString>& strings,
+                                  bool remove_links);
+  static void RegisterProfilePrefs(PrefRegistrySimple* registry);
 };
 
 #endif  // CHROME_BROWSER_UI_WEBUI_MANAGEMENT_MANAGEMENT_UI_H_

@@ -8,11 +8,12 @@
 #include <stddef.h>
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/i18n/base_i18n_export.h"
-#include "base/memory/raw_ptr.h"
-#include "base/strings/string_piece.h"
+#include "base/i18n/language_tag.h"
 
 // The BreakIterator class iterates through the words, word breaks, and
 // line breaks in a UTF-16 string.
@@ -109,12 +110,15 @@ class BASE_I18N_EXPORT BreakIterator {
   static constexpr size_t npos = static_cast<size_t>(-1);
 
   // Requires |str| to live as long as the BreakIterator does.
-  BreakIterator(StringPiece16 str, BreakType break_type);
+  BreakIterator(std::u16string_view str, BreakType break_type);
+  BreakIterator(std::u16string_view str,
+                BreakType break_type,
+                const LanguageTag& locale_tag);
   // Make a rule-based iterator. BreakType == RULE_BASED is implied.
   // TODO(andrewhayden): This signature could easily be misinterpreted as
   // "(const std::u16string& str, const std::u16string& locale)". We should do
   // something better.
-  BreakIterator(StringPiece16 str, const std::u16string& rules);
+  BreakIterator(std::u16string_view str, const std::u16string& rules);
 
   BreakIterator(const BreakIterator&) = delete;
   BreakIterator& operator=(const BreakIterator&) = delete;
@@ -134,7 +138,7 @@ class BASE_I18N_EXPORT BreakIterator {
   // Updates the text used by the iterator, resetting the iterator as if
   // if Init() had been called again. Any old state is lost. Returns true
   // unless there is an error setting the text.
-  bool SetText(const char16_t* text, const size_t length);
+  bool SetText(std::u16string_view text);
 
   // Under BREAK_WORD mode, returns true if the break we just hit is the
   // end of a word. (Otherwise, the break iterator just skipped over e.g.
@@ -174,9 +178,7 @@ class BASE_I18N_EXPORT BreakIterator {
   // Returns the string between prev() and pos().
   // Advance() must have been called successfully at least once for pos() to
   // have advanced to somewhere useful.
-  std::u16string GetString() const;
-
-  StringPiece16 GetStringPiece() const;
+  std::u16string_view GetString() const;
 
   // Returns the value of pos() returned before Advance() was last called.
   size_t prev() const { return prev_; }
@@ -185,11 +187,13 @@ class BASE_I18N_EXPORT BreakIterator {
   // or BreakIterator::npos when done.
   size_t pos() const { return pos_; }
 
+  const LanguageTag& locale_tag() const { return locale_tag_; }
+
  private:
   UBreakIteratorPtr iter_;
 
   // The string we're iterating over. Can be changed with SetText(...)
-  StringPiece16 string_;
+  std::u16string_view string_;
 
   // Rules for our iterator. Mutually exclusive with break_type_.
   const std::u16string rules_;
@@ -200,6 +204,9 @@ class BASE_I18N_EXPORT BreakIterator {
   // Previous and current iterator positions.
   size_t prev_ = npos;
   size_t pos_ = 0;
+
+  const LanguageTag locale_tag_;
+  const bool is_custom_locale_ = false;
 };
 
 }  // namespace i18n

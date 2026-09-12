@@ -5,12 +5,16 @@
 #include "fuchsia_web/webengine/web_engine_main_delegate.h"
 
 #include <utility>
+#include <variant>
 
 #include "base/base_paths.h"
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/fuchsia/intl_profile_watcher.h"
+#include "base/i18n/icubridge/default_icu_locale.h"
+#include "base/i18n/language_tag.h"
 #include "base/i18n/rtl.h"
+#include "base/i18n/tag_converters.h"
 #include "base/path_service.h"
 #include "base/strings/string_split.h"
 #include "content/public/common/content_switches.h"
@@ -35,7 +39,7 @@ void InitializeResources() {
   constexpr char kCommonResourcesPakPath[] = "web_engine_common_resources.pak";
 
   constexpr char kWebUiGeneratedResourcesPakPath[] =
-      "ui/resources/webui_resources.pak";
+      "ui/webui/resources/webui_resources.pak";
 
   base::FilePath asset_root;
   bool result = base::PathService::Get(base::DIR_ASSETS, &asset_root);
@@ -73,20 +77,11 @@ WebEngineMainDelegate::WebEngineMainDelegate() {
 
 WebEngineMainDelegate::~WebEngineMainDelegate() = default;
 
-absl::optional<int> WebEngineMainDelegate::BasicStartupComplete() {
+std::optional<int> WebEngineMainDelegate::BasicStartupComplete() {
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
 
   if (!InitLoggingFromCommandLine(*command_line)) {
     return 1;
-  }
-
-  if (command_line->HasSwitch(switches::kGoogleApiKey)) {
-#if BUILDFLAG(SUPPORT_EXTERNAL_GOOGLE_API_KEY)
-    google_apis::SetAPIKey(
-        command_line->GetSwitchValueASCII(switches::kGoogleApiKey));
-#else
-    LOG(WARNING) << "Ignored " << switches::kGoogleApiKey;
-#endif
   }
 
   SetCorsExemptHeaders(base::SplitString(
@@ -94,7 +89,7 @@ absl::optional<int> WebEngineMainDelegate::BasicStartupComplete() {
           switches::kCorsExemptHeaders),
       ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY));
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 void WebEngineMainDelegate::PreSandboxStartup() {
@@ -103,14 +98,32 @@ void WebEngineMainDelegate::PreSandboxStartup() {
   // explicitly reloaded after each change to the primary locale.
   // In the browser process the locale determines the accept-language header
   // contents, and is supplied to renderers for Blink to report to web content.
-  std::string initial_locale =
-      base::FuchsiaIntlProfileWatcher::GetPrimaryLocaleIdForInitialization();
-  base::i18n::SetICUDefaultLocale(initial_locale);
+  base::i18n::LanguageTag initial_locale =
+      base::i18n::GetLanguageTagFromString(
+          base::FuchsiaIntlProfileWatcher::
+              GetPrimaryLocaleIdForInitialization())
+          .value_or(base::i18n::GetKnownLanguageTag("en-US"));
+  base::i18n::SetDefaultIcuLocale(base::i18n::DefaultIcuLocaleSetterKey(),
+                                  initial_locale);
 
   InitializeResources();
 }
 
-absl::variant<int, content::MainFunctionParams>
+std::optional<int> WebEngineMainDelegate::PreBrowserMain() {
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch(switches::kGoogleApiKey)) {
+#if BUILDFLAG(SUPPORT_EXTERNAL_GOOGLE_API_KEY)
+    google_apis::InitializeAndOverrideAPIKey(
+        command_line->GetSwitchValueASCII(switches::kGoogleApiKey));
+#else
+    LOG(WARNING) << "Ignored " << switches::kGoogleApiKey;
+#endif
+  }
+
+  return std::nullopt;
+}
+
+std::variant<int, content::MainFunctionParams>
 WebEngineMainDelegate::RunProcess(
     const std::string& process_type,
     content::MainFunctionParams main_function_params) {

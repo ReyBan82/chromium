@@ -28,15 +28,19 @@
 
 #include "third_party/blink/renderer/platform/audio/biquad.h"
 
+#include <stdio.h>
+
+#include <algorithm>
+#include <complex>
+#include <limits>
+
+#include "base/containers/span.h"
+#include "base/numerics/safe_conversions.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
 #include "third_party/blink/renderer/platform/audio/denormal_disabler.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/fdlibm/ieee754.h"
-
-#include <stdio.h>
-#include <algorithm>
-#include <complex>
 #if BUILDFLAG(IS_MAC)
 #include <Accelerate/Accelerate.h>
 #endif
@@ -44,7 +48,7 @@
 namespace blink {
 
 #if BUILDFLAG(IS_MAC)
-const int kBiquadBufferSize = 1024;
+constexpr size_t kBiquadBufferSize = 1024;
 #endif
 
 // Compute 10^x = exp(x*log(10))
@@ -52,8 +56,7 @@ static double pow10(double x) {
   return fdlibm::expf(x * 2.30258509299404568402);
 }
 
-Biquad::Biquad(unsigned render_quantum_frames)
-    : has_sample_accurate_values_(false) {
+Biquad::Biquad(unsigned render_quantum_frames) {
 #if BUILDFLAG(IS_MAC)
   // Allocate two samples more for filter history
   input_buffer_.Allocate(kBiquadBufferSize + 2);
@@ -76,32 +79,26 @@ Biquad::Biquad(unsigned render_quantum_frames)
 
 Biquad::~Biquad() = default;
 
-void Biquad::Process(const float* source_p,
-                     float* dest_p,
-                     uint32_t frames_to_process) {
-  // WARNING: sourceP and destP may be pointing to the same area of memory!
-  // Be sure to read from sourceP before writing to destP!
-  if (HasSampleAccurateValues()) {
-    int n = frames_to_process;
+void Biquad::Process(base::span<const float> source, base::span<float> dest) {
+  const size_t frames_to_process = source.size();
+  DCHECK_EQ(source.size(), dest.size());
 
+  // WARNING: `source` and `dest` may be pointing to the same area of memory!
+  // Be sure to read from `source` before writing to `dest`!
+  if (HasSampleAccurateValues()) {
     // Create local copies of member variables
     double x1 = x1_;
     double x2 = x2_;
     double y1 = y1_;
     double y2 = y2_;
 
-    const double* b0 = b0_.Data();
-    const double* b1 = b1_.Data();
-    const double* b2 = b2_.Data();
-    const double* a1 = a1_.Data();
-    const double* a2 = a2_.Data();
-
-    for (int k = 0; k < n; ++k) {
+    for (size_t k = 0; k < frames_to_process; ++k) {
       // FIXME: this can be optimized by pipelining the multiply adds...
-      float x = *source_p++;
-      float y = b0[k] * x + b1[k] * x1 + b2[k] * x2 - a1[k] * y1 - a2[k] * y2;
+      float x = source[k];
+      float y =
+          b0_[k] * x + b1_[k] * x1 + b2_[k] * x2 - a1_[k] * y1 - a2_[k] * y2;
 
-      *dest_p++ = y;
+      dest[k] = y;
 
       // Update state variables
       x2 = x1;
@@ -127,34 +124,30 @@ void Biquad::Process(const float* source_p,
     // documented so it's not clear how to update them anyway.
   } else {
 #if BUILDFLAG(IS_MAC)
-    double* input_p = input_buffer_.Data();
-    double* output_p = output_buffer_.Data();
-
     // Set up filter state.  This is needed in case we're switching from
     // filtering with variable coefficients (i.e., with automations) to
     // fixed coefficients (without automations).
-    input_p[0] = x2_;
-    input_p[1] = x1_;
-    output_p[0] = y2_;
-    output_p[1] = y1_;
+    input_buffer_[0] = x2_;
+    input_buffer_[1] = x1_;
+    output_buffer_[0] = y2_;
+    output_buffer_[1] = y1_;
 
     // Use vecLib if available
-    ProcessFast(source_p, dest_p, frames_to_process);
+    ProcessFast(source, dest);
 
     // Copy the last inputs and outputs to the filter memory variables.
     // This is needed because the next rendering quantum might be an
     // automation which needs the history to continue correctly.  Because
-    // sourceP and destP can be the same block of memory, we can't read from
-    // sourceP to get the last inputs.  Fortunately, processFast has put the
-    // last inputs in input[0] and input[1].
-    x1_ = input_p[1];
-    x2_ = input_p[0];
-    y1_ = dest_p[frames_to_process - 1];
-    y2_ = dest_p[frames_to_process - 2];
+    // `source` and `dest` can be the same block of memory, we can't read from
+    // `source` to get the last inputs.  Fortunately, `ProcessFast` has put the
+    // last inputs in `input_buffer_[0]` and `input_buffer_[1]` and the last
+    // outputs in `output_buffer_[0]` and `output_buffer_[1]`.
+    x1_ = input_buffer_[1];
+    x2_ = input_buffer_[0];
+    y1_ = output_buffer_[1];
+    y2_ = output_buffer_[0];
 
 #else
-    int n = frames_to_process;
-
     // Create local copies of member variables
     double x1 = x1_;
     double x2 = x2_;
@@ -167,12 +160,12 @@ void Biquad::Process(const float* source_p,
     double a1 = a1_[0];
     double a2 = a2_[0];
 
-    while (n--) {
+    for (size_t k = 0; k < frames_to_process; ++k) {
       // FIXME: this can be optimized by pipelining the multiply adds...
-      float x = *source_p++;
+      float x = source[k];
       float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
 
-      *dest_p++ = y;
+      dest[k] = y;
 
       // Update state variables
       x2 = x1;
@@ -195,9 +188,8 @@ void Biquad::Process(const float* source_p,
 
 // Here we have optimized version using Accelerate.framework
 
-void Biquad::ProcessFast(const float* source_p,
-                         float* dest_p,
-                         uint32_t frames_to_process) {
+void Biquad::ProcessFast(base::span<const float> source,
+                         base::span<float> dest) {
   double filter_coefficients[5];
   filter_coefficients[0] = b0_[0];
   filter_coefficients[1] = b1_[0];
@@ -205,48 +197,47 @@ void Biquad::ProcessFast(const float* source_p,
   filter_coefficients[3] = a1_[0];
   filter_coefficients[4] = a2_[0];
 
-  double* input_p = input_buffer_.Data();
-  double* output_p = output_buffer_.Data();
+  // Break up processing into smaller slices `kBiquadBufferSize` if necessary.
 
-  double* input2p = input_p + 2;
-  double* output2p = output_p + 2;
+  while (!source.empty()) {
+    size_t frames_this_time = std::min(source.size(), kBiquadBufferSize);
 
-  // Break up processing into smaller slices (kBiquadBufferSize) if necessary.
-
-  int n = frames_to_process;
-
-  while (n > 0) {
-    int frames_this_time = n < kBiquadBufferSize ? n : kBiquadBufferSize;
+    base::span<const float> source_segment =
+        source.take_first(frames_this_time);
+    base::span<float> dest_segment = dest.take_first(frames_this_time);
 
     // Copy input to input buffer
-    for (int i = 0; i < frames_this_time; ++i)
-      input2p[i] = *source_p++;
+    for (size_t i = 0; i < frames_this_time; ++i) {
+      input_buffer_[i + 2] = source_segment[i];
+    }
 
-    ProcessSliceFast(input_p, output_p, filter_coefficients, frames_this_time);
+    ProcessSliceFast(input_buffer_.as_span(), output_buffer_.as_span(),
+                     filter_coefficients,
+                     base::checked_cast<uint32_t>(frames_this_time));
 
     // Copy output buffer to output (converts float -> double).
-    for (int i = 0; i < frames_this_time; ++i)
-      *dest_p++ = static_cast<float>(output2p[i]);
-
-    n -= frames_this_time;
+    for (size_t i = 0; i < frames_this_time; ++i) {
+      dest_segment[i] = static_cast<float>(output_buffer_[i + 2]);
+    }
   }
 }
 
-void Biquad::ProcessSliceFast(double* source_p,
-                              double* dest_p,
-                              double* coefficients_p,
+void Biquad::ProcessSliceFast(base::span<double> source,
+                              base::span<double> dest,
+                              base::span<const double, 5> coefficients,
                               uint32_t frames_to_process) {
   // Use double-precision for filter stability
-  vDSP_deq22D(source_p, 1, coefficients_p, dest_p, 1, frames_to_process);
+  vDSP_deq22D(source.data(), 1, coefficients.data(), dest.data(), 1,
+              frames_to_process);
 
-  // Save history.  Note that sourceP and destP reference m_inputBuffer and
-  // m_outputBuffer respectively.  These buffers are allocated (in the
+  // Save history.  Note that `source` and `dest` reference `input_buffer_` and
+  // `output_buffer_` respectively.  These buffers are allocated (in the
   // constructor) with space for two extra samples so it's OK to access array
-  // values two beyond framesToProcess.
-  source_p[0] = source_p[frames_to_process - 2 + 2];
-  source_p[1] = source_p[frames_to_process - 1 + 2];
-  dest_p[0] = dest_p[frames_to_process - 2 + 2];
-  dest_p[1] = dest_p[frames_to_process - 1 + 2];
+  // values two beyond `frames_to_process`.
+  source[0] = source[frames_to_process];
+  source[1] = source[frames_to_process + 1];
+  dest[0] = dest[frames_to_process];
+  dest[1] = dest[frames_to_process + 1];
 }
 
 #endif  // BUILDFLAG(IS_MAC)
@@ -254,13 +245,11 @@ void Biquad::ProcessSliceFast(double* source_p,
 void Biquad::Reset() {
 #if BUILDFLAG(IS_MAC)
   // Two extra samples for filter history
-  double* input_p = input_buffer_.Data();
-  input_p[0] = 0;
-  input_p[1] = 0;
+  input_buffer_[0] = 0;
+  input_buffer_[1] = 0;
 
-  double* output_p = output_buffer_.Data();
-  output_p[0] = 0;
-  output_p[1] = 0;
+  output_buffer_[0] = 0;
+  output_buffer_[1] = 0;
 
 #endif
   x1_ = x2_ = y1_ = y2_ = 0;
@@ -554,10 +543,13 @@ void Biquad::SetBandpassParams(int index, double frequency, double q) {
   }
 }
 
-void Biquad::GetFrequencyResponse(int n_frequencies,
-                                  const float* frequency,
-                                  float* mag_response,
-                                  float* phase_response) {
+void Biquad::GetFrequencyResponse(base::span<const float> frequency,
+                                  base::span<float> mag_response,
+                                  base::span<float> phase_response) const {
+  DCHECK(!frequency.empty());
+  DCHECK(!mag_response.empty());
+  DCHECK(!phase_response.empty());
+
   // Evaluate the Z-transform of the filter at given normalized
   // frequency from 0 to 1.  (1 corresponds to the Nyquist
   // frequency.)
@@ -581,11 +573,11 @@ void Biquad::GetFrequencyResponse(int n_frequencies,
   double a1 = a1_[0];
   double a2 = a2_[0];
 
-  for (int k = 0; k < n_frequencies; ++k) {
+  for (size_t k = 0; k < frequency.size(); ++k) {
     if (frequency[k] < 0 || frequency[k] > 1) {
       // Out-of-bounds frequencies should return NaN.
-      mag_response[k] = std::nanf("");
-      phase_response[k] = std::nanf("");
+      mag_response[k] = std::numeric_limits<float>::quiet_NaN();
+      phase_response[k] = std::numeric_limits<float>::quiet_NaN();
     } else {
       double omega = -kPiDouble * frequency[k];
       std::complex<double> z =
@@ -610,13 +602,13 @@ static double RepeatedRootResponse(double n,
   // for n such that |h(n)| = eps.  Equivalently, we want a root
   // of the equation log(|h(n)|) - log(eps) = 0 or
   //
-  //   (n-2)*log(r) + log(|c1*(n+1)*r^2+c2|) - log(eps)
+  //   (n-2)*log(|r|) + log(|c1*(n+1)*r^2+c2|) - log(eps)
   //
   // This helps with finding a nuemrical solution because this
   // approximately linearizes the response for large n.
 
-  return (n - 2) * fdlibm::log(r) +
-         fdlibm::log(fabs(c1 * (n + 1) * r * r + c2)) - log_eps;
+  return (n - 2) * fdlibm::log(std::abs(r)) +
+         fdlibm::log(std::abs(c1 * (n + 1) * r * r + c2)) - log_eps;
 }
 
 // Regula Falsi root finder, Illinois variant
@@ -629,6 +621,8 @@ static double RepeatedRootResponse(double n,
 // response.
 static double RootFinder(double low,
                          double high,
+                         double f_low,
+                         double f_high,
                          double log_eps,
                          double c1,
                          double c2,
@@ -636,15 +630,13 @@ static double RootFinder(double low,
   // Desired accuray of the root (in frames).  This doesn't need to be
   // super-accurate, so half frame is good enough, and should be less
   // than 1 because the algorithm may prematurely terminate.
-  const double kAccuracyThreshold = 0.5;
+  constexpr double kAccuracyThreshold = 0.5;
   // Max number of iterations to do.  If we haven't converged by now,
   // just return whatever we've found.
-  const int kMaxIterations = 10;
+  constexpr int kMaxIterations = 10;
 
   int side = 0;
   double root = 0;
-  double f_low = RepeatedRootResponse(low, c1, c2, r, log_eps);
-  double f_high = RepeatedRootResponse(high, c1, c2, r, log_eps);
 
   // The function values must be finite and have opposite signs!
   DCHECK(std::isfinite(f_low));
@@ -687,7 +679,7 @@ static double RootFinder(double low,
   return root;
 }
 
-double Biquad::TailFrame(int coef_index, double max_frame) {
+double Biquad::TailFrame(int coef_index, double max_frame) const {
   // The Biquad filter is given by
   //
   //   H(z) = (b0 + b1/z + b2/z^2)/(1 + a1/z + a2/z^2).
@@ -801,6 +793,13 @@ double Biquad::TailFrame(int coef_index, double max_frame) {
   double b1 = b1_[coef_index];
   double b2 = b2_[coef_index];
 
+  // If any coefficient is not finite, we cannot calculate a meaningful tail
+  // time. Return 0 to avoid propagating NaNs or causing crashes.
+  if (!std::isfinite(a1) || !std::isfinite(a2) || !std::isfinite(b0) ||
+      !std::isfinite(b1) || !std::isfinite(b2)) {
+    return 0;
+  }
+
   double tail_frame = 0;
   double discrim = a1 * a1 - 4 * a2;
 
@@ -898,15 +897,31 @@ double Biquad::TailFrame(int coef_index, double max_frame) {
         // -(1+log(r))/log(r). so we can start our search from that
         // point to max_frames.
 
-        double low = ClampTo(-(1 + fdlibm::log(r)) / fdlibm::log(r), 1.0,
+        double log_r = fdlibm::log(std::abs(r));
+        double low = ClampTo(-(1 + log_r) / log_r, 1.0,
                              static_cast<double>(max_frame - 1));
         double high = max_frame;
 
         DCHECK(std::isfinite(low));
         DCHECK(std::isfinite(high));
 
-        tail_frame =
-            RootFinder(low, high, fdlibm::log(kMaxTailAmplitude), c1, c2, r);
+        double log_eps = fdlibm::log(kMaxTailAmplitude);
+        // Check if the signal is already silent at the peak (low) and at the
+        // limit (high). RepeatedRootResponse returns > 0 if active, <= 0 if
+        // silent.
+        double f_low = RepeatedRootResponse(low, c1, c2, r, log_eps);
+        double f_high = RepeatedRootResponse(high, c1, c2, r, log_eps);
+        if (f_low <= 0) {
+          // The peak of the signal is already below the silence threshold.
+          tail_frame = 0;
+        } else if (f_high >= 0) {
+          // The signal is still active at the maximum frame limit.
+          tail_frame = high;
+        } else {
+          // The signal becomes silent somewhere between the peak (low) and the
+          // limit (high). Find the exact frame using RootFinder.
+          tail_frame = RootFinder(low, high, f_low, f_high, log_eps, c1, c2, r);
+        }
       }
     }
   }

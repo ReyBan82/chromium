@@ -21,7 +21,7 @@ namespace utils {
 
 // A generic handler for unary, ie request/response, gRPC APIs. Can only be used
 // with rpc that have the following signature:
-//       rpc Foo(Request) returns (Response)
+//        rpc Foo(Request) returns (Response)
 //
 // - TService is the gRPC service type.
 // - TRequest is the service request type.
@@ -52,6 +52,23 @@ class GrpcUnaryHandler final : public GrpcHandler {
       ReadRequest();
     }
 
+    ~Reactor() override {
+      if (on_destroy_callback_) {
+        std::move(on_destroy_callback_).Run();
+      }
+    }
+
+    void OnDone() override {
+      if (on_destroy_callback_) {
+        std::move(on_destroy_callback_).Run();
+      }
+      ReactorBase::OnDone();
+    }
+
+    void SetOnDestroyCallback(base::OnceClosure on_destroy_callback) {
+      on_destroy_callback_ = std::move(on_destroy_callback);
+    }
+
    protected:
     using ReactorBase::Finish;
     using ReactorBase::ReadRequest;
@@ -77,22 +94,27 @@ class GrpcUnaryHandler final : public GrpcHandler {
       }
     }
 
-    void OnResponseDone(const grpc::Status& /*status*/) override {
-      LOG(FATAL)
-          << "Unary handler writes must finish the reactor at the same time";
+    void OnResponseDone(const grpc::Status& status) override {
+      // This method may be called from the cancelled_reactor as a generic way
+      // to signal reactor is done via OnResponseDone API. For unary reactor it
+      // is a no-op.
+      CHECK(status.ok() || status.error_code() == grpc::StatusCode::ABORTED)
+          << "Unexpected status: " << GrpcStatusToString(status);
     }
 
     void OnRequestDone(GrpcStatusOr<TRequest> request) override {
       if (!request.ok()) {
-        Finish(request.status());
+        FinishWriting(nullptr, request.status());
         return;
       }
       on_request_callback_.Run(std::move(request).value(), this);
     }
 
     OnRequestCallback on_request_callback_;
+    base::OnceClosure on_destroy_callback_;
   };
 
+  using Request = TRequest;
   using Response = TResponse;
   using OnRequestCallback = typename Reactor::OnRequestCallback;
 

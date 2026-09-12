@@ -69,7 +69,7 @@ void UserActionsCollector::UpdateUserProfileOnLinkClick(
 }
 
 void UserActionsCollector::InitStoreFromPrefs() {
-  const base::Value::List& list_value_from_disk =
+  const base::ListValue& list_value_from_disk =
       profile_prefs_->GetList(prefs::kFeedOnDeviceUserActionsCollector);
   size_t count_values_during_store_initialization = 0;
 
@@ -139,10 +139,7 @@ std::string UserActionsCollector::EntryToString(
   visit_metadata_proto.SerializeToString(&serialized_entry);
   DCHECK(!serialized_entry.empty());
 
-  std::string base64_encoded;
-  base::Base64Encode(serialized_entry, &base64_encoded);
-
-  return base64_encoded;
+  return base::Base64Encode(serialized_entry);
 }
 
 bool UserActionsCollector::ShouldIncludeVisitMetadataEntry(

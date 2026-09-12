@@ -7,19 +7,15 @@
 #include <algorithm>
 
 #include "base/metrics/histogram_functions.h"
-#include "content/browser/reduce_accept_language/reduce_accept_language_utils.h"
-#include "content/browser/renderer_host/frame_tree_node.h"
 #include "content/browser/renderer_host/navigation_request.h"
 #include "content/public/browser/reduce_accept_language_controller_delegate.h"
+#include "content/public/browser/reduce_accept_language_utils.h"
 #include "services/network/public/cpp/features.h"
-#include "services/network/public/mojom/variants_header.mojom.h"
 #include "third_party/blink/public/common/loader/url_loader_throttle.h"
 
 namespace content {
 
 namespace {
-
-using ::network::mojom::VariantsHeaderPtr;
 
 // Metrics on the count of requests restarted or the reason why not restarted
 // when reducing accept-language HTTP header. These values are persisted to
@@ -27,7 +23,7 @@ using ::network::mojom::VariantsHeaderPtr;
 // reused.
 enum class AcceptLanguageNegotiationRestart {
   kNavigationStarted = 0,
-  kVariantsAndContentLanguageHeaderPresent = 1,
+  kAvailLanguageAndContentLanguageHeaderPresent = 1,
   kServiceWorkerPreloadRequest = 2,
   kNavigationRestarted = 3,
   kMaxValue = kNavigationRestarted,
@@ -43,12 +39,8 @@ void LogAcceptLanguageStatus(AcceptLanguageNegotiationRestart status) {
 }  // namespace
 
 ReduceAcceptLanguageThrottle::ReduceAcceptLanguageThrottle(
-    ReduceAcceptLanguageControllerDelegate& accept_language_delegate)
-    : accept_language_delegate_(accept_language_delegate) {
-  DCHECK(
-      base::FeatureList::IsEnabled(network::features::kReduceAcceptLanguage) ||
-      base::FeatureList::IsEnabled(
-          network::features::kReduceAcceptLanguageOriginTrial));
+    ReduceAcceptLanguageUtils reduce_accept_language_utils)
+    : reduce_accept_language_utils_(std::move(reduce_accept_language_utils)) {
   LogAcceptLanguageStatus(AcceptLanguageNegotiationRestart::kNavigationStarted);
 }
 
@@ -62,51 +54,49 @@ void ReduceAcceptLanguageThrottle::WillStartRequest(
 }
 
 void ReduceAcceptLanguageThrottle::BeforeWillRedirectRequest(
-    net::RedirectInfo* redirect_info,
+    const net::RedirectInfo& redirect_info,
     const network::mojom::URLResponseHead& response_head,
-    bool* defer,
-    std::vector<std::string>* to_be_removed_request_headers,
-    net::HttpRequestHeaders* modified_request_headers,
-    net::HttpRequestHeaders* modified_cors_exempt_request_headers) {
+    RestartWithURLReset* restart_with_url_reset) {
   // For redirect case, checking if a redirect response should result in a
   // restart of the last requested URL with a better negotiation language,
   // rather than following the redirect.
   //
   // Suppose origin A returns a response redirecting to origin B,
   // `last_request_url_` will be A, and `response_head` contains
-  // Content-Language and Variants headers suggesting whether we should follow
-  // the redirect response. If the response shows it supports one of user's
-  // other preferred language and needs to restart. We will restart the request
-  // to A with the new preferred language and expect A responses a different
-  // redirect. For detail example, see
+  // Content-Language and Avail-Language headers suggesting whether we should
+  // follow the redirect response. If the response shows it supports one of
+  // user's other preferred language and needs to restart. We will restart the
+  // request to A with the new preferred language and expect A responses a
+  // different redirect. For detail example, see
   // https://github.com/Tanych/accept-language/issues/3.
-  MaybeRestartWithLanguageNegotiation(response_head);
+  MaybeRestartWithLanguageNegotiation(response_head, restart_with_url_reset);
   // Update the url with the redirect new url to make sure last_request_url_
   // with be the response_url.
-  last_request_url_ = redirect_info->new_url;
+  last_request_url_ = redirect_info.new_url;
 }
 
 void ReduceAcceptLanguageThrottle::BeforeWillProcessResponse(
     const GURL& response_url,
     const network::mojom::URLResponseHead& response_head,
-    bool* defer) {
-  DCHECK_EQ(response_url, last_request_url_);
-  MaybeRestartWithLanguageNegotiation(response_head);
+    RestartWithURLReset* restart_with_url_reset) {
+  CHECK_EQ(response_url, last_request_url_, base::NotFatalUntil::M159);
+  MaybeRestartWithLanguageNegotiation(response_head, restart_with_url_reset);
 }
 
 void ReduceAcceptLanguageThrottle::MaybeRestartWithLanguageNegotiation(
-    const network::mojom::URLResponseHead& response_head) {
-  // For responses that don't contains content-language and variants header, we
-  // skip language negotiation for them since we don't know whether we can get a
-  // better representation.
+    const network::mojom::URLResponseHead& response_head,
+    RestartWithURLReset* restart_with_url_reset) {
+  // For responses that don't contains content-language and avail-language
+  // header, we skip language negotiation for them since we don't know whether
+  // we can get a better representation.
   if (!response_head.parsed_headers ||
       !response_head.parsed_headers->content_language ||
-      !response_head.parsed_headers->variants_headers) {
+      !response_head.parsed_headers->avail_language) {
     return;
   }
 
   LogAcceptLanguageStatus(AcceptLanguageNegotiationRestart::
-                              kVariantsAndContentLanguageHeaderPresent);
+                              kAvailLanguageAndContentLanguageHeaderPresent);
 
   // Skip restart when it's a service worker navigation preload request,
   // otherwise request for the same origin can't guarantee restart at most once.
@@ -126,25 +116,14 @@ void ReduceAcceptLanguageThrottle::MaybeRestartWithLanguageNegotiation(
     return;
   }
 
-  ReduceAcceptLanguageUtils reduce_language_utils(*accept_language_delegate_);
-  // Skip if kReduceAcceptLanguage feature is disabled and response header has
-  // no valid origin trial token.
-  const bool is_origin_trial_enabled =
-      ReduceAcceptLanguageUtils::IsReduceAcceptLanguageEnabledForOrigin(
-          url::Origin::Create(last_request_url_), response_head.headers.get());
-  if (!base::FeatureList::IsEnabled(network::features::kReduceAcceptLanguage) &&
-      !is_origin_trial_enabled) {
-    return;
-  }
-
   // Only restart once per-Origin (per navigation).
   if (!restarted_origins_.insert(last_request_origin).second)
     return;
 
   bool need_restart =
-      reduce_language_utils.ReadAndPersistAcceptLanguageForNavigation(
+      reduce_accept_language_utils_.ReadAndPersistAcceptLanguageForNavigation(
           last_request_origin, initial_request_headers_,
-          response_head.parsed_headers, is_origin_trial_enabled);
+          response_head.parsed_headers);
 
   // Only restart if the initial accept language doesn't match content language.
   if (need_restart) {
@@ -155,7 +134,7 @@ void ReduceAcceptLanguageThrottle::MaybeRestartWithLanguageNegotiation(
     // restarts starting from the original request URL. However, for cross
     // origin redirects, it won't pass the SiteForCookies equivalent check on
     // URLLoader when using RestartWithFlags.
-    delegate_->RestartWithURLResetAndFlags(/*additional_load_flags=*/0);
+    *restart_with_url_reset = RestartWithURLReset(true);
     return;
   }
 }

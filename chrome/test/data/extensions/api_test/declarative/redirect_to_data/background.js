@@ -3,21 +3,20 @@
 // found in the LICENSE file.
 
 // |testTitle| needs to be the same as |kTestTitle| in declarative_apitest.cc.
-var testTitle = ':TEST:';
-var redirectDataURI = 'data:text/html;charset=utf-8,<html><head><title>' +
-                      testTitle +
-                      '<%2Ftitle><%2Fhtml>';
+const testTitle = ':TEST:';
+const redirectDataURI =
+    `data:text/html;charset=utf-8,<html><head><title>${testTitle}` +
+    `<%2Ftitle><%2Fhtml>`;
 
-var rule = {
+const rule = {
   conditions: [
-    new chrome.declarativeWebRequest.RequestMatcher({
-        url: {schemes: ['http']}})
+    new chrome.declarativeWebRequest.RequestMatcher({url: {schemes: ['http']}}),
   ],
   actions: [
     new chrome.declarativeWebRequest.RedirectRequest({
-      redirectUrl: redirectDataURI
-    })
-  ]
+      redirectUrl: redirectDataURI,
+    }),
+  ],
 };
 
 function report(details) {
@@ -28,14 +27,15 @@ function report(details) {
   }
 }
 
-var activeTabId;
+let activeTabId;
 
 function navigateAndWait(url, callback) {
-  var done =
+  const done =
       chrome.test.listenForever(chrome.tabs.onUpdated, function(_, info, tab) {
-        if (tab.id == activeTabId && info.status == 'complete') {
-          if (callback)
+        if (tab.id === activeTabId && info.status === 'complete') {
+          if (callback) {
             callback(tab);
+          }
           done();
         }
       });
@@ -49,18 +49,18 @@ function checkTitleCallback(tab) {
 chrome.test.runTests([
   function setUp() {
     chrome.windows.getAll(
-      {populate: true},
-      chrome.test.callbackPass(function(windows) {
-        chrome.test.assertEq(1, windows.length);
-        activeTabId = windows[0].tabs[0].id;
-      }))
+        {populate: true}, chrome.test.callbackPass(function(windows) {
+          chrome.test.assertEq(1, windows.length);
+          activeTabId = windows[0].tabs[0].id;
+        }));
   },
   function checkTitle() {
-    chrome.declarativeWebRequest.onRequest.addRules([rule],
-      chrome.test.callbackPass(function(details) {
-        report(details);
-        navigateAndWait('http://www.example.com',
-                        chrome.test.callbackPass(checkTitleCallback));
-      }));
-  }
+    chrome.declarativeWebRequest.onRequest.addRules(
+        [rule], chrome.test.callbackPass(function(details) {
+          report(details);
+          navigateAndWait(
+              'http://www.example.com',
+              chrome.test.callbackPass(checkTitleCallback));
+        }));
+  },
 ]);

@@ -5,25 +5,25 @@
 #include "chrome/browser/command_updater_impl.h"
 
 #include <algorithm>
+#include <optional>
 
 #include "base/check.h"
 #include "base/observer_list.h"
 #include "chrome/browser/command_observer.h"
 #include "chrome/browser/command_updater_delegate.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "ui/base/window_open_disposition.h"
 
 struct CommandUpdaterImpl::Command {
   // Empty optional means not specified yet and thus implicitly disabled.
-  absl::optional<bool> enabled;
-  base::ObserverList<CommandObserver>::Unchecked observers;
+  std::optional<bool> enabled;
+  base::ObserverList<CommandObserver>::UncheckedAndDanglingUntriaged observers;
 };
 
 CommandUpdaterImpl::CommandUpdaterImpl(CommandUpdaterDelegate* delegate)
     : delegate_(delegate) {
 }
 
-CommandUpdaterImpl::~CommandUpdaterImpl() {
-}
+CommandUpdaterImpl::~CommandUpdaterImpl() = default;
 
 bool CommandUpdaterImpl::SupportsCommand(int id) const {
   return commands_.find(id) != commands_.end();
@@ -31,22 +31,19 @@ bool CommandUpdaterImpl::SupportsCommand(int id) const {
 
 bool CommandUpdaterImpl::IsCommandEnabled(int id) const {
   auto command = commands_.find(id);
-  if (command == commands_.end() || command->second->enabled == absl::nullopt)
+  if (command == commands_.end() || command->second->enabled == std::nullopt) {
     return false;
+  }
   return *command->second->enabled;
 }
 
-bool CommandUpdaterImpl::ExecuteCommand(int id, base::TimeTicks time_stamp) {
-  return ExecuteCommandWithDisposition(id, WindowOpenDisposition::CURRENT_TAB,
-                                       time_stamp);
-}
-
-bool CommandUpdaterImpl::ExecuteCommandWithDisposition(
+bool CommandUpdaterImpl::ExecuteCommandWithDispositionAndContext(
     int id,
     WindowOpenDisposition disposition,
+    std::optional<actions::ActionInvocationContext> context,
     base::TimeTicks time_stamp) {
   if (SupportsCommand(id) && IsCommandEnabled(id)) {
-    delegate_->ExecuteCommandWithDisposition(id, disposition);
+    delegate_->HandleCommandWithDisposition(id, disposition, time_stamp);
     return true;
   }
   return false;
@@ -84,7 +81,7 @@ void CommandUpdaterImpl::DisableAllCommands() {
     UpdateCommandEnabled(command_pair.first, false);
 }
 
-std::vector<int> CommandUpdaterImpl::GetAllIds() {
+std::vector<int> CommandUpdaterImpl::GetAllIds() const {
   std::vector<int> result;
   for (const auto& command_pair : commands_)
     result.push_back(command_pair.first);

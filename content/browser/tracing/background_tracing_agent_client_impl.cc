@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include "base/memory/ptr_util.h"
+#include "base/strings/strcat.h"
 #include "content/browser/child_process_host_impl.h"
 #include "content/browser/tracing/background_tracing_manager_impl.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
@@ -42,18 +43,16 @@ void BackgroundTracingAgentClientImpl::OnInitialized() {
 }
 
 void BackgroundTracingAgentClientImpl::OnTriggerBackgroundTrace(
-    const std::string& name) {
-  BackgroundTracingManagerImpl::GetInstance().OnHistogramTrigger(name);
-}
-
-void BackgroundTracingAgentClientImpl::OnAbortBackgroundTrace() {
-  BackgroundTracingManagerImpl::GetInstance().AbortScenario();
+    tracing::mojom::BackgroundTracingRulePtr rule,
+    std::optional<int32_t> histogram_value,
+    uint64_t flow_id) {
+  base::trace_event::EmitNamedTrigger(rule->rule_id, histogram_value, flow_id);
 }
 
 BackgroundTracingAgentClientImpl::BackgroundTracingAgentClientImpl(
     mojo::Remote<tracing::mojom::BackgroundTracingAgent> agent)
     : agent_(std::move(agent)) {
-  DCHECK(agent_);
+  CHECK(agent_, base::NotFatalUntil::M159);
 }
 
 }  // namespace content

@@ -6,9 +6,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/values.h"
 #include "components/webcrypto/algorithm_dispatch.h"
@@ -93,28 +95,6 @@ std::string DecryptMustFail(blink::WebCryptoKey key,
 
 class WebCryptoAesCbcTest : public WebCryptoTestBase {};
 
-TEST_F(WebCryptoAesCbcTest, InputTooLarge) {
-  std::vector<uint8_t> output;
-
-  std::vector<uint8_t> iv(16);
-
-  // Give an input that is too large. It would cause integer overflow when
-  // narrowing the ciphertext size to an int, since OpenSSL operates on signed
-  // int lengths NOT unsigned.
-  //
-  // Pretend the input is large. Don't pass data pointer as NULL in case that
-  // is special cased; the implementation shouldn't actually dereference the
-  // data.
-  base::span<const uint8_t> input(iv.data(), size_t{INT_MAX} - 3);
-
-  EXPECT_EQ(
-      Status::ErrorDataTooLarge(),
-      Encrypt(CreateAesCbcAlgorithm(iv), GetTestAesCbcKey(), input, &output));
-  EXPECT_EQ(
-      Status::ErrorDataTooLarge(),
-      Decrypt(CreateAesCbcAlgorithm(iv), GetTestAesCbcKey(), input, &output));
-}
-
 TEST_F(WebCryptoAesCbcTest, ExportKeyUnsupportedFormat) {
   std::vector<uint8_t> output;
 
@@ -135,7 +115,7 @@ struct AesCbcKnownAnswer {
   const char* ciphertext;
 };
 
-const AesCbcKnownAnswer kAesCbcKnownAnswers[] = {
+constexpr auto kAesCbcKnownAnswers = std::to_array<AesCbcKnownAnswer>({
     // F.2.1 (CBC-AES128.Encrypt)
     // http://csrc.nist.gov/publications/nistpubs/800-38a/sp800-38a.pdf
     {"2b7e151628aed2a6abf7158809cf4f3c", "000102030405060708090a0b0c0d0e0f",
@@ -163,7 +143,8 @@ const AesCbcKnownAnswer kAesCbcKnownAnswers[] = {
 
     // Taken from encryptor_unittest.cc (EncryptorTest.EmptyEncrypt())
     {"3132383d5369787465656e4279746573", "5377656574205369787465656e204956", "",
-     "8518b8878d34e7185e300d0fcc426396"}};
+     "8518b8878d34e7185e300d0fcc426396"},
+});
 
 TEST_F(WebCryptoAesCbcTest, KnownAnswers) {
   for (const auto& test : kAesCbcKnownAnswers) {
@@ -443,11 +424,11 @@ TEST_F(WebCryptoAesCbcTest, ImportKeyEmptyUsage) {
 // If key_ops is specified but empty, no key usages are allowed for the key.
 TEST_F(WebCryptoAesCbcTest, ImportKeyJwkEmptyKeyOps) {
   blink::WebCryptoKey key;
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("kty", "oct");
   dict.Set("ext", false);
   dict.Set("k", "GADWrMRHwQfoNaXU5fZvTg");
-  dict.Set("key_ops", base::Value::List());
+  dict.Set("key_ops", base::ListValue());
 
   // The JWK does not contain encrypt usages.
   EXPECT_EQ(Status::ErrorJwkKeyopsInconsistent(),
@@ -465,7 +446,7 @@ TEST_F(WebCryptoAesCbcTest, ImportKeyJwkEmptyKeyOps) {
 // If key_ops is missing, then any key usages can be specified.
 TEST_F(WebCryptoAesCbcTest, ImportKeyJwkNoKeyOps) {
   blink::WebCryptoKey key;
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("kty", "oct");
   dict.Set("k", "GADWrMRHwQfoNaXU5fZvTg");
 
@@ -485,10 +466,10 @@ TEST_F(WebCryptoAesCbcTest, ImportKeyJwkNoKeyOps) {
 
 TEST_F(WebCryptoAesCbcTest, ImportKeyJwkKeyOpsEncryptDecrypt) {
   blink::WebCryptoKey key;
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("kty", "oct");
   dict.Set("k", "GADWrMRHwQfoNaXU5fZvTg");
-  base::Value::List* key_ops = dict.EnsureList("key_ops");
+  base::ListValue* key_ops = dict.EnsureList("key_ops");
 
   key_ops->Append("encrypt");
 
@@ -522,10 +503,10 @@ TEST_F(WebCryptoAesCbcTest, ImportKeyJwkKeyOpsEncryptDecrypt) {
 // Test failure if input usage is NOT a strict subset of the JWK usage.
 TEST_F(WebCryptoAesCbcTest, ImportKeyJwkKeyOpsNotSuperset) {
   blink::WebCryptoKey key;
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("kty", "oct");
   dict.Set("k", "GADWrMRHwQfoNaXU5fZvTg");
-  base::Value::List key_ops;
+  base::ListValue key_ops;
   key_ops.Append("encrypt");
   dict.Set("key_ops", std::move(key_ops));
 
@@ -539,7 +520,7 @@ TEST_F(WebCryptoAesCbcTest, ImportKeyJwkKeyOpsNotSuperset) {
 
 TEST_F(WebCryptoAesCbcTest, ImportKeyJwkUseEnc) {
   blink::WebCryptoKey key;
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("kty", "oct");
   dict.Set("k", "GADWrMRHwQfoNaXU5fZvTg");
 
@@ -570,8 +551,7 @@ TEST_F(WebCryptoAesCbcTest, ImportJwkUnknownKeyOps) {
         })";
 
   EXPECT_EQ(Status::Success(),
-            ImportKey(blink::kWebCryptoKeyFormatJwk,
-                      base::as_bytes(base::make_span(jwk)),
+            ImportKey(blink::kWebCryptoKeyFormatJwk, base::as_byte_span(jwk),
                       CreateAlgorithm(blink::kWebCryptoAlgorithmIdAesCbc),
                       false, blink::kWebCryptoKeyUsageEncrypt, &key));
 }
@@ -586,11 +566,11 @@ TEST_F(WebCryptoAesCbcTest, ImportJwkInvalidJson) {
 
   // Fail on invalid JSON.
   const std::string bad_json = R"({ "kty": "oct", "alg": "HS256", "use": )";
-  EXPECT_EQ(Status::ErrorJwkNotDictionary(),
-            ImportKey(blink::kWebCryptoKeyFormatJwk,
-                      base::as_bytes(base::make_span(bad_json)),
-                      CreateAlgorithm(blink::kWebCryptoAlgorithmIdAesCbc),
-                      false, blink::kWebCryptoKeyUsageEncrypt, &key));
+  EXPECT_EQ(
+      Status::ErrorJwkNotDictionary(),
+      ImportKey(blink::kWebCryptoKeyFormatJwk, base::as_byte_span(bad_json),
+                CreateAlgorithm(blink::kWebCryptoAlgorithmIdAesCbc), false,
+                blink::kWebCryptoKeyUsageEncrypt, &key));
 }
 
 // Fail on inconsistent key_ops - asking for "encrypt" however JWK contains
@@ -598,11 +578,11 @@ TEST_F(WebCryptoAesCbcTest, ImportJwkInvalidJson) {
 TEST_F(WebCryptoAesCbcTest, ImportJwkKeyOpsLacksUsages) {
   blink::WebCryptoKey key;
 
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("kty", "oct");
   dict.Set("k", "GADWrMRHwQfoNaXU5fZvTg");
 
-  base::Value::List key_ops;
+  base::ListValue key_ops;
   key_ops.Append("foo");
   dict.Set("key_ops", std::move(key_ops));
   EXPECT_EQ(Status::ErrorJwkKeyopsInconsistent(),
@@ -726,7 +706,7 @@ TEST_F(WebCryptoAesCbcTest, WrapUnwrapRoundtripSpkiPkcs8) {
                               &wrapping_key));
 
   // Generate an RSA key pair to be wrapped.
-  const unsigned int modulus_length = 256;
+  const unsigned int modulus_length = 2048;
   const std::vector<uint8_t> public_exponent = HexStringToBytes("010001");
 
   blink::WebCryptoKey public_key;

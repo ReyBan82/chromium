@@ -6,16 +6,16 @@
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/strings/strcat.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
+#include "components/language/core/browser/incognito_language_list_map.h"
 #include "components/language/core/browser/pref_names.h"
 #include "components/language/core/common/language_util.h"
 #include "components/language/core/common/locale_util.h"
@@ -26,8 +26,6 @@
 #include "ui/base/l10n/l10n_util.h"
 
 namespace language {
-
-const char kFallbackInputMethodLocale[] = "en-US";
 
 void LanguagePrefs::RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* registry) {
@@ -40,7 +38,7 @@ void LanguagePrefs::RegisterProfilePrefs(
                                user_prefs::PrefRegistrySyncable::SYNCABLE_PREF);
 
   registry->RegisterListPref(language::prefs::kForcedLanguages);
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   registry->RegisterStringPref(language::prefs::kPreferredLanguages,
                                kFallbackInputMethodLocale);
 
@@ -74,7 +72,7 @@ void LanguagePrefs::GetAcceptLanguagesList(
     std::vector<std::string>* languages) const {
   DCHECK(languages);
   DCHECK(languages->empty());
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   const std::string& key = language::prefs::kPreferredLanguages;
 #else
   const std::string& key = language::prefs::kAcceptLanguages;
@@ -95,9 +93,11 @@ void LanguagePrefs::GetUserSelectedLanguagesList(
 
 void LanguagePrefs::SetUserSelectedLanguagesList(
     const std::vector<std::string>& languages) {
-  std::string languages_str = base::JoinString(languages, ",");
+  std::vector<std::string> filtered_languages =
+      l10n_util::KeepAcceptedLanguages(languages);
+  std::string languages_str = base::JoinString(filtered_languages, ",");
   prefs_->SetString(language::prefs::kSelectedLanguages, languages_str);
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   prefs_->SetString(language::prefs::kPreferredLanguages, languages_str);
 #endif
 }
@@ -146,17 +146,18 @@ std::vector<std::string> LanguagePrefs::GetULPLanguages() {
   return ulp_languages;
 }
 
-void LanguagePrefs::SetULPLanguages(std::vector<std::string> ulp_languages) {
-  base::Value::List ulp_pref_list;
+void LanguagePrefs::SetULPLanguages(
+    std::vector<base::i18n::LanguageTag> ulp_languages) {
+  base::ListValue ulp_pref_list;
   ulp_pref_list.reserve(ulp_languages.size());
   for (const auto& language : ulp_languages) {
-    ulp_pref_list.Append(language);
+    ulp_pref_list.Append(std::string(language.tag_string()));
   }
   prefs_->SetList(language::prefs::kULPLanguages, std::move(ulp_pref_list));
 }
 #endif
 
-bool LanguagePrefs::IsForcedLanguage(const std::string& language) {
+bool LanguagePrefs::IsForcedLanguage(std::string_view language) {
   return forced_languages_set_.find(language) != forced_languages_set_.end();
 }
 
@@ -172,7 +173,7 @@ void LanguagePrefs::InitializeSelectedLanguagesPref() {
 void ResetLanguagePrefs(PrefService* prefs) {
   prefs->ClearPref(language::prefs::kSelectedLanguages);
   prefs->ClearPref(language::prefs::kAcceptLanguages);
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   prefs->ClearPref(language::prefs::kPreferredLanguages);
   prefs->ClearPref(language::prefs::kPreferredLanguagesSyncable);
 #endif
@@ -181,9 +182,46 @@ void ResetLanguagePrefs(PrefService* prefs) {
 #endif
 }
 
-std::string GetFirstLanguage(base::StringPiece language_list) {
+std::string GetFirstLanguage(std::string_view language_list) {
   auto end = language_list.find(",");
   return std::string(language_list.substr(0, end));
+}
+
+namespace {
+
+// Ensure at compile time that our fallback key exists in the generated map.
+constexpr bool IncognitoMapContainsFallback() {
+  return std::ranges::any_of(kIncognitoLanguageListMap, [](const auto& e) {
+    return e.first == kFallbackInputMethodLocale;
+  });
+}
+static_assert(
+    IncognitoMapContainsFallback(),
+    "kFallbackInputMethodLocale must exist in kIncognitoLanguageListMap");
+
+}  // namespace
+
+std::string GetIncognitoLanguageList(std::string_view language_list) {
+  auto comma_pos = language_list.find(',');
+  // <2 values suggests a user actively deleted other languages from their
+  // settings, so prioritize keeping that user preference over the normal logic.
+  if (comma_pos == std::string_view::npos) {
+    return std::string(language_list);
+  }
+
+  std::string_view first_language = language_list.substr(0, comma_pos);
+
+  // Look up in the generated map.
+  auto it = kIncognitoLanguageListMap.find(first_language);
+  if (it != kIncognitoLanguageListMap.end()) {
+    return std::string(it->second);
+  }
+
+  // Fallback for simple (no regional subtags) or unrecognized languages, just
+  // prepend the first language to global default (i.e., "en-US,en").
+  return base::StrCat(
+      {first_language, ",",
+       kIncognitoLanguageListMap.at(kFallbackInputMethodLocale)});
 }
 
 }  // namespace language

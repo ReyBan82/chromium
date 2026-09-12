@@ -7,7 +7,6 @@
 
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -23,10 +22,8 @@
 #include "media/audio/audio_device_name.h"
 #include "media/audio/audio_manager.h"
 #include "media/audio/audio_output_dispatcher.h"
-
-#if BUILDFLAG(IS_WIN)
-#include "base/win/scoped_com_initializer.h"
-#endif
+#include "media/media_buildflags.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace media {
 
@@ -35,8 +32,6 @@ class AudioOutputDispatcher;
 // AudioManagerBase provides AudioManager functions common for all platforms.
 class MEDIA_EXPORT AudioManagerBase : public AudioManager {
  public:
-  enum class VoiceProcessingMode { kDisabled = 0, kEnabled = 1 };
-
   AudioManagerBase(const AudioManagerBase&) = delete;
   AudioManagerBase& operator=(const AudioManagerBase&) = delete;
 
@@ -54,6 +49,8 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
       const AudioParameters& params,
       const std::string& device_id) override;
 
+  void LogAudioManagerStartup() override;
+
   // Listeners will be notified on the GetTaskRunner() task runner.
   void AddOutputDeviceChangeListener(AudioDeviceListener* listener) override;
   void RemoveOutputDeviceChangeListener(AudioDeviceListener* listener) override;
@@ -61,6 +58,9 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
   std::unique_ptr<AudioLog> CreateAudioLog(
       AudioLogFactory::AudioComponent component,
       int component_id) override;
+
+  std::string GetDeviceNameFromCache(const std::string& device_id,
+                                     bool is_input) override;
 
   // AudioManagerBase:
 
@@ -80,11 +80,13 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
       const std::string& device_id,
       const LogCallback& log_callback) = 0;
 
+#if BUILDFLAG(ENABLE_PASSTHROUGH_AUDIO_CODECS)
   // Creates the output stream for the |AUDIO_BITSTREAM_XXX| format.
   virtual AudioOutputStream* MakeBitstreamOutputStream(
       const AudioParameters& params,
       const std::string& device_id,
       const LogCallback& log_callback);
+#endif
 
   // Creates the input stream for the |AUDIO_PCM_LINEAR| format. The legacy
   // name is also from |AUDIO_PCM_LINEAR|.
@@ -117,7 +119,6 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
   void GetAudioOutputDeviceDescriptions(
       AudioDeviceDescriptions* device_descriptions) final;
 
-  AudioParameters GetDefaultOutputStreamParameters() override;
   AudioParameters GetOutputStreamParameters(
       const std::string& device_id) override;
   AudioParameters GetInputStreamParameters(
@@ -149,11 +150,11 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
 
   // Appends a list of available input devices to |device_names|,
   // which must initially be empty.
-  virtual void GetAudioInputDeviceNames(AudioDeviceNames* device_names);
+  virtual bool GetAudioInputDeviceNames(AudioDeviceNames* device_names);
 
   // Appends a list of available output devices to |device_names|,
   // which must initially be empty.
-  virtual void GetAudioOutputDeviceNames(AudioDeviceNames* device_names);
+  virtual bool GetAudioOutputDeviceNames(AudioDeviceNames* device_names);
 
   std::string GetDefaultInputDeviceID() override;
   std::string GetDefaultOutputDeviceID() override;
@@ -178,21 +179,32 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
   // Closes all currently open input streams.
   void CloseAllInputStreams();
 
+  // Returns a callback that can be used to log device enumeration events.
+  // The callback is lazily created on the first call.
+  const LogCallback& GetEnumerationLogCallback();
+
  private:
   FRIEND_TEST_ALL_PREFIXES(AudioManagerTest, AudioDebugRecording);
 
   struct DispatcherParams;
-  typedef std::vector<std::unique_ptr<DispatcherParams>> AudioOutputDispatchers;
+  using AudioOutputDispatchers = std::vector<std::unique_ptr<DispatcherParams>>;
 
   // AudioManager:
   void InitializeDebugRecording() final;
 
-  void GetAudioDeviceDescriptions(
+  bool GetAudioDeviceDescriptions(
       AudioDeviceDescriptions* descriptions,
-      void (AudioManagerBase::*get_device_names)(AudioDeviceNames*),
+      bool (AudioManagerBase::*get_device_names)(AudioDeviceNames*),
       std::string (AudioManagerBase::*get_default_device_id)(),
       std::string (AudioManagerBase::*get_communications_device_id)(),
       std::string (AudioManagerBase::*get_group_id)(const std::string&));
+
+  // Used for logging device enumeration events. Lazily initialized in
+  // GetEnumerationLogCallback() to avoid construction-order issues.
+  class DeviceLogHelper;
+
+  // Returns a pointer to the DeviceLogHelper, initializing it if necessary.
+  DeviceLogHelper* GetDeviceLogHelper();
 
   // Max number of open output streams, modified by
   // SetMaxOutputStreamsAllowed().
@@ -202,10 +214,11 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
   int num_output_streams_;
 
   // Track output state change listeners.
-  base::ObserverList<AudioDeviceListener>::Unchecked output_listeners_;
+  base::ObserverList<AudioDeviceListener> output_listeners_;
 
   // Contains currently open input streams.
-  std::unordered_set<AudioInputStream*> input_streams_;
+  absl::flat_hash_set<raw_ptr<AudioInputStream, CtnExperimental>>
+      input_streams_;
 
   // Map of cached AudioOutputDispatcher instances.  Must only be touched
   // from the audio thread (no locking).
@@ -213,6 +226,10 @@ class MEDIA_EXPORT AudioManagerBase : public AudioManager {
 
   // Proxy for creating AudioLog objects.
   const raw_ptr<AudioLogFactory, DanglingUntriaged> audio_log_factory_;
+
+  // Used for logging device enumeration events. Lazily initialized in
+  // GetEnumerationLogCallback() to avoid construction-order issues.
+  std::unique_ptr<DeviceLogHelper> device_log_helper_;
 
   // Debug recording manager.
   std::unique_ptr<AudioDebugRecordingManager> debug_recording_manager_;

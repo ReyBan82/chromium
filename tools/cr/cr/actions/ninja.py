@@ -12,25 +12,16 @@ _PHONY_SUFFIX = ': phony'
 _LINK_SUFFIX = ': link'
 
 
-DEFAULT = cr.Config.From(
-    GOMA_DIR=os.path.expanduser('~/goma'),
-)
+DEFAULT = cr.Config.From()
+
 
 class NinjaBuilder(cr.Builder):
   """An implementation of Builder that uses ninja to do the actual build."""
 
   # Some basic configuration installed if we are enabled.
   ENABLED = cr.Config.From(
-      NINJA_BINARY=os.path.join('{DEPOT_TOOLS}', 'autoninja'),
-      NINJA_BUILD_FILE=os.path.join('{CR_BUILD_DIR}', 'build.ninja'),
-      # Don't rename to GOMA_* or Goma will complain: "unknown GOMA_ parameter".
-      NINJA_GOMA_LINE='cc = {CR_GOMA_CC} $',
-  )
-  # A config block only included if goma is detected.
-  GOMA = cr.Config.From(
-      CR_GOMA_CC=os.path.join('{GOMA_DIR}', 'gomacc'),
-      CR_GOMA_CTL=os.path.join('{GOMA_DIR}', 'goma_ctl.py'),
-      GOMA_DIR='{CR_GOMA_DIR}',
+    NINJA_BINARY=os.path.join('{DEPOT_TOOLS}', 'autoninja'),
+    NINJA_BUILD_FILE=os.path.join('{CR_BUILD_DIR}', 'build.ninja'),
   )
   # A placeholder for the system detected configuration
   DETECTED = cr.Config('DETECTED')
@@ -40,35 +31,15 @@ class NinjaBuilder(cr.Builder):
     self._targets = []
 
   def Build(self, targets, arguments):
-    # Make sure Goma is started if Ninja is set to use it.
-    # This may be redundant, but it currently improves reliability.
-    try:
-      with open(cr.context.Get('NINJA_BUILD_FILE'), 'r') as f:
-        if f.readline().rstrip('\n') == cr.context.Get('NINJA_GOMA_LINE'):
-          # Goma is active, so make sure it's started.
-          cr.Host.ExecuteSilently(
-              '{CR_GOMA_CTL}',
-              'ensure_start'
-          )
-    except IOError:
-      pass
-
     build_arguments = [target.build_target for target in targets]
     build_arguments.extend(arguments)
-    cr.Host.Execute(
-        '{NINJA_BINARY}',
-        '-C{CR_BUILD_DIR}',
-        *build_arguments
-    )
+    cr.Host.Execute('{NINJA_BINARY}', '-C{CR_BUILD_DIR}', *build_arguments)
 
   def Clean(self, targets, arguments):
     build_arguments = [target.build_target for target in targets]
     build_arguments.extend(arguments)
     cr.Host.Execute(
-        '{NINJA_BINARY}',
-        '-C{CR_BUILD_DIR}',
-        '-tclean',
-        *build_arguments
+      '{NINJA_BINARY}', '-C{CR_BUILD_DIR}', '-tclean', *build_arguments
     )
 
   def GetTargets(self):
@@ -79,18 +50,15 @@ class NinjaBuilder(cr.Builder):
       except KeyError:
         return self._targets
       output = cr.Host.Capture(
-          '{NINJA_BINARY}',
-          '-C{CR_BUILD_DIR}',
-          '-ttargets',
-          'all'
+        '{NINJA_BINARY}', '-C{CR_BUILD_DIR}', '-ttargets', 'all'
       )
       for line in output.split('\n'):
         line = line.strip()
         if line.endswith(_PHONY_SUFFIX):
-          target = line[:-len(_PHONY_SUFFIX)].strip()
+          target = line[: -len(_PHONY_SUFFIX)].strip()
           self._targets.append(target)
         elif line.endswith(_LINK_SUFFIX):
-          target = line[:-len(_LINK_SUFFIX)].strip()
+          target = line[: -len(_LINK_SUFFIX)].strip()
           self._targets.append(target)
     return self._targets
 
@@ -100,12 +68,3 @@ class NinjaBuilder(cr.Builder):
     ninja_binaries = cr.Host.SearchPath('autoninja')
     if ninja_binaries:
       cls.DETECTED.Set(NINJA_BINARY=ninja_binaries[0])
-
-    goma_binaries = cr.Host.SearchPath('gomacc', [
-      '{GOMA_DIR}',
-      '/usr/local/google/code/goma',
-      os.path.expanduser('~/goma')
-    ])
-    if goma_binaries:
-      cls.DETECTED.Set(CR_GOMA_DIR=os.path.dirname(goma_binaries[0]))
-      cls.DETECTED.AddChildren(cls.GOMA)

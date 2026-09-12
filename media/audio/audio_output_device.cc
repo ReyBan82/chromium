@@ -159,7 +159,10 @@ bool AudioOutputDevice::SetVolume(double volume) {
 }
 
 OutputDeviceInfo AudioOutputDevice::GetOutputDeviceInfo() {
-  TRACE_EVENT0("audio", "AudioOutputDevice::GetOutputDeviceInfo");
+  // The wait in this method is a known source of high input latency. Use the
+  // "latency" category to ensure it's visible in general performance traces,
+  // not just audio-specific ones.
+  TRACE_EVENT0("audio,latency", "AudioOutputDevice::GetOutputDeviceInfo");
   DCHECK(!io_task_runner_->BelongsToCurrentThread());
   did_receive_auth_.Wait();
   return GetOutputDeviceInfo_Signaled();
@@ -394,7 +397,7 @@ void AudioOutputDevice::OnStreamCreated(
   DCHECK(io_task_runner_->BelongsToCurrentThread());
   DCHECK(shared_memory_region.IsValid());
 #if BUILDFLAG(IS_WIN)
-  DCHECK(socket_handle.IsValid());
+  DCHECK(socket_handle.is_valid());
 #else
   DCHECK(socket_handle.is_valid());
 #endif
@@ -445,11 +448,14 @@ void AudioOutputDevice::OnIPCClosed() {
 
 OutputDeviceInfo AudioOutputDevice::GetOutputDeviceInfo_Signaled() {
   DCHECK(did_receive_auth_.IsSignaled());
-  return OutputDeviceInfo(AudioDeviceDescription::UseSessionIdToSelectDevice(
-                              session_id_, device_id_)
-                              ? matched_device_id_
-                              : device_id_,
-                          device_status_, output_params_);
+  OutputDeviceInfo info(AudioDeviceDescription::UseSessionIdToSelectDevice(
+                            session_id_, device_id_)
+                            ? matched_device_id_
+                            : device_id_,
+                        device_status_, output_params_);
+  TRACE_EVENT1("audio", "AudioOutputDevice::GetOutputDeviceInfo_Signaled",
+               "info", info.AsHumanReadableString());
+  return info;
 }
 
 void AudioOutputDevice::OnAuthSignal() {

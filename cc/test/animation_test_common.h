@@ -21,6 +21,11 @@ class PointF;
 
 namespace cc {
 
+// Helper method to convert base::TimeTicks to double.
+// Returns double milliseconds if the input value is resolved or
+// std::numeric_limits<double>::quiet_NaN() otherwise.
+double ToMilliseconds(std::optional<base::TimeTicks> time_ticks);
+
 class FakeFloatAnimationCurve : public gfx::FloatAnimationCurve {
  public:
   FakeFloatAnimationCurve();
@@ -29,6 +34,9 @@ class FakeFloatAnimationCurve : public gfx::FloatAnimationCurve {
 
   base::TimeDelta Duration() const override;
   float GetValue(base::TimeDelta now) const override;
+  float GetTransformedValue(
+      base::TimeDelta now,
+      gfx::TimingFunction::LimitDirection limit_direction) const override;
   std::unique_ptr<gfx::AnimationCurve> Clone() const override;
 
  private:
@@ -42,6 +50,10 @@ class FakeTransformTransition : public gfx::TransformAnimationCurve {
 
   base::TimeDelta Duration() const override;
   gfx::TransformOperations GetValue(base::TimeDelta time) const override;
+  gfx::TransformOperations GetTransformedValue(
+      base::TimeDelta time,
+      gfx::TimingFunction::LimitDirection limit_direction) const override;
+
   bool PreservesAxisAlignment() const override;
   bool MaximumScale(float* max_scale) const override;
 
@@ -58,6 +70,9 @@ class FakeFloatTransition : public gfx::FloatAnimationCurve {
 
   base::TimeDelta Duration() const override;
   float GetValue(base::TimeDelta time) const override;
+  float GetTransformedValue(
+      base::TimeDelta time,
+      gfx::TimingFunction::LimitDirection limit_direction) const override;
 
   std::unique_ptr<gfx::AnimationCurve> Clone() const override;
 
@@ -91,7 +106,8 @@ int AddOpacityTransitionToAnimation(Animation* animation,
                                     float start_opacity,
                                     float end_opacity,
                                     bool use_timing_function,
-                                    absl::optional<int> id = absl::nullopt);
+                                    std::optional<int> id = std::nullopt,
+                                    std::optional<int> group_id = std::nullopt);
 
 int AddAnimatedFilterToAnimation(Animation* animation,
                                  double duration,
@@ -156,6 +172,8 @@ int AddOpacityTransitionToElementWithAnimation(
     float start_opacity,
     float end_opacity,
     bool use_timing_function);
+
+scoped_refptr<Animation> CancelAndReplaceAnimation(Animation& animation);
 
 }  // namespace cc
 

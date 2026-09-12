@@ -5,24 +5,27 @@
 #ifndef COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_UI_PASSWORD_UNDO_HELPER_H_
 #define COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_UI_PASSWORD_UNDO_HELPER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "components/undo/undo_manager.h"
 
 namespace password_manager {
 
 class PasswordStoreInterface;
-struct PasswordForm;
+struct StoredCredential;
 
 // Helper class to revert deletion of a saved passwords or password exception
 // entries.
 class PasswordUndoHelper {
  public:
-  explicit PasswordUndoHelper(raw_ptr<PasswordStoreInterface> profile_store,
-                              raw_ptr<PasswordStoreInterface> account_store);
+  explicit PasswordUndoHelper(PasswordStoreInterface* profile_store,
+                              PasswordStoreInterface* account_store);
   PasswordUndoHelper(const PasswordUndoHelper&) = delete;
   PasswordUndoHelper& operator=(const PasswordUndoHelper&) = delete;
 
   // Adds password to the undo action.
-  void PasswordRemoved(const password_manager::PasswordForm& form);
+  void PasswordRemoved(StoredCredential credential);
+  // Adds backup password to the undo action.
+  void BackupPasswordRemoved(StoredCredential credential);
 
   // Reverts last grouped deletion.
   void Undo();

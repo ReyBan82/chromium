@@ -5,7 +5,7 @@
 #ifndef CC_LAYERS_VIDEO_FRAME_PROVIDER_H_
 #define CC_LAYERS_VIDEO_FRAME_PROVIDER_H_
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
 #include "cc/cc_export.h"
 
@@ -92,6 +92,12 @@ class CC_EXPORT VideoFrameProvider {
   // Providers may use the absence of this call as a signal to detect when a new
   // frame missed its intended deadline.
   virtual void PutCurrentFrame() = 0;
+
+  // Called when feedback of a presented frame becomes known.
+  virtual void OnFramePresented(
+      base::TimeTicks display_time,
+      std::optional<base::TimeTicks> capture_begin_time,
+      std::optional<uint32_t> rtp_timestamp) {}
 
   // Returns the interval at which the provider expects to have new frames for
   // the client.

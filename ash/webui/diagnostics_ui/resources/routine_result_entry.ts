@@ -7,16 +7,17 @@ import './diagnostics_shared.css.js';
 import './text_badge.js';
 
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {assert, assertNotReached} from 'chrome://resources/js/assert_ts.js';
+import {assert, assertNotReached} from 'chrome://resources/js/assert.js';
 import {IronA11yAnnouncer} from 'chrome://resources/polymer/v3_0/iron-a11y-announcer/iron-a11y-announcer.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getRoutineFailureMessage} from './diagnostics_utils.js';
 import {RoutineGroup} from './routine_group.js';
 import {ExecutionProgress, ResultStatusItem} from './routine_list_executor.js';
 import {getTemplate} from './routine_result_entry.html.js';
-import {RoutineResult, RoutineType, StandardRoutineResult} from './system_routine_controller.mojom-webui.js';
+import type {RoutineResult} from './system_routine_controller.mojom-webui.js';
+import {RoutineType, StandardRoutineResult} from './system_routine_controller.mojom-webui.js';
 import {BadgeType} from './text_badge.js';
 
 /**
@@ -66,6 +67,8 @@ export function getRoutineType(routineType: RoutineType): string {
       return loadTimeData.getString('arcPingRoutineText');
     case RoutineType.kArcDnsResolution:
       return loadTimeData.getString('arcDnsResolutionRoutineText');
+    case RoutineType.kGoogleServicesConnectivity:
+      return loadTimeData.getString('googleServicesGroupLabel');
     default:
       return '';
   }
@@ -74,7 +77,8 @@ export function getRoutineType(routineType: RoutineType): string {
 export function getSimpleResult(result: RoutineResult): StandardRoutineResult {
   assert(result);
 
-  if (result.hasOwnProperty('simpleResult')) {
+  if (result.hasOwnProperty('simpleResult') &&
+      result.simpleResult !== undefined) {
     return result.simpleResult as number;
     // Ideally we would just return assert(result.simpleResult) but enum
     // value 0 fails assert.
@@ -84,6 +88,7 @@ export function getSimpleResult(result: RoutineResult): StandardRoutineResult {
     assert(result.powerResult);
     return result.powerResult.simpleResult as number;
   }
+
   assertNotReached();
 }
 
@@ -93,8 +98,8 @@ export function getSimpleResult(result: RoutineResult): StandardRoutineResult {
  */
 
 export class RoutineResultEntryElement extends PolymerElement {
-  static get is(): string {
-    return 'routine-result-entry';
+  static get is(): 'routine-result-entry' {
+    return 'routine-result-entry' as const;
   }
 
   static get template(): HTMLTemplateElement {
@@ -148,14 +153,14 @@ export class RoutineResultEntryElement extends PolymerElement {
     };
   }
 
-  item: RoutineGroup|ResultStatusItem;
-  hideVerticalLines: boolean;
-  usingRoutineGroups: boolean;
-  protected badgeType: BadgeType;
-  protected badgeText: string;
-  protected testCompleted: boolean;
-  private announcedText: string;
-  private routineType: string;
+  declare item: RoutineGroup|ResultStatusItem;
+  declare hideVerticalLines: boolean;
+  declare usingRoutineGroups: boolean;
+  declare protected badgeType: BadgeType;
+  declare protected badgeText: string;
+  declare protected testCompleted: boolean;
+  declare private announcedText: string;
+  declare private routineType: string;
 
 
   static get observers(): string[] {
@@ -292,11 +297,15 @@ export class RoutineResultEntryElement extends PolymerElement {
 
     return getRoutineFailureMessage(this.item.failedTest);
   }
+
+  getAnnouncedTextForTesting(): string {
+    return this.announcedText;
+  }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'routine-result-entry': RoutineResultEntryElement;
+    [RoutineResultEntryElement.is]: RoutineResultEntryElement;
   }
 }
 

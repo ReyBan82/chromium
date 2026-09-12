@@ -7,8 +7,9 @@
 
 #include <string>
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/frame_tree_node_id.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "storage/browser/file_system/file_system_context.h"
@@ -19,14 +20,14 @@ class StorageKey;
 
 namespace content {
 
-class RenderFrameHost;
-
 // Creates a URLLoaderFactory to serve filesystem: requests from the given
 // `file_system_context`, `storage_domain`, and `storage_key`.
 //
 // The factory is self-owned - it will delete itself once there are no more
 // receivers (including the receiver associated with the returned
-// mojo::PendingRemote and the receivers bound by the Clone method).
+// mojo::PendingRemote and the receivers bound by the Clone method). It must be
+// created on the UI thread, where the `render_process_host_id` is used to check
+// the renderer process's permissions at the start of the request.
 //
 // `render_process_host_id` is the ID of the RenderProcessHost where the
 // requests are issued.
@@ -35,9 +36,8 @@ class RenderFrameHost;
 // - For a factory created to pass to the renderer for subresource requests from
 //   the frame: that renderer process's ID.
 // - For a factory created for a browser-initiated worker main script request:
-//   the ID of the process the worker will run in.
-//   TODO(https://crbug.com/986188): We should specify kInvalidUniqueID for this
-//   worker main script case like the browser-initiated navigation case.
+//   ChildProcessHost::kInvalidUniqueID (permissions are checked later via
+//   CanCommitURL in PlzWorker).
 // - For a factory created to pass to the renderer for subresource requests from
 //   the worker: that renderer process's ID.
 //
@@ -46,12 +46,12 @@ class RenderFrameHost;
 // - For a factory created for a browser-initiated navigation request, or for a
 //   factory created for subresource requests from the frame: that frame's ID.
 // - For a factory created for workers (which don't have frames):
-//   RenderFrameHost::kNoFrameTreeNodeId.
+//   an invalid FrameTreeNodeId.
 CONTENT_EXPORT
 mojo::PendingRemote<network::mojom::URLLoaderFactory>
 CreateFileSystemURLLoaderFactory(
     int render_process_host_id,
-    int frame_tree_node_id,
+    FrameTreeNodeId frame_tree_node_id,
     scoped_refptr<storage::FileSystemContext> file_system_context,
     const std::string& storage_domain,
     const blink::StorageKey& storage_key);

@@ -30,7 +30,7 @@ class SampledEffect final : public GarbageCollected<SampledEffect> {
     return interpolations_;
   }
 
-  KeyframeEffect* Effect() const { return effect_; }
+  KeyframeEffect* Effect() const { return effect_.Get(); }
   unsigned SequenceNumber() const { return sequence_number_; }
   KeyframeEffect::Priority GetPriority() const { return priority_; }
   bool WillNeverChange() const;
@@ -40,7 +40,7 @@ class SampledEffect final : public GarbageCollected<SampledEffect> {
   void Trace(Visitor*) const;
 
  private:
-  WeakMember<KeyframeEffect> effect_;
+  Member<KeyframeEffect> effect_;
   HeapVector<Member<Interpolation>> interpolations_;
   const unsigned sequence_number_;
   KeyframeEffect::Priority priority_;

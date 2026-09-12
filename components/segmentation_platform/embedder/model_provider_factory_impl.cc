@@ -5,7 +5,6 @@
 #include "components/segmentation_platform/embedder/model_provider_factory_impl.h"
 
 #include "base/task/sequenced_task_runner.h"
-#include "components/optimization_guide/machine_learning_tflite_buildflags.h"
 #include "components/segmentation_platform/internal/execution/optimization_guide/optimization_guide_segmentation_model_provider.h"
 #include "components/segmentation_platform/public/config.h"
 #include "components/segmentation_platform/public/proto/segmentation_platform.pb.h"
@@ -22,11 +21,14 @@ class DummyModelProvider : public ModelProvider {
 
   void ExecuteModelWithInput(const ModelProvider::Request& inputs,
                              ExecutionCallback callback) override {
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
   }
 
   bool ModelAvailable() override { return false; }
 };
+
+// Global TestDefaultModelOverride instance.
+TestDefaultModelOverride* g_test_default_model_override_instance = nullptr;
 
 }  // namespace
 
@@ -53,25 +55,22 @@ ModelProviderFactoryImpl::~ModelProviderFactoryImpl() = default;
 
 std::unique_ptr<ModelProvider> ModelProviderFactoryImpl::CreateProvider(
     proto::SegmentId segment_id) {
-#if BUILDFLAG(BUILD_WITH_TFLITE_LIB)
   if (!optimization_guide_provider_) {
     // Optimization guide may not be available in some tests,
     return std::make_unique<DummyModelProvider>();
   }
   return std::make_unique<OptimizationGuideSegmentationModelProvider>(
       optimization_guide_provider_, background_task_runner_, segment_id);
-#else
-  return std::make_unique<DummyModelProvider>();
-#endif  // BUILDFLAG(BUILD_WITH_TFLITE_LIB)
 }
 
-std::unique_ptr<ModelProvider> ModelProviderFactoryImpl::CreateDefaultProvider(
-    proto::SegmentId segment_id) {
-  auto test_override =
-      TestDefaultModelOverride::GetInstance().TakeOwnershipOfModelProvider(
-          segment_id);
-  if (test_override) {
-    return test_override;
+std::unique_ptr<DefaultModelProvider>
+ModelProviderFactoryImpl::CreateDefaultProvider(proto::SegmentId segment_id) {
+  if (TestDefaultModelOverride* instance =
+          TestDefaultModelOverride::GetInstance()) {
+    auto test_override = instance->TakeOwnershipOfModelProvider(segment_id);
+    if (test_override) {
+      return test_override;
+    }
   }
 
   auto it = default_models_.find(segment_id);
@@ -83,19 +82,25 @@ std::unique_ptr<ModelProvider> ModelProviderFactoryImpl::CreateDefaultProvider(
   return std::move(it->second);
 }
 
-TestDefaultModelOverride::TestDefaultModelOverride() = default;
-TestDefaultModelOverride::~TestDefaultModelOverride() = default;
-
-TestDefaultModelOverride& TestDefaultModelOverride::GetInstance() {
-  static base::NoDestructor<TestDefaultModelOverride> instance;
-  return *instance;
+TestDefaultModelOverride::TestDefaultModelOverride() {
+  CHECK(!g_test_default_model_override_instance);
+  g_test_default_model_override_instance = this;
 }
 
-std::unique_ptr<ModelProvider>
+TestDefaultModelOverride::~TestDefaultModelOverride() {
+  CHECK_EQ(g_test_default_model_override_instance, this);
+  g_test_default_model_override_instance = nullptr;
+}
+
+TestDefaultModelOverride* TestDefaultModelOverride::GetInstance() {
+  return g_test_default_model_override_instance;
+}
+
+std::unique_ptr<DefaultModelProvider>
 TestDefaultModelOverride::TakeOwnershipOfModelProvider(
     proto::SegmentId target) {
-  auto it = providers_.find(target);
-  if (it != providers_.end()) {
+  auto it = default_providers_.find(target);
+  if (it != default_providers_.end()) {
     DCHECK(it->second);
     return std::move(it->second);
   }
@@ -104,8 +109,8 @@ TestDefaultModelOverride::TakeOwnershipOfModelProvider(
 
 void TestDefaultModelOverride::SetModelForTesting(
     proto::SegmentId target,
-    std::unique_ptr<ModelProvider> provider) {
-  providers_[target] = std::move(provider);
+    std::unique_ptr<DefaultModelProvider> default_provider) {
+  default_providers_[target] = std::move(default_provider);
 }
 
 }  // namespace segmentation_platform

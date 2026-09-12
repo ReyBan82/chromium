@@ -1,13 +1,13 @@
 include_rules = [
+  "+components/android_autofill",
   "+components/autofill/android/java",
-  "+components/digital_asset_links/android/java",
   "+components/embedder_support/android/java",
-  "+components/embedder_support/android/metrics/java",
+  "+components/minidump_uploader/android/java",
   "+components/navigation_interception/android/java",
   "+components/policy/android/java",
   "+components/safe_browsing/android/java",
   "+components/stylus_handwriting/android/java",
-  "+components/component_updater/android/java",
+  "+components/webauthn/android",
   "+components/zoom/android/java",
 
   "-content/public/android/java",
@@ -17,4 +17,6 @@ include_rules = [
   "+media/base/android/java",
 
   "+mojo/public/java",
+
+  "+ui/accessibility/android/java",
 ]

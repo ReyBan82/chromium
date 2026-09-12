@@ -41,15 +41,13 @@ class BaseAudioContext;
 // They have different rendering mechanisms, so the AudioDestinationHandler
 // (ADH), which is a counterpart of the destination node, encapsulates a
 // different rendering backend.
-class AudioDestinationNode : public AudioNode {
+class MODULES_EXPORT AudioDestinationNode : public AudioNode {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   uint32_t maxChannelCount() const;
 
-  // Returns its own handler object instead of a generic one from
-  // AudioNode::Handler().
-  AudioDestinationHandler& GetAudioDestinationHandler() const;
+  virtual AudioDestinationHandler& GetAudioDestinationHandler() const;
 
   // InspectorHelperMixin: Note that this node belongs to BaseAudioContext,
   // so these methods are invoked by the parent context.

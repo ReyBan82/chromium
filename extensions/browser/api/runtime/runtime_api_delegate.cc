@@ -11,10 +11,16 @@ RuntimeAPIDelegate::UpdateCheckResult::UpdateCheckResult(
     const std::string& version)
     : status(status), version(version) {}
 
-bool RuntimeAPIDelegate::OpenOptionsPage(
+void RuntimeAPIDelegate::OpenOptionsPage(
     const Extension* extension,
-    content::BrowserContext* browser_context) {
-  return false;
+    content::BrowserContext* browser_context,
+    base::OnceCallback<void(bool)> callback) {
+  std::move(callback).Run(false);
+}
+
+int RuntimeAPIDelegate::GetDeveloperToolsWindowId(
+    content::WebContents* developer_tools_web_contents) {
+  return -1;
 }
 
 }  // namespace extensions

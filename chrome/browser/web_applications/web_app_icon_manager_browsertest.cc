@@ -4,17 +4,15 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/apps/app_service/app_launch_params.h"
+#include "build/build_config.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/apps/app_service/app_service_test.h"
 #include "chrome/browser/apps/app_service/browser_app_launcher.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/web_applications/test/web_app_browsertest_util.h"
 #include "chrome/browser/ui/web_applications/web_app_browser_controller.h"
-#include "chrome/browser/ui/web_applications/web_app_controller_browsertest.h"
+#include "chrome/browser/ui/web_applications/web_app_browsertest_base.h"
 #include "chrome/browser/web_applications/mojom/user_display_mode.mojom.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
 #include "chrome/browser/web_applications/web_app_command_scheduler.h"
@@ -23,6 +21,7 @@
 #include "chrome/browser/web_applications/web_app_install_utils.h"
 #include "chrome/browser/web_applications/web_app_provider.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "components/webapps/browser/install_result_code.h"
 #include "components/webapps/browser/installable/installable_metrics.h"
@@ -36,7 +35,7 @@
 
 namespace web_app {
 
-class WebAppIconManagerBrowserTest : public WebAppControllerBrowserTest {
+class WebAppIconManagerBrowserTest : public WebAppBrowserTestBase {
  public:
   WebAppIconManagerBrowserTest() = default;
   WebAppIconManagerBrowserTest(const WebAppIconManagerBrowserTest&) = delete;
@@ -45,38 +44,28 @@ class WebAppIconManagerBrowserTest : public WebAppControllerBrowserTest {
 
   ~WebAppIconManagerBrowserTest() override = default;
 
- protected:
-  net::EmbeddedTestServer* https_server() { return &https_server_; }
-
   void SetUpOnMainThread() override {
-    Profile* profile = browser()->profile();
+    Profile* profile = browser()->GetProfile();
     app_service_test_.SetUp(profile);
     web_app::test::WaitUntilReady(WebAppProvider::GetForTest(profile));
+    WebAppBrowserTestBase::SetUpOnMainThread();
   }
 
-  // WebAppControllerBrowserTest:
-  void SetUp() override {
-    https_server_.AddDefaultHandlers(GetChromeTestDataDir());
-    WebAppControllerBrowserTest::SetUp();
-  }
-
+ protected:
   apps::AppServiceTest& app_service_test() { return app_service_test_; }
 
  private:
-  net::EmbeddedTestServer https_server_;
   apps::AppServiceTest app_service_test_;
 };
 
 IN_PROC_BROWSER_TEST_F(WebAppIconManagerBrowserTest, SingleIcon) {
-  ASSERT_TRUE(https_server()->Start());
-  const GURL start_url =
-      https_server()->GetURL("/banners/manifest_test_page.html");
+  const GURL start_url = embedded_https_test_server().GetURL(
+      "/banners/no_manifest_test_page.html");
 
-  AppId app_id;
+  webapps::AppId app_id;
   {
     std::unique_ptr<WebAppInstallInfo> install_info =
-        std::make_unique<WebAppInstallInfo>();
-    install_info->start_url = start_url;
+        WebAppInstallInfo::CreateWithStartUrlForTesting(start_url);
     install_info->scope = start_url.GetWithoutFilename();
     install_info->title = u"App Name";
     install_info->user_display_mode = mojom::UserDisplayMode::kStandalone;
@@ -90,13 +79,13 @@ IN_PROC_BROWSER_TEST_F(WebAppIconManagerBrowserTest, SingleIcon) {
 
     base::RunLoop run_loop;
 
-    auto* provider = WebAppProvider::GetForTest(browser()->profile());
-    provider->scheduler().InstallFromInfo(
+    auto* provider = WebAppProvider::GetForTest(browser()->GetProfile());
+    provider->scheduler().InstallFromInfoNoIntegrationForTesting(
         std::move(install_info),
         /*overwrite_existing_manifest_fields=*/false,
         webapps::WebappInstallSource::OMNIBOX_INSTALL_ICON,
         base::BindLambdaForTesting(
-            [&app_id, &run_loop](const AppId& installed_app_id,
+            [&app_id, &run_loop](const webapps::AppId& installed_app_id,
                                  webapps::InstallResultCode code) {
               EXPECT_EQ(webapps::InstallResultCode::kSuccessNewInstall, code);
               app_id = installed_app_id;
@@ -109,15 +98,16 @@ IN_PROC_BROWSER_TEST_F(WebAppIconManagerBrowserTest, SingleIcon) {
   base::RunLoop run_loop;
   WebAppBrowserController::SetIconLoadCallbackForTesting(
       run_loop.QuitClosure());
-  Browser* app_browser = LaunchWebAppBrowser(app_id);
+  BrowserWindowInterface* app_browser = LaunchWebAppBrowser(app_id);
   run_loop.Run();
 
-  gfx::ImageSkia app_icon =
-      app_browser->app_controller()->GetWindowAppIcon().Rasterize(nullptr);
+  gfx::ImageSkia app_icon = web_app::AppBrowserController::From(app_browser)
+                                ->GetWindowAppIcon()
+                                .Rasterize(nullptr);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  gfx::ImageSkia image_skia = app_service_test().LoadAppIconBlocking(
-      apps::AppType::kWeb, app_id, kWebAppIconSmall);
+#if BUILDFLAG(IS_CHROMEOS)
+  gfx::ImageSkia image_skia =
+      app_service_test().LoadAppIconBlocking(app_id, kWebAppIconSmall);
   EXPECT_TRUE(app_service_test().AreIconImageEqual(image_skia, app_icon));
 #else
   const SkBitmap* bitmap = app_icon.bitmap();

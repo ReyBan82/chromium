@@ -27,18 +27,30 @@ class QuicChromiumClientSessionPeer {
   static void SetHostname(QuicChromiumClientSession* session,
                           const std::string& hostname);
 
-  static uint64_t GetPushedBytesCount(QuicChromiumClientSession* session);
-
-  static uint64_t GetPushedAndUnclaimedBytesCount(
-      QuicChromiumClientSession* session);
-
   static QuicChromiumClientStream* CreateOutgoingStream(
       QuicChromiumClientSession* session);
+
+  // Used exclusively for tests.
+  static void SetNumTotalStreamsForTesting(QuicChromiumClientSession* session,
+                                           size_t num_total_streams);
 
   static bool GetSessionGoingAway(QuicChromiumClientSession* session);
 
   static MigrationCause GetCurrentMigrationCause(
       QuicChromiumClientSession* session);
+
+  static void DisableConnectionMigration(QuicChromiumClientSession* session);
+
+  static void SetDefaultNetwork(QuicChromiumClientSession* session,
+                                handles::NetworkHandle network);
+
+  static bool IsMigrateBackToDefaultNetworkTimerRunning(
+      QuicChromiumClientSession* session);
+
+  static void OnCryptoHandshakeComplete(QuicChromiumClientSession* session);
+
+  static void SetEchConfigList(QuicChromiumClientSession* session,
+                               std::vector<uint8_t> ech_config_list);
 };
 
 }  // namespace test

@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/prefs/scoped_user_pref_update.h"
+
 #include "components/prefs/mock_pref_change_callback.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/prefs/pref_registry_simple.h"
-#include "components/prefs/scoped_user_pref_update.h"
 #include "components/prefs/testing_pref_service.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -70,18 +71,17 @@ TEST_F(ScopedUserPrefUpdateTest, ScopedDictPrefUpdateRegularUse) {
 }
 
 TEST_F(ScopedUserPrefUpdateTest, ScopedDictPrefUpdateNeverTouchAnything) {
-  const base::Value::Dict& old_value = prefs_.GetDict(kDictPref);
+  const base::DictValue& old_value = prefs_.GetDict(kDictPref);
   EXPECT_CALL(dict_observer_, OnPreferenceChanged(_)).Times(0);
   { ScopedDictPrefUpdate update(&prefs_, kDictPref); }
-  const base::Value::Dict& new_value = prefs_.GetDict(kDictPref);
+  const base::DictValue& new_value = prefs_.GetDict(kDictPref);
   EXPECT_EQ(old_value, new_value);
   Mock::VerifyAndClearExpectations(&dict_observer_);
 }
 
 TEST_F(ScopedUserPrefUpdateTest, ScopedDictPrefUpdateWithDefaults) {
-  base::Value::Dict defaults;
-  defaults.Set("firstkey", "value");
-  defaults.Set("secondkey", "value");
+  auto defaults =
+      base::DictValue().Set("firstkey", "value").Set("secondkey", "value");
 
   std::string pref_name = "mypref";
   prefs_.registry()->RegisterDictionaryPref(pref_name, std::move(defaults));
@@ -118,16 +118,16 @@ TEST_F(ScopedUserPrefUpdateTest, ScopedListPrefUpdateRegularUse) {
 }
 
 TEST_F(ScopedUserPrefUpdateTest, ScopedListPrefUpdateNeverTouchAnything) {
-  const base::Value::List& old_value = prefs_.GetList(kListPref);
+  const base::ListValue& old_value = prefs_.GetList(kListPref);
   EXPECT_CALL(dict_observer_, OnPreferenceChanged(_)).Times(0);
   { ScopedListPrefUpdate update(&prefs_, kListPref); }
-  const base::Value::List& new_value = prefs_.GetList(kListPref);
+  const base::ListValue& new_value = prefs_.GetList(kListPref);
   EXPECT_EQ(old_value, new_value);
   Mock::VerifyAndClearExpectations(&dict_observer_);
 }
 
 TEST_F(ScopedUserPrefUpdateTest, ScopedListPrefUpdateWithDefaults) {
-  base::Value::List defaults;
+  base::ListValue defaults;
   defaults.Append("firstvalue");
   defaults.Append("secondvalue");
 
@@ -138,4 +138,19 @@ TEST_F(ScopedUserPrefUpdateTest, ScopedListPrefUpdateWithDefaults) {
   ScopedListPrefUpdate update(&prefs_, pref_name);
   update->Append("thirdvalue");
   EXPECT_EQ(3u, prefs_.GetList(pref_name).size());
+}
+
+TEST_F(ScopedUserPrefUpdateTest, ScopedDictPrefUpdateClearsPrefOnNotify) {
+  // Set up a callback to clear the pref in the pref-changed notification. This
+  // should not result in a dangling pointer within ScopedUserPrefUpdate.
+  EXPECT_CALL(dict_observer_, OnPreferenceChanged(std::string(kDictPref)))
+      .WillOnce([this](const std::string& pref_name) {
+        prefs_.ClearPref(pref_name);
+      })
+      .WillRepeatedly(testing::Return());
+
+  {
+    ScopedDictPrefUpdate update(&prefs_, kDictPref);
+    update->Set(kKey, kValue);
+  }
 }

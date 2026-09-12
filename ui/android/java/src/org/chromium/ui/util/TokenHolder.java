@@ -4,20 +4,25 @@
 
 package org.chromium.ui.util;
 
-import java.util.HashSet;
+import android.util.ArraySet;
+
+import org.chromium.build.annotations.NullMarked;
+
 import java.util.Set;
 
 /**
  * Helper class for holding tokens, useful when multiple entities need to manipulate the same
  * boolean state, e.g. visibility of a view.
  */
+@NullMarked
 public class TokenHolder {
     /** An invalid token; this can be used to indicate no token is being held. */
     public static final int INVALID_TOKEN = -1;
 
     private int mNextToken;
 
-    private final Set<Integer> mAcquiredTokens = new HashSet<>();
+    // Normally there should not be very many tokens so an ArraySet should be fine.
+    private final Set<Integer> mAcquiredTokens = new ArraySet<>();
     private final Runnable mCallback;
 
     /**

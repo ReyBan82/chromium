@@ -10,9 +10,14 @@
 #include <algorithm>
 #include <memory>
 
+#include "ash/constants/ash_pref_names.h"
+#include "ash/constants/ash_switches.h"
+#include "base/check.h"
+#include "base/check_deref.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/power_monitor/power_monitor.h"
 #include "base/power_monitor/power_observer.h"
 #include "base/rand_util.h"
@@ -20,11 +25,19 @@
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "chromeos/ash/components/geolocation/geoposition.h"
-#include "chromeos/ash/components/geolocation/simple_geolocation_provider.h"
+#include "chromeos/ash/components/geolocation/system_location_provider.h"
+#include "chromeos/ash/components/settings/timezone_settings.h"
 #include "chromeos/ash/components/timezone/timezone_provider.h"
+#include "chromeos/ash/components/timezone/timezone_request.h"
+#include "chromeos/ash/components/timezone/timezone_util.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
+#include "components/session_manager/core/session.h"
+#include "components/session_manager/core/session_manager.h"
+#include "components/user_manager/user.h"
+#include "components/user_manager/user_manager.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 
 namespace ash {
 
@@ -105,8 +118,8 @@ class TimeZoneResolver::TimeZoneResolverImpl
   void CreateNewRequest();
 
   // Called by TZRequest.
-  SimpleGeolocationProvider* geolocation_provider() {
-    return &geolocation_provider_;
+  SystemLocationProvider* geolocation_provider() {
+    return resolver_->geolocation_provider_;
   }
   TimeZoneProvider* timezone_provider() { return &timezone_provider_; }
 
@@ -128,7 +141,7 @@ class TimeZoneResolver::TimeZoneResolverImpl
   bool ShouldSendCellularGeolocationData();
 
  private:
-  const TimeZoneResolver* resolver_;
+  raw_ptr<const TimeZoneResolver> resolver_;
 
   // Helper to check timezone detection policy against expected value
   bool CheckTimezoneManagementSetting(int expected_policy_value);
@@ -136,7 +149,6 @@ class TimeZoneResolver::TimeZoneResolverImpl
   // Returns delay to next timezone update request
   base::TimeDelta CalculateNextInterval();
 
-  SimpleGeolocationProvider geolocation_provider_;
   TimeZoneProvider timezone_provider_;
 
   base::OneShotTimer refresh_timer_;
@@ -167,7 +179,7 @@ class TZRequest {
   // Starts request after specified delay.
   void Start();
 
-  // Called from SimpleGeolocationProvider when location is resolved.
+  // Called from SystemLocationProvider when location is resolved.
   void OnLocationResolved(const Geoposition& position,
                           bool server_error,
                           const base::TimeDelta elapsed);
@@ -182,7 +194,7 @@ class TZRequest {
   // This is called by network detector when network is available.
   void StartRequestOnNetworkAvailable();
 
-  TimeZoneResolver::TimeZoneResolverImpl* const resolver_;
+  const raw_ptr<TimeZoneResolver::TimeZoneResolverImpl> resolver_;
 
   base::WeakPtrFactory<TZRequest> weak_ptr_factory_{this};
 };
@@ -195,7 +207,8 @@ void TZRequest::StartRequestOnNetworkAvailable() {
       base::Seconds(kRefreshTimeZoneTimeoutSeconds),
       resolver_->ShouldSendWiFiGeolocationData(),
       resolver_->ShouldSendCellularGeolocationData(),
-      base::BindOnce(&TZRequest::OnLocationResolved, AsWeakPtr()));
+      base::BindOnce(&TZRequest::OnLocationResolved, AsWeakPtr()),
+      SystemLocationProvider::ClientId::kTimezoneResolver);
 }
 
 void TZRequest::Start() {
@@ -207,9 +220,9 @@ void TZRequest::Start() {
 void TZRequest::OnLocationResolved(const Geoposition& position,
                                    bool server_error,
                                    const base::TimeDelta elapsed) {
-  base::ScopedClosureRunner on_request_finished(
-      base::BindOnce(&TimeZoneResolver::TimeZoneResolverImpl::RequestIsFinished,
-                     base::Unretained(resolver_)));
+  absl::Cleanup on_request_finished = [this] {
+    resolver_->RequestIsFinished();
+  };
 
   // Ignore invalid position.
   if (!position.Valid())
@@ -227,16 +240,16 @@ void TZRequest::OnLocationResolved(const Geoposition& position,
       position, timeout - elapsed,
       base::BindOnce(&TZRequest::OnTimezoneResolved, AsWeakPtr()));
 
-  // Prevent |on_request_finished| from firing here.
-  base::OnceClosure unused = on_request_finished.Release();
+  // `OnTimezoneResolved` is responsible for calling `RequestIsFinished()` now.
+  std::move(on_request_finished).Cancel();
 }
 
 void TZRequest::OnTimezoneResolved(
     std::unique_ptr<TimeZoneResponseData> timezone,
     bool server_error) {
-  base::ScopedClosureRunner on_request_finished(
-      base::BindOnce(&TimeZoneResolver::TimeZoneResolverImpl::RequestIsFinished,
-                     base::Unretained(resolver_)));
+  absl::Cleanup on_request_finished = [this] {
+    resolver_->RequestIsFinished();
+  };
 
   DCHECK(timezone);
   VLOG(1) << "Refreshed local timezone={" << timezone->ToStringForDebug()
@@ -262,19 +275,15 @@ base::WeakPtr<TZRequest> TZRequest::AsWeakPtr() {
 TimeZoneResolver::TimeZoneResolverImpl::TimeZoneResolverImpl(
     const TimeZoneResolver* resolver)
     : resolver_(resolver),
-      geolocation_provider_(
-          resolver->shared_url_loader_factory(),
-          SimpleGeolocationProvider::DefaultGeolocationProviderURL()),
       timezone_provider_(resolver->shared_url_loader_factory(),
                          DefaultTimezoneProviderURL()),
       requests_count_(0) {
-  DCHECK(!resolver_->apply_timezone().is_null());
   DCHECK(!resolver_->delay_network_call().is_null());
 
-  base::PowerMonitor::AddPowerSuspendObserver(this);
+  base::PowerMonitor::GetInstance()->AddPowerSuspendObserver(this);
 
   const int64_t last_refresh_at_us =
-      resolver_->local_state()->GetInt64(kLastTimeZoneRefreshTime);
+      resolver_->local_state().GetInt64(kLastTimeZoneRefreshTime);
   const base::Time last_refresh_at = base::Time::FromDeltaSinceWindowsEpoch(
       base::Microseconds(last_refresh_at_us));
   const base::Time next_refresh_not_before =
@@ -287,7 +296,7 @@ TimeZoneResolver::TimeZoneResolverImpl::TimeZoneResolverImpl(
 }
 
 TimeZoneResolver::TimeZoneResolverImpl::~TimeZoneResolverImpl() {
-  base::PowerMonitor::RemovePowerSuspendObserver(this);
+  base::PowerMonitor::GetInstance()->RemovePowerSuspendObserver(this);
 }
 
 void TimeZoneResolver::TimeZoneResolverImpl::Start() {
@@ -356,7 +365,7 @@ void TimeZoneResolver::TimeZoneResolverImpl::CreateNewRequest() {
 }
 
 void TimeZoneResolver::TimeZoneResolverImpl::RecordAttempt() {
-  resolver_->local_state()->SetInt64(
+  resolver_->local_state().SetInt64(
       kLastTimeZoneRefreshTime,
       base::Time::Now().ToDeltaSinceWindowsEpoch().InMicroseconds());
   ++requests_count_;
@@ -369,7 +378,51 @@ void TimeZoneResolver::TimeZoneResolverImpl::RequestIsFinished() {
 
 void TimeZoneResolver::TimeZoneResolverImpl::ApplyTimeZone(
     const TimeZoneResponseData* timezone) {
-  resolver_->apply_timezone().Run(timezone);
+  if (!resolver_->ShouldApplyResolvedTimezone()) {
+    return;
+  }
+
+  if (timezone->timeZoneId.empty()) {
+    return;
+  }
+
+  VLOG(1) << "Refresh TimeZone: setting timezone to '" << timezone->timeZoneId
+          << "'";
+
+  if (switches::IsPerUserTimezoneEnabled()) {
+    auto* primary_session =
+        session_manager::SessionManager::Get()->GetPrimarySession();
+
+    if (primary_session) {
+      user_manager::User* primary_user =
+          user_manager::UserManager::Get()->FindUserAndModify(
+              primary_session->account_id());
+      CHECK(primary_user);
+
+      // `profile_prefs` can be NULL only if user has logged in, but profile has
+      // not been initialized yet. Ignore delayed time zone update until user
+      // preferences are initialized.
+      PrefService* profile_prefs = primary_user->GetProfilePrefs();
+      if (!profile_prefs) {
+        return;
+      }
+
+      profile_prefs->SetString(ash::prefs::kUserTimezone, timezone->timeZoneId);
+      // For non-enterprise device, `Preferences::ApplyPreferences()`
+      // will automatically change system timezone because user is primary.
+      // But it may not happen for enterprise device, as policy may prevent
+      // user from changing device time zone manually.
+      // That is the reason we always update system time zone here.
+      system::TimezoneSettings::GetInstance()->SetTimezoneFromID(
+          base::UTF8ToUTF16(timezone->timeZoneId));
+    } else {
+      system::SetSystemAndSigninScreenTimezone(resolver_->local_state(),
+                                               timezone->timeZoneId);
+    }
+  } else {
+    system::TimezoneSettings::GetInstance()->SetTimezoneFromID(
+        base::UTF8ToUTF16(timezone->timeZoneId));
+  }
 }
 
 bool TimeZoneResolver::TimeZoneResolverImpl::ShouldSendWiFiGeolocationData() {
@@ -387,27 +440,20 @@ TimeZoneResolver::TimeZoneResolverImpl::AsWeakPtr() {
 }
 
 // ------------------------------------------------------------------------
-// TimeZoneResolver::Delegate implementation
-TimeZoneResolver::Delegate::Delegate() = default;
-TimeZoneResolver::Delegate::~Delegate() = default;
-
-// ------------------------------------------------------------------------
 // TimeZoneResolver implementation
 
 TimeZoneResolver::TimeZoneResolver(
+    PrefService* local_state,
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
     Delegate* delegate,
-    scoped_refptr<network::SharedURLLoaderFactory> factory,
-    const GURL& url,
-    const ApplyTimeZoneCallback& apply_timezone,
-    const DelayNetworkCallClosure& delay_network_call,
-    PrefService* local_state)
-    : delegate_(delegate),
-      shared_url_loader_factory_(std::move(factory)),
-      url_(url),
-      apply_timezone_(apply_timezone),
-      delay_network_call_(delay_network_call),
-      local_state_(local_state) {
-  DCHECK(!apply_timezone.is_null());
+    SystemLocationProvider* geolocation_provider,
+    const DelayNetworkCallClosure& delay_network_call)
+    : local_state_(CHECK_DEREF(local_state)),
+      shared_url_loader_factory_(std::move(shared_url_loader_factory)),
+      delegate_(delegate),
+      geolocation_provider_(geolocation_provider),
+      delay_network_call_(delay_network_call) {
+  CHECK(shared_url_loader_factory_);
   DCHECK(delegate_);
 }
 
@@ -420,12 +466,18 @@ void TimeZoneResolver::Start() {
   if (!implementation_) {
     implementation_ = std::make_unique<TimeZoneResolverImpl>(this);
     implementation_->Start();
+    is_running_ = true;
   }
 }
 
 void TimeZoneResolver::Stop() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   implementation_.reset();
+  is_running_ = false;
+}
+
+bool TimeZoneResolver::IsRunning() {
+  return is_running_;
 }
 
 // static
@@ -450,6 +502,10 @@ bool TimeZoneResolver::ShouldSendWiFiGeolocationData() const {
 
 bool TimeZoneResolver::ShouldSendCellularGeolocationData() const {
   return delegate_->ShouldSendCellularGeolocationData();
+}
+
+bool TimeZoneResolver::ShouldApplyResolvedTimezone() const {
+  return delegate_->ShouldApplyResolvedTimezone();
 }
 
 scoped_refptr<network::SharedURLLoaderFactory>

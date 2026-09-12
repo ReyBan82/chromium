@@ -29,12 +29,11 @@ public class ChromeUiAutomatorTestRule extends TestWatcher {
         super.failed(e, description);
         Log.e(TAG, description.toString() + " failed", e);
         UiAutomatorUtils utils = UiAutomatorUtils.getInstance();
+        utils.dumpCrashLogs();
         utils.printWindowHierarchy("UI hierarchy when " + description.toString() + " failed");
     }
 
-    /**
-     * Creates a Bitmap from the UiAutomatorUtils (use this for RenderTest).
-     */
+    /** Creates a Bitmap from the UiAutomatorUtils (use this for RenderTest). */
     public Bitmap takeScreenshot(Context context) throws IOException {
         UiAutomatorUtils utils = UiAutomatorUtils.getInstance();
 

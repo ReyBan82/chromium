@@ -7,34 +7,39 @@
  * 'settings-manage-profile' is the settings subpage containing controls to
  * edit a profile's name, icon, and desktop shortcut.
  */
+import 'chrome://resources/cr_components/theme_color_picker/theme_color_picker.js';
+import 'chrome://resources/cr_elements/cr_icon/cr_icon.js';
 import 'chrome://resources/cr_elements/cr_input/cr_input.js';
-import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
-import 'chrome://resources/cr_elements/cr_shared_style.css.js';
-import 'chrome://resources/cr_components/customize_themes/customize_themes.js';
-import 'chrome://resources/polymer/v3_0/iron-flex-layout/iron-flex-layout-classes.js';
-import 'chrome://resources/polymer/v3_0/paper-styles/shadow.js';
-import '../settings_shared.css.js';
 import 'chrome://resources/cr_elements/cr_profile_avatar_selector/cr_profile_avatar_selector.js';
+import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
+import 'chrome://resources/cr_elements/cr_tooltip/cr_tooltip.js';
+import '../settings_page/settings_subpage.js';
 
-import {CrInputElement} from 'chrome://resources/cr_elements/cr_input/cr_input.js';
-import {AvatarIcon} from 'chrome://resources/cr_elements/cr_profile_avatar_selector/cr_profile_avatar_selector.js';
-import {WebUiListenerMixin} from 'chrome://resources/cr_elements/web_ui_listener_mixin.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import type {ProfileInfo} from '/shared/settings/people_page/profile_info_browser_proxy.js';
+import {ProfileInfoBrowserProxyImpl} from '/shared/settings/people_page/profile_info_browser_proxy.js';
+import type {CrInputElement} from 'chrome://resources/cr_elements/cr_input/cr_input.js';
+import type {AvatarIcon} from 'chrome://resources/cr_elements/cr_profile_avatar_selector/cr_profile_avatar_selector.js';
+import {WebUiListenerMixinLit} from 'chrome://resources/cr_elements/web_ui_listener_mixin_lit.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
 import {loadTimeData} from '../i18n_setup.js';
 import {routes} from '../route.js';
-import {RouteObserverMixin, Router} from '../router.js';
+import type {Route} from '../router.js';
+import {Router} from '../router.js';
+import {SettingsViewMixinLit} from '../settings_page/settings_view_mixin_lit.js';
 
-import {getTemplate} from './manage_profile.html.js';
-import {ManageProfileBrowserProxy, ManageProfileBrowserProxyImpl, ProfileShortcutStatus} from './manage_profile_browser_proxy.js';
-import {SyncStatus} from './sync_browser_proxy.js';
+import {getCss} from './manage_profile.css.js';
+import {getHtml} from './manage_profile.html.js';
+import type {ManageProfileBrowserProxy} from './manage_profile_browser_proxy.js';
+import {ManageProfileBrowserProxyImpl, ProfileShortcutStatus} from './manage_profile_browser_proxy.js';
 
 const SettingsManageProfileElementBase =
-    RouteObserverMixin(WebUiListenerMixin(PolymerElement));
+    SettingsViewMixinLit(WebUiListenerMixinLit(CrLitElement));
 
 export interface SettingsManageProfileElement {
   $: {
-    name: CrInputElement,
+    nameInput: CrInputElement,
   };
 }
 
@@ -44,51 +49,44 @@ export class SettingsManageProfileElement extends
     return 'settings-manage-profile';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
       /**
-       * The newly selected avatar. Populated only if the user manually changes
-       * the avatar selection. The observer ensures that the changes are
-       * propagated to the C++.
+       * The newly selected avatar. Defaults to null, populated only if the user
+       * manually changes the avatar selection. The observer ensures that the
+       * changes are propagated to the C++.
        */
-      profileAvatar_: {
-        type: Object,
-        observer: 'profileAvatarChanged_',
-      },
+      profileAvatar_: {type: Object},
 
       /**
        * The current profile name.
        */
-      profileName: String,
+      profileName_: {type: String},
 
       /**
        * True if the current profile has a shortcut.
        */
-      hasProfileShortcut_: Boolean,
+      hasProfileShortcut_: {type: Boolean},
 
       /**
        * The available icons for selection.
        */
-      availableIcons: {
-        type: Array,
-        value() {
-          return [];
-        },
-      },
-
-      /**
-       * The current sync status.
-       */
-      syncStatus: Object,
+      availableIcons: {type: Array},
 
       /**
        * True if the profile shortcuts feature is enabled.
        */
-      isProfileShortcutSettingVisible_: Boolean,
+      isProfileShortcutSettingVisible_: {type: Boolean},
+
+      hasEnterpriseLabel_: {type: Boolean},
 
       /**
        * TODO(dpapad): Move this back to the HTML file when the Polymer2 version
@@ -96,20 +94,18 @@ export class SettingsManageProfileElement extends
        * JS string, can't satisfy both Polymer2 and Polymer3 at the same time
        * from the HTML file.
        */
-      pattern_: {
-        type: String,
-        value: '.*\\S.*',
-      },
+      pattern_: {type: String},
     };
   }
 
-  private profileAvatar_: AvatarIcon;
-  profileName: string;
-  private hasProfileShortcut_: boolean;
-  availableIcons: AvatarIcon[];
-  syncStatus: SyncStatus|null;
-  private isProfileShortcutSettingVisible_: boolean;
-  private pattern_: string;
+  protected accessor profileAvatar_: AvatarIcon|null = null;
+  protected accessor profileName_: string = '';
+  protected accessor hasProfileShortcut_: boolean = false;
+  accessor availableIcons: AvatarIcon[] = [];
+  protected accessor isProfileShortcutSettingVisible_: boolean = false;
+  protected accessor hasEnterpriseLabel_: boolean =
+      loadTimeData.getBoolean('hasEnterpriseLabel');
+  protected accessor pattern_: string = '.*\\S.*';
   private browserProxy_: ManageProfileBrowserProxy =
       ManageProfileBrowserProxyImpl.getInstance();
 
@@ -122,15 +118,19 @@ export class SettingsManageProfileElement extends
 
     this.addWebUiListener('available-icons-changed', setIcons);
     this.browserProxy_.getAvailableIcons().then(setIcons);
+
+    ProfileInfoBrowserProxyImpl.getInstance().getProfileInfo().then(
+        this.onProfileInfoChanged_.bind(this));
+    this.addWebUiListener(
+        'profile-info-changed', this.onProfileInfoChanged_.bind(this));
   }
 
-  override currentRouteChanged() {
+  override currentRouteChanged(newRoute: Route, oldRoute?: Route) {
+    super.currentRouteChanged(newRoute, oldRoute);
+
     if (Router.getInstance().getCurrentRoute() === routes.MANAGE_PROFILE) {
-      if (this.profileName) {
-        const profileNameInput = this.$.name;
-        if (profileNameInput) {
-          profileNameInput.value = this.profileName;
-        }
+      if (this.profileName_) {
+        this.$.nameInput.value = this.profileName_;
       }
       if (loadTimeData.getBoolean('profileShortcutsEnabled')) {
         this.browserProxy_.getProfileShortcutStatus().then(status => {
@@ -148,10 +148,24 @@ export class SettingsManageProfileElement extends
     }
   }
 
+  override willUpdate(changedProperties: PropertyValues<this>) {
+    super.willUpdate(changedProperties);
+
+    const changedPrivateProperties =
+        changedProperties as Map<PropertyKey, unknown>;
+    if (changedPrivateProperties.has('profileAvatar_')) {
+      this.profileAvatarChanged_();
+    }
+  }
+
+  private onProfileInfoChanged_(info: ProfileInfo) {
+    this.profileName_ = info.name;
+  }
+
   /**
    * Handler for when the profile name field is changed, then blurred.
    */
-  private onProfileNameChanged_(event: Event) {
+  protected onNameInputChange_(event: Event) {
     const target = event.target as CrInputElement;
     if (target.invalid) {
       return;
@@ -163,10 +177,10 @@ export class SettingsManageProfileElement extends
   /**
    * Handler for profile name keydowns.
    */
-  private onProfileNameKeydown_(event: KeyboardEvent) {
+  protected onNameInputKeydown_(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       const target = event.target as CrInputElement;
-      target.value = this.profileName;
+      target.value = this.profileName_;
       target.blur();
     }
   }
@@ -175,6 +189,10 @@ export class SettingsManageProfileElement extends
    * Handler for when the profile avatar is changed by the user.
    */
   private profileAvatarChanged_() {
+    if (this.profileAvatar_ === null) {
+      return;
+    }
+
     if (this.profileAvatar_.isGaiaAvatar) {
       this.browserProxy_.setProfileIconToGaiaAvatar();
     } else {
@@ -183,22 +201,25 @@ export class SettingsManageProfileElement extends
     }
   }
 
-  /**
-   * @return Whether the profile name field is disabled.
-   */
-  private isProfileNameDisabled_(syncStatus: SyncStatus): boolean {
-    return !!syncStatus.supervisedUser && !syncStatus.childUser;
+  protected onSelectedAvatarChanged_(e: CustomEvent<{value: AvatarIcon}>) {
+    this.profileAvatar_ = e.detail.value;
   }
 
   /**
    * Handler for when the profile shortcut toggle is changed.
    */
-  private onHasProfileShortcutChange_() {
+  protected onHasProfileShortcutChange_(event: CustomEvent<boolean>) {
+    this.hasProfileShortcut_ = event.detail;
     if (this.hasProfileShortcut_) {
       this.browserProxy_.addProfileShortcut();
     } else {
       this.browserProxy_.removeProfileShortcut();
     }
+  }
+
+  // SettingsViewMixin implementation.
+  override focusBackButton() {
+    this.shadowRoot.querySelector('settings-subpage')!.focusBackButton();
   }
 }
 

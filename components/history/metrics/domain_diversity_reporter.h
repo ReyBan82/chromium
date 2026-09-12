@@ -9,6 +9,7 @@
 #include "base/scoped_observation.h"
 #include "base/sequence_checker.h"
 #include "base/time/clock.h"
+#include "base/timer/wall_clock_timer.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/history_service_observer.h"
 
@@ -42,11 +43,18 @@ class DomainDiversityReporter : public KeyedService,
 
   // Computes the domain diversity metric and emits histogram through callback,
   // and schedules another domain metric computation task for 24 hours later.
-  void ComputeDomainMetrics();
+  // If `v4_metrics` is true, then this instantiation will output the v4
+  // metrics, else the older v3 metrics.
+  void ComputeDomainMetrics(bool v4_metrics);
 
   // Callback to emit histograms for domain metrics.
   void ReportDomainMetrics(base::Time time_current_report_triggered,
                            history::DomainDiversityResults result);
+
+  // Like ReportDomainMetrics, but for the V4 version which runs on a separate
+  // timer from V3.
+  void ReportDomainMetricsV4(base::Time time_current_report_triggered,
+                             history::DomainDiversityResults result);
 
   // HistoryServiceObserver:
   void OnHistoryServiceLoaded(
@@ -61,6 +69,7 @@ class DomainDiversityReporter : public KeyedService,
   raw_ptr<history::HistoryService> history_service_;
   raw_ptr<PrefService> prefs_;
   raw_ptr<base::Clock> clock_;
+  base::WallClockTimer wall_timer_;
 
   base::ScopedObservation<history::HistoryService,
                           history::HistoryServiceObserver>

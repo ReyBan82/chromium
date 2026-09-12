@@ -8,6 +8,7 @@
 #include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
+#include "components/contextual_tasks/public/features.h"
 #include "components/dom_distiller/core/url_constants.h"
 #include "components/dom_distiller/core/url_utils.h"
 #include "components/omnibox/browser/location_bar_model_delegate.h"
@@ -17,8 +18,10 @@
 #include "components/search_engines/template_url_service.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/favicon_size.h"
+#include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "url/gurl.h"
 #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
@@ -28,7 +31,6 @@
 
 using metrics::OmniboxEventProto;
 using testing::_;
-using testing::Invoke;
 using testing::Return;
 using testing::WithArg;
 
@@ -45,6 +47,12 @@ class TestLocationBarModelDelegate : public LocationBarModelDelegate {
   }
   void SetVisibleSecurityStateConnectionInfoUninitialized() {
     connection_info_initialized_ = false;
+  }
+  void SetIsContextualTasksPage(bool is_contextual_tasks_page) {
+    is_contextual_tasks_page_ = is_contextual_tasks_page;
+  }
+  void SetContextualTasksInnerFrameURL(const GURL& url) {
+    contextual_tasks_inner_frame_url_ = url;
   }
 
   // LocationBarModelDelegate:
@@ -87,12 +95,22 @@ class TestLocationBarModelDelegate : public LocationBarModelDelegate {
     return omnibox_client_.GetTemplateURLService();
   }
 
+  bool IsContextualTasksPage() const override {
+    return is_contextual_tasks_page_;
+  }
+
+  GURL GetContextualTasksInnerFrameURL() const override {
+    return contextual_tasks_inner_frame_url_;
+  }
+
  private:
   GURL url_;
-  security_state::SecurityLevel security_level_;
+  security_state::SecurityLevel security_level_ = security_state::NONE;
   TestOmniboxClient omnibox_client_;
   bool should_prevent_elision_ = false;
   bool connection_info_initialized_ = true;
+  bool is_contextual_tasks_page_ = false;
+  GURL contextual_tasks_inner_frame_url_;
 };
 
 class MockLocationBarModelDelegate
@@ -114,8 +132,11 @@ class LocationBarModelImplTest : public testing::Test {
 
   LocationBarModelImpl* model() { return &model_; }
 
+  base::test::ScopedFeatureList* feature_list() { return &feature_list_; }
+
  private:
   base::test::TaskEnvironment task_environment_;
+  base::test::ScopedFeatureList feature_list_;
   TestLocationBarModelDelegate delegate_;
   LocationBarModelImpl model_;
 };
@@ -140,7 +161,7 @@ TEST_F(LocationBarModelImplTest, FormatsReaderModeUrls) {
       dom_distiller::kDomDistillerScheme, http_url, "title");
   // Ensure the test is set up properly by checking the reader mode URL has
   // the reader mode scheme.
-  EXPECT_EQ(dom_distiller::kDomDistillerScheme, distilled.scheme());
+  EXPECT_EQ(dom_distiller::kDomDistillerScheme, distilled.GetScheme());
   delegate()->SetURL(distilled);
 
   // The user should see the same URL seen for the original article.
@@ -170,7 +191,7 @@ TEST_F(LocationBarModelImplTest, FormatsReaderModeUrls) {
             model()->GetFormattedFullURL());
 }
 
-// TODO(https://crbug.com/1010418): Fix flakes on linux_chromium_asan_rel_ng and
+// TODO(crbug.com/40651107): Fix flakes on linux_chromium_asan_rel_ng and
 // re-enable this test.
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_PreventElisionWorks DISABLED_PreventElisionWorks
@@ -195,9 +216,11 @@ TEST_F(LocationBarModelImplTest, MAYBE_PreventElisionWorks) {
 TEST_F(LocationBarModelImplTest, GetVectorIcon) {
   delegate()->SetSecurityLevel(security_state::SecurityLevel::WARNING);
 
-  gfx::ImageSkia expected_icon =
-      gfx::CreateVectorIcon(vector_icons::kNotSecureWarningIcon,
-                            gfx::kFaviconSize, gfx::kPlaceholderColor);
+  gfx::ImageSkia expected_icon = gfx::CreateVectorIcon(
+      features::IsRoundedIconsEnabled()
+          ? vector_icons::kWarningIcon
+          : vector_icons::kNotSecureWarningChromeRefreshOldIcon,
+      gfx::kFaviconSize, gfx::kPlaceholderColor);
 
   gfx::ImageSkia icon = gfx::CreateVectorIcon(
       model()->GetVectorIcon(), gfx::kFaviconSize, gfx::kPlaceholderColor);
@@ -226,107 +249,115 @@ TEST_F(LocationBarModelImplTest, GetPageClassification) {
   EXPECT_CALL(delegate, GetURL(_)).WillRepeatedly(Return(false));
 
   // Verify the page classification for prefetch and non-prefetch requests.
+  EXPECT_EQ(OmniboxEventProto::OTHER, model.GetPageClassification());
   EXPECT_EQ(OmniboxEventProto::OTHER,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX));
-  EXPECT_EQ(OmniboxEventProto::OTHER,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX));
-  EXPECT_EQ(OmniboxEventProto::OTHER,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX,
-                                        /*is_prefetch=*/true));
-  EXPECT_EQ(OmniboxEventProto::OTHER,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX,
-                                        /*is_prefetch=*/true));
+            model.GetPageClassification(/*is_prefetch=*/true));
 
   // Simulate the page URL is being empty.
   EXPECT_CALL(delegate, GetURL(_)).WillRepeatedly(Return(true));
 
   // Verify the page classification for prefetch and non-prefetch requests.
+  EXPECT_EQ(OmniboxEventProto::INVALID_SPEC, model.GetPageClassification());
   EXPECT_EQ(OmniboxEventProto::INVALID_SPEC,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX));
-  EXPECT_EQ(OmniboxEventProto::INVALID_SPEC,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX));
-  EXPECT_EQ(OmniboxEventProto::INVALID_SPEC,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX,
-                                        /*is_prefetch=*/true));
-  EXPECT_EQ(OmniboxEventProto::INVALID_SPEC,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX,
-                                        /*is_prefetch=*/true));
+            model.GetPageClassification(/*is_prefetch=*/true));
 
   // Simulate the page being the 1P NTP.
-  EXPECT_CALL(delegate, GetURL(_))
-      .WillRepeatedly(WithArg<0>(Invoke([](GURL* url) {
-        *url = GURL("https://foobar.com");
-        return url->is_valid();
-      })));
+  EXPECT_CALL(delegate, GetURL(_)).WillRepeatedly(WithArg<0>([](GURL* url) {
+    *url = GURL("https://foobar.com");
+    return url->is_valid();
+  }));
   EXPECT_CALL(delegate, IsNewTabPage()).WillRepeatedly(Return(true));
 
   // Verify the page classification for prefetch and non-prefetch requests.
   EXPECT_EQ(OmniboxEventProto::INSTANT_NTP_WITH_OMNIBOX_AS_STARTING_FOCUS,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX));
-  EXPECT_EQ(OmniboxEventProto::INSTANT_NTP_WITH_FAKEBOX_AS_STARTING_FOCUS,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX));
+            model.GetPageClassification());
   EXPECT_EQ(OmniboxEventProto::NTP_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX,
-                                        /*is_prefetch=*/true));
-  EXPECT_EQ(OmniboxEventProto::NTP_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX,
-                                        /*is_prefetch=*/true));
+            model.GetPageClassification(/*is_prefetch=*/true));
 
   // Simulate the page URL being chrome://newtab/.
   EXPECT_CALL(delegate, IsNewTabPage()).WillRepeatedly(Return(false));
   EXPECT_CALL(delegate, IsNewTabPageURL(_)).WillRepeatedly(Return(true));
 
   // Verify the page classification for prefetch and non-prefetch requests.
-  EXPECT_EQ(OmniboxEventProto::NTP,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX));
-  EXPECT_EQ(OmniboxEventProto::NTP,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX));
-  EXPECT_EQ(OmniboxEventProto::NTP_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX,
-                                        /*is_prefetch=*/true));
-  EXPECT_EQ(OmniboxEventProto::NTP_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX,
-                                        /*is_prefetch=*/true));
+  EXPECT_EQ(OmniboxEventProto::INSTANT_NTP_WITH_OMNIBOX_AS_STARTING_FOCUS,
+            model.GetPageClassification());
+  EXPECT_EQ(OmniboxEventProto::NTP_ZPS_PREFETCH, model.GetPageClassification(
+                                                     /*is_prefetch=*/true));
 
   // Simulate the page URL being successfully retrieved, and is the SRP.
   EXPECT_CALL(delegate, GetURL(_))
-      .WillRepeatedly(WithArg<0>(Invoke([&delegate](GURL* url) {
+      .WillRepeatedly(WithArg<0>([&delegate](GURL* url) {
         auto* turl_service = delegate.GetTemplateURLService();
         *url = turl_service->GenerateSearchURLForDefaultSearchProvider(u"foo");
         return url->is_valid();
-      })));
+      }));
   EXPECT_CALL(delegate, IsNewTabPageURL(_)).WillRepeatedly(Return(false));
 
   // Verify the page classification for prefetch and non-prefetch requests.
   EXPECT_EQ(OmniboxEventProto::SEARCH_RESULT_PAGE_NO_SEARCH_TERM_REPLACEMENT,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX));
-  EXPECT_EQ(OmniboxEventProto::SEARCH_RESULT_PAGE_NO_SEARCH_TERM_REPLACEMENT,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX));
-  EXPECT_EQ(OmniboxEventProto::SRP_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX,
-                                        /*is_prefetch=*/true));
-  EXPECT_EQ(OmniboxEventProto::SRP_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX,
-                                        /*is_prefetch=*/true));
+            model.GetPageClassification());
+  EXPECT_EQ(OmniboxEventProto::SRP_ZPS_PREFETCH, model.GetPageClassification(
+                                                     /*is_prefetch=*/true));
 
   // Simulate the page URL being successfully retrieved, and is non-empty.
-  EXPECT_CALL(delegate, GetURL(_))
-      .WillRepeatedly(WithArg<0>(Invoke([](GURL* url) {
-        *url = GURL("https://foobar.com");
-        return url->is_valid();
-      })));
+  EXPECT_CALL(delegate, GetURL(_)).WillRepeatedly(WithArg<0>([](GURL* url) {
+    *url = GURL("https://foobar.com");
+    return url->is_valid();
+  }));
 
   // Verify the page classification for prefetch and non-prefetch requests.
-  EXPECT_EQ(OmniboxEventProto::OTHER,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX));
-  EXPECT_EQ(OmniboxEventProto::OTHER,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX));
-  EXPECT_EQ(OmniboxEventProto::OTHER_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::OMNIBOX,
-                                        /*is_prefetch=*/true));
-  EXPECT_EQ(OmniboxEventProto::OTHER_ZPS_PREFETCH,
-            model.GetPageClassification(OmniboxFocusSource::FAKEBOX,
-                                        /*is_prefetch=*/true));
+  EXPECT_EQ(OmniboxEventProto::OTHER, model.GetPageClassification());
+  EXPECT_EQ(OmniboxEventProto::OTHER_ZPS_PREFETCH, model.GetPageClassification(
+                                                       /*is_prefetch=*/true));
+}
+
+class LocationBarModelImplContextualTasksUrlTest
+    : public LocationBarModelImplTest {
+ public:
+  void SetUp() override {
+    LocationBarModelImplTest::SetUp();
+    delegate()->SetIsContextualTasksPage(true);
+    delegate()->SetContextualTasksInnerFrameURL(
+        GURL("https://www.google.com/search?q=hello+world"));
+  }
+};
+
+TEST_F(LocationBarModelImplContextualTasksUrlTest, DefaultDisplayUrl) {
+  feature_list()->InitAndEnableFeature(contextual_tasks::kContextualTasks);
+  EXPECT_EQ(u"chrome://google.com/search?q=hello+world",
+            model()->GetURLForDisplay());
+}
+
+TEST_F(LocationBarModelImplContextualTasksUrlTest, CustomScheme) {
+  feature_list()->InitAndEnableFeatureWithParameters(
+      contextual_tasks::kContextualTasks,
+      {{"ContextualTasksDisplayUrlScheme", "test"}});
+  EXPECT_EQ(u"test://google.com/search?q=hello+world",
+            model()->GetURLForDisplay());
+}
+
+TEST_F(LocationBarModelImplContextualTasksUrlTest, CustomHost) {
+  feature_list()->InitAndEnableFeatureWithParameters(
+      contextual_tasks::kContextualTasks,
+      {{"ContextualTasksDisplayUrlHost", "test"}});
+  EXPECT_EQ(u"chrome://test/search?q=hello+world", model()->GetURLForDisplay());
+}
+
+TEST_F(LocationBarModelImplContextualTasksUrlTest, CustomPath) {
+  feature_list()->InitAndEnableFeatureWithParameters(
+      contextual_tasks::kContextualTasks,
+      {{"ContextualTasksDisplayUrlPath", "/test"}});
+  EXPECT_EQ(u"chrome://google.com/test?q=hello+world",
+            model()->GetURLForDisplay());
+}
+
+TEST_F(LocationBarModelImplContextualTasksUrlTest, CustomSchemeHostPath) {
+  feature_list()->InitAndEnableFeatureWithParameters(
+      contextual_tasks::kContextualTasks,
+      {{"ContextualTasksDisplayUrlScheme", "test"},
+       {"ContextualTasksDisplayUrlHost", "foo"},
+       {"ContextualTasksDisplayUrlPath", "/bar"}});
+  EXPECT_EQ(u"test://foo/bar?q=hello+world", model()->GetURLForDisplay());
 }
 
 }  // namespace

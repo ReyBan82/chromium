@@ -2,30 +2,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/installer/setup/brand_behaviors.h"
-
 #include <windows.h>
 
 #include <shellapi.h>
+
 #include <memory>
+#include <string_view>
 
 #include "base/files/file_path.h"
 #include "base/json/json_file_value_serializer.h"
 #include "base/logging.h"
-#include "base/path_service.h"
-#include "base/strings/string_piece.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/strcat.h"
+#include "base/strings/strcat_win.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "base/version.h"
 #include "base/win/registry.h"
 #include "base/win/windows_version.h"
-#include "base/win/wmi.h"
 #include "chrome/common/chrome_paths_internal.h"
 #include "chrome/install_static/install_util.h"
+#include "chrome/installer/setup/brand_behaviors.h"
 #include "chrome/installer/util/google_update_constants.h"
 #include "chrome/installer/util/google_update_settings.h"
-#include "chrome/installer/util/install_util.h"
 #include "components/metrics/metrics_pref_names.h"
 #include "third_party/crashpad/crashpad/client/crash_report_database.h"
 #include "third_party/crashpad/crashpad/client/settings.h"
@@ -35,43 +34,25 @@ namespace installer {
 
 namespace {
 
-constexpr base::WStringPiece kUninstallSurveyUrl(
+constexpr std::wstring_view kUninstallSurveyUrl(
     L"https://support.google.com/chrome?p=chrome_uninstall_survey");
 
-bool NavigateToUrlWithEdge(const std::wstring& url) {
-  std::wstring protocol_url = L"microsoft-edge:" + url;
+// Launches the url directly with the user's default handler for |url|.
+bool NavigateToUrlWithHttps(const std::wstring& url) {
   SHELLEXECUTEINFO info = {sizeof(info)};
   info.fMask = SEE_MASK_NOASYNC;
   info.lpVerb = L"open";
-  info.lpFile = protocol_url.c_str();
+  info.lpFile = url.c_str();
   info.nShow = SW_SHOWNORMAL;
   if (::ShellExecuteEx(&info))
     return true;
-  PLOG(ERROR) << "Failed to launch Edge for uninstall survey";
+  PLOG(ERROR) << "Failed to launch default browser for uninstall survey";
   return false;
-}
-
-void NavigateToUrlWithIExplore(const std::wstring& url) {
-  base::FilePath iexplore;
-  if (!base::PathService::Get(base::DIR_PROGRAM_FILES, &iexplore))
-    return;
-
-  iexplore = iexplore.AppendASCII("Internet Explorer");
-  iexplore = iexplore.AppendASCII("iexplore.exe");
-
-  std::wstring command = L"\"" + iexplore.value() + L"\" " + url;
-
-  int pid = 0;
-  // The reason we use WMI to launch the process is because the uninstall
-  // process runs inside a Job object controlled by the shell. As long as there
-  // are processes running, the shell will not close the uninstall applet. WMI
-  // allows us to escape from the Job object so the applet will close.
-  base::win::WmiLaunchProcess(command, &pid);
 }
 
 // Returns true if the prefs dictionary located at |local_data_path| contains
 // an enabled metrics pref.
-// Note: Due to crbug.com/1052816, it is possible a subset of users may return
+// Note: Due to crbug.com/40674549, it is possible a subset of users may return
 // false here even though they send UMA, as UMA can also check the registry.
 bool IsMetricsEnabled(const base::FilePath& file_path) {
   JSONFileValueDeserializer json_deserializer(file_path);
@@ -82,7 +63,7 @@ bool IsMetricsEnabled(const base::FilePath& file_path) {
   if (!root || !root->is_dict())
     return false;
 
-  const absl::optional<bool> value = root->GetDict().FindBoolByDottedPath(
+  const std::optional<bool> value = root->GetDict().FindBoolByDottedPath(
       metrics::prefs::kMetricsReportingEnabled);
 
   return value.value_or(false);
@@ -90,18 +71,8 @@ bool IsMetricsEnabled(const base::FilePath& file_path) {
 
 }  // namespace
 
-// If |archive_type| is INCREMENTAL_ARCHIVE_TYPE and |install_status| does not
-// indicate a successful update, "-full" is appended to Chrome's "ap" value in
-// its ClientState key if it is not present, resulting in the full installer
-// being returned from the next update check. If |archive_type| is
-// FULL_ARCHIVE_TYPE or |install_status| indicates a successful update, "-full"
-// is removed from the "ap" value. "-stage:*" values are
-// unconditionally removed from the "ap" value.
-void UpdateInstallStatus(installer::ArchiveType archive_type,
-                         installer::InstallStatus install_status) {
-  GoogleUpdateSettings::UpdateInstallStatus(
-      install_static::IsSystemInstall(), archive_type,
-      InstallUtil::GetInstallReturnCode(install_status));
+void UpdateInstallStatus() {
+  GoogleUpdateSettings::UpdateInstallStatus();
 }
 
 // Returns a string holding the following URL query parameters:
@@ -164,8 +135,8 @@ std::wstring GetDistributionData() {
   return result;
 }
 
-// Launches Edge or IE to show the uninstall survey. The following URL query
-// params are included unconditionally in the survey URL:
+// Launches the uninstall survey with the user's default HTTPS handler. The
+// following URL query params are included unconditionally in the survey URL:
 // - crversion: the version of Chrome being uninstalled
 // - os: Major.Minor.Build of the OS version
 // If the user is sending crash reports and usage statistics to Google, the
@@ -182,8 +153,9 @@ void DoPostUninstallOperations(const base::Version& version,
   const base::win::OSInfo* os_info = base::win::OSInfo::GetInstance();
   base::win::OSInfo::VersionNumber version_number = os_info->version_number();
   std::wstring os_version =
-      base::StringPrintf(L"%d.%d.%d", version_number.major,
-                         version_number.minor, version_number.build);
+      base::StrCat({base::NumberToWString(version_number.major), L".",
+                    base::NumberToWString(version_number.minor), L".",
+                    base::NumberToWString(version_number.build)});
 
   const std::wstring survey_url = std::wstring(kUninstallSurveyUrl);
 #if DCHECK_IS_ON()
@@ -193,19 +165,16 @@ void DoPostUninstallOperations(const base::Version& version,
   DCHECK_EQ(survey_url.find(L'?', pos + 1), std::wstring::npos);
   DCHECK_NE(survey_url.back(), L'&');
 #endif
-  auto url = base::StringPrintf(L"%ls&crversion=%ls&os=%ls", survey_url.c_str(),
-                                base::ASCIIToWide(version.GetString()).c_str(),
-                                os_version.c_str());
+  auto url = base::StrCat({survey_url, L"&crversion=",
+                           base::ASCIIToWide(version.GetString()), L"&os=",
+                           os_version});
 
   if (!distribution_data.empty() && IsMetricsEnabled(local_data_path)) {
     url += L"&";
     url += distribution_data;
   }
 
-  if (os_info->version() < base::win::Version::WIN10 ||
-      !NavigateToUrlWithEdge(url)) {
-    NavigateToUrlWithIExplore(url);
-  }
+  NavigateToUrlWithHttps(url);
 }
 
 }  // namespace installer

@@ -15,9 +15,9 @@ class MicGainSliderController;
 
 class MicGainSliderView : public UnifiedSliderView,
                           public CrasAudioHandler::AudioObserver {
- public:
-  METADATA_HEADER(MicGainSliderView);
+  METADATA_HEADER(MicGainSliderView, UnifiedSliderView)
 
+ public:
   explicit MicGainSliderView(MicGainSliderController* controller);
   MicGainSliderView(MicGainSliderController* controller,
                     uint64_t device_id,
@@ -45,9 +45,6 @@ class MicGainSliderView : public UnifiedSliderView,
 
   // True if the audio device this slider represents is internal.
   const bool internal_;
-
-  // View used for a11y alert when mute state changes.
-  views::View* announcement_view_ = nullptr;
 };
 
 }  // namespace ash

@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/platform/graphics/compositor_element_id.h"
@@ -30,9 +31,9 @@ class PaintArtifactCompositor;
 class CORE_EXPORT LinkHighlight final : public GarbageCollected<LinkHighlight> {
  public:
   explicit LinkHighlight(Page&);
-  virtual ~LinkHighlight();
+  ~LinkHighlight();
 
-  virtual void Trace(Visitor*) const;
+  void Trace(Visitor*) const;
 
   void ResetForPageNavigation();
 
@@ -68,7 +69,8 @@ class CORE_EXPORT LinkHighlight final : public GarbageCollected<LinkHighlight> {
 
   Member<Page> page_;
   std::unique_ptr<LinkHighlightImpl> impl_;
-  cc::AnimationHost* animation_host_ = nullptr;
+  raw_ptr<cc::AnimationHost, UnprotectedInRelease | DanglingUntriaged>
+      animation_host_ = nullptr;
   scoped_refptr<cc::AnimationTimeline> timeline_;
 };
 

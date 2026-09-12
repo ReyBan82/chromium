@@ -9,10 +9,12 @@
 
 #include "base/base_switches.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/files/platform_file.h"
 #include "base/i18n/unicodestring.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/path_service.h"
 #include "base/pickle.h"
 #include "base/posix/eintr_wrapper.h"
@@ -45,8 +47,7 @@ bool ZygoteCommunication::SendMessage(const base::Pickle& data,
       << "(sending " << fds->size() << ", max is "
       << base::UnixDomainSocket::kMaxFileDescriptors << ")";
 
-  return base::UnixDomainSocket::SendMsg(control_fd_.get(), data.data(),
-                                         data.size(),
+  return base::UnixDomainSocket::SendMsg(control_fd_.get(), data,
                                          fds ? *fds : std::vector<int>());
 }
 
@@ -76,6 +77,18 @@ ssize_t ZygoteCommunication::ReadReply(void* buf, size_t buf_len) {
   return HANDLE_EINTR(read(control_fd_.get(), buf, buf_len));
 }
 
+void ZygoteCommunication::EnsureLaunchFinished() {
+  base::AutoLock lock(control_lock_);
+  EnsureLaunchFinishedLocked();
+}
+
+void ZygoteCommunication::EnsureLaunchFinishedLocked() {
+  DCHECK(init_);
+  if (finish_launch_) {
+    pid_ = std::move(finish_launch_).Run();
+  }
+}
+
 void ZygoteCommunication::ReinitializeLogging(
     uint32_t logging_dest,
     base::PlatformFile raw_log_file_fd) {
@@ -87,6 +100,7 @@ void ZygoteCommunication::ReinitializeLogging(
   std::vector<int> fds = {raw_log_file_fd};
 
   base::AutoLock lock(control_lock_);
+  EnsureLaunchFinishedLocked();
   if (!SendMessage(pickle, &fds))
     DLOG(WARNING) << "Unable to reinitialize logging";
 }
@@ -139,24 +153,24 @@ pid_t ZygoteCommunication::ForkRequest(
   pid_t pid;
   {
     base::AutoLock lock(control_lock_);
+    EnsureLaunchFinishedLocked();
     if (!SendMessage(pickle, &fds))
       return base::kNullProcessHandle;
     peer_sock.reset();
 
     {
-      char buf[sizeof(kZygoteChildPingMessage) + 1];
+      uint8_t buf[sizeof(kZygoteChildPingMessage) + 1];
       std::vector<base::ScopedFD> recv_fds;
       base::ProcessId real_pid;
 
-      ssize_t n = base::UnixDomainSocket::RecvMsgWithPid(
-          my_sock.get(), buf, sizeof(buf), &recv_fds, &real_pid);
+      ssize_t n = base::UnixDomainSocket::RecvMsgWithPid(my_sock.get(), buf,
+                                                         &recv_fds, &real_pid);
       if (n != sizeof(kZygoteChildPingMessage) ||
-          0 != memcmp(buf, kZygoteChildPingMessage,
-                      sizeof(kZygoteChildPingMessage))) {
+          0 != UNSAFE_TODO(memcmp(buf, kZygoteChildPingMessage,
+                                  sizeof(kZygoteChildPingMessage)))) {
         // Zygote children should still be trustworthy when they're supposed to
         // ping us, so something's broken if we don't receive a valid ping.
-        LOG(ERROR) << "Did not receive ping from zygote child";
-        NOTREACHED();
+        DUMP_WILL_BE_NOTREACHED() << "Did not receive ping from zygote child";
         real_pid = -1;
       }
       my_sock.reset();
@@ -171,11 +185,11 @@ pid_t ZygoteCommunication::ForkRequest(
 
     // Read the reply, which pickles the PID and an optional UMA enumeration.
     static const unsigned kMaxReplyLength = 2048;
-    char buf[kMaxReplyLength];
+    uint8_t buf[kMaxReplyLength];
     const ssize_t len = ReadReply(buf, sizeof(buf));
 
-    base::Pickle reply_pickle(buf, len);
-    base::PickleIterator iter(reply_pickle);
+    base::PickleIterator iter = base::PickleIterator::WithData(
+        UNSAFE_TODO(base::span(buf, base::checked_cast<size_t>(len))));
     if (len <= 0 || !iter.ReadInt(&pid))
       return base::kNullProcessHandle;
 
@@ -232,8 +246,7 @@ void ZygoteCommunication::ZygoteChildDied(pid_t process) {
   DCHECK_EQ(1U, num_erased);
 }
 
-void ZygoteCommunication::Init(
-    base::OnceCallback<pid_t(base::CommandLine*, base::ScopedFD*)> launcher) {
+void ZygoteCommunication::Init(ZygoteLaunchCallback launcher) {
   CHECK(!init_);
 
   base::FilePath chrome_path;
@@ -256,14 +269,22 @@ void ZygoteCommunication::Init(
   static const char* const kForwardSwitches[] = {
       sandbox::policy::switches::kAllowSandboxDebugging,
       switches::kDisableInProcessStackTraces,
+      sandbox::policy::switches::kDisableLandlockSandbox,
       sandbox::policy::switches::kDisableSeccompFilterSandbox,
       sandbox::policy::switches::kNoSandbox,
   };
-  cmd_line.CopySwitchesFrom(browser_command_line, kForwardSwitches,
-                            std::size(kForwardSwitches));
+  cmd_line.CopySwitchesFrom(browser_command_line, kForwardSwitches);
 
-  pid_ = std::move(launcher).Run(&cmd_line, &control_fd_);
+  ZygoteLaunchCompletionCallback finish_launch =
+      std::move(launcher).Run(&cmd_line, &control_fd_);
+  {
+    base::AutoLock lock(control_lock_);
+    finish_launch_ = std::move(finish_launch);
+  }
 
+  // Waiting for the zygote to finish starting up is deferred until it is first
+  // used, so that it starts up in parallel with the browser. This command is
+  // simply queued in the socket until then.
   base::Pickle pickle;
   pickle.WriteInt(kZygoteCommandGetSandboxStatus);
   if (!SendMessage(pickle, nullptr))
@@ -283,10 +304,11 @@ base::TerminationStatus ZygoteCommunication::GetTerminationStatus(
   pickle.WriteInt(handle);
 
   static const unsigned kMaxMessageLength = 128;
-  char buf[kMaxMessageLength];
+  uint8_t buf[kMaxMessageLength];
   ssize_t len;
   {
     base::AutoLock lock(control_lock_);
+    EnsureLaunchFinishedLocked();
     if (!SendMessage(pickle, nullptr))
       LOG(ERROR) << "Failed to send GetTerminationStatus message to zygote";
     len = ReadReply(buf, sizeof(buf));
@@ -302,9 +324,9 @@ base::TerminationStatus ZygoteCommunication::GetTerminationStatus(
   } else if (len == 0) {
     LOG(WARNING) << "Socket closed prematurely.";
   } else {
-    base::Pickle read_pickle(buf, len);
+    base::PickleIterator iter = base::PickleIterator::WithData(
+        UNSAFE_TODO(base::span(buf, base::checked_cast<size_t>(len))));
     int tmp_status, tmp_exit_code;
-    base::PickleIterator iter(read_pickle);
     if (!iter.ReadInt(&tmp_status) || !iter.ReadInt(&tmp_exit_code)) {
       LOG(WARNING)
           << "Error parsing GetTerminationStatus response from zygote.";
@@ -322,6 +344,8 @@ base::TerminationStatus ZygoteCommunication::GetTerminationStatus(
 }
 
 int ZygoteCommunication::GetSandboxStatus() {
+  base::AutoLock lock(control_lock_);
+  EnsureLaunchFinishedLocked();
   if (have_read_sandbox_status_word_) {
     return sandbox_status_;
   }

@@ -6,14 +6,17 @@ package org.chromium.chrome.browser.toolbar.bottom;
 
 import android.view.View;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.toolbar.R;
 import org.chromium.ui.modelutil.PropertyKey;
 import org.chromium.ui.modelutil.PropertyModel;
 
+@NullMarked
 class BottomControlsViewBinder {
     /**
-     * A wrapper class that holds a {@link ScrollingBottomViewResourceFrameLayout}
-     * and a composited layer to be used with the {@link BottomControlsViewBinder}.
+     * A wrapper class that holds a {@link ScrollingBottomViewResourceFrameLayout} and a composited
+     * layer to be used with the {@link BottomControlsViewBinder}.
      */
     static class ViewHolder {
         /** A handle to the Android View based version of the bottom controls. */
@@ -25,7 +28,8 @@ class BottomControlsViewBinder {
         /**
          * @param bottomControlsRootView The Android View based bottom controls.
          */
-        public ViewHolder(ScrollingBottomViewResourceFrameLayout bottomControlsRootView,
+        public ViewHolder(
+                ScrollingBottomViewResourceFrameLayout bottomControlsRootView,
                 ScrollingBottomViewSceneLayer layer) {
             root = bottomControlsRootView;
             sceneLayer = layer;
@@ -33,12 +37,18 @@ class BottomControlsViewBinder {
     }
 
     static void bind(PropertyModel model, ViewHolder view, PropertyKey propertyKey) {
-        if (BottomControlsProperties.BOTTOM_CONTROLS_CONTAINER_HEIGHT_PX == propertyKey) {
-            View bottomControlsWrapper = view.root.findViewById(R.id.bottom_controls_wrapper);
-            bottomControlsWrapper.getLayoutParams().height =
-                    model.get(BottomControlsProperties.BOTTOM_CONTROLS_CONTAINER_HEIGHT_PX);
+        if (BottomControlsProperties.ANDROID_VIEW_HEIGHT_NO_PADDING == propertyKey) {
+            View bottomControlsView = view.root.findViewById(R.id.bottom_container_slot);
+            int height = model.get(BottomControlsProperties.ANDROID_VIEW_HEIGHT_NO_PADDING);
+            view.sceneLayer.setContentHeight(height);
+            if (bottomControlsView.getLayoutParams().height != height) {
+                bottomControlsView.getLayoutParams().height = height;
+                view.root.onModelTokenChange(new Object());
+            }
         } else if (BottomControlsProperties.Y_OFFSET == propertyKey) {
             view.sceneLayer.setYOffset(model.get(BottomControlsProperties.Y_OFFSET));
+        } else if (BottomControlsProperties.ANDROID_VIEW_TRANSLATE_Y == propertyKey) {
+            view.root.setTranslationY(model.get(BottomControlsProperties.ANDROID_VIEW_TRANSLATE_Y));
         } else if (BottomControlsProperties.ANDROID_VIEW_VISIBLE == propertyKey
                 || BottomControlsProperties.COMPOSITED_VIEW_VISIBLE == propertyKey) {
             final boolean showAndroidView =
@@ -51,16 +61,39 @@ class BottomControlsViewBinder {
                 view.root.getResourceAdapter().dropCachedBitmap();
             }
         } else if (BottomControlsProperties.IS_OBSCURED == propertyKey) {
-            view.root.setImportantForAccessibility(model.get(BottomControlsProperties.IS_OBSCURED)
+            view.root.setImportantForAccessibility(
+                    model.get(BottomControlsProperties.IS_OBSCURED)
                             ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
                             : View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        } else if (BottomControlsProperties.OFFSET_TAG == propertyKey) {
+            view.sceneLayer.setOffsetTag(model.get(BottomControlsProperties.OFFSET_TAG));
+        } else if (BottomControlsProperties.SHOW_SHADOW == propertyKey) {
+            boolean show = model.get(BottomControlsProperties.SHOW_SHADOW);
+            view.sceneLayer.setShowShadow(show);
+            view.root.setShowShadow(show);
+            View shadow = view.root.findViewById(R.id.bottom_container_top_shadow);
+            assert shadow != null;
+            shadow.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
+        } else if (BottomControlsProperties.BOTTOM_PADDING == propertyKey) {
+            int padding = model.get(BottomControlsProperties.BOTTOM_PADDING);
+            if (view.root.getPaddingBottom() != padding) {
+                view.root.setPadding(
+                        view.root.getPaddingLeft(),
+                        view.root.getPaddingTop(),
+                        view.root.getPaddingRight(),
+                        padding);
+                view.sceneLayer.setBottomPadding(padding);
+                view.root.onModelTokenChange(new Object());
+            }
         } else {
             assert false : "Unhandled property detected in BottomControlsViewBinder!";
         }
     }
 
-    static void bindCompositorMCP(PropertyModel model, ScrollingBottomViewSceneLayer sceneLayer,
-            PropertyKey propertyKey) {
+    static void bindCompositorMCP(
+            PropertyModel model,
+            ScrollingBottomViewSceneLayer sceneLayer,
+            @Nullable PropertyKey propertyKey) {
         assert propertyKey == null;
     }
 }

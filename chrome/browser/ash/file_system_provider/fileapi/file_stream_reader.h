@@ -9,11 +9,13 @@
 
 #include <memory>
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
+#include "base/types/expected.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/completion_repeating_callback.h"
+#include "net/base/net_errors.h"
 #include "storage/browser/file_system/file_stream_reader.h"
 #include "storage/browser/file_system/file_system_url.h"
 
@@ -21,8 +23,7 @@ namespace storage {
 class FileSystemContext;
 }  // namespace storage
 
-namespace ash {
-namespace file_system_provider {
+namespace ash::file_system_provider {
 
 struct EntryMetadata;
 
@@ -44,7 +45,7 @@ class FileStreamReader : public storage::FileStreamReader {
   int Read(net::IOBuffer* buf,
            int buf_len,
            net::CompletionOnceCallback callback) override;
-  int64_t GetLength(net::Int64CompletionOnceCallback callback) override;
+  int64_t GetLength(GetLengthCallback callback) override;
 
  private:
   // Helper class for executing operations on the provided file system. All
@@ -59,23 +60,23 @@ class FileStreamReader : public storage::FileStreamReader {
   // error.
   void OnReadCompleted(int result);
 
-  // Called when GetLength() operation is completed with either a success of an
+  // Called when GetLength() operation is completed with either a success or an
   // error.
-  void OnGetLengthCompleted(int64_t result);
+  void OnGetLengthCompleted(base::expected<int64_t, net::Error> result);
 
   // Initializes the reader by opening the file. When completed with success,
   // runs the |pending_closure|. Otherwise, calls the |error_callback|.
   void Initialize(base::OnceClosure pending_closure,
-                  net::Int64CompletionOnceCallback error_callback);
+                  GetLengthCallback error_callback);
 
   // Called when opening a file is completed with either a success or an error.
   void OnOpenFileCompleted(base::OnceClosure pending_closure,
-                           net::Int64CompletionOnceCallback error_callback,
+                           GetLengthCallback error_callback,
                            base::File::Error result);
 
   // Called when initialization is completed with either a success or an error.
   void OnInitializeCompleted(base::OnceClosure pending_closure,
-                             net::Int64CompletionOnceCallback error_callback,
+                             GetLengthCallback error_callback,
                              std::unique_ptr<EntryMetadata> metadata,
                              base::File::Error result);
 
@@ -103,7 +104,7 @@ class FileStreamReader : public storage::FileStreamReader {
   void GetLengthAfterInitialized();
 
   net::CompletionOnceCallback read_callback_;
-  net::Int64CompletionOnceCallback get_length_callback_;
+  GetLengthCallback get_length_callback_;
   storage::FileSystemURL url_;
   int64_t current_offset_;
   int64_t current_length_;
@@ -114,7 +115,6 @@ class FileStreamReader : public storage::FileStreamReader {
   base::WeakPtrFactory<FileStreamReader> weak_ptr_factory_{this};
 };
 
-}  // namespace file_system_provider
-}  // namespace ash
+}  // namespace ash::file_system_provider
 
 #endif  // CHROME_BROWSER_ASH_FILE_SYSTEM_PROVIDER_FILEAPI_FILE_STREAM_READER_H_

@@ -2,24 +2,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import logging
-import os
-import time
 from core import path_util
+
 path_util.AddAndroidPylibToPath()
-from pylib.utils import shared_preference_utils
-from telemetry.core import android_platform
-from telemetry.core import util
+from devil.android.sdk import keyevent  # pylint: disable=import-error
 from telemetry.page import shared_page_state
 from contrib.vr_benchmarks.desktop_runtimes import openxr_runtimes
 
 
-CARDBOARD_PATH = os.path.join('chrome', 'android', 'shared_preference_files',
-                              'test', 'vr_cardboard_skipdon_setupcomplete.json')
-
-
 class SharedVrPageStateFactory(shared_page_state.SharedPageState):
-  """"Factory" for picking the correct SharedVrPageState subclass.
+  """ "Factory" for picking the correct SharedVrPageState subclass.
 
   This is a hacky way to automatically change the shared page state that's used
   depending on which platform the benchmark is being run on. The
@@ -35,18 +27,21 @@ class SharedVrPageStateFactory(shared_page_state.SharedPageState):
   we're being run on, switch our class out for the correct one, and
   re-construct ourselves.
   """
+
   def __init__(self, test, finder_options, story_set, possible_browser=None):
     super(SharedVrPageStateFactory, self).__init__(
-        test, finder_options, story_set, possible_browser)
+      test, finder_options, story_set, possible_browser
+    )
 
-    if isinstance(self.platform, android_platform.AndroidPlatform):
+    if self.platform.GetOSName().lower() == 'android':
       self.__class__ = AndroidSharedVrPageState
     elif self.platform.GetOSName().lower() == 'win':
       self.__class__ = WindowsSharedVrPageState
     else:
       raise NotImplementedError(
-          'No VR SharedPageState implemented for platform %s' %
-          self.platform.GetOSName())
+        'No VR SharedPageState implemented for platform %s'
+        % self.platform.GetOSName()
+      )
     # Use self._possible_browser to avoid duplicate computation if
     # possible_browser is None.
     self.__init__(test, finder_options, story_set, self._possible_browser)
@@ -58,9 +53,11 @@ class _SharedVrPageState(shared_page_state.SharedPageState):
   Must be subclassed for each platform, since VR setup and tear down differs
   between each.
   """
+
   def __init__(self, test, finder_options, story_set, possible_browser=None):
     super(_SharedVrPageState, self).__init__(
-        test, finder_options, story_set, possible_browser)
+      test, finder_options, story_set, possible_browser
+    )
     self._story_set = story_set
 
   @property
@@ -68,7 +65,7 @@ class _SharedVrPageState(shared_page_state.SharedPageState):
     return self._finder_options.recording_wpr
 
   def ShouldNavigateToBlankPageBeforeFinishing(self):
-    # TODO(https://crbug.com/941715): Always navigate once the issue with
+    # TODO(crbug.com/41446778): Always navigate once the issue with
     # tracing metadata for the XR device process not being present when
     # navigation occurs is fixed.
     return False
@@ -84,111 +81,43 @@ class AndroidSharedVrPageState(_SharedVrPageState):
      AndroidScreenRestorationSharedState ensures that the screen is on. See
      _CycleScreen() for an explanation on the reasoning behind this.
   """
+
   def __init__(self, test, finder_options, story_set, possible_browser=None):
     super(AndroidSharedVrPageState, self).__init__(
-        test, finder_options, story_set, possible_browser)
-    if self._finder_options.remove_system_vrcore:
-      self._RemoveSystemVrCore()
-    if not self._finder_options.disable_vrcore_install:
-      self._InstallVrCore()
-    self._ConfigureVrCore(os.path.join(path_util.GetChromiumSrcDir(),
-                                       self._finder_options.shared_prefs_file))
-    self._InstallNfcApk()
-    if not self._finder_options.disable_keyboard_install:
-      self._InstallKeyboardApk()
-
-  def _RemoveSystemVrCore(self):
-    # Import done here since importing Devil on Windows breaks the Telemetry
-    # unittests.
-    from devil.android import forwarder  # pylint: disable=import-error,import-outside-toplevel
-    # Close the existing network controller since RemoveSystemPackages could
-    # potentially reboot the device, which breaks the existing port forwarding
-    # and makes it impossible to cleanly re-establish it if the network
-    # controller is still running.
-    self.platform.network_controller.Close()
-    self.platform.RemoveSystemPackages(['com.google.vr.vrcore'])
-    # Re-open the network controller, which in turn re-establishes the adb
-    # forwarding necessary for the local server to work. Since port forwarding
-    # often refuses to work for a short period after rebooting, try several
-    # times.
-    for _ in range(5):
-      try:
-        self.platform.network_controller.Open(self.wpr_mode)
-        break
-      except forwarder.HostForwarderError:
-        logging.error(
-            'Failed to open network controller, will retry after a short nap')
-        time.sleep(5)
-
-  def _InstallVrCore(self):
-    """Installs the VrCore APK."""
-    self.platform.InstallApplication(
-        os.path.join(path_util.GetChromiumSrcDir(), 'third_party',
-                     'gvr-android-sdk', 'test-apks', 'vr_services',
-                     'vr_services_current.apk'))
-
-  def _ConfigureVrCore(self, filepath):
-    """Configures VrCore using the provided settings file."""
-    settings = shared_preference_utils.ExtractSettingsFromJson(filepath)
-    for setting in settings:
-      shared_pref = self.platform.GetSharedPrefs(
-          setting['package'], setting['filename'],
-          use_encrypted_path=setting.get('supports_encrypted_path', False))
-      shared_preference_utils.ApplySharedPreferenceSetting(
-          shared_pref, setting)
-
-  def _InstallNfcApk(self):
-    """Installs the APK that allows VR tests to simulate a headset NFC scan."""
-    chromium_root = path_util.GetChromiumSrcDir()
-    # Find the most recently build APK
-    candidate_apks = []
-    for build_path in util.GetBuildDirectories(chromium_root):
-      apk_path = os.path.join(build_path, 'apks', 'VrNfcSimulator.apk')
-      if os.path.exists(apk_path):
-        last_changed = os.path.getmtime(apk_path)
-        candidate_apks.append((last_changed, apk_path))
-
-    if not candidate_apks:
-      raise RuntimeError(
-          'Could not find VrNfcSimulator.apk in a build output directory')
-    newest_apk_path = sorted(candidate_apks)[-1][1]
-    self.platform.InstallApplication(
-        os.path.join(chromium_root, newest_apk_path))
-
-  def _InstallKeyboardApk(self):
-    """Installs the VR Keyboard APK."""
-    self.platform.InstallApplication(
-        os.path.join(path_util.GetChromiumSrcDir(), 'third_party',
-                     'gvr-android-sdk', 'test-apks', 'vr_keyboard',
-                     'vr_keyboard_current.apk'))
+      test, finder_options, story_set, possible_browser
+    )
+    self._orig_doff_screen_timeout_ms = None
 
   def WillRunStory(self, story):
     super(AndroidSharedVrPageState, self).WillRunStory(story)
-    if not self._finder_options.disable_screen_reset:
-      self._CycleScreen()
-
-  def TearDownState(self):
-    super(AndroidSharedVrPageState, self).TearDownState()
-    # Re-apply Cardboard as the viewer to leave the device in a consistent
-    # state after a benchmark run
-    # TODO(bsheedy): Remove this after crbug.com/772969 is fixed
-    self._ConfigureVrCore(os.path.join(path_util.GetChromiumSrcDir(),
-                                       CARDBOARD_PATH))
-
-  def _CycleScreen(self):
-    """Cycles the screen off then on.
-
-    This is because VR test devices are set to have normal screen brightness and
-    automatically turn off after several minutes instead of the usual approach
-    of having the screen always on at minimum brightness. This is due to the
-    motion-to-photon latency test being sensitive to screen brightness, and min
-    brightness does not work well for it.
-
-    Simply using TurnScreenOn does not actually reset the timer for turning off
-    the screen, so instead cycle the screen to refresh it periodically.
-    """
-    self.platform.android_action_runner.TurnScreenOff()
+    if self.platform.android_action_runner.IsXrDevice():
+      # XR devices may keep screen off when not weared.
+      self._orig_doff_screen_timeout_ms = (
+        self.platform.android_action_runner.RunCommand(
+          'settings get system doff_screen_timeout_ms'
+        ).strip()
+      )
+      # The value should never be empty, and we don't know how to restore the
+      # empty value.
+      assert self._orig_doff_screen_timeout_ms
+      self.platform.android_action_runner.RunCommand(
+        'settings put system doff_screen_timeout_ms 0'
+      )
+      self.platform.android_action_runner.InputKeyEvent(keyevent.KEYCODE_WAKEUP)
     self.platform.android_action_runner.TurnScreenOn()
+
+  def DidRunStory(self, results):
+    super(AndroidSharedVrPageState, self).DidRunStory(results)
+    if self.platform.android_action_runner.IsXrDevice():
+      if self._orig_doff_screen_timeout_ms == 'null':
+        # This means the setting wasn't set.
+        cmd = 'settings delete system doff_screen_timeout_ms'
+      elif self._orig_doff_screen_timeout_ms:
+        cmd = (
+          'settings put system doff_screen_timeout_ms'
+          f' {self._orig_doff_screen_timeout_ms}'
+        )
+      self.platform.android_action_runner.RunCommand(cmd)
 
   def ShouldNavigateToBlankPageBeforeFinishing(self):
     # Android devices generate a lot of heat while in VR, so navigate away from
@@ -212,22 +141,24 @@ class WindowsSharedVrPageState(_SharedVrPageState):
   # to be installed, i.e. exactly how a real user would use VR. Mock runtimes
   # avoid this, but can't necessarily be implemented.
   DESKTOP_RUNTIMES = {
-      'openxr': {
-          MOCK_RUNTIME: openxr_runtimes.OpenXRRuntimeMock,
-          REAL_RUNTIME: openxr_runtimes.OpenXRRuntimeReal,
-      },
+    'openxr': {
+      MOCK_RUNTIME: openxr_runtimes.OpenXRRuntimeMock,
+      REAL_RUNTIME: openxr_runtimes.OpenXRRuntimeReal,
+    },
   }
 
   def __init__(self, test, finder_options, story_set, possible_browser):
     super(WindowsSharedVrPageState, self).__init__(
-        test, finder_options, story_set, possible_browser)
+      test, finder_options, story_set, possible_browser
+    )
 
     # Get the specific runtime implementation depending on runtime choice and
     # whether we're using the real or mock one.
     self._desktop_runtime = self.DESKTOP_RUNTIMES[
-        self._finder_options.desktop_runtime][
-            self._finder_options.use_real_runtime](
-                self._finder_options, self._possible_browser)
+      self._finder_options.desktop_runtime
+    ][self._finder_options.use_real_runtime](
+      self._finder_options, self._possible_browser
+    )
     self._desktop_runtime.Setup()
 
   def WillRunStory(self, story):

@@ -4,6 +4,9 @@
 
 #include "components/autofill/core/browser/logging/log_buffer_submitter.h"
 
+#include <optional>
+#include <utility>
+
 #include "components/autofill/core/browser/logging/log_manager.h"
 
 namespace autofill {
@@ -31,7 +34,7 @@ LogBufferSubmitter& LogBufferSubmitter::operator=(LogBufferSubmitter&& that) {
 LogBufferSubmitter::~LogBufferSubmitter() {
   if (!destruct_with_logging_ || !log_manager_)
     return;
-  absl::optional<base::Value::Dict> message = buffer_.RetrieveResult();
+  std::optional<base::DictValue> message = buffer_.RetrieveResult();
   if (!message)
     return;
   log_manager_->ProcessLog(std::move(*message), {});

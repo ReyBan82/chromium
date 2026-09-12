@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <string>
 
-#include "base/containers/contains.h"
 #include "base/feature_list.h"
 #include "base/run_loop.h"
 #include "components/metrics/log_decoder.h"
@@ -38,8 +37,9 @@ uint64_t UkmTestHelper::GetClientId() {
 }
 
 std::unique_ptr<Report> UkmTestHelper::GetUkmReport() {
-  if (!HasUnsentLogs())
+  if (!HasUnsentLogs()) {
     return nullptr;
+  }
 
   metrics::UnsentLogStore* log_store =
       ukm_service_->reporting_service_.ukm_log_store();
@@ -50,37 +50,40 @@ std::unique_ptr<Report> UkmTestHelper::GetUkmReport() {
   }
 
   log_store->StageNextLog();
-  if (!log_store->has_staged_log())
+  if (!log_store->has_staged_log()) {
     return nullptr;
+  }
 
   std::unique_ptr<ukm::Report> report = std::make_unique<ukm::Report>();
-  if (!metrics::DecodeLogDataToProto(log_store->staged_log(), report.get()))
+  if (!metrics::DecodeLogDataToProto(log_store->staged_log(), report.get())) {
     return nullptr;
+  }
 
   return report;
 }
 
 UkmSource* UkmTestHelper::GetSource(SourceId source_id) {
-  if (!ukm_service_)
+  if (!ukm_service_) {
     return nullptr;
+  }
 
   auto it = ukm_service_->sources().find(source_id);
   return it == ukm_service_->sources().end() ? nullptr : it->second.get();
 }
 
 bool UkmTestHelper::HasSource(SourceId source_id) {
-  return ukm_service_ && base::Contains(ukm_service_->sources(), source_id);
+  return ukm_service_ && ukm_service_->sources().contains(source_id);
 }
 
 bool UkmTestHelper::IsSourceObsolete(SourceId source_id) {
   return ukm_service_ &&
-         base::Contains(ukm_service_->recordings_.obsolete_source_ids,
-                        source_id);
+         ukm_service_->recordings_.obsolete_source_ids.contains(source_id);
 }
 
 void UkmTestHelper::RecordSourceForTesting(SourceId source_id) {
-  if (ukm_service_)
+  if (ukm_service_) {
     ukm_service_->UpdateSourceURL(source_id, GURL("http://example.com"));
+  }
 }
 
 void UkmTestHelper::BuildAndStoreLog() {
@@ -100,7 +103,12 @@ bool UkmTestHelper::HasUnsentLogs() {
 
 void UkmTestHelper::SetMsbbConsent() {
   DCHECK(ukm_service_);
-  ukm_service_->UpdateRecording(ukm::MSBB);
+  ukm_service_->UpdateRecording({ukm::MSBB});
+}
+
+void UkmTestHelper::PurgeData() {
+  DCHECK(ukm_service_);
+  ukm_service_->Purge();
 }
 
 }  // namespace ukm

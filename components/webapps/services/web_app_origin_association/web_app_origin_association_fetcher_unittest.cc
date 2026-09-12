@@ -4,6 +4,7 @@
 
 #include "components/webapps/services/web_app_origin_association/web_app_origin_association_fetcher.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -11,6 +12,7 @@
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "components/webapps/services/web_app_origin_association/web_app_origin_association_uma_util.h"
 #include "content/public/browser/network_service_instance.h"
 #include "content/public/test/browser_task_environment.h"
@@ -18,20 +20,16 @@
 #include "net/test/embedded_test_server/http_request.h"
 #include "net/test/embedded_test_server/http_response.h"
 #include "services/network/network_service.h"
+#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_network_context_client.h"
 #include "services/network/test/test_shared_url_loader_factory.h"
+#include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace {
 
 constexpr char kWebAppOriginAssociationFileContent[] =
-    R"({\"web_apps\": [{"
-    "    \"manifest\": \"https://foo.com/manifest.json\","
-    "    \"details\": {"
-    "      \"paths\": [\"/*\"],"
-    "      \"exclude_paths\": [\"/blog/data\"]"
-    "    }"
-    "}]})";
+    R"( {\"https://foo.com/\": {} })";
 
 constexpr char kFetchResultHistogram[] =
     "Webapp.WebAppOriginAssociationFetchResult";
@@ -51,7 +49,8 @@ class WebAppOriginAssociationFetcherTest : public testing::Test {
         base::MakeRefCounted<network::TestSharedURLLoaderFactory>(
             network::NetworkService::GetNetworkServiceForTesting());
 
-    fetcher_ = std::make_unique<WebAppOriginAssociationFetcher>();
+    fetcher_ = std::make_unique<WebAppOriginAssociationFetcher>(
+        shared_url_loader_factory_);
 
     // Do not retry, otherwise TestSharedURLLoaderFactory.Clone() will be
     // called, which is not implemented.
@@ -89,60 +88,87 @@ class WebAppOriginAssociationFetcherTest : public testing::Test {
 };
 
 TEST_F(WebAppOriginAssociationFetcherTest, FileExists) {
-  base::RunLoop run_loop;
-  auto handler = apps::UrlHandlerInfo();
-  handler.origin = url::Origin::Create(GURL(server_.base_url()));
+  base::test::TestFuture<std::optional<std::string>> future;
   fetcher_->FetchWebAppOriginAssociationFile(
-      handler, shared_url_loader_factory_.get(),
-      base::BindLambdaForTesting(
-          [&](std::unique_ptr<std::string> file_content) {
-            ASSERT_FALSE(!file_content);
-            EXPECT_EQ(*file_content, kWebAppOriginAssociationFileContent);
-            histogram_tester_.ExpectBucketCount(
-                kFetchResultHistogram,
-                WebAppOriginAssociationMetrics::FetchResult::kFetchSucceed, 1);
-            run_loop.Quit();
-          }));
-  run_loop.Run();
+      url::Origin::Create(GURL(server_.base_url())), future.GetCallback());
+
+  auto file_content = future.Take();
+  ASSERT_FALSE(!file_content);
+  EXPECT_EQ(*file_content, kWebAppOriginAssociationFileContent);
+  histogram_tester_.ExpectBucketCount(
+      kFetchResultHistogram,
+      WebAppOriginAssociationMetrics::FetchResult::kFetchSucceed, 1);
 }
 
 TEST_F(WebAppOriginAssociationFetcherTest, FileDoesNotExist) {
-  base::RunLoop run_loop;
-  auto handler = apps::UrlHandlerInfo();
+  base::test::TestFuture<std::optional<std::string>> future;
   GURL url = server_.GetURL("foo.com", "/");
-  handler.origin = url::Origin::Create(url);
-  fetcher_->FetchWebAppOriginAssociationFile(
-      handler, shared_url_loader_factory_.get(),
-      base::BindLambdaForTesting(
-          [&](std::unique_ptr<std::string> file_content) {
-            ASSERT_TRUE(!file_content);
-            histogram_tester_.ExpectBucketCount(
-                kFetchResultHistogram,
-                WebAppOriginAssociationMetrics::FetchResult::
-                    kFetchFailedNoResponseBody,
-                1);
-            run_loop.Quit();
-          }));
-  run_loop.Run();
+
+  fetcher_->FetchWebAppOriginAssociationFile(url::Origin::Create(url),
+                                             future.GetCallback());
+  auto file_content = future.Take();
+
+  ASSERT_TRUE(!file_content);
+  histogram_tester_.ExpectBucketCount(
+      kFetchResultHistogram,
+      WebAppOriginAssociationMetrics::FetchResult::kFetchFailedNoResponseBody,
+      1);
 }
 
 TEST_F(WebAppOriginAssociationFetcherTest, FileUrlIsInvalid) {
-  base::RunLoop run_loop;
-  auto handler = apps::UrlHandlerInfo();
-  handler.origin = url::Origin::Create(GURL("https://co.uk"));
+  base::test::TestFuture<std::optional<std::string>> future;
   fetcher_->FetchWebAppOriginAssociationFile(
-      handler, shared_url_loader_factory_.get(),
-      base::BindLambdaForTesting(
-          [&](std::unique_ptr<std::string> file_content) {
-            ASSERT_TRUE(!file_content);
-            histogram_tester_.ExpectBucketCount(
-                kFetchResultHistogram,
-                WebAppOriginAssociationMetrics::FetchResult::
-                    kFetchFailedInvalidUrl,
-                1);
-            run_loop.Quit();
-          }));
-  run_loop.Run();
+      url::Origin::Create(GURL("https://co.uk")), future.GetCallback());
+
+  auto file_content = future.Take();
+  ASSERT_TRUE(!file_content);
+  histogram_tester_.ExpectBucketCount(
+      kFetchResultHistogram,
+      WebAppOriginAssociationMetrics::FetchResult::kFetchFailedInvalidUrl, 1);
+}
+
+class WebAppOriginAssociationFetcherTimeoutTest : public testing::Test {
+ public:
+  WebAppOriginAssociationFetcherTimeoutTest()
+      : task_environment_(base::test::TaskEnvironment::TimeSource::MOCK_TIME),
+        shared_url_loader_factory_(
+            base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
+                &test_factory_)) {
+    fetcher_ = std::make_unique<WebAppOriginAssociationFetcher>(
+        shared_url_loader_factory_);
+    fetcher_->SetRetryOptionsForTest(0, network::SimpleURLLoader::RETRY_NEVER);
+  }
+
+ protected:
+  base::test::TaskEnvironment task_environment_;
+  network::TestURLLoaderFactory test_factory_;
+  scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory_;
+  std::unique_ptr<WebAppOriginAssociationFetcher> fetcher_;
+  base::HistogramTester histogram_tester_;
+};
+
+TEST_F(WebAppOriginAssociationFetcherTimeoutTest, FetchTimeout) {
+  base::test::TestFuture<std::optional<std::string>> future;
+  GURL url("https://example.com");
+  fetcher_->FetchWebAppOriginAssociationFile(url::Origin::Create(url),
+                                             future.GetCallback());
+
+  EXPECT_FALSE(future.IsReady());
+
+  // Fast forward time slightly.
+  task_environment_.FastForwardBy(base::Seconds(1));
+  EXPECT_FALSE(future.IsReady());
+
+  // Fast forward time to trigger the timeout.
+  task_environment_.FastForwardBy(base::Seconds(30));
+  EXPECT_TRUE(future.IsReady());
+
+  auto file_content = future.Take();
+  ASSERT_TRUE(!file_content);
+  histogram_tester_.ExpectBucketCount(
+      kFetchResultHistogram,
+      WebAppOriginAssociationMetrics::FetchResult::kFetchFailedNoResponseBody,
+      1);
 }
 
 }  // namespace webapps

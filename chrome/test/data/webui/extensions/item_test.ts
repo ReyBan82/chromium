@@ -4,10 +4,11 @@
 
 /** @fileoverview Suite of tests for extension-item. */
 
-import {ExtensionsItemElement, IronIconElement, navigation, Page} from 'chrome://extensions/extensions.js';
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import type {CrIconElement, ExtensionsItemElement} from 'chrome://extensions/extensions.js';
+import {navigation, Page} from 'chrome://extensions/extensions.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
 import {assertDeepEquals, assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
-import {isChildVisible} from 'chrome://webui-test/test_util.js';
+import {isChildVisible, microtasksFinished} from 'chrome://webui-test/test_util.js';
 
 import {TestService} from './test_service.js';
 import {createExtensionInfo, MockItemDelegate, testVisible} from './test_util.js';
@@ -66,27 +67,63 @@ function testDeveloperElementsAreHidden(item: HTMLElement): void {
   testElementsVisibility(item, devElements, false);
 }
 
-const extension_item_tests = {
-  suiteName: 'ExtensionItemTest',
-  TestNames: {
-    ElementVisibilityNormalState: 'element visibility: normal state',
-    ElementVisibilityDeveloperState:
-        'element visibility: after enabling developer mode',
-    ClickableItems: 'clickable items',
-    FailedReloadFiresLoadError: 'failed reload fires load error',
-    Warnings: 'warnings',
-    SourceIndicator: 'source indicator',
-    EnableToggle: 'Enable toggle is disabled when necessary',
-    RemoveButton: 'remove button hidden when necessary',
-    HtmlInName: 'html in extension name',
-    RepairButton: 'Repair button visibility',
-    InspectableViewSortOrder: 'inspectable view sort order',
-  },
-};
+/**
+ * Helper to create a runtime error object with default values.
+ */
+function createRuntimeError(
+    extensionId: string,
+    customFields?: Partial<chrome.developerPrivate.RuntimeError>):
+    chrome.developerPrivate.RuntimeError {
+  return {
+    type: chrome.developerPrivate.ErrorType.RUNTIME,
+    extensionId: extensionId,
+    fromIncognito: false,
+    source: '',
+    message: 'Some runtime error',
+    id: 1,
+    severity: chrome.developerPrivate.ErrorLevel.ERROR,
+    contextUrl: '',
+    occurrences: 1,
+    renderViewId: 0,
+    renderProcessId: 0,
+    canInspect: false,
+    stackTrace: [],
+    isServiceWorker: false,
+    ...customFields,
+  };
+}
 
-Object.assign(window, {extension_item_tests: extension_item_tests});
+/**
+ * Helper to check if errors button exists and what type it is.
+ */
+function getErrorsButtonInfo(item: HTMLElement):
+    {exists: boolean, isWarning: boolean, isError: boolean} {
+  const btn = item.shadowRoot!.querySelector('#errors-button');
+  if (!btn) {
+    return {exists: false, isWarning: false, isError: false};
+  }
+  return {
+    exists: true,
+    isWarning: btn.classList.contains('warning'),
+    isError: btn.classList.contains('error'),
+  };
+}
 
-suite(extension_item_tests.suiteName, function() {
+/**
+ * Helper to create an extension info object for a standard store extension.
+ */
+function createStoreItemData(
+    overrides?: Partial<chrome.developerPrivate.ExtensionInfo>):
+    chrome.developerPrivate.ExtensionInfo {
+  return createExtensionInfo(Object.assign(
+      {
+        webStoreUrl: 'https://chromewebstore.google.com/detail/foo',
+        location: chrome.developerPrivate.Location.FROM_STORE,
+      },
+      overrides));
+}
+
+suite('ExtensionItemTest', function() {
   /**
    * Extension item created before each test.
    */
@@ -106,62 +143,90 @@ suite(extension_item_tests.suiteName, function() {
     document.body.appendChild(toastManager);
   });
 
-  test(extension_item_tests.TestNames.ElementVisibilityNormalState, function() {
+  test('ElementVisibilityNormalState', async () => {
     testNormalElementsAreVisible(item);
     testDeveloperElementsAreHidden(item);
 
     assertTrue(item.$.enableToggle.checked);
-    item.set('data.state', 'DISABLED');
+
+    let data = createExtensionInfo(item.data);
+    data.state = chrome.developerPrivate.ExtensionState.DISABLED;
+    item.data = data;
+    await microtasksFinished();
     assertFalse(item.$.enableToggle.checked);
-    item.set('data.state', 'BLACKLISTED');
+
+    data = createExtensionInfo(item.data);
+    data.state = chrome.developerPrivate.ExtensionState.BLOCKLISTED;
+    item.data = data;
+    await microtasksFinished();
     assertFalse(item.$.enableToggle.checked);
   });
 
-  test(
-      extension_item_tests.TestNames.ElementVisibilityDeveloperState,
-      function() {
-        item.set('inDevMode', true);
+  test('ElementVisibilityDeveloperState', async () => {
+    item.inDevMode = true;
+    await microtasksFinished();
 
-        testNormalElementsAreVisible(item);
-        testDeveloperElementsAreVisible(item);
+    testNormalElementsAreVisible(item);
+    testDeveloperElementsAreVisible(item);
 
-        // Developer reload button should be visible only for enabled unpacked
-        // extensions.
-        testVisible(item, '#dev-reload-button', false);
+    // Developer reload button should be visible only for enabled unpacked
+    // extensions.
+    testVisible(item, '#dev-reload-button', false);
 
-        item.set('data.location', chrome.developerPrivate.Location.UNPACKED);
-        flush();
-        testVisible(item, '#dev-reload-button', true);
+    let data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.UNPACKED;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#dev-reload-button', true);
 
-        item.set('data.state', chrome.developerPrivate.ExtensionState.DISABLED);
-        flush();
-        testVisible(item, '#dev-reload-button', false);
+    data = createExtensionInfo(item.data);
+    data.state = chrome.developerPrivate.ExtensionState.DISABLED;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#dev-reload-button', false);
 
-        item.set('data.disableReasons.reloading', true);
-        flush();
-        testVisible(item, '#dev-reload-button', true);
+    data = createExtensionInfo(item.data);
+    data.disableReasons.reloading = true;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#dev-reload-button', true);
 
-        item.set('data.disableReasons.reloading', false);
-        flush();
-        item.set(
-            'data.state', chrome.developerPrivate.ExtensionState.TERMINATED);
-        flush();
-        testVisible(item, '#dev-reload-button', false);
-        testVisible(item, '#enableToggle', false);
-      });
+    data = createExtensionInfo(item.data);
+    data.disableReasons.reloading = false;
+    data.state = chrome.developerPrivate.ExtensionState.TERMINATED;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#dev-reload-button', false);
+    testVisible(item, '#enableToggle', false);
+  });
 
   /** Tests that the delegate methods are correctly called. */
-  test(extension_item_tests.TestNames.ClickableItems, function() {
-    item.set('inDevMode', true);
+  test('ClickableItems', async function() {
+    item.inDevMode = true;
+    await microtasksFinished();
 
-    mockDelegate.testClickingCalls(
+    await mockDelegate.testClickingCalls(
         item.$.removeButton, 'deleteItem', [item.data.id]);
-    mockDelegate.testClickingCalls(
+    await mockDelegate.testClickingCalls(
         item.$.enableToggle, 'setItemEnabled', [item.data.id, false]);
-    mockDelegate.testClickingCalls(
-        item.shadowRoot!.querySelector<HTMLElement>(
+    await mockDelegate.testClickingCalls(
+        item.shadowRoot.querySelector<HTMLElement>(
             '#inspect-views a[is="action-link"]')!,
         'inspectItemView', [item.data.id, item.data.views[0]]);
+
+    loadTimeData.overrideValues({cwsReviewPromptingEnabled: true});
+    const dataWithStoreUrl = createExtensionInfo(item.data);
+    dataWithStoreUrl.webStoreUrl =
+        'https://chromewebstore.google.com/detail/foo';
+    dataWithStoreUrl.location = chrome.developerPrivate.Location.FROM_STORE;
+    item.data = dataWithStoreUrl;
+    await microtasksFinished();
+    const reviewLink =
+        item.shadowRoot.querySelector<HTMLElement>('#rate-link')!;
+    assertTrue(!!reviewLink);
+    assertTrue(!!reviewLink.querySelector('cr-icon[icon="cr:open-in-new"]'));
+    await mockDelegate.testClickingCalls(
+        reviewLink, 'openReviewPage', [item.data.id]);
 
     // Setup for testing navigation buttons.
     let currentPage = null;
@@ -170,91 +235,128 @@ suite(extension_item_tests.suiteName, function() {
     });
 
     item.$.detailsButton.click();
+    await microtasksFinished();
     assertDeepEquals(
         currentPage, {page: Page.DETAILS, extensionId: item.data.id});
 
     // Reset current page and test inspect-view navigation.
     navigation.navigateTo({page: Page.LIST});
     currentPage = null;
-    item.shadowRoot!
+    item.shadowRoot
         .querySelector<HTMLElement>(
             '#inspect-views a[is="action-link"]:nth-of-type(2)')!.click();
+    await microtasksFinished();
     assertDeepEquals(
         currentPage, {page: Page.DETAILS, extensionId: item.data.id});
 
-    item.set('data.disableReasons.corruptInstall', true);
-    flush();
-    mockDelegate.testClickingCalls(
-        item.shadowRoot!.querySelector<HTMLElement>('#repair-button')!,
+    let data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = true;
+    item.data = data;
+    await microtasksFinished();
+    await mockDelegate.testClickingCalls(
+        item.shadowRoot.querySelector<HTMLElement>('#repair-button')!,
         'repairItem', [item.data.id]);
     testVisible(item, '#enableToggle', false);
-    item.set('data.disableReasons.corruptInstall', false);
-    flush();
 
-    item.set('data.state', chrome.developerPrivate.ExtensionState.TERMINATED);
-    flush();
-    mockDelegate.testClickingCalls(
-        item.shadowRoot!.querySelector<HTMLElement>(
-            '#terminated-reload-button')!,
+    data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = false;
+    data.state = chrome.developerPrivate.ExtensionState.TERMINATED;
+    item.data = data;
+    await microtasksFinished();
+
+    await mockDelegate.testClickingCalls(
+        item.shadowRoot.querySelector<HTMLElement>('#terminated-reload-button')!
+        ,
         'reloadItem', [item.data.id], Promise.resolve());
 
-    item.set('data.location', chrome.developerPrivate.Location.UNPACKED);
-    item.set('data.state', chrome.developerPrivate.ExtensionState.ENABLED);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.UNPACKED;
+    data.state = chrome.developerPrivate.ExtensionState.ENABLED;
+    item.data = data;
+    await microtasksFinished();
   });
 
   /** Tests that the reload button properly fires the load-error event. */
-  test(
-      extension_item_tests.TestNames.FailedReloadFiresLoadError,
-      async function() {
-        item.set('inDevMode', true);
-        item.set('data.location', chrome.developerPrivate.Location.UNPACKED);
-        flush();
-        testVisible(item, '#dev-reload-button', true);
+  test('FailedReloadFiresLoadError', async function() {
+    item.inDevMode = true;
+    const data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.UNPACKED;
+    item.data = data;
+    await microtasksFinished();
 
-        // Check clicking the reload button. The reload button should fire a
-        // load-error event if and only if the reload fails (indicated by a
-        // rejected promise).
-        // This is a bit of a pain to verify because the promises finish
-        // asynchronously, so we have to use setTimeout()s.
-        let firedLoadError = false;
-        item.addEventListener('load-error', () => {
-          firedLoadError = true;
+    // Check clicking the reload button. The reload button should fire a
+    // load-error event if and only if the reload fails (indicated by a
+    // rejected promise).
+    // This is a bit of a pain to verify because the promises finish
+    // asynchronously, so we have to use setTimeout()s.
+    let firedLoadError = false;
+    item.addEventListener('load-error', () => {
+      firedLoadError = true;
+    });
+
+    // This is easier to test with a TestBrowserProxy-style delegate.
+    const proxyDelegate = new TestService();
+    item.delegate = proxyDelegate;
+
+    function verifyEventPromise(expectCalled: boolean): Promise<void> {
+      return new Promise((resolve, _reject) => {
+        setTimeout(() => {
+          assertEquals(expectCalled, firedLoadError);
+          resolve();
         });
-
-        // This is easier to test with a TestBrowserProxy-style delegate.
-        const proxyDelegate = new TestService();
-        item.delegate = proxyDelegate;
-
-        function verifyEventPromise(expectCalled: boolean): Promise<void> {
-          return new Promise((resolve, _reject) => {
-            setTimeout(() => {
-              assertEquals(expectCalled, firedLoadError);
-              resolve();
-            });
-          });
-        }
-
-        item.shadowRoot!.querySelector<HTMLElement>(
-                            '#dev-reload-button')!.click();
-        let id = await proxyDelegate.whenCalled('reloadItem');
-        assertEquals(item.data.id, id);
-        await verifyEventPromise(false);
-        proxyDelegate.resetResolver('reloadItem');
-        proxyDelegate.setForceReloadItemError(true);
-        item.shadowRoot!.querySelector<HTMLElement>(
-                            '#dev-reload-button')!.click();
-        id = await proxyDelegate.whenCalled('reloadItem');
-        assertEquals(item.data.id, id);
-        return verifyEventPromise(true);
       });
+    }
 
-  test(extension_item_tests.TestNames.Warnings, function() {
+    item.shadowRoot.querySelector<HTMLElement>('#dev-reload-button')!.click();
+    let id = await proxyDelegate.whenCalled('reloadItem');
+    assertEquals(item.data.id, id);
+    await verifyEventPromise(false);
+    proxyDelegate.resetResolver('reloadItem');
+    proxyDelegate.setForceReloadItemError(true);
+    item.shadowRoot.querySelector<HTMLElement>('#dev-reload-button')!.click();
+    id = await proxyDelegate.whenCalled('reloadItem');
+    assertEquals(item.data.id, id);
+    return verifyEventPromise(true);
+  });
+
+  test('Description', async () => {
+    // Description is visible if there are no warnings.
+    assertTrue(isChildVisible(item, '#description'));
+
+    // Description is hidden if there is a severe warning.
+    let data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = true;
+    item.data = data;
+    await microtasksFinished();
+    assertFalse(isChildVisible(item, '#description'));
+
+    // Description is hidden if there is a MV2 deprecation warning.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = false;
+    data.disableReasons.unsupportedManifestVersion = true;
+    item.data = data;
+    await microtasksFinished();
+    assertFalse(isChildVisible(item, '#description'));
+
+    // Description is hidden if there is an allowlist warning.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.unsupportedManifestVersion = false;
+    data.showSafeBrowsingAllowlistWarning = true;
+    item.data = data;
+    await microtasksFinished();
+    assertFalse(isChildVisible(item, '#description'));
+  });
+
+  test('Warnings', async () => {
+    // Severe warnings.
     const kCorrupt = 1 << 0;
     const kSuspicious = 1 << 1;
-    const kBlacklisted = 1 << 2;
+    const kBlocklisted = 1 << 2;
     const kRuntime = 1 << 3;
+    // Allowlist warning.
     const kSafeBrowsingAllowlist = 1 << 4;
+    // MV2 deprecation warning.
+    const kMv2Deprecation = 1 << 5;
 
     function assertWarnings(mask: number) {
       assertEquals(
@@ -262,200 +364,596 @@ suite(extension_item_tests.suiteName, function() {
       assertEquals(
           !!(mask & kSuspicious), isChildVisible(item, '#suspicious-warning'));
       assertEquals(
-          !!(mask & kBlacklisted),
-          isChildVisible(item, '#blacklisted-warning'));
+          !!(mask & kBlocklisted),
+          isChildVisible(item, '#blocklisted-warning'));
       assertEquals(
           !!(mask & kRuntime), isChildVisible(item, '#runtime-warnings'));
       assertEquals(
           !!(mask & kSafeBrowsingAllowlist),
           isChildVisible(item, '#allowlist-warning'));
+      assertEquals(
+          !!(mask & kMv2Deprecation),
+          isChildVisible(item, '#mv2-deprecation-warning'));
     }
 
     assertWarnings(0);
 
-    item.set('data.disableReasons.corruptInstall', true);
-    flush();
+    // Show severe warnings by updating the corresponding properties.
+    let data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = true;
+    item.data = data;
+    await microtasksFinished();
     assertWarnings(kCorrupt);
 
-    item.set('data.disableReasons.suspiciousInstall', true);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.disableReasons.suspiciousInstall = true;
+    item.data = data;
+    await microtasksFinished();
     assertWarnings(kCorrupt | kSuspicious);
 
-    item.set('data.blacklistText', 'This item is blacklisted');
-    flush();
-    assertWarnings(kCorrupt | kSuspicious | kBlacklisted);
+    data = createExtensionInfo(item.data);
+    data.blocklistText = 'This item is blocklisted';
+    item.data = data;
+    await microtasksFinished();
+    assertWarnings(kCorrupt | kSuspicious | kBlocklisted);
 
-    item.set('data.blacklistText', null);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.blocklistText = undefined;
+    item.data = data;
+    await microtasksFinished();
     assertWarnings(kCorrupt | kSuspicious);
 
-    item.set('data.runtimeWarnings', ['Dummy warning']);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.runtimeWarnings = ['Dummy warning'];
+    item.data = data;
+    await microtasksFinished();
     assertWarnings(kCorrupt | kSuspicious | kRuntime);
 
-    item.set('data.disableReasons.corruptInstall', false);
-    item.set('data.disableReasons.suspiciousInstall', false);
-    item.set('data.runtimeWarnings', []);
-    flush();
+    // Reset all properties affecting warnings.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = false;
+    data.disableReasons.suspiciousInstall = false;
+    data.runtimeWarnings = [];
+    item.data = data;
+    await microtasksFinished();
     assertWarnings(0);
 
-    item.set('data.showSafeBrowsingAllowlistWarning', true);
-    flush();
-    assertWarnings(kSafeBrowsingAllowlist);
+    // Show MV2 deprecation warning.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.unsupportedManifestVersion = true;
+    item.data = data;
+    await microtasksFinished();
+    assertWarnings(kMv2Deprecation);
 
-    // Test that the allowlist warning is not shown when there is already a
-    // warning message.
-    item.set('data.disableReasons.suspiciousInstall', true);
-    flush();
+    // MV2 deprecation warning is hidden if there are any severe warnings.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.suspiciousInstall = true;
+    item.data = data;
+    await microtasksFinished();
     assertWarnings(kSuspicious);
+
+    // Reset all properties affecting warnings.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.unsupportedManifestVersion = false;
+    data.disableReasons.suspiciousInstall = false;
+    item.data = data;
+    await microtasksFinished();
+    assertWarnings(0);
+
+    // Show allowlist warning.
+    data = createExtensionInfo(item.data);
+    data.showSafeBrowsingAllowlistWarning = true;
+    item.data = data;
+    await microtasksFinished();
+    assertWarnings(kSafeBrowsingAllowlist);
+    // Allowlist warning is not visible if there are any severe warnings.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.suspiciousInstall = true;
+    item.data = data;
+    await microtasksFinished();
+    assertWarnings(kSuspicious);
+    // Allowlist warning is not visible if there is a MV2 deprecation warning
+    data = createExtensionInfo(item.data);
+    data.disableReasons.suspiciousInstall = false;
+    data.disableReasons.unsupportedManifestVersion = true;
+    item.data = data;
+    await microtasksFinished();
+    assertWarnings(kMv2Deprecation);
   });
 
-  test(extension_item_tests.TestNames.SourceIndicator, function() {
+  test('UnsupportedDeveloperExtensionWarning', async () => {
+    assertFalse(
+        isChildVisible(item, '#unsupported-developer-extension-warning'));
+
+    const data = createExtensionInfo(item.data);
+    data.disableReasons.unsupportedDeveloperExtension = true;
+    item.data = data;
+    await microtasksFinished();
+    assertTrue(
+        isChildVisible(item, '#unsupported-developer-extension-warning'));
+  });
+
+  test('DisabledByAnotherExtensionWarning', async () => {
+    assertFalse(isChildVisible(item, '#disabled-by-another-extension-warning'));
+    assertTrue(isChildVisible(item, '#description'));
+
+    // The disabling extension's name isn't always known, so the warning
+    // falls back to generic text in that case.
+    let data = createExtensionInfo(item.data);
+    data.disableReasons.disabledByAnotherExtension = true;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(
+        item, '#disabled-by-another-extension-warning', true,
+        loadTimeData.getString('itemDisabledByExtensionGeneric'));
+
+    // It's a severe warning, so it takes the place of the description.
+    assertFalse(isChildVisible(item, '#description'));
+
+    // Once the name is known, the warning uses it.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.disabledByExtensionName = 'Extension Name';
+    item.data = data;
+    await microtasksFinished();
+    testVisible(
+        item, '#disabled-by-another-extension-warning', true,
+        loadTimeData.getStringF('itemDisabledByExtension', 'Extension Name'));
+  });
+
+  test('SourceIndicator', async () => {
     assertFalse(isChildVisible(item, '#source-indicator'));
-    item.set('data.location', 'UNPACKED');
-    flush();
+    let data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.UNPACKED;
+    item.data = data;
+    await microtasksFinished();
     assertTrue(isChildVisible(item, '#source-indicator'));
-    const icon = item.shadowRoot!.querySelector<IronIconElement>(
-        '#source-indicator iron-icon');
+    let icon = item.shadowRoot.querySelector<CrIconElement>(
+        '#source-indicator cr-icon');
     assertTrue(!!icon);
-    assertEquals('extensions-icons:unpacked', icon.icon);
+    assertEquals('extensions-icons:unpacked-custom', icon.icon);
 
-    item.set('data.location', 'THIRD_PARTY');
-    flush();
+    data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.THIRD_PARTY;
+    item.data = data;
+    await microtasksFinished();
     assertTrue(isChildVisible(item, '#source-indicator'));
-    assertEquals('extensions-icons:input', icon.icon);
+    assertEquals(
+        loadTimeData.getBoolean('webuiRoundedIconsEnabled') ?
+            'extensions-icons:input' :
+            'extensions-icons:input-old',
+        icon.icon);
 
-    item.set('data.location', 'UNKNOWN');
-    flush();
+    data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.UNKNOWN;
+    item.data = data;
+    await microtasksFinished();
     assertTrue(isChildVisible(item, '#source-indicator'));
-    assertEquals('extensions-icons:input', icon.icon);
+    assertEquals(
+        loadTimeData.getBoolean('webuiRoundedIconsEnabled') ?
+            'extensions-icons:input' :
+            'extensions-icons:input-old',
+        icon.icon);
 
-    item.set('data.location', 'INSTALLED_BY_DEFAULT');
-    flush();
+    data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.INSTALLED_BY_DEFAULT;
+    item.data = data;
+    await microtasksFinished();
     assertFalse(isChildVisible(item, '#source-indicator'));
 
-    item.set('data.location', 'FROM_STORE');
-    item.set('data.controlledInfo', {text: 'policy'});
-    flush();
+    data = createExtensionInfo(item.data);
+    data.location = chrome.developerPrivate.Location.FROM_STORE;
+    data.controlledInfo = {text: 'policy'};
+    item.data = data;
+    await microtasksFinished();
     assertTrue(isChildVisible(item, '#source-indicator'));
-    assertEquals('extensions-icons:business', icon.icon);
+    // Re-query the icon, since it was removed from the DOM when the source
+    // indicator was behind an if()
+    icon = item.shadowRoot.querySelector<CrIconElement>(
+        '#source-indicator cr-icon');
+    assertTrue(!!icon);
+    assertEquals(
+        loadTimeData.getBoolean('webuiRoundedIconsEnabled') ?
+            'extensions-icons:domain' :
+            'extensions-icons:business-old',
+        icon.icon);
 
-    item.set('data.controlledInfo', null);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.controlledInfo = undefined;
+    item.data = data;
+    await microtasksFinished();
     assertFalse(isChildVisible(item, '#source-indicator'));
   });
 
-  test(extension_item_tests.TestNames.EnableToggle, function() {
+  test('EnableToggle', async () => {
     assertFalse(item.$.enableToggle.disabled);
 
     // Test case where user does not have permission.
-    item.set('data.userMayModify', false);
-    flush();
+    let data = createExtensionInfo(item.data);
+    data.userMayModify = false;
+    item.data = data;
+    await microtasksFinished();
     assertTrue(item.$.enableToggle.disabled);
     // Reset state.
-    item.set('data.userMayModify', true);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.userMayModify = true;
+    item.data = data;
+    await microtasksFinished();
 
-    // Test case of a blacklisted extension.
-    item.set('data.state', 'BLACKLISTED');
-    flush();
+    // Test case of a blocklisted extension.
+    data = createExtensionInfo(item.data);
+    data.state = chrome.developerPrivate.ExtensionState.BLOCKLISTED;
+    item.data = data;
+    await microtasksFinished();
     assertTrue(item.$.enableToggle.disabled);
     // Reset state.
-    item.set('data.state', 'ENABLED');
-    flush();
+    data = createExtensionInfo(item.data);
+    data.state = chrome.developerPrivate.ExtensionState.ENABLED;
+    item.data = data;
+    await microtasksFinished();
 
     // This section tests that the enable toggle is visible but disabled
     // when disableReasons.blockedByPolicy is true. This test prevents a
-    // regression to crbug/1003014.
-    item.set('data.disableReasons.blockedByPolicy', true);
-    flush();
+    // regression to crbug.com/40646977.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.blockedByPolicy = true;
+    item.data = data;
+    await microtasksFinished();
     testVisible(item, '#enableToggle', true);
     assertTrue(item.$.enableToggle.disabled);
-    item.set('data.disableReasons.blockedByPolicy', false);
-    flush();
+
+    data = createExtensionInfo(item.data);
+    data.disableReasons.blockedByPolicy = false;
+    data.disableReasons.publishedInStoreRequired = true;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#enableToggle', true);
+    assertTrue(item.$.enableToggle.disabled);
+
+    data = createExtensionInfo(item.data);
+    data.disableReasons.publishedInStoreRequired = false;
+    item.data = data;
+    await microtasksFinished();
 
     testVisible(item, '#parentDisabledPermissionsToolTip', false);
-    item.set('data.disableReasons.parentDisabledPermissions', true);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.disableReasons.parentDisabledPermissions = true;
+    item.data = data;
+    await microtasksFinished();
     testVisible(item, '#enableToggle', true);
     assertFalse(item.$.enableToggle.disabled);
     testVisible(item, '#parentDisabledPermissionsToolTip', true);
-    item.set('data.disableReasons.parentDisabledPermissions', false);
-    flush();
 
-    item.set('data.disableReasons.custodianApprovalRequired', true);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.disableReasons.parentDisabledPermissions = false;
+    data.disableReasons.custodianApprovalRequired = true;
+    item.data = data;
+    await microtasksFinished();
     testVisible(item, '#enableToggle', true);
     assertFalse(item.$.enableToggle.disabled);
-    item.set('data.disableReasons.custodianApprovalRequired', false);
-    flush();
+
+    // Extension toggle is visible and disabled when extension is disabled
+    // due to unsupported manifest version.
+    data = createExtensionInfo(item.data);
+    data.disableReasons.custodianApprovalRequired = false;
+    data.disableReasons.unsupportedManifestVersion = true;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#enableToggle', true);
+    assertTrue(item.$.enableToggle.disabled);
   });
 
-  test(extension_item_tests.TestNames.RemoveButton, function() {
+  test('EnableToggleDisabledForUnsupportedDeveloperExtension', async () => {
+    assertFalse(item.$.enableToggle.disabled);
+
+    const data = createExtensionInfo(item.data);
+    data.disableReasons.unsupportedDeveloperExtension = true;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#enableToggle', true);
+    assertTrue(item.$.enableToggle.disabled);
+  });
+
+  test('RemoveButton', async () => {
     assertFalse(item.$.removeButton.hidden);
-    item.set('data.mustRemainInstalled', true);
-    flush();
+    const data = createExtensionInfo(item.data);
+    data.mustRemainInstalled = true;
+    item.data = data;
+    await microtasksFinished();
     assertTrue(item.$.removeButton.hidden);
   });
 
-  test(extension_item_tests.TestNames.HtmlInName, function() {
+  test('HtmlInName', async () => {
     const name = '<HTML> in the name!';
-    item.set('data.name', name);
-    flush();
-    assertEquals(name, item.$.name.textContent!.trim());
+    const data = createExtensionInfo(item.data);
+    data.name = name;
+    item.data = data;
+    await microtasksFinished();
+    assertEquals(name, item.$.name.textContent.trim());
     // "Related to $1" is IDS_MD_EXTENSIONS_EXTENSION_A11Y_ASSOCIATION.
     assertEquals(
-        `Related to ${name}`, item.$.a11yAssociation.textContent!.trim());
+        `Related to ${name}`, item.$.a11yAssociation.textContent.trim());
   });
 
-  test(extension_item_tests.TestNames.RepairButton, function() {
+  test('RepairButton', async () => {
     // For most extensions, the "repair" button should be displayed if the
     // extension is detected as corrupted.
     testVisible(item, '#repair-button', false);
-    item.set('data.disableReasons.corruptInstall', true);
-    flush();
+    let data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = true;
+    item.data = data;
+    await microtasksFinished();
     testVisible(item, '#repair-button', true);
-    item.set('data.disableReasons.corruptInstall', false);
-    flush();
+
+    data = createExtensionInfo(item.data);
+    data.disableReasons.corruptInstall = false;
+    item.data = data;
+    await microtasksFinished();
     testVisible(item, '#repair-button', false);
 
     // However, the user isn't allowed to initiate a repair for extensions they
     // aren't allowed to modify, so the button shouldn't be visible.
-    item.set('data.userMayModify', false);
-    item.set('data.disableReasons.corruptInstall', true);
-    flush();
+    data = createExtensionInfo(item.data);
+    data.userMayModify = false;
+    data.disableReasons.corruptInstall = true;
+    item.data = data;
+    await microtasksFinished();
     testVisible(item, '#repair-button', false);
   });
 
-  test(
-      extension_item_tests.TestNames.InspectableViewSortOrder, function() {
-        function getUrl(path: string) {
-          return `chrome-extension://${extensionData.id}/${path}`;
-        }
-        item.set('data.views', [
-          {
-            type: chrome.developerPrivate.ViewType.EXTENSION_POPUP,
-            url: getUrl('popup.html'),
-          },
-          {
-            type: chrome.developerPrivate.ViewType.EXTENSION_BACKGROUND_PAGE,
-            url: getUrl('_generated_background_page.html'),
-          },
-          {
-            type: chrome.developerPrivate.ViewType
-                      .EXTENSION_SERVICE_WORKER_BACKGROUND,
-            url: getUrl('sw.js'),
-          },
-        ]);
-        item.set('inDevMode', true);
-        flush();
+  test('InspectableViewSortOrder', async () => {
+    function getUrl(path: string) {
+      return `chrome-extension://${extensionData.id}/${path}`;
+    }
+    const data = createExtensionInfo(item.data);
+    data.views = [
+      {
+        renderProcessId: 0,
+        renderViewId: 0,
+        incognito: false,
+        isIframe: false,
+        type: chrome.developerPrivate.ViewType.EXTENSION_POPUP,
+        url: getUrl('popup.html'),
+      },
+      {
+        renderProcessId: 0,
+        renderViewId: 0,
+        incognito: false,
+        isIframe: false,
+        type: chrome.developerPrivate.ViewType.EXTENSION_BACKGROUND_PAGE,
+        url: getUrl('_generated_background_page.html'),
+      },
+      {
+        renderProcessId: 0,
+        renderViewId: 0,
+        incognito: false,
+        isIframe: false,
+        type: chrome.developerPrivate.ViewType
+                  .EXTENSION_SERVICE_WORKER_BACKGROUND,
+        url: getUrl('sw.js'),
+      },
+    ];
+    item.data = data;
+    item.inDevMode = true;
+    await microtasksFinished();
 
-        // Check that when multiple views are available, the service worker is
-        // sorted first.
-        assertEquals(
-            'service worker,',
-            item.shadowRoot!
-                .querySelector<HTMLElement>(
-                    '#inspect-views a:first-of-type')!.textContent!.trim());
-      });
+    // Check that when multiple views are available, the service worker is
+    // sorted first.
+    assertEquals(
+        'service worker,',
+        item.shadowRoot
+            .querySelector<HTMLElement>(
+                '#inspect-views a:first-of-type')!.textContent.trim());
+  });
+
+  test('CanUploadAsAccountExtension', async () => {
+    testVisible(item, '#account-upload-button', false);
+
+    const data = createExtensionInfo(item.data);
+    data.canUploadAsAccountExtension = true;
+    item.data = data;
+    await microtasksFinished();
+    testVisible(item, '#account-upload-button', true);
+
+    await mockDelegate.testClickingCalls(
+        item.shadowRoot.querySelector<HTMLElement>('#account-upload-button')!,
+        'uploadItemToAccount', [item.data.id]);
+  });
+
+  test('ShowErrorAsWarningsButtonLabel', async () => {
+    // 1. No runtime errors, no install warnings: button should show "Warnings"
+    // label.
+    let data = createExtensionInfo(item.data);
+    data.runtimeErrors = [];
+    data.installWarnings = [];
+    data.manifestErrors = [{
+      type: chrome.developerPrivate.ErrorType.MANIFEST,
+      extensionId: data.id,
+      fromIncognito: false,
+      source: 'manifest.json',
+      message: 'Some manifest error',
+      id: 1,
+      manifestKey: 'background',
+    }];
+    item.data = data;
+    await microtasksFinished();
+    let buttonInfo = getErrorsButtonInfo(item);
+    assertTrue(buttonInfo.exists, 'Errors button should exist');
+    assertTrue(
+        buttonInfo.isWarning,
+        'Button should have warning class when no errors or install warnings');
+
+    // 2. Has runtime errors: button should show "Errors" label.
+    data = createExtensionInfo(item.data);
+    data.runtimeErrors = [createRuntimeError(data.id)];
+    data.installWarnings = [];
+    item.data = data;
+    await microtasksFinished();
+    buttonInfo = getErrorsButtonInfo(item);
+    assertTrue(buttonInfo.exists, 'Errors button should exist');
+    assertTrue(
+        buttonInfo.isError,
+        'Button should have error class when runtime errors exist');
+
+    // 3. Has install warnings: button should show "Errors" label.
+    data = createExtensionInfo(item.data);
+    data.runtimeErrors = [];
+    data.installWarnings = ['Some install warning'];
+    item.data = data;
+    await microtasksFinished();
+    buttonInfo = getErrorsButtonInfo(item);
+    assertTrue(buttonInfo.exists, 'Errors button should exist');
+    assertTrue(
+        buttonInfo.isError,
+        'Button should have error class when install warnings exist');
+
+    // 4. Has both runtime errors and install warnings: button should show
+    // "Errors" label.
+    data = createExtensionInfo(item.data);
+    data.runtimeErrors = [createRuntimeError(data.id, {id: 2})];
+    data.installWarnings = ['Some install warning'];
+    item.data = data;
+    await microtasksFinished();
+    buttonInfo = getErrorsButtonInfo(item);
+    assertTrue(buttonInfo.exists, 'Errors button should exist');
+    assertTrue(
+        buttonInfo.isError,
+        'Button should have error class when both errors and warnings exist');
+  });
+
+  test('RateExtensionLinkVisibility', async () => {
+    const card = item.shadowRoot.querySelector<HTMLElement>('#card')!;
+    card.style.transition = 'none';
+
+    function assertCardHeight(expected: number) {
+      assertEquals(expected, Math.round(card.getBoundingClientRect().height));
+    }
+
+    // Hidden when feature flag is disabled.
+    loadTimeData.overrideValues({cwsReviewPromptingEnabled: false});
+    item.data = createStoreItemData();
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+    assertFalse(card.classList.contains('review-prompting-enabled'));
+    assertCardHeight(160);
+
+    item.inDevMode = true;
+    await microtasksFinished();
+    assertCardHeight(208);
+    item.inDevMode = false;
+
+    // Enable feature flag for all remaining layout state tests.
+    loadTimeData.overrideValues({cwsReviewPromptingEnabled: true});
+    item.data = createStoreItemData();
+    await microtasksFinished();
+    assertTrue(card.classList.contains('review-prompting-enabled'));
+    assertCardHeight(180);
+
+    // Hidden by default when webStoreUrl is empty.
+    item.data = createExtensionInfo();
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Visible when webStoreUrl is present and item is from store.
+    item.data = createStoreItemData();
+    await microtasksFinished();
+    testVisible(item, '#rate-link', true);
+
+    // Visible in developer mode as well, expanding to 228px.
+    item.inDevMode = true;
+    await microtasksFinished();
+    testVisible(item, '#rate-link', true);
+    assertCardHeight(228);
+    item.inDevMode = false;
+
+    // Hidden for local developer unpacked extensions.
+    item.data = createStoreItemData({
+      location: chrome.developerPrivate.Location.UNPACKED,
+    });
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden for third-party extensions.
+    item.data = createStoreItemData({
+      location: chrome.developerPrivate.Location.THIRD_PARTY,
+    });
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden for default pre-installed component extensions.
+    item.data = createStoreItemData({
+      location: chrome.developerPrivate.Location.INSTALLED_BY_DEFAULT,
+    });
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden for unknown installation location.
+    item.data = createStoreItemData({
+      location: chrome.developerPrivate.Location.UNKNOWN,
+    });
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden for policy-controlled extensions.
+    item.data = createStoreItemData({
+      controlledInfo: {text: 'policy'},
+    });
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden when extension must remain installed.
+    item.data = createStoreItemData({mustRemainInstalled: true});
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden when extension is corrupted (repair state active).
+    const corruptedData = createStoreItemData();
+    corruptedData.disableReasons.corruptInstall = true;
+    item.data = corruptedData;
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden when extension is terminated (reload button active).
+    item.data = createStoreItemData({
+      state: chrome.developerPrivate.ExtensionState.TERMINATED,
+    });
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Visible when runtime errors exist on the card (description still valid,
+    // Errors button in strip).
+    const errorData = createStoreItemData();
+    errorData.runtimeErrors = [createRuntimeError(errorData.id)];
+    item.data = errorData;
+    await microtasksFinished();
+    testVisible(item, '#rate-link', true);
+
+    // Visible when install warnings exist on the card (description still valid,
+    // Warnings button in strip).
+    const installWarningData = createStoreItemData();
+    installWarningData.installWarnings = ['Some install warning'];
+    item.data = installWarningData;
+    await microtasksFinished();
+    testVisible(item, '#rate-link', true);
+
+    // Hidden when severe runtime warnings replace description banner.
+    const severeWarningData = createStoreItemData();
+    severeWarningData.runtimeWarnings = ['Severe runtime warning'];
+    item.data = severeWarningData;
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden when MV2 deprecation warning replaces description banner.
+    const mv2Data = createStoreItemData();
+    mv2Data.disableReasons.unsupportedManifestVersion = true;
+    item.data = mv2Data;
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+
+    // Hidden when Safe Browsing allowlist warning replaces description banner.
+    const allowlistData = createStoreItemData();
+    allowlistData.showSafeBrowsingAllowlistWarning = true;
+    item.data = allowlistData;
+    await microtasksFinished();
+    testVisible(item, '#rate-link', false);
+  });
 });

@@ -16,12 +16,12 @@
 
 namespace extensions {
 
-// A ValueStore decorator which makes calls through |Set| ignore quota.
+// A ValueStore decorator which makes calls through `Set` ignore quota.
 // "Weak" because ownership of the delegate isn't taken; this is designed to be
 // temporarily attached to storage areas.
 class WeakUnlimitedSettingsStorage : public value_store::ValueStore {
  public:
-  // Ownership of |delegate| NOT taken.
+  // Ownership of `delegate` NOT taken.
   explicit WeakUnlimitedSettingsStorage(value_store::ValueStore* delegate);
 
   WeakUnlimitedSettingsStorage(const WeakUnlimitedSettingsStorage&) = delete;
@@ -34,14 +34,14 @@ class WeakUnlimitedSettingsStorage : public value_store::ValueStore {
   size_t GetBytesInUse(const std::string& key) override;
   size_t GetBytesInUse(const std::vector<std::string>& keys) override;
   size_t GetBytesInUse() override;
+  ReadResult GetKeys() override;
   ReadResult Get(const std::string& key) override;
   ReadResult Get(const std::vector<std::string>& keys) override;
   ReadResult Get() override;
   WriteResult Set(WriteOptions options,
                   const std::string& key,
                   const base::Value& value) override;
-  WriteResult Set(WriteOptions options,
-                  const base::Value::Dict& values) override;
+  WriteResult Set(WriteOptions options, const base::DictValue& values) override;
   WriteResult Remove(const std::string& key) override;
   WriteResult Remove(const std::vector<std::string>& keys) override;
   WriteResult Clear() override;

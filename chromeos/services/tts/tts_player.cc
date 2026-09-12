@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 #include "chromeos/services/tts/tts_player.h"
+
 #include "base/task/single_thread_task_runner.h"
+#include "media/base/audio_bus.h"
 
 namespace chromeos {
 namespace tts {
@@ -11,10 +13,17 @@ namespace tts {
 TtsPlayer::TtsPlayer(
     mojo::PendingRemote<media::mojom::AudioStreamFactory> factory,
     const media::AudioParameters& params)
-    : output_device_(std::move(factory), params, this, std::string()),
+    : output_device_(
+          std::make_unique<audio::OutputDevice>(std::move(factory),
+                                                params,
+                                                this,
+                                                std::string())),
       task_runner_(base::SingleThreadTaskRunner::GetCurrentDefault()) {}
 
-TtsPlayer::~TtsPlayer() = default;
+TtsPlayer::~TtsPlayer() {
+  // Join the audio thread before any members it accesses are destroyed.
+  output_device_.reset();
+}
 
 void TtsPlayer::Play(
     base::OnceCallback<void(::mojo::PendingReceiver<mojom::TtsEventObserver>)>
@@ -23,7 +32,7 @@ void TtsPlayer::Play(
   auto pending_receiver = tts_event_observer_.BindNewPipeAndPassReceiver();
   std::move(callback).Run(std::move(pending_receiver));
 
-  output_device_.Play();
+  output_device_->Play();
 }
 
 void TtsPlayer::AddAudioBuffer(AudioBuffer buf) {
@@ -42,7 +51,7 @@ void TtsPlayer::Stop() {
 }
 
 void TtsPlayer::SetVolume(float volume) {
-  output_device_.SetVolume(volume);
+  output_device_->SetVolume(volume);
 }
 
 void TtsPlayer::Pause() {
@@ -51,47 +60,50 @@ void TtsPlayer::Pause() {
 }
 
 void TtsPlayer::Resume() {
-  output_device_.Play();
+  output_device_->Play();
 }
 
 int TtsPlayer::Render(base::TimeDelta delay,
                       base::TimeTicks delay_timestamp,
                       const media::AudioGlitchInfo& glitch_info,
                       media::AudioBus* dest) {
-  size_t frames_in_buf = 0;
+  size_t frame_count = dest->frames();
+
   {
     base::AutoLock al(state_lock_);
     if (buffers_.empty())
       return 0;
 
-    const AudioBuffer& buf = buffers_.front();
+    auto channel = dest->channel(0);
 
-    frames_in_buf = buf.frames.size();
-    const float* frames = nullptr;
-    if (!buf.frames.empty())
-      frames = &buf.frames[0];
-    float* channel = dest->channel(0);
-    for (size_t i = 0; i < frames_in_buf; i++)
-      channel[i] = frames[i];
+    AudioBuffer* buffer = &buffers_.front();
+    for (size_t output_index = 0; output_index < frame_count;
+         output_index++, buffer->current_frame_index++) {
+      while (buffer->current_frame_index == buffer->frames.size()) {
+        // Buffer empty or exhausted, continue to next buffer.
+        PostTaskProcessRenderedBuffersLocked(buffer);
 
-    rendered_buffers_.push(std::move(buffers_.front()));
-    buffers_.pop();
+        if (buffers_.empty()) {
+          return output_index;
+        }
+        buffer = &buffers_.front();
+      }
+      channel[output_index] = buffer->frames[buffer->current_frame_index];
+    }
 
-    if (!process_rendered_buffers_posted_) {
-      process_rendered_buffers_posted_ = true;
-      task_runner_->PostTask(FROM_HERE,
-                             base::BindOnce(&TtsPlayer::ProcessRenderedBuffers,
-                                            weak_factory_.GetWeakPtr()));
+    CHECK(!buffer->frames.empty());
+    if (buffer->current_frame_index == buffer->frames.size()) {
+      PostTaskProcessRenderedBuffersLocked(buffer);
     }
   }
 
-  return frames_in_buf;
+  return frame_count;
 }
 
 void TtsPlayer::OnRenderError() {}
 
 void TtsPlayer::StopLocked(bool clear_buffers) {
-  output_device_.Pause();
+  output_device_->Pause();
   rendered_buffers_ = std::queue<AudioBuffer>();
   if (clear_buffers) {
     buffers_ = std::queue<AudioBuffer>();
@@ -143,6 +155,21 @@ TtsPlayer::AudioBuffer::AudioBuffer(TtsPlayer::AudioBuffer&& other) {
   status = other.status;
   char_index = other.char_index;
   is_first_buffer = other.is_first_buffer;
+  current_frame_index = other.current_frame_index;
+}
+
+void TtsPlayer::PostTaskProcessRenderedBuffersLocked(AudioBuffer* buffer) {
+  CHECK_EQ(buffer, &buffers_.front());
+  rendered_buffers_.push(std::move(*buffer));
+  buffers_.pop();
+
+  if (process_rendered_buffers_posted_) {
+    return;
+  }
+  process_rendered_buffers_posted_ = true;
+  task_runner_->PostTask(FROM_HERE,
+                         base::BindOnce(&TtsPlayer::ProcessRenderedBuffers,
+                                        weak_factory_.GetWeakPtr()));
 }
 
 }  // namespace tts

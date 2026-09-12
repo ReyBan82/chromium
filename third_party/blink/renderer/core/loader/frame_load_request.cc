@@ -13,13 +13,23 @@
 #include "third_party/blink/renderer/core/events/current_input_event.h"
 #include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/frame/policy_container.h"
+#include "third_party/blink/renderer/core/html/forms/html_form_element.h"
+#include "third_party/blink/renderer/core/script_tools/script_tool_context.h"
 #include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
+#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
 #include "third_party/blink/renderer/platform/network/encoded_form_data.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/scheduler/public/task_attribution_info.h"
+#include "third_party/blink/renderer/platform/scheduler/public/task_attribution_tracker.h"
 #include "third_party/blink/renderer/platform/weborigin/security_policy.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 
 namespace blink {
+
+namespace {
 
 static void SetReferrerForRequest(LocalDOMWindow* origin_window,
                                   ResourceRequest& request) {
@@ -43,12 +53,35 @@ static void SetReferrerForRequest(LocalDOMWindow* origin_window,
 
   request.SetReferrerString(referrer.referrer);
   request.SetReferrerPolicy(referrer.referrer_policy);
-  request.SetHTTPOriginToMatchReferrerIfNeeded();
 }
+
+void LogDanglingMarkupHistogram(LocalDOMWindow* origin_window,
+                                const AtomicString& target) {
+  DCHECK(origin_window);
+
+  origin_window->CountUse(WebFeature::kDanglingMarkupInTarget);
+  if (!target.ends_with('>')) {
+    origin_window->CountUse(WebFeature::kDanglingMarkupInTargetNotEndsWithGT);
+    if (!target.ends_with('\n')) {
+      origin_window->CountUse(
+          WebFeature::kDanglingMarkupInTargetNotEndsWithNewLineOrGT);
+    }
+  }
+}
+
+bool ContainsNewLineAndLessThan(const AtomicString& target) {
+  return (target.contains('\n') || target.contains('\r') ||
+          target.contains('\t')) &&
+         target.contains('<');
+}
+
+}  // namespace
 
 FrameLoadRequest::FrameLoadRequest(LocalDOMWindow* origin_window,
                                    const ResourceRequest& resource_request)
-    : origin_window_(origin_window), should_send_referrer_(kMaybeSendReferrer) {
+    : origin_window_(origin_window),
+      should_send_referrer_(kMaybeSendReferrer),
+      creation_time_(base::TimeTicks::Now()) {
   resource_request_.CopyHeadFrom(resource_request);
   resource_request_.SetHttpBody(resource_request.HttpBody());
   resource_request_.SetMode(network::mojom::RequestMode::kNavigate);
@@ -66,26 +99,44 @@ FrameLoadRequest::FrameLoadRequest(LocalDOMWindow* origin_window,
 
     DCHECK(!resource_request_.RequestorOrigin());
     resource_request_.SetRequestorOrigin(origin_window->GetSecurityOrigin());
+    const InitiatorStateToken& initiator_state_token =
+        origin_window->GetInitiatorStateToken();
+    SetInitiatorStateToken(initiator_state_token);
+    if (origin_window->document()) {
+      SetInitiatorDocumentToken(origin_window->document()->Token());
+    }
     // Note: `resource_request_` is owned by this FrameLoadRequest instance, and
     // its url doesn't change after this point, so it's ok to check for
     // about:blank and about:srcdoc here.
-    if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled() &&
-        (resource_request_.Url().IsAboutBlankURL() ||
-         resource_request_.Url().IsAboutSrcdocURL())) {
+    if (resource_request_.Url().IsAboutBlankUrl() ||
+        resource_request_.Url().IsAboutSrcdocUrl() ||
+        resource_request_.Url().IsEmpty()) {
       requestor_base_url_ = origin_window->BaseURL();
-    }
-
-    if (resource_request.Url().ProtocolIs("blob")) {
-      blob_url_token_ = base::MakeRefCounted<
-          base::RefCountedData<mojo::Remote<mojom::blink::BlobURLToken>>>();
-      origin_window->GetPublicURLManager().Resolve(
-          resource_request.Url(),
-          blob_url_token_->data.BindNewPipeAndPassReceiver());
     }
 
     SetReferrerForRequest(origin_window, resource_request_);
 
+    if (origin_window->GetFrame()) {
+      resource_request_.SetHasUserGesture(
+          resource_request_.HasUserGesture() ||
+          LocalFrame::HasTransientUserActivation(origin_window->GetFrame()));
+    }
+
     SetSourceLocation(CaptureSourceLocation(origin_window));
+
+    // If a Script Tool (WebMCP tool) execution is currently active in the
+    // scheduler, capture its invocation ID and attach it to this request.
+    // This allows the browser to track navigations triggered by script tools.
+    if (auto* tracker = origin_window_->GetIsolate()
+                            ? scheduler::TaskAttributionTracker::From(
+                                  origin_window_->GetIsolate())
+                            : nullptr) {
+      if (auto* task_state = tracker->CurrentTaskState()) {
+        if (auto* script_tool_context = task_state->GetScriptToolContext()) {
+          script_tool_invocation_id_ = script_tool_context->GetInvocationId();
+        }
+      }
+    }
   }
 }
 
@@ -93,6 +144,16 @@ FrameLoadRequest::FrameLoadRequest(
     LocalDOMWindow* origin_window,
     const ResourceRequestHead& resource_request_head)
     : FrameLoadRequest(origin_window, ResourceRequest(resource_request_head)) {}
+
+HTMLFormElement* FrameLoadRequest::Form() const {
+  if (IsA<HTMLFormElement>(source_element_)) {
+    return To<HTMLFormElement>(source_element_);
+  }
+  if (IsA<HTMLFormControlElement>(source_element_)) {
+    return To<HTMLFormControlElement>(source_element_)->formOwner();
+  }
+  return nullptr;
+}
 
 bool FrameLoadRequest::CanDisplay(const KURL& url) const {
   DCHECK(!origin_window_ || origin_window_->GetSecurityOrigin() ==
@@ -102,6 +163,29 @@ bool FrameLoadRequest::CanDisplay(const KURL& url) const {
 
 const LocalFrameToken* FrameLoadRequest::GetInitiatorFrameToken() const {
   return base::OptionalToPtr(initiator_frame_token_);
+}
+
+void FrameLoadRequest::ResolveBlobURLIfNeeded() {
+  if (resource_request_.Url().ProtocolIs("blob") && origin_window_) {
+    blob_url_token_ = base::MakeRefCounted<
+        base::RefCountedData<mojo::Remote<mojom::blink::BlobURLToken>>>();
+    origin_window_->GetPublicURLManager().ResolveAsBlobURLToken(
+        resource_request_.Url(),
+        blob_url_token_->data.BindNewPipeAndPassReceiver(),
+        GetFrameType() == mojom::blink::RequestContextFrameType::kTopLevel);
+  }
+}
+
+const AtomicString& FrameLoadRequest::CleanNavigationTarget(
+    const AtomicString& target) const {
+  if (ContainsNewLineAndLessThan(target)) {
+    LogDanglingMarkupHistogram(origin_window_, target);
+    if (RuntimeEnabledFeatures::RemoveDanglingMarkupInTargetEnabled()) {
+      DEFINE_STATIC_LOCAL(const AtomicString, blank, ("_blank"));
+      return blank;
+    }
+  }
+  return target;
 }
 
 }  // namespace blink

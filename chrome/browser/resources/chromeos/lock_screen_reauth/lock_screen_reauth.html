@@ -88,12 +88,17 @@
     /* #000000 */
     box-shadow: 0 2px 2px 0 rgba(0, 0, 0, 0.17);
     display: flex;
+  }
+
+  #samlHeader {
+    display: flex;
+    flex-grow: 1;
     height: 44px;
     justify-content: flex-end;
     text-align: center;
   }
 
-  #samlContainer[saml-notice-message] {
+  #samlHeader[saml-notice-message] {
     /* #FFFFFF */
     background: white;
   }
@@ -144,7 +149,6 @@
   }
 
   .header {
-    background: white;
     display: flex;
     flex-direction: column;
     padding-bottom: var(--lock-screen-reauth-dialog-content-padding);
@@ -156,7 +160,7 @@
   }
 
   .title {
-    color: var(--cr-primary-text-color);
+    color: var(--cros-text-color-primary);
     font-size: 28px;
     font-weight: 400;
     margin: 0;
@@ -165,7 +169,7 @@
   }
 
   .subtitle {
-    color: var(--cr-secondary-text-color);
+    color: var(--cros-text-color-secondary);
     font-size: 13px;
     font-weight: 400;
     line-height: var(--lock-screen-reauth-dialog-text-line-height);
@@ -239,38 +243,7 @@
     transform: rotate(180deg);
   }
 </style>
-<div class="content-wrapper" hidden="[[!isVerifyUser_]]" role="dialog"
-    aria-modal="true" id="verifyAccountScreen"
-    aria-label="$i18n{loginWelcomeMessage}">
-  <div class="main-container">
-    <div class="header">
-      <iron-icon class="title-icon" icon="oobe-32:avatar"></iron-icon>
-      <div class="title">
-        $i18n{loginWelcomeMessage}
-      </div>
-      <div class="subtitle">
-        $i18n{lockScreenReauthSubtitile}
-      </div>
-    </div>
-    <div class="illustration-container">
-      <img class="illustration"
-          srcset="chrome://lock-reauth/images/1x/verify-account.svg 1x,
-                  chrome://lock-reauth/images/2x/verify-account.svg 2x">
-    </div>
-  </div>
-  <div class="flex layout horizontal button-container">
-    <cr-button id="cancelButtonVerifyScreen" class="cancel-button"
-        on-click="onCloseTap_">
-      $i18n{lockScreenCancelButton}
-    </cr-button>
-    <cr-button id="nextButtonVerifyScreen" class="action-button"
-        on-click="onVerify_">
-      $i18n{lockScreenVerifyButton}
-    </cr-button>
-  </div>
-</div>
-
-<div class="content-wrapper" hidden="[[!isErrorDisplayed_]]" role="dialog"
+<div class="content-wrapper" hidden="[[!isErrorDisplayed]]" role="dialog"
     aria-modal="true" id="errorScreen"
     aria-label="$i18n{loginWelcomeMessageWithError}">
   <div class="main-container">
@@ -285,29 +258,31 @@
       </div>
     </div>
     <div class="illustration-container">
-      <img src="chrome://lock-reauth/images/error.svg" class="illustration">
+      <iron-icon icon="oobe-illos:error-illo" class="illustration">
+      </iron-icon>
     </div>
   </div>
   <div class="flex layout horizontal button-container">
     <cr-button id="cancelButtonErrorScreen" class="cancel-button"
-        on-click="onCloseTap_">
+        on-click="onCloseClick">
       $i18n{lockScreenCancelButton}
     </cr-button>
-    <cr-button id="nextButton" class="action-button" on-click="onVerify_">
+    <cr-button id="nextButton" class="action-button" on-click="onVerify">
       $i18n{lockScreenVerifyAgainButton}
     </cr-button>
   </div>
 </div>
 
-<div id="body" hidden="[[!isSamlPage_]]">
-  <div id="samlContainer"
-      saml-notice-message$="[[showSamlNoticeMessage_]]">
-    <span id="samlNoticeMessage" hidden="[[!showSamlNoticeMessage_]]">
-      [[i18n('samlNotice', authDomain_)]]
-    </span>
-    <cr-icon-button id="saml-close-button" iron-icon="cr:close"
-        on-click="onCloseTap_" aria-label="$i18n{lockScreenCloseButton}">
-    </cr-icon-button>
+<div id="body" hidden="[[!isSigninFrameDisplayed]]">
+  <div id="samlContainer">
+    <div id="samlHeader" saml-notice-message$="[[isSaml]]">
+      <span id="samlNoticeMessage" hidden="[[!isSaml]]">
+        [[i18n('samlNotice', authDomain)]]
+      </span>
+      <cr-icon-button id="saml-close-button" iron-icon="cr:close"
+          on-click="onCloseClick" aria-label="$i18n{lockScreenCloseButton}">
+      </cr-icon-button>
+    </div>
   </div>
   <webview id="signin-frame" name="signin-frame" class="flex">
   </webview>
@@ -316,44 +291,54 @@
     <div>[[i18nDynamic(locale, 'samlChangeProviderMessage')]]</div>
     <oobe-text-button id="change-account"
         text-key="samlChangeProviderButton"
-        on-click="onChangeSigninProviderClicked_">
+        on-click="onChangeSigninProviderClicked">
     </oobe-text-button>
+  </div>
+  <div id="buttons-container" class="flex layout horizontal button-container"
+      hidden="[[isSaml]]">
+    <div class="action-buttons">
+      <gaia-action-buttons id="gaia-buttons"
+          authenticator="[[authenticator]]"
+          rounded-button="True"
+          on-set-focus-to-webview="setFocusToWebview">
+      </gaia-action-buttons>
+    </div>
   </div>
 </div>
 
 <div id="samlConfirmPasswordScreen" class="content-wrapper"
-    hidden="[[!isConfirmPassword_]]">
+    hidden="[[!isConfirmPassword]]">
   <div class="main-container">
     <div class="header">
       <iron-icon class="title-icon" icon="oobe-32:lock"></iron-icon>
       <div class="title">
-        [[email_]]
+        [[email]]
       </div>
-      <div class="subtitle" hidden="[[isManualInput_]]">
+      <div class="subtitle" hidden="[[isManualInput]]">
         $i18n{confirmPasswordSubtitle}
       </div>
-      <div class="subtitle" hidden="[[!isManualInput_]]">
+      <div class="subtitle" hidden="[[!isManualInput]]">
         $i18n{manualPasswordSubtitle}
       </div>
     </div>
     <div class="input-container">
       <cr-input type="password" id="passwordInput" required
-          placeholder="[[passwordPlaceholder_(locale, isManualInput_)]]"
-          error-message="[[passwordErrorText_(locale, isManualInput_)]]">
+          placeholder="[[passwordPlaceholder(locale, isManualInput)]]"
+          error-message="[[passwordErrorText(locale, isManualInput)]]">
       </cr-input>
       <cr-input type="password" id="confirmPasswordInput" required
           placeholder="$i18n{confirmPasswordLabel}"
           error-message="$i18n{manualPasswordMismatch}"
-          hidden="[[!isManualInput_]]">
+          hidden="[[!isManualInput]]">
       </cr-input>
     </div>
   </div>
   <div class="flex layout horizontal button-container">
-    <cr-button id="cancelButton" class="cancel-button" on-click="onCloseTap_">
+    <cr-button id="cancelButton" class="cancel-button" on-click="onCloseClick">
       $i18n{lockScreenCancelButton}
     </cr-button>
     <cr-button id="nextButtonSamlConfirmPassword" class="action-button"
-        on-click="onConfirm_">
+        on-click="onConfirm">
       $i18n{lockScreenNextButton}
       <iron-icon id="arrowForward" icon="oobe-20:button-arrow-forward">
       </iron-icon>
@@ -361,7 +346,7 @@
   </div>
 </div>
 
-<div class="content-wrapper" hidden="[[!isPasswordChanged_]]">
+<div class="content-wrapper" hidden="[[!isPasswordChanged]]">
   <div class="main-container">
     <div class="header">
       <iron-icon class="title-icon" icon="oobe-32:lock"></iron-icon>
@@ -379,10 +364,10 @@
     </div>
   </div>
   <div class="flex layout horizontal button-container">
-    <cr-button id="cancelButton" class="cancel-button" on-click="onCloseTap_">
+    <cr-button id="cancelButton" class="cancel-button" on-click="onCloseClick">
       $i18n{lockScreenCancelButton}
     </cr-button>
-    <cr-button id="nextButton" class="action-button" on-click="onNext_">
+    <cr-button id="nextButton" class="action-button" on-click="onNext">
       $i18n{lockScreenNextButton}
       <iron-icon icon="oobe-20:button-arrow-forward"></iron-icon>
     </cr-button>

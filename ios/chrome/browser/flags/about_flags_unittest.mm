@@ -4,13 +4,9 @@
 
 #import "ios/chrome/browser/flags/about_flags.h"
 
-#import "components/flags_ui/feature_entry.h"
-#import "components/flags_ui/flags_test_helpers.h"
+#import "components/webui/flags/feature_entry.h"
+#import "components/webui/flags/flags_test_helpers.h"
 #import "testing/platform_test.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 using AboutFlagsTest = PlatformTest;
 
@@ -34,6 +30,12 @@ TEST_F(AboutFlagsTest, EveryFlagHasNonEmptyOwners) {
 // Ensures that owners conform to rules in flag-metadata.json.
 TEST_F(AboutFlagsTest, OwnersLookValid) {
   flags_ui::testing::EnsureOwnersLookValid();
+}
+
+// Ensures that every flag in `flag-never-expire-list.json` has a matching entry
+// in `flag-metadata.json`.
+TEST_F(AboutFlagsTest, NeverExpireFlagsExist) {
+  flags_ui::testing::EnsureNeverExpireFlagsExist();
 }
 
 // Ensures that flags are listed in alphabetical order in flag-metadata.json and

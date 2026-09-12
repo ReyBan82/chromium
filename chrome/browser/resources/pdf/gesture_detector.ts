@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {Point} from './constants.js';
+import {assert} from 'chrome://resources/js/assert.js';
+
+import type {Point} from './constants.js';
 
 export interface Gesture {
   type: string;
@@ -43,10 +45,10 @@ export class GestureDetector {
     this.element_ = element;
 
     this.element_.addEventListener(
-        'touchstart', (this.onTouchStart_.bind(this) as (p1: Event) => any),
+        'touchstart', this.onTouchStart_.bind(this) as EventListener,
         {passive: true});
 
-    const boundOnTouch = (this.onTouch_.bind(this) as (p1: Event) => any);
+    const boundOnTouch = this.onTouch_.bind(this) as EventListener;
     this.element_.addEventListener('touchmove', boundOnTouch, {passive: true});
     this.element_.addEventListener('touchend', boundOnTouch, {passive: true});
     this.element_.addEventListener(
@@ -231,8 +233,9 @@ function pinchScaleRatio(event: TouchEvent, prevEvent: TouchEvent): number|
  * @return Distance between touch[0] and touch[1].
  */
 function distance(event: TouchEvent): number {
-  const touch1 = event.touches[0];
-  const touch2 = event.touches[1];
+  assert(event.touches.length > 1);
+  const touch1 = event.touches[0]!;
+  const touch2 = event.touches[1]!;
   const dx = touch1.clientX - touch2.clientX;
   const dy = touch1.clientY - touch2.clientY;
   return Math.sqrt(dx * dx + dy * dy);
@@ -244,8 +247,9 @@ function distance(event: TouchEvent): number {
  * @return Midpoint between touch[0] and touch[1].
  */
 function center(event: TouchEvent): Point {
-  const touch1 = event.touches[0];
-  const touch2 = event.touches[1];
+  assert(event.touches.length > 1);
+  const touch1 = event.touches[0]!;
+  const touch2 = event.touches[1]!;
   return {
     x: (touch1.clientX + touch2.clientX) / 2,
     y: (touch1.clientY + touch2.clientY) / 2,

@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ash/policy/core/device_attributes_impl.h"
+#include <memory>
+#include <optional>
 
 #include "base/run_loop.h"
-
+#include "base/test/test_future.h"
 #include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
+#include "chrome/browser/ash/policy/core/device_attributes_impl.h"
 #include "chrome/browser/ash/policy/core/device_cloud_policy_manager_ash.h"
 #include "chrome/browser/ash/policy/core/device_cloud_policy_store_ash.h"
 #include "chrome/browser/ash/policy/core/device_policy_cros_browser_test.h"
-#include "chrome/browser/ash/settings/scoped_testing_cros_settings.h"
-#include "chrome/browser/ash/settings/stub_cros_settings_provider.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/browser_process_platform_part_ash.h"
 #include "chromeos/ash/components/install_attributes/stub_install_attributes.h"
@@ -25,7 +25,6 @@
 #include "content/public/test/browser_test.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using testing::InvokeWithoutArgs;
 
@@ -44,7 +43,6 @@ constexpr char kFakeHostname[] = "fake-hostname";
 constexpr char kFakeDirectoryApiID[] = "fake directory API ID";
 constexpr char kFakeObfuscatedCustomerID[] = "fake obfuscated customer ID";
 constexpr char kFakeLogoURL[] = "www.fakelogo.com/url";
-constexpr char kFakeRealm[] = "fake realm";
 constexpr char kFakeDeviceID[] = "fake device ID";
 
 }  // namespace
@@ -59,32 +57,41 @@ class DeviceAttributesTest : public DevicePolicyCrosBrowserTest {
 
   ~DeviceAttributesTest() override = default;
 
+  void SetUpOnMainThread() override {
+    DevicePolicyCrosBrowserTest::SetUpOnMainThread();
+    attributes_ = std::make_unique<DeviceAttributesImpl>(
+        g_browser_process->platform_part()->browser_policy_connector_ash());
+  }
+
+  void TearDownOnMainThread() override {
+    attributes_.reset();
+    DevicePolicyCrosBrowserTest::TearDownOnMainThread();
+  }
+
  protected:
   ash::StubInstallAttributes* stub_install_attributes() {
     return install_attributes_.Get();
   }
 
-  DeviceAttributesImpl attributes_;
+  std::unique_ptr<DeviceAttributesImpl> attributes_;
   ash::ScopedStubInstallAttributes install_attributes_;
-  ash::ScopedTestingCrosSettings scoped_testing_cros_settings_;
   ash::system::ScopedFakeStatisticsProvider fake_statistics_provider_;
 };
 
 IN_PROC_BROWSER_TEST_F(DeviceAttributesTest, ReturnsAttributes) {
   // Attributes are empty before setting device policy and install attributes.
-  EXPECT_EQ("", attributes_.GetEnterpriseEnrollmentDomain());
-  EXPECT_EQ("", attributes_.GetEnterpriseDomainManager());
-  EXPECT_EQ("", attributes_.GetSSOProfile());
-  EXPECT_EQ("", attributes_.GetRealm());
-  EXPECT_EQ("", attributes_.GetDeviceAssetID());
-  EXPECT_EQ("", attributes_.GetDeviceSerialNumber());
-  EXPECT_EQ("", attributes_.GetMachineName());
-  EXPECT_EQ("", attributes_.GetDeviceAnnotatedLocation());
-  EXPECT_EQ(absl::nullopt, attributes_.GetDeviceHostname());
-  EXPECT_EQ("", attributes_.GetDirectoryApiID());
-  EXPECT_EQ("", attributes_.GetObfuscatedCustomerID());
-  EXPECT_EQ("", attributes_.GetCustomerLogoURL());
-  EXPECT_EQ(MarketSegment::UNKNOWN, attributes_.GetEnterpriseMarketSegment());
+  EXPECT_EQ("", attributes_->GetEnterpriseEnrollmentDomain());
+  EXPECT_EQ("", attributes_->GetEnterpriseDomainManager());
+  EXPECT_EQ("", attributes_->GetSSOProfile());
+  EXPECT_EQ("", attributes_->GetDeviceAssetID());
+  EXPECT_EQ("", attributes_->GetDeviceSerialNumber());
+  EXPECT_EQ("", attributes_->GetMachineName());
+  EXPECT_EQ("", attributes_->GetDeviceAnnotatedLocation());
+  EXPECT_EQ(std::nullopt, attributes_->GetDeviceHostname());
+  EXPECT_EQ("", attributes_->GetDirectoryApiID());
+  EXPECT_EQ("", attributes_->GetObfuscatedCustomerID());
+  EXPECT_EQ("", attributes_->GetCustomerLogoURL());
+  EXPECT_EQ(MarketSegment::UNKNOWN, attributes_->GetEnterpriseMarketSegment());
 
   // Set fake device policy and install attributes.
   stub_install_attributes()->SetCloudManaged(kFakeDomain, kFakeDeviceID);
@@ -100,33 +107,36 @@ IN_PROC_BROWSER_TEST_F(DeviceAttributesTest, ReturnsAttributes) {
       kFakeLogoURL);
   device_policy()->policy_data().set_market_segment(
       enterprise_management::PolicyData_MarketSegment_ENROLLED_ENTERPRISE);
-  scoped_testing_cros_settings_.device_settings()->Set(
-      ash::kDeviceHostnameTemplate, base::Value(kFakeHostname));
+  device_policy()
+      ->payload()
+      .mutable_network_hostname()
+      ->set_device_hostname_template(kFakeHostname);
+
   policy_helper()->RefreshPolicyAndWaitUntilDeviceCloudPolicyUpdated();
 
-  fake_statistics_provider_.SetMachineStatistic(
-      ash::system::kSerialNumberKeyForTest, kFakeSerialNumber);
+  fake_statistics_provider_.SetMachineStatistic(ash::system::kSerialNumberKey,
+                                                kFakeSerialNumber);
+
+  // Wait for the completion of pending tasks.
+  base::test::TestFuture<void> waiter;
+  fake_statistics_provider_.ScheduleOnMachineStatisticsLoaded(
+      waiter.GetCallback());
+  ASSERT_TRUE(waiter.Wait());
 
   // Verify returned attributes correspond to what was set.
-  EXPECT_EQ(kFakeDomain, attributes_.GetEnterpriseEnrollmentDomain());
-  EXPECT_EQ(kFakeDisplayDomain, attributes_.GetEnterpriseDomainManager());
-  EXPECT_EQ(kFakeSSOProfile, attributes_.GetSSOProfile());
-  EXPECT_EQ("", attributes_.GetRealm());
-  EXPECT_EQ(kFakeAssetId, attributes_.GetDeviceAssetID());
-  EXPECT_EQ(kFakeSerialNumber, attributes_.GetDeviceSerialNumber());
-  EXPECT_EQ(kFakeMachineName, attributes_.GetMachineName());
-  EXPECT_EQ(kFakeAnnotatedLocation, attributes_.GetDeviceAnnotatedLocation());
-  EXPECT_EQ(kFakeHostname, attributes_.GetDeviceHostname());
-  EXPECT_EQ(kFakeDirectoryApiID, attributes_.GetDirectoryApiID());
-  EXPECT_EQ(kFakeObfuscatedCustomerID, attributes_.GetObfuscatedCustomerID());
-  EXPECT_EQ(kFakeLogoURL, attributes_.GetCustomerLogoURL());
+  EXPECT_EQ(kFakeDomain, attributes_->GetEnterpriseEnrollmentDomain());
+  EXPECT_EQ(kFakeDisplayDomain, attributes_->GetEnterpriseDomainManager());
+  EXPECT_EQ(kFakeSSOProfile, attributes_->GetSSOProfile());
+  EXPECT_EQ(kFakeAssetId, attributes_->GetDeviceAssetID());
+  EXPECT_EQ(kFakeSerialNumber, attributes_->GetDeviceSerialNumber());
+  EXPECT_EQ(kFakeMachineName, attributes_->GetMachineName());
+  EXPECT_EQ(kFakeAnnotatedLocation, attributes_->GetDeviceAnnotatedLocation());
+  EXPECT_EQ(kFakeHostname, attributes_->GetDeviceHostname());
+  EXPECT_EQ(kFakeDirectoryApiID, attributes_->GetDirectoryApiID());
+  EXPECT_EQ(kFakeObfuscatedCustomerID, attributes_->GetObfuscatedCustomerID());
+  EXPECT_EQ(kFakeLogoURL, attributes_->GetCustomerLogoURL());
   EXPECT_EQ(MarketSegment::ENTERPRISE,
-            attributes_.GetEnterpriseMarketSegment());
-
-  // Set a fake active directory realm and verify it is returned.
-  stub_install_attributes()->SetActiveDirectoryManaged(kFakeRealm,
-                                                       kFakeDeviceID);
-  EXPECT_EQ(kFakeRealm, attributes_.GetRealm());
+            attributes_->GetEnterpriseMarketSegment());
 }
 
 }  // namespace policy

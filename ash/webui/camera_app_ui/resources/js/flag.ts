@@ -6,6 +6,5 @@
  * Name of the chrome flags.
  */
 export enum Flag {
-  LOW_STORAGE_WARNING = 'lowStorageWarning',
-  PLACEHOLDER_FLAG = '',
+  SUPER_RES = 'super_res',
 }

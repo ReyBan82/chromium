@@ -6,15 +6,17 @@
 
 #include <string>
 
+#include "base/compiler_specific.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace {
 
-const crypto::Aead::AeadAlgorithm kAllAlgorithms[]{
-    crypto::Aead::AES_128_CTR_HMAC_SHA256,
-    crypto::Aead::AES_256_GCM,
-    crypto::Aead::AES_256_GCM_SIV,
-    crypto::Aead::CHACHA20_POLY1305,
+const crypto::aead::Algorithm kAllAlgorithms[]{
+    crypto::aead::AES_128_CTR_HMAC_SHA256,
+    crypto::aead::AES_128_GCM,
+    crypto::aead::AES_256_GCM,
+    crypto::aead::AES_256_GCM_SIV,
+    crypto::aead::CHACHA20_POLY1305,
 };
 
 class AeadTest : public testing::TestWithParam<crypto::Aead::AeadAlgorithm> {};
@@ -51,11 +53,11 @@ TEST_P(AeadTest, SealOpenSpan) {
       aead.Seal(kPlaintext, nonce, kAdditionalData);
   EXPECT_LT(sizeof(kPlaintext), ciphertext.size());
 
-  absl::optional<std::vector<uint8_t>> decrypted =
+  std::optional<std::vector<uint8_t>> decrypted =
       aead.Open(ciphertext, nonce, kAdditionalData);
   ASSERT_TRUE(decrypted);
   ASSERT_EQ(decrypted->size(), sizeof(kPlaintext));
-  ASSERT_EQ(0, memcmp(decrypted->data(), kPlaintext, sizeof(kPlaintext)));
+  ASSERT_EQ(base::span(*decrypted), base::span(kPlaintext));
 
   std::vector<uint8_t> wrong_key(aead.KeyLength(), 1u);
   crypto::Aead aead_wrong_key(alg);
@@ -83,6 +85,33 @@ TEST_P(AeadTest, SealOpenWrongKey) {
   std::string decrypted;
   EXPECT_FALSE(aead_wrong_key.Open(ciphertext, nonce, ad, &decrypted));
   EXPECT_EQ(0U, decrypted.size());
+}
+
+TEST_P(AeadTest, SealOpenTooShortKey) {
+  crypto::Aead aead(GetParam());
+  std::array<uint8_t, 1> key;
+  aead.Init(key);
+
+  std::string nonce(aead.NonceLength(), 0);
+  std::string plaintext("this is the plaintext");
+  std::string ad("this is the additional data");
+  std::string ciphertext;
+  EXPECT_FALSE(aead.Seal(plaintext, nonce, ad, &ciphertext));
+}
+
+TEST_P(AeadTest, OneShotRoundTrips) {
+  crypto::aead::Algorithm alg = GetParam();
+
+  constexpr auto plaintext = std::to_array<uint8_t>({0x01, 0x23, 0x45, 0x67});
+  constexpr auto ad = std::to_array<uint8_t>({0x89, 0xab, 0xcd, 0xef});
+  std::vector<uint8_t> key(crypto::aead::KeySizeFor(alg));
+  std::vector<uint8_t> nonce(crypto::aead::NonceSizeFor(alg));
+
+  const auto ciphertext = crypto::aead::Seal(alg, key, plaintext, nonce, ad);
+  const auto recovered = crypto::aead::Open(alg, key, ciphertext, nonce, ad);
+
+  ASSERT_TRUE(recovered);
+  EXPECT_EQ(base::as_byte_span(*recovered), base::as_byte_span(plaintext));
 }
 
 }  // namespace

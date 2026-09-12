@@ -10,9 +10,12 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/feature_list.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -28,18 +31,16 @@
 #include "base/task/thread_pool.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/device_event_log/device_event_log.h"
 #include "device/udev_linux/scoped_udev.h"
 #include "device/udev_linux/udev_watcher.h"
 #include "services/device/hid/hid_connection_linux.h"
+#include "services/device/public/cpp/device_features.h"
 
-// TODO(huangs): Enable for IS_CHROMEOS_LACROS. This will simplify crosapi so
-// that it won't need to pass HidManager around (crbug.com/1109621).
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "base/system/sys_info.h"
 #include "chromeos/dbus/permission_broker/permission_broker_client.h"  // nogncheck
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace device {
 
@@ -64,8 +65,9 @@ udev_device* FindFirstHidAncestor(udev_device* device) {
     const char* subsystem = udev_device_get_subsystem(ancestor);
     if (!subsystem)
       return nullptr;
-    if (strcmp(subsystem, kSubsystemHid) == 0)
+    if (UNSAFE_TODO(strcmp(subsystem, kSubsystemHid)) == 0) {
       return ancestor;
+    }
   } while ((ancestor = udev_device_get_parent(ancestor)));
   return nullptr;
 }
@@ -78,8 +80,8 @@ udev_device* FindFirstNonHidAncestor(udev_device* device) {
     const char* subsystem = udev_device_get_subsystem(ancestor);
     if (!subsystem)
       return nullptr;
-    if (strcmp(subsystem, kSubsystemHid) != 0 &&
-        strcmp(subsystem, kSubsystemHidraw) != 0) {
+    if (UNSAFE_TODO(strcmp(subsystem, kSubsystemHid)) != 0 &&
+        UNSAFE_TODO(strcmp(subsystem, kSubsystemHidraw)) != 0) {
       return ancestor;
     }
   } while ((ancestor = udev_device_get_parent(ancestor)));
@@ -96,16 +98,18 @@ udev_device* FindFirstNonHidAncestor(udev_device* device) {
 const char* GetUsbDeviceSyspath(udev_device* usb_device) {
   do {
     const char* subsystem = udev_device_get_subsystem(usb_device);
-    if (!subsystem || strcmp(subsystem, kSubsystemUsb) != 0)
+    if (!subsystem || UNSAFE_TODO(strcmp(subsystem, kSubsystemUsb)) != 0) {
       return nullptr;
+    }
 
     const char* devtype = udev_device_get_devtype(usb_device);
     if (!devtype)
       return nullptr;
 
     // Use the syspath of the first ancestor with devtype "usb_device".
-    if (strcmp(devtype, kDevtypeUsbDevice) == 0)
+    if (UNSAFE_TODO(strcmp(devtype, kDevtypeUsbDevice)) == 0) {
       return udev_device_get_syspath(usb_device);
+    }
   } while ((usb_device = udev_device_get_parent(usb_device)));
   return nullptr;
 }
@@ -116,8 +120,10 @@ const char* GetUsbDeviceSyspath(udev_device* usb_device) {
 const char* GetBluetoothDeviceSyspath(udev_device* bt_device) {
   do {
     const char* subsystem = udev_device_get_subsystem(bt_device);
-    if (!subsystem || strcmp(subsystem, kSubsystemBluetooth) != 0)
+    if (!subsystem ||
+        UNSAFE_TODO(strcmp(subsystem, kSubsystemBluetooth)) != 0) {
       return nullptr;
+    }
 
     // Look for a sysname like "hci0:123".
     const char* sysfs_name = udev_device_get_sysname(bt_device);
@@ -141,8 +147,9 @@ const char* GetBluetoothDeviceSyspath(udev_device* bt_device) {
 // nullptr on failure.
 const char* GetPhysicalDeviceId(udev_device* hidraw_device) {
   const char* subsystem = udev_device_get_subsystem(hidraw_device);
-  if (!subsystem || strcmp(subsystem, kSubsystemHidraw) != 0)
+  if (!subsystem || UNSAFE_TODO(strcmp(subsystem, kSubsystemHidraw)) != 0) {
     return nullptr;
+  }
 
   udev_device* hid_ancestor = FindFirstHidAncestor(hidraw_device);
   if (!hid_ancestor)
@@ -157,13 +164,13 @@ const char* GetPhysicalDeviceId(udev_device* hidraw_device) {
   if (!ancestor_subsystem)
     return hid_sysfs_path;
 
-  if (strcmp(ancestor_subsystem, kSubsystemUsb) == 0) {
+  if (UNSAFE_TODO(strcmp(ancestor_subsystem, kSubsystemUsb)) == 0) {
     const char* usb_sysfs_path = GetUsbDeviceSyspath(ancestor);
     if (usb_sysfs_path)
       return usb_sysfs_path;
   }
 
-  if (strcmp(ancestor_subsystem, kSubsystemBluetooth) == 0) {
+  if (UNSAFE_TODO(strcmp(ancestor_subsystem, kSubsystemBluetooth)) == 0) {
     const char* bt_sysfs_path = GetBluetoothDeviceSyspath(ancestor);
     if (bt_sysfs_path)
       return bt_sysfs_path;
@@ -213,10 +220,17 @@ struct HidServiceLinux::ConnectParams {
 
 class HidServiceLinux::BlockingTaskRunnerHelper : public UdevWatcher::Observer {
  public:
-  BlockingTaskRunnerHelper(base::WeakPtr<HidServiceLinux> service)
-      : service_(std::move(service)),
-        task_runner_(base::SequencedTaskRunner::GetCurrentDefault()) {
-    DETACH_FROM_SEQUENCE(sequence_checker_);
+  BlockingTaskRunnerHelper(base::WeakPtr<HidServiceLinux> service,
+                           scoped_refptr<base::SequencedTaskRunner> task_runner)
+      : service_(std::move(service)), task_runner_(std::move(task_runner)) {
+    watcher_ = UdevWatcher::StartWatching(this);
+    if (!watcher_) {
+      return;
+    }
+    watcher_->EnumerateExistingDevices();
+    task_runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&HidServiceLinux::FirstEnumerationComplete, service_));
   }
 
   BlockingTaskRunnerHelper(const BlockingTaskRunnerHelper&) = delete;
@@ -224,16 +238,6 @@ class HidServiceLinux::BlockingTaskRunnerHelper : public UdevWatcher::Observer {
 
   ~BlockingTaskRunnerHelper() override {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  }
-
-  void Start() {
-    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-
-    watcher_ = UdevWatcher::StartWatching(this);
-    watcher_->EnumerateExistingDevices();
-    task_runner_->PostTask(
-        FROM_HERE,
-        base::BindOnce(&HidServiceLinux::FirstEnumerationComplete, service_));
   }
 
  private:
@@ -249,8 +253,9 @@ class HidServiceLinux::BlockingTaskRunnerHelper : public UdevWatcher::Observer {
     HidPlatformDeviceId platform_device_id = device_path;
 
     const char* subsystem = udev_device_get_subsystem(device.get());
-    if (!subsystem || strcmp(subsystem, kSubsystemHidraw) != 0)
+    if (!subsystem || UNSAFE_TODO(strcmp(subsystem, kSubsystemHidraw)) != 0) {
       return;
+    }
 
     const char* str_property = udev_device_get_devnode(device.get());
     if (!str_property)
@@ -271,19 +276,19 @@ class HidServiceLinux::BlockingTaskRunnerHelper : public UdevWatcher::Observer {
       return;
 
     uint32_t int_property = 0;
-    if (!HexStringToUInt(base::StringPiece(parts[0]), &int_property) ||
+    if (!base::HexStringToUInt(parts[0], &int_property) ||
         int_property > std::numeric_limits<uint16_t>::max()) {
       return;
     }
     auto bus_type = BusTypeFromLinuxBusId(int_property);
 
-    if (!HexStringToUInt(base::StringPiece(parts[1]), &int_property) ||
+    if (!base::HexStringToUInt(parts[1], &int_property) ||
         int_property > std::numeric_limits<uint16_t>::max()) {
       return;
     }
     uint16_t vendor_id = int_property;
 
-    if (!HexStringToUInt(base::StringPiece(parts[2]), &int_property) ||
+    if (!base::HexStringToUInt(parts[2], &int_property) ||
         int_property > std::numeric_limits<uint16_t>::max()) {
       return;
     }
@@ -298,6 +303,28 @@ class HidServiceLinux::BlockingTaskRunnerHelper : public UdevWatcher::Observer {
     str_property = udev_device_get_property_value(parent, kHIDName);
     if (str_property)
       product_name = str_property;
+
+    // On Linux, the HID_NAME property often contains a concatenation of the
+    // manufacturer and product strings (e.g., "Manufacturer Product"). To
+    // provide a cleaner product name consistent with other platforms, we
+    // prefer the USB "product" sysattr if available. See crbug.com/40742501.
+    if (base::FeatureList::IsEnabled(features::kProductNameOverHidName)) {
+      std::optional<std::string> name_property = std::nullopt;
+
+      // Read the product name from the USB property.
+      udev_device* usb_dev = udev_device_get_parent_with_subsystem_devtype(
+          parent, kSubsystemUsb, kDevtypeUsbDevice);
+      if (usb_dev) {
+        const char* value = udev_device_get_sysattr_value(usb_dev, "product");
+        if (value) {
+          name_property = value;
+        }
+      }
+
+      if (name_property) {
+        product_name = std::move(*name_property);
+      }
+    }
 
     const char* parent_sysfs_path = udev_device_get_syspath(parent);
     if (!parent_sysfs_path)
@@ -350,16 +377,11 @@ class HidServiceLinux::BlockingTaskRunnerHelper : public UdevWatcher::Observer {
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 };
 
-HidServiceLinux::HidServiceLinux()
-    : blocking_task_runner_(
-          base::ThreadPool::CreateSequencedTaskRunner(kBlockingTaskTraits)),
-      helper_(nullptr, base::OnTaskRunnerDeleter(blocking_task_runner_)) {
-  // We need to properly initialize |blocking_task_helper_| here because we need
-  // |weak_factory_| to be created first.
-  helper_.reset(new BlockingTaskRunnerHelper(weak_factory_.GetWeakPtr()));
-  blocking_task_runner_->PostTask(
-      FROM_HERE, base::BindOnce(&BlockingTaskRunnerHelper::Start,
-                                base::Unretained(helper_.get())));
+HidServiceLinux::HidServiceLinux() {
+  helper_ = base::SequenceBound<BlockingTaskRunnerHelper>(
+      base::ThreadPool::CreateSequencedTaskRunner(kBlockingTaskTraits),
+      weak_factory_.GetWeakPtr(),
+      base::SequencedTaskRunner::GetCurrentDefault());
 }
 
 HidServiceLinux::~HidServiceLinux() = default;
@@ -382,8 +404,7 @@ void HidServiceLinux::Connect(const std::string& device_guid,
   }
   scoped_refptr<HidDeviceInfo> device_info = map_entry->second;
 
-// TODO(huangs): Enable for IS_CHROMEOS_LACROS for crbug.com/1223456.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   auto split_callback = base::SplitOnceCallback(std::move(callback));
   chromeos::PermissionBrokerClient::Get()->OpenPath(
       device_info->device_node(),
@@ -403,10 +424,10 @@ void HidServiceLinux::Connect(const std::string& device_guid,
   blocking_task_runner->PostTask(
       FROM_HERE, base::BindOnce(&HidServiceLinux::OpenOnBlockingThread,
                                 std::move(params)));
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 
 // static
 void HidServiceLinux::OnPathOpenComplete(std::unique_ptr<ConnectParams> params,
@@ -463,7 +484,7 @@ void HidServiceLinux::OpenOnBlockingThread(
                                                   std::move(params)));
 }
 
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 // static
 void HidServiceLinux::FinishOpen(std::unique_ptr<ConnectParams> params) {

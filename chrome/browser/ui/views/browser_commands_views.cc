@@ -9,6 +9,9 @@
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/tabs/tab_strip.h"
 #include "ui/base/ui_base_features.h"
+#include "ui/display/screen.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/views/debug_utils.h"
 #include "ui/views/view.h"
 #include "ui/views/view_utils.h"
 #include "ui/views/widget/widget.h"
@@ -23,37 +26,58 @@
 #endif
 
 namespace {
-views::View* GetActiveWindowRootView(const Browser* browser) {
+#if defined(USE_AURA) || BUILDFLAG(IS_MAC)
+gfx::NativeWindow GetActiveWindow(const BrowserWindowInterface* browser) {
 #if defined(USE_AURA)
   wm::ActivationClient* client = wm::GetActivationClient(
-      browser->window()->GetNativeWindow()->GetRootWindow());
-  if (!client)
-    return nullptr;
-  gfx::NativeWindow active_window = client->GetActiveWindow();
+      browser->GetWindow()->GetNativeWindow()->GetRootWindow());
+  return client ? client->GetActiveWindow() : nullptr;
 #elif BUILDFLAG(IS_MAC)
-  NSWindow* active_window = platform_util::GetActiveWindow();
-  if (!active_window)
-    return nullptr;
+  return platform_util::GetActiveWindow();
+#endif
+}
 #endif
 
+views::View* GetActiveWindowRootView(const BrowserWindowInterface* browser) {
+#if defined(USE_AURA) || BUILDFLAG(IS_MAC)
+  gfx::NativeWindow active_window = GetActiveWindow(browser);
   views::Widget* widget =
       views::Widget::GetWidgetForNativeWindow(active_window);
   return widget ? widget->GetRootView() : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
+gfx::NativeWindow GetTargetWindowForDebug(
+    const BrowserWindowInterface* browser) {
+  gfx::Point screen_point = display::Screen::Get()->GetCursorScreenPoint();
+  gfx::NativeWindow target_window =
+      display::Screen::Get()->GetWindowAtScreenPoint(screen_point);
+#if defined(USE_AURA) || BUILDFLAG(IS_MAC)
+  if (!target_window) {
+    target_window = GetActiveWindow(browser);
+  }
+#endif
+  return target_window;
 }
 }  // namespace
 
 namespace chrome {
 
-absl::optional<int> GetKeyboardFocusedTabIndex(const Browser* browser) {
+std::optional<int> GetKeyboardFocusedTabIndex(
+    const BrowserWindowInterface* browser) {
   BrowserView* view = BrowserView::GetBrowserViewForBrowser(browser);
-  if (view && view->tabstrip())
-    return view->tabstrip()->GetFocusedTabIndex();
-  return absl::nullopt;
+  if (view && view->tab_strip_view()) {
+    return view->tab_strip_view()->GetFocusedTabIndex();
+  }
+  return std::nullopt;
 }
 
-void ExecuteUIDebugCommand(int id, const Browser* browser) {
-  if (!base::FeatureList::IsEnabled(features::kUIDebugTools))
+void ExecuteUIDebugCommand(int id, const BrowserWindowInterface* browser) {
+  if (!base::FeatureList::IsEnabled(features::kUIDebugTools)) {
     return;
+  }
 
   switch (id) {
     case IDC_DEBUG_TOGGLE_TABLET_MODE: {
@@ -64,16 +88,35 @@ void ExecuteUIDebugCommand(int id, const Browser* browser) {
       break;
     }
     case IDC_DEBUG_PRINT_VIEW_TREE:
-      if (views::View* view = GetActiveWindowRootView(browser))
-        PrintViewHierarchy(view);
-      break;
     case IDC_DEBUG_PRINT_VIEW_TREE_DETAILS:
-      if (views::View* view = GetActiveWindowRootView(browser))
-        PrintViewHierarchy(view, /* verbose= */ true);
+      if (views::View* view = GetActiveWindowRootView(browser)) {
+        LOG(ERROR) << '\n'
+                   << PrintViewHierarchy(
+                          view, id == IDC_DEBUG_PRINT_VIEW_TREE_DETAILS);
+      }
       break;
+    case IDC_DEBUG_PRINT_WINDOW_HIERARCHY: {
+      if (gfx::NativeWindow target_window = GetTargetWindowForDebug(browser)) {
+        std::ostringstream out;
+        views::PrintWindowHierarchy(target_window, &out);
+        LOG(ERROR) << out.str();
+      } else {
+        LOG(ERROR) << "No window found under mouse cursor or active.";
+      }
+      break;
+    }
+    case IDC_DEBUG_PRINT_LAYER_HIERARCHY: {
+      if (gfx::NativeWindow target_window = GetTargetWindowForDebug(browser)) {
+        std::ostringstream out;
+        views::PrintLayerHierarchy(target_window, &out);
+        LOG(ERROR) << out.str();
+      } else {
+        LOG(ERROR) << "No window found under mouse cursor or active.";
+      }
+      break;
+    }
     default:
       NOTREACHED() << "Unimplemented UI Debug command: " << id;
-      break;
   }
 }
 

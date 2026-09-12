@@ -21,11 +21,6 @@
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-#include "components/services/font/public/cpp/font_loader.h"
-#include "third_party/skia/include/core/SkRefCnt.h"
-#endif
-
 namespace discardable_memory {
 class ClientDiscardableSharedMemoryManager;
 }
@@ -58,8 +53,6 @@ class PaintPreviewCompositorCollectionImpl
   void CreateCompositor(
       mojo::PendingReceiver<mojom::PaintPreviewCompositor> compositor,
       CreateCompositorCallback callback) override;
-  void OnMemoryPressure(base::MemoryPressureListener::MemoryPressureLevel
-                            memory_pressure_level) override;
   void ListCompositors(ListCompositorsCallback callback) override;
 
  private:
@@ -72,10 +65,6 @@ class PaintPreviewCompositorCollectionImpl
   base::flat_map<base::UnguessableToken,
                  std::unique_ptr<PaintPreviewCompositorImpl>>
       compositors_;
-
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-  sk_sp<font_service::FontLoader> font_loader_;
-#endif
 
   const bool initialize_environment_;
 

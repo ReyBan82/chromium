@@ -15,14 +15,15 @@
 #include "base/json/json_reader.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/stringprintf.h"
 #include "base/test/bind.h"
-#include "chrome/browser/ash/file_manager/fake_disk_mount_manager.h"
 #include "chrome/browser/ash/file_manager/volume_manager.h"
 #include "chrome/browser/ash/file_manager/volume_manager_factory.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "chromeos/ash/components/disks/disk_mount_manager.h"
+#include "chromeos/ash/components/disks/fake_disk_mount_manager.h"
 #include "components/enterprise/common/proto/connectors.pb.h"
 #include "content/public/test/browser_task_environment.h"
 #include "storage/browser/file_system/file_system_url.h"
@@ -36,7 +37,7 @@ namespace {
 
 struct VolumeInfo {
   file_manager::VolumeType type;
-  absl::optional<guest_os::VmType> vm_type;
+  std::optional<guest_os::VmType> vm_type;
   const char* fs_config_string;
 };
 
@@ -54,25 +55,25 @@ base::FilePath GetBasePathForVolume(base::FilePath path,
 }
 
 constexpr std::array kVolumeInfos{
-    VolumeInfo{file_manager::VOLUME_TYPE_TESTING, absl::nullopt, "TESTING"},
-    VolumeInfo{file_manager::VOLUME_TYPE_GOOGLE_DRIVE, absl::nullopt,
+    VolumeInfo{file_manager::VOLUME_TYPE_TESTING, std::nullopt, "TESTING"},
+    VolumeInfo{file_manager::VOLUME_TYPE_GOOGLE_DRIVE, std::nullopt,
                "GOOGLE_DRIVE"},
-    VolumeInfo{file_manager::VOLUME_TYPE_DOWNLOADS_DIRECTORY, absl::nullopt,
+    VolumeInfo{file_manager::VOLUME_TYPE_DOWNLOADS_DIRECTORY, std::nullopt,
                "MY_FILES"},
-    VolumeInfo{file_manager::VOLUME_TYPE_REMOVABLE_DISK_PARTITION,
-               absl::nullopt, "REMOVABLE"},
-    VolumeInfo{file_manager::VOLUME_TYPE_MOUNTED_ARCHIVE_FILE, absl::nullopt,
+    VolumeInfo{file_manager::VOLUME_TYPE_REMOVABLE_DISK_PARTITION, std::nullopt,
+               "REMOVABLE"},
+    VolumeInfo{file_manager::VOLUME_TYPE_MOUNTED_ARCHIVE_FILE, std::nullopt,
                "TESTING"},
-    VolumeInfo{file_manager::VOLUME_TYPE_PROVIDED, absl::nullopt, "PROVIDED"},
-    VolumeInfo{file_manager::VOLUME_TYPE_MTP, absl::nullopt,
+    VolumeInfo{file_manager::VOLUME_TYPE_PROVIDED, std::nullopt, "PROVIDED"},
+    VolumeInfo{file_manager::VOLUME_TYPE_MTP, std::nullopt,
                "DEVICE_MEDIA_STORAGE"},
-    VolumeInfo{file_manager::VOLUME_TYPE_MEDIA_VIEW, absl::nullopt, "ARC"},
-    VolumeInfo{file_manager::VOLUME_TYPE_CROSTINI, absl::nullopt, "CROSTINI"},
-    VolumeInfo{file_manager::VOLUME_TYPE_ANDROID_FILES, absl::nullopt, "ARC"},
-    VolumeInfo{file_manager::VOLUME_TYPE_DOCUMENTS_PROVIDER, absl::nullopt,
+    VolumeInfo{file_manager::VOLUME_TYPE_MEDIA_VIEW, std::nullopt, "ARC"},
+    VolumeInfo{file_manager::VOLUME_TYPE_CROSTINI, std::nullopt, "CROSTINI"},
+    VolumeInfo{file_manager::VOLUME_TYPE_ANDROID_FILES, std::nullopt, "ARC"},
+    VolumeInfo{file_manager::VOLUME_TYPE_DOCUMENTS_PROVIDER, std::nullopt,
                "ARC"},
-    VolumeInfo{file_manager::VOLUME_TYPE_SMB, absl::nullopt, "SMB"},
-    VolumeInfo{file_manager::VOLUME_TYPE_SYSTEM_INTERNAL, absl::nullopt,
+    VolumeInfo{file_manager::VOLUME_TYPE_SMB, std::nullopt, "SMB"},
+    VolumeInfo{file_manager::VOLUME_TYPE_SYSTEM_INTERNAL, std::nullopt,
                "UNKNOWN"},
     VolumeInfo{file_manager::VOLUME_TYPE_GUEST_OS, guest_os::VmType::TERMINA,
                "CROSTINI"},
@@ -84,7 +85,7 @@ constexpr std::array kVolumeInfos{
                "BRUSCHETTA"},
     VolumeInfo{file_manager::VOLUME_TYPE_GUEST_OS, guest_os::VmType::UNKNOWN,
                "UNKNOWN_VM"},
-    VolumeInfo{file_manager::VOLUME_TYPE_GUEST_OS, absl::nullopt, "UNKNOWN_VM"},
+    VolumeInfo{file_manager::VOLUME_TYPE_GUEST_OS, std::nullopt, "UNKNOWN_VM"},
     VolumeInfo{file_manager::VOLUME_TYPE_GUEST_OS, guest_os::VmType::ARCVM,
                "ARC"}};
 
@@ -121,6 +122,7 @@ class BaseTest : public testing::Test {
         base::BindLambdaForTesting([](content::BrowserContext* context) {
           return std::unique_ptr<KeyedService>(
               std::make_unique<file_manager::VolumeManager>(
+                  TestingBrowserProcess::GetGlobal()->local_state(),
                   Profile::FromBrowserContext(context), nullptr, nullptr,
                   ash::disks::DiskMountManager::GetInstance(), nullptr,
                   file_manager::VolumeManager::GetMtpStorageInfoCallback()));
@@ -128,7 +130,7 @@ class BaseTest : public testing::Test {
 
     // Takes ownership of `disk_mount_manager_`, but Shutdown() must be called.
     ash::disks::DiskMountManager::InitializeForTesting(
-        new file_manager::FakeDiskMountManager);
+        new ash::disks::FakeDiskMountManager);
 
     // Register volumes.
     EXPECT_TRUE(temp_dir_.CreateUniqueTempDir());
@@ -155,7 +157,7 @@ class BaseTest : public testing::Test {
  protected:
   content::BrowserTaskEnvironment task_environment_;
   TestingProfileManager profile_manager_;
-  raw_ptr<TestingProfile> profile_;
+  raw_ptr<TestingProfile, DanglingUntriaged> profile_;
   base::ScopedTempDir temp_dir_;
   const blink::StorageKey kTestStorageKey =
       blink::StorageKey::CreateFromStringForTesting("chrome://abc");
@@ -178,7 +180,7 @@ TEST_F(SourceDestinationMatcherAshTest, NullptrSettingsNoCrash) {
   SourceDestinationMatcherAsh matcher;
 
   size_t id = 0;
-  base::Value::List* settings = nullptr;
+  base::ListValue* settings = nullptr;
   matcher.AddFilters(&id, settings);
   EXPECT_EQ(id, 0u);
 }

@@ -11,13 +11,16 @@
 #include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
 #include "base/strings/strcat.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/to_string.h"
+#include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "build/buildflag.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/media/webrtc/webrtc_browsertest_base.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -30,6 +33,7 @@
 #include "content/public/test/browser_test_base.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/prerender_test_util.h"
+#include "ui/gl/gl_switches.h"
 
 using content::WebContents;
 
@@ -88,19 +92,15 @@ struct TabInfo {
     // Bring the tab into focus. This avoids getDisplayMedia rejection.
     browser->tab_strip_model()->ActivateTabAt(tab_strip_index);
 
-    std::string script_result;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(), "captureOtherTab();",
-        &script_result));
-    EXPECT_EQ(script_result, "capture-success");
+    EXPECT_EQ(content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                              "captureOtherTab();"),
+              "capture-success");
   }
 
   void StartCapturingFromEmbeddedFrame() {
-    std::string script_result;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(),
-        "captureOtherTabFromEmbeddedFrame();", &script_result));
-    EXPECT_EQ(script_result, "embedded-capture-success");
+    EXPECT_EQ(content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                              "captureOtherTabFromEmbeddedFrame();"),
+              "embedded-capture-success");
   }
 
   url::Origin GetOrigin() const {
@@ -113,43 +113,35 @@ struct TabInfo {
       bool expose_origin,
       const std::string& handle,
       const std::vector<std::string>& permitted_origins) {
-    std::string script_result;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(),
-        base::StringPrintf(
-            "callSetCaptureHandleConfig(%s, \"%s\", %s);",
-            expose_origin ? "true" : "false", handle.c_str(),
-            StringifyPermittedOrigins(permitted_origins).c_str()),
-        &script_result));
-    EXPECT_EQ(script_result, "capture-handle-set");
+    EXPECT_EQ(content::EvalJs(
+                  web_contents->GetPrimaryMainFrame(),
+                  base::StringPrintf(
+                      "callSetCaptureHandleConfig(%s, \"%s\", %s);",
+                      base::ToString(expose_origin), handle.c_str(),
+                      StringifyPermittedOrigins(permitted_origins).c_str())),
+              "capture-handle-set");
 
     capture_handle =
         StringifyCaptureHandle(web_contents, expose_origin, handle);
   }
 
   std::string ReadCaptureHandle() {
-    std::string script_result;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(), "readCaptureHandle();",
-        &script_result));
-    return script_result;
+    return content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                           "readCaptureHandle();")
+        .ExtractString();
   }
 
   std::string ReadCaptureHandleInEmbeddedFrame() {
-    std::string script_result;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(),
-        "readCaptureHandleInEmbeddedFrame();", &script_result));
-    return script_result;
+    return content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                           "readCaptureHandleInEmbeddedFrame();")
+        .ExtractString();
   }
 
   void Navigate(GURL url, bool expect_handle_reset = false) {
-    std::string script_result;
-    ASSERT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(),
-        base::StringPrintf("clickLinkToUrl(\"%s\");", url.spec().c_str()),
-        &script_result));
-    ASSERT_EQ(script_result, "link-success");
+    ASSERT_EQ(content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                              base::StringPrintf("clickLinkToUrl(\"%s\");",
+                                                 url.spec().c_str())),
+              "link-success");
 
     if (expect_handle_reset) {
       capture_handle = "";
@@ -157,42 +149,36 @@ struct TabInfo {
   }
 
   std::string LastEvent() {
-    std::string script_result = "error-not-modified";
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(), "readLastEvent();",
-        &script_result));
-    return script_result;
+    return content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                           "readLastEvent();")
+        .ExtractString();
   }
 
   std::string LastEmbeddedEvent() {
-    std::string script_result = "error-not-modified";
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(), "readLastEmbeddedEvent();",
-        &script_result));
-    return script_result;
+    return content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                           "readLastEmbeddedEvent();")
+        .ExtractString();
   }
 
   void StartEmbeddingFrame(const GURL& url) {
-    std::string script_result;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents->GetPrimaryMainFrame(),
-        base::StringPrintf("startEmbeddingFrame('%s');", url.spec().c_str()),
-        &script_result));
-    EXPECT_EQ(script_result, "embedding-done");
+    EXPECT_EQ(content::EvalJs(web_contents->GetPrimaryMainFrame(),
+                              base::StringPrintf("startEmbeddingFrame('%s');",
+                                                 url.spec().c_str())),
+              "embedding-done");
   }
 
-  raw_ptr<Browser> browser;
-  raw_ptr<WebContents, DanglingUntriaged> web_contents;
+  raw_ptr<BrowserWindowInterface> browser;
+  raw_ptr<WebContents, AcrossTasksDanglingUntriaged> web_contents;
   int tab_strip_index;
   std::string capture_handle;  // Expected value for those who may observe.
 };
 
-TabInfo MakeTabInfoFromActiveTab(Browser* browser) {
+TabInfo MakeTabInfoFromActiveTab(BrowserWindowInterface* browser) {
   WebContents* const web_contents =
-      browser->tab_strip_model()->GetActiveWebContents();
+      browser->GetTabStripModel()->GetActiveWebContents();
   // "POISON_VALUE" intentionally fails comparisons if unset when read.
   return TabInfo{browser, web_contents,
-                 browser->tab_strip_model()->active_index(), "POISON_VALUE"};
+                 browser->GetTabStripModel()->active_index(), "POISON_VALUE"};
 }
 
 }  // namespace
@@ -221,6 +207,17 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
         switches::kEnableExperimentalWebPlatformFeatures);
     command_line->AppendSwitchASCII(
         switches::kAutoSelectTabCaptureSourceByTitle, kCapturedTabTitle);
+#if defined(MEMORY_SANITIZER) && !BUILDFLAG(IS_CHROMEOS)
+    // Force software rendering to avoid GPU process crashes on slow MSan bots.
+    // ChromeOS is excluded as it requires GPU acceleration even under MSan.
+    command_line->AppendSwitch(switches::kDisableGpu);
+#else
+    // TODO(crbug.com/40260482): Remove the CrOS exception after fixing feature
+    // detection in 0c tab capture path as it'll no longer be needed.
+#if !BUILDFLAG(IS_CHROMEOS)
+    command_line->AppendSwitch(switches::kUseGpuInTests);
+#endif
+#endif
   }
 
   void TearDownOnMainThread() override {
@@ -235,20 +232,20 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
 
   // Same as WebRtcTestBase::OpenTestPageInNewTab, but does not assume
   // a single embedded server is used for all pages.
-  WebContents* OpenTestPageInNewTab(Browser* browser,
+  WebContents* OpenTestPageInNewTab(BrowserWindowInterface* browser,
                                     const std::string& test_page,
                                     net::EmbeddedTestServer* server) const {
     chrome::AddTabAt(browser, GURL(url::kAboutBlankURL), -1, true);
     GURL url = server->GetURL(test_page);
     EXPECT_TRUE(ui_test_utils::NavigateToURL(browser, url));
-    WebContents* new_tab = browser->tab_strip_model()->GetActiveWebContents();
+    WebContents* new_tab = browser->GetTabStripModel()->GetActiveWebContents();
     permissions::PermissionRequestManager::FromWebContents(new_tab)
         ->set_auto_response_for_test(
             permissions::PermissionRequestManager::ACCEPT_ALL);
     return new_tab;
   }
 
-  Browser* GetBrowser(BrowserType browser_type) {
+  BrowserWindowInterface* GetBrowser(BrowserType browser_type) {
     DCHECK(browser_type == BrowserType::kRegular ||
            browser_type == BrowserType::kIncognito);
 
@@ -264,7 +261,7 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
 
   TabInfo SetUpCapturingPage(bool start_capturing,
                              BrowserType browser_type = BrowserType::kRegular) {
-    Browser* const browser = GetBrowser(browser_type);
+    BrowserWindowInterface* const browser = GetBrowser(browser_type);
 
     OpenTestPageInNewTab(browser, kCapturingPageMain,
                          servers_[kCapturingServer].get());
@@ -274,7 +271,7 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
       result.StartCapturing();
     }
 
-    event_sinks_.push_back(result.web_contents);
+    event_sinks_.push_back(result.web_contents.get());
 
     return result;
   }
@@ -289,7 +286,7 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
     const char* page = self_capture ? kCapturingPageMain : kCapturedPageMain;
     const int server_index = self_capture ? kCapturingServer : kCapturedServer;
 
-    Browser* const browser = GetBrowser(browser_type);
+    BrowserWindowInterface* const browser = GetBrowser(browser_type);
 
     auto* const web_contents =
         OpenTestPageInNewTab(browser, page, servers_[server_index].get());
@@ -297,12 +294,10 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
     // The target for getDisplayMedia is determined via the title. If we want
     // the capturing page to capture itself, then it has to change its title.
     if (self_capture) {
-      std::string script_result;
-      EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-          web_contents->GetPrimaryMainFrame(),
-          base::StringPrintf("setTitle(\"%s\");", kCapturedTabTitle),
-          &script_result));
-      EXPECT_EQ(script_result, "title-changed");
+      EXPECT_EQ(content::EvalJs(
+                    web_contents->GetPrimaryMainFrame(),
+                    base::StringPrintf("setTitle(\"%s\");", kCapturedTabTitle)),
+                "title-changed");
     }
 
     auto tab_info = MakeTabInfoFromActiveTab(browser);
@@ -323,7 +318,7 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
   };
 
   // Checked for no unconsumed events.
-  std::vector<WebContents*> event_sinks_;
+  std::vector<raw_ptr<WebContents, VectorExperimental>> event_sinks_;
 
   // Three servers to create three origins (different ports). One server for the
   // captured page, one for the top-level capturer and one for the embedded
@@ -333,7 +328,8 @@ class CaptureHandleBrowserTest : public WebRtcTestBase {
 
   // Incognito browser.
   // Note: The regular one is accessible via browser().
-  raw_ptr<Browser, DanglingUntriaged> incognito_browser_ = nullptr;
+  raw_ptr<BrowserWindowInterface, AcrossTasksDanglingUntriaged>
+      incognito_browser_ = nullptr;
 };
 
 IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTest,
@@ -373,7 +369,7 @@ IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTest,
   EXPECT_EQ(capturing_tab.ReadCaptureHandle(), "null");
 }
 
-// TODO(crbug.com/1217873): Test disabled on Mac due to multiple failing bots.
+// TODO(crbug.com/40185394): Test disabled on Mac due to multiple failing bots.
 #if BUILDFLAG(IS_MAC)
 #define MAYBE_HandleNotExposedIfTopLevelAllowlistedButCallingFrameNotAllowlisted \
   DISABLED_HandleNotExposedIfTopLevelAllowlistedButCallingFrameNotAllowlisted
@@ -412,9 +408,9 @@ IN_PROC_BROWSER_TEST_F(
                                       {top_level_capturer_origin.Serialize()});
 }
 
-// TODO(crbug.com/1217873): Test disabled on Mac due to multiple failing bots.
-// TODO(crbug.com/1287616, crbug.com/1362946): Flaky on Chrome OS and Windows.
-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_CHROMEOS_ASH) || BUILDFLAG(IS_WIN)
+// TODO(crbug.com/40185394): Test disabled on Mac due to multiple failing bots.
+// TODO(crbug.com/40211291, crbug.com/40864623): Flaky on Chrome OS and Windows.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN)
 #define MAYBE_HandleExposedIfCallingFrameAllowlistedEvenIfTopLevelNotAllowlisted \
   DISABLED_HandleExposedIfCallingFrameAllowlistedEvenIfTopLevelNotAllowlisted
 #else
@@ -547,9 +543,17 @@ IN_PROC_BROWSER_TEST_F(
   EXPECT_EQ(capturing_tab.ReadCaptureHandle(), captured_tab.capture_handle);
 }
 
+// TODO(crbug.com/462962569): Flaky on linux msan.
+#if BUILDFLAG(IS_LINUX) && defined(MEMORY_SANITIZER)
+#define MAYBE_PermittedOriginsChangeThatRemovesCapturerCausesEventAndEmptyConfig \
+  DISABLED_PermittedOriginsChangeThatRemovesCapturerCausesEventAndEmptyConfig
+#else
+#define MAYBE_PermittedOriginsChangeThatRemovesCapturerCausesEventAndEmptyConfig \
+  PermittedOriginsChangeThatRemovesCapturerCausesEventAndEmptyConfig
+#endif
 IN_PROC_BROWSER_TEST_F(
     CaptureHandleBrowserTest,
-    PermittedOriginsChangeThatRemovesCapturerCausesEventAndEmptyConfig) {
+    MAYBE_PermittedOriginsChangeThatRemovesCapturerCausesEventAndEmptyConfig) {
   TabInfo captured_tab =
       SetUpCapturedPage(/*expose_origin=*/true, "handle", {"*"});
 
@@ -613,11 +617,9 @@ IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTest,
   EXPECT_EQ(capturing_tab.ReadCaptureHandle(), captured_tab.capture_handle);
 
   // In-document navigation does not change the capture handle (config).
-  std::string navigation_result;
-  EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-      captured_tab.web_contents->GetPrimaryMainFrame(),
-      "clickLinkToPageBottom();", &navigation_result));
-  ASSERT_EQ(navigation_result, "navigated");
+  EXPECT_EQ(content::EvalJs(captured_tab.web_contents->GetPrimaryMainFrame(),
+                            "clickLinkToPageBottom();"),
+            "navigated");
 
   // No event was fired (verified in teardown) and getCaptureHandle returns the
   // same configuration as previously.
@@ -701,7 +703,7 @@ IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTest,
   EXPECT_EQ(tab.ReadCaptureHandle(), "null");
 }
 
-// TODO(crbug/1219998): Disabled because of flakiness.
+// TODO(crbug.com/40772597): Disabled because of flakiness.
 #if BUILDFLAG(IS_WIN)
 #define MAYBE_RegularTabCannotReadIncognitoTabCaptureHandle \
   DISABLED_RegularTabCannotReadIncognitoTabCaptureHandle
@@ -726,7 +728,7 @@ IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTest,
   EXPECT_EQ(capturing_tab.ReadCaptureHandle(), "null");
 }
 
-// TODO(crbug/1248619): Disabled because of flakiness.
+// TODO(crbug.com/40790671): Disabled because of flakiness.
 IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTest,
                        DISABLED_IncognitoTabCannotReadRegularTabCaptureHandle) {
   TabInfo captured_tab =
@@ -761,7 +763,7 @@ IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTest,
   EXPECT_EQ(capturing_tab.ReadCaptureHandle(), "null");
 }
 
-// TODO(crbug/1219998): Disabled because of flakiness.
+// TODO(crbug.com/40772597): Disabled because of flakiness.
 #if BUILDFLAG(IS_WIN)
 #define MAYBE_IncognitoTabCanReadIncognitoTabCaptureHandleIfSelfCapture \
   DISABLED_IncognitoTabCanReadIncognitoTabCaptureHandleIfSelfCapture
@@ -802,7 +804,8 @@ class CaptureHandleBrowserTestPrerender : public CaptureHandleBrowserTest {
 
  protected:
   std::unique_ptr<content::test::PrerenderTestHelper> prerender_helper_;
-  raw_ptr<WebContents, DanglingUntriaged> captured_web_contents_ = nullptr;
+  raw_ptr<WebContents, AcrossTasksDanglingUntriaged> captured_web_contents_ =
+      nullptr;
 };
 
 // Verifies that pre-rendered pages don't change the capture handle config.
@@ -821,13 +824,11 @@ IN_PROC_BROWSER_TEST_F(CaptureHandleBrowserTestPrerender,
       servers_[kCapturedServer]->GetURL(kCapturedPageOther));
   content::RenderFrameHost* prerender_rfh =
       prerender_helper_->GetPrerenderedMainFrameHost(host_id);
-  std::string script_result;
-  EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-      prerender_rfh,
-      base::StringPrintf("callSetCaptureHandleConfig(%s, \"%s\", %s);", "true",
-                         "prerender_handle",
-                         StringifyPermittedOrigins({"*"}).c_str()),
-      &script_result));
-  EXPECT_EQ(script_result, "capture-handle-set");
+  EXPECT_EQ(content::EvalJs(prerender_rfh,
+                            base::StringPrintf(
+                                "callSetCaptureHandleConfig(%s, \"%s\", %s);",
+                                "true", "prerender_handle",
+                                StringifyPermittedOrigins({"*"}).c_str())),
+            "capture-handle-set");
   EXPECT_EQ(capturing_tab.ReadCaptureHandle(), captured_tab.capture_handle);
 }

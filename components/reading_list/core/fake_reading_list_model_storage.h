@@ -13,15 +13,13 @@
 #include "base/memory/weak_ptr.h"
 #include "components/reading_list/core/reading_list_entry.h"
 #include "components/reading_list/core/reading_list_model_storage.h"
-#include "components/sync/model/dummy_metadata_change_list.h"
+#include "components/sync/model/empty_metadata_change_list.h"
 #include "components/sync/model/metadata_batch.h"
 
 // Test-only implementation of ReadingListModelStorage that doesn't do any
 // actual I/O but allows populating the initial list of entries. It also
 // allows tests to observe calls to I/O operations via observer.
-class FakeReadingListModelStorage
-    : public ReadingListModelStorage,
-      public base::SupportsWeakPtr<FakeReadingListModelStorage> {
+class FakeReadingListModelStorage final : public ReadingListModelStorage {
  public:
   class Observer {
    public:
@@ -46,7 +44,7 @@ class FakeReadingListModelStorage
 
    private:
     const raw_ptr<Observer> observer_ = nullptr;
-    syncer::DummyMetadataChangeList sync_metadata_change_list;
+    syncer::EmptyMetadataChangeList sync_metadata_change_list;
   };
 
   FakeReadingListModelStorage();
@@ -68,11 +66,18 @@ class FakeReadingListModelStorage
   // ReadingListModelStorage implementation.
   void Load(base::Clock* clock, LoadCallback load_cb) override;
   std::unique_ptr<ScopedBatchUpdate> EnsureBatchCreated() override;
-  void DeleteAllEntriesAndSyncMetadata() override;
+  void DeleteAllEntriesAndSyncMetadata(
+      std::unique_ptr<syncer::MetadataChangeList> metadata_change_list)
+      override;
+
+  base::WeakPtr<FakeReadingListModelStorage> AsWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
  private:
   const raw_ptr<Observer> observer_ = nullptr;
   LoadCallback load_callback_;
+  base::WeakPtrFactory<FakeReadingListModelStorage> weak_ptr_factory_{this};
 };
 
 #endif  // COMPONENTS_READING_LIST_CORE_FAKE_READING_LIST_MODEL_STORAGE_H_

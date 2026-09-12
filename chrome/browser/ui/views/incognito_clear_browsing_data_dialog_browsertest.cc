@@ -2,23 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ui/views/incognito_clear_browsing_data_dialog.h"
+
 #include "base/memory/raw_ptr.h"
-#include "base/run_loop.h"
-#include "base/test/bind.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "base/test/metrics/histogram_tester.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/frame/toolbar_button_provider.h"
-#include "chrome/browser/ui/views/incognito_clear_browsing_data_dialog.h"
 #include "chrome/browser/ui/views/incognito_clear_browsing_data_dialog_coordinator.h"
-#include "chrome/browser/ui/views/profiles/avatar_toolbar_button.h"
-#include "chrome/browser/ui/views/toolbar/toolbar_view.h"
-#include "chrome/common/chrome_features.h"
+#include "chrome/browser/ui/views/toolbar/avatar_toolbar_button_interface.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
-#include "ui/views/controls/button/label_button.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/views/test/widget_test.h"
 #include "ui/views/widget/widget_observer.h"
 
@@ -27,13 +26,21 @@ namespace {
 class IncognitoClearBrowsingDataDialogTest : public InProcessBrowserTest {
  public:
   void OpenDialog(IncognitoClearBrowsingDataDialogInterface::Type type) {
-    incognito_browser_ = CreateIncognitoBrowser(browser()->profile());
+    if (!incognito_browser_) {
+      incognito_browser_ = CreateIncognitoBrowser(GetProfile());
+    }
+
     auto* coordinator = GetCoordinator();
-    coordinator->Show(type);
+    BrowserView* browser_view =
+        BrowserView::GetBrowserViewForBrowser(incognito_browser_);
+    views::BubbleAnchor anchor = browser_view->toolbar_button_provider()
+                                     ->GetAvatarToolbarButtonInterface()
+                                     ->GetBubbleAnchor(*incognito_browser_);
+    coordinator->Show(type, anchor);
     EXPECT_TRUE(coordinator->IsShowing());
   }
 
-  Browser* GetIncognitoBrowser() { return incognito_browser_; }
+  BrowserWindowInterface* GetIncognitoBrowser() { return incognito_browser_; }
 
   IncognitoClearBrowsingDataDialog* GetDialogView() {
     return GetCoordinator()->GetIncognitoClearBrowsingDataDialogForTesting();
@@ -45,26 +52,32 @@ class IncognitoClearBrowsingDataDialogTest : public InProcessBrowserTest {
   }
 
   IncognitoClearBrowsingDataDialogCoordinator* GetCoordinator() {
-    return IncognitoClearBrowsingDataDialogCoordinator::GetOrCreateForBrowser(
+    return IncognitoClearBrowsingDataDialogCoordinator::From(
         incognito_browser_);
   }
 
  private:
-  raw_ptr<Browser, DanglingUntriaged> incognito_browser_ = nullptr;
+  raw_ptr<BrowserWindowInterface, AcrossTasksDanglingUntriaged>
+      incognito_browser_ = nullptr;
 };
 
-// Used to test that the bubble widget is destroyed before the browser.
+// Used to test that the bubble widget is destroyed before the host browser.
 class BubbleWidgetDestroyedObserver : public views::WidgetObserver {
  public:
-  explicit BubbleWidgetDestroyedObserver(views::Widget* bubble_widget) {
+  BubbleWidgetDestroyedObserver(BrowserWindowInterface* host_browser,
+                                views::Widget* bubble_widget)
+      : host_browser_(host_browser->GetWeakPtr()) {
     bubble_widget->AddObserver(this);
   }
   ~BubbleWidgetDestroyedObserver() override = default;
 
   // views::WidgetObserver:
   void OnWidgetDestroyed(views::Widget* widget) override {
-    ASSERT_GT(BrowserList::GetIncognitoBrowserCount(), 0u);
+    ASSERT_TRUE(host_browser_);
   }
+
+ private:
+  base::WeakPtr<BrowserWindowInterface> host_browser_;
 };
 
 }  // namespace
@@ -88,27 +101,30 @@ IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest,
   auto* incognito_cbd_dialog_view = GetDialogView();
 
   ASSERT_TRUE(GetCoordinator()->IsShowing());
-  ASSERT_EQ(ui::DIALOG_BUTTON_OK | ui::DIALOG_BUTTON_CANCEL,
-            incognito_cbd_dialog_view->GetDialogButtons());
-  ASSERT_TRUE(
-      incognito_cbd_dialog_view->IsDialogButtonEnabled(ui::DIALOG_BUTTON_OK));
+  ASSERT_EQ(static_cast<int>(ui::mojom::DialogButton::kOk) |
+                static_cast<int>(ui::mojom::DialogButton::kCancel),
+            incognito_cbd_dialog_view->buttons());
   ASSERT_TRUE(incognito_cbd_dialog_view->IsDialogButtonEnabled(
-      ui::DIALOG_BUTTON_CANCEL));
+      ui::mojom::DialogButton::kOk));
+  ASSERT_TRUE(incognito_cbd_dialog_view->IsDialogButtonEnabled(
+      ui::mojom::DialogButton::kCancel));
 }
 
 IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest,
                        TestCloseWindowsButton) {
   base::HistogramTester histogram_tester;
   OpenDialog(IncognitoClearBrowsingDataDialogInterface::Type::kDefaultBubble);
-  auto destroyed_observer =
-      BubbleWidgetDestroyedObserver(GetDialogView()->GetWidget());
+  auto destroyed_observer = BubbleWidgetDestroyedObserver(
+      GetIncognitoBrowser(), GetDialogView()->GetWidget());
 
+  ui_test_utils::BrowserDestroyedObserver observer(GetIncognitoBrowser());
   GetDialogView()->AcceptDialog();
   histogram_tester.ExpectBucketCount(
       "Incognito.ClearBrowsingDataDialog.ActionType",
       IncognitoClearBrowsingDataDialog::DialogActionType::kCloseIncognito, 1);
-  ui_test_utils::WaitForBrowserToClose(GetIncognitoBrowser());
-  ASSERT_EQ(0u, BrowserList::GetIncognitoBrowserCount());
+  observer.Wait();
+  ASSERT_EQ(0u,
+            GlobalBrowserCollection::GetInstance()->GetIncognitoBrowserCount());
 }
 
 IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest, TestCancelButton) {
@@ -130,23 +146,25 @@ IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest, TestCancelButton) {
 IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest,
                        TestBrowserCloseEventClosesDialogFirst) {
   OpenDialog(IncognitoClearBrowsingDataDialogInterface::Type::kDefaultBubble);
-  auto destroyed_observer = BubbleWidgetDestroyedObserver(GetDialogWidget());
+  auto destroyed_observer =
+      BubbleWidgetDestroyedObserver(GetIncognitoBrowser(), GetDialogWidget());
 
   CloseBrowserSynchronously(GetIncognitoBrowser());
 
-  ASSERT_EQ(0u, BrowserList::GetIncognitoBrowserCount());
+  ASSERT_EQ(0u,
+            GlobalBrowserCollection::GetInstance()->GetIncognitoBrowserCount());
 }
 
 IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest,
                        ClearBrowsingDataNavigationInIncognito) {
-  Browser* incognito_browser = CreateIncognitoBrowser();
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser();
   ui_test_utils::SendToOmniboxAndSubmit(incognito_browser,
                                         "chrome://settings/clearBrowserData");
   std::u16string current_tab_title;
   ui_test_utils::GetCurrentTabTitle(incognito_browser, &current_tab_title);
   EXPECT_EQ(u"about:blank", current_tab_title);
-  auto* coordinator = IncognitoClearBrowsingDataDialogCoordinator::FromBrowser(
-      incognito_browser);
+  auto* coordinator =
+      IncognitoClearBrowsingDataDialogCoordinator::From(incognito_browser);
   ASSERT_TRUE(coordinator->IsShowing());
 }
 
@@ -157,12 +175,13 @@ IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest,
   auto* incognito_cbd_dialog_view = GetDialogView();
 
   ASSERT_TRUE(GetCoordinator()->IsShowing());
-  ASSERT_EQ(ui::DIALOG_BUTTON_OK | ui::DIALOG_BUTTON_CANCEL,
-            incognito_cbd_dialog_view->GetDialogButtons());
-  ASSERT_TRUE(
-      incognito_cbd_dialog_view->IsDialogButtonEnabled(ui::DIALOG_BUTTON_OK));
+  ASSERT_EQ(static_cast<int>(ui::mojom::DialogButton::kOk) |
+                static_cast<int>(ui::mojom::DialogButton::kCancel),
+            incognito_cbd_dialog_view->buttons());
   ASSERT_TRUE(incognito_cbd_dialog_view->IsDialogButtonEnabled(
-      ui::DIALOG_BUTTON_CANCEL));
+      ui::mojom::DialogButton::kOk));
+  ASSERT_TRUE(incognito_cbd_dialog_view->IsDialogButtonEnabled(
+      ui::mojom::DialogButton::kCancel));
 }
 
 IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest,
@@ -170,9 +189,11 @@ IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest,
   OpenDialog(IncognitoClearBrowsingDataDialogInterface::Type::
                  kHistoryDisclaimerBubble);
 
+  ui_test_utils::BrowserDestroyedObserver observer(GetIncognitoBrowser());
   GetDialogView()->CancelDialog();
-  ui_test_utils::WaitForBrowserToClose(GetIncognitoBrowser());
-  ASSERT_EQ(0u, BrowserList::GetIncognitoBrowserCount());
+  observer.Wait();
+  ASSERT_EQ(0u,
+            GlobalBrowserCollection::GetInstance()->GetIncognitoBrowserCount());
 }
 
 IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest, TestGotItButton) {
@@ -183,6 +204,39 @@ IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest, TestGotItButton) {
 
   GetDialogView()->AcceptDialog();
   destroyed_waiter.Wait();
+
+  ASSERT_FALSE(GetCoordinator()->IsShowing());
+  ASSERT_FALSE(GetDialogView());
+}
+
+IN_PROC_BROWSER_TEST_F(IncognitoClearBrowsingDataDialogTest, ShowTwice) {
+  OpenDialog(IncognitoClearBrowsingDataDialogInterface::Type::
+                 kHistoryDisclaimerBubble);
+  auto* const first_incognito_cbd_dialog_view = GetDialogView();
+  EXPECT_TRUE(first_incognito_cbd_dialog_view);
+
+  // `view_tracker_for_first_view` is used to check if
+  // `first_incognito_cbd_dialog_view` has been released.
+  views::ViewTracker view_tracker_for_first_view(
+      first_incognito_cbd_dialog_view);
+
+  // Show again with the same type.
+  OpenDialog(IncognitoClearBrowsingDataDialogInterface::Type::
+                 kHistoryDisclaimerBubble);
+  const auto* const second_incognito_cbd_dialog_view = GetDialogView();
+  EXPECT_TRUE(second_incognito_cbd_dialog_view);
+
+  // Two views should not be the same.
+  EXPECT_NE(first_incognito_cbd_dialog_view, second_incognito_cbd_dialog_view);
+
+  views::test::WidgetDestroyedWaiter destroyed_waiter(GetDialogWidget());
+
+  GetDialogView()->AcceptDialog();
+  destroyed_waiter.Wait();
+
+  // `first_incognito_cbd_dialog_view` should already have been released when
+  // the second dialog is created.
+  EXPECT_FALSE(view_tracker_for_first_view.view());
 
   ASSERT_FALSE(GetCoordinator()->IsShowing());
   ASSERT_FALSE(GetDialogView());

@@ -4,6 +4,7 @@
 
 #include "components/policy/core/common/cloud/external_policy_data_fetcher.h"
 
+#include <string_view>
 #include <utility>
 
 #include "base/check_op.h"
@@ -14,6 +15,7 @@
 #include "base/task/single_thread_task_runner.h"
 #include "net/base/load_flags.h"
 #include "net/base/net_errors.h"
+#include "net/http/http_response_headers.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
@@ -40,7 +42,7 @@ class ExternalPolicyDataFetcher::Job
                          const network::mojom::URLResponseHead& response_head);
 
   // network::SimpleURLLoaderStreamConsumer implementation
-  void OnDataReceived(base::StringPiece string_piece,
+  void OnDataReceived(std::string_view string_piece,
                       base::OnceClosure resume) override;
   void OnComplete(bool success) override;
   void OnRetry(base::OnceClosure start_retry) override;
@@ -146,7 +148,7 @@ void ExternalPolicyDataFetcher::Job::OnResponseStarted(
 }
 
 void ExternalPolicyDataFetcher::Job::OnDataReceived(
-    base::StringPiece string_piece,
+    std::string_view string_piece,
     base::OnceClosure resume) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 

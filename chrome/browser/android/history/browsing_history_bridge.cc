@@ -8,28 +8,30 @@
 
 #include "base/android/callback_android.h"
 #include "base/android/jni_android.h"
-#include "base/android/jni_array.h"
 #include "base/android/jni_string.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
-#include "chrome/android/chrome_jni_headers/BrowsingHistoryBridge_jni.h"
 #include "chrome/browser/history/history_service_factory.h"
-#include "chrome/browser/profiles/profile_android.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sync/sync_service_factory.h"
 #include "components/history/core/browser/browsing_history_service.h"
+#include "components/history/core/browser/features.h"
 #include "components/keyed_service/core/service_access_type.h"
 #include "components/url_formatter/url_formatter.h"
+#include "third_party/jni_zero/default_conversions.h"
 #include "url/android/gurl_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/BrowsingHistoryBridge_jni.h"
 
 using history::BrowsingHistoryService;
 
 const int kMaxQueryCount = 150;
 
-BrowsingHistoryBridge::BrowsingHistoryBridge(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    const JavaParamRef<jobject>& j_profile) {
-  profile_ = ProfileAndroid::FromProfileAndroid(j_profile);
+BrowsingHistoryBridge::BrowsingHistoryBridge(JNIEnv* env,
+                                             const JavaRef<jobject>& obj,
+                                             Profile* profile) {
+  profile_ = profile;
 
   history::HistoryService* local_history = HistoryServiceFactory::GetForProfile(
       profile_, ServiceAccessType::EXPLICIT_ACCESS);
@@ -41,46 +43,66 @@ BrowsingHistoryBridge::BrowsingHistoryBridge(
   j_history_service_obj_.Reset(env, obj);
 }
 
-BrowsingHistoryBridge::~BrowsingHistoryBridge() {}
+BrowsingHistoryBridge::~BrowsingHistoryBridge() = default;
 
-void BrowsingHistoryBridge::Destroy(JNIEnv*, const JavaParamRef<jobject>&) {
+void BrowsingHistoryBridge::Destroy() {
   delete this;
 }
 
 void BrowsingHistoryBridge::QueryHistory(
     JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    const JavaParamRef<jobject>& j_result_obj,
-    jstring j_query,
-    jboolean j_host_only) {
+    const JavaRef<jobject>& j_result_obj,
+    const std::u16string& query,
+    const std::optional<std::string>& app_id,
+    bool j_host_only) {
   j_query_result_obj_.Reset(env, j_result_obj);
   query_history_continuation_.Reset();
 
   history::QueryOptions options;
   options.max_count = kMaxQueryCount;
+  options.policy_for_404_visits = history::VisitQuery404sPolicy::kExclude404s;
   options.duplicate_policy = history::QueryOptions::REMOVE_DUPLICATES_PER_DAY;
   options.host_only = j_host_only;
-
-  browsing_history_service_->QueryHistory(
-      base::android::ConvertJavaStringToUTF16(env, j_query), options);
+  options.include_actor_visits =
+      history::IsBrowsingHistoryActorIntegrationM3Enabled();
+  options.app_id = app_id;
+  browsing_history_service_->QueryHistory(query, options);
 }
 
 void BrowsingHistoryBridge::QueryHistoryContinuation(
     JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    const JavaParamRef<jobject>& j_result_obj) {
-  DCHECK(query_history_continuation_);
+    const JavaRef<jobject>& j_result_obj) {
+  // The Java side *should* only call this if there is actually a continuation,
+  // but if its state got out of sync for some reason, better to do nothing than
+  // to crash.
+  if (!query_history_continuation_) {
+    return;
+  }
   j_query_result_obj_.Reset(env, j_result_obj);
   std::move(query_history_continuation_).Run();
 }
 
+void BrowsingHistoryBridge::GetAllAppIds(JNIEnv* env,
+                                         const JavaRef<jobject>& j_result_obj) {
+  j_app_ids_result_obj_.Reset(env, j_result_obj);
+  browsing_history_service_->GetAllAppIds();
+}
+
+void BrowsingHistoryBridge::OnGetAllAppIds(
+    const std::vector<std::string>& app_ids) {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  for (const std::string& id : app_ids) {
+    Java_BrowsingHistoryBridge_addAppIdToList(env, j_app_ids_result_obj_, id);
+  }
+  Java_BrowsingHistoryBridge_onQueryAppsComplete(env, j_history_service_obj_,
+                                                 j_app_ids_result_obj_);
+}
+
 void BrowsingHistoryBridge::GetLastVisitToHostBeforeRecentNavigations(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    jstring j_host_name,
-    const JavaParamRef<jobject>& jcallback) {
+    const std::string& host_name,
+    const JavaRef<jobject>& jcallback) {
   browsing_history_service_->GetLastVisitToHostBeforeRecentNavigations(
-      base::android::ConvertJavaStringToUTF8(env, j_host_name),
+      host_name,
       base::BindOnce(&base::android::RunTimeCallbackAndroid,
                      base::android::ScopedJavaGlobalRef<jobject>(jcallback)));
 }
@@ -95,27 +117,33 @@ void BrowsingHistoryBridge::OnQueryComplete(
   for (const BrowsingHistoryService::HistoryEntry& entry : results) {
     // TODO(twellington): Move the domain logic to BrowsingHistoryServce so it
     // can be shared with ContentBrowsingHistoryDriver.
-    std::u16string domain = url_formatter::IDNToUnicode(entry.url.host());
+    std::u16string domain = url_formatter::IDNToUnicode(entry.url.GetHost());
     // When the domain is empty, use the scheme instead. This allows for a
     // sensible treatment of e.g. file: URLs when group by domain is on.
-    if (domain.empty())
-      domain = base::UTF8ToUTF16(entry.url.scheme() + ":");
+    if (domain.empty()) {
+      domain = base::UTF8ToUTF16(entry.url.GetScheme() + ":");
+    }
 
-    // This relies on |all_timestamps| being a sorted data structure.
+    // This relies on the list of timestamps per url in |all_timestamps| being a
+    // sorted data structure.
+    // Since the similar visits grouping logic does not yet exist on Android,
+    // `all_timestamps` will only carry timestamps for the same url. See
+    // b/460405414 for more details.
+    // TODO(b/483287809): Enable similar visits grouping for Android.
+    auto url_and_timestamps = entry.all_timestamps.find(entry.url);
+    CHECK(url_and_timestamps != entry.all_timestamps.end());
+    const std::set<base::Time>& timestamps = url_and_timestamps->second;
     int64_t most_recent_java_timestamp =
-        base::Time::FromInternalValue(*entry.all_timestamps.rbegin())
-            .ToJavaTime();
-    std::vector<int64_t> native_timestamps(entry.all_timestamps.begin(),
-                                           entry.all_timestamps.end());
-
+        timestamps.rbegin()->InMillisecondsSinceUnixEpoch();
+    std::vector<int64_t> native_timestamps;
+    for (const base::Time& val : timestamps) {
+      native_timestamps.push_back(
+          val.ToDeltaSinceWindowsEpoch().InMicroseconds());
+    }
     Java_BrowsingHistoryBridge_createHistoryItemAndAddToList(
-        env, j_query_result_obj_,
-        url::GURLAndroid::FromNativeGURL(env, entry.url),
-        base::android::ConvertUTF16ToJavaString(env, domain),
-        base::android::ConvertUTF16ToJavaString(env, entry.title),
-        most_recent_java_timestamp,
-        base::android::ToJavaLongArray(env, native_timestamps),
-        entry.blocked_visit);
+        env, j_query_result_obj_, entry.url, domain, entry.title, entry.app_id,
+        most_recent_java_timestamp, native_timestamps, entry.blocked_visit,
+        entry.is_actor_visit);
   }
 
   Java_BrowsingHistoryBridge_onQueryHistoryComplete(
@@ -124,23 +152,24 @@ void BrowsingHistoryBridge::OnQueryComplete(
 }
 
 void BrowsingHistoryBridge::MarkItemForRemoval(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    const JavaParamRef<jobject>& j_url,
-    const JavaParamRef<jlongArray>& j_native_timestamps) {
+    const GURL& url,
+    const std::optional<std::string>& app_id,
+    const std::vector<int64_t>& timestamps) {
   BrowsingHistoryService::HistoryEntry entry;
-  entry.url = *url::GURLAndroid::ToNativeGURL(env, j_url);
-
-  std::vector<int64_t> timestamps;
-  base::android::JavaLongArrayToInt64Vector(env, j_native_timestamps,
-                                            &timestamps);
-  entry.all_timestamps.insert(timestamps.begin(), timestamps.end());
-
+  entry.url = url;
+  entry.app_id = app_id;
+  for (int64_t val : timestamps) {
+    // Since the similar visits grouping logic does not yet exist on Android,
+    // we'll only pass the timestamps for the same url. See b/460405414 for more
+    // details.
+    // TODO(b/483287809): Enable similar visits grouping for Android.
+    entry.all_timestamps[entry.url].insert(
+        base::Time::FromDeltaSinceWindowsEpoch(base::Microseconds(val)));
+  }
   items_to_remove_.push_back(entry);
 }
 
-void BrowsingHistoryBridge::RemoveItems(JNIEnv* env,
-                                        const JavaParamRef<jobject>& obj) {
+void BrowsingHistoryBridge::RemoveItems() {
   browsing_history_service_->RemoveVisits(items_to_remove_);
   items_to_remove_.clear();
 }
@@ -161,7 +190,8 @@ void BrowsingHistoryBridge::HistoryDeleted() {
 }
 
 void BrowsingHistoryBridge::HasOtherFormsOfBrowsingHistory(
-    bool has_other_forms, bool has_synced_results) {
+    bool has_other_forms,
+    bool has_synced_results) {
   JNIEnv* env = base::android::AttachCurrentThread();
   Java_BrowsingHistoryBridge_hasOtherFormsOfBrowsingData(
       env, j_history_service_obj_, has_other_forms);
@@ -171,11 +201,11 @@ Profile* BrowsingHistoryBridge::GetProfile() {
   return profile_;
 }
 
-static jlong JNI_BrowsingHistoryBridge_Init(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    const JavaParamRef<jobject>& j_profile) {
-  BrowsingHistoryBridge* bridge =
-      new BrowsingHistoryBridge(env, obj, j_profile);
+static int64_t JNI_BrowsingHistoryBridge_Init(JNIEnv* env,
+                                              const JavaRef<jobject>& obj,
+                                              Profile* profile) {
+  BrowsingHistoryBridge* bridge = new BrowsingHistoryBridge(env, obj, profile);
   return reinterpret_cast<intptr_t>(bridge);
 }
+
+DEFINE_JNI(BrowsingHistoryBridge)

@@ -7,27 +7,30 @@
 
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+{% if namespace == "HTML" %}
+#include "third_party/blink/renderer/core/html_names.h"
+{% endif %}
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
 
 namespace blink {
 {% if namespace == "HTML" %}
-using HTMLTypeMap = HashMap<AtomicString, HTMLElementType>;
+using HTMLTypeMap = HashMap<AtomicString, ElementType>;
 
 HTMLTypeMap CreateHTMLTypeMap() {
   HTMLTypeMap html_type_map;
   html_type_map.ReserveCapacityForSize({{tags|count}});
-  static constexpr struct {
-    const char* name;
-    HTMLElementType type;
+  static const struct {
+    const QualifiedName* name;
+    ElementType type;
   } kTags[] = {
     {% for tag in tags|sort(attribute='name') %}
-    { "{{tag.name}}", HTMLElementType::k{{tag.js_interface}} },
+    { &html_names::{{tag|symbol}}Tag, ElementType::k{{tag.js_interface}} },
     {% endfor %}
   };
   for (const auto& tag : kTags)
-    html_type_map.insert(tag.name, tag.type);
+    html_type_map.insert(tag.name->LocalName(), tag.type);
   return html_type_map;
 }
 
@@ -36,17 +39,17 @@ static const HTMLTypeMap& GetHTMLTypeMap() {
   return html_type_map;
 }
 
-HTMLElementType HtmlElementTypeForTag(const AtomicString& tag_name, const Document* document) {
+ElementType HtmlElementTypeForTag(const AtomicString& tag_name, const Document* document) {
   const auto& html_type_map = GetHTMLTypeMap();
   auto it = html_type_map.find(tag_name);
   if (it == html_type_map.end())
-    return HTMLElementType::kHTMLUnknownElement;
+    return ElementType::kHTMLUnknownElement;
 
   {% for tag in tags|sort(attribute='name') %}
   {% if tag.runtimeEnabled %}
   if (tag_name == "{{tag.name}}") {
     if (!RuntimeEnabledFeatures::{{tag.runtimeEnabled}}Enabled(document->GetExecutionContext())) {
-      return HTMLElementType::kHTMLUnknownElement;
+      return ElementType::kHTMLUnknownElement;
     }
   }
   {% endif %}

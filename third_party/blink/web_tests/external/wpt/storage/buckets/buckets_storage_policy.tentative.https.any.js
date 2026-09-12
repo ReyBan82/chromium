@@ -1,25 +1,28 @@
 // META: title=Buckets API: Tests for bucket storage policies.
+// META: script=resources/util.js
 // META: global=window,worker
 
 'use strict';
 
+function sanitizeQuota(quota) {
+  return Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(quota)));
+}
+
+async function testQuota(quota, name) {
+  const safeQuota = sanitizeQuota(quota);
+  const bucket = await navigator.storageBuckets.open(name, { quota: safeQuota });
+  const estimateQuota = (await bucket.estimate()).quota;
+  assert_equals(estimateQuota, safeQuota);
+}
+
 promise_test(async testCase => {
-  testCase.add_cleanup(async () => {
-    const bucketNames = await navigator.storageBuckets.keys();
-    for (const bucketName of bucketNames) {
-      await navigator.storageBuckets.delete(bucketName);
-    }
-  });
+  await prepareForBucketTest(testCase);
 
-  await promise_rejects_js(
-      testCase, TypeError,
-      navigator.storageBuckets.open('negative', {quota: -1}));
+  const storageKeyQuota = (await navigator.storage.estimate()).quota;
 
-  await promise_rejects_js(
-      testCase, TypeError, navigator.storageBuckets.open('zero', {quota: 0}));
-
-  await promise_rejects_js(
-      testCase, TypeError,
-      navigator.storageBuckets.open(
-          'above_max', {quota: Number.MAX_SAFE_INTEGER + 1}));
-}, 'The open promise should reject with a TypeError when quota is requested outside the range of 1 to Number.MAX_SAFE_INTEGER.');
+  testQuota(1, 'one');
+  testQuota(storageKeyQuota / 4, 'quarter');
+  testQuota(storageKeyQuota / 2, 'half');
+  testQuota(storageKeyQuota - 1, 'one_less');
+  testQuota(storageKeyQuota, 'origin_quota');
+}, 'Bucket quota is properly set as long as it is within the storage quota');

@@ -9,10 +9,11 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ssl/https_only_mode_tab_helper.h"
 #include "chrome/browser/ssl/stateful_ssl_host_state_delegate_factory.h"
-#include "chrome/common/chrome_features.h"
 #include "chrome/common/webui_url_constants.h"
 #include "components/security_interstitials/content/settings_page_helper.h"
 #include "components/security_interstitials/content/stateful_ssl_host_state_delegate.h"
+#include "components/security_interstitials/core/metrics_helper.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
 
 // static
@@ -26,15 +27,17 @@ HttpsOnlyModeControllerClient::GetMetricsHelper(const GURL& url) {
 
 HttpsOnlyModeControllerClient::HttpsOnlyModeControllerClient(
     content::WebContents* web_contents,
-    const GURL& request_url)
+    const GURL& request_url,
+    std::unique_ptr<security_interstitials::SettingsPageHelper>
+        settings_page_helper)
     : SecurityInterstitialControllerClient(
           web_contents,
           GetMetricsHelper(request_url),
           Profile::FromBrowserContext(web_contents->GetBrowserContext())
               ->GetPrefs(),
           g_browser_process->GetApplicationLocale(),
-          GURL(chrome::kChromeUINewTabURL),
-          /*settings_page_helper=*/nullptr),
+          chrome::ChromeUINewTabURLAsGURL(),
+          std::move(settings_page_helper)),
       web_contents_(web_contents),
       request_url_(request_url) {}
 
@@ -45,6 +48,7 @@ void HttpsOnlyModeControllerClient::GoBack() {
 }
 
 void HttpsOnlyModeControllerClient::Proceed() {
+  // LINT.IfChange(HttpsFirstModeProceedLogic)
   Profile* profile =
       Profile::FromBrowserContext(web_contents_->GetBrowserContext());
   StatefulSSLHostStateDelegate* state =
@@ -52,24 +56,20 @@ void HttpsOnlyModeControllerClient::Proceed() {
           profile->GetSSLHostStateDelegate());
   // StatefulSSLHostStateDelegate can be null during tests.
   if (state) {
+    // Notifies the browser process when a HTTP exception is allowed in
+    // HTTPS-First Mode.
+    web_contents_->SetAlwaysSendSubresourceNotifications();
+
     state->AllowHttpForHost(
-        request_url_.host(),
+        request_url_.GetHost(),
         web_contents_->GetPrimaryMainFrame()->GetStoragePartition());
   }
   auto* tab_helper = HttpsOnlyModeTabHelper::FromWebContents(web_contents_);
   tab_helper->set_is_navigation_upgraded(false);
-
-  // Proceeding through the interstitial triggers the fallback navigation for
-  // the initial version of HTTPS-First Mode, but in the new version the
-  // interstitial is the result of the fallback navigation. Update state
-  // accordingly.
-  if (base::FeatureList::IsEnabled(features::kHttpsFirstModeV2)) {
-    tab_helper->set_is_navigation_fallback(false);
-  } else {
-    tab_helper->set_is_navigation_fallback(true);
-  }
+  tab_helper->set_is_navigation_fallback(false);
   web_contents_->GetController().Reload(content::ReloadType::NORMAL, false);
   // The failed https navigation will remain as a forward entry, so it needs to
   // be removed.
   web_contents_->GetController().PruneForwardEntries();
+  // LINT.ThenChange(chrome/browser/ssl/ask_before_http_dialog_controller.cc:HttpsFirstModeProceedLogic)
 }

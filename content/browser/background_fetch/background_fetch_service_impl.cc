@@ -8,7 +8,7 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/guid.h"
+#include "base/uuid.h"
 #include "content/browser/background_fetch/background_fetch_context.h"
 #include "content/browser/background_fetch/background_fetch_metrics.h"
 #include "content/browser/background_fetch/background_fetch_registration_id.h"
@@ -23,7 +23,6 @@
 #include "content/public/browser/service_worker_version_base_info.h"
 #include "content/public/browser/web_contents.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom.h"
 
@@ -41,7 +40,7 @@ void BackgroundFetchServiceImpl::CreateForWorker(
     mojo::PendingReceiver<blink::mojom::BackgroundFetchService> receiver) {
   // TODO(rayankans): Remove `network_isolation_key` parameter since it's no
   // longer used.
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
   RenderProcessHost* render_process_host =
       RenderProcessHost::FromID(info.process_id);
 
@@ -67,33 +66,25 @@ void BackgroundFetchServiceImpl::CreateForWorker(
     return;
   }
 
-  mojo::MakeSelfOwnedReceiver(
-      std::make_unique<BackgroundFetchServiceImpl>(
-          std::move(context), info.storage_key,
-          net::IsolationInfo::Create(
-              net::IsolationInfo::RequestType::kOther,
-              url::Origin::Create(info.storage_key.top_level_site().GetURL()),
-              info.storage_key.origin(), info.storage_key.ToNetSiteForCookies(),
-              /*party_context=*/absl::nullopt,
-              info.storage_key.nonce().has_value()
-                  ? &info.storage_key.nonce().value()
-                  : nullptr),
-          render_process_host, /*rfh=*/nullptr),
-      std::move(receiver));
+  mojo::MakeSelfOwnedReceiver(std::make_unique<BackgroundFetchServiceImpl>(
+                                  std::move(context), info.storage_key,
+                                  info.storage_key.ToPartialNetIsolationInfo(),
+                                  render_process_host, /*rfh=*/nullptr),
+                              std::move(receiver));
 }
 
 // static
 void BackgroundFetchServiceImpl::CreateForFrame(
     RenderFrameHost* render_frame_host,
     mojo::PendingReceiver<blink::mojom::BackgroundFetchService> receiver) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(render_frame_host);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
+  CHECK(render_frame_host, base::NotFatalUntil::M158);
 
   if (render_frame_host->IsNestedWithinFencedFrame()) {
     // The renderer should have checked and disallowed the request for fenced
     // frames and throw exception in blink::BackgroundFetchManager. Ignore the
     // request and mark it as bad if it didn't happen for some reason.
-    // TODO(crbug.com/1271051) Follow-up on this line depending on the
+    // TODO(crbug.com/40205566) Follow-up on this line depending on the
     // conclusion at
     // https://groups.google.com/a/chromium.org/g/navigation-dev/c/BZLlGsL2-64
     bad_message::ReceivedBadMessage(
@@ -104,7 +95,7 @@ void BackgroundFetchServiceImpl::CreateForFrame(
 
   auto* rfhi = static_cast<RenderFrameHostImpl*>(render_frame_host);
   RenderProcessHost* render_process_host = rfhi->GetProcess();
-  DCHECK(render_process_host);
+  CHECK(render_process_host, base::NotFatalUntil::M158);
 
   scoped_refptr<BackgroundFetchContext> context =
       WrapRefCounted(static_cast<StoragePartitionImpl*>(
@@ -112,7 +103,7 @@ void BackgroundFetchServiceImpl::CreateForFrame(
                          ->GetBackgroundFetchContext());
   mojo::MakeSelfOwnedReceiver(
       std::make_unique<BackgroundFetchServiceImpl>(
-          std::move(context), rfhi->storage_key(),
+          std::move(context), rfhi->GetStorageKey(),
           rfhi->GetIsolationInfoForSubresources(), rfhi->GetProcess(), rfhi),
       std::move(receiver));
 }
@@ -126,11 +117,11 @@ BackgroundFetchServiceImpl::BackgroundFetchServiceImpl(
     : background_fetch_context_(std::move(background_fetch_context)),
       storage_key_(std::move(storage_key)),
       isolation_info_(std::move(isolation_info)),
-      rph_id_(rph->GetID()),
+      rph_id_(rph->GetDeprecatedID()),
       rfh_id_(rfh ? rfh->GetGlobalId() : GlobalRenderFrameHostId()) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(background_fetch_context_);
+  CHECK(background_fetch_context_, base::NotFatalUntil::M158);
 }
 
 BackgroundFetchServiceImpl::~BackgroundFetchServiceImpl() {
@@ -156,9 +147,9 @@ void BackgroundFetchServiceImpl::Fetch(
 
   // New |unique_id|, since this is a new Background Fetch registration. This is
   // the only place new |unique_id|s should be created outside of tests.
-  BackgroundFetchRegistrationId registration_id(service_worker_registration_id,
-                                                storage_key_, developer_id,
-                                                base::GenerateGUID());
+  BackgroundFetchRegistrationId registration_id(
+      service_worker_registration_id, storage_key_, developer_id,
+      base::Uuid::GenerateRandomV4().AsLowercaseString());
 
   background_fetch_context_->StartFetch(
       registration_id, std::move(requests), std::move(options), icon,
@@ -214,7 +205,7 @@ bool BackgroundFetchServiceImpl::ValidateUniqueId(
     const std::string& unique_id) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!base::IsValidGUIDOutputString(unique_id)) {
+  if (!base::Uuid::ParseLowercase(unique_id).is_valid()) {
     mojo::ReportBadMessage("Invalid unique_id");
     return false;
   }
@@ -229,6 +220,24 @@ bool BackgroundFetchServiceImpl::ValidateRequests(
   if (requests.empty()) {
     mojo::ReportBadMessage("Invalid requests");
     return false;
+  }
+
+  // Ensure all requests are valid and use the HTTP or HTTPS scheme.
+  for (const auto& request : requests) {
+    if (!request) {
+      mojo::ReportBadMessage("Null request");
+      return false;
+    }
+
+    if (!request->url.is_valid()) {
+      mojo::ReportBadMessage("Invalid request URL");
+      return false;
+    }
+
+    if (!request->url.SchemeIsHTTPOrHTTPS()) {
+      mojo::ReportBadMessage("Invalid request URL scheme");
+      return false;
+    }
   }
 
   return true;

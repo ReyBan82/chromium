@@ -5,6 +5,7 @@
 #include "chrome/browser/extensions/theme_installed_infobar_delegate.h"
 
 #include <stddef.h>
+
 #include <string>
 #include <utility>
 
@@ -16,12 +17,39 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/themes/theme_service.h"
 #include "chrome/browser/themes/theme_service_factory.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/infobars/content/content_infobar_manager.h"
 #include "components/infobars/core/infobar.h"
 #include "extensions/browser/extension_system.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
+
+// static
+void ThemeInstalledInfoBarDelegate::CreateForLastActiveTab(
+    Profile* profile,
+    const std::string& theme_name,
+    const std::string& theme_id,
+    std::unique_ptr<ThemeService::ThemeReinstaller> prev_theme_reinstaller) {
+  // A theme install in either a normal or incognito window for a profile
+  // affects all windows for that profile, so search the original profile's
+  // browser collection.
+  BrowserWindowInterface* browser =
+      ProfileBrowserCollection::GetForProfile(profile)->FindTabbedBrowser(
+          /*match_original_profiles=*/true);
+  if (browser) {
+    content::WebContents* web_contents =
+        browser->GetTabStripModel()->GetActiveWebContents();
+    if (web_contents) {
+      ThemeInstalledInfoBarDelegate::Create(
+          infobars::ContentInfoBarManager::FromWebContents(web_contents),
+          ThemeServiceFactory::GetForProfile(profile), theme_name, theme_id,
+          std::move(prev_theme_reinstaller));
+    }
+  }
+}
 
 // static
 void ThemeInstalledInfoBarDelegate::Create(
@@ -39,8 +67,7 @@ void ThemeInstalledInfoBarDelegate::Create(
 
   // If there's a previous theme infobar, just replace that instead of adding a
   // new one.
-  for (size_t i = 0; i < infobar_manager->infobar_count(); ++i) {
-    infobars::InfoBar* old_infobar = infobar_manager->infobar_at(i);
+  for (infobars::InfoBar* old_infobar : infobar_manager->infobars()) {
     ThemeInstalledInfoBarDelegate* theme_infobar =
         old_infobar->delegate()->AsThemePreviewInfobarDelegate();
     if (theme_infobar) {
@@ -65,17 +92,13 @@ ThemeInstalledInfoBarDelegate::ThemeInstalledInfoBarDelegate(
     const std::string& theme_id,
     std::unique_ptr<ThemeService::ThemeReinstaller> prev_theme_reinstaller)
     : ConfirmInfoBarDelegate(),
-      theme_service_(theme_service),
       theme_name_(theme_name),
       theme_id_(theme_id),
       prev_theme_reinstaller_(std::move(prev_theme_reinstaller)) {
-  theme_service_->AddObserver(this);
+  theme_observation_.Observe(theme_service);
 }
 
-ThemeInstalledInfoBarDelegate::~ThemeInstalledInfoBarDelegate() {
-  // We don't want any notifications while we're running our destructor.
-  theme_service_->RemoveObserver(this);
-}
+ThemeInstalledInfoBarDelegate::~ThemeInstalledInfoBarDelegate() = default;
 
 infobars::InfoBarDelegate::InfoBarIdentifier
 ThemeInstalledInfoBarDelegate::GetIdentifier() const {
@@ -83,7 +106,8 @@ ThemeInstalledInfoBarDelegate::GetIdentifier() const {
 }
 
 const gfx::VectorIcon& ThemeInstalledInfoBarDelegate::GetVectorIcon() const {
-  return kPaintbrushIcon;
+  return features::IsRoundedIconsEnabled() ? kBrushFilledIcon
+                                           : kPaintbrushOldIcon;
 }
 
 ThemeInstalledInfoBarDelegate*
@@ -107,14 +131,17 @@ std::u16string ThemeInstalledInfoBarDelegate::GetButtonLabel(
 }
 
 bool ThemeInstalledInfoBarDelegate::Cancel() {
-  if (prev_theme_reinstaller_)
+  if (prev_theme_reinstaller_) {
     prev_theme_reinstaller_->Reinstall();
+  }
   return false;  // The theme change will close us.
 }
 
 void ThemeInstalledInfoBarDelegate::OnThemeChanged() {
   // If the new theme is different from what this info bar is associated with,
   // close this info bar since it is no longer relevant.
-  if (theme_id_ != theme_service_->GetThemeID())
+  CHECK(theme_observation_.IsObserving());
+  if (theme_id_ != theme_observation_.GetSource()->GetThemeID()) {
     infobar()->RemoveSelf();
+  }
 }

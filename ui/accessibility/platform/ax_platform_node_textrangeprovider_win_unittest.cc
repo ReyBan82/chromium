@@ -2,21 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "ui/accessibility/platform/ax_platform_node_textrangeprovider_win.h"
+
+#include <memory>
+#include <utility>
+
+#include "base/compiler_specific.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/win/scoped_bstr.h"
+#include "base/win/scoped_safearray.h"
+#include "base/win/scoped_variant.h"
+#include "ui/accessibility/accessibility_features.h"
+#include "ui/accessibility/ax_selection.h"
+#include "ui/accessibility/platform/ax_fragment_root_win.h"
 #include "ui/accessibility/platform/ax_platform_node_win_unittest.h"
 
 #include <UIAutomationClient.h>
 #include <UIAutomationCoreApi.h>
 
-#include <memory>
-#include <utility>
-
-#include "base/win/atl.h"
-#include "base/win/scoped_bstr.h"
-#include "base/win/scoped_safearray.h"
-#include "base/win/scoped_variant.h"
-#include "ui/accessibility/ax_selection.h"
-#include "ui/accessibility/platform/ax_fragment_root_win.h"
-#include "ui/accessibility/platform/ax_platform_node_textrangeprovider_win.h"
 using Microsoft::WRL::ComPtr;
 
 namespace ui {
@@ -53,54 +56,54 @@ namespace ui {
     EXPECT_STREQ(expectedVariant.ptr()->bstrVal, actual.ptr()->bstrVal); \
   }
 
-#define EXPECT_UIA_ELEMENT_ARRAY_BSTR_EQ(array, element_test_property_id,     \
-                                         expected_property_values)            \
-  {                                                                           \
-    ASSERT_EQ(1u, SafeArrayGetDim(array));                                    \
-    LONG array_lower_bound;                                                   \
-    ASSERT_HRESULT_SUCCEEDED(                                                 \
-        SafeArrayGetLBound(array, 1, &array_lower_bound));                    \
-    LONG array_upper_bound;                                                   \
-    ASSERT_HRESULT_SUCCEEDED(                                                 \
-        SafeArrayGetUBound(array, 1, &array_upper_bound));                    \
-    IUnknown** array_data;                                                    \
-    ASSERT_HRESULT_SUCCEEDED(                                                 \
-        ::SafeArrayAccessData(array, reinterpret_cast<void**>(&array_data))); \
-    size_t count = array_upper_bound - array_lower_bound + 1;                 \
-    ASSERT_EQ(expected_property_values.size(), count);                        \
-    for (size_t i = 0; i < count; ++i) {                                      \
-      ComPtr<IRawElementProviderSimple> element;                              \
-      ASSERT_HRESULT_SUCCEEDED(                                               \
-          array_data[i]->QueryInterface(IID_PPV_ARGS(&element)));             \
-      EXPECT_UIA_GETPROPERTYVALUE_EQ(element, element_test_property_id,       \
-                                     expected_property_values[i].c_str());    \
-    }                                                                         \
-    ASSERT_HRESULT_SUCCEEDED(::SafeArrayUnaccessData(array));                 \
+#define EXPECT_UIA_ELEMENT_ARRAY_BSTR_EQ(array, element_test_property_id,      \
+                                         expected_property_values)             \
+  {                                                                            \
+    ASSERT_EQ(1u, SafeArrayGetDim(array));                                     \
+    LONG array_lower_bound;                                                    \
+    ASSERT_HRESULT_SUCCEEDED(                                                  \
+        SafeArrayGetLBound(array, 1, &array_lower_bound));                     \
+    LONG array_upper_bound;                                                    \
+    ASSERT_HRESULT_SUCCEEDED(                                                  \
+        SafeArrayGetUBound(array, 1, &array_upper_bound));                     \
+    IUnknown** array_data;                                                     \
+    ASSERT_HRESULT_SUCCEEDED(                                                  \
+        ::SafeArrayAccessData(array, reinterpret_cast<void**>(&array_data)));  \
+    size_t count = array_upper_bound - array_lower_bound + 1;                  \
+    ASSERT_EQ(expected_property_values.size(), count);                         \
+    for (size_t i = 0; i < count; ++i) {                                       \
+      ComPtr<IRawElementProviderSimple> element;                               \
+      ASSERT_HRESULT_SUCCEEDED(                                                \
+          UNSAFE_TODO(array_data[i])->QueryInterface(IID_PPV_ARGS(&element))); \
+      EXPECT_UIA_GETPROPERTYVALUE_EQ(element, element_test_property_id,        \
+                                     expected_property_values[i].c_str());     \
+    }                                                                          \
+    ASSERT_HRESULT_SUCCEEDED(::SafeArrayUnaccessData(array));                  \
   }
 
-#define EXPECT_UIA_SAFEARRAY_EQ(safearray, expected_property_values)   \
-  {                                                                    \
-    using T = typename decltype(expected_property_values)::value_type; \
-    EXPECT_EQ(sizeof(T), ::SafeArrayGetElemsize(safearray));           \
-    EXPECT_EQ(1u, SafeArrayGetDim(safearray));                         \
-    LONG array_lower_bound;                                            \
-    EXPECT_HRESULT_SUCCEEDED(                                          \
-        SafeArrayGetLBound(safearray, 1, &array_lower_bound));         \
-    LONG array_upper_bound;                                            \
-    EXPECT_HRESULT_SUCCEEDED(                                          \
-        SafeArrayGetUBound(safearray, 1, &array_upper_bound));         \
-    const size_t count = array_upper_bound - array_lower_bound + 1;    \
-    EXPECT_EQ(expected_property_values.size(), count);                 \
-    if (sizeof(T) == ::SafeArrayGetElemsize(safearray) &&              \
-        count == expected_property_values.size()) {                    \
-      T* array_data;                                                   \
-      EXPECT_HRESULT_SUCCEEDED(::SafeArrayAccessData(                  \
-          safearray, reinterpret_cast<void**>(&array_data)));          \
-      for (size_t i = 0; i < count; ++i) {                             \
-        EXPECT_EQ(array_data[i], expected_property_values[i]);         \
-      }                                                                \
-      EXPECT_HRESULT_SUCCEEDED(::SafeArrayUnaccessData(safearray));    \
-    }                                                                  \
+#define EXPECT_UIA_SAFEARRAY_EQ(safearray, expected_property_values)        \
+  {                                                                         \
+    using T = typename decltype(expected_property_values)::value_type;      \
+    EXPECT_EQ(sizeof(T), ::SafeArrayGetElemsize(safearray));                \
+    EXPECT_EQ(1u, SafeArrayGetDim(safearray));                              \
+    LONG array_lower_bound;                                                 \
+    EXPECT_HRESULT_SUCCEEDED(                                               \
+        SafeArrayGetLBound(safearray, 1, &array_lower_bound));              \
+    LONG array_upper_bound;                                                 \
+    EXPECT_HRESULT_SUCCEEDED(                                               \
+        SafeArrayGetUBound(safearray, 1, &array_upper_bound));              \
+    const size_t count = array_upper_bound - array_lower_bound + 1;         \
+    EXPECT_EQ(expected_property_values.size(), count);                      \
+    if (sizeof(T) == ::SafeArrayGetElemsize(safearray) &&                   \
+        count == expected_property_values.size()) {                         \
+      T* array_data;                                                        \
+      EXPECT_HRESULT_SUCCEEDED(::SafeArrayAccessData(                       \
+          safearray, reinterpret_cast<void**>(&array_data)));               \
+      for (size_t i = 0; i < count; ++i) {                                  \
+        EXPECT_EQ(UNSAFE_TODO(array_data[i]), expected_property_values[i]); \
+      }                                                                     \
+      EXPECT_HRESULT_SUCCEEDED(::SafeArrayUnaccessData(safearray));         \
+    }                                                                       \
   }
 
 #define EXPECT_UIA_TEXTATTRIBUTE_EQ(provider, attribute, variant)          \
@@ -143,21 +146,22 @@ namespace ui {
     EXPECT_STREQ(expected_content, provider_content.Get()); \
   }
 
-#define EXPECT_UIA_FIND_TEXT(text_range_provider, search_term, ignore_case,  \
-                             owner)                                          \
-  {                                                                          \
-    base::win::ScopedBstr find_string(search_term);                          \
-    ComPtr<ITextRangeProvider> text_range_provider_found;                    \
-    EXPECT_HRESULT_SUCCEEDED(text_range_provider->FindText(                  \
-        find_string.Get(), false, ignore_case, &text_range_provider_found)); \
-    SetOwner(owner, text_range_provider_found.Get());                        \
-    base::win::ScopedBstr found_content;                                     \
-    EXPECT_HRESULT_SUCCEEDED(                                                \
-        text_range_provider_found->GetText(-1, found_content.Receive()));    \
-    if (ignore_case)                                                         \
-      EXPECT_EQ(0, _wcsicmp(found_content.Get(), find_string.Get()));        \
-    else                                                                     \
-      EXPECT_EQ(0, wcscmp(found_content.Get(), find_string.Get()));          \
+#define EXPECT_UIA_FIND_TEXT(text_range_provider, search_term, ignore_case,   \
+                             owner)                                           \
+  {                                                                           \
+    base::win::ScopedBstr find_string(search_term);                           \
+    ComPtr<ITextRangeProvider> text_range_provider_found;                     \
+    EXPECT_HRESULT_SUCCEEDED(text_range_provider->FindText(                   \
+        find_string.Get(), false, ignore_case, &text_range_provider_found));  \
+    SetOwner(owner, text_range_provider_found.Get());                         \
+    base::win::ScopedBstr found_content;                                      \
+    EXPECT_HRESULT_SUCCEEDED(                                                 \
+        text_range_provider_found->GetText(-1, found_content.Receive()));     \
+    if (ignore_case)                                                          \
+      EXPECT_EQ(0, _wcsicmp(found_content.Get(), find_string.Get()));         \
+    else                                                                      \
+      EXPECT_EQ(0,                                                            \
+                UNSAFE_TODO(wcscmp(found_content.Get(), find_string.Get()))); \
   }
 
 #define EXPECT_UIA_FIND_TEXT_NO_MATCH(text_range_provider, search_term,      \
@@ -202,58 +206,50 @@ namespace ui {
     EXPECT_EQ(expected_text_provider.Get(), enclosing_element.Get());        \
   }
 
-class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
+class AXPlatformNodeTextRangeProviderTest : public AXPlatformNodeWinTest {
  public:
+  static AXPlatformNodeTextRangeProviderWin* AsRangeProvider(
+      ITextRangeProvider* provider) {
+    return static_cast<AXPlatformNodeTextRangeProviderWin*>(provider);
+  }
+
   const AXNodePosition::AXPositionInstance& GetStart(
-      const AXPlatformNodeTextRangeProviderWin* text_range) {
-    return text_range->start();
+      ITextRangeProvider* text_range) {
+    return AsRangeProvider(text_range)->start();
   }
 
   const AXNodePosition::AXPositionInstance& GetEnd(
-      const AXPlatformNodeTextRangeProviderWin* text_range) {
-    return text_range->end();
+      ITextRangeProvider* text_range) {
+    return AsRangeProvider(text_range)->end();
   }
 
-  ui::AXPlatformNodeWin* GetOwner(
-      const AXPlatformNodeTextRangeProviderWin* text_range) {
-    return text_range->GetOwner();
+  AXPlatformNodeWin* GetOwner(ITextRangeProvider* text_range) {
+    return AsRangeProvider(text_range)->GetOwner();
   }
 
   void CopyOwnerToClone(ITextRangeProvider* source_range,
                         ITextRangeProvider* destination_range) {
-    ComPtr<ITextRangeProvider> source_provider = source_range;
-    ComPtr<ITextRangeProvider> destination_provider = destination_range;
-
-    ComPtr<AXPlatformNodeTextRangeProviderWin> source_provider_internal;
-    ComPtr<AXPlatformNodeTextRangeProviderWin> destination_provider_internal;
-
-    source_provider->QueryInterface(IID_PPV_ARGS(&source_provider_internal));
-    destination_provider->QueryInterface(
-        IID_PPV_ARGS(&destination_provider_internal));
-    destination_provider_internal->SetOwnerForTesting(
-        source_provider_internal->GetOwner());
+    AsRangeProvider(destination_range)
+        ->SetOwnerForTesting(AsRangeProvider(source_range)->GetOwner());
   }
 
   void SetOwner(AXPlatformNodeWin* owner,
                 ITextRangeProvider* destination_range) {
-    ComPtr<AXPlatformNodeTextRangeProviderWin> destination_provider_internal;
-
-    destination_range->QueryInterface(
-        IID_PPV_ARGS(&destination_provider_internal));
-    destination_provider_internal->SetOwnerForTesting(owner);
+    AsRangeProvider(destination_range)->SetOwnerForTesting(owner);
   }
 
-  void NormalizeTextRange(AXPlatformNodeTextRangeProviderWin* text_range,
+  void NormalizeTextRange(ITextRangeProvider* text_range,
                           AXNodePosition::AXPositionInstance& start,
                           AXNodePosition::AXPositionInstance& end) {
+    auto* provider = AsRangeProvider(text_range);
     DCHECK_EQ(*GetStart(text_range), *start);
     DCHECK_EQ(*GetEnd(text_range), *end);
-    text_range->NormalizeTextRange(start, end);
+    provider->NormalizeTextRange(start, end);
   }
 
   void GetTextRangeProviderFromTextNode(
       ComPtr<ITextRangeProvider>& text_range_provider,
-      ui::AXNode* text_node) {
+      AXNode* text_node) {
     ComPtr<IRawElementProviderSimple> provider_simple =
         QueryInterfaceFromNode<IRawElementProviderSimple>(text_node);
     ASSERT_NE(nullptr, provider_simple.Get());
@@ -267,17 +263,14 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
         text_provider->get_DocumentRange(&text_range_provider));
     ASSERT_NE(nullptr, text_range_provider.Get());
 
-    ComPtr<AXPlatformNodeTextRangeProviderWin> text_range_provider_interal;
-    EXPECT_HRESULT_SUCCEEDED(text_range_provider->QueryInterface(
-        IID_PPV_ARGS(&text_range_provider_interal)));
     AXPlatformNode* ax_platform_node = AXPlatformNodeFromNode(text_node);
     ASSERT_NE(ax_platform_node, nullptr);
-    text_range_provider_interal->SetOwnerForTesting(
-        static_cast<AXPlatformNodeWin*>(ax_platform_node));
+    AsRangeProvider(text_range_provider.Get())
+        ->SetOwnerForTesting(static_cast<AXPlatformNodeWin*>(ax_platform_node));
   }
 
   void CreateTextRangeProviderWin(
-      ComPtr<AXPlatformNodeTextRangeProviderWin>& text_range_provider_win,
+      ComPtr<ITextRangeProvider>& text_range_provider_win,
       AXPlatformNodeWin* owner,
       const AXNode* start_anchor,
       int start_offset,
@@ -290,11 +283,9 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
     AXNodePosition::AXPositionInstance range_end =
         CreateTextPosition(*end_anchor, end_offset, end_affinity);
 
-    ComPtr<ITextRangeProvider> text_range_provider =
-        AXPlatformNodeTextRangeProviderWin::CreateTextRangeProviderForTesting(
-            owner, std::move(range_start), std::move(range_end));
-
-    text_range_provider->QueryInterface(IID_PPV_ARGS(&text_range_provider_win));
+    AXPlatformNodeTextRangeProviderWin::CreateTextRangeProviderForTesting(
+        owner, std::move(range_start), std::move(range_end),
+        &text_range_provider_win);
   }
 
   void ComputeWordBoundariesOffsets(const std::string& text,
@@ -315,7 +306,7 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
         word_end_offsets.push_back(i);
       previous_char = text[i - 1];
     }
-    std::reverse(word_end_offsets.begin(), word_end_offsets.end());
+    std::ranges::reverse(word_end_offsets);
   }
 
   AXTreeUpdate BuildTextDocument(
@@ -328,7 +319,7 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
     root_data.role = ax::mojom::Role::kRootWebArea;
 
     AXTreeUpdate update;
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     update.has_tree_data = true;
 
     for (const std::string& text_content : text_nodes_content) {
@@ -376,19 +367,19 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
     return update;
   }
 
-  ui::AXTreeUpdate BuildAXTreeForBoundingRectangles() {
+  AXTreeUpdate BuildAXTreeForBoundingRectangles() {
     // AXTree content:
     // <button>Button</button><input type="checkbox">Line 1<br>Line 2
-    ui::AXNodeData root;
-    ui::AXNodeData button;
-    ui::AXNodeData check_box;
-    ui::AXNodeData text_field;
-    ui::AXNodeData static_text1;
-    ui::AXNodeData line_break;
-    ui::AXNodeData static_text2;
-    ui::AXNodeData inline_box1;
-    ui::AXNodeData inline_box2;
-    ui::AXNodeData inline_box_line_break;
+    AXNodeData root;
+    AXNodeData button;
+    AXNodeData check_box;
+    AXNodeData text_field;
+    AXNodeData static_text1;
+    AXNodeData line_break;
+    AXNodeData static_text2;
+    AXNodeData inline_box1;
+    AXNodeData inline_box2;
+    AXNodeData inline_box_line_break;
 
     const int ROOT_ID = 1;
     const int BUTTON_ID = 2;
@@ -529,7 +520,7 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
         root,         button,      check_box,  text_field,
         static_text1, inline_box1, line_break, inline_box_line_break,
         static_text2, inline_box2};
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     return update;
   }
 
@@ -537,14 +528,14 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
       L"First line of text\nStandalone line\n"
       L"bold text\nParagraph 1\nParagraph 2";
 
-  ui::AXTreeUpdate BuildAXTreeForMove() {
-    ui::AXNodeData group1_data;
+  AXTreeUpdate BuildAXTreeForMove() {
+    AXNodeData group1_data;
     group1_data.id = 2;
     group1_data.role = ax::mojom::Role::kGenericContainer;
     group1_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
 
-    ui::AXNodeData text_data;
+    AXNodeData text_data;
     text_data.id = 3;
     text_data.role = ax::mojom::Role::kStaticText;
     std::string text_content = "First line of text";
@@ -559,18 +550,18 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
                                   word_end_offsets);
     group1_data.child_ids = {text_data.id};
 
-    ui::AXNodeData group2_data;
+    AXNodeData group2_data;
     group2_data.id = 4;
     group2_data.role = ax::mojom::Role::kGenericContainer;
 
-    ui::AXNodeData line_break1_data;
+    AXNodeData line_break1_data;
     line_break1_data.id = 5;
     line_break1_data.role = ax::mojom::Role::kLineBreak;
     line_break1_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
     line_break1_data.SetName("\n");
 
-    ui::AXNodeData standalone_text_data;
+    AXNodeData standalone_text_data;
     standalone_text_data.id = 6;
     standalone_text_data.role = ax::mojom::Role::kStaticText;
     text_content = "Standalone line";
@@ -582,7 +573,7 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
     standalone_text_data.AddIntListAttribute(
         ax::mojom::IntListAttribute::kWordEnds, word_end_offsets);
 
-    ui::AXNodeData line_break2_data;
+    AXNodeData line_break2_data;
     line_break2_data.id = 7;
     line_break2_data.role = ax::mojom::Role::kLineBreak;
     line_break2_data.AddBoolAttribute(
@@ -596,7 +587,7 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
     line_break2_data.AddIntAttribute(ax::mojom::IntAttribute::kPreviousOnLineId,
                                      standalone_text_data.id);
 
-    ui::AXNodeData bold_text_data;
+    AXNodeData bold_text_data;
     bold_text_data.id = 8;
     bold_text_data.role = ax::mojom::Role::kStaticText;
     bold_text_data.AddIntAttribute(
@@ -611,13 +602,13 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
     bold_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds,
                                        word_end_offsets);
 
-    ui::AXNodeData paragraph1_data;
+    AXNodeData paragraph1_data;
     paragraph1_data.id = 9;
     paragraph1_data.role = ax::mojom::Role::kParagraph;
     paragraph1_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
 
-    ui::AXNodeData paragraph1_text_data;
+    AXNodeData paragraph1_text_data;
     paragraph1_text_data.id = 10;
     paragraph1_text_data.role = ax::mojom::Role::kStaticText;
     text_content = "Paragraph 1";
@@ -631,7 +622,7 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
     paragraph1_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
 
-    ui::AXNodeData ignored_text_data;
+    AXNodeData ignored_text_data;
     ignored_text_data.id = 11;
     ignored_text_data.role = ax::mojom::Role::kStaticText;
     ignored_text_data.AddState(ax::mojom::State::kIgnored);
@@ -640,13 +631,13 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
 
     paragraph1_data.child_ids = {paragraph1_text_data.id, ignored_text_data.id};
 
-    ui::AXNodeData paragraph2_data;
+    AXNodeData paragraph2_data;
     paragraph2_data.id = 12;
     paragraph2_data.role = ax::mojom::Role::kParagraph;
     paragraph2_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
 
-    ui::AXNodeData paragraph2_text_data;
+    AXNodeData paragraph2_text_data;
     paragraph2_text_data.id = 13;
     paragraph2_text_data.role = ax::mojom::Role::kStaticText;
     text_content = "Paragraph 2";
@@ -661,13 +652,13 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
         ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
     paragraph2_data.child_ids = {paragraph2_text_data.id};
 
-    ui::AXNodeData root_data;
+    AXNodeData root_data;
     root_data.id = 1;
     root_data.role = ax::mojom::Role::kRootWebArea;
     root_data.child_ids = {group1_data.id, group2_data.id, bold_text_data.id,
                            paragraph1_data.id, paragraph2_data.id};
 
-    ui::AXTreeUpdate update;
+    AXTreeUpdate update;
     update.has_tree_data = true;
     update.root_id = root_data.id;
     update.nodes = {root_data,           group1_data,
@@ -677,7 +668,7 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
                     paragraph1_data,     paragraph1_text_data,
                     ignored_text_data,   paragraph2_data,
                     paragraph2_text_data};
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     return update;
   }
 
@@ -796,8 +787,19 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
 
     AXNodeData paragraph4_text_data;
     paragraph4_text_data.id = 17;
-    paragraph4_text_data.role = ax::mojom::Role::kStaticText;
-    paragraph4_text_data.SetName("Paragraph 4");
+    paragraph4_text_data.role = ax::mojom::Role::kInlineTextBox;
+    paragraph4_text_data.SetName("Paraaagraph 4");
+    // Marking `Paraaagraph` as a misspelled word modeled as a CSS highlight.
+    paragraph4_data.AddIntListAttribute(
+        ax::mojom::IntListAttribute::kMarkerTypes,
+        {static_cast<int>(ax::mojom::MarkerType::kHighlight)});
+    paragraph4_data.AddIntListAttribute(
+        ax::mojom::IntListAttribute::kHighlightTypes,
+        {static_cast<int>(ax::mojom::HighlightType::kSpellingError)});
+    paragraph4_data.AddIntListAttribute(
+        ax::mojom::IntListAttribute::kMarkerStarts, {0});
+    paragraph4_data.AddIntListAttribute(
+        ax::mojom::IntListAttribute::kMarkerEnds, {11});
     paragraph4_data.child_ids = {paragraph4_text_data.id};
 
     AXNodeData root_data;
@@ -828,22 +830,22 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
                     paragraph3_text_data,
                     paragraph4_data,
                     paragraph4_text_data};
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     return update;
   }
 
-  ui::AXTreeUpdate BuildAXTreeForMoveByPage() {
-    ui::AXNodeData root_data;
+  AXTreeUpdate BuildAXTreeForMoveByPage() {
+    AXNodeData root_data;
     root_data.id = 1;
     root_data.role = ax::mojom::Role::kPdfRoot;
 
-    ui::AXNodeData page_1_data;
+    AXNodeData page_1_data;
     page_1_data.id = 2;
     page_1_data.role = ax::mojom::Role::kRegion;
     page_1_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsPageBreakingObject, true);
 
-    ui::AXNodeData page_1_text_data;
+    AXNodeData page_1_text_data;
     page_1_text_data.id = 3;
     page_1_text_data.role = ax::mojom::Role::kStaticText;
     page_1_text_data.SetName("some text on page 1");
@@ -851,13 +853,13 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
         ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
     page_1_data.child_ids = {3};
 
-    ui::AXNodeData page_2_data;
+    AXNodeData page_2_data;
     page_2_data.id = 4;
     page_2_data.role = ax::mojom::Role::kRegion;
     page_2_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsPageBreakingObject, true);
 
-    ui::AXNodeData page_2_text_data;
+    AXNodeData page_2_text_data;
     page_2_text_data.id = 5;
     page_2_text_data.role = ax::mojom::Role::kStaticText;
     page_2_text_data.SetName("some text on page 2");
@@ -866,13 +868,13 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
         static_cast<int32_t>(ax::mojom::TextStyle::kBold));
     page_2_data.child_ids = {5};
 
-    ui::AXNodeData page_3_data;
+    AXNodeData page_3_data;
     page_3_data.id = 6;
     page_3_data.role = ax::mojom::Role::kRegion;
     page_3_data.AddBoolAttribute(
         ax::mojom::BoolAttribute::kIsPageBreakingObject, true);
 
-    ui::AXNodeData page_3_text_data;
+    AXNodeData page_3_text_data;
     page_3_text_data.id = 7;
     page_3_text_data.role = ax::mojom::Role::kStaticText;
     page_3_text_data.SetName("some more text on page 3");
@@ -880,13 +882,13 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
 
     root_data.child_ids = {2, 4, 6};
 
-    ui::AXTreeUpdate update;
+    AXTreeUpdate update;
     update.has_tree_data = true;
     update.root_id = root_data.id;
     update.nodes = {root_data,       page_1_data,      page_1_text_data,
                     page_2_data,     page_2_text_data, page_3_data,
                     page_3_text_data};
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     return update;
   }
 
@@ -899,27 +901,18 @@ class AXPlatformNodeTextRangeProviderTest : public ui::AXPlatformNodeWinTest {
 };
 
 class MockAXPlatformNodeTextRangeProviderWin
-    : public CComObjectRootEx<CComMultiThreadModel>,
-      public ITextRangeProvider {
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          ITextRangeProvider> {
  public:
-  BEGIN_COM_MAP(MockAXPlatformNodeTextRangeProviderWin)
-  COM_INTERFACE_ENTRY(ITextRangeProvider)
-  END_COM_MAP()
-
   MockAXPlatformNodeTextRangeProviderWin() {}
-  ~MockAXPlatformNodeTextRangeProviderWin() {}
+  ~MockAXPlatformNodeTextRangeProviderWin() override {}
 
   static HRESULT CreateMockTextRangeProvider(ITextRangeProvider** provider) {
-    CComObject<MockAXPlatformNodeTextRangeProviderWin>* text_range_provider =
-        nullptr;
-    HRESULT hr =
-        CComObject<MockAXPlatformNodeTextRangeProviderWin>::CreateInstance(
-            &text_range_provider);
-    if (SUCCEEDED(hr)) {
-      *provider = text_range_provider;
-    }
-
-    return hr;
+    auto text_range_provider =
+        Microsoft::WRL::Make<MockAXPlatformNodeTextRangeProviderWin>();
+    *provider = text_range_provider.Detach();
+    return S_OK;
   }
 
   //
@@ -1020,8 +1013,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderClone) {
   ComPtr<ITextRangeProvider> text_range_provider_clone;
   text_range_provider->Clone(&text_range_provider_clone);
   CopyOwnerToClone(text_range_provider.Get(), text_range_provider_clone.Get());
-  ComPtr<AXPlatformNodeTextRangeProviderWin> original_range;
-  ComPtr<AXPlatformNodeTextRangeProviderWin> clone_range;
+  ComPtr<ITextRangeProvider> original_range;
+  ComPtr<ITextRangeProvider> clone_range;
 
   text_range_provider->QueryInterface(IID_PPV_ARGS(&original_range));
   text_range_provider_clone->QueryInterface(IID_PPV_ARGS(&clone_range));
@@ -1036,6 +1029,112 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderClone) {
 
   // Ensure the clone still works correctly.
   EXPECT_UIA_TEXTRANGE_EQ(text_range_provider_clone, L"some text");
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest, CompareWithInvalidatedPositions) {
+  TestAXTreeUpdate initial_state(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kStaticText name="aa"
+    ++++++3 kInlineTextBox name="aa"
+  )HTML"));
+
+  Init(initial_state);
+
+  AXNode* root_node = GetRoot();
+  AXNode* st_node = root_node->children()[0];
+
+  ComPtr<ITextRangeProvider> text_range_provider_a;
+  GetTextRangeProviderFromTextNode(text_range_provider_a, st_node);
+
+  AXNodePosition::AXPositionInstance range_start =
+      CreateTextPosition(/* anchor */ *st_node, /* text_offset*/ 0,
+                         /* affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  // This will put the end of the position past the `MaxTextOffset` of "aa",
+  // making the position invalid.
+  AXNodePosition::AXPositionInstance range_end =
+      CreateTextPosition(/* anchor */ *st_node, /* text_offset*/ 3,
+                         /* affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  ComPtr<ITextRangeProvider> text_range_provider_b;
+  AXPlatformNodeTextRangeProviderWin::CreateTextRangeProviderForTesting(
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(st_node)),
+      std::move(range_start), std::move(range_end), &text_range_provider_b);
+
+  BOOL are_same;
+  text_range_provider_a->Compare(text_range_provider_b.Get(), &are_same);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       CompareEndpointsWithInvalidatedPositions) {
+  TestAXTreeUpdate initial_state(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kStaticText name="aa"
+    ++++++3 kInlineTextBox name="aa"
+  )HTML"));
+
+  Init(initial_state);
+
+  AXNode* root_node = GetRoot();
+  AXNode* st_node = root_node->children()[0];
+
+  ComPtr<ITextRangeProvider> text_range_provider_a;
+  GetTextRangeProviderFromTextNode(text_range_provider_a, st_node);
+
+  AXNodePosition::AXPositionInstance range_start =
+      CreateTextPosition(/* anchor */ *st_node, /* text_offset*/ 0,
+                         /* affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  // This will put the end of the position past the `MaxTextOffset` of "aa",
+  // making the position invalid.
+  AXNodePosition::AXPositionInstance range_end =
+      CreateTextPosition(/* anchor */ *st_node, /* text_offset*/ 3,
+                         /* affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  ComPtr<ITextRangeProvider> text_range_provider_b;
+  AXPlatformNodeTextRangeProviderWin::CreateTextRangeProviderForTesting(
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(st_node)),
+      std::move(range_start), std::move(range_end), &text_range_provider_b);
+
+  int result;
+  text_range_provider_a->CompareEndpoints(
+      TextPatternRangeEndpoint_End, text_range_provider_b.Get(),
+      TextPatternRangeEndpoint_End, &result);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest, MoveByRangeInvalidatedPositions) {
+  TestAXTreeUpdate initial_state(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kStaticText name="aa"
+    ++++++3 kInlineTextBox name="aa"
+  )HTML"));
+
+  Init(initial_state);
+
+  AXNode* root_node = GetRoot();
+  AXNode* st_node = root_node->children()[0];
+
+  ComPtr<ITextRangeProvider> text_range_provider_a;
+  GetTextRangeProviderFromTextNode(text_range_provider_a, st_node);
+
+  AXNodePosition::AXPositionInstance range_start =
+      CreateTextPosition(/* anchor */ *st_node, /* text_offset*/ 0,
+                         /* affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  // This will put the end of the position past the `MaxTextOffset` of "aa",
+  // making the position invalid.
+  AXNodePosition::AXPositionInstance range_end =
+      CreateTextPosition(/* anchor */ *st_node, /* text_offset*/ 3,
+                         /* affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  ComPtr<ITextRangeProvider> text_range_provider_b;
+  AXPlatformNodeTextRangeProviderWin::CreateTextRangeProviderForTesting(
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(st_node)),
+      std::move(range_start), std::move(range_end), &text_range_provider_b);
+
+  text_range_provider_a->MoveEndpointByRange(TextPatternRangeEndpoint_End,
+                                             text_range_provider_b.Get(),
+                                             TextPatternRangeEndpoint_End);
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
@@ -1122,8 +1221,125 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestITextRangeProviderCompareEndpointsAcrossHyperlinkBoundary) {
+  // RootWebArea
+  // ├── StaticText "I am "
+  // │   └── InlineTextBox "I am "
+  // ├── Link
+  // │   └── StaticText "ironman"
+  // │       └── InlineTextBox "ironman"
+  // └── StaticText " two"
+  //     └── InlineTextBox " two"
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2, 4, 7};
+
+  AXNodeData before_link_data;
+  before_link_data.id = 2;
+  before_link_data.role = ax::mojom::Role::kStaticText;
+  before_link_data.SetName("I am ");
+  before_link_data.child_ids = {3};
+
+  AXNodeData before_link_inline_data;
+  before_link_inline_data.id = 3;
+  before_link_inline_data.role = ax::mojom::Role::kInlineTextBox;
+  before_link_inline_data.SetName("I am ");
+
+  AXNodeData link_data;
+  link_data.id = 4;
+  link_data.role = ax::mojom::Role::kLink;
+  link_data.child_ids = {5};
+
+  AXNodeData link_text_data;
+  link_text_data.id = 5;
+  link_text_data.role = ax::mojom::Role::kStaticText;
+  link_text_data.SetName("ironman");
+  link_text_data.child_ids = {6};
+
+  AXNodeData link_inline_data;
+  link_inline_data.id = 6;
+  link_inline_data.role = ax::mojom::Role::kInlineTextBox;
+  link_inline_data.SetName("ironman");
+
+  AXNodeData after_link_data;
+  after_link_data.id = 7;
+  after_link_data.role = ax::mojom::Role::kStaticText;
+  after_link_data.SetName(" two");
+  after_link_data.child_ids = {8};
+
+  AXNodeData after_link_inline_data;
+  after_link_inline_data.id = 8;
+  after_link_inline_data.role = ax::mojom::Role::kInlineTextBox;
+  after_link_inline_data.SetName(" two");
+
+  AXTreeUpdate update;
+  update.root_id = root_data.id;
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+  update.nodes = {
+      root_data,       before_link_data,      before_link_inline_data,
+      link_data,       link_text_data,        link_inline_data,
+      after_link_data, after_link_inline_data};
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  AXNode* before_link_text_node = root_node->children()[0];
+  AXNode* link_text_node = root_node->children()[1]->children()[0];
+
+  auto* before_link_owner = static_cast<AXPlatformNodeWin*>(
+      AXPlatformNodeFromNode(before_link_text_node));
+  auto* link_text_owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(link_text_node));
+
+  ComPtr<ITextRangeProvider> before_link_range;
+  CreateTextRangeProviderWin(
+      before_link_range, before_link_owner, before_link_text_node,
+      /*start_offset=*/5, ax::mojom::TextAffinity::kDownstream,
+      before_link_text_node, /*end_offset=*/5,
+      ax::mojom::TextAffinity::kDownstream);
+
+  ComPtr<ITextRangeProvider> link_start_range;
+  CreateTextRangeProviderWin(
+      link_start_range, link_text_owner, link_text_node,
+      /*start_offset=*/0, ax::mojom::TextAffinity::kDownstream, link_text_node,
+      /*end_offset=*/0, ax::mojom::TextAffinity::kDownstream);
+
+  ComPtr<ITextRangeProvider> link_after_first_character_range;
+  CreateTextRangeProviderWin(
+      link_after_first_character_range, link_text_owner, link_text_node,
+      /*start_offset=*/1, ax::mojom::TextAffinity::kDownstream, link_text_node,
+      /*end_offset=*/1, ax::mojom::TextAffinity::kDownstream);
+
+  ComPtr<ITextRangeProvider> link_after_second_character_range;
+  CreateTextRangeProviderWin(
+      link_after_second_character_range, link_text_owner, link_text_node,
+      /*start_offset=*/2, ax::mojom::TextAffinity::kDownstream, link_text_node,
+      /*end_offset=*/2, ax::mojom::TextAffinity::kDownstream);
+
+  auto compare_starts = [](ITextRangeProvider* left,
+                           ITextRangeProvider* right) {
+    int result = 0;
+    EXPECT_HRESULT_SUCCEEDED(
+        left->CompareEndpoints(TextPatternRangeEndpoint_Start, right,
+                               TextPatternRangeEndpoint_Start, &result));
+    return result;
+  };
+
+  // Cross-boundary: "I am " end (flat offset 5) vs after first char of
+  // "ironman" (flat offset 6) — must be strictly before. Without the
+  // embedded-object behavior override this incorrectly returned 0.
+  EXPECT_EQ(-1, compare_starts(before_link_range.Get(),
+                               link_after_first_character_range.Get()));
+
+  // Same-anchor: offsets 1 vs 2 inside "ironman".
+  EXPECT_EQ(-1, compare_starts(link_after_first_character_range.Get(),
+                               link_after_second_character_range.Get()));
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderExpandToEnclosingCharacter) {
-  ui::AXTreeUpdate update = BuildTextDocument({"some text", "more text"});
+  AXTreeUpdate update = BuildTextDocument({"some text", "more text"});
   Init(update);
   AXNode* root_node = GetRoot();
 
@@ -1365,14 +1581,14 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   AXNode* root_node = GetRoot();
   ComPtr<ITextRangeProvider> text_range_provider;
   GetTextRangeProviderFromTextNode(text_range_provider, root_node);
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range_provider_internal;
+  ComPtr<ITextRangeProvider> text_range_provider_internal;
   ASSERT_HRESULT_SUCCEEDED(text_range_provider->QueryInterface(
       IID_PPV_ARGS(&text_range_provider_internal)));
 
   EXPECT_UIA_TEXTRANGE_EQ(
       text_range_provider,
       L"Text with formatting\nStandalone line with no formatting\nbold "
-      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParagraph 4");
+      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParaaagraph 4");
 
   // https://docs.microsoft.com/en-us/windows/win32/api/uiautomationclient/nf-uiautomationclient-iuiautomationtextrange-expandtoenclosingunit
   // Consider two consecutive text units A and B.
@@ -1585,59 +1801,14 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   //
   // The issue normally occurs when a heading is directly followed by an ignored
   // empty object, itself followed by an unignored empty object.
-  //
-  // ++1 kRootWebArea
-  // ++++2 kHeading
-  // ++++++3 kStaticText
-  // ++++++++4 kInlineTextBox
-  // ++++5 kGenericContainer ignored
-  // ++++6 kButton
-  ui::AXNodeData root_1;
-  ui::AXNodeData heading_2;
-  ui::AXNodeData static_text_3;
-  ui::AXNodeData inline_box_4;
-  ui::AXNodeData generic_container_5;
-  ui::AXNodeData button_6;
-
-  root_1.id = 1;
-  heading_2.id = 2;
-  static_text_3.id = 3;
-  inline_box_4.id = 4;
-  generic_container_5.id = 5;
-  button_6.id = 6;
-
-  root_1.role = ax::mojom::Role::kRootWebArea;
-  root_1.child_ids = {heading_2.id, generic_container_5.id, button_6.id};
-
-  heading_2.role = ax::mojom::Role::kHeading;
-  heading_2.child_ids = {static_text_3.id};
-
-  static_text_3.role = ax::mojom::Role::kStaticText;
-  static_text_3.child_ids = {inline_box_4.id};
-  static_text_3.SetName("3.14");
-
-  inline_box_4.role = ax::mojom::Role::kInlineTextBox;
-  inline_box_4.SetName("3.14");
-
-  generic_container_5.role = ax::mojom::Role::kGenericContainer;
-  generic_container_5.AddBoolAttribute(
-      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
-  generic_container_5.AddState(ax::mojom::State::kIgnored);
-
-  button_6.role = ax::mojom::Role::kButton;
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.tree_data = tree_data;
-  update.has_tree_data = true;
-  update.root_id = root_1.id;
-  update.nodes.push_back(root_1);
-  update.nodes.push_back(heading_2);
-  update.nodes.push_back(static_text_3);
-  update.nodes.push_back(inline_box_4);
-  update.nodes.push_back(generic_container_5);
-  update.nodes.push_back(button_6);
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kHeading
+    ++++++3 kStaticText name="3.14"
+    ++++++++4 kInlineTextBox name="3.14"
+    ++++5 kGenericContainer state=kIgnored boolAttribute=kIsLineBreakingObject,true
+    ++++6 kButton
+  )HTML"));
 
   Init(update);
 
@@ -1702,78 +1873,17 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderIgnoredForTextNavigation) {
-  // ++1 kRootWebArea
-  // ++++2 kStaticText
-  // ++++++3 kInlineTextBox foo
-  // ++++4 kSplitter
-  // ++++5 kStaticText
-  // ++++++6 kInlineTextBox bar
-  // ++++7 genericContainer
-  // ++++8 kStaticText
-  // ++++++9 kInlineTextBox baz
-  ui::AXNodeData root_1;
-  ui::AXNodeData static_text_2;
-  ui::AXNodeData inline_box_3;
-  ui::AXNodeData splitter_4;
-  ui::AXNodeData static_text_5;
-  ui::AXNodeData inline_box_6;
-  ui::AXNodeData generic_container_7;
-  ui::AXNodeData static_text_8;
-  ui::AXNodeData inline_box_9;
-
-  root_1.id = 1;
-  static_text_2.id = 2;
-  inline_box_3.id = 3;
-  splitter_4.id = 4;
-  static_text_5.id = 5;
-  inline_box_6.id = 6;
-  generic_container_7.id = 7;
-  static_text_8.id = 8;
-  inline_box_9.id = 9;
-
-  root_1.role = ax::mojom::Role::kRootWebArea;
-  root_1.child_ids = {static_text_2.id, splitter_4.id, static_text_5.id,
-                      generic_container_7.id, static_text_8.id};
-
-  static_text_2.role = ax::mojom::Role::kStaticText;
-  static_text_2.child_ids = {inline_box_3.id};
-  static_text_2.SetName("foo");
-
-  inline_box_3.role = ax::mojom::Role::kInlineTextBox;
-  inline_box_3.SetName("foo");
-
-  splitter_4.role = ax::mojom::Role::kSplitter;
-  splitter_4.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
-                              true);
-
-  static_text_5.role = ax::mojom::Role::kStaticText;
-  static_text_5.child_ids = {inline_box_6.id};
-  static_text_5.SetName("bar");
-
-  inline_box_6.role = ax::mojom::Role::kInlineTextBox;
-  inline_box_6.SetName("bar");
-
-  generic_container_7.role = ax::mojom::Role::kGenericContainer;
-  generic_container_7.AddBoolAttribute(
-      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
-
-  static_text_8.role = ax::mojom::Role::kStaticText;
-  static_text_8.child_ids = {inline_box_9.id};
-  static_text_8.SetName("bar");
-
-  inline_box_9.role = ax::mojom::Role::kInlineTextBox;
-  inline_box_9.SetName("baz");
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.tree_data = tree_data;
-  update.has_tree_data = true;
-  update.root_id = root_1.id;
-  update.nodes = {
-      root_1,        static_text_2, inline_box_3,        splitter_4,
-      static_text_5, inline_box_6,  generic_container_7, static_text_8,
-      inline_box_9};
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kStaticText
+    ++++++3 kInlineTextBox name="foo"
+    ++++4 kSplitter boolAttribute=kIsLineBreakingObject,true
+    ++++5 kStaticText
+    ++++++6 kInlineTextBox name="bar"
+    ++++7 kGenericContainer boolAttribute=kIsLineBreakingObject,true
+    ++++8 kStaticText
+    ++++++9 kInlineTextBox name="baz"
+  )HTML"));
 
   Init(update);
 
@@ -1914,6 +2024,65 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderGetText) {
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestGetVisibleRangesFindTextGetTextPipeline) {
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer state=kRichlyEditable
+    ++++++3 kGenericContainer
+    ++++++++4 kStaticText
+    ++++++++++5 kInlineTextBox
+    ++++++6 kGenericContainer boolAttribute=kIsLineBreakingObject,true
+  )HTML"));
+  update.nodes[2].SetName("Hello World");
+  update.nodes[3].SetName("Hello World");
+  update.nodes[4].SetName("Hello World");
+
+  Init(update);
+
+  ComPtr<IRawElementProviderSimple> root_node =
+      GetRootIRawElementProviderSimple();
+
+  ComPtr<ITextProvider> text_provider;
+  EXPECT_HRESULT_SUCCEEDED(
+      root_node->GetPatternProvider(UIA_TextPatternId, &text_provider));
+
+  ComPtr<ITextRangeProvider> range;
+  EXPECT_HRESULT_SUCCEEDED(text_provider->get_DocumentRange(&range));
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(GetNode(2)));
+  ASSERT_NE(owner, nullptr);
+  SetOwner(owner, range.Get());
+
+  base::win::ScopedBstr find_string(L"Hello");
+  Microsoft::WRL::ComPtr<ITextRangeProvider> text_range_provider_found;
+  EXPECT_HRESULT_SUCCEEDED(range->FindText(find_string.Get(), false, false,
+                                           &text_range_provider_found));
+  SetOwner(owner, text_range_provider_found.Get());
+  EXPECT_UIA_TEXTRANGE_EQ(text_range_provider_found, L"Hello")
+
+  ComPtr<ITextRangeProvider> selected_text_range_provider;
+  base::win::ScopedSafearray selection;
+  LONG index = 0;
+  text_range_provider_found->Select();
+
+  AXPlatformNodeDelegate* delegate = owner->GetDelegate();
+
+  // Verify selection.
+  AXSelection unignored_selection = delegate->GetUnignoredSelection();
+
+  // Verify the content of the selection.
+  text_provider->GetSelection(selection.Receive());
+  ASSERT_NE(nullptr, selection.Get());
+
+  EXPECT_HRESULT_SUCCEEDED(
+      SafeArrayGetElement(selection.Get(), &index,
+                          static_cast<void**>(&selected_text_range_provider)));
+  SetOwner(owner, selected_text_range_provider.Get());
+  EXPECT_UIA_TEXTRANGE_EQ(selected_text_range_provider, L"Hello");
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderMoveCharacter) {
   Init(BuildAXTreeForMove());
   AXNode* root_node = GetRoot();
@@ -2011,7 +2180,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderMoveFormat) {
       /*count*/ 0,
       /*expected_text*/
       L"Text with formatting\nStandalone line with no formatting\nbold "
-      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParagraph 4",
+      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParaaagraph 4",
       /*expected_count*/ 0);
 
   // Move forward.
@@ -2029,20 +2198,24 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderMoveFormat) {
                   /*expected_count*/ 1);
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
                   /*count*/ 1,
-                  /*expected_text*/ L"Paragraph 4",
+                  /*expected_text*/ L"Paraaagraph",
+                  /*expected_count*/ 1);
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" 4",
                   /*expected_count*/ 1);
 
   // Trying to move past the last format should have no effect.
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
                   /*count*/ 1,
-                  /*expected_text*/ L"Paragraph 4",
+                  /*expected_text*/ L" 4",
                   /*expected_count*/ 0);
 
   // Move backward.
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
-                  /*count*/ -3,
+                  /*count*/ -4,
                   /*expected_text*/ L"bold text",
-                  /*expected_count*/ -3);
+                  /*expected_count*/ -4);
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
                   /*count*/ -1,
                   /*expected_text*/ L"\nStandalone line with no formatting\n",
@@ -2075,8 +2248,12 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderMoveFormat) {
   // Test degenerate range creation at the end of the document.
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
                   /*count*/ 5,
-                  /*expected_text*/ L"Paragraph 4",
+                  /*expected_text*/ L"Paraaagraph",
                   /*expected_count*/ 5);
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" 4",
+                  /*expected_count*/ 1);
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_Start, TextUnit_Format,
       /*count*/ 1,
@@ -2085,7 +2262,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderMoveFormat) {
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_Start, TextUnit_Format,
       /*count*/ -1,
-      /*expected_text*/ L"Paragraph 4",
+      /*expected_text*/ L" 4",
       /*expected_count*/ -1);
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_Start, TextUnit_Format,
@@ -2095,14 +2272,14 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderMoveFormat) {
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_Start, TextUnit_Format,
       /*count*/ -1,
-      /*expected_text*/ L"Paragraph 4",
+      /*expected_text*/ L" 4",
       /*expected_count*/ -1);
 
   // Degenerate range moves.
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
-                  /*count*/ -5,
+                  /*count*/ -6,
                   /*expected_text*/ L"Text with formatting",
-                  /*expected_count*/ -5);
+                  /*expected_count*/ -6);
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
       /*count*/ -1,
@@ -2115,7 +2292,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderMoveFormat) {
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
                   /*count*/ 70,
                   /*expected_text*/ L"",
-                  /*expected_count*/ 3);
+                  /*expected_count*/ 4);
 
   // Trying to move past the last format should have no effect.
   EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
@@ -2601,7 +2778,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderMove) {
   ComPtr<ITextRangeProvider> text_range_provider;
   GetTextRangeProviderFromTextNode(text_range_provider, root_node);
 
-  // TODO(https://crbug.com/928948): test intermixed unit types
+  // TODO(crbug.com/41439481): test intermixed unit types
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
@@ -2966,15 +3143,15 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderMoveEndpointByUnitTextField) {
   // An empty text field should also be a character, word, and line boundary.
-  ui::AXNodeData root_data;
+  AXNodeData root_data;
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kRootWebArea;
 
-  ui::AXNodeData group1_data;
+  AXNodeData group1_data;
   group1_data.id = 2;
   group1_data.role = ax::mojom::Role::kGenericContainer;
 
-  ui::AXNodeData text_data;
+  AXNodeData text_data;
   text_data.id = 3;
   text_data.role = ax::mojom::Role::kStaticText;
   std::string text_content = "some text";
@@ -2987,7 +3164,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds,
                                 word_end_offsets);
 
-  ui::AXNodeData text_input_data;
+  AXNodeData text_input_data;
   text_input_data.id = 4;
   text_input_data.role = ax::mojom::Role::kTextField;
   text_input_data.AddState(ax::mojom::State::kEditable);
@@ -2996,11 +3173,11 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_input_data.AddStringAttribute(ax::mojom::StringAttribute::kInputType,
                                      "text");
 
-  ui::AXNodeData group2_data;
+  AXNodeData group2_data;
   group2_data.id = 5;
   group2_data.role = ax::mojom::Role::kGenericContainer;
 
-  ui::AXNodeData more_text_data;
+  AXNodeData more_text_data;
   more_text_data.id = 6;
   more_text_data.role = ax::mojom::Role::kStaticText;
   text_content = "more text";
@@ -3012,7 +3189,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   more_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds,
                                      word_end_offsets);
 
-  ui::AXNodeData empty_text_data;
+  AXNodeData empty_text_data;
   empty_text_data.id = 7;
   empty_text_data.role = ax::mojom::Role::kStaticText;
   empty_text_data.AddState(ax::mojom::State::kEditable);
@@ -3030,9 +3207,9 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_input_data.child_ids = {empty_text_data.id};
   group2_data.child_ids = {more_text_data.id};
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root_data.id;
@@ -3117,6 +3294,43 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"some text");
 }
 
+TEST_F(AXPlatformNodeTextRangeProviderTest, TestMoveByCharacterEmptyTextfield) {
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kStaticText name="hello"
+    ++++3 kTextField state=kEditable
+    ++++++4 kStaticText name="" state=kEditable
+    ++++5 kStaticText name="world" state=kEditable
+  )HTML"));
+
+  update.nodes[2].SetNameExplicitlyEmpty();
+
+  Init(update);
+
+  // Set up variables from the tree for testing.
+  AXNode* root_node = GetRoot();
+
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"hello\n\xFFFc\nworld");
+
+  int count;
+  // Tests for TextUnit_Character.
+  ASSERT_HRESULT_SUCCEEDED(text_range_provider->MoveEndpointByUnit(
+      TextPatternRangeEndpoint_Start, TextUnit_Character, /*count*/ 7, &count));
+  ASSERT_EQ(7, count);
+  // Note that by design, empty objects such as empty text fields, are placed in
+  // their own paragraph for easier screen reader navigation.
+  EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"\nworld");
+
+  ASSERT_HRESULT_SUCCEEDED(text_range_provider->MoveEndpointByUnit(
+      TextPatternRangeEndpoint_Start, TextUnit_Character, /*count*/ -7,
+      &count));
+  ASSERT_EQ(-7, count);
+  EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"hello\n\xFFFc\nworld");
+}
+
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderMoveEndpointByFormat) {
   Init(BuildAXTreeForMoveByFormat());
@@ -3128,20 +3342,38 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_UIA_TEXTRANGE_EQ(
       text_range_provider,
       L"Text with formatting\nStandalone line with no formatting\nbold "
-      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParagraph 4");
+      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParaaagraph 4");
+
+  // `Paraaagraph 4` should be broken into two separate `format` units based on
+  // the spelling error (modeled as CSS highlight) in corresponding AXNode.
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
-      /*count*/ -2,
+      /*count*/ -1,
       /*expected_text*/
       L"Text with formatting\nStandalone line with no formatting\nbold "
-      L"text\nParagraph 1",
-      /*expected_count*/ -2);
+      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParaaagraph",
+      /*expected_count*/ -1);
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
+      /*count*/ -1,
+      /*expected_text*/
+      L"Text with formatting\nStandalone line with no formatting\nbold "
+      L"text\nParagraph 1\nParagraph 2\nParagraph 3\n",
+      /*expected_count*/ -1);
 
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
       /*count*/ -1,
       /*expected_text*/
-      L"Text with formatting\nStandalone line with no formatting\nbold text",
+      L"Text with formatting\nStandalone line with no formatting\nbold "
+      L"text\nParagraph 1\n",
+      /*expected_count*/ -1);
+
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
+      /*count*/ -1,
+      /*expected_text*/
+      L"Text with formatting\nStandalone line with no formatting\nbold text\n",
       /*expected_count*/ -1);
 
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
@@ -3165,17 +3397,17 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
-      /*count*/ 7,
+      /*count*/ 8,
       /*expected_text*/
       L"Text with formatting\nStandalone line with no formatting\nbold "
-      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParagraph 4",
-      /*expected_count*/ 6);
+      L"text\nParagraph 1\nParagraph 2\nParagraph 3\nParaaagraph 4",
+      /*expected_count*/ 7);
 
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
       text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
       /*count*/ -8,
       /*expected_text*/ L"",
-      /*expected_count*/ -6);
+      /*expected_count*/ -7);
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderCompare) {
@@ -3231,7 +3463,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderSelection) {
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderGetBoundingRectangles) {
-  ui::AXTreeUpdate update = BuildAXTreeForBoundingRectangles();
+  AXTreeUpdate update = BuildAXTreeForBoundingRectangles();
   Init(update);
   ComPtr<ITextRangeProvider> text_range_provider;
   base::win::ScopedSafearray rectangles;
@@ -3246,6 +3478,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   std::vector<double> expected_values = {20,  20, 200, 30, /* button */
                                          20,  50, 200, 30, /* check box */
                                          220, 20, 30,  30, /* line 1 */
+                                         250, 20, 1,   30, /* line break */
                                          220, 50, 42,  30 /* line 2 */};
   EXPECT_UIA_SAFEARRAY_EQ(rectangles.Get(), expected_values);
   rectangles.Reset();
@@ -3263,6 +3496,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   expected_values = {20,  20, 200, 30, /* button */
                      20,  50, 200, 30, /* check box */
                      220, 20, 30,  30, /* line 1 */
+                     250, 20, 1,   30, /* line break */
                      220, 50, 35,  30 /* line 2 */};
   EXPECT_UIA_SAFEARRAY_EQ(rectangles.Get(), expected_values);
   rectangles.Reset();
@@ -3278,7 +3512,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
       text_range_provider->GetBoundingRectangles(rectangles.Receive()));
   expected_values = {20,  20, 200, 30, /* button */
                      20,  50, 200, 30, /* check box */
-                     220, 20, 30,  30 /* line 1 */};
+                     220, 20, 30,  30, /* line 1 */
+                     250, 20, 1,   30 /* line break */};
   EXPECT_UIA_SAFEARRAY_EQ(rectangles.Get(), expected_values);
   rectangles.Reset();
 
@@ -3292,7 +3527,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_HRESULT_SUCCEEDED(
       text_range_provider->GetBoundingRectangles(rectangles.Receive()));
   expected_values = {20, 20, 200, 30, /* button */
-                     20, 50, 200, 30 /* check box */};
+                     20, 50, 200, 30, /* check box */
+                     220, 20, 1, 30 /* line break */};
   EXPECT_UIA_SAFEARRAY_EQ(rectangles.Get(), expected_values);
 }
 
@@ -3314,66 +3550,66 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   //                              |
   //                              text_node
 
-  ui::AXNodeData root_data;
+  AXNodeData root_data;
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kRootWebArea;
 
-  ui::AXNodeData paragraph_data;
+  AXNodeData paragraph_data;
   paragraph_data.id = 2;
   paragraph_data.role = ax::mojom::Role::kParagraph;
   root_data.child_ids.push_back(paragraph_data.id);
 
-  ui::AXNodeData static_text_data1;
+  AXNodeData static_text_data1;
   static_text_data1.id = 3;
   static_text_data1.role = ax::mojom::Role::kStaticText;
   paragraph_data.child_ids.push_back(static_text_data1.id);
 
-  ui::AXNodeData inline_text_data1;
+  AXNodeData inline_text_data1;
   inline_text_data1.id = 4;
   inline_text_data1.role = ax::mojom::Role::kInlineTextBox;
   static_text_data1.child_ids.push_back(inline_text_data1.id);
 
-  ui::AXNodeData link_data;
+  AXNodeData link_data;
   link_data.id = 5;
   link_data.role = ax::mojom::Role::kLink;
   paragraph_data.child_ids.push_back(link_data.id);
 
-  ui::AXNodeData static_text_data2;
+  AXNodeData static_text_data2;
   static_text_data2.id = 6;
   static_text_data2.role = ax::mojom::Role::kStaticText;
   link_data.child_ids.push_back(static_text_data2.id);
 
-  ui::AXNodeData inline_text_data2;
+  AXNodeData inline_text_data2;
   inline_text_data2.id = 7;
   inline_text_data2.role = ax::mojom::Role::kInlineTextBox;
   static_text_data2.child_ids.push_back(inline_text_data2.id);
 
-  ui::AXNodeData link_data2;
+  AXNodeData link_data2;
   link_data2.id = 8;
   link_data2.role = ax::mojom::Role::kLink;
   paragraph_data.child_ids.push_back(link_data2.id);
 
-  ui::AXNodeData list_data;
+  AXNodeData list_data;
   list_data.id = 9;
   list_data.role = ax::mojom::Role::kList;
   link_data2.child_ids.push_back(list_data.id);
 
-  ui::AXNodeData list_item_data;
+  AXNodeData list_item_data;
   list_item_data.id = 10;
   list_item_data.role = ax::mojom::Role::kListItem;
   list_data.child_ids.push_back(list_item_data.id);
 
-  ui::AXNodeData static_text_data3;
+  AXNodeData static_text_data3;
   static_text_data3.id = 11;
   static_text_data3.role = ax::mojom::Role::kStaticText;
   list_item_data.child_ids.push_back(static_text_data3.id);
 
-  ui::AXNodeData inline_text_data3;
+  AXNodeData inline_text_data3;
   inline_text_data3.id = 12;
   inline_text_data3.role = ax::mojom::Role::kInlineTextBox;
   static_text_data3.child_ids.push_back(inline_text_data3.id);
 
-  ui::AXNodeData search_box;
+  AXNodeData search_box;
   search_box.id = 13;
   search_box.role = ax::mojom::Role::kSearchBox;
   search_box.AddState(ax::mojom::State::kEditable);
@@ -3382,31 +3618,31 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                 "search");
   paragraph_data.child_ids.push_back(search_box.id);
 
-  ui::AXNodeData search_text;
+  AXNodeData search_text;
   search_text.id = 14;
   search_text.role = ax::mojom::Role::kStaticText;
   search_text.AddState(ax::mojom::State::kEditable);
   search_text.SetName("placeholder");
   search_box.child_ids.push_back(search_text.id);
 
-  ui::AXNodeData pdf_highlight_data;
+  AXNodeData pdf_highlight_data;
   pdf_highlight_data.id = 15;
   pdf_highlight_data.role = ax::mojom::Role::kPdfActionableHighlight;
   paragraph_data.child_ids.push_back(pdf_highlight_data.id);
 
-  ui::AXNodeData static_text_data4;
+  AXNodeData static_text_data4;
   static_text_data4.id = 16;
   static_text_data4.role = ax::mojom::Role::kStaticText;
   pdf_highlight_data.child_ids.push_back(static_text_data4.id);
 
-  ui::AXNodeData inline_text_data4;
+  AXNodeData inline_text_data4;
   inline_text_data4.id = 17;
   inline_text_data4.role = ax::mojom::Role::kInlineTextBox;
   static_text_data4.child_ids.push_back(inline_text_data4.id);
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root_data.id;
@@ -3547,14 +3783,14 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // ++++++statix_text_2
   // ++++++++inline_text_2
 
-  ui::AXNodeData root;
-  ui::AXNodeData button_1;
-  ui::AXNodeData static_text_1;
-  ui::AXNodeData inline_text_1;
-  ui::AXNodeData button_2;
-  ui::AXNodeData heading;
-  ui::AXNodeData static_text_2;
-  ui::AXNodeData inline_text_2;
+  AXNodeData root;
+  AXNodeData button_1;
+  AXNodeData static_text_1;
+  AXNodeData inline_text_1;
+  AXNodeData button_2;
+  AXNodeData heading;
+  AXNodeData static_text_2;
+  AXNodeData inline_text_2;
 
   root.id = 1;
   button_1.id = 2;
@@ -3587,9 +3823,9 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
   inline_text_2.role = ax::mojom::Role::kInlineTextBox;
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root.id;
@@ -3670,7 +3906,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_HRESULT_SUCCEEDED(
       root_node_raw->GetPatternProvider(UIA_TextPatternId, &document_provider));
   ComPtr<ITextRangeProvider> document_text_range_provider;
-  ComPtr<AXPlatformNodeTextRangeProviderWin> document_text_range;
+  ComPtr<ITextRangeProvider> document_text_range;
 
   // Text range related to "some text".
   ComPtr<IRawElementProviderSimple> text_node_raw =
@@ -3679,7 +3915,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_HRESULT_SUCCEEDED(
       text_node_raw->GetPatternProvider(UIA_TextPatternId, &text_provider));
   ComPtr<ITextRangeProvider> text_range_provider;
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range;
+  ComPtr<ITextRangeProvider> text_range;
 
   // Text range related to "more text".
   ComPtr<IRawElementProviderSimple> more_text_node_raw =
@@ -3688,7 +3924,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_HRESULT_SUCCEEDED(more_text_node_raw->GetPatternProvider(
       UIA_TextPatternId, &more_text_provider));
   ComPtr<ITextRangeProvider> more_text_range_provider;
-  ComPtr<AXPlatformNodeTextRangeProviderWin> more_text_range;
+  ComPtr<ITextRangeProvider> more_text_range;
 
   // Move the start of document text range "some textmore text" to the end of
   // itself.
@@ -3874,7 +4110,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderGetAttributeValue) {
-  ui::AXNodeData text_data;
+  AXNodeData text_data;
   text_data.id = 2;
   text_data.role = ax::mojom::Role::kStaticText;
   text_data.AddStringAttribute(ax::mojom::StringAttribute::kFontFamily, "sans");
@@ -3887,31 +4123,32 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_data.AddIntAttribute(ax::mojom::IntAttribute::kBackgroundColor,
                             0xFFADBEEFU);
   text_data.AddIntAttribute(ax::mojom::IntAttribute::kColor, 0xFFADC0DEU);
-  text_data.AddStringAttribute(ax::mojom::StringAttribute::kLanguage, "fr-CA");
   text_data.SetTextDirection(ax::mojom::WritingDirection::kRtl);
   text_data.AddTextStyle(ax::mojom::TextStyle::kItalic);
   text_data.SetTextPosition(ax::mojom::TextPosition::kSubscript);
   text_data.SetRestriction(ax::mojom::Restriction::kReadOnly);
   text_data.SetTextAlign(ax::mojom::TextAlign::kCenter);
-  text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerTypes,
-                                {(int)ax::mojom::MarkerType::kGrammar,
-                                 (int)ax::mojom::MarkerType::kSpelling,
-                                 (int)ax::mojom::MarkerType::kHighlight,
-                                 (int)ax::mojom::MarkerType::kHighlight,
-                                 (int)ax::mojom::MarkerType::kHighlight});
-  text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kHighlightTypes,
-                                {(int)ax::mojom::HighlightType::kNone,
-                                 (int)ax::mojom::HighlightType::kNone,
-                                 (int)ax::mojom::HighlightType::kHighlight,
-                                 (int)ax::mojom::HighlightType::kSpellingError,
-                                 (int)ax::mojom::HighlightType::kGrammarError});
+  text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kGrammar),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kHighlight),
+       static_cast<int>(ax::mojom::MarkerType::kHighlight),
+       static_cast<int>(ax::mojom::MarkerType::kHighlight)});
+  text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int>(ax::mojom::HighlightType::kNone),
+       static_cast<int>(ax::mojom::HighlightType::kNone),
+       static_cast<int>(ax::mojom::HighlightType::kHighlight),
+       static_cast<int>(ax::mojom::HighlightType::kSpellingError),
+       static_cast<int>(ax::mojom::HighlightType::kGrammarError)});
   text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerStarts,
                                 {0, 5, 0, 14, 19});
   text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
                                 {9, 9, 4, 18, 24});
   text_data.SetName("some text and some other text");
 
-  ui::AXNodeData heading_data;
+  AXNodeData heading_data;
   heading_data.id = 3;
   heading_data.role = ax::mojom::Role::kHeading;
   heading_data.AddIntAttribute(ax::mojom::IntAttribute::kHierarchicalLevel, 6);
@@ -3923,7 +4160,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   heading_data.AddState(ax::mojom::State::kEditable);
   heading_data.child_ids = {4};
 
-  ui::AXNodeData heading_text_data;
+  AXNodeData heading_text_data;
   heading_text_data.id = 4;
   heading_text_data.role = ax::mojom::Role::kStaticText;
   heading_text_data.AddState(ax::mojom::State::kInvisible);
@@ -3937,14 +4174,14 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   heading_text_data.SetTextAlign(ax::mojom::TextAlign::kJustify);
   heading_text_data.AddIntListAttribute(
       ax::mojom::IntListAttribute::kMarkerTypes,
-      {(int)ax::mojom::MarkerType::kSpelling});
+      {static_cast<int>(ax::mojom::MarkerType::kSpelling)});
   heading_text_data.AddIntListAttribute(
       ax::mojom::IntListAttribute::kMarkerStarts, {5});
   heading_text_data.AddIntListAttribute(
       ax::mojom::IntListAttribute::kMarkerEnds, {9});
   heading_text_data.SetName("more text");
 
-  ui::AXNodeData mark_data;
+  AXNodeData mark_data;
   mark_data.id = 5;
   mark_data.role = ax::mojom::Role::kMark;
   mark_data.AddIntAttribute(ax::mojom::IntAttribute::kBackgroundColor,
@@ -3953,7 +4190,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   mark_data.SetTextDirection(ax::mojom::WritingDirection::kRtl);
   mark_data.child_ids = {6};
 
-  ui::AXNodeData mark_text_data;
+  AXNodeData mark_text_data;
   mark_text_data.id = 6;
   mark_text_data.role = ax::mojom::Role::kStaticText;
   mark_text_data.AddIntAttribute(ax::mojom::IntAttribute::kBackgroundColor,
@@ -3963,7 +4200,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   mark_text_data.SetTextAlign(ax::mojom::TextAlign::kNone);
   mark_text_data.SetName("marked text");
 
-  ui::AXNodeData list_data;
+  AXNodeData list_data;
   list_data.id = 7;
   list_data.role = ax::mojom::Role::kList;
   list_data.child_ids = {8, 10};
@@ -3971,7 +4208,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                             0xFFADBEEFU);
   list_data.AddIntAttribute(ax::mojom::IntAttribute::kColor, 0xFFADC0DEU);
 
-  ui::AXNodeData list_item_data;
+  AXNodeData list_item_data;
   list_item_data.id = 8;
   list_item_data.role = ax::mojom::Role::kListItem;
   list_item_data.child_ids = {9};
@@ -3982,7 +4219,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                  0xFFADBEEFU);
   list_item_data.AddIntAttribute(ax::mojom::IntAttribute::kColor, 0xFFADC0DEU);
 
-  ui::AXNodeData list_item_text_data;
+  AXNodeData list_item_text_data;
   list_item_text_data.id = 9;
   list_item_text_data.role = ax::mojom::Role::kStaticText;
   list_item_text_data.AddIntAttribute(ax::mojom::IntAttribute::kBackgroundColor,
@@ -3991,7 +4228,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                       0xFFADC0DEU);
   list_item_text_data.SetName("list item");
 
-  ui::AXNodeData list_item2_data;
+  AXNodeData list_item2_data;
   list_item2_data.id = 10;
   list_item2_data.role = ax::mojom::Role::kListItem;
   list_item2_data.child_ids = {11};
@@ -4002,7 +4239,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                   0xFFADBEEFU);
   list_item2_data.AddIntAttribute(ax::mojom::IntAttribute::kColor, 0xFFADC0DEU);
 
-  ui::AXNodeData list_item2_text_data;
+  AXNodeData list_item2_text_data;
   list_item2_text_data.id = 11;
   list_item2_text_data.role = ax::mojom::Role::kStaticText;
   list_item2_text_data.AddIntAttribute(
@@ -4011,7 +4248,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                        0xFFADC0DEU);
   list_item2_text_data.SetName("list item 2");
 
-  ui::AXNodeData input_text_data;
+  AXNodeData input_text_data;
   input_text_data.id = 12;
   input_text_data.role = ax::mojom::Role::kTextField;
   input_text_data.AddState(ax::mojom::State::kEditable);
@@ -4030,7 +4267,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   input_text_data.SetName("placeholder");
   input_text_data.child_ids = {13};
 
-  ui::AXNodeData placeholder_text_data;
+  AXNodeData placeholder_text_data;
   placeholder_text_data.id = 13;
   placeholder_text_data.role = ax::mojom::Role::kStaticText;
   placeholder_text_data.AddIntAttribute(
@@ -4039,7 +4276,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                         0xFFADC0DEU);
   placeholder_text_data.SetName("placeholder");
 
-  ui::AXNodeData input_text_data2;
+  AXNodeData input_text_data2;
   input_text_data2.id = 14;
   input_text_data2.role = ax::mojom::Role::kTextField;
   input_text_data2.AddState(ax::mojom::State::kEditable);
@@ -4057,7 +4294,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   input_text_data2.SetName("foo");
   input_text_data2.child_ids = {15};
 
-  ui::AXNodeData placeholder_text_data2;
+  AXNodeData placeholder_text_data2;
   placeholder_text_data2.id = 15;
   placeholder_text_data2.role = ax::mojom::Role::kStaticText;
   placeholder_text_data2.AddIntAttribute(
@@ -4066,14 +4303,14 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                          0xFFADC0DEU);
   placeholder_text_data2.SetName("placeholder2");
 
-  ui::AXNodeData link_data;
+  AXNodeData link_data;
   link_data.id = 16;
   link_data.role = ax::mojom::Role::kLink;
   link_data.AddIntAttribute(ax::mojom::IntAttribute::kBackgroundColor,
                             0xFFADBEEFU);
   link_data.AddIntAttribute(ax::mojom::IntAttribute::kColor, 0xFFADC0DEU);
 
-  ui::AXNodeData link_text_data;
+  AXNodeData link_text_data;
   link_text_data.id = 17;
   link_text_data.role = ax::mojom::Role::kStaticText;
   link_text_data.AddIntAttribute(ax::mojom::IntAttribute::kBackgroundColor,
@@ -4081,14 +4318,14 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   link_text_data.AddIntAttribute(ax::mojom::IntAttribute::kColor, 0xFFADC0DEU);
   link_data.child_ids = {17};
 
-  ui::AXNodeData root_data;
+  AXNodeData root_data;
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kRootWebArea;
   root_data.child_ids = {2, 3, 5, 7, 12, 14, 16};
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root_data.id;
@@ -4179,18 +4416,6 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_UIA_TEXTATTRIBUTE_EQ(list_item2_text_range_provider,
                               UIA_BulletStyleAttributeId, expected_variant);
   expected_variant.Reset();
-
-  {
-    base::win::ScopedVariant lang_variant;
-    EXPECT_HRESULT_SUCCEEDED(text_range_provider->GetAttributeValue(
-        UIA_CultureAttributeId, lang_variant.Receive()));
-
-    EXPECT_EQ(lang_variant.type(), VT_I4);
-    const LCID lcid = V_I4(lang_variant.ptr());
-    EXPECT_EQ(LANG_FRENCH, PRIMARYLANGID(lcid));
-    EXPECT_EQ(SUBLANG_FRENCH_CANADIAN, SUBLANGID(lcid));
-    EXPECT_EQ(SORT_DEFAULT, SORTIDFROMLCID(lcid));
-  }
 
   std::wstring font_name = L"sans";
   expected_variant.Set(SysAllocString(font_name.c_str()));
@@ -4386,10 +4611,18 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
     // |text_node| has a grammar error on "some text", a highlight for the
     // first word, a spelling error for the second word, a "spelling-error"
     // highlight for the fourth word, and a "grammar-error" highlight for the
-    // fifth word. So the range has mixed annotations.
+    // fifth word. So the range has mixed attributes.
+    base::win::ScopedVariant annotation_types_variant;
+    EXPECT_HRESULT_SUCCEEDED(text_range_provider->GetAttributeValue(
+        UIA_AnnotationTypesAttributeId, annotation_types_variant.Receive()));
+
+    EXPECT_UIA_TEXTRANGE_EQ(text_range_provider,
+                            L"some text and some other text");
     EXPECT_UIA_TEXTATTRIBUTE_MIXED(text_range_provider,
                                    UIA_AnnotationTypesAttributeId);
+  }
 
+  {
     // Testing annotations in range [5,9)
     // start: TextPosition, anchor_id=2, text_offset=5,
     //        annotated_text=some <t>ext and some other text
@@ -4397,7 +4630,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
     //        annotated_text=some text<> and some other text
     AXPlatformNodeWin* owner =
         static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_node));
-    ComPtr<AXPlatformNodeTextRangeProviderWin> range_with_annotations;
+    ComPtr<ITextRangeProvider> range_with_annotations;
     CreateTextRangeProviderWin(
         range_with_annotations, owner,
         /*start_anchor=*/text_node, /*start_offset=*/5,
@@ -4424,7 +4657,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
     //        annotated_text=some<> text and some other text
     AXPlatformNodeWin* owner =
         static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_node));
-    ComPtr<AXPlatformNodeTextRangeProviderWin> range_with_annotations;
+    ComPtr<ITextRangeProvider> range_with_annotations;
     CreateTextRangeProviderWin(
         range_with_annotations, owner,
         /*start_anchor=*/text_node, /*start_offset=*/0,
@@ -4451,7 +4684,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
     //        annotated_text=some text and some<> other text
     AXPlatformNodeWin* owner =
         static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_node));
-    ComPtr<AXPlatformNodeTextRangeProviderWin> range_with_annotations;
+    ComPtr<ITextRangeProvider> range_with_annotations;
     CreateTextRangeProviderWin(
         range_with_annotations, owner,
         /*start_anchor=*/text_node, /*start_offset=*/14,
@@ -4477,7 +4710,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
     //        annotated_text=some text and some other<> text
     AXPlatformNodeWin* owner =
         static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_node));
-    ComPtr<AXPlatformNodeTextRangeProviderWin> range_with_annotations;
+    ComPtr<ITextRangeProvider> range_with_annotations;
     CreateTextRangeProviderWin(
         range_with_annotations, owner,
         /*start_anchor=*/text_node, /*start_offset=*/19,
@@ -4497,17 +4730,25 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
   {
     // |heading_text_node| has a a spelling error for one word, and no
-    // annotations for the remaining text, so the range has mixed annotations.
+    // annotations for the remaining text, so the entire range has mixed
+    // annotations.
+    base::win::ScopedVariant annotation_types_variant;
+    EXPECT_HRESULT_SUCCEEDED(heading_text_range_provider->GetAttributeValue(
+        UIA_AnnotationTypesAttributeId, annotation_types_variant.Receive()));
+
+    EXPECT_UIA_TEXTRANGE_EQ(heading_text_range_provider, L"more text");
     EXPECT_UIA_TEXTATTRIBUTE_MIXED(heading_text_range_provider,
                                    UIA_AnnotationTypesAttributeId);
+  }
 
+  {
     // start: TextPosition, anchor_id=4, text_offset=5,
     //        annotated_text=more <t>ext
     // end  : TextPosition, anchor_id=4, text_offset=9,
     //        annotated_text=more text<>
     AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
         AXPlatformNodeFromNode(heading_text_node));
-    ComPtr<AXPlatformNodeTextRangeProviderWin> range_with_annotations;
+    ComPtr<ITextRangeProvider> range_with_annotations;
     CreateTextRangeProviderWin(
         range_with_annotations, owner,
         /*start_anchor=*/heading_text_node, /*start_offset=*/5,
@@ -4525,10 +4766,144 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   }
 
   {
+    // |heading_text_node| = "more text" (without quotes)
+    // In this, 'text' is annotated with a spelling error.
+    //
+    // We want to test for mixed annotation in 'text' selection for spelling
+    // error text combined with character(s) from adjacent anchor(s) which do
+    // not have any such annotations.
+    //
+    // start: TextPosition, anchor_id=4, text_offset=5,
+    //        annotated_text=more <t>ext marked text
+    // end  : TextPosition, anchor_id=6, text_offset=9,
+    //        annotated_text=more text m<a>rked text
+    AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
+        AXPlatformNodeFromNode(heading_text_node));
+    ComPtr<ITextRangeProvider> mixed_text_range_provider;
+    CreateTextRangeProviderWin(
+        mixed_text_range_provider, owner,
+        /*start_anchor=*/heading_text_node, /*start_offset=*/5,
+        /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+        /*end_anchor=*/mark_text_node, /*end_offset=*/4,
+        /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+    EXPECT_UIA_TEXTRANGE_EQ(mixed_text_range_provider, L"textmark");
+    EXPECT_UIA_TEXTATTRIBUTE_MIXED(mixed_text_range_provider,
+                                   UIA_AnnotationTypesAttributeId);
+  }
+
+  {
     base::win::ScopedVariant empty_variant;
     EXPECT_UIA_TEXTATTRIBUTE_EQ(mark_text_range_provider,
                                 UIA_AnnotationTypesAttributeId, empty_variant);
   }
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestITextRangeProviderGetAttributeValueAnnotationTypesMathematics) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(features::kUiaMathMlSupport);
+
+  // Build a simple tree with one math node and one non-math node:
+  // rootWebArea id=1
+  // ++math id=2
+  // ++++staticText id=3 name="x"
+  // ++++++inlineTextBox id=4 name="x"
+  // ++staticText id=5 name="y"
+  // ++++inlineTextBox id=6 name="y"
+  AXNodeData root;
+  AXNodeData math;
+  AXNodeData math_text;
+  AXNodeData math_inline;
+  AXNodeData outside_text;
+  AXNodeData outside_inline;
+
+  root.id = 1;
+  math.id = 2;
+  math_text.id = 3;
+  math_inline.id = 4;
+  outside_text.id = 5;
+  outside_inline.id = 6;
+
+  root.role = ax::mojom::Role::kRootWebArea;
+  root.SetName("root");
+  root.child_ids = {math.id, outside_text.id};
+
+  math.role = ax::mojom::Role::kMathMLMath;
+  math.child_ids = {math_text.id};
+  math.AddStringAttribute(ax::mojom::StringAttribute::kMathContent,
+                          "<math><mi>x</mi></math>");
+
+  math_text.role = ax::mojom::Role::kStaticText;
+  math_text.SetName("x");
+  math_text.child_ids = {math_inline.id};
+
+  math_inline.role = ax::mojom::Role::kInlineTextBox;
+  math_inline.SetName("x");
+
+  outside_text.role = ax::mojom::Role::kStaticText;
+  outside_text.SetName("y");
+  outside_text.child_ids = {outside_inline.id};
+
+  outside_inline.role = ax::mojom::Role::kInlineTextBox;
+  outside_inline.SetName("y");
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root.id;
+  update.nodes = {root,        math,         math_text,
+                  math_inline, outside_text, outside_inline};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  const AXTree* tree = Init(update);
+
+  AXNode* root_node = GetRoot();
+  AXNode* math_text_node = tree->GetFromId(math_text.id);
+  AXNode* outside_text_node = tree->GetFromId(outside_text.id);
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(root_node));
+  ASSERT_NE(owner, nullptr);
+
+  // Text range inside math should expose AnnotationType_Mathematics.
+  ComPtr<ITextRangeProvider> math_text_range_provider;
+  CreateTextRangeProviderWin(
+      math_text_range_provider, owner,
+      /*start_anchor=*/math_text_node,
+      /*start_offset=*/0,
+      /*start_affinity=*/ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor=*/math_text_node,
+      /*end_offset=*/1,
+      /*end_affinity=*/ax::mojom::TextAffinity::kDownstream);
+  ASSERT_NE(nullptr, math_text_range_provider.Get());
+  EXPECT_UIA_TEXTRANGE_EQ(math_text_range_provider, L"x");
+
+  base::win::ScopedVariant math_annotation_types_variant;
+  EXPECT_HRESULT_SUCCEEDED(math_text_range_provider->GetAttributeValue(
+      UIA_AnnotationTypesAttributeId, math_annotation_types_variant.Receive()));
+
+  EXPECT_EQ(math_annotation_types_variant.type(), VT_ARRAY | VT_I4);
+  std::vector<int> expected_math_annotations = {AnnotationType_Mathematics};
+  EXPECT_UIA_SAFEARRAY_EQ(V_ARRAY(math_annotation_types_variant.ptr()),
+                          expected_math_annotations);
+
+  // Text range outside math should not expose AnnotationType_Mathematics and
+  // instead return an empty variant for AnnotationTypes.
+  ComPtr<ITextRangeProvider> outside_text_range_provider;
+  CreateTextRangeProviderWin(
+      outside_text_range_provider, owner,
+      /*start_anchor=*/outside_text_node,
+      /*start_offset=*/0,
+      /*start_affinity=*/ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor=*/outside_text_node,
+      /*end_offset=*/1,
+      /*end_affinity=*/ax::mojom::TextAffinity::kDownstream);
+  ASSERT_NE(nullptr, outside_text_range_provider.Get());
+  EXPECT_UIA_TEXTRANGE_EQ(outside_text_range_provider, L"y");
+
+  base::win::ScopedVariant empty_variant;
+  EXPECT_UIA_TEXTATTRIBUTE_EQ(outside_text_range_provider,
+                              UIA_AnnotationTypesAttributeId, empty_variant);
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
@@ -4598,13 +4973,13 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   highlighted_text.role = ax::mojom::Role::kStaticText;
   highlighted_text.SetName("highlighted");
 
-  ui::AXTreeUpdate update;
+  AXTreeUpdate update;
   update.has_tree_data = true;
   update.root_id = root.id;
   update.nodes = {root,          annotation_target, some_text,
                   comment1,      comment1_text,     comment2,
                   comment2_text, highlighted,       highlighted_text};
-  update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
 
   Init(update);
 
@@ -4614,7 +4989,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   AXNode* comment2_node = root_node->children()[2];
   AXNode* highlighted_node = root_node->children()[3];
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> some_text_range_provider;
+  ComPtr<ITextRangeProvider> some_text_range_provider;
 
   // Create a text range encapsulates |annotation_target_node| with content
   // "some text".
@@ -4729,12 +5104,12 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   comment1_text.role = ax::mojom::Role::kStaticText;
   comment1_text.SetName("comment 1");
 
-  ui::AXTreeUpdate update;
+  AXTreeUpdate update;
   update.has_tree_data = true;
   update.root_id = root.id;
   update.nodes = {root,          highlighted, some_text,
                   readonly_text, comment1,    comment1_text};
-  update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
 
   Init(update);
 
@@ -4748,7 +5123,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // "some text".
   // start: TextPosition, anchor_id=2, text_offset=0, annotated_text=<s>ome text
   // end  : TextPosition, anchor_id=2, text_offset=9, annotated_text=some text<>
-  ComPtr<AXPlatformNodeTextRangeProviderWin> some_text_range_provider;
+  ComPtr<ITextRangeProvider> some_text_range_provider;
   AXPlatformNodeWin* owner =
       static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(highlighted_node));
   CreateTextRangeProviderWin(
@@ -4802,7 +5177,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Validate text range "some textread only" returns mixed attribute.
   // start: TextPosition, anchor_id=2, text_offset=0, annotated_text=<s>ome text
   // end  : TextPosition, anchor_id=3, text_offset=9, annotated_text=read only<>
-  ComPtr<AXPlatformNodeTextRangeProviderWin> mixed_text_range_provider;
+  ComPtr<ITextRangeProvider> mixed_text_range_provider;
   CreateTextRangeProviderWin(
       mixed_text_range_provider, owner,
       /*start_anchor=*/some_text_node, /*start_offset=*/0,
@@ -4817,25 +5192,25 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderGetAttributeValueNotSupported) {
-  ui::AXNodeData root_data;
+  AXNodeData root_data;
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kRootWebArea;
 
-  ui::AXNodeData text_data_first;
+  AXNodeData text_data_first;
   text_data_first.id = 2;
   text_data_first.role = ax::mojom::Role::kStaticText;
   text_data_first.SetName("first");
   root_data.child_ids.push_back(text_data_first.id);
 
-  ui::AXNodeData text_data_second;
+  AXNodeData text_data_second;
   text_data_second.id = 3;
   text_data_second.role = ax::mojom::Role::kStaticText;
   text_data_second.SetName("second");
   root_data.child_ids.push_back(text_data_second.id);
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root_data.id;
@@ -4896,8 +5271,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderGetAttributeValueWithAncestorTextPosition) {
-  ui::AXTreeUpdate initial_state;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate initial_state;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   initial_state.tree_data.tree_id = tree_id;
   initial_state.has_tree_data = true;
   initial_state.root_id = 1;
@@ -4929,12 +5304,12 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Making |owner| AXID:2 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire subtree, and not only AXID:3 for example.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 2)));
+      AXPlatformNodeFromNode(tree->GetFromId(2)));
 
   // start: TextPosition, anchor_id=4, text_offset=0, annotated_text=<s>ome text
   // end  : TextPosition, anchor_id=5, text_offset=8,
   //        annotated_text=more tex<t>
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range_provider_win;
+  ComPtr<ITextRangeProvider> text_range_provider_win;
   CreateTextRangeProviderWin(
       text_range_provider_win, owner,
       /*start_anchor=*/some_text_node, /*start_offset=*/0,
@@ -4965,7 +5340,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderSelect) {
       QueryInterfaceFromNode<IRawElementProviderSimple>(root_node);
   ComPtr<ITextProvider> document_provider;
   ComPtr<ITextRangeProvider> document_text_range_provider;
-  ComPtr<AXPlatformNodeTextRangeProviderWin> document_text_range;
+  ComPtr<ITextRangeProvider> document_text_range;
   EXPECT_HRESULT_SUCCEEDED(
       root_node_raw->GetPatternProvider(UIA_TextPatternId, &document_provider));
   EXPECT_HRESULT_SUCCEEDED(
@@ -4981,7 +5356,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderSelect) {
   ComPtr<ITextRangeProvider> text_range_provider;
   GetTextRangeProviderFromTextNode(text_range_provider,
                                    root_node->children()[0]);
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range;
+  ComPtr<ITextRangeProvider> text_range;
   EXPECT_HRESULT_SUCCEEDED(
       text_range_provider->QueryInterface(IID_PPV_ARGS(&text_range)));
 
@@ -4990,7 +5365,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderSelect) {
   GetTextRangeProviderFromTextNode(more_text_range_provider,
                                    root_node->children()[1]);
   SetOwner(owner_platform, more_text_range_provider.Get());
-  ComPtr<AXPlatformNodeTextRangeProviderWin> more_text_range;
+  ComPtr<ITextRangeProvider> more_text_range;
   more_text_range_provider->QueryInterface(IID_PPV_ARGS(&more_text_range));
 
   AXPlatformNodeDelegate* delegate =
@@ -5122,43 +5497,181 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderSelect) {
   }
 }
 
-// TODO(crbug.com/1124051): Remove this test once this crbug is fixed.
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestSettingSelectionAcrossShadowDOM) {
+  // This tests the scenario where a selection is set across shadow DOM
+  // boundaries. An AT might for example set a selection across shadow DOM
+  // boundaries for a input text field. See
+  // AXPlatformNodeTextRangeProviderWin::Select for more details.
+
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kTextField name="hello"
+    ++++++3 kStaticText name="hello"
+    ++++++++4 kInlineTextBox name="hello"
+  )HTML"));
+
+  AXTree* tree = Init(update);
+
+  AXNode* text_field = tree->GetFromId(2);
+  AXNode* static_text = tree->GetFromId(3);
+  AXNode* inline_text_box = tree->GetFromId(4);
+
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, text_field);
+
+  int start_offset = 2;
+  int end_offset = 4;
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_field));
+  ComPtr<ITextRangeProvider> range;
+  CreateTextRangeProviderWin(
+      range, owner,
+      /*start_anchor=*/text_field, /*start_offset=*/start_offset,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor=*/inline_text_box, /*end_offset=*/end_offset,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  AXPlatformNodeDelegate* delegate = GetOwner(range.Get())->GetDelegate();
+
+  range->Select();
+
+  // Now testing where start anchor is outside shadow DOM and end anchor is
+  // inside. Selection should bubble up to the text field in this case.
+
+  AXSelection selection = delegate->GetUnignoredSelection();
+  EXPECT_EQ(text_field->id(), selection.anchor_object_id);
+  EXPECT_EQ(text_field->id(), selection.focus_object_id);
+  EXPECT_EQ(start_offset, selection.anchor_offset);
+  EXPECT_EQ(end_offset, selection.focus_offset);
+
+  // Now testing where start anchor is in shadow DOM and end anchor is outside.
+  // Selection should bubble up to the text field in this case.
+
+  CreateTextRangeProviderWin(
+      range, owner,
+      /*start_anchor=*/inline_text_box, /*start_offset=*/start_offset,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor=*/text_field, /*end_offset=*/end_offset,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  range->Select();
+
+  selection = delegate->GetUnignoredSelection();
+  EXPECT_EQ(text_field->id(), selection.anchor_object_id);
+  EXPECT_EQ(text_field->id(), selection.focus_object_id);
+  EXPECT_EQ(start_offset, selection.anchor_offset);
+  EXPECT_EQ(end_offset, selection.focus_offset);
+
+  // Now testing where both start and end anchors are in shadow DOM but
+  // different elements. Selection should NOT bubble up to the text field in
+  // this case.
+
+  CreateTextRangeProviderWin(
+      range, owner,
+      /*start_anchor=*/inline_text_box, /*start_offset=*/start_offset,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor=*/static_text, /*end_offset=*/end_offset,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  range->Select();
+
+  selection = delegate->GetUnignoredSelection();
+  EXPECT_EQ(inline_text_box->id(), selection.anchor_object_id);
+  EXPECT_EQ(static_text->id(), selection.focus_object_id);
+  EXPECT_EQ(start_offset, selection.anchor_offset);
+  EXPECT_EQ(end_offset, selection.focus_offset);
+
+  // Now testing where both start and end anchors are in shadow DOM but same
+  // elements. Selection should NOT bubble up to the text field in this case.
+
+  CreateTextRangeProviderWin(
+      range, owner,
+      /*start_anchor=*/inline_text_box, /*start_offset=*/start_offset,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor=*/inline_text_box, /*end_offset=*/end_offset,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  range->Select();
+
+  selection = delegate->GetUnignoredSelection();
+  EXPECT_EQ(inline_text_box->id(), selection.anchor_object_id);
+  EXPECT_EQ(inline_text_box->id(), selection.focus_object_id);
+  EXPECT_EQ(start_offset, selection.anchor_offset);
+  EXPECT_EQ(end_offset, selection.focus_offset);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestScrollIntoViewOnOnscreenElement) {
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer
+    ++++++3 kTextField
+  )HTML"));
+  update.nodes[0].relative_bounds.bounds = gfx::RectF(0, 0, 200, 200);
+  update.nodes[1].relative_bounds.bounds = gfx::RectF(0, 0, 100, 100);
+  update.nodes[2].SetValue("hello world test");
+  update.nodes[2].relative_bounds.bounds = gfx::RectF(50, 50, 20, 20);
+  update.nodes[2].relative_bounds.offset_container_id = 1;
+
+  Init(update);
+  AXNode* root_node = GetRoot();
+
+  AXNode* gc = root_node->children()[0];
+  AXNode* text_field = gc->children()[0];
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, text_field);
+
+  EXPECT_HRESULT_SUCCEEDED(
+      text_range_provider->ScrollIntoView(/* align_to_top */ true));
+  base::win::ScopedSafearray rectangles;
+  text_range_provider->GetBoundingRectangles(rectangles.Receive());
+
+  // Element was already fully onscreen, so there should be no change
+  // to its location.
+  std::vector<double> expected_rect = {50, 50, 20, 20};
+  EXPECT_UIA_SAFEARRAY_EQ(rectangles.Get(), expected_rect);
+  EXPECT_EQ(50, text_field->data().relative_bounds.bounds.y());
+}
+
+// TODO(crbug.com/40717049): Remove this test once this crbug is fixed.
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderSelectListMarker) {
-  ui::AXNodeData root_data;
+  AXNodeData root_data;
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kRootWebArea;
 
-  ui::AXNodeData list_data;
+  AXNodeData list_data;
   list_data.id = 2;
   list_data.role = ax::mojom::Role::kList;
   root_data.child_ids.push_back(list_data.id);
 
-  ui::AXNodeData list_item_data;
+  AXNodeData list_item_data;
   list_item_data.id = 3;
   list_item_data.role = ax::mojom::Role::kListItem;
   list_data.child_ids.push_back(list_item_data.id);
 
-  ui::AXNodeData list_marker;
+  AXNodeData list_marker;
   list_marker.id = 4;
   list_marker.role = ax::mojom::Role::kListMarker;
   list_item_data.child_ids.push_back(list_marker.id);
 
-  ui::AXNodeData static_text_data;
+  AXNodeData static_text_data;
   static_text_data.id = 5;
   static_text_data.role = ax::mojom::Role::kStaticText;
   static_text_data.SetName("1. ");
   list_marker.child_ids.push_back(static_text_data.id);
 
-  ui::AXNodeData list_item_text_data;
+  AXNodeData list_item_text_data;
   list_item_text_data.id = 6;
   list_item_text_data.role = ax::mojom::Role::kStaticText;
   list_item_text_data.SetName("First Item");
   list_item_data.child_ids.push_back(list_item_text_data.id);
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root_data.id;
@@ -5228,8 +5741,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderFindText) {
   Microsoft::WRL::ComPtr<ITextRangeProvider> text_range_provider_found;
   EXPECT_HRESULT_SUCCEEDED(range->FindText(find_string.Get(), false, false,
                                            &text_range_provider_found));
-  Microsoft::WRL::ComPtr<AXPlatformNodeTextRangeProviderWin>
-      text_range_provider_win;
+  Microsoft::WRL::ComPtr<ITextRangeProvider> text_range_provider_win;
   text_range_provider_found->QueryInterface(
       IID_PPV_ARGS(&text_range_provider_win));
   ASSERT_TRUE(GetStart(text_range_provider_win.Get())->IsTextPosition());
@@ -5242,66 +5754,16 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestITextRangeProviderFindText) {
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        FindTextWithEmbeddedObjectCharacter) {
-  // ++1 kRootWebArea
-  // ++++2 kList
-  // ++++++3 kListItem
-  // ++++++++4 kStaticText
-  // ++++++++++5 kInlineTextBox
-  // ++++++6 kListItem
-  // ++++++++7 kStaticText
-  // ++++++++++8 kInlineTextBox
-  ui::AXNodeData root_1;
-  ui::AXNodeData list_2;
-  ui::AXNodeData list_item_3;
-  ui::AXNodeData static_text_4;
-  ui::AXNodeData inline_box_5;
-  ui::AXNodeData list_item_6;
-  ui::AXNodeData static_text_7;
-  ui::AXNodeData inline_box_8;
-
-  root_1.id = 1;
-  list_2.id = 2;
-  list_item_3.id = 3;
-  static_text_4.id = 4;
-  inline_box_5.id = 5;
-  list_item_6.id = 6;
-  static_text_7.id = 7;
-  inline_box_8.id = 8;
-
-  root_1.role = ax::mojom::Role::kRootWebArea;
-  root_1.child_ids = {list_2.id};
-
-  list_2.role = ax::mojom::Role::kList;
-  list_2.child_ids = {list_item_3.id, list_item_6.id};
-
-  list_item_3.role = ax::mojom::Role::kListItem;
-  list_item_3.child_ids = {static_text_4.id};
-
-  static_text_4.role = ax::mojom::Role::kStaticText;
-  static_text_4.SetName("foo");
-  static_text_4.child_ids = {inline_box_5.id};
-
-  inline_box_5.role = ax::mojom::Role::kInlineTextBox;
-  inline_box_5.SetName("foo");
-
-  list_item_6.role = ax::mojom::Role::kListItem;
-  list_item_6.child_ids = {static_text_7.id};
-
-  static_text_7.role = ax::mojom::Role::kStaticText;
-  static_text_7.child_ids = {inline_box_8.id};
-  static_text_7.SetName("bar");
-
-  inline_box_8.role = ax::mojom::Role::kInlineTextBox;
-  inline_box_8.SetName("bar");
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.tree_data = tree_data;
-  update.has_tree_data = true;
-  update.root_id = root_1.id;
-  update.nodes = {root_1, list_2, list_item_3, static_text_4,
-                  inline_box_5, list_item_6, static_text_7, inline_box_8};
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kList
+    ++++++3 kListItem
+    ++++++++4 kStaticText name="foo"
+    ++++++++++5 kInlineTextBox name="foo"
+    ++++++6 kListItem
+    ++++++++7 kStaticText name="bar"
+    ++++++++++8 kInlineTextBox name="bar"
+  )HTML"));
 
   Init(update);
 
@@ -5314,8 +5776,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   EXPECT_HRESULT_SUCCEEDED(text_range_provider->FindText(find_string.Get(),
                            false, false, &text_range_provider_found));
   ASSERT_TRUE(text_range_provider_found.Get());
-  Microsoft::WRL::ComPtr<AXPlatformNodeTextRangeProviderWin>
-      text_range_provider_win;
+  Microsoft::WRL::ComPtr<ITextRangeProvider> text_range_provider_win;
   text_range_provider_found->QueryInterface(
       IID_PPV_ARGS(&text_range_provider_win));
   ASSERT_TRUE(GetStart(text_range_provider_win.Get())->IsTextPosition());
@@ -5324,6 +5785,65 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   ASSERT_TRUE(GetEnd(text_range_provider_win.Get())->IsTextPosition());
   EXPECT_EQ(8, GetEnd(text_range_provider_win.Get())->anchor_id());
   EXPECT_EQ(3, GetEnd(text_range_provider_win.Get())->text_offset());
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestTextRangeProviderWinUnfocusableNodeForSelection) {
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kTextField states=kFocusable
+    ++++++3 kGenericContainer state=kEditable
+    ++++++++4 kStaticText state=kEditable
+    ++++++++++5 kInlineTextBox state=kEditable
+  )HTML"));
+
+  update.nodes[1].SetName("Hello World");
+  update.nodes[3].SetName("Hello World");
+  update.nodes[4].SetName("Hello World");
+
+  AXTree* tree = Init(update);
+  AXNode* input_node = tree->GetFromId(2);
+
+  AXPlatformNodeWin* input_platform_node =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(input_node));
+
+  AXPlatformNodeWin* root = static_cast<AXPlatformNodeWin*>(
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
+
+  input_platform_node->SetFocus();
+
+  // start: TextPosition, anchor_id=2, text_offset=0, annotated_text=<h>ello
+  // world end  : TextPosition, anchor_id=2, text_offset=0,
+  // annotated_text=<h>ello world
+  ComPtr<ITextRangeProvider> text_range_provider;
+  CreateTextRangeProviderWin(
+      text_range_provider, input_platform_node,
+      /*start_anchor=*/input_node, /*start_offset=*/0,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor=*/input_node, /*end_offset=*/0,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  text_range_provider->Select();
+
+  // start: TextPosition, anchor_id=5, text_offset=6, annotated_text=hello
+  // <w>orld end  : TextPosition, anchor_id=5, text_offset=6,
+  // annotated_text=hello <w>orld
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_Start, TextUnit_Word,
+      /*count*/ 1,
+      /*expected_text*/ L"",
+      /*expected_count*/ 1);
+
+  text_range_provider->Select();
+  // Verify selection.
+  AXSelection unignored_selection =
+      root->GetDelegate()->GetUnignoredSelection();
+  EXPECT_EQ(5, unignored_selection.anchor_object_id);
+  EXPECT_EQ(5, unignored_selection.focus_object_id);
+  // Before patch that added this test, code this scenario would result in
+  // us focusing the root of the document, which is incorrect behavior.
+  EXPECT_FALSE(root->IsFocused());
+  EXPECT_TRUE(input_platform_node->IsFocused());
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
@@ -5349,11 +5869,11 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // See `AXPLatformNodeTextRangeProvider::FindText` for a more detailed
   // explanation of the embedded object character.
 
-  ui::AXNodeData root_1;
-  ui::AXNodeData generic_container_2;
-  ui::AXNodeData paragraph_3;
-  ui::AXNodeData static_text_4;
-  ui::AXNodeData inline_box_5;
+  AXNodeData root_1;
+  AXNodeData generic_container_2;
+  AXNodeData paragraph_3;
+  AXNodeData static_text_4;
+  AXNodeData inline_box_5;
 
   root_1.id = 1;
   generic_container_2.id = 2;
@@ -5381,25 +5901,24 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   inline_box_5.role = ax::mojom::Role::kInlineTextBox;
   inline_box_5.SetName("foo");
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root_1.id;
   update.nodes = {root_1, generic_container_2, paragraph_3, static_text_4,
                   inline_box_5};
 
-  Init(update);
-
-  AXNode* div_node = GetNodeFromTree(tree_data.tree_id, generic_container_2.id);
+  AXTree* tree = Init(update);
+  AXNode* div_node = tree->GetFromId(generic_container_2.id);
 
   AXPlatformNodeWin* owner =
       static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(div_node));
 
   // start: TextPosition, anchor_id=3, text_offset=0, annotated_text=<f>oo
   // end  : TextPosition, anchor_id=3, text_offset=3, annotated_text=foo<>
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range_provider;
+  ComPtr<ITextRangeProvider> text_range_provider;
   {
     ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
         AXEmbeddedObjectBehavior::kSuppressCharacter);
@@ -5480,12 +5999,12 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   //       default set to visible. So the text range represents document matches
   //       our searching criteria. And we return a degenerate range.
   {
-    ui::AXNodeData root_data;
+    AXNodeData root_data;
     root_data.id = 1;
     root_data.role = ax::mojom::Role::kRootWebArea;
 
-    ui::AXTreeUpdate update;
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    AXTreeUpdate update;
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     update.has_tree_data = true;
     update.root_id = root_data.id;
     update.nodes = {root_data};
@@ -5561,19 +6080,19 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Search backward, look for IsHidden=false.
   // Expected: nullptr
   {
-    ui::AXNodeData text_data1;
+    AXNodeData text_data1;
     text_data1.id = 2;
     text_data1.role = ax::mojom::Role::kStaticText;
     text_data1.AddState(ax::mojom::State::kInvisible);
     text_data1.SetName("text1");
 
-    ui::AXNodeData root_data;
+    AXNodeData root_data;
     root_data.id = 1;
     root_data.role = ax::mojom::Role::kRootWebArea;
     root_data.child_ids = {2};
 
-    ui::AXTreeUpdate update;
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    AXTreeUpdate update;
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     update.has_tree_data = true;
     update.root_id = root_data.id;
     update.nodes = {root_data, text_data1};
@@ -5645,23 +6164,23 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Search backward, look for IsHidden=false.
   // Expected: "text1text2"
   {
-    ui::AXNodeData text_data1;
+    AXNodeData text_data1;
     text_data1.id = 2;
     text_data1.role = ax::mojom::Role::kStaticText;
     text_data1.SetName("text1");
 
-    ui::AXNodeData text_data2;
+    AXNodeData text_data2;
     text_data2.id = 3;
     text_data2.role = ax::mojom::Role::kStaticText;
     text_data2.SetName("text2");
 
-    ui::AXNodeData root_data;
+    AXNodeData root_data;
     root_data.id = 1;
     root_data.role = ax::mojom::Role::kRootWebArea;
     root_data.child_ids = {2, 3};
 
-    ui::AXTreeUpdate update;
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    AXTreeUpdate update;
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     update.has_tree_data = true;
     update.root_id = root_data.id;
     update.nodes = {root_data, text_data1, text_data2};
@@ -5735,41 +6254,41 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Search backward, look for IsHidden=false.
   // Expected: "text4"
   {
-    ui::AXNodeData text_data1;
+    AXNodeData text_data1;
     text_data1.id = 2;
     text_data1.role = ax::mojom::Role::kStaticText;
     text_data1.SetName("text1");
 
-    ui::AXNodeData text_data2;
+    AXNodeData text_data2;
     text_data2.id = 3;
     text_data2.role = ax::mojom::Role::kStaticText;
     text_data2.AddState(ax::mojom::State::kInvisible);
     text_data2.SetName("text2");
 
-    ui::AXNodeData text_data3;
+    AXNodeData text_data3;
     text_data3.id = 4;
     text_data3.role = ax::mojom::Role::kStaticText;
     text_data3.AddState(ax::mojom::State::kInvisible);
     text_data3.SetName("text3");
 
-    ui::AXNodeData text_data4;
+    AXNodeData text_data4;
     text_data4.id = 5;
     text_data4.role = ax::mojom::Role::kStaticText;
     text_data4.SetName("text4");
 
-    ui::AXNodeData text_data5;
+    AXNodeData text_data5;
     text_data5.id = 6;
     text_data5.role = ax::mojom::Role::kStaticText;
     text_data5.AddState(ax::mojom::State::kInvisible);
     text_data5.SetName("text5");
 
-    ui::AXNodeData root_data;
+    AXNodeData root_data;
     root_data.id = 1;
     root_data.role = ax::mojom::Role::kRootWebArea;
     root_data.child_ids = {2, 3, 4, 5, 6};
 
-    ui::AXTreeUpdate update;
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    AXTreeUpdate update;
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     update.has_tree_data = true;
     update.root_id = root_data.id;
     update.nodes = {root_data,  text_data1, text_data2,
@@ -5852,41 +6371,41 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Search backward, look for IsHidden=false.
   // Expected: "text5"
   {
-    ui::AXNodeData text_data1;
+    AXNodeData text_data1;
     text_data1.id = 2;
     text_data1.role = ax::mojom::Role::kStaticText;
     text_data1.SetName("text1");
 
-    ui::AXNodeData text_data2;
+    AXNodeData text_data2;
     text_data2.id = 3;
     text_data2.role = ax::mojom::Role::kStaticText;
     text_data2.AddState(ax::mojom::State::kInvisible);
     text_data2.SetName("text2");
 
-    ui::AXNodeData text_data3;
+    AXNodeData text_data3;
     text_data3.id = 4;
     text_data3.role = ax::mojom::Role::kStaticText;
     text_data3.AddState(ax::mojom::State::kInvisible);
     text_data3.SetName("text3");
 
-    ui::AXNodeData text_data4;
+    AXNodeData text_data4;
     text_data4.id = 5;
     text_data4.role = ax::mojom::Role::kStaticText;
     text_data4.AddState(ax::mojom::State::kInvisible);
     text_data4.SetName("text4");
 
-    ui::AXNodeData text_data5;
+    AXNodeData text_data5;
     text_data5.id = 6;
     text_data5.role = ax::mojom::Role::kStaticText;
     text_data5.SetName("text5");
 
-    ui::AXNodeData root_data;
+    AXNodeData root_data;
     root_data.id = 1;
     root_data.role = ax::mojom::Role::kRootWebArea;
     root_data.child_ids = {2, 3, 4, 5, 6};
 
-    ui::AXTreeUpdate update;
-    update.tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+    AXTreeUpdate update;
+    update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
     update.has_tree_data = true;
     update.root_id = root_data.id;
     update.nodes = {root_data,  text_data1, text_data2,
@@ -5985,114 +6504,36 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, ElementNotAvailable) {
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestITextRangeProviderIgnoredNodes) {
-  // Parent Tree
-  // 1
-  // |
-  // 2(i)
-  // |________________________________
-  // |   |   |    |      |           |
-  // 3   4   5    6      7(i)        8(i)
-  //              |      |________
-  //              |      |       |
-  //              9(i)   10(i)   11
-  //              |      |____
-  //              |      |   |
-  //              12    13   14
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer states=kIgnored,kEditable,kRichlyEditable boolAttribute=kNonAtomicTextFieldRoot,true
+    ++++++3 kStaticText name=".3."
+    ++++++4 kStaticText name=".4."
+    ++++++5 kStaticText name=".5."
+    ++++++6 kButton
+    ++++++++9 kGenericContainer state=kIgnored
+    ++++++++++12 kStaticText name=".12." state=kIgnored
+    ++++++7 kGenericContainer state=kIgnored
+    ++++++++10 kGenericContainer state=kIgnored
+    ++++++++++13 kStaticText name=".13."
+    ++++++++++14 kStaticText name=".14."
+    ++++++++11 kStaticText name=".11."
+    ++++++8 kStaticText name=".8."
+  )HTML"));
 
-  ui::AXTreeUpdate tree_update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  tree_update.tree_data.tree_id = tree_id;
-  tree_update.has_tree_data = true;
-  tree_update.root_id = 1;
-  tree_update.nodes.resize(14);
-  tree_update.nodes[0].id = 1;
-  tree_update.nodes[0].child_ids = {2};
-  tree_update.nodes[0].role = ax::mojom::Role::kRootWebArea;
-
-  tree_update.nodes[1].id = 2;
-  tree_update.nodes[1].child_ids = {3, 4, 5, 6, 7, 8};
-  // According to the existing Blink code, editable roots are never ignored.
-  // However, we can still create this tree structure only for test purposes.
-  tree_update.nodes[1].AddState(ax::mojom::State::kIgnored);
-  tree_update.nodes[1].AddState(ax::mojom::State::kEditable);
-  tree_update.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
-  tree_update.nodes[1].AddBoolAttribute(
-      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
-  tree_update.nodes[1].role = ax::mojom::Role::kGenericContainer;
-
-  tree_update.nodes[2].id = 3;
-  tree_update.nodes[2].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[2].SetName(".3.");
-
-  tree_update.nodes[3].id = 4;
-  tree_update.nodes[3].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[3].SetName(".4.");
-
-  tree_update.nodes[4].id = 5;
-  tree_update.nodes[4].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[4].SetName(".5.");
-
-  tree_update.nodes[5].id = 6;
-  tree_update.nodes[5].role = ax::mojom::Role::kButton;
-  tree_update.nodes[5].child_ids = {9};
-
-  tree_update.nodes[6].id = 7;
-  tree_update.nodes[6].child_ids = {10, 11};
-  tree_update.nodes[6].AddState(ax::mojom::State::kIgnored);
-  tree_update.nodes[6].role = ax::mojom::Role::kGenericContainer;
-
-  tree_update.nodes[7].id = 8;
-  tree_update.nodes[7].AddState(ax::mojom::State::kIgnored);
-  tree_update.nodes[7].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[7].SetName(".8.");
-
-  tree_update.nodes[8].id = 9;
-  tree_update.nodes[8].child_ids = {12};
-  tree_update.nodes[8].AddState(ax::mojom::State::kIgnored);
-  tree_update.nodes[8].role = ax::mojom::Role::kGenericContainer;
-
-  tree_update.nodes[9].id = 10;
-  tree_update.nodes[9].child_ids = {13, 14};
-  tree_update.nodes[9].AddState(ax::mojom::State::kIgnored);
-  tree_update.nodes[8].role = ax::mojom::Role::kGenericContainer;
-
-  tree_update.nodes[10].id = 11;
-  tree_update.nodes[10].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[10].SetName(".11.");
-
-  tree_update.nodes[11].id = 12;
-  tree_update.nodes[11].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[11].AddState(ax::mojom::State::kIgnored);
-  tree_update.nodes[11].SetName(".12.");
-
-  tree_update.nodes[12].id = 13;
-  tree_update.nodes[12].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[12].SetName(".13.");
-
-  tree_update.nodes[13].id = 14;
-  tree_update.nodes[13].role = ax::mojom::Role::kStaticText;
-  tree_update.nodes[13].SetName(".14.");
-
-  Init(tree_update);
-  EXPECT_ENCLOSING_ELEMENT(GetNodeFromTree(tree_id, 1),
-                           GetNodeFromTree(tree_id, 1));
-  EXPECT_ENCLOSING_ELEMENT(GetNodeFromTree(tree_id, 3),
-                           GetNodeFromTree(tree_id, 3));
-  EXPECT_ENCLOSING_ELEMENT(GetNodeFromTree(tree_id, 4),
-                           GetNodeFromTree(tree_id, 4));
-  EXPECT_ENCLOSING_ELEMENT(GetNodeFromTree(tree_id, 5),
-                           GetNodeFromTree(tree_id, 5));
-  EXPECT_ENCLOSING_ELEMENT(GetNodeFromTree(tree_id, 11),
-                           GetNodeFromTree(tree_id, 11));
-  EXPECT_ENCLOSING_ELEMENT(GetNodeFromTree(tree_id, 13),
-                           GetNodeFromTree(tree_id, 13));
-  EXPECT_ENCLOSING_ELEMENT(GetNodeFromTree(tree_id, 14),
-                           GetNodeFromTree(tree_id, 14));
+  AXTreeID tree_id = update.tree_data.tree_id;
+  AXTree* tree = Init(update);
+  EXPECT_ENCLOSING_ELEMENT(tree->GetFromId(1), tree->GetFromId(1));
+  EXPECT_ENCLOSING_ELEMENT(tree->GetFromId(3), tree->GetFromId(3));
+  EXPECT_ENCLOSING_ELEMENT(tree->GetFromId(4), tree->GetFromId(4));
+  EXPECT_ENCLOSING_ELEMENT(tree->GetFromId(5), tree->GetFromId(5));
+  EXPECT_ENCLOSING_ELEMENT(tree->GetFromId(11), tree->GetFromId(11));
+  EXPECT_ENCLOSING_ELEMENT(tree->GetFromId(13), tree->GetFromId(13));
+  EXPECT_ENCLOSING_ELEMENT(tree->GetFromId(14), tree->GetFromId(14));
 
   // Test movement and GetText()
   ComPtr<ITextRangeProvider> text_range_provider;
-  GetTextRangeProviderFromTextNode(text_range_provider,
-                                   GetNodeFromTree(tree_id, 1));
+  GetTextRangeProviderFromTextNode(text_range_provider, tree->GetFromId(1));
 
   ASSERT_HRESULT_SUCCEEDED(
       text_range_provider->ExpandToEnclosingUnit(TextUnit_Character));
@@ -6121,8 +6562,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestNormalizeTextRangePastEndOfDocument) {
-  ui::AXTreeUpdate initial_state;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate initial_state;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   initial_state.tree_data.tree_id = tree_id;
   initial_state.has_tree_data = true;
   initial_state.root_id = 1;
@@ -6138,11 +6579,10 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   initial_state.nodes[2].role = ax::mojom::Role::kInlineTextBox;
   initial_state.nodes[2].SetName("aaa");
 
-  Init(initial_state);
+  AXTree* tree = Init(initial_state);
 
   ComPtr<ITextRangeProvider> text_range_provider;
-  GetTextRangeProviderFromTextNode(text_range_provider,
-                                   GetNodeFromTree(tree_id, 3));
+  GetTextRangeProviderFromTextNode(text_range_provider, tree->GetFromId(3));
 
   EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"aaa");
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
@@ -6151,7 +6591,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
       /*expected_text*/ L"a",
       /*expected_count*/ 2);
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range_provider_win;
+  ComPtr<ITextRangeProvider> text_range_provider_win;
   text_range_provider->QueryInterface(IID_PPV_ARGS(&text_range_provider_win));
 
   const AXNodePosition::AXPositionInstance start_after_move =
@@ -6181,13 +6621,16 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   ExpectPositionsEqual(original_end, GetEnd(text_range));
 
   EXPECT_EQ(*start_after_move, *normalized_start);
-  EXPECT_EQ(*end_after_move, *normalized_end);
+  // There are now two characters only instead of three, so positions should be
+  // the same minus in the text offset.
+  EXPECT_EQ(end_after_move->anchor_id(), normalized_end->anchor_id());
+  EXPECT_EQ(end_after_move->text_offset(), normalized_end->text_offset() + 1);
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestNormalizeTextRangePastEndOfDocumentWithIgnoredNodes) {
-  ui::AXTreeUpdate initial_state;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate initial_state;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   initial_state.tree_data.tree_id = tree_id;
   initial_state.has_tree_data = true;
   initial_state.root_id = 1;
@@ -6207,11 +6650,10 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   initial_state.nodes[3].AddState(ax::mojom::State::kIgnored);
   initial_state.nodes[3].SetName("ignored");
 
-  Init(initial_state);
+  AXTree* tree = Init(initial_state);
 
   ComPtr<ITextRangeProvider> text_range_provider;
-  GetTextRangeProviderFromTextNode(text_range_provider,
-                                   GetNodeFromTree(tree_id, 3));
+  GetTextRangeProviderFromTextNode(text_range_provider, tree->GetFromId(3));
 
   EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"aaa");
   EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
@@ -6220,7 +6662,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
       /*expected_text*/ L"a",
       /*expected_count*/ 2);
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range_provider_win;
+  ComPtr<ITextRangeProvider> text_range_provider_win;
   text_range_provider->QueryInterface(IID_PPV_ARGS(&text_range_provider_win));
 
   const AXNodePosition::AXPositionInstance start_after_move =
@@ -6250,13 +6692,16 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   ExpectPositionsEqual(original_end, GetEnd(text_range));
 
   EXPECT_EQ(*start_after_move, *normalized_start);
-  EXPECT_EQ(*end_after_move, *normalized_end);
+  // There are now two characters only instead of three, so positions should be
+  // the same minus in the text offset.
+  EXPECT_EQ(end_after_move->anchor_id(), normalized_end->anchor_id());
+  EXPECT_EQ(end_after_move->text_offset(), normalized_end->text_offset() + 1);
 }
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestNormalizeTextRangeInsideIgnoredNodes) {
-  ui::AXTreeUpdate initial_state;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate initial_state;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   initial_state.tree_data.tree_id = tree_id;
   initial_state.has_tree_data = true;
   initial_state.root_id = 1;
@@ -6281,11 +6726,11 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // start: TextPosition, anchor_id=3, text_offset=1, annotated_text=i<g>nored
   // end  : TextPosition, anchor_id=3, text_offset=6, annotated_text=ignore<d>
-  ComPtr<AXPlatformNodeTextRangeProviderWin> ignored_range_win;
+  ComPtr<ITextRangeProvider> ignored_range_win;
   CreateTextRangeProviderWin(
       ignored_range_win, owner,
       /*start_anchor=*/ignored_node, /*start_offset=*/0,
@@ -6339,60 +6784,29 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestNormalizeTextRangeSpanIgnoredNodes) {
-  ui::AXNodeData root_data;
-  root_data.id = 1;
-  root_data.role = ax::mojom::Role::kRootWebArea;
-
-  ui::AXNodeData before_text;
-  before_text.id = 2;
-  before_text.role = ax::mojom::Role::kStaticText;
-  before_text.SetName("before");
-  root_data.child_ids.push_back(before_text.id);
-
-  ui::AXNodeData ignored_text1;
-  ignored_text1.id = 3;
-  ignored_text1.role = ax::mojom::Role::kStaticText;
-  ignored_text1.AddState(ax::mojom::State::kIgnored);
-  ignored_text1.SetName("ignored1");
-  root_data.child_ids.push_back(ignored_text1.id);
-
-  ui::AXNodeData ignored_text2;
-  ignored_text2.id = 4;
-  ignored_text2.role = ax::mojom::Role::kStaticText;
-  ignored_text2.AddState(ax::mojom::State::kIgnored);
-  ignored_text2.SetName("ignored2");
-  root_data.child_ids.push_back(ignored_text2.id);
-
-  ui::AXNodeData after_text;
-  after_text.id = 5;
-  after_text.role = ax::mojom::Role::kStaticText;
-  after_text.SetName("after");
-  root_data.child_ids.push_back(after_text.id);
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.root_id = root_data.id;
-  update.tree_data.tree_id = tree_id;
-  update.has_tree_data = true;
-  update.nodes = {root_data, before_text, ignored_text1, ignored_text2,
-                  after_text};
-
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kStaticText name="before"
+    ++++3 kStaticText name="ignored1" state=kIgnored
+    ++++4 kStaticText name="ignored2" state=kIgnored
+    ++++5 kStaticText name="after"
+  )HTML"));
   const AXTree* tree = Init(update);
 
-  const AXNode* before_text_node = tree->GetFromId(before_text.id);
-  const AXNode* after_text_node = tree->GetFromId(after_text.id);
+  const AXNode* before_text_node = tree->GetFromId(2);
+  const AXNode* after_text_node = tree->GetFromId(5);
 
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // Original range before NormalizeTextRange()
   // |before<>||ignored1||ignored2||<a>fter|
   //         |-----------------------|
   // start: TextPosition, anchor_id=2, text_offset=6, annotated_text=before<>
   // end  : TextPosition, anchor_id=5, text_offset=0, annotated_text=<a>fter
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range_span_ignored_nodes;
+  ComPtr<ITextRangeProvider> range_span_ignored_nodes;
   CreateTextRangeProviderWin(
       range_span_ignored_nodes, owner,
       /*start_anchor=*/before_text_node, /*start_offset=*/6,
@@ -6432,79 +6846,29 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
 TEST_F(AXPlatformNodeTextRangeProviderTest,
        TestNormalizeTextRangeForceSameAnchorOnDegenerateRange) {
-  // ++1 kRootWebArea
-  // ++++2 kGenericContainer
-  // ++++++3 kImage
-  // ++++4 kTextField
-  // ++++++5 kGenericContainer
-  // ++++++++6 kStaticText
-  // ++++++++++7 kInlineTextBox
-  ui::AXNodeData root_1;
-  ui::AXNodeData generic_container_2;
-  ui::AXNodeData line_break_3;
-  ui::AXNodeData text_field_4;
-  ui::AXNodeData generic_container_5;
-  ui::AXNodeData static_text_6;
-  ui::AXNodeData inline_box_7;
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer boolAttribute=kIsLineBreakingObject,true
+    ++++++3 kImage
+    ++++4 kTextField state=kEditable
+    ++++++5 kGenericContainer
+    ++++++++6 kStaticText name="3.14"
+    ++++++++++7 kInlineTextBox name="3.14"
+  )HTML"));
 
-  root_1.id = 1;
-  generic_container_2.id = 2;
-  line_break_3.id = 3;
-  text_field_4.id = 4;
-  generic_container_5.id = 5;
-  static_text_6.id = 6;
-  inline_box_7.id = 7;
-
-  root_1.role = ax::mojom::Role::kRootWebArea;
-  root_1.child_ids = {generic_container_2.id, text_field_4.id};
-
-  generic_container_2.role = ax::mojom::Role::kGenericContainer;
-  generic_container_2.AddBoolAttribute(
-      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
-  generic_container_2.child_ids = {line_break_3.id};
-
-  line_break_3.role = ax::mojom::Role::kLineBreak;
-
-  text_field_4.role = ax::mojom::Role::kTextField;
-  text_field_4.AddState(ax::mojom::State::kEditable);
-  text_field_4.child_ids = {generic_container_5.id};
-  text_field_4.SetValue("3.14");
-
-  generic_container_5.role = ax::mojom::Role::kGenericContainer;
-  generic_container_5.child_ids = {static_text_6.id};
-
-  static_text_6.role = ax::mojom::Role::kStaticText;
-  static_text_6.child_ids = {inline_box_7.id};
-  static_text_6.SetName("3.14");
-
-  inline_box_7.role = ax::mojom::Role::kInlineTextBox;
-  inline_box_7.SetName("3.14");
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.tree_data = tree_data;
-  update.has_tree_data = true;
-  update.root_id = root_1.id;
-  update.nodes.push_back(root_1);
-  update.nodes.push_back(generic_container_2);
-  update.nodes.push_back(line_break_3);
-  update.nodes.push_back(text_field_4);
-  update.nodes.push_back(generic_container_5);
-  update.nodes.push_back(static_text_6);
-  update.nodes.push_back(inline_box_7);
+  update.nodes[3].SetValue("3.14");
 
   const AXTree* tree = Init(update);
 
-  const AXNode* line_break_3_node = tree->GetFromId(line_break_3.id);
-  const AXNode* inline_box_7_node = tree->GetFromId(inline_box_7.id);
+  const AXNode* line_break_3_node = tree->GetFromId(3);
+  const AXNode* inline_box_7_node = tree->GetFromId(7);
 
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_data.tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // start: TextPosition, anchor_id=3, text_offset=1, annotated_text=/xFFFC<>
   // end  : TextPosition, anchor_id=7, text_offset=0, annotated_text=<p>i
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   CreateTextRangeProviderWin(
       range, owner,
       /*start_anchor=*/line_break_3_node, /*start_offset=*/1,
@@ -6554,8 +6918,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestValidateStartAndEnd) {
 
   root_data.child_ids = {text_data.id, more_text_data.id};
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   update.root_id = root_data.id;
   update.tree_data.tree_id = tree_id;
   update.has_tree_data = true;
@@ -6570,11 +6934,11 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, TestValidateStartAndEnd) {
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // start: TextPosition, anchor_id=1, text_offset=0, annotated_text=<s>ome text
   // end  : TextPosition, anchor_id=3, text_offset=9, annotated_text=more text<>
-  ComPtr<AXPlatformNodeTextRangeProviderWin> text_range_provider;
+  ComPtr<ITextRangeProvider> text_range_provider;
   CreateTextRangeProviderWin(
       text_range_provider, owner,
       /*start_anchor=*/root_node, /*start_offset=*/0,
@@ -6708,8 +7072,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_6.role = ax::mojom::Role::kStaticText;
   text_6.SetName("more text");
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   update.root_id = root_1.id;
   update.tree_data.tree_id = tree_id;
   update.has_tree_data = true;
@@ -6724,11 +7088,11 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // start: TextPosition, anchor_id=3, text_offset=0, annotated_text=<s>ome text
   // end  : TextPosition, anchor_id=5, text_offset=9, annotated_text=more text<>
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   CreateTextRangeProviderWin(
       range, owner,
       /*start_anchor*/ text_3_node, /*start_offset*/ 0,
@@ -6788,7 +7152,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
     // start: TextPosition, anchor_id=4, text_offset=0, annotated_text=<s>ome
     // end  : TextPosition, anchor_id=4, text_offset=4, annotated_text=some<>
     const AXNode* text_4_node = tree->GetFromId(text_4.id);
-    ComPtr<AXPlatformNodeTextRangeProviderWin> range_2;
+    ComPtr<ITextRangeProvider> range_2;
     CreateTextRangeProviderWin(
         range_2, owner,
         /*start_anchor*/ text_4_node, /*start_offset*/ 0,
@@ -6869,8 +7233,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_7.role = ax::mojom::Role::kStaticText;
   text_7.SetName(" three");
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   update.root_id = root_1.id;
   update.tree_data.tree_id = tree_id;
   update.has_tree_data = true;
@@ -6884,13 +7248,13 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // Create a range that spans " two three" located on the leaf nodes.
 
   // start: TextPosition, anchor_id=5, text_offset=0
   // end  : TextPosition, anchor_id=7, text_offset=6
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   CreateTextRangeProviderWin(
       range, owner,
       /*start_anchor*/ text_5_node, /*start_offset*/ 0,
@@ -7000,8 +7364,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_12.role = ax::mojom::Role::kStaticText;
   text_12.SetName("four");
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   update.root_id = root_1.id;
   update.tree_data.tree_id = tree_id;
   update.has_tree_data = true;
@@ -7016,13 +7380,13 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // Create a range that spans " two three" located on the leaf nodes.
 
   // start: TextPosition, anchor_id=5, text_offset=0
   // end  : TextPosition, anchor_id=7, text_offset=6
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   CreateTextRangeProviderWin(
       range, owner,
       /*start_anchor*/ text_6_node, /*start_offset*/ 2,
@@ -7128,8 +7492,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_12.role = ax::mojom::Role::kStaticText;
   text_12.SetName("four");
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   update.root_id = root_1.id;
   update.tree_data.tree_id = tree_id;
   update.has_tree_data = true;
@@ -7144,13 +7508,13 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   // Create a range that spans " two three" located on the leaf nodes.
 
   // start: TextPosition, anchor_id=5, text_offset=0
   // end  : TextPosition, anchor_id=7, text_offset=6
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   CreateTextRangeProviderWin(
       range, owner,
       /*start_anchor*/ text_6_node, /*start_offset*/ 2,
@@ -7190,13 +7554,13 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // ++++++++++5 kInlineTextBox
   // ++++++6 kGenericContainer
   // ++++++7 kButton
-  ui::AXNodeData root_1;
-  ui::AXNodeData generic_container_2;
-  ui::AXNodeData heading_3;
-  ui::AXNodeData static_text_4;
-  ui::AXNodeData inline_box_5;
-  ui::AXNodeData generic_container_6;
-  ui::AXNodeData button_7;
+  AXNodeData root_1;
+  AXNodeData generic_container_2;
+  AXNodeData heading_3;
+  AXNodeData static_text_4;
+  AXNodeData inline_box_5;
+  AXNodeData generic_container_6;
+  AXNodeData button_7;
 
   root_1.id = 1;
   generic_container_2.id = 2;
@@ -7229,9 +7593,9 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
   button_7.role = ax::mojom::Role::kButton;
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeData tree_data;
-  tree_data.tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeData tree_data;
+  tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   update.tree_data = tree_data;
   update.has_tree_data = true;
   update.root_id = root_1.id;
@@ -7248,9 +7612,10 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
 
   AXPlatformNodeWin* owner =
       static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(root_node));
-  ComPtr<ITextRangeProvider> text_range_provider =
-      AXPlatformNodeTextRangeProviderWin::CreateTextRangeProviderForTesting(
-          owner, std::move(range_start), std::move(range_end));
+  ComPtr<ITextRangeProvider> text_range_provider;
+  AXPlatformNodeTextRangeProviderWin::CreateTextRangeProviderForTesting(
+      owner, std::move(range_start), std::move(range_end),
+      &text_range_provider);
   EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"");
 
   generic_container_2.child_ids = {heading_3.id, button_7.id};
@@ -7301,8 +7666,8 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   text_5.role = ax::mojom::Role::kStaticText;
   text_5.SetName("text 5");
 
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeUpdate update;
+  AXTreeID tree_id = AXTreeID::CreateNewAXTreeID();
   update.root_id = root_1.id;
   update.tree_data.tree_id = tree_id;
   update.has_tree_data = true;
@@ -7316,9 +7681,9 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   CreateTextRangeProviderWin(
       range, owner,
       /*start_anchor*/ text_2_node, /*start_offset*/ 0,
@@ -7376,77 +7741,24 @@ TEST_F(AXPlatformNodeTextRangeProviderTest, CaretAtEndOfTextFieldReadOnly) {
   // normalize to other positions, so we should expect the
   // 'UIA_IsReadOnlyAttributeId' attribute queried at this position to return
   // false.
-  // ++1 kRootWebArea
-  // ++++2 kTextField editable value="hello"
-  // ++++++3 kGenericContainer editable isLineBreakingObject=true
-  // ++++++++4 kStaticText editable name="hello"
-  // ++++++++++5 kInlineTextBox editable name="hello"
-  // ++++6 kStaticText name="abc"
-  // ++++++7 kInlineTextBox name="abc"
-  AXNodeData root_1;
-  AXNodeData text_field_2;
-  AXNodeData generic_container_3;
-  AXNodeData static_text_4;
-  AXNodeData inline_text_5;
-  AXNodeData static_text_6;
-  AXNodeData inline_text_7;
-
-  root_1.id = 1;
-  text_field_2.id = 2;
-  generic_container_3.id = 3;
-  static_text_4.id = 4;
-  inline_text_5.id = 5;
-  static_text_6.id = 6;
-  inline_text_7.id = 7;
-
-  root_1.role = ax::mojom::Role::kRootWebArea;
-  root_1.child_ids = {text_field_2.id, static_text_6.id};
-
-  text_field_2.role = ax::mojom::Role::kTextField;
-  text_field_2.AddState(ax::mojom::State::kEditable);
-  text_field_2.SetValue("hello");
-  text_field_2.child_ids = {generic_container_3.id};
-
-  generic_container_3.role = ax::mojom::Role::kGenericContainer;
-  generic_container_3.AddState(ax::mojom::State::kEditable);
-  generic_container_3.AddBoolAttribute(
-      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
-  generic_container_3.child_ids = {static_text_4.id};
-
-  static_text_4.role = ax::mojom::Role::kStaticText;
-  static_text_4.SetName("hello");
-  static_text_4.AddState(ax::mojom::State::kEditable);
-  static_text_4.child_ids = {inline_text_5.id};
-
-  inline_text_5.role = ax::mojom::Role::kInlineTextBox;
-  inline_text_5.SetName("hello");
-  inline_text_5.AddState(ax::mojom::State::kEditable);
-
-  static_text_6.role = ax::mojom::Role::kStaticText;
-  static_text_6.SetName("abc");
-  static_text_6.child_ids = {inline_text_7.id};
-
-  inline_text_7.role = ax::mojom::Role::kInlineTextBox;
-  inline_text_7.SetName("abc");
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.root_id = root_1.id;
-  update.tree_data.tree_id = tree_id;
-  update.has_tree_data = true;
-  update.nodes = {root_1,        text_field_2,  generic_container_3,
-                  static_text_4, inline_text_5, static_text_6,
-                  inline_text_7};
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kTextField state=kEditable
+    ++++++3 kGenericContainer state=kEditable boolAttribute=kIsLineBreakingObject,true
+    ++++++++4 kStaticText state=kEditable name="hello"
+    ++++++++++5 kInlineTextBox state=kEditable name="hello"
+    ++++6 kStaticText name="abc"
+  )HTML"));
 
   const AXTree* tree = Init(update);
-  const AXNode* inline_text_5_node = tree->GetFromId(inline_text_5.id);
+  const AXNode* inline_text_5_node = tree->GetFromId(5);
 
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   base::win::ScopedVariant expected_variant;
 
   CreateTextRangeProviderWin(
@@ -7496,102 +7808,36 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // ends at the beginning of the next paragraph. The range only contains the
   // generated newline character. The readonly attribute value returned should
   // be the one of the common anchor of the start and end endpoint.
-
-  // ++1 kRootWebArea
-  // ++++2 kGenericContainer
-  // ++++++3 kImage
-  // ++++++4 kTextField editable
-  // ++++5 kGenericContainer editable
-  // ++++++6 kImage
-  // ++++++7 kTextField editable
-  // ++++8 kGenericContainer
-  // ++++++9 kTextField editable
-  // ++++++10 kTextField editable
-  AXNodeData root_1;
-  AXNodeData generic_container_2;
-  AXNodeData image_3;
-  AXNodeData text_field_4;
-  AXNodeData generic_container_5;
-  AXNodeData image_6;
-  AXNodeData text_field_7;
-  AXNodeData generic_container_8;
-  AXNodeData text_field_9;
-  AXNodeData text_field_10;
-
-  root_1.id = 1;
-  generic_container_2.id = 2;
-  image_3.id = 3;
-  text_field_4.id = 4;
-  generic_container_5.id = 5;
-  image_6.id = 6;
-  text_field_7.id = 7;
-  generic_container_8.id = 8;
-  text_field_9.id = 9;
-  text_field_10.id = 10;
-
-  root_1.role = ax::mojom::Role::kRootWebArea;
-  root_1.child_ids = {generic_container_2.id, generic_container_5.id,
-                      generic_container_8.id};
-
-  generic_container_2.role = ax::mojom::Role::kGenericContainer;
-  generic_container_2.child_ids = {image_3.id, text_field_4.id};
-
-  image_3.role = ax::mojom::Role::kImage;
-  image_3.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
-                           true);
-
-  text_field_4.role = ax::mojom::Role::kTextField;
-  text_field_4.AddState(ax::mojom::State::kEditable);
-
-  generic_container_5.role = ax::mojom::Role::kGenericContainer;
-  generic_container_5.AddState(ax::mojom::State::kEditable);
-  generic_container_5.child_ids = {image_6.id, text_field_7.id};
-
-  image_6.role = ax::mojom::Role::kImage;
-  image_6.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
-                           true);
-
-  text_field_7.role = ax::mojom::Role::kTextField;
-  text_field_7.AddState(ax::mojom::State::kEditable);
-
-  generic_container_8.role = ax::mojom::Role::kGenericContainer;
-  generic_container_8.child_ids = {text_field_9.id, text_field_10.id};
-
-  text_field_9.role = ax::mojom::Role::kTextField;
-  text_field_9.AddState(ax::mojom::State::kEditable);
-  text_field_9.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
-                                true);
-
-  text_field_10.role = ax::mojom::Role::kTextField;
-  text_field_10.AddState(ax::mojom::State::kEditable);
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.root_id = root_1.id;
-  update.tree_data.tree_id = tree_id;
-  update.has_tree_data = true;
-  update.nodes = {root_1,       generic_container_2, image_3,
-                  text_field_4, generic_container_5, image_6,
-                  text_field_7, generic_container_8, text_field_9,
-                  text_field_10};
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer
+    ++++++3 kImage boolAttribute=kIsLineBreakingObject,true
+    ++++++4 kTextField state=kEditable
+    ++++5 kGenericContainer state=kEditable
+    ++++++6 kImage boolAttribute=kIsLineBreakingObject,true
+    ++++++7 kTextField state=kEditable
+    ++++8 kGenericContainer
+    ++++++9 kTextField state=kEditable boolAttribute=kIsLineBreakingObject,true
+    ++++++10 kTextField state=kEditable
+  )HTML"));
 
   const AXTree* tree = Init(update);
 
-  const AXNode* image_3_node = tree->GetFromId(image_3.id);
-  const AXNode* image_6_node = tree->GetFromId(image_6.id);
-  const AXNode* text_field_4_node = tree->GetFromId(text_field_4.id);
-  const AXNode* text_field_7_node = tree->GetFromId(text_field_7.id);
-  const AXNode* text_field_9_node = tree->GetFromId(text_field_9.id);
-  const AXNode* text_field_10_node = tree->GetFromId(text_field_10.id);
+  const AXNode* image_3_node = tree->GetFromId(3);
+  const AXNode* image_6_node = tree->GetFromId(6);
+  const AXNode* text_field_4_node = tree->GetFromId(4);
+  const AXNode* text_field_7_node = tree->GetFromId(7);
+  const AXNode* text_field_9_node = tree->GetFromId(9);
+  const AXNode* text_field_10_node = tree->GetFromId(10);
 
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
   base::win::ScopedVariant expected_variant;
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range_1;
+  ComPtr<ITextRangeProvider> range_1;
   CreateTextRangeProviderWin(
       range_1, owner,
       /*start_anchor*/ image_3_node, /*start_offset*/ 1,
@@ -7606,7 +7852,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                               expected_variant);
   expected_variant.Reset();
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range_2;
+  ComPtr<ITextRangeProvider> range_2;
   CreateTextRangeProviderWin(
       range_2, owner,
       /*start_anchor*/ image_6_node, /*start_offset*/ 1,
@@ -7625,7 +7871,7 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // separated by a paragraph boundary. This case used to not work because we
   // were relying on NormalizeTextRange to handle generated newlines and
   // normalization doesn't work when the range spans text fields.
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range_3;
+  ComPtr<ITextRangeProvider> range_3;
   CreateTextRangeProviderWin(
       range_3, owner,
       /*start_anchor*/ text_field_9_node, /*start_offset*/ 1,
@@ -7648,48 +7894,22 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
   // ignored for text navigation, but since it's the last node in the tree, it
   // should successfully move the endpoint to that node and keep the units_moved
   // value in sync.
-  // ++1 kRootWebArea
-  // ++++2 kStaticText name="abc"
-  // ++++++3 kInlineTextBox name="abc"
-  // ++++4 kGenericContainer
-  AXNodeData root_1;
-  AXNodeData static_text_2;
-  AXNodeData inline_text_3;
-  AXNodeData generic_container_4;
-
-  root_1.id = 1;
-  static_text_2.id = 2;
-  inline_text_3.id = 3;
-  generic_container_4.id = 4;
-
-  root_1.role = ax::mojom::Role::kRootWebArea;
-  root_1.child_ids = {static_text_2.id, generic_container_4.id};
-
-  static_text_2.role = ax::mojom::Role::kStaticText;
-  static_text_2.SetName("abc");
-  static_text_2.child_ids = {inline_text_3.id};
-
-  inline_text_3.role = ax::mojom::Role::kInlineTextBox;
-  inline_text_3.SetName("abc");
-
-  generic_container_4.role = ax::mojom::Role::kGenericContainer;
-
-  ui::AXTreeUpdate update;
-  ui::AXTreeID tree_id = ui::AXTreeID::CreateNewAXTreeID();
-  update.root_id = root_1.id;
-  update.tree_data.tree_id = tree_id;
-  update.has_tree_data = true;
-  update.nodes = {root_1, static_text_2, inline_text_3, generic_container_4};
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kStaticText name="abc"
+    ++++++3 kInlineTextBox name="abc"
+    ++++4 kGenericContainer
+  )HTML"));
 
   const AXTree* tree = Init(update);
-  const AXNode* inline_text_3_node = tree->GetFromId(inline_text_3.id);
+  const AXNode* inline_text_3_node = tree->GetFromId(3);
 
   // Making |owner| AXID:1 so that |TestAXNodeWrapper::BuildAllWrappers|
   // will build the entire tree.
   AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
-      AXPlatformNodeFromNode(GetNodeFromTree(tree_id, 1)));
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
 
-  ComPtr<AXPlatformNodeTextRangeProviderWin> range;
+  ComPtr<ITextRangeProvider> range;
   base::win::ScopedVariant expected_variant;
 
   CreateTextRangeProviderWin(
@@ -7706,6 +7926,1913 @@ TEST_F(AXPlatformNodeTextRangeProviderTest,
                                    /*count*/ 1,
                                    /*expected_text*/ L"abc\n\xFFFC",
                                    /*expected_count*/ 1);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       OnTextDeletionOrInsertionDeletionOnTwoRelevantNodes) {
+  // This test is for `OnTextDeletionOrInsertion` which is called when
+  // unserializing. This test covers the following scenario of text deletion:
+  // <div contenteditable>hello world red blue</div>
+  // Our text range would be (with start and end denoted by <> and deletion
+  // range by |):
+  // "|hello| world re<d> blue".
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer state=kRichlyEditable,kEditable boolAttribute=kNonAtomicTextFieldRoot,true
+    ++++++3 kStaticText state=kRichlyEditable,kEditable
+    ++++++++4 kInlineTextBox state=kRichlyEditable,kEditable
+  )HTML"));
+
+  update.nodes[1].SetName("hello world red blue");
+  update.nodes[2].SetName("hello world red blue");
+  update.nodes[3].SetName("hello world red blue");
+
+  AXTree* tree = Init(update);
+  AXNode* text_field = tree->GetFromId(1);
+  AXNode* st_node = tree->GetFromId(4);
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_field));
+
+  ComPtr<ITextRangeProvider> original;
+  CreateTextRangeProviderWin(
+      original, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 14,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 14,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartOffsets,
+      std::vector<int>{0});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndOffsets,
+      std::vector<int>{5});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartAnchorIds,
+      std::vector<int>{1});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndAnchorIds,
+      std::vector<int>{1});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperations,
+      std::vector<int>{static_cast<int>(ax::mojom::Command::kDelete)});
+
+  ASSERT_TRUE(GetTree()->Unserialize(update));
+
+  // We should expect the TextRangeProvider's offset to decrease by 9 on both
+  // the start and end.
+  ComPtr<ITextRangeProvider> after_deletion_expected;
+  CreateTextRangeProviderWin(
+      after_deletion_expected, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 9,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 9,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  BOOL are_same;
+  original->Compare(after_deletion_expected.Get(), &are_same);
+  EXPECT_TRUE(are_same);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       OnTextDeletionOrInsertionDeletionOnTwoIrrelevantNodes) {
+  // This test is for `OnTextDeletionOrInsertion` which is called when
+  // unserializing. This test covers the following scenario of text deletion:
+  // <div contenteditable><span>hello</span> world red blue</div>
+  // Our text range would be (with start and end denoted by <> and deletion
+  // range by |):
+  // "world re<d> blue".
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer state=kRichlyEditable,kEditable boolAttribute=kNonAtomicTextFieldRoot,true
+    ++++++3 kStaticText name="hello" state=kRichlyEditable,kEditable
+    ++++++++4 kInlineTextBox name="hello" state=kRichlyEditable,kEditable
+    ++++++5 kStaticText state=kRichlyEditable,kEditable
+    ++++++++6 kInlineTextBox state=kRichlyEditable,kEditable
+  )HTML"));
+
+  update.nodes[4].SetName("world red blue");
+  update.nodes[5].SetName("world red blue");
+
+  AXTree* tree = Init(update);
+  AXNode* text_field = tree->GetFromId(1);
+  AXNode* st_node = tree->GetFromId(4);
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_field));
+
+  ComPtr<ITextRangeProvider> original;
+  CreateTextRangeProviderWin(
+      original, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 14,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 14,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartOffsets,
+      std::vector<int>{0});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndOffsets,
+      std::vector<int>{5});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartAnchorIds,
+      std::vector<int>{3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndAnchorIds,
+      std::vector<int>{3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperations,
+      std::vector<int>{static_cast<int>(ax::mojom::Command::kDelete)});
+
+  ASSERT_TRUE(GetTree()->Unserialize(update));
+
+  // We should expect the TextRangeProvider's offset to be unaffected
+  ComPtr<ITextRangeProvider> after_deletion_expected;
+  CreateTextRangeProviderWin(
+      after_deletion_expected, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 14,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 14,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  BOOL are_same;
+  original->Compare(after_deletion_expected.Get(), &are_same);
+  EXPECT_TRUE(are_same);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       OnTextDeletionOrInsertionDeletionOnOneIrrelevantOneRelevant) {
+  // This test is for `OnTextDeletionOrInsertion` which is called when
+  // unserializing. This test covers the following scenario of text deletion:
+  // <div contenteditable><span>hello world</span> red green blue</div>
+  // Our text range would be (with start and end denoted by <> and deletion
+  // range by |):
+  // "red| gre<e>n blue".
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer state=kRichlyEditable,kEditable boolAttribute=kNonAtomicTextFieldRoot,true
+    ++++++3 kStaticText state=kRichlyEditable,kEditable
+    ++++++++4 kInlineTextBox state=kRichlyEditable,kEditable
+    ++++++5 kStaticText state=kRichlyEditable,kEditable
+    ++++++++6 kInlineTextBox state=kRichlyEditable,kEditable
+  )HTML"));
+
+  update.nodes[1].SetName("hello world red green blue");
+  update.nodes[2].SetName("hello world ");
+  update.nodes[3].SetName("hello world ");
+  update.nodes[4].SetName("red green blue");
+  update.nodes[5].SetName("red green blue");
+
+  AXTree* tree = Init(update);
+  AXNode* text_field = tree->GetFromId(1);
+  AXNode* st_node = tree->GetFromId(5);
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_field));
+
+  ComPtr<ITextRangeProvider> original;
+  CreateTextRangeProviderWin(
+      original, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 20,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 20,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartOffsets,
+      std::vector<int>{6});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndOffsets,
+      std::vector<int>{3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartAnchorIds,
+      std::vector<int>{3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndAnchorIds,
+      std::vector<int>{5});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperations,
+      std::vector<int>{static_cast<int>(ax::mojom::Command::kDelete)});
+
+  ASSERT_TRUE(GetTree()->Unserialize(update));
+
+  // We should expect the TextRangeProvider's offset to decrease by 3
+  // units since from the deleted range, only "red" affects the offset.
+  ComPtr<ITextRangeProvider> after_deletion_expected;
+  CreateTextRangeProviderWin(
+      after_deletion_expected, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 17,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 17,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  BOOL are_same;
+  original->Compare(after_deletion_expected.Get(), &are_same);
+  EXPECT_TRUE(are_same);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       OnTextDeletionOrInsertionDeletionInsideTextRangeProvider) {
+  // This test is for `OnTextDeletionOrInsertion` which is called when
+  // unserializing. This test covers the following scenario of text deletion:
+  // <div contenteditable><span>hello world</span> red green blue</div>
+  // Our text range would be (with start and end denoted by <> and deletion
+  // range by |):
+  // "hel<l>o |world red| gre<e>n blue".
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer state=kRichlyEditable,kEditable boolAttribute=kNonAtomicTextFieldRoot,true
+    ++++++3 kStaticText state=kRichlyEditable,kEditable
+    ++++++++4 kInlineTextBox state=kRichlyEditable,kEditable
+    ++++++5 kStaticText state=kRichlyEditable,kEditable
+    ++++++++6 kInlineTextBox state=kRichlyEditable,kEditable
+  )HTML"));
+
+  update.nodes[1].SetName("hello world red green blue");
+  update.nodes[2].SetName("hello world ");
+  update.nodes[3].SetName("hello world ");
+  update.nodes[4].SetName("red green blue");
+  update.nodes[5].SetName("red green blue");
+
+  AXTree* tree = Init(update);
+  AXNode* text_field = tree->GetFromId(1);
+  AXNode* span_node = tree->GetFromId(3);
+  AXNode* st_node = tree->GetFromId(5);
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_field));
+
+  ComPtr<ITextRangeProvider> original;
+  CreateTextRangeProviderWin(
+      original, owner,
+      /*start_anchor*/ span_node, /*start_offset*/ 3,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 7,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartOffsets,
+      std::vector<int>{6});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndOffsets,
+      std::vector<int>{3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartAnchorIds,
+      std::vector<int>{3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndAnchorIds,
+      std::vector<int>{5});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperations,
+      std::vector<int>{static_cast<int>(ax::mojom::Command::kDelete)});
+
+  ASSERT_TRUE(GetTree()->Unserialize(update));
+
+  // We should expect the TextRangeProvider's end offset to decrease by 3
+  // units since from the deleted range, since "red" affects the offset, but we
+  // should expect the start offset to remain unaffected.
+  ComPtr<ITextRangeProvider> after_deletion_expected;
+  CreateTextRangeProviderWin(
+      after_deletion_expected, owner,
+      /*start_anchor*/ span_node, /*start_offset*/ 3,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 4,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  BOOL are_same;
+  original->Compare(after_deletion_expected.Get(), &are_same);
+  EXPECT_TRUE(are_same);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       OnTextDeletionOrInsertionDeletionMultipleDeletionsAndInsertions) {
+  // This test is for `OnTextDeletionOrInsertion` which is called when
+  // unserializing. This test covers the following scenario of text deletion:
+  // <div contenteditable>hello world red green blue</div>
+  // Our text range would be (with start and end denoted by <> and deletion
+  // range by |):
+  // "<h>ello world red gree|n| blue<>"
+  // "<h>ello world red gre|e| blue<>"
+  // "<h>ello world red gr|e| blue<>"
+  // "<h>ello world red g|r| blue<>"
+  // "<h>ello world red |g| blue<>"
+  // And then we do some insertions, denoted again by |
+  // "<h>ello world red |g| blue<>"
+  // "<h>ello world red g|o| blue<>"
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kGenericContainer state=kRichlyEditable,kEditable boolAttribute=kNonAtomicTextFieldRoot,true
+    ++++++3 kStaticText state=kRichlyEditable,kEditable
+    ++++++++4 kInlineTextBox state=kRichlyEditable,kEditable
+  )HTML"));
+
+  update.nodes[1].SetName("hello world red green blue");
+  update.nodes[2].SetName("hello world red green blue");
+  update.nodes[3].SetName("hello world red green blue");
+
+  AXTree* tree = Init(update);
+  AXNode* text_field = tree->GetFromId(1);
+  AXNode* st_node = tree->GetFromId(3);
+
+  AXPlatformNodeWin* owner =
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(text_field));
+
+  ComPtr<ITextRangeProvider> original;
+  CreateTextRangeProviderWin(
+      original, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 0,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 26,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartOffsets,
+      std::vector<int>{20, 19, 18, 17, 16, 16, 17});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndOffsets,
+      std::vector<int>{21, 20, 19, 18, 17, 16, 17});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationStartAnchorIds,
+      std::vector<int>{3, 3, 3, 3, 3, 3, 3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperationEndAnchorIds,
+      std::vector<int>{3, 3, 3, 3, 3, 3, 3});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kTextOperations,
+      std::vector<int>{static_cast<int>(ax::mojom::Command::kDelete),
+                       static_cast<int>(ax::mojom::Command::kDelete),
+                       static_cast<int>(ax::mojom::Command::kDelete),
+                       static_cast<int>(ax::mojom::Command::kDelete),
+                       static_cast<int>(ax::mojom::Command::kDelete),
+                       static_cast<int>(ax::mojom::Command::kInsert),
+                       static_cast<int>(ax::mojom::Command::kInsert)});
+
+  ASSERT_TRUE(GetTree()->Unserialize(update));
+
+  // We should expect the TextRangeProvider's end offset to decrease by 3
+  // units since there were 5 deletions and 2 insertions relevant to it but we
+  // should expect the start offset to remain unaffected, since none of these
+  // were relevant to it.
+  ComPtr<ITextRangeProvider> after_deletion_expected;
+  CreateTextRangeProviderWin(
+      after_deletion_expected, owner,
+      /*start_anchor*/ st_node, /*start_offset*/ 0,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ st_node, /*end_offset*/ 23,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  BOOL are_same;
+  original->Compare(after_deletion_expected.Get(), &are_same);
+  EXPECT_TRUE(are_same);
+}
+
+// This test validates that the move-by-format operation does not include the
+// trailing newline characters. This is important because Narrator's heading
+// navigation, built using this move-by-format operation, expects the range to
+// be fully contained within the anchor. When a trailing newline character is
+// included, it often indicates that the end endpoint is at the start of the
+// next anchor instead of being at the end of the current anchor.
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       MoveByFormatDoesNotIncludeTrailingNewlines) {
+  AXNodeData static_text_1;
+  static_text_1.id = 2;
+  static_text_1.role = ax::mojom::Role::kStaticText;
+  static_text_1.SetName("before");
+  static_text_1.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData heading_data;
+  heading_data.id = 3;
+  heading_data.role = ax::mojom::Role::kHeading;
+  heading_data.SetName("Heading");
+  heading_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                                true);
+
+  AXNodeData static_text_2;
+  static_text_2.id = 4;
+  static_text_2.role = ax::mojom::Role::kStaticText;
+  static_text_2.SetName("Heading");
+  heading_data.child_ids = {static_text_2.id};
+
+  AXNodeData paragraph_data;
+  paragraph_data.id = 5;
+  paragraph_data.role = ax::mojom::Role::kParagraph;
+  paragraph_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData static_text_3;
+  static_text_3.id = 6;
+  static_text_3.role = ax::mojom::Role::kStaticText;
+  static_text_3.SetName("after");
+  paragraph_data.child_ids = {static_text_3.id};
+
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {static_text_1.id, heading_data.id, paragraph_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data,     static_text_1,  heading_data,
+                  static_text_2, paragraph_data, static_text_3};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 0,
+                  /*expected_text*/
+                  L"before\nHeading\nafter",
+                  /*expected_count*/ 0);
+
+  // Here, we expect the newline character because we're using the
+  // MoveEndpointByUnit function, which moves only one endpoint to unit
+  // boundary. It should expand to the enclosing unit like Move does when moving
+  // both endpoints.
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
+      /*count*/ -2,
+      /*expected_text*/
+      L"before\n",
+      /*expected_count*/ -2);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/
+                  L"Heading",
+                  /*expected_count*/ 1);
+}
+
+// Test that misspelled words (MarkerType::kSpelling) are treated as format
+// boundaries. This simulates a contenteditable with spelling mistakes like:
+// "This iss a lin that has a few diffferent misspelled words."
+// where "iss", "lin", and "diffferent" are misspelled.
+TEST_F(AXPlatformNodeTextRangeProviderTest, MisspellingsAreFormatBoundaries) {
+  // Build a tree that represents:
+  // <div contenteditable>This iss a lin that has a few diffferent misspelled
+  // words.</div>
+  // With misspellings on "iss" (5-8), "lin" (11-14), and "diffferent" (30-40)
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData contenteditable_data;
+  contenteditable_data.id = 2;
+  contenteditable_data.role = ax::mojom::Role::kGenericContainer;
+  contenteditable_data.AddState(ax::mojom::State::kEditable);
+  contenteditable_data.AddState(ax::mojom::State::kRichlyEditable);
+  contenteditable_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 3;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName(
+      "This iss a lin that has a few diffferent misspelled words.");
+  static_text_data.AddState(ax::mojom::State::kEditable);
+  static_text_data.AddState(ax::mojom::State::kRichlyEditable);
+  // Add spelling markers for misspelled words
+  // "iss" at positions 5-8, "lin" at 11-14, "diffferent" at 30-40
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {5, 11, 30});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {8, 14, 40});
+
+  AXNodeData inline_box_data;
+  inline_box_data.id = 4;
+  inline_box_data.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_data.SetName(
+      "This iss a lin that has a few diffferent misspelled words.");
+  inline_box_data.AddState(ax::mojom::State::kEditable);
+  inline_box_data.AddState(ax::mojom::State::kRichlyEditable);
+
+  static_text_data.child_ids = {inline_box_data.id};
+  contenteditable_data.child_ids = {static_text_data.id};
+  root_data.child_ids = {contenteditable_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, contenteditable_data, static_text_data,
+                  inline_box_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // Full text: "This iss a lin that has a few diffferent misspelled words."
+  // Expected format boundaries at misspelling start/end positions:
+  // - "This " (0-5) - normal text
+  // - "iss" (5-8) - misspelled
+  // - " a " (8-11) - normal text
+  // - "lin" (11-14) - misspelled
+  // - " that has a few " (14-30) - normal text
+  // - "diffferent" (30-40) - misspelled
+  // - " misspelled words." (40-58) - normal text
+
+  // Start at the beginning - should get "This " (before first misspelling)
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 0,
+                  /*expected_text*/
+                  L"This iss a lin that has a few diffferent misspelled words.",
+                  /*expected_count*/ 0);
+
+  // Move by format should stop at the misspelling boundary
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
+      /*count*/ -6,
+      /*expected_text*/ L"This ",
+      /*expected_count*/ -6);
+
+  // Move forward should get the misspelled word "iss"
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"iss",
+                  /*expected_count*/ 1);
+
+  // Move forward should get " a "
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" a ",
+                  /*expected_count*/ 1);
+
+  // Move forward should get "lin"
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"lin",
+                  /*expected_count*/ 1);
+
+  // Move forward should get " that has a few "
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" that has a few ",
+                  /*expected_count*/ 1);
+
+  // Move forward should get "diffferent"
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"diffferent",
+                  /*expected_count*/ 1);
+
+  // Move forward should get " misspelled words."
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" misspelled words.",
+                  /*expected_count*/ 1);
+
+  // Trying to move past the last format should have no effect
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" misspelled words.",
+                  /*expected_count*/ 0);
+}
+
+// Test that misspelled words are treated as format boundaries across multiple
+// paragraphs in a contenteditable. This simulates the HTML:
+// <div contenteditable="true">
+//   Hello world,
+//   <div><br></div>
+//   <div>This iss a line of text wijth misspellings. Here are twoo wors next
+//        to each other. This is a wo</div>
+//   <div>rd that is split across lines.</div>
+//   <div><br></div>
+//   <div>This paragraph has no misspellings...</div>
+// </div>
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       MoveByFormatWithMisspellingsAcrossParagraphs) {
+  // Structure:
+  // 1 - RootWebArea
+  //   2 - GenericContainer (contenteditable)
+  //     3 - StaticText "Hello world,"
+  //       4 - InlineTextBox "Hello world,"
+  //     5 - GenericContainer (empty line)
+  //       6 - LineBreak "\n"
+  //     7 - GenericContainer (paragraph with misspellings)
+  //       8 - StaticText "This iss a line..."
+  //         9 - InlineTextBox "This iss a line..."
+  //     10 - GenericContainer (continuation)
+  //       11 - StaticText "rd that is split across lines."
+  //         12 - InlineTextBox "rd that is split across lines."
+  //     13 - GenericContainer (empty line)
+  //       14 - LineBreak "\n"
+  //     15 - GenericContainer (paragraph without misspellings)
+  //       16 - StaticText "This paragraph has no misspellings..."
+  //         17 - InlineTextBox "This paragraph has no misspellings..."
+
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData contenteditable_data;
+  contenteditable_data.id = 2;
+  contenteditable_data.role = ax::mojom::Role::kGenericContainer;
+  contenteditable_data.AddState(ax::mojom::State::kEditable);
+  contenteditable_data.AddState(ax::mojom::State::kRichlyEditable);
+  contenteditable_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
+
+  // "Hello world,"
+  AXNodeData static_text_1;
+  static_text_1.id = 3;
+  static_text_1.role = ax::mojom::Role::kStaticText;
+  static_text_1.SetName("Hello world,");
+  static_text_1.AddState(ax::mojom::State::kEditable);
+  static_text_1.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData inline_box_1;
+  inline_box_1.id = 4;
+  inline_box_1.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_1.SetName("Hello world,");
+  inline_box_1.AddState(ax::mojom::State::kEditable);
+  static_text_1.child_ids = {inline_box_1.id};
+
+  // Empty line (br)
+  AXNodeData empty_line_1;
+  empty_line_1.id = 5;
+  empty_line_1.role = ax::mojom::Role::kGenericContainer;
+  empty_line_1.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                                true);
+
+  AXNodeData line_break_1;
+  line_break_1.id = 6;
+  line_break_1.role = ax::mojom::Role::kLineBreak;
+  line_break_1.SetName("\n");
+  empty_line_1.child_ids = {line_break_1.id};
+
+  // Paragraph with misspellings:
+  // "This iss a line of text wijth misspellings. Here are twoo wors next to
+  // each other. This is a wo"
+  // Misspellings: "iss" (5-8), "wijth" (24-29), "twoo" (47-51), "wors" (52-56)
+  AXNodeData para_with_misspellings;
+  para_with_misspellings.id = 7;
+  para_with_misspellings.role = ax::mojom::Role::kGenericContainer;
+  para_with_misspellings.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData static_text_2;
+  static_text_2.id = 8;
+  static_text_2.role = ax::mojom::Role::kStaticText;
+  static_text_2.SetName(
+      "This iss a line of text wijth misspellings. Here are twoo wors next to "
+      "each other. This is a wo");
+  static_text_2.AddState(ax::mojom::State::kEditable);
+  // Misspellings: "iss" (5-8), "wijth" (24-29), "twoo" (53-57), "wors" (58-62)
+  static_text_2.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling)});
+  static_text_2.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerStarts,
+                                    {5, 24, 53, 58});
+  static_text_2.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                    {8, 29, 57, 62});
+
+  AXNodeData inline_box_2;
+  inline_box_2.id = 9;
+  inline_box_2.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_2.SetName(
+      "This iss a line of text wijth misspellings. Here are twoo wors next to "
+      "each other. This is a wo");
+  inline_box_2.AddState(ax::mojom::State::kEditable);
+  static_text_2.child_ids = {inline_box_2.id};
+  para_with_misspellings.child_ids = {static_text_2.id};
+
+  // Continuation: "rd that is split across lines."
+  AXNodeData continuation;
+  continuation.id = 10;
+  continuation.role = ax::mojom::Role::kGenericContainer;
+  continuation.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                                true);
+
+  AXNodeData static_text_3;
+  static_text_3.id = 11;
+  static_text_3.role = ax::mojom::Role::kStaticText;
+  static_text_3.SetName("rd that is split across lines.");
+  static_text_3.AddState(ax::mojom::State::kEditable);
+
+  AXNodeData inline_box_3;
+  inline_box_3.id = 12;
+  inline_box_3.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_3.SetName("rd that is split across lines.");
+  inline_box_3.AddState(ax::mojom::State::kEditable);
+  static_text_3.child_ids = {inline_box_3.id};
+  continuation.child_ids = {static_text_3.id};
+
+  // Empty line (br)
+  AXNodeData empty_line_2;
+  empty_line_2.id = 13;
+  empty_line_2.role = ax::mojom::Role::kGenericContainer;
+  empty_line_2.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                                true);
+
+  AXNodeData line_break_2;
+  line_break_2.id = 14;
+  line_break_2.role = ax::mojom::Role::kLineBreak;
+  line_break_2.SetName("\n");
+  empty_line_2.child_ids = {line_break_2.id};
+
+  // Paragraph without misspellings
+  AXNodeData para_no_misspellings;
+  para_no_misspellings.id = 15;
+  para_no_misspellings.role = ax::mojom::Role::kGenericContainer;
+  para_no_misspellings.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData static_text_4;
+  static_text_4.id = 16;
+  static_text_4.role = ax::mojom::Role::kStaticText;
+  static_text_4.SetName(
+      "This paragraph has no misspellings to contrast it from the paragraph "
+      "above. This should be able to be considered as a single format for "
+      "boundary detection purposes.");
+  static_text_4.AddState(ax::mojom::State::kEditable);
+
+  AXNodeData inline_box_4;
+  inline_box_4.id = 17;
+  inline_box_4.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_4.SetName(
+      "This paragraph has no misspellings to contrast it from the paragraph "
+      "above. This should be able to be considered as a single format for "
+      "boundary detection purposes.");
+  inline_box_4.AddState(ax::mojom::State::kEditable);
+  static_text_4.child_ids = {inline_box_4.id};
+  para_no_misspellings.child_ids = {static_text_4.id};
+
+  // Wire up the tree
+  contenteditable_data.child_ids = {
+      static_text_1.id, empty_line_1.id, para_with_misspellings.id,
+      continuation.id,  empty_line_2.id, para_no_misspellings.id};
+  root_data.child_ids = {contenteditable_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {
+      root_data,    contenteditable_data, static_text_1,          inline_box_1,
+      empty_line_1, line_break_1,         para_with_misspellings, static_text_2,
+      inline_box_2, continuation,         static_text_3,          inline_box_3,
+      empty_line_2, line_break_2,         para_no_misspellings,   static_text_4,
+      inline_box_4};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // Verify the full document text first (move by 0 has no effect but shows
+  // current range). The <br> elements between block containers produce both
+  // a <br> newline and a paragraph-boundary newline.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 0,
+                  /*expected_text*/
+                  L"Hello world,\nThis iss a line of text wijth misspellings. "
+                  L"Here are twoo wors next to each other. This is a wo\nrd "
+                  L"that is split across lines.\nThis paragraph has no "
+                  L"misspellings to contrast it from the paragraph above. This "
+                  L"should be able to be considered as a single format for "
+                  L"boundary detection purposes.",
+                  /*expected_count*/ 0);
+
+  // Move forward by format from the full document. All unmarked text at the
+  // start (including "Hello world,\n" and "This ") forms a single format unit
+  // because they have the same formatting and neither is in a spelling marker.
+  // The first Move(1) collapses to start then moves to the 2nd format unit,
+  // which is the first misspelling.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"iss",
+                  /*expected_count*/ 1);
+
+  // Move forward - should get " a line of text " (text between misspellings)
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" a line of text ",
+                  /*expected_count*/ 1);
+
+  // Move forward - should get "wijth" (misspelled word)
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"wijth",
+                  /*expected_count*/ 1);
+
+  // Move forward - should get " misspellings. Here are " (text between)
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" misspellings. Here are ",
+                  /*expected_count*/ 1);
+
+  // Move forward - should get "twoo" (misspelled word)
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"twoo",
+                  /*expected_count*/ 1);
+
+  // Move forward - should get " " (single space between adjacent misspellings)
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" ",
+                  /*expected_count*/ 1);
+
+  // Move forward - should get "wors" (misspelled word)
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"wors",
+                  /*expected_count*/ 1);
+
+  // Move forward - after the last misspelling, all remaining text with no
+  // markers and same text attributes forms a single format unit. This includes
+  // text across paragraph breaks and wrapped lines.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/
+                  L" next to each other. This is a wo\n"
+                  L"rd that is split across lines.\n"
+                  L"This paragraph has no "
+                  L"misspellings to contrast it from the paragraph above. This "
+                  L"should be able to be considered as a single format for "
+                  L"boundary detection purposes.",
+                  /*expected_count*/ 1);
+
+  // Trying to move past the end should have no effect
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/
+                  L" next to each other. This is a wo\n"
+                  L"rd that is split across lines.\n"
+                  L"This paragraph has no "
+                  L"misspellings to contrast it from the paragraph above. This "
+                  L"should be able to be considered as a single format for "
+                  L"boundary detection purposes.",
+                  /*expected_count*/ 0);
+}
+
+// Test that grammar errors (MarkerType::kGrammar) are also treated as format
+// boundaries, similar to spelling errors.
+TEST_F(AXPlatformNodeTextRangeProviderTest, GrammarErrorsAreFormatBoundaries) {
+  // Build a tree representing:
+  // <div contenteditable>She dont like it when they gos there.</div>
+  // With grammar errors on "dont" (4-8) and "gos" (27-30)
+  // Character positions:
+  // S  h  e     d  o  n  t     l   i   k   e       i   t       w   h   e   n
+  // 0  1  2  3  4  5  6  7  8  9  10  11  12  13  14  15  16  17  18  19  20
+  //    t   h   e   y       g   o   s       t   h   e   r   e   .
+  //   21  22  23  24  25  26  27  28  29  30  31  32  33  34  35  36
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData contenteditable_data;
+  contenteditable_data.id = 2;
+  contenteditable_data.role = ax::mojom::Role::kGenericContainer;
+  contenteditable_data.AddState(ax::mojom::State::kEditable);
+  contenteditable_data.AddState(ax::mojom::State::kRichlyEditable);
+  contenteditable_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 3;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName("She dont like it when they gos there.");
+  static_text_data.AddState(ax::mojom::State::kEditable);
+  static_text_data.AddState(ax::mojom::State::kRichlyEditable);
+  // Add grammar markers for grammatically incorrect words
+  // "dont" at positions 4-8, "gos" at 27-30
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kGrammar),
+       static_cast<int>(ax::mojom::MarkerType::kGrammar)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {4, 27});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {8, 30});
+
+  AXNodeData inline_box_data;
+  inline_box_data.id = 4;
+  inline_box_data.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_data.SetName("She dont like it when they gos there.");
+  inline_box_data.AddState(ax::mojom::State::kEditable);
+  inline_box_data.AddState(ax::mojom::State::kRichlyEditable);
+
+  static_text_data.child_ids = {inline_box_data.id};
+  contenteditable_data.child_ids = {static_text_data.id};
+  root_data.child_ids = {contenteditable_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, contenteditable_data, static_text_data,
+                  inline_box_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // Full text: "She dont like it when they gos there."
+  // Expected format boundaries:
+  // - "She " (0-4) - normal
+  // - "dont" (4-8) - grammar error
+  // - " like it when they " (8-27) - normal
+  // - "gos" (27-30) - grammar error
+  // - " there." (30-37) - normal
+
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
+      /*count*/ -4,
+      /*expected_text*/ L"She ",
+      /*expected_count*/ -4);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"dont",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" like it when they ",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"gos",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" there.",
+                  /*expected_count*/ 1);
+}
+
+// Test format boundaries when misspelling is at the start of text.
+// Note: Markers ending at text_length-1 or later don't create a format boundary
+// at the end, so we use a longer suffix to test the end case.
+TEST_F(AXPlatformNodeTextRangeProviderTest, MisspellingsAtTextBoundaries) {
+  // Build a tree representing:
+  // <div contenteditable>Teh quick brown fox jumpd quickly.</div>
+  // With misspellings on "Teh" (0-3) at start and "jumpd" (20-25) in middle
+  // Character positions:
+  // T  e  h     q  u  i  c  k     b   r   o   w   n       f   o   x
+  // 0  1  2  3  4  5  6  7  8  9  10  11  12  13  14  15  16  17  18
+  //    j   u   m   p   d       q   u   i   c   k   l   y   .
+  //   19  20  21  22  23  24  25  26  27  28  29  30  31  32  33
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData contenteditable_data;
+  contenteditable_data.id = 2;
+  contenteditable_data.role = ax::mojom::Role::kGenericContainer;
+  contenteditable_data.AddState(ax::mojom::State::kEditable);
+  contenteditable_data.AddState(ax::mojom::State::kRichlyEditable);
+  contenteditable_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 3;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName("Teh quick brown fox jumpd quickly.");
+  static_text_data.AddState(ax::mojom::State::kEditable);
+  static_text_data.AddState(ax::mojom::State::kRichlyEditable);
+  // "Teh" at positions 0-3, "jumpd" at 20-25
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {0, 20});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {3, 25});
+
+  AXNodeData inline_box_data;
+  inline_box_data.id = 4;
+  inline_box_data.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_data.SetName("Teh quick brown fox jumpd quickly.");
+  inline_box_data.AddState(ax::mojom::State::kEditable);
+  inline_box_data.AddState(ax::mojom::State::kRichlyEditable);
+
+  static_text_data.child_ids = {inline_box_data.id};
+  contenteditable_data.child_ids = {static_text_data.id};
+  root_data.child_ids = {contenteditable_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, contenteditable_data, static_text_data,
+                  inline_box_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // Full text: "Teh quick brown fox jumpd quickly."
+  // Expected format boundaries:
+  // - "Teh" (0-3) - misspelled at start
+  // - " quick brown fox " (3-20) - normal
+  // - "jumpd" (20-25) - misspelled
+  // - " quickly." (25-34) - normal at end
+
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
+      /*count*/ -3,
+      /*expected_text*/ L"Teh",
+      /*expected_count*/ -3);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" quick brown fox ",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"jumpd",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" quickly.",
+                  /*expected_count*/ 1);
+}
+
+// Test backward navigation through format boundaries with misspellings.
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       MoveByFormatBackwardWithMisspellings) {
+  // Build a tree representing:
+  // <div contenteditable>This iss a tesst now.</div>
+  // With misspellings on "iss" (5-8) and "tesst" (11-16)
+  // Character positions:
+  // T  h  i  s     i  s  s     a       t   e   s   s   t       n   o   w   .
+  // 0  1  2  3  4  5  6  7  8  9  10  11  12  13  14  15  16  17  18  19  20
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData contenteditable_data;
+  contenteditable_data.id = 2;
+  contenteditable_data.role = ax::mojom::Role::kGenericContainer;
+  contenteditable_data.AddState(ax::mojom::State::kEditable);
+  contenteditable_data.AddState(ax::mojom::State::kRichlyEditable);
+  contenteditable_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 3;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName("This iss a tesst now.");
+  static_text_data.AddState(ax::mojom::State::kEditable);
+  static_text_data.AddState(ax::mojom::State::kRichlyEditable);
+  // "iss" at 5-8, "tesst" at 11-16
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {5, 11});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {8, 16});
+
+  AXNodeData inline_box_data;
+  inline_box_data.id = 4;
+  inline_box_data.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_data.SetName("This iss a tesst now.");
+  inline_box_data.AddState(ax::mojom::State::kEditable);
+  inline_box_data.AddState(ax::mojom::State::kRichlyEditable);
+
+  static_text_data.child_ids = {inline_box_data.id};
+  contenteditable_data.child_ids = {static_text_data.id};
+  root_data.child_ids = {contenteditable_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, contenteditable_data, static_text_data,
+                  inline_box_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // Full text: "This iss a tesst now."
+  // Expected format boundaries (5 total):
+  // - "This " (0-5) - normal
+  // - "iss" (5-8) - misspelled
+  // - " a " (8-11) - normal
+  // - "tesst" (11-16) - misspelled
+  // - " now." (16-21) - normal
+
+  // Move to the last format unit. Starting at format 0 ("This "), moving by 4
+  // lands on format 4 (" now."), which is the 5th and last format.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 4,
+                  /*expected_text*/ L" now.",
+                  /*expected_count*/ 4);
+
+  // Now move backward through the format units
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ -1,
+                  /*expected_text*/ L"tesst",
+                  /*expected_count*/ -1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ -1,
+                  /*expected_text*/ L" a ",
+                  /*expected_count*/ -1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ -1,
+                  /*expected_text*/ L"iss",
+                  /*expected_count*/ -1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ -1,
+                  /*expected_text*/ L"This ",
+                  /*expected_count*/ -1);
+
+  // Trying to move before the start should have no effect
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ -1,
+                  /*expected_text*/ L"This ",
+                  /*expected_count*/ 0);
+}
+
+// Test mixed spelling and grammar markers in the same text.
+TEST_F(AXPlatformNodeTextRangeProviderTest, MixedSpellingAndGrammarMarkers) {
+  // Build a tree representing:
+  // <div contenteditable>She dont like teh book.</div>
+  // With grammar error on "dont" (4-8) and spelling error on "teh" (14-17)
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData contenteditable_data;
+  contenteditable_data.id = 2;
+  contenteditable_data.role = ax::mojom::Role::kGenericContainer;
+  contenteditable_data.AddState(ax::mojom::State::kEditable);
+  contenteditable_data.AddState(ax::mojom::State::kRichlyEditable);
+  contenteditable_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 3;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName("She dont like teh book.");
+  static_text_data.AddState(ax::mojom::State::kEditable);
+  static_text_data.AddState(ax::mojom::State::kRichlyEditable);
+  // Grammar: "dont" at 4-8, Spelling: "teh" at 14-17
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kGrammar),
+       static_cast<int>(ax::mojom::MarkerType::kSpelling)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {4, 14});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {8, 17});
+
+  AXNodeData inline_box_data;
+  inline_box_data.id = 4;
+  inline_box_data.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_data.SetName("She dont like teh book.");
+  inline_box_data.AddState(ax::mojom::State::kEditable);
+  inline_box_data.AddState(ax::mojom::State::kRichlyEditable);
+
+  static_text_data.child_ids = {inline_box_data.id};
+  contenteditable_data.child_ids = {static_text_data.id};
+  root_data.child_ids = {contenteditable_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, contenteditable_data, static_text_data,
+                  inline_box_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // Full text: "She dont like teh book."
+  // Expected format boundaries:
+  // - "She " (0-4) - normal
+  // - "dont" (4-8) - grammar error
+  // - " like " (8-14) - normal
+  // - "teh" (14-17) - spelling error
+  // - " book." (17-23) - normal
+
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(
+      text_range_provider, TextPatternRangeEndpoint_End, TextUnit_Format,
+      /*count*/ -4,
+      /*expected_text*/ L"She ",
+      /*expected_count*/ -4);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"dont",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" like ",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"teh",
+                  /*expected_count*/ 1);
+
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" book.",
+                  /*expected_count*/ 1);
+}
+
+// Test that when text wraps across multiple InlineTextBoxes, misspelling
+// markers on the first line do NOT bleed through to the second line.
+// This simulates wrapped content where only the first line has a misspelling.
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       MisspellingsDoNotBleedToWrappedLines) {
+  // Build a tree representing wrapped text:
+  // <div contenteditable>This iss a long line that wraps here</div>
+  // The text wraps into two InlineTextBoxes:
+  //   Line 1: "This iss a long " (chars 0-17 in parent)
+  //   Line 2: "line that wraps here" (chars 17-37 in parent)
+  // With spelling marker on "iss" at positions 5-8 in the parent.
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData contenteditable_data;
+  contenteditable_data.id = 2;
+  contenteditable_data.role = ax::mojom::Role::kGenericContainer;
+  contenteditable_data.AddState(ax::mojom::State::kEditable);
+  contenteditable_data.AddState(ax::mojom::State::kRichlyEditable);
+  contenteditable_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kNonAtomicTextFieldRoot, true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 3;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName("This iss a long line that wraps here");
+  static_text_data.AddState(ax::mojom::State::kEditable);
+  static_text_data.AddState(ax::mojom::State::kRichlyEditable);
+  // Spelling marker for "iss" at parent offsets 5-8 (only in first line).
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int>(ax::mojom::MarkerType::kSpelling)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {5});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {8});
+
+  // First InlineTextBox: "This iss a long " (first 17 chars)
+  AXNodeData inline_box1_data;
+  inline_box1_data.id = 4;
+  inline_box1_data.role = ax::mojom::Role::kInlineTextBox;
+  inline_box1_data.SetName("This iss a long ");
+  inline_box1_data.AddState(ax::mojom::State::kEditable);
+  inline_box1_data.AddState(ax::mojom::State::kRichlyEditable);
+
+  // Second InlineTextBox: "line that wraps here" (chars 17-37)
+  AXNodeData inline_box2_data;
+  inline_box2_data.id = 5;
+  inline_box2_data.role = ax::mojom::Role::kInlineTextBox;
+  inline_box2_data.SetName("line that wraps here");
+  inline_box2_data.AddState(ax::mojom::State::kEditable);
+  inline_box2_data.AddState(ax::mojom::State::kRichlyEditable);
+
+  static_text_data.child_ids = {inline_box1_data.id, inline_box2_data.id};
+  contenteditable_data.child_ids = {static_text_data.id};
+  root_data.child_ids = {contenteditable_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, contenteditable_data, static_text_data,
+                  inline_box1_data, inline_box2_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  AXNode* inline_box1_node =
+      root_node->children()[0]->children()[0]->children()[0];
+
+  // Create a degenerate range at the start of inline_box1.
+  ComPtr<ITextRangeProvider> text_range_provider_win;
+  CreateTextRangeProviderWin(
+      text_range_provider_win,
+      static_cast<AXPlatformNodeWin*>(AXPlatformNodeFromNode(root_node)),
+      inline_box1_node, 0, ax::mojom::TextAffinity::kDownstream,
+      inline_box1_node, 0, ax::mojom::TextAffinity::kDownstream);
+  ComPtr<ITextRangeProvider> text_range_provider;
+  text_range_provider_win.As(&text_range_provider);
+
+  // Expand to enclosing format - should expand to "This " (before misspelling)
+  EXPECT_HRESULT_SUCCEEDED(
+      text_range_provider->ExpandToEnclosingUnit(TextUnit_Format));
+  EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"This ");
+
+  // Move forward to next format - should get the misspelled word "iss"
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L"iss",
+                  /*expected_count*/ 1);
+
+  // Move forward to next format - should get all remaining normal text.
+  // Because the misspelling marker from the first InlineTextBox does NOT
+  // bleed through to the second one, the second InlineTextBox has NO format
+  // boundaries. Both boxes share the same text attributes, so the normal
+  // text after "iss" through the end of the second line is one format unit:
+  // " a long " (rest of first line) + "line that wraps here" (entire second
+  // line).
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" a long line that wraps here",
+                  /*expected_count*/ 1);
+
+  // Trying to move forward past the end should have no effect.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/ L" a long line that wraps here",
+                  /*expected_count*/ 0);
+}
+
+// Test that newlines and other non-text nodes do NOT create spurious format
+// boundaries when they have the same text attributes as surrounding text.
+// This simulates a multi-paragraph document where all paragraphs share the
+// same formatting - they should all be part of one format unit.
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       NewlinesDoNotCreateFormatBoundaries) {
+  // Build a tree representing:
+  // <div>
+  //   Paragraph one.
+  //   <div><br></div>
+  //   Paragraph two.
+  //   <div><br></div>
+  //   Paragraph three.
+  // </div>
+  // All paragraphs have the same text attributes and NO misspellings.
+
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData container_data;
+  container_data.id = 2;
+  container_data.role = ax::mojom::Role::kGenericContainer;
+
+  // Paragraph 1
+  AXNodeData static_text_1;
+  static_text_1.id = 3;
+  static_text_1.role = ax::mojom::Role::kStaticText;
+  static_text_1.SetName("Paragraph one.");
+  static_text_1.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData inline_box_1;
+  inline_box_1.id = 4;
+  inline_box_1.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_1.SetName("Paragraph one.");
+  static_text_1.child_ids = {inline_box_1.id};
+
+  // Empty line (br)
+  AXNodeData empty_line_1;
+  empty_line_1.id = 5;
+  empty_line_1.role = ax::mojom::Role::kGenericContainer;
+  empty_line_1.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                                true);
+
+  AXNodeData line_break_1;
+  line_break_1.id = 6;
+  line_break_1.role = ax::mojom::Role::kLineBreak;
+  line_break_1.SetName("\n");
+  empty_line_1.child_ids = {line_break_1.id};
+
+  // Paragraph 2
+  AXNodeData static_text_2;
+  static_text_2.id = 7;
+  static_text_2.role = ax::mojom::Role::kStaticText;
+  static_text_2.SetName("Paragraph two.");
+  static_text_2.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData inline_box_2;
+  inline_box_2.id = 8;
+  inline_box_2.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_2.SetName("Paragraph two.");
+  static_text_2.child_ids = {inline_box_2.id};
+
+  // Empty line (br)
+  AXNodeData empty_line_2;
+  empty_line_2.id = 9;
+  empty_line_2.role = ax::mojom::Role::kGenericContainer;
+  empty_line_2.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                                true);
+
+  AXNodeData line_break_2;
+  line_break_2.id = 10;
+  line_break_2.role = ax::mojom::Role::kLineBreak;
+  line_break_2.SetName("\n");
+  empty_line_2.child_ids = {line_break_2.id};
+
+  // Paragraph 3
+  AXNodeData static_text_3;
+  static_text_3.id = 11;
+  static_text_3.role = ax::mojom::Role::kStaticText;
+  static_text_3.SetName("Paragraph three.");
+  static_text_3.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData inline_box_3;
+  inline_box_3.id = 12;
+  inline_box_3.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_3.SetName("Paragraph three.");
+  static_text_3.child_ids = {inline_box_3.id};
+
+  // Wire up the tree
+  container_data.child_ids = {static_text_1.id, empty_line_1.id,
+                              static_text_2.id, empty_line_2.id,
+                              static_text_3.id};
+  root_data.child_ids = {container_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data,    container_data, static_text_1, inline_box_1,
+                  empty_line_1, line_break_1,   static_text_2, inline_box_2,
+                  empty_line_2, line_break_2,   static_text_3, inline_box_3};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  AXNode* root_node = GetRoot();
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // The full text should be: "Paragraph one.\nParagraph two.\nParagraph three."
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 0,
+                  /*expected_text*/
+                  L"Paragraph one.\nParagraph two.\nParagraph three.",
+                  /*expected_count*/ 0);
+
+  // Moving by format should NOT move because there's only one format unit.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ 1,
+                  /*expected_text*/
+                  L"Paragraph one.\nParagraph two.\nParagraph three.",
+                  /*expected_count*/ 0);
+
+  // Moving backward should also not move.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Format,
+                  /*count*/ -1,
+                  /*expected_text*/
+                  L"Paragraph one.\nParagraph two.\nParagraph three.",
+                  /*expected_count*/ 0);
+}
+
+// Moving by character should land on generated paragraph-break newlines,
+// and `GetText()` should return "\n" for those positions.
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestMoveCharacterLandsOnGeneratedNewline) {
+  // Build a simple tree with two paragraphs separated by a generated newline.
+  // Full text: "Hello\nWorld"
+  //   1 kRootWebArea
+  //   ++2 kParagraph (kIsLineBreakingObject)
+  //   ++++3 kStaticText "Hello"
+  //   ++4 kParagraph (kIsLineBreakingObject)
+  //   ++++5 kStaticText "World"
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData para1_data;
+  para1_data.id = 2;
+  para1_data.role = ax::mojom::Role::kParagraph;
+  para1_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                              true);
+
+  AXNodeData text1_data;
+  text1_data.id = 3;
+  text1_data.role = ax::mojom::Role::kStaticText;
+  text1_data.SetName("Hello");
+
+  AXNodeData para2_data;
+  para2_data.id = 4;
+  para2_data.role = ax::mojom::Role::kParagraph;
+  para2_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                              true);
+
+  AXNodeData text2_data;
+  text2_data.id = 5;
+  text2_data.role = ax::mojom::Role::kStaticText;
+  text2_data.SetName("World");
+
+  root_data.child_ids = {para1_data.id, para2_data.id};
+  para1_data.child_ids = {text1_data.id};
+  para2_data.child_ids = {text2_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, para1_data, text1_data, para2_data, text2_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+  AXNode* root_node = GetRoot();
+
+  ComPtr<ITextRangeProvider> text_range_provider;
+  GetTextRangeProviderFromTextNode(text_range_provider, root_node);
+
+  // Verify full text includes the generated newline.
+  EXPECT_UIA_TEXTRANGE_EQ(text_range_provider, L"Hello\nWorld");
+
+  // Move forward by character through the text.
+  // After moving 5 characters, we should be at "o" (the last char of "Hello").
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Character,
+                  /*count*/ 5,
+                  /*expected_text*/ L"\n",
+                  /*expected_count*/ 5);
+
+  // The next character after "Hello" should be the generated newline "\n".
+  // This is the core of the bug: the generated newline must be navigable
+  // and `GetText()` must return "\n" for it.
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Character,
+                  /*count*/ 1,
+                  /*expected_text*/ L"W",
+                  /*expected_count*/ 1);
+
+  // Moving backward from "W" should land back on the "\n".
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Character,
+                  /*count*/ -1,
+                  /*expected_text*/ L"\n",
+                  /*expected_count*/ -1);
+
+  // And moving backward again from "\n" should land on "o".
+  EXPECT_UIA_MOVE(text_range_provider, TextUnit_Character,
+                  /*count*/ -1,
+                  /*expected_text*/ L"o",
+                  /*expected_count*/ -1);
+}
+
+// Regression test for https://crbug.com/469120959.
+// Tests that MoveEndpointByUnit correctly handles generated newlines when
+// expanding from a degenerate range positioned at a paragraph boundary.
+TEST_F(AXPlatformNodeTextRangeProviderTest,
+       TestMoveEndpointByCharacterAtGeneratedNewline) {
+  // Build a tree with three paragraphs to test multiple boundaries.
+  // Full text: "First\nSecond\nThird"
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData para1_data;
+  para1_data.id = 2;
+  para1_data.role = ax::mojom::Role::kParagraph;
+  para1_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                              true);
+
+  AXNodeData text1_data;
+  text1_data.id = 3;
+  text1_data.role = ax::mojom::Role::kStaticText;
+  text1_data.SetName("First");
+
+  AXNodeData para2_data;
+  para2_data.id = 4;
+  para2_data.role = ax::mojom::Role::kParagraph;
+  para2_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                              true);
+
+  AXNodeData text2_data;
+  text2_data.id = 5;
+  text2_data.role = ax::mojom::Role::kStaticText;
+  text2_data.SetName("Second");
+
+  AXNodeData para3_data;
+  para3_data.id = 6;
+  para3_data.role = ax::mojom::Role::kParagraph;
+  para3_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                              true);
+
+  AXNodeData text3_data;
+  text3_data.id = 7;
+  text3_data.role = ax::mojom::Role::kStaticText;
+  text3_data.SetName("Third");
+
+  root_data.child_ids = {para1_data.id, para2_data.id, para3_data.id};
+  para1_data.child_ids = {text1_data.id};
+  para2_data.child_ids = {text2_data.id};
+  para3_data.child_ids = {text3_data.id};
+
+  AXTreeUpdate update;
+  update.has_tree_data = true;
+  update.root_id = root_data.id;
+  update.nodes = {root_data,  para1_data, text1_data, para2_data,
+                  text2_data, para3_data, text3_data};
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  Init(update);
+
+  const AXTree* tree = GetTree();
+  AXPlatformNodeWin* owner = static_cast<AXPlatformNodeWin*>(
+      AXPlatformNodeFromNode(tree->GetFromId(1)));
+
+  // Create a degenerate range at the boundary between "First" and "Second"
+  // (end of text1, start of text2). This is where the generated \n lives.
+  const AXNode* text1_node = tree->GetFromId(3);
+  const AXNode* text2_node = tree->GetFromId(5);
+
+  ComPtr<ITextRangeProvider> range;
+  CreateTextRangeProviderWin(
+      range, owner,
+      /*start_anchor*/ text1_node, /*start_offset*/ 5,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ text2_node, /*end_offset*/ 0,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  // This range spans the generated newline between paragraphs.
+  EXPECT_UIA_TEXTRANGE_EQ(range.Get(), L"\n");
+
+  // Expand backward by one character from the degenerate position at text2:0
+  // to verify we correctly pick up the generated newline.
+  ComPtr<ITextRangeProvider> range2;
+  CreateTextRangeProviderWin(
+      range2, owner,
+      /*start_anchor*/ text2_node, /*start_offset*/ 0,
+      /*start_affinity*/ ax::mojom::TextAffinity::kDownstream,
+      /*end_anchor*/ text2_node, /*end_offset*/ 0,
+      /*end_affinity*/ ax::mojom::TextAffinity::kDownstream);
+
+  // `MoveEndpointByUnit()` backward should find the generated newline.
+  EXPECT_UIA_MOVE_ENDPOINT_BY_UNIT(range2.Get(), TextPatternRangeEndpoint_Start,
+                                   TextUnit_Character,
+                                   /*count*/ -1,
+                                   /*expected_text*/ L"\n",
+                                   /*expected_count*/ -1);
+}
+
+TEST_F(AXPlatformNodeTextRangeProviderTest, CreateNextNonLineBreakPosition) {
+  // Tree:
+  // RootWebArea(1) [kIsLineBreaking]
+  // ├── GenericContainer(2) [kIsLineBreaking]  // div
+  // │   └── StaticText(3) "hello"
+  // │       └── InlineTextBox(4) "hello"
+  // ├── LineBreak(5) [kIsLineBreaking]  // br
+  // │   └── InlineTextBox(6) "\n" [kIsLineBreaking]
+  // └── GenericContainer(7) [kIsLineBreaking]  // div
+  //     └── StaticText(8) "world"
+  //         └── InlineTextBox(9) "world"
+
+  AXNodeData root;
+  root.id = 1;
+  root.role = ax::mojom::Role::kRootWebArea;
+  root.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+  root.child_ids = {2, 5, 7};
+
+  AXNodeData div1;
+  div1.id = 2;
+  div1.role = ax::mojom::Role::kGenericContainer;
+  div1.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+  div1.child_ids = {3};
+
+  AXNodeData text_hello;
+  text_hello.id = 3;
+  text_hello.role = ax::mojom::Role::kStaticText;
+  text_hello.SetName("hello");
+  text_hello.child_ids = {4};
+
+  AXNodeData inline_hello;
+  inline_hello.id = 4;
+  inline_hello.role = ax::mojom::Role::kInlineTextBox;
+  inline_hello.SetName("hello");
+
+  AXNodeData line_break;
+  line_break.id = 5;
+  line_break.role = ax::mojom::Role::kLineBreak;
+  line_break.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                              true);
+  line_break.SetName("\n");
+  line_break.child_ids = {6};
+
+  AXNodeData inline_newline;
+  inline_newline.id = 6;
+  inline_newline.role = ax::mojom::Role::kInlineTextBox;
+  inline_newline.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+  inline_newline.SetName("\n");
+
+  AXNodeData div2;
+  div2.id = 7;
+  div2.role = ax::mojom::Role::kGenericContainer;
+  div2.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+  div2.child_ids = {8};
+
+  AXNodeData text_world;
+  text_world.id = 8;
+  text_world.role = ax::mojom::Role::kStaticText;
+  text_world.SetName("world");
+  text_world.child_ids = {9};
+
+  AXNodeData inline_world;
+  inline_world.id = 9;
+  inline_world.role = ax::mojom::Role::kInlineTextBox;
+  inline_world.SetName("world");
+
+  AXTreeUpdate update;
+  update.root_id = root.id;
+  update.nodes = {root,           div1, text_hello, inline_hello, line_break,
+                  inline_newline, div2, text_world, inline_world};
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+  Init(update);
+
+  // CreateNextNonLineBreakPosition from LineBreak(5) → "world" text.
+  {
+    AXNode* br_node = GetRoot()->children()[1];
+    ASSERT_EQ(br_node->GetRole(), ax::mojom::Role::kLineBreak);
+
+    AXNodePosition::AXPositionInstance pos = CreateTextPosition(
+        *br_node, /*text_offset=*/0, ax::mojom::TextAffinity::kDownstream);
+    AXNodePosition::AXPositionInstance result =
+        pos->CreateNextNonLineBreakPosition();
+
+    ASSERT_FALSE(result->IsNullPosition());
+    EXPECT_FALSE(result->GetAnchor()->IsLineBreak());
+    // Should land on the "world" inline text box.
+    EXPECT_EQ(result->GetAnchor()->GetRole(), ax::mojom::Role::kInlineTextBox);
+    EXPECT_EQ(result->GetAnchor()->GetStringAttribute(
+                  ax::mojom::StringAttribute::kName),
+              "world");
+  }
+
+  // CreateNextNonLineBreakPosition from StaticText(3) → stays on same leaf
+  // (already non-linebreak, returns self).
+  {
+    AXNode* hello_node = GetRoot()->children()[0]->children()[0];
+    ASSERT_EQ(hello_node->GetRole(), ax::mojom::Role::kStaticText);
+
+    AXNodePosition::AXPositionInstance pos = CreateTextPosition(
+        *hello_node, /*text_offset=*/0, ax::mojom::TextAffinity::kDownstream);
+    AXNodePosition::AXPositionInstance result =
+        pos->CreateNextNonLineBreakPosition();
+
+    ASSERT_FALSE(result->IsNullPosition());
+    // The position is cloned and returned as-is since the anchor is not a line
+    // break.
+    EXPECT_EQ(result->GetAnchor()->id(), hello_node->id());
+  }
+
+  // CreatePreviousNonLineBreakPosition from LineBreak(5) → "hello" text.
+  {
+    AXNode* br_node = GetRoot()->children()[1];
+    AXNodePosition::AXPositionInstance pos = CreateTextPosition(
+        *br_node, /*text_offset=*/0, ax::mojom::TextAffinity::kDownstream);
+    AXNodePosition::AXPositionInstance result =
+        pos->CreatePreviousNonLineBreakPosition();
+
+    ASSERT_FALSE(result->IsNullPosition());
+    EXPECT_FALSE(result->GetAnchor()->IsLineBreak());
+    EXPECT_EQ(result->GetAnchor()->GetRole(), ax::mojom::Role::kInlineTextBox);
+    EXPECT_EQ(result->GetAnchor()->GetStringAttribute(
+                  ax::mojom::StringAttribute::kName),
+              "hello");
+  }
+
+  // Test with multiple consecutive <br> elements.
+  // Tree:
+  // RootWebArea(1) [kIsLineBreaking]
+  // ├── StaticText(2) "A"
+  // │   └── InlineTextBox(3) "A"
+  // ├── LineBreak(4) [kIsLineBreaking]
+  // │   └── InlineTextBox(5) "\n" [kIsLineBreaking]
+  // ├── LineBreak(6) [kIsLineBreaking]
+  // │   └── InlineTextBox(7) "\n" [kIsLineBreaking]
+  // ├── LineBreak(8) [kIsLineBreaking]
+  // │   └── InlineTextBox(9) "\n" [kIsLineBreaking]
+  // └── StaticText(10) "B"
+  //     └── InlineTextBox(11) "B"
+  {
+    AXNodeData root2;
+    root2.id = 1;
+    root2.role = ax::mojom::Role::kRootWebArea;
+    root2.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                           true);
+    root2.child_ids = {2, 4, 6, 8, 10};
+
+    AXNodeData st_a;
+    st_a.id = 2;
+    st_a.role = ax::mojom::Role::kStaticText;
+    st_a.SetName("A");
+    st_a.child_ids = {3};
+
+    AXNodeData itb_a;
+    itb_a.id = 3;
+    itb_a.role = ax::mojom::Role::kInlineTextBox;
+    itb_a.SetName("A");
+
+    AXNodeData br1;
+    br1.id = 4;
+    br1.role = ax::mojom::Role::kLineBreak;
+    br1.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+    br1.SetName("\n");
+    br1.child_ids = {5};
+
+    AXNodeData itb_br1;
+    itb_br1.id = 5;
+    itb_br1.role = ax::mojom::Role::kInlineTextBox;
+    itb_br1.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+    itb_br1.SetName("\n");
+
+    AXNodeData br2;
+    br2.id = 6;
+    br2.role = ax::mojom::Role::kLineBreak;
+    br2.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+    br2.SetName("\n");
+    br2.child_ids = {7};
+
+    AXNodeData itb_br2;
+    itb_br2.id = 7;
+    itb_br2.role = ax::mojom::Role::kInlineTextBox;
+    itb_br2.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+    itb_br2.SetName("\n");
+
+    AXNodeData br3;
+    br3.id = 8;
+    br3.role = ax::mojom::Role::kLineBreak;
+    br3.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+    br3.SetName("\n");
+    br3.child_ids = {9};
+
+    AXNodeData itb_br3;
+    itb_br3.id = 9;
+    itb_br3.role = ax::mojom::Role::kInlineTextBox;
+    itb_br3.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+    itb_br3.SetName("\n");
+
+    AXNodeData st_b;
+    st_b.id = 10;
+    st_b.role = ax::mojom::Role::kStaticText;
+    st_b.SetName("B");
+    st_b.child_ids = {11};
+
+    AXNodeData itb_b;
+    itb_b.id = 11;
+    itb_b.role = ax::mojom::Role::kInlineTextBox;
+    itb_b.SetName("B");
+
+    AXTreeUpdate update2;
+    update2.root_id = root2.id;
+    update2.nodes = {root2,   st_a, itb_a,   br1,  itb_br1, br2,
+                     itb_br2, br3,  itb_br3, st_b, itb_b};
+    update2.has_tree_data = true;
+    update2.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+    Init(update2);
+
+    // CreateNextNonLineBreakPosition from br1(4) skips ALL three <br>s → "B".
+    AXNode* br1_node = GetRoot()->children()[1];
+    ASSERT_EQ(br1_node->GetRole(), ax::mojom::Role::kLineBreak);
+
+    AXNodePosition::AXPositionInstance pos = CreateTextPosition(
+        *br1_node, /*text_offset=*/0, ax::mojom::TextAffinity::kDownstream);
+    AXNodePosition::AXPositionInstance result =
+        pos->CreateNextNonLineBreakPosition();
+
+    ASSERT_FALSE(result->IsNullPosition());
+    EXPECT_FALSE(result->GetAnchor()->IsLineBreak());
+    EXPECT_EQ(result->GetAnchor()->GetStringAttribute(
+                  ax::mojom::StringAttribute::kName),
+              "B");
+  }
 }
 
 }  // namespace ui

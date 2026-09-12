@@ -25,6 +25,7 @@
 #include "third_party/blink/renderer/core/layout/layout_view.h"
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_resource_container.h"
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_root.h"
+#include "third_party/blink/renderer/core/layout/svg/svg_layout_info.h"
 #include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
 #include "third_party/blink/renderer/core/layout/svg/svg_resources.h"
 #include "third_party/blink/renderer/core/layout/svg/transform_helper.h"
@@ -34,10 +35,7 @@
 
 namespace blink {
 
-LayoutSVGBlock::LayoutSVGBlock(ContainerNode* node)
-    : LayoutBlockFlow(node),
-      needs_transform_update_(true),
-      transform_uses_reference_box_(false) {
+LayoutSVGBlock::LayoutSVGBlock(ContainerNode* node) : LayoutBlockFlow(node) {
   DCHECK(IsA<SVGElement>(node));
 }
 
@@ -46,10 +44,10 @@ SVGElement* LayoutSVGBlock::GetElement() const {
   return To<SVGElement>(LayoutObject::GetNode());
 }
 
-void LayoutSVGBlock::WillBeDestroyed() {
+void LayoutSVGBlock::WillBeDestroyed(const ComputedStyle* style) {
   NOT_DESTROYED();
-  SVGResources::ClearEffects(*this);
-  LayoutBlockFlow::WillBeDestroyed();
+  SVGResources::ClearEffects(*this, style);
+  LayoutBlockFlow::WillBeDestroyed(style);
 }
 
 void LayoutSVGBlock::InsertedIntoTree() {
@@ -70,60 +68,75 @@ void LayoutSVGBlock::WillBeRemovedFromTree() {
   LayoutBlockFlow::WillBeRemovedFromTree();
 }
 
-void LayoutSVGBlock::UpdateFromStyle() {
-  NOT_DESTROYED();
-  LayoutBlockFlow::UpdateFromStyle();
-  SetFloating(false);
-}
-
-bool LayoutSVGBlock::CheckForImplicitTransformChange(bool bbox_changed) const {
+bool LayoutSVGBlock::CheckForImplicitTransformChange(
+    const SVGLayoutInfo& layout_info,
+    bool bbox_changed) const {
   NOT_DESTROYED();
   // If the transform is relative to the reference box, check relevant
   // conditions to see if we need to recompute the transform.
   switch (StyleRef().TransformBox()) {
     case ETransformBox::kViewBox:
-      return SVGLayoutSupport::LayoutSizeOfNearestViewportChanged(this);
+      return layout_info.viewport_changed;
     case ETransformBox::kFillBox:
+    case ETransformBox::kContentBox:
+    case ETransformBox::kStrokeBox:
+    case ETransformBox::kBorderBox:
       return bbox_changed;
   }
   NOTREACHED();
-  return false;
 }
 
-bool LayoutSVGBlock::UpdateTransformAfterLayout(bool bounds_changed) {
+void LayoutSVGBlock::UpdateTransformBeforeLayout() {
+  if (!needs_transform_update_) {
+    return;
+  }
+  local_transform_ = TransformHelper::ComputeTransformIncludingMotion(
+      *GetElement(), gfx::RectF());
+}
+
+bool LayoutSVGBlock::UpdateTransformAfterLayout(
+    const SVGLayoutInfo& layout_info,
+    bool bounds_changed) {
   NOT_DESTROYED();
   // If our transform depends on the reference box, we need to check if it needs
   // to be updated.
   if (!needs_transform_update_ && transform_uses_reference_box_) {
-    needs_transform_update_ = CheckForImplicitTransformChange(bounds_changed);
+    needs_transform_update_ =
+        CheckForImplicitTransformChange(layout_info, bounds_changed);
     if (needs_transform_update_)
       SetNeedsPaintPropertyUpdate();
   }
   if (!needs_transform_update_)
     return false;
-  local_transform_ =
-      GetElement()->CalculateTransform(SVGElement::kIncludeMotionTransform);
+  const gfx::RectF reference_box = TransformHelper::ComputeReferenceBox(*this);
+  local_transform_ = TransformHelper::ComputeTransformIncludingMotion(
+      *GetElement(), reference_box);
   needs_transform_update_ = false;
   return true;
 }
 
-void LayoutSVGBlock::StyleDidChange(StyleDifference diff,
-                                    const ComputedStyle* old_style) {
+void LayoutSVGBlock::StyleDidChange(
+    StyleDifference diff,
+    const ComputedStyle* old_style,
+    const ComputedStyle& new_style,
+    const StyleChangeContext& style_change_context) {
   NOT_DESTROYED();
-  LayoutBlock::StyleDidChange(diff, old_style);
+  LayoutBlockFlow::StyleDidChange(diff, old_style, new_style,
+                                  style_change_context);
 
   // |HasTransformRelatedProperty| is used for compositing so ensure it was
   // correctly set by the call to |StyleDidChange|.
   DCHECK_EQ(HasTransformRelatedProperty(),
-            StyleRef().HasTransformRelatedPropertyForSVG());
+            new_style.HasTransformRelatedPropertyForSVG());
 
+  TransformHelper::UpdateOffsetPath(*GetElement(), old_style);
   transform_uses_reference_box_ =
-      TransformHelper::DependsOnReferenceBox(StyleRef());
+      TransformHelper::DependsOnReferenceBox(new_style);
 
   if (diff.NeedsFullLayout()) {
-    SetNeedsBoundariesUpdate();
-    if (diff.TransformChanged())
+    if (diff.transform_changed) {
       SetNeedsTransformUpdate();
+    }
   }
 
   SVGResources::UpdateEffects(*this, diff, old_style);
@@ -131,16 +144,18 @@ void LayoutSVGBlock::StyleDidChange(StyleDifference diff,
   if (!Parent())
     return;
 
-  if (diff.BlendModeChanged()) {
+  if (diff.blend_mode_changed) {
     DCHECK(IsBlendingAllowed());
     Parent()->DescendantIsolationRequirementsChanged(
-        StyleRef().HasBlendMode() ? kDescendantIsolationRequired
-                                  : kDescendantIsolationNeedsUpdate);
+        new_style.HasBlendMode() ? kDescendantIsolationRequired
+                                 : kDescendantIsolationNeedsUpdate);
   }
 
-  if (StyleRef().HasCurrentTransformRelatedAnimation() &&
-      !old_style->HasCurrentTransformRelatedAnimation()) {
-    Parent()->SetSVGDescendantMayHaveTransformRelatedAnimation();
+  if ((new_style.HasCurrentTransformRelatedAnimation() &&
+       !old_style->HasCurrentTransformRelatedAnimation()) ||
+      (new_style.HasNonIdentityTransformOperation() &&
+       !old_style->HasNonIdentityTransformOperation())) {
+    Parent()->SetSVGDescendantMayHaveTransformRelatedOperations();
   }
 
   if (diff.HasDifference())
@@ -151,6 +166,9 @@ void LayoutSVGBlock::MapLocalToAncestor(const LayoutBoxModelObject* ancestor,
                                         TransformState& transform_state,
                                         MapCoordinatesFlags flags) const {
   NOT_DESTROYED();
+  if (this == ancestor) {
+    return;
+  }
   // Convert from local HTML coordinates to local SVG coordinates.
   transform_state.Move(PhysicalLocation());
   // Apply other mappings on local SVG coordinates.
@@ -161,43 +179,30 @@ void LayoutSVGBlock::MapAncestorToLocal(const LayoutBoxModelObject* ancestor,
                                         TransformState& transform_state,
                                         MapCoordinatesFlags flags) const {
   NOT_DESTROYED();
-  if (this == ancestor)
+  if (this == ancestor) {
     return;
-
+  }
   // Map to local SVG coordinates.
   SVGLayoutSupport::MapAncestorToLocal(*this, ancestor, transform_state, flags);
   // Convert from local SVG coordinates to local HTML coordinates.
   transform_state.Move(PhysicalLocation());
 }
 
-PhysicalRect LayoutSVGBlock::VisualRectInDocument(VisualRectFlags flags) const {
-  NOT_DESTROYED();
-  return SVGLayoutSupport::VisualRectInAncestorSpace(*this, *View(), flags);
-}
-
 bool LayoutSVGBlock::MapToVisualRectInAncestorSpaceInternal(
     const LayoutBoxModelObject* ancestor,
     TransformState& transform_state,
-    VisualRectFlags) const {
+    VisualRectFlags visual_rect_flags) const {
   NOT_DESTROYED();
   transform_state.Flatten();
-  PhysicalRect rect(LayoutRect(transform_state.LastPlanarQuad().BoundingBox()));
+  PhysicalRect rect = PhysicalRect::FastAndLossyFromRectF(
+      transform_state.LastPlanarQuad().BoundingBox());
   // Convert from local HTML coordinates to local SVG coordinates.
   rect.Move(PhysicalLocation());
   // Apply other mappings on local SVG coordinates.
   bool retval = SVGLayoutSupport::MapToVisualRectInAncestorSpace(
-      *this, ancestor, gfx::RectF(rect), rect);
+      *this, ancestor, gfx::RectF(rect), rect, visual_rect_flags);
   transform_state.SetQuad(gfx::QuadF(gfx::RectF(rect)));
   return retval;
-}
-
-bool LayoutSVGBlock::NodeAtPoint(HitTestResult&,
-                                 const HitTestLocation&,
-                                 const PhysicalOffset&,
-                                 HitTestPhase) {
-  NOT_DESTROYED();
-  NOTREACHED();
-  return false;
 }
 
 }  // namespace blink

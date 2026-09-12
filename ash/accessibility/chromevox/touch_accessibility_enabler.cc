@@ -78,9 +78,10 @@ void TouchAccessibilityEnabler::HandleTouchEvent(const ui::TouchEvent& event) {
   const gfx::PointF& location = event.location_f();
   const int touch_id = event.pointer_details().id;
 
-  if (type == ui::ET_TOUCH_PRESSED) {
+  if (type == ui::EventType::kTouchPressed) {
     touch_locations_.insert(std::pair<int, gfx::PointF>(touch_id, location));
-  } else if (type == ui::ET_TOUCH_RELEASED || type == ui::ET_TOUCH_CANCELLED) {
+  } else if (type == ui::EventType::kTouchReleased ||
+             type == ui::EventType::kTouchCancelled) {
     auto iter = touch_locations_.find(touch_id);
 
     // Can happen if this object is constructed while fingers were down.
@@ -88,7 +89,7 @@ void TouchAccessibilityEnabler::HandleTouchEvent(const ui::TouchEvent& event) {
       return;
 
     touch_locations_.erase(touch_id);
-  } else if (type == ui::ET_TOUCH_MOVED) {
+  } else if (type == ui::EventType::kTouchMoved) {
     auto iter = touch_locations_.find(touch_id);
 
     // Can happen if this object is constructed while fingers were down.
@@ -103,7 +104,6 @@ void TouchAccessibilityEnabler::HandleTouchEvent(const ui::TouchEvent& event) {
     }
   } else {
     NOTREACHED() << "Unexpected event type received: " << event.GetName();
-    return;
   }
 
   if (touch_locations_.size() == 0) {
@@ -118,10 +118,11 @@ void TouchAccessibilityEnabler::HandleTouchEvent(const ui::TouchEvent& event) {
     return;
   }
 
-  if (state_ == NO_FINGERS_DOWN && event.type() == ui::ET_TOUCH_PRESSED) {
+  if (state_ == NO_FINGERS_DOWN &&
+      event.type() == ui::EventType::kTouchPressed) {
     state_ = ONE_FINGER_DOWN;
   } else if (state_ == ONE_FINGER_DOWN &&
-             event.type() == ui::ET_TOUCH_PRESSED) {
+             event.type() == ui::EventType::kTouchPressed) {
     state_ = TWO_FINGERS_DOWN;
     two_finger_start_time_ = Now();
     StartTimer();
@@ -144,8 +145,9 @@ base::TimeTicks TouchAccessibilityEnabler::Now() {
 }
 
 void TouchAccessibilityEnabler::StartTimer() {
-  if (timer_.IsRunning())
+  if (timer_.IsRunning()) {
     return;
+  }
 
   timer_.Start(FROM_HERE, kTimerDelay, this,
                &TouchAccessibilityEnabler::OnTimer);

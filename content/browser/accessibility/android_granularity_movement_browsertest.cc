@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "content/public/test/browser_test.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
+#include "content/public/test/scoped_accessibility_mode_override.h"
 #include "content/shell/browser/shell.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -31,16 +33,21 @@ const int GRANULARITY_LINE =
     ANDROID_ACCESSIBILITY_NODE_INFO_MOVEMENT_GRANULARITY_LINE;
 
 class AndroidGranularityMovementBrowserTest : public ContentBrowserTest {
- public:
-  AndroidGranularityMovementBrowserTest() {}
-  ~AndroidGranularityMovementBrowserTest() override {}
+ protected:
+  AndroidGranularityMovementBrowserTest() = default;
+  ~AndroidGranularityMovementBrowserTest() override = default;
 
-  BrowserAccessibility* LoadUrlAndGetAccessibilityRoot(const GURL& url) {
+  void SetUpOnMainThread() override {
+    accessibility_mode_.emplace(ui::kAXModeComplete);
+  }
+
+  void TearDownOnMainThread() override { accessibility_mode_.reset(); }
+
+  ui::BrowserAccessibility* LoadUrlAndGetAccessibilityRoot(const GURL& url) {
     EXPECT_TRUE(NavigateToURL(shell(), GURL(url::kAboutBlankURL)));
 
     // Load the page.
     AccessibilityNotificationWaiter waiter(shell()->web_contents(),
-                                           ui::kAXModeComplete,
                                            ax::mojom::Event::kLoadComplete);
     EXPECT_TRUE(NavigateToURL(shell(), url));
     EXPECT_TRUE(waiter.WaitForNotification());
@@ -67,10 +74,9 @@ class AndroidGranularityMovementBrowserTest : public ContentBrowserTest {
   // and fails (by logging an error and returning the empty string) if
   // the result when traversing backwards is not the same
   // (but in reverse order).
-  std::u16string TraverseNodeAtGranularity(BrowserAccessibility* node,
+  std::u16string TraverseNodeAtGranularity(ui::BrowserAccessibility* node,
                                            int granularity) {
     AccessibilityNotificationWaiter waiter(shell()->web_contents(),
-                                           ui::kAXModeComplete,
                                            ax::mojom::Event::kTreeChanged);
     node->manager()->LoadInlineTextBoxes(*node);
     EXPECT_TRUE(waiter.WaitForNotification());
@@ -89,11 +95,13 @@ class AndroidGranularityMovementBrowserTest : public ContentBrowserTest {
       int len = end_index - start_index;
       std::u16string selection = text.substr(start_index, len);
       if (base::EndsWith(selection, u"\n",
-                         base::CompareCase::INSENSITIVE_ASCII))
+                         base::CompareCase::INSENSITIVE_ASCII)) {
         selection.erase(selection.size() - 1);
+      }
       if (!selection.empty()) {
-        if (!concatenated.empty())
+        if (!concatenated.empty()) {
           concatenated += u", ";
+        }
         concatenated += u"'" + selection + u"'";
       }
 
@@ -113,10 +121,12 @@ class AndroidGranularityMovementBrowserTest : public ContentBrowserTest {
       int len = end_index - start_index;
       std::u16string selection = text.substr(start_index, len);
       if (base::EndsWith(selection, u"\n",
-                         base::CompareCase::INSENSITIVE_ASCII))
+                         base::CompareCase::INSENSITIVE_ASCII)) {
         selection = selection.substr(0, selection.size() - 1);
-      if (!reverse.empty())
+      }
+      if (!reverse.empty()) {
         reverse = u", " + reverse;
+      }
       reverse = u"'" + selection + u"'" + reverse;
 
       // Prevent an endless loop.
@@ -137,6 +147,9 @@ class AndroidGranularityMovementBrowserTest : public ContentBrowserTest {
 
     return concatenated;
   }
+
+ private:
+  std::optional<ScopedAccessibilityModeOverride> accessibility_mode_;
 };
 
 IN_PROC_BROWSER_TEST_F(AndroidGranularityMovementBrowserTest,
@@ -149,23 +162,23 @@ IN_PROC_BROWSER_TEST_F(AndroidGranularityMovementBrowserTest,
       "<button aria-label='Seven, eight, nine!'>Four, five, six!</button>"
       "</p>"
       "</body></html>");
-  BrowserAccessibility* root = LoadUrlAndGetAccessibilityRoot(url);
+  ui::BrowserAccessibility* root = LoadUrlAndGetAccessibilityRoot(url);
   ASSERT_EQ(2U, root->PlatformChildCount());
-  BrowserAccessibility* para = root->PlatformGetChild(0);
+  ui::BrowserAccessibility* para = root->PlatformGetChild(0);
   ASSERT_EQ(0U, para->PlatformChildCount());
-  BrowserAccessibility* button_container = root->PlatformGetChild(1);
+  ui::BrowserAccessibility* button_container = root->PlatformGetChild(1);
   ASSERT_EQ(1U, button_container->PlatformChildCount());
-  BrowserAccessibility* button = button_container->PlatformGetChild(0);
+  ui::BrowserAccessibility* button = button_container->PlatformGetChild(0);
   ASSERT_EQ(0U, button->PlatformChildCount());
 
   EXPECT_EQ(
       u"'O', 'n', 'e', ',', ' ', 't', 'w', 'o', "
       u"',', ' ', 't', 'h', 'r', 'e', 'e', '!'",
       TraverseNodeAtGranularity(para, GRANULARITY_CHARACTER));
-  EXPECT_EQ(
-      u"'S', 'e', 'v', 'e', 'n', ',', ' ', 'e', 'i', 'g', "
-      u"'h', 't', ',', ' ', 'n', 'i', 'n', 'e', '!'",
-      TraverseNodeAtGranularity(button, GRANULARITY_CHARACTER));
+
+  // The aria-label overrides the text content, so there's no rendered text to
+  // traverse.
+  EXPECT_EQ(u"", TraverseNodeAtGranularity(button, GRANULARITY_CHARACTER));
 }
 
 IN_PROC_BROWSER_TEST_F(AndroidGranularityMovementBrowserTest, NavigateByWords) {
@@ -174,21 +187,21 @@ IN_PROC_BROWSER_TEST_F(AndroidGranularityMovementBrowserTest, NavigateByWords) {
       "<body>"
       "<p>One, two, three!</p>"
       "<p>"
-      "<button aria-label='Seven, eight, nine!'>Four, five, six!</button>"
+      "<button>Four, five, six!</button>"
       "</p>"
       "</body></html>");
-  BrowserAccessibility* root = LoadUrlAndGetAccessibilityRoot(url);
+  ui::BrowserAccessibility* root = LoadUrlAndGetAccessibilityRoot(url);
   ASSERT_EQ(2U, root->PlatformChildCount());
-  BrowserAccessibility* para = root->PlatformGetChild(0);
+  ui::BrowserAccessibility* para = root->PlatformGetChild(0);
   ASSERT_EQ(0U, para->PlatformChildCount());
-  BrowserAccessibility* button_container = root->PlatformGetChild(1);
+  ui::BrowserAccessibility* button_container = root->PlatformGetChild(1);
   ASSERT_EQ(1U, button_container->PlatformChildCount());
-  BrowserAccessibility* button = button_container->PlatformGetChild(0);
+  ui::BrowserAccessibility* button = button_container->PlatformGetChild(0);
   ASSERT_EQ(0U, button->PlatformChildCount());
 
   EXPECT_EQ(u"'One', ',', 'two', ',', 'three', '!'",
             TraverseNodeAtGranularity(para, GRANULARITY_WORD));
-  EXPECT_EQ(u"'Seven', 'eight', 'nine'",
+  EXPECT_EQ(u"'Four', ',', 'five', ',', 'six', '!'",
             TraverseNodeAtGranularity(button, GRANULARITY_WORD));
 }
 
@@ -198,9 +211,9 @@ IN_PROC_BROWSER_TEST_F(AndroidGranularityMovementBrowserTest, NavigateByLine) {
       "<body>"
       "<pre>One,%0dtwo,%0dthree!</pre>"
       "</body>");
-  BrowserAccessibility* root = LoadUrlAndGetAccessibilityRoot(url);
+  ui::BrowserAccessibility* root = LoadUrlAndGetAccessibilityRoot(url);
   ASSERT_EQ(1U, root->PlatformChildCount());
-  BrowserAccessibility* pre = root->PlatformGetChild(0);
+  ui::BrowserAccessibility* pre = root->PlatformGetChild(0);
   ASSERT_EQ(0U, pre->PlatformChildCount());
 
   EXPECT_EQ(u"'One,', 'two,', 'three!'",

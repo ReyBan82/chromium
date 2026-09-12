@@ -12,8 +12,10 @@ import 'chrome://resources/polymer/v3_0/paper-tooltip/paper-tooltip.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getTemplate} from './emoji_button.html.js';
-import {createCustomEvent, EMOJI_IMG_BUTTON_CLICK, EMOJI_TEXT_BUTTON_CLICK, EMOJI_VARIANTS_SHOWN, EmojiImgButtonClickEvent, EmojiTextButtonClickEvent, EmojiVariantsShownEvent} from './events.js';
-import {CategoryEnum, Emoji} from './types.js';
+import type {EMOJI_IMG_BUTTON_CLICK, EMOJI_VARIANTS_SHOWN, EmojiImgButtonClickEvent, EmojiTextButtonClickEvent, EmojiVariantsShownEvent} from './events.js';
+import {createCustomEvent, EMOJI_TEXT_BUTTON_CLICK} from './events.js';
+import type {Emoji, Gender, Tone} from './types.js';
+import {CategoryEnum} from './types.js';
 
 export class EmojiButton extends PolymerElement {
   static get is() {
@@ -28,31 +30,44 @@ export class EmojiButton extends PolymerElement {
     return {
       emoji: {type: String, readonly: true},
       variant: {type: Boolean, value: false, readonly: true},
+      tone: {type: Number, readonly: true},
+      gender: {type: Number, readonly: true},
+      groupedTone: {type: Boolean, readonly: true},
+      groupedGender: {type: Boolean, readonly: true},
       disabled: {type: Boolean, value: false, readonly: true},
       base: {type: String},
       allVariants: {type: Array, readonly: true},
       tooltip: {type: String, readonly: true},
     };
   }
-  emoji: string;
-  private variant: boolean;
-  private disabled: boolean;
-  private base?: string;
-  private allVariants?: Emoji[];
-  private tooltip?: string;
+  declare emoji: string;
+  declare private variant: boolean;
+  declare private tone?: Tone;
+  declare private gender?: Gender;
+  declare private groupedTone;
+  declare private groupedGender;
+  declare private disabled: boolean;
+  declare private base?: string;
+  declare private allVariants?: Emoji[];
+  declare private tooltip?: string;
 
 
   private onClick(): void {
     if (this.disabled) {
       return;
     }
+
     this.dispatchEvent(createCustomEvent(EMOJI_TEXT_BUTTON_CLICK, {
-      text: this.emoji,
-      isVariant: this.variant,
-      baseEmoji: this.base,
-      allVariants: this.allVariants ? this.allVariants : [],
       name: this.tooltip,
       category: CategoryEnum.EMOJI,
+      text: this.emoji,
+      baseEmoji: this.base,
+      isVariant: this.variant,
+      tone: this.tone,
+      gender: this.gender,
+      groupedTone: this.groupedTone,
+      groupedGender: this.groupedGender,
+      alternates: this.allVariants ?? [],
     }));
   }
 

@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "base/byte_size.h"
 #import "base/ios/ios_util.h"
 #include "base/memory/ref_counted.h"
 #include "base/test/task_environment.h"
@@ -19,11 +20,8 @@
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "testing/gtest_mac.h"
 #include "testing/platform_test.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace {
 
@@ -172,7 +170,7 @@ TEST_F(IOSImageDataFetcherWrapperTest, TestGoodWebP) {
       std::string(kWEBPHeaderResponse, std::size(kWEBPHeaderResponse)));
   head->mime_type = "image/webp";
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = content.size();
+  status.decoded_body_length = base::ByteSize(content.size());
   factory_.AddResponse(GURL(kTestUrl), std::move(head), content, status);
   environment_.RunUntilIdle();
   EXPECT_NE(nil, result_);
@@ -188,7 +186,7 @@ TEST_F(IOSImageDataFetcherWrapperTest, TestGoodWebPNoHeader) {
   NSData* webPImageConverted =
       [NSData dataWithBytes:reinterpret_cast<const char*>(kWEBPImage)
                      length:sizeof(kWEBPImage)];
-  EXPECT_TRUE([result_data_ isEqualToData:webPImageConverted]);
+  EXPECT_NSEQ(result_data_, webPImageConverted);
   EXPECT_TRUE(called_);
 }
 
@@ -202,7 +200,7 @@ TEST_F(IOSImageDataFetcherWrapperTest, TestBadWebP) {
       std::string(kWEBPHeaderResponse, std::size(kWEBPHeaderResponse)));
   head->mime_type = "image/webp";
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = content.size();
+  status.decoded_body_length = base::ByteSize(content.size());
   factory_.AddResponse(GURL(kTestUrl), std::move(head), content, status);
   environment_.RunUntilIdle();
   EXPECT_EQ(nil, result_);
@@ -227,7 +225,7 @@ TEST_F(IOSImageDataFetcherWrapperTest, DeleteDuringWebPDecoding) {
   NSData* webPImageConverted =
       [NSData dataWithBytes:reinterpret_cast<const char*>(kWEBPImage)
                      length:sizeof(kWEBPImage)];
-  EXPECT_TRUE([result_data_ isEqualToData:webPImageConverted]);
+  EXPECT_NSEQ(result_data_, webPImageConverted);
   EXPECT_TRUE(called_);
 }
 

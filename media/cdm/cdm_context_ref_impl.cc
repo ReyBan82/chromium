@@ -13,7 +13,7 @@ namespace media {
 
 CdmContextRefImpl::CdmContextRefImpl(scoped_refptr<ContentDecryptionModule> cdm)
     : cdm_(std::move(cdm)) {
-  DCHECK(cdm_);
+  CHECK(cdm_);
 }
 
 CdmContextRefImpl::~CdmContextRefImpl() {

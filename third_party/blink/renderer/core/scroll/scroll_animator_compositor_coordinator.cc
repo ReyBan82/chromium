@@ -8,6 +8,7 @@
 
 #include "cc/animation/animation_host.h"
 #include "cc/animation/animation_timeline.h"
+#include "cc/animation/keyframe_effect.h"
 #include "cc/animation/scroll_offset_animation_curve.h"
 #include "cc/layers/picture_layer.h"
 #include "third_party/blink/public/platform/platform.h"
@@ -39,6 +40,9 @@ void ScrollAnimatorCompositorCoordinator::Dispose() {
 
 void ScrollAnimatorCompositorCoordinator::DetachElement() {
   DCHECK(!element_detached_);
+  if (RuntimeEnabledFeatures::ProgrammaticScrollPromiseEnabled()) {
+    CancelAnimation();
+  }
   element_detached_ = true;
   ReattachCompositorAnimationIfNeeded(
       GetScrollableArea()->GetCompositorAnimationTimeline());
@@ -69,7 +73,6 @@ bool ScrollAnimatorCompositorCoordinator::HasAnimationThatRequiresService()
       return true;
   }
   NOTREACHED();
-  return false;
 }
 
 bool ScrollAnimatorCompositorCoordinator::AddAnimation(
@@ -87,6 +90,15 @@ bool ScrollAnimatorCompositorCoordinator::AddAnimation(
 void ScrollAnimatorCompositorCoordinator::RemoveAnimation() {
   if (compositor_animation_id_) {
     compositor_animation_->RemoveKeyframeModel(compositor_animation_id_);
+    // When a scroll offset animation is interrupted the new scroll position on
+    // the pending tree will clobber any impl-side scrolling occurring on the
+    // active tree. To do so, avoid scrolling the pending tree along with it
+    // instead of trying to undo that scrolling later.
+    if (compositor_animation_->CcAnimation()
+            ->keyframe_effect()
+            ->scroll_offset_animation_was_interrupted()) {
+      GetScrollableArea()->DropCompositorScrollDeltaNextCommit();
+    }
     compositor_animation_id_ = 0;
     compositor_animation_group_id_ = 0;
   }
@@ -171,7 +183,6 @@ void ScrollAnimatorCompositorCoordinator::CompositorAnimationFinished(
     case RunState::kPostAnimationCleanup:
     case RunState::kRunningOnMainThread:
       NOTREACHED();
-      break;
     case RunState::kWaitingToSendToCompositor:
     case RunState::kWaitingToCancelOnCompositorButNewScroll:
       break;
@@ -292,9 +303,11 @@ void ScrollAnimatorCompositorCoordinator::UpdateCompositorAnimations() {
 
 void ScrollAnimatorCompositorCoordinator::ScrollOffsetChanged(
     const ScrollOffset& offset,
-    mojom::blink::ScrollType scroll_type) {
+    mojom::blink::ScrollType scroll_type,
+    cc::ScrollSourceType source_type) {
   ScrollOffset clamped_offset = GetScrollableArea()->ClampScrollOffset(offset);
-  GetScrollableArea()->ScrollOffsetChanged(clamped_offset, scroll_type);
+  GetScrollableArea()->ScrollOffsetChanged(clamped_offset, scroll_type,
+                                           source_type);
 }
 
 void ScrollAnimatorCompositorCoordinator::AdjustImplOnlyScrollOffsetAnimation(
@@ -345,7 +358,6 @@ String ScrollAnimatorCompositorCoordinator::RunStateAsText() const {
       return String("RunningOnCompositorButNeedsAdjustment");
   }
   NOTREACHED();
-  return String();
 }
 
 }  // namespace blink

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {findDocumentIdWithHostname, findFrameIdWithHostname, findFrameWithHostname, getFramesInTab, getSingleTab} from '/_test_resources/test_util/tabs_util.js';
+
 function injectedFunction() {
   return location.href;
 }
@@ -14,43 +16,10 @@ function getAccessError(url) {
       'to access this host.';
 }
 
-// Returns the single tab matching the given `query`.
-async function getSingleTab(query) {
-  const tabs = await chrome.tabs.query(query);
-  chrome.test.assertEq(1, tabs.length);
-  return tabs[0];
-}
-
-// Returns all frames in the given tab.
-async function getFramesInTab(tabId) {
-  const frames = await chrome.webNavigation.getAllFrames({tabId: tabId});
-  chrome.test.assertTrue(frames.length > 0);
-  return frames;
-}
-
-// Returns the frame with the given `hostname`.
-function findFrameWithHostname(frames, hostname) {
-  const frame = frames.find(frame => {
-    return (new URL(frame.url)).hostname == hostname;
-  });
-  chrome.test.assertTrue(!!frame, 'No frame with hostname: ' + hostname);
-  return frame;
-}
-
-// Returns the ID of the frame with the given `hostname`.
-function findFrameIdWithHostname(frames, hostname) {
-  return findFrameWithHostname(frames, hostname).frameId;
-}
-
-// Returns the ID of the document with the given `hostname`.
-function findDocumentIdWithHostname(frames, hostname) {
-  return findFrameWithHostname(frames, hostname).documentId;
-}
-
 chrome.test.runTests([
   async function allowedTopFrameAccess() {
     const query = {url: 'http://a.com/*'};
-    let tab = await getSingleTab(query);
+    const tab = await getSingleTab(query);
     const results = await chrome.scripting.executeScript({
       target: {
         tabId: tab.id,
@@ -76,7 +45,7 @@ chrome.test.runTests([
 
   async function disallowedTopFrameAccess() {
     const query = {url: 'http://d.com/*'};
-    let tab = await getSingleTab(query);
+    const tab = await getSingleTab(query);
     await chrome.test.assertPromiseRejects(
         chrome.scripting.executeScript({
           target: {
@@ -131,12 +100,12 @@ chrome.test.runTests([
     const tab = await getSingleTab(query);
     const frames = await getFramesInTab(tab.id);
     const frameIds = [
-        findFrameIdWithHostname(frames, 'a.com'),
-        findFrameIdWithHostname(frames, 'b.com'),
+      findFrameIdWithHostname(frames, 'a.com'),
+      findFrameIdWithHostname(frames, 'b.com'),
     ];
     const documentIds = [
-        findDocumentIdWithHostname(frames, 'a.com'),
-        findDocumentIdWithHostname(frames, 'b.com'),
+      findDocumentIdWithHostname(frames, 'a.com'),
+      findDocumentIdWithHostname(frames, 'b.com'),
     ];
 
     let results = await chrome.scripting.executeScript({
@@ -155,8 +124,7 @@ chrome.test.runTests([
     });
     chrome.test.assertEq(['a.com', 'b.com'], resultUrls.sort());
     chrome.test.assertEq(
-        frameIds,
-        results.map(result => result.frameId).sort());
+        frameIds, results.map(result => result.frameId).sort());
 
     // Now try the via documentId.
     results = await chrome.scripting.executeScript({
@@ -175,8 +143,7 @@ chrome.test.runTests([
     });
     chrome.test.assertEq(['a.com', 'b.com'], resultUrls.sort());
     chrome.test.assertEq(
-        documentIds.sort(),
-        results.map(result => result.documentId).sort());
+        documentIds.sort(), results.map(result => result.documentId).sort());
 
     chrome.test.succeed();
   },
@@ -224,15 +191,15 @@ chrome.test.runTests([
     const tab = await getSingleTab(query);
     const frames = await getFramesInTab(tab.id);
     const deniedFrame = frames.find((frame) => {
-      return (new URL(frame.url)).hostname == 'c.com';
+      return (new URL(frame.url)).hostname === 'c.com';
     });
     const frameIds = [
-        findFrameIdWithHostname(frames, 'b.com'),
-        findFrameIdWithHostname(frames, 'c.com'),
+      findFrameIdWithHostname(frames, 'b.com'),
+      findFrameIdWithHostname(frames, 'c.com'),
     ];
     const documentIds = [
-        findDocumentIdWithHostname(frames, 'b.com'),
-        findDocumentIdWithHostname(frames, 'c.com'),
+      findDocumentIdWithHostname(frames, 'b.com'),
+      findDocumentIdWithHostname(frames, 'c.com'),
     ];
 
     await chrome.test.assertPromiseRejects(
@@ -266,12 +233,12 @@ chrome.test.runTests([
     const nonExistentFrameId = 99999;
     const nonExistentDocumentId = '0123456789ABCDEF0123456789ABCDEF';
     const frameIds = [
-        findFrameIdWithHostname(frames, 'b.com'),
-        nonExistentFrameId,
+      findFrameIdWithHostname(frames, 'b.com'),
+      nonExistentFrameId,
     ];
     const documentIds = [
-        findDocumentIdWithHostname(frames, 'b.com'),
-        nonExistentDocumentId,
+      findDocumentIdWithHostname(frames, 'b.com'),
+      nonExistentDocumentId,
     ];
 
     await chrome.test.assertPromiseRejects(
@@ -305,10 +272,10 @@ chrome.test.runTests([
     const tab = await getSingleTab(query);
     const frames = await getFramesInTab(tab.id);
     const frameIds = [
-        findFrameIdWithHostname(frames, 'b.com'),
+      findFrameIdWithHostname(frames, 'b.com'),
     ];
     const documentIds = [
-        findDocumentIdWithHostname(frames, 'b.com'),
+      findDocumentIdWithHostname(frames, 'b.com'),
     ];
 
     await chrome.test.assertPromiseRejects(
@@ -344,10 +311,10 @@ chrome.test.runTests([
     const tab = await getSingleTab(query);
     const frames = await getFramesInTab(tab.id);
     const frameIds = [
-        findFrameIdWithHostname(frames, 'b.com'),
+      findFrameIdWithHostname(frames, 'b.com'),
     ];
     const documentIds = [
-        findDocumentIdWithHostname(frames, 'b.com'),
+      findDocumentIdWithHostname(frames, 'b.com'),
     ];
 
     await chrome.test.assertPromiseRejects(
@@ -355,7 +322,7 @@ chrome.test.runTests([
           target: {
             tabId: tab.id,
             documentIds: documentIds,
-            frameIds: frameIds
+            frameIds: frameIds,
           },
           func: injectedFunction,
         }),
@@ -371,19 +338,77 @@ chrome.test.runTests([
     const tab_d = await getSingleTab(query_d);
     const frames = await getFramesInTab(tab_d.id);
     const documentIds = [
-        findDocumentIdWithHostname(frames, 'b.com'),
+      findDocumentIdWithHostname(frames, 'b.com'),
     ];
 
     await chrome.test.assertPromiseRejects(
         chrome.scripting.executeScript({
           target: {
             tabId: tab_a.id,
-            documentIds: documentIds
+            documentIds: documentIds,
           },
           func: injectedFunction,
         }),
         `Error: No document with id ${documentIds[0]} in ` +
             `tab with id ${tab_a.id}`);
+    chrome.test.succeed();
+  },
+
+  async function injectIntoSandboxedSrcdoc() {
+    const tab = await getSingleTab({url: 'http://e.com/*'});
+    const results = await chrome.scripting.executeScript({
+      target: {
+        tabId: tab.id,
+        allFrames: true,
+      },
+      func: injectedFunction,
+    });
+    chrome.test.assertEq(2, results.length);
+
+    // Note: The 'e.com' result is guaranteed to be first, since it's the root
+    // frame.
+    const url1 = new URL(results[0].result);
+    chrome.test.assertEq('e.com', url1.hostname);
+
+    chrome.test.assertEq('about:srcdoc', results[1].result);
+    chrome.test.succeed();
+  },
+
+  async function injectIntoBlobUrl() {
+    const tab = await getSingleTab({url: 'http://f.com/*'});
+
+    // First run a no-op function in each frame. This allows us to get the
+    // frame IDs including the ID of the frame containing the blob URL (which
+    // isn't returned by `webNavigation.getAllFrames`) and also to test the
+    // `allFrames` property.
+    const frames = await chrome.scripting.executeScript({
+      target: {
+        tabId: tab.id,
+        allFrames: true,
+      },
+      func: () => undefined,
+    });
+
+    // Then, run a test function in each frame. This allows us to test the
+    // `frameIds` property, which runs through a slightly different code path.
+    // In this code path, access to each frame is checked on the browser side
+    // before sending a message to the renderer which can cause differences in
+    // behavior.
+    const results = await chrome.scripting.executeScript({
+      target: {
+        tabId: tab.id,
+        frameIds: frames.map((f) => f.frameId),
+      },
+      func: injectedFunction,
+    });
+    chrome.test.assertEq(2, results.length);
+
+    // Note: The 'f.com' result is guaranteed to be first, since it's the root
+    // frame.
+    const url1 = new URL(results[0].result);
+    chrome.test.assertEq('f.com', url1.hostname);
+
+    chrome.test.assertTrue(results[1].result.startsWith('blob:'));
     chrome.test.succeed();
   },
 

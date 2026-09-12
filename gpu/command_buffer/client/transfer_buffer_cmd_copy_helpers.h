@@ -5,7 +5,10 @@
 #ifndef GPU_COMMAND_BUFFER_CLIENT_TRANSFER_BUFFER_CMD_COPY_HELPERS_H_
 #define GPU_COMMAND_BUFFER_CLIENT_TRANSFER_BUFFER_CMD_COPY_HELPERS_H_
 
-#include "base/bits.h"
+#include <array>
+#include <bit>
+
+#include "base/compiler_specific.h"
 #include "base/numerics/safe_math.h"
 #include "gpu/command_buffer/client/transfer_buffer.h"
 
@@ -32,7 +35,7 @@ constexpr base::CheckedNumeric<uint32_t> ComputeCheckedCombinedCopySize(
   base::CheckedNumeric<uint32_t> checked_count(count);
   for (auto info : {std::make_pair(sizeof(Ts), alignof(Ts))...}) {
     size_t alignment = info.second;
-    DCHECK(base::bits::IsPowerOfTwo(alignment));
+    DCHECK(std::has_single_bit(alignment));
 
     checked_combined_size =
         (checked_combined_size + alignment - 1) & ~(alignment - 1);
@@ -64,7 +67,7 @@ auto CopyArraysToBuffer(uint32_t count,
   byte_offsets[0] = 0;
   base::CheckedNumeric<uint32_t> checked_byte_offset = copy_lengths[0];
   for (uint32_t i = 1; i < arr_count; ++i) {
-    DCHECK(base::bits::IsPowerOfTwo(alignments[i]));
+    DCHECK(std::has_single_bit(alignments[i]));
     checked_byte_offset =
         (checked_byte_offset + alignments[i] - 1) & ~(alignments[i] - 1);
     byte_offsets[i] = checked_byte_offset.ValueOrDie();
@@ -72,13 +75,13 @@ auto CopyArraysToBuffer(uint32_t count,
   }
 
   // Pointers to the copy sources
-  std::array<const int8_t*, arr_count> byte_pointers{
-      {([](bool b) { DCHECK(b); }(arrays),
-        reinterpret_cast<const int8_t*>(arrays + offset_count))...}};
+  std::array<const int8_t*, arr_count> byte_pointers{{(
+      [](bool b) { DCHECK(b); }(arrays),
+      reinterpret_cast<const int8_t*>(UNSAFE_TODO(arrays + offset_count)))...}};
 
   for (uint32_t i = 0; i < arr_count; ++i) {
-    memcpy(static_cast<int8_t*>(buffer) + byte_offsets[i], byte_pointers[i],
-           copy_lengths[i]);
+    UNSAFE_TODO(memcpy(static_cast<int8_t*>(buffer) + byte_offsets[i],
+                       byte_pointers[i], copy_lengths[i]));
   }
 
   return byte_offsets;

@@ -7,6 +7,7 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/scoped_observation.h"
+#include "base/scoped_observation_traits.h"
 #include "base/values.h"
 #include "chrome/browser/policy/value_provider/policy_value_provider.h"
 #include "chrome/browser/profiles/profile.h"
@@ -32,9 +33,9 @@ class ExtensionPoliciesValueProvider
 
   // PolicyValueProvider overrides.
   // Returns each individual extension policy in a dictionary.
-  base::Value::Dict GetValues() override;
+  base::DictValue GetValues() override;
 
-  base::Value::Dict GetNames() override;
+  base::DictValue GetNames() override;
 
   // extensions::ExtensionRegistryObserver implementation.
   void OnExtensionLoaded(content::BrowserContext* browser_context,
@@ -50,12 +51,34 @@ class ExtensionPoliciesValueProvider
                        const policy::PolicyMap& current) override;
 
  private:
-  base::Value::Dict GetExtensionPolicyNames(policy::PolicyDomain policy_domain);
+  base::DictValue GetExtensionPolicyNames(policy::PolicyDomain policy_domain);
 
   base::ScopedObservation<extensions::ExtensionRegistry,
                           extensions::ExtensionRegistryObserver>
       extension_registry_observation_{this};
-  base::raw_ptr<Profile> profile_;
+  base::ScopedObservation<policy::PolicyService,
+                          policy::PolicyService::Observer>
+      policy_service_observation_{this};
+  raw_ptr<Profile> profile_;
+};
+
+template <>
+struct base::ScopedObservationTraits<policy::PolicyService,
+                                     policy::PolicyService::Observer> {
+  static void AddObserver(policy::PolicyService* source,
+                          policy::PolicyService::Observer* observer) {
+    source->AddObserver(policy::POLICY_DOMAIN_EXTENSIONS, observer);
+#if BUILDFLAG(IS_CHROMEOS)
+    source->AddObserver(policy::POLICY_DOMAIN_SIGNIN_EXTENSIONS, observer);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+  }
+  static void RemoveObserver(policy::PolicyService* source,
+                             policy::PolicyService::Observer* observer) {
+    source->RemoveObserver(policy::POLICY_DOMAIN_EXTENSIONS, observer);
+#if BUILDFLAG(IS_CHROMEOS)
+    source->RemoveObserver(policy::POLICY_DOMAIN_SIGNIN_EXTENSIONS, observer);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+  }
 };
 
 #endif  // CHROME_BROWSER_POLICY_VALUE_PROVIDER_EXTENSION_POLICIES_VALUE_PROVIDER_H_

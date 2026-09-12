@@ -10,27 +10,32 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/time/default_clock.h"
+#include "build/build_config.h"
 #include "chrome/browser/notifications/scheduler/internal/background_task_coordinator.h"
 #include "chrome/browser/notifications/scheduler/internal/display_decider.h"
-#include "chrome/browser/notifications/scheduler/internal/icon_store.h"
 #include "chrome/browser/notifications/scheduler/internal/impression_history_tracker.h"
-#include "chrome/browser/notifications/scheduler/internal/impression_store.h"
 #include "chrome/browser/notifications/scheduler/internal/init_aware_scheduler.h"
 #include "chrome/browser/notifications/scheduler/internal/noop_notification_schedule_service.h"
 #include "chrome/browser/notifications/scheduler/internal/notification_schedule_service_impl.h"
 #include "chrome/browser/notifications/scheduler/internal/notification_scheduler_context.h"
-#include "chrome/browser/notifications/scheduler/internal/notification_store.h"
 #include "chrome/browser/notifications/scheduler/internal/png_icon_converter_impl.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduled_notification_manager.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduler_config.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduler_utils.h"
+#include "chrome/browser/notifications/scheduler/internal/tips_client.h"
 #include "chrome/browser/notifications/scheduler/internal/webui_client.h"
 #include "chrome/browser/notifications/scheduler/public/display_agent.h"
 #include "chrome/browser/notifications/scheduler/public/features.h"
+#include "chrome/browser/notifications/scheduler/public/finds_agent.h"
 #include "chrome/browser/notifications/scheduler/public/notification_background_task_scheduler.h"
 #include "chrome/browser/notifications/scheduler/public/notification_scheduler_client_registrar.h"
+#include "chrome/browser/notifications/scheduler/public/tips_agent.h"
 #include "components/leveldb_proto/public/proto_database_provider.h"
 #include "components/leveldb_proto/public/shared_proto_database_client_list.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/notifications/scheduler/internal/clients/finds_client.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 
 namespace notifications {
 namespace {
@@ -46,9 +51,12 @@ std::unique_ptr<KeyedService> CreateNotificationScheduleService(
     std::unique_ptr<NotificationBackgroundTaskScheduler>
         background_task_scheduler,
     std::unique_ptr<DisplayAgent> display_agent,
+    std::unique_ptr<TipsAgent> tips_agent,
+    std::unique_ptr<FindsAgent> finds_agent,
     leveldb_proto::ProtoDatabaseProvider* db_provider,
     const base::FilePath& storage_dir,
-    bool off_the_record) {
+    bool off_the_record,
+    PrefService* pref_service) {
   if (!base::FeatureList::IsEnabled(features::kNotificationScheduleService) ||
       off_the_record)
     return std::make_unique<NoopNotificationScheduleService>();
@@ -58,6 +66,14 @@ std::unique_ptr<KeyedService> CreateNotificationScheduleService(
       {base::MayBlock(), base::TaskPriority::BEST_EFFORT});
   client_registrar->RegisterClient(SchedulerClientType::kWebUI,
                                    std::make_unique<WebUIClient>());
+  client_registrar->RegisterClient(
+      SchedulerClientType::kTips,
+      std::make_unique<TipsClient>(std::move(tips_agent), pref_service));
+#if BUILDFLAG(IS_ANDROID)
+  client_registrar->RegisterClient(
+      SchedulerClientType::kChromeFinds,
+      std::make_unique<FindsClient>(std::move(finds_agent), pref_service));
+#endif  // BUILDFLAG(IS_ANDROID)
 
   // Build icon store.
   base::FilePath icon_store_dir = storage_dir.Append(kIconDBName);

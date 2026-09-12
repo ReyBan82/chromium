@@ -58,7 +58,7 @@ class ChildListMutationAccumulator final
   void ChildAdded(Node&);
   void WillRemoveChild(Node&);
 
-  bool HasObservers() const { return observers_; }
+  bool HasObservers() const { return observers_ != nullptr; }
 
   // Register and unregister mutation scopes that are using this mutation
   // accumulator.
@@ -90,7 +90,7 @@ class ChildListMutationScope final {
 
  public:
   explicit ChildListMutationScope(Node& target) {
-    if (target.GetDocument().HasMutationObserversOfType(
+    if (target.GetDocument().MayHaveMutationObserversOfType(
             kMutationTypeChildList)) {
       accumulator_ = ChildListMutationAccumulator::GetOrCreate(target);
       // Register another user of the accumulator.

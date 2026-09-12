@@ -6,26 +6,33 @@
 #include <utility>
 
 #include "base/command_line.h"
+#include "base/files/file_path.h"
 #include "base/strings/stringprintf.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/values_test_util.h"
 #include "base/values.h"
 #include "chrome/common/extensions/manifest_tests/chrome_manifest_test.h"
 #include "components/version_info/version_info.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_features.h"
 #include "extensions/common/features/feature_channel.h"
+#include "extensions/common/file_util.h"
 #include "extensions/common/manifest_constants.h"
 #include "extensions/common/manifest_handlers/background_info.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "url/gurl.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 namespace errors = manifest_errors;
 namespace keys = manifest_keys;
 
-class ExtensionManifestBackgroundTest : public ChromeManifestTest {
-};
+using ExtensionManifestBackgroundTest = ChromeManifestTest;
 
 // TODO(devlin): Can this file move to //extensions?
 
@@ -36,23 +43,24 @@ TEST_F(ExtensionManifestBackgroundTest, BackgroundPermission) {
 
 TEST_F(ExtensionManifestBackgroundTest, BackgroundScripts) {
   std::string error;
-  absl::optional<base::Value::Dict> manifest =
+  std::optional<base::DictValue> manifest =
       LoadManifest("background_scripts.json", &error);
   ASSERT_TRUE(manifest);
 
   scoped_refptr<Extension> extension(
       LoadAndExpectSuccess(ManifestData(manifest->Clone(), "")));
   ASSERT_TRUE(extension.get());
-  const std::vector<std::string>& background_scripts =
+  const std::vector<ExtensionResource>& background_scripts =
       BackgroundInfo::GetBackgroundScripts(extension.get());
   ASSERT_EQ(2u, background_scripts.size());
-  EXPECT_EQ("foo.js", background_scripts[0u]);
-  EXPECT_EQ("bar/baz.js", background_scripts[1u]);
+  EXPECT_EQ(FILE_PATH_LITERAL("foo.js"),
+            background_scripts[0u].relative_path().value());
+  EXPECT_EQ(FILE_PATH_LITERAL("bar/baz.js"),
+            background_scripts[1u].relative_path().value());
 
   EXPECT_TRUE(BackgroundInfo::HasBackgroundPage(extension.get()));
-  EXPECT_EQ(
-      std::string("/") + kGeneratedBackgroundPageFilename,
-      BackgroundInfo::GetBackgroundURL(extension.get()).path());
+  EXPECT_EQ(std::string("/") + kGeneratedBackgroundPageFilename,
+            BackgroundInfo::GetBackgroundURL(extension.get()).GetPath());
 
   manifest->SetByDottedPath("background.page", "monkey.html");
   LoadAndExpectError(ManifestData(std::move(*manifest), ""),
@@ -61,7 +69,7 @@ TEST_F(ExtensionManifestBackgroundTest, BackgroundScripts) {
 
 TEST_F(ExtensionManifestBackgroundTest, BackgroundServiceWorkerScript) {
   std::string error;
-  absl::optional<base::Value::Dict> manifest =
+  std::optional<base::DictValue> manifest =
       LoadManifest("background_script_sw.json", &error);
   ASSERT_TRUE(manifest);
 
@@ -69,9 +77,12 @@ TEST_F(ExtensionManifestBackgroundTest, BackgroundServiceWorkerScript) {
       LoadAndExpectSuccess(ManifestData(manifest->Clone(), "")));
   ASSERT_TRUE(extension.get());
   ASSERT_TRUE(BackgroundInfo::IsServiceWorkerBased(extension.get()));
-  const std::string& service_worker_script =
-      BackgroundInfo::GetBackgroundServiceWorkerScript(extension.get());
-  EXPECT_EQ("service_worker.js", service_worker_script);
+  const GURL background_service_worker_script_url =
+      BackgroundInfo::GetBackgroundServiceWorkerScriptURL(extension.get());
+  const base::FilePath service_worker_script =
+      file_util::ExtensionURLToRelativeFilePath(
+          background_service_worker_script_url);
+  EXPECT_EQ("service_worker.js", service_worker_script.AsUTF8Unsafe());
 
   manifest->SetByDottedPath("background.page", "monkey.html");
   LoadAndExpectError(ManifestData(std::move(*manifest), ""),
@@ -83,7 +94,7 @@ TEST_F(ExtensionManifestBackgroundTest, BackgroundPage) {
       LoadAndExpectSuccess("background_page.json"));
   ASSERT_TRUE(extension.get());
   EXPECT_EQ("/foo.html",
-            BackgroundInfo::GetBackgroundURL(extension.get()).path());
+            BackgroundInfo::GetBackgroundURL(extension.get()).GetPath());
   EXPECT_TRUE(BackgroundInfo::AllowJSAccess(extension.get()));
 }
 
@@ -102,7 +113,7 @@ TEST_F(ExtensionManifestBackgroundTest, BackgroundPageWebRequest) {
   ScopedCurrentChannel current_channel(version_info::Channel::DEV);
 
   std::string error;
-  absl::optional<base::Value::Dict> manifest =
+  std::optional<base::DictValue> manifest =
       LoadManifest("background_page.json", &error);
   ASSERT_TRUE(manifest);
   manifest->SetByDottedPath("background.persistent", false);
@@ -112,7 +123,7 @@ TEST_F(ExtensionManifestBackgroundTest, BackgroundPageWebRequest) {
   ASSERT_TRUE(extension.get());
   EXPECT_TRUE(BackgroundInfo::HasLazyBackgroundPage(extension.get()));
 
-  base::Value::List permissions;
+  base::ListValue permissions;
   permissions.Append("webRequest");
   manifest->Set(keys::kPermissions, std::move(permissions));
   LoadAndExpectError(ManifestData(std::move(*manifest), ""),
@@ -218,11 +229,6 @@ TEST_F(ExtensionManifestBackgroundTest, ServiceWorkerBasedBackgroundKey) {
 }
 
 TEST_F(ExtensionManifestBackgroundTest, ManifestV3Restrictions) {
-  auto get_expected_error = [](base::StringPiece key) {
-    return ErrorUtils::FormatErrorMessage(
-        errors::kBackgroundSpecificationInvalidForManifestV3, key);
-  };
-
   {
     constexpr char kManifestBackgroundPage[] =
         R"({
@@ -234,9 +240,10 @@ TEST_F(ExtensionManifestBackgroundTest, ManifestV3Restrictions) {
              }
            })";
     base::Value manifest_value = base::test::ParseJson(kManifestBackgroundPage);
-    LoadAndExpectError(
+    scoped_refptr<Extension> extension(LoadAndExpectWarning(
         ManifestData(std::move(manifest_value).TakeDict(), "background page"),
-        get_expected_error(keys::kBackgroundPage));
+        "'background.page' requires manifest version of 2 or lower."));
+    EXPECT_FALSE(BackgroundInfo::HasBackgroundPage(extension.get()));
   }
   {
     constexpr char kManifestBackgroundScripts[] =
@@ -250,9 +257,11 @@ TEST_F(ExtensionManifestBackgroundTest, ManifestV3Restrictions) {
            })";
     base::Value manifest_value =
         base::test::ParseJson(kManifestBackgroundScripts);
-    LoadAndExpectError(ManifestData(std::move(manifest_value).TakeDict(),
-                                    "background scripts"),
-                       get_expected_error(keys::kBackgroundScripts));
+    scoped_refptr<Extension> extension(LoadAndExpectWarning(
+        ManifestData(std::move(manifest_value).TakeDict(),
+                     "background scripts"),
+        "'background.scripts' requires manifest version of 2 or lower."));
+    EXPECT_FALSE(BackgroundInfo::HasBackgroundPage(extension.get()));
   }
   {
     constexpr char kManifestBackgroundPersistent[] =
@@ -267,9 +276,11 @@ TEST_F(ExtensionManifestBackgroundTest, ManifestV3Restrictions) {
            })";
     base::Value manifest_value =
         base::test::ParseJson(kManifestBackgroundPersistent);
-    LoadAndExpectError(ManifestData(std::move(manifest_value).TakeDict(),
-                                    "persistent background"),
-                       get_expected_error(keys::kBackgroundPersistent));
+    scoped_refptr<Extension> extension(LoadAndExpectWarning(
+        ManifestData(std::move(manifest_value).TakeDict(),
+                     "persistent background"),
+        "'background.persistent' requires manifest version of 2 or lower."));
+    EXPECT_FALSE(BackgroundInfo::HasBackgroundPage(extension.get()));
   }
   {
     // An extension with no background key present should still be allowed.
@@ -281,8 +292,57 @@ TEST_F(ExtensionManifestBackgroundTest, ManifestV3Restrictions) {
            })";
     base::Value manifest_value =
         base::test::ParseJson(kManifestBackgroundPersistent);
-    LoadAndExpectSuccess(
-        ManifestData(std::move(manifest_value).TakeDict(), "no background"));
+    scoped_refptr<Extension> extension(LoadAndExpectSuccess(
+        ManifestData(std::move(manifest_value).TakeDict(), "no background")));
+    EXPECT_FALSE(BackgroundInfo::HasBackgroundPage(extension.get()));
+  }
+  {
+    // An extension with both a background page and a service worker should
+    // still be allowed, with the page ignored, since other browsers still
+    // support background pages in MV3. This allows a developer to ship a
+    // single extension and for the browser to choose the appropriate key.
+    constexpr char kManifestBackgroundPersistent[] =
+        R"({
+             "name": "MV3 Test",
+             "manifest_version": 3,
+             "version": "0.1",
+             "background": {
+               "service_worker": "worker.js",
+               "page": "background.html"
+             }
+           })";
+    base::Value manifest_value =
+        base::test::ParseJson(kManifestBackgroundPersistent);
+    scoped_refptr<Extension> extension(LoadAndExpectWarning(
+        ManifestData(std::move(manifest_value).TakeDict(),
+                     "background page and service worker"),
+        "'background.page' requires manifest version of 2 or lower."));
+    EXPECT_TRUE(BackgroundInfo::IsServiceWorkerBased(extension.get()));
+    EXPECT_FALSE(BackgroundInfo::HasBackgroundPage(extension.get()));
+  }
+  {
+    // An extension with both background scripts and a service worker should
+    // still be allowed, with the scripts ignored, since other browsers still
+    // support background scripts in MV3. This allows a developer to ship a
+    // single extension and for the browser to choose the appropriate key.
+    constexpr char kManifestBackgroundPersistent[] =
+        R"({
+             "name": "MV3 Test",
+             "manifest_version": 3,
+             "version": "0.1",
+             "background": {
+               "service_worker": "worker.js",
+               "scripts": ["background.js"]
+             }
+           })";
+    base::Value manifest_value =
+        base::test::ParseJson(kManifestBackgroundPersistent);
+    scoped_refptr<Extension> extension(LoadAndExpectWarning(
+        ManifestData(std::move(manifest_value).TakeDict(),
+                     "background scripts and service worker"),
+        "'background.scripts' requires manifest version of 2 or lower."));
+    EXPECT_TRUE(BackgroundInfo::IsServiceWorkerBased(extension.get()));
+    EXPECT_FALSE(BackgroundInfo::HasBackgroundPage(extension.get()));
   }
 }
 
@@ -339,6 +399,99 @@ TEST_F(ExtensionManifestBackgroundTest, ModuleServiceWorker) {
         BackgroundInfo::GetBackgroundServiceWorkerType(extension.get());
     EXPECT_EQ(BackgroundServiceWorkerType::kClassic, service_worker_type);
   }
+}
+
+TEST_F(ExtensionManifestBackgroundTest, AsyncListenerRegistration) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      extensions_features::kExtensionAsyncListenerRegistration);
+
+  auto get_manifest = [](const char* background_value) {
+    constexpr char kManifestStub[] =
+        R"({
+           "name": "Async Listener Registration Test",
+           "manifest_version": 3,
+           "version": "0.1",
+           "background": { %s }
+         })";
+    std::string manifest_str =
+        base::StringPrintf(kManifestStub, background_value);
+    return base::test::ParseJson(manifest_str).TakeDict();
+  };
+
+  {
+    constexpr char kOptedIn[] =
+        R"("service_worker": "worker.js", "async_listener_registration": true)";
+    scoped_refptr<Extension> extension(
+        LoadAndExpectSuccess(ManifestData(get_manifest(kOptedIn), "opted in")));
+    ASSERT_TRUE(extension);
+    EXPECT_TRUE(BackgroundInfo::HasAsyncListenerRegistration(extension.get()));
+  }
+  {
+    constexpr char kOptedOut[] =
+        R"("service_worker": "worker.js",
+            "async_listener_registration": false)";
+    scoped_refptr<Extension> extension(LoadAndExpectSuccess(
+        ManifestData(get_manifest(kOptedOut), "opted out")));
+    ASSERT_TRUE(extension);
+    EXPECT_FALSE(BackgroundInfo::HasAsyncListenerRegistration(extension.get()));
+  }
+  {
+    // Defaults to false when omitted.
+    constexpr char kNoKey[] = R"("service_worker": "worker.js")";
+    scoped_refptr<Extension> extension(
+        LoadAndExpectSuccess(ManifestData(get_manifest(kNoKey), "no key")));
+    ASSERT_TRUE(extension);
+    EXPECT_FALSE(BackgroundInfo::HasAsyncListenerRegistration(extension.get()));
+  }
+  {
+    constexpr char kNonBoolean[] =
+        R"("service_worker": "worker.js",
+            "async_listener_registration": "yes")";
+    LoadAndExpectError(ManifestData(get_manifest(kNonBoolean), "non-boolean"),
+                       errors::kInvalidBackgroundAsyncListenerRegistration);
+  }
+  {
+    // Requires a service worker background context.
+    constexpr char kNoServiceWorker[] =
+        R"("async_listener_registration": true)";
+    LoadAndExpectError(
+        ManifestData(get_manifest(kNoServiceWorker), "no service worker"),
+        errors::kInvalidBackgroundAsyncListenerRegistrationNoServiceWorker);
+  }
+  {
+    // Background pages cannot opt in.
+    constexpr char kBackgroundPage[] =
+        R"("page": "background.html", "async_listener_registration": true)";
+    LoadAndExpectError(
+        ManifestData(get_manifest(kBackgroundPage), "background page"),
+        errors::kInvalidBackgroundAsyncListenerRegistrationNoServiceWorker);
+  }
+}
+
+TEST_F(ExtensionManifestBackgroundTest, AsyncListenerRegistrationFeatureOff) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      extensions_features::kExtensionAsyncListenerRegistration);
+
+  // With the feature disabled, the key produces an install warning and is
+  // ignored.
+  constexpr char kManifest[] =
+      R"({
+         "name": "Async Listener Registration Test",
+         "manifest_version": 3,
+         "version": "0.1",
+         "background": {
+           "service_worker": "worker.js",
+           "async_listener_registration": true
+         }
+       })";
+  scoped_refptr<Extension> extension(LoadAndExpectWarning(
+      ManifestData(base::test::ParseJson(kManifest).TakeDict(), "feature off"),
+      "'background.async_listener_registration' requires the "
+      "'ExtensionAsyncListenerRegistration' feature flag to be enabled."));
+  ASSERT_TRUE(extension);
+  EXPECT_FALSE(BackgroundInfo::HasAsyncListenerRegistration(extension.get()));
 }
 
 }  // namespace extensions

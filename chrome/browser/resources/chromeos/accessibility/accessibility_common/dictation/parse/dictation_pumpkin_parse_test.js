@@ -16,12 +16,6 @@ DictationPumpkinParseTest = class extends DictationE2ETestBase {
     // Re-initialize PumpkinParseStrategy after mock Pumpkin data has been
     // created.
     this.getPumpkinParseStrategy().init_();
-    await importModule(
-        'SpeechParser',
-        '/accessibility_common/dictation/parse/speech_parser.js');
-    await importModule(
-        'SUPPORTED_LOCALES',
-        '/accessibility_common/dictation/parse/pumpkin/pumpkin_constants.js');
 
     await super.setUpDeferred();
 
@@ -90,7 +84,7 @@ AX_TEST_F('DictationPumpkinParseTest', 'Parse', async function() {
     new ParseTestCase('deselect selection', {name: 'UNSELECT_TEXT'}),
     new ParseTestCase('what can I say', {name: 'LIST_COMMANDS'}),
     new ParseTestCase('new line', {}),
-    new ParseTestCase('avada kedavra', {name: 'STOP_LISTENING'}),
+    new ParseTestCase('avada kedavra', {name: 'TOGGLE_DICTATION'}),
     new ParseTestCase('clear one word', {name: 'DELETE_PREV_WORD'}),
     new ParseTestCase('erase sentence', {name: 'DELETE_PREV_SENT'}),
     new ParseTestCase('right one word', {name: 'NAV_NEXT_WORD'}),
@@ -157,71 +151,75 @@ AX_TEST_F(
     });
 
 // Tests that smart macro properties are correctly parsed and set.
-AX_TEST_F('DictationPumpkinParseTest', 'SmartMacros', async function() {
-  await this.waitForPumpkinParseStrategy_();
+// TODO(crbug.com/437027220): Test is flaky, re-enable.
+AX_TEST_F(
+    'DictationPumpkinParseTest', 'DISABLED_SmartMacros', async function() {
+      await this.waitForPumpkinParseStrategy_();
 
-  let macro =
-      await this.getPumpkinParseStrategy().parse('delete avada kedavra');
-  assertEquals('SMART_DELETE_PHRASE', macro.getNameAsString());
-  assertEquals('avada kedavra', macro.phrase_);
+      let macro =
+          await this.getPumpkinParseStrategy().parse('delete avada kedavra');
+      assertEquals('SMART_DELETE_PHRASE', macro.getNameAsString());
+      assertEquals('avada kedavra', macro.phrase_);
 
-  macro =
-      await this.getPumpkinParseStrategy().parse('replace hello with goodbye');
-  assertEquals('SMART_REPLACE_PHRASE', macro.getNameAsString());
-  assertEquals('hello', macro.deletePhrase_);
-  assertEquals('goodbye', macro.insertPhrase_);
+      macro = await this.getPumpkinParseStrategy().parse(
+          'replace hello with goodbye');
+      assertEquals('SMART_REPLACE_PHRASE', macro.getNameAsString());
+      assertEquals('hello', macro.deletePhrase_);
+      assertEquals('goodbye', macro.insertPhrase_);
 
-  macro = await this.getPumpkinParseStrategy().parse(
-      'insert hello in front of goodbye');
-  assertEquals('SMART_INSERT_BEFORE', macro.getNameAsString());
-  assertEquals('hello', macro.insertPhrase_);
-  assertEquals('goodbye', macro.beforePhrase_);
+      macro = await this.getPumpkinParseStrategy().parse(
+          'insert hello in front of goodbye');
+      assertEquals('SMART_INSERT_BEFORE', macro.getNameAsString());
+      assertEquals('hello', macro.insertPhrase_);
+      assertEquals('goodbye', macro.beforePhrase_);
 
-  macro = await this.getPumpkinParseStrategy().parse(
-      'highlight everything between hello and goodbye');
-  assertEquals('SMART_SELECT_BTWN_INCL', macro.getNameAsString());
-  assertEquals('hello', macro.startPhrase_);
-  assertEquals('goodbye', macro.endPhrase_);
-});
+      macro = await this.getPumpkinParseStrategy().parse(
+          'highlight everything between hello and goodbye');
+      assertEquals('SMART_SELECT_BTWN_INCL', macro.getNameAsString());
+      assertEquals('hello', macro.startPhrase_);
+      assertEquals('goodbye', macro.endPhrase_);
+    });
 
-AX_TEST_F('DictationPumpkinParseTest', 'ChangeLocale', async function() {
-  await this.waitForPumpkinParseStrategy_();
-  this.alwaysEnableCommands();
-  const testCases = [
-    {
-      locale: 'fr-FR',
-      testCase: new ParseTestCase('copier', {name: 'COPY_SELECTED_TEXT'}),
-    },
-    {
-      locale: 'fr-FR',
-      testCase: new ParseTestCase(
-          'supprimer deux caractères précédent',
-          {name: 'DELETE_PREV_CHAR', repeat: 2}),
-    },
-    {
-      locale: 'it-IT',
-      testCase: new ParseTestCase('annulla', {name: 'UNDO_TEXT_EDIT'}),
-    },
-    {
-      locale: 'de-DE',
-      testCase: new ParseTestCase('hilf mir', {name: 'LIST_COMMANDS'}),
-    },
-    {
-      locale: 'es-ES',
-      testCase: new ParseTestCase('ayuda', {name: 'LIST_COMMANDS'}),
-    },
-    {
-      locale: 'en-GB',
-      testCase:
-          new ParseTestCase('copy selected text', {name: 'COPY_SELECTED_TEXT'}),
-    },
-  ];
-  for (const {locale, testCase} of testCases) {
-    await this.setPref(Dictation.DICTATION_LOCALE_PREF, locale);
-    await this.waitForPumpkinParseStrategy_(locale);
-    await this.runPumpkinParseTestCase(testCase);
-  }
-});
+// TODO(b/452364395): Test is flaky on ChromiumOS MSAN bots.
+AX_TEST_F(
+    'DictationPumpkinParseTest', 'DISABLED_ChangeLocale', async function() {
+      await this.waitForPumpkinParseStrategy_();
+      this.alwaysEnableCommands();
+      const testCases = [
+        {
+          locale: 'fr-FR',
+          testCase: new ParseTestCase('copier', {name: 'COPY_SELECTED_TEXT'}),
+        },
+        {
+          locale: 'fr-FR',
+          testCase: new ParseTestCase(
+              'supprimer deux caractères précédent',
+              {name: 'DELETE_PREV_CHAR', repeat: 2}),
+        },
+        {
+          locale: 'it-IT',
+          testCase: new ParseTestCase('annulla', {name: 'UNDO_TEXT_EDIT'}),
+        },
+        {
+          locale: 'de-DE',
+          testCase: new ParseTestCase('hilf mir', {name: 'LIST_COMMANDS'}),
+        },
+        {
+          locale: 'es-ES',
+          testCase: new ParseTestCase('ayuda', {name: 'LIST_COMMANDS'}),
+        },
+        {
+          locale: 'en-GB',
+          testCase: new ParseTestCase(
+              'copy selected text', {name: 'COPY_SELECTED_TEXT'}),
+        },
+      ];
+      for (const {locale, testCase} of testCases) {
+        await this.setPref(Dictation.DICTATION_LOCALE_PREF, locale);
+        await this.waitForPumpkinParseStrategy_(locale);
+        await this.runPumpkinParseTestCase(testCase);
+      }
+    });
 
 AX_TEST_F('DictationPumpkinParseTest', 'UnsupportedLocale', async function() {
   await this.waitForPumpkinParseStrategy_();

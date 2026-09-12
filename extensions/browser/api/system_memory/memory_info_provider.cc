@@ -4,6 +4,7 @@
 
 #include "extensions/browser/api/system_memory/memory_info_provider.h"
 
+#include "base/byte_size.h"
 #include "base/system/sys_info.h"
 
 namespace extensions {
@@ -21,16 +22,17 @@ void MemoryInfoProvider::InitializeForTesting(
 }
 
 bool MemoryInfoProvider::QueryInfo() {
-  info_.capacity = static_cast<double>(base::SysInfo::AmountOfPhysicalMemory());
+  info_.capacity = base::SysInfo::AmountOfTotalPhysicalMemory().InBytesF();
   info_.available_capacity =
-      static_cast<double>(base::SysInfo::AmountOfAvailablePhysicalMemory());
+      base::SysInfo::AmountOfAvailablePhysicalMemory().InBytesF();
   return true;
 }
 
 // static
 MemoryInfoProvider* MemoryInfoProvider::Get() {
-  if (provider_.Get().get() == nullptr)
+  if (provider_.Get().get() == nullptr) {
     provider_.Get() = new MemoryInfoProvider();
+  }
   return provider_.Get().get();
 }
 

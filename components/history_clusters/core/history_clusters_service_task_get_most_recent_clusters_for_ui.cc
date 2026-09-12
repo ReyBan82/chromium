@@ -25,6 +25,7 @@ HistoryClustersServiceTaskGetMostRecentClustersForUI::
         ClusteringBackend* const backend,
         history::HistoryService* const history_service,
         ClusteringRequestSource clustering_request_source,
+        QueryClustersFilterParams filter_params,
         base::Time begin_time,
         QueryClustersContinuationParams continuation_params,
         QueryClustersCallback callback)
@@ -41,17 +42,18 @@ HistoryClustersServiceTaskGetMostRecentClustersForUI::
 
   DCHECK(IsUIRequestSource(clustering_request_source));
 
-  Start();
+  Start(std::move(filter_params));
 }
 
 HistoryClustersServiceTaskGetMostRecentClustersForUI::
-    ~HistoryClustersServiceTaskGetMostRecentClustersForUI() = default;
+    ~HistoryClustersServiceTaskGetMostRecentClustersForUI() {
+  if (!done_) {
+    std::move(callback_).Run({}, continuation_params_);
+  }
+}
 
-void HistoryClustersServiceTaskGetMostRecentClustersForUI::Start() {
-  // TODO(b/259466296): Figure out what to do with unclustered visits that
-  //   happen before this experiment starts and were unclustered by previous
-  //   path.
-
+void HistoryClustersServiceTaskGetMostRecentClustersForUI::Start(
+    QueryClustersFilterParams filter_params) {
   if (!continuation_params_.is_continuation) {
     continuation_params_.continuation_time = base::Time::Now();
   }
@@ -62,27 +64,16 @@ void HistoryClustersServiceTaskGetMostRecentClustersForUI::Start() {
       GetConfig().max_persisted_cluster_visits_to_fetch_soft_cap,
       base::BindOnce(&HistoryClustersServiceTaskGetMostRecentClustersForUI::
                          OnGotMostRecentPersistedClusters,
-                     weak_ptr_factory_.GetWeakPtr(), base::TimeTicks::Now()),
+                     weak_ptr_factory_.GetWeakPtr(), std::move(filter_params)),
       /*include_keywords_and_duplicates=*/false, &task_tracker_);
 }
 
 void HistoryClustersServiceTaskGetMostRecentClustersForUI::
-    OnGotMostRecentPersistedClusters(base::TimeTicks start_time,
+    OnGotMostRecentPersistedClusters(QueryClustersFilterParams filter_params,
                                      std::vector<history::Cluster> clusters) {
   if (!weak_history_clusters_service_) {
     return;
   }
-
-  base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClustersForUI."
-      "GetMostRecentPersistedClustersLatency",
-      elapsed_time);
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClustersForUI."
-      "GetMostRecentPersistedClustersLatency" +
-          GetHistogramNameSliceForRequestSource(clustering_request_source_),
-      elapsed_time);
 
   if (weak_history_clusters_service_->ShouldNotifyDebugMessage()) {
     weak_history_clusters_service_->NotifyDebugMessage(
@@ -105,7 +96,7 @@ void HistoryClustersServiceTaskGetMostRecentClustersForUI::
                              true, false, true, false};
 
   // Prune out synced clusters if feature not enabled.
-  if (!GetConfig().include_synced_visits) {
+  if (!filter_params.include_synced_visits) {
     auto it = clusters.begin();
     while (it != clusters.end()) {
       if (it->originator_cache_guid.empty()) {
@@ -117,32 +108,20 @@ void HistoryClustersServiceTaskGetMostRecentClustersForUI::
   }
 
   backend_->GetClustersForUI(
-      clustering_request_source_,
+      clustering_request_source_, std::move(filter_params),
       base::BindOnce(&HistoryClustersServiceTaskGetMostRecentClustersForUI::
                          OnGotModelClusters,
-                     weak_ptr_factory_.GetWeakPtr(), base::TimeTicks::Now(),
+                     weak_ptr_factory_.GetWeakPtr(),
                      std::move(continuation_params)),
       std::move(clusters));
 }
 
 void HistoryClustersServiceTaskGetMostRecentClustersForUI::OnGotModelClusters(
-    base::TimeTicks start_time,
     QueryClustersContinuationParams continuation_params,
     std::vector<history::Cluster> clusters) {
   if (!weak_history_clusters_service_) {
     return;
   }
-
-  base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClustersForUI."
-      "ComputeClustersForUILatency",
-      elapsed_time);
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClustersForUI."
-      "ComputeClustersForUILatency" +
-          GetHistogramNameSliceForRequestSource(clustering_request_source_),
-      elapsed_time);
 
   if (weak_history_clusters_service_->ShouldNotifyDebugMessage()) {
     weak_history_clusters_service_->NotifyDebugMessage(base::StringPrintf(

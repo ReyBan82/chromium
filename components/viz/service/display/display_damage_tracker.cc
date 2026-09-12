@@ -6,12 +6,27 @@
 
 #include "base/observer_list.h"
 #include "base/trace_event/trace_event.h"
-#include "components/viz/common/surfaces/surface_info.h"
 #include "components/viz/service/display/surface_aggregator.h"
 #include "components/viz/service/surfaces/surface.h"
 #include "components/viz/service/surfaces/surface_manager.h"
+#include "ui/latency/latency_info.h"
 
 namespace viz {
+namespace {
+
+bool ShouldAccumulateInteraction(
+    SurfaceObserver::HandleInteraction handle_interaction) {
+  switch (handle_interaction) {
+    case SurfaceObserver::HandleInteraction::kYes:
+      return true;
+    case SurfaceObserver::HandleInteraction::kNo:
+      return false;
+    case SurfaceObserver::HandleInteraction::kNoChange:
+      return false;
+  }
+}
+
+}  // namespace
 
 DisplayDamageTracker::DisplayDamageTracker(SurfaceManager* surface_manager,
                                            SurfaceAggregator* aggregator)
@@ -25,12 +40,13 @@ DisplayDamageTracker::~DisplayDamageTracker() {
   surface_manager_->RemoveObserver(this);
 }
 
-void DisplayDamageTracker::AddObserver(Observer* observer) {
-  observers_.AddObserver(observer);
+void DisplayDamageTracker::SetDisplayBeginFrameSourceId(
+    uint64_t begin_frame_source_id) {
+  begin_frame_source_id_ = begin_frame_source_id;
 }
 
-void DisplayDamageTracker::RemoveObserver(Observer* observer) {
-  observers_.RemoveObserver(observer);
+void DisplayDamageTracker::SetDelegate(Delegate* delegate) {
+  delegate_ = delegate;
 }
 
 void DisplayDamageTracker::SetRootFrameMissing(bool missing) {
@@ -53,7 +69,10 @@ void DisplayDamageTracker::SetNewRootSurface(const SurfaceId& root_surface_id) {
 void DisplayDamageTracker::SetRootSurfaceDamaged() {
   BeginFrameAck ack;
   ack.has_damage = true;
-  ProcessSurfaceDamage(root_surface_id_, ack, true);
+  // Since we're damaging to redraw the last activated frame, there shouldn't be
+  // any change in interaction state.
+  ProcessSurfaceDamage(root_surface_id_, ack, true,
+                       HandleInteraction::kNoChange);
 }
 
 bool DisplayDamageTracker::IsRootSurfaceValid() const {
@@ -64,14 +83,34 @@ void DisplayDamageTracker::DisplayResized() {
   expecting_root_surface_damage_because_of_resize_ = true;
   // Technically we don't have any damage yet, but we need to draw after resize,
   // so we report display damaged here.
-  NotifyDisplayDamaged(root_surface_id_);
+  NotifyDisplayDamaged(root_surface_id_, BeginFrameId());
 }
 
-void DisplayDamageTracker::ProcessSurfaceDamage(const SurfaceId& surface_id,
-                                                const BeginFrameAck& ack,
-                                                bool display_damaged) {
-  TRACE_EVENT1("viz", "DisplayDamageTracker::SurfaceDamaged", "surface_id",
+void DisplayDamageTracker::ProcessSurfaceDamage(
+    const SurfaceId& surface_id,
+    const BeginFrameAck& ack,
+    bool display_damaged,
+    HandleInteraction handle_interaction,
+    const std::vector<ui::LatencyInfo>& latency_info) {
+  TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("viz.surface_lifetime"),
+               "DisplayDamageTracker::SurfaceDamaged", "surface_id",
                surface_id.ToString());
+
+  has_surface_damage_due_to_interaction_ |=
+      ShouldAccumulateInteraction(handle_interaction);
+
+  if (display_damaged) {
+    for (const auto& latency : latency_info) {
+      base::TimeTicks timestamp;
+      if (latency.FindLatency(ui::INPUT_EVENT_LATENCY_ORIGINAL_COMPONENT,
+                              &timestamp)) {
+        if (!earliest_input_timestamp_.has_value() ||
+            timestamp < *earliest_input_timestamp_) {
+          earliest_input_timestamp_ = timestamp;
+        }
+      }
+    }
+  }
 
   if (surface_id == root_surface_id_)
     expecting_root_surface_damage_because_of_resize_ = false;
@@ -93,7 +132,7 @@ void DisplayDamageTracker::ProcessSurfaceDamage(const SurfaceId& surface_id,
   }
 
   if (display_damaged) {
-    NotifyDisplayDamaged(surface_id);
+    NotifyDisplayDamaged(surface_id, ack.frame_id);
   } else if (valid_ack) {
     NotifyPendingSurfacesChanged();
   }
@@ -132,17 +171,33 @@ bool DisplayDamageTracker::HasPendingSurfaces(
     if (SurfaceHasUnackedFrame(surface_id))
       continue;
 
-    TRACE_EVENT_INSTANT2("viz", "DisplayDamageTracker::HasPendingSurfaces",
-                         TRACE_EVENT_SCOPE_THREAD, "has_pending_surfaces", true,
-                         "pending_surface_id", surface_id.ToString());
+    TRACE_EVENT_INSTANT("viz", "DisplayDamageTracker::HasPendingSurfaces",
+                        "has_pending_surfaces", true, "pending_surface_id",
+                        surface_id.ToString());
 
     return true;
   }
 
-  TRACE_EVENT_INSTANT1("viz", "DisplayDamageTracker::HasPendingSurfaces",
-                       TRACE_EVENT_SCOPE_THREAD, "has_pending_surfaces", false);
+  TRACE_EVENT_INSTANT("viz", "DisplayDamageTracker::HasPendingSurfaces",
+                      "has_pending_surfaces", false);
 
   return false;
+}
+
+bool DisplayDamageTracker::HasDamageDueToInteraction() {
+  return has_surface_damage_due_to_interaction_;
+}
+
+std::optional<base::TimeTicks>
+DisplayDamageTracker::GetEarliestInputGenerationTimeOfDamagedSurfaces() const {
+  return earliest_input_timestamp_;
+}
+
+void DisplayDamageTracker::DidFinishFrame() {
+  // We need to unset this bit otherwise we will continue to draw immediately
+  // even when we have no new damage from an active scroller.
+  has_surface_damage_due_to_interaction_ = false;
+  earliest_input_timestamp_ = std::nullopt;
 }
 
 void DisplayDamageTracker::OnSurfaceMarkedForDestruction(
@@ -155,12 +210,21 @@ void DisplayDamageTracker::OnSurfaceMarkedForDestruction(
   NotifyPendingSurfacesChanged();
 }
 
-bool DisplayDamageTracker::OnSurfaceDamaged(const SurfaceId& surface_id,
-                                            const BeginFrameAck& ack) {
+bool DisplayDamageTracker::CheckForDisplayDamage(const SurfaceId& surface_id) {
+  return aggregator_->CheckForDisplayDamage(surface_id);
+}
+
+bool DisplayDamageTracker::OnSurfaceDamaged(
+    const SurfaceId& surface_id,
+    const BeginFrameAck& ack,
+    HandleInteraction handle_interaction,
+    const std::vector<ui::LatencyInfo>& latency_info) {
   bool display_damaged = false;
   if (ack.has_damage) {
-    display_damaged =
-        aggregator_->NotifySurfaceDamageAndCheckForDisplayDamage(surface_id);
+    // Display is damaged if we purged some resources or if this surface
+    // contributes to this display.
+    display_damaged = aggregator_->ForceReleaseResourcesIfNeeded(surface_id) ||
+                      CheckForDisplayDamage(surface_id);
 
     if (surface_id == root_surface_id_)
       display_damaged = true;
@@ -171,21 +235,38 @@ bool DisplayDamageTracker::OnSurfaceDamaged(const SurfaceId& surface_id,
   if (surface_id == root_surface_id_)
     UpdateRootFrameMissing();
 
-  ProcessSurfaceDamage(surface_id, ack, display_damaged);
+  ProcessSurfaceDamage(surface_id, ack, display_damaged, handle_interaction,
+                       latency_info);
 
   return display_damaged;
 }
 
+bool DisplayDamageTracker::CheckBeginFrameSourceId(uint64_t source_id) {
+  return !begin_frame_source_id_ || source_id == *begin_frame_source_id_ ||
+         source_id == BeginFrameArgs::kManualSourceId;
+}
+
 void DisplayDamageTracker::OnSurfaceDamageExpected(const SurfaceId& surface_id,
                                                    const BeginFrameArgs& args) {
-  TRACE_EVENT1("viz", "DisplayDamageTracker::SurfaceDamageExpected",
-               "surface_id", surface_id.ToString());
-  // Insert a new state for the surface if we don't know of it yet. We don't use
-  // OnSurfaceCreated() for this, because it may not be called if a
-  // CompositorFrameSinkSupport starts submitting frames to a different Display,
-  // but continues using the same Surface, or if a Surface does not activate its
-  // first CompositorFrame immediately.
+  TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("viz.surface_lifetime"),
+               "DisplayDamageTracker::SurfaceDamageExpected", "surface_id",
+               surface_id.ToString());
+
+  // Insert a new state for the surface if we don't know of it yet. We don't
+  // use OnSurfaceCreated() for this, because it may not be called if a
+  // CompositorFrameSinkSupport starts submitting frames to a different
+  // Display, but continues using the same Surface, or if a Surface does not
+  // activate its first CompositorFrame immediately.
   surface_states_[surface_id].last_args = args;
+
+  // HasPendingSurfaces() won't consider any surfaces that received a begin
+  // frame from a different displays begin frame source but will still iterate
+  // through all of the entries in `surface_states_`. That iteration is
+  // expensive so avoid doing it when source_id doesn't match.
+  if (!CheckBeginFrameSourceId(args.frame_id.source_id)) {
+    return;
+  }
+
   NotifyPendingSurfacesChanged();
 }
 
@@ -205,24 +286,29 @@ void DisplayDamageTracker::RunDrawCallbacks() {
   // embedded for the first time, so also go through SurfaceAggregator's list.
   for (const auto& surface_id : aggregator_->previous_contained_surfaces()) {
     Surface* surface = surface_manager_->GetSurfaceForId(surface_id);
-    if (surface)
+    if (surface) {
       surface->SendAckToClient();
+    }
   }
 }
 
-void DisplayDamageTracker::NotifyDisplayDamaged(SurfaceId surface_id) {
-  for (auto& observer : observers_)
-    observer.OnDisplayDamaged(surface_id);
+void DisplayDamageTracker::NotifyDisplayDamaged(SurfaceId surface_id,
+                                                BeginFrameId frame_id) {
+  if (delegate_) {
+    delegate_->OnDisplayDamaged(surface_id, frame_id);
+  }
 }
 
 void DisplayDamageTracker::NotifyRootFrameMissing(bool missing) {
-  for (auto& observer : observers_)
-    observer.OnRootFrameMissing(missing);
+  if (delegate_) {
+    delegate_->OnRootFrameMissing(missing);
+  }
 }
 
 void DisplayDamageTracker::NotifyPendingSurfacesChanged() {
-  for (auto& observer : observers_)
-    observer.OnPendingSurfacesChanged();
+  if (delegate_) {
+    delegate_->OnPendingSurfacesChanged();
+  }
 }
 
 }  // namespace viz

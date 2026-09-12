@@ -8,7 +8,7 @@
 #import <Cocoa/Cocoa.h>
 
 #include "chrome/browser/renderer_context_menu/render_view_context_menu.h"
-#include "ui/base/cocoa/text_services_context_menu.h"
+#include "ui/menus/cocoa/text_services_context_menu.h"
 
 // Mac implementation of the context menu display code. Uses a Cocoa NSMenu
 // to display the context menu. Internally uses an obj-c object as the
@@ -17,7 +17,9 @@ class RenderViewContextMenuMac : public RenderViewContextMenu,
                                  public ui::TextServicesContextMenu::Delegate {
  public:
   RenderViewContextMenuMac(content::RenderFrameHost& render_frame_host,
-                           const content::ContextMenuParams& params);
+                           const content::ContextMenuParams& params,
+                           bool is_paste_enabled,
+                           bool is_paste_and_match_style_enabled);
 
   RenderViewContextMenuMac(const RenderViewContextMenuMac&) = delete;
   RenderViewContextMenuMac& operator=(const RenderViewContextMenuMac&) = delete;
@@ -27,12 +29,11 @@ class RenderViewContextMenuMac : public RenderViewContextMenu,
   void Show() override {}
 
   // SimpleMenuModel::Delegate:
-  void ExecuteCommand(int command_id, int event_flags) override;
   bool IsCommandIdChecked(int command_id) const override;
   bool IsCommandIdEnabled(int command_id) const override;
 
   // TextServicesContextMenu::Delegate:
-  std::u16string GetSelectedText() const override;
+  std::u16string_view GetSelectedText() const override;
   bool IsTextDirectionEnabled(
       base::i18n::TextDirection direction) const override;
   bool IsTextDirectionChecked(
@@ -43,18 +44,36 @@ class RenderViewContextMenuMac : public RenderViewContextMenu,
   void InitToolkitMenu();
 
  protected:
+  friend class ToolkitDelegateMacCocoa;
+
+  // Cancels the menu.
+  virtual void CancelToolkitMenu() {}
+  // Updates the status and text of the specified context-menu item.
+  virtual void UpdateToolkitMenuItem(int command_id,
+                                     bool enabled,
+                                     bool hidden,
+                                     const std::u16string& title) {}
+
   // RenderViewContextMenu:
+  bool ExecPlatformCommand(int command_id, int event_flags) override;
   void AppendPlatformEditableItems() override;
 
  private:
   // Handler for the "Look Up" menu item.
   void LookUpInDictionary();
 
+  // Handler for the "Remove from Dictionary" menu item.
+  void RemoveFromDictionary();
+
   // Returns the ContextMenuParams value associated with |direction|.
   int ParamsForTextDirection(base::i18n::TextDirection direction) const;
 
   // The context menu that adds and handles Speech and BiDi.
   ui::TextServicesContextMenu text_services_context_menu_;
+
+  // The word under the cursor that the user has manually added to their
+  // dictionary. This will be empty if the word is not in the user dictionary.
+  std::u16string user_added_word_;
 };
 
 #endif  // CHROME_BROWSER_UI_COCOA_RENDERER_CONTEXT_MENU_RENDER_VIEW_CONTEXT_MENU_MAC_H_

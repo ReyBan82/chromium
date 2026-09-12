@@ -4,23 +4,39 @@
 
 #include "media/mojo/mojom/video_frame_mojom_traits.h"
 
+#include <algorithm>
+#include <array>
+
+#include "base/compiler_specific.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/writable_shared_memory_region.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
+#include "gpu/command_buffer/client/test_shared_image_interface.h"
 #include "gpu/command_buffer/common/mailbox.h"
-#include "gpu/command_buffer/common/mailbox_holder.h"
 #include "gpu/command_buffer/common/sync_token.h"
 #include "media/base/color_plane_layout.h"
 #include "media/base/video_frame.h"
-#include "media/mojo/mojom/traits_test_service.mojom.h"
-#include "media/video/fake_gpu_memory_buffer.h"
+#include "media/base/video_frame_layout.h"
+#include "media/mojo/mojom/traits_test_service.test-mojom.h"
+#include "mojo/public/cpp/bindings/message.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/buffer.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+#include <linux/kcmp.h>
+#include <sys/syscall.h>
+
+#include "base/posix/eintr_wrapper.h"
+#include "base/process/process.h"
+#include "media/mojo/mojom/buffer_handle_test_util.h"
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 
 namespace media {
 
@@ -48,9 +64,30 @@ class VideoFrameStructTraitsTest : public testing::Test,
     return remote->EchoVideoFrame(std::move(input), frame);
   }
 
+  bool RoundTripFails(scoped_refptr<VideoFrame> frame) {
+    // For a negative round trip test, the function will reduce the number of
+    // error logs when compared to RoundTrip. This makes the test output read
+    // cleaner.
+    auto message = mojom::VideoFrame::SerializeAsMessage(&frame);
+
+    // Required to pass base deserialize checks.
+    mojo::ScopedMessageHandle handle = message.TakeMojoMessage();
+    message = mojo::Message::CreateFromMessageHandle(&handle);
+
+    // Ensure deserialization fails instead of crashing.
+    scoped_refptr<VideoFrame> new_frame;
+    return false == mojom::VideoFrame::DeserializeFromMessage(
+                        std::move(message), &new_frame);
+  }
+
  private:
   void EchoVideoFrame(const scoped_refptr<VideoFrame>& f,
                       EchoVideoFrameCallback callback) override {
+    // Touch all data in the received frame to ensure that it is valid.
+    if (f && f->HasDirectCpuAccess()) {
+      VideoFrame::HexHashOfFrameForTesting(*f);
+    }
+
     std::move(callback).Run(f);
   }
 
@@ -81,7 +118,10 @@ TEST_F(VideoFrameStructTraitsTest, MappableVideoFrame) {
       VideoFrame::STORAGE_OWNED_MEMORY,
       VideoFrame::STORAGE_UNOWNED_MEMORY,
   };
-  constexpr VideoPixelFormat formats[] = {PIXEL_FORMAT_I420, PIXEL_FORMAT_NV12};
+  constexpr VideoPixelFormat formats[] = {
+      PIXEL_FORMAT_I420, PIXEL_FORMAT_NV12, PIXEL_FORMAT_XRGB,
+      PIXEL_FORMAT_ARGB, PIXEL_FORMAT_XBGR, PIXEL_FORMAT_ABGR,
+  };
   constexpr gfx::Size kCodedSize(100, 100);
   constexpr gfx::Rect kVisibleRect(kCodedSize);
   constexpr gfx::Size kNaturalSize = kCodedSize;
@@ -95,10 +135,10 @@ TEST_F(VideoFrameStructTraitsTest, MappableVideoFrame) {
         frame = media::VideoFrame::CreateFrame(format, kCodedSize, kVisibleRect,
                                                kNaturalSize, kTimestamp);
       } else {
-        std::vector<int32_t> strides =
+        std::vector<size_t> strides =
             VideoFrame::ComputeStrides(format, kCodedSize);
         size_t aggregate_size = 0;
-        size_t sizes[3] = {};
+        std::array<size_t, 3> sizes = {};
         for (size_t i = 0; i < strides.size(); ++i) {
           sizes[i] = media::VideoFrame::Rows(i, format, kCodedSize.height()) *
                      strides[i];
@@ -107,15 +147,28 @@ TEST_F(VideoFrameStructTraitsTest, MappableVideoFrame) {
         region = base::ReadOnlySharedMemoryRegion::Create(aggregate_size);
         ASSERT_TRUE(region.IsValid());
 
-        uint8_t* data[3] = {};
-        data[0] = const_cast<uint8_t*>(region.mapping.GetMemoryAs<uint8_t>());
-        for (size_t i = 1; i < strides.size(); ++i)
-          data[i] = data[i - 1] + sizes[i];
+        std::array<base::span<uint8_t>, 3> data = {};
+        auto mapping_span = region.mapping.GetMemoryAsSpan<uint8_t>();
+        size_t offset = 0;
+        for (size_t i = 0; i < strides.size(); ++i) {
+          data[i] = mapping_span.subspan(offset, sizes[i]);
+          offset += sizes[i];
+        }
 
-        strides.resize(3, 0);
-        frame = media::VideoFrame::WrapExternalYuvData(
-            format, kCodedSize, kVisibleRect, kNaturalSize, strides[0],
-            strides[1], strides[2], data[0], data[1], data[2], kTimestamp);
+        if (format == PIXEL_FORMAT_I420) {
+          frame = media::VideoFrame::WrapExternalYuvData(
+              format, kCodedSize, kVisibleRect, kNaturalSize, strides[0],
+              strides[1], strides[2], data[0], data[1], data[2], kTimestamp);
+        } else if (format == PIXEL_FORMAT_NV12) {
+          frame = media::VideoFrame::WrapExternalYuvData(
+              format, kCodedSize, kVisibleRect, kNaturalSize, strides[0],
+              strides[1], data[0], data[1], kTimestamp);
+        } else {
+          ASSERT_TRUE(media::IsRGB(format));
+          frame = media::VideoFrame::WrapExternalData(
+              format, kCodedSize, kVisibleRect, kNaturalSize, data[0],
+              kTimestamp);
+        }
         if (storage_type == VideoFrame::STORAGE_SHMEM)
           frame->BackWithSharedMemory(&region.region);
       }
@@ -138,14 +191,166 @@ TEST_F(VideoFrameStructTraitsTest, MappableVideoFrame) {
   }
 }
 
-TEST_F(VideoFrameStructTraitsTest, MailboxVideoFrame) {
-  gpu::Mailbox mailbox = gpu::Mailbox::GenerateForSharedImage();
-  gpu::MailboxHolder mailbox_holder[VideoFrame::kMaxPlanes];
-  mailbox_holder[0] = gpu::MailboxHolder(mailbox, gpu::SyncToken(), 0);
-  scoped_refptr<VideoFrame> frame = VideoFrame::WrapNativeTextures(
-      PIXEL_FORMAT_ARGB, mailbox_holder, VideoFrame::ReleaseMailboxCB(),
-      gfx::Size(100, 100), gfx::Rect(10, 10, 80, 80), gfx::Size(200, 100),
-      base::Seconds(100));
+#if BUILDFLAG(IS_CHROMEOS)
+TEST_F(VideoFrameStructTraitsTest, MappableVideoFrameMJPEG) {
+  constexpr VideoPixelFormat format = PIXEL_FORMAT_MJPEG;
+  constexpr gfx::Size kCodedSize(100, 100);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta kTimestamp = base::Seconds(100);
+
+  const size_t kPlaneOffset = 1024;
+  const size_t kPlaneSize = 50000;
+  const size_t kAggregateSize = kPlaneOffset + kPlaneSize;
+
+  auto region = base::ReadOnlySharedMemoryRegion::Create(kAggregateSize);
+  ASSERT_TRUE(region.IsValid());
+
+  std::vector<ColorPlaneLayout> planes = {{0, kPlaneOffset, kPlaneSize}};
+
+  auto layout = VideoFrameLayout::CreateWithPlanes(format, kCodedSize, planes);
+  ASSERT_TRUE(layout.has_value());
+
+  auto mapping_span = region.mapping.GetMemoryAsSpan<uint8_t>();
+  auto frame = media::VideoFrame::WrapExternalDataWithLayout(
+      *layout, kVisibleRect, kNaturalSize, mapping_span, kTimestamp);
+  ASSERT_TRUE(frame);
+
+  frame->BackWithSharedMemory(&region.region);
+
+  ASSERT_TRUE(RoundTrip(&frame));
+  ASSERT_TRUE(frame);
+  EXPECT_EQ(frame->format(), format);
+  ASSERT_EQ(frame->storage_type(), VideoFrame::STORAGE_SHMEM);
+  EXPECT_TRUE(frame->shm_region()->IsValid());
+}
+#else
+TEST_F(VideoFrameStructTraitsTest, MappableVideoFrameMJPEG) {
+  constexpr VideoPixelFormat format = PIXEL_FORMAT_MJPEG;
+  constexpr gfx::Size kCodedSize(100, 100);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta kTimestamp = base::Seconds(100);
+
+  const size_t kPlaneOffset = 1024;
+  const size_t kPlaneSize = 50000;
+  const size_t kAggregateSize = kPlaneOffset + kPlaneSize;
+
+  auto region = base::ReadOnlySharedMemoryRegion::Create(kAggregateSize);
+  ASSERT_TRUE(region.IsValid());
+
+  std::vector<ColorPlaneLayout> planes = {ColorPlaneLayout(
+      /*stride=*/0, /*offset=*/kPlaneOffset, /*size=*/kPlaneSize)};
+
+  auto layout = VideoFrameLayout::CreateWithPlanes(format, kCodedSize, planes);
+  ASSERT_TRUE(layout.has_value());
+
+  auto mapping_span = region.mapping.GetMemoryAsSpan<uint8_t>();
+  auto frame = media::VideoFrame::WrapExternalDataWithLayout(
+      *layout, kVisibleRect, kNaturalSize, mapping_span, kTimestamp);
+  ASSERT_TRUE(frame);
+
+  frame->BackWithSharedMemory(&region.region);
+
+  EXPECT_TRUE(RoundTripFails(std::move(frame)));
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+TEST_F(VideoFrameStructTraitsTest, InvalidOffsets) {
+  constexpr auto kFormat = PIXEL_FORMAT_I420;
+
+  // This test works by patching the outgoing mojo message, so choose a size
+  // that's two primes to try and maximize the uniqueness of the values we're
+  // scanning for in the message.
+  constexpr gfx::Size kSize(127, 149);
+
+  auto strides = VideoFrame::ComputeStrides(kFormat, kSize);
+  size_t aggregate_size = 0;
+  std::array<size_t, 3> sizes = {};
+  for (size_t i = 0; i < strides.size(); ++i) {
+    sizes[i] = VideoFrame::Rows(i, kFormat, kSize.height()) * strides[i];
+    aggregate_size += sizes[i];
+  }
+
+  auto region = base::ReadOnlySharedMemoryRegion::Create(aggregate_size);
+  ASSERT_TRUE(region.IsValid());
+
+  std::array<base::span<uint8_t>, 3> data = {};
+  std::vector<size_t> offsets;
+  auto mapping_span = region.mapping.GetMemoryAsSpan<uint8_t>();
+  size_t offset = 0;
+  for (size_t i = 0; i < strides.size(); ++i) {
+    offsets.push_back(offset);
+    data[i] = mapping_span.subspan(offset, sizes[i]);
+    offset += sizes[i];
+  }
+
+  auto frame = VideoFrame::WrapExternalYuvData(
+      kFormat, kSize, gfx::Rect(kSize), kSize, strides[0], strides[1],
+      strides[2], data[0], data[1], data[2], base::Seconds(1));
+  ASSERT_TRUE(frame);
+
+  frame->BackWithSharedMemory(&region.region);
+
+  auto message = mojom::VideoFrame::SerializeAsMessage(&frame);
+
+  // Scan for the offsets array in the message body. It will start with an
+  // array header and then have the three offsets matching our frame.
+  // SAFETY: This is a unit test that deliberately patches the serialized
+  // message payload to test error handling for invalid data. The payload is
+  // guaranteed to be 8-byte aligned by Mojo, and its size is checked before
+  // creating the span.
+  base::span<uint32_t> body = UNSAFE_BUFFERS(base::span<uint32_t>(
+      reinterpret_cast<uint32_t*>(message.mutable_payload()),
+      message.payload_num_bytes() / sizeof(uint32_t)));
+
+  bool patched_offsets = false;
+  for (size_t i = 0; i + 3 < body.size(); ++i) {
+    if (body[i] == offsets[0] && body[i + 1] == offsets[1] &&
+        body[i + 2] == offsets[2]) {
+      body[i + 1] = 0xc01db33f;
+      patched_offsets = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(patched_offsets);
+
+  // Required to pass base deserialize checks.
+  mojo::ScopedMessageHandle handle = message.TakeMojoMessage();
+  message = mojo::Message::CreateFromMessageHandle(&handle);
+
+  // Ensure deserialization fails instead of crashing.
+  scoped_refptr<VideoFrame> new_frame;
+  EXPECT_FALSE(mojom::VideoFrame::DeserializeFromMessage(std::move(message),
+                                                         &new_frame));
+}
+
+TEST_F(VideoFrameStructTraitsTest, HoleVideoFrame) {
+  base::UnguessableToken overlay_plane_id = base::UnguessableToken::Create();
+  scoped_refptr<VideoFrame> frame = VideoFrame::CreateVideoHoleFrame(
+      overlay_plane_id, gfx::Size(200, 100), base::Seconds(100));
+
+  // Saves the VideoFrame metadata from the created frame. The test should not
+  // assume these have any particular value.
+  const VideoFrame::StorageType storage_type = frame->storage_type();
+  const VideoPixelFormat format = frame->format();
+
+  ASSERT_TRUE(RoundTrip(&frame));
+  ASSERT_TRUE(frame);
+  EXPECT_FALSE(frame->metadata().end_of_stream);
+  EXPECT_EQ(frame->storage_type(), storage_type);
+  EXPECT_EQ(frame->format(), format);
+  EXPECT_EQ(frame->natural_size(), gfx::Size(200, 100));
+  EXPECT_EQ(frame->timestamp(), base::Seconds(100));
+  ASSERT_TRUE(frame->metadata().tracking_token.has_value());
+  ASSERT_EQ(*frame->metadata().tracking_token, overlay_plane_id);
+}
+
+TEST_F(VideoFrameStructTraitsTest, TrackingTokenVideoFrame) {
+  base::UnguessableToken tracking_token = base::UnguessableToken::Create();
+  scoped_refptr<VideoFrame> frame = VideoFrame::WrapTrackingToken(
+      PIXEL_FORMAT_ARGB, tracking_token, gfx::Size(100, 100),
+      gfx::Rect(10, 10, 80, 80), gfx::Size(200, 100), base::Seconds(100));
 
   ASSERT_TRUE(RoundTrip(&frame));
   ASSERT_TRUE(frame);
@@ -155,49 +360,444 @@ TEST_F(VideoFrameStructTraitsTest, MailboxVideoFrame) {
   EXPECT_EQ(frame->visible_rect(), gfx::Rect(10, 10, 80, 80));
   EXPECT_EQ(frame->natural_size(), gfx::Size(200, 100));
   EXPECT_EQ(frame->timestamp(), base::Seconds(100));
-  ASSERT_TRUE(frame->HasTextures());
-  ASSERT_EQ(frame->mailbox_holder(0).mailbox, mailbox);
+  ASSERT_TRUE(frame->metadata().tracking_token.has_value());
+  ASSERT_EQ(*frame->metadata().tracking_token, tracking_token);
 }
 
-// BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) because
-// media::FakeGpuMemoryBuffer supports NativePixmapHandle backed
-// GpuMemoryBufferHandle only. !BUILDFLAG(IS_OZONE) so as to force
-// GpuMemoryBufferSupport to select gfx::ClientNativePixmapFactoryDmabuf for
-// gfx::ClientNativePixmapFactory.
-#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && !BUILDFLAG(IS_OZONE)
-TEST_F(VideoFrameStructTraitsTest, GpuMemoryBufferVideoFrame) {
+TEST_F(VideoFrameStructTraitsTest, SharedImageVideoFrame) {
+  auto si_size = gfx::Size(100, 100);
+  gpu::SharedImageMetadata metadata;
+  metadata.format = viz::SinglePlaneFormat::kRGBA_8888;
+  metadata.size = si_size;
+  metadata.color_space = gfx::ColorSpace::CreateSRGB();
+  metadata.surface_origin = kTopLeft_GrSurfaceOrigin;
+  metadata.alpha_type = kOpaque_SkAlphaType;
+  metadata.usage = gpu::SharedImageUsageSet();
+  scoped_refptr<gpu::ClientSharedImage> shared_image =
+      gpu::ClientSharedImage::CreateForTesting(metadata);
+  scoped_refptr<VideoFrame> frame = VideoFrame::WrapSharedImage(
+      PIXEL_FORMAT_ABGR, shared_image, gpu::SyncToken(),
+      VideoFrame::ReleaseMailboxCB(), gfx::Rect(10, 10, 80, 80),
+      gfx::Size(200, 100), base::Seconds(100));
+  ASSERT_TRUE(RoundTrip(&frame));
+  ASSERT_TRUE(frame);
+  EXPECT_FALSE(frame->metadata().end_of_stream);
+  EXPECT_EQ(frame->format(), PIXEL_FORMAT_ABGR);
+  EXPECT_EQ(frame->coded_size(), gfx::Size(100, 100));
+  EXPECT_EQ(frame->visible_rect(), gfx::Rect(10, 10, 80, 80));
+  EXPECT_EQ(frame->natural_size(), gfx::Size(200, 100));
+  EXPECT_EQ(frame->timestamp(), base::Seconds(100));
+  ASSERT_TRUE(frame->HasSharedImage());
+  ASSERT_EQ(frame->shared_image()->mailbox(), shared_image->mailbox());
+}
+
+TEST_F(VideoFrameStructTraitsTest, SharedImageVideoFrameMismatchedSize) {
+  constexpr VideoPixelFormat kFormat = PIXEL_FORMAT_ABGR;
+
+  // This test works by patching the outgoing mojo message, so choose a size
+  // that's two primes to try and maximize the uniqueness of the values we're
+  // scanning for in the message.
+  constexpr gfx::Size kSize(127, 149);
+  constexpr gfx::Rect kVisibleRect(10, 10, 80, 80);
+  constexpr gfx::Size kNaturalSize(200, 100);
+  constexpr base::TimeDelta kTimestamp = base::Seconds(100);
+
+  gpu::SharedImageMetadata metadata;
+  metadata.format = viz::SinglePlaneFormat::kRGBA_8888;
+  metadata.size = kSize;
+  metadata.color_space = gfx::ColorSpace::CreateSRGB();
+  metadata.surface_origin = kTopLeft_GrSurfaceOrigin;
+  metadata.alpha_type = kOpaque_SkAlphaType;
+  metadata.usage = gpu::SharedImageUsageSet();
+  scoped_refptr<gpu::ClientSharedImage> shared_image =
+      gpu::ClientSharedImage::CreateForTesting(metadata);
+
+  scoped_refptr<VideoFrame> frame = VideoFrame::WrapSharedImage(
+      kFormat, shared_image, gpu::SyncToken(), VideoFrame::ReleaseMailboxCB(),
+      kVisibleRect, kNaturalSize, kTimestamp);
+
+  auto message = mojom::VideoFrame::SerializeAsMessage(&frame);
+
+  // Scan for the size in the message body.
+  // SAFETY: This is a unit test that deliberately patches the serialized
+  // message payload to test error handling for invalid data. The payload is
+  // guaranteed to be 8-byte aligned by Mojo, and its size is checked before
+  // creating the span.
+  base::span<uint32_t> body = UNSAFE_BUFFERS(base::span<uint32_t>(
+      reinterpret_cast<uint32_t*>(message.mutable_payload()),
+      message.payload_num_bytes() / sizeof(uint32_t)));
+
+  bool patched_size = false;
+  for (size_t i = 0; i + 1 < body.size(); ++i) {
+    if (body[i] == static_cast<uint32_t>(kSize.width()) &&
+        body[i + 1] == static_cast<uint32_t>(kSize.height())) {
+      body[i] = 200;  // Change width to 200
+      patched_size = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(patched_size);
+
+  // Required to pass base deserialize checks.
+  mojo::ScopedMessageHandle handle = message.TakeMojoMessage();
+  message = mojo::Message::CreateFromMessageHandle(&handle);
+
+  // Ensure deserialization fails instead of crashing.
+  scoped_refptr<VideoFrame> new_frame;
+  EXPECT_FALSE(mojom::VideoFrame::DeserializeFromMessage(std::move(message),
+                                                         &new_frame));
+}
+
+TEST_F(VideoFrameStructTraitsTest, SharedImageVideoFrameMismatchedColorSpace) {
+  constexpr gfx::Size kSize(100, 100);
+  constexpr gfx::Rect kVisibleRect(10, 10, 80, 80);
+  constexpr gfx::Size kNaturalSize(200, 100);
+  constexpr base::TimeDelta kTimestamp = base::Seconds(100);
+
+  gpu::SharedImageMetadata metadata;
+  metadata.format = viz::SinglePlaneFormat::kRGBA_8888;
+  metadata.size = kSize;
+  metadata.color_space = gfx::ColorSpace::CreateSRGB();
+  metadata.surface_origin = kTopLeft_GrSurfaceOrigin;
+  metadata.alpha_type = kOpaque_SkAlphaType;
+  metadata.usage = gpu::SharedImageUsageSet();
+  scoped_refptr<gpu::ClientSharedImage> shared_image =
+      gpu::ClientSharedImage::CreateForTesting(metadata);
+
+  auto exported_si = shared_image->Export();
+  auto mojo_si_data = mojom::SharedImageVideoFrameData::New(
+      std::move(exported_si), gpu::SyncToken(), /*is_mappable=*/false);
+
+  auto mojo_frame = mojom::VideoFrame::New(
+      PIXEL_FORMAT_ABGR, kSize, kVisibleRect, kNaturalSize, kTimestamp,
+      mojom::VideoFrameData::NewSharedImageData(std::move(mojo_si_data)),
+      VideoFrameMetadata(), gfx::ColorSpace::CreateREC709(),
+      gfx::HDRMetadata());
+
+  auto message = mojom::VideoFrame::SerializeAsMessage(&mojo_frame);
+  mojo::ScopedMessageHandle handle = message.TakeMojoMessage();
+  message = mojo::Message::CreateFromMessageHandle(&handle);
+
+  scoped_refptr<VideoFrame> new_frame;
+  // Should fail deserialization safely without crashing on CHECK.
+  EXPECT_FALSE(mojom::VideoFrame::DeserializeFromMessage(std::move(message),
+                                                         &new_frame));
+}
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+TEST_F(VideoFrameStructTraitsTest, DmabufsVideoFrame) {
+  constexpr gfx::Size kCodedSize = gfx::Size(256, 256);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta timestamp = base::Milliseconds(1);
+  constexpr VideoPixelFormat kFormat = PIXEL_FORMAT_NV12;
+
+  // Makes the "default" layout
+  constexpr int kUvWidth = (kCodedSize.width() + 1) / 2;
+  constexpr int kUvHeight = (kCodedSize.height() + 1) / 2;
+  constexpr int kUvStride = kUvWidth * 2;
+  constexpr int kUvSize = kUvStride * kUvHeight;
+  std::vector<ColorPlaneLayout> planes = std::vector<ColorPlaneLayout>{
+      ColorPlaneLayout(kCodedSize.width(), 0, kCodedSize.GetArea()),
+      ColorPlaneLayout(kUvStride, kCodedSize.GetArea(), kUvSize),
+  };
+  std::optional<VideoFrameLayout> layout = VideoFrameLayout::CreateWithPlanes(
+      kFormat, kCodedSize, std::move(planes));
+  ASSERT_TRUE(layout.has_value());
+
+  // Makes a single FD that is big enough to hold the layout.
+  std::vector<base::ScopedFD> fds;
+  fds.emplace_back(
+      CreateValidLookingBufferHandle(kCodedSize.GetArea() + kUvSize));
+  ASSERT_TRUE(fds.back().is_valid());
+  // Mojo serialization can be destructive, so we dup() the FD before
+  // serialization in order to use it later to compare it against the FD in the
+  // deserialized message.
+  std::vector<base::ScopedFD> duped_fds;
+  duped_fds.emplace_back(HANDLE_EINTR(dup(fds.back().get())));
+  ASSERT_TRUE(duped_fds.back().is_valid());
+
+  auto frame = VideoFrame::WrapExternalDmabufs(
+      *layout, kVisibleRect, kNaturalSize, std::move(fds), timestamp);
+  ASSERT_TRUE(RoundTrip(&frame));
+  ASSERT_TRUE(frame);
+  ASSERT_EQ(frame->storage_type(), VideoFrame::STORAGE_DMABUFS);
+  EXPECT_TRUE(frame->HasDmaBufs());
+  EXPECT_FALSE(frame->metadata().end_of_stream);
+  EXPECT_EQ(frame->format(), kFormat);
+  EXPECT_EQ(frame->coded_size(), kCodedSize);
+  EXPECT_EQ(frame->visible_rect(), kVisibleRect);
+  EXPECT_EQ(frame->natural_size(), kNaturalSize);
+  EXPECT_EQ(frame->timestamp(), timestamp);
+  EXPECT_EQ(frame->layout().is_multi_planar(), layout->is_multi_planar());
+  ASSERT_EQ(frame->layout().num_planes(), layout->num_planes());
+  for (size_t i = 0, num_planes = layout->num_planes(); i < num_planes; ++i) {
+    EXPECT_EQ(frame->layout().planes()[i].stride, layout->planes()[i].stride);
+    EXPECT_EQ(frame->layout().planes()[i].offset, layout->planes()[i].offset);
+    EXPECT_EQ(frame->layout().planes()[i].size, layout->planes()[i].size);
+  }
+  ASSERT_EQ(frame->NumDmabufFds(), duped_fds.size());
+  for (size_t i = 0, num_fds = duped_fds.size(); i < num_fds; ++i) {
+    const auto pid = base::Process::Current().Pid();
+    EXPECT_EQ(syscall(SYS_kcmp, pid, pid, KCMP_FILE, duped_fds[i].get(),
+                      frame->GetDmabufFd(i)),
+              0);
+  }
+}
+
+TEST_F(VideoFrameStructTraitsTest, MultiplanarDmabufsVideoFrame) {
+  constexpr gfx::Size kCodedSize = gfx::Size(256, 256);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta timestamp = base::Milliseconds(1);
+  constexpr VideoPixelFormat kFormat = PIXEL_FORMAT_NV12;
+
+  // Makes the "default" layout
+  constexpr int kUvWidth = (kCodedSize.width() + 1) / 2;
+  constexpr int kUvHeight = (kCodedSize.height() + 1) / 2;
+  constexpr int kUvStride = kUvWidth * 2;
+  constexpr int kUvSize = kUvStride * kUvHeight;
+  std::vector<ColorPlaneLayout> planes = std::vector<ColorPlaneLayout>{
+      ColorPlaneLayout(kCodedSize.width(), 1, kCodedSize.GetArea()),
+      ColorPlaneLayout(kUvStride, 2, kUvSize),
+  };
+  std::optional<VideoFrameLayout> layout = VideoFrameLayout::CreateMultiPlanar(
+      kFormat, kCodedSize, std::move(planes));
+  ASSERT_TRUE(layout.has_value());
+
+  // For each plane, makes an FD
+  std::vector<base::ScopedFD> fds;
+  std::vector<base::ScopedFD> duped_fds;
+  for (const auto& plane : layout->planes()) {
+    fds.emplace_back(CreateValidLookingBufferHandle(plane.offset + plane.size));
+    ASSERT_TRUE(fds.back().is_valid());
+    // Mojo serialization can be destructive, so we dup() the FD before
+    // serialization in order to use it later to compare it against the FD in
+    // the deserialized message.
+    duped_fds.emplace_back(HANDLE_EINTR(dup(fds.back().get())));
+    ASSERT_TRUE(duped_fds.back().is_valid());
+  }
+
+  auto frame = VideoFrame::WrapExternalDmabufs(
+      *layout, kVisibleRect, kNaturalSize, std::move(fds), timestamp);
+  ASSERT_TRUE(RoundTrip(&frame));
+  ASSERT_TRUE(frame);
+  ASSERT_EQ(frame->storage_type(), VideoFrame::STORAGE_DMABUFS);
+  EXPECT_TRUE(frame->HasDmaBufs());
+  EXPECT_FALSE(frame->metadata().end_of_stream);
+  EXPECT_EQ(frame->format(), kFormat);
+  EXPECT_EQ(frame->coded_size(), kCodedSize);
+  EXPECT_EQ(frame->visible_rect(), kVisibleRect);
+  EXPECT_EQ(frame->natural_size(), kNaturalSize);
+  EXPECT_EQ(frame->timestamp(), timestamp);
+  EXPECT_EQ(frame->layout().is_multi_planar(), layout->is_multi_planar());
+  ASSERT_EQ(frame->layout().num_planes(), layout->num_planes());
+  for (size_t i = 0, num_planes = layout->num_planes(); i < num_planes; ++i) {
+    EXPECT_EQ(frame->layout().planes()[i].stride, layout->planes()[i].stride);
+    EXPECT_EQ(frame->layout().planes()[i].offset, layout->planes()[i].offset);
+    EXPECT_EQ(frame->layout().planes()[i].size, layout->planes()[i].size);
+  }
+  ASSERT_EQ(frame->NumDmabufFds(), duped_fds.size());
+  for (size_t i = 0, num_fds = duped_fds.size(); i < num_fds; ++i) {
+    const auto pid = base::Process::Current().Pid();
+    EXPECT_EQ(syscall(SYS_kcmp, pid, pid, KCMP_FILE, duped_fds[i].get(),
+                      frame->GetDmabufFd(i)),
+              0);
+  }
+}
+
+TEST_F(VideoFrameStructTraitsTest, DmabufsVideoInvalidPixelFormat) {
+  constexpr gfx::Size kCodedSize = gfx::Size(256, 256);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta timestamp = base::Milliseconds(1);
+  constexpr VideoPixelFormat kFormat = PIXEL_FORMAT_XRGB;
+
+  // Makes the "default" layout
+  std::vector<ColorPlaneLayout> planes = std::vector<ColorPlaneLayout>{
+      ColorPlaneLayout(kCodedSize.width() * 4, 0, kCodedSize.GetArea() * 4),
+  };
+  std::optional<VideoFrameLayout> layout = VideoFrameLayout::CreateWithPlanes(
+      kFormat, kCodedSize, std::move(planes));
+  ASSERT_TRUE(layout.has_value());
+
+  // Makes a single FD that is too small to hold the layout.
+  std::vector<base::ScopedFD> fds;
+  fds.emplace_back(CreateValidLookingBufferHandle(4 * kCodedSize.GetArea()));
+  ASSERT_TRUE(fds.back().is_valid());
+
+  auto frame = VideoFrame::WrapExternalDmabufs(
+      *layout, kVisibleRect, kNaturalSize, std::move(fds), timestamp);
+  ASSERT_TRUE(frame);
+
+  // Ensure deserialization fails instead of crashing.
+  EXPECT_TRUE(RoundTripFails(std::move(frame)));
+}
+
+TEST_F(VideoFrameStructTraitsTest, DmabufsVideoNondecreasingStrides) {
+  constexpr gfx::Size kCodedSize = gfx::Size(256, 256);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta timestamp = base::Milliseconds(1);
+  constexpr VideoPixelFormat kFormat = PIXEL_FORMAT_NV12;
+
+  // Makes the "default" layout
+  constexpr int kUvWidth = (kCodedSize.width() + 1) / 2;
+  constexpr int kUvHeight = (kCodedSize.height() + 1) / 2;
+  constexpr int kUvStride = kUvWidth * 2;
+  constexpr int kUvSize = kUvStride * kUvHeight;
+  // Mess up the firs plane width
+  std::vector<ColorPlaneLayout> planes = std::vector<ColorPlaneLayout>{
+      ColorPlaneLayout(1, 0, kCodedSize.GetArea()),
+      ColorPlaneLayout(kUvStride, kCodedSize.GetArea(), kUvSize),
+  };
+  std::optional<VideoFrameLayout> layout = VideoFrameLayout::CreateWithPlanes(
+      kFormat, kCodedSize, std::move(planes));
+  ASSERT_TRUE(layout.has_value());
+
+  // Makes a single FD that is too small to hold the layout.
+  std::vector<base::ScopedFD> fds;
+  fds.emplace_back(CreateValidLookingBufferHandle(kCodedSize.GetArea()));
+  ASSERT_TRUE(fds.back().is_valid());
+
+  auto frame = VideoFrame::WrapExternalDmabufs(
+      *layout, kVisibleRect, kNaturalSize, std::move(fds), timestamp);
+
+  // Ensure deserialization fails instead of crashing.
+  EXPECT_TRUE(RoundTripFails(std::move(frame)));
+}
+
+TEST_F(VideoFrameStructTraitsTest, DmabufsVideoInvalidStrides) {
+  constexpr gfx::Size kCodedSize = gfx::Size(256, 256);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta timestamp = base::Milliseconds(1);
+  constexpr VideoPixelFormat kFormat = PIXEL_FORMAT_NV12;
+
+  // Makes the "default" layout
+  constexpr int kUvWidth = (kCodedSize.width() + 1) / 2;
+  constexpr int kUvHeight = (kCodedSize.height() + 1) / 2;
+  constexpr int kUvStride = kUvWidth * 2;
+  constexpr int kUvSize = kUvStride * kUvHeight;
+  // Reverse the plane layout.
+  std::vector<ColorPlaneLayout> planes = std::vector<ColorPlaneLayout>{
+      ColorPlaneLayout(kUvStride, kCodedSize.GetArea(), kUvSize),
+      ColorPlaneLayout(kCodedSize.width(), 0, kCodedSize.GetArea()),
+  };
+  std::optional<VideoFrameLayout> layout = VideoFrameLayout::CreateWithPlanes(
+      kFormat, kCodedSize, std::move(planes));
+  ASSERT_TRUE(layout.has_value());
+
+  // Makes a single FD that is too small to hold the layout.
+  std::vector<base::ScopedFD> fds;
+  fds.emplace_back(CreateValidLookingBufferHandle(kCodedSize.GetArea()));
+  ASSERT_TRUE(fds.back().is_valid());
+
+  auto frame = VideoFrame::WrapExternalDmabufs(
+      *layout, kVisibleRect, kNaturalSize, std::move(fds), timestamp);
+
+  // Ensure deserialization fails instead of crashing.
+  EXPECT_TRUE(RoundTripFails(std::move(frame)));
+}
+
+TEST_F(VideoFrameStructTraitsTest, DmabufsVideoFrameTooSmall) {
+  constexpr gfx::Size kCodedSize = gfx::Size(256, 256);
+  constexpr gfx::Rect kVisibleRect(kCodedSize);
+  constexpr gfx::Size kNaturalSize = kCodedSize;
+  constexpr base::TimeDelta timestamp = base::Milliseconds(1);
+  constexpr VideoPixelFormat kFormat = PIXEL_FORMAT_NV12;
+
+  // Makes the "default" layout
+  constexpr int kUvWidth = (kCodedSize.width() + 1) / 2;
+  constexpr int kUvHeight = (kCodedSize.height() + 1) / 2;
+  constexpr int kUvStride = kUvWidth * 2;
+  constexpr int kUvSize = kUvStride * kUvHeight;
+  std::vector<ColorPlaneLayout> planes = std::vector<ColorPlaneLayout>{
+      ColorPlaneLayout(kCodedSize.width(), 0, kCodedSize.GetArea()),
+      ColorPlaneLayout(kUvStride, kCodedSize.GetArea(), kUvSize),
+  };
+  std::optional<VideoFrameLayout> layout = VideoFrameLayout::CreateWithPlanes(
+      kFormat, kCodedSize, std::move(planes));
+  ASSERT_TRUE(layout.has_value());
+
+  // Makes a single FD that is too small to hold the layout.
+  std::vector<base::ScopedFD> fds;
+  fds.emplace_back(CreateValidLookingBufferHandle(kCodedSize.GetArea()));
+  ASSERT_TRUE(fds.back().is_valid());
+
+  auto frame = VideoFrame::WrapExternalDmabufs(
+      *layout, kVisibleRect, kNaturalSize, std::move(fds), timestamp);
+  ASSERT_TRUE(frame);
+
+  // Ensure deserialization fails instead of crashing.
+  EXPECT_TRUE(RoundTripFails(std::move(frame)));
+}
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+
+TEST_F(VideoFrameStructTraitsTest, MappableSharedImageVideoFrame) {
+  auto test_sii = base::MakeRefCounted<gpu::TestSharedImageInterface>();
   gfx::Size coded_size = gfx::Size(256, 256);
   gfx::Rect visible_rect(coded_size);
   auto timestamp = base::Milliseconds(1);
-  std::unique_ptr<gfx::GpuMemoryBuffer> gmb =
-      std::make_unique<FakeGpuMemoryBuffer>(
-          coded_size, gfx::BufferFormat::YUV_420_BIPLANAR);
-  gfx::BufferFormat expected_gmb_format = gmb->GetFormat();
-  gfx::Size expected_gmb_size = gmb->GetSize();
-  gpu::MailboxHolder mailbox_holders[media::VideoFrame::kMaxPlanes] = {
-      gpu::MailboxHolder(gpu::Mailbox::GenerateForSharedImage(),
-                         gpu::SyncToken(), 5),
-      gpu::MailboxHolder(gpu::Mailbox::GenerateForSharedImage(),
-                         gpu::SyncToken(), 10)};
-  auto frame = VideoFrame::WrapExternalGpuMemoryBuffer(
-      visible_rect, visible_rect.size(), std::move(gmb), mailbox_holders,
-      base::NullCallback(), timestamp);
+  auto si_format = viz::SinglePlaneFormat::kRGBA_8888;
+  const auto si_usage = gpu::SHARED_IMAGE_USAGE_CPU_WRITE_ONLY |
+                        gpu::SHARED_IMAGE_USAGE_DISPLAY_READ;
+  auto shared_image = test_sii->CreateSharedImage(
+      {si_format, coded_size, gfx::ColorSpace(),
+       gpu::SharedImageUsageSet(si_usage), "VideoFrameStructTraitsTest"},
+      gpu::kNullSurfaceHandle, gfx::BufferUsage::GPU_READ);
+  ASSERT_TRUE(shared_image);
+  auto frame = VideoFrame::WrapMappableSharedImage(
+      shared_image, test_sii->GenVerifiedSyncToken(), base::NullCallback(),
+      visible_rect, visible_rect.size(), timestamp);
+  ASSERT_TRUE(frame);
   ASSERT_TRUE(RoundTrip(&frame));
   ASSERT_TRUE(frame);
-  ASSERT_EQ(frame->storage_type(), VideoFrame::STORAGE_GPU_MEMORY_BUFFER);
-  EXPECT_TRUE(frame->HasGpuMemoryBuffer());
+  ASSERT_EQ(frame->storage_type(), VideoFrame::STORAGE_MAPPABLE_SHARED_IMAGE);
+  EXPECT_TRUE(frame->HasMappableSharedImage());
   EXPECT_FALSE(frame->metadata().end_of_stream);
-  EXPECT_EQ(frame->format(), PIXEL_FORMAT_NV12);
+  EXPECT_EQ(frame->format(), PIXEL_FORMAT_ABGR);
   EXPECT_EQ(frame->coded_size(), coded_size);
   EXPECT_EQ(frame->visible_rect(), visible_rect);
   EXPECT_EQ(frame->natural_size(), visible_rect.size());
   EXPECT_EQ(frame->timestamp(), timestamp);
-  ASSERT_TRUE(frame->HasTextures());
-  EXPECT_EQ(frame->mailbox_holder(0).mailbox, mailbox_holders[0].mailbox);
-  EXPECT_EQ(frame->mailbox_holder(1).mailbox, mailbox_holders[1].mailbox);
-  EXPECT_EQ(frame->GetGpuMemoryBuffer()->GetFormat(), expected_gmb_format);
-  EXPECT_EQ(frame->GetGpuMemoryBuffer()->GetSize(), expected_gmb_size);
+  ASSERT_TRUE(frame->HasSharedImage());
+  ASSERT_EQ(frame->shared_image()->mailbox(), shared_image->mailbox());
 }
-#endif  // (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) &&
-        // !BUILDFLAG(IS_OZONE)
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+TEST_F(VideoFrameStructTraitsTest,
+       MappableSharedImageWithoutNativePixmapFails) {
+  auto si_size = gfx::Size(100, 100);
+  gpu::SharedImageMetadata metadata;
+  metadata.format = viz::SinglePlaneFormat::kRGBA_8888;
+  metadata.size = si_size;
+  metadata.color_space = gfx::ColorSpace::CreateSRGB();
+  metadata.surface_origin = kTopLeft_GrSurfaceOrigin;
+  metadata.alpha_type = kOpaque_SkAlphaType;
+  metadata.usage = gpu::SharedImageUsageSet();
+  scoped_refptr<gpu::ClientSharedImage> shared_image =
+      gpu::ClientSharedImage::CreateForTesting(metadata);
+
+  auto exported_si = shared_image->Export();
+  auto mojo_si_data = mojom::SharedImageVideoFrameData::New(
+      std::move(exported_si), gpu::SyncToken(), /*is_mappable=*/true);
+
+  auto mojo_frame = mojom::VideoFrame::New(
+      PIXEL_FORMAT_ABGR, si_size, gfx::Rect(si_size), si_size,
+      base::Seconds(100),
+      mojom::VideoFrameData::NewSharedImageData(std::move(mojo_si_data)),
+      VideoFrameMetadata(), gfx::ColorSpace::CreateSRGB(), gfx::HDRMetadata());
+
+  auto message = mojom::VideoFrame::SerializeAsMessage(&mojo_frame);
+  mojo::ScopedMessageHandle handle = message.TakeMojoMessage();
+  message = mojo::Message::CreateFromMessageHandle(&handle);
+
+  scoped_refptr<VideoFrame> new_frame;
+  // Should fail deserialization safely without crashing on CHECK.
+  EXPECT_FALSE(mojom::VideoFrame::DeserializeFromMessage(std::move(message),
+                                                         &new_frame));
+}
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+
 }  // namespace media

@@ -22,28 +22,30 @@
  * @param {string} expectedContent Expected file content.
  */
 function readFileAndExpectContent(entry, expectedContent) {
-  chrome.test.assertFalse(!entry.file,
-                          'The object does not have \'file\' method');
-  entry.file(function(file) {
-    var reader = new FileReader();
-    reader.onloadend = function(e) {
-      chrome.test.assertEq(expectedContent, reader.result);
-      chrome.test.succeed();
-    };
-    reader.onerror = function(e) {
-      chrome.test.fail('Error reading file contents.');
-    };
-    reader.readAsText(file);
-  }, function(error) {
-    chrome.test.fail('Unable to get file snapshot: ' + error.name);
-  });
+  chrome.test.assertFalse(
+      !entry.file, 'The object does not have \'file\' method');
+  entry.file(
+      function(file) {
+        const reader = new FileReader();
+        reader.onloadend = function(e) {
+          chrome.test.assertEq(expectedContent, reader.result);
+          chrome.test.succeed();
+        };
+        reader.onerror = function(e) {
+          chrome.test.fail('Error reading file contents.');
+        };
+        reader.readAsText(file);
+      },
+      function(error) {
+        chrome.test.fail(`Unable to get file snapshot: ${error.name}`);
+      });
 }
 
 /**
  * Object that follows the app's status before chrome.test.runTests is called
  * (i.e. while the app is waiting for onLauched events).
  */
-var testPreRunStatus = {
+const testPreRunStatus = {
   // Whether the 'xulAction' handler has been launched.
   gotXulAction: false,
   // Whether the 'tiffAction' handler has been launched.
@@ -58,7 +60,7 @@ var testPreRunStatus = {
  *
  * @type {Array<function()>}
  */
-var handlerTests = [];
+const handlerTests = [];
 
 /**
  * Called if an error is detected before chrome.test.runTests. It sends failure
@@ -76,8 +78,9 @@ function onError(message) {
  * received.
  */
 function launchedListener(launchData) {
-  if (testPreRunStatus.done)
+  if (testPreRunStatus.done) {
     return;
+  }
 
   if (!launchData) {
     onError('No launchData');
@@ -89,29 +92,27 @@ function launchedListener(launchData) {
     return;
   }
 
-  if (!launchData.items || launchData.items.length != 1) {
+  if (!launchData.items || launchData.items.length !== 1) {
     onError('Invalid launch data items.');
     return;
   }
 
-  if (launchData.id == 'xulAction') {
-    handlerTests.push(
-      function readXulAction() {
-        readFileAndExpectContent(launchData.items[0].entry,
-                                 'This is some test content.');
+  if (launchData.id === 'xulAction') {
+    handlerTests.push(function readXulAction() {
+      readFileAndExpectContent(
+          launchData.items[0].entry, 'This is some test content.');
     });
     testPreRunStatus.gotXulAction = true;
-  } else if (launchData.id == 'tiffAction') {
-    handlerTests.push(
-      function readTiffAction() {
-        readFileAndExpectContent(launchData.items[0].entry,
-                                 'This is some test content.');
+  } else if (launchData.id === 'tiffAction') {
+    handlerTests.push(function readTiffAction() {
+      readFileAndExpectContent(
+          launchData.items[0].entry, 'This is some test content.');
     });
     testPreRunStatus.gotTiffAction = true;
     window.domAutomationController.send(
         `Received ${launchData.id} with: ${launchData.items[0].entry.name}`);
   } else {
-    onError('Invalid handler id: \'' + launchData.id +'\'.');
+    onError(`Invalid handler id: '${launchData.id}'.`);
     return;
   }
 

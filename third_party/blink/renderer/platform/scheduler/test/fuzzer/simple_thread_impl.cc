@@ -7,21 +7,17 @@ namespace base {
 namespace sequence_manager {
 
 SimpleThreadImpl::SimpleThreadImpl(ThreadPoolManager* thread_pool_manager,
-                                   base::TimeTicks initial_time,
                                    ThreadCallback callback)
     : SimpleThread("TestThread"),
       thread_pool_manager_(thread_pool_manager),
-      initial_time_(initial_time),
       callback_(std::move(callback)) {
   DCHECK(thread_pool_manager_);
 }
 
 void SimpleThreadImpl::Run() {
   std::unique_ptr<ThreadManager> thread_manager =
-      std::make_unique<ThreadManager>(initial_time_,
-                                      thread_pool_manager_->processor());
-  thread_manager_ = thread_manager.get();
-  std::move(callback_).Run(thread_manager_);
+      std::make_unique<ThreadManager>(thread_pool_manager_->processor());
+  std::move(callback_).Run(thread_manager.get());
   thread_can_shutdown_.Wait();
 }
 

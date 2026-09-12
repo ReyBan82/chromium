@@ -8,15 +8,14 @@
 #include "chrome/browser/ash/app_list/app_sync_ui_state_factory.h"
 #include "chrome/browser/ash/app_list/app_sync_ui_state_observer.h"
 #include "chrome/browser/extensions/extension_service.h"
-#include "chrome/browser/extensions/pending_extension_manager.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/sync/sync_service_factory.h"
 #include "components/prefs/pref_service.h"
-#include "components/sync/driver/sync_service.h"
-#include "components/sync/driver/sync_user_settings.h"
+#include "components/sync/base/user_selectable_type.h"
+#include "components/sync/service/sync_service.h"
+#include "components/sync/service/sync_user_settings.h"
 #include "components/user_manager/user_manager.h"
 #include "extensions/browser/extension_registry.h"
-#include "extensions/browser/extension_system.h"
+#include "extensions/browser/pending_extension_manager.h"
 
 namespace {
 
@@ -38,15 +37,13 @@ bool AppSyncUIState::ShouldObserveAppSyncForProfile(Profile* profile) {
   if (!profile || profile->IsOffTheRecord())
     return false;
 
-  if (!SyncServiceFactory::HasSyncService(profile))
-    return false;
-
   return profile->IsNewProfile();
 }
 
-AppSyncUIState::AppSyncUIState(Profile* profile)
+AppSyncUIState::AppSyncUIState(Profile* profile,
+                               syncer::SyncService* sync_service)
     : profile_(profile),
-      sync_service_(nullptr),
+      sync_service_(sync_service),
       status_(STATUS_NORMAL),
       extension_registry_(nullptr) {
   StartObserving();
@@ -71,14 +68,12 @@ void AppSyncUIState::Shutdown() {
 
 void AppSyncUIState::StartObserving() {
   DCHECK(ShouldObserveAppSyncForProfile(profile_));
-  DCHECK(!sync_service_);
+  DCHECK(sync_service_);
   DCHECK(!extension_registry_);
 
   extension_registry_ = extensions::ExtensionRegistry::Get(profile_);
   extension_registry_->AddObserver(this);
 
-  sync_service_ = SyncServiceFactory::GetForProfile(profile_);
-  CHECK(sync_service_);
   sync_service_->AddObserver(this);
 }
 
@@ -120,15 +115,23 @@ void AppSyncUIState::SetStatus(Status status) {
 
 void AppSyncUIState::CheckAppSync() {
   if (!sync_service_ ||
-      !sync_service_->GetUserSettings()->IsFirstSetupComplete()) {
+      !sync_service_->GetUserSettings()->GetSelectedOsTypes().Has(
+          syncer::UserSelectableOsType::kOsApps)) {
     return;
   }
 
-  const bool synced = sync_service_->IsSyncFeatureActive();
-  const bool has_pending_extension = extensions::ExtensionSystem::Get(profile_)
-                                         ->extension_service()
-                                         ->pending_extension_manager()
-                                         ->HasPendingExtensionFromSync();
+  // The sync service will be paused if it encounters errors, transition to
+  // normal UI state.
+  if (sync_service_->GetTransportState() ==
+      syncer::SyncService::TransportState::PAUSED) {
+    SetStatus(STATUS_NORMAL);
+    return;
+  }
+
+  const bool synced = sync_service_->GetActiveDataTypes().Has(syncer::APP_LIST);
+  const bool has_pending_extension =
+      extensions::PendingExtensionManager::Get(profile_)
+          ->HasPendingExtensionFromSync();
 
   if (synced && !has_pending_extension)
     SetStatus(STATUS_NORMAL);
@@ -143,6 +146,11 @@ void AppSyncUIState::OnMaxSyncingTimer() {
 void AppSyncUIState::OnStateChanged(syncer::SyncService* sync) {
   DCHECK(sync_service_);
   CheckAppSync();
+}
+
+void AppSyncUIState::OnSyncShutdown(syncer::SyncService* sync) {
+  // Unreachable, since this service is Shutdown() before the SyncService.
+  NOTREACHED();
 }
 
 void AppSyncUIState::OnExtensionLoaded(content::BrowserContext* browser_context,

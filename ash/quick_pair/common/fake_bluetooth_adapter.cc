@@ -12,17 +12,16 @@ const std::vector<uint8_t>& kTestWriteResponse{0x01, 0x03, 0x02, 0x01, 0x02};
 
 namespace ash::quick_pair {
 
-void FakeBluetoothAdapter::NotifyPoweredChanged(bool powered) {
-  device::BluetoothAdapter::NotifyAdapterPoweredChanged(powered);
-}
+FakeBluetoothAdapter::FakeBluetoothAdapter() = default;
 
 void FakeBluetoothAdapter::SetBluetoothIsPowered(bool powered) {
   is_bluetooth_powered_ = powered;
-  NotifyPoweredChanged(powered);
+  device::BluetoothAdapter::NotifyAdapterPoweredChanged(powered);
 }
 
 void FakeBluetoothAdapter::SetBluetoothIsPresent(bool present) {
   is_bluetooth_present_ = present;
+  device::BluetoothAdapter::NotifyAdapterPresentChanged(present);
 }
 
 void FakeBluetoothAdapter::SetHardwareOffloadingStatus(
@@ -57,6 +56,11 @@ void FakeBluetoothAdapter::NotifyConfirmPasskey(
   pairing_delegate_->ConfirmPasskey(device, passkey);
 }
 
+void FakeBluetoothAdapter::NotifyDisplayPasskey(device::BluetoothDevice* device,
+                                                uint32_t passkey) {
+  pairing_delegate_->DisplayPasskey(device, passkey);
+}
+
 void FakeBluetoothAdapter::NotifyDevicePairedChanged(
     device::BluetoothDevice* device,
     bool new_paired_status) {
@@ -69,6 +73,20 @@ void FakeBluetoothAdapter::NotifyDeviceChanged(
     device::BluetoothDevice* device) {
   for (auto& observer : GetObservers()) {
     observer.DeviceChanged(this, device);
+  }
+}
+
+void FakeBluetoothAdapter::NotifyDeviceConnectedStateChanged(
+    device::BluetoothDevice* device,
+    bool is_now_connected) {
+  for (auto& observer : observers_) {
+    observer.DeviceConnectedStateChanged(this, device, is_now_connected);
+  }
+}
+
+void FakeBluetoothAdapter::NotifyDeviceAdded(device::BluetoothDevice* device) {
+  for (auto& observer : observers_) {
+    observer.DeviceAdded(this, device);
   }
 }
 
@@ -112,7 +130,7 @@ void FakeBluetoothAdapter::AddPairingDelegate(
 
 void FakeBluetoothAdapter::ConnectDevice(
     const std::string& address,
-    const absl::optional<device::BluetoothDevice::AddressType>& address_type,
+    const std::optional<device::BluetoothDevice::AddressType>& address_type,
     base::OnceCallback<void(device::BluetoothDevice*)> callback,
     base::OnceCallback<void(const std::string&)> error_callback) {
   if (connect_device_failure_) {

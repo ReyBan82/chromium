@@ -7,14 +7,14 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <GLES2/gl2extchromium.h>
-
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include <vector>
+
 #include "base/atomicops.h"
 #include "base/containers/circular_deque.h"
-#include "base/containers/cxx20_erase.h"
 #include "base/numerics/safe_conversions.h"
 #include "gpu/command_buffer/client/gles2_cmd_helper.h"
 #include "gpu/command_buffer/client/gles2_implementation.h"
@@ -24,7 +24,7 @@
 namespace gpu {
 namespace gles2 {
 
-QuerySyncManager::Bucket::Bucket(QuerySync* sync_mem,
+QuerySyncManager::Bucket::Bucket(base::span<QuerySync> sync_mem,
                                  int32_t shm_id,
                                  unsigned int shm_offset)
     : syncs(sync_mem), shm_id(shm_id), base_shm_offset(shm_offset) {}
@@ -32,8 +32,8 @@ QuerySyncManager::Bucket::Bucket(QuerySync* sync_mem,
 QuerySyncManager::Bucket::~Bucket() = default;
 
 void QuerySyncManager::Bucket::FreePendingSyncs() {
-  base::EraseIf(pending_syncs, [this](const PendingSync& pending) {
-    QuerySync* sync = this->syncs + pending.index;
+  std::erase_if(pending_syncs, [this](const PendingSync& pending) {
+    QuerySync* sync = &this->syncs[pending.index];
     if (base::subtle::Acquire_Load(&sync->process_count) ==
         pending.submit_count) {
       this->in_use_query_syncs[pending.index] = false;
@@ -51,7 +51,7 @@ QuerySyncManager::QuerySyncManager(MappedMemoryManager* manager)
 
 QuerySyncManager::~QuerySyncManager() {
   while (!buckets_.empty()) {
-    mapped_memory_->Free(buckets_.front()->syncs);
+    mapped_memory_->Free(buckets_.front()->syncs.data());
     buckets_.pop_front();
   }
 }
@@ -69,12 +69,11 @@ bool QuerySyncManager::Alloc(QuerySyncManager::QueryInfo* info) {
   if (!bucket) {
     int32_t shm_id;
     unsigned int shm_offset;
-    void* mem = mapped_memory_->Alloc(
-        kSyncsPerBucket * sizeof(QuerySync), &shm_id, &shm_offset);
-    if (!mem) {
+    base::span<QuerySync> syncs = mapped_memory_->AllocTyped<QuerySync>(
+        kSyncsPerBucket, &shm_id, &shm_offset);
+    if (syncs.empty()) {
       return false;
     }
-    QuerySync* syncs = static_cast<QuerySync*>(mem);
     buckets_.push_back(std::make_unique<Bucket>(syncs, shm_id, shm_offset));
     bucket = buckets_.back().get();
   }
@@ -121,14 +120,14 @@ void QuerySyncManager::Shrink(CommandBufferHelper* helper) {
         // access the shared memory after current commands, so we can
         // free-pending-token.
         token = helper->InsertToken();
-        mapped_memory_->FreePendingToken(bucket->syncs, token);
+        mapped_memory_->FreePendingToken(bucket->syncs.data(), token);
       } else {
         new_buckets.push_back(std::move(bucket));
       }
     } else {
       // Every QuerySync is free or completed, so we know the service side won't
       // access it any more, so we can free immediately.
-      mapped_memory_->Free(bucket->syncs);
+      mapped_memory_->Free(bucket->syncs.data());
     }
     buckets_.pop_front();
   }
@@ -156,11 +155,6 @@ void QueryTracker::Query::Begin(QueryTrackerClient* client) {
   switch (target()) {
     case GL_GET_ERROR_QUERY_CHROMIUM:
       // To nothing on begin for error queries.
-      break;
-    case GL_LATENCY_QUERY_CHROMIUM:
-      client_begin_time_us_ = MicrosecondsSinceOriginOfTime();
-      // tell service about id, shared memory and count
-      client->IssueBeginQuery(target(), id(), shm_id(), shm_offset());
       break;
     case GL_ASYNC_PIXEL_PACK_COMPLETED_CHROMIUM:
     default:
@@ -219,13 +213,7 @@ bool QueryTracker::Query::CheckResultsAvailable(CommandBufferHelper* helper,
     // this method from CommandBufferHelper.
     if (processed_all || helper->IsContextLost()) {
       switch (target()) {
-        case GL_LATENCY_QUERY_CHROMIUM:
-          // Disabled DCHECK because of http://crbug.com/419236.
-          //DCHECK(info_.sync->result >= client_begin_time_us_);
-          result_ = info_.sync->result - client_begin_time_us_;
-          break;
         case GL_COMMANDS_ISSUED_CHROMIUM:
-        case GL_COMMANDS_ISSUED_TIMESTAMP_CHROMIUM:
         case GL_ASYNC_PIXEL_PACK_COMPLETED_CHROMIUM:
         case GL_GET_ERROR_QUERY_CHROMIUM:
         case GL_PROGRAM_COMPLETION_QUERY_CHROMIUM:
@@ -394,13 +382,12 @@ bool QueryTracker::SetDisjointSync(QueryTrackerClient* client) {
     // Allocate memory for disjoint value sync.
     int32_t shm_id = -1;
     uint32_t shm_offset;
-    void* mem = mapped_memory_->Alloc(sizeof(*disjoint_count_sync_),
-                                      &shm_id,
-                                      &shm_offset);
-    if (mem) {
+    base::span<DisjointValueSync> buffer =
+        mapped_memory_->AllocTyped<DisjointValueSync>(1, &shm_id, &shm_offset);
+    if (!buffer.empty()) {
       disjoint_count_sync_shm_id_ = shm_id;
       disjoint_count_sync_shm_offset_ = shm_offset;
-      disjoint_count_sync_ = static_cast<DisjointValueSync*>(mem);
+      disjoint_count_sync_ = buffer.data();
       disjoint_count_sync_->Reset();
       client->IssueSetDisjointValueSync(shm_id, shm_offset);
     }

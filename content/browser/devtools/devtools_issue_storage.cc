@@ -4,6 +4,10 @@
 
 #include "content/browser/devtools/devtools_issue_storage.h"
 
+#include <bit>
+#include <cstdint>
+
+#include "base/debug/crash_logging.h"
 #include "content/browser/devtools/protocol/audits.h"
 #include "content/browser/devtools/render_frame_devtools_agent_host.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
@@ -20,33 +24,49 @@ PAGE_USER_DATA_KEY_IMPL(DevToolsIssueStorage);
 DevToolsIssueStorage::DevToolsIssueStorage(Page& page)
     : PageUserData<DevToolsIssueStorage>(page) {
   // DevToolsIssueStorage is only created for outermost pages.
-  DCHECK(!page.GetMainDocument().GetParentOrOuterDocument());
+  CHECK(!page.GetMainDocument().GetParentOrOuterDocument(),
+        base::NotFatalUntil::M159);
 }
-DevToolsIssueStorage::~DevToolsIssueStorage() = default;
 
-void DevToolsIssueStorage::AddInspectorIssue(
+DevToolsIssueStorage::~DevToolsIssueStorage() {
+  // TOOD(1351587): remove explicit destructor once the bug is fixed.
+  // This is so that crash key is scoped to issue destruction.
+  SCOPED_CRASH_KEY_NUMBER("devtools", "audit_issue_count",
+                          std::bit_width<uint32_t>(total_added_issues_) - 1);
+  issues_.clear();
+}
+
+const protocol::Audits::InspectorIssue& DevToolsIssueStorage::AddInspectorIssue(
     RenderFrameHost* rfh,
     std::unique_ptr<protocol::Audits::InspectorIssue> issue) {
-  DCHECK_LE(issues_.size(), kMaxIssueCount);
+  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));
+
+  CHECK_LE(issues_.size(), kMaxIssueCount, base::NotFatalUntil::M159);
   if (issues_.size() == kMaxIssueCount) {
     issues_.pop_front();
   }
+  total_added_issues_++;
   issues_.emplace_back(rfh->GetGlobalId(), std::move(issue));
+  return *issues_.back().second.get();
 }
 
 std::vector<const protocol::Audits::InspectorIssue*>
 DevToolsIssueStorage::FindIssuesForAgentOf(
     RenderFrameHost* render_frame_host) const {
+  CHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));
+
   RenderFrameHostImpl* render_frame_host_impl =
       static_cast<RenderFrameHostImpl*>(render_frame_host);
   RenderFrameHostImpl* main_rfh =
       static_cast<RenderFrameHostImpl*>(&page().GetMainDocument());
   DevToolsAgentHostImpl* agent_host =
       RenderFrameDevToolsAgentHost::GetFor(render_frame_host_impl);
-  DCHECK_EQ(&render_frame_host->GetOutermostMainFrame()->GetPage(), &page());
-  DCHECK(RenderFrameDevToolsAgentHost::ShouldCreateDevToolsForHost(
-      render_frame_host_impl));
-  DCHECK(agent_host);
+  CHECK_EQ(&render_frame_host->GetOutermostMainFrame()->GetPage(), &page(),
+           base::NotFatalUntil::M159);
+  CHECK(RenderFrameDevToolsAgentHost::ShouldCreateDevToolsForHost(
+            render_frame_host_impl),
+        base::NotFatalUntil::M159);
+  CHECK(agent_host, base::NotFatalUntil::M159);
   bool is_main_agent = render_frame_host_impl == main_rfh;
 
   std::vector<const protocol::Audits::InspectorIssue*> issues;

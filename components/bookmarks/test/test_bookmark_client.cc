@@ -11,18 +11,24 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/notreached.h"
 #include "base/time/time.h"
-#include "components/bookmarks/browser/bookmark_load_details.h"
+#include "build/android_buildflags.h"
+#include "build/build_config.h"
 #include "components/bookmarks/browser/bookmark_model.h"
 #include "components/bookmarks/browser/bookmark_node.h"
 #include "components/bookmarks/browser/bookmark_storage.h"
 #include "components/favicon_base/favicon_types.h"
+#include "components/os_crypt/async/browser/test_utils.h"
+#include "components/os_crypt/async/common/encryptor.h"
 #include "ui/gfx/image/image.h"
 
 namespace bookmarks {
 
-TestBookmarkClient::TestBookmarkClient() = default;
+TestBookmarkClient::TestBookmarkClient(
+    os_crypt_async::OSCryptAsync* os_crypt_async)
+    : os_crypt_async_(os_crypt_async) {}
 
 TestBookmarkClient::~TestBookmarkClient() = default;
 
@@ -33,22 +39,15 @@ std::unique_ptr<BookmarkModel> TestBookmarkClient::CreateModel() {
 
 // static
 std::unique_ptr<BookmarkModel> TestBookmarkClient::CreateModelWithClient(
-    std::unique_ptr<BookmarkClient> client) {
-  BookmarkClient* client_ptr = client.get();
-  std::unique_ptr<BookmarkModel> bookmark_model(
-      new BookmarkModel(std::move(client)));
-  std::unique_ptr<BookmarkLoadDetails> details =
-      std::make_unique<BookmarkLoadDetails>(client_ptr);
-  details->LoadManagedNode();
-  details->index()->AddPath(details->other_folder_node());
-  details->CreateUrlIndex();
-  bookmark_model->DoneLoading(std::move(details));
+    std::unique_ptr<TestBookmarkClient> client) {
+  auto bookmark_model = std::make_unique<BookmarkModel>(std::move(client));
+  bookmark_model->LoadEmptyForTest();
   return bookmark_model;
 }
 
 BookmarkPermanentNode* TestBookmarkClient::EnableManagedNode() {
   managed_node_ = BookmarkPermanentNode::CreateManagedBookmarks(/*id=*/100);
-  // Keep a copy of the node in |unowned_managed_node_| for the accessor
+  // Keep a copy of the node in `unowned_managed_node_` for the accessor
   // functions.
   unowned_managed_node_ = managed_node_.get();
   return unowned_managed_node_;
@@ -56,10 +55,6 @@ BookmarkPermanentNode* TestBookmarkClient::EnableManagedNode() {
 
 bool TestBookmarkClient::IsManagedNodeRoot(const BookmarkNode* node) {
   return unowned_managed_node_ == node;
-}
-
-bool TestBookmarkClient::IsAManagedNode(const BookmarkNode* node) {
-  return node && node->HasAncestor(unowned_managed_node_.get());
 }
 
 bool TestBookmarkClient::SimulateFaviconLoaded(const GURL& page_url,
@@ -97,25 +92,19 @@ bool TestBookmarkClient::HasFaviconLoadTasks() const {
   return !requests_per_page_url_.empty();
 }
 
-bool TestBookmarkClient::IsPermanentNodeVisibleWhenEmpty(
-    BookmarkNode::Type type) {
-  switch (type) {
-    case bookmarks::BookmarkNode::URL:
-      NOTREACHED();
-      return false;
-    case bookmarks::BookmarkNode::BOOKMARK_BAR:
-    case bookmarks::BookmarkNode::OTHER_NODE:
-      return true;
-    case bookmarks::BookmarkNode::FOLDER:
-    case bookmarks::BookmarkNode::MOBILE:
-      return false;
-  }
-
-  NOTREACHED();
-  return false;
+void TestBookmarkClient::SetIsSyncFeatureEnabledIncludingBookmarks(bool value) {
+  is_sync_feature_enabled_including_bookmarks_ = value;
 }
 
-void TestBookmarkClient::RecordAction(const base::UserMetricsAction& action) {
+void TestBookmarkClient::SetAccountBookmarkSyncMetadataAndScheduleWrite(
+    const std::string& account_bookmark_sync_metadata) {
+  account_bookmark_sync_metadata_ = account_bookmark_sync_metadata;
+  account_bookmark_sync_metadata_save_closure_.Run();
+}
+
+void TestBookmarkClient::SetDecodeAccountBookmarkSyncMetadataResult(
+    DecodeAccountBookmarkSyncMetadataResult result) {
+  decode_account_bookmark_sync_metadata_result_ = result;
 }
 
 LoadManagedNodeCallback TestBookmarkClient::GetLoadManagedNodeCallback() {
@@ -123,26 +112,58 @@ LoadManagedNodeCallback TestBookmarkClient::GetLoadManagedNodeCallback() {
                         std::move(managed_node_));
 }
 
+bool TestBookmarkClient::IsSyncFeatureEnabledIncludingBookmarks() {
+  return is_sync_feature_enabled_including_bookmarks_;
+}
+
 bool TestBookmarkClient::CanSetPermanentNodeTitle(
     const BookmarkNode* permanent_node) {
   return IsManagedNodeRoot(permanent_node);
 }
 
-bool TestBookmarkClient::CanSyncNode(const BookmarkNode* node) {
-  return !IsAManagedNode(node);
+bool TestBookmarkClient::IsNodeManaged(const BookmarkNode* node) {
+  return node && node->HasAncestor(unowned_managed_node_.get());
 }
 
-bool TestBookmarkClient::CanBeEditedByUser(const BookmarkNode* node) {
-  return !IsAManagedNode(node);
+// static
+bool TestBookmarkClient::IsDesktopFormFactorByDefault() {
+// TODO(crbug.com/509156770): Replace this ifdef with a call to
+// DeviceInfo::is_desktop() once it returns the correct value for desktop
+// Android tests.
+#if BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_DESKTOP_ANDROID)
+  return false;
+#elif BUILDFLAG(IS_IOS)
+  return false;
+#else
+  return true;
+#endif
 }
 
-std::string TestBookmarkClient::EncodeBookmarkSyncMetadata() {
+BookmarkFormFactor TestBookmarkClient::GetBookmarkFormFactor() {
+  return IsDesktopFormFactorByDefault() ? BookmarkFormFactor::kDesktop
+                                        : BookmarkFormFactor::kMobile;
+}
+
+std::string TestBookmarkClient::EncodeLocalOrSyncableBookmarkSyncMetadata() {
   return std::string();
 }
 
-void TestBookmarkClient::DecodeBookmarkSyncMetadata(
+std::string TestBookmarkClient::EncodeAccountBookmarkSyncMetadata() {
+  return account_bookmark_sync_metadata_;
+}
+
+void TestBookmarkClient::DecodeLocalOrSyncableBookmarkSyncMetadata(
     const std::string& metadata_str,
     const base::RepeatingClosure& schedule_save_closure) {}
+
+BookmarkClient::DecodeAccountBookmarkSyncMetadataResult
+TestBookmarkClient::DecodeAccountBookmarkSyncMetadata(
+    const std::string& metadata_str,
+    const base::RepeatingClosure& schedule_save_closure) {
+  account_bookmark_sync_metadata_ = metadata_str;
+  account_bookmark_sync_metadata_save_closure_ = schedule_save_closure;
+  return decode_account_bookmark_sync_metadata_result_;
+}
 
 base::CancelableTaskTracker::TaskId
 TestBookmarkClient::GetFaviconImageForPageURL(
@@ -153,11 +174,36 @@ TestBookmarkClient::GetFaviconImageForPageURL(
   return next_task_id_++;
 }
 
+void TestBookmarkClient::OnBookmarkNodeRemovedUndoable(
+    const BookmarkNode* parent,
+    size_t index,
+    std::unique_ptr<BookmarkNode> node) {}
+
 // static
 std::unique_ptr<BookmarkPermanentNode> TestBookmarkClient::LoadManagedNode(
     std::unique_ptr<BookmarkPermanentNode> managed_node,
     int64_t* next_id) {
   return managed_node;
+}
+
+void TestBookmarkClient::SchedulePersistentTimerForDailyMetrics(
+    base::RepeatingClosure metrics_callback) {
+  metrics_callback_ = metrics_callback;
+}
+
+void TestBookmarkClient::TriggerPersistentLogInterval() {
+  metrics_callback_.Run();
+}
+
+void TestBookmarkClient::GetEncryptor(
+    base::OnceCallback<void(scoped_refptr<os_crypt_async::Encryptor> encryptor)>
+        callback) {
+  if (os_crypt_async_) {
+    os_crypt_async_->GetInstance(std::move(callback));
+  } else {
+    os_crypt_async::GetTestOSCryptAsyncForTesting()->GetInstance(
+        std::move(callback));
+  }
 }
 
 }  // namespace bookmarks

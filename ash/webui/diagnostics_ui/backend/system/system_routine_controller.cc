@@ -4,15 +4,23 @@
 
 #include "ash/webui/diagnostics_ui/backend/system/system_routine_controller.h"
 
+#include <optional>
+#include <string>
+#include <utility>
+
+#include "ash/constants/ash_features.h"
+#include "ash/system/diagnostics/diagnostics_log_controller.h"
 #include "ash/system/diagnostics/routine_log.h"
 #include "ash/webui/diagnostics_ui/backend/common/histogram_util.h"
 #include "ash/webui/diagnostics_ui/backend/common/routine_properties.h"
+#include "ash/webui/diagnostics_ui/backend/system/connectivity_problem_formatter.h"
 #include "ash/webui/diagnostics_ui/backend/system/cros_healthd_helpers.h"
-#include "base/containers/contains.h"
+#include "ash/webui/diagnostics_ui/backend/system/system_routine_controller_delegate.h"
 #include "base/containers/flat_set.h"
-#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/json/json_reader.h"
 #include "base/logging.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
@@ -22,9 +30,9 @@
 #include "chromeos/ash/services/cros_healthd/public/cpp/service_connection.h"
 #include "chromeos/ash/services/cros_healthd/public/mojom/cros_healthd_diagnostics.mojom.h"
 #include "chromeos/ash/services/cros_healthd/public/mojom/nullable_primitives.mojom.h"
+#include "chromeos/services/network_health/public/mojom/network_diagnostics.mojom.h"
 #include "content/public/browser/device_service.h"
 #include "services/device/public/mojom/wake_lock_provider.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash::diagnostics {
 
@@ -45,9 +53,11 @@ const char kWakeLockReason[] = "DiagnosticsMemoryRoutine";
 
 mojom::RoutineResultInfoPtr ConstructStandardRoutineResultInfoPtr(
     mojom::RoutineType type,
-    mojom::StandardRoutineResult result) {
+    mojom::StandardRoutineResult result,
+    std::optional<std::string> details = std::nullopt) {
   auto routine_result = mojom::RoutineResult::NewSimpleResult(result);
-  return mojom::RoutineResultInfo::New(type, std::move(routine_result));
+  return mojom::RoutineResultInfo::New(type, std::move(routine_result),
+                                       std::move(details));
 }
 
 // Converts a cros_healthd::mojom::DiagnosticRoutineStatusEnum to a
@@ -74,7 +84,6 @@ mojom::StandardRoutineResult TestStatusToResult(
     case healthd::DiagnosticRoutineStatusEnum::kCancelling:
     case healthd::DiagnosticRoutineStatusEnum::kUnknown:
       NOTREACHED();
-      return mojom::StandardRoutineResult::kExecutionError;
   }
 }
 
@@ -87,7 +96,8 @@ mojom::RoutineResultInfoPtr ConstructPowerRoutineResultInfoPtr(
       mojom::PowerRoutineResult::New(result, percent_change, seconds_elapsed);
   auto routine_result =
       mojom::RoutineResult::NewPowerResult(std::move(power_result));
-  return mojom::RoutineResultInfo::New(type, std::move(routine_result));
+  return mojom::RoutineResultInfo::New(type, std::move(routine_result),
+                                       /*details=*/std::nullopt);
 }
 
 bool IsPowerRoutine(mojom::RoutineType routine_type) {
@@ -105,13 +115,22 @@ std::string ReadMojoHandleToJsonString(mojo::PlatformHandle handle) {
   return std::string(contents.begin(), contents.end());
 }
 
+// Returns true for routines executed directly via the
+// SystemRoutineControllerDelegate (bypassing cros_healthd).
+bool IsDirectNetworkRoutine(mojom::RoutineType type) {
+  return type == mojom::RoutineType::kGoogleServicesConnectivity;
+}
+
+bool IsLoggingEnabled() {
+  return diagnostics::DiagnosticsLogController::IsInitialized();
+}
+
 }  // namespace
 
-SystemRoutineController::SystemRoutineController()
-    : SystemRoutineController(/*routine_log_ptr=*/nullptr) {}
-
-SystemRoutineController::SystemRoutineController(RoutineLog* routine_log_ptr)
-    : routine_log_ptr_(routine_log_ptr) {
+SystemRoutineController::SystemRoutineController(
+    std::unique_ptr<SystemRoutineControllerDelegate> delegate)
+    : delegate_(std::move(delegate)) {
+  CHECK(delegate_);
   inflight_routine_timer_ = std::make_unique<base::OneShotTimer>();
 }
 
@@ -121,12 +140,16 @@ SystemRoutineController::~SystemRoutineController() {
     // frontend, there's no guarantee that the disconnect handler will be
     // called. If there's a routine inflight, cancel it but do not pass a
     // callback.
-    BindCrosHealthdDiagnosticsServiceIfNeccessary();
-    diagnostics_service_->GetRoutineUpdate(
-        inflight_routine_id_, healthd::DiagnosticRoutineCommandEnum::kCancel,
-        /*should_include_output=*/false, base::DoNothing());
+    if (!inflight_routine_type_.has_value() ||
+        !IsDirectNetworkRoutine(inflight_routine_type_.value())) {
+      BindCrosHealthdDiagnosticsServiceIfNeccessary();
+      diagnostics_service_->GetRoutineUpdate(
+          inflight_routine_id_, healthd::DiagnosticRoutineCommandEnum::kCancel,
+          /*should_include_output=*/false, base::DoNothing());
+    }
     if (IsLoggingEnabled() && inflight_routine_type_.has_value()) {
-      routine_log_ptr_->LogRoutineCancelled(inflight_routine_type_.value());
+      DiagnosticsLogController::Get()->GetRoutineLog().LogRoutineCancelled(
+          inflight_routine_type_.value());
     }
   }
 
@@ -191,16 +214,32 @@ void SystemRoutineController::OnAvailableRoutinesFetched(
     const std::vector<healthd::DiagnosticRoutineEnum>& available_routines) {
   base::flat_set<healthd::DiagnosticRoutineEnum> healthd_routines(
       available_routines);
-  for (size_t i = 0; i < kRoutinePropertiesLength; i++) {
-    const RoutineProperties& routine = kRoutineProperties[i];
-    if (base::Contains(healthd_routines, routine.healthd_type)) {
+  for (const RoutineProperties& routine : kRoutineProperties) {
+    // Direct-path routines are not reported by cros_healthd; handled below.
+    if (IsDirectNetworkRoutine(routine.type)) {
+      continue;
+    }
+    if (healthd_routines.contains(routine.healthd_type)) {
       supported_routines_.push_back(routine.type);
     }
   }
+
+  if (base::FeatureList::IsEnabled(
+          ash::features::kGoogleServicesConnectivityRoutine)) {
+    supported_routines_.push_back(
+        mojom::RoutineType::kGoogleServicesConnectivity);
+  }
+
   std::move(callback).Run(supported_routines_);
 }
 
 void SystemRoutineController::ExecuteRoutine(mojom::RoutineType routine_type) {
+  // Direct-path routines bypass cros_healthd entirely.
+  if (IsDirectNetworkRoutine(routine_type)) {
+    ExecuteNetworkRoutineDirect(routine_type);
+    return;
+  }
+
   BindCrosHealthdDiagnosticsServiceIfNeccessary();
 
   switch (routine_type) {
@@ -319,6 +358,7 @@ void SystemRoutineController::ExecuteRoutine(mojom::RoutineType routine_type) {
     case mojom::RoutineType::kMemory:
       AcquireWakeLock();
       diagnostics_service_->RunMemoryRoutine(
+          std::nullopt,
           base::BindOnce(&SystemRoutineController::OnRoutineStarted,
                          weak_factory_.GetWeakPtr(), routine_type));
       memory_routine_start_timestamp_ = base::Time::Now();
@@ -328,9 +368,13 @@ void SystemRoutineController::ExecuteRoutine(mojom::RoutineType routine_type) {
           base::BindOnce(&SystemRoutineController::OnRoutineStarted,
                          weak_factory_.GetWeakPtr(), routine_type));
       break;
+    case mojom::RoutineType::kGoogleServicesConnectivity:
+      // Unreachable: guarded by IsDirectNetworkRoutine() above.
+      NOTREACHED();
   }
   if (IsLoggingEnabled()) {
-    routine_log_ptr_->LogRoutineStarted(routine_type);
+    DiagnosticsLogController::Get()->GetRoutineLog().LogRoutineStarted(
+        routine_type);
   }
 }
 
@@ -572,21 +616,13 @@ void SystemRoutineController::OnPowerRoutineResultFetched(
     return;
   }
 
-  data_decoder::DataDecoder::ParseJsonIsolated(
-      file_contents,
-      base::BindOnce(&SystemRoutineController::OnPowerRoutineJsonParsed,
-                     weak_factory_.GetWeakPtr(), routine_type));
-  return;
-}
-
-void SystemRoutineController::OnPowerRoutineJsonParsed(
-    mojom::RoutineType routine_type,
-    data_decoder::DataDecoder::ValueOrError result) {
+  std::optional<base::Value> result = base::JSONReader::Read(
+      file_contents, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   if (!result.has_value()) {
     OnPowerRoutineResult(routine_type,
                          mojom::StandardRoutineResult::kExecutionError,
                          /*percent_change=*/0, /*seconds_elapsed=*/0);
-    DVLOG(2) << "JSON parsing failed: " << result.error();
+    DVLOG(2) << "JSON parsing failed";
     return;
   }
 
@@ -598,8 +634,8 @@ void SystemRoutineController::OnPowerRoutineJsonParsed(
     return;
   }
 
-  const base::Value::Dict& parsed_json = result->GetDict();
-  const base::Value::Dict* result_details_dict =
+  const base::DictValue& parsed_json = result->GetDict();
+  const base::DictValue* result_details_dict =
       parsed_json.FindDict(kResultDetailsKey);
   if (!result_details_dict) {
     OnPowerRoutineResult(routine_type,
@@ -609,7 +645,7 @@ void SystemRoutineController::OnPowerRoutineJsonParsed(
     return;
   }
 
-  absl::optional<double> charge_percent_opt =
+  std::optional<double> charge_percent_opt =
       routine_type == mojom::RoutineType::kBatteryCharge
           ? result_details_dict->FindDouble(kChargePercentKey)
           : result_details_dict->FindDouble(kDischargePercentKey);
@@ -639,7 +675,8 @@ void SystemRoutineController::OnStandardRoutineResult(
                                        memory_routine_start_timestamp_);
   }
   if (IsLoggingEnabled()) {
-    routine_log_ptr_->LogRoutineCompleted(routine_type, result);
+    DiagnosticsLogController::Get()->GetRoutineLog().LogRoutineCompleted(
+        routine_type, result);
   }
 }
 
@@ -654,19 +691,21 @@ void SystemRoutineController::OnPowerRoutineResult(
   SendRoutineResult(std::move(result_info));
   metrics::EmitRoutineResult(routine_type, result);
   if (IsLoggingEnabled()) {
-    routine_log_ptr_->LogRoutineCompleted(routine_type, result);
+    DiagnosticsLogController::Get()->GetRoutineLog().LogRoutineCompleted(
+        routine_type, result);
   }
 }
 
 void SystemRoutineController::SendRoutineResult(
     mojom::RoutineResultInfoPtr result_info) {
-  // Added as part of investigation of crash reported in crbug/1316648 to test
-  // if crash is related to memory resource allocation. Remove if crash
-  // continues to occur.
-  if (!result_info.is_null() && !result_info->result.is_null()) {
+  if (inflight_routine_runner_ && !result_info.is_null() &&
+      !result_info->result.is_null()) {
     inflight_routine_runner_->OnRoutineResult(std::move(result_info));
   } else {
-    LOG(ERROR) << "RoutineResult is null";
+    LOG(ERROR) << (inflight_routine_runner_
+                       ? "Do not send routine result since it's null."
+                       : "Not able to call OnRoutineResult() since the "
+                         "inflight_routine_runner_ is null.");
   }
 
   inflight_routine_runner_.reset();
@@ -702,19 +741,23 @@ void SystemRoutineController::OnInflightRoutineRunnerDisconnected() {
     ReleaseWakeLock();
   }
 
-  // Make a best effort attempt to remove the routine.
-  BindCrosHealthdDiagnosticsServiceIfNeccessary();
-  diagnostics_service_->GetRoutineUpdate(
-      inflight_routine_id_, healthd::DiagnosticRoutineCommandEnum::kCancel,
-      /*should_include_output=*/false,
-      base::BindOnce(&SystemRoutineController::OnRoutineCancelAttempted,
-                     weak_factory_.GetWeakPtr()));
+  if (!inflight_routine_type_.has_value() ||
+      !IsDirectNetworkRoutine(inflight_routine_type_.value())) {
+    // Cancel non-direct-path routines via cros_healthd.
+    BindCrosHealthdDiagnosticsServiceIfNeccessary();
+    diagnostics_service_->GetRoutineUpdate(
+        inflight_routine_id_, healthd::DiagnosticRoutineCommandEnum::kCancel,
+        /*should_include_output=*/false,
+        base::BindOnce(&SystemRoutineController::OnRoutineCancelAttempted,
+                       weak_factory_.GetWeakPtr()));
+  }
 
   // Reset `inflight_routine_id_` to maintain invariant.
   inflight_routine_id_ = kInvalidRoutineId;
 
   if (IsLoggingEnabled() && inflight_routine_type_.has_value()) {
-    routine_log_ptr_->LogRoutineCancelled(inflight_routine_type_.value());
+    DiagnosticsLogController::Get()->GetRoutineLog().LogRoutineCancelled(
+        inflight_routine_type_.value());
   }
 }
 
@@ -728,10 +771,6 @@ void SystemRoutineController::OnRoutineCancelAttempted(
     DVLOG(2) << "Failed to cancel routine.";
     return;
   }
-}
-
-bool SystemRoutineController::IsLoggingEnabled() const {
-  return routine_log_ptr_ != nullptr;
 }
 
 void SystemRoutineController::AcquireWakeLock() {
@@ -753,6 +792,95 @@ void SystemRoutineController::AcquireWakeLock() {
 void SystemRoutineController::ReleaseWakeLock() {
   DCHECK(wake_lock_);
   wake_lock_->CancelWakeLock();
+}
+
+void SystemRoutineController::ExecuteNetworkRoutineDirect(
+    mojom::RoutineType type) {
+  inflight_routine_type_ = type;
+  if (IsLoggingEnabled()) {
+    DiagnosticsLogController::Get()->GetRoutineLog().LogRoutineStarted(type);
+  }
+  CHECK(delegate_);
+
+  switch (type) {
+    case mojom::RoutineType::kGoogleServicesConnectivity:
+      if (!base::FeatureList::IsEnabled(
+              ash::features::kGoogleServicesConnectivityRoutine)) {
+        auto result =
+            chromeos::network_diagnostics::mojom::RoutineResult::New();
+        result->verdict =
+            chromeos::network_diagnostics::mojom::RoutineVerdict::kNotRun;
+        OnDirectNetworkRoutineResult(type, std::move(result));
+        return;
+      }
+      delegate_->RunGoogleServicesConnectivity(
+          base::BindOnce(&SystemRoutineController::OnDirectNetworkRoutineResult,
+                         weak_factory_.GetWeakPtr(), type));
+      break;
+    default:
+      NOTREACHED();
+  }
+}
+
+void SystemRoutineController::OnDirectNetworkRoutineResult(
+    mojom::RoutineType type,
+    chromeos::network_diagnostics::mojom::RoutineResultPtr result) {
+  CHECK_EQ(type, mojom::RoutineType::kGoogleServicesConnectivity);
+  auto [standard_result, details] =
+      OnGoogleServicesConnectivityRoutineResult(type, std::move(result));
+
+  metrics::EmitRoutineResult(type, standard_result);
+  if (IsLoggingEnabled()) {
+    DiagnosticsLogController::Get()->GetRoutineLog().LogRoutineCompleted(
+        type, standard_result, details);
+  }
+}
+
+std::pair<mojom::StandardRoutineResult, std::string>
+SystemRoutineController::OnGoogleServicesConnectivityRoutineResult(
+    mojom::RoutineType type,
+    chromeos::network_diagnostics::mojom::RoutineResultPtr result) {
+  // The RoutineRunner may have disconnected (e.g. UI navigated away)
+  // before the delegate responded. The disconnect handler already
+  // cleaned up; emit metrics only and return.
+  if (!IsRoutineRunning()) {
+    return {mojom::StandardRoutineResult::kExecutionError, std::string()};
+  }
+
+  mojom::StandardRoutineResult standard_result =
+      mojom::StandardRoutineResult::kExecutionError;
+  std::vector<chromeos::network_diagnostics::mojom::
+                  GoogleServicesConnectivityProblemPtr>
+      problems;
+
+  if (result) {
+    switch (result->verdict) {
+      case chromeos::network_diagnostics::mojom::RoutineVerdict::kNoProblem:
+        standard_result = mojom::StandardRoutineResult::kTestPassed;
+        break;
+      case chromeos::network_diagnostics::mojom::RoutineVerdict::kProblem:
+        standard_result = mojom::StandardRoutineResult::kTestFailed;
+        break;
+      case chromeos::network_diagnostics::mojom::RoutineVerdict::kNotRun:
+        standard_result = mojom::StandardRoutineResult::kUnableToRun;
+        break;
+    }
+    if (result->problems &&
+        result->problems->is_google_services_connectivity_problems()) {
+      problems = std::move(
+          result->problems->get_google_services_connectivity_problems());
+    }
+  }
+
+  std::string details;
+  if (!problems.empty()) {
+    details = FormatConnectivityProblems(problems);
+  }
+
+  SendRoutineResult(ConstructStandardRoutineResultInfoPtr(
+      type, standard_result,
+      details.empty() ? std::nullopt : std::make_optional(details)));
+  return {standard_result, std::move(details)};
 }
 
 }  // namespace ash::diagnostics

@@ -35,6 +35,9 @@ class SVGViewElement final : public SVGElement,
 
  public:
   explicit SVGViewElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGViewElement;
+  }
 
   void Trace(Visitor*) const override;
 
@@ -44,6 +47,10 @@ class SVGViewElement final : public SVGElement,
   bool LayoutObjectIsNeeded(const DisplayStyle&) const override {
     return false;
   }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 };
 
 }  // namespace blink

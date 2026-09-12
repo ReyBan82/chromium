@@ -2,9 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/android/linker/linker_jni.h"
-
 #include <android/dlext.h>
+#include <android/log.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -15,10 +14,19 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <time.h>
+#include <sys/syscall.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 
 #include <memory>
+
+#include "base/compiler_specific.h"
+
+#define LOG_E(...) ((void)__android_log_print(ANDROID_LOG_ERROR, "linker-jni", __VA_ARGS__))
+
+#include "base/android/linker/ashmem.h"
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "base/android/linker/linker_jni.h"
 
 namespace chromium_android_linker {
 
@@ -32,6 +40,10 @@ RelroSharingStatus s_relro_sharing_status = RelroSharingStatus::NOT_ATTEMPTED;
 
 // Saved JavaVM passed to JNI_OnLoad().
 JavaVM* s_java_vm = nullptr;
+
+size_t GetPageSize() {
+  return sysconf(_SC_PAGESIZE);
+}
 
 // With mmap(2) reserves a range of virtual addresses.
 //
@@ -70,14 +82,15 @@ bool ScanRegionInBuffer(const char* buf,
                         uintptr_t* out_address,
                         size_t* out_size) {
   const char* position = strstr(buf, "[anon:libwebview reservation]");
-  if (!position)
+  if (!position) {
     return false;
+  }
 
   const char* line_start = position;
   while (line_start > buf) {
-    line_start--;
+    line_start = UNSAFE_TODO(line_start - 1);
     if (*line_start == '\n') {
-      line_start++;
+      line_start = UNSAFE_TODO(line_start + 1);
       break;
     }
   }
@@ -90,16 +103,19 @@ bool ScanRegionInBuffer(const char* buf,
   // Example line from proc(5):
   // address           perms offset  dev   inode   pathname
   // 00400000-00452000 r-xp 00000000 08:02 173521  /usr/bin/dbus-daemon
-  if (sscanf(line_start, "%" SCNxPTR "-%" SCNxPTR " %4c", &vma_start, &vma_end,
-             permissions) < 3) {
+  if (UNSAFE_TODO(sscanf(line_start, "%" SCNxPTR "-%" SCNxPTR " %4c",
+                         &vma_start, &vma_end, permissions)) < 3) {
     return false;
   }
 
-  if (strcmp(permissions, "---p"))
+  if (strcmp(permissions, "---p")) {
     return false;
+  }
 
-  if (vma_start % PAGE_SIZE || vma_end % PAGE_SIZE)
+  const size_t kPageSize = GetPageSize();
+  if (vma_start % kPageSize || vma_end % kPageSize) {
     return false;
+  }
 
   *out_address = static_cast<uintptr_t>(vma_start);
   *out_size = vma_end - vma_start;
@@ -109,12 +125,20 @@ bool ScanRegionInBuffer(const char* buf,
 
 bool FindRegionInOpenFile(int fd, uintptr_t* out_address, size_t* out_size) {
   constexpr size_t kMaxLineLength = 256;
-  constexpr size_t kReadSize = PAGE_SIZE;
+  const size_t kPageSize = GetPageSize();
+  const size_t kReadSize = kPageSize;
 
   // Loop until no bytes left to scan. On every iteration except the last, fill
   // the buffer till the end. On every iteration except the first, the buffer
   // begins with kMaxLineLength bytes from the end of the previous fill.
+
+// Silence clang's warning about allocating on the stack because this is a very
+// special case.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wvla-extension"
   char buf[kReadSize + kMaxLineLength + 1];
+#pragma clang diagnostic pop
+
   buf[kReadSize + kMaxLineLength] = '\0';  // Stop strstr().
   size_t pos = 0;
   size_t bytes_requested = kReadSize + kMaxLineLength;
@@ -124,8 +148,8 @@ bool FindRegionInOpenFile(int fd, uintptr_t* out_address, size_t* out_size) {
     // end.
     size_t bytes_read = 0;
     do {
-      ssize_t rv = HANDLE_EINTR(
-          read(fd, buf + pos + bytes_read, bytes_requested - bytes_read));
+      ssize_t rv = HANDLE_EINTR(read(fd, UNSAFE_TODO(buf + pos + bytes_read),
+                                     bytes_requested - bytes_read));
       if (rv == 0) {
         reached_end = true;
       } else if (rv < 0) {
@@ -136,67 +160,21 @@ bool FindRegionInOpenFile(int fd, uintptr_t* out_address, size_t* out_size) {
     } while (!reached_end && (bytes_read < bytes_requested));
 
     // Return results if the buffer contains the pattern.
-    if (ScanRegionInBuffer(buf, pos + bytes_read, out_address, out_size))
+    if (ScanRegionInBuffer(buf, pos + bytes_read, out_address, out_size)) {
       return true;
+    }
 
     // Did not find the pattern.
-    if (reached_end)
+    if (reached_end) {
       return false;
+    }
 
     // The buffer is filled to the end. Copy the end bytes to the beginning,
     // allowing to scan these bytes on the next iteration.
-    memcpy(buf, buf + kReadSize, kMaxLineLength);
+    UNSAFE_TODO(memcpy(buf, buf + kReadSize, kMaxLineLength));
     pos = kMaxLineLength;
     bytes_requested = kReadSize;
   }
-}
-
-// Calls the Linker Java methods to record the time intervals in UMA. The calls
-// are made only once pre process, hence there is no need to cache the values
-// obtained from JNIEnv. The class must *not* be reused across different
-// Java->native calls because the |jclass| reference may become invalid in this
-// case.
-class LoadTimeReporterJni : public LoadTimeReporter {
- public:
-  LoadTimeReporterJni(JNIEnv* env, jclass linker_jni_class)
-      : env_(env), class_(linker_jni_class) {}
-
-  void reportDlopenExtTime(int64_t millis) const override {
-    env_->CallStaticVoidMethod(
-        class_, env_->GetStaticMethodID(class_, "reportDlopenExtTime", "(J)V"),
-        millis);
-  }
-
-  void reportIteratePhdrTime(int64_t millis) const override {
-    env_->CallStaticVoidMethod(
-        class_,
-        env_->GetStaticMethodID(class_, "reportIteratePhdrTime", "(J)V"),
-        millis);
-  }
-
- private:
-  // Not copyable or movable.
-  LoadTimeReporterJni(const LoadTimeReporterJni&) = delete;
-  LoadTimeReporterJni& operator=(const LoadTimeReporterJni&) = delete;
-
-  JNIEnv* env_;
-  jclass class_;
-};
-
-constexpr int64_t kMillisecondsPerSecond = 1'000;
-constexpr int64_t kNanosecondsPerMillisecond = 1'000'000;
-
-int64_t GetMillisNow() {
-  struct timespec ts;
-  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-    PLOG_ERROR("clock_gettime");
-    return 0;
-  }
-
-  int64_t result = ts.tv_sec;
-  result *= kMillisecondsPerSecond;
-  result += (ts.tv_nsec / kNanosecondsPerMillisecond);
-  return result;
 }
 
 // Invokes android_dlopen_ext() to load the library into a given address range.
@@ -208,7 +186,7 @@ bool AndroidDlopenExt(void* mapping_start,
                       size_t mapping_size,
                       const char* filename,
                       void** handle) {
-  android_dlextinfo dlextinfo{};
+  android_dlextinfo dlextinfo = {};
   dlextinfo.flags = ANDROID_DLEXT_RESERVED_ADDRESS;
   dlextinfo.reserved_addr = mapping_start;
   dlextinfo.reserved_size = mapping_size;
@@ -262,35 +240,45 @@ bool CallJniOnLoad(void* handle) {
   LOG_INFO("Done");
   return true;
 }
-
 }  // namespace
 
 String::String(JNIEnv* env, jstring str) {
-  size_ = env->GetStringUTFLength(str);
-  ptr_ = static_cast<char*>(::malloc(size_ + 1));
+  if (!str) {
+    ptr_ = buffer_;
+    buffer_[0] = '\0';
+    size_ = 0;
+    return;
+  }
+
+  jsize len = env->GetStringLength(str);
+  size_ = static_cast<size_t>(env->GetStringUTFLength(str));
+  if (size_ < kInlineBufferSize) {
+    ptr_ = buffer_;
+  } else {
+    ptr_ = static_cast<char*>(::malloc(size_ + 1));
+  }
 
   // Note: This runs before browser native code is loaded, and so cannot
-  // rely on anything from base/. This means that we must use
-  // GetStringUTFChars() and not base::android::ConvertJavaStringToUTF8().
+  // rely on anything from base/. This means that we cannot use
+  // base::android::ConvertJavaStringToUTF8().
   //
-  // GetStringUTFChars() suffices because the only strings used here are
-  // paths to APK files or names of shared libraries, all of which are
-  // plain ASCII, defined and hard-coded by the Chromium Android build.
+  // GetStringUTFRegion() copies directly into our preallocated inline buffer
+  // (or fallback heap buffer) without allocating modified UTF-8 arrays inside
+  // ART or returning heap pointers.
+  //
+  // This suffices because the only strings used here are paths to APK files
+  // or names of shared libraries, all of which are plain ASCII, defined and
+  // hard-coded by the Chromium Android build.
   //
   // For more: see
   //   https://crbug.com/508876
-  //
-  // Note: GetStringUTFChars() returns Java UTF-8 bytes. This is good
-  // enough for the linker though.
-  const char* bytes = env->GetStringUTFChars(str, nullptr);
-  ::memcpy(ptr_, bytes, size_);
+  env->GetStringUTFRegion(str, 0, len, ptr_);
   ptr_[size_] = '\0';
-
-  env->ReleaseStringUTFChars(str, bytes);
 }
 
-bool IsValidAddress(jlong address) {
-  bool result = static_cast<jlong>(static_cast<uintptr_t>(address)) == address;
+bool IsValidAddress(int64_t address) {
+  bool result =
+      static_cast<int64_t>(static_cast<uintptr_t>(address)) == address;
   if (!result) {
     LOG_ERROR("Invalid address 0x%" PRIx64, static_cast<uint64_t>(address));
   }
@@ -351,63 +339,25 @@ bool FindWebViewReservation(uintptr_t* out_address, size_t* out_size) {
   return result;
 }
 
-// Starting with API level 26 (Android O) the following functions from
-// libandroid.so should be used to create shared memory regions to ensure
-// compatibility with the future versions:
-// * ASharedMemory_create()
-// * ASharedMemory_setProt()
-//
-// This is inspired by //third_party/ashmem/ashmem-dev.c, which cannot be
-// referenced from the linker library to avoid increasing binary size.
-//
-// *Not* threadsafe.
-struct SharedMemoryFunctions {
-  SharedMemoryFunctions() {
-    library_handle = dlopen("libandroid.so", RTLD_NOW);
-    create = reinterpret_cast<CreateFunction>(
-        dlsym(library_handle, "ASharedMemory_create"));
-    set_protection = reinterpret_cast<SetProtectionFunction>(
-        dlsym(library_handle, "ASharedMemory_setProt"));
-  }
-
-  bool IsWorking() const {
-    if (!create || !set_protection) {
-      LOG_ERROR("Cannot get the shared memory functions from libandroid");
-      return false;
-    }
-    return true;
-  }
-
-  ~SharedMemoryFunctions() {
-    if (library_handle)
-      dlclose(library_handle);
-  }
-
-  typedef int (*CreateFunction)(const char*, size_t);
-  typedef int (*SetProtectionFunction)(int fd, int prot);
-
-  CreateFunction create;
-  SetProtectionFunction set_protection;
-
-  void* library_handle = nullptr;
-};
-
 void NativeLibInfo::ExportLoadInfoToJava() const {
-  if (!env_)
+  if (!env_) {
     return;
+  }
   s_lib_info_fields.SetLoadInfo(env_, java_object_, load_address_, load_size_);
 }
 
 void NativeLibInfo::ExportRelroInfoToJava() const {
-  if (!env_)
+  if (!env_) {
     return;
+  }
   s_lib_info_fields.SetRelroInfo(env_, java_object_, relro_start_, relro_size_,
                                  relro_fd_);
 }
 
 void NativeLibInfo::CloseRelroFd() {
-  if (relro_fd_ == kInvalidFd)
+  if (relro_fd_ == kInvalidFd) {
     return;
+  }
   close(relro_fd_);
   relro_fd_ = kInvalidFd;
 }
@@ -416,11 +366,13 @@ bool NativeLibInfo::FindRelroAndLibraryRangesInElf() {
   LOG_INFO("Called for 0x%" PRIxPTR, load_address_);
 
   // Check that an ELF library starts at the |load_address_|.
-  if (memcmp(reinterpret_cast<void*>(load_address_), ELFMAG, SELFMAG) != 0) {
+  if (UNSAFE_TODO(memcmp(reinterpret_cast<void*>(load_address_), ELFMAG,
+                         SELFMAG)) != 0) {
     LOG_ERROR("Wrong magic number");
     return false;
   }
-  auto class_type = *reinterpret_cast<uint8_t*>(load_address_ + EI_CLASS);
+  auto class_type =
+      UNSAFE_TODO(*reinterpret_cast<uint8_t*>(load_address_ + EI_CLASS));
   if (class_type == ELFCLASS32) {
     LOG_INFO("ELFCLASS32");
   } else if (class_type == ELFCLASS64) {
@@ -429,11 +381,6 @@ bool NativeLibInfo::FindRelroAndLibraryRangesInElf() {
     LOG_ERROR("Could not determine ELF class");
     return false;
   }
-
-  // Sanitycheck PAGE_SIZE before use.
-  int page_size = sysconf(_SC_PAGESIZE);
-  if (page_size != PAGE_SIZE)
-    abort();
 
   // Compute the ranges of PT_LOAD segments and the PT_GNU_RELRO. It is possible
   // to reach for the same information by iterating over all loaded libraries
@@ -456,17 +403,20 @@ bool NativeLibInfo::FindRelroAndLibraryRangesInElf() {
   const auto* ehdr = reinterpret_cast<const ElfW(Ehdr)*>(load_address_);
   const auto* phdrs =
       reinterpret_cast<const ElfW(Phdr)*>(load_address_ + ehdr->e_phoff);
+  const size_t kPageSize = GetPageSize();
   for (int i = 0; i < ehdr->e_phnum; i++) {
-    const ElfW(Phdr)* phdr = &phdrs[i];
+    const ElfW(Phdr)* phdr = UNSAFE_TODO(&phdrs[i]);
     switch (phdr->p_type) {
       case PT_LOAD:
-        if (phdr->p_vaddr < min_vaddr)
+        if (phdr->p_vaddr < min_vaddr) {
           min_vaddr = phdr->p_vaddr;
-        if (phdr->p_vaddr + phdr->p_memsz > max_vaddr)
+        }
+        if (phdr->p_vaddr + phdr->p_memsz > max_vaddr) {
           max_vaddr = phdr->p_vaddr + phdr->p_memsz;
+        }
         break;
       case PT_GNU_RELRO:
-        min_relro_vaddr = PAGE_START(phdr->p_vaddr);
+        min_relro_vaddr = PageStart(kPageSize, phdr->p_vaddr);
         max_relro_vaddr = phdr->p_vaddr + phdr->p_memsz;
 
         // As of 2020-11 in libmonochrome.so RELRO is covered by a LOAD segment.
@@ -474,10 +424,12 @@ bool NativeLibInfo::FindRelroAndLibraryRangesInElf() {
         // the future. Include the RELRO segment as part of the 'load size'.
         // This way a potential future change in layout of LOAD segments would
         // not open address space for racy mmap(MAP_FIXED).
-        if (min_relro_vaddr < min_vaddr)
+        if (min_relro_vaddr < min_vaddr) {
           min_vaddr = min_relro_vaddr;
-        if (max_vaddr < max_relro_vaddr)
+        }
+        if (max_vaddr < max_relro_vaddr) {
           max_vaddr = max_relro_vaddr;
+        }
         break;
       default:
         break;
@@ -485,15 +437,14 @@ bool NativeLibInfo::FindRelroAndLibraryRangesInElf() {
   }
 
   // Fill out size and RELRO information.
-  load_size_ = PAGE_END(max_vaddr) - PAGE_START(min_vaddr);
-  relro_size_ = PAGE_END(max_relro_vaddr) - PAGE_START(min_relro_vaddr);
-  relro_start_ = load_address_ + PAGE_START(min_relro_vaddr);
+  load_size_ = PageEnd(kPageSize, max_vaddr) - PageStart(kPageSize, min_vaddr);
+  relro_size_ = PageEnd(kPageSize, max_relro_vaddr) -
+                PageStart(kPageSize, min_relro_vaddr);
+  relro_start_ = load_address_ + PageStart(kPageSize, min_relro_vaddr);
   return true;
 }
 
-bool NativeLibInfo::LoadWithDlopenExt(const String& path,
-                                      const LoadTimeReporter& reporter,
-                                      void** handle) {
+bool NativeLibInfo::LoadWithDlopenExt(const String& path, void** handle) {
   LOG_INFO("Entering");
 
   // The address range must be reserved during initialization in Linker.java.
@@ -508,7 +459,6 @@ bool NativeLibInfo::LoadWithDlopenExt(const String& path,
   auto* address = reinterpret_cast<void*>(load_address_);
 
   // Invoke android_dlopen_ext.
-  int64_t ticks_initial = GetMillisNow();
   void* local_handle = nullptr;
   if (!AndroidDlopenExt(address, reservation_size, path.c_str(),
                         &local_handle)) {
@@ -516,8 +466,10 @@ bool NativeLibInfo::LoadWithDlopenExt(const String& path,
     munmap(address, load_size_);
     return false;
   }
-  int64_t ticks_after_dlopen_ext = GetMillisNow();
-  reporter.reportDlopenExtTime(ticks_after_dlopen_ext - ticks_initial);
+
+  // Histogram ChromiumAndroidLinker.ModernLinkerDlopenExtTime that measured the
+  // amount of time the ModernLinker spends to run android_dlopen_ext() was
+  // removed in July 2023.
 
   // Determine the library address ranges and the RELRO region.
   if (!FindRelroAndLibraryRangesInElf()) {
@@ -526,7 +478,10 @@ bool NativeLibInfo::LoadWithDlopenExt(const String& path,
     LOG_ERROR("Could not find RELRO in the loaded library: %s", path.c_str());
     abort();
   }
-  reporter.reportIteratePhdrTime(GetMillisNow() - ticks_after_dlopen_ext);
+
+  // Histogram ChromiumAndroidLinker.ModernLinkerIteratePhdrTime that measured
+  // the amount of time the ModernLinker spends to find the RELRO region using
+  // dl_iterate_phdr() was removed in July 2023.
 
   // Release the unused parts of the memory reservation.
   TrimMapping(load_address_, reservation_size, load_size_);
@@ -535,8 +490,7 @@ bool NativeLibInfo::LoadWithDlopenExt(const String& path,
   return true;
 }
 
-bool NativeLibInfo::CreateSharedRelroFd(
-    const SharedMemoryFunctions& functions) {
+bool NativeLibInfo::CreateSharedRelroFd() {
   LOG_INFO("Entering");
   if (!relro_start_ || !relro_size_) {
     LOG_ERROR("RELRO region is not populated");
@@ -544,13 +498,13 @@ bool NativeLibInfo::CreateSharedRelroFd(
   }
 
   // Create a writable shared memory region.
-  int shared_mem_fd = functions.create("cr_relro", relro_size_);
+  int shared_mem_fd = SharedMemoryRegionCreate("cr_relro", relro_size_);
   if (shared_mem_fd == -1) {
     LOG_ERROR("Cannot create the shared memory file");
     return false;
   }
   int rw_flags = PROT_READ | PROT_WRITE;
-  functions.set_protection(shared_mem_fd, rw_flags);
+  SharedMemoryRegionSetProtectionFlags(shared_mem_fd, rw_flags);
 
   // Map the region as writable.
   void* relro_copy_addr =
@@ -563,7 +517,7 @@ bool NativeLibInfo::CreateSharedRelroFd(
 
   // Populate the shared memory region with the contents of RELRO.
   void* relro_addr = reinterpret_cast<void*>(relro_start_);
-  memcpy(relro_copy_addr, relro_addr, relro_size_);
+  UNSAFE_TODO(memcpy(relro_copy_addr, relro_addr, relro_size_));
 
   // Protect the underlying physical pages from further modifications from all
   // processes including the forked ones.
@@ -574,7 +528,7 @@ bool NativeLibInfo::CreateSharedRelroFd(
   // writable memory mappings, since they are not directly affected by the
   // change of region's protection flags.
   munmap(relro_copy_addr, relro_size_);
-  if (functions.set_protection(shared_mem_fd, PROT_READ) == -1) {
+  if (SharedMemoryRegionSetProtectionFlags(shared_mem_fd, PROT_READ) == -1) {
     LOG_ERROR("Failed to set the RELRO FD as read-only.");
     close(shared_mem_fd);
     return false;
@@ -584,8 +538,7 @@ bool NativeLibInfo::CreateSharedRelroFd(
   return true;
 }
 
-bool NativeLibInfo::ReplaceRelroWithSharedOne(
-    const SharedMemoryFunctions& functions) const {
+bool NativeLibInfo::ReplaceRelroWithSharedOne() const {
   LOG_INFO("Entering");
   if (relro_fd_ == -1 || !relro_start_ || !relro_size_) {
     LOG_ERROR("Replacement RELRO not ready");
@@ -610,8 +563,9 @@ NativeLibInfo::NativeLibInfo(JNIEnv* env, jobject java_object)
     : env_(env), java_object_(java_object) {}
 
 bool NativeLibInfo::CopyFromJavaObject() {
-  if (!env_)
+  if (!env_) {
     return false;
+  }
 
   if (!s_lib_info_fields.GetLoadInfo(env_, java_object_, &load_address_,
                                      &load_size_)) {
@@ -623,33 +577,31 @@ bool NativeLibInfo::CopyFromJavaObject() {
 }
 
 bool NativeLibInfo::LoadLibrary(const String& library_path,
-                                bool spawn_relro_region,
-                                const LoadTimeReporter& reporter) {
+                                bool spawn_relro_region) {
   // Load the library.
   void* handle = nullptr;
-  if (!LoadWithDlopenExt(library_path, reporter, &handle)) {
+  if (!LoadWithDlopenExt(library_path, &handle)) {
     LOG_ERROR("Failed to load native library: %s", library_path.c_str());
     return false;
   }
-  if (!CallJniOnLoad(handle))
+  if (!CallJniOnLoad(handle)) {
     return false;
+  }
 
   // Publish the library size and load address back to LibInfo in Java.
   ExportLoadInfoToJava();
 
-  if (!spawn_relro_region)
+  if (!spawn_relro_region) {
     return true;
+  }
 
   // Spawn RELRO to a shared memory region by copying and remapping on top of
   // itself.
-  SharedMemoryFunctions functions;
-  if (!functions.IsWorking())
-    return false;
-  if (!CreateSharedRelroFd(functions)) {
+  if (!CreateSharedRelroFd()) {
     LOG_ERROR("Failed to create shared RELRO");
     return false;
   }
-  if (!ReplaceRelroWithSharedOne(functions)) {
+  if (!ReplaceRelroWithSharedOne()) {
     LOG_ERROR("Failed to convert RELRO to shared memory");
     CloseRelroFd();
     return false;
@@ -664,8 +616,7 @@ bool NativeLibInfo::LoadLibrary(const String& library_path,
 }
 
 bool NativeLibInfo::RelroIsIdentical(
-    const NativeLibInfo& other_lib_info,
-    const SharedMemoryFunctions& functions) const {
+    const NativeLibInfo& other_lib_info) const {
   // Abandon sharing if contents of the incoming RELRO region does not match the
   // current one. This can be useful for debugging, but should never happen in
   // the field.
@@ -683,8 +634,8 @@ bool NativeLibInfo::RelroIsIdentical(
     return false;
   }
   void* current_relro_address = reinterpret_cast<void*>(relro_start_);
-  int not_equal =
-      memcmp(shared_relro_address, current_relro_address, relro_size_);
+  int not_equal = UNSAFE_TODO(
+      memcmp(shared_relro_address, current_relro_address, relro_size_));
   munmap(shared_relro_address, relro_size_);
   if (not_equal) {
     LOG_ERROR("Relocations are not identical, giving up.");
@@ -714,12 +665,7 @@ bool NativeLibInfo::CompareRelroAndReplaceItBy(
     return false;
   }
 
-  SharedMemoryFunctions functions;
-  if (!functions.IsWorking()) {
-    s_relro_sharing_status = RelroSharingStatus::NO_SHMEM_FUNCTIONS;
-    return false;
-  }
-  if (!RelroIsIdentical(other_lib_info, functions)) {
+  if (!RelroIsIdentical(other_lib_info)) {
     LOG_ERROR("RELRO is not identical");
     s_relro_sharing_status = RelroSharingStatus::NOT_IDENTICAL;
     return false;
@@ -733,7 +679,7 @@ bool NativeLibInfo::CompareRelroAndReplaceItBy(
   //  * It does not rely on disallowing mprotect(PROT_WRITE)
   //  * This way |ReplaceRelroWithSharedOne()| is reused across spawning RELRO
   //    and receiving it
-  if (!other_lib_info.ReplaceRelroWithSharedOne(functions)) {
+  if (!other_lib_info.ReplaceRelroWithSharedOne()) {
     LOG_ERROR("Failed to use relro_fd");
     s_relro_sharing_status = RelroSharingStatus::REMAP_FAILED;
     return false;
@@ -746,19 +692,10 @@ bool NativeLibInfo::CompareRelroAndReplaceItBy(
 bool NativeLibInfo::CreateSharedRelroFdForTesting() {
   // The library providing these functions will be dlclose()-ed after returning
   // from this context. The extra overhead of dlopen() is OK for testing.
-  SharedMemoryFunctions functions;
-  if (!functions.IsWorking())
-    abort();
-  return CreateSharedRelroFd(functions);
+  return CreateSharedRelroFd();
 }
 
-// static
-bool NativeLibInfo::SharedMemoryFunctionsSupportedForTesting() {
-  SharedMemoryFunctions functions;
-  return functions.IsWorking();
-}
-
-JNI_GENERATOR_EXPORT void
+JNI_ZERO_BOUNDARY_EXPORT void
 Java_org_chromium_base_library_1loader_LinkerJni_nativeFindMemoryRegionAtRandomAddress(
     JNIEnv* env,
     jclass clazz,
@@ -770,7 +707,7 @@ Java_org_chromium_base_library_1loader_LinkerJni_nativeFindMemoryRegionAtRandomA
   s_lib_info_fields.SetLoadInfo(env, lib_info_obj, address, size);
 }
 
-JNI_GENERATOR_EXPORT void
+JNI_ZERO_BOUNDARY_EXPORT void
 Java_org_chromium_base_library_1loader_LinkerJni_nativeReserveMemoryForLibrary(
     JNIEnv* env,
     jclass clazz,
@@ -783,7 +720,7 @@ Java_org_chromium_base_library_1loader_LinkerJni_nativeReserveMemoryForLibrary(
   s_lib_info_fields.SetLoadInfo(env, lib_info_obj, address, size);
 }
 
-JNI_GENERATOR_EXPORT jboolean
+JNI_ZERO_BOUNDARY_EXPORT bool
 Java_org_chromium_base_library_1loader_LinkerJni_nativeFindRegionReservedByWebViewZygote(
     JNIEnv* env,
     jclass clazz,
@@ -791,39 +728,40 @@ Java_org_chromium_base_library_1loader_LinkerJni_nativeFindRegionReservedByWebVi
   LOG_INFO("Entering");
   uintptr_t address;
   size_t size;
-  if (!FindWebViewReservation(&address, &size))
+  if (!FindWebViewReservation(&address, &size)) {
     return false;
+  }
   s_lib_info_fields.SetLoadInfo(env, lib_info_obj, address, size);
   return true;
 }
 
-JNI_GENERATOR_EXPORT jboolean
+JNI_ZERO_BOUNDARY_EXPORT bool
 Java_org_chromium_base_library_1loader_LinkerJni_nativeLoadLibrary(
     JNIEnv* env,
     jclass clazz,
     jstring jdlopen_ext_path,
     jobject lib_info_obj,
-    jboolean spawn_relro_region) {
+    bool spawn_relro_region) {
   LOG_INFO("Entering");
 
   // Copy the contents from the Java-side LibInfo object.
   NativeLibInfo lib_info = {env, lib_info_obj};
-  if (!lib_info.CopyFromJavaObject())
+  if (!lib_info.CopyFromJavaObject()) {
     return false;
+  }
 
   String library_path(env, jdlopen_ext_path);
-  LoadTimeReporterJni reporter = {env, clazz};
-  if (!lib_info.LoadLibrary(library_path, spawn_relro_region, reporter)) {
+  if (!lib_info.LoadLibrary(library_path, spawn_relro_region)) {
     return false;
   }
   return true;
 }
 
-JNI_GENERATOR_EXPORT jboolean
+JNI_ZERO_BOUNDARY_EXPORT bool
 Java_org_chromium_base_library_1loader_LinkerJni_nativeUseRelros(
     JNIEnv* env,
     jclass clazz,
-    jlong local_load_address,
+    int64_t local_load_address,
     jobject remote_lib_info_obj) {
   LOG_INFO("Entering");
   // Copy the contents from the Java-side LibInfo object.
@@ -845,11 +783,11 @@ Java_org_chromium_base_library_1loader_LinkerJni_nativeUseRelros(
   return true;
 }
 
-JNI_GENERATOR_EXPORT jint
+JNI_ZERO_BOUNDARY_EXPORT int32_t
 Java_org_chromium_base_library_1loader_LinkerJni_nativeGetRelroSharingResult(
     JNIEnv* env,
     jclass clazz) {
-  return static_cast<jint>(s_relro_sharing_status);
+  return static_cast<int32_t>(s_relro_sharing_status);
 }
 
 bool LinkerJNIInit(JavaVM* vm, JNIEnv* env) {

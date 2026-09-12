@@ -4,27 +4,28 @@
 
 package org.chromium.chrome.browser.omnibox.suggestions.tail;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.omnibox.styles.SuggestionSpannable;
 import org.chromium.chrome.browser.omnibox.suggestions.base.BaseSuggestionViewProperties;
-import org.chromium.chrome.browser.omnibox.suggestions.base.SuggestionSpannable;
 import org.chromium.ui.modelutil.PropertyKey;
 import org.chromium.ui.modelutil.PropertyModel;
 import org.chromium.ui.modelutil.PropertyModel.WritableObjectPropertyKey;
 
-/** The properties associated with rendering the default suggestion view. */
-public class TailSuggestionViewProperties {
-    /** The text content to be displayed as a tail suggestion. */
-    public static final WritableObjectPropertyKey<SuggestionSpannable> TEXT =
-            new WritableObjectPropertyKey<>();
-    /** The text content to be used to replace contents of the Omnibox. */
-    public static final WritableObjectPropertyKey<String> FILL_INTO_EDIT =
-            new WritableObjectPropertyKey<>();
+/** The properties associated with rendering the tail suggestion view. */
+@NullMarked
+@interface TailSuggestionViewProperties {
     /** Manager taking care of suggestions alignment. */
-    public static final WritableObjectPropertyKey<AlignmentManager> ALIGNMENT_MANAGER =
+    WritableObjectPropertyKey<AlignmentManager> ALIGNMENT_MANAGER =
             new WritableObjectPropertyKey<>();
 
-    public static final PropertyKey[] ALL_UNIQUE_KEYS =
-            new PropertyKey[] {TEXT, FILL_INTO_EDIT, ALIGNMENT_MANAGER};
+    /** The text content to be used to replace contents of the Omnibox. */
+    WritableObjectPropertyKey<String> FILL_INTO_EDIT = new WritableObjectPropertyKey<>();
 
-    public static final PropertyKey[] ALL_KEYS =
+    /** The text content to be displayed as a tail suggestion. */
+    WritableObjectPropertyKey<SuggestionSpannable> TEXT = new WritableObjectPropertyKey<>();
+
+    PropertyKey[] ALL_UNIQUE_KEYS = new PropertyKey[] {ALIGNMENT_MANAGER, FILL_INTO_EDIT, TEXT};
+
+    PropertyKey[] ALL_KEYS =
             PropertyModel.concatKeys(ALL_UNIQUE_KEYS, BaseSuggestionViewProperties.ALL_KEYS);
 }

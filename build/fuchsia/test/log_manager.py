@@ -1,29 +1,38 @@
-#!/usr/bin/env vpython3
 # Copyright 2022 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Reads log data from a device."""
 
-import argparse
 import os
 import subprocess
+import logging
+import re
 import sys
 import time
 
 from contextlib import AbstractContextManager
 from typing import Iterable, Optional, TextIO
 
-from common import read_package_paths, register_common_args, \
-                   register_device_args, run_continuous_ffx_command, \
-                   run_ffx_command
-from ffx_integration import ScopedFfxConfig, run_symbolizer
+from common import run_continuous_ffx_command
+from ffx_integration import run_symbolizer
 
 
 class LogManager(AbstractContextManager):
     """Handles opening and closing file streams for logging purposes."""
 
-    def __init__(self, logs_dir: Optional[str]) -> None:
+    def __init__(
+        self, logs_dir: Optional[str], wait_for_pattern: Optional[str] = None
+    ) -> None:
+        """
+        Args:
+            logs_dir: Directory where logs will be written.
+            wait_for_pattern: A regex pattern to wait for before exiting the
+                context manager. Note: The pattern cannot contain newlines or
+                span across multiple lines, as the log stream is processed and
+                cleared line-by-line.
+        """
         self._logs_dir = logs_dir
+        self._wait_for_log_pattern = wait_for_pattern
 
         # A dictionary with the log file path as the key and a file stream as
         # value.
@@ -31,14 +40,7 @@ class LogManager(AbstractContextManager):
         self._log_procs = []
         self._scoped_ffx_log = None
 
-        if self._logs_dir:
-            self._scoped_ffx_log = ScopedFfxConfig('log.dir', self._logs_dir)
-
     def __enter__(self):
-        if self._scoped_ffx_log:
-            self._scoped_ffx_log.__enter__()
-            run_ffx_command(('daemon', 'stop'), check=False)
-
         return self
 
     def is_logging_enabled(self) -> bool:
@@ -55,35 +57,75 @@ class LogManager(AbstractContextManager):
     def open_log_file(self, log_file_name: str) -> TextIO:
         """Open a file stream with log_file_name in the logs directory."""
 
-        if not self._logs_dir:
-            raise Exception('Logging directory is not specified.')
+        assert self._logs_dir, 'Logging directory is not specified.'
         log_file_path = os.path.join(self._logs_dir, log_file_name)
         log_file = open(log_file_path, 'w', buffering=1)
         self._log_files[log_file_path] = log_file
         return log_file
 
-    def stop(self):
-        """Stop all active logging instances."""
+    def _wait_for_pattern(self) -> None:
+        """Wait until pattern appears in system_log."""
+        if not self._wait_for_log_pattern:
+            return
+        if not self._logs_dir:
+            return
+        system_log_path = os.path.join(self._logs_dir, 'system_log')
+        if not os.path.exists(system_log_path):
+            return
 
-        for proc in self._log_procs:
-            proc.kill()
-        for log in self._log_files.values():
-            log.close()
+        logging.info(
+            'Waiting for pattern "%s" in system log...',
+            self._wait_for_log_pattern,
+        )
+        compiled_pattern = re.compile(self._wait_for_log_pattern)
+        start_time = time.time()
+        # Read in text mode with line buffering. We accumulate data into
+        # pending_data to handle cases where readline() returns a partial line
+        # (i.e. does not end with a newline) due to concurrent non-atomic
+        # writes.
+        pending_data = ''
+        with open(
+            system_log_path, 'r', buffering=1, encoding='utf-8', errors='ignore'
+        ) as f:
+            while time.time() - start_time < 30.0:
+                line = f.readline()
+                if line:
+                    pending_data += line
+                    if compiled_pattern.search(pending_data):
+                        logging.info(
+                            'Found pattern "%s" in system log.',
+                            self._wait_for_log_pattern,
+                        )
+                        return
+                    if pending_data.endswith('\n'):
+                        pending_data = ''
+                else:
+                    time.sleep(0.1)
+            logging.warning(
+                'Pattern "%s" not found in system log within 30s.',
+                self._wait_for_log_pattern,
+            )
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.stop()
-        if self._scoped_ffx_log:
-            self._scoped_ffx_log.__exit__(exc_type, exc_value, traceback)
+        """Stop all active logging instances."""
+        try:
+            if self.is_logging_enabled():
+                self._wait_for_pattern()
+        finally:
+            for proc in self._log_procs:
+                proc.kill()
+            for log in self._log_files.values():
+                log.close()
+        return False
 
-            # Allow command to fail while ffx team investigates the issue.
-            run_ffx_command(('daemon', 'stop'), check=False)
 
-
-def start_system_log(log_manager: LogManager,
-                     log_to_stdout: bool,
-                     pkg_paths: Optional[Iterable[str]] = None,
-                     log_args: Optional[Iterable[str]] = None,
-                     target_id: Optional[str] = None) -> None:
+def start_system_log(
+    log_manager: LogManager,
+    log_to_stdout: bool,
+    pkg_paths: Optional[Iterable[str]] = None,
+    log_args: Optional[Iterable[str]] = None,
+    target_id: Optional[str] = None,
+) -> None:
     """
     Start system logging.
 
@@ -105,55 +147,25 @@ def start_system_log(log_manager: LogManager,
         for pkg_path in pkg_paths:
             assert os.path.isfile(pkg_path), '%s does not exist' % pkg_path
             symbol_paths.append(
-                os.path.join(os.path.dirname(pkg_path), 'ids.txt'))
+                os.path.join(os.path.dirname(pkg_path), 'ids.txt')
+            )
 
     if log_to_stdout:
         system_log = sys.stdout
     else:
         system_log = log_manager.open_log_file('system_log')
-    log_cmd = ['log', '--raw']
+    log_cmd = ['log', '--symbolize', 'off', '--no-color']
     if log_args:
         log_cmd.extend(log_args)
     if symbol_paths:
-        log_proc = run_continuous_ffx_command(log_cmd,
-                                              target_id,
-                                              stdout=subprocess.PIPE)
+        log_proc = run_continuous_ffx_command(
+            log_cmd, target_id, stdout=subprocess.PIPE
+        )
         log_manager.add_log_process(log_proc)
         log_manager.add_log_process(
-            run_symbolizer(symbol_paths, log_proc.stdout, system_log))
+            run_symbolizer(symbol_paths, log_proc.stdout, system_log)
+        )
     else:
         log_manager.add_log_process(
-            run_continuous_ffx_command(log_cmd, target_id, stdout=system_log))
-
-
-def main():
-    """Stand-alone function for fetching system logs and print to terminal.
-    Runs until the process is killed or interrupted (i.e. user presses CTRL-C).
-    """
-
-    parser = argparse.ArgumentParser()
-    register_common_args(parser)
-    register_device_args(parser)
-    parser.add_argument('--packages',
-                        action='append',
-                        help='Name of the packages to symbolize.')
-    manager_args, system_log_args = parser.parse_known_args()
-    if manager_args.packages and not manager_args.out_dir:
-        raise ValueError('--out-dir must be specified to symbolize packages.')
-    package_paths = []
-    if manager_args.packages:
-        for package in manager_args.packages:
-            package_paths.extend(
-                read_package_paths(manager_args.out_dir, package))
-    with LogManager(None) as log_manager:
-        try:
-            start_system_log(log_manager, True, package_paths, system_log_args,
-                             manager_args.target_id)
-            while True:
-                time.sleep(10000)
-        except (KeyboardInterrupt, SystemExit):
-            pass
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+            run_continuous_ffx_command(log_cmd, target_id, stdout=system_log)
+        )

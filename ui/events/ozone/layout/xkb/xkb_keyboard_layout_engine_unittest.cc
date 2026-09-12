@@ -8,16 +8,19 @@
 #include <stdint.h>
 #include <xkbcommon/xkbcommon-names.h>
 
+#include <array>
+#include <string_view>
 #include <tuple>
 
 #include "base/memory/raw_ptr.h"
-#include "build/chromeos_buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/events/event_constants.h"
 #include "ui/events/keycodes/dom/dom_code.h"
 #include "ui/events/keycodes/dom/dom_key.h"
 #include "ui/events/keycodes/keyboard_code_conversion.h"
+#include "ui/events/keycodes/keyboard_codes_posix.h"
 #include "ui/events/ozone/layout/scoped_keyboard_layout_engine.h"
+#include "ui/events/ozone/layout/xkb/xkb_evdev_codes.h"
 
 namespace ui {
 
@@ -168,10 +171,11 @@ class XkbLayoutEngineVkTest : public testing::Test {
 TEST_F(XkbLayoutEngineVkTest, KeyboardCodeForPrintable) {
   // This table contains U+2460 CIRCLED DIGIT ONE, U+2461 CIRCLED DIGIT TWO,
   // and DomCode::NONE where the result should not depend on those values.
-  static const struct {
+  struct VkeyTestCase {
     VkTestXkbKeyboardLayoutEngine::PrintableEntry test;
     KeyboardCode key_code;
-  } kVkeyTestCase[] = {
+  };
+  static const auto kVkeyTestCase = std::to_array<VkeyTestCase>({
       // Cases requiring mapping tables.
       // exclamation mark, *, *
       /* 0 */ {{0x0021, 0x2460, 0x2461, DomCode::DIGIT1}, VKEY_1},
@@ -771,7 +775,7 @@ TEST_F(XkbLayoutEngineVkTest, KeyboardCodeForPrintable) {
       /* 296 */ {{'9', '(', '+', DomCode::NONE}, VKEY_9},
       /* 297 */ {{'0', ')', '-', DomCode::NONE}, VKEY_0},
 
-  };
+  });
 
   for (size_t i = 0; i < std::size(kVkeyTestCase); ++i) {
     SCOPED_TRACE(i);
@@ -809,48 +813,52 @@ TEST_F(XkbLayoutEngineVkTest, KeyboardCodeForNonPrintable) {
     VkTestXkbKeyboardLayoutEngine::KeysymEntry test;
     KeyboardCode key_code;
   } kVkeyTestCase[] = {
-    {{DomCode::CONTROL_LEFT, EF_NONE, XKB_KEY_Control_L}, VKEY_CONTROL},
-    {{DomCode::CONTROL_RIGHT, EF_NONE, XKB_KEY_Control_R}, VKEY_CONTROL},
-    {{DomCode::SHIFT_LEFT, EF_NONE, XKB_KEY_Shift_L}, VKEY_SHIFT},
-    {{DomCode::SHIFT_RIGHT, EF_NONE, XKB_KEY_Shift_R}, VKEY_SHIFT},
-    {{DomCode::META_LEFT, EF_NONE, XKB_KEY_Super_L}, VKEY_LWIN},
-    {{DomCode::META_RIGHT, EF_NONE, XKB_KEY_Super_R}, VKEY_LWIN},
-    {{DomCode::ALT_LEFT, EF_NONE, XKB_KEY_Alt_L}, VKEY_MENU},
-    {{DomCode::ALT_RIGHT, EF_NONE, XKB_KEY_Alt_R}, VKEY_MENU},
-    {{DomCode::ALT_RIGHT, EF_NONE, XKB_KEY_ISO_Level3_Shift}, VKEY_ALTGR},
-    {{DomCode::DIGIT1, EF_NONE, XKB_KEY_1}, VKEY_1},
-    {{DomCode::NUMPAD1, EF_NONE, XKB_KEY_KP_1}, VKEY_1},
-    {{DomCode::CAPS_LOCK, EF_NONE, XKB_KEY_Caps_Lock}, VKEY_CAPITAL},
-    {{DomCode::ENTER, EF_NONE, XKB_KEY_Return}, VKEY_RETURN},
-    {{DomCode::NUMPAD_ENTER, EF_NONE, XKB_KEY_KP_Enter}, VKEY_RETURN},
-    {{DomCode::SLEEP, EF_NONE, XKB_KEY_XF86Sleep}, VKEY_SLEEP},
-    // Verify that we can translate some Dom codes even if they are not
-    // known to XKB.
-    {{DomCode::LAUNCH_ASSISTANT, EF_NONE}, VKEY_ASSISTANT},
-    {{DomCode::LAUNCH_CONTROL_PANEL, EF_NONE}, VKEY_SETTINGS},
-    {{DomCode::PRIVACY_SCREEN_TOGGLE, EF_NONE}, VKEY_PRIVACY_SCREEN_TOGGLE},
-    {{DomCode::MICROPHONE_MUTE_TOGGLE, EF_NONE}, VKEY_MICROPHONE_MUTE_TOGGLE},
-    {{DomCode::EMOJI_PICKER, EF_NONE}, VKEY_EMOJI_PICKER},
-    {{DomCode::DICTATE, EF_NONE}, VKEY_DICTATE},
-    {{DomCode::ALL_APPLICATIONS, EF_NONE}, VKEY_ALL_APPLICATIONS},
-    // Verify the AC Application keys.
-    {{DomCode::NEW, EF_NONE}, VKEY_NEW},
-    {{DomCode::CLOSE, EF_NONE}, VKEY_CLOSE},
-    // Verify that number pad digits produce located VKEY codes.
-    {{DomCode::NUMPAD0, EF_NONE, XKB_KEY_KP_0, '0'}, VKEY_NUMPAD0},
-    {{DomCode::NUMPAD9, EF_NONE, XKB_KEY_KP_9, '9'}, VKEY_NUMPAD9},
-    // Verify AltGr+V & AltGr+W on de(neo) layout.
-    {{DomCode::US_W, EF_ALTGR_DOWN, XKB_KEY_BackSpace, 8}, VKEY_BACK},
-    {{DomCode::US_V, EF_ALTGR_DOWN, XKB_KEY_Return, 13}, VKEY_RETURN},
+      {{DomCode::CONTROL_LEFT, EF_NONE, XKB_KEY_Control_L}, VKEY_CONTROL},
+      {{DomCode::CONTROL_RIGHT, EF_NONE, XKB_KEY_Control_R}, VKEY_CONTROL},
+      {{DomCode::SHIFT_LEFT, EF_NONE, XKB_KEY_Shift_L}, VKEY_SHIFT},
+      {{DomCode::SHIFT_RIGHT, EF_NONE, XKB_KEY_Shift_R}, VKEY_SHIFT},
+      {{DomCode::META_LEFT, EF_NONE, XKB_KEY_Super_L}, VKEY_LWIN},
+      {{DomCode::META_RIGHT, EF_NONE, XKB_KEY_Super_R}, VKEY_LWIN},
+      {{DomCode::ALT_LEFT, EF_NONE, XKB_KEY_Alt_L}, VKEY_MENU},
+      {{DomCode::ALT_RIGHT, EF_NONE, XKB_KEY_Alt_R}, VKEY_MENU},
+      {{DomCode::ALT_RIGHT, EF_NONE, XKB_KEY_ISO_Level3_Shift}, VKEY_ALTGR},
+      {{DomCode::DIGIT1, EF_NONE, XKB_KEY_1}, VKEY_1},
+      {{DomCode::NUMPAD1, EF_NONE, XKB_KEY_KP_1}, VKEY_1},
+      {{DomCode::CAPS_LOCK, EF_NONE, XKB_KEY_Caps_Lock}, VKEY_CAPITAL},
+      {{DomCode::ENTER, EF_NONE, XKB_KEY_Return}, VKEY_RETURN},
+      {{DomCode::NUMPAD_ENTER, EF_NONE, XKB_KEY_KP_Enter}, VKEY_RETURN},
+      {{DomCode::SLEEP, EF_NONE, XKB_KEY_XF86Sleep}, VKEY_SLEEP},
+      // Verify that we can translate some Dom codes even if they are not
+      // known to XKB.
+      {{DomCode::LAUNCH_ASSISTANT, EF_NONE}, VKEY_ASSISTANT},
+      {{DomCode::LAUNCH_CONTROL_PANEL, EF_NONE}, VKEY_SETTINGS},
+      {{DomCode::PRIVACY_SCREEN_TOGGLE, EF_NONE}, VKEY_PRIVACY_SCREEN_TOGGLE},
+      {{DomCode::MICROPHONE_MUTE_TOGGLE, EF_NONE}, VKEY_MICROPHONE_MUTE_TOGGLE},
+      {{DomCode::EMOJI_PICKER, EF_NONE}, VKEY_EMOJI_PICKER},
+      {{DomCode::DICTATE, EF_NONE}, VKEY_DICTATE},
+      {{DomCode::ALL_APPLICATIONS, EF_NONE}, VKEY_ALL_APPLICATIONS},
+      // Verify the AC Application keys.
+      {{DomCode::NEW, EF_NONE}, VKEY_NEW},
+      {{DomCode::CLOSE, EF_NONE}, VKEY_CLOSE},
+      // Verify that number pad digits produce located VKEY codes.
+      {{DomCode::NUMPAD0, EF_NONE, XKB_KEY_KP_0, '0'}, VKEY_NUMPAD0},
+      {{DomCode::NUMPAD9, EF_NONE, XKB_KEY_KP_9, '9'}, VKEY_NUMPAD9},
+      // Verify AltGr+V & AltGr+W on de(neo) layout.
+      {{DomCode::US_W, EF_ALTGR_DOWN, XKB_KEY_BackSpace, 8}, VKEY_BACK},
+      {{DomCode::US_V, EF_ALTGR_DOWN, XKB_KEY_Return, 13}, VKEY_RETURN},
 #if BUILDFLAG(IS_CHROMEOS)
-    // Verify on ChromeOS PRINT maps to VKEY_PRINT not VKEY_SNAPSHOT.
-    {{DomCode::PRINT, EF_NONE, XKB_KEY_Print}, VKEY_PRINT},
-    // On ChromeOS XKB_KEY_3270_PrintScreen is used for PRINT_SCREEN.
-    {{DomCode::PRINT_SCREEN, EF_NONE, XKB_KEY_3270_PrintScreen}, VKEY_SNAPSHOT},
+      {{DomCode::ACCESSIBILITY, EF_NONE}, VKEY_ACCESSIBILITY},
+      {{DomCode::DO_NOT_DISTURB, EF_NONE}, VKEY_DO_NOT_DISTURB},
+      {{DomCode::CAMERA_ACCESS_TOGGLE, EF_NONE}, VKEY_CAMERA_ACCESS_TOGGLE},
+      // Verify on ChromeOS PRINT maps to VKEY_PRINT not VKEY_SNAPSHOT.
+      {{DomCode::PRINT, EF_NONE, XKB_KEY_Print}, VKEY_PRINT},
+      // On ChromeOS XKB_KEY_3270_PrintScreen is used for PRINT_SCREEN.
+      {{DomCode::PRINT_SCREEN, EF_NONE, XKB_KEY_3270_PrintScreen},
+       VKEY_SNAPSHOT},
 #else   // !BUILDFLAG(IS_CHROMEOS)
-    // On Linux PRINT and PRINT_SCREEN map to VKEY_SNAPSHOT via XKB_KEY_Print
-    {{DomCode::PRINT, EF_NONE, XKB_KEY_Print}, VKEY_SNAPSHOT},
-    {{DomCode::PRINT_SCREEN, EF_NONE, XKB_KEY_Print}, VKEY_SNAPSHOT},
+      // On Linux PRINT and PRINT_SCREEN map to VKEY_SNAPSHOT via XKB_KEY_Print
+      {{DomCode::PRINT, EF_NONE, XKB_KEY_Print}, VKEY_SNAPSHOT},
+      {{DomCode::PRINT_SCREEN, EF_NONE, XKB_KEY_Print}, VKEY_SNAPSHOT},
 #endif  // BUILDFLAG(IS_CHROMEOS)
   };
   for (const auto& e : kVkeyTestCase) {
@@ -866,60 +874,70 @@ TEST_F(XkbLayoutEngineVkTest, KeyboardCodeForNonPrintable) {
 
 
 TEST_F(XkbLayoutEngineVkTest, XkbRuleNamesForLayoutName) {
-  static const VkTestXkbKeyboardLayoutEngine::RuleNames kVkeyTestCase[] = {
-      /* 0 */ {"us", "us", ""},
-      /* 1 */ {"jp", "jp", ""},
-      /* 2 */ {"us(intl)", "us", "intl"},
-      /* 3 */ {"us(altgr-intl)", "us", "altgr-intl"},
-      /* 4 */ {"us(dvorak)", "us", "dvorak"},
-      /* 5 */ {"us(colemak)", "us", "colemak"},
-      /* 6 */ {"be", "be", ""},
-      /* 7 */ {"fr", "fr", ""},
-      /* 8 */ {"ca", "ca", ""},
-      /* 9 */ {"ch(fr)", "ch", "fr"},
-      /* 10 */ {"ca(multix)", "ca", "multix"},
-      /* 11 */ {"de", "de", ""},
-      /* 12 */ {"de(neo)", "de", "neo"},
-      /* 13 */ {"ch", "ch", ""},
-      /* 14 */ {"ru", "ru", ""},
-      /* 15 */ {"ru(phonetic)", "ru", "phonetic"},
-      /* 16 */ {"br", "br", ""},
-      /* 17 */ {"bg", "bg", ""},
-      /* 18 */ {"bg(phonetic)", "bg", "phonetic"},
-      /* 19 */ {"ca(eng)", "ca", "eng"},
-      /* 20 */ {"cz", "cz", ""},
-      /* 21 */ {"cz(qwerty)", "cz", "qwerty"},
-      /* 22 */ {"ee", "ee", ""},
-      /* 23 */ {"es", "es", ""},
-      /* 24 */ {"es(cat)", "es", "cat"},
-      /* 25 */ {"dk", "dk", ""},
-      /* 26 */ {"gr", "gr", ""},
-      /* 27 */ {"il", "il", ""},
-      /* 28 */ {"latam", "latam", ""},
-      /* 29 */ {"lt", "lt", ""},
-      /* 30 */ {"lv(apostrophe)", "lv", "apostrophe"},
-      /* 31 */ {"hr", "hr", ""},
-      /* 32 */ {"gb(extd)", "gb", "extd"},
-      /* 33 */ {"gb(dvorak)", "gb", "dvorak"},
-      /* 34 */ {"fi", "fi", ""},
-      /* 35 */ {"hu", "hu", ""},
-      /* 36 */ {"it", "it", ""},
-      /* 37 */ {"is", "is", ""},
-      /* 38 */ {"no", "no", ""},
-      /* 39 */ {"pl", "pl", ""},
-      /* 40 */ {"pt", "pt", ""},
-      /* 41 */ {"ro", "ro", ""},
-      /* 42 */ {"se", "se", ""},
-      /* 43 */ {"sk", "sk", ""},
-      /* 44 */ {"si", "si", ""},
-      /* 45 */ {"rs", "rs", ""},
-      /* 46 */ {"tr", "tr", ""},
-      /* 47 */ {"ua", "ua", ""},
-      /* 48 */ {"by", "by", ""},
-      /* 49 */ {"am", "am", ""},
-      /* 50 */ {"ge", "ge", ""},
-      /* 51 */ {"mn", "mn", ""},
-      /* 52 */ {"ie", "ie", ""}};
+  static const auto kVkeyTestCase =
+      std::to_array<VkTestXkbKeyboardLayoutEngine::RuleNames>({
+          /* 0 */ {"us", "us", ""},
+          /* 1 */ {"jp", "jp", ""},
+          /* 2 */ {"us(intl)", "us", "intl"},
+          /* 3 */ {"us(altgr-intl)", "us", "altgr-intl"},
+          /* 4 */ {"us(dvorak)", "us", "dvorak"},
+          /* 5 */ {"us(colemak)", "us", "colemak"},
+          /* 6 */ {"be", "be", ""},
+          /* 7 */ {"fr", "fr", ""},
+          /* 8 */ {"ca", "ca", ""},
+          /* 9 */ {"ch(fr)", "ch", "fr"},
+          /* 10 */ {"ca(multix)", "ca", "multix"},
+          /* 11 */ {"de", "de", ""},
+          /* 12 */ {"de(neo)", "de", "neo"},
+          /* 13 */ {"ch", "ch", ""},
+          /* 14 */ {"ru", "ru", ""},
+          /* 15 */ {"ru(phonetic)", "ru", "phonetic"},
+          /* 16 */ {"br", "br", ""},
+          /* 17 */ {"bg", "bg", ""},
+          /* 18 */ {"bg(phonetic)", "bg", "phonetic"},
+          /* 19 */ {"ca(eng)", "ca", "eng"},
+          /* 20 */ {"cz", "cz", ""},
+          /* 21 */ {"cz(qwerty)", "cz", "qwerty"},
+          /* 22 */ {"ee", "ee", ""},
+          /* 23 */ {"es", "es", ""},
+          /* 24 */ {"es(cat)", "es", "cat"},
+          /* 25 */ {"dk", "dk", ""},
+          /* 26 */ {"gr", "gr", ""},
+          /* 27 */ {"il", "il", ""},
+          /* 28 */ {"latam", "latam", ""},
+          /* 29 */ {"lt", "lt", ""},
+          /* 30 */ {"lv(apostrophe)", "lv", "apostrophe"},
+          /* 31 */ {"hr", "hr", ""},
+          /* 32 */ {"gb(extd)", "gb", "extd"},
+          /* 33 */ {"gb(dvorak)", "gb", "dvorak"},
+          /* 34 */ {"fi", "fi", ""},
+          /* 35 */ {"hu", "hu", ""},
+          /* 36 */ {"it", "it", ""},
+          /* 37 */ {"is", "is", ""},
+          /* 38 */ {"no", "no", ""},
+          /* 39 */ {"pl", "pl", ""},
+          /* 40 */ {"pt", "pt", ""},
+          /* 41 */ {"ro", "ro", ""},
+          /* 42 */ {"se", "se", ""},
+          /* 43 */ {"sk", "sk", ""},
+          /* 44 */ {"si", "si", ""},
+          /* 45 */ {"rs", "rs", ""},
+          /* 46 */ {"tr", "tr", ""},
+          /* 47 */ {"ua", "ua", ""},
+          /* 48 */ {"by", "by", ""},
+          /* 49 */ {"am", "am", ""},
+          /* 50 */ {"ge", "ge", ""},
+          /* 51 */ {"mn", "mn", ""},
+          /* 52 */ {"ie", "ie", ""},
+          // Path traversal cases.
+          /* 53 */ {"../../evil", "", ""},
+          /* 54 */ {"us(../../evil)", "us", ""},
+          /* 55 */ {"us-../../evil", "us", ""},
+          // Invalid character cases.
+          /* 56 */ {"us$", "", ""},
+          /* 57 */ {"us(dvo*ak)", "us", ""},
+          /* 58 */ {"us-colem@k", "us", ""},
+      });
   for (size_t i = 0; i < std::size(kVkeyTestCase); ++i) {
     SCOPED_TRACE(i);
     const VkTestXkbKeyboardLayoutEngine::RuleNames* e = &kVkeyTestCase[i];
@@ -986,17 +1004,13 @@ TEST_F(XkbLayoutEngineVkTest, GetDomCodeByKeysym) {
 
     // NumLock + Numpad1. NumLock
     {65457, kNullopt, ui::DomCode::NUMPAD1},
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-    // On ChromeOS, NumLock should be interpreted as it is always set.
-    {65457, 0, ui::DomCode::NUMPAD1},
-#endif
     {65457, kNumLockMask, ui::DomCode::NUMPAD1},
   };
 
   for (const auto& test_case : kTestCases) {
-    absl::optional<std::vector<base::StringPiece>> modifiers;
+    std::optional<std::vector<std::string_view>> modifiers;
     if (test_case.modifiers != kNullopt) {
-      std::vector<base::StringPiece> modifiers_content;
+      std::vector<std::string_view> modifiers_content;
       if (test_case.modifiers & kShiftMask)
         modifiers_content.push_back(XKB_MOD_NAME_SHIFT);
       if (test_case.modifiers & kCapsLockMask)
@@ -1010,6 +1024,84 @@ TEST_F(XkbLayoutEngineVkTest, GetDomCodeByKeysym) {
               layout_engine_->GetDomCodeByKeysym(test_case.keysym, modifiers))
         << "input: " << test_case.keysym << ", " << test_case.modifiers;
   }
+}
+
+TEST(XkbKeyboardLayoutEngineTest, NumpadDecimal) {
+  XkbEvdevCodes evdev_codes;
+  XkbKeyboardLayoutEngine layout_engine(evdev_codes);
+
+  // Set up US keyboard layout.
+  {
+    std::unique_ptr<xkb_context, ui::XkbContextDeleter> xkb_context(
+        xkb_context_new(XKB_CONTEXT_NO_FLAGS));
+    xkb_rule_names names = {
+        .rules = nullptr,
+        .model = "pc101",
+        .layout = "us",
+        .variant = "",
+        .options = "",
+    };
+    std::unique_ptr<xkb_keymap, ui::XkbKeymapDeleter> xkb_keymap(
+        xkb_keymap_new_from_names(xkb_context.get(), &names,
+                                  XKB_KEYMAP_COMPILE_NO_FLAGS));
+    std::unique_ptr<char, base::FreeDeleter> layout(
+        xkb_keymap_get_as_string(xkb_keymap.get(), XKB_KEYMAP_FORMAT_TEXT_V1));
+    layout_engine.SetCurrentLayoutFromBuffer(layout.get(),
+                                             std::strlen(layout.get()));
+  }
+
+  DomKey dom_key;
+  KeyboardCode key_code;
+
+  // With NumLock enabled, NUMPAD_DECIMAL should map to DomKey '.' and
+  // VKEY_DECIMAL.
+  dom_key = DomKey::NONE;
+  key_code = VKEY_UNKNOWN;
+  EXPECT_TRUE(layout_engine.Lookup(ui::DomCode::NUMPAD_DECIMAL,
+                                   ui::EF_NUM_LOCK_ON, &dom_key, &key_code));
+  EXPECT_EQ(ui::DomKey::FromCharacter('.'), dom_key);
+  EXPECT_EQ(ui::VKEY_DECIMAL, key_code);
+
+  // NumLock off tests are skipped on ChromeOS because NumLock is always on.
+#if !BUILDFLAG(IS_CHROMEOS)
+  // With NumLock disabled, NUMPAD_DECIMAL should map to DomKey::DEL and
+  // VKEY_DELETE.
+  dom_key = DomKey::NONE;
+  key_code = VKEY_UNKNOWN;
+  EXPECT_TRUE(layout_engine.Lookup(ui::DomCode::NUMPAD_DECIMAL, ui::EF_NONE,
+                                   &dom_key, &key_code));
+  EXPECT_EQ(ui::DomKey::DEL, dom_key);
+  EXPECT_EQ(ui::VKEY_DELETE, key_code);
+
+  // With NumLock disabled and Shift down, the key should still act as Delete
+  // (to facilitate selecting text with the numpad, for example).
+  dom_key = DomKey::NONE;
+  key_code = VKEY_UNKNOWN;
+  EXPECT_TRUE(layout_engine.Lookup(ui::DomCode::NUMPAD_DECIMAL,
+                                   ui::EF_SHIFT_DOWN, &dom_key, &key_code));
+  EXPECT_EQ(ui::DomKey::DEL, dom_key);
+  EXPECT_EQ(ui::VKEY_DELETE, key_code);
+#endif
+
+  // With NumLock enabled and Shift down, NumLock behavior is inverted (acts as
+  // disabled), which maps to DomKey::DEL and VKEY_DELETE.
+  dom_key = DomKey::NONE;
+  key_code = VKEY_UNKNOWN;
+  EXPECT_TRUE(layout_engine.Lookup(ui::DomCode::NUMPAD_DECIMAL,
+                                   ui::EF_SHIFT_DOWN | ui::EF_NUM_LOCK_ON,
+                                   &dom_key, &key_code));
+  EXPECT_EQ(ui::DomKey::DEL, dom_key);
+  EXPECT_EQ(ui::VKEY_DELETE, key_code);
+
+  // With NumLock enabled and Alt down (e.g. Alt+NumpadDecimal), keysym is still
+  // KP_Decimal, mapping to VKEY_DECIMAL.
+  dom_key = DomKey::NONE;
+  key_code = VKEY_UNKNOWN;
+  EXPECT_TRUE(layout_engine.Lookup(ui::DomCode::NUMPAD_DECIMAL,
+                                   ui::EF_ALT_DOWN | ui::EF_NUM_LOCK_ON,
+                                   &dom_key, &key_code));
+  EXPECT_EQ(ui::DomKey::FromCharacter('.'), dom_key);
+  EXPECT_EQ(ui::VKEY_DECIMAL, key_code);
 }
 
 }  // namespace ui

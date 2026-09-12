@@ -7,7 +7,7 @@
 #include <memory>
 
 #include "base/json/json_writer.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/strcat.h"
 #include "base/values.h"
 #include "components/policy/core/browser/policy_conversions.h"
 #include "components/policy/core/browser/policy_conversions_client.h"
@@ -26,10 +26,10 @@ JsonGenerationParams::JsonGenerationParams() = default;
 JsonGenerationParams::~JsonGenerationParams() = default;
 JsonGenerationParams::JsonGenerationParams(JsonGenerationParams&&) = default;
 
-std::string GenerateJson(base::Value::Dict policy_values,
-                         base::Value::Dict status,
+std::string GenerateJson(base::DictValue policy_values,
+                         base::DictValue status,
                          const JsonGenerationParams& params) {
-  base::Value::Dict dict = std::move(policy_values);
+  base::DictValue dict = std::move(policy_values);
   dict.Set("chromeMetadata", GetChromeMetadataValue(params));
   dict.Set("status", std::move(status));
 
@@ -40,19 +40,17 @@ std::string GenerateJson(base::Value::Dict policy_values,
   return json_policies;
 }
 
-base::Value::Dict GetChromeMetadataValue(const JsonGenerationParams& params) {
-  base::Value::Dict chrome_metadata;
+base::DictValue GetChromeMetadataValue(const JsonGenerationParams& params) {
+  base::DictValue chrome_metadata;
   chrome_metadata.Set("application", params.application_name);
 
-  std::string version = base::StringPrintf(
-      "%s (%s)%s %s%s", version_info::GetVersionNumber().c_str(),
-      l10n_util::GetStringUTF8(version_info::IsOfficialBuild()
-                                   ? IDS_VERSION_UI_OFFICIAL
-                                   : IDS_VERSION_UI_UNOFFICIAL)
-          .c_str(),
-      (params.channel_name.empty() ? "" : " " + params.channel_name).c_str(),
-      params.processor_variation.c_str(),
-      params.cohort_name ? params.cohort_name->c_str() : "");
+  std::string version = base::StrCat(
+      {version_info::GetVersionNumber(), " (",
+       l10n_util::GetStringUTF8(version_info::IsOfficialBuild()
+                                    ? IDS_VERSION_UI_OFFICIAL
+                                    : IDS_VERSION_UI_UNOFFICIAL),
+       ") ", params.channel_name, params.channel_name.empty() ? "" : " ",
+       params.processor_variation, params.cohort_name.value_or(std::string())});
 
   chrome_metadata.Set(kChromeMetadataVersionKey, version);
 

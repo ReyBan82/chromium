@@ -5,12 +5,14 @@
 #ifndef CONTENT_RENDERER_NAVIGATION_CLIENT_H_
 #define CONTENT_RENDERER_NAVIGATION_CLIENT_H_
 
+#include "base/memory/raw_ptr.h"
+#include "base/uuid.h"
 #include "content/common/frame.mojom.h"
 #include "content/common/navigation_client.mojom.h"
 #include "content/public/common/alternative_error_page_override_info.mojom.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "mojo/public/cpp/bindings/pending_associated_receiver.h"
-#include "third_party/blink/public/common/permissions_policy/permissions_policy.h"
+#include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 
 namespace content {
 
@@ -18,7 +20,13 @@ class RenderFrameImpl;
 
 class NavigationClient : mojom::NavigationClient {
  public:
-  explicit NavigationClient(RenderFrameImpl* render_frame);
+  // Used for browser-initiated navigations.
+  NavigationClient(RenderFrameImpl* render_frame,
+                   NavigationClient* initiator_navigation_client);
+  // Used for renderer-initiated navigations.
+  NavigationClient(RenderFrameImpl* render_frame,
+                   blink::mojom::BeginNavigationParamsPtr begin_params,
+                   blink::mojom::CommonNavigationParamsPtr common_params);
   ~NavigationClient() override;
 
   // mojom::NavigationClient implementation:
@@ -29,20 +37,25 @@ class NavigationClient : mojom::NavigationClient {
       mojo::ScopedDataPipeConsumerHandle response_body,
       network::mojom::URLLoaderClientEndpointsPtr url_loader_client_endpoints,
       std::unique_ptr<blink::PendingURLLoaderFactoryBundle> subresource_loaders,
-      absl::optional<std::vector<blink::mojom::TransferrableURLLoaderPtr>>
+      std::optional<std::vector<blink::mojom::TransferrableURLLoaderPtr>>
           subresource_overrides,
       blink::mojom::ControllerServiceWorkerInfoPtr
           controller_service_worker_info,
       blink::mojom::ServiceWorkerContainerInfoForClientPtr container_info,
       mojo::PendingRemote<network::mojom::URLLoaderFactory>
-          prefetch_loader_factory,
+          subresource_proxying_loader_factory,
       mojo::PendingRemote<network::mojom::URLLoaderFactory>
-          topics_loader_factory,
+          keep_alive_loader_factory,
+      mojo::PendingAssociatedRemote<blink::mojom::FetchLaterLoaderFactory>
+          fetch_later_loader_factory,
       const blink::DocumentToken& document_token,
       const base::UnguessableToken& devtools_navigation_token,
-      const absl::optional<blink::ParsedPermissionsPolicy>& permissions_policy,
+      const blink::InitiatorStateToken& initiator_state_token,
+      const base::Uuid& base_auction_nonce,
       blink::mojom::PolicyContainerPtr policy_container,
       mojo::PendingRemote<blink::mojom::CodeCacheHost> code_cache_host,
+      mojo::PendingRemote<blink::mojom::CodeCacheHost>
+          code_cache_host_for_background,
       mojom::CookieManagerInfoPtr cookie_manager_info,
       mojom::StorageInfoPtr storage_info,
       CommitNavigationCallback callback) override;
@@ -53,9 +66,11 @@ class NavigationClient : mojom::NavigationClient {
       int error_code,
       int extended_error_code,
       const net::ResolveErrorInfo& resolve_error_info,
-      const absl::optional<std::string>& error_page_content,
+      const std::optional<std::string>& error_page_content,
       std::unique_ptr<blink::PendingURLLoaderFactoryBundle> subresource_loaders,
       const blink::DocumentToken& document_token,
+      const base::UnguessableToken& devtools_navigation_token,
+      const blink::InitiatorStateToken& initiator_state_token,
       blink::mojom::PolicyContainerPtr policy_container,
       mojom::AlternativeErrorPageOverrideInfoPtr alternative_error_page_info,
       CommitFailedNavigationCallback callback) override;
@@ -73,7 +88,35 @@ class NavigationClient : mojom::NavigationClient {
   // notification to the browser.
   void SetUpRendererInitiatedNavigation(
       mojo::PendingRemote<mojom::NavigationRendererCancellationListener>
-          renderer_cancellation_listener_remote);
+          renderer_cancellation_listener_remote,
+      mojo::PendingRemote<
+          mojom::NavigationRendererIgnoreDuplicateNavigationListener>
+          renderer_ignore_duplicate_navigation_listener_remote);
+
+  void ResetWithoutCancelling();
+
+  void ResetForNewNavigation(bool is_duplicate_navigation);
+
+  void ResetForAbort();
+
+  bool HasBeginNavigationParams() const { return !!begin_params_; }
+
+  void DidIgnoreDuplicateNavigation();
+
+  void SetCookieModificationCount(uint64_t cookie_modification_count) {
+    cookie_modification_count_ = cookie_modification_count;
+  }
+
+  uint64_t cookie_modification_count() const {
+    return cookie_modification_count_;
+  }
+
+  const blink::mojom::BeginNavigationParams& begin_params() const {
+    return *begin_params_;
+  }
+  const blink::mojom::CommonNavigationParams& common_params() const {
+    return *common_params_;
+  }
 
  private:
   // OnDroppedNavigation is bound from BeginNavigation till CommitNavigation.
@@ -87,13 +130,38 @@ class NavigationClient : mojom::NavigationClient {
   // ended, so notify the browser about it.
   void NotifyNavigationCancellationWindowEnded();
 
+  // Change the `render_frame_` associated with this client to the RenderFrame
+  // indicated by `commit_target_frame_token`. This can only happen if a
+  // RenderFrame<>RenderFrame swap navigation is committing, but it reuses the
+  // previous RenderFrame's NavigationClient to preserve navigation cancellation
+  // behavior.
+  // See `NavigationRequest::ReuseRequestNavigationClientForCommitIfNeeded()`
+  // for more details.
+  void MoveOwnershipToCommitTargetIfNeeded(
+      std::optional<blink::LocalFrameToken> commit_target_frame_token);
+
   mojo::AssociatedReceiver<mojom::NavigationClient> navigation_client_receiver_{
       this};
   mojo::Remote<mojom::NavigationRendererCancellationListener>
       renderer_cancellation_listener_remote_;
-  RenderFrameImpl* render_frame_;
+  mojo::Remote<mojom::NavigationRendererIgnoreDuplicateNavigationListener>
+      renderer_ignore_duplicate_navigation_listener_remote_;
+
+  // Note that this might change due to `MoveOwnershipToCommitTargetIfNeeded()`.
+  raw_ptr<RenderFrameImpl, DanglingUntriaged> render_frame_;
+
   // See NavigationState::was_initiated_in_this_frame for details.
   bool was_initiated_in_this_frame_ = false;
+
+  // Captures a snapshot of the initiating document's cookie modification count
+  // when this navigation starts. Used during duplicate navigation checks to
+  // determine if cookies have changed since this navigation began.
+  uint64_t cookie_modification_count_ = 0;
+
+  // If the navigation is initiated by this renderer, this will be set to the
+  // params sent on the
+  blink::mojom::BeginNavigationParamsPtr begin_params_;
+  blink::mojom::CommonNavigationParamsPtr common_params_;
 
   base::WeakPtrFactory<NavigationClient> weak_ptr_factory_{this};
 };

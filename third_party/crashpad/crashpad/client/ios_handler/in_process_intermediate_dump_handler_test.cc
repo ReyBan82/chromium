@@ -16,7 +16,9 @@
 
 #include <sys/utsname.h>
 
+#include <atomic>
 #include <iterator>
+#include <thread>
 
 #include "base/files/file_path.h"
 #include "build/build_config.h"
@@ -25,7 +27,9 @@
 #include "client/crashpad_info.h"
 #include "client/simple_string_dictionary.h"
 #include "gtest/gtest.h"
+#include "minidump/minidump_file_writer.h"
 #include "snapshot/ios/process_snapshot_ios_intermediate_dump.h"
+#include "snapshot/minidump/process_snapshot_minidump.h"
 #include "test/scoped_set_thread_name.h"
 #include "test/scoped_temp_dir.h"
 #include "test/test_paths.h"
@@ -37,6 +41,16 @@ namespace test {
 namespace {
 
 using internal::InProcessIntermediateDumpHandler;
+
+class ReadToString : public crashpad::MemorySnapshot::Delegate {
+ public:
+  std::string result;
+
+  bool MemorySnapshotDelegateRead(void* data, size_t size) override {
+    result = std::string(reinterpret_cast<const char*>(data), size);
+    return true;
+  }
+};
 
 class InProcessIntermediateDumpHandlerTest : public testing::Test {
  protected:
@@ -61,8 +75,8 @@ class InProcessIntermediateDumpHandlerTest : public testing::Test {
       InProcessIntermediateDumpHandler::WriteHeader(writer_.get());
       InProcessIntermediateDumpHandler::WriteProcessInfo(
           writer_.get(), {{"before_dump", "pre"}});
-      InProcessIntermediateDumpHandler::WriteSystemInfo(writer_.get(),
-                                                        system_data_);
+      InProcessIntermediateDumpHandler::WriteSystemInfo(
+          writer_.get(), system_data_, ClockMonotonicNanoseconds());
       InProcessIntermediateDumpHandler::WriteThreadInfo(writer_.get(), 0, 0);
       InProcessIntermediateDumpHandler::WriteModuleInfo(writer_.get());
     }
@@ -89,6 +103,25 @@ class InProcessIntermediateDumpHandlerTest : public testing::Test {
   const auto& path() const { return path_; }
   auto writer() const { return writer_.get(); }
 
+#if TARGET_OS_SIMULATOR
+  // macOS 14.0 is 23A344, macOS 13.6.5 is 22G621, so if the first two
+  // characters in the kern.osversion are > 22, this build will reproduce the
+  // simulator bug in crbug.com/328282286
+  // This now reproduces on macOS 15.4 24E248 as well for iOS17 simulators.
+  bool HasMacOSBrokeDYLDTaskInfo() {
+    if (__builtin_available(iOS 18, *)) {
+      return false;
+    }
+    if (std::stoi(system_data_.Build().substr(0, 2)) >= 24) {
+      return true;
+    }
+    if (__builtin_available(iOS 17, *)) {
+      return false;
+    }
+    return std::stoi(system_data_.Build().substr(0, 2)) > 22;
+  }
+#endif
+
  private:
   std::unique_ptr<internal::IOSIntermediateDumpWriter> writer_;
   internal::IOSSystemDataCollector system_data_;
@@ -106,7 +139,6 @@ TEST_F(InProcessIntermediateDumpHandlerTest, TestSystem) {
   ASSERT_NE(system, nullptr);
 #if defined(ARCH_CPU_X86_64)
   EXPECT_EQ(system->GetCPUArchitecture(), kCPUArchitectureX86_64);
-  EXPECT_STREQ(system->CPUVendor().c_str(), "GenuineIntel");
 #elif defined(ARCH_CPU_ARM64)
   EXPECT_EQ(system->GetCPUArchitecture(), kCPUArchitectureARM64);
 #else
@@ -125,6 +157,16 @@ TEST_F(InProcessIntermediateDumpHandlerTest, TestSystem) {
 }
 
 TEST_F(InProcessIntermediateDumpHandlerTest, TestAnnotations) {
+#if TARGET_OS_SIMULATOR
+  // This test will fail on <iOS17 simulators when running on macOS >=14.3 or
+  // <iOS18 simulators when running on macOS >=15.4 due to a bug in Simulator.
+  // crbug.com/328282286
+  if (HasMacOSBrokeDYLDTaskInfo()) {
+    // For TearDown.
+    ASSERT_TRUE(LoggingRemoveFile(path()));
+    return;
+  }
+#endif
   // This is “leaked” to crashpad_info.
   crashpad::SimpleStringDictionary* simple_annotations =
       new crashpad::SimpleStringDictionary();
@@ -161,9 +203,10 @@ TEST_F(InProcessIntermediateDumpHandlerTest, TestAnnotations) {
       path(), {{"after_dump", "post"}}));
 
   auto process_map = process_snapshot.AnnotationsSimpleMap();
-  EXPECT_EQ(process_map.size(), 2u);
+  EXPECT_EQ(process_map.size(), 3u);
   EXPECT_EQ(process_map["before_dump"], "pre");
   EXPECT_EQ(process_map["after_dump"], "post");
+  EXPECT_TRUE(process_map.find("crashpad_uptime_ns") != process_map.end());
 
   std::map<std::string, std::string> all_annotations_simple_map;
   std::vector<AnnotationSnapshot> all_annotations;
@@ -206,6 +249,108 @@ TEST_F(InProcessIntermediateDumpHandlerTest, TestAnnotations) {
     } else {
       ADD_FAILURE() << "unexpected annotation " << annotation.name;
     }
+  }
+}
+
+TEST_F(InProcessIntermediateDumpHandlerTest, TestExtraMemoryRanges) {
+#if TARGET_OS_SIMULATOR
+  // This test will fail on <iOS17 simulators when running on macOS >=14.3 or
+  // <iOS18 simulators when running on macOS >=15.4 due to a bug in Simulator.
+  // crbug.com/328282286
+  if (HasMacOSBrokeDYLDTaskInfo()) {
+    // For TearDown.
+    ASSERT_TRUE(LoggingRemoveFile(path()));
+    return;
+  }
+#endif
+
+  // Put the string on the heap so the memory doesn't coalesce with the stack.
+  std::unique_ptr<std::string> someExtraMemoryString(
+      new std::string("extra memory range"));
+  crashpad::SimpleAddressRangeBag* ios_extra_ranges =
+      new crashpad::SimpleAddressRangeBag();
+  crashpad::CrashpadInfo::GetCrashpadInfo()->set_extra_memory_ranges(
+      ios_extra_ranges);
+  ios_extra_ranges->Insert((void*)someExtraMemoryString->c_str(), 18);
+  WriteReportAndCloseWriter();
+  crashpad::CrashpadInfo::GetCrashpadInfo()->set_extra_memory_ranges(nullptr);
+  internal::ProcessSnapshotIOSIntermediateDump process_snapshot;
+  ASSERT_TRUE(process_snapshot.InitializeWithFilePath(path(), {}));
+  ASSERT_EQ(process_snapshot.ExtraMemory().size(), 1LU);
+  auto memory = process_snapshot.ExtraMemory()[0];
+  EXPECT_EQ(memory->Address(),
+            reinterpret_cast<uint64_t>(someExtraMemoryString->c_str()));
+  EXPECT_EQ(memory->Size(), 18LU);
+  ReadToString delegate;
+  ASSERT_TRUE(memory->Read(&delegate));
+  EXPECT_EQ(delegate.result, someExtraMemoryString->c_str());
+
+  StringFile string_file;
+  MinidumpFileWriter minidump_file_writer;
+  minidump_file_writer.InitializeFromSnapshot(&process_snapshot);
+  ASSERT_TRUE(minidump_file_writer.WriteEverything(&string_file));
+
+  ProcessSnapshotMinidump process_snapshot_minidump;
+  EXPECT_TRUE(process_snapshot_minidump.Initialize(&string_file));
+  bool found;
+  for (auto minidump_memory : process_snapshot_minidump.ExtraMemory()) {
+    if (minidump_memory->Address() ==
+            reinterpret_cast<uint64_t>(someExtraMemoryString->c_str()) &&
+        minidump_memory->Size() == 18LU) {
+      found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST_F(InProcessIntermediateDumpHandlerTest,
+       TestIntermediateDumpExtraMemoryRanges) {
+#if TARGET_OS_SIMULATOR
+  // This test will fail on <iOS17 simulators when running on macOS >=14.3 or
+  // <iOS18 simulators when running on macOS >=15.4 due to a bug in Simulator.
+  // crbug.com/328282286
+  if (HasMacOSBrokeDYLDTaskInfo()) {
+    // For TearDown.
+    ASSERT_TRUE(LoggingRemoveFile(path()));
+    return;
+  }
+#endif
+
+  // Put the string on the heap so the memory doesn't coalesce with the stack.
+  std::unique_ptr<std::string> someExtraMemoryString(
+      new std::string("extra memory range"));
+  crashpad::SimpleAddressRangeBag* ios_extra_ranges =
+      new crashpad::SimpleAddressRangeBag();
+  crashpad::CrashpadInfo::GetCrashpadInfo()
+      ->set_intermediate_dump_extra_memory_ranges(ios_extra_ranges);
+  ios_extra_ranges->Insert((void*)someExtraMemoryString->c_str(), 18);
+  WriteReportAndCloseWriter();
+  crashpad::CrashpadInfo::GetCrashpadInfo()
+      ->set_intermediate_dump_extra_memory_ranges(nullptr);
+  internal::ProcessSnapshotIOSIntermediateDump process_snapshot;
+  ASSERT_TRUE(process_snapshot.InitializeWithFilePath(path(), {}));
+  ASSERT_EQ(process_snapshot.IntermediateDumpExtraMemory().size(), 1LU);
+  auto memory = process_snapshot.IntermediateDumpExtraMemory()[0];
+  EXPECT_EQ(memory->Address(),
+            reinterpret_cast<uint64_t>(someExtraMemoryString->c_str()));
+  EXPECT_EQ(memory->Size(), 18LU);
+  ReadToString delegate;
+  ASSERT_TRUE(memory->Read(&delegate));
+  EXPECT_EQ(delegate.result, someExtraMemoryString->c_str());
+
+  StringFile string_file;
+  MinidumpFileWriter minidump_file_writer;
+  minidump_file_writer.InitializeFromSnapshot(&process_snapshot);
+  ASSERT_TRUE(minidump_file_writer.WriteEverything(&string_file));
+
+  ProcessSnapshotMinidump process_snapshot_minidump;
+  EXPECT_TRUE(process_snapshot_minidump.Initialize(&string_file));
+  for (auto minidump_memory : process_snapshot_minidump.ExtraMemory()) {
+    EXPECT_FALSE(
+        minidump_memory->Address() ==
+            reinterpret_cast<uint64_t>(someExtraMemoryString->c_str()) &&
+        minidump_memory->Size() == 18LU);
   }
 }
 
@@ -256,5 +401,68 @@ TEST_F(InProcessIntermediateDumpHandlerTest, TestNSException) {
 }
 
 }  // namespace
+
+TEST_F(InProcessIntermediateDumpHandlerTest,
+       TestCaptureMemoryPointedToByThreadState) {
+  char test_buffer[1024];
+  memset(test_buffer, 'A', sizeof(test_buffer));
+  test_buffer[128] = 'B';
+
+  // Use a std::atomic and a std::thread to simulate an arbitrary thread with a
+  // known register state.
+  std::atomic<bool> wait_for_main_thread(true);
+  std::atomic<bool> thread_started(false);
+
+  std::string thread_name("CaptureMemoryThread");
+  std::thread t([&]() {
+    pthread_setname_np(thread_name.c_str());
+    void* ptr = test_buffer + 128;
+    // Force the compiler to store our pointer in a designated register rather
+    // than on the stack
+#if defined(ARCH_CPU_ARM64)
+    register void* reg_ptr asm("x20") = ptr;
+#elif defined(ARCH_CPU_X86_64)
+    register void* reg_ptr asm("r12") = ptr;
+#endif
+    thread_started = true;
+    while (wait_for_main_thread.load(std::memory_order_relaxed)) {
+      // Dummy operation to prevent the optimizer from discarding our register
+      // assignment.
+      asm volatile("" : : "r"(reg_ptr));
+    }
+  });
+
+  while (!thread_started.load(std::memory_order_relaxed)) {
+    std::this_thread::yield();
+  }
+
+  WriteReportAndCloseWriter();
+
+  wait_for_main_thread = false;
+  t.join();
+
+  internal::ProcessSnapshotIOSIntermediateDump process_snapshot;
+  ASSERT_TRUE(process_snapshot.InitializeWithFilePath(path(), {}));
+
+  bool found_our_buffer = false;
+  for (const auto* thread : process_snapshot.Threads()) {
+    if (thread->ThreadName() == thread_name) {
+      for (const auto* memory : thread->ExtraMemory()) {
+        if (memory->Address() == reinterpret_cast<uint64_t>(test_buffer)) {
+          found_our_buffer = true;
+          EXPECT_EQ(memory->Size(), 512u);
+
+          ReadToString delegate;
+          ASSERT_TRUE(memory->Read(&delegate));
+          EXPECT_EQ(delegate.result.size(), 512u);
+          EXPECT_EQ(delegate.result[128], 'B');
+          EXPECT_EQ(delegate.result[129], 'A');
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(found_our_buffer);
+}
+
 }  // namespace test
 }  // namespace crashpad

@@ -30,7 +30,8 @@ ProcessManager* ProcessManagerFactory::GetForBrowserContextIfExists(
 
 // static
 ProcessManagerFactory* ProcessManagerFactory::GetInstance() {
-  return base::Singleton<ProcessManagerFactory>::get();
+  static base::NoDestructor<ProcessManagerFactory> instance;
+  return instance.get();
 }
 
 ProcessManagerFactory::ProcessManagerFactory()
@@ -41,10 +42,10 @@ ProcessManagerFactory::ProcessManagerFactory()
   DependsOn(extensions::LazyBackgroundTaskQueueFactory::GetInstance());
 }
 
-ProcessManagerFactory::~ProcessManagerFactory() {
-}
+ProcessManagerFactory::~ProcessManagerFactory() = default;
 
-KeyedService* ProcessManagerFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ProcessManagerFactory::BuildServiceInstanceForBrowserContext(
     BrowserContext* context) const {
   return ProcessManager::Create(context);
 }
@@ -53,8 +54,7 @@ BrowserContext* ProcessManagerFactory::GetBrowserContextToUse(
     BrowserContext* context) const {
   // ProcessManager::Create handles guest and incognito profiles, returning an
   // IncognitoProcessManager in incognito mode.
-  return ExtensionsBrowserClient::Get()->GetContextForRegularAndIncognito(
-      context, /*force_guest_profile=*/true, /*force_system_profile=*/false);
+  return ExtensionsBrowserClient::Get()->GetContextOwnInstance(context);
 }
 
 }  // namespace extensions

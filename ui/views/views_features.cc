@@ -11,22 +11,46 @@ namespace views::features {
 
 // Please keep alphabetized.
 
-// Use a high-contrast style for ink drops when in platform high-contrast mode,
-// including full opacity and a high-contrast color
-BASE_FEATURE(kEnablePlatformHighContrastInkDrop,
-             "EnablePlatformHighContrastInkDrop",
+// When enabled, the screen capture exclusion feature (such as
+// SetExcludeFromScreenCapture) is allowed even when running inside a remote
+// session. By default, it is disabled to prevent excluded windows (such as
+// Picture-in-Picture) from being completely hidden from the remote user's
+// local view of that remote session.
+BASE_FEATURE(kAllowWindowCaptureExclusionInRemoteSessions,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Only paint views that are invalidated/dirty (i.e. a paint was directly
-// scheduled on those views) as opposed to painting all views that intersect
-// an invalid rectangle on the layer.
-BASE_FEATURE(kEnableViewPaintOptimization,
-             "EnableViewPaintOptimization",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+// Used to apply the initial URL to the WebContents in WebView. This is a kill
+// switch for this new logic, see crbug.com/456058558.
+// TODO(https://crbug.com/456058558): Remove this flag once the feature becomes
+// stable.
+BASE_FEATURE(kApplyInitialUrlToWebContents, base::FEATURE_ENABLED_BY_DEFAULT);
 
-// When enabled, widgets will be shown based on their z-order level
-BASE_FEATURE(kWidgetLayering,
-             "WidgetLayering",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+// Enables input protection by blocking interaction with views that are
+// currently or were recently obscured by always-on-top windows, and prevents
+// unintended events on security-sensitive UI that appears and activates
+// unexpectedly."
+BASE_FEATURE(kEnableInputProtection, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// If mouse cursor is over different window Windows will not start a Drag
+// and drop. This feature moves the cursor to the location of a touch on
+// press-down so that by the time a Drag and drop is started, the cursor will
+// already be inside the window. This is a kill switch for this new logic, see
+// crbug.com/370856871.
+BASE_FEATURE(kEnableTouchDragCursorSync, base::FEATURE_ENABLED_BY_DEFAULT);
+
+#if BUILDFLAG(IS_WIN)
+// When enabled, DesktopWindowTreeHostWin ensures HandleDestroying() is called
+// in HandleDestroyed() if WM_DESTROY was dropped before WM_NCDESTROY; see
+// https://crbug.com/330804494 and https://crbug.com/540755275.
+BASE_FEATURE(kHandleMissingWmDestroy, base::FEATURE_DISABLED_BY_DEFAULT);
+#endif
+
+// Used to enable keyboard-accessible tooltips in Views UI, as opposed
+// to kKeyboardAccessibleTooltip in //ui/base/ui_base_features.cc.
+BASE_FEATURE(kKeyboardAccessibleTooltipInViews,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+// If enabled, NativeViewHost controls the layers of the native view.
+BASE_FEATURE(kNativeViewHostManagesLayers, base::FEATURE_ENABLED_BY_DEFAULT);
 
 }  // namespace views::features

@@ -1,40 +1,17 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
 import static com.google.common.truth.Truth.assertThat;
-import static protobuf_unittest.UnittestProto.optionalInt32Extension;
+import static proto2_unittest.UnittestProto.optionalInt32Extension;
 
-import protobuf_unittest.UnittestProto.TestAllExtensions;
-import protobuf_unittest.UnittestProto.TestAllTypes;
+import proto2_unittest.UnittestProto.TestAllExtensions;
+import proto2_unittest.UnittestProto.TestAllTypes;
 import java.io.IOException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -141,23 +118,57 @@ public class LazyFieldLiteTest {
   @Test
   public void testInvalidProto() throws Exception {
     // Silently fails and uses the default instance.
-    LazyFieldLite field =
-        new LazyFieldLite(TestUtil.getExtensionRegistry(), ByteString.copyFromUtf8("invalid"));
+    ByteString invalid = ByteString.copyFromUtf8("invalid");
+    LazyFieldLite field = new LazyFieldLite(TestUtil.getExtensionRegistry(), invalid);
+    assertThat(field.getSerializedSize()).isEqualTo(7);
     assertThat(
         field.getValue(TestAllTypes.getDefaultInstance()))
             .isEqualTo(TestAllTypes.getDefaultInstance());
-    assertThat(field.getSerializedSize()).isEqualTo(0);
-    assertThat(field.toByteString()).isEqualTo(ByteString.EMPTY);
+    assertThat(field.getSerializedSize()).isEqualTo(7);
+    assertThat(field.toByteString()).isEqualTo(invalid);
   }
 
   @Test
-  public void testMergeBeforeParsing() throws Exception {
+  public void testMergeUnparsedWithDifferentExtensionRegistryInstances() throws Exception {
     TestAllTypes message1 = TestAllTypes.newBuilder().setOptionalInt32(1).build();
     LazyFieldLite field1 = createLazyFieldLiteFromMessage(message1);
     TestAllTypes message2 = TestAllTypes.newBuilder().setOptionalInt64(2).build();
     LazyFieldLite field2 = createLazyFieldLiteFromMessage(message2);
 
     field1.merge(field2);
+
+    TestAllTypes expected =
+        TestAllTypes.newBuilder().setOptionalInt32(1).setOptionalInt64(2).build();
+    assertThat(field1.getValue(TestAllTypes.getDefaultInstance())).isEqualTo(expected);
+  }
+
+  @Test
+  public void testMergeUnparsedWithSameExtensionRegistryInstance() throws Exception {
+    ByteString bytes1 = TestAllTypes.newBuilder().setOptionalInt32(1).build().toByteString();
+    ExtensionRegistryLite registry = TestUtil.getExtensionRegistry();
+    LazyFieldLite field1 = new LazyFieldLite(registry, bytes1);
+    ByteString bytes2 = TestAllTypes.newBuilder().setOptionalInt64(2).build().toByteString();
+    LazyFieldLite field2 = new LazyFieldLite(registry, bytes2);
+
+    field1.merge(field2);
+
+    TestAllTypes expected =
+        TestAllTypes.newBuilder().setOptionalInt32(1).setOptionalInt64(2).build();
+    assertThat(field1.getValue(TestAllTypes.getDefaultInstance())).isEqualTo(expected);
+    assertThat(field1.toByteString()).isEqualTo(bytes1.concat(bytes2));
+  }
+
+  @Test
+  public void testMergeBothBytesAndValueArePresent() throws Exception {
+    LazyFieldLite field1 =
+        createLazyFieldLiteFromMessage(TestAllTypes.newBuilder().setOptionalInt32(1).build());
+    MessageLite unused1 = field1.getValue(TestAllTypes.getDefaultInstance());
+    LazyFieldLite field2 =
+        createLazyFieldLiteFromMessage(TestAllTypes.newBuilder().setOptionalInt64(2).build());
+    MessageLite unused2 = field2.getValue(TestAllTypes.getDefaultInstance());
+
+    field1.merge(field2);
+
     TestAllTypes expected =
         TestAllTypes.newBuilder().setOptionalInt32(1).setOptionalInt64(2).build();
     assertThat(field1.getValue(TestAllTypes.getDefaultInstance())).isEqualTo(expected);
@@ -238,6 +249,35 @@ public class LazyFieldLiteTest {
         .isEqualTo(messageWithExtensions);
   }
 
+  @Test
+  public void testMergeOverwritesFromUnparsed() throws Exception {
+    TestAllTypes thisMessage = TestAllTypes.newBuilder().setOptionalString("foo").build();
+    TestAllTypes otherMessage = TestAllTypes.newBuilder().setOptionalString("bar").build();
+    LazyFieldLite base =
+        new LazyFieldLite(ExtensionRegistryLite.getEmptyRegistry(), thisMessage.toByteString());
+    LazyFieldLite other = LazyFieldLite.fromValue(otherMessage);
+
+    base.merge(other);
+
+    assertThat(
+            ((TestAllTypes) base.getValue(TestAllTypes.getDefaultInstance())).getOptionalString())
+        .isEqualTo("bar");
+  }
+
+  @Test
+  public void testMergeOverwritesFromParsed() throws Exception {
+    TestAllTypes thisMessage = TestAllTypes.newBuilder().setOptionalString("foo").build();
+    TestAllTypes otherMessage = TestAllTypes.newBuilder().setOptionalString("bar").build();
+    LazyFieldLite base = LazyFieldLite.fromValue(thisMessage);
+    LazyFieldLite other =
+        new LazyFieldLite(ExtensionRegistryLite.getEmptyRegistry(), otherMessage.toByteString());
+
+    base.merge(other);
+
+    assertThat(
+            ((TestAllTypes) base.getValue(TestAllTypes.getDefaultInstance())).getOptionalString())
+        .isEqualTo("bar");
+  }
 
   // Help methods.
 
@@ -262,5 +302,4 @@ public class LazyFieldLiteTest {
     assertThat(unexpected).isNotSameInstanceAs(actual);
     assertThat((unexpected != null && unexpected.equals(actual))).isFalse();
   }
-
 }

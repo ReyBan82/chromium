@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,28 +25,37 @@ namespace component_updater {
 class ZxcvbnDataComponentInstallerPolicy : public ComponentInstallerPolicy {
  public:
   // The filenames of the word lists in text format.
-  static constexpr base::FilePath::StringPieceType
-      kEnglishWikipediaTxtFileName = FILE_PATH_LITERAL("english_wikipedia.txt");
-  static constexpr base::FilePath::StringPieceType kFemaleNamesTxtFileName =
+  static constexpr base::FilePath::StringViewType kEnglishWikipediaTxtFileName =
+      FILE_PATH_LITERAL("english_wikipedia.txt");
+  static constexpr base::FilePath::StringViewType kFemaleNamesTxtFileName =
       FILE_PATH_LITERAL("female_names.txt");
-  static constexpr base::FilePath::StringPieceType kMaleNamesTxtFileName =
+  static constexpr base::FilePath::StringViewType kMaleNamesTxtFileName =
       FILE_PATH_LITERAL("male_names.txt");
-  static constexpr base::FilePath::StringPieceType kPasswordsTxtFileName =
+  static constexpr base::FilePath::StringViewType kPasswordsTxtFileName =
       FILE_PATH_LITERAL("passwords.txt");
-  static constexpr base::FilePath::StringPieceType kSurnamesTxtFileName =
+  static constexpr base::FilePath::StringViewType kSurnamesTxtFileName =
       FILE_PATH_LITERAL("surnames.txt");
-  static constexpr base::FilePath::StringPieceType kUsTvAndFilmTxtFileName =
+  static constexpr base::FilePath::StringViewType kUsTvAndFilmTxtFileName =
       FILE_PATH_LITERAL("us_tv_and_film.txt");
+
+  static constexpr std::array<base::FilePath::StringViewType, 6> kFileNames = {{
+      kEnglishWikipediaTxtFileName,
+      kFemaleNamesTxtFileName,
+      kMaleNamesTxtFileName,
+      kPasswordsTxtFileName,
+      kSurnamesTxtFileName,
+      kUsTvAndFilmTxtFileName,
+  }};
 
   // The filename of the combined word list in the format that
   // `zxcvbn::RankedDicts` uses internally.
-  static constexpr base::FilePath::StringPieceType
-      kCombinedRankedDictsFileName = FILE_PATH_LITERAL("ranked_dicts");
+  static constexpr base::FilePath::StringViewType kCombinedRankedDictsFileName =
+      FILE_PATH_LITERAL("ranked_dicts");
 
   // ComponentInstallerPolicy overrides:
   // Confirms that the version entry in the manifest exists and is well-formed
   // and verifies that all files expected for the component version exist.
-  bool VerifyInstallation(const base::Value::Dict& manifest,
+  bool VerifyInstallation(const base::DictValue& manifest,
                           const base::FilePath& install_dir) const override;
 
   bool SupportsGroupPolicyEnabledComponentUpdates() const override;
@@ -53,21 +63,20 @@ class ZxcvbnDataComponentInstallerPolicy : public ComponentInstallerPolicy {
   bool RequiresNetworkEncryption() const override;
 
   update_client::CrxInstaller::Result OnCustomInstall(
-      const base::Value::Dict& manifest,
+      const base::DictValue& manifest,
       const base::FilePath& install_dir) override;
 
   void OnCustomUninstall() override;
 
   void ComponentReady(const base::Version& version,
                       const base::FilePath& install_dir,
-                      base::Value::Dict manifest) override;
+                      base::DictValue manifest) override;
 
   base::FilePath GetRelativeInstallDir() const override;
 
   void GetHash(std::vector<uint8_t>* hash) const override;
 
   std::string GetName() const override;
-
 
   update_client::InstallerAttributes GetInstallerAttributes() const override;
 };

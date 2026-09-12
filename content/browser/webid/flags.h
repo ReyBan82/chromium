@@ -5,43 +5,73 @@
 #ifndef CONTENT_BROWSER_WEBID_FLAGS_H_
 #define CONTENT_BROWSER_WEBID_FLAGS_H_
 
+#include <optional>
+
 // Flags to control WebID for testing/debugging.
 
-namespace content {
-
-// IDP IdpSigninStatus API modes.
-enum class FedCmIdpSigninStatusMode { DISABLED, METRICS_ONLY, ENABLED };
-
-// Whether FedCM auto re-authentication is enabled.
-bool IsFedCmAutoReauthnEnabled();
-
-// Whether FedCM IDP sign-out is enabled.
-bool IsFedCmIdpSignoutEnabled();
-
-// Whether multiple identity providers are enabled.
-bool IsFedCmMultipleIdentityProvidersEnabled();
-
-// Returns the IdpSigninStatus API mode.
-FedCmIdpSigninStatusMode GetFedCmIdpSigninStatusMode();
+namespace content::webid {
 
 // Whether metrics endpoint is enabled.
-bool IsFedCmMetricsEndpointEnabled();
+bool IsMetricsEndpointEnabled();
 
-// Whether the Relying Party Context API is enabled.
-bool IsFedCmRpContextEnabled();
+// Whether the Delegation API is enabled.
+bool IsDelegationEnabled();
 
-// Whether the UserInfo API is enabled.
-bool IsFedCmUserInfoEnabled();
-
-// Whether the Selective Disclosure API is enabled.
-bool IsFedCmSelectiveDisclosureEnabled();
-
-// Whether the login hint parameter is enabled.
-bool IsFedCmLoginHintEnabled();
+// Whether the Email Verification Protocol is enabled.
+bool IsEmailVerificationProtocolEnabled();
 
 // Whether the IdP Registration API is enabled.
-bool IsFedCmIdPRegistrationEnabled();
+bool IsIdPRegistrationEnabled();
 
-}  // namespace content
+// Whether the well-known enforcement is bypassed.
+bool IsWithoutWellKnownEnforcementEnabled();
+
+// Whether subdomain-first discovery for well-known file is enabled.
+bool IsWebIdentitySubdomainEnabled();
+
+// Whether the Web Identity Digital Credentials API is enabled.
+bool IsDigitalCredentialsEnabled();
+
+// Whether the Web Identity Digital Credentials Creation API is enabled.
+bool IsDigitalCredentialsCreationEnabled();
+
+// Whether sending of SameSite=Lax cookies is enabled.
+bool IsSameSiteLaxEnabled();
+
+// Whether lightweight FedCM credentials are enabled.
+bool IsLightweightModeEnabled();
+
+// Whether autofill enhancement with FedCM is enabled.
+bool IsAutofillEnabled();
+
+// Whether nonce usage in params is enabled.
+bool IsNonceInParamsEnabled();
+
+// Controls whether FedCM requires explicit accounts_endpoint and
+// login_url in well-known files when using client_metadata.
+bool IsWellKnownEndpointValidationEnabled();
+
+// Whether preserving ports for testing is enabled.
+bool IsPreservePortsForTestingEnabled();
+
+// Whether navigation interception is enabled.
+bool IsNavigationInterceptionEnabled();
+
+// Whether the FedCM Identity Handler (service worker interception) is enabled.
+bool IsFedCmIdentityHandlerEnabled();
+
+// Whether embedder initiated login is enabled.
+bool IsEmbedderInitiatedLoginEnabled();
+
+// Whether the ambient UI is enabled.
+bool IsFedCmAmbientUIEnabled();
+
+// Whether native IdPs are enabled.
+bool IsFedCmNativeIdPsEnabled();
+
+// Whether Active Mode with multiple IdPs is enabled.
+bool IsActiveModeMultipleIdentityProvidersEnabled();
+
+}  // namespace content::webid
 
 #endif  // CONTENT_BROWSER_WEBID_FLAGS_H_

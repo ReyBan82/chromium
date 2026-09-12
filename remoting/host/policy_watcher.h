@@ -37,11 +37,13 @@ namespace remoting {
 class PolicyWatcher : public policy::PolicyService::Observer {
  public:
   // Called first with all policies, and subsequently with any changed policies.
-  typedef base::RepeatingCallback<void(base::Value::Dict)>
-      PolicyUpdatedCallback;
+  // Policies that are unchanged will be absent in the returned dictionary.
+  // If a policy has no default value but is unset, it will be an empty Value,
+  // i.e., of type NONE.
+  using PolicyUpdatedCallback = base::RepeatingCallback<void(base::DictValue)>;
 
   // Called after detecting malformed policies.
-  typedef base::RepeatingCallback<void()> PolicyErrorCallback;
+  using PolicyErrorCallback = base::RepeatingCallback<void()>;
 
   PolicyWatcher(const PolicyWatcher&) = delete;
   PolicyWatcher& operator=(const PolicyWatcher&) = delete;
@@ -55,7 +57,7 @@ class PolicyWatcher : public policy::PolicyService::Observer {
   //
   // |policy_error_callback| will be called when malformed policies are detected
   // (i.e. wrong type of policy value, or unparseable files under
-  // /etc/opt/chrome/policies/managed).
+  // $POLICY_PATH/managed).
   // When called, the |policy_error_callback| is responsible for mitigating the
   // security risk of running with incorrectly formulated policies (by either
   // shutting down or locking down the host).
@@ -70,15 +72,15 @@ class PolicyWatcher : public policy::PolicyService::Observer {
   // Return the current policies. If the policies have not yet been read, or if
   // an error occurred, the returned dictionary will be empty.  The dictionary
   // returned is the union of |platform_policies_| and |default_values_|.
-  base::Value::Dict GetEffectivePolicies();
+  base::DictValue GetEffectivePolicies();
 
   // Return the set of policies which have been explicitly set on the machine.
   // If the policies have not yet been read, no policies have been set, or if
   // an error occurred, the returned dictionary will be empty.
-  base::Value::Dict GetPlatformPolicies();
+  base::DictValue GetPlatformPolicies();
 
   // Return the default policy values.
-  static base::Value::Dict GetDefaultPolicies();
+  static base::DictValue GetDefaultPolicies();
 
   // Specify a |policy_service| to borrow (on Chrome OS, from the browser
   // process). PolicyWatcher must be used on the thread on which it is created.
@@ -122,13 +124,13 @@ class PolicyWatcher : public policy::PolicyService::Observer {
 
   // Converts each deprecated policy to its replacement if and only if the
   // replacement policy is not set, and removes deprecated policied from dict.
-  void HandleDeprecatedPolicies(base::Value::Dict* dict);
+  void HandleDeprecatedPolicies(base::DictValue* dict);
 
   // Stores |new_policies| into |effective_policies_|.  Returns dictionary with
   // items from |new_policies| that are different from the old
   // |effective_policies_|.
-  base::Value::Dict StoreNewAndReturnChangedPolicies(
-      base::Value::Dict new_policies);
+  base::DictValue StoreNewAndReturnChangedPolicies(
+      base::DictValue new_policies);
 
   // Signals policy error to the registered |PolicyErrorCallback|.
   void SignalPolicyError();
@@ -165,23 +167,23 @@ class PolicyWatcher : public policy::PolicyService::Observer {
 
   // The combined set of policies (|platform_policies_| + |default_values_|)
   // which define the effective policy set.
-  base::Value::Dict effective_policies_;
+  base::DictValue effective_policies_;
 
   // The policies which have had their values explicitly set via a policy entry.
-  base::Value::Dict platform_policies_;
+  base::DictValue platform_policies_;
 
   // The set of policy values to use if a policy has not been explicitly set.
-  base::Value::Dict default_values_;
-
-  raw_ptr<policy::PolicyService> policy_service_;
+  base::DictValue default_values_;
 
   // Order of fields below is important to ensure destruction takes object
   // dependencies into account:
+  // - |policy_service_| may be |owned_policy_service_|.
   // - |owned_policy_service_| uses |owned_policy_provider_|
   // - |owned_policy_provider_| uses |owned_schema_registry_|
   std::unique_ptr<policy::SchemaRegistry> owned_schema_registry_;
   std::unique_ptr<policy::ConfigurationPolicyProvider> owned_policy_provider_;
   std::unique_ptr<policy::PolicyService> owned_policy_service_;
+  raw_ptr<policy::PolicyService> policy_service_;
 
 #if BUILDFLAG(IS_WIN)
   // |policy_key_| relies on |policy_service_| to notify the host of policy

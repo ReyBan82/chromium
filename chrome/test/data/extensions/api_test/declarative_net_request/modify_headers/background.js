@@ -5,7 +5,7 @@
 // Navigates to |url| and invokes |callback| when the navigation is complete.
 function navigateTab(url, callback) {
   chrome.tabs.onUpdated.addListener(function updateCallback(_, info, tab) {
-    if (info.status == 'complete' && tab.url == url) {
+    if (info.status === 'complete' && tab.url === url) {
       chrome.tabs.onUpdated.removeListener(updateCallback);
       callback(tab);
     }
@@ -14,24 +14,25 @@ function navigateTab(url, callback) {
   chrome.tabs.update({url: url});
 }
 
-var testServerPort;
-var host = 'xyz.com';
+let testServerPort;
+const host = 'xyz.com';
 function getServerURL(path) {
-  if (!testServerPort)
+  if (!testServerPort) {
     throw new Error('Called getServerURL outside of runTests.');
-  return `http://${host}:${testServerPort}/${path}`
+  }
+  return `http://${host}:${testServerPort}/${path}`;
 }
 
 // Returns whether |headerName| is present in |headers|.
 function checkHasHeader(headers, headerName) {
-  return !!headers.find(header => header.name.toLowerCase() == headerName);
+  return !!headers.find(header => header.name.toLowerCase() === headerName);
 }
 
 // Adds or updates the given header name/value to |headers|.
 function addOrUpdateHeader(headers, headerName, headerValue) {
-  var index =
-      headers.findIndex(header => header.name.toLowerCase() == headerName);
-  if (index != -1) {
+  const index =
+      headers.findIndex(header => header.name.toLowerCase() === headerName);
+  if (index !== -1) {
     headers[index].value = headerValue;
   } else {
     headers.push({name: headerName, value: headerValue});
@@ -42,12 +43,12 @@ function addOrUpdateHeader(headers, headerName, headerValue) {
 // that it isn't visible to web request listeners. Then proceeds to the next
 // test.
 function checkCookieHeaderRemoved(expectRemoved) {
-  var echoCookieUrl = getServerURL('echoheader?cookie');
+  const echoCookieUrl = getServerURL('echoheader?cookie');
 
   // Register web request listeners for |echoCookieUrl|.
-  var filter = {urls: [echoCookieUrl]};
-  var extraInfoSpec = ['requestHeaders', 'extraHeaders'];
-  var onSendHeadersSeen = false;
+  const filter = {urls: [echoCookieUrl]};
+  const extraInfoSpec = ['requestHeaders', 'extraHeaders'];
+  let onSendHeadersSeen = false;
   chrome.webRequest.onSendHeaders.addListener(function listener(details) {
     chrome.webRequest.onSendHeaders.removeListener(listener);
     onSendHeadersSeen = true;
@@ -96,29 +97,30 @@ function checkCustomResponseHeaders(initialHeadersParam, headers) {
 // Removes all the cookies and optionally checks if |optCurrentCookiesSet|
 // corresponds to the current cookies. Returns a promise.
 function checkAndResetCookies(optCurrentCookiesSet) {
-  var removeCookiesPromise =
-      function(cookieParams) {
+  const removeCookiesPromise = function(cookieParams) {
     return new Promise((resolve, reject) => {
       chrome.cookies.remove(cookieParams, function(details) {
         chrome.test.assertNoLastError();
         resolve();
       });
     });
-  }
+  };
 
-  var url = getServerURL('');
+  const url = getServerURL('');
 
   return new Promise((resolve, reject) => {
     chrome.cookies.getAll({url: url}, function(cookies) {
       if (optCurrentCookiesSet) {
         chrome.test.assertEq(cookies.length, optCurrentCookiesSet.size);
-        for (var i = 0; i < cookies.length; ++i)
+        for (let i = 0; i < cookies.length; ++i) {
           chrome.test.assertTrue(optCurrentCookiesSet.has(cookies[i].name));
+        }
       }
 
-      var promises = [];
-      for (var i = 0; i < cookies.length; ++i)
+      const promises = [];
+      for (let i = 0; i < cookies.length; ++i) {
         promises.push(removeCookiesPromise({url: url, name: cookies[i].name}));
+      }
 
       Promise.all(promises).then(resolve, reject);
     });
@@ -129,12 +131,12 @@ function checkAndResetCookies(optCurrentCookiesSet) {
 // and that it isn't visible to web request listeners. Then proceeds to the next
 // test.
 function checkSetCookieHeaderRemoved(expectRemoved) {
-  var setCookieUrl = getServerURL('set-cookie?foo1=bar1&foo2=bar2');
+  const setCookieUrl = getServerURL('set-cookie?foo1=bar1&foo2=bar2');
 
   // Register web request listeners for |setCookieUrl|.
-  var filter = {urls: [setCookieUrl]};
-  var extraInfoSpec = ['responseHeaders', 'extraHeaders'];
-  var onResponseStartedSeen = false;
+  const filter = {urls: [setCookieUrl]};
+  const extraInfoSpec = ['responseHeaders', 'extraHeaders'];
+  let onResponseStartedSeen = false;
   chrome.webRequest.onResponseStarted.addListener(function listener(details) {
     chrome.webRequest.onResponseStarted.removeListener(listener);
     onResponseStartedSeen = true;
@@ -148,7 +150,7 @@ function checkSetCookieHeaderRemoved(expectRemoved) {
     navigateTab(setCookieUrl, function(tab) {
       chrome.test.assertTrue(onResponseStartedSeen);
 
-      var expectedCookies = expectRemoved ? [] : ['foo1', 'foo2'];
+      const expectedCookies = expectRemoved ? [] : ['foo1', 'foo2'];
       checkAndResetCookies(new Set(expectedCookies)).then(chrome.test.succeed);
     });
   });
@@ -157,13 +159,13 @@ function checkSetCookieHeaderRemoved(expectRemoved) {
 // Checks whether the cookie request header added by Web request extension was
 // removed. Then proceeds to the next test.
 function checkAddWebRequestCookie(expectRemoved) {
-  var echoCookieUrl = getServerURL('echoheader?cookie');
+  const echoCookieUrl = getServerURL('echoheader?cookie');
 
   // Register web request listeners for |echoCookieUrl|.
-  var filter = {urls: [echoCookieUrl]};
-  var extraInfoSpec = ['requestHeaders', 'extraHeaders', 'blocking'];
-  var onBeforeSendHeadersSeen = false;
-  var onBeforeSendHeadersListener = function listener(details) {
+  const filter = {urls: [echoCookieUrl]};
+  const extraInfoSpec = ['requestHeaders', 'extraHeaders', 'blocking'];
+  let onBeforeSendHeadersSeen = false;
+  const onBeforeSendHeadersListener = function listener(details) {
     onBeforeSendHeadersSeen = true;
     addOrUpdateHeader(details.requestHeaders, 'cookie', 'webRequest=true');
     return {requestHeaders: details.requestHeaders};
@@ -171,8 +173,8 @@ function checkAddWebRequestCookie(expectRemoved) {
   chrome.webRequest.onBeforeSendHeaders.addListener(
       onBeforeSendHeadersListener, filter, extraInfoSpec);
 
-  var onActionIgnoredCalled = false;
-  var onActionIgnoredListener = function(details) {
+  let onActionIgnoredCalled = false;
+  const onActionIgnoredListener = function(details) {
     onActionIgnoredCalled = true;
     chrome.test.assertEq('request_headers', details.action);
   };
@@ -199,13 +201,13 @@ function checkAddWebRequestCookie(expectRemoved) {
 // Checks whether the set-cookie request header added by Web request extension
 // was removed.
 function checkAddWebRequestSetCookie(expectRemoved) {
-  var url = getServerURL('echo');
+  const url = getServerURL('echo');
 
   // Register web request listeners for |url|.
-  var filter = {urls: [url]};
-  var extraInfoSpec = ['responseHeaders', 'extraHeaders', 'blocking'];
-  var onHeadersReceivedSeen = false;
-  var onHeadersReceivedListener = function listener(details) {
+  const filter = {urls: [url]};
+  const extraInfoSpec = ['responseHeaders', 'extraHeaders', 'blocking'];
+  let onHeadersReceivedSeen = false;
+  const onHeadersReceivedListener = function listener(details) {
     onHeadersReceivedSeen = true;
     addOrUpdateHeader(details.responseHeaders, 'set-cookie', 'webRequest=true');
     return {responseHeaders: details.responseHeaders};
@@ -213,8 +215,8 @@ function checkAddWebRequestSetCookie(expectRemoved) {
   chrome.webRequest.onHeadersReceived.addListener(
       onHeadersReceivedListener, filter, extraInfoSpec);
 
-  var onActionIgnoredCalled = false;
-  var onActionIgnoredListener = function(details) {
+  let onActionIgnoredCalled = false;
+  const onActionIgnoredListener = function(details) {
     onActionIgnoredCalled = true;
     chrome.test.assertEq('response_headers', details.action);
   };
@@ -229,7 +231,7 @@ function checkAddWebRequestSetCookie(expectRemoved) {
       chrome.test.assertTrue(onHeadersReceivedSeen);
       chrome.test.assertEq(expectRemoved, onActionIgnoredCalled);
 
-      var expectedCookies = expectRemoved ? [] : ['webRequest']
+      const expectedCookies = expectRemoved ? [] : ['webRequest'];
       checkAndResetCookies(new Set(expectedCookies)).then(chrome.test.succeed);
     });
   });
@@ -245,50 +247,50 @@ function clearState(ruleIds, callback) {
       });
 }
 
-var removeCookieRule = {
+const removeCookieRule = {
   id: 1,
   priority: 1,
   condition: {urlFilter: host, resourceTypes: ['main_frame']},
   action: {
     type: 'modifyHeaders',
-    requestHeaders: [{header: 'cookie', operation: 'remove'}]
-  }
+    requestHeaders: [{header: 'cookie', operation: 'remove'}],
+  },
 };
-var removeSetCookieRule = {
+const removeSetCookieRule = {
   id: 2,
   priority: 1,
   condition: {urlFilter: host, resourceTypes: ['main_frame']},
   action: {
     type: 'modifyHeaders',
-    responseHeaders: [{header: 'set-cookie', operation: 'remove'}]
-  }
+    responseHeaders: [{header: 'set-cookie', operation: 'remove'}],
+  },
 };
-var allowRule = {
+const allowRule = {
   id: 3,
   priority: 1,
   condition: {urlFilter: host, resourceTypes: ['main_frame']},
-  action: {type: 'allow'}
+  action: {type: 'allow'},
 };
-var setCustomRequestHeaderRule = {
+const setCustomRequestHeaderRule = {
   id: 10,
   priority: 1,
   condition: {urlFilter: host, resourceTypes: ['main_frame']},
   action: {
     type: 'modifyHeaders',
-    requestHeaders: [{header: 'header1', operation: 'set', value: 'value-1'}]
-  }
+    requestHeaders: [{header: 'header1', operation: 'set', value: 'value-1'}],
+  },
 };
-var appendRequestHeadersRule = {
+const appendRequestHeadersRule = {
   id: 100,
   priority: 1,
   condition: {urlFilter: host, resourceTypes: ['main_frame']},
   action: {
     type: 'modifyHeaders',
-    requestHeaders: [{header: 'cookie', operation: 'append', value: 'dnr=val'}]
-  }
+    requestHeaders: [{header: 'cookie', operation: 'append', value: 'dnr=val'}],
+  },
 };
 
-var tests = [
+const tests = [
   function testCookieWithoutRules() {
     navigateTab(getServerURL('set-cookie?foo1=bar1&foo2=bar2'), function() {
       checkCookieHeaderRemoved(false);
@@ -296,7 +298,7 @@ var tests = [
   },
 
   function testAppendRequestHeaderRule() {
-    var rules = [appendRequestHeadersRule];
+    const rules = [appendRequestHeadersRule];
     chrome.declarativeNetRequest.updateDynamicRules(
         {addRules: rules}, function() {
           chrome.test.assertNoLastError();
@@ -306,7 +308,7 @@ var tests = [
   },
 
   function addRulesAndTestCookieRemoval() {
-    var rules = [removeCookieRule];
+    const rules = [removeCookieRule];
     chrome.declarativeNetRequest.updateDynamicRules(
         {removeRuleIds: [appendRequestHeadersRule.id], addRules: rules},
         function() {
@@ -320,7 +322,7 @@ var tests = [
   },
 
   function addRulesAndTestSetCookieRemoval() {
-    var rules = [removeSetCookieRule];
+    const rules = [removeSetCookieRule];
     chrome.declarativeNetRequest.updateDynamicRules(
         {addRules: rules}, function() {
           chrome.test.assertNoLastError();
@@ -339,7 +341,7 @@ var tests = [
   // be added back by web request listeners since Declarative Net Request
   // actions have higher priority than web request actions.
   function testAddWebRequestCookieWithRules() {
-    var rules = [removeCookieRule];
+    const rules = [removeCookieRule];
     chrome.declarativeNetRequest.updateDynamicRules(
         {addRules: rules}, function() {
           chrome.test.assertNoLastError();
@@ -355,7 +357,7 @@ var tests = [
   // be added back by web request listeners since Declarative Net Request
   // actions have higher priority than web request actions.
   function testAddWebRequestSetCookieWithRules() {
-    var rules = [removeSetCookieRule];
+    const rules = [removeSetCookieRule];
     chrome.declarativeNetRequest.updateDynamicRules(
         {addRules: rules}, function() {
           chrome.test.assertNoLastError();
@@ -371,7 +373,7 @@ var tests = [
   },
 
   function testSetCustomRequestHeaderRule() {
-    var rules = [setCustomRequestHeaderRule];
+    const rules = [setCustomRequestHeaderRule];
     chrome.declarativeNetRequest.updateDynamicRules(
         {removeRuleIds: [allowRule.id], addRules: rules}, function() {
           chrome.test.assertNoLastError();
@@ -380,7 +382,7 @@ var tests = [
   },
 
   function testSetCustomResponseHeaderRule() {
-    var rules = [
+    const rules = [
       {
         id: 20,
         priority: 3,
@@ -390,9 +392,9 @@ var tests = [
           responseHeaders: [
             {header: 'header1', operation: 'append', value: 'rule-20'},
             {header: 'header2', operation: 'append', value: 'rule-20'},
-            {header: 'header3', operation: 'set', value: 'rule-20'}
-          ]
-        }
+            {header: 'header3', operation: 'set', value: 'rule-20'},
+          ],
+        },
       },
       {
         id: 21,
@@ -402,8 +404,8 @@ var tests = [
           type: 'modifyHeaders',
           responseHeaders: [
             {header: 'header3', operation: 'remove'},
-          ]
-        }
+          ],
+        },
       },
       {
         id: 22,
@@ -416,16 +418,16 @@ var tests = [
             {header: 'header2', operation: 'set', value: 'rule-22'},
             {header: 'header3', operation: 'append', value: 'rule-22'},
             {header: 'header4', operation: 'set', value: 'rule-22'},
-          ]
-        }
-      }
+          ],
+        },
+      },
     ];
 
-    var expectedResponseHeaders = {
+    const expectedResponseHeaders = {
       header1: 'original, rule-20, rule-22',
       header2: 'rule-20',
       header3: 'rule-20, rule-22',
-      header4: 'rule-22'
+      header4: 'rule-22',
     };
 
     chrome.declarativeNetRequest.updateDynamicRules(

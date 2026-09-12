@@ -37,18 +37,11 @@ bool CopyPreventionSettingsPolicyHandler::CheckPolicySettings(
   if (!SchemaValidatingPolicyHandler::CheckPolicySettings(policies, errors))
     return false;
 
-  const policy::PolicyMap::Entry* policy = policies.Get(policy_name());
-  if (policy->source != policy::POLICY_SOURCE_CLOUD &&
-      policy->source != policy::POLICY_SOURCE_CLOUD_FROM_ASH) {
-    errors->AddError(policy_name(), IDS_POLICY_CLOUD_SOURCE_ONLY_ERROR);
-    return false;
-  }
-
-  const base::Value::Dict& dict =
+  const base::DictValue& dict =
       policies.GetValue(policy_name(), base::Value::Type::DICT)->GetDict();
-  const base::Value::List* enable = dict.FindList(
+  const base::ListValue* enable = dict.FindList(
       enterprise::content::kCopyPreventionSettingsEnableFieldName);
-  const base::Value::List* disable = dict.FindList(
+  const base::ListValue* disable = dict.FindList(
       enterprise::content::kCopyPreventionSettingsDisableFieldName);
   if (!enable || !disable) {
     errors->AddError(policy_name(),
@@ -80,7 +73,7 @@ void CopyPreventionSettingsPolicyHandler::ApplyPolicySettings(
 
   // The min data size field is optional. Default to 100 bytes if it's not
   // present.
-  absl::optional<int> min_data_size = value->GetDict().FindInt(
+  std::optional<int> min_data_size = value->GetDict().FindInt(
       enterprise::content::kCopyPreventionSettingsMinDataSizeFieldName);
   if (!min_data_size) {
     processed_value.GetDict().Set(

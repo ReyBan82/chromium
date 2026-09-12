@@ -28,8 +28,8 @@
 #include "third_party/blink/renderer/core/workers/worker_classic_script_loader.h"
 
 #include <memory>
+
 #include "base/memory/scoped_refptr.h"
-#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
@@ -37,6 +37,9 @@
 #include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/core/loader/resource/script_resource.h"
 #include "third_party/blink/renderer/core/origin_trials/origin_trial_context.h"
+#include "third_party/blink/renderer/core/permissions_policy/document_policy_parser.h"
+#include "third_party/blink/renderer/core/probe/core_probes.h"
+#include "third_party/blink/renderer/core/workers/dedicated_worker_global_scope.h"
 #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
 #include "third_party/blink/renderer/platform/loader/fetch/detachable_use_counter.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_client_settings_object.h"
@@ -49,6 +52,7 @@
 #include "third_party/blink/renderer/platform/network/content_security_policy_response_headers.h"
 #include "third_party/blink/renderer/platform/network/http_names.h"
 #include "third_party/blink/renderer/platform/network/network_utils.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/weborigin/referrer.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 
@@ -70,10 +74,10 @@ String CheckSameOriginEnforcement(const KURL& request_url,
                                   const KURL& response_url) {
   if (request_url != response_url &&
       !SecurityOrigin::AreSameOrigin(request_url, response_url)) {
-    return "Refused to load the top-level worker script from '" +
-           response_url.ElidedString() +
-           "' because it doesn't match the origin of the request URL '" +
-           request_url.ElidedString() + "'";
+    return StrCat({"Refused to load the top-level worker script from '",
+                   response_url.ElidedString(),
+                   "' because it doesn't match the origin of the request URL '",
+                   request_url.ElidedString(), "'"});
   }
   return String();
 }
@@ -141,10 +145,8 @@ void WorkerClassicScriptLoader::LoadTopLevelScriptAsynchronously(
     network::mojom::CredentialsMode credentials_mode,
     base::OnceClosure response_callback,
     base::OnceClosure finished_callback,
-    RejectCoepUnsafeNone reject_coep_unsafe_none,
     mojo::PendingRemote<network::mojom::blink::URLLoaderFactory>
-        blob_url_loader_factory,
-    absl::optional<uint64_t> main_script_identifier) {
+        blob_url_loader_factory) {
   DCHECK(fetch_client_settings_object_fetcher);
   DCHECK(response_callback || finished_callback);
   response_callback_ = std::move(response_callback);
@@ -164,18 +166,20 @@ void WorkerClassicScriptLoader::LoadTopLevelScriptAsynchronously(
   if (worker_main_script_load_params) {
     auto* worker_global_scope = DynamicTo<WorkerGlobalScope>(execution_context);
     DCHECK(worker_global_scope);
-    if (main_script_identifier.has_value()) {
-      worker_global_scope->SetMainResoureIdentifier(
-          main_script_identifier.value());
-      request.SetInspectorId(main_script_identifier.value());
-    } else {
-      request.SetInspectorId(CreateUniqueIdentifier());
-    }
+    auto identifier = CreateUniqueIdentifier();
+    worker_global_scope->SetMainResoureIdentifier(identifier);
+    request.SetInspectorId(identifier);
     request.SetReferrerString(Referrer::NoReferrer());
     request.SetPriority(ResourceLoadPriority::kHigh);
+    probe::WillSendWorkerMainRequest(worker_global_scope, identifier, url);
     FetchParameters fetch_params(
         std::move(request),
         ResourceLoaderOptions(execution_context.GetCurrentWorld()));
+    if (auto* dedicated_worker_global_scope =
+            DynamicTo<DedicatedWorkerGlobalScope>(execution_context)) {
+      fetch_params.MutableOptions().initiator_info.initiator_url =
+          dedicated_worker_global_scope->WorkerScriptInitiatorUrl();
+    }
     worker_main_script_loader_ = MakeGarbageCollected<WorkerMainScriptLoader>();
     worker_main_script_loader_->Start(
         fetch_params, std::move(worker_main_script_load_params),
@@ -187,7 +191,6 @@ void WorkerClassicScriptLoader::LoadTopLevelScriptAsynchronously(
   ResourceLoaderOptions resource_loader_options(
       execution_context.GetCurrentWorld());
   need_to_cancel_ = true;
-  resource_loader_options.reject_coep_unsafe_none = reject_coep_unsafe_none;
   if (blob_url_loader_factory) {
     resource_loader_options.url_loader_factory =
         base::MakeRefCounted<base::RefCountedData<
@@ -241,6 +244,7 @@ void WorkerClassicScriptLoader::DidReceiveResponse(
 
   referrer_policy_ = response.HttpHeaderField(http_names::kReferrerPolicy);
   ProcessContentSecurityPolicy(response);
+  ProcessDocumentPolicy(response);
   origin_trial_tokens_ = OriginTrialContext::ParseHeaderValue(
       response.HttpHeaderField(http_names::kOriginTrial));
 
@@ -248,27 +252,28 @@ void WorkerClassicScriptLoader::DidReceiveResponse(
     std::move(response_callback_).Run();
 }
 
-void WorkerClassicScriptLoader::DidReceiveData(const char* data, unsigned len) {
+void WorkerClassicScriptLoader::DidReceiveData(base::span<const char> data) {
   if (failed_)
     return;
 
   if (!decoder_) {
     decoder_ = std::make_unique<TextResourceDecoder>(TextResourceDecoderOptions(
         TextResourceDecoderOptions::kPlainTextContent,
-        response_encoding_.empty() ? UTF8Encoding()
-                                   : WTF::TextEncoding(response_encoding_)));
+        response_encoding_.empty() ? Utf8Encoding()
+                                   : TextEncoding(response_encoding_)));
   }
 
-  if (!len)
+  if (data.empty()) {
     return;
+  }
 
-  source_text_.Append(decoder_->Decode(data, len));
+  source_text_.Append(decoder_->Decode(data));
 }
 
 void WorkerClassicScriptLoader::DidReceiveCachedMetadata(
     mojo_base::BigBuffer data) {
   cached_metadata_ = std::make_unique<Vector<uint8_t>>(data.size());
-  memcpy(cached_metadata_->data(), data.data(), data.size());
+  base::span(*cached_metadata_).copy_from(base::span(data));
 }
 
 void WorkerClassicScriptLoader::DidFinishLoading(uint64_t identifier) {
@@ -291,7 +296,8 @@ void WorkerClassicScriptLoader::DidFailRedirectCheck(uint64_t) {
   NotifyError();
 }
 
-void WorkerClassicScriptLoader::DidReceiveData(base::span<const char> span) {
+void WorkerClassicScriptLoader::DidReceiveDataWorkerMainScript(
+    base::span<const char> span) {
   if (!decoder_) {
     decoder_ = std::make_unique<TextResourceDecoder>(TextResourceDecoderOptions(
         TextResourceDecoderOptions::kPlainTextContent,
@@ -299,7 +305,7 @@ void WorkerClassicScriptLoader::DidReceiveData(base::span<const char> span) {
   }
   if (!span.size())
     return;
-  source_text_.Append(decoder_->Decode(span.data(), span.size()));
+  source_text_.Append(decoder_->Decode(span));
 }
 
 void WorkerClassicScriptLoader::OnFinishedLoadingWorkerMainScript() {
@@ -367,6 +373,27 @@ void WorkerClassicScriptLoader::ProcessContentSecurityPolicy(
     content_security_policy_ = MakeGarbageCollected<ContentSecurityPolicy>();
     content_security_policy_->AddPolicies(ParseContentSecurityPolicyHeaders(
         ContentSecurityPolicyResponseHeaders(response)));
+  }
+}
+
+void WorkerClassicScriptLoader::ProcessDocumentPolicy(
+    const ResourceResponse& response) {
+  if (!RuntimeEnabledFeatures::DocumentPolicyInDedicatedWorkerEnabled()) {
+    return;
+  }
+
+  if (!response.CurrentRequestUrl().ProtocolIs("blob") &&
+      !response.CurrentRequestUrl().ProtocolIs("file") &&
+      !response.CurrentRequestUrl().ProtocolIs("filesystem")) {
+    PolicyParserMessageBuffer header_logger("Document-Policy HTTP header: ");
+    document_policy_ = DocumentPolicy::DocumentPolicyBundle{
+        DocumentPolicyParser::Parse(
+            response.HttpHeaderField(http_names::kDocumentPolicy),
+            header_logger)
+            .value_or(DocumentPolicy::ParsedDocumentPolicy{}),
+        std::string(
+            response.HttpHeaderField(http_names::kDocumentPolicyReportOnly)
+                .Utf8())};
   }
 }
 

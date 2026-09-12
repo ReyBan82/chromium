@@ -6,28 +6,35 @@ package org.chromium.chrome.browser.omnibox;
 
 import static androidx.test.espresso.Espresso.onView;
 import static androidx.test.espresso.assertion.ViewAssertions.matches;
+import static androidx.test.espresso.matcher.ViewMatchers.isDescendantOfA;
 import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
 import static androidx.test.espresso.matcher.ViewMatchers.withEffectiveVisibility;
 import static androidx.test.espresso.matcher.ViewMatchers.withId;
 
-import static junit.framework.Assert.assertFalse;
-
-import static org.hamcrest.CoreMatchers.allOf;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.Assert.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doReturn;
 
-import android.content.Intent;
-import android.content.res.Configuration;
-import android.view.View;
-import android.widget.LinearLayout;
+import static org.chromium.base.test.transit.ViewFinder.waitForNoView;
+import static org.chromium.base.test.util.Criteria.checkThat;
+import static org.chromium.chrome.browser.url_constants.UrlConstantResolver.getOriginalNativeNtpUrl;
 
+import android.content.res.Configuration;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.view.View;
+import android.view.ViewGroup;
+
+import androidx.collection.ArraySet;
 import androidx.lifecycle.Lifecycle;
 import androidx.test.espresso.matcher.ViewMatchers;
 import androidx.test.filters.MediumTest;
 import androidx.test.filters.SmallTest;
 
+import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -39,152 +46,115 @@ import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 
-import org.chromium.base.CommandLine;
-import org.chromium.base.Promise;
-import org.chromium.base.metrics.UmaRecorderHolder;
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.base.test.util.CriteriaHelper;
+import org.chromium.base.test.util.DisableIf;
+import org.chromium.base.test.util.DisabledTest;
 import org.chromium.base.test.util.DoNotBatch;
+import org.chromium.base.test.util.Features.DisableFeatures;
+import org.chromium.base.test.util.Features.EnableFeatures;
 import org.chromium.base.test.util.Restriction;
+import org.chromium.base.ui.KeyboardUtils;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
 import org.chromium.chrome.browser.app.ChromeActivity;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.lens.LensController;
-import org.chromium.chrome.browser.lifecycle.InflationObserver;
 import org.chromium.chrome.browser.locale.LocaleManager;
 import org.chromium.chrome.browser.locale.LocaleManagerDelegate;
-import org.chromium.chrome.browser.omnibox.status.StatusProperties.StatusIconResource;
 import org.chromium.chrome.browser.omnibox.voice.VoiceRecognitionHandler;
 import org.chromium.chrome.browser.search_engines.TemplateUrlServiceFactory;
+import org.chromium.chrome.browser.toolbar.adaptive.AdaptiveToolbarButtonVariant;
+import org.chromium.chrome.browser.toolbar.optional_button.ButtonData;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
-import org.chromium.chrome.test.util.ChromeTabUtils;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.FreshCtaTransitTestRule;
+import org.chromium.chrome.test.transit.page.WebPageStation;
 import org.chromium.chrome.test.util.OmniboxTestUtils;
-import org.chromium.chrome.test.util.browser.Features.DisableFeatures;
-import org.chromium.chrome.test.util.browser.Features.EnableFeatures;
 import org.chromium.components.embedder_support.util.UrlConstants;
+import org.chromium.components.omnibox.AutocompleteInput;
+import org.chromium.components.omnibox.OmniboxCapabilities;
+import org.chromium.components.omnibox.OmniboxFocusReason;
 import org.chromium.components.search_engines.TemplateUrl;
 import org.chromium.components.search_engines.TemplateUrlService;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.components.signin.SigninFeatures;
 import org.chromium.content_public.common.ContentSwitches;
 import org.chromium.ui.base.ActivityKeyboardVisibilityDelegate;
-import org.chromium.ui.test.util.UiRestriction;
+import org.chromium.ui.base.DeviceFormFactor;
+import org.chromium.ui.base.DeviceInput;
 import org.chromium.ui.test.util.ViewUtils;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Map;
+import java.util.Set;
 
-/**
- * Instrumentation tests for the LocationBar component.
- */
+/** Instrumentation tests for the LocationBar component. */
 @RunWith(ChromeJUnit4ClassRunner.class)
-@CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE,
-        ContentSwitches.HOST_RESOLVER_RULES + "=MAP * 127.0.0.1", "ignore-certificate-errors"})
+@CommandLineFlags.Add({
+    ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE,
+    ContentSwitches.HOST_RESOLVER_RULES + "=MAP * 127.0.0.1",
+    "ignore-certificate-errors"
+})
 @DoNotBatch(reason = "Test start up behaviors.")
 public class LocationBarTest {
-    private static final String TEST_QUERY = "testing query";
-    private static final List<String> TEST_PARAMS = Arrays.asList("foo=bar");
     private static final String HOSTNAME = "suchwowveryyes.edu";
     private static final String GOOGLE_URL = "https://www.google.com";
-    private static final String NON_GOOGLE_URL = "https://www.notgoogle.com";
 
     @Rule
-    public ChromeTabbedActivityTestRule mActivityTestRule = new ChromeTabbedActivityTestRule();
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    public FreshCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.freshChromeTabbedActivityRule();
 
-    @Mock
-    TemplateUrlService mTemplateUrlService;
-    @Mock
-    private TemplateUrl mGoogleSearchEngine;
-    @Mock
-    private TemplateUrl mNonGoogleSearchEngine;
-    @Mock
-    private LensController mLensController;
-    @Mock
-    private LocaleManagerDelegate mLocaleManagerDelegate;
-    @Mock
-    private VoiceRecognitionHandler mVoiceRecognitionHandler;
-    @Mock
-    private SearchEngineLogoUtils mSearchEngineLogoUtils;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+
+    @Mock TemplateUrlService mTemplateUrlService;
+    @Mock private TemplateUrl mGoogleSearchEngine;
+    @Mock private TemplateUrl mNonGoogleSearchEngine;
+    @Mock private LensController mLensController;
+    @Mock private LocaleManagerDelegate mLocaleManagerDelegate;
+    @Mock private VoiceRecognitionHandler mVoiceRecognitionHandler;
 
     private ChromeTabbedActivity mActivity;
     private UrlBar mUrlBar;
     private LocationBarCoordinator mLocationBarCoordinator;
     private LocationBarMediator mLocationBarMediator;
-    private String mSearchUrl;
+    private String mHostUrl;
     private ActivityKeyboardVisibilityDelegate mKeyboardDelegate;
     private OmniboxTestUtils mOmnibox;
 
     @Before
     public void setUp() throws InterruptedException {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            TemplateUrlServiceFactory.setInstanceForTesting(mTemplateUrlService);
-            LocaleManager.getInstance().setDelegateForTest(mLocaleManagerDelegate);
-            SearchEngineLogoUtils.setInstanceForTesting(mSearchEngineLogoUtils);
-            doReturn(new Promise<>())
-                    .when(mSearchEngineLogoUtils)
-                    .getSearchEngineLogo(any(), anyInt(), any(), any());
-        });
-        UmaRecorderHolder.resetForTesting();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    TemplateUrlServiceFactory.setInstanceForTesting(mTemplateUrlService);
+                    LocaleManager.getInstance().setDelegateForTest(mLocaleManagerDelegate);
+                });
+        mHostUrl =
+                mActivityTestRule
+                        .getEmbeddedTestServerRule()
+                        .getServer()
+                        .getURLWithHostName(HOSTNAME, "/");
     }
 
     @After
     public void tearDown() {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            TemplateUrlServiceFactory.setInstanceForTesting(null);
-            SearchEngineLogoUtils.setInstanceForTesting(null);
-        });
+        mActivityTestRule.skipWindowAndTabStateCleanup();
     }
 
-    private void startActivityNormally() {
-        mActivityTestRule.startMainActivityOnBlankPage();
+    private WebPageStation startActivityNormally() {
+        WebPageStation webPageStation = mActivityTestRule.startOnBlankPage();
         mActivity = mActivityTestRule.getActivity();
         doPostActivitySetup(mActivity);
-    }
-
-    private void startActivityWithDeferredNativeInitialization() {
-        CommandLine.getInstance().appendSwitch(ChromeSwitches.DISABLE_NATIVE_INITIALIZATION);
-        Intent intent = new Intent("about:blank");
-        intent.addCategory(Intent.CATEGORY_LAUNCHER);
-        mActivityTestRule.prepareUrlIntent(intent, "about:blank");
-        mActivityTestRule.launchActivity(intent);
-        mActivity = mActivityTestRule.getActivity();
-        if (!mActivity.isInitialLayoutInflationComplete()) {
-            AtomicBoolean isInflated = new AtomicBoolean();
-            mActivity.getLifecycleDispatcher().register(new InflationObserver() {
-                @Override
-                public void onPreInflationStartup() {}
-
-                @Override
-                public void onPostInflationStartup() {
-                    isInflated.set(true);
-                }
-            });
-            CriteriaHelper.pollUiThread(isInflated::get);
-        }
-        doPostActivitySetup(mActivity);
-    }
-
-    private void triggerAndWaitForDeferredNativeInitialization() {
-        CommandLine.getInstance().removeSwitch(ChromeSwitches.DISABLE_NATIVE_INITIALIZATION);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mActivityTestRule.getActivity().startDelayedNativeInitializationForTests();
-        });
-        mActivityTestRule.waitForActivityNativeInitializationComplete();
+        return webPageStation;
     }
 
     private void doPostActivitySetup(ChromeActivity activity) {
         mOmnibox = new OmniboxTestUtils(activity);
-        mUrlBar = activity.findViewById(org.chromium.chrome.R.id.url_bar);
-        mLocationBarCoordinator = ((LocationBarCoordinator) activity.getToolbarManager()
-                                           .getToolbarLayoutForTesting()
-                                           .getLocationBar());
+        mUrlBar = activity.findViewById(R.id.url_bar);
+        mLocationBarCoordinator =
+                ((LocationBarCoordinator)
+                        activity.getToolbarManager().getToolbarLayoutForTesting().getLocationBar());
         mLocationBarMediator = mLocationBarCoordinator.getMediatorForTesting();
-        mSearchUrl = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURL("/search");
         mLocationBarCoordinator.setVoiceRecognitionHandlerForTesting(mVoiceRecognitionHandler);
         mLocationBarCoordinator.setLensControllerForTesting(mLensController);
         mKeyboardDelegate = mActivity.getWindowAndroid().getKeyboardDelegate();
@@ -192,50 +162,73 @@ public class LocationBarTest {
 
     private void setupSearchEngineLogo(String url) {
         boolean isGoogle = url.equals(GOOGLE_URL);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            // Do not show a logo image on NTP, unless the default engine is Google, to avoid
-            // occasional timeout in loading it.
-            doReturn(isGoogle).when(mTemplateUrlService).doesDefaultSearchEngineHaveLogo();
-            doReturn(isGoogle).when(mTemplateUrlService).isDefaultSearchEngineGoogle();
-            doReturn(url).when(mSearchEngineLogoUtils).getSearchLogoUrl(mTemplateUrlService);
-            doReturn(true)
-                    .when(mSearchEngineLogoUtils)
-                    .shouldShowSearchEngineLogo(/* incognito= */ false);
-            doReturn(isGoogle ? mGoogleSearchEngine : mNonGoogleSearchEngine)
-                    .when(mTemplateUrlService)
-                    .getDefaultSearchEngineTemplateUrl();
-
-            Promise<StatusIconResource> logoPromise = Promise.fulfilled(new StatusIconResource(
-                    isGoogle ? R.drawable.ic_logo_googleg_20dp : R.drawable.ic_search, 0));
-
-            doReturn(logoPromise)
-                    .when(mSearchEngineLogoUtils)
-                    .getSearchEngineLogo(any(), anyInt(), any(), any());
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    // Do not show a logo image on NTP, unless the default engine is Google, to
+                    // avoid occasional timeout in loading it.
+                    doReturn(isGoogle).when(mTemplateUrlService).doesDefaultSearchEngineHaveLogo();
+                    doReturn(isGoogle).when(mTemplateUrlService).isDefaultSearchEngineGoogle();
+                    doReturn(isGoogle ? mGoogleSearchEngine : mNonGoogleSearchEngine)
+                            .when(mTemplateUrlService)
+                            .getDefaultSearchEngineTemplateUrl();
+                });
     }
 
-    private void assertTheLastVisibleButtonInSearchBoxById(int id) {
-        LinearLayout urlActionContainer =
-                mActivityTestRule.getActivity().findViewById(R.id.url_action_container);
+    private void assertLocationBarButtonsAre(Integer... expectedIdsArray) {
+        Set<Integer> expectedIds = Set.of(expectedIdsArray);
+        Set<Integer> actualIds = new ArraySet<>();
 
-        for (int i = urlActionContainer.getChildCount() - 1; i >= 0; i--) {
-            if (urlActionContainer.getChildAt(i).getVisibility() != View.VISIBLE) {
-                continue;
+        Map<Integer, String> knownIds =
+                Map.ofEntries(
+                        Map.entry(R.id.mic_button, "R.id.mic_button"),
+                        Map.entry(R.id.lens_camera_button, "R.id.lens_camera_button"),
+                        Map.entry(R.id.zoom_button, "R.id.zoom_button"),
+                        Map.entry(R.id.install_button, "R.id.install_button"),
+                        Map.entry(R.id.bookmark_button, "R.id.bookmark_button"),
+                        Map.entry(R.id.delete_button, "R.id.delete_button"));
+
+        ViewGroup locationBar = mActivityTestRule.getActivity().findViewById(R.id.location_bar);
+
+        for (int id : knownIds.keySet()) {
+            var button = locationBar.findViewById(id);
+            if (button.getVisibility() == View.VISIBLE) {
+                actualIds.add(id);
             }
-            Assert.assertEquals(urlActionContainer.getChildAt(i).getId(), id);
-            break;
         }
+
+        if (expectedIds.equals(actualIds)) return;
+
+        Set<Integer> excessIds = new ArraySet<>(actualIds);
+        excessIds.removeAll(expectedIds);
+
+        Set<Integer> missingIds = new ArraySet<>(expectedIds);
+        missingIds.removeAll(actualIds);
+
+        var errorMsg = new StringBuilder();
+        errorMsg.append("Unexpected IDs: [ ");
+        for (int id : excessIds) {
+            errorMsg.append(knownIds.get(id));
+            errorMsg.append(' ');
+        }
+        errorMsg.append("], Missing IDs: [ ");
+        for (int id : missingIds) {
+            errorMsg.append(knownIds.get(id));
+            errorMsg.append(' ');
+        }
+        errorMsg.append(']');
+        Assert.assertEquals(errorMsg.toString(), expectedIds, actualIds);
     }
 
     private void updateLocationBar() {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            LocationBarMediator mediator = mLocationBarCoordinator.getMediatorForTesting();
-            mediator.onIncognitoStateChanged();
-            mediator.onPrimaryColorChanged();
-            mediator.onSecurityStateChanged();
-            mediator.onTemplateURLServiceChanged();
-            mediator.onUrlChanged();
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    LocationBarMediator mediator = mLocationBarCoordinator.getMediatorForTesting();
+                    mediator.onIncognitoStateChanged();
+                    mediator.onPrimaryColorChanged();
+                    mediator.onSecurityStateChanged();
+                    mediator.onTemplateURLServiceChanged();
+                    mediator.onUrlChanged(false);
+                });
     }
 
     @Test
@@ -243,366 +236,488 @@ public class LocationBarTest {
     public void testSetSearchQueryFocusesUrlBar() {
         startActivityNormally();
         final String query = "testing query";
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mLocationBarMediator.setSearchQuery(query);
-            Assert.assertEquals(query, mUrlBar.getTextWithoutAutocomplete());
-            Assert.assertTrue(mLocationBarMediator.isUrlBarFocused());
-        });
-
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    AutocompleteInput input =
+                            new AutocompleteInput()
+                                    .setUserText(query)
+                                    .setFocusReason(OmniboxFocusReason.SEARCH_QUERY);
+                    mLocationBarMediator.beginInput(input);
+                });
+        // Query cannot be applied right away because the UrlBar needs to acquire focus first.
         CriteriaHelper.pollUiThread(
-                () -> mKeyboardDelegate.isKeyboardShowing(mUrlBar.getContext(), mUrlBar));
+                () -> {
+                    Assert.assertEquals(query, mUrlBar.getTextWithoutAutocomplete());
+                    Assert.assertTrue(mLocationBarMediator.isUrlBarFocused());
+                    mKeyboardDelegate.isKeyboardShowing(mUrlBar);
+                });
     }
 
     @Test
     @MediumTest
-    public void testSetSearchQueryFocusesUrlBar_preNative() {
-        startActivityWithDeferredNativeInitialization();
-        final String query = "testing query";
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> mLocationBarMediator.setSearchQuery(query));
-
-        triggerAndWaitForDeferredNativeInitialization();
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            Assert.assertEquals(query, mUrlBar.getTextWithoutAutocomplete());
-            Assert.assertTrue(mLocationBarMediator.isUrlBarFocused());
-        });
-    }
-
-    @Test
-    @MediumTest
-    public void testPerformSearchQuery() {
-        startActivityNormally();
-        final List<String> params = Arrays.asList("foo=bar");
-        doReturn(mSearchUrl)
-                .when(mTemplateUrlService)
-                .getUrlForSearchQuery(TEST_QUERY, TEST_PARAMS);
-
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> mLocationBarMediator.performSearchQuery(TEST_QUERY, TEST_PARAMS));
-
-        ChromeTabUtils.waitForTabPageLoaded(
-                mActivityTestRule.getActivity().getActivityTab(), mSearchUrl);
-    }
-
-    @Test
-    @MediumTest
-    public void testPerformSearchQuery_emptyUrl() {
-        startActivityNormally();
-        doReturn("").when(mTemplateUrlService).getUrlForSearchQuery(TEST_QUERY, TEST_PARAMS);
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mLocationBarMediator.performSearchQuery(TEST_QUERY, TEST_PARAMS);
-            Assert.assertEquals(TEST_QUERY, mUrlBar.getTextWithoutAutocomplete());
-        });
-    }
-
-    @Test
-    @MediumTest
+    @DisabledTest(message = "crbug.com/507245181")
     public void testOnConfigurationChanged() {
+        // Start activity in Desktop mode. Expect UrlBar to focus.
+        // The DesktopMode check verifies connected peripherals, not just the Configuration change.
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(true);
         startActivityNormally();
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mLocationBarMediator.showUrlBarCursorWithoutFocusAnimations();
-            Assert.assertTrue(mLocationBarMediator.isUrlBarFocused());
-        });
+        // We expect the UrlBar to be focused iff a Hardware keyboard handler does not automatically
+        // call up Software keyboard (IME).
+        boolean wantUrlBarFocus = !KeyboardUtils.shouldShowImeWithHardwareKeyboard(mActivity);
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarMediator.showUrlBarCursorWithoutFocusAnimations();
+                    // If IME is configured to show up with hardware keys, url bar should not
+                    // receive focus.
+                    Assert.assertEquals(wantUrlBarFocus, mLocationBarMediator.isUrlBarFocused());
+                });
 
         Configuration configuration = mActivity.getSavedConfigurationForTesting();
-        configuration.keyboard = Configuration.KEYBOARD_12KEY;
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mLocationBarMediator.onConfigurationChanged(configuration);
-            Assert.assertFalse(mLocationBarMediator.isUrlBarFocused());
-        });
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(false);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarMediator.onConfigurationChanged(configuration);
+                    Assert.assertFalse(mLocationBarMediator.isUrlBarFocused());
+                });
     }
 
     @Test
     @MediumTest
     public void testPostDestroyFocusLogic() {
         startActivityNormally();
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mActivity.finish(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mActivity.finish();
+                });
 
         CriteriaHelper.pollUiThread(
                 () -> mActivity.getLifecycle().getCurrentState().equals(Lifecycle.State.DESTROYED));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mLocationBarMediator.setUrlFocusChangeInProgress(false);
-            mLocationBarMediator.finishUrlFocusChange(true, true);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarMediator.setUrlFocusChangeInProgress(false);
+                    mLocationBarMediator.finishUrlFocusChange(true, true);
+                });
     }
 
     @Test
     @MediumTest
     public void testEditingText() {
-        startActivityNormally();
-        String url = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURLWithHostName(
-                HOSTNAME, "/");
-        mActivityTestRule.loadUrl(url);
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            Assert.assertTrue(mUrlBar.getText().toString().startsWith(HOSTNAME));
-            mUrlBar.requestFocus();
-            Assert.assertEquals("", mUrlBar.getText().toString());
-            mLocationBarCoordinator.setOmniboxEditingText(url);
-            Assert.assertEquals(url, mUrlBar.getText().toString());
-            Assert.assertEquals(url.length(), mUrlBar.getSelectionStart());
-            Assert.assertEquals(url.length(), mUrlBar.getSelectionEnd());
-        });
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(true);
+        testEditingText(/* expectDesktopMode= */ true);
     }
 
     @Test
     @MediumTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @DisableIf.Device(DeviceFormFactor.DESKTOP) // https://crbug.com/526811362
+    public void testEditingText_withDesktopModeDisabled() {
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(false);
+        testEditingText(/* expectDesktopMode= */ false);
+    }
+
+    @Test
+    @MediumTest
+    public void testEditingText_withDesktopModeEnabled() {
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(true);
+        testEditingText(/* expectDesktopMode= */ true);
+    }
+
+    private void testEditingText(boolean expectDesktopMode) {
+        startActivityNormally();
+        mActivityTestRule.loadUrl(mHostUrl);
+
+        // Select the omnibox and confirm expected ready state:
+        // - Mobile devices show (by default) no text
+        // - Desktop devices show the current page URL
+        // - in both cases any text in the Omnibox is selected.
+        ThreadUtils.runOnUiThread(mUrlBar::requestFocus);
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    var text = mUrlBar.getText().toString();
+                    if (expectDesktopMode) {
+                        checkThat("Omnibox holds URL", text, Matchers.startsWith(HOSTNAME));
+                    } else {
+                        checkThat("Omnibox holds URL", text, Matchers.isEmptyString());
+                    }
+
+                    checkThat(
+                            "Selection starts at text end",
+                            mUrlBar.getSelectionStart(),
+                            equalTo(text.length()));
+                    checkThat("Selection ends at 0", mUrlBar.getSelectionEnd(), equalTo(0));
+                });
+
+        // Now, type some text and confirm cursor placement again.
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarCoordinator.setOmniboxEditingText(mHostUrl);
+                });
+
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    var text = mUrlBar.getText().toString();
+                    checkThat(
+                            "No characters are dropped during typing",
+                            text,
+                            Matchers.startsWith(mHostUrl));
+                    checkThat(
+                            "No text selection",
+                            mUrlBar.getSelectionStart(),
+                            equalTo(mUrlBar.getSelectionEnd()));
+                    checkThat("Cursor at end", mUrlBar.getSelectionStart(), equalTo(text.length()));
+                });
+    }
+
+    @Test
+    @MediumTest
+    @Restriction(DeviceFormFactor.PHONE)
     public void testFocusLogic_buttonVisibilityPhone() {
         startActivityNormally();
         doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
-        String url = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURLWithHostName(
-                HOSTNAME, "/");
-        mActivityTestRule.loadUrl(url);
+        mActivityTestRule.loadUrl(mHostUrl);
 
-        onView(withId(R.id.url_action_container))
-                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
         onView(withId(R.id.mic_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
         onView(withId(R.id.delete_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
 
-        ViewUtils.waitForView(allOf(withId(R.id.url_action_container),
-                withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
+        ViewUtils.waitForVisibleView(withId(R.id.mic_button));
+
         onView(withId(R.id.mic_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
         onView(withId(R.id.delete_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
 
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mLocationBarCoordinator.setOmniboxEditingText(url); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarCoordinator.setOmniboxEditingText(mHostUrl);
+                });
 
         onView(withId(R.id.mic_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
         onView(withId(R.id.delete_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.clearFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.clearFocus();
+                });
 
-        ViewUtils.waitForView(allOf(withId(R.id.url_action_container),
-                withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
+        onView(withId(R.id.mic_button))
+                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
+        onView(withId(R.id.delete_button))
+                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
     }
 
     @Test
     @MediumTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testFocusLogic_cameraAssistedSearchLenButtonVisibilityPhone_lensDisabled() {
         startActivityNormally();
         doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
         doReturn(false).when(mLensController).isLensEnabled(any());
-        String url = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURLWithHostName(
-                HOSTNAME, "/");
-        mActivityTestRule.loadUrl(url);
+        mActivityTestRule.loadUrl(mHostUrl);
 
-        onView(withId(R.id.url_action_container)).check(matches(not(isDisplayed())));
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
         onView(withId(R.id.delete_button)).check(matches(not(isDisplayed())));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
 
-        ViewUtils.waitForView(allOf(withId(R.id.url_action_container), isDisplayed()));
-        onView(withId(R.id.lens_camera_button)).check((matches(not(isDisplayed()))));
+        ViewUtils.waitForVisibleView(withId(R.id.mic_button));
+        onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
         onView(withId(R.id.delete_button)).check(matches(not(isDisplayed())));
-        assertTheLastVisibleButtonInSearchBoxById(R.id.mic_button);
+        assertLocationBarButtonsAre(R.id.mic_button);
 
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mLocationBarCoordinator.setOmniboxEditingText(url); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarCoordinator.setOmniboxEditingText(mHostUrl);
+                });
 
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
         onView(withId(R.id.delete_button)).check(matches(isDisplayed()));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.clearFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.clearFocus();
+                });
 
-        ViewUtils.waitForView(allOf(withId(R.id.url_action_container), not(isDisplayed())));
+        waitForNoView(withId(R.id.delete_button));
     }
 
     @Test
     @MediumTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testFocusLogic_cameraAssistedSearchLenButtonVisibilityPhone_lensEnabled() {
         startActivityNormally();
         doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
         doReturn(true).when(mLensController).isLensEnabled(any());
-        String url = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURLWithHostName(
-                HOSTNAME, "/");
-        mActivityTestRule.loadUrl(url);
+        mActivityTestRule.loadUrl(mHostUrl);
 
-        onView(withId(R.id.url_action_container)).check(matches(not(isDisplayed())));
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
         onView(withId(R.id.delete_button)).check(matches(not(isDisplayed())));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
 
-        ViewUtils.waitForView(allOf(withId(R.id.url_action_container), isDisplayed()));
-        onView(withId(R.id.lens_camera_button)).check((matches(isDisplayed())));
+        ViewUtils.waitForVisibleView(withId(R.id.lens_camera_button));
+        onView(withId(R.id.lens_camera_button)).check(matches(isDisplayed()));
         onView(withId(R.id.delete_button)).check(matches(not(isDisplayed())));
-        assertTheLastVisibleButtonInSearchBoxById(R.id.lens_camera_button);
+        assertLocationBarButtonsAre(R.id.lens_camera_button, R.id.mic_button);
 
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mLocationBarCoordinator.setOmniboxEditingText(url); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarCoordinator.setOmniboxEditingText(mHostUrl);
+                });
 
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
         onView(withId(R.id.delete_button)).check(matches(isDisplayed()));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.clearFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.clearFocus();
+                });
 
-        ViewUtils.waitForView(allOf(withId(R.id.url_action_container), not(isDisplayed())));
+        waitForNoView(withId(R.id.delete_button));
     }
 
     @Test
     @MediumTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
-    public void testFocusLogic_lenButtonVisibilityOnStartNtpPhone() {
-        startActivityNormally();
-        doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
-        doReturn(true).when(mLensController).isLensEnabled(any());
-
-        mActivityTestRule.loadUrl(UrlConstants.NTP_URL);
-
-        ViewUtils.waitForView(allOf(withId(R.id.mic_button), isDisplayed()));
-        ViewUtils.waitForView(allOf(withId(R.id.lens_camera_button), isDisplayed()));
-        assertTheLastVisibleButtonInSearchBoxById(R.id.lens_camera_button);
-    }
-
-    @Test
-    @MediumTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
-    public void testFocusLogic_lenButtonVisibilityOnStartNtpPhone_updatedOnceWhenNtpScrolled() {
+    @Restriction(DeviceFormFactor.PHONE)
+    public void testFocusLogic_lenButtonVisibilityOnNtpPhone_updatedOnceWhenNtpScrolled() {
+        setupSearchEngineLogo(GOOGLE_URL);
         startActivityNormally();
         doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
 
-        mActivityTestRule.loadUrl(UrlConstants.NTP_URL);
+        mActivityTestRule.loadUrl(getOriginalNativeNtpUrl());
 
-        ViewUtils.waitForView(allOf(withId(R.id.mic_button), isDisplayed()));
-        ViewUtils.waitForView(allOf(withId(R.id.lens_camera_button), isDisplayed()));
+        Mockito.reset(mVoiceRecognitionHandler);
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            Mockito.reset(mVoiceRecognitionHandler);
-            doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
+        // Proabably never worked. crbug.com/446200399
+        // onView(
+        //                 allOf(
+        //                         withId(R.id.voice_search_button),
+        //                         withParent(withId(R.layout.new_tab_page_layout))))
+        //         .check(matches(isDisplayed()));
 
-            // Updating the fraction once should query voice search visibility.
-            mLocationBarMediator.setUrlFocusChangeFraction(.5f);
-            Mockito.verify(mVoiceRecognitionHandler).isVoiceSearchEnabled();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
 
-            // Further updates to the fraction shouldn't trigger a button visibility update.
-            mLocationBarMediator.setUrlFocusChangeFraction(.6f);
-            Mockito.verify(mVoiceRecognitionHandler, Mockito.times(1)).isVoiceSearchEnabled();
-        });
+                    // Updating the fraction once should query voice search visibility.
+                    mLocationBarMediator.setUrlFocusChangeFraction(.5f, .5f);
+
+                    // Further updates to the fraction shouldn't trigger a button visibility update.
+                    mLocationBarMediator.setUrlFocusChangeFraction(.6f, .6f);
+                    Mockito.verify(mVoiceRecognitionHandler, Mockito.atMost(1))
+                            .isVoiceSearchEnabled();
+                });
     }
 
     @Test
     @MediumTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
+    // TODO(crbug.com/423465927): Explore a better approach to make the
+    // existing tests run with the prewarm feature enabled.
+    @DisableFeatures({"Prewarm"})
     public void testFocusLogic_lenButtonVisibilityOnLocationBarOnIncognitoStateChange() {
         startActivityNormally();
         doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
         doReturn(false).when(mLensController).isLensEnabled(any());
-        String url = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURLWithHostName(
-                HOSTNAME, "/");
         // Test when incognito is true.
-        mActivityTestRule.loadUrlInNewTab(url, /** incognito = */ true);
+        mActivityTestRule.loadUrlInNewTab(mHostUrl, /* incognito= */ true);
         updateLocationBar();
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
-        ViewUtils.waitForView(allOf(withId(R.id.lens_camera_button), not(isDisplayed())));
-        ViewUtils.waitForView(allOf(withId(R.id.mic_button), isDisplayed()));
-        assertTheLastVisibleButtonInSearchBoxById(R.id.mic_button);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
+        waitForNoView(withId(R.id.lens_camera_button));
+        ViewUtils.waitForVisibleView(withId(R.id.mic_button));
+        assertLocationBarButtonsAre(R.id.mic_button);
 
         // Test when incognito is false.
         doReturn(true).when(mLensController).isLensEnabled(any());
-        mActivityTestRule.loadUrlInNewTab(url, /** incognito = */ false);
+        mActivityTestRule.loadUrlInNewTab(mHostUrl, /* incognito= */ false);
         updateLocationBar();
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
-        ViewUtils.waitForView(allOf(withId(R.id.lens_camera_button), isDisplayed()));
-        assertTheLastVisibleButtonInSearchBoxById(R.id.lens_camera_button);
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.clearFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
+        ViewUtils.waitForVisibleView(withId(R.id.lens_camera_button));
+        assertLocationBarButtonsAre(R.id.lens_camera_button, R.id.mic_button);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.clearFocus();
+                });
     }
 
     @Test
     @MediumTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testFocusLogic_lenButtonVisibilityOnLocationBarOnDefaultSearchEngineChange() {
         startActivityNormally();
         doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
         doReturn(false).when(mLensController).isLensEnabled(any());
         doReturn(false).when(mTemplateUrlService).isDefaultSearchEngineGoogle();
-        String url = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURLWithHostName(
-                HOSTNAME, "/");
         // Test when search engine is not Google.
-        mActivityTestRule.loadUrlInNewTab(url, /** incognito = */ false);
+        mActivityTestRule.loadUrlInNewTab(mHostUrl, /* incognito= */ false);
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
-        ViewUtils.waitForView(allOf(withId(R.id.lens_camera_button), not(isDisplayed())));
-        ViewUtils.waitForView(allOf(withId(R.id.mic_button), isDisplayed()));
-        assertTheLastVisibleButtonInSearchBoxById(R.id.mic_button);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
+        waitForNoView(withId(R.id.lens_camera_button));
+        ViewUtils.waitForVisibleView(withId(R.id.mic_button));
+        assertLocationBarButtonsAre(R.id.mic_button);
 
         // Test when search engine is Google.
         doReturn(true).when(mLensController).isLensEnabled(any());
         doReturn(true).when(mTemplateUrlService).isDefaultSearchEngineGoogle();
-        mActivityTestRule.loadUrlInNewTab(url, /** incognito = */ false);
-        updateLocationBar();
+        mActivityTestRule.loadUrlInNewTab(mHostUrl, /* incognito= */ false);
         onView(withId(R.id.lens_camera_button)).check(matches(not(isDisplayed())));
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
-        ViewUtils.waitForView(allOf(withId(R.id.lens_camera_button), isDisplayed()));
-        assertTheLastVisibleButtonInSearchBoxById(R.id.lens_camera_button);
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.clearFocus(); });
+        updateLocationBar();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
+        ViewUtils.waitForVisibleView(withId(R.id.lens_camera_button));
+        assertLocationBarButtonsAre(R.id.lens_camera_button, R.id.mic_button);
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.clearFocus();
+                });
     }
 
     @Test
     @MediumTest
-    @CommandLineFlags.Add({"enable-features=" + ChromeFeatureList.VOICE_BUTTON_IN_TOP_TOOLBAR,
-            "disable-features=" + ChromeFeatureList.ADAPTIVE_BUTTON_IN_TOP_TOOLBAR + ","
-                    + ChromeFeatureList.ADAPTIVE_BUTTON_IN_TOP_TOOLBAR_CUSTOMIZATION_V2})
-    @Restriction(UiRestriction.RESTRICTION_TYPE_TABLET)
-    public void
-    testFocusLogic_buttonVisibilityTablet() {
+    @DisableFeatures(SigninFeatures.PROFILE_DISC_ON_ALL_PAGES)
+    @Restriction(DeviceFormFactor.TABLET_OR_DESKTOP)
+    public void testFocusLogic_buttonVisibilityTablet_ProfileDiscDisabled_DesktopDisabled() {
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(false);
+        DeviceInput.setSupportsAlphabeticKeyboardForTesting(false);
+        DeviceInput.setSupportsPrecisionPointerForTesting(false);
+        testFocusLogic_buttonVisibilityTablet(
+                /* expectDesktopMode= */ false, /* profileDiscEnabled= */ false);
+    }
+
+    @Test
+    @MediumTest
+    @EnableFeatures({
+        SigninFeatures.PROFILE_DISC_ON_ALL_PAGES,
+        SigninFeatures.SIGNIN_LEVEL_UP_BUTTON
+    })
+    @Restriction(DeviceFormFactor.TABLET_OR_DESKTOP)
+    public void testFocusLogic_buttonVisibilityTablet_ProfileDiscEnabled_DesktopDisabled() {
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(false);
+        DeviceInput.setSupportsAlphabeticKeyboardForTesting(false);
+        DeviceInput.setSupportsPrecisionPointerForTesting(false);
+        testFocusLogic_buttonVisibilityTablet(
+                /* expectDesktopMode= */ false, /* profileDiscEnabled= */ true);
+    }
+
+    @Test
+    @MediumTest
+    @DisableFeatures(SigninFeatures.PROFILE_DISC_ON_ALL_PAGES)
+    @Restriction(DeviceFormFactor.TABLET_OR_DESKTOP)
+    public void testFocusLogic_buttonVisibilityTablet_ProfileDiscDisabled_DesktopEnabled() {
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(true);
+        DeviceInput.setSupportsAlphabeticKeyboardForTesting(true);
+        DeviceInput.setSupportsPrecisionPointerForTesting(true);
+        testFocusLogic_buttonVisibilityTablet(
+                /* expectDesktopMode= */ true, /* profileDiscEnabled= */ false);
+    }
+
+    @Test
+    @MediumTest
+    @EnableFeatures({
+        SigninFeatures.PROFILE_DISC_ON_ALL_PAGES,
+        SigninFeatures.SIGNIN_LEVEL_UP_BUTTON
+    })
+    @Restriction(DeviceFormFactor.TABLET_OR_DESKTOP)
+    public void testFocusLogic_buttonVisibilityTablet_ProfileDiscEnabled_DesktopEnabled() {
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(true);
+        DeviceInput.setSupportsAlphabeticKeyboardForTesting(true);
+        DeviceInput.setSupportsPrecisionPointerForTesting(true);
+        testFocusLogic_buttonVisibilityTablet(
+                /* expectDesktopMode= */ true, /* profileDiscEnabled= */ true);
+    }
+
+    private void testFocusLogic_buttonVisibilityTablet(
+            boolean expectDesktopMode, boolean profileDiscEnabled) {
+        OmniboxCapabilities.setIsDesktopPlatformForTesting(expectDesktopMode);
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(expectDesktopMode);
         startActivityNormally();
+
         doReturn(true).when(mVoiceRecognitionHandler).isVoiceSearchEnabled();
-        String url = mActivityTestRule.getEmbeddedTestServerRule().getServer().getURLWithHostName(
-                HOSTNAME, "/");
-        mActivityTestRule.loadUrl(url);
+        doReturn(true).when(mLensController).isLensEnabled(any());
 
-        onView(withId(R.id.url_action_container))
-                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
+        mActivityTestRule.loadUrl(mHostUrl);
+
         onView(withId(R.id.mic_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
         onView(withId(R.id.delete_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
         onView(withId(R.id.bookmark_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
-        onView(withId(R.id.save_offline_button))
-                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> { mUrlBar.requestFocus(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
+
+        if (expectDesktopMode) {
+            onView(withId(R.id.mic_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
+            onView(withId(R.id.lens_camera_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
+            onView(withId(R.id.delete_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
+        } else {
+            onView(withId(R.id.mic_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
+            // With profileDiscEnabled a Signin button appears with priority over the lens button.
+            onView(withId(profileDiscEnabled ? R.id.signin_button : R.id.lens_camera_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
+            onView(withId(R.id.delete_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
+        }
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarCoordinator.setOmniboxEditingText(mHostUrl);
+                });
 
         onView(withId(R.id.mic_button))
-                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
-        onView(withId(R.id.delete_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
-
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mLocationBarCoordinator.setOmniboxEditingText(url); });
-
-        onView(withId(R.id.mic_button))
+        onView(withId(R.id.lens_camera_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
-        onView(withId(R.id.delete_button))
-                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
+        if (expectDesktopMode) {
+            onView(withId(R.id.delete_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
+        } else {
+            onView(withId(R.id.delete_button))
+                    .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.VISIBLE)));
+        }
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mUrlBar.clearFocus();
-            mLocationBarCoordinator.setShouldShowButtonsWhenUnfocusedForTablet(false);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.clearFocus();
+                    mLocationBarCoordinator.setShouldShowButtonsWhenUnfocusedForTablet(false);
+                });
 
         onView(withId(R.id.bookmark_button))
-                .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
-        onView(withId(R.id.save_offline_button))
                 .check(matches(withEffectiveVisibility(ViewMatchers.Visibility.GONE)));
     }
 
@@ -610,7 +725,7 @@ public class LocationBarTest {
     @MediumTest
     public void testFocusLogic_keyboardVisibility() {
         startActivityNormally();
-        assertFalse(mKeyboardDelegate.isKeyboardShowing(mUrlBar.getContext(), mUrlBar));
+        assertFalse(mKeyboardDelegate.isKeyboardShowing(mUrlBar));
 
         mOmnibox.requestFocus();
         mOmnibox.checkFocus(true);
@@ -618,36 +733,17 @@ public class LocationBarTest {
         mOmnibox.checkFocus(false);
     }
 
-    /**
-     * Test that back press should make the omnibox unfocused.
-     */
+    /** Test that back press should make the omnibox unfocused. */
     @Test
     @MediumTest
-    @DisableFeatures({ChromeFeatureList.BACK_GESTURE_REFACTOR})
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testFocusLogic_backPress() {
         startActivityNormally();
 
         mOmnibox.requestFocus();
         mOmnibox.checkFocus(true);
-        TestThreadUtils.runOnUiThreadBlocking(() -> mLocationBarMediator.backKeyPressed());
-        mOmnibox.checkFocus(false);
-    }
-
-    /**
-     * Same with {@link #testFocusLogic_backPress()}, but with predictive back gesture enabled.
-     */
-    @Test
-    @MediumTest
-    @EnableFeatures({ChromeFeatureList.BACK_GESTURE_REFACTOR})
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
-    public void testFocusLogic_backPress_Refactored() {
-        startActivityNormally();
-
-        mOmnibox.requestFocus();
-        mOmnibox.checkFocus(true);
         Assert.assertTrue(mLocationBarMediator.getHandleBackPressChangedSupplier().get());
-        TestThreadUtils.runOnUiThreadBlocking(
+        ThreadUtils.runOnUiThreadBlocking(
                 () -> mActivity.getOnBackPressedDispatcher().onBackPressed());
         Assert.assertFalse(mLocationBarMediator.getHandleBackPressChangedSupplier().get());
         mOmnibox.checkFocus(false);
@@ -655,35 +751,24 @@ public class LocationBarTest {
 
     @Test
     @SmallTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testOmniboxSearchEngineLogo_unfocusedOnSRP() {
         setupSearchEngineLogo(GOOGLE_URL);
         startActivityNormally();
 
-        mActivityTestRule.loadUrl(UrlConstants.NTP_URL);
+        mActivityTestRule.loadUrl(getOriginalNativeNtpUrl());
         onView(withId(R.id.location_bar_status_icon)).check(matches(not(isDisplayed())));
     }
 
     @Test
     @SmallTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
-    public void testOmniboxSearchEngineLogo_unfocusedOnSRP_nonGoogleSearchEngine() {
-        setupSearchEngineLogo(NON_GOOGLE_URL);
-        startActivityNormally();
-
-        mActivityTestRule.loadUrl(UrlConstants.NTP_URL);
-        onView(withId(R.id.location_bar_status_icon)).check(matches(not(isDisplayed())));
-    }
-
-    @Test
-    @SmallTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testOmniboxSearchEngineLogo_unfocusedOnSRP_incognito() {
         setupSearchEngineLogo(GOOGLE_URL);
         startActivityNormally();
 
-        mActivityTestRule.loadUrlInNewTab(UrlConstants.NTP_URL, /* incognito= */ true);
-        onView(withId(R.id.location_bar_status_icon)).check(matches(not(isDisplayed())));
+        mActivityTestRule.loadUrlInNewTab(getOriginalNativeNtpUrl(), /* incognito= */ true);
+        onView(withId(R.id.location_bar_status_icon)).check(matches(isDisplayed()));
     }
 
     @Test
@@ -692,19 +777,19 @@ public class LocationBarTest {
         setupSearchEngineLogo(GOOGLE_URL);
         startActivityNormally();
 
-        mActivityTestRule.loadUrl(UrlConstants.NTP_URL);
+        mActivityTestRule.loadUrl(getOriginalNativeNtpUrl());
         mOmnibox.requestFocus();
         onView(withId(R.id.location_bar_status_icon)).check(matches(isDisplayed()));
     }
 
     @Test
     @SmallTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testOmniboxSearchEngineLogo_ntpToSite() {
         setupSearchEngineLogo(GOOGLE_URL);
         startActivityNormally();
 
-        mActivityTestRule.loadUrl(UrlConstants.NTP_URL);
+        mActivityTestRule.loadUrl(getOriginalNativeNtpUrl());
         onView(withId(R.id.location_bar_status_icon)).check(matches(not(isDisplayed())));
 
         mActivityTestRule.loadUrl(UrlConstants.ABOUT_URL);
@@ -722,5 +807,119 @@ public class LocationBarTest {
 
         mActivityTestRule.loadUrl(UrlConstants.VERSION_URL);
         onView(withId(R.id.location_bar_status_icon)).check(matches(isDisplayed()));
+    }
+
+    private void showOptionalButton() {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    ButtonData.ButtonSpec spec =
+                            new ButtonData.ButtonSpec.Builder(
+                                            new ColorDrawable(Color.RED), "test", true)
+                                    .setButtonVariant(AdaptiveToolbarButtonVariant.SHARE)
+                                    .build();
+                    ButtonData buttonData =
+                            new ButtonData() {
+                                @Override
+                                public boolean canShow() {
+                                    return true;
+                                }
+
+                                @Override
+                                public boolean isEnabled() {
+                                    return true;
+                                }
+
+                                @Override
+                                public boolean shouldShowTextBubble() {
+                                    return false;
+                                }
+
+                                @Override
+                                public ButtonSpec getButtonSpec() {
+                                    return spec;
+                                }
+                            };
+                    mLocationBarCoordinator.updateOptionalButton(buttonData);
+                });
+
+        ViewUtils.waitForVisibleView(
+                allOf(withId(R.id.optional_button), isDescendantOfA(withId(R.id.location_bar))));
+    }
+
+    @Test
+    @SmallTest
+    @Restriction(DeviceFormFactor.PHONE)
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testOptionalButton() {
+        startActivityNormally();
+
+        showOptionalButton();
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mLocationBarCoordinator.hideOptionalButton();
+                });
+
+        waitForNoView(
+                allOf(withId(R.id.optional_button), isDescendantOfA(withId(R.id.location_bar))));
+    }
+
+    @Test
+    @SmallTest
+    @Restriction(DeviceFormFactor.PHONE)
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testOptionalButton_HiddenWhenUrlFocused() {
+        startActivityNormally();
+
+        showOptionalButton();
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mUrlBar.requestFocus();
+                });
+
+        waitForNoView(
+                allOf(withId(R.id.optional_button), isDescendantOfA(withId(R.id.location_bar))));
+    }
+
+    @Test
+    @SmallTest
+    @Restriction(DeviceFormFactor.PHONE)
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testOptionalButton_HiddenOnNtp() {
+        startActivityNormally();
+
+        showOptionalButton();
+
+        mActivityTestRule.loadUrl(getOriginalNativeNtpUrl());
+
+        waitForNoView(
+                allOf(withId(R.id.optional_button), isDescendantOfA(withId(R.id.location_bar))));
+    }
+
+    @Test
+    @MediumTest
+    @Restriction(DeviceFormFactor.DESKTOP)
+    public void testFocusCarriesSelection() {
+        // Force desktop experience on desktop form factor.
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(true);
+        startActivityNormally();
+        mActivityTestRule.loadUrl(mHostUrl);
+
+        Assert.assertFalse(mLocationBarMediator.isUrlBarFocused());
+
+        // Set unfocused selection
+        ThreadUtils.runOnUiThreadBlocking(() -> mUrlBar.setSelection(2, 5));
+
+        // Focus the omnibox.
+        ThreadUtils.runOnUiThread(mUrlBar::requestFocus);
+
+        // Verify focus and that selection is preserved.
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    Assert.assertTrue(mLocationBarMediator.isUrlBarFocused());
+                    Assert.assertEquals(2, mUrlBar.getSelectionStart());
+                    Assert.assertEquals(5, mUrlBar.getSelectionEnd());
+                });
     }
 }

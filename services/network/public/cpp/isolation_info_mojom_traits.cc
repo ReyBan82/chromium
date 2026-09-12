@@ -6,27 +6,42 @@
 
 #include "base/notreached.h"
 #include "base/unguessable_token.h"
+#include "net/base/isolation_info.h"
+#include "net/base/network_isolation_partition.h"
 #include "services/network/public/cpp/cookie_manager_shared_mojom_traits.h"
 #include "services/network/public/cpp/crash_keys.h"
+#include "services/network/public/mojom/isolation_info.mojom-shared.h"
 
 namespace mojo {
 
-bool EnumTraits<network::mojom::IsolationInfoRequestType,
-                net::IsolationInfo::RequestType>::
-    FromMojom(network::mojom::IsolationInfoRequestType request_type,
-              net::IsolationInfo::RequestType* out) {
+net::IsolationInfo::RequestType
+EnumTraits<network::mojom::IsolationInfoRequestType,
+           net::IsolationInfo::RequestType>::
+    FromMojom(network::mojom::IsolationInfoRequestType request_type) {
   switch (request_type) {
     case network::mojom::IsolationInfoRequestType::kMainFrame:
-      *out = net::IsolationInfo::RequestType::kMainFrame;
-      return true;
+      return net::IsolationInfo::RequestType::kMainFrame;
     case network::mojom::IsolationInfoRequestType::kSubFrame:
-      *out = net::IsolationInfo::RequestType::kSubFrame;
-      return true;
+      return net::IsolationInfo::RequestType::kSubFrame;
     case network::mojom::IsolationInfoRequestType::kOther:
-      *out = net::IsolationInfo::RequestType::kOther;
-      return true;
+      return net::IsolationInfo::RequestType::kOther;
   }
-  return false;
+  NOTREACHED();
+}
+
+net::IsolationInfo::FrameAncestorRelation
+EnumTraits<network::mojom::IsolationInfoFrameAncestorRelation,
+           net::IsolationInfo::FrameAncestorRelation>::
+    FromMojom(network::mojom::IsolationInfoFrameAncestorRelation input) {
+  switch (input) {
+    case network::mojom::IsolationInfoFrameAncestorRelation::kSameOrigin:
+      return net::IsolationInfo::FrameAncestorRelation::kSameOrigin;
+    case network::mojom::IsolationInfoFrameAncestorRelation::kSameSite:
+      return net::IsolationInfo::FrameAncestorRelation::kSameSite;
+    case network::mojom::IsolationInfoFrameAncestorRelation::kCrossSite:
+      return net::IsolationInfo::FrameAncestorRelation::kCrossSite;
+  }
+  NOTREACHED();
 }
 
 network::mojom::IsolationInfoRequestType EnumTraits<
@@ -43,17 +58,34 @@ network::mojom::IsolationInfoRequestType EnumTraits<
   }
 
   NOTREACHED();
-  return network::mojom::IsolationInfoRequestType::kOther;
+}
+
+network::mojom::IsolationInfoFrameAncestorRelation
+EnumTraits<network::mojom::IsolationInfoFrameAncestorRelation,
+           net::IsolationInfo::FrameAncestorRelation>::
+    ToMojom(net::IsolationInfo::FrameAncestorRelation frame_ancestor_relation) {
+  switch (frame_ancestor_relation) {
+    case net::IsolationInfo::FrameAncestorRelation::kSameOrigin:
+      return network::mojom::IsolationInfoFrameAncestorRelation::kSameOrigin;
+    case net::IsolationInfo::FrameAncestorRelation::kSameSite:
+      return network::mojom::IsolationInfoFrameAncestorRelation::kSameSite;
+    case net::IsolationInfo::FrameAncestorRelation::kCrossSite:
+      return network::mojom::IsolationInfoFrameAncestorRelation::kCrossSite;
+  }
+
+  NOTREACHED();
 }
 
 bool StructTraits<network::mojom::IsolationInfoDataView, net::IsolationInfo>::
     Read(network::mojom::IsolationInfoDataView data, net::IsolationInfo* out) {
-  absl::optional<url::Origin> top_frame_origin;
-  absl::optional<url::Origin> frame_origin;
-  absl::optional<base::UnguessableToken> nonce;
+  std::optional<url::Origin> top_frame_origin;
+  std::optional<url::Origin> frame_origin;
+  std::optional<base::UnguessableToken> nonce;
   net::SiteForCookies site_for_cookies;
   net::IsolationInfo::RequestType request_type;
-  absl::optional<std::vector<net::SchemefulSite>> mojo_party_context;
+  net::NetworkIsolationPartition network_isolation_partition;
+  std::optional<net::IsolationInfo::FrameAncestorRelation>
+      frame_ancestor_relation;
 
   if (!data.ReadTopFrameOrigin(&top_frame_origin)) {
     network::debug::SetDeserializationCrashKeyString("isolation_top_origin");
@@ -65,23 +97,16 @@ bool StructTraits<network::mojom::IsolationInfoDataView, net::IsolationInfo>::
   }
   if (!data.ReadNonce(&nonce) || !data.ReadSiteForCookies(&site_for_cookies) ||
       !data.ReadRequestType(&request_type) ||
-      !data.ReadPartyContext(&mojo_party_context)) {
+      !data.ReadNetworkIsolationPartition(&network_isolation_partition) ||
+      !data.ReadFrameAncestorRelation(&frame_ancestor_relation)) {
     return false;
   }
 
-  absl::optional<std::set<net::SchemefulSite>> party_context;
-  if (mojo_party_context.has_value()) {
-    party_context = std::set<net::SchemefulSite>(mojo_party_context->begin(),
-                                                 mojo_party_context->end());
-    if (party_context->size() != mojo_party_context->size())
-      return false;
-  }
-
-  absl::optional<net::IsolationInfo> isolation_info =
+  std::optional<net::IsolationInfo> isolation_info =
       net::IsolationInfo::CreateIfConsistent(
-          request_type, top_frame_origin, frame_origin, site_for_cookies,
-          std::move(party_context),
-          nonce.has_value() ? &nonce.value() : nullptr);
+          request_type, std::move(top_frame_origin), std::move(frame_origin),
+          std::move(site_for_cookies), std::move(nonce),
+          network_isolation_partition, frame_ancestor_relation);
   if (!isolation_info) {
     network::debug::SetDeserializationCrashKeyString("isolation_inconsistent");
     return false;

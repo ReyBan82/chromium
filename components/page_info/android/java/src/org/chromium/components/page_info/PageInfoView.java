@@ -14,82 +14,60 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/**
- * Represents the view inside the page info popup.
- */
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+
+/** Represents the view inside the page info popup. */
+@NullMarked
 public class PageInfoView extends FrameLayout implements OnClickListener {
-    private LinearLayout mRowWrapper;
-    private PageInfoRowView mConnectionRow;
-    private PageInfoRowView mPermissionsRow;
-    private PageInfoRowView mCookiesRow;
-    private Button mForgetSiteButton;
-    private TextView mHttpsImageCompressionMessage;
-    private Button mOpenOnlineButton;
-    private Runnable mOnUiClosingCallback;
+    private final LinearLayout mRowWrapper;
+    private final PageInfoRowView mConnectionRow;
+    private final ConnectionSecurityView mConnectionSecurityView;
+    private final PageInfoRowView mPermissionsRow;
+    private final PageInfoRowView mCookiesRow;
+    private final Button mForgetSiteButton;
+    private final TextView mHttpsImageCompressionMessage;
+    private final Button mOpenOnlineButton;
 
     /**  Parameters to configure the view of the page info popup. */
     public static class Params {
         public boolean openOnlineButtonShown = true;
         public boolean httpsImageCompressionMessageShown;
-        public Runnable openOnlineButtonClickCallback;
-        public Runnable onUiClosingCallback;
+        public @Nullable Runnable openOnlineButtonClickCallback;
     }
 
     public PageInfoView(Context context, Params params) {
         super(context);
         LayoutInflater.from(context).inflate(R.layout.page_info, this, true);
-        init(params);
-    }
+        // Elevate the "Cookies and site data" item.
+        LinearLayout rowWrapper = findViewById(R.id.page_info_row_wrapper);
 
-    private void init(Params params) {
-        initRowWrapper();
-        initConnection();
-        initPermissions();
-        initCookies(params);
-        initForgetSiteButton();
-        initHttpsImageCompression(params);
-        initOpenOnline(params);
-    }
-
-    private void initRowWrapper() {
-        mRowWrapper = findViewById(R.id.page_info_row_wrapper);
-        initializePageInfoViewChild(mRowWrapper, true, null);
-    }
-
-    private void initConnection() {
-        mConnectionRow = findViewById(R.id.page_info_connection_row);
-    }
-
-    private void initPermissions() {
-        mPermissionsRow = findViewById(R.id.page_info_permissions_row);
-    }
-
-    private void initCookies(Params params) {
+        mRowWrapper = rowWrapper;
         mCookiesRow = findViewById(R.id.page_info_cookies_row);
-        mOnUiClosingCallback = params.onUiClosingCallback;
-    }
-
-    private void initForgetSiteButton() {
+        initializePageInfoViewChild(rowWrapper, true, null);
+        mConnectionRow = findViewById(R.id.page_info_connection_row);
+        mConnectionSecurityView = findViewById(R.id.page_info_connection_security);
+        mPermissionsRow = findViewById(R.id.page_info_permissions_row);
         mForgetSiteButton = findViewById(R.id.page_info_forget_site_button);
         initializePageInfoViewChild(mForgetSiteButton, false, null);
-    }
-
-    private void initHttpsImageCompression(Params params) {
         mHttpsImageCompressionMessage =
                 findViewById(R.id.page_info_lite_mode_https_image_compression_message);
         initializePageInfoViewChild(
                 mHttpsImageCompressionMessage, params.httpsImageCompressionMessageShown, null);
-    }
-
-    private void initOpenOnline(Params params) {
         mOpenOnlineButton = findViewById(R.id.page_info_open_online_button);
         // The open online button should not fade in.
-        initializePageInfoViewChild(mOpenOnlineButton, params.openOnlineButtonShown,
+        initializePageInfoViewChild(
+                mOpenOnlineButton,
+                params.openOnlineButtonShown,
                 params.openOnlineButtonClickCallback);
     }
 
     public PageInfoRowView getConnectionRowView() {
         return mConnectionRow;
+    }
+
+    public ConnectionSecurityView getConnectionSecurityView() {
+        return mConnectionSecurityView;
     }
 
     public PageInfoRowView getPermissionsRowView() {
@@ -108,7 +86,37 @@ public class PageInfoView extends FrameLayout implements OnClickListener {
         return mForgetSiteButton;
     }
 
-    private void initializePageInfoViewChild(View child, boolean shown, Runnable clickCallback) {
+    public Button getBackToSafetyButton() {
+        return findViewById(R.id.page_info_back_to_safety_button);
+    }
+
+    public Button getMarkAsSafeButton() {
+        return findViewById(R.id.page_info_mark_as_safe_button);
+    }
+
+    public void setSuspiciousSiteButtonsVisible(boolean visible) {
+        View buttons = findViewById(R.id.page_info_suspicious_site_buttons_wrapper);
+        if (buttons != null) {
+            buttons.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+        updateConnectionWrapperVisibility();
+    }
+
+    public void updateConnectionWrapperVisibility() {
+        // TODO(crbug.com/539538727): Clean up page_info_connection_wrapper to clarify
+        // that it is used for both connection security information and Safe Browsing status UI.
+        View wrapper = findViewById(R.id.page_info_connection_wrapper);
+        if (wrapper != null) {
+            View buttons = findViewById(R.id.page_info_suspicious_site_buttons_wrapper);
+            boolean buttonsVisible = buttons != null && buttons.getVisibility() == View.VISIBLE;
+            boolean connectionVisible =
+                    mConnectionRow != null && mConnectionRow.getVisibility() == View.VISIBLE;
+            wrapper.setVisibility((buttonsVisible || connectionVisible) ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void initializePageInfoViewChild(
+            View child, boolean shown, @Nullable Runnable clickCallback) {
         child.setVisibility(shown ? View.VISIBLE : View.GONE);
         child.setTag(R.id.page_info_click_callback, clickCallback);
         if (clickCallback == null) return;
@@ -119,7 +127,6 @@ public class PageInfoView extends FrameLayout implements OnClickListener {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        mOnUiClosingCallback.run();
     }
 
     // OnClickListener interface.

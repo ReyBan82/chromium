@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var nextTest = null;
+let nextTest = null;
 openFromNormalShouldOpenInNormal();
 
 function openFromNormalShouldOpenInNormal() {
@@ -13,14 +13,13 @@ function openFromNormalShouldOpenInNormal() {
     chrome.test.assertEq(1, windows[0].tabs.length);
     chrome.test.assertFalse(windows[0].tabs[0].incognito);
 
-    chrome.windows.update(windows[0].id, {
-      focused: true
-    }, function() {
-      chrome.browserAction.openPopup(function(popupWindow) {
-        chrome.test.assertTrue(!!popupWindow);
-        // The rest of the test continues in popup.html.
-      });
-    });
+    // A tab works the same as a popup for providing an extension host in the
+    // context of this window.
+    chrome.tabs.create(
+        {windowId: windows[0].id, url: 'popup.html'}, function(tab) {
+          chrome.test.assertTrue(!!tab);
+          // The rest of the test continues in popup.html.
+        });
   });
 }
 
@@ -29,22 +28,26 @@ function openFromExtensionHostInIncognitoBrowserShouldOpenInNormalBrowser() {
   chrome.windows.getCurrent(function(normalWin) {
     chrome.test.assertFalse(normalWin.incognito);
     // Create an incognito window.
-    chrome.windows.create({
-      incognito: true,
-      focused: true
-    }, function(incognitoWin) {
-      // Remove the normal window. We keep running because of the incognito
-      // window.
-      chrome.windows.remove(normalWin.id, function() {
-        chrome.tabs.getAllInWindow(incognitoWin.id, function(tabs) {
-          chrome.test.assertEq(1, tabs.length);
-          chrome.browserAction.openPopup(function(popupWindow) {
-            chrome.test.assertTrue(!!popupWindow);
-            // The rest of the test continues in popup.html.
+    chrome.windows.create(
+        {
+          incognito: true,
+          focused: true,
+        },
+        function(incognitoWin) {
+          // Remove the normal window. We keep running because of the incognito
+          // window.
+          chrome.windows.remove(normalWin.id, function() {
+            chrome.tabs.query({windowId: incognitoWin.id}, function(tabs) {
+              chrome.test.assertEq(1, tabs.length);
+              chrome.tabs.create(
+                  {windowId: incognitoWin.id, url: 'popup.html'},
+                  function(tab) {
+                    chrome.test.assertTrue(!!tab);
+                    // The rest of the test continues in popup.html.
+                  });
+            });
           });
         });
-      });
-    });
   });
 }
 

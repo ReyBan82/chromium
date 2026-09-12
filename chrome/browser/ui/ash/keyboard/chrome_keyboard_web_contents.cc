@@ -35,6 +35,8 @@
 #include "ui/accessibility/aura/aura_window_properties.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/aura/window.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/compositor/layer.h"
 #include "ui/gfx/geometry/rect.h"
 
@@ -57,9 +59,14 @@ class ChromeKeyboardContentsDelegate : public content::WebContentsDelegate,
   // content::WebContentsDelegate:
   content::WebContents* OpenURLFromTab(
       content::WebContents* source,
-      const content::OpenURLParams& params) override {
-    source->GetController().LoadURLWithParams(
+      const content::OpenURLParams& params,
+      base::OnceCallback<void(content::NavigationHandle&)>
+          navigation_handle_callback) override {
+    auto navigation_handle = source->GetController().LoadURLWithParams(
         content::NavigationController::LoadURLParams(params));
+    if (navigation_handle_callback && navigation_handle) {
+      std::move(navigation_handle_callback).Run(*navigation_handle);
+    }
     Observe(source);
     return source;
   }
@@ -71,6 +78,7 @@ class ChromeKeyboardContentsDelegate : public content::WebContentsDelegate,
   }
 
   bool IsWebContentsCreationOverridden(
+      content::RenderFrameHost* opener,
       content::SiteInstance* source_site_instance,
       content::mojom::WindowContainerType window_container_type,
       const GURL& opener_url,
@@ -85,7 +93,7 @@ class ChromeKeyboardContentsDelegate : public content::WebContentsDelegate,
     aura::Window* keyboard_window = source->GetNativeView();
     // keyboard window must have been added to keyboard container window at this
     // point. Otherwise, wrong keyboard bounds is used and may cause problem as
-    // described in https://crbug.com/367788.
+    // described in https://crbug.com/41104064.
     DCHECK(keyboard_window->parent());
     // keyboard window bounds may not set to |pos| after this call. If keyboard
     // is in FULL_WIDTH mode, only the height of keyboard window will be
@@ -103,7 +111,7 @@ class ChromeKeyboardContentsDelegate : public content::WebContentsDelegate,
     if (origin.SchemeIs(extensions::kExtensionScheme)) {
       const extensions::ExtensionRegistry* registry =
           extensions::ExtensionRegistry::Get(web_contents->GetBrowserContext());
-      extension = registry->enabled_extensions().GetByID(origin.host());
+      extension = registry->enabled_extensions().GetByID(origin.GetHost());
       DCHECK(extension);
     }
     MediaCaptureDevicesDispatcher::GetInstance()->ProcessMediaAccessRequest(
@@ -128,7 +136,7 @@ class ChromeKeyboardContentsDelegate : public content::WebContentsDelegate,
         return false;
       default:
         // Stop gesture events from being passed to renderer to suppress the
-        // context menu. https://crbug.com/685140
+        // context menu. https://crbug.com/41297372
         return true;
     }
   }
@@ -193,8 +201,9 @@ ChromeKeyboardWebContents::~ChromeKeyboardWebContents() {
 
 void ChromeKeyboardWebContents::SetKeyboardUrl(const GURL& new_url) {
   GURL old_url = web_contents_->GetURL();
-  if (old_url == new_url)
+  if (old_url == new_url) {
     return;
+  }
 
   if (old_url.DeprecatedGetOriginAsURL() !=
       new_url.DeprecatedGetOriginAsURL()) {
@@ -211,8 +220,9 @@ void ChromeKeyboardWebContents::SetKeyboardUrl(const GURL& new_url) {
 }
 
 void ChromeKeyboardWebContents::SetInitialContentsSize(const gfx::Size& size) {
-  if (!contents_size_.IsEmpty())
+  if (!contents_size_.IsEmpty()) {
     return;
+  }
   gfx::Rect bounds = web_contents_->GetNativeView()->bounds();
   bounds.set_size(size);
   web_contents_->GetNativeView()->SetBounds(bounds);
@@ -220,8 +230,9 @@ void ChromeKeyboardWebContents::SetInitialContentsSize(const gfx::Size& size) {
 
 void ChromeKeyboardWebContents::RenderFrameCreated(
     content::RenderFrameHost* frame_host) {
-  if (!frame_host->IsInPrimaryMainFrame())
+  if (!frame_host->IsInPrimaryMainFrame()) {
     return;
+  }
   content::HostZoomMap* zoom_map =
       content::HostZoomMap::GetDefaultForBrowserContext(
           frame_host->GetBrowserContext());
@@ -229,20 +240,23 @@ void ChromeKeyboardWebContents::RenderFrameCreated(
 }
 
 void ChromeKeyboardWebContents::DidStopLoading() {
-  // TODO(https://crbug.com/845780): Change this to a DCHECK when we change
+  // TODO(crbug.com/40577582): Change this to a DCHECK when we change
   // ReloadKeyboardIfNeeded to also have a callback.
-  if (!load_callback_.is_null())
+  if (!load_callback_.is_null()) {
     std::move(load_callback_).Run();
+  }
 }
 
 void ChromeKeyboardWebContents::OnColorProviderChanged() {
-  if (!web_contents_)
+  if (!web_contents_) {
     return;
+  }
 
   auto* browser_context = web_contents_->GetBrowserContext();
 
-  if (!browser_context)
+  if (!browser_context) {
     return;
+  }
 
   auto* router = extensions::EventRouter::Get(browser_context);
 
@@ -256,7 +270,7 @@ void ChromeKeyboardWebContents::OnColorProviderChanged() {
       extensions::events::VIRTUAL_KEYBOARD_PRIVATE_ON_COLOR_PROVIDER_CHANGED,
       extensions::api::virtual_keyboard_private::OnColorProviderChanged::
           kEventName,
-      base::Value::List(), browser_context);
+      base::ListValue(), browser_context);
 
   router->BroadcastEvent(std::move(event));
 }
@@ -266,7 +280,7 @@ void ChromeKeyboardWebContents::LoadContents(const GURL& url) {
   content::OpenURLParams params(url, content::Referrer(),
                                 WindowOpenDisposition::SINGLETON_TAB,
                                 ui::PAGE_TRANSITION_AUTO_TOPLEVEL, false);
-  web_contents_->OpenURL(params);
+  web_contents_->OpenURL(params, /*navigation_handle_callback=*/{});
 }
 
 void ChromeKeyboardWebContents::OnWindowBoundsChanged(

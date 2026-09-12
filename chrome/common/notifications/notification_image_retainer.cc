@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <set>
 
-#include "base/containers/contains.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -57,8 +56,9 @@ std::vector<base::FilePath> GetFilesFromPrevSessions(
   for (base::FilePath current = file_enumerator.Next(); !current.empty();
        current = file_enumerator.Next()) {
     // Exclude any new file created in this session.
-    if (!base::Contains(registered_names, current.BaseName()))
+    if (!registered_names.contains(current.BaseName())) {
       files.push_back(std::move(current));
+    }
   }
 
   return files;
@@ -142,9 +142,7 @@ base::FilePath NotificationImageRetainer::RegisterTemporaryImage(
 
   // At this point, a temp file is already created. We need to clean it up even
   // if it fails to write the image data to this file.
-  int data_len = base::checked_cast<int>(data->size());
-  bool data_write_success = (base::WriteFile(temp_file, data->front_as<char>(),
-                                             data_len) == data_len);
+  bool data_write_success = base::WriteFile(temp_file, *data);
 
   // Start the timer if it hasn't to delete the expired files in batch. This
   // avoids creating a deletion task for each file, otherwise the overhead can

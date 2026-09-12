@@ -5,18 +5,29 @@
 #ifndef CHROME_BROWSER_EXTENSIONS_BROWSER_EXTENSION_WINDOW_CONTROLLER_H_
 #define CHROME_BROWSER_EXTENSIONS_BROWSER_EXTENSION_WINDOW_CONTROLLER_H_
 
-#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "chrome/browser/extensions/window_controller.h"
+#include "components/sessions/core/session_id.h"
+#include "extensions/buildflags/buildflags.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
 
-class Browser;
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+class BrowserWindowInterface;
 class GURL;
+class TabListInterface;
 
 namespace extensions {
 class Extension;
+namespace api::tabs {
+enum class WindowType;
+}  // namespace api::tabs
 
 class BrowserExtensionWindowController : public WindowController {
  public:
-  explicit BrowserExtensionWindowController(Browser* browser);
+  DECLARE_USER_DATA(BrowserExtensionWindowController);
+
+  explicit BrowserExtensionWindowController(BrowserWindowInterface* browser);
 
   BrowserExtensionWindowController(const BrowserExtensionWindowController&) =
       delete;
@@ -25,21 +36,47 @@ class BrowserExtensionWindowController : public WindowController {
 
   ~BrowserExtensionWindowController() override;
 
-  // Sets the window's fullscreen state. |extension_url| provides the url
+  static BrowserExtensionWindowController* From(
+      BrowserWindowInterface* browser_window_interface);
+
+  // Sets the window's fullscreen state. `extension_url` provides the url
   // associated with the extension (used by FullscreenController).
-  void SetFullscreenMode(bool is_fullscreen, const GURL& extension_url) const;
 
   // WindowController implementation.
   int GetWindowId() const override;
   std::string GetWindowTypeText() const override;
-  bool CanClose(Reason* reason) const override;
-  Browser* GetBrowser() const override;
+  void SetFullscreenMode(bool is_fullscreen,
+                         const GURL& extension_url) const override;
+  BrowserWindowInterface* GetBrowserWindowInterface() override;
+#if !BUILDFLAG(IS_ANDROID)
+  BrowserWindowInterface* GetBrowser() const override;
+#endif
+  content::WebContents* GetActiveTab() const override;
+  int GetTabCount() const override;
+  content::WebContents* GetWebContentsAt(int i) const override;
   bool IsVisibleToTabsAPIForExtension(
       const Extension* extension,
       bool allow_dev_tools_windows) const override;
+  base::DictValue CreateWindowValueForExtension(
+      const Extension* extension,
+      PopulateTabBehavior populate_tab_behavior,
+      mojom::ContextType context) const override;
+  base::ListValue CreateTabList(const Extension* extension,
+                                mojom::ContextType context) const override;
+  bool OpenOptionsPage(const Extension* extension,
+                       const GURL& url,
+                       bool open_in_tab) override;
 
  private:
-  const raw_ptr<Browser> browser_;
+  const raw_ref<BrowserWindowInterface> browser_;
+  // TODO(https://crbug.com/423725749): Migrate these to cross-platform
+  // concepts.
+  const raw_ref<TabListInterface> tab_list_;
+  const SessionID session_id_;
+  const api::tabs::WindowType window_type_;
+
+  ui::ScopedUnownedUserData<BrowserExtensionWindowController>
+      scoped_data_holder_;
 };
 
 }  // namespace extensions

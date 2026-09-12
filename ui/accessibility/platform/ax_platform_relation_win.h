@@ -5,14 +5,16 @@
 #ifndef UI_ACCESSIBILITY_PLATFORM_AX_PLATFORM_RELATION_WIN_H_
 #define UI_ACCESSIBILITY_PLATFORM_AX_PLATFORM_RELATION_WIN_H_
 
+#include <objbase.h>
+
+#include <windows.h>
+
 #include <oleacc.h>
 #include <wrl/client.h>
-#include <set>
+#include <wrl/implements.h>
+
 #include <vector>
 
-#include "base/component_export.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/win/atl.h"
 #include "third_party/iaccessible2/ia2_api_all.h"
 #include "ui/accessibility/ax_text_utils.h"
 #include "ui/accessibility/platform/ax_platform_node_win.h"
@@ -27,15 +29,13 @@ namespace ui {
 // potentially multiple target nodes. Also contains a utility function
 // to compute all of the possible IAccessible2 relations and reverse
 // relations given the internal relation id attributes.
-class AXPlatformRelationWin : public CComObjectRootEx<CComMultiThreadModel>,
-                              public IAccessibleRelation {
+class AXPlatformRelationWin
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          IAccessibleRelation> {
  public:
-  BEGIN_COM_MAP(AXPlatformRelationWin)
-  COM_INTERFACE_ENTRY(IAccessibleRelation)
-  END_COM_MAP()
-
-  AXPlatformRelationWin();
-  virtual ~AXPlatformRelationWin();
+  explicit AXPlatformRelationWin(std::wstring type);
+  ~AXPlatformRelationWin() override;
 
   // This is the main utility function that enumerates all of the possible
   // IAccessible2 relations between one node and any other node in the tree.
@@ -55,9 +55,8 @@ class AXPlatformRelationWin : public CComObjectRootEx<CComMultiThreadModel>,
                                     int desired_index,
                                     const std::wstring& desired_ia2_relation,
                                     std::wstring* out_ia2_relation,
-                                    std::set<AXPlatformNode*>* out_targets);
+                                    std::vector<AXPlatformNode*>* out_targets);
 
-  void Initialize(const std::wstring& type);
   void Invalidate();
   void AddTarget(AXPlatformNodeWin* target);
 
@@ -71,7 +70,7 @@ class AXPlatformRelationWin : public CComObjectRootEx<CComMultiThreadModel>,
   IFACEMETHODIMP get_localizedRelationType(BSTR* relation_type) override;
 
  private:
-  std::wstring type_;
+  const std::wstring type_;
   std::vector<Microsoft::WRL::ComPtr<AXPlatformNodeWin>> targets_;
 };
 

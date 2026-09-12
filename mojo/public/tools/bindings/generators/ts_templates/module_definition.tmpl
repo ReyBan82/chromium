@@ -2,8 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-{% if not for_bindings_internals -%}
+{% if not for_bindings_internals and
+   (interfaces|length > 0 or structs|length > 0 or unions|length > 0
+    or enums|length > 0) -%}
 import {mojo} from '{{bindings_library_path}}';
+{%- endif %}
+{%- if webui_factory %}
+{%-   if webui_factory.has_callback_router %}
+import {MojoBrowserProxyFactory} from '{{mojo_browser_proxy_import}}';
+import type {MojoBrowserProxy} from '{{mojo_browser_proxy_import}}';
+{%-   else %}
+import {MojoHandlerProxyFactory} from '{{mojo_browser_proxy_import}}';
+import type {MojoHandlerProxy} from '{{mojo_browser_proxy_import}}';
+{%-   endif %}
 {%- endif %}
 
 {% for path, kinds in js_module_imports.items()|sort -%}
@@ -16,7 +27,28 @@ import {
 {%- if not loop.last -%},{% endif -%}
 {%- endfor %}
 } from '{{path}}';
+{% endfor -%}
 
+{%- if typemapped_structs|length > 0 %}
+{%-  for struct in typemapped_structs.keys() %}
+import {
+  {{struct.name}}DataView,
+  {{struct.name}}TypeMapper,
+} from './{{converters_filename}}';
+{%-  endfor %}
+{%- endif %}
+
+{% for path, types in typemap_imports.items()|sort -%}
+import type {
+{%- for type in types|sort %}
+  {{type}}
+{%- if not loop.last -%},{% endif -%}
+{%- endfor %}
+} from '{{path}}';
+{% endfor %}
+
+{% for typemap in typemapped_structs.values() -%}
+import { {{typemap.converter}} } from './{{typemap|converter_import}}';
 {% endfor -%}
 
 {#--- Constants #}
@@ -55,3 +87,8 @@ export const {{union.name}}Spec: { $: mojo.internal.MojomType } =
 {%  for union in unions %}
 {%-   include "union_definition.tmpl" %}
 {% endfor %}
+
+{%- if webui_factory %}
+{#--- WebUI Browser Proxy definition #}
+{%- include "webui_browser_proxy_definition.tmpl" %}
+{%- endif %}

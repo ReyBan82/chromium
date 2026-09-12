@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Copyright 2014 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -15,15 +15,16 @@ import os.path
 import re
 import sys
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'common'))
-import path_util
+import setup_modules  # pylint: disable=unused-import
 
-import update_histogram_enum
+import chromium_src.tools.metrics.common.path_util as path_util
+import chromium_src.tools.metrics.histograms.update_histogram_enum as update_histogram_enum
 
 NET_ERROR_LIST_PATH = 'net/base/net_error_list.h'
 
 POSITIVE_ERROR_REGEX = re.compile(r'^NET_ERROR\(([\w]+), -([0-9]+)\)')
 NEGATIVE_ERROR_REGEX = re.compile(r'^NET_ERROR\(([\w]+), (-[0-9]+)\)')
+
 
 def ReadNetErrorCodes(filename, error_regex):
   """Reads in values from net_error_list.h, returning a dictionary mapping
@@ -58,16 +59,21 @@ def main():
     sys.exit(1)
 
   update_histogram_enum.UpdateHistogramFromDict(
-      'NetErrorCodes',
-      ReadNetErrorCodes(NET_ERROR_LIST_PATH, POSITIVE_ERROR_REGEX),
-      NET_ERROR_LIST_PATH,
-      os.path.basename(__file__))
+    'tools/metrics/histograms/enums.xml',
+    'NetErrorCodes',
+    ReadNetErrorCodes(NET_ERROR_LIST_PATH, POSITIVE_ERROR_REGEX),
+    NET_ERROR_LIST_PATH,
+    os.path.basename(__file__),
+  )
 
   update_histogram_enum.UpdateHistogramFromDict(
-      'CombinedHttpResponseAndNetErrorCode',
-      ReadNetErrorCodes(NET_ERROR_LIST_PATH, NEGATIVE_ERROR_REGEX),
-      NET_ERROR_LIST_PATH,
-      os.path.basename(__file__))
+    'tools/metrics/histograms/enums.xml',
+    'CombinedHttpResponseAndNetErrorCode',
+    ReadNetErrorCodes(NET_ERROR_LIST_PATH, NEGATIVE_ERROR_REGEX),
+    NET_ERROR_LIST_PATH,
+    os.path.basename(__file__),
+  )
+
 
 if __name__ == '__main__':
   main()

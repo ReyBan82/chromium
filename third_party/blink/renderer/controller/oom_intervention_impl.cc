@@ -16,13 +16,12 @@
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_gc_for_context_dispose.h"
-#include "third_party/blink/renderer/controller/crash_memory_metrics_reporter_impl.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/loader/frame_load_request.h"
 #include "third_party/blink/renderer/core/page/page.h"
-#include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
 #include "third_party/blink/renderer/platform/scheduler/public/main_thread.h"
+#include "third_party/blink/renderer/platform/scheduler/public/main_thread_scheduler.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 
 namespace blink {
@@ -43,7 +42,7 @@ void NavigateLocalAdsFrames(LocalFrame* frame) {
     if (auto* child_local_frame = DynamicTo<LocalFrame>(child)) {
       if (child_local_frame->IsAdFrame()) {
         FrameLoadRequest request(frame->DomWindow(),
-                                 ResourceRequest(BlankURL()));
+                                 ResourceRequest(BlankUrl()));
         child_local_frame->Navigate(request, WebFrameLoadType::kStandard);
       }
     }
@@ -114,29 +113,22 @@ void OomInterventionImpl::OnMemoryPing(MemoryUsage usage) {
 void OomInterventionImpl::Check(MemoryUsage usage) {
   DCHECK(host_);
 
-  OomInterventionMetrics current_memory =
-      CrashMemoryMetricsReporterImpl::MemoryUsageToMetrics(usage);
-
   bool oom_detected = false;
 
-  oom_detected |= detection_args_->blink_workload_threshold > 0 &&
-                  current_memory.current_blink_usage_kb * 1024 >
-                      detection_args_->blink_workload_threshold;
   oom_detected |= detection_args_->private_footprint_threshold > 0 &&
-                  current_memory.current_private_footprint_kb * 1024 >
+                  usage.private_footprint_bytes >
                       detection_args_->private_footprint_threshold;
-  oom_detected |=
-      detection_args_->swap_threshold > 0 &&
-      current_memory.current_swap_kb * 1024 > detection_args_->swap_threshold;
-  oom_detected |= detection_args_->virtual_memory_thresold > 0 &&
-                  current_memory.current_vm_size_kb * 1024 >
-                      detection_args_->virtual_memory_thresold;
 
   if (oom_detected) {
     base::debug::SetCrashKeyString(GetStateCrashKey(), "during");
 
     if (navigate_ads_enabled_ || purge_v8_memory_enabled_) {
-      for (const auto& page : Page::OrdinaryPages()) {
+      // Copy Page::OrdinaryPages() to avoid UAF. Synchronous JS
+      // execution during iteration can create new pages, which causes rehashing
+      // of the OrdinaryPages() set and invalidates the iterator.
+      // See crbug.com/502089411
+      Page::PageSet pages(Page::OrdinaryPages());
+      for (const auto& page : pages) {
         for (Frame* frame = page->MainFrame(); frame;
              frame = frame->Tree().TraverseNext()) {
           auto* local_frame = DynamicTo<LocalFrame>(frame);
@@ -159,7 +151,7 @@ void OomInterventionImpl::Check(MemoryUsage usage) {
     host_->OnHighMemoryUsage();
     MemoryUsageMonitorInstance().RemoveObserver(this);
     // Send memory pressure notification to trigger GC.
-    task_runner_->PostTask(FROM_HERE, WTF::BindOnce(&TriggerGC));
+    task_runner_->PostTask(FROM_HERE, BindOnce(&TriggerGC));
     // Notify V8GCForContextDispose that page navigation gc is needed when
     // intervention runs, as it indicates that memory usage is high.
     V8GCForContextDispose::Instance().SetForcePageNavigationGC();
@@ -167,8 +159,12 @@ void OomInterventionImpl::Check(MemoryUsage usage) {
 }
 
 void OomInterventionImpl::TriggerGC() {
-  V8PerIsolateData::MainThreadIsolate()->MemoryPressureNotification(
-      v8::MemoryPressureLevel::kCritical);
+  Thread::MainThread()
+      ->Scheduler()
+      ->ToMainThreadScheduler()
+      ->ForEachMainThreadIsolate([](v8::Isolate* isolate) {
+        isolate->MemoryPressureNotification(v8::MemoryPressureLevel::kCritical);
+      });
 }
 
 }  // namespace blink

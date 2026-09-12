@@ -13,21 +13,17 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLooper;
 
 import org.chromium.base.MemoryPressureLevel;
 import org.chromium.base.ThreadUtils;
-import org.chromium.base.supplier.Supplier;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
-/**
- * Test for MemoryPressureMonitor.
- */
+/** Test for MemoryPressureMonitor. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class MemoryPressureMonitorTest {
     private MemoryPressureMonitor mMonitor;
 
@@ -55,7 +51,7 @@ public class MemoryPressureMonitorTest {
     }
 
     private static class TestPressureSupplier implements Supplier<Integer> {
-        private @MemoryPressureLevel Integer mPressure;
+        private final @MemoryPressureLevel Integer mPressure;
         private boolean mIsCalled;
 
         public TestPressureSupplier(@MemoryPressureLevel Integer pressure) {
@@ -86,16 +82,12 @@ public class MemoryPressureMonitorTest {
         ThreadUtils.setUiThread(Looper.getMainLooper());
 
         // Pause main thread to get control over when tasks are run (see runUiThreadFor()).
-        ShadowLooper.pauseMainLooper();
 
         mMonitor = new MemoryPressureMonitor(THROTTLING_INTERVAL_MS);
         mMonitor.setCurrentPressureSupplierForTesting(null);
     }
 
-    /**
-     * Runs all UiThread tasks posted |delayMs| in the future.
-     * @param delayMs
-     */
+    /** Runs all UiThread tasks posted |delayMs| in the future. */
     private void runUiThreadFor(long delayMs) {
         ShadowLooper.idleMainLooper(delayMs, TimeUnit.MILLISECONDS);
     }
@@ -103,24 +95,25 @@ public class MemoryPressureMonitorTest {
     @Test
     @SmallTest
     public void testTrimLevelTranslation() {
-        Integer[][] trimLevelToPressureMap = {//
-                // Levels >= TRIM_MEMORY_COMPLETE map to CRITICAL.
-                {ComponentCallbacks2.TRIM_MEMORY_COMPLETE + 1, MemoryPressureLevel.CRITICAL},
-                {ComponentCallbacks2.TRIM_MEMORY_COMPLETE, MemoryPressureLevel.CRITICAL},
+        Integer[][] trimLevelToPressureMap = { //
+            // Levels >= TRIM_MEMORY_COMPLETE map to CRITICAL.
+            {ComponentCallbacks2.TRIM_MEMORY_COMPLETE + 1, MemoryPressureLevel.CRITICAL},
+            {ComponentCallbacks2.TRIM_MEMORY_COMPLETE, MemoryPressureLevel.CRITICAL},
 
-                // TRIM_MEMORY_RUNNING_CRITICAL maps to CRITICAL.
-                {ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL, MemoryPressureLevel.CRITICAL},
+            // TRIM_MEMORY_RUNNING_CRITICAL maps to CRITICAL.
+            {ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL, MemoryPressureLevel.CRITICAL},
 
-                // Levels < TRIM_MEMORY_COMPLETE && >= TRIM_MEMORY_BACKGROUND map to MODERATE.
-                {ComponentCallbacks2.TRIM_MEMORY_COMPLETE - 1, MemoryPressureLevel.MODERATE},
-                {ComponentCallbacks2.TRIM_MEMORY_BACKGROUND + 1, MemoryPressureLevel.MODERATE},
-                {ComponentCallbacks2.TRIM_MEMORY_BACKGROUND, MemoryPressureLevel.MODERATE},
+            // Levels < TRIM_MEMORY_COMPLETE && >= TRIM_MEMORY_BACKGROUND map to MODERATE.
+            {ComponentCallbacks2.TRIM_MEMORY_COMPLETE - 1, MemoryPressureLevel.MODERATE},
+            {ComponentCallbacks2.TRIM_MEMORY_BACKGROUND + 1, MemoryPressureLevel.MODERATE},
+            {ComponentCallbacks2.TRIM_MEMORY_BACKGROUND, MemoryPressureLevel.MODERATE},
 
-                // Other levels are not mapped.
-                {ComponentCallbacks2.TRIM_MEMORY_BACKGROUND - 1, null},
-                {ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW, null},
-                {ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE, null},
-                {ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN, null}};
+            // Other levels are not mapped.
+            {ComponentCallbacks2.TRIM_MEMORY_BACKGROUND - 1, null},
+            {ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW, null},
+            {ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE, null},
+            {ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN, null}
+        };
         for (Integer[] trimLevelAndPressure : trimLevelToPressureMap) {
             int trimLevel = trimLevelAndPressure[0];
             Integer expectedPressure = trimLevelAndPressure[1];

@@ -12,9 +12,13 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/task/bind_post_task.h"
+#include "base/trace_event/trace_event.h"
 #include "media/base/decoder_buffer.h"
+#include "media/base/demuxer_stream.h"
 #include "media/mojo/common/media_type_converters.h"
 #include "media/mojo/common/mojo_decoder_buffer_converter.h"
+#include "mojo/public/cpp/bindings/message.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 
 namespace media {
@@ -70,8 +74,8 @@ bool MojoDemuxerStreamAdapter::SupportsConfigChanges() {
 void MojoDemuxerStreamAdapter::OnStreamReady(
     Type type,
     mojo::ScopedDataPipeConsumerHandle consumer_handle,
-    const absl::optional<AudioDecoderConfig>& audio_config,
-    const absl::optional<VideoDecoderConfig>& video_config) {
+    const std::optional<AudioDecoderConfig>& audio_config,
+    const std::optional<VideoDecoderConfig>& video_config) {
   DVLOG(1) << __func__;
   DCHECK_EQ(UNKNOWN, type_);
   DCHECK(consumer_handle.is_valid());
@@ -89,15 +93,19 @@ void MojoDemuxerStreamAdapter::OnStreamReady(
 void MojoDemuxerStreamAdapter::OnBufferReady(
     Status status,
     std::vector<mojom::DecoderBufferPtr> batch_buffers,
-    const absl::optional<AudioDecoderConfig>& audio_config,
-    const absl::optional<VideoDecoderConfig>& video_config) {
-  DVLOG(3) << __func__ << ": status=" << status
+    const std::optional<AudioDecoderConfig>& audio_config,
+    const std::optional<VideoDecoderConfig>& video_config) {
+  DVLOG(3) << __func__
+           << ": status=" << ::media::DemuxerStream::GetStatusName(status)
            << ", batch_buffers.size=" << batch_buffers.size();
   DCHECK(read_cb_);
   DCHECK_NE(type_, UNKNOWN);
 
   if (status == kConfigChanged) {
-    UpdateConfig(std::move(audio_config), std::move(video_config));
+    if (!UpdateConfig(std::move(audio_config), std::move(video_config))) {
+      std::move(read_cb_).Run(kError, {});
+      return;
+    }
     std::move(read_cb_).Run(kConfigChanged, {});
     return;
   }
@@ -108,49 +116,93 @@ void MojoDemuxerStreamAdapter::OnBufferReady(
   }
 
   DCHECK_EQ(status, kOk);
+  DCHECK_GT(batch_buffers.size(), 0u);
+
   status_ = status;
   actual_read_count_ = batch_buffers.size();
-  for (mojom::DecoderBufferPtr& buffer : batch_buffers) {
-    mojo_decoder_buffer_reader_->ReadDecoderBuffer(
-        std::move(buffer),
-        base::BindOnce(&MojoDemuxerStreamAdapter::OnBufferRead,
-                       weak_factory_.GetWeakPtr()));
-  }
+
+  batch_buffers_ = std::move(batch_buffers);
+  mojo_decoder_buffer_reader_->ReadDecoderBuffer(
+      std::move(batch_buffers_[0]),
+      base::BindOnce(&MojoDemuxerStreamAdapter::OnBufferRead,
+                     weak_factory_.GetWeakPtr()));
 }
 
 void MojoDemuxerStreamAdapter::OnBufferRead(
     scoped_refptr<DecoderBuffer> buffer) {
   if (!buffer) {
-    std::move(read_cb_).Run(kAborted, {});
+    DVLOG(1) << __func__ << ": null buffer";
     buffer_queue_.clear();
+    std::move(read_cb_).Run(kError, {});
+    return;
+  }
+
+  if (!DecoderBuffer::DoSubsamplesMatch(*buffer)) {
+    DVLOG(1) << __func__ << ": Subsamples do not match buffer size";
+    buffer_queue_.clear();
+    std::move(read_cb_).Run(kError, {});
     return;
   }
 
   buffer_queue_.push_back(buffer);
-  if (buffer_queue_.size() == actual_read_count_) {
-    std::move(read_cb_).Run(status_, buffer_queue_);
-    actual_read_count_ = 0;
-    buffer_queue_.clear();
+
+  if (buffer_queue_.size() < actual_read_count_) {
+    int next_read_index = buffer_queue_.size();
+    // The `mojo_decoder_buffer_reader_` will run callback(OnBufferRead()) after
+    // reading a buffer from data pipe, in order to avoid reentrance
+    // OnBufferRead() and potential stack overflow , we use
+    // base::BindPostTaskToCurrentDefault here. Each callback will correspond
+    // one buffer until all buffers have been read.
+    mojo_decoder_buffer_reader_->ReadDecoderBuffer(
+        std::move(batch_buffers_[next_read_index]),
+        base::BindPostTaskToCurrentDefault(
+            base::BindOnce(&MojoDemuxerStreamAdapter::OnBufferRead,
+                           weak_factory_.GetWeakPtr())));
+    return;
   }
+
+  DCHECK_EQ(buffer_queue_.size(), actual_read_count_);
+  actual_read_count_ = 0;
+  DemuxerStream::DecoderBufferVector buffer_queue;
+  buffer_queue_.swap(buffer_queue);
+  std::move(read_cb_).Run(status_, std::move(buffer_queue));
 }
 
-void MojoDemuxerStreamAdapter::UpdateConfig(
-    const absl::optional<AudioDecoderConfig>& audio_config,
-    const absl::optional<VideoDecoderConfig>& video_config) {
+bool MojoDemuxerStreamAdapter::UpdateConfig(
+    const std::optional<AudioDecoderConfig>& audio_config,
+    const std::optional<VideoDecoderConfig>& video_config) {
   DCHECK_NE(type_, Type::UNKNOWN);
+  std::string old_decoder_config_str;
 
-  switch(type_) {
+  switch (type_) {
     case AUDIO:
-      DCHECK(audio_config && !video_config);
+      if (!audio_config || video_config || !audio_config->IsValidConfig()) {
+        mojo::ReportBadMessage("Invalid AudioDecoderConfig");
+        return false;
+      }
+      old_decoder_config_str = audio_config_.AsHumanReadableString();
       audio_config_ = audio_config.value();
+      TRACE_EVENT_INSTANT("media",
+                          "MojoDemuxerStreamAdapter.UpdateConfig.Audio",
+                          "CurrentConfig", old_decoder_config_str, "NewConfig",
+                          audio_config_.AsHumanReadableString());
       break;
     case VIDEO:
-      DCHECK(video_config && !audio_config);
+      if (!video_config || audio_config || !video_config->IsValidConfig()) {
+        mojo::ReportBadMessage("Invalid VideoDecoderConfig");
+        return false;
+      }
+      old_decoder_config_str = video_config_.AsHumanReadableString();
       video_config_ = video_config.value();
+      TRACE_EVENT_INSTANT("media",
+                          "MojoDemuxerStreamAdapter.UpdateConfig.Video",
+                          "CurrentConfig", old_decoder_config_str, "NewConfig",
+                          video_config_.AsHumanReadableString());
       break;
     default:
       NOTREACHED();
   }
+  return true;
 }
 
 }  // namespace media

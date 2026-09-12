@@ -25,9 +25,7 @@
 
 #include "third_party/blink/renderer/modules/webaudio/audio_node_output.h"
 
-#include <memory>
-
-#include "base/memory/ptr_util.h"
+#include "media/base/audio_bus.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_input.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_wiring.h"
 #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
@@ -154,6 +152,16 @@ unsigned AudioNodeOutput::RenderingFanOutCount() const {
   return rendering_fan_out_count_;
 }
 
+unsigned AudioNodeOutput::RenderingParamFanOutCount() const {
+  DCHECK(GetDeferredTaskHandler().IsAudioThread());
+  return rendering_param_fan_out_count_;
+}
+
+bool AudioNodeOutput::IsConnectedDuringRendering() const {
+  DCHECK(GetDeferredTaskHandler().IsAudioThread());
+  return RenderingFanOutCount() > 0 || RenderingParamFanOutCount() > 0;
+}
+
 void AudioNodeOutput::DisconnectAllInputs() {
   GetDeferredTaskHandler().AssertGraphOwner();
 
@@ -181,24 +189,32 @@ void AudioNodeOutput::DisconnectAll() {
   DisconnectAllParams();
 }
 
-void AudioNodeOutput::Disable() {
+void AudioNodeOutput::DisableAndEnqueue(
+    Vector<scoped_refptr<AudioHandler>>& worklist) {
   GetDeferredTaskHandler().AssertGraphOwner();
 
   if (is_enabled_) {
     is_enabled_ = false;
     for (AudioNodeInput* input : inputs_) {
-      AudioNodeWiring::Disable(*this, *input);
+      if (scoped_refptr<AudioHandler> handler =
+              AudioNodeWiring::Disable(*this, *input)) {
+        worklist.push_back(std::move(handler));
+      }
     }
   }
 }
 
-void AudioNodeOutput::Enable() {
+void AudioNodeOutput::EnableAndEnqueue(
+    Vector<scoped_refptr<AudioHandler>>& worklist) {
   GetDeferredTaskHandler().AssertGraphOwner();
 
   if (!is_enabled_) {
     is_enabled_ = true;
     for (AudioNodeInput* input : inputs_) {
-      AudioNodeWiring::Enable(*this, *input);
+      if (scoped_refptr<AudioHandler> handler =
+              AudioNodeWiring::Enable(*this, *input)) {
+        worklist.push_back(std::move(handler));
+      }
     }
   }
 }

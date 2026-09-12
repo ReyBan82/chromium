@@ -10,14 +10,18 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <memory>
+#include <string_view>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/trace_event/trace_event.h"
 #include "third_party/perfetto/include/perfetto/tracing/traced_value.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
-#include "ui/display/types/gamma_ramp_rgb_entry.h"
+#include "ui/display/types/display_color_management.h"
 #include "ui/ozone/platform/drm/common/drm_util.h"
 
 namespace ui {
@@ -29,7 +33,7 @@ bool DrmCreateDumbBuffer(int fd,
                          uint32_t* handle,
                          uint32_t* stride) {
   struct drm_mode_create_dumb request;
-  memset(&request, 0, sizeof(request));
+  std::ranges::fill(base::byte_span_from_ref(request), 0);
   request.width = info.width();
   request.height = info.height();
   request.bpp = info.bytesPerPixel() << 3;
@@ -52,17 +56,29 @@ bool DrmCreateDumbBuffer(int fd,
 
 bool DrmDestroyDumbBuffer(int fd, uint32_t handle) {
   struct drm_mode_destroy_dumb destroy_request;
-  memset(&destroy_request, 0, sizeof(destroy_request));
+  std::ranges::fill(base::byte_span_from_ref(destroy_request), 0);
   destroy_request.handle = handle;
   return !drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_request);
 }
 
 bool CanQueryForResources(int fd) {
-  drm_mode_card_res resources;
-  memset(&resources, 0, sizeof(resources));
+  struct drm_mode_card_res resources;
+  std::ranges::fill(base::byte_span_from_ref(resources), 0);
   // If there is no error getting DRM resources then assume this is a
   // modesetting device.
   return !drmIoctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &resources);
+}
+
+bool IsModeset(uint32_t flags) {
+  return flags & DRM_MODE_ATOMIC_ALLOW_MODESET;
+}
+
+bool IsBlocking(uint32_t flags) {
+  return !(flags & DRM_MODE_ATOMIC_NONBLOCK);
+}
+
+bool IsTestOnly(uint32_t flags) {
+  return flags & DRM_MODE_ATOMIC_TEST_ONLY;
 }
 
 }  // namespace
@@ -93,15 +109,13 @@ bool DrmWrapper::Initialize() {
     return false;
   }
 
-  // Set atomic capabilities.
+  // Set atomic capabilities. Note: we cache the outcome since there is no way
+  // to retrieve this outcome later (i.e. it's impossible, and a common mistake,
+  // to try and get DRM_CLIENT_CAP_ATOMIC capability.)
   is_atomic_ = SetCapability(DRM_CLIENT_CAP_ATOMIC, 1);
 
   // Expose all planes (overlay, primary, and cursor) to userspace.
   SetCapability(DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
-
-  uint64_t value;
-  allow_addfb2_modifiers_ =
-      GetCapability(DRM_CAP_ADDFB2_MODIFIERS, &value) && value;
 
   return true;
 }
@@ -125,14 +139,9 @@ bool DrmWrapper::SetCrtc(uint32_t crtc_id,
   TRACE_EVENT2("drm", "DrmWrapper::SetCrtc", "crtc", crtc_id, "size",
                gfx::Size(mode.hdisplay, mode.vdisplay).ToString());
 
-  if (!drmModeSetCrtc(drm_fd_.get(), crtc_id, framebuffer, 0, 0,
-                      connectors.data(), connectors.size(),
-                      const_cast<drmModeModeInfo*>(&mode))) {
-    ++modeset_sequence_id_;
-    return true;
-  }
-
-  return false;
+  return !drmModeSetCrtc(drm_fd_.get(), crtc_id, framebuffer, 0, 0,
+                         connectors.data(), connectors.size(),
+                         const_cast<drmModeModeInfo*>(&mode));
 }
 
 bool DrmWrapper::DisableCrtc(uint32_t crtc_id) {
@@ -195,13 +204,21 @@ bool DrmWrapper::SetCursor(uint32_t crtc_id,
 bool DrmWrapper::SetMaster() {
   TRACE_EVENT1("drm", "DrmWrapper::SetMaster", "path", device_path_.value());
   DCHECK(drm_fd_.is_valid());
-  return (drmSetMaster(drm_fd_.get()) == 0);
+  has_master_ = (drmSetMaster(drm_fd_.get()) == 0);
+  return has_master_;
 }
 
 bool DrmWrapper::DropMaster() {
   TRACE_EVENT1("drm", "DrmWrapper::DropMaster", "path", device_path_.value());
   DCHECK(drm_fd_.is_valid());
-  return (drmDropMaster(drm_fd_.get()) == 0);
+  const bool drop_master_result = (drmDropMaster(drm_fd_.get()) == 0);
+  // Chrome no longer has DRM master if drop master call succeeded.
+  has_master_ = !drop_master_result;
+  return drop_master_result;
+}
+
+bool DrmWrapper::has_master() const {
+  return has_master_;
 }
 
 /**************
@@ -225,7 +242,7 @@ bool DrmWrapper::DestroyDumbBuffer(uint32_t handle) {
 
 bool DrmWrapper::MapDumbBuffer(uint32_t handle, size_t size, void** pixels) {
   struct drm_mode_map_dumb map_request;
-  memset(&map_request, 0, sizeof(map_request));
+  std::ranges::fill(base::byte_span_from_ref(map_request), 0);
   map_request.handle = handle;
   if (drmIoctl(drm_fd_.get(), DRM_IOCTL_MODE_MAP_DUMB, &map_request)) {
     PLOG(ERROR) << "Cannot prepare dumb buffer for mapping";
@@ -248,7 +265,7 @@ bool DrmWrapper::UnmapDumbBuffer(void* pixels, size_t size) {
 
 bool DrmWrapper::CloseBufferHandle(uint32_t handle) {
   struct drm_gem_close close_request;
-  memset(&close_request, 0, sizeof(close_request));
+  std::ranges::fill(base::byte_span_from_ref(close_request), 0);
   close_request.handle = handle;
   return !drmIoctl(drm_fd_.get(), DRM_IOCTL_GEM_CLOSE, &close_request);
 }
@@ -300,13 +317,12 @@ bool DrmWrapper::AddFramebuffer2(uint32_t width,
  * Gamma
  *******/
 
-bool DrmWrapper::SetGammaRamp(
-    uint32_t crtc_id,
-    const std::vector<display::GammaRampRGBEntry>& lut) {
+bool DrmWrapper::SetGammaRamp(uint32_t crtc_id,
+                              const display::GammaCurve& curve) {
   ScopedDrmCrtcPtr crtc = GetCrtc(crtc_id);
   size_t gamma_size = static_cast<size_t>(crtc->gamma_size);
 
-  if (gamma_size == 0 && lut.empty()) {
+  if (gamma_size == 0 && curve.IsDefaultIdentity()) {
     return true;
   }
 
@@ -315,33 +331,12 @@ bool DrmWrapper::SetGammaRamp(
     return false;
   }
 
-  // TODO(robert.bradford) resample the incoming ramp to match what the kernel
-  // expects.
-  if (!lut.empty() && gamma_size != lut.size()) {
-    LOG(ERROR) << "Gamma table size mismatch: supplied " << lut.size()
-               << " expected " << gamma_size;
-    return false;
-  }
-
   std::vector<uint16_t> r, g, b;
-  r.reserve(gamma_size);
-  g.reserve(gamma_size);
-  b.reserve(gamma_size);
-
-  if (lut.empty()) {
-    // Create a linear gamma ramp table to deactivate the feature.
-    for (size_t i = 0; i < gamma_size; ++i) {
-      uint16_t value = (i * ((1 << 16) - 1)) / (gamma_size - 1);
-      r.push_back(value);
-      g.push_back(value);
-      b.push_back(value);
-    }
-  } else {
-    for (size_t i = 0; i < gamma_size; ++i) {
-      r.push_back(lut[i].r);
-      g.push_back(lut[i].g);
-      b.push_back(lut[i].b);
-    }
+  r.resize(gamma_size);
+  g.resize(gamma_size);
+  b.resize(gamma_size);
+  for (size_t i = 0; i < gamma_size; ++i) {
+    curve.Evaluate(i / (gamma_size - 1.f), r[i], g[i], b[i]);
   }
 
   DCHECK(drm_fd_.is_valid());
@@ -387,16 +382,18 @@ bool DrmWrapper::SetObjectProperty(uint32_t object_id,
 
 ScopedDrmPropertyPtr DrmWrapper::GetProperty(drmModeConnector* connector,
                                              const char* name) const {
+  DCHECK(drm_fd_.is_valid());
   TRACE_EVENT2("drm", "DrmWrapper::GetProperty", "connector",
                connector->connector_id, "name", name);
   for (int i = 0; i < connector->count_props; ++i) {
     ScopedDrmPropertyPtr property(
-        drmModeGetProperty(drm_fd_.get(), connector->props[i]));
+        drmModeGetProperty(drm_fd_.get(), UNSAFE_TODO(connector->props[i])));
     if (!property) {
       continue;
     }
 
-    if (strcmp(property->name, name) == 0) {
+    std::string_view property_name(property->name);
+    if (property_name == name) {
       return property;
     }
   }
@@ -405,6 +402,7 @@ ScopedDrmPropertyPtr DrmWrapper::GetProperty(drmModeConnector* connector,
 }
 
 ScopedDrmPropertyPtr DrmWrapper::GetProperty(uint32_t id) const {
+  DCHECK(drm_fd_.is_valid());
   return ScopedDrmPropertyPtr(drmModeGetProperty(drm_fd_.get(), id));
 }
 
@@ -422,6 +420,7 @@ bool DrmWrapper::SetProperty(uint32_t connector_id,
 
 ScopedDrmPropertyBlob DrmWrapper::CreatePropertyBlob(const void* blob,
                                                      size_t size) {
+  DCHECK(drm_fd_.is_valid());
   uint32_t id = 0;
   int ret = drmModeCreatePropertyBlob(drm_fd_.get(), blob, size, &id);
   DCHECK(!ret && id);
@@ -429,7 +428,27 @@ ScopedDrmPropertyBlob DrmWrapper::CreatePropertyBlob(const void* blob,
   return std::make_unique<DrmPropertyBlobMetadata>(this, id);
 }
 
+ScopedDrmPropertyBlob DrmWrapper::CreatePropertyBlobWithFlags(const void* blob,
+                                                              size_t size,
+                                                              uint32_t flags) {
+// TODO(markyacoub): the flag requires being merged to libdrm then backported to
+// CrOS. Remove the #if once that happens.
+#if defined(DRM_MODE_CREATE_BLOB_WRITE_ONLY)
+  DCHECK(drm_fd_.is_valid());
+  uint32_t id = 0;
+  int ret = -1;
+
+  ret =
+      drmModeCreatePropertyBlobWithFlags(drm_fd_.get(), blob, size, &id, flags);
+  DCHECK(!ret && id);
+  return std::make_unique<DrmPropertyBlobMetadata>(this, id);
+#else
+  return nullptr;
+#endif
+}
+
 void DrmWrapper::DestroyPropertyBlob(uint32_t id) {
+  DCHECK(drm_fd_.is_valid());
   drmModeDestroyPropertyBlob(drm_fd_.get(), id);
 }
 
@@ -448,15 +467,15 @@ ScopedDrmPropertyBlobPtr DrmWrapper::GetPropertyBlob(
                connector->connector_id, "name", name);
   for (int i = 0; i < connector->count_props; ++i) {
     ScopedDrmPropertyPtr property(
-        drmModeGetProperty(drm_fd_.get(), connector->props[i]));
+        drmModeGetProperty(drm_fd_.get(), UNSAFE_TODO(connector->props[i])));
     if (!property) {
       continue;
     }
 
-    if (strcmp(property->name, name) == 0 &&
-        (property->flags & DRM_MODE_PROP_BLOB)) {
-      return ScopedDrmPropertyBlobPtr(
-          drmModeGetPropertyBlob(drm_fd_.get(), connector->prop_values[i]));
+    std::string_view property_name(property->name);
+    if ((property_name == name) && (property->flags & DRM_MODE_PROP_BLOB)) {
+      return ScopedDrmPropertyBlobPtr(drmModeGetPropertyBlob(
+          drm_fd_.get(), UNSAFE_TODO(connector->prop_values[i])));
     }
   }
 
@@ -480,19 +499,73 @@ void DrmWrapper::WriteIntoTrace(perfetto::TracedDictionary dict) const {
   dict.Add("device_path", device_path_.value());
 }
 
-absl::optional<std::string> DrmWrapper::GetDriverName() const {
+std::optional<std::string> DrmWrapper::GetDriverName() const {
   DCHECK(drm_fd_.is_valid());
   ScopedDrmVersionPtr version(drmGetVersion(drm_fd_.get()));
   if (!version) {
     LOG(ERROR) << "Failed to query DRM version";
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return std::string(version->name, version->name_len);
 }
 
+display::DrmFormatsAndModifiers DrmWrapper::GetFormatsAndModifiersForCrtc(
+    uint32_t crtc_id) const {
+  return display::DrmFormatsAndModifiers();
+}
+
 base::ScopedFD DrmWrapper::ToScopedFD(std::unique_ptr<DrmWrapper> drm) {
   return std::move(drm->drm_fd_);
+}
+
+// Protected
+
+bool DrmWrapper::CommitProperties(drmModeAtomicReq* properties,
+                                  uint32_t flags,
+                                  uint64_t page_flip_id) {
+  DCHECK(drm_fd_.is_valid());
+  TRACE_EVENT("drm", "DrmWrapper::CommitProperties", "test", IsTestOnly(flags),
+              "modeset", IsModeset(flags), "blocking", IsBlocking(flags),
+              "flags", flags, "page_flip_id", page_flip_id);
+  int result = drmModeAtomicCommit(drm_fd_.get(), properties, flags,
+                                   reinterpret_cast<void*>(page_flip_id));
+
+  // TODO(gildekel): Revisit b/174844386 and see if this case is still relevant,
+  // given significant work has been done around failing pageflips.
+  if (result && errno == EBUSY && (flags & DRM_MODE_ATOMIC_NONBLOCK)) {
+    VLOG(1) << "Nonblocking atomic commit failed with EBUSY, retry without "
+               "nonblock";
+    // There have been cases where we get back EBUSY when attempting a
+    // non-blocking atomic commit. If we return false from here, that will cause
+    // the GPU process to CHECK itself. These are likely due to kernel bugs,
+    // which should be fixed, but rather than crashing we should retry the
+    // commit without the non-blocking flag and then it should work. This will
+    // cause a slight delay, but that should be imperceptible and better than
+    // crashing. We still do want the underlying driver bugs fixed, but this
+    // provide a better user experience.
+    flags &= ~DRM_MODE_ATOMIC_NONBLOCK;
+    TRACE_EVENT("drm", "DrmWrapper::CommitProperties(retry)", "test",
+                IsTestOnly(flags), "modeset", IsModeset(flags), "blocking",
+                IsBlocking(flags), "flags", flags, "page_flip_id",
+                page_flip_id);
+    result = drmModeAtomicCommit(drm_fd_.get(), properties, flags,
+                                 reinterpret_cast<void*>(page_flip_id));
+  }
+
+  return !result;
+}
+
+bool DrmWrapper::PageFlip(uint32_t crtc_id,
+                          uint32_t framebuffer,
+                          uint64_t page_flip_id) {
+  DCHECK(drm_fd_.is_valid());
+  TRACE_EVENT2("drm", "DrmWrapper::PageFlip", "crtc", crtc_id, "framebuffer",
+               framebuffer);
+
+  return !drmModePageFlip(drm_fd_.get(), crtc_id, framebuffer,
+                          DRM_MODE_PAGE_FLIP_EVENT,
+                          reinterpret_cast<void*>(page_flip_id));
 }
 
 }  // namespace ui

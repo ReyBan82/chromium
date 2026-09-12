@@ -19,10 +19,9 @@
 
 #include "absl/random/internal/randen_hwaes.h"
 
-#include <cstdint>
 #include <cstring>
 
-#include "absl/base/attributes.h"
+#include "absl/base/config.h"
 #include "absl/numeric/int128.h"
 #include "absl/random/internal/platform.h"
 #include "absl/random/internal/randen_traits.h"
@@ -31,7 +30,7 @@
 // a hardware accelerated implementation of randen, or whether it
 // will contain stubs that exit the process.
 #if ABSL_HAVE_ACCELERATED_AES
-// The following plaforms have implemented RandenHwAes.
+// The following platforms have implemented RandenHwAes.
 #if defined(ABSL_ARCH_X86_64) || defined(ABSL_ARCH_X86_32) || \
     defined(ABSL_ARCH_PPC) || defined(ABSL_ARCH_ARM) ||       \
     defined(ABSL_ARCH_AARCH64)
@@ -220,11 +219,11 @@ namespace {
 class Vector128 {
  public:
   // Convert from/to intrinsics.
-  inline explicit Vector128(const __m128i& v) : data_(v) {}
+  explicit Vector128(const __m128i& v) : data_(v) {}
 
-  inline __m128i data() const { return data_; }
+  __m128i data() const { return data_; }
 
-  inline Vector128& operator^=(const Vector128& other) {
+  Vector128& operator^=(const Vector128& other) {
     data_ = _mm_xor_si128(data_, other.data());
     return *this;
   }

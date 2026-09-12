@@ -21,13 +21,15 @@ namespace extensions {
 // The parsed form of the "bluetooth" manifest entry.
 class BluetoothManifestData : public Extension::ManifestData {
  public:
+  static const char* kManifestDataKey;
+
   explicit BluetoothManifestData(
       std::unique_ptr<BluetoothManifestPermission> permission);
   ~BluetoothManifestData() override;
 
-  // Gets the BluetoothManifestData for |extension|, or NULL if none was
+  // Gets the BluetoothManifestData for `extension`, or NULL if none was
   // specified.
-  static BluetoothManifestData* Get(const Extension* extension);
+  static const BluetoothManifestData* Get(const Extension* extension);
 
   static bool CheckRequest(const Extension* extension,
                            const BluetoothPermissionRequest& request);
@@ -36,8 +38,8 @@ class BluetoothManifestData : public Extension::ManifestData {
   static bool CheckLowEnergyPermitted(const Extension* extension);
   static bool CheckPeripheralPermitted(const Extension* extension);
 
-  // Tries to construct the info based on |value|, as it would have appeared in
-  // the manifest. Sets |error| and returns an empty scoped_ptr on failure.
+  // Tries to construct the info based on `value`, as it would have appeared in
+  // the manifest. Sets `error` and returns an empty scoped_ptr on failure.
   static std::unique_ptr<BluetoothManifestData> FromValue(
       const base::Value& value,
       std::u16string* error);

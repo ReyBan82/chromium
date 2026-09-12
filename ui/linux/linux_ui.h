@@ -6,17 +6,22 @@
 #define UI_LINUX_LINUX_UI_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "base/callback_list.h"
 #include "base/command_line.h"
 #include "base/component_export.h"
 #include "base/containers/flat_map.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation_traits.h"
 #include "build/buildflag.h"
 #include "build/chromecast_buildflags.h"
 #include "printing/buildflags/buildflags.h"
+#include "ui/display/types/display_config.h"
 
 // The main entrypoint into Linux toolkit specific code. GTK/QT code should only
 // be executed behind this interface.
@@ -27,10 +32,6 @@ class Profile;
 
 namespace aura {
 class Window;
-}
-
-namespace base {
-class TimeDelta;
 }
 
 namespace gfx {
@@ -54,16 +55,22 @@ class LinuxInputMethodContextDelegate;
 class LinuxUiTheme;
 class NativeTheme;
 class NavButtonProvider;
+class PrimaryPastePrefObserver;
 class SelectFileDialog;
 class SelectFilePolicy;
-class TextEditCommandAuraLinux;
 class WindowButtonOrderObserver;
 class WindowFrameProvider;
+enum class FrameType;
+enum class TextEditCommand;
 
 // Adapter class with targets to render like different toolkits. Set by any
 // project that wants to do linux desktop native rendering.
 class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
  public:
+  // 8px is the default value in GTK for how far the mouse needs to move before
+  // a drag begins.
+  constexpr static int kDefaultWindowDragThreshold = 8;
+
   // Describes the window management actions that could be taken in response to
   // a middle click in the non client area.
   enum class WindowFrameAction {
@@ -79,6 +86,15 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
     kDoubleClick,
     kMiddleClick,
     kRightClick,
+  };
+
+  struct FontSettings {
+    std::string family;
+    int size_pixels = 0;
+    // Holds a bitfield of gfx::Font::Style values.
+    int style = 0;
+    // A standard font weight as used in Pango.  Must be a value in [1, 999].
+    int weight = 0;
   };
 
   LinuxUi(const LinuxUi&) = delete;
@@ -110,11 +126,35 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
 
   void RemoveCursorThemeObserver(CursorThemeManagerObserver* observer);
 
+  // Adds `observer` and calls if the middle click paste preference changes.
+  void AddPrimaryPastePrefObserver(PrimaryPastePrefObserver* observer);
+
+  void RemovePrimaryPastePrefObserver(PrimaryPastePrefObserver* observer);
+
+  // Registers a callback to be invoked when the LinuxUi instance's animation
+  // setting changes or when the active LinuxUi instance changes.
+  static base::CallbackListSubscription RegisterAnimationsEnabledCallback(
+      base::RepeatingClosure callback);
+
+  // Notifies registered callbacks that the animation setting has changed.
+  void NotifyAnimationsEnabledChanged();
+
+  // Returns details about the default UI font.
+  FontSettings GetDefaultFontDescription();
+
+  // Determines the device scale factor for all screens.
+  const display::DisplayConfig& display_config() const {
+    return display_config_;
+  }
+
   // Returns true on success.  If false is returned, this instance shouldn't
   // be used and the behavior of all functions is undefined.
   [[nodiscard]] virtual bool Initialize() = 0;
 
-  virtual base::TimeDelta GetCursorBlinkInterval() const = 0;
+  // Caches the default font render parameters.  This doesn't need to be called
+  // explicitly since the first call to get the font settings will implicitly
+  // initialize the default front render parameters.
+  virtual void InitializeFontSettings() = 0;
 
   // Returns the icon for a given content type from the icon theme.
   // TODO(davidben): Add an observer for the theme changing, so we can drop the
@@ -123,15 +163,12 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
                                            int size,
                                            float scale) const = 0;
 
-  // Determines the device scale factor of the primary screen.
-  virtual float GetDeviceScaleFactor() const = 0;
-
   // Returns a map of KeyboardEvent code to KeyboardEvent key values.
   virtual base::flat_map<std::string, std::string> GetKeyboardLayoutMap() = 0;
 
 #if BUILDFLAG(ENABLE_PRINTING)
-  virtual printing::PrintDialogLinuxInterface* CreatePrintDialog(
-      printing::PrintingContextLinux* context) = 0;
+  virtual std::unique_ptr<printing::PrintDialogLinuxInterface>
+  CreatePrintDialog(printing::PrintingContextLinux* context) = 0;
 
   virtual gfx::Size GetPdfPaperSize(
       printing::PrintingContextLinux* context) = 0;
@@ -156,25 +193,16 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
   virtual std::unique_ptr<LinuxInputMethodContext> CreateInputMethodContext(
       LinuxInputMethodContextDelegate* delegate) const = 0;
 
-  // Matches a key event against the users' platform specific key bindings,
-  // false will be returned if the key event doesn't correspond to a predefined
-  // key binding.  Edit commands matched with |event| will be stored in
-  // |edit_commands|, if |edit_commands| is non-nullptr.
-  virtual bool GetTextEditCommandsForEvent(
-      const ui::Event& event,
-      std::vector<TextEditCommandAuraLinux>* commands) = 0;
+  // Matches a key event against the users' platform specific key bindings.
+  // Returns ui::TextEditCommand::INVALID_COMMAND if the key event doesn't
+  // correspond to a predefined key binding.
+  //
+  // `text_flags` is the current ui::TextInputFlags if available.
+  virtual TextEditCommand GetTextEditCommandForEvent(const Event& event,
+                                                     int text_flags) = 0;
 
   // Returns the default font rendering settings.
-  virtual gfx::FontRenderParams GetDefaultFontRenderParams() const = 0;
-
-  // Returns details about the default UI font. |style_out| holds a bitfield of
-  // gfx::Font::Style values.
-  virtual void GetDefaultFontDescription(
-      std::string* family_out,
-      int* size_pixels_out,
-      int* style_out,
-      int* weight_out,
-      gfx::FontRenderParams* params_out) const = 0;
+  virtual gfx::FontRenderParams GetDefaultFontRenderParams() = 0;
 
   // Indicates if animations are enabled by the toolkit.
   virtual bool AnimationsEnabled() const = 0;
@@ -193,6 +221,24 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
   virtual WindowFrameAction GetWindowFrameAction(
       WindowFrameActionSource source) = 0;
 
+  // Whether a middle mouse click should paste the primary clipboard contents.
+  virtual bool PrimaryPasteEnabled() const = 0;
+
+  // The threshold for moving the mouse after pressing down in the non-client
+  // area after which a window drag is initiated.
+  virtual int GetWindowDragThresholdPx() const = 0;
+
+  // Returns the command line flags that should be copied to subprocesses
+  // to have the same toolkit and version as this process.
+  virtual std::vector<std::string> GetCmdLineFlagsForCopy() const = 0;
+
+  // Sets a callback to be invoked when the underlying toolkit loses connection
+  // to the display server, allowing the browser to save state before process
+  // termination. Default no-op since abrupt process termination on display
+  // disconnect is specific to GTK; other toolkits (e.g. Qt) or backends
+  // handle this elsewhere or do not call _exit(1).
+  virtual void SetShutdownCb(base::OnceClosure shutdown_cb);
+
  protected:
   struct CmdLineArgs {
     CmdLineArgs();
@@ -204,7 +250,8 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
     int argc = 0;
 
     // Contains C-strings that point into `args`.  `argv.size()` >= `argc`.
-    std::vector<char*> argv;
+    // RAW_PTR_EXCLUSION: Qt API operates directly on the buffer of char*.
+    RAW_PTR_EXCLUSION std::vector<char*> argv;
 
     // `argv` concatenated with NUL characters.
     std::vector<char> args;
@@ -214,14 +261,24 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
 
   static CmdLineArgs CopyCmdLine(const base::CommandLine& command_line);
 
-  const base::ObserverList<DeviceScaleFactorObserver>::Unchecked&
-  device_scale_factor_observer_list() const {
+  base::ObserverList<DeviceScaleFactorObserver>::Unchecked&
+  device_scale_factor_observer_list() {
     return device_scale_factor_observer_list_;
   }
 
-  const base::ObserverList<CursorThemeManagerObserver>&
-  cursor_theme_observers() {
+  base::ObserverList<CursorThemeManagerObserver>& cursor_theme_observers() {
     return cursor_theme_observer_list_;
+  }
+
+  base::ObserverList<PrimaryPastePrefObserver>& primary_paste_observers() {
+    return primary_paste_observer_list_;
+  }
+
+  display::DisplayConfig& display_config() { return display_config_; }
+
+  void set_default_font_settings(
+      const std::optional<FontSettings>& default_font_settings) {
+    default_font_settings_ = default_font_settings;
   }
 
  private:
@@ -231,6 +288,13 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUi {
 
   // Objects to notify when the cursor theme or size changes.
   base::ObserverList<CursorThemeManagerObserver> cursor_theme_observer_list_;
+
+  // Objects to notify when the middle click paste preference changes.
+  base::ObserverList<PrimaryPastePrefObserver> primary_paste_observer_list_;
+
+  display::DisplayConfig display_config_;
+
+  std::optional<FontSettings> default_font_settings_;
 };
 
 class COMPONENT_EXPORT(LINUX_UI) LinuxUiTheme {
@@ -239,10 +303,12 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUiTheme {
   LinuxUiTheme& operator=(const LinuxUiTheme&) = delete;
   virtual ~LinuxUiTheme();
 
-  // Returns the LinuxUi instance for the given window.
+  // Returns the LinuxUi instance for the given window, or the default instance
+  // if the window is nullptr.
   static LinuxUiTheme* GetForWindow(aura::Window* window);
 
-  // Returns the LinuxUi instance for the given profile.
+  // Returns the LinuxUi instance for the given profile, or the default instance
+  // if the profile is nullptr.
   static LinuxUiTheme* GetForProfile(Profile* profile);
 
   // Returns the native theme for this toolkit.
@@ -254,26 +320,46 @@ class COMPONENT_EXPORT(LINUX_UI) LinuxUiTheme {
   virtual bool GetDisplayProperty(int id, int* result) const = 0;
 
   // Returns the preferences that we pass to Blink.
-  virtual SkColor GetFocusRingColor() const = 0;
-  virtual SkColor GetActiveSelectionBgColor() const = 0;
-  virtual SkColor GetActiveSelectionFgColor() const = 0;
-  virtual SkColor GetInactiveSelectionBgColor() const = 0;
-  virtual SkColor GetInactiveSelectionFgColor() const = 0;
+  virtual void GetFocusRingColor(SkColor* color) const = 0;
+  virtual void GetActiveSelectionBgColor(SkColor* color) const = 0;
+  virtual void GetActiveSelectionFgColor(SkColor* color) const = 0;
+  virtual void GetInactiveSelectionBgColor(SkColor* color) const = 0;
+  virtual void GetInactiveSelectionFgColor(SkColor* color) const = 0;
 
   // Only used on GTK to indicate if the dark GTK theme variant is
   // preferred.
   virtual bool PreferDarkTheme() const = 0;
 
+  // Override the toolkit's dark mode preference.  Used when the dark mode
+  // setting is provided by org.freedesktop.appearance instead of the toolkit.
+  virtual void SetDarkTheme(bool dark) = 0;
+
+  // Route the org.freedesktop.appearance color-scheme preference into the
+  // toolkit's `OsSettingsProvider`, which sources the web
+  // `NativeTheme::preferred_color_scheme()`. `std::nullopt` means "no
+  // preference" and falls back to the toolkit-derived scheme; otherwise the
+  // value selects dark (true) or light (false). (A plain tri-state is used
+  // rather than `NativeTheme::PreferredColorScheme` to avoid a //ui/linux ->
+  // //ui/native_theme dependency cycle.)
+  virtual void SetColorScheme(std::optional<bool> prefer_dark) = 0;
+
+  // Override the toolkit's accent color.
+  virtual void SetAccentColor(std::optional<SkColor> accent_color) = 0;
+
   // Returns a new NavButtonProvider, or nullptr if the underlying
   // toolkit does not support drawing client-side navigation buttons.
-  virtual std::unique_ptr<NavButtonProvider> CreateNavButtonProvider() = 0;
+  virtual std::unique_ptr<NavButtonProvider> CreateNavButtonProvider(
+      FrameType type) = 0;
 
   // Returns a WindowFrameProvider, or nullptr if the underlying toolkit does
   // not support drawing client-side window decorations. |solid_frame| indicates
   // if transparency is unsupported and the frame should be rendered opaque.
   // The returned object is not owned by the caller and will remain alive until
   // the process ends.
-  virtual WindowFrameProvider* GetWindowFrameProvider(bool solid_frame) = 0;
+  virtual WindowFrameProvider* GetWindowFrameProvider(FrameType type,
+                                                      bool solid_frame,
+                                                      bool tiled,
+                                                      bool maximized) = 0;
 
  protected:
   LinuxUiTheme();
@@ -324,6 +410,18 @@ struct ScopedObservationTraits<ui::LinuxUi, ui::WindowButtonOrderObserver> {
   static void RemoveObserver(ui::LinuxUi* source,
                              ui::WindowButtonOrderObserver* observer) {
     source->RemoveWindowButtonOrderObserver(observer);
+  }
+};
+
+template <>
+struct ScopedObservationTraits<ui::LinuxUi, ui::PrimaryPastePrefObserver> {
+  static void AddObserver(ui::LinuxUi* source,
+                          ui::PrimaryPastePrefObserver* observer) {
+    source->AddPrimaryPastePrefObserver(observer);
+  }
+  static void RemoveObserver(ui::LinuxUi* source,
+                             ui::PrimaryPastePrefObserver* observer) {
+    source->RemovePrimaryPastePrefObserver(observer);
   }
 };
 

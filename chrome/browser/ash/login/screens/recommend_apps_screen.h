@@ -9,13 +9,14 @@
 #include <string>
 
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/apps/app_discovery_service/app_discovery_service.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
 #include "components/prefs/pref_service.h"
 
 namespace base {
-class Value;
+class ListValue;
 }
 
 namespace ash {
@@ -27,7 +28,7 @@ class RecommendAppsScreen : public BaseScreen {
  public:
   using TView = RecommendAppsScreenView;
 
-  enum class Result { SELECTED, SKIPPED, NOT_APPLICABLE, LOAD_ERROR };
+  enum class Result { kSelected, kSkipped, kNotApplicable, kLoadError };
 
   static std::string GetResultString(Result result);
 
@@ -48,7 +49,7 @@ class RecommendAppsScreen : public BaseScreen {
   void OnRetry();
 
   // Called when the user Install the selected apps.
-  void OnInstall(base::Value::List apps);
+  void OnInstall(base::ListValue apps);
 
   void SetSkipForTesting() { skip_for_testing_ = true; }
 
@@ -63,7 +64,7 @@ class RecommendAppsScreen : public BaseScreen {
   // BaseScreen:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   void OnRecommendationsDownloaded(const std::vector<apps::Result>& result,
                                    apps::DiscoveryError error);
@@ -75,14 +76,14 @@ class RecommendAppsScreen : public BaseScreen {
   base::WeakPtr<RecommendAppsScreenView> view_;
   ScreenExitCallback exit_callback_;
 
-  base::raw_ptr<apps::AppDiscoveryService> app_discovery_service_ = nullptr;
+  raw_ptr<apps::AppDiscoveryService> app_discovery_service_ = nullptr;
 
   // Skip the screen for testing if set to true.
   bool skip_for_testing_ = false;
 
   size_t recommended_app_count_ = 0;
 
-  base::raw_ptr<PrefService> pref_service_;
+  raw_ptr<PrefService> pref_service_;
 
   base::WeakPtrFactory<RecommendAppsScreen> weak_factory_{this};
 };

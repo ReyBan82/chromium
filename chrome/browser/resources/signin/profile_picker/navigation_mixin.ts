@@ -2,16 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert, assertNotReached} from 'chrome://resources/js/assert_ts.js';
-import {dedupingMixin, PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {assert, assertNotReached} from 'chrome://resources/js/assert.js';
+import type {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-import {isBrowserSigninAllowed, isForceSigninEnabled, isSignInProfileCreationSupported} from './policy_helper.js';
+import {isBrowserSigninAllowed, isForceSigninEnabled, isSignInProfileCreationSupported} from './profile_picker_flags.js';
 
+// LINT.IfChange(ProfilePickerPages)
 /**
  * ProfilePickerPages enum.
  * These values are persisted to logs and should not be renumbered or
  * re-used.
- * See tools/metrics/histograms/enums.xml.
+ * See tools/metrics/histograms/metadata/profile/enums.xml.
  */
 enum Pages {
   MAIN_VIEW = 0,
@@ -20,10 +21,10 @@ enum Pages {
   LOAD_SIGNIN = 3,
   LOAD_FORCE_SIGNIN = 4,
   PROFILE_SWITCH = 5,
-  // <if expr="chromeos_lacros">
-  ACCOUNT_SELECTION_LACROS = 6,
-  // </if>
+  ACCOUNT_SELECTION_LACROS_DEPRECATED = 6,
+  COUNT = ACCOUNT_SELECTION_LACROS_DEPRECATED + 1,
 }
+// LINT.ThenChange(//tools/metrics/histograms/metadata/profile/enums.xml:ProfilePickerPages)
 
 /**
  * Valid route pathnames.
@@ -32,9 +33,6 @@ export enum Routes {
   MAIN = 'main-view',
   NEW_PROFILE = 'new-profile',
   PROFILE_SWITCH = 'profile-switch',
-  // <if expr="chromeos_lacros">
-  ACCOUNT_SELECTION_LACROS = 'account-selection-lacros',
-  // </if>
 }
 
 /**
@@ -62,10 +60,6 @@ function computeStep(route: Routes): string {
       return ProfileCreationSteps.PROFILE_TYPE_CHOICE;
     case Routes.PROFILE_SWITCH:
       return 'profileSwitch';
-    // <if expr="chromeos_lacros">
-    case Routes.ACCOUNT_SELECTION_LACROS:
-      return 'accountSelectionLacros';
-    // </if>
     default:
       assertNotReached();
   }
@@ -96,19 +90,8 @@ if (!history.state || !history.state.route || !history.state.step) {
             step: computeStep(Routes.PROFILE_SWITCH),
             isFirst: true,
           },
-          '', path);
+          '');
       break;
-    // <if expr="chromeos_lacros">
-    case `/${Routes.ACCOUNT_SELECTION_LACROS}`:
-      history.replaceState(
-          {
-            route: Routes.ACCOUNT_SELECTION_LACROS,
-            step: computeStep(Routes.ACCOUNT_SELECTION_LACROS),
-            isFirst: true,
-          },
-          '', path);
-      break;
-    // </if>
     default:
       history.replaceState(
           {route: Routes.MAIN, step: computeStep(Routes.MAIN), isFirst: true},
@@ -138,16 +121,11 @@ export function recordPageVisited(step: string) {
     case 'profileSwitch':
       page = Pages.PROFILE_SWITCH;
       break;
-    // <if expr="chromeos_lacros">
-    case 'accountSelectionLacros':
-      page = Pages.ACCOUNT_SELECTION_LACROS;
-      break;
-    // </if>
     default:
       assertNotReached();
   }
   chrome.metricsPrivate.recordEnumerationValue(
-      'ProfilePicker.UiVisited', page, Object.keys(Pages).length);
+      'ProfilePicker.UiVisited', page, Pages.COUNT);
 }
 
 const routeObservers: Set<NavigationMixinInterface> = new Set();
@@ -165,9 +143,6 @@ window.addEventListener('popstate', notifyObservers);
 
 export function navigateTo(route: Routes) {
   assert([
-    // <if expr="chromeos_lacros">
-    Routes.ACCOUNT_SELECTION_LACROS,
-    // </if>
     Routes.MAIN,
     Routes.NEW_PROFILE,
     Routes.PROFILE_SWITCH,
@@ -203,8 +178,8 @@ export function navigateToStep(route: Routes, step: string) {
 
 type Constructor<T> = new (...args: any[]) => T;
 
-export const NavigationMixin = dedupingMixin(
-    <T extends Constructor<PolymerElement>>(superClass: T): T&
+export const NavigationMixin =
+    <T extends Constructor<CrLitElement>>(superClass: T): T&
     Constructor<NavigationMixinInterface> => {
       class NavigationMixin extends superClass {
         override connectedCallback() {
@@ -231,7 +206,7 @@ export const NavigationMixin = dedupingMixin(
       }
 
       return NavigationMixin;
-    });
+    };
 
 export interface NavigationMixinInterface {
   onRouteChange(route: Routes, step: string): void;

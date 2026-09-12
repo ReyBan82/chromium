@@ -7,14 +7,19 @@
 
 #include "ash/ash_export.h"
 #include "ash/system/network/network_detailed_view.h"
-#include "ash/system/network/network_list_mobile_header_view_impl.h"
+#include "ash/system/network/network_list_mobile_header_view.h"
 #include "ash/system/network/network_list_network_header_view.h"
 #include "ash/system/network/network_list_network_item_view.h"
-#include "ash/system/network/network_list_wifi_header_view_impl.h"
+#include "ash/system/network/network_list_wifi_header_view.h"
 #include "ash/system/tray/hover_highlight_view.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/views/view.h"
 
 namespace ash {
+
+namespace {
+using chromeos::network_config::mojom::NetworkType;
+}  // namespace
 
 class DetailedViewDelegate;
 
@@ -68,13 +73,14 @@ class ASH_EXPORT NetworkDetailedNetworkView {
   // Creates, adds and returns a new network list item. The client is
   // expected to use the returned pointer for removing and rearranging
   // the list item.
-  virtual NetworkListNetworkItemView* AddNetworkListItem(
-      chromeos::network_config::mojom::NetworkType type) = 0;
+  virtual NetworkListNetworkItemView* AddNetworkListItem(NetworkType type) = 0;
 
-  // Creates, adds and returns a `HoverHighlightView`, which is the "Join WIFI
-  // network" entry. The client is expected to use the returned pointer for
+  // Creates, adds and returns a `HoverHighlightView`, which is the "Join Wifi
+  // network" entry for the Wifi section if `NetworkType::kWiFi` is passed in or
+  // the "Add eSIM" entry for the Mobile data section if `NetworkType::kMobile`
+  // is passed in. The client is expected to use the returned pointer for
   // removing and rearranging this entry.
-  virtual HoverHighlightView* AddJoinNetworkEntry() = 0;
+  virtual HoverHighlightView* AddConfigureNetworkEntry(NetworkType type) = 0;
 
   // Creates, adds and returns a Wifi sticky sub-header to the end of the
   // network list. The client is expected to use the returned pointer for
@@ -90,8 +96,7 @@ class ASH_EXPORT NetworkDetailedNetworkView {
   virtual void UpdateScanningBarVisibility(bool visible) = 0;
 
   // Returns the network list.
-  virtual views::View* GetNetworkList(
-      chromeos::network_config::mojom::NetworkType type) = 0;
+  virtual views::View* GetNetworkList(NetworkType type) = 0;
 
   // Reorders the container or list view based on the index.
   virtual void ReorderFirstListView(size_t index) = 0;
@@ -107,13 +112,18 @@ class ASH_EXPORT NetworkDetailedNetworkView {
   virtual void UpdateWifiStatus(bool enabled) = 0;
   virtual void UpdateMobileStatus(bool enabled) = 0;
 
+  // Provides some virtual methods to get and set the scroll view's position
+  // before and after reordering the network list.
+  virtual void ScrollToPosition(int position) {}
+  virtual int GetScrollPosition();
+
  protected:
   explicit NetworkDetailedNetworkView(Delegate* delegate);
 
   Delegate* delegate() { return delegate_; }
 
  private:
-  Delegate* delegate_;
+  raw_ptr<Delegate> delegate_;
 };
 
 }  // namespace ash

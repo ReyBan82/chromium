@@ -4,26 +4,48 @@
 
 #include "components/password_manager/core/browser/stub_password_manager_driver.h"
 
+#include "components/autofill/core/common/aliases.h"
+#include "components/autofill/core/common/form_field_data.h"
+#include "ui/gfx/geometry/rect_f.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 namespace password_manager {
 
 StubPasswordManagerDriver::StubPasswordManagerDriver() = default;
 StubPasswordManagerDriver::~StubPasswordManagerDriver() = default;
 
-int StubPasswordManagerDriver::GetId() const {
-  return 0;
+DriverId StubPasswordManagerDriver::GetId() const {
+  return DriverId(1);
 }
 
-void StubPasswordManagerDriver::SetPasswordFillData(
+void StubPasswordManagerDriver::PropagateFillDataOnParsingCompletion(
     const autofill::PasswordFormFillData& form_data) {}
 
 void StubPasswordManagerDriver::GeneratedPasswordAccepted(
     const std::u16string& password) {}
 
-void StubPasswordManagerDriver::FillSuggestion(const std::u16string& username,
-                                               const std::u16string& password) {
-}
+void StubPasswordManagerDriver::GeneratedPasswordRejected() {}
+
+void StubPasswordManagerDriver::FocusNextFieldAfterPasswords() {}
+
+void StubPasswordManagerDriver::FillField(
+    autofill::FieldRendererId triggering_field_id,
+    const std::u16string& value,
+    autofill::FieldPropertiesFlags field_properties,
+    base::OnceCallback<void(bool)> success_callback) {}
+
+void StubPasswordManagerDriver::FillSuggestion(
+    const std::u16string& username,
+    const std::u16string& password,
+    base::OnceCallback<void(bool)> success_callback) {}
+
+void StubPasswordManagerDriver::FillSuggestionById(
+    autofill::FieldRendererId username_element_id,
+    autofill::FieldRendererId password_element_id,
+    const std::u16string& username,
+    const std::u16string& password,
+    autofill::AutofillSuggestionTriggerSource suggestion_source) {}
 
 #if BUILDFLAG(IS_ANDROID)
 void StubPasswordManagerDriver::TriggerFormSubmission() {}
@@ -33,15 +55,20 @@ void StubPasswordManagerDriver::PreviewSuggestion(
     const std::u16string& username,
     const std::u16string& password) {}
 
+void StubPasswordManagerDriver::PreviewSuggestionById(
+    autofill::FieldRendererId username_element_id,
+    autofill::FieldRendererId password_element_id,
+    const std::u16string& username,
+    const std::u16string& password) {}
+
 void StubPasswordManagerDriver::PreviewGenerationSuggestion(
     const std::u16string& password) {}
 
-void StubPasswordManagerDriver::ClearPreviewedForm() {
-}
+void StubPasswordManagerDriver::ClearPreviewedForm() {}
 
 void StubPasswordManagerDriver::SetSuggestionAvailability(
     autofill::FieldRendererId generation_element_id,
-    const autofill::mojom::AutofillState state) {}
+    autofill::mojom::AutofillSuggestionAvailability suggestion_availability) {}
 
 PasswordGenerationFrameHelper*
 StubPasswordManagerDriver::GetPasswordGenerationHelper() {
@@ -57,20 +84,66 @@ StubPasswordManagerDriver::GetPasswordAutofillManager() {
   return nullptr;
 }
 
+autofill::PasswordManagerDelegate*
+StubPasswordManagerDriver::GetPasswordManagerDelegate() {
+  return nullptr;
+}
+
+bool StubPasswordManagerDriver::IsDirectChildOfPrimaryMainFrame() const {
+  return false;
+}
+
 bool StubPasswordManagerDriver::IsInPrimaryMainFrame() const {
   return true;
+}
+
+bool StubPasswordManagerDriver::IsNestedWithinFencedFrame() const {
+  return false;
 }
 
 bool StubPasswordManagerDriver::CanShowAutofillUi() const {
   return true;
 }
 
-::ui::AXTreeID StubPasswordManagerDriver::GetAxTreeId() const {
-  return {};
+int StubPasswordManagerDriver::GetFrameId() const {
+  return GetId().GetUnsafeValue();
 }
 
 const GURL& StubPasswordManagerDriver::GetLastCommittedURL() const {
   return GURL::EmptyGURL();
+}
+
+const url::Origin& StubPasswordManagerDriver::GetLastCommittedOrigin() const {
+  return opaque_origin_;
+}
+
+bool StubPasswordManagerDriver::HasCrossOriginAncestor() const {
+  return false;
+}
+
+gfx::RectF StubPasswordManagerDriver::TransformToRootCoordinates(
+    const gfx::RectF& bounds_in_frame_coordinates) {
+  return gfx::RectF();
+}
+
+void StubPasswordManagerDriver::CheckViewAreaVisible(
+    autofill::FieldRendererId field_id,
+    base::OnceCallback<void(bool)>) {}
+
+bool StubPasswordManagerDriver::HasValidURL(bool may_kill_renderer) {
+  return true;
+}
+
+bool StubPasswordManagerDriver::IsRenderFrameHostSupported() {
+  return true;
+}
+
+autofill::AutofillDriver* StubPasswordManagerDriver::GetAutofillDriver() const {
+  return nullptr;
+}
+
+base::WeakPtr<PasswordManagerDriver> StubPasswordManagerDriver::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace password_manager

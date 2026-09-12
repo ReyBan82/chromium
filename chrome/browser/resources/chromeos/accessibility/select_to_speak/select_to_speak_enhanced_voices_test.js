@@ -14,7 +14,7 @@ SelectToSpeakEnhancedNetworkTtsVoicesTest = class extends SelectToSpeakE2ETest {
     this.confirmationDialogResponse_ = true;
 
     chrome.accessibilityPrivate.showConfirmationDialog =
-        (title, description, callback) => {
+        (title, description, cancelName, callback) => {
           this.confirmationDialogShowCount_ += 1;
           callback(this.confirmationDialogResponse_);
         };
@@ -24,17 +24,6 @@ SelectToSpeakEnhancedNetworkTtsVoicesTest = class extends SelectToSpeakE2ETest {
         return msgid;
       },
     };
-  }
-
-  /** @override */
-  async setUpDeferred() {
-    await super.setUpDeferred();
-    await importModule(
-        'selectToSpeak', '/select_to_speak/select_to_speak_main.js');
-    await importModule(
-        'SelectToSpeakConstants',
-        '/select_to_speak/select_to_speak_constants.js');
-    await importModule('PrefsManager', '/select_to_speak/prefs_manager.js');
   }
 
   // Sets the policy to allow or disallow the network voices.
@@ -55,9 +44,11 @@ SelectToSpeakEnhancedNetworkTtsVoicesTest = class extends SelectToSpeakE2ETest {
   }
 };
 
+// TODO (crbug.com/535989327): Re-enable this test after migrating to new speech
+// backend.
 AX_TEST_F(
     'SelectToSpeakEnhancedNetworkTtsVoicesTest',
-    'EnablesVoicesIfConfirmedInDialog', async function() {
+    'DISABLED_EnablesVoicesIfConfirmedInDialog', async function() {
       this.confirmationDialogResponse_ = true;
 
       const root = await this.runWithLoadedTree('<p>This is some text</p>');
@@ -81,9 +72,11 @@ AX_TEST_F(
       this.triggerReadMouseSelectedText(event, event);
     });
 
+// TODO (crbug.com/535989327): Re-enable this test after migrating to new speech
+// backend.
 AX_TEST_F(
     'SelectToSpeakEnhancedNetworkTtsVoicesTest',
-    'DisablesVoicesIfCanceledInDialog', async function() {
+    'DISABLED_DisablesVoicesIfCanceledInDialog', async function() {
       this.confirmationDialogResponse_ = false;
 
       const root = await this.runWithLoadedTree('<p>This is some text</p>');
@@ -107,24 +100,28 @@ AX_TEST_F(
       this.triggerReadMouseSelectedText(event, event);
     });
 
+// TODO (crbug.com/535989327): Re-enable this test after migrating to new speech
+// backend.
 AX_TEST_F(
     'SelectToSpeakEnhancedNetworkTtsVoicesTest',
-    'DisablesVoicesIfDisallowedByPolicy', async function() {
+    'DISABLED_DisablesVoicesIfDisallowedByPolicy', async function() {
       this.confirmationDialogResponse_ = true;
 
       const root = await this.runWithLoadedTree('<p>This is some text</p>');
-      this.mockTts.setOnSpeechCallbacks([this.newCallback(async function(
-          utterance) {
-        // Network voices are enabled initially because of the
-        // confirmation.
-        assertEquals(this.confirmationDialogShowCount_, 1);
-        assertTrue(selectToSpeak.prefsManager_.enhancedVoicesDialogShown());
-        assertTrue(selectToSpeak.prefsManager_.enhancedNetworkVoicesEnabled());
+      this.mockTts.setOnSpeechCallbacks(
+          [this.newCallback(async function(utterance) {
+            // Network voices are enabled initially because of the
+            // confirmation.
+            assertEquals(this.confirmationDialogShowCount_, 1);
+            assertTrue(selectToSpeak.prefsManager_.enhancedVoicesDialogShown());
+            assertTrue(
+                selectToSpeak.prefsManager_.enhancedNetworkVoicesEnabled());
 
-        // Sets the policy to disallow network voices.
-        await this.setEnhancedNetworkVoicesPolicy(/* allowed= */ false);
-        assertFalse(selectToSpeak.prefsManager_.enhancedNetworkVoicesEnabled());
-      })]);
+            // Sets the policy to disallow network voices.
+            await this.setEnhancedNetworkVoicesPolicy(/* allowed= */ false);
+            assertFalse(
+                selectToSpeak.prefsManager_.enhancedNetworkVoicesEnabled());
+          })]);
       const textNode = this.findTextNode(root, 'This is some text');
       const event = {
         screenX: textNode.location.left + 1,
@@ -133,9 +130,11 @@ AX_TEST_F(
       this.triggerReadMouseSelectedText(event, event);
     });
 
+// TODO (crbug.com/535989327): Re-enable this test after migrating to new speech
+// backend.
 AX_TEST_F(
     'SelectToSpeakEnhancedNetworkTtsVoicesTest',
-    'DisablesDialogIfDisallowedByPolicy', async function() {
+    'DISABLED_DisablesDialogIfDisallowedByPolicy', async function() {
       await this.setEnhancedNetworkVoicesPolicy(/* allowed= */ false);
 
       // For some reason after setting enhanced network voices pref

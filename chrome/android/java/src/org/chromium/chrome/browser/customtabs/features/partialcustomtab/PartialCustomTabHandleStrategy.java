@@ -11,18 +11,20 @@ import android.view.VelocityTracker;
 
 import androidx.core.view.MotionEventCompat;
 
+import org.chromium.base.CallbackUtils;
 import org.chromium.base.ThreadUtils;
-import org.chromium.base.supplier.Supplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.customtabs.features.partialcustomtab.PartialCustomTabBottomSheetStrategy.HeightStatus;
 import org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar;
 
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
-/**
- * Handling touch events for resizing the Window.
- */
-class PartialCustomTabHandleStrategy
-        extends GestureDetector.SimpleOnGestureListener implements CustomTabToolbar.HandleStrategy {
+/** Handling touch events for resizing the Window. */
+@NullMarked
+class PartialCustomTabHandleStrategy extends GestureDetector.SimpleOnGestureListener
+        implements CustomTabToolbar.HandleStrategy {
     /**
      * The base duration of the settling animation of the sheet. 218 ms is a spec for material
      * design (this is the minimum time a user is guaranteed to pay attention to something).
@@ -31,18 +33,18 @@ class PartialCustomTabHandleStrategy
 
     private static final int FLING_THRESHOLD_PX = 100;
 
-    private static final int FLING_VELOCITY_PIXELS_PER_MS = 1000;
+    static final int FLING_VELOCITY_PIXELS_PER_MS = 1000;
 
     private final GestureDetector mGestureDetector;
     private float mLastPosY;
     private float mDeltaY;
     private boolean mSeenFirstMoveOrDown;
-    private VelocityTracker mVelocityTracker;
-    private Runnable mCloseHandler;
+    private final VelocityTracker mVelocityTracker;
+    private Runnable mCloseHandler = CallbackUtils.emptyRunnable();
 
-    private BooleanSupplier mIsFullHeight;
-    private Supplier<Integer> mStatus;
-    private DragEventCallback mDragEventCallback;
+    private final BooleanSupplier mIsFullHeight;
+    private final Supplier<Integer> mStatus;
+    private final DragEventCallback mDragEventCallback;
 
     /** Callback for drag events. */
     interface DragEventCallback {
@@ -60,14 +62,18 @@ class PartialCustomTabHandleStrategy
 
         /**
          * Drag action is finished.
-         * @param flingDistance fling distance when the drag action ends up in fling action.
-         *        Zero if not.
+         *
+         * @param flingDistance fling distance when the drag action ends up in fling action. Zero if
+         *     not.
          */
         boolean onDragEnd(int flingDistance);
     }
 
-    public PartialCustomTabHandleStrategy(Context context, BooleanSupplier isFullHeight,
-            Supplier<Integer> status, DragEventCallback dragEventCallback) {
+    public PartialCustomTabHandleStrategy(
+            @Nullable Context context,
+            BooleanSupplier isFullHeight,
+            Supplier<Integer> status,
+            DragEventCallback dragEventCallback) {
         mIsFullHeight = isFullHeight;
         mStatus = status;
         mDragEventCallback = dragEventCallback;
@@ -132,7 +138,8 @@ class PartialCustomTabHandleStrategy
     }
 
     @Override
-    public boolean onScroll(MotionEvent e1, MotionEvent e2, float distanceX, float distanceY) {
+    public boolean onScroll(
+            @Nullable MotionEvent e1, MotionEvent e2, float distanceX, float distanceY) {
         // Always intercept scroll events.
         return true;
     }

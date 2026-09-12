@@ -12,14 +12,16 @@
 #include "base/run_loop.h"
 #include "base/strings/escape.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/simple_test_clock.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/safe_browsing/core/browser/db/safebrowsing.pb.h"
+#include "components/safe_browsing/core/browser/db/sb_test_util.h"
 #include "components/safe_browsing/core/browser/db/util.h"
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
-#include "components/safe_browsing/core/browser/db/v4_test_util.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "net/base/load_flags.h"
 #include "net/base/net_errors.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
@@ -33,6 +35,10 @@ namespace safe_browsing {
 
 class V4GetHashProtocolManagerTest : public PlatformTest {
  public:
+  V4GetHashProtocolManagerTest() {
+    feature_list_.InitAndDisableFeature(kLocalListsUseSBv5);
+  }
+
   void SetUp() override {
     PlatformTest::SetUp();
     callback_called_ = false;
@@ -104,9 +110,9 @@ class V4GetHashProtocolManagerTest : public PlatformTest {
     pm->SetClockForTests(&clock_);
   }
 
-  void ValidateGetV4ApiResults(const ThreatMetadata& expected_md,
-                               const ThreatMetadata& actual_md) {
-    EXPECT_EQ(expected_md, actual_md);
+  void ValidateNotificationAbuseResults(bool expected_is_abusive,
+                                        bool actual_is_abusive) {
+    EXPECT_EQ(expected_is_abusive, actual_is_abusive);
     callback_called_ = true;
   }
 
@@ -124,6 +130,7 @@ class V4GetHashProtocolManagerTest : public PlatformTest {
   void reset_callback_called() { callback_called_ = false; }
 
  private:
+  base::test::ScopedFeatureList feature_list_;
   bool callback_called_;
   base::SimpleTestClock clock_;
   network::TestURLLoaderFactory test_url_loader_factory_;
@@ -141,8 +148,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingNetwork) {
   pm->GetFullHashes(
       matched_locally, {},
       base::BindOnce(&V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                     base::Unretained(this), expected_results),
-      MechanismExperimentHashDatabaseCache::kNoExperiment);
+                     base::Unretained(this), expected_results));
 
   // Failed request status should result in error.
   SetupFetcherToReturnResponse(pm.get(), net::ERR_CONNECTION_RESET, 200,
@@ -164,8 +170,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingResponseCode) {
   pm->GetFullHashes(
       matched_locally, {},
       base::BindOnce(&V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                     base::Unretained(this), expected_results),
-      MechanismExperimentHashDatabaseCache::kNoExperiment);
+                     base::Unretained(this), expected_results));
 
   // Response code of anything other than 200 should result in error.
   SetupFetcherToReturnResponse(pm.get(), net::OK, 204,
@@ -189,8 +194,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestBackoffErrorHistogramCount) {
   pm->GetFullHashes(matched_locally, {},
                     base::BindRepeating(
                         &V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                        base::Unretained(this), expected_results),
-                    MechanismExperimentHashDatabaseCache::kNoExperiment);
+                        base::Unretained(this), expected_results));
 
   FullHashToStoreAndHashPrefixesMap matched_locally2;
   matched_locally2[FullHashStr("AHash2Full")].emplace_back(
@@ -199,8 +203,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestBackoffErrorHistogramCount) {
   pm->GetFullHashes(matched_locally2, {},
                     base::BindRepeating(
                         &V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                        base::Unretained(this), expected_results),
-                    MechanismExperimentHashDatabaseCache::kNoExperiment);
+                        base::Unretained(this), expected_results));
 
   // Failed request status should result in error.
   SetupFullHashFetcherToReturnResponse(pm.get(), FullHashStr("AHashFull"),
@@ -217,8 +220,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestBackoffErrorHistogramCount) {
   pm->GetFullHashes(matched_locally2, {},
                     base::BindRepeating(
                         &V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                        base::Unretained(this), expected_results),
-                    MechanismExperimentHashDatabaseCache::kNoExperiment);
+                        base::Unretained(this), expected_results));
 
   EXPECT_EQ(1ul, pm->backoff_error_count_);
 
@@ -227,6 +229,21 @@ TEST_F(V4GetHashProtocolManagerTest, TestBackoffErrorHistogramCount) {
 
   histogram_tester.ExpectTotalCount(
       "SafeBrowsing.V4GetHash.Result.BackoffErrorCount", 1);
+  histogram_tester.ExpectTotalCount(
+      "SafeBrowsing.SBGetHash.Result.BackoffErrorCount", 1);
+
+  histogram_tester.ExpectBucketCount(
+      "SafeBrowsing.SBGetHash.CacheHitAllPrefixes", /*sample=*/false,
+      /*expected_count=*/3);
+  histogram_tester.ExpectBucketCount(
+      "SafeBrowsing.SBGetHash.Request.CountOfPrefixes", /*sample=*/1,
+      /*expected_count=*/2);
+  histogram_tester.ExpectBucketCount("SafeBrowsing.SBGetHash.Network.Result",
+                                     /*sample=*/net::ERR_CONNECTION_RESET,
+                                     /*expected_count=*/1);
+  histogram_tester.ExpectBucketCount("SafeBrowsing.SBGetHash.Network.Result",
+                                     /*sample=*/200, /*expected_count=*/1);
+  histogram_tester.ExpectTotalCount("SafeBrowsing.SBGetHash.Network.Time", 2);
 }
 
 TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingParallelRequests) {
@@ -240,8 +257,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingParallelRequests) {
   pm->GetFullHashes(matched_locally1, {},
                     base::BindRepeating(
                         &V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                        base::Unretained(this), empty_results),
-                    MechanismExperimentHashDatabaseCache::kNoExperiment);
+                        base::Unretained(this), empty_results));
 
   FullHashToStoreAndHashPrefixesMap matched_locally2;
   matched_locally2[FullHashStr("AHash2Full")].emplace_back(
@@ -249,8 +265,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingParallelRequests) {
   pm->GetFullHashes(matched_locally2, {},
                     base::BindRepeating(
                         &V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                        base::Unretained(this), empty_results),
-                    MechanismExperimentHashDatabaseCache::kNoExperiment);
+                        base::Unretained(this), empty_results));
 
   // Fail the first request.
   SetupFullHashFetcherToReturnResponse(pm.get(), FullHashStr("AHash1Full"),
@@ -286,8 +301,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingParallelRequests) {
   pm->GetFullHashes(matched_locally3, {},
                     base::BindRepeating(
                         &V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                        base::Unretained(this), empty_results),
-                    MechanismExperimentHashDatabaseCache::kNoExperiment);
+                        base::Unretained(this), empty_results));
 
   // The request is not failed right away.
   EXPECT_FALSE(callback_called());
@@ -295,9 +309,23 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingParallelRequests) {
   histogram_tester.ExpectBucketCount("SafeBrowsing.V4GetHash.Result",
                                      V4OperationResult::MIN_WAIT_DURATION_ERROR,
                                      0);
+
+  histogram_tester.ExpectBucketCount(
+      "SafeBrowsing.SBGetHash.CacheHitAllPrefixes", /*sample=*/false,
+      /*expected_count=*/3);
+  histogram_tester.ExpectBucketCount(
+      "SafeBrowsing.SBGetHash.Request.CountOfPrefixes", /*sample=*/1,
+      /*expected_count=*/3);
+  histogram_tester.ExpectBucketCount("SafeBrowsing.SBGetHash.Network.Result",
+                                     /*sample=*/net::ERR_CONNECTION_RESET,
+                                     /*expected_count=*/1);
+  histogram_tester.ExpectBucketCount("SafeBrowsing.SBGetHash.Network.Result",
+                                     /*sample=*/200, /*expected_count=*/1);
+  histogram_tester.ExpectTotalCount("SafeBrowsing.SBGetHash.Network.Time", 2);
 }
 
 TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingOK) {
+  base::HistogramTester histogram_tester;
   std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
 
   base::Time now = base::Time::UnixEpoch();
@@ -310,14 +338,13 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingOK) {
       StoreAndHashPrefix(GetChromeUrlApiId(), prefix));
   std::vector<FullHashInfo> expected_results;
   FullHashInfo fhi(full_hash, GetChromeUrlApiId(), now + base::Seconds(300));
-  fhi.metadata.api_permissions.insert("NOTIFICATIONS");
+  fhi.is_notification_abusive = true;
   expected_results.push_back(fhi);
 
   pm->GetFullHashes(
       matched_locally, {},
       base::BindOnce(&V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                     base::Unretained(this), expected_results),
-      MechanismExperimentHashDatabaseCache::kNoExperiment);
+                     base::Unretained(this), expected_results));
 
   SetupFetcherToReturnOKResponse(pm.get(), GetStockV4HashResponseInfos());
 
@@ -336,6 +363,64 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashErrorHandlingOK) {
   EXPECT_EQ(FullHashStr("Everything's shiny, Cap'n."),
             cached_result.full_hash_infos[0].full_hash);
   EXPECT_TRUE(callback_called());
+
+  histogram_tester.ExpectUniqueSample(
+      "SafeBrowsing.V4GetHash.AttemptThreatType",
+      /*sample=*/SBThreatType::SB_THREAT_TYPE_API_ABUSE,
+      /*expected_bucket_count=*/1);
+  histogram_tester.ExpectUniqueSample(
+      "SafeBrowsing.SBGetHash.AttemptThreatType",
+      /*sample=*/SBThreatType::SB_THREAT_TYPE_API_ABUSE,
+      /*expected_bucket_count=*/1);
+  histogram_tester.ExpectUniqueSample(
+      "SafeBrowsing.V4GetHash.Network.RequestThreatType",
+      /*sample=*/SBThreatType::SB_THREAT_TYPE_API_ABUSE,
+      /*expected_bucket_count=*/1);
+  histogram_tester.ExpectUniqueSample(
+      "SafeBrowsing.SBGetHash.Network.RequestThreatType",
+      /*sample=*/SBThreatType::SB_THREAT_TYPE_API_ABUSE,
+      /*expected_bucket_count=*/1);
+}
+
+TEST_F(V4GetHashProtocolManagerTest, TestGetHashCachedOK) {
+  base::HistogramTester histogram_tester;
+  std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
+
+  base::Time now = base::Time::Now();
+  SetTestClock(now, pm.get());
+
+  HashPrefixStr prefix("Everything");
+  FullHashStr full_hash("Everything's shiny, Cap'n.");
+  FullHashToStoreAndHashPrefixesMap matched_locally;
+  matched_locally[full_hash].emplace_back(GetChromeUrlApiId(), prefix);
+
+  // Pre-populate the cache so that GetFullHashes hits the cache.
+  FullHashCache* cache = pm->full_hash_cache_for_tests();
+  CachedHashPrefixInfo* entry = &(*cache)[prefix];
+  entry->negative_expiry = now + base::Minutes(5);
+
+  std::vector<FullHashInfo> expected_results;
+  pm->GetFullHashes(
+      matched_locally, {},
+      base::BindOnce(&V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
+                     base::Unretained(this), expected_results));
+
+  EXPECT_TRUE(callback_called());
+
+  // Since it was a cache hit, only the attempt threat type metrics should be
+  // logged; no network request threat type metrics should be logged.
+  histogram_tester.ExpectUniqueSample(
+      "SafeBrowsing.V4GetHash.AttemptThreatType",
+      /*sample=*/SBThreatType::SB_THREAT_TYPE_API_ABUSE,
+      /*expected_bucket_count=*/1);
+  histogram_tester.ExpectUniqueSample(
+      "SafeBrowsing.SBGetHash.AttemptThreatType",
+      /*sample=*/SBThreatType::SB_THREAT_TYPE_API_ABUSE,
+      /*expected_bucket_count=*/1);
+  histogram_tester.ExpectTotalCount(
+      "SafeBrowsing.V4GetHash.Network.RequestThreatType", 0);
+  histogram_tester.ExpectTotalCount(
+      "SafeBrowsing.SBGetHash.Network.RequestThreatType", 0);
 }
 
 TEST_F(V4GetHashProtocolManagerTest,
@@ -349,8 +434,7 @@ TEST_F(V4GetHashProtocolManagerTest,
   std::vector<FullHashInfo> fhis;
   fhis.emplace_back(full_hash, GetChromeUrlApiId(), base::Time::UnixEpoch());
 
-  pm->UpdateCache(prefixes_requested, fhis, negative_cache_expire,
-                  MechanismExperimentHashDatabaseCache::kNoExperiment);
+  pm->UpdateCache(prefixes_requested, fhis, negative_cache_expire);
 
   // Verify the state of the cache.
   const FullHashCache* cache = pm->full_hash_cache_for_tests();
@@ -394,9 +478,9 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetHashRequest) {
   }
 
   // Serialize and Base64 encode.
-  std::string req_data, req_base64;
+  std::string req_data;
   req.SerializeToString(&req_data);
-  base::Base64Encode(req_data, &req_base64);
+  std::string req_base64 = base::Base64Encode(req_data);
 
   std::vector<HashPrefixStr> prefixes_to_request = {one, two};
   EXPECT_EQ(req_base64, pm->GetHashRequest(prefixes_to_request, client_states));
@@ -446,8 +530,7 @@ TEST_F(V4GetHashProtocolManagerTest, TestParseHashResponse) {
   const FullHashInfo& fhi = full_hash_infos[0];
   EXPECT_EQ(full_hash, fhi.full_hash);
   EXPECT_EQ(GetChromeUrlApiId(), fhi.list_id);
-  EXPECT_EQ(1ul, fhi.metadata.api_permissions.size());
-  EXPECT_EQ(1ul, fhi.metadata.api_permissions.count("NOTIFICATIONS"));
+  EXPECT_TRUE(fhi.is_notification_abusive);
   EXPECT_EQ(now + base::Seconds(300), fhi.positive_expiry);
   EXPECT_EQ(now + base::Seconds(400), pm->next_gethash_time_);
 }
@@ -478,114 +561,6 @@ TEST_F(V4GetHashProtocolManagerTest,
   EXPECT_EQ(0ul, full_hash_infos.size());
 }
 
-// Adds entries with a ThreatPatternType metadata.
-TEST_F(V4GetHashProtocolManagerTest, TestParseHashThreatPatternType) {
-  std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
-
-  base::Time now = base::Time::UnixEpoch();
-  SetTestClock(now, pm.get());
-
-  {
-    // Test social engineering pattern type.
-    FindFullHashesResponse se_res;
-    se_res.mutable_negative_cache_duration()->set_seconds(600);
-    ThreatMatch* se = se_res.add_matches();
-    se->set_threat_type(SOCIAL_ENGINEERING);
-    se->set_platform_type(CHROME_PLATFORM);
-    se->set_threat_entry_type(URL);
-    FullHashStr full_hash("Everything's shiny, Cap'n.");
-    se->mutable_threat()->set_hash(full_hash);
-    ThreatEntryMetadata::MetadataEntry* se_meta =
-        se->mutable_threat_entry_metadata()->add_entries();
-    se_meta->set_key("se_pattern_type");
-    se_meta->set_value("SOCIAL_ENGINEERING_LANDING");
-
-    std::string se_data;
-    se_res.SerializeToString(&se_data);
-
-    std::vector<FullHashInfo> full_hash_infos;
-    base::Time cache_expire;
-    EXPECT_TRUE(
-        pm->ParseHashResponse(se_data, &full_hash_infos, &cache_expire));
-    EXPECT_EQ(now + base::Seconds(600), cache_expire);
-
-    // Ensure that the threat remains valid since we found a full hash match,
-    // even though the metadata information could not be parsed correctly.
-    ASSERT_EQ(1ul, full_hash_infos.size());
-    const FullHashInfo& fhi = full_hash_infos[0];
-    EXPECT_EQ(full_hash, fhi.full_hash);
-    const ListIdentifier list_id(CHROME_PLATFORM, URL, SOCIAL_ENGINEERING);
-    EXPECT_EQ(list_id, fhi.list_id);
-    EXPECT_EQ(ThreatPatternType::SOCIAL_ENGINEERING_LANDING,
-              fhi.metadata.threat_pattern_type);
-  }
-
-  {
-    // Test potentially harmful application pattern type.
-    FindFullHashesResponse pha_res;
-    pha_res.mutable_negative_cache_duration()->set_seconds(600);
-    ThreatMatch* pha = pha_res.add_matches();
-    pha->set_threat_type(POTENTIALLY_HARMFUL_APPLICATION);
-    pha->set_threat_entry_type(URL);
-    pha->set_platform_type(CHROME_PLATFORM);
-    FullHashStr full_hash("Not to fret.");
-    pha->mutable_threat()->set_hash(full_hash);
-    ThreatEntryMetadata::MetadataEntry* pha_meta =
-        pha->mutable_threat_entry_metadata()->add_entries();
-    pha_meta->set_key("pha_pattern_type");
-    pha_meta->set_value("LANDING");
-
-    std::string pha_data;
-    pha_res.SerializeToString(&pha_data);
-    std::vector<FullHashInfo> full_hash_infos;
-    base::Time cache_expire;
-    EXPECT_TRUE(
-        pm->ParseHashResponse(pha_data, &full_hash_infos, &cache_expire));
-    EXPECT_EQ(now + base::Seconds(600), cache_expire);
-
-    ASSERT_EQ(1ul, full_hash_infos.size());
-    const FullHashInfo& fhi = full_hash_infos[0];
-    EXPECT_EQ(full_hash, fhi.full_hash);
-    const ListIdentifier list_id(CHROME_PLATFORM, URL,
-                                 POTENTIALLY_HARMFUL_APPLICATION);
-    EXPECT_EQ(list_id, fhi.list_id);
-    EXPECT_EQ(ThreatPatternType::MALWARE_LANDING,
-              fhi.metadata.threat_pattern_type);
-  }
-
-  {
-    // Test invalid pattern type.
-    FullHashStr full_hash("Not to fret.");
-    FindFullHashesResponse invalid_res;
-    invalid_res.mutable_negative_cache_duration()->set_seconds(600);
-    ThreatMatch* invalid = invalid_res.add_matches();
-    invalid->set_threat_type(POTENTIALLY_HARMFUL_APPLICATION);
-    invalid->set_threat_entry_type(URL);
-    invalid->set_platform_type(CHROME_PLATFORM);
-    invalid->mutable_threat()->set_hash(full_hash);
-    ThreatEntryMetadata::MetadataEntry* invalid_meta =
-        invalid->mutable_threat_entry_metadata()->add_entries();
-    invalid_meta->set_key("pha_pattern_type");
-    invalid_meta->set_value("INVALIDE_VALUE");
-
-    std::string invalid_data;
-    invalid_res.SerializeToString(&invalid_data);
-    std::vector<FullHashInfo> full_hash_infos;
-    base::Time cache_expire;
-    EXPECT_TRUE(
-        pm->ParseHashResponse(invalid_data, &full_hash_infos, &cache_expire));
-
-    // Ensure that the threat remains valid since we found a full hash match,
-    // even though the metadata information could not be parsed correctly.
-    ASSERT_EQ(1ul, full_hash_infos.size());
-    const auto& fhi = full_hash_infos[0];
-    EXPECT_EQ(full_hash, fhi.full_hash);
-    EXPECT_EQ(
-        ListIdentifier(CHROME_PLATFORM, URL, POTENTIALLY_HARMFUL_APPLICATION),
-        fhi.list_id);
-    EXPECT_EQ(ThreatPatternType::NONE, fhi.metadata.threat_pattern_type);
-  }
-}
 
 TEST_F(V4GetHashProtocolManagerTest, TestParseSubresourceFilterMetadata) {
   typedef SubresourceFilterLevel Level;
@@ -672,7 +647,7 @@ TEST_F(V4GetHashProtocolManagerTest,
   res.mutable_negative_cache_duration()->set_seconds(600);
   ThreatMatch* m = res.add_matches();
   m->set_threat_type(API_ABUSE);
-  // TODO(crbug.com/1030487): This special case for Android will no longer be
+  // TODO(crbug.com/40661879): This special case for Android will no longer be
   // needed once GetCurrentPlatformType() returns ANDROID_PLATFORM on Android.
 #if BUILDFLAG(IS_ANDROID)
   m->set_platform_type(ANDROID_PLATFORM);
@@ -699,7 +674,7 @@ TEST_F(V4GetHashProtocolManagerTest,
   const auto& fhi = full_hash_infos[0];
   EXPECT_EQ(full_hash, fhi.full_hash);
   EXPECT_EQ(GetChromeUrlApiId(), fhi.list_id);
-  EXPECT_TRUE(fhi.metadata.api_permissions.empty());
+  EXPECT_FALSE(fhi.is_notification_abusive);
 }
 
 TEST_F(V4GetHashProtocolManagerTest,
@@ -745,9 +720,8 @@ TEST_F(V4GetHashProtocolManagerTest, GetCachedResults) {
     cache->clear();
 
     // Test with an empty cache. (Case: 2)
-    pm->GetFullHashCachedResults(
-        matched_locally, now, &prefixes_to_request, &cached_full_hash_infos,
-        MechanismExperimentHashDatabaseCache::kNoExperiment);
+    pm->GetFullHashCachedResults(matched_locally, now, &prefixes_to_request,
+                                 &cached_full_hash_infos);
     EXPECT_TRUE(cache->empty());
     ASSERT_EQ(1ul, prefixes_to_request.size());
     EXPECT_EQ(prefix, prefixes_to_request[0]);
@@ -762,9 +736,8 @@ TEST_F(V4GetHashProtocolManagerTest, GetCachedResults) {
     // Prefix has a cache entry but full hash is not there. (Case: 1-b-i)
     CachedHashPrefixInfo* entry = &(*cache)[prefix];
     entry->negative_expiry = now + base::Minutes(5);
-    pm->GetFullHashCachedResults(
-        matched_locally, now, &prefixes_to_request, &cached_full_hash_infos,
-        MechanismExperimentHashDatabaseCache::kNoExperiment);
+    pm->GetFullHashCachedResults(matched_locally, now, &prefixes_to_request,
+                                 &cached_full_hash_infos);
     EXPECT_TRUE(prefixes_to_request.empty());
     EXPECT_TRUE(cached_full_hash_infos.empty());
   }
@@ -777,9 +750,8 @@ TEST_F(V4GetHashProtocolManagerTest, GetCachedResults) {
     // Expired negative cache entry. (Case: 1-b-ii)
     CachedHashPrefixInfo* entry = &(*cache)[prefix];
     entry->negative_expiry = now - base::Minutes(5);
-    pm->GetFullHashCachedResults(
-        matched_locally, now, &prefixes_to_request, &cached_full_hash_infos,
-        MechanismExperimentHashDatabaseCache::kNoExperiment);
+    pm->GetFullHashCachedResults(matched_locally, now, &prefixes_to_request,
+                                 &cached_full_hash_infos);
     ASSERT_EQ(1ul, prefixes_to_request.size());
     EXPECT_EQ(prefix, prefixes_to_request[0]);
     EXPECT_TRUE(cached_full_hash_infos.empty());
@@ -795,9 +767,8 @@ TEST_F(V4GetHashProtocolManagerTest, GetCachedResults) {
     entry->negative_expiry = now + base::Minutes(5);
     entry->full_hash_infos.emplace_back(full_hash, GetUrlMalwareId(),
                                         now + base::Minutes(3));
-    pm->GetFullHashCachedResults(
-        matched_locally, now, &prefixes_to_request, &cached_full_hash_infos,
-        MechanismExperimentHashDatabaseCache::kNoExperiment);
+    pm->GetFullHashCachedResults(matched_locally, now, &prefixes_to_request,
+                                 &cached_full_hash_infos);
     EXPECT_TRUE(prefixes_to_request.empty());
     ASSERT_EQ(1ul, cached_full_hash_infos.size());
     EXPECT_EQ(full_hash, cached_full_hash_infos[0].full_hash);
@@ -813,9 +784,8 @@ TEST_F(V4GetHashProtocolManagerTest, GetCachedResults) {
     entry->negative_expiry = now + base::Minutes(5);
     entry->full_hash_infos.emplace_back(full_hash, GetUrlMalwareId(),
                                         now - base::Minutes(3));
-    pm->GetFullHashCachedResults(
-        matched_locally, now, &prefixes_to_request, &cached_full_hash_infos,
-        MechanismExperimentHashDatabaseCache::kNoExperiment);
+    pm->GetFullHashCachedResults(matched_locally, now, &prefixes_to_request,
+                                 &cached_full_hash_infos);
     ASSERT_EQ(1ul, prefixes_to_request.size());
     EXPECT_EQ(prefix, prefixes_to_request[0]);
     EXPECT_TRUE(cached_full_hash_infos.empty());
@@ -859,13 +829,12 @@ TEST_F(V4GetHashProtocolManagerTest, TestUpdatesAreMerged) {
                                 now + base::Seconds(200));
   expected_results.emplace_back(full_hash_2, GetChromeUrlApiId(),
                                 now + base::Seconds(300));
-  expected_results[1].metadata.api_permissions.insert("NOTIFICATIONS");
+  expected_results[1].is_notification_abusive = true;
 
   pm->GetFullHashes(
       matched_locally, {},
       base::BindOnce(&V4GetHashProtocolManagerTest::ValidateGetV4HashResults,
-                     base::Unretained(this), expected_results),
-      MechanismExperimentHashDatabaseCache::kNoExperiment);
+                     base::Unretained(this), expected_results));
 
   SetupFetcherToReturnOKResponse(pm.get(), GetStockV4HashResponseInfos());
 
@@ -891,16 +860,15 @@ TEST_F(V4GetHashProtocolManagerTest, TestUpdatesAreMerged) {
 
 // The server responds back with full hash information containing metadata
 // information for one of the full hashes for the URL in test.
-TEST_F(V4GetHashProtocolManagerTest, TestGetFullHashesWithApisMergesMetadata) {
+TEST_F(V4GetHashProtocolManagerTest,
+       TestGetFullHashesForNotificationAbuse_Abusive) {
   const GURL url("https://www.example.com/more");
-  ThreatMetadata expected_md;
-  expected_md.api_permissions.insert("NOTIFICATIONS");
-  expected_md.api_permissions.insert("AUDIO_CAPTURE");
   std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
-  pm->GetFullHashesWithApis(
+  pm->GetFullHashesForNotificationAbuse(
       url, {} /* list_client_states */,
-      base::BindOnce(&V4GetHashProtocolManagerTest::ValidateGetV4ApiResults,
-                     base::Unretained(this), expected_md));
+      base::BindOnce(
+          &V4GetHashProtocolManagerTest::ValidateNotificationAbuseResults,
+          base::Unretained(this), /*expected_is_abusive=*/true));
 
   // The following two random looking strings value are two of the full hashes
   // produced by UrlToFullHashes in v4_protocol_manager_util.h for the URL:
@@ -928,118 +896,27 @@ TEST_F(V4GetHashProtocolManagerTest, TestGetFullHashesWithApisMergesMetadata) {
   EXPECT_TRUE(callback_called());
 }
 
-// Checks that results are stored and looked up correctly in the cache for
-// interactions related to the lookup mechanism experiment.
-TEST_F(V4GetHashProtocolManagerTest, CacheResults_LookupMechanismExperiment) {
-  base::Time now = base::Time::UnixEpoch();
-  FullHashStr full_hash("example");
-  HashPrefixStr prefix("exam");
-  auto write_to_cache =
-      [prefix, now, full_hash](
-          std::unique_ptr<V4GetHashProtocolManager>& pm,
-          MechanismExperimentHashDatabaseCache cache_selection) {
-        std::vector<HashPrefixStr> prefixes_requested({prefix});
-        base::Time negative_cache_expire = now + base::Minutes(5);
-        std::vector<FullHashInfo> fhis;
-        fhis.emplace_back(full_hash, GetUrlMalwareId(), now + base::Minutes(5));
-        pm->UpdateCache(prefixes_requested, fhis, negative_cache_expire,
-                        cache_selection);
-      };
-  auto read_from_cache =
-      [full_hash, prefix, now](
-          std::unique_ptr<V4GetHashProtocolManager>& pm,
-          MechanismExperimentHashDatabaseCache cache_selection,
-          bool expected_found_in) {
-        std::vector<FullHashInfo> out_cached_full_hash_infos;
-        std::vector<HashPrefixStr> out_prefixes_to_request;
-        FullHashToStoreAndHashPrefixesMap matched_locally;
-        matched_locally[full_hash].emplace_back(GetUrlMalwareId(), prefix);
-        pm->GetFullHashCachedResults(
-            matched_locally, now, &out_prefixes_to_request,
-            &out_cached_full_hash_infos, cache_selection);
-        if (expected_found_in) {
-          EXPECT_TRUE(out_prefixes_to_request.empty());
-          ASSERT_EQ(1ul, out_cached_full_hash_infos.size());
-          EXPECT_EQ(full_hash, out_cached_full_hash_infos[0].full_hash);
-        } else {
-          ASSERT_EQ(1ul, out_prefixes_to_request.size());
-          EXPECT_EQ(prefix, out_prefixes_to_request[0]);
-          EXPECT_TRUE(out_cached_full_hash_infos.empty());
-        }
-      };
-  auto run_read_all_test =
-      [this, write_to_cache, read_from_cache, prefix, full_hash](
-          MechanismExperimentHashDatabaseCache cache_selection_write,
-          std::set<MechanismExperimentHashDatabaseCache> expected_found_in) {
-        std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
-        pm->SetLookupMechanismExperimentIsEnabled();
-        write_to_cache(pm, cache_selection_write);
-        std::vector<MechanismExperimentHashDatabaseCache> cache_selections = {
-            MechanismExperimentHashDatabaseCache::kNoExperiment,
-            MechanismExperimentHashDatabaseCache::kUrlRealTimeOnly,
-            MechanismExperimentHashDatabaseCache::kHashRealTimeOnly,
-            MechanismExperimentHashDatabaseCache::kHashDatabaseOnly,
-        };
-        for (const auto& cache_selection : cache_selections) {
-          read_from_cache(pm, cache_selection,
-                          base::Contains(expected_found_in, cache_selection));
-        }
-      };
+TEST_F(V4GetHashProtocolManagerTest,
+       TestGetFullHashesForNotificationAbuse_NotAbusive) {
+  const GURL url("https://www.example.com/more");
+  std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
+  pm->GetFullHashesForNotificationAbuse(
+      url, {} /* list_client_states */,
+      base::BindOnce(
+          &V4GetHashProtocolManagerTest::ValidateNotificationAbuseResults,
+          base::Unretained(this), /*expected_is_abusive=*/false));
 
-  // If the experiment is enabled but a lookup is called from outside the
-  // context of the experiment, it should update all caches.
-  run_read_all_test(MechanismExperimentHashDatabaseCache::kNoExperiment,
-                    {MechanismExperimentHashDatabaseCache::kHashRealTimeOnly,
-                     MechanismExperimentHashDatabaseCache::kHashDatabaseOnly,
-                     MechanismExperimentHashDatabaseCache::kUrlRealTimeOnly,
-                     MechanismExperimentHashDatabaseCache::kNoExperiment});
+  std::vector<TestV4HashResponseInfo> infos;
+  FullHashStr full_hash;
+  base::Base64Decode("1ZzJ0/7NjPkg6t0DAS8L5Jf7jA48Pn7opQcP4UXYeXc=",
+                     &full_hash);
+  TestV4HashResponseInfo info(full_hash, GetChromeUrlApiId());
+  info.key_values.emplace_back("permission", "GEOLOCATION");
+  infos.push_back(info);
 
-  // If the experiment is enabled and a lookup is called for just URL real-time,
-  // it should update only the primary cache.
-  run_read_all_test(MechanismExperimentHashDatabaseCache::kUrlRealTimeOnly,
-                    {MechanismExperimentHashDatabaseCache::kUrlRealTimeOnly,
-                     MechanismExperimentHashDatabaseCache::kNoExperiment});
+  SetupFetcherToReturnOKResponse(pm.get(), infos);
 
-  // If the experiment is enabled and a lookup is called for just hash
-  // real-time, it should update only the hash real-time cache.
-  run_read_all_test(MechanismExperimentHashDatabaseCache::kHashRealTimeOnly,
-                    {MechanismExperimentHashDatabaseCache::kHashRealTimeOnly});
-
-  // If the experiment is enabled and a lookup is called for just hash database,
-  // it should update only the hash database cache.
-  run_read_all_test(MechanismExperimentHashDatabaseCache::kHashDatabaseOnly,
-                    {MechanismExperimentHashDatabaseCache::kHashDatabaseOnly});
-
-  // If the experiment is disabled and a lookup is called (which can only be for
-  // kNoExperiment), it should update the primary cache.
-  {
-    std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
-    write_to_cache(pm, MechanismExperimentHashDatabaseCache::kNoExperiment);
-    read_from_cache(pm, MechanismExperimentHashDatabaseCache::kNoExperiment,
-                    /*expected_found_in=*/true);
-  }
-  // If the experiment is initially disabled, has a write, and then gets
-  // enabled, it should still only have affected the primary cache.
-  {
-    std::unique_ptr<V4GetHashProtocolManager> pm(CreateProtocolManager());
-    write_to_cache(pm, MechanismExperimentHashDatabaseCache::kNoExperiment);
-    read_from_cache(pm, MechanismExperimentHashDatabaseCache::kNoExperiment,
-                    /*expected_found_in=*/true);
-    pm->SetLookupMechanismExperimentIsEnabled();
-    std::vector<MechanismExperimentHashDatabaseCache> cache_selections = {
-        MechanismExperimentHashDatabaseCache::kNoExperiment,
-        MechanismExperimentHashDatabaseCache::kUrlRealTimeOnly,
-        MechanismExperimentHashDatabaseCache::kHashRealTimeOnly,
-        MechanismExperimentHashDatabaseCache::kHashDatabaseOnly,
-    };
-    std::set<MechanismExperimentHashDatabaseCache> expected_found_in = {
-        MechanismExperimentHashDatabaseCache::kNoExperiment,
-        MechanismExperimentHashDatabaseCache::kUrlRealTimeOnly};
-    for (const auto& cache_selection : cache_selections) {
-      read_from_cache(pm, cache_selection,
-                      base::Contains(expected_found_in, cache_selection));
-    }
-  }
+  EXPECT_TRUE(callback_called());
 }
 
 }  // namespace safe_browsing

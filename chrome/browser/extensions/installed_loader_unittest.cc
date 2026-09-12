@@ -5,35 +5,41 @@
 #include "chrome/browser/extensions/installed_loader.h"
 
 #include "base/test/metrics/histogram_tester.h"
-#include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/extension_service_test_base.h"
 #include "chrome/browser/extensions/extension_service_user_test_base.h"
-#include "chrome/browser/extensions/permissions_updater.h"
-#include "chrome/browser/extensions/scripting_permissions_modifier.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/test/base/testing_profile.h"
+#include "content/public/test/browser_task_environment.h"
+#include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/extension_registrar.h"
+#include "extensions/browser/extension_registry.h"
+#include "extensions/browser/permissions/permissions_updater.h"
+#include "extensions/browser/permissions/scripting_permissions_modifier.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension_builder.h"
 #include "extensions/common/extension_features.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 namespace {
 
 constexpr const char kHasWithheldHostsHistogram[] =
-    "Extensions.RuntimeHostPermissions.ExtensionHasWithheldHosts";
+    "Extensions.RuntimeHostPermissions.ExtensionHasWithheldHosts2";
 constexpr const char kGrantedHostCountHistogram[] =
-    "Extensions.RuntimeHostPermissions.GrantedHostCount";
+    "Extensions.RuntimeHostPermissions.GrantedHostCount2";
 constexpr const char kGrantedAccessHistogram[] =
-    "Extensions.HostPermissions.GrantedAccess";
+    "Extensions.HostPermissions.GrantedAccess2";
 constexpr const char kGrantedAccessForBroadRequestsHistogram[] =
-    "Extensions.HostPermissions.GrantedAccessForBroadRequests";
+    "Extensions.HostPermissions.GrantedAccessForBroadRequests2";
 constexpr const char kGrantedAccessForTargetedRequestsHistogram[] =
-    "Extensions.HostPermissions.GrantedAccessForTargetedRequests";
+    "Extensions.HostPermissions.GrantedAccessForTargetedRequests2";
 // Use an internal location for extensions since metrics aren't recorded for
 // unpacked extensions.
 constexpr mojom::ManifestLocation kManifestInternal =
@@ -47,6 +53,9 @@ struct HostPermissionsMetricsTestParams {
 
   // The host permissions the extension requests.
   std::vector<std::string> requested_host_permissions;
+
+  // Whether the extension requests activeTab.
+  bool requests_active_tab = false;
 
   // Whether the user enables host permission withholding for the extension.
   bool has_withholding_permissions = false;
@@ -68,7 +77,7 @@ struct HostPermissionsMetricsTestParams {
 
 class InstalledLoaderUnitTest : public ExtensionServiceUserTestBase {
  public:
-  InstalledLoaderUnitTest() {}
+  InstalledLoaderUnitTest() = default;
 
   InstalledLoaderUnitTest(const InstalledLoaderUnitTest&) = delete;
   InstalledLoaderUnitTest& operator=(const InstalledLoaderUnitTest&) = delete;
@@ -81,7 +90,8 @@ class InstalledLoaderUnitTest : public ExtensionServiceUserTestBase {
   }
 
   const Extension* AddExtension(const std::vector<std::string>& permissions,
-                                mojom::ManifestLocation location);
+                                mojom::ManifestLocation location,
+                                bool requests_active_tab = false);
 
   void RunHostPermissionsMetricsTest(HostPermissionsMetricsTestParams params);
 
@@ -90,16 +100,21 @@ class InstalledLoaderUnitTest : public ExtensionServiceUserTestBase {
 };
 
 const Extension* InstalledLoaderUnitTest::AddExtension(
-    const std::vector<std::string>& permissions,
-    mojom::ManifestLocation location) {
-  scoped_refptr<const Extension> extension = ExtensionBuilder("test")
-                                                 .AddPermissions(permissions)
-                                                 .SetLocation(location)
-                                                 .Build();
+    const std::vector<std::string>& host_permissions,
+    mojom::ManifestLocation location,
+    bool requests_active_tab) {
+  ExtensionBuilder builder("test");
+  builder.AddHostPermissions(host_permissions);
+  builder.SetLocation(location);
+  if (requests_active_tab) {
+    builder.AddAPIPermission("activeTab");
+  }
+
+  scoped_refptr<const Extension> extension = builder.Build();
   PermissionsUpdater updater(profile());
   updater.InitializePermissions(extension.get());
   updater.GrantActivePermissions(extension.get());
-  service()->AddExtension(extension.get());
+  registrar()->AddExtension(extension);
 
   return extension.get();
 }
@@ -107,7 +122,8 @@ const Extension* InstalledLoaderUnitTest::AddExtension(
 void InstalledLoaderUnitTest::RunHostPermissionsMetricsTest(
     HostPermissionsMetricsTestParams params) {
   const Extension* extension =
-      AddExtension(params.requested_host_permissions, params.manifest_location);
+      AddExtension(params.requested_host_permissions, params.manifest_location,
+                   params.requests_active_tab);
 
   ScriptingPermissionsModifier modifier(profile(), extension);
   if (params.has_withholding_permissions) {
@@ -122,7 +138,7 @@ void InstalledLoaderUnitTest::RunHostPermissionsMetricsTest(
   }
 
   base::HistogramTester histograms;
-  InstalledLoader loader(service());
+  InstalledLoader loader(profile());
   loader.RecordExtensionsMetricsForTesting();
 
   histograms.ExpectUniqueSample(kGrantedAccessHistogram,
@@ -154,13 +170,9 @@ void InstalledLoaderUnitTest::RunEmitUserHistogramsTest(
     int nonuser_expected_total_count,
     int user_expected_total_count) {
   base::HistogramTester histograms;
-  InstalledLoader loader(service());
-  loader.RecordExtensionsIncrementedMetricsForTesting(testing_profile());
+  InstalledLoader loader(profile());
+  loader.RecordExtensionsIncrementedMetricsForTesting(profile());
 
-  histograms.ExpectTotalCount("Extensions.LoadAllTime2", 1);
-  histograms.ExpectTotalCount("Extensions.LoadAll", 1);
-  histograms.ExpectTotalCount("Extensions.Disabled", 1);
-  histograms.ExpectTotalCount("Extensions.ManifestVersion", 1);
   histograms.ExpectTotalCount("Extensions.LoadAllTime2.NonUser",
                               nonuser_expected_total_count);
   histograms.ExpectTotalCount("Extensions.LoadAllTime2.User",
@@ -172,12 +184,52 @@ void InstalledLoaderUnitTest::RunEmitUserHistogramsTest(
                               user_expected_total_count);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+// Tests that some histograms that only emit for profiles that can use
+// non-component extensions do not emit as expected.
+TEST_F(InstalledLoaderUnitTest, UserMetrics_UserMetricsDoNotEmitForGuestUser) {
+  ASSERT_TRUE(AddExtension({"<all_urls>"}, kManifestInternal));
+  ASSERT_NO_FATAL_FAILURE(MaybeSetUpTestUser(/*is_guest=*/true));
+
+  RunEmitUserHistogramsTest(
+      /*nonuser_expected_total_count=*/1,
+      /*user_expected_total_count=*/0);
+}
+
+// This only differs from the parent class in that it explicitly logs-in a
+// "regular" user profile so the metrics record as expected.
+class InstalledLoaderUnitTestWithRegularUser : public InstalledLoaderUnitTest {
+ public:
+  InstalledLoaderUnitTestWithRegularUser() = default;
+
+  InstalledLoaderUnitTestWithRegularUser(
+      const InstalledLoaderUnitTestWithRegularUser&) = delete;
+  InstalledLoaderUnitTestWithRegularUser& operator=(
+      const InstalledLoaderUnitTestWithRegularUser&) = delete;
+
+  ~InstalledLoaderUnitTestWithRegularUser() override = default;
+
+  void SetUp() override {
+    InstalledLoaderUnitTest::SetUp();
+    ASSERT_NO_FATAL_FAILURE(MaybeSetUpTestUser(/*is_guest=*/false));
+  }
+};
+// Tests that some histograms that only emit for profiles that can use
+// non-component extensions emit as expected.
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
+       UserMetrics_UserMetricsEmitForRegularUser) {
+  ASSERT_TRUE(AddExtension({"<all_urls>"}, kManifestInternal));
+
+  RunEmitUserHistogramsTest(
+      /*nonuser_expected_total_count=*/0,
+      /*user_expected_total_count=*/1);
+}
+
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        RuntimeHostPermissions_Metrics_HasWithheldHosts_False) {
   AddExtension({"<all_urls>"}, kManifestInternal);
 
   base::HistogramTester histograms;
-  InstalledLoader loader(service());
+  InstalledLoader loader(profile());
   loader.RecordExtensionsMetricsForTesting();
 
   // The extension didn't have withheld hosts, so a single `false` record
@@ -188,14 +240,14 @@ TEST_F(InstalledLoaderUnitTest,
   histograms.ExpectTotalCount(kGrantedHostCountHistogram, 0);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        RuntimeHostPermissions_Metrics_HasWithheldHosts_True) {
   const Extension* extension = AddExtension({"<all_urls>"}, kManifestInternal);
   ScriptingPermissionsModifier(profile(), extension)
       .SetWithholdHostPermissions(true);
 
   base::HistogramTester histograms;
-  InstalledLoader loader(service());
+  InstalledLoader loader(profile());
   loader.RecordExtensionsMetricsForTesting();
 
   // The extension had withheld hosts, so a single `true` record should be
@@ -208,7 +260,7 @@ TEST_F(InstalledLoaderUnitTest,
                                 kEmitCount);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        RuntimeHostPermissions_Metrics_GrantedHostCount) {
   const Extension* extension = AddExtension({"<all_urls>"}, kManifestInternal);
   ScriptingPermissionsModifier modifier(profile(), extension);
@@ -217,7 +269,7 @@ TEST_F(InstalledLoaderUnitTest,
   modifier.GrantHostPermission(GURL("https://chromium.org/"));
 
   base::HistogramTester histograms;
-  InstalledLoader loader(service());
+  InstalledLoader loader(profile());
   loader.RecordExtensionsMetricsForTesting();
 
   histograms.ExpectUniqueSample(kHasWithheldHostsHistogram, true, 1);
@@ -228,7 +280,7 @@ TEST_F(InstalledLoaderUnitTest,
                                 kEmitCount);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_CannotAffect) {
   HostPermissionsMetricsTestParams params;
   // The extension is loaded from an external policy, so the user cannot
@@ -242,7 +294,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_CannotAffect_Broad_AllUrls) {
   HostPermissionsMetricsTestParams params;
   // The extension with host permissions is loaded from an external policy, so
@@ -255,7 +307,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_CannotAffect_Broad_Patterns) {
   HostPermissionsMetricsTestParams params;
   // The extension with host permissions is loaded from an external policy, so
@@ -268,7 +320,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_CannotAffect_Targeted) {
   HostPermissionsMetricsTestParams params;
   // The extension with host permissions is loaded from an external policy, so
@@ -282,7 +334,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_NotRequested) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -294,7 +346,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnClick_Broad_AllUrls) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -306,7 +358,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnClick_Broad_Pattern) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -318,7 +370,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnClick_Targeted) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -331,7 +383,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnSpecificSites_Broad_AllUrls) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -344,7 +396,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnSpecificSites_Broad_Pattern) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -357,7 +409,7 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnSpecificSites_Targeted) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -373,7 +425,7 @@ TEST_F(InstalledLoaderUnitTest,
 }
 
 TEST_F(
-    InstalledLoaderUnitTest,
+    InstalledLoaderUnitTestWithRegularUser,
     HostPermissions_Metrics_GrantedAccess_OnAllRequestedSites_Broad_AllUrls) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -385,7 +437,7 @@ TEST_F(
 }
 
 TEST_F(
-    InstalledLoaderUnitTest,
+    InstalledLoaderUnitTestWithRegularUser,
     HostPermissions_Metrics_GrantedAccess_OnAllRequestedSites_Broad_Pattern) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -396,7 +448,7 @@ TEST_F(
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnAllRequestedSites_Targeted) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
@@ -410,42 +462,17 @@ TEST_F(InstalledLoaderUnitTest,
   RunHostPermissionsMetricsTest(params);
 }
 
-TEST_F(InstalledLoaderUnitTest,
+TEST_F(InstalledLoaderUnitTestWithRegularUser,
        HostPermissions_Metrics_GrantedAccess_OnActiveTabOnly) {
   HostPermissionsMetricsTestParams params;
   params.manifest_location = kManifestInternal;
   // The extension has activeTab API permission and no host permissions, so host
   // permission access is on active tab only.
-  params.requested_host_permissions = {"activeTab"};
+  params.requests_active_tab = true;
   params.expected_access_level = HostPermissionsAccess::kOnActiveTabOnly;
   params.request_scope = HostPermissionsMetricsTestParams::RequestScope::kNone;
 
   RunHostPermissionsMetricsTest(params);
-}
-
-// TODO(crbug.com/1383740): After deleting the deprecated unincremented
-// histograms, consider modifying these to becomes less of change detectors in
-// metrics being modified.
-// Tests that some histograms that only emit for profiles that can use
-// non-component extensions emit as expected.
-TEST_F(InstalledLoaderUnitTest, UserMetrics_UserMetricsEmitForRegularUser) {
-  ASSERT_TRUE(AddExtension({"<all_urls>"}, kManifestInternal));
-  ASSERT_NO_FATAL_FAILURE(MaybeSetUpTestUser(/*is_guest=*/false));
-
-  RunEmitUserHistogramsTest(
-      /*nonuser_expected_total_count=*/0,
-      /*user_expected_total_count=*/1);
-}
-
-// Tests that some histograms that only emit for profiles that can use
-// non-component extensions do not emit as expected.
-TEST_F(InstalledLoaderUnitTest, UserMetrics_UserMetricsDoNotEmitForGuestUser) {
-  ASSERT_TRUE(AddExtension({"<all_urls>"}, kManifestInternal));
-  ASSERT_NO_FATAL_FAILURE(MaybeSetUpTestUser(/*is_guest=*/true));
-
-  RunEmitUserHistogramsTest(
-      /*nonuser_expected_total_count=*/1,
-      /*user_expected_total_count=*/0);
 }
 
 }  // namespace extensions

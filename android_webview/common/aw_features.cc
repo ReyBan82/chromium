@@ -3,69 +3,259 @@
 // found in the LICENSE file.
 
 #include "android_webview/common/aw_features.h"
+
+#include "base/feature.h"
 #include "base/feature_list.h"
 #include "base/metrics/field_trial_params.h"
 
-namespace android_webview {
-namespace features {
+namespace android_webview::features {
 
 // Alphabetical:
 
-// Enables package name logging for the most popular WebView embedders that are
-// on a dynamically generated allowlist.
-// The filtering for package names will be done on the server side using this
-// flag
-BASE_FEATURE(kWebViewAppsPackageNamesServerSideAllowlist,
-             "WebViewAppsPackageNamesServerSideAllowlist",
+// When enabled, creates a spare renderer for the default webview profile
+BASE_FEATURE(kCreateSpareRendererForDefaultProfile,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Enable brotli compression support in WebView.
-BASE_FEATURE(kWebViewBrotliSupport,
-             "WebViewBrotliSupport",
+// Post Chromium startup in the WebView constructor. Only has any effect
+// when kStartupNonBlockingWebViewConstructor is enabled.
+BASE_FEATURE(kPostChromiumStartupInWebViewConstructor,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Check layer_tree_frame_sink_id when return resources to compositor.
-BASE_FEATURE(kWebViewCheckReturnResources,
-             "WebViewCheckReturnResources",
+// When enabled, requests the compositor warm-up (crbug.com/41496019) for the
+// prerender trigger.
+BASE_FEATURE(kPrerender2WarmUpCompositorForWebView,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables non-blocking WebView constructor.
+BASE_FEATURE(kStartupNonBlockingWebViewConstructor,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, starts observing for Android OS accessibility changes on
+// startup.
+BASE_FEATURE(kWebViewObserveAccessibilityState,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Kill switch for Profile.addQuicHints.
+BASE_FEATURE(kWebViewAddQuicHints, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Preloads expensive classes that will be used by WebView on a background
+// thread.
+BASE_FEATURE(kWebViewAwClassPreloader, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Enable back/forward cache support in WebView. Note that this will only take
+// effect iff both this feature flag and the content/public kBackForwardCache
+// flag is enabled.
+BASE_FEATURE(kWebViewBackForwardCache, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables preloading WebView classes on a background thread during early
+// startup.
+BASE_FEATURE(kWebViewBackgroundClassPreloading,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Use the SafeBrowsingApiHandlerBridge which uses the connectionless GMS APIs.
-// This Feature is checked and used in downstream internal code.
-BASE_FEATURE(kWebViewConnectionlessSafeBrowsing,
-             "WebViewConnectionlessSafeBrowsing",
+// Enables tracing init on a background thread. This is mutually exclusive with
+// `kWebViewEarlyTracingInit`. If both flags are enabled,
+// `kWebViewEarlyTracingInit` will take precedent.
+BASE_FEATURE(kWebViewBackgroundTracingInit, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables boosting the renderer main thread priority during navigation.
+BASE_FEATURE(kWebViewBoostRendererPriorityOnNavigation,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Cache origins which have camera/mic permissions approved to allow subsequent
-// calls to enumerate devices to return device labels.
-BASE_FEATURE(kWebViewEnumerateDevicesCache,
-             "WebViewEnumerateDevicesCache",
+// Enables parsing a custom header passed by the WebView embedder during a
+// prefetch request that allows bypassing the HTTP cache for that request.
+// This is a kill switch, so it is enabled by default.
+// TODO(crbug.com/455296998): Remove this code for M145.
+BASE_FEATURE(kWebViewBypassHttpCacheForPrefetchFromHeader,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Enable WebView to automatically darken the page in FORCE_DARK_AUTO mode if
-// the app's theme is dark.
-BASE_FEATURE(kWebViewForceDarkModeMatchTheme,
-             "WebViewForceDarkModeMatchTheme",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kWebViewHitTestInBlinkOnTouchStart,
-             "WebViewHitTestInBlinkOnTouchStart",
+// When enabled, instead of using the 20MiB as the HTTP cache
+// limit, derive the value from the cache quota allocated to the app by the
+// Android framework.
+//
+// Each code cache's limit will be half the value of the HTTP cache limit.
+BASE_FEATURE(kWebViewCacheSizeLimitDerivedFromAppCacheQuota,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Enable display cutout support for Android P and above.
-BASE_FEATURE(kWebViewDisplayCutout,
-             "WebViewDisplayCutout",
-             base::FEATURE_ENABLED_BY_DEFAULT);
+// The multiplier that is used to compute the cache limit from the cache quota.
+const base::FeatureParam<double> kWebViewCacheSizeLimitMultiplier{
+    &kWebViewCacheSizeLimitDerivedFromAppCacheQuota,
+    "WebViewCacheSizeLimitMultiplier", 0.1};
 
-// Fake empty component to measure component updater performance impact on
-// WebView clients.
-BASE_FEATURE(kWebViewEmptyComponentLoaderPolicy,
-             "WebViewEmptyComponentLoaderPolicy",
+// The minimum HTTP cache size limit
+const base::FeatureParam<int> kWebViewCacheSizeLimitMinimum{
+    &kWebViewCacheSizeLimitDerivedFromAppCacheQuota,
+    "WebViewCacheSizeLimitMinimum", 20 * 1024 * 1024};
+
+// The maximum HTTP cache size limit
+const base::FeatureParam<int> kWebViewCacheSizeLimitMaximum{
+    &kWebViewCacheSizeLimitDerivedFromAppCacheQuota,
+    "WebViewCacheSizeLimitMaximum", 320 * 1024 * 1024};
+
+// The code cache limit is this multiplier times the HTTP cache limit
+const base::FeatureParam<double> kWebViewCodeCacheSizeLimitMultiplier{
+    &kWebViewCacheSizeLimitDerivedFromAppCacheQuota,
+    "WebViewCodeCacheSizeLimitMultiplier", 0.5};
+
+// Enables content restriction support in WebView.
+BASE_FEATURE(kWebViewContentRestrictionSupport,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Enable dns-prefetch and preconnect in link tags and HTTP header.
-BASE_FEATURE(kWebViewEnableDnsPrefetchAndPreconnect,
-             "WebViewEnableDnsPrefetchAndPreconnect",
+// Timeout duration for content restriction classification requests before
+// we give up and assume the platform is non-responsive.
+const base::FeatureParam<base::TimeDelta> kWebViewContentRestrictionTimeout{
+    &kWebViewContentRestrictionSupport, "WebViewContentRestrictionTimeout",
+    base::Seconds(10)};
+
+// Enables a simpler URL fixup implementation for URLs passed to CookieManager.
+BASE_FEATURE(kWebViewCookieManagerSimplerUrlFixups,
              base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables C++ UMA metrics filtering.
+BASE_FEATURE(kWebViewCppMetricsFiltering, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Enables the Cross Origin Isolated Allowlist API. The allowlist enables
+// developers to opt out of origin isolation requirements for certain features
+// who require it.
+BASE_FEATURE(kWebViewCrossOriginAllowlistApi, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// When enabled (which is the default state) a navigation will download a
+// Favicon. When disabled (which can be done through Finch or Flag UI) a
+// navigation will not download a Favicon.
+BASE_FEATURE(kWebViewDownloadFavicons, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Enables early Java startup tracing, which unconditionally collects timing
+// information and queues runnables to emit the trace events once Perfetto is
+// initialized. This flag does not affect tracing in native code.
+BASE_FEATURE(kWebViewEarlyStartupTracing, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables early tracing init. This will initialize tracing as soon as the
+// native library is loaded, which should make it available by the time we start
+// calling content code.
+BASE_FEATURE(kWebViewEarlyTracingInit, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables recording user actions for API calls.
+BASE_FEATURE(kWebViewEnableApiCallUserActions,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// This enables WebView crashes.
+BASE_FEATURE(kWebViewEnableCrash, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enables the resolution of hostnames via platform DNS APIs in WebView.
+BASE_FEATURE(kWebViewEnableDnsPlatform, base::FEATURE_DISABLED_BY_DEFAULT);
+const base::FeatureParam<bool> kWebViewEnableDnsPlatformNoSystem{
+    &kWebViewEnableDnsPlatform, "no_system", false};
+
+// When enabled, the default user agent string is fetched more quickly without
+// waiting for chromium startup to complete.
+BASE_FEATURE(kWebViewFasterGetDefaultUserAgent,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Enable JS FileSystemAccess API.
+// This flag is set by WebView internal code based on an app's targetSdkVersion.
+// It is enabled for version B+. The default value here is not relevant, and is
+// not expected to be manually changed.
+// TODO(b/364980165): Flag can be removed when SDK versions prior to B are no
+// longer supported.
+BASE_FEATURE(kWebViewFileSystemAccess, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Force the default WebAuthn state to be APP mode.
+BASE_FEATURE(kWebViewForceWebAuthn, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Gate text-size-adjust on whether the app called
+// setLayoutAlgorithm(TEXT_AUTOSIZING).
+BASE_FEATURE(kWebViewGateTextSizeAdjustOnTextAutosizing,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, memory is aggressively purged when WebView apps go to the
+// background.
+BASE_FEATURE(kWebViewPurgeMemoryInBackground,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+const base::FeatureParam<base::TimeDelta> kWebViewPurgeMemoryInBackgroundDelay{
+    &kWebViewPurgeMemoryInBackground, "purge_delay", base::Minutes(4)};
+
+// Partial kill switch for the HTTP Cache Quota API.
+//
+// When enabled, HTTP Cache quota can be configured by the WebView embedder.
+// When disabled, the setters are no-ops and defaults are restored.
+//
+// Note that getters still function regardless of whether this feature is
+// enabled, though they may not reflect any embedder configured values.
+BASE_FEATURE(kWebViewHttpCacheQuotaApi, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// When enabled, the quota for the Default profile may be configured.
+const base::FeatureParam<bool> kWebViewHttpCacheQuotaApiAllowForDefaultProfile{
+    &kWebViewHttpCacheQuotaApi, "AllowForDefaultProfile", true};
+
+// When enabled, the quota for a profile may be shrunk below the default quota.
+const base::FeatureParam<bool> kWebViewHttpCacheQuotaApiAllowShrinking{
+    &kWebViewHttpCacheQuotaApi, "AllowShrinking", true};
+
+// When enabled, quota changes are propagated to the network service at runtime,
+// without having to wait for an app restart.
+const base::FeatureParam<bool> kWebViewHttpCacheQuotaApiRuntimeUpdate{
+    &kWebViewHttpCacheQuotaApi, "RuntimeUpdate", true};
+
+// The minimum cache quota size that clamps any default or embedder-supplied
+// value. MUST be >= 1, and < 2**31.
+const base::FeatureParam<int> kWebViewHttpCacheQuotaApiMinimum{
+    &kWebViewHttpCacheQuotaApi, "Minimum", 5 * 1024 * 1024};
+
+// The maximum cache quota size that clamps any default or embedder-supplied
+// value. MUST be >= Minimum.
+//
+// 320MiB is chosen as the default because it mirrors the upper limits used in
+// both android_webview's and net's default quota logic, and greater values
+// haven't previously been tested in WebView.
+const base::FeatureParam<int> kWebViewHttpCacheQuotaApiMaximum{
+    &kWebViewHttpCacheQuotaApi, "Maximum", 320 * 1024 * 1024};
+
+// When enabled, the code cache quota is derived from the embedder-supplied HTTP
+// cache quota. When disabled, it is instead derived from the default HTTP cache
+// quota size.
+const base::FeatureParam<bool> kWebViewHttpCacheQuotaApiAffectsCodeCache{
+    &kWebViewHttpCacheQuotaApi, "AffectsCodeCache", true};
+
+// When enabled, using the cache quota API will initialize the cache backend if
+// it has not already been initialized. This may trigger evictions more readily.
+const base::FeatureParam<bool> kWebViewHttpCacheQuotaApiForceBackendInit{
+    &kWebViewHttpCacheQuotaApi, "ForceBackendInit", true};
+
+// This enables WebView's hyperlink context menu.
+BASE_FEATURE(kWebViewHyperlinkContextMenu, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Controls whether we ignore duplicate navigations or not, in favor of
+// preserving the already ongoing navigation.
+BASE_FEATURE(kWebViewIgnoreDuplicateNavs, base::FEATURE_DISABLED_BY_DEFAULT);
+
+const base::FeatureParam<base::TimeDelta> kWebViewDuplicateNavThreshold{
+    &kWebViewIgnoreDuplicateNavs, "duplicate_nav_threshold", base::Seconds(3)};
+
+// When enabled, runs WebView initialization during WebViewChromium constructor
+// rather than waiting for the framework to call init().
+BASE_FEATURE(kWebViewInitInConstructor, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// If enabled zoom picker is invoked on every kGestureScrollUpdate consumed ack,
+// otherwise the zoom picker is persistently shown from scroll start to scroll
+// end plus the usual delay in hiding.
+BASE_FEATURE(kWebViewInvokeZoomPickerOnGSU, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, cookie policy settings are captured at RestrictedCookieManager
+// creation time and used throughout its lifetime. This enables shared memory
+// cookie versioning to reduce IPC overhead.
+BASE_FEATURE(kWebViewLatchedCookiePolicy, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Install the profiling client with memory_system::Initializer. If this is
+// enabled the profiler MAY be started by
+// HeapProfilerController::StartIfEnabled, which is controlled by the
+// cross-platform features in
+// components/heap_profiling/in_process/heap_profiler_parameters.h. Otherwise
+// the profiler will never be started.
+BASE_FEATURE(kWebViewMemoryProfilingClient, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Migrates WebView's visited links database to the new partitioned database
+// structure without performing actual partitioning.
+BASE_FEATURE(kWebViewMigrateVisitedLinks, base::FEATURE_DISABLED_BY_DEFAULT);
 
 // When enabled, passive mixed content (Audio/Video/Image subresources loaded
 // over HTTP on HTTPS sites) will be autoupgraded to HTTPS, and the load will be
@@ -74,102 +264,205 @@ BASE_FEATURE(kWebViewEnableDnsPrefetchAndPreconnect,
 // are always disabled for MIXED_CONTENT_NEVER_ALLOW and
 // MIXED_CONTENT_ALWAYS_ALLOW modes.
 BASE_FEATURE(kWebViewMixedContentAutoupgrades,
-             "WebViewMixedContentAutoupgrades",
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Only allow extra headers added via loadUrl() to be sent to the original
-// origin; strip them from the request if a cross-origin redirect occurs.
-BASE_FEATURE(kWebViewExtraHeadersSameOriginOnly,
-             "WebViewExtraHeadersSameOriginOnly",
+// Moves some of the work that is being run during
+// `startChromium` to be done beforehand during WebView provider
+// initialization. This is expected to improve startup performance especially
+// when async startup takes place.
+BASE_FEATURE(kWebViewMoveWorkToProviderInit, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, WebViewMoveWorkToProviderInit tasks are run on a posted task
+// instead of synchronously during WebView provider initialization. Only has any
+// effect if `kWebViewMoveWorkToProviderInit` is also enabled.
+BASE_FEATURE(kWebViewMoveWorkToProviderInitThreadPool,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Enable the new Java/JS Bridge code path with mojo implementation.
-BASE_FEATURE(kWebViewJavaJsBridgeMojo,
-             "WebViewJavaJsBridgeMojo",
+// When enabled, accessing multi-profile APIs skips automatic initialization
+// of the Default profile during startup.
+BASE_FEATURE(kWebViewMultiProfileSkipDefaultProfile,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Measure the number of pixels occupied by one or more WebViews as a
-// proportion of the total screen size. Depending on the number of
-// WebVieaws and the size of the screen this might be expensive so
-// hidden behind a feature flag until the true runtime cost can be
-// measured.
-BASE_FEATURE(kWebViewMeasureScreenCoverage,
-             "WebViewMeasureScreenCoverage",
+// Kill switch for the WebView Navigate method.
+BASE_FEATURE(kWebViewNavigate, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Kill switch for draining the prefetch queue prior to loading the URL in the
+// WebView Navigate method.
+BASE_FEATURE(kWebViewNavigateDrainPrefetch, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// When enabled, the provisional cookie store is properly closed before the
+// Network Service opens the database, fixing race conditions that can cause
+// cookie loss and CHECK failures when cookies are set before WebView is fully
+// initialized.
+BASE_FEATURE(kWebViewNonBlockingCookieStoreHandoff,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, opts in WebView to GMSCore's bindService optimizations.
+BASE_FEATURE(kWebViewOptInToGmsBindServiceOptimization,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, WebView stores the persistent metrics files in the
+// app's non-backed-up files directory instead of the app's data directory.
+BASE_FEATURE(kWebViewPersistentMetricsInNoBackupDir,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Field trial feature for controlling support of Origin Trials on WebView.
-BASE_FEATURE(kWebViewOriginTrials,
-             "WebViewOriginTrials",
+// When enabled, HttpServerProperties will be persisted to disk across
+// app restarts.
+BASE_FEATURE(kWebViewPersistHttpServerProperties,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Whether to record size of the embedding app's data directory to the UMA
-// histogram Android.WebView.AppDataDirectorySize.
-BASE_FEATURE(kWebViewRecordAppDataDirectorySize,
-             "WebViewRecordAppDataDirectorySize",
+BASE_FEATURE(kWebViewPrefetchAheadOfPrerender,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Flag to restrict main frame Web Content to verified web content. Verification
-// happens via Digital Asset Links.
-BASE_FEATURE(kWebViewRestrictSensitiveContent,
-             "WebViewRestrictSensitiveContent",
+// Prefetches the native WebView code to memory during startup.
+BASE_FEATURE(kWebViewPrefetchNativeLibrary, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// A parameter to trigger the prefetch from the renderer instead of the browser.
+const base::FeatureParam<bool> kWebViewPrefetchFromRenderer{
+    &kWebViewPrefetchNativeLibrary, "WebViewPrefetchFromRenderer", true};
+
+// This enables to start main resource prefetch request from off the main thread
+// for WebView Prefetch API. See crbug.com/452406598, crbug.com/452389538 for
+// more details. Only takes effect if `kPrefetchOffTheMainThread` is enabled
+// as well.
+BASE_FEATURE(kWebViewPrefetchOffTheMainThread,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Disallows window.{alert, prompt, confirm} if triggered inside a subframe that
-// is not same origin with the main frame.
-BASE_FEATURE(kWebViewSuppressDifferentOriginSubframeJSDialogs,
-             "WebViewSuppressDifferentOriginSubframeJSDialogs",
+// Prefetches the native WebView code to memory when renderer is reused.
+BASE_FEATURE(kWebViewPrefetchOnRendererReuse,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// A Feature used for WebView variations tests. Not used in production.
-BASE_FEATURE(kWebViewTestFeature,
-             "WebViewTestFeature",
+// When enabled, stale `AwPrefetchHandleWrapper`s in `AwPrefetchManagerData` are
+// proactively pruned when new prefetch requests are added or reserved.
+BASE_FEATURE(kWebViewPrefetchPruneStaleWrappers,
              base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Kill switch for reporting `PreloadServingMetrics` for WebView.
+BASE_FEATURE(kWebViewPreloadServingMetrics, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Enables lazy profile creation in WebView.
+BASE_FEATURE(kWebViewProfileStoreNotTriggerStartup,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Propagate Android's network change notification signals to the networking
+// stack. This only propagates the following notifications:
+// * OnNetworkConnected
+// * OnNetworkDisconnected
+// * OnNetworkMadeDefault
+// * OnNetworkSoonToDisconnect.
+// AreNetworkHandlesCurrentlySupported is also controlled through this flag.
+BASE_FEATURE(kWebViewPropagateNetworkChangeSignals,
+             "webViewPropagateNetworkChangeSignals",
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+// When enabled, records histograms relating to app's cache size.
+BASE_FEATURE(kWebViewRecordAppCacheHistograms,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Reduce when the app's copy of the finch seed expires. This makes WebView more
+// aggressive in requesting a new copy of its finch seed.
+BASE_FEATURE(kWebViewReducedSeedExpiration, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// This flag reduces the minimum amount of time before WebView can request a new
+// seed. This, in conjunction with kWebViewReducedSeedExpiration, should mean
+// more up-to-date copies of finch seeds.
+BASE_FEATURE(kWebViewReducedSeedRequestPeriod,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// This enables reducing webview user-agent android version and device model.
+BASE_FEATURE(kWebViewReduceUAAndroidVersionDeviceModel,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, WebView support for Instant Apps is removed.
+BASE_FEATURE(kWebViewRemoveInstantAppSupport,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// This enables RenderDocument in WebView. Note that this will only take effect
+// iff both this feature flag and the content/public kRenderDocument flag is
+// enabled.
+BASE_FEATURE(kWebViewRenderDocument, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Keeps the renderer process alive after the last WebView is destroyed to
+// allow for reuse.
+BASE_FEATURE(kWebViewRendererKeepAlive, base::FEATURE_ENABLED_BY_DEFAULT);
+
+const base::FeatureParam<base::TimeDelta> kWebViewRendererKeepAliveDuration{
+    &kWebViewRendererKeepAlive, "webview_renderer_keep_alive_duration",
+    base::Days(1000)};
+
+// Enables using a single shared gpu::SharedContextState across all
+// OutputSurfaceProviderWebView instances.
+BASE_FEATURE(kWebViewSingleSharedContextState,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, navigation headers will be saved and restored as part
+// of saved state for WebView.
+BASE_FEATURE(kWebViewSaveStateIncludeHeaders, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Kill switch for WebSettings setShouldDownloadFavicons method.
+BASE_FEATURE(kWebViewSetDownloadFaviconsEnabled,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Whether to skip shouldInterceptRequest and other checks for prefetch
+// requests.
+BASE_FEATURE(kWebViewSkipInterceptsForPrefetch,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+// When enabled, certain static methods in SharedStatics do not trigger startup.
+BASE_FEATURE(kWebViewStaticMethodsNotTriggerStartup,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Kill switch for updating RfhToIoThreadClientMap on SubFrameCreated IPC.
+// When enabled, the map is not updated from the SubFrameCreated IPC.
+// TODO(crbug.com/497094708): Remove this flag and apply
+// https://crrev.com/c/8159020 in ~5 months (~January 2027).
+BASE_FEATURE(kWebViewSubFrameCreatedDoNotUpdateClientMap,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+// A Feature used for WebView variations tests. Not used in production. Please
+// do not clean up this stale feature: we intentionally keep this feature flag
+// around for testing purposes.
+BASE_FEATURE(kWebViewTestFeature, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// A no-op feature flag used to verify that the nonembedded low entropy source
+// pipeline for Finch experiments is working correctly. This feature is not
+// intended to be used to gate any production code.
+BASE_FEATURE(kWebViewTestNonembeddedLowEntropySource,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Provide the unreduced product version from the AwContentBrowserClient API,
+// regardless of the user agent reduction policy.
+BASE_FEATURE(kWebViewUnreducedProductVersion, base::FEATURE_ENABLED_BY_DEFAULT);
 
 // Use WebView's nonembedded MetricsUploadService to upload UMA metrics instead
-// of sending it directly to GMS-core.
-BASE_FEATURE(kWebViewUseMetricsUploadService,
-             "WebViewUseMetricsUploadService",
+// of sending it directly to GMS-core when running within the SDK Runtime.
+BASE_FEATURE(kWebViewUseMetricsUploadServiceOnlySdkRuntime,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Enable raster in wide color gamut for apps that use webview in a wide color
-// gamut activity.
-BASE_FEATURE(kWebViewWideColorGamutSupport,
-             "WebViewWideColorGamutSupport",
+// If enabled, all the layered studies in WebView will use WebView low entropy
+// source instead of the app's low entropy source.
+BASE_FEATURE(kWebViewUseWVLESForLayeredStudy,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, binds FrameSinkManager as a DirectReceiver, allowing IPCs
+// targeting that interface, and any other interfaces passed through it to
+// arrive without the intermediate I/O thread hop.
+BASE_FEATURE(kWebViewVizDirectCompositorThreadIpcFrameSinkManager,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, eagerly warms up the Network Service during early native
+// browser process startup in WebView.
+BASE_FEATURE(kWebViewWarmupNetworkService, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// When enabled, WebAuthn requests are blocked on pages with TLS/SSL errors.
+BASE_FEATURE(kWebViewWebAuthnRequiresSecureOrigin,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-// Control the default behaviour for the XRequestedWith header
-BASE_FEATURE(kWebViewXRequestedWithHeaderControl,
-             "WebViewXRequestedWithHeaderControl",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-// Default value of the XRequestedWith header mode when
-// WebViewXRequestedWithHeaderControl is enabled. Defaults to
-// |AwSettings::RequestedWithHeaderMode::NO_HEADER| Must be value declared in in
-// |AwSettings::RequestedWithHeaderMode|
-const base::FeatureParam<int> kWebViewXRequestedWithHeaderMode{
-    &kWebViewXRequestedWithHeaderControl, "WebViewXRequestedWithHeaderMode", 0};
-
-// Control whether WebView will attempt to read the XRW header allow-list from
-// the manifest.
-BASE_FEATURE(kWebViewXRequestedWithHeaderManifestAllowList,
-             "WebViewXRequestedWithHeaderManifestAllowList",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-// This enables image drage out for Webview.
-BASE_FEATURE(kWebViewImageDrag,
-             "WebViewImageDrag",
+// Kill switch for reporting web performance metrics.
+BASE_FEATURE(kWebViewWebPerformanceMetricsReporting,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-// This enables uploading UMA data with a higher frequency.
-// This Feature is checked and used in downstream internal code.
-BASE_FEATURE(kWebViewUmaUploadQualityOfServiceSetToDefault,
-             "WebViewUmaUploadQualityOfServiceSetToDefault",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+// Don't add new features to the end! Insert them in alphabetical order to
+// reduce conflicts.
 
-// This enables zoom keyboard shortcuts for zoom-in, zoom-out and zoom reset.
-BASE_FEATURE(kWebViewZoomKeyboardShortcuts,
-             "WebViewZoomKeyboardShortcuts",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-}  // namespace features
-}  // namespace android_webview
+}  // namespace android_webview::features

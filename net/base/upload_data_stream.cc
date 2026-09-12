@@ -14,22 +14,22 @@ namespace net {
 
 namespace {
 
-base::Value NetLogInitEndInfoParams(int result,
-                                    int total_size,
-                                    bool is_chunked) {
-  base::Value::Dict dict;
+base::DictValue NetLogInitEndInfoParams(int result,
+                                        int total_size,
+                                        bool is_chunked) {
+  base::DictValue dict;
 
   dict.Set("net_error", result);
   dict.Set("total_size", total_size);
   dict.Set("is_chunked", is_chunked);
-  return base::Value(std::move(dict));
+  return dict;
 }
 
-base::Value CreateReadInfoParams(int current_position) {
-  base::Value::Dict dict;
+base::DictValue CreateReadInfoParams(int current_position) {
+  base::DictValue dict;
 
   dict.Set("current_position", current_position);
-  return base::Value(std::move(dict));
+  return dict;
 }
 
 }  // namespace
@@ -70,6 +70,7 @@ int UploadDataStream::Read(IOBuffer* buf,
                            CompletionOnceCallback callback) {
   DCHECK(!callback.is_null() || IsInMemory());
   DCHECK(initialized_successfully_);
+  CHECK(buf);
   DCHECK_GT(buf_len, 0);
 
   net_log_.BeginEvent(NetLogEventType::UPLOAD_DATA_STREAM_READ,
@@ -83,6 +84,9 @@ int UploadDataStream::Read(IOBuffer* buf,
     DCHECK(!IsInMemory());
     callback_ = std::move(callback);
   } else {
+    if (result < ERR_IO_PENDING) {
+      LOG(ERROR) << "ReadInternal failed with Error: " << result;
+    }
     OnReadCompleted(result);
   }
 
@@ -169,9 +173,10 @@ void UploadDataStream::OnReadCompleted(int result) {
   if (result > 0) {
     current_position_ += result;
     if (!is_chunked_) {
-      DCHECK_LE(current_position_, total_size_);
-      if (current_position_ == total_size_)
+      CHECK_LE(current_position_, total_size_);
+      if (current_position_ == total_size_) {
         is_eof_ = true;
+      }
     }
   }
 

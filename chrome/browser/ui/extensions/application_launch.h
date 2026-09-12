@@ -6,11 +6,11 @@
 #define CHROME_BROWSER_UI_EXTENSIONS_APPLICATION_LAUNCH_H_
 
 #include "base/functional/callback.h"
-#include "chrome/browser/apps/app_service/app_launch_params.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "url/gurl.h"
 
-class Browser;
+class BrowserWindowInterface;
 class Profile;
 
 namespace base {
@@ -20,11 +20,11 @@ class FilePath;
 
 namespace content {
 class WebContents;
-}
+}  // namespace content
 
 namespace extensions {
 class Extension;
-}
+}  // namespace extensions
 
 enum class WindowOpenDisposition;
 
@@ -39,13 +39,14 @@ content::WebContents* OpenApplication(Profile* profile,
 
 // Create the application in a way specified by |params| in a new window but
 // delaying activating and showing it.
-Browser* CreateApplicationWindow(Profile* profile,
-                                 const apps::AppLaunchParams& params,
-                                 const GURL& url);
+BrowserWindowInterface* CreateApplicationWindow(
+    Profile* profile,
+    const apps::AppLaunchParams& params,
+    const GURL& url);
 
 // Navigate application window to application url, but do not show it yet.
 content::WebContents* NavigateApplicationWindow(
-    Browser* browser,
+    BrowserWindowInterface* browser,
     const apps::AppLaunchParams& params,
     const GURL& url,
     WindowOpenDisposition disposition);
@@ -61,8 +62,7 @@ content::WebContents* OpenApplicationWindow(Profile* profile,
 // and shortcuts that open an installed application.  This function
 // is used to open the former.  To open the latter, use
 // application_launch::OpenApplication().
-content::WebContents* OpenAppShortcutWindow(Profile* profile,
-                                            const GURL& url);
+content::WebContents* OpenAppShortcutWindow(Profile* profile, const GURL& url);
 
 // Whether the extension can be launched by sending a
 // chrome.app.runtime.onLaunched event.
@@ -78,13 +78,7 @@ void LaunchAppWithCallback(
     const std::string& app_id,
     const base::CommandLine& command_line,
     const base::FilePath& current_directory,
-    base::OnceCallback<void(Browser* browser, apps::LaunchContainer container)>
-        callback);
-
-// Shows the browser for |profile| if existent, otherwise attempts to open it.
-// Returns true if browser window already exists or if it was successfully
-// launched.
-bool ShowBrowserForProfile(Profile* profile,
-                           const apps::AppLaunchParams& params);
+    base::OnceCallback<void(BrowserWindowInterface* browser,
+                            apps::LaunchContainer container)> callback);
 
 #endif  // CHROME_BROWSER_UI_EXTENSIONS_APPLICATION_LAUNCH_H_

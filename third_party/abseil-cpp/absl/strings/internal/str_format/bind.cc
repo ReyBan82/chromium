@@ -14,10 +14,24 @@
 
 #include "absl/strings/internal/str_format/bind.h"
 
+#include <algorithm>
+#include <cassert>
 #include <cerrno>
+#include <cstddef>
+#include <cstdio>
+#include <ios>
 #include <limits>
+#include <ostream>
 #include <sstream>
 #include <string>
+#include "absl/base/config.h"
+#include "absl/base/optimization.h"
+#include "absl/strings/internal/str_format/arg.h"
+#include "absl/strings/internal/str_format/constexpr_parser.h"
+#include "absl/strings/internal/str_format/extension.h"
+#include "absl/strings/internal/str_format/output.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -90,6 +104,8 @@ inline bool ArgContext::Bind(const UnboundConversion* unbound,
     } else {
       FormatConversionSpecImplFriend::SetFlags(unbound->flags, bound);
     }
+
+    FormatConversionSpecImplFriend::SetLengthMod(unbound->length_mod, bound);
   } else {
     FormatConversionSpecImplFriend::SetFlags(unbound->flags, bound);
     FormatConversionSpecImplFriend::SetWidth(-1, bound);
@@ -215,7 +231,7 @@ std::string& AppendPack(std::string* out, const UntypedFormatSpecImpl format,
   return *out;
 }
 
-std::string FormatPack(const UntypedFormatSpecImpl format,
+std::string FormatPack(UntypedFormatSpecImpl format,
                        absl::Span<const FormatArgImpl> args) {
   std::string out;
   if (ABSL_PREDICT_FALSE(!FormatUntyped(&out, format, args))) {
@@ -235,7 +251,7 @@ int FprintF(std::FILE* output, const UntypedFormatSpecImpl format,
     errno = sink.error();
     return -1;
   }
-  if (sink.count() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+  if (sink.count() > size_t{std::numeric_limits<int>::max()}) {
     errno = EFBIG;
     return -1;
   }
@@ -251,6 +267,10 @@ int SnprintF(char* output, size_t size, const UntypedFormatSpecImpl format,
   }
   size_t total = sink.total_written();
   if (size) output[std::min(total, size - 1)] = 0;
+  if (total > size_t{std::numeric_limits<int>::max()}) {
+    errno = EFBIG;
+    return -1;
+  }
   return static_cast<int>(total);
 }
 

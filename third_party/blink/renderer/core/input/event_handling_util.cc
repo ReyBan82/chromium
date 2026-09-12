@@ -4,16 +4,20 @@
 
 #include "third_party/blink/renderer/core/input/event_handling_util.h"
 
+#include "base/feature_list.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/input/web_mouse_event.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/flat_tree_traversal.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
+#include "third_party/blink/renderer/core/frame/web_frame_widget_impl.h"
+#include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+#include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/layout/layout_embedded_content.h"
 #include "third_party/blink/renderer/core/layout/layout_view.h"
-#include "third_party/blink/renderer/core/paint/paint_layer.h"
-#include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
-#include "third_party/blink/renderer/core/scroll/scrollable_area.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 namespace event_handling_util {
@@ -28,9 +32,14 @@ HitTestResult HitTestResultInFrame(
   if (!frame || !frame->ContentLayoutObject())
     return result;
   if (LocalFrameView* frame_view = frame->View()) {
-    PhysicalRect rect(PhysicalOffset(), PhysicalSize(frame_view->Size()));
-    if (!location.Intersects(rect))
-      return result;
+    if (!RuntimeEnabledFeatures::UnboundedElementEnabled() ||
+        !frame->GetDocument() ||
+        !frame->GetDocument()->HasActiveUnboundedElements()) {
+      PhysicalRect rect(PhysicalOffset(), PhysicalSize(frame_view->Size()));
+      if (!location.Intersects(rect)) {
+        return result;
+      }
+    }
   }
   frame->ContentLayoutObject()->HitTest(location, result);
   return result;
@@ -69,36 +78,11 @@ WebInputEventResult ToWebInputEventResult(DispatchEventResult result) {
       return WebInputEventResult::kHandledSuppressed;
     default:
       NOTREACHED();
-      return WebInputEventResult::kHandledSystem;
   }
-}
-
-PaintLayer* LayerForNode(Node* node) {
-  if (!node)
-    return nullptr;
-
-  LayoutObject* layout_object = node->GetLayoutObject();
-  if (!layout_object)
-    return nullptr;
-
-  PaintLayer* layer = layout_object->EnclosingLayer();
-  if (!layer)
-    return nullptr;
-
-  return layer;
 }
 
 bool IsInDocument(EventTarget* n) {
   return n && n->ToNode() && n->ToNode()->isConnected();
-}
-
-ScrollableArea* AssociatedScrollableArea(const PaintLayer* layer) {
-  if (PaintLayerScrollableArea* scrollable_area = layer->GetScrollableArea()) {
-    if (scrollable_area->ScrollsOverflow())
-      return scrollable_area;
-  }
-
-  return nullptr;
 }
 
 ContainerNode* ParentForClickEvent(const Node& node) {
@@ -130,6 +114,19 @@ MouseEventWithHitTestResults PerformMouseEventHitTest(
 
 bool ShouldDiscardEventTargetingFrame(const WebInputEvent& event,
                                       const LocalFrame& frame) {
+  // Under certain circumstances, we discard input events to a recently moved
+  // iframe that is cross-origin to any of its ancestor frames:
+  //
+  // - If javascript in the frame's context is using
+  //   IntersectionObserver V2 to track the visibility of an element, we
+  //   interpret that as a strong signal that the frame is interested in
+  //   preventing mis-clicks. This behavior was added by:
+  //   https://chromium-review.googlesource.com/c/chromium/src/+/1686824
+  //
+  // - The feature flag kDiscardInputEventsToRecentlyMovedFrames expands this
+  //   behavior to all cross-origin iframes, regardless of whether they are
+  //   using IntersectionObserver V2.
+  //
   // There are two different mechanisms for tracking whether an iframe has moved
   // recently, for OOPIF and in-process iframes. For OOPIF's, frame movement is
   // tracked in the browser process using hit test data, and it's propagated in
@@ -137,11 +134,18 @@ bool ShouldDiscardEventTargetingFrame(const WebInputEvent& event,
   // during lifecycle updates, in FrameView::UpdateViewportIntersection, and
   // propagated via FrameView::RectInParentIsStable.
   bool should_discard = false;
-  if (frame.NeedsOcclusionTracking() &&
-      frame.IsCrossOriginToOutermostMainFrame()) {
-    should_discard =
-        (event.GetModifiers() & WebInputEvent::kTargetFrameMovedRecently) ||
-        !frame.View()->RectInParentIsStable(event.TimeStamp());
+  if (frame.HasCrossOriginAncestorFrame()) {
+    if (frame.NeedsOcclusionTracking()) {
+      should_discard =
+          (event.GetModifiers() &
+           WebInputEvent::kTargetFrameMovedRecentlyForIOv2) ||
+          !frame.View()->RectInParentIsStableForIOv2(event.TimeStamp());
+    } else if (base::FeatureList::IsEnabled(
+                   features::kDiscardInputEventsToRecentlyMovedFrames)) {
+      should_discard =
+          (event.GetModifiers() & WebInputEvent::kTargetFrameMovedRecently) ||
+          !frame.View()->RectInParentIsStable(event.TimeStamp());
+    }
   }
   if (should_discard) {
     UseCounter::Count(frame.GetDocument(),
@@ -171,14 +175,69 @@ LocalFrame* SubframeForTargetNode(Node* node, bool* is_remote_frame) {
   return &local_frame_view->GetFrame();
 }
 
+std::optional<UnboundedSubframeHitTestResult> SubframeForActiveUnboundedElement(
+    LocalFrame* from_frame,
+    const gfx::PointF& point_in_root_frame) {
+  if (!RuntimeEnabledFeatures::UnboundedElementEnabled() || !from_frame) {
+    return std::nullopt;
+  }
+  auto* web_frame = WebLocalFrameImpl::FromFrame(&from_frame->LocalFrameRoot());
+  if (!web_frame) {
+    return std::nullopt;
+  }
+  auto* widget = web_frame->FrameWidgetImpl();
+  if (!widget) {
+    return std::nullopt;
+  }
+  auto* active_element = widget->GetActiveUnboundedElement();
+  if (!active_element) {
+    return std::nullopt;
+  }
+  auto* subframe = active_element->GetDocument().GetFrame();
+  if (!subframe || subframe == from_frame ||
+      !subframe->Tree().IsDescendantOf(from_frame) ||
+      !subframe->ContentLayoutObject()) {
+    return std::nullopt;
+  }
+  PhysicalOffset subframe_point =
+      ContentPointFromRootFrame(subframe, point_in_root_frame);
+  HitTestLocation subframe_location(subframe_point);
+  HitTestRequest request(HitTestRequest::kReadOnly |
+                         HitTestRequest::kIgnoreClipping |
+                         HitTestRequest::kAllowChildFrameContent);
+  HitTestResult subframe_result(request, subframe_location);
+  if (!subframe->ContentLayoutObject()->HitTest(subframe_location,
+                                                subframe_result)) {
+    return std::nullopt;
+  }
+  Node* inner_node = subframe_result.InnerNode();
+  if (!inner_node || (inner_node != active_element &&
+                      !inner_node->IsDescendantOf(active_element))) {
+    return std::nullopt;
+  }
+  return UnboundedSubframeHitTestResult{
+      .frame = subframe,
+      .location = subframe_location,
+      .result = subframe_result,
+  };
+}
+
 LocalFrame* GetTargetSubframe(
     const MouseEventWithHitTestResults& hit_test_result,
-    Node* capturing_node,
     bool* is_remote_frame) {
-  if (!hit_test_result.IsOverEmbeddedContentView())
-    return nullptr;
+  if (hit_test_result.IsOverEmbeddedContentView()) {
+    return SubframeForTargetNode(hit_test_result.InnerNode(), is_remote_frame);
+  }
 
-  return SubframeForTargetNode(hit_test_result.InnerNode(), is_remote_frame);
+  if (Node* inner_node = hit_test_result.InnerNode()) {
+    if (auto unbounded_result = SubframeForActiveUnboundedElement(
+            inner_node->GetDocument().GetFrame(),
+            hit_test_result.Event().PositionInRootFrame())) {
+      return unbounded_result->frame;
+    }
+  }
+
+  return nullptr;
 }
 
 void PointerEventTarget::Trace(Visitor* visitor) const {

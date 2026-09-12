@@ -7,6 +7,8 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/scoped_observation.h"
 #include "base/time/clock.h"
 #include "base/time/default_clock.h"
@@ -16,6 +18,7 @@
 #include "chromeos/ash/components/login/auth/auth_status_consumer.h"
 
 class PrefRegistrySimple;
+class PrefService;
 
 namespace reporting {
 
@@ -50,10 +53,16 @@ class LoginLogoutReporter : public policy::ManagedSessionService::Observer {
 
   ~LoginLogoutReporter() override;
 
+  // `local_state` must be non-null and must be valid while the main RunLoop is
+  // running.
   static std::unique_ptr<LoginLogoutReporter> Create(
+      PrefService* local_state,
       policy::ManagedSessionService* managed_session_service);
 
+  // `local_state` must be non-null and must be valid while the main RunLoop is
+  // running.
   static std::unique_ptr<LoginLogoutReporter> CreateForTest(
+      PrefService* local_state,
       std::unique_ptr<::reporting::UserEventReporterHelper> reporter_helper,
       std::unique_ptr<Delegate> delegate,
       policy::ManagedSessionService* managed_session_service,
@@ -73,7 +82,10 @@ class LoginLogoutReporter : public policy::ManagedSessionService::Observer {
   void OnKioskLoginFailure() override;
 
  private:
+  // `local_state` must be non-null and must be valid while the main RunLoop is
+  // running.
   LoginLogoutReporter(
+      PrefService* local_state,
       std::unique_ptr<::reporting::UserEventReporterHelper> reporter_helper,
       std::unique_ptr<Delegate> delegate,
       policy::ManagedSessionService* managed_session_service,
@@ -83,6 +95,8 @@ class LoginLogoutReporter : public policy::ManagedSessionService::Observer {
 
   void MaybeReportKioskLoginFailure();
 
+  const raw_ref<PrefService> local_state_;
+
   std::unique_ptr<::reporting::UserEventReporterHelper> reporter_helper_;
 
   std::unique_ptr<Delegate> delegate_;
@@ -91,7 +105,7 @@ class LoginLogoutReporter : public policy::ManagedSessionService::Observer {
                           policy::ManagedSessionService::Observer>
       managed_session_observation_{this};
 
-  base::Clock* const clock_;
+  const raw_ptr<base::Clock> clock_;
 
   // To be able to access |kEnableKioskAndGuestLoginLogoutReporting| in tests.
   friend class LoginLogoutTestHelper;

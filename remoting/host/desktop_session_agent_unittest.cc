@@ -12,10 +12,10 @@
 #include "base/location.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
-#include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "ipc/ipc_channel_proxy.h"
 #include "ipc/ipc_listener.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
@@ -61,17 +61,12 @@ class FakeListener : public IPC::Listener {
 
  private:
   // IPC::Listener implementation.
-  bool OnMessageReceived(const IPC::Message& message) override;
   void OnAssociatedInterfaceRequest(
       const std::string& interface_name,
       mojo::ScopedInterfaceEndpointHandle handle) override;
 
   const base::RepeatingClosure action_after_received_;
 };
-
-bool FakeListener::OnMessageReceived(const IPC::Message& message) {
-  return false;
-}
 
 void FakeListener::OnAssociatedInterfaceRequest(
     const std::string& interface_name,
@@ -85,13 +80,14 @@ void FakeListener::OnAssociatedInterfaceRequest(
 class DesktopSessionAgentTest : public ::testing::Test {
  public:
   DesktopSessionAgentTest();
-  ~DesktopSessionAgentTest() override = default;
+  ~DesktopSessionAgentTest() override;
 
   void Shutdown();
 
  protected:
-  base::test::SingleThreadTaskEnvironment task_environment_;
-  base::RunLoop run_loop_;
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::MainThreadType::IO};
+  base::test::TestFuture<void> shutdown_future_;
   scoped_refptr<AutoThreadTaskRunner> task_runner_;
   scoped_refptr<DesktopSessionAgent> agent_;
 };
@@ -99,16 +95,20 @@ class DesktopSessionAgentTest : public ::testing::Test {
 DesktopSessionAgentTest::DesktopSessionAgentTest()
     : task_runner_(
           new AutoThreadTaskRunner(task_environment_.GetMainThreadTaskRunner(),
-                                   run_loop_.QuitClosure())),
+                                   shutdown_future_.GetCallback())),
       agent_(new DesktopSessionAgent(task_runner_,
                                      task_runner_,
                                      task_runner_,
                                      task_runner_)) {}
 
+DesktopSessionAgentTest::~DesktopSessionAgentTest() = default;
+
 void DesktopSessionAgentTest::Shutdown() {
   task_runner_ = nullptr;
-  agent_->Stop();
-  agent_ = nullptr;
+  if (agent_) {
+    agent_->Stop();
+    agent_ = nullptr;
+  }
 }
 
 TEST_F(DesktopSessionAgentTest, StartDesktopSessionAgent) {
@@ -122,8 +122,8 @@ TEST_F(DesktopSessionAgentTest, StartDesktopSessionAgent) {
     proxy.reset();
   }));
   proxy = IPC::ChannelProxy::Create(
-      agent_->Initialize(delegate->GetWeakPtr()).release(),
-      IPC::Channel::MODE_CLIENT, &listener, task_runner_,
+      agent_->Initialize(delegate->GetWeakPtr()), IPC::Channel::MODE_CLIENT,
+      &listener, task_runner_,
       base::SingleThreadTaskRunner::GetCurrentDefault());
 
   mojo::AssociatedRemote<mojom::DesktopSessionAgent> desktop_session_agent;
@@ -143,7 +143,7 @@ TEST_F(DesktopSessionAgentTest, StartDesktopSessionAgent) {
             desktop_session_agent.reset();
           }));
 
-  run_loop_.Run();
+  EXPECT_TRUE(shutdown_future_.Wait());
 
   ASSERT_TRUE(remote_received);
   ASSERT_TRUE(session_started);

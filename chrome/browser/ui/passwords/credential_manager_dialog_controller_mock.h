@@ -7,6 +7,7 @@
 
 #include "chrome/browser/ui/passwords/credential_manager_dialog_controller.h"
 #include "testing/gmock/include/gmock/gmock.h"
+#include "ui/gfx/range/range.h"
 
 class CredentialManagerDialogControllerMock
     : public CredentialManagerDialogController {
@@ -20,20 +21,31 @@ class CredentialManagerDialogControllerMock
 
   ~CredentialManagerDialogControllerMock() override;
 
-  MOCK_CONST_METHOD0(GetLocalForms, const FormsVector&());
-  MOCK_CONST_METHOD0(GetAccoutChooserTitle, std::u16string());
-  MOCK_CONST_METHOD0(ShouldShowSignInButton, bool());
-  MOCK_CONST_METHOD0(GetAutoSigninPromoTitle, std::u16string());
-  MOCK_CONST_METHOD0(GetAutoSigninText, std::u16string());
-  MOCK_CONST_METHOD0(ShouldShowFooter, bool());
-  MOCK_METHOD0(OnSmartLockLinkClicked, void());
-  MOCK_METHOD2(OnChooseCredentials,
-               void(const password_manager::PasswordForm& password_form,
-                    password_manager::CredentialType credential_type));
-  MOCK_METHOD0(OnSignInClicked, void());
-  MOCK_METHOD0(OnAutoSigninOK, void());
-  MOCK_METHOD0(OnAutoSigninTurnOff, void());
-  MOCK_METHOD0(OnCloseDialog, void());
+  MOCK_METHOD(const FormsVector&, GetLocalForms, (), (const, override));
+  MOCK_METHOD(url::Origin, GetOrigin, (), (const, override));
+  MOCK_METHOD(bool, IsShowingAccountChooser, (), (const, override));
+  MOCK_METHOD(std::u16string, GetAccountChooserTitle, (), (const, override));
+  MOCK_METHOD(bool, ShouldShowSignInButton, (), (const, override));
+  MOCK_METHOD(std::u16string, GetAutoSigninPromoTitle, (), (const, override));
+  MOCK_METHOD(std::u16string, GetAutoSigninText, (), (const, override));
+  MOCK_METHOD(bool, ShouldShowFooter, (), (const, override));
+  MOCK_METHOD(void,
+              OnChooseCredentials,
+              (const password_manager::PasswordForm& password_form,
+               password_manager::CredentialType credential_type),
+              (override));
+  MOCK_METHOD(void, OnSignInClicked, (), (override));
+  MOCK_METHOD(void, OnAutoSigninOK, (), (override));
+  MOCK_METHOD(void, OnAutoSigninTurnOff, (), (override));
+  MOCK_METHOD(void, OnCloseDialog, (), (override));
+
+  MOCK_METHOD(DisplayType, GetDisplayType, (), (const, override));
+  MOCK_METHOD(bool, ShouldShowTopIllustration, (), (const, override));
+  MOCK_METHOD(std::u16string, GetTitle, (), (const, override));
+  MOCK_METHOD(std::u16string, GetSubtitle, (), (const, override));
+  MOCK_METHOD(gfx::Range, GetSubtitleLinkRange, (), (const, override));
+  MOCK_METHOD(void, OnSubtitleLinkClicked, (), (override));
+  MOCK_METHOD(std::u16string, GetOkButtonLabel, (), (const, override));
 };
 
 #endif  // CHROME_BROWSER_UI_PASSWORDS_CREDENTIAL_MANAGER_DIALOG_CONTROLLER_MOCK_H_

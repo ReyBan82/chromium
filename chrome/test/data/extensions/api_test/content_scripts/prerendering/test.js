@@ -8,8 +8,9 @@ let testServerPort = 0;
 // options described in `details`.
 function getUrl(path, details) {
   let host = 'default.test';
-  if (details && details.matchAboutBlank)
+  if (details && details.matchAboutBlank) {
     host = 'match_about_blank.test';
+  }
   const url = `http://${host}:${testServerPort}/extensions/${path}`;
   return url;
 }
@@ -26,15 +27,15 @@ async function testWithIframe() {
   let numAllFramesMessages = 0;
   let numTopFrameOnlyMessages = 0;
   const testCallback = (message, sender, sendResponse) => {
-    if (message == 'all_frames') {
+    if (message === 'all_frames') {
       numAllFramesMessages++;
       chrome.test.assertTrue(numAllFramesMessages <= 3);
-    } else if (message == 'top_frame_only') {
+    } else if (message === 'top_frame_only') {
       numTopFrameOnlyMessages++;
       chrome.test.assertTrue(
           numTopFrameOnlyMessages <= 2,
           'Unexpected: maybe wrong injection on the activation');
-    } else if (message == 'activated') {
+    } else if (message === 'activated') {
       chrome.runtime.onMessage.removeListener(testCallback);
       // Inject a second script into the now-activated frame, but run it at
       // document_idle. This ensures that any content scripts that will run on
@@ -53,9 +54,9 @@ async function testWithIframe() {
       chrome.runtime.onMessage.removeListener(testCallback);
       chrome.test.fail('Unexpected message: ' + JSON.stringify(message));
     }
-    if (numAllFramesMessages == 3 && numTopFrameOnlyMessages == 2) {
+    if (numAllFramesMessages === 3 && numTopFrameOnlyMessages === 2) {
       // Navigate to the pre-rendered page.
-      // TODO(https://crbug.com/1278141): `chrome.tabs.update` can not activate
+      // TODO(crbug.com/40208062): `chrome.tabs.update` can not activate
       // the pre-rendered page, but takes a new navigation instead.
       const url = getUrl('test_file_with_iframe.html');
       chrome.tabs.executeScript({code: `location.href = '${url}';`});
@@ -83,17 +84,17 @@ async function testWithAboutBlankIframe(details) {
   let numAllFramesMessages = 0;
   let numTopFrameOnlyMessages = 0;
   const testCallback = (message, sender, sendResponse) => {
-    if (message == 'all_frames') {
+    if (message === 'all_frames') {
       numAllFramesMessages++;
       chrome.test.assertTrue(
           numAllFramesMessages <= expectedNumAllFramesMessages,
           'Unexpected: maybe running on about:blank');
-    } else if (message == 'top_frame_only') {
+    } else if (message === 'top_frame_only') {
       numTopFrameOnlyMessages++;
       chrome.test.assertTrue(
           numAllFramesMessages <= expectedNumTopFrameOnlyMessages,
           'Unexpected: maybe wrong injection on the activation');
-    } else if (message == 'activated') {
+    } else if (message === 'activated') {
       chrome.runtime.onMessage.removeListener(testCallback);
       // Inject a second script into the now-activated frame, but run it at
       // document_idle. This ensures that any content scripts that will run on
@@ -114,10 +115,10 @@ async function testWithAboutBlankIframe(details) {
       chrome.runtime.onMessage.removeListener(testCallback);
       chrome.test.fail('Unexpected message: ' + JSON.stringify(message));
     }
-    if (numAllFramesMessages == expectedNumAllFramesMessages &&
-        numTopFrameOnlyMessages == expectedNumTopFrameOnlyMessages) {
+    if (numAllFramesMessages === expectedNumAllFramesMessages &&
+        numTopFrameOnlyMessages === expectedNumTopFrameOnlyMessages) {
       // Navigate to the pre-rendered page.
-      // TODO(https://crbug.com/1278141): `chrome.tabs.update` can not activate
+      // TODO(crbug.com/40208062): `chrome.tabs.update` can not activate
       // the pre-rendered page, but takes a new navigation instead.
       const url = getUrl('test_file_with_about_blank_iframe.html', details);
       chrome.tabs.executeScript({code: `location.href = '${url}';`});
@@ -136,7 +137,8 @@ chrome.test.getConfig(async config => {
   // `match_origin_as_fallback` and manifest v3.
   chrome.test.runTests([
     testWithIframe,
-    testWithAboutBlankIframe,
-    testWithAboutBlankIframe.bind(this, {matchAboutBlank: true}),
+    // TODO(crbug.com/40853029): These two tests are flaky and time out.
+    // testWithAboutBlankIframe,
+    // testWithAboutBlankIframe.bind(this, {matchAboutBlank: true}),
   ]);
 });

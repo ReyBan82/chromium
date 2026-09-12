@@ -6,11 +6,12 @@
 #define UI_GFX_FONT_LIST_H_
 
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "base/component_export.h"
 #include "base/memory/scoped_refptr.h"
 #include "ui/gfx/font.h"
-#include "ui/gfx/gfx_export.h"
 
 namespace gfx {
 
@@ -35,12 +36,12 @@ class FontListImpl;
 // Here are examples of valid font description strings:
 // - "Arial, Helvetica, Italic Semi-Bold 14px"
 // - "Arial, 14px"
-class GFX_EXPORT FontList {
+class COMPONENT_EXPORT(GFX) FontList {
  public:
   // Parses a FontList description string into |families_out|, |style_out| (a
   // bitfield of gfx::Font::Style values), |size_pixels_out| and |weight_out|.
   // Returns true if the string is properly-formed.
-  static bool ParseDescription(const std::string& description,
+  static bool ParseDescription(std::string_view description,
                                std::vector<std::string>* families_out,
                                int* style_out,
                                int* size_pixels_out,
@@ -172,7 +173,7 @@ class GFX_EXPORT FontList {
   // returns the first font name. Empty entries are ignored.
   // Used by Blink and webui to pick the primary standard/serif/sans/fixed/etc.
   // fonts from region-specific IDS lists.
-  static std::string FirstAvailableOrFirst(const std::string& font_name_list);
+  static std::string FirstAvailableOrFirst(std::string_view font_name_list);
 
  private:
   explicit FontList(FontListImpl* impl);

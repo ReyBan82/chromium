@@ -6,16 +6,14 @@
 
 #include <utility>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/functional/bind.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "base/values.h"
-#include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
-#include "chrome/browser/ash/tpm_firmware_update.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/browser_process_platform_part.h"
-#include "chrome/common/pref_names.h"
+#include "chrome/browser/ash/tpm/tpm_firmware_update.h"
 #include "chromeos/ash/components/dbus/session_manager/session_manager_client.h"
+#include "chromeos/ash/components/install_attributes/install_attributes.h"
 #include "chromeos/ash/components/settings/cros_settings_names.h"
 #include "chromeos/ash/components/settings/cros_settings_provider.h"
 #include "components/prefs/pref_registry_simple.h"
@@ -39,9 +37,7 @@ const base::TimeDelta kTPMUpdatePlannedNotificationWaitTime = base::Days(1);
 AutoUpdateMode GetTPMAutoUpdateModeSetting(
     const ash::CrosSettings* cros_settings,
     const base::RepeatingClosure callback) {
-  if (!g_browser_process->platform_part()
-           ->browser_policy_connector_ash()
-           ->IsDeviceEnterpriseManaged()) {
+  if (!ash::InstallAttributes::Get()->IsEnterpriseManaged()) {
     return AutoUpdateMode::kNever;
   }
 
@@ -55,24 +51,22 @@ AutoUpdateMode GetTPMAutoUpdateModeSetting(
   if (!tpm_settings)
     return AutoUpdateMode::kNever;
 
-  const base::Value* const auto_update_mode = tpm_settings->FindKeyOfType(
-      ash::tpm_firmware_update::kSettingsKeyAutoUpdateMode,
-      base::Value::Type::INTEGER);
+  std::optional<int> auto_update_mode = tpm_settings->GetDict().FindInt(
+      ash::tpm_firmware_update::kSettingsKeyAutoUpdateMode);
 
   // Policy not set.
-  if (!auto_update_mode || auto_update_mode->GetInt() == 0)
-    return AutoUpdateMode::kNever;
-
-  // Verify that the value is within range.
-  if (auto_update_mode->GetInt() < static_cast<int>(AutoUpdateMode::kNever) ||
-      auto_update_mode->GetInt() >
-          static_cast<int>(AutoUpdateMode::kEnrollment)) {
-    NOTREACHED() << "Invalid value for device policy key "
-                    "TPMFirmwareUpdateSettings.AutoUpdateMode";
+  if (!auto_update_mode || *auto_update_mode == 0) {
     return AutoUpdateMode::kNever;
   }
 
-  return static_cast<AutoUpdateMode>(auto_update_mode->GetInt());
+  // Verify that the value is within range.
+  if (*auto_update_mode < static_cast<int>(AutoUpdateMode::kNever) ||
+      *auto_update_mode > static_cast<int>(AutoUpdateMode::kEnrollment)) {
+    NOTREACHED() << "Invalid value for device policy key "
+                    "TPMFirmwareUpdateSettings.AutoUpdateMode";
+  }
+
+  return static_cast<AutoUpdateMode>(*auto_update_mode);
 }
 
 }  // namespace
@@ -192,15 +186,17 @@ void TPMAutoUpdateModePolicyHandler::ShowTPMAutoUpdateNotification(
 
   const user_manager::UserManager* user_manager =
       user_manager::UserManager::Get();
-  if (!user_manager->IsUserLoggedIn() || user_manager->IsLoggedInAsKioskApp())
+  if (!user_manager->IsUserLoggedIn() ||
+      user_manager->IsLoggedInAsAnyKioskApp()) {
     return;
+  }
 
   base::Time notification_shown =
-      local_state_->GetTime(prefs::kTPMUpdatePlannedNotificationShownTime);
+      local_state_->GetTime(ash::prefs::kTPMUpdatePlannedNotificationShownTime);
 
   if (notification_shown == base::Time::Min()) {
     notification_shown = base::Time::Now();
-    local_state_->SetTime(prefs::kTPMUpdatePlannedNotificationShownTime,
+    local_state_->SetTime(ash::prefs::kTPMUpdatePlannedNotificationShownTime,
                           notification_shown);
     show_notification_callback_.Run(
         ash::TpmAutoUpdateUserNotification::kPlanned);
@@ -230,20 +226,20 @@ void TPMAutoUpdateModePolicyHandler::ShowTPMAutoUpdateNotification(
 bool TPMAutoUpdateModePolicyHandler::
     WasTPMUpdateOnNextRebootNotificationShown() {
   return local_state_->GetBoolean(
-      prefs::kTPMUpdateOnNextRebootNotificationShown);
+      ash::prefs::kTPMUpdateOnNextRebootNotificationShown);
 }
 
 // static
 void TPMAutoUpdateModePolicyHandler::RegisterPrefs(
     PrefRegistrySimple* registry) {
-  registry->RegisterTimePref(prefs::kTPMUpdatePlannedNotificationShownTime,
+  registry->RegisterTimePref(ash::prefs::kTPMUpdatePlannedNotificationShownTime,
                              base::Time::Min());
-  registry->RegisterBooleanPref(prefs::kTPMUpdateOnNextRebootNotificationShown,
-                                false);
+  registry->RegisterBooleanPref(
+      ash::prefs::kTPMUpdateOnNextRebootNotificationShown, false);
 }
 
 void TPMAutoUpdateModePolicyHandler::ShowTPMUpdateOnNextRebootNotification() {
-  local_state_->SetBoolean(prefs::kTPMUpdateOnNextRebootNotificationShown,
+  local_state_->SetBoolean(ash::prefs::kTPMUpdateOnNextRebootNotificationShown,
                            true);
 
   show_notification_callback_.Run(

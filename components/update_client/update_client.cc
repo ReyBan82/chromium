@@ -7,24 +7,36 @@
 #include <algorithm>
 #include <queue>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include "base/check_op.h"
-#include "base/containers/contains.h"
+#include "base/check.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/location.h"
+#include "base/logging.h"
+#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/sequence_checker.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_util.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/task/thread_pool.h"
+#include "base/time/time.h"
+#include "build/build_config.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/update_client/configurator.h"
 #include "components/update_client/crx_update_item.h"
 #include "components/update_client/persisted_data.h"
 #include "components/update_client/ping_manager.h"
+#include "components/update_client/protocol_definition.h"
 #include "components/update_client/protocol_parser.h"
-#include "components/update_client/task_send_uninstall_ping.h"
+#include "components/update_client/task_check_for_update.h"
+#include "components/update_client/task_send_ping.h"
+#include "components/update_client/task_traits.h"
 #include "components/update_client/task_update.h"
 #include "components/update_client/update_checker.h"
 #include "components/update_client/update_client_errors.h"
@@ -63,20 +75,25 @@ UpdateClientImpl::UpdateClientImpl(
     scoped_refptr<Configurator> config,
     scoped_refptr<PingManager> ping_manager,
     UpdateChecker::Factory update_checker_factory)
-    : config_(config),
-      ping_manager_(ping_manager),
-      update_engine_(base::MakeRefCounted<UpdateEngine>(
-          config,
-          update_checker_factory,
-          ping_manager_.get(),
-          base::BindRepeating(&UpdateClientImpl::NotifyObservers,
-                              base::Unretained(this)))) {}
+    : config_(config), ping_manager_(ping_manager) {
+  update_engine_ = base::MakeRefCounted<UpdateEngine>(
+      config, update_checker_factory, ping_manager_.get(),
+      base::BindRepeating(&UpdateClientImpl::NotifyObservers,
+                          weak_ptr_factory_.GetWeakPtr()));
+}
 
 UpdateClientImpl::~UpdateClientImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  DCHECK(task_queue_.empty());
-  DCHECK(tasks_.empty());
+  CHECK(task_queue_.empty());
+
+  if (!tasks_.empty()) {
+    VLOG(2) << __func__ << ": found tasks running";
+    for (const scoped_refptr<Task>& t : tasks_) {
+      VLOG(2) << "task: " << t->name()
+              << ", id: " << base::JoinString(t->ids(), ",");
+    }
+  }
 
   config_ = nullptr;
 }
@@ -89,41 +106,79 @@ base::RepeatingClosure UpdateClientImpl::Install(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (IsUpdating(id)) {
-    std::move(callback).Run(Error::UPDATE_IN_PROGRESS);
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(std::move(callback), Error::UPDATE_IN_PROGRESS));
     return base::DoNothing();
   }
 
-  std::vector<std::string> ids = {id};
-
-  // Install tasks are run concurrently and never queued up. They are always
-  // considered foreground tasks.
-  constexpr bool kIsForeground = true;
-  constexpr bool kIsInstall = true;
+  // Install tasks are run concurrently in the foreground and never queued up.
   auto task = base::MakeRefCounted<TaskUpdate>(
-      update_engine_.get(), kIsForeground, kIsInstall, ids,
-      std::move(crx_data_callback), crx_state_change_callback,
+      update_engine_.get(), /*is_foreground=*/true, /*is_install=*/true,
+      std::vector<std::string>{id}, std::move(crx_data_callback),
+      crx_state_change_callback,
       base::BindOnce(&UpdateClientImpl::OnTaskComplete, this,
                      std::move(callback)));
   RunTask(task);
   return base::BindRepeating(&Task::Cancel, task);
 }
 
+// Update tasks are background tasks and queued up.
 void UpdateClientImpl::Update(const std::vector<std::string>& ids,
                               CrxDataCallback crx_data_callback,
                               CrxStateChangeCallback crx_state_change_callback,
                               bool is_foreground,
                               Callback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-
-  constexpr bool kIsInstall = false;
-  auto task = base::MakeRefCounted<TaskUpdate>(
-      update_engine_.get(), is_foreground, kIsInstall, ids,
+  RunOrEnqueueTask(base::MakeRefCounted<TaskUpdate>(
+      update_engine_.get(), is_foreground, /*is_install=*/false, ids,
       std::move(crx_data_callback), crx_state_change_callback,
       base::BindOnce(&UpdateClientImpl::OnTaskComplete, this,
-                     std::move(callback)));
+                     std::move(callback))));
+}
 
-  // If no other tasks are running at the moment, run this update task.
-  // Otherwise, queue the task up.
+// Update check tasks are queued up.
+void UpdateClientImpl::CheckForUpdate(
+    const std::string& id,
+    CrxDataCallback crx_data_callback,
+    CrxStateChangeCallback crx_state_change_callback,
+    bool is_foreground,
+    Callback callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  RunOrEnqueueTask(base::MakeRefCounted<TaskCheckForUpdate>(
+      update_engine_.get(), id, std::move(crx_data_callback),
+      crx_state_change_callback, is_foreground,
+      base::BindOnce(&UpdateClientImpl::OnTaskComplete, this,
+                     std::move(callback))));
+}
+
+void UpdateClientImpl::RunTask(scoped_refptr<Task> task) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  VLOG(2) << __func__;
+
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(&UpdateClientImpl::StartTask, this, task));
+  tasks_.insert(task);
+}
+
+void UpdateClientImpl::StartTask(scoped_refptr<Task> task) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  task->Run();
+
+  // Running the task registers its CRXs with the update engine, so the
+  // cancellations requested while the task was pending can be applied now.
+  const auto it = pending_cancellations_.find(task);
+  if (it == pending_cancellations_.end()) {
+    return;
+  }
+  for (const auto& id : it->second) {
+    update_engine_->Cancel(id);
+  }
+  pending_cancellations_.erase(it);
+}
+
+void UpdateClientImpl::RunOrEnqueueTask(scoped_refptr<Task> task) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (tasks_.empty()) {
     RunTask(task);
   } else {
@@ -131,29 +186,24 @@ void UpdateClientImpl::Update(const std::vector<std::string>& ids,
   }
 }
 
-void UpdateClientImpl::RunTask(scoped_refptr<Task> task) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&Task::Run, base::Unretained(task.get())));
-  tasks_.insert(task);
-}
-
 void UpdateClientImpl::OnTaskComplete(Callback callback,
                                       scoped_refptr<Task> task,
                                       Error error) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(task);
+  CHECK(task);
 
   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(std::move(callback), error));
 
-  // Remove the task from the set of the running tasks. Only tasks handled by
-  // the update engine can be in this data structure.
-  DCHECK_EQ(1u, tasks_.count(task));
   tasks_.erase(task);
+  pending_cancellations_.erase(task);
+  VLOG(2) << __func__ << ": tasks_.empty(): " << tasks_.empty()
+          << ", task_queue_.empty(): " << task_queue_.empty()
+          << ", error: " << static_cast<int>(error);
 
-  if (is_stopped_)
+  if (is_stopped_) {
     return;
+  }
 
   // Pick up a task from the queue if the queue has pending tasks and no other
   // task is running.
@@ -174,11 +224,11 @@ void UpdateClientImpl::RemoveObserver(Observer* observer) {
   observer_list_.RemoveObserver(observer);
 }
 
-void UpdateClientImpl::NotifyObservers(Observer::Events event,
-                                       const std::string& id) {
+void UpdateClientImpl::NotifyObservers(const CrxUpdateItem& item) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  for (auto& observer : observer_list_)
-    observer.OnEvent(event, id);
+  for (auto& observer : observer_list_) {
+    observer.OnEvent(item);
+  }
 }
 
 bool UpdateClientImpl::GetCrxUpdateState(const std::string& id,
@@ -190,15 +240,13 @@ bool UpdateClientImpl::IsUpdating(const std::string& id) const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   for (const auto& task : tasks_) {
-    const auto ids = task->GetIds();
-    if (base::Contains(ids, id)) {
+    if (std::ranges::contains(task->ids(), id)) {
       return true;
     }
   }
 
   for (const auto& task : task_queue_) {
-    const auto ids = task->GetIds();
-    if (base::Contains(ids, id)) {
+    if (std::ranges::contains(task->ids(), id)) {
       return true;
     }
   }
@@ -211,16 +259,6 @@ void UpdateClientImpl::Stop() {
 
   is_stopped_ = true;
 
-  // In the current implementation it is sufficient to cancel the pending
-  // tasks only. The tasks that are run by the update engine will stop
-  // making progress naturally, as the main task runner stops running task
-  // actions. Upon the browser shutdown, the resources employed by the active
-  // tasks will leak, as the operating system kills the thread associated with
-  // the update engine task runner. Further refactoring may be needed in this
-  // area, to cancel the running tasks by canceling the current action update.
-  // This behavior would be expected, correct, and result in no resource leaks
-  // in all cases, in shutdown or not.
-  //
   // Cancel the pending tasks. These tasks are safe to cancel and delete since
   // they have not picked up by the update engine, and not shared with any
   // task runner yet.
@@ -229,15 +267,90 @@ void UpdateClientImpl::Stop() {
     task_queue_.pop_front();
     task->Cancel();
   }
+
+  // Also cancel active tasks to trigger downloader cleanup. Otherwise, upon the
+  // browser shutdown, the resources employed by the active tasks will leak, as
+  // the operating system kills the thread associated with the update engine
+  // task runner.
+  for (auto& task : tasks_) {
+    task->Cancel();
+  }
 }
 
-void UpdateClientImpl::SendUninstallPing(const CrxComponent& crx_component,
-                                         int reason,
-                                         Callback callback) {
+bool UpdateClientImpl::Cancel(const std::string& id) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  RunTask(base::MakeRefCounted<TaskSendUninstallPing>(
-      update_engine_.get(), crx_component, reason,
+  // Tasks are never cancelled as a whole here: a task may carry other CRXs,
+  // and the task types differ in how `Task::Cancel()` completes them. Instead,
+  // the cancellation is recorded for every task that carries `id` and applied
+  // to the update engine, which cancels the component for `id` only. A task
+  // that has not started yet is not known to the engine, so the cancellation
+  // is applied when the task starts, in `StartTask()`.
+  bool found = false;
+  for (const auto& task : task_queue_) {
+    if (std::ranges::contains(task->ids(), id)) {
+      pending_cancellations_[task].insert(id);
+      found = true;
+    }
+  }
+  for (const auto& task : tasks_) {
+    if (std::ranges::contains(task->ids(), id)) {
+      pending_cancellations_[task].insert(id);
+      found = true;
+    }
+  }
+  if (found) {
+    update_engine_->Cancel(id);
+  }
+  return found;
+}
+
+void UpdateClientImpl::CleanupStaleDownloads(base::Time older_than,
+                                             base::OnceClosure callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  if (!task_queue_.empty() || !tasks_.empty()) {
+    VLOG(2) << __func__ << ": skipping cleanup, tasks_: " << tasks_.size()
+            << ", task_queue_: " << task_queue_.size();
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, std::move(callback));
+    return;
+  }
+
+  // Clean up stale downloads in the temp directory.
+  base::ThreadPool::PostTaskAndReply(
+      FROM_HERE, kTaskTraits,
+      base::BindOnce(
+          [](const base::FilePath::StringType& prod_id, base::Time older_than) {
+            base::FilePath temp_dir;
+#if BUILDFLAG(IS_WIN)
+            if (!base::GetSecureTempDirectory(&temp_dir)) {
+              return;
+            }
+#else   // BUILDFLAG(IS_WIN)
+            if (!base::GetTempDir(&temp_dir)) {
+              return;
+            }
+#endif  // BUILDFLAG(IS_WIN)
+
+            CleanupDirectoriesOlderThan(
+                temp_dir,
+                base::StrCat(
+                    {prod_id, FILE_PATH_LITERAL("_chrome_url_fetcher_*")}),
+                base::Time::Now() - older_than);
+          },
+          update_client::UTF8ToStringType(config_->GetProdId()), older_than),
+      std::move(callback));
+}
+
+void UpdateClientImpl::SendPing(const CrxComponent& crx_component,
+                                PingParams ping_params,
+                                Callback callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  VLOG(2) << __func__;
+
+  RunTask(base::MakeRefCounted<TaskSendPing>(
+      update_engine_.get(), crx_component, ping_params,
       base::BindOnce(&UpdateClientImpl::OnTaskComplete, this,
                      std::move(callback))));
 }
@@ -246,18 +359,18 @@ scoped_refptr<UpdateClient> UpdateClientFactory(
     scoped_refptr<Configurator> config) {
   return base::MakeRefCounted<UpdateClientImpl>(
       config, base::MakeRefCounted<PingManager>(config),
-      &UpdateChecker::Create);
+      base::BindRepeating(&UpdateChecker::Create));
 }
 
 void RegisterPrefs(PrefRegistrySimple* registry) {
-  PersistedData::RegisterPrefs(registry);
+  RegisterPersistedDataPrefs(registry);
 }
 
 // This function has the exact same implementation as RegisterPrefs. We have
 // this implementation here to make the intention more clear that is local user
 // profile access is needed.
 void RegisterProfilePrefs(PrefRegistrySimple* registry) {
-  PersistedData::RegisterPrefs(registry);
+  RegisterPersistedDataPrefs(registry);
 }
 
 }  // namespace update_client

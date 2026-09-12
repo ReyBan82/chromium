@@ -4,9 +4,12 @@
 
 #include "components/media_router/browser/logger_impl.h"
 
+#include <string_view>
+
+#include "base/check.h"
 #include "base/i18n/time_formatting.h"
 #include "base/json/json_string_value_serializer.h"
-#include "base/strings/string_piece.h"
+#include "base/logging.h"
 #include "base/values.h"
 #include "components/media_router/browser/log_util.h"
 #include "components/media_router/common/media_source.h"
@@ -47,15 +50,43 @@ const char* AsString(mojom::LogCategory category) {
   }
 }
 
-base::StringPiece TruncateComponent(base::StringPiece component) {
+std::string_view TruncateComponent(std::string_view component) {
   return component.substr(0, kComponentMaxLength);
 }
 
-base::StringPiece TruncateMessage(base::StringPiece message) {
+std::string_view TruncateMessage(std::string_view message) {
   return message.substr(0, kMessageMaxLength);
 }
 
 }  // namespace
+
+LoggerImpl::Entry::Entry(Severity severity,
+                         mojom::LogCategory category,
+                         base::Time time,
+                         std::string_view component,
+                         std::string_view message,
+                         std::string_view sink_id,
+                         std::string media_source,
+                         std::string_view session_id)
+    : severity(severity),
+      category(category),
+      time(time),
+      component(component),
+      message(message),
+      sink_id(sink_id),
+      media_source(std::move(media_source)),
+      session_id(session_id) {}
+
+LoggerImpl::Entry::Entry(Entry&& other)
+    : severity(other.severity),
+      category(other.category),
+      time(other.time),
+      component(std::move(other.component)),
+      message(std::move(other.message)),
+      sink_id(std::move(other.sink_id)),
+      media_source(std::move(other.media_source)),
+      session_id(std::move(other.session_id)) {}
+LoggerImpl::Entry::~Entry() = default;
 
 LoggerImpl::LoggerImpl() : capacity_(kEntriesCapacity) {}
 
@@ -115,8 +146,22 @@ void LoggerImpl::Log(Severity severity,
       TruncateMessage(message), log_util::TruncateId(sink_id),
       MediaSource(media_source).TruncateForLogging(kSourceMaxLength),
       log_util::TruncateId(session_id));
-  if (entries_.size() > capacity_)
+  if (entries_.size() > capacity_) {
     entries_.pop_front();
+  }
+  for (auto& observer : observers_) {
+    observer.OnLogAdded(entries_.back());
+  }
+}
+
+void LoggerImpl::AddObserver(Observer* observer) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  observers_.AddObserver(observer);
+}
+
+void LoggerImpl::RemoveObserver(Observer* observer) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  observers_.RemoveObserver(observer);
 }
 
 std::string LoggerImpl::GetLogsAsJson() const {
@@ -131,54 +176,26 @@ std::string LoggerImpl::GetLogsAsJson() const {
 }
 
 base::Value LoggerImpl::GetLogsAsValue() const {
-  base::Value::List entries_val;
-  for (const auto& entry : entries_)
+  base::ListValue entries_val;
+  for (const auto& entry : entries_) {
     entries_val.Append(AsValue(entry));
+  }
   return base::Value(std::move(entries_val));
 }
 
-LoggerImpl::Entry::Entry(Severity severity,
-                         mojom::LogCategory category,
-                         base::Time time,
-                         base::StringPiece component,
-                         base::StringPiece message,
-                         base::StringPiece sink_id,
-                         std::string media_source,
-                         base::StringPiece session_id)
-    : severity(severity),
-      category(category),
-      time(time),
-      component(component),
-      message(message),
-      sink_id(sink_id),
-      media_source(std::move(media_source)),
-      session_id(session_id) {}
-
-LoggerImpl::Entry::Entry(Entry&& other)
-    : severity(other.severity),
-      category(other.category),
-      time(other.time),
-      component(std::move(other.component)),
-      message(std::move(other.message)),
-      sink_id(std::move(other.sink_id)),
-      media_source(std::move(other.media_source)),
-      session_id(std::move(other.session_id)) {}
-
-LoggerImpl::Entry::~Entry() = default;
-
 // static
-base::Value LoggerImpl::AsValue(const LoggerImpl::Entry& entry) {
-  base::Value entry_val(base::Value::Type::DICT);
-  entry_val.SetKey("severity", base::Value(AsString(entry.severity)));
-  entry_val.SetKey("category", base::Value(AsString(entry.category)));
-  entry_val.SetKey(
+base::DictValue LoggerImpl::AsValue(const LoggerImpl::Entry& entry) {
+  base::DictValue entry_val;
+  entry_val.Set("severity", base::Value(AsString(entry.severity)));
+  entry_val.Set("category", base::Value(AsString(entry.category)));
+  entry_val.Set(
       "time",
       base::Value(base::TimeFormatTimeOfDayWithMilliseconds(entry.time)));
-  entry_val.SetKey("component", base::Value(entry.component));
-  entry_val.SetKey("message", base::Value(entry.message));
-  entry_val.SetKey("sinkId", base::Value(entry.sink_id));
-  entry_val.SetKey("mediaSource", base::Value(entry.media_source));
-  entry_val.SetKey("sessionId", base::Value(entry.session_id));
+  entry_val.Set("component", base::Value(entry.component));
+  entry_val.Set("message", base::Value(entry.message));
+  entry_val.Set("sinkId", base::Value(entry.sink_id));
+  entry_val.Set("mediaSource", base::Value(entry.media_source));
+  entry_val.Set("sessionId", base::Value(entry.session_id));
   return entry_val;
 }
 

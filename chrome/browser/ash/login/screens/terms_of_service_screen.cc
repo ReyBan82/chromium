@@ -7,8 +7,9 @@
 #include <string>
 #include <utility>
 
-#include "ash/constants/ash_features.h"
+#include "ash/constants/ash_login_pref_names.h"
 #include "base/check.h"
+#include "base/check_deref.h"
 #include "base/files/file_util.h"
 #include "base/files/important_file_writer.h"
 #include "base/functional/bind.h"
@@ -20,18 +21,17 @@
 #include "base/time/time.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
 #include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/browser_process_platform_part.h"
 #include "chrome/browser/enterprise/util/managed_browser_utils.h"
 #include "chrome/browser/net/system_network_context_manager.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/ui/webui/ash/login/terms_of_service_screen_handler.h"
-#include "chrome/common/pref_names.h"
+#include "chromeos/ash/components/install_attributes/install_attributes.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/storage_partition.h"
 #include "net/http/http_response_headers.h"
 #include "services/network/public/cpp/resource_request.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
@@ -58,18 +58,19 @@ void SaveTosToFile(const std::string& tos, const base::FilePath& tos_path) {
   }
 }
 
-absl::optional<std::string> ReadFileToOptionalString(
+std::optional<std::string> ReadFileToOptionalString(
     const base::FilePath& file_path) {
   std::string content;
   if (base::ReadFileToString(file_path, &content))
-    return absl::make_optional<std::string>(content);
-  return absl::nullopt;
+    return std::make_optional<std::string>(content);
+  return std::nullopt;
 }
 
 }  // namespace
 
 // static
 std::string TermsOfServiceScreen::GetResultString(Result result) {
+  // LINT.IfChange(UsageMetrics)
   switch (result) {
     case Result::ACCEPTED:
       return "Accepted";
@@ -78,15 +79,21 @@ std::string TermsOfServiceScreen::GetResultString(Result result) {
     case Result::NOT_APPLICABLE:
       return BaseScreen::kNotApplicable;
   }
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/oobe/histograms.xml)
 }
 
 TermsOfServiceScreen::TermsOfServiceScreen(
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+    const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
     base::WeakPtr<TermsOfServiceScreenView> view,
     const ScreenExitCallback& exit_callback)
     : BaseScreen(TermsOfServiceScreenView::kScreenId,
                  OobeScreenPriority::DEFAULT),
+      shared_url_loader_factory_(std::move(shared_url_loader_factory)),
+      browser_policy_connector_ash_(CHECK_DEREF(browser_policy_connector_ash)),
       view_(std::move(view)),
       exit_callback_(exit_callback) {
+  CHECK(shared_url_loader_factory_);
   DCHECK(view_);
 }
 
@@ -126,16 +133,15 @@ bool TermsOfServiceScreen::MaybeSkip(WizardContext& context) {
   // immediately.
   if (context.skip_post_login_screens_for_tests ||
       !ProfileManager::GetActiveUserProfile()->GetPrefs()->IsManagedPreference(
-          prefs::kTermsOfServiceURL)) {
+          ash::prefs::kTermsOfServiceURL)) {
     exit_callback_.Run(Result::NOT_APPLICABLE);
     return true;
   }
-  if (user_manager::UserManager::Get()->IsLoggedInAsPublicAccount())
+  if (user_manager::UserManager::Get()->IsLoggedInAsManagedGuestSession()) {
     return false;
+  }
 
-  if (!features::IsManagedTermsOfServiceEnabled())
-    exit_callback_.Run(Result::NOT_APPLICABLE);
-  return !features::IsManagedTermsOfServiceEnabled();
+  return false;
 }
 
 void TermsOfServiceScreen::ShowImpl() {
@@ -143,13 +149,11 @@ void TermsOfServiceScreen::ShowImpl() {
     return;
 
   // Set the domain name whose Terms of Service are being shown.
-  policy::BrowserPolicyConnectorAsh* connector =
-      g_browser_process->platform_part()->browser_policy_connector_ash();
   // Show the screen.
   view_->Show(
-      connector->IsDeviceEnterpriseManaged()
-          ? connector->GetEnterpriseDomainManager()
-          : chrome::enterprise_util::GetDomainFromEmail(
+      ash::InstallAttributes::Get()->IsEnterpriseManaged()
+          ? browser_policy_connector_ash_->GetEnterpriseDomainManager()
+          : enterprise_util::GetDomainFromEmail(
                 ProfileManager::GetActiveUserProfile()->GetProfileUserName()));
 
   // Start downloading the Terms of Service.
@@ -158,7 +162,7 @@ void TermsOfServiceScreen::ShowImpl() {
 
 void TermsOfServiceScreen::HideImpl() {}
 
-void TermsOfServiceScreen::OnUserAction(const base::Value::List& args) {
+void TermsOfServiceScreen::OnUserAction(const base::ListValue& args) {
   const std::string& action_id = args[0].GetString();
   if (action_id == kBack)
     OnDecline();
@@ -175,7 +179,7 @@ void TermsOfServiceScreen::StartDownload() {
   // If an URL from which the Terms of Service can be downloaded has not been
   // set, show an error message to the user.
   std::string terms_of_service_url =
-      prefs->GetString(prefs::kTermsOfServiceURL);
+      prefs->GetString(ash::prefs::kTermsOfServiceURL);
   if (terms_of_service_url.empty()) {
     if (view_)
       view_->OnLoadError();
@@ -217,12 +221,10 @@ void TermsOfServiceScreen::StartDownload() {
   // download.
   terms_of_service_loader_->SetRetryOptions(
       3, network::SimpleURLLoader::RETRY_ON_NETWORK_CHANGE);
-  network::mojom::URLLoaderFactory* loader_factory =
-      g_browser_process->system_network_context_manager()
-          ->GetURLLoaderFactory();
   terms_of_service_loader_->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
-      loader_factory, base::BindOnce(&TermsOfServiceScreen::OnDownloaded,
-                                     base::Unretained(this)));
+      shared_url_loader_factory_.get(),
+      base::BindOnce(&TermsOfServiceScreen::OnDownloaded,
+                     base::Unretained(this)));
 
   // Abort the download attempt if it takes longer than one minute.
   download_timer_.Start(FROM_HERE, base::Minutes(1), this,
@@ -237,7 +239,7 @@ void TermsOfServiceScreen::OnDownloadTimeout() {
 }
 
 void TermsOfServiceScreen::OnDownloaded(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   download_timer_.Stop();
 
   // Destroy the fetcher when this method returns.
@@ -256,32 +258,25 @@ void TermsOfServiceScreen::OnDownloaded(
     // If the Terms of Service were downloaded successfully, sanitize and show
     // them to the user.
     view_->OnLoadSuccess(base::EscapeForHTML(*response_body));
-    if (features::IsManagedTermsOfServiceEnabled()) {
-      // Update locally saved terms.
-      SaveTos(base::EscapeForHTML(*response_body));
-    }
+    // Update locally saved terms.
+    SaveTos(base::EscapeForHTML(*response_body));
   }
 }
 
 void TermsOfServiceScreen::LoadFromFileOrShowError() {
   if (!view_)
     return;
-  if (features::IsManagedTermsOfServiceEnabled()) {
-    auto tos_path = GetTosFilePath();
-    base::ThreadPool::PostTaskAndReplyWithResult(
-        FROM_HERE,
-        {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
-         base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
-        base::BindOnce(&ReadFileToOptionalString, tos_path),
-        base::BindOnce(&TermsOfServiceScreen::OnTosLoadedFromFile,
-                       weak_factory_.GetWeakPtr()));
-    return;
-  }
-  view_->OnLoadError();
+  auto tos_path = GetTosFilePath();
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
+       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
+      base::BindOnce(&ReadFileToOptionalString, tos_path),
+      base::BindOnce(&TermsOfServiceScreen::OnTosLoadedFromFile,
+                     weak_factory_.GetWeakPtr()));
 }
 
-void TermsOfServiceScreen::OnTosLoadedFromFile(
-    absl::optional<std::string> tos) {
+void TermsOfServiceScreen::OnTosLoadedFromFile(std::optional<std::string> tos) {
   if (!view_)
     return;
   if (!tos.has_value()) {

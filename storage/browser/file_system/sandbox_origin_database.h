@@ -50,9 +50,6 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) SandboxOriginDatabase
   void RewriteDatabase() override;
   void DropDatabase() override;
 
-  base::FilePath GetDatabasePath() const;
-  void RemoveDatabase();
-
  private:
   enum RecoveryOption {
     REPAIR_ON_CORRUPTION,
@@ -65,6 +62,8 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) SandboxOriginDatabase
     FAIL_IF_NONEXISTENT,
   };
 
+  base::FilePath GetDatabasePath() const;
+
   bool Init(InitOption init_option, RecoveryOption recovery_option);
   bool RepairDatabase(const std::string& db_path);
   // Close the database. Before this, all iterators associated with the database
@@ -74,7 +73,7 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) SandboxOriginDatabase
   void ReportInitStatus(const leveldb::Status& status);
   bool GetLastPathNumber(int* number);
 
-  base::FilePath file_system_directory_;
+  const base::FilePath file_system_directory_;
   raw_ptr<leveldb::Env> env_override_;
   std::unique_ptr<leveldb::DB> db_;
   base::Time last_reported_time_;

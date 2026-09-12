@@ -22,16 +22,13 @@ class CC_EXPORT NinePatchLayer : public UIResourceLayer {
   NinePatchLayer(const NinePatchLayer&) = delete;
   NinePatchLayer& operator=(const NinePatchLayer&) = delete;
 
-  void PushPropertiesTo(LayerImpl* layer,
-                        const CommitState& commit_state,
-                        const ThreadUnsafeCommitState& unsafe_state) override;
-
   // |border| is the space around the center rectangular region in layer space
   // (known as aperture in image space).  |border.x()| and |border.y()| are the
   // size of the left and top boundary, respectively.
   // |border.width()-border.x()| and |border.height()-border.y()| are the size
   // of the right and bottom boundary, respectively.
   void SetBorder(const gfx::Rect& border);
+  const gfx::Rect& border() const { return border_.Read(*this); }
 
   // aperture is in the pixel space of the bitmap resource and refers to
   // the center patch of the ninepatch (which is unused in this
@@ -40,13 +37,15 @@ class CC_EXPORT NinePatchLayer : public UIResourceLayer {
   // rects are x-stretched to fit, and the left and right rects are
   // y-stretched to fit.
   void SetAperture(const gfx::Rect& aperture);
+  const gfx::Rect& aperture() const { return image_aperture_.Read(*this); }
+
   void SetFillCenter(bool fill_center);
-  void SetNearestNeighbor(bool nearest_neighbor);
 
   // |rect| is the space completely occluded by another layer in layer
   // space. This can be used for example to occlude the entire window's
   // content when drawing the shadow with a 9 patches layer.
   void SetLayerOcclusion(const gfx::Rect& occlusion);
+  const gfx::Rect& occlusion() const { return layer_occlusion_.Read(*this); }
 
  private:
   NinePatchLayer();
@@ -54,9 +53,12 @@ class CC_EXPORT NinePatchLayer : public UIResourceLayer {
   std::unique_ptr<LayerImpl> CreateLayerImpl(
       LayerTreeImpl* tree_impl) const override;
 
+  void PushDirtyPropertiesTo(LayerImpl* layer,
+                             uint8_t dirty_flag,
+                             CommitState& commit_state) override;
+
   ProtectedSequenceReadable<gfx::Rect> border_;
   ProtectedSequenceReadable<bool> fill_center_;
-  ProtectedSequenceReadable<bool> nearest_neighbor_;
 
   // The transparent center region that shows the parent layer's contents in
   // image space.

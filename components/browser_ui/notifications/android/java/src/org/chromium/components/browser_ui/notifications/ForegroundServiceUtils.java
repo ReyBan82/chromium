@@ -4,41 +4,41 @@
 
 package org.chromium.components.browser_ui.notifications;
 
+import android.app.ForegroundServiceStartNotAllowedException;
 import android.app.Notification;
 import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
+import android.os.SystemClock;
 
-import androidx.annotation.VisibleForTesting;
 import androidx.core.app.ServiceCompat;
 import androidx.core.content.ContextCompat;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
-import org.chromium.base.compat.ApiHelperForQ;
-import org.chromium.base.compat.ApiHelperForS;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
 
 /**
  * Utility functions that call into Android foreground service related API, and provides
  * compatibility for older Android versions and work around for Android API bugs.
  */
+@NullMarked
 public class ForegroundServiceUtils {
     private static final String TAG = "ForegroundService";
+
     private ForegroundServiceUtils() {}
 
-    /**
-     * Gets the singleton instance of ForegroundServiceUtils.
-     */
+    /** Gets the singleton instance of ForegroundServiceUtils. */
     public static ForegroundServiceUtils getInstance() {
         return ForegroundServiceUtils.LazyHolder.sInstance;
     }
 
-    /**
-     * Sets a mocked instance for testing.
-     */
-    @VisibleForTesting
+    /** Sets a mocked instance for testing. */
     public static void setInstanceForTesting(ForegroundServiceUtils instance) {
+        var oldValue = ForegroundServiceUtils.LazyHolder.sInstance;
         ForegroundServiceUtils.LazyHolder.sInstance = instance;
+        ResettersForTesting.register(() -> ForegroundServiceUtils.LazyHolder.sInstance = oldValue);
     }
 
     private static class LazyHolder {
@@ -52,7 +52,12 @@ public class ForegroundServiceUtils {
      * @param intent The {@link Intent} to fire to start the service.
      */
     public void startForegroundService(Intent intent) {
-        ContextCompat.startForegroundService(ContextUtils.getApplicationContext(), intent);
+        try {
+            ContextCompat.startForegroundService(ContextUtils.getApplicationContext(), intent);
+        } catch (IllegalStateException e) {
+            Log.e(TAG, "Failed to startForegroundService.", e);
+            throw e;
+        }
     }
 
     /**
@@ -70,10 +75,23 @@ public class ForegroundServiceUtils {
         // If android fail to build the notification, do nothing.
         if (notification == null) return;
 
+        Log.d(TAG, "startForeground called at time: %d", SystemClock.elapsedRealtime());
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ApiHelperForS.startForeground(service, id, notification, foregroundServiceType);
+            try {
+                service.startForeground(id, notification, foregroundServiceType);
+            } catch (ForegroundServiceStartNotAllowedException e) {
+                Log.e(
+                        TAG,
+                        "Failed to upgrades a service from background to foreground."
+                                + " channelId=%s notificationId=%s",
+                        notification.getChannelId(),
+                        id,
+                        e);
+                throw e;
+            }
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ApiHelperForQ.startForeground(service, id, notification, foregroundServiceType);
+            service.startForeground(id, notification, foregroundServiceType);
         } else {
             service.startForeground(id, notification);
         }

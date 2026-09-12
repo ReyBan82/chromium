@@ -24,16 +24,6 @@ FakeCiceroneClient::FakeCiceroneClient() {
 
   launch_container_application_response_.set_success(true);
 
-  get_linux_package_info_response_.set_success(true);
-  get_linux_package_info_response_.set_package_id("Fake Package;1.0;x86-64");
-  get_linux_package_info_response_.set_summary("A package that is fake");
-
-  install_linux_package_response_.set_status(
-      vm_tools::cicerone::InstallLinuxPackageResponse::STARTED);
-
-  uninstall_package_owning_file_response_.set_status(
-      vm_tools::cicerone::UninstallPackageOwningFileResponse::STARTED);
-
   create_lxd_container_response_.set_status(
       vm_tools::cicerone::CreateLxdContainerResponse::CREATING);
 
@@ -51,12 +41,6 @@ FakeCiceroneClient::FakeCiceroneClient() {
 
   import_lxd_container_response_.set_status(
       vm_tools::cicerone::ImportLxdContainerResponse::IMPORTING);
-
-  upgrade_container_response_.set_status(
-      vm_tools::cicerone::UpgradeContainerResponse::STARTED);
-
-  cancel_upgrade_container_response_.set_status(
-      vm_tools::cicerone::CancelUpgradeContainerResponse::CANCELLED);
 
   start_lxd_response_.set_status(
       vm_tools::cicerone::StartLxdResponse::ALREADY_RUNNING);
@@ -129,32 +113,12 @@ bool FakeCiceroneClient::IsLxdContainerStartingSignalConnected() {
   return is_lxd_container_starting_signal_connected_;
 }
 
-bool FakeCiceroneClient::IsLxdContainerStoppingSignalConnected() {
-  return is_lxd_container_stopping_signal_connected_;
-}
-
-bool FakeCiceroneClient::IsInstallLinuxPackageProgressSignalConnected() {
-  return is_install_linux_package_progress_signal_connected_;
-}
-
-bool FakeCiceroneClient::IsUninstallPackageProgressSignalConnected() {
-  return is_uninstall_package_progress_signal_connected_;
-}
-
 bool FakeCiceroneClient::IsExportLxdContainerProgressSignalConnected() {
   return is_export_lxd_container_progress_signal_connected_;
 }
 
 bool FakeCiceroneClient::IsImportLxdContainerProgressSignalConnected() {
   return is_import_lxd_container_progress_signal_connected_;
-}
-
-bool FakeCiceroneClient::IsApplyAnsiblePlaybookProgressSignalConnected() {
-  return is_apply_ansible_playbook_progress_signal_connected_;
-}
-
-bool FakeCiceroneClient::IsUpgradeContainerProgressSignalConnected() {
-  return is_upgrade_container_progress_signal_connected_;
 }
 
 bool FakeCiceroneClient::IsStartLxdProgressSignalConnected() {
@@ -169,11 +133,11 @@ bool FakeCiceroneClient::IsLowDiskSpaceTriggeredSignalConnected() {
   return is_low_disk_space_triggered_signal_connected_;
 }
 
-bool FakeCiceroneClient::IsInhibitScreensaverSignalConencted() {
+bool FakeCiceroneClient::IsInhibitScreensaverSignalConnected() {
   return is_inhibit_screensaver_signal_connected_;
 }
 
-bool FakeCiceroneClient::IsUninhibitScreensaverSignalConencted() {
+bool FakeCiceroneClient::IsUninhibitScreensaverSignalConnected() {
   return is_uninhibit_screensaver_signal_connected_;
 }
 
@@ -205,47 +169,9 @@ void FakeCiceroneClient::GetContainerAppIcons(
       base::BindOnce(std::move(callback), container_app_icon_response_));
 }
 
-void FakeCiceroneClient::GetLinuxPackageInfo(
-    const vm_tools::cicerone::LinuxPackageInfoRequest& request,
-    chromeos::DBusMethodCallback<vm_tools::cicerone::LinuxPackageInfoResponse>
-        callback) {
-  most_recent_linux_package_info_request_ = request;
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE,
-      base::BindOnce(std::move(callback), get_linux_package_info_response_));
-}
-
-void FakeCiceroneClient::InstallLinuxPackage(
-    const vm_tools::cicerone::InstallLinuxPackageRequest& request,
-    chromeos::DBusMethodCallback<
-        vm_tools::cicerone::InstallLinuxPackageResponse> callback) {
-  most_recent_install_linux_package_request_ = request;
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE,
-      base::BindOnce(std::move(callback), install_linux_package_response_));
-}
-
 void FakeCiceroneClient::SetOnLaunchContainerApplicationCallback(
     LaunchContainerApplicationCallback callback) {
   launch_container_application_callback_ = std::move(callback);
-}
-
-void FakeCiceroneClient::SetOnUninstallPackageOwningFileCallback(
-    UninstallPackageOwningFileCallback callback) {
-  uninstall_package_owning_file_callback_ = std::move(callback);
-}
-
-void FakeCiceroneClient::UninstallPackageOwningFile(
-    const vm_tools::cicerone::UninstallPackageOwningFileRequest& request,
-    chromeos::DBusMethodCallback<
-        vm_tools::cicerone::UninstallPackageOwningFileResponse> callback) {
-  if (uninstall_package_owning_file_callback_) {
-    uninstall_package_owning_file_callback_.Run(request, std::move(callback));
-  } else {
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(std::move(callback),
-                                  uninstall_package_owning_file_response_));
-  }
 }
 
 void FakeCiceroneClient::WaitForServiceToBeAvailable(
@@ -333,18 +259,6 @@ void FakeCiceroneClient::StopLxdContainer(
       base::BindOnce(std::move(callback), stop_lxd_container_response_),
       send_stop_lxd_container_response_delay_);
 
-  // Trigger CiceroneClient::Observer::NotifyLxdContainerStoppingSignal
-  vm_tools::cicerone::LxdContainerStoppingSignal stopping_signal;
-  stopping_signal.set_owner_id(request.owner_id());
-  stopping_signal.set_vm_name(request.vm_name());
-  stopping_signal.set_container_name(request.container_name());
-  stopping_signal.set_status(lxd_container_stopping_signal_status_);
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
-      FROM_HERE,
-      base::BindOnce(&FakeCiceroneClient::NotifyLxdContainerStopping,
-                     weak_factory_.GetWeakPtr(), std::move(stopping_signal)),
-      send_stop_lxd_container_response_delay_);
-
   // Trigger CiceroneClient::Observer::NotifyContainerShutdownSignal
   vm_tools::cicerone::ContainerShutdownSignal shutdown_signal;
   shutdown_signal.set_owner_id(request.owner_id());
@@ -416,15 +330,6 @@ void FakeCiceroneClient::CancelImportLxdContainer(
                                 cancel_import_lxd_container_response_));
 }
 
-void FakeCiceroneClient::ApplyAnsiblePlaybook(
-    const vm_tools::cicerone::ApplyAnsiblePlaybookRequest& request,
-    chromeos::DBusMethodCallback<
-        vm_tools::cicerone::ApplyAnsiblePlaybookResponse> callback) {
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE,
-      base::BindOnce(std::move(callback), apply_ansible_playbook_response_));
-}
-
 void FakeCiceroneClient::ConfigureForArcSideload(
     const vm_tools::cicerone::ConfigureForArcSideloadRequest& request,
     chromeos::DBusMethodCallback<
@@ -433,24 +338,6 @@ void FakeCiceroneClient::ConfigureForArcSideload(
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(std::move(callback), enable_arc_sideload_response_));
-}
-
-void FakeCiceroneClient::UpgradeContainer(
-    const vm_tools::cicerone::UpgradeContainerRequest& request,
-    chromeos::DBusMethodCallback<vm_tools::cicerone::UpgradeContainerResponse>
-        callback) {
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE,
-      base::BindOnce(std::move(callback), upgrade_container_response_));
-}
-
-void FakeCiceroneClient::CancelUpgradeContainer(
-    const vm_tools::cicerone::CancelUpgradeContainerRequest& request,
-    chromeos::DBusMethodCallback<
-        vm_tools::cicerone::CancelUpgradeContainerResponse> callback) {
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE,
-      base::BindOnce(std::move(callback), cancel_upgrade_container_response_));
 }
 
 void FakeCiceroneClient::StartLxd(
@@ -581,13 +468,6 @@ void FakeCiceroneClient::NotifyLxdContainerStarting(
   }
 }
 
-void FakeCiceroneClient::NotifyLxdContainerStopping(
-    const vm_tools::cicerone::LxdContainerStoppingSignal& proto) {
-  for (auto& observer : observer_list_) {
-    observer.OnLxdContainerStopping(proto);
-  }
-}
-
 void FakeCiceroneClient::NotifyExportLxdContainerProgress(
     const vm_tools::cicerone::ExportLxdContainerProgressSignal& proto) {
   for (auto& observer : observer_list_) {
@@ -602,38 +482,10 @@ void FakeCiceroneClient::NotifyImportLxdContainerProgress(
   }
 }
 
-void FakeCiceroneClient::InstallLinuxPackageProgress(
-    const vm_tools::cicerone::InstallLinuxPackageProgressSignal& signal) {
-  for (auto& observer : observer_list_) {
-    observer.OnInstallLinuxPackageProgress(signal);
-  }
-}
-
-void FakeCiceroneClient::UninstallPackageProgress(
-    const vm_tools::cicerone::UninstallPackageProgressSignal& signal) {
-  for (auto& observer : observer_list_) {
-    observer.OnUninstallPackageProgress(signal);
-  }
-}
-
 void FakeCiceroneClient::NotifyPendingAppListUpdates(
     const vm_tools::cicerone::PendingAppListUpdatesSignal& proto) {
   for (auto& observer : observer_list_) {
     observer.OnPendingAppListUpdates(proto);
-  }
-}
-
-void FakeCiceroneClient::NotifyApplyAnsiblePlaybookProgress(
-    const vm_tools::cicerone::ApplyAnsiblePlaybookProgressSignal& signal) {
-  for (auto& observer : observer_list_) {
-    observer.OnApplyAnsiblePlaybookProgress(signal);
-  }
-}
-
-void FakeCiceroneClient::NotifyUpgradeContainerProgress(
-    const vm_tools::cicerone::UpgradeContainerProgressSignal& signal) {
-  for (auto& observer : observer_list_) {
-    observer.OnUpgradeContainerProgress(signal);
   }
 }
 

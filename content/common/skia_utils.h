@@ -5,11 +5,23 @@
 #ifndef CONTENT_COMMON_SKIA_UTILS_H_
 #define CONTENT_COMMON_SKIA_UTILS_H_
 
+#include "content/common/content_export.h"
+
 namespace content {
 
-// Common utility code for skia initialization done in the renderer process, and
-// also in the GPU process for viz/oop-r which runs skia in the GPU process.
+// Full Skia initialization for processes that do heavy Skia work (renderer,
+// GPU, in-process-GPU browser). Configures kill-switches, font caches, etc.
 void InitializeSkia();
+
+// Lightweight Skia initialization for processes that don't need full Skia setup
+// but still need kill-switches and diagnostics (e.g. browser process with
+// out-of-process GPU). Configures ICC/EXIF kill-switches, event tracing, and
+// memory dump providers.
+void InitializeSkiaLite();
+
+// Returns whether one of the InitializeSkia* functions above has run in this
+// process. Exposed for tests that need to verify per-process initialization.
+CONTENT_EXPORT bool IsSkiaInitializedForTesting();
 
 }  // namespace content
 

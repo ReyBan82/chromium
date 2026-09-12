@@ -13,10 +13,12 @@
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/strings/string_view_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/policy/core/common/cloud/external_policy_data_fetcher.h"
 #include "components/policy/core/common/policy_logger.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 #include "net/base/backoff_entry.h"
 #include "url/gurl.h"
 
@@ -113,8 +115,7 @@ const int kMaxLimitedRetries = 3;
 
 }  // namespace
 
-class ExternalPolicyDataUpdater::FetchJob
-    : public base::SupportsWeakPtr<FetchJob> {
+class ExternalPolicyDataUpdater::FetchJob final {
  public:
   FetchJob(ExternalPolicyDataUpdater* updater,
            const std::string& key,
@@ -122,7 +123,7 @@ class ExternalPolicyDataUpdater::FetchJob
            const ExternalPolicyDataUpdater::FetchSuccessCallback& callback);
   FetchJob(const FetchJob&) = delete;
   FetchJob& operator=(const FetchJob&) = delete;
-  virtual ~FetchJob();
+  ~FetchJob();
 
   const std::string& key() const;
   const ExternalPolicyDataUpdater::Request& request() const;
@@ -135,6 +136,8 @@ class ExternalPolicyDataUpdater::FetchJob
   bool IsRescheduleWithDelayRunning() const {
     return is_reschedule_with_delay_running_;
   }
+
+  base::WeakPtr<FetchJob> AsWeakPtr() { return weak_factory_.GetWeakPtr(); }
 
  private:
   void OnFailed(net::BackoffEntry* backoff_entry);
@@ -167,6 +170,8 @@ class ExternalPolicyDataUpdater::FetchJob
   net::BackoffEntry retry_soon_entry_{&kRetrySoonPolicy};
   net::BackoffEntry retry_later_entry_{&kRetryLaterPolicy};
   net::BackoffEntry retry_much_later_entry_{&kRetryMuchLaterPolicy};
+
+  base::WeakPtrFactory<FetchJob> weak_factory_{this};
 };
 
 ExternalPolicyDataUpdater::Request::Request() = default;
@@ -272,7 +277,8 @@ void ExternalPolicyDataUpdater::FetchJob::OnFetchFinished(
       break;
   }
 
-  if (crypto::SHA256HashString(*data) != request_.hash) {
+  if (std::string(base::as_string_view(crypto::hash::Sha256(*data))) !=
+      request_.hash) {
     // Received |data| does not match expected hash. This may be because the
     // data being served is stale. Try again much later.
     LOG_POLICY(ERROR, POLICY_FETCHING)
@@ -303,7 +309,9 @@ void ExternalPolicyDataUpdater::FetchJob::OnFailed(net::BackoffEntry* entry) {
     // in the process of being deleted. If this is the case, the WeakPtr will
     // become invalid and the delayed task will never run.
     updater_->task_runner_->PostDelayedTask(
-        FROM_HERE, base::BindOnce(&FetchJob::Reschedule, AsWeakPtr()), delay);
+        FROM_HERE,
+        base::BindOnce(&FetchJob::Reschedule, weak_factory_.GetWeakPtr()),
+        delay);
   }
 
   updater_->OnJobFailed(this);

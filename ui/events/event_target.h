@@ -113,7 +113,11 @@ class EVENTS_EXPORT EventTarget {
 
   // A handler with a priority.
   struct PrioritizedHandler {
-    raw_ptr<EventHandler, DanglingUntriaged> handler = nullptr;
+    // Uses UnprotectedInRelease | DanglingUntriaged: Performance reasons: based
+    // on this sampling profiler result on ChromeOS.
+    // go/brp-cros-prof-diff-20230403
+    raw_ptr<EventHandler, UnprotectedInRelease | DanglingUntriaged> handler =
+        nullptr;
     Priority priority = Priority::kDefault;
 
     bool operator<(const PrioritizedHandler& ph) const {
@@ -134,7 +138,7 @@ class EVENTS_EXPORT EventTarget {
 
   EventHandlerPriorityList pre_target_list_;
   EventHandlerList post_target_list_;
-  raw_ptr<EventHandler> target_handler_ = nullptr;
+  raw_ptr<EventHandler, DanglingUntriaged> target_handler_ = nullptr;
 };
 
 }  // namespace ui

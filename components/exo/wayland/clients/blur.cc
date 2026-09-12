@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "components/exo/wayland/clients/blur.h"
 
 #include <algorithm>
@@ -13,7 +14,8 @@
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkSurface.h"
 #include "third_party/skia/include/effects/SkImageFilters.h"
-#include "third_party/skia/include/gpu/GrDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/SkImageGanesh.h"
 #include "ui/gl/gl_bindings.h"
 
 namespace exo {
@@ -33,7 +35,7 @@ const int kGridSize = 4;
 // Create grid image for |size| and |cell_size|.
 sk_sp<SkImage> CreateGridImage(const gfx::Size& size,
                                const gfx::Size& cell_size) {
-  sk_sp<SkSurface> surface(SkSurface::MakeRaster(
+  sk_sp<SkSurface> surface(SkSurfaces::Raster(
       SkImageInfo::MakeN32(size.width(), size.height(), kOpaque_SkAlphaType)));
   SkCanvas* canvas = surface->getCanvas();
   canvas->clear(SK_ColorWHITE);
@@ -77,11 +79,11 @@ void DrawContents(SkImage* background_grid_image,
   }
 
   // Draw rotated rectangles.
-  SkScalar rect_size =
-      SkScalarHalf(std::min(cell_size.width(), cell_size.height()));
-  SkIRect rect = SkIRect::MakeXYWH(
-      -SkScalarHalf(rect_size), -SkScalarHalf(rect_size), rect_size, rect_size);
-  SkScalar rotation = elapsed_time.InMilliseconds() * kRotationSpeed / 1000;
+  float rect_size = std::min(cell_size.width(), cell_size.height()) / 2.f;
+  SkIRect rect = SkIRect::MakeXYWH(static_cast<int>(-rect_size / 2.f),
+                                   static_cast<int>(-rect_size / 2.f),
+                                   rect_size, rect_size);
+  float rotation = elapsed_time.InMilliseconds() * kRotationSpeed / 1000;
   for (int y = 0; y < kGridSize; ++y) {
     for (int x = 0; x < kGridSize; ++x) {
       const SkColor kColors[] = {SK_ColorBLUE, SK_ColorGREEN,
@@ -90,9 +92,8 @@ void DrawContents(SkImage* background_grid_image,
       SkPaint paint;
       paint.setColor(kColors[(y * kGridSize + x) % std::size(kColors)]);
       canvas->save();
-      canvas->translate(
-          x * cell_size.width() + SkScalarHalf(cell_size.width()),
-          y * cell_size.height() + SkScalarHalf(cell_size.height()));
+      canvas->translate(x * cell_size.width() + cell_size.width() / 2.f,
+                        y * cell_size.height() + cell_size.height() / 2.f);
       canvas->rotate(rotation / (y * kGridSize + x + 1));
       canvas->drawIRect(rect, paint);
       canvas->restore();
@@ -185,9 +186,18 @@ void Blur::Run(double sigma_x,
       SkIRect subset;
       SkIPoint offset;
       sk_sp<SkImage> blur_image = content_surfaces.back()->makeImageSnapshot();
-      sk_sp<SkImage> blurred_image = blur_image->makeWithFilter(
-          gr_context_.get(), blur_filter.get(), blur_image->bounds(),
-          blur_image->bounds(), &subset, &offset);
+
+      sk_sp<SkImage> blurred_image;
+      if (gr_context_.get()) {
+        blurred_image = SkImages::MakeWithFilter(
+            gr_context_.get(), blur_image, blur_filter.get(), blur_image->bounds(),
+            blur_image->bounds(), &subset, &offset);
+      } else {
+        blurred_image =
+            SkImages::MakeWithFilter(blur_image, blur_filter.get(), blur_image->bounds(),
+                                     blur_image->bounds(), &subset, &offset);
+      }
+
       SkCanvas* canvas = buffer->sk_surface->getCanvas();
       canvas->save();
       SkSize size = SkSize::Make(size_.width(), size_.height());
@@ -205,7 +215,7 @@ void Blur::Run(double sigma_x,
 
       // Restore blur surfaces for next frame.
       std::swap(content_surfaces, blur_surfaces);
-      std::reverse(blur_surfaces.begin(), blur_surfaces.end());
+      std::ranges::reverse(blur_surfaces);
     } else {  // !blur_filter
       SkCanvas* canvas = buffer->sk_surface->getCanvas();
       DrawContents(grid_image_.get(), cell_size, elapsed_time, canvas);

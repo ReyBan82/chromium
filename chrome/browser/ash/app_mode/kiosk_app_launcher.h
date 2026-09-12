@@ -4,10 +4,14 @@
 #ifndef CHROME_BROWSER_ASH_APP_MODE_KIOSK_APP_LAUNCHER_H_
 #define CHROME_BROWSER_ASH_APP_MODE_KIOSK_APP_LAUNCHER_H_
 
+#include <optional>
+#include <string>
+
 #include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/observer_list_types.h"
 #include "chrome/browser/ash/app_mode/kiosk_app_launch_error.h"
+#include "components/webapps/common/web_app_id.h"
 
 namespace ash {
 
@@ -40,9 +44,6 @@ class KioskAppLauncher {
     virtual void InitializeNetwork() = 0;
     // Whether the device is online.
     virtual bool IsNetworkReady() const = 0;
-    // TODO(crbug.com/1015383): Refactor out this method at some moment.
-    // Whether network configure UI is shown.
-    virtual bool IsShowingNetworkConfigScreen() const = 0;
   };
 
   class Observer : public base::CheckedObserver {
@@ -52,8 +53,10 @@ class KioskAppLauncher {
     virtual void OnAppDataUpdated() {}
     virtual void OnAppInstalling() {}
     virtual void OnAppPrepared() {}
+    virtual void OnAppLaunching() {}
     virtual void OnAppLaunched() {}
-    virtual void OnAppWindowCreated() {}
+    virtual void OnAppWindowCreated(
+        const std::optional<webapps::AppId>& app_id) {}
     virtual void OnLaunchFailed(KioskAppLaunchError::Error error) {}
   };
 
@@ -70,12 +73,19 @@ class KioskAppLauncher {
     void NotifyAppDataUpdated();
     void NotifyAppInstalling();
     void NotifyAppPrepared();
+    void NotifyAppLaunching();
     void NotifyAppLaunched();
-    void NotifyAppWindowCreated();
+    void NotifyAppWindowCreated(
+        const std::optional<webapps::AppId>& app_id = std::nullopt);
     void NotifyLaunchFailed(KioskAppLaunchError::Error error);
 
    private:
-    base::ObserverList<Observer> observers_;
+    // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+    base::ObserverList<
+        Observer,
+        /*check_empty=*/false,
+        base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>
+        observers_;
   };
 
   KioskAppLauncher();
@@ -91,13 +101,11 @@ class KioskAppLauncher {
   virtual void Initialize() = 0;
   // This has to be called after launcher asked to configure network.
   virtual void ContinueWithNetworkReady() = 0;
-  // Restarts current installation.
-  virtual void RestartLauncher() = 0;
   // Launches the kiosk app.
   virtual void LaunchApp() = 0;
 
  protected:
-  base::raw_ptr<NetworkDelegate> delegate_ = nullptr;  // Not owned, owns us.
+  raw_ptr<NetworkDelegate> delegate_ = nullptr;  // Not owned, owns us.
 };
 
 }  // namespace ash

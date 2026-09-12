@@ -2,77 +2,123 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include "base/command_line.h"
 #include "base/memory/raw_ptr.h"
 #include "base/test/bind.h"
-#include "base/test/metrics/histogram_tester.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_tabstrip.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
 #include "chrome/browser/ui/exclusive_access/fullscreen_controller.h"
 #include "chrome/browser/ui/exclusive_access/fullscreen_controller_state_test.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/test/base/browser_with_test_window_test.h"
+#include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_contents_delegate.h"
+#include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/url_constants.h"
+#include "content/public/test/navigation_simulator.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
 #include "ui/display/types/display_constants.h"
 
-// The FullscreenControllerStateUnitTest unit test suite exhastively tests
+// The FullscreenControllerStateUnitTest unit test suite exhaustively tests
 // the FullscreenController through all permutations of events. The behavior
-// of the BrowserWindow is mocked via FullscreenControllerTestWindow.
+// of the ExclusiveAccessContext is mocked via FullscreenControllerTestWindow.
 
 namespace {
 
-const char kFullscreenReshowHistogramName[] =
-    "ExclusiveAccess.BubbleReshowsPerSession.Fullscreen";
-
 // FullscreenControllerTestWindow ----------------------------------------------
 
-// A BrowserWindow used for testing FullscreenController. The behavior of this
-// mock is verified manually by running
+// An ExclusiveAccessContext used for testing FullscreenController. The behavior
+// of this mock is verified manually by running
 // FullscreenControllerStateInteractiveTest.
-class FullscreenControllerTestWindow : public TestBrowserWindow,
-                                       ExclusiveAccessContext {
+class FullscreenControllerTestWindow : public ExclusiveAccessContext,
+                                       public content::WebContentsDelegate {
  public:
   // Simulate the window state with an enumeration.
   enum WindowState {
-    NORMAL,
-    FULLSCREEN,
-    TO_NORMAL,
-    TO_FULLSCREEN,
+    kNormal,
+    kFullscreen,
+    kToNormal,
+    kToFullscreen,
   };
 
-  FullscreenControllerTestWindow();
-  ~FullscreenControllerTestWindow() override {}
+  FullscreenControllerTestWindow() = default;
+  ~FullscreenControllerTestWindow() override = default;
 
-  // BrowserWindow Interface:
-  bool ShouldHideUIForFullscreen() const override;
-  bool IsFullscreen() const override;
+  // Window state:
   static const char* GetWindowStateString(WindowState state);
   WindowState state() const { return state_; }
-  void set_browser(Browser* browser) { browser_ = browser; }
-  ExclusiveAccessContext* GetExclusiveAccessContext() override;
+  void set_exclusive_access_manager(ExclusiveAccessManager* manager) {
+    exclusive_access_manager_ = manager;
+  }
+  void set_profile(Profile* profile) { profile_ = profile; }
+  void set_active_web_contents(content::WebContents* web_contents) {
+    active_web_contents_ = web_contents;
+  }
+  void set_reentrant(bool reentrant) { reentrant_ = reentrant; }
 
   // ExclusiveAccessContext Interface:
-  Profile* GetProfile() override;
-  content::WebContents* GetActiveWebContents() override;
-  void EnterFullscreen(const GURL& url,
+  Profile* GetProfile() override { return profile_; }
+  bool IsFullscreen() const override;
+  void EnterFullscreen(const url::Origin& origin,
                        ExclusiveAccessBubbleType type,
-                       int64_t display_id) override;
+                       FullscreenTabParams fullscreen_tab_params) override;
   void ExitFullscreen() override;
-  void UpdateExclusiveAccessExitBubbleContent(
-      const GURL& url,
-      ExclusiveAccessBubbleType bubble_type,
-      ExclusiveAccessBubbleHideCallback bubble_first_hide_callback,
-      bool notify_download,
-      bool force_update) override;
-  bool IsExclusiveAccessBubbleDisplayed() const override;
-  void OnExclusiveAccessUserInput() override;
-  bool CanUserExitFullscreen() const override;
+  void UpdateExclusiveAccessBubble(
+      const ExclusiveAccessBubbleParams& params,
+      ExclusiveAccessBubbleHideCallback first_hide_callback) override {}
+  bool IsExclusiveAccessBubbleDisplayed() const override { return false; }
+  void OnExclusiveAccessUserInput() override {}
+  content::WebContents* GetWebContentsForExclusiveAccess() override {
+    return active_web_contents_;
+  }
+  bool CanUserEnterFullscreen() const override { return true; }
+  bool CanUserExitFullscreen() const override { return true; }
+
+  // content::WebContentsDelegate Interface:
+  bool IsFullscreenForTabOrPending(
+      const content::WebContents* web_contents) override {
+    if (!exclusive_access_manager_) {
+      return false;
+    }
+    const content::FullscreenState fullscreen_state =
+        exclusive_access_manager_->fullscreen_controller()->GetFullscreenState(
+            web_contents);
+    return fullscreen_state.target_mode == content::FullscreenMode::kContent ||
+           fullscreen_state.target_mode ==
+               content::FullscreenMode::kPseudoContent;
+  }
+
+  content::FullscreenState GetFullscreenState(
+      const content::WebContents* web_contents) const override {
+    if (!exclusive_access_manager_) {
+      return {};
+    }
+    return exclusive_access_manager_->fullscreen_controller()
+        ->GetFullscreenState(web_contents);
+  }
+
+  void EnterFullscreenModeForTab(
+      content::RenderFrameHost* requesting_frame,
+      const blink::mojom::FullscreenOptions& options) override {
+    if (exclusive_access_manager_) {
+      exclusive_access_manager_->fullscreen_controller()
+          ->EnterFullscreenModeForTab(requesting_frame,
+                                      FullscreenTabParams{options.display_id});
+    }
+  }
+
+  void ExitFullscreenModeForTab(content::WebContents* web_contents) override {
+    if (exclusive_access_manager_) {
+      exclusive_access_manager_->fullscreen_controller()
+          ->ExitFullscreenModeForTab(web_contents);
+    }
+  }
 
   // Simulates the window changing state.
   void ChangeWindowFullscreenState();
@@ -84,38 +130,36 @@ class FullscreenControllerTestWindow : public TestBrowserWindow,
   // of updating the current fullscreen state to the passed in state.
   bool IsTransitionReentrant(bool new_fullscreen);
 
-  WindowState state_;
-  raw_ptr<Browser> browser_;
+  WindowState state_ = kNormal;
+  raw_ptr<Profile> profile_ = nullptr;
+  raw_ptr<content::WebContents> active_web_contents_ = nullptr;
+  raw_ptr<ExclusiveAccessManager> exclusive_access_manager_ = nullptr;
+  bool reentrant_ =
+      FullscreenControllerStateTest::IsWindowFullscreenStateChangedReentrant();
 };
 
-FullscreenControllerTestWindow::FullscreenControllerTestWindow()
-    : state_(NORMAL), browser_(nullptr) {}
-
 void FullscreenControllerTestWindow::EnterFullscreen(
-    const GURL& url,
+    const url::Origin& origin,
     ExclusiveAccessBubbleType type,
-    int64_t display_id) {
+    FullscreenTabParams fullscreen_tab_params) {
   EnterFullscreen();
 }
 
 void FullscreenControllerTestWindow::ExitFullscreen() {
   if (IsFullscreen()) {
-    state_ = TO_NORMAL;
+    state_ = kToNormal;
 
-    if (IsTransitionReentrant(false))
+    if (IsTransitionReentrant(false)) {
       ChangeWindowFullscreenState();
+    }
   }
-}
-
-bool FullscreenControllerTestWindow::ShouldHideUIForFullscreen() const {
-  return IsFullscreen();
 }
 
 bool FullscreenControllerTestWindow::IsFullscreen() const {
 #if BUILDFLAG(IS_MAC)
-  return state_ == FULLSCREEN || state_ == TO_FULLSCREEN;
+  return state_ == kFullscreen || state_ == kToFullscreen;
 #else
-  return state_ == FULLSCREEN || state_ == TO_NORMAL;
+  return state_ == kFullscreen || state_ == kToNormal;
 #endif
 }
 
@@ -123,13 +167,12 @@ bool FullscreenControllerTestWindow::IsFullscreen() const {
 const char* FullscreenControllerTestWindow::GetWindowStateString(
     WindowState state) {
   switch (state) {
-    ENUM_TO_STRING(NORMAL);
-    ENUM_TO_STRING(FULLSCREEN);
-    ENUM_TO_STRING(TO_FULLSCREEN);
-    ENUM_TO_STRING(TO_NORMAL);
+    ENUM_TO_STRING(kNormal);
+    ENUM_TO_STRING(kFullscreen);
+    ENUM_TO_STRING(kToFullscreen);
+    ENUM_TO_STRING(kToNormal);
     default:
       NOTREACHED() << "No string for state " << state;
-      return "WindowState-Unknown";
   }
 }
 
@@ -137,70 +180,48 @@ void FullscreenControllerTestWindow::ChangeWindowFullscreenState() {
   // Most states result in "no operation" intentionally. The tests
   // assume that all possible states and event pairs can be tested, even
   // though window managers will not generate all of these.
-  if (state_ == TO_FULLSCREEN)
-      state_ = FULLSCREEN;
-  else if (state_ == TO_NORMAL)
-      state_ = NORMAL;
+  if (state_ == kToFullscreen) {
+    state_ = kFullscreen;
+  } else if (state_ == kToNormal) {
+    state_ = kNormal;
+  }
 
   // Emit a change event from every state to ensure the Fullscreen Controller
   // handles it in all circumstances.
-  browser_->WindowFullscreenStateChanged();
+  if (exclusive_access_manager_) {
+    exclusive_access_manager_->fullscreen_controller()
+        ->WindowFullscreenStateChanged();
+  }
 }
 
 void FullscreenControllerTestWindow::EnterFullscreen() {
   bool reentrant = IsTransitionReentrant(true);
 
-  if (!IsFullscreen())
-    state_ = TO_FULLSCREEN;
+  if (!IsFullscreen()) {
+    state_ = kToFullscreen;
+  }
 
-  if (reentrant)
+  if (reentrant) {
     ChangeWindowFullscreenState();
+  }
 }
 
 bool FullscreenControllerTestWindow::IsTransitionReentrant(
     bool new_fullscreen) {
   bool fullscreen_changed = (new_fullscreen != IsFullscreen());
 
-  if (!fullscreen_changed)
+  if (!fullscreen_changed) {
     return false;
+  }
 
-  if (FullscreenControllerStateTest::IsWindowFullscreenStateChangedReentrant())
+  if (reentrant_) {
     return true;
+  }
 
   // BrowserWindowCocoa::EnterFullscreen() and
   // BrowserWindowCocoa::EnterFullscreenWithToolbar() are reentrant when
   // switching between fullscreen with chrome and fullscreen without chrome.
-  return state_ == FULLSCREEN && !fullscreen_changed;
-}
-
-ExclusiveAccessContext*
-FullscreenControllerTestWindow::GetExclusiveAccessContext() {
-  return this;
-}
-
-Profile* FullscreenControllerTestWindow::GetProfile() {
-  return browser_->profile();
-}
-
-content::WebContents* FullscreenControllerTestWindow::GetActiveWebContents() {
-  return browser_->tab_strip_model()->GetActiveWebContents();
-}
-
-void FullscreenControllerTestWindow::UpdateExclusiveAccessExitBubbleContent(
-    const GURL& url,
-    ExclusiveAccessBubbleType bubble_type,
-    ExclusiveAccessBubbleHideCallback bubble_first_hide_callback,
-    bool notify_download,
-    bool force_update) {}
-
-bool FullscreenControllerTestWindow::IsExclusiveAccessBubbleDisplayed() const {
-  return false;
-}
-
-void FullscreenControllerTestWindow::OnExclusiveAccessUserInput() {}
-
-bool FullscreenControllerTestWindow::CanUserExitFullscreen() const {
-  return true;
+  return state_ == kFullscreen && !fullscreen_changed;
 }
 
 }  // namespace
@@ -209,49 +230,69 @@ bool FullscreenControllerTestWindow::CanUserExitFullscreen() const {
 
 // Unit test fixture testing Fullscreen Controller through its states. Most of
 // the test logic comes from FullscreenControllerStateTest.
-class FullscreenControllerStateUnitTest : public BrowserWithTestWindowTest,
-                                          public FullscreenControllerStateTest {
+class FullscreenControllerStateUnitTest
+    : public ChromeRenderViewHostTestHarness,
+      public FullscreenControllerStateTest {
  public:
-  FullscreenControllerStateUnitTest();
+  FullscreenControllerStateUnitTest() = default;
 
   FullscreenControllerStateUnitTest(const FullscreenControllerStateUnitTest&) =
       delete;
   FullscreenControllerStateUnitTest& operator=(
       const FullscreenControllerStateUnitTest&) = delete;
 
-  // FullscreenControllerStateTest:
+  // ChromeRenderViewHostTestHarness:
   void SetUp() override;
   void TearDown() override;
-  std::unique_ptr<BrowserWindow> CreateBrowserWindow() override;
+
+  // FullscreenControllerStateTest:
   void ChangeWindowFullscreenState() override;
   const char* GetWindowStateString() override;
   void VerifyWindowState() override;
 
+  content::WebContents* AddTab(const GURL& url = GURL(url::kAboutBlankURL));
+  void ActivateTab(size_t index);
+  void SelectNextTab();
+  std::unique_ptr<content::WebContents> DetachTab(size_t index);
+  void AttachTab(std::unique_ptr<content::WebContents> contents,
+                 size_t index,
+                 bool active = true);
+  content::WebContents* GetTab(size_t index) {
+    CHECK_LT(index, tabs_.size());
+    return tabs_[index].get();
+  }
+
  protected:
   // FullscreenControllerStateTest:
   bool ShouldSkipStateAndEventPair(State state, Event event) override;
-  Browser* GetBrowser() override;
-  raw_ptr<FullscreenControllerTestWindow> window_ = nullptr;
+  FullscreenController* GetFullscreenController() override;
+  content::WebContents* GetActiveWebContents() override;
+
+  std::unique_ptr<FullscreenControllerTestWindow> window_;
+  std::unique_ptr<ExclusiveAccessManager> exclusive_access_manager_;
+  std::vector<std::unique_ptr<content::WebContents>> tabs_;
+  size_t active_tab_index_ = 0;
 };
 
-FullscreenControllerStateUnitTest::FullscreenControllerStateUnitTest() =
-    default;
-
 void FullscreenControllerStateUnitTest::SetUp() {
-  BrowserWithTestWindowTest::SetUp();
-  window_->set_browser(browser());
+  ChromeRenderViewHostTestHarness::SetUp();
+  window_ = std::make_unique<FullscreenControllerTestWindow>();
+  window_->set_profile(profile());
+  exclusive_access_manager_ =
+      std::make_unique<ExclusiveAccessManager>(window_.get());
+  window_->set_exclusive_access_manager(exclusive_access_manager_.get());
 }
 
 void FullscreenControllerStateUnitTest::TearDown() {
+  if (window_) {
+    window_->set_exclusive_access_manager(nullptr);
+    window_->set_active_web_contents(nullptr);
+  }
+  exclusive_access_manager_.reset();
+  window_.reset();
+  tabs_.clear();
   FullscreenControllerStateTest::TearDown();
-  BrowserWithTestWindowTest::TearDown();
-}
-
-std::unique_ptr<BrowserWindow>
-FullscreenControllerStateUnitTest::CreateBrowserWindow() {
-  auto window = std::make_unique<FullscreenControllerTestWindow>();
-  window_ = window.get();
-  return window;
+  ChromeRenderViewHostTestHarness::TearDown();
 }
 
 void FullscreenControllerStateUnitTest::ChangeWindowFullscreenState() {
@@ -265,26 +306,26 @@ const char* FullscreenControllerStateUnitTest::GetWindowStateString() {
 void FullscreenControllerStateUnitTest::VerifyWindowState() {
   switch (state()) {
     case STATE_NORMAL:
-      EXPECT_EQ(FullscreenControllerTestWindow::NORMAL,
-                window_->state()) << GetAndClearDebugLog();
+      EXPECT_EQ(FullscreenControllerTestWindow::kNormal, window_->state())
+          << GetAndClearDebugLog();
       break;
 
     case STATE_BROWSER_FULLSCREEN:
     case STATE_TAB_FULLSCREEN:
     case STATE_TAB_BROWSER_FULLSCREEN:
-      EXPECT_EQ(FullscreenControllerTestWindow::FULLSCREEN,
-                window_->state()) << GetAndClearDebugLog();
+      EXPECT_EQ(FullscreenControllerTestWindow::kFullscreen, window_->state())
+          << GetAndClearDebugLog();
       break;
 
     case STATE_TO_NORMAL:
-      EXPECT_EQ(FullscreenControllerTestWindow::TO_NORMAL,
-                window_->state()) << GetAndClearDebugLog();
+      EXPECT_EQ(FullscreenControllerTestWindow::kToNormal, window_->state())
+          << GetAndClearDebugLog();
       break;
 
     case STATE_TO_BROWSER_FULLSCREEN:
     case STATE_TO_TAB_FULLSCREEN:
-      EXPECT_EQ(FullscreenControllerTestWindow::TO_FULLSCREEN,
-                window_->state()) << GetAndClearDebugLog();
+      EXPECT_EQ(FullscreenControllerTestWindow::kToFullscreen, window_->state())
+          << GetAndClearDebugLog();
       break;
 
     default:
@@ -295,25 +336,94 @@ void FullscreenControllerStateUnitTest::VerifyWindowState() {
 }
 
 bool FullscreenControllerStateUnitTest::ShouldSkipStateAndEventPair(
-    State state, Event event) {
+    State state,
+    Event event) {
 #if BUILDFLAG(IS_MAC)
   // TODO(scheib) Toggle, Window Event, Toggle, Toggle on Mac as exposed by
   // test *.STATE_TO_NORMAL__TOGGLE_FULLSCREEN runs interactively and exits to
   // Normal. This doesn't appear to be the desired result, and would add
   // too much complexity to mimic in our simple FullscreenControllerTestWindow.
-  // http://crbug.com/156968
+  // http://crbug.com/40952626
   if ((state == STATE_TO_BROWSER_FULLSCREEN ||
        state == STATE_TO_TAB_FULLSCREEN) &&
-      event == TOGGLE_FULLSCREEN)
+      event == TOGGLE_FULLSCREEN) {
     return true;
+  }
 #endif
 
   return FullscreenControllerStateTest::ShouldSkipStateAndEventPair(state,
                                                                     event);
 }
 
-Browser* FullscreenControllerStateUnitTest::GetBrowser() {
-  return BrowserWithTestWindowTest::browser();
+FullscreenController*
+FullscreenControllerStateUnitTest::GetFullscreenController() {
+  return exclusive_access_manager_->fullscreen_controller();
+}
+
+content::WebContents*
+FullscreenControllerStateUnitTest::GetActiveWebContents() {
+  return tabs_.empty() ? nullptr : tabs_[active_tab_index_].get();
+}
+
+content::WebContents* FullscreenControllerStateUnitTest::AddTab(
+    const GURL& url) {
+  std::unique_ptr<content::WebContents> contents = CreateTestWebContents();
+  content::WebContents* raw_contents = contents.get();
+  raw_contents->SetDelegate(window_.get());
+  content::NavigationSimulator::NavigateAndCommitFromBrowser(raw_contents, url);
+  tabs_.push_back(std::move(contents));
+  ActivateTab(tabs_.size() - 1);
+  return raw_contents;
+}
+
+void FullscreenControllerStateUnitTest::ActivateTab(size_t index) {
+  CHECK_LT(index, tabs_.size());
+  content::WebContents* old_tab = GetActiveWebContents();
+  active_tab_index_ = index;
+  content::WebContents* new_tab = tabs_[index].get();
+  window_->set_active_web_contents(new_tab);
+  if (old_tab && old_tab != new_tab) {
+    exclusive_access_manager_->OnTabDeactivated(old_tab);
+    exclusive_access_manager_->OnTabDetachedFromView(old_tab);
+  }
+}
+
+void FullscreenControllerStateUnitTest::SelectNextTab() {
+  CHECK(!tabs_.empty());
+  size_t next_index = (active_tab_index_ + 1) % tabs_.size();
+  ActivateTab(next_index);
+}
+
+std::unique_ptr<content::WebContents>
+FullscreenControllerStateUnitTest::DetachTab(size_t index) {
+  CHECK_LT(index, tabs_.size());
+  std::unique_ptr<content::WebContents> detached = std::move(tabs_[index]);
+  tabs_.erase(tabs_.begin() + index);
+  detached->SetDelegate(nullptr);
+  if (index < active_tab_index_) {
+    --active_tab_index_;
+  }
+  if (active_tab_index_ >= tabs_.size()) {
+    active_tab_index_ = tabs_.empty() ? 0 : tabs_.size() - 1;
+  }
+  content::WebContents* new_active =
+      tabs_.empty() ? nullptr : tabs_[active_tab_index_].get();
+  window_->set_active_web_contents(new_active);
+  exclusive_access_manager_->OnTabDeactivated(detached.get());
+  exclusive_access_manager_->OnTabDetachedFromView(detached.get());
+  return detached;
+}
+
+void FullscreenControllerStateUnitTest::AttachTab(
+    std::unique_ptr<content::WebContents> contents,
+    size_t index,
+    bool active) {
+  CHECK_LE(index, tabs_.size());
+  contents->SetDelegate(window_.get());
+  tabs_.insert(tabs_.begin() + index, std::move(contents));
+  if (active) {
+    ActivateTab(index);
+  }
 }
 
 // Soak tests ------------------------------------------------------------------
@@ -328,58 +438,58 @@ Browser* FullscreenControllerStateUnitTest::GetBrowser() {
 // exist.
 TEST_F(FullscreenControllerStateUnitTest, TransitionsForEachState) {
   // A tab is needed for tab fullscreen.
-  AddTab(browser(), GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
   TestTransitionsForEachState();
   // Progress of test can be examined via LOG(INFO) << GetAndClearDebugLog();
 }
-
 
 // Individual tests for each pair of state and event ---------------------------
 
 #define TEST_EVENT(state, event)                                \
   TEST_F(FullscreenControllerStateUnitTest, state##__##event) { \
-    AddTab(browser(), GURL(url::kAboutBlankURL));               \
+    AddTab(GURL(url::kAboutBlankURL));                          \
     ASSERT_NO_FATAL_FAILURE(TestStateAndEvent(state, event))    \
         << GetAndClearDebugLog();                               \
   }
-    // Progress of tests can be examined by inserting the following line:
-    // LOG(INFO) << GetAndClearDebugLog(); }
+// Progress of tests can be examined by inserting the following line:
+// LOG(INFO) << GetAndClearDebugLog(); }
 
 #include "chrome/browser/ui/exclusive_access/fullscreen_controller_state_tests.h"
-
 
 // Specific one-off tests for known issues -------------------------------------
 
 // TODO(scheib) Toggling Tab fullscreen while pending Tab or
-// Browser fullscreen is broken currently http://crbug.com/154196
+// Browser fullscreen is broken currently http://crbug.com/40951066
 TEST_F(FullscreenControllerStateUnitTest,
        DISABLED_ToggleTabWhenPendingBrowser) {
   // Only possible without reentrancy.
-  if (FullscreenControllerStateTest::IsWindowFullscreenStateChangedReentrant())
+  if (FullscreenControllerStateTest::
+          IsWindowFullscreenStateChangedReentrant()) {
     return;
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  ASSERT_NO_FATAL_FAILURE(
-      TransitionToState(STATE_TO_BROWSER_FULLSCREEN))
+  }
+  AddTab(GURL(url::kAboutBlankURL));
+  ASSERT_NO_FATAL_FAILURE(TransitionToState(STATE_TO_BROWSER_FULLSCREEN))
       << GetAndClearDebugLog();
 
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE)) << GetAndClearDebugLog();
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE)) << GetAndClearDebugLog();
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN)) << GetAndClearDebugLog();
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN)) << GetAndClearDebugLog();
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE)) << GetAndClearDebugLog();
 }
 
 // TODO(scheib) Toggling Tab fullscreen while pending Tab or
-// Browser fullscreen is broken currently http://crbug.com/154196
+// Browser fullscreen is broken currently http://crbug.com/40951066
 TEST_F(FullscreenControllerStateUnitTest, DISABLED_ToggleTabWhenPendingTab) {
   // Only possible without reentrancy.
-  if (FullscreenControllerStateTest::IsWindowFullscreenStateChangedReentrant())
+  if (FullscreenControllerStateTest::
+          IsWindowFullscreenStateChangedReentrant()) {
     return;
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  ASSERT_NO_FATAL_FAILURE(
-      TransitionToState(STATE_TO_TAB_FULLSCREEN))
+  }
+  AddTab(GURL(url::kAboutBlankURL));
+  ASSERT_NO_FATAL_FAILURE(TransitionToState(STATE_TO_TAB_FULLSCREEN))
       << GetAndClearDebugLog();
 
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE)) << GetAndClearDebugLog();
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE)) << GetAndClearDebugLog();
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN)) << GetAndClearDebugLog();
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN)) << GetAndClearDebugLog();
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE)) << GetAndClearDebugLog();
 }
 
@@ -398,13 +508,14 @@ TEST_F(FullscreenControllerStateUnitTest, DISABLED_DebugLogStateTables) {
     for (int state2_int = 0; state2_int < NUM_STATES; ++state2_int) {
       State state2 = static_cast<State>(state2_int);
       if (ShouldSkipStateAndEventPair(state1, EVENT_INVALID) ||
-          ShouldSkipStateAndEventPair(state2, EVENT_INVALID))
+          ShouldSkipStateAndEventPair(state2, EVENT_INVALID)) {
         continue;
+      }
       // Compute the transition
       if (NextTransitionInShortestPath(state1, state2, NUM_STATES).state ==
           STATE_INVALID) {
         LOG(ERROR) << "Should be skipping state transitions for: "
-            << GetStateString(state1) << " " << GetStateString(state2);
+                   << GetStateString(state1) << " " << GetStateString(state2);
       }
     }
   }
@@ -419,24 +530,22 @@ TEST_F(FullscreenControllerStateUnitTest, DISABLED_DebugLogStateTables) {
 // ExclusiveAccessContext interface.
 TEST_F(FullscreenControllerStateUnitTest,
        ExitFullscreenViaExclusiveAccessContext) {
-  AddTab(browser(), GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_TRUE(browser()->window()->IsFullscreen());
+  ASSERT_TRUE(window_->IsFullscreen());
   // Exit fullscreen without going through fullscreen controller.
   window_->ExitFullscreen();
   ChangeWindowFullscreenState();
   EXPECT_EQ(EXCLUSIVE_ACCESS_BUBBLE_TYPE_NONE,
-            browser()
-                ->exclusive_access_manager()
-                ->GetExclusiveAccessExitBubbleType());
+            exclusive_access_manager_->GetExclusiveAccessExitBubbleType());
 }
 
 // Tests that RunOrDeferUntilTransitionIsComplete runs the lambda when nothing
 // is happening (no transition in progress).
 TEST_F(FullscreenControllerStateUnitTest,
        RunOrDeferUntilTransitionIsCompleteNow) {
-  AddTab(browser(), GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
   bool lambda_called = false;
   GetFullscreenController()->RunOrDeferUntilTransitionIsComplete(
       base::BindLambdaForTesting([&lambda_called]() { lambda_called = true; }));
@@ -447,100 +556,72 @@ TEST_F(FullscreenControllerStateUnitTest,
 // a transition is in progress and runs it after the transition completes.
 TEST_F(FullscreenControllerStateUnitTest,
        RunOrDeferUntilTransitionIsCompleteDefer) {
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  GetFullscreenController()->ToggleBrowserFullscreenMode();
+  AddTab(GURL(url::kAboutBlankURL));
+  window_->set_reentrant(false);
+  GetFullscreenController()->ToggleBrowserFullscreenMode(
+      /*user_initiated=*/false);
   bool lambda_called = false;
   GetFullscreenController()->RunOrDeferUntilTransitionIsComplete(
       base::BindLambdaForTesting([&lambda_called]() { lambda_called = true; }));
   EXPECT_FALSE(lambda_called);
-  GetFullscreenController()->FullscreenTransititionCompleted();
+  GetFullscreenController()->WindowFullscreenStateChanged();
   EXPECT_TRUE(lambda_called);
 }
 
-// Tests that the overloaded version of IsFullscreenForTabOrPending writes the
-// display ID.
-TEST_F(FullscreenControllerStateUnitTest,
-       IsFullscreenForTabOrPendingWritesDisplayId) {
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
-  // Should not overwrite `display_id` when not in fullscreen (or pending).
-  int64_t display_id = display::kDefaultDisplayId;
-  EXPECT_FALSE(
-      GetFullscreenController()->IsFullscreenForTabOrPending(tab, &display_id));
-  EXPECT_EQ(display::kDefaultDisplayId, display_id);
+TEST_F(FullscreenControllerStateUnitTest, GetFullscreenState) {
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const tab = GetTab(0);
+  auto state = GetFullscreenController()->GetFullscreenState(tab);
+  EXPECT_EQ(state.target_mode, content::FullscreenMode::kWindowed);
+  EXPECT_EQ(state.target_display_id, display::kInvalidDisplayId);
 
-  // During transition `display_id` should be overwritten with the display ID.
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  EXPECT_TRUE(GetFullscreenController()->IsFullscreenForTabOrPending(tab));
-  display_id = display::kDefaultDisplayId;
-  EXPECT_TRUE(GetFullscreenController()->IsFullscreenForTabOrPending(tab));
-  EXPECT_TRUE(
-      GetFullscreenController()->IsFullscreenForTabOrPending(tab, &display_id));
-  EXPECT_NE(display::kDefaultDisplayId, display_id);
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  state = GetFullscreenController()->GetFullscreenState(tab);
+  EXPECT_EQ(state.target_mode, content::FullscreenMode::kContent);
+  EXPECT_NE(state.target_display_id, display::kInvalidDisplayId);
 
-  // After transition, `display_id` should be overwritten with the display ID.
-  GetFullscreenController()->FullscreenTransititionCompleted();
-  display_id = display::kDefaultDisplayId;
-  EXPECT_TRUE(GetFullscreenController()->IsFullscreenForTabOrPending(tab));
-  EXPECT_TRUE(
-      GetFullscreenController()->IsFullscreenForTabOrPending(tab, &display_id));
-  EXPECT_NE(display::kDefaultDisplayId, display_id);
+  ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
+  state = GetFullscreenController()->GetFullscreenState(tab);
+  EXPECT_EQ(state.target_mode, content::FullscreenMode::kContent);
+  EXPECT_NE(state.target_display_id, display::kInvalidDisplayId);
+
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
+  state = GetFullscreenController()->GetFullscreenState(tab);
+  EXPECT_EQ(state.target_mode, content::FullscreenMode::kWindowed);
+  EXPECT_EQ(state.target_display_id, display::kInvalidDisplayId);
+
+  ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
+  state = GetFullscreenController()->GetFullscreenState(tab);
+  EXPECT_EQ(state.target_mode, content::FullscreenMode::kWindowed);
+  EXPECT_EQ(state.target_display_id, display::kInvalidDisplayId);
 }
 
 // Test that switching tabs takes the browser out of tab fullscreen.
 TEST_F(FullscreenControllerStateUnitTest, ExitTabFullscreenViaSwitchingTab) {
-  base::HistogramTester histogram_tester;
-
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
+  AddTab(GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_TRUE(browser()->window()->IsFullscreen());
-  histogram_tester.ExpectTotalCount(kFullscreenReshowHistogramName, 0);
+  ASSERT_TRUE(window_->IsFullscreen());
 
-  browser()->tab_strip_model()->SelectNextTab();
+  SelectNextTab();
   ChangeWindowFullscreenState();
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-
-  // Do a simple test that histograms are being recorded upon exiting the
-  // fullscreen session (when simplified-fullscreen-ui is enabled).
-  histogram_tester.ExpectUniqueSample(kFullscreenReshowHistogramName, 0, 1);
+  EXPECT_FALSE(window_->IsFullscreen());
 }
 
 // Test that switching tabs via detaching the active tab (which is in tab
 // fullscreen) takes the browser out of tab fullscreen. This case can
 // occur if the user is in both tab fullscreen and immersive browser fullscreen.
 TEST_F(FullscreenControllerStateUnitTest, ExitTabFullscreenViaDetachingTab) {
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
+  AddTab(GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_TRUE(browser()->window()->IsFullscreen());
+  ASSERT_TRUE(window_->IsFullscreen());
 
-  std::unique_ptr<content::WebContents> web_contents =
-      browser()->tab_strip_model()->DetachWebContentsAtForInsertion(0);
+  DetachTab(active_tab_index_);
   ChangeWindowFullscreenState();
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-}
-
-// Test that replacing the web contents for a tab which is in tab fullscreen
-// takes the browser out of tab fullscreen. This can occur if the user
-// navigates to a prerendered page from a page which is tab fullscreen.
-TEST_F(FullscreenControllerStateUnitTest, ExitTabFullscreenViaReplacingTab) {
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_TRUE(browser()->window()->IsFullscreen());
-
-  std::unique_ptr<content::WebContents> new_web_contents =
-      content::WebContents::Create(
-          content::WebContents::CreateParams(profile()));
-  std::unique_ptr<content::WebContents> old_web_contents =
-      browser()->tab_strip_model()->ReplaceWebContentsAt(
-          0, std::move(new_web_contents));
-  ChangeWindowFullscreenState();
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
+  EXPECT_FALSE(window_->IsFullscreen());
 }
 
 // Tests that, in a browser configured for Fullscreen-Within-Tab mode,
@@ -551,60 +632,49 @@ TEST_F(FullscreenControllerStateUnitTest, ExitTabFullscreenViaReplacingTab) {
 //
 // See 'FullscreenWithinTab Note' in fullscreen_controller.h.
 TEST_F(FullscreenControllerStateUnitTest, OneCapturedFullscreenedTab) {
-  content::WebContentsDelegate* const wc_delegate =
-      static_cast<content::WebContentsDelegate*>(browser());
-
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const first_tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
-  content::WebContents* const second_tab =
-      browser()->tab_strip_model()->GetWebContentsAt(1);
+  AddTab(GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const first_tab = GetTab(0);
+  content::WebContents* const second_tab = GetTab(1);
 
   // Activate the first tab and tell its WebContents it is being captured.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
+  ActivateTab(0);
   const gfx::Size kCaptureSize(1280, 720);
-  auto capture_handle =
-      first_tab->IncrementCapturerCount(kCaptureSize, /*stay_hidden=*/false,
-                                        /*stay_awake=*/true);
-  ASSERT_FALSE(browser()->window()->IsFullscreen());
-  ASSERT_FALSE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  ASSERT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  auto capture_handle = first_tab->IncrementCapturerCount(
+      kCaptureSize, /*stay_hidden=*/false,
+      /*stay_awake=*/true, /*is_activity=*/true);
+  ASSERT_FALSE(window_->IsFullscreen());
+  ASSERT_FALSE(first_tab->IsFullscreen());
+  ASSERT_FALSE(second_tab->IsFullscreen());
   ASSERT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
   // Enter tab fullscreen.  Since the tab is being captured, the browser window
   // should not expand to fill the screen.
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
   // Switch to the other tab.  Check that the first tab was resized to the
   // WebContents' preferred size.
-  browser()->tab_strip_model()->ActivateTabAt(
-      1, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  ActivateTab(1);
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
   EXPECT_EQ(kCaptureSize, first_tab->GetViewBounds().size());
 
   // Switch back to the first tab and exit fullscreen.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  ActivateTab(0);
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_FALSE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 }
 
@@ -618,58 +688,47 @@ TEST_F(FullscreenControllerStateUnitTest, OneCapturedFullscreenedTab) {
 //
 // See 'FullscreenWithinTab Note' in fullscreen_controller.h.
 TEST_F(FullscreenControllerStateUnitTest, TwoFullscreenedTabsOneCaptured) {
-  content::WebContentsDelegate* const wc_delegate =
-      static_cast<content::WebContentsDelegate*>(browser());
-
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const first_tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
-  content::WebContents* const second_tab =
-      browser()->tab_strip_model()->GetWebContentsAt(1);
+  AddTab(GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const first_tab = GetTab(0);
+  content::WebContents* const second_tab = GetTab(1);
 
   // Start capturing the first tab, fullscreen it, then switch to the second tab
   // and fullscreen that.  The second tab will cause the browser window to
   // expand to fill the screen.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
+  ActivateTab(0);
   const gfx::Size kCaptureSize(1280, 720);
-  auto capture_handle =
-      first_tab->IncrementCapturerCount(kCaptureSize, /*stay_hidden=*/false,
-                                        /*stay_awake=*/true);
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  auto capture_handle = first_tab->IncrementCapturerCount(
+      kCaptureSize, /*stay_hidden=*/false,
+      /*stay_awake=*/true, /*is_activity=*/true);
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
-  browser()->tab_strip_model()->ActivateTabAt(
-      1, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
+  ActivateTab(1);
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  EXPECT_TRUE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  EXPECT_TRUE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_TRUE(second_tab->IsFullscreen());
   EXPECT_TRUE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
   // Now exit fullscreen while still in the second tab.  The browser window
   // should no longer be fullscreened.
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
   // Finally, exit fullscreen on the captured tab.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  ActivateTab(0);
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_FALSE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 }
 
@@ -683,55 +742,46 @@ TEST_F(FullscreenControllerStateUnitTest, TwoFullscreenedTabsOneCaptured) {
 // See 'FullscreenWithinTab Note' in fullscreen_controller.h.
 TEST_F(FullscreenControllerStateUnitTest,
        BackgroundCapturedTabExitsFullscreen) {
-  content::WebContentsDelegate* const wc_delegate =
-      static_cast<content::WebContentsDelegate*>(browser());
-
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const first_tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
-  content::WebContents* const second_tab =
-      browser()->tab_strip_model()->GetWebContentsAt(1);
+  AddTab(GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const first_tab = GetTab(0);
+  content::WebContents* const second_tab = GetTab(1);
 
   // Start capturing the first tab, fullscreen it, then switch to the second tab
   // and fullscreen that.  The second tab will cause the browser window to
   // expand to fill the screen.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
+  ActivateTab(0);
   const gfx::Size kCaptureSize(1280, 720);
-  auto capture_handle =
-      first_tab->IncrementCapturerCount(kCaptureSize, /*stay_hidden=*/false,
-                                        /*stay_awake=*/true);
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  auto capture_handle = first_tab->IncrementCapturerCount(
+      kCaptureSize, /*stay_hidden=*/false,
+      /*stay_awake=*/true, /*is_activity=*/true);
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
-  browser()->tab_strip_model()->ActivateTabAt(
-      1, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
+  ActivateTab(1);
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  EXPECT_TRUE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  EXPECT_TRUE(window_->IsFullscreen());
+  EXPECT_TRUE(first_tab->IsFullscreen());
+  EXPECT_TRUE(second_tab->IsFullscreen());
   EXPECT_TRUE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
   // Now, the first tab (backgrounded) exits fullscreen.  This should not affect
   // the second tab's fullscreen, nor the state of the browser window.
   GetFullscreenController()->ExitFullscreenModeForTab(first_tab);
-  EXPECT_TRUE(browser()->window()->IsFullscreen());
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  EXPECT_TRUE(window_->IsFullscreen());
+  EXPECT_FALSE(first_tab->IsFullscreen());
+  EXPECT_TRUE(second_tab->IsFullscreen());
   EXPECT_TRUE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
   // Finally, exit fullscreen on the second tab.
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(first_tab));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(second_tab));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_FALSE(first_tab->IsFullscreen());
+  EXPECT_FALSE(second_tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 }
 
@@ -744,24 +794,18 @@ TEST_F(FullscreenControllerStateUnitTest,
 // See 'FullscreenWithinTab Note' in fullscreen_controller.h.
 TEST_F(FullscreenControllerStateUnitTest,
        OneCapturedTabFullscreenedBeforeBrowserFullscreen) {
-  content::WebContentsDelegate* const wc_delegate =
-      static_cast<content::WebContentsDelegate*>(browser());
-
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const tab = GetTab(0);
 
   // Start capturing the tab and fullscreen it.  The state of the browser window
   // should remain unchanged.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
+  ActivateTab(0);
   const gfx::Size kCaptureSize(1280, 720);
   auto capture_handle =
       tab->IncrementCapturerCount(kCaptureSize, /*stay_hidden=*/false,
-                                  /*stay_awake=*/true);
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(tab));
+                                  /*stay_awake=*/true, /*is_activity=*/true);
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  EXPECT_TRUE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
   EXPECT_FALSE(GetFullscreenController()->IsFullscreenForBrowser());
 
@@ -769,7 +813,7 @@ TEST_F(FullscreenControllerStateUnitTest,
   // fullscreened.
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(tab));
+  EXPECT_TRUE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
   EXPECT_TRUE(GetFullscreenController()->IsFullscreenForBrowser());
 
@@ -777,7 +821,7 @@ TEST_F(FullscreenControllerStateUnitTest,
   // fullscreen mode, but the tab stays in fullscreen mode.
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(tab));
+  EXPECT_TRUE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
   EXPECT_FALSE(GetFullscreenController()->IsFullscreenForBrowser());
 
@@ -786,8 +830,8 @@ TEST_F(FullscreenControllerStateUnitTest,
   // the tab exits fullscreen mode.
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(tab));
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
+  EXPECT_FALSE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
   EXPECT_TRUE(GetFullscreenController()->IsFullscreenForBrowser());
 }
@@ -795,23 +839,17 @@ TEST_F(FullscreenControllerStateUnitTest,
 // Tests that the tab doesn't enter Fullscreen-Within-Tab mode for hidden
 // capture (stay_hidden == true).
 TEST_F(FullscreenControllerStateUnitTest, HiddenlyCapturedTabFullscreened) {
-  content::WebContentsDelegate* const wc_delegate =
-      static_cast<content::WebContentsDelegate*>(browser());
-
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const tab = GetTab(0);
 
   // Start capturing the tab with stay_hidden==true, and fullscreen it.
   // The the browser window should enter fullscreen.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
+  ActivateTab(0);
   auto capture_handle =
       tab->IncrementCapturerCount(gfx::Size(), /*stay_hidden=*/true,
-                                  /*stay_awake=*/true);
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(tab));
+                                  /*stay_awake=*/true, /*is_activity=*/true);
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  EXPECT_TRUE(tab->IsFullscreen());
   EXPECT_TRUE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
   EXPECT_FALSE(GetFullscreenController()->IsFullscreenForBrowser());
 }
@@ -819,24 +857,22 @@ TEST_F(FullscreenControllerStateUnitTest, HiddenlyCapturedTabFullscreened) {
 class FullscreenChangeObserver : public content::WebContentsObserver {
  public:
   explicit FullscreenChangeObserver(content::WebContents* web_contents)
-      : WebContentsObserver(web_contents) {
-  }
+      : WebContentsObserver(web_contents) {}
 
   FullscreenChangeObserver(const FullscreenChangeObserver&) = delete;
   FullscreenChangeObserver& operator=(const FullscreenChangeObserver&) = delete;
 
-  MOCK_METHOD2(DidToggleFullscreenModeForTab, void(bool, bool));
+  MOCK_METHOD(void, DidToggleFullscreenModeForTab, (bool, bool));
 };
 
 // Tests that going from tab fullscreen -> browser fullscreen causes an explicit
 // WasResized to be called on ExitFullscreen while going from tab fullscreen ->
 // Normal does not. This ensures that the Resize message we get in the renderer
 // will have both the fullscreen change and size change in the same message.
-// crbug.com/142427.
+// crbug.com/40260339.
 TEST_F(FullscreenControllerStateUnitTest, TabToBrowserFullscreenCausesResize) {
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const tab = GetTab(0);
 
   FullscreenChangeObserver fullscreenObserver(tab);
 
@@ -845,33 +881,31 @@ TEST_F(FullscreenControllerStateUnitTest, TabToBrowserFullscreenCausesResize) {
   // change itself.
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  ASSERT_TRUE(browser()->window()->IsFullscreen());
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  ASSERT_TRUE(window_->IsFullscreen());
 
   // The second parameter in DidToggleFullscreenModeForTab should be false,
   // indicating that the fullscreen change will *not* cause a resize.
-  EXPECT_CALL(fullscreenObserver,
-              DidToggleFullscreenModeForTab(false, false));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
+  EXPECT_CALL(fullscreenObserver, DidToggleFullscreenModeForTab(false, false));
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
   testing::Mock::VerifyAndClearExpectations(&fullscreenObserver);
 
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_FALSE(browser()->window()->IsFullscreen());
+  ASSERT_FALSE(window_->IsFullscreen());
 
   // Go into tab fullscreen only. Exiting tab fullscreen should *not* cause
   // a call to WasResized since the window will change size and we want the
   // fullscreen change and size change to be in one Resize message.
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE));
-  ASSERT_TRUE(browser()->window()->IsFullscreen());
+  ASSERT_TRUE(window_->IsFullscreen());
 
   // The second parameter in DidToggleFullscreenModeForTab should now be true,
   // indicating that the fullscreen change *will* cause a resize.
-  EXPECT_CALL(fullscreenObserver,
-              DidToggleFullscreenModeForTab(false, true));
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
-  ASSERT_FALSE(browser()->window()->IsFullscreen());
+  EXPECT_CALL(fullscreenObserver, DidToggleFullscreenModeForTab(false, true));
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
+  ASSERT_FALSE(window_->IsFullscreen());
   testing::Mock::VerifyAndClearExpectations(&fullscreenObserver);
 }
 
@@ -881,86 +915,80 @@ TEST_F(FullscreenControllerStateUnitTest, TabToBrowserFullscreenCausesResize) {
 // See 'FullscreenWithinTab Note' in fullscreen_controller.h.
 TEST_F(FullscreenControllerStateUnitTest,
        CapturedFullscreenedTabTransferredBetweenBrowserWindows) {
-  content::WebContentsDelegate* const wc_delegate =
-      static_cast<content::WebContentsDelegate*>(browser());
-
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  content::WebContents* const tab =
-      browser()->tab_strip_model()->GetWebContentsAt(0);
+  AddTab(GURL(url::kAboutBlankURL));
+  AddTab(GURL(url::kAboutBlankURL));
+  content::WebContents* const tab = GetTab(0);
 
   // Activate the first tab and tell its WebContents it is being captured.
-  browser()->tab_strip_model()->ActivateTabAt(
-      0, TabStripUserGestureDetails(
-             TabStripUserGestureDetails::GestureType::kOther));
+  ActivateTab(0);
   const gfx::Size kCaptureSize(1280, 720);
   auto capture_handle =
       tab->IncrementCapturerCount(kCaptureSize, /*stay_hidden=*/false,
-                                  /*stay_awake=*/true);
-  ASSERT_FALSE(browser()->window()->IsFullscreen());
-  ASSERT_FALSE(wc_delegate->IsFullscreenForTabOrPending(tab));
+                                  /*stay_awake=*/true, /*is_activity=*/true);
+  ASSERT_FALSE(window_->IsFullscreen());
+  ASSERT_FALSE(tab->IsFullscreen());
   ASSERT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
   // Enter tab fullscreen.  Since the tab is being captured, the browser window
   // should not expand to fill the screen.
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(tab));
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_TRUE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
 
-  // Create the second browser window.
-  const std::unique_ptr<BrowserWindow> second_browser_window(
-      CreateBrowserWindow());
-  const std::unique_ptr<Browser> second_browser(
-      CreateBrowser(browser()->profile(), browser()->type(), false,
-                    second_browser_window.get()));
-  AddTab(second_browser.get(), GURL(url::kAboutBlankURL));
-  content::WebContentsDelegate* const second_wc_delegate =
-      static_cast<content::WebContentsDelegate*>(second_browser.get());
+  // Create the second test window and exclusive access manager.
+  FullscreenControllerTestWindow second_window;
+  second_window.set_profile(profile());
+  ExclusiveAccessManager second_exclusive_access_manager(&second_window);
+  second_window.set_exclusive_access_manager(&second_exclusive_access_manager);
+  FullscreenController* second_fullscreen_controller =
+      second_exclusive_access_manager.fullscreen_controller();
 
-  // Detach the tab from the first browser window and attach it to the second.
+  // Detach the tab from the first window and attach it to the second.
   // The tab should remain in fullscreen mode and neither browser window should
   // have expanded. It is correct for both FullscreenControllers to agree the
   // tab is in fullscreen mode.
-  std::unique_ptr<content::WebContents> owned_wc =
-      browser()->tab_strip_model()->DetachWebContentsAtForInsertion(0);
-  second_browser->tab_strip_model()->InsertWebContentsAt(
-      0, std::move(owned_wc), AddTabTypes::ADD_ACTIVE);
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_FALSE(second_browser->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(tab));
-  EXPECT_TRUE(second_wc_delegate->IsFullscreenForTabOrPending(tab));
+  std::unique_ptr<content::WebContents> detached_tab = DetachTab(0);
+  detached_tab->SetDelegate(&second_window);
+  second_window.set_active_web_contents(detached_tab.get());
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_FALSE(second_window.IsFullscreen());
+  EXPECT_TRUE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
-  EXPECT_FALSE(second_browser->exclusive_access_manager()
-                   ->fullscreen_controller()
-                   ->IsWindowFullscreenForTabOrPending());
+  EXPECT_EQ(GetFullscreenController()->GetFullscreenState(tab).target_mode,
+            content::FullscreenMode::kPseudoContent);
+  EXPECT_FALSE(
+      second_fullscreen_controller->IsWindowFullscreenForTabOrPending());
+  EXPECT_EQ(second_fullscreen_controller->GetFullscreenState(tab).target_mode,
+            content::FullscreenMode::kPseudoContent);
 
   // Now, detach and reattach it back to the first browser window.  Again, the
   // tab should remain in fullscreen mode and neither browser window should have
   // expanded.
-  owned_wc =
-      second_browser->tab_strip_model()->DetachWebContentsAtForInsertion(0);
-  browser()->tab_strip_model()->InsertWebContentsAt(0, std::move(owned_wc),
-                                                    AddTabTypes::ADD_ACTIVE);
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_FALSE(second_browser->window()->IsFullscreen());
-  EXPECT_TRUE(wc_delegate->IsFullscreenForTabOrPending(tab));
-  EXPECT_TRUE(second_wc_delegate->IsFullscreenForTabOrPending(tab));
+  detached_tab->SetDelegate(nullptr);
+  second_window.set_active_web_contents(nullptr);
+  AttachTab(std::move(detached_tab), 0, /*active=*/true);
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_FALSE(second_window.IsFullscreen());
+  EXPECT_TRUE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
-  EXPECT_FALSE(second_browser->exclusive_access_manager()
-                   ->fullscreen_controller()
-                   ->IsWindowFullscreenForTabOrPending());
+  EXPECT_EQ(GetFullscreenController()->GetFullscreenState(tab).target_mode,
+            content::FullscreenMode::kPseudoContent);
+  EXPECT_FALSE(
+      second_fullscreen_controller->IsWindowFullscreenForTabOrPending());
+  EXPECT_EQ(second_fullscreen_controller->GetFullscreenState(tab).target_mode,
+            content::FullscreenMode::kPseudoContent);
 
   // Exit fullscreen.
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_FALSE));
-  EXPECT_FALSE(browser()->window()->IsFullscreen());
-  EXPECT_FALSE(wc_delegate->IsFullscreenForTabOrPending(tab));
-  EXPECT_FALSE(second_wc_delegate->IsFullscreenForTabOrPending(tab));
+  ASSERT_TRUE(InvokeEvent(EXIT_TAB_FULLSCREEN));
+  EXPECT_FALSE(window_->IsFullscreen());
+  EXPECT_FALSE(tab->IsFullscreen());
   EXPECT_FALSE(GetFullscreenController()->IsWindowFullscreenForTabOrPending());
-  EXPECT_FALSE(second_browser->exclusive_access_manager()
-                   ->fullscreen_controller()
-                   ->IsWindowFullscreenForTabOrPending());
-
-  // Required tear-down specific to this test.
-  second_browser->tab_strip_model()->CloseAllTabs();
+  EXPECT_EQ(GetFullscreenController()->GetFullscreenState(tab).target_mode,
+            content::FullscreenMode::kWindowed);
+  EXPECT_FALSE(
+      second_fullscreen_controller->IsWindowFullscreenForTabOrPending());
+  EXPECT_EQ(second_fullscreen_controller->GetFullscreenState(tab).target_mode,
+            content::FullscreenMode::kWindowed);
+  second_window.set_exclusive_access_manager(nullptr);
 }

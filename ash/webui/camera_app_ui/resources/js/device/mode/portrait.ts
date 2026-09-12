@@ -4,24 +4,18 @@
 
 import {assert} from '../../assert.js';
 import {I18nString} from '../../i18n_string.js';
-import {TakePhotoResult} from '../../mojo/image_capture.js';
+import type {TakePhotoResult} from '../../mojo/image_capture.js';
 import {Effect} from '../../mojo/type.js';
+import {PerfLogger} from '../../perf.js';
 import * as toast from '../../toast.js';
-import {
-  Facing,
-  PreviewVideo,
-  Resolution,
-} from '../../type.js';
+import type {Facing, PreviewVideo} from '../../type.js';
+import {PerfEvent, Resolution} from '../../type.js';
 import * as util from '../../util.js';
-import {StreamConstraints} from '../stream_constraints.js';
+import type {StreamConstraints} from '../stream_constraints.js';
 
-import {ModeBase} from './mode_base.js';
-import {
-  Photo,
-  PhotoFactory,
-  PhotoHandler,
-  PhotoResult,
-} from './photo.js';
+import type {ModeBase} from './mode_base.js';
+import type {PhotoHandler, PhotoResult} from './photo.js';
+import {Photo, PhotoFactory} from './photo.js';
 
 /**
  * Provides external dependency functions used by portrait mode and handles the
@@ -48,8 +42,10 @@ export class Portrait extends Photo {
 
   override async start(): Promise<[Promise<void>]> {
     const timestamp = Date.now();
+    const perfLogger = PerfLogger.getInstance();
+    perfLogger.start(PerfEvent.PHOTO_CAPTURE_SHUTTER);
     let photoSettings: PhotoSettings;
-    if (this.captureResolution) {
+    if (this.captureResolution !== null) {
       photoSettings = {
         imageWidth: this.captureResolution.width,
         imageHeight: this.captureResolution.height,
@@ -57,20 +53,25 @@ export class Portrait extends Photo {
     } else {
       const caps = await this.getImageCapture().getPhotoCapabilities();
       photoSettings = {
-        imageWidth: caps.imageWidth.max,
-        imageHeight: caps.imageHeight.max,
+        imageWidth: caps.imageWidth!.max,
+        imageHeight: caps.imageHeight!.max,
       };
     }
 
     let reference: TakePhotoResult;
     let portrait: TakePhotoResult;
+    let hasError = false;
     try {
       [reference, portrait] = await this.getImageCapture().takePhoto(
-          photoSettings, [Effect.PORTRAIT_MODE]);
+          photoSettings, [Effect.kPortraitMode]);
       this.portraitHandler.playShutterEffect();
     } catch (e) {
+      hasError = true;
       toast.show(I18nString.ERROR_MSG_TAKE_PHOTO_FAILED);
       throw e;
+    } finally {
+      perfLogger.stop(
+          PerfEvent.PHOTO_CAPTURE_SHUTTER, {hasError, facing: this.facing});
     }
 
     async function toPhotoResult(pendingResult: TakePhotoResult) {

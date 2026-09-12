@@ -11,7 +11,7 @@
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
-#include "ui/gfx/paint_vector_icon.h"
+#include "ui/base/ui_base_features.h"
 
 ToggleMicrophoneButton::ToggleMicrophoneButton(PressedCallback callback)
     : OverlayWindowImageButton(std::move(callback)) {
@@ -24,20 +24,28 @@ void ToggleMicrophoneButton::SetMutedState(bool is_muted) {
 }
 
 void ToggleMicrophoneButton::OnBoundsChanged(const gfx::Rect& previous_bounds) {
-  if (size() == previous_bounds.size())
+  if (size() == previous_bounds.size()) {
     return;
+  }
 
   UpdateImageAndTooltipText();
 }
 
 void ToggleMicrophoneButton::UpdateImageAndTooltipText() {
-  if (bounds().IsEmpty())
+  if (bounds().IsEmpty()) {
     return;
+  }
 
-  const auto& icon =
-      is_muted_ ? vector_icons::kMicOffIcon : vector_icons::kMicIcon;
+  const auto& icon = is_muted_ ? features::IsRoundedIconsEnabled()
+                                     ? vector_icons::kMicOffIcon
+                                     : vector_icons::kMicOffChromeRefreshOldIcon
+                     : features::IsRoundedIconsEnabled()
+                         ? vector_icons::kMicIcon
+                         : vector_icons::kMicChromeRefreshOldIcon;
+
   auto text = is_muted_ ? IDS_PICTURE_IN_PICTURE_UNMUTE_MICROPHONE_TEXT
                         : IDS_PICTURE_IN_PICTURE_MUTE_MICROPHONE_TEXT;
+
   const int icon_size = std::max(0, width() - (2 * kPipWindowIconPadding));
 
   SetImageModel(views::Button::STATE_NORMAL,
@@ -46,5 +54,5 @@ void ToggleMicrophoneButton::UpdateImageAndTooltipText() {
   SetTooltipText(l10n_util::GetStringUTF16(text));
 }
 
-BEGIN_METADATA(ToggleMicrophoneButton, OverlayWindowImageButton)
+BEGIN_METADATA(ToggleMicrophoneButton)
 END_METADATA

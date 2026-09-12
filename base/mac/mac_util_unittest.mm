@@ -10,12 +10,13 @@
 #include <stdint.h>
 #include <sys/xattr.h>
 
+#include "base/apple/bridging.h"
+#include "base/apple/foundation_util.h"
+#include "base/apple/scoped_cftyperef.h"
+#include "base/check.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_cftyperef.h"
-#include "base/mac/scoped_nsobject.h"
 #include "base/system/sys_info.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
@@ -24,26 +25,62 @@ namespace base::mac {
 
 namespace {
 
+// A helper class to temporarily set a value in the `NSArgumentDomain` volatile
+// domain of `NSUserDefaults` and automatically restore it to its original state
+// when the writer goes out of scope. If `value` is nil, the key is removed from
+// the domain.
+class ScopedNSUserDefaultsWriter {
+ public:
+  ScopedNSUserDefaultsWriter(NSString* key, id value) {
+    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+    original_domain_ = [defaults volatileDomainForName:NSArgumentDomain];
+    NSMutableDictionary* temporary =
+        [(original_domain_ ? original_domain_ : @{}) mutableCopy];
+    if (value) {
+      temporary[key] = value;
+    } else {
+      [temporary removeObjectForKey:key];
+    }
+    [defaults setVolatileDomain:temporary forName:NSArgumentDomain];
+  }
+
+  ~ScopedNSUserDefaultsWriter() {
+    NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+    if (original_domain_) {
+      [defaults setVolatileDomain:original_domain_ forName:NSArgumentDomain];
+    } else {
+      [defaults removeVolatileDomainForName:NSArgumentDomain];
+    }
+  }
+
+  ScopedNSUserDefaultsWriter(const ScopedNSUserDefaultsWriter&) = delete;
+  ScopedNSUserDefaultsWriter& operator=(const ScopedNSUserDefaultsWriter&) =
+      delete;
+
+ private:
+  NSDictionary* original_domain_ = nil;
+};
+
 using MacUtilTest = PlatformTest;
 
 TEST_F(MacUtilTest, GetUserDirectoryTest) {
   // Try a few keys, make sure they come back with non-empty paths.
   FilePath caches_dir;
-  EXPECT_TRUE(GetUserDirectory(NSCachesDirectory, &caches_dir));
+  EXPECT_TRUE(apple::GetUserDirectory(NSCachesDirectory, &caches_dir));
   EXPECT_FALSE(caches_dir.empty());
 
   FilePath application_support_dir;
-  EXPECT_TRUE(GetUserDirectory(NSApplicationSupportDirectory,
-                               &application_support_dir));
+  EXPECT_TRUE(apple::GetUserDirectory(NSApplicationSupportDirectory,
+                                      &application_support_dir));
   EXPECT_FALSE(application_support_dir.empty());
 
   FilePath library_dir;
-  EXPECT_TRUE(GetUserDirectory(NSLibraryDirectory, &library_dir));
+  EXPECT_TRUE(apple::GetUserDirectory(NSLibraryDirectory, &library_dir));
   EXPECT_FALSE(library_dir.empty());
 }
 
 TEST_F(MacUtilTest, TestLibraryPath) {
-  FilePath library_dir = GetUserLibraryPath();
+  FilePath library_dir = apple::GetUserLibraryPath();
   // Make sure the string isn't empty.
   EXPECT_FALSE(library_dir.value().empty());
 }
@@ -52,231 +89,262 @@ TEST_F(MacUtilTest, TestGetAppBundlePath) {
   FilePath out;
 
   // Make sure it doesn't crash.
-  out = GetAppBundlePath(FilePath());
+  out = apple::GetAppBundlePath(FilePath());
   EXPECT_TRUE(out.empty());
 
   // Some more invalid inputs.
   const char* const invalid_inputs[] = {
-    "/", "/foo", "foo", "/foo/bar.", "foo/bar.", "/foo/bar./bazquux",
-    "foo/bar./bazquux", "foo/.app", "//foo",
+      "/",
+      "/foo",
+      "foo",
+      "/foo/bar.",
+      "foo/bar.",
+      "/foo/bar./bazquux",
+      "foo/bar./bazquux",
+      "foo/.app",
+      "//foo",
   };
-  for (size_t i = 0; i < std::size(invalid_inputs); i++) {
-    out = GetAppBundlePath(FilePath(invalid_inputs[i]));
-    EXPECT_TRUE(out.empty()) << "loop: " << i;
+  for (const auto* input : invalid_inputs) {
+    SCOPED_TRACE(std::string("input: ") + input);
+    out = apple::GetAppBundlePath(FilePath(input));
+    EXPECT_TRUE(out.empty());
   }
 
   // Some valid inputs; this and |expected_outputs| should be in sync.
   struct {
-    const char *in;
-    const char *expected_out;
+    const char* in;
+    const char* expected_out;
   } valid_inputs[] = {
-    { "FooBar.app/", "FooBar.app" },
-    { "/FooBar.app", "/FooBar.app" },
-    { "/FooBar.app/", "/FooBar.app" },
-    { "//FooBar.app", "//FooBar.app" },
-    { "/Foo/Bar.app", "/Foo/Bar.app" },
-    { "/Foo/Bar.app/", "/Foo/Bar.app" },
-    { "/F/B.app", "/F/B.app" },
-    { "/F/B.app/", "/F/B.app" },
-    { "/Foo/Bar.app/baz", "/Foo/Bar.app" },
-    { "/Foo/Bar.app/baz/", "/Foo/Bar.app" },
-    { "/Foo/Bar.app/baz/quux.app/quuux", "/Foo/Bar.app" },
-    { "/Applications/Google Foo.app/bar/Foo Helper.app/quux/Foo Helper",
-        "/Applications/Google Foo.app" },
+      {"FooBar.app/", "FooBar.app"},
+      {"/FooBar.app", "/FooBar.app"},
+      {"/FooBar.app/", "/FooBar.app"},
+      {"//FooBar.app", "//FooBar.app"},
+      {"/Foo/Bar.app", "/Foo/Bar.app"},
+      {"/Foo/Bar.app/", "/Foo/Bar.app"},
+      {"/F/B.app", "/F/B.app"},
+      {"/F/B.app/", "/F/B.app"},
+      {"/Foo/Bar.app/baz", "/Foo/Bar.app"},
+      {"/Foo/Bar.app/baz/", "/Foo/Bar.app"},
+      {"/Foo/Bar.app/baz/quux.app/quuux", "/Foo/Bar.app"},
+      {"/Applications/Google Foo.app/bar/Foo Helper.app/quux/Foo Helper",
+       "/Applications/Google Foo.app"},
   };
-  for (size_t i = 0; i < std::size(valid_inputs); i++) {
-    out = GetAppBundlePath(FilePath(valid_inputs[i].in));
-    EXPECT_FALSE(out.empty()) << "loop: " << i;
-    EXPECT_STREQ(valid_inputs[i].expected_out,
-        out.value().c_str()) << "loop: " << i;
+  for (const auto& input : valid_inputs) {
+    SCOPED_TRACE(std::string("input: ") + input.in);
+    out = apple::GetAppBundlePath(FilePath(input.in));
+    EXPECT_FALSE(out.empty());
+    EXPECT_STREQ(input.expected_out, out.value().c_str());
   }
 }
 
-TEST_F(MacUtilTest, IsOSEllipsis) {
+TEST_F(MacUtilTest, TestGetInnermostAppBundlePath) {
+  FilePath out;
+
+  // Make sure it doesn't crash.
+  out = apple::GetInnermostAppBundlePath(FilePath());
+  EXPECT_TRUE(out.empty());
+
+  // Some more invalid inputs.
+  const char* const invalid_inputs[] = {
+      "/",
+      "/foo",
+      "foo",
+      "/foo/bar.",
+      "foo/bar.",
+      "/foo/bar./bazquux",
+      "foo/bar./bazquux",
+      "foo/.app",
+      "//foo",
+  };
+  for (const auto* input : invalid_inputs) {
+    SCOPED_TRACE(std::string("input: ") + input);
+    out = apple::GetInnermostAppBundlePath(FilePath(input));
+    EXPECT_TRUE(out.empty());
+  }
+
+  // Some valid inputs; this and |expected_outputs| should be in sync.
+  struct {
+    const char* in;
+    const char* expected_out;
+  } valid_inputs[] = {
+      {"FooBar.app/", "FooBar.app"},
+      {"/FooBar.app", "/FooBar.app"},
+      {"/FooBar.app/", "/FooBar.app"},
+      {"//FooBar.app", "//FooBar.app"},
+      {"/Foo/Bar.app", "/Foo/Bar.app"},
+      {"/Foo/Bar.app/", "/Foo/Bar.app"},
+      {"/F/B.app", "/F/B.app"},
+      {"/F/B.app/", "/F/B.app"},
+      {"/Foo/Bar.app/baz", "/Foo/Bar.app"},
+      {"/Foo/Bar.app/baz/", "/Foo/Bar.app"},
+      {"/Foo/Bar.app/baz/quux.app/quuux", "/Foo/Bar.app/baz/quux.app"},
+      {"/Applications/Google Foo.app/bar/Foo Helper.app/quux/Foo Helper",
+       "/Applications/Google Foo.app/bar/Foo Helper.app"},
+  };
+  for (const auto& input : valid_inputs) {
+    SCOPED_TRACE(std::string("input: ") + input.in);
+    out = apple::GetInnermostAppBundlePath(FilePath(input.in));
+    EXPECT_FALSE(out.empty());
+    EXPECT_STREQ(input.expected_out, out.value().c_str());
+  }
+}
+
+TEST_F(MacUtilTest, MacOSVersion) {
   int32_t major, minor, bugfix;
   base::SysInfo::OperatingSystemVersionNumbers(&major, &minor, &bugfix);
 
-  // The patterns here are:
-  // - FALSE/FALSE/TRUE (it is not the earlier version, it is not "at most" the
-  //   earlier version, it is "at least" the earlier version)
-  // - TRUE/TRUE/TRUE (it is the same version, it is "at most" the same version,
-  //   it is "at least" the same version)
-  // - FALSE/TRUE/FALSE (it is not the later version, it is "at most" the later
-  //   version, it is not "at least" the later version)
-
-#define TEST_FOR_PAST_10_OS(V)      \
-  EXPECT_FALSE(IsOS10_##V());       \
-  EXPECT_FALSE(IsAtMostOS10_##V()); \
-  EXPECT_TRUE(IsAtLeastOS10_##V());
-
-#define TEST_FOR_PAST_OS(V)      \
-  EXPECT_FALSE(IsOS##V());       \
-  EXPECT_FALSE(IsAtMostOS##V()); \
-  EXPECT_TRUE(IsAtLeastOS##V());
-
-#define TEST_FOR_SAME_10_OS(V)     \
-  EXPECT_TRUE(IsOS10_##V());       \
-  EXPECT_TRUE(IsAtMostOS10_##V()); \
-  EXPECT_TRUE(IsAtLeastOS10_##V());
-
-#define TEST_FOR_SAME_OS(V)     \
-  EXPECT_TRUE(IsOS##V());       \
-  EXPECT_TRUE(IsAtMostOS##V()); \
-  EXPECT_TRUE(IsAtLeastOS##V());
-
-#define TEST_FOR_FUTURE_10_OS(V)   \
-  EXPECT_FALSE(IsOS10_##V());      \
-  EXPECT_TRUE(IsAtMostOS10_##V()); \
-  EXPECT_FALSE(IsAtLeastOS10_##V());
-
-#define TEST_FOR_FUTURE_OS(V)   \
-  EXPECT_FALSE(IsOS##V());      \
-  EXPECT_TRUE(IsAtMostOS##V()); \
-  EXPECT_FALSE(IsAtLeastOS##V());
-
-  if (major == 10) {
-    if (minor == 13) {
-      EXPECT_TRUE(IsOS10_13());
-      EXPECT_TRUE(IsAtMostOS10_13());
-
-      TEST_FOR_FUTURE_10_OS(14);
-      TEST_FOR_FUTURE_10_OS(15);
-      TEST_FOR_FUTURE_OS(11);
-      TEST_FOR_FUTURE_OS(12);
-      TEST_FOR_FUTURE_OS(13);
-
-      EXPECT_FALSE(IsOSLaterThan13_DontCallThis());
-    } else if (minor == 14) {
-      EXPECT_FALSE(IsOS10_13());
-      EXPECT_FALSE(IsAtMostOS10_13());
-
-      TEST_FOR_SAME_10_OS(14);
-      TEST_FOR_FUTURE_10_OS(15);
-      TEST_FOR_FUTURE_OS(11);
-      TEST_FOR_FUTURE_OS(12);
-      TEST_FOR_FUTURE_OS(13);
-
-      EXPECT_FALSE(IsOSLaterThan13_DontCallThis());
-    } else if (minor == 15) {
-      EXPECT_FALSE(IsOS10_13());
-      EXPECT_FALSE(IsAtMostOS10_13());
-
-      TEST_FOR_PAST_10_OS(14);
-      TEST_FOR_SAME_10_OS(15);
-      TEST_FOR_FUTURE_OS(11);
-      TEST_FOR_FUTURE_OS(12);
-      TEST_FOR_FUTURE_OS(13);
-
-      EXPECT_FALSE(IsOSLaterThan13_DontCallThis());
-    } else {
-      // macOS 10.15 was the end of the line.
-      FAIL() << "Unexpected 10.x macOS.";
-    }
-  } else if (major == 11) {
-    EXPECT_FALSE(IsOS10_13());
-    EXPECT_FALSE(IsAtMostOS10_13());
-
-    TEST_FOR_PAST_10_OS(14);
-    TEST_FOR_PAST_10_OS(15);
-    TEST_FOR_SAME_OS(11);
-    TEST_FOR_FUTURE_OS(12);
-    TEST_FOR_FUTURE_OS(13);
-
-    EXPECT_FALSE(IsOSLaterThan13_DontCallThis());
-  } else if (major == 12) {
-    EXPECT_FALSE(IsOS10_13());
-    EXPECT_FALSE(IsAtMostOS10_13());
-
-    TEST_FOR_PAST_10_OS(14);
-    TEST_FOR_PAST_10_OS(15);
-    TEST_FOR_PAST_OS(11);
-    TEST_FOR_SAME_OS(12);
-    TEST_FOR_FUTURE_OS(13);
-
-    EXPECT_FALSE(IsOSLaterThan13_DontCallThis());
-  } else if (major == 13) {
-    EXPECT_FALSE(IsOS10_13());
-    EXPECT_FALSE(IsAtMostOS10_13());
-
-    TEST_FOR_PAST_10_OS(14);
-    TEST_FOR_PAST_10_OS(15);
-    TEST_FOR_PAST_OS(11);
-    TEST_FOR_PAST_OS(12);
-    TEST_FOR_SAME_OS(13);
-
-    EXPECT_FALSE(IsOSLaterThan13_DontCallThis());
-  } else {
-    // The spooky future.
-    FAIL() << "Time to update the OS macros!";
-  }
+  EXPECT_EQ(major * 1'00'00 + minor * 1'00 + bugfix, MacOSVersion());
+  EXPECT_EQ(major, MacOSMajorVersion());
 }
 
-#undef TEST_FOR_PAST_10_OS
-#undef TEST_FOR_PAST_OS
-#undef TEST_FOR_SAME_10_OS
-#undef TEST_FOR_SAME_OS
-#undef TEST_FOR_FUTURE_10_OS
-#undef TEST_FOR_FUTURE_OS
+TEST_F(MacUtilTest, ParseOSProductVersion) {
+  // Various strings in shapes that would be expected to be returned from the
+  // API that would need to be parsed.
+  EXPECT_EQ(10'06'02, ParseOSProductVersionForTesting("10.6.2"));
+  EXPECT_EQ(10'15'00, ParseOSProductVersionForTesting("10.15"));
+  EXPECT_EQ(13'05'01, ParseOSProductVersionForTesting("13.5.1"));
+  EXPECT_EQ(14'00'00, ParseOSProductVersionForTesting("14.0"));
 
-TEST_F(MacUtilTest, ParseModelIdentifier) {
-  std::string model;
-  int32_t major = 1, minor = 2;
+  // Various strings in shapes that would not be expected, but that should parse
+  // without CHECKing.
+  EXPECT_EQ(13'04'01, ParseOSProductVersionForTesting("13.4.1 (c)"));
+  EXPECT_EQ(14'00'00, ParseOSProductVersionForTesting("14.0.0"));
+  EXPECT_EQ(28'00'00, ParseOSProductVersionForTesting("28"));
+  EXPECT_EQ(28'03'04, ParseOSProductVersionForTesting("28.3.4.3.2.5"));
 
-  EXPECT_FALSE(ParseModelIdentifier("", &model, &major, &minor));
-  EXPECT_EQ(0U, model.length());
-  EXPECT_EQ(1, major);
-  EXPECT_EQ(2, minor);
-  EXPECT_FALSE(ParseModelIdentifier("FooBar", &model, &major, &minor));
-
-  EXPECT_TRUE(ParseModelIdentifier("MacPro4,1", &model, &major, &minor));
-  EXPECT_EQ(model, "MacPro");
-  EXPECT_EQ(4, major);
-  EXPECT_EQ(1, minor);
-
-  EXPECT_TRUE(ParseModelIdentifier("MacBookPro6,2", &model, &major, &minor));
-  EXPECT_EQ(model, "MacBookPro");
-  EXPECT_EQ(6, major);
-  EXPECT_EQ(2, minor);
+  // Various strings in shapes that are so unexpected that they should not
+  // parse.
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("Mac OS X 10.0"),
+                            "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting(""), "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("  "), "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("."), "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("10.a.5"), "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("१०.१५.७"), "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("7.6.1"), "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("10.16"), "");
+  EXPECT_DEATH_IF_SUPPORTED(ParseOSProductVersionForTesting("16.0"), "");
 }
 
-TEST_F(MacUtilTest, TestRemoveQuarantineAttribute) {
-  ScopedTempDir temp_dir_;
-  ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-  FilePath dummy_folder_path = temp_dir_.GetPath().Append("DummyFolder");
-  ASSERT_TRUE(base::CreateDirectory(dummy_folder_path));
-  const char* quarantine_str = "0000;4b392bb2;Chromium;|org.chromium.Chromium";
-  const char* file_path_str = dummy_folder_path.value().c_str();
-  EXPECT_EQ(0, setxattr(file_path_str, "com.apple.quarantine",
-      quarantine_str, strlen(quarantine_str), 0, 0));
-  EXPECT_EQ(static_cast<long>(strlen(quarantine_str)),
-      getxattr(file_path_str, "com.apple.quarantine",
-          NULL, 0, 0, 0));
-  EXPECT_TRUE(RemoveQuarantineAttribute(dummy_folder_path));
-  EXPECT_EQ(-1, getxattr(file_path_str, "com.apple.quarantine", NULL, 0, 0, 0));
+// Note: The `com.apple.quarantine` xattr is not API, but is used in test code
+// to peek behind the curtain.
+constexpr char quarantine_xattr_name[] = "com.apple.quarantine";
+
+// Sample contents of a quarantine xattr. In reality this would refer to an
+// entry in the quarantine database, but for the purposes of this test, the
+// general shape of this sample is what is important.
+constexpr char quarantine_str[] =
+    "0000;4b392bb2;Chromium;|org.chromium.Chromium";
+constexpr size_t quarantine_str_len = std::size(quarantine_str) - 1;
+
+void VerifyNoQuarantineAttribute(NSURL* url) {
+  NSError* error;
+  id value;
+  EXPECT_TRUE([url getResourceValue:&value
+                             forKey:NSURLQuarantinePropertiesKey
+                              error:&error]);
+  EXPECT_FALSE(value);
+  EXPECT_FALSE(error);
+
+  // Verify that the backing xattr is not present.
+
+  EXPECT_EQ(-1, getxattr(url.fileSystemRepresentation, quarantine_xattr_name,
+                         /*value=*/nullptr,
+                         /*size=*/0, /*position=*/0, /*options=*/0));
   EXPECT_EQ(ENOATTR, errno);
 }
 
-TEST_F(MacUtilTest, TestRemoveQuarantineAttributeTwice) {
+TEST_F(MacUtilTest, TestAddThenRemoveQuarantineAttribute) {
   ScopedTempDir temp_dir_;
   ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-  FilePath dummy_folder_path = temp_dir_.GetPath().Append("DummyFolder");
-  const char* file_path_str = dummy_folder_path.value().c_str();
-  ASSERT_TRUE(base::CreateDirectory(dummy_folder_path));
-  EXPECT_EQ(-1, getxattr(file_path_str, "com.apple.quarantine", NULL, 0, 0, 0));
-  // No quarantine attribute to begin with, but RemoveQuarantineAttribute still
-  // succeeds because in the end the folder still doesn't have the quarantine
-  // attribute set.
-  EXPECT_TRUE(RemoveQuarantineAttribute(dummy_folder_path));
-  EXPECT_TRUE(RemoveQuarantineAttribute(dummy_folder_path));
-  EXPECT_EQ(ENOATTR, errno);
+  FilePath example_folder_path = temp_dir_.GetPath().Append("ExampleFolder");
+  ASSERT_TRUE(base::CreateDirectory(example_folder_path));
+  NSURL* example_folder = apple::FilePathToNSURL(example_folder_path);
+
+  EXPECT_EQ(0, setxattr(example_folder.fileSystemRepresentation,
+                        quarantine_xattr_name, quarantine_str,
+                        quarantine_str_len, /*position=*/0, /*options=*/0));
+  EXPECT_EQ(static_cast<ssize_t>(quarantine_str_len),
+            getxattr(example_folder.fileSystemRepresentation,
+                     quarantine_xattr_name, /*value=*/nullptr,
+                     /*size=*/0, /*position=*/0, /*options=*/0));
+
+  EXPECT_TRUE(RemoveQuarantineAttribute(example_folder_path));
+  VerifyNoQuarantineAttribute(example_folder);
+}
+
+TEST_F(MacUtilTest, TestAddThenRemoveQuarantineAttributeTwice) {
+  ScopedTempDir temp_dir_;
+  ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
+  FilePath example_folder_path = temp_dir_.GetPath().Append("ExampleFolder");
+  ASSERT_TRUE(base::CreateDirectory(example_folder_path));
+  NSURL* example_folder = apple::FilePathToNSURL(example_folder_path);
+
+  EXPECT_EQ(0, setxattr(example_folder.fileSystemRepresentation,
+                        quarantine_xattr_name, quarantine_str,
+                        quarantine_str_len, /*position=*/0, /*options=*/0));
+  EXPECT_EQ(static_cast<ssize_t>(quarantine_str_len),
+            getxattr(example_folder.fileSystemRepresentation,
+                     quarantine_xattr_name, /*value=*/nullptr,
+                     /*size=*/0, /*position=*/0, /*options=*/0));
+
+  // RemoveQuarantineAttribute should succeed twice: the first time at removing
+  // the attribute, and the second time because there is no attribute.
+  EXPECT_TRUE(RemoveQuarantineAttribute(example_folder_path));
+  EXPECT_TRUE(RemoveQuarantineAttribute(example_folder_path));
+  VerifyNoQuarantineAttribute(example_folder);
+}
+
+TEST_F(MacUtilTest, TestRemoveQuarantineAttributeNeverSet) {
+  ScopedTempDir temp_dir_;
+  ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
+  FilePath example_folder_path = temp_dir_.GetPath().Append("ExampleFolder");
+  ASSERT_TRUE(base::CreateDirectory(example_folder_path));
+  NSURL* example_folder = apple::FilePathToNSURL(example_folder_path);
+
+  VerifyNoQuarantineAttribute(example_folder);
+
+  EXPECT_TRUE(RemoveQuarantineAttribute(example_folder_path));
+  VerifyNoQuarantineAttribute(example_folder);
 }
 
 TEST_F(MacUtilTest, TestRemoveQuarantineAttributeNonExistentPath) {
   ScopedTempDir temp_dir_;
   ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
-  FilePath non_existent_path = temp_dir_.GetPath().Append("DummyPath");
+  FilePath non_existent_path = temp_dir_.GetPath().Append("ExampleFolder");
+
   ASSERT_FALSE(PathExists(non_existent_path));
   EXPECT_FALSE(RemoveQuarantineAttribute(non_existent_path));
+}
+
+TEST_F(MacUtilTest, GetMacOS26LiquidGlassPreferredLook) {
+  if (MacOSMajorVersion() != 26) {
+    GTEST_SKIP() << "This test only runs on macOS 26";
+  }
+
+  struct TestData {
+    NSNumber* diffusion;  // nil if unset
+    NSNumber* liquid;     // nil if unset
+    MacOS26LiquidGlassPreferredLook expected;
+  };
+
+  TestData test_cases[] = {
+      {@YES, nil, MacOS26LiquidGlassPreferredLook::kTint},
+      {@NO, nil, MacOS26LiquidGlassPreferredLook::kClear},
+      {nil, @YES, MacOS26LiquidGlassPreferredLook::kTint},
+      {nil, @NO, MacOS26LiquidGlassPreferredLook::kClear},
+      {@NO, @YES, MacOS26LiquidGlassPreferredLook::kClear},
+      {@YES, @NO, MacOS26LiquidGlassPreferredLook::kTint},
+      {nil, nil, MacOS26LiquidGlassPreferredLook::kDefault},
+  };
+
+  for (const auto& test_case : test_cases) {
+    ScopedNSUserDefaultsWriter diffusion_changer(@"NSGlassDiffusionSetting",
+                                                 test_case.diffusion);
+    ScopedNSUserDefaultsWriter liquid_changer(@"NSLiquidGlassSetting",
+                                              test_case.liquid);
+    EXPECT_EQ(test_case.expected, GetMacOS26LiquidGlassPreferredLook());
+  }
 }
 
 }  // namespace

@@ -9,9 +9,11 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "components/permissions/permission_prompt.h"
 #include "components/permissions/permission_request.h"
 #include "components/permissions/permission_request_manager.h"
+#include "components/permissions/resolvers/permission_prompt_options.h"
 #include "url/gurl.h"
 
 namespace content {
@@ -27,7 +29,7 @@ enum class RequestType;
 // actual UI.
 // See example usage in
 // chrome/browser/permissions/permission_request_manager_unittest.cc
-class MockPermissionPromptFactory {
+class MockPermissionPromptFactory : PermissionRequestManager::Observer {
  public:
   explicit MockPermissionPromptFactory(PermissionRequestManager* manager);
 
@@ -35,7 +37,7 @@ class MockPermissionPromptFactory {
   MockPermissionPromptFactory& operator=(const MockPermissionPromptFactory&) =
       delete;
 
-  ~MockPermissionPromptFactory();
+  ~MockPermissionPromptFactory() override;
 
   // Create method called by the PBM to show a bubble.
   std::unique_ptr<PermissionPrompt> Create(
@@ -48,6 +50,10 @@ class MockPermissionPromptFactory {
 
   void set_response_type(PermissionRequestManager::AutoResponseType type) {
     response_type_ = type;
+  }
+
+  void set_response_prompt_options(const PromptOptions& prompt_options) {
+    response_prompt_options_ = prompt_options;
   }
 
   PermissionRequestManager::AutoResponseType response_type() {
@@ -80,15 +86,23 @@ class MockPermissionPromptFactory {
 
   void HideView(MockPermissionPrompt* view);
 
+  // PermissionRequestManager::Observer
+  void OnPermissionRequestManagerDestructed() override;
+
   int show_count_;
   int requests_count_;
   std::vector<RequestType> request_types_seen_;
   std::vector<GURL> request_origins_seen_;
 
-  std::vector<MockPermissionPrompt*> prompts_;
+  std::vector<raw_ptr<MockPermissionPrompt, VectorExperimental>> prompts_;
   PermissionRequestManager::AutoResponseType response_type_;
+  std::optional<PromptOptions> response_prompt_options_;
 
   base::RepeatingClosure show_bubble_quit_closure_;
+
+  base::ScopedObservation<PermissionRequestManager,
+                          PermissionRequestManager::Observer>
+      observation_{this};
 
   // The bubble manager that will be associated with this factory.
   raw_ptr<PermissionRequestManager> manager_;

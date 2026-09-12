@@ -2,16 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <memory>
-
 #include "content/browser/xr/metrics/session_metrics_helper.h"
+
+#include <memory>
 
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/time/time.h"
 #include "content/browser/xr/metrics/session_timer.h"
 #include "content/browser/xr/metrics/webxr_session_tracker.h"
+#include "content/browser/xr/service/xr_runtime_manager_impl.h"
+#include "content/browser/xr/webxr_internals/mojom/webxr_internals.mojom.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/web_contents.h"
@@ -50,7 +52,7 @@ void ReportInitialSessionData(
     const device::mojom::XRSessionOptions& session_options,
     const std::unordered_set<device::mojom::XRSessionFeature>&
         enabled_features) {
-  DCHECK(webxr_session_tracker);
+  CHECK(webxr_session_tracker, base::NotFatalUntil::M159);
 
   webxr_session_tracker->ukm_entry()->SetMode(
       static_cast<int64_t>(session_options.mode));
@@ -63,7 +65,7 @@ void ReportInitialSessionData(
 // static
 SessionMetricsHelper* SessionMetricsHelper::FromWebContents(
     content::WebContents* web_contents) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M159);
 
   if (!web_contents)
     return nullptr;
@@ -75,7 +77,7 @@ SessionMetricsHelper* SessionMetricsHelper::FromWebContents(
 // static
 SessionMetricsHelper* SessionMetricsHelper::CreateForWebContents(
     content::WebContents* contents) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M159);
 
   // This is not leaked as the SessionMetricsHelperData will clean it up.
   std::unique_ptr<SessionMetricsHelper> helper =
@@ -88,8 +90,8 @@ SessionMetricsHelper* SessionMetricsHelper::CreateForWebContents(
 
 SessionMetricsHelper::SessionMetricsHelper(content::WebContents* contents) {
   DVLOG(2) << __func__;
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  DCHECK(contents);
+  CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M159);
+  CHECK(contents, base::NotFatalUntil::M159);
 
   Observe(contents);
 }
@@ -104,12 +106,13 @@ SessionMetricsHelper::StartInlineSession(
     const std::unordered_set<device::mojom::XRSessionFeature>& enabled_features,
     size_t session_id) {
   DVLOG(1) << __func__;
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M159);
 
-  DCHECK(webxr_inline_session_trackers_.find(session_id) ==
-         webxr_inline_session_trackers_.end());
+  CHECK(webxr_inline_session_trackers_.find(session_id) ==
+            webxr_inline_session_trackers_.end(),
+        base::NotFatalUntil::M159);
 
-  // TODO(crbug.com/1061899): The code here assumes that it's called on
+  // TODO(crbug.com/40122624): The code here assumes that it's called on
   // behalf of the active frame, which is not always true.
   // Plumb explicit RenderFrameHost reference from VRSessionImpl.
   auto result = webxr_inline_session_trackers_.emplace(
@@ -126,7 +129,7 @@ SessionMetricsHelper::StartInlineSession(
 
 void SessionMetricsHelper::StopAndRecordInlineSession(size_t session_id) {
   DVLOG(1) << __func__;
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M159);
 
   auto it = webxr_inline_session_trackers_.find(session_id);
 
@@ -143,16 +146,26 @@ void SessionMetricsHelper::StopAndRecordInlineSession(size_t session_id) {
 
 mojo::PendingRemote<device::mojom::XRSessionMetricsRecorder>
 SessionMetricsHelper::StartImmersiveSession(
+    const device::mojom::XRDeviceId& runtime_id,
     const device::mojom::XRSessionOptions& session_options,
     const std::unordered_set<device::mojom::XRSessionFeature>&
         enabled_features) {
   DVLOG(1) << __func__;
-  DCHECK(!webxr_immersive_session_tracker_);
+  CHECK(!webxr_immersive_session_tracker_, base::NotFatalUntil::M159);
 
-  session_timer_ = std::make_unique<SessionTimer>();
+  session_timer_ = std::make_unique<SessionTimer>(session_options.trace_id);
   session_timer_->StartSession();
 
-  // TODO(crbug.com/1061899): The code here assumes that it's called on
+  webxr::mojom::SessionStartedRecordPtr session_started_record =
+      webxr::mojom::SessionStartedRecord::New();
+  session_started_record->trace_id = session_timer_->GetTraceId();
+  session_started_record->started_time = session_timer_->GetStartTime();
+  session_started_record->device_id = runtime_id;
+  XRRuntimeManagerImpl::GetOrCreateInstance(*web_contents())
+      ->GetLoggerManager()
+      .RecordSessionStarted(std::move(session_started_record));
+
+  // TODO(crbug.com/40122624): The code here assumes that it's called on
   // behalf of the active frame, which is not always true.
   // Plumb explicit RenderFrameHost reference from VRSessionImpl.
   webxr_immersive_session_tracker_ = std::make_unique<WebXRSessionTracker>(
@@ -175,7 +188,17 @@ void SessionMetricsHelper::StopAndRecordImmersiveSession() {
     return;
   }
 
-  webxr_immersive_session_tracker_->SetSessionEnd(base::Time::Now());
+  base::Time stop_time = base::Time::Now();
+
+  webxr::mojom::SessionStoppedRecordPtr session_stopped_record =
+      webxr::mojom::SessionStoppedRecord::New();
+  session_stopped_record->trace_id = session_timer_->GetTraceId();
+  session_stopped_record->stopped_time = stop_time;
+  XRRuntimeManagerImpl::GetOrCreateInstance(*web_contents())
+      ->GetLoggerManager()
+      .RecordSessionStopped(std::move(session_stopped_record));
+
+  webxr_immersive_session_tracker_->SetSessionEnd(stop_time);
   webxr_immersive_session_tracker_->ukm_entry()->SetDuration(
       webxr_immersive_session_tracker_->GetRoundedDurationInSeconds());
   webxr_immersive_session_tracker_->RecordEntry();
@@ -186,7 +209,7 @@ void SessionMetricsHelper::StopAndRecordImmersiveSession() {
 }
 
 void SessionMetricsHelper::PrimaryPageChanged(content::Page& page) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M159);
   // All sessions are terminated on navigations, so to ensure that we log
   // everything that we have, cleanup any outstanding session trackers now.
   if (webxr_immersive_session_tracker_)

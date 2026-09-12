@@ -140,6 +140,29 @@ TEST(HistogramFunctionsTest, Times) {
   tester.ExpectTotalCount(histogram, 4);
 }
 
+TEST(HistogramFunctionsTest, ScopedTimes) {
+  std::string histogram("Testing.UMA.HistogramScopedTimes");
+  HistogramTester tester;
+  {
+    ScopedUmaHistogramTimer scoped_uma_histogram_timer(histogram);
+  }
+  tester.ExpectTotalCount(histogram, 1);
+  {
+    ScopedUmaHistogramTimer scoped_uma_histogram_timer(histogram);
+  }
+  tester.ExpectTotalCount(histogram, 2);
+}
+
+TEST(HistogramFunctionsTest, ScopedTimes_MoveCtor) {
+  std::string histogram("Testing.UMA.HistogramScopedTimes");
+  HistogramTester tester;
+  {
+    ScopedUmaHistogramTimer timer1(histogram);
+    ScopedUmaHistogramTimer timer2(std::move(timer1));
+  }
+  tester.ExpectTotalCount(histogram, 1);
+}
+
 TEST(HistogramFunctionsTest, Sparse_SupportsLargeRange) {
   std::string histogram("Testing.UMA.HistogramSparse");
   HistogramTester tester;

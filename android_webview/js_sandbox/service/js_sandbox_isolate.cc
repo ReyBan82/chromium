@@ -4,28 +4,36 @@
 
 #include "android_webview/js_sandbox/service/js_sandbox_isolate.h"
 
+#include <errno.h>
 #include <unistd.h>
-#include <algorithm>
-#include <memory>
-#include <string>
 
-#include "android_webview/js_sandbox/js_sandbox_jni_headers/JsSandboxIsolate_jni.h"
+#include <algorithm>
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <string>
+#include <string_view>
+
 #include "android_webview/js_sandbox/service/js_sandbox_array_buffer_allocator.h"
 #include "android_webview/js_sandbox/service/js_sandbox_isolate_callback.h"
 #include "base/android/callback_android.h"
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
-#include "base/auto_reset.h"
 #include "base/check.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/i18n/icu_util.h"
 #include "base/immediate_crash.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/notreached.h"
 #include "base/numerics/safe_math.h"
-#include "base/strings/string_piece.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/system/sys_info.h"
 #include "base/task/cancelable_task_tracker.h"
@@ -33,6 +41,7 @@
 #include "base/task/thread_pool.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/threading/thread_restrictions.h"
+#include "base/time/time.h"
 #include "gin/arguments.h"
 #include "gin/array_buffer.h"
 #include "gin/function_template.h"
@@ -41,21 +50,27 @@
 #include "gin/try_catch.h"
 #include "gin/v8_initializer.h"
 #include "js_sandbox_isolate.h"
+#include "third_party/jni_zero/default_conversions.h"
 #include "v8/include/v8-array-buffer.h"
 #include "v8/include/v8-function.h"
+#include "v8/include/v8-inspector.h"
+#include "v8/include/v8-isolate.h"
 #include "v8/include/v8-microtask-queue.h"
 #include "v8/include/v8-statistics.h"
 #include "v8/include/v8-template.h"
 
-using base::android::ConvertJavaStringToUTF8;
-using base::android::ConvertUTF8ToJavaString;
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/js_sandbox/js_sandbox_jni_headers/JsSandboxIsolate_jni.h"
+
 using base::android::JavaRef;
 
 namespace {
-// TODO(crbug.com/1297672): This is what shows up as filename in errors. Revisit
-// this once error handling is in place.
-constexpr base::StringPiece resource_name = "<expression>";
+
+// TODO(crbug.com/40215244): This is what shows up as filename in errors.
+// Revisit this once error handling is in place.
+constexpr std::string_view resource_name = "<expression>";
+constexpr int64_t kUnknownAssetFileDescriptorLength = -1;
+constexpr int64_t kDefaultChunkSize = 1 << 16;
 
 size_t GetAllocatePageSize() {
   return gin::V8Platform::Get()->GetPageAllocator()->AllocatePageSize();
@@ -75,6 +90,54 @@ size_t AdjustToValidHeapSize(const size_t heap_size_bytes) {
   } else {
     return max_supported_heap_size;
   }
+}
+
+// Reads content of an Fd from current position to EOF
+// Returns true iff success
+// Returns false on failure and sets errno
+bool ReadFdToStringTillEof(int fd, std::string& contents) {
+  contents.clear();
+  char temp_buffer[kDefaultChunkSize];
+  int64_t bytes_read_this_pass;
+
+  while ((bytes_read_this_pass =
+              HANDLE_EINTR(read(fd, temp_buffer, kDefaultChunkSize))) > 0) {
+    contents.append(temp_buffer, 0, bytes_read_this_pass);
+  }
+
+  if (bytes_read_this_pass == -1) {
+    contents.clear();
+    return false;
+  }
+
+  contents.shrink_to_fit();
+  return true;
+}
+
+// Skip bytes in case lseek fails
+// Returns -1 on read failure and sets errno
+// Otherwise returns number of bytes read, including cases where eof is reached
+// early and less than expected bytes are read.
+int64_t ReadBytesFromFdAndDiscard(int fd, int64_t bytes_to_read) {
+  int64_t bytes_read_this_pass;
+  int64_t bytes_read_so_far = 0;
+  char local_contents[kDefaultChunkSize];
+
+  while (bytes_read_so_far < bytes_to_read) {
+    bytes_read_this_pass = HANDLE_EINTR(
+        read(fd, &local_contents[0],
+             std::min(bytes_to_read - bytes_read_so_far, kDefaultChunkSize)));
+
+    if (bytes_read_this_pass == -1) {
+      return -1;
+    } else if (bytes_read_this_pass == 0) {
+      // eof is reached early
+      return bytes_read_so_far;
+    }
+    bytes_read_so_far += bytes_read_this_pass;
+  }
+
+  return bytes_read_so_far;
 }
 
 v8::Local<v8::String> GetSourceLine(v8::Isolate* isolate,
@@ -113,19 +176,66 @@ std::string GetStackTrace(v8::TryCatch& try_catch, v8::Isolate* isolate) {
   return GetStackTrace(message, isolate);
 }
 
-void WasmAsyncResolvePromiseCallback(v8::Isolate* isolate,
-                                     v8::Local<v8::Context> context,
-                                     v8::Local<v8::Promise::Resolver> resolver,
-                                     v8::Local<v8::Value> compilation_result,
-                                     v8::WasmAsyncSuccess success) {
-  v8::MicrotasksScope microtasks_scope(
-      isolate, v8::MicrotasksScope::kDoNotRunMicrotasks);
-  if (success == v8::WasmAsyncSuccess::kSuccess) {
-    CHECK(resolver->Resolve(context, compilation_result).FromJust());
-  } else {
-    CHECK(resolver->Reject(context, compilation_result).FromJust());
+int32_t remapConsoleMessageErrorLevel(
+    const v8::Isolate::MessageErrorLevel level) {
+  // Converted level should match the values specified in the
+  // org.chromium.android_webview.js_sandbox.common.IJsSandboxIsolateClient AIDL
+  // file (in AndroidX).
+  //
+  // These will probably remain identical to the underlying v8 enums/constants,
+  // but are mapped explicitly here to ensure we can maintain compatibility even
+  // if there are changes or additions.
+  switch (level) {
+    case v8::Isolate::MessageErrorLevel::kMessageLog:
+      return 1 << 0;
+    case v8::Isolate::MessageErrorLevel::kMessageDebug:
+      return 1 << 1;
+    case v8::Isolate::MessageErrorLevel::kMessageInfo:
+      return 1 << 2;
+    case v8::Isolate::MessageErrorLevel::kMessageError:
+      return 1 << 3;
+    case v8::Isolate::MessageErrorLevel::kMessageWarning:
+      return 1 << 4;
+    case v8::Isolate::MessageErrorLevel::kMessageAll:
+      NOTREACHED();
   }
 }
+
+// Converts a V8 inspector (UTF-8 or UTF-16) StringView to a jstring.
+base::android::ScopedJavaLocalRef<jstring> StringViewToJavaString(
+    JNIEnv* const env,
+    const v8_inspector::StringView& string_view) {
+  if (string_view.is8Bit()) {
+    return base::android::ConvertUTF8ToJavaString(
+        env, std::string_view(
+                 reinterpret_cast<const char*>(string_view.characters8()),
+                 string_view.length()));
+  } else {
+    return base::android::ConvertUTF16ToJavaString(
+        env, std::u16string_view(
+                 reinterpret_cast<const char16_t*>(string_view.characters16()),
+                 string_view.length()));
+  }
+}
+
+class NoopInspectorChannel final : public v8_inspector::V8Inspector::Channel {
+ public:
+  ~NoopInspectorChannel() override = default;
+  void sendResponse(
+      int callId,
+      std::unique_ptr<v8_inspector::StringBuffer> message) override {}
+  void sendNotification(
+      std::unique_ptr<v8_inspector::StringBuffer> message) override {}
+  void flushProtocolNotifications() override {}
+};
+
+// This must match the values defined in IJsSandboxIsolateInstanceCallback's
+// TERMINATED_ constants;
+enum class TerminationStatus {
+  kUnknownError = 1,
+  kSandboxDead = 2,
+  kMemoryLimitExceeded = 3,
+};
 
 }  // namespace
 
@@ -147,16 +257,78 @@ FdWithLength::FdWithLength(int fd_input, ssize_t len) {
   length = len;
 }
 
-JsSandboxIsolate::JsSandboxIsolate(const size_t max_heap_size_bytes)
-    : isolate_max_heap_size_bytes_(max_heap_size_bytes),
-      array_buffer_allocator_(std::make_unique<JsSandboxArrayBufferAllocator>(
-          *gin::ArrayBufferAllocator::SharedInstance(),
-          max_heap_size_bytes > 0
-              ? max_heap_size_bytes
-              : JsSandboxArrayBufferAllocator::kUnlimitedBudget,
+// This class must only be constructed, destructed, and used from the isolate
+// thread.
+class JsSandboxIsolate::InspectorClient final
+    : public v8_inspector::V8InspectorClient {
+ public:
+  explicit InspectorClient(JsSandboxIsolate& isolate) : isolate_(isolate) {}
+
+  ~InspectorClient() override = default;
+
+  void consoleAPIMessage(const int context_group_id,
+                         const v8::Isolate::MessageErrorLevel level,
+                         const v8_inspector::StringView& message,
+                         const v8_inspector::StringView& url,
+                         const unsigned int line_number,
+                         const unsigned int column_number,
+                         v8_inspector::V8StackTrace* const trace) override {
+    if (!isolate_->console_enabled_) {
+      return;
+    }
+
+    JNIEnv* env = base::android::AttachCurrentThread();
+    const int32_t converted_level = remapConsoleMessageErrorLevel(level);
+    base::android::ScopedJavaLocalRef<jstring> java_string_message =
+        StringViewToJavaString(env, message);
+    // url is actually just the source (file/expression) identifier.
+    base::android::ScopedJavaLocalRef<jstring> java_string_source =
+        StringViewToJavaString(env, url);
+    base::android::ScopedJavaLocalRef<jstring> java_string_trace;
+    if (trace && !trace->isEmpty()) {
+      StringViewToJavaString(env, trace->toString()->string());
+    }
+
+    android_webview::Java_JsSandboxIsolate_consoleMessage(
+        env, isolate_->j_isolate_, static_cast<int32_t>(context_group_id),
+        converted_level, java_string_message, java_string_source,
+        base::saturated_cast<int32_t>(line_number),
+        base::saturated_cast<int32_t>(column_number), java_string_trace);
+  }
+
+  void consoleClear(const int context_group_id) override {
+    if (!isolate_->console_enabled_) {
+      return;
+    }
+    JNIEnv* env = base::android::AttachCurrentThread();
+    android_webview::Java_JsSandboxIsolate_consoleClear(
+        env, isolate_->j_isolate_, static_cast<int32_t>(context_group_id));
+  }
+
+  double currentTimeMS() override {
+    // Note: although this is not monotonically increasing time, this reflects
+    // the behaviour of Blink code.
+    return base::Time::Now().InMillisecondsFSinceUnixEpoch();
+  }
+
+ private:
+  const raw_ref<JsSandboxIsolate> isolate_;
+};
+
+JsSandboxIsolate::JsSandboxIsolate(
+    const base::android::JavaRef<jobject>& j_isolate,
+    const size_t max_heap_size_bytes)
+    : j_isolate_(j_isolate),
+      isolate_max_heap_size_bytes_(max_heap_size_bytes),
+      memory_budget_(std::make_unique<JsSandboxMemoryBudget>(
+          max_heap_size_bytes > 0 ? max_heap_size_bytes
+                                  : JsSandboxMemoryBudget::kUnlimitedBudget,
           // This is a bit of an implementation detail - gin uses the same
           // underlying allocator for pages and array buffers.
           GetAllocatePageSize())),
+      array_buffer_allocator_(std::make_unique<JsSandboxArrayBufferAllocator>(
+          *gin::ArrayBufferAllocator::SharedInstance(),
+          *memory_budget_)),
       control_task_runner_(base::ThreadPool::CreateSequencedTaskRunner({})),
       isolate_task_runner_(base::ThreadPool::CreateSingleThreadTaskRunner(
           {base::TaskPriority::USER_BLOCKING,
@@ -170,7 +342,12 @@ JsSandboxIsolate::JsSandboxIsolate(const size_t max_heap_size_bytes)
                                 base::Unretained(this)));
 }
 
-JsSandboxIsolate::~JsSandboxIsolate() {}
+JsSandboxIsolate::~JsSandboxIsolate() {
+  if (context_holder_) {
+    v8::HandleScope handle_scope(isolate_holder_->isolate());
+    context_holder_.reset();
+  }
+}
 
 // Called from Binder thread.
 // This method posts evaluation tasks to the control_task_runner_. The
@@ -181,15 +358,12 @@ JsSandboxIsolate::~JsSandboxIsolate() {}
 // in v8. Only isolate_task_runner_ should be used to interact with the isolate
 // for thread-affine v8 APIs. The callback is invoked from the
 // isolate_task_runner_.
-jboolean JsSandboxIsolate::EvaluateJavascript(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& obj,
-    const base::android::JavaParamRef<jstring>& jcode,
-    const base::android::JavaParamRef<jobject>& j_callback) {
-  std::string code = ConvertJavaStringToUTF8(env, jcode);
+bool JsSandboxIsolate::EvaluateJavascript(
+    std::string&& code,
+    const base::android::JavaRef<jobject>& j_callback) {
   scoped_refptr<JsSandboxIsolateCallback> callback =
       base::MakeRefCounted<JsSandboxIsolateCallback>(
-          base::android::ScopedJavaGlobalRef(j_callback));
+          base::android::ScopedJavaGlobalRef<jobject>(j_callback), false);
   control_task_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(&JsSandboxIsolate::PostEvaluationToIsolateThread,
@@ -199,36 +373,75 @@ jboolean JsSandboxIsolate::EvaluateJavascript(
 }
 
 // Called from Binder thread.
-void JsSandboxIsolate::DestroyNative(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& obj) {
+// Refer to comment above EvaluateJavascript method. In addition, this method
+// checks for streaming failures.
+bool JsSandboxIsolate::EvaluateJavascriptWithFd(
+    const int32_t fd,
+    const int64_t length,
+    const int64_t offset,
+    const base::android::JavaRef<jobject>& j_callback,
+    const base::android::JavaRef<jobject>& j_pfd) {
+  scoped_refptr<JsSandboxIsolateCallback> callback =
+      base::MakeRefCounted<JsSandboxIsolateCallback>(
+          base::android::ScopedJavaGlobalRef<jobject>(j_callback), true);
+
+  control_task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&JsSandboxIsolate::PostFileDescriptorReadToIsolateThread,
+                     base::Unretained(this), fd, length, offset,
+                     base::android::ScopedJavaGlobalRef<jobject>(j_pfd),
+                     std::move(callback)));
+
+  return true;
+}
+
+// Called from Binder thread.
+void JsSandboxIsolate::DestroyNative() {
   control_task_runner_->PostTask(
       FROM_HERE, base::BindOnce(&JsSandboxIsolate::DestroyWhenPossible,
                                 base::Unretained(this)));
 }
 
 // Called from Binder thread.
-jboolean JsSandboxIsolate::ProvideNamedData(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& obj,
-    const base::android::JavaParamRef<jstring>& jname,
-    const jint fd,
-    const jint length) {
-  std::string name = ConvertJavaStringToUTF8(env, jname);
+bool JsSandboxIsolate::ProvideNamedData(const std::string& name,
+                                        const int32_t fd,
+                                        const int32_t length) {
   base::AutoLock hold(named_fd_lock_);
   FdWithLength fd_with_length(fd, length);
   return named_fd_.insert(std::make_pair(name, std::move(fd_with_length)))
       .second;
 }
 
+// Called from Binder thread.
+void JsSandboxIsolate::SetConsoleEnabled(const bool enable) {
+  control_task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(&JsSandboxIsolate::SetConsoleEnabledOnControlThread,
+                     base::Unretained(this), enable));
+}
+
 // Called from control sequence.
 void JsSandboxIsolate::PostEvaluationToIsolateThread(
-    const std::string code,
+    std::string code,
     scoped_refptr<JsSandboxIsolateCallback> callback) {
   cancelable_task_tracker_->PostTask(
       isolate_task_runner_.get(), FROM_HERE,
       base::BindOnce(&JsSandboxIsolate::EvaluateJavascriptOnThread,
                      base::Unretained(this), std::move(code),
+                     std::move(callback)));
+}
+
+// Called from control sequence
+void JsSandboxIsolate::PostFileDescriptorReadToIsolateThread(
+    int fd,
+    int64_t length,
+    int64_t offset,
+    base::android::ScopedJavaGlobalRef<jobject> pfd,
+    scoped_refptr<JsSandboxIsolateCallback> callback) {
+  cancelable_task_tracker_->PostTask(
+      isolate_task_runner_.get(), FROM_HERE,
+      base::BindOnce(&JsSandboxIsolate::ReadFileDescriptorOnThread,
+                     base::Unretained(this), fd, length, offset, std::move(pfd),
                      std::move(callback)));
 }
 
@@ -264,80 +477,108 @@ void JsSandboxIsolate::NotifyInitComplete() {
   isolate_init_complete = true;
 }
 
-// Called from control sequence.
-void JsSandboxIsolate::ConvertPromiseToArrayBufferInControlSequence(
-    std::string name,
-    std::unique_ptr<v8::Global<v8::ArrayBuffer>> array_buffer,
-    std::unique_ptr<v8::Global<v8::Promise::Resolver>> resolver) {
-  cancelable_task_tracker_->PostTask(
-      isolate_task_runner_.get(), FROM_HERE,
-      base::BindOnce(
-          &JsSandboxIsolate::ConvertPromiseToArrayBufferInIsolateSequence,
-          base::Unretained(this), std::move(name), std::move(array_buffer),
-          std::move(resolver)));
-}
-
-// Called from control sequence.
-//
-// The array_buffer's API must only be used from the isolate thread.
-void JsSandboxIsolate::ConvertPromiseToFailureInControlSequence(
-    std::string name,
-    std::unique_ptr<v8::Global<v8::ArrayBuffer>> array_buffer,
-    std::unique_ptr<v8::Global<v8::Promise::Resolver>> resolver,
-    std::string reason) {
-  cancelable_task_tracker_->PostTask(
-      isolate_task_runner_.get(), FROM_HERE,
-      base::BindOnce(
-          &JsSandboxIsolate::ConvertPromiseToFailureInIsolateSequence,
-          base::Unretained(this), std::move(name), std::move(array_buffer),
-          std::move(resolver), std::move(reason)));
-}
-
-// Called from Thread pool.
-//
-// The array_buffer's API must only be used from the isolate thread, but the
-// internal data (inner_buffer) may be accessed in whatever thread is currently
-// processing the task, so long as array_buffer remains alive.
-void JsSandboxIsolate::ConvertPromiseToArrayBufferInThreadPool(
-    base::ScopedFD fd,
-    ssize_t length,
-    std::string name,
-    std::unique_ptr<v8::Global<v8::ArrayBuffer>> array_buffer,
-    std::unique_ptr<v8::Global<v8::Promise::Resolver>> resolver,
-    void* inner_buffer) {
-  if (base::ReadFromFD(fd.get(), static_cast<char*>(inner_buffer), length)) {
-    control_task_runner_->PostTask(
-        FROM_HERE,
-        base::BindOnce(
-            &JsSandboxIsolate::ConvertPromiseToArrayBufferInControlSequence,
-            base::Unretained(this), std::move(name), std::move(array_buffer),
-            std::move(resolver)));
-  } else {
-    std::string failure_reason = "Reading data failed.";
-    control_task_runner_->PostTask(
-        FROM_HERE,
-        base::BindOnce(
-            &JsSandboxIsolate::ConvertPromiseToFailureInControlSequence,
-            base::Unretained(this), std::move(name), std::move(array_buffer),
-            std::move(resolver), std::move(failure_reason)));
-  }
-}
 
 // Called from isolate thread.
 v8::Local<v8::ObjectTemplate> JsSandboxIsolate::CreateAndroidNamespaceTemplate(
     v8::Isolate* isolate) {
-  v8::Local<v8::ObjectTemplate> android_namespace_template =
+  v8::Local<v8::ObjectTemplate> android_object_template =
       v8::ObjectTemplate::New(isolate);
-  v8::Local<v8::ObjectTemplate> consume_template =
-      v8::ObjectTemplate::New(isolate);
-  consume_template->Set(
+  android_object_template->Set(
       isolate, "consumeNamedDataAsArrayBuffer",
       gin::CreateFunctionTemplate(
           isolate,
           base::BindRepeating(&JsSandboxIsolate::ConsumeNamedDataAsArrayBuffer,
                               base::Unretained(this))));
-  android_namespace_template->Set(isolate, "android", consume_template);
-  return android_namespace_template;
+  android_object_template->Set(
+      isolate, "getNamedPort",
+      gin::CreateFunctionTemplate(
+          isolate, base::BindRepeating(&JsSandboxIsolate::GetNamedPort,
+                                       base::Unretained(this))));
+  return android_object_template;
+}
+
+// Called from isolate thread.
+void JsSandboxIsolate::ReadFileDescriptorOnThread(
+    int fd,
+    int64_t length,
+    int64_t offset,
+    base::android::ScopedJavaGlobalRef<jobject> pfd,
+    scoped_refptr<JsSandboxIsolateCallback> callback) {
+  std::string code;
+
+  if (lseek64(fd, offset, SEEK_SET) == -1) {
+    if (errno != ESPIPE) {
+      ReportFileDescriptorIOError(
+          std::move(pfd), std::move(callback),
+          base::StrCat({"Could not seek to offset: ", strerror(errno)}));
+      return;
+    } else {
+      // Just read these bytes and discard
+      int64_t bytes_read = ReadBytesFromFdAndDiscard(fd, offset);
+      if (bytes_read == -1) {
+        ReportFileDescriptorIOError(
+            std::move(pfd), std::move(callback),
+            base::StrCat({"Could not skip to offset: ", strerror(errno)}));
+        return;
+      } else if (bytes_read != offset) {
+        ReportFileDescriptorIOError(
+            std::move(pfd), std::move(callback),
+            base::StrCat({"Short read, could only read ",
+                          base::NumberToString(bytes_read), " bytes"}));
+        return;
+      }
+    }
+  }
+
+  if (length >= 0) {
+    code.resize(length);
+    if (!base::ReadFromFD(fd, code)) {
+      ReportFileDescriptorIOError(std::move(pfd), std::move(callback),
+                                  "Failed to read data from file descriptor");
+      return;
+    }
+  } else if (length == kUnknownAssetFileDescriptorLength) {
+    if (!ReadFdToStringTillEof(fd, code)) {
+      ReportFileDescriptorIOError(
+          std::move(pfd), std::move(callback),
+          base::StrCat({"Failed to read data till EOF: ", strerror(errno)}));
+      return;
+    }
+  }
+
+  JNIEnv* env = base::android::AttachCurrentThread();
+
+  // check for error on the client side irrespective of errorCode
+  std::string error =
+      android_webview::Java_JsSandboxIsolate_checkStreamingErrorAndClosePfd(
+          env, pfd);
+
+  if (!error.empty()) {
+    callback->ReportFileDescriptorIOFailedError(
+        base::StrCat({"Failed to read data from file descriptor: ", error}));
+    return;
+  }
+
+  // no error reported, proceed for evaluation
+  EvaluateJavascriptOnThread(std::move(code), std::move(callback));
+}
+
+void JsSandboxIsolate::ReportFileDescriptorIOError(
+    base::android::ScopedJavaGlobalRef<jobject> pfd,
+    scoped_refptr<JsSandboxIsolateCallback> callback,
+    std::string errorMessage) {
+  JNIEnv* env = base::android::AttachCurrentThread();
+
+  // check for error on the client side irrespective of errorCode
+  std::string error =
+      android_webview::Java_JsSandboxIsolate_checkStreamingErrorAndClosePfd(
+          env, pfd);
+
+  if (!error.empty()) {
+    errorMessage += base::StrCat({"; Application sent error: ", error});
+  }
+
+  callback->ReportFileDescriptorIOFailedError(errorMessage);
 }
 
 // Called from isolate thread.
@@ -362,21 +603,24 @@ void JsSandboxIsolate::InitializeIsolateOnThread() {
       gin::IsolateHolder::AccessMode::kSingleThread,
       gin::IsolateHolder::IsolateType::kUtility, std::move(params));
   v8::Isolate* isolate = isolate_holder_->isolate();
-  v8::Isolate::Scope isolate_scope(isolate);
+  isolate_scope_ = std::make_unique<v8::Isolate::Scope>(isolate);
   isolate->SetMicrotasksPolicy(v8::MicrotasksPolicy::kAuto);
-  isolate->SetWasmAsyncResolvePromiseCallback(WasmAsyncResolvePromiseCallback);
 
-  isolate->AddNearHeapLimitCallback(&JsSandboxIsolate::NearHeapLimitCallback,
-                                    this);
+  isolate->SetOOMErrorHandler(&OOMErrorCallback, this);
   v8::HandleScope handle_scope(isolate);
 
-  v8::Local<v8::ObjectTemplate> android_template =
-      CreateAndroidNamespaceTemplate(isolate);
-  v8::Local<v8::Context> context =
-      v8::Context::New(isolate, nullptr, android_template);
+  v8::Local<v8::Context> context = v8::Context::New(isolate);
 
   context_holder_ = std::make_unique<gin::ContextHolder>(isolate);
   context_holder_->SetContext(context);
+
+  v8::Context::Scope context_scope(context);
+  v8::Local<v8::ObjectTemplate> android_template =
+      CreateAndroidNamespaceTemplate(isolate);
+  context->Global()
+      ->Set(context, gin::StringToV8(isolate, "android"),
+            android_template->NewInstance(context).ToLocalChecked())
+      .Check();
 
   control_task_runner_->PostTask(
       FROM_HERE, base::BindOnce(&JsSandboxIsolate::NotifyInitComplete,
@@ -385,20 +629,17 @@ void JsSandboxIsolate::InitializeIsolateOnThread() {
 
 // Called from isolate thread.
 void JsSandboxIsolate::EvaluateJavascriptOnThread(
-    const std::string code,
+    std::string code,
     scoped_refptr<JsSandboxIsolateCallback> callback) {
-  base::AutoReset<JsSandboxIsolateCallback*> callback_autoreset(
-      &current_callback_, callback.get());
+  ongoing_evaluation_callbacks_.emplace(callback);
 
-  v8::Isolate::Scope isolate_scope(isolate_holder_->isolate());
   v8::HandleScope handle_scope(isolate_holder_->isolate());
   v8::Context::Scope scope(context_holder_->context());
   v8::Isolate* v8_isolate = isolate_holder_->isolate();
   v8::TryCatch try_catch(v8_isolate);
 
   // Compile
-  v8::ScriptOrigin origin(v8_isolate,
-                          gin::StringToV8(v8_isolate, resource_name));
+  v8::ScriptOrigin origin(gin::StringToV8(v8_isolate, resource_name));
   v8::MaybeLocal<v8::Script> maybe_script = v8::Script::Compile(
       context_holder_->context(), gin::StringToV8(v8_isolate, code), &origin);
   std::string compile_error = "";
@@ -407,12 +648,12 @@ void JsSandboxIsolate::EvaluateJavascriptOnThread(
   }
   v8::Local<v8::Script> script;
   if (!maybe_script.ToLocal(&script)) {
-    callback->ReportJsEvaluationError(compile_error);
+    UseCallback(callback)->ReportError(
+        JsSandboxIsolateCallback::ErrorType::kJsEvaluationError, compile_error);
     return;
   }
 
   // Run
-  v8::Isolate::SafeForTerminationScope safe_for_termination(v8_isolate);
   v8::MaybeLocal<v8::Value> maybe_result =
       script->Run(context_holder_->context());
   std::string run_error = "";
@@ -430,34 +671,32 @@ void JsSandboxIsolate::EvaluateJavascriptOnThread(
       // directly.
       if (promise->State() == v8::Promise::PromiseState::kFulfilled) {
         std::string result = gin::V8ToString(v8_isolate, promise->Result());
-        callback->ReportResult(result);
+        UseCallback(callback)->ReportResult(result);
         return;
       }
       if (promise->State() == v8::Promise::PromiseState::kRejected) {
         v8::Local<v8::Message> message = v8::Exception::CreateMessage(
             isolate_holder_->isolate(), promise->Result());
         std::string error_message = GetStackTrace(message, v8_isolate);
-        callback->ReportJsEvaluationError(error_message);
+        UseCallback(callback)->ReportError(
+            JsSandboxIsolateCallback::ErrorType::kJsEvaluationError,
+            error_message);
         return;
       }
       v8::Local<v8::Function> fulfill_fun =
           gin::CreateFunctionTemplate(
               v8_isolate,
-              base::BindRepeating(
-                  [](scoped_refptr<JsSandboxIsolateCallback> callback,
-                     gin::Arguments* args) {
-                    std::string output;
-                    args->GetNext(&output);
-                    callback->ReportResult(output);
-                  },
-                  callback))
+              base::BindRepeating(&JsSandboxIsolate::PromiseFulfillCallback,
+                                  base::Unretained(this),
+                                  base::RetainedRef(callback)))
               ->GetFunction(context_holder_->context())
               .ToLocalChecked();
       v8::Local<v8::Function> reject_fun =
           gin::CreateFunctionTemplate(
               v8_isolate,
               base::BindRepeating(&JsSandboxIsolate::PromiseRejectCallback,
-                                  base::Unretained(this), callback))
+                                  base::Unretained(this),
+                                  base::RetainedRef(callback)))
               ->GetFunction(context_holder_->context())
               .ToLocalChecked();
 
@@ -465,62 +704,36 @@ void JsSandboxIsolate::EvaluateJavascriptOnThread(
           .ToLocalChecked();
     } else {
       std::string result = gin::V8ToString(v8_isolate, value);
-      callback->ReportResult(result);
+      UseCallback(callback)->ReportResult(result);
     }
   } else {
-    callback->ReportJsEvaluationError(run_error);
+    UseCallback(callback)->ReportError(
+        JsSandboxIsolateCallback::ErrorType::kJsEvaluationError, run_error);
   }
+}
+
+void JsSandboxIsolate::PromiseFulfillCallback(
+    scoped_refptr<JsSandboxIsolateCallback> callback,
+    gin::Arguments* args) {
+  std::string result;
+  args->GetNext(&result);
+  UseCallback(callback)->ReportResult(result);
 }
 
 void JsSandboxIsolate::PromiseRejectCallback(
     scoped_refptr<JsSandboxIsolateCallback> callback,
     gin::Arguments* args) {
+  v8::HandleScope handle_scope(isolate_holder_->isolate());
   v8::Local<v8::Value> value;
   args->GetNext(&value);
   v8::Local<v8::Message> message =
       v8::Exception::CreateMessage(isolate_holder_->isolate(), value);
   std::string error_message =
       GetStackTrace(message, isolate_holder_->isolate());
-  callback->ReportJsEvaluationError(error_message);
+  UseCallback(callback)->ReportError(
+      JsSandboxIsolateCallback::ErrorType::kJsEvaluationError, error_message);
 }
 
-// Called from isolate thread.
-void JsSandboxIsolate::ConvertPromiseToArrayBufferInIsolateSequence(
-    std::string name,
-    std::unique_ptr<v8::Global<v8::ArrayBuffer>> array_buffer,
-    std::unique_ptr<v8::Global<v8::Promise::Resolver>> resolver) {
-  v8::Isolate::Scope isolate_scope(isolate_holder_->isolate());
-  v8::HandleScope handle_scope(isolate_holder_->isolate());
-  v8::Context::Scope scope(context_holder_->context());
-
-  resolver->Get(isolate_holder_->isolate())
-      ->Resolve(context_holder_->context(),
-                array_buffer->Get(isolate_holder_->isolate()))
-      .ToChecked();
-}
-
-// Called from isolate thread.
-//
-// We pass the array_buffer to the isolate thread so that it (or the handle)
-// only gets destructed from the isolate thread.
-void JsSandboxIsolate::ConvertPromiseToFailureInIsolateSequence(
-    std::string name,
-    std::unique_ptr<v8::Global<v8::ArrayBuffer>> array_buffer,
-    std::unique_ptr<v8::Global<v8::Promise::Resolver>> resolver,
-    std::string reason) {
-  v8::Isolate::Scope isolate_scope(isolate_holder_->isolate());
-  v8::HandleScope handle_scope(isolate_holder_->isolate());
-  v8::Context::Scope scope(context_holder_->context());
-
-  // Allow array buffer to be garbage collectable before further V8 calls.
-  array_buffer = nullptr;
-
-  resolver->Get(isolate_holder_->isolate())
-      ->Reject(context_holder_->context(),
-               v8::Exception::Error(
-                   gin::StringToV8(isolate_holder_->isolate(), reason)))
-      .ToChecked();
-}
 
 // Called from isolate thread.
 void JsSandboxIsolate::ConsumeNamedDataAsArrayBuffer(gin::Arguments* args) {
@@ -585,55 +798,149 @@ void JsSandboxIsolate::ConsumeNamedDataAsArrayBuffer(gin::Arguments* args) {
 
   v8::Local<v8::ArrayBuffer> local_array_buffer =
       maybe_array_buffer.ToLocalChecked();
-  void* const inner_buffer = local_array_buffer->Data();
-  // V8 documentation provides no guarantees about the thread-safety of Globals
-  // - even move construction/destruction. Wrap it in a unique_ptr so that it
-  // can be treated as an opaque pointer until it's handed back to the isolate
-  // thread.
-  std::unique_ptr<v8::Global<v8::ArrayBuffer>> global_array_buffer(
-      std::make_unique<v8::Global<v8::ArrayBuffer>>(
-          isolate, std::move(local_array_buffer)));
-  base::ThreadPool::PostTask(
-      FROM_HERE, {base::MayBlock()},
-      base::BindOnce(&JsSandboxIsolate::ConvertPromiseToArrayBufferInThreadPool,
-                     base::Unretained(this), std::move(fd), length,
-                     std::move(name), std::move(global_array_buffer),
-                     std::make_unique<v8::Global<v8::Promise::Resolver>>(
-                         std::move(global_resolver)),
-                     inner_buffer));
+  gin::ArrayBuffer gin_array_buffer(local_array_buffer);
+  if (base::ReadFromFD(fd.get(),
+                       base::as_writable_chars(gin_array_buffer.span()))) {
+    global_resolver.Get(isolate_holder_->isolate())
+        ->Resolve(context_holder_->context(), local_array_buffer)
+        .ToChecked();
+  } else {
+    std::string reason = "Reading data failed.";
+    global_resolver.Get(isolate_holder_->isolate())
+        ->Reject(context_holder_->context(),
+                 v8::Exception::Error(
+                     gin::StringToV8(isolate_holder_->isolate(), reason)))
+        .ToChecked();
+  }
   args->Return(promise);
 }
 
+void JsSandboxIsolate::GetNamedPort(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  v8::Global<v8::Promise::Resolver> global_resolver(
+      isolate, v8::Promise::Resolver::New(isolate->GetCurrentContext())
+                   .ToLocalChecked());
+
+  if (args->Length() != 1) {
+    args->ThrowTypeError("getNamedPort requires exactly one argument.");
+    return;
+  }
+  std::string name;
+  if (!args->GetNext(&name)) {
+    args->ThrowTypeError("Invalid argument type.");
+    return;
+  }
+
+  cppgc::Persistent<android_webview::JsSandboxMessagePort> message_port;
+  v8::Local<v8::Promise> promise = global_resolver.Get(isolate)->GetPromise();
+  args->Return(promise);
+
+  auto entry = message_ports_.find(name);
+  if (entry != message_ports_.end()) {
+    message_port = entry->second;
+  } else {
+    pending_port_requests_[name].push_back(
+        std::make_unique<v8::Global<v8::Promise::Resolver>>(isolate,
+                                                            global_resolver));
+  }
+
+  if (message_port) {
+    v8::Local<v8::Value> v8_message_port =
+        gin::ConvertToV8(isolate, message_port.Get()).ToLocalChecked();
+    global_resolver.Get(isolate)
+        ->Resolve(context_holder_->context(), v8_message_port)
+        .ToChecked();
+  }
+}
+
 // Called from isolate thread.
-[[noreturn]] size_t JsSandboxIsolate::NearHeapLimitCallback(
-    void* data,
-    size_t /*current_heap_limit*/,
-    size_t /*initial_heap_limit*/) {
+[[noreturn]] void JsSandboxIsolate::OOMErrorCallback(
+    const char* location,
+    const v8::OOMDetails& details,
+    void* data) {
   android_webview::JsSandboxIsolate* js_sandbox_isolate =
       static_cast<android_webview::JsSandboxIsolate*>(data);
   js_sandbox_isolate->MemoryLimitExceeded();
 }
 
+// Called from any thread.
+void JsSandboxIsolate::ExternalMemoryLimitExceeded() {
+  LOG(ERROR) << "Isolate crashed: attempted to allocate memory exceeding the "
+             << "isolate memory budget.";
+  // Intentionally bypass the control thread.
+  // TODO(b/435619571):
+  //  This will freeze the isolate thread and the app will crash the whole
+  //  process, but this isn't strictly necessary for external memory exhaustion
+  //  if V8 can terminate cleanly.
+  isolate_task_runner_->PostTask(
+      FROM_HERE, base::BindOnce(&JsSandboxIsolate::MemoryLimitExceeded,
+                                base::Unretained(this)));
+  isolate_holder_->isolate()->TerminateExecution();
+}
+
 // Called from isolate thread.
 [[noreturn]] void JsSandboxIsolate::MemoryLimitExceeded() {
+  ReportOutOfMemory();
+  FreezeThread();
+}
+
+// Called from isolate thread
+void JsSandboxIsolate::ReportOutOfMemory() {
   LOG(ERROR) << "Isolate has OOMed";
-  // TODO(ashleynewson): An isolate could run out of memory outside of an
-  // evaluation when processing asynchronous code. We should add a crash
-  // signalling mechanism which doesn't rely on us having a callback for a
-  // currently running evaluation.
-  CHECK(current_callback_)
-      << "Isolate ran out of memory outside of an evaluation.";
-  uint64_t memory_limit = uint64_t{isolate_max_heap_size_bytes_};
+
+  const uint64_t memory_limit = uint64_t{isolate_max_heap_size_bytes_};
   v8::HeapStatistics heap_statistics;
   isolate_holder_->isolate()->GetHeapStatistics(&heap_statistics);
-  uint64_t v8_heap_usage = heap_statistics.used_heap_size();
+  const uint64_t v8_heap_usage = heap_statistics.used_heap_size();
   // Note that we use our own memory accounting, and not V8's external memory
   // accounting, for non-heap usage. These numbers can differ, particularly as
   // our own memory accounting considers whole pages rather than just bytes.
-  uint64_t non_v8_heap_usage = uint64_t{array_buffer_allocator_->GetUsage()};
-  current_callback_->ReportMemoryLimitExceededError(memory_limit, v8_heap_usage,
-                                                    non_v8_heap_usage);
-  FreezeThread();
+  const uint64_t non_v8_heap_usage = uint64_t{memory_budget_->GetUsage()};
+
+  std::ostringstream details;
+  details << "Memory limit exceeded.\n";
+  if (memory_limit > 0) {
+    details << "Memory limit: " << memory_limit << " bytes\n";
+  } else {
+    details << "Memory limit not explicitly configured\n";
+  }
+  details << "V8 heap usage: " << v8_heap_usage << " bytes\n";
+  details << "Non-V8 heap usage: " << non_v8_heap_usage << " bytes\n";
+  const std::string details_str = details.str();
+
+  JNIEnv* const env = base::android::AttachCurrentThread();
+
+  const bool client_got_termination =
+      android_webview::Java_JsSandboxIsolate_sendTermination(
+          env, j_isolate_,
+          static_cast<int32_t>(TerminationStatus::kMemoryLimitExceeded),
+          details_str);
+  if (client_got_termination) {
+    // Don't send any evaluation errors - the client will deal with them itself.
+    return;
+  }
+
+  bool client_notified_via_evaluation = false;
+  if (ongoing_evaluation_callbacks_.size() > 0) {
+    // It is safe to erase items from a std::set while iterating through it.
+    auto callback_it = ongoing_evaluation_callbacks_.begin();
+    while (callback_it != ongoing_evaluation_callbacks_.end()) {
+      UseCallback(*callback_it)
+          ->ReportError(
+              JsSandboxIsolateCallback::ErrorType::kMemoryLimitExceeded,
+              details_str);
+      callback_it++;
+    }
+    client_notified_via_evaluation = true;
+  }
+
+  // Some pre-stable clients do not support termination notifications and only
+  // support signaling OOMs via evaluation callbacks. Ensure the client has been
+  // notified through at least one mechanism.
+  CHECK(client_notified_via_evaluation)
+      << "Isolate ran out of memory but the client does not support "
+      << "termination notifications and there are no ongoing evaluations "
+      << "through which to signal an error.";
 }
 
 // Halt thread until process dies.
@@ -699,8 +1006,125 @@ v8::MaybeLocal<v8::ArrayBuffer> JsSandboxIsolate::tryAllocateArrayBuffer(
       isolate_holder_->isolate(), std::move(backing_store)));
 }
 
-static void JNI_JsSandboxIsolate_InitializeEnvironment(JNIEnv* env) {
+// Called from isolate thread.
+void JsSandboxIsolate::EnableOrDisableInspectorAsNeeded() {
+  const bool needed = console_enabled_;
+  const bool already_enabled = bool{inspector_client_};
+
+  if (already_enabled && !needed) {
+    inspector_session_.reset();
+    inspector_channel_.reset();
+    inspector_.reset();
+    inspector_client_.reset();
+  } else if (!already_enabled && needed) {
+    v8::HandleScope handle_scope(isolate_holder_->isolate());
+    v8::Context::Scope scope(context_holder_->context());
+
+    constexpr int context_group_id = 1;
+    inspector_client_ = std::make_unique<InspectorClient>(*this);
+    inspector_ = v8_inspector::V8Inspector::create(isolate_holder_->isolate(),
+                                                   inspector_client_.get());
+    inspector_channel_ =
+        static_cast<std::unique_ptr<v8_inspector::V8Inspector::Channel>>(
+            std::make_unique<NoopInspectorChannel>());
+    inspector_session_ =
+        inspector_->connect(context_group_id, inspector_channel_.get(),
+                            /*state=*/v8_inspector::StringView(),
+                            v8_inspector::V8Inspector::kFullyTrusted,
+                            v8_inspector::V8Inspector::kNotWaitingForDebugger);
+    inspector_->contextCreated(v8_inspector::V8ContextInfo(
+        context_holder_->context(), context_group_id,
+        /*humanReadableName=*/v8_inspector::StringView()));
+  }
+}
+
+// Called from control sequence.
+void JsSandboxIsolate::SetConsoleEnabledOnControlThread(const bool enable) {
+  cancelable_task_tracker_->PostTask(
+      isolate_task_runner_.get(), FROM_HERE,
+      base::BindOnce(&JsSandboxIsolate::SetConsoleEnabledOnIsolateThread,
+                     base::Unretained(this), enable));
+}
+
+// Called from isolate thread.
+void JsSandboxIsolate::SetConsoleEnabledOnIsolateThread(const bool enable) {
+  console_enabled_ = enable;
+  EnableOrDisableInspectorAsNeeded();
+}
+
+const scoped_refptr<JsSandboxIsolateCallback>& JsSandboxIsolate::UseCallback(
+    const scoped_refptr<JsSandboxIsolateCallback>& callback) {
+  const size_t removed = ongoing_evaluation_callbacks_.erase(callback);
+  CHECK_EQ(removed, size_t{1});
+  return callback;
+}
+
+// Called from isolate thread.
+void JsSandboxIsolate::ProvideMessagePortOnIsolateThread(
+    std::string name,
+    const base::android::ScopedJavaGlobalRef<jobject> j_message_port) {
+  v8::Isolate* isolate = isolate_holder_->isolate();
+  v8::HandleScope handle_scope(isolate);
+  v8::Context::Scope context_scope(context_holder_->context());
+
+  android_webview::JsSandboxMessagePort* message_port =
+      JsSandboxMessagePort::Create(this, j_message_port);
+  std::vector<std::unique_ptr<v8::Global<v8::Promise::Resolver>>>
+      resolvers_to_process;
+
+  message_ports_.emplace(name, message_port);
+  auto entry = pending_port_requests_.find(name);
+  if (entry != pending_port_requests_.end()) {
+    resolvers_to_process = std::move(entry->second);
+    pending_port_requests_.erase(entry);
+  }
+
+  for (const auto& resolver_ptr : resolvers_to_process) {
+    v8::Local<v8::Value> v8_message_port =
+        gin::ConvertToV8(isolate, message_port).ToLocalChecked();
+    resolver_ptr->Get(isolate)
+        ->Resolve(context_holder_->context(), v8_message_port)
+        .ToChecked();
+  }
+}
+
+// Called from binder thread
+void JsSandboxIsolate::ProvideMessagePort(
+    std::string name,
+    const base::android::JavaRef<jobject>& j_message_port) {
+  isolate_task_runner_->PostTask(
+      FROM_HERE,
+      base::BindOnce(
+          &JsSandboxIsolate::ProvideMessagePortOnIsolateThread,
+          base::Unretained(this), std::move(name),
+          base::android::ScopedJavaGlobalRef<jobject>(j_message_port)));
+}
+
+// Called from isolate thread
+gin::ContextHolder* JsSandboxIsolate::GetContextHolder() {
+  return context_holder_.get();
+}
+
+v8::Isolate* JsSandboxIsolate::GetIsolate() {
+  return isolate_holder_->isolate();
+}
+
+scoped_refptr<base::SingleThreadTaskRunner>
+JsSandboxIsolate::GetIsolateTaskRunner() {
+  return isolate_task_runner_;
+}
+
+JsSandboxMemoryBudget* JsSandboxIsolate::GetMemoryBudget() {
+  return memory_budget_.get();
+}
+
+static void JNI_JsSandboxIsolate_InitializeEnvironment() {
   base::ThreadPoolInstance::CreateAndStartWithDefaultParams("JsSandboxIsolate");
+#if ICU_UTIL_DATA_IMPL == ICU_UTIL_DATA_FILE
+  // Since we don't go through ContentMain, and we aren't a "browser" process,
+  // we don't get ICU initialized for us, so we must do this ourselves.
+  CHECK(base::i18n::InitializeICU());
+#endif
 #ifdef V8_USE_EXTERNAL_STARTUP_DATA
   gin::V8Initializer::LoadV8Snapshot();
 #endif
@@ -708,13 +1132,15 @@ static void JNI_JsSandboxIsolate_InitializeEnvironment(JNIEnv* env) {
                                  gin::ArrayBufferAllocator::SharedInstance());
 }
 
-static jlong JNI_JsSandboxIsolate_CreateNativeJsSandboxIsolateWrapper(
-    JNIEnv* env,
-    jlong max_heap_size_bytes) {
+static int64_t JNI_JsSandboxIsolate_CreateNativeJsSandboxIsolateWrapper(
+    const base::android::JavaRef<jobject>& j_sandbox_isolate,
+    int64_t max_heap_size_bytes) {
   CHECK_GE(max_heap_size_bytes, 0);
-  JsSandboxIsolate* processor =
-      new JsSandboxIsolate(base::saturated_cast<size_t>(max_heap_size_bytes));
+  JsSandboxIsolate* processor = new JsSandboxIsolate(
+      j_sandbox_isolate, base::saturated_cast<size_t>(max_heap_size_bytes));
   return reinterpret_cast<intptr_t>(processor);
 }
 
 }  // namespace android_webview
+
+DEFINE_JNI(JsSandboxIsolate)

@@ -26,12 +26,15 @@
 #define ABSL_RANDOM_SEED_SEQUENCES_H_
 
 #include <iterator>
+#include <ostream>
 #include <random>
 
 #include "absl/base/config.h"
+#include "absl/base/nullability.h"
 #include "absl/random/internal/salted_seed_seq.h"
 #include "absl/random/internal/seed_material.h"
 #include "absl/random/seed_gen_exception.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 
 namespace absl {
@@ -78,8 +81,7 @@ using SeedSeq = random_internal::SaltedSeedSeq<std::seed_seq>;
 //
 template <typename URBG>
 SeedSeq CreateSeedSeqFrom(URBG* urbg) {
-  SeedSeq::result_type
-      seed_material[random_internal::kEntropyBlocksNeeded];
+  SeedSeq::result_type seed_material[random_internal::kEntropyBlocksNeeded];
 
   if (!random_internal::ReadSeedMaterialFromURBG(
           urbg, absl::MakeSpan(seed_material))) {

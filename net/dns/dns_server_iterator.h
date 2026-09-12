@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include <vector>
 
-#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "net/base/net_export.h"
 #include "net/dns/public/secure_dns_mode.h"
 
@@ -59,11 +59,11 @@ class NET_EXPORT_PRIVATE DnsServerIterator {
   // Servers past their failure limit will only be used once all remaining
   // servers are also past their failure limit.
   int max_failures_;
-  raw_ptr<const ResolveContext> resolve_context_;
+  base::WeakPtr<const ResolveContext> resolve_context_;
   // The first server index to try when GetNextAttemptIndex() is called.
   size_t next_index_;
 
-  raw_ptr<const DnsSession> session_;
+  base::WeakPtr<const DnsSession> session_;
 };
 
 // Iterator used to get the next server to try for a DoH transaction.
@@ -151,6 +151,35 @@ class NET_EXPORT_PRIVATE ClassicDnsServerIterator : public DnsServerIterator {
   // Return true if any servers in the list still has attempts available.
   // False otherwise. An attempt is possible if any server is under
   // max_times_returned_ tries.
+  bool AttemptAvailable() override;
+};
+
+// Iterator that can be used when the query is sent via APIs that do not allow
+// controlling the underlying DNS server used. For example, this is the case for
+// DnsTransactionFactory::AttemptMode::kPlatform on Android.
+// In this scenario, we want to limit the number of attempts for each query to
+// `max_attempts`: calling GetNextAttemptIndex increments the attempt count,
+// and AttemptAvailable will return false once `max_attempts` is reached.
+class NET_EXPORT_PRIVATE PlatformDnsServerIterator : public DnsServerIterator {
+ public:
+  explicit PlatformDnsServerIterator(int max_attempts)
+      : DnsServerIterator(/*nameservers_size=*/1,
+                          /*starting_index=*/0,
+                          /*max_times_returned=*/max_attempts,
+                          /*max_failures=*/0,
+                          /*resolve_context=*/nullptr,
+                          /*session=*/nullptr) {}
+
+  ~PlatformDnsServerIterator() override = default;
+
+  // Not copy or moveable.
+  PlatformDnsServerIterator(const PlatformDnsServerIterator&) = delete;
+  PlatformDnsServerIterator& operator=(const PlatformDnsServerIterator&) =
+      delete;
+  PlatformDnsServerIterator(PlatformDnsServerIterator&&) = delete;
+
+  // DnsServerIterator methods:
+  size_t GetNextAttemptIndex() override;
   bool AttemptAvailable() override;
 };
 

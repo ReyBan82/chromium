@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/callback_list.h"
@@ -15,19 +16,18 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece.h"
 #include "build/build_config.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/policy/core/common/policy_service.h"
 #include "components/prefs/pref_change_registrar.h"
-#include "url/gurl.h"
+
+class GURL;
 
 namespace user_prefs {
 class PrefRegistrySyncable;
 }  // namespace user_prefs
 
 class PrefService;
-class Profile;
 
 namespace browser_switcher {
 
@@ -39,10 +39,10 @@ class NoCopyUrl {
   explicit NoCopyUrl(const GURL& original);
   NoCopyUrl(const NoCopyUrl&) = delete;
 
-  const GURL& original() const { return *original_; }
-  base::StringPiece host_and_port() const { return host_and_port_; }
-  base::StringPiece spec() const { return original_->spec(); }
-  base::StringPiece spec_without_port() const { return spec_without_port_; }
+  const GURL& original() const;
+  std::string_view host_and_port() const;
+  std::string_view spec() const;
+  std::string_view spec_without_port() const;
 
  private:
   const raw_ref<const GURL> original_;
@@ -72,7 +72,7 @@ struct RawRuleSet {
 // canonicalization.
 class Rule {
  public:
-  explicit Rule(base::StringPiece original_rule);
+  explicit Rule(std::string_view original_rule);
   virtual ~Rule() = default;
 
   // Returns true if |no_copy_url| matches this rule. Ignores the value of
@@ -135,7 +135,8 @@ class BrowserSwitcherPrefs : public KeyedService,
 
   BrowserSwitcherPrefs() = delete;
 
-  explicit BrowserSwitcherPrefs(Profile* profile);
+  BrowserSwitcherPrefs(PrefService* prefs,
+                       policy::PolicyService* policy_service);
 
   BrowserSwitcherPrefs(const BrowserSwitcherPrefs&) = delete;
   BrowserSwitcherPrefs& operator=(const BrowserSwitcherPrefs&) = delete;
@@ -216,11 +217,6 @@ class BrowserSwitcherPrefs : public KeyedService,
   base::CallbackListSubscription RegisterPrefsChangedCallback(
       PrefsChangedCallback cb);
 
- protected:
-  // For internal use and testing.
-  BrowserSwitcherPrefs(PrefService* prefs,
-                       policy::PolicyService* policy_service);
-
  private:
   void RunCallbacksIfDirty();
   void MarkDirty(const std::string& pref_name);
@@ -243,7 +239,7 @@ class BrowserSwitcherPrefs : public KeyedService,
   // pref on the same registrar.
 
   // Listens on *some* prefs, to apply a filter to them
-  // (e.g. convert Value::List => vector<string>).
+  // (e.g. convert base::ListValue => vector<string>).
   PrefChangeRegistrar filtering_change_registrar_;
 
   // Listens on *all* BrowserSwitcher prefs, to notify observers when prefs

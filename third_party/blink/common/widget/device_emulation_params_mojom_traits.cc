@@ -16,14 +16,18 @@ bool StructTraits<blink::mojom::DeviceEmulationParamsDataView,
       !data.ReadViewPosition(&out->view_position) ||
       !data.ReadViewSize(&out->view_size) ||
       !data.ReadViewportOffset(&out->viewport_offset) ||
-      !data.ReadWindowSegments(&out->window_segments))
+      !data.ReadViewportSegments(&out->viewport_segments) ||
+      !data.ReadDevicePosture(&out->device_posture)) {
     return false;
+  }
   out->screen_type = data.screen_type();
   out->device_scale_factor = data.device_scale_factor();
   out->scale = data.scale();
   out->viewport_scale = data.viewport_scale();
   out->screen_orientation_type = data.screen_orientation_type();
   out->screen_orientation_angle = data.screen_orientation_angle();
+  out->force_android_overlay_scrollbar = data.force_android_overlay_scrollbar();
+  out->force_viewport_meta = data.force_viewport_meta();
   return true;
 }
 

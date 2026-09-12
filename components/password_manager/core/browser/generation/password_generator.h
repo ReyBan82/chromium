@@ -5,8 +5,9 @@
 #ifndef COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_GENERATION_PASSWORD_GENERATOR_H_
 #define COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_GENERATION_PASSWORD_GENERATOR_H_
 
-#include <string>
+#include <stdint.h>
 
+#include <string>
 
 namespace autofill {
 
@@ -18,6 +19,12 @@ class PasswordRequirementsSpec;
 void ConditionallyAddNumericDigitsToAlphabet(PasswordRequirementsSpec* spec);
 
 extern const uint32_t kDefaultPasswordLength;
+
+// Ensures that `spec` is a valid spec that the crowdsourcing server can
+// produce. If not, replaces it with an empty spec. Intended to be applied to
+// any spec received from the network before it is passed to GeneratePassword().
+PasswordRequirementsSpec SanitizeRequirementsSpec(
+    const PasswordRequirementsSpec& spec);
 
 // Returns a password that follows the |spec| as well as possible. If this is
 // impossible, a password that nearly meets the requirements can be returned.

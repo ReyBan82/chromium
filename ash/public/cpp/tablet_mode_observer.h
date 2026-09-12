@@ -6,26 +6,15 @@
 #define ASH_PUBLIC_CPP_TABLET_MODE_OBSERVER_H_
 
 #include "ash/public/cpp/ash_public_export.h"
+#include "base/observer_list_types.h"
 
 namespace ash {
 
 // Used to observe tablet mode changes inside ash. Exported for tests.
-class ASH_PUBLIC_EXPORT TabletModeObserver {
+// Note: If you want to observe the tablet mode change on display, use
+// display::DisplayObserver::OnDisplayTabletStateChanged().
+class ASH_PUBLIC_EXPORT TabletModeObserver : public base::CheckedObserver {
  public:
-  // Called when the tablet mode is about to start.
-  virtual void OnTabletModeStarting() {}
-
-  // Called when the tablet mode has started. Windows might still be animating
-  // though.
-  virtual void OnTabletModeStarted() {}
-
-  // Called when the tablet mode is about to end.
-  virtual void OnTabletModeEnding() {}
-
-  // Called when the tablet mode has ended. Windows may still be animating but
-  // have been restored.
-  virtual void OnTabletModeEnded() {}
-
   // Called when tablet mode blocks or unblocks events. This usually matches,
   // exiting or entering tablet mode, except when an external mouse is
   // connected.
@@ -37,13 +26,13 @@ class ASH_PUBLIC_EXPORT TabletModeObserver {
 
   // Called when the tablet physical state of the device changes (e.g. due to
   // lid angle changes, device attached/detached from base, ... etc.). It's
-  // called before any notifications of UI changes (such as OnTabletModeStarted,
-  // OnTabletModeEnded, ... etc.) that are results of this physical state
-  // change.
+  // called before any notifications of UI changes (such as
+  // display::DisplayObserver::OnDisplayTabletStateChanged etc.) that are
+  // results of this physical state change.
   virtual void OnTabletPhysicalStateChanged() {}
 
  protected:
-  virtual ~TabletModeObserver() = default;
+  ~TabletModeObserver() override = default;
 };
 
 }  // namespace ash

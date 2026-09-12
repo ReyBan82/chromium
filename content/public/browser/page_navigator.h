@@ -9,21 +9,20 @@
 #ifndef CONTENT_PUBLIC_BROWSER_PAGE_NAVIGATOR_H_
 #define CONTENT_PUBLIC_BROWSER_PAGE_NAVIGATOR_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/child_process_host.h"
+#include "content/public/browser/frame_tree_node_id.h"
 #include "content/public/browser/global_request_id.h"
+#include "content/public/browser/initiator_navigation_state.h"
 #include "content/public/browser/reload_type.h"
-#include "content/public/browser/render_frame_host.h"
-#include "content/public/browser/site_instance.h"
 #include "content/public/common/referrer.h"
-#include "ipc/ipc_message.h"
-#include "services/network/public/cpp/resource_request_body.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/blink/public/common/navigation/impression.h"
+#include "ipc/constants.mojom-forward.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "third_party/blink/public/mojom/frame/triggering_event_info.mojom-shared.h"
 #include "ui/base/page_transition_types.h"
@@ -31,12 +30,14 @@
 #include "url/gurl.h"
 
 namespace network {
+class ResourceRequestBody;
 class SharedURLLoaderFactory;
 }
 
 namespace content {
 
 class NavigationHandle;
+class SiteInstance;
 class WebContents;
 
 struct CONTENT_EXPORT OpenURLParams {
@@ -53,7 +54,7 @@ struct CONTENT_EXPORT OpenURLParams {
                 bool started_from_context_menu);
   OpenURLParams(const GURL& url,
                 const Referrer& referrer,
-                int frame_tree_node_id,
+                FrameTreeNodeId frame_tree_node_id,
                 WindowOpenDisposition disposition,
                 ui::PageTransition transition,
                 bool is_renderer_initiated);
@@ -64,6 +65,15 @@ struct CONTENT_EXPORT OpenURLParams {
   // (URL, referrer, initiator, etc.) with OpenURLParams equivalents and 2) fill
   // in reasonable defaults for other properties (like WindowOpenDisposition).
   static OpenURLParams FromNavigationHandle(NavigationHandle* handle);
+
+  // Creates OpenURLParams for a browser-initiated navigation.
+  static OpenURLParams CreateBrowserInitiated(
+      const GURL& url,
+      WindowOpenDisposition disposition,
+      ui::PageTransition transition,
+      const Referrer& referrer = Referrer(),
+      bool started_from_context_menu = false,
+      FrameTreeNodeId frame_tree_node_id = FrameTreeNodeId());
 
 #if DCHECK_IS_ON()
   // Returns true if the contents of this struct are considered valid and
@@ -81,7 +91,7 @@ struct CONTENT_EXPORT OpenURLParams {
   // drop), and the frame with the corresponding token may have been deleted
   // before the navigation begins. This parameter is defined if and only if
   // |initiator_process_id| below is.
-  absl::optional<blink::LocalFrameToken> initiator_frame_token;
+  std::optional<blink::LocalFrameToken> initiator_frame_token;
 
   // ID of the renderer process of the RenderFrameHost that initiated the
   // navigation. This is defined if and only if |initiator_frame_token| above
@@ -89,11 +99,18 @@ struct CONTENT_EXPORT OpenURLParams {
   int initiator_process_id = ChildProcessHost::kInvalidUniqueID;
 
   // The origin of the initiator of the navigation.
-  absl::optional<url::Origin> initiator_origin;
+  std::optional<url::Origin> initiator_origin;
 
   // The base url of the initiator of the navigation. This will be non-null only
   // if the navigation is about:blank or about:srcdoc.
-  absl::optional<GURL> initiator_base_url;
+  std::optional<GURL> initiator_base_url;
+
+  // A record of the state of the navigation initiator.
+  scoped_refptr<InitiatorNavigationState> initiator_navigation_state;
+
+  // Whether the web security policies of the initiator should be inherited when
+  // navigating to a local scheme.
+  bool should_ignore_initiator_policies_for_inheritance = false;
 
   // SiteInstance of the frame that initiated the navigation or null if we
   // don't know it.
@@ -110,12 +127,12 @@ struct CONTENT_EXPORT OpenURLParams {
   // is terminated by \r\n.  May be empty if no extra headers are needed.
   std::string extra_headers;
 
-  // The browser-global FrameTreeNode ID or RenderFrameHost::kNoFrameTreeNodeId
-  // to indicate the main frame.
-  int frame_tree_node_id = RenderFrameHost::kNoFrameTreeNodeId;
+  // The browser-global FrameTreeNode ID for the frame to navigate, or the
+  // default-constructed invalid value to indicate the main frame.
+  FrameTreeNodeId frame_tree_node_id;
 
   // Routing id of the source RenderFrameHost.
-  int source_render_frame_id = MSG_ROUTING_NONE;
+  int source_render_frame_id = IPC::mojom::kRoutingIdNone;
 
   // Process id of the source RenderFrameHost.
   int source_render_process_id = ChildProcessHost::kInvalidUniqueID;
@@ -137,6 +154,9 @@ struct CONTENT_EXPORT OpenURLParams {
   // gesture if the navigation was initiated by the renderer.
   bool user_gesture;
 
+  // Indicates whether this navigation was started by an ad.
+  bool started_by_ad = false;
+
   // Whether the call to OpenURL was triggered by an Event, and what the
   // isTrusted flag of the event was.
   blink::mojom::TriggeringEventInfo triggering_event_info =
@@ -148,9 +168,9 @@ struct CONTENT_EXPORT OpenURLParams {
   // Optional URLLoaderFactory to facilitate navigation to a blob URL.
   scoped_refptr<network::SharedURLLoaderFactory> blob_url_loader_factory;
 
-  // Indicates that the navigation should happen in an app window if
-  // possible, i.e. if an app for the URL is installed.
-  bool open_app_window_if_possible = false;
+  // Indicates that this is a service worker openWindow() call targeting a new
+  // window.
+  bool is_service_worker_open_window = false;
 
   // If this navigation was initiated from a link that specified the
   // hrefTranslate attribute, this contains the attribute's value (a BCP47
@@ -160,24 +180,61 @@ struct CONTENT_EXPORT OpenURLParams {
   // Indicates if this navigation is a reload.
   ReloadType reload_type = ReloadType::NONE;
 
-  // Optional impression associated with this navigation. Only set on
-  // navigations that originate from links with impression attributes. Used for
-  // conversion measurement.
-  absl::optional<blink::Impression> impression;
-
   // Indicates that this navigation is for PDF content in a renderer.
   bool is_pdf = false;
+
+  // True if the initiator explicitly asked for opener relationships to be
+  // preserved, via rel="opener".
+  bool has_rel_opener = false;
+
+  // A text fragment selector (that uses the syntax defined in
+  // https://wicg.github.io/scroll-to-text-fragment/#syntax) to scroll the
+  // matched text into the viewport without applying the standard highlight
+  // styling.
+  //
+  // This is intended for features that synchronize scroll state across devices
+  // or browser sessions (e.g., Chrome's Send Tab To Self). It is used instead
+  // of the standard blink::PageState restoration mechanism because PageState
+  // relies on layout-dependent pixel offsets. Pixel offsets do not translate
+  // well across vastly different form factors and viewport sizes (e.g., moving
+  // from mobile to desktop). A text fragment anchors to the content itself,
+  // making it robust against these layout differences.
+  //
+  // It is passed internally rather than appending `#:~:text=` to the URL
+  // because modifying the visible URL with arbitrary fragment strings can
+  // confuse users. Furthermore, standard URL text fragments apply a default
+  // visual highlight to the text, which is jarring when the user simply
+  // expects their previous scroll position to be restored.
+  //
+  // Usage of this parameter should be restricted to browser-initiated
+  // navigations. It must not be initiated from untrusted web content or
+  // arbitrary third-party apps, as allowing invisible, programmatic scrolling
+  // to arbitrary text on a page could introduce security risks (e.g.,
+  // clickjacking).
+  //
+  // SECURITY NOTE: Because this payload may originate from a potentially
+  // compromised remote client, the privileged browser process must treat it
+  // as an opaque string. It should never be parsed or evaluated in the
+  // browser process, and must only be parsed by the sandboxed renderer.
+  std::optional<std::string> internal_scroll_to_text_fragment;
 };
 
 class PageNavigator {
  public:
-  virtual ~PageNavigator() {}
+  virtual ~PageNavigator() = default;
 
-  // Opens a URL with the given disposition.  The transition specifies how this
-  // navigation should be recorded in the history system (for example, typed).
-  // Returns the WebContents the URL is opened in, or nullptr if the URL wasn't
-  // opened immediately.
-  virtual WebContents* OpenURL(const OpenURLParams& params) = 0;
+  // Opens a URL using parameters from `params`.
+  // Returns:
+  //    * A pointer to the WebContents object where the URL is opened.
+  //    * nullptr if the URL could not be opened immediately.
+  //
+  // If a `navigation_handle_callback` function is provided, it should be called
+  // with the pending navigation (if any) when the navigation handle become
+  // available. This allows callers to observe or attach their specific data.
+  // This function may not be called if the navigation fails for any reason.
+  virtual WebContents* OpenURL(const OpenURLParams& params,
+                               base::OnceCallback<void(NavigationHandle&)>
+                                   navigation_handle_callback) = 0;
 };
 
 }  // namespace content

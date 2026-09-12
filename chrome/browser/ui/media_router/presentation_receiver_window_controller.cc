@@ -10,6 +10,7 @@
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_destroyer.h"
 #include "chrome/browser/ui/media_router/presentation_receiver_window.h"
@@ -143,15 +144,27 @@ void PresentationReceiverWindowController::OnProfileWillBeDestroyed(
 
 void PresentationReceiverWindowController::DidStartNavigation(
     content::NavigationHandle* handle) {
-  if (!navigation_policy_.AllowNavigation(handle))
-    Terminate();
+  if (!navigation_policy_.AllowNavigation(handle)) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&PresentationReceiverWindowController::StopAndTerminate,
+                       weak_factory_.GetWeakPtr()));
+  }
+}
+
+void PresentationReceiverWindowController::StopAndTerminate() {
+  if (web_contents_) {
+    web_contents_->Stop();
+  }
+  Terminate();
 }
 
 void PresentationReceiverWindowController::TitleWasSet(
     content::NavigationEntry* entry) {
   window_->UpdateWindowTitle();
-  if (entry)
+  if (entry) {
     title_change_callback_.Run(base::UTF16ToUTF8(entry->GetTitle()));
+  }
 }
 
 void PresentationReceiverWindowController::NavigationStateChanged(
@@ -171,7 +184,7 @@ bool PresentationReceiverWindowController::ShouldSuppressDialogs(
   DCHECK_EQ(web_contents_.get(), source);
   // Suppress all because there is no possible direct user interaction with
   // dialogs.
-  // TODO(https://crbug.com/734191): This does not suppress window.print().
+  // TODO(crbug.com/40526231): This does not suppress window.print().
   return true;
 }
 
@@ -185,7 +198,8 @@ bool PresentationReceiverWindowController::ShouldFocusLocationBarByDefault(
   return true;
 }
 
-bool PresentationReceiverWindowController::ShouldFocusPageAfterCrash() {
+bool PresentationReceiverWindowController::ShouldFocusPageAfterCrash(
+    content::WebContents* source) {
   // Never focus the page after a crash.
   return false;
 }
@@ -199,6 +213,7 @@ void PresentationReceiverWindowController::CanDownload(
 }
 
 bool PresentationReceiverWindowController::IsWebContentsCreationOverridden(
+    content::RenderFrameHost* opener,
     content::SiteInstance* source_site_instance,
     content::mojom::WindowContainerType window_container_type,
     const GURL& opener_url,

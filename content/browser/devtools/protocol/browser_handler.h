@@ -7,16 +7,22 @@
 
 #include <map>
 
+#include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram.h"
+#include "base/types/optional_ref.h"
 #include "components/download/public/common/download_item.h"
 #include "content/browser/devtools/protocol/browser.h"
 #include "content/browser/devtools/protocol/devtools_domain_handler.h"
+#include "content/browser/devtools/protocol/devtools_download_manager_delegate.h"
 
 namespace content {
 
 class BrowserContext;
+class DevToolsAgentHostImpl;
 class FrameTreeNode;
+class MockCaptureDeviceController;
 
 namespace protocol {
 
@@ -32,7 +38,7 @@ class BrowserHandler : public DevToolsDomainHandler,
   ~BrowserHandler() override;
 
   static Response FindBrowserContext(
-      const Maybe<std::string>& browser_context_id,
+      const std::optional<std::string>& browser_context_id,
       BrowserContext** browser_context);
 
   static std::vector<BrowserHandler*> ForAgentHost(DevToolsAgentHostImpl* host);
@@ -49,45 +55,59 @@ class BrowserHandler : public DevToolsDomainHandler,
                       std::string* js_version) override;
 
   Response GetHistograms(
-      Maybe<std::string> in_query,
-      Maybe<bool> in_delta,
+      std::optional<std::string> in_query,
+      std::optional<bool> in_delta,
       std::unique_ptr<Array<Browser::Histogram>>* histograms) override;
 
   Response GetHistogram(
       const std::string& in_name,
-      Maybe<bool> in_delta,
+      std::optional<bool> in_delta,
       std::unique_ptr<Browser::Histogram>* out_histogram) override;
 
   Response GetBrowserCommandLine(
       std::unique_ptr<protocol::Array<std::string>>* arguments) override;
 
-  Response SetPermission(
+  Response AddMockCamera(const std::string& device_id) override;
+
+  void SetPermission(
       std::unique_ptr<protocol::Browser::PermissionDescriptor> permission,
       const protocol::Browser::PermissionSetting& setting,
-      Maybe<std::string> origin,
-      Maybe<std::string> browser_context_id) override;
+      std::optional<std::string> origin,
+      std::optional<std::string> embedded_origin,
+      std::optional<std::string> browser_context_id,
+      std::unique_ptr<protocol::Browser::Backend::SetPermissionCallback>
+          callback) override;
 
-  Response GrantPermissions(
+  void GrantPermissions(
       std::unique_ptr<protocol::Array<protocol::Browser::PermissionType>>
           permissions,
-      Maybe<std::string> origin,
-      Maybe<std::string> browser_context_id) override;
+      std::optional<std::string> origin,
+      std::optional<std::string> browser_context_id,
+      std::unique_ptr<protocol::Browser::Backend::GrantPermissionsCallback>
+          callback) override;
 
-  Response ResetPermissions(Maybe<std::string> browser_context_id) override;
+  void ResetPermissions(
+      std::optional<std::string> browser_context_id,
+      std::unique_ptr<protocol::Browser::Backend::ResetPermissionsCallback>
+          callback) override;
 
   Response SetDownloadBehavior(const std::string& behavior,
-                               Maybe<std::string> browser_context_id,
-                               Maybe<std::string> download_path,
-                               Maybe<bool> events_enabled) override;
+                               std::optional<std::string> browser_context_id,
+                               std::optional<std::string> download_path,
+                               std::optional<bool> events_enabled) override;
   Response DoSetDownloadBehavior(const std::string& behavior,
                                  BrowserContext* browser_context,
-                                 Maybe<std::string> download_path);
+                                 std::optional<std::string> download_path);
 
-  Response CancelDownload(const std::string& guid,
-                          Maybe<std::string> browser_context_id) override;
+  Response CancelDownload(
+      const std::string& guid,
+      std::optional<std::string> browser_context_id) override;
 
   Response Crash() override;
   Response CrashGpuProcess() override;
+
+  Response GetGlobalPrivacyControl(bool* out_gpc) override;
+  Response SetGlobalPrivacyControl(bool in_gpc, bool* out_gpc) override;
 
   // DownloadItem::Observer overrides
   void OnDownloadUpdated(download::DownloadItem* item) override;
@@ -96,6 +116,10 @@ class BrowserHandler : public DevToolsDomainHandler,
   void DownloadWillBegin(FrameTreeNode* ftn, download::DownloadItem* item);
 
  private:
+  // Adds the `browser_context_id` to contexts_with_overridden_permissions_.
+  void UpdateContextsWithOverriddenPermissions(
+      base::optional_ref<const std::string> browser_context_id);
+
   void SetDownloadEventsEnabled(bool enabled);
 
   // Retrieves the data for the given histogram, returning it in the converted
@@ -108,13 +132,21 @@ class BrowserHandler : public DevToolsDomainHandler,
 
   std::unique_ptr<Browser::Frontend> frontend_;
   base::flat_set<std::string> contexts_with_overridden_permissions_;
-  base::flat_set<std::string> contexts_with_overridden_downloads_;
+  base::flat_map<
+      std::string,
+      DevToolsDownloadManagerDelegate::DownloadBehaviorOverrideHandle>
+      download_behavior_overrides_;
   bool download_events_enabled_;
   const bool allow_set_download_behavior_;
-  base::flat_set<download::DownloadItem*> pending_downloads_;
+  base::flat_set<raw_ptr<download::DownloadItem, CtnExperimental>>
+      pending_downloads_;
   // Stores past histogram snapshots for producing histogram deltas.
-  std::map<std::string, std::unique_ptr<base::HistogramSamples>>
+  std::map<std::string, std::unique_ptr<base::HistogramSamples>, std::less<>>
       histograms_snapshots_;
+
+  std::unique_ptr<MockCaptureDeviceController> mock_capture_device_controller_;
+
+  base::WeakPtrFactory<BrowserHandler> weak_ptr_factory_{this};
 };
 
 }  // namespace protocol

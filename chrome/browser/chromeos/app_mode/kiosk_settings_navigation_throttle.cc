@@ -4,33 +4,60 @@
 
 #include "chrome/browser/chromeos/app_mode/kiosk_settings_navigation_throttle.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "base/check_is_test.h"
+#include "base/logging.h"
+#include "base/no_destructor.h"
 #include "base/strings/string_util.h"
 #include "chrome/browser/app_mode/app_mode_utils.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_handle.h"
+#include "content/public/browser/navigation_throttle.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_contents_observer.h"
+#include "content/public/browser/web_contents_user_data.h"
 
 namespace chromeos {
 
 namespace {
-// List of pages, which along with their subpages are allowed in kiosk mode.
-KioskSettingsNavigationThrottle::SettingsPage kSettingsPages[] = {
-    {"chrome://os-settings/manageAccessibility", true},
-    {"chrome-extension://mndnfokpggljbaajbnioimlmbfngpief/chromevox/options/"
-     "options.html",
-     false},
-    {"chrome-extension://klbcgckkldhdhonijdbnhhaiedfkllef/", true},
-    {"chrome-extension://gjjabgpgjpampikjhjpfhneeoapjbjaf/", true},
-    {"chrome-extension://dakbfdmgjiabojdgbiljlhgjbokobjpg/", true}};
 
-// This list is used in tests to replace default |kSettingsPages| items.
-std::vector<KioskSettingsNavigationThrottle::SettingsPage>*
+class KioskSettingsWindowObserver
+    : public content::WebContentsObserver,
+      public content::WebContentsUserData<KioskSettingsWindowObserver> {
+ public:
+  ~KioskSettingsWindowObserver() override = default;
+
+  // content::WebContentsObserver:
+  void DidFinishNavigation(
+      content::NavigationHandle* navigation_handle) override {
+    if (navigation_handle->IsSameDocument() &&
+        !KioskSettingsNavigationThrottle::IsSettingsPage(
+            navigation_handle->GetURL().spec())) {
+      LOG(WARNING) << "Kiosk: Force closing window "
+                   << navigation_handle->GetURL().spec();
+      web_contents()->ClosePage();
+    }
+  }
+
+ private:
+  explicit KioskSettingsWindowObserver(content::WebContents* contents)
+      : content::WebContentsObserver(contents),
+        content::WebContentsUserData<KioskSettingsWindowObserver>(*contents) {}
+
+  friend class content::WebContentsUserData<KioskSettingsWindowObserver>;
+  WEB_CONTENTS_USER_DATA_KEY_DECL();
+};
+
+WEB_CONTENTS_USER_DATA_KEY_IMPL(KioskSettingsWindowObserver);
+
+// This list is used in tests to override `DefaultSettingsPages`.
+const std::vector<KioskSettingsNavigationThrottle::SettingsPage>*
     g_test_settings_pages = nullptr;
 
-// WebContents that are marked with this UserData key should be restricted.
-const void* const kRestrictedSettingsWindowKey = &kRestrictedSettingsWindowKey;
-
-bool CheckUrlMatchSettingsPage(
+bool UrlMatchesSettingsPage(
     const KioskSettingsNavigationThrottle::SettingsPage& page,
     const std::string& url) {
   return (page.allow_subpages &&
@@ -40,20 +67,50 @@ bool CheckUrlMatchSettingsPage(
          (!page.allow_subpages && url == page.url);
 }
 
+bool hasKioskWindowObserver(content::NavigationHandle& handle) {
+  return KioskSettingsWindowObserver::FromWebContents(
+             handle.GetWebContents()) != nullptr;
+}
+
+void addKioskWindowObserver(content::NavigationHandle& handle) {
+  KioskSettingsWindowObserver::CreateForWebContents(handle.GetWebContents());
+}
+
 }  // namespace
 
 // static
+const std::vector<KioskSettingsNavigationThrottle::SettingsPage>&
+KioskSettingsNavigationThrottle::DefaultSettingsPages() {
+  static base::NoDestructor<std::vector<SettingsPage>> settings_pages{
+      {SettingsPage{"chrome://os-settings/manageAccessibility", true},
+
+       // Allow pages used by 'manageAccessibility'
+       SettingsPage{"chrome://os-settings/textToSpeech", true},
+       SettingsPage{"chrome://os-settings/displayAndMagnification", true},
+       SettingsPage{"chrome://os-settings/keyboardAndTextInput", true},
+       SettingsPage{"chrome://os-settings/cursorAndTouchpad", true},
+       SettingsPage{"chrome://os-settings/audioAndCaptions", true},
+
+       SettingsPage{
+           "chrome-extension://mndnfokpggljbaajbnioimlmbfngpief/chromevox/"
+           "options/options.html",
+           false},
+       SettingsPage{"chrome-extension://klbcgckkldhdhonijdbnhhaiedfkllef/",
+                    true},
+       SettingsPage{"chrome-extension://gjjabgpgjpampikjhjpfhneeoapjbjaf/",
+                    true},
+       SettingsPage{"chrome-extension://dakbfdmgjiabojdgbiljlhgjbokobjpg/",
+                    true}}};
+
+  return *settings_pages;
+}
+
+// static
 bool KioskSettingsNavigationThrottle::IsSettingsPage(const std::string& url) {
-  if (g_test_settings_pages) {
-    for (auto& page : *g_test_settings_pages) {
-      if (CheckUrlMatchSettingsPage(page, url)) {
-        return true;
-      }
-    }
-    return false;
-  }
-  for (auto& page : kSettingsPages) {
-    if (CheckUrlMatchSettingsPage(page, url)) {
+  auto& pages = g_test_settings_pages != nullptr ? *g_test_settings_pages
+                                                 : DefaultSettingsPages();
+  for (auto& page : pages) {
+    if (UrlMatchesSettingsPage(page, url)) {
       return true;
     }
   }
@@ -62,39 +119,40 @@ bool KioskSettingsNavigationThrottle::IsSettingsPage(const std::string& url) {
 
 // static
 void KioskSettingsNavigationThrottle::SetSettingPagesForTesting(
-    std::vector<SettingsPage>* pages) {
+    const std::vector<SettingsPage>* pages) {
+  CHECK_IS_TEST();
   g_test_settings_pages = pages;
 }
 
 // static
-std::unique_ptr<content::NavigationThrottle>
-KioskSettingsNavigationThrottle::MaybeCreateThrottleFor(
-    content::NavigationHandle* handle) {
+void KioskSettingsNavigationThrottle::MaybeCreateAndAdd(
+    content::NavigationThrottleRegistry& registry) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   // Kiosk check.
-  if (!chrome::IsRunningInForcedAppMode()) {
-    return nullptr;
+  if (!IsRunningInForcedAppMode()) {
+    return;
   }
-  // If the web contents were previously marked as restricted, attach a throttle
-  // to it.
-  if (handle->GetWebContents()->GetUserData(kRestrictedSettingsWindowKey)) {
-    return std::make_unique<KioskSettingsNavigationThrottle>(handle);
+
+  content::NavigationHandle& handle = registry.GetNavigationHandle();
+
+  // If this is a settings page, observe all navigation.
+  if (IsSettingsPage(handle.GetURL().spec())) {
+    if (!hasKioskWindowObserver(handle)) {
+      addKioskWindowObserver(handle);
+    }
   }
-  // Otherwise, check whether the navigated to url is a settings page, and if
-  // so, mark it.
-  if (IsSettingsPage(handle->GetURL().spec())) {
-    handle->GetWebContents()->SetUserData(
-        kRestrictedSettingsWindowKey,
-        std::make_unique<content::WebContents::Data>());
-    return std::make_unique<KioskSettingsNavigationThrottle>(handle);
+
+  // If we are observing this page, attach a throttle to it.
+  if (hasKioskWindowObserver(handle)) {
+    registry.AddThrottle(
+        std::make_unique<KioskSettingsNavigationThrottle>(registry));
   }
-  return nullptr;
 }
 
 KioskSettingsNavigationThrottle::KioskSettingsNavigationThrottle(
-    content::NavigationHandle* handle)
-    : content::NavigationThrottle(handle) {}
+    content::NavigationThrottleRegistry& registry)
+    : content::NavigationThrottle(registry) {}
 
 KioskSettingsNavigationThrottle::ThrottleCheckResult
 KioskSettingsNavigationThrottle::WillStartRequest() {

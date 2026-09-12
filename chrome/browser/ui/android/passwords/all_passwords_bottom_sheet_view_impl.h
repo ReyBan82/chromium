@@ -31,17 +31,15 @@ class AllPasswordsBottomSheetViewImpl : public AllPasswordsBottomSheetView {
   ~AllPasswordsBottomSheetViewImpl() override;
 
   // AllPasswordsBottomSheetView:
-  void Show(const std::vector<std::unique_ptr<password_manager::PasswordForm>>&
-                credentials,
+  void Show(const std::vector<password_manager::PasswordForm>& credentials,
             autofill::mojom::FocusedFieldType focused_field_type) override;
 
   // Invoked in case the user chooses an entry from the credential list
   // presented to them.
-  void OnCredentialSelected(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jstring>& username,
-      const base::android::JavaParamRef<jstring>& password,
-      jboolean requests_to_fill_password);
+  void OnCredentialSelected(JNIEnv* env,
+                            const std::u16string& username,
+                            const std::u16string& password,
+                            bool requests_to_fill_password);
 
   // Called from Java bridge when user dismisses the BottomSheet.
   // Redirects the call to the controller.

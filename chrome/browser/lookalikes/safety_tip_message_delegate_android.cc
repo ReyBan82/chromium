@@ -7,7 +7,6 @@
 #include "chrome/browser/android/android_theme_resources.h"
 #include "chrome/browser/android/resource_mapper.h"
 #include "chrome/browser/lookalikes/safety_tip_ui_helper.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/messages/android/message_dispatcher_bridge.h"
 #include "components/strings/grit/components_strings.h"
 #include "ui/base/l10n/l10n_util.h"
@@ -44,7 +43,7 @@ void SafetyTipMessageDelegateAndroid::DisplaySafetyTipPrompt(
   message_->SetPrimaryButtonText(
       l10n_util::GetStringUTF16(GetSafetyTipLeaveButtonId(safety_tip_status)));
   message_->SetIconResourceId(ResourceMapper::MapToJavaDrawableId(
-      IDR_ANDROID_INFOBAR_SAFETYTIP_SHIELD));
+      IDR_ANDROID_MESSAGE_SAFETYTIP_SHIELD));
   message_->DisableIconTint();
   message_->SetSecondaryIconResourceId(
       ResourceMapper::MapToJavaDrawableId(IDR_ANDROID_MESSAGE_SETTINGS));

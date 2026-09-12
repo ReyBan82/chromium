@@ -14,7 +14,7 @@
 #include "build/build_config.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_export.h"
 
-namespace WTF {
+namespace blink {
 
 // TOOD(omerkatz): Replace these casts with std::atomic_ref (C++20) once it
 // becomes available.
@@ -33,12 +33,48 @@ ALWAYS_INLINE const std::atomic<T>* AsAtomicPtr(const T* t) {
 // point to buffers of size |bytes|. Note that atomicity is guaranteed only per
 // word/halfword, not for the entire |bytes| bytes as a whole. The function
 // copies elements one by one, so overlapping regions are not supported.
-WTF_EXPORT void AtomicReadMemcpy(void* to, const void* from, size_t bytes);
+// PRECONDITIONS: `to` and `from` must be valid for `bytes` bytes.
+UNSAFE_BUFFER_USAGE WTF_EXPORT void AtomicReadMemcpySlow(void* to,
+                                                         const void* from,
+                                                         size_t bytes);
+
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicReadMemcpy(void* to,
+                                                        const void* from,
+                                                        size_t bytes) {
+  if (bytes == 0) [[unlikely]] {
+    return;
+  }
+#if defined(ARCH_CPU_64_BITS)
+  if (((reinterpret_cast<uintptr_t>(to) | reinterpret_cast<uintptr_t>(from)) &
+       (sizeof(size_t) - 1)) == 0) {
+    if (bytes == sizeof(size_t)) {
+      *reinterpret_cast<size_t*>(to) =
+          AsAtomicPtr(reinterpret_cast<const size_t*>(from))
+              ->load(std::memory_order_relaxed);
+      return;
+    }
+    if (bytes <= 4 * sizeof(size_t) && (bytes & (sizeof(size_t) - 1)) == 0) {
+      size_t* to_ptr = reinterpret_cast<size_t*>(to);
+      const size_t* from_ptr = reinterpret_cast<const size_t*>(from);
+      const size_t count = bytes / sizeof(size_t);
+      for (size_t i = 0; i < count; ++i) {
+        UNSAFE_BUFFERS(to_ptr[i] = AsAtomicPtr(from_ptr + i)
+                                       ->load(std::memory_order_relaxed));
+      }
+      return;
+    }
+  }
+#endif  // defined(ARCH_CPU_64_BITS)
+  AtomicReadMemcpySlow(to, from, bytes);
+}
 
 namespace internal {
 
+// PRECONDITIONS: `to` and `from` must be valid for `bytes` bytes.
 template <size_t bytes, typename AlignmentType>
-ALWAYS_INLINE void AtomicReadMemcpyAligned(void* to, const void* from) {
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicReadMemcpyAligned(
+    void* to,
+    const void* from) {
   static constexpr size_t kAlignment = sizeof(AlignmentType);
 
   DCHECK_EQ(0u, reinterpret_cast<uintptr_t>(to) & (kAlignment - 1));
@@ -55,36 +91,42 @@ ALWAYS_INLINE void AtomicReadMemcpyAligned(void* to, const void* from) {
 
   if constexpr (bytes % kAlignment == 0 && bytes >= kAlignment &&
                 bytes <= 3 * kAlignment) {
-    *reinterpret_cast<AlignmentType*>(to) =
-        AsAtomicPtr(reinterpret_cast<const AlignmentType*>(from))
-            ->load(std::memory_order_relaxed);
+    AlignmentType* aligned_to = reinterpret_cast<AlignmentType*>(to);
+    const auto* aligned_from = reinterpret_cast<const AlignmentType*>(from);
+    *aligned_to = AsAtomicPtr(aligned_from)->load(std::memory_order_relaxed);
     if constexpr (bytes >= 2 * kAlignment) {
-      *(reinterpret_cast<AlignmentType*>(to) + 1) =
-          AsAtomicPtr(reinterpret_cast<const AlignmentType*>(from) + 1)
-              ->load(std::memory_order_relaxed);
+      // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+      UNSAFE_BUFFERS(++aligned_to; ++aligned_from);
+      *aligned_to = AsAtomicPtr(aligned_from)->load(std::memory_order_relaxed);
     }
     if constexpr (bytes == 3 * kAlignment) {
-      *(reinterpret_cast<AlignmentType*>(to) + 2) =
-          AsAtomicPtr(reinterpret_cast<const AlignmentType*>(from) + 2)
-              ->load(std::memory_order_relaxed);
+      // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+      UNSAFE_BUFFERS(++aligned_to; ++aligned_from);
+      *aligned_to = AsAtomicPtr(aligned_from)->load(std::memory_order_relaxed);
     }
   } else {
-    AtomicReadMemcpy(to, from, bytes);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(AtomicReadMemcpy(to, from, bytes));
   }
 }
 
 }  // namespace internal
 
+// PRECONDITIONS: `to` and `from` must be valid for `bytes` bytes.
 template <size_t bytes, size_t alignment>
-ALWAYS_INLINE void AtomicReadMemcpy(void* to, const void* from) {
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicReadMemcpy(void* to,
+                                                        const void* from) {
   static_assert(bytes > 0, "Number of copied bytes should be greater than 0");
-
   if constexpr (alignment == sizeof(size_t)) {
-    internal::AtomicReadMemcpyAligned<bytes, size_t>(to, from);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(internal::AtomicReadMemcpyAligned<bytes, size_t>(to, from));
   } else if constexpr (alignment == sizeof(uint32_t)) {
-    internal::AtomicReadMemcpyAligned<bytes, uint32_t>(to, from);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(
+        internal::AtomicReadMemcpyAligned<bytes, uint32_t>(to, from));
   } else {
-    AtomicReadMemcpy(to, from, bytes);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(AtomicReadMemcpy(to, from, bytes));
   }
 }
 
@@ -93,12 +135,48 @@ ALWAYS_INLINE void AtomicReadMemcpy(void* to, const void* from) {
 // point to buffers of size |bytes|. Note that atomicity is guaranteed only per
 // word/halfword, not for the entire |bytes| bytes as a whole. The function
 // copies elements one by one, so overlapping regions are not supported.
-WTF_EXPORT void AtomicWriteMemcpy(void* to, const void* from, size_t bytes);
+// PRECONDITIONS: `to` and `from` must be valid for `bytes` bytes.
+UNSAFE_BUFFER_USAGE WTF_EXPORT void AtomicWriteMemcpySlow(void* to,
+                                                          const void* from,
+                                                          size_t bytes);
+
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicWriteMemcpy(void* to,
+                                                         const void* from,
+                                                         size_t bytes) {
+  if (bytes == 0) [[unlikely]] {
+    return;
+  }
+#if defined(ARCH_CPU_64_BITS)
+  if (((reinterpret_cast<uintptr_t>(to) | reinterpret_cast<uintptr_t>(from)) &
+       (sizeof(size_t) - 1)) == 0) {
+    if (bytes == sizeof(size_t)) {
+      AsAtomicPtr(reinterpret_cast<size_t*>(to))
+          ->store(*reinterpret_cast<const size_t*>(from),
+                  std::memory_order_relaxed);
+      return;
+    }
+    if (bytes <= 4 * sizeof(size_t) && (bytes & (sizeof(size_t) - 1)) == 0) {
+      size_t* to_ptr = reinterpret_cast<size_t*>(to);
+      const size_t* from_ptr = reinterpret_cast<const size_t*>(from);
+      const size_t count = bytes / sizeof(size_t);
+      for (size_t i = 0; i < count; ++i) {
+        UNSAFE_BUFFERS(AsAtomicPtr(to_ptr + i)
+                           ->store(from_ptr[i], std::memory_order_relaxed));
+      }
+      return;
+    }
+  }
+#endif  // defined(ARCH_CPU_64_BITS)
+  AtomicWriteMemcpySlow(to, from, bytes);
+}
 
 namespace internal {
 
+// PRECONDITIONS: buffers `to` and `from` must have `bytes` size.
 template <size_t bytes, typename AlignmentType>
-ALWAYS_INLINE void AtomicWriteMemcpyAligned(void* to, const void* from) {
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicWriteMemcpyAligned(
+    void* to,
+    const void* from) {
   static constexpr size_t kAlignment = sizeof(AlignmentType);
 
   DCHECK_EQ(0u, reinterpret_cast<uintptr_t>(to) & (kAlignment - 1));
@@ -115,35 +193,42 @@ ALWAYS_INLINE void AtomicWriteMemcpyAligned(void* to, const void* from) {
 
   if constexpr (bytes % kAlignment == 0 && bytes >= kAlignment &&
                 bytes <= 3 * kAlignment) {
-    AsAtomicPtr(reinterpret_cast<AlignmentType*>(to))
-        ->store(*reinterpret_cast<const AlignmentType*>(from),
-                std::memory_order_relaxed);
+    AlignmentType* aligned_to = reinterpret_cast<AlignmentType*>(to);
+    const auto* aligned_from = reinterpret_cast<const AlignmentType*>(from);
+    AsAtomicPtr(aligned_to)->store(*aligned_from, std::memory_order_relaxed);
     if constexpr (bytes >= 2 * kAlignment) {
-      AsAtomicPtr(reinterpret_cast<AlignmentType*>(to) + 1)
-          ->store(*(reinterpret_cast<const AlignmentType*>(from) + 1),
-                  std::memory_order_relaxed);
+      // SAFETY: Required from caller, enforced by UNSAFE_BUFFER_USAGE.
+      UNSAFE_BUFFERS(++aligned_to; ++aligned_from);
+      AsAtomicPtr(aligned_to)->store(*aligned_from, std::memory_order_relaxed);
     }
     if constexpr (bytes == 3 * kAlignment) {
-      AsAtomicPtr(reinterpret_cast<AlignmentType*>(to) + 2)
-          ->store(*(reinterpret_cast<const AlignmentType*>(from) + 2),
-                  std::memory_order_relaxed);
+      // SAFETY: Required from caller, enforced by UNSAFE_BUFFER_USAGE.
+      UNSAFE_BUFFERS(++aligned_to; ++aligned_from);
+      AsAtomicPtr(aligned_to)->store(*aligned_from, std::memory_order_relaxed);
     }
   } else {
-    AtomicWriteMemcpy(to, from, bytes);
+    // SAFETY: Required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(AtomicWriteMemcpy(to, from, bytes));
   }
 }
 
 }  // namespace internal
 
+// PRECONDITIONS: `to` and `from` must be valid for `bytes` bytes.
 template <size_t bytes, size_t alignment>
-ALWAYS_INLINE void AtomicWriteMemcpy(void* to, const void* from) {
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicWriteMemcpy(void* to,
+                                                         const void* from) {
   static_assert(bytes > 0, "Number of copied bytes should be greater than 0");
   if constexpr (alignment == sizeof(size_t)) {
-    internal::AtomicWriteMemcpyAligned<bytes, size_t>(to, from);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(internal::AtomicWriteMemcpyAligned<bytes, size_t>(to, from));
   } else if constexpr (alignment == sizeof(uint32_t)) {
-    internal::AtomicWriteMemcpyAligned<bytes, uint32_t>(to, from);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(
+        internal::AtomicWriteMemcpyAligned<bytes, uint32_t>(to, from));
   } else {
-    AtomicWriteMemcpy(to, from, bytes);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(AtomicWriteMemcpy(to, from, bytes));
   }
 }
 
@@ -151,12 +236,85 @@ ALWAYS_INLINE void AtomicWriteMemcpy(void* to, const void* from) {
 // is size_t-aligned (or halfword-aligned for 64-bit platforms) and points to a
 // buffer of size at least |bytes|. Note that atomicity is guaranteed only per
 // word/halfword, not for the entire |bytes| bytes as a whole.
-WTF_EXPORT void AtomicMemzero(void* buf, size_t bytes);
+// PRECONDITIONS: `buf` must be valid for `bytes` bytes.
+UNSAFE_BUFFER_USAGE WTF_EXPORT void AtomicMemzeroSlow(void* buf, size_t bytes);
+
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicMemzero(void* buf, size_t bytes) {
+  if (bytes == 0) [[unlikely]] {
+    return;
+  }
+#if defined(ARCH_CPU_64_BITS)
+  if ((reinterpret_cast<uintptr_t>(buf) & (sizeof(size_t) - 1)) == 0) {
+    if (bytes == sizeof(size_t)) {
+      AsAtomicPtr(reinterpret_cast<size_t*>(buf))
+          ->store(0, std::memory_order_relaxed);
+      return;
+    }
+    if (bytes <= 4 * sizeof(size_t) && (bytes & (sizeof(size_t) - 1)) == 0) {
+      size_t* ptr = reinterpret_cast<size_t*>(buf);
+      const size_t count = bytes / sizeof(size_t);
+      for (size_t i = 0; i < count; ++i) {
+        UNSAFE_BUFFERS(
+            AsAtomicPtr(ptr + i)->store(0, std::memory_order_relaxed));
+      }
+      return;
+    }
+  }
+#endif  // defined(ARCH_CPU_64_BITS)
+  AtomicMemzeroSlow(buf, bytes);
+}
+
+// Set the range [from, to) of elements of type T to 0 using atomic writes.
+// PRECONDITIONS: `from` and `to` must point within the same allocated buffer
+// with `from` <= `to`.
+template <typename T>
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicMemzero(T* from, T* to) {
+  DCHECK_LE(from, to);
+  if (from == to) [[unlikely]] {
+    return;
+  }
+  if constexpr (sizeof(T) == sizeof(size_t) && alignof(T) >= alignof(size_t)) {
+    const size_t count = static_cast<size_t>(to - from);
+    if (count == 1) [[likely]] {
+      AsAtomicPtr(reinterpret_cast<size_t*>(from))
+          ->store(0, std::memory_order_relaxed);
+      return;
+    }
+    if (count <= 4) {
+      size_t* ptr = reinterpret_cast<size_t*>(from);
+      for (size_t i = 0; i < count; ++i) {
+        UNSAFE_BUFFERS(
+            AsAtomicPtr(ptr + i)->store(0, std::memory_order_relaxed));
+      }
+      return;
+    }
+  } else if constexpr (sizeof(T) == sizeof(uint32_t) &&
+                       alignof(T) >= alignof(uint32_t)) {
+    const size_t count = static_cast<size_t>(to - from);
+    if (count == 1) [[likely]] {
+      AsAtomicPtr(reinterpret_cast<uint32_t*>(from))
+          ->store(0, std::memory_order_relaxed);
+      return;
+    }
+    if (count <= 4) {
+      uint32_t* ptr = reinterpret_cast<uint32_t*>(from);
+      for (size_t i = 0; i < count; ++i) {
+        UNSAFE_BUFFERS(
+            AsAtomicPtr(ptr + i)->store(0, std::memory_order_relaxed));
+      }
+      return;
+    }
+  }
+  // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+  UNSAFE_BUFFERS(
+      AtomicMemzero(static_cast<void*>(from), sizeof(T) * (to - from)));
+}
 
 namespace internal {
 
+// PRECONDITIONS: buffer `buf` must have `bytes` size.
 template <size_t bytes, typename AlignmentType>
-ALWAYS_INLINE void AtomicMemzeroAligned(void* buf) {
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicMemzeroAligned(void* buf) {
   static constexpr size_t kAlignment = sizeof(AlignmentType);
 
   DCHECK_EQ(0u, reinterpret_cast<size_t>(buf) & (kAlignment - 1));
@@ -171,32 +329,37 @@ ALWAYS_INLINE void AtomicMemzeroAligned(void* buf) {
 
   if constexpr (bytes % kAlignment == 0 && bytes >= kAlignment &&
                 bytes <= 3 * kAlignment) {
-    AsAtomicPtr(reinterpret_cast<AlignmentType*>(buf))
-        ->store(0, std::memory_order_relaxed);
+    AlignmentType* aligned_buf = reinterpret_cast<AlignmentType*>(buf);
+    AsAtomicPtr(aligned_buf)->store(0, std::memory_order_relaxed);
     if constexpr (bytes >= 2 * kAlignment) {
-      AsAtomicPtr(reinterpret_cast<AlignmentType*>(buf) + 1)
-          ->store(0, std::memory_order_relaxed);
+      // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+      UNSAFE_BUFFERS(++aligned_buf);
+      AsAtomicPtr(aligned_buf)->store(0, std::memory_order_relaxed);
     }
     if constexpr (bytes == 3 * kAlignment) {
-      AsAtomicPtr(reinterpret_cast<AlignmentType*>(buf) + 2)
-          ->store(0, std::memory_order_relaxed);
+      // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+      UNSAFE_BUFFERS(++aligned_buf);
+      AsAtomicPtr(aligned_buf)->store(0, std::memory_order_relaxed);
     }
   } else {
-    AtomicMemzero(buf, bytes);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(AtomicMemzero(buf, bytes));
   }
 }
 
 }  // namespace internal
 
+// PRECONDITIONS: `buf` must be valid for `bytes` bytes.
 template <size_t bytes, size_t alignment>
-ALWAYS_INLINE void AtomicMemzero(void* buf) {
+UNSAFE_BUFFER_USAGE ALWAYS_INLINE void AtomicMemzero(void* buf) {
   static_assert(bytes > 0, "Number of copied bytes should be greater than 0");
   if constexpr (alignment == sizeof(size_t)) {
     internal::AtomicMemzeroAligned<bytes, size_t>(buf);
   } else if constexpr (alignment == sizeof(uint32_t)) {
     internal::AtomicMemzeroAligned<bytes, uint32_t>(buf);
   } else {
-    AtomicMemzero(buf, bytes);
+    // SAFETY: required from caller, enforced by UNSAFE_BUFFER_USAGE.
+    UNSAFE_BUFFERS(AtomicMemzero(buf, bytes));
   }
 }
 
@@ -208,6 +371,6 @@ ALWAYS_INLINE void AtomicWriteSwap(T& lhs, T& rhs) {
   AsAtomicPtr(&lhs)->store(tmp_val, std::memory_order_relaxed);
 }
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_ATOMIC_OPERATIONS_H_

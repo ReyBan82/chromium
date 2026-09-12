@@ -4,39 +4,34 @@
 
 #include "remoting/base/chromeos_remoting_test_suite.h"
 
+#include "base/base_paths.h"
+#include "base/check.h"
+#include "base/files/file_path.h"
 #include "base/path_service.h"
-#include "base/test/test_suite.h"
-#include "build/chromeos_buildflags.h"
+#include "chromeos/ash/components/test/ash_test_suite.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "ui/aura/env.h"
 #include "ui/base/resource/resource_bundle.h"
-#include "ui/base/ui_base_paths.h"
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "ui/gl/test/gl_surface_test_support.h"
-#endif
+#include "ui/base/resource/resource_scale_factor.h"
 
 namespace remoting {
 
 ChromeOSRemotingTestSuite::ChromeOSRemotingTestSuite(int argc, char** argv)
-    : base::TestSuite(argc, argv) {}
+    : ash::AshTestSuite(argc, argv) {}
 
 ChromeOSRemotingTestSuite::~ChromeOSRemotingTestSuite() = default;
 
 void ChromeOSRemotingTestSuite::Initialize() {
-  base::TestSuite::Initialize();
-  gl::GLSurfaceTestSupport::InitializeOneOff();
-  ui::RegisterPathProvider();
+  ash::AshTestSuite::Initialize();
 
-  base::FilePath ui_test_pak_path;
-  ASSERT_TRUE(base::PathService::Get(ui::UI_TEST_PAK, &ui_test_pak_path));
-  ui::ResourceBundle::InitSharedInstanceWithPakPath(ui_test_pak_path);
-  ui::ResourceBundle::GetSharedInstance().ReloadLocaleResources("en-US");
+  base::FilePath pak_path;
+  CHECK(base::PathService::Get(base::DIR_ASSETS, &pak_path));
+  ui::ResourceBundle::GetSharedInstance().AddDataPackFromPath(
+      pak_path.AppendASCII("remoting_locales").AppendASCII("en-US.pak"),
+      ui::kScaleFactorNone);
 }
 
 void ChromeOSRemotingTestSuite::Shutdown() {
-  ui::ResourceBundle::CleanupSharedInstance();
-  base::TestSuite::Shutdown();
+  ash::AshTestSuite::Shutdown();
 }
 
 }  // namespace remoting

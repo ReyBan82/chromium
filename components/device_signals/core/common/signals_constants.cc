@@ -16,16 +16,16 @@ const char kAgentId[] = "agentId";
 // policy https://chromeenterprise.google/policies/?policy=AllowScreenLock.
 const char kAllowScreenLock[] = "allowScreenLock";
 
+// Name of the signal indicating the state of antivirus software on the
+// device.
+const char kAntivirusState[] = "antivirusState";
+
 // Name of the signal for getting information about the browser version.
 const char kBrowserVersion[] = "browserVersion";
 
 // Name of the signal for getting information about whether a built in
 // dns is enabled on the device.
 const char kBuiltInDnsClientEnabled[] = "builtInDnsClientEnabled";
-
-// Name of the signal for getting information about whether chrome cleanup
-// is enabled on the device.
-const char kChromeCleanupEnabled[] = "chromeCleanupEnabled";
 
 // Name of the signal for getting information about whether users can
 // access other computers from Chrome using Chrome Remote Desktop.
@@ -128,9 +128,15 @@ const char kSiteIsolationEnabled[] = "siteIsolationEnabled";
 // the device.
 const char kSystemDnsServers[] = "systemDnsServers";
 
-// Name of the signal for getting information about whether third party
-// blocking is enabled on the device.
-const char kThirdPartyBlockingEnabled[] = "thirdPartyBlockingEnabled";
+// Name of the signal for the trigger which generated the device signals.
+const char kTrigger[] = "trigger";
+
+// Name of the signal for getting information about the managed user's
+// enrollment domain.
+const char kUserEnrollmentDomain[] = "userEnrollmentDomain";
+
+// Name of the signal for getting information about the iOS vendor ID.
+const char kVendorId[] = "vendorId";
 
 // Name of the signal for getting information about the windows domain
 // the device has joined.

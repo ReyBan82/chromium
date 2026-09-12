@@ -4,8 +4,11 @@
 
 #include "content/browser/devtools/devtools_io_context.h"
 
+#include <array>
+
 #include "base/functional/bind.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "content/browser/blob_storage/chrome_blob_storage_context.h"
 #include "content/browser/devtools/devtools_stream_blob.h"
@@ -43,7 +46,7 @@ DevToolsIOContext::~DevToolsIOContext() = default;
 void DevToolsIOContext::RegisterStream(scoped_refptr<Stream> stream,
                                        const std::string& id) {
   bool inserted = streams_.emplace(id, std::move(stream)).second;
-  DCHECK(inserted);
+  CHECK(inserted, base::NotFatalUntil::M159);
 }
 
 scoped_refptr<DevToolsIOContext::Stream> DevToolsIOContext::GetByHandle(
@@ -63,9 +66,12 @@ void DevToolsIOContext::DiscardAllStreams() {
 
 // static
 bool DevToolsIOContext::IsTextMimeType(const std::string& mime_type) {
-  static const char* kTextMIMETypePrefixes[] = {
-      "text/", "application/x-javascript", "application/json",
-      "application/xml"};
+  static const auto kTextMIMETypePrefixes = std::to_array({
+      "text/",
+      "application/x-javascript",
+      "application/json",
+      "application/xml",
+  });
   for (size_t i = 0; i < std::size(kTextMIMETypePrefixes); ++i) {
     if (base::StartsWith(mime_type, kTextMIMETypePrefixes[i],
                          base::CompareCase::INSENSITIVE_ASCII))

@@ -9,26 +9,28 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/test/base/testing_profile.h"
 
-FakeProfileManager::FakeProfileManager(const base::FilePath& user_data_dir)
-    : ProfileManagerWithoutInit(user_data_dir) {}
+FakeProfileManager::FakeProfileManager(const base::FilePath& user_data_dir,
+                                       bool defer_async_loading)
+    : ProfileManagerWithoutInit(user_data_dir) {
+  if (!defer_async_loading) {
+    UnblockAsyncLoading();
+  }
+}
 
 FakeProfileManager::~FakeProfileManager() = default;
 
 std::unique_ptr<TestingProfile> FakeProfileManager::BuildTestingProfile(
     const base::FilePath& path,
-    Delegate* delegate) {
-  return std::make_unique<TestingProfile>(path, delegate);
+    Delegate* delegate,
+    Profile::CreateMode create_mode) {
+  return std::make_unique<TestingProfile>(path, delegate, create_mode);
 }
 
 std::unique_ptr<Profile> FakeProfileManager::CreateProfileHelper(
     const base::FilePath& path) {
   if (!base::PathExists(path) && !base::CreateDirectory(path))
     return nullptr;
-  auto profile = BuildTestingProfile(path, nullptr);
-  // Add the profile to |profiles_info_|. We need to do this manually, because
-  // TestingProfile does not call OnProfileCreationStarted().
-  OnProfileCreationStarted(profile.get(), Profile::CREATE_MODE_SYNCHRONOUS);
-  return profile;
+  return BuildTestingProfile(path, this, Profile::CreateMode::kSynchronous);
 }
 
 std::unique_ptr<Profile> FakeProfileManager::CreateProfileAsyncHelper(
@@ -39,5 +41,5 @@ std::unique_ptr<Profile> FakeProfileManager::CreateProfileAsyncHelper(
       FROM_HERE,
       base::BindOnce(base::IgnoreResult(&base::CreateDirectory), path));
 
-  return BuildTestingProfile(path, this);
+  return BuildTestingProfile(path, this, Profile::CreateMode::kAsynchronous);
 }

@@ -6,14 +6,14 @@
 
 #include <string>
 
+#include "ash/constants/ash_extension_constants.h"
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/ash/login/ui/login_web_dialog.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/extensions/extension_constants.h"
-#include "chrome/grit/generated_resources.h"
+#include "chrome/browser/ui/ash/login/login_web_dialog.h"
 #include "chrome/grit/locale_settings.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "content/public/browser/browser_thread.h"
 #include "extensions/browser/extension_registry.h"
 #include "ui/base/l10n/l10n_util.h"
@@ -29,8 +29,6 @@ using ::extensions::ExtensionRegistry;
 
 const char kHelpAppFormat[] = "chrome-extension://%s/oobe.html?id=%d";
 
-const char* g_extension_id_for_test = nullptr;
-
 }  // namespace
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -40,7 +38,8 @@ HelpAppLauncher::HelpAppLauncher(gfx::NativeWindow parent_window)
     : parent_window_(parent_window) {}
 
 void HelpAppLauncher::ShowHelpTopic(HelpTopic help_topic_id) {
-  Profile* profile = ProfileHelper::GetSigninProfile();
+  Profile* profile = Profile::FromBrowserContext(
+      BrowserContextHelper::Get()->GetSigninBrowserContext());
   ExtensionRegistry* registry = ExtensionRegistry::Get(profile);
 
   DCHECK(registry);
@@ -48,27 +47,20 @@ void HelpAppLauncher::ShowHelpTopic(HelpTopic help_topic_id) {
     return;
 
   const char* extension_id = extension_misc::kHelpAppExtensionId;
-  if (g_extension_id_for_test && *g_extension_id_for_test != '\0') {
-    extension_id = g_extension_id_for_test;
-  }
 
   GURL url(base::StringPrintf(kHelpAppFormat, extension_id,
                               static_cast<int>(help_topic_id)));
   // HelpApp component extension presents only in official builds so we can
   // show help only when the extensions is installed.
-  if (registry->enabled_extensions().GetByID(url.host()))
+  if (registry->enabled_extensions().GetByID(url.GetHost())) {
     ShowHelpTopicDialog(profile, GURL(url));
-}
-
-// static
-void HelpAppLauncher::SetExtensionIdForTest(const char* extension_id) {
-  g_extension_id_for_test = extension_id;
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // HelpApp, protected:
 
-HelpAppLauncher::~HelpAppLauncher() {}
+HelpAppLauncher::~HelpAppLauncher() = default;
 
 ///////////////////////////////////////////////////////////////////////////////
 // HelpApp, private:

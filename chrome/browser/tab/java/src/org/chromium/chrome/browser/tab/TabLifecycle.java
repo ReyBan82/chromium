@@ -5,10 +5,12 @@
 package org.chromium.chrome.browser.tab;
 
 import org.chromium.build.annotations.MockedInTests;
+import org.chromium.build.annotations.NullMarked;
 
 /**
  */
 @MockedInTests
+@NullMarked
 public interface TabLifecycle {
     /**
      * @return Whether or not this Tab has a live native component.  This will be true prior to
@@ -25,14 +27,12 @@ public interface TabLifecycle {
      * Prepares the tab to be shown. This method is supposed to be called before the tab is
      * displayed. It restores the ContentView if it is not available after the cold start and
      * reloads the tab if its renderer has crashed.
+     *
      * @param type Specifies how the tab was selected.
-     * @param caller The caller of this method.
      */
-    void show(@TabSelectionType int type, int caller);
+    void show(@TabSelectionType int type);
 
-    /**
-     * Triggers the hiding logic for the view backing the tab.
-     */
+    /** Triggers the hiding logic for the view backing the tab. */
     void hide(@TabHidingType int type);
 
     /**
@@ -47,6 +47,15 @@ public interface TabLifecycle {
      */
     void setClosing(boolean closing);
 
+    /** Mark the Tab for closure following an async request received while the tab was detached. */
+    void setDidCloseWhileDetached();
+
+    /**
+     * Returns whether this Tab was closed following an async request received while the tab was
+     * detached.
+     */
+    boolean didCloseWhileDetached();
+
     /**
      * @return Whether or not the tab is hidden.
      */
@@ -54,9 +63,10 @@ public interface TabLifecycle {
 
     /**
      * Cleans up all internal state, destroying any {@link NativePage} or {@link WebContents}
-     * currently associated with this {@link Tab}.  This also destroys the native counterpart
-     * to this class, which means that all subclasses should erase their native pointers after
-     * this method is called.  Once this call is made this {@link Tab} should no longer be used.
+     * currently associated with this {@link Tab}. This also destroys the native counterpart to this
+     * class, which means that all subclasses should erase their native pointers after this method
+     * is called. Once this call is made this {@link Tab} should no longer be used.
      */
-    void destroy();
+    @TabDestroyStatus
+    int destroy();
 }

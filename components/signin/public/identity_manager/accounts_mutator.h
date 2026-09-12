@@ -5,16 +5,20 @@
 #ifndef COMPONENTS_SIGNIN_PUBLIC_IDENTITY_MANAGER_ACCOUNTS_MUTATOR_H_
 #define COMPONENTS_SIGNIN_PUBLIC_IDENTITY_MANAGER_ACCOUNTS_MUTATOR_H_
 
+#include <optional>
 #include <string>
+#include <vector>
 
-#include "build/chromeos_buildflags.h"
 #include "components/signin/public/base/signin_buildflags.h"
+#include "components/signin/public/base/signin_metrics.h"
+#include "components/signin/public/identity_manager/token_binding_info.h"
 
 namespace signin_metrics {
 enum class SourceForRefreshTokenOperation;
 }
 
 struct CoreAccountId;
+class GaiaId;
 
 namespace signin {
 
@@ -33,12 +37,16 @@ class AccountsMutator {
 
   // Updates the information of the account associated with |gaia_id|, first
   // adding that account to the system if it is not known.
+  // Passing `std::nullopt` for `access_point` will not update the access point,
+  // and in particular will not clear it if it was previously set.
   virtual CoreAccountId AddOrUpdateAccount(
-      const std::string& gaia_id,
+      const GaiaId& gaia_id,
       const std::string& email,
       const std::string& refresh_token,
       bool is_under_advanced_protection,
-      signin_metrics::SourceForRefreshTokenOperation source) = 0;
+      std::optional<signin_metrics::AccessPoint> access_point,
+      signin_metrics::SourceForRefreshTokenOperation source,
+      const TokenBindingInfo& info = {}) = 0;
 
   // Updates the information about account identified by |account_id|.
   // If kUnknown is passed, the attribute is not updated.
@@ -73,12 +81,12 @@ class AccountsMutator {
                            const CoreAccountId& account_id) = 0;
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Seeds account into AccountTrackerService. Used by UserSessionManager to
   // manually seed the primary account before credentials are loaded.
-  // TODO(https://crbug.com/1195359): Remove after adding an account cache to
+  // TODO(crbug.com/40176006): Remove after adding an account cache to
   // AccountManagerFacade.
-  virtual CoreAccountId SeedAccountInfo(const std::string& gaia,
+  virtual CoreAccountId SeedAccountInfo(const GaiaId& gaia,
                                         const std::string& email) = 0;
 #endif
 };

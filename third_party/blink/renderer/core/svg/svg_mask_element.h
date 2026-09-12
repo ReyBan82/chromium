@@ -30,11 +30,14 @@ namespace blink {
 
 class SVGAnimatedLength;
 
-class SVGMaskElement final : public SVGElement, public SVGTests {
+class SVGMaskElement final : public SVGElement {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   explicit SVGMaskElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGMaskElement;
+  }
 
   SVGAnimatedLength* x() const { return x_.Get(); }
   SVGAnimatedLength* y() const { return y_.Get(); }
@@ -47,21 +50,29 @@ class SVGMaskElement final : public SVGElement, public SVGTests {
     return mask_content_units_.Get();
   }
 
+  // SVGTests mixin forwarders.
+  SVGStringListTearOff* requiredExtensions();
+  SVGStringListTearOff* systemLanguage();
+
   void Trace(Visitor*) const override;
 
  private:
-  bool IsValid() const override { return SVGTests::IsValid(); }
+  bool IsValid() const override { return !tests_ || tests_->IsValid(); }
 
-  void CollectStyleForPresentationAttribute(
-      const QualifiedName&,
-      const AtomicString&,
-      MutableCSSPropertyValueSet*) override;
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   void ChildrenChanged(const ChildrenChange&) override;
 
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
   bool SelfHasRelativeLengths() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
+  void CollectExtraStyleForPresentationAttribute(
+      HeapVector<CSSPropertyValue, 8>& style) override;
+
+  SVGTests& EnsureSvgTests() const;
 
   Member<SVGAnimatedLength> x_;
   Member<SVGAnimatedLength> y_;
@@ -69,6 +80,7 @@ class SVGMaskElement final : public SVGElement, public SVGTests {
   Member<SVGAnimatedLength> height_;
   Member<SVGAnimatedEnumeration<SVGUnitTypes::SVGUnitType>> mask_units_;
   Member<SVGAnimatedEnumeration<SVGUnitTypes::SVGUnitType>> mask_content_units_;
+  mutable Member<SVGTests> tests_;
 };
 
 }  // namespace blink

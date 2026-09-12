@@ -10,12 +10,13 @@
 #include "content/browser/renderer_host/render_widget_host_view_android.h"
 #include "content/public/common/content_features.h"
 #include "ui/android/view_android.h"
+#include "ui/base/ui_base_features.h"
 
 namespace content {
 
 FlingSchedulerAndroid::FlingSchedulerAndroid(RenderWidgetHostImpl* host)
     : host_(host) {
-  DCHECK(host);
+  CHECK(host, base::NotFatalUntil::M152);
 }
 
 FlingSchedulerAndroid::~FlingSchedulerAndroid() {
@@ -23,8 +24,8 @@ FlingSchedulerAndroid::~FlingSchedulerAndroid() {
 }
 
 void FlingSchedulerAndroid::ScheduleFlingProgress(
-    base::WeakPtr<FlingController> fling_controller) {
-  DCHECK(fling_controller);
+    base::WeakPtr<input::FlingController> fling_controller) {
+  CHECK(fling_controller, base::NotFatalUntil::M152);
   fling_controller_ = fling_controller;
   if (observed_compositor_)
     return;
@@ -49,19 +50,32 @@ void FlingSchedulerAndroid::ScheduleFlingProgress(
 }
 
 void FlingSchedulerAndroid::DidStopFlingingOnBrowser(
-    base::WeakPtr<FlingController> fling_controller) {
-  DCHECK(fling_controller);
+    base::WeakPtr<input::FlingController> fling_controller) {
+  CHECK(fling_controller, base::NotFatalUntil::M152);
   RemoveCompositorTick();
   fling_controller_ = nullptr;
-  host_->DidStopFlinging();
+  host_->GetRenderInputRouter()->DidStopFlinging();
 }
 
-bool FlingSchedulerAndroid::NeedsBeginFrameForFlingProgress() {
+bool FlingSchedulerAndroid::ProgressFlingOnFlingStart() {
   ui::WindowAndroid* window = GetRootWindow();
   // If the root window does not have a Compositor (happens on Android
   // WebView), we'll never receive an OnAnimate call. In this case fall back
   // to BeginFrames coming from the host.
-  return !window || !window->GetCompositor();
+  return window && window->GetCompositor();
+}
+
+bool FlingSchedulerAndroid::ShouldUseMobileFlingCurve() {
+  if (base::FeatureList::IsEnabled(features::kDesktopFlingCurveOnAndroid)) {
+    return false;
+  }
+  return true;
+}
+
+gfx::Vector2dF FlingSchedulerAndroid::GetPixelsPerInch(
+    const gfx::PointF& position_in_screen) {
+  return gfx::Vector2dF(input::kDefaultPixelsPerInch,
+                        input::kDefaultPixelsPerInch);
 }
 
 void FlingSchedulerAndroid::ProgressFlingOnBeginFrameIfneeded(
@@ -150,10 +164,21 @@ void FlingSchedulerAndroid::OnViewAndroidDestroyed() {
   RemoveCompositorTick();
 }
 
-void FlingSchedulerAndroid::OnBeginFrame(base::TimeTicks frame_begin_time) {
-  DCHECK(observed_compositor_);
+void FlingSchedulerAndroid::OnBeginFrame(
+    base::TimeTicks frame_begin_time,
+    base::TimeDelta frame_interval,
+    std::optional<base::TimeTicks> first_coalesced_frame_begin_time) {
+  CHECK(observed_compositor_, base::NotFatalUntil::M152);
   if (fling_controller_)
-    fling_controller_->ProgressFling(frame_begin_time);
+    fling_controller_->ProgressFling(frame_begin_time,
+                                     first_coalesced_frame_begin_time);
+}
+
+void FlingSchedulerAndroid::OnBeginFrameSourceShuttingDown() {
+  if (observed_compositor_) {
+    observed_compositor_->RemoveSimpleBeginFrameObserver(this);
+    observed_compositor_ = nullptr;
+  }
 }
 
 }  // namespace content

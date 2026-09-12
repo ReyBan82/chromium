@@ -6,12 +6,14 @@
 #define COMPONENTS_DOWNLOAD_INTERNAL_BACKGROUND_SERVICE_DOWNLOAD_DRIVER_H_
 
 #include <stddef.h>
+
+#include <optional>
 #include <set>
 #include <string>
 
 #include "components/download/internal/background_service/driver_entry.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 
 namespace base {
 class FilePath;
@@ -106,10 +108,17 @@ class DownloadDriver {
   virtual void Pause(const std::string& guid) = 0;
 
   // Resumes the download
-  virtual void Resume(const std::string& guid) = 0;
+  void Resume(const std::string& guid) { ResumeWithFactory(guid, nullptr); }
+
+  // Resumes a paused/interrupted download while providing a brand new
+  // URLLoaderFactory. Used by clients that need to repopulate the factory
+  // during repreparation.
+  virtual void ResumeWithFactory(
+      const std::string& guid,
+      scoped_refptr<network::SharedURLLoaderFactory> factory) = 0;
 
   // Finds a download record from low level download library.
-  virtual absl::optional<DriverEntry> Find(const std::string& guid) = 0;
+  virtual std::optional<DriverEntry> Find(const std::string& guid) = 0;
 
   // Called to query the current set of active downloads.  This doesn't
   // necessarily mean downloads started by the service.

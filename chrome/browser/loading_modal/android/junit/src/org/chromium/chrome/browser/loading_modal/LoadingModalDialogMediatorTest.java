@@ -16,13 +16,12 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.robolectric.shadows.ShadowLooper;
 
-import org.chromium.base.supplier.ObservableSupplier;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.ui.modaldialog.DialogDismissalCause;
 import org.chromium.ui.modaldialog.ModalDialogManager;
 import org.chromium.ui.modaldialog.ModalDialogProperties;
@@ -30,33 +29,23 @@ import org.chromium.ui.modelutil.PropertyModel;
 
 import java.util.concurrent.TimeUnit;
 
-/**
- * Tests for {@link LoadingModalDialogMediator}.
- */
+/** Tests for {@link LoadingModalDialogMediator}. */
 @RunWith(BaseRobolectricTestRunner.class)
 public class LoadingModalDialogMediatorTest {
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Mock
-    private ModalDialogManager mModalDialogManager;
-
-    @Mock
-    private ObservableSupplier<ModalDialogManager> mModalDialogManagerSupplier;
-
-    @Mock
-    private LoadingModalDialogCoordinator.Observer mDialogCoordinatorObserver;
-
+    @Mock private ModalDialogManager mModalDialogManager;
+    @Mock private LoadingModalDialogCoordinator.Observer mDialogCoordinatorObserver;
     private LoadingModalDialogMediator mMediator;
     private PropertyModel mModel;
 
     @Before
     public void setUp() {
-        Mockito.when(mModalDialogManagerSupplier.get()).thenReturn(mModalDialogManager);
-        mMediator = new LoadingModalDialogMediator(mModalDialogManagerSupplier, new Handler());
-        mModel = new PropertyModel.Builder(ModalDialogProperties.ALL_KEYS)
-                         .with(ModalDialogProperties.CONTROLLER, mMediator)
-                         .build();
+        mMediator = new LoadingModalDialogMediator(mModalDialogManager, new Handler());
+        mModel =
+                new PropertyModel.Builder(ModalDialogProperties.ALL_KEYS)
+                        .with(ModalDialogProperties.CONTROLLER, mMediator)
+                        .build();
         mMediator.addObserver(mDialogCoordinatorObserver);
     }
 
@@ -79,9 +68,9 @@ public class LoadingModalDialogMediatorTest {
                 .showDialog(mModel, ModalDialogManager.ModalDialogType.TAB);
 
         mMediator.dismiss();
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.FINISHED);
+        assertEquals(LoadingModalDialogCoordinator.State.FINISHED, mMediator.getState());
 
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(mModalDialogManager, never())
                 .showDialog(mModel, ModalDialogManager.ModalDialogType.TAB);
         verify(mDialogCoordinatorObserver, never()).onDismissable();
@@ -101,9 +90,9 @@ public class LoadingModalDialogMediatorTest {
         verify(mModalDialogManager)
                 .dismissDialog(mModel, DialogDismissalCause.ACTION_ON_DIALOG_COMPLETED);
         mMediator.onDismiss(mModel, DialogDismissalCause.ACTION_ON_DIALOG_COMPLETED);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.FINISHED);
+        assertEquals(LoadingModalDialogCoordinator.State.FINISHED, mMediator.getState());
 
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(mDialogCoordinatorObserver, never()).onDismissable();
         verify(mDialogCoordinatorObserver, never())
                 .onDismissedWithState(LoadingModalDialogCoordinator.State.FINISHED);
@@ -129,7 +118,7 @@ public class LoadingModalDialogMediatorTest {
         verify(mModalDialogManager, never())
                 .dismissDialog(mModel, DialogDismissalCause.ACTION_ON_DIALOG_COMPLETED);
 
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.FINISHED);
+        assertEquals(LoadingModalDialogCoordinator.State.FINISHED, mMediator.getState());
 
         // Dialog is visible for 500 ms, so it should be dismissed.
         ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS);
@@ -137,7 +126,7 @@ public class LoadingModalDialogMediatorTest {
         verify(mModalDialogManager)
                 .dismissDialog(mModel, DialogDismissalCause.ACTION_ON_DIALOG_COMPLETED);
         mMediator.onDismiss(mModel, DialogDismissalCause.ACTION_ON_DIALOG_COMPLETED);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.FINISHED);
+        assertEquals(LoadingModalDialogCoordinator.State.FINISHED, mMediator.getState());
     }
 
     @Test
@@ -149,23 +138,23 @@ public class LoadingModalDialogMediatorTest {
         // Wait for the dialog to be shown.
         ShadowLooper.runMainLooperOneTask();
         verify(mModalDialogManager).showDialog(mModel, ModalDialogManager.ModalDialogType.TAB);
-        assertEquals(SystemClock.elapsedRealtime() - startTimeMs, 500);
+        assertEquals(500, SystemClock.elapsedRealtime() - startTimeMs);
 
         mMediator.onDialogAdded(mModel);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.SHOWN);
+        assertEquals(LoadingModalDialogCoordinator.State.SHOWN, mMediator.getState());
 
         // Wait for the dialog to be shown.
         ShadowLooper.runMainLooperOneTask();
         verify(mDialogCoordinatorObserver).onDismissable();
-        assertEquals(SystemClock.elapsedRealtime() - startTimeMs, 1000);
+        assertEquals(1000, SystemClock.elapsedRealtime() - startTimeMs);
 
         // Wait until timeout occurs (4500 ms visibility timeout + 500 ms delay).
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
-        assertEquals(SystemClock.elapsedRealtime() - startTimeMs, 5000);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        assertEquals(5000, SystemClock.elapsedRealtime() - startTimeMs);
         verify(mModalDialogManager).dismissDialog(mModel, DialogDismissalCause.CLIENT_TIMEOUT);
 
         mMediator.onDismiss(mModel, DialogDismissalCause.CLIENT_TIMEOUT);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.TIMED_OUT);
+        assertEquals(LoadingModalDialogCoordinator.State.TIMED_OUT, mMediator.getState());
         verify(mDialogCoordinatorObserver)
                 .onDismissedWithState(LoadingModalDialogCoordinator.State.TIMED_OUT);
     }
@@ -177,7 +166,7 @@ public class LoadingModalDialogMediatorTest {
         ShadowLooper.runMainLooperOneTask();
         mMediator.onDialogAdded(mModel);
         mMediator.onDismiss(mModel, DialogDismissalCause.NAVIGATE_BACK_OR_TOUCH_OUTSIDE);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.CANCELLED);
+        assertEquals(LoadingModalDialogCoordinator.State.CANCELLED, mMediator.getState());
         verify(mDialogCoordinatorObserver)
                 .onDismissedWithState(LoadingModalDialogCoordinator.State.CANCELLED);
         verify(mDialogCoordinatorObserver, never()).onDismissable();
@@ -186,20 +175,20 @@ public class LoadingModalDialogMediatorTest {
     @Test
     public void testStatusIsUpdatedToFinished() {
         // Tests that dialog status updates correctly up to finished.
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.READY);
+        assertEquals(LoadingModalDialogCoordinator.State.READY, mMediator.getState());
 
         mMediator.show(mModel);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.PENDING);
+        assertEquals(LoadingModalDialogCoordinator.State.PENDING, mMediator.getState());
 
         ShadowLooper.runMainLooperOneTask();
         verify(mModalDialogManager).showDialog(mModel, ModalDialogManager.ModalDialogType.TAB);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.PENDING);
+        assertEquals(LoadingModalDialogCoordinator.State.PENDING, mMediator.getState());
 
         mMediator.onDialogAdded(mModel);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.SHOWN);
+        assertEquals(LoadingModalDialogCoordinator.State.SHOWN, mMediator.getState());
 
         mMediator.dismiss();
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.FINISHED);
+        assertEquals(LoadingModalDialogCoordinator.State.FINISHED, mMediator.getState());
         verify(mDialogCoordinatorObserver, never()).onDismissable();
 
         ShadowLooper.runMainLooperOneTask();
@@ -208,6 +197,6 @@ public class LoadingModalDialogMediatorTest {
         verify(mDialogCoordinatorObserver).onDismissable();
 
         mMediator.onDismiss(mModel, DialogDismissalCause.ACTION_ON_DIALOG_COMPLETED);
-        assertEquals(mMediator.getState(), LoadingModalDialogCoordinator.State.FINISHED);
+        assertEquals(LoadingModalDialogCoordinator.State.FINISHED, mMediator.getState());
     }
 }

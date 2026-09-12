@@ -8,12 +8,14 @@
 #include <memory>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
 #include "cc/paint/element_id.h"
 #include "third_party/blink/public/common/input/web_gesture_device.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
 #include "third_party/blink/public/common/input/web_pointer_properties.h"
 #include "third_party/blink/public/mojom/input/gesture_event.mojom-shared.h"
+#include "ui/events/event_constants.h"
 #include "ui/events/types/scroll_input_type.h"
 #include "ui/events/types/scroll_types.h"
 #include "ui/gfx/geometry/point_f.h"
@@ -58,6 +60,7 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
     } tap;
 
     struct {
+      int tap_down_count;
       float width;
       float height;
     } tap_down;
@@ -81,14 +84,15 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
     struct {
       // If set, used to target a scrollable area directly instead of performing
       // a hit-test. Should be used for gestures queued up internally within
-      // the renderer process. This is an ElementIdType instead of ElementId
-      // due to the fact that ElementId has a non-trivial constructor that
-      // can't easily participate in this union of structs. Note that while
-      // this is used in scroll unification to perform a main thread hit test,
-      // in which case |main_thread_hit_tested| is true, it is also used in
-      // other cases like scroll events reinjected for scrollbar scrolling.
-      cc::ElementIdType scrollable_area_element_id;
-      // Initial motion that triggered the scroll.
+      // the renderer process. Note that while this is used to perform a main
+      // thread hit test, in which case `main_thread_hit_tested_reasons` is
+      // non-zero, it is also used in other cases like scroll events reinjected
+      // for scrollbar scrolling.
+      // Using `cc::ElementId::InternalValue` because `cc::ElementId` has a
+      // non-trivial constructor and is not allowed in a union.
+      cc::ElementId::InternalValue scrollable_area_element_id;
+      // Initial motion that triggered the scroll. See deltas in ScrollUpdate
+      // for how to interpret these.
       float delta_x_hint;
       float delta_y_hint;
       // number of pointers down.
@@ -105,27 +109,43 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       // True if this event is generated from a mousewheel or scrollbar.
       // Synthetic GSB(s) are ignored by the blink::ElasticOverscrollController.
       bool synthetic;
-      // If true, this event has been hit tested by the main thread and the
-      // result is stored in scrollable_area_element_id. Used only in scroll
-      // unification when the event is sent back the the compositor for a
-      // second time after the main thread hit test is complete.
-      bool main_thread_hit_tested;
       // If true, this event will be used for cursor control instead of
       // scrolling. the entire scroll sequence will be used for cursor control.
       bool cursor_control;
+
+      // A non-zero value means the GestureScrollBegin was hit tested by the
+      // main thread and scrollable_area_element_id contains the result.
+      // Storing the EnumBitmask of cc::MainThreadHitTestReasons because
+      // the class has a non-trivial constructor and is not allowed in a union.
+      uint64_t main_thread_hit_tested_reasons;
+      // Represents the browser's scroll axis locking (railing) decision for a
+      // GestureScrollBegin event.
+      ui::GestureScrollRailsMode rails_mode;
     } scroll_begin;
 
     struct {
+      // These values run positive in the up and left direction of scrolling.
+      // Notably, this is the reverse as used in Blink, CC, and WebAPIs.
       float delta_x;
       float delta_y;
-      float velocity_x;
-      float velocity_y;
+      // The raw, unconstrained scroll deltas before any axis locking (railing)
+      // or snapping constraints are applied by the browser. Used when
+      // scroll-axis-lock: none is active to allow diagonal scrolling.
+      float delta_x_unconstrained;
+      float delta_y_unconstrained;
+      // Represents the browser's scroll axis locking (railing) decision for a
+      // GestureScrollUpdate event.
+      ui::GestureScrollRailsMode rails_mode;
       InertialPhaseState inertial_phase;
       // Default initialized to kScrollByPrecisePixel.
       ui::ScrollGranularity delta_units;
     } scroll_update;
 
     struct {
+      // The scroll delta that is compensated for latency i.e. the scroll delta
+      // that was not sent to the renderer as scroll updates.
+      float delta_x_compensated;
+      float delta_y_compensated;
       // The original delta units the ScrollBegin and ScrollUpdates
       // were sent as.
       ui::ScrollGranularity delta_units;
@@ -149,6 +169,12 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       // If true, this event will skip hit testing to find a scroll
       // target and instead just scroll the viewport.
       bool target_viewport;
+      // Represents the browser's scroll axis locking (railing) decision for a
+      // GestureFlingStart event. Used by the browser's FlingController to
+      // assign `rails_mode` to generated GestureScrollUpdate events. This
+      // attribute is not mojofied and will not get transferred across since
+      // GestureFlingStart is consumed on the browser.
+      ui::GestureScrollRailsMode rails_mode;
     } fling_start;
 
     struct {
@@ -204,11 +230,21 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       int modifiers,
       base::TimeTicks time_stamp,
       mojom::GestureDevice device = mojom::GestureDevice::kUninitialized)
-      : WebInputEvent(type, modifiers, time_stamp), source_device_(device) {
-    memset(&data, 0, sizeof(data));
+      : WebInputEvent(type,
+                      Type::kGestureTypeFirst,
+                      Type::kGestureTypeLast,
+                      modifiers,
+                      time_stamp),
+        source_device_(device) {
+    UNSAFE_TODO(memset(&data, 0, sizeof(data)));
   }
 
-  WebGestureEvent() { memset(&data, 0, sizeof(data)); }
+  WebGestureEvent()
+      : WebInputEvent(Type::kUndefined,
+                      Type::kGestureTypeFirst,
+                      Type::kGestureTypeLast) {
+    UNSAFE_TODO(memset(&data, 0, sizeof(data)));
+  }
 
   const gfx::PointF& PositionInWidget() const { return position_in_widget_; }
   const gfx::PointF& PositionInScreen() const { return position_in_screen_; }
@@ -239,11 +275,9 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
   InertialPhaseState InertialPhase() const;
   bool Synthetic() const;
 
-  float VelocityX() const;
-  float VelocityY() const;
-
   gfx::SizeF TapAreaInRootFrame() const;
   int TapCount() const;
+  int TapDownCount() const;
 
   void ApplyTouchAdjustment(const gfx::PointF& root_frame_coords);
 
@@ -271,10 +305,10 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
       case Type::kGestureShortPress:
       case Type::kGestureLongPress:
       case Type::kGestureLongTap:
+      case Type::kGestureDoubleTap:
         return false;
       default:
         NOTREACHED();
-        return false;
     }
   }
 
@@ -312,7 +346,6 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
         return data.tap.needs_wheel_event;
       default:
         NOTREACHED();
-        return false;
     }
   }
 
@@ -352,16 +385,15 @@ class BLINK_COMMON_EXPORT WebGestureEvent : public WebInputEvent {
   static bool IsCompatibleScrollorPinch(const WebGestureEvent& new_event,
                                         const WebGestureEvent& event_in_queue);
 
-  // Generate a scroll gesture event (begin, update, or end), based on the
-  // parameters passed in. Populates the data field of the created
-  // WebGestureEvent based on the type.
-  static std::unique_ptr<blink::WebGestureEvent> GenerateInjectedScrollGesture(
-      WebInputEvent::Type type,
-      base::TimeTicks timestamp,
-      WebGestureDevice device,
-      gfx::PointF position_in_widget,
-      gfx::Vector2dF scroll_delta,
-      ui::ScrollGranularity granularity);
+  // For a scrollbar gesture, generate a scroll gesture event (begin, update,
+  // or end), based on the parameters passed in. Populates the data field of
+  // the created WebGestureEvent based on the type.
+  static std::unique_ptr<blink::WebGestureEvent>
+  GenerateInjectedScrollbarGestureScroll(WebInputEvent::Type type,
+                                         base::TimeTicks timestamp,
+                                         gfx::PointF position_in_widget,
+                                         gfx::Vector2dF scroll_delta,
+                                         ui::ScrollGranularity granularity);
 };
 
 }  // namespace blink

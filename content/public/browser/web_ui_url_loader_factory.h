@@ -13,8 +13,8 @@
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 
 namespace content {
-class RenderFrameHost;
 class BrowserContext;
+class RenderFrameHost;
 // Create and bind a URLLoaderFactory for loading resources matching the
 // specified |scheme| and also from a "pseudo host" matching one in
 // |allowed_hosts|.
@@ -28,12 +28,12 @@ CreateWebUIURLLoaderFactory(RenderFrameHost* render_frame_host,
                             const std::string& scheme,
                             base::flat_set<std::string> allowed_hosts);
 
+// Similar to the above method, but used for worker processes.
 CONTENT_EXPORT
 mojo::PendingRemote<network::mojom::URLLoaderFactory>
-CreateWebUIServiceWorkerLoaderFactory(
-    BrowserContext* browser_context,
-    const std::string& scheme,
-    base::flat_set<std::string> allowed_hosts);
+CreateWebUIURLLoaderFactoryForWorker(BrowserContext* browser_context,
+                                     const std::string& scheme,
+                                     base::flat_set<std::string> allowed_hosts);
 }  // namespace content
 
 #endif  // CONTENT_PUBLIC_BROWSER_WEB_UI_URL_LOADER_FACTORY_H_

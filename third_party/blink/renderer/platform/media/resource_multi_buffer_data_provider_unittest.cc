@@ -2,35 +2,45 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "third_party/blink/renderer/platform/media/resource_multi_buffer_data_provider.h"
 
 #include <stdint.h>
+
 #include <algorithm>
+#include <array>
 #include <string>
 #include <utility>
 
+#include "base/containers/heap_array.h"
 #include "base/format_macros.h"
-#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "media/base/media_log.h"
+#include "media/base/media_switches.h"
 #include "media/base/seekable_buffer.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_util.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/platform/media/url_index.h"
 #include "third_party/blink/public/platform/web_network_state_notifier.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/public/platform/web_url_error.h"
 #include "third_party/blink/public/platform/web_url_request.h"
 #include "third_party/blink/public/platform/web_url_response.h"
+#include "third_party/blink/renderer/platform/media/multi_buffer_reader.h"
 #include "third_party/blink/renderer/platform/media/testing/mock_resource_fetch_context.h"
 #include "third_party/blink/renderer/platform/media/testing/mock_web_associated_url_loader.h"
+#include "third_party/blink/renderer/platform/media/url_index.h"
+#include "third_party/blink/renderer/platform/weborigin/kurl.h"
+#include "third_party/blink/renderer/platform/wtf/functional.h"
 
 namespace blink {
 
@@ -49,19 +59,29 @@ const int kHttpPartialContent = 206;
 
 enum NetworkState { kNone, kLoaded, kLoading };
 
-// Predicate that checks the Accept-Encoding request header.
-static bool CorrectAcceptEncoding(const WebURLRequest& request) {
+static bool HasIdentityAcceptEncoding(const WebURLRequest& request) {
   std::string value = request
-                          .HttpHeaderField(WebString::FromUTF8(
+                          .HttpHeaderField(WebString::FromUtf8(
                               net::HttpRequestHeaders::kAcceptEncoding))
                           .Utf8();
-  return (value.find("identity;q=1") != std::string::npos) &&
-         (value.find("*;q=0") != std::string::npos);
+  return value.contains("identity;q=1") && value.contains("*;q=0");
+}
+
+static bool HasNoAcceptEncoding(const WebURLRequest& request) {
+  return request
+      .HttpHeaderField(
+          WebString::FromUtf8(net::HttpRequestHeaders::kAcceptEncoding))
+      .IsNull();
 }
 
 class ResourceMultiBufferDataProviderTest : public testing::Test {
  public:
-  ResourceMultiBufferDataProviderTest() {
+  ResourceMultiBufferDataProviderTest()
+      : task_environment_(base::test::TaskEnvironment::TimeSource::MOCK_TIME),
+        url_index_(std::make_unique<UrlIndex>(
+            &fetch_context_,
+            0,
+            task_environment_.GetMainThreadTaskRunner())) {
     for (int i = 0; i < kDataSize; ++i) {
       data_[i] = i;
     }
@@ -75,34 +95,45 @@ class ResourceMultiBufferDataProviderTest : public testing::Test {
   ResourceMultiBufferDataProviderTest& operator=(
       const ResourceMultiBufferDataProviderTest&) = delete;
 
-  void Initialize(const char* url, int first_position) {
-    gurl_ = GURL(url);
-    url_data_ = url_index_.GetByUrl(gurl_, UrlData::CORS_UNSPECIFIED,
-                                    UrlIndex::kNormal);
+  void Initialize(const char* url,
+                  int first_position,
+                  media::DataSource::EncodingMode encoding_mode =
+                      media::DataSource::EncodingMode::kIdentity) {
+    url_ = KURL(url);
+    url_data_ = url_index_->GetByUrl(url_, UrlData::CORS_UNSPECIFIED,
+                                     UrlData::kNormal, encoding_mode);
     url_data_->set_etag(kEtag);
     DCHECK(url_data_);
     url_data_->OnRedirect(
-        base::BindOnce(&ResourceMultiBufferDataProviderTest::RedirectCallback,
-                       base::Unretained(this)));
+        blink::BindOnce(&ResourceMultiBufferDataProviderTest::RedirectCallback,
+                        Unretained(this)));
 
     first_position_ = first_position;
 
-    std::unique_ptr<ResourceMultiBufferDataProvider> loader(
-        new ResourceMultiBufferDataProvider(
-            url_data_.get(), first_position_,
-            false /* is_client_audio_element */,
-            task_environment_.GetMainThreadTaskRunner()));
+    auto loader = std::make_unique<ResourceMultiBufferDataProvider>(
+        url_data_.get(), first_position_, /*is_client_audio_element=*/false,
+        task_environment_.GetMainThreadTaskRunner());
     loader_ = loader.get();
     url_data_->multibuffer()->AddProvider(std::move(loader));
+  }
+
+  std::unique_ptr<MultiBufferReader> CreateReader(int size) {
+    auto reader = std::make_unique<MultiBufferReader>(
+        url_data_->multibuffer(), 0, 1024 * 1024,
+        /*is_client_audio_element=*/false, base::DoNothing(),
+        task_environment_.GetMainThreadTaskRunner());
+    reader->SetPinRange(0, 1024 * 1024);
+    reader->Wait(size, base::BindOnce([]() {}));
+    return reader;
   }
 
   void Start() { loader_->Start(); }
 
   void FullResponse(int64_t instance_size, bool ok = true) {
-    WebURLResponse response(gurl_);
+    WebURLResponse response(url_);
     response.SetHttpHeaderField(
-        WebString::FromUTF8("Content-Length"),
-        WebString::FromUTF8(base::StringPrintf("%" PRId64, instance_size)));
+        WebString("Content-Length"),
+        WebString::FromUtf8(base::StringPrintf("%" PRId64, instance_size)));
     response.SetExpectedContentLength(instance_size);
     response.SetHttpStatusCode(kHttpOK);
     loader_->DidReceiveResponse(response);
@@ -125,10 +156,10 @@ class ResourceMultiBufferDataProviderTest : public testing::Test {
                        int64_t instance_size,
                        bool chunked,
                        bool accept_ranges) {
-    WebURLResponse response(gurl_);
+    WebURLResponse response(url_);
     response.SetHttpHeaderField(
-        WebString::FromUTF8("Content-Range"),
-        WebString::FromUTF8(
+        WebString("Content-Range"),
+        WebString::FromUtf8(
             base::StringPrintf("bytes "
                                "%" PRId64 "-%" PRId64 "/%" PRId64,
                                first_position, last_position, instance_size)));
@@ -136,8 +167,8 @@ class ResourceMultiBufferDataProviderTest : public testing::Test {
     // HTTP 1.1 doesn't permit Content-Length with Transfer-Encoding: chunked.
     int64_t content_length = -1;
     if (chunked) {
-      response.SetHttpHeaderField(WebString::FromUTF8("Transfer-Encoding"),
-                                  WebString::FromUTF8("chunked"));
+      response.SetHttpHeaderField(WebString("Transfer-Encoding"),
+                                  WebString("chunked"));
     } else {
       content_length = last_position - first_position + 1;
     }
@@ -145,22 +176,23 @@ class ResourceMultiBufferDataProviderTest : public testing::Test {
 
     // A server isn't required to return Accept-Ranges even though it might.
     if (accept_ranges) {
-      response.SetHttpHeaderField(WebString::FromUTF8("Accept-Ranges"),
-                                  WebString::FromUTF8("bytes"));
+      response.SetHttpHeaderField(WebString("Accept-Ranges"),
+                                  WebString("bytes"));
     }
 
     response.SetHttpStatusCode(kHttpPartialContent);
     loader_->DidReceiveResponse(response);
 
-    EXPECT_EQ(instance_size, url_data_->length());
-
     // A valid partial response should always result in this being true.
-    EXPECT_TRUE(url_data_->range_supported());
+    if (url_index_) {
+      EXPECT_EQ(instance_size, url_data_->length());
+      EXPECT_TRUE(url_data_->range_supported());
+    }
   }
 
   void Redirect(const char* url) {
-    WebURL new_url{GURL(url)};
-    WebURLResponse redirect_response(gurl_);
+    WebURL new_url{KURL(url)};
+    WebURLResponse redirect_response(url_);
 
     EXPECT_CALL(*this, RedirectCallback(_))
         .WillOnce(
@@ -176,21 +208,6 @@ class ResourceMultiBufferDataProviderTest : public testing::Test {
     url_data_ = nullptr;
   }
 
-  // Helper method to write to |loader_| from |data_|.
-  void WriteLoader(int position, int size) {
-    loader_->DidReceiveData(reinterpret_cast<char*>(data_ + position), size);
-  }
-
-  void WriteData(int size) {
-    std::unique_ptr<char[]> data(new char[size]);
-    loader_->DidReceiveData(data.get(), size);
-  }
-
-  // Verifies that data in buffer[0...size] is equal to data_[pos...pos+size].
-  void VerifyBuffer(uint8_t* buffer, int pos, int size) {
-    EXPECT_EQ(0, memcmp(buffer, data_ + pos, size));
-  }
-
   MOCK_METHOD1(RedirectCallback, void(const scoped_refptr<UrlData>&));
 
   void SetUrlData(const scoped_refptr<UrlData>& new_url_data) {
@@ -201,27 +218,46 @@ class ResourceMultiBufferDataProviderTest : public testing::Test {
   std::unique_ptr<WebAssociatedURLLoader> CreateUrlLoader(
       const WebAssociatedURLLoaderOptions& options) {
     auto url_loader = std::make_unique<NiceMock<MockWebAssociatedURLLoader>>();
-    EXPECT_CALL(*url_loader.get(),
-                LoadAsynchronously(Truly(CorrectAcceptEncoding), loader_));
+    EXPECT_CALL(
+        *url_loader,
+        LoadAsynchronously(
+            Truly([this](const WebURLRequest& request) {
+              return expect_identity_accept_encoding_
+                         ? HasIdentityAcceptEncoding(request)
+                         : HasNoAcceptEncoding(request);
+            }),
+            loader_.get()));
     return url_loader;
   }
 
   base::test::SingleThreadTaskEnvironment task_environment_;
-  GURL gurl_;
+  KURL url_;
   int32_t first_position_;
 
   NiceMock<MockResourceFetchContext> fetch_context_;
-  UrlIndex url_index_{&fetch_context_, 0,
-                      task_environment_.GetMainThreadTaskRunner()};
+  std::unique_ptr<UrlIndex> url_index_;
   scoped_refptr<UrlData> url_data_;
   scoped_refptr<UrlData> redirected_to_;
   // The loader is owned by the UrlData above.
-  ResourceMultiBufferDataProvider* loader_;
+  raw_ptr<ResourceMultiBufferDataProvider> loader_;
 
-  uint8_t data_[kDataSize];
+  bool expect_identity_accept_encoding_ = false;
+
+  std::array<uint8_t, kDataSize> data_;
 };
 
 TEST_F(ResourceMultiBufferDataProviderTest, StartStop) {
+  Initialize(kHttpUrl, 0);
+  Start();
+  StopWhenLoad();
+}
+
+TEST_F(ResourceMultiBufferDataProviderTest,
+       KillSwitchRestoresAcceptEncodingInjection) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(kDeferMediaAcceptEncodingInjection);
+  expect_identity_accept_encoding_ = true;
+
   Initialize(kHttpUrl, 0);
   Start();
   StopWhenLoad();
@@ -234,10 +270,43 @@ TEST_F(ResourceMultiBufferDataProviderTest, BadHttpResponse) {
 
   EXPECT_CALL(*this, RedirectCallback(scoped_refptr<UrlData>(nullptr)));
 
-  WebURLResponse response(gurl_);
+  WebURLResponse response(url_);
   response.SetHttpStatusCode(404);
   response.SetHttpStatusText("Not Found\n");
   loader_->DidReceiveResponse(response);
+}
+
+TEST_F(ResourceMultiBufferDataProviderTest, DestructedUrlIndexFullResponse) {
+  Initialize(kHttpUrl, 100);
+  Start();
+  url_index_.reset();
+  EXPECT_CALL(*this, RedirectCallback(testing::IsNull()));
+  FullResponse(1024, false);
+}
+
+TEST_F(ResourceMultiBufferDataProviderTest, DestructedUrlIndexPartialResponse) {
+  Initialize(kHttpUrl, 100);
+  Start();
+  url_index_.reset();
+  EXPECT_CALL(*this, RedirectCallback(testing::IsNull()));
+  PartialResponse(100, 200, 1024);
+}
+
+TEST_F(ResourceMultiBufferDataProviderTest, DestructedUrlIndexDidFail) {
+  Initialize(kHttpUrl, 100);
+  Start();
+  url_index_.reset();
+  EXPECT_CALL(*this, RedirectCallback(testing::IsNull()));
+  loader_->DidFail(WebURLError(net::ERR_ABORTED, url_));
+}
+
+TEST_F(ResourceMultiBufferDataProviderTest, DestructedUrlIndexDidFinish) {
+  Initialize(kHttpUrl, 100);
+  Start();
+  FullResponse(1024, true);
+  url_index_.reset();
+  EXPECT_CALL(*this, RedirectCallback(testing::IsNull()));
+  loader_->DidFinishLoading();
 }
 
 // Tests that partial content is requested but not fulfilled.
@@ -250,6 +319,13 @@ TEST_F(ResourceMultiBufferDataProviderTest, NotPartialResponse) {
 // Tests that a 200 response is received.
 TEST_F(ResourceMultiBufferDataProviderTest, FullResponse) {
   Initialize(kHttpUrl, 0);
+  Start();
+  FullResponse(1024);
+  StopWhenLoad();
+}
+
+TEST_F(ResourceMultiBufferDataProviderTest, FullResponse_FileUrl) {
+  Initialize("file://test.ogv", 0);
   Start();
   FullResponse(1024);
   StopWhenLoad();
@@ -292,10 +368,10 @@ TEST_F(ResourceMultiBufferDataProviderTest, InvalidPartialResponse) {
 
   EXPECT_CALL(*this, RedirectCallback(scoped_refptr<UrlData>(nullptr)));
 
-  WebURLResponse response(gurl_);
+  WebURLResponse response(url_);
   response.SetHttpHeaderField(
-      WebString::FromUTF8("Content-Range"),
-      WebString::FromUTF8(base::StringPrintf("bytes "
+      WebString("Content-Range"),
+      WebString::FromUtf8(base::StringPrintf("bytes "
                                              "%d-%d/%d",
                                              1, 10, 1024)));
   response.SetExpectedContentLength(10);
@@ -319,6 +395,98 @@ TEST_F(ResourceMultiBufferDataProviderTest, TestRedirectedPartialResponse) {
   PartialResponse(0, 2048, 32000);
   Redirect(kHttpRedirect);
   PartialResponse(2048, 4096, 32000);
+  StopWhenLoad();
+}
+
+// This test verifies that a cross-origin redirect sequence (A -> B -> A)
+// does not bypass the multibuffer security checks.
+TEST_F(ResourceMultiBufferDataProviderTest, NoCrossOriginMediaLeaks) {
+  // Switch to a `url_index_` with a real block size.
+  url_index_ = std::make_unique<UrlIndex>(
+      &fetch_context_, task_environment_.GetMainThreadTaskRunner());
+
+  constexpr char kOriginA1[] = "http://localhost:18080/v1";
+  constexpr char kOriginB[] = "http://127.0.0.1:18081/secret";
+  constexpr char kOriginA2[] = "http://localhost:18080/v2";
+  constexpr int kBlockSize = 1 << 15;
+
+  // 1. Setup
+  Initialize(kOriginA1, 0);
+  auto reader = CreateReader(kBlockSize);
+  task_environment_.FastForwardUntilNoTasksRemain();
+  ASSERT_TRUE(loader_);
+
+  loader_->Start();
+
+  // 2. Mark B as cross-origin (opaque response).
+  WebURL url_b{KURL(kOriginB)};
+  WebURLResponse response_b{url_b};
+  response_b.SetHttpStatusCode(206);
+  response_b.SetHttpHeaderField(WebString::FromUtf8("Content-Range"),
+                                WebString::FromUtf8("bytes 0-1000000/1000001"));
+  response_b.SetExpectedContentLength(1000001);
+  response_b.SetType(network::mojom::FetchResponseType::kOpaque);
+
+  ASSERT_TRUE(loader_->WillFollowRedirect(url_b, response_b));
+  task_environment_.FastForwardUntilNoTasksRemain();
+
+  auto SetUrlDataAndCreateReader =
+      [&](const scoped_refptr<UrlData>& new_url_data) {
+        reader.reset();
+        url_data_ = new_url_data;
+        reader = CreateReader(kBlockSize);
+      };
+
+  EXPECT_CALL(*this, RedirectCallback(_))
+      .WillRepeatedly(SetUrlDataAndCreateReader);
+  loader_->DidReceiveResponse(response_b);
+  ASSERT_TRUE(loader_);
+  task_environment_.FastForwardUntilNoTasksRemain();
+  ASSERT_TRUE(url_data_->is_cors_cross_origin());
+
+  // 3. Receive some data for B. This data is now in the MultiBuffer for B.
+  std::string data_str(kBlockSize, 'b');
+  loader_->DidReceiveData(data_str);
+
+  // 4. Simulate a failure that invokes a retry.
+  loader_->DidFail(WebURLError(net::ERR_ABORTED, url_b));
+  task_environment_.FastForwardUntilNoTasksRemain();
+  ASSERT_TRUE(loader_);
+
+  WebURL url_a2{KURL(kOriginA2)};
+  WebURLResponse response_a2{url_a2};
+  response_a2.SetHttpStatusCode(206);
+  response_a2.SetHttpHeaderField(
+      WebString::FromUtf8("Content-Range"),
+      WebString::FromUtf8("bytes 32768-1000000/1000001"));
+  response_a2.SetExpectedContentLength(1000001 - kBlockSize);
+  response_a2.SetType(network::mojom::FetchResponseType::kBasic);
+
+  // Redirecting back to A should fail cross origin checks.
+  EXPECT_FALSE(loader_->WillFollowRedirect(url_a2, response_a2));
+  StopWhenLoad();
+}
+
+TEST_F(ResourceMultiBufferDataProviderTest, AllowGzip) {
+  Initialize(kHttpUrl, 0, media::DataSource::EncodingMode::kAllowGzip);
+
+  auto url_loader = std::make_unique<NiceMock<MockWebAssociatedURLLoader>>();
+  EXPECT_CALL(*url_loader,
+              LoadAsynchronously(
+                  Truly([](const WebURLRequest& request) {
+                    std::string value =
+                        request
+                            .HttpHeaderField(WebString::FromUtf8(
+                                net::HttpRequestHeaders::kAcceptEncoding))
+                            .Utf8();
+                    return value.contains("gzip");
+                  }),
+                  loader_.get()));
+
+  EXPECT_CALL(fetch_context_, CreateUrlLoader(_))
+      .WillOnce(testing::Return(testing::ByMove(std::move(url_loader))));
+
+  Start();
   StopWhenLoad();
 }
 

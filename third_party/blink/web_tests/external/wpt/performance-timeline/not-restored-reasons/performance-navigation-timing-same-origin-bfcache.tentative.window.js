@@ -5,7 +5,8 @@
 // META: script=/common/utils.js
 // META: script=/html/browsers/browsing-the-web/back-forward-cache/resources/rc-helper.js
 // META: script=/html/browsers/browsing-the-web/remote-context-helper/resources/remote-context-helper.js
-// META: script=/websockets/constants.sub.js
+// META: timeout=long
+
 
 'use strict';
 
@@ -18,10 +19,10 @@ promise_test(async t => {
   const rc1_url = await rc1.executeScript(() => {
     return location.href;
   });
-  // Add a same-origin iframe and use WebSocket.
+  // Add a same-origin iframe and use WebRTC.
   const rc1_child = await rc1.addIframe(
       /*extra_config=*/ {}, /*attributes=*/ {id: 'test-id'});
-  await useWebSocket(rc1_child);
+  await useBFCacheBlockingFeature(rc1_child);
 
   const rc1_child_url = await rc1_child.executeScript(() => {
     return location.href;
@@ -36,21 +37,18 @@ promise_test(async t => {
   await assertBFCacheEligibility(rc1, /*shouldRestoreFromBFCache=*/ false);
   await assertNotRestoredReasonsEquals(
       rc1,
-      /*blocked=*/ false,
       /*url=*/ rc1_url,
-      /*src=*/ '',
-      /*id=*/ '',
-      /*name=*/ '',
+      /*src=*/ null,
+      /*id=*/ null,
+      /*name=*/ null,
       /*reasons=*/[],
       /*children=*/[{
-        'blocked': true,
         'url': rc1_child_url,
         'src': rc1_child_url,
         'id': 'test-id',
         'name': '',
-        'reasons': ['WebSocket'],
+        'reasons': [{'reason': BFCACHE_BLOCKING_REASON}],
         'children': [{
-          'blocked': false,
           'url': rc1_grand_child_url,
           'src': rc1_grand_child_url,
           'id': '',

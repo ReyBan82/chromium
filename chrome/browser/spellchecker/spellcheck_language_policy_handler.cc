@@ -7,7 +7,6 @@
 #include <utility>
 #include <vector>
 
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/syslog_logging.h"
 #include "base/values.h"
@@ -33,7 +32,7 @@ bool SpellcheckLanguagePolicyHandler::CheckPolicySettings(
   const base::Value* value = nullptr;
   bool ok = CheckAndGetValue(policies, errors, &value);
 
-  base::Value::List forced;
+  base::ListValue forced;
   std::vector<std::string> unknown;
   SortForcedLanguages(policies, &forced, &unknown);
 
@@ -64,7 +63,7 @@ void SpellcheckLanguagePolicyHandler::ApplyPolicySettings(
 
   // Set the forced dictionaries preference based on this policy's values,
   // and emit warnings for unknown languages.
-  base::Value::List forced;
+  base::ListValue forced;
   std::vector<std::string> unknown;
   SortForcedLanguages(policies, &forced, &unknown);
 
@@ -81,7 +80,7 @@ void SpellcheckLanguagePolicyHandler::ApplyPolicySettings(
 
 void SpellcheckLanguagePolicyHandler::SortForcedLanguages(
     const policy::PolicyMap& policies,
-    base::Value::List* const forced,
+    base::ListValue* const forced,
     std::vector<std::string>* const unknown) {
   const base::Value* value =
       policies.GetValue(policy_name(), base::Value::Type::LIST);

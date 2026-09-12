@@ -19,36 +19,37 @@ CSSMathMax* CSSMathMax::Create(const HeapVector<Member<V8CSSNumberish>>& args,
     return nullptr;
   }
 
-  CSSMathMax* result = Create(CSSNumberishesToNumericValues(args));
+  return Create(CSSNumberishesToNumericValues(args), exception_state);
+}
+
+CSSMathMax* CSSMathMax::Create(CSSNumericValueVector values,
+                               ExceptionState& exception_state) {
+  bool error = false;
+  CSSNumericValueType final_type =
+      CSSMathVariadic::TypeCheck(values, CSSNumericValueType::Add, error);
+  CSSMathMax* result =
+      error ? nullptr
+            : MakeGarbageCollected<CSSMathMax>(
+                  MakeGarbageCollected<CSSNumericArray>(std::move(values)),
+                  final_type);
   if (!result) {
     exception_state.ThrowTypeError("Incompatible types");
-    return nullptr;
   }
 
   return result;
 }
 
-CSSMathMax* CSSMathMax::Create(CSSNumericValueVector values) {
-  bool error = false;
-  CSSNumericValueType final_type =
-      CSSMathVariadic::TypeCheck(values, CSSNumericValueType::Add, error);
-  return error ? nullptr
-               : MakeGarbageCollected<CSSMathMax>(
-                     MakeGarbageCollected<CSSNumericArray>(std::move(values)),
-                     final_type);
-}
-
-absl::optional<CSSNumericSumValue> CSSMathMax::SumValue() const {
+std::optional<CSSNumericSumValue> CSSMathMax::SumValue() const {
   auto cur_max = NumericValues()[0]->SumValue();
   if (!cur_max.has_value() || cur_max->terms.size() != 1) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   for (const auto& value : NumericValues()) {
     const auto child_sum = value->SumValue();
     if (!child_sum.has_value() || child_sum->terms.size() != 1 ||
         child_sum->terms[0].units != cur_max->terms[0].units) {
-      return absl::nullopt;
+      return std::nullopt;
     }
 
     if (child_sum->terms[0].value > cur_max->terms[0].value) {
@@ -84,15 +85,13 @@ CSSMathExpressionNode* CSSMathMax::ToCalcExpressionNode() const {
       // TODO(crbug.com/983784): Remove this when all ToCalcExpressionNode()
       // overrides are implemented.
       NOTREACHED();
-      continue;
     }
-    operands.push_back(value->ToCalcExpressionNode());
+    operands.push_back(operand);
   }
   if (!operands.size()) {
     // TODO(crbug.com/983784): Remove this when all ToCalcExpressionNode()
     // overrides are implemented.
     NOTREACHED();
-    return nullptr;
   }
   return CSSMathExpressionOperation::CreateComparisonFunction(
       std::move(operands), CSSMathOperator::kMax);

@@ -18,43 +18,41 @@ import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.Log;
 import org.chromium.base.task.PostTask;
-import org.chromium.content_public.browser.ContentFeatureList;
+import org.chromium.base.task.TaskTraits;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.content_public.common.ContentFeatures;
+import org.chromium.content_public.browser.ContentFeatureMap;
 import org.chromium.content_public.browser.InputMethodManagerWrapper;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
 import org.chromium.ui.base.WindowAndroid;
 import org.chromium.ui.display.DisplayAndroid;
 
 import java.lang.ref.WeakReference;
 
-/**
- * Wrapper around Android's InputMethodManager
- */
+/** Wrapper around Android's InputMethodManager */
+@NullMarked
 public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper {
     private static final boolean DEBUG_LOGS = false;
     private static final String TAG = "IMM";
 
     private final Context mContext;
 
-    private WindowAndroid mWindowAndroid;
+    private @Nullable WindowAndroid mWindowAndroid;
 
-    private Delegate mDelegate;
+    private @Nullable final Delegate mDelegate;
 
-    private Runnable mPendingRunnableOnInputConnection;
-
-    private boolean mOptimizeImmHideCalls;
+    private @Nullable Runnable mPendingRunnableOnInputConnection;
 
     public InputMethodManagerWrapperImpl(
-            Context context, WindowAndroid windowAndroid, Delegate delegate) {
+            Context context, @Nullable WindowAndroid windowAndroid, @Nullable Delegate delegate) {
         if (DEBUG_LOGS) Log.i(TAG, "Constructor");
         mContext = context;
         mWindowAndroid = windowAndroid;
         mDelegate = delegate;
-        mOptimizeImmHideCalls =
-                ContentFeatureList.isEnabled(ContentFeatureList.OPTIMIZE_IMM_HIDE_CALLS);
     }
 
     @Override
-    public void onWindowAndroidChanged(WindowAndroid windowAndroid) {
+    public void onWindowAndroidChanged(@Nullable WindowAndroid windowAndroid) {
         mWindowAndroid = windowAndroid;
     }
 
@@ -69,10 +67,10 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
     /**
      * Get an Activity from WindowAndroid.
      *
-     * @param windowAndroid
      * @return The Activity. May return null if it fails.
      */
-    private static Activity getActivityFromWindowAndroid(WindowAndroid windowAndroid) {
+    private static @Nullable Activity getActivityFromWindowAndroid(
+            @Nullable WindowAndroid windowAndroid) {
         if (windowAndroid == null) return null;
         // Unwrap this when we actually need it.
         WeakReference<Activity> weakRef = windowAndroid.getActivity();
@@ -100,16 +98,15 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
 
     @VisibleForTesting
     protected boolean hasCorrectDisplayId(Context context, Activity activity) {
-        // We did not support multi-display before O.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true;
-
         int contextDisplayId = getDisplayId(context);
         int activityDisplayId = getDisplayId(activity);
         if (activityDisplayId != contextDisplayId) {
-            Log.w(TAG,
+            Log.w(
+                    TAG,
                     "Activity's display ID(%d) does not match context's display ID(%d). "
                             + "Using a workaround to show soft input on the correct display...",
-                    activityDisplayId, contextDisplayId);
+                    activityDisplayId,
+                    contextDisplayId);
             return false;
         }
         return true;
@@ -120,23 +117,36 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
         return DisplayAndroid.getNonMultiDisplay(context).getDisplayId();
     }
 
+    private boolean disableWorkAroundForImeFocus() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA
+                && ContentFeatureMap.isEnabled(
+                        ContentFeatures.ANDROID_REMOVE_SET_LOCAL_FOCUS_WORKAROUND_ON_BAKLAVA);
+    }
+
     @Override
     public void showSoftInput(View view, int flags, ResultReceiver resultReceiver) {
         if (DEBUG_LOGS) Log.i(TAG, "showSoftInput");
         mPendingRunnableOnInputConnection = null;
         Activity activity = getActivityFromWindowAndroid(mWindowAndroid);
-        if (activity != null && !hasCorrectDisplayId(mContext, activity)) {
+        if (activity != null
+                && !hasCorrectDisplayId(mContext, activity)
+                && !disableWorkAroundForImeFocus()) {
             // https://crbug.com/1021403
             // This is a workaround for multi-display case. We need this as long as
             // Chrome uses the application context for creating the content view.
             // Note that this will create a few ms delay in showing keyboard.
+            // b/525387925: This workaround may not be needed with later versions of Android FW.
+            // Also this workaround breaks a CUJ where WebView exists within a dialog on a secondary
+            // display. This happens because we are forcing focus on the activity window which
+            // causes a mismatch between window focus and IME input focus. We are removing this
+            // workaround for Baklava and above to fix that CUJ.
             activity.getWindow().setLocalFocus(true, true);
-
             if (mDelegate != null && !mDelegate.hasInputConnection()) {
                 // Delay keyboard showing until input connection is established.
-                mPendingRunnableOnInputConnection = () -> {
-                    if (isActive(view)) showSoftInputInternal(view, flags, resultReceiver);
-                };
+                mPendingRunnableOnInputConnection =
+                        () -> {
+                            if (isActive(view)) showSoftInputInternal(view, flags, resultReceiver);
+                        };
                 return;
             }
             // If we already have InputConnection, then show soft input now.
@@ -158,7 +168,7 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
     }
 
     @Override
-    public boolean isActive(View view) {
+    public boolean isActive(@Nullable View view) {
         InputMethodManager manager = getInputMethodManager();
         final boolean active = manager != null && manager.isActive(view);
         if (DEBUG_LOGS) Log.i(TAG, "isActive: " + active);
@@ -167,11 +177,11 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
 
     @Override
     public boolean hideSoftInputFromWindow(
-            IBinder windowToken, int flags, ResultReceiver resultReceiver) {
+            IBinder windowToken, int flags, @Nullable ResultReceiver resultReceiver) {
         if (DEBUG_LOGS) Log.i(TAG, "hideSoftInputFromWindow");
         mPendingRunnableOnInputConnection = null;
         InputMethodManager manager = getInputMethodManager();
-        if (manager == null || mOptimizeImmHideCalls && !manager.isAcceptingText()) return false;
+        if (manager == null || !manager.isAcceptingText()) return false;
         StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskWrites(); // crbug.com/616283
         try {
             return manager.hideSoftInputFromWindow(windowToken, flags, resultReceiver);
@@ -184,8 +194,13 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
     public void updateSelection(
             View view, int selStart, int selEnd, int candidatesStart, int candidatesEnd) {
         if (DEBUG_LOGS) {
-            Log.i(TAG, "updateSelection: SEL [%d, %d], COM [%d, %d]", selStart, selEnd,
-                    candidatesStart, candidatesEnd);
+            Log.i(
+                    TAG,
+                    "updateSelection: SEL [%d, %d], COM [%d, %d]",
+                    selStart,
+                    selEnd,
+                    candidatesStart,
+                    candidatesEnd);
         }
         InputMethodManager manager = getInputMethodManager();
         if (manager == null) return;
@@ -202,7 +217,7 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
 
     @Override
     public void updateExtractedText(
-            View view, int token, android.view.inputmethod.ExtractedText text) {
+            View view, int token, android.view.inputmethod.@Nullable ExtractedText text) {
         if (DEBUG_LOGS) Log.d(TAG, "updateExtractedText");
         InputMethodManager manager = getInputMethodManager();
         if (manager == null) return;
@@ -214,6 +229,6 @@ public class InputMethodManagerWrapperImpl implements InputMethodManagerWrapper 
         if (mPendingRunnableOnInputConnection == null) return;
         Runnable runnable = mPendingRunnableOnInputConnection;
         mPendingRunnableOnInputConnection = null;
-        PostTask.postTask(UiThreadTaskTraits.DEFAULT, runnable);
+        PostTask.postTask(TaskTraits.UI_DEFAULT, runnable);
     }
 }

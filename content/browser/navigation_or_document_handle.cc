@@ -4,10 +4,14 @@
 
 #include "content/browser/navigation_or_document_handle.h"
 
+#include <optional>
+
 #include "content/browser/renderer_host/frame_tree_node.h"
 #include "content/browser/renderer_host/navigation_request.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
+#include "content/public/browser/frame_type.h"
+#include "url/origin.h"
 
 namespace content {
 
@@ -66,6 +70,19 @@ FrameTreeNode* NavigationOrDocumentHandle::GetFrameTreeNode() const {
   return nullptr;
 }
 
+std::optional<url::Origin> NavigationOrDocumentHandle::GetTopmostFrameOrigin()
+    const {
+  if (auto* navigation_request = GetNavigationRequest()) {
+    auto* current_rfh =
+        navigation_request->frame_tree_node()->current_frame_host();
+    return current_rfh->GetOutermostMainFrame()->GetLastCommittedOrigin();
+  }
+  if (auto* rfh = GetDocument()) {
+    return rfh->GetOutermostMainFrame()->GetLastCommittedOrigin();
+  }
+  return std::nullopt;
+}
+
 bool NavigationOrDocumentHandle::IsInPrimaryMainFrame() const {
   auto* navigation_request = GetNavigationRequest();
   if (navigation_request)
@@ -78,8 +95,8 @@ bool NavigationOrDocumentHandle::IsInPrimaryMainFrame() const {
 
 void NavigationOrDocumentHandle::OnNavigationCommitted(
     NavigationRequest& navigation_request) {
-  DCHECK_EQ(navigation_request_->GetNavigationId(),
-            navigation_request.GetNavigationId());
+  CHECK_EQ(navigation_request_->GetNavigationId(),
+           navigation_request.GetNavigationId(), base::NotFatalUntil::M159);
   render_frame_host_ = navigation_request.GetRenderFrameHost()->GetWeakPtr();
 }
 

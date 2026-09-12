@@ -4,11 +4,17 @@
 
 #include "components/autofill/core/browser/payments/legal_message_line.h"
 
+#include <stddef.h>
+
+#include <string>
+#include <vector>
+
 #include "base/check.h"
 #include "base/i18n/message_formatter.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
+#include "ui/gfx/range/range.h"
 
 namespace autofill {
 namespace {
@@ -68,19 +74,25 @@ LegalMessageLine::Link::Link(size_t start,
                              const std::string& url_spec)
     : range(start, end), url(url_spec) {}
 
-LegalMessageLine::Link::~Link() {}
+LegalMessageLine::Link::~Link() = default;
 
-LegalMessageLine::LegalMessageLine() {}
+bool LegalMessageLine::Link::operator==(
+    const LegalMessageLine::Link& other) const = default;
+
+LegalMessageLine::LegalMessageLine() = default;
 
 LegalMessageLine::LegalMessageLine(const LegalMessageLine& other) = default;
 
-LegalMessageLine::~LegalMessageLine() {}
+LegalMessageLine::~LegalMessageLine() = default;
+
+bool LegalMessageLine::operator==(const LegalMessageLine& other) const =
+    default;
 
 // static
-bool LegalMessageLine::Parse(const base::Value::Dict& legal_message,
+bool LegalMessageLine::Parse(const base::DictValue& legal_message,
                              LegalMessageLines* out,
                              bool escape_apostrophes) {
-  const base::Value::List* lines_list = legal_message.FindList("line");
+  const base::ListValue* lines_list = legal_message.FindList("line");
   if (lines_list) {
     LegalMessageLines lines;
     lines.reserve(lines_list->size());
@@ -97,7 +109,7 @@ bool LegalMessageLine::Parse(const base::Value::Dict& legal_message,
   return true;
 }
 
-bool LegalMessageLine::ParseLine(const base::Value::Dict& line,
+bool LegalMessageLine::ParseLine(const base::DictValue& line,
                                  bool escape_apostrophes) {
   DCHECK(text_.empty());
   DCHECK(links_.empty());
@@ -107,7 +119,7 @@ bool LegalMessageLine::ParseLine(const base::Value::Dict& line,
   std::vector<std::u16string> display_texts;
 
   // Process all the template parameters.
-  const base::Value::List* template_parameters =
+  const base::ListValue* template_parameters =
       line.FindList("template_parameter");
   if (template_parameters) {
     display_texts.reserve(template_parameters->size());

@@ -7,10 +7,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
@@ -18,6 +21,7 @@
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/task_environment.h"
@@ -264,8 +268,7 @@ class FileSystemOperationImplTest : public testing::Test {
   void GrantQuotaForCurrentUsage() {
     int64_t usage;
     GetUsageAndQuota(&usage, nullptr);
-    quota_manager()->SetQuota(sandbox_file_system_.storage_key(),
-                              sandbox_file_system_.storage_type(), usage);
+    quota_manager()->SetQuota(sandbox_file_system_.storage_key(), usage);
   }
 
   int64_t GetUsage() {
@@ -278,7 +281,6 @@ class FileSystemOperationImplTest : public testing::Test {
     int64_t quota;
     GetUsageAndQuota(nullptr, &quota);
     quota_manager()->SetQuota(sandbox_file_system_.storage_key(),
-                              sandbox_file_system_.storage_type(),
                               quota + quota_delta);
   }
 
@@ -371,7 +373,9 @@ class FileSystemOperationImplTest : public testing::Test {
     return status;
   }
 
-  base::File::Error GetMetadata(const FileSystemURL& url, int fields) {
+  base::File::Error GetMetadata(
+      const FileSystemURL& url,
+      FileSystemOperation::GetMetadataFieldSet fields) {
     base::File::Error status;
     base::RunLoop run_loop;
     update_observer_.Enable();
@@ -541,7 +545,7 @@ TEST_F(FileSystemOperationImplTest, TestMoveSuccessSrcFileAndOverwrite) {
       Move(src_file, dest_file, FileSystemOperation::CopyOrMoveOptionSet()));
   EXPECT_TRUE(FileExists("dest"));
 
-  EXPECT_EQ(1, change_observer()->get_and_reset_modify_file_count());
+  EXPECT_EQ(1, change_observer()->get_and_reset_create_file_from_count());
   EXPECT_EQ(1, change_observer()->get_and_reset_remove_file_count());
   EXPECT_TRUE(change_observer()->HasNoChange());
 
@@ -817,9 +821,8 @@ TEST_F(FileSystemOperationImplTest, TestCopySuccessSamePath) {
 TEST_F(FileSystemOperationImplTest, TestCopyInForeignFileSuccess) {
   base::FilePath src_local_disk_file_path;
   base::CreateTemporaryFile(&src_local_disk_file_path);
-  const char test_data[] = "foo";
-  int data_size = std::size(test_data);
-  base::WriteFile(src_local_disk_file_path, test_data, data_size);
+  constexpr std::string_view test_data = "foo";
+  base::WriteFile(src_local_disk_file_path, test_data);
 
   FileSystemURL dest_dir(CreateDirectory("dest"));
 
@@ -837,18 +840,18 @@ TEST_F(FileSystemOperationImplTest, TestCopyInForeignFileSuccess) {
   EXPECT_GT(after_usage, before_usage);
 
   // Compare contents of src and copied file.
-  char buffer[100];
-  EXPECT_EQ(data_size,
-            base::ReadFile(PlatformPath("dest/file"), buffer, data_size));
-  for (int i = 0; i < data_size; ++i)
-    EXPECT_EQ(test_data[i], buffer[i]);
+  std::array<char, 100> buffer;
+  auto read_span = base::span(buffer).first(test_data.size());
+  EXPECT_EQ(test_data.size(),
+            base::ReadFile(PlatformPath("dest/file"), read_span).value_or(0));
+  EXPECT_EQ(test_data, base::as_string_view(read_span));
 }
 
 TEST_F(FileSystemOperationImplTest, TestCopyInForeignFileFailureByQuota) {
   base::FilePath src_local_disk_file_path;
   base::CreateTemporaryFile(&src_local_disk_file_path);
-  const char test_data[] = "foo";
-  base::WriteFile(src_local_disk_file_path, test_data, std::size(test_data));
+  constexpr std::string_view test_data = "foo";
+  base::WriteFile(src_local_disk_file_path, test_data);
 
   FileSystemURL dest_dir(CreateDirectory("dest"));
 
@@ -936,8 +939,7 @@ TEST_F(FileSystemOperationImplTest, TestCreateDirSuccessExclusive) {
 
 TEST_F(FileSystemOperationImplTest, TestExistsAndMetadataFailure) {
   EXPECT_EQ(base::File::FILE_ERROR_NOT_FOUND,
-            GetMetadata(URLForPath("nonexistent"),
-                        FileSystemOperation::GET_METADATA_FIELD_NONE));
+            GetMetadata(URLForPath("nonexistent"), {}));
 
   EXPECT_EQ(base::File::FILE_ERROR_NOT_FOUND,
             FileExists(URLForPath("nonexistent")));
@@ -957,7 +959,7 @@ TEST_F(FileSystemOperationImplTest, TestExistsAndMetadataSuccess) {
 
   EXPECT_EQ(
       base::File::FILE_OK,
-      GetMetadata(dir, FileSystemOperation::GET_METADATA_FIELD_IS_DIRECTORY));
+      GetMetadata(dir, {FileSystemOperation::GetMetadataField::kIsDirectory}));
   EXPECT_TRUE(info().is_directory);
   ++read_access;
 
@@ -966,7 +968,7 @@ TEST_F(FileSystemOperationImplTest, TestExistsAndMetadataSuccess) {
 
   EXPECT_EQ(
       base::File::FILE_OK,
-      GetMetadata(file, FileSystemOperation::GET_METADATA_FIELD_IS_DIRECTORY));
+      GetMetadata(file, {FileSystemOperation::GetMetadataField::kIsDirectory}));
   EXPECT_FALSE(info().is_directory);
   ++read_access;
 
@@ -1074,15 +1076,16 @@ TEST_F(FileSystemOperationImplTest, TestTruncate) {
   FileSystemURL file(CreateFile("file"));
   base::FilePath platform_path = PlatformPath("file");
 
-  char test_data[] = "test data";
-  int data_size = static_cast<int>(sizeof(test_data));
-  EXPECT_EQ(data_size, base::WriteFile(platform_path, test_data, data_size));
+  constexpr std::string_view test_data = "test data";
+  constexpr int data_size = test_data.size();
+  EXPECT_TRUE(base::WriteFile(platform_path, test_data));
 
   // Check that its length is the size of the data written.
   EXPECT_EQ(
       base::File::FILE_OK,
-      GetMetadata(file, FileSystemOperation::GET_METADATA_FIELD_IS_DIRECTORY |
-                            FileSystemOperation::GET_METADATA_FIELD_SIZE));
+      GetMetadata(file,
+                  {storage::FileSystemOperation::GetMetadataField::kIsDirectory,
+                   storage::FileSystemOperation::GetMetadataField::kSize}));
   EXPECT_FALSE(info().is_directory);
   EXPECT_EQ(data_size, info().size);
 
@@ -1096,13 +1099,13 @@ TEST_F(FileSystemOperationImplTest, TestTruncate) {
   // Check that its length is now 17 and that it's all zeroes after the test
   // data.
   EXPECT_EQ(length, GetFileSize("file"));
-  char data[100];
-  EXPECT_EQ(length, base::ReadFile(platform_path, data, length));
-  for (int i = 0; i < length; ++i) {
-    if (i < static_cast<int>(sizeof(test_data)))
-      EXPECT_EQ(test_data[i], data[i]);
-    else
-      EXPECT_EQ(0, data[i]);
+  std::array<char, 100> data;
+  auto data_span = base::span(data).first(static_cast<size_t>(length));
+  EXPECT_EQ(static_cast<uint64_t>(length),
+            base::ReadFile(platform_path, data_span).value_or(0));
+  EXPECT_EQ(test_data, base::as_string_view(data_span.first(test_data.size())));
+  for (char c : data_span.subspan(test_data.size())) {
+    EXPECT_EQ(0, c);
   }
 
   // Shorten the file by truncating it.
@@ -1114,9 +1117,10 @@ TEST_F(FileSystemOperationImplTest, TestTruncate) {
 
   // Check that its length is now 3 and that it contains only bits of test data.
   EXPECT_EQ(length, GetFileSize("file"));
-  EXPECT_EQ(length, base::ReadFile(platform_path, data, length));
-  for (int i = 0; i < length; ++i)
-    EXPECT_EQ(test_data[i], data[i]);
+  data_span = base::span(data).first(static_cast<size_t>(length));
+  EXPECT_EQ(static_cast<uint64_t>(length),
+            base::ReadFile(platform_path, data_span).value_or(0));
+  EXPECT_EQ(test_data.substr(0, length), base::as_string_view(data_span));
 
   // Truncate is not a 'read' access.  (Here expected access count is 1
   // since we made 1 read access for GetMetadata.)
@@ -1142,7 +1146,7 @@ TEST_F(FileSystemOperationImplTest, TestTruncateFailureByQuota) {
   EXPECT_EQ(10, GetFileSize("dir/file"));
 }
 
-// TODO(https://crbug.com/702990): Remove this test once last_access_time has
+// TODO(crbug.com/40511450): Remove this test once last_access_time has
 // been removed after PPAPI has been deprecated. Fuchsia does not support touch,
 // which breaks this test that relies on it. Since PPAPI is being deprecated,
 // this test is excluded from the Fuchsia build.

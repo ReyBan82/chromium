@@ -32,15 +32,20 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_CLIPBOARD_COMMANDS_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_COMMANDS_CLIPBOARD_COMMANDS_H_
 
+#include "base/gtest_prod_util.h"
+#include "third_party/abseil-cpp/absl/numeric/int128.h"
+#include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
+class DataTransfer;
 class DocumentFragment;
 class Element;
 class Event;
+class ExecutionContext;
 class LocalFrame;
 
 enum class DataTransferAccessPolicy;
@@ -48,8 +53,20 @@ enum class EditorCommandSource;
 enum class PasteMode;
 
 // This class provides static functions about commands related to clipboard.
-class ClipboardCommands {
+class CORE_EXPORT ClipboardCommands {
   STATIC_ONLY(ClipboardCommands);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardTest, PasteEventUninterruptedReadText);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardTest,
+                           PasteEventInterruptedReadTextRejected);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardTest, PasteEventInterruptedReadRejected);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardTest,
+                           PasteEventReadTextPausedAfterCallRejected);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardTest,
+                           PasteEventReadPausedAfterCallRejected);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardTest,
+                           GlobalSelectionPasteEventReadTextRequiresPermission);
+  FRIEND_TEST_ALL_PREFIXES(ClipboardTest,
+                           GlobalSelectionPasteEventGrantedReadTextResolves);
 
  public:
   static bool EnabledCopy(LocalFrame&, Event*, EditorCommandSource);
@@ -77,11 +94,24 @@ class ClipboardCommands {
                                         Event*,
                                         EditorCommandSource,
                                         const String&);
+  static bool ExecutePasteFromImageUrl(LocalFrame&,
+                                       Event*,
+                                       EditorCommandSource,
+                                       const String&);
 
   static bool PasteSupported(LocalFrame*);
 
   static bool CanReadClipboard(LocalFrame&, EditorCommandSource);
   static bool CanWriteClipboard(LocalFrame&, EditorCommandSource);
+
+  // Returns true when handling a "cut" or "copy" command that originated from
+  // the user agent.
+  static bool IsExecutingCutOrCopy(ExecutionContext&);
+  // As above, but for the "paste" event.
+  static bool IsExecutingPaste(ExecutionContext&);
+  // Returns the clipboard sequence number at the start of executing paste.
+  static std::optional<absl::uint128> GetSequenceNumberForExecutingPaste(
+      ExecutionContext&);
 
  private:
   static bool CanSmartReplaceInClipboard(LocalFrame&);
@@ -106,9 +136,13 @@ class ClipboardCommands {
                               DocumentFragment*,
                               bool smart_replace,
                               bool match_style,
-                              EditorCommandSource);
+                              EditorCommandSource,
+                              DataTransfer* = nullptr);
   static void PasteAsPlainTextFromClipboard(LocalFrame&, EditorCommandSource);
-  static void PasteFromClipboard(LocalFrame&, EditorCommandSource);
+  static void PasteFromClipboard(LocalFrame&,
+                                 EditorCommandSource,
+                                 DataTransfer*);
+  static void PasteFromImageUrl(LocalFrame&, EditorCommandSource, String);
 
   using FragmentAndPlainText = std::pair<DocumentFragment*, const bool>;
   static FragmentAndPlainText GetFragmentFromClipboard(LocalFrame&);

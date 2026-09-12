@@ -13,17 +13,20 @@
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
 #include "third_party/blink/renderer/core/testing/null_execution_context.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
 
 TEST(DocumentStateTest, ToStateVectorConnected) {
+  test::TaskEnvironment task_environment;
   ScopedNullExecutionContext execution_context;
   auto& doc = *Document::CreateForTest(execution_context.GetExecutionContext());
   Element* html = doc.CreateRawElement(html_names::kHTMLTag);
   doc.appendChild(html);
   Node* body = html->appendChild(doc.CreateRawElement(html_names::kBodyTag));
-  To<Element>(body)->setInnerHTML("<select form='ff'></select>");
-  DocumentState* document_state = doc.GetFormController().ControlStates();
+  To<Element>(body)->SetInnerHTMLWithoutTrustedTypes(
+      "<select form='ff'></select>");
+  DocumentState* document_state = doc.EnsureFormController().ControlStates();
   Vector<String> state1 = document_state->ToStateVector();
   // <signature>, <control-size>, <form-key>, <name>, <type>, <data-size(0)>
   EXPECT_EQ(6u, state1.size());
@@ -34,7 +37,29 @@ TEST(DocumentStateTest, ToStateVectorConnected) {
   EXPECT_EQ(0u, state2.size());
 }
 
+TEST(FormControllerTest, DeduplicatesAutofillInvalidationWithinMutation) {
+  test::TaskEnvironment task_environment;
+  ScopedNullExecutionContext execution_context;
+  auto& doc = *Document::CreateForTest(execution_context.GetExecutionContext());
+  Element* html = doc.CreateRawElement(html_names::kHTMLTag);
+  doc.appendChild(html);
+  Element* body = doc.CreateRawElement(html_names::kBodyTag);
+  html->appendChild(body);
+  Element* sibling = doc.CreateRawElement(html_names::kDivTag);
+  html->appendChild(sibling);
+  FormController& form_controller = doc.EnsureFormController();
+
+  EXPECT_TRUE(form_controller.ShouldInvalidateAncestorFormsForAutofill(*body));
+  EXPECT_FALSE(form_controller.ShouldInvalidateAncestorFormsForAutofill(*body));
+  EXPECT_TRUE(
+      form_controller.ShouldInvalidateAncestorFormsForAutofill(*sibling));
+  EXPECT_TRUE(form_controller.ShouldInvalidateAncestorFormsForAutofill(*body));
+  body->appendChild(doc.CreateRawElement(html_names::kDivTag));
+  EXPECT_TRUE(form_controller.ShouldInvalidateAncestorFormsForAutofill(*body));
+}
+
 TEST(FormControllerTest, FormSignature) {
+  test::TaskEnvironment task_environment;
   DummyPageHolder holder;
   Document& doc = holder.GetDocument();
   doc.GetSettings()->SetScriptEnabled(true);
@@ -50,7 +75,7 @@ TEST(FormControllerTest, FormSignature) {
           </form>`;
   )SCRIPT");
   doc.body()->appendChild(script);
-  Element* form = doc.QuerySelector("form", ASSERT_NO_EXCEPTION);
+  Element* form = doc.QuerySelector(AtomicString("form"), ASSERT_NO_EXCEPTION);
   ASSERT_TRUE(form);
   EXPECT_EQ(String("http://example.com/ [1cb 3s ]"),
             FormSignature(*To<HTMLFormElement>(form)))

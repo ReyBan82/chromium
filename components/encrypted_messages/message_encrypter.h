@@ -6,9 +6,11 @@
 #define COMPONENTS_ENCRYPTED_MESSAGES_MESSAGE_ENCRYPTER_H_
 
 #include <stdint.h>
-#include <string>
 
-#include "base/strings/string_piece.h"
+#include <string>
+#include <string_view>
+
+#include "base/containers/span.h"
 
 namespace encrypted_messages {
 
@@ -19,16 +21,16 @@ class EncryptedMessage;
 // key. The remote message recipient can decrypt the message by performing the
 // same key exchange using the client public key (included in EncryptedMessage)
 // to recover the shared secret.
-bool EncryptSerializedMessage(const uint8_t* server_public_key,
+bool EncryptSerializedMessage(base::span<const uint8_t, 32> server_public_key,
                               uint32_t server_public_key_version,
-                              base::StringPiece hkdf_label,
+                              std::string_view hkdf_label,
                               const std::string& message,
                               EncryptedMessage* encrypted_message);
 
 // Decrypts a message that was encrypted using the above function.
 // Used only by tests.
-bool DecryptMessageForTesting(const uint8_t server_private_key[32],
-                              base::StringPiece hkdf_label,
+bool DecryptMessageForTesting(base::span<const uint8_t, 32> server_private_key,
+                              std::string_view hkdf_label,
                               const EncryptedMessage& encrypted_message,
                               std::string* decrypted_serialized_message);
 

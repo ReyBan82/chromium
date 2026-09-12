@@ -9,9 +9,9 @@
 #include "cc/animation/animation_host.h"
 #include "cc/test/fake_impl_task_runner_provider.h"
 #include "cc/test/fake_layer_tree_host.h"
-#include "cc/test/fake_layer_tree_host_client.h"
+#include "cc/test/fake_layer_tree_host_delegate.h"
 #include "cc/test/fake_layer_tree_host_impl.h"
-#include "cc/test/stub_layer_tree_host_single_thread_client.h"
+#include "cc/test/stub_layer_tree_host_single_thread_delegate.h"
 #include "cc/test/test_task_graph_runner.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/perf/perf_result_reporter.h"
@@ -33,11 +33,11 @@ class LayerPerfTest : public testing::Test {
 
  protected:
   void SetUp() override {
-    animation_host_ = AnimationHost::CreateForTesting(ThreadInstance::MAIN);
+    animation_host_ = AnimationHost::CreateForTesting(ThreadInstance::kMain);
     layer_tree_host_ = FakeLayerTreeHost::Create(
         &fake_client_, &task_graph_runner_, animation_host_.get());
     layer_tree_host_->InitializeSingleThreaded(
-        &single_thread_client_,
+        &single_thread_delegate_,
         base::SingleThreadTaskRunner::GetCurrentDefault());
   }
 
@@ -58,8 +58,8 @@ class LayerPerfTest : public testing::Test {
   TestTaskGraphRunner task_graph_runner_;
   FakeLayerTreeHostImpl host_impl_;
 
-  StubLayerTreeHostSingleThreadClient single_thread_client_;
-  FakeLayerTreeHostClient fake_client_;
+  StubLayerTreeHostSingleThreadDelegate single_thread_delegate_;
+  FakeLayerTreeHostDelegate fake_client_;
   std::unique_ptr<AnimationHost> animation_host_;
   std::unique_ptr<FakeLayerTreeHost> layer_tree_host_;
   base::LapTimer timer_;
@@ -90,9 +90,8 @@ TEST_F(LayerPerfTest, PushPropertiesTo) {
     // layer_tree_host_->ActivateCommitState() and the second argument would
     // come from layer_tree_host_->active_commit_state(); we use
     // pending_commit_state() just to keep the test code simple.
-    test_layer->PushPropertiesTo(
-        impl_layer.get(), *layer_tree_host_->GetPendingCommitState(),
-        layer_tree_host_->GetThreadUnsafeCommitState());
+    test_layer->PushPropertiesTo(impl_layer.get(),
+                                 *layer_tree_host_->GetPendingCommitState());
 
     transform_origin_z += 0.01f;
     scrollable = !scrollable;
@@ -110,9 +109,8 @@ TEST_F(LayerPerfTest, PushPropertiesTo) {
   // Properties didn't change.
   timer_.Reset();
   do {
-    test_layer->PushPropertiesTo(
-        impl_layer.get(), *layer_tree_host_->GetPendingCommitState(),
-        layer_tree_host_->GetThreadUnsafeCommitState());
+    test_layer->PushPropertiesTo(impl_layer.get(),
+                                 *layer_tree_host_->GetPendingCommitState());
     timer_.NextLap();
   } while (!timer_.HasTimeLimitExpired());
 
@@ -120,7 +118,7 @@ TEST_F(LayerPerfTest, PushPropertiesTo) {
   reporter.AddResult("", timer_.LapsPerSecond());
 }
 
-TEST_F(LayerPerfTest, ImplPushPropertiesTo) {
+TEST_F(LayerPerfTest, ImplMovePropertiesToActiveLayer) {
   std::unique_ptr<LayerImpl> test_layer =
       LayerImpl::Create(host_impl_.active_tree(), 1);
   std::unique_ptr<LayerImpl> impl_layer =
@@ -140,7 +138,7 @@ TEST_F(LayerPerfTest, ImplPushPropertiesTo) {
     test_layer->SetDrawsContent(draws_content);
     test_layer->SetContentsOpaque(contents_opaque);
 
-    test_layer->PushPropertiesTo(impl_layer.get());
+    test_layer->MovePropertiesToActiveLayer(impl_layer.get());
 
     background_color =
         background_color == SkColors::kRed ? SkColors::kGreen : SkColors::kRed;
@@ -160,7 +158,7 @@ TEST_F(LayerPerfTest, ImplPushPropertiesTo) {
   // Properties didn't change.
   timer_.Reset();
   do {
-    test_layer->PushPropertiesTo(impl_layer.get());
+    test_layer->MovePropertiesToActiveLayer(impl_layer.get());
     timer_.NextLap();
   } while (!timer_.HasTimeLimitExpired());
 

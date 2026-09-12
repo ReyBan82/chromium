@@ -6,9 +6,12 @@
 
 set -e
 
-if [ "$1" = "purge" ]; then
-  delgroup --quiet chrome-remote-desktop > /dev/null || true
+# Only do complete clean-up on purge.
+if [ "$1" != "purge" ]; then
+  exit 0
 fi
+
+delgroup --quiet chrome-remote-desktop > /dev/null || true
 
 APT_CONFIG="`which apt-config 2> /dev/null`"
 
@@ -28,5 +31,8 @@ if [ -x "$APT_CONFIG" ]; then
   eval $("$APT_CONFIG" shell APT_SOURCESDIR 'Dir::Etc::sourceparts/d')
   rm -f "${APT_SOURCESDIR}chrome-remote-desktop.list"
 fi
+
+# Remove the package's configuration directory.
+rm -rf /etc/chrome-remote-desktop
 
 #DEBHELPER#

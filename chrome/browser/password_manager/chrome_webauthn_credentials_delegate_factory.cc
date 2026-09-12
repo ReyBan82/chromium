@@ -39,14 +39,15 @@ ChromeWebAuthnCredentialsDelegateFactory::GetDelegateForFrame(
   // A RenderFrameHost without a live RenderFrame will never call
   // RenderFrameDeleted(), which would leave the new delegate in the map for
   // the lifetime of the WebContents.
-  if (!frame_host->IsRenderFrameLive())
+  if (!frame_host->IsRenderFrameLive()) {
     return nullptr;
+  }
 
   auto it = delegate_map_.find(frame_host);
   if (it == delegate_map_.end()) {
     auto [new_it, inserted] = delegate_map_.try_emplace(
         frame_host,
-        std::make_unique<ChromeWebAuthnCredentialsDelegate>(web_contents()));
+        std::make_unique<ChromeWebAuthnCredentialsDelegate>(frame_host));
     it = new_it;
   }
   return it->second.get();

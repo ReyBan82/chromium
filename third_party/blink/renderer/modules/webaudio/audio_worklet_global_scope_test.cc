@@ -6,8 +6,12 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/synchronization/waitable_event.h"
+#include "base/test/scoped_feature_list.h"
+#include "media/base/audio_bus.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/mojom/v8_cache_options.mojom-blink.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/public/platform/web_url_request.h"
@@ -18,6 +22,7 @@
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_gc_controller.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_microtasks_scope.h"
 #include "third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -39,9 +44,9 @@
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_processor_definition.h"
 #include "third_party/blink/renderer/modules/webaudio/offline_audio_worklet_thread.h"
 #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+#include "third_party/blink/renderer/platform/audio/denormal_disabler.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
 #include "third_party/blink/renderer/platform/bindings/source_location.h"
-#include "third_party/blink/renderer/platform/bindings/v8_binding_macros.h"
 #include "third_party/blink/renderer/platform/bindings/v8_object_constructor.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_loader_options.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
@@ -83,9 +88,10 @@ class AudioWorkletGlobalScopeTest : public PageTestBase, public ModuleTestBase {
             nullptr /* web_worker_fetch_context */,
             Vector<network::mojom::blink::ContentSecurityPolicyPtr>(),
             Vector<network::mojom::blink::ContentSecurityPolicyPtr>(),
-            window->GetReferrerPolicy(), window->GetSecurityOrigin(),
-            window->IsSecureContext(), window->GetHttpsState(),
-            nullptr /* worker_clients */, nullptr /* content_settings_client */,
+            window->GetReferrerPolicy(), DocumentPolicy::DocumentPolicyBundle{},
+            window->GetSecurityOrigin(), window->IsSecureContext(),
+            window->GetHttpsState(), nullptr /* worker_clients */,
+            nullptr /* content_settings_client */,
             OriginTrialContext::GetInheritedTrialFeatures(window).get(),
             base::UnguessableToken::Create(), nullptr /* worker_settings */,
             mojom::blink::V8CacheOptions::kDefault,
@@ -96,7 +102,7 @@ class AudioWorkletGlobalScopeTest : public PageTestBase, public ModuleTestBase {
             BeginFrameProviderParams(), nullptr /* parent_permissions_policy */,
             window->GetAgentClusterID(), ukm::kInvalidSourceId,
             window->GetExecutionContextToken()),
-        absl::nullopt, std::make_unique<WorkerDevToolsParams>());
+        std::nullopt, std::make_unique<WorkerDevToolsParams>());
     return thread;
   }
 
@@ -119,6 +125,17 @@ class AudioWorkletGlobalScopeTest : public PageTestBase, public ModuleTestBase {
             &AudioWorkletGlobalScopeTest::RunSimpleProcessTestOnWorkletThread,
             CrossThreadUnretained(this), CrossThreadUnretained(thread),
             CrossThreadUnretained(&waitable_event)));
+    waitable_event.Wait();
+  }
+
+  void RunDenormalProcessTest(WorkerThread* thread, bool expect_denormals) {
+    base::WaitableEvent waitable_event;
+    PostCrossThreadTask(
+        *thread->GetTaskRunner(TaskType::kInternalTest), FROM_HERE,
+        CrossThreadBindOnce(
+            &AudioWorkletGlobalScopeTest::RunDenormalProcessTestOnWorkletThread,
+            CrossThreadUnretained(this), CrossThreadUnretained(thread),
+            expect_denormals, CrossThreadUnretained(&waitable_event)));
     waitable_event.Wait();
   }
 
@@ -214,8 +231,7 @@ class AudioWorkletGlobalScopeTest : public PageTestBase, public ModuleTestBase {
     EXPECT_TRUE(processor);
     EXPECT_EQ(processor->Name(), "testProcessor");
     v8::Local<v8::Value> processor_value =
-        ToV8Traits<AudioWorkletProcessor>::ToV8(script_state, processor)
-            .ToLocalChecked();
+        ToV8Traits<AudioWorkletProcessor>::ToV8(script_state, processor);
     EXPECT_TRUE(processor_value->IsObject());
 
     wait_event->Signal();
@@ -288,9 +304,7 @@ class AudioWorkletGlobalScopeTest : public PageTestBase, public ModuleTestBase {
     ScriptState::Scope scope(script_state);
     v8::Isolate* isolate = script_state->GetIsolate();
     EXPECT_TRUE(isolate);
-    v8::MicrotasksScope microtasks_scope(
-        isolate, ToMicrotaskQueue(script_state),
-        v8::MicrotasksScope::kDoNotRunMicrotasks);
+    V8DoNotRunMicrotasksScope microtasks_scope(script_state);
 
     String source_code =
         R"JS(
@@ -333,16 +347,88 @@ class AudioWorkletGlobalScopeTest : public PageTestBase, public ModuleTestBase {
     output_buses.push_back(output_bus.get());
 
     // Fill `input_channel` with 1 and zero out `output_bus`.
-    std::fill(input_channel->MutableData(),
-              input_channel->MutableData() + input_channel->length(), 1);
+    std::ranges::fill(input_channel->MutableSpan(), 1);
     output_bus->Zero();
 
     // Then invoke the process() method to perform JS buffer manipulation. The
     // output buffer should contain a constant value of 2.
     processor->Process(input_buses, output_buses, param_data_map);
     for (unsigned i = 0; i < output_channel->length(); ++i) {
-      EXPECT_EQ(output_channel->Data()[i], 2);
+      EXPECT_EQ(output_channel->Span()[i], 2);
     }
+
+    wait_event->Signal();
+  }
+
+  void RunDenormalProcessTestOnWorkletThread(WorkerThread* thread,
+                                             bool expect_denormals,
+                                             base::WaitableEvent* wait_event) {
+    EXPECT_TRUE(thread->IsCurrentThread());
+
+    auto* global_scope = To<AudioWorkletGlobalScope>(thread->GlobalScope());
+    ScriptState* script_state =
+        global_scope->ScriptController()->GetScriptState();
+
+    ScriptState::Scope scope(script_state);
+    v8::Isolate* isolate = script_state->GetIsolate();
+    EXPECT_TRUE(isolate);
+    V8DoNotRunMicrotasksScope microtasks_scope(script_state);
+
+    String source_code =
+        R"JS(
+          class TestProcessor extends AudioWorkletProcessor {
+            constructor () { super(); }
+            process (inputs, outputs) {
+              let f64 = new Float64Array(1);
+              // The minimum positive normal 64-bit float is
+              // 2.225e-308. Therefore, 1.0e-309 is a denormal
+              // double. If FTZ/DAZ is enabled, it is treated
+              // as zero or flushed to zero, making f64[0]
+              // equal to 0.0. If disabled, the division
+              // computes 1.0e-310 (a valid denormal double
+              // > 0.0).
+              let denorm = 1.0e-309;
+              f64[0] = denorm / 10.0;
+              let outputChannel = outputs[0][0];
+              outputChannel[0] = f64[0] > 0.0 ? 1.0 : 0.0;
+            }
+          }
+          registerProcessor('testProcessor', TestProcessor);
+        )JS";
+    ExpectEvaluateScriptModule(global_scope, source_code, true);
+
+    auto* channel = MakeGarbageCollected<MessageChannel>(thread->GlobalScope());
+    MessagePortChannel dummy_port_channel = channel->port2()->Disentangle();
+    AudioWorkletProcessor* processor =
+        global_scope->CreateProcessor("testProcessor",
+                                      dummy_port_channel,
+                                      SerializedScriptValue::NullValue());
+    EXPECT_TRUE(processor);
+
+    Vector<scoped_refptr<AudioBus>> input_buses;
+    Vector<scoped_refptr<AudioBus>> output_buses;
+    HashMap<String, std::unique_ptr<AudioFloatArray>> param_data_map;
+    scoped_refptr<AudioBus> input_bus =
+        AudioBus::Create(1, kRenderQuantumFrames);
+    scoped_refptr<AudioBus> output_bus =
+        AudioBus::Create(1, kRenderQuantumFrames);
+    AudioChannel* output_channel = output_bus->Channel(0);
+
+    input_buses.push_back(input_bus.get());
+    output_buses.push_back(output_bus.get());
+    output_bus->Zero();
+
+    // Simulate the audio thread rendering stack by instantiating
+    // DenormalDisabler.
+    DenormalDisabler scoped_disabler;
+
+    // processor->Process() internally instantiates DenormalEnabler, which
+    // disables FTZ/DAZ during V8 execution if enabled.
+    processor->Process(input_buses, output_buses, param_data_map);
+
+    // Verify that the JS execution was affected by the outer
+    // DenormalDisabler only if the feature is disabled.
+    EXPECT_EQ(output_channel->Span()[0], expect_denormals ? 1.0f : 0.0f);
 
     wait_event->Signal();
   }
@@ -417,6 +503,30 @@ TEST_F(AudioWorkletGlobalScopeTest, BufferProcessing) {
   std::unique_ptr<OfflineAudioWorkletThread> thread
       = CreateAudioWorkletThread();
   RunSimpleProcessTest(thread.get());
+  thread->Terminate();
+  thread->WaitForShutdownForTesting();
+}
+
+TEST_F(AudioWorkletGlobalScopeTest, DenormalProcessing_FeatureEnabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      blink::features::kAudioWorkletJSDenormalEnabler);
+
+  std::unique_ptr<OfflineAudioWorkletThread> thread =
+      CreateAudioWorkletThread();
+  RunDenormalProcessTest(thread.get(), /*expect_denormals=*/true);
+  thread->Terminate();
+  thread->WaitForShutdownForTesting();
+}
+
+TEST_F(AudioWorkletGlobalScopeTest, DenormalProcessing_FeatureDisabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      blink::features::kAudioWorkletJSDenormalEnabler);
+
+  std::unique_ptr<OfflineAudioWorkletThread> thread =
+      CreateAudioWorkletThread();
+  RunDenormalProcessTest(thread.get(), /*expect_denormals=*/false);
   thread->Terminate();
   thread->WaitForShutdownForTesting();
 }

@@ -5,13 +5,15 @@
 #ifndef UI_OZONE_PUBLIC_GL_OZONE_H_
 #define UI_OZONE_PUBLIC_GL_OZONE_H_
 
+#include <optional>
 #include <string>
 
 #include "base/component_export.h"
 #include "base/memory/scoped_refptr.h"
+#include "components/viz/common/resources/shared_image_format.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/native_pixmap.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/gl/gl_display.h"
 #include "ui/gl/gl_implementation.h"
 #include "ui/gl/gpu_preference.h"
@@ -65,9 +67,9 @@ class COMPONENT_EXPORT(OZONE_BASE) GLOzone {
   // Clears static GL bindings.
   virtual void ShutdownGL(gl::GLDisplay* display) = 0;
 
-  // Returns true if the NativePixmap of the specified type can be imported
-  // into GL using ImportNativePixmap().
-  virtual bool CanImportNativePixmap() = 0;
+  // Returns true if the NativePixmap of the specified type and format can be
+  // imported into GL using ImportNativePixmap().
+  virtual bool CanImportNativePixmap(viz::SharedImageFormat format) = 0;
 
   // Imports NativePixmap into GL and binds it to the provided texture_id. The
   // NativePixmapGLBinding does not take ownership of the provided texture_id
@@ -76,8 +78,8 @@ class COMPONENT_EXPORT(OZONE_BASE) GLOzone {
   // live until glDeleteTextures fn is called on all platforms.
   virtual std::unique_ptr<NativePixmapGLBinding> ImportNativePixmap(
       scoped_refptr<gfx::NativePixmap> pixmap,
-      gfx::BufferFormat plane_format,
-      gfx::BufferPlane plane,
+      viz::SharedImageFormat plane_format,
+      std::optional<int> plane_index,
       gfx::Size plane_size,
       const gfx::ColorSpace& color_space,
       GLenum target,

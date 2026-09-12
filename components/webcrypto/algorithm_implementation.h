@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/containers/span.h"
@@ -37,10 +38,6 @@ class Status;
 //   * The key usages have already been verified. In fact in the case of calls
 //     to Encrypt()/Decrypt() the corresponding key usages may not be present
 //     (when wrapping/unwrapping).
-//
-// An AlgorithmImplementation can also assume that crypto::EnsureOpenSSLInit()
-// will be called before any of its methods are invoked (except the
-// constructor).
 class AlgorithmImplementation {
  public:
   virtual ~AlgorithmImplementation();
@@ -106,20 +103,17 @@ class AlgorithmImplementation {
   // (crypto.subtle.deriveBits() dispatches to this)
   virtual Status DeriveBits(const blink::WebCryptoAlgorithm& algorithm,
                             const blink::WebCryptoKey& base_key,
-                            bool has_optional_length_bits,
-                            unsigned int optional_length_bits,
+                            std::optional<unsigned int> length_bits,
                             std::vector<uint8_t>* derived_bytes) const;
 
   // This is what is run whenever the spec says:
   //    "Let length be the result of executing the get key length algorithm"
   //
   // In the Web Crypto spec the operation returns either "null" or an
-  // "Integer". In this code "null" is represented by setting
-  // |*has_length_bits = false|.
+  // "Integer". In this code "null" is represented with |std::nullopt|.
   virtual Status GetKeyLength(
       const blink::WebCryptoAlgorithm& key_length_algorithm,
-      bool* has_length_bits,
-      unsigned int* length_bits) const;
+      std::optional<unsigned int>* length_bits) const;
 
   // This is what is run whenever the spec says:
   //    "Let result be the result of performing the import key operation"
@@ -139,6 +133,30 @@ class AlgorithmImplementation {
   virtual Status ExportKey(blink::WebCryptoKeyFormat format,
                            const blink::WebCryptoKey& key,
                            std::vector<uint8_t>* buffer) const;
+
+  virtual Status Encapsulate(const blink::WebCryptoAlgorithm& algorithm,
+                             const blink::WebCryptoKey& encapsulation_key,
+                             std::vector<uint8_t>* out_shared_secret,
+                             std::vector<uint8_t>* out_ciphertext) const;
+
+  virtual Status Decapsulate(const blink::WebCryptoAlgorithm& algorithm,
+                             const blink::WebCryptoKey& decapsulation_key,
+                             base::span<const uint8_t> ciphertext,
+                             std::vector<uint8_t>* out_shared_secret) const;
+
+  virtual Status GetPublicKey(const blink::WebCryptoKey& key,
+                              blink::WebCryptoKeyUsageMask usages,
+                              blink::WebCryptoKey* public_key) const;
+
+  // Returns true if the operation and algorithm are supported.
+  //
+  // This function need only check for the specific operations where parameters
+  // applied to the algorithm may impact whether the operation is supported or
+  // not, or if deriveKey/deriveBits is supported and the length_bits needs to
+  // be validated.
+  virtual bool Supports(blink::WebCryptoOperation op,
+                        const blink::WebCryptoAlgorithm& algorithm,
+                        std::optional<unsigned int> length_bits) const;
 
   // -----------------------------------------------
   // Structured clone
@@ -160,14 +178,10 @@ class AlgorithmImplementation {
   //     and be able to survive future migrations to crypto libraries)
   //   * Work for all keys (including ones marked as non-extractable).
   //   * Gracefully handle invalid inputs
-  //
-  // Tests to verify structured cloning are available in:
-  //   LayoutTests/crypto/clone-*.html
 
-  // Note that SerializeKeyForClone() is not virtual because all
-  // implementations end up doing the same thing.
-  Status SerializeKeyForClone(const blink::WebCryptoKey& key,
-                              blink::WebVector<uint8_t>* key_data) const;
+  // Serializes key data for Blink.
+  virtual Status SerializeKeyForClone(const blink::WebCryptoKey& key,
+                                      std::vector<uint8_t>* key_data) const;
 
   // Deserializes key data from Blink (used for structured cloning).
   //

@@ -4,13 +4,16 @@
 
 package org.chromium.base.metrics;
 
-import androidx.annotation.VisibleForTesting;
+import com.google.errorprone.annotations.DoNotMock;
 
 import org.chromium.base.Callback;
+import org.chromium.build.annotations.NullMarked;
 
 import java.util.List;
 
 /** Common interface for code recording UMA metrics. */
+@NullMarked
+@DoNotMock("Use HistogramWatcher for histograms or UserActionTester for user actions instead.")
 public interface UmaRecorder {
     /** Records a single sample of a boolean histogram. */
     void recordBooleanHistogram(String name, boolean sample);
@@ -72,7 +75,6 @@ public interface UmaRecorder {
      * @param name name of the histogram to look up
      * @param sample the bucket containing this sample value will be looked up
      */
-    @VisibleForTesting
     int getHistogramValueCountForTesting(String name, int sample);
 
     /**
@@ -81,7 +83,6 @@ public interface UmaRecorder {
      *
      * @param name name of the histogram to look up
      */
-    @VisibleForTesting
     int getHistogramTotalCountForTesting(String name);
 
     /**
@@ -90,7 +91,6 @@ public interface UmaRecorder {
      *
      * @param name name of the histogram to look up
      */
-    @VisibleForTesting
     List<HistogramBucket> getHistogramSamplesForTesting(String name);
 
     /**
@@ -99,7 +99,6 @@ public interface UmaRecorder {
      *
      * @param callback The callback to be added.
      */
-    @VisibleForTesting
     void addUserActionCallbackForTesting(Callback<String> callback);
 
     /**
@@ -107,6 +106,5 @@ public interface UmaRecorder {
      *
      * @param callback The callback to be removed.
      */
-    @VisibleForTesting
     void removeUserActionCallbackForTesting(Callback<String> callback);
 }

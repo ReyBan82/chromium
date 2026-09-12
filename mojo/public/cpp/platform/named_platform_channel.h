@@ -6,10 +6,10 @@
 #define MOJO_PUBLIC_CPP_PLATFORM_NAMED_PLATFORM_CHANNEL_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/command_line.h"
 #include "base/component_export.h"
-#include "base/strings/string_piece.h"
 #include "build/build_config.h"
 #include "mojo/public/cpp/platform/platform_channel_endpoint.h"
 #include "mojo/public/cpp/platform/platform_channel_server_endpoint.h"
@@ -35,11 +35,27 @@ class COMPONENT_EXPORT(MOJO_CPP_PLATFORM) NamedPlatformChannel {
 
 #if BUILDFLAG(IS_WIN)
   using ServerName = std::wstring;
+
+  enum class PipeNameType {
+    // "\\.\pipe\mojo.<server_name>".
+    kDefault,
+
+    // "\\.\pipe\LOCAL\mojo.<server_name>". Required to create the pipe inside
+    // an AppContainer sandbox.
+    kLocalPipe,
+
+    // "\\.\pipe\ProtectedPrefix\Administrators\mojo.<server_name>". Only
+    // Administrators and LocalSystem may create pipes there.
+    kAdminProtected,
+  };
 #else
   using ServerName = std::string;
 #endif
 
   struct COMPONENT_EXPORT(MOJO_CPP_PLATFORM) Options {
+    Options();
+    ~Options();
+
     // Specifies the name to use for the server. If empty, a random name is
     // generated.
     ServerName server_name;
@@ -50,11 +66,30 @@ class COMPONENT_EXPORT(MOJO_CPP_PLATFORM) NamedPlatformChannel {
     // |kDefaultSecurityDescriptor|.
     std::wstring security_descriptor;
 
-    // If |true|, only a server endpoint will be allowed with the given name and
-    // only one client will be able to connect. Otherwise many
-    // NamedPlatformChannel instances can be created with the same name and
-    // a different client can connect to each one.
+    // If |true|, only a single server endpoint will be allowed with the given
+    // name. Otherwise many NamedPlatformChannel instances can be created with
+    // the same name.
     bool enforce_uniqueness = true;
+
+    // If a client sets this value to `true`, it allows the server to
+    // impersonate the client. This is to allow for a high privilege server to
+    // impersonate a client.
+    bool allow_impersonation = false;
+
+    // The maximum number of clients that can connect at any given time.
+    // Acceptable values are in the range 1 through PIPE_UNLIMITED_INSTANCES
+    // (255).
+    size_t max_clients = 1;
+
+    // If |true|, the client will verify that the server process is running
+    // at the same or higher integrity level as the client. This is useful
+    // to prevent named pipe squatting attacks, where a lower-privilege
+    // process attempts to impersonate a trusted server.
+    bool verify_server_privilege = false;
+
+    // Selects the pipe name. The server and the client must both use the same
+    // value, as it changes the pipe name.
+    PipeNameType pipe_name_type = PipeNameType::kDefault;
 #elif BUILDFLAG(IS_POSIX)
     // On POSIX, every new unnamed NamedPlatformChannel creates a server socket
     // with a random name. This controls the directory where that happens.
@@ -68,27 +103,31 @@ class COMPONENT_EXPORT(MOJO_CPP_PLATFORM) NamedPlatformChannel {
 
   NamedPlatformChannel(const Options& options);
   NamedPlatformChannel(NamedPlatformChannel&& other);
-
-  NamedPlatformChannel(const NamedPlatformChannel&) = delete;
-  NamedPlatformChannel& operator=(const NamedPlatformChannel&) = delete;
-
-  ~NamedPlatformChannel();
-
   NamedPlatformChannel& operator=(NamedPlatformChannel&& other);
+  ~NamedPlatformChannel();
 
   const PlatformChannelServerEndpoint& server_endpoint() const {
     return server_endpoint_;
   }
 
   // Helper to create a ServerName from a UTF8 string regardless of platform.
-  static ServerName ServerNameFromUTF8(base::StringPiece name);
+  static ServerName ServerNameFromUTF8(std::string_view name);
+
+#if BUILDFLAG(IS_WIN)
+  static ServerName GenerateRandomServerName();
+
+  // Returns an OS name for the pipe based on `server_name` and `name_type`.
+  static std::wstring GetPipeNameFromServerName(
+      const ServerName& server_name,
+      PipeNameType name_type = PipeNameType::kDefault);
+#endif
 
   // Passes the local server endpoint for the channel. On Windows, this is a
   // named pipe server; on POSIX it's a bound, listening domain socket. In each
   // case it should accept a single new connection.
   //
-  // Use the handle to send or receive an invitation, with the endpoint type as
-  // |MOJO_INVITATION_TRANSPORT_TYPE_CHANNEL_SERVER|.
+  // Use with PlatformChannelServer to wait for a new connection, yielding a
+  // PlatformChannelEndpoint that is usable with the Mojo invitations API.
   [[nodiscard]] PlatformChannelServerEndpoint TakeServerEndpoint() {
     return std::move(server_endpoint_);
   }

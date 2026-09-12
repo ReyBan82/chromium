@@ -6,6 +6,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_LOADER_FETCH_FETCH_CLIENT_SETTINGS_OBJECT_H_
 
 #include "services/network/public/mojom/referrer_policy.mojom-blink-forward.h"
+#include "third_party/blink/public/mojom/frame/policy_container.mojom-blink.h"
 #include "third_party/blink/public/mojom/security_context/insecure_request_policy.mojom-blink-forward.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/loader/allowed_by_nosniff.h"
@@ -60,11 +61,21 @@ class PLATFORM_EXPORT FetchClientSettingsObject
   // "The default referrer policy for fetches performed using this environment
   // settings object as a request client."
   // https://html.spec.whatwg.org/C/#concept-settings-object-referrer-policy
-  virtual network::mojom::ReferrerPolicy GetReferrerPolicy() const = 0;
+  network::mojom::blink::ReferrerPolicy GetReferrerPolicy() const {
+    return GetPolicyContainerPolicies().referrer_policy;
+  }
+
+  // The policy container for fetches performed using this environment settings
+  // object as a request client.
+  virtual const mojom::blink::PolicyContainerPolicies&
+  GetPolicyContainerPolicies() const = 0;
 
   // "referrerURL" used in the "Determine request's Referrer" algorithm:
   // https://w3c.github.io/webappsec-referrer-policy/#determine-requests-referrer
-  virtual const String GetOutgoingReferrer() const = 0;
+  virtual const String GetOutgoingReferrer() const {
+    return GetOutgoingReferrerUrl().GetString();
+  }
+  virtual KURL GetOutgoingReferrerUrl() const = 0;
 
   // https://html.spec.whatwg.org/C/#https-state
   virtual HttpsState GetHttpsState() const = 0;

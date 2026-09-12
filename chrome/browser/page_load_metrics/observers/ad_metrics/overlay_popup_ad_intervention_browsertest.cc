@@ -7,8 +7,8 @@
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/test/base/chrome_test_utils.h"
 #include "components/infobars/content/content_infobar_manager.h"
 #include "components/infobars/core/infobar.h"
@@ -61,7 +61,7 @@ class OverlayPopupAdViolationBrowserTest
   base::test::ScopedFeatureList feature_list_;
 };
 
-// TODO(https://crbug.com/1199860): Fails on Linux MSan and ChromeOS.
+// TODO(crbug.com/40761472): Fails on Linux MSan and ChromeOS.
 #if BUILDFLAG(IS_CHROMEOS) || (BUILDFLAG(IS_LINUX) && defined(MEMORY_SANITIZER))
 #define MAYBE_NoOverlayPopupAd_AdInterventionNotTriggered \
   DISABLED_NoOverlayPopupAd_AdInterventionNotTriggered
@@ -95,11 +95,12 @@ IN_PROC_BROWSER_TEST_F(OverlayPopupAdViolationBrowserTest,
       subresource_filter::mojom::AdsViolation::kOverlayPopupAd, 0);
 }
 
-// TODO(https://crbug.com/1350894): Flaky on Linux MSAN and LSAN, and on
-// ChromeOS for debug builds.
+// TODO(crbug.com/40856777): Fix flakiness and re-enable test.
 #if (BUILDFLAG(IS_LINUX) &&                                     \
      (defined(MEMORY_SANITIZER) || defined(LEAK_SANITIZER))) || \
-    (BUILDFLAG(IS_CHROMEOS) && !defined(NDEBUG))
+    (BUILDFLAG(IS_CHROMEOS) && !defined(NDEBUG)) ||             \
+    (defined(LEAK_SANITIZER) && BUILDFLAG(IS_CHROMEOS) &&       \
+     defined(ADDRESS_SANITIZER))
 #define MAYBE_OverlayPopupAd_AdInterventionTriggered \
   DISABLED_OverlayPopupAd_AdInterventionTriggered
 #else
@@ -155,8 +156,12 @@ class OverlayPopupAdViolationBrowserTestWithoutEnforcement
   base::test::ScopedFeatureList feature_list_;
 };
 
-// TODO(https://crbug.com/1394447): Fails on Linux MSan.
-#if BUILDFLAG(IS_LINUX) && defined(MEMORY_SANITIZER)
+// TODO(crbug.com/40248595): Fails on Linux MSan, and ChromeOS Debug as
+// well as Asan LSsan.
+#if (BUILDFLAG(IS_LINUX) && defined(MEMORY_SANITIZER)) || \
+    (BUILDFLAG(IS_CHROMEOS) &&                            \
+     (!defined(NDEBUG) || defined(ADDRESS_SANITIZER) ||   \
+      defined(LEAK_SANITIZER)))
 #define MAYBE_OverlayPopupAd_NoAdInterventionTriggered \
   DISABLED_OverlayPopupAd_NoAdInterventionTriggered
 #else

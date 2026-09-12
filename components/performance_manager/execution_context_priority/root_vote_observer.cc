@@ -18,6 +18,11 @@ namespace {
 void SetPriorityAndReason(
     const execution_context::ExecutionContext* execution_context,
     const PriorityAndReason& priority_and_reason) {
+  // No property changes while the node is leaving graph.
+  if (execution_context->GetNodeState() == NodeState::kLeavingGraph) {
+    return;
+  }
+
   switch (execution_context->GetType()) {
     case execution_context::ExecutionContextType::kFrameNode:
       FrameNodeImpl::FromNode(execution_context->GetFrameNode())
@@ -43,31 +48,19 @@ VotingChannel RootVoteObserver::GetVotingChannel() {
   return channel;
 }
 
-void RootVoteObserver::OnVoteSubmitted(
-    VoterId voter_id,
-    const ExecutionContext* execution_context,
-    const Vote& vote) {
+void RootVoteObserver::OnVoteSet(VoterId voter_id,
+                                 const ExecutionContext* execution_context,
+                                 const std::optional<Vote>& vote) {
   DCHECK_EQ(voter_id_, voter_id);
-  SetPriorityAndReason(execution_context,
-                       PriorityAndReason(vote.value(), vote.reason()));
-}
-
-void RootVoteObserver::OnVoteChanged(VoterId voter_id,
-                                     const ExecutionContext* execution_context,
-                                     const Vote& new_vote) {
-  DCHECK_EQ(voter_id_, voter_id);
-  SetPriorityAndReason(execution_context,
-                       PriorityAndReason(new_vote.value(), new_vote.reason()));
-}
-
-void RootVoteObserver::OnVoteInvalidated(
-    VoterId voter_id,
-    const ExecutionContext* execution_context) {
-  DCHECK_EQ(voter_id_, voter_id);
-  SetPriorityAndReason(
-      execution_context,
-      PriorityAndReason(base::TaskPriority::LOWEST,
-                        FrameNodeImpl::kDefaultPriorityReason));
+  if (vote.has_value()) {
+    SetPriorityAndReason(execution_context,
+                         PriorityAndReason(vote->value(), vote->reason()));
+  } else {
+    SetPriorityAndReason(
+        execution_context,
+        PriorityAndReason(base::Process::Priority::kMinValue,
+                          FrameNodeImpl::kDefaultPriorityReason));
+  }
 }
 
 }  // namespace execution_context_priority

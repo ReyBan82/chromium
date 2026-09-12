@@ -10,6 +10,7 @@
 #include "base/location.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
+#include "media/base/audio_bus.h"
 #include "media/base/audio_glitch_info.h"
 #include "media/base/audio_hash.h"
 #include "media/base/fake_audio_worker.h"
@@ -26,6 +27,7 @@ NullAudioSink::NullAudioSink(
 
 NullAudioSink::~NullAudioSink() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  callback_ = nullptr;
 }
 
 void NullAudioSink::Initialize(const AudioParameters& params,
@@ -48,9 +50,13 @@ void NullAudioSink::Start() {
 void NullAudioSink::Stop() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   started_ = false;
+  playing_ = false;
   // Stop may be called at any time, so we have to check before stopping.
-  if (fake_worker_)
+  if (fake_worker_) {
     fake_worker_->Stop();
+  }
+  callback_ = nullptr;
+  initialized_ = false;
 }
 
 void NullAudioSink::Play() {
@@ -127,8 +133,8 @@ void NullAudioSink::StartAudioHashForTesting() {
   audio_hash_ = std::make_unique<AudioHash>();
 }
 
-std::string NullAudioSink::GetAudioHashForTesting() {
-  return audio_hash_ ? audio_hash_->ToString() : std::string();
+const AudioHash& NullAudioSink::GetAudioHashForTesting() const {
+  return *audio_hash_;
 }
 
 }  // namespace media

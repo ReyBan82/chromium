@@ -7,12 +7,12 @@
 
 #include <stdint.h>
 
-#include <memory>
+#include <optional>
 
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "components/download/public/common/download_export.h"
-#include "crypto/secure_hash.h"
+#include "crypto/hash.h"
 
 namespace download {
 
@@ -76,7 +76,7 @@ struct COMPONENTS_DOWNLOAD_EXPORT DownloadSaveInfo {
 
   // The state of the hash. If specified, this hash state must indicate the
   // state of the partial file for the first |offset| bytes.
-  std::unique_ptr<crypto::SecureHash> hash_state;
+  std::optional<crypto::hash::Hasher> hash_state;
 
   // SHA-256 hash of the first |offset| bytes of the file. Only used if |offset|
   // is non-zero and either |file_path| or |file| specifies the file which
@@ -89,6 +89,16 @@ struct COMPONENTS_DOWNLOAD_EXPORT DownloadSaveInfo {
   // the location will be determined automatically using |file_path| as a
   // basis if |file_path| is not empty.
   bool prompt_for_save_location = false;
+
+  // Whether the file should be stored in memory.
+  bool use_in_memory_file = false;
+
+  // Whether the file contents need to be obfuscated.
+  bool needs_obfuscation = false;
+
+  // The size of the response body. If content-length response header is not
+  // presented or can't be parse, set to 0.
+  int64_t total_bytes = 0;
 };
 
 }  // namespace download

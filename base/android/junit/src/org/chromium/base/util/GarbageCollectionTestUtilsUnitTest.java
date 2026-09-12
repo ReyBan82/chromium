@@ -14,18 +14,14 @@ import android.graphics.Bitmap;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.GarbageCollectionTestUtils;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
 import java.lang.ref.WeakReference;
 
-/**
- * Tests for {@link GarbageCollectionTestUtils}.
- */
+/** Tests for {@link GarbageCollectionTestUtils}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class GarbageCollectionTestUtilsUnitTest {
     @Test
     public void testCanBeGarbageCollected() {

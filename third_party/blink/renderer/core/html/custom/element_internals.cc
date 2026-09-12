@@ -4,19 +4,27 @@
 
 #include "third_party/blink/renderer/core/html/custom/element_internals.h"
 
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
+#include "third_party/blink/renderer/bindings/core/v8/frozen_array.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_file_formdata_usvstring.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_validity_state_flags.h"
 #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
 #include "third_party/blink/renderer/core/dom/node_lists_node_data.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/fileapi/file.h"
 #include "third_party/blink/renderer/core/html/custom/custom_element.h"
 #include "third_party/blink/renderer/core/html/custom/custom_element_registry.h"
 #include "third_party/blink/renderer/core/html/custom/custom_state_set.h"
+#include "third_party/blink/renderer/core/html/forms/element_behavior.h"
 #include "third_party/blink/renderer/core/html/forms/form_controller.h"
 #include "third_party/blink/renderer/core/html/forms/form_data.h"
+#include "third_party/blink/renderer/core/html/forms/html_field_set_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_submit_button_behavior.h"
 #include "third_party/blink/renderer/core/html/forms/validity_state.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "ui/accessibility/ax_enums.mojom-blink.h"
 
 namespace blink {
 
@@ -33,6 +41,59 @@ bool IsValidityStateFlagsValid(const ValidityStateFlags* flags) {
   return true;
 }
 
+void AppendToFormControlState(const V8ControlValue& value,
+                              FormControlState& state) {
+  switch (value.GetContentType()) {
+    case V8ControlValue::ContentType::kFile: {
+      state.Append("File");
+      value.GetAsFile()->AppendToControlState(state);
+      break;
+    }
+    case V8ControlValue::ContentType::kFormData: {
+      state.Append("FormData");
+      value.GetAsFormData()->AppendToControlState(state);
+      break;
+    }
+    case V8ControlValue::ContentType::kUSVString: {
+      state.Append("USVString");
+      state.Append(value.GetAsUSVString());
+      break;
+    }
+  }
+}
+
+const V8ControlValue* RestoreFromFormControlState(
+    ExecutionContext& execution_context,
+    const FormControlState& state,
+    const StringView& section_title,
+    wtf_size_t& index) {
+  if (state.ValueSize() < index + 3) {
+    return nullptr;
+  }
+  if (state[index] != section_title) {
+    return nullptr;
+  }
+  const V8ControlValue* restored_value = nullptr;
+  const String& entry_type = state[index + 1];
+  index += 2;
+  if (entry_type == "USVString") {
+    restored_value = MakeGarbageCollected<V8ControlValue>(state[index++]);
+  } else if (entry_type == "File") {
+    if (auto* file =
+            File::CreateFromControlState(&execution_context, state, index)) {
+      restored_value = MakeGarbageCollected<V8ControlValue>(file);
+    }
+  } else if (entry_type == "FormData") {
+    if (auto* form_data =
+            FormData::CreateFromControlState(execution_context, state, index)) {
+      restored_value = MakeGarbageCollected<V8ControlValue>(form_data);
+    }
+  } else {
+    NOTREACHED();
+  }
+  return restored_value;
+}
+
 }  // namespace
 
 ElementInternals::ElementInternals(HTMLElement& target) : target_(target) {
@@ -45,10 +106,11 @@ void ElementInternals::Trace(Visitor* visitor) const {
   visitor->Trace(validity_flags_);
   visitor->Trace(validation_anchor_);
   visitor->Trace(custom_states_);
+  visitor->Trace(behaviors_);
   visitor->Trace(explicitly_set_attr_elements_map_);
   ListedElement::Trace(visitor);
   ScriptWrappable::Trace(visitor);
-  ElementRareDataField::Trace(visitor);
+  NodeRareDataField::Trace(visitor);
 }
 
 void ElementInternals::setFormValue(const V8ControlValue* value,
@@ -84,14 +146,30 @@ void ElementInternals::setFormValue(const V8ControlValue* value,
   NotifyFormStateChanged();
 }
 
-HTMLFormElement* ElementInternals::form(ExceptionState& exception_state) const {
+HTMLElement* ElementInternals::formForBinding(
+    ExceptionState& exception_state) const {
   if (!IsTargetFormAssociated()) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kNotSupportedError,
         "The target element is not a form-associated custom element.");
     return nullptr;
   }
-  return ListedElement::Form();
+
+  return ListedElement::RetargetedForm();
+}
+
+String ElementInternals::ToolParamSchema() const {
+  return tool_param_schema_;
+}
+
+void ElementInternals::setToolParamSchema(const String& schema) {
+  if (tool_param_schema_ == schema) {
+    return;
+  }
+  tool_param_schema_ = schema;
+  if (auto* owner_form = Form()) {
+    owner_form->ScheduleWebMCPSchemaUpdateIfActive();
+  }
 }
 
 void ElementInternals::setValidity(ValidityStateFlags* flags,
@@ -107,7 +185,7 @@ void ElementInternals::setValidity(ValidityStateFlags* flags,
 
 void ElementInternals::setValidity(ValidityStateFlags* flags,
                                    const String& message,
-                                   Element* anchor,
+                                   HTMLElement* anchor,
                                    ExceptionState& exception_state) {
   if (!IsTargetFormAssociated()) {
     exception_state.ThrowDOMException(
@@ -123,11 +201,14 @@ void ElementInternals::setValidity(ValidityStateFlags* flags,
         "first argument are true.");
     return;
   }
-  if (anchor && !Target().IsShadowIncludingAncestorOf(*anchor)) {
+
+  if (!anchor) {
+    anchor = &Target();
+  } else if (!Target().IsShadowIncludingInclusiveAncestorOf(*anchor)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kNotFoundError,
-        "The Element argument should be a shadow-including descendant of the "
-        "target element.");
+        "The Element argument should be a shadow-including inclusive "
+        "descendant of the target element.");
     return;
   }
 
@@ -220,7 +301,7 @@ LabelsNodeList* ElementInternals::labels(ExceptionState& exception_state) {
 CustomStateSet* ElementInternals::states() {
   if (!custom_states_)
     custom_states_ = MakeGarbageCollected<CustomStateSet>(Target());
-  return custom_states_;
+  return custom_states_.Get();
 }
 
 bool ElementInternals::HasState(const AtomicString& state) const {
@@ -274,73 +355,199 @@ void ElementInternals::DidUpgrade() {
         lists->InvalidateCaches(nullptr);
     }
   }
-  Target().GetDocument().GetFormController().RestoreControlStateOnUpgrade(
+  Target().GetDocument().EnsureFormController().RestoreControlStateOnUpgrade(
       *this);
 }
 
-void ElementInternals::SetElementAttribute(const QualifiedName& name,
+void ElementInternals::SetElementAttribute(const QualifiedName& attribute,
                                            Element* element) {
-  auto result = explicitly_set_attr_elements_map_.insert(name, nullptr);
-  if (result.is_new_entry) {
-    result.stored_value->value =
-        MakeGarbageCollected<HeapLinkedHashSet<WeakMember<Element>>>();
-  } else {
-    result.stored_value->value->clear();
-  }
-  result.stored_value->value->insert(element);
-}
-
-Element* ElementInternals::GetElementAttribute(const QualifiedName& name) {
-  const auto& iter = explicitly_set_attr_elements_map_.find(name);
-  if (iter == explicitly_set_attr_elements_map_.end())
-    return nullptr;
-  HeapLinkedHashSet<WeakMember<Element>>* stored_elements = iter->value;
-  DCHECK_EQ(stored_elements->size(), 1u);
-  return *(stored_elements->begin());
-}
-
-HeapVector<Member<Element>>* ElementInternals::GetElementArrayAttribute(
-    const QualifiedName& name) const {
-  const auto& iter = explicitly_set_attr_elements_map_.find(name);
-  if (iter == explicitly_set_attr_elements_map_.end())
-    return nullptr;
-  HeapLinkedHashSet<WeakMember<Element>>* stored_elements = iter->value;
-
-  // Convert from our internal HeapLinkedHashSet of weak references to a
-  // HeapVector of strong references so that V8 can implicitly convert to a
-  // FrozenArray.
-  HeapVector<Member<Element>>* results =
-      MakeGarbageCollected<HeapVector<Member<Element>>>(
-          stored_elements->size());
-  for (auto item : *stored_elements) {
-    results->push_back(item);
-  }
-
-  return results;
-}
-
-void ElementInternals::SetElementArrayAttribute(
-    const QualifiedName& name,
-    const HeapVector<Member<Element>>* given_elements) {
-  if (!given_elements) {
-    explicitly_set_attr_elements_map_.erase(name);
+  if (!element) {
+    explicitly_set_attr_elements_map_.erase(attribute);
+    setAttribute(attribute, g_null_atom);
     return;
   }
 
-  // Otherwise convert from our external strong references to our internal weak
-  // references.
-  auto stored_elements =
-      explicitly_set_attr_elements_map_.insert(name, nullptr);
-  if (stored_elements.is_new_entry) {
-    stored_elements.stored_value->value =
-        MakeGarbageCollected<HeapLinkedHashSet<WeakMember<Element>>>();
-  } else {
-    stored_elements.stored_value->value->clear();
+  HeapVector<Member<Element>> vector;
+  vector.push_back(element);
+  FrozenArray<Element>* array =
+      MakeGarbageCollected<FrozenArray<Element>>(std::move(vector));
+  explicitly_set_attr_elements_map_.Set(attribute, array);
+
+  // Ensure that the appropriate updates are made in the AXObjectCache, and that
+  // these attributes are serialized to the browser.
+  setAttribute(attribute, g_empty_atom);
+}
+
+Element* ElementInternals::GetElementAttribute(
+    const QualifiedName& attribute) const {
+  auto it = explicitly_set_attr_elements_map_.find(attribute);
+  if (it == explicitly_set_attr_elements_map_.end()) {
+    return nullptr;
   }
 
-  for (auto element : *given_elements) {
-    stored_elements.stored_value->value->insert(element);
+  FrozenArray<Element>* stored_elements = it->value.Get();
+  DCHECK_EQ(stored_elements->size(), 1u);
+  return stored_elements->front();
+}
+
+void ElementInternals::SetElementArrayAttribute(
+    const QualifiedName& attribute,
+    const GCedHeapVector<Member<Element>>* given_elements) {
+  if (!given_elements) {
+    explicitly_set_attr_elements_map_.erase(attribute);
+    setAttribute(attribute, g_empty_atom);
+    return;
   }
+
+  FrozenArray<Element>* frozen_elements =
+      MakeGarbageCollected<FrozenArray<Element>>(
+          HeapVector<Member<Element>>(std::move(*given_elements)));
+  explicitly_set_attr_elements_map_.Set(attribute, frozen_elements);
+
+  // Ensure that the appropriate updates are made in the AXObjectCache, and that
+  // these attributes are serialized to the browser.
+  setAttribute(attribute, g_empty_atom);
+}
+
+const FrozenArray<Element>* ElementInternals::GetElementArrayAttribute(
+    const QualifiedName& attribute) const {
+  auto it = explicitly_set_attr_elements_map_.find(attribute);
+  if (it == explicitly_set_attr_elements_map_.end()) {
+    return nullptr;
+  }
+  return it->value.Get();
+}
+
+const FrozenArray<ElementBehavior>& ElementInternals::behaviors() const {
+  DCHECK(RuntimeEnabledFeatures::ElementInternalsBehaviorsEnabled());
+
+  if (!behaviors_) {
+    DEFINE_STATIC_LOCAL(Persistent<FrozenArray<ElementBehavior>>, empty,
+                        (MakeGarbageCollected<FrozenArray<ElementBehavior>>()));
+    return *empty;
+  }
+  return *behaviors_;
+}
+
+ax::mojom::blink::Role ElementInternals::BehaviorBasedDefaultRole() const {
+  if (!behaviors_ || behaviors_->size() == 0) {
+    return ax::mojom::blink::Role::kUnknown;
+  }
+  ax::mojom::blink::Role role =
+      (*behaviors_)[behaviors_->size() - 1]->DefaultAriaRole();
+  CHECK_NE(role, ax::mojom::blink::Role::kUnknown);
+  return role;
+}
+
+void ElementInternals::SetBehaviors(
+    HeapVector<Member<ElementBehavior>> behaviors,
+    ExceptionState& exception_state) {
+  DCHECK(RuntimeEnabledFeatures::ElementInternalsBehaviorsEnabled());
+  UseCounter::Count(Target().GetDocument(),
+                    WebFeature::kElementInternalsWithBehaviors);
+
+  HashSet<String> seen_names;
+  for (ElementBehavior* behavior : behaviors) {
+    String name(behavior->BehaviorName());
+    // Check for duplicate instances or duplicate types (same BehaviorName).
+    if (seen_names.Contains(name)) {
+      exception_state.ThrowTypeError(
+          StrCat({"Only one instance of ", name, " is allowed per element."}));
+      return;
+    }
+    // Check if the behavior is already attached to another element.
+    if (behavior->GetElementInternals()) {
+      exception_state.ThrowTypeError(
+          StrCat({name, " instance is already attached to another element."}));
+      return;
+    }
+    seen_names.insert(name);
+  }
+
+  // All behaviors validated. Attach and create the frozen array.
+  for (ElementBehavior* behavior : behaviors) {
+    behavior->SetElementInternals(this);
+  }
+  behaviors_ =
+      MakeGarbageCollected<FrozenArray<ElementBehavior>>(std::move(behaviors));
+}
+
+ElementBehavior* ElementInternals::FindBehaviorByType(
+    const WrapperTypeInfo* type) const {
+  CHECK(RuntimeEnabledFeatures::ElementInternalsBehaviorsEnabled());
+  if (!behaviors_) {
+    return nullptr;
+  }
+  for (ElementBehavior* behavior : behaviors_->AsVector()) {
+    if (behavior->GetWrapperTypeInfo() == type) {
+      return behavior;
+    }
+  }
+  return nullptr;
+}
+
+const FrozenArray<Element>* ElementInternals::ariaActionsElements() const {
+  return GetElementArrayAttribute(html_names::kAriaActionsAttr);
+}
+void ElementInternals::setAriaActionsElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaActionsAttr, given_elements);
+}
+
+const FrozenArray<Element>* ElementInternals::ariaControlsElements() const {
+  return GetElementArrayAttribute(html_names::kAriaControlsAttr);
+}
+void ElementInternals::setAriaControlsElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaControlsAttr, given_elements);
+}
+
+const FrozenArray<Element>* ElementInternals::ariaDescribedByElements() const {
+  return GetElementArrayAttribute(html_names::kAriaDescribedbyAttr);
+}
+void ElementInternals::setAriaDescribedByElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaDescribedbyAttr, given_elements);
+}
+
+const FrozenArray<Element>* ElementInternals::ariaDetailsElements() const {
+  return GetElementArrayAttribute(html_names::kAriaDetailsAttr);
+}
+void ElementInternals::setAriaDetailsElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaDetailsAttr, given_elements);
+}
+
+const FrozenArray<Element>* ElementInternals::ariaErrorMessageElements() const {
+  return GetElementArrayAttribute(html_names::kAriaErrormessageAttr);
+}
+void ElementInternals::setAriaErrorMessageElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaErrormessageAttr, given_elements);
+}
+
+const FrozenArray<Element>* ElementInternals::ariaFlowToElements() const {
+  return GetElementArrayAttribute(html_names::kAriaFlowtoAttr);
+}
+void ElementInternals::setAriaFlowToElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaFlowtoAttr, given_elements);
+}
+
+const FrozenArray<Element>* ElementInternals::ariaLabelledByElements() const {
+  return GetElementArrayAttribute(html_names::kAriaLabelledbyAttr);
+}
+void ElementInternals::setAriaLabelledByElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaLabelledbyAttr, given_elements);
+}
+
+const FrozenArray<Element>* ElementInternals::ariaOwnsElements() const {
+  return GetElementArrayAttribute(html_names::kAriaOwnsAttr);
+}
+void ElementInternals::setAriaOwnsElements(
+    GCedHeapVector<Member<Element>>* given_elements) {
+  SetElementArrayAttribute(html_names::kAriaOwnsAttr, given_elements);
 }
 
 bool ElementInternals::IsTargetFormAssociated() const {
@@ -358,15 +565,11 @@ bool ElementInternals::IsTargetFormAssociated() const {
   // ElementInternals needs to handle elements to be form-associated same as
   // form-associated custom elements because web authors want to call
   // form-related operations of ElementInternals in constructors.
-  CustomElementRegistry* registry = CustomElement::Registry(Target());
+  CustomElementRegistry* registry = Target().customElementRegistry();
   if (!registry)
     return false;
   auto* definition = registry->DefinitionForName(Target().localName());
   return definition && definition->IsFormAssociated();
-}
-
-bool ElementInternals::IsFormControlElement() const {
-  return false;
 }
 
 bool ElementInternals::IsElementInternals() const {
@@ -378,15 +581,31 @@ bool ElementInternals::IsEnumeratable() const {
 }
 
 void ElementInternals::AppendToFormData(FormData& form_data) {
-  if (Target().IsDisabledFormControl())
+  if (Target().IsDisabledFormControl()) {
     return;
+  }
 
-  if (!value_)
+  // Elements with HTMLSubmitButtonBehavior contribute their submitter
+  // name/value pair only when activated (mirroring native submit buttons'
+  // is_activated_submit_ pattern). The setFormValue() path is skipped to
+  // avoid duplicate entries.
+  if (RuntimeEnabledFeatures::ElementInternalsBehaviorsEnabled()) {
+    if (auto* behavior = FindBehavior<HTMLSubmitButtonBehavior>()) {
+      if (behavior->IsActivatedSubmit() && !behavior->name().empty()) {
+        form_data.AppendFromElement(behavior->name(), behavior->value());
+      }
+      return;
+    }
+  }
+
+  if (!value_) {
     return;
+  }
 
   const AtomicString& name = Target().FastGetAttribute(html_names::kNameAttr);
-  if (!value_->IsFormData() && name.empty())
+  if (!value_->IsFormData() && name.empty()) {
     return;
+  }
 
   switch (value_->GetContentType()) {
     case V8ControlValue::ContentType::kFile: {
@@ -473,46 +692,34 @@ bool ElementInternals::ShouldSaveAndRestoreFormControlState() const {
 
 FormControlState ElementInternals::SaveFormControlState() const {
   FormControlState state;
-
-  if (!value_)
-    return state;
-
-  switch (value_->GetContentType()) {
-    case V8ControlValue::ContentType::kFile: {
-      state.Append("File");
-      value_->GetAsFile()->AppendToControlState(state);
-      break;
-    }
-    case V8ControlValue::ContentType::kFormData: {
-      state.Append("FormData");
-      value_->GetAsFormData()->AppendToControlState(state);
-      break;
-    }
-    case V8ControlValue::ContentType::kUSVString: {
-      state.Append("USVString");
-      state.Append(value_->GetAsUSVString());
-      break;
-    }
+  if (value_) {
+    state.Append("Value");
+    AppendToFormControlState(*value_, state);
+  }
+  if (state_) {
+    state.Append("State");
+    AppendToFormControlState(*state_, state);
   }
   return state;
 }
 
 void ElementInternals::RestoreFormControlState(const FormControlState& state) {
-  if (state.ValueSize() < 2)
-    return;
-  if (state[0] == "USVString") {
-    value_ = MakeGarbageCollected<V8ControlValue>(state[1]);
-  } else if (state[0] == "File") {
-    wtf_size_t i = 1;
-    if (auto* file = File::CreateFromControlState(state, i))
-      value_ = MakeGarbageCollected<V8ControlValue>(file);
-  } else if (state[0] == "FormData") {
-    wtf_size_t i = 1;
-    if (auto* form_data = FormData::CreateFromControlState(state, i))
-      value_ = MakeGarbageCollected<V8ControlValue>(form_data);
+  ExecutionContext* execution_context = target_->GetExecutionContext();
+  wtf_size_t index = 0;
+
+  // Per spec, the submission value shouldn't be automatically restored by the
+  // UA, but Blink has been doing that.
+  if (const V8ControlValue* restored_value = RestoreFromFormControlState(
+          *execution_context, state, "Value", index)) {
+    value_ = restored_value;
   }
-  if (value_)
-    CustomElement::EnqueueFormStateRestoreCallback(Target(), value_, "restore");
+
+  const V8ControlValue* restored_state =
+      RestoreFromFormControlState(*execution_context, state, "State", index);
+  if (restored_state) {
+    CustomElement::EnqueueFormStateRestoreCallback(Target(), restored_state,
+                                                   "restore");
+  }
 }
 
 }  // namespace blink

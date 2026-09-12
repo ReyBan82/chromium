@@ -6,20 +6,36 @@
 
 #include "base/command_line.h"
 #include "base/no_destructor.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/safe_browsing/chrome_sb_protocol_config_provider.h"
 #include "chrome/browser/safe_browsing/chrome_user_population_helper.h"
-#include "chrome/browser/safe_browsing/chrome_v4_protocol_config_provider.h"
 #include "chrome/browser/safe_browsing/safe_browsing_service.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
-#include "components/safe_browsing/content/browser/web_ui/safe_browsing_ui.h"
+#include "chrome/browser/ui/hats/hats_service_factory.h"
+#include "components/prefs/pref_service.h"
+#include "components/safe_browsing/buildflags.h"
+#include "components/safe_browsing/content/browser/web_ui/web_ui_content_info_singleton.h"
 #include "components/safe_browsing/core/browser/ping_manager.h"
+#include "components/safe_browsing/core/browser/safe_browsing_hats_delegate.h"
 #include "components/safe_browsing/core/browser/sync/safe_browsing_primary_account_token_fetcher.h"
 #include "components/safe_browsing/core/browser/sync/sync_utils.h"
 #include "components/safe_browsing/core/common/features.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "components/safe_browsing/core/common/safe_browsing_prefs.h"
+#include "content/public/browser/browser_thread.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/safe_browsing/android/chrome_safe_browsing_hats_delegate_android.h"
+#elif BUILDFLAG(FULL_SAFE_BROWSING)
+#include "chrome/browser/safe_browsing/chrome_safe_browsing_hats_delegate_desktop.h"
+#endif
 
 namespace safe_browsing {
+
+namespace {
+bool kAllowPingManagerInTests = false;
+}  // namespace
 
 // static
 ChromePingManagerFactory* ChromePingManagerFactory::GetInstance() {
@@ -35,15 +51,33 @@ PingManager* ChromePingManagerFactory::GetForBrowserContext(
 }
 
 ChromePingManagerFactory::ChromePingManagerFactory()
-    : ProfileKeyedServiceFactory("ChromeSafeBrowsingPingManager") {
+    : ProfileKeyedServiceFactory(
+          "ChromeSafeBrowsingPingManager",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // Telemetry report should not be sent in guest mode.
+              .WithGuest(ProfileSelection::kNone)
+              .Build()) {
   DependsOn(IdentityManagerFactory::GetInstance());
+#if BUILDFLAG(FULL_SAFE_BROWSING) || BUILDFLAG(IS_ANDROID)
+  DependsOn(HatsServiceFactory::GetInstance());
+#endif
 }
 
 ChromePingManagerFactory::~ChromePingManagerFactory() = default;
 
-KeyedService* ChromePingManagerFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ChromePingManagerFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   Profile* profile = Profile::FromBrowserContext(context);
+  std::unique_ptr<SafeBrowsingHatsDelegate> hats_delegate;
+#if BUILDFLAG(IS_ANDROID)
+  hats_delegate =
+      std::make_unique<ChromeSafeBrowsingHatsDelegateAndroid>(profile);
+#elif BUILDFLAG(FULL_SAFE_BROWSING)
+  hats_delegate =
+      std::make_unique<ChromeSafeBrowsingHatsDelegateDesktop>(profile);
+#endif
   return PingManager::Create(
       GetV4ProtocolConfig(),
       g_browser_process->safe_browsing_service()->GetURLLoaderFactory(profile),
@@ -51,13 +85,13 @@ KeyedService* ChromePingManagerFactory::BuildServiceInstanceFor(
           IdentityManagerFactory::GetForProfile(profile)),
       base::BindRepeating(
           &ChromePingManagerFactory::ShouldFetchAccessTokenForReport, profile),
-      safe_browsing::WebUIInfoSingleton::GetInstance(),
+      safe_browsing::WebUIContentInfoSingleton::GetInstance(),
       content::GetUIThreadTaskRunner({}),
       base::BindRepeating(&safe_browsing::GetUserPopulationForProfile, profile),
-      base::FeatureList::IsEnabled(
-          safe_browsing::kAddPageLoadTokenToClientSafeBrowsingReport)
-          ? base::BindRepeating(&safe_browsing::GetPageLoadTokenForURL, profile)
-          : base::NullCallback());
+      base::BindRepeating(&safe_browsing::GetPageLoadTokenForURL, profile),
+      std::move(hats_delegate), /*persister_root_path=*/profile->GetPath(),
+      base::BindRepeating(&ChromePingManagerFactory::ShouldSendPersistedReport,
+                          profile));
 }
 
 // static
@@ -68,6 +102,29 @@ bool ChromePingManagerFactory::ShouldFetchAccessTokenForReport(
       IdentityManagerFactory::GetForProfile(profile);
   return IsEnhancedProtectionEnabled(*prefs) && identity_manager &&
          safe_browsing::SyncUtils::IsPrimaryAccountSignedIn(identity_manager);
+}
+
+// static
+bool ChromePingManagerFactory::ShouldSendPersistedReport(Profile* profile) {
+  return !profile->IsOffTheRecord() &&
+         IsExtendedReportingEnabled(*profile->GetPrefs());
+}
+
+bool ChromePingManagerFactory::ServiceIsCreatedWithBrowserContext() const {
+  // PingManager is created at startup to send persisted reports.
+  return true;
+}
+
+bool ChromePingManagerFactory::ServiceIsNULLWhileTesting() const {
+  return !kAllowPingManagerInTests;
+}
+
+ChromePingManagerAllowerForTesting::ChromePingManagerAllowerForTesting() {
+  kAllowPingManagerInTests = true;
+}
+
+ChromePingManagerAllowerForTesting::~ChromePingManagerAllowerForTesting() {
+  kAllowPingManagerInTests = false;
 }
 
 }  // namespace safe_browsing

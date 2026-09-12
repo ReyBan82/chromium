@@ -5,17 +5,19 @@
 #include "chrome/browser/ash/input_method/autocorrect_manager.h"
 
 #include "ash/constants/ash_features.h"
+#include "ash/constants/ash_pref_names.h"
+#include "ash/strings/grit/ash_strings.h"
 #include "base/functional/callback_helpers.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "chrome/browser/ash/input_method/autocorrect_enums.h"
 #include "chrome/browser/ash/input_method/autocorrect_prefs.h"
 #include "chrome/browser/ash/input_method/suggestion_enums.h"
-#include "chrome/browser/ash/input_method/ui/suggestion_details.h"
+#include "chrome/browser/metrics/chrome_metrics_service_accessor.h"
+#include "chrome/browser/ui/ash/input_method/suggestion_details.h"
 #include "chrome/browser/ui/ash/keyboard/chrome_keyboard_controller_client.h"
-#include "chrome/common/pref_names.h"
-#include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/testing_profile.h"
+#include "chromeos/ash/services/ime/public/cpp/autocorrect.h"
 #include "components/strings/grit/components_strings.h"
 #include "components/ukm/test_ukm_recorder.h"
 #include "content/public/test/browser_task_environment.h"
@@ -36,10 +38,12 @@ namespace input_method {
 namespace {
 
 using ::testing::_;
-using ::testing::SetArgPointee;
 using ::testing::DoAll;
+using ::testing::ExpectationSet;
 using ::testing::Return;
+using ::testing::SetArgPointee;
 
+using ime::AutocorrectSuggestionProvider;
 using UkmEntry = ukm::builders::InputMethod_Assistive_AutocorrectV2;
 
 constexpr char kCoverageHistogramName[] = "InputMethod.Assistive.Coverage";
@@ -112,6 +116,8 @@ constexpr char kAutocorrectV2PkRejectionHistName[] =
     "InputMethod.Assistive.AutocorrectV2.Rejection.PK";
 constexpr char kAutocorrectV2VkRejectionHistName[] =
     "InputMethod.Assistive.AutocorrectV2.Rejection.VK";
+constexpr char kAutocorrectV2PkSuggestionProviderHistName[] =
+    "InputMethod.Assistive.AutocorrectV2.SuggestionProvider.Pk";
 
 constexpr char kUsEnglishEngineId[] = "xkb:us::eng";
 constexpr char kUsInternationalEngineId[] = "xkb:us:intl:eng";
@@ -360,6 +366,21 @@ AssistiveWindowProperties CreateVisibleUndoWindowProperties(
   return window_properties;
 }
 
+// A helper to create properties for shown undo window with additional learn
+// more button.
+AssistiveWindowProperties CreateVisibleUndoWindowWithLearnMoreButtonProperties(
+    const std::u16string& original_text,
+    const std::u16string& autocorrected_text) {
+  AssistiveWindowProperties window_properties;
+  window_properties.type = ash::ime::AssistiveWindowType::kUndoWindow;
+  window_properties.visible = true;
+  window_properties.show_setting_link = true;
+  window_properties.announce_string =
+      l10n_util::GetStringFUTF16(IDS_SUGGESTION_AUTOCORRECT_UNDO_WINDOW_SHOWN,
+                                 original_text, autocorrected_text);
+  return window_properties;
+}
+
 // A helper to create highlighted undo button in assistive window.
 ui::ime::AssistiveWindowButton CreateHighlightedUndoButton(
     const std::u16string& original_text) {
@@ -375,19 +396,20 @@ ui::ime::AssistiveWindowButton CreateHighlightedUndoButton(
 ui::ime::AssistiveWindowButton CreateHighlightedLearnMoreButton() {
   ui::ime::AssistiveWindowButton button = ui::ime::AssistiveWindowButton();
   button.id = ui::ime::ButtonId::kLearnMore;
-  button.announce_string = l10n_util::GetStringUTF16(IDS_LEARN_MORE);
+  button.announce_string =
+      l10n_util::GetStringUTF16(IDS_SUGGESTION_AUTOCORRECT_LEARN_MORE);
   button.window_type = ash::ime::AssistiveWindowType::kLearnMore;
   return button;
 }
 
 // A helper for creating key event.
 ui::KeyEvent CreateKeyEvent(ui::DomKey key, ui::DomCode code) {
-  return ui::KeyEvent(ui::ET_KEY_PRESSED, ui::VKEY_UNKNOWN, code, ui::EF_NONE,
-                      key, ui::EventTimeForNow());
+  return ui::KeyEvent(ui::EventType::kKeyPressed, ui::VKEY_UNKNOWN, code,
+                      ui::EF_NONE, key, ui::EventTimeForNow());
 }
 
 ui::KeyEvent PressKeyWithCtrl(const ui::DomCode& code) {
-  return ui::KeyEvent(ui::EventType::ET_KEY_PRESSED, ui::VKEY_UNKNOWN, code,
+  return ui::KeyEvent(ui::EventType::kKeyPressed, ui::VKEY_UNKNOWN, code,
                       ui::EF_CONTROL_DOWN, ui::DomKey::NONE,
                       ui::EventTimeForNow());
 }
@@ -399,11 +421,39 @@ ui::KeyEvent KeyA() {
 void SetAutocorrectPreferenceTo(Profile& profile,
                                 const std::string& engine_id,
                                 int autocorrect_level) {
-  base::Value::Dict input_method_setting;
+  base::DictValue input_method_setting;
   input_method_setting.SetByDottedPath(
       engine_id + ".physicalKeyboardAutoCorrectionLevel", autocorrect_level);
-  profile.GetPrefs()->Set(::prefs::kLanguageInputMethodSpecificSettings,
+  profile.GetPrefs()->Set(ash::prefs::kLanguageInputMethodSpecificSettings,
                           base::Value(std::move(input_method_setting)));
+}
+
+void EnableAutocorrect(Profile& profile, const std::string& engine_id) {
+  SetAutocorrectPreferenceTo(/*profile=*/profile,
+                             /*engine_id=*/engine_id,
+                             /*autocorrect_level=*/1);
+}
+
+void DisableAutocorrect(Profile& profile, const std::string& engine_id) {
+  SetAutocorrectPreferenceTo(/*profile=*/profile,
+                             /*engine_id=*/engine_id,
+                             /*autocorrect_level=*/0);
+}
+
+std::string ToString(const AutocorrectSuggestionProvider& provider) {
+  switch (provider) {
+    case AutocorrectSuggestionProvider::kUsEnglish840:
+      return "UsEnglish840";
+    case AutocorrectSuggestionProvider::kUsEnglish840V2:
+      return "UsEnglish840V2";
+    case AutocorrectSuggestionProvider::kUsEnglishDownloaded:
+      return "UsEnglishDownloaded";
+    case AutocorrectSuggestionProvider::kUsEnglishPrebundled:
+      return "UsEnglishPrebundled";
+    case AutocorrectSuggestionProvider::kUnknown:
+    default:
+      return "Unknown";
+  }
 }
 
 class MockSuggestionHandler : public SuggestionHandlerInterface {
@@ -457,6 +507,15 @@ std::vector<base::test::FeatureRef> DisabledFeatures() {
   return {ash::features::kImeRuleConfig};
 }
 
+std::vector<base::test::FeatureRef>
+DisabledFeaturesIncludingAutocorrectByDefault() {
+  return {ash::features::kImeRuleConfig, ash::features::kAutocorrectByDefault};
+}
+
+std::vector<base::test::FeatureRef> RequiredForAutocorrectByDefault() {
+  return {ash::features::kAutocorrectByDefault};
+}
+
 class AutocorrectManagerTest : public testing::Test {
  protected:
   AutocorrectManagerTest()
@@ -464,9 +523,10 @@ class AutocorrectManagerTest : public testing::Test {
         manager_(&mock_suggestion_handler_, profile_.get()) {
     // Disable ImeRulesConfigs by default.
     feature_list_.InitWithFeatures({}, DisabledFeatures());
+
     IMEBridge::Get()->SetInputContextHandler(&mock_ime_input_context_handler_);
     keyboard_client_ = ChromeKeyboardControllerClient::CreateForTest();
-    keyboard_client_->set_keyboard_visible_for_test(false);
+    keyboard_client_->set_keyboard_enabled_for_test(false);
   }
 
   content::BrowserTaskEnvironment task_environment_{
@@ -684,8 +744,7 @@ TEST_F(AutocorrectManagerTest,
             gfx::Range());
 }
 
-TEST_F(AutocorrectManagerTest,
-       OnBlurClearsAutocorrectRange) {
+TEST_F(AutocorrectManagerTest, OnBlurClearsAutocorrectRange) {
   manager_.HandleAutocorrect(gfx::Range(1, 4), u"teh", u"the");
   manager_.OnBlur();
 
@@ -693,8 +752,7 @@ TEST_F(AutocorrectManagerTest,
             gfx::Range());
 }
 
-TEST_F(AutocorrectManagerTest,
-       OnFocusClearsAutocorrectRange) {
+TEST_F(AutocorrectManagerTest, OnFocusClearsAutocorrectRange) {
   manager_.HandleAutocorrect(gfx::Range(1, 4), u"teh", u"the");
   manager_.OnFocus(1);
 
@@ -707,7 +765,7 @@ TEST_F(AutocorrectManagerTest, MovingCursorInsideRangeShowsAssistiveWindow) {
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
 
   AssistiveWindowProperties properties =
-      CreateVisibleUndoWindowProperties(u"teh", u"the");
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
   EXPECT_CALL(mock_suggestion_handler_,
               SetAssistiveWindowProperties(_, properties, _));
 
@@ -731,7 +789,7 @@ TEST_F(AutocorrectManagerTest, MovingCursorOutsideRangeHidesAssistiveWindow) {
     ::testing::InSequence seq;
 
     AssistiveWindowProperties shown_properties =
-        CreateVisibleUndoWindowProperties(u"teh", u"the");
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
     EXPECT_CALL(mock_suggestion_handler_,
                 SetAssistiveWindowProperties(_, shown_properties, _));
 
@@ -746,13 +804,38 @@ TEST_F(AutocorrectManagerTest, MovingCursorOutsideRangeHidesAssistiveWindow) {
 }
 
 TEST_F(AutocorrectManagerTest,
-       MovingCursorRetriesPrevFailedUndoWindowHide) {
+       MovingCursorInsideRangeAndRemovingCharactersHidesAssistiveWindow) {
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
+  manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
+
+  AssistiveWindowProperties properties =
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
+
+  {
+    ::testing::InSequence seq;
+
+    AssistiveWindowProperties shown_properties =
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetAssistiveWindowProperties(_, shown_properties, _));
+
+    AssistiveWindowProperties hidden_properties =
+        CreateHiddenUndoWindowProperties();
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetAssistiveWindowProperties(_, hidden_properties, _));
+  }
+
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(2));
+  manager_.OnSurroundingTextChanged(u"te ", gfx::Range(1));
+}
+
+TEST_F(AutocorrectManagerTest, MovingCursorRetriesPrevFailedUndoWindowHide) {
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
   // Show undo window.
   AssistiveWindowProperties shown_properties =
-      CreateVisibleUndoWindowProperties(u"teh", u"the");
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
   EXPECT_CALL(mock_suggestion_handler_,
               SetAssistiveWindowProperties(_, shown_properties, _));
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
@@ -780,7 +863,7 @@ TEST_F(AutocorrectManagerTest,
 
   // Show undo window.
   AssistiveWindowProperties shown_properties =
-      CreateVisibleUndoWindowProperties(u"teh", u"the");
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
   EXPECT_CALL(mock_suggestion_handler_,
               SetAssistiveWindowProperties(_, shown_properties, _));
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
@@ -817,7 +900,7 @@ TEST_F(AutocorrectManagerTest,
 
   // Show the undo window first time.
   AssistiveWindowProperties shown_properties =
-      CreateVisibleUndoWindowProperties(u"teh", u"the");
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
   EXPECT_CALL(mock_suggestion_handler_,
               SetAssistiveWindowProperties(_, shown_properties, _));
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
@@ -849,7 +932,7 @@ TEST_F(AutocorrectManagerTest, FocusChangeHidesUndoWindow) {
 
   // Show a window.
   AssistiveWindowProperties shown_properties =
-      CreateVisibleUndoWindowProperties(u"teh", u"the");
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
   EXPECT_CALL(mock_suggestion_handler_,
               SetAssistiveWindowProperties(_, shown_properties, _));
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
@@ -863,13 +946,33 @@ TEST_F(AutocorrectManagerTest, FocusChangeHidesUndoWindow) {
   manager_.OnFocus(1);
 }
 
+TEST_F(AutocorrectManagerTest, EscapeHidesUndoWindow) {
+  manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
+
+  // Show a window.
+  AssistiveWindowProperties shown_properties =
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
+  EXPECT_CALL(mock_suggestion_handler_,
+              SetAssistiveWindowProperties(_, shown_properties, _));
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
+
+  // OnFocus should try hiding the window.
+  AssistiveWindowProperties hidden_properties =
+      CreateHiddenUndoWindowProperties();
+  EXPECT_CALL(mock_suggestion_handler_,
+              SetAssistiveWindowProperties(_, hidden_properties, _));
+
+  manager_.OnKeyEvent(CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::ESCAPE));
+}
+
 TEST_F(AutocorrectManagerTest, OnFocusRetriesHidingUndoWindow) {
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
 
   // Show undo window.
   AssistiveWindowProperties shown_properties =
-      CreateVisibleUndoWindowProperties(u"teh", u"the");
+      CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
   EXPECT_CALL(mock_suggestion_handler_,
               SetAssistiveWindowProperties(_, shown_properties, _));
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
@@ -897,7 +1000,7 @@ TEST_F(AutocorrectManagerTest,
     ::testing::InSequence seq;
 
     AssistiveWindowProperties shown_properties =
-        CreateVisibleUndoWindowProperties(u"teh", u"the");
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
 
     EXPECT_CALL(mock_suggestion_handler_,
                 SetAssistiveWindowProperties(_, shown_properties, _));
@@ -926,24 +1029,59 @@ TEST_F(AutocorrectManagerTest,
     ::testing::InSequence seq;
 
     AssistiveWindowProperties shown_properties =
-        CreateVisibleUndoWindowProperties(u"teh", u"the");
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
+    ui::ime::AssistiveWindowButton undo_button =
+        CreateHighlightedUndoButton(u"teh");
+    ui::ime::AssistiveWindowButton learn_more_button =
+        CreateHighlightedLearnMoreButton();
 
     EXPECT_CALL(mock_suggestion_handler_,
                 SetAssistiveWindowProperties(_, shown_properties, _));
 
-    ui::ime::AssistiveWindowButton undo_button =
-        CreateHighlightedUndoButton(u"teh");
     EXPECT_CALL(mock_suggestion_handler_,
                 SetButtonHighlighted(_, undo_button, true, _));
-
-    ui::ime::AssistiveWindowButton learn_more_button =
-        CreateHighlightedLearnMoreButton();
     EXPECT_CALL(mock_suggestion_handler_,
                 SetButtonHighlighted(_, learn_more_button, false, _));
   }
 
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
   manager_.OnKeyEvent(CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::TAB));
+}
+
+TEST_F(
+    AutocorrectManagerTest,
+    PressingRightArrowKeyHighlightsLearnMoreButtonWhenUndoButtonIsHighlighted) {
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
+  manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
+
+  {
+    ::testing::InSequence seq;
+
+    AssistiveWindowProperties shown_properties =
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
+    ui::ime::AssistiveWindowButton undo_button =
+        CreateHighlightedUndoButton(u"teh");
+    ui::ime::AssistiveWindowButton learn_more_button =
+        CreateHighlightedLearnMoreButton();
+
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetAssistiveWindowProperties(_, shown_properties, _));
+
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, undo_button, true, _));
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, learn_more_button, false, _));
+
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, undo_button, false, _));
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, learn_more_button, true, _));
+  }
+
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
+  manager_.OnKeyEvent(CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::TAB));
+  manager_.OnKeyEvent(
+      CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::ARROW_RIGHT));
 }
 
 TEST_F(AutocorrectManagerTest,
@@ -955,7 +1093,7 @@ TEST_F(AutocorrectManagerTest,
     ::testing::InSequence seq;
 
     AssistiveWindowProperties shown_properties =
-        CreateVisibleUndoWindowProperties(u"teh", u"the");
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
 
     EXPECT_CALL(mock_suggestion_handler_,
                 SetAssistiveWindowProperties(_, shown_properties, _));
@@ -979,6 +1117,103 @@ TEST_F(AutocorrectManagerTest,
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
   manager_.OnKeyEvent(CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::ARROW_UP));
   manager_.OnKeyEvent(CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::ENTER));
+}
+
+TEST_F(AutocorrectManagerTest,
+       PressingEnterKeyHidesUndoWindowWhenLearnMoreButtonIsHighlighted) {
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
+  manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
+
+  {
+    ::testing::InSequence seq;
+
+    AssistiveWindowProperties shown_properties =
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
+    AssistiveWindowProperties hidden_properties =
+        CreateHiddenUndoWindowProperties();
+    ui::ime::AssistiveWindowButton undo_button =
+        CreateHighlightedUndoButton(u"teh");
+    ui::ime::AssistiveWindowButton learn_more_button =
+        CreateHighlightedLearnMoreButton();
+
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetAssistiveWindowProperties(_, shown_properties, _));
+
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, undo_button, true, _));
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, learn_more_button, false, _));
+
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, undo_button, false, _));
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetButtonHighlighted(_, learn_more_button, true, _));
+
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetAssistiveWindowProperties(_, hidden_properties, _));
+    EXPECT_CALL(mock_suggestion_handler_, ClickButton(learn_more_button));
+  }
+
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
+  manager_.OnKeyEvent(CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::ARROW_UP));
+  manager_.OnKeyEvent(
+      CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::ARROW_RIGHT));
+  manager_.OnKeyEvent(CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::ENTER));
+}
+
+TEST_F(AutocorrectManagerTest, LearnMoreButtonOnlyShown50Times) {
+  manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
+  manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
+
+  {
+    ::testing::InSequence seq;
+
+    AssistiveWindowProperties shown_properties =
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
+    AssistiveWindowProperties hidden_properties =
+        CreateHiddenUndoWindowProperties();
+
+    ExpectationSet learn_more_call_series;
+
+    // Expects the learn more button to show and hide for 50 times.
+    for (int i = 0; i < 50; ++i) {
+      learn_more_call_series +=
+          EXPECT_CALL(mock_suggestion_handler_,
+                      SetAssistiveWindowProperties(_, shown_properties, _));
+      learn_more_call_series +=
+          EXPECT_CALL(mock_suggestion_handler_,
+                      SetAssistiveWindowProperties(_, hidden_properties, _));
+    }
+    shown_properties = CreateVisibleUndoWindowProperties(u"teh", u"the");
+
+    // After learn more button is shown 50 times, it expires and never shows
+    // again.
+    EXPECT_CALL(mock_suggestion_handler_,
+                SetAssistiveWindowProperties(_, shown_properties, _))
+        .After(learn_more_call_series);
+  }
+
+  std::u16string surrounding_text = u"the ";
+  manager_.OnSurroundingTextChanged(surrounding_text, gfx::Range(1));
+
+  for (int i = 0; i < 50; ++i) {
+    // For each iteration:
+    // First inserts "the " into the text input field, and place the cursor at
+    // the end of the text.
+    surrounding_text += u"the ";
+    int cursor_pos = surrounding_text.length();
+    manager_.OnSurroundingTextChanged(surrounding_text, gfx::Range(cursor_pos));
+
+    // Then handles an autocorrection that occurs on the text that is just
+    // inserted.
+    manager_.HandleAutocorrect(gfx::Range(cursor_pos - 4, cursor_pos - 1),
+                               u"teh", u"the");
+
+    // Finally, moves the cursor in the middle of the new word to trigger the
+    // learn more button to show.
+    manager_.OnSurroundingTextChanged(surrounding_text,
+                                      gfx::Range(cursor_pos - 3));
+  }
 }
 
 TEST_F(AutocorrectManagerTest, UndoAutocorrectSingleWordInComposition) {
@@ -1803,7 +2038,7 @@ TEST_F(AutocorrectManagerTest,
 TEST_F(AutocorrectManagerTest,
        RecordMetricsForVkWhenVkWasVisibleAtUnderlineTime) {
   // VK is visible at the time of suggesting an autocorrect.
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
 
   // To suppress strict mock.
@@ -1811,7 +2046,7 @@ TEST_F(AutocorrectManagerTest,
 
   // VK is made hidden, but still the metrics need to be recorded for VK
   // given VK was visible at underline time.
-  keyboard_client_->set_keyboard_visible_for_test(false);
+  keyboard_client_->set_keyboard_enabled_for_test(false);
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
 
   ExpectAutocorrectHistograms(histogram_tester_, /*visible_vk=*/true,
@@ -1823,7 +2058,7 @@ TEST_F(AutocorrectManagerTest,
 TEST_F(AutocorrectManagerTest,
        DoesNotRecordMetricsForVkWhenVkWasNotVisibleAtUnderlineTime) {
   // VK is not visible at the time of suggesting an autocorrect.
-  keyboard_client_->set_keyboard_visible_for_test(false);
+  keyboard_client_->set_keyboard_enabled_for_test(false);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
 
   // To suppress strict mock.
@@ -1831,7 +2066,7 @@ TEST_F(AutocorrectManagerTest,
 
   // VK is made visible, but still metrics must not be recorded for VK
   // as it was not visible at the time of underline.
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(1));
 
   ExpectAutocorrectHistograms(histogram_tester_, /*visible_vk=*/false,
@@ -1872,7 +2107,7 @@ TEST_F(AutocorrectManagerTest, UndoRecordsMetricsAfterRevertEnableByDefault) {
 }
 
 TEST_F(AutocorrectManagerTest, HandleAutocorrectRecordsMetricsWhenVkIsVisible) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   ExpectAutocorrectHistograms(histogram_tester_, /*visible_vk=*/true,
                               /*window_shown=*/0, /*underlined=*/1,
@@ -1881,7 +2116,7 @@ TEST_F(AutocorrectManagerTest, HandleAutocorrectRecordsMetricsWhenVkIsVisible) {
 }
 
 TEST_F(AutocorrectManagerTest, ExitingTextFieldRecordsMetricsWhenVkIsVisible) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnBlur();
   ExpectAutocorrectHistograms(histogram_tester_, /*visible_vk=*/true,
@@ -1893,7 +2128,7 @@ TEST_F(AutocorrectManagerTest, ExitingTextFieldRecordsMetricsWhenVkIsVisible) {
 
 TEST_F(AutocorrectManagerTest,
        AcceptingAutocorrectRecordsMetricsWhenVkIsVisible) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -1962,7 +2197,7 @@ TEST_F(AutocorrectManagerTest,
 }
 
 TEST_F(AutocorrectManagerTest, UndoRecordsMetricsWhenVkIsVisible) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -1976,7 +2211,7 @@ TEST_F(AutocorrectManagerTest, UndoRecordsMetricsWhenVkIsVisible) {
 
 TEST_F(AutocorrectManagerTest,
        ClearingAutocorrectRecordsMetricsWhenVkIsVisible) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -2103,7 +2338,7 @@ TEST_F(AutocorrectManagerTest, RangeAndSuggestionMismatchDoesNotRecordMetrics) {
 }
 
 TEST_F(AutocorrectManagerTest, ShowingUndoWindowRecordsMetricsWhenVkIsVisible) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
 
   // This suppresses strict mock.
@@ -2258,7 +2493,7 @@ TEST_F(AutocorrectManagerTest, RecordQualityBreakdownForDefaultPkAccepted) {
 }
 
 TEST_F(AutocorrectManagerTest, RecordQualityBreakdownForVkAccepted) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 8), u"françaisss", u"français");
 
   // Accept autocorrect implicitly.
@@ -2276,7 +2511,7 @@ TEST_F(AutocorrectManagerTest, RecordQualityBreakdownForVkAccepted) {
 }
 
 TEST_F(AutocorrectManagerTest, RecordQualityBreakdownForVkRejected) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 8), u"françaisss", u"français");
 
   // Accept autocorrect implicitly.
@@ -2345,7 +2580,7 @@ TEST_F(AutocorrectManagerTest, RecordQualityBreakdownDefaultForPkRejected) {
 }
 
 TEST_F(AutocorrectManagerTest, RecordDistanceMetricForVkAccepted) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 4), u"cafe", u"cafè");
   // (|cafe|-1) * MAX_LENGTH + (|{'e'->'è'}| - 1)
   int expected_value = (4 - 1) * 30 + (1 - 1);
@@ -2384,7 +2619,7 @@ TEST_F(AutocorrectManagerTest, RecordDistanceMetricForPkAccepted) {
 }
 
 TEST_F(AutocorrectManagerTest, RecordDistanceMetricForVkRejected) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 12), u"ecauserthy", u"because they");
   //  (|ecauserthy|-1) * MAX_LENGTH + (|{''->'b'}, {'r'->' '}, {''->'e'}| - 1)
   int expected_value = (10 - 1) * 30 + (3 - 1);
@@ -2508,7 +2743,7 @@ TEST_F(AutocorrectManagerTest, RecordRejectionForPkUndoWithKeyboard) {
     ::testing::InSequence seq;
 
     AssistiveWindowProperties shown_properties =
-        CreateVisibleUndoWindowProperties(u"teh", u"the");
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
 
     EXPECT_CALL(mock_suggestion_handler_,
                 SetAssistiveWindowProperties(_, shown_properties, _));
@@ -2578,9 +2813,207 @@ TEST_F(AutocorrectManagerTest, RecordRejectionForPkControlBackspace) {
   histogram_tester_.ExpectTotalCount(kAutocorrectV2PkRejectionHistName, 2);
 }
 
+TEST_F(
+    AutocorrectManagerTest,
+    IsNotDisabledWhenNoSuggestionProviderAndAutocorrectByDefaultFlagIsDisabled) {
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(
+      /*enabled_features=*/{},
+      /*disabled_features=*/DisabledFeaturesIncludingAutocorrectByDefault());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+TEST_F(AutocorrectManagerTest,
+       IsNotDisabledWhenNoSuggestionProviderAndUserExplicitlyEnablesPref) {
+  EnableAutocorrect(/*profile=*/*profile_, /*engine_id=*/kUsEnglishEngineId);
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+TEST_F(AutocorrectManagerTest,
+       IsNotDisabledWhenNoSuggestionProviderAndUserExplicitlyDisablesPref) {
+  DisableAutocorrect(/*profile=*/*profile_, /*engine_id=*/kUsEnglishEngineId);
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+TEST_F(AutocorrectManagerTest,
+       IsNotDisabledWhenNoSuggestionProviderAndVkIsVisible) {
+  keyboard_client_->set_keyboard_enabled_for_test(true);
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+class NotDisabledByInvalidSuggestionProvider
+    : public AutocorrectManagerTest,
+      public testing::WithParamInterface<AutocorrectSuggestionProvider> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    AutocorrectManagerTest,
+    NotDisabledByInvalidSuggestionProvider,
+    testing::ValuesIn<AutocorrectSuggestionProvider>({
+        AutocorrectSuggestionProvider::kUnknown,
+        AutocorrectSuggestionProvider::kUsEnglishPrebundled,
+        AutocorrectSuggestionProvider::kUsEnglishDownloaded,
+        AutocorrectSuggestionProvider::kUsEnglish840,
+        AutocorrectSuggestionProvider::kUsEnglish840V2,
+    }),
+    [](const testing::TestParamInfo<AutocorrectSuggestionProvider> info) {
+      return ToString(info.param);
+    });
+
+TEST_P(NotDisabledByInvalidSuggestionProvider,
+       WhenAutocorrectByDefaultFlagDisabled) {
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(
+      /*enabled_features=*/{},
+      /*disabled_features=*/DisabledFeaturesIncludingAutocorrectByDefault());
+  const AutocorrectSuggestionProvider& provider = GetParam();
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+TEST_P(NotDisabledByInvalidSuggestionProvider, WhenUserExplicitlyEnablesPref) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+  EnableAutocorrect(/*profile=*/*profile_, /*engine_id=*/kUsEnglishEngineId);
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+TEST_P(NotDisabledByInvalidSuggestionProvider, WhenUserExplicitlyDisablesPref) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+  DisableAutocorrect(/*profile=*/*profile_, /*engine_id=*/kUsEnglishEngineId);
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+TEST_P(NotDisabledByInvalidSuggestionProvider, WhenVkIsVisible) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+  keyboard_client_->set_keyboard_enabled_for_test(true);
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+TEST_F(AutocorrectManagerTest,
+       IsDisabledWhenNoSuggestionProviderAndUserInDefaultBucket) {
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+
+  EXPECT_TRUE(manager_.DisabledByInvalidExperimentContext());
+}
+
+class EnabledByValidSuggestionProvider
+    : public AutocorrectManagerTest,
+      public testing::WithParamInterface<AutocorrectSuggestionProvider> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    AutocorrectManagerTest,
+    EnabledByValidSuggestionProvider,
+    testing::ValuesIn<>({
+        AutocorrectSuggestionProvider::kUsEnglish840,
+        AutocorrectSuggestionProvider::kUsEnglish840V2,
+    }),
+    [](const testing::TestParamInfo<AutocorrectSuggestionProvider> info) {
+      return ToString(info.param);
+    });
+
+TEST_P(EnabledByValidSuggestionProvider,
+       IsNotDisabledWhenUserInDefaultBucketAndValidSuggestionProviderUsed) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+
+  EXPECT_FALSE(manager_.DisabledByInvalidExperimentContext());
+}
+
+class DisabledByInvalidSuggestionProvider
+    : public AutocorrectManagerTest,
+      public testing::WithParamInterface<AutocorrectSuggestionProvider> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    AutocorrectManagerTest,
+    DisabledByInvalidSuggestionProvider,
+    testing::ValuesIn<>({
+        AutocorrectSuggestionProvider::kUnknown,
+        AutocorrectSuggestionProvider::kUsEnglishPrebundled,
+        AutocorrectSuggestionProvider::kUsEnglishDownloaded,
+    }),
+    [](const testing::TestParamInfo<AutocorrectSuggestionProvider> info) {
+      return ToString(info.param);
+    });
+
+TEST_P(DisabledByInvalidSuggestionProvider, WhenUserInDefaultExperiment) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(RequiredForAutocorrectByDefault(),
+                                 DisabledFeatures());
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+
+  EXPECT_TRUE(manager_.DisabledByInvalidExperimentContext());
+}
+
 struct RejectCase {
   std::string test_name;
-  bool vk_visible;
+  bool vk_enabled;
   std::string histogram_name;
 };
 
@@ -2589,7 +3022,7 @@ class RejectMetric : public AutocorrectManagerTest,
 
 TEST_P(RejectMetric, RecordRejectionForMetricOther) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
 
   // Accept autocorrect implicitly.
@@ -2610,7 +3043,7 @@ TEST_P(RejectMetric, RecordRejectionForMetricOther) {
 
 TEST_P(RejectMetric, RecordRejectionForVkUndo) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -2627,11 +3060,11 @@ TEST_P(RejectMetric, RecordRejectionForVkUndo) {
 
 TEST_P(RejectMetric, RecordRejectionForBackspace) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
-  if (!test_case.vk_visible) {
+  if (!test_case.vk_enabled) {
     manager_.OnKeyEvent(
         CreateKeyEvent(ui::DomKey::NONE, ui::DomCode::BACKSPACE));
   }
@@ -2642,7 +3075,7 @@ TEST_P(RejectMetric, RecordRejectionForBackspace) {
   histogram_tester_.ExpectBucketCount(
       test_case.histogram_name,
       AutocorrectRejectionBreakdown::kRejectedBackspace,
-      test_case.vk_visible ? 0 : 1);
+      test_case.vk_enabled ? 0 : 1);
   histogram_tester_.ExpectBucketCount(
       test_case.histogram_name, AutocorrectRejectionBreakdown::kRemovedLetters,
       1);
@@ -2650,12 +3083,12 @@ TEST_P(RejectMetric, RecordRejectionForBackspace) {
       test_case.histogram_name,
       AutocorrectRejectionBreakdown::kSuggestionRejected, 1);
   histogram_tester_.ExpectTotalCount(test_case.histogram_name,
-                                     test_case.vk_visible ? 2 : 3);
+                                     test_case.vk_enabled ? 2 : 3);
 }
 
 TEST_P(RejectMetric, RecordRejectionForFullSelectionTyping) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -2675,7 +3108,7 @@ TEST_P(RejectMetric, RecordRejectionForFullSelectionTyping) {
 
 TEST_P(RejectMetric, RecordRejectionForPartialSelectionTyping) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -2695,7 +3128,7 @@ TEST_P(RejectMetric, RecordRejectionForPartialSelectionTyping) {
 
 TEST_P(RejectMetric, RecordRejectionForFullWithExternalSelectionTyping) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -2715,7 +3148,7 @@ TEST_P(RejectMetric, RecordRejectionForFullWithExternalSelectionTyping) {
 
 TEST_P(RejectMetric, RecordRejectionForPartialWithExternalSelectionTyping) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -2735,7 +3168,7 @@ TEST_P(RejectMetric, RecordRejectionForPartialWithExternalSelectionTyping) {
 
 TEST_P(RejectMetric, RecordRejectionForTypingNoSelection) {
   const RejectCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(test_case.vk_visible);
+  keyboard_client_->set_keyboard_enabled_for_test(test_case.vk_enabled);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
   manager_.OnSurroundingTextChanged(u"the ", gfx::Range(4));
 
@@ -2743,7 +3176,7 @@ TEST_P(RejectMetric, RecordRejectionForTypingNoSelection) {
     ::testing::InSequence seq;
 
     AssistiveWindowProperties shown_properties =
-        CreateVisibleUndoWindowProperties(u"teh", u"the");
+        CreateVisibleUndoWindowWithLearnMoreButtonProperties(u"teh", u"the");
 
     EXPECT_CALL(mock_suggestion_handler_,
                 SetAssistiveWindowProperties(_, shown_properties, _));
@@ -2773,10 +3206,10 @@ INSTANTIATE_TEST_SUITE_P(
     RejectMetric,
     testing::ValuesIn<RejectCase>({
         {"VkEnabled",
-         /*vk_visible=*/true,
+         /*vk_enabled=*/true,
          /*histogram_name=*/kAutocorrectV2VkRejectionHistName},
         {"VkDisabled",
-         /*vk_visible=*/false,
+         /*vk_enabled=*/false,
          /*histogram_name=*/kAutocorrectV2PkRejectionHistName},
     }),
     [](const testing::TestParamInfo<RejectCase> info) {
@@ -2786,7 +3219,7 @@ INSTANTIATE_TEST_SUITE_P(
 struct PkUserPrefCase {
   std::string test_name;
   std::string engine_id;
-  absl::optional<int> autocorrect_level;
+  std::optional<int> autocorrect_level;
   AutocorrectPreference expected_pref;
 };
 
@@ -2808,8 +3241,8 @@ INSTANTIATE_TEST_SUITE_P(
          /*expected_pref=*/AutocorrectPreference::kDisabled},
         {"UsEnglishDefault",
          /*engine_id=*/kUsEnglishEngineId,
-         /*autocorrect_level=*/absl::nullopt,
-         /*expected_pref=*/AutocorrectPreference::kDefault},
+         /*autocorrect_level=*/std::nullopt,
+         /*expected_pref=*/AutocorrectPreference::kEnabledByDefault},
     }),
     [](const testing::TestParamInfo<PkUserPrefCase> info) {
       return info.param.test_name;
@@ -2833,7 +3266,7 @@ TEST_P(PkEnglishUserPreferenceMetric, IsNotRecordedWhenKeyEventNotEncountered) {
 
 TEST_P(PkEnglishUserPreferenceMetric, IsNotRecordedWhenKeyEventCameFromTheVk) {
   const PkUserPrefCase& test_case = GetParam();
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   if (test_case.autocorrect_level) {
     SetAutocorrectPreferenceTo(
         /*profile=*/*profile_,
@@ -2914,7 +3347,7 @@ INSTANTIATE_TEST_SUITE_P(
          /*expected_pref=*/AutocorrectPreference::kDisabled},
         {"UsInternationalDefault",
          /*engine_id=*/kUsInternationalEngineId,
-         /*autocorrect_level=*/absl::nullopt,
+         /*autocorrect_level=*/std::nullopt,
          /*expected_pref=*/AutocorrectPreference::kDefault},
 
         {"SpainSpanishEnabled",
@@ -2927,7 +3360,7 @@ INSTANTIATE_TEST_SUITE_P(
          /*expected_pref=*/AutocorrectPreference::kDisabled},
         {"SpainSpanishDefault",
          /*engine_id=*/kSpainSpanishEngineId,
-         /*autocorrect_level=*/absl::nullopt,
+         /*autocorrect_level=*/std::nullopt,
          /*expected_pref=*/AutocorrectPreference::kDefault},
 
         {"LatinAmericaSpanishEnabled",
@@ -2940,7 +3373,7 @@ INSTANTIATE_TEST_SUITE_P(
          /*expected_pref=*/AutocorrectPreference::kDisabled},
         {"LatinAmericaSpanishDefault",
          /*engine_id=*/kLatinAmericaSpanishEngineId,
-         /*autocorrect_level=*/absl::nullopt,
+         /*autocorrect_level=*/std::nullopt,
          /*expected_pref=*/AutocorrectPreference::kDefault},
 
         {"BrazilPortugeseEnabled",
@@ -2953,7 +3386,7 @@ INSTANTIATE_TEST_SUITE_P(
          /*expected_pref=*/AutocorrectPreference::kDisabled},
         {"BrazilPortugeseDefault",
          /*engine_id=*/kBrazilPortugeseEngineId,
-         /*autocorrect_level=*/absl::nullopt,
+         /*autocorrect_level=*/std::nullopt,
          /*expected_pref=*/AutocorrectPreference::kDefault},
 
         {"FranceFrenchEnabled",
@@ -2966,7 +3399,7 @@ INSTANTIATE_TEST_SUITE_P(
          /*expected_pref=*/AutocorrectPreference::kDisabled},
         {"FranceFrenchDefault",
          /*engine_id=*/kFranceFrenchEngineId,
-         /*autocorrect_level=*/absl::nullopt,
+         /*autocorrect_level=*/std::nullopt,
          /*expected_pref=*/AutocorrectPreference::kDefault},
     }),
     [](const testing::TestParamInfo<PkUserPrefCase> info) {
@@ -3016,7 +3449,7 @@ TEST_F(AutocorrectManagerTest,
 struct PkEnabledByDefaultCase {
   std::string test_name;
   std::string engine_id;
-  absl::optional<int> autocorrect_level;
+  std::optional<int> autocorrect_level;
   AutocorrectPreference preference_before;
   AutocorrectPreference preference_after;
 };
@@ -3047,6 +3480,10 @@ TEST_P(PkEnabledByDefaultTest, ItIsEnabledByDefaultWhenFlagIsEnabled) {
 TEST_P(PkEnabledByDefaultTest, ItIsNotEnabledByDefaultWhenFlagIsDisabled) {
   const PkEnabledByDefaultCase& test_case = GetParam();
   PrefService* prefs = profile_->GetPrefs();
+  feature_list_.Reset();
+  feature_list_.InitWithFeatures(
+      /*enabled_features=*/{},
+      /*disabled_features=*/DisabledFeaturesIncludingAutocorrectByDefault());
   if (test_case.autocorrect_level) {
     SetAutocorrectPreferenceTo(*profile_, kUsEnglishEngineId,
                                *test_case.autocorrect_level);
@@ -3068,7 +3505,7 @@ INSTANTIATE_TEST_SUITE_P(
         PkEnabledByDefaultCase{
             "EnglishDefaultToEnabledByDefault",
             /*engine_id=*/kUsEnglishEngineId,
-            /*autocorrect_level=*/absl::nullopt,
+            /*autocorrect_level=*/std::nullopt,
             /*preference_before=*/AutocorrectPreference::kDefault,
             /*preference_after=*/AutocorrectPreference::kEnabledByDefault},
         PkEnabledByDefaultCase{
@@ -3093,7 +3530,7 @@ INSTANTIATE_TEST_SUITE_P(
         PkEnabledByDefaultCase{
             "PortugeseDefaultRemainsDefault",
             /*engine_id=*/kBrazilPortugeseEngineId,
-            /*autocorrect_level=*/absl::nullopt,
+            /*autocorrect_level=*/std::nullopt,
             /*preference_before=*/AutocorrectPreference::kDefault,
             /*preference_after=*/AutocorrectPreference::kDefault},
         PkEnabledByDefaultCase{
@@ -3118,7 +3555,7 @@ INSTANTIATE_TEST_SUITE_P(
         PkEnabledByDefaultCase{
             "SpainSpanishDefaultRemainsDefault",
             /*engine_id=*/kSpainSpanishEngineId,
-            /*autocorrect_level=*/absl::nullopt,
+            /*autocorrect_level=*/std::nullopt,
             /*preference_before=*/AutocorrectPreference::kDefault,
             /*preference_after=*/AutocorrectPreference::kDefault},
         PkEnabledByDefaultCase{
@@ -3143,6 +3580,98 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<PkEnabledByDefaultCase> info) {
       return info.param.test_name;
     });
+
+class AutocorrectSuggestionProviderMetric
+    : public AutocorrectManagerTest,
+      public testing::WithParamInterface<AutocorrectSuggestionProvider> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    AutocorrectManagerTest,
+    AutocorrectSuggestionProviderMetric,
+    testing::ValuesIn<AutocorrectSuggestionProvider>({
+        AutocorrectSuggestionProvider::kUnknown,
+        AutocorrectSuggestionProvider::kUsEnglishPrebundled,
+        AutocorrectSuggestionProvider::kUsEnglishDownloaded,
+        AutocorrectSuggestionProvider::kUsEnglish840,
+        AutocorrectSuggestionProvider::kUsEnglish840V2,
+    }),
+    [](const testing::TestParamInfo<AutocorrectSuggestionProvider> info) {
+      return ToString(info.param);
+    });
+
+TEST_P(AutocorrectSuggestionProviderMetric, IsNotRecordedOnFocus) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+
+  histogram_tester_.ExpectTotalCount(
+      /*name=*/kAutocorrectV2PkSuggestionProviderHistName,
+      /*expected_count=*/0);
+}
+
+TEST_P(AutocorrectSuggestionProviderMetric, IsNotRecordedWhenVkIsVisible) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+  keyboard_client_->set_keyboard_enabled_for_test(true);
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+  manager_.OnKeyEvent(KeyA());
+
+  histogram_tester_.ExpectTotalCount(
+      /*name=*/kAutocorrectV2PkSuggestionProviderHistName,
+      /*expected_count=*/0);
+}
+
+TEST_P(AutocorrectSuggestionProviderMetric,
+       IsNotRecordedWhenAnEngineOtherThenEnglishIsActive) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+
+  manager_.OnActivate(kSpainSpanishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+  manager_.OnKeyEvent(KeyA());
+
+  histogram_tester_.ExpectTotalCount(
+      /*name=*/kAutocorrectV2PkSuggestionProviderHistName,
+      /*expected_count=*/0);
+}
+
+TEST_P(AutocorrectSuggestionProviderMetric, IsRecordedCorrectly) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+  manager_.OnKeyEvent(KeyA());
+
+  histogram_tester_.ExpectTotalCount(
+      /*name=*/kAutocorrectV2PkSuggestionProviderHistName,
+      /*expected_count=*/1);
+  histogram_tester_.ExpectBucketCount(
+      /*name=*/kAutocorrectV2PkSuggestionProviderHistName,
+      /*sample*/ provider, /*expected_count=*/1);
+}
+
+TEST_P(AutocorrectSuggestionProviderMetric, IsRecordedOnlyOncePerInput) {
+  const AutocorrectSuggestionProvider& provider = GetParam();
+
+  manager_.OnActivate(kUsEnglishEngineId);
+  manager_.OnFocus(kContextId);
+  manager_.OnConnectedToSuggestionProvider(provider);
+  manager_.OnKeyEvent(KeyA());
+  manager_.OnKeyEvent(KeyA());
+  manager_.OnKeyEvent(KeyA());
+
+  histogram_tester_.ExpectTotalCount(
+      /*name=*/kAutocorrectV2PkSuggestionProviderHistName,
+      /*expected_count=*/1);
+  histogram_tester_.ExpectBucketCount(
+      /*name=*/kAutocorrectV2PkSuggestionProviderHistName,
+      /*sample*/ provider, /*expected_count=*/1);
+}
 
 class AutocorrectManagerUkmMetricsTest : public AutocorrectManagerTest {
  protected:
@@ -3183,7 +3712,7 @@ TEST_F(AutocorrectManagerUkmMetricsTest,
 
 TEST_F(AutocorrectManagerUkmMetricsTest,
        RecordsAppCompatUkmForVKUnderlinedSuggestion) {
-  keyboard_client_->set_keyboard_visible_for_test(true);
+  keyboard_client_->set_keyboard_enabled_for_test(true);
   manager_.HandleAutocorrect(gfx::Range(0, 3), u"teh", u"the");
 
   auto ukm_entries = test_recorder_.GetEntriesByName(UkmEntry::kEntryName);

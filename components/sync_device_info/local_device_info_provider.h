@@ -6,11 +6,13 @@
 #define COMPONENTS_SYNC_DEVICE_INFO_LOCAL_DEVICE_INFO_PROVIDER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/callback_list.h"
-#include "components/sync/base/model_type.h"
-#include "components/version_info/version_info.h"
+#include "base/time/time.h"
+#include "components/sync/base/data_type.h"
+#include "components/version_info/channel.h"
 
 namespace syncer {
 
@@ -50,12 +52,15 @@ class MutableLocalDeviceInfoProvider : public LocalDeviceInfoProvider {
       const std::string& manufacturer_name,
       const std::string& model_name,
       const std::string& full_hardware_class,
-      std::unique_ptr<DeviceInfo> device_info_restored_from_store) = 0;
+      std::optional<std::string> android_os_build_fingerprint_prefix,
+      const DeviceInfo* device_info_restored_from_store) = 0;
   virtual void Clear() = 0;
 
   // Updates the local device's client name. Initialize() must be called before
   // calling this function.
   virtual void UpdateClientName(const std::string& client_name) = 0;
+
+  virtual void UpdateRecentSignInTime(base::Time time) = 0;
 };
 
 }  // namespace syncer

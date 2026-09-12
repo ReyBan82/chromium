@@ -26,11 +26,12 @@ class SignInFatalErrorScreen : public BaseScreen {
 
   // Sets the error information to be shown on the screen
   enum class Error {
-    UNKNOWN = 0,
-    SCRAPED_PASSWORD_VERIFICATION_FAILURE = 1,
-    INSECURE_CONTENT_BLOCKED = 2,
-    MISSING_GAIA_INFO = 3,
-    CUSTOM = 4,
+    kUnknown = 0,
+    kScrapedPasswordVerificationFailure = 1,
+    kInsecureContentBlocked = 2,
+    kMissingGaiaInfo = 3,
+    kOobeCompletionSkipped = 4,
+    kCustom = 5,
   };
 
   explicit SignInFatalErrorScreen(base::WeakPtr<SignInFatalErrorView> view,
@@ -40,7 +41,7 @@ class SignInFatalErrorScreen : public BaseScreen {
   ~SignInFatalErrorScreen() override;
 
   // Setting the error methods.
-  void SetErrorState(Error error, base::Value::Dict params);
+  void SetErrorState(Error error, base::DictValue params);
   void SetCustomError(const std::string& error_text,
                       const std::string& keyboard_hint,
                       const std::string& details,
@@ -50,10 +51,10 @@ class SignInFatalErrorScreen : public BaseScreen {
   // BaseScreen:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
-  Error error_state_ = Error::UNKNOWN;
-  base::Value::Dict extra_error_info_;
+  Error error_state_ = Error::kUnknown;
+  base::DictValue extra_error_info_;
 
   base::WeakPtr<SignInFatalErrorView> view_;
   base::RepeatingClosure exit_callback_;

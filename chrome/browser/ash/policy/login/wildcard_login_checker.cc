@@ -10,8 +10,6 @@
 #include "base/functional/callback_helpers.h"
 #include "base/values.h"
 #include "chrome/browser/ash/policy/core/policy_oauth2_token_fetcher.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/net/system_network_context_manager.h"
 #include "components/policy/core/browser/browser_policy_connector.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
@@ -28,9 +26,13 @@ const char kHostedDomainKey[] = "hd";
 
 }  // namespace
 
-WildcardLoginChecker::WildcardLoginChecker() {}
+WildcardLoginChecker::WildcardLoginChecker(
+    scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
+    : url_loader_factory_(std::move(url_loader_factory)) {
+  CHECK(url_loader_factory_);
+}
 
-WildcardLoginChecker::~WildcardLoginChecker() {}
+WildcardLoginChecker::~WildcardLoginChecker() = default;
 
 void WildcardLoginChecker::StartWithRefreshToken(
     const std::string& refresh_token,
@@ -42,9 +44,7 @@ void WildcardLoginChecker::StartWithRefreshToken(
 
   token_fetcher_ = PolicyOAuth2TokenFetcher::CreateInstance(kOAuthConsumerName);
   token_fetcher_->StartWithRefreshToken(
-      refresh_token,
-      g_browser_process->system_network_context_manager()
-          ->GetSharedURLLoaderFactory(),
+      refresh_token, url_loader_factory_,
       base::BindOnce(&WildcardLoginChecker::OnPolicyTokenFetched,
                      base::Unretained(this)));
 }
@@ -60,7 +60,7 @@ void WildcardLoginChecker::StartWithAccessToken(const std::string& access_token,
 }
 
 void WildcardLoginChecker::OnGetUserInfoSuccess(
-    const base::Value::Dict& response) {
+    const base::DictValue& response) {
   OnCheckCompleted(response.Find(kHostedDomainKey) ? RESULT_ALLOWED
                                                    : RESULT_BLOCKED);
 }
@@ -86,8 +86,8 @@ void WildcardLoginChecker::OnPolicyTokenFetched(
 
 void WildcardLoginChecker::StartUserInfoFetcher(
     const std::string& access_token) {
-  user_info_fetcher_ = std::make_unique<UserInfoFetcher>(
-      this, g_browser_process->shared_url_loader_factory());
+  user_info_fetcher_ =
+      std::make_unique<UserInfoFetcher>(this, url_loader_factory_);
   user_info_fetcher_->Start(access_token);
 }
 

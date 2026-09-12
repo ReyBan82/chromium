@@ -1,12 +1,8 @@
-// Copyright 2021 The Chromium Authors. All rights reserved.
+// Copyright 2021 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {
-  assert,
-  assertExists,
-  assertInstanceof,
-} from '../assert.js';
+import {assert, assertExists, assertInstanceof} from '../assert.js';
 import * as dom from '../dom.js';
 import {Box, Line, Point, Size, Vector, vectorFromPoints} from '../geometry.js';
 import {I18nString} from '../i18n_string.js';
@@ -110,9 +106,10 @@ interface Corner {
   pointerId: number|null;
 }
 
-export class DocumentFixMode {
-  private readonly templateSelector = '#document-fix-mode';
+// The class to set on corner element when the corner is being dragged.
+const CORNER_DRAGGING_CLASS = 'dragging';
 
+export class DocumentFixMode {
   private readonly root: HTMLElement;
 
   /**
@@ -174,6 +171,8 @@ export class DocumentFixMode {
    */
   private readonly onShow: () => void;
 
+  private readonly doneButton: HTMLButtonElement;
+
   constructor({target, onDone, onShow, onUpdatePage}: {
     target: HTMLElement,
     onDone: () => void,
@@ -182,7 +181,7 @@ export class DocumentFixMode {
         ({corners, rotation}: {corners: Point[], rotation: Rotation}) => void,
   }) {
     this.onShow = onShow;
-    const fragment = util.instantiateTemplate(this.templateSelector);
+    const fragment = util.instantiateTemplate('#document-fix-mode');
     this.root = dom.getFrom(fragment, '.document-fix-mode', HTMLElement);
     target.append(this.root);
     this.previewArea = dom.getFrom(this.root, '.preview-area', HTMLDivElement);
@@ -220,7 +219,7 @@ export class DocumentFixMode {
       for (let i = 0; i < 4; i++) {
         const tpl = util.instantiateTemplate('#document-drag-point-template');
         ret.push({
-          el: dom.getFrom(tpl, `.dot`, HTMLDivElement),
+          el: dom.getFrom(tpl, '.dot', HTMLDivElement),
           pt: new Point(0, 0),
           pointerId: null,
         });
@@ -240,7 +239,7 @@ export class DocumentFixMode {
     };
 
     const clockwiseBtn = dom.getFrom(
-        this.root, 'button[i18n-aria=rotate_clockwise_button]',
+        this.root, 'button[i18n-label=rotate_clockwise_button]',
         HTMLButtonElement);
     clockwiseBtn.addEventListener('click', () => {
       this.updateRotation(this.getNextRotation(this.rotation));
@@ -248,7 +247,7 @@ export class DocumentFixMode {
     });
 
     const counterclockwiseBtn = dom.getFrom(
-        this.root, 'button[i18n-aria=rotate_counterclockwise_button]',
+        this.root, 'button[i18n-label=rotate_counterclockwise_button]',
         HTMLButtonElement);
     counterclockwiseBtn.addEventListener('click', () => {
       this.updateRotation(this.getNextRotation(this.rotation, false));
@@ -302,15 +301,15 @@ export class DocumentFixMode {
           let moveX = 0;
           let moveY = 0;
           for (const keyIdx of pressedKeyIndices) {
-            const announceMoveXY = KEY_MOVEMENTS[keyIdx];
-            announceMoveX += announceMoveXY.x;
-            announceMoveY += announceMoveXY.y;
+            const announceMoveXy = KEY_MOVEMENTS[keyIdx];
+            announceMoveX += announceMoveXy.x;
+            announceMoveY += announceMoveXy.y;
             const movementIndex =
                 (keyIdx + this.getRotationIndex(this.rotation)) %
                 KEY_MOVEMENTS.length;
-            const moveXY = KEY_MOVEMENTS[movementIndex];
-            moveX += moveXY.x;
-            moveY += moveXY.y;
+            const moveXy = KEY_MOVEMENTS[movementIndex];
+            moveX += moveXy.x;
+            moveY += moveXy.y;
           }
           announcer.updateMovement(announceMoveX, announceMoveY);
           const {x: curX, y: curY} = corner.pt;
@@ -372,7 +371,7 @@ export class DocumentFixMode {
         const {width, height} = corner.el.getBoundingClientRect();
         cornerSize = new Size(width, height);
       }
-      assert(corner.el.classList.contains('dragging'));
+      assert(corner.el.classList.contains(CORNER_DRAGGING_CLASS));
 
       let dragX = e.offsetX;
       let dragY = e.offsetY;
@@ -401,13 +400,13 @@ export class DocumentFixMode {
         e.preventDefault();
       }
     });
-    dom.getFrom(
-           this.root, 'button[i18n-text=label_crop_done]', HTMLButtonElement)
-        .addEventListener('click', onDone);
+    this.doneButton = dom.getFrom(
+        this.root, 'button[i18n-text=label_crop_done]', HTMLButtonElement);
+    this.doneButton.addEventListener('click', onDone);
   }
 
   private setDragging(corner: Corner, pointerId: number) {
-    corner.el.classList.add('dragging');
+    corner.el.classList.add(CORNER_DRAGGING_CLASS);
     corner.pointerId = pointerId;
   }
 
@@ -420,7 +419,7 @@ export class DocumentFixMode {
     if (corner === null) {
       return;
     }
-    corner.el.classList.remove('dragging');
+    corner.el.classList.remove(CORNER_DRAGGING_CLASS);
     corner.pointerId = null;
   }
 
@@ -553,7 +552,7 @@ export class DocumentFixMode {
       const cornerIndex =
           (this.getRotationIndex(this.rotation) + index) % this.corners.length;
       const cornElement = this.corners[cornerIndex].el;
-      cornElement.setAttribute('i18n-aria', label);
+      cornElement.setAttribute('i18n-label', label);
     }
     util.setupI18nElements(this.root);
   }
@@ -666,5 +665,9 @@ export class DocumentFixMode {
 
   private getRotationIndex(rotation: Rotation) {
     return ROTATION_ORDER.indexOf(rotation);
+  }
+
+  focusDefaultElement(): void {
+    this.doneButton.focus();
   }
 }

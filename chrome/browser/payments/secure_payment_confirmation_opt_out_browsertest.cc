@@ -3,13 +3,15 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/payments/secure_payment_confirmation_browsertest.h"
-#include "components/autofill/core/browser/test_event_waiter.h"
-#include "components/payments/content/payment_manifest_web_data_service.h"
+#include "components/autofill/core/browser/test_utils/test_event_waiter.h"
 #include "components/payments/content/secure_payment_confirmation_app.h"
+#include "components/payments/content/web_payments_web_data_service.h"
 #include "components/payments/core/secure_payment_confirmation_credential.h"
 #include "components/webdata_services/web_data_service_wrapper_factory.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 
 namespace payments {
 namespace {
@@ -25,13 +27,15 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   std::vector<uint8_t> credential_id = {'c', 'r', 'e', 'd'};
   std::vector<uint8_t> user_id = {'u', 's', 'e', 'r'};
   webdata_services::WebDataServiceWrapperFactory::
-      GetPaymentManifestWebDataServiceForBrowserContext(
+      GetWebPaymentsWebDataServiceForBrowserContext(
           GetActiveWebContents()->GetBrowserContext(),
           ServiceAccessType::EXPLICIT_ACCESS)
           ->AddSecurePaymentConfirmationCredential(
               std::make_unique<SecurePaymentConfirmationCredential>(
                   std::move(credential_id), "a.com", std::move(user_id)),
-              /*consumer=*/this);
+              base::BindOnce(&SecurePaymentConfirmationOptOutTest::
+                                 OnWebDataServiceRequestDone,
+                             weak_ptr_factory_.GetWeakPtr()));
 
   // Initiate SPC, with opt-out enabled.
   ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
@@ -64,13 +68,15 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   std::vector<uint8_t> credential_id = {'c', 'r', 'e', 'd'};
   std::vector<uint8_t> user_id = {'u', 's', 'e', 'r'};
   webdata_services::WebDataServiceWrapperFactory::
-      GetPaymentManifestWebDataServiceForBrowserContext(
+      GetWebPaymentsWebDataServiceForBrowserContext(
           GetActiveWebContents()->GetBrowserContext(),
           ServiceAccessType::EXPLICIT_ACCESS)
           ->AddSecurePaymentConfirmationCredential(
               std::make_unique<SecurePaymentConfirmationCredential>(
                   std::move(credential_id), "a.com", std::move(user_id)),
-              /*consumer=*/this);
+              base::BindOnce(&SecurePaymentConfirmationOptOutTest::
+                                 OnWebDataServiceRequestDone,
+                             weak_ptr_factory_.GetWeakPtr()));
 
   // Initiate SPC, with opt-out enabled.
   ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
@@ -86,7 +92,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   // was recorded as offered but not taken.
   test_controller()->CloseDialog();
   EXPECT_EQ(
-      GetWebAuthnErrorMessage(),
+      GetCancelErrorMessage(),
       content::EvalJs(GetActiveWebContents(), "getOutstandingStatusPromise()"));
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
                          Event2::kUserAborted, Event2::kHadInitialFormOfPayment,
@@ -101,13 +107,15 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   std::vector<uint8_t> credential_id = {'c', 'r', 'e', 'd'};
   std::vector<uint8_t> user_id = {'u', 's', 'e', 'r'};
   webdata_services::WebDataServiceWrapperFactory::
-      GetPaymentManifestWebDataServiceForBrowserContext(
+      GetWebPaymentsWebDataServiceForBrowserContext(
           GetActiveWebContents()->GetBrowserContext(),
           ServiceAccessType::EXPLICIT_ACCESS)
           ->AddSecurePaymentConfirmationCredential(
               std::make_unique<SecurePaymentConfirmationCredential>(
                   std::move(credential_id), "a.com", std::move(user_id)),
-              /*consumer=*/this);
+              base::BindOnce(&SecurePaymentConfirmationOptOutTest::
+                                 OnWebDataServiceRequestDone,
+                             weak_ptr_factory_.GetWeakPtr()));
 
   // Initiate SPC, with opt-out disabled.
   ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
@@ -126,7 +134,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   // was not recorded as offered or taken.
   test_controller()->CloseDialog();
   EXPECT_EQ(
-      GetWebAuthnErrorMessage(),
+      GetCancelErrorMessage(),
       content::EvalJs(GetActiveWebContents(), "getOutstandingStatusPromise()"));
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
                          Event2::kUserAborted, Event2::kHadInitialFormOfPayment,
@@ -140,13 +148,15 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   std::vector<uint8_t> credential_id = {'c', 'r', 'e', 'd'};
   std::vector<uint8_t> user_id = {'u', 's', 'e', 'r'};
   webdata_services::WebDataServiceWrapperFactory::
-      GetPaymentManifestWebDataServiceForBrowserContext(
+      GetWebPaymentsWebDataServiceForBrowserContext(
           GetActiveWebContents()->GetBrowserContext(),
           ServiceAccessType::EXPLICIT_ACCESS)
           ->AddSecurePaymentConfirmationCredential(
               std::make_unique<SecurePaymentConfirmationCredential>(
                   std::move(credential_id), "a.com", std::move(user_id)),
-              /*consumer=*/this);
+              base::BindOnce(&SecurePaymentConfirmationOptOutTest::
+                                 OnWebDataServiceRequestDone,
+                             weak_ptr_factory_.GetWeakPtr()));
 
   // Initiate SPC, without specifying a value for showOptOut.
   ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
@@ -161,7 +171,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   // was not recorded as offered or taken.
   test_controller()->CloseDialog();
   EXPECT_EQ(
-      GetWebAuthnErrorMessage(),
+      GetCancelErrorMessage(),
       content::EvalJs(GetActiveWebContents(), "getOutstandingStatusPromise()"));
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
                          Event2::kUserAborted, Event2::kHadInitialFormOfPayment,
@@ -176,7 +186,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   NavigateTo("a.com", "/secure_payment_confirmation.html");
 
   // Initiate SPC, with opt-out enabled.
-  ResetEventWaiterForSingleEvent(TestEvent::kErrorDisplayed);
+  ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
   const bool show_opt_out = true;
   ExecuteScriptAsync(
       GetActiveWebContents(),
@@ -193,8 +203,8 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
 
   // Verify that opt out was recorded as both offered and chosen.
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
+                         Event2::kHadInitialFormOfPayment,
                          Event2::kOptOutOffered, Event2::kUserOptedOut,
-                         Event2::kNoMatchingCredentials,
                          Event2::kRequestMethodSecurePaymentConfirmation});
 }
 
@@ -206,7 +216,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   NavigateTo("a.com", "/secure_payment_confirmation.html");
 
   // Initiate SPC, with opt-out enabled.
-  ResetEventWaiterForSingleEvent(TestEvent::kErrorDisplayed);
+  ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
   const bool show_opt_out = true;
   ExecuteScriptAsync(
       GetActiveWebContents(),
@@ -219,11 +229,11 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   // was recorded as offered but not taken.
   test_controller()->CloseDialog();
   EXPECT_EQ(
-      GetWebAuthnErrorMessage(),
+      GetCancelErrorMessage(),
       content::EvalJs(GetActiveWebContents(), "getOutstandingStatusPromise()"));
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
-                         Event2::kUserAborted, Event2::kOptOutOffered,
-                         Event2::kNoMatchingCredentials,
+                         Event2::kUserAborted, Event2::kHadInitialFormOfPayment,
+                         Event2::kOptOutOffered,
                          Event2::kRequestMethodSecurePaymentConfirmation});
 }
 
@@ -235,7 +245,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   NavigateTo("a.com", "/secure_payment_confirmation.html");
 
   // Initiate SPC, with opt-out disabled.
-  ResetEventWaiterForSingleEvent(TestEvent::kErrorDisplayed);
+  ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
   const bool show_opt_out = false;
   ExecuteScriptAsync(
       GetActiveWebContents(),
@@ -251,10 +261,10 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   // was not recorded as offered or taken.
   test_controller()->CloseDialog();
   EXPECT_EQ(
-      GetWebAuthnErrorMessage(),
+      GetCancelErrorMessage(),
       content::EvalJs(GetActiveWebContents(), "getOutstandingStatusPromise()"));
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
-                         Event2::kUserAborted, Event2::kNoMatchingCredentials,
+                         Event2::kUserAborted, Event2::kHadInitialFormOfPayment,
                          Event2::kRequestMethodSecurePaymentConfirmation});
 }
 
@@ -266,7 +276,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   NavigateTo("a.com", "/secure_payment_confirmation.html");
 
   // Initiate SPC, without specifying a value for showOptOut.
-  ResetEventWaiterForSingleEvent(TestEvent::kErrorDisplayed);
+  ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
   ExecuteScriptAsync(GetActiveWebContents(),
                      "getSecurePaymentConfirmationStatus()");
   WaitForObservedEvent();
@@ -278,11 +288,31 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
   // was not recorded as offered or taken.
   test_controller()->CloseDialog();
   EXPECT_EQ(
-      GetWebAuthnErrorMessage(),
+      GetCancelErrorMessage(),
       content::EvalJs(GetActiveWebContents(), "getOutstandingStatusPromise()"));
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
-                         Event2::kUserAborted, Event2::kNoMatchingCredentials,
+                         Event2::kUserAborted, Event2::kHadInitialFormOfPayment,
                          Event2::kRequestMethodSecurePaymentConfirmation});
+}
+
+IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutTest,
+                       Metrics_NoMatchingCreds_OptOut) {
+  base::HistogramTester histogram_tester;
+  test_controller()->SetHasAuthenticator(true);
+  NavigateTo("a.com", "/secure_payment_confirmation.html");
+
+  ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
+  ExecuteScriptAsync(
+      GetActiveWebContents(),
+      content::JsReplace(
+          "getSecurePaymentConfirmationStatus(undefined, undefined, $1)",
+          /*show_opt_out=*/true));
+  WaitForObservedEvent();
+  test_controller()->ClickOptOut();
+
+  histogram_tester.ExpectUniqueSample("SecurePaymentRequest.Fallback.Outcome",
+                                      SecurePaymentRequestOutcome::kOptOut,
+                                      /*expected_bucket_count=*/1);
 }
 
 class SecurePaymentConfirmationOptOutDisabledTest
@@ -304,13 +334,15 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutDisabledTest,
   std::vector<uint8_t> credential_id = {'c', 'r', 'e', 'd'};
   std::vector<uint8_t> user_id = {'u', 's', 'e', 'r'};
   webdata_services::WebDataServiceWrapperFactory::
-      GetPaymentManifestWebDataServiceForBrowserContext(
+      GetWebPaymentsWebDataServiceForBrowserContext(
           GetActiveWebContents()->GetBrowserContext(),
           ServiceAccessType::EXPLICIT_ACCESS)
           ->AddSecurePaymentConfirmationCredential(
               std::make_unique<SecurePaymentConfirmationCredential>(
                   std::move(credential_id), "a.com", std::move(user_id)),
-              /*consumer=*/this);
+              base::BindOnce(&SecurePaymentConfirmationOptOutTest::
+                                 OnWebDataServiceRequestDone,
+                             weak_ptr_factory_.GetWeakPtr()));
 
   // Initiate SPC, with opt-out enabled.
   ResetEventWaiterForSingleEvent(TestEvent::kUIDisplayed);
@@ -330,7 +362,7 @@ IN_PROC_BROWSER_TEST_F(SecurePaymentConfirmationOptOutDisabledTest,
   // was not recorded as offered or taken.
   test_controller()->CloseDialog();
   EXPECT_EQ(
-      GetWebAuthnErrorMessage(),
+      GetCancelErrorMessage(),
       content::EvalJs(GetActiveWebContents(), "getOutstandingStatusPromise()"));
   ExpectEvent2Histogram({Event2::kInitiated, Event2::kShown,
                          Event2::kUserAborted, Event2::kHadInitialFormOfPayment,

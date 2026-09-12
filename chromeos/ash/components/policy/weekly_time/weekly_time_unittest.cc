@@ -5,9 +5,11 @@
 #include "chromeos/ash/components/policy/weekly_time/weekly_time.h"
 
 #include <memory>
+#include <optional>
 #include <tuple>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/functional/callback_helpers.h"
 #include "base/i18n/rtl.h"
 #include "base/memory/ptr_util.h"
@@ -18,7 +20,6 @@
 #include "base/values.h"
 #include "components/policy/proto/chrome_device_policy.pb.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/icu/source/i18n/unicode/timezone.h"
 
 namespace em = enterprise_management;
@@ -56,13 +57,11 @@ constexpr base::TimeDelta kWeek = base::Days(7);
 }  // namespace
 
 class SingleWeeklyTimeTest
-    : public testing::TestWithParam<std::tuple<int, int, absl::optional<int>>> {
+    : public testing::TestWithParam<std::tuple<int, int, std::optional<int>>> {
  public:
   int day_of_week() const { return std::get<0>(GetParam()); }
   int minutes() const { return std::get<1>(GetParam()); }
-  absl::optional<int> timezone_offset() const {
-    return std::get<2>(GetParam());
-  }
+  std::optional<int> timezone_offset() const { return std::get<2>(GetParam()); }
 };
 
 TEST_P(SingleWeeklyTimeTest, Constructor) {
@@ -77,7 +76,7 @@ TEST_P(SingleWeeklyTimeTest, ToValue) {
   WeeklyTime weekly_time = WeeklyTime(
       day_of_week(), minutes() * kMinute.InMilliseconds(), timezone_offset());
   base::Value expected_weekly_time(base::Value::Type::DICT);
-  base::Value::Dict& dict = expected_weekly_time.GetDict();
+  base::DictValue& dict = expected_weekly_time.GetDict();
   dict.Set(WeeklyTime::kDayOfWeek, day_of_week());
   int milliseconds = minutes() * kMinute.InMilliseconds();
   dict.Set(WeeklyTime::kTime, milliseconds);
@@ -98,7 +97,7 @@ TEST_P(SingleWeeklyTimeTest, ExtractFromProto_InvalidDay) {
 
 TEST_P(SingleWeeklyTimeTest, ExtractFromProto_InvalidTime) {
   em::WeeklyTimeProto proto;
-  proto.set_day_of_week(kWeekdays[day_of_week()]);
+  proto.set_day_of_week(UNSAFE_TODO(kWeekdays[day_of_week()]));
   proto.set_time(-1);
   auto result = WeeklyTime::ExtractFromProto(proto, timezone_offset());
   ASSERT_FALSE(result);
@@ -107,7 +106,7 @@ TEST_P(SingleWeeklyTimeTest, ExtractFromProto_InvalidTime) {
 TEST_P(SingleWeeklyTimeTest, ExtractFromProto_Valid) {
   int milliseconds = minutes() * kMinute.InMilliseconds();
   em::WeeklyTimeProto proto;
-  proto.set_day_of_week(kWeekdays[day_of_week()]);
+  proto.set_day_of_week(UNSAFE_TODO(kWeekdays[day_of_week()]));
   proto.set_time(milliseconds);
   auto result = WeeklyTime::ExtractFromProto(proto, timezone_offset());
   ASSERT_TRUE(result);
@@ -118,7 +117,7 @@ TEST_P(SingleWeeklyTimeTest, ExtractFromProto_Valid) {
 
 TEST_P(SingleWeeklyTimeTest, ExtractFromDict_UnspecifiedDay) {
   int milliseconds = minutes() * kMinute.InMilliseconds();
-  base::Value::Dict dict;
+  base::DictValue dict;
   EXPECT_TRUE(dict.Set(WeeklyTime::kTime, milliseconds));
   auto result = WeeklyTime::ExtractFromDict(dict, timezone_offset());
   ASSERT_FALSE(result);
@@ -126,7 +125,7 @@ TEST_P(SingleWeeklyTimeTest, ExtractFromDict_UnspecifiedDay) {
 
 TEST_P(SingleWeeklyTimeTest, ExtractFromDict_InvalidDay) {
   int milliseconds = minutes() * kMinute.InMilliseconds();
-  base::Value::Dict dict;
+  base::DictValue dict;
   EXPECT_TRUE(dict.Set(WeeklyTime::kDayOfWeek, WeeklyTime::kWeekDays[0]));
   EXPECT_TRUE(dict.Set(WeeklyTime::kTime, milliseconds));
   auto result = WeeklyTime::ExtractFromDict(dict, timezone_offset());
@@ -138,7 +137,7 @@ TEST_P(SingleWeeklyTimeTest, ExtractFromDict_InvalidDay) {
 }
 
 TEST_P(SingleWeeklyTimeTest, ExtractFromDict_InvalidTime) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   EXPECT_TRUE(
       dict.Set(WeeklyTime::kDayOfWeek, WeeklyTime::kWeekDays[day_of_week()]));
   EXPECT_TRUE(dict.Set(WeeklyTime::kTime, -1));
@@ -148,7 +147,7 @@ TEST_P(SingleWeeklyTimeTest, ExtractFromDict_InvalidTime) {
 
 TEST_P(SingleWeeklyTimeTest, ExtractFromDict_Valid) {
   int milliseconds = minutes() * kMinute.InMilliseconds();
-  base::Value::Dict dict;
+  base::DictValue dict;
   EXPECT_TRUE(
       dict.Set(WeeklyTime::kDayOfWeek, WeeklyTime::kWeekDays[day_of_week()]));
   EXPECT_TRUE(dict.Set(WeeklyTime::kTime, milliseconds));
@@ -162,7 +161,7 @@ TEST_P(SingleWeeklyTimeTest, ExtractFromDict_Valid) {
 INSTANTIATE_TEST_SUITE_P(
     TheSmallestCase,
     SingleWeeklyTimeTest,
-    testing::Values(std::make_tuple(kMonday, 0, absl::nullopt)));
+    testing::Values(std::make_tuple(kMonday, 0, std::nullopt)));
 
 INSTANTIATE_TEST_SUITE_P(
     TheBiggestCase,
@@ -225,18 +224,18 @@ INSTANTIATE_TEST_SUITE_P(
 class TwoWeeklyTimesAndDurationInDifferentTimezonesTest
     : public testing::TestWithParam<std::tuple<int,
                                                int,
-                                               absl::optional<int>,
+                                               std::optional<int>,
                                                int,
                                                int,
-                                               absl::optional<int>,
+                                               std::optional<int>,
                                                base::TimeDelta>> {
  public:
   int day1() const { return std::get<0>(GetParam()); }
   int minutes1() const { return std::get<1>(GetParam()); }
-  absl::optional<int> offset1() const { return std::get<2>(GetParam()); }
+  std::optional<int> offset1() const { return std::get<2>(GetParam()); }
   int day2() const { return std::get<3>(GetParam()); }
   int minutes2() const { return std::get<4>(GetParam()); }
-  absl::optional<int> offset2() const { return std::get<5>(GetParam()); }
+  std::optional<int> offset2() const { return std::get<5>(GetParam()); }
   base::TimeDelta expected_duration() const { return std::get<6>(GetParam()); }
 };
 
@@ -274,10 +273,10 @@ INSTANTIATE_TEST_SUITE_P(TwoAgnosticTimezones,
                          TwoWeeklyTimesAndDurationInDifferentTimezonesTest,
                          testing::Values(std::make_tuple(kMonday,
                                                          10 * kMinutesInHour,
-                                                         absl::nullopt,
+                                                         std::nullopt,
                                                          kTuesday,
                                                          5 * kMinutesInHour,
-                                                         absl::nullopt,
+                                                         std::nullopt,
                                                          base::Hours(19))));
 
 class TwoWeeklyTimesAndOffsetTest

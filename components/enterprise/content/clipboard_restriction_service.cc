@@ -4,6 +4,7 @@
 
 #include "components/enterprise/content/clipboard_restriction_service.h"
 
+#include "base/no_destructor.h"
 #include "components/enterprise/content/pref_names.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "components/policy/core/common/policy_pref_names.h"
@@ -70,11 +71,11 @@ void ClipboardRestrictionService::UpdateSettings() {
     return;
   }
 
-  const base::Value::Dict& settings =
+  const base::DictValue& settings =
       pref_service_->GetDict(enterprise::content::kCopyPreventionSettings);
-  const base::Value::List* enable = settings.FindList(
+  const base::ListValue* enable = settings.FindList(
       enterprise::content::kCopyPreventionSettingsEnableFieldName);
-  const base::Value::List* disable = settings.FindList(
+  const base::ListValue* disable = settings.FindList(
       enterprise::content::kCopyPreventionSettingsDisableFieldName);
 
   DCHECK(enable);
@@ -92,12 +93,12 @@ void ClipboardRestrictionService::UpdateSettings() {
   // and the copy will be blocked. While confusing, this is mostly to map to the
   // same policy format as the content analysis connector, which also has
   // "enable" and "disable" lists used in this way.
-  url_matcher::util::AddFilters(enable_url_matcher_.get(), true, &next_id_,
-                                *enable);
-  url_matcher::util::AddFilters(disable_url_matcher_.get(), false, &next_id_,
-                                *disable);
+  url_matcher::util::AddFiltersWithLimit(enable_url_matcher_.get(), true,
+                                         &next_id_, *enable);
+  url_matcher::util::AddFiltersWithLimit(disable_url_matcher_.get(), false,
+                                         &next_id_, *disable);
 
-  absl::optional<int> min_data_size = settings.FindInt(
+  std::optional<int> min_data_size = settings.FindInt(
       enterprise::content::kCopyPreventionSettingsMinDataSizeFieldName);
   DCHECK(min_data_size);
   DCHECK(min_data_size >= 0);
@@ -107,7 +108,8 @@ void ClipboardRestrictionService::UpdateSettings() {
 // static
 ClipboardRestrictionServiceFactory*
 ClipboardRestrictionServiceFactory::GetInstance() {
-  return base::Singleton<ClipboardRestrictionServiceFactory>::get();
+  static base::NoDestructor<ClipboardRestrictionServiceFactory> instance;
+  return instance.get();
 }
 
 // static
@@ -132,7 +134,9 @@ ClipboardRestrictionServiceFactory::GetBrowserContextToUse(
   return context;
 }
 
-KeyedService* ClipboardRestrictionServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ClipboardRestrictionServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new ClipboardRestrictionService(user_prefs::UserPrefs::Get(context));
+  return std::make_unique<ClipboardRestrictionService>(
+      user_prefs::UserPrefs::Get(context));
 }

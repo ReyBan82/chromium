@@ -27,10 +27,9 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_GEOMETRY_TRANSFORM_STATE_H_
 
 #include <memory>
+
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/core/layout/geometry/physical_offset.h"
-#include "third_party/blink/renderer/platform/geometry/layout_point.h"
-#include "third_party/blink/renderer/platform/geometry/layout_size.h"
+#include "third_party/blink/renderer/platform/geometry/physical_offset.h"
 #include "third_party/blink/renderer/platform/transforms/affine_transform.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "ui/gfx/geometry/point_f.h"
@@ -47,8 +46,6 @@ namespace blink {
 // TODO(crbug.com/1222769): This class should go away and its users should use
 // GeometryMapper instead.
 class CORE_EXPORT TransformState {
-  STACK_ALLOCATED();
-
  public:
   enum TransformDirection {
     kApplyTransformDirection,
@@ -122,6 +119,8 @@ class CORE_EXPORT TransformState {
 
   // Return the accumulated transform.
   const gfx::Transform& AccumulatedTransform() const;
+
+  TransformDirection Direction() const { return direction_; }
 
  private:
   void TranslateTransform(const PhysicalOffset&);

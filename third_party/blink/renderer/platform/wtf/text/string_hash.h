@@ -22,13 +22,16 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_STRING_HASH_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_STRING_HASH_H_
 
+#include <string_view>
+
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/hash_traits.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_hasher.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
-namespace WTF {
+namespace blink {
 
 // The GetHash() functions in below HashTraits do not support null strings.
 // find(), Contains(), and insert() on HashMap<String,...> cause a null-pointer
@@ -36,7 +39,7 @@ namespace WTF {
 
 template <>
 struct HashTraits<StringImpl*> : GenericHashTraits<StringImpl*> {
-  static unsigned GetHash(const StringImpl* key) { return key->GetHash(); }
+  static uint32_t GetHash(const StringImpl* key) { return key->GetHash(); }
   static inline bool Equal(const StringImpl* a, const StringImpl* b) {
     return EqualNonNull(a, b);
   }
@@ -47,7 +50,7 @@ struct HashTraits<StringImpl*> : GenericHashTraits<StringImpl*> {
 template <>
 struct HashTraits<scoped_refptr<StringImpl>>
     : GenericHashTraits<scoped_refptr<StringImpl>> {
-  static unsigned GetHash(const scoped_refptr<StringImpl>& key) {
+  static uint32_t GetHash(const scoped_refptr<StringImpl>& key) {
     return key->GetHash();
   }
   static bool Equal(const scoped_refptr<StringImpl>& a,
@@ -59,10 +62,42 @@ struct HashTraits<scoped_refptr<StringImpl>>
 
 template <>
 struct HashTraits<String> : SimpleClassHashTraits<String> {
-  static unsigned GetHash(const String& key) { return key.Impl()->GetHash(); }
+  static uint32_t GetHash(const String& key) { return key.Impl()->GetHash(); }
   static bool Equal(const String& a, const String& b) {
     return EqualNonNull(a.Impl(), b.Impl());
   }
+
+  // Avoid implicit conversion to String just to hash or compare.
+  // We would like to add overloads for StringView and AtomicString too,
+  // but there are classes (e.g. WebString) with
+  // implicit conversion operators both to String and one of the others,
+  // which would cause ambiguous overloads.
+  static uint32_t GetHash(const char* key) {
+    return StringHasher::ComputeHashAndMaskTop8Bits(
+        base::as_byte_span(std::string_view(key)));
+  }
+  static uint32_t GetHash(const LChar* key) {
+    return GetHash(reinterpret_cast<const char*>(key));
+  }
+  static uint32_t GetHash(const UChar* key) {
+    return blink::ComputeHashForWideString(
+        // SAFETY: Safe when input is null-terminated string.
+        UNSAFE_BUFFERS({key, blink::LengthOfNullTerminatedString(key)}));
+  }
+
+  static bool Equal(const String& a, const char* b) { return a == b; }
+  static bool Equal(const char* a, const String& b) { return a == b; }
+  static bool Equal(const String& a, const LChar* b) {
+    return a == reinterpret_cast<const char*>(b);
+  }
+  static bool Equal(const LChar* a, const String& b) {
+    return reinterpret_cast<const char*>(a) == b;
+  }
+  static bool Equal(const String& a, const UChar* b) { return a == b; }
+  static bool Equal(const UChar* a, const String& b) { return a == b; }
+  // NOTE: There are no String == StringView overloads, so we also make no
+  // Equal() for them.
+
   static constexpr bool kSafeToCompareToEmptyOrDeleted = false;
   static bool IsEmptyValue(const String& s) { return s.IsNull(); }
   static bool IsDeletedValue(const String& s) {
@@ -73,13 +108,13 @@ struct HashTraits<String> : SimpleClassHashTraits<String> {
   }
 };
 
-}  // namespace WTF
+}  // namespace blink
 
 namespace std {
 template <>
-struct hash<WTF::String> {
-  size_t operator()(const WTF::String& string) const {
-    return WTF::GetHash(string);
+struct hash<blink::String> {
+  size_t operator()(const blink::String& string) const {
+    return blink::GetHash(string);
   }
 };
 }  // namespace std

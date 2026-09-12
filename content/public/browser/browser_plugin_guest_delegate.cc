@@ -9,7 +9,6 @@ namespace content {
 std::unique_ptr<WebContents> BrowserPluginGuestDelegate::CreateNewGuestWindow(
     const WebContents::CreateParams& create_params) {
   NOTREACHED();
-  return nullptr;
 }
 
 WebContents* BrowserPluginGuestDelegate::GetOwnerWebContents() {
@@ -18,6 +17,11 @@ WebContents* BrowserPluginGuestDelegate::GetOwnerWebContents() {
 
 RenderFrameHost* BrowserPluginGuestDelegate::GetProspectiveOuterDocument() {
   return nullptr;
+}
+
+base::WeakPtr<BrowserPluginGuestDelegate>
+BrowserPluginGuestDelegate::GetGuestDelegateWeakPtr() {
+  NOTREACHED();
 }
 
 }  // namespace content

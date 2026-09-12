@@ -5,12 +5,17 @@
 #ifndef CONTENT_PUBLIC_BROWSER_SPEECH_RECOGNITION_MANAGER_H_
 #define CONTENT_PUBLIC_BROWSER_SPEECH_RECOGNITION_MANAGER_H_
 
-#include "base/functional/callback.h"
 #include "content/common/content_export.h"
+#include "media/mojo/mojom/speech_recognition.mojom.h"
+#include "media/mojo/mojom/speech_recognition_audio_forwarder.mojom.h"
+#include "media/mojo/mojom/speech_recognizer.mojom-forward.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
 
 namespace content {
 
-class SpeechRecognitionEventListener;
+struct GlobalRenderFrameHostId;
+struct SpeechRecognitionAudioForwarderConfig;
 struct SpeechRecognitionSessionConfig;
 struct SpeechRecognitionSessionContext;
 
@@ -39,6 +44,20 @@ class SpeechRecognitionManager {
   // Creates a new recognition session.
   virtual int CreateSession(const SpeechRecognitionSessionConfig& config) = 0;
 
+  // Creates a new recognition session. If the session mojo remotes are not
+  // null, speech recognition session will be managed by the speech recognition
+  // service, otherwise the session will be managed by the browser. If the audio
+  // forwarder config is not null, the audio forwarder will be used to receive
+  // audio, otherwise the audio will be received from the microphone.
+  virtual int CreateSession(
+      const SpeechRecognitionSessionConfig& config,
+      mojo::PendingReceiver<media::mojom::SpeechRecognitionSession>
+          session_receiver,
+      mojo::PendingRemote<media::mojom::SpeechRecognitionSessionClient>
+          client_remote,
+      std::optional<SpeechRecognitionAudioForwarderConfig>
+          audio_forwarder_config) = 0;
+
   // Starts/restarts recognition for an existing session, after performing a
   // preliminary check on the delegate (CheckRecognitionIsAllowed).
   virtual void StartSession(int session_id) = 0;
@@ -47,12 +66,18 @@ class SpeechRecognitionManager {
   virtual void AbortSession(int session_id) = 0;
 
   // Aborts all sessions for a given RenderFrame, without providing any result.
-  virtual void AbortAllSessionsForRenderFrame(int render_process_id,
-                                              int render_frame_id) = 0;
+  virtual void AbortAllSessionsForRenderFrame(
+      GlobalRenderFrameHostId global_id) = 0;
 
   // Stops audio capture for an existing session. The audio captured before the
   // call will be processed, possibly ending up with a result.
   virtual void StopAudioCaptureForSession(int session_id) = 0;
+
+  // Updates the recognition context for an existing session.
+  virtual void UpdateRecognitionContextForSession(
+      int session_id,
+      const media::SpeechRecognitionRecognitionContext&
+          recognition_context) = 0;
 
   // Retrieves the configuration of a session, as provided by the caller
   // upon CreateSession.
@@ -61,6 +86,9 @@ class SpeechRecognitionManager {
 
   // Retrieves the context associated to a session.
   virtual SpeechRecognitionSessionContext GetSessionContext(int session_id) = 0;
+
+  virtual bool UseOnDeviceSpeechRecognition(
+      const SpeechRecognitionSessionConfig& config) = 0;
 
  protected:
   virtual ~SpeechRecognitionManager() {}

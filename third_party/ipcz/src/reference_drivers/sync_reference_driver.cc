@@ -12,6 +12,7 @@
 #include <tuple>
 #include <vector>
 
+#include "base/no_destructor.h"
 #include "ipcz/ipcz.h"
 #include "reference_drivers/object.h"
 #include "reference_drivers/random.h"
@@ -33,7 +34,7 @@ void CloseAllHandles(absl::Span<const IpczDriverHandle> handles) {
 // Provides shared ownership of a transport object given to the driver by ipcz
 // during driver transport activation. Within ipcz this corresponds to a
 // DriverTransport object.
-class TransportWrapper : public RefCounted {
+class TransportWrapper : public RefCounted<TransportWrapper> {
  public:
   TransportWrapper(IpczHandle transport,
                    IpczTransportActivityHandler activity_handler)
@@ -47,7 +48,9 @@ class TransportWrapper : public RefCounted {
   void NotifyError() { DoNotify(IPCZ_TRANSPORT_ACTIVITY_ERROR); }
 
  private:
-  ~TransportWrapper() override {
+  friend class RefCounted<TransportWrapper>;
+
+  ~TransportWrapper() {
     // Since this is destruction, we can safely assume the invocation will be
     // exclusive. Otherwise someone is mismanaging a reference count or has
     // a UAF bug.
@@ -325,66 +328,57 @@ class InProcessTransport
   std::vector<SavedMessage> saved_messages_ ABSL_GUARDED_BY(mutex_);
 };
 
-IpczResult IPCZ_API CreateTransports(IpczDriverHandle transport0,
-                                     IpczDriverHandle transport1,
-                                     uint32_t flags,
-                                     const void* options,
-                                     IpczDriverHandle* new_transport0,
-                                     IpczDriverHandle* new_transport1) {
-  auto first = MakeRefCounted<InProcessTransport>();
-  auto second = MakeRefCounted<InProcessTransport>();
-  first->SetPeer(second);
-  second->SetPeer(first);
-  *new_transport0 = Object::ReleaseAsHandle(std::move(first));
-  *new_transport1 = Object::ReleaseAsHandle(std::move(second));
-  return IPCZ_RESULT_OK;
-}
+class SyncReferenceDriverImpl : public SingleProcessReferenceDriverBase {
+ public:
+  IpczResult CreateTransports(IpczDriverHandle transport0,
+                              IpczDriverHandle transport1,
+                              uint32_t flags,
+                              const void* options,
+                              IpczDriverHandle* new_transport0,
+                              IpczDriverHandle* new_transport1) const override {
+    auto first = MakeRefCounted<InProcessTransport>();
+    auto second = MakeRefCounted<InProcessTransport>();
+    first->SetPeer(second);
+    second->SetPeer(first);
+    *new_transport0 = Object::ReleaseAsHandle(std::move(first));
+    *new_transport1 = Object::ReleaseAsHandle(std::move(second));
+    return IPCZ_RESULT_OK;
+  }
 
-IpczResult IPCZ_API ActivateTransport(IpczDriverHandle driver_transport,
-                                      IpczHandle transport,
-                                      IpczTransportActivityHandler handler,
-                                      uint32_t flags,
-                                      const void* options) {
-  return InProcessTransport::FromHandle(driver_transport)
-      ->Activate(transport, handler);
-}
+  IpczResult ActivateTransport(IpczDriverHandle transport,
+                               IpczHandle listener,
+                               IpczTransportActivityHandler activity_handler,
+                               uint32_t flags,
+                               const void* options) const override {
+    return InProcessTransport::FromHandle(transport)->Activate(
+        listener, activity_handler);
+  }
 
-IpczResult IPCZ_API DeactivateTransport(IpczDriverHandle driver_transport,
-                                        uint32_t flags,
-                                        const void* options) {
-  InProcessTransport::FromHandle(driver_transport)->Deactivate();
-  return IPCZ_RESULT_OK;
-}
+  IpczResult DeactivateTransport(IpczDriverHandle transport,
+                                 uint32_t flags,
+                                 const void* options) const override {
+    InProcessTransport::FromHandle(transport)->Deactivate();
+    return IPCZ_RESULT_OK;
+  }
 
-IpczResult IPCZ_API Transmit(IpczDriverHandle driver_transport,
-                             const void* data,
-                             size_t num_bytes,
-                             const IpczDriverHandle* handles,
-                             size_t num_handles,
-                             uint32_t flags,
-                             const void* options) {
-  return InProcessTransport::FromHandle(driver_transport)
-      ->Transmit(absl::MakeSpan(static_cast<const uint8_t*>(data), num_bytes),
-                 absl::MakeSpan(handles, num_handles));
-}
+  IpczResult Transmit(IpczDriverHandle transport,
+                      const void* data,
+                      size_t num_bytes,
+                      const IpczDriverHandle* handles,
+                      size_t num_driver_handles,
+                      uint32_t flags,
+                      const void* options) const override {
+    return InProcessTransport::FromHandle(transport)->Transmit(
+        absl::MakeSpan(static_cast<const uint8_t*>(data), num_bytes),
+        absl::MakeSpan(handles, num_driver_handles));
+  }
+};
 
 }  // namespace
 
-const IpczDriver kSyncReferenceDriver = {
-    sizeof(kSyncReferenceDriver),
-    kSingleProcessReferenceDriverBase.Close,
-    kSingleProcessReferenceDriverBase.Serialize,
-    kSingleProcessReferenceDriverBase.Deserialize,
-    CreateTransports,
-    ActivateTransport,
-    DeactivateTransport,
-    Transmit,
-    kSingleProcessReferenceDriverBase.ReportBadTransportActivity,
-    kSingleProcessReferenceDriverBase.AllocateSharedMemory,
-    kSingleProcessReferenceDriverBase.GetSharedMemoryInfo,
-    kSingleProcessReferenceDriverBase.DuplicateSharedMemory,
-    kSingleProcessReferenceDriverBase.MapSharedMemory,
-    kSingleProcessReferenceDriverBase.GenerateRandomBytes,
-};
+const IpczDriver& GetSyncReferenceDriver() {
+  static const base::NoDestructor<SyncReferenceDriverImpl> driver;
+  return *driver;
+}
 
 }  // namespace ipcz::reference_drivers

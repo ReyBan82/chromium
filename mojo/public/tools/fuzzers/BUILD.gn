@@ -4,7 +4,6 @@
 
 # Mojo fuzzing tools
 
-import("//build/config/features.gni")
 import("//mojo/public/tools/bindings/mojom.gni")
 import("//testing/libfuzzer/fuzzer_test.gni")
 import("//third_party/protobuf/proto_library.gni")
@@ -17,6 +16,15 @@ mojom("fuzz_mojom") {
   sources = [ "fuzz.mojom" ]
 }
 
+source_set("test_support") {
+  sources = [
+    "suppress_validation_error_logging.cc",
+    "suppress_validation_error_logging.h",
+  ]
+  deps = [ "//mojo/public/cpp/bindings" ]
+  testonly = true
+}
+
 fuzzer_test("mojo_parse_message_fuzzer") {
   sources = [
     "fuzz_impl.cc",
@@ -24,8 +32,13 @@ fuzzer_test("mojo_parse_message_fuzzer") {
   ]
   deps = [
     ":fuzz_mojom",
+    ":test_support",
+    "//base",
     "//mojo/core/embedder",
   ]
+  if (is_android) {
+    deps += [ "//base/test:test_support" ]
+  }
   seed_corpus = "//mojo/public/tools/fuzzers/message_corpus"
 }
 
@@ -52,9 +65,14 @@ fuzzer_test("mojo_parse_message_proto_fuzzer") {
   deps = [
     ":fuzz_mojom",
     ":mojo_fuzzer_proto",
+    ":test_support",
+    "//base",
     "//mojo/core/embedder",
     "//third_party/libprotobuf-mutator",
   ]
+  if (is_android) {
+    deps += [ "//base/test:test_support" ]
+  }
   seed_corpus = "//mojo/public/tools/fuzzers/mojo_parse_message_proto_corpus"
 }
 
@@ -83,4 +101,19 @@ static_library("mojolpm") {
     "//mojo/public/cpp/bindings",
   ]
   testonly = true
+}
+
+proto_library("mojolpm_unittest_proto") {
+  sources = [ "mojolpm_unittest.proto" ]
+}
+
+source_set("mojolpm_tests") {
+  testonly = true
+  sources = [ "mojolpm_unittest.cc" ]
+  deps = [
+    ":mojolpm",
+    ":mojolpm_unittest_proto",
+    "//base/test:test_support",
+    "//testing/gtest",
+  ]
 }

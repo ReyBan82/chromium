@@ -4,10 +4,14 @@
 
 #include "content/browser/service_worker/service_worker_script_loader_factory.h"
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
+#include "base/byte_size.h"
+#include "base/debug/crash_logging.h"
 #include "base/functional/callback_helpers.h"
 #include "base/strings/string_number_conversions.h"
 #include "content/browser/service_worker/service_worker_cache_writer.h"
@@ -15,11 +19,14 @@
 #include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/browser/service_worker/service_worker_host.h"
 #include "content/browser/service_worker/service_worker_installed_script_loader.h"
+#include "content/browser/service_worker/service_worker_metrics.h"
 #include "content/browser/service_worker/service_worker_new_script_loader.h"
 #include "content/browser/service_worker/service_worker_updated_script_loader.h"
 #include "content/browser/service_worker/service_worker_version.h"
+#include "content/common/features.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+#include "net/base/hash_value.h"
 #include "services/network/public/cpp/request_destination.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
@@ -34,8 +41,10 @@ ServiceWorkerScriptLoaderFactory::ServiceWorkerScriptLoaderFactory(
       worker_host_(worker_host),
       loader_factory_for_new_scripts_(
           std::move(loader_factory_for_new_scripts)) {
-  DCHECK(loader_factory_for_new_scripts_ ||
-         ServiceWorkerVersion::IsInstalled(worker_host_->version()->status()));
+  CHECK(
+      loader_factory_for_new_scripts_ ||
+          ServiceWorkerVersion::IsInstalled(worker_host_->version()->status()),
+      base::NotFatalUntil::M159);
 }
 
 ServiceWorkerScriptLoaderFactory::~ServiceWorkerScriptLoaderFactory() = default;
@@ -81,8 +90,18 @@ void ServiceWorkerScriptLoaderFactory::CreateLoaderAndStart(
       version->script_cache_map()->LookupResourceId(resource_request.url);
   if (resource_id != blink::mojom::kInvalidServiceWorkerResourceId) {
     mojo::Remote<storage::mojom::ServiceWorkerResourceReader> resource_reader;
-    context_->registry()->GetRemoteStorageControl()->CreateResourceReader(
-        resource_id, resource_reader.BindNewPipeAndPassReceiver());
+    std::optional<std::string> sha256_checksum =
+        version->script_cache_map()->LookupSha256Checksum(resource_request.url);
+    std::optional<net::SHA256HashValue> sha256_hash_value;
+    if (sha256_checksum) {
+      sha256_hash_value.emplace();
+      if (!base::HexStringToSpan(*sha256_checksum, *sha256_hash_value)) {
+        sha256_hash_value.reset();
+      }
+    }
+    context_->registry().GetRemoteStorageControl()->CreateResourceReader(
+        resource_id, sha256_hash_value,
+        resource_reader.BindNewPipeAndPassReceiver());
     mojo::MakeSelfOwnedReceiver(
         std::make_unique<ServiceWorkerInstalledScriptLoader>(
             options, std::move(client), std::move(resource_reader), version,
@@ -114,7 +133,7 @@ void ServiceWorkerScriptLoaderFactory::CreateLoaderAndStart(
               base::BindOnce(
                   &ServiceWorkerScriptLoaderFactory::OnCopyScriptFinished,
                   weak_factory_.GetWeakPtr(), std::move(receiver), options,
-                  resource_request, std::move(client))));
+                  resource_request.url, std::move(client))));
           return;
         case ServiceWorkerSingleScriptUpdateChecker::Result::kFailed:
           // Network failure is treated as D.2
@@ -129,7 +148,6 @@ void ServiceWorkerScriptLoaderFactory::CreateLoaderAndStart(
           // This is invalid, as scripts in compared script info must have been
           // compared.
           NOTREACHED();
-          return;
       }
     }
   }
@@ -186,6 +204,17 @@ bool ServiceWorkerScriptLoaderFactory::CheckIfScriptRequestIsValid(
 
   // TODO(falken): Make sure we don't handle a redirected request.
 
+  if (resource_request.destination ==
+          network::mojom::RequestDestination::kServiceWorker &&
+      resource_request.mode == network::mojom::RequestMode::kSameOrigin &&
+      resource_request.url != version->script_url()) {
+    if (base::FeatureList::IsEnabled(
+            features::kServiceWorkerVerifyMainScriptUrl)) {
+      mojo::ReportBadMessage("SWSLF_FORGED_MAIN_SCRIPT_REQUEST");
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -194,15 +223,24 @@ void ServiceWorkerScriptLoaderFactory::CopyScript(
     int64_t resource_id,
     base::OnceCallback<void(int64_t, net::Error)> callback,
     int64_t new_resource_id) {
-  if (!context_) {
+  if (!context_ || !worker_host_) {
     std::move(callback).Run(new_resource_id, net::ERR_FAILED);
     return;
   }
   mojo::Remote<storage::mojom::ServiceWorkerResourceReader> reader;
-  context_->registry()->GetRemoteStorageControl()->CreateResourceReader(
-      resource_id, reader.BindNewPipeAndPassReceiver());
+  std::optional<std::string> sha256_checksum =
+      worker_host_->version()->script_cache_map()->LookupSha256Checksum(url);
+  std::optional<net::SHA256HashValue> sha256_hash_value;
+  if (sha256_checksum) {
+    sha256_hash_value.emplace();
+    if (!base::HexStringToSpan(*sha256_checksum, *sha256_hash_value)) {
+      sha256_hash_value.reset();
+    }
+  }
+  context_->registry().GetRemoteStorageControl()->CreateResourceReader(
+      resource_id, sha256_hash_value, reader.BindNewPipeAndPassReceiver());
   mojo::Remote<storage::mojom::ServiceWorkerResourceWriter> writer;
-  context_->registry()->GetRemoteStorageControl()->CreateResourceWriter(
+  context_->registry().GetRemoteStorageControl()->CreateResourceWriter(
       new_resource_id, writer.BindNewPipeAndPassReceiver());
 
   cache_writer_ = ServiceWorkerCacheWriter::CreateForCopy(
@@ -211,21 +249,14 @@ void ServiceWorkerScriptLoaderFactory::CopyScript(
   scoped_refptr<ServiceWorkerVersion> version = worker_host_->version();
   version->script_cache_map()->NotifyStartedCaching(url, new_resource_id);
 
-  auto split_callback = base::SplitOnceCallback(std::move(callback));
-  net::Error error = cache_writer_->StartCopy(
-      base::BindOnce(std::move(split_callback.first), new_resource_id));
-
-  // Run the callback directly if the operation completed or failed
-  // synchronously.
-  if (net::ERR_IO_PENDING != error) {
-    std::move(split_callback.second).Run(new_resource_id, error);
-  }
+  cache_writer_->StartCopy(
+      base::BindOnce(std::move(callback), new_resource_id));
 }
 
 void ServiceWorkerScriptLoaderFactory::OnCopyScriptFinished(
     mojo::PendingReceiver<network::mojom::URLLoader> receiver,
     uint32_t options,
-    const network::ResourceRequest& resource_request,
+    const GURL& resource_request_url,
     mojo::PendingRemote<network::mojom::URLLoaderClient> client,
     int64_t new_resource_id,
     net::Error error) {
@@ -235,16 +266,17 @@ void ServiceWorkerScriptLoaderFactory::OnCopyScriptFinished(
     return;
   }
 
-  int64_t resource_size = cache_writer_->bytes_written();
-  DCHECK_EQ(cache_writer_->checksum_update_timing(),
-            ServiceWorkerCacheWriter::ChecksumUpdateTiming::kCacheMismatch);
+  base::ByteSize resource_size = cache_writer_->bytes_written();
+  CHECK_EQ(cache_writer_->checksum_update_timing(),
+           ServiceWorkerCacheWriter::ChecksumUpdateTiming::kCacheMismatch,
+           base::NotFatalUntil::M159);
   std::string sha256_checksum = cache_writer_->GetSha256Checksum();
   cache_writer_.reset();
   scoped_refptr<ServiceWorkerVersion> version = worker_host_->version();
 
   if (error != net::OK) {
     version->script_cache_map()->NotifyFinishedCaching(
-        resource_request.url, resource_size, sha256_checksum, error,
+        resource_request_url, resource_size, sha256_checksum, error,
         ServiceWorkerConsts::kServiceWorkerCopyScriptError);
 
     mojo::Remote<network::mojom::URLLoaderClient>(std::move(client))
@@ -255,17 +287,23 @@ void ServiceWorkerScriptLoaderFactory::OnCopyScriptFinished(
   // The copy operation is successful, add the newly copied resource record to
   // the script cache map to identify that the script is installed.
   version->script_cache_map()->NotifyFinishedCaching(
-      resource_request.url, resource_size, sha256_checksum, net::OK,
+      resource_request_url, resource_size, sha256_checksum, net::OK,
       std::string());
 
   // Use ServiceWorkerInstalledScriptLoader to load the new copy.
   mojo::Remote<storage::mojom::ServiceWorkerResourceReader> resource_reader;
-  context_->registry()->GetRemoteStorageControl()->CreateResourceReader(
-      new_resource_id, resource_reader.BindNewPipeAndPassReceiver());
+  std::optional<net::SHA256HashValue> sha256_hash_value;
+  sha256_hash_value.emplace();
+  if (!base::HexStringToSpan(sha256_checksum, *sha256_hash_value)) {
+    sha256_hash_value.reset();
+  }
+  context_->registry().GetRemoteStorageControl()->CreateResourceReader(
+      new_resource_id, sha256_hash_value,
+      resource_reader.BindNewPipeAndPassReceiver());
   mojo::MakeSelfOwnedReceiver(
       std::make_unique<ServiceWorkerInstalledScriptLoader>(
           options, std::move(client), std::move(resource_reader), version,
-          resource_request.url),
+          resource_request_url),
       std::move(receiver));
 }
 
@@ -291,12 +329,14 @@ void ServiceWorkerScriptLoaderFactory::OnResourceIdAssignedForNewScriptLoader(
 
   // Note: We do not need to run throttles because they have been already by
   // the ResourceFetcher on the renderer-side.
+  scoped_refptr<ServiceWorkerVersion> version = worker_host_->version();
   mojo::MakeSelfOwnedReceiver(
       ServiceWorkerNewScriptLoader::CreateAndStart(
-          request_id, options, resource_request, std::move(client),
-          worker_host_->version(), loader_factory_for_new_scripts_,
-          traffic_annotation, resource_id, /*is_throttle_needed=*/false,
-          /*requesting_frame_id=*/GlobalRenderFrameHostId()),
+          request_id, options, resource_request, std::move(client), version,
+          loader_factory_for_new_scripts_, traffic_annotation, resource_id,
+          /*is_throttle_needed=*/false,
+          /*requesting_frame_id=*/GlobalRenderFrameHostId(),
+          version->network_restrictions_id()),
       std::move(receiver));
 }
 

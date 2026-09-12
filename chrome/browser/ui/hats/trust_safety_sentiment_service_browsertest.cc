@@ -6,17 +6,19 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time_override.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/bubble_anchor_util.h"
 #include "chrome/browser/ui/hats/hats_service_factory.h"
 #include "chrome/browser/ui/hats/mock_hats_service.h"
 #include "chrome/browser/ui/hats/trust_safety_sentiment_service_factory.h"
 #include "chrome/browser/ui/page_info/page_info_dialog.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/views/page_info/page_info_bubble_view.h"
 #include "chrome/common/chrome_features.h"
 #include "chrome/common/webui_url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
+#include "ui/base/window_open_disposition.h"
 
 using ::testing::_;
 
@@ -34,24 +36,34 @@ class TrustSafetySentimentServiceBrowserTest : public InProcessBrowserTest {
  public:
   TrustSafetySentimentServiceBrowserTest() {
     feature_list_.InitAndEnableFeatureWithParameters(
-        features::kTrustSafetySentimentSurvey,
+        features::kTrustSafetySentimentSurveyV2,
         {{"trusted-surface-probability", "1.0"}});
+  }
+
+  // TODO(crbug.com/40285326): This fails with the field trial testing config.
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    InProcessBrowserTest::SetUpCommandLine(command_line);
+    command_line->AppendSwitch("disable-field-trial-config");
   }
 
   void SetUpOnMainThread() override {
     mock_hats_service_ = static_cast<MockHatsService*>(
         HatsServiceFactory::GetInstance()->SetTestingFactoryAndUse(
-            browser()->profile(), base::BindRepeating(&BuildMockHatsService)));
+            browser()->GetProfile(),
+            base::BindRepeating(&BuildMockHatsService)));
     TrustSafetySentimentServiceFactory::GetInstance()->SetTestingFactory(
-        browser()->profile(),
+        browser()->GetProfile(),
         base::BindRepeating(&BuildSentimentServiceForTesting));
     EXPECT_CALL(*mock_hats_service_, CanShowAnySurvey(_))
         .WillRepeatedly(testing::Return(true));
   }
 
+  void TearDownOnMainThread() override { mock_hats_service_ = nullptr; }
+
   void OpenPageInfo() {
     ShowPageInfoDialog(browser()->tab_strip_model()->GetActiveWebContents(),
-                       base::DoNothing());
+                       base::DoNothing(),
+                       bubble_anchor_util::Anchor::kLocationBar);
   }
 
   void ClosePageInfo() {
@@ -70,7 +82,8 @@ class TrustSafetySentimentServiceBrowserTest : public InProcessBrowserTest {
     auto* bubble = static_cast<PageInfoBubbleView*>(
         PageInfoBubbleView::GetPageInfoBubbleForTesting());
     bubble->presenter_for_testing()->OnSitePermissionChanged(
-        permission.type, permission.setting, permission.is_one_time);
+        permission.type, permission.setting, permission.requesting_origin,
+        permission.is_one_time);
   }
 
   void OpenEnoughNewTabs() {
@@ -86,7 +99,7 @@ class TrustSafetySentimentServiceBrowserTest : public InProcessBrowserTest {
 
  protected:
   base::test::ScopedFeatureList feature_list_;
-  raw_ptr<MockHatsService, DanglingUntriaged> mock_hats_service_;
+  raw_ptr<MockHatsService> mock_hats_service_ = nullptr;
 };
 
 IN_PROC_BROWSER_TEST_F(TrustSafetySentimentServiceBrowserTest,
@@ -97,8 +110,8 @@ IN_PROC_BROWSER_TEST_F(TrustSafetySentimentServiceBrowserTest,
   SurveyBitsData expected_product_specific_data = {
       {"Interacted with Page Info", false}};
   EXPECT_CALL(*mock_hats_service_,
-              LaunchSurvey(kHatsSurveyTriggerTrustSafetyTrustedSurface, _, _,
-                           expected_product_specific_data, _));
+              LaunchSurvey(kHatsSurveyTriggerTrustSafetyV2TrustedSurface, _, _,
+                           expected_product_specific_data, _, _, _));
   {
     base::subtle::ScopedTimeClockOverrides override(
         []() {
@@ -141,8 +154,8 @@ IN_PROC_BROWSER_TEST_F(TrustSafetySentimentServiceBrowserTest,
   SurveyBitsData expected_product_specific_data = {
       {"Interacted with Page Info", true}};
   EXPECT_CALL(*mock_hats_service_,
-              LaunchSurvey(kHatsSurveyTriggerTrustSafetyTrustedSurface, _, _,
-                           expected_product_specific_data, _));
+              LaunchSurvey(kHatsSurveyTriggerTrustSafetyV2TrustedSurface, _, _,
+                           expected_product_specific_data, _, _, _));
 
   {
     base::subtle::ScopedTimeClockOverrides override(

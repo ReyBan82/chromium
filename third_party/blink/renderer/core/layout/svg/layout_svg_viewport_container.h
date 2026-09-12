@@ -23,28 +23,25 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_VIEWPORT_CONTAINER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_VIEWPORT_CONTAINER_H_
 
-#include "third_party/blink/renderer/core/layout/svg/layout_svg_container.h"
+#include "third_party/blink/renderer/core/layout/svg/layout_svg_transformable_container.h"
 
 namespace blink {
 
-class SVGSVGElement;
+class SVGViewportContainerElement;
 
-// This is used for non-root <svg> elements which are SVGTransformable thus we
-// inherit from LayoutSVGContainer instead of LayoutSVGTransformableContainer.
-class LayoutSVGViewportContainer final : public LayoutSVGContainer {
+// Used for non-root <svg> elements and for root <symbol> instances in <use>
+// shadow trees. These elements support the `transform` property in addition to
+// establishing a viewport via `viewBox`, so they share the transform handling
+// with `LayoutSVGTransformableContainer` and layer the viewBox transform on
+// top of the element's local transform.
+class LayoutSVGViewportContainer final
+    : public LayoutSVGTransformableContainer {
  public:
-  explicit LayoutSVGViewportContainer(SVGSVGElement*);
+  explicit LayoutSVGViewportContainer(SVGViewportContainerElement*);
   gfx::RectF Viewport() const {
     NOT_DESTROYED();
     return viewport_;
   }
-
-  bool IsLayoutSizeChanged() const {
-    NOT_DESTROYED();
-    return is_layout_size_changed_;
-  }
-
-  void SetNeedsTransformUpdate() override;
 
   const char* GetName() const override {
     NOT_DESTROYED();
@@ -56,28 +53,42 @@ class LayoutSVGViewportContainer final : public LayoutSVGContainer {
     return local_to_parent_transform_;
   }
 
- private:
-  bool IsOfType(LayoutObjectType type) const override {
+  gfx::RectF ViewBoxRect() const;
+
+  void IntersectChildren(HitTestResult&, const HitTestLocation&) const;
+
+  AffineTransform ComputeViewboxTransform() const;
+
+  // Returns true if the viewBox/x/y transform that is post-multiplied into
+  // LocalToSVGParentTransform() is not the identity.
+  bool HasAdditionalTransform() const override {
     NOT_DESTROYED();
-    return type == kLayoutObjectSVGViewportContainer ||
-           LayoutSVGContainer::IsOfType(type);
+    return local_to_parent_transform_ != local_transform_;
   }
 
-  void UpdateLayout() override;
+ private:
+  bool IsSVGViewportContainer() const final {
+    NOT_DESTROYED();
+    return true;
+  }
 
-  SVGTransformChange CalculateLocalTransform(bool bounds_changed) override;
+  SVGLayoutResult UpdateSVGLayout(const SVGLayoutInfo&) override;
+
+  SVGTransformChange UpdateLocalTransform(
+      const gfx::RectF& reference_box) override;
 
   bool NodeAtPoint(HitTestResult&,
                    const HitTestLocation&,
                    const PhysicalOffset& accumulated_offset,
                    HitTestPhase) final;
 
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const ComputedStyle& new_style,
+                      const StyleChangeContext&) override;
 
   gfx::RectF viewport_;
   mutable AffineTransform local_to_parent_transform_;
-  bool is_layout_size_changed_ : 1;
-  bool needs_transform_update_ : 1;
 };
 
 template <>

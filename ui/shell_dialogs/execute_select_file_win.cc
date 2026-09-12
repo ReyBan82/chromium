@@ -7,6 +7,11 @@
 #include <shlobj.h>
 #include <wrl/client.h>
 
+#include <memory>
+#include <optional>
+
+#include "base/check.h"
+#include "base/feature_list.h"
 #include "base/files/file.h"
 #include "base/files/file_util.h"
 #include "base/functional/callback.h"
@@ -17,13 +22,45 @@
 #include "base/win/scoped_co_mem.h"
 #include "base/win/shortcut.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/shell_dialogs/auto_close_dialog_event_handler_win.h"
 #include "ui/shell_dialogs/base_shell_dialog_win.h"
+#include "ui/shell_dialogs/safe_accept_file_dialog_event_handler_win.h"
 #include "ui/shell_dialogs/select_file_utils_win.h"
 #include "ui/strings/grit/ui_strings.h"
 
 namespace ui {
 
 namespace {
+
+// Stop switch for the AutoCloseDialogEventHandler.
+BASE_FEATURE(kAutoCloseFileDialogs, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Stop switch for the `SafeAcceptFileDialogEventHandler`.
+BASE_FEATURE(kSafeAcceptFileDialogs, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// RAII wrapper around a single `IFileDialogEvents` registration.
+class ScopedFileDialogEvents {
+ public:
+  ScopedFileDialogEvents(IFileDialog* file_dialog, IFileDialogEvents* handler)
+      : file_dialog_(file_dialog) {
+    CHECK(file_dialog_);
+    CHECK(handler);
+    file_dialog_->Advise(handler, &cookie_);
+  }
+
+  ~ScopedFileDialogEvents() {
+    if (cookie_) {
+      file_dialog_->Unadvise(cookie_);
+    }
+  }
+
+  ScopedFileDialogEvents(const ScopedFileDialogEvents&) = delete;
+  ScopedFileDialogEvents& operator=(const ScopedFileDialogEvents&) = delete;
+
+ private:
+  Microsoft::WRL::ComPtr<IFileDialog> file_dialog_;
+  DWORD cookie_ = 0;
+};
 
 // Distinguish directories from regular files.
 bool IsDirectory(const base::FilePath& path) {
@@ -153,6 +190,21 @@ bool RunSaveFileDialog(HWND owner,
 
   file_save_dialog->SetDefaultExtension(def_ext.c_str());
 
+  // Set up event handlers for the dialog.
+  std::optional<ScopedFileDialogEvents> auto_close_event;
+  if (owner && base::FeatureList::IsEnabled(kAutoCloseFileDialogs)) {
+    auto_close_event.emplace(
+        file_save_dialog.Get(),
+        Microsoft::WRL::Make<AutoCloseDialogEventHandler>(owner).Get());
+  }
+
+  std::optional<ScopedFileDialogEvents> safe_accept_event;
+  if (base::FeatureList::IsEnabled(kSafeAcceptFileDialogs)) {
+    safe_accept_event.emplace(
+        file_save_dialog.Get(),
+        Microsoft::WRL::Make<SafeAcceptFileDialogEventHandler>().Get());
+  }
+
   // Never consider the current scope as hung. The hang watching deadline (if
   // any) is not valid since the user can take unbounded time to choose the
   // file.
@@ -160,6 +212,10 @@ bool RunSaveFileDialog(HWND owner,
 
   HRESULT hr = file_save_dialog->Show(owner);
   BaseShellDialogImpl::DisableOwner(owner);
+
+  // Remove the event handlers regardless of the return value of `Show()`.
+  auto_close_event.reset();
+  safe_accept_event.reset();
   if (FAILED(hr))
     return false;
 
@@ -211,6 +267,21 @@ bool RunOpenFileDialog(HWND owner,
     return false;
   }
 
+  // Set up event handlers for the dialog.
+  std::optional<ScopedFileDialogEvents> auto_close_event;
+  if (owner && base::FeatureList::IsEnabled(kAutoCloseFileDialogs)) {
+    auto_close_event.emplace(
+        file_open_dialog.Get(),
+        Microsoft::WRL::Make<AutoCloseDialogEventHandler>(owner).Get());
+  }
+
+  std::optional<ScopedFileDialogEvents> safe_accept_event;
+  if (base::FeatureList::IsEnabled(kSafeAcceptFileDialogs)) {
+    safe_accept_event.emplace(
+        file_open_dialog.Get(),
+        Microsoft::WRL::Make<SafeAcceptFileDialogEventHandler>().Get());
+  }
+
   // Never consider the current scope as hung. The hang watching deadline (if
   // any) is not valid since the user can take unbounded time to choose the
   // file.
@@ -218,6 +289,11 @@ bool RunOpenFileDialog(HWND owner,
 
   HRESULT hr = file_open_dialog->Show(owner);
   BaseShellDialogImpl::DisableOwner(owner);
+
+  // Remove the event handlers regardless of the return value of `Show()`.
+  auto_close_event.reset();
+  safe_accept_event.reset();
+
   if (FAILED(hr))
     return false;
 
@@ -244,8 +320,7 @@ bool RunOpenFileDialog(HWND owner,
       return false;
 
     base::win::ScopedCoMem<wchar_t> display_name;
-    if (FAILED(shell_item->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING,
-                                          &display_name))) {
+    if (FAILED(shell_item->GetDisplayName(SIGDN_FILESYSPATH, &display_name))) {
       return false;
     }
 
@@ -297,10 +372,8 @@ bool ExecuteSelectSingleFile(HWND owner,
                              const std::vector<FileFilterSpec>& filter,
                              int* filter_index,
                              std::vector<base::FilePath>* paths) {
-  // Note: The title is not passed down for historical reasons.
-  // TODO(pmonette): Figure out if it's a worthwhile improvement.
-  return RunOpenFileDialog(owner, std::u16string(), std::u16string(),
-                           default_path, filter, 0, filter_index, paths);
+  return RunOpenFileDialog(owner, title, std::u16string(), default_path, filter,
+                           0, filter_index, paths);
 }
 
 bool ExecuteSelectMultipleFile(HWND owner,
@@ -310,15 +383,12 @@ bool ExecuteSelectMultipleFile(HWND owner,
                                int* filter_index,
                                std::vector<base::FilePath>* paths) {
   DWORD dialog_options = FOS_ALLOWMULTISELECT;
-
-  // Note: The title is not passed down for historical reasons.
-  // TODO(pmonette): Figure out if it's a worthwhile improvement.
-  return RunOpenFileDialog(owner, std::u16string(), std::u16string(),
-                           default_path, filter, dialog_options, filter_index,
-                           paths);
+  return RunOpenFileDialog(owner, title, std::u16string(), default_path, filter,
+                           dialog_options, filter_index, paths);
 }
 
 bool ExecuteSaveFile(HWND owner,
+                     const std::u16string& title,
                      const base::FilePath& default_path,
                      const std::vector<FileFilterSpec>& filter,
                      const std::wstring& def_ext,
@@ -331,10 +401,8 @@ bool ExecuteSaveFile(HWND owner,
 
   DWORD dialog_options = FOS_OVERWRITEPROMPT;
 
-  // Note: The title is not passed down for historical reasons.
-  // TODO(pmonette): Figure out if it's a worthwhile improvement.
-  return RunSaveFileDialog(owner, std::u16string(), default_path, filter,
-                           dialog_options, def_ext, filter_index, path);
+  return RunSaveFileDialog(owner, title, default_path, filter, dialog_options,
+                           def_ext, filter_index, path);
 }
 
 }  // namespace
@@ -358,7 +426,7 @@ void ExecuteSelectFile(
       break;
     case SelectFileDialog::SELECT_SAVEAS_FILE: {
       base::FilePath path;
-      if (ExecuteSaveFile(owner, default_path, filter, default_extension,
+      if (ExecuteSaveFile(owner, title, default_path, filter, default_extension,
                           &file_type_index, &path)) {
         paths.push_back(std::move(path));
       }

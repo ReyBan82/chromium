@@ -7,10 +7,11 @@
 
 #include <list>
 
+#include "base/memory/raw_ptr.h"
 #include "content/common/content_export.h"
 
-namespace IPC {
-class Message;
+namespace base {
+class Process;
 }
 
 namespace content {
@@ -21,7 +22,7 @@ class ChildProcessHost;
 
 // This class allows iteration through either all child processes, or ones of a
 // specific type, depending on which constructor is used.  Note that this should
-// be done from the IO thread and that the iterator should not be kept around as
+// be done from the UI thread and that the iterator should not be kept around as
 // it may be invalidated on subsequent event processing in the event loop.
 class CONTENT_EXPORT BrowserChildProcessHostIterator {
  public:
@@ -34,14 +35,18 @@ class CONTENT_EXPORT BrowserChildProcessHostIterator {
   bool operator++();
   bool Done();
   const ChildProcessData& GetData();
-  bool Send(IPC::Message* message);
   BrowserChildProcessHostDelegate* GetDelegate();
   ChildProcessHost* GetHost();
+
+  // Returns the child process. May be invalid if the process has not started
+  // yet or has terminated.
+  const base::Process& GetProcess();
 
  private:
   bool all_;
   int process_type_;
-  std::list<BrowserChildProcessHostImpl*>::iterator iterator_;
+  std::list<raw_ptr<BrowserChildProcessHostImpl, CtnExperimental>>::iterator
+      iterator_;
 };
 
 // Helper class so that subclasses of BrowserChildProcessHostDelegate can be

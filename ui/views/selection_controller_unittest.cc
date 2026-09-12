@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
@@ -61,7 +62,10 @@ class TestSelectionControllerDelegate : public SelectionControllerDelegate {
   void OnBeforePointerAction() override {}
   void OnAfterPointerAction(bool text_changed,
                             bool selection_changed) override {}
-  bool PasteSelectionClipboard() override { return false; }
+  void PasteSelectionClipboard(
+      base::OnceCallback<void(bool)> callback) override {
+    std::move(callback).Run(false);
+  }
   void UpdateSelectionClipboard() override {}
 
  private:
@@ -102,9 +106,9 @@ class SelectionControllerTest : public ::testing::Test {
 
   void DragMouse(const gfx::Point& location) {
     mouse_location_ = location;
-    controller_->OnMouseDragged(ui::MouseEvent(ui::ET_MOUSE_DRAGGED, location,
-                                               location, last_event_time_,
-                                               mouse_flags_, 0));
+    controller_->OnMouseDragged(
+        ui::MouseEvent(ui::EventType::kMouseDragged, location, location,
+                       last_event_time_, mouse_flags_, 0));
   }
 
   void RightMouseDown(const gfx::Point& location, bool focused = false) {
@@ -128,9 +132,9 @@ class SelectionControllerTest : public ::testing::Test {
     mouse_location_ = location;
     // Ensure that mouse presses are spaced apart by at least the double-click
     // interval to avoid triggering a double-click.
-    last_event_time_ += base::Milliseconds(views::GetDoubleClickInterval() + 1);
+    last_event_time_ += views::GetDoubleClickInterval() + base::Milliseconds(1);
     controller_->OnMousePressed(
-        ui::MouseEvent(ui::ET_MOUSE_PRESSED, location, location,
+        ui::MouseEvent(ui::EventType::kMousePressed, location, location,
                        last_event_time_, mouse_flags_, button),
         false,
         focused
@@ -141,9 +145,9 @@ class SelectionControllerTest : public ::testing::Test {
   void ReleaseMouseButton(int button) {
     DCHECK(mouse_flags_ & button);
     mouse_flags_ &= ~button;
-    controller_->OnMouseReleased(
-        ui::MouseEvent(ui::ET_MOUSE_RELEASED, mouse_location_, mouse_location_,
-                       last_event_time_, mouse_flags_, button));
+    controller_->OnMouseReleased(ui::MouseEvent(
+        ui::EventType::kMouseReleased, mouse_location_, mouse_location_,
+        last_event_time_, mouse_flags_, button));
   }
 
   base::test::TaskEnvironment task_environment_;
@@ -182,19 +186,21 @@ TEST_F(SelectionControllerTest, RightClickWhenUnfocused) {
   SetText("abc def");
 
   RightMouseDown(CenterRight(BoundsOfChar(0)));
-  if (PlatformStyle::kSelectAllOnRightClickWhenUnfocused)
+  if constexpr (PlatformStyle::kSelectAllOnRightClickWhenUnfocused) {
     EXPECT_EQ("abc def", GetSelectedText());
-  else
+  } else {
     EXPECT_EQ("", GetSelectedText());
+  }
 }
 
 TEST_F(SelectionControllerTest, RightClickSelectsWord) {
   SetText("abc def");
   RightMouseDown(CenterRight(BoundsOfChar(5)), true);
-  if (PlatformStyle::kSelectWordOnRightClick)
+  if constexpr (PlatformStyle::kSelectWordOnRightClick) {
     EXPECT_EQ("def", GetSelectedText());
-  else
+  } else {
     EXPECT_EQ("", GetSelectedText());
+  }
 }
 
 // Regression test for https://crbug.com/856609
@@ -222,10 +228,11 @@ TEST_F(SelectionControllerTest, DragPastEndUsesProperOrigin) {
   EXPECT_EQ("", GetSelectedText());
 
   DragMouse(TranslatePointX(point, -1));
-  if (gfx::RenderText::kDragToEndIfOutsideVerticalBounds)
+  if (gfx::RenderText::kDragToEndIfOutsideVerticalBounds) {
     EXPECT_EQ("abc def", GetSelectedText());
-  else
+  } else {
     EXPECT_EQ("", GetSelectedText());
+  }
 
   DragMouse(TranslatePointX(point, 1));
   EXPECT_EQ("", GetSelectedText());

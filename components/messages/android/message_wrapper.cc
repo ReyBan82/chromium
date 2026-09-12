@@ -7,9 +7,11 @@
 
 #include "base/android/jni_string.h"
 #include "base/logging.h"
-#include "components/messages/android/jni_headers/MessageWrapper_jni.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/gfx/android/java_bitmap.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "components/messages/android/jni_headers/MessageWrapper_jni.h"
 
 namespace messages {
 
@@ -23,7 +25,7 @@ MessageWrapper::MessageWrapper(MessageIdentifier message_identifier,
                                DismissCallback dismiss_callback)
     : action_callback_(std::move(action_callback)),
       dismiss_callback_(std::move(dismiss_callback)),
-      message_enqueued_(false) {
+      is_in_queue_(false) {
   JNIEnv* env = base::android::AttachCurrentThread();
   java_message_wrapper_ =
       Java_MessageWrapper_create(env, reinterpret_cast<int64_t>(this),
@@ -31,7 +33,14 @@ MessageWrapper::MessageWrapper(MessageIdentifier message_identifier,
 }
 
 MessageWrapper::~MessageWrapper() {
-  CHECK(!message_enqueued_);
+  CHECK(!is_in_queue_);
+  if (java_message_wrapper_) {
+    // Clear the native pointer on the Java side in case the Java object
+    // outlives the C++ object, such as message_wrapper is created but never
+    // enqueued.
+    JNIEnv* env = base::android::AttachCurrentThread();
+    Java_MessageWrapper_clearNativePtr(env, java_message_wrapper_);
+  }
 }
 
 std::u16string MessageWrapper::GetTitle() {
@@ -94,6 +103,18 @@ void MessageWrapper::SetPrimaryButtonText(
                                            jprimary_button_text);
 }
 
+int MessageWrapper::GetPrimaryButtonTextMaxLines() {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  return Java_MessageWrapper_getPrimaryButtonTextMaxLines(
+      env, java_message_wrapper_);
+}
+
+void MessageWrapper::SetPrimaryButtonTextMaxLines(int max_lines) {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  Java_MessageWrapper_setPrimaryButtonTextMaxLines(env, java_message_wrapper_,
+                                                   max_lines);
+}
+
 std::u16string MessageWrapper::GetSecondaryButtonMenuText() {
   JNIEnv* env = base::android::AttachCurrentThread();
   base::android::ScopedJavaLocalRef<jstring> jsecondary_button_menu_text =
@@ -114,6 +135,29 @@ void MessageWrapper::SetSecondaryButtonMenuText(
                                                  jsecondary_button_menu_text);
 }
 
+std::u16string MessageWrapper::GetSecondaryIconContentDescription() {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  base::android::ScopedJavaLocalRef<jstring>
+      jsecondary_icon_content_description =
+          Java_MessageWrapper_getSecondaryIconContentDescription(
+              env, java_message_wrapper_);
+  return jsecondary_icon_content_description.is_null()
+             ? std::u16string()
+             : base::android::ConvertJavaStringToUTF16(
+                   jsecondary_icon_content_description);
+}
+
+void MessageWrapper::SetSecondaryIconContentDescription(
+    const std::u16string& secondary_icon_content_description) {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  base::android::ScopedJavaLocalRef<jstring>
+      jsecondary_icon_content_description =
+          base::android::ConvertUTF16ToJavaString(
+              env, secondary_icon_content_description);
+  Java_MessageWrapper_setSecondaryIconContentDescription(
+      env, java_message_wrapper_, jsecondary_icon_content_description);
+}
+
 void MessageWrapper::SetSecondaryMenuMaxSize(SecondaryMenuMaxSize max_size) {
   secondary_menu_max_size_ = max_size;
 }
@@ -125,8 +169,8 @@ void MessageWrapper::AddSecondaryMenuItem(int item_id,
   JNIEnv* env = base::android::AttachCurrentThread();
   base::android::ScopedJavaLocalRef<jstring> jitem_text =
       base::android::ConvertUTF16ToJavaString(env, item_text);
-  Java_MessageWrapper_addSecondaryMenuItemOCUMPM_I_I_JLS(
-      env, java_message_wrapper_, item_id, resource_id, jitem_text);
+  Java_MessageWrapper_addSecondaryMenuItem(env, java_message_wrapper_, item_id,
+                                           resource_id, jitem_text);
 }
 
 void MessageWrapper::AddSecondaryMenuItem(
@@ -140,8 +184,8 @@ void MessageWrapper::AddSecondaryMenuItem(
       base::android::ConvertUTF16ToJavaString(env, item_text);
   base::android::ScopedJavaLocalRef<jstring> jitem_desc =
       base::android::ConvertUTF16ToJavaString(env, item_description);
-  Java_MessageWrapper_addSecondaryMenuItemOCUMPM_I_I_JLS_JLS(
-      env, java_message_wrapper_, item_id, resource_id, jitem_text, jitem_desc);
+  Java_MessageWrapper_addSecondaryMenuItem(env, java_message_wrapper_, item_id,
+                                           resource_id, jitem_text, jitem_desc);
 }
 
 void MessageWrapper::ClearSecondaryMenuItems() {
@@ -245,7 +289,7 @@ void MessageWrapper::HandleSecondaryMenuItemSelected(JNIEnv* env, int item_id) {
 
 void MessageWrapper::HandleDismissCallback(JNIEnv* env, int dismiss_reason) {
   // Make sure message dismissed callback is called exactly once.
-  message_enqueued_ = false;
+  is_in_queue_ = false;
   Java_MessageWrapper_clearNativePtr(env, java_message_wrapper_);
   if (!dismiss_callback_.is_null())
     std::move(dismiss_callback_)
@@ -262,7 +306,7 @@ const base::android::JavaRef<jobject>& MessageWrapper::GetJavaMessageWrapper()
 
 void MessageWrapper::SetMessageEnqueued(
     const base::android::JavaRef<jobject>& java_window_android) {
-  message_enqueued_ = true;
+  is_in_queue_ = true;
   java_window_android_ = java_window_android;
   JNIEnv* env = base::android::AttachCurrentThread();
   Java_MessageWrapper_initializeSecondaryMenu(
@@ -279,3 +323,5 @@ const SkBitmap MessageWrapper::GetIconBitmap() {
 }
 
 }  // namespace messages
+
+DEFINE_JNI(MessageWrapper)

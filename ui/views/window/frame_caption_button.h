@@ -6,10 +6,14 @@
 #define UI_VIEWS_WINDOW_FRAME_CAPTION_BUTTON_H_
 
 #include <memory>
+#include <optional>
+#include <variant>
 
 #include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
 #include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/base/metadata/metadata_types.h"
+#include "ui/color/color_variant.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/image/image_skia.h"
 #include "ui/views/controls/button/button.h"
@@ -30,9 +34,10 @@ namespace views {
 
 // Base class for the window caption buttons (minimize, maximize, restore,
 // close).
-class VIEWS_EXPORT FrameCaptionButton : public views::Button {
+class VIEWS_EXPORT FrameCaptionButton : public Button {
+  METADATA_HEADER(FrameCaptionButton, Button)
+
  public:
-  METADATA_HEADER(FrameCaptionButton);
   enum class Animate { kYes, kNo };
 
   FrameCaptionButton(PressedCallback callback,
@@ -51,10 +56,12 @@ class VIEWS_EXPORT FrameCaptionButton : public views::Button {
   // Sets the image to use to paint the button. If |animate| is Animate::kYes,
   // the button crossfades to the new visuals. If the image matches the one
   // currently used by the button and |animate| is Animate::kNo, the crossfade
-  // animation is progressed to the end.
+  // animation is progressed to the end. If |icon_size| is not provided, will
+  // default to the size used in the icon file.
   void SetImage(CaptionButtonIcon icon,
                 Animate animate,
-                const gfx::VectorIcon& icon_image);
+                const gfx::VectorIcon& icon_image,
+                std::optional<int> icon_size = std::nullopt);
 
   // Returns true if the button is crossfading to new visuals set in
   // SetImage().
@@ -67,8 +74,20 @@ class VIEWS_EXPORT FrameCaptionButton : public views::Button {
   void OnGestureEvent(ui::GestureEvent* event) override;
   views::PaintInfo::ScaleType GetPaintScaleType() const override;
 
+  // The icon color comes from whichever of these two setters ran last.
+  // SetBackgroundColor() derives a contrasting light or dark icon color from
+  // the frame color behind the button (see GetButtonColor()).
+  // SetIconColor() paints the icon with the given color as is; the caller is
+  // responsible for contrast with the frame.
+  // TODO(b/292154873): Replace SetBackgroundColor() with SetIconColor().
   void SetBackgroundColor(SkColor background_color);
   SkColor GetBackgroundColor() const;
+  void SetIconColor(ui::ColorVariant icon_color);
+
+  // Returns the color the icon is painted with. Returns
+  // gfx::kPlaceholderColor while a ui::ColorId is set and the button has no
+  // ColorProvider yet.
+  SkColor GetIconColor() const;
 
   void SetPaintAsActive(bool paint_as_active);
   bool GetPaintAsActive() const;
@@ -90,6 +109,7 @@ class VIEWS_EXPORT FrameCaptionButton : public views::Button {
  protected:
   // views::Button override:
   void PaintButtonContents(gfx::Canvas* canvas) override;
+  void OnThemeChanged() override;
 
   virtual void DrawHighlight(gfx::Canvas* canvas, cc::PaintFlags flags);
   virtual void DrawIconContents(gfx::Canvas* canvas,
@@ -105,6 +125,10 @@ class VIEWS_EXPORT FrameCaptionButton : public views::Button {
   // GetInkDropSize().
   gfx::Insets GetInkdropInsets(const gfx::Size& button_size) const;
 
+  // Called when `color_` is updated to reflect the color change on icon and
+  // inkdrop.
+  void MaybeRefreshIconAndInkdropBaseColor();
+
  private:
   class HighlightPathGenerator;
 
@@ -117,8 +141,15 @@ class VIEWS_EXPORT FrameCaptionButton : public views::Button {
   // The button's current icon.
   CaptionButtonIcon icon_;
 
-  // The current background color.
-  SkColor background_color_ = gfx::kPlaceholderColor;
+  // The frame color behind the button, from SetBackgroundColor(); the icon
+  // color is derived from it with GetButtonColor().
+  using BackgroundColor = SkColor;
+
+  // What the icon color is computed from: the frame background, or the icon
+  // color itself from SetIconColor().
+  // TODO(b/292154873): Store only the icon color.
+  std::variant<BackgroundColor, ui::ColorVariant> color_ =
+      gfx::kPlaceholderColor;
 
   // Whether the button should be painted as active.
   bool paint_as_active_ = false;
@@ -140,6 +171,8 @@ class VIEWS_EXPORT FrameCaptionButton : public views::Button {
   // Crossfade animation started when the button's images are changed by
   // SetImage().
   std::unique_ptr<gfx::SlideAnimation> swap_images_animation_;
+
+  std::optional<int> icon_size_ = std::nullopt;
 };
 
 }  // namespace views

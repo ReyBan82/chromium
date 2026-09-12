@@ -15,15 +15,19 @@
 #include "components/strings/grit/components_strings.h"
 #include "components/url_formatter/elide_url.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 
 namespace blocked_content {
 
 bool FramebustBlockedMessageDelegate::ShowMessage(
     const GURL& blocked_url,
+    const std::optional<url::Origin>& initiator_origin,
     HostContentSettingsMap* settings_map,
     OutcomeCallback intervention_callback) {
   if (message_ != nullptr) {  // update description only
     blocked_url_ = blocked_url;
+    initiator_origin_ = initiator_origin;
     message_->SetDescription(url_formatter::FormatUrlForSecurityDisplay(
         blocked_url, url_formatter::SchemeDisplay::OMIT_CRYPTOGRAPHIC));
     return false;
@@ -32,6 +36,7 @@ bool FramebustBlockedMessageDelegate::ShowMessage(
   intervention_callback_ = std::move(intervention_callback);
   url_ = GetWebContents().GetLastCommittedURL();
   blocked_url_ = blocked_url;
+  initiator_origin_ = initiator_origin;
 
   // Unretained is safe because |this| will always outlive |message_| which owns
   // the callback.
@@ -67,7 +72,7 @@ bool FramebustBlockedMessageDelegate::ShowMessage(
       allow_settings_changes_ ? IDS_ALWAYS_ALLOW_REDIRECTS : IDS_OK;
   message->SetPrimaryButtonText(l10n_util::GetStringUTF16(button_text_id));
   message->SetIconResourceId(message_dispatcher_bridge->MapToJavaDrawableId(
-      IDR_ANDROID_INFOBAR_BLOCKED_POPUPS));
+      IDR_ANDROID_MESSAGE_BLOCKED_POPUPS));
 
   // On rare occasions, such as the moment when activity is being recreated
   // or destroyed, framebust blocked message will not be displayed and the
@@ -84,16 +89,14 @@ bool FramebustBlockedMessageDelegate::ShowMessage(
 }
 
 FramebustBlockedMessageDelegate::~FramebustBlockedMessageDelegate() {
-  if (message_ != nullptr) {
-    messages::MessageDispatcherBridge::Get()->DismissMessage(
-        message_.get(), messages::DismissReason::UNKNOWN);
-  }
+  DismissMessage();
 }
 
 FramebustBlockedMessageDelegate::FramebustBlockedMessageDelegate(
     content::WebContents* web_contents)
     : content::WebContentsUserData<FramebustBlockedMessageDelegate>(
-          *web_contents) {}
+          *web_contents),
+      content::WebContentsObserver(web_contents) {}
 
 void FramebustBlockedMessageDelegate::HandleDismissCallback(
     messages::DismissReason dismiss_reason) {
@@ -117,13 +120,27 @@ void FramebustBlockedMessageDelegate::HandleClick() {
 }
 
 void FramebustBlockedMessageDelegate::HandleOpenLink() {
-  GetWebContents().OpenURL(content::OpenURLParams(
-      blocked_url_, content::Referrer(), WindowOpenDisposition::CURRENT_TAB,
-      ui::PAGE_TRANSITION_LINK, false));
+  content::OpenURLParams params(blocked_url_, content::Referrer(),
+                                WindowOpenDisposition::CURRENT_TAB,
+                                ui::PAGE_TRANSITION_LINK,
+                                /*is_renderer_initiated=*/true);
+  params.initiator_origin = initiator_origin_;
+  GetWebContents().OpenURL(params, /*navigation_handle_callback=*/{});
 
   if (intervention_callback_)
     std::move(intervention_callback_)
         .Run(InterventionOutcome::kDeclinedAndNavigated);
+}
+
+void FramebustBlockedMessageDelegate::DismissMessage() {
+  if (message_ != nullptr) {
+    messages::MessageDispatcherBridge::Get()->DismissMessage(
+        message_.get(), messages::DismissReason::UNKNOWN);
+  }
+}
+
+void FramebustBlockedMessageDelegate::PrimaryPageChanged(content::Page& page) {
+  DismissMessage();
 }
 
 WEB_CONTENTS_USER_DATA_KEY_IMPL(FramebustBlockedMessageDelegate);

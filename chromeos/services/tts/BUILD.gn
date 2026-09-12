@@ -22,7 +22,7 @@ source_set("tts") {
     ":libchrometts",
     "//base",
     "//chromeos/services/tts/public/mojom",
-    "//services/audio/public/cpp:cpp",
+    "//services/audio/public/cpp",
   ]
 }
 
@@ -50,6 +50,7 @@ generate_library_loader("libchrometts") {
 
   functions = [
     "GoogleTtsSetLogger",
+    "GoogleTtsPreSandboxInit",
     "GoogleTtsInit",
     "GoogleTtsShutdown",
     "GoogleTtsInstallVoice",
@@ -69,8 +70,16 @@ source_set("services_unittests") {
     "//base",
     "//base/test:test_support",
     "//chromeos/services/tts/public/mojom",
+    "//media",
+    "//media/mojo/mojom",
     "//mojo/public/cpp/bindings",
+    "//mojo/public/cpp/platform",
     "//testing/gtest",
   ]
-  sources = [ "tts_service_unittest.cc" ]
+  sources = [
+    "tts_player_unittest.cc",
+    "tts_service_unittest.cc",
+    "tts_test_utils.cc",
+    "tts_test_utils.h",
+  ]
 }

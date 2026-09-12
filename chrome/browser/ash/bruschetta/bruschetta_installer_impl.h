@@ -5,27 +5,37 @@
 #ifndef CHROME_BROWSER_ASH_BRUSCHETTA_BRUSCHETTA_INSTALLER_IMPL_H_
 #define CHROME_BROWSER_ASH_BRUSCHETTA_BRUSCHETTA_INSTALLER_IMPL_H_
 
-#include "base/guid.h"
+#include <memory>
+#include <optional>
+
 #include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/values.h"
+#include "chrome/browser/ash/bruschetta/bruschetta_download.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_installer.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_util.h"
-#include "chromeos/ash/components/dbus/concierge/concierge_service.pb.h"
-#include "chromeos/ash/components/dbus/dlcservice/dlcservice_client.h"
+#include "chrome/browser/ash/guest_os/guest_os_dlc_helper.h"
+#include "chromeos/ash/components/dbus/attestation/interface.pb.h"
+#include "chromeos/ash/components/dbus/concierge/concierge_client.h"
+#include "chromeos/ash/components/dbus/vm_concierge/concierge_service.pb.h"
 #include "components/download/public/background_service/download_metadata.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
+class PrefService;
 class Profile;
 
 namespace bruschetta {
+class BruschettaDownload;
 
-class BruschettaInstallerImpl : public BruschettaInstaller {
+class BruschettaInstallerImpl : public BruschettaInstaller,
+                                public ash::ConciergeClient::VmObserver {
  public:
   // Public for a free function in the .cc file, not actually part of the public
   // interface.
   struct Fds;
-  BruschettaInstallerImpl(Profile* profile, base::OnceClosure close_callback);
+  BruschettaInstallerImpl(Profile* profile,
+                          PrefService& local_state,
+                          base::OnceClosure close_callback);
 
   BruschettaInstallerImpl(const BruschettaInstallerImpl&) = delete;
   BruschettaInstallerImpl& operator=(const BruschettaInstallerImpl&) = delete;
@@ -34,16 +44,18 @@ class BruschettaInstallerImpl : public BruschettaInstaller {
   void Cancel() override;
   void Install(std::string vm_name, std::string config_id) override;
 
-  const base::GUID& GetDownloadGuid() const override;
-
-  void DownloadStarted(const std::string& guid,
-                       download::DownloadParams::StartResult result) override;
-  void DownloadFailed() override;
-  void DownloadSucceeded(
-      const download::CompletionInfo& completion_info) override;
-
   void AddObserver(Observer* observer) override;
   void RemoveObserver(Observer* observer) override;
+
+  // ash::ConciergeClient::VmObserver:
+  void OnVmInstallState(
+      const vm_tools::concierge::VmInstallStateSignal& signal) override;
+
+  void SetDownloadFactoryForTesting(
+      base::RepeatingCallback<std::unique_ptr<BruschettaDownload>(void)>
+          callback) {
+    download_factory_ = std::move(callback);
+  }
 
  private:
   using DownloadCallback =
@@ -55,22 +67,36 @@ class BruschettaInstallerImpl : public BruschettaInstaller {
 
   void InstallToolsDlc();
   void OnToolsDlcInstalled(
-      const ash::DlcserviceClient::InstallResult& install_result);
-  void DownloadFirmware();
-  void OnFirmwareDownloaded(const download::CompletionInfo& completion_info);
+      guest_os::GuestOsDlcInstallation::Result install_result);
+  void InstallFirmwareDlc();
+  void OnFirmwareDlcInstalled(
+      guest_os::GuestOsDlcInstallation::Result install_result);
   void DownloadBootDisk();
-  void OnBootDiskDownloaded(const download::CompletionInfo& completion_info);
+  void OnBootDiskDownloaded(base::FilePath path, std::string hash);
   void DownloadPflash();
-  void OnPflashDownloaded(const download::CompletionInfo& completion_info);
+  void OnPflashDownloaded(base::FilePath path, std::string hash);
   void OpenFds();
   void OnOpenFds(std::unique_ptr<Fds> fds);
+  void EnsureConciergeAvailable();
+  void OnConciergeAvailable(bool service_is_available);
   void CreateVmDisk();
   void OnCreateVmDisk(
-      absl::optional<vm_tools::concierge::CreateDiskImageResponse> result);
+      std::optional<vm_tools::concierge::CreateDiskImageResponse> result);
+  void InstallPflash();
+  void OnInstallPflash(
+      std::optional<vm_tools::concierge::SuccessFailureResponse> result);
+  void ClearVek();
+  void OnClearVek(const attestation::DeleteKeysReply& result);
   void StartVm();
   void OnStartVm(RunningVmPolicy launch_policy,
-                 absl::optional<vm_tools::concierge::StartVmResponse> result);
+                 std::optional<vm_tools::concierge::StartVmResponse> result);
   void LaunchTerminal();
+
+  void HandleVmInstallSucceeded();
+  void HandleVmInstallFailed();
+
+  void OnStopVm(
+      std::optional<vm_tools::concierge::SuccessFailureResponse> result);
 
   void NotifyObserver(State state);
   void Error(BruschettaInstallResult error);
@@ -79,22 +105,30 @@ class BruschettaInstallerImpl : public BruschettaInstaller {
 
   std::string vm_name_;
   std::string config_id_;
-  base::Value::Dict config_;
+  base::DictValue config_;
 
-  base::GUID download_guid_;
-  DownloadCallback download_callback_;
-
-  base::FilePath firmware_path_;
   base::FilePath boot_disk_path_;
   base::FilePath pflash_path_;
   std::string disk_path_;
   std::unique_ptr<Fds> fds_;
 
-  const base::raw_ptr<Profile> profile_;
+  std::unique_ptr<guest_os::GuestOsDlcInstallation> in_progress_dlc_;
+
+  const raw_ptr<Profile> profile_;
+
+  // The downloaded files get deleted once these go out of scope.
+  std::unique_ptr<BruschettaDownload> boot_disk_download_;
+  std::unique_ptr<BruschettaDownload> pflash_download_;
+  base::RepeatingCallback<std::unique_ptr<BruschettaDownload>(void)>
+      download_factory_;
 
   base::OnceClosure close_closure_;
 
-  base::raw_ptr<Observer> observer_ = nullptr;
+  raw_ptr<Observer> observer_ = nullptr;
+
+  base::ScopedObservation<ash::ConciergeClient,
+                          ash::ConciergeClient::VmObserver>
+      vm_observation_{this};
 
   base::WeakPtrFactory<BruschettaInstallerImpl> weak_ptr_factory_{this};
 };

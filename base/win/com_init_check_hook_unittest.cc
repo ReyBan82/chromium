@@ -5,6 +5,7 @@
 #include "base/win/com_init_check_hook.h"
 
 #include <objbase.h>
+
 #include <shlobj.h>
 #include <wrl/client.h>
 
@@ -24,8 +25,8 @@ TEST(ComInitCheckHook, AssertNotInitialized) {
   AssertComApartmentType(ComApartmentType::NONE);
   ComPtr<IUnknown> shell_link;
 #if defined(COM_INIT_CHECK_HOOK_ENABLED)
-  EXPECT_DCHECK_DEATH(::CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_ALL,
-                                         IID_PPV_ARGS(&shell_link)));
+  EXPECT_NOTREACHED_DEATH(::CoCreateInstance(
+      CLSID_ShellLink, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&shell_link)));
 #else
   EXPECT_EQ(CO_E_NOTINITIALIZED,
             ::CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_ALL,
@@ -56,8 +57,8 @@ TEST(ComInitCheckHook, MultipleHooks) {
   AssertComApartmentType(ComApartmentType::NONE);
   ComPtr<IUnknown> shell_link;
 #if defined(COM_INIT_CHECK_HOOK_ENABLED)
-  EXPECT_DCHECK_DEATH(::CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_ALL,
-                                         IID_PPV_ARGS(&shell_link)));
+  EXPECT_NOTREACHED_DEATH(::CoCreateInstance(
+      CLSID_ShellLink, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&shell_link)));
 #else
   EXPECT_EQ(CO_E_NOTINITIALIZED,
             ::CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_ALL,
@@ -72,7 +73,7 @@ TEST(ComInitCheckHook, UnexpectedHook) {
 
   uint32_t co_create_instance_padded_address =
       reinterpret_cast<uint32_t>(
-          GetProcAddress(ole32_library, "CoCreateInstance")) -
+          ::GetProcAddress(ole32_library, "CoCreateInstance")) -
       5;
   const unsigned char* co_create_instance_bytes =
       reinterpret_cast<const unsigned char*>(co_create_instance_padded_address);
@@ -84,7 +85,7 @@ TEST(ComInitCheckHook, UnexpectedHook) {
                 reinterpret_cast<const void*>(&unexpected_byte),
                 sizeof(unexpected_byte)));
 
-  EXPECT_DCHECK_DEATH({ ComInitCheckHook com_check_hook; });
+  EXPECT_NOTREACHED_DEATH({ ComInitCheckHook com_check_hook; });
 
   // If this call fails, really bad things are going to happen to other tests
   // so CHECK here.
@@ -105,7 +106,7 @@ TEST(ComInitCheckHook, ExternallyHooked) {
   ASSERT_TRUE(ole32_library);
 
   uint32_t co_create_instance_address = reinterpret_cast<uint32_t>(
-      GetProcAddress(ole32_library, "CoCreateInstance"));
+      ::GetProcAddress(ole32_library, "CoCreateInstance"));
   const unsigned char* co_create_instance_bytes =
       reinterpret_cast<const unsigned char*>(co_create_instance_address);
   const unsigned char original_byte = co_create_instance_bytes[0];
@@ -116,7 +117,7 @@ TEST(ComInitCheckHook, ExternallyHooked) {
                 reinterpret_cast<const void*>(&jmp_byte), sizeof(jmp_byte)));
 
   // Externally patched instances should crash so we catch these cases on bots.
-  EXPECT_DCHECK_DEATH({ ComInitCheckHook com_check_hook; });
+  EXPECT_NOTREACHED_DEATH({ ComInitCheckHook com_check_hook; });
 
   // If this call fails, really bad things are going to happen to other tests
   // so CHECK here.
@@ -138,7 +139,7 @@ TEST(ComInitCheckHook, UnexpectedChangeDuringHook) {
 
   uint32_t co_create_instance_padded_address =
       reinterpret_cast<uint32_t>(
-          GetProcAddress(ole32_library, "CoCreateInstance")) -
+          ::GetProcAddress(ole32_library, "CoCreateInstance")) -
       5;
   const unsigned char* co_create_instance_bytes =
       reinterpret_cast<const unsigned char*>(co_create_instance_padded_address);
@@ -150,7 +151,7 @@ TEST(ComInitCheckHook, UnexpectedChangeDuringHook) {
                 reinterpret_cast<const void*>(&unexpected_byte),
                 sizeof(unexpected_byte)));
 
-  EXPECT_DCHECK_DEATH({
+  EXPECT_NOTREACHED_DEATH({
     ComInitCheckHook com_check_hook;
 
     internal::ModifyCode(

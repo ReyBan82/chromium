@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "base/component_export.h"
-#include "base/functional/callback.h"
 #include "base/time/time.h"
 #include "base/values.h"
 
@@ -28,29 +27,35 @@ class NetworkTypePattern;
 
 // Struct for passing wifi access point data.
 struct COMPONENT_EXPORT(CHROMEOS_NETWORK) WifiAccessPoint {
-  WifiAccessPoint();
-  WifiAccessPoint(const WifiAccessPoint& other);
-  ~WifiAccessPoint();
   std::string ssid;  // The ssid of the WiFi node if available.
   std::string mac_address;  // The mac address of the WiFi node.
   base::Time timestamp;  // Timestamp when this AP was detected.
   int signal_strength;  // Radio signal strength measured in dBm.
   int signal_to_noise;  // Current signal to noise ratio measured in dB.
   int channel;  // Wifi channel number.
+
+  WifiAccessPoint();
+  WifiAccessPoint(const WifiAccessPoint& other);
+  ~WifiAccessPoint();
+
+  bool operator==(const WifiAccessPoint&) const = default;
 };
 
 // Struct for passing cellular location data
 // The age, signalStrength, and timingAdvance fields are currently unused:
 // https://developers.google.com/maps/documentation/geolocation/intro#cell_tower_object
 struct COMPONENT_EXPORT(CHROMEOS_NETWORK) CellTower {
-  CellTower();
-  CellTower(const CellTower& other);
-  ~CellTower();
   std::string mcc;       // The mobile country code if available
   std::string mnc;       // The mobile network code if available
   std::string lac;       // The location area code if available
   std::string ci;        // The cell id if availabe
   base::Time timestamp;  // Timestamp when this location was detected.
+
+  CellTower();
+  CellTower(const CellTower& other);
+  ~CellTower();
+
+  bool operator==(const CellTower&) const = default;
 };
 
 // Struct for passing network scan result data.
@@ -111,21 +116,21 @@ std::string FormattedMacAddress(const std::string& shill_mac_address);
 // CellularScanResult in |scan_results|. Returns false if parsing fails,
 // in which case the contents of |scan_results| will be undefined.
 COMPONENT_EXPORT(CHROMEOS_NETWORK)
-bool ParseCellularScanResults(const base::Value::List& list,
+bool ParseCellularScanResults(const base::ListValue& list,
                               std::vector<CellularScanResult>* scan_results);
 
 // Parses |list|, which contains dictionary Values and returns a vector of
 // CellularSIMSlotInfo in |sim_slot_infos|. Returns false if parsing fails,
 // in which case the contents of |sim_slot_infos| will be undefined.
 COMPONENT_EXPORT(CHROMEOS_NETWORK)
-bool ParseCellularSIMSlotInfo(const base::Value::List& list,
+bool ParseCellularSIMSlotInfo(const base::ListValue& list,
                               std::vector<CellularSIMSlotInfo>* sim_slot_infos);
 
 // Retrieves the ONC state dictionary for |network| using GetStateProperties.
 // This includes properties from the corresponding NetworkState if it exists.
 // Assumed to be called from the primary user profile.
 COMPONENT_EXPORT(CHROMEOS_NETWORK)
-base::Value::Dict TranslateNetworkStateToONC(const NetworkState* network);
+base::DictValue TranslateNetworkStateToONC(const NetworkState* network);
 
 // Retrieves the list of network services by passing |pattern|,
 // |configured_only|, and |visible_only| to NetworkStateHandler::
@@ -133,10 +138,10 @@ base::Value::Dict TranslateNetworkStateToONC(const NetworkState* network);
 // dictionaries using TranslateShillServiceToONCPart. |limit| is used to limit
 // the number of results.
 COMPONENT_EXPORT(CHROMEOS_NETWORK)
-base::Value::List TranslateNetworkListToONC(NetworkTypePattern pattern,
-                                            bool configured_only,
-                                            bool visible_only,
-                                            int limit);
+base::ListValue TranslateNetworkListToONC(NetworkTypePattern pattern,
+                                          bool configured_only,
+                                          bool visible_only,
+                                          int limit);
 
 // Returns the Shill type corresponding to ONC |type| or an empty string if
 // there is no match. Only valid for ethernet, wifi, cellular, and vpn.

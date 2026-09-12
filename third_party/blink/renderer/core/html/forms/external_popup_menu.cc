@@ -32,21 +32,24 @@
 
 #include "base/numerics/safe_conversions.h"
 #include "build/build_config.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/common/input/web_coalesced_input_event.h"
 #include "third_party/blink/public/common/input/web_mouse_event.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/task_type.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/events/current_input_event.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/exported/web_view_impl.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
+#include "third_party/blink/renderer/core/frame/visual_viewport.h"
 #include "third_party/blink/renderer/core/frame/web_frame_widget_impl.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+#include "third_party/blink/renderer/core/html/forms/html_opt_group_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_option_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_select_element.h"
+#include "third_party/blink/renderer/core/html/html_hr_element.h"
+#include "third_party/blink/renderer/core/input/event_handler.h"
 #include "third_party/blink/renderer/core/layout/layout_box.h"
 #include "third_party/blink/renderer/core/page/chrome_client.h"
 #include "third_party/blink/renderer/core/page/page.h"
@@ -57,20 +60,25 @@
 
 namespace blink {
 
-namespace {
-
-float GetDprForSizeAdjustment(const Element& owner_element) {
+// static
+float ExternalPopupMenu::GetDprForSizeAdjustment(const Element& owner_element) {
   float dpr = 1.0f;
-  // Android doesn't need these adjustments and it makes tests fail.
-#ifndef OS_ANDROID
   LocalFrame* frame = owner_element.GetDocument().GetFrame();
   const Page* page = frame ? frame->GetPage() : nullptr;
-  dpr = page->GetChromeClient().GetScreenInfo(*frame).device_scale_factor;
-#endif
+  // DevTools devicePixelRatio emulation only applies to the outermost
+  // main frame and local frames within it. If the current frame is
+  // cross-origin in relation to the outmost frame, we need to use the original
+  // device scale factor instead of the value emulated for the outermost main
+  // frame to correctly place the select menu.
+  if (frame->IsCrossOriginToOutermostMainFrame()) {
+    dpr = page->GetChromeClient()
+              .GetOriginalScreenInfo(*frame)
+              .device_scale_factor;
+  } else {
+    dpr = page->GetChromeClient().GetScreenInfo(*frame).device_scale_factor;
+  }
   return dpr;
 }
-
-}  // namespace
 
 ExternalPopupMenu::ExternalPopupMenu(LocalFrame& frame,
                                      HTMLSelectElement& owner_element)
@@ -100,14 +108,13 @@ bool ExternalPopupMenu::ShowInternal() {
   // recreate the actual external popup every time.
   Reset();
 
-  int32_t item_height;
   double font_size;
   int32_t selected_item;
   Vector<mojom::blink::MenuItemPtr> menu_items;
   bool right_aligned;
   bool allow_multiple_selection;
-  GetPopupMenuInfo(*owner_element_, &item_height, &font_size, &selected_item,
-                   &menu_items, &right_aligned, &allow_multiple_selection);
+  GetPopupMenuInfo(*owner_element_, &font_size, &selected_item, &menu_items,
+                   &right_aligned, &allow_multiple_selection);
   if (menu_items.empty())
     return false;
 
@@ -124,7 +131,29 @@ bool ExternalPopupMenu::ShowInternal() {
                                     ->LocalRootFrameWidget()
                                     ->GetEmulatorScale();
 
-    // rect_in_viewport needs to be in CSS pixels.
+    // Adjust anchor position to stay within web contents, otherwise the popup
+    // could be rendered entirely outside of the web contents. If this select
+    // is in a cross-origin iframe, then the anchor will be confined to the
+    // bounds of the iframe rather than the entire web contents. If the select
+    // doesn't intersect with the viewport, which can happen with oopifs, then
+    // the picker won't be opened.
+    if (RuntimeEnabledFeatures::SelectAnchorInViewportEnabled() &&
+        local_frame_->GetPage()) {
+      gfx::Rect viewport_rect =
+          local_frame_->LocalFrameRoot().IsOutermostMainFrame()
+              ? gfx::Rect(local_frame_->GetPage()->GetVisualViewport().Size())
+              : local_frame_->LocalFrameRoot().RemoteViewportIntersection();
+      if (!viewport_rect.Intersects(rect_in_viewport)) {
+        DidCancel();
+        return false;
+      }
+      rect_in_viewport.Intersect(viewport_rect);
+    }
+
+    // The browser process expects the popup bounds in DIPs, so convert
+    // rect_in_viewport here. This must happen after the viewport intersection
+    // check above because viewport_rect and rect_in_viewport are both in Blink
+    // visual viewport CSS pixels before DPR scaling.
     float dpr = GetDprForSizeAdjustment(*owner_element_);
     if (dpr != 1.0) {
       rect_in_viewport = gfx::ScaleToRoundedRect(rect_in_viewport, 1 / dpr);
@@ -137,8 +166,8 @@ bool ExternalPopupMenu::ShowInternal() {
     local_frame_->GetLocalFrameHostRemote().ShowPopupMenu(
         receiver_.BindNewPipeAndPassRemote(execution_context->GetTaskRunner(
             TaskType::kInternalUserInteraction)),
-        bounds, item_height, font_size, selected_item, std::move(menu_items),
-        right_aligned, allow_multiple_selection);
+        bounds, font_size, selected_item, std::move(menu_items), right_aligned,
+        allow_multiple_selection);
     return true;
   }
 
@@ -191,8 +220,8 @@ void ExternalPopupMenu::UpdateFromElement(UpdateReason reason) {
       needs_update_ = true;
       owner_element_->GetDocument()
           .GetTaskRunner(TaskType::kUserInteraction)
-          ->PostTask(FROM_HERE, WTF::BindOnce(&ExternalPopupMenu::Update,
-                                              WrapPersistent(this)));
+          ->PostTask(FROM_HERE, BindOnce(&ExternalPopupMenu::Update,
+                                         WrapPersistent(this)));
       break;
 
     case kByStyleChange:
@@ -250,7 +279,20 @@ void ExternalPopupMenu::DidAcceptIndices(const Vector<int32_t>& indices) {
     list_indices.reserve(list_count);
     for (wtf_size_t i = 0; i < list_count; ++i)
       list_indices.push_back(ToPopupMenuItemIndex(indices[i], *owner_element));
-    owner_element->SelectMultipleOptionsByPopup(list_indices);
+    owner_element->SelectMultipleOptions(list_indices);
+  }
+
+  if (RuntimeEnabledFeatures::ExternalPopupMenuClickEventEnabled()) {
+    WebMouseEvent event;
+    event.SetFrameScale(1);
+    PhysicalRect bounding_box = owner_element->BoundingBox();
+    event.SetPositionInWidget(bounding_box.X(), bounding_box.Y());
+    event.SetTimeStamp(base::TimeTicks::Now());
+    if (LocalFrame* frame = owner_element->GetDocument().GetFrame()) {
+      frame->GetEventHandler().HandleTargetedMouseEvent(
+          owner_element, event, event_type_names::kClick,
+          Vector<WebMouseEvent>(), Vector<WebMouseEvent>());
+    }
   }
   Reset();
 }
@@ -263,7 +305,6 @@ void ExternalPopupMenu::DidCancel() {
 
 void ExternalPopupMenu::GetPopupMenuInfo(
     HTMLSelectElement& owner_element,
-    int32_t* item_height,
     double* font_size,
     int32_t* selected_item,
     Vector<mojom::blink::MenuItemPtr>* menu_items,
@@ -273,10 +314,18 @@ void ExternalPopupMenu::GetPopupMenuInfo(
       owner_element.GetListItems();
   wtf_size_t item_count = list_items.size();
   for (wtf_size_t i = 0; i < item_count; ++i) {
-    if (owner_element.ItemIsDisplayNone(*list_items[i]))
+    if (owner_element.ItemIsDisplayNone(*list_items[i],
+                                        /*ensure_style=*/true)) {
       continue;
+    }
 
     Element& item_element = *list_items[i];
+#if BUILDFLAG(IS_ANDROID)
+    // Separators get rendered as selectable options on android
+    if (IsA<HTMLHRElement>(item_element)) {
+      continue;
+    }
+#endif
     auto popup_item = mojom::blink::MenuItem::New();
     popup_item->label = owner_element.ItemText(item_element);
     popup_item->tool_tip = item_element.title();
@@ -290,23 +339,42 @@ void ExternalPopupMenu::GetPopupMenuInfo(
       popup_item->checked = To<HTMLOptionElement>(item_element).Selected();
     }
     popup_item->enabled = !item_element.IsDisabledFormControl();
-    const ComputedStyle& style = *owner_element.ItemComputedStyle(item_element);
-    popup_item->text_direction = ToBaseTextDirection(style.Direction());
+    const ComputedStyle* style = owner_element.ItemComputedStyle(item_element);
+    CHECK(style) << "The ItemIsDisplayNone() further up should guard this";
+    popup_item->text_direction = ToBaseTextDirection(style->Direction());
     popup_item->has_text_direction_override =
-        IsOverride(style.GetUnicodeBidi());
+        IsOverride(style->GetUnicodeBidi());
     menu_items->push_back(std::move(popup_item));
   }
 
   const ComputedStyle& menu_style = owner_element.GetComputedStyle()
                                         ? *owner_element.GetComputedStyle()
                                         : *owner_element.EnsureComputedStyle();
-  const SimpleFontData* font_data = menu_style.GetFont().PrimaryFont();
-  DCHECK(font_data);
-  // These coordinates need to be in CSS pixels.
-  float dpr = GetDprForSizeAdjustment(owner_element);
-  *item_height = font_data ? font_data->GetFontMetrics().Height() / dpr : 0;
+  // There are two completely different scaling factors that need to be
+  // considered.
+  //
+  // The first scaling factor is the "page scale factor" which is what you get
+  // when you pinch-zoom on a trackpad or you double-finger-double-tap on a
+  // trackpad. That is available as `Page::PageScaleFactor()`. It does not
+  // include DPR.
+  //
+  // The second scaling factor is "page zoom factor" which is what you get when
+  // you press ⌘+/⌘-. The "page zoom factor" also includes the DPR (historical
+  // note: this is true as of the enabling of the "zoom-for-dsf" feature). The
+  // "page zoom factor" is baked into the font metrics.
+  //
+  // Because the `font_size` is sent by the browser process to the OS APIs to
+  // create a font that matches the text size of the <select> element, it must
+  // be in device-independent points and thus the DPR must be removed.
+  //
+  // Account for both scaling factors: put the page scale factor in the
+  // numerator, to multiply by it, and the DPR in the denominator so as to
+  // cancel it out.
+  float scale =
+      owner_element.GetDocument().GetFrame()->GetPage()->PageScaleFactor() /
+      GetDprForSizeAdjustment(owner_element);
   *font_size = static_cast<int>(
-      menu_style.GetFont().GetFontDescription().ComputedSize() / dpr);
+      menu_style.GetFont()->GetFontDescription().ComputedSize() * scale);
   *selected_item = ToExternalPopupMenuItemIndex(
       owner_element.SelectedListIndex(), owner_element);
 
@@ -323,8 +391,14 @@ int ExternalPopupMenu::ToPopupMenuItemIndex(int external_popup_menu_item_index,
   int index_tracker = 0;
   const HeapVector<Member<HTMLElement>>& items = owner_element.GetListItems();
   for (wtf_size_t i = 0; i < items.size(); ++i) {
-    if (owner_element.ItemIsDisplayNone(*items[i]))
+    if (owner_element.ItemIsDisplayNone(*items[i], /*ensure_style=*/true))
       continue;
+#if BUILDFLAG(IS_ANDROID)
+    // <hr> elements are not sent to the browser on android
+    if (IsA<HTMLHRElement>(*items[i])) {
+      continue;
+    }
+#endif
     if (index_tracker++ == external_popup_menu_item_index)
       return i;
   }
@@ -340,8 +414,14 @@ int ExternalPopupMenu::ToExternalPopupMenuItemIndex(
   int index_tracker = 0;
   const HeapVector<Member<HTMLElement>>& items = owner_element.GetListItems();
   for (wtf_size_t i = 0; i < items.size(); ++i) {
-    if (owner_element.ItemIsDisplayNone(*items[i]))
+    if (owner_element.ItemIsDisplayNone(*items[i], /*ensure_style=*/true))
       continue;
+#if BUILDFLAG(IS_ANDROID)
+    // <hr> elements are not sent to the browser on android
+    if (IsA<HTMLHRElement>(*items[i])) {
+      continue;
+    }
+#endif
     if (popup_menu_item_index == static_cast<int>(i))
       return index_tracker;
     ++index_tracker;

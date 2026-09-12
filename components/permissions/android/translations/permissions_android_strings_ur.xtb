@@ -11,6 +11,7 @@
 <translation id="2987449669841041897">یہ سائٹ آپ کی اجازت نہیں طلب کر سکتی</translation>
 <translation id="3036750288708366620"><ph name="BEGIN_LINK" />مدد حاصل کریں<ph name="END_LINK" /></translation>
 <translation id="3773755127849930740">جوڑا بنانے کی اجازت دینے کیلئے <ph name="BEGIN_LINK" />بلوٹوتھ کو آن کریں<ph name="END_LINK" /></translation>
+<translation id="3878792656892132392">آپ کے ہاتھوں کو ٹریک کرنے کے لیے <ph name="APP_NAME" /> کو اجازت درکار ہے</translation>
 <translation id="4915549754973153784">آلات کو اسکین کرتے وقت <ph name="BEGIN_LINK" />مدد حاصل کریں<ph name="END_LINK" />…</translation>
 <translation id="4925793601605263825"><ph name="APP_NAME" /> کو اس سائٹ کیلئے آپ کے مائیکروفون تک رسائی کی اجازت درکار ہے۔</translation>
 <translation id="5230560987958996918"><ph name="SITE" /> قریبی بلوٹوتھ آلات کے لیے اسکین کرنا چاہتی ہے، مندرجہ ذیل آلات ملے ہیں:</translation>
@@ -23,6 +24,7 @@
 <translation id="6656545060687952787">‏Chrome کو آلات اسکین کرنے کیلئے مقام تک رسائی کی ضرورت ہے۔ <ph name="BEGIN_LINK" />اجازتوں کو اپ ڈیٹ کریں<ph name="END_LINK" /></translation>
 <translation id="7146360184282545445">‏اپنے اطراف کا 3D نقشہ تخلیق کرنے کی خاطر <ph name="APP_NAME" /> کو آپ کے کیمرے تک رسائی کی اجازت درکار ہے۔</translation>
 <translation id="7624880197989616768"><ph name="BEGIN_LINK1" />مدد حاصل کریں<ph name="END_LINK1" /> یا <ph name="BEGIN_LINK2" />دوبارہ اسکین کریں<ph name="END_LINK2" /></translation>
+<translation id="7658239707568436148">منسوخ کریں</translation>
 <translation id="781351614677332494"><ph name="APP_NAME" /> کو اس سائٹ کے ساتھ آپ کے مقام کا اشتراک کرنے کیلئے آپ کے مقام تک رسائی درکار ہے۔</translation>
 <translation id="7884346424584885269">‏قریبی آلات کو اسکین کرنے کے لیے Chrome کو اجازت درکار ہے۔ <ph name="BEGIN_LINK" />اجازتیں اپ ڈیٹ کریں<ph name="END_LINK" /></translation>
 <translation id="8368027906805972958">نا معلوم یا غیر تعاون یافتہ آلہ (<ph name="DEVICE_ID" />)</translation>

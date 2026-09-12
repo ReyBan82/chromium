@@ -6,16 +6,16 @@
 
 #import <UIKit/UIKit.h>
 
+#include <vector>
+
 #include "base/functional/bind.h"
 #include "base/test/task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/image/image.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/image/image_skia_rep.h"
 
 namespace {
 
@@ -62,7 +62,7 @@ class IOSImageDecoderImplTest : public PlatformTest {
     ios_image_decoder_impl_ = CreateIOSImageDecoder();
   }
 
-  ~IOSImageDecoderImplTest() override {}
+  ~IOSImageDecoderImplTest() override = default;
 
   base::test::TaskEnvironment scoped_task_evironment_;
   std::unique_ptr<ImageDecoder> ios_image_decoder_impl_;
@@ -98,6 +98,31 @@ TEST_F(IOSImageDecoderImplTest, WebpImage) {
   scoped_task_evironment_.RunUntilIdle();
 
   EXPECT_FALSE(decoded_image_.IsEmpty());
+}
+
+// Verifies that the decoded image retains a 1.0x scale factor.
+TEST_F(IOSImageDecoderImplTest, DecodedImageScale) {
+  ASSERT_TRUE(decoded_image_.IsEmpty());
+
+  std::string image_data =
+      std::string(reinterpret_cast<char*>(kJPGImage), sizeof(kJPGImage));
+
+  ios_image_decoder_impl_->DecodeImage(
+      image_data, gfx::Size(), /*data_decoder=*/nullptr,
+      base::BindOnce(&IOSImageDecoderImplTest::OnImageDecoded,
+                     base::Unretained(this)));
+
+  scoped_task_evironment_.RunUntilIdle();
+
+  EXPECT_FALSE(decoded_image_.IsEmpty());
+
+  gfx::ImageSkia image_skia = decoded_image_.AsImageSkia();
+  std::vector<gfx::ImageSkiaRep> reps = image_skia.image_reps();
+
+  // Verify that only a single 1.0x representation exists and no representations
+  // for higher scale factors were created.
+  EXPECT_EQ(reps.size(), 1u);
+  EXPECT_EQ(reps[0].scale(), 1.0f);
 }
 
 }  // namespace image_fetcher

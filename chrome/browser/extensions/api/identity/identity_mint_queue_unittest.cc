@@ -7,8 +7,12 @@
 #include <memory>
 #include <vector>
 
+#include "extensions/buildflags/buildflags.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 using extensions::ExtensionTokenKey;
 using extensions::IdentityMintRequestQueue;
@@ -23,8 +27,8 @@ class MockRequest : public extensions::IdentityMintRequestQueue::Request {
 std::unique_ptr<ExtensionTokenKey> ExtensionIdToKey(
     const std::string& extension_id) {
   CoreAccountInfo user_info;
-  user_info.account_id = CoreAccountId("user_id");
-  user_info.gaia = "user_id";
+  user_info.gaia = GaiaId("user_id");
+  user_info.account_id = CoreAccountId::FromGaiaId(user_info.gaia);
   user_info.email = "user_email";
 
   return std::make_unique<ExtensionTokenKey>(extension_id, user_info,

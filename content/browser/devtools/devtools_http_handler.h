@@ -7,15 +7,18 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
 #include "base/files/file_path.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "content/public/browser/devtools_agent_host.h"
+#include "content/public/browser/devtools_manager_delegate.h"
+#include "net/base/ip_endpoint.h"
 #include "net/http/http_status_code.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class Thread;
@@ -51,29 +54,33 @@ class DevToolsHttpHandler {
       DevToolsManagerDelegate* delegate,
       std::unique_ptr<DevToolsSocketFactory> server_socket_factory,
       const base::FilePath& active_port_output_directory,
-      const base::FilePath& debug_frontend_dir);
+      const base::FilePath& debug_frontend_dir,
+      DevToolsAgentHost::RemoteDebuggingServerMode mode =
+          DevToolsAgentHost::RemoteDebuggingServerMode::kDefault);
 
   DevToolsHttpHandler(const DevToolsHttpHandler&) = delete;
   DevToolsHttpHandler& operator=(const DevToolsHttpHandler&) = delete;
 
   ~DevToolsHttpHandler();
 
+  net::IPEndPoint GetServerIpAddress() const;
+
  private:
   friend class ServerWrapper;
-  friend void ServerStartedOnUI(
-      base::WeakPtr<DevToolsHttpHandler> handler,
-      base::Thread* thread,
-      ServerWrapper* server_wrapper,
-      DevToolsSocketFactory* socket_factory,
-      std::unique_ptr<net::IPEndPoint> ip_address);
+  friend void ServerStartedOnUI(base::WeakPtr<DevToolsHttpHandler> handler,
+                                std::unique_ptr<base::Thread> thread,
+                                ServerWrapper* server_wrapper,
+                                DevToolsSocketFactory* socket_factory,
+                                std::unique_ptr<net::IPEndPoint> ip_address);
 
   void OnJsonRequest(int connection_id,
                      const net::HttpServerRequestInfo& info);
   void RespondToJsonList(int connection_id,
                          const std::string& host,
-                         DevToolsAgentHost::List agent_hosts);
+                         DevToolsAgentHost::List agent_hosts,
+                         bool for_tab);
   void OnDiscoveryPageRequest(int connection_id);
-  void OnFrontendResourceRequest(int connection_id, const std::string& path);
+  void OnFrontendResourceRequest(int connection_id, std::string_view path);
   void OnWebSocketRequest(int connection_id,
                           const net::HttpServerRequestInfo& info);
   void OnWebSocketMessage(int connection_id, std::string data);
@@ -86,17 +93,21 @@ class DevToolsHttpHandler {
 
   void SendJson(int connection_id,
                 net::HttpStatusCode status_code,
-                absl::optional<base::ValueView> value,
-                const std::string& message);
+                std::optional<base::ValueView> value,
+                std::string_view message);
   void Send200(int connection_id,
-               const std::string& data,
-               const std::string& mime_type);
+               std::string_view data,
+               std::string_view mime_type);
   void Send404(int connection_id);
   void Send403(int connection_id, const std::string& message);
   void Send500(int connection_id,
                const std::string& message);
   void AcceptWebSocket(int connection_id,
                        const net::HttpServerRequestInfo& request);
+  void HandleDebuggingApproval(
+      int connection_id,
+      const net::HttpServerRequestInfo& request,
+      DevToolsManagerDelegate::AcceptConnectionResult result);
 
   void DecompressAndSendJsonProtocol(int connection_id);
 
@@ -106,10 +117,11 @@ class DevToolsHttpHandler {
       const std::string& target_id,
       const std::string& host);
 
-  base::Value::Dict SerializeDescriptor(
+  base::DictValue SerializeDescriptor(
       scoped_refptr<DevToolsAgentHost> agent_host,
       const std::string& host);
 
+  DevToolsAgentHost::RemoteDebuggingServerMode mode_;
   std::set<std::string> remote_allow_origins_;
   // The thread used by the devtools handler to run server socket.
   std::unique_ptr<base::Thread> thread_;
@@ -119,7 +131,7 @@ class DevToolsHttpHandler {
   using ConnectionToClientMap =
       std::map<int, std::unique_ptr<DevToolsAgentHostClientImpl>>;
   ConnectionToClientMap connection_to_client_;
-  DevToolsManagerDelegate* delegate_;
+  raw_ptr<DevToolsManagerDelegate> delegate_;
   std::unique_ptr<DevToolsSocketFactory> socket_factory_;
   base::WeakPtrFactory<DevToolsHttpHandler> weak_factory_{this};
 };

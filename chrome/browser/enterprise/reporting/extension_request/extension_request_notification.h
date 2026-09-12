@@ -44,10 +44,19 @@ class ExtensionRequestNotification
   void Show(NotificationCloseCallback callback);
   void CloseNotification();
 
+  std::string GetNotificationId() const;
+
+  // Constructs and parses notification IDs formatted as:
+  // "ext_req|<type>|<comma_separated_extension_ids>" on Android.
+  static std::string CreateNotificationId(NotifyType notify_type,
+                                          const ExtensionIds& extension_ids);
+  static std::vector<std::string> ParseExtensionIds(
+      const std::string& notification_id);
+
  private:
   // message_center::NotificationObserver
-  void Click(const absl::optional<int>& button_index,
-             const absl::optional<std::u16string>& reply) override;
+  void Click(const std::optional<int>& button_index,
+             const std::optional<std::u16string>& reply) override;
   void Close(bool by_user) override;
 
   std::unique_ptr<message_center::Notification> notification_;

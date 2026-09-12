@@ -18,10 +18,10 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-using base::HistogramTester;
 using content::WebContents;
 
 class TabStripModelStatsRecorderTest : public ChromeRenderViewHostTestHarness {
+  const tabs::TabModel::PreventFeatureInitializationForTesting prevent_;
 };
 
 TEST_F(TabStripModelStatsRecorderTest,
@@ -31,8 +31,6 @@ TEST_F(TabStripModelStatsRecorderTest,
 
   TabStripModelStatsRecorder recorder;
   tabstrip.AddObserver(&recorder);
-
-  HistogramTester tester;
 
   // Create first tab
   std::unique_ptr<WebContents> contents0 = CreateTestWebContents();
@@ -51,9 +49,6 @@ TEST_F(TabStripModelStatsRecorderTest,
                          TabStripUserGestureDetails(
                              TabStripUserGestureDetails::GestureType::kOther));
 
-  tester.ExpectUniqueSample(
-      "Tabs.StateTransfer.NumberOfOtherTabsActivatedBeforeMadeActive", 9, 1);
-
   tabstrip.RemoveObserver(&recorder);
   tabstrip.CloseAllTabs();
 }
@@ -65,8 +60,6 @@ TEST_F(TabStripModelStatsRecorderTest,
 
   TabStripModelStatsRecorder recorder;
   tabstrip.AddObserver(&recorder);
-
-  HistogramTester tester;
 
   // Create tab 0, 1, 2
   std::unique_ptr<WebContents> contents0 = CreateTestWebContents();
@@ -97,12 +90,43 @@ TEST_F(TabStripModelStatsRecorderTest,
                          TabStripUserGestureDetails(
                              TabStripUserGestureDetails::GestureType::kOther));
 
-  EXPECT_THAT(
-      tester.GetAllSamples(
-          "Tabs.StateTransfer.NumberOfOtherTabsActivatedBeforeMadeActive"),
-      testing::ElementsAre(base::Bucket(1, 8), base::Bucket(2, 2),
-                           base::Bucket(10, 1)));
+  tabstrip.RemoveObserver(&recorder);
+  tabstrip.CloseAllTabs();
+}
+
+// This histogram is not present in ChromeOS. For more information:
+// crbug.com/457294205
+#if !BUILDFLAG(IS_CHROMEOS)
+TEST_F(TabStripModelStatsRecorderTest, TabSelectionCount) {
+  base::HistogramTester histogram_tester;
+  TestTabStripModelDelegate delegate;
+  TabStripModel tabstrip(&delegate, profile());
+
+  TabStripModelStatsRecorder recorder;
+  tabstrip.AddObserver(&recorder);
+
+  // Create first tab
+  std::unique_ptr<WebContents> contents0 = CreateTestWebContents();
+  tabstrip.InsertWebContentsAt(0, std::move(contents0),
+                               AddTabTypes::ADD_ACTIVE);
+  histogram_tester.ExpectBucketCount("Tabs.Selections.Count", 1, 1);
+
+  // Add 2 more tabs.
+  for (int i = 1; i < 3; ++i) {
+    tabstrip.InsertWebContentsAt(i, CreateTestWebContents(),
+                                 AddTabTypes::ADD_NONE);
+  }
+
+  // Select all three tabs.
+  ui::ListSelectionModel selection_model;
+  selection_model.set_active(0);
+  selection_model.AddIndexToSelection(0);
+  selection_model.AddIndexToSelection(1);
+  selection_model.AddIndexToSelection(2);
+  tabstrip.SetSelectionFromModel(selection_model);
+  histogram_tester.ExpectBucketCount("Tabs.Selections.Count", 3, 1);
 
   tabstrip.RemoveObserver(&recorder);
   tabstrip.CloseAllTabs();
 }
+#endif

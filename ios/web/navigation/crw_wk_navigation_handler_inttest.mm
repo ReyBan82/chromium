@@ -2,33 +2,39 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import "ios/web/navigation/crw_wk_navigation_handler.h"
-
+#import "base/functional/callback.h"
 #import "base/scoped_observation.h"
 #import "base/test/ios/wait_util.h"
 #import "base/test/scoped_feature_list.h"
+#import "base/test/test_future.h"
 #import "ios/web/common/features.h"
+#import "ios/web/navigation/crw_wk_navigation_handler.h"
 #import "ios/web/public/navigation/https_upgrade_type.h"
 #import "ios/web/public/navigation/navigation_context.h"
 #import "ios/web/public/navigation/navigation_item.h"
 #import "ios/web/public/test/fakes/fake_web_client.h"
 #import "ios/web/public/test/navigation_test_util.h"
+#import "ios/web/public/test/web_view_content_test_util.h"
 #import "ios/web/public/web_state_observer.h"
 #import "ios/web/security/wk_web_view_security_util.h"
 #import "ios/web/test/web_int_test.h"
-#import "ios/web/web_view/error_translation_util.h"
-#import "net/base/mac/url_conversions.h"
+#import "ios/web/util/error_translation_util.h"
+#import "net/base/apple/url_conversions.h"
 #import "net/test/embedded_test_server/default_handlers.h"
 #import "net/test/embedded_test_server/embedded_test_server.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "url/url_constants.h"
 
 using base::test::ios::kWaitForPageLoadTimeout;
 using web::HttpsUpgradeType;
 
 namespace {
+
+constexpr char kEchoURL[] = "/echo";
+constexpr char kServerRedirectToJavaScriptURL[] =
+    "/server-redirect?javascript:window.testExecuted=true;";
+constexpr char kServerRedirectToDataURL[] =
+    "/server-redirect?data:text/html,Blocked";
+constexpr char kBlockedDataContent[] = "Blocked";
 
 // A WebStateObserver that observes that the navigation is finished and keeps
 // track of the error type (SSL or net error).
@@ -46,6 +52,10 @@ class FailedWebStateObserver : public web::WebStateObserver {
   FailedWebStateObserver() = default;
   FailedWebStateObserver(const FailedWebStateObserver&) = delete;
   FailedWebStateObserver& operator=(const FailedWebStateObserver&) = delete;
+
+  void SetOnDidFinishNavigation(base::OnceClosure closure) {
+    on_did_finish_navigation_ = std::move(closure);
+  }
 
   void DidFinishNavigation(
       web::WebState* web_state,
@@ -69,6 +79,9 @@ class FailedWebStateObserver : public web::WebStateObserver {
         error_type_ = ErrorType::kNetError;
       }
     }
+    if (on_did_finish_navigation_) {
+      std::move(on_did_finish_navigation_).Run();
+    }
   }
 
   void WebStateDestroyed(web::WebState* web_state) override { NOTREACHED(); }
@@ -80,10 +93,45 @@ class FailedWebStateObserver : public web::WebStateObserver {
   ErrorType error_type() const { return error_type_; }
 
  private:
+  base::OnceClosure on_did_finish_navigation_;
   bool did_finish_ = false;
   web::HttpsUpgradeType failed_https_upgrade_type_ =
       web::HttpsUpgradeType::kNone;
   ErrorType error_type_ = ErrorType::kNone;
+};
+
+// A WebStateObserver that tracks the url of the visible item during
+// DidRedirectNavigation.
+class RedirectVisibleItemObserver : public web::WebStateObserver {
+ public:
+  explicit RedirectVisibleItemObserver(web::WebState* web_state) {
+    scoped_observation_.Observe(web_state);
+  }
+
+  void DidRedirectNavigation(
+      web::WebState* web_state,
+      web::NavigationContext* navigation_context) override {
+    web::NavigationItem* visible_item =
+        web_state->GetNavigationManager()->GetVisibleItem();
+    ASSERT_TRUE(visible_item);
+    visible_url_during_redirect_ = visible_item->GetURL();
+    did_redirect_ = true;
+  }
+
+  void WebStateDestroyed(web::WebState* web_state) override {
+    scoped_observation_.Reset();
+  }
+
+  bool did_redirect() const { return did_redirect_; }
+  const GURL& visible_url_during_redirect() const {
+    return visible_url_during_redirect_;
+  }
+
+ private:
+  base::ScopedObservation<web::WebState, web::WebStateObserver>
+      scoped_observation_{this};
+  bool did_redirect_ = false;
+  GURL visible_url_during_redirect_;
 };
 
 }  // namespace
@@ -212,7 +260,9 @@ TEST_F(CRWKNavigationHandlerIntTest, FailedHTTPSUpgrade_Upgraded_SSLError) {
 
 // Tests that a net error on a navigation that wasn't upgraded to HTTPS
 // doesn't set the IsFailedHTTPSUpgrade() bit on the navigation context.
-TEST_F(CRWKNavigationHandlerIntTest, FailedHTTPSUpgrade_NotUpgraded_NetError) {
+// TODO(crbug.com/433316885): Re-enable this test.
+TEST_F(CRWKNavigationHandlerIntTest,
+       DISABLED_FailedHTTPSUpgrade_NotUpgraded_NetError) {
   GURL url("https://site.test");
   TestFailedHttpsUpgrade(url, HttpsUpgradeType::kNone, HttpsUpgradeType::kNone,
                          FailedWebStateObserver::ErrorType::kNetError);
@@ -220,11 +270,98 @@ TEST_F(CRWKNavigationHandlerIntTest, FailedHTTPSUpgrade_NotUpgraded_NetError) {
 
 // Tests that a net error on a navigation that was upgraded to HTTPS
 // sets the IsFailedHTTPSUpgrade() bit on the navigation context.
-TEST_F(CRWKNavigationHandlerIntTest, FailedHTTPSUpgrade_Upgraded_NetError) {
+// TODO(crbug.com/433316885): Re-enable this test.
+TEST_F(CRWKNavigationHandlerIntTest,
+       DISABLED_FailedHTTPSUpgrade_Upgraded_NetError) {
   GURL url("https://site.test");
   TestFailedHttpsUpgrade(url, HttpsUpgradeType::kHttpsOnlyMode,
                          HttpsUpgradeType::kHttpsOnlyMode,
                          FailedWebStateObserver::ErrorType::kNetError);
+}
+
+// Tests that a server redirect to a JavaScript URL does not proceed.
+TEST_F(CRWKNavigationHandlerIntTest, ServerRedirectToJavaScriptURL) {
+  ASSERT_TRUE(server_.Start());
+  GURL initial_url = server_.GetURL(kEchoURL);
+  ASSERT_TRUE(LoadUrl(initial_url));
+
+  GURL redirect_url = server_.GetURL(kServerRedirectToJavaScriptURL);
+
+  FailedWebStateObserver observer;
+  base::ScopedObservation<WebState, WebStateObserver> scoped_observer(
+      &observer);
+  scoped_observer.Observe(web_state());
+
+  base::test::TestFuture<void> future;
+  observer.SetOnDidFinishNavigation(future.GetCallback());
+
+  NavigationManager::WebLoadParams params(redirect_url);
+  web_state()->GetNavigationManager()->LoadURLWithParams(params);
+
+  EXPECT_TRUE(future.Wait());
+
+  EXPECT_EQ(FailedWebStateObserver::ErrorType::kNetError,
+            observer.error_type());
+  EXPECT_NE(url::kJavaScriptScheme,
+            web_state()->GetLastCommittedURL().scheme());
+  EXPECT_NE(url::kJavaScriptScheme, web_state()->GetVisibleURL().scheme());
+}
+
+// Tests that a server redirect to a data URL does not proceed.
+TEST_F(CRWKNavigationHandlerIntTest, ServerRedirectToDataURL) {
+  ASSERT_TRUE(server_.Start());
+  GURL initial_url = server_.GetURL(kEchoURL);
+  ASSERT_TRUE(LoadUrl(initial_url));
+
+  GURL redirect_url = server_.GetURL(kServerRedirectToDataURL);
+
+  FailedWebStateObserver observer;
+  base::ScopedObservation<WebState, WebStateObserver> scoped_observer(
+      &observer);
+  scoped_observer.Observe(web_state());
+
+  base::test::TestFuture<void> future;
+  observer.SetOnDidFinishNavigation(future.GetCallback());
+
+  NavigationManager::WebLoadParams params(redirect_url);
+  web_state()->GetNavigationManager()->LoadURLWithParams(params);
+
+  EXPECT_TRUE(future.Wait());
+
+  EXPECT_EQ(FailedWebStateObserver::ErrorType::kNetError,
+            observer.error_type());
+  EXPECT_NE(url::kDataScheme, web_state()->GetLastCommittedURL().scheme());
+  EXPECT_NE(url::kDataScheme, web_state()->GetVisibleURL().scheme());
+  EXPECT_FALSE(test::IsWebViewContainingText(web_state(), kBlockedDataContent));
+}
+
+// Tests that GetVisibleItem() does not expose uncommitted redirect destinations
+// during provisional redirects, preventing address bar spoofing.
+TEST_F(CRWKNavigationHandlerIntTest, VisibleItemDuringServerRedirect) {
+  ASSERT_TRUE(server_.Start());
+  GURL destination_url(server_.GetURL("/echoall"));
+  GURL redirect_url(
+      server_.GetURL("/server-redirect?" + destination_url.spec()));
+
+  RedirectVisibleItemObserver observer(web_state());
+  ASSERT_TRUE(LoadUrl(redirect_url));
+
+  EXPECT_TRUE(observer.did_redirect());
+  // The visible item during provisional redirect must remain the initial
+  // requested URL to prevent address bar spoofing.
+  EXPECT_EQ(redirect_url, observer.visible_url_during_redirect());
+
+  // Once committed, the visible and last committed items reflect the
+  // destination.
+  NavigationItem* visible_item =
+      web_state()->GetNavigationManager()->GetVisibleItem();
+  ASSERT_TRUE(visible_item);
+  EXPECT_EQ(destination_url, visible_item->GetURL());
+
+  NavigationItem* committed_item =
+      web_state()->GetNavigationManager()->GetLastCommittedItem();
+  ASSERT_TRUE(committed_item);
+  EXPECT_EQ(destination_url, committed_item->GetURL());
 }
 
 }  // namespace web

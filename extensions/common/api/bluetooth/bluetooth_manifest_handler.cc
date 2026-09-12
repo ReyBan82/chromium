@@ -25,7 +25,7 @@ bool BluetoothManifestHandler::Parse(Extension* extension,
   if (!data)
     return false;
 
-  extension->SetManifestData(manifest_keys::kBluetooth, std::move(data));
+  extension->SetManifestData(std::move(data));
   return true;
 }
 
@@ -35,7 +35,7 @@ ManifestPermission* BluetoothManifestHandler::CreatePermission() {
 
 ManifestPermission* BluetoothManifestHandler::CreateInitialRequiredPermission(
     const Extension* extension) {
-  BluetoothManifestData* data = BluetoothManifestData::Get(extension);
+  const BluetoothManifestData* data = BluetoothManifestData::Get(extension);
   if (data)
     return data->permission()->Clone().release();
   return nullptr;

@@ -9,7 +9,8 @@
 #include <cstring>
 
 #include "base/check_op.h"
-#include "base/cxx17_backports.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "media/base/vector_math.h"
 
 namespace {
@@ -25,7 +26,9 @@ struct FMACTraits {
                               float volume,
                               int frames,
                               float* dest) {
-    ::media::vector_math::FMAC(src, volume, frames, dest);
+    const size_t size = static_cast<size_t>(frames);
+    ::media::vector_math::FMAC(UNSAFE_TODO(base::span(src, size)), volume,
+                               UNSAFE_TODO(base::span(dest, size)));
   }
 
   static void ProcessSingleDatum(const float* src, float volume, float* dest) {
@@ -44,7 +47,9 @@ struct FMULTraits {
                               float volume,
                               int frames,
                               float* dest) {
-    ::media::vector_math::FMUL(src, volume, frames, dest);
+    const size_t size = static_cast<size_t>(frames);
+    ::media::vector_math::FMUL(UNSAFE_TODO(base::span(src, size)), volume,
+                               UNSAFE_TODO(base::span(dest, size)));
   }
 
   static void ProcessSingleDatum(const float* src, float volume, float* dest) {
@@ -52,14 +57,14 @@ struct FMULTraits {
   }
 
   static void ProcessZeroVolume(const float* src, int frames, float* dest) {
-    std::memset(dest, 0, frames * sizeof(*dest));
+    UNSAFE_TODO(std::memset(dest, 0, frames * sizeof(*dest)));
   }
 
   static void ProcessUnityVolume(const float* src, int frames, float* dest) {
     if (src == dest) {
       return;
     }
-    std::memcpy(dest, src, frames * sizeof(*dest));
+    UNSAFE_TODO(std::memcpy(dest, src, frames * sizeof(*dest)));
   }
 };
 
@@ -185,11 +190,11 @@ void SlewVolume::ProcessData(bool repeat_transition,
     for (; slew_frames > 0; --slew_frames) {
       slew_cos_ -= slew_sin_ * slew_angle_;
       slew_sin_ += slew_cos_ * slew_angle_;
-      current_volume_ = base::clamp(slew_offset_ + slew_cos_, 0.0, 1.0);
+      current_volume_ = std::clamp(slew_offset_ + slew_cos_, 0.0, 1.0);
       for (int i = 0; i < channels; ++i) {
         Traits::ProcessSingleDatum(src, current_volume_, dest);
-        ++src;
-        ++dest;
+        UNSAFE_TODO(++src);
+        UNSAFE_TODO(++dest);
       }
     }
     if (!slew_counter_) {
@@ -199,8 +204,8 @@ void SlewVolume::ProcessData(bool repeat_transition,
     do {
       for (int i = 0; i < channels; ++i) {
         Traits::ProcessSingleDatum(src, current_volume_, dest);
-        ++src;
-        ++dest;
+        UNSAFE_TODO(++src);
+        UNSAFE_TODO(++dest);
       }
       --frames;
       current_volume_ += max_slew_per_sample_;
@@ -210,8 +215,8 @@ void SlewVolume::ProcessData(bool repeat_transition,
     do {
       for (int i = 0; i < channels; ++i) {
         Traits::ProcessSingleDatum(src, current_volume_, dest);
-        ++src;
-        ++dest;
+        UNSAFE_TODO(++src);
+        UNSAFE_TODO(++dest);
       }
       --frames;
       current_volume_ -= max_slew_per_sample_;
@@ -222,8 +227,8 @@ void SlewVolume::ProcessData(bool repeat_transition,
                     (::media::vector_math::kRequiredAlignment - 1))) {
     for (int i = 0; i < channels; ++i) {
       Traits::ProcessSingleDatum(src, current_volume_, dest);
-      ++src;
-      ++dest;
+      UNSAFE_TODO(++src);
+      UNSAFE_TODO(++dest);
     }
     --frames;
   }

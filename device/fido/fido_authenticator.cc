@@ -8,17 +8,18 @@
 
 #include "base/functional/callback.h"
 #include "base/notreached.h"
+#include "device/fido/cable/fido_tunnel_device.h"
 #include "device/fido/ctap_make_credential_request.h"
-#include "device/fido/fido_constants.h"
+#include "device/fido/public/fido_constants.h"
 
 namespace device {
 
 void FidoAuthenticator::ExcludeAppIdCredentialsBeforeMakeCredential(
     CtapMakeCredentialRequest request,
     MakeCredentialOptions options,
-    base::OnceCallback<void(CtapDeviceResponseCode, absl::optional<bool>)>
+    base::OnceCallback<void(CtapDeviceResponseCode, std::optional<bool>)>
         callback) {
-  std::move(callback).Run(CtapDeviceResponseCode::kSuccess, absl::nullopt);
+  std::move(callback).Run(CtapDeviceResponseCode::kSuccess, std::nullopt);
 }
 
 void FidoAuthenticator::GetPlatformCredentialInfoForRequest(
@@ -38,7 +39,7 @@ void FidoAuthenticator::GetPinRetries(
 void FidoAuthenticator::GetPINToken(
     std::string pin,
     std::vector<pin::Permissions> permissions,
-    absl::optional<std::string> rp_id,
+    std::optional<std::string> rp_id,
     FidoAuthenticator::GetTokenCallback callback) {
   NOTREACHED();
 }
@@ -54,24 +55,21 @@ bool FidoAuthenticator::CanGetUvToken() {
 
 void FidoAuthenticator::GetUvToken(
     std::vector<pin::Permissions> permissions,
-    absl::optional<std::string> rp_id,
+    std::optional<std::string> rp_id,
     FidoAuthenticator::GetTokenCallback callback) {
   NOTREACHED();
 }
 
 uint32_t FidoAuthenticator::CurrentMinPINLength() {
   NOTREACHED();
-  return kMinPinLength;
 }
 
 uint32_t FidoAuthenticator::NewMinPINLength() {
   NOTREACHED();
-  return kMinPinLength;
 }
 
 bool FidoAuthenticator::ForcePINChange() {
   NOTREACHED();
-  return false;
 }
 
 void FidoAuthenticator::SetPIN(const std::string& pin,
@@ -89,14 +87,14 @@ FidoAuthenticator::PINUVDisposition
 FidoAuthenticator::PINUVDispositionForMakeCredential(
     const CtapMakeCredentialRequest& request,
     const FidoRequestHandlerBase::Observer* observer) {
-  return PINUVDisposition::kNoUV;
+  return PINUVDisposition::kUVNotSupportedNorRequired;
 }
 
 FidoAuthenticator::PINUVDisposition
 FidoAuthenticator::PINUVDispositionForGetAssertion(
     const CtapGetAssertionRequest& request,
     const FidoRequestHandlerBase::Observer* observer) {
-  return PINUVDisposition::kNoUV;
+  return PINUVDisposition::kUVNotSupportedNorRequired;
 }
 
 void FidoAuthenticator::GetCredentialsMetadata(
@@ -140,7 +138,7 @@ void FidoAuthenticator::GetSensorInfo(BioEnrollmentCallback) {
 
 void FidoAuthenticator::BioEnrollFingerprint(
     const pin::TokenResponse&,
-    absl::optional<std::vector<uint8_t>> template_id,
+    std::optional<std::vector<uint8_t>> template_id,
     BioEnrollmentCallback) {
   NOTREACHED();
 }
@@ -173,8 +171,8 @@ void FidoAuthenticator::GarbageCollectLargeBlob(
   NOTREACHED();
 }
 
-absl::optional<base::span<const int32_t>> FidoAuthenticator::GetAlgorithms() {
-  return absl::nullopt;
+std::optional<base::span<const int32_t>> FidoAuthenticator::GetAlgorithms() {
+  return std::nullopt;
 }
 
 bool FidoAuthenticator::DiscoverableCredentialStorageFull() const {
@@ -183,11 +181,15 @@ bool FidoAuthenticator::DiscoverableCredentialStorageFull() const {
 
 void FidoAuthenticator::Reset(ResetCallback callback) {
   std::move(callback).Run(CtapDeviceResponseCode::kCtap1ErrInvalidCommand,
-                          absl::nullopt);
+                          std::nullopt);
 }
 
-FidoAuthenticator::Type FidoAuthenticator::GetType() const {
-  return Type::kOther;
+AuthenticatorType FidoAuthenticator::GetType() const {
+  return AuthenticatorType::kOther;
+}
+
+cablev2::FidoTunnelDevice* FidoAuthenticator::GetTunnelDevice() {
+  return nullptr;
 }
 
 std::string FidoAuthenticator::GetDisplayName() const {

@@ -8,6 +8,8 @@
 
 #include <memory>
 
+#include "base/files/file_path.h"
+#include "base/functional/bind.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -47,7 +49,7 @@ class ModuleEventSinkImplTest : public testing::Test {
   }
 
   void OnModuleEvent(content::ProcessType process_type,
-                     const base::FilePath& module_path,
+                     base::FilePath module_path,
                      uint32_t module_size,
                      uint32_t module_time_date_stamp) {
     ++module_event_count_;

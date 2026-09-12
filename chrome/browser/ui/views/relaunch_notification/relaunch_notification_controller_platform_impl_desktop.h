@@ -6,17 +6,21 @@
 #define CHROME_BROWSER_UI_VIEWS_RELAUNCH_NOTIFICATION_RELAUNCH_NOTIFICATION_CONTROLLER_PLATFORM_IMPL_DESKTOP_H_
 
 #include "base/functional/callback.h"
-#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/time/time.h"
-#include "chrome/browser/ui/browser_list_observer.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
 #include "ui/views/widget/widget_observer.h"
+
+class GlobalBrowserCollection;
 
 namespace views {
 class Widget;
 }
 
-class RelaunchNotificationControllerPlatformImpl : public views::WidgetObserver,
-                                                   public BrowserListObserver {
+class RelaunchNotificationControllerPlatformImpl
+    : public views::WidgetObserver,
+      public BrowserCollectionObserver {
  public:
   RelaunchNotificationControllerPlatformImpl();
 
@@ -34,7 +38,10 @@ class RelaunchNotificationControllerPlatformImpl : public views::WidgetObserver,
   // browser. window if it is not already open.  |on_visible| is run when the
   // notification is potentially seen to push the deadline back if the remaining
   // time is less than the grace period.
+  // If |is_notification_style_ap_required| the relaunch required notification
+  // is shown with Advanced Protection string and icon.
   void NotifyRelaunchRequired(base::Time deadline,
+                              bool is_notification_style_ap_required,
                               base::OnceCallback<base::Time()> on_visible);
 
   // Closes the bubble or dialog if either is still open.
@@ -53,19 +60,20 @@ class RelaunchNotificationControllerPlatformImpl : public views::WidgetObserver,
   // views::WidgetObserver:
   void OnWidgetDestroying(views::Widget* widget) override;
 
-  // BrowserListObserver:
-  void OnBrowserSetLastActive(Browser* browser) override;
+  // BrowserCollectionObserver:
+  void OnBrowserActivated(BrowserWindowInterface* browser) override;
 
  private:
   // Shows the notification in |browser| for a relaunch that will take place
-  // at |deadline|.
-  void ShowRequiredNotification(Browser* browser, base::Time deadline);
+  // at |deadline|. If |is_notification_style_ap_required| the relaunch required
+  // notification is shown with Advanced Protection string and icon.
+  void ShowRequiredNotification(BrowserWindowInterface* browser,
+                                base::Time deadline,
+                                bool is_notification_style_ap_required);
 
-  // The widget hosting the bubble or dialog, or nullptr if neither is is
+  // The widget hosting the bubble or dialog, or nullptr if neither is
   // currently shown.
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION views::Widget* widget_ = nullptr;
+  raw_ptr<views::Widget> widget_ = nullptr;
 
   // A callback run when the relaunch required notification first becomes
   // visible to the user. This callback is valid only while the instance is
@@ -74,9 +82,14 @@ class RelaunchNotificationControllerPlatformImpl : public views::WidgetObserver,
 
   // A boolean to record if the relaunch notification has been shown or not.
   bool has_shown_ = false;
+  // The relaunch notification style should be required for Advanced Protection.
+  bool is_notification_style_ap_required_ = false;
 
   // The last relaunch deadline if the relaunch notification has_shown_.
   base::Time last_relaunch_deadline_;
+
+  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
+      browser_collection_observation_{this};
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_RELAUNCH_NOTIFICATION_RELAUNCH_NOTIFICATION_CONTROLLER_PLATFORM_IMPL_DESKTOP_H_

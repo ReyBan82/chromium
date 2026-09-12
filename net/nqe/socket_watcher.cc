@@ -15,10 +15,10 @@ namespace net::nqe::internal {
 
 namespace {
 
-// Generate a compact representation for |ip_addr|. For IPv4, all 32 bits
+// Generate a compact representation for `ip_addr`. For IPv4, all 32 bits
 // are used and for IPv6, the first 64 bits are used as the remote host
 // identifier.
-absl::optional<IPHash> CalculateIPHash(const IPAddress& ip_addr) {
+std::optional<IPHash> CalculateIPHash(const IPAddress& ip_addr) {
   IPAddressBytes bytes = ip_addr.bytes();
 
   // For IPv4, the first four bytes are taken. For IPv6, the first 8 bytes are
@@ -57,6 +57,7 @@ SocketWatcher::SocketWatcher(
       updated_rtt_observation_callback_(updated_rtt_observation_callback),
       should_notify_rtt_callback_(should_notify_rtt_callback),
       rtt_notifications_minimum_interval_(min_notification_interval),
+      allow_rtt_private_address_(allow_rtt_private_address),
       run_rtt_callback_(allow_rtt_private_address ||
                         address.IsPubliclyRoutable()),
       tick_clock_(tick_clock),
@@ -83,11 +84,11 @@ bool SocketWatcher::ShouldNotifyUpdatedRTT() const {
   }
 
   // Do not allow incoming notifications if the last notification was more
-  // recent than |rtt_notifications_minimum_interval_| ago. This helps in
+  // recent than `rtt_notifications_minimum_interval_` ago. This helps in
   // reducing the overhead of obtaining the RTT values.
   // Enables a socket watcher to send RTT observation, helps in reducing
   // starvation by allowing every socket watcher to notify at least one RTT
-  // notification every |rtt_notifications_minimum_interval_| duration.
+  // notification every `rtt_notifications_minimum_interval_` duration.
   return now - last_rtt_notification_ >= rtt_notifications_minimum_interval_;
 }
 
@@ -97,8 +98,11 @@ void SocketWatcher::OnUpdatedRTTAvailable(const base::TimeDelta& rtt) {
   // tcp_socket_posix may sometimes report RTT as 1 microsecond when the RTT was
   // actually invalid. See:
   // https://cs.chromium.org/chromium/src/net/socket/tcp_socket_posix.cc?rcl=7ad660e34f2a996e381a85b2a515263003b0c171&l=106.
-  if (rtt <= base::Microseconds(1))
+  // Connections to private address eg localhost because they typically have
+  // small rtt.
+  if (!allow_rtt_private_address_ && rtt <= base::Microseconds(1)) {
     return;
+  }
 
   if (!first_quic_rtt_notification_received_ &&
       protocol_ == SocketPerformanceWatcherFactory::PROTOCOL_QUIC) {

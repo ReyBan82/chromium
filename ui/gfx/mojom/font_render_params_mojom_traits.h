@@ -29,30 +29,23 @@ struct EnumTraits<gfx::mojom::SubpixelRendering,
         return gfx::mojom::SubpixelRendering::kVBGR;
     }
     NOTREACHED();
-    return gfx::mojom::SubpixelRendering::kNone;
   }
 
-  static bool FromMojom(gfx::mojom::SubpixelRendering input,
-                        gfx::FontRenderParams::SubpixelRendering* out) {
+  static gfx::FontRenderParams::SubpixelRendering FromMojom(
+      gfx::mojom::SubpixelRendering input) {
     switch (input) {
       case gfx::mojom::SubpixelRendering::kNone:
-        *out = gfx::FontRenderParams::SUBPIXEL_RENDERING_NONE;
-        return true;
+        return gfx::FontRenderParams::SUBPIXEL_RENDERING_NONE;
       case gfx::mojom::SubpixelRendering::kRGB:
-        *out = gfx::FontRenderParams::SUBPIXEL_RENDERING_RGB;
-        return true;
+        return gfx::FontRenderParams::SUBPIXEL_RENDERING_RGB;
       case gfx::mojom::SubpixelRendering::kBGR:
-        *out = gfx::FontRenderParams::SUBPIXEL_RENDERING_BGR;
-        return true;
+        return gfx::FontRenderParams::SUBPIXEL_RENDERING_BGR;
       case gfx::mojom::SubpixelRendering::kVRGB:
-        *out = gfx::FontRenderParams::SUBPIXEL_RENDERING_VRGB;
-        return true;
+        return gfx::FontRenderParams::SUBPIXEL_RENDERING_VRGB;
       case gfx::mojom::SubpixelRendering::kVBGR:
-        *out = gfx::FontRenderParams::SUBPIXEL_RENDERING_VBGR;
-        return true;
+        return gfx::FontRenderParams::SUBPIXEL_RENDERING_VBGR;
     }
-    *out = gfx::FontRenderParams::SUBPIXEL_RENDERING_NONE;
-    return false;
+    NOTREACHED();
   }
 };
 
@@ -70,27 +63,20 @@ struct EnumTraits<gfx::mojom::Hinting, gfx::FontRenderParams::Hinting> {
         return gfx::mojom::Hinting::kFull;
     }
     NOTREACHED();
-    return gfx::mojom::Hinting::kNone;
   }
 
-  static bool FromMojom(gfx::mojom::Hinting input,
-                        gfx::FontRenderParams::Hinting* out) {
+  static gfx::FontRenderParams::Hinting FromMojom(gfx::mojom::Hinting input) {
     switch (input) {
       case gfx::mojom::Hinting::kNone:
-        *out = gfx::FontRenderParams::HINTING_NONE;
-        return true;
+        return gfx::FontRenderParams::HINTING_NONE;
       case gfx::mojom::Hinting::kSlight:
-        *out = gfx::FontRenderParams::HINTING_SLIGHT;
-        return true;
+        return gfx::FontRenderParams::HINTING_SLIGHT;
       case gfx::mojom::Hinting::kMedium:
-        *out = gfx::FontRenderParams::HINTING_MEDIUM;
-        return true;
+        return gfx::FontRenderParams::HINTING_MEDIUM;
       case gfx::mojom::Hinting::kFull:
-        *out = gfx::FontRenderParams::HINTING_FULL;
-        return true;
+        return gfx::FontRenderParams::HINTING_FULL;
     }
     NOTREACHED();
-    return false;
   }
 };
 

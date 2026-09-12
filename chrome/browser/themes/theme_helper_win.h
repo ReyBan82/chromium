@@ -12,7 +12,7 @@ class ThemeHelperWin : public ThemeHelper {
   ThemeHelperWin() = default;
   ~ThemeHelperWin() override = default;
 
-  // ThemeService:
+  // ThemeHelper:
   bool ShouldUseNativeFrame(
       const CustomThemeSupplier* theme_supplier) const override;
 };

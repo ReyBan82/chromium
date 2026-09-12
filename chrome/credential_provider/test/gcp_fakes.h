@@ -5,10 +5,12 @@
 #ifndef CHROME_CREDENTIAL_PROVIDER_TEST_GCP_FAKES_H_
 #define CHROME_CREDENTIAL_PROVIDER_TEST_GCP_FAKES_H_
 
+#include <condition_variable>
 #include <deque>
 #include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -30,6 +32,7 @@
 #include "chrome/credential_provider/gaiacp/event_logs_upload_manager.h"
 #include "chrome/credential_provider/gaiacp/gem_device_details_manager.h"
 #include "chrome/credential_provider/gaiacp/internet_availability_checker.h"
+#include "chrome/credential_provider/gaiacp/os_device_manager.h"
 #include "chrome/credential_provider/gaiacp/os_process_manager.h"
 #include "chrome/credential_provider/gaiacp/os_user_manager.h"
 #include "chrome/credential_provider/gaiacp/password_recovery_manager.h"
@@ -39,6 +42,8 @@
 #include "chrome/credential_provider/gaiacp/user_policies_manager.h"
 #include "chrome/credential_provider/gaiacp/win_http_url_fetcher.h"
 #include "chrome/credential_provider/setup/gcpw_files.h"
+
+class GaiaId;
 
 namespace base {
 class WaitableEvent;
@@ -76,6 +81,28 @@ class FakeOSProcessManager : public OSProcessManager {
  private:
   raw_ptr<OSProcessManager> original_manager_;
   DWORD next_rid_ = 0;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
+class FakeOSDeviceManager : public OSDeviceManager {
+ public:
+  FakeOSDeviceManager();
+  ~FakeOSDeviceManager() override;
+
+  // OSDeviceManager
+  base::win::ScopedHandle OpenDevice(const std::wstring& device_path) override;
+  uint16_t GetUsagePage(HANDLE device_handle) override;
+
+  void SetExpectedDevicePath(const std::wstring& device_path);
+  void SetOpenDeviceResult(base::win::ScopedHandle handle);
+  void SetUsagePage(uint16_t usage_page);
+
+ private:
+  raw_ptr<OSDeviceManager> original_manager_;
+  std::wstring expected_device_path_;
+  base::win::ScopedHandle open_device_result_;
+  uint16_t usage_page_ = 0;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -122,9 +149,11 @@ class FakeOSUserManager : public OSUserManager {
                            const wchar_t* password,
                            bool interactive,
                            base::win::ScopedHandle* token) override;
+
   HRESULT GetUserSID(const wchar_t* domain,
                      const wchar_t* username,
                      PSID* sid) override;
+
   HRESULT FindUserBySID(const wchar_t* sid,
                         wchar_t* username,
                         DWORD username_size,
@@ -183,7 +212,7 @@ class FakeOSUserManager : public OSUserManager {
                            const std::wstring& password,
                            const std::wstring& fullname,
                            const std::wstring& comment,
-                           const std::wstring& gaia_id,
+                           const GaiaId& gaia_id,
                            const std::wstring& email,
                            BSTR* sid);
 
@@ -196,7 +225,7 @@ class FakeOSUserManager : public OSUserManager {
                            const std::wstring& password,
                            const std::wstring& fullname,
                            const std::wstring& comment,
-                           const std::wstring& gaia_id,
+                           const GaiaId& gaia_id,
                            const std::wstring& email,
                            const std::wstring& domain,
                            BSTR* sid);
@@ -296,7 +325,7 @@ class FakeScopedUserProfileFactory {
 
 class FakeScopedUserProfile : public ScopedUserProfile {
  public:
-  HRESULT SaveAccountInfo(const base::Value& properties) override;
+  HRESULT SaveAccountInfo(const base::DictValue& properties) override;
 
  private:
   friend class FakeScopedUserProfileFactory;

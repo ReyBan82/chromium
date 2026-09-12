@@ -8,8 +8,7 @@
 
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 namespace {
 
@@ -104,10 +103,9 @@ void NotificationManager::RemoveNotificationsInternal(
 }
 
 void NotificationManager::ClearNotificationsInternal() {
-  base::flat_set<int64_t> removed_ids;
-  for (const auto& pair : id_to_notification_map_) {
-    removed_ids.emplace(pair.first);
-  }
+  auto removed_ids =
+      base::MakeFlatSet<int64_t>(id_to_notification_map_, /*comp=*/{},
+                                 [&](const auto& pair) { return pair.first; });
 
   if (!removed_ids.empty()) {
     id_to_notification_map_.clear();
@@ -123,5 +121,4 @@ const Notification* NotificationManager::GetNotification(
   return &it->second;
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

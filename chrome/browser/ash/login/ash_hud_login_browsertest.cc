@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
+
 #include "ash/constants/ash_switches.h"
 #include "ash/hud_display/ash_tracing_handler.h"
 #include "ash/hud_display/ash_tracing_request.h"
@@ -12,6 +14,11 @@
 #include "ash/public/cpp/test/shell_test_api.h"
 #include "ash/shell.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
+#include "base/notimplemented.h"
 #include "base/rand_util.h"
 #include "base/strings/string_util.h"
 #include "base/synchronization/lock.h"
@@ -19,8 +26,7 @@
 #include "chrome/browser/ash/login/login_manager_test.h"
 #include "chrome/browser/ash/login/test/login_manager_mixin.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
-#include "chrome/browser/ui/ash/chrome_shell_delegate.h"
-#include "chrome/common/chrome_switches.h"
+#include "chrome/browser/ui/ash/shell_delegate/chrome_shell_delegate.h"
 #include "content/public/test/browser_test.h"
 #include "third_party/perfetto/include/perfetto/tracing/tracing.h"
 
@@ -151,7 +157,7 @@ class TestAshTraceDestinationIO : public hud_display::AshTraceDestinationIO {
   int fstat(base::PlatformFile fd, struct stat* statbuf) override {
     LOG(INFO) << "TestAshTraceDestinationIO::fstat(): Called.";
     AssertRegistry();
-    memset(statbuf, 0, sizeof(struct stat));
+    std::ranges::fill(base::byte_span_from_ref(*statbuf), 0);
     return CanWriteFile(fd) ? 0 : -1;
   }
 
@@ -176,10 +182,12 @@ class TestAshTraceDestinationIO : public hud_display::AshTraceDestinationIO {
     CHECK_EQ(test_ash_trace_destination_io_registry->id(), registry_id_);
   }
 
-  const TestAshTraceDestinationIORegistry* registry_;
+  raw_ptr<const TestAshTraceDestinationIORegistry, LeakedDanglingUntriaged>
+      registry_;
   const uint64_t registry_id_;
 
-  TestAshTraceDestinationIORegistry::IOStatus* status_;
+  raw_ptr<TestAshTraceDestinationIORegistry::IOStatus, LeakedDanglingUntriaged>
+      status_;
 };
 
 // Keeps track of all test TracingSession objects.
@@ -324,13 +332,13 @@ class TestTracingSession : public perfetto::TracingSession {
     CHECK_EQ(test_tracing_session_registry->id(), registry_id_);
   }
 
-  const TestTracingSessionRegistry* registry_;
+  raw_ptr<const TestTracingSessionRegistry> registry_;
   const uint64_t registry_id_;
 
   std::function<void()> on_start_callback_;  // nocheck
   std::function<void()> on_stop_callback_;   // nocheck
 
-  TestTracingSessionRegistry::SessionStatus* status_;
+  raw_ptr<TestTracingSessionRegistry::SessionStatus> status_;
 };
 
 // Generates TraceDestination on the ThreadPool (IO-enabled sequence runner)
@@ -380,23 +388,25 @@ class TestAshTracingManagerObserver
       : manager_(manager) {}
 
   void Wait(Condition condition) {
-    if (condition.Run(manager_))
+    if (condition.Run(*manager_)) {
       return;
+    }
 
     condition_ = condition;
-    manager_.AddObserver(this);
+    manager_->AddObserver(this);
     run_loop_ = std::make_unique<base::RunLoop>();
     run_loop_->Run();
-    manager_.RemoveObserver(this);
+    manager_->RemoveObserver(this);
   }
 
   void OnTracingStatusChange() override {
-    if (condition_.Run(manager_))
+    if (condition_.Run(*manager_)) {
       run_loop_->Quit();
+    }
   }
 
  private:
-  hud_display::AshTracingManager& manager_;
+  const raw_ref<hud_display::AshTracingManager> manager_;
   Condition condition_;
 
   std::unique_ptr<base::RunLoop> run_loop_;

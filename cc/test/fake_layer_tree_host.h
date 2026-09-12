@@ -11,7 +11,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "cc/benchmarks/micro_benchmark_controller.h"
 #include "cc/test/fake_impl_task_runner_provider.h"
-#include "cc/test/fake_layer_tree_host_client.h"
+#include "cc/test/fake_layer_tree_host_delegate.h"
 #include "cc/test/fake_layer_tree_host_impl.h"
 #include "cc/trees/layer_tree_host.h"
 #include "cc/trees/layer_tree_impl.h"
@@ -41,22 +41,22 @@ class FakeLayerTreeHost : private TaskRunnerProviderHolder,
                           public LayerTreeHost {
  public:
   static std::unique_ptr<FakeLayerTreeHost> Create(
-      FakeLayerTreeHostClient* client,
+      FakeLayerTreeHostDelegate* client,
       TestTaskGraphRunner* task_graph_runner,
       MutatorHost* mutator_host);
   static std::unique_ptr<FakeLayerTreeHost> Create(
-      FakeLayerTreeHostClient* client,
+      FakeLayerTreeHostDelegate* client,
       TestTaskGraphRunner* task_graph_runner,
       MutatorHost* mutator_host,
       const LayerTreeSettings& settings);
   static std::unique_ptr<FakeLayerTreeHost> Create(
-      FakeLayerTreeHostClient* client,
+      FakeLayerTreeHostDelegate* client,
       TestTaskGraphRunner* task_graph_runner,
       MutatorHost* mutator_host,
       const LayerTreeSettings& settings,
       CompositorMode mode);
   static std::unique_ptr<FakeLayerTreeHost> Create(
-      FakeLayerTreeHostClient* client,
+      FakeLayerTreeHostDelegate* client,
       TestTaskGraphRunner* task_graph_runner,
       MutatorHost* mutator_host,
       const LayerTreeSettings& settings,
@@ -64,11 +64,12 @@ class FakeLayerTreeHost : private TaskRunnerProviderHolder,
       InitParams params);
   ~FakeLayerTreeHost() override;
 
-  void SetNeedsCommit() override;
+  void SetNeedsCommit(bool urgent) override;
   void SetNeedsUpdateLayers() override {}
+  void ClearPendingLayerCommitStates();
 
-  std::unique_ptr<LayerTreeHostImpl> CreateLayerTreeHostImplInternal(
-      LayerTreeHostImplClient* client,
+  std::unique_ptr<ClientLayerTreeHostImpl> CreateLayerTreeHostImplInternal(
+      LayerTreeHostImplDelegate* delegate,
       MutatorHost* mutator_host,
       const LayerTreeSettings& settings,
       TaskRunnerProvider* task_runner_provider,
@@ -76,9 +77,8 @@ class FakeLayerTreeHost : private TaskRunnerProviderHolder,
       int id,
       raw_ptr<TaskGraphRunner>& task_graph_runner,
       scoped_refptr<base::SequencedTaskRunner> image_worker_task_runner,
-      LayerTreeHostSchedulingClient* scheduling_client,
+      LayerTreeHostSchedulingDelegate* scheduling_delegate,
       RenderingStatsInstrumentation* rendering_stats_instrumentation,
-      std::unique_ptr<UkmRecorderFactory>& ukm_recorder_factory,
       base::WeakPtr<CompositorDelegateForInput>& compositor_delegate_weak_ptr)
       override;
 
@@ -95,8 +95,9 @@ class FakeLayerTreeHost : private TaskRunnerProviderHolder,
     return thread_unsafe_commit_state();
   }
 
-  LayerImpl* CommitAndCreateLayerImplTree();
-  LayerImpl* CommitAndCreatePendingTree();
+  LayerImpl* CommitToActiveTree();
+  LayerImpl* CommitToPendingTree();
+  LayerImpl* CommitToTree(LayerTreeImpl* tree);
 
   FakeLayerTreeHostImpl* host_impl() { return host_impl_; }
   LayerTreeImpl* active_tree() {
@@ -123,7 +124,7 @@ class FakeLayerTreeHost : private TaskRunnerProviderHolder,
   bool needs_commit() { return needs_commit_; }
   void reset_needs_commit() { needs_commit_ = false; }
 
-  FakeLayerTreeHost(FakeLayerTreeHostClient* client,
+  FakeLayerTreeHost(FakeLayerTreeHostDelegate* client,
                     LayerTreeHost::InitParams params,
                     CompositorMode mode);
 
@@ -137,7 +138,7 @@ class FakeLayerTreeHost : private TaskRunnerProviderHolder,
   // pointer as that'll always be set to the correct object.
   std::unique_ptr<FakeLayerTreeHostImpl> owned_host_impl_;
 
-  raw_ptr<FakeLayerTreeHostClient> client_ = nullptr;
+  raw_ptr<FakeLayerTreeHostDelegate> client_ = nullptr;
   raw_ptr<FakeLayerTreeHostImpl> host_impl_ = nullptr;
 
   bool needs_commit_ = false;

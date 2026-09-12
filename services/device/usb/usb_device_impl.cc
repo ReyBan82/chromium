@@ -9,6 +9,7 @@
 
 #include <algorithm>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/posix/eintr_wrapper.h"
@@ -77,8 +78,12 @@ void UsbDeviceImpl::ReadAllConfigurations() {
         continue;
       }
 
+      // SAFETY: `buffer` and `rv` are values returned by an external C function
+      // in `//third_party/libusb`, i.e. `libusb_get_raw_config_descriptor`. On
+      // success (`rv > 0`), it guarantees that buffer points to a dynamically
+      // allocated memory block of `rv` bytes.
       if (!usb_descriptor.Parse(
-              base::make_span(buffer, static_cast<size_t>(rv)))) {
+              UNSAFE_BUFFERS(base::span(buffer, static_cast<size_t>(rv))))) {
         USB_LOG(EVENT) << "Config descriptor index " << i << " was corrupt.";
       }
       free(buffer);
@@ -115,8 +120,8 @@ void UsbDeviceImpl::OpenOnBlockingThread(
   libusb_device_handle* handle = nullptr;
   const int rv = libusb_open(platform_device(), &handle);
   if (LIBUSB_SUCCESS == rv) {
-    ScopedLibusbDeviceHandle scoped_handle(handle,
-                                           platform_device_.GetContext());
+    ScopedLibusbDeviceHandle scoped_handle(
+        handle, platform_device_.GetContext(), platform_device_);
     task_runner->PostTask(
         FROM_HERE,
         base::BindOnce(&UsbDeviceImpl::Opened, this, std::move(scoped_handle),

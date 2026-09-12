@@ -8,8 +8,8 @@
 
 #include "base/check.h"
 #include "base/memory/ptr_util.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/time/default_tick_clock.h"
+#include "base/time/time.h"
 #include "components/blocked_content/popup_opener_tab_helper.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/web_contents.h"
@@ -55,38 +55,24 @@ PopupTracker::PopupTracker(content::WebContents* contents,
   if (auto* popup_opener = PopupOpenerTabHelper::FromWebContents(opener))
     popup_opener->OnOpenedPopup(this);
 
-  auto* observation_manager =
+  // A popup tracker may be constructed before `contents` has been added to its
+  // owning tab strip, and as such tab helpers for `contents` may not yet have
+  // been initialized. Explicitly instantiate SubresourceFilterObserverManager
+  // if necessary for `contents` if necessary to ensure the popup registers the
+  // observation.
+  subresource_filter::SubresourceFilterObserverManager::CreateForWebContents(
+      contents);
+  scoped_observation_.Observe(
       subresource_filter::SubresourceFilterObserverManager::FromWebContents(
-          contents);
-  if (observation_manager) {
-    scoped_observation_.Observe(observation_manager);
-  }
+          contents));
 }
 
 void PopupTracker::WebContentsDestroyed() {
   base::TimeDelta total_foreground_duration =
       visibility_tracker_.GetForegroundDuration();
-  if (first_load_visible_time_start_) {
-    base::TimeDelta first_load_visible_time =
-        first_load_visible_time_
-            ? *first_load_visible_time_
-            : total_foreground_duration - *first_load_visible_time_start_;
-    UMA_HISTOGRAM_LONG_TIMES(
-        "ContentSettings.Popups.FirstDocumentEngagementTime2",
-        first_load_visible_time);
-  }
-  UMA_HISTOGRAM_CUSTOM_TIMES("ContentSettings.Popups.EngagementTime",
-                             total_foreground_duration, base::Milliseconds(1),
-                             base::Hours(6), 50);
-  if (web_contents()->GetClosedByUserGesture()) {
-    UMA_HISTOGRAM_CUSTOM_TIMES(
-        "ContentSettings.Popups.EngagementTime.GestureClose",
-        total_foreground_duration, base::Milliseconds(1), base::Hours(6), 50);
-  }
-
   if (opener_source_id_ != ukm::kInvalidSourceId) {
     const int kMaxInteractions = 100;
-    const int kMaxSubcatagoryInteractions = 50;
+    const int kMaxSubcategoryInteractions = 50;
     ukm::builders::Popup_Closed(opener_source_id_)
         .SetEngagementTime(ukm::GetExponentialBucketMinForUserTiming(
             total_foreground_duration.InMilliseconds()))
@@ -97,9 +83,9 @@ void PopupTracker::WebContentsDestroyed() {
         .SetNumInteractions(
             CappedUserInteractions(num_interactions_, kMaxInteractions))
         .SetNumActivationInteractions(CappedUserInteractions(
-            num_activation_events_, kMaxSubcatagoryInteractions))
+            num_activation_events_, kMaxSubcategoryInteractions))
         .SetNumGestureScrollBeginInteractions(CappedUserInteractions(
-            num_gesture_scroll_begin_events_, kMaxSubcatagoryInteractions))
+            num_gesture_scroll_begin_events_, kMaxSubcategoryInteractions))
         .SetRedirectCount(num_redirects_)
         .Record(ukm::UkmRecorder::Get());
   }

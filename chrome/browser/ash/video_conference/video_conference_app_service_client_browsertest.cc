@@ -4,16 +4,20 @@
 
 #include "chrome/browser/ash/video_conference/video_conference_app_service_client.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <utility>
 #include <vector>
 
 #include "ash/constants/ash_features.h"
+#include "ash/constants/ash_switches.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "ash/system/video_conference/fake_video_conference_tray_controller.h"
-#include "ash/system/video_conference/video_conference_media_state.h"
+#include "ash/system/video_conference/video_conference_common.h"
 #include "ash/test/test_window_builder.h"
+#include "base/command_line.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
@@ -23,27 +27,28 @@
 #include "base/unguessable_token.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_ash.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
-#include "chrome/browser/ash/crosapi/crosapi_ash.h"
-#include "chrome/browser/ash/crosapi/crosapi_manager.h"
 #include "chrome/browser/ash/video_conference/video_conference_manager_ash.h"
 #include "chrome/browser/chromeos/video_conference/video_conference_manager_client_common.h"
+#include "chrome/browser/chromeos/video_conference/video_conference_ukm_helper.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
-#include "chromeos/crosapi/mojom/video_conference.mojom.h"
 #include "components/services/app_service/public/cpp/app_capability_access_cache_wrapper.h"
-#include "components/services/app_service/public/cpp/app_registry_cache.h"
 #include "components/services/app_service/public/cpp/app_types.h"
 #include "components/services/app_service/public/cpp/capability_access_update.h"
 #include "components/services/app_service/public/cpp/instance_registry.h"
+#include "components/ukm/test_ukm_recorder.h"
 #include "components/user_manager/user_manager.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
+#include "services/metrics/public/cpp/ukm_builders.h"
+#include "services/metrics/public/cpp/ukm_source_id.h"
+#include "testing/gmock/include/gmock/gmock.h"
 
 namespace ash {
 namespace {
 
 using AppIdString = std::string;
+using UkmEntry = ukm::builders::VideoConferencingEvent;
 
 constexpr char kAppId1[] = "random_app_id_1";
 constexpr char kAppName1[] = "random_app_name_1";
@@ -62,20 +67,41 @@ apps::AppPtr MakeApp(const AppIdString& app_id,
   if (app_id == kAppId2) {
     app->name = kAppName2;
   }
-  if (base::Contains(::video_conference::kSkipAppIds, app_id)) {
+  if (std::ranges::contains(::video_conference::kSkipAppIds, app_id)) {
     app->name = base::StrCat({"AppName-", app_id});
   }
 
-  app->publisher_id = app_id;
+  app->publisher_id = base::StrCat({"PublisherId-", app_id});
+
+  // Set camera_permission_value as apps::TriState (kAsk only for Arc++) for
+  // better coverage.
+  apps::TriState camera_permission_state =
+      !has_camera_permission            ? apps::TriState::kBlock
+      : app_type == apps::AppType::kArc ? apps::TriState::kAsk
+                                        : apps::TriState::kAllow;
 
   app->permissions.push_back(std::make_unique<apps::Permission>(
-      apps::PermissionType::kCamera,
-      std::make_unique<apps::PermissionValue>(has_camera_permission),
+      apps::PermissionType::kCamera, camera_permission_state,
       /*is_managed=*/false));
   app->permissions.push_back(std::make_unique<apps::Permission>(
-      apps::PermissionType::kMicrophone,
-      std::make_unique<apps::PermissionValue>(has_microphone_permission),
+      apps::PermissionType::kMicrophone, has_microphone_permission,
       /*is_managed=*/false));
+  return app;
+}
+
+VideoConferenceMediaAppInfo MakeMediaAppInfo(const base::UnguessableToken& id,
+                                             base::Time last_activity_time,
+                                             bool is_capturing_camera,
+                                             bool is_capturing_microphone,
+                                             const std::u16string& title,
+                                             VideoConferenceAppType app_type) {
+  VideoConferenceMediaAppInfo app;
+  app.id = id;
+  app.last_activity_time = last_activity_time;
+  app.is_capturing_camera = is_capturing_camera;
+  app.is_capturing_microphone = is_capturing_microphone;
+  app.title = title;
+  app.app_type = app_type;
   return app;
 }
 
@@ -110,7 +136,7 @@ class FakeAppInstance {
     // Ideally, the following should be automatically triggered by showing the
     // window_; but that is not the case for now.
     auto instance = instance_->Clone();
-    instance->UpdateState(apps::InstanceState::kVisible, base::Time::Now());
+    instance->UpdateState(apps::InstanceState::kActive, base::Time::Now());
     instance_registry_->OnInstance(std::move(instance));
   }
 
@@ -126,26 +152,35 @@ class FakeAppInstance {
  private:
   std::unique_ptr<aura::Window> window_;
   std::unique_ptr<apps::Instance> instance_;
-  base::raw_ptr<apps::InstanceRegistry> instance_registry_;
+  raw_ptr<apps::InstanceRegistry> instance_registry_;
 };
 
 }  // namespace
 
 class VideoConferenceAppServiceClientTest : public InProcessBrowserTest {
  public:
+  using AppState = VideoConferenceAppServiceClient::AppState;
+  using VideoConferencePermissions =
+      VideoConferenceAppServiceClient::VideoConferencePermissions;
+
+  void SetUp() override {
+    scoped_feature_list_.InitAndEnableFeature(
+        ash::features::kFeatureManagementVideoConference);
+
+    InProcessBrowserTest::SetUp();
+  }
+
   void SetUpOnMainThread() override {
     InProcessBrowserTest::SetUpOnMainThread();
 
     client_ = VideoConferenceAppServiceClient::GetForTesting();
-    // This is not triggered automatically.
-    client_->OnSessionStateChanged(
-        Shell::Get()->session_controller()->GetSessionState());
+
+    test_ukm_recorder_ = std::make_unique<ukm::TestUkmRecorder>();
+    client_->test_ukm_recorder_ = test_ukm_recorder_.get();
 
     Profile* profile = ProfileManager::GetActiveUserProfile();
-    instance_registry_ = &apps::AppServiceProxyFactory::GetForProfile(profile)
-                              ->InstanceRegistry();
-    app_registry_cache_ = &apps::AppServiceProxyFactory::GetForProfile(profile)
-                               ->AppRegistryCache();
+    app_service_proxy_ = apps::AppServiceProxyFactory::GetForProfile(profile);
+    instance_registry_ = &app_service_proxy_->InstanceRegistry();
     capability_cache_ =
         apps::AppCapabilityAccessCacheWrapper::Get()
             .GetAppCapabilityAccessCache(user_manager::UserManager::Get()
@@ -160,8 +195,8 @@ class VideoConferenceAppServiceClientTest : public InProcessBrowserTest {
     std::vector<apps::AppPtr> deltas;
     deltas.push_back(MakeApp(app_id, /*has_camera_permission=*/false,
                              /*has_microphone_permission=*/false, app_type));
-    app_registry_cache_->OnApps(std::move(deltas), apps::AppType::kUnknown,
-                                /*should_notify_initialized=*/false);
+    app_service_proxy_->OnApps(std::move(deltas), apps::AppType::kUnknown,
+                               /*should_notify_initialized=*/false);
   }
 
   // Update the permission of current `app_id`.
@@ -170,9 +205,9 @@ class VideoConferenceAppServiceClientTest : public InProcessBrowserTest {
                           bool has_microphone_permission) {
     std::vector<apps::AppPtr> deltas;
     deltas.push_back(MakeApp(app_id, has_camera_permission,
-                             has_microphone_permission, GetAppType(app_id)));
-    app_registry_cache_->OnApps(std::move(deltas), apps::AppType::kUnknown,
-                                /*should_notify_initialized=*/false);
+                             has_microphone_permission, apps::AppType::kArc));
+    app_service_proxy_->OnApps(std::move(deltas), apps::AppType::kUnknown,
+                               /*should_notify_initialized=*/false);
   }
 
   // Set the camera/michrophone accessing info for app with `app_id`.
@@ -190,8 +225,7 @@ class VideoConferenceAppServiceClientTest : public InProcessBrowserTest {
   }
 
   // Adds {id, state} pair to client_->id_to_app_state_.
-  void AddAppState(const AppIdString& app_id,
-                   const VideoConferenceAppServiceClient::AppState& state) {
+  void AddAppState(const AppIdString& app_id, const AppState& state) {
     (client_->id_to_app_state_)[app_id] = state;
   }
 
@@ -208,33 +242,26 @@ class VideoConferenceAppServiceClientTest : public InProcessBrowserTest {
     return client_->GetAppPermission(app_id);
   }
 
-  std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> GetMediaApps() {
-    std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> media_app_info;
-
-    client_->GetMediaApps(base::BindLambdaForTesting(
-        [&media_app_info](
-            std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr>
-                result) { media_app_info = std::move(result); }));
-
-    return media_app_info;
+  VideoConferenceManagerClient::MediaApps GetMediaApps() {
+    return client_->GetMediaApps();
   }
 
   // Returns current VideoConferenceMediaState in the VideoConferenceManagerAsh
   VideoConferenceMediaState GetMediaStateInVideoConferenceManagerAsh() {
-    return crosapi::CrosapiManager::Get()
-        ->crosapi_ash()
-        ->video_conference_manager_ash()
-        ->GetAggregatedState();
+    return VideoConferenceManagerAsh::Get()->GetAggregatedState();
   }
 
  protected:
-  apps::InstanceRegistry* instance_registry_ = nullptr;
-  apps::AppRegistryCache* app_registry_cache_ = nullptr;
-  apps::AppCapabilityAccessCache* capability_cache_ = nullptr;
-  VideoConferenceAppServiceClient* client_ = nullptr;
+  raw_ptr<apps::AppServiceProxy, DanglingUntriaged> app_service_proxy_ =
+      nullptr;
+  raw_ptr<apps::InstanceRegistry, DanglingUntriaged> instance_registry_ =
+      nullptr;
+  raw_ptr<apps::AppCapabilityAccessCache, DanglingUntriaged> capability_cache_ =
+      nullptr;
+  raw_ptr<VideoConferenceAppServiceClient, DanglingUntriaged> client_ = nullptr;
+  std::unique_ptr<ukm::TestUkmRecorder> test_ukm_recorder_;
 
-  base::test::ScopedFeatureList scoped_feature_list_{
-      ash::features::kVideoConference};
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, GetAppName) {
@@ -260,8 +287,7 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, GetAppType) {
 IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, GetAppPermission) {
   InstallApp(kAppId1);
 
-  VideoConferenceAppServiceClient::VideoConferencePermissions permission =
-      GetAppPermission(kAppId1);
+  VideoConferencePermissions permission = GetAppPermission(kAppId1);
   EXPECT_FALSE(permission.has_camera_permission);
   EXPECT_FALSE(permission.has_microphone_permission);
 
@@ -293,18 +319,15 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, GetAppPermission) {
 IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, GetMediaApps) {
   // Add {kAppId1, state1} pair to the client_.
   const base::UnguessableToken token1 = base::UnguessableToken::Create();
-  const VideoConferenceAppServiceClient::AppState state1{
-      token1, base::Time::Now(), true, true};
+  const AppState state1{token1, base::Time::Now(), true, true};
   AddAppState(kAppId1, state1);
 
   // Add {kAppId2, state2} pair to the client_.
   const base::UnguessableToken token2 = base::UnguessableToken::Create();
-  const VideoConferenceAppServiceClient::AppState state2{
-      token2, base::Time::Now(), true, false};
+  const AppState state2{token2, base::Time::Now(), true, false};
   AddAppState(kAppId2, state2);
 
-  std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> media_app_info =
-      GetMediaApps();
+  VideoConferenceManagerClient::MediaApps media_app_info = GetMediaApps();
 
   // GetMediaApps will not return anything because unrecognized apps will be
   // skipped.
@@ -316,17 +339,15 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, GetMediaApps) {
   media_app_info = GetMediaApps();
   ASSERT_EQ(media_app_info.size(), 1u);
 
-  crosapi::mojom::VideoConferenceMediaAppInfoPtr expected_media_app_info =
-      crosapi::mojom::VideoConferenceMediaAppInfo::New(
-          /*id=*/token1,
-          /*last_activity_time=*/state1.last_activity_time,
-          /*is_capturing_camera=*/state1.is_capturing_camera,
-          /*is_capturing_microphone=*/state1.is_capturing_microphone,
-          /*is_capturing_screen=*/false,
-          /*title=*/base::UTF8ToUTF16(std::string(kAppName1)),
-          /*url=*/absl::nullopt);
+  const auto expected_media_app_info = MakeMediaAppInfo(
+      /*id=*/token1,
+      /*last_activity_time=*/state1.last_activity_time,
+      /*is_capturing_camera=*/state1.is_capturing_camera,
+      /*is_capturing_microphone=*/state1.is_capturing_microphone,
+      /*title=*/base::UTF8ToUTF16(std::string(kAppName1)),
+      /*app_type=*/VideoConferenceAppType::kArcApp);
 
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 }
 
 IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, ReturnToApp) {
@@ -346,25 +367,18 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, ReturnToApp) {
 
   // Return to token1 should not do anything since the token1 is not in the
   // client_->id_to_app_state_.
-  client_->ReturnToApp(
-      token1, base::BindLambdaForTesting([&reactivated_app](bool result) {
-        reactivated_app = result;
-      }));
+  reactivated_app = client_->ReturnToApp(token1);
 
   EXPECT_FALSE(reactivated_app);
   EXPECT_FALSE(window1->IsVisible());
   EXPECT_FALSE(window2->IsVisible());
 
   // Add pair {token1, state1} to client_->id_to_app_state_.
-  const VideoConferenceAppServiceClient::AppState state1{
-      token1, base::Time::Now(), true, true};
+  const AppState state1{token1, base::Time::Now(), true, true};
   AddAppState(kAppId1, state1);
 
   // Return to token1 should show all instances associated with kAppId1.
-  client_->ReturnToApp(
-      token1, base::BindLambdaForTesting([&reactivated_app](bool result) {
-        reactivated_app = result;
-      }));
+  reactivated_app = client_->ReturnToApp(token1);
 
   EXPECT_TRUE(reactivated_app);
   EXPECT_TRUE(window1->IsVisible());
@@ -375,44 +389,47 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, MediaCapturing) {
   // Install two apps so that they will can be tracked inside GetMediaApps.
   InstallApp(kAppId1);
   InstallApp(kAppId2);
+  FakeAppInstance instance1(instance_registry_, kAppId1);
+  instance1.Start();
+  FakeAppInstance instance2(instance_registry_, kAppId2);
+  instance2.Start();
 
   // no-camera, no-mic should not start a tracking of the app.
   SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/false,
                          /*is_capturing_microphone=*/false);
   EXPECT_TRUE(GetMediaApps().empty());
 
-  std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> media_app_info;
+  VideoConferenceManagerClient::MediaApps media_app_info;
 
   // has-camera, no-mic should start the tracking of the app.
   SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/true,
                          /*is_capturing_microphone=*/false);
   media_app_info = GetMediaApps();
-  crosapi::mojom::VideoConferenceMediaAppInfoPtr expected_media_app_info =
-      crosapi::mojom::VideoConferenceMediaAppInfo::New(
-          /*id=*/media_app_info[0]->id,
-          /*last_activity_time=*/media_app_info[0]->last_activity_time,
-          /*is_capturing_camera=*/true,
-          /*is_capturing_microphone=*/false,
-          /*is_capturing_screen=*/false,
-          /*title=*/media_app_info[0]->title, /*url=*/absl::nullopt);
+  auto expected_media_app_info = MakeMediaAppInfo(
+      /*id=*/media_app_info[0].id,
+      /*last_activity_time=*/media_app_info[0].last_activity_time,
+      /*is_capturing_camera=*/true,
+      /*is_capturing_microphone=*/false,
+      /*title=*/media_app_info[0].title,
+      /*app_type=*/VideoConferenceAppType::kArcApp);
   ASSERT_EQ(media_app_info.size(), 1u);
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 
   // has-camera, has-mic should change the value of GetMediaApps.
   SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/true,
                          /*is_capturing_microphone=*/true);
   media_app_info = GetMediaApps();
   ASSERT_EQ(media_app_info.size(), 1u);
-  expected_media_app_info->is_capturing_microphone = true;
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  expected_media_app_info.is_capturing_microphone = true;
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 
   // no-camera, has-mic should change the value of GetMediaApps.
   SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/false,
                          /*is_capturing_microphone=*/true);
   media_app_info = GetMediaApps();
   ASSERT_EQ(media_app_info.size(), 1u);
-  expected_media_app_info->is_capturing_camera = false;
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  expected_media_app_info.is_capturing_camera = false;
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 
   // no-camera, no-mic should change the value of GetMediaApps; but not removing
   // the tracking app.
@@ -420,8 +437,8 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, MediaCapturing) {
                          /*is_capturing_microphone=*/false);
   media_app_info = GetMediaApps();
   ASSERT_EQ(media_app_info.size(), 1u);
-  expected_media_app_info->is_capturing_microphone = false;
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  expected_media_app_info.is_capturing_microphone = false;
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 }
 
 IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, LastActivityTime) {
@@ -434,32 +451,31 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, LastActivityTime) {
   SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/true,
                          /*is_capturing_microphone=*/true);
 
-  std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> media_app_info;
+  VideoConferenceManagerClient::MediaApps media_app_info;
 
   media_app_info = GetMediaApps();
-  crosapi::mojom::VideoConferenceMediaAppInfoPtr expected_media_app_info =
-      crosapi::mojom::VideoConferenceMediaAppInfo::New(
-          /*id=*/media_app_info[0]->id,
-          /*last_activity_time=*/media_app_info[0]->last_activity_time,
-          /*is_capturing_camera=*/true,
-          /*is_capturing_microphone=*/true,
-          /*is_capturing_screen=*/false,
-          /*title=*/media_app_info[0]->title, /*url=*/absl::nullopt);
+  auto expected_media_app_info = MakeMediaAppInfo(
+      /*id=*/media_app_info[0].id,
+      /*last_activity_time=*/media_app_info[0].last_activity_time,
+      /*is_capturing_camera=*/true,
+      /*is_capturing_microphone=*/true,
+      /*title=*/media_app_info[0].title,
+      /*app_type=*/VideoConferenceAppType::kArcApp);
   ASSERT_EQ(media_app_info.size(), 1u);
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 
   // Hide should not update last activity time.
   instance1.Hide();
   media_app_info = GetMediaApps();
   ASSERT_EQ(media_app_info.size(), 1u);
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 
   // Show should update last activity time.
   instance1.Show();
   media_app_info = GetMediaApps();
   ASSERT_EQ(media_app_info.size(), 1u);
-  EXPECT_GT(media_app_info[0]->last_activity_time,
-            expected_media_app_info->last_activity_time);
+  EXPECT_GT(media_app_info[0].last_activity_time,
+            expected_media_app_info.last_activity_time);
 }
 
 IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, CloseApp) {
@@ -477,19 +493,18 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, CloseApp) {
   SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/true,
                          /*is_capturing_microphone=*/true);
 
-  std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> media_app_info;
+  VideoConferenceManagerClient::MediaApps media_app_info;
 
   media_app_info = GetMediaApps();
-  crosapi::mojom::VideoConferenceMediaAppInfoPtr expected_media_app_info =
-      crosapi::mojom::VideoConferenceMediaAppInfo::New(
-          /*id=*/media_app_info[0]->id,
-          /*last_activity_time=*/media_app_info[0]->last_activity_time,
-          /*is_capturing_camera=*/true,
-          /*is_capturing_microphone=*/true,
-          /*is_capturing_screen=*/false,
-          /*title=*/media_app_info[0]->title, /*url=*/absl::nullopt);
+  const auto expected_media_app_info = MakeMediaAppInfo(
+      /*id=*/media_app_info[0].id,
+      /*last_activity_time=*/media_app_info[0].last_activity_time,
+      /*is_capturing_camera=*/true,
+      /*is_capturing_microphone=*/true,
+      /*title=*/media_app_info[0].title,
+      /*app_type=*/VideoConferenceAppType::kArcApp);
   ASSERT_EQ(media_app_info.size(), 1u);
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 
   // Closing instance1 should not remove tracking of kAppId1.
   instance1.Close();
@@ -498,12 +513,26 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, CloseApp) {
   base::RunLoop().RunUntilIdle();
   media_app_info = GetMediaApps();
   ASSERT_EQ(media_app_info.size(), 1u);
-  EXPECT_TRUE(media_app_info[0].Equals(expected_media_app_info));
+  EXPECT_EQ(media_app_info[0], expected_media_app_info);
 
   // Closing instance2 should remove trackingg of kAppId1.
   instance2.Close();
   // Wait for the VideoConferenceAppServiceClient::MaybeRemoveApp to be called
   // in the PostTask.
+  base::RunLoop().RunUntilIdle();
+  EXPECT_TRUE(GetMediaApps().empty());
+
+  // This should not add the app tracking back because there is no running
+  // instance.
+  SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/false,
+                         /*is_capturing_microphone=*/true);
+  base::RunLoop().RunUntilIdle();
+  EXPECT_TRUE(GetMediaApps().empty());
+
+  // This should not add the app tracking back because there is no running
+  // instance.
+  SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/false,
+                         /*is_capturing_microphone=*/false);
   base::RunLoop().RunUntilIdle();
   EXPECT_TRUE(GetMediaApps().empty());
 }
@@ -593,14 +622,11 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest,
 IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest,
                        OnlyCertainAppsAreTracked) {
   for (const auto type :
-       {apps::AppType::kUnknown, apps::AppType::kBuiltIn,
-        apps::AppType::kCrostini, apps::AppType::kChromeApp,
-        apps::AppType::kWeb, apps::AppType::kMacOs, apps::AppType::kPluginVm,
-        apps::AppType::kStandaloneBrowser, apps::AppType::kRemote,
+       {apps::AppType::kUnknown, apps::AppType::kCrostini,
+        apps::AppType::kChromeApp, apps::AppType::kWeb,
+        apps::AppType::kPluginVm, apps::AppType::kRemote,
         apps::AppType::kBorealis, apps::AppType::kSystemWeb,
-        apps::AppType::kStandaloneBrowserChromeApp, apps::AppType::kExtension,
-        apps::AppType::kStandaloneBrowserExtension,
-        apps::AppType::kBruschetta}) {
+        apps::AppType::kExtension, apps::AppType::kBruschetta}) {
     // Create a fake id.
     const std::string app_id = base::NumberToString(static_cast<int>(type));
     // Install the app with given type.
@@ -622,18 +648,12 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest,
                        HandleDeviceUsedWhileDisabled) {
   // Notify disabling state of camera and microphone from
   // video_conference_manager_ash.
-  crosapi::CrosapiManager::Get()
-      ->crosapi_ash()
-      ->video_conference_manager_ash()
-      ->SetSystemMediaDeviceStatus(
-          crosapi::mojom::VideoConferenceMediaDevice::kCamera,
-          /*disabled=*/true);
-  crosapi::CrosapiManager::Get()
-      ->crosapi_ash()
-      ->video_conference_manager_ash()
-      ->SetSystemMediaDeviceStatus(
-          crosapi::mojom::VideoConferenceMediaDevice::kMicrophone,
-          /*disabled=*/true);
+  VideoConferenceManagerAsh::Get()->SetSystemMediaDeviceStatus(
+      VideoConferenceMediaDevice::kCamera,
+      /*enabled=*/false);
+  VideoConferenceManagerAsh::Get()->SetSystemMediaDeviceStatus(
+      VideoConferenceMediaDevice::kMicrophone,
+      /*enabled=*/false);
 
   FakeVideoConferenceTrayController* fake_try_controller =
       static_cast<FakeVideoConferenceTrayController*>(
@@ -647,7 +667,7 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest,
   ASSERT_EQ(fake_try_controller->device_used_while_disabled_records().size(),
             1u);
   EXPECT_THAT(fake_try_controller->device_used_while_disabled_records().back(),
-              testing::Pair(crosapi::mojom::VideoConferenceMediaDevice::kCamera,
+              testing::Pair(VideoConferenceMediaDevice::kCamera,
                             base::UTF8ToUTF16(std::string(kAppName1))));
 
   // Accessing microphone will trigger NotifyDeviceUsedWhileDisabled.
@@ -655,10 +675,9 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest,
                          /*is_capturing_microphone=*/true);
   ASSERT_EQ(fake_try_controller->device_used_while_disabled_records().size(),
             2u);
-  EXPECT_THAT(
-      fake_try_controller->device_used_while_disabled_records().back(),
-      testing::Pair(crosapi::mojom::VideoConferenceMediaDevice::kMicrophone,
-                    base::UTF8ToUTF16(std::string(kAppName1))));
+  EXPECT_THAT(fake_try_controller->device_used_while_disabled_records().back(),
+              testing::Pair(VideoConferenceMediaDevice::kMicrophone,
+                            base::UTF8ToUTF16(std::string(kAppName1))));
 
   // Stopping microphone access should not trigger
   // NotifyDeviceUsedWhileDisabled.
@@ -675,18 +694,12 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest,
 
   // Notify enabling state of camera and microphone from
   // video_conference_manager_ash.
-  crosapi::CrosapiManager::Get()
-      ->crosapi_ash()
-      ->video_conference_manager_ash()
-      ->SetSystemMediaDeviceStatus(
-          crosapi::mojom::VideoConferenceMediaDevice::kCamera,
-          /*disabled=*/false);
-  crosapi::CrosapiManager::Get()
-      ->crosapi_ash()
-      ->video_conference_manager_ash()
-      ->SetSystemMediaDeviceStatus(
-          crosapi::mojom::VideoConferenceMediaDevice::kMicrophone,
-          /*disabled=*/false);
+  VideoConferenceManagerAsh::Get()->SetSystemMediaDeviceStatus(
+      VideoConferenceMediaDevice::kCamera,
+      /*enabled=*/true);
+  VideoConferenceManagerAsh::Get()->SetSystemMediaDeviceStatus(
+      VideoConferenceMediaDevice::kMicrophone,
+      /*enabled=*/true);
 
   // Accessing camera should not trigger NotifyDeviceUsedWhileDisabled because
   // camera is not disabled.
@@ -715,6 +728,70 @@ IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest,
   }
 
   EXPECT_TRUE(GetMediaApps().empty());
+}
+
+IN_PROC_BROWSER_TEST_F(VideoConferenceAppServiceClientTest, UkmTest) {
+  // Install two apps with permissions.
+  InstallApp(kAppId1);
+  InstallApp(kAppId2);
+  UpdateAppPermision(kAppId1, /*has_camera_permission=*/true,
+                     /*has_microphone_permission=*/false);
+  UpdateAppPermision(kAppId2, /*has_camera_permission=*/false,
+                     /*has_microphone_permission=*/true);
+
+  // Start two running instance.
+  FakeAppInstance instance1(instance_registry_, kAppId1);
+  instance1.Start();
+  FakeAppInstance instance2(instance_registry_, kAppId2);
+  instance2.Start();
+
+  // Accessing camera should start a tracking of the kAppId1.
+  SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/true,
+                         /*is_capturing_microphone=*/false);
+  // Stopping camera access.
+  SetAppCapabilityAccess(kAppId1, /*is_capturing_camera=*/false,
+                         /*is_capturing_microphone=*/false);
+
+  // Closing instance1 should remove tracking of kAppId1, thus triggers ukm
+  // logging.
+  instance1.Close();
+  // Wait for the VideoConferenceAppServiceClient::MaybeRemoveApp to be called
+  // in the PostTask.
+  base::RunLoop().RunUntilIdle();
+
+  auto* vc_entry0 =
+      test_ukm_recorder_->GetEntriesByName(UkmEntry::kEntryName)[0].get();
+  test_ukm_recorder_->ExpectEntryMetric(vc_entry0,
+                                        UkmEntry::kDidCaptureCameraName, true);
+  test_ukm_recorder_->ExpectEntryMetric(
+      vc_entry0, UkmEntry::kDidCaptureMicrophoneName, false);
+  test_ukm_recorder_->ExpectEntryMetric(vc_entry0,
+                                        UkmEntry::kDidCaptureScreenName, false);
+  test_ukm_recorder_->ExpectEntryMetric(
+      vc_entry0, UkmEntry::kMicrophoneCaptureDurationName, 0);
+  test_ukm_recorder_->ExpectEntryMetric(
+      vc_entry0, UkmEntry::kScreenCaptureDurationName, 0);
+
+  SetAppCapabilityAccess(kAppId2, /*is_capturing_camera=*/true,
+                         /*is_capturing_microphone=*/true);
+
+  // Closing instance2 should remove tracking of kAppId2, thus triggers ukm
+  // logging.
+  instance2.Close();
+  // Wait for the VideoConferenceAppServiceClient::MaybeRemoveApp to be called
+  // in the PostTask.
+  base::RunLoop().RunUntilIdle();
+
+  auto* vc_entry1 =
+      test_ukm_recorder_->GetEntriesByName(UkmEntry::kEntryName)[1].get();
+  test_ukm_recorder_->ExpectEntryMetric(vc_entry1,
+                                        UkmEntry::kDidCaptureCameraName, true);
+  test_ukm_recorder_->ExpectEntryMetric(
+      vc_entry1, UkmEntry::kDidCaptureMicrophoneName, true);
+  test_ukm_recorder_->ExpectEntryMetric(vc_entry1,
+                                        UkmEntry::kDidCaptureScreenName, false);
+  test_ukm_recorder_->ExpectEntryMetric(
+      vc_entry1, UkmEntry::kScreenCaptureDurationName, 0);
 }
 
 }  // namespace ash

@@ -6,18 +6,30 @@
  * @fileoverview Error listener to report error details to the native app.
  */
 
-import {sendWebKitMessage} from '//ios/web/public/js_messaging/resources/utils.js'
+import {CrWebError} from '//ios/web/public/js_messaging/resources/gcrweb_error.js';
+import {sendWebKitMessage} from '//ios/web/public/js_messaging/resources/utils.js';
 
 /**
  * JavaScript errors are logged on the main application side. The handler is
  * added ASAP to catch any errors in startup.
  */
 function errorEventHandler(event: ErrorEvent): void {
-  sendWebKitMessage('WindowErrorResultHandler',
-      {'filename' : event.filename,
-       'line_number' : event.lineno,
-       'message': event.message.toString()
-      });
+  // CrWebError errors will be reported directly because they are triggered from
+  // native API calls and will provide better error details than the error
+  // handler here. Early return to prevent double reporting those errors.
+  if (event instanceof CrWebError) {
+    return;
+  }
+
+  sendWebKitMessage('WindowErrorResultHandler', {
+    'line_number': event.lineno,
+    // The JS error handler is limited in the error details it can access and is
+    // likely to only have the message "Script error". Thus, this is a last
+    // resort error reporting mechanism for errors which were not caught. Yet,
+    // reporting these errors are important, especially for tests where
+    // `kAssertOnJavaScriptErrors` may be enabled.
+    'message': event.message.toString(),
+  });
 }
 
 

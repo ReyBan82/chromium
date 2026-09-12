@@ -2,13 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "services/device/hid/hid_service_linux.h"
 
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "device/udev_linux/fake_udev_loader.h"
+#include "services/device/public/cpp/device_features.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace device {
@@ -35,12 +39,13 @@ class HidServiceLinuxTest : public testing::Test {
 
   void AddFakeDevice(base::FilePath syspath,
                      std::string subsystem,
-                     absl::optional<std::string> devnode = absl::nullopt,
-                     absl::optional<std::string> devtype = absl::nullopt,
-                     std::map<std::string, std::string> properties = {}) {
+                     std::optional<std::string> devnode = std::nullopt,
+                     std::optional<std::string> devtype = std::nullopt,
+                     std::map<std::string, std::string> properties = {},
+                     std::map<std::string, std::string> sysattrs = {}) {
     fake_udev_.AddFakeDevice("fake-device", syspath.value(),
                              std::move(subsystem), std::move(devnode),
-                             std::move(devtype), /*sysattrs=*/{},
+                             std::move(devtype), std::move(sysattrs),
                              std::move(properties));
   }
 
@@ -73,17 +78,17 @@ TEST_F(HidServiceLinuxTest, EnumerateUsbHidDevice) {
   uint8_t data = 0;
   ASSERT_TRUE(base::CreateDirectory(hid_path));
   ASSERT_TRUE(
-      base::WriteFile(report_descriptor_path, base::make_span(&data, 1u)));
+      base::WriteFile(report_descriptor_path, base::span_from_ref(data)));
 
   // Add the fake HID device as well as its ancestors up to the USB device node.
   // Ancestors must be added starting from the closest to the root to ensure
   // that ancestor device info is available when the hidraw device is added.
-  AddFakeDevice(usb_device_path, kSubsystemUsb, /*devnode=*/absl::nullopt,
+  AddFakeDevice(usb_device_path, kSubsystemUsb, /*devnode=*/std::nullopt,
                 kDevtypeUsbDevice);
-  AddFakeDevice(usb_interface_path, kSubsystemUsb, /*devnode=*/absl::nullopt,
+  AddFakeDevice(usb_interface_path, kSubsystemUsb, /*devnode=*/std::nullopt,
                 kDevtypeUsbInterface);
-  AddFakeDevice(hid_path, kSubsystemHid, /*devnode=*/absl::nullopt,
-                /*devtype=*/absl::nullopt, /*properties=*/
+  AddFakeDevice(hid_path, kSubsystemHid, /*devnode=*/std::nullopt,
+                /*devtype=*/std::nullopt, /*properties=*/
                 {
                     {"HID_ID", kPropertyValueHidId},
                     {"HID_UNIQ", kPropertyValueHidUniq},
@@ -91,15 +96,10 @@ TEST_F(HidServiceLinuxTest, EnumerateUsbHidDevice) {
                 });
   AddFakeDevice(hidraw_path, kSubsystemHidraw, kDevnodeHidraw0);
 
-  std::vector<mojom::HidDeviceInfoPtr> devices;
-  base::RunLoop loop;
+  base::test::TestFuture<std::vector<mojom::HidDeviceInfoPtr>> devices_future;
   auto hid_service = std::make_unique<HidServiceLinux>();
-  hid_service->GetDevices(
-      base::BindLambdaForTesting([&](std::vector<mojom::HidDeviceInfoPtr> d) {
-        devices = std::move(d);
-        loop.Quit();
-      }));
-  loop.Run();
+  hid_service->GetDevices(devices_future.GetCallback());
+  auto devices = devices_future.Take();
 
   ASSERT_EQ(devices.size(), 1u);
   EXPECT_EQ(devices[0]->physical_device_id, usb_device_path.value());
@@ -142,15 +142,15 @@ TEST_F(HidServiceLinuxTest, EnumerateBluetoothClassicHidDevice) {
   uint8_t data = 0;
   ASSERT_TRUE(base::CreateDirectory(hid_path));
   ASSERT_TRUE(
-      base::WriteFile(report_descriptor_path, base::make_span(&data, 1u)));
+      base::WriteFile(report_descriptor_path, base::span_from_ref(data)));
 
   // Add the fake HID device as well as its ancestors up to the Bluetooth link.
   // Ancestors must be added starting from the closest to the root to ensure
   // that ancestor device info is available when the hidraw device is added.
-  AddFakeDevice(bt_link_path, kSubsystemBluetooth, /*devnode=*/absl::nullopt,
+  AddFakeDevice(bt_link_path, kSubsystemBluetooth, /*devnode=*/std::nullopt,
                 kDevtypeLink);
-  AddFakeDevice(hid_path, kSubsystemHid, /*devnode=*/absl::nullopt,
-                /*devtype=*/absl::nullopt, /*properties=*/
+  AddFakeDevice(hid_path, kSubsystemHid, /*devnode=*/std::nullopt,
+                /*devtype=*/std::nullopt, /*properties=*/
                 {
                     {"HID_ID", kPropertyValueHidId},
                     {"HID_UNIQ", kPropertyValueHidUniq},
@@ -158,15 +158,10 @@ TEST_F(HidServiceLinuxTest, EnumerateBluetoothClassicHidDevice) {
                 });
   AddFakeDevice(hidraw_path, kSubsystemHidraw, kDevnodeHidraw0);
 
-  std::vector<mojom::HidDeviceInfoPtr> devices;
-  base::RunLoop loop;
+  base::test::TestFuture<std::vector<mojom::HidDeviceInfoPtr>> devices_future;
   auto hid_service = std::make_unique<HidServiceLinux>();
-  hid_service->GetDevices(
-      base::BindLambdaForTesting([&](std::vector<mojom::HidDeviceInfoPtr> d) {
-        devices = std::move(d);
-        loop.Quit();
-      }));
-  loop.Run();
+  hid_service->GetDevices(devices_future.GetCallback());
+  auto devices = devices_future.Take();
 
   ASSERT_EQ(devices.size(), 1u);
   EXPECT_EQ(devices[0]->physical_device_id, hid_path.value());
@@ -207,14 +202,14 @@ TEST_F(HidServiceLinuxTest, EnumerateBleHidDevice) {
   uint8_t data = 0;
   ASSERT_TRUE(base::CreateDirectory(hid_path));
   ASSERT_TRUE(
-      base::WriteFile(report_descriptor_path, base::make_span(&data, 1u)));
+      base::WriteFile(report_descriptor_path, base::span_from_ref(data)));
 
   // Add the fake HID device as well as its ancestors up to the Bluetooth link.
   // Ancestors must be added starting from the closest to the root to ensure
   // that ancestor device info is available when the hidraw device is added.
   AddFakeDevice(uhid_path, kSubsystemMisc);
-  AddFakeDevice(hid_path, kSubsystemHid, /*devnode=*/absl::nullopt,
-                /*devtype=*/absl::nullopt, /*properties=*/
+  AddFakeDevice(hid_path, kSubsystemHid, /*devnode=*/std::nullopt,
+                /*devtype=*/std::nullopt, /*properties=*/
                 {
                     {"HID_ID", kPropertyValueHidId},
                     {"HID_UNIQ", kPropertyValueHidUniq},
@@ -222,15 +217,10 @@ TEST_F(HidServiceLinuxTest, EnumerateBleHidDevice) {
                 });
   AddFakeDevice(hidraw_path, kSubsystemHidraw, kDevnodeHidraw0);
 
-  std::vector<mojom::HidDeviceInfoPtr> devices;
-  base::RunLoop loop;
+  base::test::TestFuture<std::vector<mojom::HidDeviceInfoPtr>> devices_future;
   auto hid_service = std::make_unique<HidServiceLinux>();
-  hid_service->GetDevices(
-      base::BindLambdaForTesting([&](std::vector<mojom::HidDeviceInfoPtr> d) {
-        devices = std::move(d);
-        loop.Quit();
-      }));
-  loop.Run();
+  hid_service->GetDevices(devices_future.GetCallback());
+  auto devices = devices_future.Take();
 
   ASSERT_EQ(devices.size(), 1u);
   EXPECT_EQ(devices[0]->physical_device_id, hid_path.value());
@@ -253,6 +243,49 @@ TEST_F(HidServiceLinuxTest, EnumerateBleHidDevice) {
   EXPECT_TRUE(devices[0]->protected_output_report_ids->empty());
   EXPECT_TRUE(devices[0]->protected_feature_report_ids);
   EXPECT_TRUE(devices[0]->protected_feature_report_ids->empty());
+}
+
+TEST_F(HidServiceLinuxTest, EnumerateUsbHidDeviceWithProductNameEnabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kProductNameOverHidName);
+
+  constexpr char kPropertyValueHidId[] = "0003:0000ABCD:00001234";
+  constexpr char kPropertyValueHidUniq[] = "serial-number";
+  constexpr char kPropertyValueUsbProduct[] = "usb-product-name";
+
+  auto usb_device_path =
+      GetTempDir().Append("sys/devices/pci0000:00/0000:00:0.0/usb2/1-1");
+  auto usb_interface_path = usb_device_path.Append("1-1:1.1");
+  auto hid_path = usb_interface_path.Append("0003:ABCD:1234.0000");
+  auto hidraw_path = hid_path.Append("hidraw/hidraw0");
+
+  auto report_descriptor_path = hid_path.Append("report_descriptor");
+  uint8_t data = 0;
+  ASSERT_TRUE(base::CreateDirectory(hid_path));
+  ASSERT_TRUE(
+      base::WriteFile(report_descriptor_path, base::span_from_ref(data)));
+
+  AddFakeDevice(usb_device_path, kSubsystemUsb, /*devnode=*/std::nullopt,
+                kDevtypeUsbDevice, /*properties=*/{},
+                /*sysattrs=*/{{"product", kPropertyValueUsbProduct}});
+  AddFakeDevice(usb_interface_path, kSubsystemUsb, /*devnode=*/std::nullopt,
+                kDevtypeUsbInterface);
+  AddFakeDevice(hid_path, kSubsystemHid, /*devnode=*/std::nullopt,
+                /*devtype=*/std::nullopt, /*properties=*/
+                {
+                    {"HID_ID", kPropertyValueHidId},
+                    {"HID_UNIQ", kPropertyValueHidUniq},
+                    {"HID_NAME", kPropertyValueHidName},
+                });
+  AddFakeDevice(hidraw_path, kSubsystemHidraw, kDevnodeHidraw0);
+
+  base::test::TestFuture<std::vector<mojom::HidDeviceInfoPtr>> devices_future;
+  auto hid_service = std::make_unique<HidServiceLinux>();
+  hid_service->GetDevices(devices_future.GetCallback());
+  auto devices = devices_future.Take();
+
+  ASSERT_EQ(devices.size(), 1u);
+  EXPECT_EQ(devices[0]->product_name, kPropertyValueUsbProduct);
 }
 
 }  // namespace device

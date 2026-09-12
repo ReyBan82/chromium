@@ -6,26 +6,30 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "base/containers/span.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 #include "third_party/blink/renderer/platform/fonts/font.h"
 #include "third_party/blink/renderer/platform/fonts/opentype/open_type_math_test_fonts.h"
 #include "third_party/blink/renderer/platform/testing/blink_fuzzer_test_support.h"
 #include "third_party/blink/renderer/platform/testing/font_test_base.h"
 #include "third_party/blink/renderer/platform/testing/font_test_helpers.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
 
-int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(const base::span<const uint8_t> data) {
   static BlinkFuzzerTestSupport test_support = BlinkFuzzerTestSupport();
+  test::TaskEnvironment task_environment;
 
-  FontCachePurgePreventer font_cache_purge_preventer;
   FontDescription::VariantLigatures ligatures;
-  Font math =
-      test::CreateTestFont("MathTestFont", data, size, 1000, &ligatures);
+  Font* math = test::CreateTestFont(AtomicString("MathTestFont"), data, 1000,
+                                    &ligatures);
 
   // HasMathData should be used by other API functions below for early return.
   // Explicitly call it here for exhaustivity, since it is fast anyway.
   OpenTypeMathSupport::HasMathData(
-      math.PrimaryFont()->PlatformData().GetHarfBuzzFace());
+      math->PrimaryFont()->PlatformData().GetHarfBuzzFace());
 
   // There is only a small amount of math constants and each call is fast, so
   // all of these values are queried.
@@ -33,7 +37,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
        constant <= OpenTypeMathSupport::kRadicalDegreeBottomRaisePercent;
        constant++) {
     OpenTypeMathSupport::MathConstant(
-        math.PrimaryFont()->PlatformData().GetHarfBuzzFace(),
+        math->PrimaryFont()->PlatformData().GetHarfBuzzFace(),
         static_cast<OpenTypeMathSupport::MathConstants>(constant));
   }
 
@@ -43,21 +47,21 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   // GetGlyphPartRecords?
   for (auto character : {kNAryWhiteVerticalBarCodePoint, kLeftBraceCodePoint,
                          kOverBraceCodePoint}) {
-    if (auto glyph = math.PrimaryFont()->GlyphForCharacter(character)) {
+    if (auto glyph = math->PrimaryFont()->GlyphForCharacter(character)) {
       for (auto stretch_direction :
            {OpenTypeMathStretchData::StretchAxis::Horizontal,
             OpenTypeMathStretchData::StretchAxis::Vertical}) {
         Vector<OpenTypeMathStretchData::GlyphVariantRecord> variants =
             OpenTypeMathSupport::GetGlyphVariantRecords(
-                math.PrimaryFont()->PlatformData().GetHarfBuzzFace(), glyph,
+                math->PrimaryFont()->PlatformData().GetHarfBuzzFace(), glyph,
                 stretch_direction);
         for (auto variant : variants) {
           OpenTypeMathSupport::MathItalicCorrection(
-              math.PrimaryFont()->PlatformData().GetHarfBuzzFace(), variant);
+              math->PrimaryFont()->PlatformData().GetHarfBuzzFace(), variant);
         }
         float italic_correction = 0;
         OpenTypeMathSupport::GetGlyphPartRecords(
-            math.PrimaryFont()->PlatformData().GetHarfBuzzFace(), glyph,
+            math->PrimaryFont()->PlatformData().GetHarfBuzzFace(), glyph,
             stretch_direction, &italic_correction);
       }
     }
@@ -68,6 +72,3 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
 }  // namespace blink
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  return blink::LLVMFuzzerTestOneInput(data, size);
-}

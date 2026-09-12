@@ -4,9 +4,14 @@
 
 #include "chrome/browser/ui/webui/ash/manage_mirrorsync/manage_mirrorsync_dialog.h"
 
+#include <vector>
+
 #include "ash/constants/ash_features.h"
+#include "ash/constants/webui_url_constants.h"
 #include "base/files/file_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/scoped_observation.h"
 #include "base/strings/strcat.h"
 #include "base/test/bind.h"
 #include "base/test/gmock_callback_support.h"
@@ -15,16 +20,19 @@
 #include "base/threading/thread_restrictions.h"
 #include "base/values.h"
 #include "chrome/browser/ash/drive/drive_integration_service.h"
+#include "chrome/browser/ash/drive/drive_integration_service_factory.h"
 #include "chrome/browser/ash/drive/drivefs_test_support.h"
 #include "chrome/browser/ash/file_manager/path_util.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/signin/identity_manager_factory.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/webui/ash/manage_mirrorsync/manage_mirrorsync.mojom.h"
-#include "chrome/browser/ui/webui/ash/system_web_dialog_delegate.h"
-#include "chrome/common/webui_url_constants.h"
+#include "chrome/browser/ui/webui/ash/system_web_dialog/system_web_dialog_delegate.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/drive/drive_pref_names.h"
 #include "components/prefs/pref_service.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -55,11 +63,11 @@ MATCHER_P(MojoFilePaths, matcher, "") {
   return testing::ExplainMatchResult(matcher, paths, result_listener);
 }
 
-// Matcher to unwrap the `base::Value::Dict` from `getSyncingPaths` and extract
+// Matcher to unwrap the `base::DictValue` from `getSyncingPaths` and extract
 // the "error" key. The value of this is cast into a `GetSyncPathError` to
 // compare.
 MATCHER_P(SyncPathError, matcher, "") {
-  absl::optional<int> error = arg.FindInt("error");
+  std::optional<int> error = arg.FindInt("error");
   EXPECT_TRUE(error.has_value());
   auto get_sync_path_error =
       static_cast<manage_mirrorsync::mojom::PageHandler::GetSyncPathError>(
@@ -68,29 +76,27 @@ MATCHER_P(SyncPathError, matcher, "") {
                                      result_listener);
 }
 
-// Matcher to unwrap the `base::Value::Dict` from `getSyncPaths` and extract the
+// Matcher to unwrap the `base::DictValue` from `getSyncPaths` and extract the
 // "syncingPaths" key. This can be coupled wit the `MojoFilePaths` matcher to
-// perform element comparison on the resultant `base::Value::Dict` in the array.
+// perform element comparison on the resultant `base::DictValue` in the array.
 MATCHER_P(SyncingPaths, matcher, "") {
-  const base::Value::List* paths = arg.FindList("syncingPaths");
+  const base::ListValue* paths = arg.FindList("syncingPaths");
   EXPECT_NE(paths, nullptr);
   return testing::ExplainMatchResult(matcher, *paths, result_listener);
 }
 
 // Helper to observe the DriveIntegrationService for when mirroring is enabled.
 class DriveMirrorSyncStatusObserver
-    : public drive::DriveIntegrationServiceObserver {
+    : public drive::DriveIntegrationService::Observer {
  public:
-  explicit DriveMirrorSyncStatusObserver(bool expected_status)
+  // `service` must not be nullptr.
+  explicit DriveMirrorSyncStatusObserver(
+      drive::DriveIntegrationService* service,
+      bool expected_status)
       : expected_status_(expected_status) {
+    observation_.Observe(service);
     quit_closure_ = run_loop_.QuitClosure();
   }
-
-  DriveMirrorSyncStatusObserver(const DriveMirrorSyncStatusObserver&) = delete;
-  DriveMirrorSyncStatusObserver& operator=(
-      const DriveMirrorSyncStatusObserver&) = delete;
-
-  ~DriveMirrorSyncStatusObserver() override = default;
 
   void WaitForStatusChange() { run_loop_.Run(); }
 
@@ -108,6 +114,9 @@ class DriveMirrorSyncStatusObserver
   base::RunLoop run_loop_;
   base::RepeatingClosure quit_closure_;
   bool expected_status_ = false;
+  base::ScopedObservation<drive::DriveIntegrationService,
+                          drive::DriveIntegrationService::Observer>
+      observation_{this};
 };
 
 class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
@@ -138,7 +147,8 @@ class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
     fake_drivefs_helpers_[profile] =
         std::make_unique<drive::FakeDriveFsHelper>(profile, mount_point);
     auto* integration_service = new drive::DriveIntegrationService(
-        profile, "", mount_point,
+        g_browser_process->local_state(), profile,
+        IdentityManagerFactory::GetForProfile(profile), "", mount_point,
         fake_drivefs_helpers_[profile]->CreateFakeDriveFsListenerFactory());
     return integration_service;
   }
@@ -146,11 +156,11 @@ class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
   // Show the MirrorSync dialog and wait for it to complete loading.
   void ShowDialog() {
     content::WebContentsAddedObserver observer;
-    ManageMirrorSyncDialog::Show(browser()->profile());
+    ManageMirrorSyncDialog::Show(browser()->GetProfile());
     dialog_contents_ = observer.GetWebContents();
     EXPECT_TRUE(content::WaitForLoadStop(dialog_contents_));
-    EXPECT_EQ(dialog_contents_->GetLastCommittedURL().host(),
-              chrome::kChromeUIManageMirrorSyncHost);
+    EXPECT_EQ(dialog_contents_->GetLastCommittedURL().GetHost(),
+              ash::kChromeUIManageMirrorSyncHost);
   }
 
   void SetUpMyFilesAndDialog(std::vector<std::string> paths) {
@@ -159,7 +169,7 @@ class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
     my_files_dir_ = temp_dir_.GetPath().Append("MyFiles");
     storage::ExternalMountPoints::GetSystemInstance()->RevokeAllFileSystems();
     storage::ExternalMountPoints::GetSystemInstance()->RegisterFileSystem(
-        file_manager::util::GetDownloadsMountPointName(browser()->profile()),
+        file_manager::util::GetDownloadsMountPointName(browser()->GetProfile()),
         storage::kFileSystemTypeLocal, storage::FileSystemMountOption(),
         my_files_dir_);
 
@@ -185,23 +195,40 @@ class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
     my_files_dir_ = temp_dir_.GetPath().Append("MyFiles");
     storage::ExternalMountPoints::GetSystemInstance()->RevokeAllFileSystems();
     storage::ExternalMountPoints::GetSystemInstance()->RegisterFileSystem(
-        file_manager::util::GetDownloadsMountPointName(browser()->profile()),
+        file_manager::util::GetDownloadsMountPointName(browser()->GetProfile()),
         storage::kFileSystemTypeLocal, storage::FileSystemMountOption(),
         my_files_dir_);
 
+    // Turning on MirrorSync requires MyFiles to exist first.
+    {
+      base::ScopedAllowBlockingForTesting allow_blocking;
+      base::CreateDirectory(my_files_dir_);
+    }
+
+    drivefs::FakeDriveFs& fake_drivefs =
+        fake_drivefs_helpers_[browser()->GetProfile()]->fake_drivefs();
+
     // Toggle the MirrorSync preference to enable / disable the feature.
-    auto observer = std::make_unique<DriveMirrorSyncStatusObserver>(enabled);
-    auto* drive_service = drive::DriveIntegrationServiceFactory::FindForProfile(
-        browser()->profile());
-    drive_service->AddObserver(observer.get());
-    browser()->profile()->GetPrefs()->SetBoolean(
-        drive::prefs::kDriveFsEnableMirrorSync, enabled);
-    observer->WaitForStatusChange();
-    drive_service->RemoveObserver(observer.get());
+    {
+      drive::DriveIntegrationService* const service =
+          drive::DriveIntegrationServiceFactory::FindForProfile(
+              browser()->GetProfile());
+      DriveMirrorSyncStatusObserver observer(service, enabled);
+      // Turning on the sync will add ~/MyFiles as the sync path, which will
+      // call GetSyncingPaths internally.
+      if (enabled) {
+        EXPECT_CALL(fake_drivefs, GetSyncingPaths(_))
+            .WillOnce(RunOnceCallback<0>(drive::FileError::FILE_ERROR_OK,
+                                         std::vector<base::FilePath>()));
+      }
+      browser()->GetProfile()->GetPrefs()->SetBoolean(
+          drive::prefs::kDriveFsEnableMirrorSync, enabled);
+      observer.WaitForStatusChange();
+    }
 
     ShowDialog();
 
-    return fake_drivefs_helpers_[browser()->profile()]->fake_drivefs();
+    return fake_drivefs;
   }
 
   // Returns a pair of std::vector where the first element contains a list of
@@ -226,7 +253,7 @@ class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
 
   // Helper to invoke the `getChildFolders` method on chrome://manage-mirrorsync
   // dialog and extract it's response.
-  base::Value::List GetChildFolders(const std::string& path) {
+  base::ListValue GetChildFolders(const std::string& path) {
     const std::string js_expression = base::StrCat(
         {"((async () => { "
          "const {BrowserProxy} = await import('./browser_proxy.js');"
@@ -235,24 +262,23 @@ class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
          path,
          "'});"
          "return paths; })())"});
-    auto response = content::EvalJs(dialog_contents_, js_expression);
-
-    base::Value response_list = response.ExtractList();
-    return response_list.GetList().Clone();
+    return content::EvalJs(dialog_contents_.get(), js_expression)
+        .TakeValue()
+        .TakeList();
   }
 
   // Helper to invoke the `getSyncingPaths` method on chrome://manage-mirrorsync
   // dialog and extract it's response.
-  base::Value::Dict GetSyncingPaths() {
+  base::DictValue GetSyncingPaths() {
     const std::string js_expression =
         "((async () => { "
         "const {BrowserProxy} = await import('./browser_proxy.js');"
         "const handler = BrowserProxy.getInstance().handler;"
         "const response = await handler.getSyncingPaths();"
         "return response; })())";
-    auto response = content::EvalJs(dialog_contents_, js_expression);
-    EXPECT_TRUE(response.value.is_dict());
-    return response.value.GetDict().Clone();
+    return content::EvalJs(dialog_contents_.get(), js_expression)
+        .TakeValue()
+        .TakeDict();
   }
 
   void TearDown() override {
@@ -263,7 +289,7 @@ class ManageMirrorSyncDialogTest : public InProcessBrowserTest {
   base::test::ScopedFeatureList feature_list_;
   base::ScopedTempDir temp_dir_;
   base::FilePath my_files_dir_;
-  content::WebContents* dialog_contents_;
+  raw_ptr<content::WebContents, DanglingUntriaged> dialog_contents_;
 
   drive::DriveIntegrationServiceFactory::FactoryCallback
       create_drive_integration_service_;

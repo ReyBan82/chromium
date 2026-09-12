@@ -24,7 +24,7 @@ GbmPixmap::GbmPixmap(GbmSurfaceFactory* surface_manager,
       buffer_(std::move(buffer)),
       framebuffer_(std::move(framebuffer)) {}
 
-gfx::NativePixmapHandle GbmPixmap::ExportHandle() {
+gfx::NativePixmapHandle GbmPixmap::ExportHandle() const {
   return buffer_->ExportHandle();
 }
 
@@ -56,12 +56,12 @@ bool GbmPixmap::SupportsZeroCopyWebGPUImport() const {
   return buffer_->SupportsZeroCopyWebGPUImport();
 }
 
-uint64_t GbmPixmap::GetBufferFormatModifier() const {
+uint64_t GbmPixmap::GetFormatModifier() const {
   return buffer_->GetFormatModifier();
 }
 
-gfx::BufferFormat GbmPixmap::GetBufferFormat() const {
-  return buffer_->GetBufferFormat();
+viz::SharedImageFormat GbmPixmap::GetSharedImageFormat() const {
+  return buffer_->GetSharedImageFormat();
 }
 
 gfx::Size GbmPixmap::GetBufferSize() const {

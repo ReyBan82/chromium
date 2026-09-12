@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include "content/browser/xr/metrics/webxr_session_tracker.h"
+#include "device/vr/public/mojom/vr_service.mojom.h"
+#include "device/vr/public/mojom/xr_session.mojom.h"
 
 #include <utility>
 
@@ -78,15 +80,15 @@ void WebXRSessionTracker::ReportFeatureUsed(
     case XRSessionFeature::ANCHORS:
     case XRSessionFeature::CAMERA_ACCESS:
     case XRSessionFeature::PLANE_DETECTION:
+    case XRSessionFeature::MESH_DETECTION:
     case XRSessionFeature::DEPTH:
     case XRSessionFeature::IMAGE_TRACKING:
     case XRSessionFeature::HAND_INPUT:
     case XRSessionFeature::SECONDARY_VIEWS:
     case XRSessionFeature::LAYERS:
     case XRSessionFeature::FRONT_FACING:
+    case XRSessionFeature::WEBGPU:
       // Not recording metrics for these features currently.
-      // TODO(https://crbug.com/965729): Add metrics for the AR-related features
-      // that are enabled by default.
       break;
   }
 }
@@ -123,15 +125,15 @@ void WebXRSessionTracker::SetFeatureRequest(
     case XRSessionFeature::ANCHORS:
     case XRSessionFeature::CAMERA_ACCESS:
     case XRSessionFeature::PLANE_DETECTION:
+    case XRSessionFeature::MESH_DETECTION:
     case XRSessionFeature::DEPTH:
     case XRSessionFeature::IMAGE_TRACKING:
     case XRSessionFeature::HAND_INPUT:
     case XRSessionFeature::SECONDARY_VIEWS:
     case XRSessionFeature::LAYERS:
     case XRSessionFeature::FRONT_FACING:
+    case XRSessionFeature::WEBGPU:
       // Not recording metrics for these features currently.
-      // TODO(https://crbug.com/965729): Add metrics for the AR-related features
-      // that are enabled by default.
       break;
   }
 }

@@ -6,11 +6,13 @@
 
 #include <errno.h>
 
+#include <array>
 #include <string>
 
 #include "base/files/file_descriptor_watcher_posix.h"
 #include "base/logging.h"
 #include "base/memory/free_deleter.h"
+#include "base/memory/raw_ptr.h"
 #include "base/system/sys_info.h"
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
@@ -26,7 +28,7 @@ namespace {
 // TODO(plundblad): Find a way to detect the controlling terminal of the
 // X server.
 static const int kDefaultTtyLinux = 7;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 // The GUI is always running on vt1 in Chrome OS.
 static const int kDefaultTtyChromeOS = 1;
 #endif
@@ -54,7 +56,7 @@ class BrlapiConnectionImpl : public BrlapiConnection {
   bool CheckConnected();
   ConnectResult ConnectResultForError();
 
-  LibBrlapiLoader* libbrlapi_loader_;
+  raw_ptr<LibBrlapiLoader> libbrlapi_loader_;
   std::unique_ptr<brlapi_handle_t, base::FreeDeleter> handle_;
   std::unique_ptr<base::FileDescriptorWatcher::Controller> fd_controller_;
 };
@@ -77,16 +79,18 @@ BrlapiConnection::ConnectResult BrlapiConnectionImpl::Connect(
     VLOG(1) << "Error connecting to brlapi: " << BrlapiStrError();
     return ConnectResultForError();
   }
-  int path[2] = {0, 0};
+  std::array path = {0, 0};
   int pathElements = 0;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  if (base::SysInfo::IsRunningOnChromeOS())
+#if BUILDFLAG(IS_CHROMEOS)
+  if (base::SysInfo::IsRunningOnChromeOS()) {
     path[pathElements++] = kDefaultTtyChromeOS;
+  }
 #endif
-  if (pathElements == 0 && getenv("WINDOWPATH") == nullptr)
+  if (pathElements == 0 && getenv("WINDOWPATH") == nullptr) {
     path[pathElements++] = kDefaultTtyLinux;
+  }
   if (libbrlapi_loader_->brlapi__enterTtyModeWithPath(
-          handle_.get(), path, pathElements, nullptr) < 0) {
+          handle_.get(), &path[0], pathElements, nullptr) < 0) {
     LOG(ERROR) << "brlapi: couldn't enter tty mode: " << BrlapiStrError();
     Disconnect();
     return CONNECT_ERROR_RETRY;
@@ -162,8 +166,9 @@ bool BrlapiConnectionImpl::GetDisplaySize(unsigned int* columns,
 
 bool BrlapiConnectionImpl::WriteDots(const std::vector<unsigned char>& cells) {
   // Cells is a 2D vector, compressed into 1D.
-  if (!CheckConnected())
+  if (!CheckConnected()) {
     return false;
+  }
   if (libbrlapi_loader_->brlapi__writeDots(handle_.get(), cells.data()) < 0) {
     VLOG(1) << "Couldn't write to brlapi: " << BrlapiStrError();
     return false;
@@ -172,8 +177,9 @@ bool BrlapiConnectionImpl::WriteDots(const std::vector<unsigned char>& cells) {
 }
 
 int BrlapiConnectionImpl::ReadKey(brlapi_keyCode_t* key_code) {
-  if (!CheckConnected())
+  if (!CheckConnected()) {
     return -1;
+  }
   return libbrlapi_loader_->brlapi__readKey(
       handle_.get(), 0 /*wait*/, key_code);
 }
@@ -188,8 +194,9 @@ bool BrlapiConnectionImpl::GetCellSize(unsigned int* cell_size) {
       handle_.get(), BRLAPI_PARAM_DEVICE_CELL_SIZE, 0, BRLAPI_PARAMF_GLOBAL,
       &device_cell_size, sizeof(device_cell_size));
 
-  if (result == -1 || result != sizeof(device_cell_size))
+  if (result == -1 || result != sizeof(device_cell_size)) {
     return false;
+  }
 
   *cell_size = device_cell_size;
   return true;

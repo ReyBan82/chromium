@@ -15,8 +15,9 @@ import org.chromium.base.Callback;
 import org.chromium.base.DiscardableReferencePool;
 import org.chromium.base.ObserverList;
 import org.chromium.base.metrics.RecordUserAction;
-import org.chromium.base.supplier.Supplier;
 import org.chromium.base.task.PostTask;
+import org.chromium.base.task.TaskTraits;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.download.home.filter.Filters;
 import org.chromium.chrome.browser.download.home.filter.Filters.FilterType;
 import org.chromium.chrome.browser.download.home.list.DateOrderedListCoordinator;
@@ -31,15 +32,19 @@ import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
 import org.chromium.components.browser_ui.widget.selectable_list.SelectionDelegate;
 import org.chromium.components.feature_engagement.Tracker;
 import org.chromium.components.offline_items_collection.OfflineContentProvider;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
+import org.chromium.components.offline_items_collection.OfflineItem;
 import org.chromium.ui.modaldialog.ModalDialogManager;
 
 import java.io.Closeable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Supplier;
 
 /**
- * The top level coordinator for the download home UI.  This is currently an in progress class and
- * is not fully fleshed out yet.
+ * The top level coordinator for the download home UI. This is currently an in progress class and is
+ * not fully fleshed out yet.
  */
+@NullMarked
 class DownloadManagerCoordinatorImpl
         implements DownloadManagerCoordinator, ToolbarCoordinator.ToolbarActionDelegate {
     private final ObserverList<Observer> mObservers = new ObserverList<>();
@@ -50,7 +55,7 @@ class DownloadManagerCoordinatorImpl
     private final SelectionDelegate<ListItem> mSelectionDelegate;
 
     private final Activity mActivity;
-    private final Callback<Context> mSettingsLauncher;
+    private final Callback<Context> mSettingsNavigation;
     private final BackPressHandler[] mBackPressHandlers;
 
     private ViewGroup mMainView;
@@ -58,49 +63,96 @@ class DownloadManagerCoordinatorImpl
     private boolean mMuteFilterChanges;
 
     /** Builds a {@link DownloadManagerCoordinatorImpl} instance. */
-    public DownloadManagerCoordinatorImpl(Activity activity, DownloadManagerUiConfig config,
+    public DownloadManagerCoordinatorImpl(
+            Activity activity,
+            DownloadManagerUiConfig config,
             Supplier<Boolean> exploreOfflineTabVisibilitySupplier,
-            Callback<Context> settingsLauncher, SnackbarManager snackbarManager,
-            ModalDialogManager modalDialogManager, Tracker tracker, FaviconProvider faviconProvider,
-            OfflineContentProvider provider, DiscardableReferencePool discardableReferencePool) {
+            Callback<Context> settingsNavigation,
+            SnackbarManager snackbarManager,
+            ModalDialogManager modalDialogManager,
+            DownloadHelpPageLauncher helpPageLauncher,
+            Tracker tracker,
+            FaviconProvider faviconProvider,
+            OfflineContentProvider provider,
+            Callback<OfflineItem> openWithHandler,
+            DiscardableReferencePool discardableReferencePool) {
         mActivity = activity;
-        mSettingsLauncher = settingsLauncher;
+        mSettingsNavigation = settingsNavigation;
         mDeleteCoordinator = new DeleteUndoCoordinator(snackbarManager);
-        mSelectionDelegate = new SelectionDelegate<ListItem>();
-        mListCoordinator = new DateOrderedListCoordinator(mActivity, config,
-                exploreOfflineTabVisibilitySupplier, provider, mDeleteCoordinator::showSnackbar,
-                mSelectionDelegate, this::notifyFilterChanged, createDateOrderedListObserver(),
-                modalDialogManager, faviconProvider, discardableReferencePool);
-        mToolbarCoordinator = new ToolbarCoordinator(mActivity, this, mListCoordinator,
-                mSelectionDelegate, config.isSeparateActivity, tracker);
+        mSelectionDelegate = new SelectionDelegate<>();
+        mListCoordinator =
+                new DateOrderedListCoordinator(
+                        mActivity,
+                        config,
+                        exploreOfflineTabVisibilitySupplier,
+                        provider,
+                        mDeleteCoordinator::showSnackbar,
+                        mSelectionDelegate,
+                        this::notifyFilterChanged,
+                        createDateOrderedListObserver(),
+                        modalDialogManager,
+                        helpPageLauncher,
+                        faviconProvider,
+                        openWithHandler,
+                        discardableReferencePool);
+        mToolbarCoordinator =
+                new ToolbarCoordinator(
+                        mActivity,
+                        this,
+                        /* listActionDelegate= */ mListCoordinator,
+                        /* listContentView= */ mListCoordinator.getView(),
+                        mSelectionDelegate,
+                        config,
+                        tracker);
 
         initializeView();
         if (config.startWithPrefetchedContent) {
             updateForUrl(Filters.toUrl(Filters.FilterType.PREFETCHED));
         }
         RecordUserAction.record("Android.DownloadManager.Open");
-        mBackPressHandlers = new BackPressHandler[] {
-                mListCoordinator.getBackPressHandler(), mToolbarCoordinator};
+
+        mBackPressHandlers = createBackPressHandlers();
+    }
+
+    private BackPressHandler[] createBackPressHandlers() {
+        List<BackPressHandler> handlers = new ArrayList<>();
+        BackPressHandler searchHandler = mListCoordinator.getSearchBackPressHandler();
+
+        if (searchHandler != null) {
+            handlers.add(searchHandler);
+        }
+
+        handlers.add(mListCoordinator.getBackPressHandler());
+        handlers.add(mToolbarCoordinator);
+
+        return handlers.toArray(new BackPressHandler[0]);
     }
 
     /**
      * Creates the top level layout for download home including the toolbar.
-     * TODO(crbug.com/880468) : Investigate if it is better to do in XML.
+     * TODO(crbug.com/41411681) : Investigate if it is better to do in XML.
      */
     private void initializeView() {
         mMainView = new FrameLayout(mActivity);
         mMainView.setBackgroundColor(SemanticColorUtils.getDefaultBgColor(mActivity));
 
-        FrameLayout.LayoutParams listParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
-        listParams.setMargins(0,
-                mActivity.getResources().getDimensionPixelOffset(
-                        R.dimen.selectable_list_toolbar_height),
-                0, 0);
+        FrameLayout.LayoutParams listParams =
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT);
+        listParams.setMargins(
+                0,
+                mActivity
+                        .getResources()
+                        .getDimensionPixelOffset(R.dimen.selectable_list_toolbar_height),
+                0,
+                0);
         mMainView.addView(mListCoordinator.getView(), listParams);
 
-        FrameLayout.LayoutParams toolbarParams = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        FrameLayout.LayoutParams toolbarParams =
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT);
         toolbarParams.gravity = Gravity.TOP;
         mMainView.addView(mToolbarCoordinator.getView(), toolbarParams);
     }
@@ -135,12 +187,6 @@ class DownloadManagerCoordinatorImpl
     }
 
     @Override
-    public boolean onBackPressed() {
-        if (mListCoordinator.handleBackPressed()) return true;
-        return mToolbarCoordinator.handleBackPressed();
-    }
-
-    @Override
     public BackPressHandler[] getBackPressHandlers() {
         return mBackPressHandlers;
     }
@@ -155,7 +201,8 @@ class DownloadManagerCoordinatorImpl
     @Override
     public void addObserver(Observer observer) {
         mObservers.addObserver(observer);
-        PostTask.postTask(UiThreadTaskTraits.DEFAULT,
+        PostTask.postTask(
+                TaskTraits.UI_DEFAULT,
                 () -> observer.onUrlChanged(Filters.toUrl(mListCoordinator.getSelectedFilter())));
     }
 
@@ -173,7 +220,12 @@ class DownloadManagerCoordinatorImpl
     @Override
     public void openSettings() {
         RecordUserAction.record("Android.DownloadManager.Settings");
-        mSettingsLauncher.onResult(mActivity);
+        mSettingsNavigation.onResult(mActivity);
+    }
+
+    @Override
+    public ViewGroup getListViewForTesting() {
+        return mListCoordinator.getListViewForTesting();
     }
 
     private void notifyFilterChanged(@FilterType int filter) {

@@ -4,6 +4,8 @@
 
 #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 
+#include "build/build_config.h"
+
 namespace blink {
 
 namespace {
@@ -114,7 +116,7 @@ WebMouseWheelEvent WebMouseWheelEvent::FlattenTransform() const {
 WebMouseWheelEvent::EventAction
 WebMouseWheelEvent::GetPlatformSpecificDefaultEventAction(
     const WebMouseWheelEvent& event) {
-#if defined(USE_AURA)
+#if defined(USE_AURA) || BUILDFLAG(IS_ANDROID)
   // Scroll events generated from the mouse wheel when the control key is held
   // don't trigger scrolling. Instead, they may cause zooming.
   if (event.delta_units != ui::ScrollGranularity::kScrollByPrecisePixel &&
@@ -125,12 +127,12 @@ WebMouseWheelEvent::GetPlatformSpecificDefaultEventAction(
   if (event.delta_x == 0 && (event.GetModifiers() & WebInputEvent::kShiftKey))
     return blink::WebMouseWheelEvent::EventAction::kScrollHorizontal;
 #endif
-  if (event.rails_mode == WebInputEvent::kRailsModeHorizontal ||
+  if (event.rails_mode == WebInputEvent::RailsMode::kRailsModeHorizontal ||
       (event.delta_x != 0 && event.delta_y == 0)) {
     return blink::WebMouseWheelEvent::EventAction::kScrollHorizontal;
   }
 
-  if (event.rails_mode == WebInputEvent::kRailsModeVertical ||
+  if (event.rails_mode == WebInputEvent::RailsMode::kRailsModeVertical ||
       (event.delta_x == 0 && event.delta_y != 0)) {
     return blink::WebMouseWheelEvent::EventAction::kScrollVertical;
   }

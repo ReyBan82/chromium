@@ -12,9 +12,9 @@ import itertools
 import logging
 
 Neighbor = collections.namedtuple('Neighbor', ('src', 'dst', 'dist'))
-CalleeInfo = collections.namedtuple('CalleeInfo',
-                                    ('index', 'callee_symbol',
-                                     'misses', 'caller_and_count'))
+CalleeInfo = collections.namedtuple(
+  'CalleeInfo', ('index', 'callee_symbol', 'misses', 'caller_and_count')
+)
 CallerInfo = collections.namedtuple('CallerInfo', ('caller_symbol', 'count'))
 
 
@@ -65,6 +65,7 @@ class Clustering:
   performance and should not be used (1.7% decline in speedometer2,
   450K native library memory regression).
   """
+
   NEIGHBOR_DISTANCE = 20
   FAR_DISTANCE = 1000
   MAX_CLUSTER_SIZE = 4096  # 4k pages on android.
@@ -88,12 +89,6 @@ class Clustering:
     c = cls()
     c.AddSymbolLists(sym_lists)
     return c.ClusterToList(size_map)
-
-  @classmethod
-  def ClusterSymbolCallGraph(cls, call_graph, whitelist):
-    c = cls()
-    c.AddSymbolCallGraph(call_graph, whitelist)
-    return c.ClusterToList()
 
   def __init__(self):
     self._num_lists = None
@@ -134,40 +129,8 @@ class Clustering:
   def AddSymbolLists(self, sym_lists):
     self._num_lists = len(sym_lists)
     self._neighbors = self._CoalesceNeighbors(
-        self._ConstructNeighbors(sym_lists))
-
-  def AddSymbolCallGraph(self, call_graph, whitelist):
-    self._num_lists = len(call_graph)
-    self._neighbors = self._ConstructNeighborsFromGraph(call_graph, whitelist)
-
-  def _ConstructNeighborsFromGraph(self, call_graph, whitelist):
-    neighbors = []
-    pairs = collections.defaultdict()
-    # Each list item is a list of dict.
-    for process_items in call_graph:
-      for callee_info in process_items:
-        callee = callee_info.callee_symbol
-        for caller_info in callee_info.caller_and_count:
-          caller = caller_info.caller_symbol
-          if caller in whitelist or callee == caller:
-            continue
-
-          # Multiply by -1, the bigger the count the smaller the distance
-          # should be.
-          dist = caller_info.count * -1
-          if (caller, callee) in pairs:
-            pairs[(caller, callee)] += dist
-          elif (callee, caller) in pairs:
-            pairs[(callee, caller)] += dist
-          else:
-            pairs[(caller, callee)] = dist
-
-    for (s, t) in pairs:
-      assert s != t and (t, s) not in pairs, ('Unexpected shuffled pair:'
-                                              ' ({}, {})'.format(s, t))
-      neighbors.append(Neighbor(s, t, pairs[(s, t)]))
-
-    return neighbors
+      self._ConstructNeighbors(sym_lists)
+    )
 
   def _ConstructNeighbors(self, sym_lists):
     neighbors = []
@@ -189,7 +152,7 @@ class Clustering:
     coalesced = []
     logging.info('Will coalesce over %s neighbor pairs', len(pairs))
     count = 0
-    for (s, t) in pairs:
+    for s, t in pairs:
       assert s != t, '{} != {}'.format(s, t)
       if (t, s) in pairs and t < s:
         # Only process each unordered pair once.
@@ -204,8 +167,9 @@ class Clustering:
         distances.extend(-d for d in pairs[(t, s)])
       if distances:
         num_missing = self._num_lists - len(distances)
-        avg_distance = (float(sum(distances)) +
-                        self.FAR_DISTANCE * num_missing) / self._num_lists
+        avg_distance = (
+          float(sum(distances)) + self.FAR_DISTANCE * num_missing
+        ) / self._num_lists
         if avg_distance > 0:
           coalesced.append(Neighbor(s, t, avg_distance))
         else:
@@ -240,118 +204,60 @@ class Clustering:
       neighbor = self._neighbors.pop()
       src = self.ClusterOf(neighbor.src)
       dst = self.ClusterOf(neighbor.dst)
-      if (src == dst or
-          src.binary_size + dst.binary_size > self.MAX_CLUSTER_SIZE):
+      if (
+        src == dst or src.binary_size + dst.binary_size > self.MAX_CLUSTER_SIZE
+      ):
         continue
       self.Combine(src, dst)
     if size_map:
-      clusters_by_size = sorted(list(set(self._cluster_map.values())),
-                                key=lambda c: -c.binary_size)
+      clusters_by_size = sorted(
+        list(set(self._cluster_map.values())), key=lambda c: -c.binary_size
+      )
     else:
-      clusters_by_size = sorted(list(set(self._cluster_map.values())),
-                                key=lambda c: -len(c.syms))
+      clusters_by_size = sorted(
+        list(set(self._cluster_map.values())), key=lambda c: -len(c.syms)
+      )
     logging.info('Produced %s clusters', len(clusters_by_size))
-    logging.info('Top sizes: %s', ['{}/{}'.format(len(c.syms), c.binary_size)
-                                   for c in clusters_by_size[:4]])
-    logging.info('Bottom sizes: %s', ['{}/{}'.format(len(c.syms), c.binary_size)
-                                      for c in clusters_by_size[-4:]])
+    logging.info(
+      'Top sizes: %s',
+      [
+        '{}/{}'.format(len(c.syms), c.binary_size) for c in clusters_by_size[:4]
+      ],
+    )
+    logging.info(
+      'Bottom sizes: %s',
+      [
+        '{}/{}'.format(len(c.syms), c.binary_size)
+        for c in clusters_by_size[-4:]
+      ],
+    )
     ordered_syms = []
     for c in clusters_by_size:
       ordered_syms.extend(c.syms)
     assert len(ordered_syms) == len(set(ordered_syms)), 'Duplicated symbols!'
     return ordered_syms
 
+
 def _GetOffsetSymbolName(processor, dump_offset):
-  dump_offset_to_symbol_info = \
-      processor.GetDumpOffsetToSymboInfolIncludingWhitelist()
+  dump_offset_to_symbol_info = (
+    processor.GetDumpOffsetToSymboInfolIncludingWhitelist()
+  )
   offset_to_primary = processor.OffsetToPrimaryMap()
   idx = dump_offset // 2
   assert dump_offset >= 0 and idx < len(dump_offset_to_symbol_info), (
-      'Dump offset out of binary range')
+    'Dump offset out of binary range'
+  )
   symbol_info = dump_offset_to_symbol_info[idx]
-  assert symbol_info, ('A return address (offset = 0x{:08x}) does not map '
-                       'to any symbol'.format(dump_offset))
+  assert symbol_info, (
+    'A return address (offset = 0x{:08x}) does not map to any symbol'.format(
+      dump_offset
+    )
+  )
   assert symbol_info.offset in offset_to_primary, (
-      'Offset not found in primary map!')
+    'Offset not found in primary map!'
+  )
   return offset_to_primary[symbol_info.offset].name
 
-def _GetSymbolsCallGraph(profiles, processor):
-  """Maps each offset in the call graph to the corresponding symbol name.
-
-  Args:
-    profiles (ProfileManager) Manager of the profile dump files.
-    processor (SymbolOffsetProcessor) Symbol table processor for the dumps.
-
-  Returns:
-    A dict that maps each process type (ex: browser, renderer, etc.) to a list
-    of processes of that type. Each process is a list that contains the
-    call graph information. The call graph is represented by a list where each
-    item is a dict that contains: callee, 3 caller-count pairs, misses.
-  """
-  offsets_graph = profiles.GetProcessOffsetGraph();
-  process_symbols_graph = collections.defaultdict(list)
-
-  # |process_type| can be : browser, renderer, gpu-process, etc.
-  for process_type in offsets_graph:
-    for process in offsets_graph[process_type]:
-      process = sorted(process, key=lambda k: int(k['index']))
-      graph_list = []
-      for el in process:
-        index = int(el['index'])
-        callee_symbol = _GetOffsetSymbolName(processor,
-                                             int(el['callee_offset']))
-        misses = 0
-        caller_and_count = []
-        for bucket in el['caller_and_count']:
-          caller_offset = int(bucket['caller_offset'])
-          count = int(bucket['count'])
-          if caller_offset == 0:
-            misses += count
-            continue
-
-          caller_symbol_name = _GetOffsetSymbolName(processor, caller_offset)
-          caller_info = CallerInfo(caller_symbol=caller_symbol_name,
-                                   count=count)
-          caller_and_count.append(caller_info)
-
-        callee_info = CalleeInfo(index=index,
-                                 callee_symbol=callee_symbol,
-                                 misses=misses,
-                                 caller_and_count=caller_and_count)
-        graph_list.append(callee_info)
-      process_symbols_graph[process_type].append(graph_list)
-  return process_symbols_graph
-
-def _ClusterOffsetsFromCallGraph(profiles, processor):
-  symbols_call_graph = _GetSymbolsCallGraph(profiles, processor)
-  # Process names from the profile dumps that are treated specially.
-  _RENDERER = 'renderer'
-  _BROWSER = 'browser'
-
-  assert _RENDERER in symbols_call_graph
-  assert _BROWSER in symbols_call_graph
-  whitelist = processor.GetWhitelistSymbols()
-  renderer_clustering = Clustering.ClusterSymbolCallGraph(
-      symbols_call_graph[_RENDERER], whitelist)
-  browser_clustering = Clustering.ClusterSymbolCallGraph(
-      symbols_call_graph[_BROWSER], whitelist)
-  other_lists = []
-  for process in symbols_call_graph:
-    if process not in (_RENDERER, _BROWSER):
-      other_lists.extend(symbols_call_graph[process])
-  if other_lists:
-    other_clustering = Clustering.ClusterSymbolCallGraph(other_lists, whitelist)
-  else:
-    other_clustering = []
-
-  # Start with the renderer cluster to favor rendering performance.
-  final_ordering = list(renderer_clustering)
-  seen = set(final_ordering)
-  final_ordering.extend(s for s in browser_clustering if s not in seen)
-  seen |= set(browser_clustering)
-  final_ordering.extend(s for s in other_clustering if s not in seen)
-
-  return final_ordering
 
 def _ClusterOffsetsLists(profiles, processor, limit_cluster_size=False):
   raw_offsets = profiles.GetProcessOffsetLists()
@@ -360,7 +266,8 @@ def _ClusterOffsetsLists(profiles, processor, limit_cluster_size=False):
   for p in raw_offsets:
     for offsets in raw_offsets[p]:
       symbol_names = processor.GetOrderedSymbols(
-          processor.GetReachedOffsetsFromDump(offsets))
+        processor.GetReachedOffsetsFromDump(offsets)
+      )
       process_symbols[p].append(symbol_names)
       seen_symbols |= set(symbol_names)
   if limit_cluster_size:
@@ -377,9 +284,11 @@ def _ClusterOffsetsLists(profiles, processor, limit_cluster_size=False):
   assert _BROWSER in process_symbols
 
   renderer_clustering = Clustering.ClusteredSymbolLists(
-      process_symbols[_RENDERER], size_map)
+    process_symbols[_RENDERER], size_map
+  )
   browser_clustering = Clustering.ClusteredSymbolLists(
-      process_symbols[_BROWSER], size_map)
+    process_symbols[_BROWSER], size_map
+  )
   other_lists = []
   for process, syms in process_symbols.items():
     if process not in (_RENDERER, _BROWSER):
@@ -398,18 +307,15 @@ def _ClusterOffsetsLists(profiles, processor, limit_cluster_size=False):
 
   return final_ordering
 
-def ClusterOffsets(profiles, processor, limit_cluster_size=False,
-                   call_graph=False):
+
+def ClusterOffsets(profiles, processor, limit_cluster_size=False):
   """Cluster profile offsets.
 
   Args:
     profiles (ProfileManager) Manager of the profile dump files.
     processor (SymbolOffsetProcessor) Symbol table processor for the dumps.
-    call_graph (bool) whether the call graph instrumentation was used.
 
   Returns:
     A list of clustered symbol offsets.
-"""
-  if not call_graph:
-    return _ClusterOffsetsLists(profiles, processor, limit_cluster_size)
-  return _ClusterOffsetsFromCallGraph(profiles, processor)
+  """
+  return _ClusterOffsetsLists(profiles, processor, limit_cluster_size)

@@ -5,11 +5,11 @@
 #ifndef CHROMEOS_COMPONENTS_ONC_CERTIFICATE_SCOPE_H_
 #define CHROMEOS_COMPONENTS_ONC_CERTIFICATE_SCOPE_H_
 
+#include <optional>
 #include <string>
 
 #include "base/component_export.h"
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace chromeos::onc {
 
@@ -36,8 +36,8 @@ class COMPONENT_EXPORT(CHROMEOS_ONC) CertificateScope {
 
   // Parses a CertificateScope from |scope_dict|, which should be a dictionary
   // containing the ONC "Scope" object.
-  static absl::optional<CertificateScope> ParseFromOncValue(
-      const base::Value::Dict& scope_dict);
+  static std::optional<CertificateScope> ParseFromOncValue(
+      const base::DictValue& scope_dict);
 
   CertificateScope& operator=(const CertificateScope& other);
   bool operator<(const CertificateScope& other) const;

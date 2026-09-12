@@ -8,10 +8,8 @@
 
 #include "base/strings/string_number_conversions.h"
 #include "components/safe_browsing/core/common/safe_browsing_prefs.h"
-#include "components/security_interstitials/content/cert_report_helper.h"
 #include "components/security_interstitials/content/security_interstitial_controller_client.h"
 #include "components/security_interstitials/content/security_interstitial_page.h"
-#include "components/security_interstitials/content/ssl_cert_reporter.h"
 #include "components/security_interstitials/core/bad_clock_ui.h"
 #include "components/security_interstitials/core/metrics_helper.h"
 #include "content/public/browser/navigation_controller.h"
@@ -36,21 +34,18 @@ const security_interstitials::SecurityInterstitialPage::TypeID
 // it leaks memory, so don't create it here.
 BadClockBlockingPage::BadClockBlockingPage(
     content::WebContents* web_contents,
-    int cert_error,
+    net::Error cert_error,
     const net::SSLInfo& ssl_info,
     const GURL& request_url,
     const base::Time& time_triggered,
     bool can_show_enhanced_protection_message,
     ssl_errors::ClockState clock_state,
-    std::unique_ptr<SSLCertReporter> ssl_cert_reporter,
     std::unique_ptr<
         security_interstitials::SecurityInterstitialControllerClient>
         controller_client)
     : SSLBlockingPageBase(web_contents,
-                          CertificateErrorReport::INTERSTITIAL_CLOCK,
                           ssl_info,
                           request_url,
-                          std::move(ssl_cert_reporter),
                           false /* overridable */,
                           time_triggered,
                           can_show_enhanced_protection_message,
@@ -71,10 +66,10 @@ BadClockBlockingPage::GetTypeForTesting() {
 }
 
 void BadClockBlockingPage::PopulateInterstitialStrings(
-    base::Value::Dict& load_time_data) {
+    base::DictValue& load_time_data) {
   bad_clock_ui_->PopulateStringsForHTML(load_time_data);
-  cert_report_helper()->PopulateExtendedReportingOption(load_time_data);
-  cert_report_helper()->PopulateEnhancedProtectionMessage(load_time_data);
+
+  PopulateEnhancedProtectionMessage(load_time_data);
 }
 
 // This handles the commands sent from the interstitial JavaScript.
@@ -89,12 +84,6 @@ void BadClockBlockingPage::CommandReceived(const std::string& command) {
   bool retval = base::StringToInt(command, &cmd);
   DCHECK(retval);
 
-  // Let the CertReportHelper handle commands first, This allows it to get set
-  // up to send reports, so that the report is populated properly if
-  // BadClockErrorUI's command handling triggers a report to be sent.
-  cert_report_helper()->HandleReportingCommands(
-      static_cast<security_interstitials::SecurityInterstitialCommand>(cmd),
-      controller()->GetPrefService());
   bad_clock_ui_->HandleCommand(
       static_cast<security_interstitials::SecurityInterstitialCommand>(cmd));
 }

@@ -10,27 +10,22 @@ If the file was pretty-printed, the updated version is pretty-printed too.
 
 from __future__ import print_function
 
+import argparse
 import os
-import re
 import sys
-
-from ast import literal_eval
-from optparse import OptionParser
 from xml.dom import minidom
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../../third_party'))
-import pyyaml
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'common'))
-from diff_util import PromptUserToAcceptDiff
-import path_util
+import setup_modules  # pylint: disable=unused-import
 
-import histogram_paths
-import histogram_configuration_model
+import chromium_src.third_party.pyyaml as pyyaml
+import chromium_src.tools.metrics.common.diff_util as diff_util
+import chromium_src.tools.metrics.histograms.histogram_configuration_model as histogram_configuration_model
 
-ENUMS_PATH = histogram_paths.ENUMS_XML
+
+ENUMS_PATH = 'tools/metrics/histograms/metadata/enterprise/enums.xml'
 POLICY_LIST_PATH = 'components/policy/resources/templates/policies.yaml'
 POLICIES_ENUM_NAME = 'EnterprisePolicies'
-POLICY_ATOMIC_GROUPS_ENUM_NAME = 'PolicyAtomicGroups'
+
 
 class UserError(Exception):
   def __init__(self, message):
@@ -67,10 +62,9 @@ def UpdatePoliciesHistogramDefinitions(policy_ids, doc):
   policy_enum_node.appendChild(doc.createComment(comment))
 
   # Add values generated from policy templates.
-  ordered_policies = [{
-      'id': id,
-      'name': name
-  } for id, name in policy_ids.items() if name]
+  ordered_policies = [
+    {'id': id, 'name': name} for id, name in policy_ids.items() if name
+  ]
 
   ordered_policies.sort(key=lambda policy: policy['id'])
   for policy in ordered_policies:
@@ -80,49 +74,15 @@ def UpdatePoliciesHistogramDefinitions(policy_ids, doc):
     policy_enum_node.appendChild(node)
 
 
-def UpdateAtomicGroupsHistogramDefinitions(atomic_group_ids, doc):
-  """Sets the children of <enum name="PolicyAtomicGroups" ...> node in |doc| to
-  values generated from policy ids contained in |policy_templates|.
-
-  Args:
-    atomic_group_ids: A dictionary mapping atomic policy goupr ids to their
-                      names.
-    doc: A minidom.Document object representing parsed histogram definitions
-         XML file.
-  """
-  # Find EnterprisePolicies enum.
-  for enum_node in doc.getElementsByTagName('enum'):
-    if enum_node.attributes['name'].value == POLICY_ATOMIC_GROUPS_ENUM_NAME:
-      atomic_group_enum_node = enum_node
-      break
-  else:
-    raise UserError('No policy atomic group enum node found')
-
-  # Remove existing values.
-  while atomic_group_enum_node.hasChildNodes():
-    atomic_group_enum_node.removeChild(atomic_group_enum_node.lastChild)
-
-  # Add a "Generated from (...)" comment
-  comment = ' Generated from {0} '.format(POLICY_LIST_PATH)
-  atomic_group_enum_node.appendChild(doc.createComment(comment))
-
-  # Add values generated from policy templates.
-  ordered_atomic_groups = [{
-      'id': id,
-      'name': name
-  } for id, name in atomic_group_ids.items() if name]
-  ordered_atomic_groups.sort(key=lambda group: group['id'])
-  for group in ordered_atomic_groups:
-    node = doc.createElement('int')
-    node.attributes['value'] = str(group['id'])
-    node.attributes['label'] = group['name']
-    atomic_group_enum_node.appendChild(node)
-
 def main():
-  if len(sys.argv) > 1:
-    print('No arguments expected!', file=sys.stderr)
-    sys.stderr.write(__doc__)
-    sys.exit(1)
+  args_parser = argparse.ArgumentParser()
+  args_parser.add_argument(
+    '--yes',
+    '-y',
+    action='store_true',
+    help='Skip confirmation before diffing.',
+  )
+  args = args_parser.parse_args()
 
   with open(os.path.join(POLICY_LIST_PATH), encoding='utf-8') as f:
     policy_list_content = pyyaml.safe_load(f)
@@ -132,12 +92,17 @@ def main():
     f.seek(0)
     xml = f.read().decode('utf-8')
 
-  UpdatePoliciesHistogramDefinitions(policy_list_content['policies'],
-                                     histograms_doc)
-  UpdateAtomicGroupsHistogramDefinitions(policy_list_content['atomic_groups'],
-                                         histograms_doc)
+  UpdatePoliciesHistogramDefinitions(
+    policy_list_content['policies'], histograms_doc
+  )
   new_xml = histogram_configuration_model.PrettifyTree(histograms_doc)
-  if PromptUserToAcceptDiff(xml, new_xml, 'Is the updated version acceptable?'):
+  if args.yes:
+    make_edits = True
+  else:
+    make_edits = diff_util.PromptUserToAcceptDiff(
+      xml, new_xml, 'Is the updated version acceptable?'
+    )
+  if make_edits:
     with open(ENUMS_PATH, 'wb') as f:
       f.write(new_xml.encode('utf-8'))
 

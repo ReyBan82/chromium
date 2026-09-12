@@ -4,7 +4,6 @@
 
 #include "chrome/browser/ash/policy/server_backed_state/server_backed_state_keys_broker.h"
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -32,13 +31,15 @@ ServerBackedStateKeysBroker::ServerBackedStateKeysBroker(
     ash::SessionManagerClient* session_manager_client)
     : session_manager_client_(session_manager_client), requested_(false) {}
 
-ServerBackedStateKeysBroker::~ServerBackedStateKeysBroker() {}
+ServerBackedStateKeysBroker::~ServerBackedStateKeysBroker() = default;
 
 base::CallbackListSubscription
 ServerBackedStateKeysBroker::RegisterUpdateCallback(
     const UpdateCallback& callback) {
-  if (!available())
+  if (!available()) {
+    LOG(WARNING) << "Fetching state keys.";
     FetchStateKeys();
+  }
   return update_callbacks_.Add(callback);
 }
 
@@ -65,27 +66,35 @@ base::TimeDelta ServerBackedStateKeysBroker::GetRetryIntervalForTesting() {
 void ServerBackedStateKeysBroker::FetchStateKeys() {
   if (!requested_) {
     requested_ = true;
-    session_manager_client_->GetServerBackedStateKeys(
+    session_manager_client_->GetStateKeysWithTimeQuantumIndex(
         base::BindOnce(&ServerBackedStateKeysBroker::StoreStateKeys,
                        weak_factory_.GetWeakPtr()));
   }
 }
 
 void ServerBackedStateKeysBroker::StoreStateKeys(
-    const std::vector<std::string>& state_keys) {
+    base::expected<ash::SessionManagerClient::StateKeysData, ErrorType>
+        state_keys_data) {
   bool send_notification = !available();
 
   requested_ = false;
   auto wait_interval = kPollInterval;
-  if (state_keys.empty()) {
-    LOG(WARNING) << "Failed to obtain server-backed state keys.";
+  error_type_ = state_keys_data.error_or(ErrorType::kNoError);
+  if (!state_keys_data.has_value()) {
+    LOG(WARNING) << "Failed to obtain server-backed state keys. Error: "
+                 << static_cast<int>(state_keys_data.error());
     wait_interval = kRetryInterval;
-  } else if (base::Contains(state_keys, std::string())) {
-    LOG(WARNING) << "Bad state keys.";
-    wait_interval = kRetryInterval;
+    state_keys_.clear();
+    current_time_quantum_index_ = 0;
   } else {
-    send_notification |= state_keys_ != state_keys;
-    state_keys_ = state_keys;
+    send_notification |=
+        (state_keys_ != state_keys_data.value().state_keys ||
+         current_time_quantum_index_ !=
+             state_keys_data.value().current_time_quantum_index);
+    // Do not access state_keys_data.value().state_keys after this!
+    state_keys_ = std::move(state_keys_data.value().state_keys);
+    current_time_quantum_index_ =
+        state_keys_data.value().current_time_quantum_index;
   }
 
   if (send_notification)
@@ -98,6 +107,11 @@ void ServerBackedStateKeysBroker::StoreStateKeys(
       base::BindOnce(&ServerBackedStateKeysBroker::FetchStateKeys,
                      weak_factory_.GetWeakPtr()),
       wait_interval);
+}
+
+ServerBackedStateKeysBroker::ErrorType ServerBackedStateKeysBroker::error_type()
+    const {
+  return error_type_;
 }
 
 }  // namespace policy

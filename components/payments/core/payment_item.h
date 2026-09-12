@@ -15,7 +15,7 @@
 // https://w3c.github.io/payment-request/#dom-paymentitem
 
 namespace base {
-class Value;
+class DictValue;
 }
 
 namespace payments {
@@ -30,15 +30,14 @@ class PaymentItem {
   PaymentItem(const PaymentItem& other);
 
   bool operator==(const PaymentItem& other) const;
-  bool operator!=(const PaymentItem& other) const;
   PaymentItem& operator=(const PaymentItem& other);
 
   // Populates the properties of this PaymentItem from |dict|. Returns true if
   // the required values are present.
-  bool FromValueDict(const base::Value::Dict& dict);
+  bool FromValueDict(const base::DictValue& dict);
 
-  // Creates a base::Value::Dict with the properties of this PaymentItem.
-  base::Value::Dict ToValueDict() const;
+  // Creates a base::DictValue with the properties of this PaymentItem.
+  base::DictValue ToValueDict() const;
 
   // A human-readable description of the item.
   std::string label;

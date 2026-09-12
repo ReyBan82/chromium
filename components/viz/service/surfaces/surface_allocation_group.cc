@@ -4,9 +4,11 @@
 
 #include "components/viz/service/surfaces/surface_allocation_group.h"
 
+#include <algorithm>
+#include <numeric>
 #include <utility>
 
-#include "base/ranges/algorithm.h"
+#include "base/memory/raw_ptr.h"
 #include "components/viz/service/surfaces/surface.h"
 #include "components/viz/service/surfaces/surface_manager.h"
 
@@ -41,8 +43,8 @@ void SurfaceAllocationGroup::RegisterSurface(Surface* surface) {
 }
 
 void SurfaceAllocationGroup::UnregisterSurface(Surface* surface) {
-  auto it = base::ranges::find(surfaces_, surface);
-  DCHECK(it != surfaces_.end());
+  auto it = std::ranges::find(surfaces_, surface);
+  CHECK(it != surfaces_.end());
   surfaces_.erase(it);
   MaybeMarkForDestruction();
 }
@@ -158,8 +160,11 @@ void SurfaceAllocationGroup::TakeAggregatedLatencyInfoUpTo(
 }
 
 void SurfaceAllocationGroup::OnFirstSurfaceActivation(Surface* surface) {
-  for (Surface* embedder : active_embedders_)
+  // Copy container as it can be mutated during iteration.
+  auto active_embedders = active_embedders_;
+  for (Surface* embedder : active_embedders) {
     embedder->OnChildActivatedForActiveFrame(surface->surface_id());
+  }
   base::flat_map<Surface*, SurfaceId> embedders_to_notify;
   for (const auto& entry : blocked_embedders_) {
     if (!entry.second.IsNewerThan(surface->surface_id()))
@@ -191,7 +196,7 @@ void SurfaceAllocationGroup::AckLastestActiveUnAckedFrame() {
     lastest_active->SendAckToClient();
 }
 
-std::vector<Surface*>::const_iterator
+std::vector<raw_ptr<Surface, VectorExperimental>>::const_iterator
 SurfaceAllocationGroup::FindLatestSurfaceUpTo(
     const SurfaceId& surface_id) const {
   DCHECK_EQ(submitter_, surface_id.frame_sink_id());
@@ -211,7 +216,7 @@ SurfaceAllocationGroup::FindLatestSurfaceUpTo(
   int begin = 0;
   int end = surfaces_.size();
   while (end - begin > 1) {
-    int avg = (begin + end) / 2;
+    int avg = std::midpoint(begin, end);
     if (!surface_id.IsSameOrNewerThan(surfaces_[avg]->surface_id()))
       end = avg;
     else
@@ -222,7 +227,7 @@ SurfaceAllocationGroup::FindLatestSurfaceUpTo(
   return surfaces_.begin() + begin;
 }
 
-std::vector<Surface*>::const_iterator
+std::vector<raw_ptr<Surface, VectorExperimental>>::const_iterator
 SurfaceAllocationGroup::FindLatestActiveSurfaceUpTo(
     const SurfaceId& surface_id) const {
   // Start from the last older or equal surface and keep iterating back until we

@@ -10,6 +10,8 @@
 
 #include <vector>
 
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/component_export.h"
 #include "base/memory/raw_ptr_exclusion.h"
 #include "mojo/public/cpp/system/handle.h"
@@ -79,7 +81,8 @@ class COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE) Buffer {
   template <typename T>
   T* Get(size_t index) {
     DCHECK_LT(index, cursor_);
-    return reinterpret_cast<T*>(static_cast<uint8_t*>(data_) + index);
+    return reinterpret_cast<T*>(
+        UNSAFE_TODO(static_cast<uint8_t*>(data_) + index));
   }
 
   // A template helper combining Allocate() and Get<T>() above to allocate and

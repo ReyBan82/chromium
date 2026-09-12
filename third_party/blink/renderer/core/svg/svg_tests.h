@@ -31,23 +31,32 @@ class QualifiedName;
 class SVGElement;
 class SVGStaticStringList;
 class SVGStringListTearOff;
+class SVGAnimatedPropertyBase;
 
-class CORE_EXPORT SVGTests : public GarbageCollectedMixin {
+// Implements the SVGTests IDL mixin. Held as a lazily-allocated
+// `Member<SVGTests>` on each SVG element type whose IDL includes SVGTests.
+class CORE_EXPORT SVGTests final : public GarbageCollected<SVGTests> {
  public:
-  // JS API
-  SVGStringListTearOff* requiredExtensions();
-  SVGStringListTearOff* systemLanguage();
+  SVGTests();
+
+  SVGStringListTearOff* requiredExtensions(const SVGElement* owner);
+  SVGStringListTearOff* systemLanguage(const SVGElement* owner);
 
   bool IsValid() const;
 
-  void Trace(Visitor*) const override;
-
- protected:
-  explicit SVGTests(SVGElement* context_element);
-
   static bool IsKnownAttribute(const QualifiedName&);
 
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const SVGElement* owner,
+      const QualifiedName& attribute_name);
+  void SynchronizeAllSVGAttributes() const;
+
+  void Trace(Visitor*) const;
+
  private:
+  SVGStaticStringList& EnsureRequiredExtensions(const SVGElement* owner);
+  SVGStaticStringList& EnsureSystemLanguage(const SVGElement* owner);
+
   Member<SVGStaticStringList> required_extensions_;
   Member<SVGStaticStringList> system_language_;
 };

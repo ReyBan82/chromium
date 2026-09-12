@@ -6,17 +6,24 @@
 
 #include <stddef.h>
 
+#include <algorithm>
 #include <utility>
 
+#include "base/debug/dump_without_crashing.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/json/json_writer.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/string_util.h"
+#include "base/strings/to_string.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/time/time.h"
+#include "base/values.h"
+#include "build/build_config.h"
+#include "components/dom_distiller/core/dom_distiller_features.h"
+#include "components/dom_distiller/core/extraction_utils.h"
 #include "components/grit/components_resources.h"
 #include "third_party/dom_distiller_js/dom_distiller.pb.h"
 #include "third_party/dom_distiller_js/dom_distiller_json_converter.h"
@@ -27,63 +34,43 @@ namespace dom_distiller {
 
 namespace {
 
-const char* kOptionsPlaceholder = "$$OPTIONS";
-const char* kStringifyPlaceholder = "$$STRINGIFY";
-
-std::string GetDistillerScriptWithOptions(
-    const dom_distiller::proto::DomDistillerOptions& options,
-    bool stringify_output) {
-  std::string script =
-      ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(
-          IDR_DISTILLER_JS);
-  if (script.empty()) {
-    return "";
-  }
-
-  base::Value options_value =
-      dom_distiller::proto::json::DomDistillerOptions::WriteToValue(options);
-  std::string options_json;
-  if (!base::JSONWriter::Write(options_value, &options_json)) {
-    NOTREACHED();
-  }
-  size_t options_offset = script.find(kOptionsPlaceholder);
-  DCHECK_NE(std::string::npos, options_offset);
-  DCHECK_EQ(std::string::npos,
-            script.find(kOptionsPlaceholder, options_offset + 1));
-  script =
-      script.replace(options_offset, strlen(kOptionsPlaceholder), options_json);
-
-  std::string stringify = stringify_output ? "true" : "false";
-  size_t stringify_offset = script.find(kStringifyPlaceholder);
-  DCHECK_NE(std::string::npos, stringify_offset);
-  DCHECK_EQ(std::string::npos,
-            script.find(kStringifyPlaceholder, stringify_offset + 1));
-  script = script.replace(stringify_offset, strlen(kStringifyPlaceholder),
-                          stringify);
-
-  return script;
-}
+#if BUILDFLAG(IS_ANDROID)
+constexpr int kDefaultMinContentLength = 100;
+#else
+constexpr int kDefaultMinContentLength = 0;
+#endif
 
 }  // namespace
 
 DistillerPageFactory::~DistillerPageFactory() = default;
 
-DistillerPage::DistillerPage() : ready_(true) {}
+DistillerPage::DistillerPage()
+    : ready_(true), min_content_length_(kDefaultMinContentLength) {}
 
 DistillerPage::~DistillerPage() = default;
 
-void DistillerPage::DistillPage(
-    const GURL& gurl,
-    const dom_distiller::proto::DomDistillerOptions options,
-    DistillerPageCallback callback) {
-  DCHECK(ready_);
+void DistillerPage::DistillPage(const GURL& gurl,
+                                const DistillerOptions& options,
+                                DistillerPageCallback callback) {
+  CHECK(ready_);
+  CHECK(callback);
+  CHECK(!distiller_page_callback_);
   // It is only possible to distill one page at a time. |ready_| is reset when
   // the callback to OnDistillationDone happens.
   ready_ = false;
   distiller_page_callback_ = std::move(callback);
-  distillation_start_ = base::TimeTicks::Now();
-  DistillPageImpl(gurl,
-                  GetDistillerScriptWithOptions(options, StringifyOutput()));
+
+  std::string script;
+  switch (GetDistillerType()) {
+    case DistillerType::kReadability:
+      script = GetReadabilityDistillerScript(options.readability);
+      break;
+    case DistillerType::kDOMDistiller:
+      script = GetDistillerScriptWithOptions(options.dom_distiller);
+      break;
+  }
+
+  DistillPageImpl(gurl, script);
 }
 
 void DistillerPage::OnDistillationDone(const GURL& page_url,
@@ -93,63 +80,57 @@ void DistillerPage::OnDistillationDone(const GURL& page_url,
 
   std::unique_ptr<dom_distiller::proto::DomDistillerResult> distiller_result(
       new dom_distiller::proto::DomDistillerResult());
-  bool found_content;
-  if (value->is_none()) {
-    found_content = false;
-  } else {
-    found_content =
-        dom_distiller::proto::json::DomDistillerResult::ReadFromValue(
-            *value, distiller_result.get());
-    if (!found_content) {
-      DVLOG(1) << "Unable to parse DomDistillerResult.";
-    } else {
-      base::TimeDelta distillation_time =
-          base::TimeTicks::Now() - distillation_start_;
-      UMA_HISTOGRAM_TIMES("DomDistiller.Time.DistillPage", distillation_time);
-      VLOG(1) << "DomDistiller.Time.DistillPage = " << distillation_time;
 
-      if (distiller_result->has_timing_info()) {
-        const dom_distiller::proto::TimingInfo& timing =
-            distiller_result->timing_info();
-        if (timing.has_markup_parsing_time()) {
-          UMA_HISTOGRAM_TIMES("DomDistiller.Time.MarkupParsing",
-                              base::Milliseconds(timing.markup_parsing_time()));
+  DistillationParseResult result = DistillationParseResult::kParseFailure;
+
+  if (!value || value->is_none()) {
+    result = DistillationParseResult::kNoData;
+  } else {
+    bool parsed_successfully = false;
+    switch (GetDistillerType()) {
+      case DistillerType::kReadability:
+        parsed_successfully = ReadabilityDistillerResultToDomDistillerResult(
+            *value, distiller_result.get());
+        break;
+      case DistillerType::kDOMDistiller:
+        parsed_successfully =
+            dom_distiller::proto::json::DomDistillerResult::ReadFromValue(
+                *value, distiller_result.get());
+        break;
+    }
+
+    if (parsed_successfully) {
+      // Assume success unless a specific validation check fails.
+      result = DistillationParseResult::kSuccess;
+
+      // Apply a content length check specifically for the Readability
+      // distiller.
+      if (GetDistillerType() == DistillerType::kReadability) {
+        bool content_is_long_enough = true;
+        if (distiller_result->has_statistics_info() &&
+            distiller_result->statistics_info().has_word_count()) {
+          content_is_long_enough =
+              distiller_result->statistics_info().word_count() >=
+              GetMinimumAllowableDistilledContentLength();
         }
-        if (timing.has_document_construction_time()) {
-          UMA_HISTOGRAM_TIMES(
-              "DomDistiller.Time.DocumentConstruction",
-              base::Milliseconds(timing.document_construction_time()));
-        }
-        if (timing.has_article_processing_time()) {
-          UMA_HISTOGRAM_TIMES(
-              "DomDistiller.Time.ArticleProcessing",
-              base::Milliseconds(timing.article_processing_time()));
-        }
-        if (timing.has_formatting_time()) {
-          UMA_HISTOGRAM_TIMES("DomDistiller.Time.Formatting",
-                              base::Milliseconds(timing.formatting_time()));
-        }
-        if (timing.has_total_time()) {
-          UMA_HISTOGRAM_TIMES("DomDistiller.Time.DistillationTotal",
-                              base::Milliseconds(timing.total_time()));
-          VLOG(1) << "DomDistiller.Time.DistillationTotal = "
-                  << base::Milliseconds(timing.total_time());
+
+        // If content is too short, update the result state.
+        if (!content_is_long_enough) {
+          result = DistillationParseResult::kContentTooShort;
         }
       }
-      if (distiller_result->has_statistics_info()) {
-        const dom_distiller::proto::StatisticsInfo& statistics =
-            distiller_result->statistics_info();
-        if (statistics.has_word_count()) {
-          UMA_HISTOGRAM_CUSTOM_COUNTS("DomDistiller.Statistics.WordCount",
-                                      statistics.word_count(), 1, 4000, 50);
-        }
-      }
+    } else {
+      // Parsing failed, the default state is already kParseFailure.
+      DVLOG(1) << "Unable to parse DomDistillerResult.";
     }
   }
 
+  // Record result for page distillation
+  base::UmaHistogramEnumeration("DomDistiller.Distillation.Result", result);
+
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(std::move(distiller_page_callback_),
-                                std::move(distiller_result), found_content));
+                                std::move(distiller_result), result));
 }
 
 }  // namespace dom_distiller

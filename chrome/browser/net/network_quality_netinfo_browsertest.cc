@@ -10,7 +10,7 @@
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -98,19 +98,19 @@ class NetInfoBrowserTest : public InProcessBrowserTest {
 
   std::string RunScriptExtractString(const std::string& script) {
     return content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(),
-                           script, content::EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                           script)
         .ExtractString();
   }
 
   double RunScriptExtractDouble(const std::string& script) {
     return content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(),
-                           script, content::EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                           script)
         .ExtractDouble();
   }
 
   int RunScriptExtractInt(const std::string& script) {
     return content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(),
-                           script, content::EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                           script)
         .ExtractInt();
   }
 };

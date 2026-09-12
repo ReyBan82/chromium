@@ -9,23 +9,19 @@
 #include "chromeos/ash/components/phonehub/multidevice_feature_access_manager.h"
 #include "chromeos/ash/components/phonehub/proto/phonehub_api.pb.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 FeatureSetupResponseProcessor::FeatureSetupResponseProcessor(
     MessageReceiver* message_receiver,
     MultideviceFeatureAccessManager* multidevice_feature_access_manager)
-    : message_receiver_(message_receiver),
-      multidevice_feature_access_manager_(multidevice_feature_access_manager) {
-  DCHECK(message_receiver_);
+    : multidevice_feature_access_manager_(multidevice_feature_access_manager) {
+  DCHECK(message_receiver);
   DCHECK(multidevice_feature_access_manager_);
 
-  message_receiver_->AddObserver(this);
+  message_receiver_observation_.Observe(message_receiver);
 }
 
-FeatureSetupResponseProcessor::~FeatureSetupResponseProcessor() {
-  message_receiver_->RemoveObserver(this);
-}
+FeatureSetupResponseProcessor::~FeatureSetupResponseProcessor() = default;
 
 void FeatureSetupResponseProcessor::OnFeatureSetupResponseReceived(
     proto::FeatureSetupResponse response) {
@@ -65,5 +61,4 @@ void FeatureSetupResponseProcessor::OnFeatureSetupResponseReceived(
   }
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

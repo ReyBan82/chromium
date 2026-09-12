@@ -5,8 +5,6 @@
 #ifndef ASH_WEBUI_OS_FEEDBACK_UI_OS_FEEDBACK_UNTRUSTED_UI_H_
 #define ASH_WEBUI_OS_FEEDBACK_UI_OS_FEEDBACK_UNTRUSTED_UI_H_
 
-#include <memory>
-
 #include "content/public/browser/webui_config.h"
 #include "ui/webui/untrusted_web_ui_controller.h"
 
@@ -17,14 +15,14 @@ class WebUI;
 namespace ash {
 namespace feedback {
 
+class OsFeedbackUntrustedUI;
+
 // Class that stores properties for the chrome-untrusted://os-feedback WebUI.
-class OsFeedbackUntrustedUIConfig : public content::WebUIConfig {
+class OsFeedbackUntrustedUIConfig
+    : public content::DefaultWebUIConfig<OsFeedbackUntrustedUI> {
  public:
   OsFeedbackUntrustedUIConfig();
   ~OsFeedbackUntrustedUIConfig() override;
-
-  std::unique_ptr<content::WebUIController> CreateWebUIController(
-      content::WebUI* web_ui) override;
 };
 
 // WebUI for chrome-untrusted://os-feedback, intended to be used by the file
@@ -35,6 +33,9 @@ class OsFeedbackUntrustedUI : public ui::UntrustedWebUIController {
   OsFeedbackUntrustedUI(const OsFeedbackUntrustedUI&) = delete;
   OsFeedbackUntrustedUI& operator=(const OsFeedbackUntrustedUI&) = delete;
   ~OsFeedbackUntrustedUI() override;
+
+ private:
+  WEB_UI_CONTROLLER_TYPE_DECL();
 };
 
 }  // namespace feedback

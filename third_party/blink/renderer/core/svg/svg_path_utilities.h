@@ -22,25 +22,40 @@
 
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/svg/svg_parsing_error.h"
+#include "third_party/blink/renderer/platform/geometry/path_types.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
+#include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
 class Path;
 class SVGPathByteStream;
+class SVGPathByteStreamBuilder;
+class SVGPathSegment;
 
 // StringView/SVGPathByteStream -> Path
-bool CORE_EXPORT BuildPathFromString(const StringView&, Path&);
-bool BuildPathFromByteStream(const SVGPathByteStream&, Path&);
+Path CORE_EXPORT BuildPathFromString(const StringView&);
+Path BuildPathFromByteStream(const SVGPathByteStream&, WindRule);
 
-// StringView -> SVGPathByteStream
-SVGParsingError CORE_EXPORT BuildByteStreamFromString(const StringView&,
-                                                      SVGPathByteStream&);
+SVGParsingError CORE_EXPORT
+BuildByteStreamFromString(const StringView&, SVGPathByteStreamBuilder&);
 
 // SVGPathByteStream -> String
 enum PathSerializationFormat { kNoTransformation, kTransformToAbsolute };
 String BuildStringFromByteStream(const SVGPathByteStream&,
                                  PathSerializationFormat);
+
+// SVGPathByteStream -> sequence<SVGPathSegment>, as exposed via
+// SVGPathElement.getPathData(). When |normalize| is true the segments are
+// reduced to absolute M/L/C/Z form.
+HeapVector<Member<SVGPathSegment>> BuildPathSegmentsFromByteStream(
+    const SVGPathByteStream&,
+    bool normalize);
+
+// sequence<SVGPathSegment> -> SVGPathByteStream, for setPathData().
+SVGPathByteStream BuildByteStreamFromSegments(
+    const HeapVector<Member<SVGPathSegment>>&);
 
 }  // namespace blink
 

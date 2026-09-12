@@ -11,11 +11,12 @@
 #include <vector>
 
 #include "base/auto_reset.h"
+#include "base/logging.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/clipboard/clipboard.h"
 #include "ui/base/clipboard/scoped_clipboard_writer.h"
+#include "ui/base/clipboard/test/clipboard_test_util.h"
 #include "ui/gfx/range/range.h"
 #include "ui/gfx/render_text.h"
 #include "ui/views/controls/textfield/textfield.h"
@@ -64,9 +65,16 @@ class TextfieldModelTest : public ViewsTestBase,
   const std::vector<std::u16string> GetAllSelectionTexts(
       TextfieldModel* model) const {
     std::vector<std::u16string> selected_texts;
-    for (auto range : model->render_text()->GetAllSelections())
-      selected_texts.push_back(model->GetTextFromRange(range));
+    for (auto range : model->render_text()->GetAllSelections()) {
+      selected_texts.emplace_back(model->GetTextFromRange(range));
+    }
     return selected_texts;
+  }
+
+  std::u16string ReadClipboardText() const {
+    return ui::clipboard_test_util::ReadText(
+        ui::Clipboard::GetForCurrentThread(), ui::ClipboardBuffer::kCopyPaste,
+        /*data_dst=*/nullptr);
   }
 
   void VerifyAllSelectionTexts(
@@ -74,15 +82,16 @@ class TextfieldModelTest : public ViewsTestBase,
       std::vector<std::u16string> expected_selected_texts) const {
     std::vector<std::u16string> selected_texts = GetAllSelectionTexts(model);
     EXPECT_EQ(expected_selected_texts.size(), selected_texts.size());
-    for (size_t i = 0; i < selected_texts.size(); ++i)
+    for (size_t i = 0; i < selected_texts.size(); ++i) {
       EXPECT_EQ(expected_selected_texts[i], selected_texts[i]);
+    }
   }
 
   bool composition_text_confirmed_or_cleared_ = false;
 };
 
 TEST_F(TextfieldModelTest, EditString) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   // Append two strings.
   model.Append(u"HILL");
   EXPECT_EQ(u"HILL", model.text());
@@ -125,7 +134,7 @@ TEST_F(TextfieldModelTest, EditString) {
 }
 
 TEST_F(TextfieldModelTest, EditString_SimpleRTL) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   // Append two strings.
   model.Append(u"\x05d0\x05d1\x05d2");
   EXPECT_EQ(u"\x05d0\x05d1\x05d2", model.text());
@@ -151,7 +160,7 @@ TEST_F(TextfieldModelTest, EditString_SimpleRTL) {
 }
 
 TEST_F(TextfieldModelTest, EditString_ComplexScript) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
 
   // Append two Hindi strings.
   model.Append(u"\x0915\x093f\x0915\x094d\x0915");
@@ -261,7 +270,7 @@ TEST_F(TextfieldModelTest, EditString_ComplexScript) {
 }
 
 TEST_F(TextfieldModelTest, EmptyString) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   EXPECT_EQ(std::u16string(), model.text());
   EXPECT_EQ(std::u16string(), model.GetSelectedText());
 
@@ -279,7 +288,7 @@ TEST_F(TextfieldModelTest, EmptyString) {
 }
 
 TEST_F(TextfieldModelTest, Selection) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO");
   model.MoveCursor(gfx::CHARACTER_BREAK, gfx::CURSOR_RIGHT,
                    gfx::SELECTION_NONE);
@@ -350,7 +359,7 @@ TEST_F(TextfieldModelTest, Selection_BidiWithNonSpacingMarks) {
   // the (logical) start and end points. Selection is simply defined as
   // the portion of text between the logical positions of the start and end
   // caret positions.
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   // TODO(xji): temporarily disable in platform Win since the complex script
   // characters turned into empty square due to font regression. So, not able
   // to test 2 characters belong to the same grapheme.
@@ -466,7 +475,7 @@ TEST_F(TextfieldModelTest, Selection_BidiWithNonSpacingMarks) {
 }
 
 TEST_F(TextfieldModelTest, SelectionAndEdit) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO");
   model.MoveCursor(gfx::CHARACTER_BREAK, gfx::CURSOR_RIGHT,
                    gfx::SELECTION_NONE);
@@ -505,7 +514,7 @@ TEST_F(TextfieldModelTest, SelectionAndEdit) {
 
 TEST_F(TextfieldModelTest, SelectionAndEdit_WithSecondarySelection) {
   // Backspace
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"asynchronous promises make the moon spin?");
   model.SelectRange(gfx::Range(0U, 4U));
   model.SelectRange(gfx::Range(17U, 19U), false);
@@ -553,7 +562,7 @@ TEST_F(TextfieldModelTest, SelectionAndEdit_WithSecondarySelection) {
 }
 
 TEST_F(TextfieldModelTest, Word) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"The answer to Life, the Universe, and Everything");
 #if BUILDFLAG(IS_WIN)  // Move right by word includes space/punctuation.
   model.MoveCursor(gfx::WORD_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
@@ -647,7 +656,7 @@ TEST_F(TextfieldModelTest, Word) {
 }
 
 TEST_F(TextfieldModelTest, SetText) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO");
 
   // SetText moves cursor to the indicated position.
@@ -686,22 +695,22 @@ TEST_F(TextfieldModelTest, Clipboard) {
       .WriteText(initial_clipboard_text);
 
   std::u16string clipboard_text;
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO WORLD");
 
   // Cut with an empty selection should do nothing.
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
   EXPECT_FALSE(model.Cut());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(initial_clipboard_text, clipboard_text);
   EXPECT_EQ(u"HELLO WORLD", model.text());
   EXPECT_EQ(11U, model.GetCursorPosition());
 
   // Copy with an empty selection should do nothing.
   EXPECT_FALSE(model.Copy());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(initial_clipboard_text, clipboard_text);
   EXPECT_EQ(u"HELLO WORLD", model.text());
   EXPECT_EQ(11U, model.GetCursorPosition());
@@ -710,8 +719,8 @@ TEST_F(TextfieldModelTest, Clipboard) {
   model.render_text()->SetObscured(true);
   model.SelectAll(false);
   EXPECT_FALSE(model.Cut());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(initial_clipboard_text, clipboard_text);
   EXPECT_EQ(u"HELLO WORLD", model.text());
   EXPECT_EQ(u"HELLO WORLD", model.GetSelectedText());
@@ -719,8 +728,8 @@ TEST_F(TextfieldModelTest, Clipboard) {
   // Copy on obscured (password) text should do nothing.
   model.SelectAll(false);
   EXPECT_FALSE(model.Copy());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(initial_clipboard_text, clipboard_text);
   EXPECT_EQ(u"HELLO WORLD", model.text());
   EXPECT_EQ(u"HELLO WORLD", model.GetSelectedText());
@@ -730,8 +739,8 @@ TEST_F(TextfieldModelTest, Clipboard) {
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
   model.MoveCursor(gfx::WORD_BREAK, gfx::CURSOR_LEFT, gfx::SELECTION_RETAIN);
   EXPECT_TRUE(model.Cut());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"WORLD", clipboard_text);
   EXPECT_EQ(u"HELLO ", model.text());
   EXPECT_EQ(6U, model.GetCursorPosition());
@@ -739,8 +748,8 @@ TEST_F(TextfieldModelTest, Clipboard) {
   // Copy with non-empty selection.
   model.SelectAll(false);
   EXPECT_TRUE(model.Copy());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"HELLO ", clipboard_text);
   EXPECT_EQ(u"HELLO ", model.text());
   EXPECT_EQ(6U, model.GetCursorPosition());
@@ -748,11 +757,11 @@ TEST_F(TextfieldModelTest, Clipboard) {
   // Test that paste works regardless of the obscured bit. Please note that
   // trailing spaces and tabs in clipboard strings will be stripped.
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"HELLO HELLO", model.text());
   EXPECT_EQ(11U, model.GetCursorPosition());
   model.render_text()->SetObscured(true);
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"HELLO HELLOHELLO", model.text());
   EXPECT_EQ(16U, model.GetCursorPosition());
 
@@ -760,9 +769,9 @@ TEST_F(TextfieldModelTest, Clipboard) {
   model.render_text()->SetObscured(false);
   model.SetText(u"It's time to say goodbye.", 0);
   model.SelectRange({17, 24});
-  EXPECT_TRUE(model.Paste());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"HELLO ", clipboard_text);
   EXPECT_EQ(u"It's time to say HELLO.", model.text());
   EXPECT_EQ(22U, model.GetCursorPosition());
@@ -772,9 +781,9 @@ TEST_F(TextfieldModelTest, Clipboard) {
   // Paste with an empty clipboard should not replace the selection.
   ui::Clipboard::GetForCurrentThread()->Clear(ui::ClipboardBuffer::kCopyPaste);
   model.SelectRange({5, 8});
-  EXPECT_FALSE(model.Paste());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  EXPECT_FALSE(model.Paste(ReadClipboardText()));
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_TRUE(clipboard_text.empty());
   EXPECT_EQ(u"It's time to say HELLO.", model.text());
   EXPECT_EQ(8U, model.GetCursorPosition());
@@ -788,7 +797,7 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
       .WriteText(initial_clipboard_text);
 
   std::u16string clipboard_text;
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"It's time to say HELLO.");
 
   // Cut with multiple selections should copy only the primary selection but
@@ -796,8 +805,8 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   model.SelectRange({0, 5});
   model.SelectRange({13, 17}, false);
   EXPECT_TRUE(model.Cut());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"It's ", clipboard_text);
   EXPECT_EQ(u"time to HELLO.", model.text());
   EXPECT_EQ(0U, model.GetCursorPosition());
@@ -809,8 +818,8 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   model.SelectRange({13, 8});
   model.SelectRange({0, 4}, false);
   EXPECT_TRUE(model.Copy());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"HELLO", clipboard_text);
   EXPECT_EQ(u"time to HELLO.", model.text());
   EXPECT_EQ(8U, model.GetCursorPosition());
@@ -822,9 +831,9 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   model.SelectRange({0, 1});
   model.SelectRange({5, 8}, false);
   model.SelectRange({14, 14}, false);
-  EXPECT_TRUE(model.Paste());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"HELLO", clipboard_text);
   EXPECT_EQ(u"HELLOime HELLO.", model.text());
   EXPECT_EQ(5U, model.GetCursorPosition());
@@ -836,9 +845,9 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   ui::Clipboard::GetForCurrentThread()->Clear(ui::ClipboardBuffer::kCopyPaste);
   model.SelectRange({1, 2});
   model.SelectRange({4, 5}, false);
-  EXPECT_FALSE(model.Paste());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  EXPECT_FALSE(model.Paste(ReadClipboardText()));
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_TRUE(clipboard_text.empty());
   EXPECT_EQ(u"HELLOime HELLO.", model.text());
   EXPECT_EQ(2U, model.GetCursorPosition());
@@ -851,8 +860,8 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   model.SelectRange({2, 2});
   model.SelectRange({4, 5}, false);
   EXPECT_FALSE(model.Cut());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"initial text", clipboard_text);
   EXPECT_EQ(u"HELLOime HELLO.", model.text());
   EXPECT_EQ(2U, model.GetCursorPosition());
@@ -861,8 +870,8 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   // Copy with an empty primary selection and nonempty secondary selections
   // should not replace the clipboard.
   EXPECT_FALSE(model.Copy());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"initial text", clipboard_text);
   EXPECT_EQ(u"HELLOime HELLO.", model.text());
   EXPECT_EQ(2U, model.GetCursorPosition());
@@ -871,9 +880,9 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   // Paste with an empty primary selection, nonempty secondary selection, and
   // empty clipboard should change neither the text nor the selections.
   ui::Clipboard::GetForCurrentThread()->Clear(ui::ClipboardBuffer::kCopyPaste);
-  EXPECT_FALSE(model.Paste());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  EXPECT_FALSE(model.Paste(ReadClipboardText()));
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_TRUE(clipboard_text.empty());
   EXPECT_EQ(u"HELLOime HELLO.", model.text());
   EXPECT_EQ(2U, model.GetCursorPosition());
@@ -883,9 +892,9 @@ TEST_F(TextfieldModelTest, Clipboard_WithSecondarySelections) {
   // should paste at the primary selection and delete the secondary selections.
   ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
       .WriteText(initial_clipboard_text);
-  EXPECT_TRUE(model.Paste());
-  clipboard->ReadText(ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr,
-                      &clipboard_text);
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
   EXPECT_EQ(u"initial text", clipboard_text);
   EXPECT_EQ(u"HEinitial textLLime HELLO.", model.text());
   EXPECT_EQ(14U, model.GetCursorPosition());
@@ -901,7 +910,7 @@ static void SelectWordTestVerifier(
 }
 
 TEST_F(TextfieldModelTest, SelectWordTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"  HELLO  !!  WO     RLD ");
 
   // Test when cursor is at the beginning.
@@ -942,7 +951,7 @@ TEST_F(TextfieldModelTest, SelectWordTest) {
 // regression.
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 TEST_F(TextfieldModelTest, SelectWordTest_MixScripts) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   std::vector<WordAndCursor> word_and_cursor;
   word_and_cursor.emplace_back(L"a\x05d0", 2);
   word_and_cursor.emplace_back(L"a\x05d0", 2);
@@ -964,9 +973,10 @@ TEST_F(TextfieldModelTest, SelectWordTest_MixScripts) {
       0);
   for (size_t i = 0; i < word_and_cursor.size(); ++i) {
     model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_LEFT, gfx::SELECTION_NONE);
-    for (size_t j = 0; j < i; ++j)
+    for (size_t j = 0; j < i; ++j) {
       model.MoveCursor(gfx::CHARACTER_BREAK, gfx::CURSOR_RIGHT,
                        gfx::SELECTION_NONE);
+    }
     model.SelectWord();
     SelectWordTestVerifier(model, base::WideToUTF16(word_and_cursor[i].word),
                            word_and_cursor[i].cursor);
@@ -975,7 +985,7 @@ TEST_F(TextfieldModelTest, SelectWordTest_MixScripts) {
 #endif
 
 TEST_F(TextfieldModelTest, RangeTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO WORLD");
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_LEFT, gfx::SELECTION_NONE);
   gfx::Range range = model.render_text()->selection();
@@ -1091,7 +1101,7 @@ TEST_F(TextfieldModelTest, RangeTest) {
 }
 
 TEST_F(TextfieldModelTest, SelectRangeTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO WORLD");
   gfx::Range range(0, 6);
   EXPECT_FALSE(range.is_reversed());
@@ -1150,7 +1160,7 @@ TEST_F(TextfieldModelTest, SelectRangeTest) {
 }
 
 TEST_F(TextfieldModelTest, SelectionTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO WORLD");
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_LEFT, gfx::SELECTION_NONE);
   gfx::Range selection = model.render_text()->selection();
@@ -1204,7 +1214,7 @@ TEST_F(TextfieldModelTest, SelectionTest) {
 }
 
 TEST_F(TextfieldModelTest, SelectSelectionModelTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO WORLD");
   model.SelectSelectionModel(
       gfx::SelectionModel(gfx::Range(0, 6), gfx::CURSOR_BACKWARD));
@@ -1285,7 +1295,7 @@ TEST_F(TextfieldModelTest, CompositionTextTest) {
   model.SetCompositionText(composition);
   EXPECT_TRUE(model.HasCompositionText());
   EXPECT_TRUE(model.HasSelection());
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   // |composition.selection| is ignored because SetCompositionText checks
   // if a thick underline exists first.
   EXPECT_EQ(gfx::Range(5, 7), model.render_text()->selection());
@@ -1326,7 +1336,7 @@ TEST_F(TextfieldModelTest, CompositionTextTest) {
   model.SetCompositionText(composition);
   EXPECT_EQ(u"1234567890678", model.text());
   EXPECT_TRUE(model.HasSelection());
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   EXPECT_EQ(gfx::Range(10, 11), model.render_text()->selection());
   EXPECT_EQ(11U, model.render_text()->cursor_position());
 #else
@@ -1451,7 +1461,7 @@ TEST_F(TextfieldModelTest, CompositionTextTest) {
 }
 
 TEST_F(TextfieldModelTest, UndoRedo_BasicTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.InsertChar('a');
   EXPECT_FALSE(model.Redo());  // There is nothing to redo.
   EXPECT_TRUE(model.Undo());
@@ -1549,7 +1559,7 @@ TEST_F(TextfieldModelTest, UndoRedo_BasicTest) {
 
 TEST_F(TextfieldModelTest, UndoRedo_SetText) {
   // This is to test the undo/redo behavior of omnibox.
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   // Simulate typing www.y while www.google.com and www.youtube.com are
   // autocompleted.
   model.InsertChar('w');  //                                    w|
@@ -1616,7 +1626,7 @@ TEST_F(TextfieldModelTest, UndoRedo_SetText) {
 
 TEST_F(TextfieldModelTest, UndoRedo_BackspaceThenSetText) {
   // This is to test the undo/redo behavior of omnibox.
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.InsertChar('w');
   EXPECT_EQ(u"w", model.text());
   EXPECT_EQ(1U, model.GetCursorPosition());
@@ -1641,7 +1651,7 @@ TEST_F(TextfieldModelTest, UndoRedo_BackspaceThenSetText) {
 }
 
 TEST_F(TextfieldModelTest, UndoRedo_CutCopyPasteTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.SetText(u"ABCDE", 5);
   EXPECT_FALSE(model.Redo());  // There is nothing to redo.
   // Test Cut.
@@ -1669,9 +1679,9 @@ TEST_F(TextfieldModelTest, UndoRedo_CutCopyPasteTest) {
   EXPECT_FALSE(model.Redo());  // There is no more to redo.        A|DE
   EXPECT_EQ(u"ADE", model.text());
 
-  model.Paste();  //                                               ABC|DE
-  model.Paste();  //                                               ABCBC|DE
-  model.Paste();  //                                               ABCBCBC|DE
+  model.Paste(ReadClipboardText());  //                            ABC|DE
+  model.Paste(ReadClipboardText());  //                            ABCBC|DE
+  model.Paste(ReadClipboardText());  //                            ABCBCBC|DE
   EXPECT_EQ(u"ABCBCBCDE", model.text());
   EXPECT_EQ(7U, model.GetCursorPosition());
   EXPECT_TRUE(model.Undo());  //                                   ABCBC|DE
@@ -1694,7 +1704,7 @@ TEST_F(TextfieldModelTest, UndoRedo_CutCopyPasteTest) {
   EXPECT_FALSE(model.Undo());  //                                  |
   EXPECT_EQ(u"", model.text());
   EXPECT_TRUE(model.Redo());
-  EXPECT_EQ(u"ABCDE", model.text());  //                        ABCDE|
+  EXPECT_EQ(u"ABCDE", model.text());  //                           ABCDE|
   EXPECT_EQ(5U, model.GetCursorPosition());
 
   // Test Redo.
@@ -1721,7 +1731,7 @@ TEST_F(TextfieldModelTest, UndoRedo_CutCopyPasteTest) {
   EXPECT_FALSE(model.Cut());  //                                   A|BCBCDE
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
   //                                                               ABCBCDE|
-  EXPECT_TRUE(model.Paste());  //                                  ABCBCDEBC|
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));  //               ABCBCDEBC|
   EXPECT_EQ(u"ABCBCDEBC", model.text());
   EXPECT_EQ(9U, model.GetCursorPosition());
   EXPECT_TRUE(model.Undo());  //                                   ABCBCDE|
@@ -1735,17 +1745,17 @@ TEST_F(TextfieldModelTest, UndoRedo_CutCopyPasteTest) {
       gfx::Range(1, 3)));
   // Test Copy.
   ResetModel(&model);
-  model.SetText(u"12345", 5);  //                  12345|
+  model.SetText(u"12345", 5);  //                                  12345|
   EXPECT_EQ(u"12345", model.text());
   EXPECT_EQ(5U, model.GetCursorPosition());
   model.SelectRange(gfx::Range(1, 3));  //                         1[23]45
   model.Copy();  // Copy "23".  //                                 1[23]45
   EXPECT_EQ(u"12345", model.text());
   EXPECT_EQ(3U, model.GetCursorPosition());
-  model.Paste();  // Paste "23" into "23".  //                     123|45
+  model.Paste(ReadClipboardText());  // Paste "23" into "23". //   23|45
   EXPECT_EQ(u"12345", model.text());
   EXPECT_EQ(3U, model.GetCursorPosition());
-  model.Paste();  //                                               12323|45
+  model.Paste(ReadClipboardText());  //                            12323|45
   EXPECT_EQ(u"1232345", model.text());
   EXPECT_EQ(5U, model.GetCursorPosition());
   EXPECT_TRUE(model.Undo());  //                                   123|45
@@ -1779,7 +1789,7 @@ TEST_F(TextfieldModelTest, UndoRedo_CutCopyPasteTest) {
   EXPECT_EQ(u"1232345", model.text());
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
   //                                                               1232345|
-  EXPECT_TRUE(model.Paste());  //                                  123234523|
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));  //               123234523|
   EXPECT_EQ(u"123234523", model.text());
   EXPECT_EQ(9U, model.GetCursorPosition());
   EXPECT_TRUE(model.Undo());  //                                   1232345|
@@ -1788,7 +1798,7 @@ TEST_F(TextfieldModelTest, UndoRedo_CutCopyPasteTest) {
 }
 
 TEST_F(TextfieldModelTest, UndoRedo_CursorTest) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.InsertChar('a');
   model.MoveCursor(gfx::CHARACTER_BREAK, gfx::CURSOR_LEFT, gfx::SELECTION_NONE);
   model.MoveCursor(gfx::CHARACTER_BREAK, gfx::CURSOR_RIGHT,
@@ -1809,7 +1819,7 @@ TEST_F(TextfieldModelTest, UndoRedo_CursorTest) {
 
 TEST_F(TextfieldModelTest, Undo_SelectionTest) {
   gfx::Range range = gfx::Range(2, 4);
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.SetText(u"abcdef", 0);
   model.SelectRange(range);
   EXPECT_EQ(model.render_text()->selection(), range);
@@ -1898,28 +1908,28 @@ void RunOverwriteReplaceTest(TextfieldModel* model) {
 TEST_F(TextfieldModelTest, UndoRedo_ReplaceTest) {
   {
     SCOPED_TRACE("Select forwards and insert.");
-    TextfieldModel model(nullptr);
+    TextfieldModel model(this);
     model.SetText(u"abcd", 4);
     model.SelectRange(gfx::Range(1, 3));
     RunInsertReplaceTest(&model);
   }
   {
     SCOPED_TRACE("Select reversed and insert.");
-    TextfieldModel model(nullptr);
+    TextfieldModel model(this);
     model.SetText(u"abcd", 4);
     model.SelectRange(gfx::Range(3, 1));
     RunInsertReplaceTest(&model);
   }
   {
     SCOPED_TRACE("Select forwards and overwrite.");
-    TextfieldModel model(nullptr);
+    TextfieldModel model(this);
     model.SetText(u"abcd", 4);
     model.SelectRange(gfx::Range(1, 3));
     RunOverwriteReplaceTest(&model);
   }
   {
     SCOPED_TRACE("Select reversed and overwrite.");
-    TextfieldModel model(nullptr);
+    TextfieldModel model(this);
     model.SetText(u"abcd", 4);
     model.SelectRange(gfx::Range(3, 1));
     RunOverwriteReplaceTest(&model);
@@ -1927,7 +1937,7 @@ TEST_F(TextfieldModelTest, UndoRedo_ReplaceTest) {
 }
 
 TEST_F(TextfieldModelTest, UndoRedo_CompositionText) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
 
   ui::CompositionText composition;
   composition.text = u"abc";
@@ -2006,7 +2016,7 @@ TEST_F(TextfieldModelTest, UndoRedo_CompositionText) {
 }
 
 TEST_F(TextfieldModelTest, UndoRedo_TypingWithSecondarySelections) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
 
   // Type 'ab cd' as 'prefix ab xy suffix' and 'prefix ab cd suffix' are
   // autocompleted.
@@ -2074,7 +2084,7 @@ TEST_F(TextfieldModelTest, UndoRedo_TypingWithSecondarySelections) {
 }
 
 TEST_F(TextfieldModelTest, UndoRedo_MergingEditsWithSecondarySelections) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
 
   // Test all possible merge combinations involving secondary selections.
   // I.e. an initial [replace or delete] edit with secondary selections,
@@ -2306,13 +2316,13 @@ TEST_F(TextfieldModelTest, Clipboard_WhiteSpaceStringTest) {
   // Clipboard text with a leading tab should be pasted with the tab stripped.
   ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste).WriteText(u"\tB");
 
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.Append(u"HELLO WORLD");
   EXPECT_EQ(u"HELLO WORLD", model.text());
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
   EXPECT_EQ(11U, model.GetCursorPosition());
 
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"HELLO WORLDB", model.text());
 
   model.SelectAll(false);
@@ -2329,7 +2339,7 @@ TEST_F(TextfieldModelTest, Clipboard_WhiteSpaceStringTest) {
   EXPECT_EQ(u"HELLO WORLD", model.text());
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
   EXPECT_EQ(11U, model.GetCursorPosition());
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"HELLO WORLDB", model.text());
 
   model.SelectAll(false);
@@ -2346,7 +2356,7 @@ TEST_F(TextfieldModelTest, Clipboard_WhiteSpaceStringTest) {
   EXPECT_EQ(u"HELLO WORLD", model.text());
   model.MoveCursor(gfx::LINE_BREAK, gfx::CURSOR_RIGHT, gfx::SELECTION_NONE);
   EXPECT_EQ(11U, model.GetCursorPosition());
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"HELLO WORLDFOO \t\t BAR", model.text());
 
   model.SelectAll(false);
@@ -2359,7 +2369,7 @@ TEST_F(TextfieldModelTest, Clipboard_WhiteSpaceStringTest) {
   ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
       .WriteText(u"\t\tFOO \t\t BAR");
 
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"FOO \t\t BAR", model.text());
 
   model.SelectAll(false);
@@ -2371,7 +2381,7 @@ TEST_F(TextfieldModelTest, Clipboard_WhiteSpaceStringTest) {
   // trailing tabs stripped.
   ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
       .WriteText(u"FOO BAR\t\t\t");
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"FOO BAR", model.text());
 
   model.SelectAll(false);
@@ -2383,7 +2393,7 @@ TEST_F(TextfieldModelTest, Clipboard_WhiteSpaceStringTest) {
   // space.
   ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
       .WriteText(u"     \t\t");
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u" ", model.text());
 
   model.SelectAll(false);
@@ -2394,19 +2404,20 @@ TEST_F(TextfieldModelTest, Clipboard_WhiteSpaceStringTest) {
   // Clipboard text with lots of spaces between words should be pasted as-is.
   ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
       .WriteText(u"FOO      BAR");
-  EXPECT_TRUE(model.Paste());
+  EXPECT_TRUE(model.Paste(ReadClipboardText()));
   EXPECT_EQ(u"FOO      BAR", model.text());
 }
 
 TEST_F(TextfieldModelTest, Transpose) {
-  const std::u16string ltr = u"12";
-  const std::u16string rtl = u"\x0634\x0632";
-  const std::u16string ltr_transposed = u"21";
-  const std::u16string rtl_transposed = u"\x0632\x0634";
+  constexpr std::u16string ltr = u"12";
+  constexpr std::u16string rtl = u"\x0634\x0632";
+  constexpr std::u16string ltr_transposed = u"21";
+  constexpr std::u16string rtl_transposed = u"\x0632\x0634";
 
   // This is a string with an 'a' between two emojis.
   const std::u16string surrogate_pairs({0xD83D, 0xDE07, 'a', 0xD83D, 0xDE0E});
-  const std::u16string test_strings[] = {ltr, rtl, surrogate_pairs};
+  const auto test_strings =
+      std::to_array<std::u16string>({ltr, rtl, surrogate_pairs});
 
   struct TestCase {
     gfx::Range range;
@@ -2440,7 +2451,7 @@ TEST_F(TextfieldModelTest, Transpose) {
   std::vector<std::vector<TestCase>> all_tests = {ltr_tests, rtl_tests,
                                                   surrogate_pairs_test};
 
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
 
   EXPECT_EQ(all_tests.size(), std::size(test_strings));
 
@@ -2463,7 +2474,7 @@ TEST_F(TextfieldModelTest, Transpose) {
 }
 
 TEST_F(TextfieldModelTest, Yank) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.SetText(u"abcdefgh", 0);
   model.SelectRange(gfx::Range(1, 3));
 
@@ -2528,7 +2539,7 @@ TEST_F(TextfieldModelTest, Yank) {
 }
 
 TEST_F(TextfieldModelTest, SetCompositionFromExistingText) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.SetText(u"abcde", 0);
 
   model.SetCompositionFromExistingText(gfx::Range(0, 1));
@@ -2544,7 +2555,7 @@ TEST_F(TextfieldModelTest, SetCompositionFromExistingText) {
 }
 
 TEST_F(TextfieldModelTest, SetCompositionFromExistingText_Empty) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.SetText(u"abc", 0);
 
   model.SetCompositionFromExistingText(gfx::Range(0, 2));
@@ -2556,7 +2567,7 @@ TEST_F(TextfieldModelTest, SetCompositionFromExistingText_Empty) {
 }
 
 TEST_F(TextfieldModelTest, SetCompositionFromExistingText_OutOfBounds) {
-  TextfieldModel model(nullptr);
+  TextfieldModel model(this);
   model.SetText(std::u16string(), 0);
 
   model.SetCompositionFromExistingText(gfx::Range(0, 2));
@@ -2565,6 +2576,150 @@ TEST_F(TextfieldModelTest, SetCompositionFromExistingText_OutOfBounds) {
   model.SetText(u"abc", 0);
   model.SetCompositionFromExistingText(gfx::Range(1, 4));
   EXPECT_FALSE(model.HasCompositionText());
+}
+
+TEST_F(TextfieldModelTest, CopyWithCustomClipboardWriter) {
+  ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
+  ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
+      .WriteText(u"initial data");
+
+  TextfieldModel model(this);
+  model.Append(u"HELLO WORLD");
+  model.SelectWord();
+
+  // Calling Copy() with explicit parameters should put that data into the
+  // clipboard instead of `model`'s selected text. The passed
+  // ScopedClipboardWriter can also be used to attach more data to the clipboard
+  // write.
+  auto custom_writer = std::make_unique<ui::ScopedClipboardWriter>(
+      ui::ClipboardBuffer::kCopyPaste);
+  custom_writer->WriteHTML(u"some html", "https://foo.bar");
+  EXPECT_TRUE(model.Copy(u"some text", std::move(custom_writer)));
+
+  std::u16string text_data;
+  std::u16string html_data;
+  std::string url_data;
+  uint32_t start;
+  uint32_t end;
+  text_data = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
+  ui::clipboard_test_util::ReadHTML(clipboard, ui::ClipboardBuffer::kCopyPaste,
+                                    /*data_dst=*/nullptr, &html_data, &url_data,
+                                    &start, &end);
+  EXPECT_EQ(u"some text", text_data);
+  EXPECT_EQ(u"some html", html_data);
+  EXPECT_EQ("https://foo.bar/", url_data);
+  EXPECT_EQ(0u, start);
+  EXPECT_EQ(9u, end);
+
+  // `model`'s data shouldn't have changed on a Copy() call.
+  EXPECT_EQ(model.text(), u"HELLO WORLD");
+}
+
+TEST_F(TextfieldModelTest, CopyWithCustomClipboardWriterWithoutSelection) {
+  ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
+  ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
+      .WriteText(u"initial data");
+
+  TextfieldModel model(this);
+  model.Append(u"HELLO WORLD");
+
+  // Calling Copy() without selected text in `model` shouldn't change clipboard
+  // data, even with explicit parameters.
+  auto custom_writer = std::make_unique<ui::ScopedClipboardWriter>(
+      ui::ClipboardBuffer::kCopyPaste);
+  custom_writer->WriteHTML(u"some html", "https://foo.bar");
+  EXPECT_FALSE(model.Copy(u"some text", std::move(custom_writer)));
+
+  std::u16string text_data;
+  std::u16string html_data;
+  std::string url_data;
+  uint32_t start;
+  uint32_t end;
+  text_data = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
+  ui::clipboard_test_util::ReadHTML(clipboard, ui::ClipboardBuffer::kCopyPaste,
+                                    /*data_dst=*/nullptr, &html_data, &url_data,
+                                    &start, &end);
+  EXPECT_EQ(u"initial data", text_data);
+  EXPECT_EQ(u"", html_data);
+  EXPECT_EQ("", url_data);
+  EXPECT_EQ(0u, start);
+  EXPECT_EQ(0u, end);
+
+  // `model`'s data shouldn't have changed on a Copy() call.
+  EXPECT_EQ(model.text(), u"HELLO WORLD");
+}
+
+TEST_F(TextfieldModelTest, CutWithCustomClipboardWriter) {
+  ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
+  ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
+      .WriteText(u"initial data");
+
+  TextfieldModel model(this);
+  model.Append(u"HELLO WORLD");
+  model.SelectWord();
+
+  // Calling Cut() with explicit parameters should put that data int the
+  // clipboard instead of `model`'s selected text.
+  auto custom_writer = std::make_unique<ui::ScopedClipboardWriter>(
+      ui::ClipboardBuffer::kCopyPaste);
+  custom_writer->WriteHTML(u"some html", "https://foo.bar");
+  EXPECT_TRUE(model.Cut(u"some text", std::move(custom_writer)));
+
+  std::u16string text_data;
+  std::u16string html_data;
+  std::string url_data;
+  uint32_t start;
+  uint32_t end;
+  text_data = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
+  ui::clipboard_test_util::ReadHTML(clipboard, ui::ClipboardBuffer::kCopyPaste,
+                                    /*data_dst=*/nullptr, &html_data, &url_data,
+                                    &start, &end);
+  EXPECT_EQ(u"some text", text_data);
+  EXPECT_EQ(u"some html", html_data);
+  EXPECT_EQ("https://foo.bar/", url_data);
+  EXPECT_EQ(0u, start);
+  EXPECT_EQ(9u, end);
+
+  // `model`'s data should have changed on a Cut() call.
+  EXPECT_EQ(model.text(), u" WORLD");
+}
+
+TEST_F(TextfieldModelTest, CutWithCustomClipboardWriterWithoutSelection) {
+  ui::Clipboard* clipboard = ui::Clipboard::GetForCurrentThread();
+  ui::ScopedClipboardWriter(ui::ClipboardBuffer::kCopyPaste)
+      .WriteText(u"initial data");
+
+  TextfieldModel model(this);
+  model.Append(u"HELLO WORLD");
+
+  // Calling Cut() without selected text in `model` shouldn't change clipboard
+  // data, even with explicit parameters.
+  auto custom_writer = std::make_unique<ui::ScopedClipboardWriter>(
+      ui::ClipboardBuffer::kCopyPaste);
+  custom_writer->WriteHTML(u"some html", "https://foo.bar");
+  EXPECT_FALSE(model.Cut(u"some text", std::move(custom_writer)));
+
+  std::u16string text_data;
+  std::u16string html_data;
+  std::string url_data;
+  uint32_t start;
+  uint32_t end;
+  text_data = ui::clipboard_test_util::ReadText(
+      clipboard, ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr);
+  ui::clipboard_test_util::ReadHTML(clipboard, ui::ClipboardBuffer::kCopyPaste,
+                                    /*data_dst=*/nullptr, &html_data, &url_data,
+                                    &start, &end);
+  EXPECT_EQ(u"initial data", text_data);
+  EXPECT_EQ(u"", html_data);
+  EXPECT_EQ("", url_data);
+  EXPECT_EQ(0u, start);
+  EXPECT_EQ(0u, end);
+
+  // `model`'s data should not have changed on an invalid Cut() call.
+  EXPECT_EQ(model.text(), u"HELLO WORLD");
 }
 
 }  // namespace views

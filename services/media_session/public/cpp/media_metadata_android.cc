@@ -6,8 +6,10 @@
 
 #include "base/android/jni_array.h"
 #include "base/android/jni_string.h"
-#include "services/media_session/public/cpp/android/media_session_jni_headers/MediaMetadata_jni.h"
 #include "services/media_session/public/cpp/media_image.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "services/media_session/public/cpp/android/media_session_jni_headers/MediaMetadata_jni.h"
 
 using base::android::ScopedJavaLocalRef;
 
@@ -21,7 +23,12 @@ base::android::ScopedJavaLocalRef<jobject> MediaMetadata::CreateJavaObject(
       base::android::ConvertUTF16ToJavaString(env, artist));
   ScopedJavaLocalRef<jstring> j_album(
       base::android::ConvertUTF16ToJavaString(env, album));
-  return Java_MediaMetadata_create(env, j_title, j_artist, j_album);
+  ScopedJavaLocalRef<jstring> j_source_title(
+      base::android::ConvertUTF16ToJavaString(env, source_title));
+  return Java_MediaMetadata_create(env, j_title, j_artist, j_album,
+                                   j_source_title);
 }
 
 }  // namespace media_session
+
+DEFINE_JNI(MediaMetadata)

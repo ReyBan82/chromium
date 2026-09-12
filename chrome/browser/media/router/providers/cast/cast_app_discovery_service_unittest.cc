@@ -19,7 +19,6 @@
 
 using cast_channel::GetAppAvailabilityResult;
 using testing::_;
-using testing::Invoke;
 
 namespace media_router {
 
@@ -51,9 +50,10 @@ class CastAppDiscoveryServiceTest : public testing::Test {
 
   ~CastAppDiscoveryServiceTest() override { task_runner_->RunPendingTasks(); }
 
-  MOCK_METHOD2(OnSinkQueryUpdated,
-               void(const MediaSource::Id&,
-                    const std::vector<MediaSinkInternal>&));
+  MOCK_METHOD(void,
+              OnSinkQueryUpdated,
+              (const MediaSource::Id& source_id,
+               const std::vector<MediaSinkInternal>& sinks));
 
   void AddOrUpdateSink(const MediaSinkInternal& sink) {
     media_sink_service_.AddOrUpdateSink(sink);

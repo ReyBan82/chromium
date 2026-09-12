@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {getSingleTab} from '/_test_resources/test_util/tabs_util.js';
+
 const CSS_GREEN = 'body { background-color: green !important }';
 const GREEN = 'rgb(0, 128, 0)';
 const CSS_RED = 'body { background-color: red !important }';
@@ -14,13 +16,8 @@ const YELLOW = 'rgb(255, 255, 0)';
 
 function getBodyColor() {
   const hostname = (new URL(location.href)).hostname;
-  return hostname + ' ' + getComputedStyle(document.body).backgroundColor;
-}
-
-async function getSingleTab(query) {
-  const tabs = await chrome.tabs.query(query);
-  chrome.test.assertEq(1, tabs.length);
-  return tabs[0];
+  return (hostname || location.href) + ' ' +
+      getComputedStyle(document.body).backgroundColor;
 }
 
 async function getBodyColorsForTab(tabId) {
@@ -79,6 +76,25 @@ chrome.test.runTests([
     chrome.test.succeed();
   },
 
+  async function sandboxedSubframes() {
+    const query = {url: 'http://subframes-sandboxed.example/*'};
+    const tab = await getSingleTab(query);
+    const results = await chrome.scripting.insertCSS({
+      target: {
+        tabId: tab.id,
+        allFrames: true,
+      },
+      css: CSS_RED,
+    });
+    chrome.test.assertEq(undefined, results);
+    const colors = await getBodyColorsForTab(tab.id);
+    chrome.test.assertEq(2, colors.length);
+    colors.sort();
+    chrome.test.assertEq(`about:srcdoc ${RED}`, colors[0]);
+    chrome.test.assertEq(`subframes-sandboxed.example ${RED}`, colors[1]);
+    chrome.test.succeed();
+  },
+
   async function specificFrames() {
     const query = {url: 'http://subframes.example/*'};
     const tab = await getSingleTab(query);
@@ -86,7 +102,7 @@ chrome.test.runTests([
       chrome.webNavigation.getAllFrames({tabId: tab.id}, resolve);
     });
     const bComFrame = frames.find(frame => {
-      return (new URL(frame.url)).hostname == 'b.com';
+      return (new URL(frame.url)).hostname === 'b.com';
     });
     chrome.test.assertTrue(!!bComFrame);
 
@@ -145,7 +161,9 @@ chrome.test.runTests([
 
     const fontSizes = await chrome.scripting.executeScript({
       target: target,
-      func: function() { return getComputedStyle(document.body).fontSize; },
+      func: function() {
+        return getComputedStyle(document.body).fontSize;
+      },
     });
 
     chrome.test.assertEq(1, fontSizes.length);
@@ -170,7 +188,7 @@ chrome.test.runTests([
   async function noSuchFile() {
     const noSuchFile = 'no_such_file.css';
     const query = {url: 'http://example.com/*'};
-    let tab = await getSingleTab(query);
+    const tab = await getSingleTab(query);
     await chrome.test.assertPromiseRejects(
         chrome.scripting.insertCSS({
           target: {
@@ -184,7 +202,7 @@ chrome.test.runTests([
 
   async function noFilesSpecified() {
     const query = {url: 'http://example.com/*'};
-    let tab = await getSingleTab(query);
+    const tab = await getSingleTab(query);
     await chrome.test.assertPromiseRejects(
         chrome.scripting.insertCSS({
           target: {
@@ -198,15 +216,15 @@ chrome.test.runTests([
 
   async function duplicateFilesSpecified() {
     const query = {url: 'http://example.com/*'};
-    let tab = await getSingleTab(query);
+    const tab = await getSingleTab(query);
     await chrome.test.assertPromiseRejects(
         chrome.scripting.insertCSS({
           target: {
             tabId: tab.id,
           },
-          files: ['css_file.js', 'css_file.js'],
+          files: ['css_file.css', 'css_file.css'],
         }),
-        `Error: Duplicate file specified: 'css_file.js'.`);
+        `Error: Duplicate file specified: 'css_file.css'.`);
 
     // Try again with a preceding slash.
     await chrome.test.assertPromiseRejects(
@@ -214,9 +232,9 @@ chrome.test.runTests([
           target: {
             tabId: tab.id,
           },
-          files: ['css_file.js', '/css_file.js'],
+          files: ['css_file.css', '/css_file.css'],
         }),
-        `Error: Duplicate file specified: '/css_file.js'.`);
+        `Error: Duplicate file specified: '/css_file.css'.`);
     chrome.test.succeed();
   },
 

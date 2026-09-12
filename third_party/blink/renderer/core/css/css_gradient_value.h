@@ -26,8 +26,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_GRADIENT_VALUE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_GRADIENT_VALUE_H_
 
-#include "base/memory/scoped_refptr.h"
+#include <memory>
+
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/css/css_color.h"
 #include "third_party/blink/renderer/core/css/css_identifier_value.h"
 #include "third_party/blink/renderer/core/css/css_image_generator_value.h"
 #include "third_party/blink/renderer/core/css/css_primitive_value.h"
@@ -39,6 +41,7 @@ namespace blink {
 class Color;
 class Gradient;
 class Document;
+class StyleResolverState;
 
 namespace cssvalue {
 
@@ -49,7 +52,8 @@ enum CSSGradientType {
   kCSSPrefixedRadialGradient,
   kCSSLinearGradient,
   kCSSRadialGradient,
-  kCSSConicGradient
+  kCSSConicGradient,
+  kCSSConstantGradient,  // Internal.
 };
 enum CSSGradientRepeat { kNonRepeating, kRepeating };
 
@@ -97,7 +101,7 @@ class CSSGradientValue : public CSSImageGeneratorValue {
   using ContainerSizes = CSSToLengthConversionData::ContainerSizes;
 
   scoped_refptr<Image> GetImage(const ImageResourceObserver&,
-                                const Document&,
+                                const Node&,
                                 const ComputedStyle& style,
                                 const ContainerSizes&,
                                 const gfx::SizeF&) const;
@@ -113,16 +117,21 @@ class CSSGradientValue : public CSSImageGeneratorValue {
 
   CSSGradientType GradientType() const { return gradient_type_; }
 
+  bool IsCorsSameOrigin() const { return true; }
   bool KnownToBeOpaque(const Document&, const ComputedStyle&) const;
+  const CSSGradientValue& ResolveValuesIfNeeded(
+      const StyleResolverState&) const;
+  CSSGradientValue& ResolveValuesIfNeeded(const StyleResolverState&);
   CSSGradientValue* ComputedCSSValue(const ComputedStyle&,
-                                     bool allow_visited_style) const;
+                                     bool allow_visited_style,
+                                     CSSValuePhase value_phase) const;
 
   Vector<Color> GetStopColors(const Document&, const ComputedStyle&) const;
 
   void TraceAfterDispatch(blink::Visitor*) const;
 
   void SetColorInterpolationSpace(
-      Color::ColorInterpolationSpace color_interpolation_space,
+      Color::ColorSpace color_interpolation_space,
       Color::HueInterpolationMethod hue_interpolation_method) {
     color_interpolation_space_ = color_interpolation_space;
     hue_interpolation_method_ = hue_interpolation_method;
@@ -146,22 +155,25 @@ class CSSGradientValue : public CSSImageGeneratorValue {
                 const ComputedStyle&) const;
   void AddDeprecatedStops(GradientDesc&,
                           const Document&,
-                          const ComputedStyle&) const;
+                          const ComputedStyle&,
+                          const CSSToLengthConversionData&) const;
   void AddComputedStops(const ComputedStyle&,
                         bool allow_visited_style,
-                        const HeapVector<CSSGradientColorStop, 2>& stops);
+                        const HeapVector<CSSGradientColorStop, 1>& stops,
+                        CSSValuePhase value_phase);
 
   void AppendCSSTextForColorStops(StringBuilder&,
                                   bool requires_separator) const;
   void AppendCSSTextForDeprecatedColorStops(StringBuilder&) const;
 
+  bool Equals(const CSSGradientValue&) const;
+
   // Stops
-  HeapVector<CSSGradientColorStop, 2> stops_;
+  HeapVector<CSSGradientColorStop, 1> stops_;
   CSSGradientType gradient_type_;
   bool repeating_ : 1;
   bool is_cacheable_ : 1;
-  Color::ColorInterpolationSpace color_interpolation_space_ =
-      Color::ColorInterpolationSpace::kNone;
+  Color::ColorSpace color_interpolation_space_ = Color::ColorSpace::kNone;
   Color::HueInterpolationMethod hue_interpolation_method_ =
       Color::HueInterpolationMethod::kShorter;
 };
@@ -185,22 +197,37 @@ class CSSLinearGradientValue final : public CSSGradientValue {
   String CustomCSSText() const;
 
   // Create the gradient for a given size.
-  scoped_refptr<Gradient> CreateGradient(const CSSToLengthConversionData&,
-                                         const gfx::SizeF&,
-                                         const Document&,
-                                         const ComputedStyle&) const;
+  std::unique_ptr<Gradient> CreateGradient(const CSSToLengthConversionData&,
+                                           const gfx::SizeF&,
+                                           const Document&,
+                                           const ComputedStyle&) const;
 
   bool Equals(const CSSLinearGradientValue&) const;
 
+  const CSSLinearGradientValue& ResolveValuesIfNeeded(
+      const StyleResolverState&) const;
+  CSSLinearGradientValue& ResolveValuesIfNeeded(const StyleResolverState&);
   CSSLinearGradientValue* ComputedCSSValue(const ComputedStyle&,
-                                           bool allow_visited_style) const;
+                                           bool allow_visited_style,
+                                           CSSValuePhase value_phase) const;
 
   bool IsUsingCurrentColor() const;
   bool IsUsingContainerRelativeUnits() const;
 
+  bool HasRandomFunctions() const {
+    return (first_x_ && first_x_->HasRandomFunctions()) ||
+           (first_y_ && first_y_->HasRandomFunctions()) ||
+           (second_x_ && second_x_->HasRandomFunctions()) ||
+           (second_y_ && second_y_->HasRandomFunctions()) ||
+           (angle_ && angle_->HasRandomFunctions());
+  }
+
   void TraceAfterDispatch(blink::Visitor*) const;
 
  private:
+  CSSLinearGradientValue* ResolveValuesAndCreateCopyIfNeeded(
+      const StyleResolverState&) const;
+
   // Any of these may be null.
   Member<const CSSValue> first_x_;
   Member<const CSSValue> first_y_;
@@ -286,22 +313,43 @@ class CORE_EXPORT CSSRadialGradientValue final : public CSSGradientValue {
   void SetEndVerticalSize(CSSPrimitiveValue* val) { end_vertical_size_ = val; }
 
   // Create the gradient for a given size.
-  scoped_refptr<Gradient> CreateGradient(const CSSToLengthConversionData&,
-                                         const gfx::SizeF&,
-                                         const Document&,
-                                         const ComputedStyle&) const;
+  std::unique_ptr<Gradient> CreateGradient(const CSSToLengthConversionData&,
+                                           const gfx::SizeF&,
+                                           const Document&,
+                                           const ComputedStyle&) const;
 
   bool Equals(const CSSRadialGradientValue&) const;
 
+  const CSSRadialGradientValue& ResolveValuesIfNeeded(
+      const StyleResolverState&) const;
+  CSSRadialGradientValue& ResolveValuesIfNeeded(const StyleResolverState&);
   CSSRadialGradientValue* ComputedCSSValue(const ComputedStyle&,
-                                           bool allow_visited_style) const;
+                                           bool allow_visited_style,
+                                           CSSValuePhase value_phase) const;
 
   bool IsUsingCurrentColor() const;
   bool IsUsingContainerRelativeUnits() const;
 
+  bool HasRandomFunctions() const {
+    return (first_x_ && first_x_->HasRandomFunctions()) ||
+           (first_y_ && first_y_->HasRandomFunctions()) ||
+           (second_x_ && second_x_->HasRandomFunctions()) ||
+           (second_y_ && second_y_->HasRandomFunctions()) ||
+           (first_radius_ && first_radius_->HasRandomFunctions()) ||
+           (second_radius_ && second_radius_->HasRandomFunctions()) ||
+           (shape_ && shape_->HasRandomFunctions()) ||
+           (sizing_behavior_ && sizing_behavior_->HasRandomFunctions()) ||
+           (end_horizontal_size_ &&
+            end_horizontal_size_->HasRandomFunctions()) ||
+           (end_vertical_size_ && end_vertical_size_->HasRandomFunctions());
+  }
+
   void TraceAfterDispatch(blink::Visitor*) const;
 
  private:
+  CSSRadialGradientValue* ResolveValuesAndCreateCopyIfNeeded(
+      const StyleResolverState&) const;
+
   // Any of these may be null.
   Member<const CSSValue> first_x_;
   Member<const CSSValue> first_y_;
@@ -335,26 +383,107 @@ class CSSConicGradientValue final : public CSSGradientValue {
   String CustomCSSText() const;
 
   // Create the gradient for a given size.
-  scoped_refptr<Gradient> CreateGradient(const CSSToLengthConversionData&,
-                                         const gfx::SizeF&,
-                                         const Document&,
-                                         const ComputedStyle&) const;
+  std::unique_ptr<Gradient> CreateGradient(const CSSToLengthConversionData&,
+                                           const gfx::SizeF&,
+                                           const Document&,
+                                           const ComputedStyle&) const;
 
   bool Equals(const CSSConicGradientValue&) const;
 
+  const CSSConicGradientValue& ResolveValuesIfNeeded(
+      const StyleResolverState&) const;
+  CSSConicGradientValue& ResolveValuesIfNeeded(const StyleResolverState&);
   CSSConicGradientValue* ComputedCSSValue(const ComputedStyle&,
-                                          bool allow_visited_style) const;
+                                          bool allow_visited_style,
+                                          CSSValuePhase value_phase) const;
 
   bool IsUsingCurrentColor() const;
   bool IsUsingContainerRelativeUnits() const;
 
+  bool HasRandomFunctions() const {
+    return (x_ && x_->HasRandomFunctions()) ||
+           (y_ && y_->HasRandomFunctions()) ||
+           (from_angle_ && from_angle_->HasRandomFunctions());
+  }
+
   void TraceAfterDispatch(blink::Visitor*) const;
 
  private:
+  CSSConicGradientValue* ResolveValuesAndCreateCopyIfNeeded(
+      const StyleResolverState&) const;
+
   // Any of these may be null.
   Member<const CSSValue> x_;
   Member<const CSSValue> y_;
   Member<const CSSPrimitiveValue> from_angle_;
+};
+
+// cross-fade() supports interpolating between not only images,
+// but also colors. This is a proxy class that takes in a ColorValue
+// and behaves otherwise like a one-color gradient, since gradients
+// have all the machinery needed to resolve colors and convert them
+// into images.
+class CSSConstantGradientValue : public CSSGradientValue {
+ public:
+  explicit CSSConstantGradientValue(const CSSValue* color)
+      : CSSConstantGradientValue(kConstantGradientClass, color) {}
+
+  String CustomCSSText() const;
+
+  // Create the gradient for a given size.
+  std::unique_ptr<Gradient> CreateGradient(const CSSToLengthConversionData&,
+                                           const gfx::SizeF&,
+                                           const Document&,
+                                           const ComputedStyle&) const;
+
+  bool IsCorsSameOrigin() const { return true; }
+  bool KnownToBeOpaque(const Document&, const ComputedStyle&) const;
+  bool IsUsingCurrentColor() const;
+  bool Equals(const CSSConstantGradientValue&) const;
+  CSSConstantGradientValue* ComputedCSSValue(const ComputedStyle&,
+                                             bool allow_visited_style,
+                                             CSSValuePhase value_phase) const;
+  const CSSConstantGradientValue& ResolveValuesIfNeeded(
+      const StyleResolverState&) const;
+  CSSConstantGradientValue& ResolveValuesIfNeeded(const StyleResolverState&);
+
+  bool HasRandomFunctions() const {
+    return color_ && color_->HasRandomFunctions();
+  }
+
+  void TraceAfterDispatch(blink::Visitor*) const;
+
+ protected:
+  CSSConstantGradientValue(ClassType class_type, const CSSValue* color)
+      : CSSGradientValue(class_type, kNonRepeating, kCSSConstantGradient),
+        color_(color) {}
+
+  Member<const CSSValue> color_;
+};
+
+// Backs the image(<color>) functional notation from CSS Images Level 4 — a
+// solid-color image with no natural dimensions. Behaviorally identical to
+// CSSConstantGradientValue, but serializes as image(<color>) rather than
+// just <color>.
+//
+// https://drafts.csswg.org/css-images-4/#image-notation
+class CSSColorImageValue final : public CSSConstantGradientValue {
+ public:
+  explicit CSSColorImageValue(const CSSValue* color)
+      : CSSConstantGradientValue(kColorImageClass, color) {}
+
+  String CustomCSSText() const;
+  bool Equals(const CSSColorImageValue&) const;
+  CSSColorImageValue* ComputedCSSValue(const ComputedStyle&,
+                                       bool allow_visited_style,
+                                       CSSValuePhase value_phase) const;
+  const CSSColorImageValue& ResolveValuesIfNeeded(
+      const StyleResolverState&) const;
+  CSSColorImageValue& ResolveValuesIfNeeded(const StyleResolverState&);
+
+  void TraceAfterDispatch(blink::Visitor* visitor) const {
+    CSSConstantGradientValue::TraceAfterDispatch(visitor);
+  }
 };
 
 }  // namespace cssvalue
@@ -384,6 +513,20 @@ template <>
 struct DowncastTraits<cssvalue::CSSConicGradientValue> {
   static bool AllowFrom(const CSSValue& value) {
     return value.IsConicGradientValue();
+  }
+};
+
+template <>
+struct DowncastTraits<cssvalue::CSSConstantGradientValue> {
+  static bool AllowFrom(const CSSValue& value) {
+    return value.IsConstantGradientValue();
+  }
+};
+
+template <>
+struct DowncastTraits<cssvalue::CSSColorImageValue> {
+  static bool AllowFrom(const CSSValue& value) {
+    return value.IsColorImageValue();
   }
 };
 

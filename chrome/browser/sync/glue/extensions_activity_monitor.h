@@ -5,33 +5,30 @@
 #ifndef CHROME_BROWSER_SYNC_GLUE_EXTENSIONS_ACTIVITY_MONITOR_H_
 #define CHROME_BROWSER_SYNC_GLUE_EXTENSIONS_ACTIVITY_MONITOR_H_
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/scoped_observation.h"
 #include "content/public/browser/browser_context.h"
 #include "extensions/buildflags/buildflags.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-#include "chrome/browser/extensions/api/bookmarks/bookmarks_api_watcher.h"
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/browser/extensions/api/bookmarks/bookmarks_api_watcher.h"  // nogncheck
+
+class ExtensionFunction;
 #endif
 
 namespace syncer {
 class ExtensionsActivity;
 }
 
-namespace extensions {
-class BookmarksFunction;
-class Extension;
-}  // namespace extensions
-
 namespace browser_sync {
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 using BookmarksApiWatcherObserver = extensions::BookmarksApiWatcher::Observer;
 #else
 // Provides a stub class to inherit from to support overriding the destructor.
 class BookmarksApiWatcherObserver {
  public:
-  virtual ~BookmarksApiWatcherObserver() {}
+  virtual ~BookmarksApiWatcherObserver() = default;
 };
 #endif
 
@@ -46,11 +43,9 @@ class ExtensionsActivityMonitor : public BookmarksApiWatcherObserver {
 
   ~ExtensionsActivityMonitor() override;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-  // content::BookmarksApiWatcher:
-  void OnBookmarksApiInvoked(
-      const extensions::Extension* ext,
-      const extensions::BookmarksFunction* func) override;
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  // extensions::BookmarksApiWatcher:
+  void OnBookmarksApiInvoked(const ExtensionFunction* func) override;
 #endif
 
   const scoped_refptr<syncer::ExtensionsActivity>& GetExtensionsActivity();
@@ -58,7 +53,7 @@ class ExtensionsActivityMonitor : public BookmarksApiWatcherObserver {
  private:
   scoped_refptr<syncer::ExtensionsActivity> extensions_activity_;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   base::ScopedObservation<extensions::BookmarksApiWatcher,
                           extensions::BookmarksApiWatcher::Observer>
       bookmarks_api_observation_{this};

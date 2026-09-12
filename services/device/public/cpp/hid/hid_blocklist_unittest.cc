@@ -4,11 +4,12 @@
 
 #include "services/device/public/cpp/hid/hid_blocklist.h"
 
+#include <string_view>
+
 #include "base/command_line.h"
-#include "base/guid.h"
 #include "base/memory/raw_ref.h"
-#include "base/strings/string_piece.h"
 #include "base/test/scoped_feature_list.h"
+#include "base/uuid.h"
 #include "services/device/public/cpp/hid/hid_switches.h"
 #include "services/device/public/cpp/test/hid_test_util.h"
 #include "services/device/public/cpp/test/test_report_descriptors.h"
@@ -37,7 +38,7 @@ class HidBlocklistTest : public testing::Test {
 
   const HidBlocklist& list() { return *blocklist_; }
 
-  void SetDynamicBlocklist(base::StringPiece list) {
+  void SetDynamicBlocklist(std::string_view list) {
     feature_list_.Reset();
 
     std::map<std::string, std::string> params;
@@ -72,7 +73,7 @@ class HidBlocklistTest : public testing::Test {
       collection->feature_reports.push_back(std::move(report));
 
     auto device = mojom::HidDeviceInfo::New();
-    device->guid = base::GenerateGUID();
+    device->guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
     device->vendor_id = vendor_id;
     device->product_id = product_id;
     device->has_report_id = has_report_id;
@@ -125,7 +126,7 @@ class HidBlocklistTest : public testing::Test {
     }
 
     auto device = mojom::HidDeviceInfo::New();
-    device->guid = base::GenerateGUID();
+    device->guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
     device->vendor_id = vendor_id;
     device->product_id = product_id;
     device->has_report_id = true;
@@ -223,7 +224,7 @@ TEST_F(HidBlocklistTest, UnexcludedDevice) {
 
 TEST_F(HidBlocklistTest, UnexcludedDeviceWithNoCollections) {
   auto device = mojom::HidDeviceInfo::New();
-  device->guid = base::GenerateGUID();
+  device->guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
   device->vendor_id = kTestVendorId;
   device->product_id = kTestProductId;
   EXPECT_FALSE(device->is_excluded_by_blocklist);
@@ -432,6 +433,55 @@ TEST_F(HidBlocklistTest, DeviceWithAllProtectedReportsIsNotExcluded) {
   EXPECT_THAT(*device->protected_input_report_ids, ElementsAre(0x01, 0x04));
   EXPECT_THAT(*device->protected_output_report_ids, ElementsAre(0x02, 0x05));
   EXPECT_THAT(*device->protected_feature_report_ids, ElementsAre(0x03, 0x06));
+}
+
+TEST_F(HidBlocklistTest, UsagePageRuleAppliesToNestedCollection) {
+  // Protect reports by usage page.
+  SetDynamicBlocklist("::ff01:::");
+
+  // Create a device with a vendor-defined top-level collection containing a
+  // child collection with the protected usage page. The child defines an input
+  // report which is also propagated to the parent.
+  auto child = mojom::HidCollectionInfo::New();
+  child->usage = mojom::HidUsageAndPage::New(kTestUsage, 0xff01);
+  child->collection_type = mojom::kHIDCollectionTypeApplication;
+  child->report_ids.push_back(kTestReportId);
+  auto child_report = mojom::HidReportDescription::New();
+  child_report->report_id = kTestReportId;
+  child->input_reports.push_back(std::move(child_report));
+
+  auto collection = mojom::HidCollectionInfo::New();
+  collection->usage = mojom::HidUsageAndPage::New(kTestUsage, kTestUsagePage);
+  collection->collection_type = mojom::kHIDCollectionTypeApplication;
+  collection->report_ids.push_back(kTestReportId);
+  auto report = mojom::HidReportDescription::New();
+  report->report_id = kTestReportId;
+  collection->input_reports.push_back(std::move(report));
+  collection->children.push_back(std::move(child));
+
+  std::vector<mojom::HidCollectionInfoPtr> collections;
+  collections.push_back(std::move(collection));
+
+  // The report defined in the child collection is protected by the usage page
+  // rule.
+  EXPECT_THAT(HidBlocklist::Get().GetProtectedReportIds(
+                  HidBlocklist::kReportTypeInput, kTestVendorId, kTestProductId,
+                  collections),
+              ElementsAre(kTestReportId));
+}
+
+TEST_F(HidBlocklistTest, FidoReportsInNestedCollectionAreProtected) {
+  // Create a device with a vendor-defined top-level collection containing a
+  // nested FIDO collection with input and output reports.
+  auto device = CreateDeviceFromReportDescriptor(
+      kTestVendorId, kTestProductId,
+      TestReportDescriptors::VendorWithNestedFido());
+
+  // The nested FIDO reports are protected by the static blocklist.
+  EXPECT_FALSE(device->is_excluded_by_blocklist);
+  EXPECT_THAT(*device->protected_input_report_ids, ElementsAre(0x01));
+  EXPECT_THAT(*device->protected_output_report_ids, ElementsAre(0x01));
+  EXPECT_TRUE(device->protected_feature_report_ids->empty());
 }
 
 TEST_F(HidBlocklistTest, SpecificOutputReportIsProtected) {

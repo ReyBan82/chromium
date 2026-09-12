@@ -4,20 +4,22 @@
 
 package org.chromium.chrome.browser.keyboard_accessory.sheet_tabs;
 
-import androidx.annotation.Nullable;
-
+import org.chromium.base.Callback;
 import org.chromium.chrome.browser.keyboard_accessory.data.KeyboardAccessoryData.AccessorySheetData;
+import org.chromium.ui.modelutil.PropertyModel;
 
-/**
- * This class contains the logic specific to the password accessory sheet.
- */
+/** This class contains the logic specific to the password accessory sheet. */
 class PasswordAccessorySheetMediator extends AccessorySheetTabMediator {
-    private final ToggleChangeDelegate mToggleChangeDelegate;
+    private final Callback<Boolean> mOnToggleChanged;
 
-    PasswordAccessorySheetMediator(AccessorySheetTabModel model, int tabType, int userInfoType,
-            int manageActionToRecord, @Nullable ToggleChangeDelegate toggleChangeDelegate) {
-        super(model, tabType, userInfoType, manageActionToRecord, toggleChangeDelegate);
-        mToggleChangeDelegate = toggleChangeDelegate;
+    PasswordAccessorySheetMediator(
+            PropertyModel model,
+            int tabType,
+            int userInfoType,
+            int manageActionToRecord,
+            Callback<Boolean> onToggleChanged) {
+        super(model, userInfoType, manageActionToRecord);
+        mOnToggleChanged = onToggleChanged;
     }
 
     @Override
@@ -26,7 +28,12 @@ class PasswordAccessorySheetMediator extends AccessorySheetTabMediator {
         if (accessorySheetData == null || accessorySheetData.getOptionToggle() == null) {
             // This call makes sure that the default tab icon is used when the toggle doesn't exist,
             // in case the cached icon is obsolete.
-            mToggleChangeDelegate.onToggleChanged(true);
+            mOnToggleChanged.onResult(true);
         }
+    }
+
+    @Override
+    protected void onToggleChanged(boolean enabled) {
+        mOnToggleChanged.onResult(enabled);
     }
 }

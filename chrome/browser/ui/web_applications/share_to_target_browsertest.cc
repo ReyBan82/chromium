@@ -4,28 +4,22 @@
 
 #include <string>
 
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
-#include "chrome/browser/ui/browser_window.h"
+#include "base/strings/stringprintf.h"
+#include "base/strings/utf_string_conversions.h"
+#include "chrome/browser/apps/link_capturing/link_capturing_feature_test_support.h"
+#include "chrome/browser/sharesheet/sharesheet_service.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/web_applications/app_browser_controller.h"
 #include "chrome/browser/ui/web_applications/test/web_app_browsertest_util.h"
-#include "chrome/browser/ui/web_applications/web_app_controller_browsertest.h"
+#include "chrome/browser/ui/web_applications/web_app_browsertest_base.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "ui/base/base_window.h"
 #include "url/gurl.h"
-
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "base/run_loop.h"
-#include "chrome/browser/lacros/browser_test_util.h"
-#include "chromeos/crosapi/mojom/test_controller.mojom.h"
-#include "chromeos/lacros/lacros_service.h"
-#else
-#include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/sharesheet/sharesheet_service.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
 
 namespace {
 
@@ -50,16 +44,8 @@ class ScopedSharesheetAppSelection {
 
  private:
   static void SetSelectedSharesheetApp(const std::string& app_id) {
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-    base::RunLoop run_loop;
-    chromeos::LacrosService::Get()
-        ->GetRemote<crosapi::mojom::TestController>()
-        ->SetSelectedSharesheetApp(app_id, run_loop.QuitClosure());
-    run_loop.Run();
-#else
     sharesheet::SharesheetService::SetSelectedAppForTesting(
         base::UTF8ToUTF16(app_id));
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
   }
 };
 
@@ -67,10 +53,18 @@ class ScopedSharesheetAppSelection {
 
 namespace web_app {
 
-class ShareToTargetBrowserTest : public WebAppControllerBrowserTest {
+class ShareToTargetBrowserTest : public WebAppBrowserTestBase {
  public:
+  ShareToTargetBrowserTest() {
+    scoped_feature_list_.InitWithFeaturesAndParameters(
+        apps::test::GetFeaturesToEnableLinkCapturingUX(
+            apps::test::LinkCapturingFeatureVersion::kV2DefaultOn),
+        {});
+  }
+
   std::string ExecuteShare(const std::string& script) {
-    const GURL url = https_server()->GetURL("/webshare/index.html");
+    const GURL url =
+        embedded_https_test_server().GetURL("/webshare/index.html");
     EXPECT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
     content::WebContents* const contents =
         browser()->tab_strip_model()->GetActiveWebContents();
@@ -94,34 +88,37 @@ class ShareToTargetBrowserTest : public WebAppControllerBrowserTest {
     app_id_ = web_app::InstallWebAppFromManifest(browser(), app_url);
   }
 
-  const AppId& app_id() const { return app_id_; }
+  const webapps::AppId& app_id() const { return app_id_; }
 
  private:
-  // WebAppControllerBrowserTest:
+  // WebAppBrowserTestBase:
   void TearDownOnMainThread() override {
-    if (!app_id_.empty())
+    if (!app_id_.empty()) {
       CloseAppWindows(app_id_);
-    WebAppControllerBrowserTest::TearDownOnMainThread();
-  }
-
-  static void CloseAppWindows(const AppId& app_id) {
-    for (auto* browser : *BrowserList::GetInstance()) {
-      const AppBrowserController* app_controller = browser->app_controller();
-      if (app_controller && app_controller->app_id() == app_id)
-        browser->window()->Close();
     }
-
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-    // Wait for item to stop existing in shelf.
-    ASSERT_TRUE(browser_test_util::WaitForShelfItem(app_id, /*exists=*/false));
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
+    WebAppBrowserTestBase::TearDownOnMainThread();
   }
 
-  AppId app_id_;
+  static void CloseAppWindows(const webapps::AppId& app_id) {
+    ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+        [&app_id](BrowserWindowInterface* browser) {
+          const web_app::AppBrowserController* const app_controller =
+              web_app::AppBrowserController::From(browser);
+          if (app_controller && app_controller->app_id() == app_id) {
+            browser->GetWindow()->Close();
+          }
+          return true;
+        });
+  }
+
+  webapps::AppId app_id_;
+
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareToPosterWebApp) {
-  const GURL app_url = https_server()->GetURL("/web_share_target/poster.html");
+  const GURL app_url =
+      embedded_https_test_server().GetURL("/web_share_target/poster.html");
   InstallWebAppFromManifest(app_url);
   ScopedSharesheetAppSelection selection(app_id());
 
@@ -137,7 +134,8 @@ IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareToPosterWebApp) {
 }
 
 IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareToChartsWebApp) {
-  const GURL app_url = https_server()->GetURL("/web_share_target/charts.html");
+  const GURL app_url =
+      embedded_https_test_server().GetURL("/web_share_target/charts.html");
   InstallWebAppFromManifest(app_url);
   ScopedSharesheetAppSelection selection(app_id());
 
@@ -150,7 +148,7 @@ IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareToChartsWebApp) {
 
 IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareImage) {
   const GURL app_url =
-      https_server()->GetURL("/web_share_target/multimedia.html");
+      embedded_https_test_server().GetURL("/web_share_target/multimedia.html");
   InstallWebAppFromManifest(app_url);
   ScopedSharesheetAppSelection selection(app_id());
 
@@ -161,7 +159,7 @@ IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareImage) {
 
 IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareMultimedia) {
   const GURL app_url =
-      https_server()->GetURL("/web_share_target/multimedia.html");
+      embedded_https_test_server().GetURL("/web_share_target/multimedia.html");
   InstallWebAppFromManifest(app_url);
   ScopedSharesheetAppSelection selection(app_id());
 
@@ -175,8 +173,8 @@ IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareMultimedia) {
 }
 
 IN_PROC_BROWSER_TEST_F(ShareToTargetBrowserTest, ShareToPartialWild) {
-  const GURL app_url =
-      https_server()->GetURL("/web_share_target/partial-wild.html");
+  const GURL app_url = embedded_https_test_server().GetURL(
+      "/web_share_target/partial-wild.html");
   InstallWebAppFromManifest(app_url);
   ScopedSharesheetAppSelection selection(app_id());
 

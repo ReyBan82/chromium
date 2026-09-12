@@ -25,7 +25,7 @@ def split_nested_class_from_key(key: str) -> Tuple[str, Optional[str]]:
     if first_dollar_sign == -1:
         return key, None
     else:
-        return key[:first_dollar_sign], key[first_dollar_sign + 1:]
+        return key[:first_dollar_sign], key[first_dollar_sign + 1 :]
 
 
 class JavaClass(graph.Node):
@@ -35,6 +35,7 @@ class JavaClass(graph.Node):
     implicitly through lambdas). We treat these nested classes as part of
     the outer class, storing only their names as metadata.
     """
+
     def __init__(self, package: str, class_name: str):
         """Initializes a new Java class structure.
 
@@ -78,7 +79,7 @@ class JavaClass(graph.Node):
     @property
     def build_targets(self) -> Set[str]:
         """Which build target(s) contain the class."""
-        # TODO(crbug.com/1124836): Make this return a List, sorted by
+        # TODO(crbug.com/40147556): Make this return a List, sorted by
         # importance.
         return self._build_targets
 
@@ -117,9 +118,12 @@ class JavaClassDependencyGraph(graph.Graph[JavaClass]):
 
     A directed edge A -> B indicates that A depends on B.
     """
+
     def create_node_from_key(self, key: str):
         """Splits the key into package and class_name."""
         key_without_nested_class, _ = split_nested_class_from_key(key)
         last_period = key_without_nested_class.rfind('.')
-        return JavaClass(package=key_without_nested_class[:last_period],
-                         class_name=key_without_nested_class[last_period + 1:])
+        return JavaClass(
+            package=key_without_nested_class[:last_period],
+            class_name=key_without_nested_class[last_period + 1 :],
+        )

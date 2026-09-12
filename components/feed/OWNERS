@@ -1,8 +1,9 @@
-carlosk@chromium.org
-chili@chromium.org
-dewittj@chromium.org
-harringtond@chromium.org
-iwells@chromium.org
-jianli@chromium.org
-petewil@chromium.org
+# Primary owners
+hanxi@chromium.org
+pnoland@chromium.org
 
+# Fallback owners 
+carlosk@chromium.org
+dewittj@chromium.org
+iwells@chromium.org
+adamta@google.com

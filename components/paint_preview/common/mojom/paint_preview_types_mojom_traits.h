@@ -25,20 +25,17 @@ struct EnumTraits<paint_preview::mojom::RecordingPersistence,
         return paint_preview::mojom::RecordingPersistence::kMemoryBuffer;
     }
     NOTREACHED() << "Unknown persistence " << static_cast<int>(persistence);
-    return paint_preview::mojom::RecordingPersistence::kFileSystem;
   }
 
-  static bool FromMojom(paint_preview::mojom::RecordingPersistence input,
-                        paint_preview::RecordingPersistence* output) {
+  static paint_preview::RecordingPersistence FromMojom(
+      paint_preview::mojom::RecordingPersistence input) {
     switch (input) {
       case paint_preview::mojom::RecordingPersistence::kFileSystem:
-        *output = paint_preview::RecordingPersistence::kFileSystem;
-        return true;
+        return paint_preview::RecordingPersistence::kFileSystem;
       case paint_preview::mojom::RecordingPersistence::kMemoryBuffer:
-        *output = paint_preview::RecordingPersistence::kMemoryBuffer;
-        return true;
+        return paint_preview::RecordingPersistence::kMemoryBuffer;
     }
-    return false;
+    NOTREACHED();
   }
 };
 

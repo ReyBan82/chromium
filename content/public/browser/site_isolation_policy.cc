@@ -34,6 +34,7 @@ namespace content {
 namespace {
 
 bool g_disable_flag_caching_for_tests = false;
+bool g_ignore_origin_keyed_process_overrides_for_testing = false;
 
 bool IsDisableSiteIsolationFlagPresent() {
   static const bool site_isolation_disabled =
@@ -101,16 +102,53 @@ bool SiteIsolationPolicy::UseDedicatedProcessesForAllSites() {
 // static
 bool SiteIsolationPolicy::AreIsolatedSandboxedIframesEnabled() {
   // This feature is controlled by kIsolateSandboxedIframes, and depends on
-  // partial Site Isolation being enabled. It also requires new base URL
-  // behavior, so it implicitly causes
-  // blink::features::IsNewBaseUrlInheritanceBehaviorEnabled() to return true,
-  // and can't be enabled if the new base URL behavior has been disabled by
-  // enterprise policy.
+  // partial Site Isolation being enabled.
   return base::FeatureList::IsEnabled(
              blink::features::kIsolateSandboxedIframes) &&
-         !IsSiteIsolationDisabled(SiteIsolationMode::kPartialSiteIsolation) &&
-         !base::CommandLine::ForCurrentProcess()->HasSwitch(
-             blink::switches::kDisableNewBaseUrlInheritanceBehavior);
+         !IsSiteIsolationDisabled(SiteIsolationMode::kPartialSiteIsolation);
+}
+
+// static
+bool SiteIsolationPolicy::IsSitePerProcessOrStricter() {
+  // !UseDedicatedProcessesForAllSites() guarantees
+  // !AreOriginKeyedProcessesEnabledByDefault() (as that causes an early
+  // return). If UseDedicatedProcessesForAllSites() is true, this function will
+  // early return true, so AreOriginKeyedProcessesEnabledByDefault() doesn't
+  // need to be checked here.
+  return UseDedicatedProcessesForAllSites() || IsStrictOriginIsolationEnabled();
+}
+
+// static
+SiteIsolationDisabledReason
+SiteIsolationPolicy::GetSiteIsolationDisabledReason() {
+  if (IsSitePerProcessOrStricter()) {
+    return SiteIsolationDisabledReason::kNotDisabled;
+  }
+
+  if (IsDisableSiteIsolationFlagPresent()) {
+    return SiteIsolationDisabledReason::kDisabledBySwitch;
+  }
+
+#if BUILDFLAG(IS_ANDROID)
+  // Desktop platforms no longer support disabling Site Isolation by policy.
+  if (IsDisableSiteIsolationForPolicyFlagPresent()) {
+    return SiteIsolationDisabledReason::kDisabledByPolicy;
+  }
+#endif
+
+  if (GetContentClient() &&
+      GetContentClient()->browser()->ShouldDisableSiteIsolation(
+          SiteIsolationMode::kStrictSiteIsolation)) {
+    return SiteIsolationDisabledReason::kDisabledByEmbedder;
+  }
+
+  if (GetContentClient() &&
+      !GetContentClient()->browser()->ShouldEnableStrictSiteIsolation()) {
+    return SiteIsolationDisabledReason::kNotEnabledByDefault;
+  }
+
+  // If we get here, site isolation is not enabled, but we don't know why.
+  return SiteIsolationDisabledReason::kUnknownReason;
 }
 
 // static
@@ -204,6 +242,54 @@ bool SiteIsolationPolicy::IsOriginAgentClusterEnabled() {
 }
 
 // static
+bool SiteIsolationPolicy::AreOriginKeyedProcessesEnabledByDefault(
+    BrowserContext* browser_context) {
+  if (!UseDedicatedProcessesForAllSites()) {
+    return false;
+  }
+
+  if (browser_context &&
+      GetContentClient()->browser()->ShouldDisableOriginAgentClusterDefault(
+          browser_context)) {
+    return false;
+  }
+
+  // Check if the feature is explicitly overridden by the user or enterprise
+  // policy. This will ignore memory limits.
+  std::optional<bool> overridden_value =
+      GetContentClient()->browser()->GetOverrideValueForOriginKeyedProcesses();
+  if (overridden_value.has_value() &&
+      !g_ignore_origin_keyed_process_overrides_for_testing) {
+    return overridden_value.value();
+  }
+
+  // Note: This function and GetOverrideValueForOriginKeyedProcesses() are
+  // expected to be the only places features::kOriginKeyedProcessesByDefault is
+  // checked outside of tests.
+  return base::FeatureList::IsEnabled(
+             features::kOriginKeyedProcessesByDefault) &&
+         !GetContentClient()->browser()->ShouldDisableOriginIsolation();
+}
+
+// static
+bool SiteIsolationPolicy::AreOriginAgentClustersEnabledByDefault(
+    BrowserContext* browser_context) {
+  // OriginAgentClusters are enabled by default if OriginAgentCluster and
+  // kOriginAgentClusterDefaultEnabled are enabled, and if there is no
+  // enterprise policy forbidding it.
+  // This also returns true if kOriginKeyedProcessesByDefault is enabled,
+  // because it depends on having OriginAgentClusters by default. This can be
+  // handled here because this function is the only place that
+  // kOriginAgentClusterDefaultEnabled is directly checked.
+  return IsOriginAgentClusterEnabled() &&
+         (base::FeatureList::IsEnabled(
+              blink::features::kOriginAgentClusterDefaultEnabled) ||
+          AreOriginKeyedProcessesEnabledByDefault(browser_context)) &&
+         !GetContentClient()->browser()->ShouldDisableOriginAgentClusterDefault(
+             browser_context);
+}
+
+// static
 bool SiteIsolationPolicy::IsSiteIsolationForCOOPEnabled() {
   // If the user has explicitly enabled site isolation for COOP sites from the
   // command line, honor this regardless of policies that may disable site
@@ -238,11 +324,6 @@ bool SiteIsolationPolicy::ShouldPersistIsolatedCOOPSites() {
 
   return features::kSiteIsolationForCrossOriginOpenerPolicyShouldPersistParam
       .Get();
-}
-
-// static
-bool SiteIsolationPolicy::IsSiteIsolationForGuestsEnabled() {
-  return base::FeatureList::IsEnabled(features::kSiteIsolationForGuests);
 }
 
 // static
@@ -307,6 +388,11 @@ bool SiteIsolationPolicy::ShouldUrlUseApplicationIsolationLevel(
 // static
 void SiteIsolationPolicy::DisableFlagCachingForTesting() {
   g_disable_flag_caching_for_tests = true;
+}
+
+// static
+void SiteIsolationPolicy::IgnoreOriginKeyedProcessOverridesForTesting() {
+  g_ignore_origin_keyed_process_overrides_for_testing = true;
 }
 
 // static

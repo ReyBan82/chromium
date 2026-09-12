@@ -10,6 +10,7 @@
 
 #include "base/functional/bind.h"
 #include "base/json/json_writer.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/test_future.h"
 #include "base/test/test_mock_time_task_runner.h"
@@ -45,11 +46,8 @@ em::RemoteCommand GenerateScreenshotCommandProto(
   command_proto.set_type(em::RemoteCommand_Type_DEVICE_SCREENSHOT);
   command_proto.set_command_id(unique_id);
   command_proto.set_age_of_command(age_of_command.InMilliseconds());
-  std::string payload;
-  base::Value::Dict root_dict;
-  root_dict.Set(kUploadUrlFieldName, upload_url);
-  base::JSONWriter::Write(root_dict, &payload);
-  command_proto.set_payload(payload);
+  auto root_dict = base::DictValue().Set(kUploadUrlFieldName, upload_url);
+  command_proto.set_payload(base::WriteJson(root_dict).value_or(""));
   return command_proto;
 }
 
@@ -74,7 +72,7 @@ class MockUploadJob : public UploadJob {
 
  protected:
   const GURL upload_url_;
-  UploadJob::Delegate* delegate_;
+  raw_ptr<UploadJob::Delegate> delegate_;
   std::unique_ptr<UploadJob::ErrorCode> error_code_;
   bool add_datasegment_succeeds_;
 };
@@ -118,24 +116,25 @@ scoped_refptr<base::RefCountedBytes> GenerateTestPNG(const int& width,
       *bmp.getAddr32(x, y) = background_color;
     }
   }
-  scoped_refptr<base::RefCountedBytes> png_bytes(new base::RefCountedBytes());
-  gfx::PNGCodec::ColorFormat color_format = gfx::PNGCodec::FORMAT_RGBA;
-  if (!gfx::PNGCodec::Encode(
-          reinterpret_cast<const unsigned char*>(bmp.getPixels()), color_format,
-          gfx::Size(bmp.width(), bmp.height()),
-          static_cast<int>(bmp.rowBytes()), false,
-          std::vector<gfx::PNGCodec::Comment>(), &png_bytes->data())) {
+  std::optional<std::vector<uint8_t>> png_bytes = gfx::PNGCodec::Encode(
+      reinterpret_cast<const unsigned char*>(bmp.getPixels()),
+      gfx::PNGCodec::FORMAT_RGBA, gfx::Size(bmp.width(), bmp.height()),
+      static_cast<int>(bmp.rowBytes()), false,
+      std::vector<gfx::PNGCodec::Comment>());
+  if (!png_bytes) {
     LOG(ERROR) << "Failed to encode image";
+    return base::MakeRefCounted<base::RefCountedBytes>();
   }
-  return png_bytes;
+  return base::MakeRefCounted<base::RefCountedBytes>(
+      std::move(png_bytes).value());
 }
 
-class MockScreenshotDelegate : public DeviceCommandScreenshotJob::Delegate {
+class FakeScreenshotDelegate : public DeviceCommandScreenshotJob::Delegate {
  public:
-  MockScreenshotDelegate(
+  FakeScreenshotDelegate(
       std::unique_ptr<UploadJob::ErrorCode> upload_job_error_code,
       bool screenshot_allowed);
-  ~MockScreenshotDelegate() override;
+  ~FakeScreenshotDelegate() override;
 
   bool IsScreenshotAllowed() override;
   void TakeSnapshot(gfx::NativeWindow window,
@@ -149,21 +148,24 @@ class MockScreenshotDelegate : public DeviceCommandScreenshotJob::Delegate {
   bool screenshot_allowed_;
 };
 
-MockScreenshotDelegate::MockScreenshotDelegate(
+FakeScreenshotDelegate::FakeScreenshotDelegate(
     std::unique_ptr<UploadJob::ErrorCode> upload_job_error_code,
     bool screenshot_allowed)
     : upload_job_error_code_(std::move(upload_job_error_code)),
       screenshot_allowed_(screenshot_allowed) {}
 
-MockScreenshotDelegate::~MockScreenshotDelegate() = default;
+FakeScreenshotDelegate::~FakeScreenshotDelegate() = default;
 
-bool MockScreenshotDelegate::IsScreenshotAllowed() {
+bool FakeScreenshotDelegate::IsScreenshotAllowed() {
   return screenshot_allowed_;
 }
 
-void MockScreenshotDelegate::TakeSnapshot(gfx::NativeWindow window,
+void FakeScreenshotDelegate::TakeSnapshot(gfx::NativeWindow window,
                                           const gfx::Rect& source_rect,
                                           OnScreenshotTakenCallback callback) {
+  EXPECT_TRUE(screenshot_allowed_)
+      << "Should not take a screenshot unless it is allowed";
+
   const int width = source_rect.width();
   const int height = source_rect.height();
   scoped_refptr<base::RefCountedBytes> test_png =
@@ -172,7 +174,7 @@ void MockScreenshotDelegate::TakeSnapshot(gfx::NativeWindow window,
       FROM_HERE, base::BindOnce(std::move(callback), test_png));
 }
 
-std::unique_ptr<UploadJob> MockScreenshotDelegate::CreateUploadJob(
+std::unique_ptr<UploadJob> FakeScreenshotDelegate::CreateUploadJob(
     const GURL& upload_url,
     UploadJob::Delegate* delegate) {
   return std::make_unique<MockUploadJob>(upload_url, delegate,
@@ -235,13 +237,11 @@ void DeviceCommandScreenshotTest::InitializeScreenshotJob(
 
 std::string DeviceCommandScreenshotTest::CreatePayloadFromResultCode(
     DeviceCommandScreenshotJob::ResultCode result_code) {
-  std::string payload;
-  base::Value::Dict root_dict;
+  base::DictValue root_dict;
   if (result_code != DeviceCommandScreenshotJob::SUCCESS) {
     root_dict.Set(kResultFieldName, result_code);
   }
-  base::JSONWriter::Write(root_dict, &payload);
-  return payload;
+  return base::WriteJson(root_dict).value_or("");
 }
 
 void DeviceCommandScreenshotTest::VerifyResults(
@@ -257,8 +257,8 @@ void DeviceCommandScreenshotTest::VerifyResults(
 }
 
 TEST_F(DeviceCommandScreenshotTest, Success) {
-  std::unique_ptr<RemoteCommandJob> job(new DeviceCommandScreenshotJob(
-      std::make_unique<MockScreenshotDelegate>(nullptr, true)));
+  auto job = std::make_unique<DeviceCommandScreenshotJob>(
+      std::make_unique<FakeScreenshotDelegate>(nullptr, true));
   InitializeScreenshotJob(job.get(), kUniqueID, test_start_time_,
                           kMockUploadUrl);
   base::test::TestFuture<void> job_finished_future;
@@ -272,8 +272,8 @@ TEST_F(DeviceCommandScreenshotTest, Success) {
 }
 
 TEST_F(DeviceCommandScreenshotTest, FailureUserInput) {
-  std::unique_ptr<RemoteCommandJob> job(new DeviceCommandScreenshotJob(
-      std::make_unique<MockScreenshotDelegate>(nullptr, false)));
+  auto job = std::make_unique<DeviceCommandScreenshotJob>(
+      std::make_unique<FakeScreenshotDelegate>(nullptr, false));
   InitializeScreenshotJob(job.get(), kUniqueID, test_start_time_,
                           kMockUploadUrl);
   base::test::TestFuture<void> job_finished_future;
@@ -288,10 +288,9 @@ TEST_F(DeviceCommandScreenshotTest, FailureUserInput) {
 
 TEST_F(DeviceCommandScreenshotTest, Failure) {
   using ErrorCode = UploadJob::ErrorCode;
-  std::unique_ptr<ErrorCode> error_code(
-      new ErrorCode(UploadJob::AUTHENTICATION_ERROR));
-  std::unique_ptr<RemoteCommandJob> job(new DeviceCommandScreenshotJob(
-      std::make_unique<MockScreenshotDelegate>(std::move(error_code), true)));
+  auto job = std::make_unique<DeviceCommandScreenshotJob>(
+      std::make_unique<FakeScreenshotDelegate>(
+          std::make_unique<ErrorCode>(UploadJob::AUTHENTICATION_ERROR), true));
   InitializeScreenshotJob(job.get(), kUniqueID, test_start_time_,
                           kMockUploadUrl);
   base::test::TestFuture<void> job_finished_future;

@@ -26,7 +26,7 @@ bool DTSX::Parse(const std::vector<uint8_t>& data, MediaLog* media_log) {
     return false;
   DVLOG(3) << "dtsx data.size " << data.size();
   // Parse udts box using reader.
-  BitReader reader(&data[0], data.size());
+  BitReader reader(data);
 
   // Read DecoderProfileCode
   RCHECK(reader.ReadBits(6, &decoder_profile_code_));
@@ -140,7 +140,7 @@ int DTSX::GetMaxPayload() const {
   return max_payload_;
 }
 
-int DTSX::GetNumPresentations() const {
+uint32_t DTSX::GetNumPresentations() const {
   return num_presentations_;
 }
 

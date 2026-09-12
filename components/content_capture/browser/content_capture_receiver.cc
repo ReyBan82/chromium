@@ -46,16 +46,16 @@ std::string ContentCaptureReceiver::ToJSON(
     const std::vector<blink::mojom::FaviconURLPtr>& candidates) {
   if (candidates.empty())
     return std::string();
-  base::Value::List favicon_array;
+  base::ListValue favicon_array;
   for (const auto& favicon_url : candidates) {
-    base::Value::Dict favicon;
+    base::DictValue favicon;
     favicon.Set("url", favicon_url->icon_url.spec());
     favicon.Set("type", ToFaviconTypeString(favicon_url->icon_type));
 
     if (!favicon_url->icon_sizes.empty()) {
-      base::Value::List sizes;
+      base::ListValue sizes;
       for (auto icon_size : favicon_url->icon_sizes) {
-        base::Value::Dict size;
+        base::DictValue size;
         size.Set("width", icon_size.width());
         size.Set("height", icon_size.height());
         sizes.Append(std::move(size));
@@ -64,9 +64,7 @@ std::string ContentCaptureReceiver::ToJSON(
     }
     favicon_array.Append(std::move(favicon));
   }
-  std::string result;
-  base::JSONWriter::Write(favicon_array, &result);
-  return result;
+  return base::WriteJson(favicon_array).value_or("");
 }
 
 ContentCaptureReceiver::ContentCaptureReceiver(content::RenderFrameHost* rfh)
@@ -75,7 +73,7 @@ ContentCaptureReceiver::ContentCaptureReceiver(content::RenderFrameHost* rfh)
 ContentCaptureReceiver::~ContentCaptureReceiver() = default;
 
 int64_t ContentCaptureReceiver::GetIdFrom(content::RenderFrameHost* rfh) {
-  return static_cast<int64_t>(rfh->GetProcess()->GetID()) << 32 |
+  return static_cast<int64_t>(rfh->GetProcess()->GetDeprecatedID()) << 32 |
          (rfh->GetRoutingID() & 0xFFFFFFFF);
 }
 
@@ -85,9 +83,25 @@ void ContentCaptureReceiver::BindPendingReceiver(
   receiver_.Bind(std::move(pending_receiver));
 }
 
+void ContentCaptureReceiver::DidCompleteBatchCaptureContent() {
+  if (!content_capture_enabled_) {
+    return;
+  }
+  auto* provider = GetOnscreenContentProvider(rfh_);
+  if (!provider) {
+    return;
+  }
+
+  ContentCaptureFrame frame(frame_content_capture_data_);
+  provider->FlushCaptureContent(this, frame);
+}
+
 void ContentCaptureReceiver::DidCaptureContent(const ContentCaptureData& data,
                                                bool first_data) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!content_capture_enabled_) {
+    return;
+  }
   auto* provider = GetOnscreenContentProvider(rfh_);
   if (!provider)
     return;
@@ -97,14 +111,15 @@ void ContentCaptureReceiver::DidCaptureContent(const ContentCaptureData& data,
     // so the previous session should be terminated.
     // The parent frame might be captured after child, we need to check if url
     // is changed, otherwise the child frame's session will be removed.
+    std::u16string url = base::UTF8ToUTF16(rfh_->GetLastCommittedURL().spec());
     if (frame_content_capture_data_.id != 0 &&
-        frame_content_capture_data_.url != data.value) {
+        frame_content_capture_data_.url != url) {
       RemoveSession();
     }
 
     frame_content_capture_data_.id = id_;
     // Copies everything except id and children.
-    frame_content_capture_data_.url = data.value;
+    frame_content_capture_data_.url = url;
     frame_content_capture_data_.bounds = data.bounds;
     RetrieveFaviconURL();
 
@@ -120,6 +135,9 @@ void ContentCaptureReceiver::DidCaptureContent(const ContentCaptureData& data,
 
 void ContentCaptureReceiver::DidUpdateContent(const ContentCaptureData& data) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!content_capture_enabled_) {
+    return;
+  }
   auto* provider = GetOnscreenContentProvider(rfh_);
   if (!provider)
     return;
@@ -133,6 +151,9 @@ void ContentCaptureReceiver::DidUpdateContent(const ContentCaptureData& data) {
 void ContentCaptureReceiver::DidRemoveContent(
     const std::vector<int64_t>& data) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  if (!content_capture_enabled_) {
+    return;
+  }
   auto* provider = GetOnscreenContentProvider(rfh_);
   if (!provider)
     return;
@@ -166,7 +187,7 @@ void ContentCaptureReceiver::RemoveSession() {
   if (!has_session_)
     return;
 
-  // TODO(crbug.com/995952): Find a way to notify of session being removed if
+  // TODO(crbug.com/40641263): Find a way to notify of session being removed if
   // rfh isn't available.
   if (auto* provider = GetOnscreenContentProvider(rfh_)) {
     provider->DidRemoveSession(this);
@@ -261,7 +282,7 @@ const ContentCaptureFrame& ContentCaptureReceiver::GetContentCaptureFrame() {
 
   frame_content_capture_data_.id = id_;
   frame_content_capture_data_.url = url;
-  const absl::optional<gfx::Size>& size = rfh_->GetFrameSize();
+  const std::optional<gfx::Size>& size = rfh_->GetFrameSize();
   if (size.has_value())
     frame_content_capture_data_.bounds = gfx::Rect(size.value());
   RetrieveFaviconURL();

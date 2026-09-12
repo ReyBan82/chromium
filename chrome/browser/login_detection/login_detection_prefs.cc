@@ -40,7 +40,7 @@ void RemoveLoginDetectionData(PrefService* prefs) {
 
 void SaveSiteToOAuthSignedInList(PrefService* pref_service, const GURL& url) {
   ScopedDictPrefUpdate update(pref_service, kOAuthSignedInSitesPref);
-  base::Value::Dict& dict = update.Get();
+  base::DictValue& dict = update.Get();
   dict.Set(GetSiteNameForURL(url), base::TimeToValue(base::Time::Now()));
 
   // Try making space by removing sites having invalid sign-in time. This should
@@ -60,7 +60,7 @@ void SaveSiteToOAuthSignedInList(PrefService* pref_service, const GURL& url) {
   while (dict.size() > GetOauthLoggedInSitesMaxSize()) {
     // Holds the pair of site name, its last login time for the site that was
     // least recently signed-in to be removed.
-    absl::optional<std::pair<std::string, base::Time>> site_entry_to_remove;
+    std::optional<std::pair<std::string, base::Time>> site_entry_to_remove;
     for (auto site_entry : dict) {
       base::Time signin_time = *base::ValueToTime(site_entry.second);
       if (!site_entry_to_remove || signin_time < site_entry_to_remove->second) {

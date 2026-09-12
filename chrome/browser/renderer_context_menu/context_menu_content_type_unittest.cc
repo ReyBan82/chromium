@@ -4,7 +4,6 @@
 
 #include <memory>
 
-#include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/renderer_context_menu/context_menu_content_type_factory.h"
 #include "chrome/browser/renderer_context_menu/render_view_context_menu_test_util.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
@@ -23,6 +22,7 @@ content::ContextMenuParams CreateParams(int contexts) {
   rv.is_editable = false;
   rv.media_type = blink::mojom::ContextMenuDataMediaType::kNone;
   rv.page_url = GURL("http://test.page/");
+  rv.frame_url = rv.page_url;
 
   static const std::u16string selected_text = u"sel";
   if (contexts & MenuItem::SELECTION)
@@ -52,7 +52,7 @@ content::ContextMenuParams CreateParams(int contexts) {
   }
 
   if (contexts & MenuItem::FRAME)
-    rv.frame_url = GURL("http://test.frame/");
+    rv.is_subframe = true;
 
   return rv;
 }
@@ -80,6 +80,16 @@ TEST_F(ContextMenuContentTypeTest, CheckTypes) {
                     ContextMenuContentType::ITEM_GROUP_EDITABLE));
     EXPECT_TRUE(content_type->SupportsGroup(
                     ContextMenuContentType::ITEM_GROUP_SEARCH_PROVIDER));
+    EXPECT_TRUE(
+        content_type->SupportsGroup(ContextMenuContentType::ITEM_GROUP_GLIC));
+  }
+
+  {
+    content::ContextMenuParams params = CreateParams(MenuItem::SELECTION);
+    params.media_type = blink::mojom::ContextMenuDataMediaType::kImage;
+    auto content_type = std::make_unique<ContextMenuContentType>(params, true);
+    EXPECT_TRUE(
+        content_type->SupportsGroup(ContextMenuContentType::ITEM_GROUP_GLIC));
   }
 
   {
@@ -102,6 +112,8 @@ TEST_F(ContextMenuContentTypeTest, CheckTypes) {
                     ContextMenuContentType::ITEM_GROUP_SEARCHWEBFORIMAGE));
     EXPECT_TRUE(content_type->SupportsGroup(
                     ContextMenuContentType::ITEM_GROUP_PRINT));
+    EXPECT_FALSE(
+        content_type->SupportsGroup(ContextMenuContentType::ITEM_GROUP_GLIC));
 
     EXPECT_FALSE(content_type->SupportsGroup(
                     ContextMenuContentType::ITEM_GROUP_MEDIA_VIDEO));
@@ -147,4 +159,23 @@ TEST_F(ContextMenuContentTypeTest, CheckTypes) {
     EXPECT_TRUE(content_type->SupportsGroup(
                     ContextMenuContentType::ITEM_GROUP_PAGE));
   }
+}
+
+TEST_F(ContextMenuContentTypeTest, ReadAnythingType) {
+  content::ContextMenuParams params;
+  params.page_url =
+      GURL("chrome-untrusted://read-anything-side-panel.top-chrome/");
+
+  std::unique_ptr<ContextMenuContentType> content_type =
+      ContextMenuContentTypeFactory::Create(main_rfh(), params);
+
+  // Verify it behaves like ReadAnything content type (rejects PAGE group).
+  EXPECT_FALSE(
+      content_type->SupportsGroup(ContextMenuContentType::ITEM_GROUP_PAGE));
+
+  // Verify a normal page DOES support ITEM_GROUP_PAGE.
+  params.page_url = GURL("http://www.google.com");
+  content_type = ContextMenuContentTypeFactory::Create(main_rfh(), params);
+  EXPECT_TRUE(
+      content_type->SupportsGroup(ContextMenuContentType::ITEM_GROUP_PAGE));
 }

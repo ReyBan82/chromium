@@ -23,6 +23,9 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/permission_controller.h"
+#include "content/public/browser/permission_descriptor_util.h"
+#include "content/public/browser/permission_request_description.h"
+#include "content/public/browser/permission_result.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/common/content_client.h"
 #include "third_party/blink/public/common/features.h"
@@ -50,7 +53,7 @@ FontAccessManager::FontAccessManager(
     base::SequenceBound<FontEnumerationCache> font_enumeration_cache,
     base::PassKey<FontAccessManager>)
     : font_enumeration_cache_(std::move(font_enumeration_cache)),
-      results_task_runner_(content::GetUIThreadTaskRunner({})) {}
+      results_task_runner_(GetUIThreadTaskRunner({})) {}
 
 FontAccessManager::~FontAccessManager() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -69,13 +72,16 @@ void FontAccessManager::BindReceiver(
 
 void FontAccessManager::EnumerateLocalFonts(
     EnumerateLocalFontsCallback callback) {
-  DCHECK(base::FeatureList::IsEnabled(blink::features::kFontAccess));
+  CHECK(base::FeatureList::IsEnabled(blink::features::kFontAccess),
+        base::NotFatalUntil::M159);
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   if (skip_privacy_checks_for_testing_) {
-    DidRequestPermission(std::move(callback),
-                         blink::mojom::PermissionStatus::GRANTED);
+    DidRequestPermission(
+        std::move(callback),
+        PermissionResult(blink::mojom::PermissionStatus::GRANTED,
+                         PermissionStatusSource::UNSPECIFIED));
     return;
   }
 
@@ -97,16 +103,38 @@ void FontAccessManager::EnumerateLocalFonts(
     return;
   }
 
+  // Documents with opaque origins (sandboxed frames/popups, data: URLs) have
+  // no persistable permission identity: the LOCAL_FONTS content setting can
+  // never be keyed to them. Without this gate, the permission lookup below
+  // falls back to WebContents::GetVisibleURL() for opaque-origin primary main
+  // frames (PermissionUtil::GetLastCommittedOriginAsURL), which a compromised
+  // renderer can steer to an arbitrary victim origin via a never-committing
+  // pending navigation and thereby borrow that origin's persisted grant.
+  // Reject instead of CHECKing because this state is reachable by
+  // legitimate-looking renderer traffic.
+  // See crbug.com/553150261.
+  if (rfh->GetLastCommittedOrigin().opaque()) {
+    std::move(callback).Run(
+        blink::mojom::FontEnumerationStatus::kPermissionDenied,
+        base::ReadOnlySharedMemoryRegion());
+    return;
+  }
+
   content::PermissionController* permission_controller =
       rfh->GetBrowserContext()->GetPermissionController();
-  DCHECK(permission_controller);
+  CHECK(permission_controller, base::NotFatalUntil::M159);
 
   auto status = permission_controller->GetPermissionStatusForCurrentDocument(
-      blink::PermissionType::LOCAL_FONTS, rfh);
+      content::PermissionDescriptorUtil::
+          CreatePermissionDescriptorForPermissionType(
+              blink::PermissionType::LOCAL_FONTS),
+      rfh);
 
   if (status != blink::mojom::PermissionStatus::ASK) {
     // Permission has been requested before.
-    DidRequestPermission(std::move(callback), std::move(status));
+    DidRequestPermission(
+        std::move(callback),
+        PermissionResult(status, PermissionStatusSource::UNSPECIFIED));
     return;
   }
 
@@ -118,23 +146,39 @@ void FontAccessManager::EnumerateLocalFonts(
         base::ReadOnlySharedMemoryRegion());
     return;
   }
-  rfh->frame_tree_node()->UpdateUserActivationState(
-      blink::mojom::UserActivationUpdateType::kConsumeTransientActivation,
-      blink::mojom::UserActivationNotificationType::kNone);
+
+  // Ensure the requesting document is still active and consume transient user
+  // activation to prevent stale/pending-deletion frames from consuming user
+  // gestures from newly committed documents or other frames in the frame tree.
+  if ((!rfh->IsActive() &&
+       base::FeatureList::IsEnabled(
+           blink::features::kFontAccessCheckFrameIsActive)) ||
+      !rfh->frame_tree_node()->UpdateUserActivationState(
+          blink::mojom::UserActivationUpdateType::kConsumeTransientActivation,
+          blink::mojom::UserActivationNotificationType::kNone)) {
+    std::move(callback).Run(
+        blink::mojom::FontEnumerationStatus::kNeedsUserActivation,
+        base::ReadOnlySharedMemoryRegion());
+    return;
+  }
 
   permission_controller->RequestPermissionFromCurrentDocument(
-      blink::PermissionType::LOCAL_FONTS, rfh,
-      /*user_gesture=*/true,
+      rfh,
+      PermissionRequestDescription(
+          content::PermissionDescriptorUtil::
+              CreatePermissionDescriptorForPermissionType(
+                  blink::PermissionType::LOCAL_FONTS),
+          /*user_gesture=*/true),
       base::BindOnce(&FontAccessManager::DidRequestPermission,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
 void FontAccessManager::DidRequestPermission(
     EnumerateLocalFontsCallback callback,
-    blink::mojom::PermissionStatus status) {
+    PermissionResult permission_result) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (status != blink::mojom::PermissionStatus::GRANTED) {
+  if (permission_result.status != blink::mojom::PermissionStatus::GRANTED) {
     std::move(callback).Run(
         blink::mojom::FontEnumerationStatus::kPermissionDenied,
         base::ReadOnlySharedMemoryRegion());

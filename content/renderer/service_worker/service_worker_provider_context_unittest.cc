@@ -12,6 +12,7 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/notimplemented.h"
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
 #include "content/public/common/content_features.h"
@@ -205,9 +206,8 @@ class FakeControllerServiceWorker
   }
   void Clone(
       mojo::PendingReceiver<blink::mojom::ControllerServiceWorker> receiver,
-      const network::CrossOriginEmbedderPolicy&,
-      mojo::PendingRemote<network::mojom::CrossOriginEmbedderPolicyReporter>)
-      override {
+      blink::mojom::CrossOriginEmbedderPolicyInfoPtr,
+      blink::mojom::DocumentIsolationPolicyInfoPtr) override {
     receivers_.Add(this, std::move(receiver));
   }
 
@@ -361,7 +361,7 @@ TEST_F(ServiceWorkerProviderContextTest, SetController) {
 
     auto info = blink::mojom::ControllerServiceWorkerInfo::New();
     info->mode = blink::mojom::ControllerServiceWorkerMode::kControlled;
-    info->fetch_handler_type = info->effective_fetch_handler_type =
+    info->fetch_handler_type =
         blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable;
     info->object_info = std::move(object_info);
     container_remote->SetController(std::move(info), true);
@@ -409,7 +409,7 @@ TEST_F(ServiceWorkerProviderContextTest, SetController) {
 
     auto info = blink::mojom::ControllerServiceWorkerInfo::New();
     info->mode = blink::mojom::ControllerServiceWorkerMode::kControlled;
-    info->fetch_handler_type = info->effective_fetch_handler_type =
+    info->fetch_handler_type =
         blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable;
     info->object_info = std::move(object_info);
     container_remote->SetController(std::move(info), true);
@@ -477,12 +477,10 @@ TEST_F(ServiceWorkerProviderContextTest, SetControllerServiceWorker) {
   auto controller_info1 = blink::mojom::ControllerServiceWorkerInfo::New();
   mojo::Remote<blink::mojom::ControllerServiceWorker> remote_controller1;
   fake_controller1.Clone(remote_controller1.BindNewPipeAndPassReceiver(),
-                         network::CrossOriginEmbedderPolicy(),
-                         mojo::NullRemote());
+                         nullptr, nullptr);
   controller_info1->mode =
       blink::mojom::ControllerServiceWorkerMode::kControlled;
   controller_info1->fetch_handler_type =
-      controller_info1->effective_fetch_handler_type =
           blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable;
   controller_info1->object_info = std::move(object_info1);
   controller_info1->remote_controller = remote_controller1.Unbind();
@@ -525,12 +523,10 @@ TEST_F(ServiceWorkerProviderContextTest, SetControllerServiceWorker) {
   auto controller_info2 = blink::mojom::ControllerServiceWorkerInfo::New();
   mojo::Remote<blink::mojom::ControllerServiceWorker> remote_controller2;
   fake_controller2.Clone(remote_controller2.BindNewPipeAndPassReceiver(),
-                         network::CrossOriginEmbedderPolicy(),
-                         mojo::NullRemote());
+                         nullptr, nullptr);
   controller_info2->mode =
       blink::mojom::ControllerServiceWorkerMode::kControlled;
   controller_info2->fetch_handler_type =
-      controller_info2->effective_fetch_handler_type =
           blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable;
   controller_info2->object_info = std::move(object_info2);
   controller_info2->remote_controller = remote_controller2.Unbind();
@@ -619,12 +615,10 @@ TEST_F(ServiceWorkerProviderContextTest, SetControllerServiceWorker) {
   auto controller_info4 = blink::mojom::ControllerServiceWorkerInfo::New();
   mojo::Remote<blink::mojom::ControllerServiceWorker> remote_controller4;
   fake_controller4.Clone(remote_controller4.BindNewPipeAndPassReceiver(),
-                         network::CrossOriginEmbedderPolicy(),
-                         mojo::NullRemote());
+                         nullptr, nullptr);
   controller_info4->mode =
       blink::mojom::ControllerServiceWorkerMode::kControlled;
   controller_info4->fetch_handler_type =
-      controller_info4->effective_fetch_handler_type =
           blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable;
   controller_info4->object_info = std::move(object_info4);
   controller_info4->remote_controller = remote_controller4.Unbind();
@@ -679,7 +673,6 @@ TEST_F(ServiceWorkerProviderContextTest, ControllerWithoutFetchHandler) {
   controller_info->mode =
       blink::mojom::ControllerServiceWorkerMode::kNoFetchEventHandler;
   controller_info->fetch_handler_type =
-      controller_info->effective_fetch_handler_type =
           blink::mojom::ServiceWorkerFetchHandlerType::kNoHandler;
   controller_info->object_info = std::move(object_info);
 
@@ -779,13 +772,11 @@ TEST_F(ServiceWorkerProviderContextTest, OnNetworkProviderDestroyed) {
   FakeControllerServiceWorker fake_controller;
   auto controller_info = blink::mojom::ControllerServiceWorkerInfo::New();
   mojo::Remote<blink::mojom::ControllerServiceWorker> remote_controller;
-  fake_controller.Clone(remote_controller.BindNewPipeAndPassReceiver(),
-                        network::CrossOriginEmbedderPolicy(),
-                        mojo::NullRemote());
+  fake_controller.Clone(remote_controller.BindNewPipeAndPassReceiver(), nullptr,
+                        nullptr);
   controller_info->mode =
       blink::mojom::ControllerServiceWorkerMode::kControlled;
   controller_info->fetch_handler_type =
-      controller_info->effective_fetch_handler_type =
           blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable;
   controller_info->object_info = std::move(object_info);
   controller_info->remote_controller = remote_controller.Unbind();
@@ -808,7 +799,7 @@ TEST_F(ServiceWorkerProviderContextTest, OnNetworkProviderDestroyed) {
   provider_context->OnNetworkProviderDestroyed();
 
   // Calling these in the weird state shouldn't crash.
-  EXPECT_FALSE(provider_context->container_host());
+  EXPECT_FALSE(provider_context->has_container_host_for_testing());
   EXPECT_FALSE(provider_context->CloneRemoteContainerHost());
   provider_context->DispatchNetworkQuiet();
   provider_context->NotifyExecutionReady();
@@ -830,13 +821,11 @@ TEST_F(ServiceWorkerProviderContextTest,
   FakeControllerServiceWorker fake_controller;
   auto controller_info = blink::mojom::ControllerServiceWorkerInfo::New();
   mojo::Remote<blink::mojom::ControllerServiceWorker> remote_controller;
-  fake_controller.Clone(remote_controller.BindNewPipeAndPassReceiver(),
-                        network::CrossOriginEmbedderPolicy(),
-                        mojo::NullRemote());
+  fake_controller.Clone(remote_controller.BindNewPipeAndPassReceiver(), nullptr,
+                        nullptr);
   controller_info->mode =
       blink::mojom::ControllerServiceWorkerMode::kControlled;
   controller_info->fetch_handler_type =
-      controller_info->effective_fetch_handler_type =
           blink::mojom::ServiceWorkerFetchHandlerType::kNotSkippable;
   controller_info->object_info = std::move(object_info);
   controller_info->remote_controller = remote_controller.Unbind();

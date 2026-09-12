@@ -10,11 +10,18 @@ import android.text.TextUtils;
 
 import androidx.preference.CheckBoxPreference;
 import androidx.preference.Preference;
-import androidx.preference.PreferenceFragmentCompat;
 import androidx.preference.PreferenceScreen;
 
+import org.chromium.base.supplier.MonotonicObservableSupplier;
+import org.chromium.base.supplier.NonNullObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.settings.ChromeBaseSettingsFragment;
+import org.chromium.chrome.browser.settings.search.ChromeBaseSearchIndexProvider;
 import org.chromium.chrome.browser.tracing.TracingController;
 import org.chromium.components.browser_ui.settings.ChromeBaseCheckBoxPreference;
+import org.chromium.components.browser_ui.settings.EmbeddableSettingsPage;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,12 +33,15 @@ import java.util.Set;
  * Settings fragment that configures chrome tracing categories of a specific type. The type is
  * passed to the fragment via an extra (EXTRA_CATEGORY_TYPE).
  */
-public class TracingCategoriesSettings
-        extends PreferenceFragmentCompat implements Preference.OnPreferenceChangeListener {
+@NullMarked
+public class TracingCategoriesSettings extends ChromeBaseSettingsFragment
+        implements EmbeddableSettingsPage, Preference.OnPreferenceChangeListener {
     public static final String EXTRA_CATEGORY_TYPE = "type";
 
     // Non-translated strings:
     private static final String MSG_CATEGORY_SELECTION_TITLE = "Select categories";
+    private final NonNullObservableSupplier<String> mPageTitle =
+            ObservableSuppliers.createNonNull(MSG_CATEGORY_SELECTION_TITLE);
 
     private static final String SELECT_ALL_KEY = "select-all";
     private static final String SELECT_ALL_TITLE = "Select all";
@@ -42,8 +52,7 @@ public class TracingCategoriesSettings
     private CheckBoxPreference mSelectAllPreference;
 
     @Override
-    public void onCreatePreferences(Bundle savedInstanceState, String rootKey) {
-        getActivity().setTitle(MSG_CATEGORY_SELECTION_TITLE);
+    public void onCreatePreferences(@Nullable Bundle savedInstanceState, @Nullable String rootKey) {
         PreferenceScreen preferenceScreen =
                 getPreferenceManager().createPreferenceScreen(getStyledContext());
         preferenceScreen.setOrderingAsAdded(true);
@@ -75,10 +84,16 @@ public class TracingCategoriesSettings
         setPreferenceScreen(preferenceScreen);
     }
 
+    @Override
+    public MonotonicObservableSupplier<String> getPageTitle() {
+        return mPageTitle;
+    }
+
     private CheckBoxPreference createPreference(String category) {
         CheckBoxPreference preference = new ChromeBaseCheckBoxPreference(getStyledContext(), null);
         preference.setKey(category);
-        preference.setTitle(category.startsWith(TracingSettings.NON_DEFAULT_CATEGORY_PREFIX)
+        preference.setTitle(
+                category.startsWith(TracingSettings.NON_DEFAULT_CATEGORY_PREFIX)
                         ? category.substring(TracingSettings.NON_DEFAULT_CATEGORY_PREFIX.length())
                         : category);
         preference.setChecked(mEnabledCategories.contains(category));
@@ -115,4 +130,14 @@ public class TracingCategoriesSettings
             pref.callChangeListener(pref.isChecked());
         }
     }
+
+    @Override
+    public @AnimationType int getAnimationType() {
+        return AnimationType.PROPERTY;
+    }
+
+    public static final ChromeBaseSearchIndexProvider SEARCH_INDEX_DATA_PROVIDER =
+            new ChromeBaseSearchIndexProvider(
+                    TracingCategoriesSettings.class.getName(),
+                    ChromeBaseSearchIndexProvider.INDEX_OPT_OUT);
 }

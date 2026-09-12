@@ -9,16 +9,16 @@
 #include <set>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
-#include "chrome/browser/apps/app_service/app_icon/icon_key_util.h"
 #include "chrome/browser/apps/app_service/app_notifications.h"
-#include "chrome/browser/apps/app_service/app_web_contents_data.h"
-#include "chrome/browser/apps/app_service/launch_result_type.h"
 #include "chrome/browser/apps/app_service/media_requests.h"
 #include "chrome/browser/apps/app_service/paused_apps.h"
 #include "chrome/browser/apps/app_service/publishers/extension_apps_base.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_list_prefs.h"
-#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
+#include "chrome/browser/extensions/file_handlers/web_file_handlers_permission_handler.h"
+#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
 #include "chrome/browser/notifications/notification_common.h"
 #include "chrome/browser/notifications/notification_display_service.h"
 #include "components/prefs/pref_change_registrar.h"
@@ -27,6 +27,7 @@
 #include "components/services/app_service/public/cpp/instance.h"
 #include "components/services/app_service/public/cpp/instance_registry.h"
 #include "components/services/app_service/public/cpp/intent.h"
+#include "components/services/app_service/public/cpp/launch_result.h"
 #include "components/services/app_service/public/cpp/menu.h"
 #include "extensions/browser/app_window/app_window_registry.h"
 
@@ -42,21 +43,18 @@ class NotificationDisplayService;
 
 namespace apps {
 
-class PublisherHost;
-
 // An app publisher (in the App Service sense) of extension-backed apps for
 // ChromeOS, including Chrome Apps (platform apps and legacy packaged apps),
 // hosted apps (including desktop PWAs), and browser extensions. In Chrome OS,
-// there are 2 ExtensionAppsChromeOs publishers for browser extensions and
-// Chrome apps(including hosted apps) separately.
+// there are two ExtensionAppsChromeOs publishers for extension-backed apps: one
+// for `kExtension`, and one for `kChromeApp` (including hosted apps).
 //
 // See components/services/app_service/README.md.
 class ExtensionAppsChromeOs : public ExtensionAppsBase,
                               public extensions::AppWindowRegistry::Observer,
                               public ArcAppListPrefs::Observer,
                               public NotificationDisplayService::Observer,
-                              public MediaCaptureDevicesDispatcher::Observer,
-                              public AppWebContentsData::Client {
+                              public MediaStreamCaptureIndicator::Observer {
  public:
   ExtensionAppsChromeOs(AppServiceProxy* proxy, AppType app_type);
   ~ExtensionAppsChromeOs() override;
@@ -68,13 +66,10 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
 
   void ObserveArc();
 
- private:
-  friend class PublisherHost;
-
   // ExtensionAppsBase overrides.
   void Initialize() override;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+ private:
   // Requests a compressed icon data for an app identified by `app_id`. The icon
   // is identified by `size_in_dip` and `scale_factor`. Calls `callback` with
   // the result.
@@ -82,7 +77,6 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
                              int32_t size_in_dip,
                              ui::ResourceScaleFactor scale_factor,
                              LoadIconCallback callback) override;
-#endif
 
   void LaunchAppWithParamsImpl(AppLaunchParams&& params,
                                LaunchCallback callback) override;
@@ -101,6 +95,7 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
   // apps::AppPublisher overrides.
   void PauseApp(const std::string& app_id) override;
   void UnpauseApp(const std::string& app_id) override;
+  void UpdateAppSize(const std::string& app_id) override;
 
   // Overridden from AppWindowRegistry::Observer:
   void OnAppWindowAdded(extensions::AppWindow* app_window) override;
@@ -122,14 +117,11 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
   void OnPackageListInitialRefreshed() override;
   void OnArcAppListPrefsDestroyed() override;
 
-  // MediaCaptureDevicesDispatcher::Observer:
-  void OnRequestUpdate(int render_process_id,
-                       int render_frame_id,
-                       blink::mojom::MediaStreamType stream_type,
-                       const content::MediaRequestState state) override;
-
-  // AppWebContentsData::Observer:
-  void OnWebContentsDestroyed(content::WebContents* contents) override;
+  // MediaStreamCaptureIndicator::Observer:
+  void OnIsCapturingVideoChanged(content::WebContents* web_contents,
+                                 bool is_capturing_video) override;
+  void OnIsCapturingAudioChanged(content::WebContents* web_contents,
+                                 bool is_capturing_audio) override;
 
   // NotificationDisplayService::Observer overrides.
   void OnNotificationDisplayed(
@@ -162,6 +154,8 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
   AppPtr CreateApp(const extensions::Extension* extension,
                    Readiness readiness) override;
 
+  void OnSizeCalculated(const std::string& app_id, const int64_t size);
+
   // Calculate the icon effects for the extension.
   IconEffects GetIconEffects(const extensions::Extension* extension,
                              bool paused);
@@ -180,7 +174,7 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
   content::WebContents* LaunchImpl(AppLaunchParams&& params) override;
 
   void UpdateAppDisabledState(
-      const base::Value::List& disabled_system_features_pref,
+      const base::ListValue& disabled_system_features_pref,
       int feature,
       const std::string& app_id,
       bool is_disabled_mode_changed);
@@ -192,7 +186,16 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
                        WindowInfoPtr window_info,
                        LaunchCallback callback);
 
-  apps::InstanceRegistry* const instance_registry_;
+  // See LacrosExtensionAppsController::LaunchAppWithArgumentsCallback().
+  void LaunchAppWithArgumentsCallback(LaunchSource launch_source,
+                                      const std::string& app_id,
+                                      int32_t event_flags,
+                                      IntentPtr intent,
+                                      WindowInfoPtr window_info,
+                                      LaunchCallback callback,
+                                      bool should_run);
+
+  const raw_ptr<apps::InstanceRegistry> instance_registry_;
   base::ScopedObservation<extensions::AppWindowRegistry,
                           extensions::AppWindowRegistry::Observer>
       app_window_registry_{this};
@@ -206,9 +209,10 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
   // and is set by updating SystemDisabledMode policy.
   bool is_disabled_apps_mode_hidden_ = false;
 
-  std::map<extensions::AppWindow*, aura::Window*> app_window_to_aura_window_;
+  std::map<extensions::AppWindow*, raw_ptr<aura::Window, CtnExperimental>>
+      app_window_to_aura_window_;
 
-  ArcAppListPrefs* arc_prefs_ = nullptr;
+  raw_ptr<ArcAppListPrefs> arc_prefs_ = nullptr;
 
   // Registrar used to monitor the profile prefs.
   PrefChangeRegistrar profile_pref_change_registrar_;
@@ -216,8 +220,8 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
   // Registrar used to monitor the local state prefs.
   PrefChangeRegistrar local_state_pref_change_registrar_;
 
-  base::ScopedObservation<MediaCaptureDevicesDispatcher,
-                          MediaCaptureDevicesDispatcher::Observer>
+  base::ScopedObservation<MediaStreamCaptureIndicator,
+                          MediaStreamCaptureIndicator::Observer>
       media_dispatcher_{this};
 
   MediaRequests media_requests_;
@@ -227,6 +231,11 @@ class ExtensionAppsChromeOs : public ExtensionAppsBase,
       notification_display_service_{this};
 
   AppNotifications app_notifications_;
+
+  std::unique_ptr<extensions::WebFileHandlersPermissionHandler>
+      web_file_handlers_permission_handler_;
+
+  base::WeakPtrFactory<ExtensionAppsChromeOs> weak_factory_{this};
 };
 
 }  // namespace apps

@@ -6,6 +6,7 @@ package org.chromium.chrome.browser.download.home;
 
 import androidx.annotation.VisibleForTesting;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.components.offline_items_collection.ContentId;
 import org.chromium.components.offline_items_collection.OfflineItem;
 import org.chromium.components.offline_items_collection.OfflineItemState;
@@ -15,6 +16,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 /** Helper class to expose whether an item should be shown in the Just Now section. */
+@NullMarked
 public class JustNowProvider {
     // Threshold timestamp after which a download is considered recent.
     private final Date mThresholdDate;
@@ -33,13 +35,15 @@ public class JustNowProvider {
      * @return Whether the given {@code item} should be shown in the Just Now section.
      */
     public boolean isJustNowItem(OfflineItem item) {
+        if (mItems.contains(item.id)) return true;
         boolean shouldBeJustNowItem = isRecentOrInProgressDownload(item);
         if (shouldBeJustNowItem) mItems.add(item.id);
-        return mItems.contains(item.id);
+        return shouldBeJustNowItem;
     }
 
     private boolean isRecentOrInProgressDownload(OfflineItem item) {
-        return item.state == OfflineItemState.IN_PROGRESS || item.state == OfflineItemState.PAUSED
+        return item.state == OfflineItemState.IN_PROGRESS
+                || item.state == OfflineItemState.PAUSED
                 || (item.state == OfflineItemState.INTERRUPTED && item.isResumable)
                 || new Date(item.completionTimeMs).after(mThresholdDate);
     }

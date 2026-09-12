@@ -5,34 +5,16 @@
 #ifndef MEDIA_CAPTURE_VIDEO_VIDEO_FRAME_RECEIVER_H_
 #define MEDIA_CAPTURE_VIDEO_VIDEO_FRAME_RECEIVER_H_
 
+#include <memory>
+
 #include "base/functional/callback_helpers.h"
 #include "media/capture/capture_export.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
-#include "media/capture/mojom/video_capture_types.mojom.h"
 #include "media/capture/video/video_capture_buffer_handle.h"
 #include "media/capture/video/video_capture_device.h"
+#include "media/capture/video/video_frame_receiver_types.h"
 
 namespace media {
-
-struct CAPTURE_EXPORT ReadyFrameInBuffer {
-  ReadyFrameInBuffer(
-      int buffer_id,
-      int frame_feedback_id,
-      std::unique_ptr<
-          VideoCaptureDevice::Client::Buffer::ScopedAccessPermission>
-          buffer_read_permission,
-      mojom::VideoFrameInfoPtr frame_info);
-  ReadyFrameInBuffer(ReadyFrameInBuffer&& other);
-  ~ReadyFrameInBuffer();
-
-  ReadyFrameInBuffer& operator=(ReadyFrameInBuffer&& other);
-
-  int buffer_id;
-  int frame_feedback_id;
-  std::unique_ptr<VideoCaptureDevice::Client::Buffer::ScopedAccessPermission>
-      buffer_read_permission;
-  mojom::VideoFrameInfoPtr frame_info;
-};
 
 // Adapter for a VideoFrameReceiver to notify once frame consumption is
 // complete. VideoFrameReceiver requires owning an object that it will destroy
@@ -76,9 +58,7 @@ class CAPTURE_EXPORT VideoFrameReceiver {
   // the buffer. The producer guarantees that the buffer and its contents stay
   // alive and unchanged until VideoFrameReceiver releases the given
   // |buffer_read_permission|.
-  virtual void OnFrameReadyInBuffer(
-      ReadyFrameInBuffer frame,
-      std::vector<ReadyFrameInBuffer> scaled_frames) = 0;
+  virtual void OnFrameReadyInBuffer(ReadyFrameInBuffer frame) = 0;
 
   // Tells the VideoFrameReceiver that the producer is no longer going to use
   // the buffer with id |buffer_id| for frame delivery. This may be called even
@@ -94,7 +74,7 @@ class CAPTURE_EXPORT VideoFrameReceiver {
 
   virtual void OnError(VideoCaptureError error) = 0;
   virtual void OnFrameDropped(VideoCaptureFrameDropReason reason) = 0;
-  virtual void OnNewCropVersion(uint32_t crop_version) = 0;
+  virtual void OnNewCaptureVersion(media::CaptureVersion capture_version) = 0;
   virtual void OnFrameWithEmptyRegionCapture() = 0;
   virtual void OnLog(const std::string& message) = 0;
   virtual void OnStarted() = 0;

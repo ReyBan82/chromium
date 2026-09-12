@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/observer_list_types.h"
 #include "base/time/time.h"
@@ -52,8 +53,10 @@ class ArcVpnProviderManager : public ArcAppListPrefs::Observer,
 
   static ArcVpnProviderManager* Get(content::BrowserContext* context);
 
-  static ArcVpnProviderManager* Create(content::BrowserContext* context);
+  static std::unique_ptr<ArcVpnProviderManager> Create(
+      content::BrowserContext* context);
 
+  explicit ArcVpnProviderManager(ArcAppListPrefs* arc_app_list_prefs);
   ArcVpnProviderManager(const ArcVpnProviderManager&) = delete;
   ArcVpnProviderManager& operator=(const ArcVpnProviderManager&) = delete;
 
@@ -75,11 +78,9 @@ class ArcVpnProviderManager : public ArcAppListPrefs::Observer,
   std::vector<std::unique_ptr<ArcVpnProvider>> GetArcVpnProviders();
 
  private:
-  explicit ArcVpnProviderManager(ArcAppListPrefs* arc_app_list_prefs);
-
   void MaybeNotifyArcVpnProviderUpdate(const std::string& app_id);
 
-  ArcAppListPrefs* const arc_app_list_prefs_;
+  const raw_ptr<ArcAppListPrefs> arc_app_list_prefs_;
 
   // List of observers.
   base::ObserverList<Observer> observer_list_;
@@ -87,4 +88,4 @@ class ArcVpnProviderManager : public ArcAppListPrefs::Observer,
 
 }  // namespace app_list
 
-#endif  //  CHROME_BROWSER_ASH_APP_LIST_ARC_ARC_VPN_PROVIDER_MANAGER_H_
+#endif  // CHROME_BROWSER_ASH_APP_LIST_ARC_ARC_VPN_PROVIDER_MANAGER_H_

@@ -10,13 +10,17 @@
 #include <memory>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/singleton.h"
 #include "chrome/browser/media/webrtc/desktop_media_list.h"
 #include "chrome/browser/media/webrtc/desktop_media_picker_controller.h"
 #include "chrome/browser/media/webrtc/desktop_media_picker_factory.h"
 #include "chrome/common/extensions/api/desktop_capture.h"
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
 #include "url/gurl.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -48,7 +52,7 @@ class DesktopCaptureChooseDesktopMediaFunctionBase : public ExtensionFunction {
   // be suppressed when that is the case, so this flag has to be plumbed down
   // with the other flags that affect the picker. However, unlike the other
   // flags, this one only communicates intent, and has no other effect.
-  // It is a necessary evil, a work-around to address crbug.com/1354189.
+  // It is a necessary evil, a work-around to address crbug.com/40858915.
   // This will go away once the Extension API itself goes away.
   //
   // |origin| is the origin for which the stream is created.
@@ -62,7 +66,7 @@ class DesktopCaptureChooseDesktopMediaFunctionBase : public ExtensionFunction {
       bool suppress_local_audio_playback_intended,
       content::RenderFrameHost* render_frame_host,
       const GURL& origin,
-      const std::u16string target_name);
+      const std::u16string& target_name);
 
   // Returns the calling application name to show in the picker.
   std::string GetCallerDisplayName() const;
@@ -124,8 +128,9 @@ class DesktopCaptureRequestsRegistry {
     int request_id;
   };
 
-  using RequestsMap =
-      std::map<RequestId, DesktopCaptureChooseDesktopMediaFunctionBase*>;
+  using RequestsMap = std::map<
+      RequestId,
+      raw_ptr<DesktopCaptureChooseDesktopMediaFunctionBase, CtnExperimental>>;
 
   RequestsMap requests_;
 };

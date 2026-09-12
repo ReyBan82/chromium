@@ -28,6 +28,9 @@ class VolumeManagerObserver {
   // Fired when a new disk is added.
   virtual void OnDiskAdded(const ash::disks::Disk& disk, bool mounting) {}
 
+  // Fired when an attempt to add a disk is blocked by policy.
+  virtual void OnDiskAddBlockedByPolicy(const std::string& device_path) {}
+
   // Fired when a disk is removed.
   virtual void OnDiskRemoved(const ash::disks::Disk& disk) {}
 
@@ -54,16 +57,6 @@ class VolumeManagerObserver {
   virtual void OnFormatCompleted(const std::string& device_path,
                                  const std::string& device_label,
                                  bool success) {}
-
-  // Fired when partitioning a device is started.
-  virtual void OnPartitionStarted(const std::string& device_path,
-                                  const std::string& device_label,
-                                  bool success) {}
-
-  // Fired when partitioning a device is completed (or terminated on error).
-  virtual void OnPartitionCompleted(const std::string& device_path,
-                                    const std::string& device_label,
-                                    bool success) {}
 
   // Fired when renaming a device is started (or failed to start).
   virtual void OnRenameStarted(const std::string& device_path,

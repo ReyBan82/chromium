@@ -7,8 +7,7 @@
 
 #include "base/feature_list.h"
 
-namespace web {
-namespace features {
+namespace web::features {
 
 // Used to crash the browser if unexpected URL change is detected.
 // https://crbug.com/841105.
@@ -29,53 +28,12 @@ BASE_DECLARE_FEATURE(kClearOldNavigationRecordsWorkaround);
 // Feature flag enabling persistent downloads.
 BASE_DECLARE_FEATURE(kEnablePersistentDownloads);
 
-// Records snapshot size of image (IOS.Snapshots.ImageSize histogram) and PDF
-// (IOS.Snapshots.PDFSize histogram) if enabled. Enabling this flag will
-// generate PDF when Page Snapshot is taken just to record PDF size.
-BASE_DECLARE_FEATURE(kRecordSnapshotSize);
-
 // When enabled, the `attribution` property of NSMutableURLRequests passed to
 // WKWebView is set as NSURLRequestAttributionUser on iOS 15.
 BASE_DECLARE_FEATURE(kSetRequestAttribution);
 
-// Feature flag that enable Shared Highlighting color change in iOS.
-BASE_DECLARE_FEATURE(kIOSSharedHighlightingColorChange);
-
-// Feature flag that enables native session restoration with a synthesized
-// interaction state.
-BASE_DECLARE_FEATURE(kSynthesizedRestoreSession);
-
-// Enables user control for camera and/or microphone access for a specific site
-// through site settings during its lifespan. When enabled, each web state will
-// keep track of whether camera and/or microphone access is granted by the user
-// for its current site.
-BASE_DECLARE_FEATURE(kMediaPermissionsControl);
-
-// Enables the Fullscreen API in WebKit (supported on iOS 16.0+). This API
-// allows web sites to enter fullscreen mode, with all browser UI hidden.
-BASE_DECLARE_FEATURE(kEnableFullscreenAPI);
-
-// Feature flag enabling use of new iOS 15
-// loadSimulatedRequest:responseHTMLString: API to display error pages in
-// CRWWKNavigationHandler. The helper method IsLoadSimulatedRequestAPIEnabled()
-// should be used instead of directly checking this feature.
-BASE_DECLARE_FEATURE(kUseLoadSimulatedRequestForOfflinePage);
-
-// Feature flag that enable web page detected intents annotations.
-BASE_DECLARE_FEATURE(kEnableWebPageAnnotations);
-
-// Feature flag that enables getting more of the surrounding text when the user
-// long presses at a certain location.
-BASE_DECLARE_FEATURE(kLongPressSurroundingText);
-
-// Feature flag to enable Emails detection.
-BASE_DECLARE_FEATURE(kEnableEmails);
-
-// Feature flag to enable Phone Numbers detection.
-BASE_DECLARE_FEATURE(kEnablePhoneNumbers);
-
-// Feature flag to enable One tap experience for Maps.
-BASE_DECLARE_FEATURE(kOneTapForMaps);
+// Feature flag to enable Measurements detection.
+BASE_DECLARE_FEATURE(kEnableMeasurements);
 
 // When enabled, CRWWebViewScrollViewProxy's `scrollEnabled` state is not
 // restored if the new instance already has the same `scrollEnabled` state as
@@ -85,18 +43,117 @@ BASE_DECLARE_FEATURE(kScrollViewProxyScrollEnabledWorkaround);
 // Feature flag to prevent navigation without user interaction.
 BASE_DECLARE_FEATURE(kPreventNavigationWithoutUserInteraction);
 
-// When true, user control for camera and/or microphone access should be
-// enabled.
-bool IsMediaPermissionsControlEnabled();
+// Feature flag to allow a window to open an external app from another window.
+// This flag can be used to kill the cross window limitation in case it breaks a
+// legitimate use case.
+BASE_DECLARE_FEATURE(kAllowCrossWindowExternalAppNavigation);
 
-// When true, the new loadSimulatedRequest API should be used when displaying
-// error pages.
-bool IsLoadSimulatedRequestAPIEnabled();
+// Feature flag to enable Web Inspector support.
+BASE_DECLARE_FEATURE(kEnableWebInspector);
 
-// When true, the fullscreen API should be used to enable fullscreen mode.
-bool IsFullscreenAPIEnabled();
+// Feature used by finch config to enable smooth scrolling when the default
+// viewport adjustment experiment is selected via command line switches.
+BASE_DECLARE_FEATURE(kSmoothScrollingDefault);
 
-}  // namespace features
-}  // namespace web
+// When enabled, the SmoothScrollingDefault experiment uses the regular
+// UIScrollViewDelegate instead of KVO and broadcasting.
+BASE_DECLARE_FEATURE(kSmoothScrollingUseDelegate);
+
+// Returns true if the broadcaster should be used for the smooth scrolling
+// experiment.
+bool ShouldUseBroadcasterForSmoothScrolling();
+
+// Feature flag to enable a scroll threshold before entering or exiting
+// fullscreen.
+BASE_DECLARE_FEATURE(kFullscreenScrollThreshold);
+
+// Feature flag that force the use of the synthesized native WKWebView
+// session instead of the (maybe inexistent) saved native session. The
+// purpose of this flag it to allow to testing this code path.
+BASE_DECLARE_FEATURE(kForceSynthesizedRestoreSession);
+
+// Feature flag to enable detecting destroyed NavigationContexts. This is
+// intended to be used as a kill switch.
+BASE_DECLARE_FEATURE(kDetectDestroyedNavigationContexts);
+
+// Feature flag to disable the raccoon.
+BASE_DECLARE_FEATURE(kDisableRaccoon);
+
+// Feature flag adds bugfix numbers to the iOS User-Agent header for Chrome
+BASE_DECLARE_FEATURE(kUserAgentBugFixVersion);
+
+// Feature flag to let WebKit handle MarketplaceKit links. This is intended to
+// be used as a kill switch.
+BASE_DECLARE_FEATURE(kWebKitHandlesMarketplaceKitLinks);
+
+// Feature flag to restore the WKWebView edit menu customization.
+BASE_DECLARE_FEATURE(kRestoreWKWebViewEditMenuHandler);
+
+// Enables logging CrWeb Javascript errors.
+BASE_DECLARE_FEATURE(kLogCrWebJavaScriptErrors);
+
+// When enabled, JavaScript errors will crash the application.
+BASE_DECLARE_FEATURE(kAssertOnJavaScriptErrors);
+
+// A flag parameter to set the number of pixels to use as the threshold.
+inline constexpr char kFullscreenScrollThresholdAmount[] =
+    "fullscreen_scroll_threshold_amount";
+
+// Returns true if SmoothScrollingDefault is disabled and
+// FullscreenScrollThreshold is enabled.
+bool IsFullscreenScrollThresholdEnabled();
+
+// When true, an option to enable Web Inspector should be present in Settings.
+bool IsWebInspectorSupportEnabled();
+
+// TODO(crbug.com/449156290): Clean up the kill switch for updating SSL status
+// on navigation item creation.
+// When enabled, trigger an update of the SSL status on navigation item
+// lazy creation. This is intended to be used as a kill switch.
+BASE_DECLARE_FEATURE(kUpdateSSLStatusOnNavigationItemLazyCreation);
+
+// Feature flag to enable BEContextMenuConfiguration.
+// This is used as a kill switch and should not be removed.
+BASE_DECLARE_FEATURE(kEnableBEContextMenuConfiguration);
+
+// Feature flag to enable a fix for a crash in
+// DownloadTaskImpl::GenerateFileName.
+BASE_DECLARE_FEATURE(kIOSDownloadSanitizeFilename);
+
+// TODO(crbug.com/487947859): Clean up the kill switch once confirmed this is
+// not causing regressions.
+// When enabled, NetErrorFromError searches the entire NSError chain for the
+// first translatable error code. This ensures accurate error mapping on iOS
+// 26.4+, where specific network failures are often nested within generic
+// container errors. When disabled, it only attempts to translate the final
+// underlying error in the chain, which was the pre-existing behavior.
+BASE_DECLARE_FEATURE(kNetErrorFromErrorChainKillSwitch);
+
+// Feature flag to enable Cobalt on iOS.
+BASE_DECLARE_FEATURE(kIOSCobalt);
+// Feature flag to enable the developer mode of Cobalt on iOS.
+BASE_DECLARE_FEATURE(kIOSCobaltDeveloperMode);
+
+// Returns whether Cobalt is enabled on iOS.
+bool IsCobaltEnabled();
+// Returns whether the developer mode of Cobalt is enabled on iOS.
+bool IsCobaltDeveloperModeEnabled();
+
+// Feature flag to enable the workaround for SecTrust evaluation inconsistency.
+// TODO(crbug.com/485184282): Remove this flag once it's confirmed that the
+// workaround is working as intended.
+BASE_DECLARE_FEATURE(kCertVerificationWorkaroundKillSwitch);
+
+// Feature flag to enable logging the time it takes to convert a WKScriptMessage
+// object into a web::ScriptMessage object.
+BASE_DECLARE_FEATURE(kIOSScriptMessageConversionDurationLogging);
+
+// Feature flag to enable the isolated world parent-child frame tree handshake.
+BASE_DECLARE_FEATURE(kWebFrameTree);
+
+// Enables the new geolocation permission delegate feature.
+BASE_DECLARE_FEATURE(kNewGeolocationPermissionDelegate);
+
+}  // namespace web::features
 
 #endif  // IOS_WEB_COMMON_FEATURES_H_

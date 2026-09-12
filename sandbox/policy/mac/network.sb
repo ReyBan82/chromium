@@ -47,10 +47,6 @@
   (subpath "/private/var/db/mds")
   (subpath (user-homedir-path "/Library/Keychains"))
 )
-(allow file-read* file-write*
-  (subpath (param darwin-user-cache-dir))
-  (subpath (param darwin-user-temp-dir))
-)
 (if (param-defined? network-service-test-certs-dir)
   (allow file-read* (subpath (param network-service-test-certs-dir))))
 
@@ -103,6 +99,13 @@
   ; Read network configuration.
   (global-name "com.apple.SystemConfiguration.DNSConfiguration")
   (global-name "com.apple.SystemConfiguration.configd")
+
+  ; If the system has a relay configured, system frameworks may call out
+  ; to nehelper to access its configuration (https://crbug.com/383306185)
+  (global-name "com.apple.nehelper")
+
+  ; Required by the Okta SSO which is performed using URLSession api.
+  (global-name "com.apple.AppSSO.service-xpc")
 )
 
 (allow sysctl-read

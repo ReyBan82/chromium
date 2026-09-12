@@ -34,40 +34,40 @@
 #include <unicode/udisplaycontext.h>
 #include <unicode/uloc.h>
 
+#include <algorithm>
+#include <iterator>
 #include <limits>
 #include <memory>
 
 #include "base/memory/ptr_util.h"
-#include "third_party/blink/renderer/platform/wtf/date_math.h"
+#include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_buffer.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
-#include "ui/base/ui_base_features.h"
 
 namespace blink {
 
 std::unique_ptr<Locale> Locale::Create(const String& locale) {
-  return std::make_unique<LocaleICU>(locale.Utf8());
+  return std::make_unique<LocaleIcu>(locale.Utf8());
 }
 
-LocaleICU::LocaleICU(const std::string& locale)
+LocaleIcu::LocaleIcu(const std::string& locale)
     : locale_(locale),
       number_format_(nullptr),
       short_date_format_(nullptr),
       did_create_decimal_format_(false),
       did_create_short_date_format_(false),
-      first_day_of_week_(0),
       medium_time_format_(nullptr),
       short_time_format_(nullptr),
       did_create_time_format_(false) {}
 
-LocaleICU::~LocaleICU() {
+LocaleIcu::~LocaleIcu() {
   unum_close(number_format_);
   udat_close(short_date_format_);
   udat_close(medium_time_format_);
   udat_close(short_time_format_);
 }
 
-String LocaleICU::DecimalSymbol(UNumberFormatSymbol symbol) {
+String LocaleIcu::DecimalSymbol(UNumberFormatSymbol symbol) {
   UErrorCode status = U_ZERO_ERROR;
   int32_t buffer_length =
       unum_getSymbol(number_format_, symbol, nullptr, 0, &status);
@@ -75,15 +75,15 @@ String LocaleICU::DecimalSymbol(UNumberFormatSymbol symbol) {
   if (U_FAILURE(status) && status != U_BUFFER_OVERFLOW_ERROR)
     return String();
   StringBuffer<UChar> buffer(buffer_length);
+  auto span = buffer.Span();
   status = U_ZERO_ERROR;
-  unum_getSymbol(number_format_, symbol, buffer.Characters(), buffer_length,
-                 &status);
+  unum_getSymbol(number_format_, symbol, span.data(), buffer_length, &status);
   if (U_FAILURE(status))
     return String();
   return String::Adopt(buffer);
 }
 
-String LocaleICU::DecimalTextAttribute(UNumberFormatTextAttribute tag) {
+String LocaleIcu::DecimalTextAttribute(UNumberFormatTextAttribute tag) {
   UErrorCode status = U_ZERO_ERROR;
   int32_t buffer_length =
       unum_getTextAttribute(number_format_, tag, nullptr, 0, &status);
@@ -91,8 +91,9 @@ String LocaleICU::DecimalTextAttribute(UNumberFormatTextAttribute tag) {
   if (U_FAILURE(status) && status != U_BUFFER_OVERFLOW_ERROR)
     return String();
   StringBuffer<UChar> buffer(buffer_length);
+  auto span = buffer.Span();
   status = U_ZERO_ERROR;
-  unum_getTextAttribute(number_format_, tag, buffer.Characters(), buffer_length,
+  unum_getTextAttribute(number_format_, tag, span.data(), buffer_length,
                         &status);
   DCHECK(U_SUCCESS(status));
   if (U_FAILURE(status))
@@ -100,7 +101,7 @@ String LocaleICU::DecimalTextAttribute(UNumberFormatTextAttribute tag) {
   return String::Adopt(buffer);
 }
 
-void LocaleICU::InitializeLocaleData() {
+void LocaleIcu::InitializeLocaleData() {
   if (did_create_decimal_format_)
     return;
   did_create_decimal_format_ = true;
@@ -130,7 +131,7 @@ void LocaleICU::InitializeLocaleData() {
                 DecimalTextAttribute(UNUM_NEGATIVE_SUFFIX));
 }
 
-bool LocaleICU::InitializeShortDateFormat() {
+bool LocaleIcu::InitializeShortDateFormat() {
   if (did_create_short_date_format_)
     return short_date_format_;
   short_date_format_ = OpenDateFormat(UDAT_NONE, UDAT_SHORT);
@@ -138,7 +139,7 @@ bool LocaleICU::InitializeShortDateFormat() {
   return short_date_format_;
 }
 
-UDateFormat* LocaleICU::OpenDateFormat(UDateFormatStyle time_style,
+UDateFormat* LocaleIcu::OpenDateFormat(UDateFormatStyle time_style,
                                        UDateFormatStyle date_style) const {
   const UChar kGmtTimezone[3] = {'G', 'M', 'T'};
   UErrorCode status = U_ZERO_ERROR;
@@ -151,7 +152,7 @@ UDateFormat* LocaleICU::OpenDateFormat(UDateFormatStyle time_style,
 // we have to format dates with patterns "LLLL" or "LLL" and set the
 // display context to 'standalone'. See
 // http://bugs.icu-project.org/trac/ticket/11552
-UDateFormat* LocaleICU::OpenDateFormatForStandAloneMonthLabels(
+UDateFormat* LocaleIcu::OpenDateFormatForStandAloneMonthLabels(
     bool is_short) const {
   const UChar kMonthPattern[4] = {'L', 'L', 'L', 'L'};
   UErrorCode status = U_ZERO_ERROR;
@@ -172,25 +173,27 @@ static String GetDateFormatPattern(const UDateFormat* date_format) {
   if (status != U_BUFFER_OVERFLOW_ERROR || !length)
     return g_empty_string;
   StringBuffer<UChar> buffer(length);
+  auto span = buffer.Span();
   status = U_ZERO_ERROR;
-  udat_toPattern(date_format, true, buffer.Characters(), length, &status);
+  udat_toPattern(date_format, true, span.data(), length, &status);
   if (U_FAILURE(status))
     return g_empty_string;
   return String::Adopt(buffer);
 }
 
-std::unique_ptr<Vector<String>> LocaleICU::CreateLabelVector(
-    const UDateFormat* date_format,
-    UDateFormatSymbolType type,
-    int32_t start_index,
-    int32_t size) {
-  if (!date_format)
-    return std::unique_ptr<Vector<String>>();
-  if (udat_countSymbols(date_format, type) != start_index + size)
-    return std::unique_ptr<Vector<String>>();
+Vector<String> LocaleIcu::CreateLabelVector(const UDateFormat* date_format,
+                                            UDateFormatSymbolType type,
+                                            int32_t start_index,
+                                            int32_t size) {
+  if (!date_format) {
+    return {};
+  }
+  if (udat_countSymbols(date_format, type) != start_index + size) {
+    return {};
+  }
 
-  std::unique_ptr<Vector<String>> labels = std::make_unique<Vector<String>>();
-  labels->reserve(size);
+  Vector<String> labels;
+  labels.reserve(size);
   bool is_stand_alone_month = (type == UDAT_STANDALONE_MONTHS) ||
                               (type == UDAT_STANDALONE_SHORT_MONTHS);
   for (int32_t i = 0; i < size; ++i) {
@@ -205,102 +208,75 @@ std::unique_ptr<Vector<String>> LocaleICU::CreateLabelVector(
       length = udat_getSymbols(date_format, type, start_index + i, nullptr, 0,
                                &status);
     }
-    if (status != U_BUFFER_OVERFLOW_ERROR)
-      return std::unique_ptr<Vector<String>>();
+    if (status != U_BUFFER_OVERFLOW_ERROR) {
+      return {};
+    }
     StringBuffer<UChar> buffer(length);
+    auto span = buffer.Span();
     status = U_ZERO_ERROR;
     if (is_stand_alone_month) {
-      udat_format(date_format, kEpoch + i * kMonth, buffer.Characters(), length,
+      udat_format(date_format, kEpoch + i * kMonth, span.data(), length,
                   nullptr, &status);
     } else {
-      udat_getSymbols(date_format, type, start_index + i, buffer.Characters(),
-                      length, &status);
+      udat_getSymbols(date_format, type, start_index + i, span.data(), length,
+                      &status);
     }
-    if (U_FAILURE(status))
-      return std::unique_ptr<Vector<String>>();
-    labels->push_back(String::Adopt(buffer));
+    if (U_FAILURE(status)) {
+      return {};
+    }
+    labels.push_back(String::Adopt(buffer));
   }
   return labels;
 }
 
-static std::unique_ptr<Vector<String>> CreateFallbackWeekDayShortLabels() {
-  std::unique_ptr<Vector<String>> labels = std::make_unique<Vector<String>>();
-  labels->reserve(7);
-  labels->push_back("Sun");
-  labels->push_back("Mon");
-  labels->push_back("Tue");
-  labels->push_back("Wed");
-  labels->push_back("Thu");
-  labels->push_back("Fri");
-  labels->push_back("Sat");
-  return labels;
-}
-
-void LocaleICU::InitializeCalendar() {
-  if (week_day_short_labels_)
-    return;
-
-  if (!InitializeShortDateFormat()) {
-    first_day_of_week_ = 0;
-    week_day_short_labels_ = CreateFallbackWeekDayShortLabels();
-    return;
+const Vector<String>& LocaleIcu::MonthLabels() {
+  if (month_labels_.empty()) {
+    if (InitializeShortDateFormat()) {
+      month_labels_ =
+          CreateLabelVector(short_date_format_, UDAT_MONTHS, UCAL_JANUARY, 12);
+    }
+    if (month_labels_.empty()) {
+      month_labels_.reserve(std::size(kFallbackMonthNames));
+      std::ranges::copy(kFallbackMonthNames, std::back_inserter(month_labels_));
+    }
   }
-  first_day_of_week_ = ucal_getAttribute(udat_getCalendar(short_date_format_),
-                                         UCAL_FIRST_DAY_OF_WEEK) -
-                       UCAL_SUNDAY;
-
-  week_day_short_labels_ = CreateLabelVector(
-      short_date_format_, UDAT_NARROW_WEEKDAYS, UCAL_SUNDAY, 7);
-  if (!week_day_short_labels_)
-    week_day_short_labels_ = CreateFallbackWeekDayShortLabels();
+  return month_labels_;
 }
 
-static std::unique_ptr<Vector<String>> CreateFallbackMonthLabels() {
-  std::unique_ptr<Vector<String>> labels = std::make_unique<Vector<String>>();
-  labels->reserve(std::size(WTF::kMonthFullName));
-  for (unsigned i = 0; i < std::size(WTF::kMonthFullName); ++i)
-    labels->push_back(WTF::kMonthFullName[i]);
-  return labels;
-}
-
-const Vector<String>& LocaleICU::MonthLabels() {
-  if (month_labels_)
-    return *month_labels_;
-  if (InitializeShortDateFormat()) {
-    month_labels_ =
-        CreateLabelVector(short_date_format_, UDAT_MONTHS, UCAL_JANUARY, 12);
-    if (month_labels_)
-      return *month_labels_;
+const Vector<String>& LocaleIcu::WeekDayShortLabels() {
+  if (week_day_short_labels_.empty()) {
+    if (InitializeShortDateFormat()) {
+      week_day_short_labels_ = CreateLabelVector(
+          short_date_format_, UDAT_NARROW_WEEKDAYS, UCAL_SUNDAY, 7);
+    }
+    if (week_day_short_labels_.empty()) {
+      week_day_short_labels_.reserve(std::size(kFallbackWeekdayShortNames));
+      std::ranges::copy(kFallbackWeekdayShortNames,
+                        std::back_inserter(week_day_short_labels_));
+    }
   }
-  month_labels_ = CreateFallbackMonthLabels();
-  return *month_labels_;
+  return week_day_short_labels_;
 }
 
-const Vector<String>& LocaleICU::WeekDayShortLabels() {
-  InitializeCalendar();
-  return *week_day_short_labels_;
+unsigned LocaleIcu::FirstDayOfWeek() {
+  if (!first_day_of_week_.has_value()) {
+    first_day_of_week_ =
+        InitializeShortDateFormat()
+            ? ucal_getAttribute(udat_getCalendar(short_date_format_),
+                                UCAL_FIRST_DAY_OF_WEEK) -
+                  UCAL_SUNDAY
+            : 0;
+  }
+  return first_day_of_week_.value();
 }
 
-unsigned LocaleICU::FirstDayOfWeek() {
-  InitializeCalendar();
-  return first_day_of_week_;
-}
-
-bool LocaleICU::IsRTL() {
+bool LocaleIcu::IsRtl() {
   UErrorCode status = U_ZERO_ERROR;
   return uloc_getCharacterOrientation(locale_.c_str(), &status) ==
          ULOC_LAYOUT_RTL;
 }
 
-static std::unique_ptr<Vector<String>> CreateFallbackAMPMLabels() {
-  std::unique_ptr<Vector<String>> labels = std::make_unique<Vector<String>>();
-  labels->reserve(2);
-  labels->push_back("AM");
-  labels->push_back("PM");
-  return labels;
-}
-
-void LocaleICU::InitializeDateTimeFormat() {
+void LocaleIcu::InitializeDateTimeFormat() {
   if (did_create_time_format_)
     return;
 
@@ -325,16 +301,16 @@ void LocaleICU::InitializeDateTimeFormat() {
       GetDateFormatPattern(date_time_format_without_seconds);
   udat_close(date_time_format_without_seconds);
 
-  std::unique_ptr<Vector<String>> time_ampm_labels =
+  time_ampm_labels_ =
       CreateLabelVector(medium_time_format_, UDAT_AM_PMS, UCAL_AM, 2);
-  if (!time_ampm_labels)
-    time_ampm_labels = CreateFallbackAMPMLabels();
-  time_ampm_labels_ = *time_ampm_labels;
+  if (time_ampm_labels_.empty()) {
+    time_ampm_labels_ = {"AM", "PM"};
+  }
 
   did_create_time_format_ = true;
 }
 
-String LocaleICU::DateFormat() {
+String LocaleIcu::DateFormat() {
   if (!date_format_.IsNull())
     return date_format_;
   if (!InitializeShortDateFormat())
@@ -352,15 +328,17 @@ static String GetFormatForSkeleton(const char* locale, const String& skeleton) {
   status = U_ZERO_ERROR;
   Vector<UChar> skeleton_characters;
   skeleton.AppendTo(skeleton_characters);
+  int32_t skeleton_length =
+      base::checked_cast<int32_t>(skeleton_characters.size());
   int32_t length =
       udatpg_getBestPattern(pattern_generator, skeleton_characters.data(),
-                            skeleton_characters.size(), nullptr, 0, &status);
+                            skeleton_length, nullptr, 0, &status);
   if (status == U_BUFFER_OVERFLOW_ERROR && length) {
     StringBuffer<UChar> buffer(length);
+    auto span = buffer.Span();
     status = U_ZERO_ERROR;
     udatpg_getBestPattern(pattern_generator, skeleton_characters.data(),
-                          skeleton_characters.size(), buffer.Characters(),
-                          length, &status);
+                          skeleton_length, span.data(), length, &status);
     if (U_SUCCESS(status))
       format = String::Adopt(buffer);
   }
@@ -368,7 +346,7 @@ static String GetFormatForSkeleton(const char* locale, const String& skeleton) {
   return format;
 }
 
-String LocaleICU::MonthFormat() {
+String LocaleIcu::MonthFormat() {
   if (!month_format_.IsNull())
     return month_format_;
   // Gets a format for "MMMM" because Windows API always provides formats for
@@ -377,84 +355,80 @@ String LocaleICU::MonthFormat() {
   return month_format_;
 }
 
-String LocaleICU::ShortMonthFormat() {
+String LocaleIcu::ShortMonthFormat() {
   if (!short_month_format_.IsNull())
     return short_month_format_;
   short_month_format_ = GetFormatForSkeleton(locale_.c_str(), "yyyyMMM");
   return short_month_format_;
 }
 
-String LocaleICU::TimeFormat() {
+String LocaleIcu::TimeFormat() {
   InitializeDateTimeFormat();
   return time_format_with_seconds_;
 }
 
-String LocaleICU::ShortTimeFormat() {
+String LocaleIcu::ShortTimeFormat() {
   InitializeDateTimeFormat();
   return time_format_without_seconds_;
 }
 
-String LocaleICU::DateTimeFormatWithSeconds() {
+String LocaleIcu::DateTimeFormatWithSeconds() {
   InitializeDateTimeFormat();
   return date_time_format_with_seconds_;
 }
 
-String LocaleICU::DateTimeFormatWithoutSeconds() {
+String LocaleIcu::DateTimeFormatWithoutSeconds() {
   InitializeDateTimeFormat();
   return date_time_format_without_seconds_;
 }
 
-const Vector<String>& LocaleICU::ShortMonthLabels() {
-  if (!short_month_labels_.empty())
-    return short_month_labels_;
-  if (InitializeShortDateFormat()) {
-    if (std::unique_ptr<Vector<String>> labels = CreateLabelVector(
-            short_date_format_, UDAT_SHORT_MONTHS, UCAL_JANUARY, 12)) {
-      short_month_labels_ = *labels;
-      return short_month_labels_;
+const Vector<String>& LocaleIcu::ShortMonthLabels() {
+  if (short_month_labels_.empty()) {
+    if (InitializeShortDateFormat()) {
+      short_month_labels_ = CreateLabelVector(
+          short_date_format_, UDAT_SHORT_MONTHS, UCAL_JANUARY, 12);
+    }
+    if (short_month_labels_.empty()) {
+      short_month_labels_.reserve(std::size(kFallbackMonthShortNames));
+      std::ranges::copy(kFallbackMonthShortNames,
+                        std::back_inserter(short_month_labels_));
     }
   }
-  short_month_labels_.reserve(std::size(WTF::kMonthName));
-  for (unsigned i = 0; i < std::size(WTF::kMonthName); ++i)
-    short_month_labels_.push_back(WTF::kMonthName[i]);
   return short_month_labels_;
 }
 
-const Vector<String>& LocaleICU::StandAloneMonthLabels() {
-  if (!stand_alone_month_labels_.empty())
-    return stand_alone_month_labels_;
-  UDateFormat* month_formatter = OpenDateFormatForStandAloneMonthLabels(false);
-  if (month_formatter) {
-    if (std::unique_ptr<Vector<String>> labels = CreateLabelVector(
-            month_formatter, UDAT_STANDALONE_MONTHS, UCAL_JANUARY, 12)) {
-      stand_alone_month_labels_ = *labels;
+const Vector<String>& LocaleIcu::StandAloneMonthLabels() {
+  if (stand_alone_month_labels_.empty()) {
+    UDateFormat* month_formatter =
+        OpenDateFormatForStandAloneMonthLabels(false);
+    if (month_formatter) {
+      stand_alone_month_labels_ = CreateLabelVector(
+          month_formatter, UDAT_STANDALONE_MONTHS, UCAL_JANUARY, 12);
       udat_close(month_formatter);
-      return stand_alone_month_labels_;
     }
-    udat_close(month_formatter);
+    if (stand_alone_month_labels_.empty()) {
+      stand_alone_month_labels_ = MonthLabels();
+    }
   }
-  stand_alone_month_labels_ = MonthLabels();
   return stand_alone_month_labels_;
 }
 
-const Vector<String>& LocaleICU::ShortStandAloneMonthLabels() {
-  if (!short_stand_alone_month_labels_.empty())
-    return short_stand_alone_month_labels_;
-  UDateFormat* month_formatter = OpenDateFormatForStandAloneMonthLabels(true);
-  if (month_formatter) {
-    if (std::unique_ptr<Vector<String>> labels = CreateLabelVector(
-            month_formatter, UDAT_STANDALONE_SHORT_MONTHS, UCAL_JANUARY, 12)) {
-      short_stand_alone_month_labels_ = *labels;
+const Vector<String>& LocaleIcu::ShortStandAloneMonthLabels() {
+  if (short_stand_alone_month_labels_.empty()) {
+    UDateFormat* month_formatter = OpenDateFormatForStandAloneMonthLabels(true);
+    if (month_formatter) {
+      short_stand_alone_month_labels_ = CreateLabelVector(
+          month_formatter, UDAT_STANDALONE_SHORT_MONTHS, UCAL_JANUARY, 12);
       udat_close(month_formatter);
-      return short_stand_alone_month_labels_;
     }
-    udat_close(month_formatter);
+    if (short_stand_alone_month_labels_.empty()) {
+      short_stand_alone_month_labels_ = ShortMonthLabels();
+    }
   }
-  short_stand_alone_month_labels_ = ShortMonthLabels();
   return short_stand_alone_month_labels_;
 }
 
-const Vector<String>& LocaleICU::TimeAMPMLabels() {
+const Vector<String>& LocaleIcu::TimeAmPmLabels() {
   InitializeDateTimeFormat();
   return time_ampm_labels_;
 }

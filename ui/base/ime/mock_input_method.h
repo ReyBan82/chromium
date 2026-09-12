@@ -21,7 +21,7 @@ class TextInputClient;
 
 // A mock ui::InputMethod implementation for testing. You can get the instance
 // of this class as the global input method with calling
-// SetUpInputMethodFactoryForTesting() which is declared in
+// SetUpInputMethodForTesting() which is declared in
 // ui/base/ime/init/input_method_factory.h
 class COMPONENT_EXPORT(UI_BASE_IME) MockInputMethod : public InputMethod {
  public:
@@ -37,13 +37,13 @@ class COMPONENT_EXPORT(UI_BASE_IME) MockInputMethod : public InputMethod {
       ImeKeyEventDispatcher* ime_key_event_dispatcher) override;
   void OnFocus() override;
   void OnBlur() override;
-  void OnTouch(ui::EventPointerType pointerType) override;
 
 #if BUILDFLAG(IS_WIN)
   bool OnUntranslatedIMEMessage(const CHROME_MSG event,
                                 NativeEventResult* result) override;
   void OnInputLocaleChanged() override;
   bool IsInputLocaleCJK() const override;
+  void OnUrlChanged() override;
 #endif
 
   void SetFocusedTextInputClient(TextInputClient* client) override;
@@ -59,10 +59,12 @@ class COMPONENT_EXPORT(UI_BASE_IME) MockInputMethod : public InputMethod {
   void AddObserver(InputMethodObserver* observer) override;
   void RemoveObserver(InputMethodObserver* observer) override;
   VirtualKeyboardController* GetVirtualKeyboardController() override;
+  void SetVirtualKeyboardControllerForTesting(
+      std::unique_ptr<VirtualKeyboardController> controller) override;
 
  private:
-  raw_ptr<TextInputClient, DanglingUntriaged> text_input_client_;
-  base::ObserverList<InputMethodObserver>::Unchecked observer_list_;
+  raw_ptr<TextInputClient, DanglingUntriaged> text_input_client_ = nullptr;
+  base::ObserverList<InputMethodObserver> observer_list_;
   raw_ptr<ImeKeyEventDispatcher> ime_key_event_dispatcher_;
 
   VirtualKeyboardControllerStub keyboard_controller_;

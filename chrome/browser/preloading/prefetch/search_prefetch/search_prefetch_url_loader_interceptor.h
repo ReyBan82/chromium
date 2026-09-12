@@ -5,23 +5,25 @@
 #ifndef CHROME_BROWSER_PRELOADING_PREFETCH_SEARCH_PREFETCH_SEARCH_PREFETCH_URL_LOADER_INTERCEPTOR_H_
 #define CHROME_BROWSER_PRELOADING_PREFETCH_SEARCH_PREFETCH_SEARCH_PREFETCH_URL_LOADER_INTERCEPTOR_H_
 
-#include <memory>
-
 #include "base/sequence_checker.h"
+#include "chrome/browser/preloading/prefetch/search_prefetch/search_prefetch_url_loader.h"
+#include "content/public/browser/frame_tree_node_id.h"
 #include "content/public/browser/url_loader_request_interceptor.h"
+#include "extensions/buildflags/buildflags.h"
 #include "services/network/public/cpp/resource_request.h"
 
 namespace content {
 class BrowserContext;
 }  // namespace content
 
-class SearchPrefetchURLLoader;
-
 // Intercepts search navigations that were previously prefetched.
 class SearchPrefetchURLLoaderInterceptor
     : public content::URLLoaderRequestInterceptor {
  public:
-  explicit SearchPrefetchURLLoaderInterceptor(int frame_tree_node_id);
+  SearchPrefetchURLLoaderInterceptor(
+      content::FrameTreeNodeId frame_tree_node_id,
+      int64_t navigation_id,
+      scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner);
   ~SearchPrefetchURLLoaderInterceptor() override;
 
   SearchPrefetchURLLoaderInterceptor(
@@ -29,11 +31,20 @@ class SearchPrefetchURLLoaderInterceptor
   SearchPrefetchURLLoaderInterceptor& operator=(
       const SearchPrefetchURLLoaderInterceptor&) = delete;
 
-  // Creates a SearchPrefetchURLLoader if there is a prefetched response able to
-  // be served to |tentative_resource_request|,.
-  static std::unique_ptr<SearchPrefetchURLLoader> MaybeCreateLoaderForRequest(
+  // Returns a valid handler if there is a prefetched response able to
+  // be served to |tentative_resource_request|.
+  static SearchPrefetchURLLoader::RequestHandler MaybeCreateLoaderForRequest(
       const network::ResourceRequest& tentative_resource_request,
-      int frame_tree_node_id);
+      content::FrameTreeNodeId frame_tree_node_id,
+      int64_t navigation_id);
+
+  // Maybe proxies the given request handler with the Extensions Web Request
+  // API.
+  static SearchPrefetchURLLoader::RequestHandler MaybeProxyRequestHandler(
+      content::FrameTreeNodeId frame_tree_node_id,
+      int64_t navigation_id,
+      scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
+      SearchPrefetchURLLoader::RequestHandler prefetched_loader_handler);
 
   // content::URLLoaderRequestInterceptor:
   void MaybeCreateLoader(
@@ -43,7 +54,12 @@ class SearchPrefetchURLLoaderInterceptor
 
  private:
   // Used to get the current WebContents/Profile.
-  const int frame_tree_node_id_;
+  const content::FrameTreeNodeId frame_tree_node_id_;
+
+  // These are sent to the Extensions Web Request API when maybe proxying the
+  // prefetch URL loader.
+  const int64_t navigation_id_;
+  scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 };

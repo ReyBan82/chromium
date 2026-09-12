@@ -7,51 +7,60 @@
 #include <algorithm>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <utility>
 
 #include "ash/constants/ash_features.h"
+#include "ash/constants/ash_pref_names.h"
+#include "ash/constants/web_app_id_constants.h"
 #include "base/command_line.h"
+#include "base/containers/to_vector.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
-#include "base/ranges/algorithm.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/escape.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_split.h"
+#include "base/strings/string_util.h"
 #include "base/test/metrics/user_action_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/values.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_ash.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/apps/app_service/app_service_test.h"
+#include "chrome/browser/apps/app_service/policy_util.h"
 #include "chrome/browser/ash/crostini/crostini_pref_names.h"
 #include "chrome/browser/ash/crostini/crostini_test_helper.h"
 #include "chrome/browser/ash/crostini/fake_crostini_features.h"
 #include "chrome/browser/ash/drive/file_system_util.h"
-#include "chrome/browser/ash/file_manager/app_id.h"
 #include "chrome/browser/ash/file_manager/app_service_file_tasks.h"
 #include "chrome/browser/ash/file_manager/file_manager_test_util.h"
+#include "chrome/browser/ash/file_manager/office_file_tasks.h"
 #include "chrome/browser/ash/file_manager/path_util.h"
+#include "chrome/browser/ash/file_manager/virtual_file_tasks.h"
+#include "chrome/browser/ash/file_manager/virtual_tasks/fake_virtual_task.h"
+#include "chrome/browser/ash/file_manager/virtual_tasks/id_constants.h"
 #include "chrome/browser/ash/guest_os/guest_os_mime_types_service.h"
 #include "chrome/browser/ash/guest_os/guest_os_mime_types_service_factory.h"
-#include "chrome/browser/ash/login/users/scoped_test_user_manager.h"
 #include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
 #include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager_factory.h"
-#include "chrome/browser/chromeos/policy/dlp/mock_dlp_rules_manager.h"
+#include "chrome/browser/chromeos/policy/dlp/test/mock_dlp_rules_manager.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/test_extension_system.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/web_applications/test/web_app_browsertest_util.h"
-#include "chrome/browser/web_applications/web_app_id_constants.h"
 #include "chrome/common/chrome_features.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
+#include "chromeos/ash/components/file_manager/app_id.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/testing_pref_service.h"
 #include "components/services/app_service/public/cpp/app_types.h"
-#include "components/services/app_service/public/cpp/features.h"
 #include "components/services/app_service/public/cpp/file_handler.h"
 #include "components/services/app_service/public/cpp/file_handler_info.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
+#include "content/public/common/content_features.h"
 #include "content/public/test/browser_task_environment.h"
 #include "extensions/browser/entry_info.h"
 #include "extensions/browser/extension_prefs.h"
@@ -96,39 +105,30 @@ TEST(FileManagerFileTasksTest, TaskDescriptorToId) {
 }
 
 TEST(FileManagerFileTasksTest, ParseTaskID_FileBrowserHandler) {
-  TaskDescriptor task;
-  EXPECT_TRUE(ParseTaskID("app-id|file|action-id", &task));
-  EXPECT_EQ("app-id", task.app_id);
-  EXPECT_EQ(TASK_TYPE_FILE_BROWSER_HANDLER, task.task_type);
-  EXPECT_EQ("action-id", task.action_id);
+  EXPECT_EQ(
+      ParseTaskID("app-id|file|action-id"),
+      TaskDescriptor("app-id", TASK_TYPE_FILE_BROWSER_HANDLER, "action-id"));
 }
 
 TEST(FileManagerFileTasksTest, ParseTaskID_FileHandler) {
-  TaskDescriptor task;
-  EXPECT_TRUE(ParseTaskID("app-id|app|action-id", &task));
-  EXPECT_EQ("app-id", task.app_id);
-  EXPECT_EQ(TASK_TYPE_FILE_HANDLER, task.task_type);
-  EXPECT_EQ("action-id", task.action_id);
+  EXPECT_EQ(ParseTaskID("app-id|app|action-id"),
+            TaskDescriptor("app-id", TASK_TYPE_FILE_HANDLER, "action-id"));
 }
 
 TEST(FileManagerFileTasksTest, ParseTaskID_Legacy) {
-  TaskDescriptor task;
   // A legacy task ID only has two parts. The task type should be
   // TASK_TYPE_FILE_BROWSER_HANDLER.
-  EXPECT_TRUE(ParseTaskID("app-id|action-id", &task));
-  EXPECT_EQ("app-id", task.app_id);
-  EXPECT_EQ(TASK_TYPE_FILE_BROWSER_HANDLER, task.task_type);
-  EXPECT_EQ("action-id", task.action_id);
+  EXPECT_EQ(
+      ParseTaskID("app-id|action-id"),
+      TaskDescriptor("app-id", TASK_TYPE_FILE_BROWSER_HANDLER, "action-id"));
 }
 
 TEST(FileManagerFileTasksTest, ParseTaskID_Invalid) {
-  TaskDescriptor task;
-  EXPECT_FALSE(ParseTaskID("invalid", &task));
+  EXPECT_FALSE(ParseTaskID("invalid"));
 }
 
 TEST(FileManagerFileTasksTest, ParseTaskID_UnknownTaskType) {
-  TaskDescriptor task;
-  EXPECT_FALSE(ParseTaskID("app-id|unknown|action-id", &task));
+  EXPECT_FALSE(ParseTaskID("app-id|unknown|action-id"));
 }
 
 TEST(FileManagerFileTasksTest, BaseContainsFindsTaskDescriptors) {
@@ -145,9 +145,9 @@ TEST(FileManagerFileTasksTest, BaseContainsFindsTaskDescriptors) {
   tasks.insert(task_2);
   tasks.insert(task_3);
 
-  ASSERT_TRUE(base::Contains(tasks, task_1));
-  ASSERT_TRUE(base::Contains(tasks, task_2));
-  ASSERT_TRUE(base::Contains(tasks, task_3));
+  ASSERT_TRUE(tasks.contains(task_1));
+  ASSERT_TRUE(tasks.contains(task_2));
+  ASSERT_TRUE(tasks.contains(task_3));
 }
 
 TEST(FileManagerFileTasksTest, EqualTaskDescriptors) {
@@ -188,20 +188,32 @@ TEST(FileManagerFileTasksTest, FileHandlerIsEnabled) {
   const std::string test_id = "test";
 
   crostini_features.set_export_import_ui_allowed(true);
-  EXPECT_TRUE(FileHandlerIsEnabled(&test_profile, "import-crostini-image"));
-  EXPECT_TRUE(FileHandlerIsEnabled(&test_profile, test_id));
+  EXPECT_TRUE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId,
+                           "chrome://file-manager/?import-crostini-image"));
+  EXPECT_TRUE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId, test_id));
 
   crostini_features.set_export_import_ui_allowed(false);
-  EXPECT_FALSE(FileHandlerIsEnabled(&test_profile, "import-crostini-image"));
-  EXPECT_TRUE(FileHandlerIsEnabled(&test_profile, test_id));
+  EXPECT_FALSE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId,
+                           "chrome://file-manager/?import-crostini-image"));
+  EXPECT_TRUE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId, test_id));
 
   crostini_features.set_root_access_allowed(true);
-  EXPECT_TRUE(FileHandlerIsEnabled(&test_profile, "install-linux-package"));
-  EXPECT_TRUE(FileHandlerIsEnabled(&test_profile, test_id));
+  EXPECT_TRUE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId,
+                           "chrome://file-manager/?install-linux-package"));
+  EXPECT_TRUE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId, test_id));
 
   crostini_features.set_root_access_allowed(false);
-  EXPECT_FALSE(FileHandlerIsEnabled(&test_profile, "install-linux-package"));
-  EXPECT_TRUE(FileHandlerIsEnabled(&test_profile, test_id));
+  EXPECT_FALSE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId,
+                           "chrome://file-manager/?install-linux-package"));
+  EXPECT_TRUE(
+      FileHandlerIsEnabled(&test_profile, kFileManagerSwaAppId, test_id));
 }
 
 class FileManagerFileTaskWithAppServiceTest : public testing::Test {
@@ -216,7 +228,7 @@ class FileManagerFileTaskWithAppServiceTest : public testing::Test {
   }
 
   void AddFakeAppToAppService(const std::string& app_id,
-                              const absl::optional<std::string>& package_name,
+                              const std::optional<std::string>& package_name,
                               std::vector<std::string> policy_ids,
                               apps::AppType app_type) {
     auto app = std::make_unique<apps::App>(app_type, app_id);
@@ -228,8 +240,8 @@ class FileManagerFileTaskWithAppServiceTest : public testing::Test {
 
     std::vector<apps::AppPtr> apps;
     apps.push_back(std::move(app));
-    app_service_proxy()->AppRegistryCache().OnApps(
-        std::move(apps), app_type, false /* should_notify_initialized */);
+    app_service_proxy()->OnApps(std::move(apps), app_type,
+                                false /* should_notify_initialized */);
   }
 
   TestingProfile* profile() { return profile_.get(); }
@@ -238,7 +250,7 @@ class FileManagerFileTaskWithAppServiceTest : public testing::Test {
  private:
   content::BrowserTaskEnvironment task_environment_;
   std::unique_ptr<TestingProfile> profile_;
-  apps::AppServiceProxy* app_service_proxy_ = nullptr;
+  raw_ptr<apps::AppServiceProxy> app_service_proxy_ = nullptr;
   apps::AppServiceTest app_service_test_;
 };
 
@@ -252,48 +264,56 @@ class FileManagerFileTaskPolicyDefaultHandlersTest
     CreateAppsAndTasks();
   }
 
+  void TearDown() override { GetTestVirtualTasks().clear(); }
+
  protected:
   void UpdateDefaultHandlersPrefs(
       const std::vector<std::pair<std::string, std::string>>& handlers = {}) {
-    base::Value::Dict pref_dict;
+    base::DictValue pref_dict;
     for (const auto& [file_extension, policy_id] : handlers) {
       pref_dict.Set(file_extension, policy_id);
     }
     profile()->GetTestingPrefService()->SetDict(
-        prefs::kDefaultHandlersForFileExtensions, std::move(pref_dict));
+        ash::prefs::kDefaultHandlersForFileExtensions, std::move(pref_dict));
   }
 
   ResultingTasks* resulting_tasks() { return resulting_tasks_.get(); }
   std::vector<extensions::EntryInfo>& entries() { return entries_; }
 
-  void CheckCorrectPolicyAssignment(const std::string& default_app_id) {
+  void CheckCorrectPolicyAssignment(std::string_view default_app_id) {
     ASSERT_EQ(resulting_tasks()->policy_default_handler_status,
               PolicyDefaultHandlerStatus::kDefaultHandlerAssignedByPolicy);
-    ASSERT_EQ(base::ranges::count_if(resulting_tasks()->tasks, &IsDefaultTask),
+    ASSERT_EQ(std::ranges::count_if(resulting_tasks()->tasks, &IsDefaultTask),
               1);
-    ASSERT_EQ(base::ranges::find_if(resulting_tasks()->tasks, &IsDefaultTask)
+    ASSERT_EQ(std::ranges::find_if(resulting_tasks()->tasks, &IsDefaultTask)
                   ->task_descriptor.app_id,
               default_app_id);
+  }
+
+  void CheckCorrectPolicyAssignmentForVirtualTask(
+      std::string_view virtual_task_id) {
+    ASSERT_EQ(resulting_tasks()->policy_default_handler_status,
+              PolicyDefaultHandlerStatus::kDefaultHandlerAssignedByPolicy);
+    ASSERT_EQ(std::ranges::count_if(resulting_tasks()->tasks, &IsDefaultTask),
+              1);
+    const auto& task =
+        std::ranges::find_if(resulting_tasks()->tasks, &IsDefaultTask)
+            ->task_descriptor;
+    ASSERT_TRUE(IsVirtualTask(task));
+    ASSERT_THAT(task.action_id, testing::EndsWith(virtual_task_id));
   }
 
   void CheckConflictingPolicyAssignment() {
     ASSERT_EQ(resulting_tasks()->policy_default_handler_status,
               PolicyDefaultHandlerStatus::kIncorrectAssignment);
-    ASSERT_EQ(base::ranges::count_if(resulting_tasks()->tasks, &IsDefaultTask),
+    ASSERT_EQ(std::ranges::count_if(resulting_tasks()->tasks, &IsDefaultTask),
               0);
   }
 
   void CheckNoPolicyAssignment() {
     ASSERT_FALSE(resulting_tasks()->policy_default_handler_status);
-    ASSERT_EQ(base::ranges::count_if(resulting_tasks()->tasks, &IsDefaultTask),
+    ASSERT_EQ(std::ranges::count_if(resulting_tasks()->tasks, &IsDefaultTask),
               0);
-  }
-
-  static void RestoreOriginalState(ResultingTasks* resulting_tasks) {
-    resulting_tasks->policy_default_handler_status = {};
-    for (auto& task : resulting_tasks->tasks) {
-      task.is_default = false;
-    }
   }
 
  protected:
@@ -301,6 +321,9 @@ class FileManagerFileTaskPolicyDefaultHandlersTest
   static constexpr char kChromeAppId[] = "chrome-app-id";
   static constexpr char kArcAppId[] = "arc-app-id";
   static constexpr char kNonExistentAppId[] = "null";
+  static constexpr char kIsolatedAppId[] = "ghgjflengkicinnmfeejkpjmcohegmid";
+  static constexpr char kIsolatedPolicyId[] =
+      "w2gqjem6b4m7vhiqpjr3btcpp7dxfyjt6h4uuyuxklcsmygtgncaaaac";
 
   static constexpr char kWebAppUrl[] = "https://web.app";
   static constexpr char kArcAppPackageName[] = "com.package.name";
@@ -308,7 +331,8 @@ class FileManagerFileTaskPolicyDefaultHandlersTest
   static constexpr AppIdPolicyIdPair kAppIdPolicyIdMapping[] = {
       {kWebAppId, kWebAppUrl},
       {kArcAppId, kArcAppPackageName},
-      {kChromeAppId, kChromeAppId}};
+      {kChromeAppId, kChromeAppId},
+      {kIsolatedAppId, kIsolatedPolicyId}};
 
  private:
   void CreateAppsAndTasks() {
@@ -330,6 +354,9 @@ class FileManagerFileTaskPolicyDefaultHandlersTest
     AddFakeAppToAppService(kArcAppId, /*package_name=*/kArcAppPackageName,
                            /*policy_ids=*/{kArcAppPackageName},
                            apps::AppType::kArc);
+    AddFakeAppToAppService(kIsolatedAppId, /*package_name=*/{},
+                           /*policy_ids=*/{kIsolatedPolicyId},
+                           apps::AppType::kWeb);
   }
 
   static bool IsDefaultTask(const FullTaskDescriptor& ftd) {
@@ -351,16 +378,16 @@ TEST_F(FileManagerFileTaskPolicyDefaultHandlersTest, CheckNoPolicyAssignment) {
   CheckNoPolicyAssignment();
 }
 
-// Check that setting policy to a non-existent app yields an error.
+// Check that a policy set to a non-existent app is ignored.
 TEST_F(FileManagerFileTaskPolicyDefaultHandlersTest,
        CheckAssignmentToNonExistentApp) {
   entries().emplace_back(base::FilePath::FromUTF8Unsafe("foo.txt"),
                          "text/plain", false);
 
   UpdateDefaultHandlersPrefs({{".txt", kNonExistentAppId}});
-  ASSERT_TRUE(ChooseAndSetDefaultTaskFromPolicyPrefs(profile(), entries(),
-                                                     resulting_tasks()));
-  CheckConflictingPolicyAssignment();
+  ASSERT_FALSE(ChooseAndSetDefaultTaskFromPolicyPrefs(profile(), entries(),
+                                                      resulting_tasks()));
+  CheckNoPolicyAssignment();
 }
 
 // Check that assigning different apps to handle different file extensions
@@ -376,6 +403,109 @@ TEST_F(FileManagerFileTaskPolicyDefaultHandlersTest,
   ASSERT_TRUE(ChooseAndSetDefaultTaskFromPolicyPrefs(profile(), entries(),
                                                      resulting_tasks()));
   CheckConflictingPolicyAssignment();
+}
+
+class FileManagerFileTaskVirtualTaskPolicyDefaultHandlersTest
+    : public FileManagerFileTaskPolicyDefaultHandlersTest,
+      public testing::WithParamInterface<
+          std::tuple<std::string, std::string, std::string>> {
+ public:
+  FileManagerFileTaskVirtualTaskPolicyDefaultHandlersTest() {
+    // These feature flags are required to make different virtual tasks
+    // discoverable.
+    features_.InitAndEnableFeature(features::kIsolatedWebAppUnmanagedInstall);
+  }
+
+ private:
+  base::test::ScopedFeatureList features_;
+};
+
+// Check that virtual tasks are handled by the policy.
+TEST_P(FileManagerFileTaskVirtualTaskPolicyDefaultHandlersTest, VirtualTask) {
+  auto [policy_id, action_id, file_extension] = GetParam();
+  if (action_id == kActionIdInstallIsolatedWebApp) {
+    profile()->GetPrefs()->SetBoolean(ash::prefs::kIsolatedWebAppsEnabled,
+                                      true);
+  }
+  const std::string file_name = base::StrCat({"foo", file_extension});
+
+  entries().emplace_back(base::FilePath::FromUTF8Unsafe(file_name),
+                         /*mime_type=*/"", /*is_directory=*/false);
+
+  ASSERT_EQ(entries().size(), 1U);
+  MatchVirtualTasks(
+      profile(), entries(),
+      /*file_urls=*/
+      {GURL(base::StrCat(
+          {"filesystem:chrome://file-manager/external/", file_name}))},
+      /*dlp_source_urls=*/{}, &resulting_tasks()->tasks);
+
+  UpdateDefaultHandlersPrefs(
+      {{file_extension,
+        base::StrCat({apps_util::kVirtualTaskPrefix, policy_id})}});
+  ASSERT_TRUE(ChooseAndSetDefaultTaskFromPolicyPrefs(profile(), entries(),
+                                                     resulting_tasks()));
+  CheckCorrectPolicyAssignmentForVirtualTask(action_id);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    /**/,
+    FileManagerFileTaskVirtualTaskPolicyDefaultHandlersTest,
+    testing::Values(
+        std::make_tuple("install-isolated-web-app",
+                        kActionIdInstallIsolatedWebApp,
+                        ".swbn"),
+        std::make_tuple("microsoft-office", kActionIdOpenInOffice, ".docx"),
+        std::make_tuple("google-docs", kActionIdWebDriveOfficeWord, ".docx"),
+        std::make_tuple("google-spreadsheets",
+                        kActionIdWebDriveOfficeExcel,
+                        ".xlsx"),
+        std::make_tuple("google-slides",
+                        kActionIdWebDriveOfficePowerPoint,
+                        ".pptx")),
+    [](const auto& info) {
+      const auto& policy_id = std::get<0>(info.param);
+      // GoogleTest doesn't allow dashes in test names; the code below
+      // changes `xxx-yyy-zzz` policy ids to `XxxYyyZzz` test names.
+      return base::JoinString(
+          base::ToVector(
+              base::SplitString(policy_id, "-",
+                                base::WhitespaceHandling::TRIM_WHITESPACE,
+                                base::SplitResult::SPLIT_WANT_NONEMPTY),
+              [](const std::string& piece) {
+                return base::ToUpperASCII(piece[0]) + piece.substr(1);
+              }),
+          "");
+    });
+
+// Check that incorrectly assigned virtual tasks are ignored.
+TEST_F(FileManagerFileTaskPolicyDefaultHandlersTest,
+       VirtualTaskIncorrectAssignment) {
+  auto virtual_task = std::make_unique<FakeVirtualTask>(
+      ToSwaActionId(kActionIdInstallIsolatedWebApp));
+  GetTestVirtualTasks().push_back(virtual_task.get());
+
+  constexpr char kFileName[] = "foo.txt";
+
+  MatchVirtualTasks(
+      profile(),
+      {{base::FilePath::FromUTF8Unsafe(kFileName), "text/plain",
+        /*is_directory=*/false}},
+      /*file_urls=*/
+      {GURL(base::StrCat(
+          {"filesystem:chrome://file-manager/external/", kFileName}))},
+      /*dlp_source_urls=*/{}, &resulting_tasks()->tasks);
+
+  constexpr char kNonExistentVirtualTaskActionId[] = "incorrect-virtual-id";
+
+  UpdateDefaultHandlersPrefs(
+      {{".txt", base::StrCat({apps_util::kVirtualTaskPrefix,
+                              kNonExistentVirtualTaskActionId})}});
+  entries().emplace_back(base::FilePath::FromUTF8Unsafe(kFileName),
+                         "text/plain", false);
+  ASSERT_FALSE(ChooseAndSetDefaultTaskFromPolicyPrefs(profile(), entries(),
+                                                      resulting_tasks()));
+  CheckNoPolicyAssignment();
 }
 
 class FileManagerFileTaskPolicyDefaultHandlersTestPerAppType
@@ -426,13 +556,30 @@ class FileManagerFileTaskPreferencesTest
  public:
   // Updates the default task preferences per the given dictionary values.
   // Used for testing ChooseAndSetDefaultTask.
-  void UpdateDefaultTaskPreferences(const base::Value::Dict& mime_types,
-                                    const base::Value::Dict& suffixes) {
-    profile()->GetTestingPrefService()->SetDict(prefs::kDefaultTasksByMimeType,
-                                                mime_types.Clone());
-    profile()->GetTestingPrefService()->SetDict(prefs::kDefaultTasksBySuffix,
-                                                suffixes.Clone());
+  void UpdateDefaultTaskPreferences(const base::DictValue& mime_types,
+                                    const base::DictValue& suffixes) {
+    profile()->GetTestingPrefService()->SetDict(
+        ash::prefs::kDefaultTasksByMimeType, mime_types.Clone());
+    profile()->GetTestingPrefService()->SetDict(
+        ash::prefs::kDefaultTasksBySuffix, suffixes.Clone());
   }  // namespace file_manager::file_tasks
+
+  const base::DictValue& tasks_by_mime_type() {
+    return profile()->GetTestingPrefService()->GetDict(
+        ash::prefs::kDefaultTasksByMimeType);
+  }
+
+  const base::DictValue& tasks_by_suffix() {
+    return profile()->GetTestingPrefService()->GetDict(
+        ash::prefs::kDefaultTasksBySuffix);
+  }
+
+  void ClearPrefs() {
+    profile()->GetTestingPrefService()->ClearPref(
+        ash::prefs::kDefaultTasksByMimeType);
+    profile()->GetTestingPrefService()->ClearPref(
+        ash::prefs::kDefaultTasksBySuffix);
+  }
 };
 
 // Test that the right task is chosen from multiple choices per mime types
@@ -467,8 +614,8 @@ TEST_F(FileManagerFileTaskPreferencesTest,
   EXPECT_FALSE(tasks[1].is_default);
 
   // Set Text.app as default for "text/plain" in the preferences.
-  base::Value::Dict empty;
-  base::Value::Dict mime_types;
+  base::DictValue empty;
+  base::DictValue mime_types;
   mime_types.Set("text/plain", base::Value(TaskDescriptorToId(text_app_task)));
   UpdateDefaultTaskPreferences(mime_types, empty);
 
@@ -487,7 +634,7 @@ TEST_F(FileManagerFileTaskPreferencesTest,
   EXPECT_FALSE(tasks[1].is_default);
 
   // Set Nice.app as default for ".txt" in the preferences.
-  base::Value::Dict suffixes;
+  base::DictValue suffixes;
   suffixes.Set(".txt", base::Value(TaskDescriptorToId(nice_app_task)));
   UpdateDefaultTaskPreferences(empty, suffixes);
 
@@ -626,7 +773,7 @@ TEST_F(FileManagerFileTaskPreferencesTest,
                                 "action-id");
   UpdateDefaultTask(profile(), other_app_task, {".txt"}, {"text/plain"});
   // Even if it's the Media App.
-  TaskDescriptor media_app_task(web_app::kMediaAppId, TASK_TYPE_FILE_HANDLER,
+  TaskDescriptor media_app_task(ash::kMediaAppId, TASK_TYPE_FILE_HANDLER,
                                 "action-id");
   UpdateDefaultTask(profile(), media_app_task, {"tiff"}, {"image/tiff"});
 
@@ -654,9 +801,6 @@ TEST_F(FileManagerFileTaskPreferencesTest,
 
 TEST_F(FileManagerFileTaskPreferencesTest,
        ChooseAndSetDefault_MatchesWithAlternateAppServiceTaskDescriptorForm) {
-  base::test::ScopedFeatureList scoped_feature_list{
-      ash::features::kArcFileTasksUseAppService};
-
   std::string package = "com.example.gallery";
   std::string activity = "com.example.gallery.OpenActivity";
   std::string app_id = "zabcdefg";
@@ -668,7 +812,7 @@ TEST_F(FileManagerFileTaskPreferencesTest,
   // Set the default app preference.
   std::string files_app_id = package + "/" + activity;
   TaskDescriptor file_task(files_app_id, task_type, "view");
-  base::Value::Dict mime_types;
+  base::DictValue mime_types;
   mime_types.Set("image/png", base::Value(TaskDescriptorToId(file_task)));
   UpdateDefaultTaskPreferences(mime_types, {});
 
@@ -699,9 +843,6 @@ TEST_F(FileManagerFileTaskPreferencesTest,
 
 TEST_F(FileManagerFileTaskPreferencesTest,
        UpdateDefaultTask_ConvertsArcAppServiceTaskDescriptorToStandardTaskId) {
-  base::test::ScopedFeatureList scoped_feature_list{
-      ash::features::kArcFileTasksUseAppService};
-
   std::string package = "com.example.gallery";
   std::string activity = "com.example.gallery.OpenActivity";
   std::string app_id = "zabcdefg";
@@ -720,365 +861,60 @@ TEST_F(FileManagerFileTaskPreferencesTest,
   std::string files_app_id = package + "/" + activity;
   std::string files_task_id = files_app_id + "|arc|view";
   const std::string* default_task_id =
-      profile()
-          ->GetTestingPrefService()
-          ->GetDict(prefs::kDefaultTasksByMimeType)
-          .FindString(mime_type);
+      tasks_by_mime_type().FindString(mime_type);
   ASSERT_EQ(*default_task_id, files_task_id);
 }
 
-// Test the setting of a default file task for Office files to a Files App SWA.
-TEST_F(FileManagerFileTaskPreferencesTest, SetOfficeFileHandlersToFilesSWA) {
-  file_manager::file_tasks::TaskDescriptor default_task;
-  TaskDescriptor task(kFileManagerSwaAppId, TaskType::TASK_TYPE_WEB_APP,
-                      "chrome://file-manager/?a");
+TEST_F(FileManagerFileTaskPreferencesTest, RemoveDefaultTask) {
+  TaskDescriptor app1_view("app1", TASK_TYPE_FILE_BROWSER_HANDLER, "view");
+  TaskDescriptor app1_edit("app1", TASK_TYPE_FILE_BROWSER_HANDLER, "edit");
+  TaskDescriptor app2_view("app2", TASK_TYPE_FILE_BROWSER_HANDLER, "view");
 
-  // Check no default tasks exist for Doc files.
-  ASSERT_FALSE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(), "application/msword", ".doc", &default_task));
-  ASSERT_FALSE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(),
-      "application/"
-      "vnd.openxmlformats-officedocument.wordprocessingml.document",
-      ".docx", &default_task));
-  // Set default task for Doc files as a Files App SWA with action id "a".
-  SetWordFileHandlerToFilesSWA(profile(), "a");
-  // Check the default task for Doc files is `task`.
-  ASSERT_TRUE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(), "application/msword", ".doc", &default_task));
-  ASSERT_EQ(task, default_task);
-  ASSERT_TRUE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(),
-      "application/"
-      "vnd.openxmlformats-officedocument.wordprocessingml.document",
-      ".docx", &default_task));
-  ASSERT_EQ(task, default_task);
+  UpdateDefaultTask(profile(), app1_view, {"eXT1", "ext2"}, {"mime1", "mime2"});
+  UpdateDefaultTask(profile(), app1_edit, {"Ext3"}, {"mime3"});
+  UpdateDefaultTask(profile(), app2_view, {"ext4"}, {"mime4"});
 
-  // Check no default tasks exist for Excel files.
-  ASSERT_FALSE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(), "application/vnd.ms-excel", ".xls",
-      &default_task));
-  ASSERT_FALSE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(),
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      ".xlsx", &default_task));
-  // Set default task for Excel files as a Files App SWA with action id "a".
-  SetExcelFileHandlerToFilesSWA(profile(), "a");
-  // Check the default task for Excel files is `task`.
-  ASSERT_TRUE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(), "application/vnd.ms-excel", ".xls",
-      &default_task));
-  ASSERT_EQ(task, default_task);
-  ASSERT_TRUE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(),
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      ".xlsx", &default_task));
-  ASSERT_EQ(task, default_task);
+  // Removing app1_edit or app2_view should not change app1_view.
+  RemoveDefaultTask(profile(), app1_edit, {"ext1"}, {"mime1"});
+  RemoveDefaultTask(profile(), app2_view, {"ext1"}, {"mime1"});
+  EXPECT_EQ("app1|file|view", *tasks_by_suffix().FindString("ext1"));
+  EXPECT_EQ("app1|file|view", *tasks_by_mime_type().FindString("mime1"));
 
-  // Check no default tasks exist for Powerpoint files.
-  ASSERT_FALSE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(), "application/vnd.ms-powerpoint", ".ppt",
-      &default_task));
-  ASSERT_FALSE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(),
-      "application/"
-      "vnd.openxmlformats-officedocument.presentationml.presentation",
-      ".pptx", &default_task));
-  // Set default task for Powerpoint files as a Files App SWA with action id
-  // "a".
-  SetPowerPointFileHandlerToFilesSWA(profile(), "a");
-  // Check the default task for Powerpoint files is `task`.
-  ASSERT_TRUE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(), "application/vnd.ms-powerpoint", ".ppt",
-      &default_task));
-  ASSERT_EQ(task, default_task);
-  ASSERT_TRUE(file_manager::file_tasks::GetDefaultTaskFromPrefs(
-      *profile()->GetPrefs(),
-      "application/"
-      "vnd.openxmlformats-officedocument.presentationml.presentation",
-      ".pptx", &default_task));
-  ASSERT_EQ(task, default_task);
+  // Suffix match should be case-insensitive. Only specified suffixes or mimes
+  // should be removed, others should not change.
+  RemoveDefaultTask(profile(), app1_view, {"Ext1"}, {"mime1"});
+  EXPECT_EQ(nullptr, tasks_by_suffix().FindString("ext1"));
+  EXPECT_EQ(nullptr, tasks_by_mime_type().FindString("mime1"));
+  EXPECT_EQ("app1|file|view", *tasks_by_suffix().FindString("ext2"));
+  EXPECT_EQ("app1|file|view", *tasks_by_mime_type().FindString("mime2"));
+
+  // Remove all matches for app1_view.
+  RemoveDefaultTask(profile(), app1_view, {"ext1", "ext2"}, {"mime1", "mime2"});
+  EXPECT_EQ(nullptr, tasks_by_suffix().FindString("ext1"));
+  EXPECT_EQ(nullptr, tasks_by_suffix().FindString("ext2"));
+  EXPECT_EQ(nullptr, tasks_by_mime_type().FindString("mime1"));
+  EXPECT_EQ(nullptr, tasks_by_mime_type().FindString("mime2"));
 }
 
-// Test that the office PWA file handler is hidden from the available file
-// handlers when opening an office file.
-TEST_F(FileManagerFileTaskWithAppServiceTest, OfficePwaHandlerHidden) {
-  struct FakeOfficeFileType {
-    std::string file_extension;
-    std::string mime_type;
-  };
+TEST_F(FileManagerFileTaskPreferencesTest, UpdateDefaultTask_ReplaceExisting) {
+  TaskDescriptor app1("app1", TASK_TYPE_FILE_BROWSER_HANDLER, "view");
+  TaskDescriptor app2("app2", TASK_TYPE_FILE_BROWSER_HANDLER, "view");
 
-  // Enable `kUploadOfficeToCloud` flag as the hiding happens behind this
-  // flag.
-  base::test::ScopedFeatureList scoped_feature_list{
-      ash::features::kUploadOfficeToCloud};
+  // Replace-existing true or false both work when no existing task exists.
+  UpdateDefaultTask(profile(), app1, {"ext1"}, {"mime1"}, true);
+  UpdateDefaultTask(profile(), app2, {"ext2"}, {"mime2"}, false);
+  EXPECT_EQ("app1|file|view", *tasks_by_suffix().FindString("ext1"));
+  EXPECT_EQ("app2|file|view", *tasks_by_suffix().FindString("ext2"));
+  EXPECT_EQ("app1|file|view", *tasks_by_mime_type().FindString("mime1"));
+  EXPECT_EQ("app2|file|view", *tasks_by_mime_type().FindString("mime2"));
 
-  std::vector<FakeOfficeFileType> fake_office_file_types = {
-      {"ppt", "application/vnd.ms-powerpoint"},
-      {"pptx",
-       "application/"
-       "vnd.openxmlformats-officedocument.presentationml.presentation"},
-      {"xls", "application/vnd.ms-excel"},
-      {"xlsx",
-       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-      {"doc", "application/msword"},
-      {"docx",
-       "application/"
-       "vnd.openxmlformats-officedocument.wordprocessingml.document"}};
-
-  for (FakeOfficeFileType& fake_office_file_type : fake_office_file_types) {
-    file_manager::test::AddFakeWebApp(extension_misc::kOfficePwaAppId,
-                                      fake_office_file_type.mime_type,
-                                      fake_office_file_type.file_extension,
-                                      "something", true, app_service_proxy());
-
-    base::FilePath test_file_path = web_app::CreateTestFileWithExtension(
-        fake_office_file_type.file_extension);
-
-    std::vector<file_manager::file_tasks::FullTaskDescriptor> tasks =
-        file_manager::test::GetTasksForFile(profile(), test_file_path);
-
-    for (FullTaskDescriptor& task : tasks) {
-      EXPECT_NE(extension_misc::kOfficePwaAppId, task.task_descriptor.app_id)
-          << " for extension: " << fake_office_file_type.file_extension;
-    }
-  }
-}
-
-// Test using the test extension system, which needs lots of setup.
-class FileManagerFileTasksComplexTest : public testing::Test {
- protected:
-  FileManagerFileTasksComplexTest()
-      : test_profile_(std::make_unique<TestingProfile>()),
-        command_line_(base::CommandLine::NO_PROGRAM),
-        extension_service_(nullptr) {
-    extensions::TestExtensionSystem* test_extension_system =
-        static_cast<extensions::TestExtensionSystem*>(
-            extensions::ExtensionSystem::Get(test_profile_.get()));
-    extension_service_ = test_extension_system->CreateExtensionService(
-        &command_line_, base::FilePath() /* install_directory */,
-        false /* autoupdate_enabled*/);
-  }
-
-  // Helper class for calling FindAllTypesOfTask synchronously.
-  class FindAllTypesOfTasksSynchronousWrapper {
-   public:
-    void Call(Profile* profile,
-              const std::vector<extensions::EntryInfo>& entries,
-              const std::vector<GURL>& file_urls,
-              const std::vector<std::string>& source_urls,
-              ResultingTasks* resulting_tasks) {
-      FindAllTypesOfTasks(
-          profile, entries, file_urls, source_urls,
-          base::BindOnce(&FindAllTypesOfTasksSynchronousWrapper::OnReply,
-                         base::Unretained(this), resulting_tasks));
-      run_loop_.Run();
-    }
-
-   private:
-    void OnReply(ResultingTasks* out, std::unique_ptr<ResultingTasks> result) {
-      *out = *result;
-      run_loop_.Quit();
-    }
-
-    base::RunLoop run_loop_;
-  };
-
-  content::BrowserTaskEnvironment task_environment_;
-  ash::ScopedCrosSettingsTestHelper cros_settings_test_helper_;
-  ash::ScopedTestUserManager test_user_manager_;
-  std::unique_ptr<TestingProfile> test_profile_;
-  base::CommandLine command_line_;
-  extensions::ExtensionService* extension_service_;  // Owned by test_profile_;
-};
-
-// Test using the test extension system, which needs lots of setup.
-class FileManagerFileTasksCrostiniTest
-    : public FileManagerFileTasksComplexTest {
- protected:
-  FileManagerFileTasksCrostiniTest()
-      : crostini_test_helper_(std::make_unique<crostini::CrostiniTestHelper>(
-            test_profile_.get())),
-        crostini_folder_(util::GetCrostiniMountDirectory(test_profile_.get())) {
-    ash::ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
-
-    // Disable kGuestOsFileTasksUseAppService for these tests which run on code
-    // from guest_os_file_tasks.cc. When the flag is enabled, these test cases
-    // get covered in app_service_file_tasks_unittest.cc.
-    feature_list_.InitAndDisableFeature(
-        ash::features::kGuestOsFileTasksUseAppService);
-
-    vm_tools::apps::App text_app =
-        crostini::CrostiniTestHelper::BasicApp("text_app");
-    *text_app.add_mime_types() = "text/plain";
-    crostini_test_helper_->AddApp(text_app);
-
-    vm_tools::apps::App image_app =
-        crostini::CrostiniTestHelper::BasicApp("image_app");
-    *image_app.add_mime_types() = "image/gif";
-    *image_app.add_mime_types() = "image/jpeg";
-    *image_app.add_mime_types() = "image/jpg";
-    *image_app.add_mime_types() = "image/png";
-    crostini_test_helper_->AddApp(image_app);
-
-    vm_tools::apps::App gif_app =
-        crostini::CrostiniTestHelper::BasicApp("gif_app");
-    *gif_app.add_mime_types() = "image/gif";
-    crostini_test_helper_->AddApp(gif_app);
-
-    vm_tools::apps::App alt_mime_app =
-        crostini::CrostiniTestHelper::BasicApp("alt_mime_app");
-    *alt_mime_app.add_mime_types() = "foo/x-bar";
-    crostini_test_helper_->AddApp(alt_mime_app);
-
-    text_app_id_ = crostini::CrostiniTestHelper::GenerateAppId("text_app");
-    image_app_id_ = crostini::CrostiniTestHelper::GenerateAppId("image_app");
-    gif_app_id_ = crostini::CrostiniTestHelper::GenerateAppId("gif_app");
-    alt_mime_app_id_ =
-        crostini::CrostiniTestHelper::GenerateAppId("alt_mime_app");
-
-    // Setup the custom MIME type mapping.
-    vm_tools::apps::MimeTypes mime_types_list;
-    mime_types_list.set_vm_name(crostini::kCrostiniDefaultVmName);
-    mime_types_list.set_container_name(crostini::kCrostiniDefaultContainerName);
-    (*mime_types_list.mutable_mime_type_mappings())["foo"] = "foo/x-bar";
-
-    guest_os::GuestOsMimeTypesServiceFactory::GetForProfile(test_profile_.get())
-        ->UpdateMimeTypes(mime_types_list);
-  }
-  ~FileManagerFileTasksCrostiniTest() override {
-    feature_list_.Reset();
-    crostini_test_helper_.reset();
-    test_profile_.reset();
-    ash::ConciergeClient::Shutdown();
-  }
-
-  void SetUp() override {
-    storage::ExternalMountPoints::GetSystemInstance()->RegisterFileSystem(
-        util::GetDownloadsMountPointName(test_profile_.get()),
-        storage::kFileSystemTypeLocal, storage::FileSystemMountOption(),
-        util::GetMyFilesFolderForProfile(test_profile_.get()));
-  }
-
-  void TearDown() override {
-    storage::ExternalMountPoints::GetSystemInstance()->RevokeFileSystem(
-        util::GetDownloadsMountPointName(test_profile_.get()));
-  }
-
-  GURL PathToURL(const std::string& path) {
-    std::string virtual_path = base::EscapeUrlEncodedData(
-        util::GetDownloadsMountPointName(test_profile_.get()) + "/" + path,
-        /*use_plus=*/false);
-    return GURL("filesystem:chrome-extension://id/external/" + virtual_path);
-  }
-
-  base::test::ScopedFeatureList feature_list_;
-  std::unique_ptr<crostini::CrostiniTestHelper> crostini_test_helper_;
-  base::FilePath crostini_folder_;
-  std::string text_app_id_;
-  std::string image_app_id_;
-  std::string gif_app_id_;
-  std::string alt_mime_app_id_;
-};
-
-TEST_F(FileManagerFileTasksCrostiniTest, BasicFiles) {
-  std::vector<extensions::EntryInfo> entries{
-      {crostini_folder_.Append("foo.txt"), "text/plain", false}};
-  std::vector<GURL> file_urls{PathToURL("dir/foo.txt")};
-
-  auto resulting_tasks = std::make_unique<ResultingTasks>();
-  std::vector<FullTaskDescriptor>& tasks = resulting_tasks->tasks;
-
-  FindAllTypesOfTasksSynchronousWrapper().Call(
-      test_profile_.get(), entries, file_urls, {""}, resulting_tasks.get());
-  ASSERT_EQ(1U, tasks.size());
-  EXPECT_EQ(text_app_id_, tasks[0].task_descriptor.app_id);
-
-  // Multiple text files
-  entries.emplace_back(crostini_folder_.Append("bar.txt"), "text/plain", false);
-  file_urls.emplace_back(PathToURL("dir/bar.txt"));
-  FindAllTypesOfTasksSynchronousWrapper().Call(
-      test_profile_.get(), entries, file_urls, {"", ""}, resulting_tasks.get());
-  ASSERT_EQ(1U, tasks.size());
-  EXPECT_EQ(text_app_id_, tasks[0].task_descriptor.app_id);
-}
-
-TEST_F(FileManagerFileTasksCrostiniTest, Directories) {
-  std::vector<extensions::EntryInfo> entries{
-      {crostini_folder_.Append("dir"), "", true}};
-  std::vector<GURL> file_urls{PathToURL("dir/dir")};
-
-  auto resulting_tasks = std::make_unique<ResultingTasks>();
-  std::vector<FullTaskDescriptor>& tasks = resulting_tasks->tasks;
-
-  FindAllTypesOfTasksSynchronousWrapper().Call(
-      test_profile_.get(), entries, file_urls, {""}, resulting_tasks.get());
-  EXPECT_EQ(0U, tasks.size());
-
-  entries.emplace_back(crostini_folder_.Append("foo.txt"), "text/plain", false);
-  file_urls.emplace_back(PathToURL("dir/foo.txt"));
-  FindAllTypesOfTasksSynchronousWrapper().Call(
-      test_profile_.get(), entries, file_urls, {"", ""}, resulting_tasks.get());
-  EXPECT_EQ(0U, tasks.size());
-}
-
-TEST_F(FileManagerFileTasksCrostiniTest, MultipleMatches) {
-  std::vector<extensions::EntryInfo> entries{
-      {crostini_folder_.Append("foo.gif"), "image/gif", false},
-      {crostini_folder_.Append("bar.gif"), "image/gif", false}};
-  std::vector<GURL> file_urls{PathToURL("dir/foo.gif"),
-                              PathToURL("dir/bar.gif")};
-
-  auto resulting_tasks = std::make_unique<ResultingTasks>();
-  std::vector<FullTaskDescriptor>& tasks = resulting_tasks->tasks;
-
-  FindAllTypesOfTasksSynchronousWrapper().Call(
-      test_profile_.get(), entries, file_urls, {"", ""}, resulting_tasks.get());
-  // The returned values happen to be ordered alphabetically by app_id, so we
-  // rely on this to keep the test simple.
-  EXPECT_LT(gif_app_id_, image_app_id_);
-  ASSERT_EQ(2U, tasks.size());
-  EXPECT_EQ(gif_app_id_, tasks[0].task_descriptor.app_id);
-  EXPECT_EQ(image_app_id_, tasks[1].task_descriptor.app_id);
-}
-
-TEST_F(FileManagerFileTasksCrostiniTest, MultipleTypes) {
-  std::vector<extensions::EntryInfo> entries{
-      {crostini_folder_.Append("foo.gif"), "image/gif", false},
-      {crostini_folder_.Append("bar.png"), "image/png", false}};
-  std::vector<GURL> file_urls{PathToURL("dir/foo.gif"),
-                              PathToURL("dir/bar.png")};
-
-  auto resulting_tasks = std::make_unique<ResultingTasks>();
-  std::vector<FullTaskDescriptor>& tasks = resulting_tasks->tasks;
-
-  FindAllTypesOfTasksSynchronousWrapper().Call(
-      test_profile_.get(), entries, file_urls, {"", ""}, resulting_tasks.get());
-  ASSERT_EQ(1U, tasks.size());
-  EXPECT_EQ(image_app_id_, tasks[0].task_descriptor.app_id);
-
-  entries.emplace_back(crostini_folder_.Append("qux.mp4"), "video/mp4", false);
-  file_urls.emplace_back(PathToURL("dir/qux.mp4"));
-  FindAllTypesOfTasksSynchronousWrapper().Call(test_profile_.get(), entries,
-                                               file_urls, {"", "", ""},
-                                               resulting_tasks.get());
-  EXPECT_EQ(0U, tasks.size());
-}
-
-TEST_F(FileManagerFileTasksCrostiniTest, AlternateMimeTypes) {
-  std::vector<extensions::EntryInfo> entries{
-      {crostini_folder_.Append("bar1.foo"), "text/plain", false},
-      {crostini_folder_.Append("bar2.foo"), "application/octet-stream", false}};
-  std::vector<GURL> file_urls{PathToURL("dir/bar1.foo"),
-                              PathToURL("dir/bar2.foo")};
-
-  auto resulting_tasks = std::make_unique<ResultingTasks>();
-  std::vector<FullTaskDescriptor>& tasks = resulting_tasks->tasks;
-
-  FindAllTypesOfTasksSynchronousWrapper().Call(
-      test_profile_.get(), entries, file_urls, {"", ""}, resulting_tasks.get());
-  ASSERT_EQ(1U, tasks.size());
-  EXPECT_EQ(alt_mime_app_id_, tasks[0].task_descriptor.app_id);
+  // Replace-existing true should overwrite, false should not.
+  UpdateDefaultTask(profile(), app2, {"ext1"}, {"mime1"}, true);
+  UpdateDefaultTask(profile(), app1, {"ext2"}, {"mime2"}, false);
+  EXPECT_EQ("app2|file|view", *tasks_by_suffix().FindString("ext1"));
+  EXPECT_EQ("app2|file|view", *tasks_by_suffix().FindString("ext2"));
+  EXPECT_EQ("app2|file|view", *tasks_by_mime_type().FindString("mime1"));
+  EXPECT_EQ("app2|file|view", *tasks_by_mime_type().FindString("mime2"));
 }
 
 }  // namespace file_manager::file_tasks

@@ -8,7 +8,7 @@
  * The resolver has a |promise| that can be resolved or rejected using |resolve|
  * or |reject|.
  */
-// TODO(hbos): Remove when no longer needed. https://crbug.com/793808
+// TODO(hbos): Remove when no longer needed. https://crbug.com/40554156
 class Resolver {
   constructor() {
     let promiseResolve;
@@ -23,7 +23,7 @@ class Resolver {
 }
 
 // TODO(hbos): Make this an external/wpt/webrtc/ test when video elements are
-// updated by received webrtc streams in content_shell. https://crbug.com/793808
+// updated by received webrtc streams in content_shell. https://crbug.com/40554156
 async function testRTCRtpSenderReplaceTrackSendsNewVideoTrack() {
   const redCanvas = document.getElementById('redCanvas');
   const redCanvasStream = redCanvas.captureStream(10);
@@ -48,7 +48,7 @@ async function testRTCRtpSenderReplaceTrackSendsNewVideoTrack() {
   let receivedColor = await pollNextVideoColor(
       fillRedCanvas, remoteVideo, remoteVideoCanvas);
   if (receivedColor != 'red')
-    throw failTest('Expected red, but received: ' + receivedColor);
+    throw new Error('Expected red, but received: ' + receivedColor);
 
   // Send "blueCanvas" to callee using the existing sender.
   await sender.replaceTrack(blueCanvasStream.getTracks()[0]);
@@ -58,9 +58,9 @@ async function testRTCRtpSenderReplaceTrackSendsNewVideoTrack() {
   receivedColor = await pollNextVideoColor(
       fillBlueCanvas, remoteVideo, remoteVideoCanvas);
   if (receivedColor != 'blue')
-    throw failTest('Expected blue, but received: ' + receivedColor);
+    throw new Error('Expected blue, but received: ' + receivedColor);
 
-  returnToTest('test-passed');
+  return logAndReturn('test-passed');
 }
 
 // Internals.

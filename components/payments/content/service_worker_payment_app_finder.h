@@ -35,7 +35,8 @@ namespace payments {
 
 class CSPChecker;
 class PaymentManifestDownloader;
-class PaymentManifestWebDataService;
+class WebPaymentsWebDataService;
+class ServiceWorkerPaymentAppFinderTestApi;
 
 // Retrieves service worker payment apps.
 class ServiceWorkerPaymentAppFinder
@@ -73,7 +74,7 @@ class ServiceWorkerPaymentAppFinder
   // The method should be called on the UI thread.
   void GetAllPaymentApps(
       const url::Origin& merchant_origin,
-      scoped_refptr<PaymentManifestWebDataService> cache,
+      scoped_refptr<WebPaymentsWebDataService> cache,
       std::vector<mojom::PaymentMethodDataPtr> requested_method_data,
       base::WeakPtr<CSPChecker> csp_checker,
       GetAllPaymentAppsCallback callback,
@@ -85,28 +86,11 @@ class ServiceWorkerPaymentAppFinder
       const std::vector<mojom::PaymentMethodDataPtr>& requested_method_data,
       content::InstalledPaymentAppsFinder::PaymentApps* apps);
 
-  // Ignore the given |method|, so that no installed or installable service
-  // workers would ever be looked up in GetAllPaymentApps(). Calling this
-  // multiple times will union the new payment methods with the existing set.
-  void IgnorePaymentMethodForTest(const std::string& method);
-
  private:
   friend class content::DocumentUserData<ServiceWorkerPaymentAppFinder>;
-  friend class IframeCspTest;
-  friend class PaymentRequestPaymentAppTest;
-  friend class ServiceWorkerPaymentAppFinderBrowserTest;
-  friend class PaymentRequestPlatformBrowserTestBase;
-  friend class PaymentMethodViewControllerTest;
-  friend class PaymentHandlerIconRefetchTest;
-  friend class EmptyParametersTest;
+  friend class ServiceWorkerPaymentAppFinderTestApi;
 
   explicit ServiceWorkerPaymentAppFinder(content::RenderFrameHost* rfh);
-
-  // Should be used only in tests.
-  // Should be called before every call to GetAllPaymentApps() (because the test
-  // downloader is moved into the SelfDeletingServiceWorkerPaymentAppFinder).
-  void SetDownloaderAndIgnorePortInOriginComparisonForTesting(
-      std::unique_ptr<PaymentManifestDownloader> downloader);
 
   DOCUMENT_USER_DATA_KEY_DECL();
 

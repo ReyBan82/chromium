@@ -6,14 +6,13 @@
 
 #include <memory>
 
-#include "base/memory/singleton.h"
-#include "build/build_config.h"
+#include "base/no_destructor.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 #include "extensions/browser/api/networking_private/networking_private_delegate.h"
 
-namespace context {
+namespace content {
 class BrowserContext;
-}
+}  // namespace content
 
 namespace extensions {
 
@@ -53,13 +52,13 @@ class NetworkingPrivateDelegateFactory
   static NetworkingPrivateDelegateFactory* GetInstance();
 
  private:
-  friend struct base::DefaultSingletonTraits<NetworkingPrivateDelegateFactory>;
+  friend base::NoDestructor<NetworkingPrivateDelegateFactory>;
 
   NetworkingPrivateDelegateFactory();
   ~NetworkingPrivateDelegateFactory() override;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* browser_context) const override;
   content::BrowserContext* GetBrowserContextToUse(
       content::BrowserContext* context) const override;

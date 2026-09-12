@@ -11,25 +11,49 @@
 #include "base/auto_reset.h"
 #include "base/functional/callback_forward.h"
 #include "build/buildflag.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/signin/reauth_result.h"
-#include "chrome/browser/ui/signin_reauth_view_controller.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "components/signin/public/base/signin_buildflags.h"
 #include "components/signin/public/base/signin_metrics.h"
+#include "url/gurl.h"
 
-struct AccountInfo;
+class AccountInfo;
 struct CoreAccountInfo;
 class Profile;
 class ProfileAttributesEntry;
 class ProfileAttributesStorage;
 
+namespace signin {
+class AccountPreviewDataService;
+class IdentityManager;
+}
+
 // Utility functions to gather status information from the various signed in
 // services and construct messages suitable for showing in UI.
 namespace signin_ui_util {
+
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+// Shows a bubble containing a QR code to transfer credentials to a mobile
+// device.
+void ShowCrossDeviceSigninQrBubble(
+    BrowserWindowInterface* browser_window_interface,
+    GURL qr_code_url,
+    base::OnceClosure closing_callback);
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
+
+// Enables history sync for the primary account.
+// If the user is already signed in, the history datatype is enabled
+// immediately. If an account is signed in to Web, the user is also signed in to
+// Chrome. If the user needs to reauth, history sync is enabled immediately, and
+// a reauth tab is opened. If the user is not signed in to Web, a sign in tab is
+// opened, and history sync is enabled once the sign in was completed.
+void SignInAndEnableHistorySync(BrowserWindowInterface* browser,
+                                Profile* profile,
+                                signin_metrics::AccessPoint access_point);
+
 class SigninUiDelegate;
 
 // Returns the username of the primary account or an empty string if there is
-// no primary account or the account has not consented to browser sync.
+// no primary account.
 std::u16string GetAuthenticatedUsername(Profile* profile);
 
 // Shows a learn more page for signin errors.
@@ -46,19 +70,29 @@ void ShowReauthForAccount(Profile* profile,
                           const std::string& email,
                           signin_metrics::AccessPoint access_point);
 
-// Delegates to an existing sign-in tab if one exists. If not, a new sign-in tab
-// is created.
-void ShowExtensionSigninPrompt(Profile* profile,
-                               bool enable_sync,
-                               const std::string& email_hint);
-
-// This function is used to enable sync for a given account:
+// This function is used to sign in a given account:
 // * This function does nothing if the user is already signed in to Chrome.
 // * If |account| is empty, then it presents the Chrome sign-in page.
-// * If token service has an invalid refreh token for account |account|,
-//   then it presents the Chrome sign-in page with |account.emil| prefilled.
+// * If token service has an invalid refresh token for account |account|,
+//   then it presents the Chrome sign-in page with |account.email| prefilled.
 // * If token service has a valid refresh token for |account|, then it
-//   enables sync for |account|.
+//   signs in the |account|.
+void SignInFromSingleAccountPromo(Profile* profile,
+                                  const CoreAccountInfo& account,
+                                  signin_metrics::AccessPoint access_point);
+
+// This function is used to enable sync or the history sync for a given account:
+// Which screen is shown depends on the feature
+// `kReplaceSyncPromosWithSignInPromos`.
+// * This function does nothing if the user is already signed in to Chrome.
+// * If |account| is empty, then it presents the Chrome sign-in page.
+// * If token service has an invalid refresh token for account |account|,
+//   then it presents the Chrome sign-in page with |account.email| prefilled.
+// * If token service has a valid refresh token for |account|, then it
+//   shows to the user the sync consent screen is
+//   `kReplaceSyncPromosWithSignInPromos` is disabled or the history sync optin
+//   screen if `kReplaceSyncPromosWithSignInPromos` is enabled.
+// TODO(crbug.com/457398017): Consider renaming this method.
 void EnableSyncFromSingleAccountPromo(Profile* profile,
                                       const CoreAccountInfo& account,
                                       signin_metrics::AccessPoint access_point);
@@ -70,76 +104,76 @@ void EnableSyncFromSingleAccountPromo(Profile* profile,
 //
 // |is_default_promo_account| is true if |account| corresponds to the default
 // account in the promo. It is ignored if |account| is empty.
+// TODO(crbug.com/457398017): Consider renaming this method.
 void EnableSyncFromMultiAccountPromo(Profile* profile,
                                      const CoreAccountInfo& account,
                                      signin_metrics::AccessPoint access_point,
                                      bool is_default_promo_account);
 
-// Returns the list of all accounts that have a token. The unconsented primary
-// account will be the first account in the list. If
-// |restrict_to_accounts_eligible_for_sync| is true, removes the account that
-// are not suitable for sync promos.
+// Returns the list of all accounts that have a token. If the user is signed
+// in to Chrome, the primary account is always returned first. Otherwise, the
+// default (first account in the cookie jar) account will be the first account
+// in the list. If `restrict_to_accounts_eligible_for_signin` is true, removes
+// accounts that are not suitable for signin promos. If
+// `account_preview_data_service` is provided and has a preferred account for
+// promo, that account is placed at the front of the list when the user is not
+// signed in.
 std::vector<AccountInfo> GetOrderedAccountsForDisplay(
-    Profile* profile,
-    bool restrict_to_accounts_eligible_for_sync);
+    const signin::IdentityManager* identity_manager,
+    const signin::AccountPreviewDataService* account_preview_data_service,
+    bool restrict_to_accounts_eligible_for_signin);
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-// Returns single account to use in promos.
-AccountInfo GetSingleAccountForPromos(Profile* profile);
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+// Returns single account to use in promos. If `account_preview_data_service` is
+// non-null and has a preferred account for promo, that account is returned.
+// Otherwise, returns the default account for promo.
+AccountInfo GetSingleAccountForPromos(
+    const signin::IdentityManager* identity_manager,
+    const signin::AccountPreviewDataService* account_preview_data_service);
 
-#endif
+// Returns an existing re-usable Dice signin tab with the given access point.
+content::WebContents* GetSignInTabWithAccessPoint(
+    BrowserWindowInterface* browser_window_interface,
+    signin_metrics::AccessPoint access_point);
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
 
 // Returns the short user identity to display for |profile|. It is based on the
 // current unconsented primary account (if exists).
-// TODO(crbug.com/1012179): Move this logic into ProfileAttributesEntry once
+// TODO(crbug.com/40102223): Move this logic into ProfileAttributesEntry once
 // AvatarToolbarButton becomes an observer of ProfileAttributesStorage and thus
 // ProfileAttributesEntry is up-to-date when AvatarToolbarButton needs it.
 std::u16string GetShortProfileIdentityToDisplay(
     const ProfileAttributesEntry& profile_attributes_entry,
     Profile* profile);
 
-// Returns the domain of the policy value of RestrictSigninToPattern. Returns
-// an empty string if the policy is not set or can not be parsed. The parser
-// only supports the policy value that matches [^@]+@[a-zA-Z0-9\-.]+(\\E)?\$?$.
-// Also, the parser does not validate the policy value.
-std::string GetAllowedDomain(std::string signin_pattern);
-
 // Returns whether Chrome should show the identity of the user (using a brief
-// animation) on opening a new window. IdentityManager's refresh tokens must be
-// loaded when this function gets called.
-bool ShouldShowAnimatedIdentityOnOpeningWindow(
-    const ProfileAttributesStorage& profile_attributes_storage,
-    Profile* profile);
+// animation) on opening a new window.
+bool ShouldShowAnimatedIdentityOnOpeningWindow(Profile& profile);
 
-#if BUILDFLAG(ENABLE_DICE_SUPPORT) || BUILDFLAG(IS_CHROMEOS_LACROS)
+// Creates a scoped override that makes the delay for cross window animation
+// replay zero.
+base::AutoReset<std::optional<base::TimeDelta>>
+CreateZeroOverrideDelayForCrossWindowAnimationReplayForTesting();
+
+// Creates a scoped override that makes the delay for cross window animation
+// replay infinite.
+base::AutoReset<std::optional<base::TimeDelta>>
+CreateInfiniteOverrideDelayForCrossWindowAnimationReplayForTesting();
+
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
 base::AutoReset<SigninUiDelegate*> SetSigninUiDelegateForTesting(
     SigninUiDelegate* delegate);
-#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
 
 // Records that the animated identity was shown for the given profile. This is
 // used for metrics and to decide whether/when the animation can be shown again.
 void RecordAnimatedIdentityTriggered(Profile* profile);
 
-// Records that the avatar icon was highlighted for the given profile. This is
-// used for metrics.
-void RecordAvatarIconHighlighted(Profile* profile);
-
 // Called when the ProfileMenuView is opened. Used for metrics.
 void RecordProfileMenuViewShown(Profile* profile);
 
 // Called when a button/link in the profile menu was clicked.
-void RecordProfileMenuClick(Profile* profile);
-
-// Records the result of a re-auth challenge to finish a transaction (like
-// unlocking the account store for passwords).
-void RecordTransactionalReauthResult(
-    signin_metrics::ReauthAccessPoint access_point,
-    signin::ReauthResult result);
-
-// Records user action performed in a transactional reauth dialog/tab.
-void RecordTransactionalReauthUserAction(
-    signin_metrics::ReauthAccessPoint access_point,
-    SigninReauthViewController::UserAction user_action);
+void RecordProfileMenuClick(const Profile& profile);
 
 }  // namespace signin_ui_util
 

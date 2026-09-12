@@ -5,24 +5,34 @@
 import("../build_webui_tests.gni")
 
 build_webui_tests("build") {
-  resource_path_prefix = "tab_search"
+  cc_test_files = [
+    "split_view_browsertest.cc",
+    "tab_search_browsertest.cc",
+    "tab_search_focus_test.cc",
+  ]
 
   files = [
-    "bimap_test.ts",
-    "fuzzy_search_test.ts",
-    "infinite_list_test.ts",
-    "tab_search_app_focus_test.ts",
-    "tab_search_app_test.ts",
+    "search_test.ts",
+    "selectable_lazy_list_test.ts",
+    "split_new_tab_page_test.ts",
     "tab_search_item_test.ts",
     "tab_search_media_tabs_test.ts",
+    "tab_search_page_focus_test.ts",
+    "tab_search_page_test.ts",
+    "tab_search_split_item_test.ts",
     "tab_search_test_data.ts",
     "tab_search_test_helper.ts",
+    "test_search_api_proxy.ts",
     "test_tab_search_api_proxy.ts",
+    "test_tab_search_sync_browser_proxy.ts",
   ]
 
   ts_path_mappings = [
     "chrome://tab-search.top-chrome/tab_search.js|" + rebase_path(
             "$root_gen_dir/chrome/browser/resources/tab_search/tsc/tab_search.d.ts",
+            target_gen_dir),
+    "/tab_search/shared/*|" + rebase_path(
+            "$root_gen_dir/chrome/browser/resources/tab_search/shared/tsc/*",
             target_gen_dir),
     "chrome://webui-test/metrics_reporter/*|" +
         rebase_path(
@@ -31,7 +41,9 @@ build_webui_tests("build") {
   ]
   ts_deps = [
     "//chrome/browser/resources/tab_search:build_ts",
+    "//chrome/browser/resources/tab_search/shared:build_ts",
+    "//third_party/lit/v3_0:build_ts",
     "//ui/webui/resources/js:build_ts",
-    "//ui/webui/resources/mojo:library",
+    "//ui/webui/resources/mojo:build_ts",
   ]
 }

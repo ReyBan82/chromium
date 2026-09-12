@@ -15,7 +15,7 @@ namespace safe_browsing {
 
 class SafeBrowsingPrimaryAccountTokenFetcherTest : public ::testing::Test {
  public:
-  SafeBrowsingPrimaryAccountTokenFetcherTest() {}
+  SafeBrowsingPrimaryAccountTokenFetcherTest() = default;
 
  protected:
   base::test::TaskEnvironment task_environment_{
@@ -51,12 +51,15 @@ TEST_F(SafeBrowsingPrimaryAccountTokenFetcherTest, Failure) {
                      &access_token));
   identity_test_environment_
       .WaitForAccessTokenRequestIfNecessaryAndRespondWithError(
-          GoogleServiceAuthError(GoogleServiceAuthError::CONNECTION_FAILED));
+          GoogleServiceAuthError::FromConnectionError(net::ERR_FAILED));
   ASSERT_TRUE(access_token.empty());
 }
 
 TEST_F(SafeBrowsingPrimaryAccountTokenFetcherTest,
        SuccessWithConsentedPrimaryAccount) {
+  // TODO(https://crbug.com/40066949): Delete this test after UNO phase 3
+  // migration is complete. See `ConsentLevel::kSync` documentation for more
+  // details.
   identity_test_environment_.MakePrimaryAccountAvailable(
       "test@example.com", signin::ConsentLevel::kSync);
   std::string access_token;
@@ -96,7 +99,7 @@ TEST_F(SafeBrowsingPrimaryAccountTokenFetcherTest,
 
   identity_test_environment_
       .WaitForAccessTokenRequestIfNecessaryAndRespondWithError(
-          GoogleServiceAuthError(GoogleServiceAuthError::CONNECTION_FAILED));
+          GoogleServiceAuthError::FromConnectionError(net::ERR_FAILED));
   ASSERT_TRUE(access_token.empty());
 }
 

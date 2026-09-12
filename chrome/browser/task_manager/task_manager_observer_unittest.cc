@@ -21,6 +21,11 @@ class TestObserver : public TaskManagerObserver {
   TestObserver& operator=(const TestObserver&) = delete;
   ~TestObserver() override = default;
 
+  // Expose protected mutators for testing.
+  using TaskManagerObserver::AddRefreshType;
+  using TaskManagerObserver::RemoveRefreshType;
+  using TaskManagerObserver::SetRefreshTypesFlags;
+
   // task_manager::TaskManagerObserver:
   void OnTaskAdded(TaskId id) override {}
   void OnTaskToBeRemoved(TaskId id) override {}
@@ -52,8 +57,7 @@ TEST_F(TaskManagerObserverTest, Basic) {
   int64_t flags1 = RefreshType::REFRESH_TYPE_CPU |
                    RefreshType::REFRESH_TYPE_WEBCACHE_STATS |
                    RefreshType::REFRESH_TYPE_HANDLES;
-  int64_t flags2 = RefreshType::REFRESH_TYPE_MEMORY_FOOTPRINT |
-                   RefreshType::REFRESH_TYPE_NACL;
+  int64_t flags2 = RefreshType::REFRESH_TYPE_MEMORY_FOOTPRINT;
 
   TestObserver observer1(refresh_time1, flags1);
   TestObserver observer2(refresh_time2, flags2);
@@ -62,6 +66,97 @@ TEST_F(TaskManagerObserverTest, Basic) {
   EXPECT_EQ(base::Seconds(1), observer2.desired_refresh_time());
   EXPECT_EQ(flags1, observer1.desired_resources_flags());
   EXPECT_EQ(flags2, observer2.desired_resources_flags());
+}
+
+TEST_F(TaskManagerObserverTest, IsResourceRefreshEnabled) {
+  const int flags =
+      RefreshType::REFRESH_TYPE_CPU | RefreshType::REFRESH_TYPE_HANDLES;
+  EXPECT_TRUE(
+      TaskManagerObserver::IsResourceRefreshEnabled(REFRESH_TYPE_CPU, flags));
+  EXPECT_TRUE(TaskManagerObserver::IsResourceRefreshEnabled(
+      REFRESH_TYPE_HANDLES, flags));
+  EXPECT_FALSE(
+      TaskManagerObserver::IsResourceRefreshEnabled(REFRESH_TYPE_NONE, flags));
+  // All non-set bits should evaluate to false.
+  EXPECT_FALSE(TaskManagerObserver::IsResourceRefreshEnabled(
+      static_cast<RefreshType>(~flags), flags));
+}
+
+TEST_F(TaskManagerObserverTest, AddRefreshType) {
+  const int64_t initial_flags = RefreshType::REFRESH_TYPE_CPU;
+  TestObserver observer(base::Seconds(2), initial_flags);
+
+  task_manager().AddObserver(&observer);
+  EXPECT_EQ(initial_flags, task_manager().GetEnabledFlags());
+
+  observer.AddRefreshType(REFRESH_TYPE_GPU_MEMORY);
+  EXPECT_EQ(initial_flags | REFRESH_TYPE_GPU_MEMORY,
+            task_manager().GetEnabledFlags());
+
+  task_manager().RemoveObserver(&observer);
+}
+
+TEST_F(TaskManagerObserverTest, RemoveRefreshType) {
+  const int64_t initial_flags =
+      RefreshType::REFRESH_TYPE_CPU | RefreshType::REFRESH_TYPE_HANDLES;
+  TestObserver observer(base::Seconds(2), initial_flags);
+
+  task_manager().AddObserver(&observer);
+  EXPECT_EQ(initial_flags, task_manager().GetEnabledFlags());
+
+  observer.RemoveRefreshType(REFRESH_TYPE_HANDLES);
+  EXPECT_EQ(static_cast<int64_t>(REFRESH_TYPE_CPU),
+            task_manager().GetEnabledFlags());
+
+  task_manager().RemoveObserver(&observer);
+}
+
+TEST_F(TaskManagerObserverTest, SetRefreshTypesFlags) {
+  const int64_t initial_flags = RefreshType::REFRESH_TYPE_CPU;
+  TestObserver observer(base::Seconds(2), initial_flags);
+
+  task_manager().AddObserver(&observer);
+  EXPECT_EQ(initial_flags, task_manager().GetEnabledFlags());
+
+  const int64_t new_flags =
+      RefreshType::REFRESH_TYPE_V8_MEMORY | RefreshType::REFRESH_TYPE_HANDLES;
+  observer.SetRefreshTypesFlags(new_flags);
+  EXPECT_EQ(new_flags, task_manager().GetEnabledFlags());
+
+  task_manager().RemoveObserver(&observer);
+}
+
+TEST_F(TaskManagerObserverTest, AddRefreshTypeDuplicate) {
+  const int64_t initial_flags = RefreshType::REFRESH_TYPE_CPU;
+  TestObserver observer(base::Seconds(2), initial_flags);
+
+  task_manager().AddObserver(&observer);
+  observer.AddRefreshType(REFRESH_TYPE_CPU);
+  EXPECT_EQ(initial_flags, task_manager().GetEnabledFlags());
+
+  task_manager().RemoveObserver(&observer);
+}
+
+TEST_F(TaskManagerObserverTest, RemoveRefreshTypeNotSet) {
+  const int64_t initial_flags = RefreshType::REFRESH_TYPE_CPU;
+  TestObserver observer(base::Seconds(2), initial_flags);
+
+  task_manager().AddObserver(&observer);
+  observer.RemoveRefreshType(REFRESH_TYPE_GPU_MEMORY);
+  EXPECT_EQ(initial_flags, task_manager().GetEnabledFlags());
+
+  task_manager().RemoveObserver(&observer);
+}
+
+TEST_F(TaskManagerObserverTest, DestructorAutoRemoves) {
+  {
+    TestObserver observer(base::Seconds(2), RefreshType::REFRESH_TYPE_CPU);
+    task_manager().AddObserver(&observer);
+    EXPECT_NE(base::TimeDelta::Max(), task_manager().GetRefreshTime());
+    EXPECT_NE(0, task_manager().GetEnabledFlags());
+  }
+  EXPECT_EQ(base::TimeDelta::Max(), task_manager().GetRefreshTime());
+  EXPECT_EQ(0, task_manager().GetEnabledFlags());
 }
 
 // Validates the behavior of the task manager in response to adding and
@@ -78,8 +173,7 @@ TEST_F(TaskManagerObserverTest, TaskManagerResponseToObservers) {
   int64_t flags1 = RefreshType::REFRESH_TYPE_CPU |
                    RefreshType::REFRESH_TYPE_WEBCACHE_STATS |
                    RefreshType::REFRESH_TYPE_HANDLES;
-  int64_t flags2 = RefreshType::REFRESH_TYPE_MEMORY_FOOTPRINT |
-                   RefreshType::REFRESH_TYPE_NACL;
+  int64_t flags2 = RefreshType::REFRESH_TYPE_MEMORY_FOOTPRINT;
   int64_t flags3 = RefreshType::REFRESH_TYPE_MEMORY_FOOTPRINT |
                    RefreshType::REFRESH_TYPE_CPU;
   int64_t flags4 = RefreshType::REFRESH_TYPE_GPU_MEMORY;

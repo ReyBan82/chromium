@@ -12,8 +12,6 @@ source_set("gpu") {
   ]
 
   sources = [
-    "client_gpu_memory_buffer_manager.cc",
-    "client_gpu_memory_buffer_manager.h",
     "command_buffer_metrics.cc",
     "context_provider_command_buffer.cc",
     "gpu.cc",
@@ -30,8 +28,6 @@ source_set("gpu") {
 
   deps = [
     "//base",
-    "//build:chromeos_buildflags",
-    "//gpu",
     "//gpu/command_buffer/client",
     "//gpu/command_buffer/client:gles2_cmd_helper",
     "//gpu/command_buffer/client:gles2_implementation",
@@ -40,12 +36,10 @@ source_set("gpu") {
     "//gpu/command_buffer/client:webgpu",
     "//gpu/command_buffer/common:raster",
     "//gpu/config",
-    "//gpu/skia_bindings",
     "//mojo/public/cpp/system",
     "//services/service_manager/public/cpp",
     "//services/viz/public/mojom",
     "//skia:buildflags",
-    "//ui/gl",
   ]
 }
 
@@ -57,7 +51,7 @@ source_set("tests") {
   deps = [
     "//base",
     "//base/test:test_support",
-    "//build:chromeos_buildflags",
+    "//gpu/ipc/common:test_support",
     "//mojo/core/embedder",
     "//mojo/public/cpp/system",
     "//services/service_manager/public/cpp",

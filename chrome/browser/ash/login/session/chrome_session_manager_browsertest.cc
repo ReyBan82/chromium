@@ -6,38 +6,52 @@
 
 #include <memory>
 
-#include "ash/constants/ash_features.h"
 #include "ash/constants/ash_switches.h"
+#include "ash/constants/chrome_switches.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "base/command_line.h"
 #include "base/run_loop.h"
-#include "base/test/scoped_feature_list.h"
+#include "base/strings/string_util.h"
 #include "chrome/browser/ash/login/lock/screen_locker_tester.h"
 #include "chrome/browser/ash/login/login_manager_test.h"
+#include "chrome/browser/ash/login/session/user_session_manager.h"
+#include "chrome/browser/ash/login/test/cryptohome_mixin.h"
 #include "chrome/browser/ash/login/test/device_state_mixin.h"
 #include "chrome/browser/ash/login/test/login_manager_mixin.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
 #include "chrome/browser/ash/login/test/oobe_screen_waiter.h"
 #include "chrome/browser/ash/login/test/session_manager_state_waiter.h"
-#include "chrome/browser/ash/login/ui/login_display_host.h"
-#include "chrome/browser/ash/login/ui/user_adding_screen.h"
+#include "chrome/browser/ash/profiles/profile_helper.h"
+#include "chrome/browser/signin/identity_manager_factory.h"
+#include "chrome/browser/ui/ash/login/login_display_host.h"
+#include "chrome/browser/ui/ash/login/user_adding_screen.h"
 #include "chrome/browser/ui/webui/ash/login/gaia_screen_handler.h"
 #include "chrome/test/base/fake_gaia_mixin.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
+#include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
+#include "chromeos/ash/components/dbus/userdataauth/userdataauth_client.h"
 #include "chromeos/ash/components/system/fake_statistics_provider.h"
 #include "chromeos/ash/components/system/statistics_provider.h"
+#include "components/session_manager/core/session.h"
+#include "components/session_manager/core/session_manager.h"
+#include "components/signin/public/base/consent_level.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "components/signin/public/identity_manager/identity_manager.h"
+#include "components/signin/public/identity_manager/identity_test_utils.h"
+#include "components/sync/base/features.h"
 #include "content/public/test/browser_test.h"
 #include "google_apis/gaia/fake_gaia.h"
 #include "rlz/buildflags/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/clipboard/clipboard.h"
 #include "ui/base/clipboard/scoped_clipboard_writer.h"
+#include "ui/base/clipboard/test/clipboard_test_util.h"
 
 #if BUILDFLAG(ENABLE_RLZ)
 #include "chrome/browser/ash/login/session/user_session_initializer.h"
-#include "chrome/browser/google/google_brand_chromeos.h"
-#include "chrome/common/chrome_switches.h"
-#include "chromeos/ash/components/install_attributes/stub_install_attributes.h"
+#include "chrome/browser/google/google_brand_chromeos.h"  // nogncheck
+#include "chromeos/ash/components/install_attributes/stub_install_attributes.h"  // nogncheck
 #include "components/user_manager/user_names.h"
 #endif  // BUILDFLAG(ENABLE_RLZ)
 
@@ -83,13 +97,18 @@ class ChromeSessionManagerTest : public LoginManagerTest {
   ChromeSessionManagerTest(const ChromeSessionManagerTest&) = delete;
   ChromeSessionManagerTest& operator=(const ChromeSessionManagerTest&) = delete;
 
-  ~ChromeSessionManagerTest() override {}
+  ~ChromeSessionManagerTest() override = default;
 
   // LoginManagerTest:
   void SetUpCommandLine(base::CommandLine* command_line) override {
     LoginManagerTest::SetUpCommandLine(command_line);
 
     command_line->AppendSwitch(switches::kOobeSkipPostLogin);
+  }
+
+  void SetUpOnMainThread() override {
+    LoginManagerTest::SetUpOnMainThread();
+    fake_gaia_.SetupFakeGaiaForLoginWithDefaults();
   }
 
  protected:
@@ -107,8 +126,8 @@ IN_PROC_BROWSER_TEST_F(ChromeSessionManagerTest, OobeNewUser) {
 
   // Login via fake gaia to add a new user.
   fake_gaia_.SetupFakeGaiaForLoginManager();
-  fake_gaia_.fake_gaia()->SetFakeMergeSessionParams(
-      FakeGaiaMixin::kFakeUserEmail, "fake_sid", "fake_lsid");
+  fake_gaia_.fake_gaia()->SetConfigurationHelper(FakeGaiaMixin::kFakeUserEmail,
+                                                 "fake_sid", "fake_lsid");
   OobeScreenWaiter(OobeBaseTest::GetFirstSigninScreen()).Wait();
 
   LoginDisplayHost::default_host()
@@ -125,15 +144,25 @@ IN_PROC_BROWSER_TEST_F(ChromeSessionManagerTest, OobeNewUser) {
 }
 
 class ChromeSessionManagerExistingUsersTest : public ChromeSessionManagerTest {
- public:
-  ChromeSessionManagerExistingUsersTest() {
-    login_manager_.AppendRegularUsers(3);
-  }
+ protected:
+  const LoginManagerMixin::TestUserInfo with_gaia_pw_{
+      LoginManagerMixin::CreateConsumerAccountId(1),
+      test::UserAuthConfig::Create({AshAuthFactor::kGaiaPassword})};
+  const LoginManagerMixin::TestUserInfo with_local_pw_{
+      LoginManagerMixin::CreateConsumerAccountId(2),
+      test::UserAuthConfig::Create({AshAuthFactor::kLocalPassword})};
+  const LoginManagerMixin::TestUserInfo with_pin_{
+      LoginManagerMixin::CreateConsumerAccountId(3),
+      test::UserAuthConfig::Create({AshAuthFactor::kCryptohomePin})};
 
-  LoginManagerMixin login_manager_{&mixin_host_};
+  CryptohomeMixin cryptohome_mixin_{&mixin_host_};
+  LoginManagerMixin login_manager_{&mixin_host_,
+                                   {with_gaia_pw_, with_local_pw_, with_pin_},
+                                   nullptr,
+                                   &cryptohome_mixin_};
 };
 
-// http://crbug.com/1338401
+// http://crbug.com/40849037
 IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
                        DISABLED_LoginExistingUsers) {
   // Verify that session state is LOGIN_PRIMARY with existing user data dir.
@@ -171,8 +200,40 @@ IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
   // Verify that session manager has the correct user session info.
   ASSERT_EQ(users.size(), manager->sessions().size());
   for (size_t i = 0; i < users.size(); ++i) {
-    EXPECT_EQ(users[i].account_id, manager->sessions()[i].user_account_id);
+    EXPECT_EQ(users[i].account_id, manager->sessions()[i]->account_id());
   }
+}
+
+IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
+                       LoginExistingUsersWithLocalPassword) {
+  // Verify that session state is LOGIN_PRIMARY with existing user data dir.
+  session_manager::SessionManager* manager =
+      session_manager::SessionManager::Get();
+  EXPECT_EQ(session_manager::SessionState::LOGIN_PRIMARY,
+            manager->session_state());
+  EXPECT_EQ(0u, manager->sessions().size());
+
+  // Verify that session state is ACTIVE with one user session after signing
+  // in a user with a local password.
+  LoginUserWithLocalPassword(with_local_pw_.account_id);
+  EXPECT_EQ(session_manager::SessionState::ACTIVE, manager->session_state());
+  EXPECT_EQ(1u, manager->sessions().size());
+}
+
+IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
+                       LoginExistingUsersWithPin) {
+  // Verify that session state is LOGIN_PRIMARY with existing user data dir.
+  session_manager::SessionManager* manager =
+      session_manager::SessionManager::Get();
+  EXPECT_EQ(session_manager::SessionState::LOGIN_PRIMARY,
+            manager->session_state());
+  EXPECT_EQ(0u, manager->sessions().size());
+
+  // Verify that session state is ACTIVE with one user session after signing
+  // in a user with a pin.
+  LoginUserWithPin(with_pin_.account_id);
+  EXPECT_EQ(session_manager::SessionState::ACTIVE, manager->session_state());
+  EXPECT_EQ(1u, manager->sessions().size());
 }
 
 IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
@@ -197,9 +258,9 @@ IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
   // Check that the text can still be pasted: secondary login screen clipboard
   // should be the same than the active session one since we can return to
   // active session by selecting Cancel.
-  std::u16string clipboard_text;
-  ui::Clipboard::GetForCurrentThread()->ReadText(
-      ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr, &clipboard_text);
+  std::u16string clipboard_text = ui::clipboard_test_util::ReadText(
+      ui::Clipboard::GetForCurrentThread(), ui::ClipboardBuffer::kCopyPaste,
+      /*data_dst=*/nullptr);
   EXPECT_EQ(clipboard_text, session_clipboard_text);
 
   // Go back to active session, with another user.
@@ -211,8 +272,9 @@ IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
             session_controller->GetSessionState());
 
   // Check that the new active session clipboard is empty.
-  ui::Clipboard::GetForCurrentThread()->ReadText(
-      ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr, &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      ui::Clipboard::GetForCurrentThread(), ui::ClipboardBuffer::kCopyPaste,
+      /*data_dst=*/nullptr);
   EXPECT_TRUE(clipboard_text.empty());
 
   // Write a text in the new active session clipboard.
@@ -228,8 +290,9 @@ IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
             session_controller->GetSessionState());
 
   // Check that the clipboard is empty, for security reasons.
-  ui::Clipboard::GetForCurrentThread()->ReadText(
-      ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr, &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      ui::Clipboard::GetForCurrentThread(), ui::ClipboardBuffer::kCopyPaste,
+      /*data_dst=*/nullptr);
   EXPECT_TRUE(clipboard_text.empty());
 
   // Go back to the active session.
@@ -239,25 +302,19 @@ IN_PROC_BROWSER_TEST_F(ChromeSessionManagerExistingUsersTest,
             session_controller->GetSessionState());
 
   // Check that the clipboard has been restored.
-  ui::Clipboard::GetForCurrentThread()->ReadText(
-      ui::ClipboardBuffer::kCopyPaste, /*data_dst=*/nullptr, &clipboard_text);
+  clipboard_text = ui::clipboard_test_util::ReadText(
+      ui::Clipboard::GetForCurrentThread(), ui::ClipboardBuffer::kCopyPaste,
+      /*data_dst=*/nullptr);
   EXPECT_EQ(clipboard_text, other_session_clipboard_text);
 }
 
 class ChromeSessionManagerRmaTest : public ChromeSessionManagerTest {
  public:
-  ChromeSessionManagerRmaTest() {
-    scoped_feature_list_.InitWithFeatures({features::kShimlessRMAFlow}, {});
-  }
-
   // LoginManagerTest:
   void SetUpCommandLine(base::CommandLine* command_line) override {
     ChromeSessionManagerTest::SetUpCommandLine(command_line);
     command_line->AppendSwitch(switches::kLaunchRma);
   }
-
- private:
-  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(ChromeSessionManagerRmaTest, DeviceInRma) {
@@ -327,7 +384,7 @@ class ChromeSessionManagerRlzTest : public ChromeSessionManagerTest {
 
     // Login via fake gaia to add a new user.
     fake_gaia_.SetupFakeGaiaForLoginManager();
-    fake_gaia_.fake_gaia()->SetFakeMergeSessionParams(
+    fake_gaia_.fake_gaia()->SetConfigurationHelper(
         FakeGaiaMixin::kFakeUserEmail, "fake_sid", "fake_lsid");
     OobeScreenWaiter(OobeBaseTest::GetFirstSigninScreen()).Wait();
 
@@ -410,7 +467,7 @@ class GuestSessionRlzTest : public InProcessBrowserTest,
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
     command_line->AppendSwitch(switches::kGuestSession);
-    command_line->AppendSwitch(::switches::kIncognito);
+    command_line->AppendSwitch(ash::chrome_switches::kIncognito);
     command_line->AppendSwitchASCII(switches::kLoginProfile, "hash");
     command_line->AppendSwitchASCII(
         switches::kLoginUser, user_manager::GuestAccountId().GetUserEmail());
@@ -442,5 +499,83 @@ INSTANTIATE_TEST_SUITE_P(GuestSessionRlzTest,
                          ::testing::Values(false, true));
 
 #endif  // BUILDFLAG(ENABLE_RLZ)
+
+class ChromeSessionManagerConsentLevelMigrationTest
+    : public MixinBasedInProcessBrowserTest {
+ public:
+  ChromeSessionManagerConsentLevelMigrationTest() {
+    login_manager_.set_session_restore_enabled();
+
+    std::string test_name =
+        ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    if (base::StartsWith(test_name, "PRE_")) {
+      // In the PRE_ test, we want to set up a profile with kSignin consent.
+      // Enabling kChromeOsUseConsentLevelSigninForNewUsers ensures that the
+      // initial login signs the user in at kSignin.
+      feature_list_.InitWithFeatures(
+          /*enabled_features=*/{syncer::kReplaceSyncPromosWithSignInPromos,
+                                ::switches::
+                                    kChromeOsUseConsentLevelSigninForNewUsers},
+          /*disabled_features=*/{});
+    } else {
+      // In the main test (restore), we want to test the migration to kSync.
+      // Enabling kUndoChromeOsUseConsentLevelSignin should trigger
+      // the migration of the existing kSignin profile to kSync.
+      feature_list_.InitWithFeatures(
+          /*enabled_features=*/
+          {syncer::kReplaceSyncPromosWithSignInPromos,
+           ::switches::kUndoChromeOsUseConsentLevelSignin},
+          /*disabled_features=*/{
+              ::switches::kChromeOsUseConsentLevelSigninForNewUsers});
+    }
+  }
+
+ protected:
+  const LoginManagerMixin::TestUserInfo test_user_{
+      AccountId::FromUserEmailGaiaId("demo@gmail.com", GaiaId("demo_user"))};
+  FakeGaiaMixin gaia_mixin_{&mixin_host_};
+  LoginManagerMixin login_manager_{&mixin_host_, {test_user_}, &gaia_mixin_};
+
+  base::test::ScopedFeatureList feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(ChromeSessionManagerConsentLevelMigrationTest,
+                       PRE_MigrationOnRestore) {
+  // 1. Log in using the mixin. Because
+  // kChromeOsUseConsentLevelSigninForNewUsers is enabled, this should
+  // automatically sign the user in at kSignin level.
+  login_manager_.LoginWithDefaultContext(test_user_);
+  login_manager_.WaitForActiveSession();
+
+  // 2. Verify that they are indeed signed in at kSignin (and NOT kSync).
+  Profile* profile = Profile::FromBrowserContext(
+      ash::BrowserContextHelper::Get()->GetBrowserContextByAccountId(
+          test_user_.account_id));
+  signin::IdentityManager* identity_manager =
+      IdentityManagerFactory::GetForProfile(profile);
+
+  EXPECT_TRUE(
+      identity_manager->HasPrimaryAccount(signin::ConsentLevel::kSignin));
+  EXPECT_FALSE(
+      identity_manager->HasPrimaryAccount(signin::ConsentLevel::kSync));
+}
+
+IN_PROC_BROWSER_TEST_F(ChromeSessionManagerConsentLevelMigrationTest,
+                       MigrationOnRestore) {
+  // 1. The LoginManagerTest harness should automatically restore the session
+  // of the user logged in during the PRE_ test. We just wait for it to
+  // complete.
+  login_manager_.WaitForActiveSession();
+
+  Profile* profile = Profile::FromBrowserContext(
+      ash::BrowserContextHelper::Get()->GetBrowserContextByAccountId(
+          test_user_.account_id));
+  signin::IdentityManager* identity_manager =
+      IdentityManagerFactory::GetForProfile(profile);
+
+  // 2. Verify that the session restore flow automatically migrated the user
+  // to kSync because kChromeOsUseConsentLevelSigninForNewUsers is now disabled.
+  EXPECT_TRUE(identity_manager->HasPrimaryAccount(signin::ConsentLevel::kSync));
+}
 
 }  // namespace ash

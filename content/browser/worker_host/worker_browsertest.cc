@@ -2,11 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/byte_size.h"
 #include "base/check.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/path_service.h"
+#include "base/scoped_observation.h"
 #include "base/strings/escape.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/synchronization/lock.h"
@@ -17,15 +21,18 @@
 #include "base/thread_annotations.h"
 #include "base/threading/thread_restrictions.h"
 #include "build/build_config.h"
-#include "content/browser/child_process_security_policy_impl.h"
 #include "content/browser/process_lock.h"
+#include "content/browser/security/cpsp/child_process_security_policy_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
 #include "content/browser/worker_host/shared_worker_service_impl.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/client_certificate_delegate.h"
+#include "content/public/browser/dedicated_worker_service.h"
+#include "content/public/browser/shared_worker_service.h"
 #include "content/public/browser/storage_partition.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/common/content_features.h"
 #include "content/public/common/content_paths.h"
 #include "content/public/common/content_switches.h"
@@ -44,16 +51,22 @@
 #include "net/cookies/canonical_cookie.h"
 #include "net/cookies/cookie_access_result.h"
 #include "net/dns/mock_host_resolver.h"
+#include "net/http/http_response_headers.h"
 #include "net/ssl/client_cert_identity.h"
 #include "net/ssl/ssl_server_config.h"
 #include "net/test/embedded_test_server/connection_tracker.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/test/embedded_test_server/http_request.h"
 #include "net/test/embedded_test_server/http_response.h"
-#include "net/test/spawned_test_server/spawned_test_server.h"
+#include "net/test/embedded_test_server/install_default_websocket_handlers.h"
 #include "net/test/test_data_directory.h"
+#include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
+#include "services/network/public/cpp/constants.h"
+#include "services/network/public/mojom/connection_change_observer_client.mojom.h"
 #include "services/network/public/mojom/cookie_manager.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/mojom/parsed_headers.mojom.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "url/gurl.h"
@@ -70,56 +83,98 @@ const char kSameSiteCookie[] = "same-site-cookie=same-site-cookie-value";
 const char kNoCookie[] = "None";
 
 bool SupportsSharedWorker() {
-#if BUILDFLAG(IS_ANDROID)
-  // SharedWorkers are not enabled on Android. https://crbug.com/154571
-  //
-  // TODO(davidben): Move other SharedWorker exclusions from
-  // build/android/pylib/gtest/filter/ inline.
-  return false;
-#else
-  return true;
-#endif
+  return base::FeatureList::IsEnabled(blink::features::kSharedWorker);
 }
+
+// Writes a worker script response with the given `url_list` populated in the
+// service worker URL list of the response head.
+void WriteWorkerScriptResponseWithServiceWorkerUrlList(
+    network::mojom::URLLoaderClient* client,
+    const std::vector<GURL>& url_list) {
+  static constexpr char kBody[] = "postMessage('done');";
+  auto response = network::mojom::URLResponseHead::New();
+  response->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
+      "HTTP/1.1 200 OK\nContent-Type: text/javascript\n\n");
+  response->mime_type = "text/javascript";
+  response->was_fetched_via_service_worker = true;
+  response->url_list_via_service_worker = url_list;
+  response->parsed_headers = network::mojom::ParsedHeaders::New();
+
+  mojo::ScopedDataPipeProducerHandle producer_handle;
+  mojo::ScopedDataPipeConsumerHandle consumer_handle;
+  EXPECT_EQ(mojo::CreateDataPipe(nullptr, producer_handle, consumer_handle),
+            MOJO_RESULT_OK);
+  if (producer_handle.is_valid()) {
+    EXPECT_EQ(
+        producer_handle->WriteAllData(base::byte_span_from_cstring(kBody)),
+        MOJO_RESULT_OK);
+  }
+  producer_handle.reset();
+
+  client->OnReceiveResponse(std::move(response), std::move(consumer_handle),
+                            std::nullopt);
+  network::URLLoaderCompletionStatus status;
+  status.error_code = net::OK;
+  status.decoded_body_length = base::ByteSize(sizeof(kBody) - 1);
+  client->OnComplete(status);
+}
+
+// Records final response URLs reported for newly created workers.
+class WorkerFinalResponseURLObserver : public DedicatedWorkerService::Observer,
+                                       public SharedWorkerService::Observer {
+ public:
+  explicit WorkerFinalResponseURLObserver(StoragePartition* storage_partition) {
+    dedicated_worker_observation_.Observe(
+        storage_partition->GetDedicatedWorkerService());
+    shared_worker_observation_.Observe(
+        storage_partition->GetSharedWorkerService());
+  }
+
+  const std::vector<GURL>& final_response_urls() const {
+    return final_response_urls_;
+  }
+
+  // DedicatedWorkerService::Observer:
+  void OnWorkerCreated(const blink::DedicatedWorkerToken&,
+                       ChildProcessId,
+                       const url::Origin&,
+                       DedicatedWorkerCreator) override {}
+  void OnBeforeWorkerDestroyed(const blink::DedicatedWorkerToken&,
+                               DedicatedWorkerCreator) override {}
+  void OnFinalResponseURLDetermined(const blink::DedicatedWorkerToken&,
+                                    const GURL& url) override {
+    final_response_urls_.push_back(url);
+  }
+
+  // SharedWorkerService::Observer:
+  void OnWorkerCreated(const blink::SharedWorkerToken&,
+                       ChildProcessId,
+                       const url::Origin&,
+                       const base::UnguessableToken&) override {}
+  void OnBeforeWorkerDestroyed(const blink::SharedWorkerToken&) override {}
+  void OnFinalResponseURLDetermined(const blink::SharedWorkerToken&,
+                                    const GURL& url) override {
+    final_response_urls_.push_back(url);
+  }
+  void OnClientAdded(const blink::SharedWorkerToken&,
+                     GlobalRenderFrameHostId) override {}
+  void OnClientRemoved(const blink::SharedWorkerToken&,
+                       GlobalRenderFrameHostId) override {}
+
+ private:
+  std::vector<GURL> final_response_urls_;
+  base::ScopedObservation<DedicatedWorkerService,
+                          DedicatedWorkerService::Observer>
+      dedicated_worker_observation_{this};
+  base::ScopedObservation<SharedWorkerService, SharedWorkerService::Observer>
+      shared_worker_observation_{this};
+};
 
 }  // namespace
 
-// These tests are parameterized on following options:
-// 0 => Base
-// 1 => kPlzDedicatedWorker enabled
-// 2 => kPrivateNetworkAccessForWorkers enabled
-class WorkerTest : public ContentBrowserTest,
-                   public testing::WithParamInterface<int> {
+class WorkerTest : public ContentBrowserTest {
  public:
-  WorkerTest() : select_certificate_count_(0) {
-    switch (GetParam()) {
-      case 0:  // Base case.
-        feature_list_.InitWithFeatures({},
-                                       {
-                                           blink::features::kPlzDedicatedWorker,
-                                       });
-        break;
-      case 1:  // PlzDedicatedWorker
-        feature_list_.InitWithFeatures(
-            {
-                blink::features::kPlzDedicatedWorker,
-            },
-            {
-                features::kPrivateNetworkAccessForWorkers,
-            });
-        break;
-      case 2:  // PrivateNetworkAccessForWorkers
-        feature_list_.InitWithFeatures(
-            {
-                blink::features::kPlzDedicatedWorker,
-                features::kPrivateNetworkAccessForWorkers,
-            },
-            {});
-        break;
-      default:
-        NOTREACHED();
-        break;
-    }
-  }
+  WorkerTest() : select_certificate_count_(0) {}
 
   void SetUpOnMainThread() override {
     host_resolver()->AddRule("*", "127.0.0.1");
@@ -167,8 +222,10 @@ class WorkerTest : public ContentBrowserTest,
     RunTest(shell(), url, expect_failure);
   }
 
-  static void QuitUIMessageLoop(base::OnceClosure callback,
-                                bool is_primary_main_frame /* unused */) {
+  static void QuitUIMessageLoop(
+      base::OnceClosure callback,
+      bool is_primary_main_frame_navigation /* unused */,
+      bool is_navigation /* unused */) {
     GetUIThreadTaskRunner({})->PostTask(FROM_HERE, std::move(callback));
   }
 
@@ -196,10 +253,10 @@ class WorkerTest : public ContentBrowserTest,
             net::CookieOptions::SameSiteCookieContext::ContextType::
                 SAME_SITE_LAX));
     GURL cookie_url = ssl_server_.GetURL(host, "/");
-    std::unique_ptr<net::CanonicalCookie> cookie = net::CanonicalCookie::Create(
-        cookie_url, std::string(kSameSiteCookie) + "; SameSite=Lax; Secure",
-        base::Time::Now(), absl::nullopt /* server_time */,
-        absl::nullopt /* cookie_partition_key */);
+    std::unique_ptr<net::CanonicalCookie> cookie =
+        net::CanonicalCookie::CreateForTesting(
+            cookie_url, std::string(kSameSiteCookie) + "; SameSite=Lax; Secure",
+            base::Time::Now(), net::CookieSourceType::kOther);
     base::RunLoop run_loop;
     cookie_manager->SetCanonicalCookie(
         *cookie, cookie_url, options,
@@ -247,7 +304,8 @@ class WorkerTest : public ContentBrowserTest,
     auto* service = static_cast<SharedWorkerServiceImpl*>(
         partition->GetSharedWorkerService());
     return service->FindMatchingSharedWorkerHost(
-        url, "", blink::StorageKey::CreateFirstParty(url::Origin::Create(url)));
+        url, "", blink::StorageKey::CreateFirstParty(url::Origin::Create(url)),
+        blink::mojom::SharedWorkerSameSiteCookies::kAll);
   }
 
   net::test_server::EmbeddedTestServer* ssl_server() { return &ssl_server_; }
@@ -319,13 +377,11 @@ class WorkerTest : public ContentBrowserTest,
   base::test::ScopedFeatureList feature_list_;
 };
 
-INSTANTIATE_TEST_SUITE_P(All, WorkerTest, testing::Range(0, 3));
-
-IN_PROC_BROWSER_TEST_P(WorkerTest, SingleWorker) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, SingleWorker) {
   RunTest(GetTestURL("single_worker.html", std::string()));
 }
 
-IN_PROC_BROWSER_TEST_P(WorkerTest, SingleWorkerFromFile) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, SingleWorkerFromFile) {
   RunTest(GetTestFileURL("single_worker.html"), true /* expect_failure */);
 }
 
@@ -337,16 +393,12 @@ class WorkerTestWithAllowFileAccessFromFiles : public WorkerTest {
   }
 };
 
-INSTANTIATE_TEST_SUITE_P(All,
-                         WorkerTestWithAllowFileAccessFromFiles,
-                         testing::Range(0, 3));
-
-IN_PROC_BROWSER_TEST_P(WorkerTestWithAllowFileAccessFromFiles,
+IN_PROC_BROWSER_TEST_F(WorkerTestWithAllowFileAccessFromFiles,
                        SingleWorkerFromFile) {
   RunTest(GetTestFileURL("single_worker.html"));
 }
 
-IN_PROC_BROWSER_TEST_P(WorkerTest, HttpPageCantCreateFileWorker) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, HttpPageCantCreateFileWorker) {
   GURL url = GetTestURL(
       "single_worker.html",
       "workerUrl=" + base::EscapeQueryParamValue(
@@ -354,19 +406,153 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, HttpPageCantCreateFileWorker) {
   RunTest(url, /*expect_failure=*/true);
 }
 
-IN_PROC_BROWSER_TEST_P(WorkerTest, MultipleWorkers) {
+// Tests that a dedicated worker main script response whose service worker
+// supplied URL list resolves to a URL that the worker process cannot commit
+// is rejected.
+IN_PROC_BROWSER_TEST_F(WorkerTest,
+                       DedicatedWorkerRejectsNonCommittableFinalResponseUrl) {
+  const GURL main_url = ssl_server()->GetURL("a.test", "/title1.html");
+  const GURL worker_url = ssl_server()->GetURL("a.test", "/workers/worker.js");
+  const GURL non_committable_url("file:///non_committable_path");
+
+  WorkerFinalResponseURLObserver observer(shell()
+                                              ->web_contents()
+                                              ->GetBrowserContext()
+                                              ->GetDefaultStoragePartition());
+
+  URLLoaderInterceptor interceptor(base::BindLambdaForTesting(
+      [&](URLLoaderInterceptor::RequestParams* params) {
+        if (params->url_request.url != worker_url) {
+          return false;
+        }
+        WriteWorkerScriptResponseWithServiceWorkerUrlList(
+            params->client.get(), {non_committable_url});
+        return true;
+      }));
+
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  EXPECT_FALSE(ChildProcessSecurityPolicyImpl::GetInstance()->CanCommitURL(
+      shell()
+          ->web_contents()
+          ->GetPrimaryMainFrame()
+          ->GetProcess()
+          ->GetDeprecatedID(),
+      non_committable_url));
+
+  EXPECT_EQ("error", EvalJs(shell(), R"(
+    new Promise(resolve => {
+      const worker = new Worker('/workers/worker.js');
+      worker.onerror = () => resolve('error');
+      worker.onmessage = e => resolve(e.data);
+    })
+  )"));
+
+  // The worker process is not allowed to commit `non_committable_url`, so it
+  // must not have been adopted as the worker's final response URL.
+  EXPECT_TRUE(observer.final_response_urls().empty())
+      << "unexpected final response URL: "
+      << observer.final_response_urls().front();
+}
+
+// Same as DedicatedWorkerRejectsNonCommittableFinalResponseUrl, but for shared
+// workers.
+IN_PROC_BROWSER_TEST_F(WorkerTest,
+                       SharedWorkerRejectsNonCommittableFinalResponseUrl) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+
+  const GURL main_url = ssl_server()->GetURL("a.test", "/title1.html");
+  const GURL worker_url = ssl_server()->GetURL("a.test", "/workers/worker.js");
+  const GURL non_committable_url("file:///non_committable_path");
+
+  WorkerFinalResponseURLObserver observer(shell()
+                                              ->web_contents()
+                                              ->GetBrowserContext()
+                                              ->GetDefaultStoragePartition());
+
+  URLLoaderInterceptor interceptor(base::BindLambdaForTesting(
+      [&](URLLoaderInterceptor::RequestParams* params) {
+        if (params->url_request.url != worker_url) {
+          return false;
+        }
+        WriteWorkerScriptResponseWithServiceWorkerUrlList(
+            params->client.get(), {non_committable_url});
+        return true;
+      }));
+
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  EXPECT_EQ("error", EvalJs(shell(), R"(
+    new Promise(resolve => {
+      const worker = new SharedWorker('/workers/worker.js');
+      worker.onerror = () => resolve('error');
+      worker.port.onmessage = e => resolve(e.data);
+    })
+  )"));
+
+  // The worker process is not allowed to commit `non_committable_url`, so it
+  // must not have been adopted as the worker's final response URL.
+  EXPECT_TRUE(observer.final_response_urls().empty())
+      << "unexpected final response URL: "
+      << observer.final_response_urls().front();
+  EXPECT_FALSE(GetSharedWorkerHost(worker_url));
+}
+
+IN_PROC_BROWSER_TEST_F(WorkerTest, MultipleWorkers) {
   RunTest(GetTestURL("multi_worker.html", std::string()));
 }
 
-IN_PROC_BROWSER_TEST_P(WorkerTest, SingleSharedWorker) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, SingleSharedWorker) {
   if (!SupportsSharedWorker())
     return;
 
   RunTest(GetTestURL("single_worker.html", "shared=true"));
 }
 
+// A WebContents created with `disallow_shared_workers` must not be able to
+// connect to a shared worker (which would otherwise bridge its process to
+// ordinary content of the same origin, since shared worker matching ignores
+// SiteInstance). An ordinary WebContents at the same URL still can.
+IN_PROC_BROWSER_TEST_F(WorkerTest, PrivilegedWebContentsCannotUseSharedWorker) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+
+  const GURL page_url = ssl_server()->GetURL("a.test", "/title1.html");
+  const GURL worker_url =
+      ssl_server()->GetURL("a.test", "/workers/messageport_worker.js");
+  static constexpr char kConnectSharedWorker[] = R"(
+    new Promise(resolve => {
+      const worker = new SharedWorker("/workers/messageport_worker.js");
+      worker.onerror = (e) => resolve("Worker blocked.");
+      worker.port.onmessage = (e) => resolve(e.data);
+    })
+  )";
+
+  // A privileged WebContents that disallows shared workers is blocked, and no
+  // shared worker host is created for it.
+  WebContents::CreateParams privileged_params(
+      shell()->web_contents()->GetBrowserContext());
+  WebContents::PrivilegedParams marker;
+  marker.feature_id = 42;
+  marker.disallow_shared_workers = true;
+  privileged_params.privileged_params = marker;
+  std::unique_ptr<WebContents> privileged(
+      WebContents::Create(privileged_params));
+  ASSERT_TRUE(NavigateToURL(privileged.get(), page_url));
+  EXPECT_EQ("Worker blocked.", EvalJs(privileged.get(), kConnectSharedWorker));
+  EXPECT_FALSE(GetSharedWorkerHost(worker_url));
+
+  // Control: an ordinary WebContents at the same URL connects normally.
+  ASSERT_TRUE(NavigateToURL(shell(), page_url));
+  EXPECT_EQ("Worker connected.", EvalJs(shell(), kConnectSharedWorker));
+  EXPECT_TRUE(GetSharedWorkerHost(worker_url));
+}
+
 // Create a SharedWorker from a COEP:required-corp document.
-IN_PROC_BROWSER_TEST_P(WorkerTest, SharedWorkerInCOEPRequireCorpDocument) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, SharedWorkerInCOEPRequireCorpDocument) {
   if (!SupportsSharedWorker())
     return;
 
@@ -379,7 +565,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, SharedWorkerInCOEPRequireCorpDocument) {
       ProcessLock::FromSiteInfo(page_rfh->GetSiteInstance()->GetSiteInfo());
   EXPECT_TRUE(page_lock.GetWebExposedIsolationInfo().is_isolated());
   EXPECT_GT(page_rfh->GetWebExposedIsolationLevel(),
-            RenderFrameHost::WebExposedIsolationLevel::kNotIsolated);
+            WebExposedIsolationLevel::kNotIsolated);
 
   // Create a shared worker from the cross-origin-isolated page:
 
@@ -452,7 +638,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, SharedWorkerInCOEPRequireCorpDocument) {
 }
 
 // Create a SharedWorker from a COEP:credentialless document.
-IN_PROC_BROWSER_TEST_P(WorkerTest, SharedWorkerInCOEPCredentiallessDocument) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, SharedWorkerInCOEPCredentiallessDocument) {
   if (!SupportsSharedWorker())
     return;
 
@@ -537,7 +723,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, SharedWorkerInCOEPCredentiallessDocument) {
 }
 
 // http://crbug.com/96435
-IN_PROC_BROWSER_TEST_P(WorkerTest, MultipleSharedWorkers) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, MultipleSharedWorkers) {
   if (!SupportsSharedWorker())
     return;
 
@@ -546,7 +732,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, MultipleSharedWorkers) {
 
 // Incognito windows should not share workers with non-incognito windows
 // http://crbug.com/30021
-IN_PROC_BROWSER_TEST_P(WorkerTest, IncognitoSharedWorkers) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, IncognitoSharedWorkers) {
   if (!SupportsSharedWorker())
     return;
 
@@ -560,14 +746,14 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, IncognitoSharedWorkers) {
 
 // Make sure that auth dialog is displayed from worker context.
 // http://crbug.com/33344
-IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerHttpAuth) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, WorkerHttpAuth) {
   GURL url = ssl_server()->GetURL("a.test", "/workers/worker_auth.html");
 
   NavigateAndWaitForAuth(url);
 }
 
 // Tests that TLS client auth prompts for normal workers's importScripts.
-IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerTlsClientAuthImportScripts) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, WorkerTlsClientAuthImportScripts) {
   // Launch HTTPS server.
   net::EmbeddedTestServer https_server(net::EmbeddedTestServer::TYPE_HTTPS);
   https_server.ServeFilesFromSourceDirectory(GetTestDataFilePath());
@@ -585,7 +771,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerTlsClientAuthImportScripts) {
 }
 
 // Tests that TLS client auth prompts for normal workers's fetch() call.
-IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerTlsClientAuthFetch) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, WorkerTlsClientAuthFetch) {
   // Launch HTTPS server.
   net::EmbeddedTestServer https_server(net::EmbeddedTestServer::TYPE_HTTPS);
   https_server.ServeFilesFromSourceDirectory(GetTestDataFilePath());
@@ -604,7 +790,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerTlsClientAuthFetch) {
 
 // Tests that TLS client auth does not prompt for a shared worker; shared
 // workers are not associated with a WebContents.
-IN_PROC_BROWSER_TEST_P(WorkerTest, SharedWorkerTlsClientAuthImportScripts) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, SharedWorkerTlsClientAuthImportScripts) {
   if (!SupportsSharedWorker())
     return;
 
@@ -624,38 +810,35 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, SharedWorkerTlsClientAuthImportScripts) {
   EXPECT_EQ(0, select_certificate_count());
 }
 
-IN_PROC_BROWSER_TEST_P(WorkerTest, WebSocketSharedWorker) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, WebSocketSharedWorker) {
   if (!SupportsSharedWorker())
     return;
 
   // Launch WebSocket server.
-  net::SpawnedTestServer ws_server(net::SpawnedTestServer::TYPE_WS,
-                                   net::GetWebSocketTestDataDirectory());
+  net::EmbeddedTestServer ws_server(net::EmbeddedTestServer::TYPE_HTTP);
+  net::test_server::InstallDefaultWebSocketHandlers(&ws_server);
+  // Needed to add the file handler.
+  ws_server.AddDefaultHandlers(GetTestDataFilePath());
   ASSERT_TRUE(ws_server.Start());
-
-  // Generate test URL.
-  GURL::Replacements replacements;
-  replacements.SetSchemeStr("http");
-  GURL url = ws_server.GetURL("websocket_shared_worker.html")
-                 .ReplaceComponents(replacements);
 
   // Run test.
   Shell* window = shell();
   const std::u16string expected_title = u"OK";
   TitleWatcher title_watcher(window->web_contents(), expected_title);
-  EXPECT_TRUE(NavigateToURL(window, url));
+  EXPECT_TRUE(NavigateToURL(
+      window, ws_server.GetURL("/workers/websocket_shared_worker.html")));
   std::u16string final_title = title_watcher.WaitAndGetTitle();
   EXPECT_EQ(expected_title, final_title);
 }
 
-IN_PROC_BROWSER_TEST_P(WorkerTest, PassMessagePortToSharedWorker) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, PassMessagePortToSharedWorker) {
   if (!SupportsSharedWorker())
     return;
 
   RunTest(GetTestURL("pass_messageport_to_sharedworker.html", ""));
 }
 
-IN_PROC_BROWSER_TEST_P(WorkerTest,
+IN_PROC_BROWSER_TEST_F(WorkerTest,
                        PassMessagePortToSharedWorkerDontWaitForConnect) {
   if (!SupportsSharedWorker())
     return;
@@ -665,7 +848,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest,
 }
 
 // Tests the value of |request_initiator| for shared worker resources.
-IN_PROC_BROWSER_TEST_P(WorkerTest,
+IN_PROC_BROWSER_TEST_F(WorkerTest,
                        VerifyInitiatorAndSameSiteCookiesSharedWorker) {
   if (!SupportsSharedWorker())
     return;
@@ -719,18 +902,17 @@ IN_PROC_BROWSER_TEST_P(WorkerTest,
   EXPECT_TRUE(NavigateToURLFromRenderer(root->child_at(0), test_url));
   waiter.Run();
 
-  // Check cookies sent with each request to "a.test". Frame request should not
-  // have SameSite cookies, but SharedWorker could (though eventually this will
-  // need to be changed, to protect against cross-site user tracking).
-  EXPECT_EQ(kNoCookie, GetReceivedCookie(test_url.path()));
-  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie(worker_url.path()));
-  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie(script_url.path()));
-  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie(resource_url.path()));
+  // Check cookies sent with each request to "a.test".
+  // Neither the frame nor the SharedWorker should get SameSite cookies.
+  EXPECT_EQ(kNoCookie, GetReceivedCookie(test_url.GetPath()));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie(worker_url.GetPath()));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie(script_url.GetPath()));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie(resource_url.GetPath()));
 }
 
 // Test that an "a.test" worker sends "a.test" SameSite cookies, both when
 // requesting the worker script and when fetching other resources.
-IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerSameSiteCookies1) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, WorkerSameSiteCookies1) {
   SetSameSiteCookie("a.test");
   ASSERT_TRUE(NavigateToURL(
       shell(),
@@ -751,7 +933,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerSameSiteCookies1) {
 
 // Test that a "b.test" worker does not send "a.test" SameSite cookies when
 // fetching resources.
-IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerSameSiteCookies2) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, WorkerSameSiteCookies2) {
   SetSameSiteCookie("a.test");
   ASSERT_TRUE(NavigateToURL(
       shell(),
@@ -770,7 +952,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, WorkerSameSiteCookies2) {
 
 // Test that an "a.test" nested worker sends "a.test" SameSite cookies, both
 // when requesting the worker script and when fetching other resources.
-IN_PROC_BROWSER_TEST_P(WorkerTest, NestedWorkerSameSiteCookies) {
+IN_PROC_BROWSER_TEST_F(WorkerTest, NestedWorkerSameSiteCookies) {
   SetSameSiteCookie("a.test");
   ASSERT_TRUE(NavigateToURL(
       shell(),
@@ -796,7 +978,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest, NestedWorkerSameSiteCookies) {
 // Test that an "a.test" iframe in a "b.test" frame does not send same-site
 // cookies when requesting an "a.test" worker or when that worker requests
 // "a.test" resources.
-IN_PROC_BROWSER_TEST_P(WorkerTest,
+IN_PROC_BROWSER_TEST_F(WorkerTest,
                        CrossOriginIframeWorkerDoesNotSendSameSiteCookies1) {
   SetSameSiteCookie("a.test");
 
@@ -818,7 +1000,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest,
               .spec()
               .c_str(),
           kSubframeName));
-  ASSERT_TRUE(result.error.empty());
+  ASSERT_TRUE(result.is_ok());
   navigation_observer.Wait();
 
   RenderFrameHost* subframe_rfh = FrameMatchingPredicate(
@@ -838,7 +1020,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest,
 
 // Test that an "b.test" iframe in a "a.test" frame does not send same-site
 // cookies when its "b.test" worker requests "a.test" resources.
-IN_PROC_BROWSER_TEST_P(WorkerTest,
+IN_PROC_BROWSER_TEST_F(WorkerTest,
                        CrossOriginIframeWorkerDoesNotSendSameSiteCookies2) {
   SetSameSiteCookie("a.test");
 
@@ -860,7 +1042,7 @@ IN_PROC_BROWSER_TEST_P(WorkerTest,
               .spec()
               .c_str(),
           kSubframeName));
-  ASSERT_TRUE(result.error.empty());
+  ASSERT_TRUE(result.is_ok());
   navigation_observer.Wait();
 
   RenderFrameHost* subframe_rfh = FrameMatchingPredicate(
@@ -918,11 +1100,7 @@ class WorkerFromCredentiallessIframeNikBrowserTest : public WorkerTest {
   base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-INSTANTIATE_TEST_SUITE_P(All,
-                         WorkerFromCredentiallessIframeNikBrowserTest,
-                         testing::Range(0, 3));
-
-IN_PROC_BROWSER_TEST_P(WorkerFromCredentiallessIframeNikBrowserTest,
+IN_PROC_BROWSER_TEST_F(WorkerFromCredentiallessIframeNikBrowserTest,
                        SharedWorkerRequestIsDoneWithPartitionedNetworkState) {
   if (!SupportsSharedWorker())
     return;
@@ -953,14 +1131,21 @@ IN_PROC_BROWSER_TEST_P(WorkerFromCredentiallessIframeNikBrowserTest,
     GURL worker_url = embedded_test_server()->GetURL("/workers/worker.js");
 
     // Preconnect a socket with the NetworkAnonymizationKey of the main frame.
+    // TODO(crbug.com/447954811): pass the `network_restrictions_id` from the
+    // caller.
     shell()
         ->web_contents()
         ->GetBrowserContext()
         ->GetDefaultStoragePartition()
         ->GetNetworkContext()
-        ->PreconnectSockets(1, worker_url.DeprecatedGetOriginAsURL(), true,
+        ->PreconnectSockets(1, worker_url.DeprecatedGetOriginAsURL(),
+                            network::mojom::CredentialsMode::kInclude,
                             main_rfh->GetIsolationInfoForSubresources()
-                                .network_anonymization_key());
+                                .network_anonymization_key(),
+                            network::GetTestNetworkRestrictionsId(),
+                            net::MutableNetworkTrafficAnnotationTag(
+                                TRAFFIC_ANNOTATION_FOR_TESTS),
+                            std::nullopt, mojo::NullRemote());
 
     connection_tracker_->WaitForAcceptedConnections(1);
     EXPECT_EQ(1u, connection_tracker_->GetAcceptedSocketCount());
@@ -981,5 +1166,358 @@ IN_PROC_BROWSER_TEST_P(WorkerFromCredentiallessIframeNikBrowserTest,
     EXPECT_EQ(1u, connection_tracker_->GetReadSocketCount());
   }
 }
+
+// Test that an "a.test" frame starting a worker without any `sameSiteCookies`
+// option sends SameSite cookies on the request.
+IN_PROC_BROWSER_TEST_F(WorkerTest, SameSiteCookiesSharedWorkerSameDefault) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+  SetSameSiteCookie("a.test");
+  ASSERT_TRUE(NavigateToURL(
+      shell(), ssl_server()->GetURL("a.test", "/workers/simple.html")));
+  EvalJsResult result =
+      EvalJs(shell(), "new SharedWorker('/workers/worker.js');");
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie("/workers/worker.js"));
+  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie("/workers/empty.js"));
+  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie("/workers/empty.html"));
+}
+
+// Test that an "a.test" frame starting a worker with `sameSiteCookies: 'none'`
+// doesn't send SameSite cookies on the request.
+IN_PROC_BROWSER_TEST_F(WorkerTest, SameSiteCookiesSharedWorkerSameNone) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+  SetSameSiteCookie("a.test");
+  ASSERT_TRUE(NavigateToURL(
+      shell(), ssl_server()->GetURL("a.test", "/workers/simple.html")));
+  EvalJsResult result = EvalJs(
+      shell(),
+      "new SharedWorker('/workers/worker.js', {sameSiteCookies: 'none'});");
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/worker.js"));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/empty.js"));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/empty.html"));
+}
+
+// Test that an "a.test" frame starting a worker with `sameSiteCookies: 'none'`
+// sends SameSite cookies on the request.
+IN_PROC_BROWSER_TEST_F(WorkerTest, SameSiteCookiesSharedWorkerSameAll) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+  SetSameSiteCookie("a.test");
+  ASSERT_TRUE(NavigateToURL(
+      shell(), ssl_server()->GetURL("a.test", "/workers/simple.html")));
+  EvalJsResult result = EvalJs(
+      shell(),
+      "new SharedWorker('/workers/worker.js', {sameSiteCookies: 'all'});");
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie("/workers/worker.js"));
+  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie("/workers/empty.js"));
+  EXPECT_EQ(kSameSiteCookie, GetReceivedCookie("/workers/empty.html"));
+}
+
+// Test that an "a.test" iframe in a "b.test" frame starting a worker without
+// any `sameSiteCookies` option doesn't send SameSite cookies on the request.
+IN_PROC_BROWSER_TEST_F(WorkerTest, SameSiteCookiesSharedWorkerCrossDefault) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+  SetSameSiteCookie("a.test");
+  ASSERT_TRUE(NavigateToURL(
+      shell(), ssl_server()->GetURL("b.test", "/workers/frame_factory.html")));
+  content::TestNavigationObserver navigation_observer(
+      shell()->web_contents(), /*number_of_navigations*/ 1);
+  const char kSubframeName[] = "foo";
+  EvalJsResult frame_result = EvalJs(
+      shell()->web_contents()->GetPrimaryMainFrame(),
+      JsReplace(
+          "createFrame($1, $2)",
+          ssl_server()->GetURL("a.test", "/workers/simple.html").spec().c_str(),
+          kSubframeName));
+  ASSERT_TRUE(frame_result.is_ok());
+  navigation_observer.Wait();
+  RenderFrameHost* subframe_rfh = FrameMatchingPredicate(
+      shell()->web_contents()->GetPrimaryPage(),
+      base::BindRepeating(&FrameMatchesName, kSubframeName));
+  ASSERT_TRUE(subframe_rfh);
+  EvalJsResult worker_result =
+      EvalJs(subframe_rfh, "new SharedWorker('/workers/worker.js');");
+  ASSERT_TRUE(worker_result.is_ok());
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/worker.js"));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/empty.js"));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/empty.html"));
+}
+
+// Test that an "a.test" iframe in a "b.test" frame starting a worker with
+// `sameSiteCookies: 'none'` doesn't send SameSite cookies on the request.
+IN_PROC_BROWSER_TEST_F(WorkerTest, SameSiteCookiesSharedWorkerCrossNone) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+  SetSameSiteCookie("a.test");
+  ASSERT_TRUE(NavigateToURL(
+      shell(), ssl_server()->GetURL("b.test", "/workers/frame_factory.html")));
+  content::TestNavigationObserver navigation_observer(
+      shell()->web_contents(), /*number_of_navigations*/ 1);
+  const char kSubframeName[] = "foo";
+  EvalJsResult frame_result = EvalJs(
+      shell()->web_contents()->GetPrimaryMainFrame(),
+      JsReplace(
+          "createFrame($1, $2)",
+          ssl_server()->GetURL("a.test", "/workers/simple.html").spec().c_str(),
+          kSubframeName));
+  ASSERT_TRUE(frame_result.is_ok());
+  navigation_observer.Wait();
+  RenderFrameHost* subframe_rfh = FrameMatchingPredicate(
+      shell()->web_contents()->GetPrimaryPage(),
+      base::BindRepeating(&FrameMatchesName, kSubframeName));
+  ASSERT_TRUE(subframe_rfh);
+  EvalJsResult worker_result = EvalJs(
+      subframe_rfh,
+      "new SharedWorker('/workers/worker.js', {sameSiteCookies: 'none'});");
+  ASSERT_TRUE(worker_result.is_ok());
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/worker.js"));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/empty.js"));
+  EXPECT_EQ(kNoCookie, GetReceivedCookie("/workers/empty.html"));
+}
+
+// Test that an "a.test" iframe in a "b.test" frame cannot set
+// `sameSiteCookies: 'all'` option when starting a shared worker.
+IN_PROC_BROWSER_TEST_F(WorkerTest, SameSiteCookiesSharedWorkerCrossAll) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+  SetSameSiteCookie("a.test");
+  ASSERT_TRUE(NavigateToURL(
+      shell(), ssl_server()->GetURL("b.test", "/workers/frame_factory.html")));
+  content::TestNavigationObserver navigation_observer(
+      shell()->web_contents(), /*number_of_navigations*/ 1);
+  const char kSubframeName[] = "foo";
+  EvalJsResult result_frame = EvalJs(
+      shell()->web_contents()->GetPrimaryMainFrame(),
+      JsReplace(
+          "createFrame($1, $2)",
+          ssl_server()->GetURL("a.test", "/workers/simple.html").spec().c_str(),
+          kSubframeName));
+  ASSERT_TRUE(result_frame.is_ok());
+  navigation_observer.Wait();
+  RenderFrameHost* subframe_rfh = FrameMatchingPredicate(
+      shell()->web_contents()->GetPrimaryPage(),
+      base::BindRepeating(&FrameMatchesName, kSubframeName));
+  ASSERT_TRUE(subframe_rfh);
+  EvalJsResult worker_result = EvalJs(
+      subframe_rfh,
+      "new SharedWorker('/workers/worker.js', {sameSiteCookies: 'all'});");
+  ASSERT_FALSE(worker_result.is_ok());
+}
+
+// Test for the SharedWorker extendedLifetime option.
+// See: https://github.com/whatwg/html/issues/10997
+class SharedWorkerExtendedLifetimeBrowserTest : public ContentBrowserTest {
+ public:
+  SharedWorkerExtendedLifetimeBrowserTest()
+      : features_({blink::features::kSharedWorkerExtendedLifetime}) {}
+
+  void SetUpOnMainThread() override {
+    ASSERT_TRUE(embedded_test_server()->Start());
+  }
+
+ protected:
+  SharedWorkerHost* CreateSharedWorkerInMainURL() {
+    GURL main_url = embedded_test_server()->GetURL("/title1.html");
+    EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+    EXPECT_EQ("Worker connected.", EvalJs(shell(), R"(
+    new Promise(resolve => {
+      const worker =
+        new SharedWorker("/workers/messageport_worker.js",
+                          {extendedLifetime: true});
+      worker.onerror = (e) => resolve("Worker blocked.");
+      worker.port.onmessage = (e) => resolve(e.data);
+    })
+  )"));
+    auto* host = GetSharedWorkerHost(
+        embedded_test_server()->GetURL("/workers/messageport_worker.js"));
+    return host;
+  }
+  SharedWorkerHost* GetSharedWorkerHostFromToken(
+      const blink::SharedWorkerToken& token) {
+    return GetSharedWorkerService()->GetSharedWorkerHostFromToken(token);
+  }
+
+ private:
+  SharedWorkerServiceImpl* GetSharedWorkerService() {
+    StoragePartition* partition = shell()
+                                      ->web_contents()
+                                      ->GetBrowserContext()
+                                      ->GetDefaultStoragePartition();
+    DCHECK(partition);
+    return static_cast<SharedWorkerServiceImpl*>(
+        partition->GetSharedWorkerService());
+  }
+  SharedWorkerHost* GetSharedWorkerHost(const GURL& url) {
+    auto* service = GetSharedWorkerService();
+    return service->FindMatchingSharedWorkerHost(
+        url, "", blink::StorageKey::CreateFirstParty(url::Origin::Create(url)),
+        blink::mojom::SharedWorkerSameSiteCookies::kAll);
+  }
+
+  base::test::ScopedFeatureList features_;
+};
+
+IN_PROC_BROWSER_TEST_F(SharedWorkerExtendedLifetimeBrowserTest,
+                       EnsureExtendLifetime) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+
+  auto* host = CreateSharedWorkerInMainURL();
+  EXPECT_TRUE(host);
+  EXPECT_TRUE(host->instance().extended_lifetime());
+  auto token = host->token();
+
+  // Navigate to the other page to the other URL.
+  GURL other_url = embedded_test_server()->GetURL("/title2.html");
+  EXPECT_TRUE(NavigateToURL(shell(), other_url));
+  // Ensure the SharedWorker exist.
+  EXPECT_TRUE(GetSharedWorkerHostFromToken(token));
+
+  // Navigate back to the main URL.
+  auto* host2 = CreateSharedWorkerInMainURL();
+  EXPECT_TRUE(host2);
+  EXPECT_TRUE(host2->instance().extended_lifetime());
+
+  // Since the extended lifetime is enabled, SharedWorkerHost should be the
+  // same.
+  EXPECT_EQ(host, host2);
+}
+
+class SharedWorkerExtendedLifetimeBrowserOriginTrialTest
+    : public SharedWorkerExtendedLifetimeBrowserTest {
+ public:
+  SharedWorkerExtendedLifetimeBrowserOriginTrialTest() {
+    // Explicitly disable the feature.
+    features_.InitWithFeatures(
+        {}, {blink::features::kSharedWorkerExtendedLifetime});
+  }
+
+  void SetUpOnMainThread() override {
+    ASSERT_TRUE(embedded_test_server()->InitializeAndListen());
+  }
+
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    // The public key for the default privatey key used by the
+    // tools/origin_trials/generate_token.py tool.
+    static constexpr char kOriginTrialTestPublicKey[] =
+        "dRCs+TocuKkocNKa0AtZ4awrt9XKH2SQCI6o4FY6BNA=";
+    command_line->AppendSwitchASCII("origin-trial-public-key",
+                                    kOriginTrialTestPublicKey);
+  }
+
+  SharedWorkerHost* GetSharedWorkerHost(const GURL& url) {
+    StoragePartition* partition = shell()
+                                      ->web_contents()
+                                      ->GetBrowserContext()
+                                      ->GetDefaultStoragePartition();
+    DCHECK(partition);
+    auto* service = static_cast<SharedWorkerServiceImpl*>(
+        partition->GetSharedWorkerService());
+    return service->FindMatchingSharedWorkerHost(
+        url, "", blink::StorageKey::CreateFirstParty(url::Origin::Create(url)),
+        blink::mojom::SharedWorkerSameSiteCookies::kAll);
+  }
+
+ private:
+  base::test::ScopedFeatureList features_;
+};
+
+IN_PROC_BROWSER_TEST_F(SharedWorkerExtendedLifetimeBrowserOriginTrialTest,
+                       Basic) {
+  if (!SupportsSharedWorker()) {
+    return;
+  }
+
+  embedded_test_server()->StartAcceptingConnections();
+
+  // The URL that was used to register the Origin Trial token.
+  static constexpr char kOriginUrl[] = "https://127.0.0.1:44444";
+  // Generated by running (in tools/origin_trials):
+  // $ tools/origin_trials/generate_token.py https://127.0.0.1:44444 \
+  // SharedWorkerExtendedLifetime --expire-timestamp=2000000000
+  static constexpr char kOriginTrialToken[] =
+      "AzjgBY2MbbdL8LkRTaCTW9YVLuvei0SwokOz+"
+      "XqA24rqL3DV5QunyXddT1SkivH7curgzFjvXj83ZefHUD5SgAYAAABmeyJvcmlnaW4iOiAia"
+      "HR0cHM6Ly8xMjcuMC4wLjE6NDQ0NDQiLCAiZmVhdHVyZSI6ICJTaGFyZWRXb3JrZXJFeHRlb"
+      "mRlZExpZmV0aW1lIiwgImV4cGlyeSI6IDIwMDAwMDAwMDB9";
+
+  const GURL main_url(base::StrCat({kOriginUrl, "/title1.html"}));
+  const GURL shared_worker_url(
+      base::StrCat({kOriginUrl, "/workers/messageport_worker.js"}));
+
+  std::map<GURL, int /* number_of_invocations */> expected_request_urls = {
+      {main_url, 1},
+      {shared_worker_url, 1},
+  };
+
+  base::RunLoop run_loop;
+
+  // The origin trial token is associated with an origin. We can't guarantee the
+  // EmbeddedTestServer to use a specific port. So the URLLoaderInterceptor is
+  // used instead.
+  URLLoaderInterceptor shared_worker_loader(base::BindLambdaForTesting(
+      [&](URLLoaderInterceptor::RequestParams* params) {
+        auto it = expected_request_urls.find(params->url_request.url);
+        if (it == expected_request_urls.end()) {
+          return false;
+        }
+
+        const std::string content_type =
+            base::EndsWith(params->url_request.url.path(), ".js")
+                ? "text/javascript"
+                : "text/html";
+
+        const std::string headers = base::ReplaceStringPlaceholders(
+            "HTTP/1.1 200 OK\n"
+            "Content-type: $1\n"
+            "Origin-Trial: $2\n"
+            "\n",
+            {content_type, kOriginTrialToken}, {});
+
+        URLLoaderInterceptor::WriteResponse(
+            "content/test/data" + params->url_request.url.GetPath(),
+            params->client.get(), &headers, std::optional<net::SSLInfo>(),
+            params->url_request.url);
+
+        if (--it->second == 0) {
+          expected_request_urls.erase(it);
+        }
+        if (expected_request_urls.empty()) {
+          run_loop.Quit();
+        }
+        return true;
+      }));
+
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+  EXPECT_EQ("Worker connected.", EvalJs(shell(), R"(
+    new Promise(resolve => {
+      const worker =
+        new SharedWorker("/workers/messageport_worker.js",
+                          {extendedLifetime: true});
+      worker.onerror = (e) => resolve("Worker blocked.");
+      worker.port.onmessage = (e) => resolve(e.data);
+    })
+  )"));
+
+  auto* host = GetSharedWorkerHost(shared_worker_url);
+  EXPECT_TRUE(host);
+  EXPECT_TRUE(host->instance().extended_lifetime());
+
+  run_loop.Run();
+}
+
 
 }  // namespace content

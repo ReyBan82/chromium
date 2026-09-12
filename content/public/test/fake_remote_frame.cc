@@ -33,7 +33,8 @@ void FakeRemoteFrame::SetReplicatedOrigin(
     const url::Origin& origin,
     bool is_potentially_trustworthy_unique_origin) {}
 
-void FakeRemoteFrame::SetReplicatedIsAdFrame(bool is_ad_frame) {}
+void FakeRemoteFrame::SetReplicatedAdFrameStatus(
+    blink::mojom::FrameAdStatus ad_frame_status) {}
 
 void FakeRemoteFrame::SetReplicatedName(const std::string& name,
                                         const std::string& unique_name) {}
@@ -63,10 +64,6 @@ void FakeRemoteFrame::SetPageFocus(bool is_focused) {}
 
 void FakeRemoteFrame::RenderFallbackContent() {}
 
-void FakeRemoteFrame::RenderFallbackContentWithResourceTiming(
-    blink::mojom::ResourceTimingInfoPtr,
-    const std::string& server_timing_value) {}
-
 void FakeRemoteFrame::AddResourceTimingFromChild(
     blink::mojom::ResourceTimingInfoPtr timing) {}
 
@@ -82,7 +79,7 @@ void FakeRemoteFrame::IntrinsicSizingInfoOfChildChanged(
     blink::mojom::IntrinsicSizingInfoPtr sizing_info) {}
 
 void FakeRemoteFrame::UpdateOpener(
-    const absl::optional<blink::FrameToken>& opener_frame_token) {}
+    const std::optional<blink::FrameToken>& opener_frame_token) {}
 
 void FakeRemoteFrame::DetachAndDispose() {}
 
@@ -94,13 +91,14 @@ void FakeRemoteFrame::DisableAutoResize() {}
 void FakeRemoteFrame::DidUpdateVisualProperties(
     const cc::RenderFrameMetadata& metadata) {}
 
-void FakeRemoteFrame::SetFrameSinkId(const viz::FrameSinkId& frame_sink_id) {}
+void FakeRemoteFrame::SetFrameSinkId(const viz::FrameSinkId& frame_sink_id,
+                                     bool allow_paint_holding) {}
 
 void FakeRemoteFrame::ChildProcessGone() {}
 
 void FakeRemoteFrame::CreateRemoteChild(
     const blink::RemoteFrameToken& token,
-    const absl::optional<blink::FrameToken>& opener_frame_token,
+    const std::optional<blink::FrameToken>& opener_frame_token,
     blink::mojom::TreeScopeType tree_scope_type,
     blink::mojom::FrameReplicationStatePtr replication_state,
     blink::mojom::FrameOwnerPropertiesPtr owner_properties,
@@ -108,5 +106,9 @@ void FakeRemoteFrame::CreateRemoteChild(
     const base::UnguessableToken& devtools_frame_token,
     blink::mojom::RemoteFrameInterfacesFromBrowserPtr remote_frame_interfaces) {
 }
+
+void FakeRemoteFrame::CreateRemoteChildren(
+    std::vector<blink::mojom::CreateRemoteChildParamsPtr> params,
+    const std::optional<base::UnguessableToken>& navigation_metrics_token) {}
 
 }  // namespace content

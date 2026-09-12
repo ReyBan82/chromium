@@ -5,7 +5,9 @@
 #include "third_party/blink/renderer/core/editing/ime/input_method_controller.h"
 
 #include <memory>
+
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/node_list.h"
@@ -24,6 +26,7 @@
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
 #include "third_party/blink/renderer/core/layout/layout_theme.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 using ui::mojom::ImeTextSpanThickness;
 using ui::mojom::ImeTextSpanUnderlineStyle;
@@ -37,18 +40,22 @@ class InputMethodControllerTest : public EditingTestBase {
   InputMethodController& Controller() {
     return GetFrame().GetInputMethodController();
   }
+  Position SelectionAnchor() const {
+    return GetFrame().Selection().GetSelectionInDomTree().Anchor();
+  }
 
   // TODO(editing-dev): We should use |CompositionEphemeralRange()| instead
   // of having |GetCompositionRange()| and marking |InputMethodControllerTest|
   // as friend class.
-  Range* GetCompositionRange() { return Controller().composition_range_; }
+  Range* GetCompositionRange() { return Controller().composition_range_.Get(); }
 
-  Element* InsertHTMLElement(const char* element_code, const char* element_id);
-  void CreateHTMLWithCompositionInputEventListeners();
-  void CreateHTMLWithCompositionEndEventListener(const SelectionType);
+  Element* InsertHtmlElement(const char* element_code, const char* element_id);
+  void CreateHtmlWithCompositionInputEventListeners();
+  void CreateHtmlWithCompositionEndEventListener(const SelectionType);
+  int TextInputFlags(const char* html);
 };
 
-Element* InputMethodControllerTest::InsertHTMLElement(const char* element_code,
+Element* InputMethodControllerTest::InsertHtmlElement(const char* element_code,
                                                       const char* element_id) {
   GetDocument().write(element_code);
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -57,12 +64,12 @@ Element* InputMethodControllerTest::InsertHTMLElement(const char* element_code,
   return element;
 }
 
-void InputMethodControllerTest::CreateHTMLWithCompositionInputEventListeners() {
+void InputMethodControllerTest::CreateHtmlWithCompositionInputEventListeners() {
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* editable =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('beforeinput', "
       "event => {"
       "  document.title = `beforeinput.data:${event.data};`;"
@@ -81,23 +88,23 @@ void InputMethodControllerTest::CreateHTMLWithCompositionInputEventListeners() {
   editable->Focus();
 }
 
-void InputMethodControllerTest::CreateHTMLWithCompositionEndEventListener(
+void InputMethodControllerTest::CreateHtmlWithCompositionEndEventListener(
     const SelectionType type) {
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* editable =
-      InsertHTMLElement("<div id='sample' contentEditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contentEditable></div>", "sample");
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
 
   switch (type) {
     case kNoSelection:
-      script->setInnerHTML(
+      script->SetInnerHTMLWithoutTrustedTypes(
           // If the caret position is set before firing 'compositonend' event
           // (and it should), the final caret position will be reset to null.
           "document.getElementById('sample').addEventListener('compositionend',"
           "  event => getSelection().removeAllRanges());");
       break;
     case kCaretSelection:
-      script->setInnerHTML(
+      script->SetInnerHTMLWithoutTrustedTypes(
           // If the caret position is set before firing 'compositonend' event
           // (and it should), the final caret position will be reset to [3,3].
           "document.getElementById('sample').addEventListener('compositionend',"
@@ -107,7 +114,7 @@ void InputMethodControllerTest::CreateHTMLWithCompositionEndEventListener(
           "});");
       break;
     case kRangeSelection:
-      script->setInnerHTML(
+      script->SetInnerHTMLWithoutTrustedTypes(
           // If the caret position is set before firing 'compositonend' event
           // (and it should), the final caret position will be reset to [2,4].
           "document.getElementById('sample').addEventListener('compositionend',"
@@ -126,9 +133,16 @@ void InputMethodControllerTest::CreateHTMLWithCompositionEndEventListener(
   editable->Focus();
 }
 
+int InputMethodControllerTest::TextInputFlags(const char* html) {
+  GetDocument().write(html);
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  To<Element>(GetDocument().body()->lastChild())->Focus();
+  return Controller().TextInputFlags();
+}
+
 TEST_F(InputMethodControllerTest, BackspaceFromEndOfInput) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   input->SetValue("fooX");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -145,7 +159,7 @@ TEST_F(InputMethodControllerTest, BackspaceFromEndOfInput) {
   EXPECT_EQ("foo", input->Value());
 
   input->SetValue(
-      String::FromUTF8("foo\xE2\x98\x85"));  // U+2605 == "black star"
+      String::FromUtf8("foo\xE2\x98\x85"));  // U+2605 == "black star"
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(4, 4));
   EXPECT_EQ("foo\xE2\x98\x85", input->Value().Utf8());
@@ -153,7 +167,7 @@ TEST_F(InputMethodControllerTest, BackspaceFromEndOfInput) {
   EXPECT_EQ("foo", input->Value());
 
   input->SetValue(
-      String::FromUTF8("foo\xF0\x9F\x8F\x86"));  // U+1F3C6 == "trophy"
+      String::FromUtf8("foo\xF0\x9F\x8F\x86"));  // U+1F3C6 == "trophy"
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(4, 4));
   EXPECT_EQ("foo\xF0\x9F\x8F\x86", input->Value().Utf8());
@@ -161,7 +175,7 @@ TEST_F(InputMethodControllerTest, BackspaceFromEndOfInput) {
   EXPECT_EQ("foo", input->Value());
 
   // composed U+0E01 "ka kai" + U+0E49 "mai tho"
-  input->SetValue(String::FromUTF8("foo\xE0\xB8\x81\xE0\xB9\x89"));
+  input->SetValue(String::FromUtf8("foo\xE0\xB8\x81\xE0\xB9\x89"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(4, 4));
   EXPECT_EQ("foo\xE0\xB8\x81\xE0\xB9\x89", input->Value().Utf8());
@@ -177,7 +191,7 @@ TEST_F(InputMethodControllerTest, BackspaceFromEndOfInput) {
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionFromExistingText) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>hello world</div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -197,7 +211,7 @@ TEST_F(InputMethodControllerTest, SetCompositionFromExistingText) {
 }
 
 TEST_F(InputMethodControllerTest, AddImeTextSpansToExistingText) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -217,9 +231,9 @@ TEST_F(InputMethodControllerTest, AddImeTextSpansToExistingText) {
 }
 
 TEST_F(InputMethodControllerTest, AddGrammarCheckSpans) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
-  Element* div = GetDocument().QuerySelector("div");
+  Element* div = QuerySelector("div");
   Node* text = div->firstChild();
 
   GetDocument().Markers().AddSpellingMarker(
@@ -250,7 +264,7 @@ TEST_F(InputMethodControllerTest, AddGrammarCheckSpans) {
 }
 
 TEST_F(InputMethodControllerTest, GetImeTextSpans) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
   ImeTextSpan span1 = ImeTextSpan(ImeTextSpan::Type::kAutocorrect, 0, 5,
                                   Color(255, 0, 0), ImeTextSpanThickness::kThin,
@@ -274,7 +288,7 @@ TEST_F(InputMethodControllerTest, GetImeTextSpans) {
                                              10);
   Controller().SetEditableSelectionOffsets(PlainTextRange(1, 1));
 
-  const WebVector<ui::ImeTextSpan>& ime_text_spans =
+  const std::vector<ui::ImeTextSpan>& ime_text_spans =
       Controller().TextInputInfo().ime_text_spans;
 
   EXPECT_EQ(2u, ime_text_spans.size());
@@ -292,7 +306,7 @@ TEST_F(InputMethodControllerTest, GetImeTextSpans) {
 
 TEST_F(InputMethodControllerTest, SetCompositionAfterEmoji) {
   // "trophy" = U+1F3C6 = 0xF0 0x9F 0x8F 0x86 (UTF8).
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>&#x1f3c6</div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -303,15 +317,11 @@ TEST_F(InputMethodControllerTest, SetCompositionAfterEmoji) {
 
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(2, 2));
+  EXPECT_EQ(2, SelectionAnchor().ComputeOffsetInContainerNode());
   EXPECT_EQ(2, GetFrame()
                    .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
-  EXPECT_EQ(2, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Extent()
+                   .GetSelectionInDomTree()
+                   .Focus()
                    .ComputeOffsetInContainerNode());
 
   Controller().SetComposition(String("a"), ime_text_spans, 1, 1);
@@ -322,7 +332,7 @@ TEST_F(InputMethodControllerTest, SetCompositionAfterEmoji) {
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionWithGraphemeCluster) {
-  InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -334,14 +344,14 @@ TEST_F(InputMethodControllerTest, SetCompositionWithGraphemeCluster) {
   // UTF16 = 0x0939 0x0947 0x0932 0x0932. Note that 0x0932 0x0932 is a grapheme
   // cluster.
   Controller().SetComposition(
-      String::FromUTF8("\xE0\xA4\xB9\xE0\xA5\x87\xE0\xA4\xB2\xE0\xA4\xB2"),
+      String::FromUtf8("\xE0\xA4\xB9\xE0\xA5\x87\xE0\xA4\xB2\xE0\xA4\xB2"),
       ime_text_spans, 4, 4);
   EXPECT_EQ(4u, Controller().GetSelectionOffsets().Start());
   EXPECT_EQ(4u, Controller().GetSelectionOffsets().End());
 
   // UTF16 = 0x0939 0x0947 0x0932 0x094D 0x0932 0x094B.
   Controller().SetComposition(
-      String::FromUTF8("\xE0\xA4\xB9\xE0\xA5\x87\xE0\xA4\xB2\xE0\xA5\x8D\xE0"
+      String::FromUtf8("\xE0\xA4\xB9\xE0\xA5\x87\xE0\xA4\xB2\xE0\xA5\x8D\xE0"
                        "\xA4\xB2\xE0\xA5\x8B"),
       ime_text_spans, 6, 6);
   EXPECT_EQ(6u, Controller().GetSelectionOffsets().Start());
@@ -351,7 +361,7 @@ TEST_F(InputMethodControllerTest, SetCompositionWithGraphemeCluster) {
 TEST_F(InputMethodControllerTest,
        SetCompositionWithGraphemeClusterAndMultipleNodes) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -363,7 +373,7 @@ TEST_F(InputMethodControllerTest,
   // UTF16 = 0x0939 0x0947 0x0932 0x094D 0x0932 0x094B. 0x0939 0x0947 0x0932 is
   // a grapheme cluster, so is the remainding 0x0932 0x094B.
   Controller().CommitText(
-      String::FromUTF8("\xE0\xA4\xB9\xE0\xA5\x87\xE0\xA4\xB2\xE0\xA5\x8D\xE0"
+      String::FromUtf8("\xE0\xA4\xB9\xE0\xA5\x87\xE0\xA4\xB2\xE0\xA5\x8D\xE0"
                        "\xA4\xB2\xE0\xA5\x8B"),
       ime_text_spans, 1);
   Controller().CommitText("\nab ", ime_text_spans, 1);
@@ -385,7 +395,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionKeepingStyle) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' "
       "contenteditable>abc1<b>2</b>34567<b>8</b>9d<b>e</b>f</div>",
       "sample");
@@ -399,24 +409,27 @@ TEST_F(InputMethodControllerTest, SetCompositionKeepingStyle) {
 
   // Subtract a character.
   Controller().SetComposition(String("12345789"), ime_text_spans, 8, 8);
-  EXPECT_EQ("abc1<b>2</b>3457<b>8</b>9d<b>e</b>f", div->innerHTML().Utf8());
+  EXPECT_EQ("abc1<b>2</b>3457<b>8</b>9d<b>e</b>f",
+            div->GetInnerHTMLString().Utf8());
   EXPECT_EQ(11u, Controller().GetSelectionOffsets().Start());
   EXPECT_EQ(11u, Controller().GetSelectionOffsets().End());
 
   // Append a character.
   Controller().SetComposition(String("123456789"), ime_text_spans, 9, 9);
-  EXPECT_EQ("abc1<b>2</b>34567<b>8</b>9d<b>e</b>f", div->innerHTML().Utf8());
+  EXPECT_EQ("abc1<b>2</b>34567<b>8</b>9d<b>e</b>f",
+            div->GetInnerHTMLString().Utf8());
   EXPECT_EQ(12u, Controller().GetSelectionOffsets().Start());
   EXPECT_EQ(12u, Controller().GetSelectionOffsets().End());
 
   // Subtract and append characters.
   Controller().SetComposition(String("123hello789"), ime_text_spans, 11, 11);
-  EXPECT_EQ("abc1<b>2</b>3hello7<b>8</b>9d<b>e</b>f", div->innerHTML().Utf8());
+  EXPECT_EQ("abc1<b>2</b>3hello7<b>8</b>9d<b>e</b>f",
+            div->GetInnerHTMLString().Utf8());
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionWithEmojiKeepingStyle) {
   // U+1F3E0 = 0xF0 0x9F 0x8F 0xA0 (UTF8). It's an emoji character.
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable><b>&#x1f3e0</b></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -429,13 +442,13 @@ TEST_F(InputMethodControllerTest, SetCompositionWithEmojiKeepingStyle) {
 
   // 0xF0 0x9F 0x8F 0xAB is also an emoji character, with the same leading
   // surrogate pair to the previous one.
-  Controller().SetComposition(String::FromUTF8("\xF0\x9F\x8F\xAB"),
+  Controller().SetComposition(String::FromUtf8("\xF0\x9F\x8F\xAB"),
                               ime_text_spans, 2, 2);
-  EXPECT_EQ("<b>\xF0\x9F\x8F\xAB</b>", div->innerHTML().Utf8());
+  EXPECT_EQ("<b>\xF0\x9F\x8F\xAB</b>", div->GetInnerHTMLString().Utf8());
 
-  Controller().SetComposition(String::FromUTF8("\xF0\x9F\x8F\xA0"),
+  Controller().SetComposition(String::FromUtf8("\xF0\x9F\x8F\xA0"),
                               ime_text_spans, 2, 2);
-  EXPECT_EQ("<b>\xF0\x9F\x8F\xA0</b>", div->innerHTML().Utf8());
+  EXPECT_EQ("<b>\xF0\x9F\x8F\xA0</b>", div->GetInnerHTMLString().Utf8());
 }
 
 TEST_F(InputMethodControllerTest,
@@ -443,7 +456,7 @@ TEST_F(InputMethodControllerTest,
   // U+0C03 = 0xE0 0xB0 0x83 (UTF8), a telugu sign visarga with one code point.
   // It's one grapheme cluster if separated. It can also form one grapheme
   // cluster with another code point(e.g, itself).
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable><b>&#xc03</b></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -455,17 +468,17 @@ TEST_F(InputMethodControllerTest,
 
   // 0xE0 0xB0 0x83 0xE0 0xB0 0x83, a telugu character with 2 code points in
   // 1 grapheme cluster.
-  Controller().SetComposition(String::FromUTF8("\xE0\xB0\x83\xE0\xB0\x83"),
+  Controller().SetComposition(String::FromUtf8("\xE0\xB0\x83\xE0\xB0\x83"),
                               ime_text_spans, 2, 2);
-  EXPECT_EQ("<b>\xE0\xB0\x83\xE0\xB0\x83</b>", div->innerHTML().Utf8());
+  EXPECT_EQ("<b>\xE0\xB0\x83\xE0\xB0\x83</b>", div->GetInnerHTMLString().Utf8());
 
-  Controller().SetComposition(String::FromUTF8("\xE0\xB0\x83"), ime_text_spans,
+  Controller().SetComposition(String::FromUtf8("\xE0\xB0\x83"), ime_text_spans,
                               1, 1);
-  EXPECT_EQ("<b>\xE0\xB0\x83</b>", div->innerHTML().Utf8());
+  EXPECT_EQ("<b>\xE0\xB0\x83</b>", div->GetInnerHTMLString().Utf8());
 }
 
 TEST_F(InputMethodControllerTest, FinishComposingTextKeepingStyle) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' "
       "contenteditable>abc1<b>2</b>34567<b>8</b>9</div>",
       "sample");
@@ -478,15 +491,16 @@ TEST_F(InputMethodControllerTest, FinishComposingTextKeepingStyle) {
   Controller().SetCompositionFromExistingText(ime_text_spans, 3, 12);
 
   Controller().SetComposition(String("123hello789"), ime_text_spans, 11, 11);
-  EXPECT_EQ("abc1<b>2</b>3hello7<b>8</b>9", div->innerHTML());
+  EXPECT_EQ("abc1<b>2</b>3hello7<b>8</b>9", div->GetInnerHTMLString());
 
   Controller().FinishComposingText(InputMethodController::kKeepSelection);
-  EXPECT_EQ("abc1<b>2</b>3hello7<b>8</b>9", div->innerHTML());
+  EXPECT_EQ("abc1<b>2</b>3hello7<b>8</b>9", div->GetInnerHTMLString());
 }
 
 TEST_F(InputMethodControllerTest, FinishComposingTextKeepingBackwardSelection) {
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SetSelectionTextToBody("<div contenteditable>|abc^</div>"));
+  GetFrame().Selection().SetSelection(
+      SetSelectionTextToBody("<div contenteditable>|abc^</div>"),
+      SetSelectionOptions());
 
   Controller().FinishComposingText(InputMethodController::kKeepSelection);
 
@@ -494,7 +508,7 @@ TEST_F(InputMethodControllerTest, FinishComposingTextKeepingBackwardSelection) {
 }
 
 TEST_F(InputMethodControllerTest, CommitTextKeepingStyle) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' "
       "contenteditable>abc1<b>2</b>34567<b>8</b>9</div>",
       "sample");
@@ -507,12 +521,12 @@ TEST_F(InputMethodControllerTest, CommitTextKeepingStyle) {
   Controller().SetCompositionFromExistingText(ime_text_spans, 3, 12);
 
   Controller().CommitText(String("123789"), ime_text_spans, 0);
-  EXPECT_EQ("abc1<b>2</b>37<b>8</b>9", div->innerHTML());
+  EXPECT_EQ("abc1<b>2</b>37<b>8</b>9", div->GetInnerHTMLString());
 }
 
 TEST_F(InputMethodControllerTest, InsertTextWithNewLine) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
       ImeTextSpan::Type::kComposition, 0, 11, Color(255, 0, 0),
@@ -520,24 +534,24 @@ TEST_F(InputMethodControllerTest, InsertTextWithNewLine) {
       Color::kTransparent, Color::kTransparent));
 
   Controller().CommitText(String("hello\nworld"), ime_text_spans, 0);
-  EXPECT_EQ("hello<div>world</div>", div->innerHTML());
+  EXPECT_EQ("hello<div>world</div>", div->GetInnerHTMLString());
 }
 
 TEST_F(InputMethodControllerTest, InsertTextWithNewLineIncrementally) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   Controller().CommitText("a", ime_text_spans, 0);
   Controller().SetComposition("bcd", ime_text_spans, 0, 2);
-  EXPECT_EQ("abcd", div->innerHTML());
+  EXPECT_EQ("abcd", div->GetInnerHTMLString());
 
   Controller().CommitText(String("bcd\nefgh\nijkl"), ime_text_spans, 0);
-  EXPECT_EQ("abcd<div>efgh</div><div>ijkl</div>", div->innerHTML());
+  EXPECT_EQ("abcd<div>efgh</div><div>ijkl</div>", div->GetInnerHTMLString());
 }
 
 TEST_F(InputMethodControllerTest, SelectionOnConfirmExistingText) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -548,21 +562,17 @@ TEST_F(InputMethodControllerTest, SelectionOnConfirmExistingText) {
   Controller().SetCompositionFromExistingText(ime_text_spans, 0, 5);
 
   Controller().FinishComposingText(InputMethodController::kKeepSelection);
+  EXPECT_EQ(0, SelectionAnchor().ComputeOffsetInContainerNode());
   EXPECT_EQ(0, GetFrame()
                    .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
-  EXPECT_EQ(0, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Extent()
+                   .GetSelectionInDomTree()
+                   .Focus()
                    .ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest, DeleteBySettingEmptyComposition) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   input->SetValue("foo ");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -594,7 +604,7 @@ TEST_F(InputMethodControllerTest,
        SetCompositionFromExistingTextWithCollapsedWhiteSpace) {
   // Creates a div with one leading new line char. The new line char is hidden
   // from the user and IME, but is visible to InputMethodController.
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>\nhello world</div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -615,7 +625,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        SetCompositionFromExistingTextWithInvalidOffsets) {
-  InsertHTMLElement("<div id='sample' contenteditable>test</div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable>test</div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -628,7 +638,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, ConfirmPasswordComposition) {
-  auto* input = To<HTMLInputElement>(InsertHTMLElement(
+  auto* input = To<HTMLInputElement>(InsertHtmlElement(
       "<input id='sample' type='password' size='24'>", "sample"));
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -644,7 +654,7 @@ TEST_F(InputMethodControllerTest, ConfirmPasswordComposition) {
 
 TEST_F(InputMethodControllerTest, DeleteSurroundingTextWithEmptyText) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   input->SetValue("");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -673,7 +683,7 @@ TEST_F(InputMethodControllerTest, DeleteSurroundingTextWithEmptyText) {
 
 TEST_F(InputMethodControllerTest, DeleteSurroundingTextWithRangeSelection) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   input->SetValue("hello");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -713,7 +723,7 @@ TEST_F(InputMethodControllerTest, DeleteSurroundingTextWithRangeSelection) {
 
 TEST_F(InputMethodControllerTest, DeleteSurroundingTextWithCursorSelection) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   input->SetValue("hello");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -782,10 +792,10 @@ TEST_F(InputMethodControllerTest, DeleteSurroundingTextWithCursorSelection) {
 TEST_F(InputMethodControllerTest,
        DeleteSurroundingTextWithMultiCodeTextOnTheLeft) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   // U+2605 == "black star". It takes up 1 space.
-  input->SetValue(String::FromUTF8("foo\xE2\x98\x85"));
+  input->SetValue(String::FromUtf8("foo\xE2\x98\x85"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(4, 4));
   EXPECT_EQ("foo\xE2\x98\x85", input->Value().Utf8());
@@ -793,7 +803,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("foo", input->Value());
 
   // U+1F3C6 == "trophy". It takes up 2 space.
-  input->SetValue(String::FromUTF8("foo\xF0\x9F\x8F\x86"));
+  input->SetValue(String::FromUtf8("foo\xF0\x9F\x8F\x86"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(5, 5));
   EXPECT_EQ("foo\xF0\x9F\x8F\x86", input->Value().Utf8());
@@ -801,7 +811,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("foo\xED\xA0\xBC", input->Value().Utf8());
 
   // composed U+0E01 "ka kai" + U+0E49 "mai tho". It takes up 2 space.
-  input->SetValue(String::FromUTF8("foo\xE0\xB8\x81\xE0\xB9\x89"));
+  input->SetValue(String::FromUtf8("foo\xE0\xB8\x81\xE0\xB9\x89"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(5, 5));
   EXPECT_EQ("foo\xE0\xB8\x81\xE0\xB9\x89", input->Value().Utf8());
@@ -809,7 +819,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("foo\xE0\xB8\x81", input->Value().Utf8());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
+  input->SetValue(String::FromUtf8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(7, 7));
   EXPECT_EQ("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86", input->Value().Utf8());
@@ -817,7 +827,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("foo\xF0\x9F\x8F\x86", input->Value().Utf8());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
+  input->SetValue(String::FromUtf8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(7, 7));
   EXPECT_EQ("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86", input->Value().Utf8());
@@ -825,7 +835,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("foo\xED\xA0\xBC", input->Value().Utf8());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
+  input->SetValue(String::FromUtf8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(7, 7));
   EXPECT_EQ("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86", input->Value().Utf8());
@@ -833,7 +843,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("foo", input->Value());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
+  input->SetValue(String::FromUtf8("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(7, 7));
   EXPECT_EQ("foo\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86", input->Value().Utf8());
@@ -844,10 +854,10 @@ TEST_F(InputMethodControllerTest,
 TEST_F(InputMethodControllerTest,
        DeleteSurroundingTextWithMultiCodeTextOnTheRight) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   // U+2605 == "black star". It takes up 1 space.
-  input->SetValue(String::FromUTF8("\xE2\x98\x85 foo"));
+  input->SetValue(String::FromUtf8("\xE2\x98\x85 foo"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
   EXPECT_EQ("\xE2\x98\x85 foo", input->Value().Utf8());
@@ -855,7 +865,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ(" foo", input->Value());
 
   // U+1F3C6 == "trophy". It takes up 2 space.
-  input->SetValue(String::FromUTF8("\xF0\x9F\x8F\x86 foo"));
+  input->SetValue(String::FromUtf8("\xF0\x9F\x8F\x86 foo"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
   EXPECT_EQ("\xF0\x9F\x8F\x86 foo", input->Value().Utf8());
@@ -863,7 +873,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("\xED\xBF\x86 foo", input->Value().Utf8());
 
   // composed U+0E01 "ka kai" + U+0E49 "mai tho". It takes up 2 space.
-  input->SetValue(String::FromUTF8("\xE0\xB8\x81\xE0\xB9\x89 foo"));
+  input->SetValue(String::FromUtf8("\xE0\xB8\x81\xE0\xB9\x89 foo"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
   EXPECT_EQ("\xE0\xB8\x81\xE0\xB9\x89 foo", input->Value().Utf8());
@@ -871,7 +881,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("\xE0\xB9\x89 foo", input->Value().Utf8());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
+  input->SetValue(String::FromUtf8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
   EXPECT_EQ("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo", input->Value().Utf8());
@@ -879,7 +889,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("\xF0\x9F\x8F\x86 foo", input->Value().Utf8());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
+  input->SetValue(String::FromUtf8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
   EXPECT_EQ("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo", input->Value().Utf8());
@@ -887,7 +897,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("\xED\xBF\x86 foo", input->Value().Utf8());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
+  input->SetValue(String::FromUtf8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
   EXPECT_EQ("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo", input->Value().Utf8());
@@ -895,7 +905,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ(" foo", input->Value());
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
+  input->SetValue(String::FromUtf8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
   EXPECT_EQ("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86 foo", input->Value().Utf8());
@@ -906,10 +916,10 @@ TEST_F(InputMethodControllerTest,
 TEST_F(InputMethodControllerTest,
        DeleteSurroundingTextWithMultiCodeTextOnBothSides) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   // "trophy" + "trophy".
-  input->SetValue(String::FromUTF8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
+  input->SetValue(String::FromUtf8("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(2, 2));
   EXPECT_EQ("\xF0\x9F\x8F\x86\xF0\x9F\x8F\x86", input->Value().Utf8());
@@ -923,9 +933,9 @@ TEST_F(InputMethodControllerTest,
 // composed text (U+0E01 "ka kai" + U+0E49 "mai tho"), but easier to understand.
 TEST_F(InputMethodControllerTest, DeleteSurroundingTextForComposedCharacter) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
   // p̂p̂ (U+0070 U+0302 U+0070 U+0302)
-  input->SetValue(String::FromUTF8("\x70\xCC\x82\x70\xCC\x82"));
+  input->SetValue(String::FromUtf8("\x70\xCC\x82\x70\xCC\x82"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(4, 4));
   EXPECT_EQ("\x70\xCC\x82\x70\xCC\x82", input->Value().Utf8());
@@ -936,7 +946,7 @@ TEST_F(InputMethodControllerTest, DeleteSurroundingTextForComposedCharacter) {
 }
 
 TEST_F(InputMethodControllerTest, DeleteSurroundingTextForMultipleNodes) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>aaa"
       "<div id='sample2' contenteditable>bbb"
       "<div id='sample3' contenteditable>ccc"
@@ -966,17 +976,80 @@ TEST_F(InputMethodControllerTest, DeleteSurroundingTextForMultipleNodes) {
   EXPECT_EQ(2u, Controller().GetSelectionOffsets().End());
 }
 
+// This test verifies that when a JavaScript event listener modifies the
+// selection during DeleteSurroundingText (e.g., via setSelectionRange),
+// the new selection is preserved rather than being overridden.
+TEST_F(InputMethodControllerTest,
+       DeleteSurroundingTextRespectsEventListenerSelection) {
+  GetDocument().GetSettings()->SetScriptEnabled(true);
+  auto* input = To<HTMLInputElement>(
+      InsertHtmlElement("<input id='test1' value=\"0123456789\">", "test1"));
+
+  // Set up an input event listener that moves the selection when text is
+  // deleted
+  Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
+  script->SetInnerHTMLWithoutTrustedTypes(
+      "document.getElementById('test1').addEventListener('input', "
+      "  event => {"
+      "    if (event.inputType === 'deleteContentBackward') {"
+      "      event.target.setSelectionRange(0, 0);"
+      "    }"
+      "  });");
+  GetDocument().body()->AppendChild(script);
+  UpdateAllLifecyclePhasesForTest();
+
+  // Place cursor selecting character '3' and verify the correct behavior when
+  // deleting characters before and after the selection.  With '3' selected, '2'
+  // and '4' should be deleted.
+  Controller().SetEditableSelectionOffsets(PlainTextRange(3, 4));
+  EXPECT_EQ(3u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(4u, Controller().GetSelectionOffsets().End());
+  Controller().DeleteSurroundingText(1, 1);
+  EXPECT_EQ("01356789", input->Value());
+
+  // Verify the selection is at position 0 (as set by the event listener),
+  // not at position 2 (where DeleteSurroundingText would have placed it)
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().End());
+
+  // Place cursor selecting character '3' again, and verify the correct behavior
+  // when deleting a character only after the selection.  With '3' selected, '5'
+  // should be deleted.
+  Controller().SetEditableSelectionOffsets(PlainTextRange(2, 3));
+  EXPECT_EQ(2u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(3u, Controller().GetSelectionOffsets().End());
+  Controller().DeleteSurroundingText(0, 1);
+  EXPECT_EQ("0136789", input->Value());
+
+  // Verify the cursor is in the right position.
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().End());
+
+  // Place cursor selecting character '3' again, and verify the correct behavior
+  // when deleting a character only before the selection.  With '3' selected,
+  // '1' should be deleted.
+  Controller().SetEditableSelectionOffsets(PlainTextRange(2, 3));
+  EXPECT_EQ(2u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(3u, Controller().GetSelectionOffsets().End());
+  Controller().DeleteSurroundingText(1, 0);
+  EXPECT_EQ("036789", input->Value());
+
+  // Verify the cursor is in the right position.
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().End());
+}
+
 TEST_F(InputMethodControllerTest,
        DeleteSurroundingTextInCodePointsWithMultiCodeTextOnTheLeft) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   // 'a' + "black star" + SPACE + "trophy" + SPACE + composed text (U+0E01
   // "ka kai" + U+0E49 "mai tho").
   // A "black star" is 1 grapheme cluster. It has 1 code point, and its length
   // is 1 (abbreviated as [1,1,1]). A "trophy": [1,1,2]. The composed text:
   // [1,2,2].
-  input->SetValue(String::FromUTF8(
+  input->SetValue(String::FromUtf8(
       "a\xE2\x98\x85 \xF0\x9F\x8F\x86 \xE0\xB8\x81\xE0\xB9\x89"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   // The cursor is at the end of the text.
@@ -988,7 +1061,7 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("a", input->Value());
 
   // 'a' + "black star" + SPACE + "trophy" + SPACE + composed text
-  input->SetValue(String::FromUTF8(
+  input->SetValue(String::FromUtf8(
       "a\xE2\x98\x85 \xF0\x9F\x8F\x86 \xE0\xB8\x81\xE0\xB9\x89"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   // The cursor is at the end of the text.
@@ -1003,10 +1076,10 @@ TEST_F(InputMethodControllerTest,
 TEST_F(InputMethodControllerTest,
        DeleteSurroundingTextInCodePointsWithMultiCodeTextOnTheRight) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   // 'a' + "black star" + SPACE + "trophy" + SPACE + composed text
-  input->SetValue(String::FromUTF8(
+  input->SetValue(String::FromUtf8(
       "a\xE2\x98\x85 \xF0\x9F\x8F\x86 \xE0\xB8\x81\xE0\xB9\x89"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(0, 0));
@@ -1022,10 +1095,10 @@ TEST_F(InputMethodControllerTest,
 TEST_F(InputMethodControllerTest,
        DeleteSurroundingTextInCodePointsWithMultiCodeTextOnBothSides) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   // 'a' + "black star" + SPACE + "trophy" + SPACE + composed text
-  input->SetValue(String::FromUTF8(
+  input->SetValue(String::FromUtf8(
       "a\xE2\x98\x85 \xF0\x9F\x8F\x86 \xE0\xB8\x81\xE0\xB9\x89"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
   Controller().SetEditableSelectionOffsets(PlainTextRange(3, 3));
@@ -1034,7 +1107,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, DeleteSurroundingTextInCodePointsWithImage) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>aaa"
       "<img src='empty.png'>bbb</div>",
       "sample");
@@ -1049,7 +1122,7 @@ TEST_F(InputMethodControllerTest, DeleteSurroundingTextInCodePointsWithImage) {
 TEST_F(InputMethodControllerTest,
        DeleteSurroundingTextInCodePointsWithInvalidSurrogatePair) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   // 'a' + high surrogate of "trophy" + "black star" + low surrogate of "trophy"
   // + SPACE
@@ -1079,9 +1152,143 @@ TEST_F(InputMethodControllerTest,
   EXPECT_EQ("\xED\xA0\xBC\xE2\x98\x85\xED\xBF\x86", input->Value().Utf8());
 }
 
+TEST_F(InputMethodControllerTest, ReplaceTextAndDoNotChangeSelection) {
+  auto* input =
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
+
+  // The replaced range does not overlap with the selection range.
+  input->SetValue("Hello world!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Hello world!", input->Value());
+  // Select "world!".
+  Controller().SetEditableSelectionOffsets(PlainTextRange(6, 12));
+  // Replace "Hello" with "Hi".
+  Controller().ReplaceTextAndKeepSelection("Hi", {}, PlainTextRange(0, 5));
+  EXPECT_EQ("Hi world!", input->Value());
+  // The selection is still "world!".
+  EXPECT_EQ(3u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(9u, Controller().GetSelectionOffsets().End());
+
+  // The replaced range is the same as the selection range.
+  input->SetValue("Hello world!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Hello world!", input->Value());
+  // Select "Hello".
+  Controller().SetEditableSelectionOffsets(PlainTextRange(0, 5));
+  // Replace "Hello" with "Hi".
+  Controller().ReplaceTextAndKeepSelection("Hi", {}, PlainTextRange(0, 5));
+  EXPECT_EQ("Hi world!", input->Value());
+
+  // The new selection is "Hi".
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(2u, Controller().GetSelectionOffsets().End());
+
+  // The replaced range partially overlaps with the selection range.
+  input->SetValue("Hello world!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Hello world!", input->Value());
+  // Select "Hello".
+  Controller().SetEditableSelectionOffsets(PlainTextRange(0, 5));
+  // Replace "He" with "Hi".
+  Controller().ReplaceTextAndKeepSelection("Hi", {}, PlainTextRange(0, 2));
+  EXPECT_EQ("Hillo world!", input->Value());
+  // The selection is still "Hillo".
+  EXPECT_EQ(0u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(5u, Controller().GetSelectionOffsets().End());
+}
+
+TEST_F(InputMethodControllerTest,
+       ReplaceTextAndKeepSelectionWithIme_Text_Span) {
+  auto* input =
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
+
+  input->SetValue("Wow, hello world!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Wow, hello world!", input->Value());
+
+  // Replace "hello" with "hi", and add an IME span for "hi".
+  Vector<ImeTextSpan> ime_text_spans;
+  ime_text_spans.push_back(
+      ImeTextSpan(ImeTextSpan::Type::kComposition, 0, 2, Color::kBlack,
+                  ui::mojom::ImeTextSpanThickness::kThin,
+                  ui::mojom::ImeTextSpanUnderlineStyle::kSolid,
+                  Color::kTransparent, Color::kTransparent));
+
+  Controller().ReplaceTextAndKeepSelection("hi", ime_text_spans,
+                                           PlainTextRange(5, 10));
+  EXPECT_EQ("Wow, hi world!", input->Value());
+
+  // Verify that the IME span was added at the correct position (0, 2).
+  ASSERT_EQ(1u, GetDocument().Markers().Markers().size());
+  EXPECT_EQ(5u, GetDocument().Markers().Markers()[0]->StartOffset());
+  EXPECT_EQ(7u, GetDocument().Markers().Markers()[0]->EndOffset());
+  EXPECT_EQ(DocumentMarker::kComposition,
+            GetDocument().Markers().Markers()[0]->GetType());
+}
+
+TEST_F(InputMethodControllerTest, ReplaceTextAndMoveCaret) {
+  auto* input =
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
+
+  // The caret should always move to the end of the replacement text no matter
+  // where the current selection is.
+
+  input->SetValue("Good morning!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Good morning!", input->Value());
+  // Select "Good".
+  Controller().SetEditableSelectionOffsets(PlainTextRange(0, 4));
+  // Replace "morning" with "night". The replaced range does not overlap with
+  // the selection range.
+  Controller().ReplaceTextAndMoveCaret("night", PlainTextRange(5, 12), 0);
+  EXPECT_EQ("Good night!", input->Value());
+  // The caret should be after "night".
+  EXPECT_EQ(10u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(10u, Controller().GetSelectionOffsets().End());
+
+  input->SetValue("Good morning!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Good morning!", input->Value());
+  // Select "morning".
+  Controller().SetEditableSelectionOffsets(PlainTextRange(5, 12));
+  // Replace "morning" with "night". The replaced range is the same as the
+  // selection range.
+  Controller().ReplaceTextAndMoveCaret("night", PlainTextRange(5, 12), 0);
+  EXPECT_EQ("Good night!", input->Value());
+  // The caret should be after "night".
+  EXPECT_EQ(10u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(10u, Controller().GetSelectionOffsets().End());
+
+  input->SetValue("Good morning!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Good morning!", input->Value());
+  // Select "d mo".
+  Controller().SetEditableSelectionOffsets(PlainTextRange(3, 7));
+  // Replace "morning" with "night". The replaced range partially overlaps with
+  // the selection range.
+  Controller().ReplaceTextAndMoveCaret("night", PlainTextRange(5, 12), 0);
+  EXPECT_EQ("Good night!", input->Value());
+  // The caret should be after "night".
+  EXPECT_EQ(10u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(10u, Controller().GetSelectionOffsets().End());
+
+  input->SetValue("Good morning!");
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
+  EXPECT_EQ("Good morning!", input->Value());
+  // Select "d mo".
+  Controller().SetEditableSelectionOffsets(PlainTextRange(3, 7));
+  // Replace "morning" with "night". The replaced range partially overlaps with
+  // the selection range.
+  Controller().ReplaceTextAndMoveCaret("night", PlainTextRange(5, 12), -4);
+  EXPECT_EQ("Good night!", input->Value());
+  // The caret should be after "night".
+  EXPECT_EQ(6u, Controller().GetSelectionOffsets().Start());
+  EXPECT_EQ(6u, Controller().GetSelectionOffsets().End());
+}
+
 TEST_F(InputMethodControllerTest, SetCompositionForInputWithNewCaretPositions) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   input->SetValue("hello");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -1143,7 +1350,7 @@ TEST_F(InputMethodControllerTest,
        SetCompositionForContentEditableWithNewCaretPositions) {
   // There are 7 nodes and 5+1+5+1+3+4+3 characters: "hello", '\n', "world",
   // "\n", "012", "3456", "789".
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>"
       "hello"
       "<div id='sample2' contenteditable>world"
@@ -1242,7 +1449,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionWithEmptyText) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>hello</div>", "sample");
 
   Controller().SetEditableSelectionOffsets(PlainTextRange(2, 2));
@@ -1277,7 +1484,7 @@ TEST_F(InputMethodControllerTest, SetCompositionWithEmptyText) {
 
 TEST_F(InputMethodControllerTest, InsertLineBreakWhileComposingText) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -1297,7 +1504,7 @@ TEST_F(InputMethodControllerTest, InsertLineBreakWhileComposingText) {
 
 TEST_F(InputMethodControllerTest, InsertLineBreakAfterConfirmingText) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -1320,9 +1527,9 @@ TEST_F(InputMethodControllerTest, InsertLineBreakAfterConfirmingText) {
 TEST_F(InputMethodControllerTest, CompositionInputEventIsComposing) {
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* editable =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('beforeinput', "
       "  event => document.title = "
       "  `beforeinput.isComposing:${event.isComposing};`);"
@@ -1353,7 +1560,7 @@ TEST_F(InputMethodControllerTest, CompositionInputEventIsComposing) {
 }
 
 TEST_F(InputMethodControllerTest, CompositionInputEventForReplace) {
-  CreateHTMLWithCompositionInputEventListeners();
+  CreateHtmlWithCompositionInputEventListeners();
 
   // Simulate composition in the |contentEditable|.
   Vector<ImeTextSpan> ime_text_spans;
@@ -1377,7 +1584,7 @@ TEST_F(InputMethodControllerTest, CompositionInputEventForReplace) {
 }
 
 TEST_F(InputMethodControllerTest, CompositionInputEventForConfirm) {
-  CreateHTMLWithCompositionInputEventListeners();
+  CreateHtmlWithCompositionInputEventListeners();
 
   // Simulate composition in the |contentEditable|.
   Vector<ImeTextSpan> ime_text_spans;
@@ -1399,7 +1606,7 @@ TEST_F(InputMethodControllerTest, CompositionInputEventForConfirm) {
 }
 
 TEST_F(InputMethodControllerTest, CompositionInputEventForDelete) {
-  CreateHTMLWithCompositionInputEventListeners();
+  CreateHtmlWithCompositionInputEventListeners();
 
   // Simulate composition in the |contentEditable|.
   Vector<ImeTextSpan> ime_text_spans;
@@ -1424,7 +1631,7 @@ TEST_F(InputMethodControllerTest, CompositionInputEventForDelete) {
 }
 
 TEST_F(InputMethodControllerTest, CompositionInputEventForInsert) {
-  CreateHTMLWithCompositionInputEventListeners();
+  CreateHtmlWithCompositionInputEventListeners();
 
   // Simulate composition in the |contentEditable|.
   Vector<ImeTextSpan> ime_text_spans;
@@ -1457,7 +1664,7 @@ TEST_F(InputMethodControllerTest, CompositionInputEventForInsert) {
 }
 
 TEST_F(InputMethodControllerTest, CompositionInputEventForInsertEmptyText) {
-  CreateHTMLWithCompositionInputEventListeners();
+  CreateHtmlWithCompositionInputEventListeners();
 
   // Simulate composition in the |contentEditable|.
   Vector<ImeTextSpan> ime_text_spans;
@@ -1488,7 +1695,7 @@ TEST_F(InputMethodControllerTest, CompositionInputEventForInsertEmptyText) {
 }
 
 TEST_F(InputMethodControllerTest, CompositionEndEventWithNoSelection) {
-  CreateHTMLWithCompositionEndEventListener(kNoSelection);
+  CreateHtmlWithCompositionEndEventListener(kNoSelection);
 
   // Simulate composition in the |contentEditable|.
   Vector<ImeTextSpan> ime_text_spans;
@@ -1511,7 +1718,7 @@ TEST_F(InputMethodControllerTest, CompositionEndEventWithNoSelection) {
 
 TEST_F(InputMethodControllerTest, FinishCompositionRemovedRange) {
   Element* input_a =
-      InsertHTMLElement("<input id='a' /><br><input type='tel' id='b' />", "a");
+      InsertHtmlElement("<input id='a' /><br><input type='tel' id='b' />", "a");
 
   EXPECT_EQ(kWebTextInputTypeText, Controller().TextInputType());
 
@@ -1520,10 +1727,10 @@ TEST_F(InputMethodControllerTest, FinishCompositionRemovedRange) {
   EXPECT_EQ(kWebTextInputTypeText, Controller().TextInputType());
 
   // Remove element 'a'.
-  input_a->setOuterHTML("", ASSERT_NO_EXCEPTION);
+  input_a->SetOuterHTMLWithoutTrustedTypes("");
   EXPECT_EQ(kWebTextInputTypeNone, Controller().TextInputType());
 
-  GetDocument().getElementById("b")->Focus();
+  GetDocument().getElementById(AtomicString("b"))->Focus();
   EXPECT_EQ(kWebTextInputTypeTelephone, Controller().TextInputType());
 
   Controller().FinishComposingText(InputMethodController::kKeepSelection);
@@ -1531,7 +1738,7 @@ TEST_F(InputMethodControllerTest, FinishCompositionRemovedRange) {
 }
 
 TEST_F(InputMethodControllerTest, ReflectsSpaceWithoutNbspMangling) {
-  InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   Controller().CommitText(String("  "), ime_text_spans, 0);
@@ -1545,7 +1752,7 @@ TEST_F(InputMethodControllerTest, ReflectsSpaceWithoutNbspMangling) {
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionPlainTextWithIme_Text_Span) {
-  InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -1563,7 +1770,7 @@ TEST_F(InputMethodControllerTest, SetCompositionPlainTextWithIme_Text_Span) {
 
 TEST_F(InputMethodControllerTest,
        SetCompositionPlainTextWithIme_Text_Span_Interim_Char_Selection) {
-  InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -1583,7 +1790,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, CommitPlainTextWithIme_Text_SpanInsert) {
-  InsertHTMLElement("<div id='sample' contenteditable>Initial text.</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>Initial text.</div>",
                     "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -1604,7 +1811,7 @@ TEST_F(InputMethodControllerTest, CommitPlainTextWithIme_Text_SpanInsert) {
 }
 
 TEST_F(InputMethodControllerTest, CommitPlainTextWithIme_Text_SpanReplace) {
-  InsertHTMLElement("<div id='sample' contenteditable>Initial text.</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>Initial text.</div>",
                     "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -1626,7 +1833,7 @@ TEST_F(InputMethodControllerTest, CommitPlainTextWithIme_Text_SpanReplace) {
 
 TEST_F(InputMethodControllerTest, ImeTextSpanAppearsCorrectlyAfterNewline) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   Controller().SetComposition(String("hello"), ime_text_spans, 6, 6);
@@ -1667,7 +1874,7 @@ TEST_F(InputMethodControllerTest, ImeTextSpanAppearsCorrectlyAfterNewline) {
 TEST_F(InputMethodControllerTest, SelectionWhenFocusChangeFinishesComposition) {
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* editable =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
   editable->Focus();
 
   // Simulate composition in the |contentEditable|.
@@ -1681,22 +1888,14 @@ TEST_F(InputMethodControllerTest, SelectionWhenFocusChangeFinishesComposition) {
   EXPECT_TRUE(Controller().HasComposition());
   EXPECT_EQ(0u, GetCompositionRange()->startOffset());
   EXPECT_EQ(3u, GetCompositionRange()->endOffset());
-  EXPECT_EQ(3, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(3, SelectionAnchor().ComputeOffsetInContainerNode());
 
   // Insert 'test'.
   NonThrowableExceptionState exception_state;
   GetDocument().execCommand("insertText", false, "test", exception_state);
 
   EXPECT_TRUE(Controller().HasComposition());
-  EXPECT_EQ(7, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(7, SelectionAnchor().ComputeOffsetInContainerNode());
 
   // Focus change finishes composition.
   editable->blur();
@@ -1704,16 +1903,12 @@ TEST_F(InputMethodControllerTest, SelectionWhenFocusChangeFinishesComposition) {
 
   // Make sure that caret is still at the end of the inserted text.
   EXPECT_FALSE(Controller().HasComposition());
-  EXPECT_EQ(7, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(7, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest, SetEmptyCompositionShouldNotMoveCaret) {
   auto* textarea =
-      To<HTMLTextAreaElement>(InsertHTMLElement("<textarea id='txt'>", "txt"));
+      To<HTMLTextAreaElement>(InsertHtmlElement("<textarea id='txt'>", "txt"));
 
   textarea->SetValue("abc\n");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -1732,7 +1927,7 @@ TEST_F(InputMethodControllerTest, SetEmptyCompositionShouldNotMoveCaret) {
 }
 
 TEST_F(InputMethodControllerTest, WhitespaceFixup) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text blah</div>", "sample");
 
   // Delete "Initial"
@@ -1742,19 +1937,19 @@ TEST_F(InputMethodControllerTest, WhitespaceFixup) {
 
   // The space at the beginning of the string should have been converted to an
   // nbsp
-  EXPECT_EQ("&nbsp;text blah", div->innerHTML());
+  EXPECT_EQ("&nbsp;text blah", div->GetInnerHTMLString());
 
   // Delete "blah"
   Controller().SetCompositionFromExistingText(empty_ime_text_spans, 6, 10);
   Controller().CommitText(String(""), empty_ime_text_spans, 0);
 
   // The space at the end of the string should have been converted to an nbsp
-  EXPECT_EQ("&nbsp;text&nbsp;", div->innerHTML());
+  EXPECT_EQ("&nbsp;text&nbsp;", div->GetInnerHTMLString());
 }
 
 TEST_F(InputMethodControllerTest, CommitEmptyTextDeletesSelection) {
   auto* input =
-      To<HTMLInputElement>(InsertHTMLElement("<input id='sample'>", "sample"));
+      To<HTMLInputElement>(InsertHtmlElement("<input id='sample'>", "sample"));
 
   input->SetValue("Abc Def Ghi");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
@@ -1773,13 +1968,13 @@ static String GetMarkedText(
     Node* node,
     int marker_index) {
   DocumentMarker* marker = document_marker_controller.Markers()[marker_index];
-  return node->textContent().Substring(
+  return node->textContent().substr(
       marker->StartOffset(), marker->EndOffset() - marker->StartOffset());
 }
 
 TEST_F(InputMethodControllerTest,
        Marker_WhitespaceFixupAroundContentIndependentMarkerNotContainingSpace) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text blah</div>", "sample");
 
   // Add marker under "text" (use TextMatch since Composition markers don't
@@ -1808,7 +2003,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        Marker_WhitespaceFixupAroundContentIndependentMarkerBeginningWithSpace) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text blah</div>", "sample");
 
   // Add marker under " text" (use TextMatch since Composition markers don't
@@ -1836,7 +2031,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        Marker_WhitespaceFixupAroundContentIndependentMarkerEndingWithSpace) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text blah</div>", "sample");
 
   // Add marker under "text " (use TextMatch since Composition markers don't
@@ -1865,7 +2060,7 @@ TEST_F(InputMethodControllerTest,
 TEST_F(
     InputMethodControllerTest,
     Marker_WhitespaceFixupAroundContentIndependentMarkerBeginningAndEndingWithSpaces) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text blah</div>", "sample");
 
   // Add marker under " text " (use TextMatch since Composition markers don't
@@ -1893,7 +2088,7 @@ TEST_F(
 }
 
 TEST_F(InputMethodControllerTest, ContentDependentMarker_ReplaceStartOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "Initial text"
@@ -1912,7 +2107,7 @@ TEST_F(InputMethodControllerTest, ContentDependentMarker_ReplaceStartOfMarker) {
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_ReplaceStartOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "Initial text"
@@ -1935,7 +2130,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentDependentMarker_ReplaceTextContainsStartOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>This is some initial text</div>",
       "sample");
 
@@ -1955,7 +2150,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_ReplaceTextContainsStartOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>This is some initial text</div>",
       "sample");
 
@@ -1977,7 +2172,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, ContentDependentMarker_ReplaceEndOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "Initial text"
@@ -1995,7 +2190,7 @@ TEST_F(InputMethodControllerTest, ContentDependentMarker_ReplaceEndOfMarker) {
 }
 
 TEST_F(InputMethodControllerTest, ContentIndependentMarker_ReplaceEndOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "Initial text"
@@ -2018,7 +2213,7 @@ TEST_F(InputMethodControllerTest, ContentIndependentMarker_ReplaceEndOfMarker) {
 
 TEST_F(InputMethodControllerTest,
        ContentDependentMarker_ReplaceTextContainsEndOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>This is some initial text</div>",
       "sample");
 
@@ -2032,7 +2227,7 @@ TEST_F(InputMethodControllerTest,
   Controller().SetCompositionFromExistingText(empty_ime_text_spans, 13, 25);
   Controller().CommitText(String("content"), empty_ime_text_spans, 0);
 
-  EXPECT_EQ("This is some content", div->innerHTML());
+  EXPECT_EQ("This is some content", div->GetInnerHTMLString());
 
   // Verify marker was removed
   EXPECT_EQ(0u, GetDocument().Markers().Markers().size());
@@ -2040,7 +2235,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_ReplaceTextContainsEndOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>This is some initial text</div>",
       "sample");
 
@@ -2055,7 +2250,7 @@ TEST_F(InputMethodControllerTest,
   Controller().SetCompositionFromExistingText(empty_ime_text_spans, 13, 25);
   Controller().CommitText(String("content"), empty_ime_text_spans, 0);
 
-  EXPECT_EQ("This is some content", div->innerHTML());
+  EXPECT_EQ("This is some content", div->GetInnerHTMLString());
 
   // Verify marker is under "some "
   EXPECT_EQ(1u, GetDocument().Markers().Markers().size());
@@ -2064,7 +2259,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, ContentDependentMarker_ReplaceEntireMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "text"
@@ -2083,7 +2278,7 @@ TEST_F(InputMethodControllerTest, ContentDependentMarker_ReplaceEntireMarker) {
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_ReplaceEntireMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "text"
@@ -2106,7 +2301,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentDependentMarker_ReplaceTextWithMarkerAtBeginning) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "Initial"
@@ -2127,7 +2322,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_ReplaceTextWithMarkerAtBeginning) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "Initial"
@@ -2149,7 +2344,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentDependentMarker_ReplaceTextWithMarkerAtEnd) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "text"
@@ -2170,7 +2365,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_ReplaceTextWithMarkerAtEnd) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>Initial text</div>", "sample");
 
   // Add marker under "text"
@@ -2191,7 +2386,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, ContentDependentMarker_Deletions) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2233,7 +2428,7 @@ TEST_F(InputMethodControllerTest, ContentDependentMarker_Deletions) {
 }
 
 TEST_F(InputMethodControllerTest, ContentIndependentMarker_Deletions) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2287,7 +2482,7 @@ TEST_F(InputMethodControllerTest, ContentIndependentMarker_Deletions) {
 
 TEST_F(InputMethodControllerTest,
        ContentDependentMarker_DeleteExactlyOnMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2306,7 +2501,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_DeleteExactlyOnMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2325,7 +2520,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, ContentDependentMarker_DeleteMiddleOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2344,7 +2539,7 @@ TEST_F(InputMethodControllerTest, ContentDependentMarker_DeleteMiddleOfMarker) {
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_DeleteMiddleOfMarker) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2366,7 +2561,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentDependentMarker_InsertInMarkerInterior) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2400,7 +2595,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_InsertInMarkerInterior) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2439,7 +2634,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, ContentDependentMarker_InsertBetweenMarkers) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2475,7 +2670,7 @@ TEST_F(InputMethodControllerTest, ContentDependentMarker_InsertBetweenMarkers) {
 
 TEST_F(InputMethodControllerTest,
        ContentIndependentMarker_InsertBetweenMarkers) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>1111122222333334444455555</div>",
       "sample");
 
@@ -2514,7 +2709,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        CommitNotMisspellingSuggestionMarkerWithSpellCheckingDisabled) {
-  InsertHTMLElement(
+  InsertHtmlElement(
       "<div id='sample' contenteditable spellcheck='false'>text</div>",
       "sample");
 
@@ -2532,7 +2727,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        CommitMisspellingSuggestionMarkerWithSpellCheckingDisabled) {
-  InsertHTMLElement(
+  InsertHtmlElement(
       "<div id='sample' contenteditable spellcheck='false'>text</div>",
       "sample");
 
@@ -2550,7 +2745,7 @@ TEST_F(InputMethodControllerTest,
 }
 
 TEST_F(InputMethodControllerTest, RemoveSuggestionMarkerInRangeOnFinish) {
-  InsertHTMLElement(
+  InsertHtmlElement(
       "<div id='sample' contenteditable spellcheck='true'>text</div>",
       "sample");
 
@@ -2591,12 +2786,12 @@ TEST_F(InputMethodControllerTest, RemoveSuggestionMarkerInRangeOnFinish) {
 }
 
 TEST_F(InputMethodControllerTest, ClearImeTextSpansByType) {
-  InsertHTMLElement(
+  InsertHtmlElement(
       "<div id='sample' contenteditable spellcheck='true'>hello</div>",
       "sample");
   ImeTextSpan::Type type = ImeTextSpan::Type::kAutocorrect;
-  unsigned start = 0;
-  unsigned end = 1;
+  wtf_size_t start = 0;
+  wtf_size_t end = 1;
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
       type, start, end, Color::kTransparent, ImeTextSpanThickness::kNone,
@@ -2616,10 +2811,11 @@ TEST_F(InputMethodControllerTest, TextInputTypeAtBeforeEditable) {
   GetDocument().body()->Focus();
 
   // Set selection before BODY(editable).
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SelectionInDOMTree::Builder()
+  GetFrame().Selection().SetSelection(
+      SelectionInDomTree::Builder()
           .Collapse(Position(GetDocument().documentElement(), 0))
-          .Build());
+          .Build(),
+      SetSelectionOptions());
 
   EXPECT_EQ(kWebTextInputTypeContentEditable, Controller().TextInputType());
 }
@@ -2627,7 +2823,7 @@ TEST_F(InputMethodControllerTest, TextInputTypeAtBeforeEditable) {
 // http://crbug.com/721666
 TEST_F(InputMethodControllerTest, MaxLength) {
   auto* input = To<HTMLInputElement>(
-      InsertHTMLElement("<input id='a' maxlength='4'/>", "a"));
+      InsertHtmlElement("<input id='a' maxlength='4'/>", "a"));
 
   EXPECT_EQ(kWebTextInputTypeText, Controller().TextInputType());
 
@@ -2639,15 +2835,15 @@ TEST_F(InputMethodControllerTest, MaxLength) {
 }
 
 TEST_F(InputMethodControllerTest, InputModeOfFocusedElement) {
-  InsertHTMLElement("<input id='a' inputmode='decimal'>", "a")->Focus();
+  InsertHtmlElement("<input id='a' inputmode='decimal'>", "a")->Focus();
   EXPECT_EQ(kWebTextInputModeDecimal, Controller().InputModeOfFocusedElement());
 
-  InsertHTMLElement("<input id='b' inputmode='foo'>", "b")->Focus();
+  InsertHtmlElement("<input id='b' inputmode='foo'>", "b")->Focus();
   EXPECT_EQ(kWebTextInputModeDefault, Controller().InputModeOfFocusedElement());
 }
 
 TEST_F(InputMethodControllerTest, CompositionUnderlineSpansMultipleNodes) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable><b>t</b>est</div>", "sample");
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -2679,13 +2875,14 @@ TEST_F(InputMethodControllerTest, CompositionUnderlineSpansMultipleNodes) {
 // The following tests are for http://crbug.com/766680.
 
 TEST_F(InputMethodControllerTest, SetCompositionDeletesMarkupBeforeText) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='div' contenteditable='true'><img />test</div>", "div");
   // Select the contents of the div element.
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SelectionInDOMTree::Builder()
+  GetFrame().Selection().SetSelection(
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(EphemeralRange::RangeOfContents(*div))
-          .Build());
+          .Build(),
+      SetSelectionOptions());
 
   Controller().SetComposition("t", Vector<ImeTextSpan>(), 0, 1);
 
@@ -2695,13 +2892,14 @@ TEST_F(InputMethodControllerTest, SetCompositionDeletesMarkupBeforeText) {
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionDeletesMarkupAfterText) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='div' contenteditable='true'>test<img /></div>", "div");
   // Select the contents of the div element.
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SelectionInDOMTree::Builder()
+  GetFrame().Selection().SetSelection(
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(EphemeralRange::RangeOfContents(*div))
-          .Build());
+          .Build(),
+      SetSelectionOptions());
 
   Controller().SetComposition("t", Vector<ImeTextSpan>(), 0, 1);
 
@@ -2712,13 +2910,14 @@ TEST_F(InputMethodControllerTest, SetCompositionDeletesMarkupAfterText) {
 
 TEST_F(InputMethodControllerTest,
        SetCompositionDeletesMarkupBeforeAndAfterText) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='div' contenteditable='true'><img />test<img /></div>", "div");
   // Select the contents of the div element.
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SelectionInDOMTree::Builder()
+  GetFrame().Selection().SetSelection(
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(EphemeralRange::RangeOfContents(*div))
-          .Build());
+          .Build(),
+      SetSelectionOptions());
 
   Controller().SetComposition("t", Vector<ImeTextSpan>(), 0, 1);
 
@@ -2729,7 +2928,7 @@ TEST_F(InputMethodControllerTest,
 
 TEST_F(InputMethodControllerTest,
        SetCompositionWithPartialGraphemeWithCompositionUnderlineDoesntCrash) {
-  InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Vector<ImeTextSpan> ime_text_spans;
   ime_text_spans.push_back(ImeTextSpan(
@@ -2738,24 +2937,24 @@ TEST_F(InputMethodControllerTest,
       Color::kTransparent, Color::kTransparent));
   Controller().CommitText(" ", ime_text_spans, 0);
   // Add character U+094D: 'DEVANAGARI SIGN VIRAMA'
-  Controller().SetComposition(String::FromUTF8("\xE0\xA5\x8D"), ime_text_spans,
+  Controller().SetComposition(String::FromUtf8("\xE0\xA5\x8D"), ime_text_spans,
                               1, 1);
 }
 
 TEST_F(
     InputMethodControllerTest,
     SetCompositionWithPartialGraphemeWithoutCompositionUnderlineDoesntCrash) {
-  InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   Controller().CommitText(" ", Vector<ImeTextSpan>(), 0);
   // Add character U+094D: 'DEVANAGARI SIGN VIRAMA'
-  Controller().SetComposition(String::FromUTF8("\xE0\xA5\x8D"),
+  Controller().SetComposition(String::FromUtf8("\xE0\xA5\x8D"),
                               Vector<ImeTextSpan>(), 1, 1);
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionContainingNewline) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
   Controller().SetComposition("Hello", Vector<ImeTextSpan>(), 5, 5);
   Controller().SetComposition("Hello\n", Vector<ImeTextSpan>(), 6, 6);
 
@@ -2766,18 +2965,18 @@ TEST_F(InputMethodControllerTest, SetCompositionContainingNewline) {
 
 TEST_F(InputMethodControllerTest, SetCompositionTamilVirama) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   // Commit TAMIL LETTER CA (U+0B9A) followed by TAMIL SIGN VIRAMA (U+U0BCD)
-  Controller().CommitText(String::FromUTF8("\xE0\xAE\x9A\xE0\xAF\x8D"),
+  Controller().CommitText(String::FromUtf8("\xE0\xAE\x9A\xE0\xAF\x8D"),
                           Vector<ImeTextSpan>(), 0);
 
   // Open composition with TAMIL LETTER CA (U+0B9A) followed by
   // TAMIL SIGN VIRAMA (U+U0BCD)
-  Controller().SetComposition(String::FromUTF8("\xE0\xAE\x9A\xE0\xAF\x8D"),
+  Controller().SetComposition(String::FromUtf8("\xE0\xAE\x9A\xE0\xAF\x8D"),
                               Vector<ImeTextSpan>(), 2, 2);
   // Remove the TAMIL SIGN VIRAMA from the end of the composition
-  Controller().SetComposition(String::FromUTF8("\xE0\xAE\x9A"),
+  Controller().SetComposition(String::FromUtf8("\xE0\xAE\x9A"),
                               Vector<ImeTextSpan>(), 1, 1);
 
   EXPECT_EQ(1u, div->CountChildren());
@@ -2791,11 +2990,11 @@ TEST_F(InputMethodControllerTest, SetCompositionTamilVirama) {
 
 TEST_F(InputMethodControllerTest,
        CommitTextWithOpenCompositionAndInputEventHandlerChangingText) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello</div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable>hello</div>", "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -2816,21 +3015,17 @@ TEST_F(InputMethodControllerTest,
   // should leave it).
   Controller().CommitText("HELLO", Vector<ImeTextSpan>(), 0);
 
-  EXPECT_EQ(11, GetFrame()
-                    .Selection()
-                    .GetSelectionInDOMTree()
-                    .Base()
-                    .ComputeOffsetInContainerNode());
+  EXPECT_EQ(11, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest,
        CommitTextWithoutCompositionAndInputEventHandlerChangingSelection) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>hello world</div>", "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -2842,33 +3037,30 @@ TEST_F(InputMethodControllerTest,
   UpdateAllLifecyclePhasesForTest();
 
   // Select "hello".
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SelectionInDOMTree::Builder()
+  GetFrame().Selection().SetSelection(
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(EphemeralRange(Position(div->firstChild(), 0),
                                            Position(div->firstChild(), 5)))
-          .Build());
+          .Build(),
+      SetSelectionOptions());
 
   // Commit text, leaving the cursor at the end of the newly-inserted text.
   // JavaScript will move the cursor back to the beginning of the
   // "HELLO world", where it should be left.
   Controller().CommitText("HELLO", Vector<ImeTextSpan>(), 0);
 
-  EXPECT_EQ(0, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(0, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(
     InputMethodControllerTest,
     SetCompositionToEmptyStringWithOpenCompositionAndInputEventHandlerChangingText) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -2887,21 +3079,17 @@ TEST_F(
   // change the text and move the cursor after "HI", where it should be left.
   Controller().SetComposition("", Vector<ImeTextSpan>(), 0, 0);
 
-  EXPECT_EQ(2, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(2, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest,
        SetCompositionWithOpenCompositionAndInputEventHandlerChangingText) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -2921,21 +3109,17 @@ TEST_F(InputMethodControllerTest,
   // "HI", where it should be left.
   Controller().SetComposition("WORLD", Vector<ImeTextSpan>(), 5, 5);
 
-  EXPECT_EQ(2, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(2, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest,
        SetCompositionWithOpenCompositionAndInputEventHandlerChangingSelection) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -2955,21 +3139,17 @@ TEST_F(InputMethodControllerTest,
   Controller().SetComposition("WORLD", Vector<ImeTextSpan>(), 5, 5);
 
   // The IME cursor update should have been ignored.
-  EXPECT_EQ(5, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(5, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest,
        SetCompositionToEmptyStringAndInputEventHandlerChangingSelection) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -2988,21 +3168,17 @@ TEST_F(InputMethodControllerTest,
   // the text and move the cursor after "hello", where it should be left.
   Controller().SetComposition("", Vector<ImeTextSpan>(), -6, -6);
 
-  EXPECT_EQ(5, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(5, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest,
        SetCompositionDeleteSelectionAndInputEventHandlerChangingSelection) {
-  Element* div = InsertHTMLElement(
+  Element* div = InsertHtmlElement(
       "<div id='sample' contenteditable>hello world</div>", "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3014,11 +3190,12 @@ TEST_F(InputMethodControllerTest,
   UpdateAllLifecyclePhasesForTest();
 
   // Select "world".
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SelectionInDOMTree::Builder()
+  GetFrame().Selection().SetSelection(
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(EphemeralRange(Position(div->firstChild(), 6),
                                            Position(div->firstChild(), 11)))
-          .Build());
+          .Build(),
+      SetSelectionOptions());
 
   // Call SetComposition() passing the empty string to delete the selection
   // (so we end up with "hello ") and move the cursor to before "hello".
@@ -3026,20 +3203,46 @@ TEST_F(InputMethodControllerTest,
   // it should be left.
   Controller().SetComposition("", Vector<ImeTextSpan>(), -6, -6);
 
-  EXPECT_EQ(5, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(5, SelectionAnchor().ComputeOffsetInContainerNode());
+}
+
+TEST_F(InputMethodControllerTest,
+       DeleteSelectionAndBeforeInputEventHandlerChangingStyle) {
+  Element* div = InsertHtmlElement(
+      "<div id='sample' contenteditable>hello world</div>", "sample");
+
+  GetDocument().GetSettings()->SetScriptEnabled(true);
+  Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
+  script->SetInnerHTMLWithoutTrustedTypes(
+      "document.getElementById('sample').addEventListener('beforeinput', "
+      "  event => {"
+      "    event.currentTarget.style.transform = 'rotate(7deg)';"
+      "});");
+  GetDocument().body()->AppendChild(script);
+  UpdateAllLifecyclePhasesForTest();
+
+  // Select "world".
+  GetFrame().Selection().SetSelection(
+      SelectionInDomTree::Builder()
+          .SetBaseAndExtent(EphemeralRange(Position(div->firstChild(), 6),
+                                           Position(div->firstChild(), 11)))
+          .Build(),
+      SetSelectionOptions());
+
+  // Call DeleteSelection() will fire beforeinput event before deleting
+  // selection. The beforeinput event handler dirties the layout. We should
+  // update layout again before calling |TypingCommand::DeleteSelection()| to
+  // avoid crash.
+  EXPECT_EQ(true, Controller().DeleteSelection());
 }
 
 TEST_F(InputMethodControllerTest,
        CommitTextWithOpenCompositionAndCompositionEndEventHandlerChangingText) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello</div>", "sample");
+  InsertHtmlElement("<div id='sample' contenteditable>hello</div>", "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('compositionend', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3060,22 +3263,18 @@ TEST_F(InputMethodControllerTest,
   // should leave it).
   Controller().CommitText("HELLO", Vector<ImeTextSpan>(), 0);
 
-  EXPECT_EQ(11, GetFrame()
-                    .Selection()
-                    .GetSelectionInDOMTree()
-                    .Base()
-                    .ComputeOffsetInContainerNode());
+  EXPECT_EQ(11, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(
     InputMethodControllerTest,
     SetCompositionToEmptyStringWithOpenCompositionAndCompositionEndEventHandlerChangingText) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('compositionend', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3094,22 +3293,18 @@ TEST_F(
   // change the text and move the cursor after "HI", where it should be left.
   Controller().SetComposition("", Vector<ImeTextSpan>(), 0, 0);
 
-  EXPECT_EQ(2, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(2, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(
     InputMethodControllerTest,
     SetCompositionToEmptyStringAndCompositionEndEventHandlerChangingSelection) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('compositionend', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3128,21 +3323,17 @@ TEST_F(
   // the text and move the cursor after "hello", where it should be left.
   Controller().SetComposition("", Vector<ImeTextSpan>(), -6, -6);
 
-  EXPECT_EQ(5, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(5, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest,
        FinishComposingTextDoNotKeepSelectionAndCompositionEndEventHandler) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('compositionend', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3160,21 +3351,17 @@ TEST_F(InputMethodControllerTest,
   // it should be left.
   Controller().FinishComposingText(InputMethodController::kKeepSelection);
 
-  EXPECT_EQ(5, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(5, SelectionAnchor().ComputeOffsetInContainerNode());
 }
 
 TEST_F(InputMethodControllerTest,
        FinishComposingTextKeepSelectionAndCompositionEndEventHandler) {
-  InsertHTMLElement("<div id='sample' contenteditable>hello world</div>",
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
                     "sample");
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('compositionend', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3192,21 +3379,39 @@ TEST_F(InputMethodControllerTest,
   // it should be left.
   Controller().FinishComposingText(InputMethodController::kDoNotKeepSelection);
 
-  EXPECT_EQ(5, GetFrame()
-                   .Selection()
-                   .GetSelectionInDOMTree()
-                   .Base()
-                   .ComputeOffsetInContainerNode());
+  EXPECT_EQ(5, SelectionAnchor().ComputeOffsetInContainerNode());
+}
+
+TEST_F(
+    InputMethodControllerTest,
+    SetCompositionFromExistingTextAndCompositionStartEventHandlerChangingStyle) {
+  InsertHtmlElement("<div id='sample' contenteditable>hello world</div>",
+                    "sample");
+
+  GetDocument().GetSettings()->SetScriptEnabled(true);
+  Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
+  script->SetInnerHTMLWithoutTrustedTypes(
+      "document.getElementById('sample').addEventListener('compositionstart', "
+      "  event => {"
+      "    event.currentTarget.style.transform = 'rotate(7deg)';"
+      "});");
+  GetDocument().body()->AppendChild(script);
+  UpdateAllLifecyclePhasesForTest();
+
+  // Call SetCompositionFromExistingText() will fire compositionstart event. The
+  // compositionstart event handler dirties the layout. We should update layout
+  // again before getting visible selection to avoid crash.
+  Controller().SetCompositionFromExistingText(Vector<ImeTextSpan>(), 6, 11);
 }
 
 TEST_F(InputMethodControllerTest,
        FinishComposingTextTooLongKeepSelectionAndInputEventHandler) {
   auto* input = To<HTMLInputElement>(
-      InsertHTMLElement("<input id='sample' maxlength='2'>", "sample"));
+      InsertHtmlElement("<input id='sample' maxlength='2'>", "sample"));
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3232,11 +3437,11 @@ TEST_F(InputMethodControllerTest,
 TEST_F(InputMethodControllerTest,
        FinishComposingTextTooLongDoNotKeepSelectionAndInputEventHandler) {
   auto* input = To<HTMLInputElement>(
-      InsertHTMLElement("<input id='sample' maxlength='2'>", "sample"));
+      InsertHtmlElement("<input id='sample' maxlength='2'>", "sample"));
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('input', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3262,11 +3467,11 @@ TEST_F(InputMethodControllerTest,
 TEST_F(InputMethodControllerTest,
        FinishComposingTextTooLongKeepSelectionAndCompositionEndEventHandler) {
   auto* input = To<HTMLInputElement>(
-      InsertHTMLElement("<input id='sample' maxlength='2'>", "sample"));
+      InsertHtmlElement("<input id='sample' maxlength='2'>", "sample"));
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('compositionend', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3294,11 +3499,11 @@ TEST_F(
     InputMethodControllerTest,
     FinishComposingTextTooLongDoNotKeepSelectionAndCompositionEndEventHandler) {
   auto* input = To<HTMLInputElement>(
-      InsertHTMLElement("<input id='sample' maxlength='2'>", "sample"));
+      InsertHtmlElement("<input id='sample' maxlength='2'>", "sample"));
 
   GetDocument().GetSettings()->SetScriptEnabled(true);
   Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
-  script->setInnerHTML(
+  script->SetInnerHTMLWithoutTrustedTypes(
       "document.getElementById('sample').addEventListener('compositionend', "
       "  event => {"
       "    const node = event.currentTarget;"
@@ -3421,9 +3626,75 @@ TEST_F(InputMethodControllerTest, AutocapitalizeTextInputFlags) {
   }
 }
 
+TEST_F(InputMethodControllerTest, AutoCompleteTextInputFlags) {
+  constexpr int default_flags = kWebTextInputFlagAutocapitalizeSentences;
+  EXPECT_EQ(TextInputFlags("<input autocomplete=off>"),
+            kWebTextInputFlagAutocompleteOff | default_flags);
+  EXPECT_EQ(TextInputFlags("<input autocomplete=OFF>"),
+            kWebTextInputFlagAutocompleteOff | default_flags);
+  EXPECT_EQ(TextInputFlags("<input autocomplete=on>"),
+            kWebTextInputFlagAutocompleteOn | default_flags);
+  EXPECT_EQ(TextInputFlags("<input autocomplete=ON>"),
+            kWebTextInputFlagAutocompleteOn | default_flags);
+}
+
+TEST_F(InputMethodControllerTest, AutoCorrectTextInputFlags) {
+  ScopedWebAutocorrectByDefaultForTest autocorrect_by_default(true);
+  constexpr int default_flags = kWebTextInputFlagAutocapitalizeSentences;
+  EXPECT_EQ(TextInputFlags("<input autocorrect=off>"),
+            kWebTextInputFlagAutocorrectOff | default_flags);
+  EXPECT_EQ(TextInputFlags("<input autocorrect=OFF>"),
+            kWebTextInputFlagAutocorrectOff | default_flags);
+  EXPECT_EQ(TextInputFlags("<input autocorrect=on>"),
+            kWebTextInputFlagAutocorrectOn | default_flags);
+  EXPECT_EQ(TextInputFlags("<input autocorrect=ON>"),
+            kWebTextInputFlagAutocorrectOn | default_flags);
+  // With no autocorrect attribute the used state is On (the spec default), but
+  // the IME flag layer treats Off as authoritative and emits On only for an
+  // explicit attribute, leaving the default-On case unset so platforms keep
+  // their own (enabled) default.
+  EXPECT_EQ(TextInputFlags("<input>"), default_flags);
+
+  // Step 1 of the used-autocorrection-state algorithm forces Off for URL,
+  // Email, and Password inputs regardless of the autocorrect attribute. The
+  // autocapitalize flag is also forced to None for these types, and password
+  // additionally carries the HasBeenPasswordField flag.
+  constexpr int email_url_flags =
+      kWebTextInputFlagAutocorrectOff | kWebTextInputFlagAutocapitalizeNone;
+  EXPECT_EQ(TextInputFlags("<input type=email>"), email_url_flags);
+  EXPECT_EQ(TextInputFlags("<input type=email autocorrect=on>"),
+            email_url_flags);
+  EXPECT_EQ(TextInputFlags("<input type=url>"), email_url_flags);
+  EXPECT_EQ(TextInputFlags("<input type=url autocorrect=on>"), email_url_flags);
+  constexpr int password_flags =
+      email_url_flags | kWebTextInputFlagHasBeenPasswordField;
+  EXPECT_EQ(TextInputFlags("<input type=password>"), password_flags);
+  EXPECT_EQ(TextInputFlags("<input type=password autocorrect=on>"),
+            password_flags);
+
+  // Step 3 of the algorithm: an autocapitalize-and-autocorrect inheriting
+  // element with no own autocorrect attribute inherits from its form owner.
+  // The input is associated with the form via the form= attribute so it can
+  // remain the document's last child (required by the TextInputFlags helper).
+  // Each assertion uses a distinct form id because TextInputFlags() appends
+  // to the same document and an earlier id would shadow a later one in DOM
+  // order when resolving the form= attribute.
+  EXPECT_EQ(
+      TextInputFlags("<form id=f1 autocorrect=off></form><input form=f1>"),
+      kWebTextInputFlagAutocorrectOff | default_flags);
+  // Inherited Off is emitted as the authoritative Off flag, but inherited On is
+  // left unset (no explicit attribute on the input): the used state is still On
+  // and resolves to On via the platform default.
+  EXPECT_EQ(TextInputFlags("<form id=f2 autocorrect=on></form><input form=f2>"),
+            default_flags);
+  // An explicit attribute on the input wins over the form (step 2
+  // short-circuits before step 3).
+  EXPECT_EQ(TextInputFlags("<form id=f3 autocorrect=off></form>"
+                           "<input form=f3 autocorrect=on>"),
+            kWebTextInputFlagAutocorrectOn | default_flags);
+}
+
 TEST_F(InputMethodControllerTest, VerticalTextInputFlags) {
-  if (!RuntimeEnabledFeatures::ImeVerticalFlagEnabled())
-    return;
   Vector<std::pair<String, int>> element_html_and_expected_flags = {
       {"<div contenteditable='true'></div>", 0},
       {"<div contenteditable='true' style='writing-mode:vertical-rl;'></div>",
@@ -3448,42 +3719,39 @@ TEST_F(InputMethodControllerTest, VerticalTextInputFlags) {
 
 TEST_F(InputMethodControllerTest, ExecCommandDuringComposition) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
   // Open a composition.
-  Controller().SetComposition(String::FromUTF8("hello"), Vector<ImeTextSpan>(),
-                              5, 5);
+  Controller().SetComposition("hello", Vector<ImeTextSpan>(), 5, 5);
   // Turn on bold formatting.
   GetDocument().execCommand("bold", false, "", ASSERT_NO_EXCEPTION);
 
   // Extend the composition with some more text.
-  Controller().SetComposition(String::FromUTF8("helloworld"),
-                              Vector<ImeTextSpan>(), 10, 10);
+  Controller().SetComposition("helloworld", Vector<ImeTextSpan>(), 10, 10);
 
   // "world" should be bold.
-  EXPECT_EQ("hello<b>world</b>", div->innerHTML());
+  EXPECT_EQ("hello<b>world</b>", div->GetInnerHTMLString());
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionAfterNonEditableElement) {
-  GetFrame().Selection().SetSelectionAndEndTyping(
+  GetFrame().Selection().SetSelection(
       SetSelectionTextToBody("<div id='sample' contenteditable='true'>"
-                             "<span contenteditable='false'>a</span>|b</div>"));
-  Element* const div = GetDocument().getElementById("sample");
+                             "<span contenteditable='false'>a</span>|b</div>"),
+      SetSelectionOptions());
+  Element* const div = GetDocument().getElementById(AtomicString("sample"));
   div->Focus();
 
   // Open a composition and insert some text.
-  Controller().SetComposition(String::FromUTF8("c"), Vector<ImeTextSpan>(), 1,
-                              1);
+  Controller().SetComposition("c", Vector<ImeTextSpan>(), 1, 1);
 
   // Add some more text to the composition.
-  Controller().SetComposition(String::FromUTF8("cd"), Vector<ImeTextSpan>(), 2,
-                              2);
+  Controller().SetComposition("cd", Vector<ImeTextSpan>(), 2, 2);
 
   EXPECT_EQ(
       "<div contenteditable=\"true\" id=\"sample\">"
       "<span contenteditable=\"false\">a</span>^cd|b</div>",
       GetSelectionTextFromBody(
-          SelectionInDOMTree::Builder()
+          SelectionInDomTree::Builder()
               .SetBaseAndExtent(Controller().CompositionEphemeralRange())
               .Build()));
 }
@@ -3494,13 +3762,12 @@ TEST_F(InputMethodControllerTest, SetCompositionInTableCell) {
           "<table id='sample' contenteditable><tr><td>a</td><td "
           "id='td2'>|</td></tr></table>"),
       SetSelectionOptions());
-  Element* const table = GetDocument().getElementById("sample");
+  Element* const table = GetDocument().getElementById(AtomicString("sample"));
   table->Focus();
 
-  Controller().SetComposition(String::FromUTF8("c"), Vector<ImeTextSpan>(), 1,
-                              1);
+  Controller().SetComposition("c", Vector<ImeTextSpan>(), 1, 1);
 
-  Element* const td2 = GetDocument().getElementById("td2");
+  Element* const td2 = GetDocument().getElementById(AtomicString("td2"));
   const Node* const text_node = td2->firstChild();
 
   Range* range = GetCompositionRange();
@@ -3512,45 +3779,48 @@ TEST_F(InputMethodControllerTest, SetCompositionInTableCell) {
 
 TEST_F(InputMethodControllerTest, SetCompositionInMyanmar) {
   Element* div =
-      InsertHTMLElement("<div id='sample' contenteditable></div>", "sample");
+      InsertHtmlElement("<div id='sample' contenteditable></div>", "sample");
 
-  // Add character U+200C: 'kZeroWidthNonJoinerCharacter' and Myanmar vowel
-  Controller().SetComposition(String::FromUTF8("\xE2\x80\x8C\xE1\x80\xB1"),
+  // Add character U+200C: 'kZeroWidthNonJoiner' and Myanmar vowel
+  Controller().SetComposition(String::FromUtf8("\xE2\x80\x8C\xE1\x80\xB1"),
                               Vector<ImeTextSpan>(), 0, 0);
 
   EXPECT_EQ(1u, div->CountChildren());
-  EXPECT_EQ(String::FromUTF8("\xE2\x80\x8C\xE1\x80\xB1"), div->innerHTML());
+  EXPECT_EQ(String::FromUtf8("\xE2\x80\x8C\xE1\x80\xB1"),
+            div->GetInnerHTMLString());
 
   Range* range = GetCompositionRange();
   EXPECT_EQ(0u, range->startOffset());
   EXPECT_EQ(2u, range->endOffset());
-  Controller().CommitText(String::FromUTF8("\xE2\x80\x8C\xE1\x80\xB1"),
+  Controller().CommitText(String::FromUtf8("\xE2\x80\x8C\xE1\x80\xB1"),
                           Vector<ImeTextSpan>(), 1);
-  EXPECT_EQ(String::FromUTF8("\xE2\x80\x8C\xE1\x80\xB1"), div->innerHTML());
+  EXPECT_EQ(String::FromUtf8("\xE2\x80\x8C\xE1\x80\xB1"),
+            div->GetInnerHTMLString());
 
-  // Add character U+200C: 'kZeroWidthNonJoinerCharacter' and Myanmar vowel
-  Controller().SetComposition(String::FromUTF8("\xE2\x80\x8C\xE1\x80\xB1"),
+  // Add character U+200C: 'kZeroWidthNonJoiner' and Myanmar vowel
+  Controller().SetComposition(String::FromUtf8("\xE2\x80\x8C\xE1\x80\xB1"),
                               Vector<ImeTextSpan>(), 2, 2);
-  Controller().CommitText(String::FromUTF8("\xE2\x80\x8C\xE1\x80\xB1"),
+  Controller().CommitText(String::FromUtf8("\xE2\x80\x8C\xE1\x80\xB1"),
                           Vector<ImeTextSpan>(), 1);
   EXPECT_EQ(
-      String::FromUTF8("\xE2\x80\x8C\xE1\x80\xB1\xE2\x80\x8C\xE1\x80\xB1"),
-      div->innerHTML());
+      String::FromUtf8("\xE2\x80\x8C\xE1\x80\xB1\xE2\x80\x8C\xE1\x80\xB1"),
+      div->GetInnerHTMLString());
 }
 
 TEST_F(InputMethodControllerTest, VirtualKeyboardPolicyOfFocusedElement) {
   EXPECT_EQ(ui::mojom::VirtualKeyboardPolicy::AUTO,
             Controller().VirtualKeyboardPolicyOfFocusedElement());
-  InsertHTMLElement("<input id='a' virtualkeyboardpolicy='manual'>", "a")
+  InsertHtmlElement("<input id='a' virtualkeyboardpolicy='manual'>", "a")
       ->Focus();
   EXPECT_EQ(ui::mojom::VirtualKeyboardPolicy::MANUAL,
             Controller().VirtualKeyboardPolicyOfFocusedElement());
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionInTibetan) {
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SetSelectionTextToBody("<div id='sample' contenteditable>|</div>"));
-  Element* const div = GetDocument().getElementById("sample");
+  GetFrame().Selection().SetSelection(
+      SetSelectionTextToBody("<div id='sample' contenteditable>|</div>"),
+      SetSelectionOptions());
+  Element* const div = GetDocument().getElementById(AtomicString("sample"));
   div->Focus();
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -3580,9 +3850,10 @@ TEST_F(InputMethodControllerTest, SetCompositionInTibetan) {
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionInDevanagari) {
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SetSelectionTextToBody("<div id='sample' contenteditable>\u0958|</div>"));
-  Element* const div = GetDocument().getElementById("sample");
+  GetFrame().Selection().SetSelection(
+      SetSelectionTextToBody("<div id='sample' contenteditable>\u0958|</div>"),
+      SetSelectionOptions());
+  Element* const div = GetDocument().getElementById(AtomicString("sample"));
   div->Focus();
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -3598,9 +3869,10 @@ TEST_F(InputMethodControllerTest, SetCompositionInDevanagari) {
 }
 
 TEST_F(InputMethodControllerTest, SetCompositionTamil) {
-  GetFrame().Selection().SetSelectionAndEndTyping(
-      SetSelectionTextToBody("<div id='sample' contenteditable>|</div>"));
-  Element* const div = GetDocument().getElementById("sample");
+  GetFrame().Selection().SetSelection(
+      SetSelectionTextToBody("<div id='sample' contenteditable>|</div>"),
+      SetSelectionOptions());
+  Element* const div = GetDocument().getElementById(AtomicString("sample"));
   div->Focus();
 
   Vector<ImeTextSpan> ime_text_spans;
@@ -3616,4 +3888,84 @@ TEST_F(InputMethodControllerTest, SetCompositionTamil) {
             GetSelectionTextFromBody());
 }
 
+TEST_F(InputMethodControllerTest, EditContextCanvasHasEditableType) {
+  GetDocument().GetSettings()->SetScriptEnabled(true);
+  Element* noneditable_canvas = InsertHtmlElement(
+      "<canvas id='noneditable-canvas'></canvas>", "noneditable-canvas");
+  Element* editable_canvas = InsertHtmlElement(
+      "<canvas id='editable-canvas'></canvas>", "editable-canvas");
+  Element* script = GetDocument().CreateRawElement(html_names::kScriptTag);
+  script->SetInnerHTMLWithoutTrustedTypes(
+      "document.getElementById('editable-canvas').editContext = new "
+      "EditContext()");
+  GetDocument().body()->AppendChild(script);
+  UpdateAllLifecyclePhasesForTest();
+
+  noneditable_canvas->Focus();
+  EXPECT_EQ(kWebTextInputTypeNone, Controller().TextInputType());
+
+  editable_canvas->Focus();
+  EXPECT_EQ(kWebTextInputTypeContentEditable, Controller().TextInputType());
+}
+
+#if BUILDFLAG(IS_ANDROID)
+TEST_F(InputMethodControllerTest, SetImeTextSpanForSpellcheckSpellingMarkers) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      blink::features::kAndroidSpellcheckFullApiBlink);
+  Element* div = InsertHtmlElement(
+      "<div id='sample' contenteditable>hello world</div>", "sample");
+  Node* text = div->firstChild();
+
+  GetDocument().Markers().AddSpellingMarker(
+      EphemeralRange(Position(text, 0), Position(text, 5)), "hi!\nhello!");
+
+  GetDocument().GetFrame()->Selection().SetSelection(
+      SelectionInDomTree::Builder()
+          .SetBaseAndExtent(Position(text, 0), Position(text, 1))
+          .Build(),
+      SetSelectionOptions());
+
+  const std::vector<ui::ImeTextSpan>& ime_text_spans =
+      Controller().TextInputInfo().ime_text_spans;
+
+  EXPECT_EQ(1u, ime_text_spans.size());
+  EXPECT_EQ(0u, ime_text_spans[0].start_offset);
+  EXPECT_EQ(5u, ime_text_spans[0].end_offset);
+  EXPECT_EQ(2u, ime_text_spans[0].suggestions.size());
+  EXPECT_EQ("hi!", ime_text_spans[0].suggestions[0]);
+  EXPECT_EQ("hello!", ime_text_spans[0].suggestions[1]);
+  EXPECT_EQ(ui::ImeTextSpan::Type::kMisspellingSuggestion,
+            ime_text_spans[0].type);
+}
+
+TEST_F(InputMethodControllerTest, SetImeTextSpanForSpellcheckGrammarMarkers) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      blink::features::kAndroidSpellcheckFullApiBlink);
+  Element* div = InsertHtmlElement(
+      "<div id='sample' contenteditable>hello world</div>", "sample");
+  Node* text = div->firstChild();
+
+  GetDocument().Markers().AddGrammarMarker(
+      EphemeralRange(Position(text, 0), Position(text, 5)), "hi!\nhello!");
+
+  GetDocument().GetFrame()->Selection().SetSelection(
+      SelectionInDomTree::Builder()
+          .SetBaseAndExtent(Position(text, 0), Position(text, 1))
+          .Build(),
+      SetSelectionOptions());
+
+  const std::vector<ui::ImeTextSpan>& ime_text_spans =
+      Controller().TextInputInfo().ime_text_spans;
+
+  EXPECT_EQ(1u, ime_text_spans.size());
+  EXPECT_EQ(0u, ime_text_spans[0].start_offset);
+  EXPECT_EQ(5u, ime_text_spans[0].end_offset);
+  EXPECT_EQ(2u, ime_text_spans[0].suggestions.size());
+  EXPECT_EQ("hi!", ime_text_spans[0].suggestions[0]);
+  EXPECT_EQ("hello!", ime_text_spans[0].suggestions[1]);
+  EXPECT_EQ(ui::ImeTextSpan::Type::kGrammarSuggestion, ime_text_spans[0].type);
+}
+#endif
 }  // namespace blink

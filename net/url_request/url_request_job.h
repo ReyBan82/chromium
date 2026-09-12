@@ -8,9 +8,11 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "net/base/completion_once_callback.h"
@@ -23,14 +25,12 @@
 #include "net/base/request_priority.h"
 #include "net/cookies/canonical_cookie.h"
 #include "net/cookies/cookie_setting_override.h"
-#include "net/filter/source_stream.h"
+#include "net/cookies/cookie_util.h"
 #include "net/http/http_raw_request_headers.h"
 #include "net/http/http_response_headers.h"
 #include "net/socket/connection_attempts.h"
-#include "net/url_request/redirect_info.h"
 #include "net/url_request/referrer_policy.h"
 #include "net/url_request/url_request.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace net {
@@ -42,7 +42,8 @@ class HttpRequestHeaders;
 class HttpResponseInfo;
 class IOBuffer;
 struct LoadTimingInfo;
-class ProxyServer;
+class ProxyChain;
+class SourceStream;
 class SSLCertRequestInfo;
 class SSLInfo;
 class SSLPrivateKey;
@@ -111,11 +112,14 @@ class NET_EXPORT URLRequestJob {
 
   // Get the number of bytes received from network. The values returned by this
   // will never decrease over the lifetime of the URLRequestJob.
-  virtual int64_t GetTotalReceivedBytes() const;
+  virtual base::ByteSize GetTotalReceivedBytes() const;
 
   // Get the number of bytes sent over the network. The values returned by this
   // will never decrease over the lifetime of the URLRequestJob.
-  virtual int64_t GetTotalSentBytes() const;
+  virtual base::ByteSize GetTotalSentBytes() const;
+
+  // Get the number of bytes of the body received from network.
+  virtual base::ByteSize GetReceivedBodyBytes() const;
 
   // Called to fetch the current load state for the job.
   virtual LoadState GetLoadState() const;
@@ -125,6 +129,12 @@ class NET_EXPORT URLRequestJob {
   // doesn't have a charset will return false.
   virtual bool GetCharset(std::string* charset);
 
+  // Get the content encoding types (e.g., gzip, deflate) that were specified
+  // in the Content-Encoding response header but not decoded by the net stack,
+  // indicating how the response body needs to be decoded on the client side.
+  virtual void GetClientSideContentDecodingTypes(
+      std::vector<net::SourceStreamType>* types) const;
+
   // Called to get response info.
   virtual void GetResponseInfo(HttpResponseInfo* info);
 
@@ -132,6 +142,10 @@ class NET_EXPORT URLRequestJob {
   // each event blocked the request.  See FixupLoadTimingInfo in url_request.h
   // for more information on the difference.
   virtual void GetLoadTimingInfo(LoadTimingInfo* load_timing_info) const;
+
+  // Populates load timing internal information.
+  virtual void PopulateLoadTimingInternalInfo(
+      LoadTimingInternalInfo* load_timing_internal_info) const;
 
   // Gets the remote endpoint that the network stack is currently fetching the
   // URL from. Returns true and fills in |endpoint| if it is available; returns
@@ -192,12 +206,16 @@ class NET_EXPORT URLRequestJob {
       scoped_refptr<X509Certificate> client_cert,
       scoped_refptr<SSLPrivateKey> client_private_key);
 
+  // Instructs this URLRequestJob to continue with the request because the local
+  // network access permission has been granted.
+  virtual void SetPlatformLocalNetworkAccessGranted();
+
+  // Instructs this URLRequestJob to cancel the request because the local
+  // network access permission has been denied.
+  virtual void CancelPlatformLocalNetworkAccessRequest();
+
   // Continue processing the request ignoring the last error.
   virtual void ContinueDespiteLastError();
-
-  void FollowDeferredRedirect(
-      const absl::optional<std::vector<std::string>>& removed_headers,
-      const absl::optional<net::HttpRequestHeaders>& modified_headers);
 
   // Returns true if the Job is done producing response data and has called
   // NotifyDone on the request.
@@ -214,9 +232,7 @@ class NET_EXPORT URLRequestJob {
 
   // The number of bytes read before passing to the filter. This value reflects
   // bytes read even when there is no filter.
-  // TODO(caseq): this is only virtual because of StreamURLRequestJob.
-  // Consider removing virtual when StreamURLRequestJob is gone.
-  virtual int64_t prefilter_bytes_read() const;
+  base::ByteSize prefilter_bytes_read() const { return prefilter_bytes_read_; }
 
   // These methods are not applicable to all connections.
   virtual bool GetMimeType(std::string* mime_type) const;
@@ -252,9 +268,23 @@ class NET_EXPORT URLRequestJob {
   virtual void SetEarlyResponseHeadersCallback(
       ResponseHeadersCallback callback) {}
 
+  // Set a callback that will be invoked when a matching shared dictionary is
+  // available to determine whether it is allowed to use the dictionary.
+  virtual void SetIsSharedDictionaryReadAllowedCallback(
+      base::RepeatingCallback<bool()> callback) {}
+
   // Causes the current transaction always close its active socket on
   // destruction. Does not close H2/H3 sessions.
   virtual void CloseConnectionOnDestruction();
+
+  // Returns true if the request should be retried after activating Storage
+  // Access.
+  virtual bool NeedsRetryWithStorageAccess();
+
+  // Set a SharedDictionaryGetter which will be used to get a shared
+  // dictionary for this request.
+  virtual void SetSharedDictionaryGetter(
+      SharedDictionaryGetter dictionary_getter) {}
 
   // Given |policy|, |original_referrer|, and |destination|, returns the
   // referrer URL mandated by |request|'s referrer policy.
@@ -278,6 +308,9 @@ class NET_EXPORT URLRequestJob {
   // Notifies the job that a certificate is requested.
   void NotifyCertificateRequested(SSLCertRequestInfo* cert_request_info);
 
+  // Notifies the job that a local network access permission is required.
+  void NotifyPlatformLocalNetworkAccessPermissionRequired();
+
   // Notifies the job about an SSL certificate error.
   void NotifySSLCertificateError(int net_error,
                                  const SSLInfo& ssl_info,
@@ -285,7 +318,9 @@ class NET_EXPORT URLRequestJob {
 
   // Delegates to URLRequest.
   bool CanSetCookie(const net::CanonicalCookie& cookie,
-                    CookieOptions* options) const;
+                    CookieOptions* options,
+                    const net::FirstPartySetMetadata& first_party_set_metadata,
+                    CookieInclusionStatus* inclusion_status) const;
 
   // Notifies the job that headers have been received.
   void NotifyHeadersComplete();
@@ -329,17 +364,23 @@ class NET_EXPORT URLRequestJob {
   // bodies are never read.
   virtual void DoneReadingRedirectResponse();
 
+  // Called to tell the job that the body won't be read (and headers won't be
+  // cached) because we're going to retry the request.
+  virtual void DoneReadingRetryResponse();
+
   // Called to set up a SourceStream chain for this request.
   // Subclasses should return the appropriate last SourceStream of the chain,
   // or nullptr on error.
   virtual std::unique_ptr<SourceStream> SetUpSourceStream();
 
-  // Set the proxy server that was used, if any.
-  void SetProxyServer(const ProxyServer& proxy_server);
+  // Set the proxy chain that was used, if any.
+  void SetProxyChain(const ProxyChain& proxy_chain);
 
   // The number of bytes read after passing through the filter. This value
   // reflects bytes read even when there is no filter.
-  int64_t postfilter_bytes_read() const { return postfilter_bytes_read_; }
+  base::ByteSize postfilter_bytes_read() const {
+    return postfilter_bytes_read_;
+  }
 
   // Turns an integer result code into an Error and a count of bytes read.
   // The semantics are:
@@ -374,14 +415,6 @@ class NET_EXPORT URLRequestJob {
   // otherwise.
   int CanFollowRedirect(const GURL& new_url);
 
-  // Called in response to a redirect that was not canceled to follow the
-  // redirect. The current job will be replaced with a new job loading the
-  // given redirect destination.
-  void FollowRedirect(
-      const RedirectInfo& redirect_info,
-      const absl::optional<std::vector<std::string>>& removed_headers,
-      const absl::optional<net::HttpRequestHeaders>& modified_headers);
-
   // Called after every raw read. If |bytes_read| is > 0, this indicates
   // a successful read of |bytes_read| unfiltered bytes. If |bytes_read|
   // is 0, this indicates that there is no additional data to read.
@@ -412,10 +445,10 @@ class NET_EXPORT URLRequestJob {
   bool done_ = false;
 
   // Number of raw network bytes read from job subclass.
-  int64_t prefilter_bytes_read_ = 0;
+  base::ByteSize prefilter_bytes_read_;
 
   // Number of bytes after applying |source_stream_| filters.
-  int64_t postfilter_bytes_read_ = 0;
+  base::ByteSize postfilter_bytes_read_;
 
   // The first SourceStream of the SourceStream chain used.
   std::unique_ptr<SourceStream> source_stream_;
@@ -434,10 +467,6 @@ class NET_EXPORT URLRequestJob {
 
   // Expected content size
   int64_t expected_content_size_ = -1;
-
-  // Set when a redirect is deferred. Redirects are deferred after validity
-  // checks are performed, so this field must not be modified.
-  absl::optional<RedirectInfo> deferred_redirect_info_;
 
   // Non-null if ReadRawData() returned ERR_IO_PENDING, and the read has not
   // completed.

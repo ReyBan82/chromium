@@ -32,38 +32,44 @@ chrome.test.runTests([
   // Verifies that mounting succeeds, when a positive limit for opened files is
   // provided.
   function goodOpenedFilesLimit() {
-    chrome.fileSystemProvider.mount({
-      fileSystemId: 'file-system-id-3',
-      displayName: 'File System Name',
-      openedFilesLimit: 10
-    }, chrome.test.callbackPass());
+    chrome.fileSystemProvider.mount(
+        {
+          fileSystemId: 'file-system-id-3',
+          displayName: 'File System Name',
+          openedFilesLimit: 10,
+        },
+        chrome.test.callbackPass());
   },
 
   // Verifies that mounting succeeds, when limit for number of opened files is
   // set to 0. It means no limit.
   function goodOpenedFilesLimit() {
-    chrome.fileSystemProvider.mount({
-      fileSystemId: 'file-system-id-4',
-      displayName: 'File System Name',
-      openedFilesLimit: 0
-    }, chrome.test.callbackPass());
+    chrome.fileSystemProvider.mount(
+        {
+          fileSystemId: 'file-system-id-4',
+          displayName: 'File System Name',
+          openedFilesLimit: 0,
+        },
+        chrome.test.callbackPass());
   },
 
   // Verifies that mounting fails, when a negative limit for opened files is
   // provided.
   function illegalOpenedFilesLimit() {
-    chrome.fileSystemProvider.mount({
-      fileSystemId: 'file-system-id-5',
-      displayName: 'File System Name',
-      openedFilesLimit: -1
-    }, chrome.test.callbackFail('INVALID_OPERATION'));
+    chrome.fileSystemProvider.mount(
+        {
+          fileSystemId: 'file-system-id-5',
+          displayName: 'File System Name',
+          openedFilesLimit: -1,
+        },
+        chrome.test.callbackFail('INVALID_OPERATION'));
   },
 
   // End to end test. Mounts a volume using fileSystemProvider.mount(), then
   // checks if the mounted volume is added to VolumeManager, by querying
   // fileManagerPrivate.getVolumeMetadataList().
   function successfulMount() {
-    var fileSystemId = 'caramel-candy';
+    const fileSystemId = 'caramel-candy';
     chrome.fileSystemProvider.mount(
         {
           fileSystemId: fileSystemId,
@@ -71,7 +77,7 @@ chrome.test.runTests([
         },
         chrome.test.callbackPass(function() {
           chrome.fileManagerPrivate.getVolumeMetadataList(function(volumeList) {
-            var volumeInfo;
+            let volumeInfo;
             volumeList.forEach(function(inVolumeInfo) {
               // For extension based providers, provider id is the same as
               // extension id.
@@ -89,16 +95,16 @@ chrome.test.runTests([
   // Checks whether mounting a file system in writable mode ends up on filling
   // out the volume info properly.
   function successfulWritableMount() {
-    var fileSystemId = 'caramel-fudges';
+    const fileSystemId = 'caramel-fudges';
     chrome.fileSystemProvider.mount(
         {
           fileSystemId: fileSystemId,
           displayName: 'caramel-fudges.zip',
-          writable: true
+          writable: true,
         },
         chrome.test.callbackPass(function() {
           chrome.fileManagerPrivate.getVolumeMetadataList(function(volumeList) {
-            var volumeInfo;
+            let volumeInfo;
             volumeList.forEach(function(inVolumeInfo) {
               // For extension based providers, provider id is the same as
               // extension id.
@@ -178,21 +184,21 @@ chrome.test.runTests([
   // requests should succeed, except the last one which should fail with a
   // security error.
   function stressMountTest() {
-    var ALREADY_MOUNTED_FILE_SYSTEMS = 6;  // By previous tests.
-    var MAX_FILE_SYSTEMS = 16;
-    var index = 0;
-    var tryNextOne = function() {
+    const ALREADY_MOUNTED_FILE_SYSTEMS = 6;  // By previous tests.
+    const MAX_FILE_SYSTEMS = 16;
+    let index = 0;
+    const tryNextOne = function() {
       index++;
       if (index < MAX_FILE_SYSTEMS - ALREADY_MOUNTED_FILE_SYSTEMS + 1) {
-        var fileSystemId = index + '-stress-test';
+        const fileSystemId = `${index}-stress-test`;
         chrome.fileSystemProvider.mount(
-            {fileSystemId: fileSystemId, displayName: index + 'th File System'},
+            {fileSystemId: fileSystemId, displayName: `${index}th File System`},
             chrome.test.callbackPass(tryNextOne));
       } else {
         chrome.fileSystemProvider.mount(
             {
               fileSystemId: 'over-the-limit-fs-id',
-              displayName: 'Over The Limit File System'
+              displayName: 'Over The Limit File System',
             },
             chrome.test.callbackFail('TOO_MANY_OPENED'));
       }
@@ -203,20 +209,19 @@ chrome.test.runTests([
   // Tests if fileManagerPrivate.addProvidedFileSystem() emits the
   // onMountRequested() event.
   function requestMountSuccess() {
-    var onMountRequested = chrome.test.callbackPass(
-        function(onSuccess, onError) {
+    const onMountRequested =
+        chrome.test.callbackPass(function(onSuccess, onError) {
           chrome.fileSystemProvider.onMountRequested.removeListener(
               onMountRequested);
         });
 
-    chrome.fileSystemProvider.onMountRequested.addListener(
-        onMountRequested);
+    chrome.fileSystemProvider.onMountRequested.addListener(onMountRequested);
     chrome.fileManagerPrivate.getProviders(
         chrome.test.callbackPass(function(providers) {
           providers = providers.filter(function(provider) {
             // Filter out native providers.
-              return provider.providerId.length > 0 &&
-                     provider.providerId[0] != "@";
+            return provider.providerId.length > 0 &&
+                provider.providerId[0] !== '@';
           });
           chrome.test.assertEq(providers.length, 1);
           chrome.test.assertEq(chrome.runtime.id, providers[0].providerId);
@@ -229,7 +234,6 @@ chrome.test.runTests([
         }));
 
     chrome.fileManagerPrivate.addProvidedFileSystem(
-        chrome.runtime.id,
-        chrome.test.callbackPass(function() {}));
-  }
+        chrome.runtime.id, chrome.test.callbackPass(function() {}));
+  },
 ]);

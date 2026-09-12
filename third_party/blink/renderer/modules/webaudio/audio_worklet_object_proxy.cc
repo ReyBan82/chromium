@@ -6,11 +6,13 @@
 
 #include <utility>
 
+#include "third_party/blink/renderer/core/messaging/message_port.h"
 #include "third_party/blink/renderer/core/workers/threaded_worklet_messaging_proxy.h"
 #include "third_party/blink/renderer/core/workers/worker_thread.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_global_scope.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_worklet_messaging_proxy.h"
 #include "third_party/blink/renderer/modules/webaudio/cross_thread_audio_worklet_processor_info.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_copier_std.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 
@@ -19,16 +21,34 @@ namespace blink {
 AudioWorkletObjectProxy::AudioWorkletObjectProxy(
     AudioWorkletMessagingProxy* messaging_proxy_weak_ptr,
     ParentExecutionContextTaskRunners* parent_execution_context_task_runners,
-    float context_sample_rate)
+    MessagePortChannel global_scope_port_channel,
+    float context_sample_rate,
+    uint64_t context_sample_frame_at_construction,
+    uint32_t context_render_quantum_size_at_construction)
     : ThreadedWorkletObjectProxy(
           static_cast<ThreadedWorkletMessagingProxy*>(messaging_proxy_weak_ptr),
-          parent_execution_context_task_runners),
-      context_sample_rate_(context_sample_rate) {}
+          parent_execution_context_task_runners,
+          /*parent_agent_group_task_runner=*/nullptr),
+      global_scope_port_channel_(global_scope_port_channel),
+      context_sample_rate_at_construction_(context_sample_rate),
+      context_sample_frame_at_construction_(
+          context_sample_frame_at_construction),
+      context_render_quantum_size_at_construction_(
+          context_render_quantum_size_at_construction) {}
 
 void AudioWorkletObjectProxy::DidCreateWorkerGlobalScope(
     WorkerOrWorkletGlobalScope* global_scope) {
   global_scope_ = To<AudioWorkletGlobalScope>(global_scope);
-  global_scope_->SetSampleRate(context_sample_rate_);
+  if (RuntimeEnabledFeatures::AudioWorkletSharedPortEnabled()) {
+    auto* port = MakeGarbageCollected<MessagePort>(*global_scope_);
+    port->Entangle(global_scope_port_channel_);
+    global_scope_->SetPort(port);
+  }
+  global_scope_->SetRenderQuantumSize(
+      context_render_quantum_size_at_construction_);
+  global_scope_->SetSampleRate(context_sample_rate_at_construction_);
+  global_scope_->SetCurrentFrame(
+      base::checked_cast<size_t>(context_sample_frame_at_construction_));
   global_scope_->SetObjectProxy(*this);
 }
 
@@ -43,7 +63,7 @@ void AudioWorkletObjectProxy::SynchronizeProcessorInfoList() {
       processor_info_list =
           global_scope_->WorkletProcessorInfoListForSynchronization();
 
-  if (processor_info_list->size() == 0) {
+  if (processor_info_list->empty()) {
     return;
   }
 

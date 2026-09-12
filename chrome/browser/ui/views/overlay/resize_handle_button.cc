@@ -11,15 +11,17 @@
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/image/image_skia_operations.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/gfx/skbitmap_operations.h"
-#include "ui/views/vector_icons.h"
+#include "ui/views/accessibility/view_accessibility.h"
 
 namespace {
 
 constexpr int kResizeHandleButtonMargin = 4;
 constexpr int kResizeHandleButtonSize = 16;
+constexpr double kResizeHandleOpacity = 0x61;
 
 }  // namespace
 
@@ -34,7 +36,7 @@ ResizeHandleButton::ResizeHandleButton(PressedCallback callback)
   // Accessibility.
   const std::u16string resize_button_label(
       l10n_util::GetStringUTF16(IDS_PICTURE_IN_PICTURE_RESIZE_HANDLE_TEXT));
-  SetAccessibleName(resize_button_label);
+  GetViewAccessibility().SetName(resize_button_label);
   SetTooltipText(resize_button_label);
 }
 
@@ -91,17 +93,23 @@ void ResizeHandleButton::SetPosition(
 
 void ResizeHandleButton::SetQuadrant(
     VideoOverlayWindowViews::WindowQuadrant quadrant) {
-  if (current_quadrant_ == quadrant)
+  if (current_quadrant_ == quadrant) {
     return;
+  }
   current_quadrant_ = quadrant;
-  if (GetWidget())
+  if (GetWidget()) {
     UpdateImageForQuadrant();
+  }
 }
 
 void ResizeHandleButton::UpdateImageForQuadrant() {
-  const SkColor color = GetColorProvider()->GetColor(kColorPipWindowForeground);
-  gfx::ImageSkia icon =
-      gfx::CreateVectorIcon(kResizeHandleIcon, kResizeHandleButtonSize, color);
+  const SkColor color =
+      SkColorSetA(GetColorProvider()->GetColor(kColorPipWindowForeground),
+                  kResizeHandleOpacity);
+  gfx::ImageSkia icon = gfx::CreateVectorIcon(features::IsRoundedIconsEnabled()
+                                                  ? kResizeWindowIcon
+                                                  : kResizeHandleOldIcon,
+                                              kResizeHandleButtonSize, color);
   switch (current_quadrant_) {
     case VideoOverlayWindowViews::WindowQuadrant::kBottomLeft:
       SetImageHorizontalAlignment(views::ImageButton::ALIGN_RIGHT);
@@ -127,8 +135,9 @@ void ResizeHandleButton::UpdateImageForQuadrant() {
       break;
   }
 
-  SetImage(views::Button::STATE_NORMAL, icon);
+  SetImageModel(views::Button::STATE_NORMAL,
+                ui::ImageModel::FromImageSkia(icon));
 }
 
-BEGIN_METADATA(ResizeHandleButton, views::ImageButton)
+BEGIN_METADATA(ResizeHandleButton)
 END_METADATA

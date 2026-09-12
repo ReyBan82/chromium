@@ -4,11 +4,14 @@
 
 #include "components/signin/core/browser/mirror_account_reconcilor_delegate.h"
 
-#include "base/containers/contains.h"
 #include "base/logging.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/signin/core/browser/account_reconcilor.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "base/feature_list.h"
+#include "components/sync/base/features.h"
+#endif
 
 namespace signin {
 
@@ -16,7 +19,7 @@ MirrorAccountReconcilorDelegate::MirrorAccountReconcilorDelegate(
     IdentityManager* identity_manager)
     : identity_manager_(identity_manager) {
   DCHECK(identity_manager_);
-  identity_manager_->AddObserver(this);
+  identity_manager_observation_.Observe(identity_manager_);
   reconcile_enabled_ =
       identity_manager_->HasPrimaryAccount(GetConsentLevelForPrimaryAccount());
 }
@@ -29,7 +32,9 @@ bool MirrorAccountReconcilorDelegate::IsReconcileEnabled() const {
   return reconcile_enabled_;
 }
 
-gaia::GaiaSource MirrorAccountReconcilorDelegate::GetGaiaApiSource() const {
+gaia::GaiaSource MirrorAccountReconcilorDelegate::GetGaiaApiSource(
+    bool is_cookie_upgrade) const {
+  CHECK(!is_cookie_upgrade);
   return gaia::GaiaSource::kAccountReconcilorMirror;
 }
 
@@ -40,15 +45,14 @@ bool MirrorAccountReconcilorDelegate::ShouldAbortReconcileIfPrimaryHasError()
 
 ConsentLevel MirrorAccountReconcilorDelegate::GetConsentLevelForPrimaryAccount()
     const {
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
-  return ConsentLevel::kSignin;
-#elif BUILDFLAG(IS_CHROMEOS_LACROS)
-  // Whenever Mirror is enabled on a Lacros Profile, the Primary Account may or
-  // may not have consented to Chrome Sync. But we want to enable
-  // `AccountReconcilor` regardless - for minting Gaia cookies.
-  return ConsentLevel::kSignin;
+#if BUILDFLAG(IS_CHROMEOS)
+  return base::FeatureList::IsEnabled(
+             syncer::kReplaceSyncPromosWithSignInPromos)
+             ? ConsentLevel::kSignin
+             : ConsentLevel::kSync;
 #else
-  return ConsentLevel::kSync;
+  // For mobile (iOS, Android).
+  return ConsentLevel::kSignin;
 #endif
 }
 
@@ -72,8 +76,9 @@ void MirrorAccountReconcilorDelegate::OnPrimaryAccountChanged(
   // DisableReconcile logs out all accounts even if it was already disabled.
   bool should_enable_reconcile =
       identity_manager_->HasPrimaryAccount(GetConsentLevelForPrimaryAccount());
-  if (reconcile_enabled_ == should_enable_reconcile)
+  if (reconcile_enabled_ == should_enable_reconcile) {
     return;
+  }
 
   reconcile_enabled_ = should_enable_reconcile;
   if (should_enable_reconcile) {
@@ -81,6 +86,12 @@ void MirrorAccountReconcilorDelegate::OnPrimaryAccountChanged(
   } else {
     reconcilor()->DisableReconcile(true /* logout_all_gaia_accounts */);
   }
+}
+
+void MirrorAccountReconcilorDelegate::OnIdentityManagerShutdown(
+    signin::IdentityManager* identity_manager) {
+  identity_manager_observation_.Reset();
+  identity_manager_ = nullptr;
 }
 
 }  // namespace signin

@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "base/check_op.h"
+#include "base/containers/span.h"
 #include "third_party/blink/renderer/platform/audio/audio_array.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 
@@ -16,31 +17,27 @@ namespace blink {
 namespace vector_math {
 namespace scalar {
 
-static ALWAYS_INLINE void Conv(const float* source_p,
-                               int source_stride,
+ALWAYS_INLINE static void Conv(base::span<const float> source,
                                const float* filter_p,
-                               int filter_stride,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process,
+                               base::span<float> dest,
+                               size_t frames_to_process,
                                size_t filter_size,
                                const AudioFloatArray* /*prepared_filter*/) {
+  const float* source_p = source.data();
+  float* dest_p = dest.data();
   // Only contiguous convolution is implemented. Correlation (positive
   // |filter_stride|) and support for non-contiguous vectors are not
   // implemented.
-  DCHECK_EQ(1, source_stride);
-  DCHECK_EQ(-1, filter_stride);
-  DCHECK_EQ(1, dest_stride);
 
   size_t i = 0;
 
 // FIXME: The macro can be further optimized to avoid pipeline stalls. One
 // possibility is to maintain 4 separate sums and change the macro to
 // CONVOLVE_FOUR_SAMPLES.
-#define CONVOLVE_ONE_SAMPLE                   \
-  do {                                        \
-    sum += source_p[i + j] * *(filter_p - j); \
-    j++;                                      \
+#define CONVOLVE_ONE_SAMPLE                                \
+  do {                                                     \
+    sum += UNSAFE_TODO(source_p[i + j] * *(filter_p - j)); \
+    j++;                                                   \
   } while (0)
 
   while (i < frames_to_process) {
@@ -303,157 +300,125 @@ static ALWAYS_INLINE void Conv(const float* source_p,
         CONVOLVE_ONE_SAMPLE;
       }
     }
-    dest_p[i++] = sum;
+    UNSAFE_TODO(dest_p[i++] = sum);
   }
 #undef CONVOLVE_ONE_SAMPLE
 }
 
-static ALWAYS_INLINE void Vadd(const float* source1p,
-                               int source_stride1,
-                               const float* source2p,
-                               int source_stride2,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
-  while (frames_to_process > 0u) {
-    *dest_p = *source1p + *source2p;
-    source1p += source_stride1;
-    source2p += source_stride2;
-    dest_p += dest_stride;
-    --frames_to_process;
+ALWAYS_INLINE static void Vadd(base::span<const float> source1,
+                               base::span<const float> source2,
+                               base::span<float> dest) {
+  // CHECK allows the compiler to elide bounds checks (docs/unsafe_buffers.md).
+  CHECK_EQ(source1.size(), dest.size());
+  CHECK_EQ(source2.size(), dest.size());
+  for (size_t i = 0; i < dest.size(); ++i) {
+    dest[i] = source1[i] + source2[i];
   }
 }
 
-static ALWAYS_INLINE void Vsub(const float* source1p,
-                               int source_stride1,
-                               const float* source2p,
-                               int source_stride2,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
-  while (frames_to_process > 0u) {
-    *dest_p = *source1p - *source2p;
-    source1p += source_stride1;
-    source2p += source_stride2;
-    dest_p += dest_stride;
-    --frames_to_process;
+ALWAYS_INLINE static void Vsub(base::span<const float> source1,
+                               base::span<const float> source2,
+                               base::span<float> dest) {
+  // CHECK allows the compiler to elide bounds checks (docs/unsafe_buffers.md).
+  CHECK_EQ(source1.size(), dest.size());
+  CHECK_EQ(source2.size(), dest.size());
+  for (size_t i = 0; i < dest.size(); ++i) {
+    dest[i] = source1[i] - source2[i];
   }
 }
 
-static ALWAYS_INLINE void Vclip(const float* source_p,
-                                int source_stride,
-                                const float* low_threshold_p,
-                                const float* high_threshold_p,
-                                float* dest_p,
-                                int dest_stride,
-                                uint32_t frames_to_process) {
-  while (frames_to_process > 0u) {
-    *dest_p = ClampTo(*source_p, *low_threshold_p, *high_threshold_p);
-    source_p += source_stride;
-    dest_p += dest_stride;
-    --frames_to_process;
+ALWAYS_INLINE static void Vclip(base::span<const float> source,
+                                float low_threshold,
+                                float high_threshold,
+                                base::span<float> dest) {
+  // CHECK allows the compiler to elide bounds checks (docs/unsafe_buffers.md).
+  CHECK_EQ(source.size(), dest.size());
+  for (size_t i = 0; i < dest.size(); ++i) {
+    dest[i] = ClampTo(source[i], low_threshold, high_threshold);
   }
 }
 
-static ALWAYS_INLINE void Vmaxmgv(const float* source_p,
+ALWAYS_INLINE static void Vmaxmgv(const float* source_p,
                                   int source_stride,
                                   float* max_p,
-                                  uint32_t frames_to_process) {
+                                  size_t frames_to_process) {
   while (frames_to_process > 0u) {
     *max_p = std::max(*max_p, std::abs(*source_p));
-    source_p += source_stride;
+    UNSAFE_TODO(source_p += source_stride);
     --frames_to_process;
   }
 }
 
-static ALWAYS_INLINE void Vmul(const float* source1p,
-                               int source_stride1,
-                               const float* source2p,
-                               int source_stride2,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
-  while (frames_to_process > 0u) {
-    *dest_p = *source1p * *source2p;
-    source1p += source_stride1;
-    source2p += source_stride2;
-    dest_p += dest_stride;
-    --frames_to_process;
+ALWAYS_INLINE static void Vmul(base::span<const float> source1,
+                               base::span<const float> source2,
+                               base::span<float> dest) {
+  // CHECK allows the compiler to elide bounds checks (docs/unsafe_buffers.md).
+  CHECK_EQ(source1.size(), dest.size());
+  CHECK_EQ(source2.size(), dest.size());
+  for (size_t i = 0; i < dest.size(); ++i) {
+    dest[i] = source1[i] * source2[i];
   }
 }
 
-static ALWAYS_INLINE void Vsma(const float* source_p,
-                               int source_stride,
-                               const float* scale,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
-  const float k = *scale;
-  while (frames_to_process > 0u) {
-    *dest_p += k * *source_p;
-    source_p += source_stride;
-    dest_p += dest_stride;
-    --frames_to_process;
+ALWAYS_INLINE static void Vsma(base::span<const float> source,
+                               float scale,
+                               base::span<float> dest) {
+  // CHECK allows the compiler to elide bounds checks (docs/unsafe_buffers.md).
+  CHECK_EQ(source.size(), dest.size());
+  for (size_t i = 0; i < dest.size(); ++i) {
+    dest[i] += scale * source[i];
   }
 }
 
-static ALWAYS_INLINE void Vsmul(const float* source_p,
-                                int source_stride,
-                                const float* scale,
-                                float* dest_p,
-                                int dest_stride,
-                                uint32_t frames_to_process) {
-  const float k = *scale;
-  while (frames_to_process > 0u) {
-    *dest_p = k * *source_p;
-    source_p += source_stride;
-    dest_p += dest_stride;
-    --frames_to_process;
+ALWAYS_INLINE static void Vsmul(base::span<const float> source,
+                                float scale,
+                                base::span<float> dest) {
+  // CHECK allows the compiler to elide bounds checks (docs/unsafe_buffers.md).
+  CHECK_EQ(source.size(), dest.size());
+  for (size_t i = 0; i < dest.size(); ++i) {
+    dest[i] = scale * source[i];
   }
 }
 
-static ALWAYS_INLINE void Vsadd(const float* source_p,
-                                int source_stride,
-                                const float* addend,
-                                float* dest_p,
-                                int dest_stride,
-                                uint32_t frames_to_process) {
-  const float k = *addend;
-  while (frames_to_process > 0u) {
-    *dest_p = *source_p + k;
-    source_p += source_stride;
-    dest_p += dest_stride;
-    --frames_to_process;
+ALWAYS_INLINE static void Vsadd(base::span<const float> source,
+                                float addend,
+                                base::span<float> dest) {
+  // CHECK allows the compiler to elide bounds checks (docs/unsafe_buffers.md).
+  CHECK_EQ(source.size(), dest.size());
+  for (size_t i = 0; i < dest.size(); ++i) {
+    dest[i] = source[i] + addend;
   }
 }
 
-static ALWAYS_INLINE void Vsvesq(const float* source_p,
+ALWAYS_INLINE static void Vsvesq(const float* source_p,
                                  int source_stride,
                                  float* sum_p,
-                                 uint32_t frames_to_process) {
+                                 size_t frames_to_process) {
   while (frames_to_process > 0u) {
     const float sample = *source_p;
     *sum_p += sample * sample;
-    source_p += source_stride;
+    UNSAFE_TODO(source_p += source_stride);
     --frames_to_process;
   }
 }
 
-static ALWAYS_INLINE void Zvmul(const float* real1p,
+ALWAYS_INLINE static void Zvmul(const float* real1p,
                                 const float* imag1p,
                                 const float* real2p,
                                 const float* imag2p,
                                 float* real_dest_p,
                                 float* imag_dest_p,
-                                uint32_t frames_to_process) {
+                                size_t frames_to_process) {
   for (size_t i = 0u; i < frames_to_process; ++i) {
     // Read and compute result before storing them, in case the
     // destination is the same as one of the sources.
-    float real_result = real1p[i] * real2p[i] - imag1p[i] * imag2p[i];
-    float imag_result = real1p[i] * imag2p[i] + imag1p[i] * real2p[i];
+    float real_result =
+        UNSAFE_TODO(real1p[i] * real2p[i] - imag1p[i] * imag2p[i]);
+    float imag_result =
+        UNSAFE_TODO(real1p[i] * imag2p[i] + imag1p[i] * real2p[i]);
 
-    real_dest_p[i] = real_result;
-    imag_dest_p[i] = imag_result;
+    UNSAFE_TODO(real_dest_p[i] = real_result);
+    UNSAFE_TODO(imag_dest_p[i] = imag_result);
   }
 }
 

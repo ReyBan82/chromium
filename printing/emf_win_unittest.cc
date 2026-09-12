@@ -10,12 +10,12 @@
 #include <winspool.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/files/scoped_temp_dir.h"
 #include "base/path_service.h"
 #include "base/win/scoped_hdc.h"
 #include "printing/mojom/print.mojom.h"
@@ -36,15 +36,13 @@ class EmfPrintingTest : public testing::Test, public PrintingContext::Delegate {
   typedef testing::Test Parent;
   static bool IsTestCaseDisabled() {
     // It is assumed this printer is a HP Color LaserJet 4550 PCL or 4700.
-    HDC hdc = CreateDC(L"WINSPOOL", L"UnitTest Printer", nullptr, nullptr);
-    if (!hdc)
-      return true;
-    DeleteDC(hdc);
-    return false;
+    base::win::ScopedCreateDC hdc(
+        CreateDC(L"WINSPOOL", L"UnitTest Printer", nullptr, nullptr));
+    return !hdc.is_valid();
   }
 
   // PrintingContext::Delegate methods.
-  gfx::NativeView GetParentView() override { return nullptr; }
+  gfx::NativeView GetParentView() override { return gfx::NativeView(); }
   std::string GetAppLocale() override { return std::string(); }
 };
 
@@ -70,19 +68,19 @@ TEST(EmfTest, DC) {
 
   // Playback the data.
   Emf emf;
-  // TODO(thestig): Make `data` uint8_t and avoid the base::as_bytes() call.
-  EXPECT_TRUE(emf.InitFromData(base::as_bytes(base::make_span(data))));
-  HDC hdc = CreateCompatibleDC(nullptr);
-  EXPECT_TRUE(hdc);
+  // TODO(thestig): Make `data` uint8_t and avoid the base::as_byte_span() call.
+  EXPECT_TRUE(emf.InitFromData(base::as_byte_span(data)));
+  base::win::ScopedCreateDC hdc(CreateCompatibleDC(nullptr));
+  ASSERT_TRUE(hdc.is_valid());
   RECT output_rect = {0, 0, 10, 10};
-  EXPECT_TRUE(emf.Playback(hdc, &output_rect));
-  EXPECT_TRUE(DeleteDC(hdc));
+  EXPECT_TRUE(emf.Playback(hdc.get(), &output_rect));
 }
 
 // Disabled if no "UnitTest printer" exist. Useful to reproduce bug 1186598.
 TEST_F(EmfPrintingTest, Enumerate) {
-  if (IsTestCaseDisabled())
-    return;
+  if (IsTestCaseDisabled()) {
+    GTEST_SKIP();
+  }
 
   auto settings = std::make_unique<PrintSettings>();
 
@@ -90,12 +88,13 @@ TEST_F(EmfPrintingTest, Enumerate) {
   settings->set_device_name(u"UnitTest Printer");
 
   // Initialize it.
-  PrintingContextWin context(this);
+  PrintingContextWin context(this,
+                             PrintingContext::OutOfProcessBehavior::kDisabled);
   EXPECT_EQ(mojom::ResultCode::kSuccess,
             context.InitWithSettingsForTest(std::move(settings)));
 
   base::FilePath emf_file;
-  EXPECT_TRUE(base::PathService::Get(base::DIR_SOURCE_ROOT, &emf_file));
+  EXPECT_TRUE(base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &emf_file));
   emf_file = emf_file.Append(FILE_PATH_LITERAL("printing"))
                  .Append(FILE_PATH_LITERAL("test"))
                  .Append(FILE_PATH_LITERAL("data"))
@@ -103,12 +102,13 @@ TEST_F(EmfPrintingTest, Enumerate) {
                  .Append(FILE_PATH_LITERAL("test4.emf"));
 
   // Load any EMF with an image.
-  std::string emf_data;
-  base::ReadFileToString(emf_file, &emf_data);
-  ASSERT_TRUE(emf_data.size());
+  std::optional<std::vector<uint8_t>> emf_data =
+      base::ReadFileToBytes(emf_file);
+  ASSERT_TRUE(emf_data.has_value());
+  ASSERT_TRUE(emf_data.value().size());
 
   Emf emf;
-  EXPECT_TRUE(emf.InitFromData(base::as_bytes(base::make_span(emf_data))));
+  EXPECT_TRUE(emf.InitFromData(emf_data.value()));
 
   // This will print to file. The reason is that when running inside a
   // unit_test, PrintingContext automatically dumps its files to the
@@ -133,10 +133,12 @@ TEST_F(EmfPrintingTest, Enumerate) {
 
 // Disabled if no "UnitTest printer" exists.
 TEST_F(EmfPrintingTest, PageBreak) {
-  base::win::ScopedCreateDC dc(
+  base::win::ScopedCreateDC hdc(
       CreateDC(L"WINSPOOL", L"UnitTest Printer", nullptr, nullptr));
-  if (!dc.Get())
-    return;
+  if (!hdc.is_valid()) {
+    GTEST_SKIP();
+  }
+
   std::vector<char> data;
   {
     Emf emf;
@@ -161,12 +163,12 @@ TEST_F(EmfPrintingTest, PageBreak) {
   DOCINFO di = {0};
   di.cbSize = sizeof(DOCINFO);
   di.lpszDocName = L"Test Job";
-  int job_id = ::StartDoc(dc.Get(), &di);
+  int job_id = ::StartDoc(hdc.Get(), &di);
   Emf emf;
-  // TODO(thestig): Make `data` uint8_t and avoid the base::as_bytes() call.
-  EXPECT_TRUE(emf.InitFromData(base::as_bytes(base::make_span(data))));
-  EXPECT_TRUE(emf.SafePlayback(dc.Get()));
-  ::EndDoc(dc.Get());
+  // TODO(thestig): Make `data` uint8_t and avoid the base::as_byte_span() call.
+  EXPECT_TRUE(emf.InitFromData(base::as_byte_span(data)));
+  EXPECT_TRUE(emf.SafePlayback(hdc.Get()));
+  ::EndDoc(hdc.Get());
   // Since presumably the printer is not real, let us just delete the job from
   // the queue.
   HANDLE printer = nullptr;
@@ -177,39 +179,57 @@ TEST_F(EmfPrintingTest, PageBreak) {
   }
 }
 
-TEST(EmfTest, FileBackedEmf) {
-  // Simplest use case.
-  base::ScopedTempDir scratch_metafile_dir;
-  ASSERT_TRUE(scratch_metafile_dir.CreateUniqueTempDir());
-  base::FilePath metafile_path;
-  EXPECT_TRUE(base::CreateTemporaryFileInDir(scratch_metafile_dir.GetPath(),
-                                             &metafile_path));
-  uint32_t size;
+TEST(EmfTest, RemainingMetafileSize) {
+  Emf emf;
+  EXPECT_TRUE(emf.Init());
+  EXPECT_TRUE(emf.context());
+  ::Rectangle(emf.context(), 10, 10, 190, 190);
+  EXPECT_TRUE(emf.FinishDocument());
+
+  uint32_t total_size = emf.GetDataSize();
+  EXPECT_GT(total_size, 0u);
+
+  RECT page_bounds = emf.GetPageBounds(1).ToRECT();
+  base::win::ScopedCreateDC hdc(CreateCompatibleDC(nullptr));
+  ASSERT_TRUE(hdc.is_valid());
+  Emf::Enumerator emf_enum(emf, hdc.Get(), &page_bounds);
+
+  uint32_t remaining_size = total_size;
+  for (const auto& record : emf_enum) {
+    remaining_size -= record.record()->nSize;
+  }
+
+  EXPECT_EQ(emf_enum.context_.remaining_metafile_size, remaining_size);
+  EXPECT_EQ(remaining_size, 0u);
+}
+
+TEST(PostScriptMetaFileTest, SafePlaybackUndersizedComment) {
   std::vector<char> data;
   {
-    Emf emf;
-    EXPECT_TRUE(emf.InitToFile(metafile_path));
+    PostScriptMetaFile emf;
+    EXPECT_TRUE(emf.Init());
     EXPECT_TRUE(emf.context());
-    // An empty EMF is invalid, so we put at least a rectangle in it.
+    // Add `EMR_GDICOMMENT` records where the comment size field is deliberately
+    // wrong/undersized (< sizeof(uint16_t)). A valid PostScript comment
+    // requires at least 2 bytes for the payload size header, so a size of 0 or
+    // 1 cannot hold a valid payload size.
+    EXPECT_TRUE(::GdiComment(emf.context(), 0, nullptr));
+    uint8_t byte = 0;
+    EXPECT_TRUE(::GdiComment(emf.context(), 1, &byte));
     ::Rectangle(emf.context(), 10, 10, 190, 190);
     EXPECT_TRUE(emf.FinishDocument());
-    size = emf.GetDataSize();
-    EXPECT_GT(size, EMF_HEADER_SIZE);
+    uint32_t size = emf.GetDataSize();
+    EXPECT_GT(size, 0u);
     EXPECT_TRUE(emf.GetDataAsVector(&data));
-    EXPECT_EQ(data.size(), size);
   }
-  int64_t file_size = 0;
-  base::GetFileSize(metafile_path, &file_size);
-  EXPECT_EQ(size, file_size);
 
-  // Playback the data.
-  HDC hdc = CreateCompatibleDC(nullptr);
-  EXPECT_TRUE(hdc);
-  Emf emf;
-  EXPECT_TRUE(emf.InitFromFile(metafile_path));
-  RECT output_rect = {0, 0, 10, 10};
-  EXPECT_TRUE(emf.Playback(hdc, &output_rect));
-  EXPECT_TRUE(DeleteDC(hdc));
+  PostScriptMetaFile emf;
+  EXPECT_TRUE(emf.InitFromData(base::as_byte_span(data)));
+  base::win::ScopedCreateDC hdc(CreateCompatibleDC(nullptr));
+  ASSERT_TRUE(hdc.is_valid());
+  // `SafePlayback()` should safely skip the undersized comment records and must
+  // not crash from an out-of-bounds read.
+  EXPECT_TRUE(emf.SafePlayback(hdc.get()));
 }
 
 }  // namespace printing

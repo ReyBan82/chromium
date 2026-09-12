@@ -4,6 +4,9 @@
 
 #include "device/gamepad/public/cpp/gamepad_mojom_traits.h"
 
+#include <algorithm>
+#include <array>
+
 #include "base/test/task_environment.h"
 #include "device/gamepad/public/cpp/gamepad.h"
 #include "device/gamepad/public/mojom/gamepad.mojom.h"
@@ -24,18 +27,18 @@ enum GamepadTestDataType {
 Gamepad GetWebGamepadInstance(GamepadTestDataType type) {
   GamepadButton wgb(true, false, 1.0f);
 
-  GamepadVector wgv;
-  memset(&wgv, 0, sizeof(GamepadVector));
+  GamepadVector wgv = {};
   wgv.not_null = true;
   wgv.x = wgv.y = wgv.z = 1.0f;
 
-  GamepadQuaternion wgq;
-  memset(&wgq, 0, sizeof(GamepadQuaternion));
+  GamepadQuaternion wgq = {};
   wgq.not_null = true;
   wgq.x = wgq.y = wgq.z = wgq.w = 2.0f;
 
-  GamepadPose wgp;
-  memset(&wgp, 0, sizeof(GamepadPose));
+  GamepadPose wgp = {};
+
+  GamepadTouch wgt = {};
+
   if (type == GamepadPose_Null) {
     wgp.not_null = false;
   } else if (type == GamepadCommon) {
@@ -55,18 +58,28 @@ Gamepad GetWebGamepadInstance(GamepadTestDataType type) {
     wgp.angular_acceleration = wgv;
   }
 
-  constexpr char16_t kTestIdString[] = {L'M', L'o', L'c', L'k', L'S',
-                                        L't', L'i', L'c', L'k', L' ',
-                                        L'3', L'0', L'0', L'0', L'\0'};
-  constexpr size_t kTestIdStringLength = std::size(kTestIdString);
+  constexpr auto kTestIdString = std::to_array<char16_t>({
+      L'M',
+      L'o',
+      L'c',
+      L'k',
+      L'S',
+      L't',
+      L'i',
+      L'c',
+      L'k',
+      L' ',
+      L'3',
+      L'0',
+      L'0',
+      L'0',
+      L'\0',
+  });
 
-  Gamepad send;
-  memset(&send, 0, sizeof(Gamepad));
-
+  Gamepad send = {};
   send.connected = true;
-  for (size_t i = 0; i < kTestIdStringLength; i++) {
-    send.id[i] = kTestIdString[i];
-  }
+
+  std::ranges::copy(kTestIdString, send.id.begin());
   send.mapping = GamepadMapping::kNone;
   send.timestamp = base::TimeTicks::Now().since_origin().InMicroseconds();
   send.axes_length = 0U;
@@ -83,13 +96,18 @@ Gamepad GetWebGamepadInstance(GamepadTestDataType type) {
   send.hand = GamepadHand::kRight;
   send.display_id = static_cast<unsigned short>(16);
 
+  send.touch_events_length = 0U;
+  for (size_t i = 0; i < Gamepad::kTouchEventsLengthCap; i++) {
+    send.touch_events_length++;
+    send.touch_events[i] = wgt;
+  }
   return send;
 }
 
 bool isWebGamepadButtonEqual(const GamepadButton& lhs,
                              const GamepadButton& rhs) {
   return (lhs.pressed == rhs.pressed && lhs.touched == rhs.touched &&
-          lhs.value == rhs.value);
+          lhs.value == rhs.value && lhs.type == rhs.type);
 }
 
 bool isWebGamepadVectorEqual(const GamepadVector& lhs,
@@ -132,29 +150,38 @@ bool isWebGamepadPoseEqual(const GamepadPose& lhs, const GamepadPose& rhs) {
   return true;
 }
 
+bool isWebGamepadTouchEqual(const GamepadTouch& lhs, const GamepadTouch& rhs) {
+  return (lhs.x == rhs.x && lhs.y == rhs.y);
+}
+
 bool isWebGamepadEqual(const Gamepad& send, const Gamepad& echo) {
   if (send.connected != echo.connected || send.timestamp != echo.timestamp ||
       send.axes_length != echo.axes_length ||
       send.buttons_length != echo.buttons_length ||
       !isWebGamepadPoseEqual(send.pose, echo.pose) || send.hand != echo.hand ||
-      send.display_id != echo.display_id || send.mapping != echo.mapping) {
+      send.display_id != echo.display_id || send.mapping != echo.mapping ||
+      send.touch_events_length != echo.touch_events_length) {
     return false;
   }
-  for (size_t i = 0; i < Gamepad::kIdLengthCap; i++) {
-    if (send.id[i] != echo.id[i]) {
-      return false;
-    }
+
+  if (send.id != echo.id) {
+    return false;
   }
-  for (size_t i = 0; i < Gamepad::kAxesLengthCap; i++) {
-    if (send.axes[i] != echo.axes[i]) {
-      return false;
-    }
+
+  if (send.axes != echo.axes) {
+    return false;
   }
-  for (size_t i = 0; i < Gamepad::kButtonsLengthCap; i++) {
-    if (!isWebGamepadButtonEqual(send.buttons[i], echo.buttons[i])) {
-      return false;
-    }
+
+  if (!std::ranges::equal(send.buttons, echo.buttons,
+                          isWebGamepadButtonEqual)) {
+    return false;
   }
+
+  if (!std::ranges::equal(send.touch_events, echo.touch_events,
+                          isWebGamepadTouchEqual)) {
+    return false;
+  }
+
   return true;
 }
 }  // namespace

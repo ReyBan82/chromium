@@ -4,6 +4,8 @@
 
 static_library("sync_sessions") {
   sources = [
+    "features.cc",
+    "features.h",
     "local_session_event_handler_impl.cc",
     "local_session_event_handler_impl.h",
     "local_session_event_router.h",
@@ -11,10 +13,8 @@ static_library("sync_sessions") {
     "open_tabs_ui_delegate.h",
     "open_tabs_ui_delegate_impl.cc",
     "open_tabs_ui_delegate_impl.h",
-    "proxy_tabs_data_type_controller.cc",
-    "proxy_tabs_data_type_controller.h",
-    "session_model_type_controller.cc",
-    "session_model_type_controller.h",
+    "session_data_type_controller.cc",
+    "session_data_type_controller.h",
     "session_store.cc",
     "session_store.h",
     "session_sync_bridge.cc",
@@ -35,6 +35,7 @@ static_library("sync_sessions") {
     "synced_session_tracker.h",
     "synced_tab_delegate.cc",
     "synced_tab_delegate.h",
+    "synced_window_delegate.cc",
     "synced_window_delegate.h",
     "synced_window_delegates_getter.cc",
     "synced_window_delegates_getter.h",
@@ -45,6 +46,9 @@ static_library("sync_sessions") {
   public_deps = [
     "//components/sessions",
     "//components/sync",
+
+    # TODO(crbug.com/525218330): Remove this dependency by moving DeviceType and
+    # FormFactor enums from DeviceInfo to components/sync/base.
     "//components/sync_device_info",
   ]
 
@@ -60,7 +64,7 @@ static_library("sync_sessions") {
     "//components/sync_user_events",
     "//components/version_info",
     "//google_apis",
-    "//ui/base:base",
+    "//ui/base",
     "//ui/gfx",
     "//url",
   ]
@@ -69,6 +73,12 @@ static_library("sync_sessions") {
 static_library("test_support") {
   testonly = true
   sources = [
+    "fake_open_tabs_ui_delegate.cc",
+    "fake_open_tabs_ui_delegate.h",
+    "mock_open_tabs_ui_delegate.cc",
+    "mock_open_tabs_ui_delegate.h",
+    "mock_session_sync_service.cc",
+    "mock_session_sync_service.h",
     "mock_sync_sessions_client.cc",
     "mock_sync_sessions_client.h",
     "session_sync_test_helper.cc",
@@ -116,7 +126,7 @@ source_set("unit_tests") {
     "//components/sync:test_support",
     "//testing/gmock",
     "//testing/gtest",
-    "//ui/base:base",
+    "//ui/base",
     "//url",
   ]
 }

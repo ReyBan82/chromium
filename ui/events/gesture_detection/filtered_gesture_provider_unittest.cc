@@ -32,7 +32,9 @@ class FilteredGestureProviderTest : public GestureProviderClient,
 // set until (incl) touch-end.
 TEST_F(FilteredGestureProviderTest, TouchMovedBeyondSlopRegion_SingleTouch) {
   GestureProvider::Config config;
-  FilteredGestureProvider provider(config, this);
+  auto provider_ptr =
+      base::MakeRefCounted<FilteredGestureProvider>(config, this);
+  FilteredGestureProvider& provider = *provider_ptr;
 
   const float kSlopRegion = config.gesture_detector_config.touch_slop;
 
@@ -96,7 +98,9 @@ TEST_F(FilteredGestureProviderTest, TouchMovedBeyondSlopRegion_SingleTouch) {
 // first movement in any touch-point.
 TEST_F(FilteredGestureProviderTest, TouchMovedBeyondSlopRegion_MultiTouch) {
   GestureProvider::Config config;
-  FilteredGestureProvider provider(config, this);
+  auto provider_ptr =
+      base::MakeRefCounted<FilteredGestureProvider>(config, this);
+  FilteredGestureProvider& provider = *provider_ptr;
 
   const float kSlopRegion = config.gesture_detector_config.touch_slop;
 
@@ -153,6 +157,19 @@ TEST_F(FilteredGestureProviderTest, TouchMovedBeyondSlopRegion_MultiTouch) {
     EXPECT_TRUE(result.succeeded);
     EXPECT_TRUE(result.moved_beyond_slop_region);
   }
+}
+
+// Extra cancel events should be handled gracefully: https://crbug.com/1407442
+TEST_F(FilteredGestureProviderTest, ExtraCancel) {
+  GestureProvider::Config config;
+  auto provider_ptr =
+      base::MakeRefCounted<FilteredGestureProvider>(config, this);
+  FilteredGestureProvider& provider = *provider_ptr;
+
+  test::MockMotionEvent event(MotionEvent::Action::CANCEL, base::TimeTicks(), 0,
+                              0);
+  auto result = provider.OnTouchEvent(event);
+  EXPECT_FALSE(result.succeeded);
 }
 
 }  // namespace ui

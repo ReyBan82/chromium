@@ -1,8 +1,8 @@
 include_rules = [
   # Explicitly forbid //content even though it is not allowed presently.
   "-content",
-  "-components/invalidation",
-  "+components/prefs",
-  "+google_apis/gaia",
-  "+mojo/public",
+  "+components/invalidation",
+  "+components/gcm_driver",
+  "+components/keyed_service",
+  "+net/base/backoff_entry.h",
 ]

@@ -7,21 +7,21 @@ package org.chromium.chrome.browser.share.share_sheet;
 import android.graphics.drawable.Drawable;
 import android.view.View.OnClickListener;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.modelutil.PropertyKey;
 import org.chromium.ui.modelutil.PropertyModel.WritableBooleanPropertyKey;
 import org.chromium.ui.modelutil.PropertyModel.WritableObjectPropertyKey;
 
-/**
- * The properties associated with rendering an item in the share sheet.
- */
+/** The properties associated with rendering an item in the share sheet. */
+@NullMarked
 final class ShareSheetItemViewProperties {
     public static final WritableObjectPropertyKey<Drawable> ICON =
             new WritableObjectPropertyKey<>();
 
-    public static final WritableObjectPropertyKey<String> LABEL = new WritableObjectPropertyKey();
+    public static final WritableObjectPropertyKey<String> LABEL = new WritableObjectPropertyKey<>();
 
     public static final WritableObjectPropertyKey<String> CONTENT_DESCRIPTION =
-            new WritableObjectPropertyKey();
+            new WritableObjectPropertyKey<>();
 
     public static final WritableObjectPropertyKey<OnClickListener> CLICK_LISTENER =
             new WritableObjectPropertyKey<>();
@@ -30,5 +30,6 @@ final class ShareSheetItemViewProperties {
             new WritableBooleanPropertyKey();
 
     public static final PropertyKey[] ALL_KEYS = {
-            ICON, LABEL, CONTENT_DESCRIPTION, CLICK_LISTENER, SHOW_NEW_BADGE};
+        ICON, LABEL, CONTENT_DESCRIPTION, CLICK_LISTENER, SHOW_NEW_BADGE
+    };
 }

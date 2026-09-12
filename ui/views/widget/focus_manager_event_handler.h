@@ -5,8 +5,10 @@
 #ifndef UI_VIEWS_WIDGET_FOCUS_MANAGER_EVENT_HANDLER_H_
 #define UI_VIEWS_WIDGET_FOCUS_MANAGER_EVENT_HANDLER_H_
 
-#include "base/memory/raw_ptr.h"
-#include "base/strings/string_piece.h"
+#include <string_view>
+
+#include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "ui/events/event_handler.h"
 
 namespace aura {
@@ -30,13 +32,16 @@ class FocusManagerEventHandler : public ui::EventHandler {
 
   // Implementation of ui::EventHandler:
   void OnKeyEvent(ui::KeyEvent* event) override;
-  base::StringPiece GetLogContext() const override;
+  std::string_view GetLogContext() const override;
 
  private:
-  raw_ptr<Widget> widget_;
+  base::WeakPtr<Widget> widget_;
 
-  // |window_| is the event target that is associated with this class.
-  raw_ptr<aura::Window> window_;
+  // Registers `this` as a pre-target handler on the aura::Window associated
+  // with this class, via ScopedObservationTraits<ui::EventTarget,
+  // ui::EventHandler>.
+  base::ScopedObservation<ui::EventTarget, ui::EventHandler>
+      window_observation_{this};
 };
 
 }  // namespace views

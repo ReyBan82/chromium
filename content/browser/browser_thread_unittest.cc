@@ -29,15 +29,12 @@
 #include "content/browser/scheduler/browser_task_executor.h"
 #include "content/browser/scheduler/browser_task_priority.h"
 #include "content/browser/scheduler/browser_ui_thread_scheduler.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
 
 namespace content {
 
 namespace {
-
-using ::testing::Invoke;
 
 class SequenceManagerThreadDelegate : public base::Thread::Delegate {
  public:
@@ -52,7 +49,8 @@ class SequenceManagerThreadDelegate : public base::Thread::Delegate {
     default_task_runner_ =
         browser_ui_thread_scheduler->GetHandle()->GetDefaultTaskRunner();
 
-    ui_sequence_manager_->SetDefaultTaskRunner(default_task_runner_);
+    ui_sequence_manager_->SetDefaultTaskQueue(
+        browser_ui_thread_scheduler->GetDefaultTaskQueue());
 
     BrowserTaskExecutor::CreateForTesting(
         std::move(browser_ui_thread_scheduler),
@@ -73,11 +71,9 @@ class SequenceManagerThreadDelegate : public base::Thread::Delegate {
     return default_task_runner_;
   }
 
-  void BindToCurrentThread(base::TimerSlack timer_slack) override {
+  void BindToCurrentThread() override {
     ui_sequence_manager_->BindToMessagePump(
         base::MessagePump::Create(base::MessagePumpType::DEFAULT));
-    ui_sequence_manager_->SetTimerSlack(timer_slack);
-    BrowserTaskExecutor::BindToUIThreadForTesting();
   }
 
  private:
@@ -100,10 +96,9 @@ class BrowserThreadTest : public testing::Test {
  protected:
   void SetUp() override {
     ui_thread_ = std::make_unique<base::Thread>(
-        BrowserThreadImpl::GetThreadName(BrowserThread::UI));
-    base::Thread::Options ui_options;
-    ui_options.delegate = std::make_unique<SequenceManagerThreadDelegate>();
-    ui_thread_->StartWithOptions(std::move(ui_options));
+        BrowserThreadImpl::GetThreadName(BrowserThread::UI),
+        std::make_unique<SequenceManagerThreadDelegate>());
+    ui_thread_->Start();
 
     io_thread_ = BrowserTaskExecutor::CreateIOThread();
     io_thread_->RegisterAsBrowserThread();
@@ -198,19 +193,9 @@ class UIThreadDestructionObserver
 
 TEST_F(BrowserThreadTest, PostTask) {
   base::RunLoop run_loop;
-  EXPECT_TRUE(
-      GetIOThreadTaskRunner({NonNestable()})
-          ->PostTask(FROM_HERE, base::BindOnce(&BasicFunction,
-                                               run_loop.QuitWhenIdleClosure(),
-                                               BrowserThread::IO)));
-  run_loop.Run();
-}
-
-TEST_F(BrowserThreadTest, Release) {
-  base::RunLoop run_loop;
-  ExpectRelease(run_loop.QuitWhenIdleClosure());
-  BrowserThread::ReleaseSoon(BrowserThread::IO, FROM_HERE,
-                             base::WrapRefCounted(this));
+  EXPECT_TRUE(GetIOThreadTaskRunner({})->PostTask(
+      FROM_HERE, base::BindOnce(&BasicFunction, run_loop.QuitWhenIdleClosure(),
+                                BrowserThread::IO)));
   run_loop.Run();
 }
 
@@ -283,8 +268,7 @@ class BrowserThreadWithCustomSchedulerTest : public testing::Test {
       std::unique_ptr<BrowserUIThreadScheduler> browser_ui_thread_scheduler =
           BrowserUIThreadScheduler::CreateForTesting(sequence_manager());
       DeferredInitFromSubclass(
-          browser_ui_thread_scheduler->GetHandle()->GetBrowserTaskRunner(
-              QueueType::kDefault));
+          browser_ui_thread_scheduler->GetDefaultTaskQueue());
       BrowserTaskExecutor::CreateForTesting(
           std::move(browser_ui_thread_scheduler),
           std::make_unique<BrowserIOThreadDelegate>());
@@ -329,9 +313,7 @@ TEST_F(BrowserThreadWithCustomSchedulerTest, PostBestEffortTask) {
 
   BrowserTaskExecutor::OnStartupComplete();
   base::RunLoop run_loop;
-  EXPECT_CALL(best_effort_task, Run).WillOnce(Invoke([&]() {
-    run_loop.Quit();
-  }));
+  EXPECT_CALL(best_effort_task, Run).WillOnce([&]() { run_loop.Quit(); });
   run_loop.Run();
 }
 

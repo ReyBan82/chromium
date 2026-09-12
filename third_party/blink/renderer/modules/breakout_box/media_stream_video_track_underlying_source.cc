@@ -6,6 +6,7 @@
 
 #include "base/feature_list.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/threading/platform_thread.h"
 #include "media/capture/video/video_capture_buffer_pool_util.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
@@ -24,16 +25,20 @@ constexpr char kScreenPrefix[] = "screen:";
 constexpr char kWindowPrefix[] = "window:";
 
 bool IsScreenOrWindowCapture(const std::string& device_id) {
-  return base::StartsWith(device_id, kScreenPrefix,
-                          base::CompareCase::SENSITIVE) ||
-         base::StartsWith(device_id, kWindowPrefix,
-                          base::CompareCase::SENSITIVE);
+  return device_id.starts_with(kScreenPrefix) ||
+         device_id.starts_with(kWindowPrefix);
+}
+
+std::optional<base::ThreadType> GetVideoSourceUsage(
+    MediaStreamComponent* track) {
+  MediaStreamVideoSource* source =
+      MediaStreamVideoSource::GetVideoSource(track->Source());
+  if (source && source->AllowsVideoThreadTypeOverride()) {
+    return base::ThreadType::kPresentation;
+  }
+  return std::nullopt;
 }
 }  // namespace
-
-BASE_FEATURE(kBreakoutBoxFrameLimiter,
-             "BreakoutBoxFrameLimiter",
-             base::FEATURE_ENABLED_BY_DEFAULT);
 
 const int MediaStreamVideoTrackUnderlyingSource::kMaxMonitoredFrameCount = 20;
 const int MediaStreamVideoTrackUnderlyingSource::kMinMonitoredFrameCount = 2;
@@ -48,7 +53,8 @@ MediaStreamVideoTrackUnderlyingSource::MediaStreamVideoTrackUnderlyingSource(
           max_queue_size,
           GetDeviceIdForMonitoring(
               track->Source()->GetPlatformSource()->device()),
-          GetFramePoolSize(track->Source()->GetPlatformSource()->device())),
+          GetFramePoolSize(track->Source()->GetPlatformSource()->device()),
+          GetVideoSourceUsage(track)),
       media_stream_track_processor_(media_stream_track_processor),
       track_(track) {
   DCHECK(track_);
@@ -74,24 +80,19 @@ MediaStreamVideoTrackUnderlyingSource::GetStreamTransferOptimizer() {
           WrapCrossThreadWeakPersistent(this)));
 }
 
-scoped_refptr<base::SequencedTaskRunner>
-MediaStreamVideoTrackUnderlyingSource::GetIOTaskRunner() {
-  return Platform::Current()->GetIOTaskRunner();
-}
-
 void MediaStreamVideoTrackUnderlyingSource::OnSourceTransferStarted(
     scoped_refptr<base::SequencedTaskRunner> transferred_runner,
-    CrossThreadPersistent<TransferredVideoFrameQueueUnderlyingSource> source) {
+    CrossThreadPersistent<TransferredVideoFrameQueueUnderlyingSource> source,
+    base::TimeTicks time_origin,
+    bool is_cross_origin_isolated) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  TransferSource(std::move(source));
+  TransferSource(std::move(source), time_origin, is_cross_origin_isolated);
   RecordBreakoutBoxUsage(BreakoutBoxUsage::kReadableVideoWorker);
 }
 
 void MediaStreamVideoTrackUnderlyingSource::OnFrameFromTrack(
     scoped_refptr<media::VideoFrame> media_frame,
-    std::vector<scoped_refptr<media::VideoFrame>> /*scaled_media_frames*/,
     base::TimeTicks estimated_capture_time) {
-  DCHECK(GetIOTaskRunner()->RunsTasksInCurrentSequence());
   // The scaled video frames are currently ignored.
   QueueFrame(std::move(media_frame));
 }
@@ -122,9 +123,6 @@ void MediaStreamVideoTrackUnderlyingSource::StopFrameDelivery() {
 // static
 std::string MediaStreamVideoTrackUnderlyingSource::GetDeviceIdForMonitoring(
     const MediaStreamDevice& device) {
-  if (!base::FeatureList::IsEnabled(kBreakoutBoxFrameLimiter))
-    return std::string();
-
   switch (device.type) {
     case mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE:
       return device.id;

@@ -5,7 +5,9 @@
 #include "ui/views/controls/menu/menu_model_adapter.h"
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
@@ -35,9 +37,6 @@ class MenuModelBase : public ui::MenuModel {
   ~MenuModelBase() override = default;
 
   // ui::MenuModel implementation:
-
-  bool HasIcons() const override { return false; }
-
   size_t GetItemCount() const override { return items_.size(); }
 
   ItemType GetTypeAt(size_t index) const override { return items_[index].type; }
@@ -55,10 +54,6 @@ class MenuModelBase : public ui::MenuModel {
   }
 
   bool IsItemDynamicAt(size_t index) const override { return false; }
-
-  const gfx::FontList* GetLabelFontListAt(size_t index) const override {
-    return nullptr;
-  }
 
   bool GetAcceleratorAt(size_t index,
                         ui::Accelerator* accelerator) const override {
@@ -93,6 +88,11 @@ class MenuModelBase : public ui::MenuModel {
     return items_[index].new_feature;
   }
 
+  std::optional<ui::NewBadgeType> GetNewBadgeTypeAt(
+      size_t index) const override {
+    return items_[index].new_badge_type;
+  }
+
   MenuModel* GetSubmenuModelAt(size_t index) const override {
     return items_[index].submenu;
   }
@@ -114,9 +114,7 @@ class MenuModelBase : public ui::MenuModel {
          ui::MenuModel* item_submenu)
         : type(item_type),
           label(base::ASCIIToUTF16(item_label)),
-          submenu(item_submenu),
-          enabled(true),
-          visible(true) {}
+          submenu(item_submenu) {}
 
     Item(ItemType item_type,
          const std::string& item_label,
@@ -132,17 +130,18 @@ class MenuModelBase : public ui::MenuModel {
     ItemType type;
     std::u16string label;
     raw_ptr<ui::MenuModel> submenu;
-    bool enabled;
-    bool visible;
+    bool enabled = true;
+    bool visible = true;
     bool alerted = false;
     bool new_feature = false;
+    std::optional<ui::NewBadgeType> new_badge_type = std::nullopt;
   };
 
   const Item& GetItemDefinition(size_t index) { return items_[index]; }
 
   // Access index argument to ActivatedAt().
-  absl::optional<size_t> last_activation() const { return last_activation_; }
-  void set_last_activation(absl::optional<size_t> last_activation) {
+  std::optional<size_t> last_activation() const { return last_activation_; }
+  void set_last_activation(std::optional<size_t> last_activation) {
     last_activation_ = last_activation;
   }
 
@@ -151,10 +150,10 @@ class MenuModelBase : public ui::MenuModel {
 
  private:
   int command_id_base_;
-  absl::optional<size_t> last_activation_;
+  std::optional<size_t> last_activation_;
 };
 
-class SubmenuModel : public MenuModelBase {
+class SubmenuModel final : public MenuModelBase {
  public:
   SubmenuModel() : MenuModelBase(kSubmenuIdBase) {
     items_.emplace_back(TYPE_COMMAND, "submenu item 0", nullptr, false, true);
@@ -166,23 +165,38 @@ class SubmenuModel : public MenuModelBase {
   SubmenuModel& operator=(const SubmenuModel&) = delete;
 
   ~SubmenuModel() override = default;
+
+  base::WeakPtr<ui::MenuModel> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+ private:
+  base::WeakPtrFactory<SubmenuModel> weak_ptr_factory_{this};
 };
 
-class ActionableSubmenuModel : public MenuModelBase {
+class ActionableSubmenuModel final : public MenuModelBase {
  public:
   ActionableSubmenuModel() : MenuModelBase(kActionableSubmenuIdBase) {
     items_.emplace_back(TYPE_COMMAND, "actionable submenu item 0", nullptr);
     items_.emplace_back(TYPE_COMMAND, "actionable submenu item 1", nullptr);
     items_[1].new_feature = true;
+    items_[1].new_badge_type = ui::NewBadgeType::kNew;
   }
 
   ActionableSubmenuModel(const ActionableSubmenuModel&) = delete;
   ActionableSubmenuModel& operator=(const ActionableSubmenuModel&) = delete;
 
   ~ActionableSubmenuModel() override = default;
+
+  base::WeakPtr<ui::MenuModel> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+ private:
+  base::WeakPtrFactory<ActionableSubmenuModel> weak_ptr_factory_{this};
 };
 
-class RootModel : public MenuModelBase {
+class RootModel final : public MenuModelBase {
  public:
   RootModel() : MenuModelBase(kRootIdBase) {
     submenu_model_ = std::make_unique<SubmenuModel>();
@@ -200,11 +214,19 @@ class RootModel : public MenuModelBase {
   RootModel(const RootModel&) = delete;
   RootModel& operator=(const RootModel&) = delete;
 
-  ~RootModel() override = default;
+  ~RootModel() override {
+    // Avoid that the pointer to `submenu_model_` becomes dangling.
+    items_.clear();
+  }
+
+  base::WeakPtr<ui::MenuModel> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
  private:
   std::unique_ptr<MenuModel> submenu_model_;
   std::unique_ptr<MenuModel> actionable_submenu_model_;
+  base::WeakPtrFactory<RootModel> weak_ptr_factory_{this};
 };
 
 void CheckSubmenu(const RootModel& model,
@@ -271,12 +293,14 @@ void CheckSubmenu(const RootModel& model,
     EXPECT_EQ(model_item.alerted, item->is_alerted());
 
     // Check new feature flag.
-    EXPECT_EQ(model_item.new_feature, item->is_new());
+    const bool is_new = item->new_badge_type().has_value() &&
+                        (item->new_badge_type() == ui::NewBadgeType::kNew);
+    EXPECT_EQ(model_item.new_feature, is_new);
 
     // Check activation.
     static_cast<views::MenuDelegate*>(delegate)->ExecuteCommand(id);
     EXPECT_EQ(i, submodel->last_activation());
-    submodel->set_last_activation(absl::nullopt);
+    submodel->set_last_activation(std::nullopt);
   }
 }
 
@@ -292,9 +316,9 @@ TEST_F(MenuModelAdapterTest, BasicTest) {
   views::MenuModelAdapter delegate(&model);
 
   // Create menu.  Build menu twice to check that rebuilding works properly.
-  MenuItemView* menu = new views::MenuItemView(&delegate);
-  // MenuRunner takes ownership of menu.
-  std::unique_ptr<MenuRunner> menu_runner(new MenuRunner(menu, 0));
+  auto menu_owning = std::make_unique<MenuItemView>(&delegate);
+  MenuItemView* menu = menu_owning.get();
+  MenuRunner menu_runner(std::move(menu_owning), 0);
   delegate.BuildMenu(menu);
   delegate.BuildMenu(menu);
   EXPECT_TRUE(menu->HasSubmenu());
@@ -355,12 +379,14 @@ TEST_F(MenuModelAdapterTest, BasicTest) {
     EXPECT_EQ(model_item.alerted, item->is_alerted());
 
     // Check new feature flag.
-    EXPECT_EQ(model_item.new_feature, item->is_new());
+    const bool is_new = item->new_badge_type().has_value() &&
+                        (item->new_badge_type() == ui::NewBadgeType::kNew);
+    EXPECT_EQ(model_item.new_feature, is_new);
 
     // Check activation.
     static_cast<views::MenuDelegate*>(&delegate)->ExecuteCommand(id);
     EXPECT_EQ(i, model.last_activation());
-    model.set_last_activation(absl::nullopt);
+    model.set_last_activation(std::nullopt);
   }
 
   // Check the submenu.
@@ -372,6 +398,38 @@ TEST_F(MenuModelAdapterTest, BasicTest) {
   const int actionable_submenu_index = 5;
   CheckSubmenu(model, menu, &delegate, kRootIdBase + actionable_submenu_index,
                2, actionable_submenu_index, kActionableSubmenuIdBase);
+}
+
+TEST_F(MenuModelAdapterTest, NonexistentCommandIdDoesNotCrash) {
+  RootModel model;
+  views::MenuModelAdapter delegate(&model);
+  views::MenuDelegate* menu_delegate = &delegate;
+
+  constexpr int kNonexistentId = 99999;
+  ui::Accelerator accelerator;
+
+  // When a command ID is not found in the model, methods should return default
+  // values and not crash.
+  EXPECT_FALSE(menu_delegate->GetAccelerator(kNonexistentId, &accelerator));
+  EXPECT_TRUE(menu_delegate->GetLabel(kNonexistentId).empty());
+  EXPECT_FALSE(menu_delegate->IsCommandEnabled(kNonexistentId));
+  EXPECT_FALSE(menu_delegate->IsCommandVisible(kNonexistentId));
+  EXPECT_FALSE(menu_delegate->IsItemChecked(kNonexistentId));
+  // ExecuteCommand should safely no-op.
+  menu_delegate->ExecuteCommand(kNonexistentId);
+  menu_delegate->ExecuteCommand(kNonexistentId, 0);
+  EXPECT_FALSE(model.last_activation().has_value());
+
+  // Simulating teardown when the model is cleared (menu_model_ = nullptr).
+  model.SetMenuModelDelegate(nullptr);
+  EXPECT_FALSE(menu_delegate->GetAccelerator(kNonexistentId, &accelerator));
+  EXPECT_TRUE(menu_delegate->GetLabel(kNonexistentId).empty());
+  EXPECT_FALSE(menu_delegate->IsCommandEnabled(kNonexistentId));
+  EXPECT_FALSE(menu_delegate->IsCommandVisible(kNonexistentId));
+  EXPECT_FALSE(menu_delegate->IsItemChecked(kNonexistentId));
+  menu_delegate->ExecuteCommand(kNonexistentId);
+  menu_delegate->ExecuteCommand(kNonexistentId, 0);
+  EXPECT_FALSE(model.last_activation().has_value());
 }
 
 }  // namespace views

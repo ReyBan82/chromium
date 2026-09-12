@@ -4,6 +4,7 @@
 
 #include "media/audio/audio_manager.h"
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <utility>
@@ -14,16 +15,13 @@
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
-#include "base/ranges/algorithm.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_util.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/system/sys_info.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/test_message_loop.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "media/audio/audio_device_description.h"
 #include "media/audio/audio_device_info_accessor_for_tests.h"
 #include "media/audio/audio_device_name.h"
@@ -31,9 +29,12 @@
 #include "media/audio/audio_unittest_util.h"
 #include "media/audio/fake_audio_log_factory.h"
 #include "media/audio/fake_audio_manager.h"
+#include "media/audio/mock_audio_debug_recording_manager.h"
 #include "media/audio/test_audio_thread.h"
+#include "media/base/audio_bus.h"
 #include "media/base/limits.h"
 #include "media/base/media_switches.h"
+#include "media/media_buildflags.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -43,7 +44,6 @@
 
 #if BUILDFLAG(IS_MAC)
 #include "media/audio/mac/audio_manager_mac.h"
-#include "media/base/mac/audio_latency_mac.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -56,7 +56,7 @@
 #include "media/audio/pulse/pulse_util.h"
 #endif  // defined(USE_PULSEAUDIO)
 
-#if defined(USE_CRAS)
+#if BUILDFLAG(USE_CRAS)
 #include "media/audio/cras/audio_manager_cras.h"
 #endif
 
@@ -115,13 +115,14 @@ void CheckDescriptionLabels(const AudioDeviceDescriptions& descriptions,
 
   for (const auto& description : descriptions) {
     if (AudioDeviceDescription::IsDefaultDevice(description.unique_id)) {
-      EXPECT_TRUE(base::EndsWith(description.device_name, real_default_label,
-                                 base::CompareCase::SENSITIVE));
+      EXPECT_TRUE(description.device_name.ends_with(real_default_label));
     } else if (description.unique_id ==
                AudioDeviceDescription::kCommunicationsDeviceId) {
-      EXPECT_TRUE(base::EndsWith(description.device_name,
-                                 real_communications_label,
-                                 base::CompareCase::SENSITIVE));
+      EXPECT_TRUE(description.device_name.ends_with(real_communications_label));
+    } else if (description.unique_id == real_default_id) {
+      EXPECT_TRUE(description.is_system_default);
+    } else if (description.unique_id == real_communications_id) {
+      EXPECT_TRUE(description.is_communications_device);
     }
   }
 }
@@ -162,8 +163,8 @@ class AudioManagerTest : public ::testing::Test {
     stream->Close();
   }
 
-  void GetDefaultOutputStreamParameters(media::AudioParameters* params) {
-    *params = device_info_accessor_->GetDefaultOutputStreamParameters();
+  AudioParameters GetOutputStreamParameters(const std::string& device_id) {
+    return device_info_accessor_->GetOutputStreamParameters(device_id);
   }
 
   void GetAssociatedOutputDeviceID(const std::string& input_device_id,
@@ -216,7 +217,7 @@ class AudioManagerTest : public ::testing::Test {
 
   bool InputDevicesAvailable() {
 #if BUILDFLAG(IS_MAC) && defined(ARCH_CPU_ARM64)
-    // TODO(crbug.com/1128458): macOS on ARM64 says it has devices, but won't
+    // TODO(crbug.com/40719640): macOS on ARM64 says it has devices, but won't
     // let any of them be opened or listed.
     return false;
 #else
@@ -234,6 +235,7 @@ class AudioManagerTest : public ::testing::Test {
     // Flush the message loop to run any shutdown tasks posted by AudioManager.
     if (audio_manager_) {
       audio_manager_->Shutdown();
+      device_info_accessor_.reset();
       audio_manager_.reset();
     }
 
@@ -353,6 +355,21 @@ TEST_F(AudioManagerTest, EnumerateInputDevicesAlsa) {
   CheckDeviceDescriptions(device_descriptions);
 }
 
+TEST_F(AudioManagerTest, EnumerateInputDevicesAlsaWithInputDeviceSwitch) {
+  base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
+      switches::kAlsaInputDevice, "switch-input-device");
+
+  DVLOG(2) << "Testing AudioManagerAlsa.";
+  CreateAudioManagerForTesting<AudioManagerAlsa>();
+  AudioDeviceDescriptions device_descriptions;
+  device_info_accessor_->GetAudioInputDeviceDescriptions(&device_descriptions);
+  CheckDeviceDescriptions(device_descriptions);
+  EXPECT_TRUE(std::ranges::contains(device_descriptions, "switch-input-device",
+                                    [](const auto& device_description) {
+                                      return device_description.unique_id;
+                                    }));
+}
+
 TEST_F(AudioManagerTest, EnumerateOutputDevicesAlsa) {
   ABORT_AUDIO_TEST_IF_NOT(OutputDevicesAvailable());
 
@@ -362,14 +379,29 @@ TEST_F(AudioManagerTest, EnumerateOutputDevicesAlsa) {
   device_info_accessor_->GetAudioOutputDeviceDescriptions(&device_descriptions);
   CheckDeviceDescriptions(device_descriptions);
 }
+
+TEST_F(AudioManagerTest, EnumerateOutputDevicesAlsaWithOutputDeviceSwitch) {
+  base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
+      switches::kAlsaOutputDevice, "switch-output-device");
+
+  DVLOG(2) << "Testing AudioManagerAlsa.";
+  CreateAudioManagerForTesting<AudioManagerAlsa>();
+  AudioDeviceDescriptions device_descriptions;
+  device_info_accessor_->GetAudioOutputDeviceDescriptions(&device_descriptions);
+  CheckDeviceDescriptions(device_descriptions);
+  EXPECT_TRUE(std::ranges::contains(device_descriptions, "switch-output-device",
+                                    [](const auto& device_description) {
+                                      return device_description.unique_id;
+                                    }));
+}
 #endif  // defined(USE_ALSA)
 
-TEST_F(AudioManagerTest, GetDefaultOutputStreamParameters) {
+TEST_F(AudioManagerTest, GetOutputStreamParameters) {
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
   ABORT_AUDIO_TEST_IF_NOT(InputDevicesAvailable());
 
-  AudioParameters params;
-  GetDefaultOutputStreamParameters(&params);
+  std::string default_device_id = AudioDeviceDescription::kDefaultDeviceId;
+  AudioParameters params = GetOutputStreamParameters(default_device_id);
   EXPECT_TRUE(params.IsValid());
 #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 }
@@ -432,20 +464,22 @@ class TestAudioManager : public FakeAudioManager {
   }
 
  private:
-  void GetAudioInputDeviceNames(AudioDeviceNames* device_names) override {
+  bool GetAudioInputDeviceNames(AudioDeviceNames* device_names) override {
     DCHECK(device_names->empty());
     device_names->emplace_back(AudioDeviceName::CreateDefault());
     device_names->emplace_back("Input 1", "input1");
     device_names->emplace_back("Input 2", "input2");
     device_names->emplace_back("Input 3", "input3");
+    return true;
   }
 
-  void GetAudioOutputDeviceNames(AudioDeviceNames* device_names) override {
+  bool GetAudioOutputDeviceNames(AudioDeviceNames* device_names) override {
     DCHECK(device_names->empty());
     device_names->emplace_back(AudioDeviceName::CreateDefault());
     device_names->emplace_back("Output 1", "output1");
     device_names->emplace_back("Output 2", "output2");
     device_names->emplace_back("Output 3", "output3");
+    return true;
   }
 };
 
@@ -512,8 +546,8 @@ TEST_F(AudioManagerTest, DefaultCommunicationsLabelsContainRealLabels) {
 TEST_F(AudioManagerTest, CheckMakeOutputStreamWithPreferredParameters) {
   ABORT_AUDIO_TEST_IF_NOT(OutputDevicesAvailable());
 
-  AudioParameters params;
-  GetDefaultOutputStreamParameters(&params);
+  std::string default_device_id = AudioDeviceDescription::kDefaultDeviceId;
+  AudioParameters params = GetOutputStreamParameters(default_device_id);
   ASSERT_TRUE(params.IsValid());
 
   AudioOutputStream* stream =
@@ -523,7 +557,7 @@ TEST_F(AudioManagerTest, CheckMakeOutputStreamWithPreferredParameters) {
   stream->Close();
 }
 
-#if BUILDFLAG(IS_MAC) || defined(USE_CRAS)
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(USE_CRAS)
 class TestAudioSourceCallback : public AudioOutputStream::AudioSourceCallback {
  public:
   TestAudioSourceCallback(int expected_frames_per_buffer,
@@ -534,7 +568,7 @@ class TestAudioSourceCallback : public AudioOutputStream::AudioSourceCallback {
   TestAudioSourceCallback(const TestAudioSourceCallback&) = delete;
   TestAudioSourceCallback& operator=(const TestAudioSourceCallback&) = delete;
 
-  ~TestAudioSourceCallback() override {}
+  ~TestAudioSourceCallback() override = default;
 
   int OnMoreData(base::TimeDelta,
                  base::TimeTicks,
@@ -559,30 +593,30 @@ TEST_F(AudioManagerTest, CheckMinMaxAudioBufferSizeCallbacks) {
 
 #if BUILDFLAG(IS_MAC)
   CreateAudioManagerForTesting<AudioManagerMac>();
-#elif defined(USE_CRAS) && BUILDFLAG(IS_CHROMEOS_ASH)
+#elif BUILDFLAG(USE_CRAS) && BUILDFLAG(IS_CHROMEOS)
   CreateAudioManagerForTesting<AudioManagerCras>();
 #endif
 
   DCHECK(audio_manager_);
 
-  AudioParameters default_params;
-  GetDefaultOutputStreamParameters(&default_params);
+  std::string default_device_id = AudioDeviceDescription::kDefaultDeviceId;
+  AudioParameters default_params = GetOutputStreamParameters(default_device_id);
   ASSERT_LT(default_params.frames_per_buffer(),
             media::limits::kMaxAudioBufferSize);
 
 #if BUILDFLAG(IS_MAC)
   // On OSX the preferred output buffer size is higher than the minimum
   // but users may request the minimum size explicitly.
-  ASSERT_GT(default_params.frames_per_buffer(),
-            GetMinAudioBufferSizeMacOS(media::limits::kMinAudioBufferSize,
-                                       default_params.sample_rate()));
-#elif defined(USE_CRAS)
+  ASSERT_GT(
+      default_params.frames_per_buffer(),
+      AudioManagerMac::GetMinAudioBufferSizeMacOS(
+          media::limits::kMinAudioBufferSize, default_params.sample_rate()));
+#else
+  static_assert(BUILDFLAG(USE_CRAS));
   // On CRAS the preferred output buffer size varies per board and may be as low
   // as the minimum for some boards.
   ASSERT_GE(default_params.frames_per_buffer(),
             media::limits::kMinAudioBufferSize);
-#else
-  NOTREACHED();
 #endif
 
   AudioOutputStream* stream;

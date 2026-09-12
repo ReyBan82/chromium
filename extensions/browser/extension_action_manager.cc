@@ -4,7 +4,7 @@
 
 #include "extensions/browser/extension_action_manager.h"
 
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 #include "content/public/browser/browser_context.h"
@@ -32,26 +32,28 @@ class ExtensionActionManagerFactory : public BrowserContextKeyedServiceFactory {
   static ExtensionActionManagerFactory* GetInstance();
 
  private:
-  friend struct base::DefaultSingletonTraits<ExtensionActionManagerFactory>;
+  friend base::NoDestructor<ExtensionActionManagerFactory>;
 
   ExtensionActionManagerFactory()
       : BrowserContextKeyedServiceFactory(
             "ExtensionActionManager",
             BrowserContextDependencyManager::GetInstance()) {}
 
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* browser_context) const override {
-    return new ExtensionActionManager(browser_context);
+    return std::make_unique<ExtensionActionManager>(browser_context);
   }
 
   content::BrowserContext* GetBrowserContextToUse(
       content::BrowserContext* context) const override {
-    return ExtensionsBrowserClient::Get()->GetOriginalContext(context);
+    return ExtensionsBrowserClient::Get()->GetContextRedirectedToOriginal(
+        context);
   }
 };
 
 ExtensionActionManagerFactory* ExtensionActionManagerFactory::GetInstance() {
-  return base::Singleton<ExtensionActionManagerFactory>::get();
+  static base::NoDestructor<ExtensionActionManagerFactory> instance;
+  return instance.get();
 }
 
 }  // namespace
@@ -86,13 +88,15 @@ void ExtensionActionManager::OnExtensionUnloaded(
 ExtensionAction* ExtensionActionManager::GetExtensionAction(
     const Extension& extension) const {
   auto iter = actions_.find(extension.id());
-  if (iter != actions_.end())
+  if (iter != actions_.end()) {
     return iter->second.get();
+  }
 
   const ActionInfo* action_info =
       ActionInfo::GetExtensionActionInfo(&extension);
-  if (!action_info)
+  if (!action_info) {
     return nullptr;
+  }
 
   // Only create action info for enabled extensions.
   // This avoids bugs where actions are recreated just after being removed
@@ -118,8 +122,8 @@ ExtensionAction* ExtensionActionManager::GetExtensionAction(
 }
 
 // static
-void ExtensionActionManager::EnsureFactoryBuilt() {
-  ExtensionActionManagerFactory::GetInstance();
+BrowserContextKeyedServiceFactory* ExtensionActionManager::GetFactory() {
+  return ExtensionActionManagerFactory::GetInstance();
 }
 
 }  // namespace extensions

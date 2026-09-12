@@ -5,10 +5,11 @@
 #ifndef CONTENT_BROWSER_RENDERER_HOST_OVERSCROLL_CONTROLLER_DELEGATE_H_
 #define CONTENT_BROWSER_RENDERER_HOST_OVERSCROLL_CONTROLLER_DELEGATE_H_
 
+#include <optional>
+
 #include "base/memory/weak_ptr.h"
 #include "content/browser/renderer_host/overscroll_controller.h"
 #include "content/common/content_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/size.h"
 
 namespace content {
@@ -34,7 +35,7 @@ class CONTENT_EXPORT OverscrollControllerDelegate {
   // the delegate consumed the event.
   virtual bool OnOverscrollUpdate(float delta_x, float delta_y) = 0;
 
-  // This is called when the overscroll completes.
+  // This is called asynchronously when the overscroll completes.
   virtual void OnOverscrollComplete(OverscrollMode overscroll_mode) = 0;
 
   // This is called when the direction of the overscroll changes. When a new
@@ -49,7 +50,7 @@ class CONTENT_EXPORT OverscrollControllerDelegate {
 
   // Returns the optional maximum amount allowed for the absolute value of
   // overscroll delta corresponding to the current overscroll mode.
-  virtual absl::optional<float> GetMaxOverscrollDelta() const = 0;
+  virtual std::optional<float> GetMaxOverscrollDelta() const = 0;
 
   base::WeakPtr<OverscrollControllerDelegate> GetWeakPtr();
 

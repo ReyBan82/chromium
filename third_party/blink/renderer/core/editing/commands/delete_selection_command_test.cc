@@ -34,13 +34,13 @@ TEST_F(DeleteSelectionCommandTest, deleteListFromTable) {
       "</ol></td></tr></table>"
       "</div>");
 
-  Element* div = GetDocument().QuerySelector("div");
-  Element* table = GetDocument().QuerySelector("table");
-  Element* br = GetDocument().QuerySelector("br");
+  Element* div = QuerySelector("div");
+  Element* table = QuerySelector("table");
+  Element* br = QuerySelector("br");
 
   LocalFrame* frame = GetDocument().GetFrame();
   frame->Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .Collapse(Position(br, PositionAnchorType::kBeforeAnchor))
           .Extend(Position(table, PositionAnchorType::kAfterAnchor))
           .Build(),
@@ -57,11 +57,11 @@ TEST_F(DeleteSelectionCommandTest, deleteListFromTable) {
 
   EXPECT_TRUE(command->Apply()) << "the delete command should have succeeded";
   EXPECT_EQ("<div contenteditable=\"true\"><br></div>",
-            GetDocument().body()->innerHTML());
-  EXPECT_TRUE(frame->Selection().GetSelectionInDOMTree().IsCaret());
+            GetDocument().body()->GetInnerHTMLString());
+  EXPECT_TRUE(frame->Selection().GetSelectionInDomTree().IsCaret());
   EXPECT_EQ(Position(div, 0), frame->Selection()
-                                  .ComputeVisibleSelectionInDOMTree()
-                                  .Base()
+                                  .ComputeVisibleSelectionInDomTree()
+                                  .Anchor()
                                   .ToOffsetInAnchor());
 }
 
@@ -71,8 +71,7 @@ TEST_F(DeleteSelectionCommandTest, FixupWhitespace) {
   // should not be 1px.
   InsertStyleElement("body { font-size: 10px; }");
   Selection().SetSelection(
-      SetSelectionTextToBody(
-          "<p contenteditable>a<b>&#32;^X|</b>&#32;<ruby>&#32;</ruby></p>"),
+      SetSelectionTextToBody("<p contenteditable>a<b>&#32;^X|</b>&#32;Y</p>"),
       SetSelectionOptions());
 
   DeleteSelectionCommand& command =
@@ -82,7 +81,7 @@ TEST_F(DeleteSelectionCommandTest, FixupWhitespace) {
                              .SetSanitizeMarkup(true)
                              .Build());
   EXPECT_TRUE(command.Apply()) << "the delete command should have succeeded";
-  EXPECT_EQ("<p contenteditable>a<b>\u00A0|</b>\u00A0<ruby></ruby></p>",
+  EXPECT_EQ("<p contenteditable>a<b> |</b>\u00A0Y</p>",
             GetSelectionTextFromBody());
 }
 
@@ -141,12 +140,13 @@ TEST_F(DeleteSelectionCommandTest, DeleteWithEditabilityChange) {
                              .SetSanitizeMarkup(true)
                              .Build());
   // Should not crash.
-  EXPECT_TRUE(command.Apply());
+  // Editing state is aborted after the body stops being editable.
+  EXPECT_FALSE(command.Apply());
 
   // The command removes the <style>, so the <body> stops being editable,
   // and then "x" is not removed.
   EXPECT_FALSE(IsEditable(*GetDocument().body()));
-  EXPECT_EQ("|x", GetSelectionTextFromBody());
+  EXPECT_EQ("^x|", GetSelectionTextFromBody());
 }
 
 // This is a regression test for https://crbug.com/1307391

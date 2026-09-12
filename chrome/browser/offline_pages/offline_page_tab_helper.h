@@ -18,7 +18,6 @@
 #include "content/public/browser/render_frame_host_receiver_set.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
-#include "services/service_manager/public/cpp/binder_registry.h"
 #include "third_party/blink/public/mojom/loader/mhtml_load_result.mojom-forward.h"
 #include "url/gurl.h"
 
@@ -29,7 +28,6 @@ class WebContents;
 namespace offline_pages {
 
 struct OfflinePageItem;
-class PrefetchService;
 
 // This enum is used for UMA reporting. It contains all possible trusted states
 // of the offline page.
@@ -172,11 +170,6 @@ class OfflinePageTabHelper
   // Finalize the offline info when the navigation is done.
   void FinalizeOfflineInfo(content::NavigationHandle* navigation_handle);
 
-  void ReportOfflinePageMetrics();
-
-  // Report the metrics essential to PrefetchService.
-  void ReportPrefetchMetrics(content::NavigationHandle* navigation_handle);
-
   // Reload the URL in order to fetch the offline page on certain net errors.
   void TryLoadingOfflinePageOnNetError(
       content::NavigationHandle* navigation_handle);
@@ -212,11 +205,8 @@ class OfflinePageTabHelper
 
   bool reloading_url_on_net_error_ = false;
 
-  // Service, outlives this object.
-  raw_ptr<PrefetchService> prefetch_service_ = nullptr;
-
-  // TODO(crbug.com/827215): We only really want interface messages for the main
-  // frame but this is not easily done with the current helper classes.
+  // TODO(crbug.com/40569331): We only really want interface messages for the
+  // main frame but this is not easily done with the current helper classes.
   content::RenderFrameHostReceiverSet<mojom::MhtmlPageNotifier>
       mhtml_page_notifier_receivers_;
 

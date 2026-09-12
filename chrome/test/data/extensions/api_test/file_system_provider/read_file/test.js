@@ -4,23 +4,25 @@
 
 'use strict';
 
+let testUtil;
+
 /**
  * Testing contents for files.
  * @type {string}
  * @const
  */
-var TESTING_TEXT = 'I have a basket full of fruits.';
+const TESTING_TEXT = 'I have a basket full of fruits.';
 
 /**
  * Metadata of a healthy file used to read contents from.
  * @type {Object}
  * @const
  */
-var TESTING_TIRAMISU_FILE = Object.freeze({
+const TESTING_TIRAMISU_FILE = Object.freeze({
   isDirectory: false,
   name: 'tiramisu.txt',
   size: TESTING_TEXT.length,
-  modificationTime: new Date(2014, 1, 25, 7, 36, 12)
+  modificationTime: new Date(2014, 1, 25, 7, 36, 12),
 });
 
 /**
@@ -28,11 +30,11 @@ var TESTING_TIRAMISU_FILE = Object.freeze({
  * @type {Object}
  * @const
  */
-var TESTING_BROKEN_TIRAMISU_FILE = Object.freeze({
+const TESTING_BROKEN_TIRAMISU_FILE = Object.freeze({
   isDirectory: false,
   name: 'broken-tiramisu.txt',
   size: TESTING_TEXT.length,
-  modificationTime: new Date(2014, 1, 25, 7, 36, 12)
+  modificationTime: new Date(2014, 1, 25, 7, 36, 12),
 });
 
 /**
@@ -41,11 +43,11 @@ var TESTING_BROKEN_TIRAMISU_FILE = Object.freeze({
  * @type {Object}
  * @const
  */
-var TESTING_VANILLA_FOR_ABORT_FILE = Object.freeze({
+const TESTING_VANILLA_FOR_ABORT_FILE = Object.freeze({
   isDirectory: false,
   name: 'vanilla.txt',
   size: TESTING_TEXT.length,
-  modificationTime: new Date(2014, 1, 25, 7, 36, 12)
+  modificationTime: new Date(2014, 1, 25, 7, 36, 12),
 });
 
 /**
@@ -55,7 +57,7 @@ var TESTING_VANILLA_FOR_ABORT_FILE = Object.freeze({
  *
  * @type {?function(string, function()}
  */
-var readBreakpointCallback = null;
+let readBreakpointCallback = null;
 
 /**
  * Open breakpoint callback invoked when opening some testing files.
@@ -64,7 +66,7 @@ var readBreakpointCallback = null;
  *
  * @type {?function(string, function()}
  */
-var openBreakpointCallback = null;
+let openBreakpointCallback = null;
 
 /**
  * Requests reading contents of a file, previously opened with <code>
@@ -76,32 +78,32 @@ var openBreakpointCallback = null;
  * @param {function(string)} onError Error callback.
  */
 function onReadFileRequested(options, onSuccess, onError) {
-  var filePath = test_util.openedFiles[options.openRequestId];
+  const filePath = testUtil.openedFiles[options.openRequestId];
 
-  var continueRead = function() {
-    if (options.fileSystemId !== test_util.FILE_SYSTEM_ID || !filePath) {
+  const continueRead = function() {
+    if (options.fileSystemId !== testUtil.FILE_SYSTEM_ID || !filePath) {
       onError('SECURITY');  // enum ProviderError.
       return;
     }
 
-    if (filePath === '/' + TESTING_TIRAMISU_FILE.name) {
-      var textToSend = TESTING_TEXT.substr(options.offset, options.length);
-      var textToSendInChunks = textToSend.split(/(?= )/);
+    if (filePath === `/${TESTING_TIRAMISU_FILE.name}`) {
+      const textToSend = TESTING_TEXT.substr(options.offset, options.length);
+      const textToSendInChunks = textToSend.split(/(?= )/);
 
       textToSendInChunks.forEach((item, index) => {
         // Convert item (string) to an ArrayBuffer.
         onSuccess(
-            /*data=*/new TextEncoder().encode(item).buffer,
-            /*hasMore=*/index < textToSendInChunks.length - 1);
+            /*data=*/ new TextEncoder().encode(item).buffer,
+            /*hasMore=*/ index < textToSendInChunks.length - 1);
       });
     }
 
-    if (filePath === '/' + TESTING_VANILLA_FOR_ABORT_FILE.name) {
+    if (filePath === `/${TESTING_VANILLA_FOR_ABORT_FILE.name}`) {
       // Do nothing. This simulates a very slow read.
       return;
     }
 
-    if (filePath === '/' + TESTING_BROKEN_TIRAMISU_FILE.name) {
+    if (filePath === `/${TESTING_BROKEN_TIRAMISU_FILE.name}`) {
       onError('ACCESS_DENIED');  // enum ProviderError.
       return;
     }
@@ -109,10 +111,11 @@ function onReadFileRequested(options, onSuccess, onError) {
     onError('INVALID_OPERATION');  // enum ProviderError.
   };
 
-  if (readBreakpointCallback)
+  if (readBreakpointCallback) {
     readBreakpointCallback(filePath, continueRead);
-  else
+  } else {
     continueRead();
+  }
 }
 
 /**
@@ -124,26 +127,27 @@ function onReadFileRequested(options, onSuccess, onError) {
  * @param {function(string)} onError Error callback.
  */
 function onOpenFileRequested(options, onSuccess, onError) {
-  if (options.fileSystemId !== test_util.FILE_SYSTEM_ID) {
+  if (options.fileSystemId !== testUtil.FILE_SYSTEM_ID) {
     onError('SECURITY');  // enum ProviderError.
     return;
   }
 
-  var continueOpen = function() {
-    var metadata = test_util.defaultMetadata[options.filePath];
+  const continueOpen = function() {
+    const metadata = testUtil.defaultMetadata[options.filePath];
     if (metadata && !metadata.is_directory) {
-      test_util.openedFiles[options.requestId] = options.filePath;
+      testUtil.openedFiles[options.requestId] = options.filePath;
       onSuccess();
     } else {
       onError('NOT_FOUND');  // enum ProviderError.
     }
   };
 
-  if (openBreakpointCallback)
+  if (openBreakpointCallback) {
     openBreakpointCallback(options.filePath, continueOpen);
-  else
+  } else {
     continueOpen();
-};
+  }
+}
 
 /**
  * Sets up the tests. Called once per all test cases. For each test case,
@@ -152,15 +156,15 @@ function onOpenFileRequested(options, onSuccess, onError) {
  */
 function setUp() {
   chrome.fileSystemProvider.onGetMetadataRequested.addListener(
-      test_util.onGetMetadataRequestedDefault);
+      testUtil.onGetMetadataRequestedDefault);
   chrome.fileSystemProvider.onCloseFileRequested.addListener(
-      test_util.onCloseFileRequested);
+      testUtil.onCloseFileRequested);
 
-  test_util.defaultMetadata['/' + TESTING_TIRAMISU_FILE.name] =
+  testUtil.defaultMetadata[`/${TESTING_TIRAMISU_FILE.name}`] =
       TESTING_TIRAMISU_FILE;
-  test_util.defaultMetadata['/' + TESTING_BROKEN_TIRAMISU_FILE.name] =
+  testUtil.defaultMetadata[`/${TESTING_BROKEN_TIRAMISU_FILE.name}`] =
       TESTING_BROKEN_TIRAMISU_FILE;
-  test_util.defaultMetadata['/' + TESTING_VANILLA_FOR_ABORT_FILE.name] =
+  testUtil.defaultMetadata[`/${TESTING_VANILLA_FOR_ABORT_FILE.name}`] =
       TESTING_VANILLA_FOR_ABORT_FILE;
 
   chrome.fileSystemProvider.onReadFileRequested.addListener(
@@ -178,20 +182,26 @@ function setUp() {
  * @param {function()} callback Completion callback.
  */
 function setUpFileSystem(openedFilesLimit, callback) {
-  var options = {};
-  if (openedFilesLimit)
+  const options = {};
+  if (openedFilesLimit) {
     options.openedFilesLimit = openedFilesLimit;
+  }
   // TODO(mtomasz): Rather than clearing out opened files tests should wait for
-  // all files to be closed before unmounting the file system. crbug.com/789083
-  test_util.openedFiles = [];
-  if (test_util.fileSystem) {
-    chrome.fileSystemProvider.unmount({
-      fileSystemId: test_util.FILE_SYSTEM_ID
-    }, chrome.test.callbackPass(function() {
-      test_util.mountFileSystem(callback, options);
-    }));
+  // all files to be closed before unmounting the file system.
+  // crbug.com/40551846
+  for (const k of Object.keys(testUtil.openedFiles)) {
+    delete testUtil.openedFiles[k];
+  }
+  if (testUtil.fileSystem) {
+    chrome.fileSystemProvider.unmount(
+        {
+          fileSystemId: testUtil.FILE_SYSTEM_ID,
+        },
+        chrome.test.callbackPass(function() {
+          testUtil.mountFileSystem(callback, options);
+        }));
   } else {
-    test_util.mountFileSystem(callback, options);
+    testUtil.mountFileSystem(callback, options);
   }
 }
 
@@ -204,81 +214,86 @@ function runTests() {
     // succeed.
     function readFileSuccess() {
       setUpFileSystem(0 /* no limit */, chrome.test.callbackPass(function() {
-        test_util.fileSystem.root.getFile(
-            TESTING_TIRAMISU_FILE.name,
-            {create: false},
+        testUtil.fileSystem.root.getFile(
+            TESTING_TIRAMISU_FILE.name, {create: false},
             chrome.test.callbackPass(function(fileEntry) {
-              fileEntry.file(chrome.test.callbackPass(function(file) {
-                var fileReader = new FileReader();
-                fileReader.onload = chrome.test.callbackPass(function(e) {
-                  var text = fileReader.result;
-                  chrome.test.assertEq(TESTING_TEXT, text);
-                });
-                fileReader.onerror = function(e) {
-                  chrome.test.fail(fileReader.error.name);
-                };
-                fileReader.readAsText(file);
-              }),
-              function(error) {
-                chrome.test.fail(error.name);
-              });
+              fileEntry.file(
+                  chrome.test.callbackPass(function(file) {
+                    const fileReader = new FileReader();
+                    fileReader.onload = chrome.test.callbackPass(function(e) {
+                      const text = fileReader.result;
+                      chrome.test.assertEq(TESTING_TEXT, text);
+                    });
+                    fileReader.onerror = function(e) {
+                      chrome.test.fail(fileReader.error.name);
+                    };
+                    fileReader.readAsText(file);
+                  }),
+                  function(error) {
+                    chrome.test.fail(error.name);
+                  });
             }),
             function(error) {
               chrome.test.fail(error.name);
             });
-          }));
+      }));
     },
 
     // Read contents of the /tiramisu.txt multiple times at once. Verify that
     // there is at most as many opened files at once as permitted per limit.
     function readFileWithOpenedFilesLimitSuccess() {
       setUpFileSystem(2 /* two files */, chrome.test.callbackPass(function() {
-        var initAllReadsPromise;
+        // Disable eslint. It doesn't recognize that this variable is declared
+        // here and assigned below.
+        let initAllReadsPromise;  // eslint-disable-line prefer-const
 
         // Set a breakpoint on reading a file, and continue once another file
         // is queued.
         readBreakpointCallback = function(filePath, continueCallback) {
-          chrome.test.assertEq('/' + TESTING_TIRAMISU_FILE.name, filePath);
+          chrome.test.assertEq(`/${TESTING_TIRAMISU_FILE.name}`, filePath);
           // Continue after all reads are initiated.
-          initAllReadsPromise.then(chrome.test.callbackPass(function() {
-            chrome.test.assertTrue(
-                Object.keys(test_util.openedFiles).length <= 2);
-            continueCallback();
-          })).catch(function(error) {
-            chrome.test.fail(error.rname);
-          });
+          initAllReadsPromise
+              .then(chrome.test.callbackPass(function() {
+                chrome.test.assertTrue(
+                    Object.keys(testUtil.openedFiles).length <= 2);
+                continueCallback();
+              }))
+              .catch(function(error) {
+                chrome.test.fail(error.rname);
+              });
         };
 
         // Initiate reads, but all of them will be stoped on a breakpoint on
         // the first read.
-        var initReadPromises = [];
-        for (var i = 0; i < 16; i++) {
-          initReadPromises.push(new Promise(
-            chrome.test.callbackPass(function(fulfill) {
-              test_util.fileSystem.root.getFile(
-                  TESTING_TIRAMISU_FILE.name,
-                  {create: false},
-                  chrome.test.callbackPass(function(fileEntry) {
-                    fileEntry.file(chrome.test.callbackPass(function(file) {
-                      var fileReader = new FileReader();
-                      fileReader.onload = chrome.test.callbackPass(function(e) {
-                        var text = fileReader.result;
-                        chrome.test.assertEq(TESTING_TEXT, text);
-                      });
-                      fileReader.onerror = function(e) {
-                        chrome.test.fail(fileReader.error.name);
-                      };
-                      fileReader.readAsText(file);
-                      fulfill();
+        const initReadPromises = [];
+        for (let i = 0; i < 16; i++) {
+          initReadPromises.push(
+              new Promise(chrome.test.callbackPass(function(fulfill) {
+                testUtil.fileSystem.root.getFile(
+                    TESTING_TIRAMISU_FILE.name, {create: false},
+                    chrome.test.callbackPass(function(fileEntry) {
+                      fileEntry.file(
+                          chrome.test.callbackPass(function(file) {
+                            const fileReader = new FileReader();
+                            fileReader.onload =
+                                chrome.test.callbackPass(function(e) {
+                                  const text = fileReader.result;
+                                  chrome.test.assertEq(TESTING_TEXT, text);
+                                });
+                            fileReader.onerror = function(e) {
+                              chrome.test.fail(fileReader.error.name);
+                            };
+                            fileReader.readAsText(file);
+                            fulfill();
+                          }),
+                          function(error) {
+                            chrome.test.fail(error.name);
+                          });
                     }),
                     function(error) {
                       chrome.test.fail(error.name);
                     });
-                  }),
-                  function(error) {
-                    chrome.test.fail(error.name);
-                  });
-            })));
+              })));
         }
 
         initAllReadsPromise = Promise.all(initReadPromises);
@@ -291,37 +306,37 @@ function runTests() {
       setUpFileSystem(0 /* no limit */, chrome.test.callbackPass(function() {
         // Reset the breakpoint from the previous test case.
         readBreakpointCallback = null;
-        test_util.fileSystem.root.getFile(
-            TESTING_BROKEN_TIRAMISU_FILE.name,
-            {create: false},
+        testUtil.fileSystem.root.getFile(
+            TESTING_BROKEN_TIRAMISU_FILE.name, {create: false},
             chrome.test.callbackPass(function(fileEntry) {
-              fileEntry.file(chrome.test.callbackPass(function(file) {
-                var fileReader = new FileReader();
-                fileReader.onload = function(e) {
-                  chrome.test.fail();
-                };
-                fileReader.onerror = chrome.test.callbackPass(function(e) {
-                  chrome.test.assertEq(
-                      'NotReadableError', fileReader.error.name);
-                });
-                fileReader.readAsText(file);
-              }),
-              function(error) {
-                chrome.test.fail(error.name);
-              });
+              fileEntry.file(
+                  chrome.test.callbackPass(function(file) {
+                    const fileReader = new FileReader();
+                    fileReader.onload = function(e) {
+                      chrome.test.fail();
+                    };
+                    fileReader.onerror = chrome.test.callbackPass(function(e) {
+                      chrome.test.assertEq(
+                          'NotReadableError', fileReader.error.name);
+                    });
+                    fileReader.readAsText(file);
+                  }),
+                  function(error) {
+                    chrome.test.fail(error.name);
+                  });
             }),
             function(error) {
               chrome.test.fail(error.name);
             });
-        }));
+      }));
     },
 
     // Abort reading a file with a registered abort handler. Should result in a
     // gracefully terminated reading operation.
     function abortReadingSuccess() {
       setUpFileSystem(0 /* no limit */, chrome.test.callbackPass(function() {
-        var onAbortRequested = chrome.test.callbackPass(
-            function(options, onSuccess, onError) {
+        const onAbortRequested =
+            chrome.test.callbackPass(function(options, onSuccess, onError) {
               onSuccess();
               chrome.fileSystemProvider.onAbortRequested.removeListener(
                   onAbortRequested);
@@ -330,26 +345,27 @@ function runTests() {
         chrome.fileSystemProvider.onAbortRequested.addListener(
             onAbortRequested);
 
-        test_util.fileSystem.root.getFile(
+        testUtil.fileSystem.root.getFile(
             TESTING_VANILLA_FOR_ABORT_FILE.name,
             {create: false, exclusive: false},
             chrome.test.callbackPass(function(fileEntry) {
-              fileEntry.file(chrome.test.callbackPass(function(file) {
-                var fileReader = new FileReader();
-                fileReader.onabort = chrome.test.callbackPass(function(e) {
-                  chrome.test.assertEq(
-                      'AbortError', fileReader.error.name);
-                });
-                // Set a breakpoint on reading a file, so aborting is invoked
-                // after it's started.
-                readBreakpointCallback = function(filePath, continueCallback) {
-                  fileReader.abort();
-                };
-                fileReader.readAsText(file);
-              }),
-              function(error) {
-                chrome.test.fail(error.name);
-              });
+              fileEntry.file(
+                  chrome.test.callbackPass(function(file) {
+                    const fileReader = new FileReader();
+                    fileReader.onabort = chrome.test.callbackPass(function(e) {
+                      chrome.test.assertEq('AbortError', fileReader.error.name);
+                    });
+                    // Set a breakpoint on reading a file, so aborting is
+                    // invoked after it's started.
+                    readBreakpointCallback = function(
+                        filePath, continueCallback) {
+                      fileReader.abort();
+                    };
+                    fileReader.readAsText(file);
+                  }),
+                  function(error) {
+                    chrome.test.fail(error.name);
+                  });
             }),
             function(error) {
               chrome.test.fail(error.name);
@@ -361,35 +377,37 @@ function runTests() {
     // wired up. This should cause closing the file anyway.
     function abortViaCloseSuccess() {
       setUpFileSystem(0 /* no limit */, chrome.test.callbackPass(function() {
-        test_util.fileSystem.root.getFile(
+        testUtil.fileSystem.root.getFile(
             TESTING_VANILLA_FOR_ABORT_FILE.name,
             {create: false, exclusive: false},
             chrome.test.callbackPass(function(fileEntry) {
-              fileEntry.file(chrome.test.callbackPass(function(file) {
-                var fileReader = new FileReader();
-                fileReader.onabort = chrome.test.callbackPass(function(e) {
-                  chrome.test.assertEq(
-                      'AbortError', fileReader.error.name);
-                  // Confirm that the file is closed on the provider side.
-                  chrome.test.assertEq(
-                      0, Object.keys(test_util.openedFiles).length);
-                });
-                // Set a breakpoint on reading a file, so aborting is invoked
-                // after it's started.
-                openBreakpointCallback = chrome.test.callbackPass(
-                    function(filePath, continueCallback) {
-                      fileReader.abort();
-                      setTimeout(chrome.test.callbackPass(function() {
-                        continueCallback();
-                        chrome.test.assertEq(
-                            1, Object.keys(test_util.openedFiles).length);
-                      }), 0);
+              fileEntry.file(
+                  chrome.test.callbackPass(function(file) {
+                    const fileReader = new FileReader();
+                    fileReader.onabort = chrome.test.callbackPass(function(e) {
+                      chrome.test.assertEq('AbortError', fileReader.error.name);
+                      // Confirm that the file is closed on the provider side.
+                      chrome.test.assertEq(
+                          0, Object.keys(testUtil.openedFiles).length);
                     });
-                fileReader.readAsText(file);
-              }),
-              function(error) {
-                chrome.test.fail(error.name);
-              });
+                    // Set a breakpoint on reading a file, so aborting is
+                    // invoked after it's started.
+                    openBreakpointCallback = chrome.test.callbackPass(function(
+                        filePath, continueCallback) {
+                      fileReader.abort();
+                      setTimeout(
+                          chrome.test.callbackPass(function() {
+                            continueCallback();
+                            chrome.test.assertEq(
+                                1, Object.keys(testUtil.openedFiles).length);
+                          }),
+                          0);
+                    });
+                    fileReader.readAsText(file);
+                  }),
+                  function(error) {
+                    chrome.test.fail(error.name);
+                  });
             }),
             function(error) {
               chrome.test.fail(error.name);
@@ -399,50 +417,52 @@ function runTests() {
 
     // Abort opening a file while trying to read it without an abort handler
     // wired up, then quickly try to open it again while having a limit of 1
-    // opened files at once. This is a regression test for: crbug.com/519063.
+    // opened files at once. This is a regression test for: crbug.com/41193694.
     function abortOpenedAndReopenSuccess() {
       setUpFileSystem(1 /* no limit */, chrome.test.callbackPass(function() {
-        test_util.fileSystem.root.getFile(
+        testUtil.fileSystem.root.getFile(
             TESTING_VANILLA_FOR_ABORT_FILE.name,
             {create: false, exclusive: false},
             chrome.test.callbackPass(function(fileEntry) {
-              fileEntry.file(chrome.test.callbackPass(function(file) {
-                var fileReader = new FileReader();
-                var fileReader2 = new FileReader();
-                fileReader.onabort = chrome.test.callbackPass(function(e) {
-                  chrome.test.assertEq(
-                      'AbortError', fileReader.error.name);
-                  // Confirm that the file is closed on the provider side.
-                  chrome.test.assertEq(
-                      0, Object.keys(test_util.openedFiles).length);
-                });
-                // Set a breakpoint on reading a file, so aborting is invoked
-                // after it's started.
-                openBreakpointCallback = chrome.test.callbackPass(
-                    function(filePath, continueCallback) {
+              fileEntry.file(
+                  chrome.test.callbackPass(function(file) {
+                    const fileReader = new FileReader();
+                    const fileReader2 = new FileReader();
+                    fileReader.onabort = chrome.test.callbackPass(function(e) {
+                      chrome.test.assertEq('AbortError', fileReader.error.name);
+                      // Confirm that the file is closed on the provider side.
+                      chrome.test.assertEq(
+                          0, Object.keys(testUtil.openedFiles).length);
+                    });
+                    // Set a breakpoint on reading a file, so aborting is
+                    // invoked after it's started.
+                    openBreakpointCallback = chrome.test.callbackPass(function(
+                        filePath, continueCallback) {
                       fileReader.abort();
-                      setTimeout(chrome.test.callbackPass(function() {
-                        continueCallback();
-                        chrome.test.assertEq(
-                            1, Object.keys(test_util.openedFiles).length);
-                      }), 0);
-                      openBreakpointCallback = chrome.test.callbackPass(
-                          function() {
+                      setTimeout(
+                          chrome.test.callbackPass(function() {
+                            continueCallback();
+                            chrome.test.assertEq(
+                                1, Object.keys(testUtil.openedFiles).length);
+                          }),
+                          0);
+                      openBreakpointCallback =
+                          chrome.test.callbackPass(function() {
                             // The next OpenFile request should happen only
                             // after the previous file is closed successfully
                             // due to abort.
                             chrome.test.assertEq(
-                                0, Object.keys(test_util.openedFiles).length);
+                                0, Object.keys(testUtil.openedFiles).length);
                           });
                     });
-                fileReader.readAsText(file);
-                // The second reader should enqueue until the first file is
-                // closed.
-                fileReader2.readAsText(file);
-              }),
-              function(error) {
-                chrome.test.fail(error.name);
-              });
+                    fileReader.readAsText(file);
+                    // The second reader should enqueue until the first file is
+                    // closed.
+                    fileReader2.readAsText(file);
+                  }),
+                  function(error) {
+                    chrome.test.fail(error.name);
+                  });
             }),
             function(error) {
               chrome.test.fail(error.name);
@@ -453,6 +473,13 @@ function runTests() {
   ]);
 }
 
-// Setup and run all of the test cases.
-setUp();
-runTests();
+// This works-around that background scripts can't import because they aren't
+// considered modules.
+(async () => {
+  testUtil = await import(
+      '/_test_resources/api_test/file_system_provider/test_util.js');
+
+  // Setup and run all of the test cases.
+  setUp();
+  runTests();
+})();

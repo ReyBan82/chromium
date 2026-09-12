@@ -13,7 +13,7 @@ using testing::UnorderedElementsAre;
 namespace network {
 
 TEST(ContentLanguageTest, ParseContentLanguages) {
-  absl::optional<std::vector<std::string>> result;
+  std::optional<std::vector<std::string>> result;
 
   // Empty is OK.
   result = ParseContentLanguages(" ");
@@ -27,6 +27,10 @@ TEST(ContentLanguageTest, ParseContentLanguages) {
 
   // Must be a list of tokens, not other things.
   result = ParseContentLanguages("\"en\", \"zh\"");
+  EXPECT_FALSE(result.has_value());
+
+  // Must not be a single-element inner list of tokens either.
+  result = ParseContentLanguages("(en)");
   EXPECT_FALSE(result.has_value());
 
   // Parameters to the tokens are ignored.

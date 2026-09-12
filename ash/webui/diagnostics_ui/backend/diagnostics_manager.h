@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "ui/web_dialogs/web_dialog_ui.h"
 
 namespace ash {
@@ -16,6 +17,7 @@ class NetworkHealthProvider;
 class SessionLogHandler;
 class SystemDataProvider;
 class SystemRoutineController;
+class SystemRoutineControllerDelegate;
 class InputDataProvider;
 
 // DiagnosticsManager is responsible for managing the lifetime of the services
@@ -23,7 +25,8 @@ class InputDataProvider;
 class DiagnosticsManager {
  public:
   DiagnosticsManager(SessionLogHandler* session_log_handler,
-                     content::WebUI* webui);
+                     content::WebUI* webui,
+                     std::unique_ptr<SystemRoutineControllerDelegate> delegate);
   ~DiagnosticsManager();
 
   DiagnosticsManager(const DiagnosticsManager&) = delete;
@@ -39,7 +42,7 @@ class DiagnosticsManager {
   std::unique_ptr<SystemDataProvider> system_data_provider_;
   std::unique_ptr<SystemRoutineController> system_routine_controller_;
   std::unique_ptr<InputDataProvider> input_data_provider_;
-  content::WebUI* webui_;
+  raw_ptr<content::WebUI> webui_;
 };
 
 }  // namespace diagnostics

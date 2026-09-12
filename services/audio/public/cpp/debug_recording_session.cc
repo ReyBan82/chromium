@@ -30,9 +30,10 @@ const base::FilePath::CharType* StreamTypeToStringType(
       return FILE_PATH_LITERAL("input");
     case media::AudioDebugRecordingStreamType::kOutput:
       return FILE_PATH_LITERAL("output");
+    case media::AudioDebugRecordingStreamType::kLoopback:
+      return FILE_PATH_LITERAL("loopback");
   }
   NOTREACHED();
-  return FILE_PATH_LITERAL("output");
 }
 
 // Asynchronously creates a file and passes it to |reply_callback|.
@@ -90,6 +91,6 @@ DebugRecordingSession::DebugRecordingSession(
   debug_recording_->Enable(std::move(remote_file_provider));
 }
 
-DebugRecordingSession::~DebugRecordingSession() {}
+DebugRecordingSession::~DebugRecordingSession() = default;
 
 }  // namespace audio

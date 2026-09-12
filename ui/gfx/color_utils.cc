@@ -7,22 +7,25 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <functional>
+#include <iterator>
+#include <numeric>
 #include <ostream>
+#include <ranges>
+#include <vector>
 
 #include "base/check_op.h"
-#include "base/notreached.h"
+#include "base/compiler_specific.h"
+#include "base/containers/adapters.h"
+#include "base/notimplemented.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "build/build_config.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/gfx/color_palette.h"
-
-#if BUILDFLAG(IS_WIN)
-#include <windows.h>
-#include "skia/ext/skia_utils_win.h"
-#endif
 
 namespace color_utils {
 
@@ -65,168 +68,256 @@ float Linearize(float component) {
 }
 
 constexpr size_t kNumGoogleColors = 12;
-constexpr SkColor kGrey[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kGrey = {
     SK_ColorWHITE,       gfx::kGoogleGrey050, gfx::kGoogleGrey100,
     gfx::kGoogleGrey200, gfx::kGoogleGrey300, gfx::kGoogleGrey400,
     gfx::kGoogleGrey500, gfx::kGoogleGrey600, gfx::kGoogleGrey700,
     gfx::kGoogleGrey800, gfx::kGoogleGrey900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kRed[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kRed = {
     SK_ColorWHITE,      gfx::kGoogleRed050, gfx::kGoogleRed100,
     gfx::kGoogleRed200, gfx::kGoogleRed300, gfx::kGoogleRed400,
     gfx::kGoogleRed500, gfx::kGoogleRed600, gfx::kGoogleRed700,
     gfx::kGoogleRed800, gfx::kGoogleRed900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kOrange[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kOrange = {
     SK_ColorWHITE,         gfx::kGoogleOrange050, gfx::kGoogleOrange100,
     gfx::kGoogleOrange200, gfx::kGoogleOrange300, gfx::kGoogleOrange400,
     gfx::kGoogleOrange500, gfx::kGoogleOrange600, gfx::kGoogleOrange700,
     gfx::kGoogleOrange800, gfx::kGoogleOrange900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kYellow[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kYellow = {
     SK_ColorWHITE,         gfx::kGoogleYellow050, gfx::kGoogleYellow100,
     gfx::kGoogleYellow200, gfx::kGoogleYellow300, gfx::kGoogleYellow400,
     gfx::kGoogleYellow500, gfx::kGoogleYellow600, gfx::kGoogleYellow700,
     gfx::kGoogleYellow800, gfx::kGoogleYellow900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kGreen[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kGreen = {
     SK_ColorWHITE,        gfx::kGoogleGreen050, gfx::kGoogleGreen100,
     gfx::kGoogleGreen200, gfx::kGoogleGreen300, gfx::kGoogleGreen400,
     gfx::kGoogleGreen500, gfx::kGoogleGreen600, gfx::kGoogleGreen700,
     gfx::kGoogleGreen800, gfx::kGoogleGreen900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kCyan[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kCyan = {
     SK_ColorWHITE,       gfx::kGoogleCyan050, gfx::kGoogleCyan100,
     gfx::kGoogleCyan200, gfx::kGoogleCyan300, gfx::kGoogleCyan400,
     gfx::kGoogleCyan500, gfx::kGoogleCyan600, gfx::kGoogleCyan700,
     gfx::kGoogleCyan800, gfx::kGoogleCyan900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kBlue[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kBlue = {
     SK_ColorWHITE,       gfx::kGoogleBlue050, gfx::kGoogleBlue100,
     gfx::kGoogleBlue200, gfx::kGoogleBlue300, gfx::kGoogleBlue400,
     gfx::kGoogleBlue500, gfx::kGoogleBlue600, gfx::kGoogleBlue700,
     gfx::kGoogleBlue800, gfx::kGoogleBlue900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kPurple[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kPurple = {
     SK_ColorWHITE,         gfx::kGooglePurple050, gfx::kGooglePurple100,
     gfx::kGooglePurple200, gfx::kGooglePurple300, gfx::kGooglePurple400,
     gfx::kGooglePurple500, gfx::kGooglePurple600, gfx::kGooglePurple700,
     gfx::kGooglePurple800, gfx::kGooglePurple900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kMagenta[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kMagenta = {
     SK_ColorWHITE,          gfx::kGoogleMagenta050, gfx::kGoogleMagenta100,
     gfx::kGoogleMagenta200, gfx::kGoogleMagenta300, gfx::kGoogleMagenta400,
     gfx::kGoogleMagenta500, gfx::kGoogleMagenta600, gfx::kGoogleMagenta700,
     gfx::kGoogleMagenta800, gfx::kGoogleMagenta900, gfx::kGoogleGrey900,
 };
 
-constexpr SkColor kPink[kNumGoogleColors] = {
+constexpr std::array<SkColor, kNumGoogleColors> kPink = {
     SK_ColorWHITE,       gfx::kGooglePink050, gfx::kGooglePink100,
     gfx::kGooglePink200, gfx::kGooglePink300, gfx::kGooglePink400,
     gfx::kGooglePink500, gfx::kGooglePink600, gfx::kGooglePink700,
     gfx::kGooglePink800, gfx::kGooglePink900, gfx::kGoogleGrey900,
 };
 
-SkColor PickGoogleColor(const SkColor (&colors)[kNumGoogleColors],
+SkColor PickGoogleColor(const std::array<SkColor, kNumGoogleColors>& colors,
                         SkColor color,
                         SkColor background_color_a,
                         SkColor background_color_b,
-                        float min_contrast) {
-  // Compute source color, the color in `colors` which is closest to `color`.
+                        float min_contrast,
+                        float max_contrast_with_nearer) {
+  // Sanity checks.
+  DCHECK_GT(kNumGoogleColors, 0u);
+  DCHECK_GE(min_contrast, 0.0f);
+  DCHECK_LE(min_contrast, max_contrast_with_nearer);
+
   // First set up `lum_colors`, the corresponding relative luminances of
   // `colors`.  These could be precomputed and recorded next to `kGrey` etc. for
   // some runtime speedup at the cost of maintenance pain.
-  float lum_colors[kNumGoogleColors];
-  std::transform(std::cbegin(colors), std::cend(colors), std::begin(lum_colors),
-                 &GetRelativeLuminance);
+  std::array<float, kNumGoogleColors> lum_colors{};
+  std::ranges::transform(colors, lum_colors.begin(), &GetRelativeLuminance);
+  base::span lum_colors_span(lum_colors);
   // This function returns an iterator to the least-contrasting luminance (in
   // `lum_colors`) to `lum`.
-  const auto find_nearest_lum_it = [&lum_colors](float lum) {
+  const auto find_nearest_lum_idx = [&lum_colors_span](float lum) {
     // Find the first luminance (since they're sorted decreasing) <= `lum`.
-    const auto* it = std::lower_bound(
-        std::cbegin(lum_colors), std::cend(lum_colors), lum, std::greater<>());
+    const auto it =
+        std::ranges::lower_bound(lum_colors_span, lum, std::ranges::greater());
+    size_t idx = std::ranges::distance(lum_colors_span.begin(), it);
     // If applicable, check against the next greater luminance for whichever is
     // lower-contrast.
-    if (it == std::cend(lum_colors) ||
-        ((it != std::cbegin(lum_colors)) &&
-         (GetContrastRatio(lum, *it) > GetContrastRatio(*(it - 1), lum)))) {
-      --it;
+    if (idx >= lum_colors_span.size() ||
+        ((idx > 0) && (GetContrastRatio(lum, lum_colors_span[idx]) >
+                       GetContrastRatio(lum_colors_span[idx - 1], lum)))) {
+      --idx;
     }
-    return it;
+    return idx;
   };
-  const auto* const src_it = find_nearest_lum_it(GetRelativeLuminance(color));
 
-  // Compute target color, the color in `colors` which maximizes simultaneous
-  // contrast against both backgrounds, i.e. maximizes the minimum of the
-  // contrasts with both.
-  // Skip various unnecessary calculations in the common case that there is
-  // really only one background color to contrast with.
+  // Compute `src_idx`, the element in `lum_colors` which is closest to
+  // `color`.
+  size_t src_idx = find_nearest_lum_idx(GetRelativeLuminance(color));
+
+  // Compute the background luminances.
   const bool one_bg = background_color_a == background_color_b;
   const float lum_a = GetRelativeLuminance(background_color_a);
   const float lum_b = one_bg ? lum_a : GetRelativeLuminance(background_color_b);
-  // `lum_mid` is a relative luminance between `lum_a` and `lum_b` that
-  // contrasts equally with both.
+
+  // Compute `lum_mid`, the luminance between `lum_a` and `lum_b` that contrasts
+  // equally with both.
   const float lum_mid =
       one_bg ? lum_a : (std::sqrt((lum_a + 0.05f) * (lum_b + 0.05f)) - 0.05f);
-  // Of the two luminance endpoints, choose the one that contrasts more with
-  // `lum_mid`, as this maximizes the contrast against both backgrounds.  When
-  // there is only one background color, this is the target color.
-  const auto* targ_it = (lum_mid < g_luminance_midpoint)
-                            ? std::cbegin(lum_colors)
-                            : (std::cend(lum_colors) - 1);
+
   // This function returns the luminance of whichever background contrasts less
-  // with `lum`.
+  // with some given luminance (the "nearer background").
   const auto bg_lum_near_lum = [&](float lum) {
     return ((lum_a > lum_b) == (lum > lum_mid)) ? lum_a : lum_b;
   };
-  if (!one_bg) {
-    // The most-contrasting color, and thus target, is either the closest color
-    // to `lum_mid` (if the backgrounds are near both endpoints) or the
-    // previously-selected endpoint.  Compare their minimum contrasts.
-    const auto* const mid_it = find_nearest_lum_it(lum_mid);
-    if (GetContrastRatio(bg_lum_near_lum(*mid_it), *mid_it) >
-        GetContrastRatio(bg_lum_near_lum(*targ_it), *targ_it)) {
-      targ_it = mid_it;
+
+  // Compute the contrast of `src_idx` against the nearer background.
+  const float nearer_bg_lum = bg_lum_near_lum(lum_colors_span[src_idx]);
+  const float src_contrast_with_near =
+      GetContrastRatio(lum_colors_span[src_idx], nearer_bg_lum);
+
+  // This function returns the first element E, moving from `begin` towards
+  // `end` (inclusive), which does not satisfy `comp(proj(E), threshold)`. In
+  // other words, this is basically a direction-agnostic lower_bound().
+  const auto first_across_threshold =
+      [&lum_colors_span](size_t begin, size_t end, float threshold, auto comp,
+                         auto proj) {
+        if (end >= begin) {
+          auto subspan = lum_colors_span.subspan(begin, end - begin);
+          auto it = std::ranges::lower_bound(subspan, threshold, comp, proj);
+          return begin + std::ranges::distance(subspan.begin(), it);
+        }
+        auto subspan = lum_colors_span.subspan(end + 1, begin - end);
+        auto reversed = base::Reversed(subspan);
+        auto it = std::ranges::lower_bound(reversed, threshold, comp, proj);
+        return begin - std::ranges::distance(reversed.begin(), it);
+      };
+
+  // Compute `res_idx`, the desired result element in `lum_colors`. Start with
+  // `src_idx`, then adjust depending on the contrast against the nearer
+  // background.
+  size_t res_idx = src_idx;
+  if (src_contrast_with_near < min_contrast) {
+    // Need to increase contrast. This will be done by iterating through
+    // `lum_colors` towards a target element with sufficient contrast. The three
+    // potential targets are the two endpoints and (if there are two
+    // backgrounds) the element nearest `lum_mid`.
+    std::vector<size_t> targets = {0, lum_colors_span.size() - 1};
+    const bool src_darker_than_bg_a = lum_colors_span[src_idx] < lum_a;
+    if (one_bg) {
+      // To avoid inverting the relationship between source and background,
+      // prefer the endpoint on the "same side" of the background as the source,
+      // then the other endpoint.
+      if (src_darker_than_bg_a) {
+        std::swap(targets[0], targets[1]);
+      }
+    } else if (src_darker_than_bg_a == (lum_colors_span[src_idx] < lum_b)) {
+      // The source is either lighter or darker than both backgrounds, so prefer
+      // the endpoint on the "same side", then the midpoint, then the other
+      // endpoint.
+      if (src_darker_than_bg_a) {
+        std::swap(targets[0], targets[1]);
+      }
+      targets.insert(targets.cbegin() + 1, find_nearest_lum_idx(lum_mid));
+    } else {
+      // The source is between the two backgrounds, so prefer the midpoint, then
+      // the endpoint on the "same side" of the midpoint as the source, then the
+      // other endpoint.
+      if (lum_colors_span[src_idx] < lum_mid) {
+        std::swap(targets[0], targets[1]);
+      }
+      targets.insert(targets.cbegin(), find_nearest_lum_idx(lum_mid));
     }
+
+    // Set `targ_idx` to the first target in the priority list that has at least
+    // `min_contrast` against the nearer background. If none of the targets meet
+    // the contrast threshold, use the one with the best contrast.
+    size_t targ_idx;
+    float best_contrast = 0;
+    const auto proj = [&](float lum) {
+      return GetContrastRatio(lum, bg_lum_near_lum(lum));
+    };
+    for (const size_t elem : targets) {
+      const float contrast = proj(lum_colors_span[elem]);
+      if (contrast > best_contrast) {
+        targ_idx = elem;
+        best_contrast = contrast;
+        if (best_contrast >= min_contrast) {
+          break;
+        }
+      }
+    }
+
+    if (best_contrast < min_contrast) {
+      // Couldn't meet the threshold, so `targ_idx` is the best possible
+      // result.
+      res_idx = targ_idx;
+    } else {
+      // `targ_idx` has sufficient contrast. Since `src_idx` is already known
+      // to have insufficient contrast, move it one step towards `targ_idx`.
+      src_idx = (targ_idx < src_idx) ? (src_idx - 1) : (src_idx + 1);
+
+      // Now keep moving towards `targ_idx` until contrast is sufficient.
+      res_idx = first_across_threshold(src_idx, targ_idx, min_contrast,
+                                       std::ranges::less(), proj);
+    }
+  } else if (src_contrast_with_near > max_contrast_with_nearer) {
+    // Need to reduce contrast if possible by moving toward the nearer
+    // background. Compute `targ_idx`, the element in `lum_colors` whose
+    // luminance is closest to the nearer background while staying on the "same
+    // side" as `src_idx`. (This intentionally allows `targ_idx` to match the
+    // nearer background's luminance exactly, in case `min_contrast == 0`.)
+    size_t targ_idx;
+    if (lum_colors_span[src_idx] > nearer_bg_lum) {
+      auto subspan = lum_colors_span.subspan(src_idx);
+      auto it = std::ranges::upper_bound(subspan, nearer_bg_lum,
+                                         std::ranges::greater());
+      targ_idx = src_idx + std::ranges::distance(subspan.begin(), it) - 1;
+    } else {
+      auto subspan = lum_colors_span.first(src_idx);
+      auto it = std::ranges::lower_bound(subspan, nearer_bg_lum,
+                                         std::ranges::greater());
+      targ_idx = std::ranges::distance(subspan.begin(), it);
+    }
+
+    // Ensure `targ_idx` reaches `min_contrast` against the nearer background by
+    // moving toward `src_idx`.
+    const auto proj = [&](float lum) {
+      return GetContrastRatio(lum, nearer_bg_lum);
+    };
+    targ_idx = first_across_threshold(targ_idx, src_idx, min_contrast,
+                                      std::ranges::less(), proj);
+
+    // Now move `res_idx` towards `targ_idx` until contrast is sufficiently
+    // low.
+    res_idx =
+        first_across_threshold(src_idx, targ_idx, max_contrast_with_nearer,
+                               std::ranges::greater(), proj);
   }
 
-  // Find first color between source and target, inclusive, for which contrast
-  // reaches `min_contrast` threshold.
-  const auto* res_it = src_it;
-  // This function returns whether the minimum contrast of `lum` against the
-  // backgrounds is underneath the threshold `con`.
-  const auto comp = [&](float lum, float con) {
-    const float lum_near = bg_lum_near_lum(lum);
-    return GetContrastRatio(lum, lum_near) < con;
-  };
-  // Depending on how the colors are arranged, the source may have sufficient
-  // contrast against both backgrounds while some subsequent colors do not.  In
-  // this case we can return immediately.
-  if ((src_it != targ_it) && comp(*src_it, min_contrast)) {
-    // The source does not have sufficient contrast, which means the range of
-    // `lum_colors` we care about is partitioned into a set that contrasts
-    // insufficiently followed by a (possibly-empty) set that contrasts
-    // sufficiently.  Use std::lower_bound() to find the first element of the
-    // latter set (or, if that set is empty, the last element of the former).
-    if (targ_it < src_it) {
-      // Reverse iterate over [src_it - 1, targ_it).
-      const auto res_it_reversed = std::lower_bound(
-          std::make_reverse_iterator(src_it),
-          std::make_reverse_iterator(targ_it + 1), min_contrast, comp);
-      res_it = res_it_reversed.base() - 1;
-    } else {
-      res_it = std::lower_bound(src_it + 1, targ_it, min_contrast, comp);
-    }
-  }
-  return colors[res_it - std::begin(lum_colors)];
+  // Convert `res_idx` back to a color.
+  return colors[res_idx];
 }
 
 template <typename T>
@@ -284,22 +375,27 @@ SkColor PickGoogleColorImpl(SkColor color, T pick_color) {
 
 SkColor PickGoogleColor(SkColor color,
                         SkColor background_color,
-                        float min_contrast) {
-  const auto pick_color = [&](const SkColor(&colors)[kNumGoogleColors]) {
-    return PickGoogleColor(colors, color, background_color, background_color,
-                           min_contrast);
-  };
+                        float min_contrast,
+                        float max_contrast) {
+  const auto pick_color =
+      [&](const std::array<SkColor, kNumGoogleColors>& colors) {
+        return PickGoogleColor(colors, color, background_color,
+                               background_color, min_contrast, max_contrast);
+      };
   return PickGoogleColorImpl(color, pick_color);
 }
 
-SkColor PickGoogleColor(SkColor color,
-                        SkColor background_color_a,
-                        SkColor background_color_b,
-                        float min_contrast) {
-  const auto pick_color = [&](const SkColor(&colors)[kNumGoogleColors]) {
-    return PickGoogleColor(colors, color, background_color_a,
-                           background_color_b, min_contrast);
-  };
+SkColor PickGoogleColorTwoBackgrounds(SkColor color,
+                                      SkColor background_color_a,
+                                      SkColor background_color_b,
+                                      float min_contrast,
+                                      float max_contrast_with_nearer) {
+  const auto pick_color =
+      [&](const std::array<SkColor, kNumGoogleColors>& colors) {
+        return PickGoogleColor(colors, color, background_color_a,
+                               background_color_b, min_contrast,
+                               max_contrast_with_nearer);
+      };
   return PickGoogleColorImpl(color, pick_color);
 }
 
@@ -341,10 +437,9 @@ void SkColorToHSL(SkColor c, HSL* hsl) {
   float r = SkColorGetR(c) / 255.0f;
   float g = SkColorGetG(c) / 255.0f;
   float b = SkColorGetB(c) / 255.0f;
-  float vmax = std::max({r, g, b});
-  float vmin = std::min({r, g, b});
+  auto [vmin, vmax] = std::minmax({r, g, b});
   float delta = vmax - vmin;
-  hsl->l = (vmax + vmin) / 2;
+  hsl->l = std::midpoint(vmin, vmax);
   if (SkColorGetR(c) == SkColorGetG(c) && SkColorGetR(c) == SkColorGetB(c)) {
     hsl->h = hsl->s = 0;
   } else {
@@ -549,11 +644,10 @@ SkColor PickContrastingColor(SkColor foreground1,
       foreground1 : foreground2;
 }
 
-BlendResult BlendForMinContrast(
-    SkColor default_foreground,
-    SkColor background,
-    absl::optional<SkColor> high_contrast_foreground,
-    float contrast_ratio) {
+BlendResult BlendForMinContrast(SkColor default_foreground,
+                                SkColor background,
+                                std::optional<SkColor> high_contrast_foreground,
+                                float contrast_ratio) {
   DCHECK_EQ(SkColorGetA(background), SK_AlphaOPAQUE);
   default_foreground = GetResultingPaintColor(default_foreground, background);
   if (GetContrastRatio(default_foreground, background) >= contrast_ratio)
@@ -569,7 +663,7 @@ BlendResult BlendForMinContrast(
   // Use int for inclusive lower bound and exclusive upper bound, reserving
   // conversion to SkAlpha for the end (reduces casts).
   for (int low = SK_AlphaTRANSPARENT, high = SK_AlphaOPAQUE + 1; low < high;) {
-    const SkAlpha alpha = (low + high) / 2;
+    const SkAlpha alpha = std::midpoint(low, high);
     const SkColor color =
         AlphaBlend(target_foreground, default_foreground, alpha);
     const float luminance = GetRelativeLuminance(color);
@@ -588,15 +682,6 @@ BlendResult BlendForMinContrast(
 SkColor InvertColor(SkColor color) {
   return SkColorSetARGB(SkColorGetA(color), 255 - SkColorGetR(color),
                         255 - SkColorGetG(color), 255 - SkColorGetB(color));
-}
-
-SkColor GetSysSkColor(int which) {
-#if BUILDFLAG(IS_WIN)
-  return skia::COLORREFToSkColor(GetSysColor(which));
-#else
-  NOTIMPLEMENTED();
-  return SK_ColorLTGRAY;
-#endif
 }
 
 SkColor DeriveDefaultIconColor(SkColor text_color) {

@@ -7,11 +7,11 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "chrome/browser/ash/drive/drive_integration_service_factory.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "content/public/test/browser_task_environment.h"
-#include "content/public/test/test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace drive {
@@ -33,7 +33,7 @@ class DriveIntegrationServiceTest : public testing::Test {
 };
 
 // This test is flaky on chromeos.
-// https://crbug.com/943376
+// https://crbug.com/41447641
 TEST_F(DriveIntegrationServiceTest, DISABLED_ServiceInstanceIdentity) {
   TestingProfile* user1 = profile_manager_.CreateTestingProfile("user1");
 

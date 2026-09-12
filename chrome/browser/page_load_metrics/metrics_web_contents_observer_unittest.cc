@@ -18,19 +18,19 @@
 #include "content/public/test/web_contents_tester.h"
 #include "extensions/buildflags/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom.h"
 #include "url/gurl.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-#include "chrome/browser/extensions/extension_service.h"
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "base/values.h"
 #include "chrome/browser/extensions/test_extension_system.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_builder.h"
 #include "extensions/common/manifest_constants.h"
-#include "extensions/common/value_builder.h"
-#endif
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
 using content::NavigationSimulator;
 
@@ -70,23 +70,24 @@ class MetricsWebContentsObserverTest : public ChromeRenderViewHostTestHarness {
     observer->OnVisibilityChanged(content::Visibility::VISIBLE);
   }
 
-  raw_ptr<TestMetricsWebContentsObserverEmbedder> embedder_interface_ = nullptr;
+  raw_ptr<TestMetricsWebContentsObserverEmbedder, DanglingUntriaged>
+      embedder_interface_ = nullptr;
 };
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 TEST_F(MetricsWebContentsObserverTest,
        RecordFeatureUsageIgnoresChromeExtensionUpdates) {
   // Register our fake extension. The URL we access must be part of the
   // 'web_accessible_resources' for the network commit to work.
-  extensions::DictionaryBuilder manifest;
-  manifest.Set(extensions::manifest_keys::kVersion, "1.0.0.0")
-      .Set(extensions::manifest_keys::kName, "TestExtension")
-      .Set(extensions::manifest_keys::kManifestVersion, 2)
-      .Set("web_accessible_resources",
-           extensions::ListBuilder().Append("main.html").Build());
+  auto manifest = base::DictValue()
+                      .Set(extensions::manifest_keys::kVersion, "1.0.0.0")
+                      .Set(extensions::manifest_keys::kName, "TestExtension")
+                      .Set(extensions::manifest_keys::kManifestVersion, 2)
+                      .Set("web_accessible_resources",
+                           base::ListValue().Append("main.html"));
   scoped_refptr<const extensions::Extension> extension =
       extensions::ExtensionBuilder()
-          .SetManifest(manifest.Build())
+          .SetManifest(std::move(manifest))
           .SetID("mbflcebpggnecokmikipoihdbecnjfoj")
           .Build();
   ASSERT_TRUE(extension);
@@ -94,10 +95,9 @@ TEST_F(MetricsWebContentsObserverTest,
   extensions::TestExtensionSystem* extension_system =
       static_cast<extensions::TestExtensionSystem*>(
           extensions::ExtensionSystem::Get(profile()));
-  extensions::ExtensionService* extension_service =
-      extension_system->CreateExtensionService(
-          base::CommandLine::ForCurrentProcess(), base::FilePath(), false);
-  extension_service->AddExtension(extension.get());
+  extension_system->CreateExtensionService(
+      base::CommandLine::ForCurrentProcess(), base::FilePath(), false);
+  extensions::ExtensionRegistrar::Get(profile())->AddExtension(extension);
 
   content::WebContentsTester* web_contents_tester =
       content::WebContentsTester::For(web_contents());
@@ -114,6 +114,6 @@ TEST_F(MetricsWebContentsObserverTest,
   // The features come from an extension source, so shouldn't be counted.
   EXPECT_EQ(observed_features().size(), 0ul);
 }
-#endif
+#endif  // BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 
 }  // namespace page_load_metrics

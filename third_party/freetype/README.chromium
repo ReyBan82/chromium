@@ -1,12 +1,13 @@
 Name: FreeType
 URL: http://www.freetype.org/
-Version: VER-2-13-0-7-g713580f41
-Revision: 713580f41dcc2054d7fa56265f03eeb9c67e0937
-CPEPrefix: cpe:/a:freetype:freetype:2.12.1
-License: Custom license "inspired by the BSD, Artistic, and IJG (Independent
-         JPEG Group) licenses"
+Version: VER-2-14-3-105-g5c79d6cd1
+Revision: 5c79d6cd1ac73d70a55f3d963fb568aa32f6d794
+Update Mechanism: Autoroll
+CPEPrefix: cpe:/a:freetype:freetype:2.14.3
+License: FTL
 License File: src/docs/FTL.TXT
 Security Critical: yes
+Shipped: yes
 License Android Compatible: yes
 
 Description:

@@ -24,7 +24,6 @@
 #include <unistd.h>
 
 #include "base/check_op.h"
-#include "base/notreached.h"
 #include "build/build_config.h"
 #include "client/annotation.h"
 #include "client/annotation_list.h"
@@ -54,12 +53,8 @@
 #include "util/thread/thread.h"
 
 #if BUILDFLAG(IS_ANDROID)
+#include <android/api-level.h>
 #include <android/set_abort_message.h>
-#include "dlfcn_internal.h"
-
-// Normally this comes from set_abort_message.h, but only at API level 21.
-extern "C" void android_set_abort_message(const char* msg)
-    __attribute__((weak));
 #endif
 
 namespace crashpad {
@@ -71,11 +66,14 @@ enum class CrashType : uint32_t {
   kBuiltinTrap,
   kInfiniteRecursion,
   kSegvWithTagBits,
+  // kFakeSegv is meant to simulate a MTE segv error.
+  kFakeSegv,
 };
 
 struct StartHandlerForSelfTestOptions {
   bool start_handler_at_crash;
   bool set_first_chance_handler;
+  bool set_last_chance_handler;
   bool crash_non_main_thread;
   bool client_uses_signals;
   bool gather_indirectly_referenced_memory;
@@ -84,7 +82,7 @@ struct StartHandlerForSelfTestOptions {
 
 class StartHandlerForSelfTest
     : public testing::TestWithParam<
-          std::tuple<bool, bool, bool, bool, bool, CrashType>> {
+          std::tuple<bool, bool, bool, bool, bool, bool, CrashType>> {
  public:
   StartHandlerForSelfTest() = default;
 
@@ -99,6 +97,7 @@ class StartHandlerForSelfTest
     memset(&options_, 0, sizeof(options_));
     std::tie(options_.start_handler_at_crash,
              options_.set_first_chance_handler,
+             options_.set_last_chance_handler,
              options_.crash_non_main_thread,
              options_.client_uses_signals,
              options_.gather_indirectly_referenced_memory,
@@ -184,10 +183,7 @@ void ValidateDump(const StartHandlerForSelfTestOptions& options,
   ASSERT_TRUE(minidump_snapshot.Initialize(report->Reader()));
 
 #if BUILDFLAG(IS_ANDROID)
-  // This part of the test requires Q. The API level on Q devices will be 28
-  // until the API is finalized, so we can't check API level yet. For now, test
-  // for the presence of a libc symbol which was introduced in Q.
-  if (crashpad::internal::Dlsym(RTLD_DEFAULT, "android_fdsan_close_with_tag")) {
+  if (android_get_device_api_level() >= 29) {
     const auto& annotations = minidump_snapshot.AnnotationsSimpleMap();
     auto abort_message = annotations.find("abort_message");
     ASSERT_NE(annotations.end(), abort_message);
@@ -225,6 +221,9 @@ void ValidateDump(const StartHandlerForSelfTestOptions& options,
 #if defined(COMPILER_GCC)
 __attribute__((noinline))
 #endif
+#if defined(__clang__)
+__attribute__((optnone))
+#endif
 int RecurseInfinitely(int* ptr) {
   int buf[1 << 20];
   return *ptr + RecurseInfinitely(buf);
@@ -239,6 +238,10 @@ bool HandleCrashSuccessfully(int, siginfo_t*, ucontext_t*) {
 #pragma clang diagnostic ignored "-Wunreachable-code-return"
   return true;
 #pragma clang diagnostic pop
+}
+
+bool HandleCrashSuccessfullyAfterReporting(int, siginfo_t*, ucontext_t*) {
+  return true;
 }
 
 void DoCrash(const StartHandlerForSelfTestOptions& options,
@@ -268,6 +271,15 @@ void DoCrash(const StartHandlerForSelfTestOptions& options,
       x += 0xefull << 56;
 #endif  // __aarch64__
       *x;
+      break;
+    }
+
+    case CrashType::kFakeSegv: {
+      // With a regular SIGSEGV like null dereference, the signal gets reraised
+      // automatically, causing HandleOrReraiseSignal() to be called a second
+      // time, terminating the process with the signal regardless of the last
+      // chance handler.
+      raise(SIGSEGV);
       break;
     }
   }
@@ -400,10 +412,12 @@ CRASHPAD_CHILD_TEST_MAIN(StartHandlerForSelfTestChild) {
     client.SetFirstChanceExceptionHandler(HandleCrashSuccessfully);
   }
 
-#if BUILDFLAG(IS_ANDROID)
-  if (android_set_abort_message) {
-    android_set_abort_message(kTestAbortMessage);
+  if (options.set_last_chance_handler) {
+    client.SetLastChanceExceptionHandler(HandleCrashSuccessfullyAfterReporting);
   }
+
+#if BUILDFLAG(IS_ANDROID)
+  android_set_abort_message(kTestAbortMessage);
 #endif
 
   if (options.crash_non_main_thread) {
@@ -437,6 +451,16 @@ class StartHandlerForSelfInChildTest : public MultiprocessExec {
         case CrashType::kSegvWithTagBits:
           SetExpectedChildTermination(TerminationReason::kTerminationSignal,
                                       SIGSEGV);
+          break;
+        case CrashType::kFakeSegv:
+          if (!options.set_last_chance_handler) {
+            SetExpectedChildTermination(TerminationReason::kTerminationSignal,
+                                        SIGSEGV);
+          } else {
+            SetExpectedChildTermination(TerminationReason::kTerminationNormal,
+                                        EXIT_SUCCESS);
+          }
+          break;
       }
     }
   }
@@ -468,7 +492,11 @@ class StartHandlerForSelfInChildTest : public MultiprocessExec {
     writer.Close();
 
     if (options_.client_uses_signals && !options_.set_first_chance_handler &&
-        options_.crash_type != CrashType::kSimulated) {
+        options_.crash_type != CrashType::kSimulated &&
+        // The last chance handler will prevent the client handler from being
+        // called if crash type is kFakeSegv.
+        (!options_.set_last_chance_handler ||
+         options_.crash_type != CrashType::kFakeSegv)) {
       // Wait for child's client signal handler.
       char c;
       EXPECT_TRUE(LoggingReadFileExactly(ReadPipeHandle(), &c, sizeof(c)));
@@ -514,6 +542,15 @@ TEST_P(StartHandlerForSelfTest, StartHandlerInChild) {
   }
 #endif  // defined(ADDRESS_SANITIZER)
 
+  // kFakeSegv does raise(SIGSEGV) to simulate a MTE error which is a SEGSEGV
+  // that doesn't get reraised automatically, but this causes the child process
+  // to flakily terminate normally on some bots (e.g. android-nougat-x86-rel)
+  // for some reason so this is skipped.
+  if (!Options().set_last_chance_handler &&
+      Options().crash_type == CrashType::kFakeSegv) {
+    GTEST_SKIP();
+  }
+
   if (Options().crash_type == CrashType::kSegvWithTagBits) {
 #if !defined(ARCH_CPU_ARM64)
     GTEST_SKIP() << "Testing for tag bits only exists on aarch64.";
@@ -546,10 +583,12 @@ INSTANTIATE_TEST_SUITE_P(
                      testing::Bool(),
                      testing::Bool(),
                      testing::Bool(),
+                     testing::Bool(),
                      testing::Values(CrashType::kSimulated,
                                      CrashType::kBuiltinTrap,
                                      CrashType::kInfiniteRecursion,
-                                     CrashType::kSegvWithTagBits)));
+                                     CrashType::kSegvWithTagBits,
+                                     CrashType::kFakeSegv)));
 
 // Test state for starting the handler for another process.
 class StartHandlerForClientTest {
@@ -711,12 +750,10 @@ class StartHandlerForChildTest : public Multiprocess {
     test_state_.ExpectReport();
   }
 
-  void MultiprocessChild() {
+  [[noreturn]] void MultiprocessChild() {
     CHECK(test_state_.InstallHandler());
 
     __builtin_trap();
-
-    NOTREACHED();
   }
 
   StartHandlerForClientTest test_state_;

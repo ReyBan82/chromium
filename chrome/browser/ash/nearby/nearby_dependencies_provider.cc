@@ -4,13 +4,19 @@
 
 #include "chrome/browser/ash/nearby/nearby_dependencies_provider.h"
 
+#include "ash/constants/ash_features.h"
+#include "ash/constants/ash_switches.h"
 #include "ash/public/cpp/network_config_service.h"
 #include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
-#include "base/memory/singleton.h"
+#include "base/memory/raw_ptr.h"
+#include "base/no_destructor.h"
+#include "base/notimplemented.h"
 #include "chrome/browser/ash/nearby/bluetooth_adapter_manager.h"
+#include "chrome/browser/ash/nearby/mdns/nearby_connections_mdns_manager.h"
 #include "chrome/browser/ash/nearby/nearby_dependencies_provider_factory.h"
+#include "chrome/browser/ash/nearby/presence/credential_storage/credential_storage_initializer.h"
 #include "chrome/browser/nearby_sharing/common/nearby_share_features.h"
 #include "chrome/browser/nearby_sharing/common/nearby_share_switches.h"
 #include "chrome/browser/nearby_sharing/firewall_hole/nearby_connections_firewall_hole_factory.h"
@@ -20,10 +26,12 @@
 #include "chrome/browser/nearby_sharing/webrtc_signaling_messenger.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chromeos/ash/services/nearby/public/mojom/firewall_hole.mojom.h"
+#include "chromeos/ash/services/nearby/public/mojom/mdns.mojom.h"
 #include "chromeos/ash/services/nearby/public/mojom/nearby_connections.mojom.h"
 #include "chromeos/ash/services/nearby/public/mojom/sharing.mojom.h"
 #include "chromeos/ash/services/nearby/public/mojom/tcp_socket_factory.mojom.h"
 #include "chromeos/services/network_config/public/mojom/cros_network_config.mojom.h"
+#include "components/cross_device/nearby/nearby_features.h"
 #include "components/keyed_service/content/browser_context_keyed_service_shutdown_notifier_factory.h"
 #include "components/keyed_service/core/keyed_service_shutdown_notifier.h"
 #include "content/public/browser/network_service_instance.h"
@@ -69,8 +77,9 @@ class NearbyDependenciesProviderShutdownNotifierFactory
     : public BrowserContextKeyedServiceShutdownNotifierFactory {
  public:
   static NearbyDependenciesProviderShutdownNotifierFactory* GetInstance() {
-    return base::Singleton<
-        NearbyDependenciesProviderShutdownNotifierFactory>::get();
+    static base::NoDestructor<NearbyDependenciesProviderShutdownNotifierFactory>
+        instance;
+    return instance.get();
   }
 
   NearbyDependenciesProviderShutdownNotifierFactory(
@@ -79,8 +88,7 @@ class NearbyDependenciesProviderShutdownNotifierFactory
       const NearbyDependenciesProviderShutdownNotifierFactory&) = delete;
 
  private:
-  friend struct base::DefaultSingletonTraits<
-      NearbyDependenciesProviderShutdownNotifierFactory>;
+  friend base::NoDestructor<NearbyDependenciesProviderShutdownNotifierFactory>;
 
   NearbyDependenciesProviderShutdownNotifierFactory()
       : BrowserContextKeyedServiceShutdownNotifierFactory(
@@ -90,7 +98,7 @@ class NearbyDependenciesProviderShutdownNotifierFactory
   ~NearbyDependenciesProviderShutdownNotifierFactory() override = default;
 };
 
-class MdnsResponderFactory : public sharing::mojom::MdnsResponderFactory {
+class MdnsResponderFactory : public ::sharing::mojom::MdnsResponderFactory {
  public:
   explicit MdnsResponderFactory(Profile* profile) : profile_(profile) {
     // Subscribe to be notified when NearbyDependenciesProvider shuts down.
@@ -136,7 +144,7 @@ class MdnsResponderFactory : public sharing::mojom::MdnsResponderFactory {
   void Shutdown() { is_shutdown_ = true; }
 
   bool is_shutdown_ = false;
-  Profile* profile_;
+  raw_ptr<Profile, LeakedDanglingUntriaged> profile_;
   base::CallbackListSubscription shutdown_subscription_;
 };
 
@@ -154,13 +162,13 @@ NearbyDependenciesProvider::NearbyDependenciesProvider() = default;
 
 NearbyDependenciesProvider::~NearbyDependenciesProvider() = default;
 
-sharing::mojom::NearbyDependenciesPtr
+::sharing::mojom::NearbyDependenciesPtr
 NearbyDependenciesProvider::GetDependencies() {
   if (shut_down_) {
     return nullptr;
   }
 
-  auto dependencies = sharing::mojom::NearbyDependencies::New();
+  auto dependencies = ::sharing::mojom::NearbyDependencies::New();
 
   if (device::BluetoothAdapterFactory::IsBluetoothSupported()) {
     dependencies->bluetooth_adapter = GetBluetoothAdapterPendingRemote();
@@ -168,11 +176,21 @@ NearbyDependenciesProvider::GetDependencies() {
     dependencies->bluetooth_adapter = mojo::NullRemote();
   }
 
+  // TOOD(b/317307931): Re-visit security considerations before enabling
+  // this feature by default/ramping up via Finch.
+  if (ash::features::IsNearbyPresenceEnabled()) {
+    dependencies->nearby_presence_credential_storage =
+        GetNearbyPresenceCredentialStoragePendingRemote();
+  } else {
+    dependencies->nearby_presence_credential_storage = mojo::NullRemote();
+  }
+
   dependencies->webrtc_dependencies = GetWebRtcDependencies();
   dependencies->wifilan_dependencies = GetWifiLanDependencies();
+  dependencies->wifidirect_dependencies = GetWifiDirectDependencies();
 
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (command_line->HasSwitch(switches::kNearbyShareVerboseLogging)) {
+  if (command_line->HasSwitch(ash::switches::kNearbyShareVerboseLogging)) {
     dependencies->min_log_severity =
         ::nearby::api::LogMessage::Severity::kVerbose;
   }
@@ -184,6 +202,8 @@ void NearbyDependenciesProvider::PrepareForShutdown() {
   if (bluetooth_manager_) {
     bluetooth_manager_->Shutdown();
   }
+
+  presence_credential_storage_initializer_.reset();
 }
 
 void NearbyDependenciesProvider::Shutdown() {
@@ -201,7 +221,22 @@ NearbyDependenciesProvider::GetBluetoothAdapterPendingRemote() {
   return pending_remote;
 }
 
-sharing::mojom::WebRtcDependenciesPtr
+mojo::PendingRemote<presence::mojom::NearbyPresenceCredentialStorage>
+NearbyDependenciesProvider::GetNearbyPresenceCredentialStoragePendingRemote() {
+  mojo::PendingReceiver<presence::mojom::NearbyPresenceCredentialStorage>
+      pending_receiver;
+  mojo::PendingRemote<presence::mojom::NearbyPresenceCredentialStorage>
+      pending_remote = pending_receiver.InitWithNewPipeAndPassRemote();
+
+  presence_credential_storage_initializer_ =
+      std::make_unique<presence::CredentialStorageInitializer>(
+          std::move(pending_receiver), profile_);
+  presence_credential_storage_initializer_->Initialize();
+
+  return pending_remote;
+}
+
+::sharing::mojom::WebRtcDependenciesPtr
 NearbyDependenciesProvider::GetWebRtcDependencies() {
   MojoPipe<network::mojom::P2PTrustedSocketManagerClient> socket_manager_client;
   MojoPipe<network::mojom::P2PTrustedSocketManager> trusted_socket_manager;
@@ -219,59 +254,80 @@ NearbyDependenciesProvider::GetWebRtcDependencies() {
       std::move(trusted_socket_manager.receiver),
       std::move(socket_manager.receiver));
 
-  MojoPipe<sharing::mojom::MdnsResponderFactory> mdns_responder_factory_pipe;
+  MojoPipe<::sharing::mojom::MdnsResponderFactory> mdns_responder_factory_pipe;
   mojo::MakeSelfOwnedReceiver(std::make_unique<MdnsResponderFactory>(profile_),
                               std::move(mdns_responder_factory_pipe.receiver));
 
   // Create ice config fetcher.
   auto url_loader_factory = profile_->GetURLLoaderFactory();
-  MojoPipe<sharing::mojom::IceConfigFetcher> ice_config_fetcher;
+  MojoPipe<::sharing::mojom::IceConfigFetcher> ice_config_fetcher;
   mojo::MakeSelfOwnedReceiver(std::make_unique<TachyonIceConfigFetcher>(
                                   identity_manager_, url_loader_factory),
                               std::move(ice_config_fetcher.receiver));
 
-  MojoPipe<sharing::mojom::WebRtcSignalingMessenger> messenger;
+  MojoPipe<::sharing::mojom::WebRtcSignalingMessenger> messenger;
   mojo::MakeSelfOwnedReceiver(std::make_unique<WebRtcSignalingMessenger>(
                                   identity_manager_, url_loader_factory),
                               std::move(messenger.receiver));
 
-  return sharing::mojom::WebRtcDependencies::New(
+  return ::sharing::mojom::WebRtcDependencies::New(
       std::move(socket_manager.remote),
       std::move(mdns_responder_factory_pipe.remote),
       std::move(ice_config_fetcher.remote), std::move(messenger.remote));
 }
 
-sharing::mojom::WifiLanDependenciesPtr
+::sharing::mojom::WifiLanDependenciesPtr
 NearbyDependenciesProvider::GetWifiLanDependencies() {
-  if (!base::FeatureList::IsEnabled(features::kNearbySharingWifiLan)) {
-    return nullptr;
-  }
-
   MojoPipe<chromeos::network_config::mojom::CrosNetworkConfig>
       cros_network_config;
   ash::GetNetworkConfigService(std::move(cros_network_config.receiver));
 
-  MojoPipe<sharing::mojom::FirewallHoleFactory> firewall_hole_factory;
+  MojoPipe<::sharing::mojom::FirewallHoleFactory> firewall_hole_factory;
   mojo::MakeSelfOwnedReceiver(
       std::make_unique<NearbyConnectionsFirewallHoleFactory>(),
       std::move(firewall_hole_factory.receiver));
 
-  MojoPipe<sharing::mojom::TcpSocketFactory> tcp_socket_factory;
+  MojoPipe<::sharing::mojom::TcpSocketFactory> tcp_socket_factory;
   mojo::MakeSelfOwnedReceiver(
       std::make_unique<NearbyConnectionsTcpSocketFactory>(
           base::BindRepeating(&NearbyDependenciesProvider::GetNetworkContext,
                               base::Unretained(this))),
       std::move(tcp_socket_factory.receiver));
 
-  return sharing::mojom::WifiLanDependencies::New(
+  MojoPipe<::sharing::mojom::MdnsManager> mdns_manager;
+  mojo::MakeSelfOwnedReceiver(
+      std::make_unique<::nearby::sharing::NearbyConnectionsMdnsManager>(),
+      std::move(mdns_manager.receiver));
+
+  return ::sharing::mojom::WifiLanDependencies::New(
       std::move(cros_network_config.remote),
       std::move(firewall_hole_factory.remote),
-      std::move(tcp_socket_factory.remote));
+      std::move(tcp_socket_factory.remote), std::move(mdns_manager.remote));
+}
+
+sharing::mojom::WifiDirectDependenciesPtr
+NearbyDependenciesProvider::GetWifiDirectDependencies() {
+  MojoPipe<sharing::mojom::FirewallHoleFactory> firewall_hole_factory;
+  mojo::MakeSelfOwnedReceiver(
+      std::make_unique<NearbyConnectionsFirewallHoleFactory>(),
+      std::move(firewall_hole_factory.receiver));
+
+  wifi_direct_manager_ = std::make_unique<wifi_direct::WifiDirectManager>();
+  MojoPipe<wifi_direct::mojom::WifiDirectManager> manager;
+  wifi_direct_manager_->BindPendingReceiver(std::move(manager.receiver));
+
+  return sharing::mojom::WifiDirectDependencies::New(
+      std::move(manager.remote), std::move(firewall_hole_factory.remote));
 }
 
 network::mojom::NetworkContext*
 NearbyDependenciesProvider::GetNetworkContext() {
   return profile_->GetDefaultStoragePartition()->GetNetworkContext();
+}
+
+// static
+void NearbyDependenciesProvider::EnsureFactoryBuilt() {
+  NearbyDependenciesProviderShutdownNotifierFactory::GetInstance();
 }
 
 }  // namespace nearby

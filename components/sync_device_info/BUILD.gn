@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/chromeos/ui_mode.gni")
-import("//build/config/features.gni")
 if (is_android) {
   import("//build/config/android/config.gni")
   import("//build/config/android/rules.gni")
@@ -30,6 +28,8 @@ static_library("sync_device_info") {
     "device_info_tracker.h",
     "device_info_util.cc",
     "device_info_util.h",
+    "device_name_util.cc",
+    "device_name_util.h",
     "local_device_info_provider.h",
     "local_device_info_provider_impl.cc",
     "local_device_info_provider_impl.h",
@@ -46,10 +46,12 @@ static_library("sync_device_info") {
     "//components/sync/protocol",
   ]
   deps = [
-    "//build:chromeos_buildflags",
+    "//base:i18n",
+    "//components/desktop_to_mobile_promos",
     "//components/keyed_service/core",
     "//components/metrics",
     "//components/prefs",
+    "//components/strings",
     "//components/version_info",
     "//ui/base",
   ]
@@ -62,7 +64,10 @@ static_library("sync_device_info") {
 
   if (is_chromeos) {
     sources += [ "local_device_info_util_chromeos.cc" ]
-    deps += [ "//chromeos/constants" ]
+    deps += [
+      "//chromeos/ash/components/system",
+      "//chromeos/constants",
+    ]
   }
 
   if (is_ios) {
@@ -88,10 +93,6 @@ static_library("sync_device_info") {
   if (is_win) {
     sources += [ "local_device_info_util_win.cc" ]
   }
-
-  if (is_chromeos_ash) {
-    deps += [ "//chromeos/ash/components/system" ]
-  }
 }
 
 static_library("test_support") {
@@ -103,6 +104,8 @@ static_library("test_support") {
     "fake_device_info_tracker.h",
     "fake_local_device_info_provider.cc",
     "fake_local_device_info_provider.h",
+    "test_device_info_builder.cc",
+    "test_device_info_builder.h",
   ]
 
   public_deps = [ ":sync_device_info" ]
@@ -115,8 +118,10 @@ source_set("unit_tests") {
   sources = [
     "device_count_metrics_provider_unittest.cc",
     "device_info_prefs_unittest.cc",
+    "device_info_proto_enum_util_unittest.cc",
     "device_info_sync_bridge_unittest.cc",
     "device_info_util_unittest.cc",
+    "device_name_util_unittest.cc",
     "local_device_info_provider_impl_unittest.cc",
     "local_device_info_util_unittest.cc",
   ]
@@ -128,7 +133,6 @@ source_set("unit_tests") {
     ":test_support",
     "//base",
     "//base/test:test_support",
-    "//build:chromeos_buildflags",
     "//components/prefs:test_support",
     "//components/sync:test_support",
     "//components/version_info:version_string",
@@ -136,7 +140,7 @@ source_set("unit_tests") {
     "//testing/gtest",
   ]
 
-  if (is_chromeos_ash) {
+  if (is_chromeos) {
     deps += [ "//chromeos/ash/components/system" ]
   }
 }

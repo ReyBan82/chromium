@@ -7,8 +7,10 @@
 
 #include <stdint.h>
 
+#include <optional>
+
+#include "base/memory/scoped_refptr.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/display/display_export.h"
 #include "ui/display/types/display_constants.h"
 #include "ui/gfx/display_color_spaces.h"
@@ -67,6 +69,8 @@ class DISPLAY_EXPORT Display final {
     UNAVAILABLE,
   };
 
+  static constexpr float kRefreshRateEpsilon = 0.01f;
+
   // Creates a display with kInvalidDisplayId as default.
   Display();
   explicit Display(int64_t id);
@@ -109,7 +113,7 @@ class DISPLAY_EXPORT Display final {
 
   // Converts the given angle to its corresponding Rotation. The angle is in
   // degrees, and the only valid values are 0, 90, 180, and 270.
-  // TODO(crbug.com/840189): we should never need to convert degrees to a
+  // TODO(crbug.com/41387359): we should never need to convert degrees to a
   // Rotation if we were to Rotations internally and only converted to numeric
   // values when required.
   static Rotation DegreesToRotation(int degrees);
@@ -142,6 +146,33 @@ class DISPLAY_EXPORT Display final {
   float device_scale_factor() const { return device_scale_factor_; }
   void set_device_scale_factor(float scale) { device_scale_factor_ = scale; }
 
+  // Gets/Sets the display's text scale multiplier.
+  //
+  // For most users this is expected to be 1.0, but some platforms offer an
+  // accessibility option to increase the text size without increasing the size
+  // of other UI elements. When the user has selected such an option, this value
+  // is expected to match their selection.
+  //
+  // This value is also expected to be factored into the device_scale_factor.
+  // For example, if the user has selected a 1.5x text size, and the actual
+  // native device scale factor is 2.0x, then this value is expected to be 1.5,
+  // and the device_scale_factor is expected to be 1.5x2.0=3.0. This means views
+  // that only handle scaling everything by device_scale_factor will still
+  // provide the user with correctly sized text, while views that handle text
+  // scaling independently of overall device scale (like web pages that use
+  // text-scale) can factor out the text and device portions.
+  float text_scale_multiplier() const { return text_scale_multiplier_; }
+  void set_text_scale_multiplier(float scale) {
+    text_scale_multiplier_ = scale;
+  }
+
+  void set_pixels_per_inch(float pixels_per_inch_x, float pixels_per_inch_y) {
+    pixels_per_inch_x_ = pixels_per_inch_x;
+    pixels_per_inch_y_ = pixels_per_inch_y;
+  }
+  float GetPixelsPerInchX() const { return pixels_per_inch_x_; }
+  float GetPixelsPerInchY() const { return pixels_per_inch_y_; }
+
   Rotation rotation() const { return rotation_; }
   void set_rotation(Rotation rotation) { rotation_ = rotation; }
   int RotationAsDegree() const;
@@ -168,12 +199,15 @@ class DISPLAY_EXPORT Display final {
   const gfx::Size& size() const { return bounds_.size(); }
   const gfx::Size& work_area_size() const { return work_area_.size(); }
 
+  // Returns the work area relative to this display's origin.
+  gfx::Rect GetLocalWorkArea() const;
+
   // Returns the work area insets.
   gfx::Insets GetWorkAreaInsets() const;
 
   // Sets the device scale factor and display bounds in pixel. This
   // updates the work area using the same insets between old bounds and
-  // work area.
+  // work area.  This does not set the native origin based on `bounds_in_pixel`.
   void SetScaleAndBounds(float device_scale_factor,
                          const gfx::Rect& bounds_in_pixel);
 
@@ -194,6 +228,13 @@ class DISPLAY_EXPORT Display final {
   gfx::Size GetSizeInPixel() const;
   void set_size_in_pixels(const gfx::Size& size) { size_in_pixels_ = size; }
 
+  // Returns the display's origin in pixel coordinates.  Only available on
+  // windowing systems like X11 that position displays in pixel coordinates.
+  gfx::Point native_origin() const { return native_origin_; }
+  void set_native_origin(const gfx::Point& native_origin) {
+    native_origin_ = native_origin;
+  }
+
   // Returns a string representation of the display;
   std::string ToString() const;
 
@@ -202,6 +243,16 @@ class DISPLAY_EXPORT Display final {
 
   // True if the display corresponds to internal panel.
   bool IsInternal() const;
+
+  // Returns true if the display is detected by the system. A display can
+  // stay 'active' when all displays are disconnected from SW point of view,
+  // because this can happen when the display went to sleep mode, or the
+  // device went to sleep mode, and in that case, we do not want to change
+  // the display configuration (so that it starts in the same state when
+  // resumed). Use this if you want to check if the display is detected by the
+  // system.
+  bool detected() const { return detected_; }
+  void set_detected(bool detected) { detected_ = detected; }
 
   // [Deprecated] Use `display::GetInternalDisplayIds()`.
   // Gets an id of display corresponding to internal panel.
@@ -214,9 +265,8 @@ class DISPLAY_EXPORT Display final {
   }
 
   // The color spaces used by the display.
-  // TODO(b/226163383): Rename to SetColorSpaces
-  const gfx::DisplayColorSpaces& color_spaces() const { return color_spaces_; }
-  void set_color_spaces(const gfx::DisplayColorSpaces& color_spaces);
+  const gfx::DisplayColorSpaces& GetColorSpaces() const;
+  void SetColorSpaces(const gfx::DisplayColorSpaces& color_spaces);
 
   // Return true if the display orientation is landscape.
   bool is_landscape() const { return bounds_.width() >= bounds_.height(); }
@@ -232,9 +282,7 @@ class DISPLAY_EXPORT Display final {
 
   // The number of bits per pixel. Used by media query APIs.
   int color_depth() const { return color_depth_; }
-  void set_color_depth(int color_depth) {
-    color_depth_ = color_depth;
-  }
+  void set_color_depth(int color_depth) { color_depth_ = color_depth; }
 
   // The number of bits per color component (all color components are assumed to
   // have the same number of bits). Used by media query APIs.
@@ -249,8 +297,8 @@ class DISPLAY_EXPORT Display final {
   void set_is_monochrome(bool is_monochrome) { is_monochrome_ = is_monochrome; }
 
   // The display frequency of the monitor.
-  int display_frequency() const { return display_frequency_; }
-  void set_display_frequency(int display_frequency) {
+  float display_frequency() const { return display_frequency_; }
+  void set_display_frequency(float display_frequency) {
     display_frequency_ = display_frequency;
   }
 
@@ -264,40 +312,42 @@ class DISPLAY_EXPORT Display final {
   void set_label(const std::string& label) { label_ = label; }
 
   bool operator==(const Display& rhs) const;
-  bool operator!=(const Display& rhs) const { return !(*this == rhs); }
-
-  const DrmFormatsAndModifiers& GetDRMFormatsAndModifiers() const {
-    return drm_formats_and_modifiers_;
-  }
-
-  void SetDRMFormatsAndModifiers(
-      const DrmFormatsAndModifiers& drm_formats_and_modifiers) {
-    drm_formats_and_modifiers_ = drm_formats_and_modifiers;
-  }
+  static bool EqualExceptForHdrHeadroom(const Display& lhs, const Display& rhs);
 
  private:
   friend struct mojo::StructTraits<mojom::DisplayDataView, Display>;
 
+  void SetDisplayColorSpacesRef(
+      scoped_refptr<const gfx::DisplayColorSpacesRef> color_spaces);
+
+  // Returns the default value of the DisplayColorSpaces.
+  static scoped_refptr<const gfx::DisplayColorSpacesRef>
+  GetDefaultDisplayColorSpacesRef();
+
   int64_t id_ = kInvalidDisplayId;
   gfx::Rect bounds_;
-  // If non-empty, then should be same size as |bounds_|. Used to avoid rounding
+  // If non-empty, then should be same as |bounds_|. Used to avoid rounding
   // errors.
   gfx::Size size_in_pixels_;
+  gfx::Point native_origin_;
   gfx::Rect work_area_;
-  float device_scale_factor_;
+  float device_scale_factor_ = 1.0f;
+  float text_scale_multiplier_ = 1.0f;
+  float pixels_per_inch_x_ = 0.0f;
+  float pixels_per_inch_y_ = 0.0f;
   Rotation rotation_ = ROTATE_0;
-  absl::optional<Rotation> panel_rotation_;
+  std::optional<Rotation> panel_rotation_;
   TouchSupport touch_support_ = TouchSupport::UNKNOWN;
   AccelerometerSupport accelerometer_support_ = AccelerometerSupport::UNKNOWN;
   gfx::Size maximum_cursor_size_;
-  gfx::DisplayColorSpaces color_spaces_;
-  int color_depth_;
-  int depth_per_component_;
+  scoped_refptr<const gfx::DisplayColorSpacesRef> color_spaces_;
+  int color_depth_ = kDefaultBitsPerPixel;
+  int depth_per_component_ = kDefaultBitsPerComponent;
   bool is_monochrome_ = false;
-  int display_frequency_ = 0;
+  bool detected_ = true;
+  float display_frequency_ = 0;
   std::string label_;
   uint32_t audio_formats_ = 0;
-  DrmFormatsAndModifiers drm_formats_and_modifiers_;
 };
 
 }  // namespace display

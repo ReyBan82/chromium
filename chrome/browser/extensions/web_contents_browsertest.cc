@@ -2,21 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "content/public/browser/web_contents.h"
+
 #include <map>
 
 #include "base/functional/bind.h"
 #include "base/strings/stringprintf.h"
-#include "chrome/browser/devtools/devtools_window.h"
-#include "chrome/browser/devtools/devtools_window_testing.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/renderer_host/chrome_navigation_ui_data.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/test/base/ui_test_utils.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "components/sessions/content/session_tab_helper.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/render_process_host.h"
-#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -25,14 +24,17 @@
 #include "extensions/browser/extension_host.h"
 #include "extensions/browser/extension_navigation_ui_data.h"
 #include "extensions/browser/process_manager.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/manifest_handlers/background_info.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 namespace {
 
-content::WebContents* GetActiveWebContents(const Browser* browser) {
-  return browser->tab_strip_model()->GetActiveWebContents();
-}
+using ExtensionWebContentsBrowserTest = ExtensionBrowserTest;
 
 // Saves ExtensionNavigationUIData for each render frame which completes
 // navigation.
@@ -47,8 +49,8 @@ class ExtensionNavigationUIDataObserver : public content::WebContentsObserver {
       const ExtensionNavigationUIDataObserver&) = delete;
 
   const ExtensionNavigationUIData* GetExtensionNavigationUIData(
-      content::RenderFrameHost* rfh) const {
-    auto iter = navigation_ui_data_map_.find(rfh);
+      content::RenderFrameHost* render_frame_host) const {
+    auto iter = navigation_ui_data_map_.find(render_frame_host);
     if (iter == navigation_ui_data_map_.end())
       return nullptr;
     return iter->second.get();
@@ -57,13 +59,17 @@ class ExtensionNavigationUIDataObserver : public content::WebContentsObserver {
  private:
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override {
-    if (!navigation_handle->HasCommitted())
+    CHECK(navigation_handle);
+    if (!navigation_handle->HasCommitted()) {
       return;
-
-    content::RenderFrameHost* rfh = navigation_handle->GetRenderFrameHost();
+    }
+    content::RenderFrameHost* render_frame_host =
+        navigation_handle->GetRenderFrameHost();
+    CHECK(render_frame_host);
     const auto* data = static_cast<const ChromeNavigationUIData*>(
         navigation_handle->GetNavigationUIData());
-    navigation_ui_data_map_[rfh] =
+    CHECK(data);
+    navigation_ui_data_map_[render_frame_host] =
         data->GetExtensionNavigationUIData()->DeepCopy();
   }
 
@@ -72,40 +78,34 @@ class ExtensionNavigationUIDataObserver : public content::WebContentsObserver {
       navigation_ui_data_map_;
 };
 
-}  // namespace
-
 // Tests that we can load extension pages into the tab area and they can call
 // extension APIs.
-IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, WebContents) {
+IN_PROC_BROWSER_TEST_F(ExtensionWebContentsBrowserTest, WebContents) {
   ASSERT_TRUE(LoadExtension(
       test_data_dir_.AppendASCII("good").AppendASCII("Extensions")
                     .AppendASCII("behllobkkfkfnphdnhnkndlbkcpglgmj")
                     .AppendASCII("1.0.0.0")));
 
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(),
+  content::WebContents* web_contents = GetActiveWebContents();
+  ASSERT_TRUE(NavigateToURL(
+      web_contents,
       GURL("chrome-extension://behllobkkfkfnphdnhnkndlbkcpglgmj/page.html")));
 
-  bool result = false;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(
-      GetActiveWebContents(browser()), "testTabsAPI()", &result));
-  EXPECT_TRUE(result);
+  EXPECT_EQ(true, content::EvalJs(web_contents, "testTabsAPI()"));
 
   // There was a bug where we would crash if we navigated to a page in the same
   // extension because no new render view was getting created, so we would not
   // do some setup.
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(),
+  ASSERT_TRUE(NavigateToURL(
+      web_contents,
       GURL("chrome-extension://behllobkkfkfnphdnhnkndlbkcpglgmj/page.html")));
-  result = false;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(
-      GetActiveWebContents(browser()), "testTabsAPI()", &result));
-  EXPECT_TRUE(result);
+  EXPECT_EQ(true, content::EvalJs(web_contents, "testTabsAPI()"));
 }
 
 // Ensure that platform app frames can't be loaded in a tab even on a redirect.
-// Regression test for crbug.com/1110551.
-IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, TabNavigationToPlatformApp) {
+// Regression test for crbug.com/40052959.
+IN_PROC_BROWSER_TEST_F(ExtensionWebContentsBrowserTest,
+                       TabNavigationToPlatformApp) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
   const Extension* extension = LoadExtension(
@@ -117,19 +117,20 @@ IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, TabNavigationToPlatformApp) {
   for (const GURL& app_url : test_cases) {
     GURL redirect_to_platform_app =
         embedded_test_server()->GetURL("/server-redirect?" + app_url.spec());
-    content::WebContents* web_contents = GetActiveWebContents(browser());
+    content::WebContents* web_contents = GetActiveWebContents();
     content::TestNavigationObserver observer(web_contents,
                                              net::ERR_BLOCKED_BY_CLIENT);
-    ASSERT_TRUE(
-        ui_test_utils::NavigateToURL(browser(), redirect_to_platform_app));
+    // Returns false because the navigation does not succeed.
+    ASSERT_FALSE(NavigateToURL(web_contents, redirect_to_platform_app));
     observer.Wait();
     EXPECT_FALSE(observer.last_navigation_succeeded());
   }
 }
 
 // Ensure that the extension's background page can't be navigated away.
-// Regression test for crbug.com/1130083.
-IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, BackgroundPageNavigation) {
+// Regression test for crbug.com/40149659.
+IN_PROC_BROWSER_TEST_F(ExtensionWebContentsBrowserTest,
+                       BackgroundPageNavigation) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
   const Extension* extension = LoadExtension(
@@ -189,14 +190,30 @@ IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, BackgroundPageNavigation) {
 
 // Test that we correctly set up the ExtensionNavigationUIData for each
 // navigation.
-IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, ExtensionNavigationUIData) {
+IN_PROC_BROWSER_TEST_F(ExtensionWebContentsBrowserTest,
+                       ExtensionNavigationUIData) {
   ASSERT_TRUE(embedded_test_server()->Start());
-  content::WebContents* web_contents = GetActiveWebContents(browser());
+
+  // Start on a WebUI page. This avoids navigation observation problems on
+  // Android where the initial page (e.g. the NTP) may be native UI.
+  content::WebContents* web_contents = GetActiveWebContents();
+  ASSERT_TRUE(NavigateToURL(web_contents, GURL("chrome://version")));
+
+  // Observe for navigation changes to cache NavigationUIData for later.
   ExtensionNavigationUIDataObserver observer(web_contents);
 
-  // Load a page with an iframe.
-  const GURL url = embedded_test_server()->GetURL("/iframe.html");
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+  // Load a page with an iframe. Use the browser Navigate() method because on
+  // Android the NavigateToURL() helper calls directly into the content layer
+  // and bypasses ChromeNavigationUIData and ExtensionNavigationUIData creation.
+  NavigateParams params(GetBrowserWindowInterface(),
+                        embedded_test_server()->GetURL("/iframe.html"),
+                        ui::PAGE_TRANSITION_TYPED);
+  params.disposition = WindowOpenDisposition::CURRENT_TAB;
+  Navigate(&params);
+
+  // Ensure the load is complete so DidFinishNavigation will fire.
+  ASSERT_EQ(web_contents, GetActiveWebContents());
+  content::WaitForLoadStop(web_contents);
 
   sessions::SessionTabHelper* session_tab_helper =
       sessions::SessionTabHelper::FromWebContents(web_contents);
@@ -239,4 +256,5 @@ IN_PROC_BROWSER_TEST_F(ExtensionBrowserTest, ExtensionNavigationUIData) {
   }
 }
 
+}  // namespace
 }  // namespace extensions

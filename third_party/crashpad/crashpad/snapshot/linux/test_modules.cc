@@ -53,6 +53,7 @@ bool WriteTestModule(const base::FilePath& module_path,
       Phdr load1;
       Phdr load2;
       Phdr dynamic;
+      Phdr gnu_stack;
     } phdr_table;
     struct {
       Dyn hash;
@@ -110,6 +111,13 @@ bool WriteTestModule(const base::FilePath& module_path,
   module.ehdr.e_machine = EM_AARCH64;
 #elif defined(ARCH_CPU_MIPSEL) || defined(ARCH_CPU_MIPS64EL)
   module.ehdr.e_machine = EM_MIPS;
+#elif defined(ARCH_CPU_RISCV64)
+  module.ehdr.e_machine = EM_RISCV;
+#endif
+
+#if defined(ARCH_CPU_RISCV64)
+  // Crashpad supports RV64GC
+  module.ehdr.e_flags = EF_RISCV_RVC | EF_RISCV_FLOAT_ABI_DOUBLE;
 #endif
 
   module.ehdr.e_version = EV_CURRENT;
@@ -165,6 +173,12 @@ bool WriteTestModule(const base::FilePath& module_path,
   module.phdr_table.dynamic.p_memsz = sizeof(module.dynamic_array);
   module.phdr_table.dynamic.p_flags = PF_R | PF_W;
   module.phdr_table.dynamic.p_align = 8;
+
+  // Mark the stack as non-executable so glibc's loader does not try to
+  // enable an executable stack, which modern Linux kernels reject.
+  module.phdr_table.gnu_stack.p_type = PT_GNU_STACK;
+  module.phdr_table.gnu_stack.p_flags = PF_R | PF_W;
+  module.phdr_table.gnu_stack.p_align = 1;
 
   module.dynamic_array.hash.d_tag = DT_HASH;
   module.dynamic_array.hash.d_un.d_ptr =

@@ -12,16 +12,20 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
+
+#include "base/compiler_specific.h"
 #ifdef __SSE2__
 #include <immintrin.h>
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 #endif
 
+#include <array>
 #include <cstdio>
 #include <string>
 
 #include "base/bits.h"
+#include "base/containers/span.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/utf_string_conversion_utils.h"
 
@@ -29,7 +33,7 @@ namespace redaction_internal {
 
 // See the header file for this array's declaration.
 // clang-format off
-const unsigned char kSharedCharTypeTable[0x100] = {
+const std::array<unsigned char, 0x100> kSharedCharTypeTable = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // 0x00 - 0x0f
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // 0x10 - 0x1f
     0,                           // 0x20  ' ' (escape spaces in queries)
@@ -141,20 +145,24 @@ const unsigned char kSharedCharTypeTable[0x100] = {
 
 #ifndef WIN32
 
-int _itoa_s(int value, char* buffer, size_t size_in_chars, int radix) {
+int _itoa_s(int value, base::span<char> buffer, int radix) {
   // Redaction Tool Modification:
   // const char* cannot be passed in as a format string, so directly using
   // "%d" or "%x" based on radix.
   int written;
   if (radix == 10) {
-    written = snprintf(buffer, size_in_chars, "%d", value);
+    // SAFETY: snprintf is called with the size of the buffer.
+    written = UNSAFE_BUFFERS(
+        snprintf(buffer.data(), buffer.size(), "%d", value));
   } else if (radix == 16) {
-    written = snprintf(buffer, size_in_chars, "%x", value);
+    // SAFETY: snprintf is called with the size of the buffer.
+    written = UNSAFE_BUFFERS(
+        snprintf(buffer.data(), buffer.size(), "%x", value));
   } else {
     return EINVAL;
   }
 
-  if (static_cast<size_t>(written) >= size_in_chars) {
+  if (written < 0 || static_cast<size_t>(written) >= buffer.size()) {
     // Output was truncated, or written was negative.
     return EINVAL;
   }

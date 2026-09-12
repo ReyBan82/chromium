@@ -35,13 +35,6 @@ class DateHelper : public LocaleChangeObserver,
   // Creates a formatter object used to format dates from the given `pattern`.
   icu::SimpleDateFormat CreateSimpleDateFormatter(const char* pattern);
 
-  // Creates a formatter object used to format dates without calling the
-  // `getBestPattern` function, which resolves the input pattern to the best
-  // fit, which is not always what we want. e.g. 'mm' returns 'm' even though we
-  // want it zero-padded (03 vs. 3 when given 12:03)
-  icu::SimpleDateFormat CreateSimpleDateFormatterWithoutBestPattern(
-      const char* pattern);
-
   // Creates a formatter object that extracts the hours field from a given date.
   // Uses `pattern` to differentiate between 12 and 24 hour clock formats.
   icu::SimpleDateFormat CreateHoursFormatter(const char* pattern);
@@ -75,59 +68,7 @@ class DateHelper : public LocaleChangeObserver,
   // e.g. If the `date` is Apr 1st 1:00 (which is Mar 31st 18:00 PST), the
   // local timezone is PST and time difference is 7 hrs. It returns Mar 31st
   // 7:00, which is Mar 31st 00:00 PST.
-  base::Time GetLocalMidnight(base::Time date);
-
-  icu::SimpleDateFormat& day_of_month_formatter() {
-    return day_of_month_formatter_;
-  }
-
-  icu::SimpleDateFormat& month_day_formatter() { return month_day_formatter_; }
-
-  icu::SimpleDateFormat& month_day_year_formatter() {
-    return month_day_year_formatter_;
-  }
-
-  icu::SimpleDateFormat& month_day_year_week_formatter() {
-    return month_day_year_week_formatter_;
-  }
-
-  icu::SimpleDateFormat& month_name_formatter() {
-    return month_name_formatter_;
-  }
-
-  icu::SimpleDateFormat& month_name_year_formatter() {
-    return month_name_year_formatter_;
-  }
-
-  icu::SimpleDateFormat& time_zone_formatter() { return time_zone_formatter_; }
-
-  icu::SimpleDateFormat& twelve_hour_clock_formatter() {
-    return twelve_hour_clock_formatter_;
-  }
-
-  icu::SimpleDateFormat& twenty_four_hour_clock_formatter() {
-    return twenty_four_hour_clock_formatter_;
-  }
-
-  icu::SimpleDateFormat& day_of_week_formatter() {
-    return day_of_week_formatter_;
-  }
-
-  icu::SimpleDateFormat& week_title_formatter() {
-    return week_title_formatter_;
-  }
-
-  icu::SimpleDateFormat& year_formatter() { return year_formatter_; }
-
-  icu::SimpleDateFormat& twelve_hour_clock_hours_formatter() {
-    return twelve_hour_clock_hours_formatter_;
-  }
-
-  icu::SimpleDateFormat& twenty_four_hour_clock_hours_formatter() {
-    return twenty_four_hour_clock_hours_formatter_;
-  }
-
-  icu::SimpleDateFormat& minutes_formatter() { return minutes_formatter_; }
+  ASH_EXPORT base::Time GetLocalMidnight(base::Time date);
 
   const icu::DateIntervalFormat* twelve_hour_clock_interval_formatter() {
     return twelve_hour_clock_interval_formatter_.get();
@@ -168,51 +109,6 @@ class DateHelper : public LocaleChangeObserver,
   // (For example: different languages are set in different accounts, and the
   // login screen will use the owener's locale setting.)
   void OnLocaleChanged() override;
-
-  // Formatter for getting the day of month.
-  icu::SimpleDateFormat day_of_month_formatter_;
-
-  // Formatter for getting the month name and day of month.
-  icu::SimpleDateFormat month_day_formatter_;
-
-  // Formatter for getting the month name, day of month, and year.
-  icu::SimpleDateFormat month_day_year_formatter_;
-
-  // Formatter for getting the month, day, year and day of week.
-  icu::SimpleDateFormat month_day_year_week_formatter_;
-
-  // Formatter for getting the name of month.
-  icu::SimpleDateFormat month_name_formatter_;
-
-  // Formatter for getting the month name and year.
-  icu::SimpleDateFormat month_name_year_formatter_;
-
-  // Formatter for getting the time zone.
-  icu::SimpleDateFormat time_zone_formatter_;
-
-  // Formatter for 12 hour clock hours and minutes.
-  icu::SimpleDateFormat twelve_hour_clock_formatter_;
-
-  // Formatter for 24 hour clock hours and minutes.
-  icu::SimpleDateFormat twenty_four_hour_clock_formatter_;
-
-  // Formatter for getting the day of week. Returns 1 - 7.
-  icu::SimpleDateFormat day_of_week_formatter_;
-
-  // Formatter for getting the week title. e.g. M, T, W.
-  icu::SimpleDateFormat week_title_formatter_;
-
-  // Formatter for getting the year.
-  icu::SimpleDateFormat year_formatter_;
-
-  // Formatter for getting the hours in a 12 hour clock format.
-  icu::SimpleDateFormat twelve_hour_clock_hours_formatter_;
-
-  // Formatter for getting the hours in a 24 hour clock format.
-  icu::SimpleDateFormat twenty_four_hour_clock_hours_formatter_;
-
-  // Formatter for getting the minutes.
-  icu::SimpleDateFormat minutes_formatter_;
 
   // Interval formatter for two dates. Formats time in twelve
   // hour clock format (e.g. 8:30 – 9:30 PM or 11:30 AM – 2:30 PM).

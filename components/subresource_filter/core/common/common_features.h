@@ -6,6 +6,7 @@
 #define COMPONENTS_SUBRESOURCE_FILTER_CORE_COMMON_COMMON_FEATURES_H_
 
 #include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
 
 namespace subresource_filter {
 
@@ -16,6 +17,7 @@ BASE_DECLARE_FEATURE(kAdTagging);
 // Enables the artificial delaying of ads that are considered unsafe (e.g. http
 // or same-domain to the top-level).
 BASE_DECLARE_FEATURE(kDelayUnsafeAds);
+BASE_DECLARE_FEATURE(kSubresourceFilterPrewarm);
 
 // Param which governs how much to delay non-secure (i.e. http) subresources for
 // DelayUnsafeAds.

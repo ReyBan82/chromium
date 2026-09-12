@@ -7,19 +7,18 @@
 #include <memory>
 #include <string>
 
+#import "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
 #import "base/test/task_environment.h"
+#import "components/language/ios/browser/language_detection_java_script_feature.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/testing_pref_service.h"
 #include "components/translate/core/browser/translate_pref_names.h"
 #include "components/translate/core/common/language_detection_details.h"
+#import "ios/web/public/test/fakes/fake_web_frames_manager.h"
 #import "ios/web/public/test/fakes/fake_web_state.h"
 #include "testing/gtest_mac.h"
 #include "testing/platform_test.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 @interface TestIOSLanguageDetectionTabHelperObserver
     : NSObject <IOSLanguageDetectionTabHelperObserving>
@@ -52,6 +51,12 @@ class IOSLanguageDetectionTabHelperObserverBridgeTest : public PlatformTest {
     pref_service_.registry()->RegisterBooleanPref(
         translate::prefs::kOfferTranslateEnabled, true);
 
+    auto frames_manager = std::make_unique<web::FakeWebFramesManager>();
+    web::ContentWorld content_world =
+        language::LanguageDetectionJavaScriptFeature::GetInstance()
+            ->GetSupportedContentWorld();
+    web_state_.SetWebFramesManager(content_world, std::move(frames_manager));
+
     language::IOSLanguageDetectionTabHelper::CreateForWebState(
         &web_state_, /*url_language_histogram=*/nullptr,
         /*language_detection_model=*/nullptr, &pref_service_);
@@ -71,7 +76,7 @@ class IOSLanguageDetectionTabHelperObserverBridgeTest : public PlatformTest {
   base::test::SingleThreadTaskEnvironment task_environment_;
   TestingPrefServiceSimple pref_service_;
   web::FakeWebState web_state_;
-  language::IOSLanguageDetectionTabHelper* tab_helper_;
+  raw_ptr<language::IOSLanguageDetectionTabHelper> tab_helper_;
   TestIOSLanguageDetectionTabHelperObserver* observer_;
   std::unique_ptr<language::IOSLanguageDetectionTabHelperObserverBridge>
       oberserver_bridge_;

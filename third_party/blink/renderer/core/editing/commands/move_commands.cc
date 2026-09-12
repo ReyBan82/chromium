@@ -31,9 +31,9 @@
 
 #include "third_party/blink/renderer/core/editing/commands/move_commands.h"
 
+#include "cc/input/scroll_utils.h"
 #include "third_party/blink/public/mojom/input/focus_type.mojom-blink.h"
 #include "third_party/blink/renderer/core/dom/focus_params.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/editing/editing_behavior.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/editor.h"
@@ -46,7 +46,7 @@
 
 namespace blink {
 
-unsigned MoveCommands::VerticalScrollDistance(LocalFrame& frame) {
+int MoveCommands::VerticalScrollDistance(LocalFrame& frame) {
   const Element* focused_element = frame.GetDocument()->FocusedElement();
   if (!focused_element) {
     if (frame.IsCaretBrowsingEnabled()) {
@@ -60,32 +60,29 @@ unsigned MoveCommands::VerticalScrollDistance(LocalFrame& frame) {
   if (!layout_object || !layout_object->IsBox())
     return 0;
   auto& layout_box = To<LayoutBox>(*layout_object);
-  const ComputedStyle* const style = layout_box.Style();
-  if (!style)
+  const ComputedStyle& style = layout_box.StyleRef();
+  if (!(style.OverflowY() == EOverflow::kScroll ||
+        style.OverflowY() == EOverflow::kAuto || IsEditable(*focused_element) ||
+        frame.IsCaretBrowsingEnabled())) {
     return 0;
-  if (!(style->OverflowY() == EOverflow::kScroll ||
-        style->OverflowY() == EOverflow::kAuto ||
-        IsEditable(*focused_element) || frame.IsCaretBrowsingEnabled()))
-    return 0;
+  }
   const ScrollableArea& scrollable_area = *frame.View()->LayoutViewport();
-  const int height = std::min<int>(layout_box.ClientHeight().ToInt(),
-                                   scrollable_area.VisibleHeight());
-  return static_cast<unsigned>(
-      max(max<int>(height * ScrollableArea::MinFractionToStepWhenPaging(),
-                   height - scrollable_area.MaxOverlapBetweenPages()),
-          1));
+  const int height =
+      std::min<int>(layout_box.PhysicalPaddingBoxRect().Height().ToInt(),
+                    scrollable_area.VisibleHeight());
+  return cc::ScrollUtils::CalculatePageStep(height);
 }
 
 bool MoveCommands::ModifySelectionWithPageGranularity(
     LocalFrame& frame,
     SelectionModifyAlteration alter,
-    unsigned vertical_distance,
+    int vertical_distance,
     SelectionModifyVerticalDirection direction) {
   if (alter == SelectionModifyAlteration::kMove)
     UpdateSelectionForCaretBrowsing(frame);
 
   SelectionModifier selection_modifier(
-      frame, frame.Selection().GetSelectionInDOMTree());
+      frame, frame.Selection().GetSelectionInDomTree());
   selection_modifier.SetSelectionIsDirectional(
       frame.Selection().IsDirectional());
   if (!selection_modifier.ModifyWithPageGranularity(alter, vertical_distance,
@@ -116,6 +113,10 @@ bool MoveCommands::ModifySelectionWithPageGranularity(
 bool MoveCommands::MoveSelection(LocalFrame& frame,
                                  SelectionModifyDirection direction,
                                  TextGranularity granularity) {
+  if (frame.IsCaretBrowsingOverridden()) {
+    return true;
+  }
+
   UpdateSelectionForCaretBrowsing(frame);
   const bool modified =
       frame.Selection().Modify(SelectionModifyAlteration::kMove, direction,
@@ -127,20 +128,22 @@ bool MoveCommands::MoveSelection(LocalFrame& frame,
 }
 
 void MoveCommands::UpdateFocusForCaretBrowsing(LocalFrame& frame) {
-  if (!frame.IsCaretBrowsingEnabled())
+  if (!frame.IsCaretBrowsingEnabled() || frame.IsCaretBrowsingOverridden()) {
     return;
+  }
 
-  SelectionInDOMTree selection = frame.Selection().GetSelectionInDOMTree();
+  SelectionInDomTree selection = frame.Selection().GetSelectionInDomTree();
   if (!selection.IsCaret())
     return;
 
-  Node* node = selection.Extent().ComputeContainerNode();
+  Node* node = selection.Focus().ComputeContainerNode();
   if (!node)
     return;
 
-  const ComputedStyle* style = node->GetComputedStyle();
-  if (!style || style->UsedUserModify() != EUserModify::kReadOnly)
+  const ComputedStyle* style = GetComputedStyleForElementOrLayoutObject(*node);
+  if (!style || style->UsedUserModify() != EUserModify::kReadOnly) {
     return;
+  }
 
   Element* new_focused_element = nullptr;
 
@@ -173,7 +176,7 @@ void MoveCommands::UpdateSelectionForCaretBrowsing(LocalFrame& frame) {
     return;
 
   frame.Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .Collapse(Position::FirstPositionInOrBeforeNode(*activeElement))
           .Build(),
       SetSelectionOptions::Builder()
@@ -261,7 +264,7 @@ bool MoveCommands::ExecuteMovePageDown(LocalFrame& frame,
                                        Event*,
                                        EditorCommandSource,
                                        const String&) {
-  const unsigned distance = VerticalScrollDistance(frame);
+  const int distance = VerticalScrollDistance(frame);
   if (!distance)
     return false;
   return ModifySelectionWithPageGranularity(
@@ -273,7 +276,7 @@ bool MoveCommands::ExecuteMovePageDownAndModifySelection(LocalFrame& frame,
                                                          Event*,
                                                          EditorCommandSource,
                                                          const String&) {
-  const unsigned distance = VerticalScrollDistance(frame);
+  const int distance = VerticalScrollDistance(frame);
   if (!distance)
     return false;
   return ModifySelectionWithPageGranularity(
@@ -285,7 +288,7 @@ bool MoveCommands::ExecuteMovePageUp(LocalFrame& frame,
                                      Event*,
                                      EditorCommandSource,
                                      const String&) {
-  const unsigned distance = VerticalScrollDistance(frame);
+  const int distance = VerticalScrollDistance(frame);
   if (!distance)
     return false;
   return ModifySelectionWithPageGranularity(
@@ -297,7 +300,7 @@ bool MoveCommands::ExecuteMovePageUpAndModifySelection(LocalFrame& frame,
                                                        Event*,
                                                        EditorCommandSource,
                                                        const String&) {
-  const unsigned distance = VerticalScrollDistance(frame);
+  const int distance = VerticalScrollDistance(frame);
   if (!distance)
     return false;
   return ModifySelectionWithPageGranularity(

@@ -6,27 +6,34 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
 
+#include "base/containers/to_vector.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
-#include "base/numerics/math_constants.h"
+#include "base/numerics/checked_math.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "media/base/audio_decoder_config.h"
+#include "media/base/channel_layout.h"
 #include "media/base/encryption_pattern.h"
 #include "media/base/encryption_scheme.h"
+#include "media/base/hdr_metadata_track.h"
+#include "media/base/media_client.h"
+#include "media/base/media_switches.h"
 #include "media/base/media_tracks.h"
 #include "media/base/media_util.h"
 #include "media/base/stream_parser.h"
 #include "media/base/stream_parser_buffer.h"
-#include "media/base/text_track_config.h"
 #include "media/base/timestamp_constants.h"
+#include "media/base/video_codecs.h"
 #include "media/base/video_decoder_config.h"
+#include "media/base/video_spatial_format.h"
 #include "media/base/video_util.h"
 #include "media/formats/mp4/box_definitions.h"
 #include "media/formats/mp4/box_reader.h"
@@ -41,6 +48,7 @@ namespace {
 const int kMaxEmptySampleLogs = 20;
 const int kMaxInvalidConversionLogs = 20;
 const int kMaxVideoKeyframeMismatchLogs = 10;
+const int kMaxSEIRecoveryPointPromotionLogs = 10;
 
 // Caller should be prepared to handle return of EncryptionScheme::kUnencrypted
 // in case of unsupported scheme.
@@ -55,39 +63,113 @@ EncryptionScheme GetEncryptionScheme(const ProtectionSchemeInfo& sinf) {
       return EncryptionScheme::kCbcs;
     default:
       NOTREACHED();
-      break;
   }
-  return EncryptionScheme::kUnencrypted;
 }
 
 class ExternalMemoryAdapter : public DecoderBuffer::ExternalMemory {
  public:
   explicit ExternalMemoryAdapter(std::vector<uint8_t> memory)
-      : memory_(std::move(memory)) {
-    span_ = {memory_.data(), memory_.size()};
-  }
+      : memory_(std::move(memory)) {}
+
+  const base::span<const uint8_t> Span() const override { return memory_; }
 
  private:
   std::vector<uint8_t> memory_;
 };
 
+#if BUILDFLAG(USE_PROPRIETARY_CODECS)
+base::HeapArray<uint8_t> PrepareAACBuffer(
+    const AAC& aac_config,
+    base::span<const uint8_t> frame_buf,
+    std::vector<SubsampleEntry>* subsamples) {
+  base::HeapArray<uint8_t> output_buffer;
+
+  // Append an ADTS header to every audio sample if possible.
+  size_t adts_header_size = 0;
+  if (aac_config.fits_in_adts()) {
+    output_buffer = aac_config.CreateAdtsFromEsds(frame_buf, &adts_header_size);
+  } else {
+    output_buffer = base::HeapArray<uint8_t>::CopiedFrom(frame_buf);
+  }
+
+  if (output_buffer.empty()) {
+    return output_buffer;
+  }
+
+  // As above, adjust subsample information to account for the headers. AAC is
+  // not required to use subsample encryption, so we may need to add an entry.
+  if (subsamples->empty()) {
+    subsamples->emplace_back(adts_header_size, frame_buf.size());
+  } else {
+    (*subsamples)[0].clear_bytes += adts_header_size;
+  }
+
+  return output_buffer;
+}
+#endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
+
+// Create a HdrMetadataTrack for attaching metadata to track samples. Returns
+// nullptr on failure.
+std::unique_ptr<HdrMetadataTrack> MakeMetadataTrack(
+    StreamParser::TrackId metadata_track_id,
+    const MetadataIT35SampleEntry& it35_sample_entry,
+    const TrackReference& track_references) {
+  if (!base::FeatureList::IsEnabled(kMP4TimedMetadataTrack)) {
+    return nullptr;
+  }
+
+  switch (it35_sample_entry.it35_prefix_type) {
+    case HdrMetadataTrack::IT35PrefixType::kUnknown:
+      return nullptr;
+    case HdrMetadataTrack::IT35PrefixType::kSmpteSt2094App5:
+      break;
+  }
+
+  // Extract the list of tracks that this metadata is to refer to for
+  // rendering. Skip metadata tracks that do not refer to any tracks.
+  std::vector<StreamParser::TrackId> render_track_ids;
+  for (const auto& track_reference_type : track_references.types) {
+    if (track_reference_type.reference_type == FOURCC_RNDR) {
+      for (uint32_t ref_track_id : track_reference_type.track_ids) {
+        render_track_ids.push_back(
+            static_cast<StreamParser::TrackId>(ref_track_id));
+      }
+    }
+  }
+
+  // Don't bother creating a metadata track that doesn't indicate the track
+  // it references.
+  if (render_track_ids.empty()) {
+    return nullptr;
+  }
+
+  return std::make_unique<HdrMetadataTrack>(
+      metadata_track_id, it35_sample_entry.it35_prefix_type, render_track_ids);
+}
+
 }  // namespace
 
-MP4StreamParser::MP4StreamParser(const std::set<int>& audio_object_types,
-                                 bool has_sbr,
-                                 bool has_flac)
+MP4StreamParser::MP4StreamParser(
+    std::optional<base::flat_set<int>> strict_audio_object_types,
+    bool has_sbr,
+    bool has_flac,
+    bool has_iamf,
+    bool has_dv)
     : state_(kWaitingForInit),
       moof_head_(0),
       mdat_tail_(0),
       highest_end_offset_(0),
       has_audio_(false),
       has_video_(false),
-      audio_object_types_(audio_object_types),
+      strict_audio_object_types_(std::move(strict_audio_object_types)),
       has_sbr_(has_sbr),
       has_flac_(has_flac),
+      has_iamf_(has_iamf),
+      has_dv_(has_dv),
       num_empty_samples_skipped_(0),
       num_invalid_conversions_(0),
-      num_video_keyframe_mismatches_(0) {}
+      num_video_keyframe_mismatches_(0),
+      num_sei_recovery_point_promotions_(0) {}
 
 MP4StreamParser::~MP4StreamParser() = default;
 
@@ -95,7 +177,6 @@ void MP4StreamParser::Init(
     InitCB init_cb,
     NewConfigCB config_cb,
     NewBuffersCB new_buffers_cb,
-    bool /* ignore_text_tracks */,
     EncryptedMediaInitDataCB encrypted_media_init_data_cb,
     NewMediaSegmentCB new_segment_cb,
     EndMediaSegmentCB end_of_segment_cb,
@@ -116,7 +197,7 @@ void MP4StreamParser::Init(
   encrypted_media_init_data_cb_ = std::move(encrypted_media_init_data_cb);
   new_segment_cb_ = std::move(new_segment_cb);
   end_of_segment_cb_ = std::move(end_of_segment_cb);
-  media_log_ = media_log;
+  media_log_ = MediaLog::CloneSafely(media_log);
 }
 
 void MP4StreamParser::Reset() {
@@ -125,6 +206,9 @@ void MP4StreamParser::Reset() {
   runs_.reset();
   moof_head_ = 0;
   mdat_tail_ = 0;
+  for (auto& [track_id, metadata_track] : metadata_tracks_) {
+    metadata_track->Reset();
+  }
 }
 
 void MP4StreamParser::Flush() {
@@ -137,7 +221,7 @@ bool MP4StreamParser::GetGenerateTimestampsFlag() const {
   return false;
 }
 
-bool MP4StreamParser::AppendToParseBuffer(const uint8_t* buf, size_t size) {
+bool MP4StreamParser::AppendToParseBuffer(base::span<const uint8_t> buf) {
   DCHECK_NE(state_, kWaitingForInit);
 
   if (state_ == kError) {
@@ -149,8 +233,8 @@ bool MP4StreamParser::AppendToParseBuffer(const uint8_t* buf, size_t size) {
     // synchronous with the app's appendBuffer() call, instead of async decode
     // error during async parse. Since Parse() cannot succeed in kError state,
     // don't even copy `buf` into `queue_` in this case.
-    // TODO(crbug.com/1379160): Instrument this path to see if it can be changed
-    // to just DCHECK_NE(state_, kError).
+    // TODO(crbug.com/40244241): Instrument this path to see if it can be
+    // changed to just DCHECK_NE(state_, kError).
     return true;
   }
 
@@ -160,8 +244,9 @@ bool MP4StreamParser::AppendToParseBuffer(const uint8_t* buf, size_t size) {
   // could lead to memory corruption, preferring CHECK.
   CHECK_EQ(queue_.tail(), max_parse_offset_);
 
-  if (!queue_.Push(buf, base::checked_cast<int>(size))) {
-    DVLOG(2) << "AppendToParseBuffer(): Failed to push buf of size " << size;
+  if (!queue_.Push(buf)) {
+    DVLOG(2) << "AppendToParseBuffer(): Failed to push buf of size "
+             << buf.size();
     return false;
   }
 
@@ -196,7 +281,6 @@ StreamParser::ParseStatus MP4StreamParser::Parse(
       case kWaitingForInit:
       case kError:
         NOTREACHED();
-        return ParseStatus::kFailed;
 
       case kParsingBoxes: {
         ParseResult pr = ParseBox();
@@ -224,8 +308,10 @@ StreamParser::ParseStatus MP4StreamParser::Parse(
     }
   } while (result && !err);
 
-  if (!err)
-    err = !SendAndFlushSamples(&buffers);
+  if (!err) {
+    err = !SendAndFlushSamples(&buffers,
+                               /*all_samples_in_segment_received=*/false);
+  }
 
   if (err) {
     DLOG(ERROR) << "Error while parsing MP4";
@@ -242,49 +328,37 @@ StreamParser::ParseStatus MP4StreamParser::Parse(
   return ParseStatus::kSuccess;
 }
 
-void MP4StreamParser::ModulatedPeek(const uint8_t** buf, int* size) {
-  DCHECK(buf);
-  DCHECK(size);
-
-  queue_.Peek(buf, size);
+base::span<const uint8_t> MP4StreamParser::ModulatedPeek() {
+  auto result = queue_.Data();
+  if (result.empty()) {
+    return {};
+  }
 
   // The size or even availability of anything to parse (in scope of current
   // iteration of Parse()) may be less than reported in the Peek() call,
   // depending on `max_parse_offset_`.
-  DCHECK_GE(max_parse_offset_, queue_.head());
-  DCHECK_LE(max_parse_offset_, queue_.tail());
-  if (*buf) {
-    int parseable_size = max_parse_offset_ - queue_.head();
-    DCHECK_LE(parseable_size, *size);
-    *size = parseable_size;
-    if (!*size) {
-      *buf = nullptr;
-    }
-  }
+  CHECK_GE(max_parse_offset_, queue_.head());
+  CHECK_LE(max_parse_offset_, queue_.tail());
+  size_t parseable_size =
+      static_cast<size_t>(max_parse_offset_ - queue_.head());
+  return result.first(parseable_size);
 }
 
-void MP4StreamParser::ModulatedPeekAt(int64_t offset,
-                                      const uint8_t** buf,
-                                      int* size) {
-  DCHECK(buf);
-  DCHECK(size);
-  DCHECK_GE(max_parse_offset_, queue_.head());
-  DCHECK_LE(max_parse_offset_, queue_.tail());
+base::span<const uint8_t> MP4StreamParser::ModulatedPeekAt(int64_t offset) {
+  CHECK_GE(max_parse_offset_, queue_.head());
+  CHECK_LE(max_parse_offset_, queue_.tail());
 
   if (offset >= max_parse_offset_) {
-    *buf = nullptr;
-    *size = 0;
-    return;
+    return {};
   }
 
-  queue_.PeekAt(offset, buf, size);
-
-  if (*buf) {
-    int parseable_size = max_parse_offset_ - offset;
-    DCHECK_LE(parseable_size, *size);
-    DCHECK_GT(parseable_size, 0);
-    *size = parseable_size;
+  auto eq_queue_span = queue_.DataAt(offset);
+  if (eq_queue_span.empty()) {
+    return {};
   }
+
+  size_t parseable_size = static_cast<size_t>(max_parse_offset_ - offset);
+  return eq_queue_span.first(parseable_size);
 }
 
 bool MP4StreamParser::ModulatedTrim(int64_t max_offset) {
@@ -295,17 +369,15 @@ bool MP4StreamParser::ModulatedTrim(int64_t max_offset) {
 }
 
 ParseResult MP4StreamParser::ParseBox() {
-  const uint8_t* buf;
-  int size;
-  ModulatedPeek(&buf, &size);
+  base::span<const uint8_t> buf = ModulatedPeek();
 
-  if (!size) {
+  if (buf.empty()) {
     return ParseResult::kNeedMoreData;
   }
 
   std::unique_ptr<BoxReader> reader;
   ParseResult result =
-      BoxReader::ReadTopLevelBox(buf, size, media_log_, &reader);
+      BoxReader::ReadTopLevelBox(buf, media_log_.get(), &reader);
   if (result != ParseResult::kOk)
     return result;
 
@@ -343,10 +415,10 @@ VideoTransformation MP4StreamParser::CalculateRotation(
   // 3x3 matrix: [ a b c ]
   //             [ d e f ]
   //             [ x y z ]
-  int32_t rotation_matrix[kDisplayMatrixDimension] = {0};
+  std::array<int32_t, kDisplayMatrixDimension> rotation_matrix = {};
 
   // Shift values for fixed point multiplications.
-  const int32_t shifts[kDisplayMatrixHeight] = {16, 16, 30};
+  const std::array<int32_t, kDisplayMatrixHeight> shifts = {16, 16, 30};
 
   // Matrix multiplication for
   // track.display_matrix * movie.display_matrix
@@ -372,8 +444,7 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
   moov_ = std::make_unique<Movie>();
   RCHECK(moov_->Parse(reader));
   runs_.reset();
-  audio_track_ids_.clear();
-  video_track_ids_.clear();
+  track_ids_.clear();
 
   has_audio_ = false;
   has_video_ = false;
@@ -383,19 +454,26 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
   VideoDecoderConfig video_config;
   int detected_audio_track_count = 0;
   int detected_video_track_count = 0;
-  int detected_text_track_count = 0;
+  int detected_metadata_track_count = 0;
 
   for (std::vector<Track>::const_iterator track = moov_->tracks.begin();
        track != moov_->tracks.end(); ++track) {
     const SampleDescription& samp_descr =
         track->media.information.sample_table.description;
 
+    uint32_t track_id = track->header.track_id;
+    if (track_ids_.contains(track_id)) {
+      MEDIA_LOG(ERROR, media_log_)
+          << "Duplicate track ID in moov: " << track_id;
+      return false;
+    }
+
     // TODO(wolenetz): When codec reconfigurations are supported, detect and
     // send a codec reconfiguration for fragments using a sample description
     // index different from the previous one. See https://crbug.com/748250.
     size_t desc_idx = 0;
     for (const auto& trex : moov_->extends.tracks) {
-      if (trex.track_id == track->header.track_id) {
+      if (trex.track_id == track_id) {
         desc_idx = trex.default_sample_description_index;
         break;
       }
@@ -424,6 +502,9 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
 #if BUILDFLAG(ENABLE_PLATFORM_AC3_EAC3_AUDIO)
           audio_format != FOURCC_AC3 && audio_format != FOURCC_EAC3 &&
 #endif
+#if BUILDFLAG(ENABLE_PLATFORM_AC4_AUDIO)
+          audio_format != FOURCC_AC4 &&
+#endif
 #if BUILDFLAG(ENABLE_PLATFORM_DTS_AUDIO)
           audio_format != FOURCC_DTSC && audio_format != FOURCC_DTSX &&
           audio_format != FOURCC_DTSE &&
@@ -431,6 +512,9 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
 #if BUILDFLAG(ENABLE_PLATFORM_MPEG_H_AUDIO)
           audio_format != FOURCC_MHM1 && audio_format != FOURCC_MHA1 &&
 #endif
+#if BUILDFLAG(ENABLE_PLATFORM_IAMF_AUDIO) || BUILDFLAG(ENABLE_IAMF_TOOLS)
+          audio_format != FOURCC_IAMF &&
+#endif  // BUILDFLAG(ENABLE_PLATFORM_IAMF_AUDIO) || ...
           audio_format != FOURCC_MP4A) {
         MEDIA_LOG(ERROR, media_log_)
             << "Unsupported audio format 0x" << std::hex << entry.format
@@ -439,20 +523,21 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
       }
 
       AudioCodec codec = AudioCodec::kUnknown;
-      ChannelLayout channel_layout = CHANNEL_LAYOUT_NONE;
+      ChannelLayoutConfig channel_layout_config;
       int sample_per_second = 0;
       int codec_delay_in_frames = 0;
       base::TimeDelta seek_preroll;
       std::vector<uint8_t> extra_data;
 
-#if BUILDFLAG(USE_PROPRIETARY_CODECS)
+#if BUILDFLAG(USE_PROPRIETARY_CODECS) || \
+    BUILDFLAG(ENABLE_PLATFORM_IAMF_AUDIO) || BUILDFLAG(ENABLE_IAMF_TOOLS)
       AudioCodecProfile profile = AudioCodecProfile::kUnknown;
-      std::vector<uint8_t> aac_extra_data;
-#endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
+#endif  // BUILDFLAG(USE_PROPRIETARY_CODECS) || ...
 
       if (audio_format == FOURCC_OPUS) {
         codec = AudioCodec::kOpus;
-        channel_layout = GuessChannelLayout(entry.dops.channel_count);
+        channel_layout_config =
+            ChannelLayoutConfig::Guess(entry.dops.channel_count);
         sample_per_second = entry.dops.sample_rate;
         codec_delay_in_frames = entry.dops.codec_delay_in_frames;
         seek_preroll = entry.dops.seek_preroll;
@@ -468,14 +553,40 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
         }
 
         codec = AudioCodec::kFLAC;
-        channel_layout = GuessChannelLayout(entry.channelcount);
+        channel_layout_config = ChannelLayoutConfig::Guess(entry.channelcount);
         sample_per_second = entry.samplerate;
         extra_data = entry.dfla.stream_info;
+#if BUILDFLAG(ENABLE_PLATFORM_IAMF_AUDIO) || BUILDFLAG(ENABLE_IAMF_TOOLS)
+      } else if (audio_format == FOURCC_IAMF) {
+        // ISOBMFF IAMF streams do not use object type indication.
+        // |audio_format| is sufficient for identifying IAMF.
+        if (!has_iamf_) {
+          MEDIA_LOG(ERROR, media_log_) << "IAMF audio stream detected in MP4, "
+                                          "mismatching what is specified in "
+                                          "the mimetype.";
+          return false;
+        }
+
+        codec = AudioCodec::kIAMF;
+        profile = entry.iacb.profile == 0 ? AudioCodecProfile::kIAMF_SIMPLE
+                                          : AudioCodecProfile::kIAMF_BASE;
+        extra_data = entry.iacb.ia_descriptors;
+
+        // The correct values for the channel layout and sample rate can
+        // be parsed from the descriptor bitstream in `extra_data`.
+        // They are set to the following values here to create a valid
+        // AudioDecoderConfig.
+        // TODO (crbug.com/1513779): Parse the bitstream to set the correct
+        // values here.
+        channel_layout_config = ChannelLayoutConfig::Stereo();
+        sample_per_second = 48000;
+#endif  // BUILDFLAG(ENABLE_PLATFORM_IAMF_AUDIO) || ...
 #if BUILDFLAG(USE_PROPRIETARY_CODECS)
 #if BUILDFLAG(ENABLE_PLATFORM_MPEG_H_AUDIO)
       } else if (audio_format == FOURCC_MHM1 || audio_format == FOURCC_MHA1) {
         codec = AudioCodec::kMpegHAudio;
-        channel_layout = CHANNEL_LAYOUT_BITSTREAM;
+        channel_layout_config =
+            ChannelLayoutConfig::FromLayout<CHANNEL_LAYOUT_BITSTREAM>();
         sample_per_second = entry.samplerate;
         extra_data = entry.dfla.stream_info;
 #endif
@@ -487,6 +598,13 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
             audio_type = kAC3;
           if (audio_format == FOURCC_EAC3)
             audio_type = kEAC3;
+        }
+#endif
+#if BUILDFLAG(ENABLE_PLATFORM_AC4_AUDIO)
+        if (audio_type == kForbidden) {
+          if (audio_format == FOURCC_AC4) {
+            audio_type = kAC4;
+          }
         }
 #endif
 #if BUILDFLAG(ENABLE_PLATFORM_DTS_AUDIO)
@@ -501,53 +619,79 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
         }
 #endif  // BUILDFLAG(ENABLE_PLATFORM_DTS_AUDIO)
         DVLOG(1) << "audio_type 0x" << std::hex << static_cast<int>(audio_type);
-        if (audio_object_types_.find(audio_type) == audio_object_types_.end()) {
-          MEDIA_LOG(ERROR, media_log_)
-              << "audio object type 0x" << std::hex
-              << static_cast<int>(audio_type)
-              << " does not match what is specified in the mimetype.";
-          return false;
+        if (strict_audio_object_types_.has_value()) {
+          if (!strict_audio_object_types_->contains(audio_type)) {
+            MEDIA_LOG(ERROR, media_log_)
+                << "audio object type 0x" << std::hex
+                << static_cast<int>(audio_type)
+                << " does not match what is specified in the mimetype.";
+            return false;
+          }
         }
 
         // Check if it is MPEG4 AAC defined in ISO 14496 Part 3 or
-        // supported MPEG2 AAC varients.
+        // supported MPEG2 AAC variants.
         if (ESDescriptor::IsAAC(audio_type)) {
           const AAC& aac = entry.esds.aac;
           codec = AudioCodec::kAAC;
           profile = aac.GetProfile();
-          channel_layout = aac.GetChannelLayout(has_sbr_);
+          channel_layout_config = aac.GetChannelLayout(has_sbr_);
           sample_per_second = aac.GetOutputSamplesPerSecond(has_sbr_);
-          // Set `aac_extra_data` on all platforms but only set `extra_data` on
-          // Android. This is for backward compatibility until we have a better
-          // solution. See crbug.com/1245123 for details.
-          aac_extra_data = aac.codec_specific_data();
-#if BUILDFLAG(IS_ANDROID)
           extra_data = aac.codec_specific_data();
-#endif  // BUILDFLAG(IS_ANDROID)
 #if BUILDFLAG(ENABLE_PLATFORM_AC3_EAC3_AUDIO)
         } else if (audio_type == kAC3) {
           codec = AudioCodec::kAC3;
-          channel_layout = GuessChannelLayout(entry.channelcount);
+          channel_layout_config = entry.ac3.dac3.GetChannelLayout();
+          // Add an exception to allow using AudioSampleEntry's ChannelCount
+          // temporarily when AC3SpecificBox('dac3') information is
+          // not available.
+          if (channel_layout_config.channel_layout() ==
+              CHANNEL_LAYOUT_UNSUPPORTED) {
+            channel_layout_config =
+                ChannelLayoutConfig::Guess(entry.channelcount);
+          }
           sample_per_second = entry.samplerate;
         } else if (audio_type == kEAC3) {
           codec = AudioCodec::kEAC3;
-          channel_layout = GuessChannelLayout(entry.channelcount);
+          channel_layout_config = entry.eac3.dec3.GetChannelLayout();
+          // Add an exception to allow using AudioSampleEntry's ChannelCount
+          // temporarily when EC3SpecificBox('dec3') information is
+          // not available.
+          if (channel_layout_config.channel_layout() ==
+              CHANNEL_LAYOUT_UNSUPPORTED) {
+            channel_layout_config =
+                ChannelLayoutConfig::Guess(entry.channelcount);
+          }
           sample_per_second = entry.samplerate;
 #endif
+#if BUILDFLAG(ENABLE_PLATFORM_AC4_AUDIO)
+        } else if (audio_type == kAC4) {
+          codec = AudioCodec::kAC4;
+          // channel_layout and sample rate will be ignored on decoding.
+          // Refer to E.4.1 AC4SampleEntry Box in
+          //    ETSI TS 103 190 - 2 V1 .2.1(2018 - 02)
+          channel_layout_config =
+              ChannelLayoutConfig::Guess(entry.channelcount);
+          sample_per_second = entry.samplerate;
+          extra_data = entry.ac4.dac4.StreamInfo();
+#endif  // BUILDFLAG(ENABLE_PLATFORM_AC4_AUDIO)
 #if BUILDFLAG(ENABLE_PLATFORM_DTS_AUDIO)
         } else if (audio_type == kDTS) {
           codec = AudioCodec::kDTS;
-          channel_layout = GuessChannelLayout(entry.channelcount);
+          channel_layout_config =
+              ChannelLayoutConfig::Guess(entry.channelcount);
           sample_per_second = entry.samplerate;
         } else if (audio_type == kDTSX) {
           // HDMI versions pre HDMI 2.0 can only transmit 8 raw PCM channels.
           // In the case of a 5_1_4 stream we downmix to 5_1.
           codec = AudioCodec::kDTSXP2;
-          channel_layout = GuessChannelLayout(entry.channelcount);
+          channel_layout_config =
+              ChannelLayoutConfig::Guess(entry.channelcount);
           sample_per_second = entry.samplerate;
         } else if (audio_type == kDTSE) {
           codec = AudioCodec::kDTSE;
-          channel_layout = GuessChannelLayout(entry.channelcount);
+          channel_layout_config =
+              ChannelLayoutConfig::Guess(entry.channelcount);
           sample_per_second = entry.samplerate;
 #endif
         } else {
@@ -574,12 +718,6 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
       }
 
       uint32_t audio_track_id = track->header.track_id;
-      if (audio_track_ids_.find(audio_track_id) != audio_track_ids_.end()) {
-        MEDIA_LOG(ERROR, media_log_)
-            << "Audio track with track_id=" << audio_track_id
-            << " already present.";
-        return false;
-      }
       bool is_track_encrypted = entry.sinf.info.track_encryption.is_encrypted;
       EncryptionScheme scheme = EncryptionScheme::kUnencrypted;
       if (is_track_encrypted) {
@@ -588,17 +726,23 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
           return false;
       }
 
-      audio_config.Initialize(codec, sample_format, channel_layout,
+      audio_config.Initialize(codec, sample_format, channel_layout_config,
                               sample_per_second, extra_data, scheme,
                               seek_preroll, codec_delay_in_frames);
+      DVLOG(3) << __func__ << " audio_track_id=" << audio_track_id
+               << " is_encrypted=" << is_track_encrypted;
 
 #if BUILDFLAG(USE_PROPRIETARY_CODECS)
       if (codec == AudioCodec::kAAC) {
         audio_config.disable_discard_decoder_delay();
         audio_config.set_profile(profile);
-        audio_config.set_aac_extra_data(std::move(aac_extra_data));
       }
 #endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
+#if BUILDFLAG(ENABLE_PLATFORM_IAMF_AUDIO) || BUILDFLAG(ENABLE_IAMF_TOOLS)
+      if (codec == AudioCodec::kIAMF) {
+        audio_config.set_profile(profile);
+      }
+#endif  // BUILDFLAG(ENABLE_PLATFORM_IAMF_AUDIO) || ...
 
       DVLOG(1) << "audio_track_id=" << audio_track_id
                << " config=" << audio_config.AsHumanReadableString();
@@ -608,18 +752,18 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
         return false;
       }
       has_audio_ = true;
-      audio_track_ids_.insert(audio_track_id);
-      const char* track_kind = (audio_track_ids_.size() == 1 ? "main" : "");
+      track_ids_[audio_track_id] = DemuxerStream::AUDIO;
+      const char* track_kind = (detected_audio_track_count == 1 ? "main" : "");
       media_tracks->AddAudioTrack(
-          audio_config, audio_track_id, MediaTrack::Kind(track_kind),
+          audio_config, true, audio_track_id, MediaTrack::Kind(track_kind),
           MediaTrack::Label(track->media.handler.name),
           MediaTrack::Language(track->media.header.language()));
       continue;
-    }
-
-    if (track->media.handler.type == kVideo) {
+    } else if (track->media.handler.type == kVideo) {
       detected_video_track_count++;
 
+      // It is not uncommon to find otherwise-valid files with incorrect sample
+      // description indices, so we fail gracefully in that case.
       RCHECK(!samp_descr.video_entries.empty());
       if (desc_idx >= samp_descr.video_entries.size())
         desc_idx = 0;
@@ -650,12 +794,6 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
       gfx::Size natural_size = aspect_ratio.GetNaturalSize(visible_rect);
 
       uint32_t video_track_id = track->header.track_id;
-      if (video_track_ids_.find(video_track_id) != video_track_ids_.end()) {
-        MEDIA_LOG(ERROR, media_log_)
-            << "Video track with track_id=" << video_track_id
-            << " already present.";
-        return false;
-      }
       bool is_track_encrypted = entry.sinf.info.track_encryption.is_encrypted;
       EncryptionScheme scheme = EncryptionScheme::kUnencrypted;
       if (is_track_encrypted) {
@@ -663,22 +801,51 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
         if (scheme == EncryptionScheme::kUnencrypted)
           return false;
       }
-      video_config.Initialize(entry.video_codec, entry.video_codec_profile,
+      VideoCodec video_codec = entry.video_info.codec;
+      VideoCodecProfile video_codec_profile = entry.video_info.profile;
+      VideoCodecLevel video_codec_level = entry.video_info.level;
+      if (entry.dv_info.has_value()) {
+        DCHECK_EQ(entry.dv_info->codec_info.codec, VideoCodec::kDolbyVision);
+        if (has_dv_) {
+          video_codec = entry.dv_info->codec_info.codec;
+          video_codec_profile = entry.dv_info->codec_info.profile;
+          video_codec_level = entry.dv_info->codec_info.level;
+        } else {
+          MEDIA_LOG(INFO, media_log_)
+              << "Dolby Vision video track with track_id=" << video_track_id
+              << " is using cross-compatible codec: "
+              << GetCodecName(video_codec)
+              << ". To prevent this, where Dolby Vision is supported, use a "
+              << "Dolby Vision codec string when constructing the "
+                 "SourceBuffer.";
+        }
+      }
+      video_config.Initialize(video_codec, video_codec_profile,
                               entry.alpha_mode, VideoColorSpace::REC709(),
                               CalculateRotation(track->header, moov_->header),
                               coded_size, visible_rect, natural_size,
                               // No decoder-specific buffer needed for AVC;
                               // SPS/PPS are embedded in the video stream
                               EmptyExtraData(), scheme);
+      DVLOG(3) << __func__ << " video_track_id=" << video_track_id
+               << " is_encrypted=" << is_track_encrypted;
+
       video_config.set_aspect_ratio(aspect_ratio);
-      video_config.set_level(entry.video_codec_level);
+      video_config.set_level(video_codec_level);
 
       if (entry.video_color_space.IsSpecified())
         video_config.set_color_space_info(entry.video_color_space);
 
-      if (entry.hdr_metadata.has_value() && entry.hdr_metadata->IsValid()) {
-        video_config.set_hdr_metadata(entry.hdr_metadata.value());
+      if (entry.dv_info.has_value() && has_dv_ &&
+          entry.dv_info->color_space.IsSpecified()) {
+        video_config.set_color_space_info(entry.dv_info->color_space);
       }
+
+      if (!entry.hdr_metadata.IsEmpty() && entry.hdr_metadata.IsValid()) {
+        video_config.set_hdr_metadata(entry.hdr_metadata);
+      }
+
+      video_config.set_spatial_format(entry.video_spatial_format);
 
       DVLOG(1) << "video_track_id=" << video_track_id
                << " config=" << video_config.AsHumanReadableString();
@@ -688,28 +855,42 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
         return false;
       }
       has_video_ = true;
-      video_track_ids_.insert(video_track_id);
+      track_ids_[video_track_id] = DemuxerStream::VIDEO;
       auto track_kind =
-          MediaTrack::Kind(video_track_ids_.size() == 1 ? "main" : "");
+          MediaTrack::Kind(detected_video_track_count == 1 ? "main" : "");
       media_tracks->AddVideoTrack(
-          video_config, video_track_id, track_kind,
+          video_config, true, video_track_id, track_kind,
           MediaTrack::Label(track->media.handler.name),
           MediaTrack::Language(track->media.header.language()));
       continue;
-    }
+    } else if (track->media.handler.type == kMetadata) {
+      const StreamParser::TrackId metadata_track_id = track->header.track_id;
+      if (metadata_tracks_.find(metadata_track_id) != metadata_tracks_.end()) {
+        MEDIA_LOG(ERROR, media_log_)
+            << "Metadata track with track_id=" << metadata_track_id
+            << " already present.";
+        return false;
+      }
 
-    // TODO(wolenetz): Investigate support in MSE and Chrome MSE for CEA 608/708
-    // embedded caption data in video track. At time of init segment parsing, we
-    // don't have this data (unless maybe by SourceBuffer's mimetype).
-    // See https://crbug.com/597073
-    if (track->media.handler.type == kText)
-      detected_text_track_count++;
+      std::unique_ptr<HdrMetadataTrack> metadata_track;
+      if (desc_idx < samp_descr.metadata_t35_entries.size()) {
+        metadata_track = MakeMetadataTrack(
+            track->header.track_id, samp_descr.metadata_t35_entries[desc_idx],
+            track->references);
+      }
+      if (metadata_track) {
+        track_ids_[metadata_track_id] = DemuxerStream::UNKNOWN;
+        metadata_tracks_[metadata_track_id] = std::move(metadata_track);
+        ++detected_metadata_track_count;
+      }
+      continue;
+    }
   }
 
   if (!moov_->pssh.empty())
     OnEncryptedMediaInitData(moov_->pssh);
 
-  RCHECK(config_cb_.Run(std::move(media_tracks), TextTrackConfigMap()));
+  RCHECK(config_cb_.Run(std::move(media_tracks)));
 
   StreamParser::InitParameters params(kInfiniteDuration);
   if (moov_->extends.header.fragment_duration > 0) {
@@ -760,7 +941,7 @@ bool MP4StreamParser::ParseMoov(BoxReader* reader) {
   if (init_cb_) {
     params.detected_audio_track_count = detected_audio_track_count;
     params.detected_video_track_count = detected_video_track_count;
-    params.detected_text_track_count = detected_text_track_count;
+    params.detected_metadata_track_count = detected_metadata_track_count;
     std::move(init_cb_).Run(params);
   }
 
@@ -772,7 +953,7 @@ bool MP4StreamParser::ParseMoof(BoxReader* reader) {
   MovieFragment moof;
   RCHECK(moof.Parse(reader));
   if (!runs_)
-    runs_ = std::make_unique<TrackRunIterator>(moov_.get(), media_log_);
+    runs_ = std::make_unique<TrackRunIterator>(moov_.get(), media_log_.get());
   RCHECK(runs_->Init(moof));
   RCHECK(ComputeHighestEndOffset(moof));
 
@@ -794,35 +975,14 @@ void MP4StreamParser::OnEncryptedMediaInitData(
     total_size += header.raw_box.size();
   }
 
-  std::vector<uint8_t> init_data(total_size);
-  size_t pos = 0;
+  std::vector<uint8_t> init_data;
+  init_data.reserve(total_size);
   for (const auto& header : headers) {
-    memcpy(&init_data[pos], &header.raw_box[0], header.raw_box.size());
-    pos += header.raw_box.size();
+    init_data.insert(init_data.end(), header.raw_box.cbegin(),
+                     header.raw_box.cend());
   }
   encrypted_media_init_data_cb_.Run(EmeInitDataType::CENC, init_data);
 }
-
-#if BUILDFLAG(USE_PROPRIETARY_CODECS)
-bool MP4StreamParser::PrepareAACBuffer(
-    const AAC& aac_config,
-    std::vector<uint8_t>* frame_buf,
-    std::vector<SubsampleEntry>* subsamples) const {
-  // Append an ADTS header to every audio sample.
-  int adts_header_size = 0;
-  RCHECK(aac_config.ConvertEsdsToADTS(frame_buf, &adts_header_size));
-
-  // As above, adjust subsample information to account for the headers. AAC is
-  // not required to use subsample encryption, so we may need to add an entry.
-  if (subsamples->empty()) {
-    subsamples->push_back(
-        SubsampleEntry(adts_header_size, frame_buf->size() - adts_header_size));
-  } else {
-    (*subsamples)[0].clear_bytes += adts_header_size;
-  }
-  return true;
-}
-#endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
 
 ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
   DCHECK_EQ(state_, kEmittingSamples);
@@ -830,8 +990,10 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
   if (!runs_->IsRunValid()) {
     // Flush any buffers we've gotten in this chunk so that buffers don't
     // cross |new_segment_cb_| calls
-    if (!SendAndFlushSamples(buffers))
+    if (!SendAndFlushSamples(buffers,
+                             /*all_samples_in_segment_received=*/true)) {
       return ParseResult::kError;
+    }
 
     // Remain in kEmittingSamples state, discarding data, until the end of
     // the current 'mdat' box has been appended to the queue.
@@ -854,22 +1016,20 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
     return ParseResult::kOk;
   }
 
-  const uint8_t* buf;
-  int buf_size;
-  ModulatedPeek(&buf, &buf_size);
-  if (!buf_size) {
+  base::span<const uint8_t> buf = ModulatedPeek();
+  if (buf.empty()) {
     return ParseResult::kNeedMoreData;
   }
 
-  bool audio =
-      audio_track_ids_.find(runs_->track_id()) != audio_track_ids_.end();
-  bool video =
-      video_track_ids_.find(runs_->track_id()) != video_track_ids_.end();
-
-  // Skip this entire track if it's not one we're interested in
-  if (!audio && !video) {
-    if (!runs_->AdvanceRun())
+  DemuxerStream::Type buffer_type = DemuxerStream::UNKNOWN;
+  auto it = track_ids_.find(runs_->track_id());
+  if (it != track_ids_.end()) {
+    buffer_type = it->second;
+  } else {
+    // Skip this entire track if it's not one we're interested in
+    if (!runs_->AdvanceRun()) {
       return ParseResult::kError;
+    }
     return ParseResult::kOk;
   }
 
@@ -881,19 +1041,20 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
   // memory-constrained devices where the source buffer consumes a substantial
   // portion of the total system memory.
   if (runs_->AuxInfoNeedsToBeCached()) {
-    ModulatedPeekAt(runs_->aux_info_offset() + moof_head_, &buf, &buf_size);
-    if (buf_size < runs_->aux_info_size()) {
+    buf = ModulatedPeekAt(runs_->aux_info_offset() + moof_head_);
+    if (base::CheckedNumeric<int64_t>(buf.size()).ValueOrDie() <
+        runs_->aux_info_size()) {
       return ParseResult::kNeedMoreData;
     }
 
-    if (!runs_->CacheAuxInfo(buf, buf_size)) {
+    if (!runs_->CacheAuxInfo(buf)) {
       return ParseResult::kError;
     }
 
     return ParseResult::kOk;
   }
 
-  ModulatedPeekAt(runs_->sample_offset() + moof_head_, &buf, &buf_size);
+  buf = ModulatedPeekAt(runs_->sample_offset() + moof_head_);
 
   if (runs_->sample_size() >
       static_cast<uint32_t>(std::numeric_limits<int>::max())) {
@@ -901,10 +1062,11 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
     return ParseResult::kError;
   }
 
-  int sample_size = base::checked_cast<int>(runs_->sample_size());
+  const size_t sample_size = runs_->sample_size();
 
-  if (buf_size < sample_size)
+  if (buf.size() < sample_size) {
     return ParseResult::kNeedMoreData;
+  }
 
   if (sample_size == 0) {
     // Generally not expected, but spec allows it. Code below this block assumes
@@ -930,13 +1092,21 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
   // opposite of what the coded frame contains.
   bool is_keyframe = runs_->is_keyframe();
 
-  std::vector<uint8_t> frame_buf(buf, buf + sample_size);
-  if (video) {
-    if (runs_->video_description().video_codec == VideoCodec::kH264 ||
-        runs_->video_description().video_codec == VideoCodec::kHEVC ||
-        runs_->video_description().video_codec == VideoCodec::kDolbyVision) {
+  // `frame_buf` or `heap_frame_buf` should be used for post-processing buffer
+  // storage if [buf, buf + sample_size] needs any kind of processing before
+  // being put in a StreamParserBuffer. Prefer `heap_frame_buf` where possible.
+  std::vector<uint8_t> frame_buf;
+  base::HeapArray<uint8_t> heap_frame_buf;
+  if (buffer_type == DemuxerStream::VIDEO) {
+    if (runs_->video_description().video_info.codec == VideoCodec::kH264 ||
+        runs_->video_description().video_info.codec == VideoCodec::kHEVC ||
+        (runs_->video_description().video_info.codec ==
+             VideoCodec::kDolbyVision &&
+         runs_->video_description().video_info.profile !=
+             VideoCodecProfile::DOLBYVISION_PROFILE10)) {
       DCHECK(runs_->video_description().frame_bitstream_converter);
       BitstreamConverter::AnalysisResult analysis;
+      frame_buf = base::ToVector(buf.first(sample_size));
       if (!runs_->video_description()
                .frame_bitstream_converter->ConvertAndAnalyzeFrame(
                    &frame_buf, is_keyframe, &subsamples, &analysis)) {
@@ -978,14 +1148,35 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
         // similarly trust that analysis instead of the mp4.
         is_keyframe = analysis.is_keyframe.value();
       }
-    }
-  }
 
-  if (audio) {
+      // Treat frames with SEI recovery points (recovery_frame_cnt == 0) as
+      // keyframes for MSE random access purposes. This enables playback of
+      // open-GOP H.264 content where non-IDR I-frames are used as random
+      // access points. SPS/PPS parameter sets are injected for these frames
+      // in ConvertAndAnalyzeFrame() so the hardware decoder can initialize
+      // after a seek/reset. The H.264 GPU decoder already supports resuming
+      // from SEI recovery points (see h264_decoder.cc).
+      //
+      // Scoped to unencrypted content only: encrypted streams may not support
+      // the software decode fallback needed on platforms where hardware
+      // decoders don't handle non-IDR recovery points (some older Intel/AMD
+      // devices mishandle SEI + SPS/PPS). See https://crbug.com/451536366.
+      if (!is_keyframe && analysis.is_sei_recovery_point.value_or(false) &&
+          !runs_->is_encrypted() &&
+          base::FeatureList::IsEnabled(kMediaSourceSeiRecoveryPointKeyframe)) {
+        LIMITED_MEDIA_LOG(INFO, media_log_, num_sei_recovery_point_promotions_,
+                          kMaxSEIRecoveryPointPromotionLogs)
+            << "Promoting non-IDR frame with SEI recovery point to keyframe "
+               "for MSE random access.";
+        is_keyframe = true;
+      }
+    }
+  } else if (buffer_type == DemuxerStream::AUDIO) {
     if (ESDescriptor::IsAAC(runs_->audio_description().esds.object_type)) {
 #if BUILDFLAG(USE_PROPRIETARY_CODECS)
-      if (!PrepareAACBuffer(runs_->audio_description().esds.aac, &frame_buf,
-                            &subsamples)) {
+      heap_frame_buf = PrepareAACBuffer(runs_->audio_description().esds.aac,
+                                        buf.first(sample_size), &subsamples);
+      if (heap_frame_buf.empty()) {
         MEDIA_LOG(ERROR, media_log_)
             << "Failed to prepare AAC sample for decode";
         return ParseResult::kError;
@@ -1007,12 +1198,38 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
     // else, use the existing config.
   }
 
-  StreamParserBuffer::Type buffer_type = audio ? DemuxerStream::AUDIO :
-      DemuxerStream::VIDEO;
+  // Either both buffers should be empty or only one should be filled.
+  CHECK(frame_buf.empty() || heap_frame_buf.empty());
 
-  auto stream_buf = StreamParserBuffer::FromExternalMemory(
-      std::make_unique<ExternalMemoryAdapter>(std::move(frame_buf)),
-      is_keyframe, buffer_type, runs_->track_id());
+  scoped_refptr<StreamParserBuffer> stream_buf;
+
+  if (auto* media_client = GetMediaClient()) {
+    if (auto* alloc = media_client->GetMediaAllocator()) {
+      stream_buf = StreamParserBuffer::FromExternalMemory(
+          alloc->CopyFrom(frame_buf.empty()
+                              ? (heap_frame_buf.empty() ? buf.first(sample_size)
+                                                        : heap_frame_buf)
+                              : frame_buf),
+          is_keyframe, buffer_type, runs_->track_id());
+    }
+  }
+  if (!stream_buf) {
+    // Skip using the ExternalMemoryAdapter if possible since it can have more
+    // overhead in some applications. See https://crbug.com/353751208.
+    if (frame_buf.empty() && heap_frame_buf.empty()) {
+      stream_buf = StreamParserBuffer::CopyFrom(
+          buf.first(sample_size), is_keyframe, buffer_type, runs_->track_id());
+    } else if (frame_buf.empty()) {
+      stream_buf =
+          StreamParserBuffer::FromArray(std::move(heap_frame_buf), is_keyframe,
+                                        buffer_type, runs_->track_id());
+
+    } else {
+      stream_buf = StreamParserBuffer::FromExternalMemory(
+          std::make_unique<ExternalMemoryAdapter>(std::move(frame_buf)),
+          is_keyframe, buffer_type, runs_->track_id());
+    }
+  }
 
   if (decrypt_config)
     stream_buf->set_decrypt_config(std::move(decrypt_config));
@@ -1039,7 +1256,7 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
     return ParseResult::kError;
   }
 
-  DVLOG(3) << "Emit " << (audio ? "audio" : "video") << " frame: "
+  DVLOG(3) << "Emit " << DemuxerStream::GetTypeName(buffer_type) << " frame: "
            << " track_id=" << runs_->track_id() << ", key=" << is_keyframe
            << ", dur=" << runs_->duration().InMilliseconds()
            << ", dts=" << runs_->dts().InMilliseconds()
@@ -1052,7 +1269,13 @@ ParseResult MP4StreamParser::EnqueueSample(BufferQueueMap* buffers) {
   return ParseResult::kOk;
 }
 
-bool MP4StreamParser::SendAndFlushSamples(BufferQueueMap* buffers) {
+bool MP4StreamParser::SendAndFlushSamples(
+    BufferQueueMap* buffers,
+    bool all_samples_in_segment_received) {
+  for (auto& [track_id, metadata_track] : metadata_tracks_) {
+    metadata_track->AttachMetadataOrHoldBuffers(
+        buffers, all_samples_in_segment_received);
+  }
   if (buffers->empty())
     return true;
   bool success = new_buffers_cb_.Run(*buffers);
@@ -1065,13 +1288,11 @@ bool MP4StreamParser::ReadAndDiscardMDATsUntil(int64_t max_clear_offset) {
   DCHECK_LE(max_parse_offset_, queue_.tail());
   int64_t upper_bound = std::min(max_clear_offset, max_parse_offset_);
   while (mdat_tail_ < upper_bound) {
-    const uint8_t* buf = nullptr;
-    int size = 0;
-    ModulatedPeekAt(mdat_tail_, &buf, &size);
+    base::span<const uint8_t> buf = ModulatedPeekAt(mdat_tail_);
 
     FourCC type;
     size_t box_sz;
-    result = BoxReader::StartTopLevelBox(buf, size, media_log_, &type, &box_sz);
+    result = BoxReader::StartTopLevelBox(buf, media_log_.get(), &type, &box_sz);
     if (result != ParseResult::kOk)
       break;
 
@@ -1111,7 +1332,7 @@ bool MP4StreamParser::HaveEnoughDataToEnqueueSamples() {
 bool MP4StreamParser::ComputeHighestEndOffset(const MovieFragment& moof) {
   highest_end_offset_ = 0;
 
-  TrackRunIterator runs(moov_.get(), media_log_);
+  TrackRunIterator runs(moov_.get(), media_log_.get());
   RCHECK(runs.Init(moof));
 
   while (runs.IsRunValid()) {

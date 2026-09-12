@@ -6,10 +6,10 @@
 #define CHROME_BROWSER_ASH_CROSTINI_CROSTINI_INSTALLER_H_
 
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
-#include "chrome/browser/ash/crostini/ansible/ansible_management_service.h"
 #include "chrome/browser/ash/crostini/crostini_installer_ui_delegate.h"
 #include "chrome/browser/ash/crostini/crostini_manager.h"
 #include "chrome/browser/ash/crostini/crostini_types.mojom-forward.h"
@@ -18,6 +18,8 @@
 class Profile;
 
 namespace crostini {
+
+inline constexpr char kCrostiniSetupSourceHistogram[] = "Crostini.SetupSource";
 
 class CrostiniInstaller : public KeyedService,
                           public CrostiniManager::RestartObserver,
@@ -71,8 +73,6 @@ class CrostiniInstaller : public KeyedService,
     // at the top of this enum.
   };
 
-  static CrostiniInstaller* GetForProfile(Profile* profile);
-
   explicit CrostiniInstaller(Profile* profile);
 
   CrostiniInstaller(const CrostiniInstaller&) = delete;
@@ -80,8 +80,6 @@ class CrostiniInstaller : public KeyedService,
 
   ~CrostiniInstaller() override;
   void Shutdown() override;
-
-  void ShowDialog(CrostiniUISurface ui_surface);
 
   // CrostiniInstallerUIDelegate:
   void Install(CrostiniManager::RestartOptions options,
@@ -126,12 +124,12 @@ class CrostiniInstaller : public KeyedService,
   void RecordSetupResult(SetupResult result);
 
   void OnCrostiniRestartFinished(crostini::CrostiniResult result);
-  void OnAvailableDiskSpace(absl::optional<int64_t> bytes);
+  void OnAvailableDiskSpace(std::optional<int64_t> bytes);
 
   void OnCrostiniRemovedAfterConfigurationFailed(
       crostini::CrostiniResult result);
 
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
 
   State state_ = State::IDLE;
   crostini::mojom::InstallerState installing_state_;

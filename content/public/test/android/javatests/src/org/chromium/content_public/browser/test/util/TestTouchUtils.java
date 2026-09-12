@@ -10,24 +10,26 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 
+import org.chromium.base.ThreadUtils;
+
 import java.util.concurrent.ExecutionException;
 
 /**
- * Collection of utilities for generating touch events.
- * Based on android.test.TouchUtils, but slightly more flexible (allows to
- * specify coordinates for longClick, splits drag operation in three stages, etc).
+ * Collection of utilities for generating touch events. Based on android.test.TouchUtils, but
+ * slightly more flexible (allows to specify coordinates for longClick, splits drag operation in
+ * three stages, etc).
  */
 public class TestTouchUtils {
     /**
-     * Returns the absolute location in screen coordinates from location relative
-     * to view.
+     * Returns the absolute location in screen coordinates from location relative to view.
+     *
      * @param v The view the coordinates are relative to.
      * @param x Relative x location.
      * @param y Relative y location.
      * @return the absolute x and y location in an array.
      */
     public static int[] getAbsoluteLocationFromRelative(View v, int x, int y) {
-        int location[] = new int[2];
+        int[] location = new int[2];
         v.getLocationOnScreen(location);
         location[0] += x;
         location[1] += y;
@@ -64,7 +66,7 @@ public class TestTouchUtils {
      * @param y Relative y location to the view.
      */
     public static void singleClickView(Instrumentation instrumentation, View v, int x, int y) {
-        int location[] = getAbsoluteLocationFromRelative(v, x, y);
+        int[] location = getAbsoluteLocationFromRelative(v, x, y);
         int absoluteX = location[0];
         int absoluteY = location[1];
         singleClick(instrumentation, absoluteX, absoluteY);
@@ -100,7 +102,7 @@ public class TestTouchUtils {
      * @param y Relative y location to the view.
      */
     public static void longClickView(Instrumentation instrumentation, View v, int x, int y) {
-        int location[] = getAbsoluteLocationFromRelative(v, x, y);
+        int[] location = getAbsoluteLocationFromRelative(v, x, y);
         int absoluteX = location[0];
         int absoluteY = location[1];
 
@@ -148,8 +150,14 @@ public class TestTouchUtils {
      * @param stepCount The total number of motion events that should be generated during the drag.
      * @param downTime The initial time of the drag, in ms.
      */
-    public static void dragTo(Instrumentation instrumentation, float fromX, float toX, float fromY,
-            float toY, int stepCount, long downTime) {
+    public static void dragTo(
+            Instrumentation instrumentation,
+            float fromX,
+            float toX,
+            float fromY,
+            float toY,
+            int stepCount,
+            long downTime) {
         float x = fromX;
         float y = fromY;
         float yStep = (toY - fromY) / stepCount;
@@ -175,8 +183,8 @@ public class TestTouchUtils {
     }
 
     /**
-     * Performs a drag between the given coordinates, specified relative to the given view.
-     * This method makes calls to dragStart, dragTo and dragEnd.
+     * Performs a drag between the given coordinates, specified relative to the given view. This
+     * method makes calls to dragStart, dragTo and dragEnd.
      *
      * @param instrumentation Instrumentation object used by the test.
      * @param view The view the coordinates are relative to.
@@ -186,13 +194,25 @@ public class TestTouchUtils {
      * @param toY The relative y-coordinate of the end point of the drag.
      * @param stepCount The total number of motion events that should be generated during the drag.
      */
-    public static void dragCompleteView(Instrumentation instrumentation, View view, int fromX,
-            int toX, int fromY, int toY, int stepCount) {
-        int fromLocation[] = getAbsoluteLocationFromRelative(view, fromX, fromY);
-        int toLocation[] = getAbsoluteLocationFromRelative(view, toX, toY);
+    public static void dragCompleteView(
+            Instrumentation instrumentation,
+            View view,
+            int fromX,
+            int toX,
+            int fromY,
+            int toY,
+            int stepCount) {
+        int[] fromLocation = getAbsoluteLocationFromRelative(view, fromX, fromY);
+        int[] toLocation = getAbsoluteLocationFromRelative(view, toX, toY);
         long downTime = dragStart(instrumentation, fromLocation[0], fromLocation[1]);
-        dragTo(instrumentation, fromLocation[0], toLocation[0], fromLocation[1], toLocation[1],
-                stepCount, downTime);
+        dragTo(
+                instrumentation,
+                fromLocation[0],
+                toLocation[0],
+                fromLocation[1],
+                toLocation[1],
+                stepCount,
+                downTime);
         dragEnd(instrumentation, toLocation[0], toLocation[1], downTime);
     }
 
@@ -203,7 +223,10 @@ public class TestTouchUtils {
      * @param v The view to call performClick on.
      */
     public static void performClickOnMainSync(Instrumentation instrumentation, final View v) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> { v.performClick(); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    v.performClick();
+                });
     }
 
     /**
@@ -214,6 +237,6 @@ public class TestTouchUtils {
      */
     public static void performLongClickOnMainSync(Instrumentation instrumentation, final View v)
             throws ExecutionException {
-        TestThreadUtils.runOnUiThreadBlocking(() -> v.performLongClick());
+        ThreadUtils.runOnUiThreadBlocking(() -> v.performLongClick());
     }
 }

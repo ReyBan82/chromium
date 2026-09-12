@@ -8,8 +8,11 @@
 #ifndef UI_GFX_IPC_GFX_PARAM_TRAITS_MACROS_H_
 #define UI_GFX_IPC_GFX_PARAM_TRAITS_MACROS_H_
 
+#include "base/pickle.h"
 #include "build/build_config.h"
-#include "ipc/ipc_message_macros.h"
+#include "ipc/param_traits.h"
+#include "ipc/param_traits_macros.h"
+#include "ipc/param_traits_utils.h"
 #include "ui/gfx/ca_layer_params.h"
 #include "ui/gfx/ipc/gfx_ipc_export.h"
 #include "ui/gfx/selection_bound.h"
@@ -21,16 +24,6 @@
 IPC_ENUM_TRAITS_MAX_VALUE(gfx::SwapResult, gfx::SwapResult::SWAP_RESULT_LAST)
 
 IPC_ENUM_TRAITS_MAX_VALUE(gfx::SelectionBound::Type, gfx::SelectionBound::LAST)
-
-IPC_STRUCT_TRAITS_BEGIN(gfx::CALayerParams)
-  IPC_STRUCT_TRAITS_MEMBER(is_empty)
-#if BUILDFLAG(IS_MAC)
-  IPC_STRUCT_TRAITS_MEMBER(ca_context_id)
-  IPC_STRUCT_TRAITS_MEMBER(io_surface_mach_port)
-  IPC_STRUCT_TRAITS_MEMBER(pixel_size)
-  IPC_STRUCT_TRAITS_MEMBER(scale_factor)
-#endif
-IPC_STRUCT_TRAITS_END()
 
 IPC_STRUCT_TRAITS_BEGIN(gfx::SwapTimings)
   IPC_STRUCT_TRAITS_MEMBER(swap_start)

@@ -2,12 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "media/filters/decrypting_media_resource.h"
+
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/mock_callback.h"
 #include "base/test/task_environment.h"
@@ -20,7 +23,6 @@
 #include "media/base/pipeline_status.h"
 #include "media/base/test_helpers.h"
 #include "media/filters/decrypting_demuxer_stream.h"
-#include "media/filters/decrypting_media_resource.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 using ::base::test::RunCallback;
@@ -76,7 +78,8 @@ class DecryptingMediaResourceTest : public testing::Test {
   }
 
   bool HasEncryptedStream() {
-    for (auto* stream : decrypting_media_resource_->GetAllStreams()) {
+    for (media::DemuxerStream* stream :
+         decrypting_media_resource_->GetAllStreams()) {
       if ((stream->type() == DemuxerStream::AUDIO &&
            stream->audio_decoder_config().is_encrypted()) ||
           (stream->type() == DemuxerStream::VIDEO &&
@@ -91,8 +94,8 @@ class DecryptingMediaResourceTest : public testing::Test {
     streams_.push_back(CreateMockDemuxerStream(type, encrypted));
   }
 
-  std::vector<DemuxerStream*> GetAllStreams() {
-    std::vector<DemuxerStream*> streams;
+  std::vector<raw_ptr<DemuxerStream>> GetAllStreams() {
+    std::vector<raw_ptr<DemuxerStream>> streams;
 
     for (auto& stream : streams_) {
       streams.push_back(stream.get());
@@ -113,8 +116,8 @@ class DecryptingMediaResourceTest : public testing::Test {
   StrictMock<MockDecryptor> decryptor_;
   StrictMock<MockDemuxer> demuxer_;
   StrictMock<MockCdmContext> cdm_context_;
-  std::unique_ptr<DecryptingMediaResource> decrypting_media_resource_;
   std::vector<std::unique_ptr<StrictMock<MockDemuxerStream>>> streams_;
+  std::unique_ptr<DecryptingMediaResource> decrypting_media_resource_;
 
   // Constant buffer to be returned by the input demuxer streams and
   // |decryptor_|.
@@ -211,8 +214,8 @@ TEST_F(DecryptingMediaResourceTest, WaitingCallback) {
   EXPECT_CALL(*streams_.front(), OnRead(_))
       .WillRepeatedly(ReturnBuffer(encrypted_buffer_));
   EXPECT_CALL(decryptor_, Decrypt(_, encrypted_buffer_, _))
-      .WillRepeatedly(RunOnceCallback<2>(Decryptor::kNoKey,
-                                         scoped_refptr<DecoderBuffer>()));
+      .WillRepeatedly(base::test::RunOnceCallbackRepeatedly<2>(
+          Decryptor::kNoKey, scoped_refptr<DecoderBuffer>()));
   EXPECT_CALL(decrypting_media_resource_init_cb_, Run(true));
   EXPECT_CALL(waiting_cb_, Run(WaitingReason::kNoDecryptionKey));
 

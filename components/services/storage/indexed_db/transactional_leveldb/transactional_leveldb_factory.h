@@ -17,7 +17,7 @@ namespace leveldb {
 class Iterator;
 }  // namespace leveldb
 
-namespace content {
+namespace content::indexed_db {
 class TransactionalLevelDBDatabase;
 class TransactionalLevelDBIterator;
 class LevelDBScope;
@@ -43,7 +43,7 @@ class TransactionalLevelDBFactory {
 
   // A LevelDBTransaction uses the LevelDBScope to write changes, and
   // appropriately flushes the scope for reads.
-  virtual scoped_refptr<TransactionalLevelDBTransaction>
+  virtual std::unique_ptr<TransactionalLevelDBTransaction>
   CreateLevelDBTransaction(TransactionalLevelDBDatabase* db,
                            std::unique_ptr<LevelDBScope> scope) = 0;
 
@@ -66,7 +66,7 @@ class DefaultTransactionalLevelDBFactory : public TransactionalLevelDBFactory {
       size_t max_open_iterators) override;
   std::unique_ptr<LevelDBDirectTransaction> CreateLevelDBDirectTransaction(
       TransactionalLevelDBDatabase* db) override;
-  scoped_refptr<TransactionalLevelDBTransaction> CreateLevelDBTransaction(
+  std::unique_ptr<TransactionalLevelDBTransaction> CreateLevelDBTransaction(
       TransactionalLevelDBDatabase* db,
       std::unique_ptr<LevelDBScope> scope) override;
   std::unique_ptr<TransactionalLevelDBIterator> CreateIterator(
@@ -76,6 +76,6 @@ class DefaultTransactionalLevelDBFactory : public TransactionalLevelDBFactory {
       std::unique_ptr<LevelDBSnapshot> snapshot) override;
 };
 
-}  // namespace content
+}  // namespace content::indexed_db
 
 #endif  // COMPONENTS_SERVICES_STORAGE_INDEXED_DB_TRANSACTIONAL_LEVELDB_TRANSACTIONAL_LEVELDB_FACTORY_H_

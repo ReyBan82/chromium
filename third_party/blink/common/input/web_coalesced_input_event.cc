@@ -104,9 +104,6 @@ void WebCoalescedInputEvent::CoalesceWith(
   TRACE_EVENT2("input", "WebCoalescedInputEvent::CoalesceWith", "traceId",
                latency_.trace_id(), "coalescedTraceId",
                newer_event.latency_.trace_id());
-  // |newer_event| should be a newer event than |this|.
-  if (newer_event.latency_.trace_id() >= 0 && latency_.trace_id() >= 0)
-    DCHECK_GT(newer_event.latency_.trace_id(), latency_.trace_id());
 
   // New events get coalesced into older events, and the newer timestamp
   // should always be preserved.
@@ -115,15 +112,16 @@ void WebCoalescedInputEvent::CoalesceWith(
   event_->SetTimeStamp(time_stamp);
   AddCoalescedEvent(*newer_event.event_);
 
-  if (newer_event.event_->IsGestureScroll()) {
-    const WebGestureEvent& newer_gesture_event =
-        static_cast<const WebGestureEvent&>(*newer_event.event_);
-    TRACE_EVENT(
-        "input", "WebCoalescedInputEvent::CoalesceWith",
-        "coalesced_to_trace_id", latency_.trace_id(), "coalesced_delta_x",
-        newer_gesture_event.data.scroll_update.delta_x, "coalesced_delta_y",
-        newer_gesture_event.data.scroll_update.delta_y);
-  }
+  TRACE_EVENT("input", "WebCoalescedInputEvent::CoalesceWith",
+              [trace_id = newer_event.latency_.trace_id(),
+               coalesced_to_trace_id =
+                   latency_.trace_id()](perfetto::EventContext& ctx) {
+                auto* event =
+                    ctx.event<perfetto::protos::pbzero::ChromeTrackEvent>();
+                auto* scroll_data = event->set_scroll_deltas();
+                scroll_data->set_trace_id(trace_id);
+                scroll_data->set_coalesced_to_trace_id(coalesced_to_trace_id);
+              });
 }
 
 }  // namespace blink

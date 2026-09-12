@@ -14,8 +14,12 @@
 
 namespace syncer {
 
-SyncCycle::SyncCycle(SyncCycleContext* context, Delegate* delegate)
-    : context_(context), delegate_(delegate) {
+SyncCycle::SyncCycle(SyncCycleContext* context,
+                     Delegate* delegate,
+                     signin::AccessTokenInfo access_token_info)
+    : context_(context),
+      delegate_(delegate),
+      access_token_info_(std::move(access_token_info)) {
   status_controller_ = std::make_unique<StatusController>();
 }
 
@@ -28,9 +32,9 @@ SyncCycleSnapshot SyncCycle::TakeSnapshot() const {
 SyncCycleSnapshot SyncCycle::TakeSnapshotWithOrigin(
     sync_pb::SyncEnums::GetUpdatesOrigin get_updates_origin) const {
   ProgressMarkerMap download_progress_markers;
-  for (ModelType type : ModelTypeSet::All()) {
+  for (DataType type : DataTypeSet::All()) {
     const UpdateHandler* update_handler =
-        context_->model_type_registry()->GetUpdateHandler(type);
+        context_->data_type_registry()->GetUpdateHandler(type);
     if (update_handler == nullptr) {
       continue;
     }
@@ -47,7 +51,7 @@ SyncCycleSnapshot SyncCycle::TakeSnapshotWithOrigin(
       context_->notifications_enabled(), status_controller_->sync_start_time(),
       status_controller_->poll_finish_time(), get_updates_origin,
       context_->poll_interval(),
-      context_->model_type_registry()->HasUnsyncedItems());
+      context_->data_type_registry()->HasUnsyncedItems());
 
   return snapshot;
 }
@@ -59,8 +63,9 @@ void SyncCycle::SendSyncCycleEndEventNotification(
 
   DVLOG(1) << "Sending cycle end event with snapshot: "
            << event.snapshot.ToString();
-  for (SyncEngineEventListener& observer : *context_->listeners())
+  for (SyncEngineEventListener& observer : *context_->listeners()) {
     observer.OnSyncCycleEvent(event);
+  }
 }
 
 void SyncCycle::SendEventNotification(SyncCycleEvent::EventCause cause) {
@@ -68,13 +73,15 @@ void SyncCycle::SendEventNotification(SyncCycleEvent::EventCause cause) {
   event.snapshot = TakeSnapshot();
 
   DVLOG(1) << "Sending event with snapshot: " << event.snapshot.ToString();
-  for (SyncEngineEventListener& observer : *context_->listeners())
+  for (SyncEngineEventListener& observer : *context_->listeners()) {
     observer.OnSyncCycleEvent(event);
+  }
 }
 
 void SyncCycle::SendProtocolEvent(const ProtocolEvent& event) {
-  for (SyncEngineEventListener& observer : *context_->listeners())
+  for (SyncEngineEventListener& observer : *context_->listeners()) {
     observer.OnProtocolEvent(event);
+  }
 }
 
 }  // namespace syncer

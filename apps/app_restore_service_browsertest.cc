@@ -10,10 +10,12 @@
 #include "base/threading/thread_restrictions.h"
 #include "build/build_config.h"
 #include "chrome/browser/apps/platform_apps/app_browsertest_util.h"
+#include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/test/browser_test.h"
 #include "extensions/browser/api/file_system/file_system_api.h"
 #include "extensions/browser/api/file_system/saved_file_entry.h"
+#include "extensions/browser/extension_host.h"
 #include "extensions/browser/extension_host_test_helper.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/common/extension.h"
@@ -37,7 +39,8 @@ IN_PROC_BROWSER_TEST_F(PlatformAppBrowserTest, RunningAppsAreRecorded) {
   const Extension* extension = LoadExtension(
       test_data_dir_.AppendASCII("platform_apps/restart_test"));
   ASSERT_TRUE(extension);
-  ExtensionPrefs* extension_prefs = ExtensionPrefs::Get(browser()->profile());
+  ExtensionPrefs* extension_prefs =
+      ExtensionPrefs::Get(browser()->GetProfile());
 
   // App is running.
   ASSERT_TRUE(extension_prefs->IsExtensionRunning(extension->id()));
@@ -52,7 +55,7 @@ IN_PROC_BROWSER_TEST_F(PlatformAppBrowserTest, RunningAppsAreRecorded) {
   extension_prefs->SetExtensionRunning(extension->id(), true);
 
   ExtensionTestMessageListener restart_listener("onRestarted");
-  apps::AppRestoreServiceFactory::GetForBrowserContext(browser()->profile())
+  apps::AppRestoreServiceFactory::GetForBrowserContext(browser()->GetProfile())
       ->HandleStartup(true);
   EXPECT_TRUE(restart_listener.WaitUntilSatisfied());
 }
@@ -65,7 +68,8 @@ IN_PROC_BROWSER_TEST_F(PlatformAppBrowserTest, ActiveAppsAreRecorded) {
   const Extension* extension =
       LoadExtension(test_data_dir_.AppendASCII("platform_apps/active_test"));
   ASSERT_TRUE(extension);
-  ExtensionPrefs* extension_prefs = ExtensionPrefs::Get(browser()->profile());
+  ExtensionPrefs* extension_prefs =
+      ExtensionPrefs::Get(browser()->GetProfile());
   ASSERT_TRUE(ready_listener.WaitUntilSatisfied());
 
   // Open a visible window and check the app is marked active.
@@ -120,8 +124,10 @@ IN_PROC_BROWSER_TEST_F(PlatformAppBrowserTest, FileAccessIsSavedToPrefs) {
   ASSERT_TRUE(
       base::CreateTemporaryFileInDir(temp_directory.GetPath(), &temp_file));
 
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest picker(
-      temp_file);
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &temp_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
   FileSystemChooseEntryFunction::RegisterTempExternalFileSystemForTest(
       "temp", temp_directory.GetPath());
 
@@ -158,8 +164,10 @@ IN_PROC_BROWSER_TEST_F(PlatformAppBrowserTest, MAYBE_FileAccessIsRestored) {
   ASSERT_TRUE(
       base::CreateTemporaryFileInDir(temp_directory.GetPath(), &temp_file));
 
-  FileSystemChooseEntryFunction::SkipPickerAndAlwaysSelectPathForTest picker(
-      temp_file);
+  const FileSystemChooseEntryFunction::TestOptions test_options{
+      .path_to_be_picked = &temp_file};
+  auto reset_options =
+      FileSystemChooseEntryFunction::SetOptionsForTesting(test_options);
   FileSystemChooseEntryFunction::RegisterTempExternalFileSystemForTest(
       "temp", temp_directory.GetPath());
 
@@ -170,7 +178,7 @@ IN_PROC_BROWSER_TEST_F(PlatformAppBrowserTest, MAYBE_FileAccessIsRestored) {
   ASSERT_TRUE(extension);
 
   ExtensionPrefs* extension_prefs =
-      ExtensionPrefs::Get(browser()->profile());
+      ExtensionPrefs::Get(browser()->GetProfile());
   SavedFilesService* saved_files_service = SavedFilesService::Get(profile());
   std::vector<SavedFileEntry> file_entries =
       saved_files_service->GetAllFileEntries(extension->id());
@@ -185,7 +193,7 @@ IN_PROC_BROWSER_TEST_F(PlatformAppBrowserTest, MAYBE_FileAccessIsRestored) {
         extension->id(), it->id, it->path, it->is_directory);
   }
 
-  apps::AppRestoreServiceFactory::GetForBrowserContext(browser()->profile())
+  apps::AppRestoreServiceFactory::GetForBrowserContext(browser()->GetProfile())
       ->HandleStartup(true);
 
   EXPECT_TRUE(access_ok_listener.WaitUntilSatisfied());

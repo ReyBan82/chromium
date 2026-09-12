@@ -17,7 +17,6 @@
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "cc/base/switches.h"
-#include "cc/trees/raster_context_provider_wrapper.h"
 #include "components/viz/common/features.h"
 #include "components/viz/common/frame_sinks/begin_frame_args.h"
 #include "components/viz/common/frame_sinks/begin_frame_source.h"
@@ -29,29 +28,30 @@
 #include "components/viz/service/display/display_scheduler.h"
 #include "components/viz/service/display/output_surface_client.h"
 #include "components/viz/service/display/output_surface_frame.h"
-#include "components/viz/service/display/overlay_processor_stub.h"
+#include "components/viz/service/display/overlay_processor_interface.h"
 #include "components/viz/service/display_embedder/skia_output_surface_dependency_impl.h"
 #include "components/viz/service/display_embedder/skia_output_surface_impl.h"
 #include "components/viz/service/frame_sinks/frame_sink_manager_impl.h"
 #include "components/viz/service/gl/gpu_service_impl.h"
 #include "components/viz/test/test_gpu_service_holder.h"
+#include "components/viz/test/test_in_process_context_provider.h"
 #include "gpu/command_buffer/client/context_support.h"
 #include "gpu/command_buffer/client/gles2_interface.h"
+#include "gpu/command_buffer/client/raster_interface.h"
 #include "gpu/command_buffer/common/context_creation_attribs.h"
 #include "services/viz/privileged/mojom/compositing/display_private.mojom.h"
 #include "ui/compositor/compositor_switches.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/test/direct_layer_tree_frame_sink.h"
-#include "ui/compositor/test/in_process_context_provider.h"
 #include "ui/display/display_switches.h"
-#include "ui/gfx/buffer_format_util.h"
+#include "ui/display/types/display_constants.h"
 #include "ui/gfx/geometry/skia_conversions.h"
 #include "ui/gfx/presentation_feedback.h"
 #include "ui/gfx/switches.h"
 #include "ui/gl/gl_implementation.h"
 #include "ui/gl/test/gl_surface_test_support.h"
 
-#if BUILDFLAG(IS_APPLE)
+#if BUILDFLAG(IS_MAC)
 #include "ui/accelerated_widget_mac/ca_transaction_observer.h"
 #endif
 
@@ -60,6 +60,60 @@ namespace {
 
 // This should not conflict with ids from RenderWidgetHostImpl or WindowService.
 constexpr uint32_t kDefaultClientId = std::numeric_limits<uint32_t>::max() / 2;
+
+class StandaloneBeginFrameObserver : public viz::BeginFrameObserverBase {
+ public:
+  StandaloneBeginFrameObserver() = default;
+  StandaloneBeginFrameObserver(const StandaloneBeginFrameObserver&) = delete;
+  StandaloneBeginFrameObserver& operator=(const StandaloneBeginFrameObserver&) =
+      delete;
+  ~StandaloneBeginFrameObserver() override { SetBeginFrameSource(nullptr); }
+
+  // BeginFrameObserverBase:
+  bool OnBeginFrameDerivedImpl(const viz::BeginFrameArgs& args) override {
+    if (remote_observer_.is_bound()) {
+      remote_observer_->OnStandaloneBeginFrame(args);
+    }
+    return true;
+  }
+  void OnBeginFrameSourcePausedChanged(bool paused) override {}
+
+  void SetBeginFrameSource(viz::BeginFrameSource* begin_frame_source) {
+    TearDownObservation();
+    begin_frame_source_ = begin_frame_source;
+    SetUpObservation();
+  }
+
+  void SetStandaloneObserver(
+      mojo::PendingRemote<viz::mojom::BeginFrameObserver> observer) {
+    TearDownObservation();
+    remote_observer_.reset();
+    remote_observer_.Bind(std::move(observer));
+    SetUpObservation();
+  }
+
+ private:
+  void SetUpObservation() {
+    if (begin_frame_source_ && remote_observer_.is_bound() &&
+        !is_observing_begin_frame_source_) {
+      is_observing_begin_frame_source_ = true;
+      begin_frame_source_->AddObserver(this);
+    }
+  }
+
+  void TearDownObservation() {
+    if (!is_observing_begin_frame_source_) {
+      return;
+    }
+    begin_frame_source_->RemoveObserver(this);
+    begin_frame_source_ = nullptr;
+    is_observing_begin_frame_source_ = false;
+  }
+
+  mojo::Remote<viz::mojom::BeginFrameObserver> remote_observer_;
+  raw_ptr<viz::BeginFrameSource> begin_frame_source_ = nullptr;
+  bool is_observing_begin_frame_source_ = false;
+};
 
 }  // namespace
 
@@ -73,16 +127,6 @@ class InProcessContextFactory::PerCompositorData
     display_->SetVisible(visible);
   }
   void Resize(const gfx::Size& size) override { display_->Resize(size); }
-#if BUILDFLAG(IS_WIN)
-  bool DisableSwapUntilResize() override {
-    display_->DisableSwapUntilResize(base::OnceClosure());
-    return true;
-  }
-  void DisableSwapUntilResize(
-      DisableSwapUntilResizeCallback callback) override {
-    display_->DisableSwapUntilResize(std::move(callback));
-  }
-#endif
   void SetDisplayColorMatrix(const gfx::Transform& matrix) override {
     output_color_matrix_ = gfx::TransformToSkM44(matrix);
   }
@@ -103,19 +147,28 @@ class InProcessContextFactory::PerCompositorData
   void AddVSyncParameterObserver(
       mojo::PendingRemote<viz::mojom::VSyncParameterObserver> observer)
       override {}
-#if BUILDFLAG(IS_ANDROID)
-  void SetVSyncPaused(bool paused) override {}
+
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_MAC)
   void UpdateRefreshRate(float refresh_rate) override {}
-  void SetSupportedRefreshRates(
-      const std::vector<float>& refresh_rates) override {}
+#endif
+
+#if BUILDFLAG(IS_ANDROID)
+  void SetAdaptiveRefreshRateInfo(
+      viz::mojom::AdaptiveRefreshRateInfoPtr info) override {}
   void PreserveChildSurfaceControls() override {}
   void SetSwapCompletionCallbackEnabled(bool enabled) override {}
-#endif
+#endif  // BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
+  void SetSupportedRefreshRates(
+      const std::vector<float>& refresh_rates) override {}
+#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
   void SetDelegatedInkPointRenderer(
       mojo::PendingReceiver<gfx::mojom::DelegatedInkPointRenderer> receiver)
       override {}
   void SetStandaloneBeginFrameObserver(
-      mojo::PendingRemote<viz::mojom::BeginFrameObserver> observer) override {}
+      mojo::PendingRemote<viz::mojom::BeginFrameObserver> observer) override {
+    standalone_begin_frame_observer_.SetStandaloneObserver(std::move(observer));
+  }
 
   void SetSurfaceHandle(gpu::SurfaceHandle surface_handle) {
     surface_handle_ = surface_handle;
@@ -123,9 +176,16 @@ class InProcessContextFactory::PerCompositorData
   void SetBeginFrameSource(
       std::unique_ptr<viz::BeginFrameSource> begin_frame_source) {
     begin_frame_source_ = std::move(begin_frame_source);
+    standalone_begin_frame_observer_.SetBeginFrameSource(
+        begin_frame_source_.get());
   }
   void SetDisplay(std::unique_ptr<viz::Display> display) {
     display_ = std::move(display);
+  }
+  void SetMaxVSyncAndVrr(std::optional<base::TimeDelta> max_vsync_interval,
+                         display::VariableRefreshRateState vrr_state) override {
+    max_vsync_interval_ = max_vsync_interval;
+    vrr_state_ = vrr_state;
   }
 
   void ResetDisplayOutputParameters() {
@@ -133,6 +193,8 @@ class InProcessContextFactory::PerCompositorData
     display_color_spaces_ = gfx::DisplayColorSpaces();
     vsync_timebase_ = base::TimeTicks();
     vsync_interval_ = base::TimeDelta();
+    max_vsync_interval_ = std::nullopt;
+    vrr_state_ = display::VariableRefreshRateState::kVrrNotCapable;
   }
 
   void Bind(
@@ -153,16 +215,24 @@ class InProcessContextFactory::PerCompositorData
   }
   base::TimeTicks vsync_timebase() { return vsync_timebase_; }
   base::TimeDelta vsync_interval() { return vsync_interval_; }
+  std::optional<base::TimeDelta> max_vsync_interval() const {
+    return max_vsync_interval_;
+  }
+  display::VariableRefreshRateState vrr_state() const { return vrr_state_; }
 
  private:
   gpu::SurfaceHandle surface_handle_ = gpu::kNullSurfaceHandle;
   std::unique_ptr<viz::BeginFrameSource> begin_frame_source_;
   std::unique_ptr<viz::Display> display_;
+  StandaloneBeginFrameObserver standalone_begin_frame_observer_;
 
   SkM44 output_color_matrix_;
   gfx::DisplayColorSpaces display_color_spaces_;
   base::TimeTicks vsync_timebase_;
   base::TimeDelta vsync_interval_;
+  std::optional<base::TimeDelta> max_vsync_interval_;
+  display::VariableRefreshRateState vrr_state_ =
+      display::VariableRefreshRateState::kVrrNotCapable;
 
   mojo::AssociatedReceiver<viz::mojom::DisplayPrivate> receiver_{this};
 };
@@ -192,38 +262,29 @@ InProcessContextFactory::~InProcessContextFactory() {
   DCHECK(per_compositor_data_.empty());
 }
 
-void InProcessContextFactory::SetUseFastRefreshRateForTests() {
-  refresh_rate_ = 200.0;
+void InProcessContextFactory::SetRefreshRateForTests(double refresh_rate) {
+  refresh_rate_ = refresh_rate;
 }
 
 void InProcessContextFactory::CreateLayerTreeFrameSink(
     base::WeakPtr<Compositor> compositor) {
   // Try to reuse existing shared worker context provider.
   bool shared_worker_context_provider_lost = false;
-  if (shared_worker_context_provider_wrapper_) {
+  if (shared_worker_context_provider_) {
     // Note: If context is lost, delete reference after releasing the lock.
-    const scoped_refptr<viz::RasterContextProvider>& worker_context =
-        shared_worker_context_provider_wrapper_->GetContext();
-    base::AutoLock lock(*worker_context->GetLock());
-    if (worker_context->RasterInterface()->GetGraphicsResetStatusKHR() !=
-        GL_NO_ERROR) {
+    base::AutoLock lock(*shared_worker_context_provider_->GetLock());
+    if (shared_worker_context_provider_->RasterInterface()
+            ->GetGraphicsResetStatusKHR() != GL_NO_ERROR) {
       shared_worker_context_provider_lost = true;
     }
   }
-  if (!shared_worker_context_provider_wrapper_ ||
-      shared_worker_context_provider_lost) {
-    scoped_refptr<InProcessContextProvider> shared_worker_context_provider =
-        InProcessContextProvider::CreateOffscreen(&gpu_memory_buffer_manager_,
-                                                  /*is_worker=*/true);
-    auto result = shared_worker_context_provider->BindToCurrentSequence();
+  if (!shared_worker_context_provider_ || shared_worker_context_provider_lost) {
+    shared_worker_context_provider_ =
+        base::MakeRefCounted<viz::TestInProcessContextProvider>(
+            viz::TestContextType::kRaster, /*support_locking=*/true);
+    auto result = shared_worker_context_provider_->BindToCurrentSequence();
     if (result != gpu::ContextResult::kSuccess) {
-      shared_worker_context_provider_wrapper_ = nullptr;
-    } else {
-      shared_worker_context_provider_wrapper_ =
-          base::MakeRefCounted<cc::RasterContextProviderWrapper>(
-              std::move(shared_worker_context_provider), nullptr,
-              cc::ImageDecodeCacheUtils::GetWorkingSetBytesForImageDecode(
-                  /*for_renderer=*/false));
+      shared_worker_context_provider_ = nullptr;
     }
   }
 
@@ -233,8 +294,15 @@ void InProcessContextFactory::CreateLayerTreeFrameSink(
     data = CreatePerCompositorData(compositor.get());
   data->Bind(display_private.BindNewEndpointAndPassDedicatedReceiver());
 
+  auto* test_gpu_service_holder = viz::TestGpuServiceHolder::GetInstance();
+#if BUILDFLAG(IS_WIN)
+  if (initialize_direct_composition_) {
+    // Calling this multiple times is safe on the same instance.
+    test_gpu_service_holder->InitializeDirectComposition();
+  }
+#endif
   auto skia_deps = std::make_unique<viz::SkiaOutputSurfaceDependencyImpl>(
-      viz::TestGpuServiceHolder::GetInstance()->gpu_service(),
+      test_gpu_service_holder->gpu_service(),
       output_to_window_ ? data->surface_handle() : gpu::kNullSurfaceHandle);
   auto display_dependency =
       std::make_unique<viz::DisplayCompositorMemoryAndTaskController>(
@@ -243,7 +311,12 @@ void InProcessContextFactory::CreateLayerTreeFrameSink(
       viz::SkiaOutputSurfaceImpl::Create(display_dependency.get(),
                                          renderer_settings_, &debug_settings_);
 
-  auto overlay_processor = std::make_unique<viz::OverlayProcessorStub>();
+  auto overlay_processor =
+      viz::OverlayProcessorInterface::CreateOverlayProcessor(
+          output_surface.get(),
+          output_to_window_ ? data->surface_handle() : gpu::kNullSurfaceHandle,
+          output_surface->capabilities(), display_dependency.get(),
+          &shared_image_manager_, renderer_settings_, &debug_settings_);
 
   std::unique_ptr<viz::BeginFrameSource> begin_frame_source;
   if (disable_vsync_) {
@@ -265,10 +338,11 @@ void InProcessContextFactory::CreateLayerTreeFrameSink(
       /*hint_session_factory=*/nullptr);
 
   data->SetDisplay(std::make_unique<viz::Display>(
-      &shared_bitmap_manager_, renderer_settings_, &debug_settings_,
-      compositor->frame_sink_id(), std::move(display_dependency),
-      std::move(output_surface), std::move(overlay_processor),
-      std::move(scheduler), compositor->task_runner()));
+      &shared_image_manager_, &gpu_scheduler_, renderer_settings_,
+      &debug_settings_, compositor->frame_sink_id(),
+      std::move(display_dependency), std::move(output_surface),
+      std::move(overlay_processor), std::move(scheduler),
+      compositor->task_runner()));
   frame_sink_manager_->RegisterBeginFrameSource(begin_frame_source.get(),
                                                 compositor->frame_sink_id());
   // Note that we are careful not to destroy a prior |data->begin_frame_source|
@@ -277,37 +351,31 @@ void InProcessContextFactory::CreateLayerTreeFrameSink(
 
   auto layer_tree_frame_sink = std::make_unique<DirectLayerTreeFrameSink>(
       compositor->frame_sink_id(), frame_sink_manager_, data->display(),
-      SharedMainThreadContextProvider(),
-      shared_worker_context_provider_wrapper_, compositor->task_runner(),
-      &gpu_memory_buffer_manager_);
+      SharedMainThreadRasterContextProvider(), shared_worker_context_provider_,
+      compositor->task_runner(), compositor->widget());
   compositor->SetLayerTreeFrameSink(std::move(layer_tree_frame_sink),
                                     std::move(display_private));
 
   data->Resize(compositor->size());
 }
 
-scoped_refptr<viz::ContextProvider>
-InProcessContextFactory::SharedMainThreadContextProvider() {
-  if (shared_main_thread_contexts_ &&
-      shared_main_thread_contexts_->ContextGL()->GetGraphicsResetStatusKHR() ==
-          GL_NO_ERROR)
-    return shared_main_thread_contexts_;
-
-  shared_main_thread_contexts_ =
-      InProcessContextProvider::CreateOffscreen(&gpu_memory_buffer_manager_,
-                                                /*is_worker=*/false);
-  auto result = shared_main_thread_contexts_->BindToCurrentSequence();
-  if (result != gpu::ContextResult::kSuccess)
-    shared_main_thread_contexts_.reset();
-
-  return shared_main_thread_contexts_;
-}
-
 scoped_refptr<viz::RasterContextProvider>
 InProcessContextFactory::SharedMainThreadRasterContextProvider() {
-  SharedMainThreadContextProvider();
-  DCHECK(!shared_main_thread_contexts_ ||
-         shared_main_thread_contexts_->RasterInterface());
+  if (shared_main_thread_contexts_ &&
+      shared_main_thread_contexts_->RasterInterface()
+              ->GetGraphicsResetStatusKHR() == GL_NO_ERROR) {
+    return shared_main_thread_contexts_;
+  }
+
+  shared_main_thread_contexts_ =
+      base::MakeRefCounted<viz::TestInProcessContextProvider>(
+          viz::TestContextType::kRaster, /*support_locking=*/false);
+
+  auto result = shared_main_thread_contexts_->BindToCurrentSequence();
+  if (result != gpu::ContextResult::kSuccess) {
+    shared_main_thread_contexts_.reset();
+  }
+
   return shared_main_thread_contexts_;
 }
 
@@ -319,11 +387,6 @@ void InProcessContextFactory::RemoveCompositor(Compositor* compositor) {
   frame_sink_manager_->UnregisterBeginFrameSource(data->begin_frame_source());
   DCHECK(data);
   per_compositor_data_.erase(it);
-}
-
-gpu::GpuMemoryBufferManager*
-InProcessContextFactory::GetGpuMemoryBufferManager() {
-  return &gpu_memory_buffer_manager_;
 }
 
 cc::TaskGraphRunner* InProcessContextFactory::GetTaskGraphRunner() {
@@ -373,6 +436,24 @@ base::TimeDelta InProcessContextFactory::GetDisplayVSyncTimeInterval(
   if (iter == per_compositor_data_.end())
     return viz::BeginFrameArgs::DefaultInterval();
   return iter->second->vsync_interval();
+}
+
+std::optional<base::TimeDelta> InProcessContextFactory::GetMaxVSyncInterval(
+    Compositor* compositor) const {
+  auto iter = per_compositor_data_.find(compositor);
+  if (iter == per_compositor_data_.end()) {
+    return std::nullopt;
+  }
+  return iter->second->max_vsync_interval();
+}
+
+display::VariableRefreshRateState InProcessContextFactory::GetVrrState(
+    Compositor* compositor) const {
+  auto iter = per_compositor_data_.find(compositor);
+  if (iter == per_compositor_data_.end()) {
+    return display::VariableRefreshRateState::kVrrNotCapable;
+  }
+  return iter->second->vrr_state();
 }
 
 void InProcessContextFactory::ResetDisplayOutputParameters(

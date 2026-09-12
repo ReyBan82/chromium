@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <memory>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "ash/quick_pair/common/constants.h"
@@ -48,14 +49,14 @@ constexpr int kAccountKeyFilterNoNotificationHeader = 0b01100010;
 constexpr int kBatteryHeader = 0b00110011;
 constexpr int kSaltHeader = 0b00010001;
 constexpr long kModelIdLong = 7441431;
-const std::string kModelIdString = "718c17";
-const std::string kAccountKeyFilter = "112233445566";
-const std::string kSalt = "01";
-const std::string kBattery = "01048F";
-const std::string kInvalidBattery = "F1F48F";
-const std::string kBatteryUnknownValue = "3FFFFF";
-const std::string kModelId = "112233";
-const std::string kAddress = "test_address";
+constexpr char kModelIdString[] = "718c17";
+constexpr char kAccountKeyFilter[] = "112233445566";
+constexpr char kSalt[] = "01";
+constexpr char kBattery[] = "01048F";
+constexpr char kInvalidBattery[] = "F1F48F";
+constexpr char kBatteryUnknownValue[] = "3FFFFF";
+constexpr char kModelId[] = "112233";
+constexpr char kAddress[] = "test_address";
 
 }  // namespace
 
@@ -189,7 +190,7 @@ class FastPairNotDiscoverableScannerImplTest : public testing::Test {
   base::MockCallback<DeviceCallback> lost_device_callback_;
 };
 
-// TODO(crbug.com/1298377) flaky on ASan + LSan bots
+// TODO(crbug.com/40822900) flaky on ASan + LSan bots
 #if defined(ADDRESS_SANITIZER) && defined(LEAK_SANITIZER)
 #define MAYBE_UtilityProcessStopped_FailedAllRetryAttempts \
   DISABLED_UtilityProcessStopped_FailedAllRetryAttempts
@@ -224,7 +225,7 @@ TEST_F(FastPairNotDiscoverableScannerImplTest,
   scanner_->NotifyDeviceFound(device);
 }
 
-// TODO(crbug.com/1298377) flaky on ASan + LSan bots
+// TODO(crbug.com/40822900) flaky on ASan + LSan bots
 #if defined(ADDRESS_SANITIZER) && defined(LEAK_SANITIZER)
 #define MAYBE_UtilityProcessStopped_DeviceLost \
   DISABLED_UtilityProcessStopped_DeviceLost
@@ -269,7 +270,7 @@ TEST_F(FastPairNotDiscoverableScannerImplTest,
   scanner_->NotifyDeviceFound(device_ptr);
 }
 
-// TODO(crbug.com/1298377) flaky on ASan + LSan bots
+// TODO(crbug.com/40822900) flaky on ASan + LSan bots
 #if defined(ADDRESS_SANITIZER) && defined(LEAK_SANITIZER)
 #define MAYBE_UtilityProcessStopped_FastPairServiceDataLost \
   DISABLED_UtilityProcessStopped_FastPairServiceDataLost
@@ -545,15 +546,15 @@ TEST_F(FastPairNotDiscoverableScannerImplTest, SetBatteryInfo) {
   scanner_->NotifyDeviceFound(device);
   base::RunLoop().RunUntilIdle();
 
-  EXPECT_EQ(absl::nullopt, device->GetBatteryInfo(
-                               device::BluetoothDevice::BatteryType::kDefault));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_EQ(std::nullopt, device->GetBatteryInfo(
+                              device::BluetoothDevice::BatteryType::kDefault));
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kLeftBudTrueWireless));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kRightBudTrueWireless));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kCaseTrueWireless));
 }
@@ -584,15 +585,15 @@ TEST_F(FastPairNotDiscoverableScannerImplTest, SetUnknownBatteryInfo) {
   scanner_->NotifyDeviceFound(device);
   base::RunLoop().RunUntilIdle();
 
-  EXPECT_EQ(absl::nullopt, device->GetBatteryInfo(
-                               device::BluetoothDevice::BatteryType::kDefault));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_EQ(std::nullopt, device->GetBatteryInfo(
+                              device::BluetoothDevice::BatteryType::kDefault));
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kLeftBudTrueWireless));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kRightBudTrueWireless));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kCaseTrueWireless));
 }
@@ -623,15 +624,15 @@ TEST_F(FastPairNotDiscoverableScannerImplTest, SetInvalidPercentBatteryInfo) {
   scanner_->NotifyDeviceFound(device);
   base::RunLoop().RunUntilIdle();
 
-  EXPECT_EQ(absl::nullopt, device->GetBatteryInfo(
-                               device::BluetoothDevice::BatteryType::kDefault));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_EQ(std::nullopt, device->GetBatteryInfo(
+                              device::BluetoothDevice::BatteryType::kDefault));
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kLeftBudTrueWireless));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kRightBudTrueWireless));
-  EXPECT_NE(absl::nullopt,
+  EXPECT_NE(std::nullopt,
             device->GetBatteryInfo(
                 device::BluetoothDevice::BatteryType::kCaseTrueWireless));
 }

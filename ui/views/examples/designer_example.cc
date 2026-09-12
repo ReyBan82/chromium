@@ -4,18 +4,23 @@
 
 #include "ui/views/examples/designer_example.h"
 
+#include <ranges>
 #include <utility>
 
 #include "base/functional/bind.h"
-#include "base/ranges/ranges.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/strings/utf_string_conversions.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "third_party/skia/include/core/SkPath.h"
 #include "ui/base/cursor/cursor.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/metadata/metadata_types.h"
+#include "ui/base/models/simple_combobox_model.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/color/color_id.h"
 #include "ui/events/event.h"
 #include "ui/events/event_targeter.h"
@@ -24,9 +29,9 @@
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/image/image_skia.h"
-#include "ui/gfx/native_widget_types.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/gfx/skia_util.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/background.h"
 #include "ui/views/controls/button/checkbox.h"
 #include "ui/views/controls/button/image_button.h"
@@ -34,12 +39,15 @@
 #include "ui/views/controls/button/radio_button.h"
 #include "ui/views/controls/button/toggle_button.h"
 #include "ui/views/controls/combobox/combobox.h"
+#include "ui/views/controls/editable_combobox/editable_combobox.h"
 #include "ui/views/controls/scroll_view.h"
 #include "ui/views/controls/table/table_view.h"
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/examples/examples_color_id.h"
+#include "ui/views/examples/grit/views_examples_resources.h"
 #include "ui/views/layout/box_layout.h"
 #include "ui/views/layout/box_layout_view.h"
+#include "ui/views/layout/flex_layout_view.h"
 #include "ui/views/metadata/view_factory.h"
 #include "ui/views/vector_icons.h"
 #include "ui/views/view.h"
@@ -48,8 +56,9 @@
 namespace views::examples {
 
 class DesignerSurface : public View {
+  METADATA_HEADER(DesignerSurface, View)
+
  public:
-  METADATA_HEADER(DesignerSurface);
   explicit DesignerSurface(int grid_size = 8);
   DesignerSurface(const DesignerSurface&) = delete;
   DesignerSurface& operator=(const DesignerSurface&) = delete;
@@ -69,18 +78,23 @@ class DesignerSurface : public View {
   int grid_size_ = 8;
 };
 
-DesignerSurface::DesignerSurface(int grid_size) : grid_size_(grid_size) {}
+DesignerSurface::DesignerSurface(int grid_size) : grid_size_(grid_size) {
+  SetFocusBehavior(FocusBehavior::ALWAYS);
+  GetViewAccessibility().SetRole(ax::mojom::Role::kGenericContainer);
+  GetViewAccessibility().SetName(u"Designer Surface");
+}
 
 void DesignerSurface::SetGridSize(int grid_size) {
   if (grid_size_ != grid_size) {
     grid_size_ = grid_size;
-    if (GetWidget())
+    if (GetWidget()) {
       RebuildGridImage();
+    }
   }
 }
 
 void DesignerSurface::OnPaint(gfx::Canvas* canvas) {
-  views::View::OnPaint(canvas);
+  View::OnPaint(canvas);
   canvas->TileImageInt(grid_image_, 0, 0, size().width(), size().height());
 }
 
@@ -92,19 +106,13 @@ void DesignerSurface::OnThemeChanged() {
 void DesignerSurface::RebuildGridImage() {
   const SkColor grid_color =
       GetColorProvider()->GetColor(ExamplesColorIds::kColorDesignerGrid);
-  gfx::Size grid_size = grid_size_ <= 8
-                            ? gfx::Size(grid_size_ * 8, grid_size_ * 8)
-                            : gfx::Size(grid_size_, grid_size_);
-  auto grid_canvas = std::make_unique<gfx::Canvas>(grid_size, 1.0, false);
-  for (int i = 0; i < grid_size.width(); i += grid_size_) {
-    for (int j = 0; j < grid_size.height(); j += grid_size_) {
-      grid_canvas->FillRect(gfx::Rect(i, j, 1, 1), grid_color);
-    }
-  }
+  auto grid_canvas = std::make_unique<gfx::Canvas>(
+      gfx::Size(grid_size_, grid_size_), 1.0f, false);
+  grid_canvas->FillRect(gfx::Rect(0, 0, 1, 1), grid_color);
   grid_image_ = gfx::ImageSkia::CreateFrom1xBitmap(grid_canvas->GetBitmap());
 }
 
-BEGIN_METADATA(DesignerSurface, View)
+BEGIN_METADATA(DesignerSurface)
 ADD_PROPERTY_METADATA(int, GridSize)
 END_METADATA
 
@@ -119,6 +127,14 @@ DEFINE_VIEW_BUILDER(/* no export */, views::examples::DesignerSurface)
 namespace views::examples {
 
 namespace {
+
+void RemoveViewAndChildrenFromTracking(View* view,
+                                       std::set<raw_ptr<View>>& tracking) {
+  for (View* child : view->children()) {
+    RemoveViewAndChildrenFromTracking(child, tracking);
+  }
+  tracking.erase(view);
+}
 
 ui::TableColumn MakeColumn(int id, std::u16string title, bool sortable) {
   ui::TableColumn column;
@@ -135,151 +151,409 @@ int SnapToInterval(int value, int interval) {
   return value - (value % interval);
 }
 
-template <typename C>
+template <typename C, bool is_container = false>
 class ClassRegistration : public BaseClassRegistration {
  public:
   ClassRegistration() = default;
   ~ClassRegistration() override = default;
   std::unique_ptr<View> CreateView() override { return std::make_unique<C>(); }
   std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(C::MetaData()->type_name());
+    return base::ASCIIToUTF16(C::kViewClassName);
   }
+  bool IsContainer() const override { return is_container; }
 };
 
-template <>
-class ClassRegistration<Combobox> : public BaseClassRegistration,
-                                    public ui::ComboboxModel {
+class ClassRegistrationCombobox : public ClassRegistration<Combobox>,
+                                  public ui::ComboboxModel {
  public:
-  ClassRegistration() = default;
-  ~ClassRegistration() override = default;
+  ClassRegistrationCombobox() = default;
+  ~ClassRegistrationCombobox() override = default;
   std::unique_ptr<View> CreateView() override {
-    return std::make_unique<Combobox>(this);
-  }
-  std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(Combobox::MetaData()->type_name());
+    return Builder<Combobox>()
+        .SetModel(this)
+        .SetAccessibleName(
+            l10n_util::GetStringUTF16(IDS_DESIGNER_COMBOBOX_NAME))
+        .Build();
   }
 
   // ui::ComboboxModel
   size_t GetItemCount() const override { return 1; }
   std::u16string GetItemAt(size_t index) const override { return u"<empty>"; }
-  absl::optional<size_t> GetDefaultIndex() const override { return 0; }
+  std::optional<size_t> GetDefaultIndex() const override { return 0; }
 };
 
-template <>
-class ClassRegistration<MdTextButton> : public BaseClassRegistration {
+class ClassRegistrationMdTextButton : public ClassRegistration<MdTextButton> {
  public:
-  ClassRegistration() = default;
-  ~ClassRegistration() override = default;
+  ClassRegistrationMdTextButton() = default;
+  ~ClassRegistrationMdTextButton() override = default;
   std::unique_ptr<View> CreateView() override {
     return Builder<MdTextButton>().SetText(u"Button").Build();
   }
-  std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(MdTextButton::MetaData()->type_name());
-  }
 };
 
-template <>
-class ClassRegistration<Textfield> : public BaseClassRegistration {
+class ClassRegistrationTextfield : public ClassRegistration<Textfield> {
  public:
-  ClassRegistration() = default;
-  ~ClassRegistration() override = default;
+  ClassRegistrationTextfield() = default;
+  ~ClassRegistrationTextfield() override = default;
   std::unique_ptr<View> CreateView() override {
     const std::u16string text = u"<text field>";
     return Builder<Textfield>()
         .SetText(text)
         .SetDefaultWidthInChars(text.size())
+        .SetAccessibleName(
+            l10n_util::GetStringUTF16(IDS_DESIGNER_TEXTFIELD_NAME))
         .Build();
-  }
-  std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(Textfield::MetaData()->type_name());
   }
 };
 
-template <>
-class ClassRegistration<Checkbox> : public BaseClassRegistration {
+class ClassRegistrationCheckbox : public ClassRegistration<Checkbox> {
  public:
-  ClassRegistration() = default;
-  ~ClassRegistration() override = default;
+  ClassRegistrationCheckbox() = default;
+  ~ClassRegistrationCheckbox() override = default;
   std::unique_ptr<View> CreateView() override {
     return std::make_unique<Checkbox>(u"<Checkbox>");
   }
-  std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(Checkbox::MetaData()->type_name());
-  }
 };
 
-template <>
-class ClassRegistration<RadioButton> : public BaseClassRegistration {
+class ClassRegistrationRadioButton : public ClassRegistration<RadioButton> {
  public:
-  ClassRegistration() = default;
-  ~ClassRegistration() override = default;
+  ClassRegistrationRadioButton() = default;
+  ~ClassRegistrationRadioButton() override = default;
   std::unique_ptr<View> CreateView() override {
     return std::make_unique<RadioButton>(u"<RadioButton>", 0);
   }
-  std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(RadioButton::MetaData()->type_name());
-  }
 };
 
-template <>
-class ClassRegistration<ToggleButton> : public BaseClassRegistration {
+class ClassRegistrationToggleButton : public ClassRegistration<ToggleButton> {
  public:
-  ClassRegistration() = default;
-  ~ClassRegistration() override = default;
+  ClassRegistrationToggleButton() = default;
+  ~ClassRegistrationToggleButton() override = default;
   std::unique_ptr<View> CreateView() override {
-    return std::make_unique<ToggleButton>();
-  }
-  std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(ToggleButton::MetaData()->type_name());
-  }
-};
-
-template <>
-class ClassRegistration<ImageButton> : public BaseClassRegistration {
- public:
-  ClassRegistration() = default;
-  ~ClassRegistration() override = default;
-  std::unique_ptr<View> CreateView() override {
-    return Builder<ImageButton>()
-        .SetImage(Button::ButtonState::STATE_NORMAL,
-                  gfx::CreateVectorIcon(kPinIcon, ui::kColorIcon))
+    return Builder<ToggleButton>()
+        .SetAccessibleName(
+            l10n_util::GetStringUTF16(IDS_DESIGNER_IMAGEBUTTON_NAME))
         .Build();
   }
-  std::u16string GetViewClassName() override {
-    return base::ASCIIToUTF16(ImageButton::MetaData()->type_name());
+};
+
+class ClassRegistrationImageButton : public ClassRegistration<ImageButton> {
+ public:
+  ClassRegistrationImageButton() = default;
+  ~ClassRegistrationImageButton() override = default;
+  std::unique_ptr<View> CreateView() override {
+    return Builder<ImageButton>()
+        .SetImageModel(
+            Button::ButtonState::STATE_NORMAL,
+            ui::ImageModel::FromVectorIcon(
+                features::IsRoundedIconsEnabled() ? kKeepIcon : kPinOldIcon,
+                ui::kColorIcon))
+        .SetAccessibleName(
+            l10n_util::GetStringUTF16(IDS_DESIGNER_IMAGEBUTTON_NAME))
+        .Build();
+  }
+};
+
+class ClassRegistrationBoxLayoutView
+    : public ClassRegistration<BoxLayoutView, true> {
+ public:
+  ClassRegistrationBoxLayoutView() = default;
+  ~ClassRegistrationBoxLayoutView() override = default;
+  std::unique_ptr<View> CreateView() override {
+    return Builder<BoxLayoutView>()
+        .SetBackground(CreateSolidBackground(SkColorSetA(SK_ColorGRAY, 128)))
+        .SetPreferredSize(gfx::Size(100, 100))
+        .Build();
+  }
+};
+
+class ClassRegistrationFlexLayoutView
+    : public ClassRegistration<FlexLayoutView, true> {
+ public:
+  ClassRegistrationFlexLayoutView() = default;
+  ~ClassRegistrationFlexLayoutView() override = default;
+  std::unique_ptr<View> CreateView() override {
+    return Builder<FlexLayoutView>()
+        .SetBackground(CreateSolidBackground(SkColorSetA(SK_ColorGRAY, 128)))
+        .SetPreferredSize(gfx::Size(100, 100))
+        .Build();
   }
 };
 
 std::vector<std::unique_ptr<BaseClassRegistration>> GetClassRegistrations() {
   std::vector<std::unique_ptr<BaseClassRegistration>> registrations;
-  registrations.push_back(std::make_unique<ClassRegistration<Checkbox>>());
-  registrations.push_back(std::make_unique<ClassRegistration<Combobox>>());
-  registrations.push_back(std::make_unique<ClassRegistration<MdTextButton>>());
-  registrations.push_back(std::make_unique<ClassRegistration<RadioButton>>());
-  registrations.push_back(std::make_unique<ClassRegistration<Textfield>>());
-  registrations.push_back(std::make_unique<ClassRegistration<ToggleButton>>());
-  registrations.push_back(std::make_unique<ClassRegistration<ImageButton>>());
+  registrations.push_back(std::make_unique<ClassRegistrationBoxLayoutView>());
+  registrations.push_back(std::make_unique<ClassRegistrationCheckbox>());
+  registrations.push_back(std::make_unique<ClassRegistrationCombobox>());
+  registrations.push_back(std::make_unique<ClassRegistrationFlexLayoutView>());
+  registrations.push_back(std::make_unique<ClassRegistrationMdTextButton>());
+  registrations.push_back(std::make_unique<ClassRegistrationRadioButton>());
+  registrations.push_back(std::make_unique<ClassRegistrationTextfield>());
+  registrations.push_back(std::make_unique<ClassRegistrationToggleButton>());
+  registrations.push_back(std::make_unique<ClassRegistrationImageButton>());
   return registrations;
 }
 
 bool IsViewParent(View* parent, View* view) {
   while (view) {
-    if (view == parent)
+    if (view == parent) {
       return true;
+    }
     view = view->parent();
   }
   return false;
 }
 
-View* GetDesignerChild(View* child_view, View* designer) {
+View* GetDesignerChild(View* child_view,
+                       View* designer,
+                       const std::set<raw_ptr<View>>& designer_views) {
   while (child_view && child_view != designer &&
-         child_view->parent() != designer) {
+         !designer_views.count(child_view)) {
     child_view = child_view->parent();
   }
   return child_view;
 }
 
 }  // namespace
+
+// InPlaceEditor provides a base for editing properties within the TableView.
+class InPlaceEditor : public View, public TextfieldController {
+  METADATA_HEADER(InPlaceEditor, View)
+
+ public:
+  explicit InPlaceEditor(DesignerPropertyEditor* editor,
+                         base::OnceClosure on_commit)
+      : editor_(editor), on_commit_(std::move(on_commit)) {
+    SetFocusBehavior(FocusBehavior::ALWAYS);
+    GetViewAccessibility().SetRole(ax::mojom::Role::kGenericContainer);
+    GetViewAccessibility().SetName(editor->GetPropertyName());
+  }
+
+  ~InPlaceEditor() override = default;
+
+  virtual void Commit() {
+    if (!on_commit_.is_null()) {
+      std::move(on_commit_).Run();
+    }
+  }
+
+ protected:
+  raw_ptr<DesignerPropertyEditor> editor_;
+  base::OnceClosure on_commit_;
+};
+
+BEGIN_METADATA(InPlaceEditor)
+END_METADATA
+
+class TextInPlaceEditor : public InPlaceEditor {
+  METADATA_HEADER(TextInPlaceEditor, InPlaceEditor)
+
+ public:
+  TextInPlaceEditor(DesignerPropertyEditor* editor, base::OnceClosure on_commit)
+      : InPlaceEditor(editor, std::move(on_commit)) {
+    Builder<View>(this)
+        .SetUseDefaultFillLayout(true)
+        .AddChildren(Builder<Textfield>()
+                         .CopyAddressTo(&textfield_)
+                         .SetAccessibleName(editor->GetPropertyName())
+                         .SetText(editor->GetValueAsString())
+                         .SetController(this)
+                         .SetReadOnly(editor->IsReadOnly()))
+        .BuildChildren();
+  }
+
+  void RequestFocus() override {
+    if (textfield_->GetEnabled()) {
+      textfield_->RequestFocus();
+    } else {
+      InPlaceEditor::RequestFocus();
+    }
+  }
+
+  void Commit() override {
+    if (!on_commit_.is_null() && !editor_->IsReadOnly()) {
+      editor_->SetValueFromString(std::u16string(textfield_->GetText()));
+    }
+    InPlaceEditor::Commit();
+  }
+
+  // TextfieldController overrides:
+  bool HandleKeyEvent(Textfield* sender,
+                      const ui::KeyEvent& key_event) override {
+    if (key_event.type() == ui::EventType::kKeyPressed) {
+      if (key_event.key_code() == ui::VKEY_RETURN) {
+        Commit();
+        return true;
+      }
+      if (key_event.key_code() == ui::VKEY_ESCAPE) {
+        // Cancel: run callback without saving.
+        if (!on_commit_.is_null()) {
+          std::move(on_commit_).Run();
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  raw_ptr<Textfield> textfield_;
+};
+
+BEGIN_METADATA(TextInPlaceEditor)
+END_METADATA
+
+class ComboInPlaceEditor : public InPlaceEditor {
+  METADATA_HEADER(ComboInPlaceEditor, InPlaceEditor)
+
+ public:
+  ComboInPlaceEditor(DesignerPropertyEditor* editor,
+                     base::OnceClosure on_commit)
+      : InPlaceEditor(editor, std::move(on_commit)) {
+    SetUseDefaultFillLayout(true);
+    std::vector<ui::SimpleComboboxModel::Item> items;
+    for (const auto& val : editor->GetComboboxValues()) {
+      items.emplace_back(val);
+    }
+    auto model = std::make_unique<ui::SimpleComboboxModel>(std::move(items));
+    combobox_ = AddChildView(std::make_unique<EditableCombobox>(
+        std::move(model), /*filter_on_edit=*/false));
+    combobox_->GetViewAccessibility().SetName(editor->GetPropertyName());
+    combobox_->SetText(editor->GetValueAsString());
+    combobox_->SetCallback(base::BindRepeating(
+        &ComboInPlaceEditor::OnContentsChanged, base::Unretained(this)));
+    last_text_length_ = combobox_->GetText().length();
+    if (editor->IsReadOnly()) {
+      combobox_->SetEnabled(false);
+    }
+  }
+
+  void RequestFocus() override {
+    if (combobox_->GetEnabled()) {
+      static_cast<View*>(combobox_)->RequestFocus();
+    } else {
+      InPlaceEditor::RequestFocus();
+    }
+  }
+
+  void Commit() override {
+    if (!on_commit_.is_null() && !editor_->IsReadOnly()) {
+      editor_->SetValueFromString(std::u16string(combobox_->GetText()));
+    }
+    InPlaceEditor::Commit();
+  }
+
+  // View overrides:
+  void OnKeyEvent(ui::KeyEvent* event) override {
+    if (event->type() == ui::EventType::kKeyPressed) {
+      if (event->key_code() == ui::VKEY_RETURN) {
+        Commit();
+        event->SetHandled();
+      } else if (event->key_code() == ui::VKEY_ESCAPE) {
+        if (!on_commit_.is_null()) {
+          std::move(on_commit_).Run();
+        }
+        event->SetHandled();
+      }
+    }
+  }
+
+  void OnContentsChanged() {
+    std::u16string current_text = std::u16string(combobox_->GetText());
+
+    // If it's a full match, save it immediately.
+    auto values = editor_->GetComboboxValues();
+    if (std::ranges::find(values, current_text) != values.end()) {
+      if (!editor_->IsReadOnly()) {
+        editor_->SetValueFromString(current_text);
+      }
+    }
+
+    if (current_text.empty() || current_text.length() <= last_text_length_) {
+      last_text_length_ = current_text.length();
+      return;
+    }
+
+    last_text_length_ = current_text.length();
+
+    // Autocomplete logic: find first match that starts with current text.
+    for (const auto& val : values) {
+      if (base::StartsWith(val, current_text,
+                           base::CompareCase::INSENSITIVE_ASCII)) {
+        if (val.length() > current_text.length()) {
+          combobox_->SetText(val);
+          combobox_->SelectRange(
+              gfx::Range(current_text.length(), val.length()));
+          last_text_length_ = val.length();
+        }
+        break;
+      }
+    }
+  }
+
+ private:
+  raw_ptr<EditableCombobox> combobox_;
+  size_t last_text_length_ = 0;
+};
+
+BEGIN_METADATA(ComboInPlaceEditor)
+END_METADATA
+
+class CheckboxInPlaceEditor : public InPlaceEditor {
+  METADATA_HEADER(CheckboxInPlaceEditor, InPlaceEditor)
+
+ public:
+  CheckboxInPlaceEditor(DesignerPropertyEditor* editor,
+                        base::OnceClosure on_commit)
+      : InPlaceEditor(editor, std::move(on_commit)) {
+    Builder<View>(this)
+        .SetLayoutManager(std::make_unique<BoxLayout>(
+            BoxLayout::Orientation::kHorizontal, gfx::Insets(), 0))
+        .CustomConfigure(base::BindOnce([](View* editor_view) {
+          auto* layout =
+              static_cast<BoxLayout*>(editor_view->GetLayoutManager());
+          layout->set_main_axis_alignment(
+              BoxLayout::MainAxisAlignment::kCenter);
+          layout->set_cross_axis_alignment(
+              BoxLayout::CrossAxisAlignment::kCenter);
+        }))
+        .AddChildren(
+            Builder<Checkbox>()
+                .CopyAddressTo(&checkbox_)
+                .SetAccessibleName(editor->GetPropertyName())
+                .SetChecked(editor->GetValueAsString() == u"true")
+                .SetCallback(base::BindRepeating(
+                    &CheckboxInPlaceEditor::OnToggled, base::Unretained(this)))
+                .SetEnabled(!editor->IsReadOnly()))
+        .BuildChildren();
+  }
+
+  void RequestFocus() override {
+    if (checkbox_->GetEnabled()) {
+      checkbox_->RequestFocus();
+    } else {
+      InPlaceEditor::RequestFocus();
+    }
+  }
+
+  void Commit() override {
+    if (!on_commit_.is_null() && !editor_->IsReadOnly()) {
+      editor_->SetValueFromString(checkbox_->GetChecked() ? u"true" : u"false");
+    }
+    InPlaceEditor::Commit();
+  }
+
+ private:
+  void OnToggled() {
+    if (!editor_->IsReadOnly()) {
+      editor_->SetValueFromString(checkbox_->GetChecked() ? u"true" : u"false");
+    }
+  }
+
+  raw_ptr<Checkbox> checkbox_;
+};
+
+BEGIN_METADATA(CheckboxInPlaceEditor)
+END_METADATA
 
 BaseClassRegistration::~BaseClassRegistration() = default;
 
@@ -290,21 +564,27 @@ DesignerExample::GrabHandle::GrabHandle(GrabHandles* grab_handles,
 DesignerExample::GrabHandle::~GrabHandle() = default;
 
 void DesignerExample::GrabHandle::SetAttachedView(View* view) {
-  bool was_visible = GetVisible() && attached_view_ != view;
   attached_view_ = view;
+  if (attached_view_) {
+    PositionOnView();
+  }
   SetVisible(!!attached_view_);
-  UpdatePosition(!was_visible);
 }
 
 void DesignerExample::GrabHandle::UpdatePosition(bool reorder) {
-  if (GetVisible() && attached_view_) {
+  if (attached_view_) {
     PositionOnView();
-    if (reorder)
-      parent()->ReorderChildView(this, parent()->children().size());
+    if (reorder) {
+      parent()->ReorderChildView(this, -1);
+    }
   }
 }
 
 ui::Cursor DesignerExample::GrabHandle::GetCursor(const ui::MouseEvent& event) {
+  if (!attached_view_ ||
+      attached_view_->parent() != grab_handles_->layout_panel()) {
+    return ui::mojom::CursorType::kNull;
+  }
   switch (position_) {
     case GrabHandlePosition::kTop:
     case GrabHandlePosition::kBottom:
@@ -321,69 +601,108 @@ ui::Cursor DesignerExample::GrabHandle::GetCursor(const ui::MouseEvent& event) {
   }
 }
 
-gfx::Size DesignerExample::GrabHandle::CalculatePreferredSize() const {
+gfx::Size DesignerExample::GrabHandle::CalculatePreferredSize(
+    const SizeBounds& /*available_size*/) const {
   return gfx::Size(kGrabHandleSize, kGrabHandleSize);
 }
 
 void DesignerExample::GrabHandle::OnPaint(gfx::Canvas* canvas) {
-  SkPath path;
-  gfx::Point center = GetLocalBounds().CenterPoint();
-  path.addCircle(center.x(), center.y(), width() / 2);
   cc::PaintFlags flags;
-  flags.setColor(
-      GetColorProvider()->GetColor(ExamplesColorIds::kColorDesignerGrabHandle));
   flags.setAntiAlias(true);
-  canvas->DrawPath(path, flags);
+  flags.setColor(GetColorProvider()->GetColor(ui::kColorAccent));
+  flags.setStyle(cc::PaintFlags::kFill_Style);
+  canvas->DrawCircle(gfx::PointF(GetLocalBounds().CenterPoint()),
+                     kGrabHandleSize / 2.0f, flags);
 }
 
 bool DesignerExample::GrabHandle::OnMousePressed(const ui::MouseEvent& event) {
   mouse_drag_pos_ = event.location();
+  views::View::ConvertPointToTarget(this, parent(), &mouse_drag_pos_);
   return true;
 }
 
 bool DesignerExample::GrabHandle::OnMouseDragged(const ui::MouseEvent& event) {
-  gfx::Point new_location = event.location();
-  if (position_ == GrabHandlePosition::kTop ||
-      position_ == GrabHandlePosition::kBottom) {
-    new_location.set_x(mouse_drag_pos_.x());
+  if (!attached_view_ ||
+      attached_view_->parent() != grab_handles_->layout_panel()) {
+    return true;
   }
-  if (position_ == GrabHandlePosition::kLeft ||
-      position_ == GrabHandlePosition::kRight) {
-    new_location.set_y(mouse_drag_pos_.y());
+  gfx::Point mouse_in_parent = event.location();
+  views::View::ConvertPointToTarget(this, parent(), &mouse_in_parent);
+
+  gfx::Vector2d delta = mouse_in_parent - mouse_drag_pos_;
+  if (delta.IsZero()) {
+    return true;
   }
-  SetPosition(origin() + (new_location - mouse_drag_pos_));
-  UpdateViewSize();
-  grab_handles_->SetAttachedView(attached_view_);
+
+  gfx::Rect view_bounds = attached_view_->bounds();
+  if (IsTop(position_)) {
+    view_bounds.set_y(view_bounds.y() + delta.y());
+    view_bounds.set_height(view_bounds.height() - delta.y());
+  }
+  if (IsBottom(position_)) {
+    view_bounds.set_height(view_bounds.height() + delta.y());
+  }
+  if (IsLeft(position_)) {
+    view_bounds.set_x(view_bounds.x() + delta.x());
+    view_bounds.set_width(view_bounds.width() - delta.x());
+  }
+  if (IsRight(position_)) {
+    view_bounds.set_width(view_bounds.width() + delta.x());
+  }
+  attached_view_->SetBoundsRect(view_bounds);
+  grab_handles_->UpdatePositions();
+  mouse_drag_pos_ = mouse_in_parent;
   return true;
 }
 
 void DesignerExample::GrabHandle::PositionOnView() {
   DCHECK(attached_view_);
-  gfx::Rect view_bounds = attached_view_->bounds();
+  gfx::RectF view_bounds_f(attached_view_->GetLocalBounds());
+  views::View::ConvertRectToTarget(attached_view_, parent(), &view_bounds_f);
+  gfx::Rect view_bounds = gfx::ToEnclosingRect(view_bounds_f);
   gfx::Point edge_position;
   if (IsTop(position_)) {
     edge_position.set_y(view_bounds.y());
-    if (position_ == GrabHandlePosition::kTop)
+    if (position_ == GrabHandlePosition::kTop) {
       edge_position.set_x(view_bounds.top_center().x());
-  } else if (IsBottom(position_)) {
+    }
+  }
+  if (IsBottom(position_)) {
     edge_position.set_y(view_bounds.bottom());
-    if (position_ == GrabHandlePosition::kBottom)
+    if (position_ == GrabHandlePosition::kBottom) {
       edge_position.set_x(view_bounds.bottom_center().x());
+    }
   }
   if (IsLeft(position_)) {
     edge_position.set_x(view_bounds.x());
-    if (position_ == GrabHandlePosition::kLeft)
+    if (position_ == GrabHandlePosition::kLeft) {
       edge_position.set_y(view_bounds.left_center().y());
-  } else if (IsRight(position_)) {
-    edge_position.set_x(view_bounds.right());
-    if (position_ == GrabHandlePosition::kRight)
-      edge_position.set_y(view_bounds.right_center().y());
+    }
   }
-  SetPosition(edge_position - (bounds().CenterPoint() - origin()));
+  if (IsRight(position_)) {
+    edge_position.set_x(view_bounds.right());
+    if (position_ == GrabHandlePosition::kRight) {
+      edge_position.set_y(view_bounds.right_center().y());
+    }
+  }
+  if (position_ == GrabHandlePosition::kTopLeft) {
+    edge_position = view_bounds.origin();
+  }
+  if (position_ == GrabHandlePosition::kTopRight) {
+    edge_position = view_bounds.top_right();
+  }
+  if (position_ == GrabHandlePosition::kBottomLeft) {
+    edge_position = view_bounds.bottom_left();
+  }
+  if (position_ == GrabHandlePosition::kBottomRight) {
+    edge_position = view_bounds.bottom_right();
+  }
+  gfx::Rect handle_bounds(edge_position, GetPreferredSize({}));
+  handle_bounds.Offset(-kGrabHandleSize / 2, -kGrabHandleSize / 2);
+  SetBoundsRect(handle_bounds);
 }
 
 void DesignerExample::GrabHandle::UpdateViewSize() {
-  DCHECK(attached_view_);
   gfx::Rect view_bounds = attached_view_->bounds();
   gfx::Point view_center = bounds().CenterPoint();
   if (IsTop(position_)) {
@@ -391,39 +710,42 @@ void DesignerExample::GrabHandle::UpdateViewSize() {
                            (view_center.y() - view_bounds.y()));
     view_bounds.set_y(view_center.y());
   }
-  if (IsBottom(position_))
+  if (IsBottom(position_)) {
     view_bounds.set_height(view_center.y() - view_bounds.y());
+  }
   if (IsLeft(position_)) {
     view_bounds.set_width(view_bounds.width() -
                           (view_center.x() - view_bounds.x()));
     view_bounds.set_x(view_center.x());
   }
-  if (IsRight(position_))
+  if (IsRight(position_)) {
     view_bounds.set_width(view_center.x() - view_bounds.x());
+  }
   attached_view_->SetBoundsRect(view_bounds);
+  PositionOnView();
 }
 
 // static
 bool DesignerExample::GrabHandle::IsTop(GrabHandlePosition position) {
-  return (position & GrabHandlePosition::kTop);
+  return (position & GrabHandlePosition::kTop) != 0;
 }
 
 // static
 bool DesignerExample::GrabHandle::IsBottom(GrabHandlePosition position) {
-  return (position & GrabHandlePosition::kBottom);
+  return (position & GrabHandlePosition::kBottom) != 0;
 }
 
 // static
 bool DesignerExample::GrabHandle::IsLeft(GrabHandlePosition position) {
-  return (position & GrabHandlePosition::kLeft);
+  return (position & GrabHandlePosition::kLeft) != 0;
 }
 
 // static
 bool DesignerExample::GrabHandle::IsRight(GrabHandlePosition position) {
-  return (position & GrabHandlePosition::kRight);
+  return (position & GrabHandlePosition::kRight) != 0;
 }
 
-BEGIN_METADATA(DesignerExample, GrabHandle, View)
+BEGIN_METADATA(DesignerExample, GrabHandle)
 END_METADATA
 
 DesignerExample::GrabHandles::GrabHandles() = default;
@@ -431,35 +753,45 @@ DesignerExample::GrabHandles::GrabHandles() = default;
 DesignerExample::GrabHandles::~GrabHandles() = default;
 
 void DesignerExample::GrabHandles::Initialize(View* layout_panel) {
+  layout_panel_ = layout_panel;
   static constexpr GrabHandlePosition positions[] = {
       GrabHandlePosition::kTop,        GrabHandlePosition::kBottom,
       GrabHandlePosition::kLeft,       GrabHandlePosition::kRight,
       GrabHandlePosition::kTopLeft,    GrabHandlePosition::kTopRight,
       GrabHandlePosition::kBottomLeft, GrabHandlePosition::kBottomRight,
   };
-  DCHECK(grab_handles_.empty());
-  for (GrabHandlePosition position : positions) {
-    auto grab_handle = std::make_unique<GrabHandle>(this, position);
-    grab_handle->SizeToPreferredSize();
-    grab_handle->SetVisible(false);
-    grab_handles_.push_back(layout_panel->AddChildView(std::move(grab_handle)));
+  for (auto position : positions) {
+    grab_handles_.push_back(layout_panel->AddChildView(
+        std::make_unique<GrabHandle>(this, position)));
   }
 }
 
 void DesignerExample::GrabHandles::SetAttachedView(View* view) {
-  for (GrabHandle* grab_handle : grab_handles_)
-    grab_handle->SetAttachedView(view);
+  // Suppress handles for the top-level container.
+  if (view == layout_panel_) {
+    view = nullptr;
+  }
+  for (auto handle : grab_handles_) {
+    handle->SetAttachedView(view);
+  }
+}
+
+void DesignerExample::GrabHandles::UpdatePositions() {
+  for (auto handle : grab_handles_) {
+    handle->UpdatePosition(false);
+  }
 }
 
 bool DesignerExample::GrabHandles::IsGrabHandle(View* view) {
-  return base::ranges::find(grab_handles_, view) != grab_handles_.end();
+  return std::ranges::find(grab_handles_, view) != grab_handles_.end();
 }
 
 DesignerExample::DesignerExample() : ExampleBase("Designer") {}
 
 DesignerExample::~DesignerExample() {
-  if (tracker_.view())
+  if (tracker_.view()) {
     inspector_->SetModel(nullptr);
+  }
 }
 
 void DesignerExample::CreateExampleView(View* container) {
@@ -469,8 +801,6 @@ void DesignerExample::CreateExampleView(View* container) {
           Builder<BoxLayoutView>()
               .CopyAddressTo(&designer_container_)
               .SetOrientation(BoxLayout::Orientation::kHorizontal)
-              .SetMainAxisAlignment(BoxLayout::MainAxisAlignment::kEnd)
-              .SetCrossAxisAlignment(BoxLayout::CrossAxisAlignment::kStretch)
               .AddChildren(
                   Builder<DesignerSurface>()
                       .CopyAddressTo(&designer_panel_)
@@ -486,6 +816,13 @@ void DesignerExample::CreateExampleView(View* container) {
                       .SetOrientation(BoxLayout::Orientation::kVertical)
                       .SetInsideBorderInsets(gfx::Insets::TLBR(0, 3, 0, 0))
                       .SetBetweenChildSpacing(3)
+                      .CustomConfigure(base::BindOnce(
+                          [](DesignerExample* designer_example,
+                             BoxLayoutView* palette_panel) {
+                            palette_panel->AddPreTargetHandler(
+                                designer_example);
+                          },
+                          base::Unretained(this)))
                       .AddChildren(
                           Builder<Combobox>()
                               .CopyAddressTo(&view_type_)
@@ -502,59 +839,196 @@ void DesignerExample::CreateExampleView(View* container) {
                                   .SetColumns({MakeColumn(0, u"Name", true),
                                                MakeColumn(1, u"Value", false)})
                                   .SetModel(this)
-                                  .SetTableType(views::TEXT_ONLY)
-                                  .SetSingleSelection(true))
+                                  .SetTableType(views::TableType::kTextOnly)
+                                  .SetSingleSelection(true)
+                                  .SetObserver(this))
+                              .CopyAddressTo(&inspector_scroller_)
                               .SetPreferredSize(gfx::Size(250, 400)))))
       .BuildChildren();
   grab_handles_.Initialize(designer_panel_);
   designer_container_->SetFlexForView(designer_panel_, 75);
+  palette_panel_->SetFlexForView(inspector_scroller_, 1);
   class_registrations_ = GetClassRegistrations();
 
-  // TODO(crbug.com/1392538): Refactor such that the TableModel is not
+  // TODO(crbug.com/40247792): Refactor such that the TableModel is not
   // responsible for managing the lifetimes of views
   tracker_.SetView(inspector_);
 }
 
 void DesignerExample::OnEvent(ui::Event* event) {
+  if (event->IsKeyEvent()) {
+    ui::KeyEvent* key_event = event->AsKeyEvent();
+    if (key_event->type() == ui::EventType::kKeyPressed &&
+        key_event->key_code() == ui::VKEY_ESCAPE && selected_) {
+      if (selected_ == designer_panel_) {
+        SelectView(nullptr);
+      } else {
+        View* parent_view = GetDesignerChild(selected_->parent(),
+                                             designer_panel_, designer_views_);
+        SelectView(parent_view);
+      }
+      grab_handles_.SetAttachedView(selected_);
+      event->SetHandled();
+      return;
+    }
+    if (key_event->type() == ui::EventType::kKeyPressed &&
+        key_event->key_code() == ui::VKEY_DELETE && selected_ &&
+        selected_ != designer_panel_) {
+      if (active_inplace_editor_) {
+        active_inplace_editor_->Commit();
+      }
+
+      View* to_delete = selected_;
+      View* parent = to_delete->parent();
+
+      // Determine next selection.
+      View* next_selection = nullptr;
+      auto children = parent->children();
+      auto it = std::ranges::find(children, to_delete);
+      if (it != children.end()) {
+        if (std::next(it) != children.end()) {
+          next_selection = *std::next(it);
+        } else if (it != children.begin()) {
+          next_selection = *std::prev(it);
+        }
+      }
+
+      if (!next_selection || grab_handles_.IsGrabHandle(next_selection)) {
+        next_selection = parent;
+      }
+
+      if (dragging_ == to_delete) {
+        dragging_ = nullptr;
+      }
+
+      RemoveViewAndChildrenFromTracking(to_delete, designer_views_);
+      parent->RemoveChildViewT(to_delete);
+
+      SelectView(next_selection);
+      grab_handles_.SetAttachedView(selected_);
+
+      event->SetHandled();
+      return;
+    }
+    if (key_event->type() == ui::EventType::kKeyPressed &&
+        (key_event->key_code() == ui::VKEY_UP ||
+         key_event->key_code() == ui::VKEY_DOWN) &&
+        active_inplace_editor_) {
+      if (key_event->key_code() == ui::VKEY_DOWN && key_event->IsAltDown()) {
+        // Let it pass through to open the combobox.
+      } else {
+        std::optional<size_t> row = inspector_->GetFirstSelectedRow();
+        if (row.has_value()) {
+          int delta = (key_event->key_code() == ui::VKEY_UP) ? -1 : 1;
+          int next_row = static_cast<int>(row.value()) + delta;
+          if (next_row >= 0 &&
+              next_row < static_cast<int>(inspector_->GetRowCount())) {
+            active_inplace_editor_->Commit();
+            inspector_->Select(static_cast<size_t>(next_row));
+            event->SetHandled();
+            return;
+          }
+        }
+      }
+    }
+    if (key_event->type() == ui::EventType::kKeyPressed &&
+        (key_event->key_code() == ui::VKEY_LEFT ||
+         key_event->key_code() == ui::VKEY_RIGHT)) {
+      std::optional<size_t> row = inspector_->GetFirstSelectedRow();
+      if (row.has_value()) {
+        auto editor = display_list_[row.value()];
+        if (editor->IsExpandable()) {
+          bool expand = key_event->key_code() == ui::VKEY_RIGHT;
+          if (editor->IsExpanded() != expand) {
+            editor->SetExpanded(expand);
+            RefreshDisplayList();
+            if (model_observer_) {
+              model_observer_->OnModelChanged();
+            }
+            inspector_->Select(row.value());
+            event->SetHandled();
+            return;
+          }
+        }
+      }
+    }
+  }
   if (event->IsMouseEvent() && event->target()) {
     View* view = static_cast<View*>(event->target());
+    if (view == inspector_) {
+      ui::MouseEvent* mouse_event = event->AsMouseEvent();
+      if (mouse_event->type() == ui::EventType::kMousePressed &&
+          mouse_event->IsOnlyLeftMouseButton()) {
+        gfx::Point point = mouse_event->location();
+        int row = point.y() / inspector_->GetRowHeight();
+        if (row >= 0 && row < static_cast<int>(display_list_.size())) {
+          // Check if clicking in the first column (Name)
+          const auto& visible_columns = inspector_->visible_columns();
+          if (point.x() < visible_columns[0].width) {
+            auto editor = display_list_[row];
+            if (editor->IsExpandable()) {
+              editor->SetExpanded(!editor->IsExpanded());
+              RefreshDisplayList();
+              if (model_observer_) {
+                model_observer_->OnModelChanged();
+              }
+              inspector_->Select(row);
+              event->SetHandled();
+              return;
+            }
+          }
+        }
+      }
+    }
     if (IsViewParent(designer_panel_, view->parent()) ||
         view == designer_panel_) {
       HandleDesignerMouseEvent(event);
-      return;
     }
   }
-  ui::EventHandler::OnEvent(event);
 }
 
 void DesignerExample::HandleDesignerMouseEvent(ui::Event* event) {
   ui::MouseEvent* mouse_event = event->AsMouseEvent();
   switch (mouse_event->type()) {
-    case ui::ET_MOUSE_PRESSED:
+    case ui::EventType::kMousePressed:
       if (mouse_event->IsOnlyLeftMouseButton()) {
+        designer_panel_->RequestFocus();
         DCHECK(!dragging_);
-        View* event_view = GetDesignerChild(static_cast<View*>(event->target()),
-                                            designer_panel_);
-        if (grab_handles_.IsGrabHandle(event_view)) {
-          dragging_ = event_view;
+        View* target_view = static_cast<View*>(event->target());
+        if (grab_handles_.IsGrabHandle(target_view)) {
+          dragging_ = target_view;
           return;
+        }
+        View* event_view =
+            GetDesignerChild(target_view, designer_panel_, designer_views_);
+        if (mouse_event->IsAltDown() && event_view != designer_panel_) {
+          if (selected_ && (event_view == selected_ ||
+                            IsViewParent(selected_, event_view))) {
+            event_view = GetDesignerChild(selected_->parent(), designer_panel_,
+                                          designer_views_);
+          } else {
+            event_view = GetDesignerChild(event_view->parent(), designer_panel_,
+                                          designer_views_);
+          }
         }
         grab_handles_.SetAttachedView(nullptr);
-        if (event_view == designer_panel_) {
-          SelectView(nullptr);
-          return;
-        }
         SelectView(event_view);
-        dragging_ = selected_;
-        last_mouse_pos_ = mouse_event->location();
+        if (selected_ && selected_ != designer_panel_) {
+          dragging_ = selected_;
+          last_mouse_pos_ = mouse_event->location();
+        }
         event->SetHandled();
         return;
       }
       break;
-    case ui::ET_MOUSE_DRAGGED:
+    case ui::EventType::kMouseDragged:
       if (dragging_) {
-        if (grab_handles_.IsGrabHandle(dragging_))
+        if (grab_handles_.IsGrabHandle(dragging_)) {
           return;
+        }
+        if (dragging_->parent() != designer_panel_) {
+          return;
+        }
         gfx::Point new_position =
             selected_->origin() +
             SnapToGrid(mouse_event->location() - last_mouse_pos_);
@@ -567,13 +1041,17 @@ void DesignerExample::HandleDesignerMouseEvent(ui::Event* event) {
         return;
       }
       break;
-    case ui::ET_MOUSE_RELEASED:
+    case ui::EventType::kMouseReleased:
       grab_handles_.SetAttachedView(selected_);
       if (dragging_) {
+        if (model_observer_) {
+          model_observer_->OnModelChanged();
+        }
         bool dragging_handle = grab_handles_.IsGrabHandle(dragging_);
         dragging_ = nullptr;
-        if (!dragging_handle)
+        if (!dragging_handle) {
           event->SetHandled();
+        }
         return;
       }
       break;
@@ -584,15 +1062,97 @@ void DesignerExample::HandleDesignerMouseEvent(ui::Event* event) {
 
 void DesignerExample::SelectView(View* view) {
   if (view != selected_) {
-    selected_ = view;
-    selected_members_.clear();
-    if (selected_) {
-      for (auto* member : *selected_->GetClassMetaData())
-        selected_members_.push_back(member);
+    if (active_inplace_editor_) {
+      active_inplace_editor_->Commit();
     }
-    if (model_observer_)
+    selected_ = view;
+    active_editors_.clear();
+    if (selected_) {
+      for (auto* member : *selected_->GetClassMetaData()) {
+        active_editors_.push_back(CreatePropertyEditor(selected_, member));
+      }
+    }
+    RefreshDisplayList();
+    if (model_observer_) {
       model_observer_->OnModelChanged();
+    }
   }
+}
+
+void DesignerExample::RefreshDisplayList() {
+  display_list_.clear();
+  auto add_to_list = [this](auto& self,
+                            DesignerPropertyEditor* editor) -> void {
+    display_list_.push_back(editor);
+    if (editor->IsExpandable() && editor->IsExpanded()) {
+      for (auto* sub : editor->GetSubEditors()) {
+        self(self, sub);
+      }
+    }
+  };
+
+  for (const auto& editor : active_editors_) {
+    add_to_list(add_to_list, editor.get());
+  }
+}
+
+void DesignerExample::OnSelectionChanged() {
+  std::optional<size_t> row = inspector_->GetFirstSelectedRow();
+
+  if (active_inplace_editor_) {
+    // Commit and remove previous editor.
+    active_inplace_editor_->Commit();
+  }
+
+  if (!row.has_value() || !selected_) {
+    return;
+  }
+
+  auto editor = display_list_[row.value()];
+  std::unique_ptr<InPlaceEditor> inplace_editor;
+
+  size_t current_row = row.value();
+  base::OnceClosure on_commit = base::BindOnce(
+      [](DesignerExample* example, size_t row_index) {
+        if (example->active_inplace_editor_) {
+          example->inspector_->RemoveChildViewT(
+              example->active_inplace_editor_.get());
+          example->active_inplace_editor_ = nullptr;
+          if (example->selected_) {
+            example->selected_->InvalidateLayout();
+            example->selected_->SchedulePaint();
+            example->designer_panel_->SchedulePaint();
+          }
+          if (example->model_observer_) {
+            example->model_observer_->OnItemsChanged(row_index, 1);
+          }
+        }
+      },
+      base::Unretained(this), current_row);
+
+  if (editor->GetEditorType() ==
+      DesignerPropertyEditor::EditorType::kCombobox) {
+    inplace_editor =
+        std::make_unique<ComboInPlaceEditor>(editor, std::move(on_commit));
+  } else if (editor->GetEditorType() ==
+             DesignerPropertyEditor::EditorType::kCheckbox) {
+    inplace_editor =
+        std::make_unique<CheckboxInPlaceEditor>(editor, std::move(on_commit));
+  } else {
+    inplace_editor =
+        std::make_unique<TextInPlaceEditor>(editor, std::move(on_commit));
+  }
+
+  size_t view_row = inspector_->ModelToView(row.value());
+  const auto& visible_columns = inspector_->visible_columns();
+  const auto& vis_col = visible_columns[1];  // Value column
+  gfx::Rect cell_bounds(vis_col.x,
+                        static_cast<int>(view_row) * inspector_->GetRowHeight(),
+                        vis_col.width, inspector_->GetRowHeight());
+
+  active_inplace_editor_ = inspector_->AddChildView(std::move(inplace_editor));
+  active_inplace_editor_->SetBoundsRect(cell_bounds);
+  active_inplace_editor_->RequestFocus();
 }
 
 gfx::Vector2d DesignerExample::SnapToGrid(const gfx::Vector2d& distance) {
@@ -605,24 +1165,46 @@ void DesignerExample::CreateView(const ui::Event& event) {
   std::unique_ptr<View> new_view =
       class_registrations_[view_type_->GetSelectedRow().value()]->CreateView();
   new_view->SizeToPreferredSize();
-  gfx::Rect child_rect = designer_panel_->GetContentsBounds();
-  child_rect.ClampToCenteredSize(new_view->size());
-  child_rect.set_origin(gfx::Point() +
-                        SnapToGrid(child_rect.OffsetFromOrigin()));
-  new_view->SetBoundsRect(child_rect);
-  designer_panel_->AddChildView(std::move(new_view));
-}
+  designer_views_.insert(new_view.get());
 
-size_t DesignerExample::RowCount() {
-  return selected_ ? selected_members_.size() : 0;
-}
-
-std::u16string DesignerExample::GetText(size_t row, int column_id) {
+  View* parent = designer_panel_;
   if (selected_) {
-    ui::metadata::MemberMetaDataBase* member = selected_members_[row];
-    if (column_id == 0)
-      return base::ASCIIToUTF16(member->member_name());
-    return member->GetValueAsString(selected_);
+    for (const auto& reg : class_registrations_) {
+      if (reg->GetViewClassName() ==
+          base::ASCIIToUTF16(selected_->GetClassName())) {
+        if (reg->IsContainer()) {
+          parent = selected_;
+        }
+        break;
+      }
+    }
+  }
+
+  if (parent == designer_panel_) {
+    gfx::Rect child_rect = designer_panel_->GetContentsBounds();
+    child_rect.ClampToCenteredSize(new_view->size());
+    child_rect.set_origin(gfx::Point() +
+                          SnapToGrid(child_rect.OffsetFromOrigin()));
+    new_view->SetBoundsRect(child_rect);
+  }
+  parent->AddChildView(std::move(new_view));
+}
+
+size_t DesignerExample::RowCount() const {
+  return selected_ ? display_list_.size() : 0;
+}
+
+std::u16string DesignerExample::GetText(size_t row, int column_id) const {
+  if (selected_) {
+    const auto editor = display_list_[row];
+    if (column_id == 0) {
+      std::u16string name = editor->GetPropertyName();
+      if (editor->IsExpandable()) {
+        name = (editor->IsExpanded() ? u"[-] " : u"[+] ") + name;
+      }
+      return std::u16string(editor->GetLevel() * 2, ' ') + name;
+    }
+    return editor->GetValueAsString();
   }
   return std::u16string();
 }
@@ -639,7 +1221,7 @@ std::u16string DesignerExample::GetItemAt(size_t index) const {
   return class_registrations_[index]->GetViewClassName();
 }
 
-absl::optional<size_t> DesignerExample::GetDefaultIndex() const {
+std::optional<size_t> DesignerExample::GetDefaultIndex() const {
   return 0;
 }
 

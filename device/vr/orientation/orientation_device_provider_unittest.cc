@@ -22,6 +22,7 @@
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "services/device/public/cpp/generic_sensor/sensor_reading.h"
+#include "services/device/public/cpp/generic_sensor/sensor_reading_shared_buffer.h"
 #include "services/device/public/cpp/generic_sensor/sensor_reading_shared_buffer_reader.h"
 #include "services/device/public/cpp/generic_sensor/sensor_traits.h"
 #include "services/device/public/mojom/sensor.mojom.h"
@@ -34,7 +35,9 @@
 namespace device {
 
 namespace {
-std::unique_ptr<XrFrameSinkClient> FrameSinkClientFactory(int32_t, int32_t) {
+std::unique_ptr<XrFrameSinkClient> FrameSinkClientFactory(
+    network::RendererProcessId,
+    int32_t) {
   return nullptr;
 }
 }  // namespace
@@ -91,7 +94,7 @@ class VROrientationDeviceProviderTest : public testing::Test {
     init_params->memory = mapped_region_.region.Duplicate();
 
     init_params->buffer_offset =
-        SensorReadingSharedBuffer::GetOffset(kOrientationSensorType);
+        GetSensorReadingSharedBufferOffset(kOrientationSensorType);
 
     return init_params;
   }
@@ -170,7 +173,8 @@ TEST_F(VROrientationDeviceProviderTest, InitializationCallbackSuccessTest) {
 
   MockOrientationDeviceProviderClient client(&wait_for_device, &wait_for_init);
 
-  provider_->Initialize(&client);
+  // The orientation device provider does not make use of the WebContents.
+  provider_->Initialize(&client, nullptr);
 
   InitializeDevice(FakeInitParams());
 
@@ -184,7 +188,9 @@ TEST_F(VROrientationDeviceProviderTest, InitializationCallbackFailureTest) {
   base::RunLoop wait_for_init;
 
   MockOrientationDeviceProviderClient client(nullptr, &wait_for_init);
-  provider_->Initialize(&client);
+
+  // The orientation device provider does not make use of the WebContents.
+  provider_->Initialize(&client, nullptr);
 
   InitializeDevice(nullptr);
 

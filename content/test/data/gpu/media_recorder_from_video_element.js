@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-const RECORD_FRAMES = 5
 var srcVideo;
 var dstVideo;
 let recorder = null;
@@ -23,13 +22,21 @@ function logOutput(s) {
   }
 }
 
+function sendResult(status) {
+  if (window.domAutomationController) {
+    window.domAutomationController.send(status);
+  } else {
+    console.log(status);
+  }
+}
+
 function setVideoSize() {
   const width = '240';
   const height = '135';
   srcVideo.width = width;
   srcVideo.height = height;
   dstVideo.width = width;
-  srcVideo.height = height;
+  dstVideo.height = height;
 }
 
 function startPlayback() {
@@ -38,12 +45,12 @@ function startPlayback() {
   var videoURL = window.URL.createObjectURL(blob);
   dstVideo.onended = function() {
     logOutput('Playback complete.');
-    domAutomationController.send('SUCCESS');
+    sendResult('SUCCESS');
   }
-  dstVideo.onerror = e => {
-    logOutput(`Test failed: ${e.message}`);
+  dstVideo.onerror = _ => {
+    logOutput(`Test failed: ${dstVideo.error.message}`);
     abort = true;
-    domAutomationController.send('FAIL');
+    sendResult('FAIL');
   };
   dstVideo.src = videoURL;
   dstVideo.play();
@@ -51,30 +58,29 @@ function startPlayback() {
 }
 
 function startRecording() {
+  logOutput('crbug.com/476172416: startRecording() called');
   stream = srcVideo.captureStream(30);
+  logOutput('crbug.com/476172416: Stream captured');
   recorder = new MediaRecorder(stream, { mimeType });
+  logOutput('crbug.com/476172416: MediaRecorder created');
   recorder.onstop = startPlayback;
   recorder.ondataavailable = (e) => {
+    logOutput(`Recorder data available. ${e.data.size}`);
     chunks.push(e.data);
+    if (e.data.size > 50) {
+      // We actually got a real encoded video data chunk.
+      recorder.ondataavailable = null;
+      stopRecording();
+    }
   };
 
-  recorder.start();
+  // Start recording and ask it to emit encoded data every 100 ms.
+  logOutput('crbug.com/476172416: Starting recorder');
+  recorder.start(100);
+  logOutput('crbug.com/476172416: Playing video');
   srcVideo.play();
 
-  stopRecordingAfterXFrames(RECORD_FRAMES);
-
   logOutput('Recording started.');
-}
-
-function stopRecordingAfterXFrames(x) {
-  if (x <= 0) {
-    stopRecording();
-  } else {
-    logOutput(`${x} frame(s) remaining.`);
-    srcVideo.requestVideoFrameCallback(()=>{
-      stopRecordingAfterXFrames(x-1);
-    })
-  }
 }
 
 function stopRecording() {
@@ -91,12 +97,21 @@ function main() {
   dstVideo = document.getElementById('dst-video');
   dstVideo.loop = false;
   dstVideo.muted = true;  // No need to exercise audio paths.
+  logOutput('crbug.com/476172416: Setting video size');
   setVideoSize();
 
-  srcVideo.onerror = e => {
-    logOutput(`Test failed: ${e.message}`);
+  srcVideo.onerror = _ => {
+    logOutput(`Test failed: ${dstVideo.error.message}`);
     abort = true;
-    domAutomationController.send('FAIL');
+    sendResult('FAIL');
   };
-  srcVideo.requestVideoFrameCallback(startRecording);
+
+  if (srcVideo.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+    logOutput('crbug.com/476172416: Starting recording immediately');
+    startRecording();
+  } else {
+    logOutput(
+        'crbug.com/476172416: Starting recording after more data is loaded');
+    srcVideo.oncanplaythrough = startRecording;
+  }
 }

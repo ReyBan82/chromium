@@ -9,23 +9,26 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "base/files/file_path.h"
 #include "base/gtest_prod_util.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "components/safe_browsing/core/browser/db/hash_prefix_map.h"
+#include "components/safe_browsing/core/browser/db/sb_store.h"
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
+#include "components/safe_browsing/core/browser/db/v4_rice.h"
 #include "components/safe_browsing/core/common/proto/webui.pb.h"
 
 namespace safe_browsing {
 
 class V4Store;
+class ListInfo;
 
-using UpdatedStoreReadyCallback =
-    base::OnceCallback<void(std::unique_ptr<V4Store> new_store)>;
+using V4StorePtr = std::unique_ptr<V4Store, SBStoreDeleter>;
 
 // Stores the iterator to the last element merged from the HashPrefixMap for a
 // given prefix size.
@@ -33,49 +36,6 @@ using UpdatedStoreReadyCallback =
 // 3 hash prefixes of length 4, and 1 hash prefix of length 5.
 using IteratorMap =
     std::unordered_map<PrefixSize, HashPrefixesView::const_iterator>;
-
-// Enumerate different failure events while parsing the file read from disk for
-// histogramming purposes.  DO NOT CHANGE THE ORDERING OF THESE VALUES.
-enum StoreReadResult {
-  // No errors.
-  READ_SUCCESS = 0,
-
-  // Reserved for errors in parsing this enum.
-  UNEXPECTED_READ_FAILURE = 1,
-
-  // The contents of the file could not be read.
-  FILE_UNREADABLE_FAILURE = 2,
-
-  // The file was found to be empty.
-  FILE_EMPTY_FAILURE = 3,
-
-  // The contents of the file could not be interpreted as a valid
-  // V4StoreFileFormat proto.
-  PROTO_PARSING_FAILURE = 4,
-
-  // The magic number didn't match. We're most likely trying to read a file
-  // that doesn't contain hash prefixes.
-  UNEXPECTED_MAGIC_NUMBER_FAILURE = 5,
-
-  // The version of the file is different from expected and Chromium doesn't
-  // know how to interpret this version of the file.
-  FILE_VERSION_INCOMPATIBLE_FAILURE = 6,
-
-  // The rest of the file could not be parsed as a ListUpdateResponse protobuf.
-  // This can happen if the machine crashed before the file was fully written to
-  // disk or if there was disk corruption.
-  HASH_PREFIX_INFO_MISSING_FAILURE = 7,
-
-  // Unable to generate the hash prefix map from the updates on disk.
-  HASH_PREFIX_MAP_GENERATION_FAILURE = 8,
-
-  // There was a failure migrating between in-memory and mmap file formats.
-  MIGRATION_FAILURE = 9,
-
-  // Memory space for histograms is determined by the max.  ALWAYS
-  // ADD NEW VALUES BEFORE THIS ONE.
-  STORE_READ_RESULT_MAX
-};
 
 // Enumerate different failure events while writing the file to disk after
 // applying updates for histogramming purposes.
@@ -101,22 +61,118 @@ enum StoreWriteResult {
   STORE_WRITE_RESULT_MAX
 };
 
-// Factory for creating V4Store. Tests implement this factory to create fake
-// stores for testing.
-class V4StoreFactory {
+// Factory for creating V4Store instances. Implements SBStoreFactory. Tests
+// implement this factory to create fake stores for testing.
+class V4StoreFactory : public SBStoreFactory {
  public:
-  virtual ~V4StoreFactory() {}
+  ~V4StoreFactory() override = default;
 
-  virtual std::unique_ptr<V4Store> CreateV4Store(
+  // SBStoreFactory implementation:
+  SBStorePtr CreateStore(
+      const scoped_refptr<base::SequencedTaskRunner>& db_task_runner,
+      const base::FilePath& base_path,
+      const ListInfo& list_info) override;
+
+  // Creates a V4Store.
+  // |task_runner| is used to ensure operations are done on the correct thread.
+  // |store_path| specifies the location on disk for this store.
+  // |v5_prefix_size| is the prefix size of the corresponding V5 store if
+  // we plan to migrate.
+  // |is_eligible_for_migration| specifies whether this store is eligible
+  // to migrate between V4 and V5 disk formats.
+  // |is_extensions_blocklist| specifies whether this store is for the
+  // extensions blocklist.
+  virtual V4StorePtr CreateV4Store(
       const scoped_refptr<base::SequencedTaskRunner>& task_runner,
-      const base::FilePath& store_path);
+      const base::FilePath& store_path,
+      PrefixSize v5_prefix_size,
+      bool is_eligible_for_migration,
+      bool is_extensions_blocklist);
 };
 
-class V4Store {
+// Enumerate different results of the migration attempt from v5 to v4.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+// LINT.IfChange(V5ToV4MigrationResult)
+enum class V5ToV4MigrationResult {
+  // The disk is already in v4 format (migration not needed).
+  kDiskAlreadyV4 = 0,
+
+  // The migration from v5 to v4 completed successfully.
+  kV5ToV4MigrationSucceeded = 1,
+
+  // The v5 store file was not found on disk.
+  kV5StoreNotFound = 2,
+
+  // Failed to read or validate the v5 store file from disk.
+  kReadV5Failed = 3,
+
+  // The prefix size in v5 hash file doesn't match the expected V4 prefix size.
+  kPrefixSizeMismatchFailure = 4,
+
+  // The referenced v5 hash file is missing from disk.
+  kHashFileMissingFailure = 5,
+
+  // Failed to rename/move the v5 hash file to the v4 path.
+  kRenameHashFileFailure = 6,
+
+  // Failed to write the new V4StoreFileFormat proto to disk.
+  kWriteV4FileFailure = 7,
+
+  // Failed to rename the temp V4 store file to the final path.
+  kRenameV4StoreFileFailure = 8,
+
+  // Failed to serialize the new V4StoreFileFormat proto.
+  kProtoSerializationFailure = 9,
+
+  // V5 to V4 migration was ineligible, and wiping V5 failed.
+  kStoreIneligibleWipeFailed = 10,
+
+  // V5 to V4 migration was ineligible, and wiping V5 succeeded.
+  kStoreIneligibleWipeSucceeded = 11,
+
+  // Failed to migrate extensions blocklist due to conversion or write failure.
+  kExtensionBlocklistMigrationFailed = 12,
+
+  kMaxValue = kExtensionBlocklistMigrationFailed
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/safe_browsing/enums.xml:V5ToV4MigrationResult)
+
+// Enumerate different results of converting the extensions blocklist from v5 to
+// v4. These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+// LINT.IfChange(ConvertExtensionBlocklistV5ToV4Result)
+enum class ConvertExtensionBlocklistV5ToV4Result {
+  // Conversion succeeded.
+  kSuccess = 0,
+
+  // Failed to read the v5 hash file.
+  kReadV5Failed = 1,
+
+  // The v5 hash file size is not a multiple of the expected hash size.
+  kInvalidFileSize = 2,
+
+  // Failed to write the converted v4 hash file.
+  kWriteV4Failed = 3,
+
+  // The V5 store's checksum did not match the V5 data on disk.
+  kV5ChecksumMismatch = 4,
+
+  kMaxValue = kV5ChecksumMismatch
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/safe_browsing/enums.xml:ConvertExtensionBlocklistV5ToV4Result)
+
+class V4Store : public SBStore {
  public:
   // The |task_runner| is used to ensure that the operations in this file are
   // performed on the correct thread. |store_path| specifies the location on
   // disk for this file. The constructor doesn't read the store file from disk.
+  // |v5_prefix_size| is the prefix size of the corresponding V5 store if
+  // we plan to migrate.
+  // |is_eligible_for_migration| specifies whether this store is eligible
+  // to migrate between V4 and V5 disk formats.
+  // |is_extensions_blocklist| specifies whether this store is for the
+  // extensions blocklist.
   // If the store is being created to apply an update to the old store, then
   // |old_file_size| is the size of the existing file on disk for this store;
   // 0 otherwise. This is needed so that we can correctly report the size of
@@ -124,35 +180,20 @@ class V4Store {
   // applying an update.
   V4Store(const scoped_refptr<base::SequencedTaskRunner>& task_runner,
           const base::FilePath& store_path,
-          std::unique_ptr<HashPrefixMap> hash_prefix_map,
+          PrefixSize v5_prefix_size,
+          bool is_eligible_for_migration,
+          bool is_extensions_blocklist,
           int64_t old_file_size = 0);
-  virtual ~V4Store();
+  ~V4Store() override;
 
-  // Schedules the destruction of the V4Store object pointed to by |v4_store|,
-  // on the task runner.
-  static void Destroy(std::unique_ptr<V4Store> v4_store);
-
-  // If a hash prefix in this store matches |full_hash|, returns that hash
-  // prefix; otherwise returns an empty hash prefix.
-  virtual HashPrefixStr GetMatchingHashPrefix(const FullHashStr& full_hash);
-
-  // True if this store has valid contents, either from a successful read
-  // from disk or a full update.  This does not mean the checksum was verified.
-  virtual bool HasValidData();
+  HashPrefixStr GetMatchingHashPrefix(const FullHashStr& full_hash) override;
 
   const std::string& state() const { return state_; }
 
-  const base::FilePath& store_path() const { return store_path_; }
-
-  int64_t file_size() const { return file_size_; }
-
-  void ApplyUpdate(std::unique_ptr<ListUpdateResponse> response,
+  void ApplyUpdate(std::unique_ptr<SBUpdateResponse> response,
                    const scoped_refptr<base::SequencedTaskRunner>& runner,
-                   UpdatedStoreReadyCallback callback);
+                   UpdatedStoreReadyCallback callback) override;
 
-  // Records (in kilobytes) and returns the size of the file on disk for this
-  // store using |base_metric| as prefix and the filename as suffix.
-  int64_t RecordAndReturnFileSize(const std::string& base_metric);
 
   std::string DebugString() const;
 
@@ -160,23 +201,20 @@ class V4Store {
   // of the hash prefixes.
   void Initialize();
 
-  // Reset internal state.
-  void Reset();
+  void Reset() override;
 
-  // Scheduled after reading the store file from disk on startup. When run, it
-  // ensures that the checksum of the hash prefixes in lexicographical sorted
-  // order matches the expected value in |expected_checksum_|. Returns true if
-  // it matches; false otherwise. Checksum verification can take a long time,
-  // so it is performed outside of the hotpath of loading SafeBrowsing database,
-  // which blocks resource loads.
-  bool VerifyChecksum();
+  bool VerifyChecksum() override;
 
-  // Populates the DatabaseInfo message.
   void CollectStoreInfo(
-      DatabaseManagerInfo::DatabaseInfo::StoreInfo* store_info,
-      const std::string& base_metric);
+      DatabaseManagerInfo::DatabaseInfo::StoreInfo* store_info) override;
+
+  const std::string& GetStoreState() const override;
+
+  std::vector<base::FilePath> GetPathsInUse() const override;
 
  protected:
+  std::string GetMetricPrefix() const override;
+
   std::unique_ptr<HashPrefixMap> hash_prefix_map_;
 
  private:
@@ -196,6 +234,10 @@ class V4Store {
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestAddUnlumpedHashes);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestAddUnlumpedHashesWithEmptyString);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestAddUnlumpedHashesWithTooSmallPrefixSize);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestAddUnlumpedHashesWithTooLargePrefixSize);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
                            TestGetNextSmallestUnmergedPrefixWithEmptyPrefixMap);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestGetNextSmallestUnmergedPrefix);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMergeUpdatesWithSameSizesInEachMap);
@@ -208,6 +250,15 @@ class V4Store {
                            TestMergeUpdatesFailsForRepeatedHashPrefix);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
                            TestMergeUpdatesFailsWhenRemovalsIndexTooLarge);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestMergeUpdatesFailsWhenRemovalsIndexNegative);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMergeUpdateFastPathWithRemovals);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMergeUpdateFastPathEmptyLists);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestMergeUpdateFastPathMultipleRemovalsInARow);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestVerifyChecksumFastPath);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestVerifyChecksumValidStoreChecksumEmptyHistogram);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMergeUpdatesRemovesOnlyElement);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMergeUpdatesRemovesFirstElement);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMergeUpdatesRemovesMiddleElement);
@@ -220,6 +271,8 @@ class V4Store {
                            TestReadFullResponseWithValidHashPrefixMap);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
                            TestReadFullResponseWithInvalidHashPrefixMap);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestWriteFullResponseWithInvalidHashPrefixMap);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestHashPrefixExistsAtTheBeginning);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestHashPrefixExistsInTheMiddle);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestHashPrefixExistsAtTheEnd);
@@ -240,69 +293,105 @@ class V4Store {
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, GetMatchingHashPrefixSize32Or21);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
                            TestAdditionsWithRiceEncodingFailsWithInvalidInput);
+  FRIEND_TEST_ALL_PREFIXES(
+      V4StoreTest,
+      TestAdditionsWithRiceEncodingFailsWithInvalidCompressionType);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestAdditionsWithRiceEncodingSucceeds);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestRemovalsWithRiceEncodingSucceeds);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMergeUpdatesFailsChecksum);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestChecksumErrorOnStartup);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, WriteToDiskFails);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, FullUpdateFailsChecksumSynchronously);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           ApplyUpdateFailsWithInvalidResponseType);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           ApplyUpdateRemovalsFailsWithInvalidCompressionType);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, VerifyChecksumMmapFile);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, FailedMmapOnRead);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, MigrateToMmap);
-  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, MigrateToInMemory);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, MigrateFileOffsets);
-  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, MigrateToInMemoryFails);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, CleanUpOldFiles);
   FRIEND_TEST_ALL_PREFIXES(V4StoreTest, FileSizeIncludesHashFiles);
-  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, ReserveSpaceInPrefixMap);
-  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, MergeUpdatesWithMmapHashPrefixMap);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, MergeUpdatesWithHashPrefixMap);
   FRIEND_TEST_ALL_PREFIXES(V4StorePerftest, StressTest);
+  FRIEND_TEST_ALL_PREFIXES(V4StorePerftest, VerifyChecksumFast);
+  FRIEND_TEST_ALL_PREFIXES(V4StorePerftest, MergeUpdateFast);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, PreMmapMigrationFileFormatFails);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationAlreadyV4);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationDisabled);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationNotEligible_WipeSucceeds);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationNotEligible_WipeFails);
+  FRIEND_TEST_ALL_PREFIXES(
+      V4StoreTest,
+      TestMigrationNotEligible_WipeHashFileFails_WipeStoreFileSucceeds);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationV5NotFound);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationSuccess);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationSuccessNoHashFile);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationPrefixSizeMismatch);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationHashFileMissing);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureRename);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureWrite);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureRenameV4Store);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationSuccessButReadFailure);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureInvalidV5);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureOpenFailureV5);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureEmptyV5);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureCorruptedV5);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestMigrationFailureIncompatibleVersionV5);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationFailureMissingDetailsV5);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest,
+                           TestMigrationInterruptedWipesEverything);
+  FRIEND_TEST_ALL_PREFIXES(V4StoreTest, TestMigrationLogsResult);
 
   friend class V4StoreTest;
   friend class V4StoreFuzzer;
+
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  // LINT.IfChange(ApplyUpdateType)
+  enum class ApplyUpdateType {
+    kInvalid = 0,
+    kFull = 1,
+    kPartial = 2,
+    kMaxValue = kPartial,
+  };
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/safe_browsing/enums.xml:SafeBrowsingV4UpdateType)
 
   // If |prefix_size| is within expected range, and |raw_hashes_length| is a
   // multiple of prefix_size, then it sets the string of length
   // |raw_hashes_length| starting at |raw_hashes_begin| as the value at key
   // |prefix_size| in |additions_map|
-  static ApplyUpdateResult AddUnlumpedHashes(PrefixSize prefix_size,
-                                             const char* raw_hashes_begin,
-                                             const size_t raw_hashes_length,
-                                             HashPrefixMap* additions_map);
+  static ApplyUpdateResult AddUnlumpedHashes(
+      PrefixSize prefix_size,
+      const char* raw_hashes_begin,
+      const size_t raw_hashes_length,
+      std::unordered_map<PrefixSize, HashPrefixes>* additions_map);
 
   // An overloaded version of AddUnlumpedHashes that allows passing in a
   // std::string object.
-  static ApplyUpdateResult AddUnlumpedHashes(PrefixSize prefix_size,
-                                             const std::string& raw_hashes,
-                                             HashPrefixMap* additions_map);
+  static ApplyUpdateResult AddUnlumpedHashes(
+      PrefixSize prefix_size,
+      const std::string& raw_hashes,
+      std::unordered_map<PrefixSize, HashPrefixes>* additions_map);
 
   // Get the next unmerged hash prefix in dictionary order from
   // |hash_prefix_map|. |iterator_map| is used to determine which hash prefixes
   // have been merged already. Returns true if there are any unmerged hash
   // prefixes in the list.
   static bool GetNextSmallestUnmergedPrefix(
-      const HashPrefixMap& hash_prefix_map,
+      const HashPrefixMapView& hash_prefix_map,
       const IteratorMap& iterator_map,
       HashPrefixStr* smallest_hash_prefix);
 
   // For each key in |hash_prefix_map|, sets the iterator at that key
   // |iterator_map| to hash_prefix_map[key].begin().
-  static void InitializeIteratorMap(const HashPrefixMap& hash_prefix_map,
+  static void InitializeIteratorMap(const HashPrefixMapView& hash_prefix_map,
                                     IteratorMap* iterator_map);
 
-  // Reserve the appropriate string size so that the string size of the merged
-  // list is exact. This ignores the space that would otherwise be released by
-  // deletions specified in the update because it is non-trivial to calculate
-  // those deletions upfront. This isn't so bad since deletions are supposed to
-  // be small and infrequent.
-  static void ReserveSpaceInPrefixMap(const HashPrefixMap& old_map,
-                                      const HashPrefixMap& additions_map,
-                                      size_t removals_count,
-                                      HashPrefixMap* prefix_map_to_update);
-
-  // Same as the public GetMatchingHashPrefix method, but takes a StringPiece,
-  // for performance reasons.
-  HashPrefixStr GetMatchingHashPrefix(base::StringPiece full_hash);
+  // Same as the public GetMatchingHashPrefix method, but takes a
+  // std::string_view, for performance reasons.
+  HashPrefixStr GetMatchingHashPrefix(std::string_view full_hash);
 
   // Merges the prefix map from the old store (|old_hash_prefix_map|) and the
   // update (additions_map) to populate the prefix map for the current store.
@@ -311,11 +400,20 @@ class V4Store {
   // lexicographically sorted order, must match |expected_checksum| (if it's not
   // empty).
   ApplyUpdateResult MergeUpdate(
-      const HashPrefixMap& old_hash_prefix_map,
-      const HashPrefixMap& additions_map,
-      const ::google::protobuf::RepeatedField<::google::protobuf::int32>*
-          raw_removals,
+      const HashPrefixMapView& old_hash_prefix_map,
+      const HashPrefixMapView& additions_map,
+      const ::google::protobuf::RepeatedField<int32_t>* raw_removals,
       const std::string& expected_checksum);
+
+  // Fast path for MergeUpdate when both maps have exactly one prefix size.
+  ApplyUpdateResult MergeUpdateFast(
+      const HashPrefixMapView& old_hash_prefix_map,
+      const HashPrefixMapView& additions_map,
+      const ::google::protobuf::RepeatedField<int32_t>* raw_removals,
+      const std::string& expected_checksum);
+
+  // Fast path for VerifyChecksum when the map has exactly one prefix size.
+  bool VerifyChecksumFast(const HashPrefixMapView& hash_prefix_map);
 
   // Processes the FULL_UPDATE |response| from the server, and writes the
   // merged V4Store to disk. If processing the |response| succeeds, it returns
@@ -345,7 +443,7 @@ class V4Store {
   // |metric|.
   ApplyUpdateResult ProcessPartialUpdateAndWriteToDisk(
       const std::string& metric,
-      const HashPrefixMap& hash_prefix_map_old,
+      const HashPrefixMapView& hash_prefix_map_old,
       std::unique_ptr<ListUpdateResponse> response);
 
   // Merges the hash prefixes in |hash_prefix_map_old| and |response|, and
@@ -355,7 +453,7 @@ class V4Store {
   // check if |delay_checksum_check| is true.
   ApplyUpdateResult ProcessUpdate(
       const std::string& metric,
-      const HashPrefixMap& hash_prefix_map_old,
+      const HashPrefixMapView& hash_prefix_map_old,
       const std::unique_ptr<ListUpdateResponse>& response,
       bool delay_checksum_check);
 
@@ -363,13 +461,51 @@ class V4Store {
   // for the failure or reports success.
   StoreReadResult ReadFromDisk();
 
+  // Reads the state of the store from the v4 file on disk directly. Returns the
+  // reason for the failure or reports success.
+  StoreReadResult ReadFromDiskInternal();
+
+  // Attempts to migrate the store from v5 to v4 if needed. Returns the reason
+  // for the failure or reports success.
+  V5ToV4MigrationResult AttemptV5ToV4Migration();
+
+  // Performs the actual migration steps from the v5 store to v4.
+  // |v5_store_path| is the path to the V5 store file to migrate.
+  // Returns the reason for the failure or reports success.
+  V5ToV4MigrationResult MigrateFromV5(const base::FilePath& v5_store_path);
+
+  // Converts the extensions blocklist from v5 hash file format to v4 ID file
+  // format.
+  // |v5_hash_file_path| is the path to the source v5 hash file
+  // containing 16-byte hashes.
+  // |v4_hash_file_path| is the path where the
+  // converted 32-byte hex IDs should be written.
+  // |checksum_sha256| is an in-out parameter. On input, it contains the
+  // expected V5 checksum (if any) used to verify the V5 data before conversion.
+  // On successful conversion, it is overwritten in-place with the newly
+  // calculated V4 checksum of the converted data. Can be nullptr if no checksum
+  // is expected.
+  // |file_size| will be populated with the size of the converted file in
+  // bytes. Returns the granular result of the conversion attempt.
+  ConvertExtensionBlocklistV5ToV4Result ConvertExtensionsBlocklistFromV5ToV4(
+      const base::FilePath& v5_hash_file_path,
+      const base::FilePath& v4_hash_file_path,
+      std::string* checksum_sha256,
+      uint64_t* file_size);
+
+  // Wipes the V5 store file and its associated hash files.
+  // |v5_store_path| is the path of the V5 store to delete.
+  // Returns true if both the store file and all of its associated hash files
+  // are successfully deleted; false otherwise.
+  bool WipeV5Store(const base::FilePath& v5_store_path);
+
   // Updates the |additions_map| with the additions received in the partial
   // update from the server. The UMA metrics for all interesting sub-operations
   // use the prefix |metric|.
   ApplyUpdateResult UpdateHashPrefixMapFromAdditions(
       const std::string& metric,
       const ::google::protobuf::RepeatedPtrField<ThreatEntrySet>& additions,
-      HashPrefixMap* additions_map);
+      std::unordered_map<PrefixSize, HashPrefixes>* additions_map);
 
   // Writes the hash_prefix_map_ to disk as a V4StoreFileFormat proto.
   // |checksum| is used to set the |checksum| field in the final proto.
@@ -378,39 +514,46 @@ class V4Store {
   // Same as above but uses a pre-populated |file_format|.
   StoreWriteResult WriteToDisk(V4StoreFileFormat* file_format);
 
-  // Migrates between in-memory and on-disk file formats.
-  HashPrefixMap::MigrateResult MigrateFileFormatIfNeeded(
-      V4StoreFileFormat* file_format);
+  static void RecordDecodeAdditionsResult(const std::string& base_metric,
+                                          V4DecodeResult result,
+                                          const base::FilePath& file_path);
+
+  static void RecordDecodeRemovalsResult(const std::string& base_metric,
+                                         V4DecodeResult result,
+                                         const base::FilePath& file_path);
 
   // Records the status of the update being applied to the database.
   ApplyUpdateResult last_apply_update_result_ = APPLY_UPDATE_RESULT_MAX;
-
-  // Records the time when the store was last updated.
-  base::Time last_apply_update_time_millis_;
 
   // The checksum value as read from the disk, until it is verified. Once
   // verified, it is cleared.
   std::string expected_checksum_;
 
-  // The size of the file on disk for this store.
-  int64_t file_size_;
 
-  // A counter used to manage how frequently the value of `has_valid_data_`
-  // below is recorded.
-  uint8_t record_has_valid_data_counter_ = 0;
-
-  // True if the file was successfully read+parsed or was populated from
-  // a full update.
-  bool has_valid_data_;
 
   // Records the number of times we have looked up the store.
   size_t checks_attempted_ = 0;
 
+  // The expected prefix size for the hash prefixes in V5 store.
+  const PrefixSize v5_prefix_size_ = 0;
+
+  // Whether this store is eligible for v5 to v4 disk migration.
+  const bool is_eligible_for_migration_ = true;
+
+  // Whether this store is for the extensions blocklist.
+  const bool is_extensions_blocklist_ = false;
+
   // The state of the store as returned by the PVer4 server in the last applied
   // update response.
   std::string state_;
-  const base::FilePath store_path_;
-  const scoped_refptr<base::SequencedTaskRunner> task_runner_;
+
+  // True if the store was migrated from V5 and no update has been applied yet
+  // since migration.
+  bool is_first_update_after_v5_migration_ = false;
+
+  // True if the database is new (clean install where no store existed on disk
+  // at startup) and no update has been applied yet.
+  bool is_new_database_ = false;
 };
 
 std::ostream& operator<<(std::ostream& os, const V4Store& store);

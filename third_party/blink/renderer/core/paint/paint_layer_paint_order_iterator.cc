@@ -30,6 +30,7 @@
 
 #include "third_party/blink/renderer/core/paint/paint_layer_paint_order_iterator.h"
 
+#include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
 #include "third_party/blink/renderer/core/paint/paint_layer.h"
 #include "third_party/blink/renderer/core/paint/paint_layer_stacking_node.h"
 
@@ -40,7 +41,7 @@ PaintLayer* PaintLayerPaintOrderIterator::Next() {
     if (root_->StackingNode()) {
       const auto& neg_z_order_list = root_->StackingNode()->NegZOrderList();
       if (index_ < neg_z_order_list.size())
-        return neg_z_order_list[index_++];
+        return neg_z_order_list[index_++].Get();
     }
 
     index_ = 0;
@@ -68,7 +69,7 @@ PaintLayer* PaintLayerPaintOrderIterator::Next() {
     if (root_->StackingNode()) {
       const auto& pos_z_order_list = root_->StackingNode()->PosZOrderList();
       if (index_ < pos_z_order_list.size())
-        return pos_z_order_list[index_++];
+        return pos_z_order_list[index_++].Get();
     }
 
     index_ = 0;
@@ -83,7 +84,7 @@ PaintLayer* PaintLayerPaintOrderReverseIterator::Next() {
     if (root_->StackingNode()) {
       const auto& neg_z_order_list = root_->StackingNode()->NegZOrderList();
       if (index_ >= 0)
-        return neg_z_order_list[index_--];
+        return neg_z_order_list[index_--].Get();
     }
 
     remaining_children_ &= ~kNegativeZOrderChildren;
@@ -111,7 +112,7 @@ PaintLayer* PaintLayerPaintOrderReverseIterator::Next() {
     if (root_->StackingNode()) {
       const auto& pos_z_order_list = root_->StackingNode()->PosZOrderList();
       if (index_ >= 0)
-        return pos_z_order_list[index_--];
+        return pos_z_order_list[index_--].Get();
     }
 
     remaining_children_ &= ~kPositiveZOrderChildren;
@@ -154,6 +155,25 @@ void PaintLayerPaintOrderReverseIterator::SetIndexToLastItem() {
   // No more list to visit.
   DCHECK(!remaining_children_);
   index_ = -1;
+}
+
+CanvasDrawnElementPaintOrderReverseIterator::
+    CanvasDrawnElementPaintOrderReverseIterator(HTMLCanvasElement& canvas)
+    : canvas_(&canvas), current_(canvas.HitTestableDescendants().rbegin()) {}
+
+PaintLayer* CanvasDrawnElementPaintOrderReverseIterator::Next() {
+  while (current_ != canvas_->HitTestableDescendants().rend()) {
+    Element* element = *(current_++);
+    if (element->CanvasForDrawing() == canvas_) {
+      if (auto* obj =
+              DynamicTo<LayoutBoxModelObject>(element->GetLayoutObject())) {
+        if (auto* layer = obj->Layer()) {
+          return layer;
+        }
+      }
+    }
+  }
+  return nullptr;
 }
 
 }  // namespace blink

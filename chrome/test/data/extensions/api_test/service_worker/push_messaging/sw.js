@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var port;
-var pushData;
+let port;
+let pushData;
 
 function maybeFinish() {
   if (port && pushData) {
@@ -17,7 +17,7 @@ this.onpush = function(e) {
 };
 
 this.onmessage = function(e) {
-  if (e.data == 'waitForPushMessaging') {
+  if (e.data === 'waitForPushMessaging') {
     port = e.ports[0];
     maybeFinish();
   }

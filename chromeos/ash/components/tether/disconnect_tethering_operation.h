@@ -6,18 +6,11 @@
 #define CHROMEOS_ASH_COMPONENTS_TETHER_DISCONNECT_TETHERING_OPERATION_H_
 
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
 #include "chromeos/ash/components/tether/message_transfer_operation.h"
-
-namespace ash::device_sync {
-class DeviceSyncClient;
-}
-
-namespace ash::secure_channel {
-class SecureChannelClient;
-}
 
 namespace ash::tether {
 
@@ -27,30 +20,31 @@ class DisconnectTetheringOperation : public MessageTransferOperation {
   class Factory {
    public:
     static std::unique_ptr<DisconnectTetheringOperation> Create(
-        multidevice::RemoteDeviceRef device_to_connect,
-        device_sync::DeviceSyncClient* device_sync_client,
-        secure_channel::SecureChannelClient* secure_channel_client);
+        const TetherHost& tether_host,
+        raw_ptr<HostConnection::Factory> host_connection_factory);
 
     static void SetFactoryForTesting(Factory* factory);
 
    protected:
     virtual ~Factory();
     virtual std::unique_ptr<DisconnectTetheringOperation> CreateInstance(
-        multidevice::RemoteDeviceRef device_to_connect,
-        device_sync::DeviceSyncClient* device_sync_client,
-        secure_channel::SecureChannelClient* secure_channel_client) = 0;
+        const TetherHost& tether_host,
+        raw_ptr<HostConnection::Factory> host_connection_factory) = 0;
 
    private:
     static Factory* factory_instance_;
   };
 
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
     // Alerts observers when the operation has finished for device with ID
     // |device_id|. |success| is true when the operation successfully sends the
     // message and false otherwise.
     virtual void OnOperationFinished(const std::string& device_id,
                                      bool success) = 0;
+
+   protected:
+    ~Observer() override = default;
   };
 
   DisconnectTetheringOperation(const DisconnectTetheringOperation&) = delete;
@@ -64,18 +58,17 @@ class DisconnectTetheringOperation : public MessageTransferOperation {
 
  protected:
   DisconnectTetheringOperation(
-      multidevice::RemoteDeviceRef device_to_connect,
-      device_sync::DeviceSyncClient* device_sync_client,
-      secure_channel::SecureChannelClient* secure_channel_client);
+      const TetherHost& tether_host,
+      raw_ptr<HostConnection::Factory> host_connection_factory);
 
   void NotifyObserversOperationFinished(bool success);
 
   // MessageTransferOperation:
-  void OnDeviceAuthenticated(
-      multidevice::RemoteDeviceRef remote_device) override;
+  void OnDeviceAuthenticated() override;
   void OnOperationFinished() override;
   MessageType GetMessageTypeForConnection() override;
-  void OnMessageSent(int sequence_number) override;
+
+  void OnMessageSent();
 
  private:
   friend class DisconnectTetheringOperationTest;
@@ -86,13 +79,12 @@ class DisconnectTetheringOperation : public MessageTransferOperation {
 
   void SetClockForTest(base::Clock* clock_for_test);
 
-  base::ObserverList<Observer>::Unchecked observer_list_;
-  multidevice::RemoteDeviceRef remote_device_;
-  int disconnect_message_sequence_number_ = -1;
+  base::ObserverList<Observer> observer_list_;
   bool has_sent_message_;
 
-  base::Clock* clock_;
+  raw_ptr<base::Clock> clock_;
   base::Time disconnect_start_time_;
+  base::WeakPtrFactory<DisconnectTetheringOperation> weak_ptr_factory_{this};
 };
 
 }  // namespace ash::tether

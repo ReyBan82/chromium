@@ -8,13 +8,14 @@
 #include "build/build_config.h"
 
 #if !BUILDFLAG(IS_ANDROID)
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/location_bar/location_bar.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.h"
+#include "chrome/browser/ui/views/picture_in_picture/document_pip_host.h"
 #include "content/public/browser/web_contents.h"
 #endif
 
@@ -27,23 +28,38 @@ void RecordPopupsAction(PopupsAction action) {
 
 void UpdateLocationBarUiForWebContents(content::WebContents* web_contents) {
 #if !BUILDFLAG(IS_ANDROID)
-  Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
-  if (!browser)
+  if (!web_contents) {
     return;
-
-  if (browser->tab_strip_model()->GetActiveWebContents() != web_contents)
+  }
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
+  if (!browser) {
+    // Standalone Document PiP windows are not Browser-backed. The captured
+    // child WebContents holds a back-pointer to its DocumentPipHost, which
+    // forwards the refresh to the PiP frame view's content-setting icons.
+    if (DocumentPipHost* pip_host =
+            DocumentPipHost::FromChildWebContents(web_contents)) {
+      pip_host->UpdateContentSettingsIcons();
+    }
     return;
+  }
 
-  LocationBar* location_bar = browser->window()->GetLocationBar();
+  if (browser->GetTabStripModel()->GetActiveWebContents() != web_contents) {
+    return;
+  }
+
+  LocationBar* location_bar =
+      BrowserWindow::FromBrowser(browser)->GetLocationBar();
   if (location_bar)
     location_bar->UpdateContentSettingsIcons();
 
   // The document PiP window does not have a location bar, but has some content
   // setting views that need to be updated too.
-  if (browser->is_type_picture_in_picture()) {
+  if (browser->GetType() ==
+      BrowserWindowInterface::Type::TYPE_PICTURE_IN_PICTURE) {
     BrowserView* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
     auto* frame_view = static_cast<PictureInPictureBrowserFrameView*>(
-        browser_view->frame()->GetFrameView());
+        browser_view->browser_widget()->GetFrameView());
     frame_view->UpdateContentSettingsIcons();
   }
 #endif

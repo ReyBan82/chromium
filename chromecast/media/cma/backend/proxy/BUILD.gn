@@ -12,8 +12,6 @@ template("chromecast_media_grpc_library") {
   grpc_library(target_name) {
     proto_in_dir = "//"
 
-    # NOTE: For using built-in proto files like empty.proto.
-    import_dirs = [ "//third_party/protobuf/src" ]
     use_protobuf_full = true
 
     forward_variables_from(invoker,
@@ -42,6 +40,7 @@ if (!is_android) {
       "buffer_id_manager.h",
       "cast_runtime_audio_channel_broker.cc",
       "cast_runtime_audio_channel_broker.h",
+      "cast_runtime_audio_channel_endpoint_simple.cc",
       "cma_backend_proxy.cc",
       "cma_backend_proxy.h",
       "cma_proxy_handler.h",
@@ -69,10 +68,5 @@ if (!is_android) {
       "//third_party/grpc:grpc++",
       "//third_party/protobuf:protobuf_full",
     ]
-
-    if (!enable_chromium_runtime_cast_renderer ||
-        chromecast_branding == "public") {
-      sources += [ "cast_runtime_audio_channel_endpoint_simple.cc" ]
-    }
   }
 }

@@ -7,42 +7,39 @@
 
 #include "base/base_export.h"
 #include "base/task/task_traits.h"
+#include "base/task/thread_type.h"
 #include "base/time/time.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
 // An immutable but assignable representation of the priority of a Sequence.
 class BASE_EXPORT TaskSourceSortKey final {
  public:
-  TaskSourceSortKey() = default;
-  TaskSourceSortKey(TaskPriority priority,
-                    TimeTicks ready_time,
-                    uint8_t worker_count = 0);
+  constexpr TaskSourceSortKey() = default;
+  constexpr TaskSourceSortKey(ThreadType thread_type,
+                              TimeTicks ready_time,
+                              uint8_t worker_count = 0)
+      : thread_type_(thread_type),
+        worker_count_(worker_count),
+        ready_time_(ready_time) {}
 
-  TaskPriority priority() const { return priority_; }
+  ThreadType thread_type() const { return thread_type_; }
   uint8_t worker_count() const { return worker_count_; }
   TimeTicks ready_time() const { return ready_time_; }
 
   // Used for a max-heap.
   bool operator<(const TaskSourceSortKey& other) const;
 
-  bool operator==(const TaskSourceSortKey& other) const {
-    return priority_ == other.priority_ &&
-           worker_count_ == other.worker_count_ &&
-           ready_time_ == other.ready_time_;
-  }
-  bool operator!=(const TaskSourceSortKey& other) const {
-    return !(other == *this);
-  }
+  friend bool operator==(const TaskSourceSortKey&,
+                         const TaskSourceSortKey&) = default;
 
  private:
   // The private section allows this class to keep its immutable property while
   // being copy-assignable (i.e. instead of making its members const).
 
-  // Highest task priority in the sequence at the time this sort key was
+  // Highest task thread_type in the sequence at the time this sort key was
   // created.
-  TaskPriority priority_;
+  ThreadType thread_type_;
 
   // Number of workers running the task source, used as secondary sort key
   // prioritizing task sources with fewer workers.
@@ -53,7 +50,6 @@ class BASE_EXPORT TaskSourceSortKey final {
   TimeTicks ready_time_;
 };
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal
 
 #endif  // BASE_TASK_THREAD_POOL_TASK_SOURCE_SORT_KEY_H_

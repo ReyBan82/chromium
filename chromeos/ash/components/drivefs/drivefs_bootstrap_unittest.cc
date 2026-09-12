@@ -27,18 +27,12 @@ using testing::_;
 
 class MockDriveFs : public mojom::DriveFsInterceptorForTesting {
  public:
-  DriveFs* GetForwardingInterface() override {
-    NOTREACHED();
-    return nullptr;
-  }
+  DriveFs* GetForwardingInterface() override { NOTREACHED(); }
 };
 
 class MockDriveFsDelegate : public mojom::DriveFsDelegateInterceptorForTesting {
  public:
-  DriveFsDelegate* GetForwardingInterface() override {
-    NOTREACHED();
-    return nullptr;
-  }
+  DriveFsDelegate* GetForwardingInterface() override { NOTREACHED(); }
 };
 
 class DriveFsBootstrapListenerForTest : public DriveFsBootstrapListener {
@@ -97,8 +91,8 @@ class DriveFsBootstrapTest : public testing::Test,
   }
 
   void WaitForConnection(const base::UnguessableToken& token) {
-    ASSERT_TRUE(mojo_bootstrap::PendingConnectionManager::Get().OpenIpcChannel(
-        token.ToString(), {}));
+    ASSERT_TRUE(mojo_bootstrap::PendingConnectionManager::GetForDriveFs()
+                    .OpenIpcChannel(token.ToString(), {}));
     base::RunLoop run_loop;
     bootstrap_receiver_.set_disconnect_handler(run_loop.QuitClosure());
     run_loop.Run();
@@ -125,8 +119,9 @@ TEST_F(DriveFsBootstrapTest, Listen_Connect_Disconnect) {
   EXPECT_CALL(*this, OnDisconnect());
   receiver_.reset();
   base::RunLoop().RunUntilIdle();
-  ASSERT_FALSE(mojo_bootstrap::PendingConnectionManager::Get().OpenIpcChannel(
-      token.ToString(), {}));
+  ASSERT_FALSE(
+      mojo_bootstrap::PendingConnectionManager::GetForDriveFs().OpenIpcChannel(
+          token.ToString(), {}));
 }
 
 TEST_F(DriveFsBootstrapTest, Listen_Connect_DisconnectDelegate) {
@@ -136,8 +131,9 @@ TEST_F(DriveFsBootstrapTest, Listen_Connect_DisconnectDelegate) {
   EXPECT_CALL(*this, OnDisconnect());
   delegate_.reset();
   base::RunLoop().RunUntilIdle();
-  ASSERT_FALSE(mojo_bootstrap::PendingConnectionManager::Get().OpenIpcChannel(
-      token.ToString(), {}));
+  ASSERT_FALSE(
+      mojo_bootstrap::PendingConnectionManager::GetForDriveFs().OpenIpcChannel(
+          token.ToString(), {}));
 }
 
 TEST_F(DriveFsBootstrapTest, Listen_Connect_Destroy) {
@@ -147,8 +143,9 @@ TEST_F(DriveFsBootstrapTest, Listen_Connect_Destroy) {
   EXPECT_CALL(*this, OnDisconnect()).Times(0);
   connection_.reset();
   base::RunLoop().RunUntilIdle();
-  ASSERT_FALSE(mojo_bootstrap::PendingConnectionManager::Get().OpenIpcChannel(
-      token.ToString(), {}));
+  ASSERT_FALSE(
+      mojo_bootstrap::PendingConnectionManager::GetForDriveFs().OpenIpcChannel(
+          token.ToString(), {}));
 }
 
 TEST_F(DriveFsBootstrapTest, Listen_Destroy) {
@@ -156,8 +153,9 @@ TEST_F(DriveFsBootstrapTest, Listen_Destroy) {
   auto token = ListenForConnection();
   connection_.reset();
   base::RunLoop().RunUntilIdle();
-  ASSERT_FALSE(mojo_bootstrap::PendingConnectionManager::Get().OpenIpcChannel(
-      token.ToString(), {}));
+  ASSERT_FALSE(
+      mojo_bootstrap::PendingConnectionManager::GetForDriveFs().OpenIpcChannel(
+          token.ToString(), {}));
 }
 
 TEST_F(DriveFsBootstrapTest, Listen_DisconnectDelegate) {
@@ -165,6 +163,15 @@ TEST_F(DriveFsBootstrapTest, Listen_DisconnectDelegate) {
   ListenForConnection();
   delegate_.reset();
   base::RunLoop().RunUntilIdle();
+}
+
+TEST_F(DriveFsBootstrapTest, PendingTokenIsScopedToDriveFs) {
+  auto token = ListenForConnection();
+  ASSERT_FALSE(
+      mojo_bootstrap::PendingConnectionManager::GetForSmbFs().OpenIpcChannel(
+          token.ToString(), {}));
+  EXPECT_CALL(*this, OnInit());
+  WaitForConnection(token);
 }
 
 }  // namespace drivefs

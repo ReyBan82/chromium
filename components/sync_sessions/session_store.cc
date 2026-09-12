@@ -7,36 +7,52 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <optional>
 #include <set>
 #include <utility>
 
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/containers/flat_set.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/memory/raw_ptr.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/memory/weak_ptr.h"
+#include "base/not_fatal_until.h"
 #include "base/pickle.h"
 #include "base/strings/stringprintf.h"
+#include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "components/sync/base/time.h"
 #include "components/sync/model/entity_change.h"
 #include "components/sync/model/metadata_batch.h"
 #include "components/sync/model/mutable_data_batch.h"
 #include "components/sync/protocol/entity_metadata.pb.h"
-#include "components/sync/protocol/model_type_state.pb.h"
 #include "components/sync/protocol/session_specifics.pb.h"
 #include "components/sync_device_info/local_device_info_util.h"
-#include "components/sync_sessions/session_sync_prefs.h"
+#include "components/sync_sessions/features.h"
 #include "components/sync_sessions/sync_sessions_client.h"
+#include "url/gurl.h"
+#include "url/scheme_host_port.h"
 
 namespace sync_sessions {
 namespace {
 
 using sync_pb::SessionSpecifics;
+using syncer::DataTypeStore;
 using syncer::MetadataChangeList;
-using syncer::ModelTypeStore;
+
+// NOTE: Values are persisted (as part of storage keys); do not renumber, and
+// only add new entries at the end.
+enum class EntityType {
+  kHeader = 0,
+  kTab = 1,
+  kScreenshotDeprecated = 2,
+  // Add new entries here.
+  kMaxValue = kScreenshotDeprecated
+};
 
 std::string TabNodeIdToClientTag(const std::string& session_tag,
                                  int tab_node_id) {
@@ -48,21 +64,37 @@ std::string EncodeStorageKey(const std::string& session_tag, int tab_node_id) {
   base::Pickle pickle;
   pickle.WriteString(session_tag);
   pickle.WriteInt(tab_node_id);
-  return std::string(static_cast<const char*>(pickle.data()), pickle.size());
+  return std::string(pickle.AsStringView());
 }
 
 bool DecodeStorageKey(const std::string& storage_key,
                       std::string* session_tag,
-                      int* tab_node_id) {
-  base::Pickle pickle(storage_key.c_str(), storage_key.size());
-  base::PickleIterator iter(pickle);
+                      int* tab_node_id,
+                      EntityType* type) {
+  CHECK(session_tag);
+  CHECK(tab_node_id);
+  CHECK(type);
+
+  base::PickleIterator iter =
+      base::PickleIterator::WithData(base::as_byte_span(storage_key));
   if (!iter.ReadString(session_tag)) {
     return false;
   }
   if (!iter.ReadInt(tab_node_id)) {
     return false;
   }
-  return true;
+  int type_int = -1;
+  if (!iter.ReadInt(&type_int)) {
+    // For backward compatibility, if the type is missing, it's either a header
+    // or a tab.
+    *type = (*tab_node_id == TabNodePool::kInvalidTabNodeID)
+                ? EntityType::kHeader
+                : EntityType::kTab;
+    return true;
+  }
+  // The only entity type which was explicitly encoded was "screenshot" (2), and
+  // these entities are no longer supported.
+  return false;
 }
 
 std::unique_ptr<syncer::EntityData> MoveToEntityData(
@@ -80,23 +112,8 @@ std::unique_ptr<syncer::EntityData> MoveToEntityData(
   return entity_data;
 }
 
-std::string GetSessionTagWithPrefs(const std::string& cache_guid,
-                                   SessionSyncPrefs* sync_prefs) {
-  DCHECK(sync_prefs);
-
-  // If a legacy GUID exists, keep honoring it.
-  const std::string persisted_guid = sync_prefs->GetLegacySyncSessionsGUID();
-  if (!persisted_guid.empty()) {
-    DVLOG(1) << "Restoring persisted session sync guid: " << persisted_guid;
-    return persisted_guid;
-  }
-
-  DVLOG(1) << "Using sync cache guid as session sync guid: " << cache_guid;
-  return cache_guid;
-}
-
 void ForwardError(syncer::OnceModelErrorHandler error_handler,
-                  const absl::optional<syncer::ModelError>& error) {
+                  const std::optional<syncer::ModelError>& error) {
   if (error) {
     std::move(error_handler).Run(*error);
   }
@@ -104,15 +121,16 @@ void ForwardError(syncer::OnceModelErrorHandler error_handler,
 
 // Parses the content of |record_list| into |*initial_data|. The output
 // parameters are first for binding purposes.
-absl::optional<syncer::ModelError> ParseInitialDataOnBackendSequence(
+std::optional<syncer::ModelError> ParseInitialDataOnBackendSequence(
     std::map<std::string, sync_pb::SessionSpecifics>* initial_data,
     std::string* session_name,
-    std::unique_ptr<ModelTypeStore::RecordList> record_list) {
-  DCHECK(initial_data);
-  DCHECK(initial_data->empty());
-  DCHECK(record_list);
+    std::unique_ptr<DataTypeStore::RecordList> record_list) {
+  TRACE_EVENT0("sync", "sync_sessions::ParseInitialDataOnBackendSequence");
+  CHECK(initial_data, base::NotFatalUntil::M158);
+  CHECK(initial_data->empty(), base::NotFatalUntil::M158);
+  CHECK(record_list, base::NotFatalUntil::M158);
 
-  for (ModelTypeStore::Record& record : *record_list) {
+  for (DataTypeStore::Record& record : *record_list) {
     const std::string& storage_key = record.id;
     SessionSpecifics specifics;
     if (storage_key.empty() ||
@@ -125,16 +143,16 @@ absl::optional<syncer::ModelError> ParseInitialDataOnBackendSequence(
 
   *session_name = syncer::GetPersonalizableDeviceNameBlocking();
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace
 
 struct SessionStore::Builder {
-  raw_ptr<SyncSessionsClient, DanglingUntriaged> sessions_client = nullptr;
+  base::WeakPtr<SyncSessionsClient> sessions_client;
   OpenCallback callback;
   SessionInfo local_session_info;
-  std::unique_ptr<syncer::ModelTypeStore> underlying_store;
+  std::unique_ptr<syncer::DataTypeStore> underlying_store;
   std::unique_ptr<syncer::MetadataBatch> metadata_batch;
   std::map<std::string, sync_pb::SessionSpecifics> initial_data;
 };
@@ -143,26 +161,25 @@ struct SessionStore::Builder {
 void SessionStore::Open(const std::string& cache_guid,
                         SyncSessionsClient* sessions_client,
                         OpenCallback callback) {
-  DCHECK(sessions_client);
+  CHECK(sessions_client, base::NotFatalUntil::M158);
 
   DVLOG(1) << "Opening session store";
 
   auto builder = std::make_unique<Builder>();
-  builder->sessions_client = sessions_client;
+  builder->sessions_client = sessions_client->AsWeakPtr();
   builder->callback = std::move(callback);
 
   builder->local_session_info.device_type = syncer::GetLocalDeviceType();
   builder->local_session_info.device_form_factor =
       syncer::GetLocalDeviceFormFactor();
-  builder->local_session_info.session_tag = GetSessionTagWithPrefs(
-      cache_guid, sessions_client->GetSessionSyncPrefs());
+  builder->local_session_info.session_tag = cache_guid;
 
   sessions_client->GetStoreFactory().Run(
       syncer::SESSIONS, base::BindOnce(&OnStoreCreated, std::move(builder)));
 }
 
 SessionStore::WriteBatch::WriteBatch(
-    std::unique_ptr<ModelTypeStore::WriteBatch> batch,
+    std::unique_ptr<DataTypeStore::WriteBatch> batch,
     CommitCallback commit_cb,
     syncer::OnceModelErrorHandler error_handler,
     SyncedSessionTracker* session_tracker)
@@ -170,14 +187,15 @@ SessionStore::WriteBatch::WriteBatch(
       commit_cb_(std::move(commit_cb)),
       error_handler_(std::move(error_handler)),
       session_tracker_(session_tracker) {
-  DCHECK(batch_);
-  DCHECK(commit_cb_);
-  DCHECK(error_handler_);
-  DCHECK(session_tracker_);
+  CHECK(batch_, base::NotFatalUntil::M158);
+  CHECK(commit_cb_, base::NotFatalUntil::M158);
+  CHECK(error_handler_, base::NotFatalUntil::M158);
+  CHECK(session_tracker_, base::NotFatalUntil::M158);
 }
 
 SessionStore::WriteBatch::~WriteBatch() {
-  DCHECK(!batch_) << "Destructed without prior commit";
+  CHECK(!batch_, base::NotFatalUntil::M158)
+      << "Destructed without prior commit";
 }
 
 std::string SessionStore::WriteBatch::PutAndUpdateTracker(
@@ -192,40 +210,46 @@ SessionStore::WriteBatch::DeleteForeignEntityAndUpdateTracker(
     const std::string& storage_key) {
   std::string session_tag;
   int tab_node_id;
-  bool success = DecodeStorageKey(storage_key, &session_tag, &tab_node_id);
-  DCHECK(success);
-  DCHECK_NE(session_tag, session_tracker_->GetLocalSessionTag());
+  EntityType type;
+  bool success =
+      DecodeStorageKey(storage_key, &session_tag, &tab_node_id, &type);
+  CHECK(success, base::NotFatalUntil::M158);
+  CHECK_NE(session_tag, session_tracker_->GetLocalSessionTag(),
+           base::NotFatalUntil::M158);
 
-  std::vector<std::string> deleted_storage_keys;
-  deleted_storage_keys.push_back(storage_key);
+  base::flat_set<std::string> deleted_storage_keys;
+  deleted_storage_keys.insert(storage_key);
 
-  if (tab_node_id == TabNodePool::kInvalidTabNodeID) {
-    // Removal of a foreign header entity cascades the deletion of all tabs in
-    // the same session too.
-    for (int cascading_tab_node_id :
-         session_tracker_->LookupTabNodeIds(session_tag)) {
-      std::string tab_storage_key =
-          GetTabStorageKey(session_tag, cascading_tab_node_id);
-      // Note that DeleteForeignSession() below takes care of removing all tabs
-      // from the tracker, so no DeleteForeignTab() needed.
-      batch_->DeleteData(tab_storage_key);
-      deleted_storage_keys.push_back(std::move(tab_storage_key));
-    }
+  switch (type) {
+    case EntityType::kHeader:
+      // Removal of a foreign header entity cascades the deletion of all tabs
+      // in the same session too.
+      for (int cascading_tab_node_id :
+           session_tracker_->LookupTabNodeIds(session_tag)) {
+        deleted_storage_keys.insert(
+            GetTabStorageKey(session_tag, cascading_tab_node_id));
+      }
 
-    // Delete session itself.
-    session_tracker_->DeleteForeignSession(session_tag);
-  } else {
-    // Removal of a foreign tab entity.
-    session_tracker_->DeleteForeignTab(session_tag, tab_node_id);
+      // Delete session itself.
+      session_tracker_->DeleteForeignSession(session_tag);
+      break;
+    case EntityType::kTab:
+      session_tracker_->DeleteForeignTab(session_tag, tab_node_id);
+      break;
+    case EntityType::kScreenshotDeprecated:
+      NOTREACHED();
   }
 
-  batch_->DeleteData(storage_key);
-  return deleted_storage_keys;
+  for (const std::string& key : deleted_storage_keys) {
+    batch_->DeleteData(key);
+  }
+
+  return std::move(deleted_storage_keys).extract();
 }
 
 std::string SessionStore::WriteBatch::PutWithoutUpdatingTracker(
     const sync_pb::SessionSpecifics& specifics) {
-  DCHECK(AreValidSpecifics(specifics));
+  CHECK(AreValidSpecifics(specifics), base::NotFatalUntil::M158);
 
   const std::string storage_key = GetStorageKey(specifics);
   batch_->WriteData(storage_key, specifics.SerializeAsString());
@@ -234,10 +258,13 @@ std::string SessionStore::WriteBatch::PutWithoutUpdatingTracker(
 
 std::string SessionStore::WriteBatch::DeleteLocalTabWithoutUpdatingTracker(
     int tab_node_id) {
-  std::string storage_key =
-      EncodeStorageKey(session_tracker_->GetLocalSessionTag(), tab_node_id);
-  batch_->DeleteData(storage_key);
-  return storage_key;
+  const std::string session_tag = session_tracker_->GetLocalSessionTag();
+  const std::string tab_storage_key =
+      GetTabStorageKey(session_tag, tab_node_id);
+
+  batch_->DeleteData(tab_storage_key);
+
+  return tab_storage_key;
 }
 
 MetadataChangeList* SessionStore::WriteBatch::GetMetadataChangeList() {
@@ -246,7 +273,7 @@ MetadataChangeList* SessionStore::WriteBatch::GetMetadataChangeList() {
 
 // static
 void SessionStore::WriteBatch::Commit(std::unique_ptr<WriteBatch> batch) {
-  DCHECK(batch);
+  CHECK(batch, base::NotFatalUntil::M158);
   std::move(batch->commit_cb_)
       .Run(std::move(batch->batch_),
            base::BindOnce(&ForwardError, std::move(batch->error_handler_)));
@@ -254,13 +281,32 @@ void SessionStore::WriteBatch::Commit(std::unique_ptr<WriteBatch> batch) {
 
 // static
 bool SessionStore::AreValidSpecifics(const SessionSpecifics& specifics) {
+  // A session tag is always required.
   if (specifics.session_tag().empty()) {
     return false;
   }
-  if (specifics.has_tab()) {
-    return specifics.tab_node_id() >= 0 && specifics.tab().tab_id() > 0;
+
+  // Exactly one of header or tab must be set.
+  if (specifics.has_header() == specifics.has_tab()) {
+    return false;
   }
+
+  // Tabs must have both a valid tab node ID and tab ID.
+  if (specifics.has_tab()) {
+    if (specifics.tab_node_id() < 0) {
+      return false;
+    }
+    if (specifics.tab().tab_id() <= 0) {
+      return false;
+    }
+    return true;
+  }
+
   if (specifics.has_header()) {
+    // A header entity must not have a tab node ID.
+    if (specifics.tab_node_id() != TabNodePool::kInvalidTabNodeID) {
+      return false;
+    }
     // Verify that tab IDs appear only once within a header. Intended to prevent
     // http://crbug.com/360822.
     std::set<int> session_tab_ids;
@@ -272,27 +318,28 @@ bool SessionStore::AreValidSpecifics(const SessionSpecifics& specifics) {
         }
       }
     }
-    return !specifics.has_tab() &&
-           specifics.tab_node_id() == TabNodePool::kInvalidTabNodeID;
+    return true;
   }
+
+  // Neither header nor tab is set.
   return false;
 }
 
 // static
 std::string SessionStore::GetClientTag(const SessionSpecifics& specifics) {
-  DCHECK(AreValidSpecifics(specifics));
+  CHECK(AreValidSpecifics(specifics), base::NotFatalUntil::M158);
 
   if (specifics.has_header()) {
     return specifics.session_tag();
   }
 
-  DCHECK(specifics.has_tab());
+  CHECK(specifics.has_tab(), base::NotFatalUntil::M158);
   return TabNodeIdToClientTag(specifics.session_tag(), specifics.tab_node_id());
 }
 
 // static
 std::string SessionStore::GetStorageKey(const SessionSpecifics& specifics) {
-  DCHECK(AreValidSpecifics(specifics));
+  CHECK(AreValidSpecifics(specifics), base::NotFatalUntil::M158);
   return EncodeStorageKey(specifics.session_tag(), specifics.tab_node_id());
 }
 
@@ -304,7 +351,7 @@ std::string SessionStore::GetHeaderStorageKey(const std::string& session_tag) {
 // static
 std::string SessionStore::GetTabStorageKey(const std::string& session_tag,
                                            int tab_node_id) {
-  DCHECK_GE(tab_node_id, 0);
+  CHECK_GE(tab_node_id, 0, base::NotFatalUntil::M158);
   return EncodeStorageKey(session_tag, tab_node_id);
 }
 
@@ -312,8 +359,10 @@ bool SessionStore::StorageKeyMatchesLocalSession(
     const std::string& storage_key) const {
   std::string session_tag;
   int tab_node_id;
-  bool success = DecodeStorageKey(storage_key, &session_tag, &tab_node_id);
-  DCHECK(success);
+  EntityType type;
+  bool success =
+      DecodeStorageKey(storage_key, &session_tag, &tab_node_id, &type);
+  CHECK(success, base::NotFatalUntil::M158);
   return session_tag == local_session_info_.session_tag;
 }
 
@@ -326,9 +375,9 @@ std::string SessionStore::GetTabClientTagForTest(const std::string& session_tag,
 // static
 void SessionStore::OnStoreCreated(
     std::unique_ptr<Builder> builder,
-    const absl::optional<syncer::ModelError>& error,
-    std::unique_ptr<ModelTypeStore> underlying_store) {
-  DCHECK(builder);
+    const std::optional<syncer::ModelError>& error,
+    std::unique_ptr<DataTypeStore> underlying_store) {
+  CHECK(builder, base::NotFatalUntil::M158);
 
   if (error) {
     std::move(builder->callback)
@@ -337,7 +386,7 @@ void SessionStore::OnStoreCreated(
     return;
   }
 
-  DCHECK(underlying_store);
+  CHECK(underlying_store, base::NotFatalUntil::M158);
   builder->underlying_store = std::move(underlying_store);
 
   Builder* builder_copy = builder.get();
@@ -348,9 +397,10 @@ void SessionStore::OnStoreCreated(
 // static
 void SessionStore::OnReadAllMetadata(
     std::unique_ptr<Builder> builder,
-    const absl::optional<syncer::ModelError>& error,
+    const std::optional<syncer::ModelError>& error,
     std::unique_ptr<syncer::MetadataBatch> metadata_batch) {
-  DCHECK(builder);
+  TRACE_EVENT0("sync", "sync_sessions::SessionStore::OnReadAllMetadata");
+  CHECK(builder, base::NotFatalUntil::M158);
 
   if (error) {
     std::move(builder->callback)
@@ -359,7 +409,7 @@ void SessionStore::OnReadAllMetadata(
     return;
   }
 
-  DCHECK(metadata_batch);
+  CHECK(metadata_batch, base::NotFatalUntil::M158);
   builder->metadata_batch = std::move(metadata_batch);
 
   Builder* builder_copy = builder.get();
@@ -374,8 +424,9 @@ void SessionStore::OnReadAllMetadata(
 // static
 void SessionStore::OnReadAllData(
     std::unique_ptr<Builder> builder,
-    const absl::optional<syncer::ModelError>& error) {
-  DCHECK(builder);
+    const std::optional<syncer::ModelError>& error) {
+  TRACE_EVENT0("sync", "sync_sessions::SessionStore::OnReadAllData");
+  CHECK(builder, base::NotFatalUntil::M158);
 
   if (error) {
     std::move(builder->callback)
@@ -395,16 +446,31 @@ void SessionStore::OnReadAllData(
   auto session_store = base::WrapUnique(new SessionStore(
       builder->local_session_info, std::move(builder->underlying_store),
       std::move(builder->initial_data),
-      builder->metadata_batch->GetAllMetadata(), builder->sessions_client));
+      builder->metadata_batch->GetAllMetadata(),
+      builder->sessions_client.get()));
 
   std::move(builder->callback)
-      .Run(/*error=*/absl::nullopt, std::move(session_store),
+      .Run(/*error=*/std::nullopt, std::move(session_store),
            std::move(builder->metadata_batch));
+}
+
+// static
+std::unique_ptr<SessionStore> SessionStore::RecreateEmptyStore(
+    SessionStore::SessionInfo local_session_info_without_session_tag,
+    std::unique_ptr<syncer::DataTypeStore> underlying_store,
+    const std::string& cache_guid,
+    SyncSessionsClient* sessions_client) {
+  local_session_info_without_session_tag.session_tag = cache_guid;
+  // WrapUnique() used because constructor is private.
+  return base::WrapUnique(new SessionStore(
+      local_session_info_without_session_tag, std::move(underlying_store),
+      std::map<std::string, sync_pb::SessionSpecifics>(),
+      syncer::EntityMetadataMap(), sessions_client));
 }
 
 SessionStore::SessionStore(
     const SessionInfo& local_session_info,
-    std::unique_ptr<syncer::ModelTypeStore> underlying_store,
+    std::unique_ptr<syncer::DataTypeStore> underlying_store,
     std::map<std::string, sync_pb::SessionSpecifics> initial_data,
     const syncer::EntityMetadataMap& initial_metadata,
     SyncSessionsClient* sessions_client)
@@ -416,7 +482,8 @@ SessionStore::SessionStore(
       local_session_info_.session_tag, local_session_info_.client_name,
       local_session_info_.device_type, local_session_info_.device_form_factor);
 
-  DCHECK(store_);
+  CHECK(store_, base::NotFatalUntil::M158);
+  CHECK(sessions_client_, base::NotFatalUntil::M158);
 
   DVLOG(1) << "Initializing session store with " << initial_data.size()
            << " restored entities and " << initial_metadata.size()
@@ -450,27 +517,25 @@ SessionStore::SessionStore(
       // view of local window/tabs.
 
       // Two local headers cannot coexist because they would use the very same
-      // storage key in ModelTypeStore/LevelDB.
-      DCHECK(!found_local_header);
+      // storage key in DataTypeStore/LevelDB.
+      CHECK(!found_local_header, base::NotFatalUntil::M158);
       found_local_header = true;
 
       UpdateTrackerWithSpecifics(specifics, mtime, &session_tracker_);
       DVLOG(1) << "Loaded local header.";
-    } else {
-      DCHECK(specifics.has_tab());
-
+    } else if (specifics.has_tab()) {
       // This is a valid old tab node, add it to the tracker and associate
       // it (using the new tab id).
       DVLOG(1) << "Associating local tab " << specifics.tab().tab_id()
                << " with node " << specifics.tab_node_id();
 
-      // TODO(mastiz): Move call to ReassociateLocalTab() into
-      // UpdateTrackerWithSpecifics(), possibly merge with OnTabNodeSeen(). Also
-      // consider merging this branch with processing of foreign tabs above.
       session_tracker_.ReassociateLocalTab(
           specifics.tab_node_id(),
           SessionID::FromSerializedValue(specifics.tab().tab_id()));
       UpdateTrackerWithSpecifics(specifics, mtime, &session_tracker_);
+    } else {
+      // Unreachable because `AreValidSpecifics()` was checked above.
+      NOTREACHED();
     }
   }
 
@@ -489,12 +554,22 @@ std::unique_ptr<syncer::DataBatch> SessionStore::GetSessionDataForKeys(
   // Decode |storage_keys| into a map that can be fed to
   // SerializePartialTrackerToSpecifics().
   std::map<std::string, std::set<int>> session_tag_to_node_ids;
+
   for (const std::string& storage_key : storage_keys) {
     std::string session_tag;
     int tab_node_id;
-    bool success = DecodeStorageKey(storage_key, &session_tag, &tab_node_id);
-    DCHECK(success);
-    session_tag_to_node_ids[session_tag].insert(tab_node_id);
+    EntityType type;
+    bool success =
+        DecodeStorageKey(storage_key, &session_tag, &tab_node_id, &type);
+    CHECK(success, base::NotFatalUntil::M158);
+    switch (type) {
+      case EntityType::kHeader:
+      case EntityType::kTab:
+        session_tag_to_node_ids[session_tag].insert(tab_node_id);
+        break;
+      case EntityType::kScreenshotDeprecated:
+        NOTREACHED();
+    }
   }
   // Run the actual serialization into a data batch.
   auto batch = std::make_unique<syncer::MutableDataBatch>();
@@ -503,7 +578,7 @@ std::unique_ptr<syncer::DataBatch> SessionStore::GetSessionDataForKeys(
       base::BindRepeating(
           [](syncer::MutableDataBatch* batch, const std::string& session_name,
              sync_pb::SessionSpecifics* specifics) {
-            DCHECK(AreValidSpecifics(*specifics));
+            CHECK(AreValidSpecifics(*specifics), base::NotFatalUntil::M158);
             // Local variable used to avoid assuming argument evaluation order.
             const std::string storage_key = GetStorageKey(*specifics);
             batch->Put(storage_key, MoveToEntityData(session_name, specifics));
@@ -519,7 +594,7 @@ std::unique_ptr<syncer::DataBatch> SessionStore::GetAllSessionData() const {
       base::BindRepeating(
           [](syncer::MutableDataBatch* batch, const std::string& session_name,
              sync_pb::SessionSpecifics* specifics) {
-            DCHECK(AreValidSpecifics(*specifics));
+            CHECK(AreValidSpecifics(*specifics), base::NotFatalUntil::M158);
             // Local variable used to avoid assuming argument evaluation order.
             const std::string storage_key = GetStorageKey(*specifics);
             batch->Put(storage_key, MoveToEntityData(session_name, specifics));
@@ -534,20 +609,36 @@ std::unique_ptr<SessionStore::WriteBatch> SessionStore::CreateWriteBatch(
   // requirement).
   return std::make_unique<WriteBatch>(
       store_->CreateWriteBatch(),
-      base::BindOnce(&ModelTypeStore::CommitWriteBatch,
+      base::BindOnce(&DataTypeStore::CommitWriteBatch,
                      base::Unretained(store_.get())),
       std::move(error_handler), &session_tracker_);
 }
 
-void SessionStore::DeleteAllDataAndMetadata() {
-  session_tracker_.Clear();
-  store_->DeleteAllDataAndMetadata(base::DoNothing());
-  sessions_client_->GetSessionSyncPrefs()->ClearLegacySyncSessionsGUID();
+// static
+SessionStore::RecreateEmptyStoreCallback SessionStore::DeleteAllDataAndMetadata(
+    std::unique_ptr<syncer::MetadataChangeList> metadata_change_list,
+    std::unique_ptr<SessionStore> session_store) {
+  CHECK(session_store);
 
-  // At all times, the local session must be tracked.
-  session_tracker_.InitLocalSession(
-      local_session_info_.session_tag, local_session_info_.client_name,
-      local_session_info_.device_type, local_session_info_.device_form_factor);
+  // Clear the store and related info.
+  session_store->session_tracker_.Clear();
+  session_store->store_->DeleteAllDataAndMetadata(
+      std::move(metadata_change_list), base::DoNothing());
+
+  // Grab the necessary stuff for (synchronously) recreating a store later.
+  SessionInfo local_session_info = session_store->local_session_info_;
+  // After clearing data and metadata, the session tag may not be valid anymore.
+  // Clear it to prevent accidental reuse.
+  local_session_info.session_tag.clear();
+
+  std::unique_ptr<syncer::DataTypeStore> underlying_store =
+      std::move(session_store->store_);
+
+  session_store.reset();
+
+  return base::BindOnce(&SessionStore::RecreateEmptyStore,
+                        std::move(local_session_info),
+                        std::move(underlying_store));
 }
 
 }  // namespace sync_sessions

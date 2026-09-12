@@ -7,10 +7,14 @@
 
 #include "build/build_config.h"
 #include "content/public/common/isolated_world_ids.h"
-
+// LINT.IfChange
+// When changing this file, ChromeIsolatedWorldIds.java must be updated as well.
 enum ChromeIsolatedWorldIDs {
   // Isolated world ID for Chrome Translate.
   ISOLATED_WORLD_ID_TRANSLATE = content::ISOLATED_WORLD_ID_CONTENT_END + 1,
+
+  // Isolated world ID for Indigo.
+  ISOLATED_WORLD_ID_INDIGO,
 
   // Isolated world ID for internal Chrome features.
   ISOLATED_WORLD_ID_CHROME_INTERNAL,
@@ -25,5 +29,5 @@ enum ChromeIsolatedWorldIDs {
   // to this number.
   ISOLATED_WORLD_ID_EXTENSIONS
 };
-
+// LINT.ThenChange(//chrome/android/java/src/org/chromium/chrome/browser/common/ChromeIsolatedWorldIds.java)
 #endif  // CHROME_COMMON_CHROME_ISOLATED_WORLD_IDS_H_

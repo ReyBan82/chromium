@@ -12,11 +12,13 @@
 
 #include "base/component_export.h"
 #include "build/build_config.h"
+#include "components/viz/common/resources/shared_image_format.h"
 #include "gpu/vulkan/semaphore_handle.h"
 #include "ui/gfx/buffer_types.h"
+#include "ui/gfx/color_space.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/gpu_memory_buffer.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/gpu_memory_buffer_handle.h"
+#include "ui/gfx/native_ui_types.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "base/android/scoped_hardware_buffer_handle.h"
@@ -24,7 +26,6 @@
 
 namespace gfx {
 class GpuFence;
-struct GpuMemoryBufferHandle;
 }  // namespace gfx
 
 namespace gpu {
@@ -41,7 +42,8 @@ struct VulkanYCbCrInfo;
 class COMPONENT_EXPORT(VULKAN) VulkanImplementation {
  public:
   explicit VulkanImplementation(bool use_swiftshader = false,
-                                bool allow_protected_memory = false);
+                                bool allow_protected_memory = false,
+                                bool force_native = false);
 
   VulkanImplementation(const VulkanImplementation&) = delete;
   VulkanImplementation& operator=(const VulkanImplementation&) = delete;
@@ -77,22 +79,23 @@ class COMPONENT_EXPORT(VULKAN) VulkanImplementation {
       VkFence vk_fence) = 0;
 
   // Creates a semaphore that can be exported using GetSemaphoreHandle().
-  virtual VkSemaphore CreateExternalSemaphore(VkDevice vk_device) = 0;
+  virtual VkSemaphore CreateExternalSemaphore(VkDevice vk_device);
 
   // Import a VkSemaphore from a platform-specific handle.
   // Handle types that don't allow permanent import are imported with
   // temporary permanence (VK_SEMAPHORE_IMPORT_TEMPORARY_BIT).
   virtual VkSemaphore ImportSemaphoreHandle(VkDevice vk_device,
-                                            SemaphoreHandle handle) = 0;
+                                            SemaphoreHandle handle);
 
   // Export a platform-specific handle for a Vulkan semaphore. Returns a null
   // handle in case of a failure.
   virtual SemaphoreHandle GetSemaphoreHandle(VkDevice vk_device,
-                                             VkSemaphore vk_semaphore) = 0;
+                                             VkSemaphore vk_semaphore);
 
-  // Returns VkExternalMemoryHandleTypeFlagBits that should be set when creating
-  // external images and memory.
-  virtual VkExternalMemoryHandleTypeFlagBits GetExternalImageHandleType() = 0;
+  // Returns VkExternalSemaphoreHandleTypeFlagBits that should be used when
+  // creating and exporting external semaphores.
+  virtual VkExternalSemaphoreHandleTypeFlagBits
+  GetExternalSemaphoreHandleType() = 0;
 
   // Returns true if the GpuMemoryBuffer of the specified type can be imported
   // into VkImage using CreateImageFromGpuMemoryHandle().
@@ -109,6 +112,9 @@ class COMPONENT_EXPORT(VULKAN) VulkanImplementation {
       gfx::Size size,
       VkFormat vk_format,
       const gfx::ColorSpace& color_space) = 0;
+
+  // Returns whether external semaphores are supported by this device.
+  virtual bool IsExternalSemaphoreSupported(VulkanDeviceQueue* device_queue);
 
 #if BUILDFLAG(IS_ANDROID)
   // Get the sampler ycbcr conversion information from the AHB.
@@ -131,7 +137,7 @@ class COMPONENT_EXPORT(VULKAN) VulkanImplementation {
       VkDevice device,
       zx::eventpair service_handle,
       zx::channel sysmem_token,
-      gfx::BufferFormat format,
+      viz::SharedImageFormat format,
       gfx::BufferUsage usage,
       gfx::Size size,
       size_t min_buffer_count,
@@ -140,10 +146,12 @@ class COMPONENT_EXPORT(VULKAN) VulkanImplementation {
 
   bool use_swiftshader() const { return use_swiftshader_; }
   bool allow_protected_memory() const { return allow_protected_memory_; }
+  bool force_native() const { return force_native_; }
 
  private:
   const bool use_swiftshader_;
   const bool allow_protected_memory_;
+  const bool force_native_;
 };
 
 COMPONENT_EXPORT(VULKAN)

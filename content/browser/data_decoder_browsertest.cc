@@ -23,7 +23,6 @@
 #include "services/data_decoder/public/cpp/decode_image.h"
 #include "services/data_decoder/public/mojom/data_decoder_service.mojom.h"
 #include "services/data_decoder/public/mojom/image_decoder.mojom.h"
-#include "services/data_decoder/public/mojom/json_parser.mojom.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 using ::testing::Pair;
@@ -38,8 +37,9 @@ namespace {
 bool ReadTestFile(const base::FilePath& relative_path,
                   std::vector<uint8_t>& output) {
   base::FilePath source_root_dir;
-  if (!base::PathService::Get(base::DIR_SOURCE_ROOT, &source_root_dir))
+  if (!base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &source_root_dir)) {
     return false;
+  }
 
   std::string file_contents_as_string;
   {
@@ -53,23 +53,6 @@ bool ReadTestFile(const base::FilePath& relative_path,
   for (const char& c : file_contents_as_string)
     output.push_back(c);
 
-  return true;
-}
-
-// Populates `out_measurement_value` and returns true on success (i.e. if the
-// `metric_name` has a single measurement in `histograms`).  Otherwise returns
-// false.
-bool GetSingleMeasurement(const base::HistogramTester& histograms,
-                          const char* metric_name,
-                          base::TimeDelta& out_measurement_value) {
-  DCHECK(metric_name);
-
-  std::vector<base::Bucket> buckets = histograms.GetAllSamples(metric_name);
-  if (buckets.size() != 1u)
-    return false;
-
-  EXPECT_EQ(1u, buckets.size());
-  out_measurement_value = base::Milliseconds(buckets.front().min);
   return true;
 }
 
@@ -104,7 +87,7 @@ class ServiceProcessObserver : public ServiceProcessHost::Observer {
   }
 
  private:
-  absl::optional<base::RunLoop> launch_wait_loop_;
+  std::optional<base::RunLoop> launch_wait_loop_;
   int instances_started_ = 0;
 };
 
@@ -128,25 +111,27 @@ IN_PROC_BROWSER_TEST_F(DataDecoderBrowserTest, LaunchIsolated) {
   ServiceProcessObserver observer;
 
   // Verifies that separate DataDecoder client objects will launch separate
-  // service processes. We also bind a JsonParser interface to ensure that the
-  // instances don't go idle.
+  // service processes. We also bind an ImageDecoder interface to ensure that
+  // the instances don't go idle.
   data_decoder::DataDecoder decoder1;
-  mojo::Remote<data_decoder::mojom::JsonParser> parser1;
-  decoder1.GetService()->BindJsonParser(parser1.BindNewPipeAndPassReceiver());
+  mojo::Remote<data_decoder::mojom::ImageDecoder> image_decoder1;
+  decoder1.GetService()->BindImageDecoder(
+      image_decoder1.BindNewPipeAndPassReceiver());
   observer.WaitForNextLaunch();
   EXPECT_EQ(1, observer.instances_started());
 
   data_decoder::DataDecoder decoder2;
-  mojo::Remote<data_decoder::mojom::JsonParser> parser2;
-  decoder2.GetService()->BindJsonParser(parser2.BindNewPipeAndPassReceiver());
+  mojo::Remote<data_decoder::mojom::ImageDecoder> image_decoder2;
+  decoder2.GetService()->BindImageDecoder(
+      image_decoder2.BindNewPipeAndPassReceiver());
   observer.WaitForNextLaunch();
   EXPECT_EQ(2, observer.instances_started());
 
   // Both interfaces should be connected end-to-end.
-  parser1.FlushForTesting();
-  parser2.FlushForTesting();
-  EXPECT_TRUE(parser1.is_connected());
-  EXPECT_TRUE(parser2.is_connected());
+  image_decoder1.FlushForTesting();
+  image_decoder2.FlushForTesting();
+  EXPECT_TRUE(image_decoder1.is_connected());
+  EXPECT_TRUE(image_decoder2.is_connected());
 }
 
 IN_PROC_BROWSER_TEST_F(DataDecoderBrowserTest, DecodeImageIsolated) {
@@ -173,32 +158,6 @@ IN_PROC_BROWSER_TEST_F(DataDecoderBrowserTest, DecodeImageIsolated) {
         std::move(callback));
     run_loop.Run();
   }
-
-  FetchHistogramsFromChildProcesses();
-  EXPECT_THAT(
-      histograms.GetTotalCountsForPrefix("Security.DataDecoder"),
-      UnorderedElementsAre(
-          Pair("Security.DataDecoder.Image.Isolated.EndToEndTime", 1),
-          Pair("Security.DataDecoder.Image.Isolated.ProcessOverhead", 1),
-          Pair("Security.DataDecoder.Image.DecodingTime", 1)));
-
-  base::TimeDelta end_to_end_duration_estimate;
-  EXPECT_TRUE(GetSingleMeasurement(
-      histograms, "Security.DataDecoder.Image.Isolated.EndToEndTime",
-      end_to_end_duration_estimate));
-
-  base::TimeDelta overhead_estimate;
-  EXPECT_TRUE(GetSingleMeasurement(
-      histograms, "Security.DataDecoder.Image.Isolated.ProcessOverhead",
-      overhead_estimate));
-
-  base::TimeDelta decoding_duration_estimate;
-  EXPECT_TRUE(GetSingleMeasurement(histograms,
-                                   "Security.DataDecoder.Image.DecodingTime",
-                                   decoding_duration_estimate));
-
-  EXPECT_LE(decoding_duration_estimate, end_to_end_duration_estimate);
-  EXPECT_LE(overhead_estimate, end_to_end_duration_estimate);
 }
 
 IN_PROC_BROWSER_TEST_F(DataDecoderBrowserTest, DecodeImage) {
@@ -227,61 +186,6 @@ IN_PROC_BROWSER_TEST_F(DataDecoderBrowserTest, DecodeImage) {
         std::move(callback));
     run_loop.Run();
   }
-
-  FetchHistogramsFromChildProcesses();
-  EXPECT_THAT(
-      histograms.GetTotalCountsForPrefix("Security.DataDecoder"),
-      UnorderedElementsAre(
-          Pair("Security.DataDecoder.Image.Reusable.EndToEndTime", 1),
-          Pair("Security.DataDecoder.Image.Reusable.ProcessOverhead", 1),
-          Pair("Security.DataDecoder.Image.DecodingTime", 1)));
-
-  base::TimeDelta end_to_end_duration_estimate;
-  EXPECT_TRUE(GetSingleMeasurement(
-      histograms, "Security.DataDecoder.Image.Reusable.EndToEndTime",
-      end_to_end_duration_estimate));
-
-  base::TimeDelta overhead_estimate;
-  EXPECT_TRUE(GetSingleMeasurement(
-      histograms, "Security.DataDecoder.Image.Reusable.ProcessOverhead",
-      overhead_estimate));
-
-  base::TimeDelta decoding_duration_estimate;
-  EXPECT_TRUE(GetSingleMeasurement(histograms,
-                                   "Security.DataDecoder.Image.DecodingTime",
-                                   decoding_duration_estimate));
-
-  EXPECT_LE(decoding_duration_estimate, end_to_end_duration_estimate);
-  EXPECT_LE(overhead_estimate, end_to_end_duration_estimate);
-}
-
-IN_PROC_BROWSER_TEST_F(DataDecoderBrowserTest,
-                       NoCallbackAfterDestruction_Json) {
-  base::RunLoop run_loop;
-
-  auto decoder = std::make_unique<data_decoder::DataDecoder>();
-  auto* raw_decoder = decoder.get();
-
-  // Android's in-process parser can complete synchronously, so queue the
-  // delete task first unlike in the other tests.
-  base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(
-      FROM_HERE, std::move(decoder));
-
-  bool got_callback = false;
-  raw_decoder->ParseJson(
-      "[1, 2, 3]",
-      base::BindOnce(
-          [](bool* got_callback, base::ScopedClosureRunner quit_closure_runner,
-             data_decoder::DataDecoder::ValueOrError result) {
-            *got_callback = true;
-          },
-          // Pass the quit closure as a ScopedClosureRunner, so that the loop
-          // is quit if the callback is destroyed un-run or after it runs.
-          &got_callback, base::ScopedClosureRunner(run_loop.QuitClosure())));
-
-  run_loop.Run();
-
-  EXPECT_FALSE(got_callback);
 }
 
 IN_PROC_BROWSER_TEST_F(DataDecoderBrowserTest, NoCallbackAfterDestruction_Xml) {

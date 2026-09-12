@@ -71,19 +71,22 @@ Position AdjustedSelectionStartForStyleComputation(const Position& position) {
 bool EditingStyleUtilities::HasAncestorVerticalAlignStyle(Node& node,
                                                           CSSValueID value) {
   for (Node& runner : NodeTraversal::InclusiveAncestorsOf(node)) {
-    auto* ancestor_style =
-        MakeGarbageCollected<CSSComputedStyleDeclaration>(&runner);
-    if (GetIdentifierValue(ancestor_style, CSSPropertyID::kVerticalAlign) ==
-        value)
-      return true;
+    if (Element* ancestor = DynamicTo<Element>(runner)) {
+      auto* ancestor_style =
+          MakeGarbageCollected<CSSComputedStyleDeclaration>(ancestor);
+      if (GetIdentifierValue(ancestor_style, CSSPropertyID::kVerticalAlign) ==
+          value) {
+        return true;
+      }
+    }
   }
   return false;
 }
 
 EditingStyle*
 EditingStyleUtilities::CreateWrappingStyleForAnnotatedSerialization(
-    ContainerNode* context) {
-  // TODO(editing-dev): Change this function to take |const ContainerNode&|.
+    Element* context) {
+  // TODO(editing-dev): Change this function to take |const Element&|.
   // Tracking bug for this is crbug.com/766448.
   DCHECK(context);
   EditingStyle* wrapping_style = MakeGarbageCollected<EditingStyle>(
@@ -94,7 +97,7 @@ EditingStyleUtilities::CreateWrappingStyleForAnnotatedSerialization(
   // has applied. This helps us get the color of content pasted into
   // blockquotes right.
   wrapping_style->RemoveStyleAddedByElement(To<HTMLElement>(EnclosingNodeOfType(
-      FirstPositionInOrBeforeNode(*context), IsMailHTMLBlockquoteElement,
+      FirstPositionInOrBeforeNode(*context), IsMailHtmlBlockquoteElement,
       kCanCrossEditingBoundary)));
 
   // Call collapseTextDecorationProperties first or otherwise it'll copy the
@@ -106,7 +109,7 @@ EditingStyleUtilities::CreateWrappingStyleForAnnotatedSerialization(
 }
 
 EditingStyle* EditingStyleUtilities::CreateWrappingStyleForSerialization(
-    ContainerNode* context) {
+    Element* context) {
   DCHECK(context);
   EditingStyle* wrapping_style = MakeGarbageCollected<EditingStyle>();
 
@@ -115,7 +118,7 @@ EditingStyle* EditingStyleUtilities::CreateWrappingStyleForSerialization(
   for (Node& node : NodeTraversal::InclusiveAncestorsOf(*context)) {
     if (node.IsDocumentNode())
       break;
-    if (node.IsStyledElement() && !IsMailHTMLBlockquoteElement(&node)) {
+    if (node.IsStyledElement() && !IsMailHtmlBlockquoteElement(&node)) {
       wrapping_style->MergeInlineAndImplicitStyleOfElement(
           To<Element>(&node), EditingStyle::kDoNotOverrideValues,
           EditingStyle::kEditingPropertiesInEffect);
@@ -154,9 +157,9 @@ EditingStyle* EditingStyleUtilities::CreateStyleAtSelectionStart(
   // <b>hello</b>world should give you font-weight: bold.
   auto* position_node = DynamicTo<Text>(position.ComputeContainerNode());
   if (selection.IsRange() && position_node &&
-      position.ComputeOffsetInContainerNode() ==
-          static_cast<int>(position_node->length()))
+      position.ComputeOffsetInContainerNode() == position_node->length()) {
     position = NextVisuallyDistinctCandidate(position);
+  }
 
   Element* element = AssociatedElementOf(position);
   if (!element)
@@ -207,7 +210,7 @@ bool EditingStyleUtilities::IsTransparentColorValue(const CSSValue* css_value) {
   if (!css_value)
     return true;
   if (auto* color_value = DynamicTo<cssvalue::CSSColor>(css_value))
-    return !color_value->Value().Alpha();
+    return color_value->Value().IsFullyTransparent();
   if (auto* identifier_value = DynamicTo<CSSIdentifierValue>(css_value))
     return identifier_value->GetValueID() == CSSValueID::kTransparent;
   return false;
@@ -229,7 +232,11 @@ bool EditingStyleUtilities::HasTransparentBackgroundColor(
 
 const CSSValue* EditingStyleUtilities::BackgroundColorValueInEffect(
     Node* node) {
-  for (Node* ancestor = node; ancestor; ancestor = ancestor->parentNode()) {
+  Element* ancestor = DynamicTo<Element>(node);
+  if (!ancestor && node) {
+    ancestor = FlatTreeTraversal::ParentElement(*node);
+  }
+  for (; ancestor; ancestor = FlatTreeTraversal::ParentElement(*ancestor)) {
     auto* ancestor_style =
         MakeGarbageCollected<CSSComputedStyleDeclaration>(ancestor);
     if (!HasTransparentBackgroundColor(ancestor_style)) {

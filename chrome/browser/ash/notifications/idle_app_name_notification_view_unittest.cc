@@ -4,12 +4,12 @@
 
 #include "chrome/browser/ash/notifications/idle_app_name_notification_view.h"
 
+#include "ash/constants/chrome_switches.h"
 #include "base/command_line.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/test_extension_system.h"
-#include "chrome/common/chrome_switches.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
 #include "extensions/common/manifest_constants.h"
@@ -25,35 +25,34 @@ const char kTestAppName[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 class IdleAppNameNotificationViewTest : public BrowserWithTestWindowTest {
  public:
-  IdleAppNameNotificationViewTest()
-      : BrowserWithTestWindowTest(Browser::TYPE_NORMAL) {}
+  IdleAppNameNotificationViewTest() = default;
 
   IdleAppNameNotificationViewTest(const IdleAppNameNotificationViewTest&) =
       delete;
   IdleAppNameNotificationViewTest& operator=(
       const IdleAppNameNotificationViewTest&) = delete;
 
-  ~IdleAppNameNotificationViewTest() override {}
+  ~IdleAppNameNotificationViewTest() override = default;
 
   void SetUp() override {
     // Add the application switch.
     base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
-        ::switches::kAppId, kTestAppName);
+        ash::chrome_switches::kAppId, kTestAppName);
 
     BrowserWithTestWindowTest::SetUp();
 
-    base::Value::Dict manifest;
+    base::DictValue manifest;
     manifest.Set(extensions::manifest_keys::kName, "Test");
     manifest.Set(extensions::manifest_keys::kVersion, "1");
     manifest.Set(extensions::manifest_keys::kManifestVersion, 2);
     manifest.Set(extensions::manifest_keys::kDescription, "Test app");
     manifest.SetByDottedPath("author.email", "Someone");
 
-    std::string error;
+    std::u16string error;
     correct_extension_ = extensions::Extension::Create(
         base::FilePath(), extensions::mojom::ManifestLocation::kUnpacked,
         manifest, extensions::Extension::NO_FLAGS, kTestAppName, &error);
-    base::Value::Dict manifest2;
+    base::DictValue manifest2;
     manifest2.Set(extensions::manifest_keys::kName, "Test");
     manifest2.Set(extensions::manifest_keys::kVersion, "1");
     manifest2.Set(extensions::manifest_keys::kDescription, "Test app");
@@ -86,7 +85,8 @@ class IdleAppNameNotificationViewTest : public BrowserWithTestWindowTest {
 // message).
 TEST_F(IdleAppNameNotificationViewTest, CheckTooEarlyDestruction) {
   // Create a message which is visible for 10ms and fades in/out for 5ms.
-  std::make_unique<IdleAppNameNotificationView>(10, 5, correct_extension());
+  std::ignore =
+      std::make_unique<IdleAppNameNotificationView>(10, 5, correct_extension());
 }
 
 // Check that the message gets created and it destroys itself after time.

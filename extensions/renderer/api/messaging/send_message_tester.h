@@ -5,8 +5,11 @@
 #ifndef EXTENSIONS_RENDERER_API_MESSAGING_SEND_MESSAGE_TESTER_H_
 #define EXTENSIONS_RENDERER_API_MESSAGING_SEND_MESSAGE_TESTER_H_
 
+#include <optional>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
+#include "extensions/common/api/messaging/signing_certificate.h"
 #include "v8/include/v8-forward.h"
 
 namespace extensions {
@@ -51,7 +54,8 @@ class SendMessageTester {
   v8::Local<v8::Value> TestSendNativeMessage(
       const std::string& args,
       const std::string& expected_message,
-      const std::string& expected_application_name);
+      const std::string& expected_application_name,
+      SigningCertificates expected_android_certificates = {});
 
   // Tests the connect API with the specified expectations.
   void TestConnect(const std::string& args,
@@ -59,10 +63,10 @@ class SendMessageTester {
                    const MessageTarget& expected_target);
 
  private:
-  enum Method {
-    SEND_REQUEST,
-    SEND_MESSAGE,
-    SEND_NATIVE_MESSAGE,
+  enum class Method {
+    kSendRequest,
+    kSendMessage,
+    kSendNativeMessage,
   };
 
   // Common handler for testing sendMessage and sendRequest.
@@ -73,8 +77,8 @@ class SendMessageTester {
                                 Method method,
                                 v8::Local<v8::Value>& out_value);
 
-  TestIPCMessageSender* ipc_sender_;
-  ScriptContext* script_context_;
+  raw_ptr<TestIPCMessageSender> ipc_sender_;
+  raw_ptr<ScriptContext> script_context_;
   int next_port_id_;
   std::string api_namespace_;
 };

@@ -5,11 +5,12 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_POLICY_CONTAINER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_POLICY_CONTAINER_H_
 
+#include "base/unguessable_token.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
-#include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/network/public/mojom/content_security_policy.mojom-blink-forward.h"
 #include "services/network/public/mojom/referrer_policy.mojom-shared.h"
 #include "services/network/public/mojom/web_sandbox_flags.mojom-shared.h"
+#include "third_party/blink/public/common/tokens/tokens.h"
 #include "third_party/blink/public/mojom/frame/policy_container.mojom-blink.h"
 #include "third_party/blink/public/platform/web_policy_container.h"
 #include "third_party/blink/renderer/core/core_export.h"
@@ -41,23 +42,23 @@ class CORE_EXPORT PolicyContainer {
 
   // Change the Referrer Policy and sync the new policy with the corresponding
   // PolicyContainerHost.
-  void UpdateReferrerPolicy(network::mojom::blink::ReferrerPolicy policy);
+  // A new initiator state token should be generated and passed to this
+  // function. The same initiator state token should then be passed to
+  // ExecutionContext::SetInitiatorStateToken.
+  void UpdateReferrerPolicy(network::mojom::blink::ReferrerPolicy policy,
+                            const InitiatorStateToken& initiator_state_token);
   network::mojom::blink::ReferrerPolicy GetReferrerPolicy() const;
 
   // Append |policies| to the list of Content Security Policy and sync them with
   // the PolicyContainerHost.
+  // A new initiator state token should be generated and passed to this
+  // function. The same initiator state token should then be passed to
+  // ExecutionContext::SetInitiatorStateToken.
   void AddContentSecurityPolicies(
-      Vector<network::mojom::blink::ContentSecurityPolicyPtr> policies);
+      Vector<network::mojom::blink::ContentSecurityPolicyPtr> policies,
+      const InitiatorStateToken& initiator_state_token);
 
   const mojom::blink::PolicyContainerPolicies& GetPolicies() const;
-
-  // Return a keep alive handle for the browser process' PolicyContainerHost. If
-  // that PolicyContainerHost is owned by a RenderFrameHost, holding a keep
-  // alive handle ensures that the PolicyContainerHost will still be retrievable
-  // via RenderFrameHostImpl::GetPolicyContainerHost, even if the
-  // RenderFrameHost has been deleted in between.
-  mojo::PendingRemote<mojom::blink::PolicyContainerHostKeepAliveHandle>
-  IssueKeepAliveHandle();
 
  private:
   mojom::blink::PolicyContainerPoliciesPtr policies_;

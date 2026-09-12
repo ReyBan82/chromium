@@ -4,13 +4,21 @@
 
 package org.chromium.printing;
 
-import android.print.PrintDocumentAdapter;
+import android.os.ParcelFileDescriptor;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * This interface describes a class which is responsible of talking to the printing backend.
  *
- * Such class communicates with a {@link PrintingContext}, which in turn talks to the native side.
+ * <p>Such class communicates with a {@link PrintingContext}, which in turn talks to the native
+ * side.
+ *
+ * <p>Implementations are typically scoped to a specific {@link org.chromium.ui.base.WindowAndroid}
+ * to allow concurrent printing operations in different windows.
  */
+@NullMarked
 public interface PrintingController {
     /**
      * @return Dots Per Inch (DPI) of the currently selected printer.
@@ -18,10 +26,9 @@ public interface PrintingController {
     int getDpi();
 
     /**
-     * @return The file descriptor number of the file into which Chromium will write the PDF.  This
-     *         is provided to us by {@link PrintDocumentAdapter#onWrite}.
+     * @return The ParcelFileDescriptor of the file into which Chromium will write the PDF.
      */
-    int getFileDescriptor();
+    @Nullable ParcelFileDescriptor getParcelFileDescriptor();
 
     /**
      * @return The media height in mils (thousands of an inch).
@@ -37,38 +44,29 @@ public interface PrintingController {
      * @return The individual page numbers of the document to be printed, of null if all pages are
      *         to be printed.  The numbers are zero indexed.
      */
-    int[] getPageNumbers();
+    int @Nullable [] getPageNumbers();
 
     /**
      * @return If the controller is busy.
      */
-    public boolean isBusy();
+    boolean isBusy();
 
     /**
      * Initiates the printing process for the Android API.
      *
-     * @param printable An object capable of starting native side PDF generation, i.e. typically
-     *                  a Tab.
+     * @param printable An object capable of starting native side PDF generation, i.e. typically a
+     *     Tab.
      * @param printManager The print manager that manages the print job.
      */
-    void startPrint(final Printable printable, PrintManagerDelegate printManager);
+    void startPrint(Printable printable, PrintManagerDelegate printManager);
 
     /**
      * This method is called by the native side to signal PDF writing process is completed.
      *
      * @param pageCount How many pages native side wrote to PDF file descriptor. Non-positive value
-     *                  indicates native side writing failed.
+     *     indicates native side writing failed.
      */
     void pdfWritingDone(int pageCount);
-
-    /**
-     * Sets PrintingContext currently associated with the controller.
-     *
-     * This needs to be called after PrintingContext object is created. Firstly its native
-     * counterpart is created, and then the Java. PrintingController implementation
-     * needs this to interact with the native side, since JNI is built on PrintingContext.
-     **/
-    void setPrintingContext(final PrintingContext printingContext);
 
     /**
      * @return Whether a complete PDF generation cycle inside Chromium has been completed.
@@ -79,19 +77,29 @@ public interface PrintingController {
      * Sets the data required to initiate a printing process. The process can later be started using
      * {@link #startPendingPrint()}.
      *
-     * @param printable An object capable of starting native side PDF generation, i.e. typically
-     *     a Tab.
+     * @param printable An object capable of starting native side PDF generation, i.e. typically a
+     *     Tab.
      * @param printManager The print manager that manages the print job.
-     * @param renderProcessId
      * @param renderFrameId renderProcessId and renderFrameId are a pair of integers used to figure
-     *                      out which frame is going to be printed in native side.
+     *     out which frame is going to be printed in native side.
      */
-    void setPendingPrint(final Printable printable, final PrintManagerDelegate printManager,
-            final int renderProcessId, final int renderFrameId);
+    void setPendingPrint(
+            Printable printable,
+            PrintManagerDelegate printManager,
+            int renderProcessId,
+            int renderFrameId);
 
     /**
      * Starts printing, provided that the current object already has sufficient data to start the
      * process. (using {@link #setPendingPrint(Printable, PrintManagerDelegate)} for example)
+     *
+     * <p>If printing cannot be started (e.g. the Activity is finishing or destroyed, or the
+     * framework fails to initiate the print job), the callback set via {@link
+     * #setPendingPrintCallback(Runnable)} is invoked immediately. If the controller is already
+     * busy, this call is a no-op and the pending callback is neither consumed nor invoked.
      */
     void startPendingPrint();
+
+    /** Sets the callback to be run when the print dialog is completed, closed, or fails to open. */
+    void setPendingPrintCallback(Runnable callback);
 }

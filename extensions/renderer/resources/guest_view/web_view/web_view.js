@@ -10,6 +10,7 @@ var $Element = require('safeMethods').SafeMethods.$Element;
 var GuestView = require('guestView').GuestView;
 var GuestViewContainer = require('guestViewContainer').GuestViewContainer;
 var GuestViewInternalNatives = requireNative('guest_view_internal');
+var tagLogMessage = require('guestViewConstants').tagLogMessage;
 var WebViewConstants = require('webViewConstants').WebViewConstants;
 var WebViewAttributes = require('webViewAttributes').WebViewAttributes;
 var WebViewEvents = require('webViewEvents').WebViewEvents;
@@ -21,7 +22,6 @@ function WebViewImpl(webviewElement) {
   this.pendingZoomFactor_ = null;
   this.userAgentOverride = null;
   this.setupElementProperties();
-  new WebViewEvents(this, this.viewInstanceId);
 }
 
 WebViewImpl.prototype.__proto__ = GuestViewContainer.prototype;
@@ -51,6 +51,10 @@ WebViewImpl.prototype.setupAttributes = function() {
   }
 };
 
+WebViewImpl.prototype.setupEvents = function() {
+  new WebViewEvents(this);
+};
+
 // Initiates navigation once the <webview> element is attached to the DOM.
 WebViewImpl.prototype.onElementAttached = function() {
   // Mark all attributes as dirty on attachment.
@@ -64,7 +68,6 @@ WebViewImpl.prototype.onElementAttached = function() {
 
 // Resets some state upon detaching <webview> element from the DOM.
 WebViewImpl.prototype.onElementDetached = function() {
-  this.guest.destroy();
   for (var i in this.attributes) {
     this.attributes[i].dirty = false;
   }
@@ -130,9 +133,10 @@ WebViewImpl.prototype.onSizeChanged = function(webViewEvent) {
 };
 
 WebViewImpl.prototype.createGuest = function() {
-  this.guest.create(this.buildParams(), $Function.bind(function() {
-    this.attachWindow();
-  }, this));
+  this.guest.create(
+      this.viewInstanceId, this.buildParams(), $Function.bind(function() {
+        this.attachWindow();
+      }, this));
 };
 
 WebViewImpl.prototype.onFrameNameChanged = function(name) {
@@ -165,8 +169,9 @@ WebViewImpl.prototype.buildContainerParams = function() {
   params.userAgentOverride = this.userAgentOverride;
   for (var i in this.attributes) {
     var value = this.attributes[i].getValueIfDirty();
-    if (value)
+    if (value) {
       params[i] = value;
+    }
   }
   return params;
 };
@@ -189,7 +194,8 @@ WebViewImpl.prototype.attachWindow = function(opt_guestInstanceId) {
 // Shared implementation of executeScript() and insertCSS().
 WebViewImpl.prototype.executeCode = function(func, args) {
   if (!this.guest.getId()) {
-    window.console.error(WebViewConstants.ERROR_MSG_CANNOT_INJECT_SCRIPT);
+    window.console.error(tagLogMessage(
+        this.getLogTag(), WebViewConstants.ERROR_MSG_CANNOT_INJECT_SCRIPT));
     return false;
   }
 
@@ -210,6 +216,18 @@ WebViewImpl.prototype.executeCode = function(func, args) {
   return true;
 };
 
+WebViewImpl.prototype.captureVisibleRegion = function(options, callback) {
+  if (location.protocol === 'chrome-untrusted:') {
+    throw new Error(
+        WebViewConstants.ERROR_MSG_UNSUPPORTED_API_IN_CHROME_UNTRUSTED);
+  }
+  if (!this.guest.getId()) {
+    return false;
+  }
+  WebViewInternal.captureVisibleRegion(this.guest.getId(), options, callback);
+  return true;
+};
+
 WebViewImpl.prototype.setUserAgentOverride = function(userAgentOverride) {
   this.userAgentOverride = userAgentOverride;
   if (!this.guest.getId()) {
@@ -223,6 +241,10 @@ WebViewImpl.prototype.setUserAgentOverride = function(userAgentOverride) {
 
 WebViewImpl.prototype.loadDataWithBaseUrl = function(
     dataUrl, baseUrl, virtualUrl) {
+  if (location.protocol === 'chrome-untrusted:') {
+    throw new Error(
+        WebViewConstants.ERROR_MSG_UNSUPPORTED_API_IN_CHROME_UNTRUSTED);
+  }
   if (!this.guest.getId()) {
     return;
   }
@@ -252,6 +274,10 @@ WebViewImpl.prototype.makeElementFullscreen = function() {
   GuestViewInternalNatives.RunWithGesture($Function.bind(function() {
     $Element.webkitRequestFullScreen(this.element);
   }, this));
+};
+
+WebViewImpl.prototype.getLogTag = function() {
+  return 'webview';
 };
 
 // Exports.

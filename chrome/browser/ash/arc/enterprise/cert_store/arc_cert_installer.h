@@ -11,11 +11,12 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "chrome/services/keymanagement/public/mojom/cert_store_types.mojom.h"
+#include "chromeos/ash/services/keymanagement/public/mojom/cert_store_types.mojom.h"
 #include "components/policy/core/common/remote_commands/remote_command_job.h"
 #include "components/policy/core/common/remote_commands/remote_commands_queue.h"
-#include "crypto/rsa_private_key.h"
+#include "crypto/keypair.h"
 #include "net/cert/scoped_nss_types.h"
 
 class Profile;
@@ -31,7 +32,7 @@ namespace arc {
 // This class is basically a value holder associating metadata relevant to an
 // NSS CERTCertificate.
 struct CertDescription {
-  CertDescription(crypto::RSAPrivateKey* placeholder_key,
+  CertDescription(crypto::keypair::PrivateKey placeholder_key,
                   CERTCertificate* nss_cert,
                   keymanagement::mojom::ChapsSlot slot,
                   std::string label,
@@ -43,7 +44,7 @@ struct CertDescription {
   ~CertDescription();
 
   // The dummy key to be installed in ARC as a placeholder for |nss_cert|.
-  std::unique_ptr<crypto::RSAPrivateKey> placeholder_key;
+  crypto::keypair::PrivateKey placeholder_key;
   // The NSS certificate that corresponds to this object.
   net::ScopedCERTCertificate nss_cert;
   // The chaps slot where this key is stored.
@@ -96,7 +97,7 @@ class ArcCertInstaller : public policy::RemoteCommandsQueue::Observer {
   void OnJobStarted(policy::RemoteCommandJob* command) override {}
   void OnJobFinished(policy::RemoteCommandJob* command) override;
 
-  Profile* profile_;  // not owned
+  raw_ptr<Profile> profile_;  // not owned
 
   // A valid callback when the caller of |InstallArcCerts| method is awaiting
   // for a response.

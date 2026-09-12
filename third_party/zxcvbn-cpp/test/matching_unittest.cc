@@ -6,9 +6,10 @@
 
 #include <algorithm>
 #include <string>
-#include <unordered_map>
+#include <string_view>
 #include <vector>
 
+#include "base/test/task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/zxcvbn-cpp/native-src/zxcvbn/adjacency_graphs.hpp"
@@ -159,7 +160,8 @@ bool operator==(const Match& lhs, const ExpectedDateMatch& rhs) {
 }  // namespace
 
 TEST(ZxcvbnTest, DictionaryMatching) {
-  std::vector<std::vector<base::StringPiece>> test_dicts = {
+  base::test::TaskEnvironment task_environment;
+  std::vector<std::vector<std::string_view>> test_dicts = {
       {"motherboard", "mother", "board", "abcd", "cdef"},
       {"z", "8", "99", "$", "asdf1234&*"},
   };
@@ -258,7 +260,7 @@ TEST(ZxcvbnTest, DictionaryMatching) {
     // matches against all words in provided dictionaries
     for (const auto& test_dict : test_dicts) {
       rank_t expected_rank = 0;
-      for (base::StringPiece ranked_word : test_dict) {
+      for (std::string_view ranked_word : test_dict) {
         expected_rank++;
         // skip words that contain others
         if (ranked_word == "motherboard")
@@ -281,7 +283,7 @@ TEST(ZxcvbnTest, DictionaryMatching) {
     // default dictionaries
     SetRankedDicts(RankedDicts({{"wow"}}));
     std::vector<Match> matches =
-        dictionary_match("wow", default_ranked_dicts());
+        dictionary_match("wow", default_ranked_dicts()->Data());
     EXPECT_THAT(matches, ElementsAre(ExpectedDictionaryMatch{
                              .i = 0,
                              .j = 2,
@@ -293,7 +295,7 @@ TEST(ZxcvbnTest, DictionaryMatching) {
 }
 
 TEST(ZxcvbnTest, ReverseDictionaryMatching) {
-  std::vector<std::vector<base::StringPiece>> test_dicts = {
+  std::vector<std::vector<std::string_view>> test_dicts = {
       {"123", "321", "456", "654"},
   };
 
@@ -369,7 +371,7 @@ TEST(ZxcvbnTest, L33tMatching) {
   }
 
   {
-    std::vector<std::vector<base::StringPiece>> dicts = {
+    std::vector<std::vector<std::string_view>> dicts = {
         {"aac", "password", "paassword", "asdf0"},
         {"cgo"},
     };
@@ -927,6 +929,7 @@ TEST(ZxcvbnTest, DateMatching) {
 }
 
 TEST(ZxcvbnTest, Omnimatch) {
+  base::test::TaskEnvironment task_environment;
   EXPECT_THAT(omnimatch(""), IsEmpty());
 
   SetRankedDicts(RankedDicts({{"rosebud", "maelstrom"}}));

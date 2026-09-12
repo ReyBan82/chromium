@@ -6,9 +6,11 @@
 #define UI_EVENTS_GESTURE_DETECTION_FILTERED_GESTURE_PROVIDER_H_
 
 #include <stdint.h>
+
 #include <memory>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/ref_counted.h"
 #include "ui/events/gesture_detection/gesture_event_data_packet.h"
 #include "ui/events/gesture_detection/gesture_provider.h"
 #include "ui/events/gesture_detection/touch_disposition_gesture_filter.h"
@@ -18,7 +20,8 @@ namespace ui {
 // Provides filtered gesture detection and dispatch given a sequence of touch
 // events and touch event acks.
 class GESTURE_DETECTION_EXPORT FilteredGestureProvider final
-    : public ui::TouchDispositionGestureFilterClient,
+    : public base::RefCounted<FilteredGestureProvider>,
+      public ui::TouchDispositionGestureFilterClient,
       public ui::GestureProviderClient {
  public:
   // |client| will be offered all gestures detected by the |gesture_provider_|
@@ -29,7 +32,7 @@ class GESTURE_DETECTION_EXPORT FilteredGestureProvider final
   FilteredGestureProvider(const FilteredGestureProvider&) = delete;
   FilteredGestureProvider& operator=(const FilteredGestureProvider&) = delete;
 
-  ~FilteredGestureProvider() final;
+  void Shutdown();
 
   void UpdateConfig(const GestureProvider::Config& config);
 
@@ -48,9 +51,15 @@ class GESTURE_DETECTION_EXPORT FilteredGestureProvider final
 
   // To be called upon asynchronous and synchronous ack of an event that was
   // forwarded after a successful call to |OnTouchEvent()|.
+  // |event_latency_metadata| is provided only if the touch event or
+  // corresponding touch event was blocked before sending to the Renderer. This
+  // definition of blocking is not related to the value of
+  // |is_source_touch_event_set_blocking|.
   void OnTouchEventAck(uint32_t unique_event_id,
                        bool event_consumed,
-                       bool is_source_touch_event_set_blocking);
+                       bool is_source_touch_event_set_blocking,
+                       const std::optional<EventLatencyMetadata>&
+                           event_latency_metadata = std::nullopt);
 
   void ResetGestureHandlingState();
 
@@ -63,8 +72,16 @@ class GESTURE_DETECTION_EXPORT FilteredGestureProvider final
   void SetDoubleTapSupportForPlatformEnabled(bool enabled);
   void SetDoubleTapSupportForPageEnabled(bool enabled);
   const ui::MotionEvent* GetCurrentDownEvent() const;
+  const ui::MotionEvent* GetLastEventWithoutHistory() const;
+  void OnUnconfirmedTapConvertedToTap();
+  void DisableScrollUpdateCompensation();
+
+  GestureDetector* GetGestureDetectorForTesting();
 
  private:
+  friend class base::RefCounted<FilteredGestureProvider>;
+  ~FilteredGestureProvider() override;
+
   // GestureProviderClient implementation.
   void OnGestureEvent(const ui::GestureEventData& event) override;
   bool RequiresDoubleTapGestureEvents() const override;
@@ -72,7 +89,7 @@ class GESTURE_DETECTION_EXPORT FilteredGestureProvider final
   // TouchDispositionGestureFilterClient implementation.
   void ForwardGestureEvent(const ui::GestureEventData& event) override;
 
-  const raw_ptr<GestureProviderClient> client_;
+  raw_ptr<GestureProviderClient> client_;
 
   std::unique_ptr<ui::GestureProvider> gesture_provider_;
   ui::TouchDispositionGestureFilter gesture_filter_;

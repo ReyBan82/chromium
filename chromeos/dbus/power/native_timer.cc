@@ -33,6 +33,27 @@ const PowerManagerClient::TimerId kErrorId = -2;
 
 }  // namespace
 
+struct NativeTimer::StartTimerParams {
+  StartTimerParams() = default;
+  StartTimerParams(base::TimeTicks absolute_expiration_time,
+                   base::OnceClosure timer_expiration_callback,
+                   OnStartNativeTimerCallback result_callback)
+      : absolute_expiration_time(absolute_expiration_time),
+        timer_expiration_callback(std::move(timer_expiration_callback)),
+        result_callback(std::move(result_callback)) {}
+
+  StartTimerParams(const StartTimerParams&) = delete;
+  StartTimerParams& operator=(const StartTimerParams&) = delete;
+
+  StartTimerParams(StartTimerParams&&) = default;
+
+  ~StartTimerParams() = default;
+
+  base::TimeTicks absolute_expiration_time;
+  base::OnceClosure timer_expiration_callback;
+  OnStartNativeTimerCallback result_callback;
+};
+
 bool NativeTimer::simulate_timer_creation_failure_for_testing_ = false;
 
 NativeTimer::NativeTimer(const std::string& tag)
@@ -73,27 +94,6 @@ NativeTimer::~NativeTimer() {
   PowerManagerClient::Get()->DeleteArcTimers(tag_, base::DoNothing());
 }
 
-struct NativeTimer::StartTimerParams {
-  StartTimerParams() = default;
-  StartTimerParams(base::TimeTicks absolute_expiration_time,
-                   base::OnceClosure timer_expiration_callback,
-                   OnStartNativeTimerCallback result_callback)
-      : absolute_expiration_time(absolute_expiration_time),
-        timer_expiration_callback(std::move(timer_expiration_callback)),
-        result_callback(std::move(result_callback)) {}
-
-  StartTimerParams(const StartTimerParams&) = delete;
-  StartTimerParams& operator=(const StartTimerParams&) = delete;
-
-  StartTimerParams(StartTimerParams&&) = default;
-
-  ~StartTimerParams() = default;
-
-  base::TimeTicks absolute_expiration_time;
-  base::OnceClosure timer_expiration_callback;
-  OnStartNativeTimerCallback result_callback;
-};
-
 void NativeTimer::Start(base::TimeTicks absolute_expiration_time,
                         base::OnceClosure timer_expiration_callback,
                         OnStartNativeTimerCallback result_callback) {
@@ -132,13 +132,8 @@ void NativeTimer::Start(base::TimeTicks absolute_expiration_time,
                      std::move(result_callback)));
 }
 
-void NativeTimer::SimulateTimerCreationFailureForTesting() {
-  simulate_timer_creation_failure_for_testing_ = true;
-}
-
-void NativeTimer::OnCreateTimer(
-    base::ScopedFD expiration_fd,
-    absl::optional<std::vector<int32_t>> timer_ids) {
+void NativeTimer::OnCreateTimer(base::ScopedFD expiration_fd,
+                                std::optional<std::vector<int32_t>> timer_ids) {
   DCHECK(expiration_fd.is_valid());
   if (!timer_ids.has_value()) {
     LOG(ERROR) << "No timers returned";
@@ -203,8 +198,8 @@ void NativeTimer::OnExpiration() {
   DCHECK(expiration_fd_.is_valid());
   uint64_t timer_data;
   std::vector<base::ScopedFD> fds;
-  if (!base::UnixDomainSocket::RecvMsg(expiration_fd_.get(), &timer_data,
-                                       sizeof(timer_data), &fds)) {
+  if (!base::UnixDomainSocket::RecvMsg(
+          expiration_fd_.get(), base::byte_span_from_ref(timer_data), &fds)) {
     PLOG(ERROR) << "Bad data in expiration fd";
   }
 
@@ -245,6 +240,16 @@ void NativeTimer::ProcessAndResetInFlightStartParams(bool result) {
 
   // This state has been processed and must be reset to indicate that.
   in_flight_start_timer_params_.reset();
+}
+
+NativeTimer::ScopedFailureSimulatorForTesting::
+    ScopedFailureSimulatorForTesting() {
+  NativeTimer::simulate_timer_creation_failure_for_testing_ = true;
+}
+
+NativeTimer::ScopedFailureSimulatorForTesting::
+    ~ScopedFailureSimulatorForTesting() {
+  NativeTimer::simulate_timer_creation_failure_for_testing_ = false;
 }
 
 }  // namespace chromeos

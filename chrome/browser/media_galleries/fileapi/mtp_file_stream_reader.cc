@@ -35,8 +35,7 @@ MTPFileStreamReader::MTPFileStreamReader(
       expected_modification_time_(expected_modification_time),
       media_header_validated_(!do_media_header_validation) {}
 
-MTPFileStreamReader::~MTPFileStreamReader() {
-}
+MTPFileStreamReader::~MTPFileStreamReader() = default;
 
 int MTPFileStreamReader::Read(net::IOBuffer* buf,
                               int buf_len,
@@ -60,7 +59,8 @@ int MTPFileStreamReader::Read(net::IOBuffer* buf,
       header_buf_len = buf_len;
     } else {
       // Otherwise, make a special request for the header.
-      header_buf = base::MakeRefCounted<net::IOBuffer>(net::kMaxBytesToSniff);
+      header_buf =
+          base::MakeRefCounted<net::IOBufferWithSize>(net::kMaxBytesToSniff);
       header_buf_len = net::kMaxBytesToSniff;
     }
 
@@ -79,8 +79,7 @@ int MTPFileStreamReader::Read(net::IOBuffer* buf,
   return net::ERR_IO_PENDING;
 }
 
-int64_t MTPFileStreamReader::GetLength(
-    net::Int64CompletionOnceCallback callback) {
+int64_t MTPFileStreamReader::GetLength(GetLengthCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
 
   MTPDeviceAsyncDelegate* delegate =
@@ -147,7 +146,8 @@ void MTPFileStreamReader::FinishGetLength(
   DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
 
   if (!VerifySnapshotTime(expected_modification_time_, file_info)) {
-    std::move(get_length_callback_).Run(net::ERR_UPLOAD_FILE_CHANGED);
+    std::move(get_length_callback_)
+        .Run(base::unexpected(net::ERR_UPLOAD_FILE_CHANGED));
     return;
   }
 
@@ -161,7 +161,8 @@ void MTPFileStreamReader::CallReadCallbackwithPlatformFileError(
 
 void MTPFileStreamReader::CallGetLengthCallbackWithPlatformFileError(
     base::File::Error file_error) {
-  std::move(get_length_callback_).Run(net::FileErrorToNetError(file_error));
+  std::move(get_length_callback_)
+      .Run(base::unexpected(net::FileErrorToNetError(file_error)));
 }
 
 void MTPFileStreamReader::ReadBytes(

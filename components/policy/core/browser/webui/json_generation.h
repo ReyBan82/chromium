@@ -6,15 +6,11 @@
 #define COMPONENTS_POLICY_CORE_BROWSER_WEBUI_JSON_GENERATION_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/values.h"
 #include "components/policy/policy_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-
-namespace base {
-class Value;
-}
 
 namespace policy {
 
@@ -68,9 +64,9 @@ struct POLICY_EXPORT JsonGenerationParams {
   std::string application_name;
   std::string channel_name;
   std::string processor_variation;
-  absl::optional<std::string> cohort_name;
-  absl::optional<std::string> os_name;
-  absl::optional<std::string> platform_name;
+  std::optional<std::string> cohort_name;
+  std::optional<std::string> os_name;
+  std::optional<std::string> platform_name;
 };
 
 // Generates a string of JSON containing |policy_values| along
@@ -78,13 +74,13 @@ struct POLICY_EXPORT JsonGenerationParams {
 // is stored in |params| and also information that is statically available.
 // Expects |policy_values| in the format PolicyValueProvider returns. Expects
 // |status| in the format policy::PolicyStatusProvider returns.
-POLICY_EXPORT std::string GenerateJson(base::Value::Dict policy_values,
-                                       base::Value::Dict status,
+POLICY_EXPORT std::string GenerateJson(base::DictValue policy_values,
+                                       base::DictValue status,
                                        const JsonGenerationParams& params);
 
 // Returns metadata about the current device/build, based both on what
 // is stored in |params| and also information that is statically available.
-POLICY_EXPORT base::Value::Dict GetChromeMetadataValue(
+POLICY_EXPORT base::DictValue GetChromeMetadataValue(
     const JsonGenerationParams& params);
 
 }  // namespace policy

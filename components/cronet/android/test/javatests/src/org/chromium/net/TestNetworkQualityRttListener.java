@@ -4,7 +4,8 @@
 
 package org.chromium.net;
 
-import static junit.framework.Assert.assertEquals;
+import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 
 import android.os.ConditionVariable;
 import android.util.SparseIntArray;
@@ -21,13 +22,14 @@ class TestNetworkQualityRttListener extends NetworkQualityRttListener {
     private int mRttObservationCount;
 
     // Holds the RTT observations counts indexed by source.
-    private SparseIntArray mRttObservationCountBySource = new SparseIntArray();
+    private final SparseIntArray mRttObservationCountBySource = new SparseIntArray();
 
     private Thread mExecutorThread;
 
-    /*
+    /**
      * Constructs a NetworkQualityRttListener that can listen to the RTT observations at various
      * layers of the network stack.
+     *
      * @param executor The executor on which the observations are reported.
      */
     TestNetworkQualityRttListener(Executor executor) {
@@ -49,7 +51,7 @@ class TestNetworkQualityRttListener extends NetworkQualityRttListener {
                 mExecutorThread = Thread.currentThread();
             }
             // Verify that the listener is always notified on the same thread.
-            assertEquals(mExecutorThread, Thread.currentThread());
+            assertThat(Thread.currentThread()).isEqualTo(mExecutorThread);
         }
     }
 
@@ -57,7 +59,9 @@ class TestNetworkQualityRttListener extends NetworkQualityRttListener {
      * Blocks until the first RTT observation at the URL request layer is received.
      */
     public void waitUntilFirstUrlRequestRTTReceived() {
-        mWaitForUrlRequestRtt.block();
+        assertWithMessage("RTT observation didn't arrive in time")
+                .that(mWaitForUrlRequestRtt.block(/* timeoutMs= */ 5000))
+                .isTrue();
     }
 
     public int rttObservationCount() {

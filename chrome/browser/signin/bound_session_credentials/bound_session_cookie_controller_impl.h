@@ -5,42 +5,44 @@
 #ifndef CHROME_BROWSER_SIGNIN_BOUND_SESSION_CREDENTIALS_BOUND_SESSION_COOKIE_CONTROLLER_IMPL_H_
 #define CHROME_BROWSER_SIGNIN_BOUND_SESSION_CREDENTIALS_BOUND_SESSION_COOKIE_CONTROLLER_IMPL_H_
 
-#include "chrome/browser/signin/bound_session_credentials/bound_session_cookie_controller.h"
-
 #include <memory>
-#include "base/functional/bind.h"
-#include "base/functional/callback_forward.h"
-#include "base/time/time.h"
-#include "chrome/browser/signin/bound_session_credentials/bound_session_refresh_cookie_fetcher.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
+#include "base/time/time.h"
+#include "base/timer/timer.h"
+#include "chrome/browser/signin/bound_session_credentials/bound_session_cookie_controller.h"
+#include "chrome/browser/signin/bound_session_credentials/bound_session_refresh_cookie_fetcher.h"
+#include "chrome/browser/signin/bound_session_credentials/rotation_debug_info.pb.h"
+#include "content/public/browser/storage_partition.h"
+#include "net/base/backoff_entry.h"
+#include "services/network/public/cpp/network_connection_tracker.h"
+#include "services/network/public/mojom/cookie_manager.mojom.h"
 #include "url/gurl.h"
 
-class SigninClient;
-class BoundSessionCookieFetcher;
+namespace unexportable_keys {
+class UnexportableKeyService;
+}  // namespace unexportable_keys
 
-// This class is responsible for tracking a single bound session cookie:
-// - It observers cookie changes
-// - Caches cookie expiry date
-// - Initiates a cookie refresh at creation time
-// - Receives requests to refresh cookie [on demand cookie refresh]
-// - Proactively schedule cookie refresh before it expires
-// - To execute a the refresh:
-//      (1) It requests an async signature from the [future] token binding
-//      service.
-//      (2) After receiving the signature, it creates a
-//      'BoundSessionRefreshCookieFetcher' to do the network refresh request.
-// - It is responsible on resuming blocked request for the managed domain on
-// cookie updates, persistent refresh errors or timeout.
-// - Monitors cookie changes and update the renderers
-class BoundSessionCookieControllerImpl : public BoundSessionCookieController {
+namespace content {
+class StoragePartition;
+}
+
+class BoundSessionCookieObserver;
+class SessionBindingHelper;
+
+class BoundSessionCookieControllerImpl
+    : public BoundSessionCookieController,
+      public network::NetworkConnectionTracker::NetworkConnectionObserver {
  public:
-  BoundSessionCookieControllerImpl(SigninClient* client,
-                                   const GURL& url,
-                                   const std::string& cookie_name,
-                                   Delegate* delegate);
-
-  void Initialize() override;
+  BoundSessionCookieControllerImpl(
+      unexportable_keys::UnexportableKeyService& key_service,
+      content::StoragePartition* storage_partition,
+      network::NetworkConnectionTracker* network_connection_tracker,
+      const bound_session_credentials::BoundSessionParams& bound_session_params,
+      Delegate* delegate,
+      bool is_off_the_record_profile);
 
   ~BoundSessionCookieControllerImpl() override;
 
@@ -49,6 +51,19 @@ class BoundSessionCookieControllerImpl : public BoundSessionCookieController {
   BoundSessionCookieControllerImpl& operator=(
       const BoundSessionCookieControllerImpl&) = delete;
 
+  // BoundSessionCookieController:
+  void Initialize(bool is_new_session) override;
+  void HandleRequestBlockedOnCookie(
+      chrome::mojom::BoundSessionRequestThrottledHandler::
+          HandleRequestBlockedOnCookieCallback resume_blocked_request) override;
+  void StopCookieRotation() override;
+  bool ShouldPauseThrottlingRequests() const override;
+  bound_session_credentials::RotationDebugInfo TakeDebugInfo() override;
+
+  // network::NetworkConnectionTracker::NetworkConnectionObserver:
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
+
  private:
   friend class BoundSessionCookieControllerImplTest;
 
@@ -56,16 +71,32 @@ class BoundSessionCookieControllerImpl : public BoundSessionCookieController {
   // `BoundSessionRefreshCookieFetcher`.
   using RefreshCookieFetcherFactoryForTesting =
       base::RepeatingCallback<std::unique_ptr<BoundSessionRefreshCookieFetcher>(
-          SigninClient* client,
+          network::mojom::CookieManager* cookie_manager,
           const GURL& url,
-          const std::string& cookie_name)>;
+          base::flat_set<std::string> cookie_names,
+          BoundSessionRefreshCookieFetcher::Trigger trigger)>;
 
-  std::unique_ptr<BoundSessionRefreshCookieFetcher> CreateRefreshCookieFetcher()
-      const;
+  std::unique_ptr<BoundSessionRefreshCookieFetcher> CreateRefreshCookieFetcher(
+      BoundSessionRefreshCookieFetcher::Trigger trigger) const;
+  void CreateBoundCookiesObservers();
 
-  void StartRefreshCookieRequest();
-  void SetCookieExpirationTimeAndNotify(const base::Time& expiration_time);
-  void OnCookieRefreshFetched(absl::optional<const base::Time> expiration_time);
+  bool AreAllCookiesFresh();
+  bool CanCreateRefreshCookieFetcher() const;
+  void MaybeRefreshCookie(BoundSessionRefreshCookieFetcher::Trigger trigger);
+
+  void SetCookieExpirationTimeAndNotify(const std::string& cookie_name,
+                                        base::Time expiration_time);
+  void OnCookieRefreshFetched(BoundSessionRefreshCookieFetcher::Result result);
+  void UpdateCookieFetcherBackoff(
+      BoundSessionRefreshCookieFetcher::Result result);
+  void RecordCookieRotationOutageMetricsIfNeeded(bool periodic);
+  void ResetCookieFetcherBackoff();
+  void MaybeScheduleCookieRotation(
+      BoundSessionRefreshCookieFetcher::Trigger trigger);
+  void MaybeStartResumeBlockedRequestsTimer();
+  void ResumeBlockedRequests(
+      chrome::mojom::ResumeBlockedRequestsTrigger trigger);
+  void OnResumeBlockedRequestsTimeout();
 
   void set_refresh_cookie_fetcher_factory_for_testing(
       RefreshCookieFetcherFactoryForTesting
@@ -74,10 +105,56 @@ class BoundSessionCookieControllerImpl : public BoundSessionCookieController {
         refresh_cookie_fetcher_factory_for_testing;
   }
 
-  const raw_ptr<SigninClient> client_;
+  const raw_ptr<content::StoragePartition> storage_partition_;
+  const raw_ptr<network::NetworkConnectionTracker> network_connection_tracker_;
+  const bool is_off_the_record_profile_;
+
+  std::vector<std::unique_ptr<BoundSessionCookieObserver>>
+      bound_cookies_observers_;
+
+  base::ScopedObservation<
+      network::NetworkConnectionTracker,
+      network::NetworkConnectionTracker::NetworkConnectionObserver>
+      network_connection_observer_{this};
+  // Also `true` while the initial connection state is unknown.
+  bool is_offline_ = true;
+
+  std::unique_ptr<SessionBindingHelper> session_binding_helper_;
   std::unique_ptr<BoundSessionRefreshCookieFetcher> refresh_cookie_fetcher_;
+  std::optional<std::string> cached_sec_session_challenge_response_;
+
+  std::vector<chrome::mojom::BoundSessionRequestThrottledHandler::
+                  HandleRequestBlockedOnCookieCallback>
+      resume_blocked_requests_;
+
+  // Single cookie rotation retry before releasing the first batch of throttled
+  // requests on transient errors.
+  // Reset on cookie rotation success.
+  size_t cookie_rotation_retries_on_transient_error_ = 0;
+  // Used to handle server outages.
+  net::BackoffEntry refresh_cookie_fetcher_backoff_;
+  std::optional<base::TimeTicks> cookie_rotation_outage_start_;
+
+  // Used to schedule cookie refresh preemptively or based on backoff in case of
+  // server experiencing outages.
+  base::OneShotTimer cookie_refresh_timer_;
+  // Used to release blocked requests after a timeout.
+  base::OneShotTimer resume_blocked_requests_timer_;
+  size_t successive_timeout_ = 0;
+
+  // Once set to `true`, the cookies rotation is stopped and all requests are
+  // throttled until the session is terminated (i.e. this field is never flipped
+  // back to `false`).
+  bool rotation_stopped_ = false;
+
+  // Used to call `OnCookieRotationStoppedTimeout` after the session has been
+  // stopped for more than a timeout threshold.
+  base::OneShotTimer rotation_stopped_timer_;
+
   RefreshCookieFetcherFactoryForTesting
       refresh_cookie_fetcher_factory_for_testing_;
+
+  bound_session_credentials::RotationDebugInfo debug_info_;
 };
 
 #endif  // CHROME_BROWSER_SIGNIN_BOUND_SESSION_CREDENTIALS_BOUND_SESSION_COOKIE_CONTROLLER_IMPL_H_

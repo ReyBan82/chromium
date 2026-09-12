@@ -4,102 +4,86 @@
 
 package org.chromium.chrome.browser.ui;
 
-import androidx.annotation.Nullable;
-
 import org.chromium.base.Callback;
 import org.chromium.base.CallbackController;
-import org.chromium.base.supplier.ObservableSupplier;
+import org.chromium.base.supplier.MonotonicObservableSupplier;
 import org.chromium.base.supplier.OneshotSupplier;
-import org.chromium.base.supplier.Supplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.ActivityTabProvider;
+import org.chromium.chrome.browser.browser_controls.BottomControlsLayer;
+import org.chromium.chrome.browser.browser_controls.BottomControlsStacker;
+import org.chromium.chrome.browser.browser_controls.BottomControlsStacker.LayerScrollBehavior;
+import org.chromium.chrome.browser.browser_controls.BottomControlsStacker.LayerVisibility;
+import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;
 import org.chromium.chrome.browser.browser_controls.BrowserControlsVisibilityManager;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayPanel;
-import org.chromium.chrome.browser.compositor.bottombar.OverlayPanelManager;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanel;
+import org.chromium.chrome.browser.compositor.overlay_panel.OverlayPanelManager;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider.LayoutStateObserver;
 import org.chromium.chrome.browser.layouts.LayoutType;
 import org.chromium.chrome.browser.lifecycle.DestroyObserver;
-import org.chromium.chrome.browser.tab.EmptyTabObserver;
 import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.browser.tab.TabObscuringHandler;
 import org.chromium.chrome.browser.tab.TabObserver;
-import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
-import org.chromium.chrome.browser.util.ChromeAccessibilityUtil;
-import org.chromium.chrome.features.start_surface.StartSurface;
-import org.chromium.chrome.features.start_surface.StartSurface.StateObserver;
-import org.chromium.chrome.features.start_surface.StartSurfaceState;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetContent;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
-import org.chromium.components.browser_ui.bottomsheet.BottomSheetController.StateChangeReason;
-import org.chromium.components.browser_ui.bottomsheet.EmptyBottomSheetObserver;
+import org.chromium.components.browser_ui.bottomsheet.BottomSheetObserver;
+import org.chromium.components.browser_ui.bottomsheet.BottomSheetUtils;
+import org.chromium.components.browser_ui.bottomsheet.ExpandedSheetHelper;
 import org.chromium.components.browser_ui.bottomsheet.ManagedBottomSheetController;
 import org.chromium.content_public.browser.SelectionPopupController;
 import org.chromium.content_public.browser.WebContents;
-import org.chromium.ui.modaldialog.ModalDialogManager;
-import org.chromium.ui.util.TokenHolder;
 import org.chromium.url.GURL;
+
+import java.util.function.Supplier;
 
 /**
  * A class that manages activity-specific interactions with the BottomSheet component that it
  * otherwise shouldn't know about.
  */
-class BottomSheetManager extends EmptyBottomSheetObserver implements DestroyObserver {
-    /** A means of accessing the focus state of the omibox. */
-    private final ObservableSupplier<Boolean> mOmniboxFocusStateSupplier;
+@NullMarked
+class BottomSheetManager implements BottomSheetObserver, DestroyObserver {
+    /** A means of accessing the focus state of the omnibox. */
+    private final MonotonicObservableSupplier<Boolean> mOmniboxFocusStateSupplier;
 
     /** An observer of the omnibox that suppresses the sheet when the omnibox is focused. */
     private final Callback<Boolean> mOmniboxFocusObserver;
 
     /** A listener for browser controls offset changes. */
-    private final BrowserControlsVisibilityManager.Observer mBrowserControlsObserver;
+    private final BrowserControlsStateProvider.Observer mBrowserControlsObserver;
+
+    private final BottomSheetLayer mBottomSheetLayer;
 
     /** A tab observer that is only attached to the active tab. */
     private final TabObserver mTabObserver;
 
     private final CallbackController mCallbackController;
 
-    /** The supplier of {@link StartSurface} instance. */
-    private final OneshotSupplier<StartSurface> mStartSurfaceSupplier;
-    private StateObserver mStartSurfaceStateObserver;
-
-    private final boolean mIsStartSurfaceRefactorEnabled;
     private final OneshotSupplier<LayoutStateProvider> mLayoutStateProviderSupplier;
-    private LayoutStateProvider.LayoutStateObserver mLayoutStateObserver;
+    private final LayoutStateProvider.LayoutStateObserver mLayoutStateObserver;
+
+    private final ExpandedSheetHelper mExpandedSheetHelper;
 
     /** A browser controls manager for polling browser controls offsets. */
-    private BrowserControlsVisibilityManager mBrowserControlsVisibilityManager;
-
-    /** A token for suppressing app modal dialogs. */
-    private int mAppModalToken = TokenHolder.INVALID_TOKEN;
-
-    /** A token for suppressing tab modal dialogs. */
-    private int mTabModalToken = TokenHolder.INVALID_TOKEN;
+    private final BrowserControlsVisibilityManager mBrowserControlsVisibilityManager;
 
     /**
      * A handle to the {@link ManagedBottomSheetController} this class manages interactions with.
      */
-    private ManagedBottomSheetController mSheetController;
+    private final ManagedBottomSheetController mSheetController;
+
+    private final BottomControlsStacker mBottomControlsStacker;
 
     /** A mechanism for accessing the currently active tab. */
-    private ActivityTabProvider mTabProvider;
-
-    /** A supplier of the activity's dialog manager. */
-    private Supplier<ModalDialogManager> mDialogManager;
-
-    /** A supplier of a snackbar manager for the bottom sheet. */
-    private Supplier<SnackbarManager> mSnackbarManager;
-
-    /** A delegate that provides the functionality of obscuring all tabs. */
-    private TabObscuringHandler mTabObscuringHandler;
-
-    /** A token held while the bottom sheet is obscuring all visible tabs. */
-    private TabObscuringHandler.Token mTabObscuringToken;
+    private final ActivityTabProvider mTabProvider;
 
     /** The manager for overlay panels to attach listeners to. */
-    private Supplier<OverlayPanelManager> mOverlayPanelManager;
+    private final Supplier<@Nullable OverlayPanelManager> mOverlayPanelManager;
+
+    private final Callback<@Nullable Tab> mOnActiveTabChanged = this::setActivityTab;
 
     /** The last known activity tab, if available. */
-    private Tab mLastActivityTab;
+    private @Nullable Tab mLastActivityTab;
 
     /**
      * Used to track whether the active content has a custom scrim lifecycle. This is kept here
@@ -111,112 +95,150 @@ class BottomSheetManager extends EmptyBottomSheetObserver implements DestroyObse
     /** The token used to enable browser controls persistence. */
     private int mPersistentControlsToken;
 
-    /** A token used to suppress the bottom sheet in Tab switcher. */
-    private int mTabSwitcherToken;
+    private final boolean mIsBottomSheetAsBrowserControlsEnabled;
 
-    public BottomSheetManager(ManagedBottomSheetController controller,
+    /**
+     * Creates a new instance of {@link BottomSheetManager}.
+     *
+     * @param controller The {@link ManagedBottomSheetController} to interact with.
+     * @param tabProvider The {@link ActivityTabProvider} to listen to tab changes.
+     * @param controlsVisibilityManager The {@link BrowserControlsVisibilityManager} to interact
+     *     with browser controls.
+     * @param expandedSheetHelper The {@link ExpandedSheetHelper} to notify about sheet expansion.
+     * @param omniboxFocusStateSupplier The supplier for omnibox focus state.
+     * @param overlayManager The supplier for {@link OverlayPanelManager}.
+     * @param layoutStateProviderSupplier The supplier for {@link LayoutStateProvider}.
+     * @param bottomControlsStacker The {@link BottomControlsStacker} to register this layer with.
+     * @param isBottomSheetAsBrowserControlsEnabled Whether bottom sheet acting as browser controls
+     *     is enabled for the current context.
+     */
+    public BottomSheetManager(
+            ManagedBottomSheetController controller,
             ActivityTabProvider tabProvider,
             BrowserControlsVisibilityManager controlsVisibilityManager,
-            Supplier<ModalDialogManager> dialogManager,
-            Supplier<SnackbarManager> snackbarManagerSupplier,
-            TabObscuringHandler obscuringDelegate,
-            ObservableSupplier<Boolean> omniboxFocusStateSupplier,
-            Supplier<OverlayPanelManager> overlayManager,
-            OneshotSupplier<StartSurface> startSurfaceSupplier,
+            ExpandedSheetHelper expandedSheetHelper,
+            MonotonicObservableSupplier<Boolean> omniboxFocusStateSupplier,
+            Supplier<@Nullable OverlayPanelManager> overlayManager,
             OneshotSupplier<LayoutStateProvider> layoutStateProviderSupplier,
-            boolean isStartSurfaceRefactorEnabled) {
+            BottomControlsStacker bottomControlsStacker,
+            boolean isBottomSheetAsBrowserControlsEnabled) {
         mSheetController = controller;
         mTabProvider = tabProvider;
         mBrowserControlsVisibilityManager = controlsVisibilityManager;
-        mDialogManager = dialogManager;
-        mSnackbarManager = snackbarManagerSupplier;
-        mTabObscuringHandler = obscuringDelegate;
         mOmniboxFocusStateSupplier = omniboxFocusStateSupplier;
         mOverlayPanelManager = overlayManager;
         mCallbackController = new CallbackController();
-        mIsStartSurfaceRefactorEnabled = isStartSurfaceRefactorEnabled;
+        mExpandedSheetHelper = expandedSheetHelper;
+        mBottomControlsStacker = bottomControlsStacker;
+        mIsBottomSheetAsBrowserControlsEnabled = isBottomSheetAsBrowserControlsEnabled;
 
-        // TODO(https://crbug.com/1315679): Remove |mStartSurfaceSupplier|, |mStartSurfaceState| and
-        // |mStartSurfaceStateObserver| after the refactor is enabled by default.
-        mStartSurfaceSupplier = startSurfaceSupplier;
-        if (!mIsStartSurfaceRefactorEnabled) {
-            mStartSurfaceSupplier.onAvailable(
-                    mCallbackController.makeCancelable(this::addStartSurfaceStateObserver));
-        }
+        mLayoutStateObserver =
+                new LayoutStateObserver() {
+                    // On switching to a new layout act as though this is a tab switch by clearing
+                    // all state. Use onStartedHiding to avoid the bottom sheet being visible
+                    // during the transition if there is one.
+                    @Override
+                    public void onStartedHiding(int layoutType) {
+                        if (layoutType != LayoutType.SIMPLE_ANIMATION) {
+                            mSheetController.clearRequestsAndHide();
+                        }
+                    }
+                };
 
         mLayoutStateProviderSupplier = layoutStateProviderSupplier;
         mLayoutStateProviderSupplier.onAvailable(
-                mCallbackController.makeCancelable(this::addLayoutStateObserver));
+                mCallbackController.makeCancelable(
+                        (provider) -> provider.addObserver(mLayoutStateObserver)));
 
         mSheetController.addObserver(this);
-        mSheetController.setAccessibilityUtil(ChromeAccessibilityUtil.get());
 
-        // TODO(1092686): We should wait to instantiate all of these observers until the bottom
-        //                sheet is actually used.
-        mTabObserver = new EmptyTabObserver() {
-            @Override
-            public void onPageLoadStarted(Tab tab, GURL url) {
-                controller.clearRequestsAndHide();
-            }
+        // TODO(crbug.com/40134698): We should wait to instantiate all of these observers until the
+        // bottom sheet is actually used.
+        mTabObserver =
+                new TabObserver() {
+                    @Override
+                    public void onPageLoadStarted(Tab tab, GURL url) {
+                        controller.clearRequestsAndHide();
+                    }
 
-            @Override
-            public void onCrash(Tab tab) {
-                controller.clearRequestsAndHide();
-            }
+                    @Override
+                    public void onCrash(Tab tab) {
+                        controller.clearRequestsAndHide();
+                    }
 
-            @Override
-            public void onDestroyed(Tab tab) {
-                if (mLastActivityTab != tab) return;
-                mLastActivityTab = null;
+                    @Override
+                    public void onDestroyed(Tab tab) {
+                        if (mLastActivityTab != tab) return;
+                        mLastActivityTab = null;
 
-                // Remove the suppressed sheet if its lifecycle is tied to the tab being destroyed.
-                controller.clearRequestsAndHide();
-            }
-        };
+                        // Remove the suppressed sheet if its lifecycle is tied to the tab being
+                        // destroyed.
+                        controller.clearRequestsAndHide();
+                    }
+                };
 
-        mTabProvider.addObserver(this::setActivityTab);
-        setActivityTab(mTabProvider.get());
+        mTabProvider.asObservable().addSyncObserverAndCallIfNonNull(mOnActiveTabChanged);
 
-        mBrowserControlsObserver = new BrowserControlsVisibilityManager.Observer() {
-            @Override
-            public void onControlsOffsetChanged(int topOffset, int topControlsMinHeightOffset,
-                    int bottomOffset, int bottomControlsMinHeightOffset, boolean needsAnimate) {
-                controller.setBrowserControlsHiddenRatio(
-                        mBrowserControlsVisibilityManager.getBrowserControlHiddenRatio());
-            }
-        };
-        mBrowserControlsVisibilityManager.addObserver(mBrowserControlsObserver);
+        mBrowserControlsObserver =
+                new BrowserControlsStateProvider.Observer() {
+                    @Override
+                    public void onControlsOffsetChanged(
+                            int topOffset,
+                            int topControlsMinHeightOffset,
+                            boolean topControlsMinHeightChanged,
+                            int bottomOffset,
+                            int bottomControlsMinHeightOffset,
+                            boolean bottomControlsMinHeightChanged,
+                            boolean requestNewFrame,
+                            boolean isVisibilityForced) {
+                        controller.setBrowserControlsHiddenRatio(
+                                mBrowserControlsVisibilityManager.getBottomControlHiddenRatio());
+                    }
 
-        mOmniboxFocusObserver = new Callback<Boolean>() {
-            /** A token held while this object is suppressing the bottom sheet. */
-            private int mToken;
+                    @Override
+                    public void onBottomControlsHeightChanged(
+                            int bottomControlsHeight, int bottomControlsMinHeight) {
+                        mSheetController.setBottomControlsOffset(bottomControlsHeight);
+                    }
+                };
 
-            @Override
-            public void onResult(Boolean focused) {
-                if (focused) {
-                    mToken = controller.suppressSheet(BottomSheetController.StateChangeReason.NONE);
-                } else {
-                    controller.unsuppressSheet(mToken);
-                }
-            }
-        };
-        mOmniboxFocusStateSupplier.addObserver(mOmniboxFocusObserver);
+        mBottomSheetLayer = new BottomSheetLayer();
+        if (mIsBottomSheetAsBrowserControlsEnabled) {
+            mSheetController.addObserver(mBottomSheetLayer);
+            mBottomControlsStacker.addLayer(mBottomSheetLayer);
+        } else {
+            mBrowserControlsVisibilityManager.addObserver(mBrowserControlsObserver);
+        }
+
+        mOmniboxFocusObserver =
+                new Callback<>() {
+                    /** A token held while this object is suppressing the bottom sheet. */
+                    private int mToken;
+
+                    @Override
+                    public void onResult(Boolean focused) {
+                        if (focused) {
+                            mToken =
+                                    controller.suppressSheet(
+                                            BottomSheetController.StateChangeReason.NONE);
+                        } else {
+                            controller.unsuppressSheet(mToken);
+                        }
+                    }
+                };
+        mOmniboxFocusStateSupplier.addSyncObserverAndPostIfNonNull(mOmniboxFocusObserver);
+        if (mIsBottomSheetAsBrowserControlsEnabled) {
+            mBottomSheetLayer.maybeUpdateLayerHeight();
+        }
     }
 
-    private void setActivityTab(Tab tab) {
-        // Temporarily suppress the sheet if entering a state where there is no activity
-        // tab and the Start surface homepage isn't showing.
-        updateSuppressionForTabSwitcher(tab,
-                mStartSurfaceSupplier.get() == null
-                        ? null
-                        : mStartSurfaceSupplier.get().getStartSurfaceState(),
-                mLayoutStateProviderSupplier.get() == null
-                        ? null
-                        : mLayoutStateProviderSupplier.get().getActiveLayoutType());
+    /** Returns the {@link BottomControlsLayer} for the bottom sheet. */
+    public BottomControlsLayer getBottomSheetControlsLayer() {
+        return mBottomSheetLayer;
+    }
 
+    private void setActivityTab(@Nullable Tab tab) {
         if (tab == null) return;
-
-        // If refocusing the same tab, simply unsuppress the sheet.
         if (mLastActivityTab == tab) return;
 
         // Move the observer to the new activity tab and clear the sheet.
@@ -226,113 +248,13 @@ class BottomSheetManager extends EmptyBottomSheetObserver implements DestroyObse
         mSheetController.clearRequestsAndHide();
     }
 
-    /**
-     * Called by both {@link StateObserver} and {@link HintlessActivityTabObserver} to update the
-     * suppression of the bottom sheet for Tab switcher.
-     * @param tab The current tab. It might be null when the Start surface or the Tab switcher is
-     *            showing.
-     * @param startSurfaceState The current state surface state when the Start surface is enabled,
-     *                          null otherwise. It's also null when the refactor is enabled.
-     * @param layoutType The current layout type, currently only used when the refactor is enabled.
-     */
-    private void updateSuppressionForTabSwitcher(@Nullable Tab tab,
-            @Nullable @StartSurfaceState Integer startSurfaceState,
-            @Nullable @LayoutType Integer layoutType) {
-        if (shouldSuppressForTabSwitcher(tab, startSurfaceState, layoutType)) {
-            if (mTabSwitcherToken == 0) {
-                mTabSwitcherToken = mSheetController.suppressSheet(StateChangeReason.COMPOSITED_UI);
-            }
-        } else {
-            mSheetController.unsuppressSheet(mTabSwitcherToken);
-            /**
-             * Reset the token after unsuppression. Without resetting the token, the bottom sheet
-             * won't be suppress again the next time entering Tab switcher. This is because the
-             * bottom sheet is only suppressed in Tab switcher if {@link mTabSwitcherToken} is 0 by
-             * the first observer who notices the event.
-             */
-            mTabSwitcherToken = 0;
-        }
-    }
-
-    private boolean shouldSuppressForTabSwitcher(Tab tab,
-            @StartSurfaceState Integer startSurfaceState,
-            @Nullable @LayoutType Integer layoutType) {
-        StartSurface startSurface = mStartSurfaceSupplier.get();
-
-        if (mIsStartSurfaceRefactorEnabled) {
-            if (layoutType == null) return tab == null;
-            if (layoutType == LayoutType.START_SURFACE) {
-                return false;
-            } else if (layoutType == LayoutType.TAB_SWITCHER) {
-                // If startSurface is not null,  start surface is enabled.
-                return startSurface != null;
-            }
-        } else {
-            if (startSurface == null || startSurfaceState == null) return tab == null;
-            if (startSurfaceState == StartSurfaceState.SHOWING_HOMEPAGE
-                    || startSurfaceState == StartSurfaceState.SHOWN_HOMEPAGE) {
-                return false;
-            } else if (startSurfaceState != StartSurfaceState.NOT_SHOWN
-                    && startSurfaceState != StartSurfaceState.DISABLED) {
-                return true;
-            }
-        }
-        return tab == null;
-    }
-
-    private void addStartSurfaceStateObserver(StartSurface startSurface) {
-        mStartSurfaceStateObserver = new StateObserver() {
-            private int mStartSurfaceState;
-            @Override
-            public void onStateChanged(
-                    int startSurfaceState, boolean shouldShowTabSwitcherToolbar) {
-                if (mStartSurfaceState == startSurfaceState) return;
-
-                assert startSurfaceState == startSurface.getStartSurfaceState();
-                mStartSurfaceState = startSurfaceState;
-                updateSuppressionForTabSwitcher(mTabProvider.get(), startSurfaceState, null);
-
-                if (startSurfaceState == StartSurfaceState.SHOWN_HOMEPAGE) {
-                    mSheetController.clearRequestsAndHide();
-                }
-            }
-        };
-        startSurface.addStateChangeObserver(mStartSurfaceStateObserver);
-    }
-
-    private void addLayoutStateObserver(LayoutStateProvider layoutStateProvider) {
-        if (!mIsStartSurfaceRefactorEnabled) return;
-
-        mLayoutStateObserver = new LayoutStateObserver() {
-            private @LayoutType int mLayoutType;
-            @Override
-            public void onFinishedShowing(int layoutType) {
-                if (mLayoutType == layoutType) return;
-
-                mLayoutType = layoutType;
-                updateSuppressionForTabSwitcher(mTabProvider.get(), null, mLayoutType);
-                if (mLayoutType == LayoutType.START_SURFACE) {
-                    mSheetController.clearRequestsAndHide();
-                }
-            }
-        };
-        layoutStateProvider.addObserver(mLayoutStateObserver);
-        // It is possible that the observer missed the first layout change event due to the
-        // layoutStateProvider being initialized too late during the startup. Call the observer's
-        // handling function now.
-        @LayoutType
-        int layout = layoutStateProvider.getActiveLayoutType();
-        if (layout != LayoutType.NONE) {
-            mLayoutStateObserver.onFinishedShowing(layout);
-        }
-    }
-
     @Override
     public void onSheetOpened(int reason) {
         if (mBrowserControlsVisibilityManager.getBrowserVisibilityDelegate() != null) {
             // Browser controls should stay visible until the sheet is closed.
             mPersistentControlsToken =
-                    mBrowserControlsVisibilityManager.getBrowserVisibilityDelegate()
+                    mBrowserControlsVisibilityManager
+                            .getBrowserVisibilityDelegate()
                             .showControlsPersistent();
         }
 
@@ -344,30 +266,23 @@ class BottomSheetManager extends EmptyBottomSheetObserver implements DestroyObse
             }
         }
 
-        if (mOverlayPanelManager.hasValue()
-                && mOverlayPanelManager.get().getActivePanel() != null) {
-            mOverlayPanelManager.get().getActivePanel().closePanel(
-                    OverlayPanel.StateChangeReason.UNKNOWN, true);
+        OverlayPanelManager overlayPanelManager = mOverlayPanelManager.get();
+        if (overlayPanelManager != null) {
+            OverlayPanel activePanel = overlayPanelManager.getActivePanel();
+            if (activePanel != null) {
+                activePanel.closePanel(OverlayPanel.StateChangeReason.UNKNOWN, true);
+            }
         }
 
         BottomSheetContent content = mSheetController.getCurrentSheetContent();
         // Content with a custom scrim lifecycle should not obscure the tab. The feature
         // is responsible for adding itself to the list of obscuring views when applicable.
-        if (content != null && content.hasCustomScrimLifecycle()) {
+        if (BottomSheetUtils.isSheetNonModal(content)) {
             mContentHasCustomScrimLifecycle = true;
             return;
         }
 
-        setIsObscuringAllTabs(true);
-
-        assert mAppModalToken == TokenHolder.INVALID_TOKEN;
-        assert mTabModalToken == TokenHolder.INVALID_TOKEN;
-        if (mDialogManager.get() != null) {
-            mAppModalToken =
-                    mDialogManager.get().suspendType(ModalDialogManager.ModalDialogType.APP);
-            mTabModalToken =
-                    mDialogManager.get().suspendType(ModalDialogManager.ModalDialogType.TAB);
-        }
+        mExpandedSheetHelper.onSheetExpanded();
     }
 
     @Override
@@ -375,67 +290,145 @@ class BottomSheetManager extends EmptyBottomSheetObserver implements DestroyObse
         if (mBrowserControlsVisibilityManager.getBrowserVisibilityDelegate() != null) {
             // Update the browser controls since they are permanently shown while the sheet is
             // open.
-            mBrowserControlsVisibilityManager.getBrowserVisibilityDelegate()
+            mBrowserControlsVisibilityManager
+                    .getBrowserVisibilityDelegate()
                     .releasePersistentShowingToken(mPersistentControlsToken);
         }
 
-        BottomSheetContent content = mSheetController.getCurrentSheetContent();
         // If the content has a custom scrim, it wasn't obscuring tabs.
         if (mContentHasCustomScrimLifecycle) {
             mContentHasCustomScrimLifecycle = false;
             return;
         }
 
-        setIsObscuringAllTabs(false);
-
-        // Tokens can be invalid if the sheet has a custom lifecycle.
-        if (mDialogManager.get() != null
-                && (mAppModalToken != TokenHolder.INVALID_TOKEN
-                        || mTabModalToken != TokenHolder.INVALID_TOKEN)) {
-            // If one modal dialog token is set, the other should be as well.
-            assert mAppModalToken != TokenHolder.INVALID_TOKEN
-                    && mTabModalToken != TokenHolder.INVALID_TOKEN;
-            mDialogManager.get().resumeType(ModalDialogManager.ModalDialogType.APP, mAppModalToken);
-            mDialogManager.get().resumeType(ModalDialogManager.ModalDialogType.TAB, mTabModalToken);
-        }
-        mAppModalToken = TokenHolder.INVALID_TOKEN;
-        mTabModalToken = TokenHolder.INVALID_TOKEN;
-    }
-
-    /**
-     * Set whether the bottom sheet is obscuring all tabs.
-     * @param isObscuring Whether the bottom sheet is considered to be obscuring.
-     */
-    private void setIsObscuringAllTabs(boolean isObscuring) {
-        if (isObscuring) {
-            assert mTabObscuringToken == null;
-            mTabObscuringToken =
-                    mTabObscuringHandler.obscure(TabObscuringHandler.Target.ALL_TABS_AND_TOOLBAR);
-        } else {
-            mTabObscuringHandler.unobscure(mTabObscuringToken);
-            mTabObscuringToken = null;
-        }
-    }
-
-    @Override
-    public void onSheetOffsetChanged(float heightFraction, float offsetPx) {
-        if (mSnackbarManager.get() != null) {
-            mSnackbarManager.get().dismissAllSnackbars();
-        }
+        mExpandedSheetHelper.onSheetCollapsed();
     }
 
     @Override
     public void onDestroy() {
+        if (mIsBottomSheetAsBrowserControlsEnabled) {
+            mBottomControlsStacker.removeLayer(mBottomSheetLayer);
+            mSheetController.removeObserver(mBottomSheetLayer);
+        } else {
+            mBrowserControlsVisibilityManager.removeObserver(mBrowserControlsObserver);
+        }
         mCallbackController.destroy();
         if (mLastActivityTab != null) mLastActivityTab.removeObserver(mTabObserver);
         mSheetController.removeObserver(this);
-        mBrowserControlsVisibilityManager.removeObserver(mBrowserControlsObserver);
+        mTabProvider.asObservable().removeObserver(mOnActiveTabChanged);
+
         mOmniboxFocusStateSupplier.removeObserver(mOmniboxFocusObserver);
-        if (mStartSurfaceSupplier.get() != null) {
-            mStartSurfaceSupplier.get().removeStateChangeObserver(mStartSurfaceStateObserver);
+        var layoutStateProvider = mLayoutStateProviderSupplier.get();
+        if (layoutStateProvider != null) {
+            layoutStateProvider.removeObserver(mLayoutStateObserver);
         }
-        if (mLayoutStateProviderSupplier.get() != null) {
-            mLayoutStateProviderSupplier.get().removeObserver(mLayoutStateObserver);
+    }
+
+    // Bottom controls layer that represents bottom sheet.
+    // When bottom sheet is used as controls, it will contribute the browser controls by the height
+    // of bottom sheet peek mode height;
+    // when bottom sheet is not used as controls, the layer will attach on top of the browser
+    // controls, making the controls non-scrollable.
+    private class BottomSheetLayer implements BottomSheetObserver, BottomControlsLayer {
+        private int mContributedHeight;
+        private int mContributedVisibility;
+
+        @Override
+        public void onSheetOpened(int reason) {
+            maybeUpdateLayerHeight();
+        }
+
+        @Override
+        public void onSheetStateChanged(int newState, int reason) {
+            maybeUpdateLayerHeight();
+        }
+
+        @Override
+        public void onSheetContentChanged(@Nullable BottomSheetContent newContent) {
+            maybeUpdateLayerHeight();
+        }
+
+        @Override
+        public void onContainerSizeChanged(int newWidth, int newHeight) {
+            maybeUpdateLayerHeight();
+        }
+
+        // BottomControlsLayer
+
+        @Override
+        public int getType() {
+            return BottomControlsStacker.LayerType.BOTTOM_SHEET;
+        }
+
+        @Override
+        public int getScrollBehavior() {
+            // When bottom sheet presents, we stop the rest of the browser controls from
+            // scrolling, regardless whether the content want to actAsBrowserControls.
+            // This is to avoid browser controls scroll off while the sheet is in PEEK mode,
+            // leaving a piece of blank on screen.
+            // In order to scroll the bottom sheet down with browser controls together is feasible,
+            // however it will never be in sync with the rest of the compositor views, so we are
+            // disabling this functionality.
+            return LayerScrollBehavior.NEVER_SCROLL_OFF;
+        }
+
+        @Override
+        public int getHeight() {
+            return mContributedHeight;
+        }
+
+        @Override
+        public int getLayerVisibility() {
+            return mSheetController.getSheetState() == BottomSheetController.SheetState.HIDDEN
+                    ? LayerVisibility.HIDDEN
+                    : LayerVisibility.VISIBLE;
+        }
+
+        @Override
+        public @Nullable Integer getBackgroundColor() {
+            return BottomSheetUtils.isContentActingAsBrowserControls(
+                            mSheetController, mIsBottomSheetAsBrowserControlsEnabled)
+                    ? mSheetController.getSheetBackgroundColor()
+                    : null;
+        }
+
+        @Override
+        public void onBrowserControlsOffsetUpdate(int layerYOffset) {
+            // The layerYOffset is the distance between the bottom of the layer and the bottom
+            // of the screen, so it does not include the bottom sheet's height. The value of
+            // `-layerYOffset` should equal to the visible height of the browser controls on screen.
+            // Early return is handled by `mSheetController` so dispatching same yOffset
+            // will not trigger addition layouts.
+            int offset = Math.max(-layerYOffset, 0);
+            mSheetController.setBottomControlsOffset(offset);
+
+            mSheetController.setBrowserControlsHiddenRatio(
+                    mBrowserControlsVisibilityManager.getBottomControlHiddenRatio());
+        }
+
+        private void maybeUpdateLayerHeight() {
+            int currentHeight = calculateContributedHeight();
+            int currentVisibility = getLayerVisibility();
+            if (currentHeight != mContributedHeight
+                    || currentVisibility != mContributedVisibility) {
+                mContributedHeight = currentHeight;
+                mContributedVisibility = currentVisibility;
+                mBottomControlsStacker.requestLayerUpdate(false);
+            }
+        }
+
+        private int calculateContributedHeight() {
+            if (!mIsBottomSheetAsBrowserControlsEnabled) {
+                return 0;
+            }
+            if (mSheetController.getSheetState() == BottomSheetController.SheetState.HIDDEN
+                    || mSheetController.isSheetHiding()) {
+                return 0;
+            }
+            return BottomSheetUtils.isContentActingAsBrowserControls(
+                            mSheetController, mIsBottomSheetAsBrowserControlsEnabled)
+                    ? mSheetController.getCurrentPeekHeightPx()
+                    : 0;
         }
     }
 }

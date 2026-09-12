@@ -6,6 +6,8 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_SUBAPPS_SUB_APPS_H_
 
 #include "third_party/blink/public/mojom/subapps/sub_apps_service.mojom-blink.h"
+#include "third_party/blink/renderer/bindings/core/v8/idl_types.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
@@ -15,19 +17,20 @@
 namespace blink {
 
 class ExceptionState;
-class Navigator;
-class ScriptPromise;
+class LocalDOMWindow;
 class ScriptState;
-class SubAppsAddParams;
+class SubAppsAddResponse;
+class SubAppsListResult;
+class SubAppsRemoveResponse;
 
-class SubApps : public ScriptWrappable, public Supplement<Navigator> {
+class SubApps : public ScriptWrappable, public Supplement<LocalDOMWindow> {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   static const char kSupplementName[];
-  static SubApps* subApps(Navigator&);
+  static SubApps* subApps(LocalDOMWindow&);
 
-  explicit SubApps(Navigator&);
+  explicit SubApps(LocalDOMWindow&);
   SubApps(const SubApps&) = delete;
   SubApps& operator=(const SubApps&) = delete;
 
@@ -35,20 +38,19 @@ class SubApps : public ScriptWrappable, public Supplement<Navigator> {
   void Trace(Visitor*) const override;
 
   // SubApps API.
-  ScriptPromise add(
+  ScriptPromise<SubAppsAddResponse> add(ScriptState*,
+                                        const Vector<String>& install_paths,
+                                        ExceptionState&);
+  ScriptPromise<IDLRecord<IDLUSVString, SubAppsListResult>> list(
       ScriptState*,
-      const HeapVector<std::pair<String, Member<SubAppsAddParams>>>&
-          sub_apps_to_add,
       ExceptionState&);
-  ScriptPromise list(ScriptState*, ExceptionState&);
-  ScriptPromise remove(ScriptState*,
-                       const String& unhashed_app_id_path,
-                       ExceptionState&);
+  ScriptPromise<SubAppsRemoveResponse>
+  remove(ScriptState*, const Vector<String>& manifest_ids, ExceptionState&);
 
  private:
   HeapMojoRemote<mojom::blink::SubAppsService>& GetService();
   void OnConnectionError();
-  bool CheckPreconditionsMaybeThrow(ExceptionState&);
+  bool CheckPreconditionsMaybeThrow(ScriptState*, ExceptionState&);
 
   HeapMojoRemote<mojom::blink::SubAppsService> service_;
 };

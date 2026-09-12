@@ -5,29 +5,55 @@
 #include "chrome/browser/ash/policy/core/device_local_account_external_cache.h"
 
 #include <memory>
+#include <set>
+#include <string>
+#include <utility>
 
-#include "base/check_is_test.h"
+#include "base/check.h"
 #include "base/files/file_path.h"
-#include "base/functional/callback_forward.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
-#include "chrome/browser/ash/crosapi/crosapi_ash.h"
-#include "chrome/browser/ash/crosapi/crosapi_manager.h"
-#include "chrome/browser/ash/crosapi/device_local_account_extension_service_ash.h"
 #include "chrome/browser/ash/extensions/external_cache_impl.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/chromeos/extensions/device_local_account_external_policy_loader.h"
-#include "chrome/browser/extensions/external_loader.h"
+#include "components/user_manager/user.h"
+#include "components/user_manager/user_manager.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
 namespace chromeos {
 
+namespace {
+
+std::set<std::string> GetKeys(const base::DictValue& dict) {
+  std::set<std::string> keys;
+  for (auto [key, _] : dict) {
+    keys.insert(key);
+  }
+  return keys;
+}
+
+base::DictValue FilterOnKeys(const base::DictValue& dict,
+                             const std::set<std::string>& keys_to_keep) {
+  base::DictValue result;
+  for (auto [key, value] : dict) {
+    if (keys_to_keep.contains(key)) {
+      result.Set(key, value.Clone());
+    }
+  }
+  return result;
+}
+
+}  // namespace
+
 DeviceLocalAccountExternalCache::DeviceLocalAccountExternalCache(
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+    ExtensionListCallback loader,
     const std::string& user_id,
     const base::FilePath& cache_dir)
-    : user_id_(user_id), cache_dir_(cache_dir) {
-  loader_ = base::MakeRefCounted<DeviceLocalAccountExternalPolicyLoader>();
+    : shared_url_loader_factory_(std::move(shared_url_loader_factory)),
+      user_id_(user_id),
+      cache_dir_(cache_dir),
+      loader_(loader) {
+  CHECK(shared_url_loader_factory_);
 }
 
 DeviceLocalAccountExternalCache::~DeviceLocalAccountExternalCache() = default;
@@ -36,19 +62,20 @@ void DeviceLocalAccountExternalCache::StartCache(
     const scoped_refptr<base::SequencedTaskRunner>& cache_task_runner) {
   DCHECK(!external_cache_);
 
-  scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory =
-      g_browser_process->shared_url_loader_factory();
   external_cache_ = std::make_unique<ExternalCacheImpl>(
-      cache_dir_, std::move(shared_url_loader_factory), cache_task_runner, this,
+      cache_dir_, shared_url_loader_factory_, cache_task_runner,
+      /*delegate=*/this,
       /*always_check_updates=*/true,
       /*wait_for_cache_initialization=*/false,
       /*allow_scheduled_updates=*/false);
 }
 
 void DeviceLocalAccountExternalCache::UpdateExtensionsList(
-    base::Value::Dict dict) {
+    base::DictValue extensions) {
+  extension_keys_ = GetKeys(extensions);
+
   if (external_cache_) {
-    external_cache_->UpdateExtensionsList(std::move(dict));
+    external_cache_->UpdateExtensionsList(std::move(extensions));
   }
 }
 
@@ -60,8 +87,8 @@ void DeviceLocalAccountExternalCache::StopCache(base::OnceClosure callback) {
     std::move(callback).Run();
   }
 
-  base::Value::Dict empty_prefs;
-  loader_->OnExtensionListsUpdated(empty_prefs);
+  base::DictValue empty_prefs;
+  loader_.Run(user_id_, empty_prefs.Clone());
 }
 
 bool DeviceLocalAccountExternalCache::IsCacheRunning() const {
@@ -69,25 +96,31 @@ bool DeviceLocalAccountExternalCache::IsCacheRunning() const {
 }
 
 void DeviceLocalAccountExternalCache::OnExtensionListsUpdated(
-    const base::Value::Dict& prefs) {
-  if (crosapi::CrosapiManager::IsInitialized()) {
-    crosapi::CrosapiManager::Get()
-        ->crosapi_ash()
-        ->device_local_account_extension_service()
-        ->SetForceInstallExtensionsFromCache(user_id_, prefs.Clone());
-  } else {
-    CHECK_IS_TEST();
+    const base::DictValue& prefs) {
+  loader_.Run(user_id_, FilterOnKeys(prefs, extension_keys_));
+}
+
+bool DeviceLocalAccountExternalCache::IsRollbackAllowed() const {
+  return true;
+}
+
+bool DeviceLocalAccountExternalCache::CanRollbackNow() const {
+  // Allow immediate rollback only if current user is not this device local
+  // account.
+  if (auto* user = user_manager::UserManager::Get()->GetPrimaryUser()) {
+    return user_id_ != user->GetAccountId().GetUserEmail();
   }
-  loader_->OnExtensionListsUpdated(prefs);
+  return true;
 }
 
-scoped_refptr<extensions::ExternalLoader>
-DeviceLocalAccountExternalCache::GetExtensionLoader() {
-  return loader_;
-}
-
-base::Value::Dict DeviceLocalAccountExternalCache::GetCachedExtensions() const {
+base::DictValue DeviceLocalAccountExternalCache::GetCachedExtensionsForTesting()
+    const {
   return external_cache_->GetCachedExtensions().Clone();
+}
+
+void DeviceLocalAccountExternalCache::SetCacheResponseForTesting(
+    const base::DictValue& cached_extensions) {
+  OnExtensionListsUpdated(cached_extensions);
 }
 
 }  // namespace chromeos

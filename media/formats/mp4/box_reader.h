@@ -5,15 +5,19 @@
 #ifndef MEDIA_FORMATS_MP4_BOX_READER_H_
 #define MEDIA_FORMATS_MP4_BOX_READER_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <limits>
 #include <map>
 #include <memory>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_span.h"
 #include "base/numerics/safe_conversions.h"
 #include "media/base/media_export.h"
 #include "media/base/media_log.h"
@@ -30,7 +34,7 @@ enum DisplayMatrixSize {
   kDisplayMatrixDimension = kDisplayMatrixHeight * kDisplayMatrixWidth
 };
 
-using DisplayMatrix = int32_t[kDisplayMatrixDimension];
+using DisplayMatrix = std::array<int32_t, kDisplayMatrixDimension>;
 
 class BoxReader;
 
@@ -45,22 +49,22 @@ struct MEDIA_EXPORT Box {
 
 class MEDIA_EXPORT BufferReader {
  public:
-  BufferReader(const uint8_t* buf, const size_t buf_size)
-      : buf_(buf), buf_size_(buf_size), pos_(0) {
-    CHECK(buf);
-  }
-
+  explicit BufferReader(base::span<const uint8_t> buf);
+  BufferReader(const BufferReader& other);
+  virtual ~BufferReader();
   bool HasBytes(size_t count) {
     // As the size of a box is implementation limited to 2^31, fail if
     // attempting to check for too many bytes.
-    const size_t impl_limit =
-        static_cast<size_t>(std::numeric_limits<int32_t>::max());
-    return pos_ <= buf_size_ && count <= impl_limit &&
-           count <= buf_size_ - pos_;
+    constexpr size_t kImplLimit =
+        base::checked_cast<size_t>(std::numeric_limits<int32_t>::max());
+    return pos_ <= buf_.size() && count <= kImplLimit &&
+           count <= buf_.size() - pos_;
   }
 
   // Read a value from the stream, performing endian correction, and advance the
   // stream pointer.
+  //
+  // MPEG-4 uses big endian byte order, so these convert from big endian order.
   [[nodiscard]] bool Read1(uint8_t* v);
   [[nodiscard]] bool Read2(uint16_t* v);
   [[nodiscard]] bool Read2s(int16_t* v);
@@ -68,49 +72,45 @@ class MEDIA_EXPORT BufferReader {
   [[nodiscard]] bool Read4s(int32_t* v);
   [[nodiscard]] bool Read8(uint64_t* v);
   [[nodiscard]] bool Read8s(int64_t* v);
-
   [[nodiscard]] bool ReadFourCC(FourCC* v);
-
-  [[nodiscard]] bool ReadVec(std::vector<uint8_t>* t, uint64_t count);
 
   // These variants read a 4-byte integer of the corresponding signedness and
   // store it in the 8-byte return type.
   [[nodiscard]] bool Read4Into8(uint64_t* v);
   [[nodiscard]] bool Read4sInto8s(int64_t* v);
 
+  // Reads a sequence of bytes verbatim from the buffer into `t` after clearing
+  // `t`, and advances the stream pointer.
+  [[nodiscard]] bool ReadVec(std::vector<uint8_t>* t, size_t count);
+
   // Advance the stream by this many bytes.
   [[nodiscard]] bool SkipBytes(uint64_t nbytes);
 
-  const uint8_t* buffer() const { return buf_; }
+  // Returns the full buffer. This size may not match the size specified in the
+  // mp4 box header and could be less than the box size when the full box has
+  // not been appended.
+  const base::span<const uint8_t> buffer() const { return buf_; }
 
-  // Returns the size of the buffer. This may not match the size specified
-  // in the mp4 box header and could be less than the box size when the full box
-  // has not been appended. Always consult buffer_size() to avoid OOB reads.
-  // See BoxReader::box_size().
-  size_t buffer_size() const { return buf_size_; }
+  // The current position in the buffer given by `buffer()`.
   size_t pos() const { return pos_; }
 
  protected:
-  const uint8_t* buf_;
-  size_t buf_size_;
-  size_t pos_;
-
-  template <typename T>
-  [[nodiscard]] bool Read(T* t);
+  base::raw_span<const uint8_t> buf_;
+  // The position in `buf_` where the next read is from.
+  size_t pos_ = 0u;
 };
 
 class MEDIA_EXPORT BoxReader : public BufferReader {
  public:
   BoxReader(const BoxReader& other);
-  ~BoxReader();
+  ~BoxReader() override;
 
   // Create a BoxReader from a buffer. If the result is kOk, then |out_reader|
   // will be set, otherwise |out_reader| will be unchanged.
   //
   // |buf| is retained but not owned, and must outlive the BoxReader instance.
   [[nodiscard]] static ParseResult ReadTopLevelBox(
-      const uint8_t* buf,
-      const size_t buf_size,
+      base::span<const uint8_t> buf,
       MediaLog* media_log,
       std::unique_ptr<BoxReader>* out_reader);
 
@@ -119,19 +119,18 @@ class MEDIA_EXPORT BoxReader : public BufferReader {
   // box header is complete.
   //
   // |buf| is not retained.
-  [[nodiscard]] static ParseResult StartTopLevelBox(const uint8_t* buf,
-                                                    const size_t buf_size,
-                                                    MediaLog* media_log,
-                                                    FourCC* out_type,
-                                                    size_t* out_box_size);
+  [[nodiscard]] static ParseResult StartTopLevelBox(
+      base::span<const uint8_t> buf,
+      MediaLog* media_log,
+      FourCC* out_type,
+      size_t* out_box_size);
 
   // Create a BoxReader from a buffer. |buf| must be the complete buffer, as
   // errors are returned when sufficient data is not available. |buf| can start
   // with any type of box -- it does not have to be IsValidTopLevelBox().
   //
   // |buf| is retained but not owned, and must outlive the BoxReader instance.
-  static BoxReader* ReadConcatentatedBoxes(const uint8_t* buf,
-                                           const size_t buf_size,
+  static BoxReader* ReadConcatentatedBoxes(base::span<const uint8_t> buf,
                                            MediaLog* media_log);
 
   // Returns true if |type| is recognized to be a top-level box, false
@@ -156,7 +155,7 @@ class MEDIA_EXPORT BoxReader : public BufferReader {
 
   // ISO-BMFF streams files use a 3x3 matrix consisting of 6 16.16 fixed point
   // decimals and 3 2.30 fixed point decimals.
-  bool ReadDisplayMatrix(DisplayMatrix matrix);
+  bool ReadDisplayMatrix(DisplayMatrix& matrix);
 
   // Read at least one child. False means error or no such child present.
   template <typename T>
@@ -190,7 +189,7 @@ class MEDIA_EXPORT BoxReader : public BufferReader {
     return box_size_;
   }
 
-  FourCC type() const   { return type_; }
+  FourCC type() const { return type_; }
   uint8_t version() const { return version_; }
   uint32_t flags() const { return flags_; }
 
@@ -199,10 +198,7 @@ class MEDIA_EXPORT BoxReader : public BufferReader {
  private:
   // Create a BoxReader from |buf|. |is_EOS| should be true if |buf| is
   // complete stream (i.e. no additional data is expected to be appended).
-  BoxReader(const uint8_t* buf,
-            const size_t buf_size,
-            MediaLog* media_log,
-            bool is_EOS);
+  BoxReader(base::span<const uint8_t> buf, MediaLog* media_log, bool is_EOS);
 
   // Must be called immediately after init.
   [[nodiscard]] ParseResult ReadHeader();
@@ -233,12 +229,13 @@ class MEDIA_EXPORT BoxReader : public BufferReader {
 };
 
 // Template definitions
-template<typename T> bool BoxReader::ReadChildren(std::vector<T>* children) {
+template <typename T>
+bool BoxReader::ReadChildren(std::vector<T>* children) {
   RCHECK(MaybeReadChildren(children) && !children->empty());
   return true;
 }
 
-template<typename T>
+template <typename T>
 bool BoxReader::MaybeReadChildren(std::vector<T>* children) {
   DCHECK(scanned_);
   DCHECK(children->empty());
@@ -256,8 +253,8 @@ bool BoxReader::MaybeReadChildren(std::vector<T>* children) {
   }
   children_.erase(start_itr, end_itr);
 
-  DVLOG(2) << "Found " << children->size() << " "
-           << FourCCToString(child_type) << " boxes.";
+  DVLOG(2) << "Found " << children->size() << " " << FourCCToString(child_type)
+           << " boxes.";
   return true;
 }
 
@@ -282,10 +279,11 @@ bool BoxReader::ReadAllChildrenInternal(std::vector<T>* children,
 
   DCHECK_LE(pos_, box_size_);
   while (pos_ < box_size_) {
-    BoxReader child_reader(&buf_[pos_], box_size_ - pos_, media_log_, is_EOS_);
+    BoxReader child_reader(buf_.subspan(pos_), media_log_, is_EOS_);
 
-    if (child_reader.ReadHeader() != ParseResult::kOk)
+    if (child_reader.ReadHeader() != ParseResult::kOk) {
       return false;
+    }
 
     T child;
     RCHECK(!check_box_type || child_reader.type() == child.BoxType());

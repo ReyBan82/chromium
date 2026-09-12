@@ -9,7 +9,9 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
+#include "chrome/app/startup_timestamps.h"
 #include "content/public/test/test_launcher.h"
 
 #if BUILDFLAG(IS_ANDROID)
@@ -43,19 +45,22 @@ class ChromeTestChromeMainDelegate
     : public ChromeMainDelegate {
 #endif
  public:
-#if BUILDFLAG(IS_ANDROID)
-  ChromeTestChromeMainDelegate() : ChromeMainDelegateAndroid() {}
-#else
-  explicit ChromeTestChromeMainDelegate(base::TimeTicks time)
-      : ChromeMainDelegate(time) {}
-#endif
+  ChromeTestChromeMainDelegate();
+  ~ChromeTestChromeMainDelegate() override;
 
   // ChromeMainDelegateOverrides.
-  content::ContentBrowserClient* CreateContentBrowserClient() override;
+  content::ContentRendererClient* CreateContentRendererClient() override;
   content::ContentUtilityClient* CreateContentUtilityClient() override;
+  std::optional<int> PostEarlyInitialization(InvokedIn invoked_in) override;
 #if BUILDFLAG(IS_WIN)
   bool ShouldHandleConsoleControlEvents() override;
 #endif
+  void CreateThreadPool(std::string_view name) override;
+  bool IsInitFeatureListEarly() override;
+
+ private:
+  std::unique_ptr<content::ContentRendererClient>
+      chrome_content_renderer_client_;
 };
 
 // Delegate used for setting up and running chrome browser tests.

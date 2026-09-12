@@ -115,6 +115,14 @@ class MseTrackBuffer {
                                     base::TimeDelta start_pts);
 
  private:
+  // Returns true if `frame` is an audio frame that is a duplicate of the most
+  // recently processed frame. A duplicate is defined as:
+  // 1) zero duration
+  // 2) identical timestamps
+  // 3) the exact same keyframe status.
+  bool IsDuplicateAudioZeroDurationFrame(
+      const scoped_refptr<StreamParserBuffer>& frame) const;
+
   // The decode timestamp of the last coded frame appended in the current coded
   // frame group. Initially kNoTimestamp, meaning "unset".
   DecodeTimestamp last_decode_timestamp_;
@@ -174,7 +182,7 @@ class MseTrackBuffer {
 
   // Pointer to the stream associated with this track. The stream is not owned
   // by |this|.
-  const raw_ptr<ChunkDemuxerStream> stream_;
+  const raw_ptr<ChunkDemuxerStream, DanglingUntriaged> stream_;
 
   // Queue of processed frames that have not yet been appended to |stream_|.
   // EnqueueProcessedFrame() adds to this queue, and FlushProcessedFrames()
@@ -182,7 +190,7 @@ class MseTrackBuffer {
   StreamParser::BufferQueue processed_frames_;
 
   // MediaLog for reporting messages and properties to debug content and engine.
-  raw_ptr<MediaLog> media_log_;
+  const std::unique_ptr<MediaLog> media_log_;
 
   // Callback for reporting problematic conditions that are not necessarily
   // errors.
@@ -204,7 +212,7 @@ MseTrackBuffer::MseTrackBuffer(ChunkDemuxerStream* stream,
       highest_presentation_timestamp_(kNoTimestamp),
       needs_random_access_point_(true),
       stream_(stream),
-      media_log_(media_log),
+      media_log_(MediaLog::CloneSafely(media_log)),
       parse_warning_cb_(std::move(parse_warning_cb)) {
   DCHECK(stream_);
   DCHECK(parse_warning_cb_);
@@ -236,8 +244,22 @@ void MseTrackBuffer::SetHighestPresentationTimestampIfIncreased(
   }
 }
 
+bool MseTrackBuffer::IsDuplicateAudioZeroDurationFrame(
+    const scoped_refptr<StreamParserBuffer>& frame) const {
+  return stream_->type() == DemuxerStream::AUDIO &&
+         !processed_frames_.empty() &&
+         frame->timestamp() == processed_frames_.back()->timestamp() &&
+         frame->duration().is_zero() &&
+         processed_frames_.back()->duration().is_zero() &&
+         frame->is_key_frame() == processed_frames_.back()->is_key_frame();
+}
+
 bool MseTrackBuffer::EnqueueProcessedFrame(
     scoped_refptr<StreamParserBuffer> frame) {
+  if (IsDuplicateAudioZeroDurationFrame(frame)) {
+    processed_frames_.pop_back();
+  }
+
   if (frame->is_key_frame()) {
     last_keyframe_presentation_timestamp_ = frame->timestamp();
   } else {
@@ -340,7 +362,7 @@ FrameProcessor::FrameProcessor(UpdateDurationCB update_duration_cb,
                                MediaLog* media_log)
     : group_start_timestamp_(kNoTimestamp),
       update_duration_cb_(std::move(update_duration_cb)),
-      media_log_(media_log) {
+      media_log_(MediaLog::CloneSafely(media_log)) {
   DVLOG(2) << __func__ << "()";
   DCHECK(update_duration_cb_);
 }
@@ -427,10 +449,8 @@ bool FrameProcessor::ProcessFrames(
   // 1. For each coded frame in the media segment run the following steps:
   for (const auto& frame : frames) {
     // Skip any 0-byte audio or video buffers, since they cannot produce any
-    // valid decode output (and are rejected by FFmpeg A/V decode.) Retain
-    // 0-byte text buffers because their |side_data| just might be useful, and
-    // we don't feed them to FFmpeg later.
-    if (!frame->data_size() && frame->type() != DemuxerStream::TEXT) {
+    // valid decode output (and are rejected by FFmpeg A/V decode.)
+    if (!frame->size()) {
       LIMITED_MEDIA_LOG(DEBUG, media_log_, num_skipped_empty_frame_warnings_,
                         kMaxSkippedEmptyFrameWarnings)
           << "Discarding empty audio or video coded frame, PTS="
@@ -492,8 +512,8 @@ bool FrameProcessor::AddTrack(StreamParser::TrackId id,
     return false;
   }
 
-  track_buffers_[id] =
-      std::make_unique<MseTrackBuffer>(stream, media_log_, parse_warning_cb_);
+  track_buffers_[id] = std::make_unique<MseTrackBuffer>(
+      stream, media_log_.get(), parse_warning_cb_);
   return true;
 }
 
@@ -566,14 +586,15 @@ void FrameProcessor::OnPossibleAudioConfigUpdate(
   sample_duration_ =
       base::Seconds(1.0 / current_audio_config_.samples_per_second());
   has_dependent_audio_frames_ =
-      current_audio_config_.profile() == AudioCodecProfile::kXHE_AAC;
+      current_audio_config_.profile() == AudioCodecProfile::kXHE_AAC ||
+      current_audio_config_.codec() == AudioCodec::kDTSXP2;
   last_audio_pts_for_nonkeyframe_monotonicity_check_ = kNoTimestamp;
 }
 
 MseTrackBuffer* FrameProcessor::FindTrack(StreamParser::TrackId id) {
   auto itr = track_buffers_.find(id);
   if (itr == track_buffers_.end())
-    return NULL;
+    return nullptr;
 
   return itr->second.get();
 }
@@ -643,6 +664,10 @@ bool FrameProcessor::HandlePartialAppendWindowTrimming(
         (audio_preroll_buffer_->timestamp() +
          audio_preroll_buffer_->duration() - buffer->timestamp())
             .InMicroseconds();
+    // The only value that can't be converted with std::abs.
+    if (delta == std::numeric_limits<int64_t>::min()) {
+      return false;
+    }
     if (std::abs(delta) < sample_duration_.InMicroseconds() &&
         audio_preroll_buffer_->timestamp() <= buffer->timestamp()) {
       DVLOG(1) << "Attaching audio preroll buffer ["
@@ -706,8 +731,10 @@ bool FrameProcessor::HandlePartialAppendWindowTrimming(
     // Mark the overlapping portion of the buffer for discard.
     // TODO(wolenetz): Is this correct to ignore any pre-existing discard
     // padding (e.g. WebM discard padding)? See https://crbug.com/969195.
+    auto existing_discard = buffer->discard_padding();
     buffer->set_discard_padding(
-        std::make_pair(buffer->discard_padding().first,
+        std::make_pair(existing_discard.has_value() ? existing_discard->first
+                                                    : base::TimeDelta(),
                        frame_end_timestamp - append_window_end));
 
     // Decrease the duration of the buffer to remove the discarded portion.
@@ -1184,9 +1211,6 @@ bool FrameProcessor::ProcessFrame(scoped_refptr<StreamParserBuffer> frame,
 
     return true;
   }
-
-  NOTREACHED();
-  return false;
 }
 
 }  // namespace media

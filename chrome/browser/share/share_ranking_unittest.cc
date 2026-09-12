@@ -54,7 +54,7 @@ class ShareRankingTest : public testing::Test {
     });
   }
 
-  absl::optional<ShareRanking::Ranking> RankSync(
+  std::optional<ShareRanking::Ranking> RankSync(
       ShareHistory* history,
       const std::vector<std::string>& available,
       const std::string& type = "type",
@@ -62,9 +62,9 @@ class ShareRankingTest : public testing::Test {
       int length = 4,
       bool persist = true) {
     base::RunLoop loop;
-    absl::optional<ShareRanking::Ranking> ranking;
-    auto callback = base::BindLambdaForTesting(
-        [&](absl::optional<ShareRanking::Ranking> r) {
+    std::optional<ShareRanking::Ranking> ranking;
+    auto callback =
+        base::BindLambdaForTesting([&](std::optional<ShareRanking::Ranking> r) {
           ranking = r;
           loop.Quit();
         });
@@ -201,7 +201,7 @@ TEST(ShareRankingStaticTest, MoreTargetReplacesLast) {
 }
 
 TEST_F(ShareRankingStaticTest, PromotedTargetIsVisible) {
-  // Regression test for <https://crbug.com/1240355>: in "fix more" mode, the
+  // Regression test for <https://crbug.com/40785358>: in "fix more" mode, the
   // last slot on the screen is actually unusable for display since it gets
   // replaced with the "More" option that invokes the system share hub. The
   // logic to promote a target into being visible should therefore not promote
@@ -341,7 +341,7 @@ TEST_F(ShareRankingStaticTest, SwapAboveFold) {
   EXPECT_EQ(expected_displayed, displayed);
 }
 
-// Regression test for https://crbug.com/1233232
+// Regression test for https://crbug.com/40780780
 TEST_F(ShareRankingTest, OldRankingContainsItemsWithNoRecentHistory) {
   std::map<std::string, int> history = {
       {"bar", 2},
@@ -386,15 +386,15 @@ TEST_F(ShareRankingTest, InitialStateNoHistory) {
 }
 
 TEST_F(ShareRankingTest, DISABLED_AllHistoryUpdatesRanking) {
-  // TODO(https://crbug.com/1232529): Implement.
+  // TODO(crbug.com/40191160): Implement.
 }
 
 TEST_F(ShareRankingTest, DISABLED_NoPersistDoesNotPersist) {
-  // TODO(https://crbug.com/1232529): Implement.
+  // TODO(crbug.com/40191160): Implement.
 }
 
 TEST_F(ShareRankingTest, DISABLED_RecentHistoryUpdatesRanking) {
-  // TODO(https://crbug.com/1232529): Implement.
+  // TODO(crbug.com/40191160): Implement.
 }
 
 TEST_F(ShareRankingTest, ClearClearsDatabase) {
@@ -433,6 +433,19 @@ TEST_F(ShareRankingTest, ClearClearsDatabase) {
   EXPECT_EQ(post_entries.targets().at(0), "aaa");
   EXPECT_EQ(post_entries.targets().at(1), "bbb");
   EXPECT_EQ(post_entries.targets().at(2), "ccc");
+}
+
+// Regression test for https://crbug.com/374693651
+TEST_F(ShareRankingTest, TooFewTiles) {
+  ConfigureDefaultInitialRanking();
+
+  FakeShareHistory history;
+  history.set_history({{"iii", 10}, {"aaa", 2}, {"ccc", 1}});
+
+  auto ranking =
+      RankSync(&history, {"aaa", "ccc", "eee", "ggg", "iii"}, "type", 1, 1);
+  ASSERT_TRUE(ranking);
+  EXPECT_EQ(*ranking, std::vector<std::string>({"$more"}));
 }
 
 }  // namespace sharing

@@ -10,14 +10,15 @@
 #include "ash/shell.h"
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_event_dispatcher.h"
-#include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animation_observer.h"
 #include "ui/compositor/layer_animation_sequence.h"
 #include "ui/compositor/layer_animator.h"
+#include "ui/compositor/layer_solid_color.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
 
 namespace ash {
@@ -30,7 +31,7 @@ const int kFadingTimeoutDurationInSeconds = 10;
 // runs the specified |callback| when all of the animations have finished.
 class CallbackRunningObserver {
  public:
-  CallbackRunningObserver(base::OnceClosure callback)
+  explicit CallbackRunningObserver(base::OnceClosure callback)
       : completed_counter_(0),
         animation_aborted_(false),
         callback_(std::move(callback)) {}
@@ -88,8 +89,8 @@ class CallbackRunningObserver {
     }
 
    private:
-    ui::LayerAnimator* animator_;
-    CallbackRunningObserver* observer_;
+    raw_ptr<ui::LayerAnimator> animator_;
+    raw_ptr<CallbackRunningObserver> observer_;
   };
 
   size_t completed_counter_;
@@ -116,18 +117,10 @@ void DisplayAnimator::StartFadeOutAnimation(base::OnceClosure callback) {
 
   // Make the fade-out animation for all root windows.  Instead of actually
   // hiding the root windows, we put a black layer over a root window for
-  // safety.  These layers remain to hide root windows and will be deleted
+  // safety. These layers remain to hide root windows and will be deleted
   // after the animation of OnDisplayModeChanged().
   for (aura::Window* root_window : Shell::Get()->GetAllRootWindows()) {
-    std::unique_ptr<ui::Layer> hiding_layer =
-        std::make_unique<ui::Layer>(ui::LAYER_SOLID_COLOR);
-    hiding_layer->SetColor(SK_ColorBLACK);
-    hiding_layer->SetBounds(root_window->bounds());
-    ui::Layer* parent =
-        Shell::GetContainer(root_window, kShellWindowId_OverlayContainer)
-            ->layer();
-    parent->Add(hiding_layer.get());
-
+    auto hiding_layer = AddHidingLayer(root_window);
     hiding_layer->SetOpacity(0.0);
 
     ui::ScopedLayerAnimationSettings settings(hiding_layer->GetAnimator());
@@ -167,25 +160,19 @@ void DisplayAnimator::StartFadeInAnimation() {
   // black layers for fade-out, here we actually turn those black layers
   // invisible.
   for (aura::Window* root_window : Shell::Get()->GetAllRootWindows()) {
-    ui::Layer* hiding_layer = nullptr;
-    if (hiding_layers_.find(root_window) == hiding_layers_.end()) {
+    if (!hiding_layers_.contains(root_window)) {
       // In case of the transition from mirroring->non-mirroring, new root
       // windows appear and we do not have the black layers for them.  Thus
       // we need to create the layer and make it visible.
-      hiding_layer = new ui::Layer(ui::LAYER_SOLID_COLOR);
-      hiding_layer->SetColor(SK_ColorBLACK);
+      auto layer = AddHidingLayer(root_window);
+      layer->SetVisible(true);
+      layer->SetOpacity(1.0f);
+      hiding_layers_[root_window] = std::move(layer);
+    }
+
+    ui::LayerSolidColor* hiding_layer = hiding_layers_[root_window].get();
+    if (hiding_layer->bounds() != root_window->bounds()) {
       hiding_layer->SetBounds(root_window->bounds());
-      ui::Layer* parent =
-          Shell::GetContainer(root_window, kShellWindowId_OverlayContainer)
-              ->layer();
-      parent->Add(hiding_layer);
-      hiding_layer->SetOpacity(1.0f);
-      hiding_layer->SetVisible(true);
-      hiding_layers_[root_window] = base::WrapUnique(hiding_layer);
-    } else {
-      hiding_layer = hiding_layers_[root_window].get();
-      if (hiding_layer->bounds() != root_window->bounds())
-        hiding_layer->SetBounds(root_window->bounds());
     }
 
     ui::ScopedLayerAnimationSettings settings(hiding_layer->GetAnimator());
@@ -197,13 +184,13 @@ void DisplayAnimator::StartFadeInAnimation() {
   }
 }
 
-void DisplayAnimator::OnDisplayModeChanged(
+void DisplayAnimator::OnDisplayConfigurationChanged(
     const display::DisplayConfigurator::DisplayStateList& displays) {
   if (!hiding_layers_.empty())
     StartFadeInAnimation();
 }
 
-void DisplayAnimator::OnDisplayModeChangeFailed(
+void DisplayAnimator::OnDisplayConfigurationChangeFailed(
     const display::DisplayConfigurator::DisplayStateList& displays,
     display::MultipleDisplayState failed_new_state) {
   if (!hiding_layers_.empty())
@@ -216,6 +203,19 @@ void DisplayAnimator::ClearHidingLayers() {
     timer_.reset();
   }
   hiding_layers_.clear();
+}
+
+std::unique_ptr<ui::LayerSolidColor> DisplayAnimator::AddHidingLayer(
+    aura::Window* root_window) {
+  auto layer = std::make_unique<ui::LayerSolidColor>();
+  layer->SetColor(SkColors::kBlack);
+  layer->SetBounds(root_window->bounds());
+
+  ui::Layer* parent =
+      Shell::GetContainer(root_window, kShellWindowId_OverlayContainer)
+          ->layer();
+  parent->Add(layer.get());
+  return layer;
 }
 
 }  // namespace ash

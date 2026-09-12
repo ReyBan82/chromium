@@ -9,8 +9,8 @@
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/components/phonehub/phone_model.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
+
 namespace {
 
 // The grace period time for the phone status model to remain non-empty when
@@ -35,15 +35,13 @@ InvalidConnectionDisconnector::InvalidConnectionDisconnector(
     : connection_manager_(connection_manager),
       phone_model_(phone_model),
       timer_(std::move(timer)) {
-  connection_manager_->AddObserver(this);
+  connection_manager_observation_.Observe(connection_manager);
 }
 
-InvalidConnectionDisconnector::~InvalidConnectionDisconnector() {
-  connection_manager_->RemoveObserver(this);
-}
+InvalidConnectionDisconnector::~InvalidConnectionDisconnector() = default;
 
 void InvalidConnectionDisconnector::OnConnectionStatusChanged() {
-  timer_->AbandonAndStop();
+  timer_->Stop();
 
   if (IsPhoneConnected() && !DoesPhoneStatusModelExist()) {
     timer_->Start(FROM_HERE, kEmptyPhoneStatusModelGracePeriodTimeDelta,
@@ -71,5 +69,4 @@ bool InvalidConnectionDisconnector::DoesPhoneStatusModelExist() const {
   return phone_model_->phone_status_model().has_value();
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

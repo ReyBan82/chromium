@@ -4,33 +4,53 @@
 
 package org.chromium.chrome.browser.native_page;
 
+import static org.mockito.Mockito.doReturn;
+
 import static org.chromium.chrome.browser.ui.native_page.NativePageTest.INVALID_URLS;
 import static org.chromium.chrome.browser.ui.native_page.NativePageTest.VALID_URLS;
 import static org.chromium.chrome.browser.ui.native_page.NativePageTest.isValidInIncognito;
 
+import android.app.Activity;
 import android.view.View;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
 
-import org.chromium.base.jank_tracker.DummyJankTracker;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.util.Features.DisableFeatures;
+import org.chromium.base.test.util.Features.EnableFeatures;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.chrome.browser.fullscreen.BrowserControlsManager;
+import org.chromium.chrome.browser.pdf.PdfInfo;
+import org.chromium.chrome.browser.pdf.PdfPage;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tabmodel.TabModelSelector;
 import org.chromium.chrome.browser.ui.native_page.NativePage;
 import org.chromium.chrome.browser.ui.native_page.NativePage.NativePageType;
 import org.chromium.chrome.browser.ui.native_page.NativePageTest.UrlCombo;
+import org.chromium.chrome.browser.url_constants.ExtensionsUrlOverrideRegistry;
 import org.chromium.components.embedder_support.util.UrlConstants;
 
-/**
- * Tests public methods in NativePageFactory.
- */
+/** Tests public methods in NativePageFactory. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class NativePageFactoryTest {
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private PdfPage mPdfPage;
+    @Mock private NativePage mCandidatePage;
+    @Mock private Tab mTab;
+    @Mock private BrowserControlsManager mBrowserControlsManager;
+    @Mock private TabModelSelector mTabModelSelector;
+    @Mock private Activity mActivity;
     private NativePageFactory mNativePageFactory;
+    private PdfInfo mPdfInfo;
+    private static final String PDF_LINK = "https://www.foo.com/testfiles/pdf/sample.pdf";
 
     private static class MockNativePage implements NativePage {
         public final @NativePageType int type;
@@ -61,6 +81,8 @@ public class NativePageFactoryTest {
                     return UrlConstants.RECENT_TABS_HOST;
                 case NativePageType.HISTORY:
                     return UrlConstants.HISTORY_HOST;
+                case NativePageType.SETTINGS:
+                    return UrlConstants.SETTINGS_HOST;
                 default:
                     Assert.fail("Unexpected NativePageType: " + type);
                     return null;
@@ -93,8 +115,9 @@ public class NativePageFactoryTest {
 
     private static class MockNativePageBuilder extends NativePageFactory.NativePageBuilder {
         private MockNativePageBuilder() {
-            super(null, null, null, null, null, null, null, null, null, null,
-                    new DummyJankTracker(), null, null);
+            super(
+                    null, null, null, null, null, null, null, null, null, null, null, null, null,
+                    null, null, null, null, null, null, null, null, null);
         }
 
         @Override
@@ -108,7 +131,7 @@ public class NativePageFactoryTest {
         }
 
         @Override
-        public NativePage buildRecentTabsPage(Tab tab) {
+        public NativePage buildRecentTabsPage(Tab tab, String url) {
             return new MockNativePage(NativePageType.RECENT_TABS);
         }
 
@@ -116,13 +139,23 @@ public class NativePageFactoryTest {
         public NativePage buildHistoryPage(Tab tab, String url) {
             return new MockNativePage(NativePageType.HISTORY);
         }
+
+        @Override
+        public NativePage buildSettingsPage(Tab tab, String url) {
+            return new MockNativePage(NativePageType.SETTINGS);
+        }
     }
 
     @Before
     public void setUp() {
-        mNativePageFactory = new NativePageFactory(null, null, null, null, null, null, null, null,
-                null, null, null, new DummyJankTracker(), null, null);
+        mNativePageFactory =
+                new NativePageFactory(
+                        null, null, null, null, null, null, null, null, null, null, null, null,
+                        null, null, null, null, null, null, null, null, null);
         mNativePageFactory.setNativePageBuilderForTesting(new MockNativePageBuilder());
+        NativePageFactory.setPdfPageForTesting(mPdfPage);
+        mPdfInfo = new PdfInfo();
+        doReturn(PDF_LINK).when(mCandidatePage).getUrl();
     }
 
     /**
@@ -132,20 +165,34 @@ public class NativePageFactoryTest {
     @Test
     public void testCreateNativePage() {
         @NativePageType
-        int[] candidateTypes = new int[] {NativePageType.NONE, NativePageType.NTP,
-                NativePageType.BOOKMARKS, NativePageType.RECENT_TABS, NativePageType.HISTORY};
+        int[] candidateTypes =
+                new int[] {
+                    NativePageType.NONE,
+                    NativePageType.NTP,
+                    NativePageType.BOOKMARKS,
+                    NativePageType.RECENT_TABS,
+                    NativePageType.HISTORY
+                };
         for (boolean isIncognito : new boolean[] {true, false}) {
             for (UrlCombo urlCombo : VALID_URLS) {
                 if (isIncognito && !isValidInIncognito(urlCombo)) continue;
                 for (@NativePageType int candidateType : candidateTypes) {
-                    MockNativePage candidate = candidateType == NativePageType.NONE ? null
-                            : new MockNativePage(candidateType);
+                    MockNativePage candidate =
+                            candidateType == NativePageType.NONE
+                                    ? null
+                                    : new MockNativePage(candidateType);
                     MockNativePage page =
-                            (MockNativePage) mNativePageFactory.createNativePageForURL(
-                                    urlCombo.url, candidate, null, isIncognito);
-                    String debugMessage = String.format(
-                            "Failed test case: isIncognito=%s, urlCombo={%s,%s}, candidateType=%s",
-                            isIncognito, urlCombo.url, urlCombo.expectedType, candidateType);
+                            (MockNativePage)
+                                    mNativePageFactory.createNativePageForURL(
+                                            urlCombo.url, candidate, null, isIncognito, null);
+                    String debugMessage =
+                            String.format(
+                                    "Failed test case: isIncognito=%s, urlCombo={%s,%s},"
+                                            + " candidateType=%s",
+                                    isIncognito,
+                                    urlCombo.url,
+                                    urlCombo.expectedType,
+                                    candidateType);
                     Assert.assertNotNull(debugMessage, page);
                     Assert.assertEquals(debugMessage, 1, page.updateForUrlCalls);
                     Assert.assertEquals(debugMessage, urlCombo.expectedType, page.type);
@@ -159,6 +206,40 @@ public class NativePageFactoryTest {
         }
     }
 
+    @Test
+    @EnableFeatures(ChromeFeatureList.SETTINGS_IN_TAB)
+    @Config(qualifiers = "sw600dp")
+    public void testCreateSettingsPage() {
+        MockNativePage page =
+                (MockNativePage)
+                        mNativePageFactory.createNativePageForURL(
+                                UrlConstants.SETTINGS_URL, null, mTab, false, null);
+        Assert.assertNotNull(page);
+        Assert.assertEquals(NativePageType.SETTINGS, page.type);
+    }
+
+    @Test
+    @EnableFeatures(ChromeFeatureList.SETTINGS_IN_TAB)
+    @Config(qualifiers = "sw320dp")
+    public void testCreateSettingsPageOnPhone_ReturnsNull() {
+        MockNativePage page =
+                (MockNativePage)
+                        mNativePageFactory.createNativePageForURL(
+                                UrlConstants.SETTINGS_URL, null, mTab, false, null);
+        Assert.assertNull(page);
+    }
+
+    @Test
+    @DisableFeatures({ChromeFeatureList.SETTINGS_IN_TAB, ChromeFeatureList.SETTINGS_IN_TAB_DESKTOP})
+    @Config(qualifiers = "sw600dp")
+    public void testCreateSettingsPage_SettingsInTabDisabled() {
+        MockNativePage page =
+                (MockNativePage)
+                        mNativePageFactory.createNativePageForURL(
+                                UrlConstants.SETTINGS_URL, null, mTab, false, null);
+        Assert.assertNull(page);
+    }
+
     /**
      * Ensures that NativePageFactory.createNativePageForURL() returns null for URLs that don't
      * correspond to a native page.
@@ -167,16 +248,128 @@ public class NativePageFactoryTest {
     public void testCreateNativePageWithInvalidUrl() {
         for (UrlCombo urlCombo : VALID_URLS) {
             if (!isValidInIncognito(urlCombo)) {
-                Assert.assertNull(urlCombo.url,
-                        mNativePageFactory.createNativePageForURL(urlCombo.url, null, null, true));
+                Assert.assertNull(
+                        urlCombo.url,
+                        mNativePageFactory.createNativePageForURL(
+                                urlCombo.url, null, null, true, null));
             }
         }
         for (boolean isIncognito : new boolean[] {true, false}) {
             for (String invalidUrl : INVALID_URLS) {
-                Assert.assertNull(invalidUrl,
+                Assert.assertNull(
+                        invalidUrl,
                         mNativePageFactory.createNativePageForURL(
-                                invalidUrl, null, null, isIncognito));
+                                invalidUrl, null, null, isIncognito, null));
             }
         }
+    }
+
+    @Test
+    public void testCreateNativePageForCustomTab() {
+        NativePage page =
+                NativePageFactory.createNativePageForCustomTab(
+                        PDF_LINK,
+                        mCandidatePage,
+                        mTab,
+                        /* pdfInfo= */ null,
+                        mBrowserControlsManager,
+                        mTabModelSelector,
+                        mActivity);
+        Assert.assertNull("Only pdf native page is supported on custom tab.", page);
+
+        page =
+                NativePageFactory.createNativePageForCustomTab(
+                        PDF_LINK,
+                        mCandidatePage,
+                        mTab,
+                        mPdfInfo,
+                        mBrowserControlsManager,
+                        mTabModelSelector,
+                        mActivity);
+        Assert.assertEquals(
+                "Candidate page should be reused when the url matches.", mCandidatePage, page);
+
+        page =
+                NativePageFactory.createNativePageForCustomTab(
+                        PDF_LINK,
+                        /* candidatePage= */ null,
+                        mTab,
+                        mPdfInfo,
+                        mBrowserControlsManager,
+                        mTabModelSelector,
+                        mActivity);
+        Assert.assertEquals("A new pdf page should be created.", mPdfPage, page);
+    }
+
+    @Test
+    @EnableFeatures(ChromeFeatureList.CHROME_NATIVE_URL_OVERRIDING)
+    public void testExtensionUrlOverrides() {
+        // Test NTP override
+        String ntpUrl = "chrome://newtab";
+        Assert.assertNotNull(
+                "NTP should be a native page by default.",
+                mNativePageFactory.createNativePageForURL(ntpUrl, null, mTab, false, null));
+        ExtensionsUrlOverrideRegistry.setNtpOverrideEnabled(true);
+        Assert.assertNull(
+                "NTP should not be a native page when overridden.",
+                mNativePageFactory.createNativePageForURL(ntpUrl, null, mTab, false, null));
+        Assert.assertNotNull(
+                "Incognito NTP should still be a native page when NTP is overridden.",
+                mNativePageFactory.createNativePageForURL(ntpUrl, null, mTab, true, null));
+        ExtensionsUrlOverrideRegistry.setNtpOverrideEnabled(false);
+
+        // Test incognito NTP override
+        Assert.assertNotNull(
+                "Incognito NTP should be a native page by default.",
+                mNativePageFactory.createNativePageForURL(ntpUrl, null, mTab, true, null));
+        ExtensionsUrlOverrideRegistry.setIncognitoNtpOverrideEnabled(true);
+        Assert.assertNotNull(
+                "NTP should still be a native page when incognito NTP is overridden.",
+                mNativePageFactory.createNativePageForURL(ntpUrl, null, mTab, false, null));
+        Assert.assertNull(
+                "Incognito NTP should not be a native page when overridden.",
+                mNativePageFactory.createNativePageForURL(ntpUrl, null, mTab, true, null));
+        ExtensionsUrlOverrideRegistry.setIncognitoNtpOverrideEnabled(false);
+
+        // Test Bookmarks override
+        String bookmarksUrl = "chrome://bookmarks";
+        Assert.assertNotNull(
+                "Bookmarks should be a native page by default.",
+                mNativePageFactory.createNativePageForURL(bookmarksUrl, null, mTab, false, null));
+        ExtensionsUrlOverrideRegistry.setBookmarksPageOverrideEnabled(true);
+        Assert.assertNull(
+                "Bookmarks should not be a native page when overridden.",
+                mNativePageFactory.createNativePageForURL(bookmarksUrl, null, mTab, false, null));
+        Assert.assertNotNull(
+                "Incognito Bookmarks should still be a native page when Bookmarks is overridden.",
+                mNativePageFactory.createNativePageForURL(bookmarksUrl, null, mTab, true, null));
+        ExtensionsUrlOverrideRegistry.setBookmarksPageOverrideEnabled(false);
+
+        // Test incognito Bookmarks override
+        Assert.assertNotNull(
+                "Incognito Bookmarks should be a native page by default.",
+                mNativePageFactory.createNativePageForURL(bookmarksUrl, null, mTab, true, null));
+        ExtensionsUrlOverrideRegistry.setIncognitoBookmarksPageOverrideEnabled(true);
+        Assert.assertNotNull(
+                "Bookmarks should still be a native page when incognito Bookmarks is overridden.",
+                mNativePageFactory.createNativePageForURL(bookmarksUrl, null, mTab, false, null));
+        Assert.assertNull(
+                "Incognito Bookmarks should not be a native page when overridden.",
+                mNativePageFactory.createNativePageForURL(bookmarksUrl, null, mTab, true, null));
+        ExtensionsUrlOverrideRegistry.setIncognitoBookmarksPageOverrideEnabled(false);
+
+        // Test History override
+        String historyUrl = "chrome://history";
+        Assert.assertNotNull(
+                "History should be a native page by default.",
+                mNativePageFactory.createNativePageForURL(historyUrl, null, mTab, false, null));
+        ExtensionsUrlOverrideRegistry.setHistoryPageOverrideEnabled(true);
+        Assert.assertNull(
+                "History should not be a native page when overridden.",
+                mNativePageFactory.createNativePageForURL(historyUrl, null, mTab, false, null));
+        Assert.assertNotNull(
+                "Incognito history should always be a native page.",
+                mNativePageFactory.createNativePageForURL(historyUrl, null, mTab, true, null));
+        ExtensionsUrlOverrideRegistry.setHistoryPageOverrideEnabled(false);
     }
 }

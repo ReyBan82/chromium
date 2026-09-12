@@ -6,10 +6,11 @@
 
 #include <memory>
 #include <utility>
+#include <variant>
 #include <vector>
 
-#include "base/metrics/histogram_macros.h"
 #include "base/timer/elapsed_timer.h"
+#include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/gpu_fence.h"
 #include "ui/gfx/linux/drm_util_linux.h"
@@ -37,7 +38,7 @@ scoped_refptr<DrmFramebuffer> GetBufferForPageFlipTest(
   uint32_t fourcc_format =
       overlay_surface.is_opaque
           ? GetFourCCFormatForOpaqueFramebuffer(overlay_surface.format)
-          : GetFourCCFormatFromBufferFormat(overlay_surface.format);
+          : GetFourCCFormatFromSharedImageFormat(overlay_surface.format);
   gfx::Size size = overlay_surface.buffer_size;
   bool is_0th_plane = !overlay_surface.plane_z_order;
   // Force the 0th plane (e.g. primary plane and fullscreen) with the modifiers
@@ -92,7 +93,9 @@ DrmOverlayPlane DrmOverlayValidator::MakeOverlayPlane(
   scoped_refptr<DrmFramebuffer> buffer =
       GetBufferForPageFlipTest(window_, param, &reusable_buffers);
 
-  return DrmOverlayPlane(buffer, param.plane_z_order, param.transform,
+  return DrmOverlayPlane(buffer, param.color_space, param.plane_z_order,
+                         std::get<gfx::OverlayTransform>(param.transform),
+                         gfx::ToNearestRect(param.display_rect),
                          gfx::ToNearestRect(param.display_rect),
                          param.crop_rect, !param.is_opaque,
                          /*gpu_fence=*/nullptr);
@@ -140,30 +143,10 @@ OverlayStatusList DrmOverlayValidator::TestPageFlip(
     plane_indices.push_back(i);
   }
 
-  int test_page_flip_count = 0;
-
   // Test the whole list, then gradually remove the last plane and retest until
   // we have success, or no more planes to test.
   while (!test_list.empty()) {
-    test_page_flip_count++;
-    base::ElapsedTimer timer;
-
     bool test_result = controller->TestPageFlip(test_list);
-
-    auto time = timer.Elapsed();
-    static constexpr base::TimeDelta kMinTime = base::Microseconds(1);
-    static constexpr base::TimeDelta kMaxTime = base::Milliseconds(10);
-    static constexpr int kTimeBuckets = 50;
-    UMA_HISTOGRAM_CUSTOM_MICROSECONDS_TIMES(
-        "Compositing.Display.DrmOverlayManager.TestPageFlipUs", time, kMinTime,
-        kMaxTime, kTimeBuckets);
-
-    if (test_page_flip_count == 1) {
-      UMA_HISTOGRAM_BOOLEAN(
-          "Compositing.Display.DrmOverlayManager.FirstTestPageFlipPassed",
-          test_result);
-    }
-
     if (test_result) {
       break;
     }
@@ -185,10 +168,6 @@ OverlayStatusList DrmOverlayValidator::TestPageFlip(
   for (size_t index : plane_indices) {
     returns[index] = OVERLAY_STATUS_ABLE;
   }
-
-  UMA_HISTOGRAM_COUNTS_100(
-      "Compositing.Display.DrmOverlayManager.TestPageFlipCount",
-      test_page_flip_count);
 
   return returns;
 }

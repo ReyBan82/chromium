@@ -6,7 +6,7 @@
 #define CHROME_BROWSER_ASH_LOGIN_HELP_APP_LAUNCHER_H_
 
 #include "base/memory/ref_counted.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 class GURL;
 class Profile;
@@ -57,9 +57,6 @@ class HelpAppLauncher : public base::RefCountedThreadSafe<HelpAppLauncher> {
 
   // Shows specified help topic.
   void ShowHelpTopic(HelpTopic help_topic_id);
-
-  // Allows tests to specify a different extension id to connect to.
-  static void SetExtensionIdForTest(const char* extension_id);
 
  protected:
   virtual ~HelpAppLauncher();

@@ -26,6 +26,11 @@ namespace blink {
 using DocumentToken = base::TokenType<class DocumentTokenTypeMarker>;
 
 ////////////////////////////////////////////////////////////////////////////////
+// INITIATOR STATE TOKENS
+using InitiatorStateToken =
+    base::TokenType<class InitiatorStateTokenTypeMarker>;
+
+////////////////////////////////////////////////////////////////////////////////
 // FRAME TOKENS
 
 // Uniquely identifies a blink::LocalFrame / blink::WebLocalFrame /
@@ -79,11 +84,16 @@ using LayoutWorkletToken = base::TokenType<class LayoutWorkletTokenTypeMarker>;
 // Identifies a paint worklet.
 using PaintWorkletToken = base::TokenType<class PaintWorkletTokenTypeMarker>;
 
+// Identifies a shared storage worklet.
+using SharedStorageWorkletToken =
+    base::TokenType<class SharedStorageWorkletTokenTypeMarker>;
+
 // Can represent any type of WorkletToken.
 using WorkletToken = MultiToken<AnimationWorkletToken,
                                 AudioWorkletToken,
                                 LayoutWorkletToken,
-                                PaintWorkletToken>;
+                                PaintWorkletToken,
+                                SharedStorageWorkletToken>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // SHADOW REALM TOKENS
@@ -98,10 +108,6 @@ using ShadowRealmToken = base::TokenType<class ShadowRealmTokenTypeMarker>;
 // their own section, in alphabetical order. If adding a new token here, please
 // keep the following list in alphabetic order.
 
-// Identifies an attributionsrc request made by the Attribution Reporting API.
-using AttributionSrcToken =
-    base::TokenType<class AttributionSrcTokenTypeMarker>;
-
 // Identifies a unique clipboard state.
 using ClipboardSequenceNumberToken = ui::ClipboardSequenceNumberToken;
 
@@ -115,22 +121,35 @@ using ExecutionContextToken = MultiToken<LocalFrameToken,
                                          AudioWorkletToken,
                                          LayoutWorkletToken,
                                          PaintWorkletToken,
+                                         SharedStorageWorkletToken,
                                          ShadowRealmToken>;
 
-// Identifies a blink::PortalContents / blink::HTMLPortalElement in the
-// renderer process, and a content::Portal in the browser process.
-using PortalToken = base::TokenType<class PortalTokenTypeMarker>;
+// Identifies the destination of a screenshot for a same-document navigation.
+using SameDocNavigationScreenshotDestinationToken = base::TokenType<
+    class SameDocNavigationScreenshotDestinationTokenTypeMarker>;
 
 // Identifies a v8::Context / blink::ScriptState.
 using V8ContextToken = base::TokenType<class V8ContextTokenTypeMarker>;
 
+using ViewTransitionToken =
+    base::TokenType<class ViewTransitionTokenTypeMarker>;
+
 // Identifies possible contexts used for WebGPU. Used in cross-process mojo
 // interfaces for isolation key coordination.
 // TODO(dawn:549) Might be able to eventually swap this out to use
-//     ExecutionContextToken from above whif DocumentToken gets encapsulated
+//     ExecutionContextToken from above with DocumentToken gets encapsulated
 //     there later on.
-using WebGPUExecutionContextToken =
-    MultiToken<DocumentToken, DedicatedWorkerToken>;
+using WebGPUExecutionContextToken = MultiToken<DocumentToken,
+                                               DedicatedWorkerToken,
+                                               SharedWorkerToken,
+                                               ServiceWorkerToken>;
+
+// Identify various WebNN types in a renderer process and the WebNN service.
+using WebNNContextToken = base::TokenType<class WebNNContextTokenTypeMarker>;
+using WebNNPendingConstantToken =
+    base::TokenType<class WebNNPendingConstantTokenTypeMarker>;
+using WebNNTensorToken = base::TokenType<class WebNNTensorTokenTypeMarker>;
+using WebNNGraphToken = base::TokenType<class WebNNGraphTokenTypeMarker>;
 
 }  // namespace blink
 

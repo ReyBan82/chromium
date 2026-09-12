@@ -10,24 +10,23 @@
 #include "ui/base/class_property.h"
 #include "ui/compositor/layer_animation_sequence.h"
 #include "ui/compositor/layer_animator.h"
+#include "ui/compositor/layer_with_external_texture.h"
 
 DEFINE_UI_CLASS_PROPERTY_TYPE(ash::LayerCopyAnimator*)
 
 namespace ash {
 namespace {
 
-DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(LayerCopyAnimator,
-                                   kLayerCopyAnimatorKey,
-                                   nullptr)
+DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(LayerCopyAnimator, kLayerCopyAnimatorKey)
 
 // CopyOutputRequest's callback may be called on the different thread during
 // shutdown, which results in the DCHECK failure in the weak ptr when
 // referenced.
 void MaybeLayerCopied(base::WeakPtr<LayerCopyAnimator> swc,
-                      std::unique_ptr<ui::Layer> new_layer) {
-  if (!swc.MaybeValid())
-    return;
-  swc->OnLayerCopied(std::move(new_layer));
+                      std::unique_ptr<ui::LayerWithExternalTexture> new_layer) {
+  if (swc) {
+    swc->OnLayerCopied(std::move(new_layer));
+  }
 }
 
 }  // namespace
@@ -43,8 +42,8 @@ LayerCopyAnimator::LayerCopyAnimator(aura::Window* window) : window_(window) {
 
   // Copy request will not copy NOT_DRAWN and the result may be smaller than
   // requested layer.  Create a transparent layer to cover the entire layer.
-  if (window_->layer()->type() == ui::LAYER_NOT_DRAWN) {
-    full_layer_.SetColor(SK_ColorTRANSPARENT);
+  if (window_->layer()->AsNotDrawn()) {
+    full_layer_.SetColor(SkColors::kTransparent);
     full_layer_.SetBounds(gfx::Rect(window_->bounds().size()));
     window_->layer()->Add(&full_layer_);
     window_->layer()->StackAtBottom(&full_layer_);
@@ -83,7 +82,8 @@ void LayerCopyAnimator::MaybeStartAnimation(
     EnsureFakeSequence();
 }
 
-void LayerCopyAnimator::OnLayerCopied(std::unique_ptr<ui::Layer> new_layer) {
+void LayerCopyAnimator::OnLayerCopied(
+    std::unique_ptr<ui::LayerWithExternalTexture> new_layer) {
   if (fail_)
     return;
 
@@ -123,7 +123,7 @@ void LayerCopyAnimator::RunAnimation() {
   parent_layer->StackAbove(copied_layer_.get(), window_->layer());
   window_->layer()->SetOpacity(0.f);
 
-  std::move(animation_callback_).Run(copied_layer_.get(), observer_);
+  std::move(animation_callback_).Run(copied_layer_.get(), observer_.get());
 
   // Callback may not run animations, in which case, just end immediately.
   if (!copied_layer_->GetAnimator()->is_animating()) {

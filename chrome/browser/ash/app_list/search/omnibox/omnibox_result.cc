@@ -4,32 +4,35 @@
 
 #include "chrome/browser/ash/app_list/search/omnibox/omnibox_result.h"
 
+#include <optional>
+#include <string>
+#include <utility>
+
 #include "ash/public/cpp/app_list/vector_icons/vector_icons.h"
 #include "ash/public/cpp/style/dark_light_mode_controller.h"
+#include "ash/strings/grit/ash_strings.h"
+#include "base/check_deref.h"
 #include "base/metrics/field_trial_params.h"
 #include "base/strings/strcat.h"
 #include "chrome/browser/ash/app_list/app_list_controller_delegate.h"
 #include "chrome/browser/ash/app_list/search/common/icon_constants.h"
+#include "chrome/browser/ash/app_list/search/common/search_result_util.h"
+#include "chrome/browser/ash/app_list/search/omnibox/omnibox_types.h"
 #include "chrome/browser/ash/app_list/search/omnibox/omnibox_util.h"
-#include "chrome/browser/ash/app_list/search/search_features.h"
 #include "chrome/browser/bitmap_fetcher/bitmap_fetcher.h"
-#include "chrome/browser/chromeos/launcher_search/search_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/search_engines/template_url_service_factory.h"
-#include "chrome/grit/generated_resources.h"
 #include "chromeos/ash/components/string_matching/fuzzy_tokenized_string_match.h"
-#include "chromeos/crosapi/mojom/launcher_search.mojom.h"
+#include "components/omnibox/browser/favicon_cache.h"
 #include "components/omnibox/browser/vector_icons.h"
 #include "components/search_engines/util.h"
 #include "components/strings/grit/components_strings.h"
 #include "extensions/common/image_util.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/window_open_disposition_utils.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "url/gurl.h"
-
-using CrosApiSearchResult = crosapi::mojom::SearchResult;
 
 namespace app_list {
 namespace {
@@ -53,18 +56,17 @@ constexpr int kRichEntityPriority = 2;
 constexpr int kHistoryPriority = 1;
 constexpr int kDefaultPriority = 0;
 
-// crosapi OmniboxType to vector icon, used for app list.
-const gfx::VectorIcon& TypeToVectorIcon(CrosApiSearchResult::OmniboxType type) {
+// OmniboxResultType to vector icon, used for app list.
+const gfx::VectorIcon& TypeToVectorIcon(OmniboxResultType type) {
   switch (type) {
-    case CrosApiSearchResult::OmniboxType::kDomain:
+    case OmniboxResultType::kDomain:
       return ash::kOmniboxGenericIcon;
-    case CrosApiSearchResult::OmniboxType::kSearch:
+    case OmniboxResultType::kSearch:
       return ash::kSearchIcon;
-    case CrosApiSearchResult::OmniboxType::kHistory:
+    case OmniboxResultType::kHistory:
       return ash::kHistoryIcon;
     default:
       NOTREACHED();
-      return ash::kOmniboxGenericIcon;
   }
 }
 
@@ -72,42 +74,43 @@ const gfx::VectorIcon& TypeToVectorIcon(CrosApiSearchResult::OmniboxType type) {
 
 OmniboxResult::OmniboxResult(Profile* profile,
                              AppListControllerDelegate* list_controller,
-                             crosapi::mojom::SearchResultPtr search_result,
-                             const std::u16string& query)
-    : consumer_receiver_(this, std::move(search_result->receiver)),
-      profile_(profile),
+                             TemplateURLService* template_url_service,
+                             std::unique_ptr<OmniboxResultData> search_result,
+                             const std::u16string& query,
+                             FaviconCache* favicon_cache)
+    : profile_(profile),
       list_controller_(list_controller),
+      template_url_service_(CHECK_DEREF(template_url_service)),
       search_result_(std::move(search_result)),
       query_(query),
       contents_(search_result_->contents.value_or(u"")),
       description_(search_result_->description.value_or(u"")) {
+  CHECK(favicon_cache);
+
   SetDisplayType(DisplayType::kList);
   SetResultType(ResultType::kOmnibox);
-  SetMetricsType(GetSearchResultType());
+  SetMetricsType(search_result_->metrics_type);
 
-  set_id(search_result_->stripped_destination_url->spec());
+  set_id(search_result_->stripped_destination_url.spec());
 
   // Omnibox results are categorized as Search and Assistant if they are search
   // suggestions, and Web otherwise.
-  SetCategory(search_result_->omnibox_type ==
-                      CrosApiSearchResult::OmniboxType::kSearch
+  SetCategory(search_result_->omnibox_type == OmniboxResultType::kSearch
                   ? Category::kSearchAndAssistant
                   : Category::kWeb);
 
   if (IsRichEntity()) {
     dedup_priority_ = kRichEntityPriority;
-  } else if (search_result_->omnibox_type ==
-             CrosApiSearchResult::OmniboxType::kHistory) {
+  } else if (search_result_->omnibox_type == OmniboxResultType::kHistory) {
     dedup_priority_ = kHistoryPriority;
   } else {
     dedup_priority_ = kDefaultPriority;
   }
 
-  SetIsOmniboxSearch(
-      crosapi::OptionalBoolIsTrue(search_result_->is_omnibox_search));
   SetSkipUpdateAnimation(search_result_->metrics_type ==
-                         CrosApiSearchResult::MetricsType::kSearchWhatYouTyped);
+                         ash::OMNIBOX_WEB_QUERY);
 
+  FetchFavicon(favicon_cache);
   UpdateIcon();
   UpdateTitleAndDetails();
 
@@ -115,8 +118,9 @@ OmniboxResult::OmniboxResult(Profile* profile,
   // title is set.
   UpdateRelevance();
 
-  if (crosapi::OptionalBoolIsTrue(search_result_->is_omnibox_search))
+  if (search_result_->is_omnibox_search) {
     InitializeButtonActions({ash::SearchResultActionType::kRemove});
+  }
 
   if (auto* dark_light_mode_controller = ash::DarkLightModeController::Get())
     dark_light_mode_controller->AddObserver(this);
@@ -130,27 +134,14 @@ OmniboxResult::~OmniboxResult() {
 void OmniboxResult::UpdateRelevance() {
   double normalized_autocomplete_relevance =
       search_result_->relevance / kMaxOmniboxScore;
-  bool fuzzy_match_cutoff_enabled = base::GetFieldTrialParamByFeatureAsBool(
-      search_features::kLauncherFuzzyMatchForOmnibox, "enable_cutoff", false);
-  bool fuzzy_match_relevance_enabled = base::GetFieldTrialParamByFeatureAsBool(
-      search_features::kLauncherFuzzyMatchForOmnibox, "enable_relevance",
-      false);
-
-  if (!fuzzy_match_cutoff_enabled && !fuzzy_match_relevance_enabled) {
-    // Derive relevance from autocomplete relevance and normalize it to [0, 1].
-    set_relevance(normalized_autocomplete_relevance);
-    return;
-  }
 
   double title_relevance = CalculateTitleRelevance();
-  if (fuzzy_match_cutoff_enabled) {
-    if (title_relevance < kRelevanceThreshold) {
-      scoring().set_filtered(true);
-    }
-    set_relevance(normalized_autocomplete_relevance);
-  } else {
-    set_relevance((normalized_autocomplete_relevance + title_relevance) / 2);
+  if (title_relevance < kRelevanceThreshold) {
+    scoring().set_filtered(true);
   }
+
+  // Derive relevance from autocomplete relevance and normalize it to [0, 1].
+  set_relevance(normalized_autocomplete_relevance);
 }
 
 double OmniboxResult::CalculateTitleRelevance() const {
@@ -168,40 +159,14 @@ double OmniboxResult::CalculateTitleRelevance() const {
                          kStripDiacritics, kUseAcronymMatcher);
 }
 
-void OmniboxResult::Open(int event_flags) {
-  list_controller_->OpenURL(profile_, *search_result_->destination_url,
-                            crosapi::PageTransitionToUiPageTransition(
-                                search_result_->page_transition),
-                            ui::DispositionFromEventFlags(event_flags));
+std::optional<GURL> OmniboxResult::url() const {
+  return search_result_->destination_url;
 }
 
-ash::SearchResultType OmniboxResult::GetSearchResultType() const {
-  switch (search_result_->metrics_type) {
-    case CrosApiSearchResult::MetricsType::kWhatYouTyped:
-      return ash::OMNIBOX_URL_WHAT_YOU_TYPED;
-    case CrosApiSearchResult::MetricsType::kRecentlyVisitedWebsite:
-      return ash::OMNIBOX_RECENTLY_VISITED_WEBSITE;
-    case CrosApiSearchResult::MetricsType::kHistoryTitle:
-      return ash::OMNIBOX_RECENT_DOC_IN_DRIVE;
-    case CrosApiSearchResult::MetricsType::kSearchWhatYouTyped:
-      return ash::OMNIBOX_WEB_QUERY;
-    case CrosApiSearchResult::MetricsType::kSearchHistory:
-      return ash::OMNIBOX_SEARCH_HISTORY;
-    case CrosApiSearchResult::MetricsType::kSearchSuggest:
-      return ash::OMNIBOX_SEARCH_SUGGEST;
-    case CrosApiSearchResult::MetricsType::kSearchSuggestPersonalized:
-      return ash::OMNIBOX_SUGGEST_PERSONALIZED;
-    case CrosApiSearchResult::MetricsType::kBookmark:
-      return ash::OMNIBOX_BOOKMARK;
-    // SEARCH_SUGGEST_ENTITY corresponds with rich entity results.
-    case CrosApiSearchResult::MetricsType::kSearchSuggestEntity:
-      return ash::OMNIBOX_SEARCH_SUGGEST_ENTITY;
-    case CrosApiSearchResult::MetricsType::kNavSuggest:
-      return ash::OMNIBOX_NAVSUGGEST;
-
-    default:
-      return ash::SEARCH_RESULT_TYPE_BOUNDARY;
-  }
+void OmniboxResult::Open(int event_flags) {
+  list_controller_->OpenURL(profile_, search_result_->destination_url,
+                            search_result_->page_transition,
+                            ui::DispositionFromEventFlags(event_flags));
 }
 
 void OmniboxResult::OnColorModeChanged(bool dark_mode_enabled) {
@@ -209,11 +174,27 @@ void OmniboxResult::OnColorModeChanged(bool dark_mode_enabled) {
     SetGenericIcon();
 }
 
-void OmniboxResult::OnFaviconReceived(const gfx::ImageSkia& icon) {
-  // By contract, this is never called with an empty |icon|.
-  DCHECK(!icon.isNull());
-  search_result_->favicon = icon;
-  SetIcon(IconInfo(icon, kFaviconDimension));
+void OmniboxResult::FetchFavicon(FaviconCache* favicon_cache) {
+  CHECK(favicon_cache);
+  CHECK(search_result_->favicon.isNull());
+  if (IsEligibleForFavicon(search_result_->omnibox_type)) {
+    gfx::Image favicon = favicon_cache->GetFaviconForPageUrl(
+        search_result_->destination_url,
+        base::BindOnce(&OmniboxResult::OnFetchedFavicon,
+                       weak_factory_.GetWeakPtr()));
+    if (!favicon.IsEmpty()) {
+      OnFetchedFavicon(favicon);
+    }
+  }
+}
+
+void OmniboxResult::OnFetchedFavicon(const gfx::Image& icon) {
+  CHECK(search_result_->favicon.isNull());
+  auto image_skia = icon.AsImageSkia();
+  search_result_->favicon = image_skia;
+  CHECK(!search_result_->favicon.isNull());
+  SetIcon(
+      IconInfo(ui::ImageModel::FromImageSkia(image_skia), kFaviconDimension));
 }
 
 void OmniboxResult::UpdateIcon() {
@@ -222,11 +203,12 @@ void OmniboxResult::UpdateIcon() {
     return;
   }
 
-  // Use a favicon if eligible. In the event that a favicon becomes available
-  // asynchronously, it will be sent to us over Mojo and we will update our
-  // icon.
-  if (!search_result_->favicon.isNull()) {
-    SetIcon(IconInfo(search_result_->favicon, kFaviconDimension));
+  // If we already have a favicon, use that.
+  // See also FetchFavicon, which takes care of the case where the favicon
+  // becomes available later.
+  gfx::ImageSkia icon = search_result_->favicon;
+  if (!icon.isNull()) {
+    SetIcon(IconInfo(ui::ImageModel::FromImageSkia(icon), kFaviconDimension));
     return;
   }
 
@@ -237,17 +219,19 @@ void OmniboxResult::SetGenericIcon() {
   uses_generic_icon_ = true;
   // If this is neither a rich entity nor eligible for a favicon, use either
   // the generic bookmark or another generic icon as appropriate.
-  if (search_result_->omnibox_type ==
-      CrosApiSearchResult::OmniboxType::kBookmark) {
+  if (search_result_->omnibox_type == OmniboxResultType::kBookmark) {
     SetIcon(IconInfo(
-        gfx::CreateVectorIcon(omnibox::kBookmarkIcon, kSystemIconDimension,
-                              GetGenericIconColor()),
+        ui::ImageModel::FromVectorIcon(
+            features::IsRoundedIconsEnabled() ? omnibox::kStarsFilledIcon
+                                              : omnibox::kBookmarkOldIcon,
+            kGenericIconColorId, kSystemIconDimension),
+
         kSystemIconDimension));
   } else {
-    SetIcon(IconInfo(
-        gfx::CreateVectorIcon(TypeToVectorIcon(search_result_->omnibox_type),
-                              kSystemIconDimension, GetGenericIconColor()),
-        kSystemIconDimension));
+    SetIcon(IconInfo(ui::ImageModel::FromVectorIcon(
+                         TypeToVectorIcon(search_result_->omnibox_type),
+                         kGenericIconColorId, kSystemIconDimension),
+                     kSystemIconDimension));
   }
 }
 
@@ -262,7 +246,7 @@ void OmniboxResult::UpdateTitleAndDetails() {
           l10n_util::GetStringFUTF16(
               IDS_APP_LIST_QUERY_SEARCH_DESCRIPTION, description_,
               GetDefaultSearchEngineName(
-                  TemplateURLServiceFactory::GetForProfile(profile_)));
+                  &template_url_service_.get()));
       SetDetails(description_with_search_context);
       SetDetailsTags(
           TagsForText(description_, search_result_->description_type));
@@ -274,14 +258,14 @@ void OmniboxResult::UpdateTitleAndDetails() {
       SetAccessibleName(l10n_util::GetStringFUTF16(
           IDS_APP_LIST_QUERY_SEARCH_ACCESSIBILITY_NAME, accessible_name,
           GetDefaultSearchEngineName(
-              TemplateURLServiceFactory::GetForProfile(profile_))));
-    } else if (crosapi::OptionalBoolIsTrue(search_result_->is_omnibox_search)) {
+              &template_url_service_.get())));
+    } else if (search_result_->is_omnibox_search) {
       // For non-rich-entity results, put the search engine into the details
       // field. Tags are not used since this does not change with the query.
       SetDetails(l10n_util::GetStringFUTF16(
           IDS_AUTOCOMPLETE_SEARCH_DESCRIPTION,
           GetDefaultSearchEngineName(
-              TemplateURLServiceFactory::GetForProfile(profile_))));
+              &template_url_service_.get())));
     }
   } else {
     // For url result with non-empty description, swap title and details. Thus,
@@ -296,8 +280,7 @@ void OmniboxResult::UpdateTitleAndDetails() {
 }
 
 bool OmniboxResult::IsUrlResultWithDescription() const {
-  return !(crosapi::OptionalBoolIsTrue(search_result_->is_omnibox_search) ||
-           description_.empty());
+  return !(search_result_->is_omnibox_search || description_.empty());
 }
 
 bool OmniboxResult::IsRichEntity() const {
@@ -318,7 +301,8 @@ void OmniboxResult::OnFetchComplete(const GURL& url, const SkBitmap* bitmap) {
   if (!bitmap)
     return;
 
-  IconInfo icon_info(gfx::ImageSkia::CreateFrom1xBitmap(*bitmap),
+  IconInfo icon_info(ui::ImageModel::FromImageSkia(
+                         gfx::ImageSkia::CreateFrom1xBitmap(*bitmap)),
                      kImageIconDimension, IconShape::kRoundedRectangle);
   SetIcon(icon_info);
 }

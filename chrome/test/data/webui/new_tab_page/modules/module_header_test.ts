@@ -1,101 +1,149 @@
-// Copyright 2021 The Chromium Authors
+// Copyright 2023 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'chrome://webui-test/mojo_webui_test_support.js';
-
-import {ModuleHeaderElement} from 'chrome://new-tab-page/lazy_load.js';
+import {ModuleHeaderElementV2} from 'chrome://new-tab-page/lazy_load.js';
 import {$$} from 'chrome://new-tab-page/new_tab_page.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
 import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+import {isVisible, microtasksFinished} from 'chrome://webui-test/test_util.js';
 
-import {capture, render} from '../test_support.js';
-
-suite('NewTabPageModulesModuleHeaderTest', () => {
-  let moduleHeader: ModuleHeaderElement;
+suite('ModuleHeaderV2', () => {
+  let moduleHeader: ModuleHeaderElementV2;
 
   setup(() => {
+    loadTimeData.overrideValues({hideDismissModules: true});
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
-    moduleHeader = new ModuleHeaderElement();
+    moduleHeader = new ModuleHeaderElementV2();
     document.body.appendChild(moduleHeader);
-    render(moduleHeader);
   });
 
-  test('setting text shows text', () => {
-    // Act.
-    moduleHeader.chipText = 'foo';
-    moduleHeader.descriptionText = 'bar';
-    moduleHeader.showDismissButton = true;
-    moduleHeader.dismissText = 'baz';
-    moduleHeader.disableText = 'abc';
-    moduleHeader.showInfoButtonDropdown = true;
-    render(moduleHeader);
-
+  test('title only shows if headerText is not null', async () => {
     // Assert.
-    assertEquals(
-        'foo', $$<HTMLElement>(moduleHeader, '#chip')!.textContent!.trim());
-    assertEquals(
-        'bar',
-        $$<HTMLElement>(moduleHeader, '#description')!.textContent!.trim());
-    assertEquals(
-        'baz',
-        $$<HTMLElement>(moduleHeader, '#dismissButton')!.textContent!.trim());
-    assertEquals(
-        'abc',
-        $$<HTMLElement>(moduleHeader, '#disableButton')!.textContent!.trim());
-    assertEquals(
-        'About this card',
-        $$<HTMLElement>(moduleHeader, '#infoButton')!.textContent!.trim());
-  });
-
-  test('clicking buttons sends events', () => {
-    // Arrange.
-    const infoButtonClick = capture(moduleHeader, 'info-button-click');
-    const dismissButtonClick = capture(moduleHeader, 'dismiss-button-click');
-    const disableButtonClick = capture(moduleHeader, 'disable-button-click');
-    const customizeModule = capture(moduleHeader, 'customize-module');
-    moduleHeader.showInfoButton = true;
-    moduleHeader.showDismissButton = true;
-    render(moduleHeader);
+    assertFalse(isVisible(moduleHeader.$.title));
 
     // Act.
-    $$<HTMLElement>(moduleHeader, '#infoButton')!.click();
-    $$<HTMLElement>(moduleHeader, '#dismissButton')!.click();
-    $$<HTMLElement>(moduleHeader, '#disableButton')!.click();
-    $$<HTMLElement>(moduleHeader, '#customizeButton')!.click();
+    moduleHeader.headerText = 'foo';
+    await microtasksFinished();
 
-    // Assert.
-    assertTrue(infoButtonClick.received);
-    assertTrue(dismissButtonClick.received);
-    assertTrue(disableButtonClick.received);
-    assertTrue(customizeModule.received);
+    // Assert
+    assertTrue(isVisible(moduleHeader.$.title));
   });
 
-  test('action menu opens and closes', () => {
-    // Act & Assert.
-    assertFalse(moduleHeader.$.actionMenu.open);
-    $$<HTMLElement>(moduleHeader, '#menuButton')!.click();
+  test('clicking the menu button shows the action menu', async () => {
+    // Act.
+    moduleHeader.$.menuButton.click();
+    await microtasksFinished();
+
+    // Assert.
     assertTrue(moduleHeader.$.actionMenu.open);
-    $$<HTMLElement>(moduleHeader, '#disableButton')!.click();
-    assertFalse(moduleHeader.$.actionMenu.open);
   });
 
-  test('module icon appears', () => {
+  test('menu items are displayed', async () => {
     // Act.
-    moduleHeader.iconSrc = 'icons/module_logo.svg';
-    render(moduleHeader);
+    moduleHeader.menuItems = [
+      {
+        action: 'foo',
+        icon: 'modules:foo',
+        text: 'Foo',
+      },
+      {
+        action: 'bar',
+        icon: 'modules:bar',
+        text: 'Bar',
+      },
+    ];
+    moduleHeader.$.menuButton.click();
+    await microtasksFinished();
 
     // Assert.
-    assertEquals(
-        'chrome://new-tab-page/icons/module_logo.svg',
-        $$<HTMLImageElement>(moduleHeader, '.module-icon')!.src);
+    const dropDownItems = moduleHeader.shadowRoot.querySelectorAll('button');
+    assertEquals(3, dropDownItems.length);
+    assertEquals('foo', dropDownItems[0]!.id);
+    assertEquals('bar', dropDownItems[1]!.id);
+    assertEquals('customize-module', dropDownItems[2]!.id);
   });
 
-  test('can hide menu button', () => {
+  test('customize modules hides if `hideCustomize` is set', async () => {
+    // Arrange.
+    moduleHeader.menuItems = [
+      {
+        action: 'foo',
+        icon: 'modules:foo',
+        text: 'Foo',
+      },
+      {
+        action: 'bar',
+        icon: 'modules:bar',
+        text: 'Bar',
+      },
+    ];
+    moduleHeader.$.menuButton.click();
+    await microtasksFinished();
+    let dropDownItems = moduleHeader.shadowRoot.querySelectorAll('button');
+    assertEquals(3, dropDownItems.length);
+    assertEquals('customize-module', dropDownItems[2]!.id);
+    const horizontalRule = $$(moduleHeader, 'hr');
+    assertTrue(isVisible(horizontalRule));
+
     // Act.
-    moduleHeader.hideMenuButton = true;
-    render(moduleHeader);
+    moduleHeader.hideCustomize = true;
+    await microtasksFinished();
 
     // Assert.
-    assertFalse(!!$$(moduleHeader, '#menuButton'));
+    dropDownItems = moduleHeader.shadowRoot.querySelectorAll('button');
+    assertEquals(2, dropDownItems.length);
+    assertFalse(isVisible(horizontalRule));
+  });
+
+
+  test('horizontal rule shows if `menuItems` is not empty', async () => {
+    // Act.
+    moduleHeader.menuItems = [
+      {
+        action: 'baz',
+        icon: 'modules:baz',
+        text: 'Baz',
+      },
+    ];
+    moduleHeader.$.menuButton.click();
+    await microtasksFinished();
+
+    // Assert.
+    const horizontalRule = $$(moduleHeader, 'hr');
+    assertTrue(isVisible(horizontalRule));
+  });
+
+  test('horizontal rule hides if `menuItems` is empty', async () => {
+    // Act.
+    moduleHeader.$.menuButton.click();
+    await microtasksFinished();
+
+    // Assert.
+    const dropDownItems = moduleHeader.shadowRoot.querySelectorAll('button');
+    assertEquals(1, dropDownItems.length);
+    const horizontalRule = $$(moduleHeader, 'hr');
+    assertFalse(isVisible(horizontalRule));
+  });
+
+  test('dismiss action is hidden if `hideDismissModules` is true', async () => {
+    moduleHeader.menuItems = [
+      {
+        action: 'dismiss',
+        icon: 'modules:dismiss',
+        text: 'Dismiss',
+      },
+      {
+        action: 'disable',
+        icon: 'modules:disable',
+        text: 'Disable',
+      },
+    ];
+    moduleHeader.$.menuButton.click();
+    await microtasksFinished();
+    const dropDownItems = moduleHeader.shadowRoot.querySelectorAll('button');
+    assertEquals(2, dropDownItems.length);
+    assertEquals('disable', dropDownItems[0]!.id);
+    assertEquals('customize-module', dropDownItems[1]!.id);
   });
 });

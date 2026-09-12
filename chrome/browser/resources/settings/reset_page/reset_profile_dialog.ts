@@ -14,35 +14,32 @@ import 'chrome://resources/cr_elements/cr_button/cr_button.js';
 import 'chrome://resources/cr_elements/cr_checkbox/cr_checkbox.js';
 import 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
 import 'chrome://resources/js/action_link.js';
-import 'chrome://resources/cr_elements/action_link.css.js';
-import 'chrome://resources/polymer/v3_0/paper-spinner/paper-spinner-lite.js';
-import '../settings_shared.css.js';
 
-import {CrButtonElement} from 'chrome://resources/cr_elements/cr_button/cr_button.js';
-import {CrCheckboxElement} from 'chrome://resources/cr_elements/cr_checkbox/cr_checkbox.js';
-import {CrDialogElement} from 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {PaperSpinnerLiteElement} from 'chrome://resources/polymer/v3_0/paper-spinner/paper-spinner-lite.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import type {CrButtonElement} from 'chrome://resources/cr_elements/cr_button/cr_button.js';
+import type {CrCheckboxElement} from 'chrome://resources/cr_elements/cr_checkbox/cr_checkbox.js';
+import type {CrDialogElement} from 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
+import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
 import {loadTimeData} from '../i18n_setup.js';
 import {routes} from '../route.js';
 import {Router} from '../router.js';
 
-import {ResetBrowserProxy, ResetBrowserProxyImpl} from './reset_browser_proxy.js';
-import {getTemplate} from './reset_profile_dialog.html.js';
+import type {ResetBrowserProxy} from './reset_browser_proxy.js';
+import {ResetBrowserProxyImpl} from './reset_browser_proxy.js';
+import {getCss} from './reset_profile_dialog.css.js';
+import {getHtml} from './reset_profile_dialog.html.js';
 
 export interface SettingsResetProfileDialogElement {
   $: {
     cancel: CrButtonElement,
     dialog: CrDialogElement,
     reset: CrButtonElement,
-    resetSpinner: PaperSpinnerLiteElement,
     sendSettings: CrCheckboxElement,
   };
 }
 
-const SettingsResetProfileDialogElementBase = I18nMixin(PolymerElement);
+const SettingsResetProfileDialogElementBase = I18nMixinLit(CrLitElement);
 
 export class SettingsResetProfileDialogElement extends
     SettingsResetProfileDialogElementBase {
@@ -50,74 +47,60 @@ export class SettingsResetProfileDialogElement extends
     return 'settings-reset-profile-dialog';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
       // TODO(dpapad): Evaluate whether this needs to be synced across different
       // settings tabs.
 
-      isTriggered_: {
-        type: Boolean,
-        value: false,
-      },
-
-      triggeredResetToolName_: {
-        type: String,
-        value: '',
-      },
-
-      resetRequestOrigin_: String,
-
-      clearingInProgress_: {
-        type: Boolean,
-        value: false,
-      },
+      isTriggered_: {type: Boolean},
+      triggeredResetToolName_: {type: String},
+      resetRequestOrigin_: {type: String},
+      clearingInProgress_: {type: Boolean},
     };
   }
 
-  private isTriggered_: boolean;
-  private triggeredResetToolName_: string;
-  private resetRequestOrigin_: string;
-  private clearingInProgress_: boolean;
+  private accessor isTriggered_: boolean = false;
+  private accessor triggeredResetToolName_: string = '';
+  private accessor resetRequestOrigin_: string = '';
+  protected accessor clearingInProgress_: boolean = false;
   private browserProxy_: ResetBrowserProxy =
       ResetBrowserProxyImpl.getInstance();
 
-  private getExplanationText_(): TrustedHTML {
+  override firstUpdated() {
+    this.addEventListener('cancel', () => {
+      this.browserProxy_.onHideResetProfileDialog();
+    });
+
+    this.shadowRoot.querySelector('cr-checkbox a')!.addEventListener(
+        'click', this.onShowReportedSettingsClick_.bind(this));
+  }
+
+  protected getExplanationText_(): TrustedHTML {
     if (this.isTriggered_) {
       return this.i18nAdvanced(
           'triggeredResetPageExplanation',
           {substitutions: [this.triggeredResetToolName_]});
     }
 
-    if (loadTimeData.getBoolean('showExplanationWithBulletPoints')) {
-      return this.i18nAdvanced('resetPageExplanationBulletPoints', {
-        tags: ['LINE_BREAKS', 'LINE_BREAK'],
-      });
-    }
-
-    return this.i18nAdvanced('resetPageExplanation');
+    return this.i18nAdvanced('resetPageExplanationBulletPoints', {
+      tags: ['LINE_BREAKS', 'LINE_BREAK'],
+    });
   }
 
-  private getPageTitle_(): string {
+  protected getPageTitle_(): string {
     if (this.isTriggered_) {
       return loadTimeData.getStringF(
           'triggeredResetPageTitle', this.triggeredResetToolName_);
     }
     return loadTimeData.getStringF('resetDialogTitle');
-  }
-
-  override ready() {
-    super.ready();
-
-    this.addEventListener('cancel', () => {
-      this.browserProxy_.onHideResetProfileDialog();
-    });
-
-    this.shadowRoot!.querySelector('cr-checkbox a')!.addEventListener(
-        'click', this.onShowReportedSettingsTap_.bind(this));
   }
 
   private showDialog_() {
@@ -137,18 +120,13 @@ export class SettingsResetProfileDialogElement extends
         this.showDialog_();
       });
     } else {
-      // For the non-triggered reset dialog, a '#cct' hash indicates that the
-      // reset request came from the Chrome Cleanup Tool by launching Chrome
-      // with the startup URL chrome://settings/resetProfileSettings#cct.
-      const origin = window.location.hash.slice(1).toLowerCase() === 'cct' ?
-          'cct' :
-          Router.getInstance().getQueryParameters().get('origin');
-      this.resetRequestOrigin_ = origin || '';
+      this.resetRequestOrigin_ =
+          Router.getInstance().getQueryParameters().get('origin') || '';
       this.showDialog_();
     }
   }
 
-  private onCancelTap_() {
+  protected onCancelClick_() {
     this.cancel();
   }
 
@@ -158,7 +136,7 @@ export class SettingsResetProfileDialogElement extends
     }
   }
 
-  private onResetTap_() {
+  protected onResetClick_() {
     this.clearingInProgress_ = true;
     this.browserProxy_
         .performResetProfileSettings(
@@ -168,15 +146,14 @@ export class SettingsResetProfileDialogElement extends
           if (this.$.dialog.open) {
             this.$.dialog.close();
           }
-          this.dispatchEvent(
-              new CustomEvent('reset-done', {bubbles: true, composed: true}));
+          this.fire('reset-done');
         });
   }
 
   /**
    * Displays the settings that will be reported in a new tab.
    */
-  private onShowReportedSettingsTap_(e: Event) {
+  private onShowReportedSettingsClick_(e: Event) {
     this.browserProxy_.showReportedSettings();
     e.stopPropagation();
   }

@@ -72,6 +72,27 @@ class CustomElementDisconnectedCallbackReaction final
 
 // ----------------------------------------------------------------
 
+class CustomElementConnectedMoveCallbackReaction final
+    : public CustomElementReaction {
+ public:
+  explicit CustomElementConnectedMoveCallbackReaction(
+      CustomElementDefinition& definition)
+      : CustomElementReaction(definition) {
+    DCHECK(definition.HasConnectedMoveCallback());
+  }
+  CustomElementConnectedMoveCallbackReaction(
+      const CustomElementConnectedMoveCallbackReaction&) = delete;
+  CustomElementDisconnectedCallbackReaction& operator=(
+      const CustomElementConnectedMoveCallbackReaction&) = delete;
+
+ private:
+  void Invoke(Element& element) override {
+    definition_->RunConnectedMoveCallback(element);
+  }
+};
+
+// ----------------------------------------------------------------
+
 class CustomElementAdoptedCallbackReaction final
     : public CustomElementReaction {
  public:
@@ -247,6 +268,30 @@ class CustomElementFormStateRestoreCallbackReaction final
 
 // ----------------------------------------------------------------
 
+class CustomElementToolFillCallbackReaction final
+    : public CustomElementReaction {
+ public:
+  CustomElementToolFillCallbackReaction(CustomElementDefinition& definition,
+                                        const String& value)
+      : CustomElementReaction(definition), value_(value) {
+    DCHECK(definition.HasToolFillCallback());
+  }
+
+  CustomElementToolFillCallbackReaction(
+      const CustomElementToolFillCallbackReaction&) = delete;
+  CustomElementToolFillCallbackReaction& operator=(
+      const CustomElementToolFillCallbackReaction&) = delete;
+
+ private:
+  void Invoke(Element& element) override {
+    definition_->RunToolFillCallback(element, value_);
+  }
+
+  String value_;
+};
+
+// ----------------------------------------------------------------
+
 CustomElementReaction& CustomElementReactionFactory::CreateUpgrade(
     CustomElementDefinition& definition) {
   return *MakeGarbageCollected<CustomElementUpgradeReaction>(definition);
@@ -261,6 +306,12 @@ CustomElementReaction& CustomElementReactionFactory::CreateConnected(
 CustomElementReaction& CustomElementReactionFactory::CreateDisconnected(
     CustomElementDefinition& definition) {
   return *MakeGarbageCollected<CustomElementDisconnectedCallbackReaction>(
+      definition);
+}
+
+CustomElementReaction& CustomElementReactionFactory::CreateConnectedMove(
+    CustomElementDefinition& definition) {
+  return *MakeGarbageCollected<CustomElementConnectedMoveCallbackReaction>(
       definition);
 }
 
@@ -307,6 +358,13 @@ CustomElementReaction& CustomElementReactionFactory::CreateFormStateRestore(
     const String& mode) {
   return *MakeGarbageCollected<CustomElementFormStateRestoreCallbackReaction>(
       definition, value, mode);
+}
+
+CustomElementReaction& CustomElementReactionFactory::CreateToolFillCallback(
+    CustomElementDefinition& definition,
+    const String& value) {
+  return *MakeGarbageCollected<CustomElementToolFillCallbackReaction>(
+      definition, value);
 }
 
 }  // namespace blink

@@ -5,37 +5,50 @@
 #ifndef CHROME_COMMON_EXTENSIONS_MANIFEST_HANDLERS_THEME_HANDLER_H_
 #define CHROME_COMMON_EXTENSIONS_MANIFEST_HANDLERS_THEME_HANDLER_H_
 
-#include <memory>
+#include <string>
+#include <vector>
 
+#include "base/containers/flat_map.h"
 #include "base/values.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_resource.h"
 #include "extensions/common/manifest_handler.h"
 
 namespace extensions {
 
 // A structure to hold the parsed theme data.
 struct ThemeInfo : public Extension::ManifestData {
+  static const char* kManifestDataKey;
+
   // Define out of line constructor/destructor to please Clang.
   ThemeInfo();
   ~ThemeInfo() override;
 
-  static const base::Value::Dict* GetImages(const Extension* extension);
-  static const base::Value::Dict* GetColors(const Extension* extension);
-  static const base::Value::Dict* GetTints(const Extension* extension);
-  static const base::Value::Dict* GetDisplayProperties(
+  struct ThemeResource {
+    ExtensionResource resource;
+    std::string scale;
+  };
+
+  using ThemeImages = base::flat_map<std::string, std::vector<ThemeResource>>;
+
+  static const ThemeImages* GetImages(const Extension* extension);
+  static const base::DictValue* GetColors(const Extension* extension);
+  static const base::DictValue* GetTints(const Extension* extension);
+  static const base::DictValue* GetDisplayProperties(
       const Extension* extension);
 
-  // A map of resource id's to relative file paths.
-  base::Value::Dict theme_images_;
+  // A map of resource ids to ExtensionResource entries.
+  ThemeImages theme_images_;
 
   // A map of color names to colors.
-  base::Value::Dict theme_colors_;
+  base::DictValue theme_colors_;
 
   // A map of color names to colors.
-  base::Value::Dict theme_tints_;
+  base::DictValue theme_tints_;
 
   // A map of display properties.
-  base::Value::Dict theme_display_properties_;
+  base::DictValue theme_display_properties_;
+
 };
 
 // Parses the "theme" manifest key.
@@ -49,7 +62,7 @@ class ThemeHandler : public ManifestHandler {
   ~ThemeHandler() override;
 
   bool Parse(Extension* extension, std::u16string* error) override;
-  bool Validate(const Extension* extension,
+  bool Validate(const Extension& extension,
                 std::string* error,
                 std::vector<InstallWarning>* warnings) const override;
 

@@ -6,7 +6,6 @@
 #include "base/location.h"
 #include "base/strings/string_number_conversions.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "content/browser/renderer_host/frame_tree_node.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/renderer_host/render_view_host_impl.h"
@@ -35,9 +34,8 @@ class PageLifecycleStateManagerBrowserTest : public ContentBrowserTest {
   }
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    ContentBrowserTest::SetUpCommandLine(command_line);
-    base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
-        switches::kEnableBlinkFeatures, "VisibilityStateEntry");
+    command_line->AppendSwitchASCII(switches::kEnableBlinkFeatures,
+                                    "VisibilityStateEntry");
   }
 
   WebContentsImpl* web_contents() const {
@@ -134,17 +132,15 @@ IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest, SetVisibility) {
 
   MatchEventList(rfh, ListValueOf("document.visibilitychange"));
 
-  EXPECT_TRUE(
-      EvalJs(
-          rfh,
-          "(async () => { return await window.performanceObserverPromise;})()")
-          .value.GetBool());
+  EXPECT_EQ(true, EvalJs(rfh,
+                         "(async () => { return await "
+                         "window.performanceObserverPromise;})()"));
   EXPECT_EQ(ListValueOf("visible", "hidden"),
             EvalJs(rfh, "window.performanceObserverEntries"));
 }
 
-// TODO(crbug.com/1241814): Test is flaky on Win and Lacros
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS_LACROS)
+// TODO(crbug.com/40786254): Test is flaky on Win
+#if BUILDFLAG(IS_WIN)
 #define MAYBE_CrossProcessIframeHiddenAnFrozen \
   DISABLED_CrossProcessIframeHiddenAnFrozen
 #else
@@ -236,6 +232,121 @@ IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest,
 
   MatchEventList(popup_frame, ListValueOf("document.visibilitychange",
                                           "document.visibilitychange"));
+}
+
+IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest,
+                       MicrotaskRunnableDuringResumeEvent) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL test_url = embedded_test_server()->GetURL("/empty.html");
+  ASSERT_TRUE(NavigateToURL(shell(), test_url));
+  RenderFrameHostImpl* rfh = current_frame_host();
+  // 1. Register a resume listener that schedules a microtask (Promise.then).
+  // If the context is frozen during the event, the microtask will be blocked.
+  ASSERT_TRUE(ExecJs(rfh, R"(
+    window.resumeMicrotaskRan = false;
+    document.addEventListener('resume', () => {
+      Promise.resolve().then(() => {
+        window.resumeMicrotaskRan = true;
+      });
+    });
+  )",
+                     EXECUTE_SCRIPT_NO_RESOLVE_PROMISES));
+
+  // 2. Hide and freeze the page.
+  shell()->web_contents()->WasHidden();
+  EXPECT_EQ(PageVisibilityState::kHidden, rfh->GetVisibilityState());
+  shell()->web_contents()->SetPageFrozen(true);
+
+  // 3. Resume the page.
+  shell()->web_contents()->SetPageFrozen(false);
+
+  // 4. Assert that the microtask was allowed to run.
+  // EvalJs will execute and implicitly run the microtask checkpoint if needed.
+  EXPECT_EQ(true, EvalJs(rfh, "window.resumeMicrotaskRan"));
+}
+
+// Helper class to wait for the renderer to acknowledge a page freeze.
+class FreezeWaiter : public PageLifecycleStateManager::TestDelegate {
+ public:
+  void OnLastAcknowledgedStateChanged(
+      const blink::mojom::PageLifecycleState& old_state,
+      const blink::mojom::PageLifecycleState& new_state) override {
+    if (new_state.is_frozen && run_loop_) {
+      run_loop_->Quit();
+    }
+  }
+  void Wait() {
+    run_loop_ = std::make_unique<base::RunLoop>();
+    run_loop_->Run();
+  }
+
+ private:
+  std::unique_ptr<base::RunLoop> run_loop_;
+};
+
+// Tests that opening and dismissing a JavaScript dialog in a renderer
+// containing a frozen page with a PerformanceObserver does not crash due to
+// redundant SuspendObserver calls during kPaused -> kFrozen transitions.
+IN_PROC_BROWSER_TEST_F(PageLifecycleStateManagerBrowserTest,
+                       PerformanceObserverFrozenPageDialog) {
+  EXPECT_TRUE(embedded_test_server()->Start());
+  GURL test_url = embedded_test_server()->GetURL("a.com", "/empty.html");
+  EXPECT_TRUE(NavigateToURL(shell(), test_url));
+  RenderFrameHostImpl* rfh = current_frame_host();
+
+  // Create a PerformanceObserver and generate a performance mark inside the
+  // 'freeze' event listener so that the observer is active right when the page
+  // transitions to frozen, moving it into suspended_observers_.
+  EXPECT_TRUE(ExecJs(rfh, R"(
+    window.observer = new PerformanceObserver(() => {});
+    window.observer.observe({entryTypes: ['mark']});
+    document.addEventListener('freeze', () => {
+      performance.mark('mark_during_freeze');
+    });
+  )"));
+
+  // Open a same-origin popup before freezing so both pages share the exact
+  // same renderer process and Page::OrdinaryPages().
+  ShellAddedObserver new_shell_observer;
+  EXPECT_TRUE(ExecJs(rfh, JsReplace("window.open($1);", test_url)));
+  Shell* second_shell = new_shell_observer.GetShell();
+  EXPECT_TRUE(WaitForLoadStop(second_shell->web_contents()));
+  RenderFrameHostImpl* second_rfh =
+      static_cast<WebContentsImpl*>(second_shell->web_contents())
+          ->GetPrimaryFrameTree()
+          .root()
+          ->current_frame_host();
+  ASSERT_EQ(rfh->GetProcess(), second_rfh->GetProcess());
+
+  FreezeWaiter freeze_waiter;
+  static_cast<RenderViewHostImpl*>(rfh->GetRenderViewHost())
+      ->GetPageLifecycleStateManager()
+      ->SetDelegateForTesting(&freeze_waiter);
+
+  // Hide and freeze the first page, waiting for the renderer ACK.
+  shell()->web_contents()->WasHidden();
+  shell()->web_contents()->SetPageFrozen(true);
+  freeze_waiter.Wait();
+  static_cast<RenderViewHostImpl*>(rfh->GetRenderViewHost())
+      ->GetPageLifecycleStateManager()
+      ->SetDelegateForTesting(nullptr);
+
+  // Trigger a modal dialog (alert) in the second tab.
+  // ScopedPagePauser pauses all pages in the renderer. When dismissed, it
+  // unpauses all pages, transitioning the first (frozen) page from kPaused
+  // back to kFrozen.
+  //
+  // AppModalDialogWaiter captures the dialog request and automatically
+  // dismisses it across all platforms (preventing hangs on macOS/Windows where
+  // ShellJavaScriptDialog shows a native modal UI dialog).
+  AppModalDialogWaiter dialog_waiter(second_shell);
+  EXPECT_TRUE(ExecJs(second_rfh, "alert('test');"));
+  dialog_waiter.Wait();
+
+  // Verify the renderer process and frames are still live and did not crash.
+  EXPECT_TRUE(rfh->IsRenderFrameLive());
+  EXPECT_TRUE(second_rfh->IsRenderFrameLive());
+  EXPECT_TRUE(rfh->GetProcess()->IsInitializedAndNotDead());
 }
 
 }  // namespace content

@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ash/login/session/user_session_manager_test_api.h"
 
+#include "base/check_is_test.h"
 #include "chromeos/ash/components/login/auth/stub_authenticator_builder.h"
 
 namespace ash {
@@ -11,17 +12,20 @@ namespace test {
 
 UserSessionManagerTestApi::UserSessionManagerTestApi(
     UserSessionManager* session_manager)
-    : session_manager_(session_manager) {}
+    : session_manager_(session_manager) {
+  CHECK_IS_TEST();
+}
 
 void UserSessionManagerTestApi::InjectStubUserContext(
     const UserContext& user_context) {
-  session_manager_->InjectAuthenticatorBuilder(
+  session_manager_->InjectAuthenticatorBuilderForTesting(  // IN-TEST
       std::make_unique<StubAuthenticatorBuilder>(user_context));
 }
 
 void UserSessionManagerTestApi::InjectAuthenticatorBuilder(
-    std::unique_ptr<StubAuthenticatorBuilder> builder) {
-  session_manager_->InjectAuthenticatorBuilder(std::move(builder));
+    std::unique_ptr<AuthenticatorBuilder> builder) {
+  session_manager_->InjectAuthenticatorBuilderForTesting(  // IN-TEST
+      std::move(builder));
 }
 
 void UserSessionManagerTestApi::SetShouldLaunchBrowserInTests(
@@ -32,6 +36,19 @@ void UserSessionManagerTestApi::SetShouldLaunchBrowserInTests(
 void UserSessionManagerTestApi::SetShouldObtainTokenHandleInTests(
     bool should_obtain_handle) {
   session_manager_->SetShouldObtainHandleInTests(should_obtain_handle);
+}
+
+void UserSessionManagerTestApi::InitializeDeviceId(
+    bool is_ephemeral_user,
+    user_manager::KnownUser& known_user) {
+  session_manager_->InitializeDeviceId(
+      is_ephemeral_user, *session_manager_->mutable_user_context_for_testing(),
+      known_user);
+}
+
+void UserSessionManagerTestApi::MaybeMigrateConsentLevelToSync(
+    Profile* profile) {
+  session_manager_->MaybeMigrateConsentLevelToSync(profile);
 }
 
 void UserSessionManagerTestApi::SetAttemptRestartClosureInTests(

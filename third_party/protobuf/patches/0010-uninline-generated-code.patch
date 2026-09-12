@@ -1,11 +1,13 @@
---- a/src/google/protobuf/compiler/cpp/cpp_message.cc
-+++ b/src/google/protobuf/compiler/cpp/cpp_message.cc
-@@ -1300,7 +1300,7 @@ void MessageGenerator::GenerateClassDefinition(io::Printer* printer) {
-       "friend void swap($classname$& a, $classname$& b) {\n"
-       "  a.Swap(&b);\n"
-       "}\n"
--      "inline void Swap($classname$* other) {\n"
-+      "PROTOBUF_NOINLINE void Swap($classname$* other) {\n"
-       "  if (other == this) return;\n"
-       "  if (GetArena() == other->GetArena()) {\n"
-       "    InternalSwap(other);\n"
+diff --git a/src/google/protobuf/compiler/cpp/message.cc b/src/google/protobuf/compiler/cpp/message.cc
+index de6b4e0..f060e32 100644
+--- a/src/google/protobuf/compiler/cpp/message.cc
++++ b/src/google/protobuf/compiler/cpp/message.cc
+@@ -2214,7 +2214,7 @@ void MessageGenerator::GenerateClassDefinition(io::Printer* p) {
+           static constexpr int kIndexInFileMessages = $index_in_file_messages$;
+           $decl_any_methods$;
+           friend void swap($Msg$& a, $Msg$& b) { a.Swap(&b); }
+-          inline void Swap($Msg$* $nonnull$ other) {
++          PROTOBUF_NOINLINE void Swap($Msg$* $nonnull$ other) {
+             if (other == this) return;
+             if ($pbi$::CanUseInternalSwap(GetArena(), other->GetArena())) {
+               InternalSwap(other);

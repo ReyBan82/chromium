@@ -6,8 +6,8 @@ import './diagnostics_card.js';
 import './diagnostics_shared.css.js';
 import './routine_result_entry.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {RoutineGroup} from './routine_group.js';
@@ -30,8 +30,8 @@ type ResultsType = RoutineGroup[]|ResultStatusItem[];
  */
 
 export class RoutineResultListElement extends PolymerElement {
-  static get is(): string {
-    return 'routine-result-list';
+  static get is(): 'routine-result-list' {
+    return 'routine-result-list' as const;
   }
 
   static get template(): HTMLTemplateElement {
@@ -43,11 +43,6 @@ export class RoutineResultListElement extends PolymerElement {
       results: {
         type: Array,
         value: () => [],
-      },
-
-      hidden: {
-        type: Boolean,
-        value: false,
       },
 
       hideVerticalLines: {
@@ -71,11 +66,10 @@ export class RoutineResultListElement extends PolymerElement {
     };
   }
 
-  override hidden: boolean;
-  hideVerticalLines: boolean;
-  usingRoutineGroups: boolean;
-  ignoreRoutineStatusUpdates: boolean;
-  private results: ResultsType;
+  declare hideVerticalLines: boolean;
+  declare usingRoutineGroups: boolean;
+  declare ignoreRoutineStatusUpdates: boolean;
+  declare private results: ResultsType;
 
   /**
    * Resets the list and creates a new list with all routines in the unstarted
@@ -122,13 +116,15 @@ export class RoutineResultListElement extends PolymerElement {
 
   /**
    * Receives the callback from RoutineListExecutor whenever the status of a
-   * routine changed.
+   * routine changed. Returns `true` when a blocking failure is detected and
+   * the caller should stop running further routine groups.
    */
-  onStatusUpdate(status: ResultStatusItem): void {
+  onStatusUpdate(status: ResultStatusItem): boolean {
     if (this.ignoreRoutineStatusUpdates) {
-      return;
+      return false;
     }
     assert(this.results.length > 0);
+    let blockingFailureDetected = false;
     this.results.forEach(
         (result: RoutineGroup|ResultStatusItem, idx: number) => {
           if (result instanceof RoutineGroup &&
@@ -142,6 +138,7 @@ export class RoutineResultListElement extends PolymerElement {
             if (shouldUpdateRoutineUI) {
               this.ignoreRoutineStatusUpdates = true;
               this.updateRoutineUiAfterFailure();
+              blockingFailureDetected = true;
             }
             return;
           }
@@ -152,6 +149,7 @@ export class RoutineResultListElement extends PolymerElement {
             }
           }
         });
+    return blockingFailureDetected;
   }
 
   protected shouldHideVerticalLines({value}: {
@@ -187,7 +185,7 @@ export class RoutineResultListElement extends PolymerElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'routine-result-list': RoutineResultListElement;
+    [RoutineResultListElement.is]: RoutineResultListElement;
   }
 }
 

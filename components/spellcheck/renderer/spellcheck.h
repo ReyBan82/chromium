@@ -8,10 +8,12 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/files/file.h"
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "build/build_config.h"
@@ -23,12 +25,12 @@
 #include "mojo/public/cpp/bindings/receiver_set.h"
 
 class SpellcheckLanguage;
+class SpellCheckProvider;
 struct SpellCheckResult;
 
 namespace blink {
 class WebTextCheckingCompletion;
 struct WebTextCheckingResult;
-template <typename T> class WebVector;
 class WebString;
 }
 
@@ -42,15 +44,14 @@ class DictionaryUpdateObserver {
   // |words_added| is newly added words to dictionary as correct words.
   // OnDictionaryUpdated should be called even if |words_added| empty.
   virtual void OnDictionaryUpdated(
-      const blink::WebVector<blink::WebString>& words_added) = 0;
+      const std::vector<blink::WebString>& words_added) = 0;
 };
 
 // TODO(morrita): Needs reorg with SpellCheckProvider.
 // See http://crbug.com/73699.
 // Shared spellchecking logic/data for a RenderProcess. All RenderViews use
 // this object to perform spellchecking tasks.
-class SpellCheck : public base::SupportsWeakPtr<SpellCheck>,
-                   public spellcheck::mojom::SpellChecker {
+class SpellCheck : public spellcheck::mojom::SpellChecker {
  public:
   // TODO(groby): I wonder if this can be private, non-mac only.
   class SpellcheckRequest;
@@ -78,30 +79,25 @@ class SpellCheck : public base::SupportsWeakPtr<SpellCheck>,
 
   void AddSpellcheckLanguage(base::File file, const std::string& language);
 
-  // If there are no dictionary files, then this requests them from the browser
-  // and does not block. In this case it returns true.
-  // If there are dictionary files, but their Hunspell has not been loaded, then
-  // this loads their Hunspell.
-  // If each dictionary file's Hunspell is already loaded, this does nothing. In
-  // both the latter cases it returns false, meaning that it is OK to continue
-  // spellchecking.
+  // Requests dictionaries from the browser if they have not been requested yet
+  // and `kOnDemandSpellcheckInitialization` is enabled.
+  // Returns true if spellcheck initialization is still pending (i.e. dictionary
+  // files are being loaded or requested asynchronously from the browser).
+  // Returns false if initialization is complete (or no languages are enabled),
+  // meaning that it is OK to continue with spellchecking.
   bool InitializeIfNeeded();
 
   // SpellCheck a word.
   // Returns true if spelled correctly for any language in |languages_|, false
   // otherwise.
   // If any spellcheck languages failed to initialize, always returns true.
-  // The |tag| parameter should either be a unique identifier for the document
-  // that the word came from (if the current platform requires it), or 0.
   // In addition, finds the suggested words for a given word
   // and puts them into |*optional_suggestions|.
   // If the word is spelled correctly, the vector is empty.
   // If optional_suggestions is NULL, suggested words will not be looked up.
   // Note that doing suggest lookups can be slow.
-  bool SpellCheckWord(const char16_t* text_begin,
-                      size_t position_in_text,
-                      size_t text_length,
-                      int tag,
+  bool SpellCheckWord(std::u16string_view text,
+                      spellcheck::mojom::SpellCheckHost& host,
                       size_t* misspelling_start,
                       size_t* misspelling_len,
                       std::vector<std::u16string>* optional_suggestions);
@@ -111,20 +107,16 @@ class SpellCheck : public base::SupportsWeakPtr<SpellCheck>,
   // useful if the suggestions must be merged with another list of suggestions,
   // for example in the case of the Windows hybrid spellchecker.
   bool SpellCheckWord(
-      const char16_t* text_begin,
-      size_t position_in_text,
-      size_t text_length,
-      int tag,
+      std::u16string_view text,
+      spellcheck::mojom::SpellCheckHost& host,
       size_t* misspelling_start,
       size_t* misspelling_len,
       spellcheck::PerLanguageSuggestions* optional_per_language_suggestions);
 
   // Overload of SpellCheckWord for skipping optional suggestions with a
   // nullptr, used to disambiguate between the other two overloads.
-  bool SpellCheckWord(const char16_t* text_begin,
-                      size_t position_in_text,
-                      size_t text_length,
-                      int tag,
+  bool SpellCheckWord(std::u16string_view text,
+                      spellcheck::mojom::SpellCheckHost& host,
                       size_t* misspelling_start,
                       size_t* misspelling_len,
                       std::nullptr_t null_suggestions_ptr);
@@ -133,29 +125,44 @@ class SpellCheck : public base::SupportsWeakPtr<SpellCheck>,
   // SpellCheck a paragraph.
   // Returns true if |text| is correctly spelled, false otherwise.
   // If the spellchecker failed to initialize, always returns true.
+  // If |document_custom_words| is non-null, misspellings whose word matches an
+  // entry are dropped.
   bool SpellCheckParagraph(
       const std::u16string& text,
-      blink::WebVector<blink::WebTextCheckingResult>* results);
+      spellcheck::mojom::SpellCheckHost& host,
+      std::vector<blink::WebTextCheckingResult>* results,
+      const std::set<std::u16string>* document_custom_words = nullptr);
 
   // Requests to spellcheck the specified text in the background. This function
   // posts a background task and calls SpellCheckParagraph() in the task.
   void RequestTextChecking(
       const std::u16string& text,
-      std::unique_ptr<blink::WebTextCheckingCompletion> completion);
+      std::unique_ptr<blink::WebTextCheckingCompletion> completion,
+      base::WeakPtr<SpellCheckProvider> provider);
 #endif
 
   // Creates a list of WebTextCheckingResult objects (used by WebKit) from a
   // list of SpellCheckResult objects (used by Chrome). This function also
   // checks misspelled words returned by the Spelling service and changes the
   // underline colors of contextually-misspelled words.
+  // If |document_custom_words| is non-null, misspellings whose word matches
+  // an entry are also dropped. This is how the SpellCheckCustomDictionary web
+  // API's per-document word set is applied; the set lives on the
+  // SpellCheckProvider since it is document-scoped.
   void CreateTextCheckingResults(
       ResultFilter filter,
+      spellcheck::mojom::SpellCheckHost& host,
       int line_offset,
       const std::u16string& line_text,
       const std::vector<SpellCheckResult>& spellcheck_results,
-      blink::WebVector<blink::WebTextCheckingResult>* textcheck_results);
+      std::vector<blink::WebTextCheckingResult>* textcheck_results,
+      const std::set<std::u16string>* document_custom_words = nullptr);
 
   bool IsSpellcheckEnabled();
+
+  void SpellCheckCustomDictionaryChanged(
+      const std::vector<std::string>& words_added,
+      const std::vector<std::string>& words_removed);
 
   // Add observer on dictionary update event.
   void AddDictionaryUpdateObserver(DictionaryUpdateObserver* observer);
@@ -197,7 +204,7 @@ class SpellCheck : public base::SupportsWeakPtr<SpellCheck>,
 
    // Performs dictionary update notification.
    void NotifyDictionaryObservers(
-       const blink::WebVector<blink::WebString>& words_added);
+       const std::vector<blink::WebString>& words_added);
 
    // Returns whether a word is in the script of one of the enabled spellcheck
    // languages.
@@ -219,6 +226,16 @@ class SpellCheck : public base::SupportsWeakPtr<SpellCheck>,
    std::unique_ptr<SpellcheckRequest> pending_request_param_;
 #endif
 
+  enum class DictionaryState {
+    kNotRequested,
+    kRequested,
+    kInitialized,
+  };
+
+  // Requests dictionaries from the browser if they haven't been requested yet
+  // and `kOnDemandSpellcheckInitialization` is enabled.
+  void RequestDictionaryIfNeeded();
+
   // Receivers for SpellChecker clients.
   mojo::ReceiverSet<spellcheck::mojom::SpellChecker> receivers_;
 
@@ -229,10 +246,14 @@ class SpellCheck : public base::SupportsWeakPtr<SpellCheck>,
   // Custom dictionary spelling engine.
   CustomDictionaryEngine custom_dictionary_;
 
-  service_manager::LocalInterfaceProvider* embedder_provider_;
+  raw_ptr<service_manager::LocalInterfaceProvider> embedder_provider_;
 
   // Remember state for spellchecking.
   bool spellcheck_enabled_;
+
+  // Lifecycle state for requesting and receiving dictionaries from the
+  // browser.
+  DictionaryState dictionary_state_ = DictionaryState::kNotRequested;
 
   // Observers of update dictionary events.
   base::ObserverList<DictionaryUpdateObserver>::Unchecked

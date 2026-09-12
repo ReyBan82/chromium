@@ -6,10 +6,13 @@
 #define ASH_PUBLIC_CPP_WINDOW_PROPERTIES_H_
 
 #include <stdint.h>
+
 #include <string>
 
+#include "ash/public/cpp/arc_game_controls_flag.h"
 #include "ash/public/cpp/arc_resize_lock_type.h"
 #include "ash/public/cpp/ash_public_export.h"
+#include "base/memory/weak_ptr.h"
 #include "ui/base/class_property.h"
 
 class SkRegion;
@@ -42,6 +45,10 @@ enum class ResizeShadowType;
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<std::string*>* const
     kAppIDKey;
 
+// A property key to store the ARC Game Controls status.
+ASH_PUBLIC_EXPORT extern const aura::WindowProperty<ArcGameControlsFlag>* const
+    kArcGameControlsFlagsKey;
+
 // A property key to store the ARC package name for a window's associated
 // ARC app.
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<std::string*>* const
@@ -69,13 +76,19 @@ ASH_PUBLIC_EXPORT extern const aura::WindowProperty<int32_t>* const
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
     kExcludeInMruKey;
 
-ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
-    kFrameRateThrottleKey;
-
 // A property key to indicate whether we should hide this window in overview
 // mode and Alt + Tab.
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
     kHideInOverviewKey;
+
+// A property key to exclude the window in the transient tree iterator.
+ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
+    kExcludeFromTransientTreeTransformKey;
+
+// A property key that ignores window activation changes on the window even if
+// it is activatable.
+ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
+    kIgnoreWindowActivationKey;
 
 // A property key to indicate whether we should hide this window in the shelf.
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
@@ -85,6 +98,11 @@ ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
 // dragged.
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
     kIsDraggingTabsKey;
+
+// A property key to store the address of the source window that the drag
+// originated from if the window is currently in tab-dragging process.
+ASH_PUBLIC_EXPORT extern const aura::WindowProperty<
+    base::WeakPtr<aura::Window>*>* const kTabDraggingSourceWindowKey;
 
 // If true, the window will be ignored when mirroring the desk contents into
 // the desk's mini_view.
@@ -179,16 +197,17 @@ ASH_PUBLIC_EXPORT extern const aura::WindowProperty<ResizeShadowType>* const
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<SkRegion*>* const
     kSystemGestureExclusionKey;
 
-// A property key to store the address of the source window that the drag
-// originated from if the window is currently in tab-dragging process.
-ASH_PUBLIC_EXPORT extern const aura::WindowProperty<aura::Window*>* const
-    kTabDraggingSourceWindowKey;
-
 // A property key to indicate whether ash should perform auto management of
 // window positions; when you open a second browser, ash will move the two to
 // minimize overlap.
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
     kWindowPositionManagedTypeKey;
+
+// A property key to indicate whether the cursor should stay visible when a key
+// is pressed. ChromeOS normally hides the cursor when a key is pressed but this
+// results in undesirable interaction with games.
+ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
+    kShowCursorOnKeypress;
 
 // A property key to indicate pip window state.
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
@@ -200,8 +219,22 @@ ASH_PUBLIC_EXPORT extern const aura::WindowProperty<bool>* const
 ASH_PUBLIC_EXPORT extern const aura::WindowProperty<gfx::Rect*>* const
     kWindowPipResizeHandleBoundsKey;
 
-// Alphabetical sort.
-
 }  // namespace ash
+
+// Declare template specializations introduced by Ash here to make sure that the
+// compiler knows about them before the first template instance use. Using a
+// template instance before its specialization is declared in a translation unit
+// is an error.
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT, SkRegion*)
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT,
+                                        ash::ArcGameControlsFlag)
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT,
+                                        ash::ArcResizeLockType)
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT,
+                                        ash::ResizeShadowType)
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT, ash::WindowBackdrop*)
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT, bool*)
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT, float*)
+DECLARE_EXPORTED_UI_CLASS_PROPERTY_TYPE(ASH_PUBLIC_EXPORT, uint64_t)
 
 #endif  // ASH_PUBLIC_CPP_WINDOW_PROPERTIES_H_

@@ -9,15 +9,15 @@
 #include "base/feature_list.h"
 #include "base/logging.h"
 #include "build/build_config.h"
-#include "content/common/mojo_core_library_support.h"
 #include "content/public/common/content_switches.h"
 #include "mojo/core/embedder/configuration.h"
 #include "mojo/core/embedder/embedder.h"
+#include "mojo/core/embedder/features.h"
 #include "mojo/public/c/system/functions.h"
 #include "mojo/public/c/system/types.h"
 #include "mojo/public/cpp/base/shared_memory_utils.h"
 #include "mojo/public/cpp/platform/platform_channel.h"
-#include "mojo/public/cpp/system/dynamic_library_support.h"
+#include "sandbox/policy/mojom/sandbox.mojom.h"
 #include "sandbox/policy/sandbox_type.h"
 
 namespace content {
@@ -37,17 +37,10 @@ void InitializeMojoCore() {
   const auto& command_line = *base::CommandLine::ForCurrentProcess();
   const bool is_browser = !command_line.HasSwitch(switches::kProcessType);
   if (is_browser) {
-    // On Lacros, Chrome is not always the broker, because ash-chrome is.
-    // Otherwise, look at the command line flag to decide whether it is
-    // a broker.
+    // Look at the command line flag to decide whether it is a broker.
     config.is_broker_process =
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-        false
-#else
         !command_line.HasSwitch(switches::kDisableMojoBroker) &&
-        !mojo::PlatformChannel::CommandLineHasPassedEndpoint(command_line)
-#endif
-        ;
+        !mojo::PlatformChannel::CommandLineHasPassedEndpoint(command_line);
     if (!config.is_broker_process)
       config.force_direct_shared_memory_allocation = true;
   } else {
@@ -55,21 +48,28 @@ void InitializeMojoCore() {
     // On Windows it's not necessary to broker shared memory allocation, as
     // even sandboxed processes can allocate their own without trouble.
     config.force_direct_shared_memory_allocation = true;
+#elif BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_APPLE)
+    // Brokering is not necessary on these platforms too.
+    config.force_direct_shared_memory_allocation = base::FeatureList::IsEnabled(
+        mojo::core::kMojoDirectSharedMemoryAllocation);
+#endif
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+    // Renderer and GPU processes create a lot of unsafe regions (data pipes,
+    // large IPC payloads) and their seccomp policies allow the memfd
+    // creation, sizing and sealing that base needs for one, so let them skip
+    // the broker round trip for those. Other sandbox types keep delegating
+    // everything; some of them (e.g. the hardware video decoder) deliberately
+    // forbid ftruncate().
+    const sandbox::mojom::Sandbox sandbox_type =
+        sandbox::policy::SandboxTypeFromCommandLine(command_line);
+    config.direct_unsafe_shared_memory_allocation =
+        sandbox_type == sandbox::mojom::Sandbox::kRenderer ||
+        sandbox_type == sandbox::mojom::Sandbox::kGpu;
 #endif
   }
 
-  if (!IsMojoCoreSharedLibraryEnabled()) {
-    mojo::core::Init(config);
-  } else if (is_browser) {
-    MojoInitializeFlags flags = MOJO_INITIALIZE_FLAG_NONE;
-    if (config.is_broker_process)
-      flags |= MOJO_INITIALIZE_FLAG_AS_BROKER;
-    if (config.force_direct_shared_memory_allocation)
-      flags |= MOJO_INITIALIZE_FLAG_FORCE_DIRECT_SHARED_MEMORY_ALLOCATION;
-    MojoResult result = mojo::LoadAndInitializeCoreLibrary(
-        GetMojoCoreSharedLibraryPath(), flags);
-    CHECK_EQ(MOJO_RESULT_OK, result);
-  }
+  mojo::core::Init(config);
 
   // Note #1: the installed shared memory hooks require a live instance of
   // mojo::core::ScopedIPCSupport to function, which is instantiated below by
@@ -81,7 +81,7 @@ void InitializeMojoCore() {
   // Note #2: some platforms can directly allocated shared memory in a
   // sandboxed process. The defines below must be in sync with the
   // implementation of mojo::NodeController::CreateSharedBuffer().
-#if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_NACL) && !BUILDFLAG(IS_FUCHSIA)
+#if !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_ANDROID)
   if (sandbox::policy::IsUnsandboxedSandboxType(
           sandbox::policy::SandboxTypeFromCommandLine(
               *base::CommandLine::ForCurrentProcess()))) {
@@ -98,7 +98,7 @@ void InitializeMojoCore() {
     // allocate shared memory.
     mojo::SharedMemoryUtils::InstallBaseHooks();
   }
-#endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_NACL) && !BUILDFLAG(IS_FUCHSIA)
+#endif  // !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_FUCHSIA)
 }
 
 }  // namespace content

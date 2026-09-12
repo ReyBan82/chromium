@@ -3,18 +3,22 @@
 // found in the LICENSE file.
 
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_test.h"
 #include "chrome/browser/ui/exclusive_access/fullscreen_controller.h"
 #include "chrome/browser/ui/exclusive_access/fullscreen_controller_state_test.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/url_constants.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/page_transition_types.h"
 
 // FullscreenControllerStateInteractiveTest ------------------------------------
 
@@ -52,7 +56,12 @@ class FullscreenControllerStateInteractiveTest
   }
 
   // FullscreenControllerStateTest:
-  Browser* GetBrowser() override { return InProcessBrowserTest::browser(); }
+  FullscreenController* GetFullscreenController() override {
+    return ExclusiveAccessManager::From(browser())->fullscreen_controller();
+  }
+  content::WebContents* GetActiveWebContents() override {
+    return browser()->GetTabStripModel()->GetActiveWebContents();
+  }
 };
 
 // Soak tests ------------------------------------------------------------------
@@ -73,7 +82,6 @@ IN_PROC_BROWSER_TEST_F(FullscreenControllerStateInteractiveTest,
   TestTransitionsForEachState();
   // Progress of test can be examined via LOG(INFO) << GetAndClearDebugLog();
 }
-
 
 // Individual tests for each pair of state and event ---------------------------
 
@@ -108,7 +116,6 @@ IN_PROC_BROWSER_TEST_F(FullscreenControllerStateInteractiveTest,
 
 #include "chrome/browser/ui/exclusive_access/fullscreen_controller_state_tests.h"
 
-
 // Specific one-off tests for known issues -------------------------------------
 
 // Used manually to determine what happens on a platform.
@@ -119,12 +126,12 @@ IN_PROC_BROWSER_TEST_F(FullscreenControllerStateInteractiveTest,
       AddTabAtIndex(0, GURL(url::kAboutBlankURL), ui::PAGE_TRANSITION_TYPED));
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN)) << GetAndClearDebugLog();
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE)) << GetAndClearDebugLog();
-  ASSERT_TRUE(InvokeEvent(TAB_FULLSCREEN_TRUE)) << GetAndClearDebugLog();
+  ASSERT_TRUE(InvokeEvent(ENTER_TAB_FULLSCREEN)) << GetAndClearDebugLog();
   ASSERT_TRUE(InvokeEvent(TOGGLE_FULLSCREEN)) << GetAndClearDebugLog();
   ASSERT_TRUE(InvokeEvent(WINDOW_CHANGE)) << GetAndClearDebugLog();
 
   // Wait, allowing human operator to observe the result.
-  scoped_refptr<content::MessageLoopRunner> message_loop
-      = new content::MessageLoopRunner();
+  scoped_refptr<content::MessageLoopRunner> message_loop =
+      new content::MessageLoopRunner();
   message_loop->Run();
 }

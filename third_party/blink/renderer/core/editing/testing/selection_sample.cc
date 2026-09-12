@@ -14,6 +14,7 @@
 #include "third_party/blink/renderer/core/dom/processing_instruction.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
+#include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/html/html_collection.h"
 #include "third_party/blink/renderer/core/html/html_template_element.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
@@ -27,12 +28,14 @@ void ConvertTemplatesToShadowRoots(HTMLElement& element) {
   // |element| and descendant elements can have TEMPLATE element with
   // |data-mode="open"|, which is required. Each elemnt can have only one
   // TEMPLATE element.
-  HTMLCollection* const templates = element.getElementsByTagName("template");
+  HTMLCollection* const templates =
+      element.getElementsByTagName(AtomicString("template"));
   HeapVector<Member<Element>> template_vector;
   for (Element* template_element : *templates)
     template_vector.push_back(template_element);
   for (Element* template_element : template_vector) {
-    const AtomicString& data_mode = template_element->getAttribute("data-mode");
+    const AtomicString& data_mode =
+        template_element->getAttribute(AtomicString("data-mode"));
     DCHECK_EQ(data_mode, "open");
 
     Element* const parent = template_element->parentElement();
@@ -40,7 +43,7 @@ void ConvertTemplatesToShadowRoots(HTMLElement& element) {
 
     Document* const document = element.ownerDocument();
     ShadowRoot& shadow_root =
-        parent->AttachShadowRootInternal(ShadowRootType::kOpen);
+        parent->AttachShadowRootForTesting(ShadowRootMode::kOpen);
     Node* const fragment = document->importNode(
         To<HTMLTemplateElement>(template_element)->content(), true,
         ASSERT_NO_EXCEPTION);
@@ -57,20 +60,21 @@ class Parser final {
   ~Parser() = default;
 
   // Set |selection_text| as inner HTML of |element| and returns
-  // |SelectionInDOMTree| marked up within |selection_text|.
-  SelectionInDOMTree SetSelectionText(HTMLElement* element,
+  // |SelectionInDomTree| marked up within |selection_text|.
+  SelectionInDomTree SetSelectionText(HTMLElement* element,
                                       const std::string& selection_text) {
-    element->setInnerHTML(String::FromUTF8(selection_text.c_str()));
+    element->SetInnerHTMLWithoutTrustedTypes(String::FromUtf8(selection_text));
+    element->GetDocument().View()->UpdateAllLifecyclePhasesForTest();
     ConvertTemplatesToShadowRoots(*element);
     Traverse(element);
     if (anchor_node_ && focus_node_) {
-      return typename SelectionInDOMTree::Builder()
+      return typename SelectionInDomTree::Builder()
           .Collapse(Position(anchor_node_, anchor_offset_))
           .Extend(Position(focus_node_, focus_offset_))
           .Build();
     }
     DCHECK(focus_node_) << "Need just '|', or '^' and '|'";
-    return typename SelectionInDOMTree::Builder()
+    return typename SelectionInDomTree::Builder()
         .Collapse(Position(focus_node_, focus_offset_))
         .Build();
   }
@@ -80,42 +84,47 @@ class Parser final {
   // |Node| and |offset|. The |node| is removed from container when |node|
   // contains only selection markers.
   void HandleCharacterData(CharacterData* node) {
-    int anchor_offset = -1;
-    int focus_offset = -1;
+    std::optional<wtf_size_t> anchor_offset;
+    std::optional<wtf_size_t> focus_offset;
     StringBuilder builder;
-    for (unsigned i = 0; i < node->length(); ++i) {
+    for (wtf_size_t i = 0; i < node->length(); ++i) {
       const UChar char_code = node->data()[i];
       if (char_code == '^') {
-        DCHECK_EQ(anchor_offset, -1) << node->data();
-        anchor_offset = static_cast<int>(builder.length());
+        DCHECK(!anchor_offset) << node->data();
+        anchor_offset = builder.length();
         continue;
       }
       if (char_code == '|') {
-        DCHECK_EQ(focus_offset, -1) << node->data();
-        focus_offset = static_cast<int>(builder.length());
+        DCHECK(!focus_offset) << node->data();
+        focus_offset = builder.length();
         continue;
       }
       builder.Append(char_code);
     }
-    if (anchor_offset == -1 && focus_offset == -1)
+    if (!anchor_offset && !focus_offset) {
       return;
+    }
     node->setData(builder.ToString());
     if (node->length() == 0) {
       // Remove |node| if it contains only selection markers.
       ContainerNode* const parent_node = node->parentNode();
       DCHECK(parent_node) << node;
-      const int offset_in_parent = node->NodeIndex();
-      if (anchor_offset >= 0)
+      const wtf_size_t offset_in_parent = node->NodeIndex();
+      if (anchor_offset.has_value()) {
         RecordSelectionAnchor(parent_node, offset_in_parent);
-      if (focus_offset >= 0)
+      }
+      if (focus_offset.has_value()) {
         RecordSelectionFocus(parent_node, offset_in_parent);
+      }
       parent_node->removeChild(node);
       return;
     }
-    if (anchor_offset >= 0)
-      RecordSelectionAnchor(node, anchor_offset);
-    if (focus_offset >= 0)
-      RecordSelectionFocus(node, focus_offset);
+    if (anchor_offset.has_value()) {
+      RecordSelectionAnchor(node, *anchor_offset);
+    }
+    if (focus_offset.has_value()) {
+      RecordSelectionFocus(node, *focus_offset);
+    }
   }
 
   void HandleElementNode(Element* element) {
@@ -134,14 +143,14 @@ class Parser final {
     }
   }
 
-  void RecordSelectionAnchor(Node* node, int offset) {
+  void RecordSelectionAnchor(Node* node, wtf_size_t offset) {
     DCHECK(!anchor_node_) << "Found more than one '^' in " << *anchor_node_
                           << " and " << *node;
     anchor_node_ = node;
     anchor_offset_ = offset;
   }
 
-  void RecordSelectionFocus(Node* node, int offset) {
+  void RecordSelectionFocus(Node* node, wtf_size_t offset) {
     DCHECK(!focus_node_) << "Found more than one '|' in " << *focus_node_
                          << " and " << *node;
     focus_node_ = node;
@@ -164,8 +173,8 @@ class Parser final {
 
   Node* anchor_node_ = nullptr;
   Node* focus_node_ = nullptr;
-  int anchor_offset_ = 0;
-  int focus_offset_ = 0;
+  wtf_size_t anchor_offset_ = 0;
+  wtf_size_t focus_offset_ = 0;
 };
 
 // Serialize DOM/Flat tree to selection text.
@@ -179,7 +188,7 @@ class Serializer final {
 
   std::string Serialize(const ContainerNode& root) {
     SerializeChildren(root);
-    return builder_.ToString().Utf8();
+    return StringView(builder_).Utf8();
   }
 
  private:
@@ -189,45 +198,45 @@ class Serializer final {
       builder_.Append(text);
       return;
     }
-    const Node& base_node = *selection_.Base().ComputeContainerNode();
-    const Node& extent_node = *selection_.Extent().ComputeContainerNode();
-    const int base_offset = selection_.Base().ComputeOffsetInContainerNode();
-    const int extent_offset =
-        selection_.Extent().ComputeOffsetInContainerNode();
-    if (base_node == node && extent_node == node) {
-      if (base_offset == extent_offset) {
-        builder_.Append(text.Left(base_offset));
+    const Node& anchor_node = *selection_.Anchor().ComputeContainerNode();
+    const Node& focus_node = *selection_.Focus().ComputeContainerNode();
+    const wtf_size_t anchor_offset =
+        selection_.Anchor().ComputeOffsetInContainerNode();
+    const wtf_size_t focus_offset =
+        selection_.Focus().ComputeOffsetInContainerNode();
+    if (anchor_node == node && focus_node == node) {
+      if (anchor_offset == focus_offset) {
+        builder_.Append(text.subview(0, anchor_offset));
         builder_.Append('|');
-        builder_.Append(text.Substring(base_offset));
+        builder_.Append(text.subview(anchor_offset));
         return;
       }
-      if (base_offset < extent_offset) {
-        builder_.Append(text.Left(base_offset));
+      if (anchor_offset < focus_offset) {
+        builder_.Append(text.subview(0, anchor_offset));
         builder_.Append('^');
         builder_.Append(
-            text.Substring(base_offset, extent_offset - base_offset));
+            text.subview(anchor_offset, focus_offset - anchor_offset));
         builder_.Append('|');
-        builder_.Append(text.Substring(extent_offset));
+        builder_.Append(text.subview(focus_offset));
         return;
       }
-      builder_.Append(text.Left(extent_offset));
+      builder_.Append(text.subview(0, focus_offset));
       builder_.Append('|');
-      builder_.Append(
-          text.Substring(extent_offset, base_offset - extent_offset));
+      builder_.Append(text.subview(focus_offset, anchor_offset - focus_offset));
       builder_.Append('^');
-      builder_.Append(text.Substring(base_offset));
+      builder_.Append(text.subview(anchor_offset));
       return;
     }
-    if (base_node == node) {
-      builder_.Append(text.Left(base_offset));
+    if (anchor_node == node) {
+      builder_.Append(text.subview(0, anchor_offset));
       builder_.Append('^');
-      builder_.Append(text.Substring(base_offset));
+      builder_.Append(text.subview(anchor_offset));
       return;
     }
-    if (extent_node == node) {
-      builder_.Append(text.Left(extent_offset));
+    if (focus_node == node) {
+      builder_.Append(text.subview(0, focus_offset));
       builder_.Append('|');
-      builder_.Append(text.Substring(extent_offset));
+      builder_.Append(text.subview(focus_offset));
       return;
     }
     builder_.Append(text);
@@ -313,12 +322,13 @@ class Serializer final {
     if (selection_.IsNone())
       return;
     const PositionTemplate<Strategy> position(node, offset);
-    if (selection_.Extent().ToOffsetInAnchor() == position) {
+    if (selection_.Focus().ToOffsetInAnchor() == position) {
       builder_.Append('|');
       return;
     }
-    if (selection_.Base().ToOffsetInAnchor() != position)
+    if (selection_.Anchor().ToOffsetInAnchor() != position) {
       return;
+    }
     builder_.Append('^');
   }
 
@@ -349,10 +359,10 @@ void SelectionSample::ConvertTemplatesToShadowRootsForTesring(
   ConvertTemplatesToShadowRoots(element);
 }
 
-SelectionInDOMTree SelectionSample::SetSelectionText(
+SelectionInDomTree SelectionSample::SetSelectionText(
     HTMLElement* element,
     const std::string& selection_text) {
-  SelectionInDOMTree selection =
+  SelectionInDomTree selection =
       Parser().SetSelectionText(element, selection_text);
   DCHECK(!selection.IsNone()) << "|selection_text| should container caret "
                                  "marker '|' or selection marker '^' and "
@@ -362,7 +372,7 @@ SelectionInDOMTree SelectionSample::SetSelectionText(
 
 std::string SelectionSample::GetSelectionText(
     const ContainerNode& root,
-    const SelectionInDOMTree& selection) {
+    const SelectionInDomTree& selection) {
   return Serializer<EditingStrategy>(selection).Serialize(root);
 }
 

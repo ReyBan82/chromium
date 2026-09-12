@@ -5,10 +5,11 @@
 function updateDynamicRules(options, expectedError) {
   return new Promise(resolve => {
     chrome.declarativeNetRequest.updateDynamicRules(options, () => {
-      if (expectedError)
+      if (expectedError) {
         chrome.test.assertLastError(expectedError);
-      else
+      } else {
         chrome.test.assertNoLastError();
+      }
 
       resolve();
     });
@@ -34,7 +35,7 @@ function createRegexRuleWithID(id) {
 }
 
 function createLargeRegexRuleWithID(id) {
-  let rule = createRegexRuleWithID(id);
+  const rule = createRegexRuleWithID(id);
   rule.condition.regexFilter = '.{512}x';
   return rule;
 }
@@ -49,7 +50,7 @@ function dynamicRulesEqual(expectedRules, ruleFilter) {
       chrome.test.assertNoLastError();
 
       // Sort by ID first since assertEq respects order of arrays.
-      let comparator = (rule1, rule2) => rule1.id - rule2.id;
+      const comparator = (rule1, rule2) => rule1.id - rule2.id;
       actualRules.sort(comparator);
       expectedRules.sort(comparator);
 
@@ -58,7 +59,7 @@ function dynamicRulesEqual(expectedRules, ruleFilter) {
       resolve();
     });
   });
-};
+}
 
 let currentRules = [];
 
@@ -116,8 +117,9 @@ chrome.test.runTests([
   async function largeRegexError() {
     await updateDynamicRules(
         {addRules: [createLargeRegexRuleWithID(5)]},
-        'Rule with id 5 specified a more complex regex than allowed as part ' +
-            'of the "regexFilter" key.');
+        'Rule with id 5 was skipped as the "regexFilter" value exceeded the ' +
+            '2KB memory limit when compiled. Learn more: ' +
+            'https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest#regex-rules');
 
     chrome.test.succeed();
   },

@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
 (async function() {
   TestRunner.addResult(
       `Test that console.log(new Error().stack) would linkify links in stacks for sourceUrls and sourceMaps Bug 424001.\n`);
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
   await TestRunner.addScriptTag('resources/stack-with-sourceUrl.js');
   await TestRunner.addScriptTag('resources/stack-with-sourceMap.js');
@@ -50,7 +52,7 @@
 
       console.log("Error message without stacks http://www.chromium.org/");
 
-      console.log("Error valid stack #2\\n    at http://www.chromium.org/boo.js:40:70\\n    at foo(http://www.chromium.org/foo.js:10:50)");
+      console.log("Error valid stack #2\\n    at http://www.chromium.org/boo.js:40:70\\n    at foo (http://www.chromium.org/foo.js:10:50)");
       console.log("Error valid stack #3\\n    at http://www.chromium.org/foo.js:40");
       console.log("Error: MyError\\n    at throwError (http://www.chromium.org/foo.js:40)\\n    at eval (eval at <anonymous> (http://www.chromium.org/foo.js:42:1), <anonymous>:1:1)\\n    at http://www.chromium.org/foo.js:239");
 

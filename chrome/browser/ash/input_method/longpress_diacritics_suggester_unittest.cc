@@ -6,11 +6,14 @@
 
 #include <string>
 
+#include "ash/constants/notifier_catalogs.h"
+#include "base/containers/fixed_flat_map.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "chrome/browser/ash/input_method/fake_suggestion_handler.h"
 #include "chrome/browser/ash/input_method/suggestion_enums.h"
+#include "chrome/test/base/chrome_ash_test_base.h"
 #include "chrome/test/base/testing_profile.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/events/base_event_utils.h"
@@ -29,8 +32,9 @@ struct DiacriticsTestCase {
   std::vector<std::u16string> candidates;
 };
 
-using LongpressDiacriticsSuggesterTest =
-    ::testing::TestWithParam<DiacriticsTestCase>;
+class LongpressDiacriticsSuggesterTest
+    : public ChromeAshTestBase,
+      public testing::WithParamInterface<DiacriticsTestCase> {};
 
 using AssistiveWindowButton = ui::ime::AssistiveWindowButton;
 
@@ -50,16 +54,17 @@ const auto kDigitToDomCode = base::MakeFixedFlatMap<int, ui::DomCode>({
 });
 
 ui::KeyEvent CreateKeyEventFromCode(const ui::DomCode& code) {
-  return ui::KeyEvent(ui::ET_KEY_PRESSED, ui::VKEY_UNKNOWN, code, ui::EF_NONE,
-                      ui::DomKey::NONE, ui::EventTimeForNow());
+  return ui::KeyEvent(ui::EventType::kKeyPressed, ui::VKEY_UNKNOWN, code,
+                      ui::EF_NONE, ui::DomKey::NONE, ui::EventTimeForNow());
 }
 
 ui::KeyEvent CreateRepeatKeyEventFromCode(const ui::DomCode& code,
                                           bool shifted) {
   int flags = ui::EF_IS_REPEAT;
-  if (shifted)
+  if (shifted) {
     flags |= ui::EF_SHIFT_DOWN;
-  return ui::KeyEvent(ui::ET_KEY_PRESSED, ui::VKEY_UNKNOWN, code, flags,
+  }
+  return ui::KeyEvent(ui::EventType::kKeyPressed, ui::VKEY_UNKNOWN, code, flags,
                       ui::DomKey::NONE, ui::EventTimeForNow());
 }
 
@@ -75,7 +80,7 @@ AssistiveWindowButton CreateDiacriticsButtonFor(
       .id = ui::ime::ButtonId::kSuggestion,
       .window_type =
           ash::ime::AssistiveWindowType::kLongpressDiacriticsSuggestion,
-      .index = index,
+      .suggestion_index = index,
       .announce_string = announce_string,
   };
   return button;
@@ -127,6 +132,7 @@ TEST_P(LongpressDiacriticsSuggesterTest, DoesNotSuggestForInvalidEngineId) {
 
 TEST_P(LongpressDiacriticsSuggesterTest, DoesNotSuggestForInvalidKeyChar) {
   FakeSuggestionHandler suggestion_handler;
+  base::HistogramTester histogram_tester;
   LongpressDiacriticsSuggester suggester =
       LongpressDiacriticsSuggester(&suggestion_handler);
   suggester.SetEngineId(kUSEngineId);
@@ -136,6 +142,8 @@ TEST_P(LongpressDiacriticsSuggesterTest, DoesNotSuggestForInvalidKeyChar) {
 
   EXPECT_FALSE(suggestion_handler.GetShowingSuggestion());
   EXPECT_EQ(suggestion_handler.GetSuggestionText(), u"");
+  histogram_tester.ExpectUniqueSample("Ash.NotifierFramework.Nudge.ShownCount",
+                                      NudgeCatalogName::kDisableDiacritics, 1);
 }
 
 TEST_P(LongpressDiacriticsSuggesterTest, DoesNotSuggestAfterBlur) {
@@ -171,8 +179,7 @@ TEST_P(LongpressDiacriticsSuggesterTest, HighlightsFirstOnInitialNextKeyEvent) {
 }
 
 TEST_P(LongpressDiacriticsSuggesterTest,
-       HighlightsLastOnInitialPreviousKeyEvent) {
-  size_t expected_candidate_index = GetParam().candidates.size() - 1;
+       HighlightsSettingsOnInitialPreviousKeyEvent) {
   FakeSuggestionHandler suggestion_handler;
   LongpressDiacriticsSuggester suggester =
       LongpressDiacriticsSuggester(&suggestion_handler);
@@ -182,14 +189,17 @@ TEST_P(LongpressDiacriticsSuggesterTest,
   suggester.TrySuggestOnLongpress(GetParam().longpress_char);
   suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_LEFT));
 
+  AssistiveWindowButton learn_more_button = {
+      .id = ui::ime::ButtonId::kLearnMore,
+      .window_type =
+          ash::ime::AssistiveWindowType::kLongpressDiacriticsSuggestion,
+  };
+
   EXPECT_EQ(suggestion_handler.GetContextId(), kContextId);
   EXPECT_TRUE(suggestion_handler.GetShowingSuggestion());
   EXPECT_EQ(suggestion_handler.GetSuggestionText(),
             Join(GetParam().candidates));
-  EXPECT_EQ(suggestion_handler.GetHighlightedButton(),
-            CreateDiacriticsButtonFor(
-                expected_candidate_index,
-                GetParam().candidates[expected_candidate_index]));
+  EXPECT_EQ(suggestion_handler.GetHighlightedButton(), learn_more_button);
 }
 
 TEST_P(LongpressDiacriticsSuggesterTest, HighlightIncrementsOnNextKeyEvent) {
@@ -261,7 +271,7 @@ TEST_P(LongpressDiacriticsSuggesterTest,
 
 TEST_P(LongpressDiacriticsSuggesterTest,
        HighlightWrapsAroundAfterLastIndexOnNextKeyEvent) {
-  size_t expected_candidate_index = (9 % GetParam().candidates.size());
+  size_t expected_candidate_index = 9 % (GetParam().candidates.size() + 1);
   FakeSuggestionHandler suggestion_handler;
   LongpressDiacriticsSuggester suggester =
       LongpressDiacriticsSuggester(&suggestion_handler);
@@ -273,19 +283,27 @@ TEST_P(LongpressDiacriticsSuggesterTest,
     suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_RIGHT));
   }
 
+  AssistiveWindowButton learn_more_button = {
+      .id = ui::ime::ButtonId::kLearnMore,
+      .window_type =
+          ash::ime::AssistiveWindowType::kLongpressDiacriticsSuggestion,
+  };
+  AssistiveWindowButton expectedButton =
+      expected_candidate_index == GetParam().candidates.size()
+          ? learn_more_button
+          : CreateDiacriticsButtonFor(
+                expected_candidate_index,
+                GetParam().candidates[expected_candidate_index]);
+
   EXPECT_EQ(suggestion_handler.GetContextId(), kContextId);
   EXPECT_TRUE(suggestion_handler.GetShowingSuggestion());
   EXPECT_EQ(suggestion_handler.GetSuggestionText(),
             Join(GetParam().candidates));
-  EXPECT_EQ(suggestion_handler.GetHighlightedButton(),
-            CreateDiacriticsButtonFor(
-                expected_candidate_index,
-                GetParam().candidates[expected_candidate_index]));
+  EXPECT_EQ(suggestion_handler.GetHighlightedButton(), expectedButton);
 }
 
 TEST_P(LongpressDiacriticsSuggesterTest,
        HighlightWrapsAroundAfterFirstIndexOnPreviousKeyEvent) {
-  size_t expected_candidate_index = GetParam().candidates.size() - 1;
   FakeSuggestionHandler suggestion_handler;
   LongpressDiacriticsSuggester suggester =
       LongpressDiacriticsSuggester(&suggestion_handler);
@@ -296,14 +314,17 @@ TEST_P(LongpressDiacriticsSuggesterTest,
   suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_RIGHT));
   suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_LEFT));
 
+  AssistiveWindowButton learn_more_button = {
+      .id = ui::ime::ButtonId::kLearnMore,
+      .window_type =
+          ash::ime::AssistiveWindowType::kLongpressDiacriticsSuggestion,
+  };
+
   EXPECT_EQ(suggestion_handler.GetContextId(), kContextId);
   EXPECT_TRUE(suggestion_handler.GetShowingSuggestion());
   EXPECT_EQ(suggestion_handler.GetSuggestionText(),
             Join(GetParam().candidates));
-  EXPECT_EQ(suggestion_handler.GetHighlightedButton(),
-            CreateDiacriticsButtonFor(
-                expected_candidate_index,
-                GetParam().candidates[expected_candidate_index]));
+  EXPECT_EQ(suggestion_handler.GetHighlightedButton(), learn_more_button);
 }
 
 TEST_P(LongpressDiacriticsSuggesterTest,
@@ -341,8 +362,7 @@ TEST_P(LongpressDiacriticsSuggesterTest,
   suggester.TrySuggestOnLongpress(GetParam().longpress_char);
   suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_RIGHT));
   suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_RIGHT));
-  suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_RIGHT));
-  suggester.AcceptSuggestion(2);
+  suggester.AcceptSuggestion(1);
 
   suggester.TrySuggestOnLongpress(GetParam().longpress_char);
   suggester.HandleKeyEvent(CreateKeyEventFromCode(ui::DomCode::ARROW_RIGHT));
@@ -804,9 +824,9 @@ TEST_P(LongpressDiacriticsSuggesterTest, A11yAnnounceOnShowWindow) {
   suggester.TrySuggestOnLongpress(GetParam().longpress_char);
 
   ASSERT_EQ(suggestion_handler.GetAnnouncements().size(), 1u);
-  EXPECT_EQ(suggestion_handler.GetAnnouncements().back(),
-            u"Accent marks menu open. Press left or right to navigate and "
-            u"enter to insert.");
+  EXPECT_EQ(suggestion_handler.GetAnnouncements().front(),
+            u"Accent marks menu open. Press left, right, or number keys to "
+            u"navigate and enter to insert.");
 }
 
 TEST_P(LongpressDiacriticsSuggesterTest, A11yAnnounceOnDismissWithEsc) {
@@ -822,8 +842,8 @@ TEST_P(LongpressDiacriticsSuggesterTest, A11yAnnounceOnDismissWithEsc) {
 
   ASSERT_EQ(suggestion_handler.GetAnnouncements().size(), 2u);
   EXPECT_EQ(suggestion_handler.GetAnnouncements().front(),
-            u"Accent marks menu open. Press left or right to navigate and "
-            u"enter to insert.");
+            u"Accent marks menu open. Press left, right, or number keys to "
+            u"navigate and enter to insert.");
   EXPECT_EQ(suggestion_handler.GetAnnouncements().back(),
             u"Accent marks menu dismissed.");
 }
@@ -841,8 +861,8 @@ TEST_P(LongpressDiacriticsSuggesterTest, A11yAnnounceOnDismissByTyping) {
 
   ASSERT_EQ(suggestion_handler.GetAnnouncements().size(), 2u);
   EXPECT_EQ(suggestion_handler.GetAnnouncements().front(),
-            u"Accent marks menu open. Press left or right to navigate and "
-            u"enter to insert.");
+            u"Accent marks menu open. Press left, right, or number keys to "
+            u"navigate and enter to insert.");
   EXPECT_EQ(suggestion_handler.GetAnnouncements().back(),
             u"Accent marks menu dismissed.");
 }
@@ -860,8 +880,8 @@ TEST_P(LongpressDiacriticsSuggesterTest, A11yAnnounceOnAcceptViaDigit) {
 
   ASSERT_EQ(suggestion_handler.GetAnnouncements().size(), 2u);
   EXPECT_EQ(suggestion_handler.GetAnnouncements().front(),
-            u"Accent marks menu open. Press left or right to navigate and "
-            u"enter to insert.");
+            u"Accent marks menu open. Press left, right, or number keys to "
+            u"navigate and enter to insert.");
   EXPECT_EQ(suggestion_handler.GetAnnouncements().back(),
             u"Accent mark inserted.");
 }
@@ -880,8 +900,8 @@ TEST_P(LongpressDiacriticsSuggesterTest, A11yAnnounceOnAcceptViaEnter) {
 
   ASSERT_EQ(suggestion_handler.GetAnnouncements().size(), 2u);
   EXPECT_EQ(suggestion_handler.GetAnnouncements().front(),
-            u"Accent marks menu open. Press left or right to navigate and "
-            u"enter to insert.");
+            u"Accent marks menu open. Press left, right, or number keys to "
+            u"navigate and enter to insert.");
   EXPECT_EQ(suggestion_handler.GetAnnouncements().back(),
             u"Accent mark inserted.");
 }
@@ -916,8 +936,7 @@ INSTANTIATE_TEST_SUITE_P(
           u"SOUFLE",
           u"SOUFLES",
           {u"É", u"È", u"Ê", u"Ë", u"Ē"}}}),
-    [](const testing::TestParamInfo<
-        LongpressDiacriticsSuggesterTest::ParamType>& info) {
+    [](const testing::TestParamInfo<DiacriticsTestCase>& info) {
       return std::string(1, info.param.longpress_char);
     });
 

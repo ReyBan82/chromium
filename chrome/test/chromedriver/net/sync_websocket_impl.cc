@@ -162,9 +162,9 @@ void SyncWebSocketImpl::Core::OnMessageReceived(const std::string& message) {
 
 void SyncWebSocketImpl::Core::DetermineRecipient(const std::string& message,
                                                  bool* send_to_chromedriver) {
-  absl::optional<base::Value> message_value =
+  std::optional<base::Value> message_value =
       base::JSONReader::Read(message, base::JSON_REPLACE_INVALID_CHARACTERS);
-  base::Value::Dict* message_dict =
+  base::DictValue* message_dict =
       message_value ? message_value->GetIfDict() : nullptr;
   if (!message_dict) {
     *send_to_chromedriver = true;
@@ -180,6 +180,9 @@ void SyncWebSocketImpl::Core::OnClose() {
   base::AutoLock lock(lock_);
   is_connected_ = false;
   on_update_event_.Signal();
+  if (notify_) {
+    owning_sequence_->PostTask(FROM_HERE, notify_);
+  }
 }
 
 void SyncWebSocketImpl::Core::SetNotificationCallback(

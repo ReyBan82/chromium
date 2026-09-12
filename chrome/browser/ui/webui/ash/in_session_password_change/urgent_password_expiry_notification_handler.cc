@@ -11,7 +11,6 @@
 #include "chrome/browser/ash/login/saml/in_session_password_change_manager.h"
 #include "chrome/browser/ash/login/saml/password_expiry_notification.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
 #include "chromeos/ash/components/login/auth/public/saml_password_attributes.h"
 #include "components/prefs/pref_service.h"
 #include "components/user_manager/user_manager.h"
@@ -25,12 +24,12 @@ UrgentPasswordExpiryNotificationHandler::
     ~UrgentPasswordExpiryNotificationHandler() = default;
 
 void UrgentPasswordExpiryNotificationHandler::HandleContinue(
-    const base::Value::List& params) {
+    const base::ListValue& params) {
   InSessionPasswordChangeManager::Get()->StartInSessionPasswordChange();
 }
 
 void UrgentPasswordExpiryNotificationHandler::HandleGetTitleText(
-    const base::Value::List& params) {
+    const base::ListValue& params) {
   const std::string callback_id = params[0].GetString();
   const int ms_until_expiry = params[1].GetInt();
 

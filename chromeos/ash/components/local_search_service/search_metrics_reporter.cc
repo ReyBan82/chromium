@@ -4,9 +4,12 @@
 
 #include "chromeos/ash/components/local_search_service/search_metrics_reporter.h"
 
+#include <array>
+
 #include "base/check_op.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/time/time.h"
 #include "chromeos/ash/components/local_search_service/pref_names.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
@@ -75,7 +78,7 @@ class SearchMetricsReporter::DailyEventObserver
   }
 
  private:
-  SearchMetricsReporter* reporter_;  // Not owned.
+  raw_ptr<SearchMetricsReporter> reporter_;  // Not owned.
 };
 
 // static:

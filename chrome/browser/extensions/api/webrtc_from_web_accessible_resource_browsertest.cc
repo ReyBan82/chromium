@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 #include "base/command_line.h"
+#include "build/build_config.h"
 #include "chrome/browser/extensions/extension_apitest.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/test/base/ui_test_utils.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "components/permissions/permission_request_manager.h"
 #include "components/permissions/test/permission_request_observer.h"
 #include "content/public/test/browser_test.h"
@@ -13,18 +13,23 @@
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 
+// This test does not run on Android because it is testing getUserMedia(), which
+// is not available in the service-worker-based extension renderers used with
+// manifest v3 (the only manifest version supported on Android).
+static_assert(!BUILDFLAG(IS_ANDROID));
+
 namespace extensions {
 
 class WebRtcFromWebAccessibleResourceTest : public ExtensionApiTest {
  public:
-  WebRtcFromWebAccessibleResourceTest() {}
+  WebRtcFromWebAccessibleResourceTest() = default;
 
   WebRtcFromWebAccessibleResourceTest(
       const WebRtcFromWebAccessibleResourceTest&) = delete;
   WebRtcFromWebAccessibleResourceTest& operator=(
       const WebRtcFromWebAccessibleResourceTest&) = delete;
 
-  ~WebRtcFromWebAccessibleResourceTest() override {}
+  ~WebRtcFromWebAccessibleResourceTest() override = default;
 
   // InProcessBrowserTest:
   void SetUpOnMainThread() override {
@@ -52,14 +57,21 @@ class WebRtcFromWebAccessibleResourceTest : public ExtensionApiTest {
 
 // Verify that a chrome-extension:// web accessible URL can successfully access
 // getUserMedia(), even if it is embedded in an insecure context.
+// TODO(crbug.com/538977465): Flaky/times out on ASAN builds due to audio pipeline startup latency.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_GetUserMediaInWebAccessibleResourceSuccess \
+  DISABLED_GetUserMediaInWebAccessibleResourceSuccess
+#else
+#define MAYBE_GetUserMediaInWebAccessibleResourceSuccess \
+  GetUserMediaInWebAccessibleResourceSuccess
+#endif
 IN_PROC_BROWSER_TEST_F(WebRtcFromWebAccessibleResourceTest,
-                       GetUserMediaInWebAccessibleResourceSuccess) {
+                       MAYBE_GetUserMediaInWebAccessibleResourceSuccess) {
   ASSERT_TRUE(StartEmbeddedTestServer());
 
   LoadTestExtension();
   GURL url = GetTestServerInsecureUrl("/extensions/test_file.html?succeed");
-  content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+  content::WebContents* web_contents = GetActiveWebContents();
   permissions::PermissionRequestManager* request_manager =
       permissions::PermissionRequestManager::FromWebContents(web_contents);
   request_manager->set_auto_response_for_test(
@@ -67,7 +79,7 @@ IN_PROC_BROWSER_TEST_F(WebRtcFromWebAccessibleResourceTest,
   permissions::PermissionRequestObserver permission_request_observer(
       web_contents);
   extensions::ResultCatcher catcher;
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+  ASSERT_TRUE(NavigateToURL(GetActiveWebContents(), url));
 
   ASSERT_TRUE(catcher.GetNextResult());
   EXPECT_TRUE(permission_request_observer.request_shown());
@@ -82,8 +94,7 @@ IN_PROC_BROWSER_TEST_F(WebRtcFromWebAccessibleResourceTest,
 
   LoadTestExtension();
   GURL url = GetTestServerInsecureUrl("/extensions/test_file.html?fail");
-  content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+  content::WebContents* web_contents = GetActiveWebContents();
   permissions::PermissionRequestManager* request_manager =
       permissions::PermissionRequestManager::FromWebContents(web_contents);
   request_manager->set_auto_response_for_test(
@@ -91,7 +102,7 @@ IN_PROC_BROWSER_TEST_F(WebRtcFromWebAccessibleResourceTest,
   permissions::PermissionRequestObserver permission_request_observer(
       web_contents);
   extensions::ResultCatcher catcher;
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+  ASSERT_TRUE(NavigateToURL(GetActiveWebContents(), url));
 
   ASSERT_TRUE(catcher.GetNextResult());
   EXPECT_TRUE(permission_request_observer.request_shown());

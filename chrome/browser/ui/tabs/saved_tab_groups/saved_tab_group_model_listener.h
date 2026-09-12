@@ -7,118 +7,132 @@
 
 #include "base/containers/flat_set.h"
 #include "base/memory/raw_ptr.h"
-#include "chrome/browser/ui/browser_list_observer.h"
+#include "base/scoped_observation.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
+#include "chrome/browser/ui/tabs/saved_tab_groups/local_tab_group_listener.h"
+#include "chrome/browser/ui/tabs/saved_tab_groups/saved_tab_group_web_contents_listener.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 #include "components/tab_groups/tab_group_id.h"
-#include "content/public/browser/navigation_handle.h"
-#include "content/public/browser/web_contents.h"
-#include "content/public/browser/web_contents_observer.h"
 
-class SavedTabGroupModel;
 class TabStripModel;
 class Profile;
 
-class SavedTabGroupWebContentsListener : public content::WebContentsObserver {
- public:
-  SavedTabGroupWebContentsListener(content::WebContents* web_contents,
-                                   base::Token token,
-                                   SavedTabGroupModel* model);
-  ~SavedTabGroupWebContentsListener() override;
+namespace tabs {
+class TabInterface;
+}
 
-  // content::WebContentsObserver
-  void DidFinishNavigation(
-      content::NavigationHandle* navigation_handle) override;
+namespace tab_groups {
 
-  base::Token token() { return token_; }
-  content::WebContents* web_contents() { return web_contents_; }
-
- private:
-  base::Token token_;
-  raw_ptr<content::WebContents> web_contents_;
-  raw_ptr<SavedTabGroupModel> model_;
-};
-
-// Manages the listening state for each individual tabstrip.
-class SavedTabGroupBrowserListener : public TabStripModelObserver {
- public:
-  SavedTabGroupBrowserListener(Browser* browser, SavedTabGroupModel* model);
-  ~SavedTabGroupBrowserListener() override;
-
-  bool ContainsTabGroup(tab_groups::TabGroupId group_id) const;
-
-  // Starts tracking webcontents for changes and return the token. If its
-  // already tracked, just return the token.
-  base::Token GetOrCreateTrackedIDForWebContents(
-      content::WebContents* web_contents);
-
-  // Stops tracking the webcontents for changes. CHECKS if not currently
-  // tracked.
-  void StopTrackingWebContents(content::WebContents* web_contents);
-
-  // TabStripModelObserver:
-  void OnTabGroupChanged(const TabGroupChange& change) override;
-  void TabGroupedStateChanged(absl::optional<tab_groups::TabGroupId> group,
-                              content::WebContents* contents,
-                              int index) override;
-  void WillCloseAllTabs(TabStripModel* tab_strip_model) override;
-
-  Browser* browser() { return browser_; }
-  SavedTabGroupModel* saved_tab_group_model() { return model_; }
-
-  // Testing Accessors.
-  std::unordered_map<content::WebContents*, SavedTabGroupWebContentsListener>&
-  GetWebContentsTokenMapForTesting() {
-    return web_contents_to_tab_id_map_;
-  }
-
- private:
-  std::unordered_map<content::WebContents*, SavedTabGroupWebContentsListener>
-      web_contents_to_tab_id_map_;
-  raw_ptr<Browser> browser_;
-  raw_ptr<SavedTabGroupModel> model_;
-};
+class TabGroupSyncService;
 
 // Serves to maintain and listen to browsers who contain saved tab groups and
 // update the model if a saved tab group was changed.
-class SavedTabGroupModelListener : public BrowserListObserver {
+class SavedTabGroupModelListener : public BrowserCollectionObserver,
+                                   TabStripModelObserver {
  public:
   // Used for testing.
   SavedTabGroupModelListener();
-  explicit SavedTabGroupModelListener(SavedTabGroupModel* model,
+  explicit SavedTabGroupModelListener(TabGroupSyncService* service,
                                       Profile* profile);
   SavedTabGroupModelListener(const SavedTabGroupModelListener&) = delete;
   SavedTabGroupModelListener& operator=(
       const SavedTabGroupModelListener& other) = delete;
   ~SavedTabGroupModelListener() override;
 
-  Browser* GetBrowserWithTabGroupId(tab_groups::TabGroupId group_id);
-  TabStripModel* GetTabStripModelWithTabGroupId(
-      tab_groups::TabGroupId group_id);
+  // Start ignoring tab added/removed notifications that pertain to this group.
+  void PauseTrackingLocalTabGroup(const tab_groups::TabGroupId& group_id);
 
-  // Starts tracking webcontents on a specific browser.
-  base::Token GetOrCreateTrackedIDForWebContents(
-      Browser* browser,
-      content::WebContents* web_contents);
+  // Stop ignoring tab added/removed notifications that pertain to this group.
+  void ResumeTrackingLocalTabGroup(const tab_groups::TabGroupId& group_id);
 
-  // Stops tracking webcontents on a specific browser.
-  void StopTrackingWebContents(Browser* browser,
-                               content::WebContents* web_contents);
+  // True when we are tracking changes to `group_id` in
+  // `local_tab_group_listeners`. False otherwise.
+  bool IsTrackingLocalTabGroup(const tab_groups::TabGroupId& group_id);
 
-  // BrowserListObserver:
-  void OnBrowserAdded(Browser* browser) override;
-  void OnBrowserRemoved(Browser* browser) override;
+  // New API for local observation.
+  // Temporarily pauses local observers for all tab groups. Will ignore all
+  // local updates until ResumeLocalObservation is called.
+  void PauseLocalObservation();
+  // Resumes local observers for all tab groups.
+  void ResumeLocalObservation();
+
+  // Start keeping `saved_tab_group` up to date with changes to its
+  // corresponding local group.
+  void ConnectToLocalTabGroup(
+      const SavedTabGroup& saved_tab_group,
+      std::map<tabs::TabInterface*, base::Uuid> tab_guid_mapping);
+
+  // Stop updating the saved group corresponding to the local group with id
+  // `tab_group_id` when the local group changes.
+  // `closing_source` refers to the callsite that results in invoking this
+  // method.
+  void DisconnectLocalTabGroup(tab_groups::TabGroupId tab_group_id,
+                               ClosingSource closing_source);
+
+  // The saved group corresponding to `local_group_id` was removed, so we must
+  // remove the local group to match.
+  void RemoveLocalGroupFromSync(tab_groups::TabGroupId local_group_id);
+
+  // Updates the local group with id `local_group_id` to match the current state
+  // of the saved tab group, if it is open locally.
+  void UpdateLocalGroupFromSync(tab_groups::TabGroupId local_group_id);
+
+  // BrowserCollectionObserver:
+  void OnBrowserCreated(BrowserWindowInterface* browser) override;
+
+  // TabStripModelObserver:
+  void OnTabGroupAdded(const tab_groups::TabGroupId& group_id) override;
+  void OnTabGroupWillBeRemoved(const tab_groups::TabGroupId& group_id) override;
+  void OnTabGroupChanged(const TabGroupChange& change) override;
+  void TabGroupedStateChanged(TabStripModel* tab_strip_model,
+                              std::optional<tab_groups::TabGroupId> old_group,
+                              std::optional<tab_groups::TabGroupId> new_group,
+                              tabs::TabInterface* tab,
+                              int index) override;
+  void OnTabStripModelChanged(
+      TabStripModel* tab_strip_model,
+      const TabStripModelChange& change,
+      const TabStripSelectionChange& selection) override;
+
+  void WillCloseAllTabs(TabStripModel* tab_strip_model) override;
 
   // Testing Accessors.
-  std::unordered_map<Browser*, SavedTabGroupBrowserListener>&
-  GetBrowserListenerMapForTesting() {
-    return observed_browser_listeners_;
+  std::unordered_map<tab_groups::TabGroupId,
+                     LocalTabGroupListener,
+                     tab_groups::TabGroupIdHash>&
+  GetLocalTabGroupListenerMapForTesting() {
+    return local_tab_group_listeners_;
   }
 
  private:
-  std::unordered_map<Browser*, SavedTabGroupBrowserListener>
-      observed_browser_listeners_;
-  raw_ptr<SavedTabGroupModel> model_ = nullptr;
-  raw_ptr<Profile> profile_;
+  // Create a SavedTabGroup from the corresponding Tab Group in the TabStrip
+  // denoted by `group_id`. Also return a mapping of the tabs in the tab group
+  // to their saved tab guid. This mapping will be used in
+  // ConnectToLocalTabGroup in order to observe any changes to the tabs over
+  // time.
+  std::pair<SavedTabGroup, std::map<tabs::TabInterface*, base::Uuid>>
+  CreateSavedTabGroupAndTabMapping(const tab_groups::TabGroupId& group_id);
+
+  // The LocalTabGroupListeners for each saved tab group that's currently open.
+  std::unordered_map<tab_groups::TabGroupId,
+                     LocalTabGroupListener,
+                     tab_groups::TabGroupIdHash>
+      local_tab_group_listeners_;
+
+  // The service used to manage SavedTabGroups.
+  raw_ptr<TabGroupSyncService> service_ = nullptr;
+
+  // The profile used to verify a browser belongs to this profile before we
+  // listen to it. Also used to query if new groups should be automatically
+  // pinned by default.
+  raw_ptr<Profile> profile_ = nullptr;
+
+  base::ScopedObservation<ProfileBrowserCollection, BrowserCollectionObserver>
+      browser_collection_observation_{this};
 };
+
+}  // namespace tab_groups
 
 #endif  // CHROME_BROWSER_UI_TABS_SAVED_TAB_GROUPS_SAVED_TAB_GROUP_MODEL_LISTENER_H_

@@ -10,7 +10,6 @@
 
 #include "base/component_export.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "build/build_config.h"
 #include "ui/base/ime/composition_text.h"
@@ -29,9 +28,7 @@ class TextInputClient;
 
 // A helper class providing functionalities shared among ui::InputMethod
 // implementations.
-class COMPONENT_EXPORT(UI_BASE_IME) InputMethodBase
-    : public InputMethod,
-      public base::SupportsWeakPtr<InputMethodBase> {
+class COMPONENT_EXPORT(UI_BASE_IME) InputMethodBase : public InputMethod {
  public:
   InputMethodBase(const InputMethodBase&) = delete;
   InputMethodBase& operator=(const InputMethodBase&) = delete;
@@ -42,7 +39,6 @@ class COMPONENT_EXPORT(UI_BASE_IME) InputMethodBase
   void SetImeKeyEventDispatcher(
       ImeKeyEventDispatcher* ime_key_event_dispatcher) override;
   void OnFocus() override;
-  void OnTouch(ui::EventPointerType pointerType) override;
   void OnBlur() override;
 
   void SetFocusedTextInputClient(TextInputClient* client) override;
@@ -107,7 +103,12 @@ class COMPONENT_EXPORT(UI_BASE_IME) InputMethodBase
 
   raw_ptr<TextInputClient, DanglingUntriaged> text_input_client_ = nullptr;
 
-  base::ObserverList<InputMethodObserver>::Unchecked observer_list_;
+  base::ObserverList<
+      InputMethodObserver,
+      /*check_empty=*/false,
+      /*reentrancy=*/
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>
+      observer_list_;
 
   // Screen bounds of a on-screen keyboard.
   gfx::Rect keyboard_bounds_;

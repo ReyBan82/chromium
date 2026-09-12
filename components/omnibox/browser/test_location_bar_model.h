@@ -29,18 +29,19 @@ class TestLocationBarModel : public LocationBarModel {
   std::u16string GetFormattedFullURL() const override;
   std::u16string GetURLForDisplay() const override;
   GURL GetURL() const override;
+  bool IsContextualTasksPage() const override;
+  GURL GetContextualTasksInnerFrameURL() const override;
   security_state::SecurityLevel GetSecurityLevel() const override;
   net::CertStatus GetCertStatus() const override;
   metrics::OmniboxEventProto::PageClassification GetPageClassification(
-      OmniboxFocusSource focus_source,
-      bool is_prefetch = false) override;
+      bool is_prefetch = false) const override;
+  metrics::OmniboxEventProto::PageClassification GetOmniboxComposeboxPageClassification() const override;
   const gfx::VectorIcon& GetVectorIcon() const override;
   std::u16string GetSecureDisplayText() const override;
   std::u16string GetSecureAccessibilityText() const override;
   bool ShouldDisplayURL() const override;
   bool IsOfflinePage() const override;
   bool ShouldPreventElision() const override;
-  bool ShouldUseUpdatedConnectionSecurityIndicators() const override;
 
   void set_formatted_full_url(const std::u16string& url) {
     formatted_full_url_ = std::make_unique<std::u16string>(url);
@@ -63,8 +64,18 @@ class TestLocationBarModel : public LocationBarModel {
   void set_secure_display_text(std::u16string secure_display_text) {
     secure_display_text_ = secure_display_text;
   }
+  void set_secure_accessibility_text(std::u16string secure_accessibility_text) {
+    secure_accessibility_text_ = secure_accessibility_text;
+  }
   void set_should_prevent_elision(bool should_prevent_elision) {
     should_prevent_elision_ = should_prevent_elision;
+  }
+  void set_page_classification(
+      metrics::OmniboxEventProto::PageClassification page_classification) {
+    page_classification_ = page_classification;
+  }
+  void set_is_contextual_tasks_page(bool is_contextual_tasks_page) {
+    is_contextual_tasks_page_ = is_contextual_tasks_page;
   }
 
  private:
@@ -80,7 +91,11 @@ class TestLocationBarModel : public LocationBarModel {
   bool should_display_url_ = false;
   bool offline_page_ = false;
   std::u16string secure_display_text_ = std::u16string();
+  std::u16string secure_accessibility_text_ = std::u16string();
   bool should_prevent_elision_ = false;
+  metrics::OmniboxEventProto::PageClassification page_classification_ =
+      metrics::OmniboxEventProto::OTHER;
+  bool is_contextual_tasks_page_ = false;
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_TEST_LOCATION_BAR_MODEL_H_

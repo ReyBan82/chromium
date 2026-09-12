@@ -7,6 +7,7 @@
 
 #include <Accelerate/Accelerate.h>
 
+#include "base/containers/span.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/platform/audio/audio_array.h"
 
@@ -20,162 +21,121 @@ namespace mac {
 // our namespaced function names, so we must handle this case differently. Other
 // architectures (64bit, ARM, etc.) do not include this header file.
 
-static ALWAYS_INLINE void Conv(const float* source_p,
-                               int source_stride,
+ALWAYS_INLINE static void Conv(base::span<const float> source,
                                const float* filter_p,
-                               int filter_stride,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process,
+                               base::span<float> dest,
+                               size_t frames_to_process,
                                size_t filter_size,
                                const AudioFloatArray* /*prepared_filter*/) {
+  const float* source_p = source.data();
+  float* dest_p = dest.data();
 #if defined(ARCH_CPU_X86)
-  ::conv(source_p, source_stride, filter_p, filter_stride, dest_p, dest_stride,
-         frames_to_process, filter_size);
+  ::conv(source_p, 1, filter_p, -1, dest_p, 1, frames_to_process, filter_size);
 #else
-  vDSP_conv(source_p, source_stride, filter_p, filter_stride, dest_p,
-            dest_stride, frames_to_process, filter_size);
+  vDSP_conv(source_p, 1, filter_p, -1, dest_p, 1, frames_to_process,
+            filter_size);
 #endif
 }
 
-static ALWAYS_INLINE void Vadd(const float* source1p,
-                               int source_stride1,
-                               const float* source2p,
-                               int source_stride2,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
+ALWAYS_INLINE static void Vadd(base::span<const float> source1,
+                               base::span<const float> source2,
+                               base::span<float> dest) {
+  DCHECK_EQ(source1.size(), dest.size());
+  DCHECK_EQ(source2.size(), dest.size());
 #if defined(ARCH_CPU_X86)
-  ::vadd(source1p, source_stride1, source2p, source_stride2, dest_p,
-         dest_stride, frames_to_process);
+  ::vadd(source1.data(), 1, source2.data(), 1, dest.data(), 1, dest.size());
 #else
-  vDSP_vadd(source1p, source_stride1, source2p, source_stride2, dest_p,
-            dest_stride, frames_to_process);
+  vDSP_vadd(source1.data(), 1, source2.data(), 1, dest.data(), 1, dest.size());
 #endif
 }
 
-static ALWAYS_INLINE void Vsub(const float* source1p,
-                               int source_stride1,
-                               const float* source2p,
-                               int source_stride2,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
-  // NOTE: We define Vsub to be source1 - source2, The vDSP routines
+ALWAYS_INLINE static void Vsub(base::span<const float> source1,
+                               base::span<const float> source2,
+                               base::span<float> dest) {
+  DCHECK_EQ(source1.size(), dest.size());
+  DCHECK_EQ(source2.size(), dest.size());
+  // NOTE: We define Vsub to be source1 - source2. The vDSP routines
   // do source2 - source1, so swap the args when calling the vDSP
   // routines.
 #if defined(ARCH_CPU_X86)
-  ::vsub(source2p, source_stride2, source1p, source_stride1, dest_p,
-         dest_stride, frames_to_process);
+  ::vsub(source2.data(), 1, source1.data(), 1, dest.data(), 1, dest.size());
 #else
-  vDSP_vsub(source2p, source_stride2, source1p, source_stride1, dest_p,
-            dest_stride, frames_to_process);
+  vDSP_vsub(source2.data(), 1, source1.data(), 1, dest.data(), 1, dest.size());
 #endif
 }
 
-static ALWAYS_INLINE void Vclip(const float* source_p,
-                                int source_stride,
-                                const float* low_threshold_p,
-                                const float* high_threshold_p,
-                                float* dest_p,
-                                int dest_stride,
-                                uint32_t frames_to_process) {
-  vDSP_vclip(source_p, source_stride, low_threshold_p, high_threshold_p, dest_p,
-             dest_stride, frames_to_process);
+ALWAYS_INLINE static void Vclip(base::span<const float> source,
+                                float low_threshold,
+                                float high_threshold,
+                                base::span<float> dest) {
+  DCHECK_EQ(source.size(), dest.size());
+  vDSP_vclip(source.data(), 1, &low_threshold, &high_threshold, dest.data(), 1,
+             dest.size());
 }
 
-static ALWAYS_INLINE void Vmaxmgv(const float* source_p,
+ALWAYS_INLINE static void Vmaxmgv(const float* source_p,
                                   int source_stride,
                                   float* max_p,
-                                  uint32_t frames_to_process) {
+                                  size_t frames_to_process) {
   vDSP_maxmgv(source_p, source_stride, max_p, frames_to_process);
 }
 
-static ALWAYS_INLINE void Vmul(const float* source1p,
-                               int source_stride1,
-                               const float* source2p,
-                               int source_stride2,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
+ALWAYS_INLINE static void Vmul(base::span<const float> source1,
+                               base::span<const float> source2,
+                               base::span<float> dest) {
+  DCHECK_EQ(source1.size(), dest.size());
+  DCHECK_EQ(source2.size(), dest.size());
 #if defined(ARCH_CPU_X86)
-  ::vmul(source1p, source_stride1, source2p, source_stride2, dest_p,
-         dest_stride, frames_to_process);
+  ::vmul(source1.data(), 1, source2.data(), 1, dest.data(), 1, dest.size());
 #else
-  vDSP_vmul(source1p, source_stride1, source2p, source_stride2, dest_p,
-            dest_stride, frames_to_process);
+  vDSP_vmul(source1.data(), 1, source2.data(), 1, dest.data(), 1, dest.size());
 #endif
 }
 
-static ALWAYS_INLINE void Vsma(const float* source_p,
-                               int source_stride,
-                               const float* scale,
-                               float* dest_p,
-                               int dest_stride,
-                               uint32_t frames_to_process) {
-  vDSP_vsma(source_p, source_stride, scale, dest_p, dest_stride, dest_p,
-            dest_stride, frames_to_process);
+ALWAYS_INLINE static void Vsma(base::span<const float> source,
+                               float scale,
+                               base::span<float> dest) {
+  DCHECK_EQ(source.size(), dest.size());
+  vDSP_vsma(source.data(), 1, &scale, dest.data(), 1, dest.data(), 1,
+            dest.size());
 }
 
-static ALWAYS_INLINE void Vsmul(const float* source_p,
-                                int source_stride,
-                                const float* scale,
-                                float* dest_p,
-                                int dest_stride,
-                                uint32_t frames_to_process) {
+ALWAYS_INLINE static void Vsmul(base::span<const float> source,
+                                float scale,
+                                base::span<float> dest) {
+  DCHECK_EQ(source.size(), dest.size());
 #if defined(ARCH_CPU_X86)
-  ::vsmul(source_p, source_stride, scale, dest_p, dest_stride,
-          frames_to_process);
+  ::vsmul(source.data(), 1, &scale, dest.data(), 1, dest.size());
 #else
-  vDSP_vsmul(source_p, source_stride, scale, dest_p, dest_stride,
-             frames_to_process);
+  vDSP_vsmul(source.data(), 1, &scale, dest.data(), 1, dest.size());
 #endif
 }
 
-static ALWAYS_INLINE void Vsadd(const float* source_p,
-                                int source_stride,
-                                const float* addend,
-                                float* dest_p,
-                                int dest_stride,
-                                uint32_t frames_to_process) {
-#if defined(ARCH_CPU_X86)
-  ::vsadd(source_p, source_stride, addend, dest_p, dest_stride,
-          frames_to_process);
-#else
-  vDSP_vsadd(source_p, source_stride, addend, dest_p, dest_stride,
-             frames_to_process);
-#endif
-}
-
-static ALWAYS_INLINE void Vsadd(const float* source_p,
-                                int source_stride,
+ALWAYS_INLINE static void Vsadd(base::span<const float> source,
                                 float addend,
-                                float* dest_p,
-                                int dest_stride,
-                                uint32_t frames_to_process) {
+                                base::span<float> dest) {
+  DCHECK_EQ(source.size(), dest.size());
 #if defined(ARCH_CPU_X86)
-  ::vsadd(source_p, source_stride, &addend, dest_p, dest_stride,
-          frames_to_process);
+  ::vsadd(source.data(), 1, &addend, dest.data(), 1, dest.size());
 #else
-  vDSP_vsadd(source_p, source_stride, &addend, dest_p, dest_stride,
-             frames_to_process);
+  vDSP_vsadd(source.data(), 1, &addend, dest.data(), 1, dest.size());
 #endif
 }
 
-static ALWAYS_INLINE void Vsvesq(const float* source_p,
+ALWAYS_INLINE static void Vsvesq(const float* source_p,
                                  int source_stride,
                                  float* sum_p,
-                                 uint32_t frames_to_process) {
+                                 size_t frames_to_process) {
   vDSP_svesq(source_p, source_stride, sum_p, frames_to_process);
 }
 
-static ALWAYS_INLINE void Zvmul(const float* real1p,
+ALWAYS_INLINE static void Zvmul(const float* real1p,
                                 const float* imag1p,
                                 const float* real2p,
                                 const float* imag2p,
                                 float* real_dest_p,
                                 float* imag_dest_p,
-                                uint32_t frames_to_process) {
+                                size_t frames_to_process) {
   DSPSplitComplex sc1;
   DSPSplitComplex sc2;
   DSPSplitComplex dest;

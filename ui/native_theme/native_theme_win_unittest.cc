@@ -1,134 +1,245 @@
-// Copyright 2019 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/native_theme/native_theme_win.h"
 
+#include <windows.h>
+
+#include <Windows.Media.ClosedCaptioning.h>
+#include <windows.foundation.h>
+#include <wrl/client.h>
+#include <wrl/event.h>
+#include <wrl/implements.h>
+
+#include "base/scoped_observation.h"
+#include "base/test/bind.h"
+#include "base/test/task_environment.h"
+#include "base/threading/thread.h"
+#include "base/win/scoped_com_initializer.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "ui/gfx/color_palette.h"
+#include "ui/native_theme/native_theme.h"
+#include "ui/native_theme/native_theme_observer.h"
 
 namespace ui {
+namespace {
 
-using PrefScheme = NativeTheme::PreferredColorScheme;
-using SystemThemeColor = NativeTheme::SystemThemeColor;
-
-class TestNativeThemeWin : public NativeThemeWin {
+// Fake implementation of IClosedCaptionPropertiesStatics and
+// IClosedCaptionPropertiesStatics2 that stores the event handler passed to
+// add_PropertiesChanged so tests can invoke it.
+class FakeClosedCaptionPropertiesStatics
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<
+              Microsoft::WRL::WinRt | Microsoft::WRL::InhibitRoOriginateError>,
+          ABI::Windows::Media::ClosedCaptioning::
+              IClosedCaptionPropertiesStatics,
+          ABI::Windows::Media::ClosedCaptioning::
+              IClosedCaptionPropertiesStatics2> {
  public:
-  TestNativeThemeWin() : NativeThemeWin(false, false) {}
-  TestNativeThemeWin& operator=(const TestNativeThemeWin&) = delete;
+  FakeClosedCaptionPropertiesStatics() = default;
 
-  ~TestNativeThemeWin() override = default;
-
-  // NativeTheme:
-  void SetSystemColor(SystemThemeColor system_color, SkColor color) {
-    system_colors_[system_color] = color;
+  // IClosedCaptionPropertiesStatics — all getters return E_NOTIMPL since
+  // they are not called during listener registration.
+  IFACEMETHODIMP get_FontColor(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionColor*) override {
+    return E_NOTIMPL;
   }
+  IFACEMETHODIMP get_ComputedFontColor(ABI::Windows::UI::Color*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_FontOpacity(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionOpacity*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_FontSize(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionSize*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_FontStyle(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionStyle*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_FontEffect(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionEdgeEffect*)
+      override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_BackgroundColor(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionColor*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_ComputedBackgroundColor(
+      ABI::Windows::UI::Color*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_BackgroundOpacity(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionOpacity*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_RegionColor(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionColor*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_ComputedRegionColor(ABI::Windows::UI::Color*) override {
+    return E_NOTIMPL;
+  }
+  IFACEMETHODIMP get_RegionOpacity(
+      ABI::Windows::Media::ClosedCaptioning::ClosedCaptionOpacity*) override {
+    return E_NOTIMPL;
+  }
+
+  // IClosedCaptionPropertiesStatics2:
+  IFACEMETHODIMP add_PropertiesChanged(
+      ABI::Windows::Foundation::IEventHandler<IInspectable*>* handler,
+      EventRegistrationToken* token) override {
+    handler_ = handler;
+    *token = EventRegistrationToken{1};
+    return S_OK;
+  }
+
+  IFACEMETHODIMP remove_PropertiesChanged(
+      EventRegistrationToken token) override {
+    handler_.Reset();
+    return S_OK;
+  }
+
+  // Fire the stored event handler to simulate a caption style change.
+  HRESULT SimulatePropertiesChanged() {
+    if (!handler_) {
+      return E_FAIL;
+    }
+    return handler_->Invoke(nullptr, nullptr);
+  }
+
+  bool has_handler() const { return handler_.Get() != nullptr; }
+
+ private:
+  Microsoft::WRL::ComPtr<ABI::Windows::Foundation::IEventHandler<IInspectable*>>
+      handler_;
 };
 
-TEST(NativeThemeWinTest, CalculatePreferredColorScheme) {
-  TestNativeThemeWin theme;
+// Subclass to access the protected NativeThemeWin constructor.
+class TestNativeThemeWin : public NativeThemeWin {
+ public:
+  TestNativeThemeWin() = default;
+  ~TestNativeThemeWin() override = default;
+};
 
-  theme.set_forced_colors(false);
-  theme.set_use_dark_colors(true);
-  EXPECT_EQ(theme.CalculatePreferredColorScheme(), PrefScheme::kDark);
+class MockCaptionObserver : public NativeThemeObserver {
+ public:
+  MOCK_METHOD(void, OnCaptionStyleUpdated, (), (override));
+};
 
-  theme.set_use_dark_colors(false);
-  EXPECT_EQ(theme.CalculatePreferredColorScheme(), PrefScheme::kLight);
+class NativeThemeWinCaptionTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    fake_statics_ = Microsoft::WRL::Make<FakeClosedCaptionPropertiesStatics>();
 
-  theme.set_forced_colors(true);
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorBLACK);
-  EXPECT_EQ(theme.CalculatePreferredColorScheme(), PrefScheme::kDark);
+    // Inject the fake statics so the next NativeThemeWin constructor will
+    // register with our fake.
+    NativeThemeWin::SetClosedCaptionPropertiesStaticsForTesting(fake_statics_);
+  }
 
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorWHITE);
-  EXPECT_EQ(theme.CalculatePreferredColorScheme(), PrefScheme::kLight);
+  void TearDown() override {
+    // Clear the test override.
+    NativeThemeWin::SetClosedCaptionPropertiesStaticsForTesting(nullptr);
+  }
 
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorBLUE);
-  EXPECT_EQ(theme.CalculatePreferredColorScheme(), PrefScheme::kDark);
+  FakeClosedCaptionPropertiesStatics& fake_statics() {
+    return *fake_statics_.Get();
+  }
 
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorYELLOW);
-  EXPECT_EQ(theme.CalculatePreferredColorScheme(), PrefScheme::kLight);
+ private:
+  base::test::TaskEnvironment task_environment_;
+  base::win::ScopedCOMInitializer com_initializer_;
+  Microsoft::WRL::ComPtr<FakeClosedCaptionPropertiesStatics> fake_statics_;
+};
 
-  theme.set_forced_colors(false);
-  EXPECT_EQ(theme.CalculatePreferredColorScheme(), PrefScheme::kLight);
+// Verifies that constructing a NativeThemeWin registers an event handler
+// via the IClosedCaptionPropertiesStatics2 interface, and destroying it
+// unregisters the handler.
+TEST_F(NativeThemeWinCaptionTest, ListenerLifecycle) {
+  EXPECT_FALSE(fake_statics().has_handler());
+  {
+    TestNativeThemeWin theme;
+    ASSERT_TRUE(fake_statics().has_handler());
+  }
+  EXPECT_FALSE(fake_statics().has_handler());
 }
 
-TEST(NativeThemeWinTest, CalculatePreferredContrast) {
-  using PrefContrast = NativeTheme::PreferredContrast;
-
+// Verifies that when the WinRT PropertiesChanged event fires,
+// OnCaptionStyleUpdated is called on observers of the web NativeTheme.
+TEST_F(NativeThemeWinCaptionTest, EventFiresObserverCallback) {
   TestNativeThemeWin theme;
+  ASSERT_TRUE(fake_statics().has_handler());
 
-  theme.set_forced_colors(false);
-  EXPECT_EQ(theme.CalculatePreferredContrast(), PrefContrast::kNoPreference);
+  MockCaptionObserver observer;
+  base::ScopedObservation<NativeTheme, NativeThemeObserver> observation(
+      &observer);
+  observation.Observe(NativeTheme::GetInstanceForWeb());
 
-  theme.set_forced_colors(true);
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorBLACK);
-  theme.SetSystemColor(SystemThemeColor::kWindowText, SK_ColorWHITE);
-  EXPECT_EQ(theme.CalculatePreferredContrast(), PrefContrast::kMore);
+  EXPECT_CALL(observer, OnCaptionStyleUpdated()).Times(1);
 
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorWHITE);
-  theme.SetSystemColor(SystemThemeColor::kWindowText, SK_ColorBLACK);
-  EXPECT_EQ(theme.CalculatePreferredContrast(), PrefContrast::kMore);
-
-  theme.SetSystemColor(SystemThemeColor::kWindowText, SK_ColorRED);
-  EXPECT_EQ(theme.CalculatePreferredContrast(), PrefContrast::kCustom);
-
-  theme.SetSystemColor(SystemThemeColor::kWindowText, SK_ColorYELLOW);
-  EXPECT_EQ(theme.CalculatePreferredContrast(), PrefContrast::kLess);
-
-  theme.set_forced_colors(false);
-  EXPECT_EQ(theme.CalculatePreferredContrast(), PrefContrast::kNoPreference);
+  // Simulate a caption style change from the OS.
+  EXPECT_HRESULT_SUCCEEDED(fake_statics().SimulatePropertiesChanged());
+  base::RunLoop().RunUntilIdle();
 }
 
-TEST(NativeThemeWinTest, GetDefaultSystemColorScheme) {
-  using ColorScheme = NativeTheme::ColorScheme;
-
+// Verifies that multiple PropertiesChanged events each trigger
+// OnCaptionStyleUpdated.
+TEST_F(NativeThemeWinCaptionTest, MultipleEventsFireMultipleCallbacks) {
   TestNativeThemeWin theme;
-  theme.set_forced_colors(false);
-  theme.set_use_dark_colors(true);
-  EXPECT_EQ(theme.GetDefaultSystemColorScheme(), ColorScheme::kDark);
+  ASSERT_TRUE(fake_statics().has_handler());
 
-  theme.set_use_dark_colors(false);
-  EXPECT_EQ(theme.GetDefaultSystemColorScheme(), ColorScheme::kLight);
+  MockCaptionObserver observer;
+  base::ScopedObservation<NativeTheme, NativeThemeObserver> observation(
+      &observer);
+  observation.Observe(NativeTheme::GetInstanceForWeb());
 
-  theme.set_forced_colors(true);
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorBLACK);
-  theme.SetSystemColor(SystemThemeColor::kWindowText, SK_ColorWHITE);
-  EXPECT_EQ(theme.GetDefaultSystemColorScheme(),
-            ColorScheme::kPlatformHighContrast);
+  EXPECT_CALL(observer, OnCaptionStyleUpdated()).Times(3);
 
-  theme.SetSystemColor(SystemThemeColor::kWindow, SK_ColorWHITE);
-  theme.SetSystemColor(SystemThemeColor::kWindowText, SK_ColorBLACK);
-  EXPECT_EQ(theme.GetDefaultSystemColorScheme(),
-            ColorScheme::kPlatformHighContrast);
-
-  theme.SetSystemColor(SystemThemeColor::kWindowText, SK_ColorBLUE);
-  EXPECT_EQ(theme.GetDefaultSystemColorScheme(),
-            ColorScheme::kPlatformHighContrast);
-
-  theme.set_forced_colors(false);
-  EXPECT_EQ(theme.GetDefaultSystemColorScheme(), ColorScheme::kLight);
+  EXPECT_HRESULT_SUCCEEDED(fake_statics().SimulatePropertiesChanged());
+  EXPECT_HRESULT_SUCCEEDED(fake_statics().SimulatePropertiesChanged());
+  EXPECT_HRESULT_SUCCEEDED(fake_statics().SimulatePropertiesChanged());
+  base::RunLoop().RunUntilIdle();
 }
 
-TEST(NativeThemeWinTest, GetPlatformHighContrastColorScheme) {
-  using HCColorScheme = NativeTheme::PlatformHighContrastColorScheme;
-
+// Verifies that when the WinRT PropertiesChanged event is delivered on a
+// different thread, OnCaptionStyleUpdated is still dispatched to observers on
+// the sequence that registered the listener.
+TEST_F(NativeThemeWinCaptionTest,
+       EventOnOtherThreadNotifiesOnRegisteringSequence) {
   TestNativeThemeWin theme;
-  theme.set_forced_colors(false);
-  theme.set_preferred_color_scheme(PrefScheme::kDark);
-  EXPECT_EQ(theme.GetPlatformHighContrastColorScheme(), HCColorScheme::kNone);
+  ASSERT_TRUE(fake_statics().has_handler());
 
-  theme.set_preferred_color_scheme(PrefScheme::kLight);
-  EXPECT_EQ(theme.GetPlatformHighContrastColorScheme(), HCColorScheme::kNone);
+  const base::PlatformThreadId main_thread_id =
+      base::PlatformThread::CurrentId();
+  base::PlatformThreadId notify_thread_id;
 
-  theme.set_forced_colors(true);
-  theme.set_preferred_color_scheme(PrefScheme::kDark);
-  EXPECT_EQ(theme.GetPlatformHighContrastColorScheme(), HCColorScheme::kDark);
+  MockCaptionObserver observer;
+  EXPECT_CALL(observer, OnCaptionStyleUpdated()).WillOnce([&] {
+    notify_thread_id = base::PlatformThread::CurrentId();
+  });
+  base::ScopedObservation<NativeTheme, NativeThemeObserver> observation(
+      &observer);
+  observation.Observe(NativeTheme::GetInstanceForWeb());
 
-  theme.set_preferred_color_scheme(PrefScheme::kLight);
-  EXPECT_EQ(theme.GetPlatformHighContrastColorScheme(), HCColorScheme::kLight);
+  // Invoke the registered handler from a different thread, as the system may
+  // do for WinRT events.
+  base::Thread other_thread("CaptionEventThread");
+  ASSERT_TRUE(other_thread.Start());
+  base::RunLoop run_loop;
+  other_thread.task_runner()->PostTaskAndReply(
+      FROM_HERE, base::BindLambdaForTesting([&] {
+        EXPECT_HRESULT_SUCCEEDED(fake_statics().SimulatePropertiesChanged());
+      }),
+      run_loop.QuitClosure());
+  run_loop.Run();
+  other_thread.Stop();
 
-  theme.set_forced_colors(false);
-  EXPECT_EQ(theme.GetPlatformHighContrastColorScheme(), HCColorScheme::kNone);
+  EXPECT_EQ(main_thread_id, notify_thread_id);
 }
 
+}  // namespace
 }  // namespace ui

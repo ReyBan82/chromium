@@ -18,11 +18,13 @@ namespace content {
 ServiceWorkerContentSettingsProxyImpl::ServiceWorkerContentSettingsProxyImpl(
     const GURL& script_url,
     scoped_refptr<ServiceWorkerContextWrapper> context_wrapper,
-    mojo::PendingReceiver<blink::mojom::WorkerContentSettingsProxy> receiver)
+    mojo::PendingReceiver<blink::mojom::WorkerContentSettingsProxy> receiver,
+    blink::StorageKey storage_key)
     : origin_(url::Origin::Create(script_url)),
       context_wrapper_(context_wrapper),
-      receiver_(this, std::move(receiver)) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+      receiver_(this, std::move(receiver)),
+      storage_key_(std::move(storage_key)) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 }
 
 ServiceWorkerContentSettingsProxyImpl::
@@ -30,7 +32,7 @@ ServiceWorkerContentSettingsProxyImpl::
 
 void ServiceWorkerContentSettingsProxyImpl::AllowIndexedDB(
     AllowIndexedDBCallback callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   // May be shutting down.
   if (!context_wrapper_->browser_context()) {
     std::move(callback).Run(false);
@@ -46,12 +48,13 @@ void ServiceWorkerContentSettingsProxyImpl::AllowIndexedDB(
   // so just pass an empty |render_frames|.
   std::vector<GlobalRenderFrameHostId> render_frames;
   std::move(callback).Run(GetContentClient()->browser()->AllowWorkerIndexedDB(
-      origin_.GetURL(), context_wrapper_->browser_context(), render_frames));
+      origin_.GetURL(), context_wrapper_->browser_context(), render_frames,
+      storage_key_));
 }
 
 void ServiceWorkerContentSettingsProxyImpl::AllowCacheStorage(
     AllowCacheStorageCallback callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   // May be shutting down.
   if (!context_wrapper_->browser_context()) {
     std::move(callback).Run(false);
@@ -68,13 +71,13 @@ void ServiceWorkerContentSettingsProxyImpl::AllowCacheStorage(
   std::vector<GlobalRenderFrameHostId> render_frames;
   std::move(callback).Run(
       GetContentClient()->browser()->AllowWorkerCacheStorage(
-          origin_.GetURL(), context_wrapper_->browser_context(),
-          render_frames));
+          origin_.GetURL(), context_wrapper_->browser_context(), render_frames,
+          storage_key_));
 }
 
 void ServiceWorkerContentSettingsProxyImpl::AllowWebLocks(
     AllowWebLocksCallback callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   // May be shutting down.
   if (!context_wrapper_->browser_context()) {
     std::move(callback).Run(false);
@@ -90,11 +93,12 @@ void ServiceWorkerContentSettingsProxyImpl::AllowWebLocks(
   // so just pass an empty |render_frames|.
   std::vector<GlobalRenderFrameHostId> render_frames;
   std::move(callback).Run(GetContentClient()->browser()->AllowWorkerWebLocks(
-      origin_.GetURL(), context_wrapper_->browser_context(), render_frames));
+      origin_.GetURL(), context_wrapper_->browser_context(), render_frames,
+      storage_key_));
 }
 
-void ServiceWorkerContentSettingsProxyImpl::RequestFileSystemAccessSync(
-    RequestFileSystemAccessSyncCallback callback) {
+void ServiceWorkerContentSettingsProxyImpl::AllowFileSystem(
+    AllowFileSystemCallback callback) {
   mojo::ReportBadMessage(
       "The FileSystem API is not exposed to service workers "
       "but somehow a service worker requested access.");

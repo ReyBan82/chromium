@@ -4,46 +4,47 @@
 
 #include "content/public/app/content_main.h"
 
-#include "base/allocator/buildflags.h"
+#include <memory>
+#include <optional>
+
 #include "base/allocator/partition_alloc_support.h"
 #include "base/at_exit.h"
 #include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
-#include "base/debug/activity_tracker.h"
 #include "base/debug/debugger.h"
-#include "base/debug/stack_trace.h"
 #include "base/feature_list.h"
 #include "base/i18n/icu_util.h"
 #include "base/logging.h"
+#include "base/memory/ptr_util.h"
 #include "base/message_loop/message_pump_type.h"
+#include "base/no_destructor.h"
 #include "base/process/launch.h"
 #include "base/process/memory.h"
 #include "base/process/process.h"
+#include "base/process/set_process_title.h"
+#include "base/profiler/sample_metadata.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/synchronization/condition_variable.h"
 #include "base/task/single_thread_task_executor.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread.h"
 #include "base/trace_event/trace_config.h"
-#include "base/trace_event/trace_log.h"
+#include "base/trace_event/trace_event.h"
+#include "base/trace_event/trace_session_observer.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "components/tracing/common/trace_to_console.h"
-#include "components/tracing/common/tracing_switches.h"
+#include "components/embedder_support/switches.h"
 #include "content/app/content_main_runner_impl.h"
-#include "content/common/mojo_core_library_support.h"
-#include "content/common/set_process_title.h"
 #include "content/public/app/content_main_delegate.h"
 #include "content/public/common/content_switches.h"
 #include "mojo/core/embedder/configuration.h"
 #include "mojo/core/embedder/embedder.h"
 #include "mojo/core/embedder/scoped_ipc_support.h"
 #include "mojo/public/cpp/platform/platform_channel.h"
-#include "mojo/public/cpp/system/dynamic_library_support.h"
+#include "partition_alloc/buildflags.h"
 #include "sandbox/policy/sandbox_type.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/ui_base_paths.h"
 #include "ui/base/ui_base_switches.h"
 
@@ -53,7 +54,6 @@
 #include "base/win/process_startup_helper.h"
 #include "base/win/win_util.h"
 #include "base/win/windows_version.h"
-#include "ui/base/win/atl_module.h"
 #include "ui/gfx/switches.h"
 #endif
 
@@ -69,13 +69,13 @@
 #endif
 
 #if BUILDFLAG(IS_MAC)
-#include "base/mac/scoped_nsautorelease_pool.h"
+#include "base/apple/scoped_nsautorelease_pool.h"
 #include "content/app/mac_init.h"
 #endif
 
 #if BUILDFLAG(IS_APPLE)
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
-#include "base/allocator/partition_allocator/shim/allocator_shim.h"
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
+#include "partition_alloc/shim/allocator_shim.h"
 #endif
 #endif  // BUILDFLAG(IS_MAC)
 
@@ -102,8 +102,7 @@ void SetupSignalHandlers() {
   CHECK_EQ(0, sigemptyset(&empty_signal_set));
   CHECK_EQ(0, sigprocmask(SIG_SETMASK, &empty_signal_set, nullptr));
 
-  struct sigaction sigact;
-  memset(&sigact, 0, sizeof(sigact));
+  struct sigaction sigact = {};
   sigact.sa_handler = SIG_DFL;
   static const int signals_to_reset[] = {SIGHUP,  SIGINT,  SIGQUIT, SIGILL,
                                          SIGABRT, SIGFPE,  SIGSEGV, SIGALRM,
@@ -118,13 +117,18 @@ bool IsSubprocess() {
   auto type = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
       switches::kProcessType);
   return type == switches::kGpuProcess ||
-         type == switches::kPpapiPluginProcess ||
          type == switches::kRendererProcess ||
          type == switches::kUtilityProcess || type == switches::kZygoteProcess;
 }
 
 void CommonSubprocessInit() {
 #if BUILDFLAG(IS_WIN)
+  // Lower non-browser processes to 0x27F so `csrss` notifies/terminates the
+  // browser process (0x280) first during OS shutdown. The browser's teardown
+  // or job handle cleanup then takes care of child processes before it can
+  // observe them dying unexpectedly.
+  ::SetProcessShutdownParameters(0x280 - 1, SHUTDOWN_NORETRY);
+
   // HACK: Let Windows know that we have started.  This is needed to suppress
   // the IDC_APPSTARTING cursor from being displayed for a prolonged period
   // while a subprocess is starting.
@@ -138,32 +142,37 @@ void CommonSubprocessInit() {
 #if !defined(OFFICIAL_BUILD) && BUILDFLAG(IS_WIN)
   base::RouteStdioToConsole(false);
   LoadLibraryA("dbghelp.dll");
+  LoadLibraryA("msdia140.dll");
 #endif
 }
 
-void InitTimeTicksAtUnixEpoch() {
-  const auto* command_line = base::CommandLine::ForCurrentProcess();
-  if (!command_line->HasSwitch(switches::kTimeTicksAtUnixEpoch)) {
-    return;
+// Apply metadata to samples collected by the StackSamplingProfiler when tracing
+// is enabled. This helps distinguish profiles with tracing overhead, e.g. due
+// to background tracing, from those without.
+class TracingEnabledStateObserver : public perfetto::TrackEventSessionObserver {
+ public:
+  TracingEnabledStateObserver() {
+    base::TrackEvent::AddSessionObserver(this);
+    if (base::TrackEvent::IsEnabled()) {
+      apply_sample_metadata_.emplace("TracingEnabled", 1,
+                                     base::SampleMetadataScope::kProcess);
+    }
   }
 
-  std::string time_ticks_at_unix_epoch_as_string =
-      command_line->GetSwitchValueASCII(switches::kTimeTicksAtUnixEpoch);
-
-  int64_t time_ticks_at_unix_epoch_delta_micro;
-  if (!base::StringToInt64(time_ticks_at_unix_epoch_as_string,
-                           &time_ticks_at_unix_epoch_delta_micro)) {
-    return;
+  void OnStart(const perfetto::DataSourceBase::StartArgs&) override {
+    apply_sample_metadata_.emplace("TracingEnabled", 1,
+                                   base::SampleMetadataScope::kProcess);
   }
 
-  base::TimeDelta time_ticks_at_unix_epoch_delta =
-      base::Microseconds(time_ticks_at_unix_epoch_delta_micro);
+  void OnStop(const perfetto::DataSourceBase::StopArgs& args) override {
+    if (!base::trace_event::IsEnabledOnStop(args)) {
+      apply_sample_metadata_.reset();
+    }
+  }
 
-  base::TimeTicks time_ticks_at_unix_epoch =
-      base::TimeTicks() + time_ticks_at_unix_epoch_delta;
-
-  base::TimeTicks::SetSharedUnixEpoch(time_ticks_at_unix_epoch);
-}
+ private:
+  std::optional<base::ScopedSampleMetadata> apply_sample_metadata_;
+};
 
 }  // namespace
 
@@ -177,19 +186,13 @@ ContentMainParams& ContentMainParams::operator=(ContentMainParams&&) = default;
 
 // This function must be marked with NO_STACK_PROTECTOR or it may crash on
 // return, see the --change-stack-guard-on-fork command line flag.
-int NO_STACK_PROTECTOR
-RunContentProcess(ContentMainParams params,
-                  ContentMainRunner* content_main_runner) {
+NO_STACK_PROTECTOR int RunContentProcess(
+    ContentMainParams params,
+    ContentMainRunner* content_main_runner) {
   base::FeatureList::FailOnFeatureAccessWithoutFeatureList();
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  // Lacros is launched with inherited priority. Revert to normal priority
-  // before spawning more processes.
-  base::PlatformThread::SetCurrentThreadType(base::ThreadType::kDefault);
-#endif
   int exit_code = -1;
-  base::debug::GlobalActivityTracker* tracker = nullptr;
 #if BUILDFLAG(IS_MAC)
-  std::unique_ptr<base::mac::ScopedNSAutoreleasePool> autorelease_pool;
+  base::apple::ScopedNSAutoreleasePool autorelease_pool;
 #endif
 
   // A flag to indicate whether Main() has been called before. On Android, we
@@ -203,10 +206,11 @@ RunContentProcess(ContentMainParams params,
     content_main_runner->ReInitializeParams(std::move(params));
   } else {
     is_initialized = true;
-#if BUILDFLAG(IS_APPLE) && BUILDFLAG(USE_ALLOCATOR_SHIM)
+#if BUILDFLAG(IS_APPLE) && PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
     allocator_shim::InitializeAllocatorShim();
 #endif
     base::EnableTerminationOnOutOfMemory();
+    logging::RegisterAbslAbortHook();
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
     // The various desktop environments set this environment variable that
@@ -224,7 +228,6 @@ RunContentProcess(ContentMainParams params,
 
 #if BUILDFLAG(IS_WIN)
     base::win::RegisterInvalidParamHandler();
-    ui::win::CreateATLModuleIfNeeded();
 #endif  // BUILDFLAG(IS_WIN)
 
 #if !BUILDFLAG(IS_ANDROID)
@@ -246,10 +249,8 @@ RunContentProcess(ContentMainParams params,
 
     base::EnableTerminationOnHeapCorruption();
 
-    SetProcessTitleFromCommandLine(argv);
+    base::SetProcessTitleFromCommandLine(argv);
 #endif  // !BUILDFLAG(IS_ANDROID)
-
-    InitTimeTicksAtUnixEpoch();
 
 // On Android setlocale() is not supported, and we don't override the signal
 // handlers so we can get a stack trace when crashing.
@@ -279,77 +280,63 @@ RunContentProcess(ContentMainParams params,
     // We need this pool for all the objects created before we get to the event
     // loop, but we don't want to leave them hanging around until the app quits.
     // Each "main" needs to flush this pool right before it goes into its main
-    // event loop to get rid of the cruft.
-    autorelease_pool = std::make_unique<base::mac::ScopedNSAutoreleasePool>();
-    params.autorelease_pool = autorelease_pool.get();
+    // event loop to get rid of the cruft. TODO(crbug.com/40260311): This
+    // is not safe. Each main loop should create and destroy its own pool; it
+    // should not be flushing the pool at the base of the autorelease pool
+    // stack.
+    params.autorelease_pool = &autorelease_pool;
     InitializeMac();
 #endif
 
 #if BUILDFLAG(IS_IOS)
-    // TODO(crbug.com/1412835): Remove this initialization on iOS. Everything
-    // runs in process for now as we have no fork.
     base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-    command_line->AppendSwitch(switches::kSingleProcess);
     command_line->AppendSwitch(switches::kEnableViewport);
-    command_line->AppendSwitch(switches::kUseMobileUserAgent);
+    command_line->AppendSwitch(embedder_support::kUseMobileUserAgent);
+
+#if BUILDFLAG(IS_IOS_TVOS)
+    // Set tvOS to single-process mode by default.
+    command_line->AppendSwitch(switches::kSingleProcess);
+
+    // Enable spatial navigation; we interpret remote control swipes as arrow
+    // keys.
+    command_line->AppendSwitch(switches::kEnableSpatialNavigation);
+#endif
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
+#if (BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)) && !defined(COMPONENT_BUILD)
     base::subtle::EnableFDOwnershipEnforcement(true);
 #endif
 
     ui::RegisterPathProvider();
-    tracker = base::debug::GlobalActivityTracker::Get();
     exit_code = content_main_runner->Initialize(std::move(params));
 
     if (exit_code >= 0) {
-      if (tracker) {
-        tracker->SetProcessPhase(
-            base::debug::GlobalActivityTracker::PROCESS_LAUNCH_FAILED);
-        tracker->process_data().SetInt("exit-code", exit_code);
-      }
       return exit_code;
     }
 
 #if BUILDFLAG(IS_WIN)
-    // Route stdio to parent console (if any) or create one.
-    if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-            switches::kEnableLogging) ||
-        base::CommandLine::ForCurrentProcess()->HasSwitch(
-            switches::kHeadless)) {
-      base::RouteStdioToConsole(true);
+    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+    if (command_line->HasSwitch(switches::kHeadless)) {
+      // When running in headless mode we want stdio routed however if
+      // console does not exist we should not create one.
+      base::RouteStdioToConsole(/*create_console_if_not_found*/ false);
+    } else if (command_line->HasSwitch(switches::kEnableLogging)) {
+      // Route stdio to parent console (if any) or create one, do not create a
+      // console in children if handles are being passed.
+      bool create_console = command_line->GetSwitchValueASCII(
+                                switches::kEnableLogging) != "handle";
+      base::RouteStdioToConsole(create_console);
     }
 #endif
 
-    if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-            ::switches::kTraceToConsole)) {
-      base::trace_event::TraceConfig trace_config =
-          tracing::GetConfigForTraceToConsole();
-      base::trace_event::TraceLog::GetInstance()->SetEnabled(
-          trace_config, base::trace_event::TraceLog::RECORDING_MODE);
-    }
+    static base::NoDestructor<TracingEnabledStateObserver> tracing_observer;
   }
 
   if (IsSubprocess())
     CommonSubprocessInit();
   exit_code = content_main_runner->Run();
 
-  if (tracker) {
-    if (exit_code == 0) {
-      tracker->SetProcessPhaseIfEnabled(
-          base::debug::GlobalActivityTracker::PROCESS_EXITED_CLEANLY);
-    } else {
-      tracker->SetProcessPhaseIfEnabled(
-          base::debug::GlobalActivityTracker::PROCESS_EXITED_WITH_CODE);
-      tracker->process_data().SetInt("exit-code", exit_code);
-    }
-  }
-
-#if BUILDFLAG(IS_MAC)
-  autorelease_pool.reset();
-#endif
-
-#if !BUILDFLAG(IS_ANDROID)
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
   content_main_runner->Shutdown();
 #endif
 
@@ -358,7 +345,7 @@ RunContentProcess(ContentMainParams params,
 
 // This function must be marked with NO_STACK_PROTECTOR or it may crash on
 // return, see the --change-stack-guard-on-fork command line flag.
-int NO_STACK_PROTECTOR ContentMain(ContentMainParams params) {
+NO_STACK_PROTECTOR int ContentMain(ContentMainParams params) {
   auto runner = ContentMainRunner::Create();
   return RunContentProcess(std::move(params), runner.get());
 }

@@ -18,7 +18,8 @@
                 ],
                 "build_config": "Release",
                 "config": "chromium",
-                "target_bits": 64
+                "target_bits": 64,
+                "target_platform": "linux"
               },
               "legacy_gclient_config": {
                 "config": "chromium"
@@ -40,7 +41,8 @@
                 ],
                 "build_config": "Release",
                 "config": "chromium",
-                "target_bits": 64
+                "target_bits": 64,
+                "target_platform": "linux"
               },
               "legacy_gclient_config": {
                 "config": "chromium"
@@ -50,7 +52,8 @@
                 "builder": "GPU FYI Linux Builder",
                 "project": "chromium"
               },
-              "run_tests_serially": true
+              "run_tests_serially": true,
+              "use_test_trigger_cas": true
             }
           }
         ]
@@ -67,7 +70,8 @@
           "builder": "gpu-fyi-try-linux-intel-exp",
           "group": "tryserver.chromium.linux"
         }
-      ]
+      ],
+      "targets_spec_directory": "infra/config/generated/builders/ci/Linux FYI Experimental Release (Intel UHD 630)/targets"
     }
   },
   "$recipe_engine/resultdb/test_presentation": {
@@ -78,6 +82,9 @@
     ]
   },
   "builder_group": "chromium.gpu.fyi",
+  "gardener_rotations": [
+    "chromium.gpu"
+  ],
   "perf_dashboard_machine_group": "ChromiumGPUFYI",
   "recipe": "chromium",
   "sheriff_rotations": [

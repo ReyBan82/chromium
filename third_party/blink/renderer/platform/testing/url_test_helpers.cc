@@ -31,8 +31,8 @@
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
 
 #include <string>
+
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "services/network/public/mojom/load_timing_info.mojom.h"
 #include "third_party/blink/public/platform/file_path_conversion.h"
 #include "third_party/blink/public/platform/platform.h"
@@ -96,9 +96,10 @@ void RegisterMockedErrorURLLoad(const WebURL& full_url,
 
 void RegisterMockedURLLoadWithCustomResponse(const WebURL& full_url,
                                              const WebString& file_path,
-                                             WebURLResponse response) {
-  URLLoaderMockFactory::GetSingletonInstance()->RegisterURL(full_url, response,
-                                                            file_path);
+                                             WebURLResponse response,
+                                             const size_t chunk_size) {
+  URLLoaderMockFactory::GetSingletonInstance()->RegisterURL(
+      full_url, response, file_path, chunk_size);
 }
 
 void RegisterMockedURLUnregister(const WebURL& url) {

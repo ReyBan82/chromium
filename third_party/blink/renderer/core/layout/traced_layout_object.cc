@@ -5,11 +5,14 @@
 #include "third_party/blink/renderer/core/layout/traced_layout_object.h"
 
 #include <inttypes.h>
+
 #include <memory>
+
 #include "third_party/blink/renderer/core/layout/layout_inline.h"
-#include "third_party/blink/renderer/core/layout/layout_table_cell.h"
 #include "third_party/blink/renderer/core/layout/layout_text.h"
 #include "third_party/blink/renderer/core/layout/layout_view.h"
+#include "third_party/blink/renderer/core/layout/table/layout_table_cell.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 
 namespace blink {
 
@@ -18,9 +21,8 @@ namespace {
 void DumpToTracedValue(const LayoutObject& object,
                        bool trace_geometry,
                        TracedValue* traced_value) {
-  traced_value->SetString(
-      "address",
-      String::Format("%" PRIxPTR, reinterpret_cast<uintptr_t>(&object)));
+  traced_value->SetString("address",
+                          Format("{:x}", reinterpret_cast<uintptr_t>(&object)));
   traced_value->SetString("name", object.GetName());
   if (Node* node = object.GetNode()) {
     traced_value->SetString("tag", node->nodeName());
@@ -57,22 +59,18 @@ void DumpToTracedValue(const LayoutObject& object,
 
   if (object.IsOutOfFlowPositioned())
     traced_value->SetBoolean("positioned", object.IsOutOfFlowPositioned());
-  if (object.SelfNeedsLayout())
-    traced_value->SetBoolean("selfNeeds", object.SelfNeedsLayout());
-  if (object.NeedsPositionedMovementLayout())
-    traced_value->SetBoolean("positionedMovement",
-                             object.NeedsPositionedMovementLayout());
-  if (object.NormalChildNeedsLayout())
-    traced_value->SetBoolean("childNeeds", object.NormalChildNeedsLayout());
-  if (object.PosChildNeedsLayout())
-    traced_value->SetBoolean("posChildNeeds", object.PosChildNeedsLayout());
+  if (object.SelfNeedsFullLayout()) {
+    traced_value->SetBoolean("selfNeeds", object.SelfNeedsFullLayout());
+  }
+  if (object.ChildNeedsFullLayout()) {
+    traced_value->SetBoolean("childNeeds", object.ChildNeedsFullLayout());
+  }
 
   if (object.IsTableCell()) {
     // Table layout might be dirty if traceGeometry is false.
     // See https://crbug.com/664271 .
     if (trace_geometry) {
-      const LayoutNGTableCellInterface& c =
-          ToInterface<LayoutNGTableCellInterface>(object);
+      const auto& c = To<LayoutTableCell>(object);
       traced_value->SetDouble("row", c.RowIndex());
       traced_value->SetDouble("col", c.AbsoluteColumnIndex());
       if (c.ResolvedRowSpan() != 1)

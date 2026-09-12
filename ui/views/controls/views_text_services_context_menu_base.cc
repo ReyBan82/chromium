@@ -10,9 +10,9 @@
 #include "build/build_config.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/emoji/emoji_panel_helper.h"
-#include "ui/base/models/simple_menu_model.h"
 #include "ui/events/event.h"
 #include "ui/events/event_constants.h"
+#include "ui/menus/simple_menu_model.h"
 #include "ui/resources/grit/ui_resources.h"
 #include "ui/strings/grit/ui_strings.h"
 #include "ui/views/controls/textfield/textfield.h"
@@ -34,7 +34,8 @@ ViewsTextServicesContextMenuBase::ViewsTextServicesContextMenuBase(
   DCHECK(client);
   DCHECK(menu);
   // Not inserted on read-only fields or if the OS/version doesn't support it.
-  if (!client_->GetReadOnly() && ui::IsEmojiPanelSupported()) {
+  if (!client_->GetReadOnly() && ui::IsEmojiPanelSupported() &&
+      client_->SupportsEmoji()) {
     menu->InsertSeparatorAt(0, ui::NORMAL_SEPARATOR);
     menu->InsertItemWithStringIdAt(0, IDS_CONTENT_CONTEXT_EMOJI,
                                    IDS_CONTENT_CONTEXT_EMOJI);
@@ -95,6 +96,6 @@ ViewsTextServicesContextMenu::Create(ui::SimpleMenuModel* menu,
                                      Textfield* client) {
   return std::make_unique<ViewsTextServicesContextMenuBase>(menu, client);
 }
-#endif
+#endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace views

@@ -4,33 +4,35 @@
 
 #include "device/fido/make_credential_request_handler.h"
 
+#include <algorithm>
+#include <map>
 #include <set>
 #include <utility>
 
 #include "base/barrier_closure.h"
-#include "base/containers/contains.h"
-#include "base/containers/cxx20_erase.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/json/json_writer.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/stl_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/cbor/diagnostic_writer.h"
 #include "components/device_event_log/device_event_log.h"
-#include "device/fido/device_public_key_extension.h"
+#include "crypto/hash.h"
 #include "device/fido/fido_authenticator.h"
 #include "device/fido/fido_discovery_factory.h"
-#include "device/fido/fido_parsing_utils.h"
-#include "device/fido/fido_transport_protocol.h"
-#include "device/fido/fido_types.h"
 #include "device/fido/filter.h"
 #include "device/fido/make_credential_task.h"
+#include "device/fido/public/features.h"
+#include "device/fido/public/fido_constants.h"
+#include "device/fido/public/fido_transport_protocol.h"
+#include "device/fido/public/fido_types.h"
 
 #if BUILDFLAG(IS_WIN)
 #include "device/fido/win/authenticator.h"
 #include "device/fido/win/type_conversions.h"
-#include "third_party/microsoft_webauthn/webauthn.h"
+#include "third_party/microsoft_webauthn/src/webauthn.h"
 #endif
 
 #if BUILDFLAG(IS_CHROMEOS)
@@ -56,38 +58,6 @@ const std::set<pin::Permissions> GetMakeCredentialRequestPermissions(
     permissions.insert(pin::Permissions::kBioEnrollment);
   }
   return permissions;
-}
-
-absl::optional<MakeCredentialStatus> ConvertDeviceResponseCode(
-    CtapDeviceResponseCode device_response_code) {
-  switch (device_response_code) {
-    case CtapDeviceResponseCode::kSuccess:
-      return MakeCredentialStatus::kSuccess;
-
-    // Only returned after the user interacted with the authenticator.
-    case CtapDeviceResponseCode::kCtap2ErrCredentialExcluded:
-      return MakeCredentialStatus::kUserConsentButCredentialExcluded;
-
-    // The user explicitly denied the operation. Touch ID returns this error
-    // when the user cancels the macOS prompt. External authenticators may
-    // return it e.g. after the user fails fingerprint verification.
-    case CtapDeviceResponseCode::kCtap2ErrOperationDenied:
-      return MakeCredentialStatus::kUserConsentDenied;
-
-    // External authenticators may return this error if internal user
-    // verification fails for a make credential request or if the pin token is
-    // not valid.
-    case CtapDeviceResponseCode::kCtap2ErrPinAuthInvalid:
-      return MakeCredentialStatus::kUserConsentDenied;
-
-    case CtapDeviceResponseCode::kCtap2ErrKeyStoreFull:
-      return MakeCredentialStatus::kStorageFull;
-
-    // For all other errors, the authenticator will be dropped, and other
-    // authenticators may continue.
-    default:
-      return absl::nullopt;
-  }
 }
 
 // IsCandidateAuthenticatorPreTouch returns true if the given authenticator
@@ -171,7 +141,7 @@ MakeCredentialStatus IsCandidateAuthenticatorPostTouch(
     return MakeCredentialStatus::kAuthenticatorMissingUserVerification;
   }
 
-  absl::optional<base::span<const int32_t>> supported_algorithms(
+  std::optional<base::span<const int32_t>> supported_algorithms(
       authenticator->GetAlgorithms());
   if (supported_algorithms) {
     // Substitution of defaults should have happened by this point.
@@ -185,7 +155,7 @@ MakeCredentialStatus IsCandidateAuthenticatorPostTouch(
         continue;
       }
 
-      if (base::Contains(*supported_algorithms, algo.algorithm)) {
+      if (std::ranges::contains(*supported_algorithms, algo.algorithm)) {
         at_least_one_common_algorithm = true;
         break;
       }
@@ -210,7 +180,7 @@ base::flat_set<FidoTransportProtocol> GetTransportsAllowedByRP(
           FidoTransportProtocol::kBluetoothLowEnergy,
           FidoTransportProtocol::kNearFieldCommunication,
           FidoTransportProtocol::kHybrid,
-          FidoTransportProtocol::kAndroidAccessory,
+          FidoTransportProtocol::kSmartCard,
       };
     case AuthenticatorAttachment::kAny:
       return {
@@ -219,24 +189,15 @@ base::flat_set<FidoTransportProtocol> GetTransportsAllowedByRP(
           FidoTransportProtocol::kUsbHumanInterfaceDevice,
           FidoTransportProtocol::kBluetoothLowEnergy,
           FidoTransportProtocol::kHybrid,
-          FidoTransportProtocol::kAndroidAccessory,
+          FidoTransportProtocol::kSmartCard,
       };
   }
 
   NOTREACHED();
-  return base::flat_set<FidoTransportProtocol>();
-}
-
-void ReportMakeCredentialRequestTransport(FidoAuthenticator* authenticator) {
-  if (authenticator->AuthenticatorTransport()) {
-    base::UmaHistogramEnumeration(
-        "WebAuthentication.MakeCredentialRequestTransport",
-        *authenticator->AuthenticatorTransport());
-  }
 }
 
 void ReportMakeCredentialResponseTransport(
-    absl::optional<FidoTransportProtocol> transport) {
+    std::optional<FidoTransportProtocol> transport) {
   if (transport) {
     base::UmaHistogramEnumeration(
         "WebAuthentication.MakeCredentialResponseTransport", *transport);
@@ -311,6 +272,10 @@ bool ValidateResponseExtensions(
       if (!request.hmac_secret || !it.second.is_bool()) {
         return false;
       }
+    } else if (ext_name == kExtensionHmacSecretMc) {
+      if (!request.hmac_secret || !it.second.is_bytestring()) {
+        return false;
+      }
     } else if (ext_name == kExtensionCredBlob) {
       if (!request.cred_blob || !it.second.is_bool()) {
         return false;
@@ -319,19 +284,8 @@ bool ValidateResponseExtensions(
       if (!request.min_pin_length_requested || !it.second.is_unsigned()) {
         return false;
       }
-    } else if (ext_name == kExtensionDevicePublicKey) {
-      if (!request.device_public_key) {
-        FIDO_LOG(ERROR) << "unsolicited devicePubKey extension output";
-        return false;
-      }
-      const bool backup_eligible_flag =
-          response.attestation_object.authenticator_data().backup_eligible();
-      const absl::optional<const char*> error =
-          CheckDevicePublicKeyExtensionForErrors(
-              it.second, request.device_public_key->attestation,
-              backup_eligible_flag);
-      if (error.has_value()) {
-        FIDO_LOG(ERROR) << error.value();
+    } else if (ext_name == kExtensionCmtgKey) {
+      if (!request.cmtg_key || !it.second.is_bytestring()) {
         return false;
       }
     } else {
@@ -349,27 +303,17 @@ bool ResponseValid(const FidoAuthenticator& authenticator,
                    const CtapMakeCredentialRequest& request,
                    const AuthenticatorMakeCredentialResponse& response,
                    const MakeCredentialOptions& options) {
-  if (response.GetRpIdHash() !=
-      fido_parsing_utils::CreateSHA256Hash(request.rp.id)) {
+  if (response.GetRpIdHash() != crypto::hash::Sha256(request.rp.id)) {
     FIDO_LOG(ERROR) << "Invalid RP ID hash";
     return false;
   }
 
-  const absl::optional<cbor::Value>& extensions =
+  const std::optional<cbor::Value>& extensions =
       response.attestation_object.authenticator_data().extensions();
   if (extensions && !ValidateResponseExtensions(request, options, authenticator,
                                                 response, *extensions)) {
     FIDO_LOG(ERROR) << "Invalid extensions block: "
                     << cbor::DiagnosticWriter::Write(*extensions);
-    return false;
-  }
-
-  const bool has_dpk_extension =
-      extensions &&
-      extensions->GetMap().count(cbor::Value(kExtensionDevicePublicKey));
-  if (has_dpk_extension != response.device_public_key_signature.has_value()) {
-    FIDO_LOG(ERROR)
-        << "DPK extension isn't coherent with presence of DPK signature";
     return false;
   }
 
@@ -393,10 +337,22 @@ bool ResponseValid(const FidoAuthenticator& authenticator,
 
   return true;
 }
+
+UserVerificationRequirement AtLeastUVPreferred(UserVerificationRequirement uv) {
+  switch (uv) {
+    case UserVerificationRequirement::kDiscouraged:
+      return UserVerificationRequirement::kPreferred;
+    case UserVerificationRequirement::kPreferred:
+    case UserVerificationRequirement::kRequired:
+      return uv;
+  }
+}
+
 }  // namespace
 
 MakeCredentialRequestHandler::MakeCredentialRequestHandler(
     FidoDiscoveryFactory* fido_discovery_factory,
+    std::vector<std::unique_ptr<FidoDiscoveryBase>> additional_discoveries,
     const base::flat_set<FidoTransportProtocol>& supported_transports,
     CtapMakeCredentialRequest request,
     const MakeCredentialOptions& options,
@@ -412,13 +368,19 @@ MakeCredentialRequestHandler::MakeCredentialRequestHandler(
   DCHECK(!request_.cred_protect_enforce);
 
   transport_availability_info().request_type = FidoRequestType::kMakeCredential;
-  transport_availability_info().is_off_the_record_context =
-      options_.is_off_the_record_context;
   transport_availability_info().resident_key_requirement =
       options_.resident_key;
+  transport_availability_info().attestation_conveyance_preference =
+      request_.attestation_preference;
+  transport_availability_info().user_verification_requirement =
+      request_.user_verification;
+  transport_availability_info().request_is_internal_only =
+      options_.authenticator_attachment == AuthenticatorAttachment::kPlatform;
+  transport_availability_info().make_credential_attachment =
+      options_.authenticator_attachment;
 
   base::flat_set<FidoTransportProtocol> allowed_transports =
-      GetTransportsAllowedByRP(options.authenticator_attachment);
+      GetTransportsAllowedByRP(options_.authenticator_attachment);
 
 #if BUILDFLAG(IS_CHROMEOS)
   // Attempt to instantiate the ChromeOS platform authenticator for
@@ -432,10 +394,26 @@ MakeCredentialRequestHandler::MakeCredentialRequestHandler(
   }
 #endif
 
-  InitDiscoveries(
-      fido_discovery_factory,
+  auto available_transports =
       base::STLSetIntersection<base::flat_set<FidoTransportProtocol>>(
-          supported_transports, allowed_transports));
+          supported_transports, allowed_transports);
+  bool consider_enclave = request_.authenticator_attachment !=
+                          AuthenticatorAttachment::kCrossPlatform;
+  if (options_.is_passkey_upgrade_request) {
+    consider_enclave = true;
+    available_transports = {};
+  }
+
+  InitDiscoveries(fido_discovery_factory, std::move(additional_discoveries),
+                  std::move(available_transports), consider_enclave);
+  std::string json_string;
+  if (!options_.json ||
+      !base::JSONWriter::WriteWithOptions(
+          *options_.json->value, base::JsonOptions::OPTIONS_PRETTY_PRINT,
+          &json_string)) {
+    json_string = "no JSON";
+  }
+  FIDO_LOG(EVENT) << "Starting MakeCredential flow: " << json_string;
   Start();
 }
 
@@ -514,7 +492,7 @@ void MakeCredentialRequestHandler::DispatchRequest(
   } else {
     DispatchRequestAfterAppIdExclude(std::move(request), authenticator,
                                      CtapDeviceResponseCode::kSuccess,
-                                     absl::nullopt);
+                                     std::nullopt);
   }
 }
 
@@ -522,7 +500,7 @@ void MakeCredentialRequestHandler::DispatchRequestAfterAppIdExclude(
     std::unique_ptr<CtapMakeCredentialRequest> request,
     FidoAuthenticator* authenticator,
     CtapDeviceResponseCode status,
-    absl::optional<bool> unused) {
+    std::optional<bool> unused) {
   if (state_ != State::kWaitingForTouch) {
     return;
   }
@@ -542,7 +520,7 @@ void MakeCredentialRequestHandler::DispatchRequestAfterAppIdExclude(
     default:
       std::move(completion_callback_)
           .Run(MakeCredentialStatus::kAuthenticatorResponseInvalid,
-               absl::nullopt, authenticator);
+               std::nullopt, authenticator);
       return;
   }
 
@@ -552,7 +530,8 @@ void MakeCredentialRequestHandler::DispatchRequestAfterAppIdExclude(
   auto uv_disposition = authenticator->PINUVDispositionForMakeCredential(
       *request.get(), observer());
   switch (uv_disposition) {
-    case PINUVDisposition::kNoUV:
+    case PINUVDisposition::kUVNotSupportedNorRequired:
+    case PINUVDisposition::kNoUVRequired:
     case PINUVDisposition::kNoTokenInternalUV:
     case PINUVDisposition::kNoTokenInternalUVPINFallback:
       break;
@@ -563,10 +542,7 @@ void MakeCredentialRequestHandler::DispatchRequestAfterAppIdExclude(
     case PINUVDisposition::kUnsatisfiable:
       // |IsCandidateAuthenticatorPostTouch| should have handled this case.
       NOTREACHED();
-      return;
   }
-
-  ReportMakeCredentialRequestTransport(authenticator);
 
   auto request_copy(*request.get());  // can't copy and move in the same stmt.
   authenticator->MakeCredential(
@@ -585,6 +561,9 @@ void MakeCredentialRequestHandler::AuthenticatorRemoved(
 
   FidoRequestHandlerBase::AuthenticatorRemoved(discovery, authenticator);
 
+  if (bio_enroller_ && authenticator == bio_enroller_->authenticator()) {
+    bio_enroller_.reset();
+  }
   if (authenticator == selected_authenticator_for_pin_uv_auth_token_) {
     selected_authenticator_for_pin_uv_auth_token_ = nullptr;
     // Authenticator could have been removed during PIN entry, PIN fallback
@@ -593,7 +572,7 @@ void MakeCredentialRequestHandler::AuthenticatorRemoved(
       state_ = State::kFinished;
       std::move(completion_callback_)
           .Run(MakeCredentialStatus::kAuthenticatorRemovedDuringPINEntry,
-               absl::nullopt, nullptr);
+               std::nullopt, authenticator);
     }
   }
 }
@@ -610,7 +589,7 @@ bool MakeCredentialRequestHandler::AuthenticatorSelectedForPINUVAuthToken(
   state_ = State::kWaitingForToken;
   selected_authenticator_for_pin_uv_auth_token_ = authenticator;
 
-  base::EraseIf(auth_token_requester_map_, [authenticator](auto& entry) {
+  std::erase_if(auth_token_requester_map_, [authenticator](auto& entry) {
     return entry.first != authenticator;
   });
   CancelActiveAuthenticators(authenticator->GetId());
@@ -642,8 +621,8 @@ void MakeCredentialRequestHandler::PromptForInternalUVRetry(int attempts) {
 void MakeCredentialRequestHandler::HavePINUVAuthTokenResultForAuthenticator(
     FidoAuthenticator* authenticator,
     AuthTokenRequester::Result result,
-    absl::optional<pin::TokenResponse> token_response) {
-  absl::optional<MakeCredentialStatus> error;
+    std::optional<pin::TokenResponse> token_response) {
+  std::optional<MakeCredentialStatus> error;
   switch (result) {
     case AuthTokenRequester::Result::kPreTouchUnsatisfiableRequest:
     case AuthTokenRequester::Result::kPreTouchAuthenticatorResponseInvalid:
@@ -675,7 +654,7 @@ void MakeCredentialRequestHandler::HavePINUVAuthTokenResultForAuthenticator(
   DCHECK_EQ(selected_authenticator_for_pin_uv_auth_token_, authenticator);
   if (error) {
     state_ = State::kFinished;
-    std::move(completion_callback_).Run(*error, absl::nullopt, authenticator);
+    std::move(completion_callback_).Run(*error, std::nullopt, authenticator);
     return;
   }
 
@@ -727,8 +706,8 @@ void MakeCredentialRequestHandler::HandleResponse(
     FidoAuthenticator* authenticator,
     std::unique_ptr<CtapMakeCredentialRequest> request,
     base::ElapsedTimer request_timer,
-    CtapDeviceResponseCode status,
-    absl::optional<AuthenticatorMakeCredentialResponse> response) {
+    MakeCredentialStatus status,
+    std::optional<AuthenticatorMakeCredentialResponse> response) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(my_sequence_checker_);
 
   if (state_ != State::kWaitingForTouch &&
@@ -748,12 +727,10 @@ void MakeCredentialRequestHandler::HandleResponse(
   }
 
 #if BUILDFLAG(IS_WIN)
-  if (authenticator->GetType() == FidoAuthenticator::Type::kWinNative) {
+  if (authenticator->GetType() == AuthenticatorType::kWinNative) {
     state_ = State::kFinished;
-    if (status != CtapDeviceResponseCode::kSuccess) {
-      std::move(completion_callback_)
-          .Run(WinCtapDeviceResponseCodeToMakeCredentialStatus(status),
-               absl::nullopt, authenticator);
+    if (status != MakeCredentialStatus::kSuccess) {
+      std::move(completion_callback_).Run(status, std::nullopt, authenticator);
       return;
     }
     if (!response ||
@@ -762,26 +739,24 @@ void MakeCredentialRequestHandler::HandleResponse(
           << "Failing make credential request due to bad response from "
           << authenticator->GetDisplayName();
       std::move(completion_callback_)
-          .Run(MakeCredentialStatus::kWinNotAllowedError, absl::nullopt,
-               authenticator);
+          .Run(MakeCredentialStatus::kAuthenticatorResponseInvalid,
+               std::nullopt, authenticator);
       return;
     }
     CancelActiveAuthenticators(authenticator->GetId());
     ReportMakeCredentialResponseTransport(response->transport_used);
     response->attestation_should_be_filtered = suppress_attestation_;
     std::move(completion_callback_)
-        .Run(WinCtapDeviceResponseCodeToMakeCredentialStatus(status),
-             std::move(*response), authenticator);
+        .Run(status, std::move(*response), authenticator);
     return;
   }
 #endif
 
-  // If we requested UV from an authentiator without uvToken support, UV failed,
-  // and the authenticator supports PIN, fall back to that.
+  // If we requested UV from an authenticator without uvToken support, UV
+  // failed, and the authenticator supports PIN, fall back to that.
   if (request->user_verification != UserVerificationRequirement::kDiscouraged &&
       !request->pin_auth &&
-      (status == CtapDeviceResponseCode::kCtap2ErrPinAuthInvalid ||
-       status == CtapDeviceResponseCode::kCtap2ErrPinRequired) &&
+      (status == MakeCredentialStatus::kUserConsentDenied) &&
       authenticator->PINUVDispositionForMakeCredential(*request, observer()) ==
           PINUVDisposition::kNoTokenInternalUVPINFallback) {
     // Authenticators without uvToken support will return this error immediately
@@ -799,9 +774,15 @@ void MakeCredentialRequestHandler::HandleResponse(
     return;
   }
 
+  if (authenticator->GetType() == AuthenticatorType::kEnclave &&
+      status == MakeCredentialStatus::kUserConsentDenied) {
+    // EnclaveAuthenticator will trigger UI that can cause a retry.
+    return;
+  }
+
   if (options_.resident_key == ResidentKeyRequirement::kPreferred &&
       request->resident_key_required &&
-      status == CtapDeviceResponseCode::kCtap2ErrKeyStoreFull) {
+      status == MakeCredentialStatus::kStorageFull) {
     FIDO_LOG(DEBUG) << "Downgrading rk=preferred to non-resident credential "
                        "because key storage is full";
     request->resident_key_required = false;
@@ -814,7 +795,7 @@ void MakeCredentialRequestHandler::HandleResponse(
     return;
   }
 
-  if (status == CtapDeviceResponseCode::kCtap2ErrUnsupportedAlgorithm) {
+  if (status == MakeCredentialStatus::kNoCommonAlgorithms) {
     // The authenticator didn't support any of the requested public-key
     // algorithms. This status will have been returned immediately.
     // Collect a touch and tell the user that it's unsupported.
@@ -825,13 +806,21 @@ void MakeCredentialRequestHandler::HandleResponse(
     return;
   }
 
-  const absl::optional<MakeCredentialStatus> maybe_result =
-      ConvertDeviceResponseCode(status);
-  if (!maybe_result) {
+  if (status == MakeCredentialStatus::kAuthenticatorResponseInvalid) {
     if (state_ == State::kWaitingForResponseWithToken) {
       std::move(completion_callback_)
           .Run(MakeCredentialStatus::kAuthenticatorResponseInvalid,
-               absl::nullopt, authenticator);
+               std::nullopt, authenticator);
+    } else if (authenticator->GetType() == AuthenticatorType::kPhone ||
+               authenticator->GetType() == AuthenticatorType::kEnclave) {
+      FIDO_LOG(ERROR) << "Status " << static_cast<int>(status) << " from "
+                      << authenticator->GetDisplayName()
+                      << " is fatal to the request";
+      std::move(completion_callback_)
+          .Run(authenticator->GetType() == AuthenticatorType::kPhone
+                   ? MakeCredentialStatus::kHybridTransportError
+                   : MakeCredentialStatus::kEnclaveError,
+               std::nullopt, authenticator);
     } else {
       FIDO_LOG(ERROR) << "Ignoring status " << static_cast<int>(status)
                       << " from " << authenticator->GetDisplayName();
@@ -842,12 +831,11 @@ void MakeCredentialRequestHandler::HandleResponse(
   state_ = State::kFinished;
   CancelActiveAuthenticators(authenticator->GetId());
 
-  if (status != CtapDeviceResponseCode::kSuccess) {
+  if (status != MakeCredentialStatus::kSuccess) {
     FIDO_LOG(ERROR) << "Failing make credential request due to status "
                     << static_cast<int>(status) << " from "
                     << authenticator->GetDisplayName();
-    std::move(completion_callback_)
-        .Run(*maybe_result, absl::nullopt, authenticator);
+    std::move(completion_callback_).Run(status, std::nullopt, authenticator);
     return;
   }
 
@@ -857,7 +845,7 @@ void MakeCredentialRequestHandler::HandleResponse(
         << "Failing make credential request due to bad response from "
         << authenticator->GetDisplayName();
     std::move(completion_callback_)
-        .Run(MakeCredentialStatus::kAuthenticatorResponseInvalid, absl::nullopt,
+        .Run(MakeCredentialStatus::kAuthenticatorResponseInvalid, std::nullopt,
              authenticator);
     return;
   }
@@ -876,7 +864,7 @@ void MakeCredentialRequestHandler::HandleExcludedAuthenticator(
   CancelActiveAuthenticators(authenticator->GetId());
   std::move(completion_callback_)
       .Run(MakeCredentialStatus::kUserConsentButCredentialExcluded,
-           absl::nullopt, nullptr);
+           std::nullopt, authenticator);
 }
 
 void MakeCredentialRequestHandler::HandleInapplicableAuthenticator(
@@ -887,7 +875,7 @@ void MakeCredentialRequestHandler::HandleInapplicableAuthenticator(
 
   state_ = State::kFinished;
   CancelActiveAuthenticators(authenticator->GetId());
-  std::move(completion_callback_).Run(status, absl::nullopt, nullptr);
+  std::move(completion_callback_).Run(status, std::nullopt, authenticator);
 }
 
 void MakeCredentialRequestHandler::OnSampleCollected(
@@ -897,7 +885,7 @@ void MakeCredentialRequestHandler::OnSampleCollected(
 }
 
 void MakeCredentialRequestHandler::OnEnrollmentDone(
-    absl::optional<std::vector<uint8_t>> template_id) {
+    std::optional<std::vector<uint8_t>> template_id) {
   state_ = State::kBioEnrollmentDone;
 
   bio_enrollment_complete_barrier_->Run();
@@ -905,11 +893,12 @@ void MakeCredentialRequestHandler::OnEnrollmentDone(
 
 void MakeCredentialRequestHandler::OnEnrollmentError(
     CtapDeviceResponseCode status) {
+  FidoAuthenticator* authenticator = bio_enroller_->authenticator();
   bio_enroller_.reset();
   state_ = State::kFinished;
   std::move(completion_callback_)
-      .Run(MakeCredentialStatus::kAuthenticatorResponseInvalid, absl::nullopt,
-           nullptr);
+      .Run(MakeCredentialStatus::kAuthenticatorResponseInvalid, std::nullopt,
+           authenticator);
 }
 
 void MakeCredentialRequestHandler::OnEnrollmentDismissed() {
@@ -942,8 +931,6 @@ void MakeCredentialRequestHandler::DispatchRequestWithToken(
   std::tie(request->pin_protocol, request->pin_auth) =
       token.PinAuth(request->client_data_hash);
   request->pin_token_for_exclude_list_probing = std::move(token);
-
-  ReportMakeCredentialRequestTransport(authenticator);
 
   auto request_copy(*request.get());  // can't copy and move in the same stmt.
   authenticator->MakeCredential(
@@ -983,7 +970,7 @@ void MakeCredentialRequestHandler::SpecializeRequestForAuthenticator(
       request->resident_key_required =
 #if BUILDFLAG(IS_WIN)
           // Windows does not yet support rk=preferred.
-          authenticator->GetType() != FidoAuthenticator::Type::kWinNative &&
+          authenticator->GetType() != AuthenticatorType::kWinNative &&
 #endif
           auth_options.supports_resident_key &&
           !authenticator->DiscoverableCredentialStorageFull() &&
@@ -1019,11 +1006,16 @@ void MakeCredentialRequestHandler::SpecializeRequestForAuthenticator(
     request->large_blob_key = want_large_blob;
   }
 
-  if (request->resident_key_required || auth_options.always_uv) {
-    request->user_verification = UserVerificationRequirement::kRequired;
-  } else {
-    request->user_verification = options_.user_verification;
-  }
+  // "Upgrade" uv to `required` for discoverable credentials on non-platform
+  // authenticators, and on security keys that have the `alwaysUv` config
+  // enabled.
+  const bool upgrade_uv = (request->resident_key_required &&
+                           authenticator->AuthenticatorTransport() !=
+                               FidoTransportProtocol::kInternal) ||
+                          auth_options.always_uv;
+  request->user_verification = upgrade_uv
+                                   ? UserVerificationRequirement::kRequired
+                                   : options_.user_verification;
 
   if (options_.cred_protect_request &&
       authenticator->Options().supports_cred_protect) {
@@ -1033,9 +1025,26 @@ void MakeCredentialRequestHandler::SpecializeRequestForAuthenticator(
   }
 
   if (request->hmac_secret) {
-    request->prf = auth_options.supports_prf;
+    bool supports_prf_or_hmac_secret_mc =
+        auth_options.supports_prf || (auth_options.supports_hmac_secret &&
+                                      auth_options.supports_hmac_secret_mc);
+    request->prf = supports_prf_or_hmac_secret_mc;
     request->hmac_secret =
         !auth_options.supports_prf && auth_options.supports_hmac_secret;
+    if (request->prf || request->hmac_secret) {
+      // CTAP2 devices have two PRFs per credential: one for non-UV assertions
+      // and another for UV assertions. WebAuthn only exposes the latter so UV
+      // is needed if supported by the authenticator. When `hmac_secret` is
+      // true, uv=preferred is taken to be a stronger signal and will configure
+      // UV on authenticators without it.
+      request->user_verification =
+          AtLeastUVPreferred(request->user_verification);
+    }
+    // Evaluating the PRF at creation time is only supported with the "prf"
+    // extension.
+    if (request->prf_input && !supports_prf_or_hmac_secret_mc) {
+      request->prf_input.reset();
+    }
   }
 
   if (request->min_pin_length_requested &&
@@ -1071,9 +1080,8 @@ void MakeCredentialRequestHandler::SpecializeRequestForAuthenticator(
     request->cred_blob.reset();
   }
 
-  if (request->device_public_key &&
-      !authenticator->Options().supports_device_public_key) {
-    request->device_public_key.reset();
+  if (request->cmtg_key && !authenticator->Options().supports_cmtg_key) {
+    request->cmtg_key = false;
   }
 }
 

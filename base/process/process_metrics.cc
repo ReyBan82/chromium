@@ -7,7 +7,7 @@
 #include <utility>
 
 #include "base/check.h"
-#include "base/notreached.h"
+#include "base/notimplemented.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/values.h"
 #include "build/build_config.h"
@@ -27,7 +27,9 @@ int CalculateEventsPerSecond(uint64_t event_count,
   if (*last_event_count != 0) {
     const uint64_t events_delta = event_count - *last_event_count;
     const base::TimeDelta time_delta = time - *last_calculated;
-    DCHECK(!time_delta.is_zero());
+    if (time_delta.is_zero()) {
+      return 0;
+    }
     events_per_second = ClampRound(events_delta / time_delta.InSecondsF());
   }
 
@@ -39,11 +41,11 @@ int CalculateEventsPerSecond(uint64_t event_count,
 
 }  // namespace
 
-SystemMemoryInfoKB::SystemMemoryInfoKB() = default;
+SystemMemoryInfo::SystemMemoryInfo() = default;
 
-SystemMemoryInfoKB::SystemMemoryInfoKB(const SystemMemoryInfoKB&) = default;
+SystemMemoryInfo::SystemMemoryInfo(const SystemMemoryInfo&) = default;
 
-SystemMemoryInfoKB& SystemMemoryInfoKB::operator=(const SystemMemoryInfoKB&) =
+SystemMemoryInfo& SystemMemoryInfo::operator=(const SystemMemoryInfo&) =
     default;
 
 SystemMetrics::SystemMetrics() {
@@ -69,26 +71,7 @@ SystemMetrics SystemMetrics::Sample() {
   return system_metrics;
 }
 
-Value::Dict SystemMetrics::ToDict() const {
-  Value::Dict res;
-
-  res.Set("committed_memory", static_cast<int>(committed_memory_));
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
-  Value::Dict meminfo = memory_info_.ToDict();
-  meminfo.Merge(vmstat_info_.ToDict());
-  res.Set("meminfo", std::move(meminfo));
-  res.Set("diskinfo", disk_info_.ToDict());
-#endif
-#if BUILDFLAG(IS_CHROMEOS)
-  res.Set("swapinfo", swap_info_.ToDict());
-  res.Set("gpu_meminfo", gpu_memory_info_.ToDict());
-#endif
-#if BUILDFLAG(IS_WIN)
-  res.Set("perfinfo", performance_.ToDict());
-#endif
-
-  return res;
-}
+ProcessMetrics::~ProcessMetrics() = default;
 
 std::unique_ptr<ProcessMetrics> ProcessMetrics::CreateCurrentProcessMetrics() {
 #if !BUILDFLAG(IS_MAC)
@@ -112,8 +95,9 @@ double ProcessMetrics::GetPlatformIndependentCPUUsage(
 
   TimeDelta cpu_time_delta = cumulative_cpu - last_cumulative_cpu_;
   TimeDelta time_delta = time - last_cpu_time_;
-  if (time_delta.is_zero())
+  if (time_delta.is_zero()) {
     return 0;
+  }
 
   last_cumulative_cpu_ = cumulative_cpu;
   last_cpu_time_ = time;
@@ -121,38 +105,13 @@ double ProcessMetrics::GetPlatformIndependentCPUUsage(
   return 100.0 * cpu_time_delta / time_delta;
 }
 
-double ProcessMetrics::GetPlatformIndependentCPUUsage() {
-  return GetPlatformIndependentCPUUsage(GetCumulativeCPUUsage());
+base::expected<double, ProcessCPUUsageError>
+ProcessMetrics::GetPlatformIndependentCPUUsage() {
+  return GetCumulativeCPUUsage().transform([this](base::TimeDelta cpu_usage) {
+    return GetPlatformIndependentCPUUsage(cpu_usage);
+  });
 }
 #endif
-
-#if BUILDFLAG(IS_WIN)
-double ProcessMetrics::GetPreciseCPUUsage(TimeDelta cumulative_cpu) {
-  TimeTicks time = TimeTicks::Now();
-
-  if (last_precise_cumulative_cpu_.is_zero()) {
-    // First call, just set the last values.
-    last_precise_cumulative_cpu_ = cumulative_cpu;
-    last_cpu_time_for_precise_cpu_usage_ = time;
-    return 0;
-  }
-
-  TimeDelta cpu_time_delta = cumulative_cpu - last_precise_cumulative_cpu_;
-  TimeDelta time_delta = time - last_cpu_time_for_precise_cpu_usage_;
-  DCHECK(!time_delta.is_zero());
-  if (time_delta.is_zero())
-    return 0;
-
-  last_precise_cumulative_cpu_ = cumulative_cpu;
-  last_cpu_time_for_precise_cpu_usage_ = time;
-
-  return 100.0 * cpu_time_delta / time_delta;
-}
-
-double ProcessMetrics::GetPreciseCPUUsage() {
-  return GetPreciseCPUUsage(GetPreciseCumulativeCPUUsage());
-}
-#endif  // BUILDFLAG(IS_WIN)
 
 #if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
     BUILDFLAG(IS_AIX)
@@ -179,12 +138,5 @@ int ProcessMetrics::CalculatePackageIdleWakeupsPerSecond(
 }
 
 #endif  // BUILDFLAG(IS_APPLE)
-
-#if !BUILDFLAG(IS_WIN)
-uint64_t ProcessMetrics::GetCumulativeDiskUsageInBytes() {
-  // Not implemented.
-  return 0;
-}
-#endif
 
 }  // namespace base

@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <stdint.h>
 #include <string>
+#include <string_view>
 
 #include "ash/constants/ash_features.h"
 #include "base/logging.h"
@@ -57,16 +58,15 @@ std::string GetMessageTypeName(proto::MessageType message_type) {
 }  // namespace
 
 MessageReceiverImpl::MessageReceiverImpl(
-    secure_channel::ConnectionManager* connection_manager)
-    : connection_manager_(connection_manager) {
-  DCHECK(connection_manager_);
-
-  connection_manager_->AddObserver(this);
+    secure_channel::ConnectionManager* connection_manager,
+    PhoneHubStructuredMetricsLogger* phone_hub_structured_metrics_logger)
+    : phone_hub_structured_metrics_logger_(
+          phone_hub_structured_metrics_logger) {
+  DCHECK(connection_manager);
+  connection_manager_observation_.Observe(connection_manager);
 }
 
-MessageReceiverImpl::~MessageReceiverImpl() {
-  connection_manager_->RemoveObserver(this);
-}
+MessageReceiverImpl::~MessageReceiverImpl() = default;
 
 void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
   // The first two bytes of |payload| is reserved for the header
@@ -80,13 +80,17 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
                << GetMessageTypeName(message_type) << " message.";
   util::LogMessageResult(message_type,
                          util::PhoneHubMessageResult::kResponseReceived);
+  phone_hub_structured_metrics_logger_->LogPhoneHubMessageEvent(
+      message_type, PhoneHubMessageDirection::kPhoneToChromebook);
+
+  // Serialized proto is after the first two bytes of |payload|.
+  std::string_view serialized_proto = std::string_view(payload).substr(2);
 
   // Decode the proto message if the message is something we want to notify to
   // clients.
   if (message_type == proto::MessageType::PHONE_STATUS_SNAPSHOT) {
     proto::PhoneStatusSnapshot snapshot_proto;
-    // Serialized proto is after the first two bytes of |payload|.
-    if (!snapshot_proto.ParseFromString(payload.substr(2))) {
+    if (!snapshot_proto.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "PhoneStatusSnapshot proto message.";
       return;
@@ -97,8 +101,7 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
 
   if (message_type == proto::MessageType::PHONE_STATUS_UPDATE) {
     proto::PhoneStatusUpdate update_proto;
-    // Serialized proto is after the first two bytes of |payload|.
-    if (!update_proto.ParseFromString(payload.substr(2))) {
+    if (!update_proto.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "PhoneStatusUpdate proto message.";
       return;
@@ -107,11 +110,9 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
     return;
   }
 
-  if (features::IsPhoneHubFeatureSetupErrorHandlingEnabled() &&
-      message_type == proto::MessageType::FEATURE_SETUP_RESPONSE) {
+  if (message_type == proto::MessageType::FEATURE_SETUP_RESPONSE) {
     proto::FeatureSetupResponse response;
-    // Serialized proto is after the first two bytes of |payload|.
-    if (!response.ParseFromString(payload.substr(2))) {
+    if (!response.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "FeatureSetupResponse proto message.";
       return;
@@ -119,11 +120,9 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
     NotifyFeatureSetupResponseReceived(response);
   }
 
-  if (features::IsPhoneHubCameraRollEnabled() &&
-      message_type == proto::MessageType::FETCH_CAMERA_ROLL_ITEMS_RESPONSE) {
+  if (message_type == proto::MessageType::FETCH_CAMERA_ROLL_ITEMS_RESPONSE) {
     proto::FetchCameraRollItemsResponse response;
-    // Serialized proto is after the first two bytes of |payload|.
-    if (!response.ParseFromString(payload.substr(2))) {
+    if (!response.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "FetchCameraRollItemsResponse proto message.";
       return;
@@ -132,12 +131,10 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
     return;
   }
 
-  if (features::IsPhoneHubCameraRollEnabled() &&
-      message_type ==
-          proto::MessageType::FETCH_CAMERA_ROLL_ITEM_DATA_RESPONSE) {
+  if (message_type ==
+      proto::MessageType::FETCH_CAMERA_ROLL_ITEM_DATA_RESPONSE) {
     proto::FetchCameraRollItemDataResponse response;
-    // Serialized proto is after the first two bytes of |payload|.
-    if (!response.ParseFromString(payload.substr(2))) {
+    if (!response.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "FetchCameraRollItemDataResponse proto message.";
       return;
@@ -146,8 +143,7 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
     return;
   }
 
-  if (features::IsPhoneHubPingOnBubbleOpenEnabled() &&
-      message_type == proto::MessageType::PING_RESPONSE) {
+  if (message_type == proto::MessageType::PING_RESPONSE) {
     // We don't need to send the content of the ping response, we only care
     // that we got a response.
     NotifyPingResponseReceived();
@@ -157,8 +153,7 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
   if (features::IsEcheSWAEnabled() &&
       message_type == proto::MessageType::APP_STREAM_UPDATE) {
     proto::AppStreamUpdate app_stream_update;
-    // Serialized proto is after the first two bytes of |payload|.
-    if (!app_stream_update.ParseFromString(payload.substr(2))) {
+    if (!app_stream_update.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "AppStreamUpdate proto message.";
       return;
@@ -170,8 +165,7 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
   if (features::IsEcheSWAEnabled() &&
       message_type == proto::MessageType::APP_LIST_UPDATE) {
     proto::AppListUpdate app_list_update;
-    // Serialized proto is after the first two bytes of |payload|.
-    if (!app_list_update.ParseFromString(payload.substr(2))) {
+    if (!app_list_update.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "AppListUpdate proto message.";
       return;
@@ -183,7 +177,7 @@ void MessageReceiverImpl::OnMessageReceived(const std::string& payload) {
   if (features::IsEcheSWAEnabled() &&
       message_type == proto::MessageType::APP_LIST_INCREMENTAL_UPDATE) {
     proto::AppListIncrementalUpdate app_list_incrementalUpdate;
-    if (!app_list_incrementalUpdate.ParseFromString(payload.substr(2))) {
+    if (!app_list_incrementalUpdate.ParseFromString(serialized_proto)) {
       PA_LOG(ERROR) << "OnMessageReceived() could not deserialize the "
                     << "AppListIncrementalUpdate proto message.";
       return;

@@ -5,12 +5,12 @@
 #include "components/prefs/pref_value_store.h"
 
 #include <stddef.h>
+
 #include <string>
+#include <string_view>
 
 #include "base/logging.h"
-#include "base/strings/string_piece.h"
 #include "components/prefs/pref_notifier.h"
-#include "components/prefs/pref_observer.h"
 
 PrefValueStore::PrefStoreKeeper::PrefStoreKeeper()
     : pref_value_store_(nullptr), type_(PrefValueStore::INVALID_STORE) {}
@@ -25,7 +25,7 @@ PrefValueStore::PrefStoreKeeper::~PrefStoreKeeper() {
 
 void PrefValueStore::PrefStoreKeeper::Initialize(
     PrefValueStore* store,
-    PrefStore* pref_store,
+    scoped_refptr<PrefStore> pref_store,
     PrefValueStore::PrefStoreType type) {
   if (pref_store_) {
     pref_store_->RemoveObserver(this);
@@ -38,8 +38,7 @@ void PrefValueStore::PrefStoreKeeper::Initialize(
     pref_store_->AddObserver(this);
 }
 
-void PrefValueStore::PrefStoreKeeper::OnPrefValueChanged(
-    const std::string& key) {
+void PrefValueStore::PrefStoreKeeper::OnPrefValueChanged(std::string_view key) {
   pref_value_store_->OnPrefValueChanged(type_, key);
 }
 
@@ -48,65 +47,71 @@ void PrefValueStore::PrefStoreKeeper::OnInitializationCompleted(
   pref_value_store_->OnInitializationCompleted(type_, succeeded);
 }
 
-PrefValueStore::PrefValueStore(PrefStore* managed_prefs,
-                               PrefStore* supervised_user_prefs,
-                               PrefStore* extension_prefs,
-                               PrefStore* standalone_browser_prefs,
-                               PrefStore* command_line_prefs,
-                               PrefStore* user_prefs,
-                               PrefStore* recommended_prefs,
-                               PrefStore* default_prefs,
+PrefValueStore::PrefValueStore(scoped_refptr<PrefStore> managed_prefs,
+                               scoped_refptr<PrefStore> supervised_user_prefs,
+                               scoped_refptr<PrefStore> extension_prefs,
+                               scoped_refptr<PrefStore> command_line_prefs,
+                               scoped_refptr<PrefStore> user_prefs,
+                               scoped_refptr<PrefStore> recommended_prefs,
+                               scoped_refptr<PrefStore> default_prefs,
                                PrefNotifier* pref_notifier)
     : pref_notifier_(pref_notifier), initialization_failed_(false) {
-  InitPrefStore(MANAGED_STORE, managed_prefs);
-  InitPrefStore(SUPERVISED_USER_STORE, supervised_user_prefs);
-  InitPrefStore(EXTENSION_STORE, extension_prefs);
-  InitPrefStore(STANDALONE_BROWSER_STORE, standalone_browser_prefs);
-  InitPrefStore(COMMAND_LINE_STORE, command_line_prefs);
-  InitPrefStore(USER_STORE, user_prefs);
-  InitPrefStore(RECOMMENDED_STORE, recommended_prefs);
-  InitPrefStore(DEFAULT_STORE, default_prefs);
+  InitPrefStore(MANAGED_STORE, std::move(managed_prefs));
+  InitPrefStore(SUPERVISED_USER_STORE, std::move(supervised_user_prefs));
+  InitPrefStore(EXTENSION_STORE, std::move(extension_prefs));
+  InitPrefStore(COMMAND_LINE_STORE, std::move(command_line_prefs));
+  InitPrefStore(USER_STORE, std::move(user_prefs));
+  InitPrefStore(RECOMMENDED_STORE, std::move(recommended_prefs));
+  InitPrefStore(DEFAULT_STORE, std::move(default_prefs));
 
   CheckInitializationCompleted();
 }
 
-PrefValueStore::~PrefValueStore() {}
+PrefValueStore::~PrefValueStore() = default;
 
 std::unique_ptr<PrefValueStore> PrefValueStore::CloneAndSpecialize(
-    PrefStore* managed_prefs,
-    PrefStore* supervised_user_prefs,
-    PrefStore* extension_prefs,
-    PrefStore* standalone_browser_prefs,
-    PrefStore* command_line_prefs,
-    PrefStore* user_prefs,
-    PrefStore* recommended_prefs,
-    PrefStore* default_prefs,
+    scoped_refptr<PrefStore> managed_prefs,
+    scoped_refptr<PrefStore> supervised_user_prefs,
+    scoped_refptr<PrefStore> extension_prefs,
+    scoped_refptr<PrefStore> command_line_prefs,
+    scoped_refptr<PrefStore> user_prefs,
+    scoped_refptr<PrefStore> recommended_prefs,
+    scoped_refptr<PrefStore> default_prefs,
     PrefNotifier* pref_notifier) {
   DCHECK(pref_notifier);
   if (!managed_prefs)
-    managed_prefs = GetPrefStore(MANAGED_STORE);
+    managed_prefs = GetPrefStoreRef(MANAGED_STORE);
   if (!supervised_user_prefs)
-    supervised_user_prefs = GetPrefStore(SUPERVISED_USER_STORE);
+    supervised_user_prefs = GetPrefStoreRef(SUPERVISED_USER_STORE);
   if (!extension_prefs)
-    extension_prefs = GetPrefStore(EXTENSION_STORE);
-  if (!standalone_browser_prefs)
-    standalone_browser_prefs = GetPrefStore(STANDALONE_BROWSER_STORE);
+    extension_prefs = GetPrefStoreRef(EXTENSION_STORE);
   if (!command_line_prefs)
-    command_line_prefs = GetPrefStore(COMMAND_LINE_STORE);
+    command_line_prefs = GetPrefStoreRef(COMMAND_LINE_STORE);
   if (!user_prefs)
-    user_prefs = GetPrefStore(USER_STORE);
+    user_prefs = GetPrefStoreRef(USER_STORE);
   if (!recommended_prefs)
-    recommended_prefs = GetPrefStore(RECOMMENDED_STORE);
+    recommended_prefs = GetPrefStoreRef(RECOMMENDED_STORE);
   if (!default_prefs)
-    default_prefs = GetPrefStore(DEFAULT_STORE);
+    default_prefs = GetPrefStoreRef(DEFAULT_STORE);
 
   return std::make_unique<PrefValueStore>(
-      managed_prefs, supervised_user_prefs, extension_prefs,
-      standalone_browser_prefs, command_line_prefs, user_prefs,
-      recommended_prefs, default_prefs, pref_notifier);
+      std::move(managed_prefs), std::move(supervised_user_prefs),
+      std::move(extension_prefs), std::move(command_line_prefs),
+      std::move(user_prefs), std::move(recommended_prefs),
+      std::move(default_prefs), pref_notifier);
 }
 
-bool PrefValueStore::GetValue(base::StringPiece name,
+PrefValueStore::PrefStoreType PrefValueStore::ControllingPrefStoreForPref(
+    const std::string& name) const {
+  for (size_t i = 0; i <= PREF_STORE_TYPE_MAX; ++i) {
+    if (PrefValueInStore(name, static_cast<PrefStoreType>(i))) {
+      return static_cast<PrefStoreType>(i);
+    }
+  }
+  return INVALID_STORE;
+}
+
+bool PrefValueStore::GetValue(std::string_view name,
                               base::Value::Type type,
                               const base::Value** out_value) const {
   // Check the |PrefStore|s in order of their priority from highest to lowest,
@@ -126,7 +131,7 @@ bool PrefValueStore::GetRecommendedValue(const std::string& name,
 }
 
 void PrefValueStore::NotifyPrefChanged(
-    const std::string& path,
+    std::string_view path,
     PrefValueStore::PrefStoreType new_store) {
   DCHECK(new_store != INVALID_STORE);
   // A notification is sent when the pref value in any store changes. If this
@@ -165,11 +170,6 @@ bool PrefValueStore::PrefValueFromRecommendedStore(
   return ControllingPrefStoreForPref(name) == RECOMMENDED_STORE;
 }
 
-bool PrefValueStore::PrefValueFromStandaloneBrowserStore(
-    const std::string& name) const {
-  return ControllingPrefStoreForPref(name) == STANDALONE_BROWSER_STORE;
-}
-
 bool PrefValueStore::PrefValueFromDefaultStore(const std::string& name) const {
   return ControllingPrefStoreForPref(name) == DEFAULT_STORE;
 }
@@ -187,22 +187,22 @@ bool PrefValueStore::PrefValueExtensionModifiable(
          effective_store == INVALID_STORE;
 }
 
-bool PrefValueStore::PrefValueStandaloneBrowserModifiable(
-    const std::string& name) const {
-  PrefStoreType effective_store = ControllingPrefStoreForPref(name);
-  return effective_store >= STANDALONE_BROWSER_STORE ||
-         effective_store == INVALID_STORE;
+void PrefValueStore::UpdateCommandLinePrefStore(
+    scoped_refptr<PrefStore> command_line_prefs) {
+  InitPrefStore(COMMAND_LINE_STORE, std::move(command_line_prefs));
 }
 
-void PrefValueStore::UpdateCommandLinePrefStore(PrefStore* command_line_prefs) {
-  InitPrefStore(COMMAND_LINE_STORE, command_line_prefs);
+void PrefValueStore::UpdateExtensionPrefStore(
+    scoped_refptr<PrefStore> extension_prefs) {
+  InitPrefStore(EXTENSION_STORE, std::move(extension_prefs));
 }
 
 bool PrefValueStore::IsInitializationComplete() const {
   for (size_t i = 0; i <= PREF_STORE_TYPE_MAX; ++i) {
     const PrefStore* pref_store = GetPrefStore(static_cast<PrefStoreType>(i));
-    if (pref_store && !pref_store->IsInitializationComplete())
+    if (pref_store && !pref_store->IsInitializationComplete()) {
       return false;
+    }
   }
   return true;
 }
@@ -222,7 +222,6 @@ bool PrefValueStore::PrefValueInStoreRange(
     PrefValueStore::PrefStoreType last_checked_store) const {
   if (first_checked_store > last_checked_store) {
     NOTREACHED();
-    return false;
   }
 
   for (size_t i = first_checked_store;
@@ -233,16 +232,7 @@ bool PrefValueStore::PrefValueInStoreRange(
   return false;
 }
 
-PrefValueStore::PrefStoreType PrefValueStore::ControllingPrefStoreForPref(
-    const std::string& name) const {
-  for (size_t i = 0; i <= PREF_STORE_TYPE_MAX; ++i) {
-    if (PrefValueInStore(name, static_cast<PrefStoreType>(i)))
-      return static_cast<PrefStoreType>(i);
-  }
-  return INVALID_STORE;
-}
-
-bool PrefValueStore::GetValueFromStore(base::StringPiece name,
+bool PrefValueStore::GetValueFromStore(std::string_view name,
                                        PrefValueStore::PrefStoreType store_type,
                                        const base::Value** out_value) const {
   // Only return true if we find a value and it is the correct type, so stale
@@ -258,7 +248,7 @@ bool PrefValueStore::GetValueFromStore(base::StringPiece name,
 }
 
 bool PrefValueStore::GetValueFromStoreWithType(
-    base::StringPiece name,
+    std::string_view name,
     base::Value::Type type,
     PrefStoreType store,
     const base::Value** out_value) const {
@@ -276,7 +266,7 @@ bool PrefValueStore::GetValueFromStoreWithType(
 }
 
 void PrefValueStore::OnPrefValueChanged(PrefValueStore::PrefStoreType type,
-                                        const std::string& key) {
+                                        std::string_view key) {
   NotifyPrefChanged(key, type);
 }
 
@@ -293,8 +283,8 @@ void PrefValueStore::OnInitializationCompleted(
 }
 
 void PrefValueStore::InitPrefStore(PrefValueStore::PrefStoreType type,
-                                   PrefStore* pref_store) {
-  pref_stores_[type].Initialize(this, pref_store, type);
+                                   scoped_refptr<PrefStore> pref_store) {
+  pref_stores_[type].Initialize(this, std::move(pref_store), type);
 }
 
 void PrefValueStore::CheckInitializationCompleted() {

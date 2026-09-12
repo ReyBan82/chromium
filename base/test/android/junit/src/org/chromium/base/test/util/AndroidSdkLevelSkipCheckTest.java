@@ -21,7 +21,8 @@ import org.chromium.base.test.BaseRobolectricTestRunner;
 
 /** Unit tests for {@link AndroidSdkLevelSkipCheck} */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = 29)
+@Config(sdk = BaseRobolectricTestRunner.MIN_SDK)
+@SuppressWarnings("UnusedMethod")
 public class AndroidSdkLevelSkipCheckTest {
     public static class UnannotatedBaseClass {
         @Test
@@ -105,7 +106,8 @@ public class AndroidSdkLevelSkipCheckTest {
                 sSkipCheck.shouldSkip(new FrameworkMethod(testClass.getMethod(methodName))),
                 equalTo(shouldSkip));
         TestRunnerTestRule.TestLog runListener = mTestRunnerTestRule.runTest(testClass);
-        Assert.assertThat(Description.createTestDescription(testClass, methodName),
+        Assert.assertThat(
+                Description.createTestDescription(testClass, methodName),
                 isIn(shouldSkip ? runListener.skippedTests : runListener.runTests));
     }
 

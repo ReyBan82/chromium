@@ -48,7 +48,7 @@ class ContentFaviconDriver
  private:
   friend class content::WebContentsUserData<ContentFaviconDriver>;
 
-  // TODO(crbug.com/1205018): these two classes are current used to ensure that
+  // TODO(crbug.com/40180290): these two classes are current used to ensure that
   // we disregard manifest URL updates that arrive prior to onload firing.
   struct DocumentManifestData
       : public content::DocumentUserData<DocumentManifestData> {
@@ -69,6 +69,7 @@ class ContentFaviconDriver
 
   // Callback when a manifest is downloaded.
   void OnDidDownloadManifest(ManifestDownloadCallback callback,
+                             blink::mojom::ManifestRequestResult result,
                              const GURL& manifest_url,
                              blink::mojom::ManifestPtr manifest);
 
@@ -91,7 +92,8 @@ class ContentFaviconDriver
   // content::WebContentsObserver implementation.
   void DidUpdateFaviconURL(
       content::RenderFrameHost* rfh,
-      const std::vector<blink::mojom::FaviconURLPtr>& candidates) override;
+      const std::vector<blink::mojom::FaviconURLPtr>& candidates,
+      blink::mojom::FaviconUpdateReason reason) override;
   void DidUpdateWebManifestURL(content::RenderFrameHost* rfh,
                                const GURL& manifest_url) override;
   void DidStartNavigation(

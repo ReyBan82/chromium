@@ -3,18 +3,18 @@
 // found in the LICENSE file.
 
 #include "base/test/metrics/histogram_tester.h"
-#include "base/test/scoped_feature_list.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_enums.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "chrome/test/permissions/permission_request_manager_test_api.h"
-#include "components/permissions/features.h"
 #include "components/permissions/permission_uma_util.h"
 #include "components/permissions/test/permission_request_observer.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 
 constexpr char kRequestNotifications[] = R"(
       new Promise(resolve => {
@@ -26,11 +26,7 @@ constexpr char kRequestNotifications[] = R"(
 
 class PermissionPromptMetricsTest : public InProcessBrowserTest {
  public:
-  PermissionPromptMetricsTest() {
-    scoped_feature_list_.InitAndEnableFeature(
-        permissions::features::kPermissionChip);
-  }
-
+  PermissionPromptMetricsTest() = default;
   PermissionPromptMetricsTest(const PermissionPromptMetricsTest&) = delete;
   PermissionPromptMetricsTest& operator=(const PermissionPromptMetricsTest&) =
       delete;
@@ -43,13 +39,12 @@ class PermissionPromptMetricsTest : public InProcessBrowserTest {
 
   content::RenderFrameHost* GetActiveMainFrame() {
     return browser()
-        ->tab_strip_model()
+        ->GetTabStripModel()
         ->GetActiveWebContents()
         ->GetPrimaryMainFrame();
   }
 
   std::unique_ptr<test::PermissionRequestManagerTestApi> test_api_;
-  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
@@ -58,7 +53,7 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   ASSERT_TRUE(embedded_test_server()->Start());
   const GURL url(embedded_test_server()->GetURL("/empty.html"));
 
-  TabStripModel* tab_strip = browser()->tab_strip_model();
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
   content::WebContents* embedder_contents_tab_0 =
       tab_strip->GetActiveWebContents();
   ASSERT_TRUE(embedder_contents_tab_0);
@@ -87,7 +82,7 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   histograms.ExpectUniqueSample(
       "Permissions.Prompt.Notifications.LocationBarLeftChipAutoBubble."
       "IgnoredReason",
-      static_cast<base::HistogramBase::Sample>(
+      static_cast<base::HistogramBase::Sample32>(
           permissions::PermissionIgnoredReason::TAB_CLOSED),
       1);
 }
@@ -98,7 +93,7 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   ASSERT_TRUE(embedded_test_server()->Start());
   const GURL url(embedded_test_server()->GetURL("/empty.html"));
 
-  TabStripModel* tab_strip = browser()->tab_strip_model();
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
   content::WebContents* embedder_contents_tab_0 =
       tab_strip->GetActiveWebContents();
   ASSERT_TRUE(embedder_contents_tab_0);
@@ -128,7 +123,7 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   histograms.ExpectUniqueSample(
       "Permissions.Prompt.Notifications.LocationBarLeftChipAutoBubble."
       "IgnoredReason",
-      static_cast<base::HistogramBase::Sample>(
+      static_cast<base::HistogramBase::Sample32>(
           permissions::PermissionIgnoredReason::TAB_CLOSED),
       1);
 }
@@ -139,7 +134,7 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   ASSERT_TRUE(embedded_test_server()->Start());
   const GURL url(embedded_test_server()->GetURL("/empty.html"));
 
-  TabStripModel* tab_strip = browser()->tab_strip_model();
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
   content::WebContents* embedder_contents_tab_0 =
       tab_strip->GetActiveWebContents();
   ASSERT_TRUE(embedder_contents_tab_0);
@@ -155,13 +150,14 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   observer_tab_0.Wait();
 
   // Close browser without decision
+  ui_test_utils::BrowserDestroyedObserver observer(browser());
   chrome::CloseWindow(browser());
-  ui_test_utils::WaitForBrowserToClose(browser());
+  observer.Wait();
 
   histograms.ExpectUniqueSample(
       "Permissions.Prompt.Notifications.LocationBarLeftChipAutoBubble."
       "IgnoredReason",
-      static_cast<base::HistogramBase::Sample>(
+      static_cast<base::HistogramBase::Sample32>(
           permissions::PermissionIgnoredReason::WINDOW_CLOSED),
       1);
 }
@@ -172,7 +168,7 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   ASSERT_TRUE(embedded_test_server()->Start());
   const GURL url(embedded_test_server()->GetURL("/empty.html"));
 
-  TabStripModel* tab_strip = browser()->tab_strip_model();
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
   content::WebContents* embedder_contents_tab_0 =
       tab_strip->GetActiveWebContents();
   ASSERT_TRUE(embedder_contents_tab_0);
@@ -193,7 +189,7 @@ IN_PROC_BROWSER_TEST_F(PermissionPromptMetricsTest,
   histograms.ExpectUniqueSample(
       "Permissions.Prompt.Notifications.LocationBarLeftChipAutoBubble."
       "IgnoredReason",
-      static_cast<base::HistogramBase::Sample>(
+      static_cast<base::HistogramBase::Sample32>(
           permissions::PermissionIgnoredReason::NAVIGATION),
       1);
 }

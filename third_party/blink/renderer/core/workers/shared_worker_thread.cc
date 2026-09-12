@@ -32,9 +32,11 @@
 
 #include <memory>
 #include <utility>
+
 #include "third_party/blink/renderer/core/workers/global_scope_creation_params.h"
 #include "third_party/blink/renderer/core/workers/shared_worker_global_scope.h"
 #include "third_party/blink/renderer/core/workers/worker_backing_thread.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -48,15 +50,20 @@ SharedWorkerThread::SharedWorkerThread(
 
 SharedWorkerThread::~SharedWorkerThread() = default;
 
-void SharedWorkerThread::ClearWorkerBackingThread() {
-  worker_backing_thread_ = nullptr;
-}
-
 WorkerOrWorkletGlobalScope* SharedWorkerThread::CreateWorkerGlobalScope(
     std::unique_ptr<GlobalScopeCreationParams> creation_params) {
+  if (RuntimeEnabledFeatures::ResourceTimingInitiatorEnabled()) {
+    V8PerIsolateData::From(GetIsolate())
+        ->InitializeTaskAttributionTrackerOnWorkerThread();
+  }
+  // We need to pull this bool out of creation_params before we construct
+  // SharedWorkerGlobalScope as it has to move the pointer to the base class
+  // before any information in it can be accessed.
+  bool require_cross_site_request_for_cookies =
+      creation_params->require_cross_site_request_for_cookies;
   return MakeGarbageCollected<SharedWorkerGlobalScope>(
-      std::move(creation_params), is_constructor_origin_secure_, this,
-      time_origin_, token_);
+      std::move(creation_params), this, time_origin_, token_,
+      require_cross_site_request_for_cookies);
 }
 
 }  // namespace blink

@@ -3,20 +3,32 @@
 // found in the LICENSE file.
 
 import {FakeMethodResolver} from 'chrome://resources/ash/common/fake_method_resolver.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
 
-import {PowerRoutineResult, RoutineResult, RoutineResultInfo, RoutineRunnerInterface, RoutineType, StandardRoutineResult, SystemRoutineControllerInterface} from './system_routine_controller.mojom-webui.js';
+import type {PowerRoutineResult, RoutineResult, RoutineResultInfo, RoutineRunnerInterface, SystemRoutineControllerInterface} from './system_routine_controller.mojom-webui.js';
+import {RoutineType, StandardRoutineResult} from './system_routine_controller.mojom-webui.js';
 
 /**
  * @fileoverview
  * Implements a fake version of the SystemRoutineController mojo interface.
  */
 
+/**
+ * Type for methods needed for the fake SystemRoutineController implementation.
+ */
+export type FakeSystemRoutineControllerInterface =
+    SystemRoutineControllerInterface&{
+      setDelayTimeInMillisecondsForTesting(delayMilliseconds: number): void,
+      getSupportedRoutines(): Promise<{routines: RoutineType[]}>,
+      getAllRoutines(): RoutineType[],
+    };
+
 export class FakeSystemRoutineController implements
-    SystemRoutineControllerInterface {
-  private methods: FakeMethodResolver = new FakeMethodResolver();
-  private routineResults: Map<RoutineType, RoutineResult> = new Map();
+    FakeSystemRoutineControllerInterface {
+  private readonly methods: FakeMethodResolver = new FakeMethodResolver();
+  private readonly routineResults: Map<RoutineType, RoutineResult> = new Map();
+  private readonly routineDetails: Map<RoutineType, string> = new Map();
   /**
    * Controls the delay resolving routines. By default this is 0 and routines
    * resolve immediately, but still asynchronously.
@@ -59,6 +71,7 @@ export class FakeSystemRoutineController implements
       RoutineType.kArcHttp,
       RoutineType.kArcPing,
       RoutineType.kArcDnsResolution,
+      RoutineType.kGoogleServicesConnectivity,
     ];
   }
 
@@ -103,6 +116,17 @@ export class FakeSystemRoutineController implements
       routineType: RoutineType, routineResult: PowerRoutineResult): void {
     this.routineResults.set(
         routineType, ({powerResult: routineResult} as RoutineResult));
+  }
+
+  setFakeRoutineDetails(routineType: RoutineType, details: string): void {
+    this.routineDetails.set(routineType, details);
+  }
+
+  // Clears all per-routine results and details so that state from one test
+  // does not leak into the next.
+  clearRoutineState(): void {
+    this.routineResults.clear();
+    this.routineDetails.clear();
   }
 
   /**
@@ -160,6 +184,7 @@ export class FakeSystemRoutineController implements
     const resultInfo: RoutineResultInfo = {
       type: this.routineType,
       result: result,
+      details: this.routineDetails.get(this.routineType) ?? null,
     };
 
     return resultInfo;

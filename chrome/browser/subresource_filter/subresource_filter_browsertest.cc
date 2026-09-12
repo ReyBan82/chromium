@@ -6,16 +6,14 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
-
-#include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
 
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/memory/ref_counted.h"
 #include "base/strings/pattern.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
@@ -27,23 +25,22 @@
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/safe_browsing/test_safe_browsing_database_helper.h"
 #include "chrome/browser/safe_browsing/test_safe_browsing_service.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_navigator.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/url_constants.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/metrics/content/subprocess_metrics_provider.h"
-#include "components/safe_browsing/core/browser/db/v4_test_util.h"
+#include "components/safe_browsing/core/browser/db/sb_test_util.h"
 #include "components/security_interstitials/core/unsafe_resource.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter_test_utils.h"
 #include "components/subresource_filter/content/browser/content_subresource_filter_throttle_manager.h"
 #include "components/subresource_filter/content/browser/ruleset_service.h"
 #include "components/subresource_filter/content/browser/test_ruleset_publisher.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter_test_utils.h"
 #include "components/subresource_filter/core/browser/subresource_filter_constants.h"
 #include "components/subresource_filter/core/browser/subresource_filter_features.h"
 #include "components/subresource_filter/core/browser/subresource_filter_features_test_support.h"
@@ -53,8 +50,8 @@
 #include "components/subresource_filter/core/common/test_ruleset_creator.h"
 #include "components/subresource_filter/core/common/test_ruleset_utils.h"
 #include "components/subresource_filter/core/mojom/subresource_filter.mojom.h"
-#include "components/ukm/test_ukm_recorder.h"
 #include "components/url_pattern_index/proto/rules.pb.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/page_navigator.h"
 #include "content/public/browser/render_frame_host.h"
@@ -69,11 +66,11 @@
 #include "content/public/test/test_navigation_observer.h"
 #include "content/public/test/test_utils.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
-#include "services/metrics/public/cpp/ukm_builders.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/chrome_debug_urls.h"
-#include "third_party/blink/public/common/features.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "url/gurl.h"
 
 namespace subresource_filter {
@@ -88,7 +85,7 @@ namespace proto = url_pattern_index::proto;
 static constexpr const char kTestFrameSetPath[] =
     "/subresource_filter/frame_set.html";
 
-GURL GetURLWithFragment(const GURL& url, base::StringPiece fragment) {
+GURL GetURLWithFragment(const GURL& url, std::string_view fragment) {
   GURL::Replacements replacements;
   replacements.SetRefStr(fragment);
   return url.ReplaceComponents(replacements);
@@ -105,18 +102,19 @@ constexpr const char kBlinkDisallowChildFrameConsoleMessageFormat[] =
 
 // Tests -----------------------------------------------------------------------
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterListInsertingBrowserTest,
-                       MainFrameActivation_SubresourceFilterList) {
+IN_PROC_BROWSER_TEST_P(SubresourceFilterListInsertingBrowserTestWithV4V5Param,
+                       MainFrameActivationWithEnforcement_BetterAdsList) {
   content::WebContentsConsoleObserver console_observer(web_contents());
   console_observer.SetPattern(kActivationConsoleMessage);
   GURL url(GetTestUrl("subresource_filter/frame_with_included_script.html"));
-  ConfigureAsSubresourceFilterOnlyURL(url);
+  ConfigureURLWithEnforcement(url,
+                              safe_browsing::SubresourceFilterType::BETTER_ADS);
   ASSERT_NO_FATAL_FAILURE(SetRulesetToDisallowURLsWithPathSuffix(
       "suffix-that-does-not-match-anything"));
 
   Configuration config(subresource_filter::mojom::ActivationLevel::kEnabled,
                        subresource_filter::ActivationScope::ACTIVATION_LIST,
-                       subresource_filter::ActivationList::SUBRESOURCE_FILTER);
+                       subresource_filter::ActivationList::BETTER_ADS);
   ResetConfiguration(std::move(config));
 
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -138,13 +136,13 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterListInsertingBrowserTest,
       WasParsedScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterListInsertingBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterListInsertingBrowserTestWithV4V5Param,
                        MainFrameActivationWithWarning_BetterAdsList) {
   content::WebContentsConsoleObserver console_observer(web_contents());
   console_observer.SetPattern("*show ads*");
   GURL url(GetTestUrl("subresource_filter/frame_with_included_script.html"));
   ConfigureURLWithWarning(url,
-                          {safe_browsing::SubresourceFilterType::BETTER_ADS});
+                          safe_browsing::SubresourceFilterType::BETTER_ADS);
   ASSERT_NO_FATAL_FAILURE(SetRulesetToDisallowURLsWithPathSuffix(
       "suffix-that-does-not-match-anything"));
 
@@ -171,9 +169,9 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterListInsertingBrowserTest,
             console_observer.GetMessageAt(1u));
 }
 
-IN_PROC_BROWSER_TEST_F(
-    SubresourceFilterListInsertingBrowserTest,
-    ExpectRedirectPatternHistogramsAreRecordedForSubresourceFilterOnlyRedirectMatch) {
+IN_PROC_BROWSER_TEST_P(
+    SubresourceFilterListInsertingBrowserTestWithV4V5Param,
+    ExpectRedirectPatternHistogramsAreRecordedForBetterAdsRedirectMatch) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
   const std::string initial_host("a.com");
@@ -184,16 +182,21 @@ IN_PROC_BROWSER_TEST_F(
   GURL url(embedded_test_server()->GetURL(
       initial_host, "/server-redirect?" + redirect_url.spec()));
 
-  ConfigureAsSubresourceFilterOnlyURL(url.DeprecatedGetOriginAsURL());
+  ConfigureURLWithEnforcement(url.DeprecatedGetOriginAsURL(),
+                              safe_browsing::SubresourceFilterType::BETTER_ADS);
   base::HistogramTester tester;
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   tester.ExpectUniqueSample(kActivationListHistogram,
                             static_cast<int>(ActivationList::NONE), 1);
 }
 
+INSTANTIATE_TEST_SUITE_P(All,
+                         SubresourceFilterListInsertingBrowserTestWithV4V5Param,
+                         ::testing::Bool());
+
 // Normally, the subresource filter list is only sync'd in chrome branded
 // builds.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        SubresourceFilterListNeedsBranding) {
   bool has_list = database_helper()->HasListSynced(
       safe_browsing::GetUrlSubresourceFilterId());
@@ -204,7 +207,8 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 #endif
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest, MainFrameActivation) {
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
+                       MainFrameActivation) {
   content::WebContentsConsoleObserver console_observer(web_contents());
   console_observer.SetPattern(kActivationConsoleMessage);
   GURL url(GetTestUrl("subresource_filter/frame_with_included_script.html"));
@@ -232,7 +236,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest, MainFrameActivation) {
 
 // There should be no document-level de-/reactivation happening on the renderer
 // side as a result of a same document navigation.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        DocumentActivationOutlivesSameDocumentNavigation) {
   GURL url(GetTestUrl("subresource_filter/frame_with_delayed_script.html"));
   ConfigureAsPhishingURL(url);
@@ -252,7 +256,8 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
       IsDynamicScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest, SubFrameActivation) {
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
+                       SubFrameActivation) {
   std::string message_filter =
       base::StringPrintf(kBlinkDisallowChildFrameConsoleMessageFormat, "*");
   content::WebContentsConsoleObserver console_observer(web_contents());
@@ -281,7 +286,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest, SubFrameActivation) {
                          "*included_script.js")));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        ActivationDisabled_NoConsoleMessage) {
   std::string message_filter =
       base::StringPrintf(kBlinkDisallowChildFrameConsoleMessageFormat, "*");
@@ -305,7 +310,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
   EXPECT_TRUE(console_observer.messages().empty());
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        ActivationDryRun_NoConsoleMessage) {
   std::string message_filter =
       base::StringPrintf(kBlinkDisallowChildFrameConsoleMessageFormat, "*");
@@ -329,7 +334,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
   EXPECT_TRUE(console_observer.messages().empty());
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        SubframeDocumentLoadFiltering) {
   base::HistogramTester histogram_tester;
   GURL url(GetTestUrl(kTestFrameSetPath));
@@ -388,11 +393,15 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 
   content::RenderFrameHost* frame = FindFrameByName(kSubframeNames[0]);
   ASSERT_TRUE(frame);
-  EXPECT_EQ(disallowed_subdocument_url, frame->GetLastCommittedURL());
+  // We expect the URL to be sanitized, per https://crbug.com/517156678.
+  // TODO(crbug.com/40134629): Remove the sanitization once Subframe Error Page
+  // Isolation ships.
+  EXPECT_EQ(disallowed_subdocument_url.DeprecatedGetOriginAsURL(),
+            frame->GetLastCommittedURL());
   ExpectFramesIncludedInLayout(kSubframeNames, kExpectOnlySecondSubframe);
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        HistoryNavigationActivation) {
   content::WebContentsConsoleObserver console_observer(web_contents());
   console_observer.SetPattern(kActivationConsoleMessage);
@@ -438,7 +447,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
       kSubframeNames, kExpectScriptInFrameToLoadWithActivation));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        FailedProvisionalLoadInMainframe) {
   GURL url_with_activation_but_dns_error(
       "http://host-with-dns-lookup-failure/");
@@ -469,7 +478,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 // The page-level activation state on the browser-side should not be reset when
 // a same document navigation starts in the root frame. Verify this by
 // dynamically inserting a subframe afterwards, and still expecting activation.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        PageLevelActivationOutlivesSameDocumentNavigation) {
   content::WebContentsConsoleObserver console_observer(web_contents());
   console_observer.SetPattern(kActivationConsoleMessage);
@@ -495,7 +504,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 
 // If a navigation starts but aborts before commit, page level activation should
 // remain unchanged.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        PageLevelActivationOutlivesAbortedNavigation) {
   GURL url(GetTestUrl(kTestFrameSetPath));
   ConfigureAsPhishingURL(url);
@@ -527,7 +536,8 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
   EXPECT_FALSE(WasParsedScriptElementLoaded(dynamic_frame));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest, DynamicFrame) {
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
+                       DynamicFrame) {
   GURL url(GetTestUrl("subresource_filter/frame_set.html"));
   ConfigureAsPhishingURL(url);
   ASSERT_NO_FATAL_FAILURE(
@@ -540,12 +550,12 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest, DynamicFrame) {
   EXPECT_FALSE(WasParsedScriptElementLoaded(dynamic_frame));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        PRE_MainFrameActivationOnStartup) {
   SetRulesetToDisallowURLsWithPathSuffix("included_script.js");
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        MainFrameActivationOnStartup) {
   GURL url(GetTestUrl("subresource_filter/frame_with_included_script.html"));
   ConfigureAsPhishingURL(url);
@@ -556,7 +566,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
       WasParsedScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        PromptShownAgainOnNextNavigation) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -583,7 +593,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
       subresource_filter::SubresourceFilterAction::kUIShown, 2);
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        CrossSiteSubFrameActivationWithoutAllowlist) {
   GURL a_url(embedded_test_server()->GetURL(
       "a.com", "/subresource_filter/frame_cross_site_set.html"));
@@ -595,7 +605,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
       std::vector<const char*>{"b", "c", "d"}, {false, false, false});
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        CrossSiteSubFrameActivationWithAllowlist) {
   GURL a_url(embedded_test_server()->GetURL(
       "a.com", "/subresource_filter/frame_cross_site_set.html"));
@@ -609,7 +619,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 }
 
 // Disable the test as it's flaky on Win7 dbg.
-// crbug.com/1068185
+// crbug.com/40125372
 #if BUILDFLAG(IS_WIN) && !defined(NDEBUG)
 #define MAYBE_RendererDebugURL_NoLeakedThrottlePtrs \
   DISABLED_RendererDebugURL_NoLeakedThrottlePtrs
@@ -632,19 +642,21 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
   // This test should crash the *browser process* with CHECK failures if the
   // component is faulty. The CHECK assumes that the crash URL and other
   // renderer debug URLs do not create a navigation throttle. See
-  // crbug.com/736658.
+  // crbug.com/40527486.
   content::RenderProcessHostWatcher crash_observer(
       browser()->tab_strip_model()->GetActiveWebContents(),
       content::RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
-  browser()->OpenURL(content::OpenURLParams(
-      GURL(blink::kChromeUICrashURL), content::Referrer(),
-      WindowOpenDisposition::CURRENT_TAB, ui::PAGE_TRANSITION_TYPED, false));
+  browser()->OpenURL(content::OpenURLParams(GURL(blink::kChromeUICrashURL),
+                                            content::Referrer(),
+                                            WindowOpenDisposition::CURRENT_TAB,
+                                            ui::PAGE_TRANSITION_TYPED, false),
+                     /*navigation_handle_callback=*/{});
   crash_observer.Wait();
 }
 
 // Test that resources in frames with an aborted initial load due to a doc.write
 // are still disallowed.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        FrameWithDocWriteAbortedLoad_ResourceStillDisallowed) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetWithRules({testing::CreateSuffixRule("ad=true")}));
@@ -669,7 +681,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 
 // Test that resources in frames with an aborted initial load due to a
 // window.stop are still disallowed.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        FrameWithWindowStopAbortedLoad_ResourceStillDisallowed) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetWithRules({testing::CreateSuffixRule("ad=true")}));
@@ -694,7 +706,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 
 // Test that a frame with an aborted initial load due to a frame deletion does
 // not cause a crash.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        FrameDeletedDuringLoad_DoesNotCrash) {
   // Watches for title set by end of frame deletion script.
   content::TitleWatcher title_watcher(web_contents(), u"done");
@@ -708,8 +720,8 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 
 // Test that an allowed resource in the child of a frame with its initial load
 // aborted due to a doc.write is not blocked.
-IN_PROC_BROWSER_TEST_F(
-    SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(
+    SubresourceFilterBrowserTestWithV4V5Param,
     ChildOfFrameWithAbortedLoadLoadsAllowedResource_ResourceLoaded) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetWithRules({testing::CreateSuffixRule("ad=true")}));
@@ -748,8 +760,8 @@ IN_PROC_BROWSER_TEST_F(
 
 // Test that a disallowed resource in the child of a frame with its initial load
 // aborted due to a doc.write is blocked.
-IN_PROC_BROWSER_TEST_F(
-    SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(
+    SubresourceFilterBrowserTestWithV4V5Param,
     ChildOfFrameWithAbortedLoadLoadsDisallowedResource_ResourceBlocked) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetWithRules({testing::CreateSuffixRule("ad=true")}));
@@ -786,7 +798,7 @@ IN_PROC_BROWSER_TEST_F(
   EXPECT_EQ(u"failed", title_watcher.WaitAndGetTitle());
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        PopupsInheritActivation_ResourcesBlocked) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetWithRules({testing::CreateSuffixRule("ad=true")}));
@@ -818,7 +830,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 
       // TODO(alexmt): Enable this test case. Currently disabled as there is no
       // guarantee that the descendant's navigation starts after the parent's
-      // navigation ends (see crbug.com/1101569).
+      // navigation ends (see crbug.com/40138406).
       // Child of popup with doc.write-aborted load
       // "popupLoadsDisallowedResourceAsDescendant('http://b.com/slow?100');",
 
@@ -840,7 +852,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
   }
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        PopupNavigatesBackToAboutBlank_FilterChecked) {
   const GURL kInitialPopupUrl =
       embedded_test_server()->GetURL("b.com", "/title2.html");
@@ -938,8 +950,8 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 // doc.write are still blocked when disallowed, even if the opener is
 // immediately closed after writing.
 // TODO(alexmt): Fix test flakiness and then reenable.
-IN_PROC_BROWSER_TEST_F(
-    SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(
+    SubresourceFilterBrowserTestWithV4V5Param,
     DISABLED_PopupWithDocWriteAbortedLoadAndOpenerClosed_FilterChecked) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetWithRules({testing::CreateSuffixRule("ad_script.js"),
@@ -998,19 +1010,23 @@ void ExpectHistogramsAreRecordedForTestFrameSet(
 
   // The following histograms are generated on the browser side.
   tester.ExpectUniqueSample(
-      SubresourceFilterBrowserTest::kSubresourceLoadsTotalForPage, 6, 1);
-  tester.ExpectUniqueSample(
-      SubresourceFilterBrowserTest::kSubresourceLoadsEvaluatedForPage, 6, 1);
-  tester.ExpectUniqueSample(
-      SubresourceFilterBrowserTest::kSubresourceLoadsMatchedRulesForPage, 4, 1);
-  tester.ExpectUniqueSample(
-      SubresourceFilterBrowserTest::kSubresourceLoadsDisallowedForPage, 4, 1);
-  tester.ExpectTotalCount(
-      SubresourceFilterBrowserTest::kEvaluationTotalWallDurationForPage,
-      time_recorded);
-  tester.ExpectTotalCount(
-      SubresourceFilterBrowserTest::kEvaluationTotalCPUDurationForPage,
-      time_recorded);
+      SubresourceFilterBrowserTestWithV4V5Param::kSubresourceLoadsTotalForPage,
+      6, 1);
+  tester.ExpectUniqueSample(SubresourceFilterBrowserTestWithV4V5Param::
+                                kSubresourceLoadsEvaluatedForPage,
+                            6, 1);
+  tester.ExpectUniqueSample(SubresourceFilterBrowserTestWithV4V5Param::
+                                kSubresourceLoadsMatchedRulesForPage,
+                            4, 1);
+  tester.ExpectUniqueSample(SubresourceFilterBrowserTestWithV4V5Param::
+                                kSubresourceLoadsDisallowedForPage,
+                            4, 1);
+  tester.ExpectTotalCount(SubresourceFilterBrowserTestWithV4V5Param::
+                              kEvaluationTotalWallDurationForPage,
+                          time_recorded);
+  tester.ExpectTotalCount(SubresourceFilterBrowserTestWithV4V5Param::
+                              kEvaluationTotalCPUDurationForPage,
+                          time_recorded);
 
   // The rest is produced by renderers, therefore needs to be merged here.
   content::FetchHistogramsFromChildProcesses();
@@ -1018,28 +1034,25 @@ void ExpectHistogramsAreRecordedForTestFrameSet(
 
   // 5 subframes, each with an include.js, plus a top level include.js.
   int num_subresource_checks = 5 + 5 + 1;
-  tester.ExpectTotalCount(SubresourceFilterBrowserTest::kEvaluationWallDuration,
-                          time_recorded ? num_subresource_checks : 0);
-  tester.ExpectTotalCount(SubresourceFilterBrowserTest::kEvaluationCPUDuration,
-                          time_recorded ? num_subresource_checks : 0);
-
-  tester.ExpectUniqueSample(
-      SubresourceFilterBrowserTest::kDocumentLoadActivationLevel,
-      static_cast<base::Histogram::Sample>(mojom::ActivationLevel::kEnabled),
-      6);
+  tester.ExpectTotalCount(
+      SubresourceFilterBrowserTestWithV4V5Param::kEvaluationWallDuration,
+      time_recorded ? num_subresource_checks : 0);
+  tester.ExpectTotalCount(
+      SubresourceFilterBrowserTestWithV4V5Param::kEvaluationCPUDuration,
+      time_recorded ? num_subresource_checks : 0);
 }
 
 }  // namespace
 
 #if BUILDFLAG(IS_MAC)
-// TODO(crbug.com/1357773): Flaky on Mac.
+// TODO(crbug.com/40236757): Flaky on Mac.
 #define MAYBE_ExpectPerformanceHistogramsAreRecorded \
   DISABLED_ExpectPerformanceHistogramsAreRecorded
 #else
 #define MAYBE_ExpectPerformanceHistogramsAreRecorded \
   ExpectPerformanceHistogramsAreRecorded
 #endif
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        MAYBE_ExpectPerformanceHistogramsAreRecorded) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -1054,20 +1067,19 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
       tester, true /* expect_performance_measurements */);
 }
 
-class SubresourceFilterBrowserTestWithoutAdTagging
-    : public SubresourceFilterBrowserTest {
+class SubresourceFilterBrowserTestWithV4V5ParamWithoutAdTagging
+    : public SubresourceFilterBrowserTestWithV4V5Param {
  public:
-  SubresourceFilterBrowserTestWithoutAdTagging() {
-    feature_list_.InitAndDisableFeature(kAdTagging);
+  base::flat_set<base::test::FeatureRef> GetSubresourceFilterDisabledFeatures()
+      const override {
+    return {kAdTagging};
   }
-
- private:
-  base::test::ScopedFeatureList feature_list_;
 };
 
 // This test only makes sense when AdTagging is disabled.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTestWithoutAdTagging,
-                       ExpectHistogramsNotRecordedWhenFilteringNotActivated) {
+IN_PROC_BROWSER_TEST_P(
+    SubresourceFilterBrowserTestWithV4V5ParamWithoutAdTagging,
+    ExpectHistogramsNotRecordedWhenFilteringNotActivated) {
   ASSERT_NO_FATAL_FAILURE(SetRulesetToDisallowURLsWithPathSuffix(
       "suffix-that-does-not-match-anything"));
   ResetConfigurationToEnableOnPhishingSites(true /* measure_performance */);
@@ -1095,13 +1107,14 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTestWithoutAdTagging,
   tester.ExpectTotalCount(kEvaluationCPUDuration, 0);
 
   // Although SubresourceFilterAgents still record the activation decision.
-  tester.ExpectUniqueSample(
-      kDocumentLoadActivationLevel,
-      static_cast<base::Histogram::Sample>(mojom::ActivationLevel::kDisabled),
-      6);
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    SubresourceFilterBrowserTestWithV4V5ParamWithoutAdTagging,
+    ::testing::Bool());
+
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        ActivationEnabledOnReload) {
   GURL url(GetTestUrl("subresource_filter/frame_with_included_script.html"));
   ConfigureAsPhishingURL(url);
@@ -1138,7 +1151,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 // navigation we destroy the handle if it is "no longer in use". Since a corrupt
 // or invalid ruleset will never be "in use" (i.e. activate any frame), we
 // destroy the handle after every navigation / frame destruction.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        NewRulesetSameTab_ActivatesSuccessfully) {
   GURL a_url(embedded_test_server()->GetURL(
       "a.com", "/subresource_filter/frame_cross_site_set.html"));
@@ -1155,9 +1168,9 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
 }
 
 // Perform a hash change before the initial URL of a frame is navigated. Ensure
-// we don't trip any DCHECKs (crbug.com/1237409) and that filtering works as
+// we don't trip any CHECKs (crbug.com/40193093) and that filtering works as
 // expected.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterBrowserTestWithV4V5Param,
                        SameDocumentBeforeInitialNavigation) {
   const GURL kInitialUrl = embedded_test_server()->GetURL("/title1.html");
   const GURL kFrameUrl(
@@ -1205,352 +1218,8 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterBrowserTest,
   EXPECT_FALSE(WasParsedScriptElementLoaded(child_rfh));
 }
 
-struct AutomaticLazyLoadFrameBrowserTestParam {
-  bool enable_lazy_ads_and_embeds;
-  bool enable_lazy_embed_urls;
-  bool enable_lazy_embed_with_non_ads_strategy;
-  int skip_frame_count;
-  int number_of_ads;
-  int number_of_embeds;
-  int expected_child_frame_load_count;
-  int expected_lazy_ads_frame_count_in_ukm;
-  int expected_lazy_embeds_frame_count_in_ukm;
-};
-
-class AutomaticLazyLoadFrameBrowserTest
-    : public SubresourceFilterBrowserTest,
-      public ::testing::WithParamInterface<
-          AutomaticLazyLoadFrameBrowserTestParam> {
- public:
-  AutomaticLazyLoadFrameBrowserTest() {
-    if (GetParam().enable_lazy_ads_and_embeds) {
-      // kAutomaticLazyFrameLoadingToEmbedUrls should be enabled when
-      // kAutomaticLazyFrameLoadingToEmbeds is enabled.
-      EXPECT_TRUE(GetParam().enable_lazy_embed_urls);
-      feature_list_.InitWithFeaturesAndParameters(
-          /*enabled_features=*/
-          {{blink::features::kAutomaticLazyFrameLoadingToEmbedUrls,
-            {{"allowed_websites", "http://embed.com|/title1.html"}}},
-           {blink::features::kAutomaticLazyFrameLoadingToAds,
-            {{blink::features::kSkipFrameCountForLazyAds.name,
-              base::NumberToString(GetParam().skip_frame_count)},
-             {blink::features::kTimeoutMillisForLazyAds.name, "10000"}}},
-           {blink::features::kAutomaticLazyFrameLoadingToEmbeds,
-            {{blink::features::kSkipFrameCountForLazyEmbeds.name,
-              base::NumberToString(GetParam().skip_frame_count)},
-             {blink::features::kTimeoutMillisForLazyEmbeds.name, "10000"}}}},
-          /*disabled_features=*/
-          {});
-    } else if (GetParam().enable_lazy_embed_urls) {
-      // kAutomaticLazyFrameLoadingToEmbedUrls should be enabled when we want
-      // to record LazyEmbedFrameCount UKM even when
-      // kAutomaticLazyFrameLoadingToEmbeds is disabled.
-      feature_list_.InitWithFeaturesAndParameters(
-          /*enabled_features=*/
-          {{blink::features::kAutomaticLazyFrameLoadingToEmbedUrls,
-            {{"allowed_websites", "http://embed.com|/title1.html"}}}},
-          /*disabled_features=*/
-          {blink::features::kAutomaticLazyFrameLoadingToAds,
-           blink::features::kAutomaticLazyFrameLoadingToEmbeds});
-    } else if (GetParam().enable_lazy_embed_with_non_ads_strategy) {
-      feature_list_.InitWithFeaturesAndParameters(
-          /*enabled_features=*/
-          {{blink::features::kAutomaticLazyFrameLoadingToEmbedUrls,
-            {{blink::features::
-                  kAutomaticLazyFrameLoadingToEmbedLoadingStrategyParam.name,
-              blink::features::
-                  kAutomaticLazyFrameLoadingToEmbedLoadingStrategyParam
-                      .options[1]
-                      .name}}},
-           {blink::features::kAutomaticLazyFrameLoadingToEmbeds,
-            {{blink::features::kTimeoutMillisForLazyEmbeds.name, "10000"}}}},
-          /**disabled_features=*/{});
-    } else {
-      feature_list_.InitWithFeaturesAndParameters(
-          /*enabled_features=*/
-          {},
-          /*disabled_features=*/
-          {blink::features::kAutomaticLazyFrameLoadingToAds,
-           blink::features::kAutomaticLazyFrameLoadingToEmbeds,
-           blink::features::kAutomaticLazyFrameLoadingToEmbedUrls});
-    }
-  }
-
- protected:
-  void SetUpOnMainThread() override {
-    SubresourceFilterBrowserTest::SetUpOnMainThread();
-    SetRulesetWithRules(
-        {subresource_filter::testing::CreateSuffixRule("ad_iframe_writer.js")});
-  }
-
-  void InitTestPage(content::RenderFrameHost* render_frame_host) {
-    EXPECT_TRUE(ExecJs(render_frame_host, R"(
-      var childFrameLoadCount = 0;
-    )"));
-
-    // Create a vertical space so that lazy iframe loading is not triggered.
-    EXPECT_TRUE(ExecJs(render_frame_host, R"(
-      const element = document.createElement("div");
-      element.style.height = '100000px';
-      document.body.appendChild(element);
-    )"));
-  }
-
-  int GetChildFrameLoadCount(content::RenderFrameHost* render_frame_host) {
-    return EvalJs(render_frame_host, "childFrameLoadCount").ExtractInt();
-  }
-
-  void AddAdIframe(content::RenderFrameHost* render_frame_host,
-                   const GURL& url) {
-    const base::StringPiece script = R"(
-      createAdIframeWithSrc($1).onload = () => {childFrameLoadCount++;};
-    )";
-    EXPECT_TRUE(ExecJs(render_frame_host, content::JsReplace(script, url)));
-  }
-
-  void AddLazyAdIframe(content::RenderFrameHost* render_frame_host,
-                       const GURL& url) {
-    const base::StringPiece script = R"(
-      createLazyAdIframeWithSrc($1).onload = () => {childFrameLoadCount++;};
-    )";
-    EXPECT_TRUE(ExecJs(render_frame_host, content::JsReplace(script, url)));
-  }
-
-  void AddIframe(content::RenderFrameHost* render_frame_host, const GURL& url) {
-    const base::StringPiece script = R"(
-      const iframeElement = document.createElement("iframe");
-      iframeElement.src = $1;
-      iframeElement.onload = () => {childFrameLoadCount++;};
-      document.body.appendChild(iframeElement);
-    )";
-    EXPECT_TRUE(ExecJs(render_frame_host, content::JsReplace(script, url)));
-  }
-
-  void AddLazyIframe(content::RenderFrameHost* render_frame_host,
-                     const GURL& url) {
-    const base::StringPiece script = R"(
-      const iframeElement = document.createElement("iframe");
-      iframeElement.src = $1;
-      iframeElement.loading = 'lazy';
-      iframeElement.onload = () => {childFrameLoadCount++;};
-      document.body.appendChild(iframeElement);
-    )";
-    EXPECT_TRUE(ExecJs(render_frame_host, content::JsReplace(script, url)));
-  }
-
- private:
-  base::test::ScopedFeatureList feature_list_;
-};
-
-IN_PROC_BROWSER_TEST_P(AutomaticLazyLoadFrameBrowserTest, UKM) {
-  // Ensure that the previous page won't be stored in the back/forward cache, so
-  // that the histogram will be recorded when the previous page is unloaded.
-  DisableBackForwardCacheForTesting(
-      web_contents(), content::BackForwardCache::TEST_REQUIRES_NO_CACHING);
-
-  base::RunLoop ukm_loop;
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-  ukm_recorder.SetOnAddEntryCallback(
-      ukm::builders::Blink_AutomaticLazyLoadFrame::kEntryName,
-      ukm_loop.QuitClosure());
-
-  const std::string kMainFrameOrigin = "a_main_frame.com";
-  const GURL kMainFrameUrl(embedded_test_server()->GetURL(
-      kMainFrameOrigin, "/ads_observer/blank_with_adiframe_writer.html"));
-  const GURL kAdUrl(embedded_test_server()->GetURL("ad.com", "/title1.html"));
-  const GURL kEmbedUrl(
-      embedded_test_server()->GetURL("embed.com", "/title1.html"));
-  const GURL kNonAdNonEmbed(
-      embedded_test_server()->GetURL("non_ad_non_embed.com", "/title1.html"));
-  const GURL kSameOriginAdUrl(
-      embedded_test_server()->GetURL(kMainFrameOrigin, "/title1.html"));
-  const GURL kSameOriginEmbedUrl(
-      embedded_test_server()->GetURL(kMainFrameOrigin, "/title1.html"));
-
-  content::RenderFrameHost* render_frame_host =
-      ui_test_utils::NavigateToURL(browser(), kMainFrameUrl);
-  ASSERT_TRUE(render_frame_host);
-
-  InitTestPage(render_frame_host);
-
-  for (int i = 0; i < GetParam().number_of_ads; i++)
-    AddAdIframe(render_frame_host, kAdUrl);
-
-  for (int i = 0; i < GetParam().number_of_embeds; i++)
-    AddIframe(render_frame_host, kEmbedUrl);
-
-  // Add ad-iframe that is already specified to lazy-load which should not be
-  // counted as LazyAdsFrameCount.
-  AddLazyAdIframe(render_frame_host, kEmbedUrl);
-
-  // Add embed-iframe that is already specified to lazy-load which should not be
-  // counted as LazyEmbedFrameCount.
-  AddLazyIframe(render_frame_host, kEmbedUrl);
-
-  // Add iframe that is not detected as an ad-frame nor an embed.
-  AddIframe(render_frame_host, kNonAdNonEmbed);
-
-  // Add same-origin iframe that is specified to lazy-load or ad-frame should
-  // not be counted as LazyAdsFrameCount and LazyEmbedFrameCount.
-  AddAdIframe(render_frame_host, kSameOriginAdUrl);
-  AddIframe(render_frame_host, kSameOriginEmbedUrl);
-
-  EXPECT_TRUE(content::WaitForLoadStop(web_contents()));
-
-  EXPECT_EQ(GetChildFrameLoadCount(render_frame_host),
-            GetParam().expected_child_frame_load_count);
-
-  // LazyEmbeds and LazyAds must be disabled when the page is reloaded.
-  EXPECT_TRUE(render_frame_host->Reload());
-  EXPECT_TRUE(content::WaitForLoadStop(web_contents()));
-  InitTestPage(render_frame_host);
-  AddAdIframe(render_frame_host, kAdUrl);
-  AddIframe(render_frame_host, kEmbedUrl);
-  EXPECT_TRUE(content::WaitForLoadStop(web_contents()));
-  EXPECT_EQ(GetChildFrameLoadCount(render_frame_host), 2);
-
-  // Navigating away from the test page (kMainFrameUrl) causes the document to
-  // be unloaded. That will cause any buffered metrics to be flushed.
-  content::NavigateToURLBlockUntilNavigationsComplete(web_contents(),
-                                                      GURL("about:blank"), 1);
-
-  // Waits until UKM data is recorded.
-  ukm_loop.Run();
-
-  // Checks merged metrics by singular="True".
-  auto merged_entries = ukm_recorder.GetMergedEntriesByName(
-      ukm::builders::Blink_AutomaticLazyLoadFrame::kEntryName);
-  EXPECT_EQ(1u, merged_entries.size());
-  for (auto& entry : merged_entries) {
-    const ukm::mojom::UkmEntry* ukm_entry = entry.second.get();
-    ukm_recorder.ExpectEntrySourceHasUrl(ukm_entry, kMainFrameUrl);
-    ukm::TestAutoSetUkmRecorder::ExpectEntryMetric(
-        ukm_entry, "LazyAdsFrameCount",
-        GetParam().expected_lazy_ads_frame_count_in_ukm);
-    ukm::TestAutoSetUkmRecorder::ExpectEntryMetric(
-        ukm_entry, "LazyEmbedsFrameCount",
-        GetParam().expected_lazy_embeds_frame_count_in_ukm);
-  }
-}
-
-const AutomaticLazyLoadFrameBrowserTestParam
-    kAutomaticLazyLoadFrameBrowserTestParams[] = {
-        {
-            .enable_lazy_ads_and_embeds = false,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 0,
-            .number_of_ads = 2,
-            .number_of_embeds = 0,
-            .expected_child_frame_load_count = 5,
-            .expected_lazy_ads_frame_count_in_ukm = 2,
-            .expected_lazy_embeds_frame_count_in_ukm = 0,
-        },
-        {
-            .enable_lazy_ads_and_embeds = false,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 0,
-            .number_of_ads = 0,
-            .number_of_embeds = 2,
-            .expected_child_frame_load_count = 5,
-            .expected_lazy_ads_frame_count_in_ukm = 0,
-            .expected_lazy_embeds_frame_count_in_ukm = 2,
-        },
-        {
-            .enable_lazy_ads_and_embeds = false,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 0,
-            .number_of_ads = 2,
-            .number_of_embeds = 2,
-            .expected_child_frame_load_count = 7,
-            .expected_lazy_ads_frame_count_in_ukm = 2,
-            .expected_lazy_embeds_frame_count_in_ukm = 2,
-        },
-        {
-            .enable_lazy_ads_and_embeds = false,
-            .enable_lazy_embed_urls = false,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 0,
-            .number_of_ads = 2,
-            .number_of_embeds = 2,
-            .expected_child_frame_load_count = 7,
-            .expected_lazy_ads_frame_count_in_ukm = 2,
-            .expected_lazy_embeds_frame_count_in_ukm = 0,
-        },
-        {
-            .enable_lazy_ads_and_embeds = true,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 0,
-            .number_of_ads = 2,
-            .number_of_embeds = 0,
-            .expected_child_frame_load_count = 3,
-            .expected_lazy_ads_frame_count_in_ukm = 2,
-            .expected_lazy_embeds_frame_count_in_ukm = 0,
-        },
-        {
-            .enable_lazy_ads_and_embeds = true,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 0,
-            .number_of_ads = 0,
-            .number_of_embeds = 2,
-            .expected_child_frame_load_count = 3,
-            .expected_lazy_ads_frame_count_in_ukm = 0,
-            .expected_lazy_embeds_frame_count_in_ukm = 2,
-        },
-        {
-            .enable_lazy_ads_and_embeds = true,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 0,
-            .number_of_ads = 2,
-            .number_of_embeds = 2,
-            .expected_child_frame_load_count = 3,
-            .expected_lazy_ads_frame_count_in_ukm = 2,
-            .expected_lazy_embeds_frame_count_in_ukm = 2,
-        },
-        {
-            .enable_lazy_ads_and_embeds = true,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 1,
-            .number_of_ads = 2,
-            .number_of_embeds = 0,
-            .expected_child_frame_load_count = 4,
-            .expected_lazy_ads_frame_count_in_ukm = 2,
-            .expected_lazy_embeds_frame_count_in_ukm = 0,
-        },
-        {
-            .enable_lazy_ads_and_embeds = true,
-            .enable_lazy_embed_urls = true,
-            .enable_lazy_embed_with_non_ads_strategy = false,
-            .skip_frame_count = 1,
-            .number_of_ads = 0,
-            .number_of_embeds = 2,
-            .expected_child_frame_load_count = 4,
-            .expected_lazy_ads_frame_count_in_ukm = 0,
-            .expected_lazy_embeds_frame_count_in_ukm = 2,
-        },
-        {
-            .enable_lazy_ads_and_embeds = false,
-            .enable_lazy_embed_urls = false,
-            .enable_lazy_embed_with_non_ads_strategy = true,
-            .skip_frame_count = 0,
-            .number_of_ads = 2,
-            .number_of_embeds = 2,
-            .expected_child_frame_load_count = 4,
-            .expected_lazy_ads_frame_count_in_ukm = 2,
-            // number_of_embeds + kNonAdNonEmbed frame added in the test code.
-            .expected_lazy_embeds_frame_count_in_ukm = 3,
-        },
-};
-
-INSTANTIATE_TEST_SUITE_P(
-    All,
-    AutomaticLazyLoadFrameBrowserTest,
-    ::testing::ValuesIn(kAutomaticLazyLoadFrameBrowserTestParams));
+INSTANTIATE_TEST_SUITE_P(All,
+                         SubresourceFilterBrowserTestWithV4V5Param,
+                         ::testing::Bool());
 
 }  // namespace subresource_filter

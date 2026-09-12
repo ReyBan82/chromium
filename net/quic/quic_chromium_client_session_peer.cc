@@ -4,32 +4,33 @@
 
 #include "net/quic/quic_chromium_client_session_peer.h"
 
-#include "net/dns/public/secure_dns_policy.h"
-#include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
+#include <string>
 
+#include "net/base/network_anonymization_key.h"
+#include "net/base/privacy_mode.h"
+#include "net/base/proxy_chain.h"
+#include "net/base/session_usage.h"
+#include "net/dns/public/secure_dns_policy.h"
+#include "net/quic/quic_session_key.h"
+#include "net/socket/socket_tag.h"
+#include "net/third_party/quiche/src/quiche/quic/core/quic_server_id.h"
+#include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 namespace net::test {
 // static
 void QuicChromiumClientSessionPeer::SetHostname(
     QuicChromiumClientSession* session,
     const std::string& hostname) {
   quic::QuicServerId server_id(hostname,
-                               session->session_key_.server_id().port(),
-                               session->session_key_.privacy_mode());
-  session->session_key_ =
-      QuicSessionKey(server_id, SocketTag(), NetworkAnonymizationKey(),
-                     SecureDnsPolicy::kAllow, /*require_dns_https_alpn=*/false);
-}
-
-// static
-uint64_t QuicChromiumClientSessionPeer::GetPushedBytesCount(
-    QuicChromiumClientSession* session) {
-  return session->bytes_pushed_count_;
-}
-
-// static
-uint64_t QuicChromiumClientSessionPeer::GetPushedAndUnclaimedBytesCount(
-    QuicChromiumClientSession* session) {
-  return session->bytes_pushed_and_unclaimed_count_;
+                               session->session_key_.server_id().port());
+  session->session_key_ = QuicSessionKey(
+      server_id, session->session_key_.privacy_mode(),
+      session->session_key_.proxy_chain(),
+      session->session_key_.session_usage(), session->session_key_.socket_tag(),
+      session->session_key_.network_anonymization_key(),
+      session->session_key_.secure_dns_policy(),
+      session->session_key_.require_dns_https_alpn(),
+      session->session_key_.disable_cert_verification_network_fetches(),
+      session->session_key_.target_network());
 }
 
 // static
@@ -37,8 +38,16 @@ QuicChromiumClientStream* QuicChromiumClientSessionPeer::CreateOutgoingStream(
     QuicChromiumClientSession* session) {
   return session->ShouldCreateOutgoingBidirectionalStream()
              ? session->CreateOutgoingReliableStreamImpl(
-                   TRAFFIC_ANNOTATION_FOR_TESTS)
+                   TRAFFIC_ANNOTATION_FOR_TESTS,
+                   /*max_stream_limit_pending_delay=*/base::TimeDelta())
              : nullptr;
+}
+
+// static
+void QuicChromiumClientSessionPeer::SetNumTotalStreamsForTesting(
+    QuicChromiumClientSession* session,
+    size_t num_total_streams) {
+  session->num_total_streams_ = num_total_streams;
 }
 
 // static
@@ -51,6 +60,38 @@ bool QuicChromiumClientSessionPeer::GetSessionGoingAway(
 MigrationCause QuicChromiumClientSessionPeer::GetCurrentMigrationCause(
     QuicChromiumClientSession* session) {
   return session->current_migration_cause_;
+}
+
+// static
+void QuicChromiumClientSessionPeer::DisableConnectionMigration(
+    QuicChromiumClientSession* session) {
+  session->connection_migration_disabled_ = true;
+}
+
+// static
+void QuicChromiumClientSessionPeer::SetDefaultNetwork(
+    QuicChromiumClientSession* session,
+    handles::NetworkHandle network) {
+  session->default_network_ = network;
+}
+
+// static
+bool QuicChromiumClientSessionPeer::IsMigrateBackToDefaultNetworkTimerRunning(
+    QuicChromiumClientSession* session) {
+  return session->migrate_back_to_default_timer_.IsRunning();
+}
+
+// static
+void QuicChromiumClientSessionPeer::OnCryptoHandshakeComplete(
+    QuicChromiumClientSession* session) {
+  session->OnCryptoHandshakeComplete();
+}
+
+// static
+void QuicChromiumClientSessionPeer::SetEchConfigList(
+    QuicChromiumClientSession* session,
+    std::vector<uint8_t> ech_config_list) {
+  session->ech_config_list_ = std::move(ech_config_list);
 }
 
 }  // namespace net::test

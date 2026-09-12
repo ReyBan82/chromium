@@ -6,8 +6,11 @@
 #define HEADLESS_LIB_HEADLESS_CONTENT_MAIN_DELEGATE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <variant>
 
+#include "base/feature_list.h"
 #include "build/build_config.h"
 #include "content/public/app/content_main_delegate.h"
 #include "content/public/browser/content_browser_client.h"
@@ -15,13 +18,17 @@
 #include "headless/lib/headless_content_client.h"
 #include "headless/public/headless_browser.h"
 #include "headless/public/headless_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class CommandLine;
 }  // namespace base
 
 namespace headless {
+
+namespace features {
+// Enables virtual time, which allows for deterministic time control.
+HEADLESS_EXPORT BASE_DECLARE_FEATURE(kVirtualTime);
+}  // namespace features
 
 class HeadlessBrowserImpl;
 
@@ -40,18 +47,27 @@ class HEADLESS_EXPORT HeadlessContentMainDelegate
 
  private:
   // content::ContentMainDelegate implementation:
-  absl::optional<int> BasicStartupComplete() override;
+  std::optional<int> BasicStartupComplete() override;
   void PreSandboxStartup() override;
-  absl::variant<int, content::MainFunctionParams> RunProcess(
+  std::variant<int, content::MainFunctionParams> RunProcess(
       const std::string& process_type,
       content::MainFunctionParams main_function_params) override;
-  absl::optional<int> PreBrowserMain() override;
+  std::optional<int> PreBrowserMain() override;
+#if BUILDFLAG(IS_WIN)
+  bool ShouldHandleConsoleControlEvents() override;
+#endif
   content::ContentClient* CreateContentClient() override;
   content::ContentBrowserClient* CreateContentBrowserClient() override;
   content::ContentUtilityClient* CreateContentUtilityClient() override;
   content::ContentRendererClient* CreateContentRendererClient() override;
 
-  absl::optional<int> PostEarlyInitialization(InvokedIn invoked_in) override;
+  std::optional<int> PostEarlyInitialization(InvokedIn invoked_in) override;
+
+#if defined(HEADLESS_SUPPORT_FIELD_TRIALS)
+  bool ShouldCreateFeatureList(InvokedIn invoked_in) override;
+  bool ShouldInitializeMojo(InvokedIn invoked_in) override;
+#endif
+
 #if BUILDFLAG(IS_MAC)
   void PlatformPreBrowserMain();
 #endif
@@ -72,12 +88,14 @@ class HEADLESS_EXPORT HeadlessContentMainDelegate
   void InitLogging(const base::CommandLine& command_line);
   void InitCrashReporter(const base::CommandLine& command_line);
 
+  // Other clients may retain pointers to browser, so it should come
+  // first.
+  std::unique_ptr<HeadlessBrowserImpl> const browser_;
+
   std::unique_ptr<content::ContentRendererClient> renderer_client_;
   std::unique_ptr<content::ContentBrowserClient> browser_client_;
   std::unique_ptr<content::ContentUtilityClient> utility_client_;
   HeadlessContentClient content_client_;
-
-  std::unique_ptr<HeadlessBrowserImpl> browser_;
 };
 
 }  // namespace headless

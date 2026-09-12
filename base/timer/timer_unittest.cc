@@ -41,13 +41,13 @@ const test::TaskEnvironment::MainThreadType testing_main_threads[] = {
 
 class Receiver {
  public:
-  Receiver() : count_(0) {}
+  Receiver() = default;
   void OnCalled() { count_++; }
   bool WasCalled() { return count_ > 0; }
   int TimesCalled() { return count_; }
 
  private:
-  int count_;
+  int count_ = 0;
 };
 
 // Basic test with same setup as RunTest_OneShotTimers_Cancel below to confirm
@@ -110,7 +110,7 @@ void RunTest_OneShotSelfDeletingTimer(
 
 void RunTest_RepeatingTimer(
     test::TaskEnvironment::MainThreadType main_thread_type,
-    const TimeDelta& delay) {
+    TimeDelta delay) {
   test::TaskEnvironment task_environment(
       test::TaskEnvironment::TimeSource::MOCK_TIME, main_thread_type);
 
@@ -126,7 +126,7 @@ void RunTest_RepeatingTimer(
 
 void RunTest_RepeatingTimer_Cancel(
     test::TaskEnvironment::MainThreadType main_thread_type,
-    const TimeDelta& delay) {
+    TimeDelta delay) {
   test::TaskEnvironment task_environment(
       test::TaskEnvironment::TimeSource::MOCK_TIME, main_thread_type);
 
@@ -246,7 +246,7 @@ TEST(TimerTest, OneShotTimer_CustomTaskRunner) {
   // The timer will use the TestSimpleTaskRunner to schedule its delays.
   timer.SetTaskRunner(task_runner);
   timer.Start(FROM_HERE, Days(1),
-              BindLambdaForTesting([&]() { task_ran = true; }));
+              BindLambdaForTesting([&] { task_ran = true; }));
 
   EXPECT_FALSE(task_ran);
   EXPECT_TRUE(task_runner->HasPendingTask());
@@ -488,8 +488,8 @@ TEST(TimerTest, AbandonedTaskIsCancelled) {
   timer.Start(FROM_HERE, kTestDelay, base::DoNothing());
   EXPECT_EQ(1u, task_environment.GetPendingMainThreadTaskCount());
 
-  // After AbandonAndStop(), the task is correctly treated as cancelled.
-  timer.AbandonAndStop();
+  // After Stop(), the task is correctly treated as cancelled.
+  timer.Stop();
   EXPECT_EQ(0u, task_environment.GetPendingMainThreadTaskCount());
   EXPECT_FALSE(timer.IsRunning());
 }

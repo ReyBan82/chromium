@@ -4,16 +4,14 @@
 
 #include "chrome/browser/ui/views/passwords/move_to_account_store_bubble_view.h"
 
+#include <utility>
+
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
-#include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/browser/ui/views/passwords/password_bubble_view_test_base.h"
 #include "chrome/grit/generated_resources.h"
-#include "chrome/grit/theme_resources.h"
 #include "ui/base/l10n/l10n_util.h"
-#include "ui/events/event_target.h"
-#include "ui/events/event_target_iterator.h"
-#include "ui/views/bubble/bubble_frame_view.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/views/controls/label.h"
 
 class MoveToAccountStoreBubbleViewTest : public PasswordBubbleViewTestBase {
@@ -31,7 +29,7 @@ class MoveToAccountStoreBubbleViewTest : public PasswordBubbleViewTestBase {
   void TearDown() override;
 
  protected:
-  raw_ptr<MoveToAccountStoreBubbleView> view_;
+  raw_ptr<MoveToAccountStoreBubbleView> view_ = nullptr;
 };
 
 void MoveToAccountStoreBubbleViewTest::CreateViewAndShow() {
@@ -39,17 +37,19 @@ void MoveToAccountStoreBubbleViewTest::CreateViewAndShow() {
   signin::IdentityManager* identity_manager =
       IdentityManagerFactory::GetForProfile(profile());
   AccountInfo info = signin::MakePrimaryAccountAvailable(
-      identity_manager, "test@email.com", signin::ConsentLevel::kSync);
+      identity_manager, "test@email.com", signin::ConsentLevel::kSignin);
 
   CreateAnchorViewAndShow();
 
-  view_ = new MoveToAccountStoreBubbleView(web_contents(), anchor_view());
+  view_ = new MoveToAccountStoreBubbleView(web_contents(),
+                                           views::BubbleAnchor(anchor_view()));
   views::BubbleDialogDelegateView::CreateBubble(view_)->Show();
 }
 
 void MoveToAccountStoreBubbleViewTest::TearDown() {
-  view_->GetWidget()->CloseWithReason(
-      views::Widget::ClosedReason::kCloseButtonClicked);
+  std::exchange(view_, nullptr)
+      ->GetWidget()
+      ->CloseWithReason(views::Widget::ClosedReason::kCloseButtonClicked);
 
   PasswordBubbleViewTestBase::TearDown();
 }
@@ -58,12 +58,12 @@ TEST_F(MoveToAccountStoreBubbleViewTest, HasTwoButtons) {
   CreateViewAndShow();
   ASSERT_TRUE(view_->GetOkButton());
   ASSERT_TRUE(view_->GetCancelButton());
-  EXPECT_EQ(
-      l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_MOVE_BUBBLE_OK_BUTTON),
-      view_->GetDialogButtonLabel(ui::DIALOG_BUTTON_OK));
+  EXPECT_EQ(l10n_util::GetStringUTF16(
+                IDS_PASSWORD_MANAGER_SAVE_IN_ACCOUNT_BUBBLE_SAVE_BUTTON),
+            view_->GetDialogButtonLabel(ui::mojom::DialogButton::kOk));
   EXPECT_EQ(
       l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_MOVE_BUBBLE_CANCEL_BUTTON),
-      view_->GetDialogButtonLabel(ui::DIALOG_BUTTON_CANCEL));
+      view_->GetDialogButtonLabel(ui::mojom::DialogButton::kCancel));
 }
 
 TEST_F(MoveToAccountStoreBubbleViewTest, HasDescription) {
@@ -72,6 +72,8 @@ TEST_F(MoveToAccountStoreBubbleViewTest, HasDescription) {
   ASSERT_EQ(view_->children().size(), 2u);
   views::Label* description =
       static_cast<views::Label*>(*view_->children().begin());
-  EXPECT_EQ(l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_MOVE_HINT),
+  EXPECT_EQ(l10n_util::GetStringFUTF16(
+                IDS_PASSWORD_MANAGER_SAVE_IN_ACCOUNT_BUBBLE_DESCRIPTION,
+                u"test@email.com"),
             description->GetText());
 }

@@ -36,7 +36,7 @@ class WebDialogView;
 // 2. Any extra scopes provided through flags.
 // 3. A URL loader that will be used by various OAuth fetchers.
 using HandleGcpwSigninCompleteResult =
-    base::OnceCallback<void(base::Value::Dict,
+    base::OnceCallback<void(base::DictValue,
                             const std::string& additional_mdm_oauth_scopes,
                             scoped_refptr<network::SharedURLLoaderFactory>)>;
 
@@ -58,11 +58,5 @@ views::WebDialogView* ShowCredentialProviderSigninDialog(
     const base::CommandLine& command_line,
     content::BrowserContext* context,
     HandleGcpwSigninCompleteResult signin_complete_handler);
-
-#if BUILDFLAG(CAN_TEST_GCPW_SIGNIN_STARTUP)
-// Allow displaying of GCPW signin dialog when not under the winlogon desktop
-// for testing purposes.
-void EnableGcpwSigninDialogForTesting(bool enable);
-#endif  // BUILDFLAG(CAN_TEST_GCPW_SIGNIN_STARTUP)
 
 #endif  // CHROME_BROWSER_UI_STARTUP_CREDENTIAL_PROVIDER_SIGNIN_DIALOG_WIN_H_

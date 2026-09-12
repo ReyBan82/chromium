@@ -13,9 +13,6 @@ namespace ntp_tiles {
 
 const char kPopularSitesFieldTrialName[] = "NTPPopularSites";
 
-const char kIOSPopularSitesExcludePopularAppsParam[] =
-    "IOSPopularSitesExcludePopularAppsParam";
-
 BASE_FEATURE(kPopularSitesBakedInContentFeature,
              "NTPPopularSitesBakedInContent",
              base::FEATURE_ENABLED_BY_DEFAULT);
@@ -24,25 +21,9 @@ BASE_FEATURE(kNtpMostLikelyFaviconsFromServerFeature,
              "NTPMostLikelyFaviconsFromServer",
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-BASE_FEATURE(kUsePopularSitesSuggestions,
-             "UsePopularSitesSuggestions",
-             base::FEATURE_ENABLED_BY_DEFAULT);
+BASE_FEATURE(kPopularSitesRefreshUs, base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kIOSPopularSitesImprovedSuggestions,
-             "IOSPopularSitesImprovedSuggestions",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-IOSDefaultPopularSitesExperimentBehavior
-GetDefaultPopularSitesExperimentType() {
-  if (base::FeatureList::IsEnabled(kIOSPopularSitesImprovedSuggestions)) {
-    return base::GetFieldTrialParamByFeatureAsBool(
-               kIOSPopularSitesImprovedSuggestions,
-               kIOSPopularSitesExcludePopularAppsParam, /*default_value=*/false)
-               ? IOSDefaultPopularSitesExperimentBehavior::kExcludePopularApps
-               : IOSDefaultPopularSitesExperimentBehavior::kIncludePopularApps;
-  }
-
-  return IOSDefaultPopularSitesExperimentBehavior::kDefault;
-}
+const base::FeatureParam<int> kPopularSitesRefreshUsArm{&kPopularSitesRefreshUs,
+                                                        "arm", 0};
 
 }  // namespace ntp_tiles

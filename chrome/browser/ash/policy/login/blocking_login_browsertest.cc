@@ -8,18 +8,18 @@
 #include "ash/constants/ash_switches.h"
 #include "base/command_line.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/string_util.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
 #include "chrome/browser/ash/login/test/session_manager_state_waiter.h"
-#include "chrome/browser/ash/login/ui/login_display_host.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/profiles/profile_manager_observer.h"
+#include "chrome/browser/ui/ash/login/login_display_host.h"
 #include "chrome/browser/ui/webui/ash/login/gaia_screen_handler.h"
-#include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chromeos/ash/components/install_attributes/install_attributes.h"
 #include "components/policy/core/common/cloud/device_management_service.h"
@@ -82,7 +82,8 @@ struct BlockingLoginTestParam {
 // when we made an entirely different set of network calls on startup. As a
 // result it generates random failures in startup network requests, then waits
 // to see if the profile finishes loading which is not at all what it is
-// intended to test. We need to fix this test or remove it (crbug.com/580537).
+// intended to test. We need to fix this test or remove it
+// (crbug.com/274707332).
 class BlockingLoginTest
     : public ash::OobeBaseTest,
       public ProfileManagerObserver,
@@ -115,9 +116,6 @@ class BlockingLoginTest
   }
 
   void OnProfileAdded(Profile* profile) override {
-    if (ash::ProfileHelper::IsLockScreenAppProfile(profile)) {
-      return;
-    }
     ASSERT_EQ(profile_added_, nullptr);
     profile_added_ = profile;
   }
@@ -154,7 +152,7 @@ class BlockingLoginTest
     std::unique_ptr<net::test_server::HttpResponse> response;
 
     GaiaUrls* gaia = GaiaUrls::GetInstance();
-    if (request.relative_url == gaia->oauth2_token_url().path() ||
+    if (request.relative_url == gaia->oauth2_token_url().GetPath() ||
         base::StartsWith(request.relative_url, kDMRegisterRequest,
                          base::CompareCase::SENSITIVE) ||
         base::StartsWith(request.relative_url, kDMPolicyRequest,
@@ -208,7 +206,7 @@ class BlockingLoginTest
         &BlockingLoginTest::HandleRequest, base::Unretained(this)));
   }
 
-  Profile* profile_added_;
+  raw_ptr<Profile> profile_added_;
 
  private:
   std::vector<std::unique_ptr<net::test_server::HttpResponse>> responses_;
@@ -312,7 +310,7 @@ const BlockingLoginTestParam kBlockinLoginTestCases[] = {
 };
 
 // TODO(poromov): Disabled because it has become flaky due to incorrect mock
-// network requests - re-enable this when https://crbug.com/580537 is fixed.
+// network requests - re-enable this when https://crbug.com/274707332 is fixed.
 INSTANTIATE_TEST_SUITE_P(DISABLED_BlockingLoginTestInstance,
                          BlockingLoginTest,
                          testing::ValuesIn(kBlockinLoginTestCases));

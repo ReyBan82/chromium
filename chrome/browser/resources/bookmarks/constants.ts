@@ -13,6 +13,7 @@ export enum DropPosition {
   BELOW = 4,
 }
 
+// LINT.IfChange(Command)
 /**
  * Commands which can be handled by the CommandManager. This enum is also used
  * for metrics and should be kept in sync with BookmarkManagerCommand in
@@ -46,14 +47,19 @@ export enum Command {
   OPEN_BOOKMARK = 21,
   OPEN_FOLDER = 22,
 
+  OPEN_SPLIT_VIEW = 23,
+
+  OPEN_NEW_GROUP = 24,
+
+  OPEN_ISOLATED = 25,
+
   // Append new values to the end of the enum.
-  MAX_VALUE = 23,
+  MAX_VALUE = 26,
 }
+// LINT.ThenChange(//tools/metrics/histograms/metadata/bookmarks/enums.xml:BookmarkManagerCommand)
 
 /**
- * Where the menu was opened from. This enum is also used for metrics and should
- * be kept in sync with BookmarkManagerMenuSource in enums.xml. Values must
- * never be renumbered or reused.
+ * Where the menu was opened from. Values must never be renumbered or reused.
  */
 export enum MenuSource {
   NONE = 0,
@@ -81,12 +87,12 @@ export const LOCAL_STORAGE_TREE_WIDTH_KEY: string = 'treeWidth';
 
 export const ROOT_NODE_ID: string = '0';
 
-export const BOOKMARKS_BAR_ID: string = '1';
+// The IDs of the heading nodes that may be inserted into the tree.
+export const ACCOUNT_HEADING_NODE_ID: string = 'account_heading';
+export const LOCAL_HEADING_NODE_ID: string = 'local_heading';
 
 export const OPEN_CONFIRMATION_LIMIT: number = 15;
 
-/**
- * Folders that are beneath this depth will be closed by default in the folder
- * tree (where the Bookmarks Bar folder is at depth 0).
- */
-export const FOLDER_OPEN_BY_DEFAULT_DEPTH: number = 1;
+// Maximum allowed length for a bookmark URL and title.
+// Limit to 500KB to match Chrome address bar (Omnibox) behavior.
+export const MAX_BOOKMARK_INPUT_LENGTH: number = 500 * 1024;

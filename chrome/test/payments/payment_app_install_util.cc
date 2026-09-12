@@ -11,13 +11,16 @@
 #include "base/functional/callback.h"
 #include "base/run_loop.h"
 #include "content/public/browser/payment_app_provider.h"
+#include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/supported_delegations.h"
+#include "content/public/browser/web_contents.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
 namespace payments {
+namespace test {
 namespace {
 
 void OnInstallPaymentApp(base::OnceClosure finished,
@@ -31,7 +34,7 @@ void OnInstallPaymentApp(base::OnceClosure finished,
 
 // static
 std::string PaymentAppInstallUtil::InstallPaymentApp(
-    content::WebContents& web_contents,
+    content::RenderFrameHost& initiator_frame,
     net::EmbeddedTestServer& test_server,
     const std::string& hostname,
     const std::string& service_worker_file_path,
@@ -47,7 +50,7 @@ std::string PaymentAppInstallUtil::InstallPaymentApp(
       url::Origin::Create(service_worker_javascript_file_url).Serialize();
 
   return InstallPaymentAppForPaymentMethodIdentifier(
-             web_contents, service_worker_javascript_file_url,
+             initiator_frame, service_worker_javascript_file_url,
              payment_method_identifier, icon_install)
              ? payment_method_identifier
              : std::string();
@@ -55,7 +58,7 @@ std::string PaymentAppInstallUtil::InstallPaymentApp(
 
 // static
 bool PaymentAppInstallUtil::InstallPaymentAppForPaymentMethodIdentifier(
-    content::WebContents& web_contents,
+    content::RenderFrameHost& initiator_frame,
     const GURL& service_worker_javascript_file_url,
     const std::string& payment_method_identifier,
     IconInstall icon_install) {
@@ -68,18 +71,22 @@ bool PaymentAppInstallUtil::InstallPaymentAppForPaymentMethodIdentifier(
       service_worker_javascript_file_url.GetWithoutFilename();
 
   SkBitmap app_icon;
-  if (icon_install == IconInstall::kWithIcon) {
-    constexpr int kBitmapDimension = 16;
+  if (icon_install != IconInstall::kWithoutIcon) {
+    const int kBitmapDimension =
+        icon_install == IconInstall::kWithLargeIcon ? 128 : 16;
     app_icon.allocN32Pixels(kBitmapDimension, kBitmapDimension);
     app_icon.eraseColor(SK_ColorRED);
   }
 
   base::RunLoop run_loop;
   bool success = false;
-  content::PaymentAppProvider::GetOrCreateForWebContents(&web_contents)
+  content::WebContents* web_contents =
+      content::WebContents::FromRenderFrameHost(&initiator_frame);
+  CHECK(web_contents);
+  content::PaymentAppProvider::GetOrCreateForWebContents(web_contents)
       ->InstallPaymentAppForTesting(
           app_icon, service_worker_javascript_file_url, service_worker_scope,
-          payment_method_identifier,
+          payment_method_identifier, initiator_frame.GetGlobalId(),
           base::BindOnce(&OnInstallPaymentApp, run_loop.QuitClosure(),
                          &success));
   run_loop.Run();
@@ -87,4 +94,5 @@ bool PaymentAppInstallUtil::InstallPaymentAppForPaymentMethodIdentifier(
   return success;
 }
 
+}  // namespace test
 }  // namespace payments

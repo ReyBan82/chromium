@@ -9,11 +9,13 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
+#include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
@@ -23,28 +25,23 @@
 #include "media/base/audio_processing.h"
 #include "media/media_buildflags.h"
 #include "media/mojo/mojom/audio_processing.mojom.h"
-#include "mojo/public/cpp/bindings/pending_receiver.h"
-#include "mojo/public/cpp/bindings/pending_remote.h"
-#include "mojo/public/cpp/bindings/receiver.h"
-#include "mojo/public/cpp/bindings/remote.h"
-#include "services/audio/stream_monitor.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "services/audio/loopback_mixin.h"
 
 namespace media {
 class AecdumpRecordingManager;
 class AudioBus;
 class AudioInputStream;
 class AudioManager;
-class Snoopable;
-class UserInputMonitor;
+struct AudioGlitchInfo;
 }  // namespace media
 
 namespace audio {
 class AudioProcessorHandler;
 class AudioCallback;
+class MlModelManager;
 class OutputTapper;
-class DeviceOutputListener;
-class ProcessingAudioFifo;
+class ReferenceSignalProvider;
+class VoiceIsolationHandler;
 
 // Only do power monitoring for non-mobile platforms to save resources.
 #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
@@ -64,31 +61,33 @@ class ProcessingAudioFifo;
 //     InputController::|audio_callback_|::OnData()
 //     -> InputController::OnData()
 //     --> InputController::|audio_processor_handler_|::ProcessCapturedAudio()
-//     ---> InputController::DeliverProcessedAudio()
-//     ----> InputController::|sync_writer_|::Write()
+//     ---> |audio_processor_handler_|::ProcessCapturedAudioInternal()
+//     ----> InputController::DeliverProcessedAudio()
+//     -----> InputController::|sync_writer_|::Write()
 //
 // * With audio processing and a dedicated processing thread:
 //   Audio capture device thread:
 //     InputController::|audio_callback_|::OnData()
 //     -> InputController::OnData()
-//     --> InputController::|processing_fifo_|::PushData()
+//     --> InputController::|audio_processor_handler_|::ProcessCapturedAudio()
+//     ---> |audio_processor_handler_|::|processing_fifo_|::PushData()
 //   Audio processing thread:
-//     ---> InputController::|audio_processor_handler_|::ProcessCapturedAudio()
-//     ----> InputController::DeliverProcessedAudio()
-//     -----> InputController::|sync_writer_|::Write()
+//     ----> |audio_processor_handler_|::ProcessCapturedAudioInternal()
+//     -----> InputController::DeliverProcessedAudio()
+//     ------> InputController::|sync_writer_|::Write()
 //
 //     - InputController::|audio_processor_handler_| changes format from the
 //     AudioInputStream format to |params| provided to
 //     InputController::Create().
 //
-class InputController final : public StreamMonitor {
+class InputController final {
  public:
   // Error codes to make native logging more clear. These error codes are added
   // to generic error strings to provide a higher degree of details.
   // Changing these values can lead to problems when matching native debug
   // logs with the actual cause of error.
   enum ErrorCode {
-    // An unspecified error occured.
+    // An unspecified error occurred.
     UNKNOWN_ERROR = 0,
 
     // Failed to create an audio input stream.
@@ -106,6 +105,25 @@ class InputController final : public StreamMonitor {
 
     // Open failed due to device in use by another app.
     STREAM_OPEN_DEVICE_IN_USE_ERROR,  // = 5
+
+    // Native input stream reports an error. Exact reason differs between
+    // platforms.
+    REFERENCE_STREAM_ERROR,  // = 6
+
+    // Failed to create aec reference stream.
+    REFERENCE_STREAM_CREATE_ERROR,  // = 7
+
+    // Failed to open aec reference stream.
+    REFERENCE_STREAM_OPEN_ERROR,  // = 8
+
+    // Failed to open aec reference stream due to lack of system permissions.
+    REFERENCE_STREAM_OPEN_SYSTEM_PERMISSIONS_ERROR,  // = 9
+
+    // Failed to open aec reference stream due to device in use by another app.
+    REFERENCE_STREAM_OPEN_DEVICE_IN_USE_ERROR,  // = 10
+
+    // Open failed due to the device being removed.
+    STREAM_OPEN_DEVICE_REMOVED_ERROR,  // = 11
   };
 
 #if defined(AUDIO_POWER_MONITORING)
@@ -137,25 +155,25 @@ class InputController final : public StreamMonitor {
     // OnMuted callback has had time to be processed.
     virtual void OnCreated(bool initially_muted) = 0;
     virtual void OnError(ErrorCode error_code) = 0;
-    virtual void OnLog(base::StringPiece) = 0;
+    virtual void OnLog(std::string_view) = 0;
     // Called whenever the muted state of the underlying stream changes.
     virtual void OnMuted(bool is_muted) = 0;
 
    protected:
-    virtual ~EventHandler() {}
+    virtual ~EventHandler() = default;
   };
 
   // A synchronous writer interface used by InputController for
   // synchronous writing.
   class SyncWriter {
    public:
-    virtual ~SyncWriter() {}
+    virtual ~SyncWriter() = default;
 
     // Write certain amount of data from |data|.
     virtual void Write(const media::AudioBus* data,
                        double volume,
-                       bool key_pressed,
-                       base::TimeTicks capture_time) = 0;
+                       base::TimeTicks capture_time,
+                       const media::AudioGlitchInfo& glitch_info) = 0;
 
     // Close this synchronous writer.
     virtual void Close() = 0;
@@ -171,19 +189,19 @@ class InputController final : public StreamMonitor {
   InputController(const InputController&) = delete;
   InputController& operator=(const InputController&) = delete;
 
-  ~InputController() final;
+  ~InputController();
 
   media::AudioInputStream* stream_for_testing() { return stream_; }
 
-  // |user_input_monitor| is used for typing detection and can be NULL.
   static std::unique_ptr<InputController> Create(
       media::AudioManager* audio_manager,
       EventHandler* event_handler,
       SyncWriter* sync_writer,
-      media::UserInputMonitor* user_input_monitor,
-      DeviceOutputListener* device_output_listener,
+      std::unique_ptr<ReferenceSignalProvider> reference_signal_provider,
       media::AecdumpRecordingManager* aecdump_recording_manager,
+      raw_ptr<MlModelManager> ml_model_manager,
       media::mojom::AudioProcessingConfigPtr processing_config,
+      LoopbackMixin::MaybeCreateCallback maybe_create_loopback_mixin_cb,
       const media::AudioParameters& params,
       const std::string& device_id,
       bool agc_is_enabled);
@@ -203,11 +221,8 @@ class InputController final : public StreamMonitor {
   // input device supports echo cancellation.
   void SetOutputDeviceForAec(const std::string& output_device_id);
 
-  // StreamMonitor implementation
-  void OnStreamActive(Snoopable* snoopable) override;
-  void OnStreamInactive(Snoopable* snoopable) override;
-
  private:
+  class StatsReporter;
   friend class InputControllerTestHelper;
 
   // Used to log the result of capture startup.
@@ -227,24 +242,29 @@ class InputController final : public StreamMonitor {
     CAPTURE_STARTUP_OPEN_STREAM_FAILED = 2,
     CAPTURE_STARTUP_NEVER_GOT_DATA = 3,
     CAPTURE_STARTUP_STOPPED_EARLY = 4,
-    CAPTURE_STARTUP_RESULT_MAX = CAPTURE_STARTUP_STOPPED_EARLY,
+    CAPTURE_STARTUP_VOICE_ISOLATION_ERROR = 5,
+    CAPTURE_STARTUP_RESULT_MAX = CAPTURE_STARTUP_VOICE_ISOLATION_ERROR,
   };
+
+  static void LogCaptureStartupResult(StreamType type,
+                                      CaptureStartupResult result);
 
   InputController(EventHandler* event_handler,
                   SyncWriter* sync_writer,
-                  media::UserInputMonitor* user_input_monitor,
-                  DeviceOutputListener* device_output_listener,
-                  media::AecdumpRecordingManager* aecdump_recording_manager,
-                  media::mojom::AudioProcessingConfigPtr processing_config,
-                  const media::AudioParameters& output_params,
-                  const media::AudioParameters& device_params,
                   StreamType type);
 
-  void DoCreate(media::AudioManager* audio_manager,
-                const media::AudioParameters& params,
-                const std::string& device_id,
-                bool enable_agc);
-  void DoReportError();
+  void DoCreate(
+      media::AudioManager* audio_manager,
+      const media::AudioParameters& params,
+      const std::string& device_id,
+      bool enable_agc,
+      LoopbackMixin::MaybeCreateCallback maybe_create_loopback_mixin_cb,
+      media::mojom::AudioProcessingConfigPtr processing_config,
+      const media::AudioParameters& device_params,
+      std::unique_ptr<ReferenceSignalProvider> reference_signal_provider,
+      media::AecdumpRecordingManager* aecdump_recording_manager,
+      raw_ptr<MlModelManager> ml_model_manager);
+  void DoReportError(ErrorCode error_code);
   void DoLogAudioLevels(float level_dbfs, int microphone_volume_percent);
 
 #if defined(AUDIO_POWER_MONITORING)
@@ -256,15 +276,14 @@ class InputController final : public StreamMonitor {
   // Logs the result of creating an InputController.
   void LogCaptureStartupResult(CaptureStartupResult result);
 
-  // Logs whether an error was encountered suring the stream.
+  // Logs whether an error was encountered for the native input stream.
   void LogCallbackError();
 
-  // Called by the stream with log messages.
+  // Called by the native input stream with log messages.
   void LogMessage(const std::string& message);
 
-  // Called on the hw callback thread. Checks for keyboard input if
-  // |user_input_monitor_| is set otherwise returns false.
-  bool CheckForKeyboardInput();
+  // Helper method for creating internal log messages prefixed with "AIC::".
+  void SendLogMessage(const std::string& message);
 
   // Does power monitoring on supported platforms.
   // Called on the hw callback thread.
@@ -277,7 +296,13 @@ class InputController final : public StreamMonitor {
                        float* average_power_dbfs,
                        int* mic_volume_percent);
 
+  // Polls the input stream's mute state when push notifications are not
+  // supported by the platform.
   void CheckMutedState();
+
+  // Deduplicates and forwards mute state changes received through either push
+  // notifications or polling.
+  void OnMuteStateChanged(bool is_muted);
 
   // Called once at first audio callback.
   void ReportIsAlive();
@@ -285,22 +310,39 @@ class InputController final : public StreamMonitor {
   // Receives new input data on the hw callback thread.
   void OnData(const media::AudioBus* source,
               base::TimeTicks capture_time,
-              double volume);
+              double volume,
+              const media::AudioGlitchInfo& glitch_info);
 
 #if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
-  // Called from the constructor. Helper to isolate logic setting up audio
-  // processing components.
+  using DeliverProcessedAudioCallback = base::RepeatingCallback<void(
+      const media::AudioBus& audio_bus,
+      base::TimeTicks audio_capture_time,
+      const media::AudioGlitchInfo& audio_glitch_info)>;
+
+  // Called from DoCreate. Helper to isolate logic setting up audio processing
+  // components.
   void MaybeSetUpAudioProcessing(
       media::mojom::AudioProcessingConfigPtr processing_config,
       const media::AudioParameters& processing_output_params,
       const media::AudioParameters& device_params,
-      DeviceOutputListener* device_output_listener,
-      media::AecdumpRecordingManager* aecdump_recording_manager);
+      std::unique_ptr<ReferenceSignalProvider> reference_signal_provider,
+      media::AecdumpRecordingManager* aecdump_recording_manager,
+      raw_ptr<MlModelManager> ml_model_manager,
+      std::unique_ptr<VoiceIsolationHandler> voice_isolation,
+      DeliverProcessedAudioCallback deliver_processed_audio_callback);
+
+  // Called from DoCreate. Helper to create a VoiceIsolationHandler. It might
+  // return nullptr if the VoiceIsolation component is not created. If created,
+  // `deliver_processed_audio_callback` should be consumed.
+  std::unique_ptr<VoiceIsolationHandler> MaybeCreateVoiceIsolationHandler(
+      raw_ptr<MlModelManager> ml_model_manager,
+      const media::AudioParameters& processing_output_params,
+      DeliverProcessedAudioCallback deliver_processed_audio_callback);
 
   // Used as a callback for |audio_processor_handler_|.
   void DeliverProcessedAudio(const media::AudioBus& audio_bus,
                              base::TimeTicks audio_capture_time,
-                             absl::optional<double> new_volume);
+                             const media::AudioGlitchInfo& glitch_info);
 #endif
 
   static StreamType ParamsToStreamType(const media::AudioParameters& params);
@@ -322,22 +364,17 @@ class InputController final : public StreamMonitor {
 
   StreamType type_;
 
+  // Helper class to report logs and UMA stats for delay and capture glitches.
+  std::unique_ptr<StatsReporter> stats_reporter_;
+
   double max_volume_ = 0.0;
 
 #if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
   // Handles audio processing effects applied to the microphone capture audio.
   std::unique_ptr<AudioProcessorHandler> audio_processor_handler_;
-
-  // Offloads processing captured data to its own real time thread.
-  // Note: Ordering is important, as |processing_fifo_| must be destroyed before
-  // |audio_processing_handler_|.
-  std::unique_ptr<ProcessingAudioFifo> processing_fifo_;
-
   // Manages the |audio_processor_handler_| subscription to output audio.
   std::unique_ptr<OutputTapper> output_tapper_;
 #endif
-
-  const raw_ptr<media::UserInputMonitor, DanglingUntriaged> user_input_monitor_;
 
 #if defined(AUDIO_POWER_MONITORING)
   // Whether the silence state and microphone levels should be checked and sent
@@ -357,7 +394,14 @@ class InputController final : public StreamMonitor {
   base::TimeTicks stream_create_time_;
 
   bool is_muted_ = false;
+
+  // Mute state changes are monitored by either a platform subscription or,
+  // when subscriptions are not supported, the polling timer.
+  std::optional<base::CallbackListSubscription> mute_state_subscription_;
   base::RepeatingTimer check_muted_state_timer_;
+
+  // If configured, used to add chromium playout to the captured audio signal.
+  std::unique_ptr<LoopbackMixin> loopback_mixin_;
 
   // Holds a pointer to the callback object that receives audio data from
   // the lower audio layer. Valid only while 'recording' (between calls to

@@ -6,11 +6,11 @@
 
 #include <utility>
 
-#include "remoting/codec/video_encoder.h"
+#include "base/notimplemented.h"
+#include "remoting/base/fifo_buffer.h"
 #include "remoting/protocol/audio_source.h"
 #include "remoting/protocol/audio_stream.h"
 #include "remoting/protocol/session.h"
-#include "remoting/protocol/video_frame_pump.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capturer.h"
 
 namespace remoting::protocol {
@@ -22,10 +22,6 @@ void FakeVideoStream::SetEventTimestampsSource(
     scoped_refptr<InputEventTimestampsSource> event_timestamps_source) {}
 
 void FakeVideoStream::Pause(bool pause) {}
-
-void FakeVideoStream::SetObserver(Observer* observer) {
-  observer_ = observer;
-}
 
 void FakeVideoStream::SelectSource(webrtc::ScreenId id) {
   selected_source_ = id;
@@ -39,6 +35,8 @@ void FakeVideoStream::SetMouseCursor(
 void FakeVideoStream::SetMouseCursorPosition(
     const webrtc::DesktopVector& position) {}
 
+void FakeVideoStream::SetTargetFramerate(int framerate) {}
+
 webrtc::ScreenId FakeVideoStream::selected_source() const {
   return selected_source_;
 }
@@ -47,8 +45,7 @@ base::WeakPtr<FakeVideoStream> FakeVideoStream::GetWeakPtr() {
   return weak_factory_.GetWeakPtr();
 }
 
-FakeConnectionToClient::FakeConnectionToClient(std::unique_ptr<Session> session)
-    : session_(std::move(session)) {}
+FakeConnectionToClient::FakeConnectionToClient() = default;
 
 FakeConnectionToClient::~FakeConnectionToClient() = default;
 
@@ -56,20 +53,15 @@ void FakeConnectionToClient::SetEventHandler(EventHandler* event_handler) {
   event_handler_ = event_handler;
 }
 
+void FakeConnectionToClient::ApplyNetworkSettings(
+    const NetworkSettings& settings) {
+  network_settings_ = settings;
+}
+
 std::unique_ptr<VideoStream> FakeConnectionToClient::StartVideoStream(
-    const std::string& stream_name,
+    webrtc::ScreenId screen_id,
     std::unique_ptr<DesktopCapturer> desktop_capturer) {
   desktop_capturer_ = std::move(desktop_capturer);
-  if (video_stub_ && video_encode_task_runner_) {
-    std::unique_ptr<VideoEncoder> video_encoder =
-        VideoEncoder::Create(session_->config());
-
-    std::unique_ptr<protocol::VideoFramePump> pump(new protocol::VideoFramePump(
-        video_encode_task_runner_, std::move(desktop_capturer_),
-        std::move(video_encoder), video_stub_));
-    video_feedback_stub_ = pump->video_feedback_stub();
-    return std::move(pump);
-  }
 
   std::unique_ptr<FakeVideoStream> result(new FakeVideoStream());
   last_video_stream_ = result->GetWeakPtr();
@@ -82,22 +74,34 @@ std::unique_ptr<AudioStream> FakeConnectionToClient::StartAudioStream(
   return nullptr;
 }
 
+void FakeConnectionToClient::SetAudioWriter(
+    std::unique_ptr<FifoBufferWriter> writer) {
+  audio_writer_ = std::move(writer);
+}
+
 ClientStub* FakeConnectionToClient::client_stub() {
   return client_stub_;
 }
 
-void FakeConnectionToClient::Disconnect(ErrorCode disconnect_error) {
-  CHECK(is_connected_);
+void FakeConnectionToClient::Start() {}
+
+void FakeConnectionToClient::Disconnect(ErrorCode disconnect_error,
+                                        std::string_view error_details,
+                                        const SourceLocation& error_location) {
+  if (!is_connected_) {
+    return;
+  }
 
   is_connected_ = false;
   disconnect_error_ = disconnect_error;
   if (event_handler_) {
-    event_handler_->OnConnectionClosed(disconnect_error_);
+    event_handler_->OnConnectionClosed(disconnect_error, error_details,
+                                       error_location);
   }
 }
 
-Session* FakeConnectionToClient::session() {
-  return session_.get();
+Transport* FakeConnectionToClient::transport() {
+  return nullptr;
 }
 
 void FakeConnectionToClient::set_clipboard_stub(ClipboardStub* clipboard_stub) {
@@ -118,6 +122,15 @@ PeerConnectionControls* FakeConnectionToClient::peer_connection_controls() {
 
 WebrtcEventLogData* FakeConnectionToClient::rtc_event_log() {
   return nullptr;
+}
+
+base::WeakPtr<ConnectionToClient> FakeConnectionToClient::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
+}
+
+base::WeakPtr<FakeConnectionToClient>
+FakeConnectionToClient::GetWeakPtrForTest() {
+  return weak_factory_.GetWeakPtr();
 }
 
 }  // namespace remoting::protocol

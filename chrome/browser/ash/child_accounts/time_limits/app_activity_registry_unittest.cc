@@ -6,8 +6,10 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "base/unguessable_token.h"
@@ -18,7 +20,6 @@
 #include "chrome/browser/ash/child_accounts/time_limits/app_time_notification_delegate.h"
 #include "chrome/browser/ash/child_accounts/time_limits/app_types.h"
 #include "chrome/browser/ash/child_accounts/time_limits/persisted_app_info.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/views/chrome_views_test_base.h"
 #include "components/prefs/pref_service.h"
@@ -26,12 +27,10 @@
 #include "extensions/common/constants.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/aura/client/window_types.h"
 #include "ui/aura/window.h"
 
-namespace ash {
-namespace app_time {
+namespace ash::app_time {
 
 namespace {
 
@@ -52,7 +51,7 @@ class AppTimeNotificationDelegateMock : public AppTimeNotificationDelegate {
 
   MOCK_METHOD3(ShowAppTimeLimitNotification,
                void(const AppId&,
-                    const absl::optional<base::TimeDelta>&,
+                    const std::optional<base::TimeDelta>&,
                     AppNotification));
 };
 
@@ -87,7 +86,7 @@ class AppActivityRegistryTest : public ChromeViewsTestBase {
   base::UnguessableToken GetInstanceIdForApp(const AppId& app_id);
 
   void SetAppLimit(const AppId& app_id,
-                   const absl::optional<AppLimit>& app_limit);
+                   const std::optional<AppLimit>& app_limit);
 
   void ReInitializeRegistry();
 
@@ -150,7 +149,7 @@ base::UnguessableToken AppActivityRegistryTest::GetInstanceIdForApp(
 
 void AppActivityRegistryTest::SetAppLimit(
     const AppId& app_id,
-    const absl::optional<AppLimit>& app_limit) {
+    const std::optional<AppLimit>& app_limit) {
   registry().SetAppLimit(app_id, app_limit);
   task_environment()->RunUntilIdle();
 }
@@ -452,9 +451,9 @@ TEST_F(AppActivityRegistryTest, LimitChangedForActiveApp) {
 
   EXPECT_TRUE(registry().IsAppActive(kApp1));
   EXPECT_EQ(base::Minutes(0), registry().GetActiveTime(kApp1));
-  EXPECT_EQ(absl::nullopt, registry_test().GetAppLimit(kApp1));
-  EXPECT_EQ(absl::nullopt, registry().GetTimeLimit(kApp1));
-  EXPECT_EQ(absl::nullopt, registry_test().GetTimeLeft(kApp1));
+  EXPECT_EQ(std::nullopt, registry_test().GetAppLimit(kApp1));
+  EXPECT_EQ(std::nullopt, registry().GetTimeLimit(kApp1));
+  EXPECT_EQ(std::nullopt, registry_test().GetTimeLeft(kApp1));
 
   task_environment()->FastForwardBy(base::Minutes(5));
 
@@ -636,8 +635,8 @@ TEST_F(AppActivityRegistryTest, RestoredApplicationInformation) {
   EXPECT_EQ(registry().GetActiveTime(kApp1), active_timedelta);
 
   // Now let's test that the app activity are stored appropriately.
-  const base::Value::List& list =
-      prefs()->GetList(prefs::kPerAppTimeLimitsAppActivities);
+  const base::ListValue& list =
+      prefs()->GetList(ash::prefs::kPerAppTimeLimitsAppActivities);
 
   const std::vector<PersistedAppInfo> app_infos =
       PersistedAppInfo::PersistedAppInfosFromList(
@@ -678,8 +677,8 @@ TEST_F(AppActivityRegistryTest, RemoveUninstalledApplications) {
   registry().OnSuccessfullyReported(base::Time::Now());
 
   // Now let's test that the app activity are stored appropriately.
-  const base::Value::List& list =
-      prefs()->GetList(prefs::kPerAppTimeLimitsAppActivities);
+  const base::ListValue& list =
+      prefs()->GetList(ash::prefs::kPerAppTimeLimitsAppActivities);
 
   const std::vector<PersistedAppInfo> app_infos =
       PersistedAppInfo::PersistedAppInfosFromList(
@@ -687,16 +686,17 @@ TEST_F(AppActivityRegistryTest, RemoveUninstalledApplications) {
           /* include_app_activity_array */ true);
 
   EXPECT_EQ(app_infos.size(), 3u);
-  for (const auto& entry : app_infos)
+  for (const auto& entry : app_infos) {
     EXPECT_EQ(entry.active_times().size(), 0u);
+  }
 
   // kApp1 will still be present since it still has activity.
   registry().OnResetTimeReached(base::Time::Now());
   registry().SaveAppActivity();
   registry().OnSuccessfullyReported(base::Time::Now());
 
-  const base::Value::List& new_list =
-      prefs()->GetList(prefs::kPerAppTimeLimitsAppActivities);
+  const base::ListValue& new_list =
+      prefs()->GetList(ash::prefs::kPerAppTimeLimitsAppActivities);
 
   const std::vector<PersistedAppInfo> final_app_infos =
       PersistedAppInfo::PersistedAppInfosFromList(
@@ -716,7 +716,7 @@ TEST_F(AppActivityRegistryTest, RemoveOldEntries) {
   CreateAppActivityForApp(kApp1, base::Hours(1));
   CreateAppActivityForApp(kApp2, base::Hours(1));
 
-  prefs()->SetInt64(prefs::kPerAppTimeLimitsLastSuccessfulReportTime,
+  prefs()->SetInt64(ash::prefs::kPerAppTimeLimitsLastSuccessfulReportTime,
                     start_time.ToDeltaSinceWindowsEpoch().InMicroseconds());
 
   task_environment()->AdvanceClock(base::Days(30));
@@ -726,8 +726,8 @@ TEST_F(AppActivityRegistryTest, RemoveOldEntries) {
   ReInitializeRegistry();
 
   // Now let's test that the app activity are stored appropriately.
-  const base::Value::List& list =
-      prefs()->GetList(prefs::kPerAppTimeLimitsAppActivities);
+  const base::ListValue& list =
+      prefs()->GetList(ash::prefs::kPerAppTimeLimitsAppActivities);
 
   const std::vector<PersistedAppInfo> app_infos =
       PersistedAppInfo::PersistedAppInfosFromList(
@@ -1057,7 +1057,7 @@ TEST_F(AppActivityRegistryTest, WebAppInstalled) {
 }
 
 TEST_F(AppActivityRegistryTest, AppBlocked) {
-  const AppLimit app1_limit(AppRestriction::kBlocked, absl::nullopt,
+  const AppLimit app1_limit(AppRestriction::kBlocked, std::nullopt,
                             base::Time::Now());
   const std::map<AppId, AppLimit> limits{{kApp1, app1_limit}};
 
@@ -1105,5 +1105,4 @@ TEST_F(AppActivityRegistryTest, GoogleSlidesPaused) {
   CreateAppActivityForApp(kGoogleSlidesApp, base::Hours(1));
 }
 
-}  // namespace app_time
-}  // namespace ash
+}  // namespace ash::app_time

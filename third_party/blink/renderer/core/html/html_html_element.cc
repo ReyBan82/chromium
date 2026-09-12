@@ -28,15 +28,15 @@
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/document_parser.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/html_body_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
-#include "third_party/blink/renderer/core/layout/ng/inline/layout_ng_text_combine.h"
+#include "third_party/blink/renderer/core/layout/layout_text_combine.h"
 #include "third_party/blink/renderer/core/loader/document_loader.h"
 #include "third_party/blink/renderer/core/loader/frame_loader.h"
+#include "third_party/blink/renderer/core/loader/render_blocking_resource_manager.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
@@ -64,6 +64,20 @@ void HTMLHtmlElement::InsertedByParser() {
   }
 }
 
+void HTMLHtmlElement::AttachLayoutTree(AttachContext& context) {
+  HTMLElement::AttachLayoutTree(context);
+  if (PseudoElement* skeleton = GetPseudoElement(kPseudoIdSkeleton)) {
+    skeleton->AttachLayoutTree(context);
+  }
+}
+
+void HTMLHtmlElement::DetachLayoutTree(bool performing_reattach) {
+  HTMLElement::DetachLayoutTree(performing_reattach);
+  if (PseudoElement* skeleton = GetPseudoElement(kPseudoIdSkeleton)) {
+    skeleton->DetachLayoutTree(performing_reattach);
+  }
+}
+
 namespace {
 
 bool NeedsLayoutStylePropagation(const ComputedStyle& layout_style,
@@ -72,21 +86,19 @@ bool NeedsLayoutStylePropagation(const ComputedStyle& layout_style,
          layout_style.Direction() != propagated_style.Direction();
 }
 
-scoped_refptr<const ComputedStyle> CreateLayoutStyle(
-    const ComputedStyle& style,
-    const ComputedStyle& propagated_style) {
+const ComputedStyle& CreateLayoutStyle(const ComputedStyle& style,
+                                       const ComputedStyle& propagated_style) {
   ComputedStyleBuilder builder(style);
   builder.SetDirection(propagated_style.Direction());
   builder.SetWritingMode(propagated_style.GetWritingMode());
   builder.UpdateFontOrientation();
-  return builder.TakeStyle();
+  return *builder.TakeStyle();
 }
 
 }  // namespace
 
-scoped_refptr<const ComputedStyle> HTMLHtmlElement::LayoutStyleForElement(
-    scoped_refptr<const ComputedStyle> style) {
-  DCHECK(style);
+const ComputedStyle& HTMLHtmlElement::LayoutStyleForElement(
+    const ComputedStyle& style) {
   DCHECK(GetDocument().InStyleRecalc());
   DCHECK(GetLayoutObject());
   StyleResolver& resolver = GetDocument().GetStyleResolver();
@@ -96,8 +108,9 @@ scoped_refptr<const ComputedStyle> HTMLHtmlElement::LayoutStyleForElement(
     if (resolver.ShouldStopBodyPropagation(*body_element))
       return style;
     if (const ComputedStyle* body_style = body_element->GetComputedStyle()) {
-      if (NeedsLayoutStylePropagation(*style, *body_style))
-        return CreateLayoutStyle(*style, *body_style);
+      if (NeedsLayoutStylePropagation(style, *body_style)) {
+        return CreateLayoutStyle(style, *body_style);
+      }
     }
   }
   return style;
@@ -120,15 +133,16 @@ void HTMLHtmlElement::PropagateWritingModeAndDirectionFromBody() {
   if (!layout_object)
     return;
 
-  const ComputedStyle* const old_style = layout_object->Style();
-  scoped_refptr<const ComputedStyle> new_style =
-      LayoutStyleForElement(layout_object->Style());
+  const ComputedStyle& old_style = layout_object->StyleRef();
+  const ComputedStyle& new_style =
+      LayoutStyleForElement(layout_object->StyleRef());
 
-  if (old_style == new_style)
+  if (&old_style == &new_style) {
     return;
+  }
 
-  const bool is_orthogonal = old_style->IsHorizontalWritingMode() !=
-                             new_style->IsHorizontalWritingMode();
+  const bool is_orthogonal = old_style.IsHorizontalWritingMode() !=
+                             new_style.IsHorizontalWritingMode();
 
   // We need to propagate the style to text children because the used
   // writing-mode and direction affects text children. Child elements,
@@ -142,14 +156,14 @@ void HTMLHtmlElement::PropagateWritingModeAndDirectionFromBody() {
       continue;
     if (is_orthogonal) {
       // If the old and new writing-modes are orthogonal, reattach the layout
-      // objects to make sure we create or remove any LayoutNGTextCombine.
+      // objects to make sure we create or remove any LayoutTextCombine.
       node->SetNeedsReattachLayoutTree();
       continue;
     }
     auto* const text_combine =
-        DynamicTo<LayoutNGTextCombine>(layout_text->Parent());
-    if (UNLIKELY(text_combine)) {
-      layout_text->SetStyle(text_combine->Style());
+        DynamicTo<LayoutTextCombine>(layout_text->Parent());
+    if (text_combine) [[unlikely]] {
+      layout_text->SetStyle(text_combine->StyleRef());
       continue;
     }
     layout_text->SetStyle(new_style);
@@ -159,6 +173,15 @@ void HTMLHtmlElement::PropagateWritingModeAndDirectionFromBody() {
   // style keeps original style instead.
   // See wm-propagation-body-computed-root.html
   layout_object->SetStyle(new_style);
+
+  // TODO(crbug.com/371033184): We should propagate `writing-mode` and
+  // `direction` to ComputedStyles of pseudo-elements of `this`.
+  // * We can't use Element::RecalcStyle() because it refers to the
+  //   ComputedStyle stored in this element, not `layout_object`.
+  // * We should not copy `writing-mode` and `direction` values of `new_style`
+  //   if `writing-mode` or `direction` is specified explicitly for a pseudo-
+  //   element.
+  // See css/css-writing-modes/wm-propagation-body-{042,047,049,054}.html.
 }
 
 }  // namespace blink

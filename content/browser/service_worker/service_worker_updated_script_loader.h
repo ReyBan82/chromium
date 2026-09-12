@@ -5,6 +5,7 @@
 #ifndef CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_UPDATED_SCRIPT_LOADER_H_
 #define CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_UPDATED_SCRIPT_LOADER_H_
 
+#include "base/byte_size.h"
 #include "base/time/time.h"
 #include "content/browser/service_worker/service_worker_cache_writer.h"
 #include "content/browser/service_worker/url_loader_client_checker.h"
@@ -88,21 +89,17 @@ class CONTENT_EXPORT ServiceWorkerUpdatedScriptLoader final
 
   // network::mojom::URLLoader:
   void FollowRedirect(
-      const std::vector<std::string>& removed_headers,
-      const net::HttpRequestHeaders& modified_headers,
-      const net::HttpRequestHeaders& modified_cors_exempt_headers,
-      const absl::optional<GURL>& new_url) override;
+      network::HttpRequestHeadersUpdateParams headers_update_params,
+      const std::optional<GURL>& new_url) override;
   void SetPriority(net::RequestPriority priority,
                    int32_t intra_priority_value) override;
-  void PauseReadingBodyFromNet() override;
-  void ResumeReadingBodyFromNet() override;
 
   // network::mojom::URLLoaderClient for the network load:
   void OnReceiveEarlyHints(network::mojom::EarlyHintsPtr early_hints) override;
   void OnReceiveResponse(
       network::mojom::URLResponseHeadPtr response_head,
       mojo::ScopedDataPipeConsumerHandle body,
-      absl::optional<mojo_base::BigBuffer> cached_metadata) override;
+      std::optional<mojo_base::BigBuffer> cached_metadata) override;
   void OnReceiveRedirect(
       const net::RedirectInfo& redirect_info,
       network::mojom::URLResponseHeadPtr response_head) override;
@@ -120,7 +117,7 @@ class CONTENT_EXPORT ServiceWorkerUpdatedScriptLoader final
                     base::OnceCallback<void(net::Error)> callback) override;
 
   // Buffer size for reading script data from network.
-  const static uint32_t kReadBufferSize;
+  const static size_t kReadBufferSize;
 
  private:
   class WrappedIOBuffer;
@@ -140,7 +137,7 @@ class CONTENT_EXPORT ServiceWorkerUpdatedScriptLoader final
                  uint32_t bytes_available);
   void OnWriteDataComplete(
       scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer,
-      uint32_t bytes_written,
+      size_t bytes_written,
       net::Error error);
 
   // This is the last method that is called on this class. Notifies the final
@@ -159,12 +156,13 @@ class CONTENT_EXPORT ServiceWorkerUpdatedScriptLoader final
   // If not all data are received, it continues to download from network.
   void OnCacheWriterResumed(
       scoped_refptr<network::MojoToNetPendingBuffer> pending_network_buffer,
-      uint32_t consumed_bytes,
+      base::ByteSize consumed_bytes,
       net::Error error);
 
   const GURL request_url_;
 
   const bool is_main_script_;
+  const bool should_update_policy_container_;
 
   // Loader options to pass to the network loader.
   const uint32_t options_;
@@ -218,7 +216,7 @@ class CONTENT_EXPORT ServiceWorkerUpdatedScriptLoader final
   WriterState body_writer_state_ = WriterState::kNotStarted;
 
   mojo::SimpleWatcher client_producer_watcher_;
-  const base::TimeTicks request_start_;
+  const base::TimeTicks request_start_time_;
   mojo::PendingReceiver<network::mojom::URLLoaderClient>
       pending_network_client_receiver_;
 
@@ -227,10 +225,10 @@ class CONTENT_EXPORT ServiceWorkerUpdatedScriptLoader final
   scoped_refptr<net::IOBuffer> data_to_send_;
 
   // Length of |data_to_send_| in bytes.
-  int data_length_ = 0;
+  size_t data_length_ = 0;
 
   // Length of data in |data_to_send_| already sent to |client_|.
-  int bytes_sent_to_client_ = 0;
+  size_t bytes_sent_to_client_ = 0;
 
   // Run this to notify ServiceWorkerCacheWriter that the observer completed
   // its work. net::OK means all |data_to_send_| has been sent to |client_|.

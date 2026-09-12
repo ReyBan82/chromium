@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "content/renderer/render_thread_impl.h"
-
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,10 +14,10 @@
 #include "base/functional/callback_helpers.h"
 #include "base/memory/discardable_memory.h"
 #include "base/memory/discardable_memory_allocator.h"
-#include "base/memory/madv_free_discardable_memory_allocator_posix.h"
-#include "base/memory/madv_free_discardable_memory_posix.h"
 #include "base/memory/memory_pressure_listener.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/bind.h"
+#include "base/test/run_until.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/discardable_memory/client/client_discardable_shared_memory_manager.h"
@@ -30,10 +28,8 @@
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
 #include "content/public/test/test_utils.h"
-#include "content/renderer/discardable_memory_utils.h"
+#include "content/renderer/render_thread_impl.h"
 #include "content/shell/browser/shell.h"
-#include "gpu/ipc/common/gpu_memory_buffer_impl.h"
-#include "ui/gfx/buffer_format_util.h"
 #include "url/gurl.h"
 
 namespace content {
@@ -89,11 +85,17 @@ class RenderThreadImplDiscardableMemoryBrowserTest : public ContentBrowserTest {
         RenderThreadImpl::current()->GetDiscardableMemoryAllocatorForTest();
   }
 
-  base::DiscardableMemoryAllocator* discardable_memory_allocator_;
+  raw_ptr<base::DiscardableMemoryAllocator> discardable_memory_allocator_;
 };
 
+// TODO(crbug.com/362224383): This test was flaky on Windows ASan bots.
+#if BUILDFLAG(IS_WIN) && defined(ADDRESS_SANITIZER)
+#define MAYBE_LockDiscardableMemory DISABLED_LockDiscardableMemory
+#else
+#define MAYBE_LockDiscardableMemory LockDiscardableMemory
+#endif
 IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
-                       LockDiscardableMemory) {
+                       MAYBE_LockDiscardableMemory) {
   const size_t kSize = 1024 * 1024;  // 1MiB.
 
   std::unique_ptr<base::DiscardableMemory> memory =
@@ -120,20 +122,10 @@ IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
 // See http://crbug.com/667837 for detail.
 #if !(BUILDFLAG(IS_ANDROID) && defined(ADDRESS_SANITIZER))
 IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
-                       // TODO(crbug.com/1065493): Re-enable this test
+                       // TODO(crbug.com/40681859): Re-enable this test
                        DISABLED_DiscardableMemoryAddressSpace) {
   const size_t kLargeSize = 4 * 1024 * 1024;   // 4MiB.
   const size_t kNumberOfInstances = 1024 + 1;  // >4GiB total.
-
-  base::DiscardableMemoryBacking impl = base::GetDiscardableMemoryBacking();
-
-  // TODO(gordonguan): When MADV_FREE DiscardableMemory is discarded, the
-  // backing memory is freed, but remains mapped in memory. It is only
-  // unmapped when the object is destroyed, or on the next Lock() after
-  // discard. Therefore, an abundance of discarded but mapped discardable
-  // memory instances may cause an out-of-memory condition.
-  if (impl != base::DiscardableMemoryBacking::kSharedMemory)
-    return;
 
   std::vector<std::unique_ptr<base::DiscardableMemory>> instances;
   for (size_t i = 0; i < kNumberOfInstances; ++i) {
@@ -148,22 +140,19 @@ IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
 }
 #endif
 
+// TODO(crbug.com/362120461): Flaky on many builders.
 IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
-                       ReleaseFreeDiscardableMemory) {
+                       DISABLED_ReleaseFreeDiscardableMemory_Explicitly) {
   const size_t kSize = 1024 * 1024;  // 1MiB.
-
-  base::DiscardableMemoryBacking impl = base::GetDiscardableMemoryBacking();
 
   std::unique_ptr<base::DiscardableMemory> memory =
       AllocateLockedDiscardableMemory(kSize);
 
   EXPECT_TRUE(memory);
   EXPECT_GE(discardable_memory_allocator()->GetBytesAllocated(), kSize);
-  memory.reset();
 
+  memory.reset();
   EXPECT_EQ(discardable_memory_allocator()->GetBytesAllocated(), 0U);
-  if (impl != base::DiscardableMemoryBacking::kSharedMemory)
-    return;
 
   EXPECT_GE(discardable_memory::DiscardableSharedMemoryManager::Get()
                 ->GetBytesAllocated(),
@@ -173,43 +162,51 @@ IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
       discardable_memory_allocator())
       ->ReleaseFreeMemory();
 
-  // Busy wait for host memory usage to be reduced.
-  base::TimeTicks end = base::TimeTicks::Now() + base::Seconds(5);
-  while (base::TimeTicks::Now() < end) {
-    if (!discardable_memory::DiscardableSharedMemoryManager::Get()
-             ->GetBytesAllocated())
-      break;
-    base::RunLoop().RunUntilIdle();
-  }
-
-  EXPECT_LT(base::TimeTicks::Now(), end);
+  // ReleaseFreeMemory() should result in the allocated bytes dropping to zero
+  // within a shorter time than the RunLoop timeout.
+  EXPECT_TRUE(base::test::RunUntil([]() {
+    return discardable_memory::DiscardableSharedMemoryManager::Get()
+               ->GetBytesAllocated() == 0;
+  }));
 }
 
-// TODO(crbug.com/974850): Flaky on all platforms.
 IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
-                       DISABLED_ReleaseFreeMemory) {
+                       ReleaseFreeDiscardableMemory_ByCriticalPressure) {
   const size_t kSize = 1024 * 1024;  // 1MiB.
 
   std::unique_ptr<base::DiscardableMemory> memory =
       AllocateLockedDiscardableMemory(kSize);
 
   EXPECT_TRUE(memory);
-  memory.reset();
-
   EXPECT_GE(discardable_memory_allocator()->GetBytesAllocated(), kSize);
 
-  // Call RenderThreadImpl::ReleaseFreeMemory through a fake memory pressure
-  // notification.
-  base::MemoryPressureListener::SimulatePressureNotification(
-      base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_CRITICAL);
-  base::RunLoop().RunUntilIdle();
-  RunAllTasksUntilIdle();
+  memory.reset();
+  EXPECT_EQ(discardable_memory_allocator()->GetBytesAllocated(), 0U);
 
-  EXPECT_EQ(0U, discardable_memory_allocator()->GetBytesAllocated());
+  EXPECT_GE(discardable_memory::DiscardableSharedMemoryManager::Get()
+                ->GetBytesAllocated(),
+            kSize);
+
+  // Call RenderThreadImpl::ReleaseFreeMemory through a fake memory pressure
+  // notification. The pressure notification will be handled on the test
+  // main thread, so it is sufficient to RunAllTasksUntilIdle(), after which
+  // the manager should report that the memory has been freed.
+  base::MemoryPressureListener::SimulatePressureNotification(
+      base::MEMORY_PRESSURE_LEVEL_CRITICAL);
+
+  RunAllTasksUntilIdle();
+  EXPECT_EQ(0u, discardable_memory::DiscardableSharedMemoryManager::Get()
+                    ->GetBytesAllocated());
 }
 
+// TODO(crbug.com/364379688): This test is flaky on Windows ASan bots.
+#if BUILDFLAG(IS_WIN) && defined(ADDRESS_SANITIZER)
+#define MAYBE_CheckReleaseMemory DISABLED_CheckReleaseMemory
+#else
+#define MAYBE_CheckReleaseMemory CheckReleaseMemory
+#endif
 IN_PROC_BROWSER_TEST_F(RenderThreadImplDiscardableMemoryBrowserTest,
-                       CheckReleaseMemory) {
+                       MAYBE_CheckReleaseMemory) {
   std::vector<std::unique_ptr<base::DiscardableMemory>> all_memory;
   auto* allocator =
       static_cast<discardable_memory::ClientDiscardableSharedMemoryManager*>(

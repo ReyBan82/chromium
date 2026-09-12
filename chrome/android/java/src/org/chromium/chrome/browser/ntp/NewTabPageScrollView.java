@@ -4,6 +4,7 @@
 
 package org.chromium.chrome.browser.ntp;
 
+
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.util.AttributeSet;
@@ -13,31 +14,34 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
-import android.widget.ScrollView;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.components.browser_ui.widget.FadingEdgeScrollView;
 
 /**
- * Simple wrapper on top of a ScrollView that will acquire focus when tapped.  Ensures the
- * New Tab page receives focus when clicked. This is only used in the Incognito NTP.
+ * Simple wrapper on top of a ScrollView that will acquire focus when tapped. Ensures the New Tab
+ * page receives focus when clicked. This is only used in the Incognito NTP.
  */
-public class NewTabPageScrollView extends ScrollView {
+@NullMarked
+public class NewTabPageScrollView extends FadingEdgeScrollView {
 
-    private GestureDetector mGestureDetector;
+    private final GestureDetector mGestureDetector;
 
-    /**
-     * Constructor needed to inflate from XML.
-     */
+    /** Constructor needed to inflate from XML. */
     public NewTabPageScrollView(Context context, AttributeSet attrs) {
         super(context, attrs);
 
-        mGestureDetector = new GestureDetector(
-                getContext(), new GestureDetector.SimpleOnGestureListener() {
-                    @Override
-                    public boolean onSingleTapUp(MotionEvent e) {
-                        boolean retVal = super.onSingleTapUp(e);
-                        requestFocus();
-                        return retVal;
-                    }
-                });
+        mGestureDetector =
+                new GestureDetector(
+                        getContext(),
+                        new GestureDetector.SimpleOnGestureListener() {
+                            @Override
+                            public boolean onSingleTapUp(MotionEvent e) {
+                                boolean retVal = super.onSingleTapUp(e);
+                                requestFocus();
+                                return retVal;
+                            }
+                        });
     }
 
     @Override
@@ -68,7 +72,7 @@ public class NewTabPageScrollView extends ScrollView {
     public boolean executeKeyEvent(KeyEvent event) {
         // Ignore all key events except arrow keys and spacebar. Otherwise, the ScrollView consumes
         // unwanted events (including the hardware menu button and app-level keyboard shortcuts).
-        // http://crbug.com/308322
+        // http://crbug.com/40337205
         switch (event.getKeyCode()) {
             case KeyEvent.KEYCODE_DPAD_UP:
             case KeyEvent.KEYCODE_DPAD_DOWN:
@@ -81,7 +85,7 @@ public class NewTabPageScrollView extends ScrollView {
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        // Fixes lanscape transitions when unfocusing the URL bar: crbug.com/288546
+        // Fixes lanscape transitions when unfocusing the URL bar: crbug.com/41049674
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN;
         return super.onCreateInputConnection(outAttrs);
     }

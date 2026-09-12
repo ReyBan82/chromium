@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   var {page, session, dp} = await testRunner.startBlank(
       `Tests that evaluating V8-embedder callbacks allows side-effect-free methods. Should not crash.`);
 
@@ -49,8 +49,6 @@
   // Unsafe Command Line API
   await checkHasSideEffect(`monitorEvents()`);
   await checkHasSideEffect(`unmonitorEvents()`);
-  await checkHasNoSideEffect(`monitorEvents.toString()`);
-  await checkHasNoSideEffect(`unmonitorEvents.toString()`);
 
   // Document
   await checkHasNoSideEffect(`document.getElementsByTagName('div')`);

@@ -9,40 +9,9 @@
 #import "base/strings/utf_string_conversions.h"
 #import "ios/web/public/js_messaging/web_frame.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace web {
 
-#pragma mark - WebFramesManagerImpl::Container
-
-WEB_STATE_USER_DATA_KEY_IMPL(WebFramesManagerImpl::Container)
-
-WebFramesManagerImpl::Container::Container(web::WebState* web_state)
-    : web_state_(web_state) {}
-WebFramesManagerImpl::Container::~Container() = default;
-
-WebFramesManagerImpl& WebFramesManagerImpl::Container::ManagerForContentWorld(
-    ContentWorld content_world) {
-  DCHECK_NE(content_world, ContentWorld::kAllContentWorlds);
-
-  auto& manager = managers_[content_world];
-  if (!manager) {
-    manager = base::WrapUnique(new WebFramesManagerImpl());
-  }
-  return *manager.get();
-}
-
 #pragma mark - WebFramesManagerImpl
-
-WebFramesManagerImpl& WebFramesManagerImpl::FromWebState(
-    web::WebState* web_state,
-    ContentWorld content_world) {
-  WebFramesManagerImpl::Container::CreateForWebState(web_state);
-  return WebFramesManagerImpl::Container::FromWebState(web_state)
-      ->ManagerForContentWorld(content_world);
-}
 
 WebFramesManagerImpl::WebFramesManagerImpl() : weak_factory_(this) {}
 
@@ -95,6 +64,16 @@ void WebFramesManagerImpl::RemoveFrameWithId(const std::string& frame_id) {
   web_frames_.erase(frame_id);
 }
 
+void WebFramesManagerImpl::RemoveAllWebFrames() {
+  std::set<std::string> frame_ids;
+  for (const auto& it : web_frames_) {
+    frame_ids.insert(it.first);
+  }
+  for (std::string frame_id : frame_ids) {
+    RemoveFrameWithId(frame_id);
+  }
+}
+
 #pragma mark - WebFramesManager
 
 void WebFramesManagerImpl::AddObserver(Observer* observer) {
@@ -118,10 +97,13 @@ WebFrame* WebFramesManagerImpl::GetMainWebFrame() {
 }
 
 WebFrame* WebFramesManagerImpl::GetFrameWithId(const std::string& frame_id) {
-  DCHECK(!frame_id.empty());
-  auto web_frames_it = web_frames_.find(frame_id);
+  if (frame_id.empty()) {
+    return nullptr;
+  }
+
+  auto web_frames_it = web_frames_.find(base::ToLowerASCII(frame_id));
   return web_frames_it == web_frames_.end() ? nullptr
                                             : web_frames_it->second.get();
 }
 
-}  // namespace
+}  // namespace web

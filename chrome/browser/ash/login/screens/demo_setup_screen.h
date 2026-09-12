@@ -21,7 +21,7 @@ class DemoSetupScreenView;
 // user to setup retail demo mode on the device.
 class DemoSetupScreen : public BaseScreen {
  public:
-  enum class Result { COMPLETED, CANCELED };
+  enum class Result { kCompleted, kCanceled };
 
   static std::string GetResultString(Result result);
 
@@ -42,7 +42,7 @@ class DemoSetupScreen : public BaseScreen {
   // BaseScreen:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   ScreenExitCallback* exit_callback() { return &exit_callback_; }
 

@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 #include "snapshot/cpu_context.h"
+#include "util/linux/pac_helper.h"
 #include "util/numeric/safe_assignment.h"
 
 namespace crashpad {
@@ -51,7 +52,11 @@ class StackReferencesAddressRange : public MemorySnapshot::Delegate {
   template <typename Pointer>
   bool ScanStackForPointers(void* data, size_t size) {
     size_t sp_offset;
-    if (!AssignIfInRange(&sp_offset, stack_pointer_ - stack_->Address())) {
+    // stack_pointer_ might point below the stack region if ProcessReaderLinux
+    // interpreted it as pointing to a guard page.
+    if (stack_pointer_ < stack_->Address()) {
+      sp_offset = 0;
+    } else if (!AssignIfInRange(&sp_offset, stack_pointer_ - stack_->Address())) {
       return false;
     }
     const size_t aligned_sp_offset =
@@ -61,7 +66,8 @@ class StackReferencesAddressRange : public MemorySnapshot::Delegate {
                                             aligned_sp_offset);
     size_t word_count = (size - aligned_sp_offset) / sizeof(Pointer);
     for (size_t index = 0; index < word_count; ++index) {
-      if (words[index] >= low_ && words[index] < high_) {
+      auto word = StripPACBits(words[index]);
+      if (word >= low_ && word < high_) {
         return true;
       }
     }

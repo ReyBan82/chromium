@@ -1,8 +1,8 @@
 config("library_impl_config") {
   # Build targets that contain private-join-and-compute implementation need this
-  # macro to be defined in order to correctly export symbols when is_component_build
-  # is true.
-  # For more info see: base/private_join_and_compute_export.h.
+  # macro to be defined in order to correctly export symbols when
+  # is_component_build is true. For more info see:
+  # base/private_join_and_compute_export.h.
   defines = [ "IS_PRIVATE_COMPUTE_LIBRARY_IMPL" ]
 }
 
@@ -26,19 +26,21 @@ config("private_join_and_compute_config") {
 component("ec_commutative_cipher") {
   public = [
     "//third_party/private-join-and-compute/base/private_join_and_compute_export.h",
+    "crypto/big_num.h",
     "crypto/context.h",
     "crypto/ec_commutative_cipher.h",
     "crypto/ec_group.h",
     "crypto/ec_point.h",
+    "crypto/elgamal.h",
   ]
   sources = [
     "chromium_patch.h",
     "crypto/big_num.cc",
-    "crypto/big_num.h",
     "crypto/context.cc",
     "crypto/ec_commutative_cipher.cc",
     "crypto/ec_group.cc",
     "crypto/ec_point.cc",
+    "crypto/elgamal.cc",
     "crypto/openssl.inc",
     "util/canonical_errors.cc",
     "util/canonical_errors.h",

@@ -4,16 +4,18 @@
 
 #include "components/viz/host/host_display_client.h"
 
+#include "base/logging.h"
+#include "base/notimplemented.h"
+#include "base/notreached.h"
 #include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-
 #if BUILDFLAG(IS_APPLE)
 #include "ui/accelerated_widget_mac/ca_layer_frame_sink.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
+
 #include <utility>
 
 #include "components/viz/common/display/use_layered_window.h"
@@ -38,11 +40,11 @@ mojo::PendingRemote<mojom::DisplayClient> HostDisplayClient::GetBoundRemote(
 
 #if BUILDFLAG(IS_APPLE)
 void HostDisplayClient::OnDisplayReceivedCALayerParams(
-    const gfx::CALayerParams& ca_layer_params) {
+    gfx::CALayerParams ca_layer_params) {
   ui::CALayerFrameSink* ca_layer_frame_sink =
       ui::CALayerFrameSink::FromAcceleratedWidget(widget_);
   if (ca_layer_frame_sink)
-    ca_layer_frame_sink->UpdateCALayerTree(ca_layer_params);
+    ca_layer_frame_sink->UpdateCALayerTree(std::move(ca_layer_params));
   else
     DLOG(WARNING) << "Received frame for non-existent widget.";
 }
@@ -65,12 +67,16 @@ void HostDisplayClient::AddChildWindowToBrowser(
 }
 #endif
 
-// TODO(crbug.com/1052397): Revisit the macro expression once build flag switch
-// of lacros-chrome is complete.
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_LINUX) && BUILDFLAG(SUPPORTS_OZONE_X11)
 void HostDisplayClient::DidCompleteSwapWithNewSize(const gfx::Size& size) {
   NOTIMPLEMENTED();
 }
-#endif
+#endif  // BUILDFLAG(IS_LINUX) && BUILDFLAG(SUPPORTS_OZONE_X11)
+
+#if BUILDFLAG(IS_CHROMEOS)
+void HostDisplayClient::SetPreferredRefreshRate(float refresh_rate) {
+  NOTREACHED();
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace viz

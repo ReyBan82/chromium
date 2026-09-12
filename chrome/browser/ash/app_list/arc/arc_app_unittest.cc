@@ -5,40 +5,34 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "ash/components/arc/arc_prefs.h"
-#include "ash/components/arc/arc_util.h"
-#include "ash/components/arc/metrics/arc_metrics_constants.h"
-#include "ash/components/arc/mojom/app.mojom.h"
-#include "ash/components/arc/mojom/compatibility_mode.mojom.h"
-#include "ash/components/arc/session/arc_service_manager.h"
-#include "ash/components/arc/test/arc_util_test_support.h"
-#include "ash/components/arc/test/fake_app_instance.h"
 #include "ash/constants/ash_switches.h"
 #include "ash/public/cpp/app_list/app_list_config.h"
 #include "ash/public/cpp/shelf_model.h"
-#include "base/containers/contains.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/path_service.h"
-#include "base/ranges/algorithm.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_command_line.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/values.h"
 #include "chrome/browser/apps/app_service/app_icon/app_icon_decoder.h"
 #include "chrome/browser/apps/app_service/app_icon/app_icon_factory.h"
 #include "chrome/browser/apps/app_service/app_icon/app_icon_util.h"
-#include "chrome/browser/apps/app_service/app_icon/arc_icon_once_loader.h"
 #include "chrome/browser/apps/app_service/app_icon/dip_px_util.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
@@ -48,7 +42,6 @@
 #include "chrome/browser/ash/app_list/app_service/app_service_app_item.h"
 #include "chrome/browser/ash/app_list/app_service/app_service_app_model_builder.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_icon.h"
-#include "chrome/browser/ash/app_list/arc/arc_app_icon_factory.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_launcher.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_list_prefs.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_list_prefs_factory.h"
@@ -68,8 +61,12 @@
 #include "chrome/browser/ash/arc/arc_support_host.h"
 #include "chrome/browser/ash/arc/arc_util.h"
 #include "chrome/browser/ash/arc/session/arc_session_manager.h"
+#include "chrome/browser/ash/browser_delegate/browser_controller_impl.h"
+#include "chrome/browser/ash/login/session/user_session_manager.h"
+#include "chrome/browser/ash/login/users/scoped_account_id_annotator.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/extension_service_test_base.h"
+#include "chrome/browser/global_features.h"
 #include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/sync/sync_service_factory.h"
 #include "chrome/browser/ui/ash/shelf/arc_app_shelf_id.h"
@@ -77,38 +74,60 @@
 #include "chrome/browser/ui/ash/shelf/shelf_controller_helper.h"
 #include "chrome/browser/web_applications/test/fake_web_app_provider.h"
 #include "chrome/common/chrome_paths.h"
+#include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
-#include "components/arc/test/fake_intent_helper_instance.h"
+#include "chrome/test/base/testing_profile_manager.h"
+#include "chromeos/ash/components/login/session/session_termination_manager.h"
+#include "chromeos/ash/experiences/arc/app/arc_app_constants.h"
+#include "chromeos/ash/experiences/arc/arc_features.h"
+#include "chromeos/ash/experiences/arc/arc_prefs.h"
+#include "chromeos/ash/experiences/arc/arc_util.h"
+#include "chromeos/ash/experiences/arc/metrics/arc_metrics_constants.h"
+#include "chromeos/ash/experiences/arc/mojom/app.mojom.h"
+#include "chromeos/ash/experiences/arc/mojom/compatibility_mode.mojom.h"
+#include "chromeos/ash/experiences/arc/session/arc_service_manager.h"
+#include "chromeos/ash/experiences/arc/test/arc_util_test_support.h"
+#include "chromeos/ash/experiences/arc/test/fake_app_instance.h"
+#include "chromeos/ash/experiences/arc/test/fake_intent_helper_instance.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "components/services/app_service/public/cpp/app_registry_cache.h"
+#include "components/services/app_service/public/cpp/app_service_registry.h"
 #include "components/services/app_service/public/cpp/app_types.h"
 #include "components/services/app_service/public/cpp/app_update.h"
-#include "components/services/app_service/public/cpp/features.h"
+#include "components/services/app_service/public/cpp/icon_effects.h"
 #include "components/services/app_service/public/cpp/icon_types.h"
 #include "components/services/app_service/public/cpp/intent.h"
 #include "components/services/app_service/public/cpp/intent_util.h"
 #include "components/services/app_service/public/cpp/stub_icon_loader.h"
+#include "components/session_manager/core/session.h"
 #include "components/sync/base/client_tag_hash.h"
-#include "components/sync/driver/sync_service_impl.h"
 #include "components/sync/model/sync_data.h"
 #include "components/sync/protocol/arc_package_specifics.pb.h"
 #include "components/sync/protocol/entity_specifics.pb.h"
+#include "components/sync/service/sync_service_impl.h"
 #include "components/sync/test/fake_sync_change_processor.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/test/test_utils.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest_constants.h"
+#include "services/data_decoder/public/cpp/test_support/in_process_data_decoder.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
+#include "services/network/test/test_url_loader_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/display/test/test_screen.h"
 #include "ui/display/types/display_constants.h"
 #include "ui/events/event_constants.h"
 #include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/geometry/skia_conversions.h"
 #include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/image/image_skia_operations.h"
+#include "ui/gfx/image/image_skia_rep.h"
 #include "ui/gfx/image/image_unittest_util.h"
 
 namespace {
@@ -119,8 +138,6 @@ constexpr char kFrameworkPackageName[] = "android";
 
 constexpr int kFrameworkNycVersion = 25;
 constexpr int kFrameworkPiVersion = 28;
-
-constexpr size_t kMaxSimultaneousIconRequests = 250;
 
 constexpr int kDefaultIconUpdateCount = 1;
 
@@ -145,7 +162,7 @@ class FakeAppIconLoaderDelegate : public AppIconLoaderDelegate {
 
     const std::vector<ui::ResourceScaleFactor>& scale_factors =
         ui::GetSupportedResourceScaleFactors();
-    for (auto& scale_factor : scale_factors) {
+    for (const auto scale_factor : scale_factors) {
       const float scale = ui::GetScaleForResourceScaleFactor(scale_factor);
       if (!image.HasRepresentation(scale))
         return false;
@@ -163,14 +180,17 @@ class FakeAppIconLoaderDelegate : public AppIconLoaderDelegate {
     return true;
   }
 
-  void OnAppImageUpdated(const std::string& app_id,
-                         const gfx::ImageSkia& image) override {
+  void OnAppImageUpdated(
+      const std::string& app_id,
+      const gfx::ImageSkia& image,
+      bool is_placeholder_icon,
+      const std::optional<gfx::ImageSkia>& badge_image) override {
     app_id_ = app_id;
     image_ = image;
 
     const std::vector<ui::ResourceScaleFactor>& scale_factors =
         ui::GetSupportedResourceScaleFactors();
-    for (auto& scale_factor : scale_factors) {
+    for (const auto scale_factor : scale_factors) {
       // Force the icon to be loaded.
       image_.GetRepresentation(
           ui::GetScaleForResourceScaleFactor(scale_factor));
@@ -229,83 +249,7 @@ class FakeAppIconLoaderDelegate : public AppIconLoaderDelegate {
   base::OnceClosure icon_loaded_callback_;
 };
 
-// FakeArcAppIcon is a sub class of ArcAppIcon, to record all ArcAppIcon load
-// icon requests to calculate the max icon loading requests count.
-class FakeArcAppIcon : public ArcAppIcon {
- public:
-  FakeArcAppIcon(content::BrowserContext* context,
-                 const std::string& app_id,
-                 int size_in_dip,
-                 ArcAppIcon::Observer* observer,
-                 ArcAppIcon::IconType icon_type,
-                 std::set<ArcAppIcon*>& arc_app_icon_requests,
-                 size_t& max_arc_app_icon_request_count)
-      : ArcAppIcon(context, app_id, size_in_dip, observer, icon_type),
-        arc_app_icon_requests_(arc_app_icon_requests),
-        max_arc_app_icon_request_count_(max_arc_app_icon_request_count) {}
 
-  ~FakeArcAppIcon() override = default;
-
-  FakeArcAppIcon(const FakeArcAppIcon&) = delete;
-  FakeArcAppIcon& operator=(const FakeArcAppIcon&) = delete;
-
-  void LoadSupportedScaleFactors() override {
-    arc_app_icon_requests_.insert(this);
-    if (max_arc_app_icon_request_count_ < arc_app_icon_requests_.size())
-      max_arc_app_icon_request_count_ = arc_app_icon_requests_.size();
-
-    ArcAppIcon::LoadSupportedScaleFactors();
-  }
-
- private:
-  void LoadForScaleFactor(ui::ResourceScaleFactor scale_factor) override {
-    arc_app_icon_requests_.insert(this);
-    if (max_arc_app_icon_request_count_ < arc_app_icon_requests_.size())
-      max_arc_app_icon_request_count_ = arc_app_icon_requests_.size();
-
-    ArcAppIcon::LoadForScaleFactor(scale_factor);
-  }
-
-  void OnIconRead(
-      std::unique_ptr<ArcAppIcon::ReadResult> read_result) override {
-    arc_app_icon_requests_.erase(this);
-    ArcAppIcon::OnIconRead(std::move(read_result));
-  }
-
-  std::set<ArcAppIcon*>& arc_app_icon_requests_;
-  size_t& max_arc_app_icon_request_count_;
-};
-
-// FakeArcAppIconFactory is a sub class of ArcAppIconFactory, to generate
-// FakeArcAppIcon.
-class FakeArcAppIconFactory : public arc::ArcAppIconFactory {
- public:
-  FakeArcAppIconFactory(std::set<ArcAppIcon*>& arc_app_icon_requests,
-                        size_t& max_arc_app_icon_request_count)
-      : arc::ArcAppIconFactory(),
-        arc_app_icon_requests_(arc_app_icon_requests),
-        max_arc_app_icon_request_count_(max_arc_app_icon_request_count) {}
-
-  ~FakeArcAppIconFactory() override = default;
-
-  FakeArcAppIconFactory(const FakeArcAppIconFactory&) = delete;
-  FakeArcAppIconFactory& operator=(const FakeArcAppIconFactory&) = delete;
-
-  std::unique_ptr<ArcAppIcon> CreateArcAppIcon(
-      content::BrowserContext* context,
-      const std::string& app_id,
-      int size_in_dip,
-      ArcAppIcon::Observer* observer,
-      ArcAppIcon::IconType icon_type) override {
-    return std::make_unique<FakeArcAppIcon>(
-        context, app_id, size_in_dip, observer, icon_type,
-        arc_app_icon_requests_, max_arc_app_icon_request_count_);
-  }
-
- private:
-  std::set<ArcAppIcon*>& arc_app_icon_requests_;
-  size_t& max_arc_app_icon_request_count_;
-};
 
 ArcAppIconDescriptor GetAppListIconDescriptor(
     ui::ResourceScaleFactor scale_factor) {
@@ -314,35 +258,23 @@ ArcAppIconDescriptor GetAppListIconDescriptor(
       scale_factor);
 }
 
-ArcAppIconDescriptor GetAppListIconDescriptor(
-    int dip_size,
-    ui::ResourceScaleFactor scale_factor) {
-  return ArcAppIconDescriptor(dip_size, scale_factor);
-}
-
 bool IsIconCreated(Profile* profile,
                    ArcAppListPrefs* prefs,
                    const std::string& app_id,
                    int dip_size,
                    ui::ResourceScaleFactor scale_factor) {
-  // When the kUnifiedAppServiceIconLoading flag is enabled, the AppService
-  // saves the adaptive icon with the foreground and background icon files, so
-  // we need to check the foreground and background icon files in the AppService
-  // directory.
-  if (base::FeatureList::IsEnabled(apps::kUnifiedAppServiceIconLoading)) {
-    DCHECK(profile);
+  // The AppService saves the adaptive icon with the foreground and background
+  // icon files, so we need to check the foreground and background icon files in
+  // the AppService directory.
+  DCHECK(profile);
 
-    auto foreground_path = apps::GetForegroundIconPath(
-        profile->GetPath(), app_id,
-        apps_util::ConvertDipToPxForScale(dip_size, scale_factor));
-    auto background_path = apps::GetBackgroundIconPath(
-        profile->GetPath(), app_id,
-        apps_util::ConvertDipToPxForScale(dip_size, scale_factor));
-    return apps::IsAdaptiveIcon(foreground_path, background_path);
-  }
-
-  return base::PathExists(prefs->GetIconPath(
-      app_id, GetAppListIconDescriptor(dip_size, scale_factor)));
+  auto foreground_path = apps::GetForegroundIconPath(
+      profile->GetPath(), app_id,
+      apps_util::ConvertDipToPxForScale(dip_size, scale_factor));
+  auto background_path = apps::GetBackgroundIconPath(
+      profile->GetPath(), app_id,
+      apps_util::ConvertDipToPxForScale(dip_size, scale_factor));
+  return apps::IsAdaptiveIcon(foreground_path, background_path);
 }
 
 void WaitForIconCreation(Profile* profile,
@@ -350,22 +282,11 @@ void WaitForIconCreation(Profile* profile,
                          const std::string& app_id,
                          int dip_size,
                          ui::ResourceScaleFactor scale_factor) {
-  if (base::FeatureList::IsEnabled(apps::kUnifiedAppServiceIconLoading)) {
-    // Process pending tasks. This performs multiple thread hops, so we need
-    // to run it continuously until it is resolved.
-    do {
-      content::RunAllTasksUntilIdle();
-    } while (!IsIconCreated(profile, prefs, app_id, dip_size, scale_factor));
-    return;
-  }
-
-  const base::FilePath icon_path = prefs->GetIconPath(
-      app_id, GetAppListIconDescriptor(dip_size, scale_factor));
   // Process pending tasks. This performs multiple thread hops, so we need
   // to run it continuously until it is resolved.
   do {
     content::RunAllTasksUntilIdle();
-  } while (!base::PathExists(icon_path));
+  } while (!IsIconCreated(profile, prefs, app_id, dip_size, scale_factor));
 }
 
 void WaitForIconUpdates(Profile* profile,
@@ -389,7 +310,7 @@ void VerifyIcon(const gfx::ImageSkia& src, const gfx::ImageSkia& dst) {
       ui::GetSupportedResourceScaleFactors();
   ASSERT_EQ(2U, scale_factors.size());
 
-  for (auto& scale_factor : scale_factors) {
+  for (const auto scale_factor : scale_factors) {
     const float scale = ui::GetScaleForResourceScaleFactor(scale_factor);
     ASSERT_TRUE(src.HasRepresentation(scale));
     ASSERT_TRUE(dst.HasRepresentation(scale));
@@ -435,7 +356,6 @@ int GetAppListIconDimensionForScaleFactor(
              2;
     default:
       NOTREACHED();
-      return 0;
   }
 }
 
@@ -450,8 +370,8 @@ ArcAppListPrefs::AppInfo GetAppInfoExpectation(const arc::mojom::AppInfo& app,
       true /* resize_lock_needs_confirmation */,
       ArcAppListPrefs::WindowLayout(), true /* ready */, false /* suspended */,
       launchable /* show_in_launcher*/, false /* shortcut */, launchable,
-      false /* need_fixup */, absl::nullopt /* app_size */,
-      absl::nullopt /* data_size */);
+      false /* need_fixup */, std::nullopt /* app_size */,
+      std::nullopt /* data_size */, app.app_category);
 }
 
 MATCHER_P(ArcPackageInfoIs, package, "") {
@@ -493,27 +413,51 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
   ArcAppModelBuilderTest() = default;
   ArcAppModelBuilderTest(const ArcAppModelBuilderTest&) = delete;
   ArcAppModelBuilderTest& operator=(const ArcAppModelBuilderTest&) = delete;
-  ~ArcAppModelBuilderTest() override {
-    // Release profile file in order to keep right sequence.
-    profile_.reset();
-  }
+  ~ArcAppModelBuilderTest() override = default;
 
   void SetUp() override {
+    TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(
+        test_url_loader_factory_.GetSafeWeakWrapper());
+
     if (GetArcState() == ArcState::ARC_WITHOUT_PLAY_STORE) {
       arc::SetArcAlwaysStartWithoutPlayStoreForTesting();
     }
 
+    browser_controller_.emplace();
     model_ = std::make_unique<ash::ShelfModel>();
 
+    user_session_manager_ = std::make_unique<ash::UserSessionManager>(
+        TestingBrowserProcess::GetGlobal()->local_state(),
+        TestingBrowserProcess::GetGlobal()
+            ->GetFeatures()
+            ->application_locale_storage(),
+        TestingBrowserProcess::GetGlobal()->shared_url_loader_factory(),
+        TestingBrowserProcess::GetGlobal()
+            ->platform_part()
+            ->browser_policy_connector_ash(),
+        TestingBrowserProcess::GetGlobal()
+            ->platform_part()
+            ->component_manager_ash());
+
+    arc_app_test_.set_initialize_real_intent_helper_bridge(true);
+    arc_app_test_.PreProfileSetUp();
+
     extensions::ExtensionServiceTestBase::SetUp();
-    InitializeExtensionService(ExtensionServiceInitParams());
-    service_->Init();
+    {
+      ash::ScopedAccountIdAnnotator annotator(
+          testing_profile_manager()->profile_manager(),
+          session_manager::SessionManager::Get()
+              ->GetPrimarySession()
+              ->account_id());
+      InitializeExtensionService(ExtensionServiceInitParams());
+    }
+    service()->Init();
 
     OnBeforeArcTestSetup();
-    arc_test_.set_initialize_real_intent_helper_bridge(true);
-    arc_test_.SetUp(profile_.get());
 
-    web_app::FakeWebAppProvider::Get(profile_.get())->Start();
+    arc_app_test_.PostProfileSetUp(profile());
+
+    web_app::FakeWebAppProvider::Get(profile())->Start();
     CreateBuilder();
 
     CreateShelfController();
@@ -523,20 +467,27 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
   }
 
   void TearDown() override {
+    user_session_manager_->Shutdown();
     shelf_controller_.reset();
-    arc_test_.TearDown();
+    model_.reset();
+    arc_app_test_.PreProfileTearDown();
     ResetBuilder();
     extensions::ExtensionServiceTestBase::TearDown();
+    arc_app_test_.PostProfileTearDown();
+    user_session_manager_.reset();
+    browser_controller_.reset();
+
+    TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(nullptr);
   }
 
   ArcState GetArcState() const { return GetParam(); }
 
   ChromeShelfController* CreateShelfController() {
-    shelf_controller_ = std::make_unique<ChromeShelfController>(
-        profile_.get(), model_.get(), /*shelf_item_factory=*/nullptr);
-    shelf_controller_->SetProfileForTest(profile_.get());
+    shelf_controller_ =
+        std::make_unique<ChromeShelfController>(profile(), model_.get());
+    shelf_controller_->SetProfileForTest(profile());
     shelf_controller_->SetShelfControllerHelperForTest(
-        std::make_unique<ShelfControllerHelper>(profile_.get()));
+        std::make_unique<ShelfControllerHelper>(profile()));
     shelf_controller_->Init();
     return shelf_controller_.get();
   }
@@ -557,8 +508,8 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
     scoped_callback_ = std::make_unique<
         AppServiceAppModelBuilder::ScopedAppPositionInitCallbackForTest>(
         builder_.get(), base::BindRepeating(&InitAppPosition));
-    builder_->Initialize(nullptr, profile_.get(), model_updater_.get());
-    RemoveNonArcApps(profile_.get(), model_updater_.get());
+    builder_->Initialize(nullptr, profile(), model_updater_.get());
+    RemoveNonArcApps(profile(), model_updater_.get());
   }
 
   void ResetBuilder() {
@@ -616,15 +567,15 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
   }
 
   void ValidateHaveShortcuts(
-      const std::vector<arc::mojom::ShortcutInfo> shortcuts) {
+      const std::vector<arc::mojom::ShortcutInfo>& shortcuts) {
     ValidateHaveAppsAndShortcuts(std::vector<arc::mojom::AppInfoPtr>(),
                                  shortcuts);
   }
 
   void ValidateHaveAppsAndShortcuts(
       const std::vector<arc::mojom::AppInfoPtr>& apps,
-      const std::vector<arc::mojom::ShortcutInfo> shortcuts) {
-    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+      const std::vector<arc::mojom::ShortcutInfo>& shortcuts) {
+    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
     ASSERT_NE(nullptr, prefs);
     const std::vector<std::string> ids = prefs->GetAppIds();
     ASSERT_EQ(apps.size() + shortcuts.size(), ids.size());
@@ -632,7 +583,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
     // In principle, order of items is not defined.
     for (const auto& app : apps) {
       const std::string id = ArcAppTest::GetAppId(*app);
-      EXPECT_TRUE(base::Contains(ids, id));
+      EXPECT_TRUE(std::ranges::contains(ids, id));
       std::unique_ptr<ArcAppListPrefs::AppInfo> app_info = prefs->GetApp(id);
       ASSERT_NE(nullptr, app_info.get());
       EXPECT_EQ(app->name, app_info->name);
@@ -646,7 +597,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
 
     for (auto& shortcut : shortcuts) {
       const std::string id = ArcAppTest::GetAppId(shortcut);
-      EXPECT_TRUE(base::Contains(ids, id));
+      EXPECT_TRUE(std::ranges::contains(ids, id));
       std::unique_ptr<ArcAppListPrefs::AppInfo> app_info = prefs->GetApp(id);
       ASSERT_NE(nullptr, app_info.get());
       EXPECT_EQ(shortcut.name, app_info->name);
@@ -662,7 +613,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
   // Validate that prefs have right packages.
   void ValidateHavePackages(
       const std::vector<arc::mojom::ArcPackageInfoPtr>& packages) {
-    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
     ASSERT_NE(nullptr, prefs);
     const std::vector<std::string> pref_packages =
         prefs->GetPackagesFromPrefs();
@@ -678,6 +629,8 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
       EXPECT_EQ(package->sync, package_info->should_sync);
       EXPECT_EQ(package->vpn_provider, package_info->vpn_provider);
       EXPECT_EQ(package->preinstalled, package_info->preinstalled);
+      EXPECT_EQ(package->game_controls_opt_out,
+                package_info->game_controls_opt_out);
       EXPECT_EQ(package->permission_states, package_info->permissions);
       EXPECT_EQ(package->web_app_info.is_null(),
                 package_info->web_app_info.is_null());
@@ -696,6 +649,15 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
         EXPECT_EQ(package->web_app_info->certificate_sha256_fingerprint,
                   package_info->web_app_info->certificate_sha256_fingerprint);
       }
+      EXPECT_EQ(package->locale_info.is_null(),
+                package_info->locale_info.is_null());
+      if (!package->locale_info.is_null() &&
+          !package_info->locale_info.is_null()) {
+        EXPECT_EQ(package->locale_info->supported_locales,
+                  package_info->locale_info->supported_locales);
+        EXPECT_EQ(package->locale_info->selected_locale,
+                  package_info->locale_info->selected_locale);
+      }
     }
   }
 
@@ -703,7 +665,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
   // opposite state.
   void ValidateAppReadyState(const std::vector<arc::mojom::AppInfoPtr>& apps,
                              bool ready) {
-    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
     ASSERT_NE(nullptr, prefs);
 
     std::vector<std::string> ids = prefs->GetAppIds();
@@ -712,7 +674,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
     // Process requested apps.
     for (auto& app : apps) {
       const std::string id = ArcAppTest::GetAppId(*app);
-      std::vector<std::string>::iterator it_id = base::ranges::find(ids, id);
+      std::vector<std::string>::iterator it_id = std::ranges::find(ids, id);
       ASSERT_NE(it_id, ids.end());
       ids.erase(it_id);
 
@@ -731,9 +693,9 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
 
   // Validate that requested shortcuts have required ready state
   void ValidateShortcutReadyState(
-      const std::vector<arc::mojom::ShortcutInfo> shortcuts,
+      const std::vector<arc::mojom::ShortcutInfo>& shortcuts,
       bool ready) {
-    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
     ASSERT_NE(nullptr, prefs);
     std::vector<std::string> ids = prefs->GetAppIds();
     EXPECT_EQ(ids.size(), GetArcItemCount());
@@ -741,7 +703,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
     // Process requested apps.
     for (auto& shortcut : shortcuts) {
       const std::string id = ArcAppTest::GetAppId(shortcut);
-      std::vector<std::string>::iterator it_id = base::ranges::find(ids, id);
+      std::vector<std::string>::iterator it_id = std::ranges::find(ids, id);
       ASSERT_NE(it_id, ids.end());
       ids.erase(it_id);
 
@@ -758,7 +720,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
 
     const std::vector<ui::ResourceScaleFactor>& scale_factors =
         ui::GetSupportedResourceScaleFactors();
-    for (auto& scale_factor : scale_factors) {
+    for (const auto scale_factor : scale_factors) {
       const float scale = ui::GetScaleForResourceScaleFactor(scale_factor);
       EXPECT_TRUE(image.HasRepresentation(scale));
       const gfx::ImageSkiaRep& representation = image.GetRepresentation(scale);
@@ -772,7 +734,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
 
   // Removes icon request record and allowd re-sending icon request.
   void MaybeRemoveIconRequestRecord(const std::string& app_id) {
-    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
     ASSERT_NE(nullptr, prefs);
 
     prefs->MaybeRemoveIconRequestRecord(app_id);
@@ -796,22 +758,26 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
     return arc::mojom::ArcPackageInfo::New(
         package_name, package_version, 1 /* last_backup_android_id */,
         1 /* last_backup_time */, true /* sync */, false /* system */,
-        false /* vpn_provider */, nullptr /* web_app_info */, absl::nullopt,
+        false /* vpn_provider */, nullptr /* web_app_info */, std::nullopt,
         std::move(permissions) /* permission states */);
   }
 
   void AddPackage(const arc::mojom::ArcPackageInfoPtr& package) {
-    arc_test_.AddPackage(package->Clone());
+    arc_app_test_.AddPackage(package->Clone());
     app_instance()->SendPackageAdded(package->Clone());
   }
 
+  void UpdateTestPackage(const arc::mojom::ArcPackageInfoPtr& package) {
+    arc_app_test_.UpdatePackage(package->Clone());
+  }
+
   void UpdatePackage(const arc::mojom::ArcPackageInfoPtr& package) {
-    arc_test_.UpdatePackage(package->Clone());
+    arc_app_test_.UpdatePackage(package->Clone());
     app_instance()->SendPackageModified(package->Clone());
   }
 
   void RemovePackage(const std::string& package_name) {
-    arc_test_.RemovePackage(package_name);
+    arc_app_test_.RemovePackage(package_name);
     app_instance()->SendPackageUninstalled(package_name);
   }
 
@@ -869,36 +835,41 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
 
   AppListControllerDelegate* controller() { return controller_.get(); }
 
-  TestingProfile* profile() { return profile_.get(); }
-
-  ArcAppTest* arc_test() { return &arc_test_; }
+  ArcAppTest* arc_app_test() { return &arc_app_test_; }
 
   const std::vector<arc::mojom::AppInfoPtr>& fake_apps() const {
-    return arc_test_.fake_apps();
+    return arc_app_test_.fake_apps();
   }
 
   const std::vector<arc::mojom::AppInfoPtr>& fake_default_apps() const {
-    return arc_test_.fake_default_apps();
+    return arc_app_test_.fake_default_apps();
   }
 
   const std::vector<arc::mojom::ArcPackageInfoPtr>& fake_packages() const {
-    return arc_test_.fake_packages();
+    return arc_app_test_.fake_packages();
   }
 
   const std::vector<arc::mojom::ShortcutInfo>& fake_shortcuts() const {
-    return arc_test_.fake_shortcuts();
+    return arc_app_test_.fake_shortcuts();
   }
 
-  arc::FakeAppInstance* app_instance() { return arc_test_.app_instance(); }
+  arc::FakeAppInstance* app_instance() { return arc_app_test_.app_instance(); }
 
   arc::FakeIntentHelperInstance* intent_helper_instance() {
-    return arc_test_.intent_helper_instance();
+    return arc_app_test_.intent_helper_instance();
   }
 
   FakeAppListModelUpdater* model_updater() { return model_updater_.get(); }
 
  private:
-  ArcAppTest arc_test_;
+  network::TestURLLoaderFactory test_url_loader_factory_;
+
+  apps::AppServiceRegistry app_service_registry_;
+  ash::SessionTerminationManager session_termination_manager_;
+  ArcAppTest arc_app_test_;
+  std::unique_ptr<ash::UserSessionManager> user_session_manager_;
+  display::test::TestScreen test_screen_{/*create_dispay=*/true,
+                                         /*register_screen=*/true};
   std::unique_ptr<FakeAppListModelUpdater> model_updater_;
   std::unique_ptr<test::TestAppListControllerDelegate> controller_;
   std::unique_ptr<AppServiceAppModelBuilder> builder_;
@@ -907,6 +878,7 @@ class ArcAppModelBuilderTest : public extensions::ExtensionServiceTestBase,
       scoped_callback_;
   std::unique_ptr<ChromeShelfController> shelf_controller_;
   std::unique_ptr<ash::ShelfModel> model_;
+  std::optional<ash::BrowserControllerImpl> browser_controller_;
 };
 
 class ArcAppModelBuilderRecreate : public ArcAppModelBuilderTest {
@@ -926,22 +898,27 @@ class ArcAppModelBuilderRecreate : public ArcAppModelBuilderTest {
 
   void StartArc() {
     ArcAppListPrefsFactory::GetInstance()->RecreateServiceInstanceForTesting(
-        profile_.get());
-    arc_test()->SetUp(profile_.get());
+        profile());
+    // TODO(crbug.com/454468678): This should be called before profile is
+    // created.
+    arc_app_test()->PreProfileSetUp();
+    arc_app_test()->PostProfileSetUp(profile());
     CreateBuilder();
   }
 
   void StopArc() {
-    apps::ArcAppsFactory::GetInstance()->ShutDownForTesting(profile_.get());
-    arc_test()->TearDown();
-    RemoveArcApps(profile_.get(), model_updater());
+    arc_app_test()->PreProfileTearDown();
+    RemoveArcApps(profile(), model_updater());
+    // TODO(crbug.com/454468678): This should be called after profile is
+    // deleted.
+    arc_app_test()->PostProfileTearDown();
     ResetBuilder();
   }
 
   // ArcAppModelBuilderTest:
   void OnBeforeArcTestSetup() override {
     arc::ArcPackageSyncableServiceFactory::GetInstance()->SetTestingFactory(
-        profile_.get(), BrowserContextKeyedServiceFactory::TestingFactory());
+        profile(), BrowserContextKeyedServiceFactory::TestingFactory());
   }
 };
 
@@ -956,21 +933,17 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
   void SetUp() override {
     ArcAppModelBuilderRecreate::SetUp();
 
-    scoped_decode_request_for_testing_ =
-        std::make_unique<apps::ScopedDecodeRequestForTesting>();
-
-    std::vector<ui::ResourceScaleFactor> supported_scale_factors;
-    supported_scale_factors.push_back(ui::k100Percent);
-    supported_scale_factors.push_back(ui::k200Percent);
     scoped_supported_scale_factors_ =
         std::make_unique<ui::test::ScopedSetSupportedResourceScaleFactors>(
-            supported_scale_factors);
+            std::vector<ui::ResourceScaleFactor>{ui::k100Percent,
+                                                 ui::k200Percent});
   }
 
   void TearDown() override {
     // Clean up any observers added in StartApp(). This is a no-op if we didn't
     // add an observer.
-    arc_test()->arc_app_list_prefs()->RemoveObserver(this);
+    arc_app_test()->arc_app_list_prefs()->RemoveObserver(this);
+    icon_updated_count_ = 0;
     scoped_supported_scale_factors_.reset();
     ArcAppModelBuilderRecreate::TearDown();
   }
@@ -980,11 +953,11 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
   std::string StartApp(int package_version) {
     DCHECK(!fake_apps().empty());
 
-    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
     DCHECK(prefs);
 
     icon_updated_count_ = 0;
-    arc_test()->arc_app_list_prefs()->AddObserver(this);
+    arc_app_test()->arc_app_list_prefs()->AddObserver(this);
 
     std::vector<arc::mojom::AppInfoPtr> apps;
     apps.emplace_back(test_app());
@@ -1023,21 +996,27 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
 
     const std::vector<std::unique_ptr<arc::FakeAppInstance::IconRequest>>&
         icon_requests = app_instance()->icon_requests();
-    ASSERT_EQ(2U, icon_requests.size());
-    ASSERT_TRUE(icon_requests[0]->IsForApp(*apps[0]));
-    ASSERT_TRUE(icon_requests[1]->IsForApp(*apps[0]));
+    // There are 4 requests triggered (2 from restart recovery + 2 from
+    // invalidation).
+    ASSERT_EQ(4u, icon_requests.size());
+    // Verify the two most recent requests.
+    size_t last_idx = icon_requests.size() - 1;
+    size_t prev_idx = icon_requests.size() - 2;
+    ASSERT_TRUE(icon_requests[prev_idx]->IsForApp(*apps[0]));
+    ASSERT_TRUE(icon_requests[last_idx]->IsForApp(*apps[0]));
 
     // testing::UnorderedElementsAre because icon requests could be out of order
     // when going through  base::ThreadPool::PostTaskAndReplyWithResult in
     // ArcAppIcon::LoadForScaleFactor.
-    const std::vector<int> requested_dims = {icon_requests[0]->dimension(),
-                                             icon_requests[1]->dimension()};
+    const std::vector<int> requested_dims = {
+        icon_requests[prev_idx]->dimension(),
+        icon_requests[last_idx]->dimension()};
     ASSERT_THAT(requested_dims,
                 testing::UnorderedElementsAre(
                     GetAppListIconDimensionForScaleFactor(ui::k100Percent),
                     GetAppListIconDimensionForScaleFactor(ui::k200Percent)));
 
-    WaitForIconUpdates(profile_.get(), app_id, expected_update_count);
+    WaitForIconUpdates(profile(), app_id, expected_update_count);
   }
 
   // ArcAppListPrefs::Observer overrides.
@@ -1048,7 +1027,7 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
     if (icon_updated_count_ >= 2) {
       if (icon_update_callback_)
         std::move(icon_update_callback_).Run();
-      ArcAppListPrefs::Get(profile_.get())->RemoveObserver(this);
+      ArcAppListPrefs::Get(profile())->RemoveObserver(this);
     }
   }
 
@@ -1143,7 +1122,7 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
       icon_loader.FetchImage(app_id);
 
       // Wait AppServiceAppItem to generate the bad icon image files.
-      for (auto& scale_factor : scale_factors) {
+      for (const auto scale_factor : scale_factors) {
         // Force the icon to be loaded.
         WaitForIconCreation(
             profile(), ArcAppListPrefs::Get(profile()), app_id,
@@ -1152,7 +1131,7 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
       }
 
       // Wait AppServiceAppIconLoader to generate the bad icon image files.
-      for (auto& scale_factor : scale_factors) {
+      for (const auto scale_factor : scale_factors) {
         // Force the icon to be loaded.
         WaitForIconCreation(profile(), ArcAppListPrefs::Get(profile()), app_id,
                             extension_misc::EXTENSION_ICON_MEDIUM,
@@ -1188,21 +1167,12 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
   }
 
   void RemoveAppsFromIconLoader(std::vector<std::string>& app_ids) {
-    apps::ArcIconOnceLoader& arc_icon_once_loader =
-        apps::ArcAppsFactory::GetForProfile(profile())
-            ->GetArcIconOnceLoaderForTesting();
-    for (const auto& app_id : app_ids) {
-      arc_icon_once_loader.OnAppRemoved(app_id);
-    }
-
     // Update the icon key to fetch the new icon and avoid icon catch,
-    apps_util::IncrementingIconKeyFactory icon_key_factory;
     std::vector<apps::AppPtr> apps;
     for (const auto& app_id : app_ids) {
       auto app = std::make_unique<apps::App>(apps::AppType::kArc, app_id);
       app->icon_key =
-          std::move(*icon_key_factory.CreateIconKey(apps::IconEffects::kNone));
-      app->icon_key->raw_icon_updated = true;
+          apps::IconKey(/*raw_icon_updated=*/true, apps::IconEffects::kNone);
       apps.push_back(std::move(app));
     }
 
@@ -1211,31 +1181,15 @@ class ArcAppModelIconTest : public ArcAppModelBuilderRecreate,
         false /* should_notify_initialized */);
   }
 
-  // Set FakeArcAppIconFactory to use FakeArcAppIcon for Arc app icon loading to
-  // calculate the arc app icon requests number.
-  void SetFakeArcAppIconFactory() {
-    apps::ArcAppsFactory::GetForProfile(profile())
-        ->GetArcIconOnceLoaderForTesting()
-        .SetArcAppIconFactoryForTesting(std::make_unique<FakeArcAppIconFactory>(
-            arc_app_icon_requests_, max_arc_app_icon_request_count_));
-  }
-
   arc::mojom::AppInfoPtr test_app() const { return fake_apps()[0]->Clone(); }
 
-  size_t max_arc_app_icon_request_count() {
-    return max_arc_app_icon_request_count_;
-  }
-
  private:
-  std::unique_ptr<apps::ScopedDecodeRequestForTesting>
-      scoped_decode_request_for_testing_;
+  data_decoder::test::InProcessDataDecoder in_process_data_decoder_;
   std::unique_ptr<ui::test::ScopedSetSupportedResourceScaleFactors>
       scoped_supported_scale_factors_;
   std::unique_ptr<base::RunLoop> run_loop_;
   base::OnceClosure icon_update_callback_;
   int icon_updated_count_;
-  std::set<ArcAppIcon*> arc_app_icon_requests_;
-  size_t max_arc_app_icon_request_count_ = 0;
 };
 
 class ArcDefaultAppTest : public ArcAppModelBuilderRecreate {
@@ -1255,7 +1209,7 @@ class ArcDefaultAppTest : public ArcAppModelBuilderRecreate {
   // ArcAppModelBuilderTest:
   void OnBeforeArcTestSetup() override {
     ArcDefaultAppList::UseTestAppsDirectory();
-    arc_test()->set_wait_default_apps(IsWaitDefaultAppsNeeded());
+    arc_app_test()->set_wait_default_apps(IsWaitDefaultAppsNeeded());
     ArcAppModelBuilderRecreate::OnBeforeArcTestSetup();
   }
 
@@ -1266,20 +1220,16 @@ class ArcDefaultAppTest : public ArcAppModelBuilderRecreate {
                     gfx::ImageSkia& output_image_skia) {
     int size_in_dip =
         ash::SharedAppListConfig::instance().default_grid_icon_dimension();
-    for (auto scale_factor : ui::GetSupportedResourceScaleFactors()) {
+    for (const auto scale_factor : ui::GetSupportedResourceScaleFactors()) {
       base::FilePath file_path = file_paths[scale_factor];
       ASSERT_TRUE(base::PathExists(file_path));
 
-      std::string unsafe_icon_data;
-      ASSERT_TRUE(base::ReadFileToString(file_path, &unsafe_icon_data));
+      std::optional<std::vector<uint8_t>> unsafe_icon_data =
+          base::ReadFileToBytes(file_path);
+      ASSERT_TRUE(unsafe_icon_data);
+      SkBitmap bitmap = gfx::PNGCodec::Decode(unsafe_icon_data.value());
 
       float scale = ui::GetScaleForResourceScaleFactor(scale_factor);
-
-      SkBitmap bitmap;
-      gfx::PNGCodec::Decode(
-          reinterpret_cast<const unsigned char*>(&unsafe_icon_data.front()),
-          unsafe_icon_data.length(), &bitmap);
-
       if (bitmap.width() != roundf(size_in_dip * scale) ||
           bitmap.height() != roundf(size_in_dip * scale)) {
         SkBitmap dst;
@@ -1310,7 +1260,7 @@ class ArcDefaultAppTest : public ArcAppModelBuilderRecreate {
     std::map<int, base::FilePath> foreground_paths;
     std::map<int, base::FilePath> background_paths;
     std::map<float, int> scale_to_size;
-    for (auto scale_factor : ui::GetSupportedResourceScaleFactors()) {
+    for (const auto scale_factor : ui::GetSupportedResourceScaleFactors()) {
       foreground_paths[scale_factor] =
           base_path.Append("arc_default_apps")
               .Append("test_app1")
@@ -1338,7 +1288,7 @@ class ArcDefaultAppTest : public ArcAppModelBuilderRecreate {
                                                           foreground),
         apps::LoadMaskImage(scale_to_size));
 
-    for (auto& scale_factor : ui::GetSupportedResourceScaleFactors()) {
+    for (const auto scale_factor : ui::GetSupportedResourceScaleFactors()) {
       // Force the icon to be loaded.
       output_image_skia.GetRepresentation(
           ui::GetScaleForResourceScaleFactor(scale_factor));
@@ -1374,22 +1324,20 @@ class ArcPlayStoreAppTest : public ArcDefaultAppTest {
   void OnBeforeArcTestSetup() override {
     ArcDefaultAppTest::OnBeforeArcTestSetup();
 
-    base::Value::Dict manifest;
+    base::DictValue manifest;
     manifest.Set(extensions::manifest_keys::kName, "Play Store");
     manifest.Set(extensions::manifest_keys::kVersion, "1");
     manifest.Set(extensions::manifest_keys::kManifestVersion, 2);
     manifest.Set(extensions::manifest_keys::kDescription,
                  "Play Store for testing");
 
-    std::string error;
+    std::u16string error;
     arc_support_host_ = extensions::Extension::Create(
         base::FilePath(), extensions::mojom::ManifestLocation::kUnpacked,
         manifest, extensions::Extension::NO_FLAGS, arc::kPlayStoreAppId,
         &error);
 
-    extensions::ExtensionService* extension_service =
-        extensions::ExtensionSystem::Get(profile_.get())->extension_service();
-    extension_service->AddExtension(arc_support_host_.get());
+    registrar()->AddExtension(arc_support_host_.get());
   }
 
   void SendPlayStoreApp() {
@@ -1423,7 +1371,6 @@ class ArcPlayStoreManagedUserAppTest : public ArcPlayStoreAppTest {
         return false;
       default:
         NOTREACHED();
-        return false;
     }
   }
 
@@ -1432,7 +1379,7 @@ class ArcPlayStoreManagedUserAppTest : public ArcPlayStoreAppTest {
     policy::ProfilePolicyConnector* const connector =
         profile()->GetProfilePolicyConnector();
     connector->OverrideIsManagedForTesting(true);
-    profile()->GetTestingPrefService()->SetManagedPref(
+    testing_profile()->GetTestingPrefService()->SetManagedPref(
         arc::prefs::kArcEnabled,
         std::make_unique<base::Value>(IsEnabledByPolicy()));
 
@@ -1454,11 +1401,149 @@ TEST_P(ArcAppModelBuilderTest, ArcPackagePref) {
   package->last_backup_android_id = 2;
   package->last_backup_time = 2;
   package->preinstalled = true;
+  package->game_controls_opt_out = true;
   AddPackage(package);
   ValidateHavePackages(fake_packages());
 
   // Update web_app_info of the last package to null.
   UpdatePackage(CreatePackage(kTestPackageName4));
+  ValidateHavePackages(fake_packages());
+}
+
+TEST_P(ArcAppModelBuilderTest, ArcPackagePref_PerAppLanguageFlagDisabled) {
+  ValidateHavePackages({});
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndDisableFeature(arc::kPerAppLanguage);
+
+  app_instance()->SendRefreshPackageList(
+      ArcAppTest::ClonePackages(fake_packages()));
+
+  // Update fake_packages to be used as validation.
+  // Even if package was initially sent with localeInfo, the resulting saved
+  // package should not contain localeInfo.
+  // fake_packages[4] is the test package with localeInfo.
+  arc::mojom::ArcPackageInfoPtr updated_package = fake_packages()[4]->Clone();
+  updated_package->locale_info = nullptr;
+  UpdateTestPackage(updated_package);
+
+  ValidateHavePackages(fake_packages());
+}
+
+TEST_P(ArcAppModelBuilderTest, SetAppLocale) {
+  // Setup.
+  SendRefreshAppList(fake_apps());
+  app_instance()->SendRefreshPackageList(
+      ArcAppTest::ClonePackages(fake_packages()));
+  ValidateHavePackages(fake_packages());
+
+  // Update fake_packages to be used as validation.
+  // fake_packages[4] is the test package with localeInfo.
+  arc::mojom::ArcPackageInfoPtr updated_package = fake_packages()[4]->Clone();
+  updated_package->locale_info->selected_locale = "ja";
+  UpdateTestPackage(updated_package);
+
+  // Run.
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
+  ASSERT_NE(nullptr, prefs);
+  prefs->SetAppLocale(fake_packages()[4]->package_name,
+                      fake_packages()[4]->locale_info->selected_locale);
+
+  // Assert.
+  ValidateHavePackages(fake_packages());
+}
+
+TEST_P(ArcAppModelBuilderTest,
+       ArcPackagePref_RejectsArcLocaleUpdateOnMismatch) {
+  // This test simulates changing app locale from ChromeOS settings
+  // (SetAppLocale), and ARC sends outdated package info
+  // (SendRefreshPackageList).
+  // Setup.
+  std::vector<arc::mojom::ArcPackageInfoPtr> outdated_fake_packages =
+      ArcAppTest::ClonePackages(fake_packages());
+  // Update fake_packages to match modified app-locale.
+  // fake_packages[4] is the test package with localeInfo.
+  arc::mojom::ArcPackageInfoPtr updated_package = fake_packages()[4]->Clone();
+  updated_package->locale_info->selected_locale = "ja";
+  UpdateTestPackage(updated_package);
+
+  // App locale should be set to "en".
+  SendRefreshAppList(fake_apps());
+  app_instance()->SendRefreshPackageList(
+      ArcAppTest::ClonePackages(outdated_fake_packages));
+  ValidateHavePackages(outdated_fake_packages);
+
+  // Run.
+  // App locale modified to "ja".
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
+  ASSERT_NE(nullptr, prefs);
+  prefs->SetAppLocale(updated_package->package_name,
+                      updated_package->locale_info->selected_locale);
+  // Re-sends ARC outdated package info
+  app_instance()->SendRefreshPackageList(
+      ArcAppTest::ClonePackages(outdated_fake_packages));
+
+  // Assert.
+  // Outdated package info is rejected, and app locale is still set to "ja".
+  ValidateHavePackages(fake_packages());
+  ASSERT_EQ(1ul, app_instance()->selected_locales().size());
+  ASSERT_EQ(updated_package->locale_info->selected_locale,
+            app_instance()->selected_locale(updated_package->package_name));
+}
+
+TEST_P(ArcAppModelBuilderTest,
+       ArcPackagePref_DontRejectArcLocaleUpdateOnPackageModified) {
+  // Setup.
+  // App locale should be set to "en".
+  SendRefreshAppList(fake_apps());
+  app_instance()->SendRefreshPackageList(
+      ArcAppTest::ClonePackages(fake_packages()));
+  ValidateHavePackages(fake_packages());
+
+  // Run.
+  // App locale modified to "ja".
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
+  ASSERT_NE(nullptr, prefs);
+  // fake_packages[4] is the test package with localeInfo.
+  prefs->SetAppLocale(fake_packages()[4]->package_name,
+                      fake_packages()[4]->locale_info->selected_locale);
+  // Update fake_packages to be used as ARC-modified package and validation.
+  arc::mojom::ArcPackageInfoPtr updated_package = fake_packages()[4]->Clone();
+  updated_package->locale_info->selected_locale = "fr";
+  UpdateTestPackage(updated_package);
+  app_instance()->SendPackageModified(updated_package->Clone());
+
+  // Assert.
+  // ChromeOS set-locale "ja" is overridden by ARC modified-locale "fr".
+  ValidateHavePackages(fake_packages());
+  ASSERT_TRUE(app_instance()->selected_locales().empty());
+}
+
+TEST_P(ArcAppModelBuilderTest, ArcPackagePref_RejectMaliciousAppLocaleTag) {
+  // Setup.
+  SendRefreshAppList(fake_apps());
+  std::vector<arc::mojom::ArcPackageInfoPtr> packages =
+      ArcAppTest::ClonePackages(fake_packages());
+  // Update fake_packages to use malicious locale tag.
+  // fake_packages[4] is the test package with localeInfo.
+  arc::mojom::ArcPackageInfoPtr updated_package = fake_packages()[4]->Clone();
+  updated_package->locale_info->supported_locales.clear();
+  // Add malicious locale tag.
+  updated_package->locale_info->supported_locales.push_back(
+      "+!@#$%^&*()[]{};'");
+  UpdateTestPackage(updated_package);
+
+  // Run.
+  app_instance()->SendRefreshPackageList(
+      ArcAppTest::ClonePackages(fake_packages()));
+
+  // Assert.
+  // Since supported locales will be rejected, we'll have to clear that from the
+  // fake_packages.
+  std::vector<arc::mojom::ArcPackageInfoPtr> expected_packages =
+      ArcAppTest::ClonePackages(fake_packages());
+  arc::mojom::ArcPackageInfoPtr expected_package = fake_packages()[4]->Clone();
+  expected_package->locale_info->supported_locales.clear();
+  UpdateTestPackage(expected_package);
   ValidateHavePackages(fake_packages());
 }
 
@@ -1547,7 +1632,7 @@ TEST_P(ArcAppModelBuilderTest, MultipleRefreshAll) {
 }
 
 TEST_P(ArcAppModelBuilderTest, StopStartServicePreserveApps) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   EXPECT_EQ(0u, GetArcItemCount());
@@ -1559,7 +1644,7 @@ TEST_P(ArcAppModelBuilderTest, StopStartServicePreserveApps) {
   ValidateAppReadyState(fake_apps(), true);
 
   // Stopping service does not delete items. It makes them non-ready.
-  arc_test()->StopArcInstance();
+  arc_app_test()->StopArcInstance();
   // Ids should be the same.
   EXPECT_EQ(ids, prefs->GetAppIds());
   ValidateAppReadyState(fake_apps(), false);
@@ -1569,14 +1654,14 @@ TEST_P(ArcAppModelBuilderTest, StopStartServicePreserveApps) {
   ValidateAppReadyState(fake_apps(), false);
 
   // Refreshing app list makes apps available.
-  arc_test()->RestartArcInstance();
+  arc_app_test()->RestartArcInstance();
   SendRefreshAppList(fake_apps());
   EXPECT_EQ(ids, prefs->GetAppIds());
   ValidateAppReadyState(fake_apps(), true);
 }
 
 TEST_P(ArcAppModelBuilderTest, StopStartServicePreserveShortcuts) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   EXPECT_EQ(0u, GetArcItemCount());
@@ -1588,7 +1673,7 @@ TEST_P(ArcAppModelBuilderTest, StopStartServicePreserveShortcuts) {
   ValidateShortcutReadyState(fake_shortcuts(), true);
 
   // Stopping service does not delete items. It makes them non-ready.
-  arc_test()->StopArcInstance();
+  arc_app_test()->StopArcInstance();
   // Ids should be the same.
   EXPECT_EQ(ids, prefs->GetAppIds());
   ValidateShortcutReadyState(fake_shortcuts(), false);
@@ -1598,14 +1683,14 @@ TEST_P(ArcAppModelBuilderTest, StopStartServicePreserveShortcuts) {
   ValidateShortcutReadyState(fake_shortcuts(), false);
 
   // Refreshing app list makes apps available.
-  arc_test()->RestartArcInstance();
+  arc_app_test()->RestartArcInstance();
   SendRefreshAppList(std::vector<arc::mojom::AppInfoPtr>());
   EXPECT_EQ(ids, prefs->GetAppIds());
   ValidateShortcutReadyState(fake_shortcuts(), true);
 }
 
 TEST_P(ArcAppModelBuilderTest, RestartPreserveApps) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   // Start from scratch and fill with apps.
@@ -1615,81 +1700,16 @@ TEST_P(ArcAppModelBuilderTest, RestartPreserveApps) {
   ValidateAppReadyState(fake_apps(), true);
 
   // This recreates model and ARC apps will be read from prefs.
-  arc_test()->StopArcInstance();
+  arc_app_test()->StopArcInstance();
   CreateBuilder();
   ValidateAppReadyState(fake_apps(), false);
-}
-
-TEST_P(ArcAppModelBuilderTest, IsUnknownBasic) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
-  ASSERT_NE(nullptr, prefs);
-  EXPECT_TRUE(prefs->IsUnknownPackage("com.package.notreallyapackage"));
-}
-
-TEST_P(ArcDefaultAppTest, IsUnknownDefaultApps) {
-  // Note we run as a default test here so that we can use the fake default apps
-  // list.
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
-  ASSERT_NE(nullptr, prefs);
-  for (const auto& app : fake_default_apps())
-    EXPECT_FALSE(prefs->IsUnknownPackage(app->package_name));
-}
-
-TEST_P(ArcAppModelBuilderTest, IsUnknownSyncTest) {
-  app_instance()->SendRefreshPackageList(
-      ArcAppTest::ClonePackages(fake_packages()));
-
-  const std::string sync_package_name = "com.google.fakesyncpack";
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
-  ASSERT_NE(nullptr, prefs);
-
-  // Check that this is indeed unknown before adding to sync.
-  ASSERT_TRUE(prefs->IsUnknownPackage(sync_package_name));
-
-  // Add to sync, then check unknown.
-  auto data_list = syncer::SyncDataList();
-  sync_pb::EntitySpecifics specifics;
-  specifics.mutable_arc_package()->set_package_name(sync_package_name);
-  data_list.push_back(syncer::SyncData::CreateRemoteData(
-      specifics, syncer::ClientTagHash::FromHashed("unused")));
-  auto* sync_service = arc::ArcPackageSyncableServiceFactory::GetInstance()
-                           ->GetForBrowserContext(profile_.get());
-  ASSERT_NE(nullptr, sync_service);
-  sync_service->MergeDataAndStartSyncing(
-      syncer::ARC_PACKAGE, data_list,
-      std::make_unique<syncer::FakeSyncChangeProcessor>());
-
-  EXPECT_FALSE(prefs->IsUnknownPackage(sync_package_name));
-}
-
-TEST_P(ArcAppModelBuilderTest, IsUnknownInstalling) {
-  const std::string package_name = "com.fakepackage.name";
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
-  ASSERT_NE(nullptr, prefs);
-  EXPECT_TRUE(prefs->IsUnknownPackage(package_name));
-  app_instance()->SendInstallationStarted(package_name);
-  EXPECT_FALSE(prefs->IsUnknownPackage(package_name));
-  AddPackage(CreatePackage(package_name));
-  app_instance()->SendInstallationFinished(package_name, true /* success */);
-  EXPECT_FALSE(prefs->IsUnknownPackage(package_name));
-}
-
-TEST_P(ArcAppModelBuilderTest, IsUnknownAfterUninstall) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
-  ASSERT_NE(nullptr, prefs);
-  ASSERT_GE(fake_packages().size(), 1U);
-  app_instance()->SendRefreshPackageList(
-      ArcAppTest::ClonePackages(fake_packages()));
-  EXPECT_FALSE(prefs->IsUnknownPackage(fake_packages()[0]->package_name));
-  app_instance()->UninstallPackage(fake_packages()[0]->package_name);
-  EXPECT_TRUE(prefs->IsUnknownPackage(fake_packages()[0]->package_name));
 }
 
 TEST_P(ArcAppModelBuilderTest, MetricsIncremented) {
   const std::string package_name = "com.fakepackage.name";
   const std::string install_histogram = "Arc.AppInstalledReason";
   const std::string uninstall_histogram = "Arc.AppUninstallReason";
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   base::HistogramTester histogram_tester;
@@ -1706,7 +1726,7 @@ TEST_P(ArcAppModelBuilderTest, MetricsIncremented) {
 }
 
 TEST_P(ArcAppModelBuilderTest, RestartPreserveShortcuts) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   // Start from scratch and install shortcuts.
@@ -1716,7 +1736,7 @@ TEST_P(ArcAppModelBuilderTest, RestartPreserveShortcuts) {
   ValidateShortcutReadyState(fake_shortcuts(), true);
 
   // This recreates model and ARC apps and shortcuts will be read from prefs.
-  arc_test()->StopArcInstance();
+  arc_app_test()->StopArcInstance();
   CreateBuilder();
   ValidateShortcutReadyState(fake_shortcuts(), false);
 }
@@ -1756,7 +1776,7 @@ TEST_P(ArcAppModelBuilderTest, LaunchApps) {
 
   // Test an attempt to launch of a not-ready app. Number of launch requests
   // should be the same, indicating that launch request was blocked.
-  arc_test()->StopArcInstance();
+  arc_app_test()->StopArcInstance();
   item1 = FindArcItem(ArcAppTest::GetAppId(*apps[0]));
   ASSERT_TRUE(item1);
   item1->PerformActivate(0);
@@ -1789,7 +1809,7 @@ TEST_P(ArcAppModelBuilderTest, LaunchShortcuts) {
   EXPECT_EQ(app_first.intent_uri, launch_intents[2]);
 
   // Test an attempt to launch of a not-ready shortcut.
-  arc_test()->StopArcInstance();
+  arc_app_test()->StopArcInstance();
   item_first = FindArcItem(ArcAppTest::GetAppId(app_first));
   ASSERT_NE(nullptr, item_first);
   size_t launch_request_count_before = app_instance()->launch_intents().size();
@@ -1810,7 +1830,7 @@ TEST_P(ArcAppModelBuilderTest, RequestIcons) {
   std::set<int> expected_dimensions;
   const std::vector<ui::ResourceScaleFactor>& scale_factors =
       ui::GetSupportedResourceScaleFactors();
-  for (auto& scale_factor : scale_factors) {
+  for (const auto scale_factor : scale_factors) {
     expected_dimensions.insert(
         GetAppListIconDimensionForScaleFactor(scale_factor));
     for (auto& app : fake_apps()) {
@@ -1864,7 +1884,7 @@ TEST_P(ArcAppModelBuilderTest, RequestShortcutIcons) {
   const arc::mojom::ShortcutInfo& shortcut = fake_shortcuts()[0];
   SendInstallShortcut(shortcut);
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   // Icons representations loading is done asynchronously and is started once
@@ -1873,11 +1893,11 @@ TEST_P(ArcAppModelBuilderTest, RequestShortcutIcons) {
   std::set<int> expected_dimensions;
   AppServiceAppItem* app_item = FindArcItem(ArcAppTest::GetAppId(shortcut));
   ASSERT_NE(nullptr, app_item);
-  WaitForIconUpdates(profile_.get(), app_item->id());
+  WaitForIconUpdates(profile(), app_item->id());
 
   const std::vector<ui::ResourceScaleFactor>& scale_factors =
       ui::GetSupportedResourceScaleFactors();
-  for (auto& scale_factor : scale_factors) {
+  for (const auto scale_factor : scale_factors) {
     expected_dimensions.insert(
         GetAppListIconDimensionForScaleFactor(scale_factor));
     EXPECT_TRUE(IsIconCreated(
@@ -1907,7 +1927,7 @@ TEST_P(ArcAppModelBuilderTest, RequestShortcutIcons) {
   EXPECT_EQ(shortcut_dimensions, expected_dimensions);
 
   // Validate all icon files are installed.
-  for (auto& scale_factor : scale_factors) {
+  for (const auto scale_factor : scale_factors) {
     EXPECT_TRUE(IsIconCreated(
         profile(), prefs, ArcAppTest::GetAppId(shortcut),
         ash::SharedAppListConfig::instance().default_grid_icon_dimension(),
@@ -1934,7 +1954,7 @@ TEST_P(ArcAppModelBuilderTest, ForceCacheIcons) {
   // Number of requests per size in pixels.
   std::map<int, int> requests_expectation;
   const std::vector<int> expected_dip_sizes({16, 32, 48, 64});
-  for (auto scale_factor : ui::GetSupportedResourceScaleFactors()) {
+  for (const auto scale_factor : ui::GetSupportedResourceScaleFactors()) {
     for (int dip_size : expected_dip_sizes) {
       const int size_in_pixels =
           ArcAppIconDescriptor(dip_size, scale_factor).GetSizeInPixels();
@@ -1968,7 +1988,7 @@ TEST_P(ArcAppModelBuilderTest, InstallIcon) {
   app_instance()->SendRefreshAppList(apps);
   const arc::mojom::AppInfo& app = *apps[0];
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   const ui::ResourceScaleFactor scale_factor =
@@ -1976,18 +1996,14 @@ TEST_P(ArcAppModelBuilderTest, InstallIcon) {
   const float scale = ui::GetScaleForResourceScaleFactor(scale_factor);
   const std::string app_id = ArcAppTest::GetAppId(app);
 
-  // When the kUnifiedAppServiceIconLoading flag is enabled, the AppService
-  // saves the adaptive icon with the foreground and background icon files, so
-  // we check the foreground icon file in the AppService directory, not
-  // the icon path in the ARC directory.
-  const base::FilePath icon_path =
-      base::FeatureList::IsEnabled(apps::kUnifiedAppServiceIconLoading)
-          ? apps::GetForegroundIconPath(profile()->GetPath(), app_id,
-                                        apps_util::ConvertDipToPxForScale(
-                                            ash::SharedAppListConfig::instance()
-                                                .default_grid_icon_dimension(),
-                                            scale_factor))
-          : prefs->GetIconPath(app_id, GetAppListIconDescriptor(scale_factor));
+  // The AppService saves the adaptive icon with the foreground and background
+  // icon files, so we check the foreground icon file in the AppService
+  // directory, not the icon path in the ARC directory.
+  const base::FilePath icon_path = apps::GetForegroundIconPath(
+      profile()->GetPath(), app_id,
+      apps_util::ConvertDipToPxForScale(
+          ash::SharedAppListConfig::instance().default_grid_icon_dimension(),
+          scale_factor));
   EXPECT_FALSE(IsIconCreated(
       profile(), prefs, app_id,
       ash::SharedAppListConfig::instance().default_grid_icon_dimension(),
@@ -1998,7 +2014,7 @@ TEST_P(ArcAppModelBuilderTest, InstallIcon) {
   // This initiates async loading.
   app_item->icon().GetRepresentation(scale);
 
-  WaitForIconUpdates(profile_.get(), app_id);
+  WaitForIconUpdates(profile(), app_id);
 
   // Validate that icons are installed, have right content and icon is
   // refreshed for ARC app item.
@@ -2021,7 +2037,7 @@ TEST_P(ArcAppModelBuilderTest, RemoveAppCleanUpFolder) {
   // Make sure we are on UI thread.
   ASSERT_TRUE(content::BrowserThread::CurrentlyOn(content::BrowserThread::UI));
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   std::vector<arc::mojom::AppInfoPtr> apps;
@@ -2043,7 +2059,7 @@ TEST_P(ArcAppModelBuilderTest, RemoveAppCleanUpFolder) {
   const base::FilePath app_path = prefs->GetAppPath(app_id);
 
   // Now send generated icon for the app.
-  WaitForIconUpdates(profile_.get(), app_id);
+  WaitForIconUpdates(profile(), app_id);
   EXPECT_TRUE(IsIconCreated(
       profile(), prefs, app_id,
       ash::SharedAppListConfig::instance().default_grid_icon_dimension(),
@@ -2074,7 +2090,7 @@ TEST_P(ArcAppModelBuilderTest, LastLaunchTime) {
   const std::string id2 = ArcAppTest::GetAppId(app2);
   const std::string id3 = ArcAppTest::GetAppId(app3);
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   std::unique_ptr<ArcAppListPrefs::AppInfo> app_info = prefs->GetApp(id1);
@@ -2119,7 +2135,7 @@ TEST_P(ArcAppModelBuilderTest, LastLaunchTime) {
 
 // Makes sure that install time is set.
 TEST_P(ArcAppModelBuilderTest, InstallTime) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   ASSERT_TRUE(fake_apps().size());
@@ -2136,7 +2152,7 @@ TEST_P(ArcAppModelBuilderTest, InstallTime) {
 }
 
 TEST_P(ArcAppModelBuilderTest, AppLifeCycleEventsOnOptOut) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   arc::ConnectionObserver<arc::mojom::AppInstance>* const connection_observer =
@@ -2184,7 +2200,7 @@ TEST_P(ArcAppModelBuilderTest, AppLifeCycleEventsOnOptOut) {
 }
 
 TEST_P(ArcAppModelBuilderTest, AppLifeCycleEventsOnPackageListRefresh) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   arc::MockArcAppListPrefsObserver observer;
@@ -2208,6 +2224,10 @@ TEST_P(ArcAppModelBuilderTest, AppLifeCycleEventsOnPackageListRefresh) {
                             &arc::mojom::ArcPackageInfo::package_name,
                             fake_packages()[3]->package_name)))
       .Times(1);
+  EXPECT_CALL(observer, OnPackageInstalled(testing::Field(
+                            &arc::mojom::ArcPackageInfo::package_name,
+                            fake_packages()[4]->package_name)))
+      .Times(1);
   app_instance()->SendRefreshPackageList(
       ArcAppTest::ClonePackages(fake_packages()));
 
@@ -2225,6 +2245,9 @@ TEST_P(ArcAppModelBuilderTest, AppLifeCycleEventsOnPackageListRefresh) {
   EXPECT_CALL(observer,
               OnPackageRemoved(fake_packages()[3]->package_name, false))
       .Times(1);
+  EXPECT_CALL(observer,
+              OnPackageRemoved(fake_packages()[4]->package_name, false))
+      .Times(1);
 
   std::vector<arc::mojom::ArcPackageInfoPtr> packages;
   packages.push_back(fake_packages()[0].Clone());
@@ -2232,39 +2255,41 @@ TEST_P(ArcAppModelBuilderTest, AppLifeCycleEventsOnPackageListRefresh) {
   prefs->RemoveObserver(&observer);
 }
 
-TEST_P(ArcAppModelBuilderTest, ArcPacakgesIsUpToDate) {
+TEST_P(ArcAppModelBuilderTest, ArcPackagesIsUpToDate) {
   const std::string package_name = "com.fakepackage.name";
   const arc::mojom::ArcPackageInfoPtr package = CreatePackage(package_name);
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
-  // kArcPackagesIsUpToDate is set to true when the package list is refreshed.
+  // kArcPackagesIsUpToDate is true by default.
+  EXPECT_TRUE(
+      profile()->GetPrefs()->GetBoolean(arc::prefs::kArcPackagesIsUpToDate));
+
+  // kArcPackagesIsUpToDate is still true when the package list is refreshed.
   std::vector<arc::mojom::ArcPackageInfoPtr> packages;
   packages.push_back(package->Clone());
   app_instance()->SendRefreshPackageList(std::move(packages));
-  EXPECT_TRUE(profile_.get()->GetTestingPrefService()->GetBoolean(
-      arc::prefs::kArcPackagesIsUpToDate));
+  EXPECT_TRUE(
+      profile()->GetPrefs()->GetBoolean(arc::prefs::kArcPackagesIsUpToDate));
 
   // kArcPackagesIsUpToDate is set to false when installation starts.
   app_instance()->SendInstallationStarted(package_name);
-  EXPECT_FALSE(profile_.get()->GetTestingPrefService()->GetBoolean(
-      arc::prefs::kArcPackagesIsUpToDate));
+  EXPECT_FALSE(
+      profile()->GetPrefs()->GetBoolean(arc::prefs::kArcPackagesIsUpToDate));
 
   // kArcPackagesIsUpToDate is still false after installation finishes.
   app_instance()->SendInstallationFinished(package_name, true /* success */);
-  EXPECT_FALSE(profile_.get()->GetTestingPrefService()->GetBoolean(
-      arc::prefs::kArcPackagesIsUpToDate));
+  EXPECT_FALSE(
+      profile()->GetPrefs()->GetBoolean(arc::prefs::kArcPackagesIsUpToDate));
 
   // kArcPackagesIsUpToDate is set to true after the installed package is added.
   AddPackage(CreatePackage(package_name));
-  EXPECT_TRUE(profile_.get()->GetTestingPrefService()->GetBoolean(
-      arc::prefs::kArcPackagesIsUpToDate));
+  EXPECT_TRUE(
+      profile()->GetPrefs()->GetBoolean(arc::prefs::kArcPackagesIsUpToDate));
 }
 
-// Validate that arc model contains expected elements on restart.
-// Flaky. https://crbug.com/1013813
-TEST_P(ArcAppModelBuilderRecreate, DISABLED_AppModelRestart) {
+TEST_P(ArcAppModelBuilderRecreate, AppModelRestart) {
   // No apps on initial start.
   ValidateHaveApps(std::vector<arc::mojom::AppInfoPtr>());
 
@@ -2290,12 +2315,8 @@ TEST_P(ArcAppModelBuilderRecreate, DISABLED_AppModelRestart) {
   EXPECT_EQ(fake_apps().size(), GetArcItemCount());
 }
 
-// Verifies that no OnAppRegistered/OnAppRemoved is called in case ARC++ started
-// next time disabled.
-// Flaky. https://crbug.com/1013813
-TEST_P(ArcAppModelBuilderRecreate,
-       DISABLED_AppsNotReportedNextSessionDisabled) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+TEST_P(ArcAppModelBuilderRecreate, AppsNotReportedNextSessionDisabled) {
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   // Register one app first.
@@ -2305,27 +2326,29 @@ TEST_P(ArcAppModelBuilderRecreate,
   SendRefreshAppList(apps);
 
   // We will wait for default apps manually once observer is set.
-  arc_test()->set_wait_default_apps(false);
-  arc_test()->set_activate_arc_on_start(false);
+  arc_app_test()->set_wait_default_apps(false);
+  arc_app_test()->set_activate_arc_on_start(false);
   StopArc();
-  // Disable ARC in beetwen sessions.
-  SetArcPlayStoreEnabledForProfile(profile(), false);
+  // Disable ARC in between sessions. Use Prefs directly to avoid DCHECK in
+  // SetArcPlayStoreEnabledForProfile because StopArc() tears down user mapping.
+  profile()->GetPrefs()->SetBoolean(arc::prefs::kArcEnabled, false);
   StartArc();
 
-  prefs = ArcAppListPrefs::Get(profile_.get());
+  prefs = ArcAppListPrefs::Get(profile());
 
   arc::MockArcAppListPrefsObserver observer;
   prefs->AddObserver(&observer);
   EXPECT_CALL(observer, OnAppRegistered(app_id, testing::_)).Times(0);
   EXPECT_CALL(observer, OnAppRemoved(app_id)).Times(0);
 
-  arc_test()->WaitForDefaultApps();
+  arc_app_test()->WaitForDefaultApps();
+  prefs->RemoveObserver(&observer);
 }
 
 TEST_P(ArcPlayStoreAppTest, PlayStore) {
   ASSERT_TRUE(content::BrowserThread::CurrentlyOn(content::BrowserThread::UI));
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   std::unique_ptr<ArcAppListPrefs::AppInfo> app_info =
@@ -2364,15 +2387,13 @@ TEST_P(ArcPlayStoreAppTest, PlayStore) {
 TEST_P(ArcPlayStoreAppTest, PaiStarter) {
   ASSERT_TRUE(content::BrowserThread::CurrentlyOn(content::BrowserThread::UI));
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   bool pai_started = false;
 
-  arc::ArcPaiStarter starter1(profile_.get());
-  arc::ArcPaiStarter starter2(profile_.get());
+  arc::ArcPaiStarter starter1(profile());
   EXPECT_FALSE(starter1.started());
-  EXPECT_FALSE(starter2.started());
   EXPECT_EQ(app_instance()->start_pai_request_count(), 0);
 
   starter1.AddOnStartCallback(
@@ -2391,8 +2412,6 @@ TEST_P(ArcPlayStoreAppTest, PaiStarter) {
   ASSERT_TRUE(session_manager->pai_starter());
   EXPECT_FALSE(session_manager->pai_starter()->started());
 
-  starter2.AcquireLock();
-
   SendPlayStoreApp();
 
   EXPECT_TRUE(starter1.started());
@@ -2404,17 +2423,12 @@ TEST_P(ArcPlayStoreAppTest, PaiStarter) {
       base::BindOnce(&OnPaiStartedCallback, &pai_started));
   EXPECT_TRUE(pai_started);
 
-  EXPECT_FALSE(starter2.started());
   EXPECT_TRUE(session_manager->pai_starter()->started());
   EXPECT_EQ(app_instance()->start_pai_request_count(), 2);
 
-  starter2.ReleaseLock();
+  arc::ArcPaiStarter starter2(profile());
   EXPECT_TRUE(starter2.started());
   EXPECT_EQ(app_instance()->start_pai_request_count(), 3);
-
-  arc::ArcPaiStarter starter3(profile_.get());
-  EXPECT_TRUE(starter3.started());
-  EXPECT_EQ(app_instance()->start_pai_request_count(), 4);
 }
 
 // Validates that PAI is started on the next session start if it was not started
@@ -2430,10 +2444,7 @@ TEST_P(ArcPlayStoreAppTest, StartPaiOnNextRun) {
   ASSERT_TRUE(pai_starter);
   EXPECT_FALSE(pai_starter->started());
 
-  // Finish session with lock. This would prevent running PAI.
-  pai_starter->AcquireLock();
-  SendPlayStoreApp();
-  EXPECT_FALSE(pai_starter->started());
+  // Session ended without PAI starts.
   session_manager->Shutdown();
 
   // Simulate ARC restart.
@@ -2444,7 +2455,6 @@ TEST_P(ArcPlayStoreAppTest, StartPaiOnNextRun) {
   session_manager = arc::ArcSessionManager::Get();
   pai_starter = session_manager->pai_starter();
   ASSERT_TRUE(pai_starter);
-  EXPECT_FALSE(pai_starter->locked());
 
   SendPlayStoreApp();
   EXPECT_TRUE(pai_starter->started());
@@ -2520,11 +2530,10 @@ TEST_P(ArcPlayStoreAppTest,
        FastAppReinstallStarterUserFinishesSelectionBeforePlayStore) {
   ASSERT_TRUE(content::BrowserThread::CurrentlyOn(content::BrowserThread::UI));
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
-  arc::ArcFastAppReinstallStarter starter1(profile_.get(),
-                                           profile_->GetPrefs());
+  arc::ArcFastAppReinstallStarter starter1(profile(), profile()->GetPrefs());
   EXPECT_FALSE(starter1.started());
   EXPECT_EQ(0, app_instance()->start_fast_app_reinstall_request_count());
 
@@ -2542,10 +2551,10 @@ TEST_P(ArcPlayStoreAppTest,
 
   // Fast App Reinstall is not expected to start when the user finishes
   // selection without the Play Store.
-  base::Value::List package_list;
+  base::ListValue package_list;
   package_list.Append("fake_package_name");
-  profile_.get()->GetTestingPrefService()->SetList(
-      arc::prefs::kArcFastAppReinstallPackages, std::move(package_list));
+  profile()->GetPrefs()->SetList(arc::prefs::kArcFastAppReinstallPackages,
+                                 std::move(package_list));
   starter1.OnAppsSelectionFinished();
   EXPECT_FALSE(starter1.started());
   EXPECT_EQ(0, app_instance()->start_fast_app_reinstall_request_count());
@@ -2555,8 +2564,7 @@ TEST_P(ArcPlayStoreAppTest,
   EXPECT_TRUE(starter1.started());
   EXPECT_EQ(2, app_instance()->start_fast_app_reinstall_request_count());
 
-  arc::ArcFastAppReinstallStarter starter2(profile_.get(),
-                                           profile_->GetPrefs());
+  arc::ArcFastAppReinstallStarter starter2(profile(), profile()->GetPrefs());
   EXPECT_TRUE(starter2.started());
   EXPECT_EQ(3, app_instance()->start_fast_app_reinstall_request_count());
 }
@@ -2565,11 +2573,10 @@ TEST_P(ArcPlayStoreAppTest,
        FastAppReinstallStarterUserFinishesSelectionAfterPlayStore) {
   ASSERT_TRUE(content::BrowserThread::CurrentlyOn(content::BrowserThread::UI));
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
-  arc::ArcFastAppReinstallStarter starter1(profile_.get(),
-                                           profile_->GetPrefs());
+  arc::ArcFastAppReinstallStarter starter1(profile(), profile()->GetPrefs());
   EXPECT_FALSE(starter1.started());
   EXPECT_EQ(0, app_instance()->start_fast_app_reinstall_request_count());
 
@@ -2592,18 +2599,17 @@ TEST_P(ArcPlayStoreAppTest,
   EXPECT_FALSE(starter1.started());
   EXPECT_EQ(0, app_instance()->start_fast_app_reinstall_request_count());
 
-  base::Value::List package_list;
+  base::ListValue package_list;
   package_list.Append("fake_package_name");
-  profile_.get()->GetTestingPrefService()->SetList(
-      arc::prefs::kArcFastAppReinstallPackages, std::move(package_list));
+  profile()->GetPrefs()->SetList(arc::prefs::kArcFastAppReinstallPackages,
+                                 std::move(package_list));
   starter1.OnAppsSelectionFinished();
   // Fast App Reinstall is expected to start right after user finishes selection
   // after Play Store is ready.
   EXPECT_TRUE(starter1.started());
   EXPECT_EQ(1, app_instance()->start_fast_app_reinstall_request_count());
 
-  arc::ArcFastAppReinstallStarter starter2(profile_.get(),
-                                           profile_->GetPrefs());
+  arc::ArcFastAppReinstallStarter starter2(profile(), profile()->GetPrefs());
   EXPECT_TRUE(starter2.started());
   EXPECT_EQ(2, app_instance()->start_fast_app_reinstall_request_count());
 }
@@ -2614,7 +2620,7 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderForShelfGroup) {
   apps.emplace_back(fake_apps()[0]->Clone());
   const std::string app_id = ArcAppTest::GetAppId(*apps[0]);
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   SendRefreshAppList(apps);
@@ -2630,18 +2636,18 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderForShelfGroup) {
       app_instance()->icon_requests().size();
 
   std::vector<arc::mojom::ShortcutInfo> shortcuts =
-      arc_test()->fake_shortcuts();
+      arc_app_test()->fake_shortcuts();
   shortcuts.resize(1);
   shortcuts[0].intent_uri +=
-      ";S.org.chromium.arc.shelf_group_id=arc_test_shelf_group;end";
+      ";S.org.chromium.arc.shelf_group_id=arc_app_test_shelf_group;end";
   SendInstallShortcuts(shortcuts);
   const std::string shortcut_id = ArcAppTest::GetAppId(shortcuts[0]);
   content::RunAllTasksUntilIdle();
 
   const std::string id_shortcut_exist =
-      arc::ArcAppShelfId("arc_test_shelf_group", app_id).ToString();
+      arc::ArcAppShelfId("arc_app_test_shelf_group", app_id).ToString();
   const std::string id_shortcut_absent =
-      arc::ArcAppShelfId("arc_test_shelf_group_absent", app_id).ToString();
+      arc::ArcAppShelfId("arc_app_test_shelf_group_absent", app_id).ToString();
 
   FakeAppIconLoaderDelegate delegate;
   AppServiceAppIconLoader icon_loader(
@@ -2699,7 +2705,7 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderForSuspendedApps) {
   apps.emplace_back(fake_apps()[0]->Clone());
   const std::string app_id = ArcAppTest::GetAppId(*apps[0]);
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   FakeAppIconLoaderDelegate delegate;
@@ -2752,7 +2758,7 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderWithBadIcon) {
   apps.emplace_back(fake_apps()[0]->Clone());
   const std::string app_id = ArcAppTest::GetAppId(*apps[0]);
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   app_instance()->set_icon_response_type(
@@ -2763,7 +2769,7 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderWithBadIcon) {
   // temporarily to avoid calling ArcAppIcon. Otherwise, it might affect
   // the test result when calling AppServiceAppIconLoader to load the icon.
   apps::AppServiceProxy* proxy =
-      apps::AppServiceProxyFactory::GetForProfile(profile_.get());
+      apps::AppServiceProxyFactory::GetForProfile(profile());
   apps::StubIconLoader stub_icon_loader;
   apps::IconLoader* old_icon_loader =
       proxy->OverrideInnerIconLoaderForTesting(&stub_icon_loader);
@@ -2794,12 +2800,12 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderWithBadIcon) {
   const std::vector<ui::ResourceScaleFactor>& scale_factors =
       ui::GetSupportedResourceScaleFactors();
   AppServiceAppItem* app_item = FindArcItem(app_id);
-  for (auto& scale_factor : scale_factors) {
+  for (const auto scale_factor : scale_factors) {
     // Force the icon to be loaded.
     app_item->icon().GetRepresentation(
         ui::GetScaleForResourceScaleFactor(scale_factor));
     WaitForIconCreation(
-        profile_.get(), prefs, app_id,
+        profile(), prefs, app_id,
         ash::SharedAppListConfig::instance().default_grid_icon_dimension(),
         scale_factor);
   }
@@ -2823,7 +2829,7 @@ TEST_P(ArcAppModelBuilderTest, IconLoader) {
   apps.emplace_back(fake_apps()[0]->Clone());
   const std::string app_id = ArcAppTest::GetAppId(*apps[0]);
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   app_instance()->SendRefreshAppList(apps);
@@ -2853,7 +2859,7 @@ TEST_P(ArcAppModelBuilderTest, IconLoader) {
 }
 
 TEST_P(ArcDefaultAppTest, LoadAdaptiveIcon) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   const std::string app_id = ArcAppTest::GetAppId(*fake_default_apps()[0]);
@@ -2876,10 +2882,8 @@ TEST_P(ArcAppModelIconTest, LoadManyIcons) {
   // those default app icons.
   RemoveArcApps(profile(), model_updater());
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
-
-  SetFakeArcAppIconFactory();
 
   int app_count = 500;
   std::vector<std::string> app_ids;
@@ -2890,8 +2894,6 @@ TEST_P(ArcAppModelIconTest, LoadManyIcons) {
   RemoveAppsFromIconLoader(app_ids);
 
   LoadIconsWithIconLoader(app_ids, app_count);
-
-  EXPECT_GE(kMaxSimultaneousIconRequests, max_arc_app_icon_request_count());
 }
 
 TEST_P(ArcAppModelIconTest, LoadManyIconsWithSomeBadIcons) {
@@ -2899,10 +2901,8 @@ TEST_P(ArcAppModelIconTest, LoadManyIconsWithSomeBadIcons) {
   // those default app icons.
   RemoveArcApps(profile(), model_updater());
 
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
-
-  SetFakeArcAppIconFactory();
 
   int app_count = 500;
   std::vector<std::string> app_ids;
@@ -2930,8 +2930,6 @@ TEST_P(ArcAppModelIconTest, LoadManyIconsWithSomeBadIcons) {
   for (auto& app_id : app_ids)
     icon_loader.FetchImage(app_id);
   delegate.WaitForIconLoaded(app_ids, extension_misc::EXTENSION_ICON_MEDIUM);
-
-  EXPECT_GE(kMaxSimultaneousIconRequests, max_arc_app_icon_request_count());
 }
 
 TEST_P(ArcAppModelBuilderTest, IconLoaderCompressed) {
@@ -2946,11 +2944,11 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderCompressed) {
   base::RunLoop run_loop;
 
   apps::AppServiceProxy* proxy =
-      apps::AppServiceProxyFactory::GetForProfile(profile_.get());
+      apps::AppServiceProxyFactory::GetForProfile(profile());
   ASSERT_NE(nullptr, proxy);
 
   proxy->LoadIcon(
-      apps::AppType::kArc, app_id, apps::IconType::kCompressed, icon_size,
+      app_id, apps::IconType::kCompressed, icon_size,
       false /*allow_placeholder_icon*/,
       base::BindLambdaForTesting([&](apps::IconValuePtr icon_value) {
         EXPECT_EQ(apps::IconType::kCompressed, icon_value->icon_type);
@@ -2963,13 +2961,12 @@ TEST_P(ArcAppModelBuilderTest, IconLoaderCompressed) {
   run_loop.Run();
 }
 
-// Flaky.  https://crbug.com/1248526
-TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidation) {
-  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile_.get());
+TEST_P(ArcAppModelIconTest, IconInvalidation) {
+  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   const std::string app_id = StartApp(1 /* package_version */);
-  WaitForIconUpdates(profile_.get(), app_id);
+  WaitForIconUpdates(profile(), app_id);
 
   // Simulate ARC restart.
   RestartArc();
@@ -2977,13 +2974,25 @@ TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidation) {
 
   // No icon update requests on restart. Icons were not invalidated.
   EXPECT_TRUE(app_instance()->icon_requests().empty());
+  // Force the system to display the icons for all supported scale factors (100%
+  // and 200%). This triggers 2 requests.
+  WaitForIconUpdates(profile(), app_id);
 
-  // Send new apps for the package. This should invalidate package icons.
+  // Send new apps for the package. This should invalidate package icons. This
+  // call also triggers an additional 2 requests.
   UpdatePackage(2 /* package_version */);
+
+  // UpdatePackage(2) triggers an asynchronous invalidation of the on-disk icon
+  // cache. We must wait for these background cleanup tasks to complete.
+  // Otherwise, the subsequent LoadAppIcon call might see an inconsistent cache
+  // state and trigger redundant Mojo requests, causing a flake in the following
+  // call to EnsureIconsUpdated(), in which 6 requests are counted instead of 4.
+  content::RunAllTasksUntilIdle();
 
   model_updater()->LoadAppIcon(app_id);
   WaitForIconUpdate();
 
+  // All in all 2 + 2 = 4 requests were triggered so far.
   EnsureIconsUpdated();
 
   // Simulate ARC restart again.
@@ -2994,9 +3003,9 @@ TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidation) {
   EXPECT_TRUE(app_instance()->icon_requests().empty());
 }
 
-// TODO(crbug.com/1345154): Flaky.
+// TODO(crbug.com/40853365): Flaky.
 TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidationOnFrameworkUpdate) {
-  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   std::vector<arc::mojom::AppInfoPtr> apps;
@@ -3012,7 +3021,7 @@ TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidationOnFrameworkUpdate) {
 
   const std::vector<ui::ResourceScaleFactor>& scale_factors =
       ui::GetSupportedResourceScaleFactors();
-  WaitForIconUpdates(profile_.get(), app_id,
+  WaitForIconUpdates(profile(), app_id,
                      scale_factors.size() + kDefaultIconUpdateCount);
 
   RestartArc();
@@ -3047,9 +3056,9 @@ TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidationOnFrameworkUpdate) {
 
 // This verifies that app icons are invalidated in case icon version was
 // changed which means ARC sends icons using updated processing.
-// TODO(crbug.com/1364812): Flaky.
+// TODO(crbug.com/40865778): Flaky.
 TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidationOnIconVersionUpdate) {
-  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   const std::string app_id = StartApp(1 /* package_version */);
@@ -3081,7 +3090,7 @@ TEST_P(ArcAppModelIconTest, DISABLED_IconInvalidationOnIconVersionUpdate) {
 
 // TODO(crbug.com/1005069) Disabled on Chrome OS due to flake
 TEST_P(ArcAppModelIconTest, DISABLED_IconLoadNonSupportedScales) {
-  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   const std::string app_id = StartApp(1 /* package_version */);
@@ -3235,7 +3244,7 @@ TEST_P(ArcAppModelBuilderTest, AppLauncherForSuspendedApp) {
 
 // Validates an app that have no launchable flag.
 TEST_P(ArcAppModelBuilderTest, NonLaunchableApp) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   ValidateHaveApps(std::vector<arc::mojom::AppInfoPtr>());
@@ -3257,7 +3266,7 @@ TEST_P(ArcAppModelBuilderTest, NonLaunchableApp) {
 }
 
 TEST_P(ArcAppModelBuilderTest, ArcAppsAndShortcutsOnPackageChange) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   auto apps = ArcAppTest::CloneApps(fake_apps());
@@ -3310,7 +3319,7 @@ TEST_P(ArcAppModelBuilderTest, ArcAppsAndShortcutsOnPackageChange) {
 // This validates that runtime apps are not removed on package change event.
 TEST_P(ArcAppModelBuilderTest, DontRemoveRuntimeAppOnPackageChange) {
   ArcAppListPrefs::AppInfo::SetIgnoreCompareInstallTimeForTesting(true);
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   arc::MockArcAppListPrefsObserver observer;
@@ -3385,24 +3394,24 @@ TEST_P(ArcAppModelBuilderTest, DontRemoveRuntimeAppOnPackageChange) {
 }
 
 TEST_P(ArcAppModelBuilderTest, PackageSyncableServiceEnabled) {
-  EXPECT_TRUE(SyncServiceFactory::GetAsSyncServiceImplForProfileForTesting(
-                  profile_.get())
-                  ->GetRegisteredDataTypesForTest()
-                  .Has(syncer::ARC_PACKAGE));
+  EXPECT_TRUE(
+      SyncServiceFactory::GetAsSyncServiceImplForProfileForTesting(profile())
+          ->GetRegisteredDataTypesForTest()
+          .Has(syncer::ARC_PACKAGE));
 }
 
 TEST_P(ArcAppModelBuilderTest, PackageSyncableServiceDisabled) {
   base::test::ScopedCommandLine command_line;
   command_line.GetProcessCommandLine()->AppendSwitch(
       ash::switches::kArcDisableAppSync);
-  EXPECT_FALSE(SyncServiceFactory::GetAsSyncServiceImplForProfileForTesting(
-                   profile_.get())
-                   ->GetRegisteredDataTypesForTest()
-                   .Has(syncer::ARC_PACKAGE));
+  EXPECT_FALSE(
+      SyncServiceFactory::GetAsSyncServiceImplForProfileForTesting(profile())
+          ->GetRegisteredDataTypesForTest()
+          .Has(syncer::ARC_PACKAGE));
 }
 
 TEST_P(ArcDefaultAppTest, DefaultApps) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   ValidateHaveApps(fake_default_apps());
@@ -3466,7 +3475,7 @@ TEST_P(ArcDefaultAppTest, DefaultApps) {
   RestartArc();
 
   // Prefs are changed.
-  prefs = ArcAppListPrefs::Get(profile_.get());
+  prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
   ValidateHaveApps(all_apps);
 
@@ -3488,7 +3497,7 @@ TEST_P(ArcDefaultAppTest, DefaultApps) {
 // Test that validates disabling default app removes app from the list and this
 // is persistent in next sessions.
 TEST_P(ArcDefaultAppTest, DisableDefaultApps) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   ValidateHaveApps(fake_default_apps());
@@ -3512,14 +3521,14 @@ TEST_P(ArcDefaultAppTest, DisableDefaultApps) {
   // Sign-out and sign-in again. Disabled default app should not appear.
   RestartArc();
 
-  prefs = ArcAppListPrefs::Get(profile_.get());
+  prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
   EXPECT_FALSE(prefs->GetApp(app_id));
 }
 
-// TODO(crbug.com/1112319): Flaky.
+// TODO(crbug.com/40709649): Flaky.
 TEST_P(ArcAppLauncherForDefaultAppTest, DISABLED_AppIconUpdated) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   ASSERT_FALSE(fake_default_apps().empty());
@@ -3531,7 +3540,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, DISABLED_AppIconUpdated) {
                   ->MaybeGetIconPathForDefaultApp(
                       app_id, GetAppListIconDescriptor(ui::k100Percent))
                   .empty());
-  arc_test()->WaitForDefaultApps();
+  arc_app_test()->WaitForDefaultApps();
   EXPECT_TRUE(prefs->GetApp(app_id));
   EXPECT_FALSE(prefs
                    ->MaybeGetIconPathForDefaultApp(
@@ -3551,7 +3560,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, DISABLED_AppIconUpdated) {
 
   // Restart ARC to validate default app icon can be loaded next session.
   RestartArc();
-  prefs = ArcAppListPrefs::Get(profile_.get());
+  prefs = ArcAppListPrefs::Get(profile());
 
   FakeAppIconLoaderDelegate icon_delegate2;
   icon_loader = std::make_unique<AppServiceAppIconLoader>(
@@ -3576,7 +3585,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, DISABLED_AppIconUpdated) {
 // Validates that default app icon can be loaded for non-default dips, that do
 // not exist in Chrome image.
 TEST_P(ArcAppLauncherForDefaultAppTest, AppIconNonDefaultDip) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   ASSERT_FALSE(fake_default_apps().empty());
@@ -3584,7 +3593,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, AppIconNonDefaultDip) {
   const std::string app_id = ArcAppTest::GetAppId(app);
 
   // Icon can be only fetched after app is registered in the system.
-  arc_test()->WaitForDefaultApps();
+  arc_app_test()->WaitForDefaultApps();
 
   FakeAppIconLoaderDelegate icon_delegate;
   // 17 should never be a default dip size.
@@ -3598,7 +3607,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, AppIconNonDefaultDip) {
 // Validates that default app icon can be loaded for the single icon file
 // generated when the adaptive icon feature is disabled.
 TEST_P(ArcAppLauncherForDefaultAppTest, AppIconMigration) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   ASSERT_EQ(3u, fake_default_apps().size());
@@ -3606,7 +3615,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, AppIconMigration) {
   const std::string app_id = ArcAppTest::GetAppId(app);
 
   // Icon can be only fetched after app is registered in the system.
-  arc_test()->WaitForDefaultApps();
+  arc_app_test()->WaitForDefaultApps();
 
   FakeAppIconLoaderDelegate icon_delegate;
   std::unique_ptr<AppServiceAppIconLoader> icon_loader =
@@ -3617,7 +3626,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, AppIconMigration) {
 }
 
 TEST_P(ArcAppLauncherForDefaultAppTest, AppLauncherForDefaultApps) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   ASSERT_GE(fake_default_apps().size(), 2U);
@@ -3638,7 +3647,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, AppLauncherForDefaultApps) {
 
   EXPECT_FALSE(launcher1.app_launched());
 
-  arc_test()->WaitForDefaultApps();
+  arc_app_test()->WaitForDefaultApps();
 
   // Only second app is expected to be launched.
   EXPECT_FALSE(launcher1.app_launched());
@@ -3652,7 +3661,7 @@ TEST_P(ArcAppLauncherForDefaultAppTest, AppLauncherForDefaultApps) {
 }
 
 TEST_P(ArcDefaultAppTest, DefaultAppsNotAvailable) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   ValidateHaveApps(fake_default_apps());
@@ -3711,7 +3720,7 @@ TEST_P(ArcDefaultAppTest, DefaultAppsNotAvailable) {
 }
 
 TEST_P(ArcDefaultAppTest, DefaultAppsInstallation) {
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
 
   const std::vector<arc::mojom::AppInfoPtr> empty_app_list;
@@ -3752,7 +3761,7 @@ TEST_P(ArcDefaultAppTest, DefaultAppsInstallation) {
 
 TEST_P(ArcDefaultAppTest, DefaultAppInstallMetrics) {
   const std::string install_histogram = "Arc.AppInstalledReason";
-  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile_.get());
+  ArcAppListPrefs* prefs = ArcAppListPrefs::Get(profile());
   ASSERT_NE(nullptr, prefs);
   base::HistogramTester histogram_tester;
 
@@ -3772,7 +3781,7 @@ TEST_P(ArcDefaultAppTest, DefaultAppInstallMetrics) {
 }
 
 TEST_P(ArcPlayStoreManagedUserAppTest, DefaultAppsForManagedUser) {
-  const ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile_.get());
+  const ArcAppListPrefs* const prefs = ArcAppListPrefs::Get(profile());
   ASSERT_TRUE(prefs);
 
   // There is no default app for managed users except Play Store

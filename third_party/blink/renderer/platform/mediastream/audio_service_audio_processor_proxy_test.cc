@@ -29,7 +29,6 @@ void VerifyStats(const media::AudioProcessingStats& expected,
             expected.echo_return_loss);
   EXPECT_EQ(received.apm_statistics.echo_return_loss_enhancement,
             expected.echo_return_loss_enhancement);
-  EXPECT_FALSE(received.apm_statistics.voice_detected);
   EXPECT_FALSE(received.apm_statistics.divergent_filter_fraction);
   EXPECT_FALSE(received.apm_statistics.delay_median_ms);
   EXPECT_FALSE(received.apm_statistics.delay_standard_deviation_ms);
@@ -81,7 +80,13 @@ class MockAudioProcessorControls : public media::AudioProcessorControls {
     SetPreferredNumCaptureChannelsCalled(num_preferred_channels);
   }
 
+  void SetVoiceIsolation(bool enabled) override {
+    DCHECK_CALLED_ON_VALID_THREAD(main_thread_checker_);
+    SetVoiceIsolationCalled(enabled);
+  }
+
   MOCK_METHOD1(SetPreferredNumCaptureChannelsCalled, void(int32_t));
+  MOCK_METHOD1(SetVoiceIsolationCalled, void(bool));
 
  private:
   media::AudioProcessingStats stats_;
@@ -101,14 +106,14 @@ class AudioServiceAudioProcessorProxyTest : public testing::Test {
 
 TEST_F(AudioServiceAudioProcessorProxyTest, SafeIfNoControls) {
   scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
-      new rtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
   VerifyStats(media::AudioProcessingStats(), proxy);
   proxy->MaybeUpdateNumPreferredCaptureChannels(2);
 }
 
 TEST_F(AudioServiceAudioProcessorProxyTest, StopDetachesFromControls) {
   scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
-      new rtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
 
   StrictMock<MockAudioProcessorControls> controls;
 
@@ -121,7 +126,7 @@ TEST_F(AudioServiceAudioProcessorProxyTest, StopDetachesFromControls) {
 
 TEST_F(AudioServiceAudioProcessorProxyTest, StatsUpdatedOnTimer) {
   scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
-      new rtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
   StrictMock<MockAudioProcessorControls> controls;
   media::AudioProcessingStats stats1{4, 5};
   controls.SetStats(stats1);
@@ -141,7 +146,7 @@ TEST_F(AudioServiceAudioProcessorProxyTest, StatsUpdatedOnTimer) {
 
 TEST_F(AudioServiceAudioProcessorProxyTest, SetNumChannelsIfIncreases) {
   scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
-      new rtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
   StrictMock<MockAudioProcessorControls> controls;
   EXPECT_CALL(controls, SetPreferredNumCaptureChannelsCalled(2));
   EXPECT_CALL(controls, SetPreferredNumCaptureChannelsCalled(3));
@@ -156,7 +161,7 @@ TEST_F(AudioServiceAudioProcessorProxyTest, SetNumChannelsIfIncreases) {
 TEST_F(AudioServiceAudioProcessorProxyTest,
        DoesNotSetNumChannelsIfDoesNotChange) {
   scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
-      new rtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
   StrictMock<MockAudioProcessorControls> controls;
   EXPECT_CALL(controls, SetPreferredNumCaptureChannelsCalled(2)).Times(1);
 
@@ -169,7 +174,7 @@ TEST_F(AudioServiceAudioProcessorProxyTest,
 
 TEST_F(AudioServiceAudioProcessorProxyTest, DoesNotSetNumChannelsIfDecreases) {
   scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
-      new rtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
   StrictMock<MockAudioProcessorControls> controls;
   EXPECT_CALL(controls, SetPreferredNumCaptureChannelsCalled(3)).Times(1);
 
@@ -178,6 +183,74 @@ TEST_F(AudioServiceAudioProcessorProxyTest, DoesNotSetNumChannelsIfDecreases) {
   MaybeSetNumChannelsOnAnotherThread(proxy, 3);
   MaybeSetNumChannelsOnAnotherThread(proxy, 2);
   task_environment_.RunUntilIdle();
+}
+
+TEST_F(AudioServiceAudioProcessorProxyTest,
+       DoesNotSetNumChannelsIfNegativeValue) {
+  scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+  StrictMock<MockAudioProcessorControls> controls;
+  EXPECT_CALL(controls, SetPreferredNumCaptureChannelsCalled(2)).Times(1);
+
+  proxy->SetControls(&controls);
+
+  MaybeSetNumChannelsOnAnotherThread(proxy, -1);
+  MaybeSetNumChannelsOnAnotherThread(proxy, 2);
+  MaybeSetNumChannelsOnAnotherThread(proxy, -1);
+  task_environment_.RunUntilIdle();
+}
+
+TEST_F(AudioServiceAudioProcessorProxyTest, SetVoiceIsolation) {
+  scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+  StrictMock<MockAudioProcessorControls> controls;
+  EXPECT_CALL(controls, SetVoiceIsolationCalled(true));
+  EXPECT_CALL(controls, SetVoiceIsolationCalled(false));
+
+  proxy->SetControls(&controls);
+
+  proxy->SetVoiceIsolation(true);
+  proxy->SetVoiceIsolation(false);
+  task_environment_.RunUntilIdle();
+}
+
+TEST_F(AudioServiceAudioProcessorProxyTest,
+       SetVoiceIsolationBufferedBeforeSetControls) {
+  scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+  StrictMock<MockAudioProcessorControls> controls;
+  EXPECT_CALL(controls, SetVoiceIsolationCalled(false));
+
+  proxy->SetVoiceIsolation(false);
+
+  proxy->SetControls(&controls);
+  task_environment_.RunUntilIdle();
+}
+
+TEST_F(AudioServiceAudioProcessorProxyTest,
+       DoesNotSetVoiceIsolationIfDoesNotChange) {
+  scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+  StrictMock<MockAudioProcessorControls> controls;
+  EXPECT_CALL(controls, SetVoiceIsolationCalled(true)).Times(1);
+
+  proxy->SetControls(&controls);
+
+  proxy->SetVoiceIsolation(true);
+  proxy->SetVoiceIsolation(true);
+  task_environment_.RunUntilIdle();
+}
+
+TEST_F(AudioServiceAudioProcessorProxyTest, VoiceIsolation) {
+  scoped_refptr<AudioServiceAudioProcessorProxy> proxy =
+      new webrtc::RefCountedObject<AudioServiceAudioProcessorProxy>();
+  EXPECT_FALSE(proxy->VoiceIsolation().has_value());
+
+  proxy->SetVoiceIsolation(true);
+  EXPECT_EQ(proxy->VoiceIsolation(), true);
+
+  proxy->SetVoiceIsolation(false);
+  EXPECT_EQ(proxy->VoiceIsolation(), false);
 }
 
 }  // namespace blink

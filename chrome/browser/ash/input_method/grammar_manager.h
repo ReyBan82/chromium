@@ -9,12 +9,13 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "base/memory/raw_ptr.h"
 #include "base/timer/timer.h"
 #include "chrome/browser/ash/input_method/grammar_service_client.h"
 #include "chrome/browser/ash/input_method/suggestion_handler_interface.h"
 #include "chrome/browser/ash/input_method/text_utils.h"
-#include "chrome/browser/ash/input_method/ui/assistive_delegate.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/ash/input_method/assistive_delegate.h"
 #include "ui/base/ime/ash/text_input_method.h"
 #include "ui/events/event.h"
 
@@ -84,9 +85,9 @@ class GrammarManager {
   void SetButtonHighlighted(const ui::ime::AssistiveWindowButton& button,
                             bool highlighted);
 
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
   std::unique_ptr<GrammarServiceClient> grammar_client_;
-  SuggestionHandlerInterface* suggestion_handler_;
+  raw_ptr<SuggestionHandlerInterface> suggestion_handler_;
   int context_id_ = 0;
   bool new_to_context_ = true;
   std::u16string current_text_;

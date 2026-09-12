@@ -7,14 +7,11 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/release_notes/release_notes_storage.h"
 #include "chromeos/ash/components/network/network_state_handler_observer.h"
 #include "components/session_manager/core/session_manager_observer.h"
-
-namespace message_center {
-class Notification;
-}  // namespace message_center
 
 namespace ash {
 
@@ -45,10 +42,8 @@ class ReleaseNotesNotification {
 
   void HandleClickShowNotification();
 
-  Profile* const profile_;
+  const raw_ptr<Profile> profile_;
   std::unique_ptr<ReleaseNotesStorage> release_notes_storage_;
-  std::unique_ptr<message_center::Notification>
-      release_notes_available_notification_;
 
   base::WeakPtrFactory<ReleaseNotesNotification> weak_ptr_factory_{this};
 };

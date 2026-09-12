@@ -4,8 +4,8 @@
 
 import("//extensions/buildflags/buildflags.gni")
 
-assert(enable_extensions,
-       "Cannot depend on extensions because enable_extensions=false.")
+assert(enable_extensions_core,
+       "Cannot depend on extensions because enable_extensions_core=false.")
 
 source_set("web_ui") {
   sources = [
@@ -17,5 +17,8 @@ source_set("web_ui") {
     "//net",
     "//url",
   ]
-  deps = [ "//content/public/browser" ]
+  deps = [
+    "//content/public/browser",
+    "//extensions/browser:url_fetcher",
+  ]
 }

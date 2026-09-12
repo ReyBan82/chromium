@@ -11,7 +11,7 @@
 #include "chrome/browser/extensions/api/settings_private/settings_private_event_router.h"
 #include "chrome/browser/extensions/api/settings_private/settings_private_event_router_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/test/base/mixin_based_in_process_browser_test.h"
 #include "content/public/test/browser_test.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -24,9 +24,9 @@ class SettingsPrivateGuestModeTest : public MixinBasedInProcessBrowserTest {
   ash::GuestSessionMixin guest_session_{&mixin_host_};
 };
 
-// Regression test for https://crbug.com/887383.
+// Regression test for https://crbug.com/41416087.
 IN_PROC_BROWSER_TEST_F(SettingsPrivateGuestModeTest, GuestMode) {
-  Profile* guest_profile = browser()->profile();
+  Profile* guest_profile = GetProfile();
   EXPECT_TRUE(guest_profile->IsOffTheRecord());
 
   // SettingsPrivate uses the incognito profile, not the recording profile,
@@ -49,7 +49,7 @@ IN_PROC_BROWSER_TEST_F(SettingsPrivateGuestModeTest, GuestMode) {
   // default value.
   EXPECT_EQ(settings_private::SetPrefResult::PREF_NOT_MODIFIABLE,
             delegate->SetDefaultZoom(0.5));
-  EXPECT_EQ(delegate->GetDefaultZoom()->GetDouble(), 0.0);
+  EXPECT_EQ(delegate->GetDefaultZoom().GetDouble(), 0.0);
 }
 
 }  // namespace

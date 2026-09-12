@@ -4,163 +4,210 @@
 
 package org.chromium.chrome.browser.tasks.tab_management;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.content.Context;
 
-import androidx.annotation.NonNull;
-
+import org.chromium.base.Callback;
+import org.chromium.base.Token;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.R;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabCreationState;
 import org.chromium.chrome.browser.tab.TabLaunchType;
+import org.chromium.chrome.browser.tabmodel.TabClosingSource;
+import org.chromium.chrome.browser.tabmodel.TabGroupObserver;
 import org.chromium.chrome.browser.tabmodel.TabModel;
 import org.chromium.chrome.browser.tabmodel.TabModelSelector;
-import org.chromium.chrome.browser.tabmodel.TabModelSelectorObserver;
 import org.chromium.chrome.browser.tabmodel.TabModelSelectorTabModelObserver;
-import org.chromium.chrome.browser.tasks.tab_groups.EmptyTabGroupModelFilterObserver;
-import org.chromium.chrome.browser.tasks.tab_groups.TabGroupModelFilter;
+import org.chromium.chrome.browser.tabmodel.UndoGroupMetadata;
 import org.chromium.chrome.browser.ui.messages.snackbar.Snackbar;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
-import org.chromium.chrome.tab_ui.R;
+import org.chromium.chrome.browser.undo_tab_close_snackbar.UndoBarThrottle;
+import org.chromium.ui.util.TokenHolder;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 /**
- * A controller that listens to
- * {@link TabGroupModelFilter.Observer#didCreateGroup(List, List, List)} and shows a
- * undo snackbar.
+ * A controller that listens to {@link TabGroupObserver#showUndoGroupSnackbar} and shows an undo
+ * snackbar. Also implements {@link UndoBarThrottle} to delay snackbar display during active UI
+ * operations (e.g., drag-and-drop).
  */
-public class UndoGroupSnackbarController implements SnackbarManager.SnackbarController {
+@NullMarked
+public class UndoGroupSnackbarController
+        implements SnackbarManager.SnackbarController, UndoBarThrottle {
     private final Context mContext;
     private final TabModelSelector mTabModelSelector;
     private final SnackbarManager mSnackbarManager;
-    private final TabGroupModelFilter.Observer mTabGroupModelFilterObserver;
-    private final TabModelSelectorObserver mTabModelSelectorObserver;
+    private final TabGroupObserver mTabGroupObserver;
+    private final Callback<TabModel> mCurrentTabModelObserver;
     private final TabModelSelectorTabModelObserver mTabModelSelectorTabModelObserver;
-
-    private class TabUndoInfo {
-        public final Tab tab;
-        public final int tabOriginalIndex;
-        public final int tabOriginalGroupId;
-
-        TabUndoInfo(Tab tab, int tabIndex, int tabGroupId) {
-            this.tab = tab;
-            this.tabOriginalIndex = tabIndex;
-            this.tabOriginalGroupId = tabGroupId;
-        }
-    }
+    private final TokenHolder mThrottle = new TokenHolder(this::maybeShowUndoGroupSnackbar);
+    private @Nullable UndoGroupMetadata mPendingUndoGroupMetadata;
 
     /**
      * @param context The current Android context.
      * @param tabModelSelector The current {@link TabModelSelector}.
      * @param snackbarManager Manages the snackbar.
      */
-    public UndoGroupSnackbarController(@NonNull Context context,
-            @NonNull TabModelSelector tabModelSelector, @NonNull SnackbarManager snackbarManager) {
+    public UndoGroupSnackbarController(
+            Context context, TabModelSelector tabModelSelector, SnackbarManager snackbarManager) {
         mContext = context;
         mTabModelSelector = tabModelSelector;
         mSnackbarManager = snackbarManager;
-        mTabGroupModelFilterObserver = new EmptyTabGroupModelFilterObserver() {
-            @Override
-            public void didCreateGroup(
-                    List<Tab> tabs, List<Integer> tabOriginalIndex, List<Integer> originalRootId) {
-                assert tabs.size() == tabOriginalIndex.size();
+        mTabGroupObserver =
+                new TabGroupObserver() {
+                    @Override
+                    public void willMoveTabOutOfGroup(
+                            Tab movedTab, @Nullable Token destinationTabGroupId) {
+                        // Fix for b/338511492 is to dismiss the snackbar if an ungroup operation
+                        // happens because information that allowed the group action to be undone
+                        // may no longer be usable (incorrect indices, group IDs, etc.).
+                        dismissSnackbars();
+                    }
 
-                List<TabUndoInfo> tabUndoInfo = new ArrayList<>();
-                for (int i = 0; i < tabs.size(); i++) {
-                    Tab tab = tabs.get(i);
-                    int index = tabOriginalIndex.get(i);
-                    int groupId = originalRootId.get(i);
+                    @Override
+                    public void showUndoGroupSnackbar(UndoGroupMetadata undoGroupMetadata) {
+                        if (mThrottle.hasTokens()) {
+                            // Only the most recent undo group snackbar should be preserved while
+                            // throttled. Expire any existing pending operation so we do not leak
+                            // detached tab groups in the TabModel.
+                            expirePendingUndoGroupMetadata();
+                            mPendingUndoGroupMetadata = undoGroupMetadata;
+                        } else {
+                            showUndoGroupSnackbarInternal(undoGroupMetadata);
+                        }
+                    }
+                };
 
-                    tabUndoInfo.add(new TabUndoInfo(tab, index, groupId));
-                }
-                showUndoGroupSnackbar(tabUndoInfo);
-            }
-        };
+        getTabModel(/* isIncognito= */ false).addTabGroupObserver(mTabGroupObserver);
+        getTabModel(/* isIncognito= */ true).addTabGroupObserver(mTabGroupObserver);
 
-        ((TabGroupModelFilter) mTabModelSelector.getTabModelFilterProvider().getTabModelFilter(
-                 false))
-                .addTabGroupObserver(mTabGroupModelFilterObserver);
-        ((TabGroupModelFilter) mTabModelSelector.getTabModelFilterProvider().getTabModelFilter(
-                 true))
-                .addTabGroupObserver(mTabGroupModelFilterObserver);
+        mCurrentTabModelObserver = (tabModel) -> dismissSnackbars();
 
-        mTabModelSelectorObserver = new TabModelSelectorObserver() {
-            @Override
-            public void onTabModelSelected(TabModel newModel, TabModel oldModel) {
-                mSnackbarManager.dismissSnackbars(UndoGroupSnackbarController.this);
-            }
-        };
-
-        mTabModelSelector.addObserver(mTabModelSelectorObserver);
+        mTabModelSelector
+                .getCurrentTabModelSupplier()
+                .addSyncObserverAndPostIfNonNull(mCurrentTabModelObserver);
 
         mTabModelSelectorTabModelObserver =
                 new TabModelSelectorTabModelObserver(mTabModelSelector) {
                     @Override
-                    public void didAddTab(Tab tab, @TabLaunchType int type,
-                            @TabCreationState int creationState, boolean markedForSelection) {
-                        mSnackbarManager.dismissSnackbars(UndoGroupSnackbarController.this);
+                    public void didAddTab(
+                            Tab tab,
+                            @TabLaunchType int type,
+                            @TabCreationState int creationState,
+                            boolean markedForSelection) {
+                        dismissSnackbars();
                     }
 
                     @Override
-                    public void willCloseTab(Tab tab, boolean animate, boolean didCloseAlone) {
-                        mSnackbarManager.dismissSnackbars(UndoGroupSnackbarController.this);
+                    public void willCloseTab(Tab tab, boolean didCloseAlone) {
+                        dismissSnackbars();
                     }
 
                     @Override
-                    public void onFinishingTabClosure(Tab tab) {
-                        mSnackbarManager.dismissSnackbars(UndoGroupSnackbarController.this);
+                    public void willCloseTabs(
+                            List<Tab> tabs, boolean isAllTabs, boolean allowUndo) {
+                        dismissSnackbars();
+                    }
+
+                    @Override
+                    public void onFinishingTabClosure(
+                            Tab tab, @TabClosingSource int closingSource) {
+                        dismissSnackbars();
                     }
                 };
     }
 
     /**
-     * Cleans up this class, removes {@link TabModelSelectorObserver} from {@link TabModelSelector}
-     * and {@link TabGroupModelFilter.Observer} from {@link TabGroupModelFilter}.
+     * Cleans up this class, removes {@link Callback<TabModel>} from {@link
+     * TabModelSelector#getCurrentTabModelSupplier()} and {@link TabGroupObserver} from {@link
+     * TabModel}.
      */
     public void destroy() {
+        expirePendingUndoGroupMetadata();
         if (mTabModelSelector != null) {
-            mTabModelSelector.removeObserver(mTabModelSelectorObserver);
-            ((TabGroupModelFilter) mTabModelSelector.getTabModelFilterProvider().getTabModelFilter(
-                     false))
-                    .removeTabGroupObserver(mTabGroupModelFilterObserver);
-            ((TabGroupModelFilter) mTabModelSelector.getTabModelFilterProvider().getTabModelFilter(
-                     true))
-                    .removeTabGroupObserver(mTabGroupModelFilterObserver);
+            mTabModelSelector.getCurrentTabModelSupplier().removeObserver(mCurrentTabModelObserver);
+            getTabModel(/* isIncognito= */ false).removeTabGroupObserver(mTabGroupObserver);
+            getTabModel(/* isIncognito= */ true).removeTabGroupObserver(mTabGroupObserver);
         }
         mTabModelSelectorTabModelObserver.destroy();
     }
 
-    private void showUndoGroupSnackbar(List<TabUndoInfo> tabUndoInfo) {
-        int mergedGroupSize = mTabModelSelector.getTabModelFilterProvider()
-                                      .getCurrentTabModelFilter()
-                                      .getRelatedTabIds(tabUndoInfo.get(0).tabOriginalGroupId)
-                                      .size();
-        assert mergedGroupSize > 1;
+    // Implement UndoBarThrottle interface.
 
-        String content = String.format(Locale.getDefault(), "%d", mergedGroupSize);
-        mSnackbarManager.showSnackbar(
-                Snackbar.make(content, this, Snackbar.TYPE_ACTION,
-                                Snackbar.UMA_TAB_GROUP_MANUAL_CREATION_UNDO)
-                        .setTemplateText(mContext.getString(R.string.undo_bar_group_tabs_message))
-                        .setAction(mContext.getString(R.string.undo), tabUndoInfo));
+    @Override
+    public int startThrottling() {
+        return mThrottle.acquireToken();
     }
 
     @Override
-    public void onAction(Object actionData) {
-        undo((List<TabUndoInfo>) actionData);
+    public void stopThrottling(int token) {
+        mThrottle.releaseToken(token);
     }
 
-    private void undo(List<TabUndoInfo> data) {
-        assert data.size() != 0;
+    // Implement SnackbarManager.SnackbarController interface.
 
-        TabGroupModelFilter tabGroupModelFilter =
-                (TabGroupModelFilter) mTabModelSelector.getTabModelFilterProvider()
-                        .getCurrentTabModelFilter();
-        for (int i = data.size() - 1; i >= 0; i--) {
-            TabUndoInfo info = data.get(i);
-            tabGroupModelFilter.undoGroupedTab(
-                    info.tab, info.tabOriginalIndex, info.tabOriginalGroupId);
+    @Override
+    public void onAction(@Nullable Object actionData) {
+        assumeNonNull(actionData);
+        UndoGroupMetadata undoGroupMetadata = (UndoGroupMetadata) actionData;
+        TabModel tabModel = getTabModel(undoGroupMetadata.isIncognito());
+        tabModel.performUndoGroupOperation(undoGroupMetadata);
+    }
+
+    @Override
+    public void onDismissNoAction(@Nullable Object actionData) {
+        assumeNonNull(actionData);
+        UndoGroupMetadata undoGroupMetadata = (UndoGroupMetadata) actionData;
+        TabModel tabModel = getTabModel(undoGroupMetadata.isIncognito());
+        tabModel.undoGroupOperationExpired(undoGroupMetadata);
+    }
+
+    private void maybeShowUndoGroupSnackbar() {
+        if (mPendingUndoGroupMetadata != null) {
+            showUndoGroupSnackbarInternal(mPendingUndoGroupMetadata);
+            mPendingUndoGroupMetadata = null;
         }
+    }
+
+    private void dismissSnackbars() {
+        expirePendingUndoGroupMetadata();
+        mSnackbarManager.dismissSnackbars(UndoGroupSnackbarController.this);
+    }
+
+    private void expirePendingUndoGroupMetadata() {
+        if (mPendingUndoGroupMetadata != null) {
+            TabModel tabModel = getTabModel(mPendingUndoGroupMetadata.isIncognito());
+            tabModel.undoGroupOperationExpired(mPendingUndoGroupMetadata);
+            mPendingUndoGroupMetadata = null;
+        }
+    }
+
+    private void showUndoGroupSnackbarInternal(UndoGroupMetadata undoGroupMetadata) {
+        TabModel tabModel = getTabModel(undoGroupMetadata.isIncognito());
+        int mergedGroupSize = tabModel.getTabCountForGroup(undoGroupMetadata.getTabGroupId());
+
+        String content = String.format(Locale.getDefault(), "%d", mergedGroupSize);
+        String templateText;
+        if (mergedGroupSize == 1) {
+            templateText = mContext.getString(R.string.undo_bar_group_tab_message);
+        } else {
+            templateText = mContext.getString(R.string.undo_bar_group_tabs_message);
+        }
+        mSnackbarManager.showSnackbar(
+                Snackbar.make(
+                                content,
+                                this,
+                                Snackbar.TYPE_ACTION,
+                                Snackbar.UMA_TAB_GROUP_MANUAL_CREATION_UNDO)
+                        .setTemplateText(templateText)
+                        .setAction(mContext.getString(R.string.undo), undoGroupMetadata));
+    }
+
+    private TabModel getTabModel(boolean isIncognito) {
+        return mTabModelSelector.getModel(isIncognito);
     }
 }

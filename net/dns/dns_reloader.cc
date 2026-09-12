@@ -16,9 +16,11 @@
 // res_nclose(3), which requires __RES >= 19991006 (most libcs at this point,
 // but not all).
 //
-// Historically, this code was also not used on Apple platforms - /etc/hosts
-// can't change on iOS, but on macOS the situation is less clear.
-// TODO(https://crbug.com/1414923): Why is this not used on macOS?
+// This code is also not used on either macOS or iOS, even though both platforms
+// have res_ninit(3). On iOS, /etc/hosts is immutable so there's no reason for
+// us to watch it; on macOS, there is a system mechanism for listening to DNS
+// changes which does not require use to do this kind of reloading. See
+// //net/dns/dns_config_watcher_mac.cc.
 //
 // It *also* is not used on Android, because Android handles nameserver changes
 // for us and has no /etc/resolv.conf. Despite that, Bionic does export these
@@ -38,7 +40,7 @@
 
 #if defined(USE_RES_NINIT)
 
-#include "base/lazy_instance.h"
+#include "base/no_destructor.h"
 #include "base/notreached.h"
 #include "base/synchronization/lock.h"
 #include "base/task/current_thread.h"
@@ -64,8 +66,8 @@ namespace {
 // Android does not have /etc/resolv.conf. The system takes care of nameserver
 // changes, so none of this is needed.
 //
-// TODO(crbug.com/971411): Convert to SystemDnsConfigChangeNotifier because this
-// really only cares about system DNS config changes, not Chrome effective
+// TODO(crbug.com/40630884): Convert to SystemDnsConfigChangeNotifier because
+// this really only cares about system DNS config changes, not Chrome effective
 // config changes.
 
 class DnsReloader : public NetworkChangeNotifier::DNSObserver {
@@ -112,25 +114,26 @@ class DnsReloader : public NetworkChangeNotifier::DNSObserver {
 
   base::Lock lock_;  // Protects resolver_generation_.
   int resolver_generation_ = 0;
-  friend struct base::LazyInstanceTraitsBase<DnsReloader>;
+  friend class base::NoDestructor<DnsReloader>;
 
   // We use thread local storage to identify which ReloadState to interact with.
   base::ThreadLocalOwnedPointer<ReloadState> tls_reload_state_;
 };
 
-base::LazyInstance<DnsReloader>::Leaky
-    g_dns_reloader = LAZY_INSTANCE_INITIALIZER;
+DnsReloader* GetDnsReloader() {
+  static base::NoDestructor<DnsReloader> dns_reloader;
+  return dns_reloader.get();
+}
 
 }  // namespace
 
 void EnsureDnsReloaderInit() {
-  g_dns_reloader.Pointer();
+  GetDnsReloader();
 }
 
 void DnsReloaderMaybeReload() {
   // This routine can be called by any of the DNS worker threads.
-  DnsReloader* dns_reloader = g_dns_reloader.Pointer();
-  dns_reloader->MaybeReload();
+  GetDnsReloader()->MaybeReload();
 }
 
 }  // namespace net

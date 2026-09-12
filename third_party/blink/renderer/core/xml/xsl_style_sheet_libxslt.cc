@@ -19,22 +19,25 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#include "third_party/blink/renderer/core/execution_context/execution_context.h"
-#include "third_party/blink/renderer/core/xml/xsl_style_sheet.h"
-
 #include <libxml/uri.h>
 #include <libxslt/xsltutils.h>
+
 #include "services/network/public/mojom/fetch_api.mojom-blink.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/node.h"
 #include "third_party/blink/renderer/core/dom/transform_source.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/loader/resource/xsl_style_sheet_resource.h"
+#include "third_party/blink/renderer/core/xml/parser/xml_document_parser.h"
 #include "third_party/blink/renderer/core/xml/parser/xml_document_parser_scope.h"
 #include "third_party/blink/renderer/core/xml/parser/xml_parser_input.h"
+#include "third_party/blink/renderer/core/xml/xsl_style_sheet.h"
+#include "third_party/blink/renderer/core/xml/xslt_extensions.h"
 #include "third_party/blink/renderer/core/xml/xslt_processor.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_initiator_type_names.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_parameters.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -53,7 +56,10 @@ XSLStyleSheet::XSLStyleSheet(XSLStyleSheet* parent_style_sheet,
       stylesheet_doc_taken_(false),
       compilation_failed_(false),
       parent_style_sheet_(parent_style_sheet),
-      owner_document_(nullptr) {}
+      owner_document_(nullptr) {
+  CHECK(XSLTProcessor::IsXSLTEnabled(
+      OwnerDocument() ? OwnerDocument()->GetExecutionContext() : nullptr));
+}
 
 XSLStyleSheet::XSLStyleSheet(Node* parent_node,
                              const String& original_url,
@@ -69,7 +75,10 @@ XSLStyleSheet::XSLStyleSheet(Node* parent_node,
       stylesheet_doc_taken_(false),
       compilation_failed_(false),
       parent_style_sheet_(nullptr),
-      owner_document_(nullptr) {}
+      owner_document_(nullptr) {
+  CHECK(XSLTProcessor::IsXSLTEnabled(
+      OwnerDocument() ? OwnerDocument()->GetExecutionContext() : nullptr));
+}
 
 XSLStyleSheet::XSLStyleSheet(Document* owner_document,
                              Node* style_sheet_root_node,
@@ -86,7 +95,10 @@ XSLStyleSheet::XSLStyleSheet(Document* owner_document,
       stylesheet_doc_taken_(false),
       compilation_failed_(false),
       parent_style_sheet_(nullptr),
-      owner_document_(owner_document) {}
+      owner_document_(owner_document) {
+  CHECK(XSLTProcessor::IsXSLTEnabled(
+      owner_document ? owner_document->GetExecutionContext() : nullptr));
+}
 
 XSLStyleSheet::~XSLStyleSheet() {
   if (!stylesheet_doc_taken_)
@@ -113,9 +125,13 @@ void XSLStyleSheet::ClearDocuments() {
 }
 
 bool XSLStyleSheet::ParseString(const String& source) {
+  XMLDocumentParser::EnsureLibXMLInitialized();
+
   // Parse in a single chunk into an xmlDocPtr
-  if (!stylesheet_doc_taken_)
+  if (!stylesheet_doc_taken_) {
     xmlFreeDoc(stylesheet_doc_);
+    stylesheet_doc_ = nullptr;
+  }
   stylesheet_doc_taken_ = false;
 
   FrameConsole* console = nullptr;
@@ -189,8 +205,14 @@ void XSLStyleSheet::LoadChildSheets() {
       if (IS_XSLT_ELEM(curr) && IS_XSLT_NAME(curr, "import")) {
         xmlChar* uri_ref =
             xsltGetNsProp(curr, (const xmlChar*)"href", XSLT_NAMESPACE);
-        LoadChildSheet(String::FromUTF8((const char*)uri_ref));
+        LoadChildSheet(String::FromUtf8((const char*)uri_ref));
         xmlFree(uri_ref);
+
+        // crbug.com/496271580: LoadChildSheet() can trigger synchronous
+        // destruction of the stylesheet's xmlDoc. Bail out to avoid UAF.
+        if (stylesheet_doc_taken_) {
+          return;
+        }
       } else {
         break;
       }
@@ -203,8 +225,14 @@ void XSLStyleSheet::LoadChildSheets() {
           IS_XSLT_NAME(curr, "include")) {
         xmlChar* uri_ref =
             xsltGetNsProp(curr, (const xmlChar*)"href", XSLT_NAMESPACE);
-        LoadChildSheet(String::FromUTF8((const char*)uri_ref));
+        LoadChildSheet(String::FromUtf8((const char*)uri_ref));
         xmlFree(uri_ref);
+
+        // crbug.com/496271580: LoadChildSheet() can trigger synchronous
+        // destruction of the stylesheet's xmlDoc. Bail out to avoid UAF.
+        if (stylesheet_doc_taken_) {
+          return;
+        }
       }
       curr = curr->next;
     }
@@ -244,6 +272,8 @@ void XSLStyleSheet::LoadChildSheet(const String& href) {
 }
 
 xsltStylesheetPtr XSLStyleSheet::CompileStyleSheet() {
+  InitializeLibXSLT();
+
   // FIXME: Hook up error reporting for the stylesheet compilation process.
   if (embedded_)
     return xsltLoadStylesheetPI(GetDocument());

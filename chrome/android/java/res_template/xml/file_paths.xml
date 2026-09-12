@@ -12,6 +12,7 @@ found in the LICENSE file.
     <files-path name="images" path="images/"/>
     <cache-path name="cache" path="net-export/"/>
     <cache-path name="passwords" path="passwords/"/>
+    <cache-path name="pdfs" path="pdfs/"/>
     <cache-path name="traces" path="traces/"/>
     <cache-path name="webapk" path="webapks/" />
     <cache-path name="offline-cache" path="Offline Pages/archives/" />
@@ -20,4 +21,5 @@ found in the LICENSE file.
          content:// URIs for downloads. This may no longer work if/when users
          are allowed to save files elsewhere. -->
     <external-path name="downloads" path="Download/" />
+    <external-files-path name="net_export" path="Download/net-export/" />
 </paths>

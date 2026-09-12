@@ -2,27 +2,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var messages = ['hey', 100, 25.0];
-var messagesSent = 0;
-var messagesReceived = 0;
+const messages = ['hey', 100, 25.0];
+let messagesSent = 0;
+let messagesReceived = 0;
 
 window.addEventListener('message', function(event) {
-  if (event.data == messages[messagesReceived]) {
+  if (event.data === messages[messagesReceived]) {
     messagesReceived++;
-    if (messagesReceived == messages.length)
+    if (messagesReceived === messages.length) {
       // Instruct the extension to call chrome.test.succeed().
       plugin.postMessage('succeed');
+    }
   } else {
     // Instruct the extension to call chrome.test.fail().
     plugin.postMessage('fail');
   }
 }, false);
 
-var plugin = document.getElementById('plugin');
+const plugin = document.getElementById('plugin');
 function postNextMessage() {
   plugin.postMessage(messages[messagesSent]);
   messagesSent++;
-  if (messagesSent < messages.length)
+  if (messagesSent < messages.length) {
     setTimeout(postNextMessage, 0);
+  }
 }
 postNextMessage();

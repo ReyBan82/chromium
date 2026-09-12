@@ -5,14 +5,15 @@
 #ifndef MEDIA_FUCHSIA_VIDEO_FUCHSIA_VIDEO_DECODER_H_
 #define MEDIA_FUCHSIA_VIDEO_FUCHSIA_VIDEO_DECODER_H_
 
+#include <fuchsia/media/cpp/fidl.h>
+#include <lib/zx/eventpair.h>
+
 #include <deque>
 #include <memory>
 #include <vector>
 
-#include <fuchsia/media/cpp/fidl.h>
-#include <lib/zx/eventpair.h>
-
 #include "base/memory/scoped_refptr.h"
+#include "base/sequence_checker.h"
 #include "media/base/media_export.h"
 #include "media/base/video_decoder.h"
 #include "media/base/video_decoder_config.h"
@@ -20,10 +21,6 @@
 #include "media/fuchsia/common/sysmem_client.h"
 #include "media/mojo/mojom/fuchsia_media.mojom.h"
 #include "mojo/public/cpp/bindings/shared_remote.h"
-
-namespace gfx {
-class ClientNativePixmapFactory;
-}  // namespace gfx
 
 namespace viz {
 class RasterContextProvider;
@@ -67,9 +64,6 @@ class MEDIA_EXPORT FuchsiaVideoDecoder : public VideoDecoder,
   bool CanReadWithoutStalling() const override;
   int GetMaxDecodeRequests() const override;
 
-  void SetClientNativePixmapFactoryForTests(
-      std::unique_ptr<gfx::ClientNativePixmapFactory> factory);
-
  private:
   class OutputMailbox;
 
@@ -79,7 +73,7 @@ class MEDIA_EXPORT FuchsiaVideoDecoder : public VideoDecoder,
 
   // SysmemBufferStream::Sink implementation.
   void OnSysmemBufferStreamBufferCollectionToken(
-      fuchsia::sysmem::BufferCollectionTokenPtr token) override;
+      fuchsia::sysmem2::BufferCollectionTokenPtr token) override;
   void OnSysmemBufferStreamOutputPacket(
       StreamProcessorHelper::IoPacket packet) override;
   void OnSysmemBufferStreamEndOfStream() override;
@@ -87,6 +81,9 @@ class MEDIA_EXPORT FuchsiaVideoDecoder : public VideoDecoder,
   void OnSysmemBufferStreamNoKey() override;
 
   // StreamProcessorHelper::Client implementation.
+  void OnStreamProcessorAllocateInputBuffers(
+      const fuchsia::media::StreamBufferConstraints& stream_constraints)
+      override;
   void OnStreamProcessorAllocateOutputBuffers(
       const fuchsia::media::StreamBufferConstraints& stream_constraints)
       override;
@@ -111,7 +108,7 @@ class MEDIA_EXPORT FuchsiaVideoDecoder : public VideoDecoder,
   // Callback for SysmemBufferCollection::CreateSharedToken(), used to send the
   // sysmem buffer collection token to the GPU process.
   void SetBufferCollectionTokenForGpu(
-      fuchsia::sysmem::BufferCollectionTokenPtr token);
+      fuchsia::sysmem2::BufferCollectionTokenPtr token);
 
   // Called by OutputMailbox to signal that the output buffer can be reused.
   void ReleaseOutputPacket(StreamProcessorHelper::IoPacket packet);
@@ -127,6 +124,7 @@ class MEDIA_EXPORT FuchsiaVideoDecoder : public VideoDecoder,
 
   OutputCB output_cb_;
   WaitingCB waiting_cb_;
+  InitCB init_cb_;
 
   std::unique_ptr<SysmemBufferStream> sysmem_buffer_stream_;
 
@@ -138,7 +136,6 @@ class MEDIA_EXPORT FuchsiaVideoDecoder : public VideoDecoder,
   std::unique_ptr<StreamProcessorHelper> decoder_;
 
   SysmemAllocatorClient sysmem_allocator_;
-  std::unique_ptr<gfx::ClientNativePixmapFactory> client_native_pixmap_factory_;
 
   // Callbacks for pending Decode() request.
   std::deque<DecodeCB> decode_callbacks_;

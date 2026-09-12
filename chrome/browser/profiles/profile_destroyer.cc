@@ -5,9 +5,11 @@
 #include "chrome/browser/profiles/profile_destroyer.h"
 
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <utility>
 
+#include "base/debug/alias.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -18,7 +20,6 @@
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/typed_macros.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/browser_features.h"
 #include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/render_process_host.h"
@@ -29,7 +30,7 @@ namespace {
 // Set the render host waiting time to 5s on Android, that's the same
 // as an "Application Not Responding" timeout.
 const int64_t kTimerDelaySeconds = 5;
-#elif BUILDFLAG(IS_CHROMEOS_ASH)
+#elif BUILDFLAG(IS_CHROMEOS)
 // linux-chromeos-dbg is failing to destroy the profile in under 1 second
 const int64_t kTimerDelaySeconds = 2;
 #else
@@ -116,10 +117,25 @@ class OriginalProfileDestroyer : public ProfileDestroyer {
 };
 
 // static
+std::optional<base::TimeDelta>
+    ProfileDestroyer::destroy_profile_timeout_override_;
+
+// static
+void ProfileDestroyer::SetDestroyProfileTimeoutForTesting(  // IN-TEST
+    base::TimeDelta timeout) {
+  destroy_profile_timeout_override_ = timeout;
+}
+
+// static
+base::TimeDelta ProfileDestroyer::GetDestroyProfileTimeout() {
+  return destroy_profile_timeout_override_.value_or(
+      base::Seconds(kTimerDelaySeconds));
+}
+
 void ProfileDestroyer::DestroyOriginalProfileWhenAppropriate(
     std::unique_ptr<Profile> profile) {
-  DestroyOriginalProfileWhenAppropriateWithTimeout(
-      std::move(profile), base::Seconds(kTimerDelaySeconds));
+  DestroyOriginalProfileWhenAppropriateWithTimeout(std::move(profile),
+                                                   GetDestroyProfileTimeout());
 }
 
 void ProfileDestroyer::DestroyOriginalProfileWhenAppropriateWithTimeout(
@@ -153,8 +169,8 @@ void ProfileDestroyer::DestroyOriginalProfileWhenAppropriateWithTimeout(
 }
 
 void ProfileDestroyer::DestroyOTRProfileWhenAppropriate(Profile* profile) {
-  DestroyOTRProfileWhenAppropriateWithTimeout(
-      profile, base::Seconds(kTimerDelaySeconds));
+  DestroyOTRProfileWhenAppropriateWithTimeout(profile,
+                                              GetDestroyProfileTimeout());
 }
 
 void ProfileDestroyer::DestroyOTRProfileImmediately(Profile* profile) {
@@ -294,9 +310,9 @@ void ProfileDestroyer::DestroyOriginalProfileNow(
   // RenderProcessHosts in --single-process mode, to avoid race conditions.
   if (!content::RenderProcessHost::run_renderer_in_process()) {
     DCHECK_EQ(profile_hosts_count, 0u);
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
     // ChromeOS' system profile can be outlived by its off-the-record profile
-    // (see https://crbug.com/828479).
+    // (see https://crbug.com/40569888).
     DCHECK_EQ(off_the_record_profile_hosts_count, 0u);
 #endif
   }
@@ -352,7 +368,7 @@ ProfileDestroyer::~ProfileDestroyer() {
               });
   // Don't wait for pending registrations, if any, these hosts are buggy.
   // Note: this can happen, but if so, it's better to crash here than wait
-  // for the host to dereference a deleted Profile. http://crbug.com/248625
+  // for the host to dereference a deleted Profile. http://crbug.com/41017156
   UMA_HISTOGRAM_ENUMERATION("Profile.Destroyer.OffTheRecord",
                             observations_.IsObservingAnySource()
                                 ? ProfileDestructionType::kDelayedAndCrashed
@@ -362,7 +378,7 @@ ProfileDestroyer::~ProfileDestroyer() {
   CHECK(!observations_.IsObservingAnySource())
       << "Some render process hosts were not destroyed early enough!";
   auto iter = PendingDestroyers().find(this);
-  DCHECK(iter != PendingDestroyers().end());
+  CHECK(iter != PendingDestroyers().end());
   PendingDestroyers().erase(iter);
 }
 
@@ -409,8 +425,9 @@ void ProfileDestroyer::GetHostsForProfile(HostSet* out,
       continue;
 
     // Ignore the spare RenderProcessHost.
-    if (render_process_host->HostHasNotBeenUsed() && !include_spare_rph)
+    if (render_process_host->IsSpare() && !include_spare_rph) {
       continue;
+    }
 
     TRACE_EVENT(
         "shutdown", "ProfileDestroyer::GetHostsForProfile",

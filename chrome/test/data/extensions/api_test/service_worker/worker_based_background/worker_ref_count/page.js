@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var FAILURE_MESSAGE = 'FAILURE';
+const FAILURE_MESSAGE = 'FAILURE';
 
 function getServiceWorker() {
   return new Promise(function(resolve, reject) {
-    navigator.serviceWorker.ready.then(function (registration) {
+    navigator.serviceWorker.ready.then(function(registration) {
       resolve(registration.active);
     });
   });
@@ -18,9 +18,9 @@ window.testSendMessage = function() {
       chrome.test.sendMessage(FAILURE_MESSAGE);
       return;
     }
-    var channel = new MessageChannel();
+    const channel = new MessageChannel();
     channel.port1.onmessage = function(e) {
-      if (e.data != 'Worker reply: Hello world') {
+      if (e.data !== 'Worker reply: Hello world') {
         chrome.test.sendMessage(FAILURE_MESSAGE);
       }
     };
@@ -29,18 +29,19 @@ window.testSendMessage = function() {
 };
 
 window.roundtripToWorker = function() {
-  getServiceWorker().then(function(serviceWorker) {
-    if (serviceWorker == null) {
-      window.domAutomationController.send('roundtrip-failed');
-    }
-    var channel = new MessageChannel();
-    channel.port1.onmessage = function(e) {
-      if (e.data == 'roundtrip-response') {
-        window.domAutomationController.send('roundtrip-succeeded');
-      } else {
-        window.domAutomationController.send('roundtrip-failed');
+  return getServiceWorker().then(function(serviceWorker) {
+    return new Promise(resolve => {
+      if (serviceWorker == null) {
+        return resolve('roundtrip-failed');
       }
-    };
-    serviceWorker.postMessage('roundtrip-request', [channel.port2]);
+      const channel = new MessageChannel();
+      channel.port1.onmessage = function(e) {
+        if (e.data === 'roundtrip-response') {
+          return resolve('roundtrip-succeeded');
+        }
+        return resolve('roundtrip-failed');
+      };
+      serviceWorker.postMessage('roundtrip-request', [channel.port2]);
+    });
   });
 };

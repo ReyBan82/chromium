@@ -11,10 +11,13 @@
 #include "base/time/default_clock.h"
 #include "build/build_config.h"
 #include "chrome/browser/invalidation/profile_invalidation_provider_factory.h"
+#include "chrome/browser/policy/cloud/cloud_policy_invalidator.h"
+#include "chrome/browser/policy/policy_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "components/invalidation/impl/profile_invalidation_provider.h"
-#include "components/policy/core/common/cloud/cloud_policy_constants.h"
+#include "components/invalidation/profile_invalidation_provider.h"
 #include "components/policy/core/common/cloud/cloud_policy_manager.h"
+#include "components/policy/core/common/features.h"
+#include "extensions/buildflags/buildflags.h"
 
 namespace {
 
@@ -31,11 +34,7 @@ namespace policy {
 UserCloudPolicyInvalidator::UserCloudPolicyInvalidator(
     Profile* profile,
     CloudPolicyManager* policy_manager)
-    : CloudPolicyInvalidator(PolicyInvalidationScope::kUser,
-                             policy_manager->core(),
-                             base::SingleThreadTaskRunner::GetCurrentDefault(),
-                             base::DefaultClock::GetInstance(),
-                             0 /* highest_handled_invalidation_version */) {
+    : profile_(profile), policy_manager_(policy_manager) {
   DCHECK(profile);
 
   // Register for notification that profile creation is complete. The
@@ -45,15 +44,42 @@ UserCloudPolicyInvalidator::UserCloudPolicyInvalidator(
   // TODO(stepco): Delayed initialization can be removed once the request
   // context can be accessed during profile-keyed service creation. Tracked by
   // bug 286209.
-  // TODO(crbug.com/1038437): Investigate if this is still required.
+  // TODO(crbug.com/40113187): Investigate if this is still required.
   profile_observation_.Observe(profile);
 }
 
 UserCloudPolicyInvalidator::~UserCloudPolicyInvalidator() = default;
 
+void UserCloudPolicyInvalidator::StartExtensionInstallInvalidator() {
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  CHECK(base::FeatureList::IsEnabled(
+      policy::features::kEnableExtensionInstallPolicyFetching));
+
+  invalidation::ProfileInvalidationProvider* invalidation_provider =
+      GetInvalidationProvider(profile_);
+  if (!invalidation_provider) {
+    return;
+  }
+  auto* core = policy_manager_->extension_install_core();
+  CHECK(core) << "Extension install core must be initialized.";
+  extension_install_invalidator_ =
+      std::make_unique<ExtensionInstallPolicyInvalidator>(
+          PolicyInvalidationScope::kUser,
+          invalidation_provider->GetInvalidationListener(
+              policy::kPolicyInvalidationProjectNumber),
+          core, base::SingleThreadTaskRunner::GetCurrentDefault(),
+          base::DefaultClock::GetInstance());
+#else
+  NOTREACHED();
+#endif
+}
+
 void UserCloudPolicyInvalidator::Shutdown() {
   profile_observation_.Reset();
-  CloudPolicyInvalidator::Shutdown();
+    invalidator_.reset();
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+    extension_install_invalidator_.reset();
+#endif
 }
 
 void UserCloudPolicyInvalidator::OnProfileInitializationComplete(
@@ -65,10 +91,17 @@ void UserCloudPolicyInvalidator::OnProfileInitializationComplete(
   // service can safely be initialized.
   invalidation::ProfileInvalidationProvider* invalidation_provider =
       GetInvalidationProvider(profile);
-  if (!invalidation_provider)
+  if (!invalidation_provider) {
     return;
-  Initialize(invalidation_provider->GetInvalidationServiceForCustomSender(
-      policy::kPolicyFCMInvalidationSenderID));
+  }
+
+  invalidator_ = std::make_unique<CloudPolicyInvalidator>(
+      PolicyInvalidationScope::kUser,
+      invalidation_provider->GetInvalidationListener(
+          policy::kPolicyInvalidationProjectNumber),
+      policy_manager_->core(),
+      base::SingleThreadTaskRunner::GetCurrentDefault(),
+      base::DefaultClock::GetInstance());
 }
 
 }  // namespace policy

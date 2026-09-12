@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   const pageURL = `http://devtools.test:8000/inspector-protocol/resources/empty.html`;
   const crossProcessURL = `https://devtools.test:8443/inspector-protocol/resources/empty.html`;
   const {page, session, dp} = await testRunner.startURL(pageURL,
@@ -19,7 +19,8 @@
   `);
   testRunner.log('Opened the window');
   const attachedEvent = await target.onceAttachedToTarget();
-  const popupSession = new TestRunner.Session(testRunner, attachedEvent.params.sessionId);
+  const popupSession =
+      testRunner.createSessionFor(attachedEvent.params.sessionId);
   popupSession.protocol.Page.enable();
   popupSession.protocol.Runtime.runIfWaitingForDebugger();
   await popupSession.protocol.Page.onceLoadEventFired();

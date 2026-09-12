@@ -10,22 +10,23 @@
 import 'chrome://resources/polymer/v3_0/iron-icon/iron-icon.js';
 import 'chrome://resources/polymer/v3_0/paper-ripple/paper-ripple.js';
 
-import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {Url} from 'chrome://resources/mojo/url/mojom/url.mojom-webui.js';
+import {isNonEmptyArray} from 'chrome://resources/ash/common/sea_pen/sea_pen_utils.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+import type {Url} from 'chrome://resources/mojo/url/mojom/url.mojom-webui.js';
 import {IronA11yAnnouncer} from 'chrome://resources/polymer/v3_0/iron-a11y-announcer/iron-a11y-announcer.js';
 
-import {UserImage, UserInfo} from '../../personalization_app.mojom-webui.js';
-import {isPersonalizationJellyEnabled} from '../load_time_booleans.js';
-import {Paths, PersonalizationRouter} from '../personalization_router_element.js';
+import type {UserImage, UserInfo} from '../../personalization_app.mojom-webui.js';
+import {Paths, PersonalizationRouterElement} from '../personalization_router_element.js';
 import {WithPersonalizationStore} from '../personalization_store.js';
-import {decodeString16, isNonEmptyArray, isNonEmptyString} from '../utils.js';
+import {isNonEmptyString} from '../utils.js';
 
 import {initializeUserData} from './user_controller.js';
 import {UserImageObserver} from './user_image_observer.js';
 import {getUserProvider} from './user_interface_provider.js';
 import {getTemplate} from './user_preview_element.html.js';
 import {selectUserImageUrl} from './user_selectors.js';
+import {getAvatarUrl} from './utils.js';
 
 class AvatarChangedEvent extends CustomEvent<{text: string}> {
   constructor() {
@@ -40,7 +41,7 @@ class AvatarChangedEvent extends CustomEvent<{text: string}> {
   }
 }
 
-export class UserPreview extends WithPersonalizationStore {
+export class UserPreviewElement extends WithPersonalizationStore {
   static get is() {
     return 'user-preview';
   }
@@ -63,21 +64,14 @@ export class UserPreview extends WithPersonalizationStore {
         type: Boolean,
         value: null,
       },
-      isPersonalizationJellyEnabled_: {
-        type: Boolean,
-        value() {
-          return isPersonalizationJellyEnabled();
-        },
-      },
     };
   }
 
-  private path: string;
-  private info_: UserInfo|null;
-  private image_: UserImage|null;
-  private imageUrl_: Url|null;
-  private imageIsEnterpriseManaged_: boolean|null;
-  private isPersonalizationJellyEnabled_: boolean;
+  declare private path: string;
+  declare private info_: UserInfo|null;
+  declare private image_: UserImage|null;
+  declare private imageUrl_: Url|null;
+  declare private imageIsEnterpriseManaged_: boolean|null;
 
   override ready() {
     super.ready();
@@ -87,10 +81,12 @@ export class UserPreview extends WithPersonalizationStore {
   override connectedCallback() {
     super.connectedCallback();
     UserImageObserver.initUserImageObserverIfNeeded();
-    this.watch<UserPreview['info_']>('info_', state => state.user.info);
-    this.watch<UserPreview['image_']>('image_', state => state.user.image);
-    this.watch<UserPreview['imageUrl_']>('imageUrl_', selectUserImageUrl);
-    this.watch<UserPreview['imageIsEnterpriseManaged_']>(
+    this.watch<UserPreviewElement['info_']>('info_', state => state.user.info);
+    this.watch<UserPreviewElement['image_']>(
+        'image_', state => state.user.image);
+    this.watch<UserPreviewElement['imageUrl_']>(
+        'imageUrl_', selectUserImageUrl);
+    this.watch<UserPreviewElement['imageIsEnterpriseManaged_']>(
         'imageIsEnterpriseManaged_',
         state => state.user.imageIsEnterpriseManaged);
     this.updateFromStore();
@@ -98,13 +94,18 @@ export class UserPreview extends WithPersonalizationStore {
   }
 
   private onClickUserSubpageLink_() {
-    PersonalizationRouter.instance().goToRoute(Paths.USER);
+    PersonalizationRouterElement.instance().goToRoute(Paths.USER);
   }
 
   private onImageUrlChanged_(value: Url|null, old: Url|null): void {
     if (value && old) {
       this.dispatchEvent(new AvatarChangedEvent());
     }
+  }
+
+  private onImgError_(e: Event) {
+    const divElement = e.currentTarget as HTMLDivElement;
+    divElement.setAttribute('hidden', 'true');
   }
 
   private shouldShowMainPageView_(path: string, isEnterpriseManaged: boolean):
@@ -135,7 +136,7 @@ export class UserPreview extends WithPersonalizationStore {
       return '';
     }
     if (image.defaultImage) {
-      return decodeString16(image.defaultImage.title);
+      return image.defaultImage.title;
     }
     if (image.externalImage) {
       return this.i18n('lastExternalImageTitle');
@@ -153,34 +154,41 @@ export class UserPreview extends WithPersonalizationStore {
    * images . Static image loads faster and will provide a smooth experience
    * when the animated image complete loading.
    */
-  private getImgBackgroudStyle_(url: Url|null): string {
+  private getImgBackgroundStyle_(url: string|null): string {
     // Only add background image for default user images.
-    if (!this.image_ || this.image_.invalidImage || !this.image_.defaultImage) {
+    if (!this.image_ || this.image_.invalidImage || !this.image_.defaultImage ||
+        !url) {
       return '';
     }
+    assert(
+        !url.startsWith('chrome://image/'), 'The url should not be sanitized');
+    return `background-image: url('${
+        getAvatarUrl(url, /*staticEncode=*/ true)}')`;
+  }
 
-    return `background-image: url('` + url + `&staticEncode=true')`;
+  private getAvatarUrl_(url: string): string {
+    return getAvatarUrl(url);
   }
 
   private shouldShowDeprecatedImageSourceInfo_(image: UserImage|null): boolean {
     return !!image && !!image.defaultImage && !!image.defaultImage.sourceInfo &&
-        isNonEmptyArray(image.defaultImage.sourceInfo.author.data) &&
-        isNonEmptyString(image.defaultImage.sourceInfo.website.url);
+        isNonEmptyString(image.defaultImage.sourceInfo.author) &&
+        isNonEmptyString(image.defaultImage.sourceInfo.website);
   }
 
   private getDeprecatedAuthor_(image: UserImage): string {
     assert(
         image && image.defaultImage && image.defaultImage.sourceInfo,
         'only called for deprecated default images with sourceInfo');
-    return decodeString16(image.defaultImage.sourceInfo.author);
+    return image.defaultImage.sourceInfo.author;
   }
 
   private getDeprecatedWebsite_(image: UserImage): string {
     assert(
         image && image.defaultImage && image.defaultImage.sourceInfo,
         'only called for deprecated default images with sourceInfo');
-    return image.defaultImage.sourceInfo.website.url;
+    return image.defaultImage.sourceInfo.website;
   }
 }
 
-customElements.define(UserPreview.is, UserPreview);
+customElements.define(UserPreviewElement.is, UserPreviewElement);

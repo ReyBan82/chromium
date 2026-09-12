@@ -7,8 +7,8 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/values.h"
-#include "chrome/browser/enterprise/connectors/device_trust/signals/decorators/common/metrics_utils.h"
 #include "components/device_signals/core/common/signals_constants.h"
+#include "components/enterprise/device_trust/core/metrics_utils.h"
 #include "components/policy/core/common/cloud/cloud_policy_util.h"
 #include "components/version_info/version_info.h"
 
@@ -25,7 +25,7 @@ CommonSignalsDecorator::CommonSignalsDecorator() = default;
 
 CommonSignalsDecorator::~CommonSignalsDecorator() = default;
 
-void CommonSignalsDecorator::Decorate(base::Value::Dict& signals,
+void CommonSignalsDecorator::Decorate(base::DictValue& signals,
                                       base::OnceClosure done_closure) {
   auto start_time = base::TimeTicks::Now();
   signals.Set(device_signals::names::kOs, policy::GetOSPlatform());
@@ -50,7 +50,7 @@ void CommonSignalsDecorator::Decorate(base::Value::Dict& signals,
 }
 
 void CommonSignalsDecorator::OnHardwareInfoRetrieved(
-    base::Value::Dict& signals,
+    base::DictValue& signals,
     base::TimeTicks start_time,
     base::OnceClosure done_closure,
     base::SysInfo::HardwareInfo hardware_info) {
@@ -64,7 +64,7 @@ void CommonSignalsDecorator::OnHardwareInfoRetrieved(
   std::move(done_closure).Run();
 }
 
-void CommonSignalsDecorator::UpdateFromCache(base::Value::Dict& signals) {
+void CommonSignalsDecorator::UpdateFromCache(base::DictValue& signals) {
   signals.Set(device_signals::names::kDeviceModel,
               cached_device_model_.value());
   signals.Set(device_signals::names::kDeviceManufacturer,

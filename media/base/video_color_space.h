@@ -13,11 +13,10 @@ namespace media {
 // Described in ISO 23001-8:2016
 class MEDIA_EXPORT VideoColorSpace {
  public:
-  // These values are persisted to logs. Entries should not be renumbered or
-  // removed and numeric values should never be reused.
-  // Please keep in sync with "VideoColorSpace.PrimaryID"
-  // in src/tools/metrics/histograms/enums.xml.
   // Table 2
+  //
+  // TODO(https://crbug.com/380457000): Delete this enum and use
+  // `SkNamedPrimaries::CicpId` instead.
   enum class PrimaryID : uint8_t {
     INVALID = 0,
     BT709 = 1,
@@ -35,11 +34,10 @@ class MEDIA_EXPORT VideoColorSpace {
     kMaxValue = EBU_3213_E,
   };
 
-  // These values are persisted to logs. Entries should not be renumbered or
-  // removed and numeric values should never be reused.
-  // Please keep in sync with "VideoColorSpace.TransferID"
-  // in src/tools/metrics/histograms/enums.xml.
   // Table 3
+  //
+  // TODO(https://crbug.com/380457000): Delete this enum and use
+  // `SkNamedTransferFn::CicpId` instead.
   enum class TransferID : uint8_t {
     INVALID = 0,
     BT709 = 1,
@@ -76,6 +74,7 @@ class MEDIA_EXPORT VideoColorSpace {
     SMPTE240M = 7,
     YCOCG = 8,
     BT2020_NCL = 9,
+    // NOTE: BT2020_CL is no longer supported (b/333906350).
     BT2020_CL = 10,
     YDZDX = 11,
     INVALID = 255,
@@ -91,12 +90,15 @@ class MEDIA_EXPORT VideoColorSpace {
                   TransferID transfer,
                   MatrixID matrix,
                   gfx::ColorSpace::RangeID range);
-
   bool operator==(const VideoColorSpace& other) const;
   bool operator!=(const VideoColorSpace& other) const;
-  // Returns true if any of the fields have a value other
+
+  // Returns true if all of the fields have a value other
   // than INVALID or UNSPECIFIED.
   bool IsSpecified() const;
+
+  // Returns true if the transfer function is HDR (PQ or HLG).
+  bool IsHDR() const;
 
   // These will return INVALID if the number you give it
   // is not a valid enum value.
@@ -109,15 +111,31 @@ class MEDIA_EXPORT VideoColorSpace {
   static VideoColorSpace JPEG();
 
   gfx::ColorSpace ToGfxColorSpace() const;
+
+  // Similar to ToGfxColorSpace(), but attempts to guess a gfx::ColorSpace from
+  // a fully or partially specified VideoColorSpace. E.g., a completely invalid
+  // VideoColorSpace will return a BT.709 gfx::ColorSpace.
+  gfx::ColorSpace GuessGfxColorSpace() const;
+
   std::string ToString() const;
 
   static VideoColorSpace FromGfxColorSpace(const gfx::ColorSpace& color_space);
 
-  // Note, these are public variables.
-  PrimaryID primaries = PrimaryID::INVALID;
-  TransferID transfer = TransferID::INVALID;
-  MatrixID matrix = MatrixID::INVALID;
-  gfx::ColorSpace::RangeID range = gfx::ColorSpace::RangeID::INVALID;
+  PrimaryID primaries() const;
+  TransferID transfer() const;
+  MatrixID matrix() const;
+  gfx::ColorSpace::RangeID range() const { return color_space_.GetRangeID(); }
+
+ private:
+  VideoColorSpace(gfx::ColorSpace color_space,
+                  bool primaries_unspecified,
+                  bool transfer_unspecified,
+                  bool matrix_unspecified);
+
+  gfx::ColorSpace color_space_;
+  bool primaries_unspecified_ = true;
+  bool transfer_unspecified_ = true;
+  bool matrix_unspecified_ = true;
 };
 
 }  // namespace media

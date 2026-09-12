@@ -4,7 +4,10 @@
 
 #include "ui/views/controls/textfield/textfield_controller.h"
 
+#include <utility>
+
 #include "base/functional/callback_helpers.h"
+#include "ui/base/clipboard/scoped_clipboard_writer.h"
 #include "ui/base/dragdrop/mojom/drag_drop_types.mojom.h"
 #include "ui/events/event.h"
 
@@ -26,14 +29,32 @@ bool TextfieldController::HandleGestureEvent(
   return false;
 }
 
-ui::mojom::DragOperation TextfieldController::OnDrop(
-    const ui::DropTargetEvent& event) {
-  return ui::mojom::DragOperation::kNone;
-}
-
 views::View::DropCallback TextfieldController::CreateDropCallback(
     const ui::DropTargetEvent& event) {
   return base::NullCallback();
+}
+
+bool TextfieldController::OnBeforeCutOrCopy(Textfield* sender,
+                                            std::u16string* copy_contents) {
+  // Default implementation does not intercept copy/cut. Controllers may
+  // override this to supply copy/cut contents and return true to bypass default
+  // clipboard write.
+  return false;
+}
+
+void TextfieldController::OnBeforePaste(
+    Textfield* sender,
+    base::OnceCallback<void(std::optional<std::u16string>)> callback) {
+  // Default implementation does not intercept paste. Controllers may override
+  // this to supply paste contents by invoking `callback` with a value to bypass
+  // default clipboard read.
+  std::move(callback).Run(std::nullopt);
+}
+
+std::unique_ptr<ui::ScopedClipboardWriter>
+TextfieldController::CreateClipboardWriter() {
+  return std::make_unique<ui::ScopedClipboardWriter>(
+      ui::ClipboardBuffer::kCopyPaste);
 }
 
 }  // namespace views

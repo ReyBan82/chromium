@@ -10,11 +10,12 @@
 #include "chrome/browser/device_identity/device_oauth2_token_service.h"
 #include "chrome/browser/device_identity/device_oauth2_token_service_factory.h"
 #include "chrome/browser/device_identity/device_oauth2_token_store_desktop.h"
-#include "components/os_crypt/os_crypt_mocker.h"
+#include "components/os_crypt/async/browser/test_utils.h"
 #include "components/policy/core/common/cloud/mock_cloud_policy_client.h"
 #include "components/prefs/testing_pref_service.h"
 #include "content/public/test/browser_task_environment.h"
 #include "google_apis/gaia/gaia_urls.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -52,7 +53,9 @@ class CBCMInvalidationsInitializerTest
     : public testing::Test,
       public CBCMInvalidationsInitializer::Delegate {
  public:
-  CBCMInvalidationsInitializerTest() = default;
+  CBCMInvalidationsInitializerTest()
+      : os_crypt_async_(os_crypt_async::GetTestOSCryptAsyncForTesting(
+            /*is_sync_for_unittests=*/true)) {}
 
   void RefreshTokenSavedCallbackExpectSuccess(bool success) {
     EXPECT_TRUE(success);
@@ -89,29 +92,24 @@ class CBCMInvalidationsInitializerTest
 
   std::string MakeTokensFromAuthCodesResponse(const std::string& refresh_token,
                                               const std::string& access_token) {
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set("access_token", access_token);
     dict.Set("refresh_token", refresh_token);
     dict.Set("expires_in", 9999);
-
-    std::string json;
-    base::JSONWriter::Write(dict, &json);
-    return json;
+    return base::WriteJson(dict).value_or("");
   }
 
  private:
   void SetUp() override {
     DeviceOAuth2TokenStoreDesktop::RegisterPrefs(
         testing_local_state_.registry());
-    DeviceOAuth2TokenServiceFactory::Initialize(GetURLLoaderFactory(),
-                                                &testing_local_state_);
-    OSCryptMocker::SetUp();
+    DeviceOAuth2TokenServiceFactory::Initialize(
+        GetURLLoaderFactory(), &testing_local_state_, os_crypt_async_.get());
     mock_policy_client_.SetDMToken(kDMToken);
   }
 
   void TearDown() override {
     DeviceOAuth2TokenServiceFactory::Shutdown();
-    OSCryptMocker::TearDown();
   }
 
   int num_refresh_tokens_saved_ = 0;
@@ -121,6 +119,7 @@ class CBCMInvalidationsInitializerTest
   network::TestURLLoaderFactory test_url_loader_factory_;
   content::BrowserTaskEnvironment task_environment_;
   TestingPrefServiceSimple testing_local_state_;
+  std::unique_ptr<os_crypt_async::OSCryptAsync> os_crypt_async_;
 };
 
 TEST_F(CBCMInvalidationsInitializerTest, InvalidationsStartDisabled) {

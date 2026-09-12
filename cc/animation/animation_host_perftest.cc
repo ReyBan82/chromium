@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/memory/raw_ptr.h"
 #include "cc/animation/animation_host.h"
 
+#include "base/memory/raw_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/timer/lap_timer.h"
 #include "cc/animation/animation.h"
@@ -12,9 +12,9 @@
 #include "cc/animation/animation_timeline.h"
 #include "cc/test/fake_impl_task_runner_provider.h"
 #include "cc/test/fake_layer_tree_host.h"
-#include "cc/test/fake_layer_tree_host_client.h"
+#include "cc/test/fake_layer_tree_host_delegate.h"
 #include "cc/test/fake_layer_tree_host_impl.h"
-#include "cc/test/stub_layer_tree_host_single_thread_client.h"
+#include "cc/test/stub_layer_tree_host_single_thread_delegate.h"
 #include "cc/test/test_task_graph_runner.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/perf/perf_result_reporter.h"
@@ -23,26 +23,21 @@ namespace cc {
 
 class AnimationHostPerfTest : public testing::Test {
  protected:
-  AnimationHostPerfTest()
-      : root_layer_impl_(),
-        first_timeline_id_(),
-        last_timeline_id_(),
-        first_animation_id_(),
-        last_animation_id_() {}
+  AnimationHostPerfTest() = default;
 
   void SetUp() override {
     LayerTreeSettings settings;
-    animation_host_ = AnimationHost::CreateForTesting(ThreadInstance::MAIN);
+    animation_host_ = AnimationHost::CreateForTesting(ThreadInstance::kMain);
     layer_tree_host_ = FakeLayerTreeHost::Create(
         &fake_client_, &task_graph_runner_, animation_host_.get(), settings);
     layer_tree_host_->InitializeSingleThreaded(
-        &single_thread_client_,
+        &single_thread_delegate_,
         base::SingleThreadTaskRunner::GetCurrentDefault());
 
     root_layer_ = Layer::Create();
     layer_tree_host_->SetRootLayer(root_layer_);
 
-    root_layer_impl_ = layer_tree_host_->CommitAndCreateLayerImplTree();
+    root_layer_impl_ = layer_tree_host_->CommitToActiveTree();
   }
 
   void TearDown() override {
@@ -81,7 +76,7 @@ class AnimationHostPerfTest : public testing::Test {
     }
 
     // Create impl animations.
-    layer_tree_host_->CommitAndCreateLayerImplTree();
+    layer_tree_host_->CommitToActiveTree();
 
     // Check impl instances created.
     scoped_refptr<AnimationTimeline> timeline_impl =
@@ -103,7 +98,7 @@ class AnimationHostPerfTest : public testing::Test {
     }
 
     // Create impl timelines.
-    layer_tree_host_->CommitAndCreateLayerImplTree();
+    layer_tree_host_->CommitToActiveTree();
 
     // Check impl instances created.
     for (int i = first_timeline_id_; i < last_timeline_id_; ++i)
@@ -121,7 +116,7 @@ class AnimationHostPerfTest : public testing::Test {
   }
 
   void DoTest(const std::string& test_name) {
-    PropertyTrees property_trees(*host());
+    PropertyTrees property_trees;
     timer_.Reset();
     do {
       // Invalidate dirty flags.
@@ -137,19 +132,19 @@ class AnimationHostPerfTest : public testing::Test {
   }
 
  private:
-  StubLayerTreeHostSingleThreadClient single_thread_client_;
-  FakeLayerTreeHostClient fake_client_;
+  StubLayerTreeHostSingleThreadDelegate single_thread_delegate_;
+  FakeLayerTreeHostDelegate fake_client_;
   std::unique_ptr<AnimationHost> animation_host_;
   std::unique_ptr<FakeLayerTreeHost> layer_tree_host_;
   scoped_refptr<Layer> root_layer_;
-  raw_ptr<LayerImpl> root_layer_impl_;
+  raw_ptr<LayerImpl> root_layer_impl_ = nullptr;
   scoped_refptr<AnimationTimeline> all_animations_timeline_;
 
-  int first_timeline_id_;
-  int last_timeline_id_;
+  int first_timeline_id_ = 0;
+  int last_timeline_id_ = 0;
 
-  int first_animation_id_;
-  int last_animation_id_;
+  int first_animation_id_ = 0;
+  int last_animation_id_ = 0;
 
   base::LapTimer timer_;
   TestTaskGraphRunner task_graph_runner_;

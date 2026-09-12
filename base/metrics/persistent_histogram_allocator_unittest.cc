@@ -4,14 +4,22 @@
 
 #include "base/metrics/persistent_histogram_allocator.h"
 
+#include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/debug/leak_annotations.h"
 #include "base/files/file.h"
 #include "base/files/file_util.h"
+#include "base/files/memory_mapped_file.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/metrics/bucket_ranges.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/metrics/histogram.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/metrics/metrics_hashes.h"
 #include "base/metrics/persistent_memory_allocator.h"
+#include "base/metrics/sample_vector.h"
+#include "base/metrics/sparse_histogram.h"
 #include "base/metrics/statistics_recorder.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -26,23 +34,31 @@ class PersistentHistogramAllocatorTest : public testing::Test {
       const PersistentHistogramAllocatorTest&) = delete;
 
  protected:
-  const int32_t kAllocatorMemorySize = 64 << 10;  // 64 KiB
+  constexpr static int32_t kAllocatorMemorySize = 64 << 10;  // 64 KiB
 
   PersistentHistogramAllocatorTest()
       : statistics_recorder_(StatisticsRecorder::CreateTemporaryForTesting()) {
     CreatePersistentHistogramAllocator();
+
+    // Reset the static histogram pointer that PersistentSampleVector uses to
+    // track the result of MountExistingCountsStorage, in case a previous test
+    // has caused it to already be initialized. This ensures a known state for
+    // the current test.
+    PersistentSampleVector::ResetMountExistingCountsStorageResultForTesting();
   }
   ~PersistentHistogramAllocatorTest() override {
     DestroyPersistentHistogramAllocator();
   }
 
   void CreatePersistentHistogramAllocator() {
-    allocator_memory_.reset(new char[kAllocatorMemorySize]);
+    // GlobalHistogramAllocator is never deleted, hence intentionally leak
+    // allocated memory in this test.
+    allocator_memory_ = new char[kAllocatorMemorySize]();
+    ANNOTATE_LEAKING_OBJECT_PTR(allocator_memory_);
 
     GlobalHistogramAllocator::ReleaseForTesting();
-    memset(allocator_memory_.get(), 0, kAllocatorMemorySize);
     GlobalHistogramAllocator::CreateWithPersistentMemory(
-        allocator_memory_.get(), kAllocatorMemorySize, 0, 0,
+        allocator_memory_, kAllocatorMemorySize, 0, 0,
         "PersistentHistogramAllocatorTest");
     allocator_ = GlobalHistogramAllocator::Get()->memory_allocator();
   }
@@ -53,7 +69,7 @@ class PersistentHistogramAllocatorTest : public testing::Test {
   }
 
   std::unique_ptr<StatisticsRecorder> statistics_recorder_;
-  std::unique_ptr<char[]> allocator_memory_;
+  raw_ptr<char> allocator_memory_ = nullptr;
   raw_ptr<PersistentMemoryAllocator> allocator_ = nullptr;
 };
 
@@ -109,7 +125,8 @@ TEST_F(PersistentHistogramAllocatorTest, CreateAndIterate) {
   std::unique_ptr<HistogramBase> recovered;
   PersistentHistogramAllocator recovery(
       std::make_unique<PersistentMemoryAllocator>(
-          allocator_memory_.get(), kAllocatorMemorySize, 0, 0, "", false));
+          allocator_memory_, kAllocatorMemorySize, 0, 0, "",
+          PersistentMemoryAllocator::kReadWrite));
   PersistentHistogramAllocator::Iterator histogram_iter(&recovery);
 
   recovered = histogram_iter.GetNext();
@@ -130,6 +147,96 @@ TEST_F(PersistentHistogramAllocatorTest, CreateAndIterate) {
 
   recovered = histogram_iter.GetNext();
   EXPECT_FALSE(recovered);
+}
+
+// Tests that persistent histograms can be recovered from a file mapped strictly
+// as OS READ_ONLY memory, similar to what `FileMetricsProvider` does on
+// startup.
+TEST_F(PersistentHistogramAllocatorTest, FileReadonlyRecovery) {
+  constexpr char kHistogramName[] = "ReadOnlyTestHistogram";
+  constexpr char kLinearHistogramName[] = "ReadOnlyTestLinearHistogram";
+  constexpr char kBooleanHistogramName[] = "ReadOnlyTestBooleanHistogram";
+  constexpr char kCustomHistogramName[] = "ReadOnlyTestCustomHistogram";
+  constexpr char kSparseHistogramName[] = "ReadOnlyTestSparseHistogram";
+
+  // 1. Create a persistent standard histogram testing all flags.
+  HistogramBase* histogram = Histogram::FactoryGet(kHistogramName, 1, 1000, 10,
+                                                   HistogramBase::kAllFlags);
+  ASSERT_TRUE(histogram);
+  histogram->Add(50);
+
+  // 2. Create a persistent linear histogram testing all flags.
+  HistogramBase* linear_histogram = LinearHistogram::FactoryGet(
+      kLinearHistogramName, 1, 1000, 10, HistogramBase::kAllFlags);
+  ASSERT_TRUE(linear_histogram);
+  linear_histogram->Add(50);
+
+  // 3. Create a persistent boolean histogram testing all flags.
+  HistogramBase* boolean_histogram = BooleanHistogram::FactoryGet(
+      kBooleanHistogramName, HistogramBase::kAllFlags);
+  ASSERT_TRUE(boolean_histogram);
+  boolean_histogram->Add(1);
+
+  // 4. Create a persistent custom histogram testing all flags.
+  const std::vector<int> custom_ranges = {1, 5, 10, 50, 100};
+  HistogramBase* custom_histogram = CustomHistogram::FactoryGet(
+      kCustomHistogramName, custom_ranges, HistogramBase::kAllFlags);
+  ASSERT_TRUE(custom_histogram);
+  custom_histogram->Add(5);
+
+  // 5. Create a persistent sparse histogram testing all flags.
+  HistogramBase* sparse_histogram = SparseHistogram::FactoryGet(
+      kSparseHistogramName, HistogramBase::kAllFlags);
+  ASSERT_TRUE(sparse_histogram);
+  sparse_histogram->Add(50);
+
+  ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  const FilePath file_path =
+      temp_dir.GetPath().AppendASCII("persistent_memory.pma");
+
+  // Write allocator memory to a temporary file.
+  ASSERT_TRUE(WriteFile(file_path, std::string_view(allocator_memory_.get(),
+                                                    kAllocatorMemorySize)));
+
+  // Map the file strictly as READ_ONLY.
+  auto mmfile = std::make_unique<MemoryMappedFile>();
+  ASSERT_TRUE(
+      mmfile->Initialize(File(file_path, File::FLAG_OPEN | File::FLAG_READ),
+                         MemoryMappedFile::READ_ONLY));
+  EXPECT_TRUE(mmfile->IsValid());
+
+  auto readonly_file_allocator =
+      std::make_unique<FilePersistentMemoryAllocator>(
+          std::move(mmfile), 0, 0, "", PersistentMemoryAllocator::kReadOnly);
+  EXPECT_TRUE(readonly_file_allocator->IsReadonly());
+
+  PersistentHistogramAllocator recovery_readonly(
+      std::move(readonly_file_allocator));
+  PersistentHistogramAllocator::Iterator it(&recovery_readonly);
+
+  const char* const kExpectedNames[] = {
+      kHistogramName, kLinearHistogramName, kBooleanHistogramName,
+      kCustomHistogramName, kSparseHistogramName};
+
+  // Verify recovery of all histograms from read-only PMA.
+  std::unique_ptr<base::HistogramBase> recovered;
+  for (const char* expected_name : kExpectedNames) {
+    recovered = it.GetNext();
+    ASSERT_TRUE(recovered);
+    EXPECT_EQ(expected_name, recovered->histogram_name());
+    EXPECT_TRUE(recovered->HasFlags(HistogramBase::kAllFlags));
+    EXPECT_EQ(1, recovered->SnapshotSamples()->TotalCount());
+  }
+
+  EXPECT_FALSE(it.GetNext());
+
+#if !defined(THREAD_SANITIZER)
+  // Verify that attempting to write/add a sample to a read-only histogram
+  // is intercepted by OS page protection and crashes the process with SIGSEGV.
+  // Death tests are notoriously slow/flaky under TSan.
+  EXPECT_DEATH_IF_SUPPORTED(recovered->Add(100), "");
+#endif
 }
 
 TEST_F(PersistentHistogramAllocatorTest, ConstructPaths) {
@@ -204,32 +311,39 @@ TEST_F(PersistentHistogramAllocatorTest, CreateSpareFile) {
 
   char buffer[256];
   for (size_t pos = 0; pos < temp_size; pos += sizeof(buffer)) {
-    ASSERT_EQ(static_cast<int>(sizeof(buffer)),
-              file.ReadAtCurrentPos(buffer, sizeof(buffer)));
-    for (size_t i = 0; i < sizeof(buffer); ++i)
-      EXPECT_EQ(0, buffer[i]);
+    ASSERT_TRUE(
+        file.ReadAtCurrentPosAndCheck(as_writable_bytes(base::span(buffer))));
+    for (char i : buffer) {
+      EXPECT_EQ(0, i);
+    }
   }
 }
 
 TEST_F(PersistentHistogramAllocatorTest, StatisticsRecorderMerge) {
-  const char LinearHistogramName[] = "SRTLinearHistogram";
-  const char SparseHistogramName[] = "SRTSparseHistogram";
+  static constexpr char LinearHistogramName[] = "SRTLinearHistogram";
+  static constexpr char SparseHistogramName[] = "SRTSparseHistogram";
+
   const size_t global_sr_initial_histogram_count =
       StatisticsRecorder::GetHistogramCount();
   const size_t global_sr_initial_bucket_ranges_count =
       StatisticsRecorder::GetBucketRanges().size();
 
+  // We will create three histograms in this test,: two explicitly, and one
+  // implicitly when we merge multi-sample histogram data.
+  constexpr size_t kNumHistogramsCreated = 3;
+
   // Create a local StatisticsRecorder in which the newly created histogram
   // will be recorded. The global allocator must be replaced after because the
   // act of releasing will cause the active SR to forget about all histograms
-  // in the relased memory.
+  // in the released memory.
   std::unique_ptr<StatisticsRecorder> local_sr =
       StatisticsRecorder::CreateTemporaryForTesting();
   EXPECT_EQ(0U, StatisticsRecorder::GetHistogramCount());
-  std::unique_ptr<GlobalHistogramAllocator> old_allocator =
+  GlobalHistogramAllocator* old_allocator =
       GlobalHistogramAllocator::ReleaseForTesting();
   GlobalHistogramAllocator::CreateWithLocalMemory(kAllocatorMemorySize, 0, "");
   ASSERT_TRUE(GlobalHistogramAllocator::Get());
+  PersistentSampleVector::ResetMountExistingCountsStorageResultForTesting();
 
   // Create a linear histogram for merge testing.
   HistogramBase* histogram1 =
@@ -256,20 +370,22 @@ TEST_F(PersistentHistogramAllocatorTest, StatisticsRecorderMerge) {
   // Destroy the local SR and ensure that we're back to the initial state and
   // restore the global allocator. Histograms created in the local SR will
   // become unmanaged.
-  std::unique_ptr<GlobalHistogramAllocator> new_allocator =
+  GlobalHistogramAllocator* new_allocator =
       GlobalHistogramAllocator::ReleaseForTesting();
   local_sr.reset();
   EXPECT_EQ(global_sr_initial_histogram_count,
             StatisticsRecorder::GetHistogramCount());
   EXPECT_EQ(global_sr_initial_bucket_ranges_count,
             StatisticsRecorder::GetBucketRanges().size());
-  GlobalHistogramAllocator::Set(std::move(old_allocator));
+  GlobalHistogramAllocator::Set(old_allocator);
+  PersistentSampleVector::ResetMountExistingCountsStorageResultForTesting();
 
   // Create a "recovery" allocator using the same memory as the local one.
   PersistentHistogramAllocator recovery1(
       std::make_unique<PersistentMemoryAllocator>(
           const_cast<void*>(new_allocator->memory_allocator()->data()),
-          new_allocator->memory_allocator()->size(), 0, 0, "", false));
+          new_allocator->memory_allocator()->size(), 0, 0, "",
+          PersistentMemoryAllocator::kReadWrite));
   PersistentHistogramAllocator::Iterator histogram_iter1(&recovery1);
 
   // Get the histograms that were created locally (and forgotten) and merge
@@ -277,15 +393,22 @@ TEST_F(PersistentHistogramAllocatorTest, StatisticsRecorderMerge) {
   std::unique_ptr<HistogramBase> recovered;
   while (true) {
     recovered = histogram_iter1.GetNext();
-    if (!recovered)
+    if (!recovered) {
       break;
+    }
 
-    recovery1.MergeHistogramDeltaToStatisticsRecorder(recovered.get());
+    recovery1.MergeHistogramDeltaToStatisticsRecorder(recovered.get(),
+                                                      /*name_override=*/"");
     HistogramBase* found =
         StatisticsRecorder::FindHistogram(recovered->histogram_name());
     EXPECT_NE(recovered.get(), found);
   }
-  EXPECT_EQ(global_sr_initial_histogram_count + 2,
+
+  // Verify that the histograms were merged into the global SR. The test has
+  // created two histograms above, plus another internal histogram tracking
+  // the success/failure of reading non-sparse persistent histogram sample
+  // vector data, for a total of 3 histograms.
+  EXPECT_EQ(global_sr_initial_histogram_count + kNumHistogramsCreated,
             StatisticsRecorder::GetHistogramCount());
 
   // Check the merged histograms for accuracy.
@@ -307,10 +430,20 @@ TEST_F(PersistentHistogramAllocatorTest, StatisticsRecorderMerge) {
   EXPECT_EQ(1, snapshot->GetCount(4));
   EXPECT_EQ(1, snapshot->GetCount(6));
 
+  // kMountExistingCountsStorageResult will have exactly one sample for the
+  // linear histogram: One sample for the in-flight, but not logged/snapshotted
+  // sample vector; zero samples for the logged/shapshotted sample vector (which
+  // has no samples written to it yet),
+  found = StatisticsRecorder::FindHistogram(kMountExistingCountsStorageResult);
+  ASSERT_TRUE(found);
+  snapshot = found->SnapshotSamples();
+  EXPECT_EQ(1, snapshot->TotalCount());
+  EXPECT_EQ(1, snapshot->GetCount(0));  // We expect to have logged kSuccess
+
   // Verify that the LinearHistogram's BucketRanges was registered with the
   // global SR since the recovery allocator does not specify a custom
   // RangesManager.
-  ASSERT_EQ(global_sr_initial_bucket_ranges_count + 1,
+  ASSERT_EQ(global_sr_initial_bucket_ranges_count + 2,
             StatisticsRecorder::GetBucketRanges().size());
 
   // Perform additional histogram increments.
@@ -323,15 +456,18 @@ TEST_F(PersistentHistogramAllocatorTest, StatisticsRecorderMerge) {
   PersistentHistogramAllocator recovery2(
       std::make_unique<PersistentMemoryAllocator>(
           const_cast<void*>(new_allocator->memory_allocator()->data()),
-          new_allocator->memory_allocator()->size(), 0, 0, "", false));
+          new_allocator->memory_allocator()->size(), 0, 0, "",
+          PersistentMemoryAllocator::kReadWrite));
   PersistentHistogramAllocator::Iterator histogram_iter2(&recovery2);
   while (true) {
     recovered = histogram_iter2.GetNext();
-    if (!recovered)
+    if (!recovered) {
       break;
-    recovery2.MergeHistogramDeltaToStatisticsRecorder(recovered.get());
+    }
+    recovery2.MergeHistogramDeltaToStatisticsRecorder(recovered.get(),
+                                                      /*name_override=*/"");
   }
-  EXPECT_EQ(global_sr_initial_histogram_count + 2,
+  EXPECT_EQ(global_sr_initial_histogram_count + kNumHistogramsCreated,
             StatisticsRecorder::GetHistogramCount());
 
   // And verify.
@@ -351,6 +487,196 @@ TEST_F(PersistentHistogramAllocatorTest, StatisticsRecorderMerge) {
   EXPECT_EQ(1, snapshot->GetCount(4));
   EXPECT_EQ(1, snapshot->GetCount(6));
   EXPECT_EQ(1, snapshot->GetCount(7));
+
+  // kMountExistingCountsStorageResult will have exactly three samples for the
+  // linear histogram: One sample from the first merge; one sample for the
+  // current merge of the in-flight, but not logged/snapshotted sample vector;
+  // and, one samples for the logged/shapshotted sample vector (which was
+  // populated when the snapshot was taken above).
+  found = StatisticsRecorder::FindHistogram(kMountExistingCountsStorageResult);
+  snapshot = found->SnapshotSamples();
+  EXPECT_EQ(3, snapshot->TotalCount());
+  EXPECT_EQ(3, snapshot->GetCount(0));  // kSuccess.
+}
+
+// Verify that when merging histograms from an allocator with the global
+// StatisticsRecorder, if the histogram has no samples to be merged, then it
+// is skipped (no lookup/registration of the histogram with the SR).
+TEST_F(PersistentHistogramAllocatorTest,
+       StatisticsRecorderMerge_IsDefinitelyEmpty) {
+  const size_t global_sr_initial_histogram_count =
+      StatisticsRecorder::GetHistogramCount();
+  const size_t global_sr_initial_bucket_ranges_count =
+      StatisticsRecorder::GetBucketRanges().size();
+
+  // Create a local StatisticsRecorder in which the newly created histogram
+  // will be recorded. The global allocator must be replaced after because the
+  // act of releasing will cause the active SR to forget about all histograms
+  // in the released memory.
+  std::unique_ptr<StatisticsRecorder> local_sr =
+      StatisticsRecorder::CreateTemporaryForTesting();
+  EXPECT_EQ(0U, StatisticsRecorder::GetHistogramCount());
+  GlobalHistogramAllocator* old_allocator =
+      GlobalHistogramAllocator::ReleaseForTesting();
+  GlobalHistogramAllocator::CreateWithLocalMemory(kAllocatorMemorySize, 0, "");
+  ASSERT_TRUE(GlobalHistogramAllocator::Get());
+
+  // Create a bunch of histograms, and call SnapshotDelta() on all of them so
+  // that their next SnapshotDelta() calls return an empty HistogramSamples.
+  LinearHistogram::FactoryGet("SRTLinearHistogram1", 1, 10, 10, 0);
+  HistogramBase* histogram2 =
+      LinearHistogram::FactoryGet("SRTLinearHistogram2", 1, 10, 10, 0);
+  histogram2->Add(3);
+  histogram2->SnapshotDelta();
+  HistogramBase* histogram3 =
+      LinearHistogram::FactoryGet("SRTLinearHistogram3", 1, 10, 10, 0);
+  histogram3->Add(1);
+  histogram3->Add(10);
+  histogram3->SnapshotDelta();
+  SparseHistogram::FactoryGet("SRTSparseHistogram1", 0);
+  HistogramBase* sparse_histogram2 =
+      SparseHistogram::FactoryGet("SRTSparseHistogram2", 0);
+  sparse_histogram2->Add(3);
+  sparse_histogram2->SnapshotDelta();
+  HistogramBase* sparse_histogram3 =
+      SparseHistogram::FactoryGet("SRTSparseHistogram3", 0);
+  sparse_histogram3->Add(1);
+  sparse_histogram3->Add(10);
+  sparse_histogram3->SnapshotDelta();
+
+  // No histograms have been recovered from "persistent" memory yet, so there
+  // are no samples for kMountExistingCountsStorageResult. Just the histograms
+  // created above.
+  EXPECT_EQ(6U, StatisticsRecorder::GetHistogramCount());
+
+  // Destroy the local SR and ensure that we're back to the initial state and
+  // restore the global allocator. Histograms created in the local SR will
+  // become unmanaged.
+  GlobalHistogramAllocator* new_allocator =
+      GlobalHistogramAllocator::ReleaseForTesting();
+  local_sr.reset();
+  EXPECT_EQ(global_sr_initial_histogram_count,
+            StatisticsRecorder::GetHistogramCount());
+  EXPECT_EQ(global_sr_initial_bucket_ranges_count,
+            StatisticsRecorder::GetBucketRanges().size());
+  GlobalHistogramAllocator::Set(old_allocator);
+
+  // Create a "recovery" allocator using the same memory as the local one.
+  PersistentHistogramAllocator recovery1(
+      std::make_unique<PersistentMemoryAllocator>(
+          const_cast<void*>(new_allocator->memory_allocator()->data()),
+          new_allocator->memory_allocator()->size(), 0, 0, "",
+          PersistentMemoryAllocator::kReadWrite));
+  PersistentHistogramAllocator::Iterator histogram_iter1(&recovery1);
+
+  // Get the histograms that were created locally (and forgotten) and attempt
+  // to merge them into the global SR. Since their delta are all empty, nothing
+  // should end up being registered with the SR.
+  while (true) {
+    std::unique_ptr<HistogramBase> recovered = histogram_iter1.GetNext();
+    if (!recovered) {
+      break;
+    }
+
+    recovery1.MergeHistogramDeltaToStatisticsRecorder(recovered.get(),
+                                                      /*name_override=*/"");
+    HistogramBase* found =
+        StatisticsRecorder::FindHistogram(recovered->histogram_name());
+    EXPECT_FALSE(found);
+  }
+
+  // As mentioned above, all of the previously written histograms have not
+  // changed since their snapshot, so we load then discard them. However
+  // we record kMountExistingCountsStorageResult for each attempted sample
+  // vector recovery, which happens up to twice per histogram: once for the
+  // in-flight sample vector and once for the logged/snapshotted sample vector.
+  EXPECT_EQ(global_sr_initial_histogram_count + 1,
+            StatisticsRecorder::GetHistogramCount());
+  HistogramBase* found =
+      StatisticsRecorder::FindHistogram(kMountExistingCountsStorageResult);
+  ASSERT_TRUE(found);
+  auto snapshot = found->SnapshotSamples();
+  EXPECT_EQ(2, snapshot->TotalCount());  // 2 for SRTLinearHistogram3
+  EXPECT_EQ(2, snapshot->GetCount(0));   // kSuccess.
+
+  // Same as above, but with MergeHistogramFinalDeltaToStatisticsRecorder()
+  // instead of MergeHistogramDeltaToStatisticsRecorder().
+  PersistentHistogramAllocator recovery2(
+      std::make_unique<PersistentMemoryAllocator>(
+          const_cast<void*>(new_allocator->memory_allocator()->data()),
+          new_allocator->memory_allocator()->size(), 0, 0, "",
+          PersistentMemoryAllocator::kReadWrite));
+  PersistentHistogramAllocator::Iterator histogram_iter2(&recovery2);
+  while (true) {
+    std::unique_ptr<HistogramBase> recovered = histogram_iter2.GetNext();
+    if (!recovered) {
+      break;
+    }
+
+    recovery2.MergeHistogramFinalDeltaToStatisticsRecorder(
+        recovered.get(), /*name_override=*/"");
+    found = StatisticsRecorder::FindHistogram(recovered->histogram_name());
+    EXPECT_FALSE(found);
+  }
+  EXPECT_EQ(global_sr_initial_histogram_count + 1,
+            StatisticsRecorder::GetHistogramCount());
+}
+
+TEST_F(PersistentHistogramAllocatorTest, MultipleSameSparseHistograms) {
+  const std::string kSparseHistogramName = "SRTSparseHistogram";
+
+  // Create a temporary SR so that histograms created during this test aren't
+  // leaked to other tests.
+  std::unique_ptr<StatisticsRecorder> local_sr =
+      StatisticsRecorder::CreateTemporaryForTesting();
+
+  // Create a sparse histogram.
+  HistogramBase* sparse = SparseHistogram::FactoryGet(kSparseHistogramName, 0);
+
+  // Get the sparse histogram that was created above. We should have two
+  // distinct objects, but both representing and pointing to the same data.
+  PersistentHistogramAllocator::Iterator iter(GlobalHistogramAllocator::Get());
+  std::unique_ptr<HistogramBase> sparse2;
+  while (true) {
+    sparse2 = iter.GetNext();
+    if (!sparse2 || kSparseHistogramName == sparse2->histogram_name()) {
+      break;
+    }
+  }
+  ASSERT_TRUE(sparse2);
+  EXPECT_NE(sparse, sparse2.get());
+
+  // Verify that both objects can coexist, i.e., samples emitted from one can be
+  // found by the other and vice versa.
+  sparse->AddCount(1, 3);
+  std::unique_ptr<HistogramSamples> snapshot =
+      sparse->SnapshotUnloggedSamples();
+  std::unique_ptr<HistogramSamples> snapshot2 =
+      sparse2->SnapshotUnloggedSamples();
+  EXPECT_EQ(snapshot->TotalCount(), 3);
+  EXPECT_EQ(snapshot2->TotalCount(), 3);
+  EXPECT_EQ(snapshot->GetCount(1), 3);
+  EXPECT_EQ(snapshot2->GetCount(1), 3);
+  snapshot = sparse->SnapshotDelta();
+  snapshot2 = sparse2->SnapshotDelta();
+  EXPECT_EQ(snapshot->TotalCount(), 3);
+  EXPECT_EQ(snapshot2->TotalCount(), 0);
+  EXPECT_EQ(snapshot->GetCount(1), 3);
+  EXPECT_EQ(snapshot2->GetCount(1), 0);
+
+  sparse2->AddCount(2, 6);
+  snapshot = sparse->SnapshotUnloggedSamples();
+  snapshot2 = sparse2->SnapshotUnloggedSamples();
+  EXPECT_EQ(snapshot->TotalCount(), 6);
+  EXPECT_EQ(snapshot2->TotalCount(), 6);
+  EXPECT_EQ(snapshot->GetCount(2), 6);
+  EXPECT_EQ(snapshot2->GetCount(2), 6);
+  snapshot2 = sparse2->SnapshotDelta();
+  snapshot = sparse->SnapshotDelta();
+  EXPECT_EQ(snapshot->TotalCount(), 0);
+  EXPECT_EQ(snapshot2->TotalCount(), 6);
+  EXPECT_EQ(snapshot->GetCount(2), 0);
+  EXPECT_EQ(snapshot2->GetCount(2), 6);
 }
 
 TEST_F(PersistentHistogramAllocatorTest, CustomRangesManager) {
@@ -365,7 +691,7 @@ TEST_F(PersistentHistogramAllocatorTest, CustomRangesManager) {
   std::unique_ptr<StatisticsRecorder> local_sr =
       StatisticsRecorder::CreateTemporaryForTesting();
   EXPECT_EQ(0U, StatisticsRecorder::GetHistogramCount());
-  std::unique_ptr<GlobalHistogramAllocator> old_allocator =
+  GlobalHistogramAllocator* old_allocator =
       GlobalHistogramAllocator::ReleaseForTesting();
   GlobalHistogramAllocator::CreateWithLocalMemory(kAllocatorMemorySize, 0, "");
   ASSERT_TRUE(GlobalHistogramAllocator::Get());
@@ -381,18 +707,19 @@ TEST_F(PersistentHistogramAllocatorTest, CustomRangesManager) {
   // Destroy the local SR and ensure that we're back to the initial state and
   // restore the global allocator. The histogram created in the local SR will
   // become unmanaged.
-  std::unique_ptr<GlobalHistogramAllocator> new_allocator =
+  GlobalHistogramAllocator* new_allocator =
       GlobalHistogramAllocator::ReleaseForTesting();
   local_sr.reset();
   EXPECT_EQ(global_sr_initial_bucket_ranges_count,
             StatisticsRecorder::GetBucketRanges().size());
-  GlobalHistogramAllocator::Set(std::move(old_allocator));
+  GlobalHistogramAllocator::Set(old_allocator);
 
   // Create a "recovery" allocator using the same memory as the local one.
   PersistentHistogramAllocator recovery(
       std::make_unique<PersistentMemoryAllocator>(
           const_cast<void*>(new_allocator->memory_allocator()->data()),
-          new_allocator->memory_allocator()->size(), 0, 0, "", false));
+          new_allocator->memory_allocator()->size(), 0, 0, "",
+          PersistentMemoryAllocator::kReadWrite));
 
   // Set a custom RangesManager for the recovery allocator so that the
   // BucketRanges are not registered with the global SR.
@@ -446,12 +773,131 @@ TEST_F(PersistentHistogramAllocatorTest, RangesDeDuplication) {
   EXPECT_NE(0U, ref2);
   EXPECT_NE(ref1, ref2);
 
-  uint32_t* data1 =
+  const uint32_t* data1 =
       allocator_->GetAsArray<uint32_t>(ref1, 0, kRangesRefIndex + 1);
-  uint32_t* data2 =
+  const uint32_t* data2 =
       allocator_->GetAsArray<uint32_t>(ref2, 0, kRangesRefIndex + 1);
-  EXPECT_EQ(ranges_ref, data1[kRangesRefIndex]);
-  EXPECT_EQ(ranges_ref, data2[kRangesRefIndex]);
+  ASSERT_NE(nullptr, data1);
+  ASSERT_NE(nullptr, data2);
+  UNSAFE_BUFFERS({
+    EXPECT_EQ(ranges_ref, data1[kRangesRefIndex]);
+    EXPECT_EQ(ranges_ref, data2[kRangesRefIndex]);
+  });
+}
+
+TEST_F(PersistentHistogramAllocatorTest, MovePersistentFile) {
+  const char temp_name[] = "MovePersistentFileTest.pma";
+  ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  FilePath temp_file = temp_dir.GetPath().AppendASCII(temp_name);
+  const size_t temp_size = 64 << 10;  // 64 KiB
+
+  // Initialize persistent histogram system with a known file path.
+  DestroyPersistentHistogramAllocator();
+  GlobalHistogramAllocator::CreateWithFile(temp_file, temp_size, 0, temp_name);
+  GlobalHistogramAllocator* allocator = GlobalHistogramAllocator::Get();
+  ASSERT_TRUE(allocator->HasPersistentLocation());
+  EXPECT_EQ(allocator->GetPersistentLocation(), temp_file);
+  EXPECT_TRUE(base::PathExists(temp_file));
+
+  // Move the persistent file to a new directory.
+  ScopedTempDir new_temp_dir;
+  ASSERT_TRUE(new_temp_dir.CreateUniqueTempDir());
+  EXPECT_TRUE(allocator->MovePersistentFile(new_temp_dir.GetPath()));
+
+  // Verify that the persistent file was correctly moved |new_temp_dir|.
+  FilePath new_temp_file = new_temp_dir.GetPath().AppendASCII(temp_name);
+  ASSERT_TRUE(allocator->HasPersistentLocation());
+  EXPECT_EQ(allocator->GetPersistentLocation(), new_temp_file);
+  EXPECT_TRUE(base::PathExists(new_temp_file));
+  EXPECT_FALSE(base::PathExists(temp_file));
+
+  // Emit a histogram after moving the file.
+  const char kHistogramName[] = "MovePersistentFile.Test";
+  base::UmaHistogramBoolean(kHistogramName, true);
+
+  // Release the allocator.
+  DestroyPersistentHistogramAllocator();
+
+  // Open and read the file in order to verify that |kHistogramName| was written
+  // to it even after being moved.
+  base::File file(new_temp_file, base::File::FLAG_OPEN | base::File::FLAG_READ);
+  base::HeapArray<char> data = base::HeapArray<char>::Uninit(temp_size);
+  EXPECT_TRUE(file.ReadAndCheck(/*offset=*/0, as_writable_byte_span(data)));
+
+  // Create an allocator and iterator using the file's data.
+  PersistentHistogramAllocator new_file_allocator(
+      std::make_unique<PersistentMemoryAllocator>(
+          data.data(), temp_size, 0, 0, "",
+          PersistentMemoryAllocator::kReadWrite));
+  PersistentHistogramAllocator::Iterator it(&new_file_allocator);
+
+  // Verify that |kHistogramName| is in the file.
+  std::unique_ptr<HistogramBase> histogram;
+  bool found_histogram = false;
+  while ((histogram = it.GetNext()) != nullptr) {
+    if (histogram->histogram_name() == kHistogramName) {
+      found_histogram = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_histogram);
+}
+
+TEST_F(PersistentHistogramAllocatorTest, CorruptSparseHistogramMetadataId) {
+  using PersistentHistogramData =
+      PersistentHistogramAllocator::PersistentHistogramData;
+
+  const size_t kLocalMemorySize = 64 << 10;
+
+  PersistentHistogramAllocator local_allocator(
+      std::make_unique<LocalPersistentMemoryAllocator>(kLocalMemorySize, 0,
+                                                       "LocalAllocator"));
+
+  const std::string kName = "ManualCorruptSparse";
+  uint64_t name_hash = HashMetricName(kName);
+
+  // Allocate memory for PersistentHistogramData + name.
+  size_t alloc_size =
+      offsetof(PersistentHistogramData, name) + kName.size() + 1;
+  PersistentMemoryAllocator::Reference ref =
+      local_allocator.memory_allocator()->Allocate(
+          alloc_size, PersistentHistogramData::kPersistentTypeId);
+  ASSERT_TRUE(ref);
+
+  uint8_t* ptr = local_allocator.memory_allocator()->GetAsArray<uint8_t>(
+      ref, PersistentHistogramData::kPersistentTypeId, 1);
+  ASSERT_TRUE(ptr);
+
+  auto* histogram_data = reinterpret_cast<PersistentHistogramData*>(ptr);
+
+  // Initialize PersistentHistogramData fields.
+  histogram_data->histogram_type = SPARSE_HISTOGRAM;
+  histogram_data->flags = HistogramBase::kIsPersistent;
+  histogram_data->samples_metadata.id = name_hash;
+
+  // We will set it to name_hash (invalid for sparse) to test the fix.
+  histogram_data->logged_metadata.id = name_hash;
+
+  // SAFETY: We manually serialize a corrupt histogram structure into a raw
+  // memory block for testing. We allocated `alloc_size` bytes which is
+  // guaranteed to be large enough to hold the struct and the name. Copying the
+  // name into the buffer is safe because it is bounded by the allocated size.
+  UNSAFE_BUFFERS(memcpy(histogram_data->name, kName.c_str(), kName.size() + 1));
+
+  // Try to load it.
+  std::unique_ptr<HistogramBase> mutated_histogram =
+      local_allocator.GetHistogram(ref);
+
+  // With the fix, it should detect the corruption and return nullptr.
+  EXPECT_FALSE(mutated_histogram);
+
+  // Now let's test with valid ID to make sure it works when not corrupt.
+  histogram_data->logged_metadata.id = name_hash + 1;  // valid
+
+  std::unique_ptr<HistogramBase> valid_histogram =
+      local_allocator.GetHistogram(ref);
+  EXPECT_TRUE(valid_histogram);
 }
 
 }  // namespace base

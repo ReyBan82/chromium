@@ -9,8 +9,6 @@ component("gcm") {
   sources = [
     "base/gcm_constants.cc",
     "base/gcm_constants.h",
-    "base/gcm_features.cc",
-    "base/gcm_features.h",
     "base/gcm_util.cc",
     "base/gcm_util.h",
     "base/mcs_message.cc",
@@ -70,9 +68,7 @@ component("gcm") {
   ]
   deps = [
     "//base",
-    "//base/third_party/dynamic_annotations",
-    "//build:chromeos_buildflags",
-    "//mojo/public/cpp/system:system",
+    "//mojo/public/cpp/system",
     "//net",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
@@ -112,7 +108,7 @@ static_library("test_support") {
   public_deps = [ ":gcm" ]
   deps = [
     "//base",
-    "//mojo/public/cpp/system:system",
+    "//mojo/public/cpp/system",
     "//net",
     "//net:test_support",
     "//testing/gtest",
@@ -167,11 +163,10 @@ test("gcm_unit_tests") {
     ":test_support",
     "//base",
     "//base/test:test_support",
-    "//build:chromeos_buildflags",
     "//google_apis",
     "//google_apis:run_all_unittests",
     "//google_apis:test_support",
-    "//mojo/public/cpp/system:system",
+    "//mojo/public/cpp/system",
     "//net",
     "//net:test_support",
     "//services/network:network_service",

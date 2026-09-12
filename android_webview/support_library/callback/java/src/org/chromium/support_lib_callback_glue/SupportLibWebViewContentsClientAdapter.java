@@ -11,7 +11,7 @@ import android.webkit.WebViewClient;
 
 import androidx.annotation.Nullable;
 
-import org.chromium.android_webview.AwContentsClient.AwWebResourceError;
+import org.chromium.android_webview.AwWebResourceError;
 import org.chromium.android_webview.safe_browsing.AwSafeBrowsingResponse;
 import org.chromium.base.Callback;
 import org.chromium.base.metrics.RecordHistogram;
@@ -37,8 +37,7 @@ public class SupportLibWebViewContentsClientAdapter {
 
     // If {@code null}, this indicates the WebViewClient is not a WebViewClientCompat. Otherwise,
     // this is a Proxy for the WebViewClientCompat.
-    @Nullable
-    private WebViewClientBoundaryInterface mWebViewClient;
+    @Nullable private WebViewClientBoundaryInterface mWebViewClient;
     private String[] mWebViewClientSupportedFeatures;
 
     public SupportLibWebViewContentsClientAdapter() {
@@ -46,12 +45,14 @@ public class SupportLibWebViewContentsClientAdapter {
     }
 
     public void setWebViewClient(WebViewClient possiblyCompatClient) {
-        try (ScopedSysTraceEvent event = ScopedSysTraceEvent.scoped(
-                     "SupportLibWebViewContentsClientAdapter.setWebViewClient")) {
+        try (ScopedSysTraceEvent event =
+                ScopedSysTraceEvent.scoped(
+                        "SupportLibWebViewContentsClientAdapter.setWebViewClient")) {
             mWebViewClient = convertCompatClient(possiblyCompatClient);
-            mWebViewClientSupportedFeatures = mWebViewClient == null
-                    ? EMPTY_FEATURE_LIST
-                    : mWebViewClient.getSupportedFeatures();
+            mWebViewClientSupportedFeatures =
+                    mWebViewClient == null
+                            ? EMPTY_FEATURE_LIST
+                            : mWebViewClient.getSupportedFeatures();
 
             // We ignore the case where the client is set to null, since this is often done by
             // WebView's internal logic (such as during destroy()), and would otherwise skew data.
@@ -65,7 +66,7 @@ public class SupportLibWebViewContentsClientAdapter {
     @Nullable
     private WebViewClientBoundaryInterface convertCompatClient(WebViewClient possiblyCompatClient) {
         if (!BoundaryInterfaceReflectionUtil.instanceOfInOwnClassLoader(
-                    possiblyCompatClient, WEBVIEW_CLIENT_COMPAT_NAME)) {
+                possiblyCompatClient, WEBVIEW_CLIENT_COMPAT_NAME)) {
             return null;
         }
 
@@ -77,7 +78,7 @@ public class SupportLibWebViewContentsClientAdapter {
     }
 
     /**
-     * Indicates whether this client can handle the callback(s) assocated with {@param featureName}.
+     * Indicates whether this client can handle the callback(s) assocated with {@code featureName}.
      * This should be called with the correct feature name before invoking the corresponding
      * callback, and the callback must not be called if this returns {@code false} for the feature.
      *
@@ -110,7 +111,10 @@ public class SupportLibWebViewContentsClientAdapter {
         mWebViewClient.onReceivedHttpError(webView, request, response);
     }
 
-    public void onSafeBrowsingHit(WebView webView, WebResourceRequest request, int threatType,
+    public void onSafeBrowsingHit(
+            WebView webView,
+            WebResourceRequest request,
+            int threatType,
             Callback<AwSafeBrowsingResponse> callback) {
         assert isFeatureAvailable(Features.SAFE_BROWSING_HIT);
         SafeBrowsingResponseBoundaryInterface supportLibResponse =

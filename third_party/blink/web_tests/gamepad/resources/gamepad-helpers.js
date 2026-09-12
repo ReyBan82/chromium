@@ -1,7 +1,7 @@
 'use strict';
 
-// TODO(crbug.com/146285): Allow more than 4 connected gamepads.
-var MAX_GAMEPADS = 4;
+// Keep in sync with device::Gamepads::kItemsLengthCap.
+var MAX_GAMEPADS = 8;
 
 function disconnectGamepads() {
     // Simulate disconnecting all gamepads.
@@ -22,12 +22,26 @@ function connectGamepads(gamepadCount) {
         gamepadController.setId(i, "MockStick 3000");
         gamepadController.setButtonCount(i, 2);
         gamepadController.setAxisCount(i, 2);
+        gamepadController.setTouchCount(i, 0);
         gamepadController.setButtonData(i, 0, 1);
         gamepadController.setButtonData(i, 1, 0);
         gamepadController.setAxisData(i, 0, .5);
         gamepadController.setAxisData(i, 1, -1.0);
+        gamepadController.setTouchData(i, 0, 0, 0, 0);
         gamepadController.dispatchConnected(i);
     }
+}
+
+function dispatchRawInputChanged(index) {
+  gamepadController.dispatchRawInputChanged(index);
+}
+
+function setButtonInput(index, buttonIndex, value) {
+  gamepadController.setButtonData(index, buttonIndex, value);
+}
+
+function setAxisInput(index, axisIndex, value) {
+  gamepadController.setAxisData(index, axisIndex, value);
 }
 
 function testGamepadStateAllDisconnected() {
@@ -46,15 +60,17 @@ function testGamepadStateAllDisconnected() {
 }
 
 async function onGamepadEvent(expectedEvent) {
-  await new Promise(resolve => {
-    window.addEventListener(expectedEvent, resolve, { once: true });
+  let gamepadEvent = await new Promise(resolve => {
+    window.addEventListener(expectedEvent, (e) => {
+      resolve(e);
+    }, {once: true});
   });
 
   // The gamepadController test API can be used to update gamepad state inside
   // a gamepad listener, which is normally not possible and may cause updates
   // to be delayed until the listener has exited. To avoid this in tests,
   // schedule the promise to resolve after a zero-length timeout.
-  return new Promise(resolve => setTimeout(resolve, 0));
+  return new Promise(resolve => setTimeout(() => resolve(gamepadEvent), 0));
 }
 
 async function onGamepadEventWithIndex(expectedEvent, gamepadIndex) {
@@ -83,4 +99,8 @@ async function ongamepadconnected() {
 
 async function ongamepaddisconnected() {
   return onGamepadEvent('gamepaddisconnected');
+}
+
+async function ongamepadrawinputchanged() {
+  return onGamepadEvent('gamepadrawinputchanged');
 }

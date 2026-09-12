@@ -2,32 +2,36 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ui/extensions/extension_install_ui.h"
+
 #include "base/command_line.h"
 #include "base/strings/string_util.h"
+#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/extensions/extension_service.h"
+#include "chrome/browser/infobars/infobar_features.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/themes/test/theme_service_changed_waiter.h"
 #include "chrome/browser/themes/theme_service.h"
 #include "chrome/browser/themes/theme_service_factory.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/test/base/ui_test_utils.h"
 #include "components/crx_file/id_util.h"
 #include "components/infobars/content/content_infobar_manager.h"
 #include "components/infobars/core/confirm_infobar_delegate.h"
 #include "components/infobars/core/infobar.h"
+#include "components/strings/grit/components_strings.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "extensions/browser/app_sorting.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/browser/install/crx_install_error.h"
 #include "extensions/common/constants.h"
+#include "ui/base/l10n/l10n_util.h"
 
 using content::WebContents;
 using extensions::AppSorting;
@@ -35,29 +39,28 @@ using extensions::Extension;
 
 class ExtensionInstallUIBrowserTest : public extensions::ExtensionBrowserTest {
  public:
-  ExtensionInstallUIBrowserTest() {}
+  ExtensionInstallUIBrowserTest() = default;
 
   ExtensionInstallUIBrowserTest(const ExtensionInstallUIBrowserTest&) = delete;
   ExtensionInstallUIBrowserTest& operator=(
       const ExtensionInstallUIBrowserTest&) = delete;
 
-  ~ExtensionInstallUIBrowserTest() override {}
+  ~ExtensionInstallUIBrowserTest() override = default;
 
   // Checks that a theme info bar is currently visible and issues an undo to
   // revert to the previous theme.
   void VerifyThemeInfoBarAndUndoInstall() {
-    WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+    WebContents* web_contents = GetActiveWebContents();
     ASSERT_TRUE(web_contents);
     infobars::ContentInfoBarManager* infobar_manager =
         infobars::ContentInfoBarManager::FromWebContents(web_contents);
-    ASSERT_EQ(1U, infobar_manager->infobar_count());
+    ASSERT_EQ(1U, infobar_manager->infobars().size());
     ConfirmInfoBarDelegate* delegate =
-        infobar_manager->infobar_at(0)->delegate()->AsConfirmInfoBarDelegate();
+        infobar_manager->infobars()[0]->delegate()->AsConfirmInfoBarDelegate();
     ASSERT_TRUE(delegate);
     delegate->Cancel();
     WaitForThemeChange();
-    ASSERT_EQ(0U, infobar_manager->infobar_count());
+    ASSERT_EQ(0U, infobar_manager->infobars().size());
   }
 
   // Install the given theme from the data dir and verify expected name.
@@ -70,7 +73,7 @@ class ExtensionInstallUIBrowserTest : public extensions::ExtensionBrowserTest {
     size_t num_before = extensions::ExtensionRegistry::Get(profile())
                             ->enabled_extensions()
                             .size();
-    ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_path, 1, browser()));
+    ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_path, 1));
     WaitForThemeChange();
     size_t num_after = extensions::ExtensionRegistry::Get(profile())
                            ->enabled_extensions()
@@ -84,23 +87,23 @@ class ExtensionInstallUIBrowserTest : public extensions::ExtensionBrowserTest {
     ASSERT_EQ(theme->name(), expected_name);
   }
 
-  const Extension* GetTheme() const {
-    return ThemeServiceFactory::GetThemeForProfile(browser()->profile());
+  const Extension* GetTheme() {
+    return ThemeServiceFactory::GetThemeForProfile(profile());
   }
 
   void WaitForThemeChange() {
     test::ThemeServiceChangedWaiter waiter(
-        ThemeServiceFactory::GetForProfile(browser()->profile()));
+        ThemeServiceFactory::GetForProfile(profile()));
     waiter.WaitForThemeChanged();
   }
 };
 
-// Fails on Linux and Windows (http://crbug.com/580907).
+// Fails on Linux and Windows (http://crbug.com/41236457).
 IN_PROC_BROWSER_TEST_F(ExtensionInstallUIBrowserTest,
                        DISABLED_TestThemeInstallUndoResetsToDefault) {
   // Install theme once and undo to verify we go back to default theme.
   base::FilePath theme_crx = PackExtension(test_data_dir_.AppendASCII("theme"));
-  ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_crx, 1, browser()));
+  ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_crx, 1));
   WaitForThemeChange();
   const Extension* theme = GetTheme();
   ASSERT_TRUE(theme);
@@ -109,12 +112,12 @@ IN_PROC_BROWSER_TEST_F(ExtensionInstallUIBrowserTest,
   ASSERT_EQ(nullptr, GetTheme());
 
   // Set the same theme twice and undo to verify we go back to default theme.
-  ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_crx, 0, browser()));
+  ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_crx, 0));
   WaitForThemeChange();
   theme = GetTheme();
   ASSERT_TRUE(theme);
   ASSERT_EQ(theme_id, theme->id());
-  ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_crx, 0, browser()));
+  ASSERT_TRUE(InstallExtensionWithUIAutoConfirm(theme_crx, 0));
   WaitForThemeChange();
   theme = GetTheme();
   ASSERT_TRUE(theme);
@@ -145,13 +148,63 @@ IN_PROC_BROWSER_TEST_F(ExtensionInstallUIBrowserTest,
   InstallThemeAndVerify("theme", "camo theme");
 
   // Reset to default theme.
-  ThemeServiceFactory::GetForProfile(browser()->profile())->UseDefaultTheme();
+  ThemeServiceFactory::GetForProfile(profile())->UseDefaultTheme();
   ASSERT_FALSE(GetTheme());
 }
 
-// Flaky (http://crbug.com/851252).
+// Flaky (http://crbug.com/41393682).
 IN_PROC_BROWSER_TEST_F(ExtensionInstallUIBrowserTest,
                        DISABLED_TestInstallThemeInFullScreen) {
   EXPECT_TRUE(chrome::ExecuteCommand(browser(), IDC_FULLSCREEN));
   InstallThemeAndVerify("theme", "camo theme");
 }
+
+class ExtensionInstallUIInstallationErrorBrowserTest
+    : public ExtensionInstallUIBrowserTest,
+      public testing::WithParamInterface<bool> {
+ public:
+  ExtensionInstallUIInstallationErrorBrowserTest() {
+    if (GetParam()) {
+      feature_list_.InitAndEnableFeatureWithParameters(
+          infobars::kCentralizedInfoBarFramework,
+          {{infobars::kMigratedInstallationError.name, "true"}});
+    } else {
+      feature_list_.InitAndDisableFeature(
+          infobars::kCentralizedInfoBarFramework);
+    }
+  }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_P(ExtensionInstallUIInstallationErrorBrowserTest,
+                       OnInstallFailureShowsInfoBar) {
+  content::WebContents* web_contents = GetActiveWebContents();
+  ASSERT_TRUE(web_contents);
+  infobars::ContentInfoBarManager* infobar_manager =
+      infobars::ContentInfoBarManager::FromWebContents(web_contents);
+  ASSERT_EQ(0U, infobar_manager->infobars().size());
+
+  const std::u16string error_message = u"Extension installation error";
+  auto install_ui = ExtensionInstallUI::Create(profile());
+  install_ui->OnInstallFailure(extensions::CrxInstallError(
+      extensions::CrxInstallErrorType::OTHER,
+      extensions::CrxInstallErrorDetail::OFFSTORE_INSTALL_DISALLOWED,
+      error_message));
+
+  ASSERT_EQ(1U, infobar_manager->infobars().size());
+  ConfirmInfoBarDelegate* delegate =
+      infobar_manager->infobars()[0]->delegate()->AsConfirmInfoBarDelegate();
+  ASSERT_TRUE(delegate);
+  EXPECT_EQ(infobars::InfoBarDelegate::INSTALLATION_ERROR_INFOBAR_DELEGATE,
+            delegate->GetIdentifier());
+  EXPECT_EQ(error_message, delegate->GetMessageText());
+  EXPECT_EQ(l10n_util::GetStringUTF16(IDS_LEARN_MORE), delegate->GetLinkText());
+  EXPECT_EQ(GURL("https://support.google.com/chrome_webstore/?p=crx_warning"),
+            delegate->GetLinkURL());
+}
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         ExtensionInstallUIInstallationErrorBrowserTest,
+                         testing::Bool());

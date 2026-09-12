@@ -4,21 +4,32 @@
 
 #include "chrome/browser/signin/signin_promo.h"
 
+#include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/metrics/field_trial_params.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/string_number_conversions.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/google/google_brand.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/signin/account_consistency_mode_manager.h"
+#include "chrome/browser/signin/chrome_signin_pref_names.h"
 #include "chrome/browser/signin/signin_promo_util.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/common/url_constants.h"
 #include "components/google/core/common/google_util.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
+#include "components/signin/public/base/signin_metrics.h"
+#include "components/signin/public/base/signin_pref_names.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "components/sync/base/features.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/storage_partition_config.h"
+#include "device/bluetooth/bluetooth_adapter.h"
+#include "device/bluetooth/bluetooth_adapter_factory.h"
 #include "extensions/browser/guest_view/web_view/web_view_guest.h"
 #include "google_apis/gaia/gaia_urls.h"
 #include "net/base/url_util.h"
@@ -35,14 +46,12 @@ const char kSignInPromoQueryKeyAutoClose[] = "auto_close";
 const char kSignInPromoQueryKeyForceKeepData[] = "force_keep_data";
 const char kSignInPromoQueryKeyReason[] = "reason";
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 GURL GetEmbeddedPromoURL(signin_metrics::AccessPoint access_point,
                          signin_metrics::Reason reason,
                          bool auto_close) {
-  CHECK_LT(static_cast<int>(access_point),
-           static_cast<int>(signin_metrics::AccessPoint::ACCESS_POINT_MAX));
-  CHECK_NE(static_cast<int>(access_point),
-           static_cast<int>(signin_metrics::AccessPoint::ACCESS_POINT_UNKNOWN));
+  CHECK_LE(static_cast<int>(access_point),
+           static_cast<int>(signin_metrics::AccessPoint::kMaxValue));
   CHECK_LE(static_cast<int>(reason),
            static_cast<int>(signin_metrics::Reason::kMaxValue));
   CHECK_NE(static_cast<int>(reason),
@@ -70,25 +79,100 @@ GURL GetEmbeddedReauthURLWithEmail(signin_metrics::AccessPoint access_point,
   url = net::AppendQueryParameter(url, "validateEmail", "1");
   return net::AppendQueryParameter(url, "readOnlyEmail", "1");
 }
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
-GURL GetChromeSyncURLForDice(const std::string& email,
-                             const std::string& continue_url) {
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+GURL GetChromeSyncURLForDice(ChromeSyncUrlArgs args) {
   GURL url = GaiaUrls::GetInstance()->signin_chrome_sync_dice();
-  if (!email.empty())
-    url = net::AppendQueryParameter(url, "email_hint", email);
-  if (!continue_url.empty())
-    url = net::AppendQueryParameter(url, "continue", continue_url);
+  if (!args.email.empty()) {
+    url = net::AppendQueryParameter(url, "email_hint", args.email);
+  }
+  if (!args.continue_url.is_empty()) {
+    url = net::AppendQueryParameter(url, "continue", args.continue_url.spec());
+  }
+  if (args.request_dark_scheme) {
+    url = net::AppendQueryParameter(url, "color_scheme", "dark");
+  }
+  switch (args.flow) {
+    // Default behavior.
+    case Flow::NONE:
+      if (syncer::IsReplaceSyncPromosWithSignInPromosEnabled()) {
+        // If History Sync Opt-in is enabled, use a customized sign-in screen
+        // that does NOT mention history sync benefits.
+        url = net::AppendQueryParameter(url, "flow", "history_opt_in");
+      }
+      break;
+    case Flow::PROMO:
+      url = net::AppendQueryParameter(url, "flow", "promo");
+      break;
+    case Flow::EMBEDDED_PROMO:
+      url = net::AppendQueryParameter(url, "flow", "embedded_promo");
+      break;
+  }
+  if (base::FeatureList::IsEnabled(switches::kSignInPromoMaterialNextUI)) {
+    url = net::AppendQueryParameter(url, "theme", "mn");
+  }
+
+  if (base::FeatureList::IsEnabled(
+          switches::kMagiChromeSignInExperimentsBatch1)) {
+    std::string exp_param = base::GetFieldTrialParamValueByFeature(
+        switches::kMagiChromeSignInExperimentsBatch1,
+        "magichrome_fre_exp_branch");
+    if (!exp_param.empty()) {
+      url = net::AppendQueryParameter(url, "magichrome_fre_exp_branch",
+                                      exp_param);
+    }
+  }
+  static const char kMagiChromeHybridTransportSupportedHistogram[] =
+      "Signin.MagiChrome.HybridTransportSupported";
+  // Record hybrid transport signal histogram.
+  IsHybridTransportSupportedForQrCodeSignin(base::BindOnce([](bool can_start) {
+    base::UmaHistogramBoolean(kMagiChromeHybridTransportSupportedHistogram,
+                              can_start);
+  }));
+
+  return url;
+}
+
+void IsHybridTransportSupportedForQrCodeSignin(
+    base::OnceCallback<void(bool)> callback) {
+  if (!device::BluetoothAdapterFactory::Get()->IsLowEnergySupported()) {
+    std::move(callback).Run(false);
+    return;
+  }
+  device::BluetoothAdapterFactory::Get()->GetAdapter(base::BindOnce(
+      [](base::OnceCallback<void(bool)> callback,
+         scoped_refptr<device::BluetoothAdapter> adapter) {
+        bool can_show =
+            adapter && adapter->IsPresent() &&
+            adapter->GetOsPermissionStatus() ==
+                device::BluetoothAdapter::PermissionStatus::kAllowed &&
+            adapter->IsPowered();
+        std::move(callback).Run(can_show);
+      },
+      std::move(callback)));
+}
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
+
+GURL GetChromeReauthURL(ChromeSyncUrlArgs args) {
+  GURL url = GaiaUrls::GetInstance()->reauth_chrome_dice();
+  if (!args.email.empty()) {
+    url = net::AppendQueryParameter(url, "Email", args.email);
+  }
+  if (!args.continue_url.is_empty()) {
+    url = net::AppendQueryParameter(url, "continue", args.continue_url.spec());
+  }
   return url;
 }
 
 GURL GetAddAccountURLForDice(const std::string& email,
-                             const std::string& continue_url) {
+                             const GURL& continue_url) {
   GURL url = GaiaUrls::GetInstance()->add_account_url();
   if (!email.empty())
     url = net::AppendQueryParameter(url, "Email", email);
-  if (!continue_url.empty())
-    url = net::AppendQueryParameter(url, "continue", continue_url);
+  if (!continue_url.is_empty()) {
+    url = net::AppendQueryParameter(url, "continue", continue_url.spec());
+  }
   return url;
 }
 
@@ -100,24 +184,18 @@ content::StoragePartition* GetSigninPartition(
   return browser_context->GetStoragePartition(signin_partition_config);
 }
 
-signin_metrics::AccessPoint GetAccessPointForEmbeddedPromoURL(const GURL& url) {
+std::optional<signin_metrics::AccessPoint> GetAccessPointForEmbeddedPromoURL(
+    const GURL& url) {
   std::string value;
   if (!net::GetValueForKeyInQuery(url, kSignInPromoQueryKeyAccessPoint,
                                   &value)) {
-    return signin_metrics::AccessPoint::ACCESS_POINT_UNKNOWN;
+    return std::nullopt;
   }
 
-  int access_point = -1;
-  base::StringToInt(value, &access_point);
-  if (access_point <
-          static_cast<int>(
-              signin_metrics::AccessPoint::ACCESS_POINT_START_PAGE) ||
-      access_point >=
-          static_cast<int>(signin_metrics::AccessPoint::ACCESS_POINT_MAX)) {
-    return signin_metrics::AccessPoint::ACCESS_POINT_UNKNOWN;
-  }
+  int access_point_value = -1;
+  base::StringToInt(value, &access_point_value);
 
-  return static_cast<signin_metrics::AccessPoint>(access_point);
+  return signin_metrics::AccessPointFromInt(access_point_value);
 }
 
 signin_metrics::Reason GetSigninReasonForEmbeddedPromoURL(const GURL& url) {
@@ -139,6 +217,42 @@ signin_metrics::Reason GetSigninReasonForEmbeddedPromoURL(const GURL& url) {
 void RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* registry) {
   registry->RegisterIntegerPref(prefs::kDiceSigninUserMenuPromoCount, 0);
+  registry->RegisterIntegerPref(
+      prefs::kAutofillSignInPromoDismissCountPerProfile, 0);
+  registry->RegisterIntegerPref(prefs::kPasswordSignInPromoShownCountPerProfile,
+                                0);
+  registry->RegisterIntegerPref(prefs::kAddressSignInPromoShownCountPerProfile,
+                                0);
+  registry->RegisterIntegerPref(prefs::kBookmarkSignInPromoShownCountPerProfile,
+                                0);
+  registry->RegisterIntegerPref(
+      prefs::kHistoryPageHistorySyncPromoShownCountPerProfile, 0);
+  registry->RegisterTimePref(
+      prefs::kHistoryPageHistorySyncPromoLastDismissedTimestampPerProfile,
+      base::Time());
+  registry->RegisterBooleanPref(
+      prefs::kHistoryPageHistorySyncPromoShownAfterDismissalPerProfile, false);
+
+  // Signin promo limits experiment prefs.
+  registry->RegisterIntegerPref(
+      prefs::kAddressSignInPromoShownCountPerProfileForLimitsExperiment, 0);
+  registry->RegisterIntegerPref(
+      prefs::kBookmarkSignInPromoShownCountPerProfileForLimitsExperiment, 0);
+  registry->RegisterIntegerPref(
+      prefs::kPasswordSignInPromoShownCountPerProfileForLimitsExperiment, 0);
+  registry->RegisterIntegerPref(
+      prefs::kAddressSignInPromoDismissCountPerProfileForLimitsExperiment, 0);
+  registry->RegisterIntegerPref(
+      prefs::kPasswordSignInPromoDismissCountPerProfileForLimitsExperiment, 0);
+  registry->RegisterIntegerPref(
+      prefs::kBookmarkSignInPromoDismissCountPerProfileForLimitsExperiment, 0);
+  registry->RegisterIntegerPref(
+      prefs::kSearchAIModeSignInPromoShownCountPerProfile, 0);
+  registry->RegisterIntegerPref(
+      prefs::kSearchAIModeSignInPromoDismissCountPerProfile, 0);
+  registry->RegisterTimePref(
+      prefs::kSearchAIModeSignInPromoLastImpressionTimestampPerProfile,
+      base::Time());
 }
 
 }  // namespace signin

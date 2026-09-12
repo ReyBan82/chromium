@@ -1,6 +1,7 @@
 # Copyright 2022 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+import("//build/config/chromeos/args.gni")
 import("//build/config/coverage/coverage.gni")
 import("//build/config/python.gni")
 
@@ -17,6 +18,10 @@ group("orchestrator_all") {
     ":process_perf_results_py",
     ":standard_gtest_merge_py",
     ":standard_isolated_script_merge_py",
+
+    # Dependencies used by GPU CI testers that opt in to the test_trigger_cas
+    # code path.
+    ":gpu_test_trigger_cas",
   ]
 
   if (is_android) {
@@ -43,9 +48,21 @@ group("orchestrator_all") {
   }
 
   if (use_jacoco_coverage) {
-    data += [ "//third_party/jacoco/lib/jacococli.jar" ]
+    data += [ "//third_party/jacoco/cipd/lib/jacococli.jar" ]
     data_deps += [ "//third_party/jdk:java_data" ]
   }
+
+  if (is_skylab) {
+    data += [
+      "//third_party/chromite/",
+      "//chromeos/CHROMEOS_LKGM",
+      "//chromeos/tast_control_cq_tests.txt",
+      "//chromeos/tast_control_disabled_tests.txt",
+      "//chromeos/tast_control_disabled_tests_public_builders.txt",
+      "//chromeos/tast_control_flaky_tests.txt",
+    ]
+  }
+
   write_runtime_deps = "$root_out_dir/orchestrator_all.runtime_deps"
 }
 
@@ -85,6 +102,7 @@ python_library("process_perf_results_py") {
     # them, build/print_python_deps.py doesn't detect them. So to appease
     # telemetry, just add the needed dirs directly.
     "//third_party/catapult/telemetry/third_party/",
+    "//third_party/catapult/third_party/gsutil/",
     "//third_party/catapult/third_party/polymer/",
     "//third_party/catapult/third_party/six/",
     "//third_party/catapult/third_party/vinn/",
@@ -92,7 +110,20 @@ python_library("process_perf_results_py") {
     "//third_party/catapult/tracing/third_party/",
     "//third_party/catapult/tracing/tracing/",
 
-    # This file is read at script run-time.
+    # These files are read at script run-time.
     "//tools/perf/core/perf_dashboard_machine_group_mapping.json",
+    "//tools/perf/core/schedule/",
+    "//tools/perf/public_builders.json",
+  ]
+}
+
+group("gpu_test_trigger_cas") {
+  data = [
+    "//infra/config/generated/builders/ci/",
+    "//infra/config/generated/builders/gn_args_locations.json",
+
+    # mb
+    "//build/gn_helpers.py",
+    "//tools/mb/",
   ]
 }

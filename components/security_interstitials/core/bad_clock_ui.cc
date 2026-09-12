@@ -13,7 +13,7 @@
 namespace security_interstitials {
 
 BadClockUI::BadClockUI(const GURL& request_url,
-                       int cert_error,
+                       net::Error cert_error,
                        const net::SSLInfo& ssl_info,
                        const base::Time& time_triggered,
                        ssl_errors::ClockState clock_state,
@@ -35,7 +35,7 @@ BadClockUI::~BadClockUI() {
   controller_->metrics_helper()->RecordShutdownMetrics();
 }
 
-void BadClockUI::PopulateStringsForHTML(base::Value::Dict& load_time_data) {
+void BadClockUI::PopulateStringsForHTML(base::DictValue& load_time_data) {
   // Shared with other SSL errors.
   common_string_util::PopulateSSLLayoutStrings(cert_error_, load_time_data);
   common_string_util::PopulateSSLDebuggingStrings(ssl_info_, time_triggered_,
@@ -46,7 +46,7 @@ void BadClockUI::PopulateStringsForHTML(base::Value::Dict& load_time_data) {
   load_time_data.Set("finalParagraph", "");  // Placeholder.
 }
 
-void BadClockUI::PopulateClockStrings(base::Value::Dict& load_time_data) {
+void BadClockUI::PopulateClockStrings(base::DictValue& load_time_data) {
   load_time_data.Set("bad_clock", true);
   load_time_data.Set("overridable", false);
   load_time_data.Set("hide_primary_button",
@@ -93,8 +93,9 @@ void BadClockUI::HandleCommand(SecurityInterstitialCommand command) {
           security_interstitials::MetricsHelper::SHOW_ADVANCED);
       break;
     case CMD_OPEN_DATE_SETTINGS:
-      if (!controller_->CanLaunchDateAndTimeSettings())
+      if (!controller_->CanLaunchDateAndTimeSettings()) {
         NOTREACHED() << "This platform does not support date settings";
+      }
       controller_->metrics_helper()->RecordUserInteraction(
           security_interstitials::MetricsHelper::OPEN_TIME_SETTINGS);
       controller_->LaunchDateAndTimeSettings();
@@ -110,15 +111,23 @@ void BadClockUI::HandleCommand(SecurityInterstitialCommand command) {
           security_interstitials::MetricsHelper::OPEN_ENHANCED_PROTECTION);
       controller_->OpenEnhancedProtectionSettings();
       break;
+    case CMD_SHOW_CERTIFICATE_VIEWER:
     case CMD_PROCEED:
     case CMD_OPEN_HELP_CENTER:
     case CMD_RELOAD:
     case CMD_OPEN_DIAGNOSTIC:
     case CMD_OPEN_LOGIN:
     case CMD_REPORT_PHISHING_ERROR:
+    case CMD_CLOSE_INTERSTITIAL_WITHOUT_UI:
+    case CMD_REQUEST_SITE_ACCESS_PERMISSION:
+    case CMD_OPEN_ANDROID_ADVANCED_PROTECTION_SETTINGS:
+    case CMD_OPEN_HELP_CENTER_IN_NEW_TAB:
+    case CMD_OPEN_DIAGNOSTIC_IN_NEW_TAB:
+    case CMD_OPEN_REPORTING_PRIVACY_IN_NEW_TAB:
+    case CMD_OPEN_WHITEPAPER_IN_NEW_TAB:
+    case CMD_REPORT_PHISHING_ERROR_IN_NEW_TAB:
       // Not supported by the bad clock error page.
       NOTREACHED() << "Unsupported command: " << command;
-      break;
     case CMD_ERROR:
     case CMD_TEXT_FOUND:
     case CMD_TEXT_NOT_FOUND:
@@ -127,4 +136,4 @@ void BadClockUI::HandleCommand(SecurityInterstitialCommand command) {
   }
 }
 
-}  // security_interstitials
+}  // namespace security_interstitials

@@ -7,8 +7,12 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 
+#include "base/compiler_specific.h"
+#include "base/containers/auto_spanification_helper.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "services/device/usb/mock_usb_device_handle.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -45,15 +49,17 @@ const uint8_t kExampleUrlDescriptor1[] = {
     0x19, 0x03, 0x01, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o',
     'm',  '/',  'i',  'n', 'd', 'e', 'x', '.', 'h', 't', 'm', 'l'};
 
-const uint8_t kExampleUrlDescriptor255[] = {
+const auto kExampleUrlDescriptor255 = std::to_array<uint8_t>({
     0x2E, 0x03, 0xFF, 'c', 'h', 'r', 'o', 'm', 'e', '-', 'e', 'x',
     't',  'e',  'n',  's', 'i', 'o', 'n', ':', '/', '/', 'e', 'x',
     't',  'e',  'n',  's', 'i', 'o', 'n', 'i', 'd', '/', 'e', 'x',
-    'a',  'm',  'p',  'l', 'e', '.', 'h', 't', 'm', 'l'};
+    'a',  'm',  'p',  'l', 'e', '.', 'h', 't', 'm', 'l',
+});
 
-ACTION_P2(InvokeCallback, data, length) {
-  size_t transferred_length = std::min(length, arg6->size());
-  memcpy(arg6->front(), data, transferred_length);
+ACTION_P(InvokeCallback, data_span) {
+  size_t transferred_length = std::min(data_span.size(), arg6->size());
+  base::span(arg6->as_vector())
+      .copy_prefix_from(data_span.first(transferred_length));
   std::move(arg8).Run(UsbTransferStatus::COMPLETED, arg6, transferred_length);
 }
 
@@ -201,9 +207,11 @@ TEST_F(WebUsbDescriptorsTest, UrlDescriptor) {
 TEST_F(WebUsbDescriptorsTest, EntireUrlDescriptor) {
   GURL url;
   ASSERT_TRUE(ParseWebUsbUrlDescriptor(
-      std::vector<uint8_t>(
-          kExampleUrlDescriptor255,
-          kExampleUrlDescriptor255 + sizeof(kExampleUrlDescriptor255)),
+      std::vector<uint8_t>(kExampleUrlDescriptor255.data(),
+                           base::span(kExampleUrlDescriptor255)
+                               .subspan(base::SpanificationSizeofForStdArray(
+                                   kExampleUrlDescriptor255))
+                               .data()),
       &url));
   EXPECT_EQ(GURL("chrome-extension://extensionid/example.html"), url);
 }
@@ -253,15 +261,13 @@ TEST_F(WebUsbDescriptorsTest, ReadDescriptors) {
                                       UsbControlTransferRecipient::DEVICE, 0x06,
                                       0x0F00, 0x0000, _, _, _))
       .Times(2)
-      .WillRepeatedly(
-          InvokeCallback(kExampleBosDescriptor, sizeof(kExampleBosDescriptor)));
+      .WillRepeatedly(InvokeCallback(base::span(kExampleBosDescriptor)));
   EXPECT_CALL(*device_handle,
               ControlTransferInternal(UsbTransferDirection::INBOUND,
                                       UsbControlTransferType::VENDOR,
                                       UsbControlTransferRecipient::DEVICE, 0x42,
                                       0x0001, 0x0002, _, _, _))
-      .WillOnce(InvokeCallback(kExampleUrlDescriptor1,
-                               sizeof(kExampleUrlDescriptor1)));
+      .WillOnce(InvokeCallback(base::span(kExampleUrlDescriptor1)));
 
   ReadWebUsbDescriptors(device_handle, base::BindOnce(&ExpectLandingPage));
 }

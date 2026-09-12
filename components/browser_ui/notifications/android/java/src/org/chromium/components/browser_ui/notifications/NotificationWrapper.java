@@ -6,34 +6,49 @@ package org.chromium.components.browser_ui.notifications;
 
 import android.app.Notification;
 
-import androidx.annotation.Nullable;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.NullUnmarked;
+import org.chromium.build.annotations.Nullable;
 
-/**
- * A wrapper class of {@link Notification}, which also contains the notification id and tag, etc.
- */
+/** A wrapper class of {@link Notification}, which also contains the notification id and tag, etc. */
+@NullMarked
 public class NotificationWrapper {
-    @Nullable
-    private final Notification mNotification;
+    private final @Nullable Notification mNotification;
     private final NotificationMetadata mNotificationMetadata;
+    private final boolean mIsSilent;
 
     public NotificationWrapper(@Nullable Notification notification, NotificationMetadata metadata) {
+        this(notification, metadata, /* isSilent= */ false);
+    }
+
+    public NotificationWrapper(
+            @Nullable Notification notification, NotificationMetadata metadata, boolean isSilent) {
         assert metadata != null;
         mNotification = notification;
         mNotificationMetadata = metadata;
+        mIsSilent = isSilent;
     }
 
-    /**
-     * Returns the {@link Notification}.
-     */
+    /** Returns the {@link Notification}. */
+    @NullUnmarked
     public Notification getNotification() {
         return mNotification;
     }
 
     /**
      * Gets the notification metadata.
-     * @See {@link NotificationMetadata}.
+     *
+     * @see {@link NotificationMetadata}.
      */
     public NotificationMetadata getMetadata() {
         return mNotificationMetadata;
+    }
+
+    /**
+     * Returns whether the notification is silent. This exists because {@link
+     * android.app.Notification} does not have a getter for this boolean.
+     */
+    public boolean isSilent() {
+        return mIsSilent;
     }
 }

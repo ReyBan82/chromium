@@ -6,11 +6,12 @@
 
 namespace cc {
 
-AnimationEvent::AnimationEvent(AnimationEvent::Type type,
-                               UniqueKeyframeModelId uid,
-                               int group_id,
-                               int target_property,
-                               base::TimeTicks monotonic_time)
+AnimationPlaybackEvent::AnimationPlaybackEvent(
+    AnimationPlaybackEvent::Type type,
+    UniqueKeyframeModelId uid,
+    int group_id,
+    int target_property,
+    base::TimeTicks monotonic_time)
     : type(type),
       uid(uid),
       group_id(group_id),
@@ -19,10 +20,11 @@ AnimationEvent::AnimationEvent(AnimationEvent::Type type,
       is_impl_only(false),
       local_time() {}
 
-AnimationEvent::AnimationEvent(int timeline_id,
-                               int animation_id,
-                               absl::optional<base::TimeDelta> local_time)
-    : type(TIME_UPDATED),
+AnimationPlaybackEvent::AnimationPlaybackEvent(
+    int timeline_id,
+    int animation_id,
+    std::optional<base::TimeDelta> local_time)
+    : type(Type::kTimeUpdated),
       // Initializing model_id with an invalid value (0).
       // Also initializing keyframe_id with 0 which in its case is a valid
       // value. However this is safe since keyframe_id and model_id are not used
@@ -34,7 +36,8 @@ AnimationEvent::AnimationEvent(int timeline_id,
       is_impl_only(false),
       local_time(local_time) {}
 
-AnimationEvent::AnimationEvent(const AnimationEvent& other) {
+AnimationPlaybackEvent::AnimationPlaybackEvent(
+    const AnimationPlaybackEvent& other) {
   type = other.type;
   uid = other.uid;
   group_id = other.group_id;
@@ -47,7 +50,8 @@ AnimationEvent::AnimationEvent(const AnimationEvent& other) {
   local_time = other.local_time;
 }
 
-AnimationEvent& AnimationEvent::operator=(const AnimationEvent& other) {
+AnimationPlaybackEvent& AnimationPlaybackEvent::operator=(
+    const AnimationPlaybackEvent& other) {
   type = other.type;
   uid = other.uid;
   group_id = other.group_id;
@@ -61,23 +65,35 @@ AnimationEvent& AnimationEvent::operator=(const AnimationEvent& other) {
   return *this;
 }
 
-AnimationEvent::~AnimationEvent() = default;
+AnimationPlaybackEvent::~AnimationPlaybackEvent() = default;
 
 AnimationEvents::AnimationEvents() : needs_time_updated_events_(false) {}
 
 AnimationEvents::~AnimationEvents() = default;
 
 bool AnimationEvents::IsEmpty() const {
-  return events_.empty() && !needs_time_updated_events_;
+  return events().empty() && !needs_time_updated_events_;
 }
 
-bool AnimationEvent::ShouldDispatchToKeyframeEffectAndModel() const {
+bool AnimationPlaybackEvent::ShouldDispatchToKeyframeEffectAndModel() const {
   // TIME_UPDATED events are used to synchronize effect time between cc and
   // main thread worklet animations. Keyframe models are not involved in
   // this process.
   // is_impl_only events are not dispatched because they don't have
   // corresponding main thread components.
-  return type != TIME_UPDATED && !is_impl_only;
+  return type != Type::kTimeUpdated && !is_impl_only;
+}
+
+AnimationTriggerEvent::AnimationTriggerEvent(int trigger_id,
+                                             Type type,
+                                             base::TimeTicks time)
+    : trigger_id(trigger_id), type(type), time(time) {}
+
+AnimationTriggerEvent::AnimationTriggerEvent(
+    const AnimationTriggerEvent& other) {
+  type = other.type;
+  trigger_id = other.trigger_id;
+  time = other.time;
 }
 
 }  // namespace cc

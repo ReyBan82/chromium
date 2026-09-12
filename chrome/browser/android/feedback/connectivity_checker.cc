@@ -13,9 +13,7 @@
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
-#include "chrome/android/chrome_jni_headers/ConnectivityChecker_jni.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/profiles/profile_android.h"
 #include "content/public/browser/storage_partition.h"
 #include "net/base/load_flags.h"
 #include "net/http/http_status_code.h"
@@ -25,7 +23,10 @@
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "url/gurl.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/ConnectivityChecker_jni.h"
+
+using base::android::JavaRef;
 
 namespace chrome {
 namespace android {
@@ -50,7 +51,7 @@ void ExecuteCallback(const base::android::JavaRef<jobject>& callback,
                                            callback, result);
 }
 
-void JNI_ConnectivityChecker_PostCallback(
+static void JNI_ConnectivityChecker_PostCallback(
     JNIEnv* env,
     const base::android::JavaRef<jobject>& j_callback,
     ConnectivityCheckResult result) {
@@ -168,20 +169,19 @@ void ConnectivityChecker::OnTimeout() {
 
 }  // namespace
 
-void JNI_ConnectivityChecker_CheckConnectivity(
+static void JNI_ConnectivityChecker_CheckConnectivity(
     JNIEnv* env,
-    const JavaParamRef<jobject>& j_profile,
-    const JavaParamRef<jstring>& j_url,
-    jlong j_timeout_ms,
-    const JavaParamRef<jobject>& j_callback,
-    jint j_network_annotation_hash_code) {
-  Profile* profile = ProfileAndroid::FromProfileAndroid(j_profile);
+    Profile* profile,
+    const std::string& j_url,
+    int64_t j_timeout_ms,
+    const JavaRef<jobject>& j_callback,
+    int32_t j_network_annotation_hash_code) {
   if (!profile) {
     JNI_ConnectivityChecker_PostCallback(env, j_callback,
                                          CONNECTIVITY_CHECK_RESULT_ERROR);
     return;
   }
-  GURL url(base::android::ConvertJavaStringToUTF8(env, j_url));
+  GURL url(j_url);
   if (!url.is_valid()) {
     JNI_ConnectivityChecker_PostCallback(env, j_callback,
                                          CONNECTIVITY_CHECK_RESULT_ERROR);
@@ -196,12 +196,13 @@ void JNI_ConnectivityChecker_CheckConnectivity(
   connectivity_checker->StartAsyncCheck();
 }
 
-jboolean JNI_ConnectivityChecker_IsUrlValid(
-    JNIEnv* env,
-    const JavaParamRef<jstring>& j_url) {
-  GURL url(base::android::ConvertJavaStringToUTF8(env, j_url));
+static bool JNI_ConnectivityChecker_IsUrlValid(JNIEnv* env,
+                                               const std::string& j_url) {
+  GURL url(j_url);
   return url.is_valid();
 }
 
 }  // namespace android
 }  // namespace chrome
+
+DEFINE_JNI(ConnectivityChecker)

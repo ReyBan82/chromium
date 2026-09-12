@@ -6,8 +6,10 @@
 #define GPU_COMMAND_BUFFER_CLIENT_DAWN_CLIENT_MEMORY_TRANSFER_SERVICE_H_
 
 #include <dawn/wire/WireClient.h>
+
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
 
 namespace gpu {
@@ -25,13 +27,9 @@ class DawnClientMemoryTransferService
   DawnClientMemoryTransferService(MappedMemoryManager* mapped_memory);
   ~DawnClientMemoryTransferService() override;
 
-  // Create a handle for reading shared memory data.
+  // Create a handle for using shared memory data.
   // This may fail and return nullptr.
-  ReadHandle* CreateReadHandle(size_t size) override;
-
-  // Create a handle for writing shared memory data.
-  // This may fail and return nullptr.
-  WriteHandle* CreateWriteHandle(size_t size) override;
+  std::unique_ptr<MemoryHandle> CreateMemoryHandle(size_t size) override;
 
   // Free shared memory allocations after the next token passes on the GPU
   // process.
@@ -42,18 +40,25 @@ class DawnClientMemoryTransferService
  private:
   class ReadHandleImpl;
   class WriteHandleImpl;
+  class MemoryHandleImpl;
 
-  // Allocate a shared memory handle for the memory transfer.
-  void* AllocateHandle(size_t size, MemoryTransferHandle* handle);
+  // Allocate a shared memory transfer buffer and populate `handle` with its
+  // metadata (shm_id, shm_offset, size).
+  base::span<std::byte> AllocateTransferBuffer(size_t size,
+                                               MemoryTransferHandle* handle);
 
   // Mark a shared memory allocation as free. This should not be called more
   // than once per block.
   void MarkHandleFree(void* ptr);
 
-  raw_ptr<MappedMemoryManager> mapped_memory_;
+  // Found dangling on `linux-rel` in
+  // `gpu_tests.context_lost_integration_test.ContextLostIntegrationTest.
+  // ContextLost_WebGPUStressRequestDeviceAndRemoveLoop`
+  raw_ptr<MappedMemoryManager, DanglingUntriaged> mapped_memory_;
+
   // Pointers to memory allocated by the MappedMemoryManager to free after
   // the next Flush.
-  std::vector<void*> free_blocks_;
+  std::vector<raw_ptr<void, VectorExperimental>> free_blocks_;
 
   // If disconnected, new handle creation always returns null.
   bool disconnected_ = false;

@@ -1,66 +1,58 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/origin_trials/browser/origin_trials.h"
+
 #include <memory>
 #include <string>
-#include <vector>
 
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/bind.h"
 #include "base/strings/strcat.h"
-#include "base/test/scoped_feature_list.h"
-#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/test/base/in_process_browser_test.h"
-#include "chrome/test/base/ui_test_utils.h"
-#include "components/browsing_data/content/browsing_data_helper.h"
-#include "components/origin_trials/browser/origin_trials.h"
-#include "components/user_prefs/user_prefs.h"
+#include "chrome/test/base/chrome_test_utils.h"
+#include "chrome/test/base/platform_browser_test.h"
 #include "content/public/browser/origin_trials_controller_delegate.h"
-#include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/url_loader_interceptor.h"
-#include "net/dns/mock_host_resolver.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
 namespace {
 
-// See
+// See:
 // https://chromium.googlesource.com/chromium/src/+/main/docs/origin_trials_integration.md
-const char kTestTokenPublicKey[] =
+constexpr char kTestTokenPublicKey[] =
     "dRCs+TocuKkocNKa0AtZ4awrt9XKH2SQCI6o4FY6BNA=";
 
-const char kTrialEnabledDomain[] = "example.com";
-const char kEmbeddingDomain[] = "embedding.com";
-const char kFrobulatePersistentTrialName[] = "FrobulatePersistent";
-// Generated with
+constexpr char kTrialEnabledDomain[] = "example.com";
+constexpr char kEmbeddingDomain[] = "embedding.com";
+constexpr char kFrobulatePersistentTrialName[] = "FrobulatePersistent";
+// Generated with:
 // tools/origin_trials/generate_token.py https://example.com \
 //     FrobulatePersistent --expire-timestamp=2000000000
-const char kFrobulatePersistentToken[] =
+constexpr char kFrobulatePersistentToken[] =
     "AzZfd1vKZ0SSGRGk/"
     "8nIszQSlHYjbuYVE3jwaNZG3X4t11zRhzPWWJwTZ+JJDS3JJsyEZcpz+y20pAP6/"
     "6upOQ4AAABdeyJvcmlnaW4iOiAiaHR0cHM6Ly9leGFtcGxlLmNvbTo0NDMiLCAiZmVhdHVyZSI"
     "6ICJGcm9idWxhdGVQZXJzaXN0ZW50IiwgImV4cGlyeSI6IDIwMDAwMDAwMDB9";
 
-const char kTrialEnabledPath[] = "/origin-trial";
-const char kCriticalTrialEnabledPath[] = "/critical-origin-trial";
+constexpr char kTrialEnabledPath[] = "/origin-trial";
+constexpr char kCriticalTrialEnabledPath[] = "/critical-origin-trial";
 
-const char kPageWithOriginTrialResourcePath[] = "/has-origin-trial-resource";
+constexpr char kPageWithOriginTrialResourcePath[] =
+    "/has-origin-trial-resource";
 
-const char kPageWithEmbeddedFramePath[] = "/has-embedded-frame";
+constexpr char kPageWithEmbeddedFramePath[] = "/has-embedded-frame";
 
-const char kOriginTrialResourceJavascriptPath[] = "/origin-trial-script.js";
+constexpr char kOriginTrialResourceJavascriptPath[] = "/origin-trial-script.js";
 
 class OriginTrialsBrowserTest : public PlatformBrowserTest {
  public:
-  OriginTrialsBrowserTest() {
-    test_features_.InitAndEnableFeature(::features::kPersistentOriginTrials);
-  }
+  OriginTrialsBrowserTest() = default;
 
   OriginTrialsBrowserTest(const OriginTrialsBrowserTest&) = delete;
   OriginTrialsBrowserTest& operator=(const OriginTrialsBrowserTest&) = delete;
@@ -74,10 +66,10 @@ class OriginTrialsBrowserTest : public PlatformBrowserTest {
   }
 
   bool InterceptRequest(content::URLLoaderInterceptor::RequestParams* params) {
-    std::string path = params->url_request.url.path();
+    std::string path = params->url_request.url.GetPath();
 
     std::string headers = "HTTP/1.1 200 OK\n";
-    // Set Origin-Trial related headers
+    // Set Origin-Trial related headers.
     if (params->url_request.url.DomainIs(kTrialEnabledDomain)) {
       received_request_counts_[path]++;
       if (path == kTrialEnabledPath || path == kCriticalTrialEnabledPath ||
@@ -92,7 +84,7 @@ class OriginTrialsBrowserTest : public PlatformBrowserTest {
       }
     }
 
-    // Set Content-Type header
+    // Set Content-Type header.
     if (path == kOriginTrialResourceJavascriptPath) {
       base::StrAppend(&headers,
                       {"Content-Type: text/javascript; charset=utf-8\n"});
@@ -101,7 +93,7 @@ class OriginTrialsBrowserTest : public PlatformBrowserTest {
     }
     headers += '\n';
 
-    // Set body contents
+    // Set body contents.
     std::string body;
     if (path == kPageWithOriginTrialResourcePath) {
       base::StrAppend(&body,
@@ -120,11 +112,8 @@ class OriginTrialsBrowserTest : public PlatformBrowserTest {
   }
 
   void TearDownOnMainThread() override {
-    // Clean up any saved settings after test run
-    browser()
-        ->profile()
-        ->GetOriginTrialsControllerDelegate()
-        ->ClearPersistedTokens();
+    // Clean up any saved settings after test run.
+    GetProfile()->GetOriginTrialsControllerDelegate()->ClearPersistedTokens();
 
     url_loader_interceptor_.reset();
     PlatformBrowserTest::TearDownOnMainThread();
@@ -137,7 +126,7 @@ class OriginTrialsBrowserTest : public PlatformBrowserTest {
     url::Origin partition_domain =
         url::Origin::CreateFromNormalizedTuple("https", partition_site, 443);
     content::OriginTrialsControllerDelegate* delegate =
-        browser()->profile()->GetOriginTrialsControllerDelegate();
+        GetProfile()->GetOriginTrialsControllerDelegate();
     return delegate->GetPersistedTrialsForOrigin(origin, partition_domain,
                                                  base::Time::Now());
   }
@@ -147,33 +136,31 @@ class OriginTrialsBrowserTest : public PlatformBrowserTest {
                                     kTestTokenPublicKey);
   }
 
-  // Navigate to an insecure domain
-  void RequestToHttpDomain() {
-    ASSERT_TRUE(
-        ui_test_utils::NavigateToURL(browser(), GURL("http://127.0.0.1/")));
+  void NavigateToURL(const GURL& url) {
+    ASSERT_TRUE(chrome_test_utils::NavigateToURL(
+        chrome_test_utils::GetActiveWebContents(this), url));
   }
 
-  // Navigate to our enabled origin without any Origin-Trial response headers
+  // Navigate to an insecure domain.
+  void RequestToHttpDomain() { NavigateToURL(GURL("http://127.0.0.1/")); }
+
+  // Navigate to our enabled origin without any Origin-Trial response headers.
   void RequestWithoutHeaders() {
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(
-        browser(), GURL(base::StrCat({"https://", kTrialEnabledDomain, "/"}))));
+    NavigateToURL(GURL(base::StrCat({"https://", kTrialEnabledDomain, "/"})));
   }
 
   // Navigate to our enabled origin on a path that sets the Origin-Trial header.
   void RequestForOriginTrial(const std::string& path) {
-    GURL url(base::StrCat({"https://", kTrialEnabledDomain, path}));
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+    NavigateToURL(GURL(base::StrCat({"https://", kTrialEnabledDomain, path})));
   }
 
-  // Navigate to a third-party page that embeds an origin trial-enabling page
+  // Navigate to a third-party page that embeds an origin trial-enabling page.
   void RequestForEmbeddedOriginTrial() {
-    GURL url(base::StrCat(
-        {"https://", kEmbeddingDomain, kPageWithEmbeddedFramePath}));
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+    NavigateToURL(GURL(base::StrCat(
+        {"https://", kEmbeddingDomain, kPageWithEmbeddedFramePath})));
   }
 
  protected:
-  base::test::ScopedFeatureList test_features_;
   std::unique_ptr<content::URLLoaderInterceptor> url_loader_interceptor_;
   base::flat_map<std::string, int> received_request_counts_;
 };
@@ -207,13 +194,13 @@ IN_PROC_BROWSER_TEST_F(OriginTrialsBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(OriginTrialsBrowserTest,
                        TrialEnabledAfterNavigationToOtherDomain) {
-  // Navigate to a page that enables a persistent origin trial
+  // Navigate to a page that enables a persistent origin trial.
   RequestForOriginTrial(kTrialEnabledPath);
   EXPECT_FALSE(GetOriginTrialsForEnabledOrigin(kTrialEnabledDomain).empty());
-  // Navigate to a different domain
+  // Navigate to a different domain.
   RequestToHttpDomain();
 
-  // The trial should still be enabled
+  // The trial should still be enabled.
   base::flat_set<std::string> trials =
       GetOriginTrialsForEnabledOrigin(kTrialEnabledDomain);
   ASSERT_FALSE(trials.empty());
@@ -222,13 +209,13 @@ IN_PROC_BROWSER_TEST_F(OriginTrialsBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(OriginTrialsBrowserTest,
                        TrialDisabledAfterNavigationToSameDomain) {
-  // Navigate to a page that enables a persistent origin trial
+  // Navigate to a page that enables a persistent origin trial.
   RequestForOriginTrial(kTrialEnabledPath);
   EXPECT_FALSE(GetOriginTrialsForEnabledOrigin(kTrialEnabledDomain).empty());
-  // Navigate to same domain without the Origin-Trial header set
+  // Navigate to same domain without the Origin-Trial header set.
   RequestWithoutHeaders();
 
-  // The trial should no longer be enabled
+  // The trial should no longer be enabled.
   EXPECT_TRUE(GetOriginTrialsForEnabledOrigin(kTrialEnabledDomain).empty());
 }
 
@@ -240,15 +227,15 @@ IN_PROC_BROWSER_TEST_F(OriginTrialsBrowserTest,
   // The trial was critical, so expect two requests due to restart.
   EXPECT_EQ(2, received_request_counts_[kCriticalTrialEnabledPath]);
 
-  // Navigate to another page
+  // Navigate to another page.
   RequestToHttpDomain();
 
-  // Load the original page again
+  // Load the original page again.
   received_request_counts_[kCriticalTrialEnabledPath] = 0;
   RequestForOriginTrial(kCriticalTrialEnabledPath);
   EXPECT_FALSE(GetOriginTrialsForEnabledOrigin(kTrialEnabledDomain).empty());
 
-  // The trial should already be persisted, so no restart should have happened
+  // The trial should already be persisted, so no restart should have happened.
   EXPECT_EQ(1, received_request_counts_[kCriticalTrialEnabledPath]);
 }
 

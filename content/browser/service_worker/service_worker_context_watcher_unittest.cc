@@ -11,6 +11,7 @@
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "content/browser/service_worker/embedded_worker_test_helper.h"
+#include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -156,9 +157,12 @@ class ServiceWorkerContextWatcherTest : public testing::Test {
     blink::mojom::ServiceWorkerRegistrationOptions options;
     options.scope = scope;
     int64_t registration_id = blink::mojom::kInvalidServiceWorkerRegistrationId;
+    auto fetch_client_settings_object =
+        blink::mojom::FetchClientSettingsObject::New();
+    fetch_client_settings_object->policy_container_policies =
+        blink::mojom::PolicyContainerPolicies::New();
     context()->RegisterServiceWorker(
-        script_url, key, options,
-        blink::mojom::FetchClientSettingsObject::New(),
+        script_url, key, options, std::move(fetch_client_settings_object),
         base::BindOnce(&DidRegisterServiceWorker, &registration_id),
         /*requesting_frame_id=*/GlobalRenderFrameHostId(),
         PolicyContainerPolicies());
@@ -173,6 +177,7 @@ class ServiceWorkerContextWatcherTest : public testing::Test {
         blink::ServiceWorkerStatusCode::kErrorFailed;
     context()->UnregisterServiceWorker(
         scope, key, /*is_immediate=*/false,
+        ServiceWorkerRegistration::DeleteInitiator::kTest,
         base::BindOnce(&DidUnregisterServiceWorker, &status));
     base::RunLoop().RunUntilIdle();
     return status;

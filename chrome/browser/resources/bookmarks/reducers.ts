@@ -9,12 +9,14 @@
  * calls.
  */
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {Action} from 'chrome://resources/js/store_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {Action} from 'chrome://resources/js/store.js';
 
-import {ChangeFolderOpenAction, CreateBookmarkAction, EditBookmarkAction, FinishSearchAction, MoveBookmarkAction, RefreshNodesAction, RemoveBookmarkAction, ReorderChildrenAction, SelectFolderAction, SelectItemsAction, SetPrefAction, StartSearchAction, UpdateAnchorAction} from './actions.js';
-import {BookmarkNode, BookmarksPageState, FolderOpenState, NodeMap, PreferencesState, SearchState, SelectionState} from './types.js';
-import {removeIdsFromMap, removeIdsFromObject, removeIdsFromSet} from './util.js';
+import type {ChangeFolderOpenAction, CreateBookmarkAction, EditBookmarkAction, FinishSearchAction, MoveBookmarkAction, RefreshNodesAction, RemoveBookmarkAction, ReorderChildrenAction, SelectFolderAction, SelectItemsAction, SetPrefAction, StartSearchAction, UpdateAnchorAction} from './actions.js';
+import {PermanentFolderType} from './bookmarks_api.mojom-webui.js';
+import {ACCOUNT_HEADING_NODE_ID, LOCAL_HEADING_NODE_ID, ROOT_NODE_ID} from './constants.js';
+import type {BookmarkNode, BookmarksPageState, FolderOpenState, NodeMap, PreferencesState, SearchState, SelectionState} from './types.js';
+import {buildAccountHeadingNode, buildLocalHeadingNode, getDefaultSelectedFolder, removeIdsFromMap, removeIdsFromObject, removeIdsFromSet} from './util.js';
 
 function selectItems(
     selectionState: SelectionState, action: SelectItemsAction): SelectionState {
@@ -166,17 +168,68 @@ function modifyNode(
 }
 
 function createBookmark(nodes: NodeMap, action: CreateBookmarkAction): NodeMap {
-  const nodeModifications: NodeMap = {};
-  nodeModifications[action.id] = action.node;
+  let parentId = action.parentId;
+  let parentIndex = action.parentIndex;
+  const isPermanent = action.node.permanentFolderType !== undefined;
 
-  const parentNode = nodes[action.parentId]!;
+  if (isPermanent && ACCOUNT_HEADING_NODE_ID in nodes) {
+    parentId =
+        action.node.isSynced ? ACCOUNT_HEADING_NODE_ID : LOCAL_HEADING_NODE_ID;
+    parentIndex = nodes[parentId]!.children!.length;
+  }
+
+  const nodeModifications: NodeMap = {};
+  nodeModifications[action.id] =
+      Object.assign({}, action.node, {parentId: parentId});
+
+  const parentNode = nodes[parentId]!;
   const newChildren = parentNode.children!.slice();
-  newChildren.splice(action.parentIndex, 0, action.id);
-  nodeModifications[action.parentId] = Object.assign({}, parentNode, {
+  newChildren.splice(parentIndex, 0, action.id);
+  nodeModifications[parentId] = Object.assign({}, parentNode, {
     children: newChildren,
   });
 
-  return Object.assign({}, nodes, nodeModifications);
+  let newNodes = Object.assign({}, nodes, nodeModifications);
+
+  // If headings are not created yet, check if adding this permanent node causes
+  // both local and account bookmark bars to exist.
+  if (!newNodes[ACCOUNT_HEADING_NODE_ID] && isPermanent) {
+    const rootChildren = newNodes[ROOT_NODE_ID]!.children || [];
+    const rootChildNodes =
+        rootChildren.map(id => newNodes[id]!).filter(Boolean);
+    const hasAccountBar = rootChildNodes.some(
+        n => n.permanentFolderType === PermanentFolderType.kBookmarkBar &&
+            n.isSynced);
+    const hasLocalBar = rootChildNodes.some(
+        n => n.permanentFolderType === PermanentFolderType.kBookmarkBar &&
+            !n.isSynced);
+
+    if (hasAccountBar && hasLocalBar) {
+      const accountHeading = buildAccountHeadingNode();
+      const localHeading = buildLocalHeadingNode();
+      const headingModifications: NodeMap = {
+        [accountHeading.id]: accountHeading,
+        [localHeading.id]: localHeading,
+      };
+
+      rootChildNodes.forEach(child => {
+        const hParentId =
+            child.isSynced ? ACCOUNT_HEADING_NODE_ID : LOCAL_HEADING_NODE_ID;
+        headingModifications[hParentId]!.children!.push(child.id);
+        headingModifications[child.id] =
+            Object.assign({}, child, {parentId: hParentId});
+      });
+
+      headingModifications[ROOT_NODE_ID] =
+          Object.assign({}, newNodes[ROOT_NODE_ID], {
+            children: [accountHeading.id, localHeading.id],
+          });
+
+      newNodes = Object.assign({}, newNodes, headingModifications);
+    }
+  }
+
+  return newNodes;
 }
 
 function editBookmark(nodes: NodeMap, action: EditBookmarkAction): NodeMap {
@@ -218,21 +271,85 @@ function moveBookmark(nodes: NodeMap, action: MoveBookmarkAction): NodeMap {
 }
 
 function removeBookmark(nodes: NodeMap, action: RemoveBookmarkAction): NodeMap {
+  // Permanent folders in the bookmark model are direct children of the root.
+  // However, within the NodeMap, these permanent folders might be children of
+  // either the root or custom "heading nodes" if those headings have been
+  // created.
+  const isHeadingChild = action.parentId === ROOT_NODE_ID ||
+      action.parentId === ACCOUNT_HEADING_NODE_ID ||
+      action.parentId === LOCAL_HEADING_NODE_ID;
+
+  if (isHeadingChild && ACCOUNT_HEADING_NODE_ID in nodes) {
+    const accountHeadingNode = nodes[ACCOUNT_HEADING_NODE_ID]!;
+    const localHeadingNode = nodes[LOCAL_HEADING_NODE_ID]!;
+
+    const parentHeading = accountHeadingNode.children!.includes(action.id) ?
+        accountHeadingNode :
+        (localHeadingNode.children!.includes(action.id) ? localHeadingNode :
+                                                          null);
+
+    if (parentHeading) {
+      // Update the chosen heading node.
+      const newState = modifyNode(nodes, parentHeading.id, function(node) {
+        return Object.assign(
+            {}, node,
+            {children: node.children!.filter(id => id !== action.id)});
+      });
+
+      // Prune the headings if either heading node has become empty.
+      return pruneHeadings(removeIdsFromObject(newState, action.descendants));
+    }
+  }
+
   const newState = modifyNode(nodes, action.parentId, function(node) {
     const newChildren = node.children!.slice();
     newChildren.splice(action.index, 1);
-    return /** @type {BookmarkNode} */ (
-        Object.assign({}, node, {children: newChildren}));
+    return Object.assign({}, node, {children: newChildren});
+  });
+  return removeIdsFromObject(newState, action.descendants);
+}
+
+function pruneHeadings(nodes: NodeMap): NodeMap {
+  if (!nodes[ACCOUNT_HEADING_NODE_ID]) {
+    // Heading nodes are not created.
+    return nodes;
+  }
+
+  const accountHeadingChildren = nodes[ACCOUNT_HEADING_NODE_ID].children!;
+  const localHeadingChildren = nodes[LOCAL_HEADING_NODE_ID]!.children!;
+
+  // Heading nodes are removed iff one of them has no children left.
+  if (accountHeadingChildren.length > 0 && localHeadingChildren.length > 0) {
+    return nodes;
+  }
+
+  const newRootChildren = accountHeadingChildren.length === 0 ?
+      localHeadingChildren :
+      accountHeadingChildren;
+  assert(newRootChildren.length > 0);
+
+  const updatedNodes = Object.assign({}, nodes);
+  // Set the children (i.e. permanent folders) of the non-empty heading to be
+  // children of root.
+  newRootChildren.forEach(childId => {
+    if (updatedNodes[childId]) {
+      updatedNodes[childId] =
+          Object.assign({}, updatedNodes[childId], {parentId: ROOT_NODE_ID});
+    }
+  });
+  updatedNodes[ROOT_NODE_ID] = Object.assign({}, updatedNodes[ROOT_NODE_ID], {
+    children: structuredClone(newRootChildren),
   });
 
-  return removeIdsFromObject(newState, action.descendants);
+  // Remove the headings.
+  return removeIdsFromObject(
+      updatedNodes, new Set([LOCAL_HEADING_NODE_ID, ACCOUNT_HEADING_NODE_ID]));
 }
 
 function reorderChildren(
     nodes: NodeMap, action: ReorderChildrenAction): NodeMap {
   return modifyNode(nodes, action.id, function(node) {
-    return /** @type {BookmarkNode} */ (
-        Object.assign({}, node, {children: action.children}));
+    return Object.assign({}, node, {children: action.children});
   });
 }
 
@@ -263,13 +380,12 @@ function isAncestorOf(
     if (currentId === ancestorId) {
       return true;
     }
-    currentId = nodes[currentId!]!.parentId;
+    currentId = nodes[currentId]!.parentId;
   }
   return false;
 }
 
-// Exported for tests.
-export function updateSelectedFolder(
+function updateSelectedFolder(
     selectedFolder: string, action: Action, nodes: NodeMap): string {
   switch (action.name) {
     case 'select-folder':
@@ -284,18 +400,70 @@ export function updateSelectedFolder(
       }
       return selectedFolder;
     case 'remove-bookmark':
-      // When deleting the selected folder (or its ancestor), select the
-      // parent of the deleted node.
-      const id = (action as RemoveBookmarkAction).id;
-      if (selectedFolder && isAncestorOf(nodes, id, selectedFolder)) {
-        const parentId = nodes[id]!.parentId;
-        assert(parentId);
-        return parentId;
+      return getSelectedFolderAfterBookmarkRemove(
+          selectedFolder, (action as RemoveBookmarkAction), nodes);
+    case 'refresh-nodes': {
+      const refreshedNodes = (action as RefreshNodesAction).nodes;
+      if (!selectedFolder || !refreshedNodes[selectedFolder]) {
+        // If the selected folder was removed, select the default folder.
+        return getDefaultSelectedFolder(refreshedNodes);
       }
       return selectedFolder;
+    }
     default:
       return selectedFolder;
   }
+}
+
+function getSelectedFolderAfterBookmarkRemove(
+    selectedFolder: string, action: RemoveBookmarkAction,
+    nodes: NodeMap): string {
+  const id = action.id;
+
+  // If no folder is currently selected, return as is.
+  if (selectedFolder === '') {
+    return selectedFolder;
+  }
+
+  // Handle removal of permanent bookmark folders (e.g., 'Mobile Bookmarks',
+  // 'Bookmark Bar', 'Other Bookmarks'). Such removals can also implicitly
+  // prune headings that would be selected.
+  const isHeadingChild = action.parentId === ROOT_NODE_ID ||
+      action.parentId === ACCOUNT_HEADING_NODE_ID ||
+      action.parentId === LOCAL_HEADING_NODE_ID;
+
+  if (isHeadingChild) {
+    // If the currently selected folder or its ancestor is being deleted, update
+    // selection to the parent of the deleted node.
+    const newSelection = isAncestorOf(nodes, id, selectedFolder) ?
+        nodes[id]!.parentId! :
+        selectedFolder;
+
+    if (newSelection !== ROOT_NODE_ID &&
+        newSelection !== ACCOUNT_HEADING_NODE_ID &&
+        newSelection !== LOCAL_HEADING_NODE_ID) {
+      // The selection can safely be returned if it is neither root nor a
+      // heading node.
+      return newSelection;
+    }
+
+    // The selection is invalid iff it is root or a heading node that is being
+    // removed. Resolve to the new first child of root, which should be the
+    // remaining bookmark bar, to prevent stale UI.
+    const updatedNodes = removeBookmark(nodes, action);
+    if (newSelection === ROOT_NODE_ID || !updatedNodes[newSelection]) {
+      return updatedNodes[ROOT_NODE_ID]!.children![0]!;
+    }
+    return newSelection;
+  }
+
+  // When deleting the selected folder (or its non-permanent ancestor), select
+  // the parent of the deleted node.
+  if (isAncestorOf(nodes, id, selectedFolder)) {
+    return nodes[id]!.parentId!;
+  }
+
+  return selectedFolder;
 }
 
 function openFolderAndAncestors(

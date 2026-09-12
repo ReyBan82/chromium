@@ -4,7 +4,6 @@
 
 #include "chrome/renderer/google_accounts_private_api_extension.h"
 
-#include "chrome/common/chrome_features.h"
 #include "chrome/renderer/google_accounts_private_api_util.h"
 #include "content/public/common/isolated_world_ids.h"
 #include "content/public/renderer/chrome_object_extensions_utils.h"
@@ -12,7 +11,7 @@
 #include "gin/arguments.h"
 #include "gin/function_template.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
-#include "third_party/blink/public/web/blink.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "v8/include/v8-context.h"
 #include "v8/include/v8-function.h"
@@ -48,15 +47,14 @@ void GoogleAccountsPrivateApiExtension::DidCreateScriptContext(
 void GoogleAccountsPrivateApiExtension::InjectScript() {
   DCHECK(render_frame());
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context =
-      render_frame()->GetWebFrame()->MainWorldScriptContext();
+  v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
   if (context.IsEmpty()) {
     return;
   }
 
-#if !BUILDFLAG(IS_ANDROID)
   v8::Context::Scope context_scope(context);
 
   v8::Local<v8::Object> window =
@@ -74,10 +72,8 @@ void GoogleAccountsPrivateApiExtension::InjectScript() {
               ->GetFunction(context)
               .ToLocalChecked())
       .Check();
-#endif  // !BUILDFLAG(IS_ANDROID)
 }
 
-#if !BUILDFLAG(IS_ANDROID)
 void GoogleAccountsPrivateApiExtension::SetConsentResult(gin::Arguments* args) {
   std::string consent_result;
   if (!args->GetNext(&consent_result)) {
@@ -92,4 +88,3 @@ void GoogleAccountsPrivateApiExtension::SetConsentResult(gin::Arguments* args) {
 
   remote_->SetConsentResult(consent_result);
 }
-#endif  // !BUILDFLAG(IS_ANDROID)

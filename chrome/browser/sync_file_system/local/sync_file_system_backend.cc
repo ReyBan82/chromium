@@ -21,18 +21,25 @@
 #include "chrome/browser/sync_file_system/syncable_file_system_util.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
+#include "extensions/common/constants.h"
 #include "storage/browser/file_system/file_stream_reader.h"
 #include "storage/browser/file_system/file_stream_writer.h"
 #include "storage/browser/file_system/file_system_context.h"
 #include "storage/browser/file_system/file_system_operation.h"
-#include "storage/browser/file_system/file_system_util.h"
 #include "storage/common/file_system/file_system_util.h"
+#include "url/origin.h"
 
 using content::BrowserThread;
 
 namespace sync_file_system {
 
 namespace {
+
+// The syncable filesystem is only exposed via the chrome.syncFileSystem
+// extension API, so only extension-scheme origins are permitted to use it.
+bool IsSyncFSAllowedOrigin(const url::Origin& origin) {
+  return origin.scheme() == extensions::kExtensionScheme;
+}
 
 bool CalledOnUIThread() {
   // Ensure that these methods are called on the UI thread, except for unittests
@@ -53,8 +60,7 @@ SyncFileSystemBackend::SyncFileSystemBackend(Profile* profile)
 
 SyncFileSystemBackend::~SyncFileSystemBackend() {
   if (change_tracker_) {
-    GetDelegate()->file_task_runner()->DeleteSoon(
-        FROM_HERE, change_tracker_.release());
+    change_tracker_->Disable();
   }
 }
 
@@ -87,6 +93,12 @@ void SyncFileSystemBackend::ResolveURL(const storage::FileSystemURL& url,
                                        storage::OpenFileSystemMode mode,
                                        ResolveURLCallback callback) {
   DCHECK(CanHandleType(url.type()));
+
+  if (!IsSyncFSAllowedOrigin(url.origin())) {
+    std::move(callback).Run(GURL(), std::string(),
+                            base::File::FILE_ERROR_SECURITY);
+    return;
+  }
 
   if (skip_initialize_syncfs_service_for_testing_) {
     GetDelegate()->OpenFileSystem(
@@ -125,6 +137,7 @@ SyncFileSystemBackend::GetCopyOrMoveFileValidatorFactory(
 
 std::unique_ptr<storage::FileSystemOperation>
 SyncFileSystemBackend::CreateFileSystemOperation(
+    storage::OperationType type,
     const storage::FileSystemURL& url,
     storage::FileSystemContext* context,
     base::File::Error* error_code) const {
@@ -132,18 +145,23 @@ SyncFileSystemBackend::CreateFileSystemOperation(
   DCHECK(context);
   DCHECK(error_code);
 
+  if (!IsSyncFSAllowedOrigin(url.origin())) {
+    *error_code = base::File::FILE_ERROR_SECURITY;
+    return nullptr;
+  }
+
   std::unique_ptr<storage::FileSystemOperationContext> operation_context =
       GetDelegate()->CreateFileSystemOperationContext(url, context, error_code);
   if (!operation_context)
     return nullptr;
 
   if (url.type() == storage::kFileSystemTypeSyncableForInternalSync) {
-    return storage::FileSystemOperation::Create(url, context,
+    return storage::FileSystemOperation::Create(type, url, context,
                                                 std::move(operation_context));
   }
 
   return std::make_unique<SyncableFileSystemOperation>(
-      url, context, std::move(operation_context),
+      type, url, context, std::move(operation_context),
       base::PassKey<SyncFileSystemBackend>());
 }
 
@@ -163,7 +181,9 @@ SyncFileSystemBackend::CreateFileStreamReader(
     int64_t offset,
     int64_t max_bytes_to_read,
     const base::Time& expected_modification_time,
-    storage::FileSystemContext* context) const {
+    storage::FileSystemContext* context,
+    file_access::ScopedFileAccessDelegate::
+        RequestFilesAccessIOCallback /*file_access*/) const {
   DCHECK(CanHandleType(url.type()));
   return GetDelegate()->CreateFileStreamReader(
       url, offset, expected_modification_time, context);
@@ -208,7 +228,7 @@ SyncFileSystemBackend* SyncFileSystemBackend::GetBackend(
 }
 
 void SyncFileSystemBackend::SetLocalFileChangeTracker(
-    std::unique_ptr<LocalFileChangeTracker> tracker) {
+    scoped_refptr<LocalFileChangeTracker> tracker) {
   DCHECK(!change_tracker_);
   DCHECK(tracker);
   change_tracker_ = std::move(tracker);

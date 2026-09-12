@@ -4,31 +4,46 @@
 
 package org.chromium.chrome.browser.share.send_tab_to_self;
 
-import org.chromium.base.annotations.CalledByNative;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JniType;
+
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.components.sync_device_info.FormFactor;
+import org.chromium.components.sync_device_info.OsType;
 
 /**
  * SendTabToSelfEntry mirrors the native struct send_tab_to_self::TargetDeviceInfo declared in
  * //components/send_tab_to_self/target_device_info.h. This provides useful getters and methods
  * called by native code.
  */
+@NullMarked
 public class TargetDeviceInfo {
     public final String cacheGuid;
     public final @FormFactor int formFactor;
+    public final @OsType int osType;
     public final String deviceName;
-    public final long lastUpdatedTimestamp;
+    public final String lastActiveTimeForDisplay;
 
     public TargetDeviceInfo(
-            String name, String cacheGuid, @FormFactor int formFactor, long lastUpdatedTimestamp) {
+            String name,
+            String cacheGuid,
+            @FormFactor int formFactor,
+            @OsType int osType,
+            String lastActiveTimeForDisplay) {
         this.deviceName = name;
         this.cacheGuid = cacheGuid;
         this.formFactor = formFactor;
-        this.lastUpdatedTimestamp = lastUpdatedTimestamp;
+        this.osType = osType;
+        this.lastActiveTimeForDisplay = lastActiveTimeForDisplay;
     }
 
     @CalledByNative
     public static TargetDeviceInfo build(
-            String name, String cacheGuid, @FormFactor int formFactor, long lastUpdatedTimestamp) {
-        return new TargetDeviceInfo(name, cacheGuid, formFactor, lastUpdatedTimestamp);
+            @JniType("std::string") String name,
+            @JniType("std::string") String cacheGuid,
+            @FormFactor int formFactor,
+            @OsType int osType,
+            @JniType("std::u16string") String lastActiveTimeForDisplay) {
+        return new TargetDeviceInfo(name, cacheGuid, formFactor, osType, lastActiveTimeForDisplay);
     }
 }

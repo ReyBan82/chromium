@@ -10,18 +10,18 @@
 #include <string>
 #include <vector>
 
+#include "ash/system/video_conference/video_conference_common.h"
 #include "base/functional/callback.h"
-#include "chromeos/crosapi/mojom/video_conference.mojom.h"
-#include "mojo/public/cpp/bindings/pending_remote.h"
-#include "mojo/public/cpp/bindings/receiver_set.h"
+#include "base/memory/raw_ptr.h"
 
 namespace base {
 class UnguessableToken;
 }  // namespace base
 
+class CaptureModeVideoConferenceBrowserTests;
+
 namespace ash {
 
-class VideoConferenceClientWrapper;
 class VideoConferenceTrayController;
 struct VideoConferenceMediaState;
 
@@ -30,9 +30,11 @@ struct VideoConferenceMediaState;
 // 2. Being the single source of truth for VC parameters like
 //    background blur, portrait relighting, apps using audio/camera, etc.
 //    and providing this information to the UI as needed.
-class VideoConferenceManagerAsh
-    : public crosapi::mojom::VideoConferenceManager {
+class VideoConferenceManagerAsh : public VideoConferenceManagerBase {
  public:
+  // Gets the singleton instance.
+  static VideoConferenceManagerAsh* Get();
+
   VideoConferenceManagerAsh();
 
   VideoConferenceManagerAsh(const VideoConferenceManagerAsh&) = delete;
@@ -41,45 +43,28 @@ class VideoConferenceManagerAsh
 
   ~VideoConferenceManagerAsh() override;
 
-  // Returns a vector of crosapi::mojom::VideoConferenceMediaAppInfo
-  // for all media apps aggregated from all clients.
-  using MediaApps = std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr>;
-  void GetMediaApps(base::OnceCallback<void(MediaApps)> ui_callback);
+  // VideoConferenceManagerBase overrides.
+  void GetMediaApps(base::OnceCallback<void(MediaApps)>) override;
+  void ReturnToApp(const base::UnguessableToken& id) override;
+  void SetSystemMediaDeviceStatus(VideoConferenceMediaDevice device,
+                                  bool enabled) override;
+  void CreateBackgroundImage() override;
 
-  // Brings the app connected to the |id| to the foreground.
-  void ReturnToApp(const base::UnguessableToken& id);
-
-  // Sets whether |device| is disabled at the system or hardware level.
-  void SetSystemMediaDeviceStatus(
-      crosapi::mojom::VideoConferenceMediaDevice device,
-      bool disabled);
-
-  // Registers an ash-browser client. Non-mojo clients need to manually call
-  // |UnregisterClient|, e.g. inside their destructor.
-  void RegisterCppClient(crosapi::mojom::VideoConferenceManagerClient* client,
+  // Registers a client. Clients need to manually call |UnregisterClient|,
+  // e.g. inside their destructor.
+  void RegisterCppClient(VideoConferenceManagerClient* client,
                          const base::UnguessableToken& client_id);
 
-  // Binds a pending receiver connected to a lacros mojo client to the manager.
-  void BindReceiver(
-      mojo::PendingReceiver<crosapi::mojom::VideoConferenceManager> receiver);
-
-  // crosapi::mojom::VideoConferenceManager overrides
-  void NotifyMediaUsageUpdate(
-      crosapi::mojom::VideoConferenceMediaUsageStatusPtr status,
-      NotifyMediaUsageUpdateCallback callback) override;
-  void RegisterMojoClient(
-      mojo::PendingRemote<crosapi::mojom::VideoConferenceManagerClient> client,
-      const base::UnguessableToken& client_id,
-      RegisterMojoClientCallback callback) override;
-  void NotifyDeviceUsedWhileDisabled(
-      crosapi::mojom::VideoConferenceMediaDevice device,
-      const std::u16string& app_name,
-      NotifyDeviceUsedWhileDisabledCallback callback) override;
+  void NotifyMediaUsageUpdate(VideoConferenceMediaUsageStatus status,
+                              base::OnceCallback<void(bool)> callback);
+  void NotifyDeviceUsedWhileDisabled(VideoConferenceMediaDevice device,
+                                     const std::u16string& app_name,
+                                     base::OnceCallback<void(bool)> callback);
+  void NotifyClientUpdate(VideoConferenceClientUpdate update);
 
   // Removes entry corresponding to |client_id| from
-  // |client_id_to_wrapper_|. Called by the destructor of
-  // cpp clients (ash browser, ARC++) and by the disconnect handler on
-  // |receiver| when the lacros mojo client disconnects.
+  // |client_info_map_|. Called by the destructor of
+  // cpp clients (ash browser, ARC++).
   void UnregisterClient(const base::UnguessableToken& client_id);
 
  protected:
@@ -96,14 +81,19 @@ class VideoConferenceManagerAsh
   VideoConferenceTrayController* GetTrayController();
 
  private:
+  friend class ::CaptureModeVideoConferenceBrowserTests;
+  friend class VideoConferenceAshfeatureClientTest;
   friend class VideoConferenceAppServiceClientTest;
 
-  // A (client_id, client_wrapper) entry is inserted into this map
+  struct ClientInfo {
+    raw_ptr<VideoConferenceManagerClient> client = nullptr;
+    VideoConferenceMediaState state;
+  };
+
+  // A (client_id, client_info) entry is inserted into this map
   // whenever a new client is registered on the manager and deleted
   // upon destruction of the client.
-  std::map<base::UnguessableToken, VideoConferenceClientWrapper>
-      client_id_to_wrapper_;
-  mojo::ReceiverSet<crosapi::mojom::VideoConferenceManager> receivers_;
+  std::map<base::UnguessableToken, ClientInfo> client_info_map_;
 };
 
 }  // namespace ash

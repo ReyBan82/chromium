@@ -4,8 +4,7 @@
 
 #include "chromeos/ash/components/phonehub/feature_status_provider.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 FeatureStatusProvider::FeatureStatusProvider() = default;
 
@@ -20,9 +19,17 @@ void FeatureStatusProvider::RemoveObserver(Observer* observer) {
 }
 
 void FeatureStatusProvider::NotifyStatusChanged() {
-  for (auto& observer : observer_list_)
-    observer.OnFeatureStatusChanged();
+  // TODO(crbug.com/507907151): Investigate if this reentrancy is valid or can
+  // be removed.
+  observer_list_.NotifyAllowReentrancyUntriaged(
+      &Observer::OnFeatureStatusChanged);
 }
 
-}  // namespace phonehub
-}  // namespace ash
+void FeatureStatusProvider::NotifyEligibleDevicesFound(
+    const multidevice::RemoteDeviceRefList devices) {
+  for (auto& observer : observer_list_) {
+    observer.OnEligiblePhoneHubHostFound(devices);
+  }
+}
+
+}  // namespace ash::phonehub

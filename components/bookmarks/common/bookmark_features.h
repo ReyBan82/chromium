@@ -10,16 +10,64 @@
 
 namespace bookmarks {
 
-BASE_DECLARE_FEATURE(kApproximateNodeMatch);
+BASE_DECLARE_FEATURE(kAllBookmarksBaselineFolderVisibility);
 
-BASE_DECLARE_FEATURE(kTypedUrlsMap);
+// TODO(crbug.com/426243026): Complete MD5 -> SHA256 migration.
+BASE_DECLARE_FEATURE(kEnableBookmarkCodecSHA256);
 
-BASE_DECLARE_FEATURE(kLimitNumNodesForBookmarkSearch);
-extern const base::FeatureParam<int> kLimitNumNodesForBookmarkSearchCount;
+BASE_DECLARE_FEATURE(kEnableBookmarkNodeDataNewPickleFormat);
 
-BASE_DECLARE_FEATURE(kIndexPaths);
+// Based on kEncryptBookmarks and kBookmarkEncryptionStageParam, this function
+// returns true if bookmarks should be written to a secondary file on disk.
+// If ShouldUseEncryptedBookmarksAsPrimarySource returns false, the encrypted
+// bookmarks file will be written to this secondary file, otherwise the
+// unencrypted bookmarks file will.
+bool ShouldWriteBookmarksToSecondaryFileOnDisk();
 
-BASE_DECLARE_FEATURE(kEnableBookmarksAccountStorage);
+// Based on kEncryptBookmarks and kBookmarkEncryptionStageParam, this function
+// returns true if bookmarks data in the secondary file should be verified when
+// loading bookmarks data.
+// If ShouldUseEncryptedBookmarksAsPrimarySource returns false, data in
+// secondary file are encrypted and needs to be verified against the unencrypted
+// data one.
+// If ShouldUseEncryptedBookmarksAsPrimarySource returns true, data in
+// secondary file are unencrypted and needs to be verified against the encrypted
+// data one.
+bool ShouldVerifyBookmarksDataInSecondaryFileOnLoad();
+
+// Based on kEncryptBookmarks and kBookmarkEncryptionStageParam, this function
+// returns true if encrypted bookmarks use as the primary source of truth.
+// When true, encrypted bookmarks should be read / written first.
+bool ShouldUseEncryptedBookmarksAsPrimarySource();
+
+// Based on kEncryptBookmarks and kBookmarkEncryptionStageParam, this function
+// returns true if the clear text bookmarks file should be deleted after a
+// successful load from the encrypted file.
+bool ShouldDeleteClearTextBookmarksFile();
+
+// Flag to enable bookmark encryption. If false, no encryption will be performed
+// on bookmarks. If true, usage of encryption will be determined by
+// kBookmarkEncryptionStageParam.
+// Do not use this feature directly, instead use helper functions defined above.
+BASE_DECLARE_FEATURE(kEncryptBookmarks);
+
+// Represents the stage of the bookmark encryption feature.
+// Exposed publicly for testing purposes.
+enum class BookmarkEncryptionStage {
+  kDisabled,
+  kWriteBothReadOnlyClear,
+  kWriteBothReadPreferEncrypted,
+  kWriteOnlyEncryptedReadPreferEncrypted,
+};
+
+// Return the name of the given bookmark encryption stage that should be used to
+// initialize kBookmarkEncryptionStageParam in tests.
+std::string GetBookmarkEncryptionStageNameForTesting(
+    BookmarkEncryptionStage stage);
+
+// Return the name of the given bookmark encryption stage that should be used to
+// initialize kBookmarkEncryptionStageParam in tests.
+BookmarkEncryptionStage GetCurrentBookmarkEncryptionStageForTesting();
 
 }  // namespace bookmarks
 

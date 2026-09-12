@@ -5,22 +5,22 @@
 #ifndef ASH_WEBUI_PERSONALIZATION_APP_MOJOM_PERSONALIZATION_APP_MOJOM_TRAITS_H_
 #define ASH_WEBUI_PERSONALIZATION_APP_MOJOM_PERSONALIZATION_APP_MOJOM_TRAITS_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "ash/constants/ambient_theme.h"
 #include "ash/public/cpp/ambient/ambient_ui_model.h"
 #include "ash/public/cpp/ambient/common/ambient_settings.h"
 #include "ash/public/cpp/default_user_image.h"
 #include "ash/public/cpp/personalization_app/user_display_info.h"
 #include "ash/public/cpp/wallpaper/wallpaper_types.h"
 #include "ash/style/color_palette_controller.h"
+#include "ash/style/mojom/color_scheme.mojom-shared.h"
 #include "ash/webui/personalization_app/mojom/personalization_app.mojom-forward.h"
 #include "ash/webui/personalization_app/proto/backdrop_wallpaper.pb.h"
 #include "base/unguessable_token.h"
 #include "mojo/public/cpp/bindings/enum_traits.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace mojo {
@@ -31,8 +31,7 @@ struct EnumTraits<ash::personalization_app::mojom::WallpaperLayout,
   using MojomWallpaperLayout =
       ::ash::personalization_app::mojom::WallpaperLayout;
   static MojomWallpaperLayout ToMojom(ash::WallpaperLayout input);
-  static bool FromMojom(MojomWallpaperLayout input,
-                        ash::WallpaperLayout* output);
+  static ash::WallpaperLayout FromMojom(MojomWallpaperLayout input);
 };
 
 template <>
@@ -40,7 +39,7 @@ struct EnumTraits<ash::personalization_app::mojom::WallpaperType,
                   ash::WallpaperType> {
   using MojomWallpaperType = ::ash::personalization_app::mojom::WallpaperType;
   static MojomWallpaperType ToMojom(ash::WallpaperType input);
-  static bool FromMojom(MojomWallpaperType input, ash::WallpaperType* output);
+  static ash::WallpaperType FromMojom(MojomWallpaperType input);
 };
 
 template <>
@@ -49,8 +48,7 @@ struct EnumTraits<ash::personalization_app::mojom::OnlineImageType,
   using MojomOnlineImageType =
       ::ash::personalization_app::mojom::OnlineImageType;
   static MojomOnlineImageType ToMojom(::backdrop::Image::ImageType input);
-  static bool FromMojom(MojomOnlineImageType input,
-                        ::backdrop::Image::ImageType* output);
+  static ::backdrop::Image::ImageType FromMojom(MojomOnlineImageType input);
 };
 
 template <>
@@ -59,28 +57,14 @@ struct StructTraits<
     backdrop::Collection> {
   static const std::string& id(const backdrop::Collection& collection);
   static const std::string& name(const backdrop::Collection& collection);
-  static const std::string& description(const backdrop::Collection& collection);
+  static const std::string& description_content(
+      const backdrop::Collection& collection);
   static std::vector<GURL> previews(const backdrop::Collection& collection);
 
   static bool Read(
       ash::personalization_app::mojom::WallpaperCollectionDataView data,
       backdrop::Collection* out);
   static bool IsNull(const backdrop::Collection& collection);
-};
-
-template <>
-struct StructTraits<
-    ash::personalization_app::mojom::CurrentWallpaperDescriptionDataView,
-    backdrop::Image::Description> {
-  static const std::string& title(
-      const backdrop::Image::Description& description);
-  static const std::string& content(
-      const backdrop::Image::Description& description);
-
-  static bool Read(
-      ash::personalization_app::mojom::CurrentWallpaperDescriptionDataView data,
-      backdrop::Image::Description* out);
-  static bool IsNull(const backdrop::Image::Description& description);
 };
 
 template <>
@@ -132,7 +116,7 @@ struct StructTraits<ash::personalization_app::mojom::DefaultUserImageDataView,
       const ash::default_user_image::DefaultUserImage& default_user_image);
   static const GURL& url(
       const ash::default_user_image::DefaultUserImage& default_user_image);
-  static const absl::optional<ash::default_user_image::DeprecatedSourceInfo>&
+  static const std::optional<ash::default_user_image::DeprecatedSourceInfo>&
   source_info(
       const ash::default_user_image::DefaultUserImage& default_user_image);
   static bool Read(
@@ -141,30 +125,12 @@ struct StructTraits<ash::personalization_app::mojom::DefaultUserImageDataView,
 };
 
 template <>
-struct EnumTraits<ash::personalization_app::mojom::AnimationTheme,
-                  ash::AmbientTheme> {
-  using MojomAnimationTheme = ::ash::personalization_app::mojom::AnimationTheme;
-  static MojomAnimationTheme ToMojom(ash::AmbientTheme input);
-  static bool FromMojom(MojomAnimationTheme input, ash::AmbientTheme* output);
-};
-
-template <>
-struct EnumTraits<ash::personalization_app::mojom::TopicSource,
-                  ash::AmbientModeTopicSource> {
-  using MojomTopicSource = ::ash::personalization_app::mojom::TopicSource;
-  static MojomTopicSource ToMojom(ash::AmbientModeTopicSource input);
-  static bool FromMojom(MojomTopicSource input,
-                        ash::AmbientModeTopicSource* output);
-};
-
-template <>
 struct EnumTraits<ash::personalization_app::mojom::TemperatureUnit,
                   ash::AmbientModeTemperatureUnit> {
   using MojomTemperatureUnit =
       ::ash::personalization_app::mojom::TemperatureUnit;
   static MojomTemperatureUnit ToMojom(ash::AmbientModeTemperatureUnit input);
-  static bool FromMojom(MojomTemperatureUnit input,
-                        ash::AmbientModeTemperatureUnit* output);
+  static ash::AmbientModeTemperatureUnit FromMojom(MojomTemperatureUnit input);
 };
 
 template <>
@@ -173,22 +139,13 @@ struct EnumTraits<ash::personalization_app::mojom::AmbientUiVisibility,
   using MojomAmbientUiVisibility =
       ::ash::personalization_app::mojom::AmbientUiVisibility;
   static MojomAmbientUiVisibility ToMojom(ash::AmbientUiVisibility input);
-  static bool FromMojom(MojomAmbientUiVisibility input,
-                        ash::AmbientUiVisibility* output);
-};
-
-template <>
-struct EnumTraits<ash::personalization_app::mojom::ColorScheme,
-                  ash::ColorScheme> {
-  using MojomColorScheme = ::ash::personalization_app::mojom::ColorScheme;
-  static MojomColorScheme ToMojom(ash::ColorScheme input);
-  static bool FromMojom(MojomColorScheme input, ash::ColorScheme* output);
+  static ash::AmbientUiVisibility FromMojom(MojomAmbientUiVisibility input);
 };
 
 template <>
 struct StructTraits<ash::personalization_app::mojom::SampleColorSchemeDataView,
                     ash::SampleColorScheme> {
-  static ash::ColorScheme scheme(
+  static ash::style::mojom::ColorScheme scheme(
       const ash::SampleColorScheme& sample_color_scheme);
   static SkColor primary(const ash::SampleColorScheme& sample_color_scheme);
   static SkColor secondary(const ash::SampleColorScheme& sample_color_scheme);

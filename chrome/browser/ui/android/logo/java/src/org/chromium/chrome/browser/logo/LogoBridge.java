@@ -6,49 +6,82 @@ package org.chromium.chrome.browser.logo;
 
 import android.graphics.Bitmap;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.NativeMethods;
+import androidx.annotation.VisibleForTesting;
+
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.profiles.Profile;
 
-/**
- * Provides access to the search provider's logo via the C++ LogoService.
- */
+/** Provides access to the search provider's logo via the C++ LogoService. */
+@NullMarked
 public class LogoBridge {
-    /**
-     * A logo for a search provider (e.g. the Yahoo! logo or Google doodle).
-     */
+    /** A logo for a search provider (e.g. the Yahoo! logo or Google doodle). */
     public static class Logo {
-        /**
-         * The logo image. Non-null.
-         */
+        /** The logo image. Non-null. */
         public final Bitmap image;
 
-        /**
-         * The URL to navigate to when the user clicks on the logo. May be null.
-         */
-        public final String onClickUrl;
+        /** The dark mode logo image. May be null. */
+        public final @Nullable Bitmap darkImage;
 
-        /**
-         * The accessibility text describing the logo. May be null.
-         */
-        public final String altText;
+        /** The URL to navigate to when the user clicks on the logo. */
+        public final @Nullable String onClickUrl;
+
+        /** The accessibility text describing the logo. */
+        public final @Nullable String altText;
 
         /**
          * The URL to download animated GIF logo. If null, there is no animated logo to download.
          */
-        public final String animatedLogoUrl;
+        public final @Nullable String animatedLogoUrl;
 
-        Logo(Bitmap image, String onClickUrl, String altText, String animatedLogoUrl) {
+        /**
+         * The URL to download dark mode animated GIF logo. If null, there is no dark animated logo
+         * to download.
+         */
+        public final @Nullable String darkAnimatedLogoUrl;
+
+        /** The URL to ping when the logo is shown. */
+        public final @Nullable String logUrl;
+
+        /** The URL to ping when the dark mode logo is shown. */
+        public final @Nullable String darkLogUrl;
+
+        /** The URL to ping when the CTA image is shown. */
+        public final @Nullable String ctaLogUrl;
+
+        /** The URL to ping when the dark mode CTA image is shown. */
+        public final @Nullable String darkCtaLogUrl;
+
+        @VisibleForTesting(otherwise = VisibleForTesting.PACKAGE_PRIVATE)
+        public Logo(
+                Bitmap image,
+                @Nullable Bitmap darkImage,
+                @Nullable String onClickUrl,
+                @Nullable String altText,
+                @Nullable String animatedLogoUrl,
+                @Nullable String darkAnimatedLogoUrl,
+                @Nullable String logUrl,
+                @Nullable String darkLogUrl,
+                @Nullable String ctaLogUrl,
+                @Nullable String darkCtaLogUrl) {
             this.image = image;
+            this.darkImage = darkImage;
             this.onClickUrl = onClickUrl;
             this.altText = altText;
             this.animatedLogoUrl = animatedLogoUrl;
+            this.darkAnimatedLogoUrl = darkAnimatedLogoUrl;
+            this.logUrl = logUrl;
+            this.darkLogUrl = darkLogUrl;
+            this.ctaLogUrl = ctaLogUrl;
+            this.darkCtaLogUrl = darkCtaLogUrl;
         }
     }
 
-    /**
-     * Observer for receiving the logo when it's available.
-     */
+    /** Observer for receiving the logo when it's available. */
     public interface LogoObserver {
         /**
          * Called when the cached or fresh logo is available. This may be called up to two times,
@@ -57,16 +90,8 @@ public class LogoBridge {
          * @param logo The search provider's logo.
          * @param fromCache Whether the logo was loaded from the cache.
          */
-        @CalledByNative("LogoObserver")
+        @CalledByNative
         void onLogoAvailable(Logo logo, boolean fromCache);
-
-        /**
-         * Called when it has been determined from server that the cached logo (or null) is still
-         * valid. This is independent from OnLogoAvailable and is intended for users who need to
-         * take some action that can only happen when a logo won't later change.
-         */
-        @CalledByNative("LogoObserver")
-        void onCachedLogoRevalidated();
     }
 
     private long mNativeLogoBridge;
@@ -77,7 +102,7 @@ public class LogoBridge {
      * @param profile Profile of the tab that will show the logo.
      */
     public LogoBridge(Profile profile) {
-        mNativeLogoBridge = LogoBridgeJni.get().init(LogoBridge.this, profile);
+        mNativeLogoBridge = LogoBridgeJni.get().init(profile);
     }
 
     /**
@@ -86,7 +111,7 @@ public class LogoBridge {
      */
     void destroy() {
         assert mNativeLogoBridge != 0;
-        LogoBridgeJni.get().destroy(mNativeLogoBridge, LogoBridge.this);
+        LogoBridgeJni.get().destroy(mNativeLogoBridge);
         mNativeLogoBridge = 0;
     }
 
@@ -94,22 +119,57 @@ public class LogoBridge {
      * Gets the current logo for the default search provider.
      *
      * @param logoObserver The observer to receive the cached and/or fresh logos when they're
-     *                     available. logoObserver.onLogoAvailable() may be called synchronously if
-     *                     the cached logo is already available.
+     *     available. logoObserver.onLogoAvailable() may be called synchronously if the cached logo
+     *     is already available.
      */
     void getCurrentLogo(LogoObserver logoObserver) {
-        LogoBridgeJni.get().getCurrentLogo(mNativeLogoBridge, LogoBridge.this, logoObserver);
+        LogoBridgeJni.get().getCurrentLogo(mNativeLogoBridge, logoObserver);
+    }
+
+    /**
+     * Records an impression for a doodle.
+     *
+     * @param logUrl The URL to ping to record the impression.
+     */
+    public void recordImpression(@Nullable String logUrl) {
+        if (mNativeLogoBridge != 0 && logUrl != null) {
+            LogoBridgeJni.get().recordImpression(mNativeLogoBridge, logUrl);
+        }
     }
 
     @CalledByNative
-    private static Logo createLogo(Bitmap image, String onClickUrl, String altText, String gifUrl) {
-        return new Logo(image, onClickUrl, altText, gifUrl);
+    private static Logo createLogo(
+            Bitmap image,
+            @Nullable Bitmap darkImage,
+            @Nullable String onClickUrl,
+            @Nullable String altText,
+            @Nullable String gifUrl,
+            @Nullable String darkGifUrl,
+            @Nullable String logUrl,
+            @Nullable String darkLogUrl,
+            @Nullable String ctaLogUrl,
+            @Nullable String darkCtaLogUrl) {
+        return new Logo(
+                image,
+                darkImage,
+                onClickUrl,
+                altText,
+                gifUrl,
+                darkGifUrl,
+                logUrl,
+                darkLogUrl,
+                ctaLogUrl,
+                darkCtaLogUrl);
     }
 
     @NativeMethods
     public interface Natives {
-        long init(LogoBridge caller, Profile profile);
-        void getCurrentLogo(long nativeLogoBridge, LogoBridge caller, LogoObserver logoObserver);
-        void destroy(long nativeLogoBridge, LogoBridge caller);
+        long init(@JniType("Profile*") Profile profile);
+
+        void getCurrentLogo(long nativeLogoBridge, LogoObserver logoObserver);
+
+        void recordImpression(long nativeLogoBridge, @JniType("std::string") String logUrl);
+
+        void destroy(long nativeLogoBridge);
     }
 }

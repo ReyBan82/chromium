@@ -10,6 +10,7 @@
 #include <wrl.h>
 
 #include <memory>
+#include <optional>
 #include <queue>
 
 #include "base/memory/raw_ptr.h"
@@ -24,14 +25,6 @@
 namespace media {
 
 namespace {
-
-struct MediaFoundationSubsampleEntry {
-  MediaFoundationSubsampleEntry(SubsampleEntry entry)
-      : clear_bytes(entry.clear_bytes), cipher_bytes(entry.cypher_bytes) {}
-  MediaFoundationSubsampleEntry() = default;
-  DWORD clear_bytes = 0;
-  DWORD cipher_bytes = 0;
-};
 
 struct PendingInputBuffer {
   PendingInputBuffer(DemuxerStream::Status status,
@@ -50,7 +43,7 @@ struct PendingInputBuffer {
 // (https://msdn.microsoft.com/en-us/windows/desktop/ms697561) based on the
 // given |demuxer_stream|.
 //
-class MediaFoundationStreamWrapper
+class MEDIA_EXPORT MediaFoundationStreamWrapper
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<
               Microsoft::WRL::RuntimeClassType::ClassicCom>,
@@ -58,6 +51,8 @@ class MediaFoundationStreamWrapper
  public:
   MediaFoundationStreamWrapper();
   ~MediaFoundationStreamWrapper() override;
+
+  IFACEMETHODIMP_(ULONG) Release() override;
 
   static HRESULT Create(int stream_id,
                         IMFMediaSource* parent_source,
@@ -81,12 +76,12 @@ class MediaFoundationStreamWrapper
   bool IsSelected();
   bool IsEnabled();
   void SetEnabled(bool enabled);
-  void SetFlushed(bool flushed);
+  void Flush();
 
   // TODO: revisting inheritance and potentially replacing it with composition.
 
   // The stream is encrypted or not.
-  virtual bool IsEncrypted() const = 0;
+  bool IsEncrypted() const;
   // Let derived class to adjust the IMFSample if necessary.
   virtual HRESULT TransformSample(Microsoft::WRL::ComPtr<IMFSample>& sample);
   // Allow derived class to tell us if we can send MEStreamFormatChanged to MF.
@@ -101,8 +96,10 @@ class MediaFoundationStreamWrapper
   void ProcessRequestsIfPossible();
   void OnDemuxerStreamRead(DemuxerStream::Status status,
                            scoped_refptr<DecoderBuffer> buffer);
-  // Receive the data from MojoDemuxerStreamAdapter.
-  void OnDemuxerStreamReadBuffers(DemuxerStream::Status status,
+  // Receive the data from MojoDemuxerStreamAdapter. |flush_generation| is the
+  // value |flush_generation_| had when the read was requested.
+  void OnDemuxerStreamReadBuffers(uint32_t flush_generation,
+                                  DemuxerStream::Status status,
                                   DemuxerStream::DecoderBufferVector buffers);
 
   // IMFMediaStream implementation - it is in general running in MF threadpool
@@ -128,8 +125,6 @@ class MediaFoundationStreamWrapper
 
  protected:
   HRESULT GenerateStreamDescriptor();
-  HRESULT GenerateSampleFromDecoderBuffer(DecoderBuffer* buffer,
-                                          IMFSample** sample_out);
   HRESULT ServiceSampleRequest(IUnknown* token, DecoderBuffer* buffer)
       EXCLUSIVE_LOCKS_REQUIRED(lock_);
   // Returns true when a sample request has been serviced.
@@ -154,7 +149,7 @@ class MediaFoundationStreamWrapper
 
   // Need exclusive access to some members between calls from MF threadpool
   // thread and calling thread from Chromium media stack.
-  base::Lock lock_;
+  mutable base::Lock lock_;
 
   // Indicates whether the stream is selected in the MF pipeline.
   bool selected_ GUARDED_BY(lock_) = false;
@@ -162,13 +157,18 @@ class MediaFoundationStreamWrapper
   // Indicates whether the stream is enabled in the Chromium media pipeline.
   bool enabled_ GUARDED_BY(lock_) = true;
 
-  // Indicates whether the Chromium pipeline has flushed the renderer
-  // (prior to a seek).
-  // Since SetFlushed() can be invoked by media stack thread or MF threadpool
-  // thread, |flushed_| and |post_flush_buffers_| are protected by lock.
-  bool flushed_ GUARDED_BY(lock_) = false;
+  // Indicates whether the Chromium pipeline has flushed the renderer and we're
+  // buffering post-flush samples (prior to a seek). Since Flush() can be
+  // invoked by media stack thread or MF threadpool thread,
+  // |buffering_post_flush_samples_| and |post_flush_buffers_| are protected by
+  // lock.
+  bool buffering_post_flush_samples_ GUARDED_BY(lock_) = false;
 
   int stream_id_;
+
+  bool has_clear_lead_ = false;
+
+  bool switched_clear_to_encrypted_ = false;
 
   // |mf_media_event_queue_| is safe to be called on any thread.
   Microsoft::WRL::ComPtr<IMFMediaEventQueue> mf_media_event_queue_;
@@ -187,7 +187,7 @@ class MediaFoundationStreamWrapper
   // Maintain the buffer obtained by batch read. We push buffer into
   // |buffer_queue_| by OnDemuxerStreamReadBuffers(), pop buffer by
   // ProcessRequestsIfPossible(), these two operations are both on media stack
-  // thread. SetFlush() can be invoked by media stack thread or MF threadpool
+  // thread. Flush() can be invoked by media stack thread or MF threadpool
   // thread, it clears the buffer in |buffer_queue_|. So |buffer_queue_| needs
   // to be guardedby the lock.
   std::deque<PendingInputBuffer> buffer_queue_ GUARDED_BY(lock_);
@@ -196,6 +196,15 @@ class MediaFoundationStreamWrapper
   // call. The actual returned buffer count could be less according to
   // DemuxerStream::Read() API.
   uint32_t batch_read_count_ = 1;
+
+  // Whether kMediaFoundationBatchRead is enabled.
+  bool batch_read_enabled_ = false;
+
+  // Incremented by every Flush(). A read stamped with an older value was
+  // requested before that flush, so its buffers are from the position playback
+  // seeked away from. Only ever compared for equality, which stays correct if
+  // the counter wraps.
+  uint32_t flush_generation_ GUARDED_BY(lock_) = 0;
 
   bool stream_ended_ = false;
   GUID last_key_id_ = GUID_NULL;
@@ -212,6 +221,9 @@ class MediaFoundationStreamWrapper
       GUARDED_BY(lock_);
 
   bool encryption_type_reported_ = false;
+
+  bool is_encrypted_ = false;
+  bool has_cdm_ GUARDED_BY(lock_) = false;
 
   // NOTE: Weak pointers must be invalidated before all other member variables.
   base::WeakPtrFactory<MediaFoundationStreamWrapper> weak_factory_{this};

@@ -6,16 +6,21 @@
 #define MEDIA_BASE_ANDROID_MEDIA_CODEC_UTIL_H_
 
 #include <jni.h>
+
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "base/android/scoped_java_ref.h"
 #include "base/compiler_specific.h"
 #include "media/base/android/media_codec_direction.h"
 #include "media/base/audio_codecs.h"
 #include "media/base/media_export.h"
 #include "media/base/sample_format.h"
 #include "media/base/video_codecs.h"
+#include "ui/gfx/geometry/size.h"
 
 namespace media {
 
@@ -31,44 +36,39 @@ class MEDIA_EXPORT MediaCodecUtil {
                                             SampleFormat sample_format);
   static std::string CodecToAndroidMimeType(VideoCodec codec);
 
-  // Returns true if MediaCodec supports CBCS Encryption.
-  static bool PlatformSupportsCbcsEncryption(int sdk);
-
   // Indicates if the vp8 decoder or encoder is available on this device.
   static bool IsVp8DecoderAvailable();
-  static bool IsVp8EncoderAvailable();
 
-  // Indicates if the vp9 decoder is available on this device.
-  static bool IsVp9DecoderAvailable();
-  static bool IsVp9Profile2DecoderAvailable();
-  static bool IsVp9Profile3DecoderAvailable();
+  // Estimates a maximum input buffer size for a video codec at the requested
+  // resolution.
+  //
+  // Returns 0 if no clear heuristic applies.
+  static size_t EstimateVideoBufferSize(VideoCodec codec,
+                                        int width,
+                                        int height);
 
-  // Indicates if the Opus decoder is available on this device.
-  static bool IsOpusDecoderAvailable();
-
-  // Indicates if the av1 decoder is available on this device.
-  static bool IsAv1DecoderAvailable();
-
-#if BUILDFLAG(ENABLE_PLATFORM_HEVC)
-  // Indicates if the h265 decoder is available on this device.
-  static bool IsHEVCDecoderAvailable();
-#endif
-
-  // Indicates if SurfaceView and MediaCodec work well together on this device.
-  static bool IsSurfaceViewOutputSupported();
-
-  // Indicates if MediaCodec.setOutputSurface() works on this device.
-  static bool IsSetOutputSurfaceSupported();
-
-  // Return true if the compressed audio |codec| will pass through the media
-  // pipelines without decompression.
-  static bool IsPassthroughAudioFormat(AudioCodec codec);
+  // Returns a known alignment which can be used to translate visible size into
+  // coded size. E.g., a size of (1, 1) means no alignment while a size of
+  // (64, 1) would mean visible width should be rounded up to the nearest
+  // multiple of 64 and height should be left untouched.
+  //
+  // Returns std::nullopt if the decoder isn't recognized. `host_sdk_int` may
+  // be set for testing purposes.
+  static std::optional<gfx::Size> LookupCodedSizeAlignment(
+      std::string_view name,
+      std::optional<int> host_sdk_int = std::nullopt);
 
   //
   // ***************************************************************
   // *** THE FOLLOWING METHODS CAN'T BE CALLED FROM THE RENDERER ***
   // ***************************************************************
   //
+
+  // Returns true if the decoder requires a secure decoder component for the
+  // given |mime_type| based on the MediaCrypto session.
+  static bool RequiresSecureDecoderComponent(
+      const base::android::JavaRef<jobject>& media_crypto,
+      std::string_view mime_type);
 
   // Returns whether it's possible to create a MediaCodec for the given codec
   // and secureness.
@@ -78,26 +78,12 @@ class MEDIA_EXPORT MediaCodecUtil {
   static bool CanDecode(VideoCodec codec, bool is_secure);
   static bool CanDecode(AudioCodec codec);
 
-  // Indicates if the h264 encoder is available on this device.
-  //
-  // This can't be used from the renderer process since it attempts to
-  // access MediaCodecList (which requires permissions).
-  static bool IsH264EncoderAvailable();
-
   // Returns a vector of supported codecs profiles and levels.
   //
   // WARNING: This can't be used from the renderer process since it attempts to
   // access MediaCodecList (which requires permissions).
   static void AddSupportedCodecProfileLevels(
       std::vector<CodecProfileLevel>* out);
-
-  // Get a list of encoder supported color formats for |mime_type|.
-  // The mapping of color format name and its value refers to
-  // MediaCodecInfo.CodecCapabilities.
-  //
-  // WARNING: This can't be used from the renderer process since it attempts to
-  // access MediaCodecList (which requires permissions).
-  static std::set<int> GetEncoderColorFormats(const std::string& mime_type);
 
   // Returns true if |mime_type| is known to be unaccelerated (i.e. backed by a
   // software codec instead of a hardware one).

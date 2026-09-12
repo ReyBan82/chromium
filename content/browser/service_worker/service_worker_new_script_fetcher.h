@@ -5,11 +5,14 @@
 #ifndef CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_NEW_SCRIPT_FETCHER_H_
 #define CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_NEW_SCRIPT_FETCHER_H_
 
+#include <optional>
+
 #include "base/functional/callback.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "content/browser/service_worker/service_worker_version.h"
+#include "content/browser/worker_host/worker_script_fetcher.h"
 #include "content/common/content_export.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
@@ -49,9 +52,9 @@ class CONTENT_EXPORT ServiceWorkerNewScriptFetcher
   ~ServiceWorkerNewScriptFetcher() override;
 
   // Callback called when the main script load params are ready. Called with
-  // null struct on an error.
+  // nullopt on an error.
   using StartCallback =
-      base::OnceCallback<void(blink::mojom::WorkerMainScriptLoadParamsPtr)>;
+      base::OnceCallback<void(std::optional<WorkerScriptFetcherResult>)>;
   void Start(StartCallback callback);
 
  private:
@@ -62,7 +65,7 @@ class CONTENT_EXPORT ServiceWorkerNewScriptFetcher
   void OnReceiveResponse(
       network::mojom::URLResponseHeadPtr response_head,
       mojo::ScopedDataPipeConsumerHandle response_body,
-      absl::optional<mojo_base::BigBuffer> cached_metadata) override;
+      std::optional<mojo_base::BigBuffer> cached_metadata) override;
   void OnReceiveRedirect(
       const net::RedirectInfo& redirect_info,
       network::mojom::URLResponseHeadPtr response_head) override;

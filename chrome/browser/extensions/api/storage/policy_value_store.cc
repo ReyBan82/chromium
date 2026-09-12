@@ -14,6 +14,10 @@
 #include "components/value_store/value_store_change.h"
 #include "extensions/browser/api/storage/backend_task_runner.h"
 #include "extensions/browser/api/storage/storage_area_namespace.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 using value_store::ValueStore;
 
@@ -29,20 +33,20 @@ ValueStore::Status ReadOnlyError() {
 }  // namespace
 
 PolicyValueStore::PolicyValueStore(
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     SequenceBoundSettingsChangedCallback observer,
     std::unique_ptr<ValueStore> delegate)
     : extension_id_(extension_id),
       observer_(std::move(observer)),
       delegate_(std::move(delegate)) {}
 
-PolicyValueStore::~PolicyValueStore() {}
+PolicyValueStore::~PolicyValueStore() = default;
 
 void PolicyValueStore::SetCurrentPolicy(const policy::PolicyMap& policy) {
   DCHECK(IsOnBackendSequence());
   // Convert |policy| to a dictionary value. Only include mandatory policies
   // for now.
-  base::Value::Dict current_policy;
+  base::DictValue current_policy;
   for (const auto& it : policy) {
     if (it.second.level == policy::POLICY_LEVEL_MANDATORY) {
       current_policy.Set(it.first, it.second.value_unsafe()->Clone());
@@ -53,7 +57,7 @@ void PolicyValueStore::SetCurrentPolicy(const policy::PolicyMap& policy) {
   // TODO(joaodasilva): it'd be better to have a less expensive way of
   // determining which keys are currently stored, or of determining which keys
   // must be removed.
-  base::Value::Dict previous_policy;
+  base::DictValue previous_policy;
   ValueStore::ReadResult read_result = delegate_->Get();
 
   if (!read_result.status().ok()) {
@@ -70,8 +74,9 @@ void PolicyValueStore::SetCurrentPolicy(const policy::PolicyMap& policy) {
   // anymore.
   std::vector<std::string> removed_keys;
   for (auto kv : previous_policy) {
-    if (!current_policy.Find(kv.first))
+    if (!current_policy.Find(kv.first)) {
       removed_keys.push_back(kv.first);
+    }
   }
 
   value_store::ValueStoreChangeList changes;
@@ -101,6 +106,7 @@ void PolicyValueStore::SetCurrentPolicy(const policy::PolicyMap& policy) {
 
   if (!changes.empty()) {
     observer_->Run(extension_id_, StorageAreaNamespace::kManaged,
+                   /*session_access_level=*/std::nullopt,
                    value_store::ValueStoreChange::ToValue(std::move(changes)));
   }
 }
@@ -128,6 +134,10 @@ size_t PolicyValueStore::GetBytesInUse() {
   return 0;
 }
 
+ValueStore::ReadResult PolicyValueStore::GetKeys() {
+  return delegate_->GetKeys();
+}
+
 ValueStore::ReadResult PolicyValueStore::Get(const std::string& key) {
   return delegate_->Get(key);
 }
@@ -147,9 +157,8 @@ ValueStore::WriteResult PolicyValueStore::Set(WriteOptions options,
   return WriteResult(ReadOnlyError());
 }
 
-ValueStore::WriteResult PolicyValueStore::Set(
-    WriteOptions options,
-    const base::Value::Dict& settings) {
+ValueStore::WriteResult PolicyValueStore::Set(WriteOptions options,
+                                              const base::DictValue& settings) {
   return WriteResult(ReadOnlyError());
 }
 

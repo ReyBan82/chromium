@@ -1,22 +1,25 @@
 // Copyright 2015 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 #include "chromecast/crash/linux/dump_info.h"
 
 #include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 
+#include <string_view>
+
+#include "base/compiler_specific.h"
 #include "base/logging.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
+#include "base/time/time.h"
 #include "base/values.h"
 
 namespace chromecast {
 
 namespace {
-
-// "%Y-%m-%d %H:%M:%S";
-const char kDumpTimeFormat[] = "%04d-%02d-%02d %02d:%02d:%02d";
 
 const int kNumRequiredParams = 4;
 
@@ -39,11 +42,23 @@ const char kExecNameKey[] = "exec_name";
 const char kSignatureKey[] = "signature";
 const char kExtraInfoKey[] = "extra_info";
 
-// Convenience wrapper around Value::Dict::FindString(), for easier use in if
-// statements. If `key` is a string in `dict`, writes it to `out` and returns
+// CastLite specific data
+const char kComments[] = "comments";
+const char kJsEngine[] = "js_engine";
+const char kJsBuildLabel[] = "js_build_label";
+const char kJsExceptionCategory[] = "js_exception_category";
+const char kJsExceptionDetails[] = "js_exception_details";
+const char kJsExceptionSignature[] = "js_exception_signature";
+const char kJsErrorAppKey[] = "js_error_app";
+const char kPreviousLogFileKey[] = "previous_logfile";
+const char kBackgroundAppsKey[] = "background_apps";
+const char kServerUrl[] = "server_url";
+
+// Convenience wrapper around base::DictValue::FindString(), for easier use in
+// if statements. If `key` is a string in `dict`, writes it to `out` and returns
 // true. Leaves `out` alone and returns false otherwise.
-bool FindString(const base::Value::Dict& dict,
-                base::StringPiece key,
+bool FindString(const base::DictValue& dict,
+                std::string_view key,
                 std::string& out) {
   const std::string* value = dict.FindString(key);
   if (!value)
@@ -74,21 +89,22 @@ DumpInfo::DumpInfo(const std::string& crashed_process_dump,
 DumpInfo::~DumpInfo() {}
 
 base::Value DumpInfo::GetAsValue() const {
-  base::Value::Dict result;
+  base::DictValue result;
 
-  base::Time::Exploded ex;
-  dump_time_.LocalExplode(&ex);
-  std::string dump_time =
-      base::StringPrintf(kDumpTimeFormat, ex.year, ex.month, ex.day_of_month,
-                         ex.hour, ex.minute, ex.second);
-  result.Set(kDumpTimeKey, dump_time);
+  base::Time::Exploded exploded;
+  dump_time_.LocalExplode(&exploded);
+  result.Set(
+      kDumpTimeKey,
+      base::StringPrintf("%04d-%02d-%02d %02d:%02d:%02d", exploded.year,
+                         exploded.month, exploded.day_of_month, exploded.hour,
+                         exploded.minute, exploded.second));
 
   result.Set(kDumpKey, crashed_process_dump_);
-  std::string uptime = std::to_string(params_.process_uptime);
+  std::string uptime = base::NumberToString(params_.process_uptime);
   result.Set(kUptimeKey, uptime);
   result.Set(kLogfileKey, logfile_);
 
-  base::Value::List attachments_list;
+  base::ListValue attachments_list;
   for (const auto& attachment : attachments_) {
     attachments_list.Append(attachment);
   }
@@ -105,6 +121,16 @@ base::Value DumpInfo::GetAsValue() const {
   result.Set(kSignatureKey, params_.signature);
   result.Set(kExtraInfoKey, params_.extra_info);
   result.Set(kCrashProductNameKey, params_.crash_product_name);
+  result.Set(kComments, params_.comments);
+  result.Set(kJsEngine, params_.js_engine);
+  result.Set(kJsBuildLabel, params_.js_build_label);
+  result.Set(kJsExceptionCategory, params_.js_exception_category);
+  result.Set(kJsExceptionDetails, params_.js_exception_details);
+  result.Set(kJsExceptionSignature, params_.js_exception_signature);
+  result.Set(kJsErrorAppKey, params_.js_error_app);
+  result.Set(kPreviousLogFileKey, params_.previous_logfile);
+  result.Set(kBackgroundAppsKey, params_.background_apps);
+  result.Set(kServerUrl, params_.server_url);
 
   return base::Value(std::move(result));
 }
@@ -115,7 +141,7 @@ bool DumpInfo::ParseEntry(const base::Value* entry) {
   if (!entry)
     return false;
 
-  const base::Value::Dict* dict = entry->GetIfDict();
+  const base::DictValue* dict = entry->GetIfDict();
   if (!dict)
     return false;
 
@@ -133,7 +159,7 @@ bool DumpInfo::ParseEntry(const base::Value* entry) {
   if (!FindString(*dict, kUptimeKey, uptime))
     return false;
   errno = 0;
-  params_.process_uptime = strtoull(uptime.c_str(), nullptr, 0);
+  params_.process_uptime = UNSAFE_TODO(strtoull(uptime.c_str(), nullptr, 0));
   if (errno != 0)
     return false;
 
@@ -142,7 +168,7 @@ bool DumpInfo::ParseEntry(const base::Value* entry) {
   size_t num_params = kNumRequiredParams;
 
   // Extract all other optional fields.
-  const base::Value::List* attachments_list = dict->FindList(kAttachmentsKey);
+  const base::ListValue* attachments_list = dict->FindList(kAttachmentsKey);
   if (attachments_list) {
     ++num_params;
     for (const auto& attachment : *attachments_list) {
@@ -177,24 +203,55 @@ bool DumpInfo::ParseEntry(const base::Value* entry) {
     ++num_params;
   if (FindString(*dict, kCrashProductNameKey, params_.crash_product_name))
     ++num_params;
+  if (FindString(*dict, kComments, params_.comments)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kJsEngine, params_.js_engine)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kJsBuildLabel, params_.js_build_label)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kJsExceptionCategory, params_.js_exception_category)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kJsExceptionDetails, params_.js_exception_details)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kJsExceptionSignature,
+                 params_.js_exception_signature)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kJsErrorAppKey, params_.js_error_app)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kPreviousLogFileKey, params_.previous_logfile)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kBackgroundAppsKey, params_.background_apps)) {
+    ++num_params;
+  }
+  if (FindString(*dict, kServerUrl, params_.server_url)) {
+    ++num_params;
+  }
 
   // Disallow extraneous params
-  if (dict->size() != num_params)
+  if (dict->size() != num_params) {
+    LOG(ERROR) << "Failed to parse DumpInfo: missing required fields";
     return false;
+  }
 
   valid_ = true;
   return true;
 }
 
 bool DumpInfo::SetDumpTimeFromString(const std::string& timestr) {
-  base::Time::Exploded ex = {0};
-  if (sscanf(timestr.c_str(), kDumpTimeFormat, &ex.year, &ex.month,
-             &ex.day_of_month, &ex.hour, &ex.minute, &ex.second) < 6) {
-    LOG(INFO) << "Failed to convert dump time invalid";
-    return false;
+  if (base::Time::FromString(timestr.c_str(), &dump_time_)) {
+    return true;
   }
 
-  return base::Time::FromLocalExploded(ex, &dump_time_);
+  LOG(INFO) << "Failed to convert dump time invalid";
+  return false;
 }
 
 }  // namespace chromecast

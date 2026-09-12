@@ -6,6 +6,7 @@
 
 #include <bitset>
 
+#include "base/no_destructor.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chromeos/ash/services/bluetooth_config/fast_pair_delegate.h"
 #include "chromeos/ash/services/bluetooth_config/public/cpp/device_image_info.h"
@@ -75,13 +76,15 @@ mojom::AudioOutputCapability ComputeAudioOutputCapability(
 
   // Alternatively, audio output capable devices may have any of the following
   // UUIDs in its UUID list.
-  static const std::array<device::BluetoothUUID, 3> kAudioServiceUuids{
-      device::BluetoothUUID("00001108-0000-1000-8000-00805f9b34fb"),  // Headset
-      device::BluetoothUUID(
-          "0000110b-0000-1000-8000-00805f9b34fb"),  // Audio Sink
-      device::BluetoothUUID(
-          "0000111e-0000-1000-8000-00805f9b34fb"),  // Handsfree
-  };
+  static const base::NoDestructor<std::array<device::BluetoothUUID, 3>>
+      kAudioServiceUuids(std::array<device::BluetoothUUID, 3>{
+          device::BluetoothUUID(
+              "00001108-0000-1000-8000-00805f9b34fb"),  // Headset
+          device::BluetoothUUID(
+              "0000110b-0000-1000-8000-00805f9b34fb"),  // Audio Sink
+          device::BluetoothUUID(
+              "0000111e-0000-1000-8000-00805f9b34fb"),  // Handsfree
+      });
 
   const std::bitset<32> bluetooth_class_bitset(device->GetBluetoothClass());
   if (bluetooth_class_bitset.test(kRenderingBitPosition) &&
@@ -93,7 +96,7 @@ mojom::AudioOutputCapability ComputeAudioOutputCapability(
   // (b/209666215). Check if any of the device's UUIDs correspond with an audio
   // service.
   base::flat_set<device::BluetoothUUID> uuids = device->GetUUIDs();
-  for (device::BluetoothUUID audio_service_uuid : kAudioServiceUuids) {
+  for (const device::BluetoothUUID& audio_service_uuid : *kAudioServiceUuids) {
     if (uuids.contains(audio_service_uuid)) {
       return mojom::AudioOutputCapability::kCapableOfAudioOutput;
     }
@@ -105,7 +108,7 @@ mojom::AudioOutputCapability ComputeAudioOutputCapability(
 mojom::BatteryPropertiesPtr ComputeBatteryInfoForBatteryType(
     const device::BluetoothDevice* device,
     device::BluetoothDevice::BatteryType battery_type) {
-  const absl::optional<device::BluetoothDevice::BatteryInfo> battery_info =
+  const std::optional<device::BluetoothDevice::BatteryInfo> battery_info =
       device->GetBatteryInfo(battery_type);
 
   if (!battery_info || !battery_info->percentage.has_value())
@@ -167,7 +170,7 @@ mojom::DeviceConnectionState ComputeConnectionState(
 }
 
 std::u16string ComputeDeviceName(const device::BluetoothDevice* device) {
-  absl::optional<std::string> name = device->GetName();
+  std::optional<std::string> name = device->GetName();
   if (name && device::HasGraphicCharacter(name.value()))
     return device->GetNameForDisplay();
 
@@ -177,7 +180,7 @@ std::u16string ComputeDeviceName(const device::BluetoothDevice* device) {
 mojom::DeviceImageInfoPtr ComputeImageInfo(
     const device::BluetoothDevice* device,
     FastPairDelegate* fast_pair_delegate) {
-  absl::optional<DeviceImageInfo> images =
+  std::optional<DeviceImageInfo> images =
       fast_pair_delegate->GetDeviceImageInfo(device->GetAddress());
   if (!images) {
     return nullptr;

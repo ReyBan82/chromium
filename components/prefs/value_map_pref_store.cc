@@ -4,22 +4,20 @@
 
 #include "components/prefs/value_map_pref_store.h"
 
-#include <algorithm>
-#include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/observer_list.h"
-#include "base/strings/string_piece.h"
 #include "base/values.h"
 
-ValueMapPrefStore::ValueMapPrefStore() {}
+ValueMapPrefStore::ValueMapPrefStore() = default;
 
-bool ValueMapPrefStore::GetValue(base::StringPiece key,
+bool ValueMapPrefStore::GetValue(std::string_view key,
                                  const base::Value** value) const {
   return prefs_.GetValue(key, value);
 }
 
-base::Value::Dict ValueMapPrefStore::GetValues() const {
+base::DictValue ValueMapPrefStore::GetValues() const {
   return prefs_.AsDict();
 }
 
@@ -35,47 +33,46 @@ bool ValueMapPrefStore::HasObservers() const {
   return !observers_.empty();
 }
 
-void ValueMapPrefStore::SetValue(const std::string& key,
+void ValueMapPrefStore::SetValue(std::string_view key,
                                  base::Value value,
                                  uint32_t flags) {
   if (prefs_.SetValue(key, std::move(value))) {
-    for (Observer& observer : observers_)
-      observer.OnPrefValueChanged(key);
+    observers_.NotifyAllowReentrancy(&PrefStore::Observer::OnPrefValueChanged,
+                                     key);
   }
 }
 
-void ValueMapPrefStore::RemoveValue(const std::string& key, uint32_t flags) {
+void ValueMapPrefStore::RemoveValue(std::string_view key, uint32_t flags) {
   if (prefs_.RemoveValue(key)) {
-    for (Observer& observer : observers_)
-      observer.OnPrefValueChanged(key);
+    observers_.NotifyAllowReentrancy(&PrefStore::Observer::OnPrefValueChanged,
+                                     key);
   }
 }
 
-bool ValueMapPrefStore::GetMutableValue(const std::string& key,
+bool ValueMapPrefStore::GetMutableValue(std::string_view key,
                                         base::Value** value) {
   return prefs_.GetValue(key, value);
 }
 
-void ValueMapPrefStore::ReportValueChanged(const std::string& key,
+void ValueMapPrefStore::ReportValueChanged(std::string_view key,
                                            uint32_t flags) {
-  for (Observer& observer : observers_)
-    observer.OnPrefValueChanged(key);
+  observers_.NotifyAllowReentrancy(&PrefStore::Observer::OnPrefValueChanged,
+                                   key);
 }
 
-void ValueMapPrefStore::SetValueSilently(const std::string& key,
+void ValueMapPrefStore::SetValueSilently(std::string_view key,
                                          base::Value value,
                                          uint32_t flags) {
   prefs_.SetValue(key, std::move(value));
 }
 
-ValueMapPrefStore::~ValueMapPrefStore() {}
+ValueMapPrefStore::~ValueMapPrefStore() = default;
 
 void ValueMapPrefStore::NotifyInitializationCompleted() {
   for (Observer& observer : observers_)
     observer.OnInitializationCompleted(true);
 }
 
-void ValueMapPrefStore::RemoveValuesByPrefixSilently(
-    const std::string& prefix) {
+void ValueMapPrefStore::RemoveValuesByPrefixSilently(std::string_view prefix) {
   prefs_.ClearWithPrefix(prefix);
 }

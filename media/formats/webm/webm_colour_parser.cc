@@ -13,6 +13,7 @@ namespace media {
 
 WebMColorMetadata::WebMColorMetadata() = default;
 WebMColorMetadata::WebMColorMetadata(const WebMColorMetadata& rhs) = default;
+WebMColorMetadata::~WebMColorMetadata() = default;
 
 WebMColorVolumeMetadataParser::WebMColorVolumeMetadataParser() = default;
 WebMColorVolumeMetadataParser::~WebMColorVolumeMetadataParser() = default;
@@ -20,34 +21,34 @@ WebMColorVolumeMetadataParser::~WebMColorVolumeMetadataParser() = default;
 bool WebMColorVolumeMetadataParser::OnFloat(int id, double val) {
   switch (id) {
     case kWebMIdPrimaryRChromaticityX:
-      color_volume_metadata_.primaries.fRX = val;
+      mdcv_.fDisplayPrimaries.fRX = val;
       break;
     case kWebMIdPrimaryRChromaticityY:
-      color_volume_metadata_.primaries.fRY = val;
+      mdcv_.fDisplayPrimaries.fRY = val;
       break;
     case kWebMIdPrimaryGChromaticityX:
-      color_volume_metadata_.primaries.fGX = val;
+      mdcv_.fDisplayPrimaries.fGX = val;
       break;
     case kWebMIdPrimaryGChromaticityY:
-      color_volume_metadata_.primaries.fGY = val;
+      mdcv_.fDisplayPrimaries.fGY = val;
       break;
     case kWebMIdPrimaryBChromaticityX:
-      color_volume_metadata_.primaries.fBX = val;
+      mdcv_.fDisplayPrimaries.fBX = val;
       break;
     case kWebMIdPrimaryBChromaticityY:
-      color_volume_metadata_.primaries.fBY = val;
+      mdcv_.fDisplayPrimaries.fBY = val;
       break;
     case kWebMIdWhitePointChromaticityX:
-      color_volume_metadata_.primaries.fWX = val;
+      mdcv_.fDisplayPrimaries.fWX = val;
       break;
     case kWebMIdWhitePointChromaticityY:
-      color_volume_metadata_.primaries.fWY = val;
+      mdcv_.fDisplayPrimaries.fWY = val;
       break;
     case kWebMIdLuminanceMax:
-      color_volume_metadata_.luminance_max = val;
+      mdcv_.fMaximumDisplayMasteringLuminance = val;
       break;
     case kWebMIdLuminanceMin:
-      color_volume_metadata_.luminance_min = val;
+      mdcv_.fMinimumDisplayMasteringLuminance = val;
       break;
     default:
       DVLOG(1) << "Unexpected id in ColorVolumeMetadata: 0x" << std::hex << id;
@@ -191,24 +192,23 @@ WebMColorMetadata WebMColourParser::GetWebMColorMetadata() const {
   color_metadata.color_space = VideoColorSpace(
       primaries_, transfer_characteristics_, matrix_coefficients_, range_id);
 
-  if (max_content_light_level_ != -1 || max_frame_average_light_level_ != -1 ||
-      color_volume_metadata_parsed_) {
-    color_metadata.hdr_metadata = gfx::HDRMetadata();
-
+  if (max_content_light_level_ != -1 || max_frame_average_light_level_ != -1) {
+    skhdr::ContentLightLevelInformation clli;
     if (max_content_light_level_ != -1) {
-      color_metadata.hdr_metadata->max_content_light_level =
-          max_content_light_level_;
+      clli.fMaxCLL = max_content_light_level_;
     }
-
     if (max_frame_average_light_level_ != -1) {
-      color_metadata.hdr_metadata->max_frame_average_light_level =
-          max_frame_average_light_level_;
+      clli.fMaxFALL = max_frame_average_light_level_;
     }
 
-    if (color_volume_metadata_parsed_) {
-      color_metadata.hdr_metadata->color_volume_metadata =
-          color_volume_metadata_parser_.GetColorVolumeMetadata();
-    }
+    // TODO(crbug.com/40268540): Consider rejecting metadata that does
+    // not specify all values.
+    color_metadata.hdr_metadata.SetCLLI(clli);
+  }
+
+  if (color_volume_metadata_parsed_) {
+    color_metadata.hdr_metadata.SetMDCV(
+        color_volume_metadata_parser_.GetColorVolumeMetadata());
   }
 
   return color_metadata;

@@ -12,20 +12,21 @@
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
 #include "ash/wallpaper/wallpaper_controller_impl.h"
-#include "base/test/metrics/histogram_tester.h"
-#include "base/test/scoped_feature_list.h"
+#include "ash/wallpaper/wallpaper_controller_test_api.h"
+#include "base/memory/raw_ptr.h"
 #include "chromeos/dbus/power/fake_power_manager_client.h"
 #include "components/session_manager/session_manager_types.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "third_party/skia/include/core/SkColor.h"
 
 namespace ash {
 
 namespace {
-constexpr char kUser1[] = "user1@test.com";
-const AccountId account_id_1 = AccountId::FromUserEmailGaiaId(kUser1, kUser1);
 
-constexpr char kUser2[] = "user2@test.com";
-const AccountId account_id_2 = AccountId::FromUserEmailGaiaId(kUser2, kUser2);
+const AccountId account_id_1 =
+    AccountId::FromUserEmailGaiaId("user1@test.com", GaiaId("1111"));
+const AccountId account_id_2 =
+    AccountId::FromUserEmailGaiaId("user2@test.com", GaiaId("2222"));
 
 // Creates an image of size |size|.
 gfx::ImageSkia CreateImage(int width, int height, SkColor color) {
@@ -66,13 +67,9 @@ class TestWallpaperObserver : public ash::WallpaperControllerObserver {
 };
 }  // namespace
 
-class KeyboardBacklightColorControllerTest : public AshTestBase {
+class KeyboardBacklightColorControllerTest : public NoSessionAshTestBase {
  public:
-  KeyboardBacklightColorControllerTest() {
-    scoped_feature_list_.InitWithFeatures(
-        {features::kRgbKeyboard, features::kMultiZoneRgbKeyboard}, {});
-    set_start_session(false);
-  }
+  KeyboardBacklightColorControllerTest() = default;
 
   KeyboardBacklightColorControllerTest(
       const KeyboardBacklightColorControllerTest&) = delete;
@@ -83,23 +80,21 @@ class KeyboardBacklightColorControllerTest : public AshTestBase {
 
   // testing::Test:
   void SetUp() override {
-    AshTestBase::SetUp();
+    NoSessionAshTestBase::SetUp();
 
     controller_ =
         std::make_unique<KeyboardBacklightColorController>(local_state());
     wallpaper_controller_ = Shell::Get()->wallpaper_controller();
+    WallpaperControllerTestApi(wallpaper_controller_).ResetCalculatedColors();
   }
 
   void TearDown() override {
+    wallpaper_controller_ = nullptr;
     controller_.reset();
-    AshTestBase::TearDown();
+    NoSessionAshTestBase::TearDown();
   }
 
  protected:
-  const base::HistogramTester& histogram_tester() const {
-    return histogram_tester_;
-  }
-
   SkColor displayed_color() const {
     return controller_->displayed_color_for_testing_;
   }
@@ -114,12 +109,16 @@ class KeyboardBacklightColorControllerTest : public AshTestBase {
     rgb_keyboard_manager->OnCapabilityUpdatedForTesting(capability);
   }
 
-  std::unique_ptr<KeyboardBacklightColorController> controller_;
-  WallpaperControllerImpl* wallpaper_controller_ = nullptr;
+  // Set the cached wallpaper color to `color`.
+  void SetWallpaperColor(SkColor color) {
+    WallpaperControllerTestApi test_api(wallpaper_controller_);
+    WallpaperCalculatedColors calculated_colors;
+    calculated_colors.k_mean_color = color;
+    test_api.SetCalculatedColors(calculated_colors);
+  }
 
- private:
-  base::test::ScopedFeatureList scoped_feature_list_;
-  base::HistogramTester histogram_tester_;
+  std::unique_ptr<KeyboardBacklightColorController> controller_;
+  raw_ptr<WallpaperControllerImpl> wallpaper_controller_ = nullptr;
 };
 
 TEST_F(KeyboardBacklightColorControllerTest, SetBacklightColorUpdatesPref) {
@@ -135,14 +134,9 @@ TEST_F(KeyboardBacklightColorControllerTest, SetBacklightColorAfterSignin) {
   controller_->OnRgbKeyboardSupportedChanged(true);
   // Verify the user starts with wallpaper-extracted color.
   SimulateUserLogin(account_id_1);
+  // Expect the default choice to be wallpaper color.
   EXPECT_EQ(personalization_app::mojom::BacklightColor::kWallpaper,
             controller_->GetBacklightColor(account_id_1));
-  // Expect the Wallpaper color to be set to the default as wallpaper color is
-  // not valid in this state.
-  // Backlight should be set twice. Once on login screen and then again once
-  // signed in.
-  histogram_tester().ExpectBucketCount(
-      "Ash.Personalization.KeyboardBacklight.WallpaperColor.Valid", false, 2);
   EXPECT_EQ(kDefaultColor, displayed_color());
 
   controller_->SetBacklightColor(
@@ -165,16 +159,9 @@ TEST_F(KeyboardBacklightColorControllerTest, SetBacklightColorAfterSignin) {
 
 TEST_F(KeyboardBacklightColorControllerTest,
        DisplaysDefaultColorForNearlyBlackColor) {
+  SetWallpaperColor(SkColorSetRGB(/*r=*/0, /*g=*/0, /*b=*/10));
   controller_->OnRgbKeyboardSupportedChanged(true);
-  TestWallpaperObserver observer;
-  SimulateUserLogin(account_id_1);
-  gfx::ImageSkia one_shot_wallpaper =
-      CreateImage(640, 480, SkColorSetRGB(/*r=*/0, /*g=*/0, /*b=*/10));
-  wallpaper_controller_->ShowOneShotWallpaper(one_shot_wallpaper);
-  observer.WaitForWallpaperColorsChanged();
 
-  histogram_tester().ExpectBucketCount(
-      "Ash.Personalization.KeyboardBacklight.WallpaperColor.Valid", true, 1);
   EXPECT_EQ(kDefaultColor, displayed_color());
 }
 
@@ -219,12 +206,17 @@ TEST_F(KeyboardBacklightColorControllerTest,
             controller_->GetBacklightColor(account_id_1));
 
   // Simulate re-login for user2 and expect blue color to be set.
-  SimulateUserLogin(account_id_2);
-  EXPECT_EQ(personalization_app::mojom::BacklightColor::kWallpaper,
-            controller_->GetBacklightColor(account_id_2));
-  EXPECT_EQ(ConvertBacklightColorToSkColor(
-                personalization_app::mojom::BacklightColor::kBlue),
-            displayed_color());
+  {
+    TestWallpaperObserver observer;
+    SimulateUserLogin(account_id_2);
+
+    EXPECT_EQ(personalization_app::mojom::BacklightColor::kWallpaper,
+              controller_->GetBacklightColor(account_id_2));
+    EXPECT_EQ(ConvertBacklightColorToSkColor(
+                  personalization_app::mojom::BacklightColor::kBlue),
+              displayed_color());
+    observer.WaitForWallpaperColorsChanged();
+  }
 
   // Set the wallpaper and check that the displayed color now matches the
   // default color.
@@ -234,8 +226,6 @@ TEST_F(KeyboardBacklightColorControllerTest,
   wallpaper_controller_->ShowOneShotWallpaper(one_shot_wallpaper);
   observer.WaitForWallpaperColorsChanged();
 
-  histogram_tester().ExpectBucketCount(
-      "Ash.Personalization.KeyboardBacklight.WallpaperColor.Valid", true, 1);
   EXPECT_EQ(kDefaultColor, displayed_color());
 }
 
@@ -364,14 +354,17 @@ TEST_F(KeyboardBacklightColorControllerTest, SetBacklightZoneColor) {
   for (auto color : zone_colors) {
     EXPECT_EQ(color, default_color);
   }
+  // Expects the backligh color display type to be set to `kStatic`.
+  EXPECT_EQ(KeyboardBacklightColorController::DisplayType::kStatic,
+            controller_->GetDisplayType(account_id_1));
 
   // Updates one of the zone to a different color.
   const int zone = 3;
   const auto color_to_be_set = personalization_app::mojom::BacklightColor::kRed;
   controller_->SetBacklightZoneColor(zone, color_to_be_set, account_id_1);
-  // Expects the backligh color pref to be set to kMultiZone.
-  EXPECT_EQ(personalization_app::mojom::BacklightColor::kMultiZone,
-            controller_->GetBacklightColor(account_id_1));
+  // Expects the backligh color display type to be set to `kMultiZone`.
+  EXPECT_EQ(KeyboardBacklightColorController::DisplayType::kMultiZone,
+            controller_->GetDisplayType(account_id_1));
   // Expects zone color to be updated.
   zone_colors = controller_->GetBacklightZoneColors(account_id_1);
   EXPECT_EQ(color_to_be_set, zone_colors.at(zone));

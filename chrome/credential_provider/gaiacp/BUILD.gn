@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//base/win/embedded_i18n/generate_embedded_i18n.gni")
+import("//base/i18n/win/embedded_i18n/generate_embedded_i18n.gni")
 import("//build/config/clang/clang.gni")
 import("//build/config/compiler/compiler.gni")
 import("//build/config/dcheck_always_on.gni")
@@ -11,6 +11,7 @@ import("//build/toolchain/win/midl.gni")
 import("//chrome/process_version_rc_template.gni")
 import("//testing/libfuzzer/fuzzer_test.gni")
 import("//testing/test.gni")
+import("//third_party/protobuf/proto_library.gni")
 import("//tools/grit/grit_rule.gni")
 
 # This static library is shared with the setup program.
@@ -41,9 +42,13 @@ source_set("common") {
     "//components/crash/core/app",
     "//components/crash/core/common",
     "//components/version_info",
-    "//google_apis:google_apis",
+    "//google_apis",
     "//url",
   ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 config("common_config") {
@@ -67,8 +72,14 @@ source_set("util") {
     "gcp_utils.h",
     "gcpw_strings.cc",
     "gcpw_strings.h",
+    "internet_availability_checker.cc",
+    "internet_availability_checker.h",
     "logging.cc",
     "logging.h",
+    "os_device_manager.cc",
+    "os_device_manager.h",
+    "os_gaia_user_manager.cc",
+    "os_gaia_user_manager.h",
     "os_user_manager.cc",
     "os_user_manager.h",
     "reg_utils.cc",
@@ -90,10 +101,18 @@ source_set("util") {
     "//build:branding_buildflags",
     "//chrome/common:version_header",
     "//chrome/installer/launcher_support",
-    "//google_apis:google_apis",
+    "//google_apis",
+    "//services/device/public/mojom",
+    "//services/device/public/proto:hid_gcpw_proto",
+    "//third_party/protobuf:protobuf_lite",
     "//third_party/re2",
-    "//url:url",
+    "//url",
   ]
+  libs = [ "hid.lib" ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 config("util_config") {
@@ -128,6 +147,10 @@ component("policies") {
     "//components/policy/proto",
     "//url",
   ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 source_set("mdm_utils") {
@@ -141,7 +164,7 @@ source_set("mdm_utils") {
     ":util",
     "//base",
     "//build:branding_buildflags",
-    "//url:url",
+    "//url",
   ]
 }
 
@@ -176,8 +199,6 @@ source_set("gaiacp_lib") {
     "gcp_crash_reporting.cc",
     "gcp_crash_reporting.h",
     "initguid.cc",
-    "internet_availability_checker.cc",
-    "internet_availability_checker.h",
     "os_process_manager.cc",
     "os_process_manager.h",
     "password_recovery_manager.cc",
@@ -186,7 +207,6 @@ source_set("gaiacp_lib") {
     "reauth_credential.h",
     "scoped_user_profile.cc",
     "scoped_user_profile.h",
-    "stdafx.h",
   ]
   public_configs = [ ":gaiacp_config" ]
   public_deps = [ ":common" ]
@@ -205,14 +225,17 @@ source_set("gaiacp_lib") {
     "//chrome/common:version_header",
     "//chrome/credential_provider/gaiacp/mojom",
     "//chrome/installer/launcher_support",
-    "//components/crash/core/app:app",
+    "//components/crash/core/app",
     "//components/crash/core/app:crash_export_thunks",
     "//components/crash/core/app:run_as_crashpad_handler",
     "//content/public/browser",
     "//crypto",
+    "//extensions/common",
     "//google_apis",
     "//net",
+    "//services/device/public/proto:hid_gcpw_proto",
     "//third_party/boringssl",
+    "//third_party/protobuf:protobuf_lite",
     "//third_party/re2",
     "//url",
   ]
@@ -221,6 +244,10 @@ source_set("gaiacp_lib") {
     "setupapi.lib",
     "wevtapi.lib",
   ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 config("gaiacp_config") {
@@ -296,6 +323,10 @@ shared_library("gaia1_0") {
     "//content/public/browser",
   ]
   configs += [ "//build/config/win:windowed" ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 # String Resource targets for the credential provider dll.

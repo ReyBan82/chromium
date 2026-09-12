@@ -4,9 +4,7 @@
 
 package org.chromium.content.browser.accessibility;
 
-/**
- * Singleton used for tracking accessibility data during content shell unit tests.
- */
+/** Singleton used for tracking accessibility data during content shell unit tests. */
 public class AccessibilityContentShellTestData {
     private static AccessibilityContentShellTestData sInstance;
 
@@ -28,6 +26,7 @@ public class AccessibilityContentShellTestData {
     public String announcementText;
     public int typeWindowContentChangedCount;
     public boolean receivedEvent;
+    public boolean receivedHoverEvent;
     public boolean receivedAccessibilityFocusEvent;
     public boolean receivedTraversalEvent;
     public boolean receivedSelectionEvent;
@@ -40,6 +39,7 @@ public class AccessibilityContentShellTestData {
         announcementText = "";
         typeWindowContentChangedCount = 0;
         receivedEvent = false;
+        receivedHoverEvent = false;
         receivedAccessibilityFocusEvent = false;
         receivedTraversalEvent = false;
         receivedSelectionEvent = false;
@@ -103,6 +103,14 @@ public class AccessibilityContentShellTestData {
 
     public void setReceivedEvent(boolean receivedEvent) {
         this.receivedEvent = receivedEvent;
+    }
+
+    public boolean hasReceivedHoverEvent() {
+        return receivedHoverEvent;
+    }
+
+    public void setReceivedHoverEvent(boolean receivedHoverEvent) {
+        this.receivedHoverEvent = receivedHoverEvent;
     }
 
     public boolean hasReceivedAccessibilityFocusEvent() {

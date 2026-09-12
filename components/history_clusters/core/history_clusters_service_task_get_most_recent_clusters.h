@@ -68,7 +68,7 @@ class HistoryClustersServiceTaskGetMostRecentClusters
   // persisted clusters if no annotated visits were fetched
   void OnGotAnnotatedVisitsToCluster(
       // Unused because clusters aren't persisted in this flow.
-      std::vector<int64_t> old_clusters_unused,
+      std::vector<history::ClusterId> old_clusters_unused,
       std::vector<history::AnnotatedVisit> annotated_visits,
       QueryClustersContinuationParams continuation_params);
 
@@ -106,15 +106,6 @@ class HistoryClustersServiceTaskGetMostRecentClusters
   // Invoked after either `OnGotModelClusters()` or
   // `OnGotMostRecentPersistedClusters()`.
   QueryClustersCallback callback_;
-
-  // When `Start()` kicked off the request to fetch visits to cluster.
-  base::TimeTicks get_annotated_visits_to_cluster_start_time_;
-  // When `OnGotAnnotatedVisitsToCluster()` kicked off the request to cluster
-  // the visits.
-  base::TimeTicks get_model_clusters_start_time_;
-  // When `ReturnMostRecentPersistedClusters()` kicked off the request to get
-  // persisted clusters.
-  base::TimeTicks get_most_recent_persisted_clusters_start_time_;
 
   // Used for async callbacks.
   base::WeakPtrFactory<HistoryClustersServiceTaskGetMostRecentClusters>

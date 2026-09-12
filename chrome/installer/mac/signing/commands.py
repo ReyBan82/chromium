@@ -5,6 +5,7 @@
 The commands module wraps operations that have side-effects.
 """
 
+import asyncio
 import os
 import platform
 import plistlib
@@ -13,24 +14,37 @@ import stat
 import subprocess
 import tempfile
 
-from . import logger
+from signing import logger
 
 
 def file_exists(path):
     return os.path.exists(path)
 
 
+def delete_file_if_exists(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def copy_files(source, dest):
     assert source[-1] != '/'
     subprocess.check_call(
-        ['rsync', '--archive', '--checksum', '--delete', source, dest])
+        ['rsync', '--archive', '--checksum', '--delete', source, dest]
+    )
 
 
 def copy_dir_overwrite_and_count_changes(source, dest, dry_run=False):
     assert source[-1] != '/'
     command = [
-        'rsync', '--archive', '--checksum', '--itemize-changes', '--delete',
-        source + '/', dest
+        'rsync',
+        '--archive',
+        '--checksum',
+        '--itemize-changes',
+        '--delete',
+        source + '/',
+        dest,
     ]
     if dry_run:
         command.append('--dry-run')
@@ -71,9 +85,7 @@ def read_file(path):
 
 
 def zip(out, path):
-    shutil.move(
-        shutil.make_archive('{}.zip.tmp'.format(os.path.basename(out)), 'zip',
-                            path), out)
+    run_command(['zip', '-9ry', out, '.'], cwd=path)
 
 
 def set_executable(path):
@@ -82,9 +94,16 @@ def set_executable(path):
     Args:
         path: The path to the file to make executable.
     """
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
-             | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH
-             | stat.S_IXOTH)  # -rwxr-xr-x a.k.a. 0755
+    os.chmod(
+        path,
+        stat.S_IRUSR
+        | stat.S_IWUSR
+        | stat.S_IXUSR
+        | stat.S_IRGRP
+        | stat.S_IXGRP
+        | stat.S_IROTH
+        | stat.S_IXOTH,
+    )  # -rwxr-xr-x a.k.a. 0755
 
 
 def run_command(args, **kwargs):
@@ -97,17 +116,33 @@ def run_command_output(args, **kwargs):
     return subprocess.check_output(args, **kwargs)
 
 
-def run_password_command_output(args, password, **kwargs):
-    """Runs a command that expects a password on stdin. This function feeds
-    |password| to that command and returns the output like
-    run_command_output().
-    """
-    assert 'stdin' not in kwargs
-    return run_command_output(
-        args,
-        start_new_session=True,
-        input=(password + '\n').encode('utf8'),
-        **kwargs)
+async def run_command_output_async(args, **kwargs):
+    logger.info('Running command: %s', args)
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **kwargs,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode:
+        logger.error('%s failed. stdout: %s stderr: %s', args, stdout, stderr)
+        raise subprocess.CalledProcessError(
+            process.returncode, args, output=stdout, stderr=stderr
+        )
+    return stdout
+
+
+async def run_command_all_output_async(args, **kwargs):
+    logger.info('Running command: %s', args)
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **kwargs,
+    )
+    stdout, stderr = await process.communicate()
+    return ('%s' % args, process.returncode, stdout, stderr)
 
 
 def lenient_run_command_output(args, **kwargs):
@@ -121,23 +156,14 @@ def lenient_run_command_output(args, **kwargs):
 
     try:
         process = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs
+        )
     except OSError:
         return (None, None, None)
 
     (stdout, stderr) = process.communicate()
 
     return (process.wait(), stdout, stderr)
-
-
-def macos_version():
-    """Determines the macOS version of the running system.
-
-    Returns:
-        A list containing one element for each component of the version number,
-        such as [10, 15, 6] and [11, 0].
-    """
-    return [int(x) for x in platform.mac_ver()[0].split('.')]
 
 
 def read_plist(path):
@@ -152,12 +178,11 @@ def write_plist(data, path, format):
     # so if more than one hardlink points to destination all of them will be
     # modified. This is not what is expected, so delete destination file if
     # it does exist.
-    if os.path.exists(path):
-        os.unlink(path)
+    delete_file_if_exists(path)
     with open(path, 'wb') as f:
         plist_format = {
             'binary1': plistlib.FMT_BINARY,
-            'xml1': plistlib.FMT_XML
+            'xml1': plistlib.FMT_XML,
         }
         plistlib.dump(data, f, fmt=plist_format[format])
 
@@ -171,11 +196,9 @@ class PlistContext(object):
     input and output will be in binary instead of the default XML format.
     """
 
-    def __init__(self,
-                 plist_path,
-                 rewrite=False,
-                 create_new=False,
-                 binary=False):
+    def __init__(
+        self, plist_path, rewrite=False, create_new=False, binary=False
+    ):
         self._path = plist_path
         self._rewrite = rewrite
         self._create_new = create_new

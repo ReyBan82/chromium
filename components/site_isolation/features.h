@@ -10,12 +10,21 @@
 namespace site_isolation {
 namespace features {
 
-BASE_DECLARE_FEATURE(kCacheSiteIsolationMemoryThreshold);
 BASE_DECLARE_FEATURE(kSiteIsolationForPasswordSites);
 BASE_DECLARE_FEATURE(kSiteIsolationForOAuthSites);
-BASE_DECLARE_FEATURE(kSiteIsolationMemoryThresholds);
+
+#if BUILDFLAG(IS_ANDROID)
+BASE_DECLARE_FEATURE(kSiteIsolationMemoryThresholdsAndroid);
 extern const char kStrictSiteIsolationMemoryThresholdParamName[];
 extern const char kPartialSiteIsolationMemoryThresholdParamName[];
+
+BASE_DECLARE_FEATURE(kSiteIsolationEnableMemoryThresholdAndroid);
+#endif  // BUIDLFLAG(IS_ANDROID)
+
+BASE_DECLARE_FEATURE(kIsolateOriginsShortlist);
+BASE_DECLARE_FEATURE(kOriginIsolationForJsOptExceptions);
+BASE_DECLARE_FEATURE(kOriginIsolationMemoryThreshold);
+extern const char kOriginIsolationMemoryThresholdParamName[];
 
 }  // namespace features
 }  // namespace site_isolation

@@ -32,6 +32,7 @@
 #include <memory>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "third_party/blink/renderer/platform/audio/audio_channel.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 
@@ -48,20 +49,19 @@ float ExtractAverageGroupDelay(AudioChannel* channel,
                                unsigned analysis_fft_size) {
   DCHECK(channel);
 
-  float* impulse_p = channel->MutableData();
-
-  DCHECK_GE(channel->length(), analysis_fft_size);
+  base::span<float> impulse_span =
+      channel->MutableSpan().first(analysis_fft_size);
 
   // Check for power-of-2.
   DCHECK_EQ(1UL << static_cast<unsigned>(log2(analysis_fft_size)),
             analysis_fft_size);
 
   FFTFrame estimation_frame(analysis_fft_size);
-  estimation_frame.DoFFT(impulse_p);
+  estimation_frame.DoFFT(impulse_span);
 
   const float frame_delay =
       ClampTo<float>(estimation_frame.ExtractAverageGroupDelay());
-  estimation_frame.DoInverseFFT(impulse_p);
+  estimation_frame.DoInverseFFT(impulse_span);
 
   return frame_delay;
 }
@@ -77,7 +77,7 @@ HRTFKernel::HRTFKernel(AudioChannel* channel,
   // Determine the leading delay (average group delay) for the response.
   frame_delay_ = ExtractAverageGroupDelay(channel, fft_size / 2);
 
-  float* impulse_response = channel->MutableData();
+  base::span<float> impulse_response = channel->MutableSpan();
   const uint32_t response_length = channel->length();
 
   // We need to truncate to fit into 1/2 the FFT size (with zero padding) in
@@ -99,7 +99,7 @@ HRTFKernel::HRTFKernel(AudioChannel* channel,
   }
 
   fft_frame_ = std::make_unique<FFTFrame>(fft_size);
-  fft_frame_->DoPaddedFFT(impulse_response, truncated_response_length);
+  fft_frame_->DoPaddedFFT(impulse_response.first(truncated_response_length));
 }
 
 // Interpolates two kernels with x: 0 -> 1 and returns the result.
@@ -113,8 +113,8 @@ std::unique_ptr<HRTFKernel> HRTFKernel::CreateInterpolatedKernel(
   DCHECK_LT(x, 1.0);
   x = ClampTo(x, 0.0f, 1.0f);
 
-  const float sample_rate1 = kernel1->SampleRate();
-  const float sample_rate2 = kernel2->SampleRate();
+  const float sample_rate1 = kernel1->sample_rate_;
+  const float sample_rate2 = kernel2->sample_rate_;
   DCHECK_EQ(sample_rate1, sample_rate2);
 
   const float frame_delay =

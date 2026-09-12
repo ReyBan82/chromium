@@ -4,14 +4,14 @@
 
 #include "components/dom_distiller/core/dom_distiller_service.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
 #include "base/functional/bind.h"
-#include "base/guid.h"
 #include "base/location.h"
-#include "base/ranges/algorithm.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/uuid.h"
 #include "components/dom_distiller/core/distilled_content_store.h"
 #include "components/dom_distiller/core/proto/distilled_article.pb.h"
 #include "components/dom_distiller/core/task_tracker.h"
@@ -23,7 +23,7 @@ namespace {
 
 ArticleEntry CreateSkeletonEntryForUrl(const GURL& url) {
   ArticleEntry skeleton;
-  skeleton.entry_id = base::GenerateGUID();
+  skeleton.entry_id = base::Uuid::GenerateRandomV4().AsLowercaseString();
   skeleton.pages.push_back(url);
 
   DCHECK(IsEntryValid(skeleton));
@@ -65,6 +65,23 @@ std::unique_ptr<ViewerHandle> DomDistillerService::ViewUrl(
     ViewRequestDelegate* delegate,
     std::unique_ptr<DistillerPage> distiller_page,
     const GURL& url) {
+  return ViewUrlImpl(delegate, std::move(distiller_page), url,
+                     /*use_cache=*/true);
+}
+
+std::unique_ptr<ViewerHandle> DomDistillerService::ViewUrlIgnoreCache(
+    ViewRequestDelegate* delegate,
+    std::unique_ptr<DistillerPage> distiller_page,
+    const GURL& url) {
+  return ViewUrlImpl(delegate, std::move(distiller_page), url,
+                     /*use_cache=*/false);
+}
+
+std::unique_ptr<ViewerHandle> DomDistillerService::ViewUrlImpl(
+    ViewRequestDelegate* delegate,
+    std::unique_ptr<DistillerPage> distiller_page,
+    const GURL& url,
+    bool use_cache) {
   if (!url.is_valid()) {
     return nullptr;
   }
@@ -76,8 +93,10 @@ std::unique_ptr<ViewerHandle> DomDistillerService::ViewUrl(
   // If a distiller is already running for one URL, don't start another.
   if (was_created) {
     task_tracker->StartDistiller(distiller_factory_.get(),
-                                 std::move(distiller_page));
-    task_tracker->StartBlobFetcher();
+                                 std::move(distiller_page), use_cache);
+    if (use_cache) {
+      task_tracker->StartBlobFetcher();
+    }
   }
 
   return viewer_handle;
@@ -114,8 +133,7 @@ TaskTracker* DomDistillerService::CreateTaskTracker(const ArticleEntry& entry) {
 }
 
 void DomDistillerService::CancelTask(TaskTracker* task) {
-  auto it =
-      base::ranges::find(tasks_, task, &std::unique_ptr<TaskTracker>::get);
+  auto it = std::ranges::find(tasks_, task, &std::unique_ptr<TaskTracker>::get);
   if (it != tasks_.end()) {
     it->release();
     tasks_.erase(it);

@@ -27,19 +27,25 @@
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 #include <algorithm>
-#include "base/strings/string_util.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
+#include "base/feature_list.h"
+#include "base/numerics/checked_math.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/platform/wtf/dtoa.h"
 #include "third_party/blink/renderer/platform/wtf/text/integer_to_string_conversion.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
-namespace WTF {
+namespace blink {
 
 String StringBuilder::ReleaseString() {
   if (!length_)
     return g_empty_string;
-  if (string_.IsNull())
+  if (string_.IsNull()) {
     BuildString<String>();
+  } else {
+    NormalizeSharedString();
+  }
   String string = std::move(string_);
   Clear();
   return string;
@@ -48,44 +54,56 @@ String StringBuilder::ReleaseString() {
 String StringBuilder::ToString() {
   if (!length_)
     return g_empty_string;
-  if (string_.IsNull())
+  if (string_.IsNull()) {
     BuildString<String>();
+  } else {
+    NormalizeSharedString();
+  }
   return string_;
 }
 
 AtomicString StringBuilder::ToAtomicString() {
   if (!length_)
     return g_empty_atom;
-  if (string_.IsNull())
+  if (string_.IsNull()) {
     BuildString<AtomicString>();
+  } else {
+    NormalizeSharedString();
+  }
   return AtomicString(string_);
 }
 
 String StringBuilder::Substring(unsigned start, unsigned length) const {
   if (start >= length_)
     return g_empty_string;
-  if (!string_.IsNull())
-    return string_.Substring(start, length);
   length = std::min(length, length_ - start);
+  if (!string_.IsNull()) {
+    return string_.substr(start, length);
+  }
   if (is_8bit_)
-    return String(Characters8() + start, length);
-  return String(Characters16() + start, length);
+    return String(Span8().subspan(start, length));
+  return String(Span16().subspan(start, length));
 }
 
 StringView StringBuilder::SubstringView(unsigned start, unsigned length) const {
   if (start >= length_)
     return StringView();
-  if (!string_.IsNull())
-    return StringView(string_, start, length);
   length = std::min(length, length_ - start);
+  if (!string_.IsNull()) {
+    return StringView(string_, start, length);
+  }
   if (is_8bit_)
-    return StringView(Characters8() + start, length);
-  return StringView(Characters16() + start, length);
+    return StringView(Span8().subspan(start, length));
+  return StringView(Span16().subspan(start, length));
+}
+
+std::string StringBuilder::Utf8(Utf8ConversionMode mode) const {
+  return StringView(*this).Utf8(mode);
 }
 
 void StringBuilder::Swap(StringBuilder& builder) {
-  absl::optional<Buffer8> buffer8;
-  absl::optional<Buffer16> buffer16;
+  std::optional<Buffer8> buffer8;
+  std::optional<Buffer16> buffer16;
   if (has_buffer_) {
     if (is_8bit_) {
       buffer8 = std::move(buffer8_);
@@ -169,7 +187,8 @@ void StringBuilder::Reserve16BitCapacity(unsigned new_capacity) {
 
 void StringBuilder::Resize(unsigned new_size) {
   DCHECK_LE(new_size, length_);
-  string_ = string_.Left(new_size);
+  // For a shared view, the content is the [0, length_) prefix of `string_`;
+  // shrinking just reduces the view length.
   length_ = new_size;
   if (HasBuffer()) {
     if (is_8bit_)
@@ -182,6 +201,12 @@ void StringBuilder::Resize(unsigned new_size) {
 void StringBuilder::CreateBuffer8(unsigned added_size) {
   DCHECK(!HasBuffer());
   DCHECK(is_8bit_);
+  // Capture the retained shared view (if any) before mutating state, so we can
+  // copy exactly the [0, length_) prefix into the new buffer.
+  String saved_source = std::move(string_);
+  const unsigned saved_length = length_;
+  string_ = String();
+
   new (&buffer8_) Buffer8;
   has_buffer_ = true;
   // createBuffer is called right before appending addedSize more bytes. We
@@ -193,72 +218,137 @@ void StringBuilder::CreateBuffer8(unsigned added_size) {
   // strings or single characters. This is a no-op if m_length == 0 since
   // initialBufferSize() is the same as the inline capacity of the vector.
   // This allows doing append(string); append('\0') without extra mallocs.
-  buffer8_.ReserveInitialCapacity(length_ +
+  buffer8_.ReserveInitialCapacity(saved_length +
                                   std::max(added_size, InitialBufferSize()));
   length_ = 0;
-  Append(string_);
-  string_ = String();
+  if (!saved_source.IsNull()) {
+    Append(saved_source.Span8().first(saved_length));
+  }
 }
 
 void StringBuilder::CreateBuffer16(unsigned added_size) {
   DCHECK(is_8bit_ || !HasBuffer());
   Buffer8 buffer8;
+  String saved_source;
   unsigned length = length_;
   wtf_size_t capacity = 0;
   if (has_buffer_) {
     buffer8 = std::move(buffer8_);
     buffer8_.~Buffer8();
     capacity = buffer8.capacity();
+  } else {
+    saved_source = std::move(string_);
   }
+  string_ = String();
   new (&buffer16_) Buffer16;
   has_buffer_ = true;
   capacity = std::max<wtf_size_t>(
-      capacity, length_ + std::max<unsigned>(
-                              added_size, InitialBufferSize() / sizeof(UChar)));
+      capacity, length + std::max<unsigned>(
+                             added_size, InitialBufferSize() / sizeof(UChar)));
   // See CreateBuffer8's call to ReserveInitialCapacity for why we do this.
   buffer16_.ReserveInitialCapacity(capacity);
   is_8bit_ = false;
   length_ = 0;
   if (!buffer8.empty()) {
-    Append(buffer8.data(), length);
+    Append(base::span(buffer8).first(length));
     return;
   }
-  Append(string_);
-  string_ = String();
+  if (!saved_source.IsNull()) {
+    if (saved_source.Is8Bit()) {
+      Append(saved_source.Span8().first(length));
+    } else {
+      Append(saved_source.Span16().first(length));
+    }
+  }
 }
 
-void StringBuilder::Append(const UChar* characters, unsigned length) {
-  if (!length)
+bool StringBuilder::DoesAppendCauseOverflow(unsigned length) const {
+  base::CheckedNumeric<wtf_size_t> checked_new_length(length_);
+  checked_new_length += length;
+  if (!checked_new_length.IsValid()) {
+    return true;
+  }
+  const wtf_size_t new_length = checked_new_length.ValueOrDie();
+
+  if (base::FeatureList::IsEnabled(features::kCapStringBuilderLengthTo1GiB) &&
+      new_length > kStringMaxUCharLength) {
+    return true;
+  }
+
+  if (new_length < Capacity()) {
+    return false;
+  }
+  // Expanding the underlying vector usually doubles its capacity—unless there
+  // is no current buffer, in which case `length` will become the capacity.
+  if (is_8bit_) {
+    return (HasBuffer() ? buffer8_.capacity() * 2 : length) >=
+           Buffer8::MaxCapacity();
+  }
+  return (HasBuffer() ? buffer16_.capacity() * 2 : length) >=
+         Buffer16::MaxCapacity();
+}
+
+void StringBuilder::Append(base::span<const UChar> chars) {
+  if (chars.empty()) {
     return;
-  DCHECK(characters);
+  }
+  DCHECK(chars.data());
+
+  if (!is_8bit_ && TryExtendSharedView(string_.Span16(), chars)) {
+    return;
+  }
 
   // If there's only one char we use append(UChar) instead since it will
   // check for latin1 and avoid converting to 16bit if possible.
-  if (length == 1) {
-    Append(*characters);
+  if (chars.size() == 1) {
+    Append(chars[0]);
     return;
   }
 
+  unsigned length = base::checked_cast<unsigned>(chars.size());
   EnsureBuffer16(length);
-  buffer16_.Append(characters, length);
+  buffer16_.append_range(chars);
   length_ += length;
 }
 
-void StringBuilder::Append(const LChar* characters, unsigned length) {
-  if (!length)
+void StringBuilder::Append(base::span<const LChar> chars) {
+  if (chars.empty()) {
     return;
-  DCHECK(characters);
+  }
+  DCHECK(chars.data());
 
+  if (is_8bit_ && TryExtendSharedView(string_.Span8(), chars)) {
+    return;
+  }
+
+  unsigned length = base::checked_cast<unsigned>(chars.size());
   if (is_8bit_) {
     EnsureBuffer8(length);
-    buffer8_.Append(characters, length);
+    buffer8_.append_range(chars);
     length_ += length;
     return;
   }
 
   EnsureBuffer16(length);
-  buffer16_.Append(characters, length);
+  buffer16_.append_range(chars);
   length_ += length;
+}
+
+template <typename CharType>
+bool StringBuilder::TryExtendSharedView(base::span<const CharType> buffer,
+                                        base::span<const CharType> chars) {
+  if (HasBuffer() || string_.IsNull()) {
+    return false;
+  }
+  const size_t end = length_;
+  if (end + chars.size() > buffer.size()) {
+    return false;
+  }
+  if (!std::ranges::equal(buffer.subspan(end, chars.size()), chars)) {
+    return false;
+  }
+  length_ += base::checked_cast<unsigned>(chars.size());
+  return true;
 }
 
 void StringBuilder::AppendNumber(bool number) {
@@ -270,30 +360,8 @@ void StringBuilder::AppendNumber(float number) {
 }
 
 void StringBuilder::AppendNumber(double number, unsigned precision) {
-  NumberToStringBuffer buffer;
-  Append(NumberToFixedPrecisionString(number, precision, buffer));
-}
-
-void StringBuilder::AppendFormat(const char* format, ...) {
-  va_list args;
-
-  static constexpr unsigned kDefaultSize = 256;
-  Vector<char, kDefaultSize> buffer(kDefaultSize);
-
-  va_start(args, format);
-  int length = base::vsnprintf(buffer.data(), kDefaultSize, format, args);
-  va_end(args);
-  DCHECK_GE(length, 0);
-
-  if (length >= static_cast<int>(kDefaultSize)) {
-    buffer.Grow(length + 1);
-    va_start(args, format);
-    length = base::vsnprintf(buffer.data(), buffer.size(), format, args);
-    va_end(args);
-  }
-
-  DCHECK_LT(static_cast<wtf_size_t>(length), buffer.size());
-  Append(reinterpret_cast<const LChar*>(buffer.data()), length);
+  DoubleToStringConverter converter;
+  Append(converter.ToStringWithFixedPrecision(number, precision));
 }
 
 void StringBuilder::erase(unsigned index) {
@@ -310,4 +378,4 @@ void StringBuilder::erase(unsigned index) {
   --length_;
 }
 
-}  // namespace WTF
+}  // namespace blink

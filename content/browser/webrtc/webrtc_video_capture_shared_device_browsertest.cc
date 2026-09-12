@@ -17,6 +17,7 @@
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
 #include "media/base/media_switches.h"
+#include "media/capture/capture_switches.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
@@ -30,13 +31,15 @@
 
 using testing::_;
 using testing::AtLeast;
-using testing::Invoke;
 using testing::InvokeWithoutArgs;
 using testing::Return;
 
 namespace content {
 
 namespace {
+
+using GetSourceInfosResult =
+    video_capture::mojom::VideoSourceProvider::GetSourceInfosResult;
 
 static const char kVideoCaptureHtmlFile[] = "/media/video_capture_test.html";
 static const char kStartVideoCaptureAndVerify[] =
@@ -52,10 +55,7 @@ static const gfx::Size kVideoSize(320, 200);
 // test exercises through JavaScript.
 class WebRtcVideoCaptureSharedDeviceBrowserTest : public ContentBrowserTest {
  public:
-  WebRtcVideoCaptureSharedDeviceBrowserTest() {
-    scoped_feature_list_.InitAndEnableFeature(features::kMojoVideoCapture);
-  }
-
+  WebRtcVideoCaptureSharedDeviceBrowserTest() = default;
   WebRtcVideoCaptureSharedDeviceBrowserTest(
       const WebRtcVideoCaptureSharedDeviceBrowserTest&) = delete;
   WebRtcVideoCaptureSharedDeviceBrowserTest& operator=(
@@ -81,13 +81,14 @@ class WebRtcVideoCaptureSharedDeviceBrowserTest : public ContentBrowserTest {
     const std::string javascript_to_execute = base::StringPrintf(
         kStartVideoCaptureAndVerify, kVideoSize.width(), kVideoSize.height());
     // Start video capture and wait until it started rendering
-    ASSERT_EQ("OK", EvalJs(shell(), javascript_to_execute,
-                           EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+    ASSERT_TRUE(ExecJs(shell(), javascript_to_execute));
   }
 
  protected:
   void SetUpCommandLine(base::CommandLine* command_line) override {
     command_line->AppendSwitch(switches::kUseFakeUIForMediaStream);
+    command_line->AppendSwitch(
+        switches::kDisableVideoCaptureUseGpuMemoryBuffer);
   }
 
   void SetUp() override {
@@ -111,7 +112,9 @@ class WebRtcVideoCaptureSharedDeviceBrowserTest : public ContentBrowserTest {
  private:
   void OnSourceInfosReceived(
       media::VideoCaptureBufferType buffer_type_to_request,
+      GetSourceInfosResult result,
       const std::vector<media::VideoCaptureDeviceInfo>& infos) {
+    ASSERT_EQ(result, GetSourceInfosResult::kSuccess);
     ASSERT_FALSE(infos.empty());
     video_source_provider_->GetVideoSource(
         infos[0].descriptor.device_id,
@@ -139,8 +142,6 @@ class WebRtcVideoCaptureSharedDeviceBrowserTest : public ContentBrowserTest {
     subscription_->Activate();
   }
 
-  base::test::ScopedFeatureList scoped_feature_list_;
-
   mojo::Remote<video_capture::mojom::VideoSourceProvider>
       video_source_provider_;
   mojo::Remote<video_capture::mojom::VideoSource> video_source_;
@@ -163,11 +164,11 @@ IN_PROC_BROWSER_TEST_F(
   auto expected_buffer_handle_tag =
       media::mojom::VideoBufferHandle::Tag::kUnsafeShmemRegion;
   ON_CALL(*mock_video_frame_handler_, DoOnNewBuffer(_, _))
-      .WillByDefault(Invoke(
+      .WillByDefault(
           [expected_buffer_handle_tag](
               int32_t, media::mojom::VideoBufferHandlePtr* buffer_handle) {
             ASSERT_EQ(expected_buffer_handle_tag, (*buffer_handle)->which());
-          }));
+          });
   EXPECT_CALL(*mock_video_frame_handler_, DoOnFrameReadyInBuffer(_, _, _))
       .WillOnce(InvokeWithoutArgs([&receive_frame_from_service_wait_loop]() {
         receive_frame_from_service_wait_loop.Quit();
@@ -196,11 +197,11 @@ IN_PROC_BROWSER_TEST_F(
   auto expected_buffer_handle_tag =
       media::mojom::VideoBufferHandle::Tag::kUnsafeShmemRegion;
   ON_CALL(*mock_video_frame_handler_, DoOnNewBuffer(_, _))
-      .WillByDefault(Invoke(
+      .WillByDefault(
           [expected_buffer_handle_tag](
               int32_t, media::mojom::VideoBufferHandlePtr* buffer_handle) {
             ASSERT_EQ(expected_buffer_handle_tag, (*buffer_handle)->which());
-          }));
+          });
   EXPECT_CALL(*mock_video_frame_handler_, DoOnFrameReadyInBuffer(_, _, _))
       .WillOnce(InvokeWithoutArgs([&receive_frame_from_service_wait_loop]() {
         receive_frame_from_service_wait_loop.Quit();

@@ -4,9 +4,9 @@
 
 #include "chromecast/media/common/audio_decoder_software_wrapper.h"
 
+#include <algorithm>
 #include <ostream>
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/task/single_thread_task_runner.h"
@@ -70,7 +70,7 @@ MediaPipelineBackend::BufferStatus AudioDecoderSoftwareWrapper::PushBuffer(
   software_decoder_->Decode(
       base::WrapRefCounted(buffer_base),
       base::BindOnce(&AudioDecoderSoftwareWrapper::OnDecodedBuffer,
-                     base::Unretained(this)));
+                     weak_factory_.GetWeakPtr()));
   return MediaPipelineBackend::kBufferPending;
 }
 
@@ -89,7 +89,7 @@ bool AudioDecoderSoftwareWrapper::SetConfig(const AudioConfig& config) {
     return true;
   }
 
-  if (base::Contains(kPassthroughCodecs, config.codec)) {
+  if (std::ranges::contains(kPassthroughCodecs, config.codec)) {
     LOG(INFO) << "Cannot use software decoder for " << config.codec;
     return false;
   }

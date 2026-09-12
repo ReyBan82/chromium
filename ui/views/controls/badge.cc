@@ -7,6 +7,7 @@
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/views/badge_painter.h"
 #include "ui/views/controls/label.h"
+#include "ui/views/property_effects.h"
 
 namespace views {
 
@@ -14,17 +15,18 @@ Badge::Badge(const std::u16string& text) : text_(text) {}
 
 Badge::~Badge() = default;
 
-std::u16string Badge::GetText() const {
+const std::u16string& Badge::GetText() const {
   return text_;
 }
 
 void Badge::SetText(const std::u16string& text) {
   text_ = text;
 
-  OnPropertyChanged(&text_, kPropertyEffectsPreferredSizeChanged);
+  OnPropertyChanged(&text_, PropertyEffects::kPreferredSizeChanged);
 }
 
-gfx::Size Badge::CalculatePreferredSize() const {
+gfx::Size Badge::CalculatePreferredSize(
+    const SizeBounds& /*available_size*/) const {
   return BadgePainter::GetBadgeSize(text_, Label::GetDefaultFontList());
 }
 
@@ -33,7 +35,7 @@ void Badge::OnPaint(gfx::Canvas* canvas) {
                            Label::GetDefaultFontList());
 }
 
-BEGIN_METADATA(Badge, View)
+BEGIN_METADATA(Badge)
 ADD_PROPERTY_METADATA(std::u16string, Text)
 END_METADATA
 

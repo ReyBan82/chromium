@@ -2,22 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var fileEntry;
-var fileSystem;
-var usageBeforeWrite;
-var testData = '12345';
-var dataSize;
+let fileEntry;
+let fileSystem;
+let usageBeforeWrite;
+const TEST_DATA = '12345';
+let dataSize;
 
-var testStep = [
-  function () {
+const testStep = [
+  function() {
     chrome.syncFileSystem.requestFileSystem(testStep.shift());
   },
   // Create empty file.
   function(fs) {
     fileSystem = fs;
     fileSystem.root.getFile(
-        'Test.txt', {create: true},
-        testStep.shift(),
+        'Test.txt', {create: true}, testStep.shift(),
         errorHandler('getFile (create)'));
   },
   function(entry) {
@@ -36,12 +35,12 @@ var testStep = [
   function() {
     fileEntry.createWriter(testStep.shift(), errorHandler('createWriter'));
   },
-  function (fileWriter) {
+  function(fileWriter) {
     fileWriter.onwriteend = function(e) {
       testStep.shift()();
     };
     fileWriter.onerror = errorHandler('write');
-    var blob = new Blob([testData], {type: "text/plain"});
+    const blob = new Blob([TEST_DATA], {type: 'text/plain'});
     dataSize = blob.size;
     fileWriter.write(blob);
   },
@@ -49,7 +48,7 @@ var testStep = [
   function() {
     fileEntry.getMetadata(testStep.shift(), errorHandler('getMetadata'));
   },
-  function (metadata) {
+  function(metadata) {
     chrome.test.assertEq(dataSize, metadata.size);
     testStep.shift()();
   },
@@ -58,15 +57,15 @@ var testStep = [
     chrome.syncFileSystem.getUsageAndQuota(fileSystem, testStep.shift());
   },
   function(storageInfo) {
-    var usageAfterWrite = storageInfo.usageBytes;
+    const usageAfterWrite = storageInfo.usageBytes;
     chrome.test.assertEq(dataSize, usageAfterWrite - usageBeforeWrite);
     chrome.test.succeed();
-  }
+  },
 ];
 
 function errorHandler(msg) {
   return function(error) {
-    chrome.test.fail(msg + ": " + error.name);
+    chrome.test.fail(`${msg}: ${error.name}`);
   };
 }
 

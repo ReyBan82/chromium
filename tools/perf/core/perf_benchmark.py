@@ -12,8 +12,9 @@ from telemetry.internal.browser import browser_finder
 from telemetry.internal.util import path as path_module
 
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..',
-                             '..', 'variations'))
+sys.path.append(
+  os.path.join(os.path.dirname(__file__), '..', '..', 'variations')
+)
 import fieldtrial_util  # pylint: disable=import-error
 
 
@@ -42,8 +43,9 @@ def GetAdTaggingProfileFiles(chrome_output_directory):
   if chrome_output_directory is None:
     return []
 
-  gen_path = os.path.join(chrome_output_directory, 'gen', 'components',
-                          'subresource_filter', 'tools')
+  gen_path = os.path.join(
+    chrome_output_directory, 'gen', 'components', 'subresource_filter', 'tools'
+  )
   ruleset_path = os.path.join(gen_path, 'GeneratedRulesetData')
   if not os.path.exists(ruleset_path):
     return []
@@ -60,15 +62,19 @@ def GetAdTaggingProfileFiles(chrome_output_directory):
     # Subresource Filter/Indexed Rules/<iv>/<uv>/Ruleset Data
     # Where iv = indexed version and uv = unindexed version
     ruleset_format_str = '%d' % ruleset_version['format']
-    ruleset_dest = os.path.join('Subresource Filter', 'Indexed Rules',
-                                ruleset_format_str, ruleset_version['content'],
-                                'Ruleset Data')
+    ruleset_dest = os.path.join(
+      'Subresource Filter',
+      'Indexed Rules',
+      ruleset_format_str,
+      ruleset_version['content'],
+      'Ruleset Data',
+    )
 
     return [(ruleset_path, ruleset_dest), (local_state_path, 'Local State')]
 
 
 class PerfBenchmark(benchmark.Benchmark):
-  """ Super class for all benchmarks in src/tools/perf/benchmarks directory.
+  """Super class for all benchmarks in src/tools/perf/benchmarks directory.
   All the perf benchmarks must subclass from this one to to make sure that
   the field trial configs are activated for the browser during benchmark runs.
   For more info, see: https://goo.gl/4uvaVM
@@ -77,9 +83,33 @@ class PerfBenchmark(benchmark.Benchmark):
   def SetExtraBrowserOptions(self, options):
     """To be overridden by perf benchmarks."""
 
+  def SetExtraBrowserOptionsWithBrowser(self, options, possible_browser):
+    """To be overridden by perf benchmarks. Run after SetExtraBrowserOptions."""
+
+  def RemoveExtraBrowserArgWithValues(self, options, arg):
+    """Safely removes a browser argument.
+
+    Unlike options.RemoveExtraBrowserArg, this method:
+    1. Supports matching flags with values (e.g. --flag=value) when removing
+       by flag name (e.g. --flag).
+    2. Does not raise KeyError if the flag is not found.
+    """
+    if '=' in arg:
+      if arg in options.extra_browser_args:
+        options.RemoveExtraBrowserArg(arg)
+    else:
+      to_remove = [
+        x
+        for x in options.extra_browser_args
+        if x == arg or x.startswith(arg + '=')
+      ]
+      for x in to_remove:
+        options.RemoveExtraBrowserArg(x)
+
   def CustomizeOptions(self, finder_options, possible_browser=None):
-    # Subclass of PerfBenchmark should override  SetExtraBrowserOptions to add
-    # more browser options rather than overriding CustomizeOptions.
+    # Subclass of PerfBenchmark should override SetExtraBrowserOptions or
+    # SetExtraBrowserOptionsWithBrowser to add more browser options, rather than
+    # overriding CustomizeOptions.
     super(PerfBenchmark, self).CustomizeOptions(finder_options)
 
     browser_options = finder_options.browser_options
@@ -94,24 +124,41 @@ class PerfBenchmark(benchmark.Benchmark):
     #
     # The same logic applies to the ad filtering ruleset, which could be in a
     # binary format that an older build does not expect.
-    if (browser_options.browser_type != 'reference' and
-        'no-field-trials' not in browser_options.compatibility_mode):
+    if (
+      browser_options.browser_type != 'reference'
+      and 'no-field-trials' not in browser_options.compatibility_mode
+    ):
       variations = self._GetVariationsBrowserArgs(
-          finder_options, browser_options.extra_browser_args, possible_browser)
+        finder_options, browser_options.extra_browser_args, possible_browser
+      )
       browser_options.AppendExtraBrowserArgs(variations)
 
       browser_options.profile_files_to_copy.extend(
-          GetAdTaggingProfileFiles(
-              self._GetOutDirectoryEstimate(finder_options)))
+        GetAdTaggingProfileFiles(self._GetOutDirectoryEstimate(finder_options))
+      )
 
     # A non-sandboxed, 120-seconds-delayed gpu process is currently running in
     # the browser to collect gpu info. A command line switch is added here to
     # skip this gpu process for all perf tests to prevent any interference
     # with the test results.
     browser_options.AppendExtraBrowserArgs(
-        '--disable-gpu-process-for-dx12-info-collection')
+      '--disable-gpu-process-for-dx12-info-collection'
+    )
+
+    # In-Product Help (IPH) is a constantly-updating collection of prompts
+    # designed to help users understand the browser better. Because different
+    # experiences are rolled out all the time and some can happen at or near
+    # startup, disable IPH to prevent any interference with test results.
+    # (Note that this argument takes a list of IPH that will be allowed;
+    # specifying none disables all IPH.)
+    browser_options.AppendExtraBrowserArgs('--propagate-iph-for-testing')
 
     self.SetExtraBrowserOptions(browser_options)
+
+    # SetExtraBrowserOptions is inherited from Telemetry and doesn't take a
+    # possible_browser. PerfBenchmark disallows the usual approach of overriding
+    # CustomizeOptions, so instead it provides this additional hook.
+    self.SetExtraBrowserOptionsWithBrowser(browser_options, possible_browser)
 
   def GetExtraOutDirectories(self):
     # Subclasses of PerfBenchmark should override this method instead of
@@ -133,10 +180,9 @@ class PerfBenchmark(benchmark.Benchmark):
       return 'chromeos_lacros'
     return target_os
 
-  def _GetVariationsBrowserArgs(self,
-                                finder_options,
-                                current_args,
-                                possible_browser=None):
+  def _GetVariationsBrowserArgs(
+    self, finder_options, current_args, possible_browser=None
+  ):
     if possible_browser is None:
       possible_browser = browser_finder.FindBrowser(finder_options)
     if not possible_browser:
@@ -145,19 +191,22 @@ class PerfBenchmark(benchmark.Benchmark):
     # Because of binary size constraints, Android cannot use the
     # "--enable-field-trial-config" flag. For Android, we instead generate
     # browser args from the fieldtrial_testing_config.json config file. For
-    # other OSes, we simply pass the "--enable-field-trial-config" flag. See the
-    # FIELDTRIAL_TESTING_ENABLED buildflag definition in
+    # other OSes, we pass the "--enable-field-trial-config=benchmarking" flag so
+    # that Chrome respects the disable_benchmarking parameter in the field trial
+    # config. See the FIELDTRIAL_TESTING_ENABLED buildflag definition in
     # components/variations/service/BUILD.gn for more details.
     if not self.IsAndroid(possible_browser):
-      return '--enable-field-trial-config'
+      return '--enable-field-trial-config=benchmarking'
 
-    variations_dir = os.path.join(path_module.GetChromiumSrcDir(), 'testing',
-                                  'variations')
+    variations_dir = os.path.join(
+      path_module.GetChromiumSrcDir(), 'testing', 'variations'
+    )
 
     return fieldtrial_util.GenerateArgs(
-        os.path.join(variations_dir, 'fieldtrial_testing_config.json'),
-        self.FixupTargetOS(possible_browser.target_os),
-        current_args)
+      os.path.join(variations_dir, 'fieldtrial_testing_config.json'),
+      self.FixupTargetOS(possible_browser.target_os),
+      current_args,
+    )
 
   @staticmethod
   def _GetPossibleBuildDirectories(chrome_src_dir, browser_type):
@@ -168,8 +217,11 @@ class PerfBenchmark(benchmark.Benchmark):
       return possible_directories
 
     # For all other browser types, just consider directories which match.
-    return (p for p in possible_directories
-            if os.path.basename(p).lower() == browser_type)
+    return (
+      p
+      for p in possible_directories
+      if os.path.basename(p).lower() == browser_type
+    )
 
   def _GetOutDirectoryEstimate(self, finder_options):
     """Gets an estimate of the output directory for this build.
@@ -183,10 +235,11 @@ class PerfBenchmark(benchmark.Benchmark):
       return finder_options.chromium_output_dir
 
     possible_directories = itertools.chain(
-        self._GetPossibleBuildDirectories(
-          finder_options.chrome_root,
-          finder_options.browser_options.browser_type),
-        self.GetExtraOutDirectories())
+      self._GetPossibleBuildDirectories(
+        finder_options.chrome_root, finder_options.browser_options.browser_type
+      ),
+      self.GetExtraOutDirectories(),
+    )
 
     return next((p for p in possible_directories if os.path.exists(p)), None)
 

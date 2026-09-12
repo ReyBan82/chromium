@@ -14,30 +14,22 @@ bool PropertyHandle::operator==(const PropertyHandle& other) const {
 
   switch (handle_type_) {
     case kHandleCSSProperty:
-    case kHandlePresentationAttribute:
       return css_property_ == other.css_property_;
     case kHandleCSSCustomProperty:
       return property_name_ == other.property_name_;
-    case kHandleSVGAttribute:
-      return svg_attribute_ == other.svg_attribute_;
     default:
       return true;
   }
 }
 
-unsigned PropertyHandle::GetHash() const {
+uint32_t PropertyHandle::GetHash() const {
   switch (handle_type_) {
     case kHandleCSSProperty:
-      return static_cast<int>(css_property_->PropertyID());
+      return static_cast<uint32_t>(css_property_->PropertyID());
     case kHandleCSSCustomProperty:
-      return WTF::GetHash(property_name_);
-    case kHandlePresentationAttribute:
-      return -static_cast<int>(css_property_->PropertyID());
-    case kHandleSVGAttribute:
-      return WTF::GetHash(*svg_attribute_);
+      return blink::GetHash(property_name_);
     default:
       NOTREACHED();
-      return 0;
   }
 }
 

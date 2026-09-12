@@ -11,20 +11,23 @@
 #include "base/run_loop.h"
 #include "base/task/task_traits.h"
 #include "base/test/bind.h"
-#include "chrome/browser/performance_manager/test_support/page_aggregator.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "components/performance_manager/embedder/performance_manager_registry.h"
-#include "components/performance_manager/performance_manager_impl.h"
 #include "components/performance_manager/public/performance_manager.h"
 #include "components/performance_manager/test_support/graph_impl.h"
 #include "components/performance_manager/test_support/mock_graphs.h"
+#include "components/performance_manager/test_support/page_aggregator.h"
 #include "components/performance_manager/test_support/test_harness_helper.h"
+#include "components/tabs/public/mock_tab_interface.h"
+#include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/test/navigation_simulator.h"
 #include "content/public/test/web_contents_tester.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/features.h"
+#include "ui/base/unowned_user_data/unowned_user_data_host.h"
 
 class FormInteractionTabHelperTest : public ChromeRenderViewHostTestHarness {
  public:
@@ -39,16 +42,20 @@ class FormInteractionTabHelperTest : public ChromeRenderViewHostTestHarness {
     ChromeRenderViewHostTestHarness::SetUp();
     pm_harness_.SetUp();
     performance_manager::testing::CreatePageAggregatorAndPassItToGraph();
-    performance_manager::PerformanceManagerImpl::CallOnGraph(
-        FROM_HERE, base::BindOnce([](performance_manager::Graph* graph) {
-          graph->PassToGraph(FormInteractionTabHelper::CreateGraphObserver());
-        }));
+    performance_manager::Graph* graph =
+        performance_manager::PerformanceManager::GetGraph();
+    graph->PassToGraph(FormInteractionTabHelper::CreateGraphObserver());
+    ON_CALL(tab_, GetUnownedUserDataHost())
+        .WillByDefault(::testing::ReturnRef(user_data_host_));
+    helper_ = std::make_unique<FormInteractionTabHelper>(tab_);
   }
 
   std::unique_ptr<content::WebContents> CreateTestWebContents() {
     std::unique_ptr<content::WebContents> contents =
         ChromeRenderViewHostTestHarness::CreateTestWebContents();
-    FormInteractionTabHelper::CreateForWebContents(contents.get());
+    // Associate the contents with the tab so that the graph observer can find
+    // the helper. In production this association is maintained by TabModel.
+    tabs::TabLookupFromWebContents::CreateForWebContents(contents.get(), &tab_);
     // Simulate a navigation event to force the initialization of the main
     // frame.
     content::WebContentsTester::For(contents.get())
@@ -63,36 +70,30 @@ class FormInteractionTabHelperTest : public ChromeRenderViewHostTestHarness {
   }
 
   void SetHadFormInteraction(content::RenderFrameHost* rfh) {
-    base::RunLoop run_loop;
-    // Use a |QuitWhenIdleClosure| as the task posted to the UI thread by
-    // PerformanceManager will have a lower priority (USER_VISIBLE) than the one
-    // of a QuitClosure's task runner (USER_BLOCKING).
-    auto graph_callback = base::BindLambdaForTesting(
-        [quit_loop = run_loop.QuitWhenIdleClosure(),
-         node = performance_manager::PerformanceManager::
-             GetFrameNodeForRenderFrameHost(rfh)]() {
-          auto* frame_node =
-              performance_manager::FrameNodeImpl::FromNode(node.get());
-          frame_node->SetIsCurrent(true);
-          frame_node->SetHadFormInteraction();
-          std::move(quit_loop).Run();
-        });
-    performance_manager::PerformanceManagerImpl::CallOnGraph(
-        FROM_HERE, std::move(graph_callback));
-    run_loop.Run();
+    base::WeakPtr<performance_manager::FrameNode> node =
+        performance_manager::PerformanceManager::GetFrameNodeForRenderFrameHost(
+            rfh);
+    auto* frame_node = performance_manager::FrameNodeImpl::FromNode(node.get());
+    frame_node->SetHadFormInteraction();
+  }
+
+  FormInteractionTabHelper* helper() {
+    return FormInteractionTabHelper::From(&tab_);
   }
 
  private:
   performance_manager::PerformanceManagerTestHarnessHelper pm_harness_;
+  ui::UnownedUserDataHost user_data_host_;
+  tabs::MockTabInterface tab_;
+  std::unique_ptr<FormInteractionTabHelper> helper_;
 };
 
 TEST_F(FormInteractionTabHelperTest, HadFormInteractionSingleFrame) {
   std::unique_ptr<content::WebContents> contents = CreateTestWebContents();
-  auto* helper = FormInteractionTabHelper::FromWebContents(contents.get());
 
-  EXPECT_FALSE(helper->had_form_interaction());
+  EXPECT_FALSE(helper()->had_form_interaction());
   SetHadFormInteraction(contents->GetPrimaryMainFrame());
-  EXPECT_TRUE(helper->had_form_interaction());
+  EXPECT_TRUE(helper()->had_form_interaction());
 
   // A navigation event should reset the |had_form_interaction| for this page.
   content::WebContentsTester::For(contents.get())
@@ -101,7 +102,7 @@ TEST_F(FormInteractionTabHelperTest, HadFormInteractionSingleFrame) {
   // to complete.
   task_environment()->RunUntilIdle();
 
-  EXPECT_FALSE(helper->had_form_interaction());
+  EXPECT_FALSE(helper()->had_form_interaction());
 }
 
 enum class ChildFrameType {
@@ -150,16 +151,15 @@ INSTANTIATE_TEST_SUITE_P(All,
 
 TEST_P(FormInteractionTabHelperWithChildTest, HadFormInteractionInChildFrame) {
   std::unique_ptr<content::WebContents> contents = CreateTestWebContents();
-  auto* helper = FormInteractionTabHelper::FromWebContents(contents.get());
 
-  EXPECT_FALSE(helper->had_form_interaction());
+  EXPECT_FALSE(helper()->had_form_interaction());
 
   content::RenderFrameHost* child =
       content::NavigationSimulator::NavigateAndCommitFromDocument(
           GURL("https://foochild.com"), AppendChild(contents.get()));
 
   SetHadFormInteraction(child);
-  EXPECT_TRUE(helper->had_form_interaction());
+  EXPECT_TRUE(helper()->had_form_interaction());
 
   // A navigation event should reset the |had_form_interaction| for this page.
   content::NavigationSimulator::NavigateAndCommitFromDocument(
@@ -169,25 +169,24 @@ TEST_P(FormInteractionTabHelperWithChildTest, HadFormInteractionInChildFrame) {
   // to complete.
   task_environment()->RunUntilIdle();
 
-  EXPECT_FALSE(helper->had_form_interaction());
+  EXPECT_FALSE(helper()->had_form_interaction());
 }
 
 TEST_P(FormInteractionTabHelperWithChildTest,
        HadFormInteractionInBothMainAndChild) {
   std::unique_ptr<content::WebContents> contents = CreateTestWebContents();
-  auto* helper = FormInteractionTabHelper::FromWebContents(contents.get());
 
-  EXPECT_FALSE(helper->had_form_interaction());
+  EXPECT_FALSE(helper()->had_form_interaction());
 
   SetHadFormInteraction(contents->GetPrimaryMainFrame());
-  EXPECT_TRUE(helper->had_form_interaction());
+  EXPECT_TRUE(helper()->had_form_interaction());
 
   content::RenderFrameHost* child =
       content::NavigationSimulator::NavigateAndCommitFromDocument(
           GURL("https://foochild.com"), AppendChild(contents.get()));
 
   SetHadFormInteraction(child);
-  EXPECT_TRUE(helper->had_form_interaction());
+  EXPECT_TRUE(helper()->had_form_interaction());
 
   // The |had_form_interaction| for this page should be still true even though
   // the navigation happens on the child frame, since the main frame have had an
@@ -199,5 +198,5 @@ TEST_P(FormInteractionTabHelperWithChildTest,
   // to complete.
   task_environment()->RunUntilIdle();
 
-  EXPECT_TRUE(helper->had_form_interaction());
+  EXPECT_TRUE(helper()->had_form_interaction());
 }

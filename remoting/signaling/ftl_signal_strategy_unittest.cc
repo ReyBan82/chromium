@@ -12,14 +12,22 @@
 #include "base/functional/callback_helpers.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
+#include "base/test/gmock_callback_support.h"
+#include "base/test/mock_log.h"
 #include "base/test/task_environment.h"
+#include "remoting/base/http_status.h"
+#include "remoting/base/mock_oauth_token_getter.h"
 #include "remoting/base/oauth_token_getter.h"
-#include "remoting/base/protobuf_http_status.h"
+#include "remoting/proto/ftl/v1/chromoting_message.pb.h"
 #include "remoting/proto/ftl/v1/ftl_messages.pb.h"
-#include "remoting/signaling/messaging_client.h"
+#include "remoting/proto/ftl/v1/xmpp.pb.h"
+#include "remoting/signaling/content_description.h"
+#include "remoting/signaling/ftl_messaging_client.h"
+#include "remoting/signaling/jingle_message_xml_converter.h"
 #include "remoting/signaling/registration_manager.h"
 #include "remoting/signaling/signaling_address.h"
 #include "remoting/signaling/xmpp_constants.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
@@ -31,10 +39,85 @@ namespace {
 using testing::_;
 using testing::ByMove;
 using testing::Mock;
+using testing::Property;
 using testing::Return;
 
 constexpr char kFakeLocalUsername[] = "fake_local_user@domain.com";
 constexpr char kFakeRemoteUsername[] = "fake_remote_user@domain.com";
+constexpr char kFakeCorpUsername[] = "user@corp.google.com";
+
+MATCHER_P2(SignalingMessageMatchesBoth, to, from, "") {
+  if (!arg.has_xmpp() || !arg.xmpp().has_stanza() ||
+      !arg.xmpp().has_iq_stanza()) {
+    return false;
+  }
+
+  // Check XML stanza
+  bool xml_matches = false;
+  std::string stanza = arg.xmpp().stanza();
+  auto parsed_xml = base::WrapUnique(jingle_xmpp::XmlElement::ForStr(stanza));
+  if (parsed_xml && parsed_xml->Attr(kQNameTo) == std::string(to) &&
+      parsed_xml->Attr(kQNameFrom) == std::string(from)) {
+    xml_matches = true;
+  }
+
+  // Check iq_stanza
+  bool iq_matches = false;
+  const auto& iq_stanza = arg.xmpp().iq_stanza();
+  auto get_id = [](const ftl::JabberId& jid) {
+    std::string id = jid.local_part();
+    if (!jid.domain_part().empty() && id.find('@') == std::string::npos) {
+      id += "@" + jid.domain_part();
+    }
+    if (!jid.resource_part().empty()) {
+      id += "/chromoting_ftl_" + jid.resource_part();
+    }
+    return id;
+  };
+  if (get_id(iq_stanza.sender()) == std::string(from) &&
+      get_id(iq_stanza.receiver()) == std::string(to)) {
+    iq_matches = true;
+  }
+
+  return xml_matches && iq_matches;
+}
+
+MATCHER_P2(SignalingMessageMatchesXmlOnly, to, from, "") {
+  if (!arg.has_xmpp() || !arg.xmpp().has_stanza() ||
+      arg.xmpp().has_iq_stanza()) {
+    return false;
+  }
+  std::string stanza = arg.xmpp().stanza();
+  auto parsed_xml = base::WrapUnique(jingle_xmpp::XmlElement::ForStr(stanza));
+  return parsed_xml && parsed_xml->Attr(kQNameTo) == std::string(to) &&
+         parsed_xml->Attr(kQNameFrom) == std::string(from);
+}
+
+MATCHER_P2(SignalingMessageMatchesProtoOnly, to, from, "") {
+  if (!arg.has_xmpp() || arg.xmpp().has_stanza() ||
+      !arg.xmpp().has_iq_stanza()) {
+    return false;
+  }
+  const auto& iq_stanza = arg.xmpp().iq_stanza();
+  auto get_id = [](const ftl::JabberId& jid) {
+    std::string id = jid.local_part();
+    if (!jid.domain_part().empty() && id.find('@') == std::string::npos) {
+      id += "@" + jid.domain_part();
+    }
+    if (!jid.resource_part().empty()) {
+      id += "/chromoting_ftl_" + jid.resource_part();
+    }
+    return id;
+  };
+  return get_id(iq_stanza.sender()) == std::string(from) &&
+         get_id(iq_stanza.receiver()) == std::string(to);
+}
+
+MATCHER_P(SignalingMessageMatches, to, "") {
+  return arg.has_xmpp() &&
+         arg.xmpp().stanza().find(std::string(to)) != std::string::npos;
+}
+
 constexpr char kFakeOAuthToken[] = "fake_oauth_token";
 constexpr char kFakeFtlAuthToken[] = "fake_auth_token";
 constexpr char kFakeLocalRegistrationId[] = "fake_local_registration_id";
@@ -54,9 +137,10 @@ std::unique_ptr<jingle_xmpp::XmlElement> CreateXmlStanza(
     const std::string& id) {
   static constexpr char kStanzaTemplate[] =
       "<iq xmlns=\"jabber:client\" type=\"set\">"
-      "<bind xmlns=\"urn:ietf:params:xml:ns:xmpp-bind\">"
-      "<resource>chromoting</resource>"
-      "</bind>"
+      "<jingle xmlns=\"urn:xmpp:jingle:1\" action=\"session-info\" "
+      "sid=\"sid123\">"
+      "<rem:test-info xmlns:rem=\"google:remoting\">TestMessage</rem:test-info>"
+      "</jingle>"
       "</iq>";
   auto stanza = base::WrapUnique<jingle_xmpp::XmlElement>(
       jingle_xmpp::XmlElement::ForStr(kStanzaTemplate));
@@ -71,14 +155,40 @@ std::unique_ptr<jingle_xmpp::XmlElement> CreateXmlStanza(
   return stanza;
 }
 
-class MockOAuthTokenGetter : public OAuthTokenGetter {
- public:
-  MOCK_METHOD1(CallWithToken, void(TokenCallback));
-  MOCK_METHOD0(InvalidateCache, void());
-};
+ftl::ChromotingMessage CreateIqStanzaMessage(Direction direction,
+                                             const std::string& id) {
+  ftl::ChromotingMessage message;
+  auto* xmpp = message.mutable_xmpp();
+  auto* iq = xmpp->mutable_iq_stanza();
+  iq->set_id(id);
+  auto* jingle = iq->mutable_jingle();
+  jingle->set_session_id("sid123");
+  jingle->mutable_session_info();
 
-class FakeMessagingClient : public MessagingClient {
+  if (direction == Direction::OUTGOING) {
+    iq->mutable_sender()->set_local_part(kFakeLocalUsername);
+    iq->mutable_sender()->set_resource_part(kFakeLocalRegistrationId);
+    iq->mutable_receiver()->set_local_part(kFakeRemoteUsername);
+    iq->mutable_receiver()->set_resource_part(kFakeRemoteRegistrationId);
+  } else {
+    iq->mutable_sender()->set_local_part(kFakeRemoteUsername);
+    iq->mutable_sender()->set_resource_part(kFakeRemoteRegistrationId);
+    iq->mutable_receiver()->set_local_part(kFakeLocalUsername);
+    iq->mutable_receiver()->set_resource_part(kFakeLocalRegistrationId);
+  }
+  return message;
+}
+
+class FakeMessagingClient : public FtlMessagingClient {
  public:
+  FakeMessagingClient()
+      // static_cast is used to disambiguate which c'tor to call.
+      : FtlMessagingClient(static_cast<OAuthTokenGetter*>(nullptr),
+                           nullptr,
+                           static_cast<RegistrationManager*>(nullptr),
+                           nullptr) {}
+  ~FakeMessagingClient() override = default;
+
   base::CallbackListSubscription RegisterMessageCallback(
       const MessageCallback& callback) override {
     return callback_list_.Add(callback);
@@ -95,24 +205,29 @@ class FakeMessagingClient : public MessagingClient {
     is_receiving_messages_ = true;
   }
 
-  void StopReceivingMessages() override {
-    if (!is_receiving_messages_) {
-      return;
-    }
-  }
+  void StopReceivingMessages() override { is_receiving_messages_ = false; }
 
   bool IsReceivingMessages() const override { return is_receiving_messages_; }
 
-  MOCK_METHOD4(SendMessage,
-               void(const std::string&,
-                    const std::string&,
-                    const ftl::ChromotingMessage&,
-                    DoneCallback));
+  MOCK_METHOD(void,
+              SendMessage,
+              (const SignalingAddress&,
+               ftl::ChromotingMessage&&,
+               DoneCallback,
+               scoped_refptr<const ProtobufHttpRequestConfig::RetryPolicy>),
+              (override));
 
   void OnMessage(const ftl::Id& sender_id,
                  const std::string& sender_registration_id,
                  const ftl::ChromotingMessage& message) {
-    callback_list_.Notify(sender_id, sender_registration_id, message);
+    OnMessage(SignalingAddress::CreateFtlSignalingAddress(
+                  sender_id.id(), sender_registration_id),
+              message);
+  }
+
+  void OnMessage(const SignalingAddress& sender_address,
+                 const ftl::ChromotingMessage& message) {
+    callback_list_.Notify(sender_address, message);
   }
 
   void AcceptReceivingMessages() {
@@ -123,7 +238,7 @@ class FakeMessagingClient : public MessagingClient {
     }
   }
 
-  void RejectReceivingMessages(const ProtobufHttpStatus& status) {
+  void RejectReceivingMessages(const HttpStatus& status) {
     DCHECK(is_receiving_messages_);
     std::vector<DoneCallback> on_closed_callbacks;
     on_closed_callbacks.swap(on_closed_callbacks_);
@@ -142,14 +257,14 @@ class FakeMessagingClient : public MessagingClient {
 
 class FakeRegistrationManager : public RegistrationManager {
  public:
-  using SignInCallback = base::RepeatingCallback<ProtobufHttpStatus(
-      std::string* out_registration_id,
-      std::string* out_auth_token)>;
+  using SignInCallback =
+      base::RepeatingCallback<HttpStatus(std::string* out_registration_id,
+                                         std::string* out_auth_token)>;
 
   FakeRegistrationManager() = default;
   ~FakeRegistrationManager() override = default;
 
-  // RegistrationManager implementations.
+  // RegistrationManager implementation.
   void SignOut() override { is_signed_in_ = false; }
 
   bool IsSignedIn() const override { return is_signed_in_; }
@@ -162,29 +277,49 @@ class FakeRegistrationManager : public RegistrationManager {
     return is_signed_in_ ? kFakeFtlAuthToken : "";
   }
 
-  MOCK_METHOD1(SignInGaia, void(DoneCallback));
+  MOCK_METHOD(void, SignInGaia, (DoneCallback), (override));
 
   void ExpectSignInGaiaSucceeds() {
     EXPECT_CALL(*this, SignInGaia(_)).WillOnce([&](DoneCallback callback) {
       is_signed_in_ = true;
-      std::move(callback).Run(ProtobufHttpStatus::OK());
+      std::move(callback).Run(HttpStatus::OK());
     });
   }
 
-  void ExpectSignInGaiaFails(const ProtobufHttpStatus& status) {
-    EXPECT_CALL(*this, SignInGaia(_)).WillOnce([status](DoneCallback callback) {
-      std::move(callback).Run(status);
-    });
+  void ExpectSignInGaiaFails(const HttpStatus& status) {
+    EXPECT_CALL(*this, SignInGaia(_))
+        .WillOnce(base::test::RunOnceCallback<0>(status));
   }
 
  private:
   bool is_signed_in_ = false;
 };
 
+std::string CreateValidSessionInitiateXml(const std::string& id,
+                                          const std::string& sid) {
+  JingleMessage message;
+  message.from = SignalingAddress(kFakeRemoteFtlId);
+  message.to = SignalingAddress(kFakeLocalFtlId);
+  message.message_id = id;
+  message.sid = sid;
+  message.initiator = kFakeRemoteFtlId;
+
+  SessionInitiate initiate;
+  initiate.transport_info.emplace();
+
+  message.description =
+      std::make_unique<ContentDescription>(JingleAuthentication());
+  message.SetPayload(std::move(initiate));
+
+  auto xml = JingleMessageToXml(message);
+  return xml->Str();
+}
+
 }  // namespace
 
 class FtlSignalStrategyTest : public testing::Test,
-                              public SignalStrategy::Listener {
+                              public SignalStrategy::Listener,
+                              public FtlSignalStrategy::FtlListener {
  public:
   FtlSignalStrategyTest() {
     auto token_getter = std::make_unique<MockOAuthTokenGetter>();
@@ -199,15 +334,26 @@ class FtlSignalStrategyTest : public testing::Test,
         std::move(token_getter), std::move(registration_manager),
         std::move(messaging_client)));
     signal_strategy_->AddListener(this);
+    signal_strategy_->AddFtlListener(this);
 
-    // By default, messages will be delievered through
-    // OnSignalStrategyIncomingStanza().
-    ON_CALL(*this, OnSignalStrategyIncomingMessage(_, _, _))
-        .WillByDefault(Return(false));
+    // By default, messages will be collected in received_messages_.
+    ON_CALL(*this, OnSignalingMessage(_, _))
+        .WillByDefault([&](const SignalingAddress& sender_address,
+                           const JingleMessage& jingle_message) {
+          received_messages_.push_back(JingleMessageToXml(jingle_message));
+          return true;
+        });
+    ON_CALL(*this, OnSignalingReply(_, _))
+        .WillByDefault([&](const SignalingAddress& sender_address,
+                           const JingleMessageReply& jingle_reply) {
+          received_messages_.push_back(JingleMessageReplyToXml(jingle_reply));
+          return true;
+        });
   }
 
   ~FtlSignalStrategyTest() override {
     signal_strategy_->RemoveListener(this);
+    signal_strategy_->RemoveFtlListener(this);
     signal_strategy_.reset();
     task_environment_.FastForwardUntilNoTasksRemain();
   }
@@ -215,31 +361,40 @@ class FtlSignalStrategyTest : public testing::Test,
  protected:
   void ExpectGetOAuthTokenFails(OAuthTokenGetter::Status status) {
     EXPECT_CALL(*token_getter_, CallWithToken(_))
-        .WillOnce([=](OAuthTokenGetter::TokenCallback token_callback) {
-          std::move(token_callback).Run(status, {}, {});
-        });
+        .WillOnce(base::test::RunOnceCallback<0>(status, OAuthTokenInfo()));
   }
 
   void ExpectGetOAuthTokenSucceedsWithFakeCreds() {
     EXPECT_CALL(*token_getter_, CallWithToken(_))
-        .WillOnce([](OAuthTokenGetter::TokenCallback token_callback) {
-          std::move(token_callback)
-              .Run(OAuthTokenGetter::SUCCESS, kFakeLocalUsername,
-                   kFakeOAuthToken);
-        });
+        .WillOnce(base::test::RunOnceCallback<0>(
+            OAuthTokenGetter::SUCCESS,
+            OAuthTokenInfo(kFakeOAuthToken, kFakeLocalUsername)));
   }
 
-  MOCK_METHOD3(OnSignalStrategyIncomingMessage,
-               bool(const ftl::Id&,
-                    const std::string&,
-                    const ftl::ChromotingMessage&));
+  MOCK_METHOD(bool,
+              OnSignalingMessage,
+              (const SignalingAddress&, const JingleMessage&),
+              (override));
+
+  MOCK_METHOD(bool,
+              OnSignalingReply,
+              (const SignalingAddress&, const JingleMessageReply&),
+              (override));
+
+  MOCK_METHOD(bool,
+              OnIncomingFtlMessage,
+              (const SignalingAddress&, const ftl::ChromotingMessage&),
+              (override));
 
   base::test::TaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 
-  raw_ptr<MockOAuthTokenGetter> token_getter_ = nullptr;
-  raw_ptr<FakeRegistrationManager> registration_manager_ = nullptr;
-  raw_ptr<FakeMessagingClient> messaging_client_ = nullptr;
+  raw_ptr<MockOAuthTokenGetter, AcrossTasksDanglingUntriaged> token_getter_ =
+      nullptr;
+  raw_ptr<FakeRegistrationManager, AcrossTasksDanglingUntriaged>
+      registration_manager_ = nullptr;
+  raw_ptr<FakeMessagingClient, AcrossTasksDanglingUntriaged> messaging_client_ =
+      nullptr;
   std::unique_ptr<FtlSignalStrategy> signal_strategy_;
 
   std::vector<SignalStrategy::State> state_history_;
@@ -247,61 +402,54 @@ class FtlSignalStrategyTest : public testing::Test,
 
  private:
   // SignalStrategy::Listener overrides.
-  void OnSignalStrategyStateChange(SignalStrategy::State state) override {
+  void OnSignalingStateChanged(SignalStrategy::State state) override {
     state_history_.push_back(state);
-  }
-
-  bool OnSignalStrategyIncomingStanza(
-      const jingle_xmpp::XmlElement* stanza) override {
-    received_messages_.push_back(
-        std::make_unique<jingle_xmpp::XmlElement>(*stanza));
-    return true;
   }
 };
 
 TEST_F(FtlSignalStrategyTest, OAuthTokenGetterAuthError) {
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::OK, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::OK);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 
   ExpectGetOAuthTokenFails(OAuthTokenGetter::AUTH_ERROR);
 
   signal_strategy_->Connect();
 
-  ASSERT_EQ(2u, state_history_.size());
-  ASSERT_EQ(SignalStrategy::State::CONNECTING, state_history_[0]);
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, state_history_[1]);
+  ASSERT_EQ(state_history_.size(), 2u);
+  ASSERT_EQ(state_history_[0], SignalStrategy::State::CONNECTING);
+  ASSERT_EQ(state_history_[1], SignalStrategy::State::DISCONNECTED);
 
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::AUTHENTICATION_FAILED,
-            signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(),
+            SignalStrategy::Error::AUTHENTICATION_FAILED);
   ASSERT_TRUE(signal_strategy_->IsSignInError());
 }
 
 TEST_F(FtlSignalStrategyTest, SignInGaiaAuthError_InvalidatesOAuthToken) {
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::OK, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::OK);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 
   ExpectGetOAuthTokenSucceedsWithFakeCreds();
-  registration_manager_->ExpectSignInGaiaFails(ProtobufHttpStatus(
-      ProtobufHttpStatus::Code::UNAUTHENTICATED, "unauthenticated"));
+  registration_manager_->ExpectSignInGaiaFails(
+      HttpStatus(HttpStatus::Code::UNAUTHENTICATED, "unauthenticated"));
   EXPECT_CALL(*token_getter_, InvalidateCache()).WillOnce(Return());
 
   signal_strategy_->Connect();
 
-  ASSERT_EQ(2u, state_history_.size());
-  ASSERT_EQ(SignalStrategy::State::CONNECTING, state_history_[0]);
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, state_history_[1]);
+  ASSERT_EQ(state_history_.size(), 2u);
+  ASSERT_EQ(state_history_[0], SignalStrategy::State::CONNECTING);
+  ASSERT_EQ(state_history_[1], SignalStrategy::State::DISCONNECTED);
 
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::NETWORK_ERROR, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::NETWORK_ERROR);
   ASSERT_TRUE(signal_strategy_->IsSignInError());
 }
 
 TEST_F(FtlSignalStrategyTest, StartStream_Success) {
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::OK, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::OK);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 
   ExpectGetOAuthTokenSucceedsWithFakeCreds();
@@ -310,39 +458,42 @@ TEST_F(FtlSignalStrategyTest, StartStream_Success) {
   signal_strategy_->Connect();
   messaging_client_->AcceptReceivingMessages();
 
-  ASSERT_EQ(2u, state_history_.size());
-  ASSERT_EQ(SignalStrategy::State::CONNECTING, state_history_[0]);
-  ASSERT_EQ(SignalStrategy::State::CONNECTED, state_history_[1]);
+  ASSERT_EQ(state_history_.size(), 2u);
+  ASSERT_EQ(state_history_[0], SignalStrategy::State::CONNECTING);
+  ASSERT_EQ(state_history_[1], SignalStrategy::State::CONNECTED);
 
-  ASSERT_EQ(SignalStrategy::State::CONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::OK, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::CONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::OK);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 }
 
 TEST_F(FtlSignalStrategyTest, StartStream_Failure) {
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::OK, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::OK);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 
   ExpectGetOAuthTokenSucceedsWithFakeCreds();
   registration_manager_->ExpectSignInGaiaSucceeds();
 
   signal_strategy_->Connect();
+  ASSERT_TRUE(registration_manager_->IsSignedIn());
   messaging_client_->RejectReceivingMessages(
-      ProtobufHttpStatus(ProtobufHttpStatus::Code::UNAVAILABLE, "unavailable"));
+      HttpStatus(HttpStatus::Code::UNAVAILABLE, "unavailable"));
+  // Remain signed-in for non-auth related error.
+  ASSERT_TRUE(registration_manager_->IsSignedIn());
 
-  ASSERT_EQ(2u, state_history_.size());
-  ASSERT_EQ(SignalStrategy::State::CONNECTING, state_history_[0]);
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, state_history_[1]);
+  ASSERT_EQ(state_history_.size(), 2u);
+  ASSERT_EQ(state_history_[0], SignalStrategy::State::CONNECTING);
+  ASSERT_EQ(state_history_[1], SignalStrategy::State::DISCONNECTED);
 
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::NETWORK_ERROR, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::NETWORK_ERROR);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 }
 
 TEST_F(FtlSignalStrategyTest, StreamRemotelyClosed) {
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::OK, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::OK);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 
   ExpectGetOAuthTokenSucceedsWithFakeCreds();
@@ -351,19 +502,21 @@ TEST_F(FtlSignalStrategyTest, StreamRemotelyClosed) {
   signal_strategy_->Connect();
   messaging_client_->AcceptReceivingMessages();
   messaging_client_->RejectReceivingMessages(
-      ProtobufHttpStatus(ProtobufHttpStatus::Code::UNAVAILABLE, "unavailable"));
+      HttpStatus(HttpStatus::Code::UNAVAILABLE, "unavailable"));
+  // Remain signed-in for non-auth related error.
+  ASSERT_TRUE(registration_manager_->IsSignedIn());
 
-  ASSERT_EQ(3u, state_history_.size());
-  ASSERT_EQ(SignalStrategy::State::CONNECTING, state_history_[0]);
-  ASSERT_EQ(SignalStrategy::State::CONNECTED, state_history_[1]);
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, state_history_[2]);
+  ASSERT_EQ(state_history_.size(), 3u);
+  ASSERT_EQ(state_history_[0], SignalStrategy::State::CONNECTING);
+  ASSERT_EQ(state_history_[1], SignalStrategy::State::CONNECTED);
+  ASSERT_EQ(state_history_[2], SignalStrategy::State::DISCONNECTED);
 
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::NETWORK_ERROR, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::NETWORK_ERROR);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 }
 
-TEST_F(FtlSignalStrategyTest, SendStanza_Success) {
+TEST_F(FtlSignalStrategyTest, SendMessage_XmlElement_Success) {
   ExpectGetOAuthTokenSucceedsWithFakeCreds();
   registration_manager_->ExpectSignInGaiaSucceeds();
   signal_strategy_->Connect();
@@ -373,18 +526,20 @@ TEST_F(FtlSignalStrategyTest, SendStanza_Success) {
       CreateXmlStanza(Direction::OUTGOING, signal_strategy_->GetNextId());
   std::string stanza_string = stanza->Str();
 
+  JingleMessage jingle_message;
+  std::string error;
+  ASSERT_TRUE(JingleMessageFromXml(stanza.get(), &jingle_message, &error));
+
   EXPECT_CALL(*messaging_client_,
-              SendMessage(kFakeRemoteUsername, kFakeRemoteRegistrationId, _, _))
-      .WillOnce([stanza_string](const std::string&, const std::string&,
-                                const ftl::ChromotingMessage& message,
-                                MessagingClient::DoneCallback on_done) {
-        ASSERT_EQ(stanza_string, message.xmpp().stanza());
-        std::move(on_done).Run(ProtobufHttpStatus::OK());
-      });
-  signal_strategy_->SendStanza(std::move(stanza));
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+  signal_strategy_->SendMessage(std::move(jingle_message));
 }
 
-TEST_F(FtlSignalStrategyTest, SendStanza_AuthError) {
+TEST_F(FtlSignalStrategyTest, SendMessage_XmlElement_AuthError) {
   ExpectGetOAuthTokenSucceedsWithFakeCreds();
   registration_manager_->ExpectSignInGaiaSucceeds();
   signal_strategy_->Connect();
@@ -393,28 +548,29 @@ TEST_F(FtlSignalStrategyTest, SendStanza_AuthError) {
   auto stanza =
       CreateXmlStanza(Direction::OUTGOING, signal_strategy_->GetNextId());
 
+  JingleMessage jingle_message;
+  std::string error;
+  ASSERT_TRUE(JingleMessageFromXml(stanza.get(), &jingle_message, &error));
+
   EXPECT_CALL(*token_getter_, InvalidateCache()).WillOnce(Return());
-  EXPECT_CALL(*messaging_client_,
-              SendMessage(kFakeRemoteUsername, kFakeRemoteRegistrationId, _, _))
-      .WillOnce([](const std::string&, const std::string&,
-                   const ftl::ChromotingMessage& message,
-                   MessagingClient::DoneCallback on_done) {
-        std::move(on_done).Run(ProtobufHttpStatus(
-            ProtobufHttpStatus::Code::UNAUTHENTICATED, "unauthenticated"));
-      });
-  signal_strategy_->SendStanza(std::move(stanza));
+  EXPECT_CALL(
+      *messaging_client_,
+      SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId), _, _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(
+          HttpStatus(HttpStatus::Code::UNAUTHENTICATED, "unauthenticated")));
+  signal_strategy_->SendMessage(std::move(jingle_message));
 
-  ASSERT_EQ(3u, state_history_.size());
-  ASSERT_EQ(SignalStrategy::State::CONNECTING, state_history_[0]);
-  ASSERT_EQ(SignalStrategy::State::CONNECTED, state_history_[1]);
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, state_history_[2]);
+  ASSERT_EQ(state_history_.size(), 3u);
+  ASSERT_EQ(state_history_[0], SignalStrategy::State::CONNECTING);
+  ASSERT_EQ(state_history_[1], SignalStrategy::State::CONNECTED);
+  ASSERT_EQ(state_history_[2], SignalStrategy::State::DISCONNECTED);
 
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::NETWORK_ERROR, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::NETWORK_ERROR);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
 }
 
-TEST_F(FtlSignalStrategyTest, SendStanza_NetworkError) {
+TEST_F(FtlSignalStrategyTest, SendMessage_XmlElement_NetworkError) {
   ExpectGetOAuthTokenSucceedsWithFakeCreds();
   registration_manager_->ExpectSignInGaiaSucceeds();
   signal_strategy_->Connect();
@@ -423,22 +579,23 @@ TEST_F(FtlSignalStrategyTest, SendStanza_NetworkError) {
   std::string stanza_id = signal_strategy_->GetNextId();
   auto stanza = CreateXmlStanza(Direction::OUTGOING, stanza_id);
 
-  EXPECT_CALL(*messaging_client_,
-              SendMessage(kFakeRemoteUsername, kFakeRemoteRegistrationId, _, _))
-      .WillOnce([](const std::string&, const std::string&,
-                   const ftl::ChromotingMessage& message,
-                   MessagingClient::DoneCallback on_done) {
-        std::move(on_done).Run(ProtobufHttpStatus(
-            ProtobufHttpStatus::Code::UNAVAILABLE, "unavailable"));
-      });
-  signal_strategy_->SendStanza(std::move(stanza));
+  JingleMessage jingle_message;
+  std::string error;
+  ASSERT_TRUE(JingleMessageFromXml(stanza.get(), &jingle_message, &error));
 
-  ASSERT_EQ(1u, received_messages_.size());
+  EXPECT_CALL(
+      *messaging_client_,
+      SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId), _, _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(
+          HttpStatus(HttpStatus::Code::UNAVAILABLE, "unavailable")));
+  signal_strategy_->SendMessage(std::move(jingle_message));
+
+  ASSERT_EQ(received_messages_.size(), 1u);
   auto& error_message = received_messages_[0];
-  ASSERT_EQ(kIqTypeError, error_message->Attr(kQNameType));
-  ASSERT_EQ(stanza_id, error_message->Attr(kQNameId));
-  ASSERT_EQ(kFakeRemoteFtlId, error_message->Attr(kQNameFrom));
-  ASSERT_EQ(kFakeLocalFtlId, error_message->Attr(kQNameTo));
+  ASSERT_EQ(error_message->Attr(kQNameType), kIqTypeError);
+  ASSERT_EQ(error_message->Attr(kQNameId), stanza_id);
+  ASSERT_EQ(error_message->Attr(kQNameFrom), kFakeRemoteFtlId);
+  ASSERT_EQ(error_message->Attr(kQNameTo), kFakeLocalFtlId);
 }
 
 TEST_F(FtlSignalStrategyTest, ReceiveStanza_Success) {
@@ -458,8 +615,11 @@ TEST_F(FtlSignalStrategyTest, ReceiveStanza_Success) {
   messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
                                message);
 
-  ASSERT_EQ(1u, received_messages_.size());
-  ASSERT_EQ(stanza_string, received_messages_[0]->Str());
+  ASSERT_EQ(received_messages_.size(), 1u);
+  EXPECT_EQ(received_messages_[0]->Attr(kQNameTo),
+            std::string(kFakeLocalFtlId));
+  EXPECT_EQ(received_messages_[0]->Attr(kQNameFrom),
+            std::string(kFakeRemoteFtlId));
 }
 
 TEST_F(FtlSignalStrategyTest, ReceiveMessage_DelieverMessageAndDropStanza) {
@@ -473,14 +633,17 @@ TEST_F(FtlSignalStrategyTest, ReceiveMessage_DelieverMessageAndDropStanza) {
   ftl::ChromotingMessage message;
   message.mutable_xmpp()->set_stanza(stanza_string);
 
-  EXPECT_CALL(*this,
-              OnSignalStrategyIncomingMessage(_, kFakeRemoteRegistrationId, _))
-      .WillOnce([&](const ftl::Id& sender_id,
-                    const std::string& sender_registration_id_unused,
-                    const ftl::ChromotingMessage& message) {
-        EXPECT_EQ(ftl::IdType_Type_EMAIL, sender_id.type());
-        EXPECT_EQ(remote_user_id.id(), sender_id.id());
-        EXPECT_EQ(stanza_string, message.xmpp().stanza());
+  EXPECT_CALL(*this, OnSignalingMessage(_, _))
+      .WillOnce([&](const SignalingAddress& sender_address,
+                    const JingleMessage& received_message) {
+        SignalingAddress expected_address =
+            SignalingAddress::CreateFtlSignalingAddress(
+                kFakeRemoteUsername, kFakeRemoteRegistrationId);
+        EXPECT_EQ(sender_address.id(), expected_address.id());
+
+        auto xml = JingleMessageToXml(received_message);
+        EXPECT_EQ(xml->Attr(kQNameTo), std::string(kFakeLocalFtlId));
+        EXPECT_EQ(xml->Attr(kQNameFrom), std::string(kFakeRemoteFtlId));
         return true;
       });
 
@@ -492,8 +655,8 @@ TEST_F(FtlSignalStrategyTest, ReceiveMessage_DelieverMessageAndDropStanza) {
   messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
                                message);
 
-  // Message has already been consumed in OnSignalStrategyIncomingMessage().
-  ASSERT_EQ(0u, received_messages_.size());
+  // Message has already been consumed in OnSignalingMessage().
+  ASSERT_EQ(received_messages_.size(), 0u);
 }
 
 TEST_F(FtlSignalStrategyTest, ReceiveStanza_DropMessageWithMalformedXmpp) {
@@ -510,7 +673,47 @@ TEST_F(FtlSignalStrategyTest, ReceiveStanza_DropMessageWithMalformedXmpp) {
   messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
                                message);
 
-  ASSERT_EQ(0u, received_messages_.size());
+  ASSERT_EQ(received_messages_.size(), 0u);
+}
+
+TEST_F(FtlSignalStrategyTest, ReceiveStanza_RejectStanzaWithDtd) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  ftl::ChromotingMessage message;
+  message.mutable_xmpp()->set_stanza(
+      "<!DOCTYPE iq [ <!ENTITY xxe \"evil\"> ]></iq>");
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               message);
+
+  ASSERT_EQ(received_messages_.size(), 0u);
+}
+
+TEST_F(FtlSignalStrategyTest, ReceiveStanza_RejectUtf16StanzaWithDtd) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  ftl::ChromotingMessage message;
+  // UTF-16LE encoded "<!DOCTYPE iq>"
+  std::string xml(
+      "\xFF\xFE\x3C\x00\x21\x00\x44\x00\x4F\x00\x43\x00\x54\x00\x59\x00\x50\x00"
+      "\x45\x00\x20\x00\x69\x00\x71\x00\x3E\x00",
+      28);
+  message.mutable_xmpp()->set_stanza(xml);
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               message);
+
+  ASSERT_EQ(received_messages_.size(), 0u);
 }
 
 TEST_F(FtlSignalStrategyTest, SendMessage_Success) {
@@ -523,19 +726,104 @@ TEST_F(FtlSignalStrategyTest, SendMessage_Success) {
   ftl::ChromotingMessage message;
   message.mutable_xmpp()->set_stanza(message_payload);
 
-  EXPECT_CALL(*messaging_client_,
-              SendMessage(kFakeRemoteUsername, kFakeRemoteRegistrationId, _, _))
-      .WillOnce([message_payload](const std::string&, const std::string&,
-                                  const ftl::ChromotingMessage& message,
-                                  MessagingClient::DoneCallback on_done) {
-        ASSERT_EQ(message_payload, message.xmpp().stanza());
-        std::move(on_done).Run(ProtobufHttpStatus::OK());
-      });
+  EXPECT_CALL(
+      *messaging_client_,
+      SendMessage(Property(&SignalingAddress::id,
+                           SignalingAddress::CreateFtlSignalingAddress(
+                               kFakeRemoteUsername, kFakeRemoteRegistrationId)
+                               .id()),
+                  SignalingMessageMatches(message_payload), _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
 
-  signal_strategy_->SendMessage(
+  signal_strategy_->SendFtlMessage(
       SignalingAddress::CreateFtlSignalingAddress(kFakeRemoteUsername,
                                                   kFakeRemoteRegistrationId),
-      message);
+      std::move(message));
+}
+
+TEST_F(FtlSignalStrategyTest, SendMessage_IqStanza_Success) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  ftl::ChromotingMessage message;
+  auto* xmpp = message.mutable_xmpp();
+  auto* iq = xmpp->mutable_iq_stanza();
+  iq->set_id("test_id");
+  auto* jingle = iq->mutable_jingle();
+  jingle->set_session_id("sid123");
+  jingle->mutable_session_initiate();
+  iq->mutable_sender()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_local_part(kFakeRemoteUsername);
+
+  EXPECT_CALL(*messaging_client_, SendMessage(_, _, _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  base::test::MockLog mock_log;
+  ON_CALL(mock_log, Log(_, _, _, _, _)).WillByDefault(testing::Return(true));
+
+  EXPECT_CALL(
+      mock_log,
+      Log(logging::LOGGING_INFO, _, _, _,
+          testing::AllOf(
+              testing::HasSubstr("Sending outgoing message:"),
+              testing::HasSubstr("Receiver: fake_remote_user@domain.com"),
+              testing::HasSubstr("<iq xmlns=\"jabber:client\" type=\"set\" "
+                                 "id=\"test_id\""),
+              testing::HasSubstr(
+                  "<jingle xmlns=\"urn:xmpp:jingle:1\" "
+                  "sid=\"sid123\" action=\"session-initiate\""))))
+      .Times(1);
+
+  mock_log.StartCapturingLogs();
+
+  signal_strategy_->SendFtlMessage(
+      SignalingAddress::CreateFtlSignalingAddress(kFakeRemoteUsername,
+                                                  kFakeRemoteRegistrationId),
+      std::move(message));
+}
+
+TEST_F(FtlSignalStrategyTest,
+       SendMessage_IqStanza_InvalidPayload_FallbackLogging) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  ftl::ChromotingMessage message;
+  auto* xmpp = message.mutable_xmpp();
+  auto* iq = xmpp->mutable_iq_stanza();
+  iq->set_id("test_id");
+  // Do NOT set jingle, reply, or error payload.
+  iq->mutable_sender()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_local_part(kFakeRemoteUsername);
+
+  EXPECT_CALL(*messaging_client_, SendMessage(_, _, _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  base::test::MockLog mock_log;
+  ON_CALL(mock_log, Log(_, _, _, _, _)).WillByDefault(testing::Return(true));
+
+  EXPECT_CALL(
+      mock_log,
+      Log(logging::LOGGING_INFO, _, _, _,
+          testing::AllOf(
+              testing::HasSubstr("Sending outgoing message:"),
+              testing::HasSubstr("Receiver: fake_remote_user@domain.com"),
+              testing::HasSubstr("Failed to convert IqStanza to JingleMessage"),
+              testing::HasSubstr("Stanza missing Jingle payload"),
+              testing::HasSubstr("Raw fields: id=test_id, "
+                                 "sender=fake_local_user@domain.com, "
+                                 "receiver=fake_remote_user@domain.com"))))
+      .Times(1);
+
+  mock_log.StartCapturingLogs();
+
+  signal_strategy_->SendFtlMessage(
+      SignalingAddress::CreateFtlSignalingAddress(kFakeRemoteUsername,
+                                                  kFakeRemoteRegistrationId),
+      std::move(message));
 }
 
 TEST_F(FtlSignalStrategyTest, SendMessage_AuthError) {
@@ -545,29 +833,33 @@ TEST_F(FtlSignalStrategyTest, SendMessage_AuthError) {
   messaging_client_->AcceptReceivingMessages();
 
   EXPECT_CALL(*token_getter_, InvalidateCache()).WillOnce(Return());
-  EXPECT_CALL(*messaging_client_,
-              SendMessage(kFakeRemoteUsername, kFakeRemoteRegistrationId, _, _))
-      .WillOnce([](const std::string&, const std::string&,
-                   const ftl::ChromotingMessage& message,
-                   MessagingClient::DoneCallback on_done) {
-        std::move(on_done).Run(ProtobufHttpStatus(
-            ProtobufHttpStatus::Code::UNAUTHENTICATED, "unauthenticated"));
-      });
+  EXPECT_CALL(
+      *messaging_client_,
+      SendMessage(Property(&SignalingAddress::id,
+                           SignalingAddress::CreateFtlSignalingAddress(
+                               kFakeRemoteUsername, kFakeRemoteRegistrationId)
+                               .id()),
+                  _, _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(
+          HttpStatus(HttpStatus::Code::UNAUTHENTICATED, "unauthenticated")));
 
   ftl::ChromotingMessage message;
-  signal_strategy_->SendMessage(
+  signal_strategy_->SendFtlMessage(
       SignalingAddress::CreateFtlSignalingAddress(kFakeRemoteUsername,
                                                   kFakeRemoteRegistrationId),
-      message);
+      std::move(message));
 
-  ASSERT_EQ(3u, state_history_.size());
-  ASSERT_EQ(SignalStrategy::State::CONNECTING, state_history_[0]);
-  ASSERT_EQ(SignalStrategy::State::CONNECTED, state_history_[1]);
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, state_history_[2]);
+  ASSERT_EQ(state_history_.size(), 3u);
+  ASSERT_EQ(state_history_[0], SignalStrategy::State::CONNECTING);
+  ASSERT_EQ(state_history_[1], SignalStrategy::State::CONNECTED);
+  ASSERT_EQ(state_history_[2], SignalStrategy::State::DISCONNECTED);
 
-  ASSERT_EQ(SignalStrategy::State::DISCONNECTED, signal_strategy_->GetState());
-  ASSERT_EQ(SignalStrategy::Error::NETWORK_ERROR, signal_strategy_->GetError());
+  ASSERT_EQ(signal_strategy_->GetState(), SignalStrategy::State::DISCONNECTED);
+  ASSERT_EQ(signal_strategy_->GetError(), SignalStrategy::Error::NETWORK_ERROR);
   ASSERT_FALSE(signal_strategy_->IsSignInError());
+
+  // Sign-out due to auth related error.
+  ASSERT_FALSE(registration_manager_->IsSignedIn());
 }
 
 TEST_F(FtlSignalStrategyTest, SendMessage_NetworkError) {
@@ -576,22 +868,703 @@ TEST_F(FtlSignalStrategyTest, SendMessage_NetworkError) {
   signal_strategy_->Connect();
   messaging_client_->AcceptReceivingMessages();
 
-  EXPECT_CALL(*messaging_client_,
-              SendMessage(kFakeRemoteUsername, kFakeRemoteRegistrationId, _, _))
-      .WillOnce([](const std::string&, const std::string&,
-                   const ftl::ChromotingMessage& message,
-                   MessagingClient::DoneCallback on_done) {
-        std::move(on_done).Run(ProtobufHttpStatus(
-            ProtobufHttpStatus::Code::UNAVAILABLE, "unavailable"));
-      });
+  EXPECT_CALL(
+      *messaging_client_,
+      SendMessage(Property(&SignalingAddress::id,
+                           SignalingAddress::CreateFtlSignalingAddress(
+                               kFakeRemoteUsername, kFakeRemoteRegistrationId)
+                               .id()),
+                  _, _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(
+          HttpStatus(HttpStatus::Code::UNAVAILABLE, "unavailable")));
 
   ftl::ChromotingMessage message;
-  signal_strategy_->SendMessage(
+  signal_strategy_->SendFtlMessage(
       SignalingAddress::CreateFtlSignalingAddress(kFakeRemoteUsername,
                                                   kFakeRemoteRegistrationId),
-      message);
+      std::move(message));
 
-  ASSERT_EQ(0u, received_messages_.size());
+  ASSERT_EQ(received_messages_.size(), 0u);
+  // Remain signed-in for non-auth related error.
+  ASSERT_TRUE(registration_manager_->IsSignedIn());
+}
+
+TEST_F(FtlSignalStrategyTest, ReceiveMessageFromNonFtlSender_IsIgnored) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  auto stanza =
+      CreateXmlStanza(Direction::INCOMING, signal_strategy_->GetNextId());
+  std::string stanza_string = stanza->Str();
+  ftl::ChromotingMessage message;
+  message.mutable_xmpp()->set_stanza(stanza_string);
+
+  // This represents an XMPP address.
+  messaging_client_->OnMessage(SignalingAddress(kFakeRemoteUsername), message);
+  ASSERT_EQ(received_messages_.size(), 0u);
+
+  // This represents a 'Corp' signaling user with an FTL-like resource. The
+  // SignalingAddress class should detect this and mark it as a Corp address.
+  messaging_client_->OnMessage(
+      SignalingAddress::CreateFtlSignalingAddress(kFakeCorpUsername,
+                                                  kFakeRemoteRegistrationId),
+      message);
+  ASSERT_EQ(received_messages_.size(), 0u);
+}
+
+TEST_F(FtlSignalStrategyTest, ReceiveIncomingFtlMessage) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  ftl::ChromotingMessage message;
+  message.mutable_echo()->set_message("echo");
+
+  EXPECT_CALL(*this, OnIncomingFtlMessage(_, _)).WillOnce(Return(true));
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               message);
+}
+
+TEST_F(FtlSignalStrategyTest, ReceiveIqStanzaOnly_Success) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  std::string stanza_id = signal_strategy_->GetNextId();
+  ftl::ChromotingMessage message =
+      CreateIqStanzaMessage(Direction::INCOMING, stanza_id);
+
+  EXPECT_CALL(*this, OnSignalingMessage(_, _))
+      .WillOnce([&](const SignalingAddress& sender_address,
+                    const JingleMessage& received_message) {
+        EXPECT_EQ(received_message.message_id, stanza_id);
+        EXPECT_EQ(sender_address.id(), std::string(kFakeRemoteFtlId));
+        return true;
+      });
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               message);
+}
+
+TEST_F(FtlSignalStrategyTest, ReceiveIqStanzaAndStanza_PreferIqStanza) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  std::string proto_stanza_id = "proto_id";
+  ftl::ChromotingMessage message =
+      CreateIqStanzaMessage(Direction::INCOMING, proto_stanza_id);
+
+  std::string xml_stanza_id = "xml_id";
+  auto xml_stanza = CreateXmlStanza(Direction::INCOMING, xml_stanza_id);
+  message.mutable_xmpp()->set_stanza(xml_stanza->Str());
+
+  EXPECT_CALL(*this, OnSignalingMessage(_, _))
+      .WillOnce([&](const SignalingAddress& sender_address,
+                    const JingleMessage& received_message) {
+        EXPECT_EQ(received_message.message_id, proto_stanza_id);
+        EXPECT_EQ(sender_address.id(), std::string(kFakeRemoteFtlId));
+        return true;
+      });
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               message);
+}
+
+TEST_F(FtlSignalStrategyTest, ReceiveIqStanza_NoPayload) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  std::string stanza_id = signal_strategy_->GetNextId();
+  ftl::ChromotingMessage message;
+  auto* iq = message.mutable_xmpp()->mutable_iq_stanza();
+  iq->set_id(stanza_id);
+  iq->mutable_sender()->set_local_part(kFakeRemoteUsername);
+  iq->mutable_sender()->set_resource_part(kFakeRemoteRegistrationId);
+  iq->mutable_receiver()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_resource_part(kFakeLocalRegistrationId);
+
+  // No payload set in iq_stanza.
+
+  EXPECT_CALL(*this, OnSignalingMessage(_, _)).Times(0);
+  EXPECT_CALL(*this, OnSignalingReply(_, _)).Times(0);
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               message);
+}
+
+TEST_F(FtlSignalStrategyTest, SendReply_DefaultsToXml) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  JingleMessageReply reply;
+  reply.to = SignalingAddress(kFakeRemoteFtlId);
+  reply.message_id = signal_strategy_->GetNextId();
+  reply.reply_type = JingleMessageReply::REPLY_RESULT;
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendReply(std::move(reply));
+}
+
+TEST_F(FtlSignalStrategyTest, SendMessage_SessionAcceptRequestsNotFoundRetry) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  JingleMessage message(SignalingAddress(kFakeRemoteFtlId), SessionAccept(),
+                        "sid");
+  message.message_id = "id";
+
+  EXPECT_CALL(*messaging_client_, SendMessage(_, _, _, _))
+      .WillOnce([&](const SignalingAddress&, ftl::ChromotingMessage&&,
+                    FtlMessagingClient::DoneCallback callback,
+                    scoped_refptr<const ProtobufHttpRequestConfig::RetryPolicy>
+                        retry_policy) {
+        ASSERT_TRUE(retry_policy);
+        EXPECT_TRUE(retry_policy->retriable_error_codes.contains(
+            HttpStatus::Code::NOT_FOUND));
+        std::move(callback).Run(HttpStatus::OK());
+      });
+
+  signal_strategy_->SendMessage(std::move(message));
+}
+
+TEST_F(FtlSignalStrategyTest, SendReply_RequestsNotFoundRetry) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  JingleMessageReply reply;
+  reply.to = SignalingAddress(kFakeRemoteFtlId);
+  reply.message_id = "id";
+
+  EXPECT_CALL(*messaging_client_, SendMessage(_, _, _, _))
+      .WillOnce([&](const SignalingAddress&, ftl::ChromotingMessage&&,
+                    FtlMessagingClient::DoneCallback callback,
+                    scoped_refptr<const ProtobufHttpRequestConfig::RetryPolicy>
+                        retry_policy) {
+        ASSERT_TRUE(retry_policy);
+        EXPECT_TRUE(retry_policy->retriable_error_codes.contains(
+            HttpStatus::Code::NOT_FOUND));
+        std::move(callback).Run(HttpStatus::OK());
+      });
+
+  signal_strategy_->SendReply(std::move(reply));
+}
+
+TEST_F(FtlSignalStrategyTest,
+       SendMessage_OtherMessagesDoNotRequestNotFoundRetry) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  JingleMessage message(SignalingAddress(kFakeRemoteFtlId), SessionInfo(),
+                        "sid");
+  message.message_id = "id";
+
+  EXPECT_CALL(*messaging_client_, SendMessage(_, _, _, _))
+      .WillOnce([&](const SignalingAddress&, ftl::ChromotingMessage&&,
+                    FtlMessagingClient::DoneCallback callback,
+                    scoped_refptr<const ProtobufHttpRequestConfig::RetryPolicy>
+                        retry_policy) {
+        ASSERT_FALSE(retry_policy);
+        std::move(callback).Run(HttpStatus::OK());
+      });
+
+  signal_strategy_->SendMessage(std::move(message));
+}
+
+// Tests that the client can transition to Proto signaling if the host responds
+// with Proto, even though the client currently only initiates with XML.
+TEST_F(FtlSignalStrategyTest, Negotiation_ClientSide_ProtoChosen) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  // 1. Client sends session-initiate. Currently restricted to XML-only.
+  // TODO: crbug.com/504910955 - Expect SignalingMessageMatchesBoth once
+  // client-side BOTH is enabled.
+  JingleMessage message(SignalingAddress(kFakeRemoteFtlId), SessionInitiate(),
+                        "sid123");
+  message.message_id = "req_initiate";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(message));
+
+  // 2. Client receives Proto reply.
+  ftl::ChromotingMessage reply_msg;
+  auto* iq = reply_msg.mutable_xmpp()->mutable_iq_stanza();
+  iq->set_id("req_initiate");
+  iq->mutable_sender()->set_local_part(kFakeRemoteUsername);
+  iq->mutable_sender()->set_resource_part(kFakeRemoteRegistrationId);
+  iq->mutable_receiver()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_resource_part(kFakeLocalRegistrationId);
+  iq->mutable_reply();  // Set reply payload
+
+  EXPECT_CALL(*this, OnSignalingReply(_, _)).Times(1);
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               reply_msg);
+
+  // 3. Client sends next message. Verify it is PROTO-ONLY.
+  JingleMessage info_message(SignalingAddress(kFakeRemoteFtlId), SessionInfo(),
+                             "sid123");
+  info_message.message_id = "req_info";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesProtoOnly(kFakeRemoteFtlId,
+                                                           kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(info_message));
+}
+
+// Tests that the client stays on XML signaling if the host responds with XML.
+TEST_F(FtlSignalStrategyTest, Negotiation_ClientSide_XmlChosen) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  // 1. Client sends session-initiate. Currently restricted to XML-only.
+  // TODO: crbug.com/504910955 - Expect SignalingMessageMatchesBoth once
+  // client-side BOTH is enabled.
+  JingleMessage message(SignalingAddress(kFakeRemoteFtlId), SessionInitiate(),
+                        "sid123");
+  message.message_id = "req_initiate";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(message));
+
+  // 2. Client receives XML reply.
+  ftl::ChromotingMessage reply_msg;
+  std::string xml_reply =
+      "<iq xmlns=\"jabber:client\" type=\"result\" id=\"req_initiate\" "
+      "to=\"" +
+      std::string(kFakeLocalFtlId) +
+      "\" "
+      "from=\"" +
+      std::string(kFakeRemoteFtlId) +
+      "\">"
+      "<jingle xmlns=\"urn:xmpp:jingle:1\"/>"
+      "</iq>";
+  reply_msg.mutable_xmpp()->set_stanza(xml_reply);
+
+  EXPECT_CALL(*this, OnSignalingReply(_, _)).Times(1);
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               reply_msg);
+
+  // 3. Client sends next message. Verify it is XML-ONLY.
+  JingleMessage info_message(SignalingAddress(kFakeRemoteFtlId), SessionInfo(),
+                             "sid123");
+  info_message.message_id = "req_info";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(info_message));
+}
+
+TEST_F(FtlSignalStrategyTest,
+       Negotiation_ClientSide_SendProtobufInInitiate_ProtoChosen) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  signal_strategy_->SetSendProtobufInInitiate(true);
+
+  // 1. Client sends session-initiate. Should be BOTH.
+  JingleMessage message(SignalingAddress(kFakeRemoteFtlId), SessionInitiate(),
+                        "sid123");
+  message.message_id = "req_initiate";
+
+  EXPECT_CALL(
+      *messaging_client_,
+      SendMessage(
+          Property(&SignalingAddress::id, kFakeRemoteFtlId),
+          SignalingMessageMatchesBoth(kFakeRemoteFtlId, kFakeLocalFtlId), _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(message));
+
+  // 2. Client receives Proto reply.
+  ftl::ChromotingMessage reply_msg;
+  auto* iq = reply_msg.mutable_xmpp()->mutable_iq_stanza();
+  iq->set_id("req_initiate");
+  iq->mutable_sender()->set_local_part(kFakeRemoteUsername);
+  iq->mutable_sender()->set_resource_part(kFakeRemoteRegistrationId);
+  iq->mutable_receiver()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_resource_part(kFakeLocalRegistrationId);
+  iq->mutable_reply();  // Set reply payload
+
+  EXPECT_CALL(*this, OnSignalingReply(_, _)).Times(1);
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               reply_msg);
+
+  // 3. Client sends next message. Verify it is PROTO-ONLY.
+  JingleMessage info_message(SignalingAddress(kFakeRemoteFtlId), SessionInfo(),
+                             "sid123");
+  info_message.message_id = "req_info";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesProtoOnly(kFakeRemoteFtlId,
+                                                           kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(info_message));
+}
+
+TEST_F(FtlSignalStrategyTest,
+       Negotiation_ClientSide_SendProtobufInInitiate_XmlChosen) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  signal_strategy_->SetSendProtobufInInitiate(true);
+
+  // 1. Client sends session-initiate. Should be BOTH.
+  JingleMessage message(SignalingAddress(kFakeRemoteFtlId), SessionInitiate(),
+                        "sid123");
+  message.message_id = "req_initiate";
+
+  EXPECT_CALL(
+      *messaging_client_,
+      SendMessage(
+          Property(&SignalingAddress::id, kFakeRemoteFtlId),
+          SignalingMessageMatchesBoth(kFakeRemoteFtlId, kFakeLocalFtlId), _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(message));
+
+  // 2. Client receives XML reply.
+  ftl::ChromotingMessage reply_msg;
+  std::string xml_reply =
+      "<iq xmlns=\"jabber:client\" type=\"result\" id=\"req_initiate\" "
+      "to=\"" +
+      std::string(kFakeLocalFtlId) +
+      "\" "
+      "from=\"" +
+      std::string(kFakeRemoteFtlId) +
+      "\">"
+      "<jingle xmlns=\"urn:xmpp:jingle:1\"/>"
+      "</iq>";
+  reply_msg.mutable_xmpp()->set_stanza(xml_reply);
+
+  EXPECT_CALL(*this, OnSignalingReply(_, _)).Times(1);
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               reply_msg);
+
+  // 3. Client sends next message. Verify it is XML-ONLY.
+  JingleMessage info_message(SignalingAddress(kFakeRemoteFtlId), SessionInfo(),
+                             "sid123");
+  info_message.message_id = "req_info";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(info_message));
+}
+
+TEST_F(FtlSignalStrategyTest, Negotiation_HostSide_ReceiveBoth) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  // 1. Host receives session-initiate with BOTH.
+  ftl::ChromotingMessage init_msg;
+  // Populate Proto
+  auto* iq = init_msg.mutable_xmpp()->mutable_iq_stanza();
+  iq->set_id("req_initiate");
+  iq->mutable_sender()->set_local_part(kFakeRemoteUsername);
+  iq->mutable_sender()->set_resource_part(kFakeRemoteRegistrationId);
+  iq->mutable_receiver()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_resource_part(kFakeLocalRegistrationId);
+  auto* jingle = iq->mutable_jingle();
+  jingle->set_session_id("sid123");
+  jingle->mutable_session_initiate();
+  // Populate XML
+  std::string xml_init =
+      CreateValidSessionInitiateXml("req_initiate", "sid123");
+  init_msg.mutable_xmpp()->set_stanza(xml_init);
+
+  EXPECT_CALL(*this, OnSignalingMessage(_, _)).WillOnce(Return(true));
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               init_msg);
+
+  // 2. Host sends reply. Verify it is PROTO-ONLY (locks into Proto).
+  JingleMessageReply reply;
+  reply.to = SignalingAddress(kFakeRemoteFtlId);
+  reply.message_id = "req_initiate";
+  reply.reply_type = JingleMessageReply::REPLY_RESULT;
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesProtoOnly(kFakeRemoteFtlId,
+                                                           kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendReply(std::move(reply));
+
+  // 3. Host sends session-accept. Verify it is PROTO-ONLY.
+  JingleMessage accept_message(SignalingAddress(kFakeRemoteFtlId),
+                               SessionAccept(), "sid123");
+  accept_message.message_id = "req_accept";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesProtoOnly(kFakeRemoteFtlId,
+                                                           kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(accept_message));
+}
+
+TEST_F(FtlSignalStrategyTest,
+       Negotiation_HostSide_ReceiveBoth_ProtoFails_FallsBackToXml) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  // 1. Host receives session-initiate with BOTH, but proto has missing sid.
+  ftl::ChromotingMessage init_msg;
+  // Populate malformed Proto (missing session_id / jingle sid)
+  auto* iq = init_msg.mutable_xmpp()->mutable_iq_stanza();
+  iq->set_id("req_initiate");
+  iq->mutable_sender()->set_local_part(kFakeRemoteUsername);
+  iq->mutable_sender()->set_resource_part(kFakeRemoteRegistrationId);
+  iq->mutable_receiver()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_resource_part(kFakeLocalRegistrationId);
+  // Missing session_id causes JingleMessageFromProto to fail.
+  auto* jingle = iq->mutable_jingle();
+  jingle->mutable_session_initiate();
+  // Populate valid XML
+  std::string xml_init =
+      CreateValidSessionInitiateXml("req_initiate", "sid123");
+  init_msg.mutable_xmpp()->set_stanza(xml_init);
+
+  EXPECT_CALL(*this, OnSignalingMessage(_, _)).WillOnce(Return(true));
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               init_msg);
+
+  // 2. Host sends reply. Verify it falls back to XML-ONLY.
+  JingleMessageReply reply;
+  reply.to = SignalingAddress(kFakeRemoteFtlId);
+  reply.message_id = "req_initiate";
+  reply.reply_type = JingleMessageReply::REPLY_RESULT;
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendReply(std::move(reply));
+
+  // 3. Host sends session-accept. Verify it falls back to XML-ONLY.
+  JingleMessage accept_message(SignalingAddress(kFakeRemoteFtlId),
+                               SessionAccept(), "sid123");
+  accept_message.message_id = "req_accept";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(accept_message));
+}
+
+TEST_F(FtlSignalStrategyTest, Negotiation_HostSide_ReceiveXmlOnly) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  // 1. Host receives session-initiate with XML only.
+  ftl::ChromotingMessage init_msg;
+  std::string xml_init =
+      CreateValidSessionInitiateXml("req_initiate", "sid123");
+  init_msg.mutable_xmpp()->set_stanza(xml_init);
+
+  EXPECT_CALL(*this, OnSignalingMessage(_, _)).WillOnce(Return(true));
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               init_msg);
+
+  // 2. Host sends reply. Verify it is XML-ONLY.
+  JingleMessageReply reply;
+  reply.to = SignalingAddress(kFakeRemoteFtlId);
+  reply.message_id = "req_initiate";
+  reply.reply_type = JingleMessageReply::REPLY_RESULT;
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendReply(std::move(reply));
+
+  // 3. Host sends session-accept. Verify it is XML-ONLY.
+  JingleMessage accept_message(SignalingAddress(kFakeRemoteFtlId),
+                               SessionAccept(), "sid123");
+  accept_message.message_id = "req_accept";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesXmlOnly(kFakeRemoteFtlId,
+                                                         kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(accept_message));
+}
+
+TEST_F(FtlSignalStrategyTest, Negotiation_HostSide_ReceiveProtoOnly) {
+  ExpectGetOAuthTokenSucceedsWithFakeCreds();
+  registration_manager_->ExpectSignInGaiaSucceeds();
+  signal_strategy_->Connect();
+  messaging_client_->AcceptReceivingMessages();
+
+  // 1. Host receives session-initiate with Proto only.
+  ftl::ChromotingMessage init_msg;
+  auto* iq = init_msg.mutable_xmpp()->mutable_iq_stanza();
+  iq->set_id("req_initiate");
+  iq->mutable_sender()->set_local_part(kFakeRemoteUsername);
+  iq->mutable_sender()->set_resource_part(kFakeRemoteRegistrationId);
+  iq->mutable_receiver()->set_local_part(kFakeLocalUsername);
+  iq->mutable_receiver()->set_resource_part(kFakeLocalRegistrationId);
+  auto* jingle = iq->mutable_jingle();
+  jingle->set_session_id("sid123");
+  jingle->mutable_session_initiate();
+
+  EXPECT_CALL(*this, OnSignalingMessage(_, _)).WillOnce(Return(true));
+
+  ftl::Id remote_user_id;
+  remote_user_id.set_type(ftl::IdType_Type_EMAIL);
+  remote_user_id.set_id(kFakeRemoteUsername);
+  messaging_client_->OnMessage(remote_user_id, kFakeRemoteRegistrationId,
+                               init_msg);
+
+  // 2. Host sends reply. Verify it is PROTO-ONLY.
+  JingleMessageReply reply;
+  reply.to = SignalingAddress(kFakeRemoteFtlId);
+  reply.message_id = "req_initiate";
+  reply.reply_type = JingleMessageReply::REPLY_RESULT;
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesProtoOnly(kFakeRemoteFtlId,
+                                                           kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendReply(std::move(reply));
+
+  // 3. Host sends session-accept. Verify it is PROTO-ONLY.
+  JingleMessage accept_message(SignalingAddress(kFakeRemoteFtlId),
+                               SessionAccept(), "sid123");
+  accept_message.message_id = "req_accept";
+
+  EXPECT_CALL(*messaging_client_,
+              SendMessage(Property(&SignalingAddress::id, kFakeRemoteFtlId),
+                          SignalingMessageMatchesProtoOnly(kFakeRemoteFtlId,
+                                                           kFakeLocalFtlId),
+                          _, _))
+      .WillOnce(base::test::RunOnceCallback<2>(HttpStatus::OK()));
+
+  signal_strategy_->SendMessage(std::move(accept_message));
 }
 
 }  // namespace remoting

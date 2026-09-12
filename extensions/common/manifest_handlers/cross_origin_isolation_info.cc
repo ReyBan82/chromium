@@ -15,8 +15,8 @@ namespace {
 using COIManifestKeys = api::cross_origin_isolation::ManifestKeys;
 
 const std::string* GetHeaderValue(const Extension& extension, const char* key) {
-  CrossOriginIsolationHeader* header =
-      static_cast<CrossOriginIsolationHeader*>(extension.GetManifestData(key));
+  const auto* header =
+      extension.GetManifestData<CrossOriginIsolationHeader>(key);
   return header ? &header->value : nullptr;
 }
 
@@ -45,7 +45,7 @@ bool CrossOriginIsolationHandler::Parse(Extension* extension,
                                         std::u16string* error) {
   COIManifestKeys manifest_keys;
   if (!COIManifestKeys::ParseFromDictionary(
-          extension->manifest()->available_values(), &manifest_keys, error)) {
+          extension->manifest()->available_values(), manifest_keys, *error)) {
     return false;
   }
 

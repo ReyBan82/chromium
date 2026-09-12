@@ -5,7 +5,6 @@
 #ifndef CHROME_BROWSER_ASH_FILE_SYSTEM_PROVIDER_OPERATIONS_EXECUTE_ACTION_H_
 #define CHROME_BROWSER_ASH_FILE_SYSTEM_PROVIDER_OPERATIONS_EXECUTE_ACTION_H_
 
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -21,9 +20,7 @@ namespace base {
 class FilePath;
 }  // namespace base
 
-namespace ash {
-namespace file_system_provider {
-namespace operations {
+namespace ash::file_system_provider::operations {
 
 // Bridge between chrome.fileManagerPrivate.executeCustomAction operation and
 // the providing extension's onExecuteActionRequested event. Created per
@@ -44,10 +41,10 @@ class ExecuteAction : public Operation {
   // Operation overrides.
   bool Execute(int request_id) override;
   void OnSuccess(int request_id,
-                 std::unique_ptr<RequestValue> result,
+                 const RequestValue& result,
                  bool has_more) override;
   void OnError(int request_id,
-               std::unique_ptr<RequestValue> result,
+               const RequestValue& result,
                base::File::Error error) override;
 
  private:
@@ -56,8 +53,6 @@ class ExecuteAction : public Operation {
   storage::AsyncFileUtil::StatusCallback callback_;
 };
 
-}  // namespace operations
-}  // namespace file_system_provider
-}  // namespace ash
+}  // namespace ash::file_system_provider::operations
 
 #endif  // CHROME_BROWSER_ASH_FILE_SYSTEM_PROVIDER_OPERATIONS_EXECUTE_ACTION_H_

@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -36,14 +13,12 @@ import static com.google.protobuf.WireFormat.MAX_VARINT32_SIZE;
 import static com.google.protobuf.WireFormat.MAX_VARINT_SIZE;
 import static java.lang.Math.max;
 
-import com.google.protobuf.Utf8.UnpairedSurrogateException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import java.util.Locale;
 
 /**
  * Encodes and writes protocol message fields.
@@ -57,13 +32,13 @@ import java.util.logging.Logger;
  * <p>This class is totally unsynchronized.
  */
 public abstract class CodedOutputStream extends ByteOutput {
-  private static final Logger logger = Logger.getLogger(CodedOutputStream.class.getName());
-  private static final boolean HAS_UNSAFE_ARRAY_OPERATIONS = UnsafeUtil.hasUnsafeArrayOperations();
 
   /** Used to adapt to the experimental {@link Writer} interface. */
-  CodedOutputStreamWriter wrapper;
+  Object wrapper;
 
-  /** @deprecated Use {@link #computeFixed32SizeNoTag(int)} instead. */
+  /**
+   * @deprecated Use {@link #computeFixed32SizeNoTag(int)} instead.
+   */
   @Deprecated public static final int LITTLE_ENDIAN_32_SIZE = FIXED32_SIZE;
 
   /** The buffer size used in {@link #newInstance(OutputStream)}. */
@@ -116,10 +91,13 @@ public abstract class CodedOutputStream extends ByteOutput {
   }
 
   /**
-   * Create a new {@code CodedOutputStream} that writes directly to the given byte array slice. If
-   * more bytes are written than fit in the slice, {@link OutOfSpaceException} will be thrown.
-   * Writing directly to a flat array is faster than writing to an {@code OutputStream}. See also
-   * {@link ByteString#newCodedBuilder}.
+   * Create a new {@code CodedOutputStream} that writes directly to the given byte array slice.
+   *
+   * @param flatArray the flat array to write to.
+   * @param offset the offset into the array to start writing at.
+   * @param length the number of bytes to write. Callers are responsible for ensuring that the bytes
+   *     written do not exceed the specified length by calling {@link #spaceLeft()} on the returned
+   *     {@link CodedOutputStream}.
    */
   public static CodedOutputStream newInstance(
       final byte[] flatArray, final int offset, final int length) {
@@ -128,25 +106,20 @@ public abstract class CodedOutputStream extends ByteOutput {
 
   /** Create a new {@code CodedOutputStream} that writes to the given {@link ByteBuffer}. */
   public static CodedOutputStream newInstance(ByteBuffer buffer) {
+    if (buffer.isReadOnly()) {
+      throw new IllegalArgumentException("ByteBuffer is read-only");
+    }
     if (buffer.hasArray()) {
-      return new HeapNioEncoder(buffer);
+      return new ArrayEncoder(
+          buffer.array(),
+          buffer.arrayOffset() + buffer.position(),
+          buffer.remaining(),
+          new ByteBufferFlusher(buffer));
+    } else if (buffer.isDirect()) {
+      return new DirectNioEncoder(buffer);
+    } else {
+      throw new IllegalArgumentException("ByteBuffer mut be either direct or array");
     }
-    if (buffer.isDirect() && !buffer.isReadOnly()) {
-      return UnsafeDirectNioEncoder.isSupported()
-          ? newUnsafeInstance(buffer)
-          : newSafeInstance(buffer);
-    }
-    throw new IllegalArgumentException("ByteBuffer is read-only");
-  }
-
-  /** For testing purposes only. */
-  static CodedOutputStream newUnsafeInstance(ByteBuffer buffer) {
-    return new UnsafeDirectNioEncoder(buffer);
-  }
-
-  /** For testing purposes only. */
-  static CodedOutputStream newSafeInstance(ByteBuffer buffer) {
-    return new SafeDirectNioEncoder(buffer);
   }
 
   /**
@@ -156,17 +129,17 @@ public abstract class CodedOutputStream extends ByteOutput {
    * {@code equals()} methods in protos) messages will always be serialized to the same bytes. This
    * implies:
    *
-   * <ul>
-   *   <li>repeated serialization of a message will return the same bytes
-   *   <li>different processes of the same binary (which may be executing on different machines)
-   *       will serialize equal messages to the same bytes.
-   * </ul>
+   * <h2>There is no canonical representation of Protobuf messages.</h2>
    *
-   * <p>Note the deterministic serialization is NOT canonical across languages; it is also unstable
-   * across different builds with schema changes due to unknown fields. Users who need canonical
-   * serialization, e.g. persistent storage in a canonical form, fingerprinting, etc, should define
-   * their own canonicalization specification and implement the serializer using reflection APIs
-   * rather than relying on this API.
+   * <p>The deterministic serialization is not stable between separate builds or between different
+   * languages.
+   *
+   * <p>Users who need canonical serialization, e.g. persistent storage in a canonical form,
+   * fingerprinting, etc, must define their own canonicalization specification and implement the
+   * serializer using reflection APIs rather than relying on this API.
+   *
+   * <p>See <a href="https://protobuf.dev/programming-guides/serialization-not-canonical/">Protobuf
+   * Serialization is not Canonical</a>.
    *
    * <p>Once set, the serializer will: (Note this is an implementation detail and may subject to
    * change in the future)
@@ -199,25 +172,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   public static CodedOutputStream newInstance(
       ByteBuffer byteBuffer, @SuppressWarnings("unused") int unused) {
     return newInstance(byteBuffer);
-  }
-
-  /**
-   * Create a new {@code CodedOutputStream} that writes to the provided {@link ByteOutput}.
-   *
-   * <p>NOTE: The {@link ByteOutput} <strong>MUST NOT</strong> modify the provided buffers. Doing so
-   * may result in corrupted data, which would be difficult to debug.
-   *
-   * @param byteOutput the output target for encoded bytes.
-   * @param bufferSize the size of the internal scratch buffer to be used for string encoding.
-   *     Setting this to {@code 0} will disable buffering, requiring an allocation for each encoded
-   *     string.
-   */
-  static CodedOutputStream newInstance(ByteOutput byteOutput, int bufferSize) {
-    if (bufferSize < 0) {
-      throw new IllegalArgumentException("bufferSize must be positive");
-    }
-
-    return new ByteOutputEncoder(byteOutput, bufferSize);
   }
 
   // Disallow construction outside of this class.
@@ -364,11 +318,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   public abstract void writeMessage(final int fieldNumber, final MessageLite value)
       throws IOException;
 
-  /** Write an embedded message field, including tag, to the stream. */
-  // Abstract to avoid overhead of additional virtual method calls.
-  abstract void writeMessage(final int fieldNumber, final MessageLite value, Schema schema)
-      throws IOException;
-
   /**
    * Write a MessageSet extension field to the stream. For historical reasons, the wire format
    * differs from normal fields.
@@ -456,7 +405,7 @@ public abstract class CodedOutputStream extends ByteOutput {
   }
 
   /** Write a {@code string} field to the stream. */
-  // TODO(dweis): Document behavior on ill-formed UTF-16 input.
+  // TODO: Document behavior on ill-formed UTF-16 input.
   // Abstract to avoid overhead of additional virtual method calls.
   public abstract void writeStringNoTag(String value) throws IOException;
 
@@ -472,10 +421,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   /** Write an embedded message field to the stream. */
   // Abstract to avoid overhead of additional virtual method calls.
   public abstract void writeMessageNoTag(final MessageLite value) throws IOException;
-
-  /** Write an embedded message field to the stream. */
-  // Abstract to avoid overhead of additional virtual method calls.
-  abstract void writeMessageNoTag(final MessageLite value, Schema schema) throws IOException;
 
   // =================================================================
 
@@ -498,7 +443,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   @Override
   public abstract void writeLazy(ByteBuffer value) throws IOException;
 
-  // =================================================================
   // =================================================================
 
   /**
@@ -646,11 +590,13 @@ public abstract class CodedOutputStream extends ByteOutput {
   }
 
   /**
-   * Compute the number of bytes that would be needed to encode an embedded message in lazy field,
-   * including tag.
+   * Compute the number of bytes that would be needed to encode an embedded message in lazy
+   * field, including tag.
    */
+  @Deprecated
+  @InlineMe(replacement = "value.computeSize(fieldNumber)")
   public static int computeLazyFieldSize(final int fieldNumber, final LazyFieldLite value) {
-    return computeTagSize(fieldNumber) + computeLazyFieldSizeNoTag(value);
+    return value.computeSize(fieldNumber);
   }
 
   /**
@@ -659,15 +605,6 @@ public abstract class CodedOutputStream extends ByteOutput {
    */
   public static int computeMessageSize(final int fieldNumber, final MessageLite value) {
     return computeTagSize(fieldNumber) + computeMessageSizeNoTag(value);
-  }
-
-  /**
-   * Compute the number of bytes that would be needed to encode an embedded message field, including
-   * tag.
-   */
-  static int computeMessageSize(
-      final int fieldNumber, final MessageLite value, final Schema schema) {
-    return computeTagSize(fieldNumber) + computeMessageSizeNoTag(value, schema);
   }
 
   /**
@@ -696,11 +633,11 @@ public abstract class CodedOutputStream extends ByteOutput {
    * extension field to the stream. For historical reasons, the wire format differs from normal
    * fields.
    */
+  @Deprecated
+  @InlineMe(replacement = "value.computeMessageSetExtensionSize(fieldNumber)")
   public static int computeLazyFieldMessageSetExtensionSize(
       final int fieldNumber, final LazyFieldLite value) {
-    return computeTagSize(WireFormat.MESSAGE_SET_ITEM) * 2
-        + computeUInt32Size(WireFormat.MESSAGE_SET_TYPE_ID, fieldNumber)
-        + computeLazyFieldSize(WireFormat.MESSAGE_SET_MESSAGE, value);
+    return value.computeMessageSetExtensionSize(fieldNumber);
   }
 
   // -----------------------------------------------------------------
@@ -711,33 +648,56 @@ public abstract class CodedOutputStream extends ByteOutput {
   }
 
   /**
-   * Compute the number of bytes that would be needed to encode an {@code int32} field, including
+   * Compute the number of bytes that would be needed to encode an {@code int32} field, excluding
    * tag.
    */
   public static int computeInt32SizeNoTag(final int value) {
-    if (value >= 0) {
-      return computeUInt32SizeNoTag(value);
-    } else {
-      // Must sign-extend.
-      return MAX_VARINT_SIZE;
-    }
+    return computeUInt64SizeNoTag((long) value);
   }
 
   /** Compute the number of bytes that would be needed to encode a {@code uint32} field. */
   public static int computeUInt32SizeNoTag(final int value) {
-    if ((value & (~0 << 7)) == 0) {
-      return 1;
-    }
-    if ((value & (~0 << 14)) == 0) {
-      return 2;
-    }
-    if ((value & (~0 << 21)) == 0) {
-      return 3;
-    }
-    if ((value & (~0 << 28)) == 0) {
-      return 4;
-    }
-    return 5;
+    /*
+    This code is ported from the C++ varint implementation.
+    Implementation notes:
+
+    To calculate varint size, we want to count the number of 7 bit chunks required. Rather than using
+    division by 7 to accomplish this, we use multiplication by 9/64. This has a number of important
+    properties:
+     * It's roughly 1/7.111111. This makes the 0 bits set case have the same value as the 7 bits set
+       case, so offsetting by 1 gives us the correct value we want for integers up to 448 bits.
+     * Multiplying by 9 is special. x * 9 = x << 3 + x, and so this multiplication can be done by a
+       single shifted add on arm (add w0, w0, w0, lsl #3), or a single lea instruction
+       (leal (%rax,%rax,8), %eax)) on x86.
+     * Dividing by 64 is a 6 bit right shift.
+
+    An explicit non-sign-extended right shift is used instead of the more obvious '/ 64' because
+    that actually produces worse code on android arm64 at time of authoring because of sign
+    extension. Rather than
+        lsr w0, w0, #6
+    It would emit:
+        add w16, w0, #0x3f (63)
+        cmp w0, #0x0 (0)
+        csel w0, w16, w0, lt
+        asr w0, w0, #6
+
+    Summarized:
+    floor(((Integer.SIZE - clz) / 7.1111) + 1
+    ((Integer.SIZE - clz) * 9) / 64 + 1
+    (((Integer.SIZE - clz) * 9) >>> 6) + 1
+    ((Integer.SIZE - clz) * 9 + (1 << 6)) >>> 6
+    (Integer.SIZE * 9 + (1 << 6) - clz * 9) >>> 6
+    (352 - clz * 9) >>> 6
+    on arm:
+    (352 - clz - (clz << 3)) >>> 6
+    on x86:
+    (352 - lea(clz, clz, 8)) >>> 6
+
+    If you make changes here, please validate their compiled output on different architectures and
+    runtimes.
+    */
+    int clz = Integer.numberOfLeadingZeros(value);
+    return ((Integer.SIZE * 9 + (1 << 6)) - (clz * 9)) >>> 6;
   }
 
   /** Compute the number of bytes that would be needed to encode an {@code sint32} field. */
@@ -755,40 +715,16 @@ public abstract class CodedOutputStream extends ByteOutput {
     return FIXED32_SIZE;
   }
 
-  /**
-   * Compute the number of bytes that would be needed to encode an {@code int64} field, including
-   * tag.
-   */
+  /** Compute the number of bytes that would be needed to encode an {@code int64} field. */
   public static int computeInt64SizeNoTag(final long value) {
     return computeUInt64SizeNoTag(value);
   }
 
-  /**
-   * Compute the number of bytes that would be needed to encode a {@code uint64} field, including
-   * tag.
-   */
+  /** Compute the number of bytes that would be needed to encode a {@code uint64} field. */
   public static int computeUInt64SizeNoTag(long value) {
-    // handle two popular special cases up front ...
-    if ((value & (~0L << 7)) == 0L) {
-      return 1;
-    }
-    if (value < 0L) {
-      return 10;
-    }
-    // ... leaving us with 8 remaining, which we can divide and conquer
-    int n = 2;
-    if ((value & (~0L << 35)) != 0L) {
-      n += 4;
-      value >>>= 28;
-    }
-    if ((value & (~0L << 21)) != 0L) {
-      n += 2;
-      value >>>= 14;
-    }
-    if ((value & (~0L << 14)) != 0L) {
-      n += 1;
-    }
-    return n;
+    int clz = Long.numberOfLeadingZeros(value);
+    // See computeUInt32SizeNoTag for explanation
+    return ((Long.SIZE * 9 + (1 << 6)) - (clz * 9)) >>> 6;
   }
 
   /** Compute the number of bytes that would be needed to encode an {@code sint64} field. */
@@ -806,18 +742,12 @@ public abstract class CodedOutputStream extends ByteOutput {
     return FIXED64_SIZE;
   }
 
-  /**
-   * Compute the number of bytes that would be needed to encode a {@code float} field, including
-   * tag.
-   */
+  /** Compute the number of bytes that would be needed to encode a {@code float} field. */
   public static int computeFloatSizeNoTag(@SuppressWarnings("unused") final float unused) {
     return FIXED32_SIZE;
   }
 
-  /**
-   * Compute the number of bytes that would be needed to encode a {@code double} field, including
-   * tag.
-   */
+  /** Compute the number of bytes that would be needed to encode a {@code double} field. */
   public static int computeDoubleSizeNoTag(@SuppressWarnings("unused") final double unused) {
     return FIXED64_SIZE;
   }
@@ -837,24 +767,14 @@ public abstract class CodedOutputStream extends ByteOutput {
 
   /** Compute the number of bytes that would be needed to encode a {@code string} field. */
   public static int computeStringSizeNoTag(final String value) {
-    int length;
-    try {
-      length = Utf8.encodedLength(value);
-    } catch (UnpairedSurrogateException e) {
-      // TODO(dweis): Consider using nio Charset methods instead.
-      final byte[] bytes = value.getBytes(Internal.UTF_8);
-      length = bytes.length;
-    }
-
-    return computeLengthDelimitedFieldSize(length);
+    return computeLengthDelimitedFieldSize(Utf8.encodedLength(value));
   }
 
-  /**
-   * Compute the number of bytes that would be needed to encode an embedded message stored in lazy
-   * field.
-   */
+  /** Compute the number of bytes that would be needed to encode a {@code bytes} field. */
+  @Deprecated
+  @InlineMe(replacement = "value.computeSizeNoTag()")
   public static int computeLazyFieldSizeNoTag(final LazyFieldLite value) {
-    return computeLengthDelimitedFieldSize(value.getSerializedSize());
+    return value.computeSizeNoTag();
   }
 
   /** Compute the number of bytes that would be needed to encode a {@code bytes} field. */
@@ -875,11 +795,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   /** Compute the number of bytes that would be needed to encode an embedded message field. */
   public static int computeMessageSizeNoTag(final MessageLite value) {
     return computeLengthDelimitedFieldSize(value.getSerializedSize());
-  }
-
-  /** Compute the number of bytes that would be needed to encode an embedded message field. */
-  static int computeMessageSizeNoTag(final MessageLite value, final Schema schema) {
-    return computeLengthDelimitedFieldSize(((AbstractMessageLite) value).getSerializedSize(schema));
   }
 
   static int computeLengthDelimitedFieldSize(int fieldLength) {
@@ -923,20 +838,24 @@ public abstract class CodedOutputStream extends ByteOutput {
   public abstract void flush() throws IOException;
 
   /**
-   * If writing to a flat array, return the space left in the array. Otherwise, throws {@code
-   * UnsupportedOperationException}.
+   * If writing to a flat array, return the space left in the array, which can be a negative value
+   * if writing past the limit specified in {@link #newInstance(byte[], int, int)} but before the
+   * end of the array. Otherwise, throws {@code UnsupportedOperationException}.
    */
   public abstract int spaceLeft();
 
   /**
-   * Verifies that {@link #spaceLeft()} returns zero. It's common to create a byte array that is
-   * exactly big enough to hold a message, then write to it with a {@code CodedOutputStream}.
-   * Calling {@code checkNoSpaceLeft()} after writing verifies that the message was actually as big
-   * as expected, which can help catch bugs.
+   * Verifies that {@link #spaceLeft()} does not return a positive value. It's common to create a
+   * byte array that is exactly big enough to hold a message, then write to it with a {@code
+   * CodedOutputStream}. Calling {@code checkNoSpaceLeft()} after writing verifies that the message
+   * was actually as big as expected, which can help catch bugs.
    */
   public final void checkNoSpaceLeft() {
-    if (spaceLeft() != 0) {
+    if (spaceLeft() > 0) {
       throw new IllegalStateException("Did not write as much data as expected.");
+    }
+    if (spaceLeft() < 0) {
+      throw new IllegalStateException("Wrote more data than expected.");
     }
   }
 
@@ -965,6 +884,22 @@ public abstract class CodedOutputStream extends ByteOutput {
     OutOfSpaceException(String explanationMessage, Throwable cause) {
       super(MESSAGE + ": " + explanationMessage, cause);
     }
+
+    OutOfSpaceException(int position, int limit, int length) {
+      this(position, limit, length, null);
+    }
+
+    OutOfSpaceException(int position, int limit, int length, Throwable cause) {
+      this((long) position, (long) limit, length, cause);
+    }
+
+    OutOfSpaceException(long position, long limit, int length) {
+      this(position, limit, length, null);
+    }
+
+    OutOfSpaceException(long position, long limit, int length, Throwable cause) {
+      this(String.format(Locale.US, "Pos: %d, limit: %d, len: %d", position, limit, length), cause);
+    }
   }
 
   /**
@@ -978,28 +913,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   /** Write a {@code bytes} field to the stream. Visible for testing. */
   abstract void writeByteArrayNoTag(final byte[] value, final int offset, final int length)
       throws IOException;
-
-  final void inefficientWriteStringNoTag(String value, UnpairedSurrogateException cause)
-      throws IOException {
-    logger.log(
-        Level.WARNING,
-        "Converting ill-formed UTF-16. Your Protocol Buffer will not round trip correctly!",
-        cause);
-
-    // Unfortunately there does not appear to be any way to tell Java to encode
-    // UTF-8 directly into our buffer, so we have to let it create its own byte
-    // array and then copy.
-    // TODO(dweis): Consider using nio Charset methods instead.
-    final byte[] bytes = value.getBytes(Internal.UTF_8);
-    try {
-      writeUInt32NoTag(bytes.length);
-      writeLazy(bytes, 0, bytes.length);
-    } catch (IndexOutOfBoundsException e) {
-      throw new OutOfSpaceException(e);
-    } catch (OutOfSpaceException e) {
-      throw e;
-    }
-  }
 
   // =================================================================
 
@@ -1016,19 +929,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   }
 
   /**
-   * Write a {@code group} field, including tag, to the stream.
-   *
-   * @deprecated groups are deprecated.
-   */
-  @Deprecated
-  final void writeGroup(final int fieldNumber, final MessageLite value, Schema schema)
-      throws IOException {
-    writeTag(fieldNumber, WireFormat.WIRETYPE_START_GROUP);
-    writeGroupNoTag(value, schema);
-    writeTag(fieldNumber, WireFormat.WIRETYPE_END_GROUP);
-  }
-
-  /**
    * Write a {@code group} field to the stream.
    *
    * @deprecated groups are deprecated.
@@ -1036,16 +936,6 @@ public abstract class CodedOutputStream extends ByteOutput {
   @Deprecated
   public final void writeGroupNoTag(final MessageLite value) throws IOException {
     value.writeTo(this);
-  }
-
-  /**
-   * Write a {@code group} field to the stream.
-   *
-   * @deprecated groups are deprecated.
-   */
-  @Deprecated
-  final void writeGroupNoTag(final MessageLite value, Schema schema) throws IOException {
-    schema.writeTo(value, wrapper);
   }
 
   /**
@@ -1059,28 +949,11 @@ public abstract class CodedOutputStream extends ByteOutput {
     return computeTagSize(fieldNumber) * 2 + value.getSerializedSize();
   }
 
-  /**
-   * Compute the number of bytes that would be needed to encode a {@code group} field, including
-   * tag.
-   *
-   * @deprecated groups are deprecated.
-   */
-  @Deprecated
-  static int computeGroupSize(final int fieldNumber, final MessageLite value, Schema schema) {
-    return computeTagSize(fieldNumber) * 2 + computeGroupSizeNoTag(value, schema);
-  }
-
   /** Compute the number of bytes that would be needed to encode a {@code group} field. */
   @Deprecated
   @InlineMe(replacement = "value.getSerializedSize()")
   public static int computeGroupSizeNoTag(final MessageLite value) {
     return value.getSerializedSize();
-  }
-
-  /** Compute the number of bytes that would be needed to encode a {@code group} field. */
-  @Deprecated
-  static int computeGroupSizeNoTag(final MessageLite value, Schema schema) {
-    return ((AbstractMessageLite) value).getSerializedSize(schema);
   }
 
   /**
@@ -1157,27 +1030,50 @@ public abstract class CodedOutputStream extends ByteOutput {
 
   // =================================================================
 
+  private static final class ByteBufferFlusher {
+    private final ByteBuffer byteBuffer;
+    private final int initialPosition;
+
+    ByteBufferFlusher(ByteBuffer byteBuffer) {
+      this.byteBuffer = byteBuffer;
+      this.initialPosition = byteBuffer.position();
+    }
+
+    void flush(ArrayEncoder encoder) {
+      Java8Compatibility.position(byteBuffer, initialPosition + encoder.getTotalBytesWritten());
+    }
+  }
+
   /** A {@link CodedOutputStream} that writes directly to a byte array. */
-  private static class ArrayEncoder extends CodedOutputStream {
+  private static final class ArrayEncoder extends CodedOutputStream {
     private final byte[] buffer;
     private final int offset;
     private final int limit;
     private int position;
+    private final ByteBufferFlusher flusher;
 
     ArrayEncoder(byte[] buffer, int offset, int length) {
+      this(buffer, offset, length, null);
+    }
+
+    ArrayEncoder(byte[] buffer, int offset, int length, ByteBufferFlusher flusher) {
       if (buffer == null) {
         throw new NullPointerException("buffer");
       }
       if ((offset | length | (buffer.length - (offset + length))) < 0) {
         throw new IllegalArgumentException(
             String.format(
+                Locale.US,
                 "Array range is invalid. Buffer.length=%d, offset=%d, length=%d",
-                buffer.length, offset, length));
+                buffer.length,
+                offset,
+                length));
       }
       this.buffer = buffer;
       this.offset = offset;
       position = offset;
       limit = offset + length;
+      this.flusher = flusher;
     }
 
     @Override
@@ -1273,7 +1169,7 @@ public abstract class CodedOutputStream extends ByteOutput {
         write(value.array(), value.arrayOffset(), value.capacity());
       } else {
         ByteBuffer duplicated = value.duplicate();
-        duplicated.clear();
+        Java8Compatibility.clear(duplicated);
         write(duplicated);
       }
     }
@@ -1283,14 +1179,6 @@ public abstract class CodedOutputStream extends ByteOutput {
         throws IOException {
       writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
       writeMessageNoTag(value);
-    }
-
-    @Override
-    final void writeMessage(final int fieldNumber, final MessageLite value, Schema schema)
-        throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeUInt32NoTag(((AbstractMessageLite) value).getSerializedSize(schema));
-      schema.writeTo(value, wrapper);
     }
 
     @Override
@@ -1318,19 +1206,14 @@ public abstract class CodedOutputStream extends ByteOutput {
     }
 
     @Override
-    final void writeMessageNoTag(final MessageLite value, Schema schema) throws IOException {
-      writeUInt32NoTag(((AbstractMessageLite) value).getSerializedSize(schema));
-      schema.writeTo(value, wrapper);
-    }
-
-    @Override
     public final void write(byte value) throws IOException {
+      int position = this.position;
       try {
         buffer[position++] = value;
       } catch (IndexOutOfBoundsException e) {
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, 1), e);
+        throw new OutOfSpaceException(position, limit, 1, e);
       }
+      this.position = position; // Only update position if we stayed within the array bounds.
     }
 
     @Override
@@ -1338,128 +1221,186 @@ public abstract class CodedOutputStream extends ByteOutput {
       if (value >= 0) {
         writeUInt32NoTag(value);
       } else {
-        // Must sign-extend.
-        writeUInt64NoTag(value);
+        // Negative values sign extend to int64, and then always take exactly 10 bytes.
+        long v = value;
+        int position = this.position;
+        try {
+          buffer[position++] = (byte) ((int) v | 0x80);
+          buffer[position++] = (byte) ((int) (v >>> 7) | 0x80);
+          buffer[position++] = (byte) ((int) (v >>> 14) | 0x80);
+          buffer[position++] = (byte) ((int) (v >>> 21) | 0x80);
+          buffer[position++] = (byte) ((int) (v >>> 28) | 0x80);
+          buffer[position++] = (byte) 0xFF;
+          buffer[position++] = (byte) 0xFF;
+          buffer[position++] = (byte) 0xFF;
+          buffer[position++] = (byte) 0xFF;
+          buffer[position++] = (byte) 0x01;
+        } catch (IndexOutOfBoundsException e) {
+          throw new OutOfSpaceException(position, limit, 10, e);
+        }
+        this.position = position;
       }
     }
 
     @Override
     public final void writeUInt32NoTag(int value) throws IOException {
-      if (HAS_UNSAFE_ARRAY_OPERATIONS
-          && !Android.isOnAndroidDevice()
-          && spaceLeft() >= MAX_VARINT32_SIZE) {
+      int position = this.position; // Perf: hoist field to register to avoid load/stores.
+      try {
         if ((value & ~0x7F) == 0) {
-          UnsafeUtil.putByte(buffer, position++, (byte) value);
+          buffer[position++] = (byte) value;
+          this.position = position;
           return;
         }
-        UnsafeUtil.putByte(buffer, position++, (byte) (value | 0x80));
+        buffer[position++] = (byte) (value | 0x80);
         value >>>= 7;
+
         if ((value & ~0x7F) == 0) {
-          UnsafeUtil.putByte(buffer, position++, (byte) value);
+          buffer[position++] = (byte) value;
+          this.position = position;
           return;
         }
-        UnsafeUtil.putByte(buffer, position++, (byte) (value | 0x80));
+        buffer[position++] = (byte) (value | 0x80);
         value >>>= 7;
+
         if ((value & ~0x7F) == 0) {
-          UnsafeUtil.putByte(buffer, position++, (byte) value);
+          buffer[position++] = (byte) value;
+          this.position = position;
           return;
         }
-        UnsafeUtil.putByte(buffer, position++, (byte) (value | 0x80));
+        buffer[position++] = (byte) (value | 0x80);
         value >>>= 7;
+
         if ((value & ~0x7F) == 0) {
-          UnsafeUtil.putByte(buffer, position++, (byte) value);
+          buffer[position++] = (byte) value;
+          this.position = position;
           return;
         }
-        UnsafeUtil.putByte(buffer, position++, (byte) (value | 0x80));
+        buffer[position++] = (byte) (value | 0x80);
         value >>>= 7;
-        UnsafeUtil.putByte(buffer, position++, (byte) value);
-      } else {
-        try {
-          while (true) {
-            if ((value & ~0x7F) == 0) {
-              buffer[position++] = (byte) value;
-              return;
-            } else {
-              buffer[position++] = (byte) ((value & 0x7F) | 0x80);
-              value >>>= 7;
-            }
-          }
-        } catch (IndexOutOfBoundsException e) {
-          throw new OutOfSpaceException(
-              String.format("Pos: %d, limit: %d, len: %d", position, limit, 1), e);
-        }
+
+        buffer[position++] = (byte) value;
+        this.position = position;
+      } catch (IndexOutOfBoundsException e) {
+        throw new OutOfSpaceException(position, limit, 1, e);
       }
     }
 
     @Override
     public final void writeFixed32NoTag(int value) throws IOException {
+      int position = this.position; // Perf: hoist field to register to avoid load/stores.
       try {
-        buffer[position++] = (byte) (value & 0xFF);
-        buffer[position++] = (byte) ((value >> 8) & 0xFF);
-        buffer[position++] = (byte) ((value >> 16) & 0xFF);
-        buffer[position++] = (byte) ((value >> 24) & 0xFF);
+        buffer[position] = (byte) value;
+        buffer[position + 1] = (byte) (value >> 8);
+        buffer[position + 2] = (byte) (value >> 16);
+        buffer[position + 3] = (byte) (value >> 24);
       } catch (IndexOutOfBoundsException e) {
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, 1), e);
+        throw new OutOfSpaceException(position, limit, FIXED32_SIZE, e);
       }
+      // Only update position if we stayed within the array bounds.
+      this.position = position + FIXED32_SIZE;
     }
 
     @Override
     public final void writeUInt64NoTag(long value) throws IOException {
-      if (HAS_UNSAFE_ARRAY_OPERATIONS && spaceLeft() >= MAX_VARINT_SIZE) {
-        while (true) {
-          if ((value & ~0x7FL) == 0) {
-            UnsafeUtil.putByte(buffer, position++, (byte) value);
-            return;
-          } else {
-            UnsafeUtil.putByte(buffer, position++, (byte) (((int) value & 0x7F) | 0x80));
-            value >>>= 7;
-          }
+      int position = this.position; // Perf: hoist field to register to avoid load/stores.
+      try {
+        if ((value & ~0x7FL) == 0) {
+          buffer[position] = (byte) value;
+          this.position = position + 1;
+          return;
         }
-      } else {
-        try {
-          while (true) {
-            if ((value & ~0x7FL) == 0) {
-              buffer[position++] = (byte) value;
-              return;
-            } else {
-              buffer[position++] = (byte) (((int) value & 0x7F) | 0x80);
-              value >>>= 7;
-            }
-          }
-        } catch (IndexOutOfBoundsException e) {
-          throw new OutOfSpaceException(
-              String.format("Pos: %d, limit: %d, len: %d", position, limit, 1), e);
+        buffer[position] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 1] = (byte) value;
+          this.position = position + 2;
+          return;
         }
+        buffer[position + 1] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 2] = (byte) value;
+          this.position = position + 3;
+          return;
+        }
+        buffer[position + 2] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 3] = (byte) value;
+          this.position = position + 4;
+          return;
+        }
+        buffer[position + 3] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 4] = (byte) value;
+          this.position = position + 5;
+          return;
+        }
+        buffer[position + 4] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 5] = (byte) value;
+          this.position = position + 6;
+          return;
+        }
+        buffer[position + 5] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 6] = (byte) value;
+          this.position = position + 7;
+          return;
+        }
+        buffer[position + 6] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 7] = (byte) value;
+          this.position = position + 8;
+          return;
+        }
+        buffer[position + 7] = (byte) ((int) value | 0x80);
+        value >>>= 7;
+        if ((value & ~0x7FL) == 0) {
+          buffer[position + 8] = (byte) value;
+          this.position = position + 9;
+          return;
+        }
+        buffer[position + 8] = (byte) ((int) value | 0x80);
+        buffer[position + 9] = (byte) (value >>> 7);
+        this.position = position + 10;
+        return;
+      } catch (IndexOutOfBoundsException e) {
+        throw new OutOfSpaceException(position, limit, 1, e);
       }
     }
 
     @Override
     public final void writeFixed64NoTag(long value) throws IOException {
+      int position = this.position; // Perf: hoist field to register to avoid load/stores.
       try {
-        buffer[position++] = (byte) ((int) (value) & 0xFF);
-        buffer[position++] = (byte) ((int) (value >> 8) & 0xFF);
-        buffer[position++] = (byte) ((int) (value >> 16) & 0xFF);
-        buffer[position++] = (byte) ((int) (value >> 24) & 0xFF);
-        buffer[position++] = (byte) ((int) (value >> 32) & 0xFF);
-        buffer[position++] = (byte) ((int) (value >> 40) & 0xFF);
-        buffer[position++] = (byte) ((int) (value >> 48) & 0xFF);
-        buffer[position++] = (byte) ((int) (value >> 56) & 0xFF);
+        buffer[position] = (byte) value;
+        buffer[position + 1] = (byte) (value >> 8);
+        buffer[position + 2] = (byte) (value >> 16);
+        buffer[position + 3] = (byte) (value >> 24);
+        buffer[position + 4] = (byte) (value >> 32);
+        buffer[position + 5] = (byte) (value >> 40);
+        buffer[position + 6] = (byte) (value >> 48);
+        buffer[position + 7] = (byte) (value >> 56);
       } catch (IndexOutOfBoundsException e) {
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, 1), e);
+        throw new OutOfSpaceException(position, limit, FIXED64_SIZE, e);
       }
+      // Only update position if we stayed within the array bounds.
+      this.position = position + FIXED64_SIZE;
     }
 
     @Override
     public final void write(byte[] value, int offset, int length) throws IOException {
       try {
         System.arraycopy(value, offset, buffer, position, length);
-        position += length;
       } catch (IndexOutOfBoundsException e) {
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, length), e);
+        throw new OutOfSpaceException(position, limit, length, e);
       }
+      position += length;
     }
 
     @Override
@@ -1474,8 +1415,7 @@ public abstract class CodedOutputStream extends ByteOutput {
         value.get(buffer, position, length);
         position += length;
       } catch (IndexOutOfBoundsException e) {
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, length), e);
+        throw new OutOfSpaceException(position, limit, length, e);
       }
     }
 
@@ -1495,7 +1435,7 @@ public abstract class CodedOutputStream extends ByteOutput {
         final int minLengthVarIntSize = computeUInt32SizeNoTag(value.length());
         if (minLengthVarIntSize == maxLengthVarIntSize) {
           position = oldPosition + minLengthVarIntSize;
-          int newPosition = Utf8.encode(value, buffer, position, spaceLeft());
+          int newPosition = Utf8.encode(value, buffer, position, buffer.length - position);
           // Since this class is stateful and tracks the position, we rewind and store the state,
           // prepend the length, then reset it back to the end of the string.
           position = oldPosition;
@@ -1505,14 +1445,8 @@ public abstract class CodedOutputStream extends ByteOutput {
         } else {
           int length = Utf8.encodedLength(value);
           writeUInt32NoTag(length);
-          position = Utf8.encode(value, buffer, position, spaceLeft());
+          position = Utf8.encode(value, buffer, position, buffer.length - position);
         }
-      } catch (UnpairedSurrogateException e) {
-        // Roll back the change - we fall back to inefficient path.
-        position = oldPosition;
-
-        // TODO(nathanmittler): We should throw an IOException here instead.
-        inefficientWriteStringNoTag(value, e);
       } catch (IndexOutOfBoundsException e) {
         throw new OutOfSpaceException(e);
       }
@@ -1520,7 +1454,9 @@ public abstract class CodedOutputStream extends ByteOutput {
 
     @Override
     public void flush() {
-      // Do nothing.
+      if (flusher != null) {
+        flusher.flush(this);
+      }
     }
 
     @Override
@@ -1535,39 +1471,15 @@ public abstract class CodedOutputStream extends ByteOutput {
   }
 
   /**
-   * A {@link CodedOutputStream} that writes directly to a heap {@link ByteBuffer}. Writes are done
-   * directly to the underlying array. The buffer position is only updated after a flush.
-   */
-  private static final class HeapNioEncoder extends ArrayEncoder {
-    private final ByteBuffer byteBuffer;
-    private int initialPosition;
-
-    HeapNioEncoder(ByteBuffer byteBuffer) {
-      super(
-          byteBuffer.array(),
-          byteBuffer.arrayOffset() + byteBuffer.position(),
-          byteBuffer.remaining());
-      this.byteBuffer = byteBuffer;
-      this.initialPosition = byteBuffer.position();
-    }
-
-    @Override
-    public void flush() {
-      // Update the position on the buffer.
-      byteBuffer.position(initialPosition + getTotalBytesWritten());
-    }
-  }
-
-  /**
    * A {@link CodedOutputStream} that writes directly to a direct {@link ByteBuffer}, using only
    * safe operations..
    */
-  private static final class SafeDirectNioEncoder extends CodedOutputStream {
+  private static final class DirectNioEncoder extends CodedOutputStream {
     private final ByteBuffer originalBuffer;
     private final ByteBuffer buffer;
     private final int initialPosition;
 
-    SafeDirectNioEncoder(ByteBuffer buffer) {
+    DirectNioEncoder(ByteBuffer buffer) {
       this.originalBuffer = buffer;
       this.buffer = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
       initialPosition = buffer.position();
@@ -1653,13 +1565,6 @@ public abstract class CodedOutputStream extends ByteOutput {
     }
 
     @Override
-    void writeMessage(final int fieldNumber, final MessageLite value, Schema schema)
-        throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeMessageNoTag(value, schema);
-    }
-
-    @Override
     public void writeMessageSetExtension(final int fieldNumber, final MessageLite value)
         throws IOException {
       writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_START_GROUP);
@@ -1684,17 +1589,11 @@ public abstract class CodedOutputStream extends ByteOutput {
     }
 
     @Override
-    void writeMessageNoTag(final MessageLite value, Schema schema) throws IOException {
-      writeUInt32NoTag(((AbstractMessageLite) value).getSerializedSize(schema));
-      schema.writeTo(value, wrapper);
-    }
-
-    @Override
     public void write(byte value) throws IOException {
       try {
         buffer.put(value);
       } catch (BufferOverflowException e) {
-        throw new OutOfSpaceException(e);
+        throw new OutOfSpaceException(buffer.position(), buffer.limit(), 1, e);
       }
     }
 
@@ -1716,7 +1615,7 @@ public abstract class CodedOutputStream extends ByteOutput {
         write(value.array(), value.arrayOffset(), value.capacity());
       } else {
         ByteBuffer duplicated = value.duplicate();
-        duplicated.clear();
+        Java8Compatibility.clear(duplicated);
         write(duplicated);
       }
     }
@@ -1739,7 +1638,7 @@ public abstract class CodedOutputStream extends ByteOutput {
             buffer.put((byte) value);
             return;
           } else {
-            buffer.put((byte) ((value & 0x7F) | 0x80));
+            buffer.put((byte) (value | 0x80));
             value >>>= 7;
           }
         }
@@ -1753,7 +1652,7 @@ public abstract class CodedOutputStream extends ByteOutput {
       try {
         buffer.putInt(value);
       } catch (BufferOverflowException e) {
-        throw new OutOfSpaceException(e);
+        throw new OutOfSpaceException(buffer.position(), buffer.limit(), FIXED32_SIZE, e);
       }
     }
 
@@ -1765,7 +1664,7 @@ public abstract class CodedOutputStream extends ByteOutput {
             buffer.put((byte) value);
             return;
           } else {
-            buffer.put((byte) (((int) value & 0x7F) | 0x80));
+            buffer.put((byte) ((int) value | 0x80));
             value >>>= 7;
           }
         }
@@ -1779,7 +1678,7 @@ public abstract class CodedOutputStream extends ByteOutput {
       try {
         buffer.putLong(value);
       } catch (BufferOverflowException e) {
-        throw new OutOfSpaceException(e);
+        throw new OutOfSpaceException(buffer.position(), buffer.limit(), FIXED64_SIZE, e);
       }
     }
 
@@ -1826,29 +1725,23 @@ public abstract class CodedOutputStream extends ByteOutput {
           // Save the current position and increment past the length field. We'll come back
           // and write the length field after the encoding is complete.
           final int startOfBytes = buffer.position() + minLengthVarIntSize;
-          buffer.position(startOfBytes);
+          Java8Compatibility.position(buffer, startOfBytes);
 
           // Encode the string.
           encode(value);
 
           // Now go back to the beginning and write the length.
           int endOfBytes = buffer.position();
-          buffer.position(startPos);
+          Java8Compatibility.position(buffer, startPos);
           writeUInt32NoTag(endOfBytes - startOfBytes);
 
           // Reposition the buffer past the written data.
-          buffer.position(endOfBytes);
+          Java8Compatibility.position(buffer, endOfBytes);
         } else {
           final int length = Utf8.encodedLength(value);
           writeUInt32NoTag(length);
           encode(value);
         }
-      } catch (UnpairedSurrogateException e) {
-        // Roll back the change and convert to an IOException.
-        buffer.position(startPos);
-
-        // TODO(nathanmittler): We should throw an IOException here instead.
-        inefficientWriteStringNoTag(value, e);
       } catch (IllegalArgumentException e) {
         // Thrown by buffer.position() if out of range.
         throw new OutOfSpaceException(e);
@@ -1858,7 +1751,7 @@ public abstract class CodedOutputStream extends ByteOutput {
     @Override
     public void flush() {
       // Update the position of the original buffer.
-      originalBuffer.position(buffer.position());
+      Java8Compatibility.position(originalBuffer, buffer.position());
     }
 
     @Override
@@ -1881,374 +1774,27 @@ public abstract class CodedOutputStream extends ByteOutput {
   }
 
   /**
-   * A {@link CodedOutputStream} that writes directly to a direct {@link ByteBuffer} using {@code
-   * sun.misc.Unsafe}.
+   * An encoder that writes into an OutputStream. This internally uses an array for buffering to
+   * improve efficiency.
    */
-  private static final class UnsafeDirectNioEncoder extends CodedOutputStream {
-    private final ByteBuffer originalBuffer;
-    private final ByteBuffer buffer;
-    private final long address;
-    private final long initialPosition;
-    private final long limit;
-    private final long oneVarintLimit;
-    private long position;
+  private static final class OutputStreamEncoder extends CodedOutputStream {
+    private final byte[] buffer;
+    private final int limit;
+    private int position;
+    private int totalBytesWritten;
 
-    UnsafeDirectNioEncoder(ByteBuffer buffer) {
-      this.originalBuffer = buffer;
-      this.buffer = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN);
-      address = UnsafeUtil.addressOffset(buffer);
-      initialPosition = address + buffer.position();
-      limit = address + buffer.limit();
-      oneVarintLimit = limit - MAX_VARINT_SIZE;
-      position = initialPosition;
-    }
+    /**
+     * An {@link CodedOutputStream} that decorates an {@link OutputStream}. It performs internal
+     * buffering to optimize writes to the {@link OutputStream}.
+     */
+    private final OutputStream out;
 
-    static boolean isSupported() {
-      return UnsafeUtil.hasUnsafeByteBufferOperations();
-    }
-
-    @Override
-    public void writeTag(int fieldNumber, int wireType) throws IOException {
-      writeUInt32NoTag(WireFormat.makeTag(fieldNumber, wireType));
-    }
-
-    @Override
-    public void writeInt32(int fieldNumber, int value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      writeInt32NoTag(value);
-    }
-
-    @Override
-    public void writeUInt32(int fieldNumber, int value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      writeUInt32NoTag(value);
-    }
-
-    @Override
-    public void writeFixed32(int fieldNumber, int value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_FIXED32);
-      writeFixed32NoTag(value);
-    }
-
-    @Override
-    public void writeUInt64(int fieldNumber, long value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      writeUInt64NoTag(value);
-    }
-
-    @Override
-    public void writeFixed64(int fieldNumber, long value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_FIXED64);
-      writeFixed64NoTag(value);
-    }
-
-    @Override
-    public void writeBool(int fieldNumber, boolean value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      write((byte) (value ? 1 : 0));
-    }
-
-    @Override
-    public void writeString(int fieldNumber, String value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeStringNoTag(value);
-    }
-
-    @Override
-    public void writeBytes(int fieldNumber, ByteString value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeBytesNoTag(value);
-    }
-
-    @Override
-    public void writeByteArray(int fieldNumber, byte[] value) throws IOException {
-      writeByteArray(fieldNumber, value, 0, value.length);
-    }
-
-    @Override
-    public void writeByteArray(int fieldNumber, byte[] value, int offset, int length)
-        throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeByteArrayNoTag(value, offset, length);
-    }
-
-    @Override
-    public void writeByteBuffer(int fieldNumber, ByteBuffer value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeUInt32NoTag(value.capacity());
-      writeRawBytes(value);
-    }
-
-    @Override
-    public void writeMessage(int fieldNumber, MessageLite value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeMessageNoTag(value);
-    }
-
-    @Override
-    void writeMessage(int fieldNumber, MessageLite value, Schema schema) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeMessageNoTag(value, schema);
-    }
-
-    @Override
-    public void writeMessageSetExtension(int fieldNumber, MessageLite value) throws IOException {
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_START_GROUP);
-      writeUInt32(WireFormat.MESSAGE_SET_TYPE_ID, fieldNumber);
-      writeMessage(WireFormat.MESSAGE_SET_MESSAGE, value);
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_END_GROUP);
-    }
-
-    @Override
-    public void writeRawMessageSetExtension(int fieldNumber, ByteString value) throws IOException {
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_START_GROUP);
-      writeUInt32(WireFormat.MESSAGE_SET_TYPE_ID, fieldNumber);
-      writeBytes(WireFormat.MESSAGE_SET_MESSAGE, value);
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_END_GROUP);
-    }
-
-    @Override
-    public void writeMessageNoTag(MessageLite value) throws IOException {
-      writeUInt32NoTag(value.getSerializedSize());
-      value.writeTo(this);
-    }
-
-    @Override
-    void writeMessageNoTag(MessageLite value, Schema schema) throws IOException {
-      writeUInt32NoTag(((AbstractMessageLite) value).getSerializedSize(schema));
-      schema.writeTo(value, wrapper);
-    }
-
-    @Override
-    public void write(byte value) throws IOException {
-      if (position >= limit) {
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, 1));
+    OutputStreamEncoder(OutputStream out, int bufferSize) {
+      if (out == null) {
+        throw new NullPointerException("out");
       }
-      UnsafeUtil.putByte(position++, value);
-    }
+      this.out = out;
 
-    @Override
-    public void writeBytesNoTag(ByteString value) throws IOException {
-      writeUInt32NoTag(value.size());
-      value.writeTo(this);
-    }
-
-    @Override
-    public void writeByteArrayNoTag(byte[] value, int offset, int length) throws IOException {
-      writeUInt32NoTag(length);
-      write(value, offset, length);
-    }
-
-    @Override
-    public void writeRawBytes(ByteBuffer value) throws IOException {
-      if (value.hasArray()) {
-        write(value.array(), value.arrayOffset(), value.capacity());
-      } else {
-        ByteBuffer duplicated = value.duplicate();
-        duplicated.clear();
-        write(duplicated);
-      }
-    }
-
-    @Override
-    public void writeInt32NoTag(int value) throws IOException {
-      if (value >= 0) {
-        writeUInt32NoTag(value);
-      } else {
-        // Must sign-extend.
-        writeUInt64NoTag(value);
-      }
-    }
-
-    @Override
-    public void writeUInt32NoTag(int value) throws IOException {
-      if (position <= oneVarintLimit) {
-        // Optimization to avoid bounds checks on each iteration.
-        while (true) {
-          if ((value & ~0x7F) == 0) {
-            UnsafeUtil.putByte(position++, (byte) value);
-            return;
-          } else {
-            UnsafeUtil.putByte(position++, (byte) ((value & 0x7F) | 0x80));
-            value >>>= 7;
-          }
-        }
-      } else {
-        while (position < limit) {
-          if ((value & ~0x7F) == 0) {
-            UnsafeUtil.putByte(position++, (byte) value);
-            return;
-          } else {
-            UnsafeUtil.putByte(position++, (byte) ((value & 0x7F) | 0x80));
-            value >>>= 7;
-          }
-        }
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, 1));
-      }
-    }
-
-    @Override
-    public void writeFixed32NoTag(int value) throws IOException {
-      buffer.putInt(bufferPos(position), value);
-      position += FIXED32_SIZE;
-    }
-
-    @Override
-    public void writeUInt64NoTag(long value) throws IOException {
-      if (position <= oneVarintLimit) {
-        // Optimization to avoid bounds checks on each iteration.
-        while (true) {
-          if ((value & ~0x7FL) == 0) {
-            UnsafeUtil.putByte(position++, (byte) value);
-            return;
-          } else {
-            UnsafeUtil.putByte(position++, (byte) (((int) value & 0x7F) | 0x80));
-            value >>>= 7;
-          }
-        }
-      } else {
-        while (position < limit) {
-          if ((value & ~0x7FL) == 0) {
-            UnsafeUtil.putByte(position++, (byte) value);
-            return;
-          } else {
-            UnsafeUtil.putByte(position++, (byte) (((int) value & 0x7F) | 0x80));
-            value >>>= 7;
-          }
-        }
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, 1));
-      }
-    }
-
-    @Override
-    public void writeFixed64NoTag(long value) throws IOException {
-      buffer.putLong(bufferPos(position), value);
-      position += FIXED64_SIZE;
-    }
-
-    @Override
-    public void write(byte[] value, int offset, int length) throws IOException {
-      if (value == null
-          || offset < 0
-          || length < 0
-          || (value.length - length) < offset
-          || (limit - length) < position) {
-        if (value == null) {
-          throw new NullPointerException("value");
-        }
-        throw new OutOfSpaceException(
-            String.format("Pos: %d, limit: %d, len: %d", position, limit, length));
-      }
-
-      UnsafeUtil.copyMemory(value, offset, position, length);
-      position += length;
-    }
-
-    @Override
-    public void writeLazy(byte[] value, int offset, int length) throws IOException {
-      write(value, offset, length);
-    }
-
-    @Override
-    public void write(ByteBuffer value) throws IOException {
-      try {
-        int length = value.remaining();
-        repositionBuffer(position);
-        buffer.put(value);
-        position += length;
-      } catch (BufferOverflowException e) {
-        throw new OutOfSpaceException(e);
-      }
-    }
-
-    @Override
-    public void writeLazy(ByteBuffer value) throws IOException {
-      write(value);
-    }
-
-    @Override
-    public void writeStringNoTag(String value) throws IOException {
-      long prevPos = position;
-      try {
-        // UTF-8 byte length of the string is at least its UTF-16 code unit length (value.length()),
-        // and at most 3 times of it. We take advantage of this in both branches below.
-        int maxEncodedSize = value.length() * Utf8.MAX_BYTES_PER_CHAR;
-        int maxLengthVarIntSize = computeUInt32SizeNoTag(maxEncodedSize);
-        int minLengthVarIntSize = computeUInt32SizeNoTag(value.length());
-        if (minLengthVarIntSize == maxLengthVarIntSize) {
-          // Save the current position and increment past the length field. We'll come back
-          // and write the length field after the encoding is complete.
-          int stringStart = bufferPos(position) + minLengthVarIntSize;
-          buffer.position(stringStart);
-
-          // Encode the string.
-          Utf8.encodeUtf8(value, buffer);
-
-          // Write the length and advance the position.
-          int length = buffer.position() - stringStart;
-          writeUInt32NoTag(length);
-          position += length;
-        } else {
-          // Calculate and write the encoded length.
-          int length = Utf8.encodedLength(value);
-          writeUInt32NoTag(length);
-
-          // Write the string and advance the position.
-          repositionBuffer(position);
-          Utf8.encodeUtf8(value, buffer);
-          position += length;
-        }
-      } catch (UnpairedSurrogateException e) {
-        // Roll back the change and convert to an IOException.
-        position = prevPos;
-        repositionBuffer(position);
-
-        // TODO(nathanmittler): We should throw an IOException here instead.
-        inefficientWriteStringNoTag(value, e);
-      } catch (IllegalArgumentException e) {
-        // Thrown by buffer.position() if out of range.
-        throw new OutOfSpaceException(e);
-      } catch (IndexOutOfBoundsException e) {
-        throw new OutOfSpaceException(e);
-      }
-    }
-
-    @Override
-    public void flush() {
-      // Update the position of the original buffer.
-      originalBuffer.position(bufferPos(position));
-    }
-
-    @Override
-    public int spaceLeft() {
-      return (int) (limit - position);
-    }
-
-    @Override
-    public int getTotalBytesWritten() {
-      return (int) (position - initialPosition);
-    }
-
-    private void repositionBuffer(long pos) {
-      buffer.position(bufferPos(pos));
-    }
-
-    private int bufferPos(long pos) {
-      return (int) (pos - address);
-    }
-  }
-
-  /** Abstract base class for buffered encoders. */
-  private abstract static class AbstractBufferedEncoder extends CodedOutputStream {
-    final byte[] buffer;
-    final int limit;
-    int position;
-    int totalBytesWritten;
-
-    AbstractBufferedEncoder(int bufferSize) {
       if (bufferSize < 0) {
         throw new IllegalArgumentException("bufferSize must be >= 0");
       }
@@ -2277,7 +1823,10 @@ public abstract class CodedOutputStream extends ByteOutput {
      * responsibility of the caller.
      */
     final void buffer(byte value) {
-      buffer[position++] = value;
+      int position = this.position;
+      buffer[position] = value;
+      // Android optimisation: 1 fewer instruction codegen vs buffer[position++].
+      this.position = position + 1;
       totalBytesWritten++;
     }
 
@@ -2307,32 +1856,43 @@ public abstract class CodedOutputStream extends ByteOutput {
      * responsibility of the caller.
      */
     final void bufferUInt32NoTag(int value) {
-      if (HAS_UNSAFE_ARRAY_OPERATIONS) {
-        final long originalPos = position;
-        while (true) {
-          if ((value & ~0x7F) == 0) {
-            UnsafeUtil.putByte(buffer, position++, (byte) value);
-            break;
-          } else {
-            UnsafeUtil.putByte(buffer, position++, (byte) ((value & 0x7F) | 0x80));
-            value >>>= 7;
-          }
-        }
-        int delta = (int) (position - originalPos);
-        totalBytesWritten += delta;
-      } else {
-        while (true) {
-          if ((value & ~0x7F) == 0) {
-            buffer[position++] = (byte) value;
-            totalBytesWritten++;
-            return;
-          } else {
-            buffer[position++] = (byte) ((value & 0x7F) | 0x80);
-            totalBytesWritten++;
-            value >>>= 7;
-          }
-        }
+      int position = this.position;
+      int totalBytesWritten = this.totalBytesWritten;
+      if ((value & ~0x7F) == 0) {
+        buffer[position] = (byte) value;
+        this.position = position + 1;
+        this.totalBytesWritten = totalBytesWritten + 1;
+        return;
       }
+      buffer[position] = (byte) (value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7F) == 0) {
+        buffer[position + 1] = (byte) value;
+        this.position = position + 2;
+        this.totalBytesWritten = totalBytesWritten + 2;
+        return;
+      }
+      buffer[position + 1] = (byte) (value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7F) == 0) {
+        buffer[position + 2] = (byte) value;
+        this.position = position + 3;
+        this.totalBytesWritten = totalBytesWritten + 3;
+        return;
+      }
+      buffer[position + 2] = (byte) (value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7F) == 0) {
+        buffer[position + 3] = (byte) value;
+        this.position = position + 4;
+        this.totalBytesWritten = totalBytesWritten + 4;
+        return;
+      }
+      buffer[position + 3] = (byte) (value | 0x80);
+      buffer[position + 4] = (byte) (value >>> 7);
+      this.position = position + 5;
+      this.totalBytesWritten = totalBytesWritten + 5;
+      return;
     }
 
     /**
@@ -2340,32 +1900,83 @@ public abstract class CodedOutputStream extends ByteOutput {
      * responsibility of the caller.
      */
     final void bufferUInt64NoTag(long value) {
-      if (HAS_UNSAFE_ARRAY_OPERATIONS) {
-        final long originalPos = position;
-        while (true) {
-          if ((value & ~0x7FL) == 0) {
-            UnsafeUtil.putByte(buffer, position++, (byte) value);
-            break;
-          } else {
-            UnsafeUtil.putByte(buffer, position++, (byte) (((int) value & 0x7F) | 0x80));
-            value >>>= 7;
-          }
-        }
-        int delta = (int) (position - originalPos);
-        totalBytesWritten += delta;
-      } else {
-        while (true) {
-          if ((value & ~0x7FL) == 0) {
-            buffer[position++] = (byte) value;
-            totalBytesWritten++;
-            return;
-          } else {
-            buffer[position++] = (byte) (((int) value & 0x7F) | 0x80);
-            totalBytesWritten++;
-            value >>>= 7;
-          }
-        }
+      int position = this.position;
+      int totalBytesWritten = this.totalBytesWritten;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position] = (byte) value;
+        this.position = position + 1;
+        this.totalBytesWritten = totalBytesWritten + 1;
+        return;
       }
+      buffer[position] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 1] = (byte) value;
+        this.position = position + 2;
+        this.totalBytesWritten = totalBytesWritten + 2;
+        return;
+      }
+      buffer[position + 1] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 2] = (byte) value;
+        this.position = position + 3;
+        this.totalBytesWritten = totalBytesWritten + 3;
+        return;
+      }
+      buffer[position + 2] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 3] = (byte) value;
+        this.position = position + 4;
+        this.totalBytesWritten = totalBytesWritten + 4;
+        return;
+      }
+      buffer[position + 3] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 4] = (byte) value;
+        this.position = position + 5;
+        this.totalBytesWritten = totalBytesWritten + 5;
+        return;
+      }
+      buffer[position + 4] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 5] = (byte) value;
+        this.position = position + 6;
+        this.totalBytesWritten = totalBytesWritten + 6;
+        return;
+      }
+      buffer[position + 5] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 6] = (byte) value;
+        this.position = position + 7;
+        this.totalBytesWritten = totalBytesWritten + 7;
+        return;
+      }
+      buffer[position + 6] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 7] = (byte) value;
+        this.position = position + 8;
+        this.totalBytesWritten = totalBytesWritten + 8;
+        return;
+      }
+      buffer[position + 7] = (byte) ((int) value | 0x80);
+      value >>>= 7;
+      if ((value & ~0x7FL) == 0) {
+        buffer[position + 8] = (byte) value;
+        this.position = position + 9;
+        this.totalBytesWritten = totalBytesWritten + 9;
+        return;
+      }
+      buffer[position + 8] = (byte) ((int) value | 0x80);
+      buffer[position + 9] = (byte) (value >>> 7);
+      this.position = position + 10;
+      this.totalBytesWritten = totalBytesWritten + 10;
+      return;
     }
 
     /**
@@ -2373,10 +1984,12 @@ public abstract class CodedOutputStream extends ByteOutput {
      * responsibility of the caller.
      */
     final void bufferFixed32NoTag(int value) {
-      buffer[position++] = (byte) (value & 0xFF);
-      buffer[position++] = (byte) ((value >> 8) & 0xFF);
-      buffer[position++] = (byte) ((value >> 16) & 0xFF);
-      buffer[position++] = (byte) ((value >> 24) & 0xFF);
+      int position = this.position; // Perf: hoist field to register to avoid load/stores.
+      buffer[position++] = (byte) value;
+      buffer[position++] = (byte) (value >> 8);
+      buffer[position++] = (byte) (value >> 16);
+      buffer[position++] = (byte) (value >> 24);
+      this.position = position;
       totalBytesWritten += FIXED32_SIZE;
     }
 
@@ -2385,32 +1998,17 @@ public abstract class CodedOutputStream extends ByteOutput {
      * responsibility of the caller.
      */
     final void bufferFixed64NoTag(long value) {
-      buffer[position++] = (byte) (value & 0xFF);
-      buffer[position++] = (byte) ((value >> 8) & 0xFF);
-      buffer[position++] = (byte) ((value >> 16) & 0xFF);
-      buffer[position++] = (byte) ((value >> 24) & 0xFF);
-      buffer[position++] = (byte) ((int) (value >> 32) & 0xFF);
-      buffer[position++] = (byte) ((int) (value >> 40) & 0xFF);
-      buffer[position++] = (byte) ((int) (value >> 48) & 0xFF);
-      buffer[position++] = (byte) ((int) (value >> 56) & 0xFF);
+      int position = this.position; // Perf: hoist field to register to avoid load/stores.
+      buffer[position++] = (byte) value;
+      buffer[position++] = (byte) (value >> 8);
+      buffer[position++] = (byte) (value >> 16);
+      buffer[position++] = (byte) (value >> 24);
+      buffer[position++] = (byte) (value >> 32);
+      buffer[position++] = (byte) (value >> 40);
+      buffer[position++] = (byte) (value >> 48);
+      buffer[position++] = (byte) (value >> 56);
+      this.position = position;
       totalBytesWritten += FIXED64_SIZE;
-    }
-  }
-
-  /**
-   * A {@link CodedOutputStream} that decorates a {@link ByteOutput}. It internal buffer only to
-   * support string encoding operations. All other writes are just passed through to the {@link
-   * ByteOutput}.
-   */
-  private static final class ByteOutputEncoder extends AbstractBufferedEncoder {
-    private final ByteOutput out;
-
-    ByteOutputEncoder(ByteOutput out, int bufferSize) {
-      super(bufferSize);
-      if (out == null) {
-        throw new NullPointerException("out");
-      }
-      this.out = out;
     }
 
     @Override
@@ -2510,7 +2108,7 @@ public abstract class CodedOutputStream extends ByteOutput {
         write(value.array(), value.arrayOffset(), value.capacity());
       } else {
         ByteBuffer duplicated = value.duplicate();
-        duplicated.clear();
+        Java8Compatibility.clear(duplicated);
         write(duplicated);
       }
     }
@@ -2519,13 +2117,6 @@ public abstract class CodedOutputStream extends ByteOutput {
     public void writeMessage(final int fieldNumber, final MessageLite value) throws IOException {
       writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
       writeMessageNoTag(value);
-    }
-
-    @Override
-    void writeMessage(final int fieldNumber, final MessageLite value, Schema schema)
-        throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeMessageNoTag(value, schema);
     }
 
     @Override
@@ -2550,12 +2141,6 @@ public abstract class CodedOutputStream extends ByteOutput {
     public void writeMessageNoTag(final MessageLite value) throws IOException {
       writeUInt32NoTag(value.getSerializedSize());
       value.writeTo(this);
-    }
-
-    @Override
-    void writeMessageNoTag(final MessageLite value, Schema schema) throws IOException {
-      writeUInt32NoTag(((AbstractMessageLite) value).getSerializedSize(schema));
-      schema.writeTo(value, wrapper);
     }
 
     @Override
@@ -2628,353 +2213,29 @@ public abstract class CodedOutputStream extends ByteOutput {
         doFlush();
       }
 
-      final int oldPosition = position;
+      // Optimize for the case where we know this length results in a constant varint length as
+      // this saves a pass for measuring the length of the string.
+      final int minLengthVarIntSize = computeUInt32SizeNoTag(value.length());
+      int oldPosition = position;
+      final int length;
       try {
-        // Optimize for the case where we know this length results in a constant varint length as
-        // this saves a pass for measuring the length of the string.
-        final int minLengthVarIntSize = computeUInt32SizeNoTag(value.length());
-
         if (minLengthVarIntSize == maxLengthVarIntSize) {
           position = oldPosition + minLengthVarIntSize;
           int newPosition = Utf8.encode(value, buffer, position, limit - position);
-          // Since this class is stateful and tracks the position, we rewind and store the state,
-          // prepend the length, then reset it back to the end of the string.
+          // Since this class is stateful and tracks the position, we rewind and store the
+          // state, prepend the length, then reset it back to the end of the string.
           position = oldPosition;
-          int length = newPosition - oldPosition - minLengthVarIntSize;
+          length = newPosition - oldPosition - minLengthVarIntSize;
           bufferUInt32NoTag(length);
           position = newPosition;
-          totalBytesWritten += length;
         } else {
-          int length = Utf8.encodedLength(value);
+          length = Utf8.encodedLength(value);
           bufferUInt32NoTag(length);
           position = Utf8.encode(value, buffer, position, length);
-          totalBytesWritten += length;
         }
-      } catch (UnpairedSurrogateException e) {
-        // Roll back the change and convert to an IOException.
-        totalBytesWritten -= position - oldPosition;
-        position = oldPosition;
-
-        // TODO(nathanmittler): We should throw an IOException here instead.
-        inefficientWriteStringNoTag(value, e);
-      } catch (IndexOutOfBoundsException e) {
+        totalBytesWritten += length;
+      } catch (ArrayIndexOutOfBoundsException e) {
         throw new OutOfSpaceException(e);
-      }
-    }
-
-    @Override
-    public void flush() throws IOException {
-      if (position > 0) {
-        // Flush the buffer.
-        doFlush();
-      }
-    }
-
-    @Override
-    public void write(byte[] value, int offset, int length) throws IOException {
-      flush();
-      out.write(value, offset, length);
-      totalBytesWritten += length;
-    }
-
-    @Override
-    public void writeLazy(byte[] value, int offset, int length) throws IOException {
-      flush();
-      out.writeLazy(value, offset, length);
-      totalBytesWritten += length;
-    }
-
-    @Override
-    public void write(ByteBuffer value) throws IOException {
-      flush();
-      int length = value.remaining();
-      out.write(value);
-      totalBytesWritten += length;
-    }
-
-    @Override
-    public void writeLazy(ByteBuffer value) throws IOException {
-      flush();
-      int length = value.remaining();
-      out.writeLazy(value);
-      totalBytesWritten += length;
-    }
-
-    private void flushIfNotAvailable(int requiredSize) throws IOException {
-      if (limit - position < requiredSize) {
-        doFlush();
-      }
-    }
-
-    private void doFlush() throws IOException {
-      out.write(buffer, 0, position);
-      position = 0;
-    }
-  }
-
-  /**
-   * An {@link CodedOutputStream} that decorates an {@link OutputStream}. It performs internal
-   * buffering to optimize writes to the {@link OutputStream}.
-   */
-  private static final class OutputStreamEncoder extends AbstractBufferedEncoder {
-    private final OutputStream out;
-
-    OutputStreamEncoder(OutputStream out, int bufferSize) {
-      super(bufferSize);
-      if (out == null) {
-        throw new NullPointerException("out");
-      }
-      this.out = out;
-    }
-
-    @Override
-    public void writeTag(final int fieldNumber, final int wireType) throws IOException {
-      writeUInt32NoTag(WireFormat.makeTag(fieldNumber, wireType));
-    }
-
-    @Override
-    public void writeInt32(final int fieldNumber, final int value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT_SIZE * 2);
-      bufferTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      bufferInt32NoTag(value);
-    }
-
-    @Override
-    public void writeUInt32(final int fieldNumber, final int value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT_SIZE * 2);
-      bufferTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      bufferUInt32NoTag(value);
-    }
-
-    @Override
-    public void writeFixed32(final int fieldNumber, final int value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT_SIZE + FIXED32_SIZE);
-      bufferTag(fieldNumber, WireFormat.WIRETYPE_FIXED32);
-      bufferFixed32NoTag(value);
-    }
-
-    @Override
-    public void writeUInt64(final int fieldNumber, final long value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT_SIZE * 2);
-      bufferTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      bufferUInt64NoTag(value);
-    }
-
-    @Override
-    public void writeFixed64(final int fieldNumber, final long value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT_SIZE + FIXED64_SIZE);
-      bufferTag(fieldNumber, WireFormat.WIRETYPE_FIXED64);
-      bufferFixed64NoTag(value);
-    }
-
-    @Override
-    public void writeBool(final int fieldNumber, final boolean value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT_SIZE + 1);
-      bufferTag(fieldNumber, WireFormat.WIRETYPE_VARINT);
-      buffer((byte) (value ? 1 : 0));
-    }
-
-    @Override
-    public void writeString(final int fieldNumber, final String value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeStringNoTag(value);
-    }
-
-    @Override
-    public void writeBytes(final int fieldNumber, final ByteString value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeBytesNoTag(value);
-    }
-
-    @Override
-    public void writeByteArray(final int fieldNumber, final byte[] value) throws IOException {
-      writeByteArray(fieldNumber, value, 0, value.length);
-    }
-
-    @Override
-    public void writeByteArray(
-        final int fieldNumber, final byte[] value, final int offset, final int length)
-        throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeByteArrayNoTag(value, offset, length);
-    }
-
-    @Override
-    public void writeByteBuffer(final int fieldNumber, final ByteBuffer value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeUInt32NoTag(value.capacity());
-      writeRawBytes(value);
-    }
-
-    @Override
-    public void writeBytesNoTag(final ByteString value) throws IOException {
-      writeUInt32NoTag(value.size());
-      value.writeTo(this);
-    }
-
-    @Override
-    public void writeByteArrayNoTag(final byte[] value, int offset, int length) throws IOException {
-      writeUInt32NoTag(length);
-      write(value, offset, length);
-    }
-
-    @Override
-    public void writeRawBytes(final ByteBuffer value) throws IOException {
-      if (value.hasArray()) {
-        write(value.array(), value.arrayOffset(), value.capacity());
-      } else {
-        ByteBuffer duplicated = value.duplicate();
-        duplicated.clear();
-        write(duplicated);
-      }
-    }
-
-    @Override
-    public void writeMessage(final int fieldNumber, final MessageLite value) throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeMessageNoTag(value);
-    }
-
-    @Override
-    void writeMessage(final int fieldNumber, final MessageLite value, Schema schema)
-        throws IOException {
-      writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED);
-      writeMessageNoTag(value, schema);
-    }
-
-    @Override
-    public void writeMessageSetExtension(final int fieldNumber, final MessageLite value)
-        throws IOException {
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_START_GROUP);
-      writeUInt32(WireFormat.MESSAGE_SET_TYPE_ID, fieldNumber);
-      writeMessage(WireFormat.MESSAGE_SET_MESSAGE, value);
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_END_GROUP);
-    }
-
-    @Override
-    public void writeRawMessageSetExtension(final int fieldNumber, final ByteString value)
-        throws IOException {
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_START_GROUP);
-      writeUInt32(WireFormat.MESSAGE_SET_TYPE_ID, fieldNumber);
-      writeBytes(WireFormat.MESSAGE_SET_MESSAGE, value);
-      writeTag(WireFormat.MESSAGE_SET_ITEM, WireFormat.WIRETYPE_END_GROUP);
-    }
-
-    @Override
-    public void writeMessageNoTag(final MessageLite value) throws IOException {
-      writeUInt32NoTag(value.getSerializedSize());
-      value.writeTo(this);
-    }
-
-    @Override
-    void writeMessageNoTag(final MessageLite value, Schema schema) throws IOException {
-      writeUInt32NoTag(((AbstractMessageLite) value).getSerializedSize(schema));
-      schema.writeTo(value, wrapper);
-    }
-
-    @Override
-    public void write(byte value) throws IOException {
-      if (position == limit) {
-        doFlush();
-      }
-
-      buffer(value);
-    }
-
-    @Override
-    public void writeInt32NoTag(int value) throws IOException {
-      if (value >= 0) {
-        writeUInt32NoTag(value);
-      } else {
-        // Must sign-extend.
-        writeUInt64NoTag(value);
-      }
-    }
-
-    @Override
-    public void writeUInt32NoTag(int value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT32_SIZE);
-      bufferUInt32NoTag(value);
-    }
-
-    @Override
-    public void writeFixed32NoTag(final int value) throws IOException {
-      flushIfNotAvailable(FIXED32_SIZE);
-      bufferFixed32NoTag(value);
-    }
-
-    @Override
-    public void writeUInt64NoTag(long value) throws IOException {
-      flushIfNotAvailable(MAX_VARINT_SIZE);
-      bufferUInt64NoTag(value);
-    }
-
-    @Override
-    public void writeFixed64NoTag(final long value) throws IOException {
-      flushIfNotAvailable(FIXED64_SIZE);
-      bufferFixed64NoTag(value);
-    }
-
-    @Override
-    public void writeStringNoTag(String value) throws IOException {
-      try {
-        // UTF-8 byte length of the string is at least its UTF-16 code unit length (value.length()),
-        // and at most 3 times of it. We take advantage of this in both branches below.
-        final int maxLength = value.length() * Utf8.MAX_BYTES_PER_CHAR;
-        final int maxLengthVarIntSize = computeUInt32SizeNoTag(maxLength);
-
-        // If we are streaming and the potential length is too big to fit in our buffer, we take the
-        // slower path.
-        if (maxLengthVarIntSize + maxLength > limit) {
-          // Allocate a byte[] that we know can fit the string and encode into it. String.getBytes()
-          // does the same internally and then does *another copy* to return a byte[] of exactly the
-          // right size. We can skip that copy and just writeRawBytes up to the actualLength of the
-          // UTF-8 encoded bytes.
-          final byte[] encodedBytes = new byte[maxLength];
-          int actualLength = Utf8.encode(value, encodedBytes, 0, maxLength);
-          writeUInt32NoTag(actualLength);
-          writeLazy(encodedBytes, 0, actualLength);
-          return;
-        }
-
-        // Fast path: we have enough space available in our buffer for the string...
-        if (maxLengthVarIntSize + maxLength > limit - position) {
-          // Flush to free up space.
-          doFlush();
-        }
-
-        // Optimize for the case where we know this length results in a constant varint length as
-        // this saves a pass for measuring the length of the string.
-        final int minLengthVarIntSize = computeUInt32SizeNoTag(value.length());
-        int oldPosition = position;
-        final int length;
-        try {
-          if (minLengthVarIntSize == maxLengthVarIntSize) {
-            position = oldPosition + minLengthVarIntSize;
-            int newPosition = Utf8.encode(value, buffer, position, limit - position);
-            // Since this class is stateful and tracks the position, we rewind and store the
-            // state, prepend the length, then reset it back to the end of the string.
-            position = oldPosition;
-            length = newPosition - oldPosition - minLengthVarIntSize;
-            bufferUInt32NoTag(length);
-            position = newPosition;
-          } else {
-            length = Utf8.encodedLength(value);
-            bufferUInt32NoTag(length);
-            position = Utf8.encode(value, buffer, position, length);
-          }
-          totalBytesWritten += length;
-        } catch (UnpairedSurrogateException e) {
-          // Be extra careful and restore the original position for retrying the write with the
-          // less efficient path.
-          totalBytesWritten -= position - oldPosition;
-          position = oldPosition;
-          throw e;
-        } catch (ArrayIndexOutOfBoundsException e) {
-          throw new OutOfSpaceException(e);
-        }
-      } catch (UnpairedSurrogateException e) {
-        inefficientWriteStringNoTag(value, e);
       }
     }
 

@@ -4,9 +4,9 @@
 
 #include "media/filters/offloading_video_decoder.h"
 
+#include <algorithm>
 #include <memory>
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/synchronization/atomic_flag.h"
@@ -96,7 +96,7 @@ void OffloadingVideoDecoder::Initialize(const VideoDecoderConfig& config,
   const bool disable_offloading =
       config.is_encrypted() ||
       config.coded_size().width() < min_offloading_width_ ||
-      !base::Contains(supported_codecs_, config.codec());
+      !std::ranges::contains(supported_codecs_, config.codec());
 
   if (initialized_) {
     initialized_ = false;
@@ -108,7 +108,7 @@ void OffloadingVideoDecoder::Initialize(const VideoDecoderConfig& config,
           FROM_HERE,
           base::BindOnce(&OffloadableVideoDecoder::Detach,
                          base::Unretained(helper_->decoder())),
-          // We must trampoline back trough OffloadingVideoDecoder because it's
+          // We must trampoline back through OffloadingVideoDecoder because it's
           // possible for this class to be destroyed during Initialize().
           base::BindOnce(&OffloadingVideoDecoder::Initialize,
                          weak_factory_.GetWeakPtr(), config, low_delay,
@@ -142,7 +142,7 @@ void OffloadingVideoDecoder::Initialize(const VideoDecoderConfig& config,
 
   if (!offload_task_runner_) {
     offload_task_runner_ = base::ThreadPool::CreateSequencedTaskRunner(
-        {base::TaskPriority::USER_BLOCKING});
+        {base::MayBlock(), base::TaskPriority::USER_BLOCKING});
   }
 
   offload_task_runner_->PostTask(

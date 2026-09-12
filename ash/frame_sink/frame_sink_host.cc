@@ -4,6 +4,8 @@
 
 #include "ash/frame_sink/frame_sink_host.h"
 
+#include <utility>
+
 #include "ash/frame_sink/frame_sink_holder.h"
 #include "base/check.h"
 #include "base/functional/bind.h"
@@ -25,8 +27,6 @@ FrameSinkHost::~FrameSinkHost() {
 
   FrameSinkHolder::DeleteWhenLastResourceHasBeenReclaimed(
       std::move(frame_sink_holder_), host_window_);
-
-  host_window_->RemoveObserver(this);
 }
 
 void FrameSinkHost::SetPresentationCallback(PresentationCallback callback) {
@@ -34,18 +34,49 @@ void FrameSinkHost::SetPresentationCallback(PresentationCallback callback) {
 }
 
 void FrameSinkHost::Init(aura::Window* host_window) {
-  DCHECK(!frame_sink_holder_);
+  SetHostWindow(host_window);
+  frame_sink_factory_ = base::BindRepeating(
+      &FrameSinkHost::CreateLayerTreeFrameSink, base::Unretained(this));
+  InitFrameSinkHolder(host_window, frame_sink_factory_.Run());
+}
+
+void FrameSinkHost::InitForTesting(aura::Window* host_window,
+                                   FrameSinkFactory frame_sink_factory) {
+  frame_sink_factory_ = std::move(frame_sink_factory);
+  SetHostWindow(host_window);
+  InitFrameSinkHolder(host_window, frame_sink_factory_.Run());
+}
+
+std::unique_ptr<cc::LayerTreeFrameSink>
+FrameSinkHost::CreateLayerTreeFrameSink() {
+  DCHECK(host_window_);
+  return host_window_->CreateLayerTreeFrameSink();
+}
+
+void FrameSinkHost::InitFrameSinkHolder(
+    aura::Window* host_window,
+    std::unique_ptr<cc::LayerTreeFrameSink> layer_tree_frame_sink) {
+  DCHECK(layer_tree_frame_sink);
+  DCHECK(!frame_sink_holder_) << "FrameSinkHost is already initialized.";
+
+  frame_sink_holder_ = std::make_unique<FrameSinkHolder>(
+      std::move(layer_tree_frame_sink),
+      base::BindRepeating(&FrameSinkHost::CreateCompositorFrame,
+                          base::Unretained(this)),
+      base::BindOnce(&FrameSinkHost::OnFirstFrameRequested,
+                     base::Unretained(this)),
+      base::BindOnce(&FrameSinkHost::OnFrameSinkLost, base::Unretained(this)));
+}
+
+void FrameSinkHost::SetHostWindow(aura::Window* host_window) {
+  DCHECK(!host_window_) << "FrameSinkHost is already initialized.";
   DCHECK(host_window);
   DCHECK(host_window->parent()) << "Before calling Init(), host_window must be "
                                    "added to the window hierarchy first.";
+
   host_window_ = host_window;
-
-  host_window_->AddObserver(this);
-
-  frame_sink_holder_ = std::make_unique<FrameSinkHolder>(
-      host_window_->CreateLayerTreeFrameSink(),
-      base::BindRepeating(&FrameSinkHost::CreateCompositorFrame,
-                          base::Unretained(this)));
+  host_window_observation_.Reset();
+  host_window_observation_.Observe(host_window_);
 }
 
 void FrameSinkHost::UpdateSurface(const gfx::Rect& content_rect,
@@ -62,10 +93,6 @@ void FrameSinkHost::UpdateSurface(const gfx::Rect& content_rect,
   content_rect_ = content_rect;
   UnionDamage(damage_rect);
 
-  if (!damage_rect.IsEmpty()) {
-    frame_sink_holder_->resource_manager().DamageResources();
-  }
-
   frame_sink_holder_->SubmitCompositorFrame(synchonous_draw);
 }
 
@@ -78,10 +105,6 @@ void FrameSinkHost::AutoUpdateSurface(const gfx::Rect& content_rect,
   content_rect_ = content_rect;
   UnionDamage(damage_rect);
 
-  if (!damage_rect.IsEmpty()) {
-    frame_sink_holder_->resource_manager().DamageResources();
-  }
-
   frame_sink_holder_->SetAutoUpdateMode(/*mode=*/true);
 }
 
@@ -93,8 +116,22 @@ void FrameSinkHost::OnWindowDestroying(aura::Window* window) {
   FrameSinkHolder::DeleteWhenLastResourceHasBeenReclaimed(
       std::move(frame_sink_holder_), host_window_);
 
-  host_window_->RemoveObserver(this);
+  host_window_observation_.Reset();
   host_window_ = nullptr;
+}
+
+void FrameSinkHost::OnFirstFrameRequested() {}
+
+void FrameSinkHost::OnFrameSinkLost() {
+  frame_sink_holder_.reset();
+  InitFrameSinkHolder(host_window(), frame_sink_factory_.Run());
+
+  // Since some implementations of FrameSinkHost rarely update the surface,
+  // submit a compositor frame in order to update the surface. Otherwise,
+  // host_window will show a white surface instead.
+  const gfx::Rect& content_rect = host_window_->bounds();
+  const gfx::Rect& damage_rect = content_rect;
+  UpdateSurface(content_rect, damage_rect, /*synchronous_draw=*/true);
 }
 
 }  // namespace ash

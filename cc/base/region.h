@@ -5,9 +5,11 @@
 #ifndef CC_BASE_REGION_H_
 #define CC_BASE_REGION_H_
 
+#include <iosfwd>
 #include <memory>
 #include <string>
 
+#include "base/containers/span.h"
 #include "cc/base/base_export.h"
 #include "third_party/skia/include/core/SkRegion.h"
 #include "ui/gfx/geometry/rect.h"
@@ -33,11 +35,13 @@ class CC_BASE_EXPORT Region {
   Region();
   explicit Region(const SkRegion& region);
   Region(const Region& region);
+  Region(Region&& region);
   Region(const gfx::Rect& rect);  // NOLINT(runtime/explicit)
   ~Region();
 
   const Region& operator=(const gfx::Rect& rect);
   const Region& operator=(const Region& region);
+  Region& operator=(Region&& region);
   const Region& operator+=(const gfx::Vector2d& offset);
 
   // Returns a reference to a global empty Region. This should only be used for
@@ -63,6 +67,7 @@ class CC_BASE_EXPORT Region {
   void Subtract(const SimpleEnclosedRegion& region);
   void Union(const gfx::Rect& rect);
   void Union(const Region& region);
+  void Union(base::span<const SkIRect> rects);
   void Intersect(const gfx::Rect& rect);
   void Intersect(const Region& region);
 
@@ -163,6 +168,11 @@ inline Region UnionRegions(const Region& a, const gfx::Rect& b) {
   result.Union(b);
   return result;
 }
+
+// This is declared here for use in gtest-based unit tests but is defined in
+// the //cc:test_support target. Depend on that to use this in your unit test.
+// This should not be used in production code - call ToString() instead.
+void PrintTo(const Region& region, std::ostream* os);
 
 }  // namespace cc
 

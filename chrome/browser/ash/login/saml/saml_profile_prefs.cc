@@ -4,8 +4,8 @@
 
 #include "chrome/browser/ash/login/saml/saml_profile_prefs.h"
 
+#include "ash/constants/ash_login_pref_names.h"
 #include "chrome/browser/ash/login/login_constants.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
 #include "chromeos/ash/components/login/auth/public/saml_password_attributes.h"
 #include "components/prefs/pref_registry_simple.h"
 
@@ -18,11 +18,9 @@ void RegisterSamlProfilePrefs(PrefRegistrySimple* registry) {
   registry->RegisterIntegerPref(
       prefs::kGaiaOfflineSigninTimeLimitDays,
       constants::kDefaultGaiaOfflineSigninTimeLimitDays);
-  registry->RegisterTimePref(prefs::kGaiaLastOnlineSignInTime, base::Time());
 
   registry->RegisterIntegerPref(prefs::kSAMLOfflineSigninTimeLimit,
                                 constants::kDefaultSAMLOfflineSigninTimeLimit);
-  registry->RegisterTimePref(prefs::kSAMLLastGAIASignInTime, base::Time());
 
   registry->RegisterIntegerPref(
       prefs::kGaiaLockScreenOfflineSigninTimeLimitDays,
@@ -42,7 +40,8 @@ void RegisterSamlProfilePrefs(PrefRegistrySimple* registry) {
   registry->RegisterBooleanPref(
       prefs::kLockScreenReauthenticationEnabled,
       constants::kDefaultLockScreenReauthenticationEnabled);
-  registry->RegisterStringPref(prefs::kSamlPasswordSyncToken, std::string());
+
+  registry->RegisterTimePref(prefs::kLastOnlineSignInTime, base::Time());
 
   SamlPasswordAttributes::RegisterProfilePrefs(registry);
 }

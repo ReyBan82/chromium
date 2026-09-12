@@ -4,73 +4,83 @@
 
 package org.chromium.chrome.browser.ntp;
 
+import static org.chromium.build.NullUtil.assertNonNull;
+import static org.chromium.build.NullUtil.assumeNonNull;
+import static org.chromium.chrome.R.plurals.recent_tabs_group_closure_without_title_with_color_accessibility;
+import static org.chromium.chrome.R.string.recent_tabs_group_closure_with_title_with_color_accessibility;
+
 import android.app.Activity;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.LruCache;
-import android.view.ContextMenu;
 import android.view.LayoutInflater;
-import android.view.MenuItem.OnMenuItemClickListener;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseExpandableListAdapter;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import androidx.annotation.ColorInt;
 import androidx.annotation.IntDef;
+import androidx.annotation.StringRes;
 
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.ntp.ForeignSessionHelper.ForeignSession;
-import org.chromium.chrome.browser.ntp.ForeignSessionHelper.ForeignSessionTab;
-import org.chromium.chrome.browser.ntp.ForeignSessionHelper.ForeignSessionWindow;
+import org.chromium.chrome.browser.native_page.ContextMenuManager;
+import org.chromium.chrome.browser.recent_tabs.ForeignSessionHelper.ForeignSession;
+import org.chromium.chrome.browser.recent_tabs.ForeignSessionHelper.ForeignSessionTab;
+import org.chromium.chrome.browser.recent_tabs.ForeignSessionHelper.ForeignSessionWindow;
 import org.chromium.chrome.browser.signin.LegacySyncPromoView;
 import org.chromium.chrome.browser.ui.favicon.FaviconHelper.DefaultFaviconHelper;
 import org.chromium.chrome.browser.ui.favicon.FaviconHelper.FaviconImageCallback;
 import org.chromium.chrome.browser.ui.favicon.FaviconUtils;
-import org.chromium.chrome.browser.ui.signin.SyncPromoController.SyncPromoState;
 import org.chromium.components.browser_ui.styles.SemanticColorUtils;
 import org.chromium.components.browser_ui.widget.RoundedIconGenerator;
 import org.chromium.components.embedder_support.util.UrlUtilities;
-import org.chromium.components.signin.metrics.SigninAccessPoint;
+import org.chromium.components.tab_groups.TabGroupColorId;
+import org.chromium.components.tab_groups.TabGroupColorPickerUtils;
+import org.chromium.components.url_formatter.UrlFormatter;
+import org.chromium.ui.UiUtils;
 import org.chromium.ui.base.DeviceFormFactor;
 import org.chromium.ui.mojom.WindowOpenDisposition;
+import org.chromium.ui.widget.HoverHighlightViewListener;
 import org.chromium.url.GURL;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
-import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
- * Row adapter for presenting recently closed tabs, synced tabs from other devices, the sync or
- * sign in promo, and currently open tabs (only in document mode) in a grouped list view.
+ * Row adapter for presenting recently closed tabs, synced tabs from other devices, the sync or sign
+ * in promo, and currently open tabs (only in document mode) in a grouped list view.
  */
+@NullMarked
 public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
     private static final int MAX_NUM_FAVICONS_TO_CACHE = 128;
 
-    @IntDef({ChildType.NONE, ChildType.DEFAULT_CONTENT, ChildType.PERSONALIZED_SIGNIN_PROMO,
-            ChildType.PERSONALIZED_SYNC_PROMO, ChildType.SYNC_PROMO})
+    @IntDef({
+        ChildType.NONE,
+        ChildType.DEFAULT_CONTENT,
+        ChildType.SIGNIN_PROMO,
+    })
     @Retention(RetentionPolicy.SOURCE)
     private @interface ChildType {
         // Values should be enumerated from 0 and can't have gaps.
         int NONE = 0;
         int DEFAULT_CONTENT = 1;
-        int PERSONALIZED_SIGNIN_PROMO = 2;
-        int PERSONALIZED_SYNC_PROMO = 3;
-        int SYNC_PROMO = 4;
-        /**
-         * Number of entries.
-         */
-        int NUM_ENTRIES = 5;
+        int SIGNIN_PROMO = 2;
+
+        /** Number of entries. */
+        int NUM_ENTRIES = 3;
     }
 
     @IntDef({GroupType.CONTENT, GroupType.VISIBLE_SEPARATOR, GroupType.INVISIBLE_SEPARATOR})
@@ -80,18 +90,22 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         int CONTENT = 0;
         int VISIBLE_SEPARATOR = 1;
         int INVISIBLE_SEPARATOR = 2;
-        /**
-         * Number of entries.
-         */
+
+        /** Number of entries. */
         int NUM_ENTRIES = 3;
     }
 
     // Values from the OtherSessionsActions enum in histograms.xml; do not change these values or
     // histograms will be broken.
-    @IntDef({OtherSessionsActions.MENU_INITIALIZED, OtherSessionsActions.LINK_CLICKED,
-            OtherSessionsActions.COLLAPSE_SESSION, OtherSessionsActions.EXPAND_SESSION,
-            OtherSessionsActions.OPEN_ALL, OtherSessionsActions.HAS_FOREIGN_DATA,
-            OtherSessionsActions.HIDE_FOR_NOW})
+    @IntDef({
+        OtherSessionsActions.MENU_INITIALIZED,
+        OtherSessionsActions.LINK_CLICKED,
+        OtherSessionsActions.COLLAPSE_SESSION,
+        OtherSessionsActions.EXPAND_SESSION,
+        OtherSessionsActions.OPEN_ALL,
+        OtherSessionsActions.HAS_FOREIGN_DATA,
+        OtherSessionsActions.HIDE_FOR_NOW
+    })
     @Retention(RetentionPolicy.SOURCE)
     private @interface OtherSessionsActions {
         int MENU_INITIALIZED = 0;
@@ -118,6 +132,7 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
     private final List<Group> mGroups;
     private final DefaultFaviconHelper mDefaultFaviconHelper;
     private final RecentTabsManager mRecentTabsManager;
+    private final ContextMenuManager mContextMenuManager;
     private final RecentlyClosedTabsGroup mRecentlyClosedTabsGroup = new RecentlyClosedTabsGroup();
     private final SeparatorGroup mVisibleSeparatorGroup = new SeparatorGroup(true);
     private final SeparatorGroup mInvisibleSeparatorGroup = new SeparatorGroup(false);
@@ -125,13 +140,14 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
             new ArrayMap<>(FaviconLocality.NUM_ENTRIES);
     private final int mFaviconSize;
     private boolean mHasForeignDataRecorded;
-    private RoundedIconGenerator mIconGenerator;
+    private final RoundedIconGenerator mIconGenerator;
+    private final HoverHighlightViewListener mHoverListener;
 
     /**
      * A generic group of objects to be shown in the RecentTabsRowAdapter, such as the list of
      * recently closed tabs.
      */
-    abstract class Group {
+    abstract class Group extends ContextMenuManager.EmptyDelegate {
         /**
          * @return The type of group: GroupType.CONTENT or GroupType.SEPARATOR.
          */
@@ -151,7 +167,7 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
          * @param childPosition The position for which to return the child.
          * @return The child at the position childPosition.
          */
-        Object getChild(int childPosition) {
+        @Nullable Object getChild(int childPosition) {
             return null;
         }
 
@@ -162,22 +178,16 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
          * @param isLastChild Whether this child is the last one.
          * @param convertView The re-usable child view (may be null).
          * @param parent The parent view group.
-         *
          * @return The view corresponding to the child.
          */
-        View getChildView(int childPosition, boolean isLastChild,
-                View convertView, ViewGroup parent) {
+        View getChildView(
+                int childPosition, boolean isLastChild, View convertView, ViewGroup parent) {
             View childView = convertView;
             if (childView == null) {
                 LayoutInflater inflater = LayoutInflater.from(mActivity);
                 childView = inflater.inflate(R.layout.recent_tabs_list_item, parent, false);
 
-                ViewHolder viewHolder = new ViewHolder();
-                viewHolder.textView = (TextView) childView.findViewById(R.id.title_row);
-                viewHolder.domainView = (TextView) childView.findViewById(R.id.domain_row);
-                viewHolder.imageView = (ImageView) childView.findViewById(R.id.recent_tabs_favicon);
-                viewHolder.imageView.setBackgroundResource(R.drawable.list_item_icon_modern_bg);
-                viewHolder.itemLayout = childView.findViewById(R.id.recent_tabs_list_item_layout);
+                ViewHolder viewHolder = new ViewHolder(childView);
                 childView.setTag(viewHolder);
             }
 
@@ -188,8 +198,8 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         }
 
         /**
-         * Configures a view inflated from recent_tabs_list_item.xml to display information about
-         * a child in this group.
+         * Configures a view inflated from recent_tabs_list_item.xml to display information about a
+         * child in this group.
          *
          * @param childPosition The position of the child within this group.
          * @param viewHolder The ViewHolder with references to pieces of the view.
@@ -202,29 +212,31 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
          * @param isExpanded Whether the group is expanded.
          * @param convertView The re-usable group view (may be null).
          * @param parent The parent view group.
-         *
          * @return The view corresponding to the group.
          */
         public View getGroupView(boolean isExpanded, View convertView, ViewGroup parent) {
             RecentTabsGroupView groupView = (RecentTabsGroupView) convertView;
             if (groupView == null) {
-                groupView = (RecentTabsGroupView) LayoutInflater.from(mActivity).inflate(
-                        R.layout.recent_tabs_group_item, parent, false);
+                groupView =
+                        (RecentTabsGroupView)
+                                LayoutInflater.from(mActivity)
+                                        .inflate(R.layout.recent_tabs_group_item, parent, false);
             }
+            groupView.setOnHoverListener(mHoverListener);
+            groupView.getExpandCollapseIcon().setOnHoverListener(mHoverListener);
             configureGroupView(groupView, isExpanded);
             return groupView;
         }
 
         /**
          * Configures an RecentTabsGroupView to display the header of this group.
+         *
          * @param groupView The RecentTabsGroupView to configure.
          * @param isExpanded Whether the view is currently expanded.
          */
         abstract void configureGroupView(RecentTabsGroupView groupView, boolean isExpanded);
 
-        /**
-         * Sets whether this group is collapsed (i.e. whether only the header is visible).
-         */
+        /** Sets whether this group is collapsed (i.e. whether only the header is visible). */
         abstract void setCollapsed(boolean isCollapsed);
 
         /**
@@ -234,6 +246,7 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
 
         /**
          * Called when a child item is clicked.
+         *
          * @param childPosition The position of the child in the group.
          * @return Whether the click was handled.
          */
@@ -242,29 +255,37 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         }
 
         /**
-         * Called when the context menu for the group view is being built.
-         * @param menu The context menu being built.
-         * @param activity The current activity.
+         * Returns whether the child item is selectable.
+         *
+         * @param childPosition The position of the child in the group.
+         * @return Whether the child item is selectable.
          */
-        void onCreateContextMenuForGroup(ContextMenu menu, Activity activity) {
+        boolean isChildSelectable(int childPosition) {
+            return true;
         }
 
         /**
-         * Called when a context menu for one of the child views is being built.
-         * @param childPosition The position of the child in the group.
-         * @param menu The context menu being built.
+         * Called when the context menu for the group view is being built.
+         *
          * @param activity The current activity.
+         * @param view The {@link View} of the group.
          */
-        void onCreateContextMenuForChild(int childPosition, ContextMenu menu,
-                Activity activity) {
-        }
+        void onCreateContextMenuForGroup(Activity activity, View view) {}
+
+        /**
+         * Called when a context menu for one of the child views is being built.
+         *
+         * @param childPosition The position of the child in the group.
+         * @param activity The current activity.
+         * @param view The {@link View} of the child.
+         */
+        void onCreateContextMenuForChild(int childPosition, Activity activity, View view) {}
     }
 
-    /**
-     * A group containing all the tabs associated with a foreign session from a synced device.
-     */
-    class ForeignSessionGroup extends Group {
+    /** A group containing all the tabs associated with a foreign session from a synced device. */
+    private class ForeignSessionGroup extends Group {
         private final ForeignSession mForeignSession;
+        private @Nullable ForeignSessionTab mLongPressedRow;
 
         ForeignSessionGroup(ForeignSession foreignSession) {
             mForeignSession = foreignSession;
@@ -290,7 +311,7 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         }
 
         @Override
-        public ForeignSessionTab getChild(int childPosition) {
+        public @Nullable ForeignSessionTab getChild(int childPosition) {
             for (ForeignSessionWindow window : mForeignSession.windows) {
                 if (childPosition < window.tabs.size()) {
                     return window.tabs.get(childPosition);
@@ -298,16 +319,16 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
                 childPosition -= window.tabs.size();
             }
             assert false;
-            return null;
+            return assertNonNull(null);
         }
 
         @Override
         public void configureChildView(int childPosition, ViewHolder viewHolder) {
-            ForeignSessionTab sessionTab = getChild(childPosition);
+            ForeignSessionTab sessionTab = assumeNonNull(getChild(childPosition));
             String url = sessionTab.url.getSpec();
             String text = TextUtils.isEmpty(sessionTab.title) ? url : sessionTab.title;
             viewHolder.textView.setText(text);
-            String domain = UrlUtilities.getDomainAndRegistry(url, false);
+            String domain = formatUrlForDisplay(sessionTab.url);
             if (!TextUtils.isEmpty(domain)) {
                 viewHolder.domainView.setText(domain);
                 viewHolder.domainView.setVisibility(View.VISIBLE);
@@ -315,6 +336,8 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
                 viewHolder.domainView.setText("");
                 viewHolder.domainView.setVisibility(View.GONE);
             }
+            // Reset the icon view.
+            viewHolder.iconView.setVisibility(View.GONE);
             loadFavicon(viewHolder, sessionTab.url, FaviconLocality.FOREIGN);
         }
 
@@ -326,11 +349,15 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         @Override
         public void setCollapsed(boolean isCollapsed) {
             if (isCollapsed) {
-                RecordHistogram.recordEnumeratedHistogram("HistoryPage.OtherDevicesMenu",
-                        OtherSessionsActions.COLLAPSE_SESSION, OtherSessionsActions.NUM_ENTRIES);
+                RecordHistogram.recordEnumeratedHistogram(
+                        "HistoryPage.OtherDevicesMenu",
+                        OtherSessionsActions.COLLAPSE_SESSION,
+                        OtherSessionsActions.NUM_ENTRIES);
             } else {
-                RecordHistogram.recordEnumeratedHistogram("HistoryPage.OtherDevicesMenu",
-                        OtherSessionsActions.EXPAND_SESSION, OtherSessionsActions.NUM_ENTRIES);
+                RecordHistogram.recordEnumeratedHistogram(
+                        "HistoryPage.OtherDevicesMenu",
+                        OtherSessionsActions.EXPAND_SESSION,
+                        OtherSessionsActions.NUM_ENTRIES);
             }
             mRecentTabsManager.setForeignSessionCollapsed(mForeignSession, isCollapsed);
         }
@@ -342,40 +369,28 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
 
         @Override
         public boolean onChildClick(int childPosition) {
-            RecordHistogram.recordEnumeratedHistogram("HistoryPage.OtherDevicesMenu",
-                    OtherSessionsActions.LINK_CLICKED, OtherSessionsActions.NUM_ENTRIES);
+            RecordHistogram.recordEnumeratedHistogram(
+                    "HistoryPage.OtherDevicesMenu",
+                    OtherSessionsActions.LINK_CLICKED,
+                    OtherSessionsActions.NUM_ENTRIES);
             ForeignSessionTab foreignSessionTab = getChild(childPosition);
-            mRecentTabsManager.openForeignSessionTab(mForeignSession, foreignSessionTab,
-                    WindowOpenDisposition.CURRENT_TAB);
+            assumeNonNull(foreignSessionTab);
+            mRecentTabsManager.openForeignSessionTab(
+                    mForeignSession, foreignSessionTab, WindowOpenDisposition.CURRENT_TAB);
             return true;
         }
 
         @Override
-        public void onCreateContextMenuForGroup(ContextMenu menu, Activity activity) {
-            menu.add(R.string.recent_tabs_open_all_menu_option).setOnMenuItemClickListener(item -> {
-                RecordHistogram.recordEnumeratedHistogram("HistoryPage.OtherDevicesMenu",
-                        OtherSessionsActions.OPEN_ALL, OtherSessionsActions.NUM_ENTRIES);
-                openAllTabs();
-                return true;
-            });
-            menu.add(R.string.recent_tabs_hide_menu_option).setOnMenuItemClickListener(item -> {
-                RecordHistogram.recordEnumeratedHistogram("HistoryPage.OtherDevicesMenu",
-                        OtherSessionsActions.HIDE_FOR_NOW, OtherSessionsActions.NUM_ENTRIES);
-                mRecentTabsManager.deleteForeignSession(mForeignSession);
-                return true;
-            });
+        public void onCreateContextMenuForGroup(Activity activity, View view) {
+            mLongPressedRow = null;
+            mContextMenuManager.showListContextMenu(view, this);
         }
 
         @Override
-        public void onCreateContextMenuForChild(int childPosition, ContextMenu menu,
-                Activity activity) {
-            final ForeignSessionTab foreignSessionTab = getChild(childPosition);
-            OnMenuItemClickListener listener = item -> {
-                mRecentTabsManager.openForeignSessionTab(mForeignSession, foreignSessionTab,
-                        WindowOpenDisposition.NEW_BACKGROUND_TAB);
-                return true;
-            };
-            menu.add(R.string.contextmenu_open_in_new_tab).setOnMenuItemClickListener(listener);
+        public void onCreateContextMenuForChild(int childPosition, Activity activity, View view) {
+            mLongPressedRow = getChild(childPosition);
+            if (mLongPressedRow == null) return;
+            mContextMenuManager.showListContextMenu(view, this);
         }
 
         private void openAllTabs() {
@@ -397,11 +412,49 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
                         mForeignSession, firstTab, WindowOpenDisposition.CURRENT_TAB);
             }
         }
+
+        @Override
+        public void openItem(int windowDisposition) {
+            assumeNonNull(mLongPressedRow);
+            mRecentTabsManager.openForeignSessionTab(
+                    mForeignSession, mLongPressedRow, windowDisposition);
+        }
+
+        @Override
+        public void openAllItems() {
+            RecordHistogram.recordEnumeratedHistogram(
+                    "HistoryPage.OtherDevicesMenu",
+                    OtherSessionsActions.OPEN_ALL,
+                    OtherSessionsActions.NUM_ENTRIES);
+            openAllTabs();
+        }
+
+        @Override
+        public void hideAllItems() {
+            RecordHistogram.recordEnumeratedHistogram(
+                    "HistoryPage.OtherDevicesMenu",
+                    OtherSessionsActions.HIDE_FOR_NOW,
+                    OtherSessionsActions.NUM_ENTRIES);
+            mRecentTabsManager.deleteForeignSession(mForeignSession);
+            openAllTabs();
+        }
+
+        @Override
+        public boolean isItemSupported(int menuItemId) {
+            switch (menuItemId) {
+                case ContextMenuManager.ContextMenuItemId.OPEN_IN_NEW_TAB:
+                    return mLongPressedRow != null;
+                case ContextMenuManager.ContextMenuItemId.OPEN_ALL:
+                    return mLongPressedRow == null;
+                case ContextMenuManager.ContextMenuItemId.HIDE_ALL:
+                    return mLongPressedRow == null;
+                default:
+                    return false;
+            }
+        }
     }
 
-    /**
-     * A base group for promos.
-     */
+    /** A base group for promos. */
     private abstract class PromoGroup extends Group {
         @Override
         @GroupType
@@ -428,54 +481,59 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         boolean isCollapsed() {
             return mRecentTabsManager.isPromoCollapsed();
         }
-    }
-
-    /** A group containing the personalized sync promo. */
-    class PersonalizedSyncPromoGroup extends PromoGroup {
-        private final @ChildType int mChildType;
-
-        PersonalizedSyncPromoGroup(@ChildType int childType) {
-            assert childType == ChildType.PERSONALIZED_SIGNIN_PROMO
-                    || childType
-                            == ChildType.PERSONALIZED_SYNC_PROMO : "Unsupported child type:"
-                                    + childType;
-            mChildType = childType;
-        }
 
         @Override
-        @ChildType
-        int getChildType() {
-            return mChildType;
-        }
-
-        @Override
-        View getChildView(
-                int childPosition, boolean isLastChild, View convertView, ViewGroup parent) {
-            if (convertView == null) {
-                LayoutInflater layoutInflater = LayoutInflater.from(parent.getContext());
-                convertView =
-                        layoutInflater.inflate(R.layout.sync_promo_view_recent_tabs, parent, false);
-            }
-            mRecentTabsManager.setUpSyncPromoView(
-                    convertView.findViewById(R.id.signin_promo_view_container));
-            return convertView;
+        boolean isChildSelectable(int childPosition) {
+            return false;
         }
     }
 
-    /**
-     * A group containing the sync promo.
-     */
-    class SyncPromoGroup extends PromoGroup {
+    /** A group containing the signin promo. */
+    private class SigninPromoGroup extends PromoGroup {
         @Override
         public @ChildType int getChildType() {
-            return ChildType.SYNC_PROMO;
+            return ChildType.SIGNIN_PROMO;
+        }
+
+        @Override
+        View getChildView(
+                int childPosition, boolean isLastChild, View convertView, ViewGroup parent) {
+            return mRecentTabsManager.getSigninPromoView(parent);
+        }
+    }
+
+    /** A group containing the empty state illustration. */
+    // TODO(crbug.com/40923516): Consider using this PromoGroup subclass for the empty state
+    // implementation of LegacySyncPromoView.
+    private class EmptyStatePromoGroup extends PromoGroup {
+        @Override
+        int getChildType() {
+            return ChildType.NONE;
         }
 
         @Override
         View getChildView(
                 int childPosition, boolean isLastChild, View convertView, ViewGroup parent) {
             if (convertView == null) {
-                convertView = LegacySyncPromoView.create(parent, SigninAccessPoint.RECENT_TABS);
+                LegacySyncPromoView legacySyncPromoView =
+                        (LegacySyncPromoView)
+                                LayoutInflater.from(parent.getContext())
+                                        .inflate(R.layout.legacy_sync_promo_view, parent, false);
+                legacySyncPromoView.setInitializeNotRequired();
+                legacySyncPromoView
+                        .getEmptyStateTitle()
+                        .setText(R.string.recent_tabs_no_tabs_empty_state);
+                legacySyncPromoView
+                        .getEmptyStateDescription()
+                        .setText(R.string.recent_tabs_sign_in_on_other_devices);
+                int emptyViewImageResId =
+                        DeviceFormFactor.isNonMultiDisplayContextOnTablet(parent.getContext())
+                                ? R.drawable.tablet_recent_tab_empty_state_illustration
+                                : R.drawable.phone_recent_tab_empty_state_illustration;
+                legacySyncPromoView.getEmptyStateImage().setImageResource(emptyViewImageResId);
+                legacySyncPromoView.getOldEmptyCardView().setVisibility(View.GONE);
+                legacySyncPromoView.getEmptyStateView().setVisibility(View.VISIBLE);
+                convertView = legacySyncPromoView;
             }
             return convertView;
         }
@@ -485,9 +543,12 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
      * A group containing tabs that were recently closed on this device and a link to the history
      * page.
      */
-    class RecentlyClosedTabsGroup extends Group {
-        static final int ID_OPEN_IN_NEW_TAB = 1;
-        static final int ID_REMOVE_ALL = 2;
+    private class RecentlyClosedTabsGroup extends Group {
+        private static final int GROUP_CLOSURE_NO_TITLE_RES =
+                recent_tabs_group_closure_without_title_with_color_accessibility;
+        private static final int GROUP_CLOSURE_WITH_TITLE_RES =
+                recent_tabs_group_closure_with_title_with_color_accessibility;
+        private @Nullable RecentlyClosedEntry mLongPressedRow;
 
         @Override
         public @GroupType int getGroupType() {
@@ -514,8 +575,62 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
             return childPosition == mRecentTabsManager.getRecentlyClosedEntries().size();
         }
 
+        private void setIconView(ViewHolder viewHolder, @TabGroupColorId int colorId) {
+            ImageView iconView = viewHolder.iconView;
+            iconView.setVisibility(View.VISIBLE);
+
+            final @ColorInt int color =
+                    TabGroupColorPickerUtils.getTabGroupColorPickerItemColor(
+                            mActivity, colorId, /* isIncognito= */ false);
+
+            ((GradientDrawable) iconView.getBackground()).setColor(color);
+        }
+
+        private void setContentDescription(
+                Resources res,
+                ViewHolder viewHolder,
+                String groupTitle,
+                @TabGroupColorId int colorId,
+                int tabCount) {
+            final @StringRes int colorDescRes =
+                    TabGroupColorPickerUtils.getTabGroupColorPickerItemColorAccessibilityString(
+                            colorId);
+            String colorDesc = res.getString(colorDescRes);
+            String contentDescription;
+
+            if (TextUtils.isEmpty(groupTitle)) {
+                contentDescription =
+                        res.getQuantityString(
+                                GROUP_CLOSURE_NO_TITLE_RES, tabCount, tabCount, colorDesc);
+            } else {
+                contentDescription =
+                        res.getString(GROUP_CLOSURE_WITH_TITLE_RES, groupTitle, colorDesc);
+            }
+            viewHolder.textView.setContentDescription(contentDescription);
+        }
+
+        private void setDomainText(
+                Resources res,
+                ViewHolder viewHolder,
+                int tabCount,
+                List<RecentlyClosedTab> tabList) {
+            List<String> domainList = new ArrayList<>();
+            for (RecentlyClosedTab tab : tabList) {
+                String domain = formatUrlForDisplay(tab.getUrl());
+                domainList.add(domain);
+            }
+            String domainText =
+                    res.getQuantityString(
+                            R.plurals.recent_tabs_group_closure_domain_text,
+                            tabCount,
+                            tabCount,
+                            String.join(", ", domainList));
+            viewHolder.domainView.setText(domainText);
+            viewHolder.domainView.setVisibility(View.VISIBLE);
+        }
+
         @Override
-        public RecentlyClosedEntry getChild(int childPosition) {
+        public @Nullable RecentlyClosedEntry getChild(int childPosition) {
             if (isHistoryLink(childPosition)) return null;
             return mRecentTabsManager.getRecentlyClosedEntries().get(childPosition);
         }
@@ -528,78 +643,89 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
             viewHolder.domainView.setVisibility(View.GONE);
             // Reset content description.
             viewHolder.textView.setContentDescription(null);
+            // Reset the icon view.
+            viewHolder.iconView.setVisibility(View.GONE);
+            // Explicitly telling this specific row's layout should react to hover events.
+            viewHolder.itemLayout.setOnHoverListener(mHoverListener);
+            Resources res = mActivity.getResources();
             if (isHistoryLink(childPosition)) {
                 viewHolder.textView.setText(R.string.show_full_history);
-                Bitmap historyIcon = BitmapFactory.decodeResource(
-                        mActivity.getResources(), R.drawable.ic_watch_later_24dp);
-                int size = mActivity.getResources().getDimensionPixelSize(
-                        R.dimen.tile_view_icon_size_modern);
                 Drawable drawable =
-                        FaviconUtils.createRoundedBitmapDrawable(mActivity.getResources(),
-                                Bitmap.createScaledBitmap(historyIcon, size, size, true));
+                        UiUtils.getTintedDrawable(
+                                mActivity,
+                                R.drawable.ic_schedule_fill_24dp,
+                                R.color.default_icon_color_tint_list);
                 drawable.setColorFilter(
                         SemanticColorUtils.getDefaultIconColor(mActivity), PorterDuff.Mode.SRC_IN);
                 viewHolder.imageView.setImageDrawable(drawable);
-                viewHolder.itemLayout.getLayoutParams().height =
-                        mActivity.getResources().getDimensionPixelSize(
-                                R.dimen.recent_tabs_show_history_item_size);
+                viewHolder.itemLayout.setMinimumHeight(
+                        res.getDimensionPixelSize(R.dimen.recent_tabs_show_history_item_size));
                 return;
             }
-            viewHolder.itemLayout.getLayoutParams().height =
-                    mActivity.getResources().getDimensionPixelSize(
-                            R.dimen.recent_tabs_foreign_session_group_item_height);
-            RecentlyClosedEntry entry = getChild(childPosition);
-            if (!(entry instanceof RecentlyClosedTab)) {
-                int tabCount = 0;
-                if (entry instanceof RecentlyClosedGroup) {
-                    RecentlyClosedGroup recentlyClosedGroup = (RecentlyClosedGroup) entry;
-                    tabCount = recentlyClosedGroup.getTabs().size();
-
-                    String groupTitle = recentlyClosedGroup.getTitle();
-                    if (TextUtils.isEmpty(groupTitle)) {
-                        viewHolder.textView.setText(mActivity.getResources().getString(
-                                R.string.recent_tabs_group_closure_without_title, tabCount));
-                        String contentDescription = mActivity.getResources().getString(
-                                R.string.recent_tabs_group_closure_without_title_accessibility,
-                                tabCount);
-                        viewHolder.textView.setContentDescription(contentDescription);
-                    } else {
-                        viewHolder.textView.setText(mActivity.getResources().getString(
-                                R.string.recent_tabs_group_closure_with_title, groupTitle));
-                        viewHolder.textView.setContentDescription(
-                                mActivity.getResources().getString(
-                                        R.string.recent_tabs_group_closure_with_title_accessibility,
-                                        groupTitle));
-                    }
+            viewHolder.itemLayout.setMinimumHeight(
+                    res.getDimensionPixelSize(
+                            R.dimen.recent_tabs_foreign_session_group_item_height));
+            RecentlyClosedEntry entry = assumeNonNull(getChild(childPosition));
+            if (entry instanceof RecentlyClosedWindow recentlyClosedWindow) {
+                viewHolder.textView.setText(recentlyClosedWindow.getTitle());
+                String activeTabDomain = formatUrlForDisplay(recentlyClosedWindow.getUrl());
+                String activeTabInfo =
+                        TextUtils.isEmpty(activeTabDomain)
+                                ? recentlyClosedWindow.getActiveTabTitle()
+                                : activeTabDomain;
+                int inactiveTabCount = recentlyClosedWindow.getTabCount() - 1;
+                final String description;
+                if (inactiveTabCount > 0) {
+                    description =
+                            res.getQuantityString(
+                                    R.plurals.recent_tabs_window_closure_domain_text,
+                                    inactiveTabCount,
+                                    activeTabInfo,
+                                    inactiveTabCount);
+                } else {
+                    description = activeTabInfo;
                 }
-                if (entry instanceof RecentlyClosedBulkEvent) {
-                    RecentlyClosedBulkEvent recentlyClosedBulkEvent =
-                            (RecentlyClosedBulkEvent) entry;
-                    tabCount = recentlyClosedBulkEvent.getTabs().size();
+                viewHolder.domainView.setText(description);
+                viewHolder.domainView.setVisibility(View.VISIBLE);
+                loadWindowIcon(viewHolder);
+            } else if (entry instanceof RecentlyClosedGroup recentlyClosedGroup) {
+                List<RecentlyClosedTab> tabList = recentlyClosedGroup.getTabs();
+                int tabCount = tabList.size();
 
-                    viewHolder.textView.setText(mActivity.getResources().getString(
-                            R.string.recent_tabs_bulk_closure, tabCount));
-                    viewHolder.textView.setContentDescription(mActivity.getResources().getString(
-                            R.string.recent_tabs_bulk_closure_accessibility, tabCount));
+                String groupTitle = recentlyClosedGroup.getTitle();
+                @TabGroupColorId int colorId = recentlyClosedGroup.getColor();
+                if (TextUtils.isEmpty(groupTitle)) {
+                    viewHolder.textView.setText(
+                            res.getQuantityString(
+                                    R.plurals.recent_tabs_group_closure_without_title,
+                                    tabCount,
+                                    tabCount));
+                } else {
+                    viewHolder.textView.setText(
+                            res.getString(
+                                    R.string.recent_tabs_group_closure_with_title, groupTitle));
                 }
+                setDomainText(res, viewHolder, tabCount, tabList);
+                setContentDescription(res, viewHolder, groupTitle, colorId, tabCount);
+                setIconView(viewHolder, colorId);
+                loadGroupIcon(viewHolder);
+            } else if (entry instanceof RecentlyClosedBulkEvent recentlyClosedBulkEvent) {
+                List<RecentlyClosedTab> tabList = recentlyClosedBulkEvent.getTabs();
+                int tabCount = tabList.size();
 
-                // Entries without dates have a time of 0. TabRestoreService may not save timestamps
-                // between restarts.
-                if (entry.getDate().getTime() != 0L) {
-                    String dateString =
-                            DateFormat.getDateInstance(DateFormat.LONG, getPreferredLocale())
-                                    .format(entry.getDate());
-                    viewHolder.domainView.setText(dateString);
-                    viewHolder.domainView.setVisibility(View.VISIBLE);
-                }
+                viewHolder.textView.setText(
+                        res.getString(R.string.recent_tabs_bulk_closure, tabCount));
+                viewHolder.textView.setContentDescription(
+                        res.getString(R.string.recent_tabs_bulk_closure_accessibility, tabCount));
+                setDomainText(res, viewHolder, tabCount, tabList);
                 loadTabCount(viewHolder, tabCount);
             } else {
+                assert entry instanceof RecentlyClosedTab : "Unexpected entry type.";
                 RecentlyClosedTab tab = (RecentlyClosedTab) entry;
-
                 String title = TitleUtil.getTitleForDisplay(tab.getTitle(), tab.getUrl());
                 viewHolder.textView.setText(title);
 
-                String domain = UrlUtilities.getDomainAndRegistry(tab.getUrl().getSpec(), false);
+                String domain = formatUrlForDisplay(tab.getUrl());
                 if (!TextUtils.isEmpty(domain)) {
                     viewHolder.domainView.setText(domain);
                     viewHolder.domainView.setVisibility(View.VISIBLE);
@@ -630,6 +756,7 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
                 return true;
             }
             RecentlyClosedEntry entry = getChild(childPosition);
+            assumeNonNull(entry);
             if (entry instanceof RecentlyClosedTab) {
                 mRecentTabsManager.openRecentlyClosedTab(
                         (RecentlyClosedTab) entry, WindowOpenDisposition.CURRENT_TAB);
@@ -640,43 +767,43 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         }
 
         @Override
-        public void onCreateContextMenuForGroup(ContextMenu menu, Activity activity) {
+        public void onCreateContextMenuForGroup(Activity activity, View view) {}
+
+        @Override
+        public void onCreateContextMenuForChild(
+                final int childPosition, Activity activity, View view) {
+            mLongPressedRow = getChild(childPosition);
+            if (mLongPressedRow == null) return;
+            mContextMenuManager.showListContextMenu(view, this);
         }
 
         @Override
-        public void onCreateContextMenuForChild(final int childPosition, ContextMenu menu,
-                Activity activity) {
-            final RecentlyClosedEntry recentlyClosedEntry = getChild(childPosition);
-            if (recentlyClosedEntry == null) return;
-            OnMenuItemClickListener listener = item -> {
-                switch (item.getItemId()) {
-                    case ID_REMOVE_ALL:
-                        mRecentTabsManager.clearRecentlyClosedEntries();
-                        break;
-                    case ID_OPEN_IN_NEW_TAB:
-                        mRecentTabsManager.openRecentlyClosedTab(
-                                (RecentlyClosedTab) recentlyClosedEntry,
-                                WindowOpenDisposition.NEW_BACKGROUND_TAB);
-                        break;
-                    default:
-                        assert false;
-                }
-                return true;
-            };
-            if (recentlyClosedEntry instanceof RecentlyClosedTab) {
-                menu.add(ContextMenu.NONE, ID_OPEN_IN_NEW_TAB, ContextMenu.NONE,
-                            R.string.contextmenu_open_in_new_tab)
-                        .setOnMenuItemClickListener(listener);
+        public void openItem(int windowDisposition) {
+            assumeNonNull(mLongPressedRow);
+            mRecentTabsManager.openRecentlyClosedTab(
+                    (RecentlyClosedTab) mLongPressedRow, windowDisposition);
+        }
+
+        @Override
+        public void removeAllItems() {
+            mRecentTabsManager.clearRecentlyClosedEntries();
+        }
+
+        @Override
+        public boolean isItemSupported(int menuItemId) {
+            switch (menuItemId) {
+                case ContextMenuManager.ContextMenuItemId.OPEN_IN_NEW_TAB:
+                    return mLongPressedRow instanceof RecentlyClosedTab;
+                case ContextMenuManager.ContextMenuItemId.REMOVE_ALL:
+                    return mLongPressedRow != null;
+                default:
+                    return false;
             }
-            menu.add(ContextMenu.NONE, ID_REMOVE_ALL, ContextMenu.NONE,
-                    R.string.remove_all).setOnMenuItemClickListener(listener);
         }
     }
 
-    /**
-     * A group containing a blank separator.
-     */
-    class SeparatorGroup extends Group {
+    /** A group containing a blank separator. */
+    private class SeparatorGroup extends Group {
         private final boolean mIsVisible;
 
         public SeparatorGroup(boolean isVisible) {
@@ -701,21 +828,20 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         @Override
         public View getGroupView(boolean isExpanded, View convertView, ViewGroup parent) {
             if (convertView == null) {
-                int layout = mIsVisible
-                        ? R.layout.recent_tabs_group_separator_visible
-                        : R.layout.recent_tabs_group_separator_invisible;
+                int layout =
+                        mIsVisible
+                                ? R.layout.recent_tabs_group_separator_visible
+                                : R.layout.recent_tabs_group_separator_invisible;
                 convertView = LayoutInflater.from(mActivity).inflate(layout, parent, false);
             }
             return convertView;
         }
 
         @Override
-        public void configureGroupView(RecentTabsGroupView groupView, boolean isExpanded) {
-        }
+        public void configureGroupView(RecentTabsGroupView groupView, boolean isExpanded) {}
 
         @Override
-        public void setCollapsed(boolean isCollapsed) {
-        }
+        public void setCollapsed(boolean isCollapsed) {}
 
         @Override
         public boolean isCollapsed() {
@@ -740,15 +866,19 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
     }
 
     /**
-     * Creates a RecentTabsRowAdapter used to populate an ExpandableList with other
-     * devices and foreign tab cells.
+     * Creates a RecentTabsRowAdapter used to populate an ExpandableList with other devices and
+     * foreign tab cells.
      *
      * @param activity The Android activity this adapter will work in.
      * @param recentTabsManager The RecentTabsManager that will act as the data source.
      */
-    public RecentTabsRowAdapter(Activity activity, RecentTabsManager recentTabsManager) {
+    public RecentTabsRowAdapter(
+            Activity activity,
+            RecentTabsManager recentTabsManager,
+            ContextMenuManager contextMenuManager) {
         mActivity = activity;
         mRecentTabsManager = recentTabsManager;
+        mContextMenuManager = contextMenuManager;
         mGroups = new ArrayList<>();
         mFaviconCaches.put(FaviconLocality.LOCAL, new FaviconCache(MAX_NUM_FAVICONS_TO_CACHE));
         mFaviconCaches.put(FaviconLocality.FOREIGN, new FaviconCache(MAX_NUM_FAVICONS_TO_CACHE));
@@ -758,22 +888,54 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         mFaviconSize = resources.getDimensionPixelSize(R.dimen.default_favicon_size);
 
         mIconGenerator = FaviconUtils.createCircularIconGenerator(activity);
+        mHoverListener = new HoverHighlightViewListener();
 
-        RecordHistogram.recordEnumeratedHistogram("HistoryPage.OtherDevicesMenu",
-                OtherSessionsActions.MENU_INITIALIZED, OtherSessionsActions.NUM_ENTRIES);
+        RecordHistogram.recordEnumeratedHistogram(
+                "HistoryPage.OtherDevicesMenu",
+                OtherSessionsActions.MENU_INITIALIZED,
+                OtherSessionsActions.NUM_ENTRIES);
     }
 
     /**
-     * ViewHolder class optimizes looking up table row fields. findViewById is only called once
-     * per row view initialization, and the references are cached here. Also stores a reference to
-     * the favicon image callback; so that we can make sure we load the correct favicon.
+     * Formats a URL for display. For most URLs, this is just the domain and registry. For about and
+     * chrome scheme URLs, the entire URL is returned.
+     *
+     * @param gurl The URL to format.
+     * @return The formatted URL or null if the domain could not be extracted.
      */
-    private static class ViewHolder {
-        public TextView textView;
-        public TextView domainView;
-        public ImageView imageView;
-        public View itemLayout;
-        public FaviconImageCallback imageCallback;
+    private @Nullable String formatUrlForDisplay(GURL gurl) {
+        String urlSpec = gurl.getSpec();
+        if (UrlUtilities.isInternalScheme(gurl)) {
+            return UrlFormatter.formatUrlForDisplayOmitHTTPScheme(urlSpec);
+        }
+        // This should perhaps use UrlFormatter as well, but it has used domain for a long time.
+        return UrlUtilities.getDomainAndRegistry(urlSpec, false);
+    }
+
+    private @Nullable String formatUrlForDisplay(String urlSpec) {
+        return formatUrlForDisplay(new GURL(urlSpec));
+    }
+
+    /**
+     * ViewHolder class optimizes looking up table row fields. findViewById is only called once per
+     * row view initialization, and the references are cached here. Also stores a reference to the
+     * favicon image callback; so that we can make sure we load the correct favicon.
+     */
+    static class ViewHolder {
+        public final ImageView iconView;
+        public final TextView textView;
+        public final TextView domainView;
+        public final ImageView imageView;
+        public final View itemLayout;
+        public @Nullable FaviconImageCallback imageCallback;
+
+        public ViewHolder(View view) {
+            iconView = view.findViewById(R.id.row_icon);
+            textView = view.findViewById(R.id.title_row);
+            domainView = view.findViewById(R.id.domain_row);
+            imageView = view.findViewById(R.id.recent_tabs_favicon);
+            itemLayout = view.findViewById(R.id.recent_tabs_list_item_layout);
+        }
     }
 
     private void loadTabCount(final ViewHolder viewHolder, int tabCount) {
@@ -782,27 +944,52 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         viewHolder.imageView.setImageDrawable(image);
     }
 
+    private void loadGroupIcon(final ViewHolder viewHolder) {
+        Drawable image =
+                UiUtils.getTintedDrawable(
+                        mActivity,
+                        R.drawable.ic_grid_view_24dp,
+                        R.color.default_icon_color_tint_list);
+        viewHolder.imageView.setImageDrawable(image);
+    }
+
+    private void loadWindowIcon(final ViewHolder viewHolder) {
+        Drawable image =
+                UiUtils.getTintedDrawable(
+                        mActivity,
+                        R.drawable.ic_folder_outline_24dp,
+                        R.color.default_icon_color_tint_list);
+        viewHolder.imageView.setImageDrawable(image);
+    }
+
     private void loadFavicon(
             final ViewHolder viewHolder, final GURL url, @FaviconLocality int locality) {
         Drawable image;
+        ImageView imageView = viewHolder.imageView;
         if (url == null) {
             // URL is null for print jobs, for example.
-            image = mDefaultFaviconHelper.getDefaultFaviconDrawable(
-                    mActivity.getResources(), url, true);
+            image = mDefaultFaviconHelper.getDefaultFaviconDrawable(mActivity, url, true);
         } else {
-            image = mFaviconCaches.get(locality).getFaviconImage(url);
+            image = assumeNonNull(mFaviconCaches.get(locality)).getFaviconImage(url);
             if (image == null) {
-                FaviconImageCallback imageCallback = new FaviconImageCallback() {
-                    @Override
-                    public void onFaviconAvailable(Bitmap bitmap, GURL iconUrl) {
-                        if (this != viewHolder.imageCallback) return;
-                        Drawable faviconDrawable = FaviconUtils.getIconDrawableWithFilter(bitmap,
-                                url, mIconGenerator, mDefaultFaviconHelper,
-                                mActivity.getResources(), mFaviconSize);
-                        mFaviconCaches.get(locality).putFaviconImage(url, faviconDrawable);
-                        viewHolder.imageView.setImageDrawable(faviconDrawable);
-                    }
-                };
+                FaviconImageCallback imageCallback =
+                        new FaviconImageCallback() {
+                            @Override
+                            public void onFaviconAvailable(
+                                    @Nullable Bitmap bitmap, @Nullable GURL iconUrl) {
+                                if (this != viewHolder.imageCallback) return;
+                                Drawable faviconDrawable =
+                                        FaviconUtils.getIconDrawableWithFilter(
+                                                bitmap,
+                                                url,
+                                                mIconGenerator,
+                                                mDefaultFaviconHelper,
+                                                mActivity,
+                                                mFaviconSize);
+                                mFaviconCaches.get(locality).putFaviconImage(url, faviconDrawable);
+                                imageView.setImageDrawable(faviconDrawable);
+                            }
+                        };
                 viewHolder.imageCallback = imageCallback;
                 switch (locality) {
                     case FaviconLocality.LOCAL:
@@ -814,16 +1001,19 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
                         break;
                 }
 
-                image = mDefaultFaviconHelper.getDefaultFaviconDrawable(
-                        mActivity.getResources(), url, true);
+                image = mDefaultFaviconHelper.getDefaultFaviconDrawable(mActivity, url, true);
             }
         }
-        viewHolder.imageView.setImageDrawable(image);
+        imageView.setImageDrawable(image);
     }
 
     @Override
-    public View getChildView(int groupPosition, int childPosition, boolean isLastChild,
-            View convertView, ViewGroup parent) {
+    public View getChildView(
+            int groupPosition,
+            int childPosition,
+            boolean isLastChild,
+            View convertView,
+            ViewGroup parent) {
         return getGroup(groupPosition)
                 .getChildView(childPosition, isLastChild, convertView, parent);
     }
@@ -845,8 +1035,8 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
     }
 
     @Override
-    public View getGroupView(int groupPosition, boolean isExpanded, View convertView,
-            ViewGroup parent) {
+    public View getGroupView(
+            int groupPosition, boolean isExpanded, View convertView, ViewGroup parent) {
         return getGroup(groupPosition).getGroupView(isExpanded, convertView, parent);
     }
 
@@ -862,13 +1052,13 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
     }
 
     @Override
-    public Object getChild(int groupPosition, int childPosition) {
+    public @Nullable Object getChild(int groupPosition, int childPosition) {
         return getGroup(groupPosition).getChild(childPosition);
     }
 
     @Override
     public boolean isChildSelectable(int groupPosition, int childPosition) {
-        return true;
+        return getGroup(groupPosition).isChildSelectable(childPosition);
     }
 
     // BaseExpandableListAdapter misc. implementation
@@ -891,7 +1081,7 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         if (!DeviceFormFactor.isNonMultiDisplayContextOnTablet(mActivity)) {
             mGroups.add(group);
         } else {
-            if (mGroups.size() == 0) {
+            if (mGroups.isEmpty()) {
                 mGroups.add(mInvisibleSeparatorGroup);
             }
             mGroups.add(group);
@@ -905,27 +1095,23 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
         addGroup(mRecentlyClosedTabsGroup);
         for (ForeignSession session : mRecentTabsManager.getForeignSessions()) {
             if (!mHasForeignDataRecorded) {
-                RecordHistogram.recordEnumeratedHistogram("HistoryPage.OtherDevicesMenu",
-                        OtherSessionsActions.HAS_FOREIGN_DATA, OtherSessionsActions.NUM_ENTRIES);
+                RecordHistogram.recordEnumeratedHistogram(
+                        "HistoryPage.OtherDevicesMenu",
+                        OtherSessionsActions.HAS_FOREIGN_DATA,
+                        OtherSessionsActions.NUM_ENTRIES);
                 mHasForeignDataRecorded = true;
             }
             addGroup(new ForeignSessionGroup(session));
         }
 
-        switch (mRecentTabsManager.getPromoState()) {
-            case SyncPromoState.NO_PROMO:
-                break;
-            case SyncPromoState.PROMO_FOR_SIGNED_OUT_STATE:
-                addGroup(new PersonalizedSyncPromoGroup(ChildType.PERSONALIZED_SIGNIN_PROMO));
-                break;
-            case SyncPromoState.PROMO_FOR_SIGNED_IN_STATE:
-                addGroup(new PersonalizedSyncPromoGroup(ChildType.PERSONALIZED_SYNC_PROMO));
-                break;
-            case SyncPromoState.PROMO_FOR_SYNC_TURNED_OFF_STATE:
-                addGroup(new SyncPromoGroup());
-                break;
-            default:
-                assert false : "Unexpected value for promo type!";
+        if (mRecentTabsManager.shouldShowPromo()) {
+            addGroup(new SigninPromoGroup());
+        } else {
+            boolean recentlyClosedGroupIsOnlyHeader =
+                    mRecentlyClosedTabsGroup.getChildrenCount() == 1;
+            if (recentlyClosedGroupIsOnlyHeader) {
+                addGroup(new EmptyStatePromoGroup());
+            }
         }
 
         // Add separator line after the recently closed tabs group.
@@ -950,9 +1136,20 @@ public class RecentTabsRowAdapter extends BaseExpandableListAdapter {
     }
 
     /**
-     * Retrieves the user's preferred locale from the app's configurations.
+     * Finds the group position for a foreign session with the given tag.
+     *
+     * @param sessionTag The tag of the foreign session.
+     * @return The group position, or -1 if not found.
      */
-    private Locale getPreferredLocale() {
-        return mActivity.getResources().getConfiguration().getLocales().get(0);
+    public int getGroupPositionForForeignSession(String sessionTag) {
+        for (int i = 0; i < mGroups.size(); i++) {
+            Group group = mGroups.get(i);
+            if (group instanceof ForeignSessionGroup foreignSessionGroup) {
+                if (sessionTag.equals(foreignSessionGroup.mForeignSession.tag)) {
+                    return i;
+                }
+            }
+        }
+        return -1;
     }
 }

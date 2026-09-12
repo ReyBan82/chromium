@@ -7,7 +7,6 @@
 #include <stddef.h>
 
 #include <memory>
-#include <set>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -23,6 +22,7 @@
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace policy {
 
@@ -46,11 +46,12 @@ long g_retry_delay_ms = 25000;
 
 }  // namespace
 
-UploadJobImpl::Delegate::~Delegate() {}
+UploadJobImpl::Delegate::~Delegate() = default;
 
-UploadJobImpl::MimeBoundaryGenerator::~MimeBoundaryGenerator() {}
+UploadJobImpl::MimeBoundaryGenerator::~MimeBoundaryGenerator() = default;
 
-UploadJobImpl::RandomMimeBoundaryGenerator::~RandomMimeBoundaryGenerator() {}
+UploadJobImpl::RandomMimeBoundaryGenerator::~RandomMimeBoundaryGenerator() =
+    default;
 
 // multipart/form-data POST request to upload the data. A DataSegment
 // corresponds to one "Content-Disposition" in the "multipart" request.
@@ -154,7 +155,6 @@ UploadJobImpl::UploadJobImpl(
   DCHECK(delegate_);
   SYSLOG(INFO) << "Upload job created.";
   if (!upload_url_.is_valid()) {
-    state_ = ERROR;
     NOTREACHED() << upload_url_ << " is not a valid URL.";
   }
 }
@@ -218,7 +218,7 @@ bool UploadJobImpl::SetUpMultipart() {
   if (mime_boundary_ && post_data_)
     return true;
 
-  std::set<std::string> used_names;
+  absl::flat_hash_set<std::string> used_names;
 
   // Check uniqueness of header field names.
   for (const auto& data_segment : data_segments_) {

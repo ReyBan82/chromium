@@ -7,21 +7,24 @@ import './input_card.js';
 import './keyboard_tester.js';
 import './touchscreen_tester.js';
 
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {afterNextRender, PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
-import {DiagnosticsBrowserProxy, DiagnosticsBrowserProxyImpl} from './diagnostics_browser_proxy.js';
-import {ConnectionType, KeyboardInfo} from './input.mojom-webui.js';
-import {InputCardElement} from './input_card.js';
-import {ConnectedDevicesObserverReceiver, InputDataProviderInterface, InternalDisplayPowerStateObserverReceiver, LidStateObserverReceiver, TabletModeObserverReceiver, TouchDeviceInfo, TouchDeviceType} from './input_data_provider.mojom-webui.js';
+import type {DiagnosticsBrowserProxy} from './diagnostics_browser_proxy.js';
+import {DiagnosticsBrowserProxyImpl} from './diagnostics_browser_proxy.js';
+import type {KeyboardInfo} from './input.mojom-webui.js';
+import {ConnectionType} from './input.mojom-webui.js';
+import type {InputCardElement} from './input_card.js';
+import type {InputDataProviderInterface, TouchDeviceInfo} from './input_data_provider.mojom-webui.js';
+import {ConnectedDevicesObserverReceiver, InternalDisplayPowerStateObserverReceiver, LidStateObserverReceiver, TabletModeObserverReceiver, TouchDeviceType} from './input_data_provider.mojom-webui.js';
 import {getTemplate} from './input_list.html.js';
-import {KeyboardTesterElement} from './keyboard_tester.js';
+import type {KeyboardTesterElement} from './keyboard_tester.js';
 import {getInputDataProvider} from './mojo_interface_provider.js';
 import {TouchpadTesterElement} from './touchpad_tester.js';
-import {TouchscreenTesterElement} from './touchscreen_tester.js';
+import type {TouchscreenTesterElement} from './touchscreen_tester.js';
 
 /**
  * @fileoverview
@@ -84,27 +87,26 @@ export class InputListElement extends InputListElementBase {
     };
   }
 
-  protected showTouchpads: boolean;
-  protected showTouchscreens: boolean;
+  declare protected showTouchpads: boolean;
+  declare protected showTouchscreens: boolean;
   // The evdev id of touchscreen under testing.
-  protected touchscreenIdUnderTesting: number = -1;
-  protected hostDeviceStatus:
-      HostDeviceStatus = {isLidOpen: false, isTabletMode: false};
-  private keyboards: KeyboardInfo[];
-  private touchpads: TouchDeviceInfo[];
-  private touchscreens: TouchDeviceInfo[];
+  declare protected touchscreenIdUnderTesting: number;
+  declare protected hostDeviceStatus: HostDeviceStatus;
+  declare private keyboards: KeyboardInfo[];
+  declare private touchpads: TouchDeviceInfo[];
+  declare private touchscreens: TouchDeviceInfo[];
   private connectedDevicesObserverReceiver: ConnectedDevicesObserverReceiver|
       null = null;
   private internalDisplayPowerStateObserverReceiver:
       InternalDisplayPowerStateObserverReceiver|null = null;
   private tabletModeReceiver: TabletModeObserverReceiver|null = null;
   private lidStateReceiver: LidStateObserverReceiver|null = null;
-  private keyboardTester: KeyboardTesterElement;
+  private keyboardTester: KeyboardTesterElement|null = null;
   private touchscreenTester: TouchscreenTesterElement|null = null;
   private touchpadTester: TouchpadTesterElement|null = null;
-  private browserProxy: DiagnosticsBrowserProxy =
+  private readonly browserProxy: DiagnosticsBrowserProxy =
       DiagnosticsBrowserProxyImpl.getInstance();
-  private inputDataProvider: InputDataProviderInterface =
+  private readonly inputDataProvider: InputDataProviderInterface =
       getInputDataProvider();
 
   private computeShowTouchpads(numTouchpads: number): boolean {
@@ -112,14 +114,17 @@ export class InputListElement extends InputListElementBase {
   }
 
   private computeShowTouchscreens(numTouchscreens: number): boolean {
-    return numTouchscreens > 0 &&
-        loadTimeData.getBoolean('isTouchscreenEnabled');
+    return numTouchscreens > 0;
   }
 
   constructor() {
     super();
+    this.touchscreenIdUnderTesting = -1;
+    this.hostDeviceStatus = {isLidOpen: false, isTabletMode: false};
     this.browserProxy.initialize();
-    this.loadInitialDevices();
+    this.loadInitialDevices().then(() => {
+      this.handleKeyboardTesterDirectOpen();
+    });
     this.observeConnectedDevices();
     this.observeInternalDisplayPowerState();
     this.observeLidState();
@@ -128,13 +133,15 @@ export class InputListElement extends InputListElementBase {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    const keyboardTester = this.shadowRoot!.querySelector('keyboard-tester');
+    const keyboardTester =
+        this.shadowRoot!.querySelector<KeyboardTesterElement>(
+            'keyboard-tester');
     assert(keyboardTester);
     this.keyboardTester = keyboardTester;
   }
 
-  private loadInitialDevices(): void {
-    this.inputDataProvider.getConnectedDevices().then((devices) => {
+  private loadInitialDevices(): Promise<void> {
+    return this.inputDataProvider.getConnectedDevices().then(({devices}) => {
       this.keyboards = devices.keyboards;
       this.touchpads = devices.touchDevices.filter(
           (device: TouchDeviceInfo) =>
@@ -279,8 +286,23 @@ export class InputListElement extends InputListElementBase {
     const keyboard: KeyboardInfo|undefined = this.keyboards.find(
         (keyboard: KeyboardInfo) => keyboard.id === e.detail.evdevId);
     assert(keyboard);
+    assert(this.keyboardTester);
     this.keyboardTester.keyboard = keyboard;
     this.keyboardTester.show();
+  }
+
+  /**
+   * Show the keyboard tester directly if `showDefaultKeyboardTester` is present
+   * in the query string.
+   */
+  private handleKeyboardTesterDirectOpen(): void {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('showDefaultKeyboardTester') && this.keyboards.length > 0 &&
+        !this.keyboardTester?.isOpen()) {
+      assert(this.keyboardTester);
+      this.keyboardTester.keyboard = this.keyboards[0];
+      this.keyboardTester.show();
+    }
   }
 
   /**
@@ -341,6 +363,7 @@ export class InputListElement extends InputListElementBase {
   onHostDeviceStatusChanged(): void {
     // If the keyboard tester isn't open or we aren't testing an internal
     // keyboard, do nothing.
+    assert(this.keyboardTester);
     if (!this.keyboardTester.isOpen() ||
         this.keyboardTester.keyboard.connectionType !=
             ConnectionType.kInternal) {

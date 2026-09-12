@@ -7,7 +7,6 @@
 
 #include <vector>
 
-#include "base/functional/callback.h"
 #include "components/viz/common/gpu/context_provider.h"
 #include "components/viz/common/resources/returned_resource.h"
 #include "components/viz/service/viz_service_export.h"
@@ -34,16 +33,14 @@ class VIZ_SERVICE_EXPORT OutputSurfaceClient {
   // and is now visible to the user, along with information about the swap
   // including: the result, timings, what was swapped, what can be released, and
   // damage compared to the last swapped buffer.
-  virtual void DidReceiveSwapBuffersAck(
-      const gpu::SwapBuffersCompleteParams& params,
-      gfx::GpuFenceHandle release_fence) = 0;
+  virtual void DidReceiveSwapBuffersAck(gpu::SwapBuffersCompleteParams params,
+                                        gfx::GpuFenceHandle release_fence) = 0;
 
   // For displaying a swapped frame's contents on macOS.
-  virtual void DidReceiveCALayerParams(
-      const gfx::CALayerParams& ca_layer_params) = 0;
+  virtual void DidReceiveCALayerParams(gfx::CALayerParams ca_layer_params) = 0;
 
   // For sending swap sizes back to the browser process. Currently only used on
-  // Android.
+  // Android and Linux.
   virtual void DidSwapWithSize(const gfx::Size& pixel_size) = 0;
 
   // See |gfx::PresentationFeedback| for detail.
@@ -60,7 +57,7 @@ class VIZ_SERVICE_EXPORT OutputSurfaceClient {
   virtual void AddChildWindowToBrowser(gpu::SurfaceHandle child_window) = 0;
 
  protected:
-  virtual ~OutputSurfaceClient() {}
+  virtual ~OutputSurfaceClient() = default;
 };
 
 }  // namespace viz

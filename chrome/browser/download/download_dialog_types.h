@@ -18,17 +18,19 @@ enum class DownloadLocationDialogType {
   NAME_CONFLICT = 4,  // Error dialog, there is already a file with that name.
   NAME_TOO_LONG = 5,  // Error dialog, the file name is too long.
   LOCATION_SUGGESTION = 6,  // Dialog showing alternative location suggestion.
-  kMaxValue = LOCATION_SUGGESTION
+  FORCE_PROMPT = 7,  // Dialog forced by Save As (bypasses 1-directory check).
+  kMaxValue = FORCE_PROMPT
 };
 
 // Result of download location dialog.
 // Recorded in histogram, so do not delete or reuse entries. The values must
 // match DownloadLocationDialogResult in enums.xml.
 enum class DownloadLocationDialogResult {
-  USER_CONFIRMED = 0,    // User confirmed a file path.
-  USER_CANCELED = 1,     // User canceled file path selection.
-  DUPLICATE_DIALOG = 2,  // Dialog is already showing.
-  kMaxValue = DUPLICATE_DIALOG
+  USER_CONFIRMED = 0,                // User confirmed a file path.
+  USER_CANCELED = 1,                 // User canceled file path selection.
+  DUPLICATE_DIALOG = 2,              // Dialog is already showing.
+  CONFIRMED_WITHOUT_USER_INPUT = 3,  // Dialog was confirmed by default.
+  kMaxValue = CONFIRMED_WITHOUT_USER_INPUT
 };
 
 #endif  // CHROME_BROWSER_DOWNLOAD_DOWNLOAD_DIALOG_TYPES_H_

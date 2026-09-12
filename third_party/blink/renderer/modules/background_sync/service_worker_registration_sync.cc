@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/modules/background_sync/service_worker_registration_sync.h"
 
+#include "base/task/single_thread_task_runner.h"
 #include "third_party/blink/renderer/modules/background_sync/periodic_sync_manager.h"
 #include "third_party/blink/renderer/modules/background_sync/sync_manager.h"
 #include "third_party/blink/renderer/modules/service_worker/service_worker_registration.h"
@@ -40,12 +41,7 @@ SyncManager* ServiceWorkerRegistrationSync::sync(
 
 SyncManager* ServiceWorkerRegistrationSync::sync() {
   if (!sync_manager_) {
-    ExecutionContext* execution_context =
-        GetSupplementable()->GetExecutionContext();
-    // TODO(falken): Consider defining a task source in the spec for this event.
-    sync_manager_ = MakeGarbageCollected<SyncManager>(
-        GetSupplementable(),
-        execution_context->GetTaskRunner(TaskType::kMiscPlatformAPI));
+    sync_manager_ = MakeGarbageCollected<SyncManager>(GetSupplementable());
   }
   return sync_manager_.Get();
 }
@@ -57,12 +53,8 @@ PeriodicSyncManager* ServiceWorkerRegistrationSync::periodicSync(
 
 PeriodicSyncManager* ServiceWorkerRegistrationSync::periodicSync() {
   if (!periodic_sync_manager_) {
-    ExecutionContext* execution_context =
-        GetSupplementable()->GetExecutionContext();
-    // TODO(falken): Consider defining a task source in the spec for this event.
-    periodic_sync_manager_ = MakeGarbageCollected<PeriodicSyncManager>(
-        GetSupplementable(),
-        execution_context->GetTaskRunner(TaskType::kMiscPlatformAPI));
+    periodic_sync_manager_ =
+        MakeGarbageCollected<PeriodicSyncManager>(GetSupplementable());
   }
   return periodic_sync_manager_.Get();
 }

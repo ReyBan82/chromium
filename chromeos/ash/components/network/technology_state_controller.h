@@ -6,6 +6,7 @@
 #define CHROMEOS_ASH_COMPONENTS_NETWORK_TECHNOLOGY_STATE_CONTROLLER_H_
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 
 #include "chromeos/ash/components/network/network_handler.h"
@@ -23,6 +24,8 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) TechnologyStateController {
  public:
   class HotspotOperationDelegate {
    public:
+    virtual ~HotspotOperationDelegate() = default;
+
     // Prepare for enable Wifi technology by disabling hotspot if active.
     // Calls |callback| when the preparation is completed.
     virtual void PrepareEnableWifi(
@@ -63,8 +66,8 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) TechnologyStateController {
   }
 
  private:
-  NetworkStateHandler* network_state_handler_ = nullptr;
-  HotspotOperationDelegate* hotspot_operation_delegate_ = nullptr;
+  raw_ptr<NetworkStateHandler> network_state_handler_ = nullptr;
+  raw_ptr<HotspotOperationDelegate> hotspot_operation_delegate_ = nullptr;
 
   void OnDisableWifiForHotspotFailed(PrepareEnableHotspotCallback callback,
                                      const std::string& error_name);

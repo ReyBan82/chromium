@@ -4,29 +4,30 @@
 
 import 'chrome://resources/ash/common/navigation_view_panel.js';
 import 'chrome://resources/ash/common/page_toolbar.js';
-import 'chrome://resources/cr_elements/cr_toast/cr_toast.js';
+import 'chrome://resources/ash/common/cr_elements/cr_toast/cr_toast.js';
 import 'chrome://resources/polymer/v3_0/iron-icon/iron-icon.js';
 import './diagnostics_sticky_banner.js';
 import './diagnostics_shared.css.js';
 import './input_list.js';
 import './network_list.js';
-import './strings.m.js';
+import '/strings.m.js';
 import './system_page.js';
 
+import type {CrToastElement} from 'chrome://resources/ash/common/cr_elements/cr_toast/cr_toast.js';
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {SelectorItem} from 'chrome://resources/ash/common/navigation_selector.js';
-import {NavigationViewPanelElement} from 'chrome://resources/ash/common/navigation_view_panel.js';
-import {CrToastElement} from 'chrome://resources/cr_elements/cr_toast/cr_toast.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {SelectorItem} from 'chrome://resources/ash/common/navigation_selector.js';
+import type {NavigationViewPanelElement} from 'chrome://resources/ash/common/navigation_view_panel.js';
+import {ColorChangeUpdater} from 'chrome://resources/cr_components/color_change_listener/colors_css_updater.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getTemplate} from './diagnostics_app.html.js';
 import {DiagnosticsBrowserProxyImpl} from './diagnostics_browser_proxy.js';
 import {getDiagnosticsIcon, getNavigationIcon} from './diagnostics_utils.js';
-import {KeyboardInfo} from './input.mojom-webui.js';
-import {ConnectedDevicesObserverReceiver, InputDataProviderInterface, TouchDeviceInfo} from './input_data_provider.mojom-webui.js';
+import type {InputDataProviderInterface} from './input_data_provider.mojom-webui.js';
+import {ConnectedDevicesObserverReceiver} from './input_data_provider.mojom-webui.js';
 import {getInputDataProvider} from './mojo_interface_provider.js';
 
 export interface DiagnosticsAppElement {
@@ -37,18 +38,15 @@ export interface DiagnosticsAppElement {
 }
 
 export type ShowToastEvent = CustomEvent<{message: string}>;
+export const SHOW_TOAST_EVENT_NAME = 'show-toast' as const;
 
 declare global {
-  interface HTMLElementEventMap {
-    'show-toast': ShowToastEvent;
+  interface WindowEventMap {
+    [SHOW_TOAST_EVENT_NAME]: ShowToastEvent;
   }
-}
-
-// TODO(michaelcheco): Update |InputDataProvider::GetConnectedDevices()| to
-// return a |ConnectedDevices| struct instead of defining one here.
-interface ConnectedDevices {
-  keyboards: KeyboardInfo[];
-  touchDevices: TouchDeviceInfo[];
+  interface HTMLElementEventMap {
+    [SHOW_TOAST_EVENT_NAME]: ShowToastEvent;
+  }
 }
 
 /**
@@ -85,11 +83,6 @@ export class DiagnosticsAppElement extends DiagnosticsAppElementBase {
         value: true,
       },
 
-      isInputEnabled: {
-        type: Boolean,
-        value: loadTimeData.getBoolean('isInputEnabled'),
-      },
-
       /**
        * Whether a user is logged in or not.
        * Note: A guest session is considered a logged-in state.
@@ -106,25 +99,22 @@ export class DiagnosticsAppElement extends DiagnosticsAppElementBase {
     };
   }
 
-  protected bannerMessage: string;
-  protected isLoggedIn: boolean;
-  private saveSessionLogEnabled: boolean;
-  private isInputEnabled: boolean;
-  private toastText: string;
-  private browserProxy: DiagnosticsBrowserProxyImpl =
+  declare protected bannerMessage: string;
+  declare protected isLoggedIn: boolean;
+  declare private saveSessionLogEnabled: boolean;
+  declare private toastText: string;
+  private readonly browserProxy: DiagnosticsBrowserProxyImpl =
       DiagnosticsBrowserProxyImpl.getInstance();
-  private inputDataProvider: InputDataProviderInterface =
+  private readonly inputDataProvider: InputDataProviderInterface =
       getInputDataProvider();
   private numKeyboards: number = 0;
 
   constructor() {
     super();
     this.browserProxy.initialize();
-    if (this.isInputEnabled) {
-      this.inputDataProvider.observeConnectedDevices(
-          new ConnectedDevicesObserverReceiver(this)
-              .$.bindNewPipeAndPassRemote());
-    }
+    this.inputDataProvider.observeConnectedDevices(
+        new ConnectedDevicesObserverReceiver(this)
+            .$.bindNewPipeAndPassRemote());
   }
 
   /**
@@ -132,7 +122,7 @@ export class DiagnosticsAppElement extends DiagnosticsAppElementBase {
    * will contain message to display on message property of event found on
    * event found on path `e.detail.message`.
    */
-  private showToastHandler = (e: ShowToastEvent): void => {
+  private readonly showToastHandler = (e: ShowToastEvent): void => {
     assert(e.detail.message);
     this.toastText = e.detail.message;
     this.$.toast.show();
@@ -172,7 +162,7 @@ export class DiagnosticsAppElement extends DiagnosticsAppElementBase {
   onTouchDeviceDisconnected(): void {}
 
   // Note: When adding a new page, update the DiagnosticsPage enum located
-  // in chrome/browser/ui/webui/ash/diagnostics_dialog.h.
+  // in chrome/browser/ui/webui/ash/diagnostics_dialog/diagnostics_dialog.h.
   private async getNavPages(): Promise<SelectorItem[]> {
     const pages: SelectorItem[] = [
       this.$.navigationPanel.createSelectorItem(
@@ -183,21 +173,12 @@ export class DiagnosticsAppElement extends DiagnosticsAppElementBase {
           getNavigationIcon('ethernet'), 'connectivity'),
     ];
 
-    if (this.isInputEnabled) {
-      const devices: ConnectedDevices =
-          await this.inputDataProvider.getConnectedDevices();
-      // Check the existing value of |numKeyboards| if |GetConnectedDevices|
-      // returns no keyboards as it's possible |onKeyboardConnected| was called
-      // prior.
-      this.numKeyboards = devices.keyboards.length || this.numKeyboards;
-      const isTouchPadOrTouchScreenEnabled =
-          loadTimeData.getBoolean('isTouchpadEnabled') ||
-          loadTimeData.getBoolean('isTouchscreenEnabled');
-      if (this.numKeyboards > 0 || isTouchPadOrTouchScreenEnabled) {
-        pages.push(this.createInputSelector());
-      }
-    }
-
+    pages.push(this.createInputSelector());
+    const {devices} = await this.inputDataProvider.getConnectedDevices();
+    // Check the existing value of |numKeyboards| if |GetConnectedDevices|
+    // returns no keyboards as it's possible |onKeyboardConnected| was called
+    // prior.
+    this.numKeyboards = devices.keyboards.length || this.numKeyboards;
     return pages;
   }
 
@@ -207,15 +188,15 @@ export class DiagnosticsAppElement extends DiagnosticsAppElementBase {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    ColorChangeUpdater.forDocument().start();
+
     this.createNavigationPanel();
-    window.addEventListener(
-        'show-toast', (e) => this.showToastHandler((e as ShowToastEvent)));
+    window.addEventListener(SHOW_TOAST_EVENT_NAME, this.showToastHandler);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    window.removeEventListener(
-        'show-toast', (e) => this.showToastHandler((e as ShowToastEvent)));
+    window.removeEventListener(SHOW_TOAST_EVENT_NAME, this.showToastHandler);
   }
 
   protected onSessionLogClick(): void {

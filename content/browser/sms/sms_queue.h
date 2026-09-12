@@ -24,14 +24,15 @@ class SmsQueue {
   ~SmsQueue();
 
   using FailureType = SmsFetchFailureType;
+  using OriginList = SmsFetcher::OriginList;
   using Subscriber = SmsFetcher::Subscriber;
 
   void Push(const OriginList& origin_list, Subscriber* subscriber);
   Subscriber* Pop(const OriginList& origin_list);
   void Remove(const OriginList& origin_list, Subscriber* subscriber);
-  bool HasSubscribers();
+  bool HasSubscribers() const;
   bool HasSubscriber(const OriginList& origin_list,
-                     const Subscriber* subscriber);
+                     const Subscriber* subscriber) const;
   // Pops and notifies the first subscriber of an origin iff there's one origin
   // in the |subscribers_| map. Returns true if the failure is handled.
   bool NotifyFailure(FailureType failure_type);

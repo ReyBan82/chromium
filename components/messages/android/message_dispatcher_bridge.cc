@@ -8,9 +8,12 @@
 
 #include "base/android/jni_android.h"
 #include "base/android/scoped_java_ref.h"
+#include "base/check.h"
 #include "base/no_destructor.h"
-#include "components/messages/android/jni_headers/MessageDispatcherBridge_jni.h"
 #include "content/public/browser/web_contents.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "components/messages/android/jni_headers/MessageDispatcherBridge_jni.h"
 
 namespace messages {
 
@@ -41,6 +44,7 @@ bool MessageDispatcherBridge::EnqueueMessage(MessageWrapper* message,
                                              content::WebContents* web_contents,
                                              MessageScopeType scope_type,
                                              MessagePriority priority) {
+  CHECK(!message->is_in_queue());
   JNIEnv* env = base::android::AttachCurrentThread();
   if (Java_MessageDispatcherBridge_enqueueMessage(
           env, message->GetJavaMessageWrapper(),
@@ -57,6 +61,7 @@ bool MessageDispatcherBridge::EnqueueWindowScopedMessage(
     MessageWrapper* message,
     ui::WindowAndroid* window_android,
     MessagePriority priority) {
+  CHECK(!message->is_in_queue());
   JNIEnv* env = base::android::AttachCurrentThread();
   if (Java_MessageDispatcherBridge_enqueueWindowScopedMessage(
           env, message->GetJavaMessageWrapper(),
@@ -93,3 +98,5 @@ void MessageDispatcherBridge::Initialize(ResourceIdMapper resource_id_mapper) {
 }
 
 }  // namespace messages
+
+DEFINE_JNI(MessageDispatcherBridge)

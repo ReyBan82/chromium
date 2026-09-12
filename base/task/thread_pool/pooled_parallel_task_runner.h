@@ -24,7 +24,8 @@ class BASE_EXPORT PooledParallelTaskRunner : public TaskRunner {
   // Constructs a PooledParallelTaskRunner which can be used to post tasks.
   PooledParallelTaskRunner(
       const TaskTraits& traits,
-      PooledTaskRunnerDelegate* pooled_task_runner_delegate);
+      PooledTaskRunnerDelegate* pooled_task_runner_delegate,
+      bool inherit_task_importance_by_default);
   PooledParallelTaskRunner(const PooledParallelTaskRunner&) = delete;
   PooledParallelTaskRunner& operator=(const PooledParallelTaskRunner&) = delete;
 
@@ -37,7 +38,9 @@ class BASE_EXPORT PooledParallelTaskRunner : public TaskRunner {
   ~PooledParallelTaskRunner() override;
 
   const TaskTraits traits_;
-  const raw_ptr<PooledTaskRunnerDelegate> pooled_task_runner_delegate_;
+  const raw_ptr<PooledTaskRunnerDelegate, DanglingUntriaged>
+      pooled_task_runner_delegate_;
+  const bool inherit_task_importance_by_default_;
 };
 
 }  // namespace internal

@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/autofill/payments/save_payment_icon_controller.h"
+
 #include "chrome/app/chrome_command_ids.h"
+#include "chrome/browser/ui/autofill/payments/iban_bubble_controller_impl.h"
 #include "chrome/browser/ui/autofill/payments/save_card_bubble_controller_impl.h"
-#include "chrome/browser/ui/autofill/payments/save_iban_bubble_controller_impl.h"
 
 namespace autofill {
 
@@ -13,14 +14,15 @@ namespace autofill {
 SavePaymentIconController* SavePaymentIconController::Get(
     content::WebContents* web_contents,
     int command_id) {
-  if (!web_contents)
+  if (!web_contents) {
     return nullptr;
+  }
 
   if (command_id == IDC_SAVE_CREDIT_CARD_FOR_PAGE) {
     return SaveCardBubbleControllerImpl::FromWebContents(web_contents);
   }
   DCHECK_EQ(command_id, IDC_SAVE_IBAN_FOR_PAGE);
-  return SaveIbanBubbleControllerImpl::FromWebContents(web_contents);
+  return IbanBubbleControllerImpl::FromWebContents(web_contents);
 }
 
 }  // namespace autofill

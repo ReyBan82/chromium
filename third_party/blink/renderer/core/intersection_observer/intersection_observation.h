@@ -5,7 +5,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_INTERSECTION_OBSERVER_INTERSECTION_OBSERVATION_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_INTERSECTION_OBSERVER_INTERSECTION_OBSERVATION_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
+#include "base/containers/enum_set.h"
+#include "base/time/time.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/dom_high_res_time_stamp.h"
 #include "third_party/blink/renderer/core/intersection_observer/intersection_geometry.h"
@@ -14,6 +17,7 @@
 
 namespace blink {
 
+class ComputeIntersectionsContext;
 class Element;
 class IntersectionObserver;
 class IntersectionObserverEntry;
@@ -27,83 +31,88 @@ class CORE_EXPORT IntersectionObservation final
  public:
   // Flags that drive the behavior of the ComputeIntersections() method. For an
   // explanation of implicit vs. explicit root, see intersection_observer.h.
-  enum ComputeFlags {
+  enum class ComputeFlag {
+    kMinValue,
     // If this bit is set, and observer_->RootIsImplicit() is true, then the
     // root bounds (i.e., size of the top document's viewport) should be
     // included in any IntersectionObserverEntry objects created by Compute().
-    kReportImplicitRootBounds = 1 << 0,
+    kReportImplicitRootBounds = kMinValue,
     // If this bit is set, and observer_->RootIsImplicit() is false, then
     // Compute() should update the observation.
-    kExplicitRootObserversNeedUpdate = 1 << 1,
+    kExplicitRootObserversNeedUpdate,
     // If this bit is set, and observer_->RootIsImplicit() is true, then
     // Compute() should update the observation.
-    kImplicitRootObserversNeedUpdate = 1 << 2,
+    kImplicitRootObserversNeedUpdate,
     // If this bit is set, it indicates that at least one LocalFrameView
     // ancestor is detached from the LayoutObject tree of its parent. Usually,
     // this is unnecessary -- if an ancestor FrameView is detached, then all
     // descendant frames are detached. There is, however, at least one exception
     // to this rule; see crbug.com/749737 for details.
-    kAncestorFrameIsDetachedFromLayout = 1 << 3,
+    kAncestorFrameIsDetachedFromLayout,
     // If this bit is set, then the observer.delay parameter is ignored; i.e.,
     // the computation will run even if the previous run happened within the
     // delay parameter.
-    kIgnoreDelay = 1 << 4,
+    kIgnoreDelay,
     // If this bit is set, we can skip tracking the sticky frame during
     // UpdateViewportIntersectionsForSubtree.
-    kCanSkipStickyFrameTracking = 1 << 5,
+    kCanSkipStickyFrameTracking,
     // If this bit is set, we only process intersection observations that
     // require post-layout delivery.
-    kPostLayoutDeliveryOnly = 1 << 6,
-    // If this is set, the overflow clip edge is used.
-    kUseOverflowClipEdge = 1 << 7,
+    kPostLayoutDeliveryOnly,
+    // Corresponding to LocalFrameView::kScrollAndVisibilityOnly.
+    kScrollAndVisibilityOnly,
+    // Remove outdated entries from IntersectionObserverController.
+    kUpdateTracking,
+    kMaxValue = kUpdateTracking,
   };
+  // Allow using the enum values under IntersectionObservation::.
+  using enum ComputeFlag;
+  using ComputeFlags = base::EnumSet<ComputeFlag>;
 
   IntersectionObservation(IntersectionObserver&, Element&);
 
   IntersectionObserver* Observer() const { return observer_.Get(); }
-  Element* Target() const { return target_; }
-  unsigned LastThresholdIndex() const { return last_threshold_index_; }
+  Element* Target() const { return target_.Get(); }
+  // Returns true if root and target are valid, connected, and have the required
+  // DOM hierarchy to compute an intersection.
+  bool CanCompute() const;
   // Returns 1 if the geometry was recalculated, otherwise 0. This could be a
   // bool, but int64_t matches IntersectionObserver::ComputeIntersections().
-  int64_t ComputeIntersection(unsigned flags,
-                              absl::optional<base::TimeTicks>& monotonic_time);
-  int64_t ComputeIntersection(
-      const IntersectionGeometry::RootGeometry& root_geometry,
-      unsigned flags,
-      absl::optional<base::TimeTicks>& monotonic_time);
+  int64_t ComputeIntersection(ComputeFlags flags, ComputeIntersectionsContext&);
   void TakeRecords(HeapVector<Member<IntersectionObserverEntry>>&);
   void Disconnect();
-  void InvalidateCachedRects();
 
   void Trace(Visitor*) const;
 
-  bool CanUseCachedRectsForTesting() const { return CanUseCachedRects(); }
+  bool CanUseCachedRectsForTesting(bool visibility_only) const;
+  bool HasPendingUpdateForTesting() const { return needs_update_; }
 
  private:
-  bool ShouldCompute(unsigned flags) const;
-  bool MaybeDelayAndReschedule(unsigned flags, DOMHighResTimeStamp timestamp);
-  bool CanUseCachedRects() const;
-  unsigned GetIntersectionGeometryFlags(unsigned compute_flags) const;
+  bool ShouldCompute(ComputeFlags flags) const;
+  bool MaybeDelayAndReschedule(ComputeFlags flags,
+                               ComputeIntersectionsContext&);
+  IntersectionGeometry::Flags GetIntersectionGeometryFlags(
+      ComputeFlags compute_flags) const;
   // Inspect the geometry to see if there has been a transition event; if so,
   // generate a notification and schedule it for delivery.
   void ProcessIntersectionGeometry(const IntersectionGeometry& geometry,
-                                   DOMHighResTimeStamp timestamp);
-  void SetLastThresholdIndex(unsigned index) { last_threshold_index_ = index; }
-  void SetWasVisible(bool last_is_visible) {
-    last_is_visible_ = last_is_visible ? 1 : 0;
-  }
+                                   ComputeIntersectionsContext&);
 
   Member<IntersectionObserver> observer_;
   WeakMember<Element> target_;
   HeapVector<Member<IntersectionObserverEntry>> entries_;
-  DOMHighResTimeStamp last_run_time_;
+  base::TimeTicks last_run_time_;
 
-  std::unique_ptr<IntersectionGeometry::CachedRects> cached_rects_;
+  IntersectionGeometry::CachedRects cached_rects_;
 
-  unsigned last_is_visible_ : 1;
-  unsigned needs_update_ : 1;
-  unsigned last_threshold_index_ : 30;
-  static const unsigned kMaxThresholdIndex = static_cast<unsigned>(0x40000000);
+  wtf_size_t last_threshold_index_ = kNotFound;
+  bool last_is_visible_ = false;
+
+  // Ensures update even if kExplicitRootObserversNeedUpdate or
+  // kImplicitRootObserversNeedUpdate is not specified in flags.
+  // It ensures the initial update, and if a needed update is skipped for some
+  // reason, the flag will be true until the update is done.
+  bool needs_update_ = true;
 };
 
 }  // namespace blink

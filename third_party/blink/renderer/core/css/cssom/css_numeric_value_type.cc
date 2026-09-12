@@ -4,9 +4,8 @@
 
 #include "third_party/blink/renderer/core/css/cssom/css_numeric_value_type.h"
 
+#include <algorithm>
 #include <functional>
-
-#include "base/ranges/algorithm.h"
 
 namespace blink {
 
@@ -67,6 +66,8 @@ CSSNumericValueType::BaseType UnitTypeToBaseType(
     case UnitType::kIcs:
     case UnitType::kLhs:
     case UnitType::kRlhs:
+    case UnitType::kCaps:
+    case UnitType::kRcaps:
       return BaseType::kLength;
     case UnitType::kMilliseconds:
     case UnitType::kSeconds:
@@ -84,41 +85,16 @@ CSSNumericValueType::BaseType UnitTypeToBaseType(
     case UnitType::kDotsPerInch:
     case UnitType::kDotsPerCentimeter:
       return BaseType::kResolution;
-    case UnitType::kFraction:
+    case UnitType::kFlex:
       return BaseType::kFlex;
     case UnitType::kPercentage:
       return BaseType::kPercent;
     default:
       NOTREACHED();
-      return BaseType::kLength;
   }
 }
 
 }  // namespace
-
-AtomicString CSSNumericValueType::BaseTypeToString(BaseType base_type) {
-  switch (base_type) {
-    case BaseType::kLength:
-      return "length";
-    case BaseType::kAngle:
-      return "angle";
-    case BaseType::kTime:
-      return "time";
-    case BaseType::kFrequency:
-      return "frequency";
-    case BaseType::kResolution:
-      return "resolution";
-    case BaseType::kFlex:
-      return "flex";
-    case BaseType::kPercent:
-      return "percent";
-    default:
-      break;
-  }
-
-  NOTREACHED();
-  return "";
-}
 
 CSSNumericValueType::CSSNumericValueType(CSSPrimitiveValue::UnitType unit) {
   exponents_.Fill(0, kNumBaseTypes);
@@ -137,8 +113,8 @@ CSSNumericValueType::CSSNumericValueType(int exponent,
 
 CSSNumericValueType CSSNumericValueType::NegateExponents(
     CSSNumericValueType type) {
-  base::ranges::transform(type.exponents_, type.exponents_.begin(),
-                          std::negate());
+  std::ranges::transform(type.exponents_, type.exponents_.begin(),
+                         std::negate());
   return type;
 }
 

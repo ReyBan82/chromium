@@ -6,7 +6,7 @@
 #define COMPONENTS_FEED_CORE_V2_ENUMS_H_
 
 #include <iosfwd>
-#include "base/strings/string_piece_forward.h"
+#include <string_view>
 
 namespace feed {
 
@@ -15,16 +15,15 @@ enum class NetworkRequestType : int {
   kFeedQuery = 0,
   kUploadActions = 1,
   kNextPage = 2,
-  kListWebFeeds = 3,
-  kUnfollowWebFeed = 4,
-  kFollowWebFeed = 5,
-  kListRecommendedWebFeeds = 6,
-  kWebFeedListContents = 7,
+  // Deprecated, as web feed is removed
+  // kListWebFeeds = 3,
+  // kUnfollowWebFeed = 4,
+  // kFollowWebFeed = 5,
+  // kListRecommendedWebFeeds = 6,
+  // kWebFeedListContents = 7,
   kQueryInteractiveFeed = 8,
   kQueryBackgroundFeed = 9,
   kQueryNextPage = 10,
-  kSingleWebFeedListContents = 11,
-  kQueryWebFeed = 12,
 };
 std::ostream& operator<<(std::ostream& out, NetworkRequestType value);
 
@@ -87,12 +86,14 @@ enum class LoadStreamStatus {
   kDataInStoreIsForAnotherUser = 23,
   kAbortWithPendingClearAll = 24,
   kAlreadyHaveUnreadContent = 25,
-  kNotAWebFeedSubscriber = 26,
+  kNotAWebFeedSubscriber_DEPRECATED = 26,
   kAccountTokenFetchFailedWrongAccount = 27,
   kAccountTokenFetchTimedOut = 28,
   kNetworkFetchTimedOut = 29,
   kLoadNotAllowedDisabled = 30,
-  kMaxValue = kLoadNotAllowedDisabled,
+  kLoadNotAllowedDisabledByDse = 31,
+  kNoCardReceived = 32,
+  kMaxValue = kNoCardReceived,
 };
 
 // Were we able to load fresh Feed data. This should be 'true' unless some kind
@@ -133,20 +134,6 @@ enum class UploadActionsBatchStatus {
 std::ostream& operator<<(std::ostream& out, UploadActionsStatus value);
 std::ostream& operator<<(std::ostream& out, UploadActionsBatchStatus value);
 
-// This must be kept in sync with WebFeedRefreshStatus in enums.xml.
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-// Status of updating recommended or subscribed web feeds.
-enum class WebFeedRefreshStatus {
-  kNoStatus = 0,
-  kSuccess = 1,
-  kNetworkFailure = 2,
-  kNetworkRequestThrottled = 3,
-  kAbortFetchWebFeedPendingClearAll = 4,
-  kMaxValue = kAbortFetchWebFeedPendingClearAll,
-};
-std::ostream& operator<<(std::ostream& out, WebFeedRefreshStatus value);
-
 // This must be kept in sync with FeedUserSettingsOnStart in enums.xml.
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
@@ -173,9 +160,11 @@ enum class UserSettingsOnStart {
   kSignedInNoRecentData = 8,
   // The Feed is disabled.
   kFeedNotEnabled = 9,
-  kMaxValue = kFeedNotEnabled,
+  // The Feed is disabled if swapping out NTP is enabled and DSE isn't Google.
+  kFeedNotEnabledByDse = 10,
+  kMaxValue = kFeedNotEnabledByDse,
 };
-base::StringPiece ToString(UserSettingsOnStart v);
+std::string_view ToString(UserSettingsOnStart v);
 std::ostream& operator<<(std::ostream& out, UserSettingsOnStart value);
 
 }  // namespace feed

@@ -11,10 +11,12 @@
 #include "base/functional/bind.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
+#include "base/strings/escape.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/test/run_until.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/timer/elapsed_timer.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -33,36 +35,40 @@
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/filename_util.h"
+#include "net/dns/mock_host_resolver.h"
+#include "net/test/embedded_test_server/embedded_test_server.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "third_party/blink/public/mojom/presentation/presentation.mojom.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/views/widget/widget.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 using testing::_;
-using testing::Invoke;
 
 namespace {
 
 constexpr char kPresentationId[] = "test_id";
-const base::FilePath::StringPieceType kResourcePath =
+const base::FilePath::StringViewType kResourcePath =
     FILE_PATH_LITERAL("media/router/");
 
 base::RepeatingCallback<void(const std::string&)> GetNoopTitleChangeCallback() {
   return base::BindRepeating([](const std::string& title) {});
 }
 
-base::FilePath GetResourceFile(base::FilePath::StringPieceType relative_path) {
+base::FilePath GetResourceFile(base::FilePath::StringViewType relative_path) {
   base::FilePath base_dir;
-  if (!base::PathService::Get(chrome::DIR_TEST_DATA, &base_dir))
+  if (!base::PathService::Get(chrome::DIR_TEST_DATA, &base_dir)) {
     return base::FilePath();
+  }
   base::FilePath full_path =
       base_dir.Append(kResourcePath).Append(relative_path);
   {
     base::ScopedAllowBlockingForTesting scoped_allow_blocking;
-    if (!PathExists(full_path))
+    if (!PathExists(full_path)) {
       return base::FilePath();
+    }
   }
   return full_path;
 }
@@ -74,7 +80,7 @@ base::FilePath GetResourceFile(base::FilePath::StringPieceType relative_path) {
 class FakeControllerConnection final
     : public blink::mojom::PresentationConnection {
  public:
-  FakeControllerConnection() {}
+  FakeControllerConnection() = default;
 
   FakeControllerConnection(const FakeControllerConnection&) = delete;
   FakeControllerConnection& operator=(const FakeControllerConnection&) = delete;
@@ -86,8 +92,9 @@ class FakeControllerConnection final
   }
 
   // blink::mojom::PresentationConnection implementation
-  MOCK_METHOD1(OnMessage,
-               void(blink::mojom::PresentationConnectionMessagePtr message));
+  MOCK_METHOD(void,
+              OnMessage,
+              (blink::mojom::PresentationConnectionMessagePtr message));
   void DidChangeState(
       blink::mojom::PresentationConnectionState state) override {}
   void DidClose(
@@ -170,14 +177,13 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
   ReceiverWindowDestroyer destroyer;
   auto receiver_window =
       PresentationReceiverWindowController::CreateFromOriginalProfile(
-          browser()->profile(), gfx::Rect(100, 100),
+          browser()->GetProfile(), gfx::Rect(100, 100),
           base::BindOnce(&ReceiverWindowDestroyer::OnTerminate,
                          base::Unretained(&destroyer)),
           GetNoopTitleChangeCallback());
   receiver_window->Start(kPresentationId, GURL("about:blank"));
-  base::RunLoop().RunUntilIdle();
-
-  EXPECT_TRUE(IsWindowFullscreen(*receiver_window));
+  EXPECT_TRUE(base::test::RunUntil(
+      [&]() { return IsWindowFullscreen(*receiver_window); }));
 
   destroyer.AwaitTerminate(std::move(receiver_window));
 }
@@ -185,7 +191,7 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
 IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
                        MANUAL_CreatesWindowOnGivenDisplay) {
   // Pick specific display.
-  auto* screen = display::Screen::GetScreen();
+  auto* screen = display::Screen::Get();
   const auto& displays = screen->GetAllDisplays();
   for (const auto& display : displays) {
     DVLOG(0) << display.ToString();
@@ -193,8 +199,8 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
 
   // Choose a non-default display to which to move the receiver window.
   ASSERT_LE(2ul, displays.size());
-  const auto default_display =
-      screen->GetDisplayNearestWindow(browser()->window()->GetNativeWindow());
+  const auto default_display = screen->GetDisplayNearestWindow(
+      browser()->GetWindow()->GetNativeWindow());
   display::Display target_display;
   ASSERT_FALSE(target_display.is_valid());
   for (const auto& display : displays) {
@@ -208,7 +214,7 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
   ReceiverWindowDestroyer destroyer;
   auto receiver_window =
       PresentationReceiverWindowController::CreateFromOriginalProfile(
-          browser()->profile(), target_display.bounds(),
+          browser()->GetProfile(), target_display.bounds(),
           base::BindOnce(&ReceiverWindowDestroyer::OnTerminate,
                          base::Unretained(&destroyer)),
           GetNoopTitleChangeCallback());
@@ -228,7 +234,7 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
   destroyer.AwaitTerminate(std::move(receiver_window));
 }
 
-// Flaky. See https://crbug.com/880045.
+// Flaky. See https://crbug.com/41411389.
 IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
                        DISABLED_NavigationClosesWindow) {
   // Start receiver window.
@@ -239,7 +245,7 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
   ReceiverWindowDestroyer destroyer;
   auto receiver_window =
       PresentationReceiverWindowController::CreateFromOriginalProfile(
-          browser()->profile(), gfx::Rect(100, 100),
+          browser()->GetProfile(), gfx::Rect(100, 100),
           base::BindOnce(&ReceiverWindowDestroyer::OnTerminate,
                          base::Unretained(&destroyer)),
           GetNoopTitleChangeCallback());
@@ -248,14 +254,14 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
 
   content::WebContentsDestroyedWatcher destroyed_watcher(
       receiver_window->web_contents());
-  ASSERT_TRUE(content::ExecuteScript(receiver_window->web_contents(),
-                                     "window.location = 'about:blank'"));
+  ASSERT_TRUE(content::ExecJs(receiver_window->web_contents(),
+                              "window.location = 'about:blank'"));
   destroyed_watcher.Wait();
 
   destroyer.AwaitTerminate(std::move(receiver_window));
 }
 
-// Flaky. See https://crbug.com/840136.
+// Flaky. See https://crbug.com/41387325.
 IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
                        DISABLED_PresentationApiCommunication) {
   // Start receiver window.
@@ -266,7 +272,7 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
   ReceiverWindowDestroyer destroyer;
   auto receiver_window =
       PresentationReceiverWindowController::CreateFromOriginalProfile(
-          browser()->profile(), gfx::Rect(100, 100),
+          browser()->GetProfile(), gfx::Rect(100, 100),
           base::BindOnce(&ReceiverWindowDestroyer::OnTerminate,
                          base::Unretained(&destroyer)),
           GetNoopTitleChangeCallback());
@@ -277,7 +283,7 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
   FakeControllerConnection controller_connection;
   auto controller_ptr = controller_connection.Bind();
   media_router::LocalPresentationManagerFactory::GetOrCreateForBrowserContext(
-      browser()->profile())
+      browser()->GetProfile())
       ->RegisterLocalPresentationController(
           blink::mojom::PresentationInfo(presentation_url, kPresentationId),
           content::GlobalRenderFrameHostId(0, 0), std::move(controller_ptr),
@@ -308,13 +314,134 @@ IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
   destroyer.AwaitTerminate(std::move(receiver_window));
 }
 
+class PresentationReceiverNavigationBrowserTest
+    : public PresentationReceiverWindowControllerBrowserTest {
+ protected:
+  PresentationReceiverNavigationBrowserTest()
+      : https_server_(net::EmbeddedTestServer::TYPE_HTTPS) {}
+
+  void SetUpOnMainThread() override {
+    PresentationReceiverWindowControllerBrowserTest::SetUpOnMainThread();
+    host_resolver()->AddRule("*", "127.0.0.1");
+    // navigator.presentation is [SecureContext]; serve over HTTPS so the
+    // hijacker page's user JS can read the stolen connection.
+    https_server_.SetSSLConfig(net::EmbeddedTestServer::CERT_TEST_NAMES);
+    https_server_.ServeFilesFromSourceDirectory(
+        "chrome/test/data/media/router");
+    ASSERT_TRUE(https_server_.Start());
+  }
+
+  net::EmbeddedTestServer https_server_;
+};
+
+// Observes a receiver WebContents and records every committed primary
+// main-frame URL until the WebContents is destroyed.
+class CommittedUrlRecorder : public content::WebContentsObserver {
+ public:
+  explicit CommittedUrlRecorder(content::WebContents* wc)
+      : content::WebContentsObserver(wc) {}
+
+  void DidFinishNavigation(content::NavigationHandle* handle) override {
+    if (handle->IsInPrimaryMainFrame() && handle->HasCommitted()) {
+      committed_urls_.push_back(handle->GetURL());
+      LOG(ERROR) << "Main-frame navigation committed: "
+                 << handle->GetURL().spec();
+      if (on_commit_cb_ && handle->GetURL() == on_commit_url_) {
+        std::move(on_commit_cb_).Run();
+      }
+    }
+  }
+  void RunOnCommit(const GURL& url, base::OnceClosure cb) {
+    on_commit_url_ = url;
+    on_commit_cb_ = std::move(cb);
+  }
+  const std::vector<GURL>& committed_urls() const { return committed_urls_; }
+
+ private:
+  std::vector<GURL> committed_urls_;
+  GURL on_commit_url_;
+  base::OnceClosure on_commit_cb_;
+};
+
+IN_PROC_BROWSER_TEST_F(PresentationReceiverNavigationBrowserTest,
+                       CrossOriginNavigationDoesNotCommit) {
+  // Two distinct HTTPS origins (a.test vs b.test, both covered by
+  // CERT_TEST_NAMES) — site isolation puts them in different renderer
+  // processes and both are SecureContexts so navigator.presentation is exposed.
+  const GURL target_url = https_server_.GetURL("b.test", "/target.html");
+  const std::string receiver_path =
+      "/target_receiver.html?" +
+      base::EscapeQueryParamValue(target_url.spec(), /*use_plus=*/false);
+  const GURL start_url = https_server_.GetURL("a.test", receiver_path);
+  const url::Origin target_origin = url::Origin::Create(target_url);
+  ASSERT_NE(url::Origin::Create(start_url), target_origin);
+
+  // 1. Create the receiver window.
+  // Instead of ReceiverWindowDestroyer, we use a simple RunLoop to wait for
+  // the asynchronous termination callback.
+  base::RunLoop terminate_loop;
+  auto receiver_window =
+      PresentationReceiverWindowController::CreateFromOriginalProfile(
+          browser()->GetProfile(), gfx::Rect(100, 100),
+          terminate_loop.QuitClosure(), GetNoopTitleChangeCallback());
+  CommittedUrlRecorder recorder(receiver_window->web_contents());
+  receiver_window->Start(kPresentationId, start_url);
+
+  // 2. start_url commits and Blink eagerly creates a PresentationReceiver.
+  //    start_url then attempts to navigate to target_url.
+  //    PresentationNavigationPolicy::AllowNavigation returns false for that
+  //    second main-frame navigation.
+  //    Our fix asynchronously stops the navigation and terminates the window,
+  //    which runs the termination callback and quits the loop.
+  terminate_loop.Run();
+
+  // 3. Verify that the disallowed navigation never committed.
+  EXPECT_EQ(1u, recorder.committed_urls().size());
+  EXPECT_EQ(start_url, recorder.committed_urls()[0]);
+
+  // 4. Register a controller connection for the same presentation_id.
+  //    Since the receiver window is destroyed/terminated, the connection
+  //    should not be hijacked or routed to target.
+  FakeControllerConnection controller_connection;
+  media_router::LocalPresentationManagerFactory::GetOrCreateForBrowserContext(
+      browser()->GetProfile())
+      ->RegisterLocalPresentationController(
+          blink::mojom::PresentationInfo(start_url, kPresentationId),
+          content::GlobalRenderFrameHostId(0, 0), controller_connection.Bind(),
+          controller_connection.MakeConnectionRequest(),
+          media_router::MediaRoute("route",
+                                   media_router::MediaSource(start_url), "sink",
+                                   "desc", true));
+
+  std::string received;
+  base::RunLoop loop;
+  EXPECT_CALL(controller_connection, OnMessage(_))
+      .WillRepeatedly([&](blink::mojom::PresentationConnectionMessagePtr msg) {
+        if (msg->is_message()) {
+          received = msg->get_message();
+        }
+        loop.Quit();
+      });
+
+  // Run the loop for a short time to ensure no message is received.
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE, loop.QuitClosure(), base::Milliseconds(500));
+  loop.Run();
+
+  // Safely destroy the receiver window controller.
+  receiver_window.reset();
+
+  // 5. Verify that no message to target was received.
+  EXPECT_TRUE(received.empty());
+}
+
 IN_PROC_BROWSER_TEST_F(PresentationReceiverWindowControllerBrowserTest,
                        WindowClosingTerminatesPresentation) {
   // Start receiver window.
   ReceiverWindowDestroyer destroyer;
   auto receiver_window =
       PresentationReceiverWindowController::CreateFromOriginalProfile(
-          browser()->profile(), gfx::Rect(100, 100),
+          browser()->GetProfile(), gfx::Rect(100, 100),
           base::BindOnce(&ReceiverWindowDestroyer::OnTerminate,
                          base::Unretained(&destroyer)),
           GetNoopTitleChangeCallback());

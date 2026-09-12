@@ -6,30 +6,43 @@
 
 #include <list>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/notimplemented.h"
+#include "base/scoped_observation.h"
 #include "ui/aura/null_window_targeter.h"
 #include "ui/aura/scoped_window_targeter.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_delegate.h"
+#include "ui/base/dragdrop/mojom/drag_drop_types.mojom.h"
+#include "ui/base/ozone_buildflags.h"
 #include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
 #include "ui/compositor/compositor.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "ui/events/event.h"
+#include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/linux/linux_ui.h"
-#include "ui/platform_window/extensions/desk_extension.h"
-#include "ui/platform_window/extensions/pinned_mode_extension.h"
+#include "ui/linux/window_frame_provider.h"
+#include "ui/native_theme/native_theme.h"
 #include "ui/platform_window/extensions/wayland_extension.h"
 #include "ui/platform_window/extensions/x11_extension.h"
+#include "ui/platform_window/platform_window.h"
 #include "ui/platform_window/platform_window_init_properties.h"
 #include "ui/platform_window/wm/wm_move_resize_handler.h"
+#include "ui/views/view_utils.h"
 #include "ui/views/views_delegate.h"
 #include "ui/views/widget/widget.h"
+#include "ui/views/window/frame_view_linux.h"
+#include "ui/views/window/frame_view_utils_linux.h"
+#include "ui/views/window/native_frame_view.h"
+#include "ui/views/window/native_frame_view_linux.h"
 
 #if BUILDFLAG(USE_ATK)
 #include "ui/accessibility/platform/atk_util_auralinux.h"
@@ -45,45 +58,95 @@ class SwapWithNewSizeObserverHelper : public ui::CompositorObserver {
   using HelperCallback = base::RepeatingCallback<void(const gfx::Size&)>;
   SwapWithNewSizeObserverHelper(ui::Compositor* compositor,
                                 const HelperCallback& callback)
-      : compositor_(compositor), callback_(callback) {
-    compositor_->AddObserver(this);
+      : callback_(callback) {
+    compositor_observation_.Observe(compositor);
   }
 
   SwapWithNewSizeObserverHelper(const SwapWithNewSizeObserverHelper&) = delete;
   SwapWithNewSizeObserverHelper& operator=(
       const SwapWithNewSizeObserverHelper&) = delete;
 
-  ~SwapWithNewSizeObserverHelper() override {
-    if (compositor_)
-      compositor_->RemoveObserver(this);
-  }
+  ~SwapWithNewSizeObserverHelper() override = default;
 
  private:
   // ui::CompositorObserver:
+#if BUILDFLAG(SUPPORTS_OZONE_X11)
   void OnCompositingCompleteSwapWithNewSize(ui::Compositor* compositor,
                                             const gfx::Size& size) override {
-    DCHECK_EQ(compositor, compositor_);
+    DCHECK(compositor_observation_.IsObservingSource(compositor));
     callback_.Run(size);
   }
+#endif  // BUILDFLAG(SUPPORTS_OZONE_X11)
+
   void OnCompositingShuttingDown(ui::Compositor* compositor) override {
-    DCHECK_EQ(compositor, compositor_);
-    compositor_->RemoveObserver(this);
-    compositor_ = nullptr;
+    DCHECK(compositor_observation_.IsObservingSource(compositor));
+    compositor_observation_.Reset();
   }
 
-  raw_ptr<ui::Compositor> compositor_;
+  base::ScopedObservation<ui::Compositor, ui::CompositorObserver>
+      compositor_observation_{this};
   const HelperCallback callback_;
 };
 
 }  // namespace
 
+// static
+const char DesktopWindowTreeHostLinux::kWindowKey[] =
+    "DesktopWindowTreeHostLinux";
+
 DesktopWindowTreeHostLinux::DesktopWindowTreeHostLinux(
     internal::NativeWidgetDelegate* native_widget_delegate,
     DesktopNativeWidgetAura* desktop_native_widget_aura)
     : DesktopWindowTreeHostPlatform(native_widget_delegate,
-                                    desktop_native_widget_aura) {}
+                                    desktop_native_widget_aura) {
+  window()->SetNativeWindowProperty(kWindowKey, this);
+}
 
 DesktopWindowTreeHostLinux::~DesktopWindowTreeHostLinux() = default;
+
+std::unique_ptr<FrameView> DesktopWindowTreeHostLinux::CreateFrameView() {
+  if (ShouldUseNativeFrame()) {
+    return std::make_unique<NativeFrameView>(GetWidget());
+  }
+
+  auto* linux_ui_theme = ui::LinuxUiTheme::GetForWindow(GetContentWindow());
+  if (linux_ui_theme) {
+    auto nav_button_provider =
+        linux_ui_theme->CreateNavButtonProvider(ui::FrameType::kDefault);
+    if (nav_button_provider) {
+      // base::Unretained is safe: linux_ui_theme outlives this host, and the
+      // callback is stored in NativeFrameViewLinux which is destroyed before
+      // this host.
+      auto frame_provider_getter = base::BindRepeating(
+          [](ui::LinuxUiTheme* theme, DesktopWindowTreeHostLinux* host,
+             bool tiled, bool maximized) -> ui::WindowFrameProvider* {
+            // A solid frame is used when the platform doesn't support
+            // transparency.
+            const bool solid_frame = !host->ShouldWindowContentsBeTransparent();
+            return theme->GetWindowFrameProvider(ui::FrameType::kDefault,
+                                                 solid_frame, tiled, maximized);
+          },
+          base::Unretained(linux_ui_theme), base::Unretained(this));
+
+      auto frame_view = std::make_unique<NativeFrameViewLinux>(
+          GetWidget(), std::move(nav_button_provider),
+          std::move(frame_provider_getter));
+      frame_view->SetSupportsClientFrameShadow(
+          platform_window()->CanSetDecorationInsets() &&
+          Widget::IsWindowCompositingSupported());
+      frame_view->InitViews();
+      return frame_view;
+    }
+  }
+
+  // Fallback when no native toolkit is available.
+  auto frame_view = std::make_unique<FrameViewLinux>(GetWidget());
+  frame_view->SetSupportsClientFrameShadow(
+      platform_window()->CanSetDecorationInsets() &&
+      Widget::IsWindowCompositingSupported());
+  frame_view->InitViews();
+  return frame_view;
+}
 
 gfx::Rect DesktopWindowTreeHostLinux::GetXRootWindowOuterBounds() const {
   // TODO(msisov): must be removed as soon as all X11 low-level bits are moved
@@ -93,10 +156,11 @@ gfx::Rect DesktopWindowTreeHostLinux::GetXRootWindowOuterBounds() const {
 }
 
 void DesktopWindowTreeHostLinux::LowerWindow() {
-  if (GetX11Extension())
+  if (GetX11Extension()) {
     GetX11Extension()->LowerXWindow();
-  else
+  } else {
     NOTIMPLEMENTED_LOG_ONCE();
+  }
 }
 
 base::OnceClosure DesktopWindowTreeHostLinux::DisableEventListening() {
@@ -113,8 +177,128 @@ base::OnceClosure DesktopWindowTreeHostLinux::DisableEventListening() {
                         weak_factory_.GetWeakPtr());
 }
 
+void DesktopWindowTreeHostLinux::UpdateFrameHints() {
+  if (!GetContentWindow()->targeter()) {
+    platform_window()->SetInputRegion(std::nullopt);
+  } else {
+    // Content window can have a window_targeter that allows located events fall
+    // to the window underneath it. There is no window underneath the content
+    // window from aura's point of view so wayland platform needs to know about
+    // it.
+    gfx::Rect hit_test_rect_mouse_dp{
+        platform_window()->GetBoundsInDIP().size()};
+    gfx::Rect hit_test_rect_touch_dp = gfx::Rect{hit_test_rect_mouse_dp};
+    GetContentWindow()->targeter()->GetHitTestRects(
+        GetContentWindow(), &hit_test_rect_mouse_dp, &hit_test_rect_touch_dp);
+    platform_window()->SetInputRegion(std::optional<std::vector<gfx::Rect>>(
+        {ConvertRectToPixels(hit_test_rect_mouse_dp)}));
+  }
+
+  // Set opaque and input regions if using FrameViewLinux with client-side
+  // decorations.
+  UpdateFrameRegions();
+}
+
+gfx::Insets DesktopWindowTreeHostLinux::CalculateInsetsInDIP(
+    ui::PlatformWindowState window_state) const {
+  if (window_state == ui::PlatformWindowState::kMaximized ||
+      window_state == ui::PlatformWindowState::kFullScreen ||
+      window_state == ui::PlatformWindowState::kMinimized) {
+    return gfx::Insets();
+  }
+
+  auto* widget = GetWidget();
+  if (!widget || !widget->non_client_view()) {
+    return DesktopWindowTreeHostPlatform::CalculateInsetsInDIP(window_state);
+  }
+
+  auto* frame_view_linux = views::AsViewClass<FrameViewLinux>(
+      widget->non_client_view()->frame_view());
+  if (!frame_view_linux) {
+    return DesktopWindowTreeHostPlatform::CalculateInsetsInDIP(window_state);
+  }
+
+  return frame_view_linux->GetRestoredFrameBorderInsets();
+}
+
+void DesktopWindowTreeHostLinux::OnWindowTiledStateChanged(
+    ui::WindowTiledEdges new_tiled_edges) {
+  auto* widget = GetWidget();
+  if (!widget || !widget->non_client_view()) {
+    return;
+  }
+
+  auto* frame_view_linux = views::AsViewClass<FrameViewLinux>(
+      widget->non_client_view()->frame_view());
+  if (!frame_view_linux) {
+    return;
+  }
+
+  frame_view_linux->SetTiled(new_tiled_edges.top || new_tiled_edges.left ||
+                             new_tiled_edges.bottom || new_tiled_edges.right);
+  UpdateFrameRegions();
+}
+
+void DesktopWindowTreeHostLinux::UpdateFrameRegions() {
+  auto* widget = GetWidget();
+  if (!widget || !widget->non_client_view()) {
+    return;
+  }
+
+  auto* frame_view_linux = views::AsViewClass<FrameViewLinux>(
+      widget->non_client_view()->frame_view());
+  if (!frame_view_linux) {
+    return;
+  }
+
+  auto* window = platform_window();
+  float scale = device_scale_factor();
+  gfx::Insets frame_insets = frame_view_linux->GetFrameBorderInsets();
+
+  if (views::Widget::IsWindowCompositingSupported()) {
+    if (frame_insets.IsEmpty()) {
+      // No frame decorations, the window is maximized or fullscreen.  The
+      // entire window is opaque except for a possibly translucent top area.
+      gfx::Size widget_size = widget->GetWindowBoundsInScreen().size();
+      gfx::Rect opaque_region_dip(widget_size);
+      gfx::Insets insets;
+      insets.set_top(frame_view_linux->GetTranslucentTopAreaHeight());
+      opaque_region_dip.Inset(insets);
+      window->SetOpaqueRegion(std::vector<gfx::Rect>(
+          {gfx::ScaleToEnclosingRect(opaque_region_dip, scale)}));
+    } else {
+      window->SetOpaqueRegion(GetRestoredOpaqueRegion(
+          frame_view_linux->GetRestoredClipRegion(), scale,
+          frame_view_linux->GetTranslucentTopAreaHeight()));
+    }
+  }
+
+  // Set the input region to exclude the outer shadow while preserving
+  // the resize band.
+  if (platform_window()->CanSetDecorationInsets() &&
+      views::Widget::IsWindowCompositingSupported()) {
+    if (frame_insets.IsEmpty()) {
+      window->SetInputRegion(std::nullopt);
+    } else {
+      const gfx::Insets input_insets = frame_view_linux->GetInputInsets();
+      gfx::Size widget_size = widget->GetWindowBoundsInScreen().size();
+      gfx::Rect input_bounds(widget_size);
+      input_bounds.Inset(frame_insets - input_insets);
+      window->SetInputRegion(std::optional<std::vector<gfx::Rect>>(
+          {gfx::ScaleToEnclosingRect(input_bounds, scale)}));
+    }
+  }
+}
+
+void DesktopWindowTreeHostLinux::OnNativeThemeUpdated(
+    ui::NativeTheme* /*observed_theme*/) {
+  UpdateFrameRegions();
+}
+
 void DesktopWindowTreeHostLinux::Init(const Widget::InitParams& params) {
   DesktopWindowTreeHostPlatform::Init(params);
+
+  theme_observation_.Observe(ui::NativeTheme::GetInstanceForNativeUi());
 
   if (GetX11Extension() && GetX11Extension()->IsSyncExtensionAvailable()) {
     compositor_observer_ = std::make_unique<SwapWithNewSizeObserverHelper>(
@@ -131,15 +315,38 @@ void DesktopWindowTreeHostLinux::OnNativeWidgetCreated(
   DesktopWindowTreeHostPlatform::OnNativeWidgetCreated(params);
 }
 
-void DesktopWindowTreeHostLinux::InitModalType(ui::ModalType modal_type) {
+void DesktopWindowTreeHostLinux::InitModalType(
+    ui::mojom::ModalType modal_type) {
   switch (modal_type) {
-    case ui::MODAL_TYPE_NONE:
+    case ui::mojom::ModalType::kNone:
       break;
     default:
       // TODO(erg): Figure out under what situations |modal_type| isn't
       // none. The comment in desktop_native_widget_aura.cc suggests that this
       // is rare.
       NOTIMPLEMENTED();
+  }
+}
+
+void DesktopWindowTreeHostLinux::PrepareForMoveLoop(
+    Widget::MoveLoopSource source) {
+  if (auto* wayland_extension =
+          ui::GetWaylandToplevelExtension(*platform_window())) {
+    ui::mojom::DragEventSource event_source =
+        (source == Widget::MoveLoopSource::kMouse)
+            ? ui::mojom::DragEventSource::kMouse
+            : ui::mojom::DragEventSource::kTouch;
+    wayland_extension->StartWindowDraggingSessionIfNeeded(
+        event_source, /*allow_system_drag=*/true);
+  }
+}
+
+void DesktopWindowTreeHostLinux::SetBypassWindowManager(bool bypass) {
+  if (auto* x11_extension = GetX11Extension()) {
+    if (x11_extension->IsWmTiling() &&
+        x11_extension->CanResetOverrideRedirect()) {
+      x11_extension->SetOverrideRedirect(bypass);
+    }
   }
 }
 
@@ -150,17 +357,18 @@ Widget::MoveLoopResult DesktopWindowTreeHostLinux::RunMoveLoop(
   GetContentWindow()->SetCapture();
 
   // DesktopWindowTreeHostLinux::RunMoveLoop() may result in |this| being
-  // deleted. As an extra safity guard, keep track of |this| with a weak
+  // deleted. As an extra safety guard, keep track of |this| with a weak
   // pointer, and only call ReleaseCapture() if it still exists.
   //
-  // TODO(https://crbug.com/1289682): Consider removing capture set/unset
+  // TODO(crbug.com/40212051): Consider removing capture set/unset
   // during window drag 'n drop (detached).
   auto weak_this = weak_factory_.GetWeakPtr();
 
   Widget::MoveLoopResult result = DesktopWindowTreeHostPlatform::RunMoveLoop(
       drag_offset, source, escape_behavior);
-  if (weak_this.get())
+  if (weak_this.get()) {
     GetContentWindow()->ReleaseCapture();
+  }
 
   return result;
 }
@@ -192,17 +400,19 @@ void DesktopWindowTreeHostLinux::DispatchEvent(ui::Event* event) {
           GetRootTransform().InverseMapPoint(location).value_or(location);
       hit_test_code = GetContentWindow()->delegate()->GetNonClientComponent(
           gfx::ToRoundedPoint(location_in_dip));
-      if (hit_test_code != HTCLIENT && hit_test_code != HTNOWHERE)
+      if (hit_test_code != HTCLIENT && hit_test_code != HTNOWHERE) {
         flags |= ui::EF_IS_NON_CLIENT;
-      located_event->set_flags(flags);
+      }
+      located_event->SetFlags(flags);
     }
 
     // While we unset the urgency hint when we gain focus, we also must remove
     // it on mouse clicks because we can call FlashFrame() on an active window.
     if (located_event->IsMouseEvent() &&
         (located_event->AsMouseEvent()->IsAnyButton() ||
-         located_event->IsMouseWheelEvent()))
+         located_event->IsMouseWheelEvent())) {
       FlashFrame(false);
+    }
   }
 
   // Prehandle the event as long as as we are not able to track if it is handled
@@ -215,13 +425,26 @@ void DesktopWindowTreeHostLinux::DispatchEvent(ui::Event* event) {
         hit_test_code, event->AsLocatedEvent());
   }
 
-  if (!event->handled())
+  if (!event->handled()) {
     WindowTreeHostPlatform::DispatchEvent(event);
+  }
 }
 
 void DesktopWindowTreeHostLinux::OnClosed() {
   DestroyNonClientEventFilter();
   DesktopWindowTreeHostPlatform::OnClosed();
+}
+
+void DesktopWindowTreeHostLinux::OnBoundsChanged(const BoundsChange& change) {
+  // DesktopWindowTreeHostPlatform::OnBoundsChanged() may result in |this| being
+  // deleted. As an extra safety guard, keep track of |this| with a weak
+  // pointer, and only call UpdateFrameHints() if it still exists.
+  auto weak_this = weak_factory_.GetWeakPtr();
+  DesktopWindowTreeHostPlatform::OnBoundsChanged(change);
+
+  if (weak_this.get()) {
+    UpdateFrameHints();
+  }
 }
 
 ui::X11Extension* DesktopWindowTreeHostLinux::GetX11Extension() {
@@ -237,20 +460,22 @@ const ui::X11Extension* DesktopWindowTreeHostLinux::GetX11Extension() const {
 #if BUILDFLAG(USE_ATK)
 bool DesktopWindowTreeHostLinux::OnAtkKeyEvent(AtkKeyEventStruct* atk_event,
                                                bool transient) {
-  if (!transient && !IsActive() && !HasCapture())
+  if (!transient && !IsActive() && !HasCapture()) {
     return false;
+  }
   return ui::AtkUtilAuraLinux::HandleAtkKeyEvent(atk_event) ==
          ui::DiscardAtkKeyEvent::Discard;
 }
 #endif
 
-bool DesktopWindowTreeHostLinux::IsOverrideRedirect() const {
+bool DesktopWindowTreeHostLinux::IsOverrideRedirect(
+    const ui::X11Extension& x11_extension) const {
   // BrowserDesktopWindowTreeHostLinux implements this for browser windows.
   return false;
 }
 
 gfx::Rect DesktopWindowTreeHostLinux::GetGuessedFullScreenSizeInPx() const {
-  display::Screen* screen = display::Screen::GetScreen();
+  display::Screen* screen = display::Screen::Get();
   const display::Display display =
       screen->GetDisplayMatching(GetWindowBoundsInScreen());
   return gfx::Rect(gfx::ScaleToFlooredPoint(display.bounds().origin(),
@@ -287,22 +512,56 @@ void DesktopWindowTreeHostLinux::AddAdditionalInitProperties(
   properties->wm_role_name = params.wm_role_name;
 
   properties->wayland_app_id = params.wayland_app_id;
+  properties->startup_id = params.startup_id;
 
   DCHECK(!properties->x11_extension_delegate);
   properties->x11_extension_delegate = this;
+
+  properties->prefer_dark_theme = ui::LinuxUiTheme::GetForProfile(nullptr);
 }
 
 base::flat_map<std::string, std::string>
 DesktopWindowTreeHostLinux::GetKeyboardLayoutMap() {
-  if (auto* linux_ui = ui::LinuxUi::instance())
+  if (auto* linux_ui = ui::LinuxUi::instance()) {
     return linux_ui->GetKeyboardLayoutMap();
+  }
   return WindowTreeHostPlatform::GetKeyboardLayoutMap();
+}
+
+bool DesktopWindowTreeHostLinux::SupportsMouseLock() {
+  auto* wayland_extension = ui::GetWaylandToplevelExtension(*platform_window());
+  if (!wayland_extension) {
+    return false;
+  }
+
+  return wayland_extension->SupportsPointerLock();
+}
+
+void DesktopWindowTreeHostLinux::LockMouse(aura::Window* window) {
+  DesktopWindowTreeHostPlatform::LockMouse(window);
+
+  if (SupportsMouseLock()) {
+    auto* wayland_extension =
+        ui::GetWaylandToplevelExtension(*platform_window());
+    wayland_extension->LockPointer(true /*enabled*/);
+  }
+}
+
+void DesktopWindowTreeHostLinux::UnlockMouse(aura::Window* window) {
+  DesktopWindowTreeHostPlatform::UnlockMouse(window);
+
+  if (SupportsMouseLock()) {
+    auto* wayland_extension =
+        ui::GetWaylandToplevelExtension(*platform_window());
+    wayland_extension->LockPointer(false /*enabled*/);
+  }
 }
 
 void DesktopWindowTreeHostLinux::OnCompleteSwapWithNewSize(
     const gfx::Size& size) {
-  if (GetX11Extension())
-    GetX11Extension()->OnCompleteSwapAfterResize();
+  if (GetX11Extension()) {
+    GetX11Extension()->OnCompleteSwapAfterResize(size);
+  }
 }
 
 void DesktopWindowTreeHostLinux::CreateNonClientEventFilter() {
@@ -321,8 +580,9 @@ void DesktopWindowTreeHostLinux::OnLostMouseGrab() {
 
 void DesktopWindowTreeHostLinux::EnableEventListening() {
   DCHECK_GT(modal_dialog_counter_, 0UL);
-  if (!--modal_dialog_counter_)
+  if (!--modal_dialog_counter_) {
     targeter_for_modal_.reset();
+  }
 }
 
 // static

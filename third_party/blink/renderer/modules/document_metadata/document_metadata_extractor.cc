@@ -8,7 +8,7 @@
 #include <memory>
 #include <utility>
 
-#include "base/metrics/histogram_functions.h"
+#include "base/notreached.h"
 #include "components/schema_org/common/metadata.mojom-blink.h"
 #include "third_party/blink/public/mojom/document_metadata/document_metadata.mojom-blink.h"
 #include "third_party/blink/renderer/core/dom/document.h"
@@ -55,13 +55,18 @@ constexpr wtf_size_t kMaxRepeatedSize = 100;
 constexpr char kJSONLDKeyType[] = "@type";
 constexpr char kJSONLDKeyGraph[] = "@graph";
 bool IsSupportedType(AtomicString type) {
-  DEFINE_STATIC_LOCAL(HashSet<AtomicString>, elements,
-                      ({// Common types that include addresses.
-                        "AutoDealer", "Hotel", "LocalBusiness", "Organization",
-                        "Person", "Place", "PostalAddress", "Product",
-                        "Residence", "Restaurant", "SingleFamilyResidence",
-                        // Common types including phone numbers
-                        "Store", "ContactPoint", "LodgingBusiness"}));
+  DEFINE_STATIC_LOCAL(
+      HashSet<AtomicString>, elements,
+      ({// Common types that include addresses.
+        AtomicString("AutoDealer"), AtomicString("Hotel"),
+        AtomicString("LocalBusiness"), AtomicString("Organization"),
+        AtomicString("Person"), AtomicString("Place"),
+        AtomicString("PostalAddress"), AtomicString("Product"),
+        AtomicString("ProductGroup"), AtomicString("Residence"),
+        AtomicString("Restaurant"), AtomicString("SingleFamilyResidence"),
+        // Common types including phone numbers
+        AtomicString("Store"), AtomicString("ContactPoint"),
+        AtomicString("LodgingBusiness"), AtomicString("LoginAction")}));
   return type && elements.Contains(type);
 }
 
@@ -128,14 +133,14 @@ bool ParseRepeatedValue(const JSONArray& arr,
         double v;
         element->AsDouble(&v);
         String s = String::Number(v);
-        s.Truncate(kMaxStringLength);
+        s = s.substr(0, kMaxStringLength);
         values->get_string_values().push_back(s);
         continue;
       }
       case JSONValue::ValueType::kTypeString: {
         String v;
         element->AsString(&v);
-        v.Truncate(kMaxStringLength);
+        v = v.substr(0, kMaxStringLength);
         values->get_string_values().push_back(v);
         continue;
       }
@@ -148,7 +153,7 @@ bool ParseRepeatedValue(const JSONArray& arr,
       }
       case JSONValue::ValueType::kTypeNull:
       case JSONValue::ValueType::kTypeArray:
-        CHECK(false);
+        NOTREACHED();
     }
   }
   return true;
@@ -190,13 +195,13 @@ void ExtractEntity(const JSONObject& val, int recursion_level, Entity& entity) {
         double v;
         val.GetDouble(entry.first, &v);
         String s = String::Number(v);
-        s.Truncate(kMaxStringLength);
+        s = s.substr(0, kMaxStringLength);
         property->values = Values::NewStringValues({s});
       } break;
       case JSONValue::ValueType::kTypeString: {
         String v;
         val.GetString(entry.first, &v);
-        v.Truncate(kMaxStringLength);
+        v = v.substr(0, kMaxStringLength);
         property->values = Values::NewStringValues({v});
       } break;
       case JSONValue::ValueType::kTypeObject: {
@@ -214,7 +219,8 @@ void ExtractEntity(const JSONObject& val, int recursion_level, Entity& entity) {
         add_property = ParseRepeatedValue(*(val.GetArray(entry.first)),
                                           recursion_level, property->values);
         break;
-      default:
+      case JSONValue::ValueType::kTypeNull:
+        add_property = false;
         break;
     }
     if (add_property)
@@ -311,21 +317,10 @@ WebPagePtr DocumentMetadataExtractor::Extract(const Document& document) {
   WebPagePtr page = WebPage::New();
 
   // Traverse the DOM tree and extract the metadata.
-  base::TimeTicks start_time = base::TimeTicks::Now();
   ExtractionStatus status = ExtractMetadata(*html, page->entities);
-  base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
-
-  base::UmaHistogramEnumeration("CopylessPaste.ExtractionStatus", status);
-
   if (status != ExtractionStatus::kOK) {
-    base::UmaHistogramCustomMicrosecondsTimes(
-        "CopylessPaste.ExtractionFailedUs", elapsed_time, base::Microseconds(1),
-        base::Seconds(1), 50);
     return nullptr;
   }
-  base::UmaHistogramCustomMicrosecondsTimes("CopylessPaste.ExtractionUs",
-                                            elapsed_time, base::Microseconds(1),
-                                            base::Seconds(1), 50);
 
   page->url = document.Url();
   page->title = document.title();

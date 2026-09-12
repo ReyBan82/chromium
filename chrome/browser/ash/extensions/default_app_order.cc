@@ -4,27 +4,38 @@
 
 #include "chrome/browser/ash/extensions/default_app_order.h"
 
+#include <array>
 #include <utility>
 
 #include "ash/constants/ash_paths.h"
+#include "ash/constants/web_app_id_constants.h"
 #include "ash/public/cpp/app_list/internal_app_id_constants.h"
-#include "ash/webui/projector_app/public/cpp/projector_app_constants.h"
+#include "ash/webui/mall/app_id.h"
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_file_value_serializer.h"
+#include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/task/thread_pool.h"
-#include "chrome/browser/ash/app_list/arc/arc_app_utils.h"
-#include "chrome/browser/ash/file_manager/app_id.h"
+#include "build/branding_buildflags.h"
+#include "chrome/browser/apps/app_service/policy_util.h"
 #include "chrome/browser/ash/guest_os/guest_os_terminal.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/web_applications/web_app_id_constants.h"
+#include "chrome/browser/web_applications/policy/app_service_web_app_policy.h"
 #include "chrome/common/extensions/extension_constants.h"
+#include "chromeos/ash/components/file_manager/app_id.h"
+#include "chromeos/ash/components/system_web_apps/system_web_app_type.h"
+#include "chromeos/ash/experiences/arc/app/arc_app_constants.h"
 #include "chromeos/constants/chromeos_features.h"
 #include "components/app_constants/constants.h"
+#include "components/services/app_service/public/cpp/package_id.h"
 #include "extensions/common/constants.h"
+
+using apps::PackageId;
+using apps::PackageType;
 
 namespace chromeos {
 namespace default_app_order {
@@ -42,7 +53,7 @@ const char kImportDefaultOrderAttr[] = "import_default_order";
 
 // Reads external ordinal json file and returns the parsed value. Returns NULL
 // if the file does not exist or could not be parsed properly.
-std::unique_ptr<base::Value::List> ReadExternalOrdinalFile(
+std::unique_ptr<base::ListValue> ReadExternalOrdinalFile(
     const base::FilePath& path) {
   if (!base::PathExists(path))
     return nullptr;
@@ -60,25 +71,25 @@ std::unique_ptr<base::Value::List> ReadExternalOrdinalFile(
   if (!value->is_list())
     LOG(WARNING) << "Expect a JSON list in file " << path.value();
 
-  return std::make_unique<base::Value::List>(std::move(*value).TakeList());
+  return std::make_unique<base::ListValue>(std::move(*value).TakeList());
 }
 
-std::string GetLocaleSpecificStringImpl(const base::Value::Dict& root,
+std::string GetLocaleSpecificStringImpl(const base::DictValue& root,
                                         const std::string& locale,
                                         const std::string& dictionary_name,
                                         const std::string& entry_name) {
-  const base::Value::Dict* dict_content = root.FindDict(dictionary_name);
+  const base::DictValue* dict_content = root.FindDict(dictionary_name);
   if (!dict_content)
     return std::string();
 
-  const base::Value::Dict* locale_dict = dict_content->FindDict(locale);
+  const base::DictValue* locale_dict = dict_content->FindDict(locale);
   if (locale_dict) {
     const std::string* result = locale_dict->FindString(entry_name);
     if (result)
       return *result;
   }
 
-  const base::Value::Dict* default_dict = dict_content->FindDict(kDefaultAttr);
+  const base::DictValue* default_dict = dict_content->FindDict(kDefaultAttr);
   if (default_dict) {
     const std::string* result = default_dict->FindString(entry_name);
     if (result)
@@ -97,43 +108,56 @@ void GetDefault(std::vector<std::string>* app_ids) {
     arc::kPlayStoreAppId,
 
     extension_misc::kFilesManagerAppId,
-    file_manager::kFileManagerSwaAppId,
+    file_manager::kFileManagerSwaAppId
+  });
 
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+  if (chromeos::features::IsGeminiAppPreinstallEnabled()) {
+    app_ids->push_back(ash::kGeminiAppId);
+  }
+#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
+
+  app_ids->insert(app_ids->end(), {
     arc::kGmailAppId,
     extension_misc::kGmailAppId,
-    web_app::kGmailAppId,
+    ash::kGmailAppId,
 
-    web_app::kGoogleMeetAppId,
+    ash::kGoogleMeetAppId,
 
-    web_app::kGoogleChatAppId,
+    ash::kGoogleChatAppId,
+    ash::kOldGoogleChatAppId,
 
     extension_misc::kGoogleDocsAppId,
-    web_app::kGoogleDocsAppId,
+    ash::kGoogleDocsAppId,
 
     extension_misc::kGoogleSlidesAppId,
-    web_app::kGoogleSlidesAppId,
+    ash::kGoogleSlidesAppId,
 
     extension_misc::kGoogleSheetsAppId,
-    web_app::kGoogleSheetsAppId,
+    ash::kGoogleSheetsAppId,
 
     extension_misc::kGoogleDriveAppId,
-    web_app::kGoogleDriveAppId,
+    ash::kGoogleDriveAppId,
 
     extension_misc::kGoogleKeepAppId,
-    web_app::kGoogleKeepAppId,
+    ash::kGoogleKeepAppId,
 
     arc::kGoogleCalendarAppId,
     extension_misc::kCalendarAppId,
-    web_app::kGoogleCalendarAppId,
+    ash::kGoogleCalendarAppId,
 
-    web_app::kMessagesAppId,
+    ash::kMessagesAppId,
+
+    ash::kNotebookLmAppId,
+
+    ash::kVidsAppId,
 
     arc::kYoutubeAppId,
     extension_misc::kYoutubeAppId,
-    web_app::kYoutubeAppId,
+    ash::kYoutubeAppId,
 
     arc::kYoutubeMusicAppId,
-    web_app::kYoutubeMusicAppId,
+    ash::kYoutubeMusicAppId,
     arc::kYoutubeMusicWebApkAppId,
 
     arc::kPlayMoviesAppId,
@@ -145,49 +169,60 @@ void GetDefault(std::vector<std::string>* app_ids) {
 
     arc::kPlayBooksAppId,
     extension_misc::kGooglePlayBooksAppId,
-    web_app::kPlayBooksAppId,
+    ash::kPlayBooksAppId,
 
-    web_app::kCameraAppId,
+    ash::kCameraAppId,
+    ash::kRecorderAppId,
 
     arc::kGooglePhotosAppId,
     extension_misc::kGooglePhotosAppId,
 
     arc::kGoogleMapsAppId,
-    web_app::kGoogleMapsAppId,
+    ash::kGoogleMapsAppId,
 
     ash::kInternalAppIdSettings,
-    web_app::kSettingsAppId,
-    web_app::kOsSettingsAppId,
+    ash::kSettingsAppId,
+    ash::kOsSettingsAppId,
 
-    web_app::kHelpAppId,
+    ash::kHelpAppId,
 
-    web_app::kCalculatorAppId,
+    ash::kMallSystemAppId,
+
+    ash::kCalculatorAppId,
     extension_misc::kCalculatorAppId,
 
-    web_app::kMediaAppId,
-    web_app::kCursiveAppId,
-    web_app::kCanvasAppId,
+    ash::kMediaAppId,
+    ash::kCursiveAppId,
+    ash::kCanvasAppId,
 
-    ash::kChromeUITrustedProjectorSwaAppId,
+    ash::kChromeUIUntrustedProjectorSwaAppId,
+    ash::kAdobeExpressAppId,
     extension_misc::kTextEditorAppId,
-    web_app::kPrintManagementAppId,
-    web_app::kScanningAppId,
+    ash::kPrintManagementAppId,
+    ash::kScanningAppId,
+    ash::kShortcutCustomizationAppId,
     guest_os::kTerminalSystemAppId,
 
-    web_app::kYoutubeTVAppId,
-    web_app::kGoogleNewsAppId,
+    ash::kYoutubeTVAppId,
+    ash::kGoogleNewsAppId,
     extensions::kWebStoreAppId,
+    ash::kGraduationAppId,
 
     arc::kLightRoomAppId,
     arc::kInfinitePainterAppId,
-    web_app::kShowtimeAppId,
+    ash::kShowtimeAppId,
     extension_misc::kGooglePlusAppId,
   });
   // clang-format on
 
   if (chromeos::features::IsCloudGamingDeviceEnabled()) {
-    app_ids->push_back(web_app::kNvidiaGeForceNowAppId);
+    app_ids->push_back(ash::kNvidiaGeForceNowAppId);
   }
+}
+
+PackageId SystemPackageId(ash::SystemWebAppType type) {
+  return PackageId(PackageType::kSystem,
+                   *web_app::GetPolicyIdForSystemWebAppType(type));
 }
 
 }  // namespace
@@ -237,7 +272,7 @@ void ExternalLoader::Load() {
   base::FilePath ordinals_file;
   CHECK(base::PathService::Get(ash::FILE_DEFAULT_APP_ORDER, &ordinals_file));
 
-  std::unique_ptr<base::Value::List> ordinals_value =
+  std::unique_ptr<base::ListValue> ordinals_value =
       ReadExternalOrdinalFile(ordinals_file);
   if (ordinals_value) {
     std::string locale = g_browser_process->GetApplicationLocale();
@@ -246,7 +281,7 @@ void ExternalLoader::Load() {
         std::string app_id = i.GetString();
         app_ids_.push_back(app_id);
       } else if (i.is_dict()) {
-        const base::Value::Dict& dict = i.GetDict();
+        const base::DictValue& dict = i.GetDict();
         if (dict.FindBool(kOemAppsFolderAttr).value_or(false)) {
           oem_apps_folder_name_ = GetLocaleSpecificStringImpl(
               dict, locale, kLocalizedContentAttr, kNameAttr);
@@ -274,6 +309,33 @@ void Get(std::vector<std::string>* app_ids) {
   }
 
   *app_ids = loader_instance->GetAppIds();
+}
+
+base::span<const apps::LauncherItem> GetAppPreloadServiceDefaults() {
+  static const base::NoDestructor<std::array<apps::LauncherItem, 19>>
+      kPackageIds({
+          PackageId(PackageType::kChromeApp, app_constants::kChromeAppId),
+          PackageId(PackageType::kChromeApp, arc::kPlayStoreAppId),
+          SystemPackageId(ash::SystemWebAppType::FILE_MANAGER),
+          PackageId(PackageType::kWeb, ash::kGmailManifestId),
+          PackageId(PackageType::kWeb, ash::kGoogleDocsManifestId),
+          PackageId(PackageType::kWeb, ash::kGoogleSlidesManifestId),
+          PackageId(PackageType::kWeb, ash::kGoogleSheetsManifestId),
+          PackageId(PackageType::kWeb, ash::kGoogleDriveManifestId),
+          PackageId(PackageType::kWeb, ash::kYoutubeManifestId),
+          SystemPackageId(ash::SystemWebAppType::CAMERA),
+          SystemPackageId(ash::SystemWebAppType::SETTINGS),
+          SystemPackageId(ash::SystemWebAppType::HELP),
+          SystemPackageId(ash::SystemWebAppType::MALL),
+          SystemPackageId(ash::SystemWebAppType::MEDIA),
+          SystemPackageId(ash::SystemWebAppType::PROJECTOR),
+          SystemPackageId(ash::SystemWebAppType::PRINT_MANAGEMENT),
+          SystemPackageId(ash::SystemWebAppType::SCANNING),
+          SystemPackageId(ash::SystemWebAppType::SHORTCUT_CUSTOMIZATION),
+          SystemPackageId(ash::SystemWebAppType::TERMINAL),
+      });
+
+  return *kPackageIds;
 }
 
 std::string GetOemAppsFolderName() {

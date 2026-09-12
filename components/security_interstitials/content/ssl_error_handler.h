@@ -5,7 +5,9 @@
 #ifndef COMPONENTS_SECURITY_INTERSTITIALS_CONTENT_SSL_ERROR_HANDLER_H_
 #define COMPONENTS_SECURITY_INTERSTITIALS_CONTENT_SSL_ERROR_HANDLER_H_
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "base/feature_list.h"
 #include "base/functional/callback_forward.h"
@@ -17,7 +19,6 @@
 #include "components/captive_portal/core/buildflags.h"
 #include "components/security_interstitials/content/common_name_mismatch_handler.h"
 #include "components/security_interstitials/content/security_interstitial_page.h"
-#include "components/security_interstitials/content/ssl_cert_reporter.h"
 #include "components/security_interstitials/content/ssl_error_assistant.pb.h"
 #include "components/ssl_errors/error_classification.h"
 #include "content/public/browser/certificate_request_result_type.h"
@@ -45,8 +46,6 @@ class NetworkTimeTracker;
 }
 
 BASE_DECLARE_FEATURE(kMITMSoftwareInterstitial);
-BASE_DECLARE_FEATURE(kCaptivePortalInterstitial);
-BASE_DECLARE_FEATURE(kCaptivePortalCertificateList);
 
 // This class is responsible for deciding what type of interstitial to display
 // for an SSL validation error and actually displaying it. The display of the
@@ -70,18 +69,16 @@ BASE_DECLARE_FEATURE(kCaptivePortalCertificateList);
 class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
                         public content::WebContentsObserver {
  public:
-  typedef base::RepeatingCallback<void(content::WebContents*)>
-      TimerStartedCallback;
-  typedef base::OnceCallback<void(
-      std::unique_ptr<security_interstitials::SecurityInterstitialPage>)>
-      BlockingPageReadyCallback;
+  using TimerStartedCallback =
+      base::RepeatingCallback<void(content::WebContents*)>;
+  using BlockingPageReadyCallback = base::OnceCallback<void(
+      std::unique_ptr<security_interstitials::SecurityInterstitialPage>)>;
 
   // Callback that is optionally used to inform the client that a blocking page
   // has been shown in the specified WebContents for the specified URL with the
   // given error string and network error code.
-  typedef base::RepeatingCallback<
-      void(content::WebContents*, const GURL&, const std::string&, int)>
-      OnBlockingPageShownCallback;
+  using OnBlockingPageShownCallback = base::RepeatingCallback<
+      void(content::WebContents*, const GURL&, const std::string&, int)>;
 
   SSLErrorHandler(const SSLErrorHandler&) = delete;
   SSLErrorHandler& operator=(const SSLErrorHandler&) = delete;
@@ -107,6 +104,7 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
     OS_REPORTS_CAPTIVE_PORTAL = 12,
     SHOW_BLOCKED_INTERCEPTION_INTERSTITIAL = 13,
     SHOW_LEGACY_TLS_INTERSTITIAL = 14,  // Deprecated in M98.
+    SHOW_LOCAL_SELF_SIGNED_INTERSTITIAL = 15,
     SSL_ERROR_HANDLER_EVENT_COUNT
   };
 
@@ -114,7 +112,7 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
   // actions.
   class Delegate {
    public:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
     virtual void CheckForCaptivePortal() = 0;
     virtual bool DoesOSReportCaptivePortal() = 0;
     virtual bool GetSuggestedUrl(const std::vector<std::string>& dns_names,
@@ -132,6 +130,7 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
         const base::Time& now,
         ssl_errors::ClockState clock_state) = 0;
     virtual void ShowBlockedInterceptionInterstitial() = 0;
+    virtual void ShowLocalSelfSignedInterstitial() = 0;
     virtual void ReportNetworkConnectivity(base::OnceClosure callback) = 0;
     virtual bool HasBlockedInterception() const = 0;
   };
@@ -152,10 +151,9 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
   // shown.
   static void HandleSSLError(
       content::WebContents* web_contents,
-      int cert_error,
+      net::Error cert_error,
       const net::SSLInfo& ssl_info,
       const GURL& request_url,
-      std::unique_ptr<SSLCertReporter> ssl_cert_reporter,
       BlockingPageReadyCallback blocking_page_ready_callback,
       network_time::NetworkTimeTracker* network_time_tracker,
       captive_portal::CaptivePortalService* captive_portal_service,
@@ -188,12 +186,14 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
   static int GetErrorAssistantProtoVersionIdForTesting();
   static void SetOSReportsCaptivePortalForTesting(
       bool os_reports_captive_portal);
+  static void SetIsMultiNetworkCCTWorkflowForTesting(
+      bool is_multi_network_cct_workflow);
   bool IsTimerRunningForTesting() const;
 
  protected:
   SSLErrorHandler(std::unique_ptr<Delegate> delegate,
                   content::WebContents* web_contents,
-                  int cert_error,
+                  net::Error cert_error,
                   const net::SSLInfo& ssl_info,
                   network_time::NetworkTimeTracker* network_time_tracker,
                   captive_portal::CaptivePortalService* captive_portal_service,
@@ -221,6 +221,7 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
                                 ssl_errors::ClockState clock_state);
   void ShowDynamicInterstitial(const DynamicInterstitialInfo interstitial);
   void ShowBlockedInterceptionInterstitial();
+  void ShowLocalSelfSignedInterstitial();
 
   // Gets the result of whether the suggested URL is valid. Displays
   // common name mismatch interstitial or ssl interstitial accordingly.
@@ -248,7 +249,7 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
   bool IsOnlyCertError(net::CertStatus only_cert_error_expected) const;
 
   std::unique_ptr<Delegate> delegate_;
-  const int cert_error_;
+  const net::Error cert_error_;
   const net::SSLInfo ssl_info_;
   const GURL request_url_;
   raw_ptr<network_time::NetworkTimeTracker> network_time_tracker_;
@@ -256,7 +257,8 @@ class SSLErrorHandler : public content::WebContentsUserData<SSLErrorHandler>,
   // The below field is unused if captive portal detection is not enabled,
   // which causes a compiler error.
 #if BUILDFLAG(ENABLE_CAPTIVE_PORTAL_DETECTION)
-  raw_ptr<captive_portal::CaptivePortalService> captive_portal_service_;
+  raw_ptr<captive_portal::CaptivePortalService, DanglingUntriaged>
+      captive_portal_service_;
 #endif
 
   base::CallbackListSubscription subscription_;

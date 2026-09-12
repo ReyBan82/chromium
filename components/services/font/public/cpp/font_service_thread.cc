@@ -9,8 +9,11 @@
 #include "base/files/file.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/task/thread_pool.h"
+#include "base/timer/elapsed_timer.h"
 #include "components/services/font/public/cpp/mapped_font_file.h"
 #include "pdf/buildflags.h"
 
@@ -42,6 +45,9 @@ bool FontServiceThread::MatchFamilyName(
     SkFontStyle* out_style) {
   DCHECK(!task_runner_->RunsTasksInCurrentSequence());
   bool out_valid = false;
+
+  base::ElapsedTimer timer;
+
   // This proxies to the other thread, which proxies to mojo. Only on the reply
   // from mojo do we return from this.
   base::WaitableEvent done_event;
@@ -51,6 +57,9 @@ bool FontServiceThread::MatchFamilyName(
                      family_name, requested_style, &out_valid,
                      out_font_identity, out_family_name, out_style));
   done_event.Wait();
+
+  base::UmaHistogramMicrosecondsTimes(
+      "Blink.Fonts.FontServiceThread.MatchFamilyNameTime", timer.Elapsed());
 
   return out_valid;
 }
@@ -79,8 +88,8 @@ bool FontServiceThread::FallbackFontForCharacter(
 bool FontServiceThread::FontRenderStyleForStrike(
     std::string family,
     uint32_t size,
-    bool is_italic,
     bool is_bold,
+    bool is_italic,
     float device_scale_factor,
     font_service::mojom::FontRenderStylePtr* out_font_render_style) {
   DCHECK(!task_runner_->RunsTasksInCurrentSequence());
@@ -89,7 +98,7 @@ bool FontServiceThread::FontRenderStyleForStrike(
   task_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(&FontServiceThread::FontRenderStyleForStrikeImpl, this,
-                     &done_event, family, size, is_italic, is_bold,
+                     &done_event, family, size, is_bold, is_italic,
                      device_scale_factor, &out_valid, out_font_render_style));
   done_event.Wait();
   return out_valid;
@@ -134,6 +143,8 @@ scoped_refptr<MappedFontFile> FontServiceThread::OpenStream(
     const SkFontConfigInterface::FontIdentity& identity) {
   DCHECK(!task_runner_->RunsTasksInCurrentSequence());
 
+  base::ElapsedTimer timer;
+
   base::File stream_file;
   // This proxies to the other thread, which proxies to mojo. Only on the
   // reply from mojo do we return from this.
@@ -143,6 +154,9 @@ scoped_refptr<MappedFontFile> FontServiceThread::OpenStream(
                                 &done_event, &stream_file, identity.fID));
   done_event.Wait();
 
+  base::UmaHistogramMicrosecondsTimes(
+      "Blink.Fonts.FontServiceThread.OpenStreamTime", timer.Elapsed());
+
   if (!stream_file.IsValid()) {
     // The font-service may have been killed.
     return nullptr;
@@ -150,7 +164,7 @@ scoped_refptr<MappedFontFile> FontServiceThread::OpenStream(
 
   // Converts the file to out internal type.
   scoped_refptr<MappedFontFile> mapped_font_file =
-      new MappedFontFile(identity.fID);
+      base::MakeRefCounted<MappedFontFile>(identity.fID);
   if (!mapped_font_file->Initialize(std::move(stream_file)))
     return nullptr;
 
@@ -297,8 +311,8 @@ void FontServiceThread::FontRenderStyleForStrikeImpl(
     base::WaitableEvent* done_event,
     std::string family,
     uint32_t size,
-    bool is_italic,
     bool is_bold,
+    bool is_italic,
     float device_scale_factor,
     bool* out_valid,
     mojom::FontRenderStylePtr* out_font_render_style) {
@@ -312,7 +326,7 @@ void FontServiceThread::FontRenderStyleForStrikeImpl(
 
   pending_waitable_events_.insert(done_event);
   font_service_->FontRenderStyleForStrike(
-      std::move(family), size, is_italic, is_bold, device_scale_factor,
+      std::move(family), size, is_bold, is_italic, device_scale_factor,
       base::BindOnce(&FontServiceThread::OnFontRenderStyleForStrikeComplete,
                      this, done_event, out_valid, out_font_render_style));
 }
@@ -407,7 +421,7 @@ void FontServiceThread::OnMatchFontWithFallbackComplete(
 #endif  // BUILDFLAG(ENABLE_PDF)
 
 void FontServiceThread::OnFontServiceDisconnected() {
-  std::set<base::WaitableEvent*> events;
+  std::set<raw_ptr<base::WaitableEvent, SetExperimental>> events;
   events.swap(pending_waitable_events_);
   for (base::WaitableEvent* event : events)
     event->Signal();

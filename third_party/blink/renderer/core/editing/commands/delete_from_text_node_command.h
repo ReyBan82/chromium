@@ -34,17 +34,18 @@ class Text;
 
 class DeleteFromTextNodeCommand final : public SimpleEditCommand {
  public:
-  DeleteFromTextNodeCommand(Text*, unsigned offset, unsigned count);
+  DeleteFromTextNodeCommand(Text*, wtf_size_t offset, wtf_size_t count);
 
   void Trace(Visitor*) const override;
 
  private:
   void DoApply(EditingState*) override;
   void DoUnapply() override;
+  String ToString() const override;
 
   Member<Text> node_;
-  unsigned offset_;
-  unsigned count_;
+  wtf_size_t offset_;
+  wtf_size_t count_;
   String text_;
 };
 

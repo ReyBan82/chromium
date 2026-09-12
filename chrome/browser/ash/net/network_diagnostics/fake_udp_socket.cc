@@ -4,10 +4,11 @@
 
 #include "chrome/browser/ash/net/network_diagnostics/fake_udp_socket.h"
 
+#include <optional>
 #include <utility>
 
+#include "base/containers/span.h"
 #include "net/base/ip_endpoint.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 namespace network_diagnostics {
@@ -52,13 +53,17 @@ void FakeUdpSocket::SetReceiveBufferSize(int32_t receive_buffer_size,
   NOTREACHED();
 }
 
-void FakeUdpSocket::JoinGroup(const net::IPAddress& group_address,
-                              JoinGroupCallback callback) {
+void FakeUdpSocket::JoinGroup(
+    const net::IPAddress& group_address,
+    const std::optional<net::IPAddress>& source_address,
+    JoinGroupCallback callback) {
   NOTREACHED();
 }
 
-void FakeUdpSocket::LeaveGroup(const net::IPAddress& group_address,
-                               LeaveGroupCallback callback) {
+void FakeUdpSocket::LeaveGroup(
+    const net::IPAddress& group_address,
+    const std::optional<net::IPAddress>& source_address,
+    LeaveGroupCallback callback) {
   NOTREACHED();
 }
 

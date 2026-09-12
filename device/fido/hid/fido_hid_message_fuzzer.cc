@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "device/fido/hid/fido_hid_message.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -9,13 +11,12 @@
 #include <vector>
 
 #include "base/containers/span.h"
-#include "device/fido/hid/fido_hid_message.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 
 namespace device {
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(base::span<const uint8_t> span) {
   constexpr size_t kHidPacketSize = 64;
-  auto span = base::make_span(data, size);
 
   auto packet = span.first(std::min(kHidPacketSize, span.size()));
   auto msg = FidoHidMessage::CreateFromSerializedData(

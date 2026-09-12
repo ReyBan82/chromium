@@ -45,7 +45,9 @@ struct COMPONENT_EXPORT(STORAGE_BROWSER) BlobStorageLimits {
   bool IsValid() const;
 
   size_t memory_limit_before_paging() const {
-    return max_blob_in_memory_space - min_page_file_size;
+    return max_blob_in_memory_space > min_page_file_size
+               ? max_blob_in_memory_space - min_page_file_size
+               : 0;
   }
 
   // If disk space goes less than this we stop allocating more disk quota.
@@ -106,7 +108,7 @@ enum class IPCBlobItemRequestStrategy {
 
 // Used by BlobURLStoreImpl when determining how to validate Blob URLs received
 // from the renderer over Mojo.
-// TODO(https://crbug.com/1058759): Once fixed, remove this.
+// TODO(crbug.com/40051700): Once fixed, remove this.
 enum class BlobURLValidityCheckBehavior {
   DEFAULT,
   // In cases where we know that the storage key may not be opaque when it

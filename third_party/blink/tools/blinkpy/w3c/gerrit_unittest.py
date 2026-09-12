@@ -2,9 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import json
 import unittest
 
 from blinkpy.common.host_mock import MockHost
+from blinkpy.common.net.rpc import RESPONSE_PREFIX
 from blinkpy.common.path_finder import RELATIVE_WEB_TESTS, RELATIVE_WPT_TESTS
 from blinkpy.common.system.executive_mock import mock_git_commands
 from blinkpy.w3c.gerrit import GerritAPI, GerritCL
@@ -23,6 +25,102 @@ class GerritAPITest(unittest.TestCase):
         gerrit = GerritAPI(host, '', '')
         with self.assertRaises(AssertionError):
             gerrit.post('/a/changes/test~master~I100/abandon', None)
+
+    def test_query_cl(self):
+        host = MockHost()
+        url = ('https://chromium-review.googlesource.com/changes/chromium%2F'
+               'src~main~I012345?o=CURRENT_FILES&o=CURRENT_REVISION'
+               '&o=COMMIT_FOOTERS&o=DETAILED_ACCOUNTS')
+        payload = {'change_id': 'I012345'}
+        host.web.urls = {
+            url: RESPONSE_PREFIX + b'\n' + json.dumps(payload).encode(),
+        }
+        gerrit = GerritAPI(host, 'user', 'token')
+        cl = gerrit.query_cl('I012345')
+        self.assertEqual(cl.change_id, 'I012345')
+
+    def test_query_cl_comments_and_revisions(self):
+        host = MockHost()
+        url = ('https://chromium-review.googlesource.com/changes/chromium%2F'
+               'src~main~I012345?o=MESSAGES&o=ALL_REVISIONS')
+        payload = {'change_id': 'I012345'}
+        host.web.urls = {
+            url: RESPONSE_PREFIX + b'\n' + json.dumps(payload).encode(),
+        }
+        gerrit = GerritAPI(host, 'user', 'token')
+        cl = gerrit.query_cl_comments_and_revisions('I012345')
+        self.assertEqual(cl.change_id, 'I012345')
+
+    def test_query_exportable_cls(self):
+        host = MockHost()
+        url = ('https://chromium-review.googlesource.com/changes/'
+               '?q=project:"chromium%2Fsrc"+branch:main+-is:wip'
+               '&n=200&o=CURRENT_FILES&o=CURRENT_REVISION&o=COMMIT_FOOTERS'
+               '&o=DETAILED_ACCOUNTS&o=SUBMITTABLE')
+        non_submittable_cl = {
+            'change_id': 'Ib58c7125d85d2fd71af711ea8bbd2dc927ed02cb',
+            'subject': 'fake subject',
+            '_number': 638250,
+            'current_revision': '1',
+            'revisions': {
+                '1': {
+                    'commit_with_footers': 'fake subject',
+                    'files': {
+                        RELATIVE_WPT_TESTS + 'foo/bar.html': '',
+                    }
+                }
+            },
+            'submittable': False,
+            'owner': {
+                'email': 'test@chromium.org'
+            },
+        }
+        submittable_cl = {
+            'change_id': 'Ib58c7125d85d2fd71af711ea8bbd2dc927ed02cc',
+            'subject': 'fake subject',
+            '_number': 638250,
+            'current_revision': '1',
+            'revisions': {
+                '1': {
+                    'commit_with_footers': 'fake subject',
+                    'files': {
+                        RELATIVE_WPT_TESTS + 'foo/bar.html': '',
+                    }
+                }
+            },
+            'submittable': True,
+            'owner': {
+                'email': 'test@chromium.org'
+            },
+        }
+        force_export_cl = {
+            'change_id': 'Ib58c7125d85d2fd71af711ea8bbd2dc927ed02cd',
+            'subject': 'fake subject',
+            '_number': 638250,
+            'current_revision': '1',
+            'revisions': {
+                '1': {
+                    'commit_with_footers':
+                    'fake subject\nForce-WPT-Export: true',
+                    'files': {
+                        RELATIVE_WPT_TESTS + 'foo/bar.html': '',
+                    }
+                }
+            },
+            'submittable': False,
+            'owner': {
+                'email': 'test@chromium.org'
+            },
+        }
+        payload = [non_submittable_cl, submittable_cl, force_export_cl]
+        host.web.urls = {
+            url: RESPONSE_PREFIX + b'\n' + json.dumps(payload).encode(),
+        }
+        gerrit = GerritAPI(host, 'user', 'token')
+        cls = gerrit.query_exportable_cls()
+        self.assertCountEqual(
+            [cl.change_id for cl in cls],
+            [submittable_cl['change_id'], force_export_cl['change_id']])
 
 
 class GerritCLTest(unittest.TestCase):

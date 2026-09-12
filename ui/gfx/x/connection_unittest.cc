@@ -5,6 +5,7 @@
 #include "ui/gfx/x/connection.h"
 
 #include "base/memory/ref_counted_memory.h"
+#include "base/numerics/safe_conversions.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/x/event.h"
 #include "ui/gfx/x/future.h"
@@ -74,8 +75,8 @@ TEST(X11ConnectionTest, Event) {
       .property = Atom::WM_NAME,
       .type = Atom::STRING,
       .format = CHAR_BIT,
-      .data_len = 1,
-      .data = base::RefCountedBytes::TakeVector(&data),
+      .data_len = base::checked_cast<uint32_t>(data.size()),
+      .data = base::MakeRefCounted<base::RefCountedBytes>(std::move(data)),
   });
   EXPECT_FALSE(prop_future.Sync().error);
 
@@ -100,6 +101,68 @@ TEST(X11ConnectionTest, Error) {
   // TODO(thomasanderson): Implement As<> for errors, similar to events.
   auto* drawable_error = reinterpret_cast<DrawableError*>(error);
   EXPECT_EQ(drawable_error->bad_value, static_cast<uint32_t>(invalid_window));
+}
+
+TEST(X11ConnectionTest, LargeQueryTree) {
+  Connection connection;
+  ASSERT_TRUE(connection.Ready());
+
+  Window root = CreateWindow(&connection);
+  for (size_t i = 0; i < 0x10000; i++) {
+    connection.CreateWindow({
+        .depth = connection.default_root_depth().depth,
+        .wid = connection.GenerateId<Window>(),
+        .parent = root,
+        .width = 1,
+        .height = 1,
+        .override_redirect = Bool32(true),
+    });
+  }
+
+  // Ensure large QueryTree requests don't cause a crash.
+  connection.QueryTree(root).Sync();
+}
+
+TEST(X11ConnectionTest, GetPropertyReplyValidation) {
+  // Simulate a malicious response with format 39.
+  // The reply length is in 4-byte units, starting from after the first 32
+  // bytes. A GetProperty reply has a fixed size of 32 bytes followed by the
+  // value.
+  std::vector<uint8_t> data(32, 0);
+  data[0] = 1;   // response_type: Reply
+  data[1] = 39;  // format: 39 (Invalid, should be 8, 16, or 32)
+  data[10] = 0;  // length: 0
+  data[11] = 0;
+
+  ReadBuffer buf(x11::ThrowAwaySizeRefCountedMemory::From(std::move(data)));
+  auto reply = detail::ReadReply<GetPropertyReply>(&buf);
+  EXPECT_FALSE(reply);
+}
+
+TEST(X11ConnectionTest, GetPropertyReplyValid) {
+  // Simulate a valid response with format 32.
+  std::vector<uint8_t> data(32, 0);
+  data[0] = 1;   // response_type: Reply
+  data[1] = 32;  // format: 32
+  data[10] = 0;  // length: 0
+  data[11] = 0;
+  data[16] = 0;  // type: None
+  data[24] = 0;  // value_len: 0
+
+  ReadBuffer buf(x11::ThrowAwaySizeRefCountedMemory::From(std::move(data)));
+  auto reply = detail::ReadReply<GetPropertyReply>(&buf);
+  ASSERT_TRUE(reply);
+  EXPECT_EQ(reply->format, 32);
+}
+
+TEST(X11ConnectionTest, WmSupportsEwmhSync) {
+  Connection connection;
+  ASSERT_TRUE(connection.Ready());
+  // Calling GetWmName() and WmSupportsHint() immediately before event dispatch
+  // should work synchronously.
+  EXPECT_FALSE(connection.GetWmName().empty());
+  EXPECT_TRUE(
+      connection.WmSupportsHint(connection.GetAtom("_NET_ACTIVE_WINDOW")));
 }
 
 }  // namespace x11

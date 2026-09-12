@@ -4,9 +4,9 @@
 
 #include "chrome/browser/ash/extensions/signin_screen_policy_provider.h"
 
+#include "ash/constants/ash_extension_constants.h"
 #include "base/memory/ref_counted.h"
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/common/extensions/extension_constants.h"
 #include "components/version_info/version_info.h"
 #include "extensions/common/extension_builder.h"
 #include "extensions/common/features/feature_channel.h"
@@ -27,29 +27,25 @@ scoped_refptr<const extensions::Extension> CreateTestApp(
     ManifestLocation location) {
   return extensions::ExtensionBuilder()
       .SetManifest(
-          extensions::DictionaryBuilder()
+          base::DictValue()
               .Set("name", "test app")
               .Set("version", "1")
               .Set("manifest_version", 2)
               .Set("app",
-                   extensions::DictionaryBuilder()
+                   base::DictValue()  //
                        .Set("background",
-                            extensions::DictionaryBuilder()
+                            base::DictValue()
                                 .Set("persistent", "false")
-                                .Set("scripts", extensions::ListBuilder()
-                                                    .Append("background.js")
-                                                    .Build())
-                                .Build())
-                       .Build())
+                                .Set("scripts",
+                                     base::ListValue::with_capacity(1)  //
+                                         .Append("background.js"))))
               .Set("storage",
-                   extensions::DictionaryBuilder()
-                       .Set("managed_schema", "managed_storage_schema.json")
-                       .Build())
-              .Set("permissions", extensions::ListBuilder()
-                                      .Append("usb")
-                                      .Append("alwaysOnTopWindows")
-                                      .Build())
-              .Build())
+                   base::DictValue().Set("managed_schema",
+                                         "managed_storage_schema.json"))
+              .Set("permissions",
+                   base::ListValue::with_capacity(2)  //
+                       .Append("usb")
+                       .Append("alwaysOnTopWindows")))
       .SetID(extension_id)
       .SetLocation(location)
       .Build();
@@ -109,4 +105,21 @@ TEST_F(SigninScreenPolicyProviderTest, DenyRandomNonPolicyExtension) {
   std::u16string error;
   EXPECT_FALSE(provider_.UserMayLoad(extension.get(), &error));
   EXPECT_FALSE(error.empty());
+}
+
+TEST_F(SigninScreenPolicyProviderTest, AllowAccessibilityExtensions) {
+  // Accessibility extensions should be allowed on the sign-in screen.
+  const std::string kAccessibilityIds[] = {
+      extension_misc::kSelectToSpeakExtensionId,
+      extension_misc::kEnhancedNetworkTtsExtensionId,
+      extension_misc::kAccessibilityCommonExtensionId,
+  };
+  for (const std::string& id : kAccessibilityIds) {
+    scoped_refptr<const extensions::Extension> extension =
+        CreateTestApp(id, ManifestLocation::kComponent);
+    std::u16string error;
+    EXPECT_TRUE(provider_.UserMayLoad(extension.get(), &error))
+        << "Extension " << id << " should be allowed on sign-in screen.";
+    EXPECT_TRUE(error.empty());
+  }
 }

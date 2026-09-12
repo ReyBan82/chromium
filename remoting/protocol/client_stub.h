@@ -13,25 +13,29 @@
 #include "remoting/protocol/clipboard_stub.h"
 #include "remoting/protocol/cursor_shape_stub.h"
 #include "remoting/protocol/keyboard_layout_stub.h"
+#include "remoting/protocol/microphone_stub.h"
 
 namespace remoting::protocol {
 
+class ActiveDisplay;
 class Capabilities;
 class ExtensionMessage;
 class PairingResponse;
 class TransportInfo;
 class VideoLayout;
+class TerminalControl;
 
 class ClientStub : public ClipboardStub,
                    public CursorShapeStub,
-                   public KeyboardLayoutStub {
+                   public KeyboardLayoutStub,
+                   public MicrophoneStub {
  public:
-  ClientStub() {}
+  ClientStub() = default;
 
   ClientStub(const ClientStub&) = delete;
   ClientStub& operator=(const ClientStub&) = delete;
 
-  ~ClientStub() override {}
+  ~ClientStub() override = default;
 
   // Passes the set of capabilities supported by the host to the client.
   virtual void SetCapabilities(const Capabilities& capabilities) = 0;
@@ -47,6 +51,13 @@ class ClientStub : public ClipboardStub,
 
   // Passes the host's transport info to the client.
   virtual void SetTransportInfo(const TransportInfo& transport_info) = 0;
+
+  // Sends the host's active display to the client. This is sent whenever the
+  // screen id associated with the active window changes.
+  virtual void SetActiveDisplay(const ActiveDisplay& active_display) = 0;
+
+  // Delivers a terminal control message from the host to the client.
+  virtual void DeliverTerminalControl(const TerminalControl& terminal_control) = 0;
 };
 
 }  // namespace remoting::protocol

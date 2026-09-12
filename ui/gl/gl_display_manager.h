@@ -21,6 +21,8 @@
 
 namespace gl {
 
+// TODO(344606399): Consider removing the templating since only the EGL display
+// is used.
 template <typename GLDisplayPlatform>
 class GLDisplayManager {
  public:
@@ -51,17 +53,21 @@ class GLDisplayManager {
     for (auto iter = gpu_preference_map_.begin();
          iter != gpu_preference_map_.end();
          /* no increment */) {
-      if (iter->second == system_device_id) {
-        gpu_preference_map_.erase(iter++);
+      if (iter->second == system_device_id && gpu_preference_map_.size() > 1) {
+        iter = gpu_preference_map_.erase(iter);
       } else {
         iter++;
       }
     }
 
-    auto iter = gpu_preference_map_.find(GpuPreference::kDefault);
-    if (iter == gpu_preference_map_.end()) {
-      gpu_preference_map_[GpuPreference::kDefault] =
-          gpu_preference_map_.begin()->second;
+    // Ensure that kDefault is always set if there is at least one other gpu
+    // preference.
+    if (!gpu_preference_map_.empty()) {
+      auto iter = gpu_preference_map_.find(GpuPreference::kDefault);
+      if (iter == gpu_preference_map_.end()) {
+        gpu_preference_map_[GpuPreference::kDefault] =
+            gpu_preference_map_.begin()->second;
+      }
     }
 
     base::AutoLock auto_lock(lock_);
@@ -93,10 +99,6 @@ class GLDisplayManager {
   GLDisplayManager(const GLDisplayManager&) = delete;
   GLDisplayManager& operator=(const GLDisplayManager&) = delete;
 
-  GLDisplayPlatform* GetDisplay(GpuPreference preference) {
-    return GetDisplay(GetSystemDeviceId(preference));
-  }
-
   bool IsEmpty() {
     base::AutoLock auto_lock(lock_);
     return displays_.empty();
@@ -106,34 +108,53 @@ class GLDisplayManager {
     override_egl_dual_gpu_rendering_support_for_tests_ = value;
   }
 
+  bool SupportsEGLDualGPURendering() {
+    return features::SupportsEGLDualGPURendering() ||
+           override_egl_dual_gpu_rendering_support_for_tests_;
+  }
+
+  GLDisplayPlatform* GetDisplay(GpuPreference preference,
+                                gl::DisplayKey display_key) {
+    return GetDisplay(GetSystemDeviceId(preference), display_key);
+  }
+
+  GLDisplayPlatform* GetDisplay(GpuPreference preference) {
+    return GetDisplay(GetSystemDeviceId(preference), gl::DisplayKey::kDefault);
+  }
+
+  GLDisplayPlatform* GetDisplay(void* platform_display) {
+    base::AutoLock auto_lock(lock_);
+    for (const auto& display : displays_) {
+      if (display->GetDisplay() == platform_display) {
+        return display.get();
+      }
+    }
+    return nullptr;
+  }
+
  private:
   friend class base::NoDestructor<GLDisplayManager<GLDisplayPlatform>>;
-#if defined(USE_EGL)
   friend class GLDisplayManagerEGLTest;
-#endif
 
   // Don't delete these functions for testing purpose.
   // Each test constructs a scoped GLDisplayManager directly.
   GLDisplayManager() = default;
   virtual ~GLDisplayManager() = default;
 
-  GLDisplayPlatform* GetDisplay(uint64_t system_device_id) {
+  GLDisplayPlatform* GetDisplay(uint64_t system_device_id,
+                                gl::DisplayKey display_key) {
     base::AutoLock auto_lock(lock_);
     for (const auto& display : displays_) {
-      if (display->system_device_id() == system_device_id) {
+      if (display->system_device_id() == system_device_id &&
+          display->display_key() == display_key) {
         return display.get();
       }
     }
 
     std::unique_ptr<GLDisplayPlatform> display(
-        new GLDisplayPlatform(system_device_id));
+        new GLDisplayPlatform(system_device_id, display_key));
     displays_.push_back(std::move(display));
     return displays_.back().get();
-  }
-
-  bool SupportsEGLDualGPURendering() {
-    return features::SupportsEGLDualGPURendering() ||
-           override_egl_dual_gpu_rendering_support_for_tests_;
   }
 
   mutable base::Lock lock_;
@@ -144,19 +165,10 @@ class GLDisplayManager {
   bool override_egl_dual_gpu_rendering_support_for_tests_ = false;
 };
 
-#if defined(USE_EGL)
 using GLDisplayManagerEGL = GLDisplayManager<GLDisplayEGL>;
 
 extern template class EXPORT_TEMPLATE_DECLARE(GL_EXPORT)
     GLDisplayManager<GLDisplayEGL>;
-#endif
-
-#if defined(USE_GLX)
-using GLDisplayManagerX11 = GLDisplayManager<GLDisplayX11>;
-
-extern template class EXPORT_TEMPLATE_DECLARE(GL_EXPORT)
-    GLDisplayManager<GLDisplayX11>;
-#endif
 
 }  // namespace gl
 

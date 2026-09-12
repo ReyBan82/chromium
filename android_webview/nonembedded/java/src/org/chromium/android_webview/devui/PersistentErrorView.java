@@ -14,11 +14,9 @@ import android.widget.TextView;
 
 import androidx.annotation.IdRes;
 
-/**
- * Shows a text message at the top of a Layout to show error messages.
- */
+/** Shows a text message at the top of a Layout to show error messages. */
 public class PersistentErrorView {
-    private ViewGroup mViewGroup;
+    private final ViewGroup mViewGroup;
 
     /**
      * @param context The Activity where this View is shon.
@@ -53,7 +51,9 @@ public class PersistentErrorView {
     }
 
     /**
-     * Set and show the main action button. If {@code text} is {@null} the button will be hidden.
+     * Set and show the main action button. If {@code text} is {@code null} the button will be
+     * hidden.
+     *
      * @param text Button text.
      * @param listener the listener to execute when the button is clicked.
      * @return object reference for chaining.
@@ -82,16 +82,12 @@ public class PersistentErrorView {
         return this;
     }
 
-    /**
-     * Show the view by setting its visibility.
-     */
+    /** Show the view by setting its visibility. */
     public void show() {
         mViewGroup.setVisibility(View.VISIBLE);
     }
 
-    /**
-     * Hide the view by setting its visibility.
-     */
+    /** Hide the view by setting its visibility. */
     public void hide() {
         mViewGroup.setVisibility(View.GONE);
     }

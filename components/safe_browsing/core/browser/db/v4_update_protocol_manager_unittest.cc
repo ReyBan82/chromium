@@ -12,13 +12,15 @@
 #include "base/functional/bind.h"
 #include "base/strings/escape.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/test_simple_task_runner.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "components/safe_browsing/buildflags.h"
 #include "components/safe_browsing/core/browser/db/safebrowsing.pb.h"
+#include "components/safe_browsing/core/browser/db/sb_test_util.h"
 #include "components/safe_browsing/core/browser/db/util.h"
-#include "components/safe_browsing/core/browser/db/v4_test_util.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "net/base/load_flags.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_status_code.h"
@@ -36,7 +38,14 @@ using base::Time;
 
 namespace safe_browsing {
 
+using enum ExtendedReportingLevel;
+
 class V4UpdateProtocolManagerTest : public PlatformTest {
+ public:
+  V4UpdateProtocolManagerTest() {
+    feature_list_.InitAndDisableFeature(kLocalListsUseSBv5);
+  }
+
   void SetUp() override {
     PlatformTest::SetUp();
 
@@ -77,7 +86,7 @@ class V4UpdateProtocolManagerTest : public PlatformTest {
       const std::vector<ListUpdateResponse>& expected_lurs,
       bool disable_auto_update = false,
       ExtendedReportingLevel erl = SBER_LEVEL_OFF) {
-    return V4UpdateProtocolManager::Create(
+    return std::make_unique<V4UpdateProtocolManager>(
         test_shared_loader_factory_,
         GetTestV4ProtocolConfig(disable_auto_update),
         base::BindRepeating(
@@ -150,6 +159,9 @@ class V4UpdateProtocolManagerTest : public PlatformTest {
   std::unique_ptr<StoreStateMap> store_state_map_;
   network::TestURLLoaderFactory test_url_loader_factory_;
   scoped_refptr<network::SharedURLLoaderFactory> test_shared_loader_factory_;
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
 };
 
 TEST_F(V4UpdateProtocolManagerTest, TestGetUpdatesErrorHandlingNetwork) {
@@ -172,7 +184,8 @@ TEST_F(V4UpdateProtocolManagerTest, TestGetUpdatesErrorHandlingNetwork) {
   EXPECT_FALSE(pm->IsUpdateScheduled());
 
   // Failed request status should result in error.
-  pm->OnURLLoaderCompleteInternal(net::ERR_CONNECTION_RESET, 0, std::string());
+  pm->OnURLLoaderCompleteInternal(base::TimeTicks(), net::ERR_CONNECTION_RESET,
+                                  0, std::string());
 
   // Should have recorded one error, but back off multiplier is unchanged.
   EXPECT_EQ(1ul, pm->update_error_count_);
@@ -199,8 +212,8 @@ TEST_F(V4UpdateProtocolManagerTest, TestGetUpdatesErrorHandlingResponseCode) {
 
   EXPECT_FALSE(pm->IsUpdateScheduled());
 
-  // Response code of anything other than 200 should result in error.
-  pm->OnURLLoaderCompleteInternal(net::HTTP_NO_CONTENT, 0, std::string());
+  pm->OnURLLoaderCompleteInternal(base::TimeTicks(), net::HTTP_NO_CONTENT, 0,
+                                  std::string());
 
   // Should have recorded one error, but back off multiplier is unchanged.
   EXPECT_EQ(1ul, pm->update_error_count_);
@@ -228,7 +241,7 @@ TEST_F(V4UpdateProtocolManagerTest, TestGetUpdatesNoError) {
 
   EXPECT_FALSE(pm->IsUpdateScheduled());
 
-  pm->OnURLLoaderCompleteInternal(net::OK, net::HTTP_OK,
+  pm->OnURLLoaderCompleteInternal(base::TimeTicks(), net::OK, net::HTTP_OK,
                                   GetExpectedV4UpdateResponse(expected_lurs));
 
   // No error, back off multiplier is unchanged.
@@ -258,7 +271,8 @@ TEST_F(V4UpdateProtocolManagerTest, TestGetUpdatesWithOneBackoff) {
   EXPECT_FALSE(pm->IsUpdateScheduled());
 
   // Response code of anything other than 200 should result in error.
-  pm->OnURLLoaderCompleteInternal(net::HTTP_NO_CONTENT, 0, std::string());
+  pm->OnURLLoaderCompleteInternal(base::TimeTicks(), net::HTTP_NO_CONTENT, 0,
+                                  std::string());
 
   // Should have recorded one error, but back off multiplier is unchanged.
   EXPECT_EQ(1ul, pm->update_error_count_);
@@ -270,7 +284,7 @@ TEST_F(V4UpdateProtocolManagerTest, TestGetUpdatesWithOneBackoff) {
   // Call RunPendingTasks to ensure that the request is sent after backoff.
   runner->RunPendingTasks();
 
-  pm->OnURLLoaderCompleteInternal(net::OK, net::HTTP_OK,
+  pm->OnURLLoaderCompleteInternal(base::TimeTicks(), net::OK, net::HTTP_OK,
                                   GetExpectedV4UpdateResponse(expected_lurs));
 
   // No error, back off multiplier is unchanged.
@@ -347,7 +361,7 @@ TEST_F(V4UpdateProtocolManagerTest, TestGetUpdatesHasTimeout) {
   EXPECT_EQ(1ul, pm->update_back_off_mult_);
 
   // There should be another fetcher now.
-  pm->OnURLLoaderCompleteInternal(net::OK, net::HTTP_OK,
+  pm->OnURLLoaderCompleteInternal(base::TimeTicks(), net::OK, net::HTTP_OK,
                                   GetExpectedV4UpdateResponse(expected_lurs));
 
   // No error, back off multiplier is unchanged.

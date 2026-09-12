@@ -10,9 +10,11 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/task/single_thread_task_runner.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/device_identity/device_oauth2_token_store.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #include "components/prefs/pref_service.h"
@@ -23,6 +25,10 @@
 #include "google_apis/gaia/oauth2_access_token_consumer.h"
 #include "google_apis/gaia/oauth2_access_token_fetcher.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
+
+namespace {
+const char kRefreshTokenInitMetric[] = "Enterprise.RefreshTokenLoadResult";
+}  // namespace
 
 struct DeviceOAuth2TokenService::PendingRequest {
   PendingRequest(
@@ -57,13 +63,13 @@ DeviceOAuth2TokenService::DeviceOAuth2TokenService(
 }
 
 DeviceOAuth2TokenService::~DeviceOAuth2TokenService() {
-  FlushPendingRequests(false, GoogleServiceAuthError::REQUEST_CANCELED);
+  FlushPendingRequests(false, GoogleServiceAuthError::CreateRequestCanceled());
 }
 
 void DeviceOAuth2TokenService::SetAndSaveRefreshToken(
     const std::string& refresh_token,
     StatusCallback result_callback) {
-  ReportServiceError(GoogleServiceAuthError::REQUEST_CANCELED);
+  ReportServiceError(GoogleServiceAuthError::CreateRequestCanceled());
 
   state_ = STATE_VALIDATION_PENDING;
   store_->SetAndSaveRefreshToken(refresh_token, std::move(result_callback));
@@ -119,14 +125,13 @@ bool DeviceOAuth2TokenService::RefreshTokenIsAvailable() const {
   }
 
   NOTREACHED() << "Unhandled state " << state_;
-  return false;
 }
 
 OAuth2AccessTokenManager* DeviceOAuth2TokenService::GetAccessTokenManager() {
   return token_manager_.get();
 }
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 void DeviceOAuth2TokenService::SetServiceAccountEmail(
     const std::string& account_email) {
   store_->SetAccountEmail(account_email);
@@ -141,7 +146,7 @@ void DeviceOAuth2TokenService::OnRefreshTokenResponse(
 }
 
 void DeviceOAuth2TokenService::OnGetTokenInfoResponse(
-    const base::Value::Dict& token_info) {
+    const base::DictValue& token_info) {
   // For robot accounts email id is the account id.
   const std::string* robot_email = token_info.FindString("email");
   gaia_oauth_client_.reset();
@@ -155,7 +160,9 @@ void DeviceOAuth2TokenService::OnGetTokenInfoResponse(
 void DeviceOAuth2TokenService::OnOAuthError() {
   gaia_oauth_client_.reset();
   state_ = STATE_TOKEN_INVALID;
-  ReportServiceError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS);
+  ReportServiceError(GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+      GoogleServiceAuthError::InvalidGaiaCredentialsReason::
+          CREDENTIALS_REJECTED_BY_SERVER));
 }
 
 void DeviceOAuth2TokenService::OnNetworkError(int response_code) {
@@ -164,11 +171,13 @@ void DeviceOAuth2TokenService::OnNetworkError(int response_code) {
   // Go back to pending validation state. That'll allow a retry on subsequent
   // token minting requests.
   state_ = STATE_VALIDATION_PENDING;
-  ReportServiceError(GoogleServiceAuthError::CONNECTION_FAILED);
+  ReportServiceError(
+      GoogleServiceAuthError::FromConnectionError(net::ERR_FAILED));
 }
 
 void DeviceOAuth2TokenService::OnInitComplete(bool init_result,
                                               bool validation_required) {
+  base::UmaHistogramBoolean(kRefreshTokenInitMetric, init_result);
   if (!init_result) {
     state_ = STATE_NO_TOKEN;
     return;
@@ -196,14 +205,14 @@ void DeviceOAuth2TokenService::OnPrepareTrustedAccountIdFinished(
     bool check_passed) {
   if (!check_passed) {
     state_ = STATE_NO_TOKEN;
-    ReportServiceError(GoogleServiceAuthError::USER_NOT_SIGNED_UP);
+    ReportServiceError(GoogleServiceAuthError::CreateAccountNotFound());
     return;
   }
 
   CoreAccountId policy_robot_id = GetRobotAccountId();
   if (policy_robot_id == gaia_robot_id) {
     state_ = STATE_TOKEN_VALID;
-    ReportServiceError(GoogleServiceAuthError::NONE);
+    ReportServiceError(GoogleServiceAuthError::AuthErrorNone());
   } else {
     if (gaia_robot_id.empty()) {
       LOG(WARNING) << "Device service account owner in policy is empty.";
@@ -212,7 +221,9 @@ void DeviceOAuth2TokenService::OnPrepareTrustedAccountIdFinished(
                    << "refresh token owner \"" << gaia_robot_id << "\".";
     }
     state_ = STATE_TOKEN_INVALID;
-    ReportServiceError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS);
+    ReportServiceError(GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+        GoogleServiceAuthError::InvalidGaiaCredentialsReason::
+            CREDENTIALS_REJECTED_BY_SERVER));
   }
 }
 
@@ -224,7 +235,8 @@ std::unique_ptr<OAuth2AccessTokenFetcher>
 DeviceOAuth2TokenService::CreateAccessTokenFetcher(
     const CoreAccountId& account_id,
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
-    OAuth2AccessTokenConsumer* consumer) {
+    OAuth2AccessTokenConsumer* consumer,
+    const std::string& token_binding_challenge) {
   std::string refresh_token = GetRefreshToken();
   DCHECK(!refresh_token.empty());
   return GaiaAccessTokenFetcher::
@@ -281,10 +293,13 @@ bool DeviceOAuth2TokenService::HandleAccessTokenFetch(
     case STATE_VALIDATION_STARTED:
       return true;
     case STATE_NO_TOKEN:
-      FailRequest(request, GoogleServiceAuthError::USER_NOT_SIGNED_UP);
+      FailRequest(request, GoogleServiceAuthError::CreateAccountNotFound());
       return true;
     case STATE_TOKEN_INVALID:
-      FailRequest(request, GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS);
+      FailRequest(request,
+                  GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+                      GoogleServiceAuthError::InvalidGaiaCredentialsReason::
+                          CREDENTIALS_REJECTED_BY_SERVER));
       return true;
     case STATE_TOKEN_VALID:
       // Let OAuth2AccessTokenManager handle the request.
@@ -292,15 +307,15 @@ bool DeviceOAuth2TokenService::HandleAccessTokenFetch(
   }
 
   NOTREACHED() << "Unexpected state " << state_;
-  return false;
 }
 
 void DeviceOAuth2TokenService::FlushPendingRequests(
     bool token_is_valid,
-    GoogleServiceAuthError::State error) {
-  std::vector<PendingRequest*> requests;
+    const GoogleServiceAuthError& error) {
+  std::vector<raw_ptr<PendingRequest, VectorExperimental>> requests;
   requests.swap(pending_requests_);
-  for (std::vector<PendingRequest*>::iterator request(requests.begin());
+  for (std::vector<raw_ptr<PendingRequest, VectorExperimental>>::iterator
+           request(requests.begin());
        request != requests.end(); ++request) {
     std::unique_ptr<PendingRequest> scoped_request(*request);
     if (!scoped_request->request)
@@ -320,17 +335,11 @@ void DeviceOAuth2TokenService::FlushPendingRequests(
 
 void DeviceOAuth2TokenService::FailRequest(
     OAuth2AccessTokenManager::RequestImpl* request,
-    GoogleServiceAuthError::State error) {
-  GoogleServiceAuthError auth_error =
-      (error == GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS)
-          ? GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
-                GoogleServiceAuthError::InvalidGaiaCredentialsReason::
-                    CREDENTIALS_REJECTED_BY_SERVER)
-          : GoogleServiceAuthError(error);
+    const GoogleServiceAuthError& error) {
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
       base::BindOnce(&OAuth2AccessTokenManager::RequestImpl::InformConsumer,
-                     request->AsWeakPtr(), auth_error,
+                     request->AsWeakPtr(), error,
                      OAuth2AccessTokenConsumer::TokenResponse()));
 }
 
@@ -345,7 +354,6 @@ std::string DeviceOAuth2TokenService::GetRefreshToken() const {
       // minting via OAuth2AccessTokenManager::FetchOAuth2Token should be
       // triggered.
       NOTREACHED();
-      return std::string();
     case STATE_VALIDATION_PENDING:
     case STATE_VALIDATION_STARTED:
     case STATE_TOKEN_VALID:
@@ -353,7 +361,6 @@ std::string DeviceOAuth2TokenService::GetRefreshToken() const {
   }
 
   NOTREACHED() << "Unhandled state " << state_;
-  return std::string();
 }
 
 void DeviceOAuth2TokenService::StartValidation() {
@@ -381,11 +388,12 @@ void DeviceOAuth2TokenService::RequestValidation() {
 }
 
 void DeviceOAuth2TokenService::ReportServiceError(
-    GoogleServiceAuthError::State error) {
-  if (error == GoogleServiceAuthError::NONE)
-    FlushPendingRequests(true, GoogleServiceAuthError::NONE);
-  else
+    const GoogleServiceAuthError& error) {
+  if (error.state() == GoogleServiceAuthError::NONE) {
+    FlushPendingRequests(true, error);
+  } else {
     FlushPendingRequests(false, error);
+  }
 }
 
 bool DeviceOAuth2TokenService::HasValidationResult() const {

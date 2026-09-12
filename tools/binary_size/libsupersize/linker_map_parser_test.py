@@ -9,6 +9,7 @@ import sys
 import unittest
 
 import linker_map_parser
+import models
 import test_util
 
 _SCRIPT_DIR = os.path.dirname(__file__)
@@ -58,7 +59,6 @@ def _RenderSectionSizesAndRawSymbols(section_sizes, raw_symbols):
 
 
 class LinkerMapParserTest(unittest.TestCase):
-
   @_CompareWithGolden()
   def test_Parser(self):
     lines = _ReadMapFile(_TEST_MAP_PATH)
@@ -99,15 +99,31 @@ class LinkerMapParserTest(unittest.TestCase):
     self.assertEqual((False, None), fun('OUTLINED_FUNCTION_'))
     self.assertEqual((False, None), fun('abc'))
 
+  def test_ParseFeatureSection(self):
+    map_lines = [
+      '     VMA      LMA     Size Align Out     In      Symbol',
+      '    1000     1000      100     8 .data',
+      '    1000     1000       18     8         obj/foo.o:(.data..cr_features)',
+      '    1000     1000       18     1                 kMyFeature',
+    ]
+    parser = linker_map_parser.MapFileParserLld('lld_v1')
+    _, syms, _ = parser.Parse(iter(map_lines))
+    self.assertEqual(1, len(syms))
+    self.assertEqual('kMyFeature', syms[0].full_name)
+    self.assertTrue(syms[0].is_feature)
+    self.assertTrue(syms[0].flags & models.FLAG_FEATURE)
+
   @_CompareWithGolden()
   def test_Tokenize(self):
     ret = []
     lines = _ReadMapFile(_TEST_MAP_PATH)
     parser = linker_map_parser.MapFileParserLld('lld-lto_v1')
     tokenizer = parser.Tokenize(lines)
-    for (_, address, size, level, span, tok) in tokenizer:
-      ret.append('%8X %8X (%d) %s %s' % (address, size, level, '-' * 8 if
-                                         span is None else '%8X' % span, tok))
+    for _, address, size, level, span, tok in tokenizer:
+      ret.append(
+        '%8X %8X (%d) %s %s'
+        % (address, size, level, '-' * 8 if span is None else '%8X' % span, tok)
+      )
     return ret
 
 

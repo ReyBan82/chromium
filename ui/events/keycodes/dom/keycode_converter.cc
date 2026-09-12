@@ -4,6 +4,10 @@
 
 #include "ui/events/keycodes/dom/keycode_converter.h"
 
+#include <array>
+#include <string_view>
+
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversion_utils.h"
@@ -50,20 +54,25 @@ struct DomKeyMapEntry {
   const char* string;
 };
 
-#define DOM_KEY_MAP_DECLARATION constexpr DomKeyMapEntry kDomKeyMappings[] =
-#define DOM_KEY_UNI(key, id, value) {DomKey::id, key}
-#define DOM_KEY_MAP(key, id, value) {DomKey::id, key}
+#define DOM_KEY_MAP_DECLARATION_START \
+  constexpr auto kDomKeyMappings = std::to_array<DomKeyMapEntry>({
+#define DOM_KEY_UNI(key, id, value) {DomKey::id, key},
+#define DOM_KEY_MAP(key, id, value) {DomKey::id, key},
+#define DOM_KEY_MAP_DECLARATION_END \
+  })                                 \
+  ;
 #include "ui/events/keycodes/dom/dom_key_data.inc"
-#undef DOM_KEY_MAP_DECLARATION
+#undef DOM_KEY_MAP_DECLARATION_START
 #undef DOM_KEY_MAP
 #undef DOM_KEY_UNI
+#undef DOM_KEY_MAP_DECLARATION_END
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 
 // The offset between XKB Keycode and evdev code.
 constexpr int kXkbKeycodeOffset = 8;
 
-// TODO(crbug.com/1135034): After migrating native code for
+// TODO(crbug.com/40151699): After migrating native code for
 // these platforms from XKB to evdev, use XKB_INVALID_KEYCODE
 // (=0xFFFFFFFF) to represent invalid XKB keycode.
 // Currently, 0 is returned for backward compatibility.
@@ -89,7 +98,7 @@ uint32_t EvdevCodeToXkbKeycode(int evdev_code) {
   if (evdev_code < 0 || evdev_code > KEY_MAX || evdev_code == KEY_RESERVED)
     return KeycodeConverter::InvalidNativeKeycode();
 
-  // TODO(crbug.com/1135034): Move this to EvdevCodeToDomCode on
+  // TODO(crbug.com/40151699): Move this to EvdevCodeToDomCode on
   // migration.
   if (evdev_code == KEY_PLAYCD)
     evdev_code = KEY_PLAY;
@@ -97,6 +106,46 @@ uint32_t EvdevCodeToXkbKeycode(int evdev_code) {
 }
 
 #endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(IS_CHROMEOS)
+
+bool IsAlphaNumericKeyboardCode(KeyboardCode key_code) {
+  return (key_code >= VKEY_A && key_code <= VKEY_Z) ||
+         (key_code >= VKEY_0 && key_code <= VKEY_9);
+}
+
+bool ShouldPositionallyRemapKey(KeyboardCode key_code, DomCode code) {
+  switch (code) {
+    // Following set of keys should only be positionally remapped if the
+    // original key_code is not an alphanumeric key. This is because there are
+    // many layouts where the OEM keys in the US layout are instead
+    // alphabetic keys in the other layout. In this case, the shortcut using the
+    // key should be mapped to the semantic meaning (the letter/number) instead
+    // of the position.
+
+    // An example is the French layout where the semicolon key on the US layout
+    // is the "m" key on the French keyboard. This prevents us from remapping
+    // the "m" key on the French keyboard to "semicolon" for the purposes of
+    // shortcuts.
+    case DomCode::SEMICOLON:
+    case DomCode::QUOTE:
+    case DomCode::BACKSLASH:
+    case DomCode::BACKQUOTE:
+    case DomCode::INTL_BACKSLASH:
+      return !IsAlphaNumericKeyboardCode(key_code);
+    case DomCode::BRACKET_LEFT:
+    case DomCode::BRACKET_RIGHT:
+    case DomCode::MINUS:
+    case DomCode::EQUAL:
+    case DomCode::COMMA:
+    case DomCode::PERIOD:
+    case DomCode::SLASH:
+    default:
+      return true;
+  }
+}
+
+#endif
 
 }  // namespace
 
@@ -143,28 +192,28 @@ int KeycodeConverter::DomCodeToNativeKeycode(DomCode code) {
 // static
 DomCode KeycodeConverter::XkbKeycodeToDomCode(uint32_t xkb_keycode) {
   // Currently XKB keycode is the native keycode.
-  // TODO(crbug.com/1135034): Replace with evdev.
+  // TODO(crbug.com/40151699): Replace with evdev.
   return NativeKeycodeToDomCode(static_cast<int>(xkb_keycode));
 }
 
 // static
 uint32_t KeycodeConverter::DomCodeToXkbKeycode(DomCode code) {
   // Currently XKB keycode is the native keycode.
-  // TODO(crbug.com/1135034): Replace with evdev.
+  // TODO(crbug.com/40151699): Replace with evdev.
   return static_cast<uint32_t>(DomCodeToNativeKeycode(code));
 }
 
 // static
 DomCode KeycodeConverter::EvdevCodeToDomCode(int evdev_code) {
   // Currently XKB keycode is the native keycode.
-  // TODO(crbug.com/1135034): Replace with evdev.
+  // TODO(crbug.com/40151699): Replace with evdev.
   return XkbKeycodeToDomCode(EvdevCodeToXkbKeycode(evdev_code));
 }
 
 // static
 int KeycodeConverter::DomCodeToEvdevCode(DomCode code) {
   // Currently XKB keycode is the native keycode.
-  // TODO(crbug.com/1135034): Replace with evdev.
+  // TODO(crbug.com/40151699): Replace with evdev.
   return XkbKeycodeToEvdevCode(DomCodeToXkbKeycode(code));
 }
 #endif
@@ -172,7 +221,12 @@ int KeycodeConverter::DomCodeToEvdevCode(DomCode code) {
 #if BUILDFLAG(IS_CHROMEOS)
 // static
 DomCode KeycodeConverter::MapUSPositionalShortcutKeyToDomCode(
-    KeyboardCode key_code) {
+    KeyboardCode key_code,
+    DomCode original_dom_code) {
+  if (!ShouldPositionallyRemapKey(key_code, original_dom_code)) {
+    return DomCode::NONE;
+  }
+
   // VKEY Mapping: http://kbdlayout.info/kbdus/overview+virtualkeys
   // DomCode Mapping:
   //     https://www.w3.org/TR/DOM-Level-3-Events-code/#writing-system-keys
@@ -191,6 +245,16 @@ DomCode KeycodeConverter::MapUSPositionalShortcutKeyToDomCode(
       return DomCode::COMMA;
     case VKEY_OEM_PERIOD:
       return DomCode::PERIOD;
+    case VKEY_OEM_1:
+      return DomCode::SEMICOLON;
+    case VKEY_OEM_7:
+      return DomCode::QUOTE;
+    case VKEY_OEM_3:
+      return DomCode::BACKQUOTE;
+    case VKEY_OEM_5:
+      return DomCode::BACKSLASH;
+    case VKEY_OEM_102:
+      return DomCode::INTL_BACKSLASH;
     default:
       return DomCode::NONE;
   }
@@ -198,7 +262,12 @@ DomCode KeycodeConverter::MapUSPositionalShortcutKeyToDomCode(
 
 // static
 KeyboardCode KeycodeConverter::MapPositionalDomCodeToUSShortcutKey(
-    DomCode code) {
+    DomCode code,
+    KeyboardCode original_key_code) {
+  if (!ShouldPositionallyRemapKey(original_key_code, code)) {
+    return VKEY_UNKNOWN;
+  }
+
   // VKEY Mapping: http://kbdlayout.info/kbdus/overview+virtualkeys
   // DomCode Mapping:
   //     https://www.w3.org/TR/DOM-Level-3-Events-code/#writing-system-keys
@@ -217,6 +286,16 @@ KeyboardCode KeycodeConverter::MapPositionalDomCodeToUSShortcutKey(
       return VKEY_OEM_COMMA;
     case DomCode::PERIOD:
       return VKEY_OEM_PERIOD;
+    case DomCode::SEMICOLON:
+      return VKEY_OEM_1;
+    case DomCode::QUOTE:
+      return VKEY_OEM_7;
+    case DomCode::BACKQUOTE:
+      return VKEY_OEM_3;
+    case DomCode::BACKSLASH:
+      return VKEY_OEM_5;
+    case DomCode::INTL_BACKSLASH:
+      return VKEY_OEM_102;
     default:
       return VKEY_UNKNOWN;
   }
@@ -224,7 +303,7 @@ KeyboardCode KeycodeConverter::MapPositionalDomCodeToUSShortcutKey(
 #endif
 
 // static
-DomCode KeycodeConverter::CodeStringToDomCode(base::StringPiece code) {
+DomCode KeycodeConverter::CodeStringToDomCode(std::string_view code) {
   if (code.empty())
     return DomCode::NONE;
   for (auto& mapping : kDomCodeMappings) {
@@ -318,7 +397,7 @@ DomKeyLocation KeycodeConverter::DomCodeToLocation(DomCode dom_code) {
 }
 
 // static
-DomKey KeycodeConverter::KeyStringToDomKey(base::StringPiece key) {
+DomKey KeycodeConverter::KeyStringToDomKey(std::string_view key) {
   if (key.empty())
     return DomKey::NONE;
   // Check for standard key names.
@@ -339,8 +418,7 @@ DomKey KeycodeConverter::KeyStringToDomKey(base::StringPiece key) {
   const size_t key_length = key.length();
   size_t char_index = 0;
   base_icu::UChar32 character;
-  if (base::ReadUnicodeCharacter(key.data(), key_length, &char_index,
-                                 &character) &&
+  if (base::ReadUnicodeCharacter(key, &char_index, &character) &&
       ++char_index == key_length) {
     return DomKey::FromCharacter(character);
   }
@@ -458,6 +536,10 @@ uint32_t KeycodeConverter::DomCodeToUsbKeycode(DomCode dom_code) {
       return mapping.usb_keycode;
   }
   return InvalidUsbKeycode();
+}
+
+std::ostream& operator<<(std::ostream& os, const DomKey& dom_key) {
+  return os << KeycodeConverter::DomKeyToKeyString(dom_key);
 }
 
 }  // namespace ui

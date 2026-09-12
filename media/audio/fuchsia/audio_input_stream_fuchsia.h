@@ -6,7 +6,9 @@
 #define MEDIA_AUDIO_FUCHSIA_AUDIO_INPUT_STREAM_FUCHSIA_H_
 
 #include <fuchsia/media/cpp/fidl.h>
+#include <fuchsia/settings/cpp/fidl.h>
 
+#include "base/memory/raw_ptr.h"
 #include "media/audio/audio_io.h"
 #include "media/base/audio_parameters.h"
 #include "media/base/media_export.h"
@@ -18,6 +20,8 @@ class AudioManagerFuchsia;
 
 class MEDIA_EXPORT AudioInputStreamFuchsia : public AudioInputStream {
  public:
+  using Error = AudioInputStream::AudioInputCallback::Error;
+
   // Caller must ensure that manager outlives the stream.
   AudioInputStreamFuchsia(AudioManagerFuchsia* manager,
                           const AudioParameters& parameters,
@@ -41,13 +45,18 @@ class MEDIA_EXPORT AudioInputStreamFuchsia : public AudioInputStream {
   void OnPacketProduced(fuchsia::media::StreamPacket packet);
 
   // Reports an error to |callback_| and disconnects |capturer_|.
-  void ReportError();
+  void ReportError(Error error_code);
 
-  AudioManagerFuchsia* const manager_;
+  void WatchInputSettings();
+  void OnInputSettingsReceived(fuchsia::settings::InputSettings settings);
+
+  const raw_ptr<AudioManagerFuchsia> manager_;
   AudioParameters parameters_;
   std::string device_id_;
 
   fuchsia::media::AudioCapturerPtr capturer_;
+  fuchsia::settings::InputPtr input_service_;
+  bool is_muted_ = false;
 
   // VMO with the AudioCapturer in order to pass the captured data.
   VmoBuffer capture_buffer_;
@@ -58,7 +67,7 @@ class MEDIA_EXPORT AudioInputStreamFuchsia : public AudioInputStream {
 
   std::unique_ptr<AudioBus> audio_bus_;
 
-  AudioInputCallback* callback_ = nullptr;
+  raw_ptr<AudioInputCallback> callback_ = nullptr;
 };
 
 }  // namespace media

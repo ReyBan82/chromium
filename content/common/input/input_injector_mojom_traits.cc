@@ -4,6 +4,8 @@
 
 #include "content/common/input/input_injector_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 // static
@@ -30,44 +32,32 @@ EnumTraits<content::mojom::PointerActionType,
   }
 
   NOTREACHED();
-  return content::mojom::PointerActionType::kMaxValue;
 }
 
 // static
-bool EnumTraits<content::mojom::PointerActionType,
-                content::SyntheticPointerActionParams::PointerActionType>::
-    FromMojom(
-        content::mojom::PointerActionType input,
-        content::SyntheticPointerActionParams::PointerActionType* output) {
+content::SyntheticPointerActionParams::PointerActionType
+EnumTraits<content::mojom::PointerActionType,
+           content::SyntheticPointerActionParams::PointerActionType>::
+    FromMojom(content::mojom::PointerActionType input) {
   switch (input) {
     case content::mojom::PointerActionType::kNotInitialized:
-      *output = content::SyntheticPointerActionParams::PointerActionType::
+      return content::SyntheticPointerActionParams::PointerActionType::
           NOT_INITIALIZED;
-      return true;
     case content::mojom::PointerActionType::kPress:
-      *output = content::SyntheticPointerActionParams::PointerActionType::PRESS;
-      return true;
+      return content::SyntheticPointerActionParams::PointerActionType::PRESS;
     case content::mojom::PointerActionType::kMove:
-      *output = content::SyntheticPointerActionParams::PointerActionType::MOVE;
-      return true;
+      return content::SyntheticPointerActionParams::PointerActionType::MOVE;
     case content::mojom::PointerActionType::kRelease:
-      *output =
-          content::SyntheticPointerActionParams::PointerActionType::RELEASE;
-      return true;
+      return content::SyntheticPointerActionParams::PointerActionType::RELEASE;
     case content::mojom::PointerActionType::kCancel:
-      *output =
-          content::SyntheticPointerActionParams::PointerActionType::CANCEL;
-      return true;
+      return content::SyntheticPointerActionParams::PointerActionType::CANCEL;
     case content::mojom::PointerActionType::kLeave:
-      *output = content::SyntheticPointerActionParams::PointerActionType::LEAVE;
-      return true;
+      return content::SyntheticPointerActionParams::PointerActionType::LEAVE;
     case content::mojom::PointerActionType::kIdle:
-      *output = content::SyntheticPointerActionParams::PointerActionType::IDLE;
-      return true;
+      return content::SyntheticPointerActionParams::PointerActionType::IDLE;
   }
 
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -91,37 +81,29 @@ EnumTraits<content::mojom::SyntheticButton,
   }
 
   NOTREACHED();
-  return content::mojom::SyntheticButton::kMaxValue;
 }
 
 // static
-bool EnumTraits<content::mojom::SyntheticButton,
-                content::SyntheticPointerActionParams::Button>::
-    FromMojom(content::mojom::SyntheticButton input,
-              content::SyntheticPointerActionParams::Button* output) {
+content::SyntheticPointerActionParams::Button
+EnumTraits<content::mojom::SyntheticButton,
+           content::SyntheticPointerActionParams::Button>::
+    FromMojom(content::mojom::SyntheticButton input) {
   switch (input) {
     case content::mojom::SyntheticButton::kNoButton:
-      *output = content::SyntheticPointerActionParams::Button::NO_BUTTON;
-      return true;
+      return content::SyntheticPointerActionParams::Button::NO_BUTTON;
     case content::mojom::SyntheticButton::kLeft:
-      *output = content::SyntheticPointerActionParams::Button::LEFT;
-      return true;
+      return content::SyntheticPointerActionParams::Button::LEFT;
     case content::mojom::SyntheticButton::kMiddle:
-      *output = content::SyntheticPointerActionParams::Button::MIDDLE;
-      return true;
+      return content::SyntheticPointerActionParams::Button::MIDDLE;
     case content::mojom::SyntheticButton::kRight:
-      *output = content::SyntheticPointerActionParams::Button::RIGHT;
-      return true;
+      return content::SyntheticPointerActionParams::Button::RIGHT;
     case content::mojom::SyntheticButton::kBack:
-      *output = content::SyntheticPointerActionParams::Button::BACK;
-      return true;
+      return content::SyntheticPointerActionParams::Button::BACK;
     case content::mojom::SyntheticButton::kForward:
-      *output = content::SyntheticPointerActionParams::Button::FORWARD;
-      return true;
+      return content::SyntheticPointerActionParams::Button::FORWARD;
   }
 
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -135,6 +117,8 @@ bool StructTraits<content::mojom::SyntheticSmoothDragDataView,
 
   out->gesture_source_type = data.gesture_source_type();
   out->speed_in_pixels_s = data.speed_in_pixels_s();
+  out->vsync_offset_ms = data.vsync_offset_ms();
+  out->input_event_pattern = data.input_event_pattern();
   return true;
 }
 
@@ -153,6 +137,8 @@ bool StructTraits<content::mojom::SyntheticSmoothScrollDataView,
   out->fling_velocity_x = data.fling_velocity_x();
   out->fling_velocity_y = data.fling_velocity_y();
   out->modifiers = data.modifiers();
+  out->vsync_offset_ms = data.vsync_offset_ms();
+  out->input_event_pattern = data.input_event_pattern();
   return true;
 }
 
@@ -167,6 +153,8 @@ bool StructTraits<content::mojom::SyntheticPinchDataView,
   out->scale_factor = data.scale_factor();
   out->relative_pointer_speed_in_pixels_s =
       data.relative_pointer_speed_in_pixels_s();
+  out->vsync_offset_ms = data.vsync_offset_ms();
+  out->input_event_pattern = data.input_event_pattern();
   return true;
 }
 

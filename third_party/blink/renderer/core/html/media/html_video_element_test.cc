@@ -4,36 +4,199 @@
 
 #include "third_party/blink/renderer/core/html/media/html_video_element.h"
 
+#include "base/memory/raw_ptr.h"
 #include "cc/layers/layer.h"
+#include "media/base/video_frame.h"
+#include "media/renderers/paint_canvas_video_renderer.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/common/media/display_type.h"
+#include "third_party/blink/public/common/frame/frame_ad_evidence.h"
 #include "third_party/blink/public/platform/web_fullscreen_video_status.h"
+#include "third_party/blink/public/platform/web_media_player.h"
+#include "third_party/blink/renderer/bindings/core/v8/idl_types.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
+#include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/picture_in_picture_controller.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/html/media/html_media_test_helper.h"
+#include "third_party/blink/renderer/core/html/media/media_video_visibility_tracker.h"
+#include "third_party/blink/renderer/core/html/track/audio_track_list.h"
+#include "third_party/blink/renderer/core/html/track/video_track_list.h"
 #include "third_party/blink/renderer/core/html_names.h"
+#include "third_party/blink/renderer/core/layout/geometry/physical_rect.h"
 #include "third_party/blink/renderer/core/layout/layout_box_model_object.h"
 #include "third_party/blink/renderer/core/loader/empty_clients.h"
 #include "third_party/blink/renderer/core/paint/paint_layer.h"
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
+#include "third_party/blink/renderer/core/testing/fake_local_frame_host.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
+#include "third_party/blink/renderer/platform/blob/testing/fake_blob_url_store.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/loader/fetch/ad_tagging_utils.h"
 #include "third_party/blink/renderer/platform/testing/empty_web_media_player.h"
 #include "third_party/blink/renderer/platform/testing/paint_test_configurations.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 using testing::_;
+using testing::Eq;
+using testing::Return;
 
 namespace blink {
 
 namespace {
 
+class StubPictureInPictureController : public PictureInPictureController {
+ public:
+  explicit StubPictureInPictureController(Document& document)
+      : PictureInPictureController(document) {}
+
+  void EnterPictureInPicture(
+      HTMLVideoElement*,
+      ScriptPromiseResolver<PictureInPictureWindow>*) override {}
+  void EnterPictureInPictureImmersive(
+      HTMLVideoElement& video_element) override {
+    enter_immersive_called_ = true;
+  }
+  void ExitPictureInPicture(HTMLVideoElement*,
+                            ScriptPromiseResolver<IDLUndefined>*) override {}
+  Status IsElementAllowed(const HTMLVideoElement&,
+                          bool report_failure) const override {
+    return Status::kEnabled;
+  }
+  void OnExitedPictureInPicture(ScriptPromiseResolver<IDLUndefined>*) override {
+  }
+  void OnPictureInPictureStateChange() override {}
+  void OnMediaPositionStateChanged(
+      const media_session::mojom::blink::MediaPositionPtr&) override {}
+  Element* PictureInPictureElement() const override { return nullptr; }
+  Element* PictureInPictureElement(TreeScope&) const override {
+    return nullptr;
+  }
+  bool PictureInPictureEnabled() const override { return true; }
+
+  bool enter_immersive_called() const { return enter_immersive_called_; }
+  void reset_enter_immersive_called() { enter_immersive_called_ = false; }
+
+ protected:
+  bool IsPictureInPictureElement(const Element*) const override {
+    return false;
+  }
+  LocalDOMWindow* GetDocumentPictureInPictureWindow() const override {
+    return nullptr;
+  }
+  LocalDOMWindow* GetDocumentPictureInPictureOwner() const override {
+    return nullptr;
+  }
+
+ private:
+  bool enter_immersive_called_ = false;
+};
+
 class HTMLVideoElementMockMediaPlayer : public EmptyWebMediaPlayer {
  public:
   MOCK_METHOD1(SetIsEffectivelyFullscreen, void(WebFullscreenVideoStatus));
-  MOCK_METHOD1(OnDisplayTypeChanged, void(DisplayType));
+  MOCK_METHOD1(OnDisplayTypeChanged, void(WebMediaPlayer::DisplayType));
   MOCK_CONST_METHOD0(HasAvailableVideoFrame, bool());
+  MOCK_CONST_METHOD0(HasReadableVideoFrame, bool());
+  MOCK_CONST_METHOD0(IsHDR, bool());
+  MOCK_METHOD(void,
+              RecordVideoOcclusionState,
+              (std::string_view occlusion_state));
+  MOCK_METHOD(gfx::Size, NaturalSize, (), (const));
+  MOCK_METHOD(void, EnabledAudioTracksChanged, (std::optional<TrackId>));
+  MOCK_METHOD(void, SelectedVideoTrackChanged, (std::optional<TrackId>));
+  MOCK_METHOD(void, RequestVideoFrameCallback, (), (override));
+
+  scoped_refptr<media::VideoFrame> GetCurrentFrameThenUpdate() override {
+    return video_frame_;
+  }
+  media::PaintCanvasVideoRenderer* GetPaintCanvasVideoRenderer() override {
+    return &video_renderer_;
+  }
+
+  void SetCurrentFrame(scoped_refptr<media::VideoFrame> frame) {
+    video_frame_ = std::move(frame);
+  }
+
+ private:
+  scoped_refptr<media::VideoFrame> video_frame_;
+  media::PaintCanvasVideoRenderer video_renderer_;
+};
+
+class SaveVideoFrameBlobURLStore : public FakeBlobURLStore {
+ public:
+  void Register(mojo::PendingRemote<mojom::blink::Blob> blob,
+                const KURL& url,
+                RegisterCallback callback) override {
+    FakeBlobURLStore::Register(std::move(blob), url, std::move(callback));
+  }
+
+  void ResolveAsBlobURLToken(
+      const KURL& url,
+      mojo::PendingReceiver<mojom::blink::BlobURLToken> receiver,
+      bool is_top_level_navigation) override {
+    resolve_token_called_ = true;
+    resolved_url_ = url;
+    token_receivers_.push_back(std::move(receiver));
+  }
+
+  bool resolve_token_called() const { return resolve_token_called_; }
+  const KURL& resolved_url() const { return resolved_url_; }
+
+ private:
+  bool resolve_token_called_ = false;
+  KURL resolved_url_;
+  Vector<mojo::PendingReceiver<mojom::blink::BlobURLToken>> token_receivers_;
+};
+
+class SaveVideoFrameLocalFrameHost : public FakeLocalFrameHost {
+ public:
+  explicit SaveVideoFrameLocalFrameHost(AssociatedInterfaceProvider* provider) {
+    provider->OverrideBinderForTesting(
+        mojom::blink::LocalFrameHost::Name_,
+        base::BindRepeating(&SaveVideoFrameLocalFrameHost::BindFrameHost,
+                            base::Unretained(this)));
+    provider->OverrideBinderForTesting(
+        mojom::blink::BlobURLStore::Name_,
+        base::BindRepeating(&SaveVideoFrameLocalFrameHost::BindBlobURLStore,
+                            base::Unretained(this)));
+  }
+
+  void DownloadURL(mojom::blink::DownloadURLParamsPtr params) override {
+    download_url_called_ = true;
+    download_params_ = std::move(params);
+  }
+
+  bool download_url_called() const { return download_url_called_; }
+  const mojom::blink::DownloadURLParamsPtr& download_params() const {
+    return download_params_;
+  }
+
+  SaveVideoFrameBlobURLStore* BlobURLStore() { return &blob_url_store_; }
+
+ private:
+  void BindFrameHost(mojo::ScopedInterfaceEndpointHandle handle) {
+    receiver_.Bind(
+        mojo::PendingAssociatedReceiver<mojom::blink::LocalFrameHost>(
+            std::move(handle)));
+  }
+
+  void BindBlobURLStore(mojo::ScopedInterfaceEndpointHandle handle) {
+    blob_url_store_receiver_.Bind(
+        mojo::PendingAssociatedReceiver<mojom::blink::BlobURLStore>(
+            std::move(handle)));
+  }
+
+  bool download_url_called_ = false;
+  mojom::blink::DownloadURLParamsPtr download_params_;
+  mojo::AssociatedReceiver<mojom::blink::LocalFrameHost> receiver_{this};
+
+  SaveVideoFrameBlobURLStore blob_url_store_;
+  mojo::AssociatedReceiver<mojom::blink::BlobURLStore> blob_url_store_receiver_{
+      &blob_url_store_};
 };
 }  // namespace
 
@@ -44,15 +207,18 @@ class HTMLVideoElementTest : public PaintTestConfigurations,
     auto mock_media_player =
         std::make_unique<HTMLVideoElementMockMediaPlayer>();
     media_player_ = mock_media_player.get();
-    SetupPageWithClients(nullptr,
-                         MakeGarbageCollected<test::MediaStubLocalFrameClient>(
-                             std::move(mock_media_player)),
-                         nullptr);
+    auto* client = MakeGarbageCollected<test::MediaStubLocalFrameClient>(
+        std::move(mock_media_player));
+    frame_host_ = std::make_unique<SaveVideoFrameLocalFrameHost>(
+        client->GetRemoteNavigationAssociatedInterfaces());
+    SetupPageWithClients(nullptr, client, nullptr);
     video_ = MakeGarbageCollected<HTMLVideoElement>(GetDocument());
     GetDocument().body()->appendChild(video_);
   }
 
   void SetFakeCcLayer(cc::Layer* layer) { video_->SetCcLayer(layer); }
+
+  void ClearMediaPlayer() { video_->OnWebMediaPlayerCleared(); }
 
   HTMLVideoElement* video() { return video_.Get(); }
 
@@ -60,20 +226,121 @@ class HTMLVideoElementTest : public PaintTestConfigurations,
     return media_player_;
   }
 
+  HTMLVideoElementMockMediaPlayer* MockMediaPlayer() { return media_player_; }
+
+  MediaVideoVisibilityTracker* VideoVisibilityTracker() {
+    return video_ ? video_->visibility_tracker_for_tests() : nullptr;
+  }
+
+  MediaVideoVisibilityTracker::TrackerAttachedToDocument
+  VideoVisibilityTrackerAttachedToDocument() const {
+    DCHECK(video_);
+    DCHECK(video_->visibility_tracker_for_tests());
+    return video_->visibility_tracker_for_tests()
+        ->tracker_attached_to_document_;
+  }
+
+  void RequestVisibility(HTMLMediaElement::RequestVisibilityCallback
+                             request_visibility_callback) const {
+    DCHECK(video_);
+    video_->RequestVisibility(std::move(request_visibility_callback));
+  }
+
+  const MediaVideoVisibilityTracker::OcclusionState& TrackerOcclusionState() {
+    DCHECK(video_);
+    DCHECK(video_->visibility_tracker_for_tests());
+    return video_->visibility_tracker_for_tests()->occlusion_state_;
+  }
+  SaveVideoFrameLocalFrameHost* FrameHost() { return frame_host_.get(); }
+
  private:
   Persistent<HTMLVideoElement> video_;
 
   // Owned by HTMLVideoElementFrameClient.
-  HTMLVideoElementMockMediaPlayer* media_player_;
+  raw_ptr<HTMLVideoElementMockMediaPlayer,
+          UnprotectedInRelease | DanglingUntriaged>
+      media_player_;
+
+  std::unique_ptr<SaveVideoFrameLocalFrameHost> frame_host_;
 };
 INSTANTIATE_PAINT_TEST_SUITE_P(HTMLVideoElementTest);
+
+TEST_P(HTMLVideoElementTest, TrackChangeEventPropagationTest) {
+  scoped_refptr<cc::Layer> layer = cc::Layer::Create();
+  SetFakeCcLayer(layer.get());
+
+  video()->SetBooleanAttribute(html_names::kControlsAttr, true);
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+
+  video()->AddTrackForTesting(media::MediaTrack::CreateAudioTrack(
+      "a0", media::MediaTrack::AudioKind::kMain, "zero", "EN", true, 0, true));
+  video()->AddTrackForTesting(media::MediaTrack::CreateAudioTrack(
+      "a1", media::MediaTrack::AudioKind::kMain, "one", "EN", false, 1, true));
+  ASSERT_EQ(video()->audioTracks().length(), 2);
+  ASSERT_EQ(video()->audioTracks().AnonymousIndexedGetter(0)->id(), "a0");
+  ASSERT_TRUE(video()->audioTracks().AnonymousIndexedGetter(0)->enabled());
+  ASSERT_EQ(video()->audioTracks().AnonymousIndexedGetter(1)->id(), "a1");
+  ASSERT_FALSE(video()->audioTracks().AnonymousIndexedGetter(1)->enabled());
+
+  video()->AddTrackForTesting(media::MediaTrack::CreateVideoTrack(
+      "v0", media::MediaTrack::VideoKind::kMain, "zero", "EN", true, 0));
+  video()->AddTrackForTesting(media::MediaTrack::CreateVideoTrack(
+      "v1", media::MediaTrack::VideoKind::kMain, "one", "EN", false, 1));
+  ASSERT_EQ(video()->videoTracks().length(), 2);
+  ASSERT_EQ(video()->videoTracks().AnonymousIndexedGetter(0)->id(), "v0");
+  ASSERT_TRUE(video()->videoTracks().AnonymousIndexedGetter(0)->selected());
+  ASSERT_EQ(video()->videoTracks().AnonymousIndexedGetter(1)->id(), "v1");
+  ASSERT_FALSE(video()->videoTracks().AnonymousIndexedGetter(1)->selected());
+
+  // Enabling the enabled audio track does nothing.
+  EXPECT_CALL(*MockMediaPlayer(), EnabledAudioTracksChanged(_)).Times(0);
+  video()->audioTracks().AnonymousIndexedGetter(0)->setEnabled(true);
+  test::RunPendingTasks();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+
+  // Enabling the disabled audio track triggers a track change for it.
+  EXPECT_CALL(*MockWebMediaPlayer(),
+              EnabledAudioTracksChanged(
+                  testing::Optional(EmptyWebMediaPlayer::TrackId("a1"))));
+  video()->audioTracks().AnonymousIndexedGetter(1)->setEnabled(true);
+  test::RunPendingTasks();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+
+  // Disabling the enabled audio track triggers a track disable for the media
+  // player.
+  EXPECT_CALL(*MockWebMediaPlayer(),
+              EnabledAudioTracksChanged(Eq(std::nullopt)));
+  video()->audioTracks().AnonymousIndexedGetter(1)->setEnabled(false);
+  test::RunPendingTasks();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+
+  // Now do the same things for video tracks.
+  EXPECT_CALL(*MockMediaPlayer(), SelectedVideoTrackChanged(_)).Times(0);
+  video()->videoTracks().AnonymousIndexedGetter(0)->setSelected(true);
+  test::RunPendingTasks();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+
+  EXPECT_CALL(*MockWebMediaPlayer(),
+              SelectedVideoTrackChanged(
+                  testing::Optional(EmptyWebMediaPlayer::TrackId("v1"))));
+  video()->videoTracks().AnonymousIndexedGetter(1)->setSelected(true);
+  test::RunPendingTasks();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+
+  EXPECT_CALL(*MockWebMediaPlayer(),
+              SelectedVideoTrackChanged(Eq(std::nullopt)));
+  video()->videoTracks().AnonymousIndexedGetter(1)->setSelected(false);
+  test::RunPendingTasks();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+}
 
 TEST_P(HTMLVideoElementTest, PictureInPictureInterstitialAndTextContainer) {
   scoped_refptr<cc::Layer> layer = cc::Layer::Create();
   SetFakeCcLayer(layer.get());
 
   video()->SetBooleanAttribute(html_names::kControlsAttr, true);
-  video()->SetSrc("http://example.com/foo.mp4");
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
   test::RunPendingTasks();
 
   // Simulate the text track being displayed.
@@ -82,7 +349,7 @@ TEST_P(HTMLVideoElementTest, PictureInPictureInterstitialAndTextContainer) {
 
   // Simulate entering Picture-in-Picture.
   EXPECT_CALL(*MockWebMediaPlayer(),
-              OnDisplayTypeChanged(DisplayType::kInline));
+              OnDisplayTypeChanged(WebMediaPlayer::DisplayType::kInline));
   video()->OnEnteredPictureInPicture();
 
   // Simulate that text track are displayed again.
@@ -90,7 +357,7 @@ TEST_P(HTMLVideoElementTest, PictureInPictureInterstitialAndTextContainer) {
 
   EXPECT_EQ(3u, video()->EnsureUserAgentShadowRoot().CountChildren());
   EXPECT_CALL(*MockWebMediaPlayer(),
-              OnDisplayTypeChanged(DisplayType::kInline));
+              OnDisplayTypeChanged(WebMediaPlayer::DisplayType::kInline));
   // Reset cc::layer to avoid crashes depending on timing.
   SetFakeCcLayer(nullptr);
 }
@@ -100,18 +367,19 @@ TEST_P(HTMLVideoElementTest, PictureInPictureInterstitial_Reattach) {
   SetFakeCcLayer(layer.get());
 
   video()->SetBooleanAttribute(html_names::kControlsAttr, true);
-  video()->SetSrc("http://example.com/foo.mp4");
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
   test::RunPendingTasks();
 
   EXPECT_CALL(*MockWebMediaPlayer(),
-              OnDisplayTypeChanged(DisplayType::kInline));
+              OnDisplayTypeChanged(WebMediaPlayer::DisplayType::kInline));
   EXPECT_CALL(*MockWebMediaPlayer(), HasAvailableVideoFrame())
       .WillRepeatedly(testing::Return(true));
 
   // Simulate entering Picture-in-Picture.
   video()->OnEnteredPictureInPicture();
 
-  EXPECT_CALL(*MockWebMediaPlayer(), OnDisplayTypeChanged(DisplayType::kInline))
+  EXPECT_CALL(*MockWebMediaPlayer(),
+              OnDisplayTypeChanged(WebMediaPlayer::DisplayType::kInline))
       .Times(3);
 
   // Try detaching and reattaching. This should not crash.
@@ -121,27 +389,28 @@ TEST_P(HTMLVideoElementTest, PictureInPictureInterstitial_Reattach) {
 }
 
 TEST_P(HTMLVideoElementTest, EffectivelyFullscreen_DisplayType) {
-  video()->SetSrc("http://example.com/foo.mp4");
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
   test::RunPendingTasks();
   UpdateAllLifecyclePhasesForTest();
 
-  EXPECT_EQ(DisplayType::kInline, video()->GetDisplayType());
+  EXPECT_EQ(WebMediaPlayer::DisplayType::kInline, video()->GetDisplayType());
 
   // Vector of data to use for tests. First value is to be set when calling
   // SetIsEffectivelyFullscreen(). The second one is the expected DisplayType.
   // This is testing all possible values of WebFullscreenVideoStatus and then
   // sets the value back to a value that should put the DisplayType back to
   // inline.
-  Vector<std::pair<WebFullscreenVideoStatus, DisplayType>> tests = {
-      {WebFullscreenVideoStatus::kNotEffectivelyFullscreen,
-       DisplayType::kInline},
-      {WebFullscreenVideoStatus::kFullscreenAndPictureInPictureEnabled,
-       DisplayType::kFullscreen},
-      {WebFullscreenVideoStatus::kFullscreenAndPictureInPictureDisabled,
-       DisplayType::kFullscreen},
-      {WebFullscreenVideoStatus::kNotEffectivelyFullscreen,
-       DisplayType::kInline},
-  };
+  Vector<std::pair<WebFullscreenVideoStatus, WebMediaPlayer::DisplayType>>
+      tests = {
+          {WebFullscreenVideoStatus::kNotEffectivelyFullscreen,
+           WebMediaPlayer::DisplayType::kInline},
+          {WebFullscreenVideoStatus::kFullscreenAndPictureInPictureEnabled,
+           WebMediaPlayer::DisplayType::kFullscreen},
+          {WebFullscreenVideoStatus::kFullscreenAndPictureInPictureDisabled,
+           WebMediaPlayer::DisplayType::kFullscreen},
+          {WebFullscreenVideoStatus::kNotEffectivelyFullscreen,
+           WebMediaPlayer::DisplayType::kInline},
+      };
 
   for (const auto& test : tests) {
     EXPECT_CALL(*MockWebMediaPlayer(), SetIsEffectivelyFullscreen(test.first));
@@ -154,7 +423,7 @@ TEST_P(HTMLVideoElementTest, EffectivelyFullscreen_DisplayType) {
 }
 
 TEST_P(HTMLVideoElementTest, ChangeLayerNeedsCompositingUpdate) {
-  video()->SetSrc("http://example.com/foo.mp4");
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
   test::RunPendingTasks();
   UpdateAllLifecyclePhasesForTest();
 
@@ -181,7 +450,7 @@ TEST_P(HTMLVideoElementTest, ChangeLayerNeedsCompositingUpdate) {
 }
 
 TEST_P(HTMLVideoElementTest, HasAvailableVideoFrameChecksWMP) {
-  video()->SetSrc("http://example.com/foo.mp4");
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
   test::RunPendingTasks();
   UpdateAllLifecyclePhasesForTest();
 
@@ -193,7 +462,7 @@ TEST_P(HTMLVideoElementTest, HasAvailableVideoFrameChecksWMP) {
 }
 
 TEST_P(HTMLVideoElementTest, AutoPIPExitPIPTest) {
-  video()->SetSrc("http://example.com/foo.mp4");
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
   test::RunPendingTasks();
 
   // Set in auto PIP.
@@ -227,9 +496,410 @@ TEST_P(HTMLVideoElementTest, DefaultPosterImage) {
 
   // Set the poster image of the video to something
   video->setAttribute(html_names::kPosterAttr,
-                      "http://www.example.com/bar.jpg");
+                      AtomicString("http://www.example.com/bar.jpg"));
   EXPECT_FALSE(video->IsDefaultPosterImageURL());
   EXPECT_NE(kDefaultPosterImage, video->PosterImageURL());
+}
+
+TEST_P(HTMLVideoElementTest,
+       RecordVideoOcclusionStateCalledWhenVisibilityIsRequested) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+  UpdateAllLifecyclePhasesForTest();
+  ASSERT_EQ(VideoVisibilityTracker(), nullptr);
+
+  video()->Play();
+  EXPECT_TRUE(video()->GetWebMediaPlayer());
+  ASSERT_NE(VideoVisibilityTracker(), nullptr);
+  EXPECT_NE(VideoVisibilityTrackerAttachedToDocument(), nullptr);
+  UpdateAllLifecyclePhasesForTest();
+
+  // Request visibility and verify `RecordVideoOcclusionState` is called.
+  const std::string expected_occlusion_state =
+      "has sufficiently visible video: {True}, occluded area: {0.00}, "
+      "occluding rects: {None}, intersection rect: {x: 8, y: 8, width: 300, "
+      "height: 150}, video element rect: {x: 8, y: 8, width: 300, height: "
+      "150}, visibility threshold: {10000}";
+  EXPECT_CALL((*MockMediaPlayer()),
+              RecordVideoOcclusionState(expected_occlusion_state));
+  RequestVisibility(base::DoNothing());
+
+  // Verify that `RecordVideoOcclusionState` is also called when the document is
+  // not in the `DocumentUpdateReason::kPaintClean` lifecycle state.
+  //
+  // Set the lifecycle state to a value < `DocumentUpdateReason::kPaintClean`.
+  // This will cause the tracker to used the cached
+  // `meets_visibility_threshold_` value when we request visibility.
+  GetDocument().View()->UpdateLifecycleToLayoutClean(
+      DocumentUpdateReason::kTest);
+  EXPECT_CALL((*MockMediaPlayer()),
+              RecordVideoOcclusionState(expected_occlusion_state));
+  RequestVisibility(base::DoNothing());
+}
+
+TEST_P(HTMLVideoElementTest,
+       RecordVideoOcclusionStateNotCalledIfVisibilityIsNotRequested) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+  UpdateAllLifecyclePhasesForTest();
+  ASSERT_EQ(VideoVisibilityTracker(), nullptr);
+
+  video()->Play();
+
+  // Update all lifecycle phases and verify `RecordVideoOcclusionState` is not
+  // called.
+  EXPECT_CALL((*MockMediaPlayer()), RecordVideoOcclusionState(_)).Times(0);
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_TRUE(video()->GetWebMediaPlayer());
+  ASSERT_NE(VideoVisibilityTracker(), nullptr);
+  EXPECT_NE(VideoVisibilityTrackerAttachedToDocument(), nullptr);
+}
+
+TEST_P(HTMLVideoElementTest,
+       RecordVideoOcclusionStateCalledWhenTrackerNotAttached) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+  UpdateAllLifecyclePhasesForTest();
+  ASSERT_EQ(VideoVisibilityTracker(), nullptr);
+
+  video()->Play();
+  EXPECT_TRUE(video()->GetWebMediaPlayer());
+  ASSERT_NE(VideoVisibilityTracker(), nullptr);
+  EXPECT_NE(VideoVisibilityTrackerAttachedToDocument(), nullptr);
+
+  // Remove video, and verify that the visibility tracker has been detached.
+  NonThrowableExceptionState should_not_throw;
+  video()->remove(should_not_throw);
+  test::RunPendingTasks();
+  EXPECT_EQ(VideoVisibilityTrackerAttachedToDocument(), nullptr);
+
+  // Request visibility and verify `RecordVideoOcclusionState` is called since
+  // the tracker has a request visibility callback.
+  const std::string expected_occlusion_state =
+      "has sufficiently visible video: {False}, occluded area: {0.00}, "
+      "occluding rects: {None}, intersection rect: {None}, video element rect: "
+      "{None}, visibility threshold: {10000}";
+  EXPECT_CALL((*MockMediaPlayer()),
+              RecordVideoOcclusionState(expected_occlusion_state));
+  RequestVisibility(base::DoNothing());
+}
+
+TEST_P(HTMLVideoElementTest, VideoVisibilityTrackerVideoElementRectDimensions) {
+  const auto& expected_natural_size = gfx::Size(1920, 1080);
+  EXPECT_CALL(*MockMediaPlayer(), NaturalSize())
+      .WillRepeatedly(Return(expected_natural_size));
+
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  video()->setAttribute(html_names::kStyleAttr,
+                        AtomicString("width: 300px; height: 300px"));
+  test::RunPendingTasks();
+  UpdateAllLifecyclePhasesForTest();
+  ASSERT_EQ(VideoVisibilityTracker(), nullptr);
+
+  video()->Play();
+  EXPECT_TRUE(video()->GetWebMediaPlayer());
+  ASSERT_EQ(expected_natural_size,
+            gfx::Size(video()->videoWidth(), video()->videoHeight()));
+  ASSERT_NE(VideoVisibilityTracker(), nullptr);
+  EXPECT_NE(VideoVisibilityTrackerAttachedToDocument(), nullptr);
+  UpdateAllLifecyclePhasesForTest();
+
+  RequestVisibility(base::DoNothing());
+
+  // Verify that the visibility tracker is using the content rect for the
+  // `video_element_rect`.
+  const auto occlusion_state = TrackerOcclusionState();
+  LayoutBox* box = To<LayoutBox>(video()->GetLayoutObject());
+  EXPECT_EQ(box->AbsoluteBoundingBoxRect().width(),
+            occlusion_state.video_element_rect.Width());
+  EXPECT_GT(box->AbsoluteBoundingBoxRect().height(),
+            occlusion_state.video_element_rect.Height());
+
+  // Verify that the `video_element_rect` intersects the `HTMLVideoElement`
+  // bounds.
+  const auto intersection = Intersection(VisualRectInDocument(*box),
+                                         occlusion_state.video_element_rect);
+  EXPECT_EQ(occlusion_state.video_element_rect, intersection);
+}
+
+TEST_P(HTMLVideoElementTest, PosterDeferredForLazyLoad) {
+  ScopedLazyLoadVideoAndAudioForTest scoped_feature(true);
+
+  // Set loading=lazy on the video element.
+  video()->setAttribute(html_names::kLoadingAttr, AtomicString("lazy"));
+  video()->setAttribute(html_names::kPosterAttr,
+                        AtomicString("http://example.com/poster.jpg"));
+
+  // Trigger poster update.
+  video()->setAttribute(html_names::kSrcAttr,
+                        AtomicString("http://example.com/video.mp4"));
+  test::RunPendingTasks();
+
+  // Verify that poster loading was deferred due to lazy loading.
+  EXPECT_TRUE(video()->poster_deferred_for_lazy_load_for_tests());
+}
+
+TEST_P(HTMLVideoElementTest, PosterDeferredViaUpdatePosterImageInternal) {
+  ScopedLazyLoadVideoAndAudioForTest scoped_feature(true);
+
+  // Set poster BEFORE loading=lazy to exercise the microtask path
+  // (UpdatePosterImageInternal). This mimics the HTML parser attribute order:
+  // <video poster="..." loading="lazy">
+  // When poster is set without loading=lazy, UpdatePosterImage() enqueues a
+  // microtask to UpdatePosterImageInternal(). Then loading=lazy is set before
+  // the microtask fires.
+  video()->setAttribute(html_names::kPosterAttr,
+                        AtomicString("http://example.com/poster.jpg"));
+  // Now set loading=lazy. The microtask hasn't fired yet.
+  video()->setAttribute(html_names::kLoadingAttr, AtomicString("lazy"));
+
+  // Run the microtask - UpdatePosterImageInternal sees loading=lazy and defers.
+  test::RunPendingTasks();
+
+  // Verify that poster loading was deferred via the microtask path.
+  EXPECT_TRUE(video()->poster_deferred_for_lazy_load_for_tests());
+}
+
+TEST_P(HTMLVideoElementTest, PosterNotDeferredWithoutLazyLoad) {
+  ScopedLazyLoadVideoAndAudioForTest scoped_feature(true);
+
+  // Set loading=eager (or no loading attribute) on the video element.
+  video()->setAttribute(html_names::kLoadingAttr, AtomicString("eager"));
+  video()->setAttribute(html_names::kPosterAttr,
+                        AtomicString("http://example.com/poster.jpg"));
+
+  // Trigger poster update.
+  video()->setAttribute(html_names::kSrcAttr,
+                        AtomicString("http://example.com/video.mp4"));
+  test::RunPendingTasks();
+
+  // Verify that poster loading was NOT deferred.
+  EXPECT_FALSE(video()->poster_deferred_for_lazy_load_for_tests());
+}
+
+TEST_P(HTMLVideoElementTest, PosterNotDeferredWhenFeatureDisabled) {
+  ScopedLazyLoadVideoAndAudioForTest scoped_feature(false);
+
+  // Set loading=lazy on the video element.
+  video()->setAttribute(html_names::kLoadingAttr, AtomicString("lazy"));
+  video()->setAttribute(html_names::kPosterAttr,
+                        AtomicString("http://example.com/poster.jpg"));
+
+  // Trigger poster update.
+  video()->setAttribute(html_names::kSrcAttr,
+                        AtomicString("http://example.com/video.mp4"));
+  test::RunPendingTasks();
+
+  // Verify that poster loading was NOT deferred when feature is disabled.
+  EXPECT_FALSE(video()->poster_deferred_for_lazy_load_for_tests());
+}
+
+TEST_P(HTMLVideoElementTest, RequestSaveVideoFrame) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+  UpdateAllLifecyclePhasesForTest();
+
+  // Force BlobURLStore to bind early to prevent same-thread sync Mojo deadlock.
+  GetFrame().DomWindow()->GetPublicURLManager().GetBlobURLStore();
+  test::RunPendingTasks();
+
+  auto frame = media::VideoFrame::CreateBlackFrame(gfx::Size(100, 100));
+  MockMediaPlayer()->SetCurrentFrame(frame);
+
+  video()->RequestSaveVideoFrame();
+
+  test::RunPendingTasks();
+
+  ASSERT_TRUE(FrameHost()->download_url_called());
+  const auto& params = FrameHost()->download_params();
+  ASSERT_TRUE(params);
+  EXPECT_TRUE(params->should_prompt_for_save_location);
+  EXPECT_TRUE(params->suggested_name.starts_with("videoframe_"));
+  EXPECT_TRUE(params->url.ProtocolIs("blob"));
+  EXPECT_TRUE(params->blob_url_token.is_valid());
+  EXPECT_TRUE(FrameHost()->BlobURLStore()->resolve_token_called());
+  EXPECT_EQ(FrameHost()->BlobURLStore()->resolved_url(), params->url);
+}
+
+TEST_P(HTMLVideoElementTest, CreateStaticBitmapImage_Rotated) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+
+  gfx::Size coded_size(1280, 720);
+  gfx::Rect visible_rect(coded_size);
+  gfx::Size natural_size = coded_size;
+
+  auto frame = media::VideoFrame::CreateZeroInitializedFrame(
+      media::PIXEL_FORMAT_I420, coded_size, visible_rect, natural_size,
+      base::TimeDelta());
+
+  frame->metadata().transformation =
+      media::VideoTransformation(media::VIDEO_ROTATION_90);
+
+  MockMediaPlayer()->SetCurrentFrame(frame);
+
+  auto image = video()->CreateStaticBitmapImage(std::nullopt, false,
+                                                kDoNotRespectImageOrientation);
+
+  ASSERT_TRUE(image);
+  EXPECT_EQ(image->Size(), gfx::Size(720, 1280));
+}
+
+TEST_P(HTMLVideoElementTest, CreateStaticBitmapImage_Rotated_SoftFlip) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+
+  gfx::Size coded_size(1280, 720);
+  gfx::Rect visible_rect(coded_size);
+  gfx::Size natural_size = coded_size;
+
+  auto frame = media::VideoFrame::CreateZeroInitializedFrame(
+      media::PIXEL_FORMAT_I420, coded_size, visible_rect, natural_size,
+      base::TimeDelta());
+
+  frame->metadata().transformation =
+      media::VideoTransformation(media::VIDEO_ROTATION_90);
+
+  MockMediaPlayer()->SetCurrentFrame(frame);
+
+  auto image = video()->CreateStaticBitmapImage(std::nullopt, false,
+                                                kRespectImageOrientation);
+
+  ASSERT_TRUE(image);
+  EXPECT_EQ(image->Size(kRespectImageOrientation), gfx::Size(720, 1280));
+  EXPECT_EQ(image->PreferredDisplaySize(), gfx::Size(720, 1280));
+  EXPECT_EQ(image->SizeAsFloat(kRespectImageOrientation),
+            gfx::SizeF(720, 1280));
+  EXPECT_EQ(image->SizeAsFloat(kDoNotRespectImageOrientation),
+            gfx::SizeF(1280, 720));
+  EXPECT_EQ(image->Orientation(), ImageOrientationEnum::kOriginRightTop);
+}
+
+TEST_P(HTMLVideoElementTest, CreateStaticBitmapImage_Rotated_WYSIWYG) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+
+  gfx::Size coded_size(1280, 720);
+  gfx::Rect visible_rect(coded_size);
+  gfx::Size natural_size = coded_size;
+
+  auto frame = media::VideoFrame::CreateZeroInitializedFrame(
+      media::PIXEL_FORMAT_I420, coded_size, visible_rect, natural_size,
+      base::TimeDelta());
+
+  frame->metadata().transformation =
+      media::VideoTransformation(media::VIDEO_ROTATION_90);
+
+  MockMediaPlayer()->SetCurrentFrame(frame);
+
+  auto image = video()->CreateStaticBitmapImage(gfx::Size(270, 480), false,
+                                                kDoNotRespectImageOrientation);
+
+  ASSERT_TRUE(image);
+  EXPECT_EQ(image->Size(), gfx::Size(270, 480));
+}
+
+TEST_P(HTMLVideoElementTest, CanvasSubtreeChangeTriggersEvents) {
+  ScopedCanvasDrawElementForTest forced_canvas_draw_element_feature(true);
+
+  EXPECT_CALL((*MockMediaPlayer()), RequestVideoFrameCallback()).Times(0);
+
+  SetBodyInnerHTML(R"HTML(
+    <canvas id='canvas' layoutsubtree>
+    </canvas>
+    <video id='video_elmt' src='http://example.com/foo.mp4'></video>
+    )HTML");
+
+  test::RunPendingTasks();
+  UpdateAllLifecyclePhasesForTest();
+
+  HTMLVideoElement* video =
+      DynamicTo<HTMLVideoElement>(GetElementById("video_elmt"));
+
+  EXPECT_TRUE(video->GetWebMediaPlayer());
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+
+  EXPECT_CALL((*MockMediaPlayer()), RequestVideoFrameCallback()).Times(1);
+  GetElementById("canvas")->appendChild(video);
+  UpdateAllLifecyclePhasesForTest();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+
+  // Removing from canvas should not trigger another frame callback request.
+  EXPECT_CALL(*MockMediaPlayer(), RequestVideoFrameCallback()).Times(0);
+  video->remove();
+  UpdateAllLifecyclePhasesForTest();
+  testing::Mock::VerifyAndClearExpectations(MockMediaPlayer());
+}
+
+TEST_P(HTMLVideoElementTest,
+       ImmersiveVideoPlaybackRequiresFirstFrameAndFullscreen) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+
+  // Enable immersive video playback setting.
+  GetDocument().GetSettings()->SetImmersiveVideoPlaybackEnabled(true);
+
+  // Set up the stub PictureInPictureController.
+  auto* pip_controller =
+      MakeGarbageCollected<StubPictureInPictureController>(GetDocument());
+  Supplement<Document>::ProvideTo(GetDocument(), pip_controller);
+
+  // Scenario 1: Transition to effectively fullscreen while first frame has NOT
+  // arrived.
+  video()->SetIsEffectivelyFullscreen(
+      WebFullscreenVideoStatus::kFullscreenAndPictureInPictureEnabled);
+  EXPECT_FALSE(pip_controller->enter_immersive_called());
+
+  // First frame arrives -> should trigger immersive PiP.
+  video()->OnFirstFrame(base::TimeTicks::Now(), 0);
+  EXPECT_TRUE(pip_controller->enter_immersive_called());
+
+  // Reset the stub.
+  pip_controller->reset_enter_immersive_called();
+
+  // Clearing the player resets first frame received.
+  ClearMediaPlayer();
+
+  // Scenario 2: First frame arrives while NOT effectively fullscreen.
+  video()->SetIsEffectivelyFullscreen(
+      WebFullscreenVideoStatus::kNotEffectivelyFullscreen);
+  video()->OnFirstFrame(base::TimeTicks::Now(), 0);
+  EXPECT_FALSE(pip_controller->enter_immersive_called());
+
+  // Transition to effectively fullscreen -> should trigger immersive PiP.
+  video()->SetIsEffectivelyFullscreen(
+      WebFullscreenVideoStatus::kFullscreenAndPictureInPictureEnabled);
+  EXPECT_TRUE(pip_controller->enter_immersive_called());
+}
+
+TEST_P(HTMLVideoElementTest, AdVideoHDRUseCounter) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+
+  EXPECT_CALL(*MockMediaPlayer(), IsHDR()).WillRepeatedly(Return(true));
+
+  video()->SetIsAdRelated(NoProvenance{});
+
+  EXPECT_FALSE(GetDocument().IsUseCounted(WebFeature::kAdVideoHDR));
+
+  video()->OnFirstFrame(base::TimeTicks::Now(), 0);
+
+  EXPECT_TRUE(GetDocument().IsUseCounted(WebFeature::kAdVideoHDR));
+}
+
+TEST_P(HTMLVideoElementTest, AdVideoHDRUseCounter_NonHDR) {
+  video()->SetSrc(AtomicString("http://example.com/foo.mp4"));
+  test::RunPendingTasks();
+
+  EXPECT_CALL(*MockMediaPlayer(), IsHDR()).WillRepeatedly(Return(false));
+
+  video()->SetIsAdRelated(NoProvenance{});
+
+  EXPECT_FALSE(GetDocument().IsUseCounted(WebFeature::kAdVideoHDR));
+
+  video()->OnFirstFrame(base::TimeTicks::Now(), 0);
+
+  EXPECT_FALSE(GetDocument().IsUseCounted(WebFeature::kAdVideoHDR));
 }
 
 }  // namespace blink

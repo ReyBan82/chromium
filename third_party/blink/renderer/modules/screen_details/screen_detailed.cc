@@ -4,6 +4,8 @@
 
 #include "third_party/blink/renderer/modules/screen_details/screen_detailed.h"
 
+#include <cmath>
+
 #include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -17,20 +19,14 @@
 
 namespace blink {
 
-ScreenDetailed::ScreenDetailed(LocalDOMWindow* window,
-                               int64_t display_id,
-                               bool label_is_internal,
-                               uint32_t label_idx)
-    : Screen(window, display_id, /*use_size_override=*/false),
-      label_idx_(label_idx),
-      label_is_internal_(label_is_internal) {}
+ScreenDetailed::ScreenDetailed(LocalDOMWindow* window, int64_t display_id)
+    : Screen(window, display_id) {}
 
 // static
 bool ScreenDetailed::AreWebExposedScreenDetailedPropertiesEqual(
     const display::ScreenInfo& prev,
     const display::ScreenInfo& current) {
-  if (!Screen::AreWebExposedScreenPropertiesEqual(
-          prev, current, /*use_size_override=*/false)) {
+  if (!Screen::AreWebExposedScreenPropertiesEqual(prev, current)) {
     return false;
   }
 
@@ -98,6 +94,13 @@ bool ScreenDetailed::AreWebExposedScreenDetailedPropertiesEqual(
   return true;
 }
 
+// static
+bool ScreenDetailed::AreHdrHeadroomEqual(const display::ScreenInfo& prev,
+                                         const display::ScreenInfo& current) {
+  return prev.display_color_spaces.GetHDRMaxLuminanceRelative() ==
+         current.display_color_spaces.GetHDRMaxLuminanceRelative();
+}
+
 int ScreenDetailed::left() const {
   if (!DomWindow())
     return 0;
@@ -131,7 +134,13 @@ float ScreenDetailed::devicePixelRatio() const {
 String ScreenDetailed::label() const {
   if (!DomWindow())
     return String();
-  return String::FromUTF8(GetScreenInfo().label);
+  return String::FromUtf8(GetScreenInfo().label);
+}
+
+float ScreenDetailed::hdrHeadroom() const {
+  return std::log2(std::max(
+      GetScreenInfo().display_color_spaces.GetHDRMaxLuminanceRelative(),
+      1.f));
 }
 
 float ScreenDetailed::highDynamicRangeHeadroom() const {

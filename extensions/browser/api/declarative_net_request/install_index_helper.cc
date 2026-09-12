@@ -5,39 +5,72 @@
 #include "extensions/browser/api/declarative_net_request/install_index_helper.h"
 
 #include <iterator>
+#include <numeric>
 #include <utility>
 
-#include "base/barrier_closure.h"
+#include "base/check.h"
+#include "base/functional/bind.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "base/timer/elapsed_timer.h"
+#include "base/values.h"
 #include "extensions/browser/api/declarative_net_request/constants.h"
 #include "extensions/browser/api/declarative_net_request/utils.h"
+#include "extensions/browser/ruleset_parse_result.h"
 #include "extensions/common/api/declarative_net_request.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest.h"
 
-namespace extensions {
-namespace declarative_net_request {
+namespace extensions::declarative_net_request {
 
 namespace {
 namespace dnr_api = api::declarative_net_request;
 
+// A boolean that indicates if a ruleset should be ignored.
+constexpr char kDNRIgnoreRulesetKey[] = "ignore_ruleset";
+
+// Key corresponding to which we store a ruleset's checksum for the Declarative
+// Net Request API.
+constexpr char kDNRChecksumKey[] = "checksum";
+
+// Converts a single ruleset result into a Dict.
+base::DictValue ConvertRulesetToDict(bool ignored,
+                                     std::optional<int> checksum) {
+  base::DictValue result;
+  result.Set(kDNRIgnoreRulesetKey, ignored);
+  if (checksum) {
+    result.Set(kDNRChecksumKey, *checksum);
+  }
+
+  return result;
+}
+
+void SetRulesetDict(base::DictValue& dict,
+                    RulesetID id,
+                    base::DictValue ruleset) {
+  std::string key = base::NumberToString(id.value());
+  DCHECK(!dict.Find(key));
+  dict.Set(key, std::move(ruleset));
+}
+
 // Combines indexing results from multiple FileBackedRulesetSources into a
 // single InstallIndexHelper::Result.
-InstallIndexHelper::Result CombineResults(
+RulesetParseResult CombineResults(
     std::vector<std::pair<const FileBackedRulesetSource*,
                           IndexAndPersistJSONRulesetResult>> results,
     bool log_histograms) {
   using IndexStatus = IndexAndPersistJSONRulesetResult::Status;
 
-  InstallIndexHelper::Result total_result;
-  total_result.ruleset_install_prefs.reserve(results.size());
+  RulesetParseResult total_result;
   bool any_ruleset_indexed_successfully = false;
   size_t enabled_rules_count = 0;
   size_t enabled_regex_rules_count = 0;
   base::TimeDelta total_index_and_persist_time;
 
-  // TODO(crbug.com/754526): Limit the number of install warnings across all
+  // TODO(crbug.com/40534665): Limit the number of install warnings across all
   // rulesets.
 
   // Note |results| may be empty.
@@ -64,9 +97,9 @@ InstallIndexHelper::Result CombineResults(
       // If the ruleset was ignored and not indexed, there should be install
       // warnings associated.
       DCHECK(!index_result.warnings.empty());
-      total_result.ruleset_install_prefs.emplace_back(
-          source->id(), absl::nullopt /* ruleset_checksum */,
-          true /* ignored */);
+      SetRulesetDict(total_result.ruleset_install_prefs, source->id(),
+                     ConvertRulesetToDict(/*ignored=*/true,
+                                          /*checksum=*/std::nullopt));
       continue;
     }
 
@@ -75,9 +108,10 @@ InstallIndexHelper::Result CombineResults(
     if (index_result.status == IndexStatus::kSuccess) {
       any_ruleset_indexed_successfully = true;
 
-      total_result.ruleset_install_prefs.emplace_back(
-          source->id(), std::move(index_result.ruleset_checksum),
-          false /* ignored */);
+      SetRulesetDict(
+          total_result.ruleset_install_prefs, source->id(),
+          ConvertRulesetToDict(/*ignored=*/false,
+                               std::move(index_result.ruleset_checksum)));
 
       total_index_and_persist_time += index_result.index_and_persist_time;
 
@@ -112,11 +146,20 @@ InstallIndexHelper::Result CombineResults(
 
 }  // namespace
 
-InstallIndexHelper::Result::Result() = default;
-InstallIndexHelper::Result::~Result() = default;
-InstallIndexHelper::Result::Result(Result&&) = default;
-InstallIndexHelper::Result& InstallIndexHelper::Result::operator=(Result&&) =
-    default;
+InstallIndexHelper::InstallIndexHelper(
+    std::vector<FileBackedRulesetSource> sources,
+    uint8_t parse_flags,
+    bool log_histograms,
+    IndexCallback callback)
+    : sources_(std::move(sources)),
+      parse_flags_(parse_flags),
+      log_histograms_(log_histograms),
+      callback_(std::move(callback)) {
+  DCHECK(callback_);
+  results_.reserve(sources_.size());
+}
+
+InstallIndexHelper::~InstallIndexHelper() = default;
 
 // static
 void InstallIndexHelper::IndexStaticRulesets(
@@ -124,79 +167,84 @@ void InstallIndexHelper::IndexStaticRulesets(
     FileBackedRulesetSource::RulesetFilter ruleset_filter,
     uint8_t parse_flags,
     IndexCallback callback) {
-  // Note we use ref-counting instead of manual memory management since there
-  // are some subtle cases:
-  //  - Zero rulesets to index.
-  //  - All individual callbacks return synchronously.
-  // In these cases there's a potential for a use-after-free with manual memory
-  // management.
-  auto install_index_helper = base::WrapRefCounted(new InstallIndexHelper(
-      FileBackedRulesetSource::CreateStatic(extension, ruleset_filter),
-      std::move(callback)));
-  install_index_helper->Start(parse_flags);
+  std::vector<FileBackedRulesetSource> sources =
+      FileBackedRulesetSource::CreateStatic(extension, ruleset_filter);
+
+  // Don't log histograms for unpacked extensions so that the histograms reflect
+  // real world usage.
+  const bool log_histograms =
+      !Manifest::IsUnpackedLocation(extension.location());
+
+  auto helper = base::WrapRefCounted(new InstallIndexHelper(
+      std::move(sources), parse_flags, log_histograms, std::move(callback)));
+  helper->Start();
 }
 
 // static
-InstallIndexHelper::Result InstallIndexHelper::IndexStaticRulesetsUnsafe(
-    const Extension& extension,
-    FileBackedRulesetSource::RulesetFilter ruleset_filter,
-    uint8_t parse_flags) {
+bool InstallIndexHelper::IndexRuleset(const FileBackedRulesetSource& source,
+                                      uint8_t parse_flags,
+                                      IndexResults& results) {
+  IndexAndPersistJSONRulesetResult result =
+      source.IndexAndPersistJSONRuleset(parse_flags);
+
+  bool is_error =
+      (result.status == IndexAndPersistJSONRulesetResult::Status::kError);
+
+  results.emplace_back(&source, std::move(result));
+  return !is_error;
+}
+
+void InstallIndexHelper::Start(size_t start_index) {
+  base::ElapsedTimer timer;
+
+  for (size_t i = start_index; i < sources_.size(); ++i) {
+    if (!IndexRuleset(sources_[i], parse_flags_, results_)) {
+      OnIndexingFinished();
+      return;
+    }
+
+    if (i + 1 < sources_.size() && timer.Elapsed() >= kMaxTimeSlice) {
+      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE, base::BindOnce(&InstallIndexHelper::Start, this, i + 1));
+      return;
+    }
+  }
+
+  OnIndexingFinished();
+}
+
+void InstallIndexHelper::OnIndexingFinished() {
+  DCHECK(callback_);
+  RulesetParseResult total_result =
+      CombineResults(std::move(results_), log_histograms_);
+  std::move(callback_).Run(std::move(total_result));
+}
+
+// static
+RulesetParseResult InstallIndexHelper::IndexAndPersistRulesOnInstall(
+    const Extension& extension) {
+  auto ruleset_filter = declarative_net_request::FileBackedRulesetSource::
+      RulesetFilter::kIncludeAll;
+  auto parse_flags =
+      declarative_net_request::RulesetSource::kRaiseErrorOnInvalidRules |
+      declarative_net_request::RulesetSource::kRaiseWarningOnLargeRegexRules;
+
   std::vector<FileBackedRulesetSource> sources =
       FileBackedRulesetSource::CreateStatic(extension, ruleset_filter);
 
   IndexResults results;
   results.reserve(sources.size());
-  for (const FileBackedRulesetSource& source : sources) {
-    results.emplace_back(&source,
-                         source.IndexAndPersistJSONRulesetUnsafe(parse_flags));
+
+  for (const auto& source : sources) {
+    if (!IndexRuleset(source, parse_flags, results)) {
+      break;
+    }
   }
 
-  // Don't log histograms for unpacked extensions so that the histograms reflect
-  // real world usage.
-  DCHECK(Manifest::IsUnpackedLocation(extension.location()));
-  const bool log_histograms = false;
+  const bool log_histograms =
+      !Manifest::IsUnpackedLocation(extension.location());
+
   return CombineResults(std::move(results), log_histograms);
 }
 
-InstallIndexHelper::InstallIndexHelper(
-    std::vector<FileBackedRulesetSource> sources,
-    IndexCallback callback)
-    : sources_(std::move(sources)), callback_(std::move(callback)) {}
-
-InstallIndexHelper::~InstallIndexHelper() = default;
-
-void InstallIndexHelper::Start(uint8_t parse_flags) {
-  // |all_done_closure| will be invoked once |barrier_closure| is run
-  // |sources_.size()| times.
-  base::OnceClosure all_done_closure =
-      base::BindOnce(&InstallIndexHelper::OnAllRulesetsIndexed, this);
-  base::RepeatingClosure barrier_closure =
-      base::BarrierClosure(sources_.size(), std::move(all_done_closure));
-
-  for (size_t i = 0; i < sources_.size(); ++i) {
-    // Since |sources_| is const, |sources_[i]| is guaranteed to remain valid.
-    auto callback = base::BindOnce(&InstallIndexHelper::OnRulesetIndexed, this,
-                                   barrier_closure, i);
-    sources_[i].IndexAndPersistJSONRuleset(&decoder_, parse_flags,
-                                           std::move(callback));
-  }
-}
-
-void InstallIndexHelper::OnAllRulesetsIndexed() {
-  DCHECK_EQ(sources_.size(), results_.size());
-
-  bool log_histograms = !sources_.empty();
-  std::move(callback_).Run(CombineResults(std::move(results_), log_histograms));
-}
-
-// Callback invoked when indexing of a single ruleset is completed.
-void InstallIndexHelper::OnRulesetIndexed(
-    base::OnceClosure ruleset_done_closure,
-    size_t source_index,
-    IndexAndPersistJSONRulesetResult result) {
-  results_.emplace_back(&sources_[source_index], std::move(result));
-  std::move(ruleset_done_closure).Run();
-}
-
-}  // namespace declarative_net_request
-}  // namespace extensions
+}  // namespace extensions::declarative_net_request

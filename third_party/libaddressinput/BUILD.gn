@@ -22,16 +22,16 @@ config("internal_config") {
   include_dirs = [ target_gen_dir ]
 }
 
-grit("strings") {
+grit_strings("strings") {
   source = "chromium/address_input_strings.grd"
-
+  inputs = [ "chromium/address_input_strings.grdp" ] + process_file_template(
+               xtb_locales,
+               [ "chromium/resources/address_input_strings_{{source_name_part}}.xtb" ])
   outputs = [
     "messages.h",
     "en_messages.cc",
   ]
-  foreach(locale, all_chrome_locales) {
-    outputs += [ "address_input_strings_$locale.pak" ]
-  }
+  output_prefix = "address_input_strings_"
 
   configs = [ ":internal_config" ]
 }
@@ -60,8 +60,8 @@ static_library("util") {
     "src/cpp/src/localization.cc",
     "src/cpp/src/lookup_key.cc",
     "src/cpp/src/lookup_key.h",
-    "src/cpp/src/region_data_constants.cc",
     "src/cpp/src/region_data_constants.h",
+    "src/cpp/src/region_metadata_constants.cc",
     "src/cpp/src/rule.cc",
     "src/cpp/src/rule.h",
     "src/cpp/src/util/cctype_tolower_equal.cc",

@@ -7,6 +7,15 @@
 // well as feature.h, simple_feature.h, and feature_provider.h.
 
 {
+  "about_page": {
+    "channel": "stable",
+    "extension_types": ["shared_module"]
+  },
+  "action": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "min_manifest_version": 3
+  },
   "action_handlers": {
     "channel": "stable",
     "extension_types": ["platform_app"],
@@ -25,13 +34,6 @@
     "channel": "stable",
     "extension_types": ["platform_app"],
     "allowlist": [
-      // Keep this list in sync with extensions_misc::kHangoutsExtensionIds but
-      // omit the Packaged App ids.
-      "53041A2FA309EECED01FFC751E7399186E860B2C",  // Hangouts Production.
-      "312745D9BF916161191143F6490085EEA0434997",  // Hangouts Debug.
-      "E7E2461CE072DF036CF9592740196159E2D7C089",  // Hangouts Alpha.
-      "A74A4D44C7CFCD8844830E6140C8D763E12DD8F3",  // Hangouts Beta.
-
       "5107DE9024C329EEA9C9A72D94C16723790C6422" // Apps Debugger
     ]
   },
@@ -39,14 +41,25 @@
     "channel": "stable",
     "extension_types": ["platform_app"]
   },
-  "automation": [{
-    "channel": "dev",
-    "extension_types": ["extension", "legacy_packaged_app", "platform_app"]
-  }, {
+  "author": {
     "channel": "stable",
-    "extension_types": ["extension", "legacy_packaged_app"],
-    "allowlist": [ "2FCBCE08B34CCA1728A85F1EFBD9A34DD2558B2E" ]
-  }],
+    "extension_types": "all"
+  },
+  "automation": {
+    // This is a private API which, for historical reasons, does not include
+    // 'private' in the name. It should not be exposed outside of first-party
+    // allow-listed very trusted extensions and component extensions.
+    // This API has no protection in the JS wrappers around untrusted scripts
+    // putting getters/setters to intercept and manipulate native bindings.
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app", "platform_app"],
+    "allowlist": [
+      "2FCBCE08B34CCA1728A85F1EFBD9A34DD2558B2E",
+      "05D1DBD6E8B9C4690FFA7D50E6F60C5290DC662A", // http://crbug.com/941107
+      "0D209B5E4401BB8E7873B5AB5B1346A1CB067015", // http://crbug.com/654525
+      "93CFDA3681E923AD7AB291CEDD98248396B5496C"  // http://crbug.com/803543
+    ]
+  },
   "background": {
     "channel": "stable",
     "extension_types": [
@@ -56,11 +69,26 @@
   "background.persistent": {
     "channel": "stable",
     "extension_types": [
-      "extension", "legacy_packaged_app", "login_screen_extension" ]
+      "extension", "legacy_packaged_app", "login_screen_extension" ],
+    "max_manifest_version": 2
+  },
+  "background.scripts": {
+    "channel": "stable",
+    "max_manifest_version": 2
+  },
+  "background.page": {
+    "channel": "stable",
+    "max_manifest_version": 2
   },
   "background.service_worker": {
     "channel": "stable",
-    "extension_types": ["extension", "chromeos_system_extension"]
+    "extension_types": ["extension", "chromeos_system_extension", "login_screen_extension"]
+  },
+  "background.async_listener_registration": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "min_manifest_version": 3,
+    "feature_flag": "ExtensionAsyncListenerRegistration"
   },
   "bluetooth": [{
     // Note: The "bluetooth" manifest permission is used by the
@@ -68,23 +96,7 @@
     // APIs.
     "channel": "stable",
     "extension_types": ["platform_app"],
-    "platforms": ["chromeos", "win", "mac"]
-  }, {
-    "channel": "stable",
-    "extension_types": ["platform_app"],
-    "platforms": ["linux"],
-    "allowlist": [
-      "9E287A8257E58EFB13E89C86A4B75A3AC4B058D8",  // unit_tests browser_tests
-      "1C93BD3CF875F4A73C0B2A163BB8FBDA8B8B3D80",  // http://crbug.com/396117
-      "A3BC37E2148AC4E99BE4B16AF9D42DD1E592BBBE",  // http://crbug.com/396117
-      "E703483CEF33DEC18B4B6DD84B5C776FB9182BDB",  // http://crbug.com/396117
-      "307E96539209F95A1A8740C713E6998A73657D96",  // http://crbug.com/396117
-      "4F25792AF1AA7483936DE29C07806F203C7170A0",  // http://crbug.com/407693
-      "BD8781D757D830FC2E85470A1B6E8A718B7EE0D9",  // http://crbug.com/407693
-      "4AC2B6C63C6480D150DFDA13E4A5956EB1D0DDBB",  // http://crbug.com/407693
-      "81986D4F846CEDDDB962643FA501D1780DD441BB",  // http://crbug.com/407693
-      "A9A9FC0228ADF541F0334F22BEFB8F9C245B21D7"   // http://crbug.com/839189
-    ]
+    "platforms": ["chromeos"]
   }, {
     "channel": "stable",
     "extension_types": ["extension"],
@@ -93,6 +105,29 @@
       "75C7F4B720314B6CB1B5817CD86089DB95CD2461"  // http://crbug.com/899052
     ]
   }],
+  "browser_action": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "max_manifest_version": 2
+  },
+  "chrome_url_overrides": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"]
+  },
+  "chrome_url_overrides.activationmessage": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"],
+    "platforms": ["chromeos"]
+  },
+  "chrome_url_overrides.keyboard": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"],
+    "platforms": ["chromeos"]
+  },
+  "commands": {
+    "channel": "stable",
+    "extension_types": ["extension", "platform_app"]
+  },
   "content_capabilities": [{
     "channel": "stable",
     "extension_types": ["extension"],
@@ -108,6 +143,25 @@
     "channel": "canary",
     "extension_types": ["extension"]
   }],
+  "content_scripts": [
+    {
+      "channel": "stable",
+      "extension_types": ["extension", "legacy_packaged_app"]
+    },
+    {
+      // The URLs that can be matched with content scripts added by login screen
+      // extensions are restricted to the Imprivata IdP.
+      "channel": "stable",
+      "dependencies": ["behavior:imprivata_login_screen_extension"],
+      "extension_types": ["login_screen_extension"]
+    }
+  ],
+  "converted_from_user_script": {
+    "channel": "stable",
+    "extension_types": [
+      "extension", "legacy_packaged_app", "hosted_app"
+    ]
+  },
   "content_security_policy": {
     "channel": "stable",
     // Platform apps have a restricted content security policy that cannot be
@@ -141,11 +195,69 @@
     "channel": "stable",
     "extension_types": "all"
   },
+  "devtools_page": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"]
+  },
   "differential_fingerprint": {
     "channel": "stable",
     "extension_types": "all"
   },
-  "externally_connectable": {
+  "display_in_launcher": [
+    {
+      "channel": "stable",
+      "extension_types": ["legacy_packaged_app", "platform_app", "hosted_app"],
+      "location": "component"
+    },
+    {
+      "channel": "stable",
+      "extension_types": ["legacy_packaged_app", "platform_app"],
+      "allowlist": [
+        "64291898C201DAF15B090EC4B9EC270BEB6BE6FF",
+        "07BD6A765FFC289FF755D7CAB2893A40EC337FEC",  // http://crbug.com/41154924
+        "896B85CC7E913E11C34892C1425A093C0701D386",  // http://crbug.com/41154924
+        "11A01C82EF355E674E4F9728A801F5C3CB40D83F",  // http://crbug.com/41154924
+        "F410C88469990EE7947450311D24B8AF2ADB2595"   // http://crbug.com/41154924
+      ]
+    }
+  ],
+  "display_in_new_tab_page": [
+    {
+      "channel": "stable",
+      "extension_types": ["legacy_packaged_app", "platform_app", "hosted_app"],
+      "location": "component"
+    },
+    {
+      "channel": "stable",
+      "extension_types": ["legacy_packaged_app", "platform_app"],
+      "allowlist": [
+        "64291898C201DAF15B090EC4B9EC270BEB6BE6FF",
+        "07BD6A765FFC289FF755D7CAB2893A40EC337FEC",  // http://crbug.com/41154924
+        "896B85CC7E913E11C34892C1425A093C0701D386",  // http://crbug.com/41154924
+        "11A01C82EF355E674E4F9728A801F5C3CB40D83F",  // http://crbug.com/41154924
+        "F410C88469990EE7947450311D24B8AF2ADB2595"   // http://crbug.com/41154924
+      ]
+    }
+  ],
+  "event_rules": {
+    "channel": "stable",
+    // "event_rules" does not grant any capabilities, it's just
+    // an optimisation for any API which uses events, so it's safe
+    // to expose to all extension types.
+    "extension_types": [
+      "extension",
+      "legacy_packaged_app",
+      "platform_app",
+      "hosted_app",
+      "shared_module",
+      "theme"
+    ]
+  },
+  "export": {
+    "channel": "stable",
+    "extension_types": ["shared_module"]
+  },
+  "externally_connectable": [{
     "channel": "stable",
     "extension_types": [
       "extension",
@@ -154,12 +266,23 @@
       "platform_app",
       "chromeos_system_extension"
     ]
-  },
+  }, {
+    "channel": "stable",
+    "extension_types": ["login_screen_extension"],
+    "location": "policy",
+    "platforms": ["chromeos"],
+    "allowlist": [
+      "93B7178E8C275515C38D4F43D9DF4648F0EA9B03", // Identity Card Connector
+      // https://crbug.com/383855830
+      "1FC31C9D42DF1B51EA7648F73DF26400322999A8"  // IDmelon Accesskey
+    ]
+  }],
   "file_handlers": [
     {
       "channel": "stable",
       "extension_types": ["platform_app"]
-    }, {
+    },
+    {
       "channel": "stable",
       "extension_types": [ "extension"],
       "allowlist": [
@@ -169,19 +292,49 @@
       ]
     },
     {
-      "channel": "canary",
+      "channel": "stable",
       "extension_types": ["extension"],
-      "min_manifest_version": 3
+      "min_manifest_version": 3,
+      "platforms": ["chromeos"]
     }
   ],
-  "host_permissions": {
+  "protocol_handlers": {
+    "channel": "dev",
+    "extension_types": ["extension"],
+    "min_manifest_version": 3
+  },
+  "homepage_url": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"]
+  },
+  "host_permissions": [{
     "channel": "stable",
     "extension_types": ["extension"],
     "min_manifest_version": 3
   },
+  {
+    "channel": "stable",
+    "dependencies": ["behavior:imprivata_login_screen_extension"],
+    "extension_types": ["login_screen_extension"],
+    "min_manifest_version": 3
+  }],
   "icons": {
     "channel": "stable",
     "extension_types": "all"
+  },
+  "input_components": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"]
+  },
+  "import": {
+    "channel": "stable",
+    "extension_types": "all"
+  },
+  "icon_variants": {
+    "channel": "canary",
+    "extension_types": ["extension"],
+    "min_manifest_version": 3,
+    "feature_flag": "ExtensionIconVariants"
   },
   "incognito": [
     {
@@ -240,6 +393,11 @@
       "platform_app"
     ]
   },
+  "message_serialization": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "min_manifest_version": 3
+  },
   "manifest_version": {
     "channel": "stable",
     "extension_types": "all"
@@ -256,7 +414,7 @@
       "CBCC42ABED43A4B58FE3810E62AFFA010EB0349F"   // PDF
     ]
   },
-  "mime_types_handler": {
+  "mime_types_handler": [{
     "channel": "stable",
     "extension_types": [ "extension", "legacy_packaged_app", "platform_app" ],
     "allowlist": [
@@ -266,14 +424,14 @@
       "3727DD3E564B6055387425027AD74C58784ACC15",  // QuickOffice Editor
       "CBCC42ABED43A4B58FE3810E62AFFA010EB0349F"   // PDF
     ]
-  },
-  "nacl_modules": {
+  }, {
+    "channel": "dev",
+    "extension_types": ["extension"]
+  }, {
     "channel": "stable",
-    "extension_types": [
-      "extension", "legacy_packaged_app", "hosted_app", "platform_app"
-    ],
-    "max_manifest_version": 2
-  },
+    "extension_types": ["extension"],
+    "feature_flag": "ApiMimeHandler"
+  }],
   "name": {
     "channel": "stable",
     "extension_types": "all"
@@ -319,9 +477,33 @@
     "extension_types": ["extension"],
     "min_manifest_version": 3
   },
+  "optional_permissions": {
+    "channel": "stable",
+    "extension_types": [
+      "extension",
+      "legacy_packaged_app",
+      "hosted_app",
+      "platform_app",
+      "chromeos_system_extension"
+    ]
+  },
+  "options_page": {
+    "channel": "stable",
+    "extension_types": [
+      "extension",
+      "legacy_packaged_app",
+      "hosted_app",
+      "chromeos_system_extension"
+    ]
+  },
   "options_ui": {
     "channel": "stable",
     "extension_types": ["extension", "legacy_packaged_app"]
+  },
+  "page_action": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "max_manifest_version": 2
   },
   "permissions": {
     "channel": "stable",
@@ -334,19 +516,25 @@
       "chromeos_system_extension"
     ]
   },
-  "replacement_android_app": {
-    "channel": "trunk",
-    "extension_types": ["platform_app"]
-  },
   "replacement_web_app": {
     "channel": "stable",
     "extension_types": ["extension", "platform_app"]
+  },
+  "requirements": {
+    "channel": "stable",
+    "extension_types": [
+      "extension", "legacy_packaged_app", "hosted_app", "platform_app"
+    ]
   },
   "sandbox": {
     "channel": "stable",
     "extension_types": [
       "extension", "platform_app", "legacy_packaged_app"
     ]
+  },
+  "short_name": {
+    "channel": "stable",
+    "extension_types": "all"
   },
   "sockets": [
     {
@@ -364,10 +552,23 @@
     {
       "channel": "dev",
       "extension_types": ["extension"],
-      "platforms": ["chromeos", "lacros"],
+      "platforms": ["chromeos"],
       "session_types": ["kiosk"]
     }
   ],
+  "trial_tokens": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "min_manifest_version": 3
+  },
+  "tts_engine": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"]
+  },
+  "update_url": {
+    "channel": "stable",
+    "extension_types": "all"
+  },
   "usb_printers": {
     "channel": "stable",
     "extension_types": ["platform_app"]
@@ -396,6 +597,15 @@
       "channel": "stable",
       "dependencies": ["behavior:imprivata_login_screen_extension"],
       "extension_types": ["login_screen_extension"]
+    }, {
+      "channel": "stable",
+      "extension_types": ["login_screen_extension"],
+      "location": "policy",
+      "platforms": ["chromeos"],
+      "allowlist": [
+        // https://crbug.com/383855830
+        "1FC31C9D42DF1B51EA7648F73DF26400322999A8"  // IDmelon Accesskey
+      ]
     }
   ],
   "webview": {

@@ -4,6 +4,8 @@
 
 package org.chromium.chrome.browser.ui.autofill;
 
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -17,12 +19,12 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.base.test.util.JniMocker;
+import org.chromium.base.test.util.Features.EnableFeatures;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.ui.autofill.data.AuthenticatorOption;
 import org.chromium.ui.modaldialog.ModalDialogManager.ModalDialogType;
 import org.chromium.ui.test.util.modaldialog.FakeModalDialogManager;
@@ -30,10 +32,9 @@ import org.chromium.ui.test.util.modaldialog.FakeModalDialogManager;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Unit tests for {@link AuthenticatorSelectionDialogBridge}.
- */
+/** Unit tests for {@link AuthenticatorSelectionDialogBridge}. */
 @RunWith(BaseRobolectricTestRunner.class)
+@EnableFeatures({ChromeFeatureList.RESET_NATIVE_POINTER_IN_CREDIT_CARD_AUTH_DIALOG})
 public class AuthenticatorSelectionDialogBridgeTest {
     // The icon set on the AuthenticatorOption is not important and any icon would do.
     private static final AuthenticatorOption OPTION_1 =
@@ -56,40 +57,67 @@ public class AuthenticatorSelectionDialogBridgeTest {
 
     private static final long NATIVE_AUTHENTICATOR_SELECTION_DIALOG_VIEW = 100L;
 
-    private List<AuthenticatorOption> mOptions = new ArrayList<>();
+    private final List<AuthenticatorOption> mOptions = new ArrayList<>();
 
     private FakeModalDialogManager mModalDialogManager;
     private AuthenticatorSelectionDialogBridge mAuthenticatorSelectionDialogBridge;
-    @Mock
-    private AuthenticatorSelectionDialogBridge.Natives mNativeMock;
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
-    @Rule
-    public JniMocker mMocker = new JniMocker();
+    @Mock private AuthenticatorSelectionDialogBridge.Natives mNativeMock;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         reset(mNativeMock);
         mOptions.add(OPTION_1);
         mOptions.add(OPTION_2);
         mModalDialogManager = new FakeModalDialogManager(ModalDialogType.TAB);
         mAuthenticatorSelectionDialogBridge =
-                new AuthenticatorSelectionDialogBridge(NATIVE_AUTHENTICATOR_SELECTION_DIALOG_VIEW,
-                        ApplicationProvider.getApplicationContext(), mModalDialogManager);
-        mMocker.mock(AuthenticatorSelectionDialogBridgeJni.TEST_HOOKS, mNativeMock);
+                new AuthenticatorSelectionDialogBridge(
+                        NATIVE_AUTHENTICATOR_SELECTION_DIALOG_VIEW,
+                        ApplicationProvider.getApplicationContext(),
+                        mModalDialogManager);
+        AuthenticatorSelectionDialogBridgeJni.setInstanceForTesting(mNativeMock);
         mAuthenticatorSelectionDialogBridge.show(mOptions);
     }
 
     @Test
     @SmallTest
-    public void testBasic() throws Exception {
+    public void testDismissDialog() throws Exception {
         Assert.assertNotNull(mModalDialogManager.getShownDialogModel());
 
         mAuthenticatorSelectionDialogBridge.dismiss();
         // Verify that no dialog is shown and that the callback is triggered on dismissal.
         Assert.assertNull(mModalDialogManager.getShownDialogModel());
         verify(mNativeMock, times(1)).onDismissed(NATIVE_AUTHENTICATOR_SELECTION_DIALOG_VIEW);
+    }
+
+    @Test
+    @SmallTest
+    public void testDismissTwice() throws Exception {
+        mAuthenticatorSelectionDialogBridge.dismiss();
+        mAuthenticatorSelectionDialogBridge.dismiss();
+
+        // Make sure the native side is notified only once.
+        verify(mNativeMock, times(1)).onDismissed(NATIVE_AUTHENTICATOR_SELECTION_DIALOG_VIEW);
+    }
+
+    @Test
+    @SmallTest
+    public void testOnDismissedTwice() {
+        mAuthenticatorSelectionDialogBridge.dismiss();
+        mAuthenticatorSelectionDialogBridge.onDialogDismissed();
+        mAuthenticatorSelectionDialogBridge.onDialogDismissed();
+
+        verify(mNativeMock, times(1)).onDismissed(NATIVE_AUTHENTICATOR_SELECTION_DIALOG_VIEW);
+    }
+
+    @Test
+    @SmallTest
+    public void onOptionSelectedNotCalledAfterOnDismissed() {
+        mAuthenticatorSelectionDialogBridge.onDialogDismissed();
+        mAuthenticatorSelectionDialogBridge.onOptionSelected(OPTION_1.getIdentifier());
+
+        verify(mNativeMock, times(1)).onDismissed(NATIVE_AUTHENTICATOR_SELECTION_DIALOG_VIEW);
+        verify(mNativeMock, times(0)).onOptionSelected(anyLong(), anyString());
     }
 
     @Test

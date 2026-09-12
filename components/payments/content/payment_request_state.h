@@ -23,7 +23,6 @@
 #include "components/payments/core/payments_profile_comparator.h"
 #include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/payment_app_provider.h"
-#include "content/public/browser/web_contents.h"
 #include "third_party/blink/public/mojom/payments/payment_request.mojom.h"
 #include "url/origin.h"
 
@@ -31,11 +30,11 @@ namespace autofill {
 class AddressNormalizer;
 class AutofillProfile;
 class PersonalDataManager;
-class RegionDataLoader;
 }  // namespace autofill
 
 namespace content {
 class RenderFrameHost;
+class WebContents;
 }  // namespace content
 
 namespace payments {
@@ -68,7 +67,7 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
     virtual void OnSelectedInformationChanged() = 0;
 
    protected:
-    virtual ~Observer() {}
+    virtual ~Observer() = default;
   };
 
   class Delegate {
@@ -78,7 +77,8 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
         mojom::PaymentResponsePtr response) = 0;
 
     // Called when the invoked payment app failed.
-    virtual void OnPaymentResponseError(const std::string& error_message) = 0;
+    virtual void OnPaymentResponseError(mojom::PaymentEventResponseType error,
+                                        const std::string& error_message) = 0;
 
     // Called when the shipping option has changed to |shipping_option_id|.
     virtual void OnShippingOptionIdSelected(std::string shipping_option_id) = 0;
@@ -90,7 +90,7 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
     virtual void OnPayerInfoSelected(mojom::PayerDetailPtr payer_info) = 0;
 
    protected:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
   };
 
   using StatusCallback = base::OnceCallback<void(bool)>;
@@ -123,6 +123,7 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
   base::WeakPtr<ContentPaymentRequestDelegate> GetPaymentRequestDelegate()
       const override;
   void ShowProcessingSpinner() override;
+  void ShowLoadingView() override;
   base::WeakPtr<PaymentRequestSpec> GetSpec() const override;
   void GetTwaPackageName(GetTwaPackageNameCallback callback) override;
   const GURL& GetTopOrigin() override;
@@ -135,9 +136,10 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
       const override;
   std::unique_ptr<webauthn::InternalAuthenticator> CreateInternalAuthenticator()
       const override;
-  scoped_refptr<PaymentManifestWebDataService>
-  GetPaymentManifestWebDataService() const override;
+  scoped_refptr<WebPaymentsWebDataService> GetWebPaymentsWebDataService()
+      const override;
   bool IsOffTheRecord() const override;
+  bool PrefsCanMakePayment() const override;
   void OnPaymentAppCreated(std::unique_ptr<PaymentApp> app) override;
   void OnPaymentAppCreationError(
       const std::string& error_message,
@@ -151,7 +153,9 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
   // PaymentResponseHelper::Delegate
   void OnPaymentResponseReady(
       mojom::PaymentResponsePtr payment_response) override;
-  void OnPaymentResponseError(const std::string& error_message) override;
+  void OnPaymentResponseError(mojom::PaymentEventResponseType error,
+                              const std::string& error_message) override;
+  bool WasPaymentHandlerWindowInteractedWith() const override;
 
   // PaymentRequestSpec::Observer
   void OnStartUpdating(PaymentRequestSpec::UpdateReason reason) override {}
@@ -173,9 +177,6 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
 
   // Resets pending MethodsSupportedCallback after abort.
   void OnAbort();
-
-  // Returns authenticated user email, or empty string.
-  std::string GetAuthenticatedEmail() const;
 
   void AddObserver(Observer* observer);
   void RemoveObserver(Observer* observer);
@@ -219,10 +220,12 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
 
   // Returns the appropriate Autofill Profiles for this user. The profiles
   // returned are owned by the PaymentRequestState.
-  const std::vector<autofill::AutofillProfile*>& shipping_profiles() {
+  const std::vector<raw_ptr<autofill::AutofillProfile, VectorExperimental>>&
+  shipping_profiles() {
     return shipping_profiles_;
   }
-  const std::vector<autofill::AutofillProfile*>& contact_profiles() {
+  const std::vector<raw_ptr<autofill::AutofillProfile, VectorExperimental>>&
+  contact_profiles() {
     return contact_profiles_;
   }
   const std::vector<std::unique_ptr<PaymentApp>>& available_apps() {
@@ -262,9 +265,16 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
 
   bool is_retry_called() const { return is_retry_called_; }
 
+  bool user_interaction_in_web_payment_app() const;
+
+  void set_user_interaction_in_web_payment_app(bool user_interaction);
+
+  void set_bypass_user_interaction_for_testing(bool bypass) {
+    bypass_user_interaction_for_testing_ = bypass;
+  }
+
   const std::string& GetApplicationLocale();
   autofill::PersonalDataManager* GetPersonalDataManager();
-  autofill::RegionDataLoader* GetRegionDataLoader();
 
   PaymentsProfileComparator* profile_comparator() {
     return &profile_comparator_;
@@ -366,6 +376,13 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
   // Whether retry() has been called by the merchant.
   bool is_retry_called_ = false;
 
+  // Whether the user has interacted with the web payment app.
+  bool user_interaction_in_web_payment_app_ = false;
+
+  // Whether to bypass user interaction requirement for tests.
+  // Note: This does not apply to secure payment confirmation.
+  bool bypass_user_interaction_for_testing_ = false;
+
   const std::string app_locale_;
 
   // These WeakPtrs can be null when the webpage closes or the iframe refreshes
@@ -387,24 +404,25 @@ class PaymentRequestState : public PaymentAppFactory::Delegate,
   AppCreationFailureReason get_all_payment_apps_error_reason_ =
       AppCreationFailureReason::UNKNOWN;
 
-  raw_ptr<autofill::AutofillProfile, DanglingUntriaged>
-      selected_shipping_profile_ = nullptr;
-  raw_ptr<autofill::AutofillProfile, DanglingUntriaged>
-      selected_shipping_option_error_profile_ = nullptr;
-  raw_ptr<autofill::AutofillProfile, DanglingUntriaged>
-      selected_contact_profile_ = nullptr;
-  raw_ptr<autofill::AutofillProfile, DanglingUntriaged>
-      invalid_shipping_profile_ = nullptr;
-  raw_ptr<autofill::AutofillProfile, DanglingUntriaged>
-      invalid_contact_profile_ = nullptr;
   base::WeakPtr<PaymentApp> selected_app_;
 
   // Profiles may change due to (e.g.) sync events, so profiles are cached after
   // loading and owned here. They are populated once only, and ordered by
   // frecency.
   std::vector<std::unique_ptr<autofill::AutofillProfile>> profile_cache_;
-  std::vector<autofill::AutofillProfile*> shipping_profiles_;
-  std::vector<autofill::AutofillProfile*> contact_profiles_;
+  std::vector<raw_ptr<autofill::AutofillProfile, VectorExperimental>>
+      shipping_profiles_;
+  std::vector<raw_ptr<autofill::AutofillProfile, VectorExperimental>>
+      contact_profiles_;
+
+  // These point into `profile_cache_`; declared after it so they are destroyed
+  // first and never dangle during teardown.
+  raw_ptr<autofill::AutofillProfile> selected_shipping_profile_ = nullptr;
+  raw_ptr<autofill::AutofillProfile> selected_shipping_option_error_profile_ =
+      nullptr;
+  raw_ptr<autofill::AutofillProfile> selected_contact_profile_ = nullptr;
+  raw_ptr<autofill::AutofillProfile> invalid_shipping_profile_ = nullptr;
+  raw_ptr<autofill::AutofillProfile> invalid_contact_profile_ = nullptr;
 
   std::vector<std::unique_ptr<PaymentApp>> available_apps_;
 

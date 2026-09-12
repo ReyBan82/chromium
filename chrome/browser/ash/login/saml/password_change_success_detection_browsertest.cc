@@ -2,20 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
+#include <string>
+
+#include "ash/constants/ash_login_pref_names.h"
 #include "ash/constants/ash_switches.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
+#include "base/command_line.h"
+#include "base/functional/bind.h"
 #include "chrome/browser/ash/login/saml/in_session_password_change_manager.h"
 #include "chrome/browser/ash/login/test/embedded_test_server_setup_mixin.h"
 #include "chrome/browser/ash/login/test/js_checker.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/mixin_based_in_process_browser_test.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/test/browser_test.h"
 #include "net/base/url_util.h"
+#include "net/http/http_status_code.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/test/embedded_test_server/http_request.h"
 #include "net/test/embedded_test_server/http_response.h"
+#include "testing/gtest/include/gtest/gtest.h"
 
 namespace ash {
 
@@ -150,27 +157,25 @@ class PasswordChangeSuccessDetectionTest
   void SetUpOnMainThread() override {
     MixinBasedInProcessBrowserTest::SetUpOnMainThread();
 
-    content::WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
-    Profile* profile =
-        Profile::FromBrowserContext(web_contents->GetBrowserContext());
+    Profile* profile = browser()->GetProfile();
     profile->GetPrefs()->SetBoolean(prefs::kSamlInSessionPasswordChangeEnabled,
                                     true);
 
-    password_change_manager_ =
-        std::make_unique<InSessionPasswordChangeManager>(profile);
+    password_change_manager_ = std::make_unique<InSessionPasswordChangeManager>(
+        g_browser_process->local_state(), profile);
     InSessionPasswordChangeManager::SetForTesting(
         password_change_manager_.get());
+  }
+
+  void TearDownOnMainThread() override {
+    InSessionPasswordChangeManager::ResetForTesting();
+    password_change_manager_.reset();
+    MixinBasedInProcessBrowserTest::TearDownOnMainThread();
   }
 
   void WaitForPasswordChangeDetected() {
     PasswordChangeWaiter password_change_waiter;
     password_change_waiter.WaitForPasswordChange();
-  }
-
-  void TearDownOnMainThread() override {
-    InSessionPasswordChangeManager::ResetForTesting();
-    MixinBasedInProcessBrowserTest::TearDownOnMainThread();
   }
 
   net::EmbeddedTestServer embedded_test_server_{

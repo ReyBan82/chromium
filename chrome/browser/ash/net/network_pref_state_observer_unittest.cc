@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/string_util.h"
 #include "base/values.h"
@@ -17,10 +18,12 @@
 #include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
 #include "chromeos/ash/components/network/proxy/ui_proxy_config_service.h"
+#include "chromeos/ash/components/sync_wifi/wifi_configuration_sync_service_provider.h"
 #include "components/onc/onc_constants.h"
 #include "components/prefs/pref_service.h"
 #include "components/proxy_config/proxy_config_pref_names.h"
 #include "components/proxy_config/proxy_prefs.h"
+#include "components/session_manager/core/fake_session_manager_delegate.h"
 #include "components/session_manager/core/session_manager.h"
 #include "components/user_manager/scoped_user_manager.h"
 #include "content/public/test/browser_task_environment.h"
@@ -34,29 +37,44 @@ namespace {
 const char kUserId[] = "test@example.com";
 const char kNetworkId[] = "wifi1_guid";  // Matches FakeShillManagerClient
 
+// Installs a no-op WifiConfigurationSyncServiceProvider so the observer can
+// resolve the service without depending on the //chrome factory. The service
+// is never created in tests, matching the production create=false behavior.
+class FakeWifiConfigurationSyncServiceProvider
+    : public WifiConfigurationSyncServiceProvider {
+ public:
+  sync_wifi::WifiConfigurationSyncService* Find(
+      const AccountId& account_id) override {
+    return nullptr;
+  }
+};
+
 }  // namespace
 
 class NetworkPrefStateObserverTest : public testing::Test {
  public:
-  NetworkPrefStateObserverTest()
-      : fake_user_manager_(new FakeChromeUserManager),
-        user_manager_enabler_(base::WrapUnique(fake_user_manager_)),
-        profile_manager_(TestingBrowserProcess::GetGlobal()) {}
+  NetworkPrefStateObserverTest() = default;
 
   NetworkPrefStateObserverTest(const NetworkPrefStateObserverTest&) = delete;
   NetworkPrefStateObserverTest& operator=(const NetworkPrefStateObserverTest&) =
       delete;
 
-  ~NetworkPrefStateObserverTest() override {}
+  ~NetworkPrefStateObserverTest() override = default;
 
   void SetUp() override {
     testing::Test::SetUp();
-    ASSERT_TRUE(profile_manager_.SetUp());
-    network_pref_state_observer_ = std::make_unique<NetworkPrefStateObserver>();
+    fake_user_manager_.Reset(std::make_unique<FakeChromeUserManager>());
+    profile_manager_ = std::make_unique<TestingProfileManager>(
+        TestingBrowserProcess::GetGlobal());
+    ASSERT_TRUE(profile_manager_->SetUp());
+    network_pref_state_observer_ = std::make_unique<NetworkPrefStateObserver>(
+        *TestingBrowserProcess::GetGlobal()->local_state());
   }
 
   void TearDown() override {
     network_pref_state_observer_.reset();
+    profile_manager_.reset();
+    fake_user_manager_.Reset();
     testing::Test::TearDown();
   }
 
@@ -65,7 +83,7 @@ class NetworkPrefStateObserverTest : public testing::Test {
     AccountId account_id = AccountId::FromUserEmail(kUserId);
     fake_user_manager_->AddUser(account_id);
     fake_user_manager_->LoginUser(account_id);
-    Profile* profile = profile_manager_.CreateTestingProfile(kUserId);
+    Profile* profile = profile_manager_->CreateTestingProfile(kUserId);
     session_manager_.NotifyUserProfileLoaded(account_id);
     base::RunLoop().RunUntilIdle();
     return profile;
@@ -73,10 +91,13 @@ class NetworkPrefStateObserverTest : public testing::Test {
 
   content::BrowserTaskEnvironment task_environment_;
   NetworkHandlerTestHelper network_handler_test_helper_;
-  FakeChromeUserManager* fake_user_manager_;
-  user_manager::ScopedUserManager user_manager_enabler_;
-  TestingProfileManager profile_manager_;
-  session_manager::SessionManager session_manager_;
+  session_manager::SessionManager session_manager_{
+      std::make_unique<session_manager::FakeSessionManagerDelegate>()};
+  user_manager::TypedScopedUserManager<FakeChromeUserManager>
+      fake_user_manager_;
+  std::unique_ptr<TestingProfileManager> profile_manager_;
+  FakeWifiConfigurationSyncServiceProvider
+      wifi_configuration_sync_service_provider_;
   std::unique_ptr<NetworkPrefStateObserver> network_pref_state_observer_;
 };
 
@@ -86,7 +107,7 @@ TEST_F(NetworkPrefStateObserverTest, LoginUser) {
       NetworkHandler::GetUiProxyConfigService();
   ASSERT_TRUE(device_ui_proxy_config_service);
   // There should be no proxy config available.
-  base::Value::Dict ui_proxy_config;
+  base::DictValue ui_proxy_config;
   EXPECT_FALSE(device_ui_proxy_config_service->MergeEnforcedProxyConfig(
       kNetworkId, &ui_proxy_config));
 
@@ -97,20 +118,20 @@ TEST_F(NetworkPrefStateObserverTest, LoginUser) {
       NetworkHandler::GetUiProxyConfigService();
   ASSERT_TRUE(profile_ui_proxy_config_service);
   ASSERT_NE(device_ui_proxy_config_service, profile_ui_proxy_config_service);
-  ui_proxy_config = base::Value::Dict();
+  ui_proxy_config = base::DictValue();
   EXPECT_FALSE(profile_ui_proxy_config_service->MergeEnforcedProxyConfig(
       kNetworkId, &ui_proxy_config));
 
   // Set the profile pref to PAC script mode.
-  base::Value::Dict proxy_config;
-  proxy_config.Set("mode", ProxyPrefs::kPacScriptProxyModeName);
-  proxy_config.Set("pac_url", "http://proxy");
+  auto proxy_config = base::DictValue()
+                          .Set("mode", ProxyPrefs::kPacScriptProxyModeName)
+                          .Set("pac_url", "http://proxy");
   profile->GetPrefs()->Set(proxy_config::prefs::kProxy,
                            base::Value(std::move(proxy_config)));
   base::RunLoop().RunUntilIdle();
 
   // Mode should now be MODE_PAC_SCRIPT.
-  ui_proxy_config = base::Value::Dict();
+  ui_proxy_config.clear();
   EXPECT_TRUE(
       NetworkHandler::GetUiProxyConfigService()->MergeEnforcedProxyConfig(
           kNetworkId, &ui_proxy_config));

@@ -10,13 +10,19 @@
 #include "third_party/blink/public/common/fenced_frame/fenced_frame_utils.h"
 #include "third_party/blink/public/common/frame/fenced_frame_sandbox_flags.h"
 #include "third_party/blink/public/platform/web_runtime_features.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/execution_context/security_context.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/screen.h"
 #include "third_party/blink/renderer/core/html/fenced_frame/fenced_frame_ad_sizes.h"
+#include "third_party/blink/renderer/core/html/fenced_frame/fenced_frame_config.h"
 #include "third_party/blink/renderer/core/html/html_iframe_element.h"
+#include "third_party/blink/renderer/core/inspector/inspector_issue_storage.h"
+#include "third_party/blink/renderer/core/inspector/protocol/audits.h"
+#include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
 
@@ -48,27 +54,28 @@ class HTMLFencedFrameElementTest : private ScopedFencedFramesForTest,
   base::test::ScopedFeatureList enabled_feature_list_;
 };
 
-TEST_F(HTMLFencedFrameElementTest, FreezeSizePageZoomFactor) {
+TEST_F(HTMLFencedFrameElementTest, FreezeSizeLayoutZoomFactor) {
   Document& doc = GetDocument();
   auto* fenced_frame = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
   doc.body()->AppendChild(fenced_frame);
   UpdateAllLifecyclePhasesForTest();
 
   LocalFrame& frame = GetFrame();
-  const float zoom_factor = frame.PageZoomFactor();
+  const float zoom_factor = frame.LayoutZoomFactor();
   const PhysicalSize size(200, 100);
   fenced_frame->FreezeFrameSize(size);
-  frame.SetPageZoomFactor(zoom_factor * 2);
+  frame.SetLayoutZoomFactor(zoom_factor * 2);
   EXPECT_EQ(*fenced_frame->FrozenFrameSize(),
             PhysicalSize(size.width * 2, size.height * 2));
 
-  frame.SetPageZoomFactor(zoom_factor);
+  frame.SetLayoutZoomFactor(zoom_factor);
 }
 
 TEST_F(HTMLFencedFrameElementTest, CoerceFrameSizeTest) {
   Document& doc = GetDocument();
   auto* fenced_frame = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
-  fenced_frame->mode_ = mojom::blink::FencedFrameMode::kOpaqueAds;
+  fenced_frame->mode_ =
+      blink::FencedFrame::DeprecatedFencedFrameMode::kOpaqueAds;
   doc.body()->AppendChild(fenced_frame);
 
   // Check that for allowed ad sizes, coercion is a no-op.
@@ -174,9 +181,12 @@ TEST_F(HTMLFencedFrameElementTest, HistogramTestInsecureContext) {
       SecurityOrigin::CreateFromString("http://insecure_top_level.test"));
 
   auto* fenced_frame = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
-  fenced_frame->setAttribute(html_names::kSrcAttr,
-                             String("https://example.com/"),
-                             ASSERT_NO_EXCEPTION);
+  fenced_frame->setConfig(FencedFrameConfig::Create(
+      KURL("https://example.com/"),
+      /*urn_uuid=*/KURL("urn:uuid:12345678-1234-5678-1234-567812345678"),
+      /*container_size=*/std::nullopt, /*content_size=*/std::nullopt,
+      FencedFrameConfig::AttributeVisibility::kTransparent,
+      /*freeze_initial_size=*/false));
   doc.body()->AppendChild(fenced_frame);
 
   histogram_tester_.ExpectUniqueSample(
@@ -184,56 +194,10 @@ TEST_F(HTMLFencedFrameElementTest, HistogramTestInsecureContext) {
       FencedFrameCreationOutcome::kInsecureContext, 1);
 }
 
-TEST_F(HTMLFencedFrameElementTest, HistogramTestIncompatibleUrlHTTPDefault) {
-  Document& doc = GetDocument();
-
-  auto* fenced_frame = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
-  fenced_frame->setAttribute(html_names::kModeAttr, String("default"),
-                             ASSERT_NO_EXCEPTION);
-  fenced_frame->setAttribute(
-      html_names::kSrcAttr, String("http://example.com/"), ASSERT_NO_EXCEPTION);
-  doc.body()->AppendChild(fenced_frame);
-  histogram_tester_.ExpectUniqueSample(
-      kFencedFrameCreationOrNavigationOutcomeHistogram,
-      FencedFrameCreationOutcome::kIncompatibleURLDefault, 1);
-}
-
-TEST_F(HTMLFencedFrameElementTest, HistogramTestIncompatibleURNDefault) {
-  Document& doc = GetDocument();
-
-  auto* fenced_frame = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
-  fenced_frame->setAttribute(html_names::kModeAttr, String("default"),
-                             ASSERT_NO_EXCEPTION);
-  fenced_frame->setAttribute(
-      html_names::kSrcAttr,
-      String("urn:uuid:12345678-1234-5678-1234-567812345678"),
-      ASSERT_NO_EXCEPTION);
-  doc.body()->AppendChild(fenced_frame);
-  histogram_tester_.ExpectUniqueSample(
-      kFencedFrameCreationOrNavigationOutcomeHistogram,
-      FencedFrameCreationOutcome::kIncompatibleURLDefault, 1);
-}
-
-TEST_F(HTMLFencedFrameElementTest, HistogramTestIncompatibleUrlOpaque) {
-  Document& doc = GetDocument();
-
-  auto* fenced_frame = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
-  fenced_frame->setAttribute(html_names::kModeAttr, String("opaque-ads"),
-                             ASSERT_NO_EXCEPTION);
-  fenced_frame->setAttribute(
-      html_names::kSrcAttr, String("http://example.com/"), ASSERT_NO_EXCEPTION);
-  doc.body()->AppendChild(fenced_frame);
-  histogram_tester_.ExpectUniqueSample(
-      kFencedFrameCreationOrNavigationOutcomeHistogram,
-      FencedFrameCreationOutcome::kIncompatibleURLOpaque, 1);
-}
-
 TEST_F(HTMLFencedFrameElementTest, HistogramTestResizeAfterFreeze) {
   Document& doc = GetDocument();
 
   auto* fenced_frame_opaque = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
-  fenced_frame_opaque->setAttribute(html_names::kModeAttr, String("opaque-ads"),
-                                    ASSERT_NO_EXCEPTION);
   doc.body()->AppendChild(fenced_frame_opaque);
 
   // The fenced frame was not navigated to any page. Manually tell it that it
@@ -259,8 +223,8 @@ TEST_F(HTMLFencedFrameElementTest, HistogramTestSandboxFlags) {
       WebSandboxFlags::kAll);
 
   auto* fenced_frame = MakeGarbageCollected<HTMLFencedFrameElement>(doc);
-  fenced_frame->setAttribute(html_names::kSrcAttr, String("https://test.com/"),
-                             ASSERT_NO_EXCEPTION);
+  fenced_frame->SetAttributeWithoutValidation(
+      html_names::kSrcAttr, AtomicString("https://test.com/"));
   doc.body()->AppendChild(fenced_frame);
   histogram_tester_.ExpectUniqueSample(
       kFencedFrameCreationOrNavigationOutcomeHistogram,
@@ -289,8 +253,8 @@ TEST_F(HTMLFencedFrameElementTest, HistogramTestSandboxFlagsInIframe) {
 
   // Create iframe and embed it in the main document
   auto* iframe = MakeGarbageCollected<HTMLIFrameElement>(doc);
-  iframe->setAttribute(html_names::kSrcAttr, String("https://test.com/"),
-                       ASSERT_NO_EXCEPTION);
+  iframe->SetAttributeWithoutValidation(html_names::kSrcAttr,
+                                        AtomicString("https://test.com/"));
   doc.body()->AppendChild(iframe);
   Document* iframe_doc = iframe->contentDocument();
   iframe_doc->GetFrame()->DomWindow()->GetSecurityContext().SetSandboxFlags(
@@ -299,14 +263,33 @@ TEST_F(HTMLFencedFrameElementTest, HistogramTestSandboxFlagsInIframe) {
   // Create fenced frame and embed it in the main frame
   auto* fenced_frame =
       MakeGarbageCollected<HTMLFencedFrameElement>(*iframe_doc);
-  fenced_frame->setAttribute(html_names::kSrcAttr, String("https://test.com/"),
-                             ASSERT_NO_EXCEPTION);
+  fenced_frame->SetAttributeWithoutValidation(
+      html_names::kSrcAttr, AtomicString("https://test.com/"));
   iframe_doc->body()->AppendChild(fenced_frame);
 
   // Test that it logged that the fenced frame creation attempt was NOT in the
   // outermost main frame.
   histogram_tester_.ExpectUniqueSample(
       kFencedFrameFailedSandboxLoadInTopLevelFrame, false, 1);
+}
+
+TEST_F(HTMLFencedFrameElementTest, ReportFencedFrameRemovalOnCreation) {
+  Document& doc = GetDocument();
+  InspectorIssueStorage& storage = doc.GetPage()->GetInspectorIssueStorage();
+  wtf_size_t initial_size = storage.size();
+
+  MakeGarbageCollected<HTMLFencedFrameElement>(doc);
+  EXPECT_EQ(initial_size + 1, storage.size());
+
+  auto* issue = storage.at(initial_size);
+  EXPECT_EQ(protocol::Audits::InspectorIssueCodeEnum::DeprecationIssue,
+            issue->getCode());
+  ASSERT_TRUE(issue->getDetails()->hasDeprecationIssueDetails());
+  EXPECT_EQ("FencedFrame",
+            issue->getDetails()->getDeprecationIssueDetails()->getType());
+
+  // Verify that the deprecation use counter was also bumped.
+  EXPECT_TRUE(doc.IsUseCounted(WebFeature::kHTMLFencedFrameElement));
 }
 
 }  // namespace blink

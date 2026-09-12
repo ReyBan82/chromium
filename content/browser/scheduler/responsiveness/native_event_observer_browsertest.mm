@@ -12,32 +12,31 @@
 
 #import <Carbon/Carbon.h>
 
-namespace content {
-namespace responsiveness {
+namespace content::responsiveness {
 
 namespace {
 
-class FakeNativeEventObserver : public NativeEventObserver {
+class FakeNativeEventObserver : public BrowserUINativeEventObserver {
  public:
   FakeNativeEventObserver()
-      : NativeEventObserver(base::DoNothing(), base::DoNothing()) {}
+      : BrowserUINativeEventObserver(base::DoNothing(), base::DoNothing()) {}
   ~FakeNativeEventObserver() override = default;
 
-  void WillRunNativeEvent(const void* opaque_identifier) override {
+  void WillRunNativeEvent(uintptr_t opaque_identifier) override {
     ASSERT_FALSE(will_run_id_);
     will_run_id_ = opaque_identifier;
   }
-  void DidRunNativeEvent(const void* opaque_identifier) override {
+  void DidRunNativeEvent(uintptr_t opaque_identifier) override {
     ASSERT_FALSE(did_run_id_);
     did_run_id_ = opaque_identifier;
   }
 
-  const void* will_run_id() { return will_run_id_; }
-  const void* did_run_id() { return did_run_id_; }
+  uintptr_t will_run_id() { return will_run_id_; }
+  uintptr_t did_run_id() { return did_run_id_; }
 
  private:
-  raw_ptr<const void> will_run_id_ = nullptr;
-  raw_ptr<const void> did_run_id_ = nullptr;
+  uintptr_t will_run_id_ = 0;
+  uintptr_t did_run_id_ = 0;
 };
 
 }  // namespace
@@ -55,9 +54,8 @@ IN_PROC_BROWSER_TEST_F(ResponsivenessNativeEventObserverBrowserTest,
       kVK_Return, '\r', NSEventTypeKeyDown, 0);
   [NSApp sendEvent:event];
 
-  EXPECT_EQ(observer.will_run_id(), event);
-  EXPECT_EQ(observer.did_run_id(), event);
+  EXPECT_EQ(observer.will_run_id(), reinterpret_cast<uintptr_t>((__bridge void*)event));
+  EXPECT_EQ(observer.did_run_id(), reinterpret_cast<uintptr_t>((__bridge void*)event));
 }
 
-}  // namespace responsiveness
-}  // namespace content
+}  // namespace content::responsiveness

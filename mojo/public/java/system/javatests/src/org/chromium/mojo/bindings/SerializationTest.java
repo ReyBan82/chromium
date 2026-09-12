@@ -53,9 +53,7 @@ public class SerializationTest {
         struct.serialize(null);
     }
 
-    /**
-     * Verifies that serializing a struct with a null struct pointer throws an exception.
-     */
+    /** Verifies that serializing a struct with a null struct pointer throws an exception. */
     @Test
     @SmallTest
     public void testStructPointer() {
@@ -111,9 +109,7 @@ public class SerializationTest {
         struct.serialize(null);
     }
 
-    /**
-     * Verifies that serializing a struct with a null string throws an exception.
-     */
+    /** Verifies that serializing a struct with a null string throws an exception. */
     @Test
     @SmallTest
     public void testString() {
@@ -140,28 +136,24 @@ public class SerializationTest {
         struct.serialize(null);
     }
 
-    /**
-     * Verifies that a struct can be serialized to and deserialized from a ByteBuffer.
-     */
+    /** Verifies that a struct can be serialized to and deserialized from a ByteBuffer. */
     @Test
     @SmallTest
-    public void testByteBufferSerialization() {
+    public void testByteBufferSerialization() throws BadMessageException {
         Struct1 input = new Struct1();
         input.i = 0x7F;
 
         ByteBuffer buf = input.serialize();
 
-        byte[] expected_raw_bytes = {16, 0, 0, 0, 0, 0, 0, 0, 0x7F, 0, 0, 0, 0, 0, 0, 0};
-        ByteBuffer expected_buf = ByteBuffer.wrap(expected_raw_bytes);
-        Assert.assertEquals(expected_buf, buf);
+        byte[] expectedRawBytes = {16, 0, 0, 0, 0, 0, 0, 0, 0x7F, 0, 0, 0, 0, 0, 0, 0};
+        ByteBuffer expectedBuf = ByteBuffer.wrap(expectedRawBytes);
+        Assert.assertEquals(expectedBuf, buf);
 
         Struct1 output = Struct1.deserialize(buf);
         Assert.assertEquals(0x7F, output.i);
     }
 
-    /**
-     * Verifies that a struct with handles cannot be serialized to a ByteBuffer.
-     */
+    /** Verifies that a struct with handles cannot be serialized to a ByteBuffer. */
     @Test
     @SmallTest
     public void testByteBufferSerializationWithHandles() {
@@ -177,8 +169,9 @@ public class SerializationTest {
 
         try {
             struct.serialize();
-            Assert.fail("Serializing a struct with handles to a ByteBuffer should have thrown an "
-                    + "exception.");
+            Assert.fail(
+                    "Serializing a struct with handles to a ByteBuffer should have thrown an "
+                            + "exception.");
         } catch (UnsupportedOperationException ex) {
             // Expected.
         }

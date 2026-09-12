@@ -4,40 +4,50 @@
 
 package org.chromium.chrome.browser.permissions;
 
+import android.os.Build;
+
 import androidx.test.filters.MediumTest;
 
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.RuleChain;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.DisableIf;
 import org.chromium.base.test.util.Feature;
+import org.chromium.base.test.util.Features.DisableFeatures;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.permissions.PermissionTestRule.PermissionUpdateWaiter;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+import org.chromium.chrome.test.transit.AutoResetCtaTransitTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
 import org.chromium.chrome.test.util.browser.LocationSettingsTestUtil;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
 import org.chromium.device.geolocation.LocationProviderOverrider;
 import org.chromium.device.geolocation.MockLocationProvider;
+import org.chromium.ui.base.DeviceFormFactor;
 
 /**
  * Test suite for Geo-Location functionality.
  *
- * These tests rely on the device being specially setup (which the bots do automatically):
- * - Global location is enabled.
- * - Google location is enabled.
+ * <p>These tests rely on the device being specially setup (which the bots do automatically): -
+ * Global location is enabled. - Google location is enabled.
  */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class GeolocationTest {
+    public AutoResetCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.autoResetCtaActivityRule();
+    public PermissionTestRule mPermissionRule =
+            new PermissionTestRule(mActivityTestRule.getActivityTestRule());
+
     @Rule
-    public PermissionTestRule mPermissionRule = new PermissionTestRule();
+    public RuleChain mRuleChain = RuleChain.outerRule(mActivityTestRule).around(mPermissionRule);
 
     private static final String TEST_FILE = "/content/test/data/android/geolocation.html";
-    private static final String PERSIST_ACCEPT_HISTOGRAM =
-            "Permissions.Prompt.Accepted.Persisted.Geolocation";
 
     public GeolocationTest() {}
 
@@ -48,48 +58,42 @@ public class GeolocationTest {
         LocationProviderOverrider.setLocationProviderImpl(new MockLocationProvider());
     }
 
-    private void runTest(String javascript, int nUpdates, boolean withGesture, boolean isDialog)
-            throws Exception {
-        Tab tab = mPermissionRule.getActivity().getActivityTab();
+    private void runTest(String javascript, int nUpdates, boolean withGesture) throws Exception {
+        Tab tab = mPermissionRule.getActivityTab();
         PermissionUpdateWaiter updateWaiter =
                 new PermissionUpdateWaiter("Count:", mPermissionRule.getActivity());
-        TestThreadUtils.runOnUiThreadBlocking(() -> tab.addObserver(updateWaiter));
-        mPermissionRule.runAllowTest(
-                updateWaiter, TEST_FILE, javascript, nUpdates, withGesture, isDialog);
-        TestThreadUtils.runOnUiThreadBlocking(() -> tab.removeObserver(updateWaiter));
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.addObserver(updateWaiter));
+        mPermissionRule.runAllowTest(updateWaiter, TEST_FILE, javascript, nUpdates, withGesture);
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.removeObserver(updateWaiter));
     }
 
-    /**
-     * Verify Geolocation creates a dialog and receives a mock location.
-     * @throws Exception
-     */
+    /** Verify Geolocation creates a dialog and receives a mock location. */
     @Test
     @MediumTest
     @Feature({"Location", "Main"})
+    @DisableIf.Device(DeviceFormFactor.ONLY_TABLET) // crbug.com/41486136
     public void testGeolocationPlumbingAllowedDialog() throws Exception {
-        runTest("initiate_getCurrentPosition()", 1, true, true);
+        runTest("initiate_getCurrentPosition()", 1, true);
     }
 
     /**
-     * Verify Geolocation creates a dialog and receives a mock location when dialogs are
-     * enabled and there is no user gesture.
-     * @throws Exception
+     * Verify Geolocation creates a dialog and receives a mock location when dialogs are enabled and
+     * there is no user gesture.
      */
     @Test
     @MediumTest
     @Feature({"Location", "Main"})
+    @DisableFeatures({"PermissionsGestureGatedPrompts"})
     public void testGeolocationPlumbingAllowedDialogNoGesture() throws Exception {
-        runTest("initiate_getCurrentPosition()", 1, false, true);
+        runTest("initiate_getCurrentPosition()", 1, false);
     }
 
-    /**
-     * Verify Geolocation creates a dialog and receives multiple locations.
-     * @throws Exception
-     */
+    /** Verify Geolocation creates a dialog and receives multiple locations. */
     @Test
     @MediumTest
     @Feature({"Location"})
+    @DisableIf.Build(sdk_is_greater_than = Build.VERSION_CODES.R, message = "crbug.com/362792693")
     public void testGeolocationWatchDialog() throws Exception {
-        runTest("initiate_watchPosition()", 2, true, true);
+        runTest("initiate_watchPosition()", 2, true);
     }
 }

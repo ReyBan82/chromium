@@ -20,16 +20,21 @@ void FakeFastPairDelegate::SetAdapterStateController(
   adapter_state_controller_ = adapter_state_controller;
 }
 
+void FakeFastPairDelegate::UpdateDeviceNickname(const std::string& mac_address,
+                                                const std::string& nickname) {
+  mac_address_to_nickname_.insert_or_assign(mac_address, nickname);
+}
+
 void FakeFastPairDelegate::SetDeviceNameManager(
     DeviceNameManager* device_name_manager) {
   device_name_manager_ = device_name_manager;
 }
 
-absl::optional<DeviceImageInfo> FakeFastPairDelegate::GetDeviceImageInfo(
+std::optional<DeviceImageInfo> FakeFastPairDelegate::GetDeviceImageInfo(
     const std::string& mac_address) {
   const auto it = mac_address_to_images_.find(mac_address);
   if (it == mac_address_to_images_.end()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   return it->second;
 }

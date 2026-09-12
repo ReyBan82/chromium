@@ -3,21 +3,24 @@
 // found in the LICENSE file.
 
 #include "ui/display/manager/content_protection_key_manager.h"
+
 #include <memory>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/display/display_features.h"
-#include "ui/display/fake/fake_display_snapshot.h"
+#include "ui/display/manager/test/fake_display_snapshot.h"
+#include "ui/display/manager/test/test_native_display_delegate.h"
 #include "ui/display/types/display_constants.h"
 
 namespace display::test {
 
 namespace {
 constexpr int64_t kDisplayId = 123;
-const DisplayMode kDisplayMode{gfx::Size(1366, 768), false, 60.0f};
+const DisplayMode kDisplayMode({1366, 768}, false, 60.0f);
 const std::string kFakeKey285 =
     "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuv"
     "wxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqr"
@@ -43,18 +46,25 @@ class ContentProtectionKeyManagerTest : public testing::Test {
   }
 
   void SetKeyIfRequiredForDisplay(auto on_key_set) {
-    key_manager_.SetKeyIfRequired(std::vector<DisplaySnapshot*>{display_.get()},
-                                  kDisplayId, std::move(on_key_set));
+    key_manager_.SetKeyIfRequired(
+        std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>{
+            display_.get()},
+        kDisplayId, std::move(on_key_set));
   }
 
   base::test::ScopedFeatureList scoped_feature_list_;
   ContentProtectionKeyManager key_manager_;
   std::unique_ptr<DisplaySnapshot> display_;
 
+  ActionLogger log_;
+  TestNativeDisplayDelegate native_display_delegate_{&log_};
+
  private:
   void SetUp() override {
     scoped_feature_list_.InitAndEnableFeature(
         features::kRequireHdcpKeyProvisioning);
+
+    key_manager_.set_native_display_delegate(&native_display_delegate_);
 
     display_ = FakeDisplaySnapshot::Builder()
                    .SetId(kDisplayId)
@@ -71,6 +81,9 @@ TEST_F(ContentProtectionKeyManagerTest, TestIfKeySetWhenServerKeyIsValid) {
   auto on_key_set = base::BindOnce([](bool result) { EXPECT_TRUE(result); });
 
   SetKeyIfRequiredForDisplay(std::move(on_key_set));
+
+  EXPECT_EQ(GetSetHdcpKeyPropAction(kDisplayId, true),
+            log_.GetActionsAndClear());
 }
 
 TEST_F(ContentProtectionKeyManagerTest, TestIfKeyNotSetWhenServerKeyIsEmpty) {
@@ -92,8 +105,9 @@ TEST_F(ContentProtectionKeyManagerTest, TestIfKeyNotSetIfFeatureIsDisabled) {
 TEST_F(ContentProtectionKeyManagerTest, TestIfKeyNotSetWhenDisplayIdMismatch) {
   auto on_key_set = base::BindOnce([](bool result) { EXPECT_FALSE(result); });
 
-  key_manager_.SetKeyIfRequired(std::vector<DisplaySnapshot*>{display_.get()},
-                                kDisplayId + 1, std::move(on_key_set));
+  key_manager_.SetKeyIfRequired(
+      std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>{display_.get()},
+      kDisplayId + 1, std::move(on_key_set));
 }
 
 TEST_F(ContentProtectionKeyManagerTest,
@@ -109,9 +123,12 @@ TEST_F(ContentProtectionKeyManagerTest,
 
   SetProvisionedKeyRequest(true);
 
-  auto displays =
-      std::vector<DisplaySnapshot*>{display_.get(), other_display.get()};
+  auto displays = std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>{
+      display_.get(), other_display.get()};
   key_manager_.SetKeyIfRequired(displays, kDisplayId, std::move(on_key_set));
+
+  EXPECT_EQ(GetSetHdcpKeyPropAction(kDisplayId, true),
+            log_.GetActionsAndClear());
 }
 
 TEST_F(ContentProtectionKeyManagerTest, TestIfKeyNotSetWhenDisplayIsEdp) {
@@ -141,17 +158,29 @@ TEST_F(ContentProtectionKeyManagerTest,
   SetKeyIfRequiredForDisplay(std::move(on_key_set));
 }
 
-TEST_F(ContentProtectionKeyManagerTest, TesThatKeyIsSetForMultipleDisplays) {
+TEST_F(ContentProtectionKeyManagerTest, TestThatKeyIsSetForMultipleDisplays) {
   SetProvisionedKeyRequest(true);
 
   auto on_key_set = base::BindOnce([](bool result) { EXPECT_TRUE(result); });
+  key_manager_.SetKeyIfRequired(
+      std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>{display_.get()},
+      kDisplayId, std::move(on_key_set));
 
-  SetKeyIfRequiredForDisplay(std::move(on_key_set));
+  auto other_display = FakeDisplaySnapshot::Builder()
+                           .SetId(kDisplayId + 1)
+                           .SetType(DISPLAY_CONNECTION_TYPE_DISPLAYPORT)
+                           .SetHasContentProtectionKey(true)
+                           .SetCurrentMode(kDisplayMode.Clone())
+                           .Build();
+  on_key_set = base::BindOnce([](bool result) { EXPECT_TRUE(result); });
+  key_manager_.SetKeyIfRequired(
+      std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>{
+          other_display.get()},
+      kDisplayId + 1, std::move(on_key_set));
 
-  on_key_set = base::BindOnce([](bool result) { EXPECT_TRUE(true); });
-
-  key_manager_.SetKeyIfRequired(std::vector<DisplaySnapshot*>{display_.get()},
-                                kDisplayId + 1, std::move(on_key_set));
+  EXPECT_EQ(GetSetHdcpKeyPropAction(kDisplayId, true) + "," +
+                GetSetHdcpKeyPropAction(kDisplayId + 1, true),
+            log_.GetActionsAndClear());
 }
 
 TEST_F(ContentProtectionKeyManagerTest,
@@ -172,8 +201,9 @@ TEST_F(ContentProtectionKeyManagerTest,
 
   on_key_set = base::BindOnce([](bool result) { EXPECT_TRUE(true); });
 
-  key_manager_.SetKeyIfRequired(std::vector<DisplaySnapshot*>{display_.get()},
-                                kDisplayId + 1, std::move(on_key_set));
+  key_manager_.SetKeyIfRequired(
+      std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>{display_.get()},
+      kDisplayId + 1, std::move(on_key_set));
 }
 
 TEST_F(ContentProtectionKeyManagerTest, TestThatKeyIsFetchedAgainIfKeyInvalid) {
@@ -197,8 +227,9 @@ TEST_F(ContentProtectionKeyManagerTest, TestThatKeyIsFetchedAgainIfKeyInvalid) {
 
   on_key_set = base::BindOnce([](bool result) { EXPECT_TRUE(true); });
 
-  key_manager_.SetKeyIfRequired(std::vector<DisplaySnapshot*>{display_.get()},
-                                kDisplayId + 1, std::move(on_key_set));
+  key_manager_.SetKeyIfRequired(
+      std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>{display_.get()},
+      kDisplayId + 1, std::move(on_key_set));
 }
 
 }  // namespace display::test

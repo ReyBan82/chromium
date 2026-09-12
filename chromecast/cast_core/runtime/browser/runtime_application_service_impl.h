@@ -9,10 +9,16 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/ref_counted.h"
+#include "base/memory/weak_ptr.h"
+#include "base/sequence_checker.h"
+#include "base/synchronization/lock.h"
 #include "base/task/sequenced_task_runner.h"
+#include "chromecast/browser/application_media_capabilities.h"
 #include "chromecast/browser/cast_content_window.h"
 #include "chromecast/browser/cast_web_view.h"
 #include "chromecast/cast_core/grpc/grpc_server.h"
+#include "chromecast/cast_core/grpc/thread_safe_reactor_handle.h"
 #include "chromecast/chromecast_buildflags.h"
 #include "components/cast_receiver/browser/public/embedder_application.h"
 #include "components/cast_receiver/browser/public/runtime_application.h"
@@ -33,7 +39,6 @@ class StreamingConfigManager;
 
 namespace content {
 class WebContents;
-class WebUIControllerFactory;
 }  // namespace content
 
 namespace chromecast {
@@ -60,7 +65,14 @@ class RuntimeApplicationServiceImpl : public cast_receiver::EmbedderApplication,
   void Stop(const cast::runtime::StopApplicationRequest& request,
             StatusCallback callback);
 
-  const std::string& app_id() { return runtime_application_->GetAppId(); }
+  // Returns current application ID.
+  const std::string& app_id() const { return runtime_application_->GetAppId(); }
+
+  // Returns RuntimeApplicationService gRPC server endpoint.
+  const std::string& endpoint() const {
+    CHECK(grpc_server_);
+    return grpc_server_->endpoint();
+  }
 
   // EmbedderApplication implementation:
   void NotifyApplicationStarted() override;
@@ -69,8 +81,6 @@ class RuntimeApplicationServiceImpl : public cast_receiver::EmbedderApplication,
   void NotifyMediaPlaybackChanged(bool playing) override;
   void GetAllBindings(GetAllBindingsCallback callback) override;
   cast_receiver::MessagePortService* GetMessagePortService() override;
-  std::unique_ptr<content::WebUIControllerFactory> CreateWebUIControllerFactory(
-      std::vector<std::string> hosts) override;
   content::WebContents* GetWebContents() override;
   cast_receiver::ContentWindowControls* GetContentWindowControls() override;
 #if !BUILDFLAG(IS_CAST_DESKTOP_BUILD)
@@ -91,50 +101,66 @@ class RuntimeApplicationServiceImpl : public cast_receiver::EmbedderApplication,
   void SetVisibility(cast::common::Visibility::Type state);
   void SetMediaBlocking(cast::common::MediaState::Type state);
 
+  void SetApplicationMediaCapabilities();
+
   // Called on an error is hit during running of cast mirroring or remoting.
   void OnStreamingApplicationError(cast_receiver::Status status);
 
   // RuntimeApplicationService handlers:
+  using SetUrlRewriteRulesReactor =
+      cast::v2::RuntimeApplicationServiceHandler::SetUrlRewriteRules::Reactor;
+  using SetMediaStateReactor =
+      cast::v2::RuntimeApplicationServiceHandler::SetMediaState::Reactor;
+  using SetVisibilityReactor =
+      cast::v2::RuntimeApplicationServiceHandler::SetVisibility::Reactor;
+  using SetTouchInputReactor =
+      cast::v2::RuntimeApplicationServiceHandler::SetTouchInput::Reactor;
+
   void HandleSetUrlRewriteRules(
       cast::v2::SetUrlRewriteRulesRequest request,
-      cast::v2::RuntimeApplicationServiceHandler::SetUrlRewriteRules::Reactor*
+      scoped_refptr<
+          cast::utils::ThreadSafeReactorHandle<SetUrlRewriteRulesReactor>>
           reactor);
   void HandleSetMediaState(
       cast::v2::SetMediaStateRequest request,
-      cast::v2::RuntimeApplicationServiceHandler::SetMediaState::Reactor*
+      scoped_refptr<cast::utils::ThreadSafeReactorHandle<SetMediaStateReactor>>
           reactor);
   void HandleSetVisibility(
       cast::v2::SetVisibilityRequest request,
-      cast::v2::RuntimeApplicationServiceHandler::SetVisibility::Reactor*
+      scoped_refptr<cast::utils::ThreadSafeReactorHandle<SetVisibilityReactor>>
           reactor);
   void HandleSetTouchInput(
       cast::v2::SetTouchInputRequest request,
-      cast::v2::RuntimeApplicationServiceHandler::SetTouchInput::Reactor*
+      scoped_refptr<cast::utils::ThreadSafeReactorHandle<SetTouchInputReactor>>
           reactor);
 
   // RuntimeMessagePortApplicationService handlers:
-  void HandlePostMessage(cast::web::Message request,
-                         cast::v2::RuntimeMessagePortApplicationServiceHandler::
-                             PostMessage::Reactor* reactor);
+  using PostMessageReactor = cast::v2::
+      RuntimeMessagePortApplicationServiceHandler::PostMessage::Reactor;
+
+  void OnPostMessageRpc(
+      cast::web::Message request,
+      scoped_refptr<cast::utils::ThreadSafeReactorHandle<PostMessageReactor>>
+          reactor_handle);
 
   void OnAllBindingsReceived(
       GetAllBindingsCallback callback,
       cast::utils::GrpcStatusOr<cast::bindings::GetAllResponse> response_or);
 
-  // Returns if current session is enabled for dev.
-  bool IsEnabledForDev() const;
-
-  // Returns if remote control mode is enabled.
-  bool IsRemoteControlMode() const;
-
-  // Returns renderer features.
-  base::Value::Dict GetRendererFeatures() const;
-
   // Returns if app is audio only.
   bool IsAudioOnly() const;
 
+  // Returns if current session is enabled for dev.
+  bool IsEnabledForDev() const;
+
+  // Returns if touch input is allowed.
+  bool IsTouchInputAllowed() const;
+
+  // Returns renderer features.
+  base::DictValue GetRendererFeatures() const;
+
   // Returns whether feature permissions should be enforced.
-  bool GetEnforceFeaturePermissions() const;
+  bool IsFeaturePermissionsEnforced() const;
 
   // CastWebContents::Observer overrides.
   void InnerContentsCreated(CastWebContents* inner_contents,
@@ -143,14 +169,18 @@ class RuntimeApplicationServiceImpl : public cast_receiver::EmbedderApplication,
   const cast::common::ApplicationConfig config_;
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
-  base::raw_ref<CastWebService> web_service_;
+  raw_ref<CastWebService> web_service_;
+
+  shell::ApplicationMediaCapabilities app_media_capabilities_;
 
   // The WebView associated with the window in which the Cast application is
   // displayed.
   CastWebView::Scoped cast_web_view_;
 
+  std::unique_ptr<cast_receiver::RuntimeApplication> const runtime_application_;
+
   // Controls for window, as a wrapper around a CastContentWindow instance.
-  // NOTE: Must be declared after |cast_web_view_|.
+  // NOTE: Must be declared after |cast_web_view_| and |runtime_application_|.
   std::unique_ptr<cast_receiver::ContentWindowControls>
       content_window_controls_;
 
@@ -163,15 +193,13 @@ class RuntimeApplicationServiceImpl : public cast_receiver::EmbedderApplication,
   // use.
   std::unique_ptr<MessagePortServiceGrpc> message_port_service_;
 
-  absl::optional<cast::utils::GrpcServer> grpc_server_;
-  absl::optional<cast::v2::CoreApplicationServiceStub> core_app_stub_;
-  absl::optional<cast::v2::CoreMessagePortApplicationServiceStub>
+  std::optional<cast::utils::GrpcServer> grpc_server_;
+  std::optional<cast::v2::CoreApplicationServiceStub> core_app_stub_;
+  std::optional<cast::v2::CoreMessagePortApplicationServiceStub>
       core_message_port_app_stub_;
-  absl::optional<std::string> cast_media_service_grpc_endpoint_;
+  std::optional<std::string> cast_media_service_grpc_endpoint_;
 
   SEQUENCE_CHECKER(sequence_checker_);
-
-  std::unique_ptr<cast_receiver::RuntimeApplication> const runtime_application_;
 
   base::WeakPtrFactory<RuntimeApplicationServiceImpl> weak_factory_{this};
 };

@@ -5,10 +5,11 @@
 #ifndef CHROMEOS_VERSION_VERSION_LOADER_H_
 #define CHROMEOS_VERSION_VERSION_LOADER_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/component_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace chromeos {
 namespace version_loader {
@@ -22,20 +23,20 @@ enum VersionFormat {
 // Gets the version.
 // If |full_version| is true version string with extra info is extracted,
 // otherwise it's in short format x.x.xx.x.
-// If not found returns absl::nullopt.
+// If not found returns std::nullopt.
 // May block.
 COMPONENT_EXPORT(CHROMEOS_VERSION)
-absl::optional<std::string> GetVersion(VersionFormat format);
+std::optional<std::string> GetVersion(VersionFormat format);
 
 // Gets the ARC version.
 // May block.
 COMPONENT_EXPORT(CHROMEOS_VERSION) std::string GetArcVersion();
 
 // Gets the ARC Android SDK version.
-// If not found returns absl::nullopt.
+// If not found returns std::nullopt.
 // May block.
 COMPONENT_EXPORT(CHROMEOS_VERSION)
-absl::optional<std::string> GetArcAndroidSdkVersion();
+std::optional<std::string> GetArcAndroidSdkVersion();
 
 // Gets the firmware info.
 // May block.
@@ -43,7 +44,7 @@ COMPONENT_EXPORT(CHROMEOS_VERSION) std::string GetFirmware();
 
 // Extracts the firmware from the file.
 COMPONENT_EXPORT(CHROMEOS_VERSION)
-std::string ParseFirmware(const std::string& contents);
+std::string ParseFirmware(std::string_view contents);
 
 // Returns true if |new_version| is older than |current_version|.
 // Version numbers should be dot separated. The sections are compared as
@@ -51,8 +52,7 @@ std::string ParseFirmware(const std::string& contents);
 // precedence. If one version is prefix of another, the shorter one is
 // considered older. (See test for examples.)
 COMPONENT_EXPORT(CHROMEOS_VERSION)
-bool IsRollback(const std::string& current_version,
-                const std::string& new_version);
+bool IsRollback(std::string_view current_version, std::string_view new_version);
 
 }  // namespace version_loader
 }  // namespace chromeos

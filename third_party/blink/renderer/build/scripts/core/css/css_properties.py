@@ -17,7 +17,7 @@ import copy
 # if applicable.
 PRIMITIVE_TYPES = [
     'short', 'unsigned short', 'int', 'unsigned int', 'unsigned', 'float',
-    'LineClampValue'
+    'LineClampValue', 'uint16_t'
 ]
 
 
@@ -53,15 +53,15 @@ def validate_property(prop, props_by_name):
         'Only longhands can be valid_for_cue [%s]' % name
     assert not prop.valid_for_marker or prop.is_longhand, \
         'Only longhands can be valid_for_marker [%s]' % name
-    assert not prop.valid_for_highlight_legacy or prop.is_longhand, \
-        'Only longhands can be valid_for_highlight_legacy [%s]' % name
     assert not prop.valid_for_highlight or prop.is_longhand, \
         'Only longhands can be valid_for_highlight [%s]' % name
+    assert not prop.tracks_animated_source or prop.is_longhand, \
+        'Only longhands can have tracks_animated_source [%s]' % name
     assert not prop.is_internal or prop.computable is None, \
         'Internal properties are always non-computable [%s]' % name
+    assert not has_method('ParseSingleValue') or not prop.field_template == 'keyword', \
+        'When using the keyword template, implement parsing in css_parser_fast_paths.cc [%s]' % name
     if prop.supports_incremental_style:
-        assert not prop.inherited, \
-            'We do not currently support incremental style on inherited properties [%s]' % name
         assert not prop.is_animation_property, \
             'Animation properties can not be applied incrementally [%s]' % name
         assert prop.idempotent, \
@@ -71,10 +71,6 @@ def validate_property(prop, props_by_name):
                 subprop = props_by_name[subprop_name]
                 assert subprop.supports_incremental_style, \
                     '%s must be incrementally applicable when its shorthand %s is' % (subprop_name, name)
-    assert not prop.valid_for_formatted_text or prop.is_longhand, \
-        'Only longhands can be valid_for_formatted_text [%s]' % name
-    assert not prop.valid_for_formatted_text_run or prop.is_longhand, \
-        'Only longhands can be valid_for_formatted_text_run [%s]' % name
     if prop.alias_for:
         assert not prop.is_internal, \
             'Internal aliases not supported [%s]' % name
@@ -90,7 +86,11 @@ def validate_property(prop, props_by_name):
     if prop.field_template == 'derived_flag':
         assert prop.mutable, 'Derived flags must be mutable [%s]' % name
         assert not prop.field_group, 'Derived flags may not have field groups [%s]' % name
-        assert prop.custom_copy, 'Derived flags must have custom_copy [%s]' % name
+        assert prop.reset_on_new_style, 'Derived flags must have reset_on_new_style [%s]' % name
+    if prop.is_logical:
+        assert not prop.field_group, 'Logical properties can not have fields [%s]' % name
+    if prop.is_animation_property:
+        assert prop.is_animation_affecting, 'Animation properties must always be animation-affecting [%s]' % name
 
 # Determines whether or not style builders (i.e. Apply functions)
 # should be generated for the given property.
@@ -166,6 +166,49 @@ class PropertyBase(object):
             and not self.runtime_flag \
             and not self.alternative
 
+    @property
+    def effective_is_animation_affecting(self):
+        """True if this property may not be animated.
+
+        Internal properties are not animatable because they should not be exposed
+        to the page/author in the first place."""
+        return self.is_animation_affecting or self.is_internal
+
+    @property
+    def ultimate_property(self):
+        """Returns the ultimate property, which is the final property
+            in the alternative_of chain."""
+        if self.alternative_of:
+            return self.alternative_of.ultimate_property
+        return self
+
+    @property
+    def css_sample_id(self):
+        """Returns the CSSSampleId to use for this property."""
+        # Alternative properties use the same use-counter as the
+        # corresponding ultimate main property. In other words, alternative
+        # properties are use-counted the same way as their main properties.
+        return self.ultimate_property.enum_key
+
+    @property
+    def may_be_affected_by_transition_all(self):
+        """Whether the property may be affected by transition: all.
+
+        See ComputedStyleBase::TransitionAllDiff() for caveats."""
+        return self.interpolable and not self.is_internal
+
+    @property
+    def may_be_affected_by_transition_all_discrete(self):
+        """Whether the property may be affected by transition: all if discrete.
+
+        Notably, this excludes everything marked may_be_affected_by_transition_all
+        (it is exclusive). See TransitionAllWithDiscreteDiff() for why."""
+        return \
+           not self.effective_is_animation_affecting \
+           and not self.is_shorthand \
+           and not self.is_internal \
+           and not self.is_extra_field \
+           and not self.may_be_affected_by_transition_all
 
 def generate_property_field(default):
     # Must use 'default_factory' rather than 'default' for list/dict.
@@ -190,11 +233,12 @@ def generate_property_class(parameters):
     additional = {
         'aliases': [],
         'custom_compare': False,
-        'custom_copy': False,
+        'reset_on_new_style': False,
         'mutable': False,
         'name': None,
         'alternative': None,
         'visited_property': None,
+        'is_extra_field': False,
     }
 
     fields += additional.items()
@@ -268,6 +312,8 @@ class CSSProperties(object):
             self._extra_fields = [
                 Property(**x) for x in fields.name_dictionaries
             ]
+            for property_ in self._extra_fields:
+                property_.is_extra_field = True
 
         self._properties_by_name = {p.name.original: p for p in properties}
 
@@ -292,16 +338,23 @@ class CSSProperties(object):
             if (not property_.alias_for and not property_.longhands)
         ]
 
-        # Sort the properties by priority, then alphabetically. Ensure that
-        # the resulting order is deterministic.
-        # Sort properties by priority, then alphabetically.
+        # Sort the properties by priority, then internal-visited first,
+        # then alphabetically. Ensures that the resulting order is deterministic.
+        # (internal-visited is because we want to fit their number into an
+        # uint8_t for kPropertyVisitedIDs.)
         for property_ in self._longhands + self._shorthands:
-            priority_numbers = {'High': 0, 'Low': 1}
-            priority = priority_numbers[property_.priority]
             name_without_leading_dash = property_.name.original
             if name_without_leading_dash.startswith('-'):
                 name_without_leading_dash = name_without_leading_dash[1:]
-            property_.sorting_key = (priority, name_without_leading_dash)
+            internal_visited_order = 1
+            if name_without_leading_dash.startswith(
+                    'internal-visited-'
+            ) or name_without_leading_dash.startswith(
+                    'internal-forced-visited-'):
+                internal_visited_order = 0
+            property_.sorting_key = (-property_.priority,
+                                     internal_visited_order,
+                                     name_without_leading_dash)
 
         sorting_keys = {}
         for property_ in self._longhands + self._shorthands:
@@ -324,7 +377,7 @@ class CSSProperties(object):
                 ('property with ID {} appears more than once in the '
                  'properties list'.format(property_.property_id))
             self._properties_by_id[property_.property_id] = property_
-            if property_.priority == 'High':
+            if property_.priority > 0:
                 self._last_high_priority_property = property_
 
         self._alias_offset = self._last_used_enum_value
@@ -352,6 +405,12 @@ class CSSProperties(object):
         assert not unvisited_property.visited_property, \
             'A property may not have multiple visited properties'
         unvisited_property.visited_property = property_
+        # NOTE: Currently, we note that a property is valid for :visited
+        # iff it has a corresponding -internal-visited-* property
+        # (i.e., some other property is visited_property_for it). Once
+        # those properties go away, we will need to make this flag explicit
+        # on the (unvisited) property instead.
+        unvisited_property.valid_for_visited = True
 
     def set_derived_surrogate_attributes(self, property_):
         if not property_.surrogate_for:
@@ -384,6 +443,7 @@ class CSSProperties(object):
             updated_alias.alternative = alias.alternative
             updated_alias.aliased_property = aliased_property.name.to_upper_camel_case(
             )
+            updated_alias.computable = alias.computable
             updated_alias.property_id = id_for_css_property_alias(alias.name)
             updated_alias.enum_key = enum_key_for_css_property_alias(
                 alias.name)
@@ -394,17 +454,23 @@ class CSSProperties(object):
                 'Shorthand' if aliased_property.longhands else 'Longhand'
             self._aliases[i] = updated_alias
 
-        # The above loop produces an "updated" alias for each (incoming) alias.
-        # The alternative_of/alternative references must be updated to point to
-        # the respective "updated" aliases.
         updated_aliases_by_name = {a.name: a for a in self._aliases}
-        for alias in self._aliases:
-            if alias.alternative_of:
-                alias.alternative_of = updated_aliases_by_name[
-                    alias.alternative_of.name]
-            if alias.alternative:
-                alias.alternative = updated_aliases_by_name[
-                    alias.alternative.name]
+
+        # The above loop produces an "updated" alias for each (incoming) alias.
+        # Any alternative_of/alternative references that point to aliases
+        # must be updated to point to the respective "updated" aliases.
+        def update_alternatives(properties):
+            for _property in properties:
+                if _property.alternative_of and _property.alternative_of.alias_for:
+                    _property.alternative_of = updated_aliases_by_name[
+                        _property.alternative_of.name]
+                if _property.alternative and _property.alternative.alias_for:
+                    _property.alternative = updated_aliases_by_name[
+                        _property.alternative.name]
+
+        update_alternatives(self.longhands)
+        update_alternatives(self.shorthands)
+        update_alternatives(self.aliases)
 
     def set_derived_attributes(self, property_):
         """Set new attributes on 'property_', based on existing attribute values
@@ -490,6 +556,9 @@ class CSSProperties(object):
         else:
             set_if_none(property_, 'converter', 'CSSIdentifierValue')
 
+        if property_.anchor_mode:
+            property_.anchor_mode = NameStyleConverter(property_.anchor_mode)
+
         if not property_.longhands:
             property_.superclass = 'Longhand'
             property_.namespace_group = 'Longhand'
@@ -502,9 +571,9 @@ class CSSProperties(object):
             self._field_alias_expander.expand_field_alias(property_)
 
             type_name = property_.type_name
-            if (property_.field_template == 'keyword'
-                    or property_.field_template == 'multi_keyword'
-                    or property_.field_template == 'bitset_keyword'):
+            if (property_.field_template
+                    in ('keyword', 'keyword_custom', 'multi_keyword',
+                        'bitset_keyword')):
                 default_value = (type_name + '::' + NameStyleConverter(
                     property_.default_value).to_enum_value())
             elif (property_.field_template == 'external'
@@ -530,12 +599,16 @@ class CSSProperties(object):
                         property_.wrapper_pointer_name, type_name)
 
         # Default values for extra parameters in computed_style_extra_fields.json5.
-        set_if_none(property_, 'custom_copy', False)
+        set_if_none(property_, 'reset_on_new_style', False)
         set_if_none(property_, 'custom_compare', False)
         set_if_none(property_, 'mutable', False)
 
         property_.in_origin_trial = property_.runtime_flag and \
             property_.runtime_flag in self._origin_trial_features
+
+        assert not property_.is_shorthand or not property_.in_origin_trial, \
+            'Shorthand property [%s] cannot be controlled by an origin trial. See https://crbug.com/425974279' \
+            % property_.name
 
         self.set_derived_visited_attributes(property_)
         self.set_derived_surrogate_attributes(property_)
@@ -551,7 +624,12 @@ class CSSProperties(object):
 
     @property
     def computable(self):
-        is_prefixed = lambda p: p.name.original.startswith('-')
+        # Use the name of the ultimate property as the sorting key,
+        # otherwise '-alternative-foo' will sort according to
+        # '-alternative-...', when it will really be exposed to
+        # parsing/serialization as just 'foo'.
+        sorting_name = lambda p: p.ultimate_property.name.original
+        is_prefixed = lambda p: sorting_name(p).startswith('-')
         is_not_prefixed = lambda p: not is_prefixed(p)
 
         prefixed = filter(is_prefixed, self._properties_including_aliases)
@@ -574,10 +652,16 @@ class CSSProperties(object):
         prefixed = filter(is_computable, prefixed)
         unprefixed = filter(is_computable, unprefixed)
 
-        original_name = lambda x: x.name.original
+        return sorted(unprefixed, key=sorting_name) + \
+            sorted(prefixed, key=sorting_name)
 
-        return sorted(unprefixed, key=original_name) + \
-            sorted(prefixed, key=original_name)
+    @property
+    def includes_currentcolor(self):
+        return [p for p in self._longhands if p.includes_currentcolor]
+
+    @property
+    def tracks_animated_source(self):
+        return [p for p in self._longhands if p.tracks_animated_source]
 
     @property
     def shorthands(self):

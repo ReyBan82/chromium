@@ -9,9 +9,9 @@
 #include <vector>
 
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
 #include "chrome/browser/extensions/chrome_extension_function_details.h"
 #include "chrome/common/extensions/api/quick_unlock_private.h"
+#include "chromeos/ash/components/cryptohome/auth_factor.h"
 #include "extensions/browser/extension_function.h"
 
 namespace ash {
@@ -39,8 +39,8 @@ class QuickUnlockPrivateGetAuthTokenFunction : public ExtensionFunction {
   // ExtensionFunction overrides.
   ResponseAction Run() override;
 
-  void OnResult(absl::optional<api::quick_unlock_private::TokenInfo> token_info,
-                absl::optional<ash::AuthenticationError> error);
+  void OnResult(std::optional<api::quick_unlock_private::TokenInfo> token_info,
+                std::optional<ash::AuthenticationError> error);
 
  private:
   ChromeExtensionFunctionDetails chrome_details_;
@@ -111,7 +111,9 @@ class QuickUnlockPrivateCanAuthenticatePinFunction : public ExtensionFunction {
   ResponseAction Run() override;
 
  private:
-  void HandleCanAuthenticateResult(bool result);
+  void HandleCanAuthenticateResult(
+      bool result,
+      cryptohome::PinLockAvailability available_at);
 
   ChromeExtensionFunctionDetails chrome_details_;
 };
@@ -198,6 +200,11 @@ class QuickUnlockPrivateGetCredentialRequirementsFunction
   ResponseAction Run() override;
 };
 
+// TODO(crbug.com/258481055): This particular Extension function isn't being
+// used in production code anymore, so it could in theory be removed, but
+// unfortunately it is still being used in one Autotest and one Tast test.
+// Those dependencies could be removed, but that requires additional work. See
+// the attached bug for more details.
 class QuickUnlockPrivateSetModesFunction : public ExtensionFunction {
  public:
   using QuickUnlockMode =
@@ -239,7 +246,7 @@ class QuickUnlockPrivateSetModesFunction : public ExtensionFunction {
   void FireEvent(const std::vector<QuickUnlockMode>& modes);
 
   ChromeExtensionFunctionDetails chrome_details_;
-  std::unique_ptr<api::quick_unlock_private::SetModes::Params> params_;
+  std::optional<api::quick_unlock_private::SetModes::Params> params_;
 
   std::vector<QuickUnlockMode> initial_modes_;
 

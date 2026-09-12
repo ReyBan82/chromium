@@ -4,17 +4,17 @@
 
 #include "third_party/blink/renderer/core/loader/resource_load_observer_for_frame.h"
 
-#include "base/metrics/histogram_macros.h"
+#include <optional>
+
+#include "base/numerics/safe_conversions.h"
 #include "base/types/optional_util.h"
-#include "components/power_scheduler/power_mode_arbiter.h"
 #include "services/network/public/cpp/cors/cors_error_status.h"
 #include "services/network/public/mojom/cors.mojom-forward.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/security/address_space_feature.h"
 #include "third_party/blink/public/mojom/frame/frame.mojom-blink.h"
 #include "third_party/blink/renderer/core/core_probes_inl.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
-#include "third_party/blink/renderer/core/frame/attribution_src_loader.h"
+#include "third_party/blink/renderer/core/execution_context/agent.h"
 #include "third_party/blink/renderer/core/frame/deprecation/deprecation.h"
 #include "third_party/blink/renderer/core/frame/frame_console.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
@@ -31,10 +31,10 @@
 #include "third_party/blink/renderer/core/loader/mixed_content_checker.h"
 #include "third_party/blink/renderer/core/loader/preload_helper.h"
 #include "third_party/blink/renderer/core/loader/progress_tracker.h"
-#include "third_party/blink/renderer/core/loader/subresource_filter.h"
 #include "third_party/blink/renderer/platform/bindings/v8_dom_activity_logger.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_client_settings_object.h"
+#include "third_party/blink/renderer/platform/loader/fetch/fetch_context.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_initiator_info.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_initiator_type_names.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_parameters.h"
@@ -50,9 +50,9 @@ namespace {
 
 // The list of features which should be reported as deprecated.
 constexpr WebFeature kDeprecatedAddressSpaceFeatures[] = {
-    WebFeature::kAddressSpacePublicNonSecureContextEmbeddedPrivate,
-    WebFeature::kAddressSpacePublicNonSecureContextEmbeddedLocal,
-    WebFeature::kAddressSpacePrivateNonSecureContextEmbeddedLocal,
+    WebFeature::kAddressSpacePublicNonSecureContextEmbeddedLocalV2,
+    WebFeature::kAddressSpacePublicNonSecureContextEmbeddedLoopbackV2,
+    WebFeature::kAddressSpaceLocalNonSecureContextEmbeddedLoopbackV2,
 };
 
 // Returns whether |feature| is deprecated.
@@ -82,7 +82,7 @@ void RecordAddressSpaceFeature(LocalFrame* client_frame,
     UseCounter::Count(window, WebFeature::kPrivateNetworkAccessNullIpAddress);
   }
 
-  absl::optional<WebFeature> feature = AddressSpaceFeature(
+  std::optional<WebFeature> feature = AddressSpaceFeature(
       FetchType::kSubresource, response.ClientAddressSpace(),
       window->IsSecureContext(), response.AddressSpace());
   if (!feature.has_value()) {
@@ -106,10 +106,7 @@ ResourceLoadObserverForFrame::ResourceLoadObserverForFrame(
     DocumentLoader& loader,
     Document& document,
     const ResourceFetcherProperties& fetcher_properties)
-    : power_mode_voter_(
-          power_scheduler::PowerModeArbiter::GetInstance()->NewVoter(
-              "PowerModeVoter.ResourceLoads")),
-      document_loader_(loader),
+    : document_loader_(loader),
       document_(document),
       fetcher_properties_(fetcher_properties) {}
 ResourceLoadObserverForFrame::~ResourceLoadObserverForFrame() = default;
@@ -123,18 +120,19 @@ void ResourceLoadObserverForFrame::DidStartRequest(
       !params.IsSpeculativePreload()) {
     V8DOMActivityLogger* activity_logger = nullptr;
     const AtomicString& initiator_name = params.Options().initiator_info.name;
+    v8::Isolate* isolate = document_->GetAgent().isolate();
     if (initiator_name == fetch_initiator_type_names::kXmlhttprequest) {
-      activity_logger = V8DOMActivityLogger::CurrentActivityLogger();
+      activity_logger = V8DOMActivityLogger::CurrentActivityLogger(isolate);
     } else {
       activity_logger =
-          V8DOMActivityLogger::CurrentActivityLoggerIfIsolatedWorld();
+          V8DOMActivityLogger::CurrentActivityLoggerIfIsolatedWorld(isolate);
     }
     if (activity_logger) {
       Vector<String> argv = {
           Resource::ResourceTypeToString(resource_type, initiator_name),
           params.Url()};
-      activity_logger->LogEvent("blinkRequestResource", argv.size(),
-                                argv.data());
+      activity_logger->LogEvent(document_->GetExecutionContext(),
+                                "blinkRequestResource", argv);
     }
   }
 }
@@ -155,25 +153,15 @@ void ResourceLoadObserverForFrame::WillSendRequest(
                                                 request.Priority());
   }
 
-  if (!redirect_response.IsNull() &&
-      !redirect_response.HttpHeaderField(http_names::kExpectCT).empty()) {
-    Deprecation::CountDeprecation(frame->DomWindow(),
-                                  mojom::blink::WebFeature::kExpectCTHeader);
-  }
-
-  frame->GetAttributionSrcLoader()->MaybeRegisterAttributionHeaders(
-      request, redirect_response, resource);
-
   probe::WillSendRequest(
-      GetProbe(), document_loader_,
+      document_->domWindow(), document_loader_,
       fetcher_properties_->GetFetchClientSettingsObject().GlobalObjectUrl(),
       request, redirect_response, options, resource_type,
       render_blocking_behavior, base::TimeTicks::Now());
   if (auto* idleness_detector = frame->GetIdlenessDetector())
     idleness_detector->OnWillSendRequest(document_->Fetcher());
   if (auto* interactive_detector = InteractiveDetector::From(*document_))
-    interactive_detector->OnResourceLoadBegin(absl::nullopt);
-  UpdatePowerModeVote();
+    interactive_detector->OnResourceLoadBegin(std::nullopt);
 }
 
 void ResourceLoadObserverForFrame::DidChangePriority(
@@ -187,50 +175,6 @@ void ResourceLoadObserverForFrame::DidChangePriority(
                                    identifier, priority);
 }
 
-namespace {
-
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-//
-// Must remain in sync with LinkPrefetchMimeType in
-// tools/metrics/histograms/enums.xml.
-enum class LinkPrefetchMimeType {
-  kUnknown = 0,
-  kHtml = 1,
-  kScript = 2,
-  kStyle = 3,
-  kFont = 4,
-  kImage = 5,
-  kMedia = 6,
-  kMaxValue = kMedia,
-};
-
-void LogLinkPrefetchMimeTypeHistogram(const AtomicString& mime) {
-  // Loosely based on https://mimesniff.spec.whatwg.org/#mime-type-groups.
-  // This could be done properly if needed, but this is just to gather
-  // approximate data.
-  LinkPrefetchMimeType type = LinkPrefetchMimeType::kUnknown;
-  if (mime == "text/html" || mime == "application/xhtml+xml") {
-    type = LinkPrefetchMimeType::kHtml;
-  } else if (mime == "application/javascript" || mime == "text/javascript") {
-    type = LinkPrefetchMimeType::kScript;
-  } else if (mime == "text/css") {
-    type = LinkPrefetchMimeType::kStyle;
-  } else if (mime.StartsWith("font/") || mime.StartsWith("application/font-") ||
-             mime == "application/vnd.ms-fontobject" ||
-             mime == "application/vnd.ms-opentype") {
-    type = LinkPrefetchMimeType::kFont;
-  } else if (mime.StartsWith("image/")) {
-    type = LinkPrefetchMimeType::kImage;
-  } else if (mime.StartsWith("audio/") || mime.StartsWith("video/") ||
-             mime == "application/ogg") {
-    type = LinkPrefetchMimeType::kMedia;
-  }
-  UMA_HISTOGRAM_ENUMERATION("Blink.Prefetch.LinkPrefetchMimeType", type);
-}
-
-}  // namespace
-
 void ResourceLoadObserverForFrame::DidReceiveResponse(
     uint64_t identifier,
     const ResourceRequest& request,
@@ -239,11 +183,23 @@ void ResourceLoadObserverForFrame::DidReceiveResponse(
     ResponseSource response_source) {
   LocalFrame* frame = document_->GetFrame();
   DCHECK(frame);
+
+  // Track resource metrics by identifier for byte tracking in DidReceiveData.
+  // Only track resources that actually have responses and will send data.
+  if (!guardrails_policy_state_initialized_) {
+    guardrails_policy_state_ =
+        document_->GetExecutionContext()->GetGuardrailsPolicyState();
+    guardrails_policy_state_initialized_ = true;
+  }
+  if (guardrails_policy_state_.has_value() && resource &&
+      resource->GetType() == ResourceType::kImage &&
+      response_source != ResponseSource::kFromMemoryCache) {
+    KURL resource_url = resource ? resource->Url() : request.Url();
+    resource_metrics_by_identifier_.Set(identifier,
+                                        ResourceMetrics(resource_url));
+  }
+
   LocalFrameClient* frame_client = frame->Client();
-  SubresourceFilter* subresource_filter =
-      document_loader_->GetSubresourceFilter();
-  if (subresource_filter && resource->GetResourceRequest().IsAdResource())
-    subresource_filter->ReportAdRequestId(response.RequestId());
 
   DCHECK(frame_client);
   if (response_source == ResponseSource::kFromMemoryCache) {
@@ -252,10 +208,10 @@ void ResourceLoadObserverForFrame::DidReceiveResponse(
     if (!resource_request.Url().ProtocolIs(url::kDataScheme)) {
       frame_client->DispatchDidLoadResourceFromMemoryCache(resource_request,
                                                            response);
+      auto scrub_null = [](const String& s) { return s ? s : g_empty_string; };
       frame->GetLocalFrameHostRemote().DidLoadResourceFromMemoryCache(
-          resource_request.Url(),
-          String::FromUTF8(resource_request.HttpMethod().Utf8()),
-          String::FromUTF8(response.MimeType().Utf8()),
+          resource_request.Url(), scrub_null(resource_request.HttpMethod()),
+          scrub_null(response.MimeType()),
           resource_request.GetRequestDestination(),
           response.RequestIncludeCredentials());
     }
@@ -267,11 +223,6 @@ void ResourceLoadObserverForFrame::DidReceiveResponse(
   }
 
   RecordAddressSpaceFeature(frame, response);
-
-  if (!response.HttpHeaderField(http_names::kExpectCT).empty()) {
-    Deprecation::CountDeprecation(frame->DomWindow(),
-                                  mojom::blink::WebFeature::kExpectCTHeader);
-  }
 
   document_->Loader()->MaybeRecordServiceWorkerFallbackMainResource(
       response.WasFetchedViaServiceWorker());
@@ -297,20 +248,17 @@ void ResourceLoadObserverForFrame::DidReceiveResponse(
   // Count usage of Content-Disposition header in SVGUse resources.
   if (resource->Options().initiator_info.name ==
           fetch_initiator_type_names::kUse &&
-      request.Url().ProtocolIsInHTTPFamily() && response.IsAttachment()) {
+      request.Url().ProtocolIsInHttpFamily() && response.IsAttachment()) {
     CountUsage(WebFeature::kContentDispositionInSvgUse);
   }
 
-  if (resource->GetType() == ResourceType::kLinkPrefetch)
-    LogLinkPrefetchMimeTypeHistogram(response.MimeType());
-
-  PreloadHelper::CanLoadResources resource_loading_policy =
-      response_source == ResponseSource::kFromMemoryCache
-          ? PreloadHelper::kDoNotLoadResources
-          : PreloadHelper::kLoadResourcesAndPreconnect;
   PreloadHelper::LoadLinksFromHeader(
       response.HttpHeaderField(http_names::kLink), response.CurrentRequestUrl(),
-      *frame, document_, resource_loading_policy, PreloadHelper::kLoadAll,
+      *frame, document_,
+      response_source == ResponseSource::kFromMemoryCache
+          ? PreloadHelper::LoadLinksFromHeaderMode::kSubresourceFromMemoryCache
+          : PreloadHelper::LoadLinksFromHeaderMode::
+                kSubresourceNotFromMemoryCache,
       nullptr /* viewport_description */, std::move(alternate_resource_info),
       base::OptionalToPtr(response.RecursivePrefetchToken()));
 
@@ -321,9 +269,6 @@ void ResourceLoadObserverForFrame::DidReceiveResponse(
         document_loader_->GetContentSecurityNotifier());
   }
 
-  frame->GetAttributionSrcLoader()->MaybeRegisterAttributionHeaders(
-      request, response, resource);
-
   frame->Loader().Progress().IncrementProgress(identifier, response);
   probe::DidReceiveResourceResponse(GetProbe(), identifier, document_loader_,
                                     response, resource);
@@ -332,14 +277,31 @@ void ResourceLoadObserverForFrame::DidReceiveResponse(
                                                   response);
 }
 
+void ResourceLoadObserverForFrame::CheckGuardrailsPolicyForSizeLimit(
+    uint64_t identifier,
+    uint64_t bytes) {
+  auto metrics_it = resource_metrics_by_identifier_.find(identifier);
+  if (metrics_it != resource_metrics_by_identifier_.end()) {
+    ResourceMetrics& metrics = metrics_it->value;
+    metrics.accumulated_bytes += bytes;
+
+    if (document_->GetExecutionContext()->CheckGuardrailsPolicyForAssetSize(
+            GuardrailPolicyAssetType::kImage,
+            base::saturated_cast<size_t>(metrics.accumulated_bytes),
+            metrics.url)) {
+      resource_metrics_by_identifier_.erase(identifier);
+    }
+  }
+}
+
 void ResourceLoadObserverForFrame::DidReceiveData(
     uint64_t identifier,
-    base::span<const char> chunk) {
+    base::SpanOrSize<const char> chunk) {
   LocalFrame* frame = document_->GetFrame();
   DCHECK(frame);
   frame->Loader().Progress().IncrementProgress(identifier, chunk.size());
-  probe::DidReceiveData(GetProbe(), identifier, document_loader_, chunk.data(),
-                        chunk.size());
+  CheckGuardrailsPolicyForSizeLimit(identifier, chunk.size());
+  probe::DidReceiveData(GetProbe(), identifier, document_loader_, chunk);
 }
 
 void ResourceLoadObserverForFrame::DidReceiveTransferSizeUpdate(
@@ -361,14 +323,13 @@ void ResourceLoadObserverForFrame::DidFinishLoading(
     uint64_t identifier,
     base::TimeTicks finish_time,
     int64_t encoded_data_length,
-    int64_t decoded_body_length,
-    bool should_report_corb_blocking) {
+    int64_t decoded_body_length) {
   LocalFrame* frame = document_->GetFrame();
   DCHECK(frame);
   frame->Loader().Progress().CompleteProgress(identifier);
+  resource_metrics_by_identifier_.erase(identifier);
   probe::DidFinishLoading(GetProbe(), identifier, document_loader_, finish_time,
-                          encoded_data_length, decoded_body_length,
-                          should_report_corb_blocking);
+                          encoded_data_length, decoded_body_length);
 
   if (auto* interactive_detector = InteractiveDetector::From(*document_)) {
     interactive_detector->OnResourceLoadEnd(finish_time);
@@ -376,7 +337,6 @@ void ResourceLoadObserverForFrame::DidFinishLoading(
   if (IdlenessDetector* idleness_detector = frame->GetIdlenessDetector()) {
     idleness_detector->OnDidLoadResource();
   }
-  UpdatePowerModeVote();
   document_->CheckCompleted();
 }
 
@@ -389,6 +349,7 @@ void ResourceLoadObserverForFrame::DidFailLoading(
   LocalFrame* frame = document_->GetFrame();
   DCHECK(frame);
   frame->Loader().Progress().CompleteProgress(identifier);
+  resource_metrics_by_identifier_.erase(identifier);
 
   probe::DidFailLoading(GetProbe(), identifier, document_loader_, error,
                         frame->GetDevToolsFrameToken());
@@ -401,28 +362,33 @@ void ResourceLoadObserverForFrame::DidFailLoading(
   if (auto* interactive_detector = InteractiveDetector::From(*document_)) {
     // We have not yet recorded load_finish_time. Pass nullopt here; we will
     // call base::TimeTicks::Now() lazily when we need it.
-    interactive_detector->OnResourceLoadEnd(absl::nullopt);
+    interactive_detector->OnResourceLoadEnd(std::nullopt);
   }
   if (IdlenessDetector* idleness_detector = frame->GetIdlenessDetector()) {
     idleness_detector->OnDidLoadResource();
   }
-  UpdatePowerModeVote();
   document_->CheckCompleted();
 }
 
 void ResourceLoadObserverForFrame::DidChangeRenderBlockingBehavior(
     Resource* resource,
     const FetchParameters& params) {
-  TRACE_EVENT_INSTANT_WITH_TIMESTAMP1(
+  TRACE_EVENT_INSTANT(
       "devtools.timeline", "PreloadRenderBlockingStatusChange",
-      TRACE_EVENT_SCOPE_THREAD, base::TimeTicks::Now(), "data",
-      [&](perfetto::TracedValue ctx) {
+      base::TimeTicks::Now(), "data", [&](perfetto::TracedValue ctx) {
         inspector_change_render_blocking_behavior_event::Data(
             std::move(ctx), document_->Loader(),
             resource->GetResourceRequest().InspectorId(),
             resource->GetResourceRequest(),
             params.GetResourceRequest().GetRenderBlockingBehavior());
       });
+}
+
+bool ResourceLoadObserverForFrame::InterestedInAllRequests() {
+  if (GetProbe()) {
+    return GetProbe()->HasInspectorNetworkAgents();
+  }
+  return false;
 }
 
 void ResourceLoadObserverForFrame::Trace(Visitor* visitor) const {
@@ -438,24 +404,6 @@ CoreProbeSink* ResourceLoadObserverForFrame::GetProbe() {
 
 void ResourceLoadObserverForFrame::CountUsage(WebFeature feature) {
   document_loader_->GetUseCounter().Count(feature, document_->GetFrame());
-}
-
-void ResourceLoadObserverForFrame::UpdatePowerModeVote() {
-  // Vote for loading as long as there are at least three pending requests.
-  int request_count = document_->Fetcher()->ActiveRequestCount();
-  bool should_vote_loading = request_count > 2;
-
-  if (should_vote_loading == power_mode_vote_is_loading_)
-    return;
-
-  if (should_vote_loading) {
-    power_mode_voter_->VoteFor(power_scheduler::PowerMode::kLoading);
-  } else {
-    power_mode_voter_->ResetVoteAfterTimeout(
-        power_scheduler::PowerModeVoter::kLoadingTimeout);
-  }
-
-  power_mode_vote_is_loading_ = should_vote_loading;
 }
 
 }  // namespace blink

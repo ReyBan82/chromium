@@ -6,6 +6,7 @@
 
 #include "components/autofill/core/browser/logging/log_router.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
+#include "components/password_manager/core/browser/features/password_features.h"
 
 namespace password_manager {
 
@@ -14,14 +15,20 @@ using autofill::LogRouter;
 // static
 LogRouter* PasswordManagerLogRouterFactory::GetForBrowserContext(
     content::BrowserContext* context) {
-  return static_cast<LogRouter*>(
+  LogRouter* log_router = static_cast<LogRouter*>(
       GetInstance()->GetServiceForBrowserContext(context, /* create = */ true));
+  if (base::FeatureList::IsEnabled(
+          password_manager::features::kPasswordManagerLogToTerminal)) {
+    log_router->LogToTerminal();
+  }
+  return log_router;
 }
 
 // static
 PasswordManagerLogRouterFactory*
 PasswordManagerLogRouterFactory::GetInstance() {
-  return base::Singleton<PasswordManagerLogRouterFactory>::get();
+  static base::NoDestructor<PasswordManagerLogRouterFactory> instance;
+  return instance.get();
 }
 
 PasswordManagerLogRouterFactory::PasswordManagerLogRouterFactory()
@@ -31,9 +38,10 @@ PasswordManagerLogRouterFactory::PasswordManagerLogRouterFactory()
 
 PasswordManagerLogRouterFactory::~PasswordManagerLogRouterFactory() = default;
 
-KeyedService* PasswordManagerLogRouterFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+PasswordManagerLogRouterFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* /* context */) const {
-  return new LogRouter();
+  return std::make_unique<LogRouter>();
 }
 
 }  // namespace password_manager

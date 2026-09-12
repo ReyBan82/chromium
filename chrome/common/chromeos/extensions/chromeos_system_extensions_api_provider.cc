@@ -5,6 +5,7 @@
 #include "chrome/common/chromeos/extensions/chromeos_system_extensions_api_provider.h"
 
 #include <memory>
+#include <string_view>
 
 #include "base/logging.h"
 #include "chrome/common/chromeos/extensions/api/api_features.h"
@@ -17,12 +18,13 @@
 #include "extensions/common/features/feature_provider.h"
 #include "extensions/common/features/json_feature_provider_source.h"
 #include "extensions/common/manifest_handler.h"
+#include "extensions/common/manifest_handler_registry.h"
 #include "extensions/common/permissions/permissions_info.h"
 
 namespace chromeos {
 
-ChromeOSSystemExtensionsAPIProvider::ChromeOSSystemExtensionsAPIProvider()
-    : registry_(extensions::ManifestHandlerRegistry::Get()) {}
+ChromeOSSystemExtensionsAPIProvider::ChromeOSSystemExtensionsAPIProvider() =
+    default;
 
 ChromeOSSystemExtensionsAPIProvider::~ChromeOSSystemExtensionsAPIProvider() =
     default;
@@ -54,12 +56,12 @@ void ChromeOSSystemExtensionsAPIProvider::AddAPIJSONSources(
 
 bool ChromeOSSystemExtensionsAPIProvider::IsAPISchemaGenerated(
     const std::string& name) {
-  return api::ChromeOSGeneratedSchemas::IsGenerated(name);
+  return api::ChromeOSSystemExtensionsGeneratedSchemas::IsGenerated(name);
 }
 
-base::StringPiece ChromeOSSystemExtensionsAPIProvider::GetAPISchema(
+std::string_view ChromeOSSystemExtensionsAPIProvider::GetAPISchema(
     const std::string& name) {
-  return api::ChromeOSGeneratedSchemas::Get(name);
+  return api::ChromeOSSystemExtensionsGeneratedSchemas::Get(name);
 }
 
 void ChromeOSSystemExtensionsAPIProvider::RegisterPermissions(
@@ -69,11 +71,11 @@ void ChromeOSSystemExtensionsAPIProvider::RegisterPermissions(
       base::span<const extensions::Alias>());
 }
 
-void ChromeOSSystemExtensionsAPIProvider::RegisterManifestHandlers() {
+void ChromeOSSystemExtensionsAPIProvider::RegisterManifestHandlers(
+    extensions::ManifestHandlerRegistry* registry) {
   DCHECK(!extensions::ManifestHandler::IsRegistrationFinalized());
 
-  registry_->RegisterHandler(
-      std::make_unique<ChromeOSSystemExtensionHandler>());
+  registry->RegisterHandler(std::make_unique<ChromeOSSystemExtensionHandler>());
 }
 
 }  // namespace chromeos

@@ -10,6 +10,7 @@
 #include "base/functional/callback_helpers.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/permission_controller.h"
+#include "content/public/browser/permission_descriptor_util.h"
 #include "content/public/browser/render_frame_host.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
 
@@ -95,10 +96,13 @@ void IdleManagerImpl::AddMonitor(
 bool IdleManagerImpl::HasPermission() {
   PermissionController* permission_controller =
       render_frame_host_->GetBrowserContext()->GetPermissionController();
-  DCHECK(permission_controller);
+  CHECK(permission_controller, base::NotFatalUntil::M159);
   PermissionStatus status =
       permission_controller->GetPermissionStatusForCurrentDocument(
-          blink::PermissionType::IDLE_DETECTION, render_frame_host_);
+          content::PermissionDescriptorUtil::
+              CreatePermissionDescriptorForPermissionType(
+                  blink::PermissionType::IDLE_DETECTION),
+          render_frame_host_);
   return status == PermissionStatus::GRANTED;
 }
 
@@ -114,12 +118,7 @@ void IdleManagerImpl::OnIdleStateChange(
     const ui::IdlePollingService::State& state) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  blink::mojom::IdleStatePtr new_state = CreateIdleState(state);
-  if (new_state == last_state_) {
-    return;
-  }
-
-  last_state_ = std::move(new_state);
+  last_state_ = CreateIdleState(state);
   for (const auto& monitor : monitors_) {
     monitor->Update(last_state_->Clone(), /*is_overridden_by_devtools=*/false);
   }

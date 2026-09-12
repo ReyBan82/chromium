@@ -5,18 +5,21 @@
 #ifndef IOS_WEB_PUBLIC_WEB_CLIENT_H_
 #define IOS_WEB_PUBLIC_WEB_CLIENT_H_
 
+#import <Foundation/Foundation.h>
+
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/functional/callback.h"
-#include "base/strings/string_piece.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "ios/web/common/user_agent.h"
 #include "mojo/public/cpp/bindings/generic_pending_receiver.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "ui/base/layout.h"
+#include "ui/base/resource/resource_scale_factor.h"
 
 namespace base {
 class RefCountedMemory;
@@ -27,6 +30,11 @@ class GURL;
 @protocol CRWFindSession;
 @protocol UITraitEnvironment;
 @class NSString;
+@class NSData;
+@protocol UIMenuBuilder;
+@class UIView;
+@class WKFrameInfo;
+@class WKOpenPanelParameters;
 
 namespace net {
 class SSLInfo;
@@ -36,10 +44,23 @@ namespace web {
 
 class BrowserState;
 class BrowserURLRewriter;
+class CobaltController;
 class JavaScriptFeature;
 class WebClient;
 class WebMainParts;
 class WebState;
+
+// Enum type specifying the JavaScript Error logging level.
+enum class JSErrorReportLoggingLevel : short {
+  // No logging.
+  NONE = 0,
+
+  // A report without the webpage URL.
+  REPORT_WITHOUT_URL,
+
+  // A full report may be sent, including webpage URL.
+  FULL
+};
 
 // Setter and getter for the client.  The client should be set early, before any
 // web code is called.
@@ -55,6 +76,10 @@ class WebClient {
   // Allows the embedder to set a custom WebMainParts implementation for the
   // browser startup code.
   virtual std::unique_ptr<WebMainParts> CreateWebMainParts();
+
+  // Allows the embedder to initialize the field trial and features list
+  // early.
+  virtual void InitializeFieldTrialAndFeatureList() {}
 
   // Gives the embedder a chance to perform tasks before a web view is created.
   virtual void PreWebViewCreation() const {}
@@ -84,22 +109,26 @@ class WebClient {
   // browser would return true for "chrome://about" URL.
   virtual bool IsAppSpecificURL(const GURL& url) const;
 
-  // Returns text to be displayed for an unsupported plugin.
-  virtual std::u16string GetPluginNotSupportedText() const;
-
   // Returns the user agent string for the specified type.
   virtual std::string GetUserAgent(UserAgentType type) const;
+
+  // Returns the name of the main thread. If the returned string is empty,
+  // the main thread name will not be set. The default implementation returns
+  // an empty string and does not rename the main thread.
+  virtual std::string GetMainThreadName() const;
 
   // Returns a string resource given its id.
   virtual std::u16string GetLocalizedString(int message_id) const;
 
-  // Returns the contents of a resource in a StringPiece given the resource id.
-  virtual base::StringPiece GetDataResource(
+  // Returns the contents of a resource in a std::string_view given the resource
+  // id.
+  virtual std::string_view GetDataResource(
       int resource_id,
       ui::ResourceScaleFactor scale_factor) const;
 
   // Returns the raw bytes of a scale independent data resource.
-  virtual base::RefCountedMemory* GetDataResourceBytes(int resource_id) const;
+  virtual scoped_refptr<base::RefCountedMemory> GetDataResourceBytes(
+      int resource_id) const;
 
   // Returns a list of additional WebUI schemes, if any. These additional
   // schemes act as aliases to the about: scheme. The additional schemes may or
@@ -116,24 +145,6 @@ class WebClient {
 
   // Gives the embedder a chance to provide custom JavaScriptFeatures.
   virtual std::vector<JavaScriptFeature*> GetJavaScriptFeatures(
-      BrowserState* browser_state) const;
-
-  // Gives the embedder a chance to provide the JavaScript to be injected into
-  // the web view as early as possible. Result must not be nil.
-  // The script returned will be injected in all frames (main and subframes).
-  //
-  // TODO(crbug.com/703964): Change the return value to NSArray<NSString*> to
-  // improve performance.
-  virtual NSString* GetDocumentStartScriptForAllFrames(
-      BrowserState* browser_state) const;
-
-  // Gives the embedder a chance to provide the JavaScript to be injected into
-  // the web view as early as possible. Result must not be nil.
-  // The script returned will only be injected in the main frame.
-  //
-  // TODO(crbug.com/703964): Change the return value to NSArray<NSString*> to
-  // improve performance.
-  virtual NSString* GetDocumentStartScriptForMainFrame(
       BrowserState* browser_state) const;
 
   // Allows the embedder to bind an interface request for a WebState-scoped
@@ -156,15 +167,21 @@ class WebClient {
                                 NSError* error,
                                 bool is_post,
                                 bool is_off_the_record,
-                                const absl::optional<net::SSLInfo>& info,
+                                const std::optional<net::SSLInfo>& info,
                                 int64_t navigation_id,
                                 base::OnceCallback<void(NSString*)> callback);
 
   // Instructs the embedder to return a container that is attached to a window.
   virtual UIView* GetWindowedContainer();
 
+  // Enables the web-exposed Fullscreen API.
+  virtual bool EnableFullscreenAPI() const;
+
   // Enables the logic to handle long press context menu with UIContextMenu.
   virtual bool EnableLongPressUIContextMenu() const;
+
+  // Allows WKWebViews to be inspected using Safari's Web Inspector.
+  virtual bool EnableWebInspector(web::BrowserState* browser_state) const;
 
   // Returns the UserAgentType that should be used by default for the web
   // content, based on the `web_state`.
@@ -176,14 +193,12 @@ class WebClient {
   virtual void LogDefaultUserAgent(web::WebState* web_state,
                                    const GURL& url) const;
 
-  // Returns true if URL was restored via session restoration cache.
-  virtual bool RestoreSessionFromCache(web::WebState* web_state) const;
-
   // Correct missing NTP and reading list virtualURLs and titles. Native session
   // restoration may not properly restore these items.
   virtual void CleanupNativeRestoreURLs(web::WebState* web_state) const;
 
   // Notify the embedder that `web_state` will display a prompt for the user.
+  // Note that the implementation of this method may destroy `web state`.
   virtual void WillDisplayMediaCapturePermissionPrompt(
       web::WebState* web_state) const;
 
@@ -191,20 +206,47 @@ class WebClient {
   virtual bool IsPointingToSameDocument(const GURL& url1,
                                         const GURL& url2) const;
 
-  // Provides a searchable object for the given `web_state` instance.
-  virtual id<CRWFindSession> CreateFindSessionForWebState(
-      web::WebState* web_state) const API_AVAILABLE(ios(16));
+  // Returns true if browser lockdown mode is enabled. Default return value is
+  // false.
+  virtual bool IsBrowserLockdownModeEnabled();
 
-  // Starts a text search in `web_state`.
-  virtual void StartTextSearchInWebState(web::WebState* web_state);
+  // Sets OS lockdown mode preference value. By default, no preference value is
+  // set.
+  virtual void SetOSLockdownModeEnabled(bool enabled);
 
-  // Stops the ongoing text search in `web_state`.
-  virtual void StopTextSearchInWebState(web::WebState* web_state);
-
-  // Returns true if mixed content on HTTPS documents should be upgraded if
-  // possible.
-  virtual bool IsMixedContentAutoupgradeEnabled(
+  virtual bool IsInsecureFormWarningEnabled(
       web::BrowserState* browser_state) const;
+
+  virtual void BuildEditMenu(web::WebState* web_state, id<UIMenuBuilder>) const;
+
+  // Whether the embedder implements `RunOpenPanel()` for `web_state`.
+  // If this returns `false`, then the native open panel will run instead.
+  // The value returned for a `web_state` cannot change during its lifetime.
+  virtual bool CanRunOpenPanel(web::WebState* web_state) const
+      API_AVAILABLE(ios(18.4));
+  // Displays a file upload panel and calls `completion` with file URLs selected
+  // by the user. `parameters` describe the file upload control which initiated
+  // the call from `frame`. This is not called if `CanRunOpenPanel()` returns
+  // false for `web_state`.
+  virtual void RunOpenPanel(
+      web::WebState* web_state,
+      WKOpenPanelParameters* parameters,
+      WKFrameInfo* frame,
+      base::OnceCallback<void(NSArray<NSURL*>*)> completion) const
+      API_AVAILABLE(ios(18.4));
+
+  virtual JSErrorReportLoggingLevel GetJSErrorReportLoggingLevel(
+      BrowserState* browser_state) const;
+
+  // Returns the Cobalt controller for the given `browser_state`.
+  virtual CobaltController* GetCobaltController(
+      BrowserState* browser_state) const;
+
+  // Returns whether smooth scrolling is supported.
+  virtual bool IsSmoothScrollingSupported() const;
+
+  // Returns whether Universal Opt Out is enabled for `browser_state`.
+  virtual bool IsUniversalOptOutEnabled(BrowserState* browser_state) const;
 };
 
 }  // namespace web

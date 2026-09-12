@@ -6,9 +6,11 @@
 #include "base/command_line.h"
 #include "base/i18n/icu_util.h"
 #include "base/logging.h"
+#include "base/no_destructor.h"
 #include "base/test/scoped_run_loop_timeout.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_timeouts.h"
+#include "testing/libfuzzer/libfuzzer_exports.h"
 
 namespace {
 
@@ -36,7 +38,7 @@ struct InitGlobals {
 
     // Disable noisy logging as per "libFuzzer in Chrome" documentation:
     // testing/libfuzzer/getting_started.md#Disable-noisy-error-message-logging.
-    logging::SetMinLogLevel(logging::LOG_FATAL);
+    logging::SetMinLogLevel(logging::LOGGING_FATAL);
   }
 
   // A number of tests use async code which depends on there being a
@@ -50,6 +52,12 @@ struct InitGlobals {
   base::AtExitManager at_exit_manager;
 };
 
-InitGlobals* init_globals = new InitGlobals();
-
 }  // namespace
+
+// Use LLVMFuzzerInitialize to centralize initialization for all fuzzers
+// linking against this file, avoiding the need to duplicate this setup
+// in their individual LLVMFuzzerTestOneInput functions.
+extern "C" int LLVMFuzzerInitialize(int* argc, char*** argv) {
+  static const base::NoDestructor<InitGlobals> init_globals;
+  return 0;
+}

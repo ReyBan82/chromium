@@ -17,6 +17,7 @@
 #include "content/public/browser/web_contents.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/url_request/redirect_info.h"
+#include "services/network/public/cpp/http_request_headers_update_params.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "third_party/blink/public/common/navigation/navigation_policy.h"
@@ -37,9 +38,7 @@ void TestNavigationURLLoader::Start() {
 }
 
 void TestNavigationURLLoader::FollowRedirect(
-    const std::vector<std::string>& removed_headers,
-    const net::HttpRequestHeaders& modified_headers,
-    const net::HttpRequestHeaders& modified_cors_exempt_headers) {
+    network::HttpRequestHeadersUpdateParams headers_update_params) {
   DCHECK_EQ(loader_type_, NavigationURLLoader::LoaderType::kRegular);
   redirect_count_++;
 }
@@ -48,6 +47,8 @@ bool TestNavigationURLLoader::SetNavigationTimeout(base::TimeDelta timeout) {
   // Do nothing. `false` here means no timeout was started.
   return false;
 }
+
+void TestNavigationURLLoader::CancelNavigationTimeout() {}
 
 void TestNavigationURLLoader::SimulateServerRedirect(const GURL& redirect_url) {
   DCHECK_EQ(loader_type_, NavigationURLLoader::LoaderType::kRegular);
@@ -89,7 +90,7 @@ void TestNavigationURLLoader::CallOnRequestRedirected(
 void TestNavigationURLLoader::CallOnResponseStarted(
     network::mojom::URLResponseHeadPtr response_head,
     mojo::ScopedDataPipeConsumerHandle response_body,
-    absl::optional<mojo_base::BigBuffer> cached_metadata) {
+    std::optional<mojo_base::BigBuffer> cached_metadata) {
   if (!response_head->parsed_headers)
     response_head->parsed_headers = network::mojom::ParsedHeaders::New();
   // Create a bidirectionnal communication pipe between a URLLoader and a
@@ -109,8 +110,8 @@ void TestNavigationURLLoader::CallOnResponseStarted(
   delegate_->OnResponseStarted(
       std::move(url_loader_client_endpoints), std::move(response_head),
       std::move(response_body), GlobalRequestID::MakeBrowserInitiated(), false,
-      request_info_->isolation_info.network_anonymization_key(), absl::nullopt,
-      std::move(early_hints));
+      request_info_->isolation_info.network_anonymization_key(),
+      SubresourceLoaderParams(), std::move(early_hints));
 }
 
 TestNavigationURLLoader::~TestNavigationURLLoader() {}

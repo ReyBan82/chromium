@@ -8,10 +8,12 @@
 #include <stddef.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "base/functional/callback.h"
 #include "base/values.h"
 #include "components/value_store/value_store_change.h"
 
@@ -21,6 +23,8 @@ namespace value_store {
 class ValueStore {
  public:
   // Status codes returned from storage methods.
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
   enum StatusCode {
     OK,
 
@@ -42,8 +46,14 @@ class ValueStore {
 
     // Any other error.
     OTHER_ERROR,
+
+    // Add new values above this line.
+    STATUS_CODE_MAX,
   };
 
+  // Status codes returned from attempting to restore a database.
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
   enum BackingStoreRestoreStatus {
     // No restore attempted.
     RESTORE_NONE,
@@ -57,6 +67,8 @@ class ValueStore {
     VALUE_RESTORE_DELETE_SUCCESS,
     // Corrupted value cannot be deleted.
     VALUE_RESTORE_DELETE_FAILURE,
+    // Add new values above this line.
+    RESTORE_STATUS_MAX,
   };
 
   // The status (result) of an operation on a ValueStore.
@@ -91,7 +103,7 @@ class ValueStore {
   // The result of a read operation (Get).
   class ReadResult {
    public:
-    ReadResult(base::Value::Dict settings, Status status);
+    ReadResult(base::DictValue settings, Status status);
     explicit ReadResult(Status status);
     ReadResult(ReadResult&& other);
     ~ReadResult();
@@ -104,14 +116,14 @@ class ValueStore {
     // be in |settings|.|foo|.
     //
     // Must only be called if there is no error.
-    base::Value::Dict& settings() { return settings_; }
-    base::Value::Dict PassSettings() { return std::move(settings_); }
+    base::DictValue& settings() { return settings_; }
+    base::DictValue PassSettings() { return std::move(settings_); }
     Status PassStatus() { return std::move(status_); }
 
     const Status& status() const { return status_; }
 
    private:
-    base::Value::Dict settings_;
+    base::DictValue settings_;
     Status status_;
   };
 
@@ -167,6 +179,9 @@ class ValueStore {
   // Gets the total amount of space being used by this storage area, in bytes.
   virtual size_t GetBytesInUse() = 0;
 
+  // Gets all keys from storage.
+  virtual ReadResult GetKeys() = 0;
+
   // Gets a single value from storage.
   virtual ReadResult Get(const std::string& key) = 0;
 
@@ -183,7 +198,7 @@ class ValueStore {
 
   // Sets multiple keys to new values.
   virtual WriteResult Set(WriteOptions options,
-                          const base::Value::Dict& values) = 0;
+                          const base::DictValue& values) = 0;
 
   // Removes a key from the storage.
   virtual WriteResult Remove(const std::string& key) = 0;

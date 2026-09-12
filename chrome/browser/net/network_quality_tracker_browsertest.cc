@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "services/network/public/cpp/network_quality_tracker.h"
+
 #include <memory>
 
 #include "base/check_op.h"
@@ -15,13 +17,13 @@
 #include "chrome/browser/chrome_content_browser_client.h"
 #include "chrome/browser/net/system_network_context_manager.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/network_service_instance.h"
+#include "content/public/browser/network_service_util.h"
 #include "content/public/browser/storage_partition.h"
-#include "content/public/common/network_service_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_base.h"
 #include "content/public/test/browser_test_utils.h"
@@ -31,7 +33,6 @@
 #include "net/nqe/network_quality_estimator.h"
 #include "services/network/network_service.h"
 #include "services/network/public/cpp/features.h"
-#include "services/network/public/cpp/network_quality_tracker.h"
 #include "services/network/public/mojom/network_service_test.mojom.h"
 
 namespace network {
@@ -120,8 +121,8 @@ class TestNetworkQualityObserver
 
 class NetworkQualityTrackerBrowserTest : public InProcessBrowserTest {
  public:
-  NetworkQualityTrackerBrowserTest() {}
-  ~NetworkQualityTrackerBrowserTest() override {}
+  NetworkQualityTrackerBrowserTest() = default;
+  ~NetworkQualityTrackerBrowserTest() override = default;
 
   // Simulates a network quality change.
   void SimulateNetworkQualityChange(net::EffectiveConnectionType type) {
@@ -138,7 +139,7 @@ class NetworkQualityTrackerBrowserTest : public InProcessBrowserTest {
 
     mojo::ScopedAllowSyncCallForTesting allow_sync_call;
     content::StoragePartition* partition =
-        browser()->profile()->GetDefaultStoragePartition();
+        browser()->GetProfile()->GetDefaultStoragePartition();
     DCHECK(partition->GetNetworkContext());
     DCHECK(content::GetNetworkService());
 
@@ -257,7 +258,7 @@ IN_PROC_BROWSER_TEST_F(NetworkQualityTrackerBrowserTest,
   SimulateNetworkServiceCrash();
   // Flush the network interface to make sure it notices the crash.
   browser()
-      ->profile()
+      ->GetProfile()
       ->GetDefaultStoragePartition()
       ->FlushNetworkInterfaceForTesting();
 

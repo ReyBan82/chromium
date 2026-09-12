@@ -30,7 +30,9 @@ extern const char kVersionSwitchName[];
 extern const char kProcessTypeController[];
 extern const char kProcessTypeDaemon[];
 extern const char kProcessTypeDesktop[];
-extern const char kProcessTypeHost[];
+extern const char kProcessTypeNetwork[];
+extern const char kProcessTypePeerConnection[];
+extern const char kProcessTypeSingleProcessHost[];
 extern const char kProcessTypeRdpDesktopSession[];
 extern const char kProcessTypeEvaluateCapability[];
 extern const char kProcessTypeFileChooser[];
@@ -42,9 +44,16 @@ extern const char kProcessTypeXSessionChooser[];
 extern const char kEvaluateCapabilitySwitchName[];
 
 #if BUILDFLAG(IS_LINUX)
-// Used to record client sessions to utmp/wtmp.
-extern const char kEnableUtempter[];
+// Used to record client sessions to wtmpd.
+extern const char kEnableWtmpdb[];
+
+// Used to pass inherited Crashpad handler socket descriptor and PID.
+extern const char kCrashpadHandlerSocketFd[];
+extern const char kCrashpadHandlerPid[];
 #endif
+
+// Indicates whether Corp Messaging should be enabled for signaling.
+extern const char kEnableCorpMessaging[];
 
 // Values for kEvaluateCapabilitySwitchName.
 #if BUILDFLAG(IS_WIN)
@@ -69,6 +78,16 @@ extern const char kOutputSwitchName[];
 // Token used to create a message pipe between a pair of child and parent
 // processes.
 extern const char kMojoPipeToken[];
+
+// A server pipe handle used by the child process to initialize crash reporting.
+extern const char kCrashServerPipeHandle[];
+
+#if BUILDFLAG(IS_WIN)
+// TODO(crbug.com/502281489): Remove this switch once the PC process is enabled
+// by default.
+// Specifies whether to use the dedicated Peer Connection process.
+extern const char kUsePeerConnectionProcessSwitch[];
+#endif  // BUILDFLAG(IS_WIN)
 
 #if BUILDFLAG(IS_APPLE)
 // NativeMessagingHost switch to check for required OS permissions and request

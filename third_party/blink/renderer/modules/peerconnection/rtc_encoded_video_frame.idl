@@ -14,12 +14,15 @@ enum RTCEncodedVideoFrameType {
 [
     Exposed=(Window, DedicatedWorker)
 ] interface RTCEncodedVideoFrame {
+    [Measure, RaisesException, CallWith=ExecutionContext]
+    constructor (RTCEncodedVideoFrame originalFrame, optional RTCEncodedVideoFrameOptions options = {});
+    [RuntimeEnabled=RTCEncodedVideoFrameConstructor, Measure, CallWith=ExecutionContext, RaisesException]
+    constructor (RTCEncodedVideoFrameInit init);
     readonly attribute RTCEncodedVideoFrameType type;
-    readonly attribute unsigned long timestamp;  // RTP timestamp.
-    attribute ArrayBuffer data;
-    RTCEncodedVideoFrameMetadata getMetadata();
-    [RuntimeEnabled=RTCEncodedVideoFrameAdditionalMetadata, RaisesException]
+    [Measure] readonly attribute unsigned long timestamp;  // RTP timestamp.
+    [CallWith=ExecutionContext] attribute ArrayBuffer data;
+    [CallWith=ExecutionContext] RTCEncodedVideoFrameMetadata getMetadata();
+    [RuntimeEnabled=RTCEncodedFrameSetMetadata, Measure, RaisesException, CallWith=ExecutionContext]
     void setMetadata(RTCEncodedVideoFrameMetadata metadata);
-    [RuntimeEnabled=RTCEncodedVideoFrameClone] RTCEncodedVideoFrame clone();
-    stringifier;
+    [CallWith=ExecutionContext] stringifier;
 };

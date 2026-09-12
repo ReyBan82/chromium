@@ -2,14 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "gpu/command_buffer/service/gles2_cmd_decoder.h"
-
 #include <stdint.h>
 
+#include <string_view>
+
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/strings/string_view_util.h"
 #include "gpu/command_buffer/common/gles2_cmd_format.h"
 #include "gpu/command_buffer/common/gles2_cmd_utils.h"
 #include "gpu/command_buffer/service/context_group.h"
+#include "gpu/command_buffer/service/gles2_cmd_decoder.h"
 #include "gpu/command_buffer/service/gles2_cmd_decoder_unittest_base.h"
 #include "gpu/command_buffer/service/program_manager.h"
 #include "gpu/command_buffer/service/test_helper.h"
@@ -613,7 +617,6 @@ class GLES3DecoderTest2 : public GLES2DecoderTest2 {
   void SetUp() override {
     InitState init;
     init.gl_version = "OpenGL ES 3.0";
-    init.bind_generates_resource = true;
     init.context_type = CONTEXT_TYPE_OPENGLES3;
     InitDecoder(init);
   }
@@ -657,8 +660,9 @@ void GLES2DecoderTestBase::SpecializedSetup<cmds::GetProgramInfoLog, 0>(
       .WillOnce(SetArgPointee<2>(strlen(log) + 1))
       .RetiresOnSaturation();
   EXPECT_CALL(*gl_, GetProgramInfoLog(kServiceProgramId, strlen(log) + 1, _, _))
-      .WillOnce(DoAll(SetArgPointee<2>(strlen(log)),
-                      SetArrayArgument<3>(log, log + strlen(log) + 1)))
+      .WillOnce(
+          DoAll(SetArgPointee<2>(strlen(log)),
+                SetArrayArgument<3>(log, UNSAFE_TODO(log + strlen(log) + 1))))
       .RetiresOnSaturation();
   EXPECT_CALL(*gl_, GetProgramiv(kServiceProgramId, GL_ACTIVE_ATTRIBUTES, _))
       .WillOnce(SetArgPointee<2>(0));
@@ -678,7 +682,7 @@ void GLES2DecoderTestBase::SpecializedSetup<cmds::GetProgramInfoLog, 0>(
   attach_cmd.Init(client_program_id_, kTestClientFragmentShaderId);
   EXPECT_EQ(error::kNoError, ExecuteCmd(attach_cmd));
 
-  program->Link(nullptr, Program::kCountOnlyStaticallyUsed, this);
+  program->Link(nullptr, this);
 }
 
 template <>
@@ -687,20 +691,6 @@ void GLES2DecoderTestBase::SpecializedSetup<
         bool /* valid */) {
   DoBindRenderbuffer(GL_RENDERBUFFER, client_renderbuffer_id_,
                     kServiceRenderbufferId);
-}
-
-template <>
-void GLES2DecoderTestBase::SpecializedSetup<cmds::GetProgramiv, 0>(bool valid) {
-  if (valid) {
-    // GetProgramiv calls ClearGLError then GetError to make sure
-    // it actually got a value so it can report correctly to the client.
-    EXPECT_CALL(*gl_, GetError())
-        .WillOnce(Return(GL_NO_ERROR))
-        .RetiresOnSaturation();
-    EXPECT_CALL(*gl_, GetError())
-        .WillOnce(Return(GL_NO_ERROR))
-        .RetiresOnSaturation();
-  }
 }
 
 template <>
@@ -942,6 +932,12 @@ void GLES2DecoderTestBase::SpecializedSetup<cmds::GetVertexAttribIuiv, 0>(
         .WillOnce(Return(GL_NO_ERROR))
         .RetiresOnSaturation();
   }
+}
+
+template <>
+void GLES2DecoderTestBase::SpecializedSetup<cmds::Uniform4f, 0>(
+    bool /* valid */) {
+  SetupShaderForUniform(GL_FLOAT_VEC4);
 }
 
 #include "gpu/command_buffer/service/gles2_cmd_decoder_unittest_2_autogen.h"

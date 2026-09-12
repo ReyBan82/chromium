@@ -21,7 +21,7 @@ constexpr char kPasswordChangeUrlKey[] = "passwordChangeUrl";
 base::Time ReadJsTime(const std::string& input) {
   int64_t js_time;
   if (base::StringToInt64(input, &js_time)) {
-    return base::Time::FromJsTime(js_time);
+    return base::Time::FromMillisecondsSinceUnixEpoch(js_time);
   }
   return base::Time();  // null time
 }
@@ -52,7 +52,7 @@ void SamlPasswordAttributes::RegisterProfilePrefs(
 
 // static
 SamlPasswordAttributes SamlPasswordAttributes::FromJs(
-    const base::Value::Dict& js_object) {
+    const base::DictValue& js_object) {
   base::Time modified_time;
   const std::string* string_value = js_object.FindString(kModifiedTimeKey);
   if (string_value) {

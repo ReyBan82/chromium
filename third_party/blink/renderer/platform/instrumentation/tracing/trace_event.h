@@ -7,16 +7,12 @@
 
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
+#include "base/trace_event/trace_session_observer.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 namespace trace_event {
-
-using base::trace_event::TraceScopedTrackableObject;
-using AsyncEnabledStateObserver =
-    base::trace_event::TraceLog::AsyncEnabledStateObserver;
-using EnabledStateObserver = base::trace_event::TraceLog::EnabledStateObserver;
 
 inline base::TimeTicks ToTraceTimestamp(double seconds) {
   return base::TimeTicks() + base::Seconds(seconds);
@@ -25,16 +21,19 @@ inline base::TimeTicks ToTraceTimestamp(double seconds) {
 // This is to avoid error of passing a chromium time internal value.
 void ToTraceTimestamp(int64_t);
 
-PLATFORM_EXPORT void EnableTracing(const String& category_filter);
-PLATFORM_EXPORT void DisableTracing();
+PLATFORM_EXPORT void EnableTracingForTesting(const String& category_filter);
+PLATFORM_EXPORT void DisableTracingForTesting();
 
-PLATFORM_EXPORT void AddAsyncEnabledStateObserver(
-    base::WeakPtr<AsyncEnabledStateObserver>);
-PLATFORM_EXPORT void RemoveAsyncEnabledStateObserver(
-    AsyncEnabledStateObserver*);
+using TraceSessionObserver = base::trace_event::TraceSessionObserver;
+template <typename T>
+void AddTraceSessionObserver(T* observer) {
+  base::trace_event::TraceSessionObserverList::AddObserver(observer);
+}
 
-PLATFORM_EXPORT void AddEnabledStateObserver(EnabledStateObserver*);
-PLATFORM_EXPORT void RemoveEnabledStateObserver(EnabledStateObserver*);
+template <typename T>
+void RemoveTraceSessionObserver(T* observer) {
+  base::trace_event::TraceSessionObserverList::RemoveObserver(observer);
+}
 
 }  // namespace trace_event
 }  // namespace blink

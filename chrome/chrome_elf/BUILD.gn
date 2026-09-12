@@ -48,30 +48,20 @@ static_library("test_stubs") {
   ]
 }
 
-# We should move chrome_result_codes.h to another target which does not bring
-# in the world.
 shared_library("chrome_elf") {
   sources = [
+    "chrome_elf.def",
     "chrome_elf_main.cc",
     "chrome_elf_main.h",
   ]
-  if (target_cpu == "x86") {
-    sources += [ "chrome_elf_x86.def" ]
-  } else if (target_cpu == "arm64") {
-    sources += [ "chrome_elf_arm64.def" ]
-  } else {
-    sources += [ "chrome_elf_x64.def" ]
-  }
 
   deps = [
     ":chrome_elf_manifest",
     ":chrome_elf_resources",
-    ":constants",
     ":crash",
-    ":hook_util",
-    ":nt_registry",
     ":security",
     ":third_party_dlls",
+    "//base:compiler_specific",
     "//chrome/install_static:install_static_util",
     "//chrome/install_static:primary_module",
     "//components/crash/core/app:crash_export_thunks",
@@ -108,20 +98,18 @@ static_library("crash") {
   sources = [
     "../app/chrome_crash_reporter_client_win.cc",
     "../app/chrome_crash_reporter_client_win.h",
-    "../common/chrome_result_codes.h",
     "crash/crash_helper.cc",
     "crash/crash_helper.h",
   ]
   deps = [
     ":constants",
-    ":hook_util",
     "//base",  # This needs to go.  DEP of app, crash_keys, client.
-    "//base:base_static",  # pe_image
     "//chrome/install_static:install_static_util",
     "//components/crash/core/app",
     "//components/crash/core/common",  # crash_keys
+    "//components/metrics:system_profile_user_stream",
     "//components/version_info:channel",
-    "//content/public/common:result_codes",
+    "//sandbox/policy:win_hook_util",
     "//third_party/crashpad/crashpad/client",  # DumpWithoutCrash
   ]
 }
@@ -138,20 +126,9 @@ executable("dll_hash_main") {
   sources = [ "dll_hash/dll_hash_main.cc" ]
   deps = [
     ":dll_hash",
+    "//base",
     "//build/win:default_exe_manifest",
   ]
-}
-
-static_library("hook_util") {
-  sources = [
-    "hook_util/hook_util.cc",
-    "hook_util/hook_util.h",
-  ]
-  deps = [
-    ":nt_registry",  # utils
-    "//base:base_static",  # pe_image
-  ]
-  public_deps = [ "//sandbox" ]
 }
 
 # This target contains utility functions which must only depend on
@@ -162,6 +139,8 @@ static_library("nt_registry") {
     "nt_registry/nt_registry.h",
     "nt_registry/nt_registry_functions.h",
   ]
+
+  deps = [ "//base:compiler_specific" ]
 
   libs = [
     "kernel32.lib",
@@ -174,6 +153,7 @@ source_set("pe_image_safe") {
     "pe_image_safe/pe_image_safe.cc",
     "pe_image_safe/pe_image_safe.h",
   ]
+  deps = [ "//base:compiler_specific" ]
 }
 
 source_set("security") {
@@ -184,7 +164,7 @@ source_set("security") {
   deps = [
     ":constants",
     ":nt_registry",
-    "//base:base",
+    "//base",
     "//chrome/install_static:install_static_util",
   ]
 }
@@ -194,13 +174,22 @@ source_set("sha1") {
     "sha1/sha1.cc",
     "sha1/sha1.h",
   ]
+  deps = [ "//base:compiler_specific" ]
 }
 
 source_set("third_party_dlls") {
   visibility = [ ":*" ]  # Only targets in this file can depend on this.
+  friend = [
+    ":chrome_elf",
+    ":chrome_elf_unittests",
+    ":third_party_dlls_test_exe",
+  ]
+  public = [
+    "third_party_dlls/beacon.h",
+    "third_party_dlls/main.h",
+  ]
   sources = [
     "third_party_dlls/beacon.cc",
-    "third_party_dlls/beacon.h",
     "third_party_dlls/hardcoded_blocklist.cc",
     "third_party_dlls/hardcoded_blocklist.h",
     "third_party_dlls/hook.cc",
@@ -208,20 +197,21 @@ source_set("third_party_dlls") {
     "third_party_dlls/logs.cc",
     "third_party_dlls/logs.h",
     "third_party_dlls/main.cc",
-    "third_party_dlls/main.h",
     "third_party_dlls/packed_list_file.cc",
     "third_party_dlls/packed_list_file.h",
   ]
-  public_deps = [
+  deps = [
     ":constants",
     ":crash",
-    ":hook_util",
     ":nt_registry",
     ":pe_image_safe",
     ":sha1",
-    ":third_party_shared_defines",
+    "//base:base_static",
     "//chrome/install_static:install_static_util",
+    "//sandbox/policy:win_hook_util",
+    "//sandbox/win:service_resolver",
   ]
+  public_deps = [ ":third_party_shared_defines" ]
 }
 
 # This source_set defines third-party-related structures and APIs used from
@@ -264,7 +254,6 @@ test("chrome_elf_unittests") {
     ":chrome_elf",
     ":constants",
     ":crash",
-    ":hook_util",
     ":hook_util_test_dll",
     ":nt_registry",
     ":pe_image_safe",
@@ -278,7 +267,7 @@ test("chrome_elf_unittests") {
     "//chrome/install_static:install_static_util",
     "//chrome/install_static/test:test_support",
     "//components/crash/core/app:test_support",
-    "//sandbox",
+    "//sandbox/policy:win_hook_util",
     "//testing/gtest",
   ]
   data_deps = [

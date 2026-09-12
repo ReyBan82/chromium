@@ -4,6 +4,7 @@
 
 #include "chrome/browser/android/usage_stats/usage_stats_database.h"
 
+#include <string_view>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -86,7 +87,7 @@ bool DoesNotContainFilter(const base::flat_set<std::string>& set,
 
 bool KeyContainsDomainFilter(const base::flat_set<std::string>& domains,
                              const std::string& key) {
-  return domains.contains(key.substr(kUnixTimeDigits + 1));
+  return domains.contains(std::string_view(key).substr(kUnixTimeDigits + 1));
 }
 
 UsageStatsDatabase::Error ToError(bool isSuccess) {
@@ -155,8 +156,8 @@ void UsageStatsDatabase::QueryEventsInRange(base::Time startTime,
   // represented by integers, [startTime, endTime) is equivalent to  [startTime,
   // endTime - 1].
   website_event_db_->LoadKeysAndEntriesInRange(
-      CreateWebsiteEventKey(startTime.ToDoubleT(), ""),
-      CreateWebsiteEventKey(endTime.ToDoubleT() - 1, ""),
+      CreateWebsiteEventKey(startTime.InSecondsFSinceUnixEpoch(), ""),
+      CreateWebsiteEventKey(endTime.InSecondsFSinceUnixEpoch() - 1, ""),
       base::BindOnce(&UsageStatsDatabase::OnLoadEntriesForQueryEventsInRange,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
@@ -219,7 +220,7 @@ void UsageStatsDatabase::DeleteEventsInRange(base::Time startTime,
   }
 
   // If leveldb_proto adds a DeleteEntriesInRange function, these two proto_db_
-  // calls could be consolidated into a single call (crbug.com/939136).
+  // calls could be consolidated into a single call (crbug.com/40616989).
 
   // Load all WebsiteEvents where the timestamp is in the specified range.
   // Function accepts a half-open range [startTime, endTime) as input, but the
@@ -227,8 +228,8 @@ void UsageStatsDatabase::DeleteEventsInRange(base::Time startTime,
   // represented by integers, [startTime, endTime) is equivalent to  [startTime,
   // endTime - 1].
   website_event_db_->LoadKeysAndEntriesInRange(
-      CreateWebsiteEventKey(startTime.ToDoubleT(), ""),
-      CreateWebsiteEventKey(endTime.ToDoubleT() - 1, ""),
+      CreateWebsiteEventKey(startTime.InSecondsFSinceUnixEpoch(), ""),
+      CreateWebsiteEventKey(endTime.InSecondsFSinceUnixEpoch() - 1, ""),
       base::BindOnce(&UsageStatsDatabase::OnLoadEntriesForDeleteEventsInRange,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
@@ -256,7 +257,7 @@ void UsageStatsDatabase::DeleteEventsWithMatchingDomains(
 void UsageStatsDatabase::ExpireEvents(base::Time now) {
   base::Time seven_days_ago = now - base::Days(EXPIRY_THRESHOLD_DAYS);
   DeleteEventsInRange(
-      base::Time::FromDoubleT(1), seven_days_ago,
+      base::Time::FromSecondsSinceUnixEpoch(1), seven_days_ago,
       base::BindOnce(&UsageStatsDatabase::OnWebsiteEventExpiryDone,
                      weak_ptr_factory_.GetWeakPtr()));
 }
@@ -373,7 +374,7 @@ void UsageStatsDatabase::OnWebsiteEventInitDone(
     return;
   }
 
-  // Execute deferred operations on sucessfully initialized database.
+  // Execute deferred operations on successfully initialized database.
   while (!website_event_db_callbacks_.empty()) {
     std::move(website_event_db_callbacks_.front()).Run();
     website_event_db_callbacks_.pop();
@@ -395,7 +396,7 @@ void UsageStatsDatabase::OnSuspensionInitDone(
     return;
   }
 
-  // Execute deferred operations on sucessfully initialized database.
+  // Execute deferred operations on successfully initialized database.
   while (!suspension_db_callbacks_.empty()) {
     std::move(suspension_db_callbacks_.front()).Run();
     suspension_db_callbacks_.pop();
@@ -418,7 +419,7 @@ void UsageStatsDatabase::OnTokenMappingInitDone(
     return;
   }
 
-  // Execute deferred operations on sucessfully initialized database.
+  // Execute deferred operations on successfully initialized database.
   while (!token_mapping_db_callbacks_.empty()) {
     std::move(token_mapping_db_callbacks_.front()).Run();
     token_mapping_db_callbacks_.pop();

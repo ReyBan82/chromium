@@ -108,7 +108,7 @@ class FreezerCgroupProcessManager::FileWorker {
 
     // TODO(derat): For now, lie and report success if thawing failed but
     // freezing also failed previously. Remove after weird EBADF and ENOENT
-    // problems tracked at http://crbug.com/661310 are fixed.
+    // problems tracked at http://crbug.com/172221050 are fixed.
     if (!result && !froze_successfully_)
       result = true;
 
@@ -126,14 +126,9 @@ class FreezerCgroupProcessManager::FileWorker {
  private:
   bool WriteCommandToFile(const std::string& command,
                           const base::FilePath& file) {
-    int bytes = base::WriteFile(file, command.c_str(), command.size());
-    if (bytes == -1) {
+    if (!base::WriteFile(file, command)) {
       PLOG(ERROR) << "Writing " << command << " to " << file.value()
                   << " failed";
-      return false;
-    } else if (bytes != static_cast<int>(command.size())) {
-      LOG(ERROR) << "Only wrote " << bytes << " byte(s) when writing "
-                 << command << " to " << file.value();
       return false;
     }
     return true;

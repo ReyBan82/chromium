@@ -6,16 +6,14 @@
 
 #import "base/check.h"
 #import "base/path_service.h"
+#import "components/metrics/metrics_features.h"
 #import "components/metrics/persistent_histograms.h"
 #import "ios/chrome/app/tests_hook.h"
-#import "ios/chrome/browser/application_context/application_context.h"
-#import "ios/chrome/browser/paths/paths.h"
-#import "ios/chrome/browser/ui/content_suggestions/tile_ablation_field_trial.h"
-#import "ios/chrome/browser/ui/ntp/ios_popular_sites_field_trial.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/chrome/browser/shared/model/application_context/application_context.h"
+#import "ios/chrome/browser/shared/model/paths/paths.h"
+#import "ios/chrome/browser/shared/model/utils/first_run_util.h"
+#import "ios/chrome/browser/variations/model/ios_chrome_variations_seed_store.h"
+#import "ios/chrome/common/channel_info.h"
 
 void IOSChromeFieldTrials::OnVariationsSetupComplete() {
   // Persistent histograms must be enabled ASAP, but depends on Features.
@@ -25,23 +23,25 @@ void IOSChromeFieldTrials::OnVariationsSetupComplete() {
   } else {
     NOTREACHED();
   }
+  if (used_seed_) {
+    [IOSChromeVariationsSeedStore notifySeedApplication];
+  }
 }
 
 void IOSChromeFieldTrials::SetUpClientSideFieldTrials(
     bool has_seed,
     const variations::EntropyProviders& entropy_providers,
     base::FeatureList* feature_list) {
+  used_seed_ = has_seed;
   // Disable trials when testing to remove sources of nondeterminism.
   // WARNING: Do not add any field trials until after this check, or
   // else they will be incorrectly randomized during EG testing.
   if (tests_hook::DisableClientSideFieldTrials()) {
     return;
   }
+}
 
-  ios_popular_sites_field_trial::Create(
-      entropy_providers.low_entropy(), feature_list,
-      GetApplicationContext()->GetLocalState());
-  tile_ablation_field_trial::Create(entropy_providers.low_entropy(),
-                                    feature_list,
-                                    GetApplicationContext()->GetLocalState());
+void IOSChromeFieldTrials::EnableRuntimeMutableFeatures(
+    base::FeatureList* feature_list) {
+  // Add calls to enable runtime-mutable features here.
 }

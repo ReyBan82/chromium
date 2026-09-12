@@ -24,6 +24,7 @@
 
 #include "third_party/blink/renderer/core/layout/layout_theme_default.h"
 
+#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 #include "third_party/blink/public/platform/web_theme_engine.h"
 #include "third_party/blink/public/resources/grit/blink_resources.h"
 #include "third_party/blink/renderer/core/css_value_keywords.h"
@@ -45,167 +46,9 @@ static const float kDefaultCancelButtonSize = 9;
 static const float kMinCancelButtonSize = 5;
 static const float kMaxCancelButtonSize = 21;
 
-Color LayoutThemeDefault::active_selection_background_color_ =
-    Color::FromRGBA32(0xFF1E90FF);
-Color LayoutThemeDefault::active_selection_foreground_color_ =
-    Color::FromRGBA32(0xFF000000);
-Color LayoutThemeDefault::inactive_selection_background_color_ =
-    Color::FromRGBA32(0xFFC8C8C8);
-Color LayoutThemeDefault::inactive_selection_foreground_color_ =
-    Color::FromRGBA32(0xFF323232);
-Color
-    LayoutThemeDefault::active_list_box_selection_background_color_dark_mode_ =
-        Color::FromRGBA32(0xFF99C8FF);
-Color
-    LayoutThemeDefault::active_list_box_selection_foreground_color_dark_mode_ =
-        Color::FromRGBA32(0xFF3B3B3B);
-Color LayoutThemeDefault::
-    inactive_list_box_selection_background_color_dark_mode_ =
-        Color::FromRGBA32(0x4D3B3B3B);
-Color LayoutThemeDefault::
-    inactive_list_box_selection_foreground_color_dark_mode_ =
-        Color::FromRGBA32(0xFF323232);
-
 LayoutThemeDefault::LayoutThemeDefault() : painter_(*this) {}
 
 LayoutThemeDefault::~LayoutThemeDefault() = default;
-
-// Use the Windows style sheets to match their metrics.
-String LayoutThemeDefault::ExtraDefaultStyleSheet() {
-  String extra_style_sheet = LayoutTheme::ExtraDefaultStyleSheet();
-  String multiple_fields_style_sheet =
-      RuntimeEnabledFeatures::InputMultipleFieldsUIEnabled()
-          ? UncompressResourceAsASCIIString(
-                IDR_UASTYLE_THEME_INPUT_MULTIPLE_FIELDS_CSS)
-          : String();
-  String multiple_fields_inline_flex_style_sheet =
-      RuntimeEnabledFeatures::InputMultipleFieldsUIEnabled() &&
-              !RuntimeEnabledFeatures::DateInputInlineBlockEnabled()
-          ? UncompressResourceAsASCIIString(
-                IDR_UASTYLE_THEME_INPUT_MULTIPLE_FIELDS_INLINE_FLEX_CSS)
-          : String();
-  StringBuilder builder;
-  builder.ReserveCapacity(extra_style_sheet.length() +
-                          multiple_fields_style_sheet.length() +
-                          multiple_fields_inline_flex_style_sheet.length());
-  builder.Append(extra_style_sheet);
-  builder.Append(multiple_fields_style_sheet);
-  builder.Append(multiple_fields_inline_flex_style_sheet);
-  return builder.ToString();
-}
-
-Color LayoutThemeDefault::PlatformActiveSelectionBackgroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return active_selection_background_color_;
-}
-
-Color LayoutThemeDefault::PlatformInactiveSelectionBackgroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return inactive_selection_background_color_;
-}
-
-Color LayoutThemeDefault::PlatformActiveSelectionForegroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return active_selection_foreground_color_;
-}
-
-Color LayoutThemeDefault::PlatformInactiveSelectionForegroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return inactive_selection_foreground_color_;
-}
-
-Color LayoutThemeDefault::PlatformActiveListBoxSelectionBackgroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return color_scheme == mojom::blink::ColorScheme::kDark
-             ? active_list_box_selection_background_color_dark_mode_
-             : PlatformActiveSelectionBackgroundColor(color_scheme);
-}
-
-Color LayoutThemeDefault::PlatformInactiveListBoxSelectionBackgroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return color_scheme == mojom::blink::ColorScheme::kDark
-             ? inactive_list_box_selection_background_color_dark_mode_
-             : PlatformInactiveSelectionBackgroundColor(color_scheme);
-}
-
-Color LayoutThemeDefault::PlatformActiveListBoxSelectionForegroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return color_scheme == mojom::blink::ColorScheme::kDark
-             ? active_list_box_selection_foreground_color_dark_mode_
-             : PlatformActiveSelectionForegroundColor(color_scheme);
-}
-
-Color LayoutThemeDefault::PlatformInactiveListBoxSelectionForegroundColor(
-    mojom::blink::ColorScheme color_scheme) const {
-  return color_scheme == mojom::blink::ColorScheme::kDark
-             ? inactive_list_box_selection_foreground_color_dark_mode_
-             : PlatformInactiveSelectionForegroundColor(color_scheme);
-}
-
-gfx::Size LayoutThemeDefault::SliderTickSize() const {
-  // The value should be synchronized with a -webkit-slider-container rule in
-  // html.css.
-  return gfx::Size(1, 4);
-}
-
-int LayoutThemeDefault::SliderTickOffsetFromTrackCenter() const {
-  // The value should be synchronized with a -webkit-slider-container rule in
-  // html.css and LayoutThemeAndroid::ExtraDefaultStyleSheet().
-  return 7;
-}
-
-void LayoutThemeDefault::AdjustSliderThumbSize(
-    ComputedStyleBuilder& builder) const {
-  gfx::Size size = WebThemeEngineHelper::GetNativeThemeEngine()->GetSize(
-      WebThemeEngine::kPartSliderThumb);
-
-  float zoom_level = builder.EffectiveZoom();
-  if (builder.EffectiveAppearance() == kSliderThumbHorizontalPart) {
-    builder.SetWidth(Length::Fixed(size.width() * zoom_level));
-    builder.SetHeight(Length::Fixed(size.height() * zoom_level));
-  } else if (builder.EffectiveAppearance() == kSliderThumbVerticalPart) {
-    builder.SetWidth(Length::Fixed(size.height() * zoom_level));
-    builder.SetHeight(Length::Fixed(size.width() * zoom_level));
-  }
-}
-
-void LayoutThemeDefault::SetSelectionColors(Color active_background_color,
-                                            Color active_foreground_color,
-                                            Color inactive_background_color,
-                                            Color inactive_foreground_color) {
-  if (active_selection_background_color_ != active_background_color ||
-      active_selection_foreground_color_ != active_foreground_color ||
-      inactive_selection_background_color_ != inactive_background_color ||
-      inactive_selection_foreground_color_ != inactive_foreground_color) {
-    active_selection_background_color_ = active_background_color;
-    active_selection_foreground_color_ = active_foreground_color;
-    inactive_selection_background_color_ = inactive_background_color;
-    inactive_selection_foreground_color_ = inactive_foreground_color;
-    PlatformColorsDidChange();
-  }
-}
-
-void LayoutThemeDefault::AdjustInnerSpinButtonStyle(
-    ComputedStyleBuilder& style) const {
-  gfx::Size size = WebThemeEngineHelper::GetNativeThemeEngine()->GetSize(
-      WebThemeEngine::kPartInnerSpinButton);
-
-  float zoom_level = style.EffectiveZoom();
-  style.SetWidth(Length::Fixed(size.width() * zoom_level));
-  style.SetMinWidth(Length::Fixed(size.width() * zoom_level));
-}
-
-Color LayoutThemeDefault::PlatformFocusRingColor() const {
-  constexpr Color focus_ring_color = Color::FromRGBA32(0xFFE59700);
-  return focus_ring_color;
-}
-
-void LayoutThemeDefault::AdjustButtonStyle(
-    ComputedStyleBuilder& builder) const {
-  // Ignore line-height.
-  if (builder.EffectiveAppearance() == kPushButtonPart)
-    builder.SetLineHeight(ComputedStyleInitialValues::InitialLineHeight());
-}
 
 void LayoutThemeDefault::AdjustSearchFieldCancelButtonStyle(
     ComputedStyleBuilder& builder) const {
@@ -216,18 +59,6 @@ void LayoutThemeDefault::AdjustSearchFieldCancelButtonStyle(
       kMaxCancelButtonSize)));
   builder.SetWidth(Length::Fixed(cancel_button_size));
   builder.SetHeight(Length::Fixed(cancel_button_size));
-}
-
-void LayoutThemeDefault::AdjustMenuListStyle(
-    ComputedStyleBuilder& builder) const {
-  LayoutTheme::AdjustMenuListStyle(builder);
-  // Height is locked to auto on all browsers.
-  builder.ResetLineHeight();
-}
-
-void LayoutThemeDefault::AdjustMenuListButtonStyle(
-    ComputedStyleBuilder& builder) const {
-  AdjustMenuListStyle(builder);
 }
 
 // The following internal paddings are in addition to the user-supplied padding.

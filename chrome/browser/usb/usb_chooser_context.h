@@ -51,7 +51,7 @@ class UsbChooserContext : public permissions::ObjectPermissionContextBase,
     virtual void OnBrowserContextShutdown() = 0;
   };
 
-  static base::Value DeviceInfoToValue(
+  static base::DictValue DeviceInfoToValue(
       const device::mojom::UsbDeviceInfo& device_info);
 
   // ObjectPermissionContextBase:
@@ -59,10 +59,10 @@ class UsbChooserContext : public permissions::ObjectPermissionContextBase,
       const url::Origin& origin) override;
   std::vector<std::unique_ptr<Object>> GetAllGrantedObjects() override;
   void RevokeObjectPermission(const url::Origin& origin,
-                              const base::Value& object) override;
-  std::string GetKeyForObject(const base::Value& object) override;
-  bool IsValidObject(const base::Value& object) override;
-  std::u16string GetObjectDisplayName(const base::Value& object) override;
+                              const base::DictValue& object) override;
+  std::string GetKeyForObject(const base::DictValue& object) override;
+  bool IsValidObject(const base::DictValue& object) override;
+  std::u16string GetObjectDisplayName(const base::DictValue& object) override;
 
   // Grants |origin| access to the USB device.
   void GrantDevicePermission(const url::Origin& origin,
@@ -108,14 +108,22 @@ class UsbChooserContext : public permissions::ObjectPermissionContextBase,
     return *usb_policy_allowed_devices_;
   }
 
+  // KeyedService:
+  void Shutdown() override;
+
  private:
   // device::mojom::UsbDeviceManagerClient implementation.
   void OnDeviceAdded(device::mojom::UsbDeviceInfoPtr device_info) override;
   void OnDeviceRemoved(device::mojom::UsbDeviceInfoPtr device_info) override;
 
   void RevokeObjectPermissionInternal(const url::Origin& origin,
-                                      const base::Value& object,
+                                      const base::DictValue& object,
                                       bool revoked_by_website);
+
+  // ObjectPermissionContextBase:
+  std::vector<url::Origin> RevokeEphemeralPermissions(
+      const ContentSettingsPattern& primary_pattern,
+      bool unconditional) override;
 
   void OnDeviceManagerConnectionError();
   void EnsureConnectionWithDeviceManager();

@@ -4,9 +4,13 @@
 
 #include "chrome/services/util_win/public/mojom/util_win_mojom_traits.h"
 
+#include <limits.h> /* UINT_MAX */
+
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/notreached.h"
+#include "base/numerics/safe_math.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/win/shortcut.h"
@@ -37,39 +41,29 @@ chrome::mojom::SelectFileDialogType EnumTraits<
       return chrome::mojom::SelectFileDialogType::kOpenMultiFile;
   }
   NOTREACHED();
-  return chrome::mojom::SelectFileDialogType::kNone;
 }
 
 // static
-bool EnumTraits<chrome::mojom::SelectFileDialogType,
-                ui::SelectFileDialog::Type>::
-    FromMojom(chrome::mojom::SelectFileDialogType input,
-              ui::SelectFileDialog::Type* output) {
+ui::SelectFileDialog::Type
+EnumTraits<chrome::mojom::SelectFileDialogType, ui::SelectFileDialog::Type>::
+    FromMojom(chrome::mojom::SelectFileDialogType input) {
   switch (input) {
     case chrome::mojom::SelectFileDialogType::kNone:
-      *output = ui::SelectFileDialog::Type::SELECT_NONE;
-      return true;
+      return ui::SelectFileDialog::Type::SELECT_NONE;
     case chrome::mojom::SelectFileDialogType::kFolder:
-      *output = ui::SelectFileDialog::Type::SELECT_FOLDER;
-      return true;
+      return ui::SelectFileDialog::Type::SELECT_FOLDER;
     case chrome::mojom::SelectFileDialogType::kUploadFolder:
-      *output = ui::SelectFileDialog::Type::SELECT_UPLOAD_FOLDER;
-      return true;
+      return ui::SelectFileDialog::Type::SELECT_UPLOAD_FOLDER;
     case chrome::mojom::SelectFileDialogType::kExistingFolder:
-      *output = ui::SelectFileDialog::Type::SELECT_EXISTING_FOLDER;
-      return true;
+      return ui::SelectFileDialog::Type::SELECT_EXISTING_FOLDER;
     case chrome::mojom::SelectFileDialogType::kSaveAsFile:
-      *output = ui::SelectFileDialog::Type::SELECT_SAVEAS_FILE;
-      return true;
+      return ui::SelectFileDialog::Type::SELECT_SAVEAS_FILE;
     case chrome::mojom::SelectFileDialogType::kOpenFile:
-      *output = ui::SelectFileDialog::Type::SELECT_OPEN_FILE;
-      return true;
+      return ui::SelectFileDialog::Type::SELECT_OPEN_FILE;
     case chrome::mojom::SelectFileDialogType::kOpenMultiFile:
-      *output = ui::SelectFileDialog::Type::SELECT_OPEN_MULTI_FILE;
-      return true;
+      return ui::SelectFileDialog::Type::SELECT_OPEN_MULTI_FILE;
   }
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -85,7 +79,6 @@ EnumTraits<chrome::mojom::CertificateType, CertificateInfo::Type>::ToMojom(
       return chrome::mojom::CertificateType::kCertificateInCatalog;
   }
   NOTREACHED();
-  return chrome::mojom::CertificateType::kNoCertificate;
 }
 
 // static
@@ -100,29 +93,24 @@ EnumTraits<chrome::mojom::ShortcutOperation, ::base::win::ShortcutOperation>::
     case base::win::ShortcutOperation::kUpdateExisting:
       return chrome::mojom::ShortcutOperation::kUpdateExisting;
   }
-  NOTREACHED();
+  DUMP_WILL_BE_NOTREACHED();
   return chrome::mojom::ShortcutOperation::kCreateAlways;
 }
 
 // static
-bool EnumTraits<chrome::mojom::ShortcutOperation,
-                ::base::win::ShortcutOperation>::
-    FromMojom(chrome::mojom::ShortcutOperation input,
-              ::base::win::ShortcutOperation* output) {
+::base::win::ShortcutOperation
+EnumTraits<chrome::mojom::ShortcutOperation, ::base::win::ShortcutOperation>::
+    FromMojom(chrome::mojom::ShortcutOperation input) {
   switch (input) {
     case chrome::mojom::ShortcutOperation::kCreateAlways:
-      *output = base::win::ShortcutOperation::kCreateAlways;
-      return true;
+      return base::win::ShortcutOperation::kCreateAlways;
     case chrome::mojom::ShortcutOperation::kReplaceExisting:
-      *output = base::win::ShortcutOperation::kReplaceExisting;
-      return true;
+      return base::win::ShortcutOperation::kReplaceExisting;
     case chrome::mojom::ShortcutOperation::kUpdateExisting:
-      *output = base::win::ShortcutOperation::kUpdateExisting;
-      return true;
+      return base::win::ShortcutOperation::kUpdateExisting;
   }
 
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -133,23 +121,19 @@ bool StructTraits<chrome::mojom::FileFilterSpecDataView, ui::FileFilterSpec>::
 }
 
 // static
-bool EnumTraits<chrome::mojom::CertificateType, CertificateInfo::Type>::
-    FromMojom(chrome::mojom::CertificateType input,
-              CertificateInfo::Type* output) {
+CertificateInfo::Type
+EnumTraits<chrome::mojom::CertificateType, CertificateInfo::Type>::FromMojom(
+    chrome::mojom::CertificateType input) {
   switch (input) {
     case chrome::mojom::CertificateType::kNoCertificate:
-      *output = CertificateInfo::Type::NO_CERTIFICATE;
-      return true;
+      return CertificateInfo::Type::NO_CERTIFICATE;
     case chrome::mojom::CertificateType::kCertificateInFile:
-      *output = CertificateInfo::Type::CERTIFICATE_IN_FILE;
-      return true;
+      return CertificateInfo::Type::CERTIFICATE_IN_FILE;
     case chrome::mojom::CertificateType::kCertificateInCatalog:
-      *output = CertificateInfo::Type::CERTIFICATE_IN_CATALOG;
-      return true;
+      return CertificateInfo::Type::CERTIFICATE_IN_CATALOG;
   }
 
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -183,12 +167,10 @@ const std::u16string& StructTraits<
   return input.version;
 }
 // static
-chrome::mojom::CertificateType
+CertificateInfo::Type
 StructTraits<chrome::mojom::InspectionResultDataView, ModuleInspectionResult>::
     certificate_type(const ModuleInspectionResult& input) {
-  return EnumTraits<chrome::mojom::CertificateType,
-                    CertificateInfo::Type>::ToMojom(input.certificate_info
-                                                        .type);
+  return input.certificate_info.type;
 }
 // static
 const base::FilePath&
@@ -221,8 +203,7 @@ bool StructTraits<
 // static
 base::span<const uint8_t> StructTraits<chrome::mojom::ClsIdDataView,
                                        ::CLSID>::bytes(const ::CLSID& input) {
-  return base::make_span(reinterpret_cast<const uint8_t*>(&input),
-                         sizeof(input));
+  return base::byte_span_from_ref(input);
 }
 
 // static
@@ -235,7 +216,7 @@ bool StructTraits<chrome::mojom::ClsIdDataView, ::CLSID>::Read(
 
   const ::CLSID* cls_id = reinterpret_cast<const ::CLSID*>(bytes_view.data());
 
-  memcpy(out, cls_id, sizeof(*out));
+  *out = *cls_id;
   return true;
 }
 
@@ -245,7 +226,6 @@ bool StructTraits<chrome::mojom::ShortcutPropertiesDataView,
     Read(chrome::mojom::ShortcutPropertiesDataView input,
          base::win::ShortcutProperties* out) {
   out->icon_index = input.icon_index();
-  out->dual_mode = input.dual_mode();
   out->options = input.options();
 
   // out->toast_activator_clsid
@@ -282,6 +262,43 @@ bool StructTraits<chrome::mojom::AntiVirusProductDataView,
     return false;
   if (!product_version.empty())
     output->set_product_version(std::move(product_version));
+
+  return true;
+}
+
+// static
+bool StructTraits<chrome::mojom::TpmIdentifierDataView,
+                  metrics::SystemProfileProto_TpmIdentifier>::
+    Read(chrome::mojom::TpmIdentifierDataView input,
+         metrics::SystemProfileProto_TpmIdentifier* output) {
+  if (input.manufacturer_id() == 0u) {
+    // If manufacturer_id is it's default value metrics will not be
+    // reported.
+    return false;
+  }
+  output->set_manufacturer_id(input.manufacturer_id());
+
+  std::optional<std::string> manufacturer_version;
+  if (input.ReadManufacturerVersion(&manufacturer_version)) {
+    if (manufacturer_version.has_value()) {
+      output->set_manufacturer_version(std::move(manufacturer_version.value()));
+    }
+  }
+
+  std::optional<std::string> manufacturer_version_info;
+  if (input.ReadManufacturerVersionInfo(&manufacturer_version_info)) {
+    if (manufacturer_version_info.has_value()) {
+      output->set_manufacturer_version_info(
+          std::move(manufacturer_version_info.value()));
+    }
+  }
+
+  std::optional<std::string> tpm_specific_version;
+  if (input.ReadTpmSpecificVersion(&tpm_specific_version)) {
+    if (tpm_specific_version.has_value()) {
+      output->set_tpm_specific_version(std::move(tpm_specific_version.value()));
+    }
+  }
 
   return true;
 }

@@ -5,7 +5,8 @@
 module blink.mojom;
 
 import "services/network/public/mojom/web_sandbox_flags.mojom";
-import "third_party/blink/public/mojom/permissions_policy/permissions_policy.mojom";
+import "services/network/public/mojom/permissions_policy/permissions_policy.mojom";
+import "third_party/blink/public/mojom/ad_tagging/ad_evidence.mojom";
 import "third_party/blink/public/mojom/frame/frame_policy.mojom";
 import "third_party/blink/public/mojom/frame/tree_scope_type.mojom";
 import "third_party/blink/public/mojom/security_context/insecure_request_policy.mojom";
@@ -53,7 +54,7 @@ struct FrameReplicationState {
 
   // Parsed permissions policy header. May be empty if no header was sent with
   // the document.
-  array<blink.mojom.ParsedPermissionsPolicyDeclaration>
+  array<network.mojom.ParsedPermissionsPolicyDeclaration>
     permissions_policy_header;
 
   // Contains the currently active sandbox flags for this frame, including flags
@@ -95,6 +96,12 @@ struct FrameReplicationState {
   // trustworthy.
   bool has_potentially_trustworthy_unique_origin = false;
 
+  // True if the embedder identifies this frame as a secure-context root —
+  // descendants should treat it as a secure-context boundary when walking
+  // ancestors. Sourced from `ContentBrowserClient::IsSecureContextRoot()` at
+  // navigation commit. Today set for MIME-handler extension OOPIFs.
+  bool is_secure_context_root = false;
+
   // Whether the frame has an active transient user gesture.
   bool has_active_user_gesture = false;
 
@@ -102,6 +109,6 @@ struct FrameReplicationState {
   // long as a the frame has staying on the same eTLD+1.
   bool has_received_user_gesture_before_nav = false;
 
-  // Whether this frame is an ad frame.
-  bool is_ad_frame = false;
+  // The ad status of this frame.
+  FrameAdStatus ad_frame_status = kNotAd;
 };

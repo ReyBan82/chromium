@@ -4,6 +4,9 @@
 
 package org.chromium.components.browser_ui.site_settings;
 
+import org.chromium.build.annotations.EnsuresNonNullIf;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.embedder_support.util.UrlConstants;
 import org.chromium.content_public.browser.BrowserContextHandle;
 import org.chromium.url.GURL;
@@ -15,9 +18,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Represents a group of Websites that either share the same eTLD+1 or are embedded on it.
- */
+/** Represents a group of Websites that either share the same eTLD+1 or are embedded on it. */
+@NullMarked
 public class WebsiteGroup implements WebsiteEntry {
     // The common eTLD+1.
     private final String mDomainAndRegistry;
@@ -27,8 +29,8 @@ public class WebsiteGroup implements WebsiteEntry {
     private final long mTotalUsage;
     // Total number of cookies associated with the websites.
     private final int mCookiesCount;
-    // First Party Sets info relative to the eTLD+1.
-    private FPSCookieInfo mFPSInfo;
+    // Related Website Sets info relative to the eTLD+1.
+    private @Nullable RwsCookieInfo mRwsInfo;
 
     /**
      * Groups the websites by eTLD+1.
@@ -40,8 +42,10 @@ public class WebsiteGroup implements WebsiteEntry {
         // Put all the sites into an eTLD+1 -> list of origins mapping.
         Map<String, List<Website>> etldMap = new HashMap<>();
         for (Website website : websites) {
-            // TODO(crbug.com/1342991): Handle partitioned storage.
-            String etld = website.getAddress().getDomainAndRegistry();
+            // TODO(crbug.com/40231223): Handle partitioned storage.
+            // Use the main address to handle cases where Origin is a wildcard and the Embedder is
+            // the actual address.
+            String etld = website.getMainAddress().getDomainAndRegistry();
             List<Website> etldSites = etldMap.get(etld);
             if (etldSites == null) {
                 etldSites = new ArrayList<>();
@@ -52,11 +56,31 @@ public class WebsiteGroup implements WebsiteEntry {
         // Convert the mapping to a list of WebsiteGroup objects.
         List<WebsiteEntry> entries = new ArrayList<>();
         for (Map.Entry<String, List<Website>> etld : etldMap.entrySet()) {
-            entries.add((etld.getValue().size() == 1)
+            entries.add(
+                    (etld.getValue().size() == 1)
                             ? etld.getValue().get(0)
                             : new WebsiteGroup(etld.getKey(), etld.getValue()));
         }
         return entries;
+    }
+
+    /**
+     * Creates a {@code WebsiteGroup} for the specified domain from a collection of {@code Website}
+     * objects.
+     *
+     * @param domainAndRegistry The eTLD+1 domain to group by.
+     * @param websites A collection of {@code Website} objects to filter.
+     * @return A {@code WebsiteGroup} containing all sites matching the domain.
+     */
+    public static WebsiteGroup createForDomain(
+            String domainAndRegistry, Collection<Website> websites) {
+        List<Website> groupWebsites = new ArrayList<>();
+        for (Website site : websites) {
+            if (domainAndRegistry.equalsIgnoreCase(site.getMainAddress().getDomainAndRegistry())) {
+                groupWebsites.add(site);
+            }
+        }
+        return new WebsiteGroup(domainAndRegistry, groupWebsites);
     }
 
     public WebsiteGroup(String domainAndRegistry, List<Website> websites) {
@@ -66,10 +90,10 @@ public class WebsiteGroup implements WebsiteEntry {
         long totalUsage = 0;
         for (Website website : websites) {
             totalUsage += website.getTotalUsage();
-            // If there's more than 1 website with FPS info in the group it's fine to override it
-            // since websites are grouped by eTLD+1, and FPS info are at eTLD+1 level as well.
-            if (website.getFPSCookieInfo() != null) {
-                mFPSInfo = website.getFPSCookieInfo();
+            // If there's more than 1 website with RWS info in the group it's fine to override it
+            // since websites are grouped by eTLD+1, and RWS info are at eTLD+1 level as well.
+            if (website.getRwsCookieInfo() != null) {
+                mRwsInfo = website.getRwsCookieInfo();
             }
         }
         mTotalUsage = totalUsage;
@@ -89,9 +113,7 @@ public class WebsiteGroup implements WebsiteEntry {
         return mDomainAndRegistry;
     }
 
-    /**
-     * Returns the URL to use for fetching the favicon: https:// + eTLD+1 is returned.
-     */
+    /** Returns the URL to use for fetching the favicon: https:// + eTLD+1 is returned. */
     @Override
     public GURL getFaviconUrl() {
         return new GURL(UrlConstants.HTTPS_URL_PREFIX + mDomainAndRegistry);
@@ -119,8 +141,28 @@ public class WebsiteGroup implements WebsiteEntry {
         return false;
     }
 
+    /** {@inheritDoc} */
+    @Override
+    @EnsuresNonNullIf({"mRwsInfo"})
+    public boolean isPartOfRws() {
+        return mRwsInfo != null;
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public @Nullable String getRwsOwner() {
+        return isPartOfRws() ? mRwsInfo.getOwner() : null;
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public int getRwsSize() {
+        return isPartOfRws() ? mRwsInfo.getMembersCount() : 0;
+    }
+
     /**
      * Some Google-affiliated domains are not allowed to delete cookies for supervised accounts.
+     *
      * @return true only if every single website in the group has the deletion disabled.
      */
     @Override
@@ -135,10 +177,11 @@ public class WebsiteGroup implements WebsiteEntry {
         return true;
     }
 
-    public FPSCookieInfo getFPSInfo() {
-        return mFPSInfo;
+    public @Nullable RwsCookieInfo getRwsInfo() {
+        return mRwsInfo;
     }
 
+    @Override
     public String getDomainAndRegistry() {
         return mDomainAndRegistry;
     }

@@ -36,14 +36,22 @@ MerchantViewerDataManagerFactory::GetInstance() {
 }
 
 MerchantViewerDataManagerFactory::MerchantViewerDataManagerFactory()
-    : ProfileKeyedServiceFactory("MerchantViewerDataManager") {
+    : ProfileKeyedServiceFactory(
+          "MerchantViewerDataManager",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOriginalOnly)
+              .Build()) {
   DependsOn(SessionProtoDBFactory<
             MerchantViewerDataManager::MerchantSignalProto>::GetInstance());
 }
 
 MerchantViewerDataManagerFactory::~MerchantViewerDataManagerFactory() = default;
 
-KeyedService* MerchantViewerDataManagerFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+MerchantViewerDataManagerFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new MerchantViewerDataManager(context);
+  return std::make_unique<MerchantViewerDataManager>(context);
 }

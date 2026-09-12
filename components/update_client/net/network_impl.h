@@ -10,7 +10,10 @@
 #include <memory>
 #include <string>
 
-#include "base/memory/ref_counted.h"
+#include "base/files/file_path.h"
+#include "base/functional/callback_forward.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "components/update_client/net/network_chromium.h"
 #include "components/update_client/network.h"
 #include "services/network/public/mojom/url_response_head.mojom-forward.h"
@@ -42,12 +45,13 @@ class NetworkFetcherImpl : public NetworkFetcher {
       ResponseStartedCallback response_started_callback,
       ProgressCallback progress_callback,
       PostRequestCompleteCallback post_request_complete_callback) override;
-  void DownloadToFile(const GURL& url,
-                      const base::FilePath& file_path,
-                      ResponseStartedCallback response_started_callback,
-                      ProgressCallback progress_callback,
-                      DownloadToFileCompleteCallback
-                          download_to_file_complete_callback) override;
+  base::OnceClosure DownloadToFile(
+      const GURL& url,
+      const base::FilePath& file_path,
+      ResponseStartedCallback response_started_callback,
+      ProgressCallback progress_callback,
+      DownloadToFileCompleteCallback download_to_file_complete_callback)
+      override;
 
  private:
   void OnResponseStartedCallback(
@@ -60,9 +64,16 @@ class NetworkFetcherImpl : public NetworkFetcher {
 
   static constexpr int kMaxRetriesOnNetworkChange = 3;
 
+  void OnDownloadToFileComplete(base::FilePath file_path);
+  void CancelDownloadToFile();
+
   scoped_refptr<network::SharedURLLoaderFactory> shared_url_network_factory_;
-  std::unique_ptr<network::SimpleURLLoader> simple_url_loader_;
   SendCookiesPredicate cookie_predicate_;
+  // The loader and the completion callback of the download in progress, if
+  // any. Both are reset when the download completes or is cancelled.
+  std::unique_ptr<network::SimpleURLLoader> simple_url_loader_;
+  DownloadToFileCompleteCallback download_to_file_complete_callback_;
+  base::WeakPtrFactory<NetworkFetcherImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace update_client

@@ -37,8 +37,9 @@ LanguageSettingsPrivateDelegate::LanguageSettingsPrivateDelegate(
   // some unit tests try to create all context services, but don't initialize
   // the event router first.
   EventRouter* event_router = EventRouter::Get(context_);
-  if (!event_router)
+  if (!event_router) {
     return;
+  }
 
   event_router->RegisterObserver(this,
       language_settings_private::OnSpellcheckDictionariesChanged::kEventName);
@@ -53,9 +54,9 @@ LanguageSettingsPrivateDelegate::LanguageSettingsPrivateDelegate(
       Profile::FromBrowserContext(context_)->GetPrefs());
 
   StartOrStopListeningForSpellcheckChanges();
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   StartOrStopListeningForInputMethodChanges();
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 LanguageSettingsPrivateDelegate::~LanguageSettingsPrivateDelegate() {
@@ -64,25 +65,28 @@ LanguageSettingsPrivateDelegate::~LanguageSettingsPrivateDelegate() {
   pref_change_registrar_.RemoveAll();
 }
 
-LanguageSettingsPrivateDelegate* LanguageSettingsPrivateDelegate::Create(
-    content::BrowserContext* context) {
-  return new LanguageSettingsPrivateDelegate(context);
+std::unique_ptr<LanguageSettingsPrivateDelegate>
+LanguageSettingsPrivateDelegate::Create(content::BrowserContext* context) {
+  return std::make_unique<LanguageSettingsPrivateDelegate>(context);
 }
 
 std::vector<language_settings_private::SpellcheckDictionaryStatus>
 LanguageSettingsPrivateDelegate::GetHunspellDictionaryStatuses() {
   std::vector<language_settings_private::SpellcheckDictionaryStatus> statuses;
   for (const auto& dictionary : GetHunspellDictionaries()) {
-    if (!dictionary)
+    if (!dictionary) {
       continue;
+    }
     language_settings_private::SpellcheckDictionaryStatus status;
     status.language_code = dictionary->GetLanguage();
     status.is_ready = dictionary->IsReady();
     if (!status.is_ready) {
-      if (dictionary->IsDownloadInProgress())
+      if (dictionary->IsDownloadInProgress()) {
         status.is_downloading = true;
-      if (dictionary->IsDownloadFailure())
+      }
+      if (dictionary->IsDownloadFailure()) {
         status.download_failed = true;
+      }
     }
     statuses.push_back(std::move(status));
   }
@@ -94,22 +98,24 @@ void LanguageSettingsPrivateDelegate::Shutdown() {
   // event router, because some unit tests try to shutdown all context services,
   // but didn't initialize the event router first.
   EventRouter* event_router = EventRouter::Get(context_);
-  if (event_router)
+  if (event_router) {
     event_router->UnregisterObserver(this);
+  }
 
   if (listening_spellcheck_) {
     RemoveDictionaryObservers();
     listening_spellcheck_ = false;
   }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   if (listening_input_method_) {
     auto* input_method_manager = ash::input_method::InputMethodManager::Get();
-    if (input_method_manager)
+    if (input_method_manager) {
       input_method_manager->RemoveObserver(this);
+    }
     listening_input_method_ = false;
   }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void LanguageSettingsPrivateDelegate::OnListenerAdded(
@@ -122,7 +128,7 @@ void LanguageSettingsPrivateDelegate::OnListenerAdded(
     StartOrStopListeningForSpellcheckChanges();
     return;
   }
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   if (details.event_name ==
           language_settings_private::OnInputMethodAdded::kEventName ||
       details.event_name ==
@@ -130,19 +136,19 @@ void LanguageSettingsPrivateDelegate::OnListenerAdded(
     StartOrStopListeningForInputMethodChanges();
     return;
   }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void LanguageSettingsPrivateDelegate::OnListenerRemoved(
     const EventListenerInfo& details) {
   // Stop listening to events if there are no more listeners.
   StartOrStopListeningForSpellcheckChanges();
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   StartOrStopListeningForInputMethodChanges();
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 void LanguageSettingsPrivateDelegate::InputMethodChanged(
     ash::input_method::InputMethodManager* manager,
     Profile* profile,
@@ -171,7 +177,7 @@ void LanguageSettingsPrivateDelegate::OnInputMethodExtensionRemoved(
       std::move(args)));
   EventRouter::Get(context_)->BroadcastEvent(std::move(extension_event));
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 void LanguageSettingsPrivateDelegate::OnHunspellDictionaryInitialized(
     const std::string& language) {
@@ -213,28 +219,32 @@ void LanguageSettingsPrivateDelegate::OnCustomDictionaryChanged(
 
 void LanguageSettingsPrivateDelegate::RefreshDictionaries(bool was_listening,
                                                           bool should_listen) {
-  if (was_listening)
+  if (was_listening) {
     RemoveDictionaryObservers();
+  }
   hunspell_dictionaries_.clear();
   SpellcheckService* service = SpellcheckServiceFactory::GetForContext(
       context_);
-  if (!custom_dictionary_)
+  if (!custom_dictionary_) {
     custom_dictionary_ = service->GetCustomDictionary();
+  }
 
   const std::vector<std::unique_ptr<SpellcheckHunspellDictionary>>&
       dictionaries(service->GetHunspellDictionaries());
   for (const auto& dictionary : dictionaries) {
     hunspell_dictionaries_.push_back(dictionary->AsWeakPtr());
-    if (should_listen)
+    if (should_listen) {
       dictionary->AddObserver(this);
+    }
   }
 }
 
 const LanguageSettingsPrivateDelegate::WeakDictionaries&
 LanguageSettingsPrivateDelegate::GetHunspellDictionaries() {
   // If there are no hunspell dictionaries, or the first is invalid, refresh.
-  if (hunspell_dictionaries_.empty() || !hunspell_dictionaries_.front())
+  if (hunspell_dictionaries_.empty() || !hunspell_dictionaries_.front()) {
     RefreshDictionaries(listening_spellcheck_, listening_spellcheck_);
+  }
   return hunspell_dictionaries_;
 }
 
@@ -257,21 +267,23 @@ void LanguageSettingsPrivateDelegate::
             &LanguageSettingsPrivateDelegate::OnSpellcheckDictionariesChanged,
             base::Unretained(this)));
     // Observe the dictionary of custom words.
-    if (custom_dictionary_)
+    if (custom_dictionary_) {
       custom_dictionary_->AddObserver(this);
+    }
   } else if (!should_listen && listening_spellcheck_) {
     // Stop observing any dictionaries that still exist.
     RemoveDictionaryObservers();
     hunspell_dictionaries_.clear();
     pref_change_registrar_.Remove(spellcheck::prefs::kSpellCheckDictionaries);
-    if (custom_dictionary_)
+    if (custom_dictionary_) {
       custom_dictionary_->RemoveObserver(this);
+    }
   }
 
   listening_spellcheck_ = should_listen;
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 void LanguageSettingsPrivateDelegate::
     StartOrStopListeningForInputMethodChanges() {
   EventRouter* event_router = EventRouter::Get(context_);
@@ -283,15 +295,16 @@ void LanguageSettingsPrivateDelegate::
 
   auto* input_method_manager = ash::input_method::InputMethodManager::Get();
   if (input_method_manager) {
-    if (should_listen && !listening_input_method_)
+    if (should_listen && !listening_input_method_) {
       input_method_manager->AddObserver(this);
-    else if (!should_listen && listening_input_method_)
+    } else if (!should_listen && listening_input_method_) {
       input_method_manager->RemoveObserver(this);
+    }
   }
 
   listening_input_method_ = should_listen;
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 void LanguageSettingsPrivateDelegate::RetryDownloadHunspellDictionary(
     const std::string& language) {
@@ -324,8 +337,9 @@ void LanguageSettingsPrivateDelegate::BroadcastDictionariesChangedEvent() {
 
 void LanguageSettingsPrivateDelegate::RemoveDictionaryObservers() {
   for (const auto& dictionary : hunspell_dictionaries_) {
-    if (dictionary)
+    if (dictionary) {
       dictionary->RemoveObserver(this);
+    }
   }
 }
 

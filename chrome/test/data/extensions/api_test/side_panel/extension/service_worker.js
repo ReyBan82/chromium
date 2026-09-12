@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var tabId;
+let tabId;
 
 chrome.test.runTests([
   async function init() {
@@ -21,7 +21,7 @@ chrome.test.runTests([
 
   // Setting incomplete default options should merge with already-set fields
   // from the manifset panel.
-  // Regression for crbug.com/1403071.
+  // Regression for crbug.com/40251404.
   async function defaultSetAndGetPanelUpsertManifest() {
     // Disable the default panel.
     await chrome.sidePanel.setOptions({enabled: false});
@@ -93,5 +93,5 @@ chrome.test.runTests([
     const result = await chrome.sidePanel.getOptions({tabId: newTabId});
     chrome.test.assertEq(expected, result);
     chrome.test.succeed();
-  }
+  },
 ]);

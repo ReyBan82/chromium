@@ -4,19 +4,21 @@
 
 package org.chromium.device.nfc;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.device.mojom.Nfc;
 import org.chromium.device.mojom.NfcProvider;
 import org.chromium.mojo.bindings.InterfaceRequest;
 import org.chromium.mojo.system.MojoException;
 import org.chromium.services.service_manager.InterfaceFactory;
 
-/**
- * Android implementation of the NfcProvider Mojo interface.
- */
+/** Android implementation of the NfcProvider Mojo interface. */
+@NullMarked
 public class NfcProviderImpl implements NfcProvider {
     private static final String TAG = "NfcProviderImpl";
-    private NfcDelegate mDelegate;
-    private NfcImpl mNfcImpl;
+    private final NfcDelegate mDelegate;
+    private @Nullable NfcImpl mNfcImpl;
+    private boolean mOperationsSuspended;
 
     public NfcProviderImpl(NfcDelegate delegate) {
         mDelegate = delegate;
@@ -32,6 +34,7 @@ public class NfcProviderImpl implements NfcProvider {
             mNfcImpl.closeMojoConnection();
             mNfcImpl = null;
         }
+        mOperationsSuspended = false;
     }
 
     @Override
@@ -48,34 +51,38 @@ public class NfcProviderImpl implements NfcProvider {
         if (mNfcImpl != null) {
             mNfcImpl.closeMojoConnection();
         }
-        mNfcImpl = new NfcImpl(hostId, mDelegate, request);
+        mNfcImpl = new NfcImpl(hostId, mDelegate, request, mOperationsSuspended);
     }
 
-    /**
-     * Suspends the NFC usage. Should be called when web page visibility is lost.
-     */
+    /** Suspends the NFC usage. Should be called when web page visibility is lost. */
     @Override
     public void suspendNfcOperations() {
+        mOperationsSuspended = true;
         if (mNfcImpl != null) {
             mNfcImpl.suspendNfcOperations();
         }
     }
 
-    /**
-     * Resumes the NFC usage. Should be called when web page becomes visible.
-     */
+    /** Resumes the NFC usage. Should be called when web page becomes visible. */
     @Override
     public void resumeNfcOperations() {
+        mOperationsSuspended = false;
         if (mNfcImpl != null) {
             mNfcImpl.resumeNfcOperations();
         }
     }
 
-    /**
-     * A factory for implementations of the NfcProvider interface.
-     */
-    public static class Factory implements InterfaceFactory<NfcProvider> {
-        private NfcDelegate mDelegate;
+    @Nullable NfcImpl getNfcImplForTesting() {
+        return mNfcImpl;
+    }
+
+    boolean getOperationsSuspendedForTesting() {
+        return mOperationsSuspended;
+    }
+
+    /** A factory for implementations of the NfcProvider interface. */
+    public static class Factory implements InterfaceFactory<@Nullable NfcProvider> {
+        private final NfcDelegate mDelegate;
 
         public Factory(NfcDelegate delegate) {
             mDelegate = delegate;

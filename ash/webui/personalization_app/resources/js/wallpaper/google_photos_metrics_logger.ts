@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 
 /**
  * This enum is tied directly to a UMA enum defined in
@@ -13,7 +13,7 @@ import {assert} from 'chrome://resources/js/assert_ts.js';
  */
 export enum WallpaperGooglePhotosSource {
   PHOTOS = 0,
-  ALBUMS = 1,  // This enum will be retired with the shared albums feature.
+  ALBUMS_DEPRECATED = 1,  // Deprecated.
   OWNED_ALBUMS = 2,
   SHARED_ALBUMS = 3,
   NUM_SOURCES = 4,

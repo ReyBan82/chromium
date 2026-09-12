@@ -7,6 +7,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -17,7 +18,6 @@
 #include "components/sync/protocol/session_specifics.pb.h"
 #include "components/sync/protocol/sync_enums.pb.h"
 #include "components/sync_device_info/device_info.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace sync_sessions {
 
@@ -51,7 +51,7 @@ void SetSessionTabFromSyncData(const sync_pb::SessionTab& sync_data,
 // property of the window.
 sync_pb::SessionTab SessionTabToSyncData(
     const sessions::SessionTab& tab,
-    absl::optional<sync_pb::SyncEnums::BrowserType> browser_type);
+    std::optional<sync_pb::SyncEnums::BrowserType> browser_type);
 
 // A Sync wrapper for a SessionWindow.
 struct SyncedSessionWindow {
@@ -66,7 +66,8 @@ struct SyncedSessionWindow {
   sync_pb::SessionWindow ToSessionWindowProto() const;
 
   // Type of the window. See session_specifics.proto.
-  sync_pb::SyncEnums::BrowserType window_type;
+  sync_pb::SyncEnums::BrowserType window_type =
+      sync_pb::SyncEnums::BROWSER_TYPE_UNKNOWN;
 
   // The SessionWindow this object wraps.
   sessions::SessionWindow wrapped_window;
@@ -75,7 +76,7 @@ struct SyncedSessionWindow {
 // Defines a synced session for use by session sync. A synced session is a
 // list of windows along with a unique session identifer (tag) and meta-data
 // about the device being synced.
-// TODO(1386119): Change struct to class to follow style guides.
+// TODO(crbug.com/40879579): Change struct to class to follow style guides.
 struct SyncedSession {
  public:
   SyncedSession();
@@ -86,15 +87,18 @@ struct SyncedSession {
   ~SyncedSession();
 
   void SetSessionTag(const std::string& session_tag);
-
   const std::string& GetSessionTag() const;
 
   void SetSessionName(const std::string& session_name);
-
   const std::string& GetSessionName() const;
 
-  void SetModifiedTime(const base::Time& modified_time);
+  // The timestamp when this session was started, i.e. when the user signed in
+  // or turned on the sessions data type. Only populated for sessions started in
+  // M130 or later.
+  void SetStartTime(base::Time start_time);
+  std::optional<base::Time> GetStartTime() const;
 
+  void SetModifiedTime(const base::Time& modified_time);
   const base::Time& GetModifiedTime() const;
 
   // Map of windows that make up this session.
@@ -105,8 +109,8 @@ struct SyncedSession {
   sync_pb::SessionHeader ToSessionHeaderProto() const;
 
   void SetDeviceTypeAndFormFactor(
-      const sync_pb::SyncEnums::DeviceType& local_device_type,
-      const syncer::DeviceInfo::FormFactor& local_device_form_factor);
+      syncer::DeviceInfo::DeviceType local_device_type,
+      syncer::DeviceInfo::FormFactor local_device_form_factor);
 
   syncer::DeviceInfo::FormFactor GetDeviceFormFactor() const;
 
@@ -117,14 +121,20 @@ struct SyncedSession {
   // User-visible name
   std::string session_name_;
 
+  // The timestamp when this session was started, i.e. when the user signed in
+  // or turned on the sessions data type. Only populated for sessions started in
+  // M130 or later.
+  std::optional<base::Time> start_time_;
+
   // Last time this session was modified remotely. This is the max of the header
   // and all children tab mtimes.
   base::Time modified_time_;
 
   // Type of device this session is from.
-  // It's used only to populate deprecated device_type by
+  // Used to populate the deprecated device_type field in
   // ToSessionHeaderProto().
-  sync_pb::SyncEnums::DeviceType device_type;
+  syncer::DeviceInfo::DeviceType device_type =
+      syncer::DeviceInfo::DeviceType::kUnset;
 
   // Form Factor of device this session is from.
   syncer::DeviceInfo::FormFactor device_form_factor =

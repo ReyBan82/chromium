@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "media/formats/webm/opus_packet_builder.h"
 
 #include "base/check_op.h"
@@ -50,12 +51,8 @@ OpusPacket::OpusPacket(uint8_t config, uint8_t frame_count, bool is_VBR) {
 
 OpusPacket::~OpusPacket() = default;
 
-const uint8_t* OpusPacket::data() const {
-  return &(data_[0]);
-}
-
-int OpusPacket::size() const {
-  return data_.size();
+base::span<const uint8_t> OpusPacket::data() const {
+  return data_;
 }
 
 double OpusPacket::duration_ms() const {

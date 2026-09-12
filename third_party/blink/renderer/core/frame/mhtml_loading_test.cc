@@ -29,10 +29,12 @@
  */
 
 #include "base/functional/callback_helpers.h"
+#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "services/network/public/cpp/web_sandbox_flags.h"
 #include "services/network/public/mojom/web_sandbox_flags.mojom-blink.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/public/web/web_view.h"
@@ -45,9 +47,11 @@
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/location.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+#include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/testing/mock_policy_container_host.h"
 #include "third_party/blink/renderer/platform/loader/static_data_navigation_body_loader.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
@@ -77,10 +81,15 @@ class MHTMLLoadingTest : public testing::Test {
  protected:
   void SetUp() override { helper_.Initialize(); }
 
-  void LoadURLInTopFrame(const WebURL& url, const std::string& file_name) {
-    scoped_refptr<SharedBuffer> buffer = test::ReadFromFile(
-        test::CoreTestDataPath(WebString::FromUTF8("mhtml/" + file_name)));
+  void LoadURLInTopFrame(const WebURL& url,
+                         const std::string& file_name,
+                         bool view_source = false) {
+    std::optional<Vector<char>> data = test::ReadFromFile(
+        test::CoreTestDataPath(WebString::FromUtf8("mhtml/" + file_name)));
+    ASSERT_TRUE(data);
+    scoped_refptr<SharedBuffer> buffer = SharedBuffer::Create(std::move(*data));
     WebLocalFrameImpl* frame = helper_.GetWebView()->MainFrameImpl();
+    frame->EnableViewSourceMode(view_source);
     auto params = std::make_unique<WebNavigationParams>();
     params->url = url;
     params->response = WebURLResponse(url);
@@ -92,10 +101,14 @@ class MHTMLLoadingTest : public testing::Test {
         blink::WebPolicyContainerPolicies(),
         mock_policy_container_host.BindNewEndpointAndPassDedicatedRemote());
     params->policy_container->policies.sandbox_flags = kMhtmlSandboxFlags;
-    auto body_loader = std::make_unique<StaticDataNavigationBodyLoader>();
-    body_loader->Write(*buffer);
-    body_loader->Finish();
-    params->body_loader = std::move(body_loader);
+    params->body_loader =
+        StaticDataNavigationBodyLoader::CreateWithData(std::move(buffer));
+    if ((params->policy_container->policies.sandbox_flags &
+         network::mojom::blink::WebSandboxFlags::kOrigin) !=
+        network::mojom::blink::WebSandboxFlags::kNone) {
+      params->origin_to_commit =
+          SecurityOrigin::Create(url)->DeriveNewOpaqueOrigin();
+    }
     frame->CommitNavigation(std::move(params), nullptr /* extra_data */);
     frame_test_helpers::PumpPendingRequestsForFrameToLoad(frame);
   }
@@ -103,6 +116,7 @@ class MHTMLLoadingTest : public testing::Test {
   Page* GetPage() const { return helper_.GetWebView()->GetPage(); }
 
  private:
+  test::TaskEnvironment task_environment_;
   ScopedTestingPlatformSupport<TestingPlatformSupport> platform_;
   frame_test_helpers::WebViewHelper helper_;
 };
@@ -145,7 +159,7 @@ TEST_F(MHTMLLoadingTest, EnforceSandboxFlags) {
   EXPECT_FALSE(window->CanExecuteScripts(kNotAboutToExecuteScript));
 
   // The element to be created by the script is not there.
-  EXPECT_FALSE(window->document()->getElementById("mySpan"));
+  EXPECT_FALSE(window->document()->getElementById(AtomicString("mySpan")));
 
   // Make sure the subframe is also sandboxed.
   LocalFrame* child_frame =
@@ -162,7 +176,8 @@ TEST_F(MHTMLLoadingTest, EnforceSandboxFlags) {
   EXPECT_FALSE(child_window->CanExecuteScripts(kNotAboutToExecuteScript));
 
   // The element to be created by the script is not there.
-  EXPECT_FALSE(child_window->document()->getElementById("mySpan"));
+  EXPECT_FALSE(
+      child_window->document()->getElementById(AtomicString("mySpan")));
 }
 
 TEST_F(MHTMLLoadingTest, EnforceSandboxFlagsInXSLT) {
@@ -195,19 +210,22 @@ TEST_F(MHTMLLoadingTest, ShadowDom) {
   Document* document = frame->GetDocument();
   ASSERT_TRUE(document);
 
-  EXPECT_TRUE(IsShadowHost(document->getElementById("h2")));
+  EXPECT_TRUE(IsShadowHost(document->getElementById(AtomicString("h2"))));
   // The nested shadow DOM tree is created.
-  EXPECT_TRUE(IsShadowHost(
-      document->getElementById("h2")->GetShadowRoot()->getElementById("h3")));
+  EXPECT_TRUE(IsShadowHost(document->getElementById(AtomicString("h2"))
+                               ->GetShadowRoot()
+                               ->getElementById(AtomicString("h3"))));
 
-  EXPECT_TRUE(IsShadowHost(document->getElementById("h4")));
+  EXPECT_TRUE(IsShadowHost(document->getElementById(AtomicString("h4"))));
   // The static element in the shadow dom template is found.
-  EXPECT_TRUE(
-      document->getElementById("h4")->GetShadowRoot()->getElementById("s1"));
+  EXPECT_TRUE(document->getElementById(AtomicString("h4"))
+                  ->GetShadowRoot()
+                  ->getElementById(AtomicString("s1")));
   // The element to be created by the script in the shadow dom template is
   // not found because the script is blocked.
-  EXPECT_FALSE(
-      document->getElementById("h4")->GetShadowRoot()->getElementById("s2"));
+  EXPECT_FALSE(document->getElementById(AtomicString("h4"))
+                   ->GetShadowRoot()
+                   ->getElementById(AtomicString("s2")));
 }
 
 TEST_F(MHTMLLoadingTest, FormControlElements) {
@@ -220,13 +238,47 @@ TEST_F(MHTMLLoadingTest, FormControlElements) {
   Document* document = frame->GetDocument();
   ASSERT_TRUE(document);
 
-  HTMLCollection* formControlElements = document->getElementsByClassName("fc");
+  HTMLCollection* formControlElements =
+      document->getElementsByClassName(AtomicString("fc"));
   ASSERT_TRUE(formControlElements);
   for (Element* element : *formControlElements)
     EXPECT_TRUE(element->IsDisabledFormControl());
 
-  EXPECT_FALSE(document->getElementById("h1")->IsDisabledFormControl());
-  EXPECT_FALSE(document->getElementById("fm")->IsDisabledFormControl());
+  EXPECT_FALSE(
+      document->getElementById(AtomicString("h1"))->IsDisabledFormControl());
+  EXPECT_FALSE(
+      document->getElementById(AtomicString("fm"))->IsDisabledFormControl());
+}
+
+TEST_F(MHTMLLoadingTest, ViewSourceLineWrapControl) {
+  base::test::ScopedFeatureList features;
+  features.InitAndDisableFeature(blink::features::kMHTML_Improvements);
+  LoadURLInTopFrame(ToKURL("file:///form.mht"), "form.mht",
+                    /*view_source=*/true);
+  ASSERT_TRUE(GetPage());
+  auto* frame = To<LocalFrame>(GetPage()->MainFrame());
+  ASSERT_TRUE(frame);
+  Document* document = frame->GetDocument();
+  ASSERT_TRUE(document);
+
+  auto* checkbox = To<HTMLInputElement>(
+      document->QuerySelector(AtomicString("input[type=checkbox]")));
+  auto* table = document->QuerySelector(AtomicString("table"));
+  ASSERT_TRUE(checkbox);
+  ASSERT_TRUE(table);
+  EXPECT_FALSE(checkbox->IsDisabledFormControl());
+  EXPECT_FALSE(checkbox->Checked());
+  EXPECT_FALSE(table->HasClass());
+
+  checkbox->click();
+
+  EXPECT_TRUE(checkbox->Checked());
+  EXPECT_EQ(table->GetClassAttribute(), AtomicString("line-wrap"));
+
+  checkbox->click();
+
+  EXPECT_FALSE(checkbox->Checked());
+  EXPECT_FALSE(table->HasClass());
 }
 
 TEST_F(MHTMLLoadingTest, LoadMHTMLContainingSoftLineBreaks) {
@@ -243,8 +295,8 @@ TEST_F(MHTMLLoadingTest, LoadMHTMLContainingSoftLineBreaks) {
 
   // We should not have problem to concatenate body lines separated by soft
   // line breaks.
-  EXPECT_TRUE(document->getElementById(
-      "AVeryLongID012345678901234567890123456789012345678901234567890End"));
+  EXPECT_TRUE(document->getElementById(AtomicString(
+      "AVeryLongID012345678901234567890123456789012345678901234567890End")));
 }
 
 }  // namespace test

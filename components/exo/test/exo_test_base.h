@@ -9,18 +9,15 @@
 
 #include "ash/test/ash_test_base.h"
 #include "components/exo/test/exo_test_helper.h"
-
-namespace ash {
-class TestShellDelegate;
-}
+#include "components/exo/window_occlusion_manager.h"
 
 namespace viz {
 class SurfaceManager;
 }
 
 namespace exo {
-class WMHelper;
 class ShellSurfaceBase;
+class WMHelper;
 
 namespace test {
 class ExoTestHelper;
@@ -44,8 +41,6 @@ class ExoTestBase : public ash::AshTestBase {
   void SetUp() override;
   void TearDown() override;
 
-  void SetUp(std::unique_ptr<ash::TestShellDelegate> shell_delegate);
-
   viz::SurfaceManager* GetSurfaceManager();
 
   gfx::Point GetOriginOfShellSurface(const ShellSurfaceBase* shell_surface);
@@ -56,6 +51,7 @@ class ExoTestBase : public ash::AshTestBase {
  private:
   ExoTestHelper exo_test_helper_;
   std::unique_ptr<WMHelper> wm_helper_;
+  std::unique_ptr<WindowOcclusionManager> window_occlusion_manager_;
 };
 
 }  // namespace test

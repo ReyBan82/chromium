@@ -15,8 +15,10 @@
 #include "absl/random/uniform_int_distribution.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -24,7 +26,7 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/base/internal/raw_logging.h"
+#include "absl/log/log.h"
 #include "absl/random/internal/chi_square.h"
 #include "absl/random/internal/distribution_test_util.h"
 #include "absl/random/internal/pcg_engine.h"
@@ -47,8 +49,8 @@ TYPED_TEST(UniformIntDistributionTest, ParamSerializeTest) {
   using Limits = std::numeric_limits<TypeParam>;
   using param_type =
       typename absl::uniform_int_distribution<TypeParam>::param_type;
-  const TypeParam kMin = std::is_unsigned<TypeParam>::value ? 37 : -105;
-  const TypeParam kNegOneOrZero = std::is_unsigned<TypeParam>::value ? 0 : -1;
+  const TypeParam kMin = std::is_unsigned_v<TypeParam> ? 37 : -105;
+  const TypeParam kNegOneOrZero = std::is_unsigned_v<TypeParam> ? 0 : -1;
 
   constexpr int kCount = 1000;
   absl::InsecureBitGen gen;
@@ -107,16 +109,15 @@ TYPED_TEST(UniformIntDistributionTest, ParamSerializeTest) {
         sample_min = sample;
       }
     }
-    std::string msg = absl::StrCat("Range: ", +sample_min, ", ", +sample_max);
-    ABSL_RAW_LOG(INFO, "%s", msg.c_str());
+    LOG(INFO) << "Range: " << sample_min << ", " << sample_max;
   }
 }
 
 TYPED_TEST(UniformIntDistributionTest, ViolatesPreconditionsDeathTest) {
 #if GTEST_HAS_DEATH_TEST
   // Hi < Lo
-  EXPECT_DEBUG_DEATH({ absl::uniform_int_distribution<TypeParam> dist(10, 1); },
-                     "");
+  EXPECT_DEBUG_DEATH(
+      { absl::uniform_int_distribution<TypeParam> dist(10, 1); }, "");
 #endif  // GTEST_HAS_DEATH_TEST
 #if defined(NDEBUG)
   // opt-mode, for invalid parameters, will generate a garbage value,
@@ -181,7 +182,7 @@ TYPED_TEST(UniformIntDistributionTest, ChiSquaredTest50) {
   const int kThreshold =
       absl::random_internal::ChiSquareValue(kBuckets, 0.999999);
 
-  const TypeParam min = std::is_unsigned<TypeParam>::value ? 37 : -37;
+  const TypeParam min = std::is_unsigned_v<TypeParam> ? 37 : -37;
   const TypeParam max = min + kBuckets;
 
   // We use a fixed bit generator for distribution accuracy tests.  This allows
@@ -210,7 +211,7 @@ TYPED_TEST(UniformIntDistributionTest, ChiSquaredTest50) {
     absl::StrAppend(&msg, kChiSquared, " p-value ", p_value, "\n");
     absl::StrAppend(&msg, "High ", kChiSquared, " value: ", chi_square, " > ",
                     kThreshold);
-    ABSL_RAW_LOG(INFO, "%s", msg.c_str());
+    LOG(INFO) << msg;
     FAIL() << msg;
   }
 }

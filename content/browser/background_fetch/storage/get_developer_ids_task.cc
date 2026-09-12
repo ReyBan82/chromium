@@ -42,7 +42,7 @@ void GetDeveloperIdsTask::DidGetServiceWorkerRegistration(
     return;
   }
 
-  // TODO(crbug.com/1199077): Move this check into the SW context.
+  // TODO(crbug.com/40177656): Move this check into the SW context.
   if (registration->key() != storage_key_) {
     SetStorageErrorAndFinish(
         BackgroundFetchStorageError::kServiceWorkerStorageError);
@@ -78,13 +78,8 @@ void GetDeveloperIdsTask::DidGetUniqueIds(
 
 void GetDeveloperIdsTask::FinishWithError(
     blink::mojom::BackgroundFetchError error) {
-  ReportStorageError();
   std::move(callback_).Run(error, std::move(developer_ids_));
   Finished();  // Destroys |this|.
-}
-
-std::string GetDeveloperIdsTask::HistogramName() const {
-  return "GetDeveloperIdsTask";
 }
 
 }  // namespace background_fetch

@@ -1,2 +1,6 @@
-cmfcmf@chromium.org
-rmcelrath@chromium.org
+file://components/webapps/isolated_web_apps/PLATFORM_OWNERS
+
+# Backup OWNERS
+zgroza@chromium.org
+# For topics on version management
+mskarbinska@google.com

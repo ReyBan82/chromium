@@ -21,26 +21,51 @@ enum ChromeInsetsMetric {
   INSETS_OMNIBOX_PILL_BUTTON,
   // Padding used in an page info hover button.
   INSETS_PAGE_INFO_HOVER_BUTTON,
+  // Margins for the avatars in the Recent Activity dialog.
+  INSETS_RECENT_ACTIVITY_IMAGE_MARGIN,
+  // Margins for the contents inside in the Task Manager.
+  INSETS_TASK_MANAGER,
+  // Padding used in the page info footer button.
+  INSETS_PAGE_INFO_FOOTER_BUTTON,
+  // Outer border insets around the Block-style Action App Menu container popup.
+  INSETS_ACTION_APP_MENU_POPUP,
+  // Border insets for Block-style Action App Menu items.
+  INSETS_ACTION_APP_MENU_ITEM,
+  // Padding for the footer container in the Block-style Action App Menu.
+  INSETS_ACTION_APP_MENU_FOOTER,
+  // Margins for the footer container in the Block-style Action App Menu.
+  INSETS_ACTION_APP_MENU_FOOTER_MARGIN,
+  // Padding for a Block-style Action App Menu footer button.
+  INSETS_ACTION_APP_MENU_FOOTER_BUTTON,
+  // Padding for a status chip in the app menu.
+  INSETS_APP_MENU_CHIP,
+  // Padding for the block creation action buttons row container.
+  INSETS_ACTION_APP_MENU_BLOCK_ROW,
+  // Internal padding for a block entry button.
+  INSETS_ACTION_APP_MENU_BLOCK_ENTRY_BUTTON,
+  // Margins for the search bar in the Block-style Action App Menu.
+  INSETS_ACTION_APP_MENU_SEARCH_BAR_MARGIN,
 };
 
 enum ChromeDistanceMetric {
   // Default minimum width of a button.
   DISTANCE_BUTTON_MINIMUM_WIDTH = views::VIEWS_DISTANCE_END,
+  // Size of the Collaboration Messaging fallback icon padding.
+  DISTANCE_COLLABORATION_MESSAGING_AVATAR_FALLBACK_ICON_PADDING,
+  // Size of the Collaboration Messaging fallback icon border.
+  DISTANCE_COLLABORATION_MESSAGING_AVATAR_FALLBACK_ICON_BORDER_SIZE,
   // Vertical spacing at the beginning and end of a content list (a vertical
   // stack of composite views that behaves like a menu) containing one item.
   DISTANCE_CONTENT_LIST_VERTICAL_SINGLE,
   // Same as |DISTANCE_CONTENT_LIST_VERTICAL_SINGLE|, but used at the beginning
   // and end of a multi-item content list.
   DISTANCE_CONTENT_LIST_VERTICAL_MULTI,
-  // Vertical spacing between a list of multiple controls in one column.
-  DISTANCE_CONTROL_LIST_VERTICAL,
-  // Width of the space in a dropdown button between its label and down arrow.
-  DISTANCE_DROPDOWN_BUTTON_LABEL_ARROW_SPACING,
-  // Width of the horizontal padding in a dropdown button between the down arrow
-  // and the button's border.
-  DISTANCE_DROPDOWN_BUTTON_RIGHT_MARGIN,
+  // Width of the extensions menu.
+  DISTANCE_EXTENSIONS_MENU_WIDTH,
   // Width and height of a button's icon in the extensions menu.
   DISTANCE_EXTENSIONS_MENU_BUTTON_ICON_SIZE,
+  // Width and height of a small button's icon in the extensions menu.
+  DISTANCE_EXTENSIONS_MENU_BUTTON_ICON_SMALL_SIZE,
   // Width and height of an extension's icon in the extensions menu. This are
   // larger than menu button's icons because it contains internal padding to
   // provide space for badging.
@@ -50,6 +75,9 @@ enum ChromeDistanceMetric {
   DISTANCE_EXTENSIONS_MENU_ICON_SPACING,
   // Vertical and horizontal margin for menu buttons.
   DISTANCE_EXTENSIONS_MENU_BUTTON_MARGIN,
+  // Horizontal spacing between a label and an icon in the extension's menu
+  // entry.
+  DISTANCE_EXTENSIONS_MENU_LABEL_ICON_SPACING,
   // Smaller horizontal spacing between other controls that are logically
   // related.
   DISTANCE_RELATED_CONTROL_HORIZONTAL_SMALL,
@@ -65,17 +93,10 @@ enum ChromeDistanceMetric {
   DISTANCE_TOAST_CONTROL_VERTICAL,
   // Vertical margin for labels in a toast.
   DISTANCE_TOAST_LABEL_VERTICAL,
-  // Horizontal spacing between controls that are logically unrelated.
-  DISTANCE_UNRELATED_CONTROL_HORIZONTAL,
   // Larger horizontal spacing between unrelated controls.
   DISTANCE_UNRELATED_CONTROL_HORIZONTAL_LARGE,
   // Larger vertical spacing between unrelated controls.
   DISTANCE_UNRELATED_CONTROL_VERTICAL_LARGE,
-  // Width of larger modal dialogs that require extra width.
-  DISTANCE_LARGE_MODAL_DIALOG_PREFERRED_WIDTH,
-  // Width and height of a vector icon in a bubble's header (i.e. the one
-  // returned from GetWindowIcon).
-  DISTANCE_BUBBLE_HEADER_VECTOR_ICON_SIZE,
   // Width of a bubble that appears mid-screen (like a standalone dialog)
   // instead of being anchored.
   DISTANCE_STANDALONE_BUBBLE_PREFERRED_WIDTH,
@@ -92,6 +113,145 @@ enum ChromeDistanceMetric {
   DISTANCE_SIDE_PANEL_HEADER_BUTTON_MINIMUM_SIZE,
   // Horizontal spacing for separating side panel header border from controls.
   DISTANCE_SIDE_PANEL_HEADER_INTERIOR_MARGIN_HORIZONTAL,
+  // The corner radius for the side panel content.
+  DISTANCE_SIDE_PANEL_CONTENT_RADIUS,
+  // Horizontal padding between separator in the page info view.
+  DISTANCE_HORIZONTAL_SEPARATOR_PADDING_PAGE_INFO_VIEW,
+  // Horizontal padding applied between the icon and label in the infobar.
+  DISTANCE_INFOBAR_HORIZONTAL_ICON_LABEL_PADDING,
+  // Height of info bars.
+  DISTANCE_INFOBAR_HEIGHT,
+  // Horizontal padding applied between the icon and label in the permission
+  // prompt.
+  DISTANCE_PERMISSION_PROMPT_HORIZONTAL_ICON_LABEL_PADDING,
+  // Horizontal spacing between icon and label in the rich hover button.
+  DISTANCE_RICH_HOVER_BUTTON_ICON_HORIZONTAL,
+  // Horizontal spacing for the search bar's magnifying glass icon and x button.
+  DISTANCE_TASK_MANAGER_SEARCH_BAR_ICON_AND_BUTTON_HORIZONTAL_SPACING,
+  // Width and height of the vector icons shown in the search bar of the task
+  // manager.
+  DISTANCE_TASK_MANAGER_SEARCH_ICON_SIZE,
+  // The minimum width for the search bar found in Task Manager.
+  DISTANCE_TASK_MANAGER_SEARCH_BAR_MIN_WIDTH,
+  // The minimum height for the search bar found in Task Manager.
+  DISTANCE_TASK_MANAGER_SEARCH_BAR_MIN_HEIGHT,
+  // Height of Task Manager tabs.
+  DISTANCE_TASK_MANAGER_TAB_HEIGHT,
+  // Distance between most child elements inside the toast.
+  DISTANCE_TOAST_BUBBLE_BETWEEN_CHILD_SPACING,
+  // Distance between the toast label and action button.
+  DISTANCE_TOAST_BUBBLE_BETWEEN_LABEL_ACTION_BUTTON_SPACING,
+  // Distance between the toast label and the menu button.
+  DISTANCE_TOAST_BUBBLE_BETWEEN_LABEL_MENU_BUTTON_SPACING,
+  // Height of the toast.
+  DISTANCE_TOAST_BUBBLE_HEIGHT,
+  // Height of toast action buttons.
+  DISTANCE_TOAST_BUBBLE_HEIGHT_ACTION_BUTTON,
+  // Height of the toast text and close button icon.
+  DISTANCE_TOAST_BUBBLE_HEIGHT_CONTENT,
+  // Width and height of the vector icons shown in the toast bubble.
+  DISTANCE_TOAST_BUBBLE_ICON_SIZE,
+  // Width and height of the icon that shows the "further options" menu.
+  DISTANCE_TOAST_BUBBLE_MENU_ICON_SIZE,
+  // Left and right margins of the leading vector icon shown in the toast
+  // bubble.
+  DISTANCE_TOAST_BUBBLE_LEADING_ICON_SIDE_MARGINS,
+  // Distance between left border of the toast and the icon.
+  DISTANCE_TOAST_BUBBLE_MARGIN_LEFT,
+  // Distance between the right border of the toast and the action button, if
+  // the action button is the rightmost element.
+  DISTANCE_TOAST_BUBBLE_MARGIN_RIGHT_ACTION_BUTTON,
+  // Distance between the right border of the toast and the close button, if the
+  // close button is the rightmost element.
+  DISTANCE_TOAST_BUBBLE_MARGIN_RIGHT_CLOSE_BUTTON,
+  // Distance between the right border of the toast and the menu button, if the
+  // menu button is the rightmost element.
+  DISTANCE_TOAST_BUBBLE_MARGIN_RIGHT_MENU_BUTTON,
+  // Distance between the right border of the toast and the label, if the label
+  // is the rightmost element.
+  DISTANCE_TOAST_BUBBLE_MARGIN_RIGHT_LABEL,
+  // Minimum distance between the horizontal edges of the toast and the browser
+  // window. Relevant if the toast is wide relative to the browser.
+  DISTANCE_TOAST_BUBBLE_BROWSER_WINDOW_MARGIN,
+  // Size to resize avatars to in the Recent Activity dialog.
+  DISTANCE_RECENT_ACTIVITY_AVATAR_SIZE,
+  // Size to use for avatar fallback icon in the Recent Activity dialog.
+  DISTANCE_RECENT_ACTIVITY_AVATAR_FALLBACK_SIZE,
+  // Size to use for the radius of activity containers in the Recent
+  // Activity dialog.
+  DISTANCE_RECENT_ACTIVITY_CONTAINER_RADIUS,
+  // Size to use for the margin between Recent Activity containers.
+  DISTANCE_RECENT_ACTIVITY_CONTAINER_VERTICAL_MARGIN,
+  // Additional margin for leading and trailing rows within the Recent
+  // Activity dialog.
+  DISTANCE_RECENT_ACTIVITY_CONTAINER_VERTICAL_PADDING,
+  // Width of the empty border around favicon containers in the Recent Activity
+  // dialog.
+  DISTANCE_RECENT_ACTIVITY_FAVICON_CONTAINER_BORDER_WIDTH,
+  // Distance to offset favicon containers from the avatar in the Recent
+  // Activity dialog.
+  DISTANCE_RECENT_ACTIVITY_FAVICON_CONTAINER_OFFSET_FROM_AVATAR,
+  // Width of the padding inside favicon containers in the Recent Activity
+  // dialog.
+  DISTANCE_RECENT_ACTIVITY_FAVICON_CONTAINER_PADDING,
+  // Size to use for favicon containers in the Recent Activity dialog.
+  DISTANCE_RECENT_ACTIVITY_FAVICON_CONTAINER_RADIUS,
+  // Vertical padding for rows within the Recent Activity dialog.
+  DISTANCE_RECENT_ACTIVITY_ROW_VERTICAL_PADDING,
+  // Distance between the avatar icon and the email in the account info row.
+  DISTANCE_ACCOUNT_INFO_ROW_AVATAR_EMAIL,
+  // Vertical spacing between a textfield and an account card, usually
+  // consisting of an avatar icon, name and email address.
+  DISTANCE_TEXTFIELD_ACCOUNT_CARD_VERTICAL,
+  // Width and height of the vector icon shown in infoboxes in the FFR dialog.
+  DISTANCE_FEATURE_FIRST_RUN_INFO_BOX_ICON_SIZE,
+  // Vertical and horizontal padding of the infoboxes in the FFR dialog.
+  DISTANCE_FEATURE_FIRST_RUN_INFO_BOX_PADDING,
+  // Rounded corner radius for infoboxes in the FFR dialog.
+  DISTANCE_FEATURE_FIRST_RUN_INFO_BOX_ROUNDED_BORDER_RADIUS,
+  // Vertical spacing between infoboxes in the FFR dialog.
+  DISTANCE_FEATURE_FIRST_RUN_INFO_BOX_VERTICAL,
+  // Vertical padding for the infobar buttons.
+  DISTANCE_INFOBAR_BUTTON_VERTICAL_PADDING,
+  // Horizontal padding for the infobar buttons.
+  DISTANCE_INFOBAR_BUTTON_HORIZONTAL_PADDING,
+  // Corner radius for Block-style Action App Menu section container cards.
+  DISTANCE_ACTION_APP_MENU_CONTAINER_CORNER_RADIUS,
+  // Top padding for the first item in a Block-style Action App Menu section
+  // card.
+  DISTANCE_ACTION_APP_MENU_ITEM_FIRST_TOP_PADDING,
+  // Bottom padding for the last item in a Block-style Action App Menu section
+  // card.
+  DISTANCE_ACTION_APP_MENU_ITEM_LAST_BOTTOM_PADDING,
+  // Default vertical margin for Block-style Action App Menu items.
+  DISTANCE_ACTION_APP_MENU_ITEM_DEFAULT_VERTICAL_MARGIN,
+  // Size of vector icons in the Block-style Action App Menu.
+  DISTANCE_ACTION_APP_MENU_ICON_SIZE,
+  // Full height of a Block-style Action App Menu item row.
+  DISTANCE_ACTION_APP_MENU_FULL_ITEM_HEIGHT,
+  // Height of an expanded Block-style Action App Menu item row (e.g. Zoom,
+  // Profile).
+  DISTANCE_ACTION_APP_MENU_EXPANDED_ITEM_HEIGHT,
+  // Width of a block-style entry in the Action App Menu.
+  DISTANCE_ACTION_APP_MENU_BLOCK_ENTRY_WIDTH,
+  // Height of a block-style entry in the Action App Menu.
+  DISTANCE_ACTION_APP_MENU_BLOCK_ENTRY_HEIGHT,
+  // Size of vector icon inside a block-style entry.
+  DISTANCE_ACTION_APP_MENU_BLOCK_ENTRY_ICON_SIZE,
+  // Spacing between action items in the Block-style Action App Menu footer.
+  DISTANCE_ACTION_APP_MENU_FOOTER_BUTTON_SPACING,
+  // Spacing between child views in a Block-style Action App Menu footer button.
+  DISTANCE_ACTION_APP_MENU_FOOTER_BUTTON_BETWEEN_CHILD_SPACING,
+  // Corner radius for a Block-style Action App Menu footer button.
+  DISTANCE_ACTION_APP_MENU_FOOTER_BUTTON_CORNER_RADIUS,
+  // Vertical margin for section headers in the Action App Menu.
+  DISTANCE_ACTION_APP_MENU_HEADER_VERTICAL_MARGIN,
+  // Spacing between buttons in a block action row.
+  DISTANCE_ACTION_APP_MENU_BLOCK_ROW_SPACING,
+  // Rounded corner radius for a block entry button.
+  DISTANCE_ACTION_APP_MENU_BLOCK_ENTRY_CORNER_RADIUS,
+  // Vertical spacing between icon and label inside a block entry button.
+  DISTANCE_ACTION_APP_MENU_BLOCK_ENTRY_BETWEEN_CHILD_SPACING,
 };
 
 class ChromeLayoutProvider : public views::LayoutProvider {

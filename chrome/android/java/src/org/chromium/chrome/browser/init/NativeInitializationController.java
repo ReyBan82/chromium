@@ -6,22 +6,29 @@ package org.chromium.chrome.browser.init;
 
 import android.content.Intent;
 
+import org.chromium.base.BaseSwitches;
 import org.chromium.base.CommandLine;
 import org.chromium.base.Log;
 import org.chromium.base.ThreadUtils;
 import org.chromium.base.TraceEvent;
+import org.chromium.base.TriState;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.firstrun.FirstRunFlowSequencer;
-import org.chromium.chrome.browser.flags.ChromeSwitches;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
  * This class controls the different asynchronous states during our initialization:
- * 1. During startBackgroundTasks(), we'll kick off loading the library and yield the call stack.
- * 2. We may receive a onStart() / onStop() call any point after that, whether or not
- *    the library has been loaded.
+ *
+ * <ol>
+ *   <li>During startBackgroundTasks(), we'll kick off loading the library and yield the call stack.
+ *   <li>We may receive a onStart() / onStop() call any point after that, whether or not the library
+ *       has been loaded.
+ * </ol>
  */
+@NullMarked
 class NativeInitializationController {
     private static final String TAG = "NIController";
 
@@ -29,13 +36,14 @@ class NativeInitializationController {
 
     private boolean mOnStartPending;
     private boolean mOnResumePending;
-    private List<Intent> mPendingNewIntents;
-    private List<ActivityResult> mPendingActivityResults;
+    private @Nullable List<Intent> mPendingNewIntents;
+    private @Nullable List<ActivityResult> mPendingActivityResults;
 
-    private Boolean mBackgroundTasksComplete;
+    private @TriState int mBackgroundTasksComplete;
     private boolean mHasDoneFirstDraw;
     private boolean mHasSignaledLibraryLoaded;
     private boolean mInitializationComplete;
+    private boolean mOnTopResumedPending;
 
     /**
      * This class encapsulates a call to onActivityResult that has to be deferred because the native
@@ -44,9 +52,9 @@ class NativeInitializationController {
     static class ActivityResult {
         public final int requestCode;
         public final int resultCode;
-        public final Intent data;
+        public final @Nullable Intent data;
 
-        public ActivityResult(int requestCode, int resultCode, Intent data) {
+        public ActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
             this.requestCode = requestCode;
             this.resultCode = resultCode;
             this.data = data;
@@ -67,11 +75,11 @@ class NativeInitializationController {
      * process.
      *
      * @param allocateChildConnection Whether a spare child connection should be allocated. Set to
-     *                                false if you know that no new renderer is needed.
+     *     false if you know that no new renderer is needed.
      */
     public void startBackgroundTasks(final boolean allocateChildConnection) {
         ThreadUtils.assertOnUiThread();
-        if (CommandLine.getInstance().hasSwitch(ChromeSwitches.DISABLE_NATIVE_INITIALIZATION)) {
+        if (CommandLine.getInstance().hasSwitch(BaseSwitches.DISABLE_NATIVE_INITIALIZATION)) {
             Log.i(TAG, "Exit early and start Chrome without loading native library!");
             return;
         }
@@ -79,17 +87,18 @@ class NativeInitializationController {
         // This is a fairly low cost way to check if fetching the variations seed is needed. It can
         // produces false positives, but that's okay. There's a later mechanism that checks a
         // dedicated durable field to make sure the actual network request is only made once.
-        boolean fetchVariationsSeed = FirstRunFlowSequencer.checkIfFirstRunIsNecessary(
-                false, mActivityDelegate.getInitialIntent());
+        boolean fetchVariationsSeed =
+                FirstRunFlowSequencer.checkIfFirstRunIsNecessary(
+                        false, mActivityDelegate.getInitialIntent());
 
-        mBackgroundTasksComplete = false;
+        mBackgroundTasksComplete = TriState.FALSE;
         new AsyncInitTaskRunner() {
 
             @Override
             protected void onSuccess() {
                 ThreadUtils.assertOnUiThread();
 
-                mBackgroundTasksComplete = true;
+                mBackgroundTasksComplete = TriState.TRUE;
                 signalNativeLibraryLoadedIfReady();
             }
 
@@ -100,7 +109,6 @@ class NativeInitializationController {
                 // mBackgroundTasksComplete or do any other tidying up.
                 mActivityDelegate.onStartupFailure(failureCause);
             }
-
         }.startBackgroundTasks(allocateChildConnection, fetchVariationsSeed);
     }
 
@@ -108,7 +116,7 @@ class NativeInitializationController {
         ThreadUtils.assertOnUiThread();
 
         // Called on UI thread when any of the booleans below have changed.
-        if (mHasDoneFirstDraw && (mBackgroundTasksComplete != null && mBackgroundTasksComplete)) {
+        if (mHasDoneFirstDraw && mBackgroundTasksComplete == TriState.TRUE) {
             // This block should only be hit once.
             assert !mHasSignaledLibraryLoaded;
             mHasSignaledLibraryLoaded = true;
@@ -127,11 +135,17 @@ class NativeInitializationController {
         signalNativeLibraryLoadedIfReady();
     }
 
-    /**
-     * Called when native initialization for an activity has been finished.
-     */
+    /** Called when native initialization for an activity has been finished. */
     public void onNativeInitializationComplete() {
-        // Callback when we finished with ChromeActivityNativeDelegate.onCreateWithNative tasks
+        // The activity may have been finished/destroyed between the time
+        // finishNativeInitialization was posted and now. Bail out before flipping
+        // mInitializationComplete: signalNativeLibraryLoadedIfReady() likewise skipped
+        // onCreateWithNative on the same condition, so onStartWithNative /
+        // onResumeWithNative were never dispatched. If we set the flag here, later
+        // onPause/onStop would route to the *WithNative branch and touch state that
+        // was never initialized.
+        if (mActivityDelegate.isActivityFinishingOrDestroyed()) return;
+
         mInitializationComplete = true;
 
         if (mOnStartPending) {
@@ -143,11 +157,14 @@ class NativeInitializationController {
             mOnResumePending = false;
             onResume();
         }
+
+        if (mOnTopResumedPending) {
+            mOnTopResumedPending = false;
+            onTopResumedActivityChanged(true);
+        }
     }
 
-    /**
-     * Called when an activity gets an onStart call and is done with java only tasks.
-     */
+    /** Called when an activity gets an onStart call and is done with java only tasks. */
     public void onStart() {
         if (mInitializationComplete) {
             startNowAndProcessPendingItems();
@@ -156,9 +173,7 @@ class NativeInitializationController {
         }
     }
 
-    /**
-     * Called when an activity gets an onResume call and is done with java only tasks.
-     */
+    /** Called when an activity gets an onResume call and is done with java only tasks. */
     public void onResume() {
         if (mInitializationComplete) {
             mActivityDelegate.onResumeWithNative();
@@ -168,18 +183,29 @@ class NativeInitializationController {
     }
 
     /**
-     * Called when an activity gets an onPause call and is done with java only tasks.
+     * Called when activity gets or loses the top resumed position in the system.
+     *
+     * @param isTopResumedActivity {@code true} if it's the topmost resumed activity in the system,
+     *     {@code false} otherwise. A call with this as {@code true} will always be followed by
+     *     another one with {@code false}.
      */
+    public void onTopResumedActivityChanged(boolean isTopResumedActivity) {
+        if (mInitializationComplete) {
+            mActivityDelegate.onTopResumedActivityChangedWithNative(isTopResumedActivity);
+        } else {
+            mOnTopResumedPending = isTopResumedActivity;
+        }
+    }
+
+    /** Called when an activity gets an onPause call and is done with java only tasks. */
     public void onPause() {
-        mOnResumePending = false;  // Clear the delayed resume if a pause happens first.
+        mOnResumePending = false; // Clear the delayed resume if a pause happens first.
         if (mInitializationComplete) mActivityDelegate.onPauseWithNative();
     }
 
-    /**
-     * Called when an activity gets an onStop call and is done with java only tasks.
-     */
+    /** Called when an activity gets an onStop call and is done with java only tasks. */
     public void onStop() {
-        mOnStartPending = false;  // Clear the delayed start if a stop happens first.
+        mOnStartPending = false; // Clear the delayed start if a stop happens first.
         if (!mInitializationComplete) return;
         mActivityDelegate.onStopWithNative();
     }
@@ -198,13 +224,14 @@ class NativeInitializationController {
     }
 
     /**
-     * This is the Android onActivityResult callback deferred, if necessary,
-     * to when the native library has loaded.
+     * This is the Android onActivityResult callback deferred, if necessary, to when the native
+     * library has loaded.
+     *
      * @param requestCode The request code for the ActivityResult.
      * @param resultCode The result code for the ActivityResult.
      * @param data The intent that has been sent with the ActivityResult.
      */
-    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+    public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         if (mInitializationComplete) {
             mActivityDelegate.onActivityResultWithNative(requestCode, resultCode, data);
         } else {
@@ -216,7 +243,7 @@ class NativeInitializationController {
     }
 
     private void startNowAndProcessPendingItems() {
-        try (TraceEvent te = TraceEvent.scoped("startNowAndProcessPendingItems")) {
+        try (TraceEvent _ = TraceEvent.scoped("startNowAndProcessPendingItems")) {
             // onNewIntent and onActivityResult are called only when the activity is paused.
             // To match the non-deferred behavior, onStart should be called before any processing
             // of pending intents and activity results.
@@ -237,8 +264,10 @@ class NativeInitializationController {
                 ActivityResult activityResult;
                 for (int i = 0; i < mPendingActivityResults.size(); i++) {
                     activityResult = mPendingActivityResults.get(i);
-                    mActivityDelegate.onActivityResultWithNative(activityResult.requestCode,
-                            activityResult.resultCode, activityResult.data);
+                    mActivityDelegate.onActivityResultWithNative(
+                            activityResult.requestCode,
+                            activityResult.resultCode,
+                            activityResult.data);
                 }
                 mPendingActivityResults = null;
             }

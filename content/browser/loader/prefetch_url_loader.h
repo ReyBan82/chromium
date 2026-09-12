@@ -6,11 +6,14 @@
 #define CONTENT_BROWSER_LOADER_PREFETCH_URL_LOADER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/functional/callback.h"
 #include "base/unguessable_token.h"
 #include "content/browser/web_package/prefetched_signed_exchange_cache.h"
+#include "content/common/content_export.h"
+#include "content/public/browser/frame_tree_node_id.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -19,7 +22,6 @@
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace network {
@@ -38,9 +40,9 @@ class SignedExchangePrefetchHandler;
 
 // A URLLoader for loading a prefetch request, including <link rel="prefetch">.
 // It basically just keeps draining the data.
-class PrefetchURLLoader : public network::mojom::URLLoader,
-                          public network::mojom::URLLoaderClient,
-                          public mojo::DataPipeDrainer::Client {
+class CONTENT_EXPORT PrefetchURLLoader : public network::mojom::URLLoader,
+                                         public network::mojom::URLLoaderClient,
+                                         public mojo::DataPipeDrainer::Client {
  public:
   using URLLoaderThrottlesGetter = base::RepeatingCallback<
       std::vector<std::unique_ptr<blink::URLLoaderThrottle>>()>;
@@ -59,7 +61,7 @@ class PrefetchURLLoader : public network::mojom::URLLoader,
   PrefetchURLLoader(
       int32_t request_id,
       uint32_t options,
-      int frame_tree_node_id,
+      FrameTreeNodeId frame_tree_node_id,
       const network::ResourceRequest& resource_request,
       const net::NetworkAnonymizationKey& network_anonymization_key,
       mojo::PendingRemote<network::mojom::URLLoaderClient> client,
@@ -85,24 +87,28 @@ class PrefetchURLLoader : public network::mojom::URLLoader,
   void SendOnComplete(
       const network::URLLoaderCompletionStatus& completion_status);
 
+  const network::ResourceRequest& resource_request_for_testing() const {
+    return resource_request_;
+  }
+  const net::NetworkAnonymizationKey& network_anonymization_key_for_testing()
+      const {
+    return network_anonymization_key_;
+  }
+
  private:
   // network::mojom::URLLoader overrides:
   void FollowRedirect(
-      const std::vector<std::string>& removed_headers,
-      const net::HttpRequestHeaders& modified_headers,
-      const net::HttpRequestHeaders& modified_cors_exempt_headers,
-      const absl::optional<GURL>& new_url) override;
+      network::HttpRequestHeadersUpdateParams headers_update_params,
+      const std::optional<GURL>& new_url) override;
   void SetPriority(net::RequestPriority priority,
                    int intra_priority_value) override;
-  void PauseReadingBodyFromNet() override;
-  void ResumeReadingBodyFromNet() override;
 
   // network::mojom::URLLoaderClient overrides:
   void OnReceiveEarlyHints(network::mojom::EarlyHintsPtr early_hints) override;
   void OnReceiveResponse(
       network::mojom::URLResponseHeadPtr head,
       mojo::ScopedDataPipeConsumerHandle body,
-      absl::optional<mojo_base::BigBuffer> cached_metadata) override;
+      std::optional<mojo_base::BigBuffer> cached_metadata) override;
   void OnReceiveRedirect(const net::RedirectInfo& redirect_info,
                          network::mojom::URLResponseHeadPtr head) override;
   void OnUploadProgress(int64_t current_position,
@@ -113,19 +119,19 @@ class PrefetchURLLoader : public network::mojom::URLLoader,
 
   // mojo::DataPipeDrainer::Client overrides:
   // This just does nothing but keep reading.
-  void OnDataAvailable(const void* data, size_t num_bytes) override {}
+  void OnDataAvailable(base::span<const uint8_t> data) override {}
   void OnDataComplete() override {}
 
   void OnNetworkConnectionError();
 
-  const int frame_tree_node_id_;
+  const FrameTreeNodeId frame_tree_node_id_;
 
   // Set in the constructor and updated when redirected.
   network::ResourceRequest resource_request_;
 
   network::mojom::URLResponseHeadPtr response_;
 
-  const net::NetworkAnonymizationKey network_anonymization_key_;
+  net::NetworkAnonymizationKey network_anonymization_key_;
 
   scoped_refptr<network::SharedURLLoaderFactory> network_loader_factory_;
 

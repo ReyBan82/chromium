@@ -12,13 +12,13 @@
 namespace blink {
 
 SelectionForUndoStep SelectionForUndoStep::From(
-    const SelectionInDOMTree& selection) {
+    const SelectionInDomTree& selection) {
   SelectionForUndoStep result;
-  result.base_ = selection.Base();
-  result.extent_ = selection.Extent();
+  result.anchor_ = selection.Anchor();
+  result.focus_ = selection.Focus();
   result.affinity_ = selection.Affinity();
-  result.is_base_first_ = selection.IsBaseFirst();
-  result.root_editable_element_ = RootEditableElementOf(result.base_);
+  result.is_anchor_first_ = selection.IsAnchorFirst();
+  result.root_editable_element_ = RootEditableElementOf(result.anchor_);
   return result;
 }
 
@@ -31,57 +31,66 @@ SelectionForUndoStep& SelectionForUndoStep::operator=(
     const SelectionForUndoStep& other) = default;
 
 bool SelectionForUndoStep::operator==(const SelectionForUndoStep& other) const {
-  if (IsNone())
-    return other.IsNone();
-  if (other.IsNone())
-    return false;
-  return base_ == other.base_ && extent_ == other.extent_ &&
-         affinity_ == other.affinity_ && is_base_first_ == other.is_base_first_;
-}
-
-bool SelectionForUndoStep::operator!=(const SelectionForUndoStep& other) const {
-  return !operator==(other);
-}
-
-SelectionInDOMTree SelectionForUndoStep::AsSelection() const {
   if (IsNone()) {
-    return SelectionInDOMTree();
+    return other.IsNone();
   }
-  return SelectionInDOMTree::Builder()
-      .SetBaseAndExtent(base_, extent_)
+  if (other.IsNone()) {
+    return false;
+  }
+  return anchor_ == other.anchor_ && focus_ == other.focus_ &&
+         affinity_ == other.affinity_ &&
+         is_anchor_first_ == other.is_anchor_first_;
+}
+
+SelectionInDomTree SelectionForUndoStep::AsSelection() const {
+  if (IsNone()) {
+    return SelectionInDomTree();
+  }
+
+  // Guard against concurrent DOM modifications that may have disconnected
+  // positions. This prevents crashes when JavaScript callbacks modify DOM
+  // during editing operations.
+  if (!anchor_.IsConnected() || !focus_.IsConnected()) {
+    // If positions are disconnected, return empty selection
+    return SelectionInDomTree();
+  }
+
+  return SelectionInDomTree::Builder()
+      .SetBaseAndExtent(anchor_, focus_)
       .SetAffinity(affinity_)
       .Build();
 }
 
 Position SelectionForUndoStep::Start() const {
-  return is_base_first_ ? base_ : extent_;
+  return is_anchor_first_ ? anchor_ : focus_;
 }
 
 Position SelectionForUndoStep::End() const {
-  return is_base_first_ ? extent_ : base_;
+  return is_anchor_first_ ? focus_ : anchor_;
 }
 
 bool SelectionForUndoStep::IsCaret() const {
-  return base_.IsNotNull() && base_ == extent_;
+  return anchor_.IsNotNull() && anchor_ == focus_;
 }
 
 bool SelectionForUndoStep::IsNone() const {
-  return base_.IsNull();
+  return anchor_.IsNull();
 }
 
 bool SelectionForUndoStep::IsRange() const {
-  return base_ != extent_;
+  return anchor_ != focus_;
 }
 
 bool SelectionForUndoStep::IsValidFor(const Document& document) const {
-  if (base_.IsNull())
+  if (anchor_.IsNull()) {
     return true;
-  return base_.IsValidFor(document) && extent_.IsValidFor(document);
+  }
+  return anchor_.IsValidFor(document) && focus_.IsValidFor(document);
 }
 
 void SelectionForUndoStep::Trace(Visitor* visitor) const {
-  visitor->Trace(base_);
-  visitor->Trace(extent_);
+  visitor->Trace(anchor_);
+  visitor->Trace(focus_);
   visitor->Trace(root_editable_element_);
 }
 
@@ -89,28 +98,28 @@ void SelectionForUndoStep::Trace(Visitor* visitor) const {
 SelectionForUndoStep::Builder::Builder() = default;
 
 SelectionForUndoStep::Builder&
-SelectionForUndoStep::Builder::SetBaseAndExtentAsBackwardSelection(
-    const Position& base,
-    const Position& extent) {
-  DCHECK(base.IsNotNull());
-  DCHECK(extent.IsNotNull());
-  DCHECK_NE(base, extent);
-  selection_.base_ = base;
-  selection_.extent_ = extent;
-  selection_.is_base_first_ = false;
+SelectionForUndoStep::Builder::SetAnchorAndFocusAsBackwardSelection(
+    const Position& anchor,
+    const Position& focus) {
+  DCHECK(anchor.IsNotNull());
+  DCHECK(focus.IsNotNull());
+  DCHECK_NE(anchor, focus);
+  selection_.anchor_ = anchor;
+  selection_.focus_ = focus;
+  selection_.is_anchor_first_ = false;
   return *this;
 }
 
 SelectionForUndoStep::Builder&
-SelectionForUndoStep::Builder::SetBaseAndExtentAsForwardSelection(
-    const Position& base,
-    const Position& extent) {
-  DCHECK(base.IsNotNull());
-  DCHECK(extent.IsNotNull());
-  DCHECK_NE(base, extent);
-  selection_.base_ = base;
-  selection_.extent_ = extent;
-  selection_.is_base_first_ = true;
+SelectionForUndoStep::Builder::SetAnchorAndFocusAsForwardSelection(
+    const Position& anchor,
+    const Position& focus) {
+  DCHECK(anchor.IsNotNull());
+  DCHECK(focus.IsNotNull());
+  DCHECK_NE(anchor, focus);
+  selection_.anchor_ = anchor;
+  selection_.focus_ = focus;
+  selection_.is_anchor_first_ = true;
   return *this;
 }
 

@@ -29,11 +29,14 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <set>
+#include <string>
+#include <vector>
 
+#include "base/check_op.h"
 #include "base/logging.h"
 #include "base/strings/stringprintf.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "client/client_argv_handling.h"
 #include "third_party/lss/lss.h"
 #include "util/file/file_io.h"
@@ -45,6 +48,7 @@
 #include "util/linux/socket.h"
 #include "util/misc/address_sanitizer.h"
 #include "util/misc/from_pointer_cast.h"
+#include "util/posix/close_multiple.h"
 #include "util/posix/scoped_mmap.h"
 #include "util/posix/signals.h"
 #include "util/posix/spawn_subprocess.h"
@@ -131,6 +135,8 @@ std::vector<std::string> BuildArgsToLaunchWithLinker(
 
 #endif  // BUILDFLAG(IS_ANDROID)
 
+using LastChanceHandler = bool (*)(int, siginfo_t*, ucontext_t*);
+
 // A base class for Crashpad signal handler implementations.
 class SignalHandler {
  public:
@@ -152,6 +158,10 @@ class SignalHandler {
 
   void SetFirstChanceHandler(CrashpadClient::FirstChanceHandler handler) {
     first_chance_handler_ = handler;
+  }
+
+  void SetLastChanceExceptionHandler(LastChanceHandler handler) {
+    last_chance_handler_ = handler;
   }
 
   // The base implementation for all signal handlers, suitable for calling
@@ -212,6 +222,11 @@ class SignalHandler {
     if (!handler_->disabled_.test_and_set()) {
       handler_->HandleCrash(signo, siginfo, context);
       handler_->WakeThreads();
+      if (handler_->last_chance_handler_ &&
+          handler_->last_chance_handler_(
+              signo, siginfo, static_cast<ucontext_t*>(context))) {
+        return;
+      }
     } else {
       // Processes on Android normally have several chained signal handlers that
       // co-operate to report crashes. e.g. WebView will have this signal
@@ -254,6 +269,7 @@ class SignalHandler {
   Signals::OldActions old_actions_ = {};
   ExceptionInformation exception_information_ = {};
   CrashpadClient::FirstChanceHandler first_chance_handler_ = nullptr;
+  LastChanceHandler last_chance_handler_ = nullptr;
   int32_t dump_done_futex_ = kDumpNotDone;
 #if !defined(__cpp_lib_atomic_value_initialization) || \
     __cpp_lib_atomic_value_initialization < 201911L
@@ -279,7 +295,9 @@ class LaunchAtCrashHandler : public SignalHandler {
 
   bool Initialize(std::vector<std::string>* argv_in,
                   const std::vector<std::string>* envp,
-                  const std::set<int>* unhandled_signals) {
+                  const std::set<int>* unhandled_signals,
+                  const std::set<int>& preserve_fds) {
+    preserve_fds_ = preserve_fds;
     argv_strings_.swap(*argv_in);
 
     if (envp) {
@@ -303,6 +321,8 @@ class LaunchAtCrashHandler : public SignalHandler {
       return;
     }
     if (pid == 0) {
+      ClearCloseOnExec(preserve_fds_);
+
       if (set_envp_) {
         execve(argv_[0],
                const_cast<char* const*>(argv_.data()),
@@ -322,6 +342,7 @@ class LaunchAtCrashHandler : public SignalHandler {
 
   ~LaunchAtCrashHandler() = delete;
 
+  std::set<int> preserve_fds_;
   std::vector<std::string> argv_strings_;
   std::vector<const char*> argv_;
   std::vector<std::string> envp_strings_;
@@ -393,7 +414,7 @@ class RequestCrashDumpHandler : public SignalHandler {
     ExceptionHandlerProtocol::ClientInformation info = {};
     info.exception_information_address =
         FromPointerCast<VMAddress>(&GetExceptionInfo());
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     info.crash_loop_before_time = crash_loop_before_time_;
 #endif
 
@@ -401,7 +422,7 @@ class RequestCrashDumpHandler : public SignalHandler {
     client.RequestCrashDump(info);
   }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   void SetCrashLoopBefore(uint64_t crash_loop_before_time) {
     crash_loop_before_time_ = crash_loop_before_time;
   }
@@ -423,7 +444,7 @@ class RequestCrashDumpHandler : public SignalHandler {
   ScopedFileHandle sock_to_handler_;
   pid_t handler_pid_ = -1;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // An optional UNIX timestamp passed to us from Chrome.
   // This will pass to crashpad_handler and then to Chrome OS crash_reporter.
   // This should really be a time_t, but it's basically an opaque value (we
@@ -447,7 +468,8 @@ bool CrashpadClient::StartHandler(
     const std::vector<std::string>& arguments,
     bool restartable,
     bool asynchronous_start,
-    const std::vector<base::FilePath>& attachments) {
+    const std::vector<base::FilePath>& attachments,
+    const std::set<FileHandle>& preserve_file_handles) {
   DCHECK(!asynchronous_start);
 
   ScopedFileHandle client_sock, handler_sock;
@@ -461,7 +483,11 @@ bool CrashpadClient::StartHandler(
 
   argv.push_back(FormatArgumentInt("initial-client-fd", handler_sock.get()));
   argv.push_back("--shared-client-connection");
-  if (!SpawnSubprocess(argv, nullptr, handler_sock.get(), false, nullptr)) {
+
+  std::set<int> spawn_preserve_fds = preserve_file_handles;
+  spawn_preserve_fds.insert(handler_sock.get());
+
+  if (!SpawnSubprocess(argv, nullptr, spawn_preserve_fds, false, nullptr)) {
     return false;
   }
   handler_sock.reset();
@@ -602,7 +628,7 @@ bool CrashpadClient::StartJavaHandlerAtCrash(
                                                       kInvalidFileHandle);
 
   auto signal_handler = LaunchAtCrashHandler::Get();
-  return signal_handler->Initialize(&argv, env, &unhandled_signals_);
+  return signal_handler->Initialize(&argv, env, &unhandled_signals_, {});
 }
 
 // static
@@ -617,7 +643,7 @@ bool CrashpadClient::StartJavaHandlerForClient(
     int socket) {
   std::vector<std::string> argv = BuildAppProcessArgs(
       class_name, database, metrics_dir, url, annotations, arguments, socket);
-  return SpawnSubprocess(argv, env, socket, false, nullptr);
+  return SpawnSubprocess(argv, env, {socket}, false, nullptr);
 }
 
 bool CrashpadClient::StartHandlerWithLinkerAtCrash(
@@ -629,7 +655,8 @@ bool CrashpadClient::StartHandlerWithLinkerAtCrash(
     const base::FilePath& metrics_dir,
     const std::string& url,
     const std::map<std::string, std::string>& annotations,
-    const std::vector<std::string>& arguments) {
+    const std::vector<std::string>& arguments,
+    const std::set<int>& preserve_fds) {
   std::vector<std::string> argv =
       BuildArgsToLaunchWithLinker(handler_trampoline,
                                   handler_library,
@@ -641,7 +668,8 @@ bool CrashpadClient::StartHandlerWithLinkerAtCrash(
                                   arguments,
                                   kInvalidFileHandle);
   auto signal_handler = LaunchAtCrashHandler::Get();
-  return signal_handler->Initialize(&argv, env, &unhandled_signals_);
+  return signal_handler->Initialize(
+      &argv, env, &unhandled_signals_, preserve_fds);
 }
 
 // static
@@ -655,7 +683,8 @@ bool CrashpadClient::StartHandlerWithLinkerForClient(
     const std::string& url,
     const std::map<std::string, std::string>& annotations,
     const std::vector<std::string>& arguments,
-    int socket) {
+    int socket,
+    const std::set<int>& preserve_fds) {
   std::vector<std::string> argv =
       BuildArgsToLaunchWithLinker(handler_trampoline,
                                   handler_library,
@@ -666,7 +695,9 @@ bool CrashpadClient::StartHandlerWithLinkerForClient(
                                   annotations,
                                   arguments,
                                   socket);
-  return SpawnSubprocess(argv, env, socket, false, nullptr);
+  std::set<int> spawn_preserve_fds = preserve_fds;
+  spawn_preserve_fds.insert(socket);
+  return SpawnSubprocess(argv, env, spawn_preserve_fds, false, nullptr);
 }
 
 #endif
@@ -683,7 +714,7 @@ bool CrashpadClient::StartHandlerAtCrash(
       handler, database, metrics_dir, url, annotations, arguments, attachments);
 
   auto signal_handler = LaunchAtCrashHandler::Get();
-  return signal_handler->Initialize(&argv, nullptr, &unhandled_signals_);
+  return signal_handler->Initialize(&argv, nullptr, &unhandled_signals_, {});
 }
 
 // static
@@ -700,7 +731,7 @@ bool CrashpadClient::StartHandlerForClient(
 
   argv.push_back(FormatArgumentInt("initial-client-fd", socket));
 
-  return SpawnSubprocess(argv, nullptr, socket, true, nullptr);
+  return SpawnSubprocess(argv, nullptr, {socket}, true, nullptr);
 }
 
 // static
@@ -739,12 +770,18 @@ void CrashpadClient::SetFirstChanceExceptionHandler(
   SignalHandler::Get()->SetFirstChanceHandler(handler);
 }
 
+// static
+void CrashpadClient::SetLastChanceExceptionHandler(LastChanceHandler handler) {
+  DCHECK(SignalHandler::Get());
+  SignalHandler::Get()->SetLastChanceExceptionHandler(handler);
+}
+
 void CrashpadClient::SetUnhandledSignals(const std::set<int>& signals) {
   DCHECK(!SignalHandler::Get());
   unhandled_signals_ = signals;
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 // static
 void CrashpadClient::SetCrashLoopBefore(uint64_t crash_loop_before_time) {
   auto request_crash_dump_handler = RequestCrashDumpHandler::Get();

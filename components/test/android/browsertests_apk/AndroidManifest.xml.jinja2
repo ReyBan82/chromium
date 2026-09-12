@@ -21,7 +21,8 @@ found in the LICENSE file.
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
 
     <application android:name="ComponentsBrowserTestsApplication"
-            android:label="ComponentsBrowserTests">
+            android:label="ComponentsBrowserTests"
+            android:memtagMode="sync">
         <activity android:name="ComponentsBrowserTestsActivity"
                   android:launchMode="singleTask"
                   android:theme="@android:style/Theme.Holo.Light.NoActionBar"
@@ -50,6 +51,17 @@ found in the LICENSE file.
                  android:exported="false" />
         {% endfor %}
 
+        <service android:name="org.chromium.content.app.NativeOnlySandboxedProcessService0"
+                 android:process=":sandboxed_process0"
+                 android:isolatedProcess="true"
+                 android:nativeService="true"
+                 android:exported="false" >
+             <property android:name="android.app.PROPERTY_NATIVE_SERVICE_LIBRARY_NAME"
+                       android:value="lib{{ library_name }}.so" />
+             <property android:name="android.app.PROPERTY_NATIVE_SERVICE_FUNCTION_NAME"
+                       android:value="NativeChildProcessService_onCreate" />
+        </service>
+
         {% set num_privileged_services = 5 %}
         <meta-data android:name="org.chromium.content.browser.NUM_PRIVILEGED_SERVICES"
                    android:value="{{ num_privileged_services }}"/>
@@ -60,10 +72,13 @@ found in the LICENSE file.
                  android:isolatedProcess="false"
                  android:exported="false" />
         {% endfor %}
+
+        <service android:name="org.chromium.build.gtest_apk.ProcessKeepaliveService"
+                 android:process=":test_process"
+                 android:exported="false" />
     </application>
 
     <instrumentation android:name="org.chromium.build.gtest_apk.NativeTestInstrumentationTestRunner"
             android:label="ComponentsBrowserTests"
-            android:targetPackage="org.chromium.components_browsertests_apk"
-            chromium-junit3="true"/>
+            android:targetPackage="org.chromium.components_browsertests_apk" />
 </manifest>

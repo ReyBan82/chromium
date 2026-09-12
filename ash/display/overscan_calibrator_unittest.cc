@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 #include "ash/display/overscan_calibrator.h"
-#include "ash/display/cros_display_config.h"
 
+#include "ash/display/cros_display_config.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
 #include "base/functional/callback_helpers.h"
@@ -21,21 +21,21 @@ class OverscanCalibratorTest : public AshTestBase {
   OverscanCalibratorTest(OverscanCalibratorTest&) = delete;
   OverscanCalibratorTest& operator=(const OverscanCalibratorTest&) = delete;
 
-  OverscanCalibrator* StartCalibration(const std::string& id) {
+  OverscanCalibrator* StartCalibration(int64_t display_id) {
     Shell::Get()->cros_display_config()->OverscanCalibration(
-        id, crosapi::mojom::DisplayConfigOperation::kStart,
-        gfx::Insets() /* not used */, base::DoNothing());
-    return Shell::Get()->cros_display_config()->GetOverscanCalibrator(id);
+        display_id, DisplayCalibrationOperation::kStart,
+        gfx::Insets() /* not used */);
+    return Shell::Get()->cros_display_config()->GetOverscanCalibrator(
+        display_id);
   }
 };
 
 TEST_F(OverscanCalibratorTest, Rotation) {
   auto* display_manager = Shell::Get()->display_manager();
 
-  int64_t display_id = display::Screen::GetScreen()->GetPrimaryDisplay().id();
-  std::string id_str = base::StringPrintf("%" PRId64, display_id);
+  int64_t display_id = display::Screen::Get()->GetPrimaryDisplay().id();
 
-  auto* calibrator = StartCalibration(id_str);
+  auto* calibrator = StartCalibration(display_id);
   calibrator->UpdateInsets(gfx::Insets::TLBR(100, 5, 10, 15));
   calibrator->Commit();
   display::ManagedDisplayInfo info =
@@ -46,9 +46,9 @@ TEST_F(OverscanCalibratorTest, Rotation) {
                                       display::Display::Rotation::ROTATE_90,
                                       display::Display::RotationSource::USER);
   EXPECT_EQ(gfx::Size(490, 780),
-            display::Screen::GetScreen()->GetPrimaryDisplay().size());
+            display::Screen::Get()->GetPrimaryDisplay().size());
 
-  calibrator = StartCalibration(id_str);
+  calibrator = StartCalibration(display_id);
   // The insets will be rotated and applied in the host coordinates.
   gfx::Insets insets = calibrator->insets();
   insets.set_left(105);

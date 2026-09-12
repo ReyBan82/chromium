@@ -6,21 +6,23 @@
 #define NET_WEBSOCKETS_WEBSOCKET_STREAM_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/functional/callback_forward.h"
+#include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/isolation_info.h"
 #include "net/base/net_export.h"
+#include "net/base/network_handle.h"
 #include "net/cookies/site_for_cookies.h"
 #include "net/log/net_log_with_source.h"
+#include "net/storage_access_api/status.h"
 #include "net/websockets/websocket_event_interface.h"
 #include "net/websockets/websocket_handshake_request_info.h"
 #include "net/websockets/websocket_handshake_response_info.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class GURL;
 
@@ -39,14 +41,24 @@ class AuthCredentials;
 class HttpRequestHeaders;
 class HttpResponseHeaders;
 class IPEndPoint;
+class IsolationInfo;
 class NetLogWithSource;
+class SSLInfo;
 class URLRequest;
 class URLRequestContext;
-struct WebSocketFrame;
 class WebSocketBasicHandshakeStream;
 class WebSocketHttp2HandshakeStream;
 class WebSocketHttp3HandshakeStream;
 struct NetworkTrafficAnnotationTag;
+struct TransportInfo;
+struct WebSocketFrame;
+struct WebSocketHandshakeRequestInfo;
+struct WebSocketHandshakeResponseInfo;
+
+enum class WebSocketPriorityHint {
+  kDefault,
+  kMaximum,
+};
 
 // WebSocketStreamRequest is the caller's handle to the process of creation of a
 // WebSocketStream. Deleting the object before the ConnectDelegate OnSuccess or
@@ -71,16 +83,15 @@ class NET_EXPORT_PRIVATE WebSocketStreamRequestAPI
       WebSocketHttp3HandshakeStream* handshake_stream) = 0;
   virtual void OnFailure(const std::string& message,
                          int net_error,
-                         absl::optional<int> response_code) = 0;
+                         std::optional<int> response_code) = 0;
 };
 
 // WebSocketStream is a transport-agnostic interface for reading and writing
 // WebSocket frames. This class provides an abstraction for WebSocket streams
 // based on various transport layers, such as normal WebSocket connections
-// (WebSocket protocol upgraded from HTTP handshake), SPDY transports, or
-// WebSocket connections with multiplexing extension. Subtypes of
-// WebSocketStream are responsible for managing the underlying transport
-// appropriately.
+// (WebSocket protocol upgraded from HTTP/1.1 handshake), HTTP/2 streams
+// (RFC 8441), or HTTP/3 streams (RFC 9220). Subtypes of WebSocketStream are
+// responsible for managing the underlying transport appropriately.
 //
 // All functions except Close() can be asynchronous. If an operation cannot
 // be finished synchronously, the function returns ERR_IO_PENDING, and
@@ -97,6 +108,11 @@ class NET_EXPORT_PRIVATE WebSocketStream {
     // Called when the URLRequest is created.
     virtual void OnCreateRequest(URLRequest* url_request) = 0;
 
+    // Called when the URLRequest::OnConnected() is called.
+    virtual int OnURLRequestConnected(URLRequest* request,
+                                      const TransportInfo& info,
+                                      CompletionOnceCallback callback) = 0;
+
     // Called on successful connection. The parameter is an object derived from
     // WebSocketStream.
     virtual void OnSuccess(
@@ -104,10 +120,10 @@ class NET_EXPORT_PRIVATE WebSocketStream {
         std::unique_ptr<WebSocketHandshakeResponseInfo> response) = 0;
 
     // Called on failure to connect.
-    // |message| contains defails of the failure.
+    // |message| contains details of the failure.
     virtual void OnFailure(const std::string& message,
                            int net_error,
-                           absl::optional<int> response_code) = 0;
+                           std::optional<int> response_code) = 0;
 
     // Called when the WebSocket Opening Handshake starts.
     virtual void OnStartOpeningHandshake(
@@ -137,32 +153,32 @@ class NET_EXPORT_PRIVATE WebSocketStream {
         scoped_refptr<HttpResponseHeaders> response_headers,
         const IPEndPoint& remote_endpoint,
         base::OnceCallback<void(const AuthCredentials*)> callback,
-        absl::optional<AuthCredentials>* credentials) = 0;
+        std::optional<AuthCredentials>* credentials) = 0;
   };
 
-  // Create and connect a WebSocketStream of an appropriate type. The actual
-  // concrete type returned depends on whether multiplexing or SPDY are being
-  // used to communicate with the remote server. If the handshake completed
-  // successfully, then connect_delegate->OnSuccess() is called with a
-  // WebSocketStream instance. If it failed, then connect_delegate->OnFailure()
-  // is called with a WebSocket result code corresponding to the error. Deleting
-  // the returned WebSocketStreamRequest object will cancel the connection, in
-  // which case the |connect_delegate| object that the caller passed will be
-  // deleted without any of its methods being called. Unless cancellation is
-  // required, the caller should keep the WebSocketStreamRequest object alive
-  // until connect_delegate->OnSuccess() or OnFailure() have been called, then
-  // it is safe to delete.
+  // Create and connect a WebSocketStream of an appropriate type. If the
+  // handshake completed successfully, then connect_delegate->OnSuccess() is
+  // called with a WebSocketStream instance. If it failed, then
+  // connect_delegate->OnFailure() is called with a WebSocket result code
+  // corresponding to the error. Deleting the returned WebSocketStreamRequest
+  // object will cancel the connection, in which case the |connect_delegate|
+  // object that the caller passed will be deleted without any of its methods
+  // being called. Unless cancellation is required, the caller should keep the
+  // WebSocketStreamRequest object alive until connect_delegate->OnSuccess() or
+  // OnFailure() have been called, then it is safe to delete.
   static std::unique_ptr<WebSocketStreamRequest> CreateAndConnectStream(
       const GURL& socket_url,
       const std::vector<std::string>& requested_subprotocols,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
+      StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
       URLRequestContext* url_request_context,
       const NetLogWithSource& net_log,
+      WebSocketPriorityHint priority_hint,
       NetworkTrafficAnnotationTag traffic_annotation,
-      std::unique_ptr<ConnectDelegate> connect_delegate);
+      std::unique_ptr<ConnectDelegate> connect_delegate,
+      handles::NetworkHandle target_network);
 
   // Alternate version of CreateAndConnectStream() for testing use only. It
   // takes |timer| as the handshake timeout timer, and for methods on
@@ -173,15 +189,17 @@ class NET_EXPORT_PRIVATE WebSocketStream {
       const GURL& socket_url,
       const std::vector<std::string>& requested_subprotocols,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
+      StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
       URLRequestContext* url_request_context,
       const NetLogWithSource& net_log,
+      WebSocketPriorityHint priority_hint,
       NetworkTrafficAnnotationTag traffic_annotation,
       std::unique_ptr<ConnectDelegate> connect_delegate,
       std::unique_ptr<base::OneShotTimer> timer,
-      std::unique_ptr<WebSocketStreamRequestAPI> api_delegate);
+      std::unique_ptr<WebSocketStreamRequestAPI> api_delegate,
+      handles::NetworkHandle target_network);
 
   WebSocketStream(const WebSocketStream&) = delete;
   WebSocketStream& operator=(const WebSocketStream&) = delete;
@@ -279,17 +297,6 @@ class NET_EXPORT_PRIVATE WebSocketStream {
  protected:
   WebSocketStream();
 };
-
-// A helper function used in the implementation of CreateAndConnectStream() and
-// WebSocketBasicHandshakeStream. It creates a WebSocketHandshakeResponseInfo
-// object and dispatches it to the OnFinishOpeningHandshake() method of the
-// supplied |connect_delegate|.
-void WebSocketDispatchOnFinishOpeningHandshake(
-    WebSocketStream::ConnectDelegate* connect_delegate,
-    const GURL& gurl,
-    const scoped_refptr<HttpResponseHeaders>& headers,
-    const IPEndPoint& remote_endpoint,
-    base::Time response_time);
 
 }  // namespace net
 

@@ -12,6 +12,32 @@ import("//testing/test.gni")
 import("//third_party/blink/public/public_features.gni")
 import("//third_party/blink/renderer/config.gni")
 
+declare_args() {
+  # Enable modification checks in blink::HeapVector to detect
+  # modifications during iteration.
+  enable_heap_vector_modification_checks = false
+
+  # Enable modification checks in non-garbage-collected blink::Vector
+  # (i.e. PartitionAllocator-backed) to detect modifications during iteration.
+  enable_vector_modification_checks = false
+
+  # Whether blink::HeapVector promptly frees its backing store via
+  # Allocator::FreeVectorBacking(). When disabled, the backing store is left to
+  # be reclaimed by garbage collection.
+  enable_heap_vector_promptly_free = false
+}
+
+buildflag_header("wtf_buildflags") {
+  header = "wtf_buildflags.h"
+  header_dir = "third_party/blink/renderer/platform/wtf"
+
+  flags = [
+    "ENABLE_HEAP_VECTOR_MODIFICATION_CHECKS=$enable_heap_vector_modification_checks",
+    "ENABLE_VECTOR_MODIFICATION_CHECKS=$enable_vector_modification_checks",
+    "ENABLE_HEAP_VECTOR_PROMPTLY_FREE=$enable_heap_vector_promptly_free",
+  ]
+}
+
 visibility = [
   ":*",
   "//:gn_all",
@@ -49,12 +75,13 @@ component("wtf") {
     "assertions.h",
     "atomic_operations.cc",
     "atomic_operations.h",
+    "base_hash_traits.h",
+    "bind_post_task.h",
     "bit_field.h",
     "bloom_filter.h",
     "casting.h",
-    "conditional_destructor.h",
+    "construct_traits.h",
     "container_annotations.h",
-    "cross_thread_copier.cc",
     "cross_thread_copier.h",
     "cross_thread_copier_base.h",
     "cross_thread_copier_gfx.h",
@@ -64,6 +91,7 @@ component("wtf") {
     "cross_thread_copier_public.h",
     "cross_thread_copier_skia.h",
     "cross_thread_copier_std.h",
+    "cross_thread_copier_url.h",
     "cross_thread_functional.h",
     "date_math.cc",
     "date_math.h",
@@ -77,10 +105,12 @@ component("wtf") {
     "dynamic_annotations.h",
     "forward.h",
     "functional.h",
+    "functional_internal.h",
     "gc_plugin.h",
     "get_ptr.h",
     "hash_counted_set.h",
     "hash_functions.h",
+    "hash_functions_memory.h",
     "hash_map.h",
     "hash_set.h",
     "hash_table.cc",
@@ -107,12 +137,12 @@ component("wtf") {
     "stack_util.h",
     "static_constructors.h",
     "std_lib_extras.h",
-    "text/ascii_ctype.cc",
     "text/ascii_ctype.h",
+    "text/ascii_fast_path.cc",
     "text/ascii_fast_path.h",
+    "text/ascii_lower_hash_reader.h",
     "text/atomic_string.cc",
     "text/atomic_string.h",
-    "text/atomic_string_cf.cc",
     "text/atomic_string_encoding.h",
     "text/atomic_string_hash.h",
     "text/atomic_string_table.cc",
@@ -125,9 +155,13 @@ component("wtf") {
     "text/character_names.h",
     "text/character_visitor.h",
     "text/code_point_iterator.h",
+    "text/convert_to_8bit_hash_reader.h",
     "text/copy_lchars_from_uchar_source.h",
     "text/encoding_tables.cc",
     "text/encoding_tables.h",
+    "text/format.cc",
+    "text/format.h",
+    "text/ignoring_ascii_case_hash.h",
     "text/integer_to_string_conversion.h",
     "text/line_ending.cc",
     "text/line_ending.h",
@@ -135,16 +169,22 @@ component("wtf") {
     "text/math_transform.h",
     "text/number_parsing_options.h",
     "text/parsing_utilities.h",
+    "text/strcat.cc",
+    "text/strcat.h",
     "text/string_buffer.h",
     "text/string_builder.cc",
     "text/string_builder.h",
+    "text/string_builder_stream.cc",
+    "text/string_builder_stream.h",
     "text/string_concatenate.cc",
     "text/string_concatenate.h",
     "text/string_hash.h",
     "text/string_hasher.h",
     "text/string_impl.cc",
     "text/string_impl.h",
+    "text/string_internal.h",
     "text/string_operators.h",
+    "text/string_operators_atomic.h",
     "text/string_statics.cc",
     "text/string_statics.h",
     "text/string_to_number.cc",
@@ -178,10 +218,10 @@ component("wtf") {
     "text/text_offset_map.h",
     "text/text_position.cc",
     "text/text_position.h",
-    "text/text_stream.cc",
-    "text/text_stream.h",
     "text/unicode.h",
     "text/unicode_string.h",
+    "text/utf16.cc",
+    "text/utf16.h",
     "text/utf8.cc",
     "text/utf8.h",
     "text/wtf_string.cc",
@@ -209,6 +249,7 @@ component("wtf") {
     "//third_party/blink/renderer:config",
     "//third_party/blink/renderer:non_test_config",
     "//third_party/blink/renderer:blink_pch",
+    "//third_party/blink/renderer:inside_blink",
   ]
 
   defines = [ "WTF_IMPLEMENTATION=1" ]
@@ -220,18 +261,21 @@ component("wtf") {
 
   deps = [
     "//base/allocator:buildflags",
-    "//build:chromeos_buildflags",
-    "//third_party/blink/public/common:common",
+    "//third_party/blink/public/common",
     "//third_party/modp_b64",
+    "//third_party/rapidhash",
+    "//third_party/simdutf",
 
     # TODO(tkent): WTF should not depend on it.
     "//third_party/blink/public/common:headers",
   ]
 
   public_deps = [
+    ":wtf_buildflags",
     "//base",
     "//base/third_party/double_conversion",
     "//components/crash/core/common:crash_key",
+    "//third_party/highway:libhwy",
     "//third_party/icu",
   ]
 
@@ -270,8 +314,6 @@ component("wtf") {
       "CoreFoundation.framework",
       "Foundation.framework",
     ]
-  } else {
-    sources -= [ "text/atomic_string_cf.cc" ]
   }
 
   if (using_mismatched_sample_profile) {
@@ -284,73 +326,18 @@ component("wtf") {
 
 test("wtf_unittests") {
   deps = [ ":wtf_unittests_sources" ]
+  fuzztests = [
+    "TextCodecUtf8FuzzTest.DecodeFastPathMatchesLegacy",
+    "TextCodecUtf8FuzzTest.DecodeStreamingFastPathMatchesLegacy",
+  ]
 }
 
-source_set("wtf_unittests_sources") {
-  visibility = []  # Allow re-assignment of list.
-  visibility = [ "*" ]
-  testonly = true
-
+test("wtf_perf_tests") {
   sources = [
-    "allocator/allocator_test.cc",
-    "allocator/partitions_test.cc",
-    "ascii_ctype_test.cc",
-    "assertions_test.cc",
-    "atomic_operations_test.cc",
-    "bit_field_test.cc",
-    "bloom_filter_test.cc",
-    "cross_thread_functional_test.cc",
-    "decimal_test.cc",
-    "deque_test.cc",
-    "doubly_linked_list_test.cc",
-    "dtoa_test.cc",
-    "functional_test.cc",
-    "hash_map_test.cc",
-    "hash_set_test.cc",
-    "linked_hash_set_test.cc",
-    "math_extras_test.cc",
-    "pod_arena_test.cc",
-    "pod_arena_test_helpers.h",
-    "pod_free_list_arena_test.cc",
-    "pod_interval_tree_test.cc",
-    "pod_red_black_tree_test.cc",
-    "pod_tree_test_helpers.cc",
-    "pod_tree_test_helpers.h",
-    "sequence_bound_test.cc",
-    "shared_buffer_test.cc",
     "testing/run_all_tests.cc",
-    "text/atomic_string_table_test.cc",
-    "text/atomic_string_test.cc",
-    "text/base64_test.cc",
-    "text/case_map_test.cc",
-    "text/code_point_iterator_test.cc",
-    "text/encoding_tables_test.cc",
-    "text/integer_to_string_conversion_test.cc",
-    "text/line_ending_test.cc",
-    "text/math_transform_test.cc",
-    "text/string_buffer_test.cc",
-    "text/string_builder_test.cc",
-    "text/string_hasher_test.cc",
-    "text/string_impl_test.cc",
-    "text/string_to_number_test.cc",
-    "text/string_view_test.cc",
-    "text/text_codec_cjk_test.cc",
-    "text/text_codec_icu_test.cc",
-    "text/text_codec_replacement_test.cc",
-    "text/text_codec_test.cc",
-    "text/text_codec_utf8_test.cc",
-    "text/text_encoding_test.cc",
-    "text/wtf_string_test.cc",
-    "threading_primitives_test.cc",
-    "type_traits_test.cc",
-    "uuid_test.cc",
-    "vector_backed_linked_list_test.cc",
-    "vector_test.cc",
+    "text/string_simd_perf_test.cc",
+    "text/utf8_perf_test.cc",
   ]
-
-  if (is_win) {
-    cflags = [ "/wd4068" ]  # Unknown pragma.
-  }
 
   configs += [
     "//third_party/blink/renderer:config",
@@ -364,4 +351,105 @@ source_set("wtf_unittests_sources") {
     "//testing/gmock",
     "//testing/gtest",
   ]
+}
+
+source_set("wtf_unittests_sources") {
+  visibility = []  # Allow re-assignment of list.
+  visibility = [ "*" ]
+  testonly = true
+
+  sources = [
+    "allocator/allocator_test.cc",
+    "allocator/partitions_test.cc",
+    "assertions_test.cc",
+    "atomic_operations_test.cc",
+    "base_hash_traits_test.cc",
+    "bind_post_task_test.cc",
+    "bit_field_test.cc",
+    "bloom_filter_test.cc",
+    "casting_test.cc",
+    "cross_thread_functional_test.cc",
+    "decimal_test.cc",
+    "deque_test.cc",
+    "doubly_linked_list_test.cc",
+    "dtoa_test.cc",
+    "functional_test.cc",
+    "hash_functions_memory_test.cc",
+    "hash_map_test.cc",
+    "hash_set_test.cc",
+    "linked_hash_set_test.cc",
+    "math_extras_test.cc",
+    "pod_arena_test.cc",
+    "pod_free_list_arena_test.cc",
+    "pod_interval_tree_test.cc",
+    "pod_red_black_tree_test.cc",
+    "pod_tree_test_helpers.cc",
+    "pod_tree_test_helpers.h",
+    "sequence_bound_test.cc",
+    "shared_buffer_test.cc",
+    "testing/run_all_tests.cc",
+    "text/ascii_ctype_test.cc",
+    "text/ascii_fast_path_test.cc",
+    "text/atomic_string_table_test.cc",
+    "text/atomic_string_test.cc",
+    "text/base64_test.cc",
+    "text/case_map_test.cc",
+    "text/code_point_iterator_test.cc",
+    "text/encoding_tables_test.cc",
+    "text/format_test.cc",
+    "text/ignoring_ascii_case_hash_test.cc",
+    "text/integer_to_string_conversion_test.cc",
+    "text/line_ending_test.cc",
+    "text/math_transform_test.cc",
+    "text/strcat_test.cc",
+    "text/string_buffer_test.cc",
+    "text/string_builder_stream_test.cc",
+    "text/string_builder_test.cc",
+    "text/string_hasher_test.cc",
+    "text/string_impl_test.cc",
+    "text/string_to_number_test.cc",
+    "text/string_view_test.cc",
+    "text/text_codec_cjk_test.cc",
+    "text/text_codec_icu_test.cc",
+    "text/text_codec_latin1_test.cc",
+    "text/text_codec_replacement_test.cc",
+    "text/text_codec_test.cc",
+    "text/text_codec_utf8_test.cc",
+    "text/text_encoding_registry_test.cc",
+    "text/text_encoding_test.cc",
+    "text/text_offset_map_test.cc",
+    "text/utf16_test.cc",
+    "text/utf8_test.cc",
+    "text/wtf_string_test.cc",
+    "threading_primitives_test.cc",
+    "type_traits_test.cc",
+    "uuid_test.cc",
+    "vector_backed_linked_list_test.cc",
+    "vector_test.cc",
+    "wtf_test_helper.cc",
+    "wtf_test_helper.h",
+  ]
+
+  if (is_win) {
+    cflags = [ "/wd4068" ]  # Unknown pragma.
+  }
+
+  configs += [
+    "//third_party/blink/renderer:config",
+    "//third_party/blink/renderer:blink_pch",
+    "//third_party/blink/renderer:inside_blink",
+  ]
+
+  deps = [
+    ":wtf",
+    "//base",
+    "//base/test:test_support",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//third_party/fuzztest",
+  ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }

@@ -13,41 +13,34 @@
 
 namespace bookmarks {
 
-#if defined(TOOLKIT_VIEWS)
+// static
+void BookmarkNodeData::ClipboardContainsBookmarks(
+    base::OnceCallback<void(bool)> callback) {
+  NSPasteboard* pb =
+      ui::clipboard_util::PasteboardFromBuffer(ui::ClipboardBuffer::kCopyPaste);
+  std::move(callback).Run(PasteboardContainsBookmarks(pb));
+}
+
+void BookmarkNodeData::WriteToClipboard(bool is_off_the_record) {
+  NSPasteboard* pb =
+      ui::clipboard_util::PasteboardFromBuffer(ui::ClipboardBuffer::kCopyPaste);
+  WriteBookmarksToPasteboard(pb, elements, profile_path_, is_off_the_record);
+}
 
 // static
-const ui::ClipboardFormatType& BookmarkNodeData::GetBookmarkFormatType() {
-  static const base::NoDestructor<ui::ClipboardFormatType> format(
-      ui::ClipboardFormatType::GetType(
-          base::SysNSStringToUTF8(kUTTypeChromiumBookmarkDictionaryList)));
-
-  return *format;
-}
-
-#endif  // TOOLKIT_VIEWS
-
-// static
-bool BookmarkNodeData::ClipboardContainsBookmarks() {
-  NSPasteboard* pb =
-      ui::ClipboardUtil::PasteboardFromBuffer(ui::ClipboardBuffer::kCopyPaste);
-  return PasteboardContainsBookmarks(pb);
-}
-
-void BookmarkNodeData::WriteToClipboard() {
-  NSPasteboard* pb =
-      ui::ClipboardUtil::PasteboardFromBuffer(ui::ClipboardBuffer::kCopyPaste);
-  WriteBookmarksToPasteboard(pb, elements, profile_path_);
-}
-
-bool BookmarkNodeData::ReadFromClipboard(ui::ClipboardBuffer buffer) {
-  NSPasteboard* pb = ui::ClipboardUtil::PasteboardFromBuffer(buffer);
+void BookmarkNodeData::ReadFromClipboard(
+    ui::ClipboardBuffer buffer,
+    base::OnceCallback<void(std::unique_ptr<BookmarkNodeData>)> callback) {
+  NSPasteboard* pb = ui::clipboard_util::PasteboardFromBuffer(buffer);
+  auto data = std::make_unique<BookmarkNodeData>();
   base::FilePath file_path;
-  if (ReadBookmarksFromPasteboard(pb, &elements, &file_path)) {
-    profile_path_ = file_path;
-    return true;
+  if (ReadBookmarksFromPasteboard(pb, &data->elements, &file_path)) {
+    data->profile_path_ = file_path;
+    std::move(callback).Run(std::move(data));
+    return;
   }
 
-  return false;
+  std::move(callback).Run(nullptr);
 }
 
 #if defined(TOOLKIT_VIEWS)
@@ -57,7 +50,10 @@ void BookmarkNodeData::Write(const base::FilePath& profile_path,
   ui::OSExchangeDataProviderMac& provider =
       static_cast<ui::OSExchangeDataProviderMac&>(data->provider());
   NSPasteboard* pb = provider.GetPasteboard();
-  WriteBookmarksToPasteboard(pb, elements, profile_path);
+  // TODO(crbug.com/40945200): Add support for off-the-record bookmarks during
+  // drag and drop.
+  WriteBookmarksToPasteboard(pb, elements, profile_path,
+                             /*is_off_the_record=*/false);
 }
 
 bool BookmarkNodeData::Read(const ui::OSExchangeData& data) {

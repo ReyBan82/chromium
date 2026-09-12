@@ -7,9 +7,12 @@
 
 #include <string>
 
+#include "base/memory/weak_ptr.h"
+
 namespace exo {
 
 class DataOffer;
+class SecurityDelegate;
 enum class DndAction;
 
 // Handles events on data devices in context-specific ways.
@@ -18,6 +21,8 @@ class DataOfferDelegate {
   // Called at the top of the data device's destructor, to give observers a
   // chance to remove themselves.
   virtual void OnDataOfferDestroying(DataOffer* offer) = 0;
+
+  virtual base::WeakPtr<DataOfferDelegate> GetWeakPtr() = 0;
 
   // Called when |mime_type| is offered by the client.
   virtual void OnOffer(const std::string& mime_type) = 0;
@@ -29,8 +34,11 @@ class DataOfferDelegate {
   // Called when current |action| is offered by the client.
   virtual void OnAction(DndAction action) = 0;
 
+  // Returns the server's SecurityDelegate.
+  virtual SecurityDelegate* GetSecurityDelegate() const = 0;
+
  protected:
-  virtual ~DataOfferDelegate() {}
+  virtual ~DataOfferDelegate() = default;
 };
 
 }  // namespace exo

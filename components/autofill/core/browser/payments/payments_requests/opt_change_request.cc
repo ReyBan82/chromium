@@ -5,8 +5,15 @@
 #include "components/autofill/core/browser/payments/payments_requests/opt_change_request.h"
 
 #include <string>
+#include <utility>
 
+#include "base/functional/callback.h"
 #include "base/json/json_writer.h"
+#include "base/logging.h"
+#include "base/notreached.h"
+#include "components/autofill/core/browser/payments/payments_autofill_client.h"
+#include "components/autofill/core/browser/payments/payments_request_details.h"
+#include "components/autofill/core/browser/payments/payments_requests/payments_request.h"
 
 namespace autofill::payments {
 
@@ -16,10 +23,9 @@ const char kOptChangeRequestPath[] =
 }  // namespace
 
 OptChangeRequest::OptChangeRequest(
-    const PaymentsClient::OptChangeRequestDetails& request_details,
-    base::OnceCallback<void(AutofillClient::PaymentsRpcResult,
-                            PaymentsClient::OptChangeResponseDetails&)>
-        callback,
+    const OptChangeRequestDetails& request_details,
+    base::OnceCallback<void(PaymentsAutofillClient::PaymentsRpcResult,
+                            OptChangeResponseDetails&)> callback,
     const bool full_sync_enabled)
     : request_details_(request_details),
       callback_(std::move(callback)),
@@ -36,35 +42,34 @@ std::string OptChangeRequest::GetRequestContentType() {
 }
 
 std::string OptChangeRequest::GetRequestContent() {
-  base::Value::Dict request_dict;
-  base::Value::Dict context;
+  base::DictValue request_dict;
+  base::DictValue context;
   context.Set("language_code", request_details_.app_locale);
-  context.Set("billable_service", kUnmaskCardBillableServiceNumber);
+  context.Set("billable_service", kUnmaskPaymentMethodBillableServiceNumber);
   request_dict.Set("context", std::move(context));
 
-  base::Value::Dict chrome_user_context;
-  chrome_user_context.Set("full_sync_enabled", full_sync_enabled_);
-  request_dict.Set("chrome_user_context", std::move(chrome_user_context));
+  request_dict.Set("chrome_user_context",
+                   BuildChromeUserContext(/*client_behavior_signals=*/{},
+                                          full_sync_enabled_));
 
   std::string reason;
   switch (request_details_.reason) {
-    case PaymentsClient::OptChangeRequestDetails::ENABLE_FIDO_AUTH:
+    case OptChangeRequestDetails::Reason::kEnableFidoAuth:
       reason = "ENABLE_FIDO_AUTH";
       break;
-    case PaymentsClient::OptChangeRequestDetails::DISABLE_FIDO_AUTH:
+    case OptChangeRequestDetails::Reason::kDisableFidoAuth:
       reason = "DISABLE_FIDO_AUTH";
       break;
-    case PaymentsClient::OptChangeRequestDetails::ADD_CARD_FOR_FIDO_AUTH:
+    case OptChangeRequestDetails::Reason::kAddCardForFidoAuth:
       reason = "ADD_CARD_FOR_FIDO_AUTH";
       break;
     default:
       NOTREACHED();
-      break;
   }
   request_dict.Set("reason", std::move(reason));
 
   if (request_details_.fido_authenticator_response.has_value()) {
-    base::Value::Dict fido_authentication_info;
+    base::DictValue fido_authentication_info;
 
     fido_authentication_info.Set(
         "fido_authenticator_response",
@@ -79,13 +84,12 @@ std::string OptChangeRequest::GetRequestContent() {
                      std::move(fido_authentication_info));
   }
 
-  std::string request_content;
-  base::JSONWriter::Write(request_dict, &request_content);
-  VLOG(3) << "updateautofilluserpreference request body: " << request_content;
+  std::string request_content = base::WriteJson(request_dict).value_or("");
+  DVLOG(3) << "updateautofilluserpreference request body: " << request_content;
   return request_content;
 }
 
-void OptChangeRequest::ParseResponse(const base::Value::Dict& response) {
+void OptChangeRequest::ParseResponse(const base::DictValue& response) {
   const auto* fido_authentication_info =
       response.FindDict("fido_authentication_info");
   if (!fido_authentication_info)
@@ -111,7 +115,7 @@ bool OptChangeRequest::IsResponseComplete() {
 }
 
 void OptChangeRequest::RespondToDelegate(
-    AutofillClient::PaymentsRpcResult result) {
+    PaymentsAutofillClient::PaymentsRpcResult result) {
   std::move(callback_).Run(result, response_details_);
 }
 

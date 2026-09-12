@@ -13,16 +13,18 @@
 #include "chromeos/ash/components/dbus/hermes/hermes_profile_client.h"
 #include "chromeos/ash/components/network/cellular_esim_profile_handler.h"
 #include "chromeos/ash/components/network/cellular_inhibitor.h"
+#include "chromeos/ash/components/network/device_state.h"
 #include "chromeos/ash/components/network/hermes_metrics_util.h"
 #include "chromeos/ash/components/network/network_connection_handler.h"
 #include "chromeos/ash/components/network/network_event_log.h"
 #include "chromeos/ash/components/network/network_state.h"
 #include "chromeos/ash/components/network/network_type_pattern.h"
+#include "third_party/cros_system_api/dbus/hermes/dbus-constants.h"
 
 namespace ash {
 namespace {
 
-constexpr base::TimeDelta kWaitingForConnectableTimeout = base::Seconds(30);
+constexpr base::TimeDelta kWaitingForConnectableTimeout = base::Seconds(60);
 
 bool CanInitiateShillConnection(const NetworkState* network) {
   // The network must be part of a Shill profile (i.e., it cannot be a "stub"
@@ -35,7 +37,7 @@ bool CanInitiateShillConnection(const NetworkState* network) {
   return network->connectable();
 }
 
-absl::optional<dbus::ObjectPath> GetEuiccPath(const std::string& eid) {
+std::optional<dbus::ObjectPath> GetEuiccPath(const std::string& eid) {
   const std::vector<dbus::ObjectPath>& euicc_paths =
       HermesManagerClient::Get()->GetAvailableEuiccs();
 
@@ -46,30 +48,31 @@ absl::optional<dbus::ObjectPath> GetEuiccPath(const std::string& eid) {
       return euicc_path;
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<dbus::ObjectPath> GetProfilePath(const std::string& eid,
-                                                const std::string& iccid) {
-  absl::optional<dbus::ObjectPath> euicc_path = GetEuiccPath(eid);
+std::optional<dbus::ObjectPath> GetProfilePath(const std::string& eid,
+                                               const std::string& iccid) {
+  std::optional<dbus::ObjectPath> euicc_path = GetEuiccPath(eid);
   if (!euicc_path)
-    return absl::nullopt;
+    return std::nullopt;
 
   HermesEuiccClient::Properties* euicc_properties =
       HermesEuiccClient::Get()->GetProperties(*euicc_path);
   if (!euicc_properties)
-    return absl::nullopt;
+    return std::nullopt;
 
   const std::vector<dbus::ObjectPath>& profile_paths =
-      euicc_properties->installed_carrier_profiles().value();
+      euicc_properties->profiles().value();
   for (const auto& profile_path : profile_paths) {
     HermesProfileClient::Properties* profile_properties =
         HermesProfileClient::Get()->GetProperties(profile_path);
-    if (profile_properties && profile_properties->iccid().value() == iccid)
+    if (profile_properties && profile_properties->iccid().value() == iccid) {
       return profile_path;
+    }
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace
@@ -78,17 +81,20 @@ absl::optional<dbus::ObjectPath> GetProfilePath(const std::string& eid,
 const base::TimeDelta CellularConnectionHandler::kWaitingForAutoConnectTimeout =
     base::Minutes(2);
 
-absl::optional<std::string> CellularConnectionHandler::ResultToErrorString(
+std::optional<std::string> CellularConnectionHandler::ResultToErrorString(
     PrepareCellularConnectionResult result) {
   switch (result) {
     case PrepareCellularConnectionResult::kSuccess:
-      return absl::nullopt;
+      return std::nullopt;
 
     case PrepareCellularConnectionResult::kCouldNotFindNetworkWithIccid:
       return NetworkConnectionHandler::kErrorNotFound;
 
     case PrepareCellularConnectionResult::kInhibitFailed:
       return NetworkConnectionHandler::kErrorCellularInhibitFailure;
+
+    case PrepareCellularConnectionResult::kSimLocked:
+      return NetworkConnectionHandler::kErrorSimPinPukLocked;
 
     case PrepareCellularConnectionResult::kCouldNotFindRelevantEuicc:
       [[fallthrough]];
@@ -139,7 +145,7 @@ void CellularConnectionHandler::Init(
   cellular_inhibitor_ = cellular_inhibitor;
   cellular_esim_profile_handler_ = cellular_esim_profile_handler;
 
-  network_state_handler_observer_.Observe(network_state_handler_);
+  network_state_handler_observer_.Observe(network_state_handler_.get());
 }
 
 void CellularConnectionHandler::PrepareExistingCellularNetworkForConnection(
@@ -240,7 +246,7 @@ void CellularConnectionHandler::CompleteConnectionAttempt(
       std::move(request_queue_.front());
   request_queue_.pop();
 
-  const absl::optional<std::string> error_name = ResultToErrorString(result);
+  const std::optional<std::string> error_name = ResultToErrorString(result);
 
   if (error_name) {
     std::move(metadata->error_callback).Run(service_path, *error_name);
@@ -286,7 +292,7 @@ CellularConnectionHandler::GetNetworkStateForCurrentOperation() const {
   return nullptr;
 }
 
-absl::optional<dbus::ObjectPath>
+std::optional<dbus::ObjectPath>
 CellularConnectionHandler::GetEuiccPathForCurrentOperation() const {
   const ConnectionRequestMetadata* current_request =
       request_queue_.front().get();
@@ -296,12 +302,12 @@ CellularConnectionHandler::GetEuiccPathForCurrentOperation() const {
 
   const NetworkState* network_state = GetNetworkStateForCurrentOperation();
   if (!network_state)
-    return absl::nullopt;
+    return std::nullopt;
 
   return GetEuiccPath(network_state->eid());
 }
 
-absl::optional<dbus::ObjectPath>
+std::optional<dbus::ObjectPath>
 CellularConnectionHandler::GetProfilePathForCurrentOperation() const {
   const ConnectionRequestMetadata* current_request =
       request_queue_.front().get();
@@ -311,7 +317,7 @@ CellularConnectionHandler::GetProfilePathForCurrentOperation() const {
 
   const NetworkState* network_state = GetNetworkStateForCurrentOperation();
   if (!network_state)
-    return absl::nullopt;
+    return std::nullopt;
 
   return GetProfilePath(network_state->eid(), network_state->iccid());
 }
@@ -380,7 +386,7 @@ void CellularConnectionHandler::OnInhibitScanResult(
 }
 
 void CellularConnectionHandler::RequestInstalledProfiles() {
-  absl::optional<dbus::ObjectPath> euicc_path =
+  std::optional<dbus::ObjectPath> euicc_path =
       GetEuiccPathForCurrentOperation();
   if (!euicc_path) {
     NET_LOG(ERROR) << "eSIM connection flow could not find relevant EUICC";
@@ -416,7 +422,7 @@ void CellularConnectionHandler::OnRefreshProfileListResult(
 }
 
 void CellularConnectionHandler::EnableProfile() {
-  absl::optional<dbus::ObjectPath> profile_path =
+  std::optional<dbus::ObjectPath> profile_path =
       GetProfilePathForCurrentOperation();
   if (!profile_path) {
     NET_LOG(ERROR) << "eSIM connection flow could not find profile";
@@ -463,8 +469,9 @@ void CellularConnectionHandler::OnEnableCarrierProfileResult(
 }
 
 void CellularConnectionHandler::HandleNetworkPropertiesUpdate() {
-  if (state_ == ConnectionState::kWaitingForConnectable)
+  if (state_ == ConnectionState::kWaitingForConnectable) {
     CheckForConnectable();
+  }
 }
 
 void CellularConnectionHandler::NetworkConnectionStateChanged(
@@ -474,10 +481,35 @@ void CellularConnectionHandler::NetworkConnectionStateChanged(
   }
 }
 
+void CellularConnectionHandler::DevicePropertiesUpdated(
+    const DeviceState* device) {
+  if (device->type() != shill::kTypeCellular ||
+      state_ != ConnectionState::kWaitingForConnectable) {
+    return;
+  }
+
+  CheckForConnectable();
+}
+
 void CellularConnectionHandler::CheckForConnectable() {
   DCHECK_EQ(state_, ConnectionState::kWaitingForConnectable);
 
+  // If the cellular device is locked, exit early, there's no need to wait for
+  // the network to be connectable.
+  const DeviceState* cellular_device =
+      network_state_handler_->GetDeviceStateByType(
+          NetworkTypePattern::Cellular());
+  DCHECK(cellular_device);
   const NetworkState* network_state = GetNetworkStateForCurrentOperation();
+  // We can check the cellular device lock status since the current SIM is the
+  // active SIM.
+  if (cellular_device->IsSimLocked() && network_state &&
+      cellular_device->iccid() == network_state->iccid()) {
+    CompleteConnectionAttempt(PrepareCellularConnectionResult::kSimLocked,
+                              /*auto_connected=*/false);
+    return;
+  }
+
   if (network_state && CanInitiateShillConnection(network_state)) {
     if (!request_queue_.front()->did_connection_require_enabling_profile) {
       CompleteConnectionAttempt(PrepareCellularConnectionResult::kSuccess,

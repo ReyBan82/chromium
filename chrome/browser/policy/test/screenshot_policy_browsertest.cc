@@ -7,6 +7,7 @@
 #include "ash/public/cpp/capture_mode/capture_mode_api.h"
 #include "base/files/file_enumerator.h"
 #include "base/run_loop.h"
+#include "base/threading/thread_restrictions.h"
 #include "chrome/browser/download/download_prefs.h"
 #include "chrome/browser/policy/policy_test_utils.h"
 #include "chrome/browser/profiles/profile_manager.h"
@@ -47,7 +48,7 @@ class CaptureNotificationWaiter : public message_center::MessageCenterObserver {
 
   // message_center::MessageCenterObserver:
   void OnNotificationAdded(const std::string& notification_id) override {
-    if (notification_id.starts_with(kScreenCaptureNotificationId))
+    if (notification_id == kScreenCaptureNotificationId)
       run_loop_.Quit();
   }
 

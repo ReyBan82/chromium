@@ -5,18 +5,82 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_PERFORMANCE_METRICS_FOR_REPORTING_H_
 #define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_PERFORMANCE_METRICS_FOR_REPORTING_H_
 
+#include <unicode/uscript.h>
+
+#include <array>
+#include <optional>
+#include <vector>
+
 #include "base/time/time.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/unguessable_token.h"
 #include "third_party/blink/public/common/performance/largest_contentful_paint_type.h"
+#include "third_party/blink/public/mojom/navigation/navigation_type_for_navigation_api.mojom-shared.h"
 #include "third_party/blink/public/platform/web_common.h"
 #include "third_party/blink/public/platform/web_private_ptr.h"
 #include "third_party/blink/public/platform/web_url_request.h"
-#include "third_party/blink/public/platform/web_vector.h"
 #include "third_party/blink/public/web/web_navigation_type.h"
 
 namespace blink {
 
 class WindowPerformance;
+
+struct ResourceLoadTimingsForReporting {
+  std::optional<base::TimeDelta> discovery_time = std::nullopt;
+  std::optional<base::TimeDelta> load_start = std::nullopt;
+  std::optional<base::TimeDelta> load_end = std::nullopt;
+};
+
+struct LargestContentfulPaintDetailsForReporting {
+  double image_paint_time = 0;
+  uint64_t image_paint_size = 0;
+  ResourceLoadTimingsForReporting resource_load_timings = {};
+  blink::LargestContentfulPaintType type =
+      blink::LargestContentfulPaintType::kNone;
+  double image_bpp = 0.0;
+  double text_paint_time = 0;
+  uint64_t text_paint_size = 0;
+  std::optional<WebURLRequest::Priority> image_request_priority = std::nullopt;
+  // The unclamped paint time of the largest content (image/text).
+  std::optional<base::TimeTicks> merged_unclamped_paint_time = std::nullopt;
+  // The performance timeline navigation ID of the corresponding soft
+  // navigation; 1 for hard nav.
+  uint64_t performance_timeline_navigation_id = 1;
+};
+
+struct ScriptFontFallbackDetailsForReporting {
+  // The Unicode script code (UScriptCode) of the character.
+  UScriptCode script_code;
+  // The number of fallback events for this script.
+  size_t fallback_count;
+  // Whether the fallback was for an Emoji.
+  bool is_emoji;
+};
+
+struct SoftNavigationMetricsForReporting {
+  // A unique number assigned to this soft navigation from the start of the
+  // page load, 2, 3, ... n.
+  uint64_t performance_timeline_navigation_id = 0;
+
+  // The navigation start (time origin) relative to the start of the
+  // navigation. Note that this field is initially sent with an absolute time,
+  // and only MetricsRenderFrameObserver::DidObserveSoftNavigation makes it
+  // relative to navigation start.
+  base::TimeDelta start_time;
+
+  // The timestamp that we use for slicing the performance timeline. This is
+  // only a Chrome-internal mechanism and never recorded to UKM.
+  base::TimeTicks soft_navigation_slicing_time;
+
+  // The type of soft navigation, set based on the type of same document
+  // navigation.
+  mojom::NavigationTypeForNavigationApi navigation_type =
+      mojom::NavigationTypeForNavigationApi::kPush;
+
+  // Identifies the same document navigation for the initial URL change.
+  // This allows us to map to the UKM Source ID in the browser side,
+  // and therefore attribute the metrics to the correct URL.
+  base::UnguessableToken same_document_metrics_token;
+};
 
 // This class is used for reporting purposes (e.g. ukm) of non-web-exposed
 // metrics.
@@ -33,11 +97,11 @@ class BLINK_EXPORT WebPerformanceMetricsForReporting {
     std::array<double,
                kRequestAnimationFramesToRecordAfterBackForwardCacheRestore>
         request_animation_frames = {};
-    absl::optional<base::TimeDelta> first_input_delay;
+    std::optional<base::TimeDelta> first_input_delay;
   };
 
   using BackForwardCacheRestoreTimings =
-      WebVector<BackForwardCacheRestoreTiming>;
+      std::vector<BackForwardCacheRestoreTiming>;
 
   ~WebPerformanceMetricsForReporting() { Reset(); }
 
@@ -62,59 +126,66 @@ class BLINK_EXPORT WebPerformanceMetricsForReporting {
   WebNavigationType GetNavigationType() const;
 
   // These functions return time in seconds (not milliseconds) since the epoch.
+  //
+  // TODO (crbug.com/355962211): Update the methods which return double for
+  // timing information to return `base::TimeTicks`.
   double InputForNavigationStart() const;
   double NavigationStart() const;
   base::TimeTicks NavigationStartAsMonotonicTime() const;
   BackForwardCacheRestoreTimings BackForwardCacheRestore() const;
+  double DomainLookupStart() const;
+  double DomainLookupEnd() const;
+  double ConnectStart() const;
+  double ConnectEnd() const;
   double ResponseStart() const;
   double DomContentLoadedEventStart() const;
   double DomContentLoadedEventEnd() const;
   double LoadEventStart() const;
   double LoadEventEnd() const;
   double FirstPaint() const;
+  base::TimeTicks FirstPaintAsMonotonicTime() const;
   double FirstImagePaint() const;
   double FirstContentfulPaint() const;
   base::TimeTicks FirstContentfulPaintAsMonotonicTime() const;
   base::TimeTicks FirstContentfulPaintRenderedButNotPresentedAsMonotonicTime()
       const;
   double FirstMeaningfulPaint() const;
-  double LargestImagePaintForMetrics() const;
-  uint64_t LargestImagePaintSizeForMetrics() const;
-  absl::optional<base::TimeDelta> LargestContentfulPaintImageLoadStart() const;
-  absl::optional<base::TimeDelta> LargestContentfulPaintImageLoadEnd() const;
-  double LargestTextPaintForMetrics() const;
-  uint64_t LargestTextPaintSizeForMetrics() const;
-  base::TimeTicks LargestContentfulPaintAsMonotonicTimeForMetrics() const;
-  double ExperimentalLargestImagePaint() const;
-  uint64_t ExperimentalLargestImagePaintSize() const;
-  blink::LargestContentfulPaintType LargestContentfulPaintTypeForMetrics()
+  LargestContentfulPaintDetailsForReporting LargestContentfulDetailsForMetrics()
       const;
-  double LargestContentfulPaintImageBPPForMetrics() const;
-  absl::optional<WebURLRequest::Priority>
-  LargestContentfulPaintImageRequestPriorityForMetrics() const;
-  double ExperimentalLargestTextPaint() const;
-  uint64_t ExperimentalLargestTextPaintSize() const;
+  LargestContentfulPaintDetailsForReporting
+  SoftNavigationLargestContentfulDetailsForMetrics() const;
   double FirstEligibleToPaint() const;
   double FirstInputOrScrollNotifiedTimestamp() const;
-  absl::optional<base::TimeDelta> FirstInputDelay() const;
-  absl::optional<base::TimeDelta> FirstInputTimestamp() const;
-  absl::optional<base::TimeTicks> FirstInputTimestampAsMonotonicTime() const;
-  absl::optional<base::TimeDelta> LongestInputDelay() const;
-  absl::optional<base::TimeDelta> LongestInputTimestamp() const;
-  absl::optional<base::TimeDelta> FirstInputProcessingTime() const;
-  absl::optional<base::TimeDelta> FirstScrollDelay() const;
-  absl::optional<base::TimeDelta> FirstScrollTimestamp() const;
+  std::optional<base::TimeDelta> FirstInputDelay() const;
+  std::optional<base::TimeDelta> FirstInputTimestamp() const;
+  std::optional<base::TimeTicks> FirstInputTimestampAsMonotonicTime() const;
+  std::optional<base::TimeDelta> LongestInputDelay() const;
+  std::optional<base::TimeDelta> LongestInputTimestamp() const;
+  std::optional<base::TimeDelta> FirstInputProcessingTime() const;
+  std::optional<base::TimeDelta> FirstScrollDelay() const;
+  std::optional<base::TimeDelta> FirstScrollTimestamp() const;
   double ParseStart() const;
   double ParseStop() const;
   double ParseBlockedOnScriptLoadDuration() const;
   double ParseBlockedOnScriptLoadFromDocumentWriteDuration() const;
   double ParseBlockedOnScriptExecutionDuration() const;
   double ParseBlockedOnScriptExecutionFromDocumentWriteDuration() const;
-  absl::optional<base::TimeTicks> LastPortalActivatedPaint() const;
-  absl::optional<base::TimeDelta> PrerenderActivationStart() const;
-  absl::optional<base::TimeDelta> UserTimingMarkFullyLoaded() const;
-  absl::optional<base::TimeDelta> UserTimingMarkFullyVisible() const;
-  absl::optional<base::TimeDelta> UserTimingMarkInteractive() const;
+  std::optional<base::TimeDelta> PrerenderActivationStart() const;
+  std::optional<base::TimeDelta> UserTimingMarkFullyLoaded() const;
+  std::optional<base::TimeDelta> UserTimingMarkFullyVisible() const;
+  std::optional<base::TimeDelta> UserTimingMarkInteractive() const;
+
+  base::TimeDelta SystemFallbackFontTime() const;
+  uint32_t SystemFallbackFontCount() const;
+  base::TimeDelta SystemFallbackFontInitialDuration() const;
+  uint32_t ShapeCacheHitCount() const;
+  uint32_t ShapeCacheMissCount() const;
+
+  std::vector<ScriptFontFallbackDetailsForReporting>
+  GetScriptFontFallbackDetails() const;
+
+  std::optional<std::tuple<std::string, base::TimeDelta>> CustomUserTimingMark()
+      const;
 
 #if INSIDE_BLINK
   explicit WebPerformanceMetricsForReporting(WindowPerformance*);
@@ -122,7 +193,7 @@ class BLINK_EXPORT WebPerformanceMetricsForReporting {
 #endif
 
  private:
-  WebPrivatePtr<WindowPerformance> private_;
+  WebPrivatePtrForGC<WindowPerformance> private_;
 };
 
 }  // namespace blink

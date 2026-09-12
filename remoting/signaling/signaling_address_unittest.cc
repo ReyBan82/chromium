@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "remoting/signaling/corp_messaging_constants.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
 
@@ -45,23 +46,20 @@ TEST(SignalingAddressTest, ParseAddress) {
 
   std::unique_ptr<jingle_xmpp::XmlElement> message(
       jingle_xmpp::XmlElement::ForStr(kTestMessage));
-  std::string error;
 
   SignalingAddress from =
-      SignalingAddress::Parse(message.get(), SignalingAddress::FROM, &error);
+      SignalingAddress::Parse(message.get(), SignalingAddress::FROM);
   EXPECT_FALSE(from.empty());
-  EXPECT_TRUE(error.empty());
 
-  EXPECT_EQ("user@domain.com/chromoting_ftl_sender", from.id());
-  EXPECT_EQ(SignalingAddress::Channel::FTL, from.channel());
+  EXPECT_EQ(from.id(), "user@domain.com/chromoting_ftl_sender");
+  EXPECT_EQ(from.channel(), SignalingAddress::Channel::FTL);
 
   SignalingAddress to =
-      SignalingAddress::Parse(message.get(), SignalingAddress::TO, &error);
+      SignalingAddress::Parse(message.get(), SignalingAddress::TO);
   EXPECT_FALSE(to.empty());
-  EXPECT_TRUE(error.empty());
 
-  EXPECT_EQ("remoting@bot.talk.google.com", to.id());
-  EXPECT_EQ(SignalingAddress::Channel::XMPP, to.channel());
+  EXPECT_EQ(to.id(), "remoting@bot.talk.google.com");
+  EXPECT_EQ(to.channel(), SignalingAddress::Channel::XMPP);
 }
 
 TEST(SignalingAddressTest, ParseEmptySignalingId) {
@@ -80,9 +78,8 @@ TEST(SignalingAddressTest, ParseEmptySignalingId) {
   std::string error;
 
   SignalingAddress from =
-      SignalingAddress::Parse(message.get(), SignalingAddress::FROM, &error);
+      SignalingAddress::Parse(message.get(), SignalingAddress::FROM);
   EXPECT_TRUE(from.empty());
-  EXPECT_TRUE(error.empty());
 }
 
 TEST(SignalingAddressTest, ParseMissingSignalingId) {
@@ -97,19 +94,17 @@ TEST(SignalingAddressTest, ParseMissingSignalingId) {
 
   std::unique_ptr<jingle_xmpp::XmlElement> message(
       jingle_xmpp::XmlElement::ForStr(kTestMessage));
-  std::string error;
 
   SignalingAddress from =
-      SignalingAddress::Parse(message.get(), SignalingAddress::FROM, &error);
+      SignalingAddress::Parse(message.get(), SignalingAddress::FROM);
   EXPECT_TRUE(from.empty());
-  EXPECT_TRUE(error.empty());
 }
 
 TEST(SignalingAddressTest, SetInMessageToXmpp) {
   std::unique_ptr<jingle_xmpp::XmlElement> message = GetEmptyJingleMessage();
   SignalingAddress addr("user@domain.com/chromoting12345");
   addr.SetInMessage(message.get(), SignalingAddress::TO);
-  EXPECT_EQ("user@domain.com/chromoting12345", message->Attr(QName("", "to")));
+  EXPECT_EQ(message->Attr(QName("", "to")), "user@domain.com/chromoting12345");
 }
 
 TEST(SignalingAddressTest, SetInMessageToFtl) {
@@ -117,33 +112,33 @@ TEST(SignalingAddressTest, SetInMessageToFtl) {
   SignalingAddress addr(kFtlAddress);
 
   addr.SetInMessage(message.get(), SignalingAddress::TO);
-  EXPECT_EQ(kFtlAddress, message->Attr(QName("", "to")));
+  EXPECT_EQ(message->Attr(QName("", "to")), kFtlAddress);
 }
 
 TEST(SignalingAddressTest, SetInMessageFromXmpp) {
   std::unique_ptr<jingle_xmpp::XmlElement> message = GetEmptyJingleMessage();
   SignalingAddress addr("user@domain.com/resource");
   addr.SetInMessage(message.get(), SignalingAddress::FROM);
-  EXPECT_EQ("user@domain.com/resource", message->Attr(QName("", "from")));
+  EXPECT_EQ(message->Attr(QName("", "from")), "user@domain.com/resource");
 }
 
 TEST(SignalingAddressTest, SetInMessageFromFtl) {
   std::unique_ptr<jingle_xmpp::XmlElement> message = GetEmptyJingleMessage();
   SignalingAddress addr(kFtlAddress);
   addr.SetInMessage(message.get(), SignalingAddress::FROM);
-  EXPECT_EQ(kFtlAddress, message->Attr(QName("", "from")));
+  EXPECT_EQ(message->Attr(QName("", "from")), kFtlAddress);
 }
 
 TEST(SignalingAddressTest, CreateFtlSignalingAddress) {
   SignalingAddress addr = SignalingAddress::CreateFtlSignalingAddress(
       "user@domain.com", kFtlRegistrationId);
-  EXPECT_EQ(kFtlAddress, addr.id());
+  EXPECT_EQ(addr.id(), kFtlAddress);
 
   std::string username;
   std::string registration_id;
   EXPECT_TRUE(addr.GetFtlInfo(&username, &registration_id));
-  EXPECT_EQ("user@domain.com", username);
-  EXPECT_EQ(kFtlRegistrationId, registration_id);
+  EXPECT_EQ(username, "user@domain.com");
+  EXPECT_EQ(registration_id, kFtlRegistrationId);
 }
 
 TEST(SignalingAddressTest, GetFtlInfo_NotFtlInfo) {
@@ -154,6 +149,46 @@ TEST(SignalingAddressTest, GetFtlInfo_NotFtlInfo) {
   EXPECT_FALSE(addr.GetFtlInfo(&username, &registration_id));
   EXPECT_TRUE(username.empty());
   EXPECT_TRUE(registration_id.empty());
+}
+
+TEST(SignalingAddressTest, CorpAddress) {
+  const char kCorpToken[] = "this_is_a_corp_token_without_at_or_slash";
+  SignalingAddress addr(kCorpToken);
+  EXPECT_EQ(addr.channel(), SignalingAddress::Channel::CORP);
+  EXPECT_EQ(addr.id(), kCorpToken);
+
+  const char kCorpUserWithResource[] =
+      "user@corp.google.com/some-uuid-resource";
+  SignalingAddress addr1(kCorpUserWithResource);
+  EXPECT_EQ(addr1.channel(), SignalingAddress::Channel::CORP);
+  EXPECT_EQ(addr1.id(), kCorpUserWithResource);
+
+  const char kCorpServiceWithoutResource[] = "some-uuid@type.corp.google.com";
+  SignalingAddress addr2(kCorpServiceWithoutResource);
+  EXPECT_EQ(addr2.channel(), SignalingAddress::Channel::CORP);
+  EXPECT_EQ(addr2.id(), kCorpServiceWithoutResource);
+
+  const char kCorpServiceWithResource[] =
+      "some-uuid@type.corp.google.com/some-resource";
+  SignalingAddress addr3(kCorpServiceWithResource);
+  EXPECT_EQ(addr3.channel(), SignalingAddress::Channel::CORP);
+  EXPECT_EQ(addr3.id(), kCorpServiceWithResource);
+}
+
+TEST(SignalingAddressTest, JidWithoutResourceIsXmpp) {
+  const char kJid[] = "user@domain.com";
+  SignalingAddress addr(kJid);
+  EXPECT_EQ(addr.channel(), SignalingAddress::Channel::XMPP);
+  EXPECT_EQ(addr.id(), kJid);
+}
+
+TEST(SignalingAddressTest, CreateFtlSystemAddress) {
+  const char kSystemSenderId[] = "chromoting-backend-service";
+  SignalingAddress addr =
+      SignalingAddress::CreateFtlSystemAddress(kSystemSenderId);
+  EXPECT_EQ(addr.channel(), SignalingAddress::Channel::FTL);
+  EXPECT_TRUE(addr.is_system());
+  EXPECT_EQ(addr.id(), kSystemSenderId);
 }
 
 }  // namespace remoting

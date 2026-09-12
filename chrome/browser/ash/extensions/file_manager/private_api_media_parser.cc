@@ -4,17 +4,18 @@
 
 #include "chrome/browser/ash/extensions/file_manager/private_api_media_parser.h"
 
+#include <string_view>
+
 #include "base/base64.h"
 #include "base/functional/bind.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/strcat.h"
-#include "base/strings/string_piece.h"
 #include "base/values.h"
 #include "chrome/browser/apps/platform_apps/api/media_galleries/blob_data_source_factory.h"
 #include "chrome/browser/ash/extensions/file_manager/private_api_media_parser_util.h"
 #include "chrome/common/extensions/api/file_manager_private.h"
 #include "chrome/common/extensions/api/file_manager_private_internal.h"
-#include "chrome/services/media_gallery_util/public/mojom/media_parser.mojom.h"
+#include "components/media_gallery_util/public/mojom/media_parser.mojom.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -37,7 +38,7 @@ FileManagerPrivateInternalGetContentMimeTypeFunction::Run() {
   const std::string& blob_uuid = args()[0].GetString();
 
   if (blob_uuid.empty()) {
-    return RespondNow(Error("fileEntry.file() blob error."));
+    return RespondNow(Error("Blob UUID must not be empty."));
   }
 
   content::GetUIThreadTaskRunner({})->PostTask(
@@ -54,7 +55,7 @@ void FileManagerPrivateInternalGetContentMimeTypeFunction::ReadBlobBytes(
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   BlobReader::Read(  // Read net::kMaxBytesToSniff bytes from the front.
-      browser_context(), blob_uuid,
+      browser_context()->GetBlobRemote(blob_uuid),
       base::BindOnce(
           &FileManagerPrivateInternalGetContentMimeTypeFunction::SniffMimeType,
           this, blob_uuid),
@@ -63,12 +64,12 @@ void FileManagerPrivateInternalGetContentMimeTypeFunction::ReadBlobBytes(
 
 void FileManagerPrivateInternalGetContentMimeTypeFunction::SniffMimeType(
     const std::string& blob_uuid,
-    std::unique_ptr<std::string> sniff_bytes,
-    int64_t length) {
+    std::string sniff_bytes,
+    int64_t /*length*/) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   std::string mime_type;
-  if (!net::SniffMimeTypeFromLocalData(*sniff_bytes, &mime_type)) {
+  if (!net::SniffMimeTypeFromLocalData(sniff_bytes, &mime_type)) {
     Respond(Error("Could not deduce the content mime type."));
     return;
   }
@@ -85,11 +86,11 @@ FileManagerPrivateInternalGetContentMetadataFunction::
 ExtensionFunction::ResponseAction
 FileManagerPrivateInternalGetContentMetadataFunction::Run() {
   using api::file_manager_private_internal::GetContentMetadata::Params;
-  const std::unique_ptr<Params> params(Params::Create(args()));
+  const std::optional<Params> params = Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
   if (params->blob_uuid.empty()) {
-    return RespondNow(Error("fileEntry.file() blob error."));
+    return RespondNow(Error("Blob UUID must not be empty"));
   }
 
   content::GetUIThreadTaskRunner({})->PostTask(
@@ -108,7 +109,7 @@ void FileManagerPrivateInternalGetContentMetadataFunction::ReadBlobSize(
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   BlobReader::Read(  // Read net::kMaxBytesToSniff bytes from the front.
-      browser_context(), blob_uuid,
+      browser_context()->GetBlobRemote(blob_uuid),
       base::BindOnce(
           &FileManagerPrivateInternalGetContentMetadataFunction::CanParseBlob,
           this, blob_uuid, mime_type, include_images),
@@ -119,7 +120,7 @@ void FileManagerPrivateInternalGetContentMetadataFunction::CanParseBlob(
     const std::string& blob_uuid,
     const std::string& mime_type,
     bool include_images,
-    std::unique_ptr<std::string> sniff_bytes,
+    std::string /*sniff_bytes*/,
     int64_t length) {  // The length of the original input blob.
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
@@ -168,7 +169,7 @@ void FileManagerPrivateInternalGetContentMetadataFunction::ParserDone(
   }
 
   DCHECK(metadata);
-  base::Value::Dict dictionary =
+  base::DictValue dictionary =
       extensions::api::file_manager_private::MojoMediaMetadataToValue(
           std::move(metadata));
 
@@ -184,15 +185,15 @@ void FileManagerPrivateInternalGetContentMetadataFunction::ParserDone(
   }
 
   if (image && size && !image->type.empty()) {  // Attach thumbnail image.
-    std::string url;
-    base::Base64Encode(base::StringPiece(image->data.data(), size), &url);
+    std::string url =
+        base::Base64Encode(std::string_view(image->data.data(), size));
     url.insert(0, base::StrCat({"data:", image->type, ";base64,"}));
 
-    base::Value::Dict media_thumbnail_image;
+    base::DictValue media_thumbnail_image;
     media_thumbnail_image.Set("data", std::move(url));
     media_thumbnail_image.Set("type", std::move(image->type));
 
-    base::Value::List* attached_images_list =
+    base::ListValue* attached_images_list =
         dictionary.FindList("attachedImages");
     attached_images_list->Append(std::move(media_thumbnail_image));
   }

@@ -9,21 +9,21 @@
 #include "base/functional/callback.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/test/scoped_feature_list.h"
+#include "base/test/run_until.h"
 #include "base/test/test_timeouts.h"
 #include "build/build_config.h"
 #include "cc/base/switches.h"
-#include "cc/input/scroll_utils.h"
-#include "content/browser/renderer_host/input/synthetic_gesture.h"
-#include "content/browser/renderer_host/input/synthetic_smooth_scroll_gesture.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
+#include "content/common/input/synthetic_gesture.h"
 #include "content/common/input/synthetic_gesture_params.h"
+#include "content/common/input/synthetic_smooth_scroll_gesture.h"
 #include "content/common/input/synthetic_smooth_scroll_gesture_params.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
@@ -32,25 +32,15 @@
 #include "content/public/test/test_utils.h"
 #include "content/shell/browser/shell.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
-#include "ui/base/ui_base_features.h"
 
 namespace content {
 
-class SyntheticInputTest : public ContentBrowserTest,
-                           public testing::WithParamInterface<bool> {
+class SyntheticInputTest : public ContentBrowserTest {
  public:
-  SyntheticInputTest() {
-    if (GetParam()) {
-      scoped_feature_list.InitAndEnableFeature(
-          features::kWindowsScrollingPersonality);
-    } else {
-      scoped_feature_list.InitAndDisableFeature(
-          features::kWindowsScrollingPersonality);
-    }
-  }
+  SyntheticInputTest() = default;
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    command_line->AppendSwitch(cc::switches::kEnableGpuBenchmarking);
+    command_line->AppendSwitch(switches::kEnableGpuBenchmarking);
   }
 
   RenderWidgetHostImpl* GetRenderWidgetHost() const {
@@ -83,66 +73,15 @@ class SyntheticInputTest : public ContentBrowserTest,
     runner_->Quit();
   }
 
-  // Required because scrolls are animated with percent based scrolling, with
-  // no easy way to disable. See crbug.com/1334257
-  double WaitForScrollToEnd(const std::string& script) {
-    MainThreadFrameObserver frame_observer(
-        RenderWidgetHostImpl::From(shell()
-                                       ->web_contents()
-                                       ->GetPrimaryMainFrame()
-                                       ->GetRenderViewHost()
-                                       ->GetWidget()));
-    int frame_count = 0;
-    double scroll_top = -1;
-    while (true) {
-      double new_scroll_top = EvalJs(shell(), script).ExtractDouble();
-      if (new_scroll_top == scroll_top) {
-        frame_count++;
-        // Return when the scroll top value holds steady for 10 frames.
-        if (frame_count == 10)
-          return scroll_top;
-      } else {
-        // Scroll top value changed; reset counter.
-        frame_count = 0;
-        scroll_top = new_scroll_top;
-      }
-      frame_observer.Wait();
-    }
-  }
-
-  gfx::SizeF GetViewportSize() {
-    return gfx::SizeF(
-        EvalJs(shell(), "window.visualViewport.width").ExtractDouble(),
-        EvalJs(shell(), "window.visualViewport.height").ExtractDouble());
-  }
-
-  void InitSyntheticGestureWithDistanceAndGranularity(
-      SyntheticSmoothScrollGestureParams* params,
-      const int delta_x,
-      const int delta_y,
-      const gfx::SizeF& scroller,
-      const gfx::SizeF& viewport) {
-    if (features::IsPercentBasedScrollingEnabled()) {
-      params->distances.push_back(
-          cc::ScrollUtils::ResolvePixelScrollToPercentageForTesting(
-              gfx::Vector2dF(delta_x, delta_y), scroller, viewport));
-      params->granularity = ui::ScrollGranularity::kScrollByPercentage;
-    } else {
-      params->distances.push_back(gfx::Vector2d(delta_x, delta_y));
-      params->granularity = ui::ScrollGranularity::kScrollByPrecisePixel;
-    }
-  }
-
  protected:
   std::unique_ptr<base::RunLoop> runner_;
-  base::test::ScopedFeatureList scoped_feature_list;
 };
-
-INSTANTIATE_TEST_SUITE_P(All, SyntheticInputTest, ::testing::Bool());
 
 class GestureScrollObserver : public RenderWidgetHost::InputEventObserver {
  public:
-  void OnInputEvent(const blink::WebInputEvent& event) override {
+  void OnInputEvent(const RenderWidgetHost& widget,
+                    const blink::WebInputEvent& event,
+                    InputEventSource source) override {
     if (event.GetType() == blink::WebInputEvent::Type::kGestureScrollBegin)
       gesture_scroll_seen_ = true;
   }
@@ -154,7 +93,7 @@ class GestureScrollObserver : public RenderWidgetHost::InputEventObserver {
 // gesture doesn't cause lifetime issues. Namely, that the gesture
 // CompletionCallback isn't destroyed before being called or the Mojo pipe
 // being closed.
-IN_PROC_BROWSER_TEST_P(SyntheticInputTest, DestroyWidgetWithOngoingGesture) {
+IN_PROC_BROWSER_TEST_F(SyntheticInputTest, DestroyWidgetWithOngoingGesture) {
   EXPECT_TRUE(NavigateToURL(shell(), GURL("about:blank")));
   EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
 
@@ -170,18 +109,20 @@ IN_PROC_BROWSER_TEST_P(SyntheticInputTest, DestroyWidgetWithOngoingGesture) {
              "chrome.gpuBenchmarking.smoothScrollByXY(0, 10000, ()=>{}, "
              "100, 100, chrome.gpuBenchmarking.TOUCH_INPUT);"));
 
-  while (!gesture_observer.HasSeenGestureScrollBegin()) {
-    base::RunLoop run_loop;
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
-        FROM_HERE, run_loop.QuitClosure(), TestTimeouts::tiny_timeout());
-    run_loop.Run();
-  }
+  EXPECT_TRUE(base::test::RunUntil(
+      [&]() { return gesture_observer.HasSeenGestureScrollBegin(); }));
 
   shell()->Close();
 }
 
 // This test ensures that synthetic wheel scrolling works on all platforms.
-IN_PROC_BROWSER_TEST_P(SyntheticInputTest, SmoothScrollWheel) {
+// Disabled for flakiness on Android (crbug.com/1103731).
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_SmoothScrollWheel DISABLED_SmoothScrollWheel
+#else
+#define MAYBE_SmoothScrollWheel SmoothScrollWheel
+#endif  // BUILDFLAG(IS_ANDROID)
+IN_PROC_BROWSER_TEST_F(SyntheticInputTest, MAYBE_SmoothScrollWheel) {
   LoadURL(R"HTML(
     data:text/html;charset=utf-8,
     <!DOCTYPE html>
@@ -204,14 +145,15 @@ IN_PROC_BROWSER_TEST_P(SyntheticInputTest, SmoothScrollWheel) {
   SyntheticSmoothScrollGestureParams params;
   params.gesture_source_type = content::mojom::GestureSourceType::kMouseInput;
   params.anchor = gfx::PointF(1, 1);
-
-  InitSyntheticGestureWithDistanceAndGranularity(
-      &params, 0, -scroll_delta, gfx::SizeF(10, 2000), GetViewportSize());
+  params.distances.push_back(gfx::Vector2d(0, -scroll_delta));
 
   // Use a speed that's fast enough that the entire scroll occurs in a single
   // GSU, avoiding precision loss. SyntheticGestures can lose delta over time
   // in slower scrolls on some platforms.
   params.speed_in_pixels_s = 10000000.f;
+
+  // Use PrecisePixel to avoid animating.
+  params.granularity = ui::ScrollGranularity::kScrollByPrecisePixel;
 
   runner_ = std::make_unique<base::RunLoop>();
 
@@ -226,13 +168,8 @@ IN_PROC_BROWSER_TEST_P(SyntheticInputTest, SmoothScrollWheel) {
   runner_->Run();
   runner_.reset();
 
-  if (features::IsPercentBasedScrollingEnabled()) {
-    EXPECT_EQ(WaitForScrollToEnd("document.scrollingElement.scrollTop"),
-              scroll_delta);
-  } else {
-    EXPECT_EQ(scroll_delta, EvalJs(shell()->web_contents(),
-                                   "document.scrollingElement.scrollTop"));
-  }
+  EXPECT_EQ(scroll_delta, EvalJs(shell()->web_contents(),
+                                 "document.scrollingElement.scrollTop"));
 }
 
 // This test ensures that slow synthetic wheel scrolling does not lose precision
@@ -240,7 +177,7 @@ IN_PROC_BROWSER_TEST_P(SyntheticInputTest, SmoothScrollWheel) {
 // https://crbug.com/1103731. Flaky on Android bots.
 // https://crbug.com/1086334. Flaky on all desktop bots, but maybe for a
 // different reason.
-IN_PROC_BROWSER_TEST_P(SyntheticInputTest, DISABLED_SlowSmoothScrollWheel) {
+IN_PROC_BROWSER_TEST_F(SyntheticInputTest, DISABLED_SlowSmoothScrollWheel) {
   LoadURL(R"HTML(
     data:text/html;charset=utf-8,
     <!DOCTYPE html>
@@ -263,14 +200,15 @@ IN_PROC_BROWSER_TEST_P(SyntheticInputTest, DISABLED_SlowSmoothScrollWheel) {
   SyntheticSmoothScrollGestureParams params;
   params.gesture_source_type = content::mojom::GestureSourceType::kMouseInput;
   params.anchor = gfx::PointF(1, 1);
-
-  InitSyntheticGestureWithDistanceAndGranularity(
-      &params, 0, -scroll_delta, gfx::SizeF(10, 2000), GetViewportSize());
+  params.distances.push_back(gfx::Vector2d(0, -scroll_delta));
 
   // Use a speed that's slow enough that it requires the browser to require
   // multiple wheel-events to be dispatched, so that precision is needed to
   // scroll the correct amount.
   params.speed_in_pixels_s = 1000.f;
+
+  // Use PrecisePixel to avoid animating.
+  params.granularity = ui::ScrollGranularity::kScrollByPrecisePixel;
 
   runner_ = std::make_unique<base::RunLoop>();
 
@@ -287,13 +225,87 @@ IN_PROC_BROWSER_TEST_P(SyntheticInputTest, DISABLED_SlowSmoothScrollWheel) {
   scroll_offset_wait.WaitForScrollOffset(
       gfx::PointF(0.f, ((float)scroll_delta) * device_scale_factor));
 
-  if (features::IsPercentBasedScrollingEnabled()) {
-    EXPECT_EQ(WaitForScrollToEnd("document.scrollingElement.scrollTop"),
-              scroll_delta);
-  } else {
-    EXPECT_EQ(scroll_delta, EvalJs(shell()->web_contents(),
-                                   "document.scrollingElement.scrollTop"));
+  EXPECT_EQ(scroll_delta, EvalJs(shell()->web_contents(),
+                                 "document.scrollingElement.scrollTop"));
+}
+
+class ScrollAxisLockSyntheticInputTest : public SyntheticInputTest {
+ public:
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    SyntheticInputTest::SetUpCommandLine(command_line);
+    command_line->AppendSwitchASCII(switches::kEnableBlinkFeatures,
+                                    "ScrollAxisLock");
   }
+};
+
+// This test ensures that scroll deltas from coalesced input events are not lost
+// on scroll containers with scroll-axis-lock: none.
+IN_PROC_BROWSER_TEST_F(ScrollAxisLockSyntheticInputTest,
+                       ScrollAxisLockCoalescing) {
+  // Load page with scroll-axis-lock: none.
+  LoadURL(R"HTML(
+    data:text/html;charset=utf-8,
+    <!DOCTYPE html>
+    <meta name='viewport' content='width=device-width'>
+    <style>
+      .scroller {
+        scroll-axis-lock: none;
+        width: 200px;
+        height: 200px;
+        overflow: scroll;
+        border: 1px solid black;
+      }
+      .content {
+        width: 2000px;
+        height: 2000px;
+      }
+    </style>
+    <div class="scroller" id="scroller">
+      <div class="content" id="content"></div>
+    </div>
+    <script>
+      document.title = 'ready';
+    </script>
+  )HTML");
+
+  const int scroll_x = 2;
+  const int scroll_y = 400;
+
+  SyntheticSmoothScrollGestureParams params;
+  params.gesture_source_type = content::mojom::GestureSourceType::kTouchInput;
+  params.anchor = gfx::PointF(100, 100);  // inside scroller
+  // Drag UP and LEFT to scroll DOWN and RIGHT.
+  // The gesture is split into a sequence of touchmove events animated over
+  // time, creating the opportunity for coalescing.
+  params.distances.push_back(gfx::Vector2d(-scroll_x, -scroll_y));
+  params.speed_in_pixels_s = 800.f;
+  params.granularity = ui::ScrollGranularity::kScrollByPrecisePixel;
+  // Use kTwoPerVsync to force coalescing of events on the compositor thread.
+  params.input_event_pattern = content::mojom::InputEventPattern::kTwoPerVsync;
+
+  runner_ = std::make_unique<base::RunLoop>();
+
+  auto gesture = std::make_unique<SyntheticSmoothScrollGesture>(params);
+  GetRenderWidgetHost()->QueueSyntheticGesture(
+      std::move(gesture),
+      base::BindOnce(&SyntheticInputTest::OnSyntheticGestureCompleted,
+                     base::Unretained(this)));
+
+  // Run until the gesture completes.
+  runner_->Run();
+  runner_.reset();
+
+  double actual_scroll_left =
+      EvalJs(shell()->web_contents(),
+             "document.getElementById('scroller').scrollLeft")
+          .ExtractDouble();
+  double actual_scroll_top =
+      EvalJs(shell()->web_contents(),
+             "document.getElementById('scroller').scrollTop")
+          .ExtractDouble();
+
+  EXPECT_NEAR(actual_scroll_left, scroll_x, 1);
+  EXPECT_NEAR(actual_scroll_top, scroll_y, 1);
 }
 
 }  // namespace content

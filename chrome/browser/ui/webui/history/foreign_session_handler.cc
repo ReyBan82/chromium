@@ -12,30 +12,45 @@
 #include <utility>
 #include <vector>
 
+#include "base/check.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/i18n/rtl.h"
 #include "base/i18n/time_formatting.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sessions/session_restore.h"
+#include "chrome/browser/sync/device_info_sync_service_factory.h"
 #include "chrome/browser/sync/session_sync_service_factory.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/ui_features.h"
+#include "chrome/browser/ui/views/side_panel/tabs_from_other_devices/tabs_from_other_devices_side_panel_metrics.h"
 #include "chrome/browser/ui/webui/ntp/new_tab_ui.h"
+#include "chrome/browser/ui/webui/side_panel/tabs_from_other_devices/tabs_from_other_devices_side_panel_ui.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/common/url_constants.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
+#include "components/sessions/core/session_id.h"
 #include "components/strings/grit/components_strings.h"
+#include "components/sync_device_info/device_info_sync_service.h"
+#include "components/sync_device_info/device_info_tracker.h"
 #include "components/sync_sessions/session_sync_service.h"
+#include "components/sync_sessions/synced_session.h"
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/url_data_source.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
 #include "ui/base/l10n/time_format.h"
+#include "ui/base/mojom/window_open_disposition.mojom.h"
 #include "ui/base/webui/web_ui_util.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/base/window_open_disposition_utils.h"
 
 namespace browser_sync {
@@ -45,187 +60,134 @@ namespace {
 // Maximum number of sessions we're going to display on the NTP
 const size_t kMaxSessionsToShow = 10;
 
-// Helper method to create JSON compatible objects from Session objects.
-absl::optional<base::Value::Dict> SessionTabToValue(
+// Strings used to set the direction of the HTML document based on locale.
+const char kRTLHtmlTextDirection[] = "rtl";
+const char kLTRHtmlTextDirection[] = "ltr";
+
+// Helper method to create Mojom objects from Session objects.
+history::mojom::ForeignSessionTabPtr SessionTabToMojom(
     const ::sessions::SessionTab& tab) {
-  if (tab.navigations.empty())
-    return absl::nullopt;
+  if (tab.navigations.empty()) {
+    return nullptr;
+  }
 
   int selected_index = std::min(tab.current_navigation_index,
                                 static_cast<int>(tab.navigations.size() - 1));
   const ::sessions::SerializedNavigationEntry& current_navigation =
       tab.navigations.at(selected_index);
   GURL tab_url = current_navigation.virtual_url();
-  if (!tab_url.is_valid() || tab_url.spec() == chrome::kChromeUINewTabURL)
-    return absl::nullopt;
+  if (!tab_url.is_valid() || tab_url == chrome::ChromeUINewTabURLAsGURL()) {
+    return nullptr;
+  }
 
-  base::Value::Dict dictionary;
-  NewTabUI::SetUrlTitleAndDirection(&dictionary, current_navigation.title(),
-                                    tab_url);
-  dictionary.Set("remoteIconUrlForUma",
-                 current_navigation.favicon_url().spec());
-  dictionary.Set("type", "tab");
-  dictionary.Set("timestamp",
-                 static_cast<double>(tab.timestamp.ToInternalValue()));
-  // TODO(jeremycho): This should probably be renamed to tabId to avoid
-  // confusion with the ID corresponding to a session.  Investigate all the
-  // places (C++ and JS) where this is being used.  (http://crbug.com/154865).
-  dictionary.Set("sessionId", tab.tab_id.id());
-  return dictionary;
+  auto tab_mojom = history::mojom::ForeignSessionTab::New();
+  bool using_url_as_the_title = false;
+  tab_mojom->title = base::UTF16ToUTF8(current_navigation.title());
+  if (tab_mojom->title.empty()) {
+    using_url_as_the_title = true;
+    tab_mojom->title = tab_url.spec();
+  }
+
+  tab_mojom->url = tab_url;
+  tab_mojom->remote_icon_url_for_uma = current_navigation.favicon_url().spec();
+  tab_mojom->timestamp =
+      tab.timestamp.ToDeltaSinceWindowsEpoch().InMicrosecondsF();
+  tab_mojom->timestamp_display_str = base::UTF16ToUTF8(
+      ForeignSessionHandler::FormatSessionTime(tab.timestamp));
+  tab_mojom->session_id = tab.tab_id.id();
+
+  // Set the "direction" attribute of the title so that in RTL locales, a LTR
+  // title is rendered left-to-right and truncated from the right. For example,
+  // the title of http://msdn.microsoft.com/en-us/default.aspx is "MSDN:
+  // Microsoft developer network". In RTL locales, if the "direction" of this
+  // title is not specified, it takes Chrome UI's directionality. So the title
+  // will be truncated as "soft developer network". Setting the "direction"
+  // attribute as "ltr" renders the truncated title as "MSDN: Microsoft D...".
+  // As another example, the title of http://yahoo.com is "Yahoo!". In RTL
+  // locales, the title will be rendered as "!Yahoo" if its "direction"
+  // attribute is not set to "ltr".
+  if (using_url_as_the_title) {
+    tab_mojom->direction = kLTRHtmlTextDirection;
+  } else {
+    tab_mojom->direction =
+        base::i18n::IsRTL() && base::i18n::StringContainsStrongRTLChars(
+                                   current_navigation.title())
+            ? kRTLHtmlTextDirection
+            : kLTRHtmlTextDirection;
+  }
+  return tab_mojom;
 }
 
-// Helper for initializing a boilerplate SessionWindow JSON compatible object.
-base::Value::Dict BuildWindowData(base::Time modification_time,
-                                  SessionID window_id) {
-  base::Value::Dict dictionary;
-  // The items which are to be written into |dictionary| are also described in
-  // chrome/browser/resources/ntp4/other_sessions.js in @typedef for WindowData.
-  // Please update it whenever you add or remove any keys here.
-  dictionary.Set("type", "window");
-  dictionary.Set("timestamp",
-                 static_cast<double>(modification_time.ToInternalValue()));
-
-  dictionary.Set("sessionId", window_id.id());
-  return dictionary;
-}
-
-// Helper method to create JSON compatible objects from SessionWindow objects.
-absl::optional<base::Value::Dict> SessionWindowToValue(
+// Helper method to create Mojom objects from SessionWindow objects.
+history::mojom::ForeignSessionWindowPtr SessionWindowToMojom(
     const ::sessions::SessionWindow& window) {
-  if (window.tabs.empty())
-    return absl::nullopt;
+  if (window.tabs.empty()) {
+    return nullptr;
+  }
 
-  base::Value::List tab_values;
+  std::vector<history::mojom::ForeignSessionTabPtr> tabs;
   // Calculate the last |modification_time| for all entries within a window.
   base::Time modification_time = window.timestamp;
   for (const std::unique_ptr<sessions::SessionTab>& tab : window.tabs) {
-    auto tab_value = SessionTabToValue(*tab.get());
-    if (tab_value.has_value()) {
+    history::mojom::ForeignSessionTabPtr tab_mojom = SessionTabToMojom(*tab);
+    if (tab_mojom) {
       modification_time = std::max(modification_time, tab->timestamp);
-      tab_values.Append(std::move(*tab_value));
+      tab_mojom->window_id = window.window_id.id();
+      tabs.push_back(std::move(tab_mojom));
     }
   }
-  if (tab_values.empty())
-    return absl::nullopt;
+  if (tabs.empty()) {
+    return nullptr;
+  }
 
-  base::Value::Dict dictionary =
-      BuildWindowData(window.timestamp, window.window_id);
-  dictionary.Set("tabs", std::move(tab_values));
-  return dictionary;
+  auto window_mojom = history::mojom::ForeignSessionWindow::New();
+  window_mojom->timestamp =
+      modification_time.ToDeltaSinceWindowsEpoch().InMicrosecondsF();
+  window_mojom->session_id = window.window_id.id();
+  window_mojom->tabs = std::move(tabs);
+  return window_mojom;
+}
+
+std::string GetDeviceNameSuffixFromSyncUserAgent(
+    const std::string& user_agent) {
+  if (user_agent.find("channel(canary)") != std::string::npos) {
+    return " (Canary)";
+  }
+  if (user_agent.find("channel(dev)") != std::string::npos) {
+    return " (Dev)";
+  }
+  if (user_agent.find("channel(beta)") != std::string::npos) {
+    return " (Beta)";
+  }
+  if (user_agent.find("-devel") != std::string::npos) {
+    return " (developer build)";
+  }
+  return "";
 }
 
 }  // namespace
 
-ForeignSessionHandler::ForeignSessionHandler() = default;
-
-ForeignSessionHandler::~ForeignSessionHandler() = default;
-
-// static
-void ForeignSessionHandler::RegisterProfilePrefs(
-    user_prefs::PrefRegistrySyncable* registry) {
-  registry->RegisterDictionaryPref(prefs::kNtpCollapsedForeignSessions);
-}
-
-// static
-void ForeignSessionHandler::OpenForeignSessionTab(
-    content::WebUI* web_ui,
-    const std::string& session_string_value,
-    SessionID tab_id,
-    const WindowOpenDisposition& disposition) {
-  sync_sessions::OpenTabsUIDelegate* open_tabs = GetOpenTabsUIDelegate(web_ui);
-  if (!open_tabs)
-    return;
-
-  const ::sessions::SessionTab* tab;
-  if (!open_tabs->GetForeignTab(session_string_value, tab_id, &tab)) {
-    LOG(ERROR) << "Failed to load foreign tab.";
-    return;
-  }
-  if (tab->navigations.empty()) {
-    LOG(ERROR) << "Foreign tab no longer has valid navigations.";
-    return;
-  }
-  SessionRestore::RestoreForeignSessionTab(web_ui->GetWebContents(), *tab,
-                                           disposition);
-}
-
-// static
-void ForeignSessionHandler::OpenForeignSessionWindows(
-    content::WebUI* web_ui,
-    const std::string& session_string_value,
-    size_t window_num) {
-  sync_sessions::OpenTabsUIDelegate* open_tabs = GetOpenTabsUIDelegate(web_ui);
-  if (!open_tabs)
-    return;
-
-  std::vector<const ::sessions::SessionWindow*> windows;
-  // Note: we don't own the ForeignSessions themselves.
-  if (!open_tabs->GetForeignSession(session_string_value, &windows)) {
-    LOG(ERROR) << "ForeignSessionHandler failed to get session data from"
-                  "OpenTabsUIDelegate.";
-    return;
-  }
-
-  // Bounds check `window_num` before using it anywhere. crbug.com/1408120
-  CHECK_LT(window_num, windows.size());
-  auto iter_begin = windows.begin() + window_num;
-  DCHECK(iter_begin != windows.end())
-      << "Because we CHECKed that windows_num is less than the size.";
-  auto iter_end = iter_begin + 1;
-  SessionRestore::RestoreForeignSessionWindows(Profile::FromWebUI(web_ui),
-                                               iter_begin, iter_end);
-
-  size_t total_tabs_opened = 0;
-  for (const ::sessions::SessionWindow* window : windows) {
-    UMA_HISTOGRAM_COUNTS_1000(
-        "HistoryPage.OtherDevicesMenu.OpenAll.TabsPerWindow",
-        window->tabs.size());
-    total_tabs_opened += window->tabs.size();
-  }
-  UMA_HISTOGRAM_COUNTS_1000("HistoryPage.OtherDevicesMenu.OpenAll.TotalTabs",
-                            total_tabs_opened);
-  UMA_HISTOGRAM_COUNTS_100("HistoryPage.OtherDevicesMenu.OpenAll.TotalWindows",
-                           windows.size());
-}
-
-// static
-sync_sessions::OpenTabsUIDelegate* ForeignSessionHandler::GetOpenTabsUIDelegate(
-    content::WebUI* web_ui) {
-  Profile* profile = Profile::FromWebUI(web_ui);
-  sync_sessions::SessionSyncService* service =
-      SessionSyncServiceFactory::GetInstance()->GetForProfile(profile);
-  return service ? service->GetOpenTabsUIDelegate() : nullptr;
-}
-
-void ForeignSessionHandler::RegisterMessages() {
-  web_ui()->RegisterMessageCallback(
-      "deleteForeignSession",
-      base::BindRepeating(&ForeignSessionHandler::HandleDeleteForeignSession,
-                          base::Unretained(this)));
-  web_ui()->RegisterMessageCallback(
-      "getForeignSessions",
-      base::BindRepeating(&ForeignSessionHandler::HandleGetForeignSessions,
-                          base::Unretained(this)));
-  web_ui()->RegisterMessageCallback(
-      "openForeignSession",
-      base::BindRepeating(&ForeignSessionHandler::HandleOpenForeignSession,
-                          base::Unretained(this)));
-  web_ui()->RegisterMessageCallback(
-      "setForeignSessionCollapsed",
-      base::BindRepeating(
-          &ForeignSessionHandler::HandleSetForeignSessionCollapsed,
-          base::Unretained(this)));
-}
-
-void ForeignSessionHandler::OnJavascriptAllowed() {
-  // This can happen if the page is refreshed.
-  if (!initial_session_list_)
-    initial_session_list_ = GetForeignSessions();
-
-  Profile* profile = Profile::FromWebUI(web_ui());
+ForeignSessionHandler::ForeignSessionHandler(
+    mojo::PendingReceiver<history::mojom::ForeignSessionPageHandler>
+        pending_page_handler,
+    mojo::PendingRemote<history::mojom::ForeignSessionPage> pending_page,
+    Profile* profile,
+    content::WebContents* web_contents,
+    RestoreForeignSessionTabCallback restore_tab_callback,
+    RestoreForeignSessionWindowsCallback restore_windows_callback,
+    TabsFromOtherDevicesSidePanelUI* side_panel_ui)
+    : profile_(profile),
+      web_contents_(web_contents),
+      page_(std::move(pending_page)),
+      receiver_(this, std::move(pending_page_handler)),
+      side_panel_ui_(side_panel_ui),
+      restore_tab_callback_(std::move(restore_tab_callback)),
+      restore_windows_callback_(std::move(restore_windows_callback)) {
+  CHECK(restore_tab_callback_);
+  CHECK(restore_windows_callback_);
 
   sync_sessions::SessionSyncService* service =
-      SessionSyncServiceFactory::GetInstance()->GetForProfile(profile);
+      SessionSyncServiceFactory::GetInstance()->GetForProfile(profile_);
 
   // NOTE: The SessionSyncService can be null in tests.
   if (service) {
@@ -238,22 +200,170 @@ void ForeignSessionHandler::OnJavascriptAllowed() {
   }
 }
 
-void ForeignSessionHandler::OnJavascriptDisallowed() {
-  // Avoid notifying Javascript listeners due to foreign session changes, which
-  // is now disallowed and would otherwise run into CHECK failures in
-  // OnForeignSessionUpdated().
-  foreign_session_updated_subscription_ = base::CallbackListSubscription();
+ForeignSessionHandler::~ForeignSessionHandler() = default;
+
+// static
+void ForeignSessionHandler::RegisterProfilePrefs(
+    user_prefs::PrefRegistrySyncable* registry) {
+  registry->RegisterDictionaryPref(prefs::kNtpCollapsedForeignSessions);
+}
+
+// static
+sync_sessions::OpenTabsUIDelegate* ForeignSessionHandler::GetOpenTabsUIDelegate(
+    Profile* profile) {
+  sync_sessions::SessionSyncService* service =
+      SessionSyncServiceFactory::GetInstance()->GetForProfile(profile);
+  return service ? service->GetOpenTabsUIDelegate() : nullptr;
+}
+
+void ForeignSessionHandler::GetForeignSessions(
+    GetForeignSessionsCallback callback) {
+  std::move(callback).Run(GetForeignSessionsInternal());
+}
+
+void ForeignSessionHandler::OpenForeignSessionAllTabs(
+    const std::string& session_tag) {
+  // This is not used by the side panel. If it becomes used in the future, the
+  // metrics should be updated to cover this case.
+  CHECK(!side_panel_ui_);
+
+  sync_sessions::OpenTabsUIDelegate* open_tabs =
+      GetOpenTabsUIDelegate(profile_);
+  if (!open_tabs) {
+    return;
+  }
+
+  // Note: we don't own the ForeignSessions themselves.
+  std::vector<const ::sessions::SessionWindow*> windows =
+      open_tabs->GetForeignSession(session_tag);
+  if (windows.empty()) {
+    DVLOG(1) << "ForeignSessionHandler failed to get session data from"
+                "OpenTabsUIDelegate.";
+    return;
+  }
+
+  restore_windows_callback_.Run(profile_, windows);
+}
+
+void ForeignSessionHandler::OpenForeignSessionTab(
+    const std::string& session_tag,
+    int32_t tab_id_value,
+    ui::mojom::ClickModifiersPtr modifiers) {
+  sync_sessions::OpenTabsUIDelegate* open_tabs =
+      GetOpenTabsUIDelegate(profile_);
+  if (!open_tabs) {
+    return;
+  }
+
+  SessionID tab_id = SessionID::FromSerializedValue(tab_id_value);
+  if (!tab_id.is_valid()) {
+    DVLOG(1) << "Failed to deserialize tab ID.";
+    return;
+  }
+
+  const ::sessions::SessionTab* tab;
+  if (!open_tabs->GetForeignTab(session_tag, tab_id, &tab)) {
+    DVLOG(1) << "Failed to load foreign tab.";
+    return;
+  }
+  if (tab->navigations.empty()) {
+    DVLOG(1) << "Foreign tab no longer has valid navigations.";
+    return;
+  }
+
+  WindowOpenDisposition disposition = ui::DispositionFromClick(
+      modifiers->middle_button, modifiers->alt_key, modifiers->ctrl_key,
+      modifiers->meta_key, modifiers->shift_key);
+
+  if (side_panel_ui_ && disposition == WindowOpenDisposition::CURRENT_TAB) {
+    // In the side panel, never replace the current tab but open a new tab
+    // instead.
+    disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
+  }
+
+  if (side_panel_ui_ && side_panel_ui_->metrics_recorder()) {
+    size_t device_index = 0;
+    size_t tab_recency_index = 0;
+    std::vector<raw_ptr<const sync_sessions::SyncedSession, VectorExperimental>>
+        sessions;
+    if (open_tabs->GetAllForeignSessions(&sessions)) {
+      auto it = std::ranges::find(sessions, session_tag,
+                                  &sync_sessions::SyncedSession::GetSessionTag);
+      // Note: In practice, the session should always be found, since
+      // GetForeignTab() returned non-null above.
+      if (it != sessions.end()) {
+        device_index = std::distance(sessions.begin(), it);
+
+        // Count the "recency index" of the tab, i.e. how many tabs have a
+        // timestamp after this one (and thus will show up before this one in
+        // the side panel).
+        for (const auto& window_pair : (*it)->windows) {
+          for (const auto& session_tab :
+               window_pair.second->wrapped_window.tabs) {
+            if (session_tab->timestamp > tab->timestamp) {
+              ++tab_recency_index;
+            }
+          }
+        }
+      }
+    }
+
+    side_panel_ui_->metrics_recorder()->RecordTabOpened(device_index,
+                                                        tab_recency_index);
+  }
+
+  // If this is in the side panel, `web_contents_` refers to the content of the
+  // side panel, *not* the main tab where the foreign tab should be restored.
+  content::WebContents* web_contents =
+      side_panel_ui_ ? side_panel_ui_->browser_window_interface()
+                           ->GetTabStripModel()
+                           ->GetActiveWebContents()
+                     : web_contents_.get();
+  restore_tab_callback_.Run(web_contents, *tab, disposition);
+  // Note: As a consequence of running the callback, `this` may have been
+  // destroyed!
+}
+
+void ForeignSessionHandler::DeleteForeignSession(
+    const std::string& session_tag) {
+  sync_sessions::OpenTabsUIDelegate* open_tabs =
+      GetOpenTabsUIDelegate(profile_);
+  if (open_tabs) {
+    open_tabs->DeleteForeignSession(session_tag);
+  }
+}
+
+void ForeignSessionHandler::SetForeignSessionCollapsed(
+    const std::string& session_tag,
+    bool collapsed) {
+  // Store session tags for collapsed sessions in a preference so that the
+  // collapsed state persists.
+  PrefService* prefs = profile_->GetPrefs();
+  ScopedDictPrefUpdate update(prefs, prefs::kNtpCollapsedForeignSessions);
+  if (collapsed) {
+    update->Set(session_tag, true);
+  } else {
+    update->Remove(session_tag);
+  }
+}
+
+void ForeignSessionHandler::ShowUi() {
+  if (side_panel_ui_) {
+    base::WeakPtr<TopChromeWebUIController::Embedder> embedder =
+        side_panel_ui_->embedder();
+    if (embedder) {
+      embedder->ShowUI();
+    }
+  }
 }
 
 void ForeignSessionHandler::OnForeignSessionUpdated() {
-  FireWebUIListener("foreign-sessions-changed",
-                    std::move(GetForeignSessions()));
+  if (page_) {
+    page_->OnForeignSessionsChanged(GetForeignSessionsInternal());
+  }
 }
 
-void ForeignSessionHandler::InitializeForeignSessions() {
-  initial_session_list_ = GetForeignSessions();
-}
-
+// static
 std::u16string ForeignSessionHandler::FormatSessionTime(
     const base::Time& time) {
   // Return a time like "1 hour ago", "2 days ago", etc.
@@ -264,168 +374,99 @@ std::u16string ForeignSessionHandler::FormatSessionTime(
                                 now < time ? base::TimeDelta() : now - time);
 }
 
-void ForeignSessionHandler::HandleGetForeignSessions(
-    const base::Value::List& args) {
-  AllowJavascript();
-  CHECK(initial_session_list_);
-  const base::Value& callback_id = args[0];
-  ResolveJavascriptCallback(callback_id, *initial_session_list_);
-
-  // Clear the initial list so that it will be reset in AllowJavascript if the
-  // page is refreshed.
-  initial_session_list_ = absl::nullopt;
-}
-
-base::Value::List ForeignSessionHandler::GetForeignSessions() {
+std::vector<history::mojom::ForeignSessionPtr>
+ForeignSessionHandler::GetForeignSessionsInternal() {
   sync_sessions::OpenTabsUIDelegate* open_tabs =
-      GetOpenTabsUIDelegate(web_ui());
-  std::vector<const sync_sessions::SyncedSession*> sessions;
+      GetOpenTabsUIDelegate(profile_);
+  std::vector<raw_ptr<const sync_sessions::SyncedSession, VectorExperimental>>
+      sessions;
 
-  base::Value::List session_list;
+  std::vector<history::mojom::ForeignSessionPtr> session_list;
   if (open_tabs && open_tabs->GetAllForeignSessions(&sessions)) {
     // Use a pref to keep track of sessions that were collapsed by the user.
     // To prevent the pref from accumulating stale sessions, clear it each time
     // and only add back sessions that are still current.
-    ScopedDictPrefUpdate pref_update(Profile::FromWebUI(web_ui())->GetPrefs(),
+    ScopedDictPrefUpdate pref_update(profile_->GetPrefs(),
                                      prefs::kNtpCollapsedForeignSessions);
-    base::Value::Dict& current_collapsed_sessions = pref_update.Get();
-    base::Value::Dict collapsed_sessions = current_collapsed_sessions.Clone();
+    base::DictValue& current_collapsed_sessions = *pref_update;
+    base::DictValue collapsed_sessions = current_collapsed_sessions.Clone();
     current_collapsed_sessions.clear();
+
+    std::map<std::string, int> name_counts;
+    const syncer::DeviceInfoTracker* device_info_tracker = nullptr;
+    if (side_panel_ui_) {
+      syncer::DeviceInfoSyncService* device_info_sync_service =
+          DeviceInfoSyncServiceFactory::GetForProfile(profile_);
+      if (device_info_sync_service) {
+        device_info_tracker = device_info_sync_service->GetDeviceInfoTracker();
+      }
+
+      for (const sync_sessions::SyncedSession* session : sessions) {
+        ++name_counts[session->GetSessionName()];
+      }
+    }
+
+    size_t total_tab_count = 0;
+    size_t active_device_tab_count = 0;
 
     // Note: we don't own the SyncedSessions themselves.
     for (size_t i = 0; i < sessions.size() && i < kMaxSessionsToShow; ++i) {
       const sync_sessions::SyncedSession* session = sessions[i];
       const std::string& session_tag = session->GetSessionTag();
-      base::Value::Dict session_data;
-      // The items which are to be written into |session_data| are also
-      // described in chrome/browser/resources/history/externs.js
-      // @typedef for ForeignSession. Please update it whenever you add or
-      // remove any keys here.
-      session_data.Set("tag", session_tag);
-      session_data.Set("name", session->GetSessionName());
-      session_data.Set("modifiedTime",
-                       FormatSessionTime(session->GetModifiedTime()));
-      session_data.Set("timestamp", session->GetModifiedTime().ToJsTime());
+      auto session_mojom = history::mojom::ForeignSession::New();
+      session_mojom->tag = session_tag;
+      session_mojom->name = session->GetSessionName();
+      if (side_panel_ui_ && name_counts[session_mojom->name] > 1 &&
+          device_info_tracker) {
+        const syncer::DeviceInfo* device_info =
+            device_info_tracker->GetDeviceInfo(session_tag);
+        if (device_info) {
+          session_mojom->name += GetDeviceNameSuffixFromSyncUserAgent(
+              device_info->sync_user_agent());
+        }
+      }
+      session_mojom->modified_time =
+          base::UTF16ToUTF8(FormatSessionTime(session->GetModifiedTime()));
+      session_mojom->timestamp =
+          session->GetModifiedTime().InMillisecondsFSinceUnixEpoch();
 
-      bool is_collapsed = collapsed_sessions.Find(session_tag);
-      session_data.Set("collapsed", is_collapsed);
-      if (is_collapsed)
+      bool is_collapsed = collapsed_sessions.contains(session_tag);
+      session_mojom->collapsed = is_collapsed;
+      if (is_collapsed) {
         current_collapsed_sessions.Set(session_tag, true);
+      }
 
-      base::Value::List window_list;
+      std::vector<history::mojom::ForeignSessionWindowPtr> windows;
+
+      size_t session_tab_count = 0;
 
       // Order tabs by visual order within window.
       for (const auto& window_pair : session->windows) {
-        auto window_data =
-            SessionWindowToValue(window_pair.second->wrapped_window);
-        if (window_data.has_value()) {
-          window_list.Append(std::move(*window_data));
+        history::mojom::ForeignSessionWindowPtr window_mojom =
+            SessionWindowToMojom(window_pair.second->wrapped_window);
+        if (window_mojom) {
+          windows.push_back(std::move(window_mojom));
         }
+
+        session_tab_count += window_pair.second->wrapped_window.tabs.size();
       }
 
-      session_data.Set("windows", std::move(window_list));
-      session_list.Append(std::move(session_data));
+      if (i == 0) {
+        active_device_tab_count = session_tab_count;
+      }
+      total_tab_count += session_tab_count;
+
+      session_mojom->windows = std::move(windows);
+      session_list.push_back(std::move(session_mojom));
+    }
+
+    if (side_panel_ui_ && side_panel_ui_->metrics_recorder() &&
+        !side_panel_ui_->metrics_recorder()->HasRecordedTabCount()) {
+      side_panel_ui_->metrics_recorder()->RecordTabCountOnOpen(
+          session_list.size(), total_tab_count, active_device_tab_count);
     }
   }
   return session_list;
-}
-
-void ForeignSessionHandler::HandleOpenForeignSession(
-    const base::Value::List& args) {
-  size_t num_args = args.size();
-  // Expect either 1 or 8 args. For restoring an entire session, only
-  // one argument is required -- the session tag. To restore a tab,
-  // the additional args required are the window id, the tab id,
-  // and 4 properties of the event object (button, altKey, ctrlKey,
-  // metaKey, shiftKey) for determining how to open the tab.
-  if (num_args != 8U && num_args != 1U) {
-    LOG(ERROR) << "openForeignSession called with " << args.size()
-               << " arguments.";
-    return;
-  }
-
-  // Extract the session tag (always provided).
-  if (!args[0].is_string()) {
-    LOG(ERROR) << "Failed to extract session tag.";
-    return;
-  }
-  const std::string& session_string_value = args[0].GetString();
-
-  // Extract window number.
-  size_t window_num = 0;
-  if (num_args >= 2 &&
-      (!args[1].is_string() ||
-       !base::StringToSizeT(args[1].GetString(), &window_num))) {
-    LOG(ERROR) << "Failed to extract window number.";
-    return;
-  }
-
-  // Extract tab id.
-  SessionID::id_type tab_id_value = 0;
-  if (num_args >= 3 &&
-      (!args[2].is_string() ||
-       !base::StringToInt(args[2].GetString(), &tab_id_value))) {
-    LOG(ERROR) << "Failed to extract tab SessionID.";
-    return;
-  }
-
-  SessionID tab_id = SessionID::FromSerializedValue(tab_id_value);
-  if (tab_id.is_valid()) {
-    WindowOpenDisposition disposition = webui::GetDispositionFromClick(args, 3);
-    OpenForeignSessionTab(web_ui(), session_string_value, tab_id, disposition);
-  } else {
-    OpenForeignSessionWindows(web_ui(), session_string_value, window_num);
-  }
-}
-
-void ForeignSessionHandler::HandleDeleteForeignSession(
-    const base::Value::List& args) {
-  if (args.size() != 1U) {
-    LOG(ERROR) << "Wrong number of args to deleteForeignSession";
-    return;
-  }
-
-  // Get the session tag argument (required).
-  if (!args[0].is_string()) {
-    LOG(ERROR) << "Unable to extract session tag";
-    return;
-  }
-  const std::string& session_tag = args[0].GetString();
-
-  sync_sessions::OpenTabsUIDelegate* open_tabs =
-      GetOpenTabsUIDelegate(web_ui());
-  if (open_tabs)
-    open_tabs->DeleteForeignSession(session_tag);
-}
-
-void ForeignSessionHandler::HandleSetForeignSessionCollapsed(
-    const base::Value::List& args) {
-  if (args.size() != 2U) {
-    LOG(ERROR) << "Wrong number of args to setForeignSessionCollapsed";
-    return;
-  }
-
-  // Get the session tag argument (required).
-  if (!args[0].is_string()) {
-    LOG(ERROR) << "Unable to extract session tag";
-    return;
-  }
-  const std::string& session_tag = args[0].GetString();
-
-  if (!args[1].is_bool()) {
-    LOG(ERROR) << "Unable to extract boolean argument";
-    return;
-  }
-  const bool is_collapsed = args[1].GetBool();
-
-  // Store session tags for collapsed sessions in a preference so that the
-  // collapsed state persists.
-  PrefService* prefs = Profile::FromWebUI(web_ui())->GetPrefs();
-  ScopedDictPrefUpdate update(prefs, prefs::kNtpCollapsedForeignSessions);
-  if (is_collapsed)
-    update->Set(session_tag, true);
-  else
-    update->Remove(session_tag);
 }
 
 }  // namespace browser_sync

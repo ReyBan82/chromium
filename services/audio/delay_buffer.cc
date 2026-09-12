@@ -5,6 +5,7 @@
 #include "services/audio/delay_buffer.h"
 
 #include <algorithm>
+#include <ranges>
 #include <utility>
 
 #include "base/numerics/safe_conversions.h"
@@ -36,9 +37,9 @@ void DelayBuffer::Write(FrameTicks position,
   // Make a copy of the AudioBus for later consumption. Apply the volume setting
   // by scaling the audio signal during the copy.
   auto copy = media::AudioBus::Create(input_bus.channels(), input_bus.frames());
-  for (int ch = 0; ch < input_bus.channels(); ++ch) {
-    media::vector_math::FMUL(input_bus.channel(ch), volume, input_bus.frames(),
-                             copy->channel(ch));
+  for (auto [src_ch, dest_ch] :
+       std::views::zip(input_bus.AllChannels(), copy->AllChannels())) {
+    media::vector_math::FMUL(src_ch, volume, dest_ch);
   }
 
   chunks_.emplace_back(position, std::move(copy));
@@ -63,9 +64,8 @@ void DelayBuffer::Read(FrameTicks from,
     // If attempting to read past the end of the recorded signal, zero-pad the
     // rest of the output and return.
     if (chunks_.empty()) {
-      TRACE_EVENT_INSTANT1("audio", "DelayBuffer::Read underrun",
-                           TRACE_EVENT_SCOPE_THREAD, "frames missing",
-                           frames_remaining);
+      TRACE_EVENT_INSTANT("audio", "DelayBuffer::Read underrun",
+                          "frames missing", frames_remaining);
       output_bus->ZeroFramesPartial(dest_offset, frames_remaining);
       return;
     }
@@ -84,9 +84,8 @@ void DelayBuffer::Read(FrameTicks from,
       const int frames_to_zero_fill = (source_offset + frames_remaining <= 0)
                                           ? frames_remaining
                                           : -source_offset;
-      TRACE_EVENT_INSTANT1("audio", "DelayBuffer::Read gap",
-                           TRACE_EVENT_SCOPE_THREAD, "frames missing",
-                           frames_to_zero_fill);
+      TRACE_EVENT_INSTANT("audio", "DelayBuffer::Read gap", "frames missing",
+                          frames_to_zero_fill);
       output_bus->ZeroFramesPartial(dest_offset, frames_to_zero_fill);
       frames_remaining -= frames_to_zero_fill;
       continue;

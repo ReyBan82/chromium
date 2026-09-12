@@ -6,6 +6,7 @@
 #define EXTENSIONS_BROWSER_EXTENSION_WEB_CONTENTS_OBSERVER_H_
 
 #include <map>
+#include <optional>
 #include <string>
 
 #include "base/compiler_specific.h"
@@ -16,6 +17,8 @@
 #include "extensions/browser/extension_function_dispatcher.h"
 #include "extensions/common/mojom/frame.mojom.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
+#include "third_party/blink/public/mojom/devtools/console_message.mojom-forward.h"
+#include "url/gurl.h"
 
 namespace content {
 class BrowserContext;
@@ -56,15 +59,13 @@ class ExtensionFrameHost;
 // we detect that the unexpected URL and unregister the frame.
 // With OOPIF only the first notification is sufficient in most cases, except
 // for sandboxed frames with a unique origin.
-class ExtensionWebContentsObserver
-    : public content::WebContentsObserver,
-      public ExtensionFunctionDispatcher::Delegate {
+class ExtensionWebContentsObserver : public content::WebContentsObserver {
  public:
   ExtensionWebContentsObserver(const ExtensionWebContentsObserver&) = delete;
   ExtensionWebContentsObserver& operator=(const ExtensionWebContentsObserver&) =
       delete;
 
-  // Returns the ExtensionWebContentsObserver for the given |web_contents|.
+  // Returns the ExtensionWebContentsObserver for the given `web_contents`.
   static ExtensionWebContentsObserver* GetForWebContents(
       content::WebContents* web_contents);
 
@@ -72,27 +73,32 @@ class ExtensionWebContentsObserver
   // with the RenderFrameHost.
   static void BindLocalFrameHost(
       mojo::PendingAssociatedReceiver<mojom::LocalFrameHost> receiver,
-      content::RenderFrameHost* rfh);
+      content::RenderFrameHost* render_frame_host);
 
   // This must be called by clients directly after the EWCO has been created.
   void Initialize();
 
   ExtensionFunctionDispatcher* dispatcher() { return &dispatcher_; }
 
-  // Returns the extension associated with the given |render_frame_host|, or
+  // Returns the extension associated with the given `render_frame_host`, or
   // null if there is none.
-  // If |verify_url| is false, only the SiteInstance is taken into account.
-  // If |verify_url| is true, the frame's last committed URL is also used to
+  // If `verify_url` is false, only the SiteInstance is taken into account.
+  // If `verify_url` is true, the frame's last committed URL is also used to
   // improve the classification of the frame.
   const Extension* GetExtensionFromFrame(
       content::RenderFrameHost* render_frame_host,
       bool verify_url) const;
 
-  // Returns mojom::LocalFrame* corresponding |render_frame_host|. It emplaces
-  // AssociatedRemote<mojom::LocalFrame> to |local_frame_map_| if the map
-  // doesn't have it. Note that it could return nullptr if |render_frame_host|
-  // is not live.
+  // Returns mojom::LocalFrame* corresponding `render_frame_host`. It emplaces
+  // AssociatedRemote<mojom::LocalFrame> to `local_frame_map_` if the map
+  // doesn't have it. Note that it could return nullptr if `render_frame_host`
+  // is not live or `render_frame_host` does not immediately belong to the
+  // associated `WebContents`.
   mojom::LocalFrame* GetLocalFrame(content::RenderFrameHost* render_frame_host);
+
+  // Similar to `GetLocalFrame` but will not return nullptr, will crash.
+  mojom::LocalFrame& GetLocalFrameChecked(
+      content::RenderFrameHost* render_frame_host);
 
   // Tells the receiver to start listening to window ID changes from the
   // supplied SessionTabHelper. This method is public to allow the code that
@@ -123,27 +129,50 @@ class ExtensionWebContentsObserver
   virtual std::unique_ptr<ExtensionFrameHost> CreateExtensionFrameHost(
       content::WebContents* web_contents);
 
-  // ExtensionFunctionDispatcher::Delegate overrides.
-  content::WebContents* GetAssociatedWebContents() const override;
-
   // content::WebContentsObserver overrides.
-  void RenderFrameCreated(content::RenderFrameHost* render_frame_host) override;
   void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
   void ReadyToCommitNavigation(
       content::NavigationHandle* navigation_handle) override;
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override;
   void MediaPictureInPictureChanged(bool is_picture_in_picture) override;
+  void OnDidAddMessageToConsole(
+      content::RenderFrameHost* source_frame,
+      blink::mojom::ConsoleMessageLevel log_level,
+      const std::u16string& message,
+      int32_t line_no,
+      const std::u16string& source_id,
+      const std::optional<std::u16string>& untrusted_stack_trace) override;
 
-  // Per the documentation in WebContentsObserver, these two methods are invoked
-  // when a Pepper plugin instance is attached/detached in the page DOM.
-  void PepperInstanceCreated() override;
-  void PepperInstanceDeleted() override;
+  // Initializes state for any processes associated with the new
+  // `render_frame_host`, such as granting process access to new schemes.
+  virtual void SetUpRenderFrameHost(
+      content::RenderFrameHost* render_frame_host);
+
+  // Returns true if `extension` is allowed to use Mojo JS bindings.
+  // Default queries ExtensionMojoBinderRegistry.
+  virtual bool IsMojoJsEnabled(const Extension& extension) const;
+
+  // Returns true if JS error reporting (e.g. stack trace collection) should be
+  // enabled for the given `extension`. Default queries ExtensionConfigMap.
+  virtual bool IsJsErrorReportingEnabled(const Extension& extension) const;
+
+  // Called when a JS error console message is received from an extension frame
+  // after message level, scheme, frame lifecycle, and extension-configuration
+  // checks have passed. Embedders can override this to perform
+  // embedder-specific error reporting or crash-in-development handling.
+  virtual void OnExtensionJsError(
+      content::RenderFrameHost* source_frame,
+      const Extension& extension,
+      const std::u16string& message,
+      int32_t line_no,
+      const GURL& url,
+      const std::optional<std::u16string>& untrusted_stack_trace);
 
  private:
   using PassKey = base::PassKey<ExtensionWebContentsObserver>;
 
-  void OnWindowIdChanged(const SessionID& id);
+  void OnWindowIdChanged(SessionID id);
 
   // The BrowserContext associated with the WebContents being observed.
   raw_ptr<content::BrowserContext> browser_context_;

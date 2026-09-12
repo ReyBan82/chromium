@@ -8,18 +8,22 @@
 #include "android_webview/browser/gfx/aw_vulkan_context_provider.h"
 #include "android_webview/browser/gfx/compositor_frame_consumer.h"
 #include "android_webview/browser/gfx/render_thread_manager.h"
-#include "android_webview/browser/gfx/vulkan_gl_interop.h"
 #include "android_webview/public/browser/draw_fn.h"
 #include "base/android/scoped_java_ref.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/containers/circular_deque.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
 
 namespace android_webview {
 
+// Lifetime: WebView
 class AwDrawFnImpl {
  public:
   // Safe to call even on versions where draw_fn functor is not supported.
   static bool IsUsingVulkan();
+
+  static void ReportRenderingThreads(int functor,
+                                     const pid_t* thread_ids,
+                                     size_t size);
 
   AwDrawFnImpl();
 
@@ -28,13 +32,9 @@ class AwDrawFnImpl {
 
   ~AwDrawFnImpl();
 
-  void ReleaseHandle(JNIEnv* env,
-                     const base::android::JavaParamRef<jobject>& obj);
-  jint GetFunctorHandle(JNIEnv* env,
-                        const base::android::JavaParamRef<jobject>& obj);
-  jlong GetCompositorFrameConsumer(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
+  void ReleaseHandle(JNIEnv* env);
+  int32_t GetFunctorHandle(JNIEnv* env);
+  int64_t GetCompositorFrameConsumer(JNIEnv* env);
 
   int functor_handle() { return functor_handle_; }
   void OnSync(AwDrawFn_OnSyncParams* params);
@@ -46,18 +46,9 @@ class AwDrawFnImpl {
   void RemoveOverlays(AwDrawFn_RemoveOverlaysParams* params);
 
  private:
-  // With direct mode, we will render frames with Vulkan API directly.
-  void DrawVkDirect(sk_sp<GrVkSecondaryCBDrawContext> draw_context,
-                    sk_sp<SkColorSpace> color_space,
-                    const HardwareRendererDrawParams& params,
-                    const OverlaysParams& overlays_params);
-  void PostDrawVkDirect(AwDrawFn_PostDrawVkParams* params);
-
   CompositorFrameConsumer* GetCompositorFrameConsumer() {
     return &render_thread_manager_;
   }
-
-  const bool is_interop_mode_;
 
   int functor_handle_;
 
@@ -66,10 +57,12 @@ class AwDrawFnImpl {
   // Vulkan context provider for Vk rendering.
   scoped_refptr<AwVulkanContextProvider> vulkan_context_provider_;
 
-  absl::optional<AwVulkanContextProvider::ScopedSecondaryCBDraw>
+  // Same functor may be inserted multiple times in the same draw, in which case
+  // multiple DrawVk can be called and then the same number of PostDrawVk is
+  // called. Use a deque to allow creating a ScopedSecondaryCBDraw for each
+  // DrawVk call.
+  base::circular_deque<AwVulkanContextProvider::ScopedSecondaryCBDraw>
       scoped_secondary_cb_draw_;
-
-  absl::optional<VulkanGLInterop> interop_;
 
   bool skip_next_post_draw_vk_ = false;
 };

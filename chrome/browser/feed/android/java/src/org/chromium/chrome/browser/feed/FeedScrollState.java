@@ -3,29 +3,27 @@
 // found in the LICENSE file.
 
 package org.chromium.chrome.browser.feed;
-import androidx.annotation.Nullable;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import org.chromium.base.Log;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
-/**
- * Class for storing scroll state of a feed surface.
- */
+/** Class for storing scroll state of a feed surface. */
+@NullMarked
 public class FeedScrollState {
     private static final String TAG = "FeedScrollState";
 
     private static final String SCROLL_POSITION = "pos";
     private static final String SCROLL_LAST_POSITION = "lpos";
     private static final String SCROLL_OFFSET = "off";
-    private static final String TAB_ID = "tabId";
     private static final String FEED_CONTENT_STATE = "contentState";
 
     public int position;
     public int lastPosition;
     public int offset;
-    public int tabId;
     // Represents the state of Feed content. If it changes,
     // the scroll state should not be retained.
     public String feedContentState = "";
@@ -37,7 +35,6 @@ public class FeedScrollState {
             jsonSavedState.put(SCROLL_POSITION, position);
             jsonSavedState.put(SCROLL_LAST_POSITION, lastPosition);
             jsonSavedState.put(SCROLL_OFFSET, offset);
-            jsonSavedState.put(TAB_ID, tabId);
             jsonSavedState.put(FEED_CONTENT_STATE, feedContentState);
             return jsonSavedState.toString();
         } catch (JSONException e) {
@@ -47,8 +44,7 @@ public class FeedScrollState {
     }
 
     /** Reads from json to recover a FeedScrollState object. */
-    @Nullable
-    static FeedScrollState fromJson(String json) {
+    static @Nullable FeedScrollState fromJson(@Nullable String json) {
         if (json == null) return null;
         FeedScrollState result = new FeedScrollState();
         try {
@@ -56,7 +52,6 @@ public class FeedScrollState {
             result.position = jsonSavedState.getInt(SCROLL_POSITION);
             result.lastPosition = jsonSavedState.getInt(SCROLL_LAST_POSITION);
             result.offset = jsonSavedState.getInt(SCROLL_OFFSET);
-            result.tabId = jsonSavedState.getInt(TAB_ID);
             result.feedContentState = jsonSavedState.getString(FEED_CONTENT_STATE);
         } catch (JSONException e) {
             Log.d(TAG, "Unable to parse a JSONObject from a string.");

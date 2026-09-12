@@ -8,7 +8,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "content/public/browser/web_ui.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/shell_dialogs/select_file_dialog.h"
 
 namespace ash {
@@ -27,24 +27,21 @@ class UserImageFileSelector : public ui::SelectFileDialog::Listener {
   // Opens a file selection dialog to choose user image from file.
   virtual void SelectFile(
       base::OnceCallback<void(const base::FilePath&)> selected_cb,
-      base::OnceCallback<void(void)> canceled_cb);
+      base::OnceClosure canceled_cb);
 
  private:
   // Returns handle to browser window or NULL if it can't be found.
   gfx::NativeWindow GetBrowserWindow();
 
   // ui::SelectFileDialog::Listener implementation.
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override;
-
-  void FileSelectionCanceled(void* params) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
+  void FileSelectionCanceled() override;
 
   raw_ptr<content::WebUI> web_ui_;
 
   base::OnceCallback<void(const base::FilePath&)> selected_cb_;
 
-  base::OnceCallback<void(void)> canceled_cb_;
+  base::OnceClosure canceled_cb_;
 
   scoped_refptr<ui::SelectFileDialog> select_file_dialog_;
 };

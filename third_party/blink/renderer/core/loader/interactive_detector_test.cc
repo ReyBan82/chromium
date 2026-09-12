@@ -1,15 +1,14 @@
 // Copyright 2017 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-#include "components/ukm/test_ukm_recorder.h"
-#include "services/metrics/public/cpp/ukm_builders.h"
+#include "third_party/blink/renderer/core/loader/interactive_detector.h"
 
 #include "base/functional/callback_helpers.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/time/time.h"
-#include "third_party/blink/renderer/core/loader/interactive_detector.h"
-
+#include "components/ukm/test_ukm_recorder.h"
+#include "services/metrics/public/cpp/ukm_builders.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
@@ -17,9 +16,11 @@
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
 #include "third_party/blink/renderer/core/testing/scoped_mock_overlay_scrollbars.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
-#include "third_party/blink/renderer/platform/testing/testing_platform_support_with_mock_scheduler.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
+#include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 
 namespace blink {
@@ -48,17 +49,18 @@ int NetworkActivityCheckerForTest::GetActiveConnections() {
 class InteractiveDetectorTest : public testing::Test,
                                 public ScopedMockOverlayScrollbars {
  public:
-  InteractiveDetectorTest() {
-    platform_->AdvanceClockSeconds(1);
+  InteractiveDetectorTest()
+      : task_environment_(base::test::TaskEnvironment::TimeSource::MOCK_TIME) {
+    task_environment_.AdvanceClock(base::Seconds(1));
 
-    auto test_task_runner = platform_->test_task_runner();
-    auto* tick_clock = test_task_runner->GetMockTickClock();
+    auto test_task_runner = task_environment_.GetMainThreadTaskRunner();
+    auto* tick_clock = task_environment_.GetMockTickClock();
     dummy_page_holder_ = std::make_unique<DummyPageHolder>(
         gfx::Size(), nullptr, nullptr, base::NullCallback(), tick_clock);
 
     Document* document = &dummy_page_holder_->GetDocument();
     detector_ = MakeGarbageCollected<InteractiveDetector>(
-        *document, new NetworkActivityCheckerForTest(document));
+        *document, std::make_unique<NetworkActivityCheckerForTest>(document));
     detector_->SetTaskRunnerForTesting(test_task_runner);
     detector_->SetTickClockForTesting(tick_clock);
 
@@ -73,7 +75,7 @@ class InteractiveDetectorTest : public testing::Test,
 
   // Public because it's executed on a task queue.
   void DummyTaskWithDuration(double duration_seconds) {
-    platform_->AdvanceClockSeconds(duration_seconds);
+    task_environment_.AdvanceClock(base::Seconds(duration_seconds));
     dummy_task_end_time_ = Now();
   }
 
@@ -118,7 +120,7 @@ class InteractiveDetectorTest : public testing::Test,
 
   void RunTillTimestamp(base::TimeTicks target_time) {
     base::TimeTicks current_time = Now();
-    platform_->RunForPeriod(
+    task_environment_.FastForwardBy(
         std::max(base::TimeDelta(), target_time - current_time));
   }
 
@@ -144,7 +146,7 @@ class InteractiveDetectorTest : public testing::Test,
     detector_->OnResourceLoadEnd(load_finish_time);
   }
 
-  base::TimeTicks Now() { return platform_->test_task_runner()->NowTicks(); }
+  base::TimeTicks Now() { return task_environment_.NowTicks(); }
 
   base::TimeTicks GetInteractiveTime() { return detector_->interactive_time_; }
 
@@ -161,8 +163,8 @@ class InteractiveDetectorTest : public testing::Test,
         TaskType::kUserInteraction);
   }
 
-  ScopedTestingPlatformSupport<TestingPlatformSupportWithMockScheduler>
-      platform_;
+  test::TaskEnvironment task_environment_;
+  ScopedTestingPlatformSupport<TestingPlatformSupport> platform_;
 
  private:
   Persistent<InteractiveDetector> detector_;
@@ -502,13 +504,13 @@ TEST_F(InteractiveDetectorTest, TaskLongerThan5sBlocksTTI) {
 
   // Post a task with 6 seconds duration.
   GetTaskRunner()->PostTask(
-      FROM_HERE, WTF::BindOnce(&InteractiveDetectorTest::DummyTaskWithDuration,
-                               WTF::Unretained(this), 6.0));
+      FROM_HERE, BindOnce(&InteractiveDetectorTest::DummyTaskWithDuration,
+                          Unretained(this), 6.0));
 
-  platform_->RunUntilIdle();
+  task_environment_.RunUntilIdle();
 
   // We should be able to detect TTI 5s after the end of long task.
-  platform_->RunForPeriodSeconds(5.1);
+  task_environment_.FastForwardBy(base::Seconds(5.1));
   EXPECT_EQ(GetInteractiveTime(), GetDummyTaskEndTime());
 }
 
@@ -521,24 +523,24 @@ TEST_F(InteractiveDetectorTest, LongTaskAfterTTIDoesNothing) {
 
   // Long task 1.
   GetTaskRunner()->PostTask(
-      FROM_HERE, WTF::BindOnce(&InteractiveDetectorTest::DummyTaskWithDuration,
-                               WTF::Unretained(this), 0.1));
+      FROM_HERE, BindOnce(&InteractiveDetectorTest::DummyTaskWithDuration,
+                          Unretained(this), 0.1));
 
-  platform_->RunUntilIdle();
+  task_environment_.RunUntilIdle();
 
   base::TimeTicks long_task_1_end_time = GetDummyTaskEndTime();
   // We should be able to detect TTI 5s after the end of long task.
-  platform_->RunForPeriodSeconds(5.1);
+  task_environment_.FastForwardBy(base::Seconds(5.1));
   EXPECT_EQ(GetInteractiveTime(), long_task_1_end_time);
 
   // Long task 2.
   GetTaskRunner()->PostTask(
-      FROM_HERE, WTF::BindOnce(&InteractiveDetectorTest::DummyTaskWithDuration,
-                               WTF::Unretained(this), 0.1));
+      FROM_HERE, BindOnce(&InteractiveDetectorTest::DummyTaskWithDuration,
+                          Unretained(this), 0.1));
 
-  platform_->RunUntilIdle();
+  task_environment_.RunUntilIdle();
   // Wait 5 seconds to see if TTI time changes.
-  platform_->RunForPeriodSeconds(5.1);
+  task_environment_.FastForwardBy(base::Seconds(5.1));
   // TTI time should not change.
   EXPECT_EQ(GetInteractiveTime(), long_task_1_end_time);
 }
@@ -614,19 +616,20 @@ TEST_F(InteractiveDetectorTest, FirstInputDelayForClickOnMobile) {
   auto* detector = GetDetector();
   base::TimeTicks t0 = Now();
   // Pointerdown
-  Event pointerdown(event_type_names::kPointerdown, MessageEvent::Bubbles::kYes,
-                    MessageEvent::Cancelable::kYes,
-                    MessageEvent::ComposedMode::kComposed, t0);
-  pointerdown.SetTrusted(true);
-  detector->HandleForInputDelay(pointerdown, t0, t0 + base::Milliseconds(17));
+  Event* pointerdown = MakeGarbageCollected<Event>(
+      event_type_names::kPointerdown, MessageEvent::Bubbles::kYes,
+      MessageEvent::Cancelable::kYes, MessageEvent::ComposedMode::kComposed,
+      t0);
+  pointerdown->SetTrusted(true);
+  detector->HandleForInputDelay(*pointerdown, t0, t0 + base::Milliseconds(17));
   EXPECT_FALSE(detector->GetFirstInputDelay().has_value());
   // Pointerup
-  Event pointerup(event_type_names::kPointerup, MessageEvent::Bubbles::kYes,
-                  MessageEvent::Cancelable::kYes,
-                  MessageEvent::ComposedMode::kComposed,
-                  t0 + base::Milliseconds(20));
-  pointerup.SetTrusted(true);
-  detector->HandleForInputDelay(pointerup, t0 + base::Milliseconds(20),
+  Event* pointerup = MakeGarbageCollected<Event>(
+      event_type_names::kPointerup, MessageEvent::Bubbles::kYes,
+      MessageEvent::Cancelable::kYes, MessageEvent::ComposedMode::kComposed,
+      t0 + base::Milliseconds(20));
+  pointerup->SetTrusted(true);
+  detector->HandleForInputDelay(*pointerup, t0 + base::Milliseconds(20),
                                 t0 + base::Milliseconds(50));
   EXPECT_TRUE(detector->GetFirstInputDelay().has_value());
   EXPECT_EQ(detector->GetFirstInputDelay().value(), base::Milliseconds(17));
@@ -638,26 +641,28 @@ TEST_F(InteractiveDetectorTest,
   auto* detector = GetDetector();
   base::TimeTicks t0 = Now();
   // Pointerdown
-  Event pointerdown(event_type_names::kPointerdown, MessageEvent::Bubbles::kYes,
-                    MessageEvent::Cancelable::kYes,
-                    MessageEvent::ComposedMode::kComposed, t0);
-  pointerdown.SetTrusted(true);
-  detector->HandleForInputDelay(pointerdown, t0, t0 + base::Milliseconds(17));
+  Event* pointerdown = MakeGarbageCollected<Event>(
+      event_type_names::kPointerdown, MessageEvent::Bubbles::kYes,
+      MessageEvent::Cancelable::kYes, MessageEvent::ComposedMode::kComposed,
+      t0);
+  pointerdown->SetTrusted(true);
+  detector->HandleForInputDelay(*pointerdown, t0, t0 + base::Milliseconds(17));
   EXPECT_FALSE(detector->GetFirstInputDelay().has_value());
   // Mousedown
-  Event mousedown(event_type_names::kMousedown, MessageEvent::Bubbles::kYes,
-                  MessageEvent::Cancelable::kYes,
-                  MessageEvent::ComposedMode::kComposed, t0);
-  mousedown.SetTrusted(true);
-  detector->HandleForInputDelay(mousedown, t0, t0 + base::Milliseconds(13));
+  Event* mousedown = MakeGarbageCollected<Event>(
+      event_type_names::kMousedown, MessageEvent::Bubbles::kYes,
+      MessageEvent::Cancelable::kYes, MessageEvent::ComposedMode::kComposed,
+      t0);
+  mousedown->SetTrusted(true);
+  detector->HandleForInputDelay(*mousedown, t0, t0 + base::Milliseconds(13));
   EXPECT_FALSE(detector->GetFirstInputDelay().has_value());
   // Pointerup
-  Event pointerup(event_type_names::kPointerup, MessageEvent::Bubbles::kYes,
-                  MessageEvent::Cancelable::kYes,
-                  MessageEvent::ComposedMode::kComposed,
-                  t0 + base::Milliseconds(20));
-  pointerup.SetTrusted(true);
-  detector->HandleForInputDelay(pointerup, t0 + base::Milliseconds(20),
+  Event* pointerup = MakeGarbageCollected<Event>(
+      event_type_names::kPointerup, MessageEvent::Bubbles::kYes,
+      MessageEvent::Cancelable::kYes, MessageEvent::ComposedMode::kComposed,
+      t0 + base::Milliseconds(20));
+  pointerup->SetTrusted(true);
+  detector->HandleForInputDelay(*pointerup, t0 + base::Milliseconds(20),
                                 t0 + base::Milliseconds(50));
   EXPECT_TRUE(detector->GetFirstInputDelay().has_value());
   EXPECT_EQ(detector->GetFirstInputDelay().value(), base::Milliseconds(17));

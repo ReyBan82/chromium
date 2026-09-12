@@ -4,6 +4,7 @@
 
 #include "components/bookmarks/managed/managed_bookmarks_tracker.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -12,7 +13,6 @@
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
-#include "base/ranges/algorithm.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/task_environment.h"
@@ -65,8 +65,8 @@ class ManagedBookmarksTrackerTest : public testing::Test {
     model_ = std::make_unique<BookmarkModel>(std::move(client));
 
     model_->AddObserver(&observer_);
-    EXPECT_CALL(observer_, BookmarkModelLoaded(model_.get(), _));
-    model_->Load(&prefs_, scoped_temp_dir_.GetPath());
+    EXPECT_CALL(observer_, BookmarkModelLoaded(_));
+    model_->Load(scoped_temp_dir_.GetPath());
     test::WaitForBookmarkModelToLoad(model_.get());
     Mock::VerifyAndClearExpectations(&observer_);
 
@@ -84,33 +84,33 @@ class ManagedBookmarksTrackerTest : public testing::Test {
     return node && node->HasAncestor(managed_node_.get());
   }
 
-  void SetManagedPref(const std::string& path, const base::Value::List& list) {
+  void SetManagedPref(const std::string& path, const base::ListValue& list) {
     prefs_.SetManagedPref(path, base::Value(list.Clone()));
   }
 
-  static base::Value::Dict CreateBookmark(const std::string& title,
-                                          const std::string& url) {
+  static base::DictValue CreateBookmark(const std::string& title,
+                                        const std::string& url) {
     EXPECT_TRUE(GURL(url).is_valid());
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set("name", title);
     dict.Set("url", GURL(url).spec());
     return dict;
   }
 
-  static base::Value::Dict CreateFolder(const std::string& title,
-                                        base::Value::List children) {
-    base::Value::Dict dict;
+  static base::DictValue CreateFolder(const std::string& title,
+                                      base::ListValue children) {
+    base::DictValue dict;
     dict.Set("name", title);
     dict.Set("children", std::move(children));
     return dict;
   }
 
-  static base::Value::List CreateTestTree() {
-    base::Value::List folder;
-    folder.Append(CreateFolder("Empty", base::Value::List()));
+  static base::ListValue CreateTestTree() {
+    base::ListValue folder;
+    folder.Append(CreateFolder("Empty", base::ListValue()));
     folder.Append(CreateBookmark("Youtube", "http://youtube.com/"));
 
-    base::Value::List list;
+    base::ListValue list;
     list.Append(CreateBookmark("Google", "http://google.com/"));
     list.Append(CreateFolder("Folder", std::move(folder)));
 
@@ -126,20 +126,20 @@ class ManagedBookmarksTrackerTest : public testing::Test {
         IDS_BOOKMARK_BAR_MANAGED_FOLDER_DEFAULT_NAME);
   }
 
-  static base::Value::Dict CreateExpectedTree() {
+  static base::DictValue CreateExpectedTree() {
     return CreateFolder(GetManagedFolderTitle(), CreateTestTree());
   }
 
   static bool NodeMatchesValue(const BookmarkNode* node,
-                               const base::Value::Dict& dict) {
+                               const base::DictValue& dict) {
     const std::string* title = dict.FindString("name");
     if (!title || node->GetTitle() != base::UTF8ToUTF16(*title))
       return false;
 
     if (node->is_folder()) {
-      const base::Value::List* children = dict.FindList("children");
+      const base::ListValue* children = dict.FindList("children");
       return children &&
-             base::ranges::equal(
+             std::ranges::equal(
                  *children, node->children(),
                  [](const base::Value& child, const auto& child_node) {
                    return child.is_dict() &&
@@ -178,7 +178,7 @@ TEST_F(ManagedBookmarksTrackerTest, LoadInitial) {
   EXPECT_FALSE(managed_node()->children().empty());
   EXPECT_TRUE(managed_node()->IsVisible());
 
-  base::Value::Dict expected(CreateExpectedTree());
+  base::DictValue expected(CreateExpectedTree());
   EXPECT_TRUE(NodeMatchesValue(managed_node(), expected));
 }
 
@@ -194,8 +194,7 @@ TEST_F(ManagedBookmarksTrackerTest, LoadInitialWithTitle) {
   EXPECT_FALSE(managed_node()->children().empty());
   EXPECT_TRUE(managed_node()->IsVisible());
 
-  base::Value::Dict expected(
-      CreateFolder(kExpectedFolderName, CreateTestTree()));
+  base::DictValue expected(CreateFolder(kExpectedFolderName, CreateTestTree()));
   EXPECT_TRUE(NodeMatchesValue(managed_node(), expected));
 }
 
@@ -211,8 +210,7 @@ TEST_F(ManagedBookmarksTrackerTest, DynamicRefreshOfTitle) {
   EXPECT_FALSE(managed_node()->children().empty());
   EXPECT_TRUE(managed_node()->IsVisible());
 
-  base::Value::Dict expected(
-      CreateFolder(kExpectedFolderName, CreateTestTree()));
+  base::DictValue expected(CreateFolder(kExpectedFolderName, CreateTestTree()));
   EXPECT_TRUE(NodeMatchesValue(managed_node(), expected));
 
   // Set new managed folder title.
@@ -227,7 +225,7 @@ TEST_F(ManagedBookmarksTrackerTest, SwapNodes) {
   CreateModel();
 
   // Swap the Google bookmark with the Folder.
-  base::Value::List updated(CreateTestTree());
+  base::ListValue updated(CreateTestTree());
   ASSERT_FALSE(updated.empty());
   base::Value removed = std::move(updated[0]);
   updated.erase(updated.begin());
@@ -235,12 +233,12 @@ TEST_F(ManagedBookmarksTrackerTest, SwapNodes) {
 
   // These two nodes should just be swapped.
   const BookmarkNode* parent = managed_node();
-  EXPECT_CALL(observer_, BookmarkNodeMoved(model_.get(), parent, 1, parent, 0));
+  EXPECT_CALL(observer_, BookmarkNodeMoved(parent, 1, parent, 0));
   SetManagedPref(prefs::kManagedBookmarks, updated);
   Mock::VerifyAndClearExpectations(&observer_);
 
   // Verify the final tree.
-  base::Value::Dict expected(
+  base::DictValue expected(
       CreateFolder(GetManagedFolderTitle(), std::move(updated)));
   EXPECT_TRUE(NodeMatchesValue(managed_node(), expected));
 }
@@ -250,16 +248,16 @@ TEST_F(ManagedBookmarksTrackerTest, RemoveNode) {
   CreateModel();
 
   // Remove the Folder.
-  base::Value::List updated(CreateTestTree());
+  base::ListValue updated(CreateTestTree());
   updated.erase(updated.begin() + 1);
 
   const BookmarkNode* parent = managed_node();
-  EXPECT_CALL(observer_, BookmarkNodeRemoved(model_.get(), parent, 1, _, _));
+  EXPECT_CALL(observer_, BookmarkNodeRemoved(parent, 1, _, _, _));
   SetManagedPref(prefs::kManagedBookmarks, updated);
   Mock::VerifyAndClearExpectations(&observer_);
 
   // Verify the final tree.
-  base::Value::Dict expected(
+  base::DictValue expected(
       CreateFolder(GetManagedFolderTitle(), std::move(updated)));
   EXPECT_TRUE(NodeMatchesValue(managed_node(), expected));
 }
@@ -269,20 +267,19 @@ TEST_F(ManagedBookmarksTrackerTest, CreateNewNodes) {
   CreateModel();
 
   // Put all the nodes inside another folder.
-  base::Value::List updated;
+  base::ListValue updated;
   updated.Append(CreateFolder("Container", CreateTestTree()));
 
-  EXPECT_CALL(observer_, BookmarkNodeAdded(model_.get(), _, _, _)).Times(5);
+  EXPECT_CALL(observer_, BookmarkNodeAdded(_, _, _)).Times(5);
   // The remaining nodes have been pushed to positions 1 and 2; they'll both be
   // removed when at position 1.
   const BookmarkNode* parent = managed_node();
-  EXPECT_CALL(observer_, BookmarkNodeRemoved(model_.get(), parent, 1, _, _))
-      .Times(2);
+  EXPECT_CALL(observer_, BookmarkNodeRemoved(parent, 1, _, _, _)).Times(2);
   SetManagedPref(prefs::kManagedBookmarks, updated);
   Mock::VerifyAndClearExpectations(&observer_);
 
   // Verify the final tree.
-  base::Value::Dict expected(
+  base::DictValue expected(
       CreateFolder(GetManagedFolderTitle(), std::move(updated)));
   EXPECT_TRUE(NodeMatchesValue(managed_node(), expected));
 }
@@ -294,8 +291,7 @@ TEST_F(ManagedBookmarksTrackerTest, RemoveAll) {
 
   // Remove the policy.
   const BookmarkNode* parent = managed_node();
-  EXPECT_CALL(observer_, BookmarkNodeRemoved(model_.get(), parent, 0, _, _))
-      .Times(2);
+  EXPECT_CALL(observer_, BookmarkNodeRemoved(parent, 0, _, _, _)).Times(2);
   prefs_.RemoveManagedPref(prefs::kManagedBookmarks);
   Mock::VerifyAndClearExpectations(&observer_);
 
@@ -329,18 +325,16 @@ TEST_F(ManagedBookmarksTrackerTest, RemoveAllUserBookmarksDoesntRemoveManaged) {
   CreateModel();
   EXPECT_EQ(2u, managed_node()->children().size());
 
-  EXPECT_CALL(observer_, BookmarkNodeAdded(model_.get(),
-                                           model_->bookmark_bar_node(), 0, _));
-  EXPECT_CALL(observer_, BookmarkNodeAdded(model_.get(),
-                                           model_->bookmark_bar_node(), 1, _));
+  EXPECT_CALL(observer_, BookmarkNodeAdded(model_->bookmark_bar_node(), 0, _));
+  EXPECT_CALL(observer_, BookmarkNodeAdded(model_->bookmark_bar_node(), 1, _));
   model_->AddURL(model_->bookmark_bar_node(), 0, u"Test",
                  GURL("http://google.com/"));
   model_->AddFolder(model_->bookmark_bar_node(), 1, u"Test Folder");
   EXPECT_EQ(2u, model_->bookmark_bar_node()->children().size());
   Mock::VerifyAndClearExpectations(&observer_);
 
-  EXPECT_CALL(observer_, BookmarkAllUserNodesRemoved(model_.get(), _));
-  model_->RemoveAllUserBookmarks();
+  EXPECT_CALL(observer_, BookmarkAllUserNodesRemoved(_, _));
+  model_->RemoveAllUserBookmarks(FROM_HERE);
   EXPECT_EQ(2u, managed_node()->children().size());
   EXPECT_EQ(0u, model_->bookmark_bar_node()->children().size());
   Mock::VerifyAndClearExpectations(&observer_);

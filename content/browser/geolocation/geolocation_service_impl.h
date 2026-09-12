@@ -8,11 +8,14 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/permission_controller.h"
+#include "content/public/browser/permission_result.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "services/device/public/mojom/geolocation.mojom.h"
 #include "services/device/public/mojom/geolocation_context.mojom.h"
 #include "third_party/blink/public/mojom/geolocation/geolocation_service.mojom.h"
+#include "url/origin.h"
 
 namespace blink {
 namespace mojom {
@@ -32,17 +35,17 @@ class GeolocationServiceImplContext {
       const GeolocationServiceImplContext&) = delete;
 
   ~GeolocationServiceImplContext();
-  using PermissionCallback =
-      base::OnceCallback<void(blink::mojom::PermissionStatus)>;
+  using PermissionCallback = base::OnceCallback<void(PermissionResult)>;
   void RequestPermission(RenderFrameHost* render_frame_host,
                          bool user_gesture,
+                         blink::mojom::GeolocationAccuracy accuracy,
                          PermissionCallback callback);
 
  private:
   bool has_pending_permission_request_ = false;
 
-  void HandlePermissionStatus(PermissionCallback callback,
-                              blink::mojom::PermissionStatus permission_status);
+  void HandlePermissionResult(PermissionCallback callback,
+                              PermissionResult permission_result);
 
   base::WeakPtrFactory<GeolocationServiceImplContext> weak_factory_{this};
 };
@@ -50,8 +53,7 @@ class GeolocationServiceImplContext {
 class CONTENT_EXPORT GeolocationServiceImpl
     : public blink::mojom::GeolocationService {
  public:
-  GeolocationServiceImpl(device::mojom::GeolocationContext* geolocation_context,
-                         RenderFrameHost* render_frame_host);
+  explicit GeolocationServiceImpl(RenderFrameHost* render_frame_host);
 
   GeolocationServiceImpl(const GeolocationServiceImpl&) = delete;
   GeolocationServiceImpl& operator=(const GeolocationServiceImpl&) = delete;
@@ -67,18 +69,39 @@ class CONTENT_EXPORT GeolocationServiceImpl
   void CreateGeolocation(
       mojo::PendingReceiver<device::mojom::Geolocation> receiver,
       bool user_gesture,
+      blink::mojom::GeolocationAccuracy accuracy,
       CreateGeolocationCallback callback) override;
 
+  void HandlePermissionResultChange(PermissionResult permission_result);
+
+  void OnDisconnected();
+
  private:
+  // Private helper to manage connection lifetimes.
+  class GeolocationProxy;
+
   // Creates the Geolocation Service.
-  void CreateGeolocationWithPermissionStatus(
+  void CreateGeolocationWithPermissionResult(
       mojo::PendingReceiver<device::mojom::Geolocation> receiver,
       CreateGeolocationCallback callback,
-      blink::mojom::PermissionStatus permission_status);
+      PermissionResult permission_result);
 
-  raw_ptr<device::mojom::GeolocationContext> geolocation_context_;
+  void IncrementActivityCount();
+  void DecrementActivityCount();
+
+  device::mojom::GeolocationContext* GetGeolocationContext();
+
+  void OnProxyDisconnected(GeolocationProxy* proxy);
+
+  // Used to subscribe to permission status changes.
+  PermissionController::SubscriptionId subscription_id_;
+
+  // Tracks the origin for which a granted permission is being observed. Used to
+  // terminate access upon permission revocation.
+  url::Origin requesting_origin_;
+
   // Note: |render_frame_host_| owns |this| instance.
-  const raw_ptr<RenderFrameHost> render_frame_host_;
+  const raw_ptr<RenderFrameHost, DanglingUntriaged> render_frame_host_;
 
   // Along with each GeolocationService, we store a
   // GeolocationServiceImplContext which primarily exists to manage a
@@ -86,6 +109,18 @@ class CONTENT_EXPORT GeolocationServiceImpl
   mojo::ReceiverSet<blink::mojom::GeolocationService,
                     std::unique_ptr<GeolocationServiceImplContext>>
       receiver_set_;
+
+  // Whether this service is dispatching geolocation updates to its listeners.
+  // The creation/destruction of this class is usually the sign of whether
+  // the frame is updating the geolocation information. However, it can also be
+  // stopped because the permission status changed.
+  bool is_sending_updates_ = false;
+
+  // Active proxies managing connections between the renderer and the backing
+  // GeolocationImpl.
+  std::vector<std::unique_ptr<GeolocationProxy>> active_proxies_;
+
+  base::WeakPtrFactory<GeolocationServiceImpl> weak_factory_{this};
 };
 
 }  // namespace content

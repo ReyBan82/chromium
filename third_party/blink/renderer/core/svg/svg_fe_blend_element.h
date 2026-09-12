@@ -53,6 +53,10 @@ class SVGFEBlendElement final : public SVGFilterPrimitiveStandardAttributes {
 
   explicit SVGFEBlendElement(Document&);
 
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEBlendElement;
+  }
+
   SVGAnimatedString* in1() { return in1_.Get(); }
   SVGAnimatedString* in2() { return in2_.Get(); }
   SVGAnimatedEnumeration<Mode>* mode() { return mode_.Get(); }
@@ -65,6 +69,10 @@ class SVGFEBlendElement final : public SVGFilterPrimitiveStandardAttributes {
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override { return false; }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedString> in1_;
   Member<SVGAnimatedString> in2_;

@@ -33,21 +33,23 @@ public class JsonLogger {
             mBaseJsonObject.put("global_tags", new JSONArray());
             mBaseJsonObject.put("all_tests", new JSONArray());
             mBaseJsonObject.put("disabled_tests", new JSONArray());
-            mBaseJsonObject.put("per_iteration_data",
-                                new JSONArray().put(mBaseTestInfoJsonObject));
+            mBaseJsonObject.put("per_iteration_data", new JSONArray().put(mBaseTestInfoJsonObject));
         } catch (JSONException e) {
             System.err.println("Unable to create json output.");
         }
     }
 
-    /**
-     *  Add the results of a test run to the json output.
-     */
+    /** Add the results of a test run to the json output. */
     public void addTestResultInfo(Description test, boolean passed, long elapsedTimeMillis) {
+        addTestResultInfo(test, passed ? "SUCCESS" : "FAILURE", elapsedTimeMillis);
+    }
+
+    /** Add the results of a test run to the json output. */
+    public void addTestResultInfo(Description test, String status, long elapsedTimeMillis) {
         JSONObject testInfoJsonObject = new JSONObject();
 
         try {
-            testInfoJsonObject.put("status", (passed ? "SUCCESS" : "FAILURE"));
+            testInfoJsonObject.put("status", status);
             testInfoJsonObject.put("elapsed_time_ms", elapsedTimeMillis);
             testInfoJsonObject.put("output_snippet", "");
             testInfoJsonObject.put("output_snippet_base64", "");
@@ -63,27 +65,17 @@ public class JsonLogger {
         }
     }
 
-    /**
-     *  Writes the json output to a file.
-     */
-    public void writeJsonToFile() {
-        try {
-            PrintStream stream = new PrintStream(new FileOutputStream(mOutputFile));
-            try {
-                stream.print(mBaseJsonObject);
-            } finally {
-                try {
-                    stream.close();
-                } catch (RuntimeException e) {
-                    System.err.println("Unable to close output file: " + mOutputFile.getPath());
-                }
-            }
-        } catch (FileNotFoundException e) {
-            System.err.println("File not found: " + mOutputFile.getPath());
+    /** Writes the json output to a file. */
+    public void writeJsonToFile() throws FileNotFoundException {
+        try (PrintStream stream = new PrintStream(new FileOutputStream(mOutputFile))) {
+            stream.print(mBaseJsonObject);
         }
     }
 
     private String testName(Description test) {
+        if (test.getMethodName() == null) {
+            return test.getClassName();
+        }
         return test.getClassName() + "#" + test.getMethodName();
     }
 }

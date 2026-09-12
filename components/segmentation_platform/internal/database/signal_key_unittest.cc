@@ -5,7 +5,6 @@
 #include "components/segmentation_platform/internal/database/signal_key.h"
 
 #include <cmath>
-#include <cstring>
 
 #include "base/logging.h"
 #include "base/test/simple_test_clock.h"
@@ -20,7 +19,7 @@ int CompareBinaryKeys(const SignalKey& a, const SignalKey& b) {
   std::string a_key = a.ToBinary();
   std::string b_key = b.ToBinary();
   CHECK_EQ(a_key.size(), b_key.size());
-  return std::memcmp(a_key.data(), b_key.data(), a_key.size());
+  return a_key.compare(b_key);
 }
 
 bool Equal(const SignalKey& k1, const SignalKey& k2) {
@@ -180,14 +179,14 @@ TEST_F(SignalKeyTest, TestKeyDebugStringRepresentation) {
                 test_clock_.Now() + base::Seconds(10));
 
   EXPECT_EQ(
-      "{kind=1, name_hash=42, range_start=1970-01-01 08:00:00.000 UTC, "
-      "range_end=1970-01-01 08:00:10.000 UTC}",
+      "{kind=1, name_hash=42, range_start=1970-01-01 08:00:00.000000 UTC, "
+      "range_end=1970-01-01 08:00:10.000000 UTC}",
       key.ToDebugString());
   std::stringstream key_buffer;
   key_buffer << key;
   EXPECT_EQ(
-      "{kind=1, name_hash=42, range_start=1970-01-01 08:00:00.000 UTC, "
-      "range_end=1970-01-01 08:00:10.000 UTC}",
+      "{kind=1, name_hash=42, range_start=1970-01-01 08:00:00.000000 UTC, "
+      "range_end=1970-01-01 08:00:10.000000 UTC}",
       key_buffer.str());
 }
 

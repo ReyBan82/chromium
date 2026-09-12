@@ -6,6 +6,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/files/file_path.h"
@@ -18,6 +19,7 @@
 #include "base/test/test_simple_task_runner.h"
 #include "base/values.h"
 #include "components/policy/core/common/cloud/cloud_external_data_store.h"
+#include "components/policy/core/common/cloud/cloud_policy_constants.h"
 #include "components/policy/core/common/cloud/mock_cloud_policy_store.h"
 #include "components/policy/core/common/cloud/resource_cache.h"
 #include "components/policy/core/common/external_data_fetcher.h"
@@ -27,10 +29,10 @@
 #include "crypto/sha2.h"
 #include "net/http/http_status_code.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace policy {
@@ -55,13 +57,13 @@ const char k10ByteData[] = "10 bytes..";
 const char k20ByteData[] = "20 bytes............";
 
 const PolicyDetails kPolicyDetails[] = {
-    // deprecated  future, device_policy  id    max_external_data_size
-    {false, false, false, 1, 0},
-    {false, false, false, 2, 10},
-    {false, false, false, 3, 20},
-    {false, false, false, 4, 20},
+    // is_deprecated, is_future, supports_dynamic_refresh, id
+    // max_external_data_size, risk tags
+    {false, false, false, kProfile, kSourceRestrictionNone, 1, 0},
+    {false, false, false, kProfile, kSourceRestrictionNone, 2, 10},
+    {false, false, false, kProfile, kSourceRestrictionNone, 3, 20},
+    {false, false, false, kProfile, kSourceRestrictionNone, 4, 20},
 };
-
 const char kCacheKey[] = "data";
 
 const char k10ByteAppURL[] = "http://localhost/app_10_bytes";
@@ -86,7 +88,7 @@ class CloudExternalDataManagerBaseTest : public testing::Test {
 
   base::Value ConstructMetadata(const std::string& url,
                                 const std::string& hash);
-  void AddMetadataToWebAppPolicyList(base::Value::List& value,
+  void AddMetadataToWebAppPolicyList(base::ListValue& value,
                                      const std::string& app_url,
                                      const std::string& image_url,
                                      const std::string& image_hash);
@@ -111,7 +113,8 @@ class CloudExternalDataManagerBaseTest : public testing::Test {
   base::test::SingleThreadTaskEnvironment task_environment_;
   base::ScopedTempDir temp_dir_;
   std::unique_ptr<ResourceCache> resource_cache_;
-  MockCloudPolicyStore cloud_policy_store_;
+  MockCloudPolicyStore cloud_policy_store_{
+      dm_protocol::GetChromeUserPolicyType()};
   network::TestURLLoaderFactory test_url_loader_factory_;
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
 
@@ -121,13 +124,13 @@ class CloudExternalDataManagerBaseTest : public testing::Test {
   PolicyDetailsMap policy_details_;
 };
 
-CloudExternalDataManagerBaseTest::CloudExternalDataManagerBaseTest() {}
+CloudExternalDataManagerBaseTest::CloudExternalDataManagerBaseTest() = default;
 
 void CloudExternalDataManagerBaseTest::SetUp() {
   ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
   resource_cache_ = std::make_unique<ResourceCache>(
       temp_dir_.GetPath(), task_environment_.GetMainThreadTaskRunner(),
-      /* max_cache_size */ absl::nullopt);
+      /* max_cache_size */ std::nullopt);
   SetUpExternalDataManager();
 
   // Set |kStringPolicy| to a string value.
@@ -174,18 +177,18 @@ void CloudExternalDataManagerBaseTest::SetUpExternalDataManager() {
 base::Value CloudExternalDataManagerBaseTest::ConstructMetadata(
     const std::string& url,
     const std::string& hash) {
-  base::Value::Dict metadata;
+  base::DictValue metadata;
   metadata.Set("url", url);
-  metadata.Set("hash", base::HexEncode(hash.c_str(), hash.size()));
+  metadata.Set("hash", base::HexEncode(hash));
   return base::Value(std::move(metadata));
 }
 
 void CloudExternalDataManagerBaseTest::AddMetadataToWebAppPolicyList(
-    base::Value::List& list,
+    base::ListValue& list,
     const std::string& app_url,
     const std::string& image_url,
     const std::string& image_hash) {
-  base::Value::Dict app;
+  base::DictValue app;
   app.Set("url", app_url);
   app.Set("custom_icon", ConstructMetadata(image_url, image_hash));
   list.Append(std::move(app));
@@ -777,7 +780,7 @@ TEST_F(CloudExternalDataManagerBaseTest, PolicyChangeWhileDownloadPending) {
 // external data files (every installed app can include one icon).
 TEST_F(CloudExternalDataManagerBaseTest, DownloadMultipleFilesFromPolicy) {
   // Set up the policy value with 2 apps, one icon each:
-  base::Value::List web_app_value;
+  base::ListValue web_app_value;
   AddMetadataToWebAppPolicyList(web_app_value, k10ByteAppURL, k10BytePolicyURL,
                                 crypto::SHA256HashString(k10ByteData));
   AddMetadataToWebAppPolicyList(web_app_value, k20ByteAppURL, k20BytePolicyURL,

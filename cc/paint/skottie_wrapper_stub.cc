@@ -4,7 +4,8 @@
 
 #include "cc/paint/skottie_wrapper.h"
 
-#include "base/check.h"
+#include "base/containers/span.h"
+#include "base/notreached.h"
 
 namespace cc {
 
@@ -13,17 +14,15 @@ namespace cc {
 // a concrete SkottieWrapper implementation is not required.
 
 // static
-scoped_refptr<SkottieWrapper> SkottieWrapper::CreateSerializable(
+scoped_refptr<SkottieWrapper> SkottieWrapper::UnsafeCreateSerializable(
     std::vector<uint8_t> data) {
-  CHECK(false) << "Skottie is not supported on this platform";
-  return nullptr;
+  NOTREACHED() << "Skottie is not supported on this platform";
 }
 
 // static
-scoped_refptr<SkottieWrapper> SkottieWrapper::CreateNonSerializable(
+scoped_refptr<SkottieWrapper> SkottieWrapper::UnsafeCreateNonSerializable(
     base::span<const uint8_t> data) {
-  CHECK(false) << "Skottie is not supported on this platform";
-  return nullptr;
+  NOTREACHED() << "Skottie is not supported on this platform";
 }
 
 }  // namespace cc

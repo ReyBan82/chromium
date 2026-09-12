@@ -25,17 +25,22 @@
 #include "chrome/browser/media/webrtc/webrtc_event_log_manager_remote.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/upload_list/upload_list.h"
+#include "components/webrtc_logging/browser/text_log_list.h"
 #include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/peer_connection_tracker_host_observer.h"
 #include "content/public/browser/render_process_host_observer.h"
 #include "content/public/browser/webrtc_event_logger.h"
 
+class RTCDiagnosticLoggingTest;
 class WebRTCInternalsIntegrationBrowserTest;
 
 namespace content {
 class BrowserContext;
-class NetworkConnectionTracker;
 }  // namespace content
+
+namespace network {
+class NetworkConnectionTracker;
+}  // namespace network
 
 FORWARD_DECLARE_TEST(WebRtcEventLogCollectionAllowedPolicyTest, RunTest);
 
@@ -75,10 +80,16 @@ class WebRtcEventLogManager final
 
     virtual void DisableWebRtcEventLogging(
         const WebRtcEventLogPeerConnectionKey& key) = 0;
+
+    virtual void EnableWebRtcDataChannelLogging(
+        const WebRtcEventLogPeerConnectionKey& key) = 0;
+
+    virtual void DisableWebRtcDataChannelLogging(
+        const WebRtcEventLogPeerConnectionKey& key) = 0;
   };
 
   // Ensures that no previous instantiation of the class was performed, then
-  // instantiates the class and returns the object (ownership is transfered to
+  // instantiates the class and returns the object (ownership is transferred to
   // the caller). Subsequent calls to GetInstance() will return this object,
   // until it is destructed, at which pointer nullptr will be returned by
   // subsequent calls.
@@ -111,8 +122,7 @@ class WebRtcEventLogManager final
                              int lid,
                              base::ProcessId pid,
                              const std::string& url,
-                             const std::string& rtc_configuration,
-                             const std::string& constraints) override;
+                             const std::string& rtc_configuration) override;
   void OnPeerConnectionRemoved(content::GlobalRenderFrameHostId frame_id,
                                int lid) override;
   void OnPeerConnectionUpdated(content::GlobalRenderFrameHostId frame_id,
@@ -121,14 +131,20 @@ class WebRtcEventLogManager final
                                const std::string& value) override;
   void OnPeerConnectionSessionIdSet(content::GlobalRenderFrameHostId frame_id,
                                     int lid,
-                                    const std::string& session_id) override;
+                                    const std::string& session_id,
+                                    base::OnceClosure callback) override;
   void OnWebRtcEventLogWrite(content::GlobalRenderFrameHostId frame_id,
                              int lid,
                              const std::string& message) override;
+  void OnWebRtcDataChannelLogWrite(content::GlobalRenderFrameHostId frame_id,
+                                   int lid,
+                                   const std::string& message) override;
 
   // content::WebRtcEventLogger implementation.
   void EnableLocalLogging(const base::FilePath& base_path) override;
   void DisableLocalLogging() override;
+  void EnableDataChannelLogging(const base::FilePath& base_path) override;
+  void DisableDataChannelLogging() override;
 
   // Start logging a peer connection's WebRTC events to a file, which will
   // later be uploaded to a remote server. If a reply is provided, it will be
@@ -142,8 +158,23 @@ class WebRtcEventLogManager final
       size_t max_file_size_bytes,
       int output_period_ms,
       size_t web_app_id,
+      std::optional<std::string> diagnostic_uuid,
+      bool local_only,
       base::OnceCallback<void(bool, const std::string&, const std::string&)>
           reply);
+
+  // Finishes logging all peer connections for the given process. The logs
+  // are stored and may be uploaded to a remote server if the logs are remote
+  // bound.
+  void FinishLogging(int render_process_id, base::OnceClosure callback);
+
+  // Cancels logging for the given process. Any logs for active peer connections
+  // are deleted and not uploaded. Any logs for inactive peer connections that
+  // are pending for upload and match the provided |diagnostic_uuid| are also
+  // deleted.
+  void CancelLogging(int render_process_id,
+                     const std::string& diagnostic_uuid,
+                     base::OnceClosure callback);
 
   // Clear WebRTC event logs associated with a given browser context, in a given
   // time range (|delete_begin| inclusive, |delete_end| exclusive), then
@@ -193,6 +224,7 @@ class WebRtcEventLogManager final
                            RunTest);
   friend class WebRtcEventLogManagerTestBase;
   friend class ::WebRTCInternalsIntegrationBrowserTest;
+  friend class ::RTCDiagnosticLoggingTest;
 
   using PeerConnectionKey = WebRtcEventLogPeerConnectionKey;
 
@@ -250,12 +282,16 @@ class WebRtcEventLogManager final
                                int lid,
                                base::OnceCallback<void(bool)> reply);
 
-  // An overload of OnPeerConnectionSessionIdSet() that replies true if and only
-  // if the operation was successful.
-  void OnPeerConnectionSessionIdSet(content::GlobalRenderFrameHostId frame_id,
-                                    int lid,
-                                    const std::string& session_id,
-                                    base::OnceCallback<void(bool)> reply);
+  // Sets the session id for the peer connection identified with `lid`.
+  // Replies true if and only if the operation was successful.
+  // Note: uses different naming convention to avoid name collision with the
+  // OnPeerConnectionSessionIdSet() version inherited from
+  // PeerConnectionTrackerHostObserver.
+  void OnSessionIdSetForPeerConnection(
+      content::GlobalRenderFrameHostId frame_id,
+      int lid,
+      const std::string& session_id,
+      base::OnceCallback<void(bool)> reply);
 
   // An overload of OnWebRtcEventLogWrite() that replies with a pair of bool.
   // The first bool is associated with local logging and the second bool is
@@ -267,6 +303,13 @@ class WebRtcEventLogManager final
       int lid,
       const std::string& message,
       base::OnceCallback<void(std::pair<bool, bool>)> reply);
+
+  // An overload for testing which replies with a bool whether the message was
+  // successfully written to file or not.
+  void OnWebRtcDataChannelLogWrite(content::GlobalRenderFrameHostId frame_id,
+                                   int lid,
+                                   const std::string& message,
+                                   base::OnceCallback<void(bool)> reply);
 
   // An overload of EnableLocalLogging() replies true if the logging was
   // actually enabled. i.e. The logging was not already enabled before the call.
@@ -283,10 +326,22 @@ class WebRtcEventLogManager final
   // actually disabled. i.e. The logging was enabled before the call.
   void DisableLocalLogging(base::OnceCallback<void(bool)> reply);
 
+  // For testing, replies with a bool indicating whether logging was
+  // successfully enabled or not.
+  void EnableDataChannelLogging(const base::FilePath& base_path,
+                                size_t max_file_size_bytes,
+                                base::OnceCallback<void(bool)> reply);
+  // For testing, replies with a bool indicating whether logging was
+  // successfully disabled or not.
+  void DisableDataChannelLogging(base::OnceCallback<void(bool)> reply);
+
   // WebRtcLocalEventLogsObserver implementation:
-  void OnLocalLogStarted(PeerConnectionKey peer_connection,
-                         const base::FilePath& file_path) override;
-  void OnLocalLogStopped(PeerConnectionKey peer_connection) override;
+  void OnLocalEventLogStarted(PeerConnectionKey peer_connection,
+                              const base::FilePath& file_path) override;
+  void OnLocalEventLogStopped(PeerConnectionKey peer_connection) override;
+  void OnLocalDataChannelLogStarted(PeerConnectionKey peer_connection,
+                                    const base::FilePath& file_path) override;
+  void OnLocalDataChannelLogStopped(PeerConnectionKey peer_connection) override;
 
   // WebRtcRemoteEventLogsObserver implementation:
   void OnRemoteLogStarted(PeerConnectionKey key,
@@ -327,7 +382,7 @@ class WebRtcEventLogManager final
       BrowserContextId browser_context_id,
       base::OnceClosure reply);
 
-  void RemovePendingRemoteBoundLogsForNotEnabledBrowserContext(
+  void RemoveRemoteBoundLogsForNotEnabledBrowserContext(
       BrowserContextId browser_context_id,
       const base::FilePath& browser_context_dir,
       base::OnceClosure reply);
@@ -337,7 +392,7 @@ class WebRtcEventLogManager final
   void OnPeerConnectionRemovedInternal(PeerConnectionKey key,
                                        base::OnceCallback<void(bool)> reply);
 
-  void OnPeerConnectionSessionIdSetInternal(
+  void OnSessionIdSetForPeerConnectionInternal(
       PeerConnectionKey key,
       const std::string& session_id,
       base::OnceCallback<void(bool)> reply);
@@ -352,6 +407,16 @@ class WebRtcEventLogManager final
       const std::string& message,
       base::OnceCallback<void(std::pair<bool, bool>)> reply);
 
+  void EnableDataChannelLoggingInternal(const base::FilePath& base_path,
+                                        size_t max_file_size_bytes,
+                                        base::OnceCallback<void(bool)> reply);
+  void DisableDataChannelLoggingInternal(base::OnceCallback<void(bool)> reply);
+
+  void OnWebRtcDataChannelLogWriteInternal(
+      PeerConnectionKey key,
+      const std::string& message,
+      base::OnceCallback<void(bool)> reply);
+
   void StartRemoteLoggingInternal(
       int render_process_id,
       BrowserContextId browser_context_id,
@@ -360,8 +425,15 @@ class WebRtcEventLogManager final
       size_t max_file_size_bytes,
       int output_period_ms,
       size_t web_app_id,
+      std::optional<std::string> diagnostic_uuid,
+      bool local_only,
       base::OnceCallback<void(bool, const std::string&, const std::string&)>
           reply);
+
+  void StopLoggingInternal(int render_process_id,
+                           StopLoggingAction action,
+                           std::optional<std::string> diagnostic_uuid,
+                           base::OnceClosure callback);
 
   void ClearCacheForBrowserContextInternal(BrowserContextId browser_context_id,
                                            const base::Time& delete_begin,
@@ -415,7 +487,8 @@ class WebRtcEventLogManager final
 
   // This allows unit tests that do not wish to change the task runner to still
   // check when certain operations are finished.
-  // TODO(crbug.com/775415): Remove this and use PostNullTaskForTesting instead.
+  // TODO(crbug.com/40545136): Remove this and use PostNullTaskForTesting
+  // instead.
   scoped_refptr<base::SequencedTaskRunner> GetTaskRunnerForTesting();
 
   void PostNullTaskForTesting(base::OnceClosure reply);
@@ -438,7 +511,7 @@ class WebRtcEventLogManager final
   // Indicates whether remote-bound logging is generally allowed, although
   // possibly not for all profiles. This makes it possible for remote-bound to
   // be disabled through Finch.
-  // TODO(crbug.com/775415): Remove this kill-switch.
+  // TODO(crbug.com/40545136): Remove this kill-switch.
   const bool remote_logging_feature_enabled_;
 
   // Observer which will be informed whenever a local log file is started or
@@ -473,7 +546,8 @@ class WebRtcEventLogManager final
   // observation. Allows us to register for each RPH only once, and get notified
   // when it exits (cleanly or due to a crash).
   // This object is only to be accessed on the UI thread.
-  base::flat_set<content::RenderProcessHost*> observed_render_process_hosts_;
+  base::flat_set<raw_ptr<content::RenderProcessHost, CtnExperimental>>
+      observed_render_process_hosts_;
 
   // In production, this holds a small object that just tells WebRTC (via
   // PeerConnectionTracker) to start/stop producing event logs for a specific

@@ -8,15 +8,27 @@
 #include <string>
 
 #include "base/files/file_path.h"
+#include "base/json/json_reader.h"
+#include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
+#include "build/buildflag.h"
+#include "components/enterprise/buildflags/buildflags.h"
+#include "components/policy/core/common/mock_policy_service.h"
+#include "components/policy/core/common/policy_map.h"
+#include "components/policy/core/common/policy_service.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/testing_pref_service.h"
 #include "components/proxy_config/proxy_config_dictionary.h"
 #include "components/proxy_config/proxy_config_pref_names.h"
+#include "net/base/host_port_pair.h"
+#include "net/base/proxy_chain.h"
+#include "net/base/proxy_server.h"
 #include "net/base/proxy_string_util.h"
+#include "net/net_buildflags.h"
 #include "net/proxy_resolution/proxy_info.h"
 #include "net/proxy_resolution/proxy_list.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
@@ -24,8 +36,17 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 
+#if BUILDFLAG(ENTERPRISE_PROXY)
+#include "components/enterprise/net/core/enterprise_proxy_service.h"
+#include "components/enterprise/net/core/mock_enterprise_proxy_service.h"
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
+
 using testing::_;
 using testing::Mock;
+
+#if BUILDFLAG(ENTERPRISE_PROXY)
+using enterprise_net::MockEnterpriseProxyService;
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
 
 namespace {
 
@@ -43,8 +64,9 @@ class TestProxyConfigService : public net::ProxyConfigService {
     config_ =
         net::ProxyConfigWithAnnotation(config, TRAFFIC_ANNOTATION_FOR_TESTS);
     availability_ = availability;
-    for (net::ProxyConfigService::Observer& observer : observers_)
+    for (net::ProxyConfigService::Observer& observer : observers_) {
       observer.OnProxyConfigChanged(config_, availability);
+    }
   }
 
  private:
@@ -78,7 +100,7 @@ class MockObserver : public net::ProxyConfigService::Observer {
 
 class PrefProxyConfigTrackerImplTest : public testing::Test {
  protected:
-  PrefProxyConfigTrackerImplTest() {}
+  PrefProxyConfigTrackerImplTest() = default;
 
   // Initializes the proxy config service. The delegate config service has the
   // specified initial config availability.
@@ -92,8 +114,16 @@ class PrefProxyConfigTrackerImplTest : public testing::Test {
         proxy_config, TRAFFIC_ANNOTATION_FOR_TESTS);
     delegate_service_ =
         new TestProxyConfigService(fixed_config_, delegate_config_availability);
+    ON_CALL(mock_policy_service_, GetPolicies(_))
+        .WillByDefault(testing::ReturnRef(empty_policy_map_));
     proxy_config_tracker_ = std::make_unique<PrefProxyConfigTrackerImpl>(
-        pref_service_.get(), base::SingleThreadTaskRunner::GetCurrentDefault());
+        pref_service_.get(), base::SingleThreadTaskRunner::GetCurrentDefault(),
+        policy_service_
+#if BUILDFLAG(ENTERPRISE_PROXY)
+        ,
+        enterprise_proxy_service_
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
+    );
     proxy_config_service_ =
         proxy_config_tracker_->CreateTrackingProxyConfigService(
             std::unique_ptr<net::ProxyConfigService>(delegate_service_));
@@ -108,10 +138,28 @@ class PrefProxyConfigTrackerImplTest : public testing::Test {
 
   base::test::SingleThreadTaskEnvironment task_environment_;
   std::unique_ptr<TestingPrefServiceSimple> pref_service_;
-  raw_ptr<TestProxyConfigService> delegate_service_;  // weak
+  raw_ptr<TestProxyConfigService, DanglingUntriaged> delegate_service_;  // weak
   std::unique_ptr<net::ProxyConfigService> proxy_config_service_;
   net::ProxyConfigWithAnnotation fixed_config_;
   std::unique_ptr<PrefProxyConfigTrackerImpl> proxy_config_tracker_;
+#if BUILDFLAG(ENTERPRISE_PROXY)
+  testing::NiceMock<MockEnterpriseProxyService> mock_enterprise_proxy_service_;
+  raw_ptr<enterprise_net::EnterpriseProxyService> enterprise_proxy_service_ =
+      &mock_enterprise_proxy_service_;
+  void SetActiveDynamicRoutingConfig(
+      const net::ProxyConfig::DynamicRoutingConfig& config) {
+    EXPECT_CALL(mock_enterprise_proxy_service_, GetDynamicRoutingConfig())
+        .WillRepeatedly(testing::Return(config));
+    mock_enterprise_proxy_service_.NotifyObservers();
+  }
+#else
+  void SetActiveDynamicRoutingConfig(
+      const net::ProxyConfig::DynamicRoutingConfig& config) {}
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
+
+  policy::PolicyMap empty_policy_map_;
+  testing::NiceMock<policy::MockPolicyService> mock_policy_service_;
+  raw_ptr<policy::PolicyService> policy_service_ = &mock_policy_service_;
 };
 
 TEST_F(PrefProxyConfigTrackerImplTest, BaseConfiguration) {
@@ -136,9 +184,9 @@ TEST_F(PrefProxyConfigTrackerImplTest, DynamicPrefOverrides) {
   EXPECT_FALSE(actual_config.value().auto_detect());
   EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
             actual_config.value().proxy_rules().type);
-  EXPECT_EQ(actual_config.value().proxy_rules().single_proxies.Get(),
-            net::ProxyUriToProxyServer("http://example.com:3128",
-                                       net::ProxyServer::SCHEME_HTTP));
+  EXPECT_EQ(actual_config.value().proxy_rules().single_proxies.First(),
+            net::ProxyUriToProxyChain("http://example.com:3128",
+                                      net::ProxyServer::SCHEME_HTTP));
 
   pref_service_->SetManagedPref(
       proxy_config::prefs::kProxy,
@@ -149,6 +197,163 @@ TEST_F(PrefProxyConfigTrackerImplTest, DynamicPrefOverrides) {
             proxy_config_service_->GetLatestProxyConfig(&actual_config));
   EXPECT_TRUE(actual_config.value().auto_detect());
 }
+
+#if BUILDFLAG(ENABLE_BRACKETED_PROXY_URIS)
+TEST_F(PrefProxyConfigTrackerImplTest, DynamicPrefOverridesSingleBracketedUri) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateFixedServers(
+          "[http://example.com:3128]", std::string())));
+  base::RunLoop().RunUntilIdle();
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_FALSE(actual_config.value().auto_detect());
+  EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
+            actual_config.value().proxy_rules().type);
+  EXPECT_EQ(actual_config.value().proxy_rules().single_proxies.First(),
+            net::ProxyUriToProxyChain("http://example.com:3128",
+                                      net::ProxyServer::SCHEME_HTTP));
+
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateAutoDetect()));
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_TRUE(actual_config.value().auto_detect());
+}
+
+TEST_F(PrefProxyConfigTrackerImplTest, DynamicPrefOverridesMultiBracketedUris) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateFixedServers(
+          "[https://foopy:443 https://hoopy:443]", std::string())));
+  base::RunLoop().RunUntilIdle();
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_FALSE(actual_config.value().auto_detect());
+  EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
+            actual_config.value().proxy_rules().type);
+
+  // Build expected proxy chain for multi-proxy chain.
+  net::ProxyChain expected_proxy_chain(
+      {net::ProxyUriToProxyServer("https://foopy:443",
+                                  net::ProxyServer::SCHEME_HTTPS),
+       net::ProxyUriToProxyServer("https://hoopy:443",
+                                  net::ProxyServer::SCHEME_HTTPS)});
+  EXPECT_EQ(actual_config.value().proxy_rules().single_proxies.First(),
+            expected_proxy_chain);
+
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateAutoDetect()));
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_TRUE(actual_config.value().auto_detect());
+}
+#else
+// Ensure that bracketed URIs are not parsed in release builds.
+TEST_F(PrefProxyConfigTrackerImplTest,
+       DynamicPrefOverridesBracketedUriNotValidInReleaseBuilds) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateFixedServers(
+          "[http://example.com:3128]", std::string())));
+  base::RunLoop().RunUntilIdle();
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_FALSE(actual_config.value().auto_detect());
+  EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
+            actual_config.value().proxy_rules().type);
+  // ProxyList should be empty b/c brackets in URI are invalid format.
+  EXPECT_TRUE(actual_config.value().proxy_rules().single_proxies.IsEmpty());
+
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateAutoDetect()));
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_TRUE(actual_config.value().auto_detect());
+}
+#endif
+
+#if BUILDFLAG(ENABLE_QUIC_PROXY_SUPPORT)
+// Ensure that QUIC proxies are correctly parsed when the build flag for QUIC
+// proxy support, `ENABLE_QUIC_PROXY_SUPPORT`, is enabled.
+TEST_F(PrefProxyConfigTrackerImplTest,
+       DynamicPrefOverridesQuicProxySupportValidWhenBuildFlagEnabled) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateFixedServers(
+          "quic://foopy:443", std::string())));
+  base::RunLoop().RunUntilIdle();
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_FALSE(actual_config.value().auto_detect());
+  EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
+            actual_config.value().proxy_rules().type);
+  EXPECT_EQ(actual_config.value().proxy_rules().single_proxies.First(),
+            net::ProxyUriToProxyChain("quic://foopy:443",
+                                      net::ProxyServer::SCHEME_HTTP,
+                                      /*is_quic_allowed=*/true));
+
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateAutoDetect()));
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_TRUE(actual_config.value().auto_detect());
+}
+#else
+// Ensure that QUIC proxy support is not valid/parsed when the build flag for
+// QUIC support, `ENABLE_QUIC_PROXY_SUPPORT`, is disabled.
+TEST_F(PrefProxyConfigTrackerImplTest,
+       DynamicPrefOverridesQuicProxySupportNotValidWhenBuildFlagDisabled) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateFixedServers(
+          "quic://foopy:443", std::string())));
+  base::RunLoop().RunUntilIdle();
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_FALSE(actual_config.value().auto_detect());
+  EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
+            actual_config.value().proxy_rules().type);
+  // ProxyList should be empty b/c brackets in URI are invalid format.
+  EXPECT_TRUE(actual_config.value().proxy_rules().single_proxies.IsEmpty());
+
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateAutoDetect()));
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_TRUE(actual_config.value().auto_detect());
+}
+#endif  // BUILDFLAG(ENABLE_QUIC_PROXY_SUPPORT)
 
 // Compares proxy configurations, but allows different sources.
 MATCHER_P(ProxyConfigMatches, config, "") {
@@ -166,8 +371,9 @@ TEST_F(PrefProxyConfigTrackerImplTest, Observers) {
   // Firing the observers in the delegate should trigger a notification.
   net::ProxyConfig config2;
   config2.set_auto_detect(true);
-  EXPECT_CALL(observer, OnProxyConfigChanged(ProxyConfigMatches(config2),
-                                             CONFIG_VALID)).Times(1);
+  EXPECT_CALL(observer,
+              OnProxyConfigChanged(ProxyConfigMatches(config2), CONFIG_VALID))
+      .Times(1);
   delegate_service_->SetProxyConfig(config2, CONFIG_VALID);
   base::RunLoop().RunUntilIdle();
   Mock::VerifyAndClearExpectations(&observer);
@@ -177,7 +383,8 @@ TEST_F(PrefProxyConfigTrackerImplTest, Observers) {
   pref_config.set_pac_url(GURL(kFixedPacUrl));
 
   EXPECT_CALL(observer, OnProxyConfigChanged(ProxyConfigMatches(pref_config),
-                                             CONFIG_VALID)).Times(1);
+                                             CONFIG_VALID))
+      .Times(1);
   pref_service_->SetManagedPref(
       proxy_config::prefs::kProxy,
       std::make_unique<base::Value>(
@@ -198,8 +405,9 @@ TEST_F(PrefProxyConfigTrackerImplTest, Observers) {
   Mock::VerifyAndClearExpectations(&observer);
 
   // Clear the override should switch back to the fixed configuration.
-  EXPECT_CALL(observer, OnProxyConfigChanged(ProxyConfigMatches(config3),
-                                             CONFIG_VALID)).Times(1);
+  EXPECT_CALL(observer,
+              OnProxyConfigChanged(ProxyConfigMatches(config3), CONFIG_VALID))
+      .Times(1);
   pref_service_->RemoveManagedPref(proxy_config::prefs::kProxy);
   base::RunLoop().RunUntilIdle();
   Mock::VerifyAndClearExpectations(&observer);
@@ -207,8 +415,9 @@ TEST_F(PrefProxyConfigTrackerImplTest, Observers) {
   // Delegate service notifications should show up again.
   net::ProxyConfig config4;
   config4.proxy_rules().ParseFromString("socks:config4");
-  EXPECT_CALL(observer, OnProxyConfigChanged(ProxyConfigMatches(config4),
-                                             CONFIG_VALID)).Times(1);
+  EXPECT_CALL(observer,
+              OnProxyConfigChanged(ProxyConfigMatches(config4), CONFIG_VALID))
+      .Times(1);
   delegate_service_->SetProxyConfig(config4, CONFIG_VALID);
   base::RunLoop().RunUntilIdle();
   Mock::VerifyAndClearExpectations(&observer);
@@ -234,7 +443,8 @@ TEST_F(PrefProxyConfigTrackerImplTest, Fallback) {
   // Set a recommended pref.
   EXPECT_CALL(observer,
               OnProxyConfigChanged(ProxyConfigMatches(recommended_config),
-                                   CONFIG_VALID)).Times(1);
+                                   CONFIG_VALID))
+      .Times(1);
   pref_service_->SetRecommendedPref(
       proxy_config::prefs::kProxy,
       std::make_unique<base::Value>(ProxyConfigDictionary::CreateAutoDetect()));
@@ -245,9 +455,9 @@ TEST_F(PrefProxyConfigTrackerImplTest, Fallback) {
   EXPECT_TRUE(actual_config.value().Equals(recommended_config));
 
   // Override in user prefs.
-  EXPECT_CALL(observer,
-              OnProxyConfigChanged(ProxyConfigMatches(user_config),
-                                   CONFIG_VALID)).Times(1);
+  EXPECT_CALL(observer, OnProxyConfigChanged(ProxyConfigMatches(user_config),
+                                             CONFIG_VALID))
+      .Times(1);
   pref_service_->SetManagedPref(
       proxy_config::prefs::kProxy,
       std::make_unique<base::Value>(
@@ -261,7 +471,8 @@ TEST_F(PrefProxyConfigTrackerImplTest, Fallback) {
   // Go back to recommended pref.
   EXPECT_CALL(observer,
               OnProxyConfigChanged(ProxyConfigMatches(recommended_config),
-                                   CONFIG_VALID)).Times(1);
+                                   CONFIG_VALID))
+      .Times(1);
   pref_service_->RemoveManagedPref(proxy_config::prefs::kProxy);
   base::RunLoop().RunUntilIdle();
   Mock::VerifyAndClearExpectations(&observer);
@@ -318,5 +529,977 @@ TEST_F(PrefProxyConfigTrackerImplTest, DelegateConfigServiceGetsConfigLate) {
 
   proxy_config_service_->RemoveObserver(&observer);
 }
+
+class PrefProxyConfigOverrideRulesTest : public PrefProxyConfigTrackerImplTest {
+ public:
+  void SetOverrideRulesInternal(const std::string& pref,
+                                bool is_extension = false,
+                                bool is_valid = true) {
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+    pref_service_->SetInteger(
+        proxy_config::prefs::kEnableProxyOverrideRulesForAllUsers, 1);
+#endif
+    auto set_pref = [&] {
+      auto val = std::make_unique<base::Value>(
+          *base::JSONReader::Read(pref, base::JSON_ALLOW_TRAILING_COMMAS));
+      if (is_extension) {
+        pref_service_->SetExtensionPref(
+            proxy_config::prefs::kProxyOverrideRules, std::move(val));
+      } else {
+        pref_service_->SetManagedPref(proxy_config::prefs::kProxyOverrideRules,
+                                      std::move(val));
+      }
+    };
+
+    if (is_valid) {
+      base::RunLoop run_loop;
+      MockObserver observer;
+      EXPECT_CALL(observer, OnProxyConfigChanged(testing::_, testing::_))
+          .WillOnce(testing::InvokeWithoutArgs([&] { run_loop.Quit(); }));
+      proxy_config_service_->AddObserver(&observer);
+      set_pref();
+      run_loop.Run();
+      proxy_config_service_->RemoveObserver(&observer);
+    } else {
+      set_pref();
+    }
+  }
+
+  void SetOverrideRules(const std::string& pref, bool is_valid = true) {
+    SetOverrideRulesInternal(pref, /*is_extension=*/false, is_valid);
+  }
+
+  void SetExtensionOverrideRules(const std::string& pref,
+                                 bool is_valid = true) {
+    SetOverrideRulesInternal(pref, /*is_extension=*/true, is_valid);
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_features_{kEnableProxyOverrideRules};
+};
+
+TEST_F(PrefProxyConfigOverrideRulesTest, DynamicPolicy) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 3u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://some.app.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(),
+            "https://other.app.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(2)->ToString(), "<-loopback>");
+
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().at(0)->ToString(),
+            "https://exception.some.app.com");
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().at(1)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule.proxy_list.size(), 2u);
+  EXPECT_EQ(rule.proxy_list.AllChains().at(0),
+            net::PacResultElementToProxyChain("HTTPS proxy.app:443"));
+  EXPECT_EQ(rule.proxy_list.AllChains().at(1),
+            net::PacResultElementToProxyChain("DIRECT"));
+
+  EXPECT_EQ(rule.dns_conditions.size(), 1u);
+  EXPECT_EQ(rule.dns_conditions.at(0).host,
+            url::SchemeHostPort(GURL("http://corp.ads")));
+  EXPECT_TRUE(rule.dns_conditions.at(0).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(0).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved);
+
+  // Setting the pref again in the same test scope validates the policy is
+  // dynamic and that the retrieved config changes appropriately.
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://some.other.app.com",
+                 ],
+                 "ProxyList": [
+                     "DIRECT",
+                     "PROXY some.host:123",
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     },
+                     {
+                         "DnsProbe": {
+                             "Host": "ads.corp",
+                             "Result": "not_found",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.special.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.special.app.com",
+                 ],
+                 "ProxyList": [
+                     "DIRECT",
+                 ],
+             }
+        ])");
+
+  net::ProxyConfigWithAnnotation updated_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&updated_config));
+
+  EXPECT_EQ(updated_config.value().proxy_override_rules().size(), 2u);
+
+  const auto& rule_0 = updated_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule_0.destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule_0.destination_matchers.rules().at(0)->ToString(),
+            "https://some.other.app.com");
+  EXPECT_EQ(rule_0.destination_matchers.rules().at(1)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule_0.exclude_destination_matchers.rules().size(), 1u);
+  EXPECT_EQ(rule_0.exclude_destination_matchers.rules().at(0)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule_0.proxy_list.size(), 4u);
+  EXPECT_EQ(rule_0.proxy_list.AllChains().at(0),
+            net::PacResultElementToProxyChain("DIRECT"));
+  EXPECT_EQ(rule_0.proxy_list.AllChains().at(1),
+            net::PacResultElementToProxyChain("PROXY some.host:123"));
+  EXPECT_EQ(rule_0.proxy_list.AllChains().at(2),
+            net::PacResultElementToProxyChain("HTTPS proxy.app:443"));
+  EXPECT_EQ(rule_0.proxy_list.AllChains().at(3),
+            net::PacResultElementToProxyChain("DIRECT"));
+
+  EXPECT_EQ(rule_0.dns_conditions.size(), 2u);
+  EXPECT_TRUE(rule_0.dns_conditions.at(0).host.IsValid());
+  EXPECT_EQ(rule_0.dns_conditions.at(0).host,
+            url::SchemeHostPort(GURL("http://corp.ads")));
+  EXPECT_EQ(rule_0.dns_conditions.at(0).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved);
+  EXPECT_TRUE(rule_0.dns_conditions.at(1).host.IsValid());
+  EXPECT_EQ(rule_0.dns_conditions.at(1).host,
+            url::SchemeHostPort(GURL("http://ads.corp")));
+  EXPECT_EQ(rule_0.dns_conditions.at(1).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kNotFound);
+
+  const auto& rule_1 = updated_config.value().proxy_override_rules().at(1);
+  EXPECT_EQ(rule_1.destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule_1.destination_matchers.rules().at(0)->ToString(),
+            "https://some.special.app.com");
+  EXPECT_EQ(rule_1.destination_matchers.rules().at(1)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule_1.exclude_destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule_1.exclude_destination_matchers.rules().at(0)->ToString(),
+            "https://exception.some.special.app.com");
+  EXPECT_EQ(rule_1.exclude_destination_matchers.rules().at(1)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule_1.proxy_list.size(), 1u);
+  EXPECT_EQ(rule_1.proxy_list.AllChains().at(0),
+            net::PacResultElementToProxyChain("DIRECT"));
+
+  EXPECT_TRUE(rule_1.dns_conditions.empty());
+
+  // Changing the `kProxy` pref should not change `kProxyOverrideRules`, and
+  // `kProxyOverrideRules` being set shouldn't prevent a `kProxy` value from
+  // being in the resulting config.
+  auto previous_override_rules = updated_config.value().proxy_override_rules();
+  pref_service_->SetManagedPref(
+      proxy_config::prefs::kProxy,
+      std::make_unique<base::Value>(ProxyConfigDictionary::CreateFixedServers(
+          "http://example.com:3128", std::string())));
+  base::RunLoop().RunUntilIdle();
+
+  net::ProxyConfigWithAnnotation fixed_servers_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&fixed_servers_config));
+
+  EXPECT_EQ(fixed_servers_config.value().proxy_override_rules(),
+            previous_override_rules);
+  EXPECT_FALSE(fixed_servers_config.value().auto_detect());
+  EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
+            fixed_servers_config.value().proxy_rules().type);
+  EXPECT_EQ(fixed_servers_config.value().proxy_rules().single_proxies.First(),
+            net::ProxyUriToProxyChain("http://example.com:3128",
+                                      net::ProxyServer::SCHEME_HTTP));
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest, URLAndPacProxyList) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+
+  // The first two entries of the "ProxyList" are ignored due to not being valid
+  // PAC strings or URLs.
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ProxyList": [
+                     "proxy://bad.value",
+                     "some_random_bad_value",
+                     "HTTPS proxy.app:443",
+                     "https://other.app:344",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 3u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://some.app.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(),
+            "https://other.app.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(2)->ToString(), "<-loopback>");
+
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().size(), 1u);
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().at(0)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule.proxy_list.size(), 3u);
+  EXPECT_EQ(rule.proxy_list.AllChains().at(0),
+            net::PacResultElementToProxyChain("HTTPS proxy.app:443"));
+  EXPECT_EQ(rule.proxy_list.AllChains().at(1),
+            net::PacResultElementToProxyChain("HTTPS other.app:344"));
+  EXPECT_EQ(rule.proxy_list.AllChains().at(2),
+            net::PacResultElementToProxyChain("DIRECT"));
+
+  EXPECT_EQ(rule.dns_conditions.size(), 1u);
+  EXPECT_TRUE(rule.dns_conditions.at(0).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(0).host,
+            url::SchemeHostPort(GURL("http://corp.ads")));
+  EXPECT_EQ(rule.dns_conditions.at(0).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved);
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest, IPAddressMatchers) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://32.123.34.123",
+                     "35.234.543.12",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "12.345.678.90",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                 ],
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+
+  const auto& proxy_override_rule =
+      actual_config.value().proxy_override_rules()[0];
+
+  EXPECT_TRUE(
+      proxy_override_rule.MatchesDestination(GURL("https://32.123.34.123")));
+  EXPECT_TRUE(
+      proxy_override_rule.MatchesDestination(GURL("http://35.234.543.12")));
+  EXPECT_FALSE(
+      proxy_override_rule.MatchesDestination(GURL("http://12.345.678.90")));
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest, DNSProbeHostValues) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                 ],
+                 "ProxyList": [
+                     "https://other.app:344",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "https://google.com:448",
+                             "Result": "resolved",
+                         },
+                     },
+                     {
+                         "DnsProbe": {
+                             "Host": "https://google.com",
+                             "Result": "not_found",
+                         },
+                     },
+                     {
+                         "DnsProbe": {
+                             "Host": "http://google.com",
+                             "Result": "resolved",
+                         },
+                     },
+                     {
+                         "DnsProbe": {
+                             "Host": "http://google.com:84",
+                             "Result": "not_found",
+                         },
+                     },
+                     {
+                         "DnsProbe": {
+                             "Host": "google.com:88",
+                             "Result": "resolved",
+                         },
+                     },
+                     {
+                         "DnsProbe": {
+                             "Host": "google.com",
+                             "Result": "not_found",
+                         },
+                     }
+                 ]
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://some.app.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(), "<-loopback>");
+
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().size(), 1u);
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().at(0)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule.proxy_list.size(), 1u);
+  EXPECT_EQ(rule.proxy_list.AllChains().at(0),
+            net::PacResultElementToProxyChain("HTTPS other.app:344"));
+
+  EXPECT_EQ(rule.dns_conditions.size(), 6u);
+
+  EXPECT_TRUE(rule.dns_conditions.at(0).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(0).host,
+            url::SchemeHostPort(GURL("https://google.com:448")));
+  EXPECT_EQ(rule.dns_conditions.at(0).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved);
+  EXPECT_TRUE(rule.dns_conditions.at(1).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(1).host,
+            url::SchemeHostPort(GURL("https://google.com:443")));
+  EXPECT_EQ(rule.dns_conditions.at(1).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kNotFound);
+  EXPECT_TRUE(rule.dns_conditions.at(2).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(2).host,
+            url::SchemeHostPort(GURL("http://google.com:80")));
+  EXPECT_EQ(rule.dns_conditions.at(2).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved);
+  EXPECT_TRUE(rule.dns_conditions.at(3).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(3).host,
+            url::SchemeHostPort(GURL("http://google.com:84")));
+  EXPECT_EQ(rule.dns_conditions.at(3).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kNotFound);
+  EXPECT_TRUE(rule.dns_conditions.at(4).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(4).host,
+            url::SchemeHostPort(GURL("http://google.com:88")));
+  EXPECT_EQ(rule.dns_conditions.at(4).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved);
+  EXPECT_TRUE(rule.dns_conditions.at(5).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(5).host,
+            url::SchemeHostPort(GURL("http://google.com:80")));
+  EXPECT_EQ(rule.dns_conditions.at(5).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kNotFound);
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest, NonListValues) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  for (const char* value : {"1234", "false", "null", "\"abce\""}) {
+    SetOverrideRules(value, /*is_valid=*/false);
+
+    net::ProxyConfigWithAnnotation actual_config;
+    EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+              proxy_config_service_->GetLatestProxyConfig(&actual_config));
+    EXPECT_TRUE(actual_config.value().proxy_override_rules().empty());
+  }
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest, InvalidTypesInList) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+  SetOverrideRules(
+      R"([
+             1234,
+             "abcd",
+             false,
+             null,
+         ])",
+      /*is_valid=*/false);
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_TRUE(actual_config.value().proxy_override_rules().empty());
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest, InvalidDictsInList) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+
+  // Only the first entry of the list should be kept in the resulting config.
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     1234,
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     1234,
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolves",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     1234,
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {}
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": 1234,
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": 1234,
+                             "Result": "resolved",
+                         },
+                     }
+                 ]
+             },
+             {
+                 "DestinationMatchers": [
+                     "https://some.app.com",
+                     "https://other.app.com",
+                 ],
+                 "ExcludeDestinationMatchers": [
+                     "https://exception.some.app.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS proxy.app:443",
+                     "DIRECT",
+                 ],
+                 "Conditions": [
+                     {
+                         "DnsProbe": {
+                             "Host": "corp.ads",
+                             "Result": "invalid_value",
+                         },
+                     }
+                 ]
+             },
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 3u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://some.app.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(),
+            "https://other.app.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(2)->ToString(), "<-loopback>");
+
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().at(0)->ToString(),
+            "https://exception.some.app.com");
+  EXPECT_EQ(rule.exclude_destination_matchers.rules().at(1)->ToString(),
+            "<-loopback>");
+
+  EXPECT_EQ(rule.proxy_list.size(), 2u);
+  EXPECT_EQ(rule.proxy_list.AllChains().at(0),
+            net::PacResultElementToProxyChain("HTTPS proxy.app:443"));
+  EXPECT_EQ(rule.proxy_list.AllChains().at(1),
+            net::PacResultElementToProxyChain("DIRECT"));
+
+  EXPECT_EQ(rule.dns_conditions.size(), 1u);
+  EXPECT_TRUE(rule.dns_conditions.at(0).host.IsValid());
+  EXPECT_EQ(rule.dns_conditions.at(0).host,
+            url::SchemeHostPort(GURL("http://corp.ads")));
+  EXPECT_EQ(rule.dns_conditions.at(0).result,
+            net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved);
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest,
+       PolicyOverrideRulesWhenSystemProxyUnset) {
+  InitConfigService(net::ProxyConfigService::CONFIG_UNSET);
+
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://managed.example.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS managed-proxy.example.com:443",
+                 ]
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  // When system proxy is unset, baseline has no main proxy settings with
+  // override rules attached.
+  EXPECT_FALSE(actual_config.value().has_pac_url());
+  EXPECT_TRUE(actual_config.value().proxy_rules().empty());
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  // Destination matchers contains 2 rules: the URL pattern and an implicit rule
+  // ("<-loopback>") automatically added by AddRulesToSubtractImplicit().
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://managed.example.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(), "<-loopback>");
+  EXPECT_EQ(rule.proxy_list.size(), 1u);
+  EXPECT_EQ(
+      rule.proxy_list.AllChains().at(0),
+      net::PacResultElementToProxyChain("HTTPS managed-proxy.example.com:443"));
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest,
+       PolicyOverrideRulesWhenSystemProxyValid) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+
+  SetOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://managed.example.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS managed-proxy.example.com:443",
+                 ]
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  // System proxy settings (PAC URL) must be preserved alongside override rules.
+  EXPECT_EQ(actual_config.value().pac_url(), GURL(kFixedPacUrl));
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://managed.example.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(), "<-loopback>");
+  EXPECT_EQ(rule.proxy_list.size(), 1u);
+  EXPECT_EQ(
+      rule.proxy_list.AllChains().at(0),
+      net::PacResultElementToProxyChain("HTTPS managed-proxy.example.com:443"));
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest,
+       ExtensionOverrideRulesWhenSystemProxyUnset) {
+  InitConfigService(net::ProxyConfigService::CONFIG_UNSET);
+
+  SetExtensionOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://extension.example.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS ext-proxy.example.com:443",
+                 ]
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  // When system proxy is unset, baseline has no main proxy settings with
+  // override rules attached.
+  EXPECT_FALSE(actual_config.value().has_pac_url());
+  EXPECT_TRUE(actual_config.value().proxy_rules().empty());
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://extension.example.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(), "<-loopback>");
+  EXPECT_EQ(rule.proxy_list.size(), 1u);
+  EXPECT_EQ(
+      rule.proxy_list.AllChains().at(0),
+      net::PacResultElementToProxyChain("HTTPS ext-proxy.example.com:443"));
+}
+
+TEST_F(PrefProxyConfigOverrideRulesTest,
+       ExtensionOverrideRulesWhenSystemProxyValid) {
+  InitConfigService(net::ProxyConfigService::CONFIG_VALID);
+
+  SetExtensionOverrideRules(
+      R"([
+             {
+                 "DestinationMatchers": [
+                     "https://extension.example.com",
+                 ],
+                 "ProxyList": [
+                     "HTTPS ext-proxy.example.com:443",
+                 ]
+             }
+         ])");
+
+  net::ProxyConfigWithAnnotation actual_config;
+  EXPECT_EQ(net::ProxyConfigService::CONFIG_VALID,
+            proxy_config_service_->GetLatestProxyConfig(&actual_config));
+
+  // System proxy settings (PAC URL) must be preserved alongside override rules.
+  EXPECT_EQ(actual_config.value().pac_url(), GURL(kFixedPacUrl));
+  EXPECT_EQ(actual_config.value().proxy_override_rules().size(), 1u);
+  const auto& rule = actual_config.value().proxy_override_rules().at(0);
+  EXPECT_EQ(rule.destination_matchers.rules().size(), 2u);
+  EXPECT_EQ(rule.destination_matchers.rules().at(0)->ToString(),
+            "https://extension.example.com");
+  EXPECT_EQ(rule.destination_matchers.rules().at(1)->ToString(), "<-loopback>");
+  EXPECT_EQ(rule.proxy_list.size(), 1u);
+  EXPECT_EQ(
+      rule.proxy_list.AllChains().at(0),
+      net::PacResultElementToProxyChain("HTTPS ext-proxy.example.com:443"));
+}
+
+#if BUILDFLAG(ENTERPRISE_PROXY)
+TEST_F(PrefProxyConfigTrackerImplTest, DynamicRoutingConfigStatusChanged) {
+  InitConfigService(net::ProxyConfigService::CONFIG_UNSET);
+
+  MockObserver observer;
+  proxy_config_service_->AddObserver(&observer);
+
+  auto update_and_capture =
+      [&](const net::ProxyConfig::DynamicRoutingConfig& config) {
+        base::RunLoop run_loop;
+        net::ProxyConfigWithAnnotation captured_config;
+        EXPECT_CALL(observer,
+                    OnProxyConfigChanged(testing::_,
+                                         net::ProxyConfigService::CONFIG_VALID))
+            .WillOnce(
+                [&](const net::ProxyConfigWithAnnotation& cfg,
+                    net::ProxyConfigService::ConfigAvailability availability) {
+                  captured_config = cfg;
+                  run_loop.Quit();
+                });
+
+        SetActiveDynamicRoutingConfig(config);
+        run_loop.Run();
+        return captured_config;
+      };
+
+  // Dynamic routing update with in_progress = true.
+  net::ProxyConfig::DynamicRoutingConfig in_progress_config;
+  in_progress_config.is_update_in_progress = true;
+  net::ProxyConfigWithAnnotation captured_in_progress =
+      update_and_capture(in_progress_config);
+  EXPECT_TRUE(captured_in_progress.value()
+                  .dynamic_routing_config()
+                  .is_update_in_progress);
+  EXPECT_TRUE(captured_in_progress.value()
+                  .dynamic_routing_config()
+                  .routing_rules.empty());
+
+  // Another dynamic routing update but with in_progress = false.
+  net::ProxyConfig::DynamicRoutingConfig resolved_config;
+  resolved_config.is_update_in_progress = false;
+  net::ProxyConfig::DynamicRoutingRule rule;
+  rule.proxy_list.AddProxyChain(net::ProxyUriToProxyChain(
+      "https://proxy.example.com:443", net::ProxyServer::SCHEME_HTTPS));
+  resolved_config.routing_rules.push_back(rule);
+  net::ProxyConfigWithAnnotation captured_resolved =
+      update_and_capture(resolved_config);
+  EXPECT_FALSE(
+      captured_resolved.value().dynamic_routing_config().is_update_in_progress);
+  EXPECT_EQ(
+      1u,
+      captured_resolved.value().dynamic_routing_config().routing_rules.size());
+
+  // Policy pref change combined with active dynamic routing rules.
+  {
+    base::RunLoop run_loop;
+    net::ProxyConfigWithAnnotation captured_config;
+    EXPECT_CALL(
+        observer,
+        OnProxyConfigChanged(testing::_, net::ProxyConfigService::CONFIG_VALID))
+        .WillOnce(
+            [&](const net::ProxyConfigWithAnnotation& config,
+                net::ProxyConfigService::ConfigAvailability availability) {
+              captured_config = config;
+              run_loop.Quit();
+            });
+
+    pref_service_->SetManagedPref(
+        proxy_config::prefs::kProxy,
+        std::make_unique<base::Value>(ProxyConfigDictionary::CreateFixedServers(
+            "http://policy-proxy.example.com:8080", std::string())));
+    run_loop.Run();
+
+    EXPECT_EQ(net::ProxyConfig::ProxyRules::Type::PROXY_LIST,
+              captured_config.value().proxy_rules().type);
+    EXPECT_EQ(
+        1u,
+        captured_config.value().dynamic_routing_config().routing_rules.size());
+  }
+
+  proxy_config_service_->RemoveObserver(&observer);
+}
+#endif
 
 }  // namespace

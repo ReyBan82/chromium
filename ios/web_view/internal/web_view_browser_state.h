@@ -8,16 +8,13 @@
 #include <memory>
 
 #include "base/files/file_path.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "components/prefs/pref_service.h"
 #include "ios/web/public/browser_state.h"
 
-namespace user_prefs {
-class PrefRegistrySyncable;
-}
-
 namespace web {
 class WebUIIOS;
+class SystemCookieStoreHandle;
 }  // namespace web
 
 namespace ios_web_view {
@@ -31,7 +28,8 @@ class WebViewBrowserState final : public web::BrowserState {
  public:
   explicit WebViewBrowserState(
       bool off_the_record,
-      WebViewBrowserState* recording_browser_state = nullptr);
+      WebViewBrowserState* recording_browser_state = nullptr,
+      NSString* storage_identifier = nil);
 
   WebViewBrowserState(const WebViewBrowserState&) = delete;
   WebViewBrowserState& operator=(const WebViewBrowserState&) = delete;
@@ -42,6 +40,7 @@ class WebViewBrowserState final : public web::BrowserState {
   bool IsOffTheRecord() const override;
   base::FilePath GetStatePath() const override;
   net::URLRequestContextGetter* GetRequestContext() override;
+  const base::Uuid& GetWebKitStorageID() const override;
 
   // Returns the associated PrefService.
   PrefService* GetPrefs();
@@ -57,14 +56,14 @@ class WebViewBrowserState final : public web::BrowserState {
   static WebViewBrowserState* FromWebUIIOS(web::WebUIIOS* web_ui);
 
  private:
-  // Registers the preferences for this BrowserState.
-  void RegisterPrefs(user_prefs::PrefRegistrySyncable* pref_registry);
-
   // The path associated with this BrowserState object.
   base::FilePath path_;
 
   // Whether this BrowserState is incognito.
   bool off_the_record_;
+
+  // The WebKit storage identifier for this BrowserState.
+  base::Uuid webkit_storage_id_;
 
   // The request context getter for this BrowserState object.
   scoped_refptr<WebViewURLRequestContextGetter> request_context_getter_;
@@ -77,6 +76,9 @@ class WebViewBrowserState final : public web::BrowserState {
 
   // Handles browser downloads.
   std::unique_ptr<WebViewDownloadManager> download_manager_;
+
+  // Handle to the SystemCookieStore that must live on the UI thread.
+  std::unique_ptr<web::SystemCookieStoreHandle> cookie_store_handle_;
 };
 
 }  // namespace ios_web_view

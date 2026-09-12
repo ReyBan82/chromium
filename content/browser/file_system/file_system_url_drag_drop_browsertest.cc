@@ -153,7 +153,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemURLDragDropBrowserTest, FileSystemFileDrop) {
   // Get the points corresponding to the center of the browser window in
   // both screen coordinates and window coordinates.
   const gfx::Rect window_in_screen_coords =
-      render_widget_host_impl->GetView()->GetBoundsInRootWindow();
+      render_widget_host_impl->GetView()->GetBoundsInScreen();
   const gfx::PointF screen_point =
       gfx::PointF(window_in_screen_coords.CenterPoint());
   const gfx::PointF client_point =
@@ -166,6 +166,8 @@ IN_PROC_BROWSER_TEST_F(FileSystemURLDragDropBrowserTest, FileSystemFileDrop) {
   filesystem_file_info.size = test_contents.size();
   filesystem_file_info.filesystem_id = original_file.filesystem_id();
   DropData drop_data;
+  drop_data.operation = ui::mojom::DragOperation::kCopy;
+  drop_data.document_is_handling_drag = true;
   drop_data.file_system_files.push_back(filesystem_file_info);
 
   render_widget_host_impl->FilterDropData(&drop_data);
@@ -276,7 +278,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemURLDragDropBrowserTest, FileSystemFileLeave) {
   // Get the points corresponding to the center of the browser window in
   // both screen coordinates and window coordinates.
   const gfx::Rect window_in_screen_coords =
-      render_widget_host_impl->GetView()->GetBoundsInRootWindow();
+      render_widget_host_impl->GetView()->GetBoundsInScreen();
   const gfx::PointF screen_point =
       gfx::PointF(window_in_screen_coords.CenterPoint());
   const gfx::PointF client_point =
@@ -288,6 +290,8 @@ IN_PROC_BROWSER_TEST_F(FileSystemURLDragDropBrowserTest, FileSystemFileLeave) {
   filesystem_file_info.size = test_contents.size();
   filesystem_file_info.filesystem_id = original_file.filesystem_id();
   DropData drop_data;
+  drop_data.operation = ui::mojom::DragOperation::kCopy;
+  drop_data.document_is_handling_drag = true;
   drop_data.file_system_files.push_back(filesystem_file_info);
 
   render_widget_host_impl->FilterDropData(&drop_data);

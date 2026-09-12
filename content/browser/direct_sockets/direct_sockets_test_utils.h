@@ -6,12 +6,14 @@
 #define CONTENT_BROWSER_DIRECT_SOCKETS_DIRECT_SOCKETS_TEST_UTILS_H_
 
 #include <stdint.h>
+
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/containers/span.h"
 #include "base/functional/callback_forward.h"
-#include "base/strings/string_piece_forward.h"
 #include "base/test/test_future.h"
 #include "base/token.h"
 #include "content/public/browser/web_contents.h"
@@ -21,10 +23,10 @@
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 #include "services/network/test/test_network_context_with_host_resolver.h"
 #include "services/network/test/test_restricted_udp_socket.h"
 #include "services/network/test/test_udp_socket.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace url {
 class Origin;
@@ -51,7 +53,7 @@ class MockUDPSocket : public network::TestUDPSocket {
 
   // Sends some data to the remote.
   void MockSend(int32_t result,
-                const absl::optional<base::span<uint8_t>>& data = {});
+                const std::optional<base::span<uint8_t>>& data = {});
 
   mojo::Remote<network::mojom::UDPSocketListener>& get_listener() {
     return listener_;
@@ -70,7 +72,7 @@ class MockUDPSocket : public network::TestUDPSocket {
  protected:
   mojo::Remote<network::mojom::UDPSocketListener> listener_;
 
-  absl::optional<int> next_send_result_;
+  std::optional<int> next_send_result_;
 
   SendCallback callback_;
   base::OnceClosure additional_send_callback_;
@@ -91,7 +93,7 @@ class MockRestrictedUDPSocket : public network::TestRestrictedUDPSocket {
 class MockNetworkContext : public network::TestNetworkContextWithHostResolver {
  public:
   MockNetworkContext();
-  explicit MockNetworkContext(base::StringPiece host_mapping_rules);
+  explicit MockNetworkContext(std::string_view host_mapping_rules);
 
   MockNetworkContext(const MockNetworkContext&) = delete;
   MockNetworkContext& operator=(const MockNetworkContext&) = delete;
@@ -103,9 +105,11 @@ class MockNetworkContext : public network::TestNetworkContextWithHostResolver {
       const net::IPEndPoint& addr,
       network::mojom::RestrictedUDPSocketMode mode,
       const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
-      network::mojom::UDPSocketOptionsPtr options,
+      network::mojom::RestrictedUDPSocketParamsPtr params,
       mojo::PendingReceiver<network::mojom::RestrictedUDPSocket> receiver,
       mojo::PendingRemote<network::mojom::UDPSocketListener> listener,
+      bool allow_multicast,
+      bool allow_source_specific_multicast,
       CreateRestrictedUDPSocketCallback callback) override;
 
   MockUDPSocket* get_udp_socket() {
@@ -121,8 +125,7 @@ class MockNetworkContext : public network::TestNetworkContextWithHostResolver {
 
 // A wrapper class that allows running javascript asynchronously.
 //
-//    * RunScript(...) returns a unique pointer to
-//      base::test::TestFuture<std::string>. Call
+//    * RunScript(...) returns a base::test::TestFuture<std::string>. Call
 //      Get(...) on the future pointer to wait for
 //      the script to complete.
 //    * Note that the observer expects exactly one message per script
@@ -153,8 +156,7 @@ class AsyncJsRunner : public WebContentsObserver {
   explicit AsyncJsRunner(content::WebContents* web_contents);
   ~AsyncJsRunner() override;
 
-  std::unique_ptr<base::test::TestFuture<std::string>> RunScript(
-      const std::string& script);
+  base::test::TestFuture<std::string> RunScript(const std::string& script);
 
   // WebContentsObserver:
   void DomOperationResponse(RenderFrameHost* render_frame_host,
@@ -166,6 +168,25 @@ class AsyncJsRunner : public WebContentsObserver {
   base::OnceCallback<void(std::string)> future_callback_;
   base::Token token_;
 };
+
+class SetHeaderWithFileUrlBuilder {
+ public:
+  explicit SetHeaderWithFileUrlBuilder(std::string_view path);
+  ~SetHeaderWithFileUrlBuilder();
+
+  SetHeaderWithFileUrlBuilder& WithCOIHeaders();
+  SetHeaderWithFileUrlBuilder& WithPermissionsPolicy(std::string_view feature,
+                                                     std::string_view value);
+
+  GURL Build(net::EmbeddedTestServer* server) const;
+
+ private:
+  std::string path_;
+  std::vector<std::string> headers_;
+  std::map<std::string, std::vector<std::string>> permissions_policy_;
+};
+
+SetHeaderWithFileUrlBuilder FileWithHeaders(std::string_view path);
 
 std::string WrapAsync(const std::string& script);
 
@@ -179,11 +200,6 @@ class IsolatedWebAppContentBrowserClient
 
   bool ShouldUrlUseApplicationIsolationLevel(BrowserContext* browser_context,
                                              const GURL& url) override;
-
-  absl::optional<blink::ParsedPermissionsPolicy>
-  GetPermissionsPolicyForIsolatedWebApp(
-      content::BrowserContext* browser_context,
-      const url::Origin& app_origin) override;
 
  private:
   url::Origin isolated_app_origin_;

@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "chrome/browser/ash/crostini/fake_crostini_features.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -30,7 +31,8 @@ class CrostiniBrowserTestBase : public InProcessBrowserTest {
       content::BrowserMainParts* browser_main_parts) override;
   void SetUpOnMainThread() override;
 
-  void SetConnectionType(network::mojom::ConnectionType connection_type);
+  void SetConnectionType(
+      net::NetworkChangeNotifier::ConnectionType connection_type);
 
   void UnregisterTermina();
 
@@ -41,7 +43,8 @@ class CrostiniBrowserTestBase : public InProcessBrowserTest {
   crostini::FakeCrostiniFeatures fake_crostini_features_;
 
   // Owned by content::Browser
-  CrostiniBrowserTestChromeBrowserMainExtraParts* extra_parts_ = nullptr;
+  raw_ptr<CrostiniBrowserTestChromeBrowserMainExtraParts, DanglingUntriaged>
+      extra_parts_ = nullptr;
 
  private:
   void DiskMountImpl(const std::string& source_path,
@@ -53,7 +56,7 @@ class CrostiniBrowserTestBase : public InProcessBrowserTest {
                      ash::disks::DiskMountManager::MountPathCallback callback);
 
   // Owned by ash::disks::DiskMountManager;
-  ash::disks::MockDiskMountManager* dmgr_;
+  raw_ptr<ash::disks::MockDiskMountManager, DanglingUntriaged> dmgr_;
 };
 
 #endif  // CHROME_BROWSER_ASH_CROSTINI_CROSTINI_BROWSER_TEST_UTIL_H_

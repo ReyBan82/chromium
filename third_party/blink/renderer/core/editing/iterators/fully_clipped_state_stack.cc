@@ -21,19 +21,19 @@ inline bool FullyClipsContents(const Node* node) {
   if (!layout_object || !layout_object->IsBox() ||
       !layout_object->IsScrollContainer() || IsA<LayoutView>(layout_object))
     return false;
-  return To<LayoutBox>(layout_object)->Size().IsEmpty();
+  return To<LayoutBox>(layout_object)->StitchedSize().IsEmpty();
 }
 
 inline bool IgnoresContainerClip(const Node* node) {
   LayoutObject* layout_object = node->GetLayoutObject();
   if (!layout_object || layout_object->IsText())
     return false;
-  return layout_object->Style()->HasOutOfFlowPosition();
+  return layout_object->StyleRef().HasOutOfFlowPosition();
 }
 
 template <typename Strategy>
-unsigned DepthCrossingShadowBoundaries(const Node& node) {
-  unsigned depth = 0;
+wtf_size_t DepthCrossingShadowBoundaries(const Node& node) {
+  wtf_size_t depth = 0;
   for (ContainerNode* parent = ParentCrossingShadowBoundaries<Strategy>(node);
        parent; parent = ParentCrossingShadowBoundaries<Strategy>(*parent))
     ++depth;

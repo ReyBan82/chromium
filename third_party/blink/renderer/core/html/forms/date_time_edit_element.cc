@@ -25,9 +25,11 @@
 
 #include "third_party/blink/renderer/core/html/forms/date_time_edit_element.h"
 
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
 #include "third_party/blink/renderer/core/css/style_change_reason.h"
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/dom/focus_params.h"
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/events/mouse_event.h"
 #include "third_party/blink/renderer/core/frame/use_counter_impl.h"
@@ -35,6 +37,7 @@
 #include "third_party/blink/renderer/core/html/forms/date_time_fields_state.h"
 #include "third_party/blink/renderer/core/html/shadow/shadow_element_names.h"
 #include "third_party/blink/renderer/core/html_names.h"
+#include "third_party/blink/renderer/core/layout/text_utils.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/fonts/font_cache.h"
@@ -42,7 +45,6 @@
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/text/date_time_format.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
-#include "third_party/blink/renderer/platform/wtf/date_math.h"
 
 namespace blink {
 
@@ -67,8 +69,9 @@ class DateTimeEditBuilder : private DateTimeFormat::TokenHandler {
   inline const StepRange& GetStepRange() const {
     return parameters_.step_range;
   }
-  DateTimeNumericFieldElement::Step CreateStep(double ms_per_field_unit,
-                                               double ms_per_field_size) const;
+  DateTimeNumericFieldElement::Step CreateStep(
+      base::TimeDelta per_field_unit,
+      base::TimeDelta per_field_size) const;
 
   // DateTimeFormat::TokenHandler functions.
   void VisitField(DateTimeFormat::FieldType, int) final;
@@ -147,15 +150,11 @@ bool DateTimeEditBuilder::Build(const String& format_string) {
 }
 
 bool DateTimeEditBuilder::NeedMillisecondField() const {
+  static constexpr int kMillisecondsPerSecond =
+      static_cast<int>(base::Time::kMillisecondsPerSecond);
   return date_value_.Millisecond() ||
-         !GetStepRange()
-              .Minimum()
-              .Remainder(static_cast<int>(kMsPerSecond))
-              .IsZero() ||
-         !GetStepRange()
-              .Step()
-              .Remainder(static_cast<int>(kMsPerSecond))
-              .IsZero();
+         !GetStepRange().Minimum().Remainder(kMillisecondsPerSecond).IsZero() ||
+         !GetStepRange().Step().Remainder(kMillisecondsPerSecond).IsZero();
 }
 
 void DateTimeEditBuilder::VisitField(DateTimeFormat::FieldType field_type,
@@ -172,80 +171,56 @@ void DateTimeEditBuilder::VisitField(DateTimeFormat::FieldType field_type,
               document, EditElement(), parameters_.placeholder_for_day,
               day_range_);
       EditElement().AddField(field);
-      if (ShouldDayOfMonthFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
     case DateTimeFormat::kFieldTypeHour11: {
       DateTimeNumericFieldElement::Step step =
-          CreateStep(kMsPerHour, kMsPerHour * 12);
+          CreateStep(base::Hours(1), base::Hours(12));
       DateTimeFieldElement* field =
           MakeGarbageCollected<DateTimeHour11FieldElement>(
               document, EditElement(), hour23_range_, step);
       EditElement().AddField(field);
-      if (ShouldHourFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
     case DateTimeFormat::kFieldTypeHour12: {
       DateTimeNumericFieldElement::Step step =
-          CreateStep(kMsPerHour, kMsPerHour * 12);
+          CreateStep(base::Hours(1), base::Hours(12));
       DateTimeFieldElement* field =
           MakeGarbageCollected<DateTimeHour12FieldElement>(
               document, EditElement(), hour23_range_, step);
       EditElement().AddField(field);
-      if (ShouldHourFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
     case DateTimeFormat::kFieldTypeHour23: {
       DateTimeNumericFieldElement::Step step =
-          CreateStep(kMsPerHour, kMsPerDay);
+          CreateStep(base::Hours(1), base::Days(1));
       DateTimeFieldElement* field =
           MakeGarbageCollected<DateTimeHour23FieldElement>(
               document, EditElement(), hour23_range_, step);
       EditElement().AddField(field);
-      if (ShouldHourFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
     case DateTimeFormat::kFieldTypeHour24: {
       DateTimeNumericFieldElement::Step step =
-          CreateStep(kMsPerHour, kMsPerDay);
+          CreateStep(base::Hours(1), base::Days(1));
       DateTimeFieldElement* field =
           MakeGarbageCollected<DateTimeHour24FieldElement>(
               document, EditElement(), hour23_range_, step);
       EditElement().AddField(field);
-      if (ShouldHourFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
     case DateTimeFormat::kFieldTypeMinute: {
       DateTimeNumericFieldElement::Step step =
-          CreateStep(kMsPerMinute, kMsPerHour);
+          CreateStep(base::Minutes(1), base::Hours(1));
       DateTimeNumericFieldElement* field =
           MakeGarbageCollected<DateTimeMinuteFieldElement>(
               document, EditElement(), minute_range_, step);
       EditElement().AddField(field);
-      if (ShouldMinuteFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
@@ -285,11 +260,6 @@ void DateTimeEditBuilder::VisitField(DateTimeFormat::FieldType field_type,
           break;
       }
       EditElement().AddField(field);
-      if (min_month == max_month && min_month == date_value_.Month() &&
-          date_value_.GetType() != DateComponents::kMonth) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
@@ -301,26 +271,18 @@ void DateTimeEditBuilder::VisitField(DateTimeFormat::FieldType field_type,
     case DateTimeFormat::kFieldTypePeriodFlexible: {
       DateTimeFieldElement* field =
           MakeGarbageCollected<DateTimeAMPMFieldElement>(
-              document, EditElement(), parameters_.locale.TimeAMPMLabels());
+              document, EditElement(), parameters_.locale.TimeAmPmLabels());
       EditElement().AddField(field);
-      if (ShouldAMPMFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
     case DateTimeFormat::kFieldTypeSecond: {
       DateTimeNumericFieldElement::Step step =
-          CreateStep(kMsPerSecond, kMsPerMinute);
+          CreateStep(base::Seconds(1), base::Minutes(1));
       DateTimeNumericFieldElement* field =
           MakeGarbageCollected<DateTimeSecondFieldElement>(
               document, EditElement(), second_range_, step);
       EditElement().AddField(field);
-      if (ShouldSecondFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
 
       if (NeedMillisecondField()) {
         VisitLiteral(parameters_.locale.LocalizedDecimalSeparator());
@@ -330,15 +292,12 @@ void DateTimeEditBuilder::VisitField(DateTimeFormat::FieldType field_type,
     }
 
     case DateTimeFormat::kFieldTypeFractionalSecond: {
-      DateTimeNumericFieldElement::Step step = CreateStep(1, kMsPerSecond);
+      DateTimeNumericFieldElement::Step step =
+          CreateStep(base::Milliseconds(1), base::Seconds(1));
       DateTimeNumericFieldElement* field =
           MakeGarbageCollected<DateTimeMillisecondFieldElement>(
               document, EditElement(), millisecond_range_, step);
       EditElement().AddField(field);
-      if (ShouldMillisecondFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
@@ -383,10 +342,6 @@ void DateTimeEditBuilder::VisitField(DateTimeFormat::FieldType field_type,
           MakeGarbageCollected<DateTimeYearFieldElement>(
               document, EditElement(), year_params);
       EditElement().AddField(field);
-      if (ShouldYearFieldDisabled()) {
-        field->SetValueAsDate(date_value_);
-        field->SetDisabled();
-      }
       return;
     }
 
@@ -426,10 +381,11 @@ bool DateTimeEditBuilder::ShouldHourFieldDisabled() const {
     return false;
   }
 
-  const Decimal decimal_ms_per_day(static_cast<int>(kMsPerDay));
+  const Decimal decimal_ms_per_day(
+      static_cast<int>(base::Time::kMillisecondsPerDay));
   Decimal hour_part_of_minimum =
       (GetStepRange().StepBase().Abs().Remainder(decimal_ms_per_day) /
-       static_cast<int>(kMsPerHour))
+       static_cast<int>(base::Hours(1).InMilliseconds()))
           .Floor();
   return hour_part_of_minimum == date_value_.Hour() &&
          GetStepRange().Step().Remainder(decimal_ms_per_day).IsZero();
@@ -440,7 +396,8 @@ bool DateTimeEditBuilder::ShouldMillisecondFieldDisabled() const {
       millisecond_range_.minimum == date_value_.Millisecond())
     return true;
 
-  const Decimal decimal_ms_per_second(static_cast<int>(kMsPerSecond));
+  const Decimal decimal_ms_per_second(
+      static_cast<int>(base::Time::kMillisecondsPerSecond));
   return GetStepRange().StepBase().Abs().Remainder(decimal_ms_per_second) ==
              date_value_.Millisecond() &&
          GetStepRange().Step().Remainder(decimal_ms_per_second).IsZero();
@@ -451,10 +408,11 @@ bool DateTimeEditBuilder::ShouldMinuteFieldDisabled() const {
       minute_range_.minimum == date_value_.Minute())
     return true;
 
-  const Decimal decimal_ms_per_hour(static_cast<int>(kMsPerHour));
+  const Decimal decimal_ms_per_hour(
+      static_cast<int>(base::Hours(1).InMilliseconds()));
   Decimal minute_part_of_minimum =
       (GetStepRange().StepBase().Abs().Remainder(decimal_ms_per_hour) /
-       static_cast<int>(kMsPerMinute))
+       static_cast<int>(base::Minutes(1).InMilliseconds()))
           .Floor();
   return minute_part_of_minimum == date_value_.Minute() &&
          GetStepRange().Step().Remainder(decimal_ms_per_hour).IsZero();
@@ -465,10 +423,11 @@ bool DateTimeEditBuilder::ShouldSecondFieldDisabled() const {
       second_range_.minimum == date_value_.Second())
     return true;
 
-  const Decimal decimal_ms_per_minute(static_cast<int>(kMsPerMinute));
+  const Decimal decimal_ms_per_minute(
+      static_cast<int>(base::Minutes(1).InMilliseconds()));
   Decimal second_part_of_minimum =
       (GetStepRange().StepBase().Abs().Remainder(decimal_ms_per_minute) /
-       static_cast<int>(kMsPerSecond))
+       static_cast<int>(base::Time::kMillisecondsPerSecond))
           .Floor();
   return second_part_of_minimum == date_value_.Second() &&
          GetStepRange().Step().Remainder(decimal_ms_per_minute).IsZero();
@@ -488,13 +447,15 @@ void DateTimeEditBuilder::VisitLiteral(const String& text) {
   auto* element =
       MakeGarbageCollected<HTMLDivElement>(EditElement().GetDocument());
   element->SetShadowPseudoId(text_pseudo_id);
-  if (parameters_.locale.IsRTL() && text.length()) {
-    WTF::unicode::CharDirection dir = WTF::unicode::Direction(text[0]);
-    if (dir == WTF::unicode::kSegmentSeparator ||
-        dir == WTF::unicode::kWhiteSpaceNeutral ||
-        dir == WTF::unicode::kOtherNeutral) {
-      element->AppendChild(Text::Create(
-          EditElement().GetDocument(), String(&kRightToLeftMarkCharacter, 1u)));
+  element->SetInlineStyleProperty(CSSPropertyID::kUnicodeBidi,
+                                  CSSValueID::kNormal);
+  if (parameters_.locale.IsRtl() && text.length()) {
+    unicode::CharDirection dir = unicode::Direction(text[0]);
+    if (dir == unicode::kSegmentSeparator ||
+        dir == unicode::kWhiteSpaceNeutral || dir == unicode::kOtherNeutral) {
+      element->AppendChild(
+          Text::Create(EditElement().GetDocument(),
+                       String(base::span_from_ref(uchar::kRightToLeftMark))));
     }
   }
   element->AppendChild(Text::Create(EditElement().GetDocument(), text));
@@ -506,10 +467,12 @@ DateTimeEditElement& DateTimeEditBuilder::EditElement() const {
 }
 
 DateTimeNumericFieldElement::Step DateTimeEditBuilder::CreateStep(
-    double ms_per_field_unit,
-    double ms_per_field_size) const {
-  const Decimal ms_per_field_unit_decimal(static_cast<int>(ms_per_field_unit));
-  const Decimal ms_per_field_size_decimal(static_cast<int>(ms_per_field_size));
+    base::TimeDelta per_field_unit,
+    base::TimeDelta per_field_size) const {
+  const Decimal ms_per_field_unit_decimal(
+      static_cast<int>(per_field_unit.InMilliseconds()));
+  const Decimal ms_per_field_size_decimal(
+      static_cast<int>(per_field_size.InMilliseconds()));
   Decimal step_milliseconds = GetStepRange().Step();
   DCHECK(!ms_per_field_unit_decimal.IsZero());
   DCHECK(!ms_per_field_size_decimal.IsZero());
@@ -543,6 +506,7 @@ DateTimeEditElement::DateTimeEditElement(Document& document,
   SetHasCustomStyleCallbacks();
   SetShadowPseudoId(AtomicString("-webkit-datetime-edit"));
   setAttribute(html_names::kIdAttr, shadow_element_names::kIdDateTimeEdit);
+  SetInlineStyleProperty(CSSPropertyID::kUnicodeBidi, CSSValueID::kNormal);
 }
 
 DateTimeEditElement::~DateTimeEditElement() = default;
@@ -578,12 +542,11 @@ void DateTimeEditElement::BlurByOwner() {
     field->blur();
 }
 
-scoped_refptr<const ComputedStyle>
-DateTimeEditElement::CustomStyleForLayoutObject(
+const ComputedStyle* DateTimeEditElement::CustomStyleForLayoutObject(
     const StyleRecalcContext& style_recalc_context) {
   // TODO(crbug.com/1181868): This is a kind of layout. We might want to
   // introduce new LayoutObject.
-  scoped_refptr<const ComputedStyle> original_style =
+  const ComputedStyle* original_style =
       OriginalStyleForLayoutObject(style_recalc_context);
   float width = 0;
   for (Node* child = FieldsWrapperElement()->firstChild(); child;
@@ -599,12 +562,15 @@ DateTimeEditElement::CustomStyleForLayoutObject(
     } else {
       // ::-webkit-datetime-edit-text case. It has no
       // border/padding/margin in html.css.
-      width += DateTimeFieldElement::ComputeTextWidth(
-          *original_style, child_element->textContent());
+      width += ComputeTextWidth(child_element->textContent(), *original_style);
     }
   }
   ComputedStyleBuilder builder(*original_style);
-  builder.SetWidth(Length::Fixed(ceilf(width)));
+  if (original_style->IsHorizontalWritingMode()) {
+    builder.SetWidth(Length::Fixed(ceilf(width)));
+  } else {
+    builder.SetHeight(Length::Fixed(ceilf(width)));
+  }
   builder.SetCustomStyleCallbackDependsOnFont();
   return builder.TakeStyle();
 }
@@ -649,9 +615,10 @@ void DateTimeEditElement::FocusByOwner(Element* old_focused_element) {
     DateTimeFieldElement* old_focused_field =
         static_cast<DateTimeFieldElement*>(old_focused_element);
     wtf_size_t index = FieldIndexOf(*old_focused_field);
-    GetDocument().UpdateStyleAndLayoutTreeForNode(old_focused_field);
+    GetDocument().UpdateStyleAndLayoutTreeForElement(
+        old_focused_field, DocumentUpdateReason::kFocus);
     if (index != kInvalidFieldIndex && old_focused_field->IsFocusable()) {
-      old_focused_field->Focus();
+      old_focused_field->Focus(FocusParams(FocusTrigger::kUserGesture));
       return;
     }
   }
@@ -682,7 +649,7 @@ bool DateTimeEditElement::FocusOnNextFocusableField(wtf_size_t start_index) {
   for (wtf_size_t field_index = start_index; field_index < fields_.size();
        ++field_index) {
     if (fields_[field_index]->IsFocusable()) {
-      fields_[field_index]->Focus();
+      fields_[field_index]->Focus(FocusParams(FocusTrigger::kUserGesture));
       return true;
     }
   }
@@ -706,7 +673,7 @@ bool DateTimeEditElement::FocusOnPreviousField(
   while (field_index > 0) {
     --field_index;
     if (fields_[field_index]->IsFocusable()) {
-      fields_[field_index]->Focus();
+      fields_[field_index]->Focus(FocusParams(FocusTrigger::kUserGesture));
       return true;
     }
   }
@@ -763,6 +730,8 @@ void DateTimeEditElement::GetLayout(const LayoutParameters& layout_parameters,
   if (!HasChildren()) {
     auto* element = MakeGarbageCollected<HTMLDivElement>(GetDocument());
     element->SetShadowPseudoId(fields_wrapper_pseudo_id);
+    element->SetInlineStyleProperty(CSSPropertyID::kUnicodeBidi,
+                                    CSSValueID::kNormal);
     AppendChild(element);
   }
   Element* fields_wrapper = FieldsWrapperElement();
@@ -789,7 +758,7 @@ void DateTimeEditElement::GetLayout(const LayoutParameters& layout_parameters,
     }
     if (DateTimeFieldElement* field =
             FieldAt(std::min(focused_field_index, fields_.size() - 1)))
-      field->Focus();
+      field->Focus(FocusParams(FocusTrigger::kUserGesture));
   }
 
   if (last_child_to_be_removed) {
@@ -860,10 +829,10 @@ void DateTimeEditElement::SetEmptyValue(
 }
 
 DateTimeFieldElement* DateTimeEditElement::GetField(DateTimeField type) const {
-  auto* it = base::ranges::find(fields_, type, &DateTimeFieldElement::Type);
+  auto it = std::ranges::find(fields_, type, &DateTimeFieldElement::Type);
   if (it == fields_.end())
     return nullptr;
-  return *it;
+  return it->Get();
 }
 
 bool DateTimeEditElement::HasField(DateTimeField type) const {
@@ -956,6 +925,12 @@ void DateTimeEditElement::StepUp() {
 
 void DateTimeEditElement::UpdateUIState() {
   if (IsDisabled()) {
+    // Skip blur() during Node::moveBefore: it would dispatch synchronous
+    // events to author script, which must not run while an atomic move is
+    // in progress. Mirrors the guard in `HTMLFieldSetElement::ChildrenChanged`.
+    if (GetDocument().StatePreservingAtomicMoveInProgress()) {
+      return;
+    }
     if (DateTimeFieldElement* field = FocusedField())
       field->blur();
   }

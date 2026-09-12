@@ -10,10 +10,9 @@ Before cut and paste:
 | " WebKit<#selection-focus>"
 
 After cut and paste:
-| "hello "
+| "hello "
 | <span>
 |   class="test"
-|   style="background-color: transparent;"
+|   style="background: transparent;"
 |   "world"
-| " "
-| "WebKit<#selection-caret>"
+| " WebKit<#selection-caret>"

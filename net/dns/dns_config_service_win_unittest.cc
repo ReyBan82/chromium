@@ -4,18 +4,21 @@
 
 #include "net/dns/dns_config_service_win.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/memory/free_deleter.h"
+#include "base/test/gmock_expected_support.h"
 #include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
+#include "net/dns/dns_test_util.h"
 #include "net/dns/public/dns_protocol.h"
 #include "net/dns/public/win_dns_system_settings.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace net {
 
@@ -43,74 +46,10 @@ TEST(DnsConfigServiceWinTest, ParseSearchList) {
   }
 }
 
-struct AdapterInfo {
-  IFTYPE if_type;
-  IF_OPER_STATUS oper_status;
-  const WCHAR* dns_suffix;
-  std::string dns_server_addresses[4];  // Empty string indicates end.
-  uint16_t ports[4];
-};
-
-std::unique_ptr<IP_ADAPTER_ADDRESSES, base::FreeDeleter> CreateAdapterAddresses(
-    const AdapterInfo* infos) {
-  size_t num_adapters = 0;
-  size_t num_addresses = 0;
-  for (size_t i = 0; infos[i].if_type; ++i) {
-    ++num_adapters;
-    for (size_t j = 0; !infos[i].dns_server_addresses[j].empty(); ++j) {
-      ++num_addresses;
-    }
-  }
-
-  size_t heap_size = num_adapters * sizeof(IP_ADAPTER_ADDRESSES) +
-                     num_addresses * (sizeof(IP_ADAPTER_DNS_SERVER_ADDRESS) +
-                                      sizeof(struct sockaddr_storage));
-  std::unique_ptr<IP_ADAPTER_ADDRESSES, base::FreeDeleter> heap(
-      static_cast<IP_ADAPTER_ADDRESSES*>(malloc(heap_size)));
-  CHECK(heap.get());
-  memset(heap.get(), 0, heap_size);
-
-  IP_ADAPTER_ADDRESSES* adapters = heap.get();
-  IP_ADAPTER_DNS_SERVER_ADDRESS* addresses =
-      reinterpret_cast<IP_ADAPTER_DNS_SERVER_ADDRESS*>(adapters + num_adapters);
-  struct sockaddr_storage* storage =
-      reinterpret_cast<struct sockaddr_storage*>(addresses + num_addresses);
-
-  for (size_t i = 0; i < num_adapters; ++i) {
-    const AdapterInfo& info = infos[i];
-    IP_ADAPTER_ADDRESSES* adapter = adapters + i;
-    if (i + 1 < num_adapters)
-      adapter->Next = adapter + 1;
-    adapter->IfType = info.if_type;
-    adapter->OperStatus = info.oper_status;
-    adapter->DnsSuffix = const_cast<PWCHAR>(info.dns_suffix);
-    IP_ADAPTER_DNS_SERVER_ADDRESS* address = nullptr;
-    for (size_t j = 0; !info.dns_server_addresses[j].empty(); ++j) {
-      --num_addresses;
-      if (j == 0) {
-        address = adapter->FirstDnsServerAddress = addresses + num_addresses;
-      } else {
-        // Note that |address| is moving backwards.
-        address = address->Next = address - 1;
-      }
-      IPAddress ip;
-      CHECK(ip.AssignFromIPLiteral(info.dns_server_addresses[j]));
-      IPEndPoint ipe = IPEndPoint(ip, info.ports[j]);
-      address->Address.lpSockaddr =
-          reinterpret_cast<LPSOCKADDR>(storage + num_addresses);
-      socklen_t length = sizeof(struct sockaddr_storage);
-      CHECK(ipe.ToSockAddr(address->Address.lpSockaddr, &length));
-      address->Address.iSockaddrLength = static_cast<int>(length);
-    }
-  }
-
-  return heap;
-}
-
 TEST(DnsConfigServiceWinTest, ConvertAdapterAddresses) {
   // Check nameservers and connection-specific suffix.
   const struct TestCase {
-    AdapterInfo input_adapters[4];        // |if_type| == 0 indicates end.
+    std::vector<AdapterInfo> input_adapters;
     std::string expected_nameservers[4];  // Empty string indicates end.
     std::string expected_suffix;
     uint16_t expected_ports[4];
@@ -123,7 +62,6 @@ TEST(DnsConfigServiceWinTest, ConvertAdapterAddresses) {
           { "1.0.0.1" } },
         { IF_TYPE_USB, IfOperStatusUp, L"chromium.org",
           { "10.0.0.10", "2001:FFFF::1111" } },
-        { 0 },
       },
       { "10.0.0.10", "2001:FFFF::1111" },
       "chromium.org",
@@ -147,7 +85,6 @@ TEST(DnsConfigServiceWinTest, ConvertAdapterAddresses) {
           { "1.0.0.1", "fec0:0:0:ffff::2", "8.8.8.8" } },
         { IF_TYPE_USB, IfOperStatusUp, L"chromium.org",
           { "10.0.0.10", "2001:FFFF::1111" } },
-        { 0 },
       },
       { "1.0.0.1", "8.8.8.8" },
       "example.com",
@@ -159,7 +96,6 @@ TEST(DnsConfigServiceWinTest, ConvertAdapterAddresses) {
         { IF_TYPE_FASTETHER, IfOperStatusDormant, L"example.com",
           { "1.0.0.1" } },
         { IF_TYPE_USB, IfOperStatusUp, L"chromium.org" },
-        { 0 },
       },
     },
   };
@@ -169,38 +105,43 @@ TEST(DnsConfigServiceWinTest, ConvertAdapterAddresses) {
     settings.addresses = CreateAdapterAddresses(t.input_adapters);
     // Default settings for the rest.
     std::vector<IPEndPoint> expected_nameservers;
-    for (size_t j = 0; !t.expected_nameservers[j].empty(); ++j) {
+    auto expected_nameservers_span = base::span(t.expected_nameservers);
+    auto expected_ports_span = base::span(t.expected_ports);
+
+    for (size_t j = 0; j < expected_nameservers_span.size() &&
+                       !expected_nameservers_span[j].empty();
+         ++j) {
       IPAddress ip;
-      ASSERT_TRUE(ip.AssignFromIPLiteral(t.expected_nameservers[j]));
-      uint16_t port = t.expected_ports[j];
-      if (!port)
+      ASSERT_TRUE(ip.AssignFromIPLiteral(expected_nameservers_span[j]));
+      uint16_t port = expected_ports_span[j];
+      if (!port) {
         port = dns_protocol::kDefaultPort;
+      }
+
       expected_nameservers.push_back(IPEndPoint(ip, port));
     }
-
-    absl::optional<DnsConfig> config =
-        internal::ConvertSettingsToDnsConfig(settings);
+    base::expected<DnsConfig, ReadWinSystemDnsSettingsError> config_or_error =
+        internal::ConvertSettingsToDnsConfig(std::move(settings));
     bool expected_success = !expected_nameservers.empty();
-    EXPECT_EQ(expected_success, config.has_value());
-    if (config.has_value()) {
-      EXPECT_EQ(expected_nameservers, config->nameservers);
-      EXPECT_THAT(config->search, testing::ElementsAre(t.expected_suffix));
+    EXPECT_EQ(expected_success, config_or_error.has_value());
+    if (config_or_error.has_value()) {
+      EXPECT_EQ(expected_nameservers, config_or_error->nameservers);
+      EXPECT_THAT(config_or_error->search,
+                  testing::ElementsAre(t.expected_suffix));
     }
   }
 }
-
 TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
-  AdapterInfo infos[2] = {
-    { IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", { "1.0.0.1" } },
-    { 0 },
+  const std::vector<AdapterInfo> infos = {
+      {IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", {"1.0.0.1"}},
   };
 
   const struct TestCase {
     struct {
-      absl::optional<std::wstring> policy_search_list;
-      absl::optional<std::wstring> tcpip_search_list;
-      absl::optional<std::wstring> tcpip_domain;
-      absl::optional<std::wstring> primary_dns_suffix;
+      std::optional<std::wstring> policy_search_list;
+      std::optional<std::wstring> tcpip_search_list;
+      std::optional<std::wstring> tcpip_domain;
+      std::optional<std::wstring> primary_dns_suffix;
       WinDnsSystemSettings::DevolutionSetting policy_devolution;
       WinDnsSystemSettings::DevolutionSetting dnscache_devolution;
       WinDnsSystemSettings::DevolutionSetting tcpip_devolution;
@@ -220,7 +161,7 @@ TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
       {
           // User-specified SearchList override.
           {
-              absl::nullopt,
+              std::nullopt,
               L"tcpip.searchlist.a,tcpip.searchlist.b",
               L"tcpip.domain",
               L"primary.dns.suffix",
@@ -233,7 +174,7 @@ TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
               L",bad.searchlist,parsed.as.empty",
               L"tcpip.searchlist,good.but.overridden",
               L"tcpip.domain",
-              absl::nullopt,
+              std::nullopt,
           },
           {"tcpip.domain", "connection.suffix"},
       },
@@ -271,8 +212,8 @@ TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
       {
           // No primary suffix. Devolution does not matter.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"",
               L"",
               {1, 2},
@@ -282,25 +223,25 @@ TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
       {
           // Devolution enabled by policy, level by dnscache.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"a.b.c.d.e",
-              absl::nullopt,
-              {1, absl::nullopt},  // policy_devolution: enabled, level
-              {0, 3},              // dnscache_devolution
-              {0, 1},              // tcpip_devolution
+              std::nullopt,
+              {1, std::nullopt},  // policy_devolution: enabled, level
+              {0, 3},             // dnscache_devolution
+              {0, 1},             // tcpip_devolution
           },
           {"a.b.c.d.e", "connection.suffix", "b.c.d.e", "c.d.e"},
       },
       {
           // Devolution enabled by dnscache, level by policy.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"a.b.c.d.e",
               L"f.g.i.l.j",
-              {absl::nullopt, 4},
-              {1, absl::nullopt},
+              {std::nullopt, 4},
+              {1, std::nullopt},
               {0, 3},
           },
           {"f.g.i.l.j", "connection.suffix", "g.i.l.j"},
@@ -308,50 +249,50 @@ TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
       {
           // Devolution enabled by default.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"a.b.c.d.e",
-              absl::nullopt,
-              {absl::nullopt, absl::nullopt},
-              {absl::nullopt, 3},
-              {absl::nullopt, 1},
+              std::nullopt,
+              {std::nullopt, std::nullopt},
+              {std::nullopt, 3},
+              {std::nullopt, 1},
           },
           {"a.b.c.d.e", "connection.suffix", "b.c.d.e", "c.d.e"},
       },
       {
           // Devolution enabled at level = 2, but nothing to devolve.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"a.b",
-              absl::nullopt,
-              {absl::nullopt, absl::nullopt},
-              {absl::nullopt, 2},
-              {absl::nullopt, 2},
+              std::nullopt,
+              {std::nullopt, std::nullopt},
+              {std::nullopt, 2},
+              {std::nullopt, 2},
           },
           {"a.b", "connection.suffix"},
       },
       {
           // Devolution disabled when no explicit level.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"a.b.c.d.e",
-              absl::nullopt,
-              {1, absl::nullopt},
-              {1, absl::nullopt},
-              {1, absl::nullopt},
+              std::nullopt,
+              {1, std::nullopt},
+              {1, std::nullopt},
+              {1, std::nullopt},
           },
           {"a.b.c.d.e", "connection.suffix"},
       },
       {
           // Devolution disabled by policy level.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"a.b.c.d.e",
-              absl::nullopt,
-              {absl::nullopt, 1},
+              std::nullopt,
+              {std::nullopt, 1},
               {1, 3},
               {1, 4},
           },
@@ -360,12 +301,12 @@ TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
       {
           // Devolution disabled by user setting.
           {
-              absl::nullopt,
-              absl::nullopt,
+              std::nullopt,
+              std::nullopt,
               L"a.b.c.d.e",
-              absl::nullopt,
-              {absl::nullopt, 3},
-              {absl::nullopt, 3},
+              std::nullopt,
+              {std::nullopt, 3},
+              {std::nullopt, 3},
               {0, 3},
           },
           {"a.b.c.d.e", "connection.suffix"},
@@ -383,44 +324,46 @@ TEST(DnsConfigServiceWinTest, ConvertSuffixSearch) {
     settings.dnscache_devolution = t.input_settings.dnscache_devolution;
     settings.tcpip_devolution = t.input_settings.tcpip_devolution;
 
-    EXPECT_THAT(
-        internal::ConvertSettingsToDnsConfig(settings),
-        testing::Optional(testing::Field(
-            &DnsConfig::search, testing::ElementsAreArray(t.expected_search))));
+    ASSERT_OK_AND_ASSIGN(
+        DnsConfig dns_config,
+        internal::ConvertSettingsToDnsConfig(std::move(settings)));
+    EXPECT_THAT(dns_config,
+                testing::Field(&DnsConfig::search,
+                               testing::ElementsAreArray(t.expected_search)));
   }
 }
 
 TEST(DnsConfigServiceWinTest, AppendToMultiLabelName) {
-  AdapterInfo infos[2] = {
-    { IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", { "1.0.0.1" } },
-    { 0 },
+  const std::vector<AdapterInfo> infos = {
+      {IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", {"1.0.0.1"}},
   };
 
   const struct TestCase {
-    absl::optional<DWORD> input;
+    std::optional<DWORD> input;
     bool expected_output;
   } cases[] = {
       {0, false},
       {1, true},
-      {absl::nullopt, false},
+      {std::nullopt, false},
   };
 
   for (const auto& t : cases) {
     WinDnsSystemSettings settings;
     settings.addresses = CreateAdapterAddresses(infos);
     settings.append_to_multi_label_name = t.input;
-    EXPECT_THAT(
-        internal::ConvertSettingsToDnsConfig(settings),
-        testing::Optional(testing::Field(&DnsConfig::append_to_multi_label_name,
-                                         testing::Eq(t.expected_output))));
+    ASSERT_OK_AND_ASSIGN(
+        DnsConfig dns_config,
+        internal::ConvertSettingsToDnsConfig(std::move(settings)));
+    EXPECT_THAT(dns_config,
+                testing::Field(&DnsConfig::append_to_multi_label_name,
+                               testing::Eq(t.expected_output)));
   }
 }
 
 // Setting have_name_resolution_policy_table should set `unhandled_options`.
 TEST(DnsConfigServiceWinTest, HaveNRPT) {
-  AdapterInfo infos[2] = {
-    { IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", { "1.0.0.1" } },
-    { 0 },
+  const std::vector<AdapterInfo> infos = {
+      {IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", {"1.0.0.1"}},
   };
 
   const struct TestCase {
@@ -435,19 +378,18 @@ TEST(DnsConfigServiceWinTest, HaveNRPT) {
     WinDnsSystemSettings settings;
     settings.addresses = CreateAdapterAddresses(infos);
     settings.have_name_resolution_policy = t.have_nrpt;
-    absl::optional<DnsConfig> config =
-        internal::ConvertSettingsToDnsConfig(settings);
-    ASSERT_TRUE(config.has_value());
-    EXPECT_EQ(t.unhandled_options, config->unhandled_options);
-    EXPECT_EQ(t.have_nrpt, config->use_local_ipv6);
+    ASSERT_OK_AND_ASSIGN(
+        DnsConfig dns_config,
+        internal::ConvertSettingsToDnsConfig(std::move(settings)));
+    EXPECT_EQ(t.unhandled_options, dns_config.unhandled_options);
+    EXPECT_EQ(t.have_nrpt, dns_config.use_local_ipv6);
   }
 }
 
 // Setting have_proxy should set `unhandled_options`.
 TEST(DnsConfigServiceWinTest, HaveProxy) {
-  AdapterInfo infos[2] = {
+  const std::vector<AdapterInfo> infos = {
       {IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", {"1.0.0.1"}},
-      {0},
   };
 
   const struct TestCase {
@@ -462,31 +404,33 @@ TEST(DnsConfigServiceWinTest, HaveProxy) {
     WinDnsSystemSettings settings;
     settings.addresses = CreateAdapterAddresses(infos);
     settings.have_proxy = t.have_proxy;
-    EXPECT_THAT(
-        internal::ConvertSettingsToDnsConfig(settings),
-        testing::Optional(testing::Field(&DnsConfig::unhandled_options,
-                                         testing::Eq(t.unhandled_options))));
+    ASSERT_OK_AND_ASSIGN(
+        DnsConfig dns_config,
+        internal::ConvertSettingsToDnsConfig(std::move(settings)));
+    EXPECT_THAT(dns_config, testing::Field(&DnsConfig::unhandled_options,
+                                           testing::Eq(t.unhandled_options)));
   }
 }
 
 // Setting uses_vpn should set `unhandled_options`.
 TEST(DnsConfigServiceWinTest, UsesVpn) {
-  AdapterInfo infos[3] = {
+  const std::vector<AdapterInfo> infos = {
       {IF_TYPE_USB, IfOperStatusUp, L"connection.suffix", {"1.0.0.1"}},
       {IF_TYPE_PPP, IfOperStatusUp, L"connection.suffix", {"1.0.0.1"}},
-      {0},
   };
 
   WinDnsSystemSettings settings;
   settings.addresses = CreateAdapterAddresses(infos);
-  EXPECT_THAT(internal::ConvertSettingsToDnsConfig(settings),
-              testing::Optional(testing::Field(&DnsConfig::unhandled_options,
-                                               testing::IsTrue())));
+  ASSERT_OK_AND_ASSIGN(
+      DnsConfig dns_config,
+      internal::ConvertSettingsToDnsConfig(std::move(settings)));
+  EXPECT_THAT(dns_config,
+              testing::Field(&DnsConfig::unhandled_options, testing::IsTrue()));
 }
 
 // Setting adapter specific nameservers should set `unhandled_options`.
 TEST(DnsConfigServiceWinTest, AdapterSpecificNameservers) {
-  AdapterInfo infos[3] = {
+  const std::vector<AdapterInfo> infos = {
       {IF_TYPE_FASTETHER,
        IfOperStatusUp,
        L"example.com",
@@ -495,20 +439,21 @@ TEST(DnsConfigServiceWinTest, AdapterSpecificNameservers) {
        IfOperStatusUp,
        L"chromium.org",
        {"10.0.0.10", "2001:FFFF::1111"}},
-      {0},
   };
 
   WinDnsSystemSettings settings;
   settings.addresses = CreateAdapterAddresses(infos);
-  EXPECT_THAT(internal::ConvertSettingsToDnsConfig(settings),
-              testing::Optional(testing::Field(&DnsConfig::unhandled_options,
-                                               testing::IsTrue())));
+  ASSERT_OK_AND_ASSIGN(
+      DnsConfig dns_config,
+      internal::ConvertSettingsToDnsConfig(std::move(settings)));
+  EXPECT_THAT(dns_config,
+              testing::Field(&DnsConfig::unhandled_options, testing::IsTrue()));
 }
 
 // Setting adapter specific nameservers for non operational adapter should not
 // set `unhandled_options`.
 TEST(DnsConfigServiceWinTest, AdapterSpecificNameserversForNo) {
-  AdapterInfo infos[3] = {
+  const std::vector<AdapterInfo> infos = {
       {IF_TYPE_FASTETHER,
        IfOperStatusUp,
        L"example.com",
@@ -517,14 +462,15 @@ TEST(DnsConfigServiceWinTest, AdapterSpecificNameserversForNo) {
        IfOperStatusDown,
        L"chromium.org",
        {"10.0.0.10", "2001:FFFF::1111"}},
-      {0},
   };
 
   WinDnsSystemSettings settings;
   settings.addresses = CreateAdapterAddresses(infos);
-  EXPECT_THAT(internal::ConvertSettingsToDnsConfig(settings),
-              testing::Optional(testing::Field(&DnsConfig::unhandled_options,
-                                               testing::IsFalse())));
+  ASSERT_OK_AND_ASSIGN(
+      DnsConfig dns_config,
+      internal::ConvertSettingsToDnsConfig(std::move(settings)));
+  EXPECT_THAT(dns_config, testing::Field(&DnsConfig::unhandled_options,
+                                         testing::IsFalse()));
 }
 
 }  // namespace

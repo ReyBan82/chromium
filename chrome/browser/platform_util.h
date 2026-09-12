@@ -7,11 +7,11 @@
 
 #include "base/functional/callback_forward.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/common/buildflags.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/native_ui_types.h"
 
-class Browser;
+class BrowserWindowInterface;
 class GURL;
 class Profile;
 
@@ -55,6 +55,10 @@ typedef base::OnceCallback<void(OpenOperationResult)> OpenOperationCallback;
 // Note: On all platforms, the user may be shown additional UI if there is no
 // suitable handler for |full_path|. On Chrome OS, all errors will result in
 // visible error messages iff |callback| is not specified.
+//
+// The |profile| is used to determine the running profile of file manager app in
+// Chrome OS only. |profile| is not used in platforms other than Chrome OS.
+//
 // Must be called on the UI thread.
 void OpenItem(Profile* profile,
               const base::FilePath& full_path,
@@ -62,16 +66,18 @@ void OpenItem(Profile* profile,
               OpenOperationCallback callback);
 
 // Opens the folder containing the item specified by |full_path| in the
-// desktop's default manner. If possible, the item will be selected. The
-// |profile| is used to determine the running profile of file manager app in
-// Chrome OS only. |profile| is not used in platforms other than Chrome OS. Must
-// be called on the UI thread.
+// desktop's default manner. If possible, the item will be selected.
+//
+// The |profile| is used to determine the running profile of file manager app in
+// Chrome OS only. |profile| is not used in platforms other than Chrome OS.
+//
+// Must be called on the UI thread.
 void ShowItemInFolder(Profile* profile, const base::FilePath& full_path);
 
 // Open the given external protocol URL in the desktop's default manner.
 // (For example, mailto: URLs in the default mail user agent.)
 // Must be called from the UI thread.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 void OpenExternal(Profile* profile, const GURL& url);
 #else
 void OpenExternal(const GURL& url);
@@ -106,13 +112,17 @@ bool IsVisible(gfx::NativeView view);
 bool IsSwipeTrackingFromScrollEventsEnabled();
 
 // Returns the active window which accepts keyboard inputs.
-NSWindow* GetActiveWindow();
+gfx::NativeWindow GetActiveWindow();
 #endif
 
+#if BUILDFLAG(IS_CHROMEOS)
 // Returns true if the given browser window is in locked fullscreen mode
 // (a special type of fullscreen where the user is locked into one browser
 // window).
-bool IsBrowserLockedFullscreen(const Browser* browser);
+// TODO(crbug.com/365146870): Deprecate in favor of LockedStateController and
+// BrowserDelegate::IsOnTaskState.
+bool IsBrowserLockedFullscreen(const BrowserWindowInterface* browser);
+#endif
 
 }  // namespace platform_util
 

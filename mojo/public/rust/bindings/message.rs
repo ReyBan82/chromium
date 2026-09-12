@@ -1,109 +1,92 @@
-// Copyright 2016 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::bindings::decoding::{Decoder, ValidationError};
-use crate::bindings::encoding;
-use crate::bindings::encoding::{Context, DataHeaderValue, Encoder, DATA_HEADER_SIZE};
-use crate::bindings::mojom::{MojomEncodable, MojomPointer, MojomStruct};
+//! This module defines the rust representation of a Mojom message. It consists
+//! of a structured header, followed by an unstructured payload (a series of
+//! bytes representing a value that has been serialized to its Mojom wire
+//! representation).
 
-/// A flag for the message header indicating that no flag has been set.
-pub const MESSAGE_HEADER_NO_FLAG: u32 = 0;
-
-/// A flag for the message header indicating that this message expects
-/// a response.
-pub const MESSAGE_HEADER_EXPECT_RESPONSE: u32 = 1;
-
-/// A flag for the message header indicating that this message is
-/// a response.
-pub const MESSAGE_HEADER_IS_RESPONSE: u32 = 2;
-
-const MESSAGE_HEADER_VERSIONS: [(u32, u32); 2] = [(0, 24), (1, 32)];
-
-/// A message header object implemented as a Mojom struct.
-pub struct MessageHeader {
-    pub version: u32,
-    pub interface_id: u32,
-    pub name: u32,
-    pub flags: u32,
-    pub request_id: u64,
+chromium::import! {
+    "//mojo/public/rust/mojom_value_parser";
+    "//mojo/public/rust/system";
 }
 
-impl MessageHeader {
-    /// Create a new MessageHeader.
-    pub fn new(version: u32, name: u32, flags: u32) -> MessageHeader {
-        MessageHeader { version: version, interface_id: 0, name: name, flags: flags, request_id: 0 }
-    }
+use crate::message_header::*;
+pub use system::message::{
+    BadMessageError, ReadableBytesOnlyMessage, ReadableWithHandlesMessage, SendableMessage,
+    WritableMessage,
+};
+use system::mojo_types::UntypedHandle;
+
+/// Represents a Mojom message with a structured header and unstructured
+/// payload.
+///
+/// This type does not make any guarantees. It is the user's responsibility to
+/// ensure that the header and payload combine to create a valid Mojom message.
+/// In practice, this means ensuring that the payload represents an encoded
+/// mojom value (obtained from mojom_value_parser::serialize), and that the
+/// header matches the value. See message_header.rs for more information on
+/// headers.
+pub struct MojomMessage {
+    pub header: MessageHeader,
+    pub payload: Vec<u8>,
+    pub handles: Vec<UntypedHandle>,
+    // we keep the raw handle around so we can report a bad message later if
+    // necessary.
+    pub raw_message_handle: Option<ReadableBytesOnlyMessage>,
 }
 
-impl MojomPointer for MessageHeader {
-    fn header_data(&self) -> DataHeaderValue {
-        DataHeaderValue::Version(self.version)
-    }
-
-    /// Get the serialized size.
+impl MojomMessage {
+    /// Parse the provided raw message object's header, and extract its data.
     ///
-    /// This value differs based on whether or not
-    /// a request_id is necessary.
-    fn serialized_size(&self, _context: &Context) -> usize {
-        let mut size = DATA_HEADER_SIZE + 12;
-        if self.flags != MESSAGE_HEADER_NO_FLAG {
-            size += 8;
-        }
-        encoding::align_default(size)
-    }
+    /// If parsing fails, this will return `None` and report the original
+    /// message as malformed.
+    pub fn parse_raw_or_report_bad_message(msg: ReadableWithHandlesMessage) -> Option<Self> {
+        let (handles, mut msg_bytes_only) = msg.read_data().unwrap();
 
-    fn encode_value(self, encoder: &mut Encoder, context: Context) {
-        MojomEncodable::encode(self.interface_id, encoder, context.clone());
-        MojomEncodable::encode(self.name, encoder, context.clone());
-        MojomEncodable::encode(self.flags, encoder, context.clone());
-        if self.version > 0 {
-            MojomEncodable::encode(self.request_id, encoder, context.clone());
-        }
-    }
-
-    fn decode_value(decoder: &mut Decoder, context: Context) -> Result<Self, ValidationError> {
-        let state = decoder.get_mut(&context);
-        let version = match state.decode_struct_header(&MESSAGE_HEADER_VERSIONS) {
-            Ok(header) => header.data(),
-            Err(err) => return Err(err),
-        };
-        let interface_id = state.decode::<u32>();
-        let name = state.decode::<u32>();
-        let flags = state.decode::<u32>();
-        if flags > MESSAGE_HEADER_IS_RESPONSE {
-            return Err(ValidationError::MessageHeaderInvalidFlags);
-        }
-        if version == 0 {
-            if flags == MESSAGE_HEADER_IS_RESPONSE || flags == MESSAGE_HEADER_EXPECT_RESPONSE {
-                return Err(ValidationError::MessageHeaderMissingRequestId);
+        let raw_bytes = msg_bytes_only.read_bytes().unwrap();
+        let (remaining_bytes, header) = match MessageHeader::deserialize(raw_bytes) {
+            Ok(data) => data,
+            Err(err) => {
+                let _ = msg_bytes_only.report_bad_message(&err.to_string());
+                return None;
             }
-            Ok(MessageHeader {
-                version: version,
-                interface_id: interface_id,
-                name: name,
-                flags: flags,
-                request_id: 0,
-            })
-        } else if version == 1 {
-            Ok(MessageHeader {
-                version: version,
-                interface_id: interface_id,
-                name: name,
-                flags: flags,
-                request_id: state.decode::<u64>(),
-            })
-        } else {
-            return Err(ValidationError::UnexpectedStructHeader);
+        };
+
+        // We might be able to avoid allocating here if we had a better
+        // MojomMessage type.
+        let payload = remaining_bytes.to_vec();
+        Some(MojomMessage { header, payload, handles, raw_message_handle: Some(msg_bytes_only) })
+    }
+
+    /// Parse the given raw message into a structured representation.
+    pub fn report_bad_message(&mut self, error_msg: &str) -> Result<(), BadMessageError> {
+        match &mut self.raw_message_handle {
+            Some(raw_msg) => raw_msg.report_bad_message(error_msg),
+            // This should only happen if someone calls this function on a message
+            // they didn't receive, which means they created it themselves.
+            None => panic!("Cannot report a bad message that doesn't have an underlying handle"),
         }
     }
-}
 
-impl MojomEncodable for MessageHeader {
-    impl_encodable_for_pointer!();
-    fn compute_size(&self, context: Context) -> usize {
-        self.serialized_size(&context)
+    /// Serialize this message into its binary equivalent, and return the
+    /// attached handles
+    pub fn into_data(self) -> (Vec<u8>, Vec<UntypedHandle>) {
+        let mut serialized = self.header.serialize();
+        serialized.extend(self.payload);
+        (serialized, self.handles)
     }
 }
 
-impl MojomStruct for MessageHeader {}
+impl From<MojomMessage> for SendableMessage {
+    fn from(msg: MojomMessage) -> Self {
+        // This is more of a sanity check. There is nothing stopping us from re-sending
+        // a message given that the handle is there, but we should never end up in that
+        // situation, hence a technical bug somewhere.
+        assert!(msg.raw_message_handle.is_none(), "Cannot re-send an incoming message");
+        let (payload, handles) = msg.into_data();
+        // This can only fail if we're out of memory
+        WritableMessage::new_with_data(&payload, handles).unwrap().into()
+    }
+}

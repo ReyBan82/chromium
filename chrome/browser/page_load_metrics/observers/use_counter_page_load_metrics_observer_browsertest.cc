@@ -26,8 +26,8 @@ class UseCounterPageLoadMetricsObserverBrowserTest
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
     feature_list_.InitWithFeaturesAndParameters(
-        content::DefaultEnabledBackForwardCacheParametersForTests(),
-        content::DefaultDisabledBackForwardCacheParametersForTests());
+        content::GetDefaultEnabledBackForwardCacheFeaturesForTesting(),
+        content::GetDefaultDisabledBackForwardCacheFeaturesForTesting());
     MetricIntegrationTest::SetUpCommandLine(command_line);
     vmodule_switches_.InitWithSwitches("back_forward_cache_impl=1");
   }
@@ -97,17 +97,17 @@ IN_PROC_BROWSER_TEST_F(UseCounterPageLoadMetricsObserverBrowserTest,
   for (auto feature : features_0) {
     histogram_tester().ExpectBucketCount(
         "Blink.UseCounter.Features",
-        static_cast<base::Histogram::Sample>(feature), 1);
+        static_cast<base::Histogram::Sample32>(feature), 1);
     histogram_tester().ExpectBucketCount(
         "Blink.UseCounter.MainFrame.Features",
-        static_cast<base::Histogram::Sample>(feature), 1);
+        static_cast<base::Histogram::Sample32>(feature), 1);
   }
   for (auto feature : features_1) {
     histogram_tester().ExpectBucketCount(
         "Blink.UseCounter.Features",
-        static_cast<base::Histogram::Sample>(feature), 1);
+        static_cast<base::Histogram::Sample32>(feature), 1);
     histogram_tester().ExpectBucketCount(
         "Blink.UseCounter.MainFrame.Features",
-        static_cast<base::Histogram::Sample>(feature), 1);
+        static_cast<base::Histogram::Sample32>(feature), 1);
   }
 }

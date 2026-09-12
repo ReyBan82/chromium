@@ -10,12 +10,14 @@
 
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory_coordinator/test_memory_consumer_registry.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
 #include "base/synchronization/lock.h"
+#include "base/test/task_environment.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
+#include "net/base/features.h"
 #include "net/cert/cert_net_fetcher.h"
-#include "net/cert/ct_policy_enforcer.h"
 #include "net/cert/mock_cert_verifier.h"
 #include "net/cert/multi_log_ct_verifier.h"
 #include "net/dns/mock_host_resolver.h"
@@ -76,9 +78,15 @@ void VerifyFailure(net::Error expected_error,
   EXPECT_EQ(0u, actual_body.size());
 }
 
-class CertNetFetcherURLLoaderTest : public PlatformTest {
+class CertNetFetcherURLLoaderTest : public PlatformTest,
+                                    public net::WithTaskEnvironment {
  public:
-  CertNetFetcherURLLoaderTest() {
+  CertNetFetcherURLLoaderTest()
+      : net::WithTaskEnvironment(
+            base::test::TaskEnvironment::TimeSource::DEFAULT,
+            // TODO(crbug.com/463794414): Enable the Net Task Scheduler on
+            // this test.
+            {net::features::kNetTaskScheduler}) {
     test_server_.AddDefaultHandlers(base::FilePath(kDocRoot));
     StartNetworkThread();
   }
@@ -213,6 +221,8 @@ class CertNetFetcherURLLoaderTest : public PlatformTest {
     done->Signal();
   }
 
+  base::TestMemoryConsumerRegistry test_memory_consumer_registry_;
+
   net::EmbeddedTestServer test_server_;
   std::unique_ptr<base::Thread> creation_thread_;
   std::unique_ptr<CertNetFetcherTestUtil> test_util_;
@@ -240,8 +250,7 @@ class SecureDnsInterceptor : public net::URLRequestInterceptor {
 };
 
 class CertNetFetcherURLLoaderTestWithSecureDnsInterceptor
-    : public CertNetFetcherURLLoaderTest,
-      public net::WithTaskEnvironment {
+    : public CertNetFetcherURLLoaderTest {
  public:
   CertNetFetcherURLLoaderTestWithSecureDnsInterceptor()
       : invoked_interceptor_(false) {}

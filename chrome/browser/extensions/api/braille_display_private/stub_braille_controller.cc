@@ -6,12 +6,13 @@
 
 #include <memory>
 
+#include "base/memory/singleton.h"
+
 namespace extensions {
 namespace api {
 namespace braille_display_private {
 
-StubBrailleController::StubBrailleController() {
-}
+StubBrailleController::StubBrailleController() = default;
 
 std::unique_ptr<DisplayState> StubBrailleController::GetDisplayState() {
   return std::make_unique<DisplayState>();

@@ -4,6 +4,7 @@
 
 #include "components/account_manager_core/chromeos/account_manager.h"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -13,11 +14,14 @@
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/hash/sha1.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/run_loop.h"
+#include "base/strings/escape.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "components/prefs/testing_pref_service.h"
 #include "google_apis/gaia/gaia_urls.h"
 #include "google_apis/gaia/google_service_auth_error.h"
@@ -25,9 +29,9 @@
 #include "google_apis/gaia/oauth2_access_token_fetcher.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
+#include "services/network/test/test_utils.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace account_manager {
 
@@ -54,8 +58,6 @@ constexpr char kAccessTokenResponse[] = R"(
     })";
 const ::account_manager::AccountKey kGaiaAccountKey = {
     "gaia_id", ::account_manager::AccountType::kGaia};
-const ::account_manager::AccountKey kActiveDirectoryAccountKey = {
-    "object_guid", ::account_manager::AccountType::kActiveDirectory};
 
 bool IsAccountKeyPresent(
     const std::vector<::account_manager::Account>& accounts,
@@ -103,53 +105,25 @@ class AccountManagerTest : public testing::Test {
   // Gets the list of accounts stored in |account_manager|.
   std::vector<::account_manager::Account> GetAccountsBlocking(
       AccountManager* const account_manager) {
-    std::vector<::account_manager::Account> accounts;
-
-    base::RunLoop run_loop;
-    account_manager->GetAccounts(base::BindLambdaForTesting(
-        [&accounts, &run_loop](
-            const std::vector<::account_manager::Account>& stored_accounts) {
-          accounts = stored_accounts;
-          run_loop.Quit();
-        }));
-    run_loop.Run();
-
-    return accounts;
+    base::test::TestFuture<const std::vector<::account_manager::Account>&>
+        future;
+    account_manager->GetAccounts(future.GetCallback());
+    return future.Get();
   }
 
   // Gets the raw email for |account_key|.
   std::string GetAccountEmailBlocking(
       const ::account_manager::AccountKey& account_key) {
-    std::string raw_email;
-
-    base::RunLoop run_loop;
-    account_manager_->GetAccountEmail(
-        account_key,
-        base::BindLambdaForTesting(
-            [&raw_email, &run_loop](const std::string& stored_raw_email) {
-              raw_email = stored_raw_email;
-              run_loop.Quit();
-            }));
-    run_loop.Run();
-
-    return raw_email;
+    base::test::TestFuture<const std::string&> future;
+    account_manager_->GetAccountEmail(account_key, future.GetCallback());
+    return future.Get();
   }
 
   bool HasDummyGaiaTokenBlocking(
       const ::account_manager::AccountKey& account_key) {
-    bool has_dummy_token_result = false;
-
-    base::RunLoop run_loop;
-    account_manager_->HasDummyGaiaToken(
-        account_key,
-        base::BindLambdaForTesting(
-            [&has_dummy_token_result, &run_loop](bool has_dummy_token) {
-              has_dummy_token_result = has_dummy_token;
-              run_loop.Quit();
-            }));
-    run_loop.Run();
-
-    return has_dummy_token_result;
+    base::test::TestFuture<bool> future;
+    account_manager_->HasDummyGaiaToken(account_key, future.GetCallback());
+    return future.Get();
   }
 
   // Helper method to reset and initialize |account_manager_| with default
@@ -217,6 +191,10 @@ class AccountManagerTest : public testing::Test {
     return test_url_loader_factory_.GetSafeWeakWrapper();
   }
 
+  network::TestURLLoaderFactory* GetTestURLLoaderFactory() {
+    return &test_url_loader_factory_;
+  }
+
  private:
   void InitializeAccountManager(AccountManager* account_manager,
                                 const base::FilePath& home_dir,
@@ -266,9 +244,9 @@ class AccountManagerObserver : public AccountManager::Observer {
   void Reset() {
     is_token_upserted_callback_called_ = false;
     is_account_removed_callback_called_ = false;
-    last_upserted_account_key_ = absl::nullopt;
+    last_upserted_account_key_ = std::nullopt;
     last_upserted_account_email_.clear();
-    last_removed_account_key_ = absl::nullopt;
+    last_removed_account_key_ = std::nullopt;
     last_removed_account_email_.clear();
     accounts_.clear();
   }
@@ -304,9 +282,9 @@ class AccountManagerObserver : public AccountManager::Observer {
  private:
   bool is_token_upserted_callback_called_ = false;
   bool is_account_removed_callback_called_ = false;
-  absl::optional<::account_manager::AccountKey> last_upserted_account_key_;
+  std::optional<::account_manager::AccountKey> last_upserted_account_key_;
   std::string last_upserted_account_email_;
-  absl::optional<::account_manager::AccountKey> last_removed_account_key_;
+  std::optional<::account_manager::AccountKey> last_removed_account_key_;
   std::string last_removed_account_email_;
   std::set<::account_manager::AccountKey> accounts_;
 };
@@ -440,11 +418,11 @@ TEST_F(AccountManagerTest, TestEphemeralMode) {
 }
 
 TEST_F(AccountManagerTest, TestEphemeralModeInitializationCallback) {
-  base::RunLoop run_loop;
+  base::test::TestFuture<void> future;
   AccountManager account_manager;
   account_manager.InitializeInEphemeralMode(test_url_loader_factory(),
-                                            run_loop.QuitClosure());
-  run_loop.Run();
+                                            future.GetCallback());
+  EXPECT_TRUE(future.Wait());
 }
 
 TEST_F(AccountManagerTest, TestAccountEmailPersistence) {
@@ -576,18 +554,6 @@ TEST_F(AccountManagerTest, TokenRevocationIsAttemptedForGaiaAccountRemovals) {
 }
 
 TEST_F(AccountManagerTest,
-       TokenRevocationIsNotAttemptedForNonGaiaAccountRemovals) {
-  ResetAndInitializeAccountManager();
-  EXPECT_CALL(*account_manager_spy(), RevokeGaiaTokenOnServer(_)).Times(0);
-
-  account_manager()->UpsertAccount(kActiveDirectoryAccountKey, kRawUserEmail,
-                                   AccountManager::kActiveDirectoryDummyToken);
-  RunAllPendingTasks();
-
-  account_manager()->RemoveAccount(kActiveDirectoryAccountKey);
-}
-
-TEST_F(AccountManagerTest,
        TokenRevocationIsNotAttemptedForInvalidTokenRemovals) {
   ResetAndInitializeAccountManager();
   EXPECT_CALL(*account_manager_spy(), RevokeGaiaTokenOnServer(_)).Times(0);
@@ -618,17 +584,6 @@ TEST_F(AccountManagerTest, IsTokenAvailableReturnsTrueForValidGaiaAccounts) {
   EXPECT_TRUE(account_manager()->IsTokenAvailable(kGaiaAccountKey));
 }
 
-TEST_F(AccountManagerTest,
-       IsTokenAvailableReturnsFalseForActiveDirectoryAccounts) {
-  EXPECT_FALSE(account_manager()->IsTokenAvailable(kActiveDirectoryAccountKey));
-  account_manager()->UpsertAccount(kActiveDirectoryAccountKey, kRawUserEmail,
-                                   AccountManager::kActiveDirectoryDummyToken);
-  RunAllPendingTasks();
-  EXPECT_FALSE(account_manager()->IsTokenAvailable(kActiveDirectoryAccountKey));
-  EXPECT_TRUE(
-      IsAccountKeyPresent(GetAccountsBlocking(), kActiveDirectoryAccountKey));
-}
-
 TEST_F(AccountManagerTest, IsTokenAvailableReturnsTrueForInvalidTokens) {
   EXPECT_FALSE(account_manager()->IsTokenAvailable(kGaiaAccountKey));
   account_manager()->UpsertAccount(kGaiaAccountKey, kRawUserEmail,
@@ -651,6 +606,25 @@ TEST_F(AccountManagerTest, HasDummyGaiaTokenReturnsFalseForValidTokens) {
   account_manager()->UpsertAccount(kGaiaAccountKey, kRawUserEmail, kGaiaToken);
   RunAllPendingTasks();
   EXPECT_FALSE(HasDummyGaiaTokenBlocking(kGaiaAccountKey));
+}
+
+TEST_F(AccountManagerTest, GetTokenHashReturnsAnEmptyStringForUnknownAccounts) {
+  base::test::TestFuture<const std::string&> future;
+  account_manager()->GetTokenHash(kGaiaAccountKey, future.GetCallback());
+  EXPECT_EQ(std::string(), future.Get());
+}
+
+TEST_F(AccountManagerTest, GetTokenHashReturnsSha1Hash) {
+  account_manager()->UpsertAccount(kGaiaAccountKey, kRawUserEmail, kGaiaToken);
+  RunAllPendingTasks();
+
+  base::test::TestFuture<const std::string&> future;
+  account_manager()->GetTokenHash(kGaiaAccountKey, future.GetCallback());
+
+  const base::SHA1Digest token_hash =
+      base::SHA1Hash(base::as_byte_span(std::string(kGaiaToken)));
+  const std::string token_hash_digest = base::HexEncode(token_hash);
+  EXPECT_EQ(token_hash_digest, future.Get());
 }
 
 TEST_F(AccountManagerTest,
@@ -698,25 +672,6 @@ TEST_F(AccountManagerTest, AccessTokenFetchSucceedsForGaiaAccounts) {
   RunAllPendingTasks();
 }
 
-TEST_F(AccountManagerTest, AccessTokenFetchFailsForActiveDirectoryAccounts) {
-  ResetAndInitializeAccountManager();
-  account_manager()->UpsertAccount(kActiveDirectoryAccountKey, kRawUserEmail,
-                                   AccountManager::kActiveDirectoryDummyToken);
-  RunAllPendingTasks();
-
-  MockAccessTokenConsumer consumer;
-  EXPECT_CALL(consumer,
-              OnGetTokenFailure(Property(
-                  &GoogleServiceAuthError::state,
-                  Eq(GoogleServiceAuthError::State::USER_NOT_SIGNED_UP))));
-
-  std::unique_ptr<OAuth2AccessTokenFetcher> access_token_fetcher =
-      account_manager()->CreateAccessTokenFetcher(kActiveDirectoryAccountKey,
-                                                  &consumer);
-  access_token_fetcher->Start(kFakeClientId, kFakeClientSecret, /*scopes=*/{});
-  RunAllPendingTasks();
-}
-
 TEST_F(AccountManagerTest, AccessTokenFetchFailsForUnknownAccounts) {
   ResetAndInitializeAccountManager();
 
@@ -724,12 +679,96 @@ TEST_F(AccountManagerTest, AccessTokenFetchFailsForUnknownAccounts) {
   EXPECT_CALL(consumer,
               OnGetTokenFailure(Property(
                   &GoogleServiceAuthError::state,
-                  Eq(GoogleServiceAuthError::State::USER_NOT_SIGNED_UP))));
+                  Eq(GoogleServiceAuthError::State::ACCOUNT_NOT_FOUND))));
 
   std::unique_ptr<OAuth2AccessTokenFetcher> access_token_fetcher =
       account_manager()->CreateAccessTokenFetcher(kGaiaAccountKey, &consumer);
   access_token_fetcher->Start(kFakeClientId, kFakeClientSecret, /*scopes=*/{});
   RunAllPendingTasks();
+}
+
+TEST_F(AccountManagerTest, AccessTokenFetchSubstitutesEmptyClientIdAndSecret) {
+  ResetAndInitializeAccountManager();
+  account_manager()->UpsertAccount(kGaiaAccountKey, kRawUserEmail, kGaiaToken);
+  RunAllPendingTasks();
+
+  std::string expected_client_id = base::EscapeUrlEncodedData(
+      GaiaUrls::GetInstance()->oauth2_chrome_client_id(), true);
+  std::string expected_client_secret = base::EscapeUrlEncodedData(
+      GaiaUrls::GetInstance()->oauth2_chrome_client_secret(), true);
+
+  bool interceptor_called = false;
+  GetTestURLLoaderFactory()->SetInterceptor(base::BindLambdaForTesting(
+      [&, expected_client_id,
+       expected_client_secret](const network::ResourceRequest& request) {
+        interceptor_called = true;
+        EXPECT_EQ(request.url, GaiaUrls::GetInstance()->oauth2_token_url());
+        std::string body = network::GetUploadData(request);
+        EXPECT_NE(body.find("client_id=" + expected_client_id),
+                  std::string::npos);
+        EXPECT_NE(body.find("client_secret=" + expected_client_secret),
+                  std::string::npos);
+      }));
+
+  AddFakeAccessTokenResponse();
+  MockAccessTokenConsumer consumer;
+  EXPECT_CALL(consumer,
+              OnGetTokenSuccess(
+                  Field(&OAuth2AccessTokenConsumer::TokenResponse::access_token,
+                        Eq(kFakeAccessToken))));
+  std::unique_ptr<OAuth2AccessTokenFetcher> access_token_fetcher =
+      account_manager()->CreateAccessTokenFetcher(kGaiaAccountKey, &consumer);
+  access_token_fetcher->Start(/*client_id=*/"", /*client_secret=*/"",
+                              /*scopes=*/{});
+  RunAllPendingTasks();
+  EXPECT_TRUE(interceptor_called);
+}
+
+TEST_F(AccountManagerTest, AccessTokenFetchSuccessIsAsynchronous) {
+  ResetAndInitializeAccountManager();
+  account_manager()->UpsertAccount(kGaiaAccountKey, kRawUserEmail, kGaiaToken);
+  RunAllPendingTasks();
+
+  AddFakeAccessTokenResponse();
+  bool callback_called = false;
+  MockAccessTokenConsumer consumer;
+  EXPECT_CALL(consumer,
+              OnGetTokenSuccess(
+                  Field(&OAuth2AccessTokenConsumer::TokenResponse::access_token,
+                        Eq(kFakeAccessToken))))
+      .WillOnce(
+          [&callback_called](const OAuth2AccessTokenConsumer::TokenResponse&) {
+            callback_called = true;
+          });
+  std::unique_ptr<OAuth2AccessTokenFetcher> access_token_fetcher =
+      account_manager()->CreateAccessTokenFetcher(kGaiaAccountKey, &consumer);
+  access_token_fetcher->Start(/*client_id=*/"", /*client_secret=*/"",
+                              /*scopes=*/{});
+  EXPECT_FALSE(callback_called);
+  RunAllPendingTasks();
+  EXPECT_TRUE(callback_called);
+}
+
+TEST_F(AccountManagerTest,
+       AccessTokenFetchFailsForUnknownAccountsIsAsynchronous) {
+  ResetAndInitializeAccountManager();
+
+  MockAccessTokenConsumer consumer;
+  bool callback_called = false;
+  EXPECT_CALL(consumer,
+              OnGetTokenFailure(Property(
+                  &GoogleServiceAuthError::state,
+                  Eq(GoogleServiceAuthError::State::ACCOUNT_NOT_FOUND))))
+      .WillOnce([&callback_called](const GoogleServiceAuthError&) {
+        callback_called = true;
+      });
+
+  std::unique_ptr<OAuth2AccessTokenFetcher> access_token_fetcher =
+      account_manager()->CreateAccessTokenFetcher(kGaiaAccountKey, &consumer);
+  access_token_fetcher->Start(kFakeClientId, kFakeClientSecret, /*scopes=*/{});
+  EXPECT_FALSE(callback_called);
+  RunAllPendingTasks();
+  EXPECT_TRUE(callback_called);
 }
 
 }  // namespace account_manager

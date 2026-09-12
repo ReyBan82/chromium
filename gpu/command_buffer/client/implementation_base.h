@@ -26,12 +26,11 @@
 #include "gpu/command_buffer/common/capabilities.h"
 #include "gpu/command_buffer/common/context_result.h"
 
-class GrDirectContext;
-
 namespace gpu {
 
 namespace gles2 {
 class QueryTracker;
+class GLES2ImplementationTest;
 }
 
 class CommandBufferHelper;
@@ -86,10 +85,6 @@ class GLES2_IMPL_EXPORT ImplementationBase
   void GetGpuFence(uint32_t gpu_fence_id,
                    base::OnceCallback<void(std::unique_ptr<gfx::GpuFence>)>
                        callback) override;
-  void SetGrContext(GrDirectContext* gr) override;
-  bool HasGrContextSupport() const override;
-  void WillCallGLFromSkia() override;
-  void DidCallGLFromSkia() override;
 
   // base::trace_event::MemoryDumpProvider implementation.
   bool OnMemoryDump(const base::trace_event::MemoryDumpArgs& args,
@@ -159,10 +154,20 @@ class GLES2_IMPL_EXPORT ImplementationBase
                           const char* function_name,
                           const char* msg) = 0;
 
+  friend class gles2::GLES2ImplementationTest;
+
   raw_ptr<CommandBufferHelper> helper_;
 
   base::WeakPtrFactory<ImplementationBase> weak_ptr_factory_{this};
 };
+
+// Helper for copying 2D pixel data without touching the padding between rows.
+GLES2_IMPL_EXPORT void RelaxedAtomicWriteMemcpyImageRowsSkippingPadding(
+    base::span<uint8_t> dst,
+    base::span<uint8_t> src,
+    size_t row_bytes,
+    size_t height,
+    size_t stride);
 
 }  // namespace gpu
 

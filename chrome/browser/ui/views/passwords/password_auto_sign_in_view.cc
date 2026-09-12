@@ -7,20 +7,19 @@
 #include <memory>
 
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/passwords/password_dialog_prompts.h"
 #include "chrome/browser/ui/passwords/passwords_model_delegate.h"
 #include "chrome/browser/ui/passwords/ui_utils.h"
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
-#include "chrome/browser/ui/views/chrome_typography.h"
-#include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/passwords/credentials_item_view.h"
 #include "chrome/grit/generated_resources.h"
-#include "components/strings/grit/components_strings.h"
-#include "content/public/browser/browser_context.h"
-#include "content/public/browser/storage_partition.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/web_contents.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/views/layout/fill_layout.h"
 
 int PasswordAutoSignInView::auto_signin_toast_timeout_ = 3;
@@ -29,7 +28,7 @@ PasswordAutoSignInView::~PasswordAutoSignInView() = default;
 
 PasswordAutoSignInView::PasswordAutoSignInView(
     content::WebContents* web_contents,
-    views::View* anchor_view)
+    views::BubbleAnchor anchor_view)
     : PasswordBubbleViewBase(web_contents,
                              anchor_view,
                              /*easily_dismissable=*/false),
@@ -38,7 +37,7 @@ PasswordAutoSignInView::PasswordAutoSignInView(
   const password_manager::PasswordForm& form = controller_.pending_password();
 
   SetShowCloseButton(false);
-  SetButtons(ui::DIALOG_BUTTON_NONE);
+  SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
 
   set_margins(
       ChromeLayoutProvider::Get()->GetInsetsMetric(views::INSETS_DIALOG));
@@ -54,13 +53,14 @@ PasswordAutoSignInView::PasswordAutoSignInView(
   credential->SetEnabled(false);
 
   // Setup the observer and maybe start the timer.
-  Browser* browser = chrome::FindBrowserWithWebContents(GetWebContents());
-  DCHECK(browser);
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+          GetWebContents());
 
   // Sign-in dialogs opened for inactive browser windows do not auto-close on
   // MacOS. This matches existing Cocoa bubble behavior.
-  // TODO(varkha): Remove the limitation as part of http://crbug/671916 .
-  if (browser->window()->IsActive()) {
+  // TODO(varkha): Remove the limitation as part of http://crbug.com/40496900 .
+  if (browser && browser->IsActive()) {
     timer_.Start(FROM_HERE, GetTimeout(), this,
                  &PasswordAutoSignInView::OnTimer);
   }
@@ -92,3 +92,6 @@ void PasswordAutoSignInView::OnTimer() {
 base::TimeDelta PasswordAutoSignInView::GetTimeout() {
   return base::Seconds(PasswordAutoSignInView::auto_signin_toast_timeout_);
 }
+
+BEGIN_METADATA(PasswordAutoSignInView)
+END_METADATA

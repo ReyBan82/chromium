@@ -1,10 +1,13 @@
 [Unit]
-Description=Chrome Remote Desktop instance for %I
+Description=Chrome Remote Desktop instance for %i
 After=network.target
+# This service (single-process host) cannot start if the multi-process host has
+# started, and vice versa.
+Conflicts=chrome-remote-desktop.service
 
 [Service]
 Type=simple
-User=%I
+User=%i
 Environment=XDG_SESSION_CLASS=user XDG_SESSION_TYPE=x11
 PAMName=chrome-remote-desktop
 # Ideally, PAM_TTY would be set to the X display for x11 sessions, but we don't

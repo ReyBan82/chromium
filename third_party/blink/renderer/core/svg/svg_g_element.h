@@ -31,9 +31,10 @@ class CORE_EXPORT SVGGElement final : public SVGGraphicsElement {
 
  public:
   explicit SVGGElement(Document&, ConstructionType = kCreateSVGElement);
+  ElementType GetElementType() const final { return ElementType::kSVGGElement; }
 
  protected:
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
  private:
   bool LayoutObjectIsNeeded(const DisplayStyle&) const override;

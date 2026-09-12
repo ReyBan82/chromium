@@ -7,11 +7,8 @@
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/ui/media_router/media_cast_mode.h"
 #include "chrome/browser/ui/media_router/ui_media_sink.h"
-#include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/test/views/chrome_views_test_base.h"
-#include "components/media_router/common/mojom/media_router.mojom.h"
-#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/views/controls/button/button.h"
@@ -74,8 +71,8 @@ TEST_F(CastDialogSinkButtonTest, SetStatusLabelForActiveSink) {
 
 TEST_F(CastDialogSinkButtonTest, SetStatusLabelForSinkWithIssue) {
   UIMediaSink sink{mojom::MediaRouteProviderId::CAST};
-  sink.issue =
-      Issue(IssueInfo("issue", IssueInfo::Severity::WARNING, "sinkId1"));
+  sink.issue = Issue::CreateIssueWithIssueInfo(
+      IssueInfo("issue", IssueInfo::Severity::WARNING, "sinkId1"));
   // Issue info should be the status text regardless of the sink state.
   sink.state = UIMediaSinkState::AVAILABLE;
   CastDialogSinkButton button1(views::Button::PressedCallback(), sink);
@@ -143,6 +140,26 @@ TEST_F(CastDialogSinkButtonTest, OverrideStatusText) {
   ASSERT_EQ(button.subtitle()->GetText(), status1);
   button.RestoreStatusText();
   EXPECT_EQ(button.subtitle()->GetText(), status1);
+}
+
+TEST_F(CastDialogSinkButtonTest, RequestFocus) {
+  UIMediaSink sink{mojom::MediaRouteProviderId::CAST};
+  sink.state = UIMediaSinkState::AVAILABLE;
+
+  auto widget = CreateTestWidget(views::Widget::InitParams::CLIENT_OWNS_WIDGET);
+  auto* button = widget->SetContentsView(std::make_unique<CastDialogSinkButton>(
+      views::Button::PressedCallback(), sink));
+
+  // When widget is inactive, RequestFocus() should be ignored.
+  EXPECT_FALSE(widget->IsActive());
+  button->RequestFocus();
+  EXPECT_FALSE(button->HasFocus());
+
+  // When widget is active, RequestFocus() should succeed.
+  widget->Show();
+  EXPECT_TRUE(widget->IsActive());
+  button->RequestFocus();
+  EXPECT_TRUE(button->HasFocus());
 }
 
 }  // namespace media_router

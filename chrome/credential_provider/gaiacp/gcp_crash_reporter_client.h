@@ -5,17 +5,14 @@
 #ifndef CHROME_CREDENTIAL_PROVIDER_GAIACP_GCP_CRASH_REPORTER_CLIENT_H_
 #define CHROME_CREDENTIAL_PROVIDER_GAIACP_GCP_CRASH_REPORTER_CLIENT_H_
 
+#include "base/files/file_path.h"
 #include "components/crash/core/app/crash_reporter_client.h"
-
-namespace base {
-class FilePath;
-}
 
 namespace credential_provider {
 
 class GcpCrashReporterClient : public crash_reporter::CrashReporterClient {
  public:
-  GcpCrashReporterClient() = default;
+  explicit GcpCrashReporterClient(base::FilePath crash_dump_location);
 
   GcpCrashReporterClient(const GcpCrashReporterClient&) = delete;
   GcpCrashReporterClient& operator=(const GcpCrashReporterClient&) = delete;
@@ -23,20 +20,13 @@ class GcpCrashReporterClient : public crash_reporter::CrashReporterClient {
   ~GcpCrashReporterClient() override;
 
   // crash_reporter::CrashReporterClient:
-  bool ShouldCreatePipeName(const std::wstring& process_type) override;
   bool GetAlternativeCrashDumpLocation(std::wstring* crash_dir) override;
   void GetProductNameAndVersion(const std::wstring& exe_path,
                                 std::wstring* product_name,
                                 std::wstring* version,
                                 std::wstring* special_build,
                                 std::wstring* channel_name) override;
-  bool ShouldShowRestartDialog(std::wstring* title,
-                               std::wstring* message,
-                               bool* is_rtl_locale) override;
-  bool AboutToRestart() override;
-  bool GetIsPerUserInstall() override;
   bool GetShouldDumpLargerDumps() override;
-  int GetResultCodeRespawnFailed() override;
   bool GetCrashDumpLocation(std::wstring* crash_dir) override;
   bool IsRunningUnattended() override;
   bool GetCollectStatsConsent() override;
@@ -45,6 +35,9 @@ class GcpCrashReporterClient : public crash_reporter::CrashReporterClient {
  protected:
   virtual base::FilePath GetPathForFileVersionInfo(
       const std::wstring& exe_path);
+
+ private:
+  const base::FilePath crash_dump_location_;
 };
 
 }  // namespace credential_provider

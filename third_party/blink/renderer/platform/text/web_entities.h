@@ -61,17 +61,11 @@ class PLATFORM_EXPORT WebEntities {
   // entities.
   explicit WebEntities(bool xml_entities);
 
-  // Check whether specified unicode has corresponding html or xml built-in
-  // entity name. If yes, return the entity notation. If not, returns an
-  // empty string. Parameter isHTML indicates check the code in html entity
-  // map or in xml entity map.
-  WTF::String EntityNameByCode(int code) const;
-
   // Returns a new string with corresponding entity names replaced.
-  WTF::String ConvertEntitiesInString(const WTF::String&) const;
+  String ConvertEntitiesInString(const String&) const;
 
  private:
-  typedef HashMap<int, WTF::String> EntitiesMapType;
+  typedef HashMap<int, String> EntitiesMapType;
   // An internal object that maps the Unicode character to corresponding
   // entity notation.
   EntitiesMapType entities_map_;

@@ -9,7 +9,7 @@
 #include "base/time/default_tick_clock.h"
 #include "components/shared_highlighting/core/common/shared_highlighting_features.h"
 #include "third_party/abseil-cpp/absl/base/macros.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/interface_registry.h"
 #include "third_party/blink/renderer/core/editing/ephemeral_range.h"
 #include "third_party/blink/renderer/core/editing/finder/find_buffer.h"
@@ -119,22 +119,13 @@ constexpr int kExactTextMaxChars = 300;
 constexpr int kNoContextMinChars = 20;
 constexpr int kMaxContextWords = 10;
 constexpr int kMaxRangeWords = 10;
-constexpr int kMaxIterationCountToRecord = 10;
 constexpr int kMinWordCount = 3;
 
-absl::optional<int> g_exactTextMaxCharsOverride;
+std::optional<int> g_exactTextMaxCharsOverride;
 
 TextFragmentSelectorGenerator::TextFragmentSelectorGenerator(
     LocalFrame* main_frame)
-    : frame_(main_frame) {
-  if (base::FeatureList::IsEnabled(
-          shared_highlighting::kSharedHighlightingRefinedMaxContextWords)) {
-    max_context_words_ =
-        shared_highlighting::kSharedHighlightingMaxContextWords.Get();
-  } else {
-    max_context_words_ = kMaxContextWords;
-  }
-}
+    : frame_(main_frame) {}
 
 void TextFragmentSelectorGenerator::Generate(const RangeInFlatTree& range,
                                              GenerateCallback callback) {
@@ -148,8 +139,10 @@ void TextFragmentSelectorGenerator::Generate(const RangeInFlatTree& range,
 }
 
 void TextFragmentSelectorGenerator::Reset() {
-  if (finder_)
+  if (finder_) {
     finder_->Cancel();
+    finder_.Clear();
+  }
 
   generation_start_time_ = base::DefaultTickClock::GetInstance()->NowTicks();
   state_ = kNotStarted;
@@ -161,7 +154,6 @@ void TextFragmentSelectorGenerator::Reset() {
   range_end_iterator_ = nullptr;
   num_context_words_ = 0;
   num_range_words_ = 0;
-  iteration_ = 0;
   selector_ = nullptr;
   range_ = nullptr;
   pending_generate_selector_callback_.Reset();
@@ -191,6 +183,8 @@ String TextFragmentSelectorGenerator::GetSelectorTargetText() const {
 
 void TextFragmentSelectorGenerator::DidFindMatch(const RangeInFlatTree& match,
                                                  bool is_unique) {
+  finder_.Clear();
+
   if (did_find_match_callback_for_testing_)
     std::move(did_find_match_callback_for_testing_).Run(is_unique);
 
@@ -211,6 +205,8 @@ void TextFragmentSelectorGenerator::DidFindMatch(const RangeInFlatTree& match,
 }
 
 void TextFragmentSelectorGenerator::NoMatchFound() {
+  finder_.Clear();
+
   state_ = kFailure;
   error_ = LinkGenerationError::kIncorrectSelector;
   ResolveSelectorState();
@@ -226,13 +222,13 @@ void TextFragmentSelectorGenerator::AdjustSelection() {
   Node* end_container = ephemeral_range.EndPosition().ComputeContainerNode();
   Node* corrected_start =
       ResolvePositionToNode(ephemeral_range.StartPosition());
-  int corrected_start_offset =
+  wtf_size_t corrected_start_offset =
       (corrected_start->isSameNode(start_container))
           ? ephemeral_range.StartPosition().ComputeOffsetInContainerNode()
           : 0;
 
   Node* corrected_end = ResolvePositionToNode(ephemeral_range.EndPosition());
-  int corrected_end_offset =
+  wtf_size_t corrected_end_offset =
       (corrected_end->isSameNode(end_container))
           ? ephemeral_range.EndPosition().ComputeOffsetInContainerNode()
           : 0;
@@ -251,8 +247,8 @@ void TextFragmentSelectorGenerator::AdjustSelection() {
     // because block limits are also word limits.
     String start_text = corrected_start->textContent();
     start_text.Ensure16Bit();
-    corrected_start_offset = FindWordStartBoundary(
-        start_text.Characters16(), start_text.length(), corrected_start_offset);
+    corrected_start_offset =
+        FindWordStartBoundary(start_text.Span16(), corrected_start_offset);
   }
 
   // If end node has no text or given end position point to the first visible
@@ -276,19 +272,18 @@ void TextFragmentSelectorGenerator::AdjustSelection() {
     // If |selection_end_pos| is at the beginning of a new word then don't
     // search for the word end as it will be the end of the next word, which was
     // not included in the selection.
-    if (corrected_end_offset != FindWordStartBoundary(end_text.Characters16(),
-                                                      end_text.length(),
-                                                      corrected_end_offset)) {
-      corrected_end_offset = FindWordEndBoundary(
-          end_text.Characters16(), end_text.length(), corrected_end_offset);
+    if (corrected_end_offset !=
+        FindWordStartBoundary(end_text.Span16(), corrected_end_offset)) {
+      corrected_end_offset =
+          FindWordEndBoundary(end_text.Span16(), corrected_end_offset);
     }
   }
 
   if (corrected_start != start_container ||
-      static_cast<int>(corrected_start_offset) !=
+      corrected_start_offset !=
           ephemeral_range.StartPosition().ComputeOffsetInContainerNode() ||
       corrected_end != end_container ||
-      static_cast<int>(corrected_end_offset) !=
+      corrected_end_offset !=
           ephemeral_range.EndPosition().ComputeOffsetInContainerNode()) {
     PositionInFlatTree start(corrected_start, corrected_start_offset);
     PositionInFlatTree end(corrected_end, corrected_end_offset);
@@ -344,8 +339,6 @@ void TextFragmentSelectorGenerator::StartGeneration() {
     return;
   }
 
-  UMA_HISTOGRAM_COUNTS_1000("SharedHighlights.LinkGenerated.SelectionLength",
-                            PlainText(range_->ToEphemeralRange()).length());
   state_ = kNeedsNewCandidate;
   GenerateSelectorCandidate();
 }
@@ -372,7 +365,6 @@ void TextFragmentSelectorGenerator::ResolveSelectorState() {
     case kNotStarted:
     case kNeedsNewCandidate:
       NOTREACHED();
-      ABSL_FALLTHROUGH_INTENDED;
     case kFailure:
       OnSelectorReady(
           TextFragmentSelector(TextFragmentSelector::SelectorType::kInvalid));
@@ -385,7 +377,6 @@ void TextFragmentSelectorGenerator::ResolveSelectorState() {
 
 void TextFragmentSelectorGenerator::RunTextFinder() {
   DCHECK(selector_);
-  iteration_++;
   // |FindMatch| will call |DidFindMatch| indicating if the match was unique.
   finder_ = MakeGarbageCollected<TextFragmentFinder>(
       *this, *selector_, frame_->GetDocument(),
@@ -580,7 +571,7 @@ void TextFragmentSelectorGenerator::ExtendContext() {
   DCHECK(selector_);
 
   // Give up if context is already too long.
-  if (num_context_words_ >= max_context_words_) {
+  if (num_context_words_ >= kMaxContextWords) {
     state_ = kFailure;
     error_ = LinkGenerationError::kContextLimitReached;
     return;
@@ -651,23 +642,12 @@ void TextFragmentSelectorGenerator::RecordAllMetrics(
   ukm::SourceId source_id = frame_->GetDocument()->UkmSourceID();
 
   if (selector.Type() != TextFragmentSelector::SelectorType::kInvalid) {
-    UMA_HISTOGRAM_COUNTS_1000("SharedHighlights.LinkGenerated.ParamLength",
-                              selector.ToString().length());
-
-    UMA_HISTOGRAM_EXACT_LINEAR("SharedHighlights.LinkGenerated.Iterations",
-                               iteration_, kMaxIterationCountToRecord);
     UMA_HISTOGRAM_TIMES("SharedHighlights.LinkGenerated.TimeToGenerate",
                         base::DefaultTickClock::GetInstance()->NowTicks() -
                             generation_start_time_);
-    UMA_HISTOGRAM_ENUMERATION(
-        "SharedHighlights.LinkGenerated.SelectorParameters",
-        TextFragmentAnchorMetrics::GetParametersForSelector(selector));
 
     shared_highlighting::LogLinkGeneratedSuccessUkmEvent(recorder, source_id);
   } else {
-    UMA_HISTOGRAM_EXACT_LINEAR(
-        "SharedHighlights.LinkGenerated.Error.Iterations", iteration_,
-        kMaxIterationCountToRecord);
     UMA_HISTOGRAM_TIMES("SharedHighlights.LinkGenerated.Error.TimeToGenerate",
                         base::DefaultTickClock::GetInstance()->NowTicks() -
                             generation_start_time_);

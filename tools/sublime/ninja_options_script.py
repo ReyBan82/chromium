@@ -19,18 +19,23 @@ from __future__ import print_function
 import imp
 import optparse
 import os
-import pipes
+import shlex
 
 ycm_module_path = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)),
-    '../vim/chromium.ycm_extra_conf.py'))
+  os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '../vim/chromium.ycm_extra_conf.py',
+  )
+)
 ycm_extra_conf = imp.load_source('ycm_extra_conf', ycm_module_path)
+
 
 def main():
   usage = "usage: %prog [options] file"
   parser = optparse.OptionParser(usage)
-  parser.add_option("-d", "--depot_tools", dest="depot_path",
-                  help="path to depot_tools")
+  parser.add_option(
+    "-d", "--depot_tools", dest="depot_path", help="path to depot_tools"
+  )
   (options, args) = parser.parse_args()
   if options.depot_path:
     os.environ["PATH"] += ":%s" % options.depot_path
@@ -43,7 +48,7 @@ def main():
   for flag in results['flags']:
     # The sublimeclang plugin expects to parse its input with shlex.
     # Defines and include path names may have spaces or quotes.
-    print(pipes.quote(flag))
+    print(shlex.quote(flag))
 
 
 if __name__ == "__main__":

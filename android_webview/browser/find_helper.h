@@ -8,6 +8,7 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "content/public/browser/web_contents_user_data.h"
 
 namespace content {
 class WebContents;
@@ -16,7 +17,8 @@ class WebContents;
 namespace android_webview {
 
 // Handles the WebView find-in-page API requests.
-class FindHelper {
+// Lifetime: WebView
+class FindHelper : public content::WebContentsUserData<FindHelper> {
  public:
   class Listener {
    public:
@@ -29,12 +31,10 @@ class FindHelper {
     virtual ~Listener() {}
   };
 
-  explicit FindHelper(content::WebContents* web_contents);
-
   FindHelper(const FindHelper&) = delete;
   FindHelper& operator=(const FindHelper&) = delete;
 
-  ~FindHelper();
+  ~FindHelper() override;
 
   // Sets the listener to receive find result updates.
   // Does not own the listener and must set to nullptr when invalid.
@@ -52,11 +52,13 @@ class FindHelper {
   void ClearMatches();
 
  private:
+  friend class content::WebContentsUserData<FindHelper>;
+
+  explicit FindHelper(content::WebContents* web_contents);
+
   void StartNewSession(const std::u16string& search_string);
   bool MaybeHandleEmptySearch(const std::u16string& search_string);
   void NotifyResults(int active_ordinal, int match_count, bool finished);
-
-  const raw_ptr<content::WebContents> web_contents_;
 
   // Listener results are reported to.
   raw_ptr<Listener> listener_ = nullptr;
@@ -77,6 +79,8 @@ class FindHelper {
   std::u16string last_search_string_;
   int last_match_count_ = -1;
   int last_active_ordinal_ = -1;
+
+  WEB_CONTENTS_USER_DATA_KEY_DECL();
 };
 
 }  // namespace android_webview

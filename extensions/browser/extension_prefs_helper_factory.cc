@@ -21,7 +21,8 @@ ExtensionPrefsHelper* ExtensionPrefsHelperFactory::GetForBrowserContext(
 
 // static
 ExtensionPrefsHelperFactory* ExtensionPrefsHelperFactory::GetInstance() {
-  return base::Singleton<ExtensionPrefsHelperFactory>::get();
+  static base::NoDestructor<ExtensionPrefsHelperFactory> instance;
+  return instance.get();
 }
 
 ExtensionPrefsHelperFactory::ExtensionPrefsHelperFactory()
@@ -34,16 +35,18 @@ ExtensionPrefsHelperFactory::ExtensionPrefsHelperFactory()
 
 ExtensionPrefsHelperFactory::~ExtensionPrefsHelperFactory() = default;
 
-KeyedService* ExtensionPrefsHelperFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ExtensionPrefsHelperFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new ExtensionPrefsHelper(
+  return std::make_unique<ExtensionPrefsHelper>(
       ExtensionPrefsFactory::GetForBrowserContext(context),
       ExtensionPrefValueMapFactory::GetForBrowserContext(context));
 }
 
 content::BrowserContext* ExtensionPrefsHelperFactory::GetBrowserContextToUse(
     content::BrowserContext* context) const {
-  return ExtensionsBrowserClient::Get()->GetOriginalContext(context);
+  return ExtensionsBrowserClient::Get()->GetContextRedirectedToOriginal(
+      context);
 }
 
 bool ExtensionPrefsHelperFactory::ServiceIsNULLWhileTesting() const {

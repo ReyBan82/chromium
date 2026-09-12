@@ -6,18 +6,22 @@
 #define THIRD_PARTY_BLINK_PUBLIC_COMMON_STORAGE_KEY_STORAGE_KEY_H_
 
 #include <iosfwd>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <tuple>
 
-#include "base/strings/string_piece_forward.h"
 #include "base/unguessable_token.h"
-#include "net/base/isolation_info.h"
 #include "net/base/schemeful_site.h"
-#include "net/cookies/cookie_partition_key.h"
 #include "net/cookies/site_for_cookies.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/common_export.h"
 #include "third_party/blink/public/mojom/storage_key/ancestor_chain_bit.mojom.h"
 #include "url/origin.h"
+
+namespace net {
+class CookiePartitionKey;
+class IsolationInfo;
+}
 
 namespace blink {
 
@@ -91,9 +95,13 @@ class BLINK_COMMON_EXPORT StorageKey {
   // (1D) Construct for a specific first or third party context.
   // This is a common entry point when constructing a context, and callsites
   // generally must branch and call CreateWithNonce() if a nonce is set.
+  // TODO(crbug.com/1199077): The default argument here is so tests don't need
+  // to be aware of it. Find a solution that removes this default arg.
   static StorageKey Create(const url::Origin& origin,
                            const net::SchemefulSite& top_level_site,
-                           blink::mojom::AncestorChainBit ancestor_chain_bit);
+                           blink::mojom::AncestorChainBit ancestor_chain_bit,
+                           bool third_party_partitioning_allowed =
+                               IsThirdPartyStoragePartitioningEnabled());
 
   // (1E) Construct for the provided isolation_info.
   // TODO(crbug.com/1346450): This does not account for extension URLs.
@@ -149,7 +157,7 @@ class BLINK_COMMON_EXPORT StorageKey {
       const url::Origin& origin,
       const net::SchemefulSite& top_level_site,
       const net::SchemefulSite& top_level_site_if_third_party_enabled,
-      const absl::optional<base::UnguessableToken>& nonce,
+      const std::optional<base::UnguessableToken>& nonce,
       blink::mojom::AncestorChainBit ancestor_chain_bit,
       blink::mojom::AncestorChainBit ancestor_chain_bit_if_third_party_enabled,
       StorageKey& out);
@@ -157,12 +165,12 @@ class BLINK_COMMON_EXPORT StorageKey {
   // (3D) Deserialization from string.
   // Note that if the deserialization wouldn't create a well-formed StorageKey
   // then nullopt is returned. This function must never DCHECK.
-  static absl::optional<StorageKey> Deserialize(base::StringPiece in);
+  static std::optional<StorageKey> Deserialize(std::string_view in);
 
   // A variant of deserialization for localStorage code only.
   // You almost always want to use Deserialize() instead.
-  static absl::optional<StorageKey> DeserializeForLocalStorage(
-      base::StringPiece in);
+  static std::optional<StorageKey> DeserializeForLocalStorage(
+      std::string_view in);
 
   // (3E) Serialization to string; origin must not be opaque.
   // Note that this function will DCHECK if the origin is opaque.
@@ -179,7 +187,11 @@ class BLINK_COMMON_EXPORT StorageKey {
 
   const net::SchemefulSite& top_level_site() const { return top_level_site_; }
 
-  const absl::optional<base::UnguessableToken>& nonce() const { return nonce_; }
+  // Returns true if unpartitioned storage access is forbidden for the current
+  // storage key.
+  bool ForbidsUnpartitionedStorageAccess() const { return nonce_.has_value(); }
+
+  const std::optional<base::UnguessableToken>& nonce() const { return nonce_; }
 
   blink::mojom::AncestorChainBit ancestor_chain_bit() const {
     return ancestor_chain_bit_;
@@ -202,18 +214,20 @@ class BLINK_COMMON_EXPORT StorageKey {
   // Returns true if ThirdPartyStoragePartitioning feature flag is enabled.
   static bool IsThirdPartyStoragePartitioningEnabled();
 
+  // `IsFirstPartyContext` returns true if the StorageKey is for a context that
+  // is "first-party", i.e. the StorageKey's top-level site and origin have
+  // the same scheme and domain, and all intervening frames in the frame tree
+  // are first-party.
+  //
   // `IsThirdPartyContext` returns true if the StorageKey is for a context that
   // is "third-party", i.e. the StorageKey's top-level site and origin have
   // different schemes and/or domains, or an intervening frame in the frame
-  // tree is third-party.
-  //
-  // `IsThirdPartyContext` returns true if the StorageKey was created with a
-  // nonce or has an AncestorChainBit value of kCrossSite.
-  bool IsThirdPartyContext() const {
-    return ancestor_chain_bit_ == blink::mojom::AncestorChainBit::kCrossSite ||
-           net::SchemefulSite(origin_) != top_level_site_;
+  // tree is third-party. StorageKeys created using a nonce instead of a
+  // top-level site will also be considered third-party.
+  bool IsFirstPartyContext() const {
+    return ancestor_chain_bit_ == blink::mojom::AncestorChainBit::kSameSite;
   }
-  bool IsFirstPartyContext() const { return !IsThirdPartyContext(); }
+  bool IsThirdPartyContext() const { return !IsFirstPartyContext(); }
 
   // Provides a concise string representation suitable for memory dumps.
   // Limits the length to `max_length` chars and strips special characters.
@@ -233,6 +247,23 @@ class BLINK_COMMON_EXPORT StorageKey {
   // info.)
   const net::SiteForCookies ToNetSiteForCookies() const;
 
+  // Return an instance of net::IsolationInfo. This is used for forms of storage
+  // like workers which have network access to ensure they only have access to
+  // network state in their partition.
+  //
+  // The IsolationInfo that this creates will not be exactly the same as the
+  // IsolationInfo of the context that created the worker. This is because
+  // StorageKey only stores the top-frame *site* whereas IsolationInfo normally
+  // uses top-frame *origin*. So we may lose the subdomain of the original
+  // context. Although this is imperfect, it is better than using first-party
+  // IsolationInfo for partitioned workers.
+  //
+  // For first-party contexts, the storage origin is used for the top-frame
+  // origin in the resulting IsolationInfo. This matches legacy behavior before
+  // storage partitioning, where the storage origin is always used as the
+  // top-frame origin.
+  const net::IsolationInfo ToPartialNetIsolationInfo() const;
+
   // Returns true if the registration key string is partitioned by top-level
   // site but storage partitioning is currently disabled, otherwise returns
   // false. Also returns false if the key string contains a serialized nonce.
@@ -242,7 +273,7 @@ class BLINK_COMMON_EXPORT StorageKey {
 
   // Cast a storage key to a cookie partition key. If cookie partitioning is not
   // enabled, then it will always return nullopt.
-  const absl::optional<net::CookiePartitionKey> ToCookiePartitionKey() const;
+  const std::optional<net::CookiePartitionKey> ToCookiePartitionKey() const;
 
   // Checks whether this StorageKey matches a given origin for the purposes of
   // clearing site data. This method should only be used in trusted contexts,
@@ -256,6 +287,10 @@ class BLINK_COMMON_EXPORT StorageKey {
   // in contrast to that.
   bool MatchesOriginForTrustedStorageDeletion(const url::Origin& origin) const;
 
+  // Like MatchesOriginForTrustedStorageDeletion, but for registrable domains.
+  bool MatchesRegistrableDomainForTrustedStorageDeletion(
+      std::string_view domain) const;
+
  private:
   // [Block 7 - Private Methods] - Keep in sync with BlinkStorageKey.
 
@@ -265,16 +300,23 @@ class BLINK_COMMON_EXPORT StorageKey {
   StorageKey(const url::Origin& origin,
              const net::SchemefulSite& top_level_site,
              const base::UnguessableToken* nonce,
-             blink::mojom::AncestorChainBit ancestor_chain_bit);
+             blink::mojom::AncestorChainBit ancestor_chain_bit,
+             bool third_party_partitioning_allowed);
 
   // (7B) Operators.
   // Note that not all must be friends, but all are to consolidate the header.
-  BLINK_COMMON_EXPORT
-  friend bool operator==(const StorageKey& lhs, const StorageKey& rhs);
-  BLINK_COMMON_EXPORT
-  friend bool operator!=(const StorageKey& lhs, const StorageKey& rhs);
-  BLINK_COMMON_EXPORT
-  friend bool operator<(const StorageKey& lhs, const StorageKey& rhs);
+  friend bool operator==(const StorageKey& lhs, const StorageKey& rhs) {
+    return std::tie(lhs.origin_, lhs.top_level_site_, lhs.nonce_,
+                    lhs.ancestor_chain_bit_) ==
+           std::tie(rhs.origin_, rhs.top_level_site_, rhs.nonce_,
+                    rhs.ancestor_chain_bit_);
+  }
+  friend auto operator<=>(const StorageKey& lhs, const StorageKey& rhs) {
+    return std::tie(lhs.origin_, lhs.top_level_site_, lhs.nonce_,
+                    lhs.ancestor_chain_bit_) <=>
+           std::tie(rhs.origin_, rhs.top_level_site_, rhs.nonce_,
+                    rhs.ancestor_chain_bit_);
+  }
   BLINK_COMMON_EXPORT
   friend std::ostream& operator<<(std::ostream& ostream, const StorageKey& sk);
 
@@ -283,6 +325,16 @@ class BLINK_COMMON_EXPORT StorageKey {
   // a key to ensure correctness. This does not imply that the key is
   // serializable as keys with opaque origins will still return true.
   bool IsValid() const;
+
+  // Not currently implemented in BlinkStorageKey since Blink generally uses
+  // WTF::HashMap and its variants.
+  template <typename H>
+  friend H AbslHashValue(H h, const StorageKey& key) {
+    return H::combine(std::move(h), key.origin_, key.top_level_site_,
+                      key.top_level_site_if_third_party_enabled_, key.nonce_,
+                      key.ancestor_chain_bit_,
+                      key.ancestor_chain_bit_if_third_party_enabled_);
+  }
 
   // [Block 8 - Private Members] - Keep in sync with BlinkStorageKey.
 
@@ -305,7 +357,7 @@ class BLINK_COMMON_EXPORT StorageKey {
 
   // Optional, forcing partitioned storage and used by anonymous iframes:
   // https://github.com/camillelamy/explainers/blob/master/anonymous_iframes.md
-  absl::optional<base::UnguessableToken> nonce_;
+  std::optional<base::UnguessableToken> nonce_;
 
   // kSameSite if the entire ancestor chain is same-site with the current frame.
   // kCrossSite otherwise. Used by service workers.

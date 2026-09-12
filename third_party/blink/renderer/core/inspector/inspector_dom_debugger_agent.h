@@ -48,7 +48,6 @@ class InspectorDOMAgent;
 class Node;
 
 namespace probe {
-class ExecuteScript;
 class UserCallback;
 }  // namespace probe
 
@@ -64,9 +63,7 @@ class CORE_EXPORT InspectorDOMDebuggerAgent final
                                           v8::Local<v8::Value>,
                                           V8EventListenerInfoList* listeners);
 
-  InspectorDOMDebuggerAgent(v8::Isolate*,
-                            InspectorDOMAgent*,
-                            v8_inspector::V8InspectorSession*);
+  InspectorDOMDebuggerAgent(v8::Isolate*, InspectorDOMAgent*);
   InspectorDOMDebuggerAgent(const InspectorDOMDebuggerAgent&) = delete;
   InspectorDOMDebuggerAgent& operator=(const InspectorDOMDebuggerAgent&) =
       delete;
@@ -81,45 +78,30 @@ class CORE_EXPORT InspectorDOMDebuggerAgent final
                                          const String& type) override;
   protocol::Response setEventListenerBreakpoint(
       const String& event_name,
-      protocol::Maybe<String> target_name) override;
+      std::optional<String> target_name) override;
   protocol::Response removeEventListenerBreakpoint(
       const String& event_name,
-      protocol::Maybe<String> target_name) override;
-  protocol::Response setInstrumentationBreakpoint(
-      const String& event_name) override;
-  protocol::Response removeInstrumentationBreakpoint(
-      const String& event_name) override;
+      std::optional<String> target_name) override;
   protocol::Response setXHRBreakpoint(const String& url) override;
   protocol::Response removeXHRBreakpoint(const String& url) override;
   protocol::Response getEventListeners(
       const String& object_id,
-      protocol::Maybe<int> depth,
-      protocol::Maybe<bool> pierce,
+      std::optional<int> depth,
+      std::optional<bool> pierce,
       std::unique_ptr<protocol::Array<protocol::DOMDebugger::EventListener>>*
           listeners) override;
 
   // InspectorInstrumentation API
   void WillInsertDOMNode(Node* parent);
-  void DidInvalidateStyleAttr(Node*);
+  void DidInvalidateStyleAttr(Element*);
   void DidInsertDOMNode(Node*);
   void CharacterDataModified(CharacterData*);
   void DidRemoveDOMNode(Node*);
   void WillModifyDOMAttr(Element*, const AtomicString&, const AtomicString&);
   void WillSendXMLHttpOrFetchNetworkRequest(const String& url);
-  void DidCreateCanvasContext();
-  void DidFireWebGLError(const String& error_name);
-  void DidFireWebGLWarning();
-  void DidFireWebGLErrorOrWarning(const String& message);
   void ScriptExecutionBlockedByCSP(const String& directive_text);
-  void Will(const probe::ExecuteScript&);
-  void Did(const probe::ExecuteScript&);
   void Will(const probe::UserCallback&);
   void Did(const probe::UserCallback&);
-  void BreakableLocation(const char* name);
-  void DidCreateAudioContext();
-  void DidCloseAudioContext();
-  void DidResumeAudioContext();
-  void DidSuspendAudioContext();
   void OnContentSecurityPolicyViolation(
       const ContentSecurityPolicyViolationType);
 
@@ -150,16 +132,13 @@ class CORE_EXPORT InspectorDOMDebuggerAgent final
       bool pierce,
       InspectorDOMAgent::IncludeWhitespaceEnum include_whitespace,
       V8EventListenerInfoList* listeners);
-  void AllowNativeBreakpoint(const String& breakpoint_name,
-                             const String* target_name,
-                             bool sync);
   void CancelNativeBreakpoint();
   void PauseOnNativeEventIfNeeded(
       std::unique_ptr<protocol::DictionaryValue> event_data,
       bool synchronous);
   std::unique_ptr<protocol::DictionaryValue> PreparePauseOnNativeEventData(
       const String& event_name,
-      const String* target_name);
+      const String& target_name);
   void BreakProgramOnDOMEvent(Node* target,
                               int breakpoint_type,
                               bool insertion);
@@ -188,7 +167,6 @@ class CORE_EXPORT InspectorDOMDebuggerAgent final
 
   v8::Isolate* isolate_;
   Member<InspectorDOMAgent> dom_agent_;
-  v8_inspector::V8InspectorSession* v8_session_;
   HeapHashMap<Member<Node>, uint32_t> dom_breakpoints_;
   InspectorAgentState::Boolean enabled_;
   InspectorAgentState::Boolean pause_on_all_xhrs_;

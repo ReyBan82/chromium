@@ -20,6 +20,8 @@ class SpeechRecognitionServiceFactory : public ProfileKeyedServiceFactory {
  public:
   static speech::SpeechRecognitionService* GetForProfile(Profile* profile);
 
+  static SpeechRecognitionServiceFactory* GetInstanceForTest();
+
   static void EnsureFactoryBuilt();
 
  private:
@@ -30,7 +32,7 @@ class SpeechRecognitionServiceFactory : public ProfileKeyedServiceFactory {
   ~SpeechRecognitionServiceFactory() override;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
 };
 

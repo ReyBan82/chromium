@@ -14,6 +14,10 @@ class DragDropClient;
 }  // namespace aura::client
 
 namespace ui {
+namespace mojom {
+enum class DragOperation;
+}  // namespace mojom
+
 class DropTargetEvent;
 }  // namespace ui
 
@@ -27,12 +31,22 @@ class MockDragDropObserver : public aura::client::DragDropClientObserver {
   MockDragDropObserver& operator=(const MockDragDropObserver&) = delete;
   ~MockDragDropObserver() override;
 
+  // Stops observing the DragDropClient.
+  void ResetObservation();
+
   // aura::client::DragDropClientObserver:
   MOCK_METHOD(void, OnDragStarted, (), (override));
   MOCK_METHOD(void,
               OnDragUpdated,
               (const ui::DropTargetEvent& event),
               (override));
+  MOCK_METHOD(void,
+              OnDragCompleted,
+              (const ui::DropTargetEvent& event),
+              (override));
+  MOCK_METHOD(void, OnDragCancelled, (), (override));
+  MOCK_METHOD(void, OnDropCompleted, (ui::mojom::DragOperation), (override));
+  MOCK_METHOD(void, OnDragDropClientDestroying, (), (override));
 
  private:
   base::ScopedObservation<aura::client::DragDropClient,

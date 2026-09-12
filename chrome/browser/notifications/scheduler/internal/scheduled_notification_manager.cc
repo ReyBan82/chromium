@@ -6,24 +6,24 @@
 
 #include <algorithm>
 #include <map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
+#include "base/containers/enum_set.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/guid.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/notifications/scheduler/internal/icon_store.h"
-#include "chrome/browser/notifications/scheduler/internal/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduler_config.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduler_utils.h"
 #include "chrome/browser/notifications/scheduler/internal/stats.h"
+#include "chrome/browser/notifications/scheduler/public/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/public/notification_params.h"
 #include "chrome/browser/notifications/scheduler/public/notification_scheduler_constant.h"
 #include "chrome/grit/generated_resources.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace notifications {
@@ -50,14 +50,15 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
  public:
   using NotificationStore = std::unique_ptr<CollectionStore<NotificationEntry>>;
 
-  ScheduledNotificationManagerImpl(
-      NotificationStore notification_store,
-      std::unique_ptr<IconStore> icon_store,
-      const std::vector<SchedulerClientType>& clients,
-      const SchedulerConfig& config)
+  using SchedulerClientTypeEnumSet = base::EnumSet<SchedulerClientType>;
+
+  ScheduledNotificationManagerImpl(NotificationStore notification_store,
+                                   std::unique_ptr<IconStore> icon_store,
+                                   const SchedulerClientTypeEnumSet clients,
+                                   const SchedulerConfig& config)
       : notification_store_(std::move(notification_store)),
         icon_store_(std::move(icon_store)),
-        clients_(clients.begin(), clients.end()),
+        clients_(clients),
         config_(config) {}
   ScheduledNotificationManagerImpl(const ScheduledNotificationManagerImpl&) =
       delete;
@@ -82,8 +83,9 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
     stats::LogNotificationLifeCycleEvent(
         stats::NotificationLifeCycleEvent::kScheduleRequest, type);
 
-    if (!clients_.count(type) ||
-        (notifications_.count(type) && notifications_[type].count(guid))) {
+    auto type_it = notifications_.find(type);
+    if (!clients_.Has(type) ||
+        (type_it != notifications_.end() && type_it->second.count(guid))) {
       // TODO(xingliu): Report duplicate guid failure.
       std::move(callback).Run(false);
       return;
@@ -158,9 +160,9 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
     }
   }
 
-  void GetNotifications(
-      SchedulerClientType type,
-      std::vector<const NotificationEntry*>* notifications) const override {
+  void GetNotifications(SchedulerClientType type,
+                        std::vector<raw_ptr<const NotificationEntry>>*
+                            notifications) const override {
     DCHECK(notifications);
     notifications->clear();
     const auto it = notifications_.find(type);
@@ -171,24 +173,23 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
   }
 
   void DeleteNotifications(SchedulerClientType type) override {
-    if (!notifications_.count(type))
+    auto type_it = notifications_.find(type);
+    if (type_it == notifications_.end()) {
       return;
+    }
 
-    auto it = notifications_[type].begin();
-    while (it != notifications_[type].end()) {
+    auto it = type_it->second.begin();
+    while (it != type_it->second.end()) {
       const auto& entry = *it->second;
       ++it;
       DeleteNotification(entry, false /*should_delete_in_memory*/);
     }
-    notifications_.erase(type);
+    notifications_.erase(type_it);
   }
 
   void OnIconStoreInitialized(InitCallback callback,
                               bool success,
                               IconStore::LoadedIconKeys loaded_keys) {
-    stats::LogDbInit(stats::DatabaseType::kIconDb, success,
-                     loaded_keys ? loaded_keys->size() : 0);
-
     if (!success) {
       std::move(callback).Run(false);
       return;
@@ -205,9 +206,6 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
       std::unique_ptr<std::vector<std::string>> loaded_icon_keys,
       bool success,
       CollectionStore<NotificationEntry>::Entries entries) {
-    stats::LogDbInit(stats::DatabaseType::kNotificationDb, success,
-                     entries.size());
-
     if (!success) {
       std::move(callback).Run(false);
       return;
@@ -220,7 +218,7 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
 
   void FilterIconEntries(
       std::unique_ptr<std::vector<std::string>> uuids_from_icon_store) {
-    std::unordered_set<std::string> icons_uuid_from_entries;
+    absl::flat_hash_set<std::string> icons_uuid_from_entries;
     for (const auto& client_pair : notifications_) {
       for (const auto& notification : client_pair.second) {
         for (const auto& icon : notification.second->icons_uuid) {
@@ -230,14 +228,11 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
     }
     std::vector<std::string> icons_to_delete;
     for (const auto& loaded_icon_key : *uuids_from_icon_store.get()) {
-      if (!base::Contains(icons_uuid_from_entries, loaded_icon_key)) {
+      if (!icons_uuid_from_entries.contains(loaded_icon_key)) {
         icons_to_delete.emplace_back(loaded_icon_key);
       }
     }
-    icon_store_->DeleteIcons(
-        icons_to_delete,
-        base::BindOnce(&ScheduledNotificationManagerImpl::OnIconDeleted,
-                       weak_ptr_factory_.GetWeakPtr()));
+    icon_store_->DeleteIcons(icons_to_delete, /*callback=*/base::DoNothing());
   }
 
   // Filters and loads notification into memory.
@@ -249,7 +244,7 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
       bool expired = entry->create_time + config_->notification_expiration <=
                      base::Time::Now();
       bool valid = ValidateNotificationEntry(*entry);
-      bool deprecated_client = !base::Contains(clients_, entry->type);
+      bool deprecated_client = !clients_.Has(entry->type);
       if (expired || deprecated_client || !valid) {
         DeleteNotification(*entry, false /*should_delete_in_memory*/);
       } else {
@@ -262,8 +257,6 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
                     ScheduleCallback schedule_callback,
                     IconStore::IconTypeUuidMap icons_uuid_map,
                     bool success) {
-    stats::LogDbOperation(stats::DatabaseType::kIconDb, success);
-
     if (!success) {
       std::move(schedule_callback).Run(false);
       return;
@@ -281,18 +274,14 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
   void OnNotificationAdded(std::unique_ptr<NotificationEntry> entry,
                            ScheduleCallback schedule_callback,
                            bool success) {
-    stats::LogDbOperation(stats::DatabaseType::kNotificationDb, success);
-
     // Delete the icons when failed to add to notification database.
     if (!success) {
       std::vector<std::string> icons_to_delete;
       for (const auto& uuid : entry->icons_uuid) {
         icons_to_delete.emplace_back(uuid.second);
       }
-      icon_store_->DeleteIcons(
-          std::move(icons_to_delete),
-          base::BindOnce(&ScheduledNotificationManagerImpl::OnIconDeleted,
-                         weak_ptr_factory_.GetWeakPtr()));
+      icon_store_->DeleteIcons(std::move(icons_to_delete),
+                               /*callback=*/base::DoNothing());
       std::move(schedule_callback).Run(false);
       return;
     }
@@ -306,21 +295,11 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
     std::move(schedule_callback).Run(true);
   }
 
-  void OnNotificationDeleted(bool success) {
-    stats::LogDbOperation(stats::DatabaseType::kNotificationDb, success);
-  }
-
-  void OnIconDeleted(bool success) {
-    stats::LogDbOperation(stats::DatabaseType::kIconDb, success);
-  }
-
   void OnIconsLoaded(SchedulerClientType client_type,
                      const std::string& guid,
                      DisplayCallback display_callback,
                      bool success,
                      IconStore::LoadedIconsMap loaded_icons_map) {
-    stats::LogDbOperation(stats::DatabaseType::kIconDb, success);
-
     auto* entry_ptr = FindNotificationEntry(client_type, guid);
     if (!entry_ptr) {
       std::move(display_callback).Run(nullptr);
@@ -351,9 +330,15 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
 
   NotificationEntry* FindNotificationEntry(SchedulerClientType type,
                                            const std::string& guid) {
-    if (!notifications_.count(type) || !notifications_[type].count(guid))
+    auto type_it = notifications_.find(type);
+    if (type_it == notifications_.end()) {
       return nullptr;
-    return notifications_[type][guid].get();
+    }
+    auto guid_it = type_it->second.find(guid);
+    if (guid_it == type_it->second.end()) {
+      return nullptr;
+    }
+    return guid_it->second.get();
   }
 
   // Delete NotitificationEntry from memory and disk.
@@ -364,24 +349,23 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
     for (const auto& icon_id : entry.icons_uuid) {
       icons_to_delete.emplace_back(icon_id.second);
     }
-    icon_store_->DeleteIcons(
-        std::move(icons_to_delete),
-        base::BindOnce(&ScheduledNotificationManagerImpl::OnIconDeleted,
-                       weak_ptr_factory_.GetWeakPtr()));
+    icon_store_->DeleteIcons(std::move(icons_to_delete),
+                             /*callback=*/base::DoNothing());
 
     auto guid = entry.guid;
     auto type = entry.type;
 
     // Deletes notification entry.
-    notification_store_->Delete(
-        guid,
-        base::BindOnce(&ScheduledNotificationManagerImpl::OnNotificationDeleted,
-                       weak_ptr_factory_.GetWeakPtr()));
+    notification_store_->Delete(guid, /*callback=*/base::DoNothing());
 
     if (should_delete_in_memory) {
-      notifications_[type].erase(guid);
-      if (notifications_[type].empty())
-        notifications_.erase(type);
+      auto type_it = notifications_.find(type);
+      if (type_it != notifications_.end()) {
+        type_it->second.erase(guid);
+        if (type_it->second.empty()) {
+          notifications_.erase(type_it);
+        }
+      }
     }
   }
 
@@ -439,7 +423,7 @@ class ScheduledNotificationManagerImpl : public ScheduledNotificationManager {
 
   NotificationStore notification_store_;
   std::unique_ptr<IconStore> icon_store_;
-  const std::unordered_set<SchedulerClientType> clients_;
+  const SchedulerClientTypeEnumSet clients_;
   std::map<SchedulerClientType,
            std::map<std::string, std::unique_ptr<NotificationEntry>>>
       notifications_;
@@ -457,8 +441,13 @@ ScheduledNotificationManager::Create(
     std::unique_ptr<IconStore> icon_store,
     const std::vector<SchedulerClientType>& clients,
     const SchedulerConfig& config) {
+  ScheduledNotificationManagerImpl::SchedulerClientTypeEnumSet clients_set;
+  for (const auto& client : clients) {
+    clients_set.Put(client);
+  }
   return std::make_unique<ScheduledNotificationManagerImpl>(
-      std::move(notification_store), std::move(icon_store), clients, config);
+      std::move(notification_store), std::move(icon_store), clients_set,
+      config);
 }
 
 ScheduledNotificationManager::ScheduledNotificationManager() = default;

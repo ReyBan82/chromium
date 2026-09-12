@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 import './icons.html.js';
-import 'chrome://resources/cr_elements/cr_button/cr_button.js';
+import 'chrome://resources/ash/common/cr_elements/cr_button/cr_button.js';
 
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
@@ -28,11 +28,11 @@ export class TextGroupButton extends PolymerElement {
       customTabIndex: {type: Number, value: -1},
     };
   }
-  name: string;
-  groupId: string;
-  active: boolean;
-  disabled: boolean;
-  customTabIndex: number;
+  declare name: string;
+  declare groupId: string;
+  declare active: boolean;
+  declare disabled: boolean;
+  declare customTabIndex: number;
 
   constructor() {
     super();
@@ -47,8 +47,8 @@ export class TextGroupButton extends PolymerElement {
     return active ? 'text-group-active' : '';
   }
 
-  private toUpperCase(text: string) {
-    return text.toUpperCase();
+  private getAriaPressedState(active: boolean): string {
+    return active ? 'true' : 'false';
   }
 }
 

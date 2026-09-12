@@ -8,18 +8,22 @@
 #include <string>
 
 #include "base/files/file_path.h"
-#include "base/functional/callback_forward.h"
-#include "base/memory/ref_counted.h"
-#include "chrome/browser/image_decoder/image_decoder.h"
+#include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
+#include "components/user_manager/user_image/user_image.h"
 #include "url/gurl.h"
 
 namespace base {
 class SequencedTaskRunner;
-}
+}  // namespace base
+
+namespace network::mojom {
+class URLLoaderFactory;
+}  // namespace network::mojom
 
 namespace user_manager {
 class UserImage;
-}
+}  // namespace user_manager
 
 // Helper functions that read, decode and optionally resize an image on a
 // background thread. The image is returned in the form of a UserImage.
@@ -40,19 +44,15 @@ using LoadedCallback =
 void StartWithFilePath(
     scoped_refptr<base::SequencedTaskRunner> background_task_runner,
     const base::FilePath& file_path,
-    ImageDecoder::ImageCodec image_codec,
+    user_manager::UserImage::ImageFormat image_format,
     int pixels_per_side,
     LoadedCallback loaded_cb);
 void StartWithData(
     scoped_refptr<base::SequencedTaskRunner> background_task_runner,
     std::unique_ptr<std::string> data,
-    ImageDecoder::ImageCodec image_codec,
+    user_manager::UserImage::ImageFormat image_format,
     int pixels_per_side,
     LoadedCallback loaded_cb);
-
-// Loads user image from provided |data| bytes. If the image is animated, encode
-// with WebP encoder, otherwise encode with PNG encoder.
-void StartWithDataAnimated(base::StringPiece data, LoadedCallback loaded_cb);
 
 // Loads user image from |file_path|. If the image is animated, encode with WebP
 // encoder, otherwise encode with PNG encoder.
@@ -64,7 +64,9 @@ void StartWithFilePathAnimated(
 
 // Loads the default image fetched from |default_image_url|. If the image is
 // animated, encode with WebP encoder, otherwise encode with PNG encoder.
-void StartWithGURLAnimated(const GURL& default_image_url,
+// `url_loader_factory` must be non-null, and can be deleted after this returns.
+void StartWithGURLAnimated(network::mojom::URLLoaderFactory* url_loader_factory,
+                           const GURL& default_image_url,
                            LoadedCallback loaded_cb);
 
 }  // namespace user_image_loader

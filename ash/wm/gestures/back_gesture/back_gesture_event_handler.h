@@ -5,7 +5,6 @@
 #ifndef ASH_WM_GESTURES_BACK_GESTURE_BACK_GESTURE_EVENT_HANDLER_H_
 #define ASH_WM_GESTURES_BACK_GESTURE_BACK_GESTURE_EVENT_HANDLER_H_
 
-#include "ash/wm/gestures/back_gesture/back_gesture_metrics.h"
 #include "base/containers/flat_set.h"
 #include "ui/display/display_observer.h"
 #include "ui/events/event_handler.h"
@@ -44,6 +43,7 @@ class BackGestureEventHandler : public display::DisplayObserver,
 
   // ui::GestureConsumer:
   const std::string& GetName() const override;
+  base::WeakPtr<ui::GestureConsumer> GetWeakPtr() override;
 
   // ui::GestureProviderAuraClient:
   void OnGestureEvent(GestureConsumer* consumer,
@@ -127,9 +127,7 @@ class BackGestureEventHandler : public display::DisplayObserver,
   // whether back gesture should be shown.
   bool should_wait_for_touch_ack_ = false;
 
-  // Start scenario type of the back gesture, used for related metrics.
-  BackGestureStartScenarioType back_gesture_start_scenario_type_ =
-      BackGestureStartScenarioType::kMaxValue;
+  base::WeakPtrFactory<BackGestureEventHandler> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

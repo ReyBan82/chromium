@@ -4,6 +4,8 @@
 
 #include "chrome/updater/win/ui/complete_wnd.h"
 
+#include <string>
+
 #include "base/check.h"
 #include "base/strings/string_util.h"
 #include "chrome/updater/win/ui/l10n_util.h"
@@ -11,13 +13,14 @@
 
 namespace updater::ui {
 
-// dialog_id specifies the dialog resource to use.
-// control_classes specifies the control classes required for dialog_id.
+// `dialog_id` specifies the dialog resource to use.
+// `control_classes` specifies the control classes required for `dialog_id`.
 CompleteWnd::CompleteWnd(int dialog_id,
                          DWORD control_classes,
-                         WTL::CMessageLoop* message_loop,
-                         HWND parent)
-    : OmahaWnd(dialog_id, message_loop, parent),
+                         MessageLoop* message_loop,
+                         HWND parent,
+                         const std::wstring& lang)
+    : OmahaWnd(dialog_id, message_loop, parent, lang),
       events_sink_(nullptr),
       control_classes_(control_classes | ICC_STANDARD_CLASSES) {}
 
@@ -36,12 +39,8 @@ void CompleteWnd::SetEventSink(CompleteWndEvents* ev) {
   OmahaWnd::SetEventSink(events_sink_);
 }
 
-LRESULT CompleteWnd::OnInitDialog(UINT message,
-                                  WPARAM w_param,
-                                  LPARAM l_param,
-                                  BOOL& handled) {
-  // TODO(sorin): remove this when https://crbug.com/1010653 is fixed.
-  HideWindowChildren(*this);
+LRESULT CompleteWnd::OnInitDialog(UINT, WPARAM, LPARAM) {
+  HideWindowChildren(hwnd());
   InitializeDialog();
 
   SetControlAttributes(IDC_COMPLETE_TEXT, kDisabledNonButtonAttributes);
@@ -49,35 +48,24 @@ LRESULT CompleteWnd::OnInitDialog(UINT message,
   SetControlAttributes(IDC_GET_HELP, kDisabledButtonAttributes);
   SetControlAttributes(IDC_CLOSE, kDefaultActiveButtonAttributes);
 
-  handled = true;
   return 1;  // Let the system set the focus.
 }
 
-LRESULT CompleteWnd::OnClickedButton(WORD notify_code,
-                                     WORD id,
-                                     HWND wnd_ctl,
-                                     BOOL& handled) {
-  DCHECK(id == IDC_CLOSE);
-  DCHECK(is_complete());
+void CompleteWnd::OnClickedButton(UINT, int id, HWND) {
+  CHECK_EQ(id, IDC_CLOSE);
+  CHECK(is_complete());
 
   CloseWindow();
-
-  handled = true;
-  return 0;
 }
 
-LRESULT CompleteWnd::OnClickedGetHelp(WORD notify_code,
-                                      WORD id,
-                                      HWND wnd_ctl,
-                                      BOOL& handled) {
-  DCHECK(events_sink_);
+void CompleteWnd::OnClickedGetHelp(UINT, int, HWND) {
+  CHECK(events_sink_);
   if (events_sink_) {
     events_sink_->DoLaunchBrowser(help_url_);
   }
-
-  handled = true;
-  return 1;
 }
+
+void CompleteWnd::UpdateErrorIllustration() {}
 
 bool CompleteWnd::MaybeCloseWindow() {
   CloseWindow();
@@ -91,9 +79,10 @@ void CompleteWnd::DisplayCompletionDialog(bool is_success,
     return;
   }
 
-  SetDlgItemText(IDC_CLOSE, GetLocalizedString(IDS_UPDATER_CLOSE_BASE).c_str());
+  ::SetDlgItemTextW(hwnd(), IDC_CLOSE,
+                    GetLocalizedString(IDS_UPDATER_CLOSE_BASE, lang()).c_str());
 
-  DCHECK(!text.empty());
+  CHECK(!text.empty());
 
   // FormatMessage() converts all LFs to CRLFs, which are rendered as little
   // squares in UI. To avoid this, convert all CRLFs to LFs.
@@ -101,19 +90,19 @@ void CompleteWnd::DisplayCompletionDialog(bool is_success,
   base::ReplaceChars(text, L"\r\n", L"\n", &display_text);
 
   if (is_success) {
-    SetDlgItemText(IDC_COMPLETE_TEXT, display_text.c_str());
+    ::SetDlgItemTextW(hwnd(), IDC_COMPLETE_TEXT, display_text.c_str());
   } else {
-    SetDlgItemText(IDC_ERROR_TEXT, display_text.c_str());
+    ::SetDlgItemTextW(hwnd(), IDC_ERROR_TEXT, display_text.c_str());
 
     if (!help_url.empty()) {
       help_url_ = help_url.c_str();
-      SetDlgItemText(IDC_GET_HELP,
-                     GetLocalizedString(IDS_GET_HELP_TEXT_BASE).c_str());
+      ::SetDlgItemTextW(
+          hwnd(), IDC_GET_HELP,
+          GetLocalizedString(IDS_GET_HELP_TEXT_BASE, lang()).c_str());
     }
   }
 
   SetControlState(is_success);
-  return;
 }
 
 HRESULT CompleteWnd::SetControlState(bool is_success) {
@@ -121,6 +110,7 @@ HRESULT CompleteWnd::SetControlState(bool is_success) {
                        kVisibleTextAttributes);
   if (!is_success) {
     SetControlAttributes(IDC_ERROR_ILLUSTRATION, kVisibleImageAttributes);
+    UpdateErrorIllustration();
   }
   if (!help_url_.empty()) {
     SetControlAttributes(IDC_GET_HELP, kNonDefaultActiveButtonAttributes);

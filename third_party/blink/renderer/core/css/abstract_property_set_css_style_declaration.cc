@@ -25,6 +25,7 @@
 #include "third_party/blink/renderer/core/css/css_numeric_literal_value.h"
 #include "third_party/blink/renderer/core/css/css_property_value_set.h"
 #include "third_party/blink/renderer/core/css/css_style_sheet.h"
+#include "third_party/blink/renderer/core/css/parser/css_property_parser.h"
 #include "third_party/blink/renderer/core/css/style_attribute_mutation_scope.h"
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
@@ -65,6 +66,11 @@ void AbstractPropertySetCSSStyleDeclaration::setCSSText(
   DidMutate(kPropertyChanged);
 
   mutation_scope.EnqueueMutationRecord();
+}
+
+const CSSPropertyValueSet&
+AbstractPropertySetCSSStyleDeclaration::GetPropertyValueSet() const {
+  return PropertySet();
 }
 
 String AbstractPropertySetCSSStyleDeclaration::getPropertyValue(
@@ -134,11 +140,11 @@ void AbstractPropertySetCSSStyleDeclaration::setProperty(
     ExceptionState& exception_state) {
   CSSPropertyID property_id =
       UnresolvedCSSPropertyID(execution_context, property_name);
-  if (!IsValidCSSPropertyID(property_id)) {
+  if (!IsValidCSSPropertyID(property_id) || !IsPropertyValid(property_id)) {
     return;
   }
 
-  bool important = EqualIgnoringASCIICase(priority, "important");
+  bool important = EqualIgnoringAsciiCase(priority, "important");
   if (!important && !priority.empty()) {
     return;
   }
@@ -177,6 +183,19 @@ String AbstractPropertySetCSSStyleDeclaration::removeProperty(
     mutation_scope.EnqueueMutationRecord();
   }
   return result;
+}
+
+void AbstractPropertySetCSSStyleDeclaration::QuietlyRemoveProperty(
+    const String& property_name) {
+  CSSPropertyID property_id =
+      CssPropertyID(GetExecutionContext(), property_name);
+  CHECK(IsValidCSSPropertyID(property_id));
+  if (property_id == CSSPropertyID::kVariable) {
+    PropertySet().RemoveProperty(AtomicString(property_name),
+                                 /*return_text=*/nullptr);
+  } else {
+    PropertySet().RemoveProperty(property_id, /*return_text=*/nullptr);
+  }
 }
 
 const CSSValue*
@@ -235,7 +254,7 @@ DISABLE_CFI_PERF
 void AbstractPropertySetCSSStyleDeclaration::SetPropertyInternal(
     CSSPropertyID unresolved_property,
     const String& custom_property_name,
-    const String& value,
+    StringView value,
     bool important,
     SecureContextMode secure_context_mode,
     ExceptionState&) {

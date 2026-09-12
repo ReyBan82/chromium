@@ -11,7 +11,7 @@
 namespace gfx {
 
 NativePixmapDmaBuf::NativePixmapDmaBuf(const gfx::Size& size,
-                                       gfx::BufferFormat format,
+                                       viz::SharedImageFormat format,
                                        gfx::NativePixmapHandle handle)
     : size_(size), format_(format), handle_(std::move(handle)) {}
 
@@ -48,11 +48,11 @@ size_t NativePixmapDmaBuf::GetDmaBufPlaneSize(size_t plane) const {
   return base::checked_cast<size_t>(handle_.planes[plane].size);
 }
 
-uint64_t NativePixmapDmaBuf::GetBufferFormatModifier() const {
+uint64_t NativePixmapDmaBuf::GetFormatModifier() const {
   return handle_.modifier;
 }
 
-gfx::BufferFormat NativePixmapDmaBuf::GetBufferFormat() const {
+viz::SharedImageFormat NativePixmapDmaBuf::GetSharedImageFormat() const {
   return format_;
 }
 
@@ -61,7 +61,7 @@ size_t NativePixmapDmaBuf::GetNumberOfPlanes() const {
 }
 
 bool NativePixmapDmaBuf::SupportsZeroCopyWebGPUImport() const {
-  // TODO(crbug.com/1258986): Figure out how to import multi-planar pixmap into
+  // TODO(crbug.com/40201271): Figure out how to import multi-planar pixmap into
   // WebGPU without copy.
   return false;
 }
@@ -82,7 +82,7 @@ bool NativePixmapDmaBuf::ScheduleOverlayPlane(
   return false;
 }
 
-gfx::NativePixmapHandle NativePixmapDmaBuf::ExportHandle() {
+gfx::NativePixmapHandle NativePixmapDmaBuf::ExportHandle() const {
   return gfx::CloneHandleForIPC(handle_);
 }
 

@@ -10,7 +10,10 @@
 #include "base/functional/bind.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/api/declarative/declarative_constants.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -31,7 +34,7 @@ ContentCondition::ContentCondition(
     std::vector<std::unique_ptr<const ContentPredicate>> predicates)
     : predicates(std::move(predicates)) {}
 
-ContentCondition::~ContentCondition() {}
+ContentCondition::~ContentCondition() = default;
 
 std::unique_ptr<ContentCondition> CreateContentCondition(
     const Extension* extension,
@@ -43,7 +46,7 @@ std::unique_ptr<ContentCondition> CreateContentCondition(
     return nullptr;
   }
 
-  const base::Value::Dict& api_condition_dict = api_condition.GetDict();
+  const base::DictValue& api_condition_dict = api_condition.GetDict();
 
   // Verify that we are dealing with a Condition whose type we understand.
   const std::string* instance_type = api_condition_dict.FindString(
@@ -61,8 +64,9 @@ std::unique_ptr<ContentCondition> CreateContentCondition(
   for (const auto iter : api_condition_dict) {
     const std::string& predicate_name = iter.first;
     const base::Value& predicate_value = iter.second;
-    if (predicate_name == declarative_content_constants::kInstanceType)
+    if (predicate_name == declarative_content_constants::kInstanceType) {
       continue;
+    }
 
     const auto loc = predicate_factories.find(predicate_name);
     if (loc != predicate_factories.end())
@@ -73,8 +77,9 @@ std::unique_ptr<ContentCondition> CreateContentCondition(
       *error = base::StringPrintf(kUnknownConditionAttribute,
                                   predicate_name.c_str());
 
-    if (!error->empty())
+    if (!error->empty()) {
       return nullptr;
+    }
   }
 
   return std::make_unique<ContentCondition>(std::move(predicates));

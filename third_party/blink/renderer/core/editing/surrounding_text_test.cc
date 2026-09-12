@@ -5,6 +5,7 @@
 #include "third_party/blink/renderer/core/editing/surrounding_text.h"
 
 #include <memory>
+
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/range.h"
@@ -15,13 +16,15 @@
 #include "third_party/blink/renderer/core/html/forms/text_control_element.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
+#include "third_party/blink/renderer/core/testing/page_test_base.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
 
-class SurroundingTextTest : public testing::Test {
+class SurroundingTextTest : public PageTestBase {
  protected:
   Document& GetDocument() const { return dummy_page_holder_->GetDocument(); }
-  void SetHTML(const String&);
+  void SetHtml(const String&);
   EphemeralRange Select(int offset) { return Select(offset, offset); }
   EphemeralRange Select(int start, int end);
 
@@ -35,19 +38,19 @@ void SurroundingTextTest::SetUp() {
   dummy_page_holder_ = std::make_unique<DummyPageHolder>(gfx::Size(800, 600));
 }
 
-void SurroundingTextTest::SetHTML(const String& content) {
-  GetDocument().body()->setInnerHTML(content);
+void SurroundingTextTest::SetHtml(const String& content) {
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(content);
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
 }
 
 EphemeralRange SurroundingTextTest::Select(int start, int end) {
-  Element* element = GetDocument().getElementById("selection");
+  Element* element = GetDocument().getElementById(AtomicString("selection"));
   return EphemeralRange(Position(element->firstChild(), start),
                         Position(element->firstChild(), end));
 }
 
 TEST_F(SurroundingTextTest, BasicCaretSelection) {
-  SetHTML(String("<p id='selection'>foo bar</p>"));
+  SetHtml(String("<p id='selection'>foo bar</p>"));
 
   {
     EphemeralRange selection = Select(0);
@@ -110,7 +113,7 @@ TEST_F(SurroundingTextTest, BasicCaretSelection) {
 }
 
 TEST_F(SurroundingTextTest, BasicRangeSelection) {
-  SetHTML(String("<p id='selection'>Lorem ipsum dolor sit amet</p>"));
+  SetHtml("<p id='selection'>Lorem ipsum dolor sit amet</p>");
 
   {
     EphemeralRange selection = Select(0, 5);
@@ -172,9 +175,9 @@ TEST_F(SurroundingTextTest, BasicRangeSelection) {
 }
 
 TEST_F(SurroundingTextTest, TreeCaretSelection) {
-  SetHTML(
-      String("<div>This is outside of <p id='selection'>foo bar</p> the "
-             "selected node</div>"));
+  SetHtml(
+      "<div>This is outside of <p id='selection'>foo bar</p> the "
+      "selected node</div>");
 
   {
     EphemeralRange selection = Select(0);
@@ -226,9 +229,9 @@ TEST_F(SurroundingTextTest, TreeCaretSelection) {
 }
 
 TEST_F(SurroundingTextTest, TreeRangeSelection) {
-  SetHTML(
-      String("<div>This is outside of <p id='selection'>foo bar</p> the "
-             "selected node</div>"));
+  SetHtml(
+      "<div>This is outside of <p id='selection'>foo bar</p> the "
+      "selected node</div>");
 
   {
     EphemeralRange selection = Select(0, 1);
@@ -282,13 +285,13 @@ TEST_F(SurroundingTextTest, TreeRangeSelection) {
 }
 
 TEST_F(SurroundingTextTest, TextAreaSelection) {
-  SetHTML(
-      String("<p>First paragraph</p>"
-             "<textarea id='selection'>abc def ghi</textarea>"
-             "<p>Second paragraph</p>"));
+  SetHtml(
+      "<p>First paragraph</p>"
+      "<textarea id='selection'>abc def ghi</textarea>"
+      "<p>Second paragraph</p>");
 
   TextControlElement* text_ctrl = reinterpret_cast<TextControlElement*>(
-      GetDocument().getElementById("selection"));
+      GetDocument().getElementById(AtomicString("selection")));
 
   text_ctrl->SetSelectionRange(4, 7);
   EphemeralRange selection = text_ctrl->Selection().ComputeRange();
@@ -302,10 +305,10 @@ TEST_F(SurroundingTextTest, TextAreaSelection) {
 }
 
 TEST_F(SurroundingTextTest, EmptyInputElementWithChild) {
-  SetHTML(String("<input type=\"text\" id=\"input_name\"/>"));
+  SetHtml("<input type=\"text\" id=\"input_name\"/>");
 
   TextControlElement* input_element = reinterpret_cast<TextControlElement*>(
-      GetDocument().getElementById("input_name"));
+      GetDocument().getElementById(AtomicString("input_name")));
   input_element->SetInnerEditorValue("John Smith");
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
 
@@ -325,10 +328,10 @@ TEST_F(SurroundingTextTest, EmptyInputElementWithChild) {
 }
 
 TEST_F(SurroundingTextTest, ButtonsAndParagraph) {
-  SetHTML(
-      String("<button>.</button>12345"
-             "<p id='selection'>6789 12345</p>"
-             "6789<button>.</button>"));
+  SetHtml(
+      "<button>.</button>12345"
+      "<p id='selection'>6789 12345</p>"
+      "6789<button>.</button>");
 
   {
     EphemeralRange selection = Select(0);
@@ -375,11 +378,11 @@ TEST_F(SurroundingTextTest, ButtonsAndParagraph) {
 }
 
 TEST_F(SurroundingTextTest, SelectElementAndText) {
-  SetHTML(String(
+  SetHtml(
       "<select>.</select>"
       "<div>57th Street and Lake Shore Drive</div>"
       " <span>Chicago</span> <span id='selection'>IL</span> <span>60637</span>"
-      "<select>.</select>"));
+      "<select>.</select>");
 
   EphemeralRange selection = Select(0);
   SurroundingText surrounding_text(selection, 100);
@@ -391,10 +394,10 @@ TEST_F(SurroundingTextTest, SelectElementAndText) {
 }
 
 TEST_F(SurroundingTextTest, FieldsetElementAndText) {
-  SetHTML(
-      String("<fieldset>.</fieldset>12345<button>abc</button>"
-             "<p>6789<br><span id='selection'>12345</span></p>"
-             "6789<textarea>abc</textarea>0123<fieldset>.</fieldset>"));
+  SetHtml(
+      "<fieldset>.</fieldset>12345<button>abc</button>"
+      "<p>6789<br><span id='selection'>12345</span></p>"
+      "6789<textarea>abc</textarea>0123<fieldset>.</fieldset>");
 
   EphemeralRange selection = Select(0);
   SurroundingText surrounding_text(selection, 100);
@@ -405,11 +408,11 @@ TEST_F(SurroundingTextTest, FieldsetElementAndText) {
 }
 
 TEST_F(SurroundingTextTest, ButtonScriptAndComment) {
-  SetHTML(
-      String("<button>.</button>"
-             "<div id='selection'>This is <!-- comment --!>a test "
-             "<script language='javascript'></script>"
-             "example<button>.</button>"));
+  SetHtml(
+      "<button>.</button>"
+      "<div id='selection'>This is <!-- comment --!>a test "
+      "<script language='javascript'></script>"
+      "example<button>.</button>");
 
   EphemeralRange selection = Select(0);
   SurroundingText surrounding_text(selection, 100);
@@ -420,10 +423,10 @@ TEST_F(SurroundingTextTest, ButtonScriptAndComment) {
 }
 
 TEST_F(SurroundingTextTest, ButtonAndLongDiv) {
-  SetHTML(
-      String("<button>.</button>"
-             "<div id='selection'>012345678901234567890123456789</div>"
-             "<button>.</button>"));
+  SetHtml(
+      "<button>.</button>"
+      "<div id='selection'>012345678901234567890123456789</div>"
+      "<button>.</button>");
 
   EphemeralRange selection = Select(15);
   SurroundingText surrounding_text(selection, 12);
@@ -434,10 +437,10 @@ TEST_F(SurroundingTextTest, ButtonAndLongDiv) {
 }
 
 TEST_F(SurroundingTextTest, EmptySurroundingTextInOptionsAndButton) {
-  SetHTML(
-      String("<option>.</option>12345"
-             "<button id='selection'>test</button>"
-             "<option>.</option>"));
+  SetHtml(
+      "<option>.</option>12345"
+      "<button id='selection'>test</button>"
+      "<option>.</option>");
 
   {
     EphemeralRange selection = Select(1);
@@ -455,7 +458,7 @@ TEST_F(SurroundingTextTest, EmptySurroundingTextInOptionsAndButton) {
 }
 
 TEST_F(SurroundingTextTest, SingleDotParagraph) {
-  SetHTML(String("<p id='selection'>.</p>"));
+  SetHtml("<p id='selection'>.</p>");
 
   EphemeralRange selection = Select(0);
   SurroundingText surrounding_text(selection, 2);

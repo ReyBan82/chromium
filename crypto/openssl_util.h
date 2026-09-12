@@ -6,11 +6,15 @@
 #define CRYPTO_OPENSSL_UTIL_H_
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/location.h"
 #include "base/memory/raw_ptr.h"
 #include "crypto/crypto_export.h"
+#include "third_party/boringssl/src/include/openssl/bytestring.h"
 
 namespace crypto {
 
@@ -36,7 +40,7 @@ class ScopedOpenSSLSafeSizeBuffer {
   ~ScopedOpenSSLSafeSizeBuffer() {
     if (output_len_ < MIN_SIZE) {
       // Copy the temporary buffer out, truncating as needed.
-      memcpy(output_, min_sized_buffer_, output_len_);
+      UNSAFE_TODO(memcpy(output_, min_sized_buffer_, output_len_));
     }
     // else... any writing already happened directly into |output_|.
   }
@@ -56,13 +60,6 @@ class ScopedOpenSSLSafeSizeBuffer {
   unsigned char min_sized_buffer_[MIN_SIZE];
 };
 
-// Initialize OpenSSL if it isn't already initialized. This must be called
-// before any other OpenSSL functions though it is safe and cheap to call this
-// multiple times.
-// This function is thread-safe, and OpenSSL will only ever be initialized once.
-// OpenSSL will be properly shut down on program exit.
-CRYPTO_EXPORT void EnsureOpenSSLInit();
-
 // Drains the OpenSSL ERR_get_error stack. On a debug build the error codes
 // are send to VLOG(1), on a release build they are disregarded. In most
 // cases you should pass FROM_HERE as the |location|.
@@ -78,9 +75,7 @@ class OpenSSLErrStackTracer {
   // messages. Note any diagnostic emitted will be tagged with the location of
   // the constructor call as it's not possible to trace a destructor's callsite.
   explicit OpenSSLErrStackTracer(const base::Location& location)
-      : location_(location) {
-    EnsureOpenSSLInit();
-  }
+      : location_(location) {}
 
   OpenSSLErrStackTracer(const OpenSSLErrStackTracer&) = delete;
   OpenSSLErrStackTracer& operator=(const OpenSSLErrStackTracer&) = delete;
@@ -92,6 +87,13 @@ class OpenSSLErrStackTracer {
  private:
   const base::Location location_;
 };
+
+// Returns a span over the data in |cbb|.
+inline base::span<const uint8_t> CbbAsSpan(const CBB* cbb) {
+  // SAFETY: BoringSSL ensures that CBBs always have CBB_len() bytes available
+  // at their CBB_data() pointer.
+  return UNSAFE_BUFFERS(base::span<const uint8_t>(CBB_data(cbb), CBB_len(cbb)));
+}
 
 }  // namespace crypto
 

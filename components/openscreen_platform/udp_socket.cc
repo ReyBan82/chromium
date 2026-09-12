@@ -8,13 +8,13 @@
 
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
-#include "components/openscreen_platform/network_context.h"
 #include "components/openscreen_platform/network_util.h"
+#include "components/openscreen_platform/socket_factory.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/base/address_family.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_errors.h"
-#include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/mojom/socket_factory.mojom.h"
 #include "third_party/openscreen/src/platform/base/udp_packet.h"
 
 // Open Screen expects us to provide linked implementations of some of its
@@ -23,12 +23,12 @@ namespace openscreen {
 
 // static
 ErrorOr<std::unique_ptr<UdpSocket>> UdpSocket::Create(
-    TaskRunner* task_runner,
+    TaskRunner& task_runner,
     Client* client,
     const IPEndpoint& local_endpoint) {
-  network::mojom::NetworkContext* const network_context =
-      openscreen_platform::GetNetworkContext();
-  if (!network_context) {
+  network::mojom::SocketFactory* const socket_factory =
+      openscreen_platform::GetSocketFactory();
+  if (!socket_factory) {
     return Error::Code::kInitializationFailure;
   }
 
@@ -37,8 +37,8 @@ ErrorOr<std::unique_ptr<UdpSocket>> UdpSocket::Create(
       listener_remote.InitWithNewPipeAndPassReceiver();
 
   mojo::Remote<network::mojom::UDPSocket> socket;
-  network_context->CreateUDPSocket(socket.BindNewPipeAndPassReceiver(),
-                                   std::move(listener_remote));
+  socket_factory->CreateUDPSocket(socket.BindNewPipeAndPassReceiver(),
+                                  std::move(listener_remote));
 
   return ErrorOr<std::unique_ptr<UdpSocket>>(
       std::make_unique<openscreen_platform::UdpSocket>(
@@ -52,6 +52,7 @@ namespace openscreen_platform {
 
 namespace {
 
+using openscreen::ByteView;
 using openscreen::Error;
 using openscreen::IPAddress;
 using openscreen::IPEndpoint;
@@ -129,20 +130,15 @@ void UdpSocket::SetMulticastOutboundInterface(
 void UdpSocket::JoinMulticastGroup(const IPAddress& address,
                                    openscreen::NetworkInterfaceIndex ifindex) {
   const auto join_address = openscreen_platform::ToNetAddress(address);
-  udp_socket_->JoinGroup(join_address,
+  udp_socket_->JoinGroup(join_address, std::nullopt,
                          base::BindOnce(&UdpSocket::JoinGroupCallback,
                                         weak_ptr_factory_.GetWeakPtr()));
 }
 
-void UdpSocket::SendMessage(const void* data,
-                            size_t length,
-                            const IPEndpoint& dest) {
+void UdpSocket::SendMessage(ByteView data, const IPEndpoint& dest) {
   const auto send_to_address = openscreen_platform::ToNetEndPoint(dest);
-  base::span<const uint8_t> data_span(static_cast<const uint8_t*>(data),
-                                      length);
-
   udp_socket_->SendTo(
-      send_to_address, data_span,
+      send_to_address, base::span(data),
       net::MutableNetworkTrafficAnnotationTag(kTrafficAnnotation),
       base::BindOnce(&UdpSocket::SendCallback, weak_ptr_factory_.GetWeakPtr()));
 }
@@ -152,13 +148,13 @@ void UdpSocket::SetDscp(openscreen::UdpSocket::DscpMode state) {}
 
 void UdpSocket::OnReceived(
     int32_t net_result,
-    const absl::optional<net::IPEndPoint>& source_endpoint,
-    absl::optional<base::span<const uint8_t>> data) {
+    const std::optional<net::IPEndPoint>& source_endpoint,
+    std::optional<base::span<const uint8_t>> data) {
+  base::WeakPtr<UdpSocket> weak_this = weak_ptr_factory_.GetWeakPtr();
   if (net_result != net::OK) {
     client_->OnRead(this, Error::Code::kSocketReadFailure);
   } else if (data) {
     UdpPacket packet(data->begin(), data->end());
-    packet.set_socket(this);
     if (source_endpoint) {
       packet.set_source(
           openscreen_platform::ToOpenScreenEndPoint(source_endpoint.value()));
@@ -166,11 +162,13 @@ void UdpSocket::OnReceived(
     client_->OnRead(this, std::move(packet));
   }
 
-  udp_socket_->ReceiveMore(1);
+  if (weak_this) {
+    udp_socket_->ReceiveMore(1);
+  }
 }
 
 void UdpSocket::BindCallback(int32_t result,
-                             const absl::optional<net::IPEndPoint>& address) {
+                             const std::optional<net::IPEndPoint>& address) {
   if (result != net::OK) {
     client_->OnError(this, Error(Error::Code::kSocketBindFailure,
                                  net::ErrorToString(result)));

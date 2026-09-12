@@ -14,11 +14,10 @@
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "chrome/browser/apps/app_service/app_icon/app_icon_factory.h"
-#include "chrome/browser/apps/app_service/app_icon/icon_key_util.h"
-#include "chrome/browser/apps/app_service/launch_result_type.h"
 #include "chrome/browser/apps/app_service/publishers/app_publisher.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "components/services/app_service/public/cpp/app_types.h"
+#include "components/services/app_service/public/cpp/launch_result.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_prefs_observer.h"
 #include "extensions/browser/extension_registry.h"
@@ -53,6 +52,8 @@ class ExtensionAppsBase : public AppPublisher,
 
   ExtensionAppsBase(const ExtensionAppsBase&) = delete;
   ExtensionAppsBase& operator=(const ExtensionAppsBase&) = delete;
+
+  virtual void Initialize();
 
   // Handles profile prefs kHideWebStoreIcon changes for ChromeOS.
   virtual void OnHideWebStoreIconPrefChanged() {}
@@ -90,16 +91,10 @@ class ExtensionAppsBase : public AppPublisher,
   // nullptr.
   const extensions::Extension* MaybeGetExtension(const std::string& app_id);
 
-  virtual void Initialize();
-
   Profile* profile() const { return profile_; }
 
   base::WeakPtr<ExtensionAppsBase> GetWeakPtr() {
     return weak_factory_.GetWeakPtr();
-  }
-
-  apps_util::IncrementingIconKeyFactory& icon_key_factory() {
-    return icon_key_factory_;
   }
 
   AppType app_type() { return app_type_; }
@@ -191,8 +186,6 @@ class ExtensionAppsBase : public AppPublisher,
   // The app type published by this publisher. Must be either kChromeApp or
   // kExtension.
   AppType app_type_;
-
-  apps_util::IncrementingIconKeyFactory icon_key_factory_;
 
   base::ScopedObservation<extensions::ExtensionPrefs,
                           extensions::ExtensionPrefsObserver>

@@ -54,9 +54,14 @@ class AutocompleteControllerMetrics {
   // is done, will also log suggestion finalization metrics; otherwise, future
   // calls to `OnProviderUpdate()`, `OnStop()`, or `OnStart()` will log
   // suggestion finalization metrics.
-  void OnNotifyChanged(
-      std::vector<AutocompleteResult::MatchDedupComparator> last_result,
-      std::vector<AutocompleteResult::MatchDedupComparator> new_result);
+  //
+  // `new_result` is passed as an AutocompleteResult rather than its dedup
+  // comparators vector because logging finalization metrics (e.g. inline
+  // location suggestion metrics) requires inspecting match details (like
+  // subtypes and headers) that are not part of the dedup comparators.
+  void OnNotifyChanged(std::vector<AutocompleteResult::MatchDedupComparator>
+                           last_result_comparators,
+                       const AutocompleteResult& new_result);
 
   // Called when `AutocompleteController::OnProviderUpdate()` is called. If the
   // provider is done, will log how long it took; otherwise, future calls to
@@ -75,33 +80,16 @@ class AutocompleteControllerMetrics {
  private:
   friend class AutocompleteControllerMetricsTest;
 
-  // Checks `controller_` `done()`, `expire_timer_done()` and `in_start()` to
-  // determine whether the controller is absolutely done; i.e., there won't be
-  // any changes to results until the next user action. Just checking `done()`
-  // isn't sufficient, as the expiring copied matches can change the results.
-  // Just checking `done()` and `expire_timer_done()` isn't sufficient, as
-  // they'll both be true during the sync pass, and all async providers complete
-  // during the sync pass, there won't be a followup async update to trigger
-  // logging metrics.
-  bool ControllerIdle();
-
   // Logs
   // 'Omnibox.AsyncAutocompletionTime.[Done|LastChange|LastDefaultChange]'.
   // Additionally logs either '*.Completed' or '*.Interrupted' for each of the
   // 3 depending on whether the controller completed or was interrupted.
-  void LogSuggestionFinalizationMetrics();
+  void LogSuggestionFinalizationMetrics(const AutocompleteResult& result);
 
   // Logs 'Omnibox.AsyncAutocompletionTime.Provider.<provider name>'.
   // Additionally logs either '*.Completed' or '*.Interrupted' depending
   // whether the provider completed or was interrupted.
   void LogProviderTimeMetrics(const AutocompleteProvider& provider) const;
-
-  // Helper for the above 2 logging methods. Logs
-  // 'Omnibox.AsyncAutocompletionTime.<name>'. Additionally logs either
-  // '*.Completed' or '*.Interrupted' depending on `completed`.
-  void LogAsyncAutocompletionTimeMetrics(const std::string& name,
-                                         bool completed,
-                                         const base::TimeTicks end_time) const;
 
   // Logs 'Omnibox.MatchStability.MatchChangeIndex'. Additionally logs
   // '*.CrossInput' or '*.Async' depending on `controller_.in_start()`.
@@ -110,6 +98,11 @@ class AutocompleteControllerMetrics {
   // Logs 'Omnibox.MatchStability.MatchChangeInAnyPosition'. Additionally logs
   // '*.CrossInput' or '*.Async' depending on `controller_.in_start()`.
   void LogSuggestionChangeInAnyPositionMetrics(bool changed) const;
+
+#if !BUILDFLAG(IS_IOS)
+  void LogInlineLocationSuggestionMetrics(
+      const AutocompleteResult& result) const;
+#endif
 
   const raw_ref<const AutocompleteController> controller_;
 
@@ -123,7 +116,8 @@ class AutocompleteControllerMetrics {
   // default suggestion.
   base::TimeTicks last_default_change_time_;
   // Whether `LogSuggestionFinalizationMetrics()` has been invoked for the
-  // current request.
+  // current request. Used for `DCHECK`s and iOS only. The autocomplete
+  // controller state should be the source of truth instead.
   bool logged_finalization_metrics_ = true;
 };
 

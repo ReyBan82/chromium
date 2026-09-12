@@ -4,23 +4,26 @@
 
 #include "media/formats/mp4/avc.h"
 
+#include <algorithm>
+#include <array>
 #include <memory>
 #include <utility>
 
 #include "base/logging.h"
-#include "base/ranges/algorithm.h"
+#include "base/notreached.h"
+#include "base/types/to_address.h"
 #include "media/base/decrypt_config.h"
+#include "media/base/media_switches.h"
 #include "media/formats/mp4/box_definitions.h"
 #include "media/formats/mp4/box_reader.h"
-#include "media/video/h264_parser.h"
+#include "media/parsers/h264_parser.h"
 
-namespace media {
-namespace mp4 {
+namespace media::mp4 {
 
-static constexpr uint8_t kAnnexBStartCode[] = {0, 0, 0, 1};
-static constexpr int kAnnexBStartCodeSize = 4;
+static constexpr auto kAnnexBStartCode = std::to_array<uint8_t>({0, 0, 0, 1});
 
-static bool ConvertAVCToAnnexBInPlaceForLengthSize4(std::vector<uint8_t>* buf) {
+// static
+bool AVC::ConvertAVCToAnnexBInPlaceForLengthSize4(std::vector<uint8_t>* buf) {
   const size_t kLengthSize = 4;
   size_t pos = 0;
   while (buf->size() > kLengthSize && buf->size() - kLengthSize > pos) {
@@ -34,7 +37,7 @@ static bool ConvertAVCToAnnexBInPlaceForLengthSize4(std::vector<uint8_t>* buf) {
       return false;
     }
 
-    base::ranges::copy(kAnnexBStartCode, buf->begin() + pos);
+    std::ranges::copy(kAnnexBStartCode, buf->begin() + pos);
     pos += kLengthSize + nal_length;
   }
   return pos == buf->size();
@@ -42,21 +45,25 @@ static bool ConvertAVCToAnnexBInPlaceForLengthSize4(std::vector<uint8_t>* buf) {
 
 // static
 int AVC::FindSubsampleIndex(const std::vector<uint8_t>& buffer,
-                            const std::vector<SubsampleEntry>* subsamples,
+                            base::span<const SubsampleEntry> subsamples,
                             const uint8_t* ptr) {
-  DCHECK(ptr >= &buffer[0]);
-  DCHECK(ptr <= &buffer[buffer.size()-1]);
-  if (!subsamples || subsamples->empty())
+  DCHECK(ptr >= buffer.data());
+  DCHECK(ptr <= &buffer.back());
+  if (subsamples.empty()) {
     return 0;
+  }
 
-  const uint8_t* p = &buffer[0];
-  for (size_t i = 0; i < subsamples->size(); ++i) {
-    p += (*subsamples)[i].clear_bytes + (*subsamples)[i].cypher_bytes;
-    if (p > ptr)
-      return i;
+  size_t byte_offset = std::distance(buffer.data(), ptr);
+  size_t index = 0;
+  size_t total_bytes = 0;
+  for (const auto& subsample : subsamples) {
+    total_bytes += subsample.clear_bytes + subsample.cypher_bytes;
+    if (total_bytes > byte_offset) [[unlikely]] {
+      return index;
+    }
+    ++index;
   }
   NOTREACHED();
-  return 0;
 }
 
 // static
@@ -87,13 +94,14 @@ bool AVC::ConvertFrameToAnnexB(size_t length_size,
     }
 
     RCHECK(temp.size() >= nal_length && temp.size() - nal_length >= pos);
-    buffer->insert(buffer->end(), kAnnexBStartCode,
-                   kAnnexBStartCode + kAnnexBStartCodeSize);
+    buffer->insert(buffer->end(), kAnnexBStartCode.begin(),
+                   kAnnexBStartCode.end());
     if (subsamples && !subsamples->empty()) {
-      uint8_t* buffer_pos = &(*(buffer->end() - kAnnexBStartCodeSize));
-      int subsample_index = FindSubsampleIndex(*buffer, subsamples, buffer_pos);
+      uint8_t* buffer_pos = &(*(buffer->end() - kAnnexBStartCode.size()));
+      int subsample_index =
+          FindSubsampleIndex(*buffer, *subsamples, buffer_pos);
       // We've replaced NALU size value with an AnnexB start code.
-      int size_adjustment = kAnnexBStartCodeSize - length_size;
+      int size_adjustment = kAnnexBStartCode.size() - length_size;
       (*subsamples)[subsample_index].clear_bytes += size_adjustment;
     }
     buffer->insert(buffer->end(), temp.begin() + pos,
@@ -107,9 +115,9 @@ bool AVC::ConvertFrameToAnnexB(size_t length_size,
 bool AVC::InsertParamSetsAnnexB(const AVCDecoderConfigurationRecord& avc_config,
                                 std::vector<uint8_t>* buffer,
                                 std::vector<SubsampleEntry>* subsamples) {
-  std::unique_ptr<H264Parser> parser(new H264Parser());
+  std::unique_ptr<H264Parser> parser = std::make_unique<H264Parser>();
   const uint8_t* start = &(*buffer)[0];
-  parser->SetEncryptedStream(start, buffer->size(), *subsamples);
+  parser->SetEncryptedStream(*buffer, *subsamples);
 
   H264NALU nalu;
   if (parser->AdvanceToNextNALU(&nalu) != H264Parser::kOk)
@@ -119,13 +127,13 @@ bool AVC::InsertParamSetsAnnexB(const AVCDecoderConfigurationRecord& avc_config,
 
   if (nalu.nal_unit_type == H264NALU::kAUD) {
     // Move insert point to just after the AUD.
-    config_insert_point += (nalu.data + nalu.size) - start;
+    config_insert_point += base::to_address(nalu.data.end()) - start;
   }
 
   // Clear |parser| and |start| since they aren't needed anymore and
   // will hold stale pointers once the insert happens.
   parser.reset();
-  start = NULL;
+  start = nullptr;
 
   std::vector<uint8_t> param_sets;
   RCHECK(AVC::ConvertConfigToAnnexB(avc_config, &param_sets));
@@ -133,7 +141,7 @@ bool AVC::InsertParamSetsAnnexB(const AVCDecoderConfigurationRecord& avc_config,
   if (subsamples && !subsamples->empty()) {
     if (config_insert_point != buffer->end()) {
       int subsample_index =
-          FindSubsampleIndex(*buffer, subsamples, &(*config_insert_point));
+          FindSubsampleIndex(*buffer, *subsamples, &(*config_insert_point));
       // Update the size of the subsample where SPS/PPS is to be inserted.
       (*subsamples)[subsample_index].clear_bytes += param_sets.size();
     } else {
@@ -159,46 +167,49 @@ bool AVC::ConvertConfigToAnnexB(const AVCDecoderConfigurationRecord& avc_config,
   DCHECK(buffer->empty());
   buffer->clear();
   int total_size = 0;
-  for (size_t i = 0; i < avc_config.sps_list.size(); i++)
-    total_size += avc_config.sps_list[i].size() + kAnnexBStartCodeSize;
-  for (size_t i = 0; i < avc_config.pps_list.size(); i++)
-    total_size += avc_config.pps_list[i].size() + kAnnexBStartCodeSize;
+  for (const auto& i : avc_config.sps_list) {
+    total_size += i.size() + kAnnexBStartCode.size();
+  }
+  for (const auto& i : avc_config.pps_list) {
+    total_size += i.size() + kAnnexBStartCode.size();
+  }
   buffer->reserve(total_size);
 
-  for (size_t i = 0; i < avc_config.sps_list.size(); i++) {
-    buffer->insert(buffer->end(), kAnnexBStartCode,
-                kAnnexBStartCode + kAnnexBStartCodeSize);
-    buffer->insert(buffer->end(), avc_config.sps_list[i].begin(),
-                avc_config.sps_list[i].end());
+  for (const auto& i : avc_config.sps_list) {
+    buffer->insert(buffer->end(), kAnnexBStartCode.begin(),
+                   kAnnexBStartCode.end());
+    buffer->insert(buffer->end(), i.begin(), i.end());
   }
 
-  for (size_t i = 0; i < avc_config.pps_list.size(); i++) {
-    buffer->insert(buffer->end(), kAnnexBStartCode,
-                   kAnnexBStartCode + kAnnexBStartCodeSize);
-    buffer->insert(buffer->end(), avc_config.pps_list[i].begin(),
-                   avc_config.pps_list[i].end());
+  for (const auto& i : avc_config.pps_list) {
+    buffer->insert(buffer->end(), kAnnexBStartCode.begin(),
+                   kAnnexBStartCode.end());
+    buffer->insert(buffer->end(), i.begin(), i.end());
   }
   return true;
 }
 
 // static
 BitstreamConverter::AnalysisResult AVC::AnalyzeAnnexB(
-    const uint8_t* buffer,
-    size_t size,
-    const std::vector<SubsampleEntry>& subsamples) {
+    base::span<const uint8_t> buffer,
+    const std::vector<SubsampleEntry>& subsamples,
+    bool allow_bare_idr) {
   DVLOG(3) << __func__;
-  DCHECK(buffer);
 
   BitstreamConverter::AnalysisResult result;
   result.is_conformant = false;  // Will change if needed before return.
 
-  if (size == 0) {
+  if (buffer.empty()) {
     result.is_conformant = true;
     return result;
   }
 
+  // Track whether SPS/PPS exist
+  bool has_sps = false;
+  bool has_pps = false;
+
   H264Parser parser;
-  parser.SetEncryptedStream(buffer, size, subsamples);
+  parser.SetEncryptedStream(buffer, subsamples);
 
   typedef enum {
     kAUDAllowed,
@@ -212,6 +223,7 @@ BitstreamConverter::AnalysisResult AVC::AnalyzeAnnexB(
   NALUOrderState order_state = kAUDAllowed;
   int last_nalu_type = H264NALU::kUnspecified;
   bool done = false;
+  bool had_unexpected_nalu = false;
   while (!done) {
     switch (parser.AdvanceToNextNALU(&nalu)) {
       case H264Parser::kOk:
@@ -221,31 +233,91 @@ BitstreamConverter::AnalysisResult AVC::AnalyzeAnnexB(
           case H264NALU::kAUD:
             if (order_state > kAUDAllowed) {
               DVLOG(1) << "Unexpected AUD in order_state " << order_state;
-              return result;
+              had_unexpected_nalu = true;
             }
-            order_state = kBeforeFirstVCL;
+            if (order_state < kBeforeFirstVCL) {
+              order_state = kBeforeFirstVCL;
+            }
             break;
 
-          case H264NALU::kSEIMessage:
+          case H264NALU::kSEIMessage: {
+            if (order_state > kBeforeFirstVCL) {
+              DVLOG(1) << "Unexpected NALU type " << nalu.nal_unit_type
+                       << " in order_state " << order_state;
+              had_unexpected_nalu = true;
+            }
+            if (order_state < kBeforeFirstVCL) {
+              order_state = kBeforeFirstVCL;
+            }
+
+            if (base::FeatureList::IsEnabled(kParseSEIRecoveryPoints)) {
+              H264SEI sei;
+              if (parser.ParseSEI(&sei) != H264Parser::kOk) {
+                // This is non-fatal for historical compliance.
+                break;
+              }
+
+              const bool is_sei_recovery_point =
+                  std::ranges::any_of(sei.msgs, [](const auto& msg) {
+                    auto sei_recovery_msg =
+                        std::get_if<H264SEIRecoveryPoint>(&msg);
+                    return sei_recovery_msg &&
+                           sei_recovery_msg->recovery_frame_cnt == 0;
+                  });
+
+              // SEI recovery points generally function as key frames. However
+              // we don't mark them as such since `is_keyframe` is used to
+              // insert parameter sets -- which can cause decoding errors when
+              // done to non-IDR frames. See https://crbug.com/464062740.
+              if (is_sei_recovery_point) {
+                result.is_sei_recovery_point = true;
+              }
+            }
+
+            break;
+          }
+
           case H264NALU::kPrefix:
           case H264NALU::kSubsetSPS:
           case H264NALU::kDPS:
           case H264NALU::kReserved17:
           case H264NALU::kReserved18:
-          case H264NALU::kPPS:
-          case H264NALU::kSPS:
             if (order_state > kBeforeFirstVCL) {
               DVLOG(1) << "Unexpected NALU type " << nalu.nal_unit_type
                        << " in order_state " << order_state;
-              return result;
+              had_unexpected_nalu = true;
             }
-            order_state = kBeforeFirstVCL;
+            if (order_state < kBeforeFirstVCL) {
+              order_state = kBeforeFirstVCL;
+            }
+            break;
+
+          case H264NALU::kPPS:
+            if (order_state > kBeforeFirstVCL) {
+              DVLOG(1) << "Unexpected PPS in order_state " << order_state;
+              had_unexpected_nalu = true;
+            }
+            if (order_state < kBeforeFirstVCL) {
+              order_state = kBeforeFirstVCL;
+            }
+            has_pps = true;
+            break;
+
+          case H264NALU::kSPS:
+            if (order_state > kBeforeFirstVCL) {
+              DVLOG(1) << "Unexpected SPS in order_state " << order_state;
+              had_unexpected_nalu = true;
+            }
+            if (order_state < kBeforeFirstVCL) {
+              order_state = kBeforeFirstVCL;
+            }
+            has_sps = true;
             break;
 
           case H264NALU::kSPSExt:
             if (last_nalu_type != H264NALU::kSPS) {
               DVLOG(1) << "SPS extension does not follow an SPS.";
-              return result;
+              had_unexpected_nalu = true;
             }
             break;
 
@@ -256,46 +328,48 @@ BitstreamConverter::AnalysisResult AVC::AnalyzeAnnexB(
           case H264NALU::kIDRSlice:
             if (order_state > kAfterFirstVCL) {
               DVLOG(1) << "Unexpected VCL in order_state " << order_state;
-              return result;
+              had_unexpected_nalu = true;
             }
-
-            if (!result.is_keyframe.has_value())
-              result.is_keyframe = nalu.nal_unit_type == H264NALU::kIDRSlice;
-
-            order_state = kAfterFirstVCL;
+            if (!result.is_keyframe.has_value()) {
+              result.is_keyframe = nalu.nal_unit_type == H264NALU::kIDRSlice &&
+                                   (allow_bare_idr || (has_sps && has_pps));
+            }
+            if (order_state < kAfterFirstVCL) {
+              order_state = kAfterFirstVCL;
+            }
             break;
 
           case H264NALU::kCodedSliceAux:
             if (order_state != kAfterFirstVCL) {
               DVLOG(1) << "Unexpected extension in order_state " << order_state;
-              return result;
+              had_unexpected_nalu = true;
             }
             break;
 
           case H264NALU::kEOSeq:
             if (order_state != kAfterFirstVCL) {
               DVLOG(1) << "Unexpected EOSeq in order_state " << order_state;
-              return result;
+              had_unexpected_nalu = true;
             }
-            order_state = kEOStreamAllowed;
+            if (order_state < kEOStreamAllowed) {
+              order_state = kEOStreamAllowed;
+            }
             break;
 
           case H264NALU::kEOStream:
             if (order_state < kAfterFirstVCL) {
               DVLOG(1) << "Unexpected EOStream in order_state " << order_state;
-              return result;
+              had_unexpected_nalu = true;
             }
-            order_state = kNoMoreDataAllowed;
+            if (order_state < kNoMoreDataAllowed) {
+              order_state = kNoMoreDataAllowed;
+            }
             break;
 
           case H264NALU::kFiller:
           case H264NALU::kUnspecified:
-            if (!(order_state >= kAfterFirstVCL &&
-                  order_state < kEOStreamAllowed)) {
-              DVLOG(1) << "Unexpected NALU type " << nalu.nal_unit_type
-                       << " in order_state " << order_state;
-              return result;
-            }
+            // These syntax elements are to simply be ignored according to H264
+            // Annex B 7.4.2.7
             break;
 
           default:
@@ -304,7 +378,7 @@ BitstreamConverter::AnalysisResult AVC::AnalyzeAnnexB(
                 order_state != kAfterFirstVCL) {
               DVLOG(1) << "Unexpected NALU type " << nalu.nal_unit_type
                        << " in order_state " << order_state;
-              return result;
+              had_unexpected_nalu = true;
             }
         }
         last_nalu_type = nalu.nal_unit_type;
@@ -315,18 +389,17 @@ BitstreamConverter::AnalysisResult AVC::AnalyzeAnnexB(
 
       case H264Parser::kUnsupportedStream:
         NOTREACHED() << "AdvanceToNextNALU() returned kUnsupportedStream!";
-        return result;
 
       case H264Parser::kEOStream:
         done = true;
     }
   }
 
-  if (order_state < kAfterFirstVCL)
+  if (!result.is_keyframe.has_value()) {
     return result;
+  }
 
-  result.is_conformant = true;
-  DCHECK(result.is_keyframe.has_value());
+  result.is_conformant = !had_unexpected_nalu;
   return result;
 }
 
@@ -355,12 +428,18 @@ bool AVCBitstreamConverter::ConvertAndAnalyzeFrame(
   // keyframe. |is_keyframe| will be used if the analysis is inconclusive.
   // Also, provide the analysis result to the caller via out parameter
   // |analysis_result|.
-  *analysis_result = Analyze(frame_buf, subsamples);
+  *analysis_result = Analyze(*frame_buf, subsamples);
 
-  if (analysis_result->is_keyframe.value_or(is_keyframe)) {
-    // If this is a keyframe, we (re-)inject SPS and PPS headers at the start of
-    // a frame. If subsample info is present, we also update the clear byte
-    // count for that first subsample.
+  // See https://crbug.com/451536366.
+  const bool encrypted = subsamples && !subsamples->empty();
+  const bool inject_for_sei_recovery_point =
+      analysis_result->is_sei_recovery_point.value_or(false) && !encrypted &&
+      base::FeatureList::IsEnabled(kMediaSourceSeiRecoveryPointKeyframe);
+  if (analysis_result->is_keyframe.value_or(is_keyframe) ||
+      inject_for_sei_recovery_point) {
+    // (Re-)inject SPS and PPS headers for keyframes and SEI recovery point
+    // frames. Recovery point frames need parameter sets so the hardware decoder
+    // can initialize after a seek/reset, even though they are not IDR frames.
     RCHECK(AVC::InsertParamSetsAnnexB(*avc_config_, frame_buf, subsamples));
   }
 
@@ -368,10 +447,13 @@ bool AVCBitstreamConverter::ConvertAndAnalyzeFrame(
 }
 
 BitstreamConverter::AnalysisResult AVCBitstreamConverter::Analyze(
-    std::vector<uint8_t>* frame_buf,
+    base::span<const uint8_t> frame_buf,
     std::vector<SubsampleEntry>* subsamples) const {
-  return AVC::AnalyzeAnnexB(frame_buf->data(), frame_buf->size(), *subsamples);
+  const bool allow_bare_idr =
+      !base::FeatureList::IsEnabled(kH264IDRKeyframeRequiresParameterSets) ||
+      (!avc_config_->sps_list.empty() && !avc_config_->pps_list.empty());
+
+  return AVC::AnalyzeAnnexB(frame_buf, *subsamples, allow_bare_idr);
 }
 
-}  // namespace mp4
-}  // namespace media
+}  // namespace media::mp4

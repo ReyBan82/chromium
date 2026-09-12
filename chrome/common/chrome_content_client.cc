@@ -8,12 +8,14 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
+#include "base/check.h"
 #include "base/containers/flat_set.h"
-#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
+#include "base/memory/ref_counted_memory.h"
 #include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/strings/string_number_conversions.h"
@@ -23,9 +25,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/common/channel_info.h"
-#include "chrome/common/child_process_logging.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
@@ -37,8 +37,11 @@
 #include "components/crash/core/common/crash_key.h"
 #include "components/dom_distiller/core/url_constants.h"
 #include "components/embedder_support/origin_trials/origin_trial_policy_impl.h"
-#include "components/services/heap_profiling/public/cpp/profiling_client.h"
+#include "components/heap_profiling/in_process/child_process_snapshot_controller.h"
+#include "components/heap_profiling/in_process/heap_profiler_controller.h"
+#include "components/heap_profiling/in_process/mojom/snapshot_controller.mojom.h"
 #include "components/strings/grit/components_strings.h"
+#include "content/public/common/buildflags.h"
 #include "content/public/common/cdm_info.h"
 #include "content/public/common/content_constants.h"
 #include "content/public/common/content_switches.h"
@@ -51,12 +54,17 @@
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "net/http/http_util.h"
 #include "pdf/buildflags.h"
-#include "ppapi/buildflags/buildflags.h"
 #include "third_party/widevine/cdm/buildflags.h"
 #include "ui/base/l10n/l10n_util.h"
-#include "ui/base/layout.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/resource/resource_scale_factor.h"
 #include "url/url_constants.h"
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS)
+#include "components/webapps/isolated_web_apps/scheme.h"
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) ||
+        // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #include <fcntl.h>
@@ -67,22 +75,16 @@
 #include "base/win/windows_version.h"
 #endif
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 #include "extensions/common/constants.h"
 #endif
 
-#if BUILDFLAG(ENABLE_NACL)
-#include "components/nacl/common/nacl_constants.h"
-#include "components/nacl/common/nacl_process_type.h"
-#include "ppapi/shared_impl/ppapi_permissions.h"  // nogncheck
-#endif
-
 #if BUILDFLAG(ENABLE_PLUGINS)
-#include "content/public/common/content_plugin_info.h"
+#include "content/public/common/webplugininfo.h"
 #endif
 
 #if BUILDFLAG(ENABLE_PDF)
-#include "components/pdf/common/internal_plugin_helpers.h"
+#include "components/pdf/common/constants.h"
 #endif
 
 #if BUILDFLAG(ENABLE_LIBRARY_CDMS)
@@ -97,28 +99,11 @@
 
 namespace {
 
-#if BUILDFLAG(ENABLE_NACL)
-content::ContentPluginInfo::GetInterfaceFunc g_nacl_get_interface;
-content::ContentPluginInfo::PPP_InitializeModuleFunc g_nacl_initialize_module;
-content::ContentPluginInfo::PPP_ShutdownModuleFunc g_nacl_shutdown_module;
-#endif
-
 }  // namespace
 
 ChromeContentClient::ChromeContentClient() = default;
 
 ChromeContentClient::~ChromeContentClient() = default;
-
-#if BUILDFLAG(ENABLE_NACL)
-void ChromeContentClient::SetNaClEntryFunctions(
-    content::ContentPluginInfo::GetInterfaceFunc get_interface,
-    content::ContentPluginInfo::PPP_InitializeModuleFunc initialize_module,
-    content::ContentPluginInfo::PPP_ShutdownModuleFunc shutdown_module) {
-  g_nacl_get_interface = get_interface;
-  g_nacl_initialize_module = initialize_module;
-  g_nacl_shutdown_module = shutdown_module;
-}
-#endif
 
 void ChromeContentClient::SetActiveURL(const GURL& url,
                                        std::string top_origin) {
@@ -135,52 +120,29 @@ void ChromeContentClient::SetGpuInfo(const gpu::GPUInfo& gpu_info) {
 }
 
 void ChromeContentClient::AddPlugins(
-    std::vector<content::ContentPluginInfo>* plugins) {
+    std::vector<content::WebPluginInfo>* plugins) {
 #if BUILDFLAG(ENABLE_PDF)
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-  static constexpr char kPDFPluginName[] = "Chrome PDF Plugin";
+  static constexpr char16_t kPDFPluginName[] = u"Chrome PDF Plugin";
 #else
-  static constexpr char kPDFPluginName[] = "Chromium PDF Plugin";
+  static constexpr char16_t kPDFPluginName[] = u"Chromium PDF Plugin";
 #endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
+  static constexpr char16_t kPDFPluginDescription[] = u"Built-in PDF viewer";
   static constexpr char kPDFPluginExtension[] = "pdf";
-  static constexpr char kPDFPluginDescription[] = "Portable Document Format";
+  static constexpr char kPDFPluginExtensionDescription[] =
+      "Portable Document Format";
 
-  content::ContentPluginInfo pdf_info;
-  pdf_info.is_internal = true;
-  pdf_info.is_out_of_process = true;
+  content::WebPluginInfo pdf_info;
   pdf_info.name = kPDFPluginName;
-  pdf_info.description = kPDFPluginDescription;
   pdf_info.path = base::FilePath(ChromeContentClient::kPDFInternalPluginPath);
-  content::WebPluginMimeType pdf_mime_type(
-      pdf::kInternalPluginMimeType, kPDFPluginExtension, kPDFPluginDescription);
+  pdf_info.desc = kPDFPluginDescription;
+  content::WebPluginMimeType pdf_mime_type(pdf::kInternalPluginMimeType,
+                                           kPDFPluginExtension,
+                                           kPDFPluginExtensionDescription);
   pdf_info.mime_types.push_back(pdf_mime_type);
+  pdf_info.type = content::WebPluginInfo::PLUGIN_TYPE_BROWSER_INTERNAL_PLUGIN;
   plugins->push_back(pdf_info);
 #endif  // BUILDFLAG(ENABLE_PDF)
-
-#if BUILDFLAG(ENABLE_NACL)
-  // Handle Native Client just like the PDF plugin. This means that it is
-  // enabled by default for the non-portable case.  This allows apps installed
-  // from the Chrome Web Store to use NaCl even if the command line switch
-  // isn't set.  For other uses of NaCl we check for the command line switch.
-  content::ContentPluginInfo nacl;
-  // The nacl plugin is now built into the Chromium binary.
-  nacl.is_internal = true;
-  nacl.path = base::FilePath(nacl::kInternalNaClPluginFileName);
-  nacl.name = nacl::kNaClPluginName;
-  content::WebPluginMimeType nacl_mime_type(nacl::kNaClPluginMimeType,
-                                            nacl::kNaClPluginExtension,
-                                            nacl::kNaClPluginDescription);
-  nacl.mime_types.push_back(nacl_mime_type);
-  content::WebPluginMimeType pnacl_mime_type(nacl::kPnaclPluginMimeType,
-                                             nacl::kPnaclPluginExtension,
-                                             nacl::kPnaclPluginDescription);
-  nacl.mime_types.push_back(pnacl_mime_type);
-  nacl.internal_entry_points.get_interface = g_nacl_get_interface;
-  nacl.internal_entry_points.initialize_module = g_nacl_initialize_module;
-  nacl.internal_entry_points.shutdown_module = g_nacl_shutdown_module;
-  nacl.permissions = ppapi::PERMISSION_PRIVATE | ppapi::PERMISSION_DEV;
-  plugins->push_back(nacl);
-#endif  // BUILDFLAG(ENABLE_NACL)
 }
 
 void ChromeContentClient::AddContentDecryptionModules(
@@ -214,12 +176,24 @@ void ChromeContentClient::AddContentDecryptionModules(
 //
 // Example standard schemes: https://, chrome-extension://, chrome://, file://
 // Example nonstandard schemes: mailto:, data:, javascript:, about:
+//
+// Warning: Adding a scheme here will make URLs with that scheme incompatible
+// with other parts of the web. If you just need the URL parser to handle the
+// hostname or path correctly, you don't need to add a scheme here since
+// non-special scheme URLs are now supported (see http://crbug.com/40063064 for
+// details). If you add a new scheme, please also add WPT tests for it like
+// https://crrev.com/c/5790445.
 static const char* const kChromeStandardURLSchemes[] = {
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
     extensions::kExtensionScheme,
 #endif
-    chrome::kIsolatedAppScheme,   chrome::kChromeNativeScheme,
-    chrome::kChromeSearchScheme,  dom_distiller::kDomDistillerScheme,
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS)
+    webapps::kIsolatedAppScheme,
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) ||
+        // BUILDFLAG(IS_CHROMEOS)
+    chrome::kChromeNativeScheme,        chrome::kChromeSearchScheme,
+    dom_distiller::kDomDistillerScheme,
 #if BUILDFLAG(IS_ANDROID)
     content::kAndroidAppScheme,
 #endif
@@ -231,13 +205,20 @@ void ChromeContentClient::AddAdditionalSchemes(Schemes* schemes) {
 
 #if BUILDFLAG(IS_ANDROID)
   schemes->referrer_schemes.push_back(content::kAndroidAppScheme);
+  schemes->referrer_schemes.push_back(dom_distiller::kDomDistillerScheme);
 #endif
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   schemes->extension_schemes.push_back(extensions::kExtensionScheme);
 #endif
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS)
+  schemes->isolated_app_schemes.push_back(webapps::kIsolatedAppScheme);
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) ||
+        // BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   schemes->savable_schemes.push_back(extensions::kExtensionScheme);
 #endif
   schemes->savable_schemes.push_back(chrome::kChromeSearchScheme);
@@ -246,7 +227,7 @@ void ChromeContentClient::AddAdditionalSchemes(Schemes* schemes) {
   // chrome-search: resources shouldn't trigger insecure content warnings.
   schemes->secure_schemes.push_back(chrome::kChromeSearchScheme);
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   // Treat extensions as secure because communication with them is entirely in
   // the browser, so there is no danger of manipulation or eavesdropping on
   // communication with them by third parties.
@@ -260,7 +241,7 @@ void ChromeContentClient::AddAdditionalSchemes(Schemes* schemes) {
   schemes->no_access_schemes.push_back(chrome::kChromeNativeScheme);
   schemes->secure_schemes.push_back(chrome::kChromeNativeScheme);
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   schemes->service_worker_schemes.push_back(extensions::kExtensionScheme);
   schemes->service_worker_schemes.push_back(url::kFileScheme);
 
@@ -273,25 +254,36 @@ void ChromeContentClient::AddAdditionalSchemes(Schemes* schemes) {
   schemes->csp_bypassing_schemes.push_back(extensions::kExtensionScheme);
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS_ASH) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_CHROMEOS)
   schemes->predefined_handler_schemes.emplace_back(
       url::kMailToScheme, chrome::kChromeOSDefaultMailtoHandler);
   schemes->predefined_handler_schemes.emplace_back(
       url::kWebcalScheme, chrome::kChromeOSDefaultWebcalHandler);
 #endif
 
-  schemes->secure_schemes.push_back(chrome::kIsolatedAppScheme);
-  schemes->cors_enabled_schemes.push_back(chrome::kIsolatedAppScheme);
-  schemes->service_worker_schemes.push_back(chrome::kIsolatedAppScheme);
-  url::AddWebStorageScheme(chrome::kIsolatedAppScheme);
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS)
+  schemes->secure_schemes.push_back(webapps::kIsolatedAppScheme);
+  schemes->cors_enabled_schemes.push_back(webapps::kIsolatedAppScheme);
+  schemes->service_worker_schemes.push_back(webapps::kIsolatedAppScheme);
+  url::AddWebStorageScheme(webapps::kIsolatedAppScheme);
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) ||
+        // BUILDFLAG(IS_CHROMEOS)
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   schemes->local_schemes.push_back(content::kExternalFileScheme);
 #endif
 
 #if BUILDFLAG(IS_ANDROID)
   schemes->local_schemes.push_back(url::kContentScheme);
 #endif
+
+  schemes->standard_schemes.push_back(
+      chrome::kChromeExperimentalSiteTokenProviderScheme);
+  schemes->secure_schemes.push_back(
+      chrome::kChromeExperimentalSiteTokenProviderScheme);
+  schemes->cors_enabled_schemes.push_back(
+      chrome::kChromeExperimentalSiteTokenProviderScheme);
 }
 
 std::u16string ChromeContentClient::GetLocalizedString(int message_id) {
@@ -304,14 +296,18 @@ std::u16string ChromeContentClient::GetLocalizedString(
   return l10n_util::GetStringFUTF16(message_id, replacement);
 }
 
-base::StringPiece ChromeContentClient::GetDataResource(
+bool ChromeContentClient::HasDataResource(int resource_id) const {
+  return ui::ResourceBundle::GetSharedInstance().HasDataResource(resource_id);
+}
+
+std::string_view ChromeContentClient::GetDataResource(
     int resource_id,
     ui::ResourceScaleFactor scale_factor) {
   return ui::ResourceBundle::GetSharedInstance().GetRawDataResourceForScale(
       resource_id, scale_factor);
 }
 
-base::RefCountedMemory* ChromeContentClient::GetDataResourceBytes(
+scoped_refptr<base::RefCountedMemory> ChromeContentClient::GetDataResourceBytes(
     int resource_id) {
   return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytes(
       resource_id);
@@ -328,21 +324,12 @@ gfx::Image& ChromeContentClient::GetNativeImageNamed(int resource_id) {
 }
 
 std::string ChromeContentClient::GetProcessTypeNameInEnglish(int type) {
-#if BUILDFLAG(ENABLE_NACL)
-  switch (type) {
-    case PROCESS_TYPE_NACL_LOADER:
-      return "Native Client module";
-    case PROCESS_TYPE_NACL_BROKER:
-      return "Native Client broker";
-  }
-#endif
-
+  // TODO(crbug.com/423859723): Remove this method.
   NOTREACHED() << "Unknown child process type!";
-  return "Unknown";
 }
 
 blink::OriginTrialPolicy* ChromeContentClient::GetOriginTrialPolicy() {
-  // Prevent initialization race (see crbug.com/721144). There may be a
+  // Prevent initialization race (see crbug.com/41318781). There may be a
   // race when the policy is needed for worker startup (which happens on a
   // separate worker thread).
   base::AutoLock auto_lock(origin_trial_policy_lock_);
@@ -361,13 +348,29 @@ media::MediaDrmBridgeClient* ChromeContentClient::GetMediaDrmBridgeClient() {
 void ChromeContentClient::ExposeInterfacesToBrowser(
     scoped_refptr<base::SequencedTaskRunner> io_task_runner,
     mojo::BinderMap* binders) {
-  binders->Add<heap_profiling::mojom::ProfilingClient>(
-      base::BindRepeating(
-          [](mojo::PendingReceiver<heap_profiling::mojom::ProfilingClient>
-                 receiver) {
-            static base::NoDestructor<heap_profiling::ProfilingClient>
-                profiling_client;
-            profiling_client->BindToInterface(std::move(receiver));
-          }),
-      io_task_runner);
+  // Sets up the in-process heap profiler, if it's enabled.
+  const auto* heap_profiler_controller =
+      heap_profiling::HeapProfilerController::GetInstance();
+  if (heap_profiler_controller && heap_profiler_controller->IsEnabled()) {
+    binders->Add<heap_profiling::mojom::SnapshotController>(
+        &heap_profiling::ChildProcessSnapshotController::
+            CreateSelfOwnedReceiver,
+        // ChildProcessSnapshotController calls into HeapProfilerController,
+        // which can only be accessed on this sequence.
+        base::SequencedTaskRunner::GetCurrentDefault());
+  }
+}
+
+bool ChromeContentClient::IsFilePickerAllowedForCrossOriginSubframe(
+    const url::Origin& origin) {
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  // Permissive renderer-side gate: any extension-scheme origin is allowed
+  // past the synchronous SecurityError. The authoritative check lives in the
+  // browser via
+  // ContentBrowserClient::IsCrossOriginSubframeAllowedToShowFilePicker(),
+  // which verifies the frame is actually a MIME handler extension subframe.
+  return origin.scheme() == extensions::kExtensionScheme;
+#else
+  return false;
+#endif
 }

@@ -6,23 +6,29 @@
 
 #include "base/test/bind.h"
 #include "ui/base/interaction/element_tracker.h"
-#include "ui/base/interaction/framework_specific_implementation.h"
+#include "ui/base/interaction/safe_castable.h"
 
 namespace ui::test {
 
-TestElementBase::TestElementBase(ElementIdentifier id, ElementContext context)
-    : TrackedElement(id, context) {}
+TestElementBase::TestElementBase(ElementIdentifier id,
+                                 ElementContext context,
+                                 std::string_view secondary_id)
+    : TrackedElement(id, context), secondary_id_(secondary_id) {}
 
 TestElementBase::~TestElementBase() {
   Hide();
 }
 
-TestElement::TestElement(ElementIdentifier id, ElementContext context)
-    : TestElementBase(id, context) {}
+TestElement::TestElement(ElementIdentifier id,
+                         ElementContext context,
+                         std::string_view secondary_id)
+    : TestElementBase(id, context, secondary_id) {}
 
-TestElementOtherFramework::TestElementOtherFramework(ElementIdentifier id,
-                                                     ElementContext context)
-    : TestElementBase(id, context) {}
+TestElementOtherFramework::TestElementOtherFramework(
+    ElementIdentifier id,
+    ElementContext context,
+    std::string_view secondary_id)
+    : TestElementBase(id, context, secondary_id) {}
 
 void TestElementBase::Show() {
   if (visible_)
@@ -43,6 +49,10 @@ void TestElementBase::Hide() {
   ElementTracker::GetFrameworkDelegate()->NotifyElementHidden(this);
 }
 
+bool TestElementBase::IsVisible() const {
+  return visible_;
+}
+
 void TestElementBase::SendCustomEvent(CustomElementEventType event_type) {
   DCHECK(visible_);
   ElementTracker::GetFrameworkDelegate()->NotifyCustomEvent(this, event_type);
@@ -56,7 +66,20 @@ gfx::Rect TestElementBase::GetScreenBounds() const {
   return screen_bounds_;
 }
 
-DEFINE_FRAMEWORK_SPECIFIC_METADATA(TestElement)
-DEFINE_FRAMEWORK_SPECIFIC_METADATA(TestElementOtherFramework)
+void TestElementBase::SetNativeView(gfx::NativeView native_view) {
+  native_view_ = native_view;
+}
+
+gfx::NativeView TestElementBase::GetNativeView() const {
+  return native_view_;
+}
+
+std::string TestElementBase::GetSecondaryIdentifier() const {
+  return secondary_id_.empty() ? TrackedElement::GetSecondaryIdentifier()
+                               : secondary_id_;
+}
+
+DEFINE_SAFE_CAST_TARGET(TestElement)
+DEFINE_SAFE_CAST_TARGET(TestElementOtherFramework)
 
 }  // namespace ui::test

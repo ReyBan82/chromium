@@ -4,15 +4,18 @@
 
 #include "chrome/browser/ash/login/screens/guest_tos_screen.h"
 
+#include "ash/constants/ash_login_pref_names.h"
 #include "ash/constants/ash_switches.h"
+#include "ash/constants/url_constants.h"
+#include "base/check_deref.h"
 #include "base/check_op.h"
 #include "base/command_line.h"
+#include "base/logging.h"
 #include "base/strings/stringprintf.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
 #include "chrome/browser/ash/login/startup_utils.h"
-#include "chrome/browser/browser_process.h"
+#include "chrome/browser/metrics/cros_pre_choice_metrics_manager.h"
 #include "chrome/browser/ui/webui/ash/login/guest_tos_screen_handler.h"
-#include "chrome/common/url_constants.h"
+#include "components/application_locale_storage/application_locale_storage.h"
 #include "components/prefs/pref_service.h"
 namespace ash {
 namespace {
@@ -21,32 +24,33 @@ constexpr const char kUserActionBackClicked[] = "back-button";
 constexpr const char kUserActionCancelClicked[] = "cancel";
 constexpr const char kUserActionGuestToSAccept[] = "guest-tos-accept";
 
-std::string GetGoogleEulaOnlineUrl() {
+std::string GetGoogleEulaOnlineUrl(const std::string& application_locale) {
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kOobeEulaUrlForTests)) {
     return base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
         switches::kOobeEulaUrlForTests);
   }
 
-  return base::StringPrintf(chrome::kGoogleEulaOnlineURLPath,
-                            g_browser_process->GetApplicationLocale().c_str());
+  return base::StringPrintf(ash::external_urls::kGoogleEulaOnlineURLPath,
+                            application_locale.c_str());
 }
 
-std::string GetCrosEulaOnlineUrl() {
+std::string GetCrosEulaOnlineUrl(const std::string& application_locale) {
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kOobeEulaUrlForTests)) {
     return base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
         switches::kOobeEulaUrlForTests);
   }
 
-  return base::StringPrintf(chrome::kCrosEulaOnlineURLPath,
-                            g_browser_process->GetApplicationLocale().c_str());
+  return base::StringPrintf(ash::external_urls::kCrosEulaOnlineURLPath,
+                            application_locale.c_str());
 }
 
 }  // namespace
 
 // static
 std::string GuestTosScreen::GetResultString(Result result) {
+  // LINT.IfChange(UsageMetrics)
   switch (result) {
     case Result::ACCEPT:
       return "Accept";
@@ -55,11 +59,17 @@ std::string GuestTosScreen::GetResultString(Result result) {
     case Result::CANCEL:
       return "Cancel";
   }
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/oobe/histograms.xml)
 }
 
-GuestTosScreen::GuestTosScreen(base::WeakPtr<GuestTosScreenView> view,
-                               const ScreenExitCallback& exit_callback)
+GuestTosScreen::GuestTosScreen(
+    PrefService* local_state,
+    const ApplicationLocaleStorage* application_locale_storage,
+    base::WeakPtr<GuestTosScreenView> view,
+    const ScreenExitCallback& exit_callback)
     : BaseScreen(GuestTosScreenView::kScreenId, OobeScreenPriority::DEFAULT),
+      local_state_(CHECK_DEREF(local_state)),
+      application_locale_storage_(CHECK_DEREF(application_locale_storage)),
       view_(std::move(view)),
       exit_callback_(exit_callback) {
   DCHECK(view_);
@@ -70,12 +80,13 @@ GuestTosScreen::~GuestTosScreen() = default;
 void GuestTosScreen::ShowImpl() {
   if (!view_)
     return;
-  view_->Show(GetGoogleEulaOnlineUrl(), GetCrosEulaOnlineUrl());
+  const std::string& locale = application_locale_storage_->Get();
+  view_->Show(GetGoogleEulaOnlineUrl(locale), GetCrosEulaOnlineUrl(locale));
 }
 
 void GuestTosScreen::HideImpl() {}
 
-void GuestTosScreen::OnUserAction(const base::Value::List& args) {
+void GuestTosScreen::OnUserAction(const base::ListValue& args) {
   const std::string& action_id = args[0].GetString();
   if (action_id == kUserActionBackClicked) {
     exit_callback_.Run(Result::BACK);
@@ -91,15 +102,17 @@ void GuestTosScreen::OnUserAction(const base::Value::List& args) {
 }
 
 void GuestTosScreen::OnAccept(bool enable_usage_stats) {
-  // TODO(crbug/1298249): Add browser tests to ensure that the feature is
-  // working.
-  PrefService* local_state = g_browser_process->local_state();
+  // Disable pre-choice metrics for guest as guest has expressed choice. This
+  // is critical as crash_reporter is depending on the disable operation of
+  // CrOSPreChoiceMetricsManager to end pre-choice stage.
+  if (metrics::CrOSPreChoiceMetricsManager::Get()) {
+    metrics::CrOSPreChoiceMetricsManager::Get()->Disable();
+  }
 
-  // Store guest consent to local state so that correct metrics consent can be
+  // Store guest choice to local state so that correct metrics choice can be
   // loaded after browser restart.
-  local_state->SetBoolean(prefs::kOobeGuestMetricsEnabled, enable_usage_stats);
-  local_state->SetBoolean(prefs::kOobeGuestAcceptedTos, true);
-  local_state->CommitPendingWrite(
+  local_state_->SetBoolean(prefs::kOobeGuestMetricsEnabled, enable_usage_stats);
+  local_state_->CommitPendingWrite(
       base::BindOnce(&GuestTosScreen::OnOobeGuestPrefWriteDone,
                      weak_ptr_factory_.GetWeakPtr()));
 }

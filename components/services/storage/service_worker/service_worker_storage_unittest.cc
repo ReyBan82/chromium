@@ -10,6 +10,7 @@
 #include <string>
 #include <utility>
 
+#include "base/byte_size.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
@@ -20,18 +21,18 @@
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "net/base/hash_value.h"
 #include "net/base/net_errors.h"
 #include "net/disk_cache/disk_cache.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace storage {
-namespace service_worker_storage_unittest {
+namespace storage::service_worker_storage_unittest {
 
 struct ReadResponseHeadResult {
   int result;
   network::mojom::URLResponseHeadPtr response_head;
-  absl::optional<mojo_base::BigBuffer> metadata;
+  std::optional<mojo_base::BigBuffer> metadata;
 };
 
 using ResourceRecord = mojom::ServiceWorkerResourceRecordPtr;
@@ -39,9 +40,9 @@ using ResourceList = std::vector<mojom::ServiceWorkerResourceRecordPtr>;
 
 ResourceRecord CreateResourceRecord(int64_t resource_id,
                                     const GURL& url,
-                                    int64_t size_bytes) {
+                                    base::ByteSize size) {
   EXPECT_TRUE(url.is_valid());
-  return mojom::ServiceWorkerResourceRecord::New(resource_id, url, size_bytes,
+  return mojom::ServiceWorkerResourceRecord::New(resource_id, url, size,
                                                  /*sha256_checksum=*/"");
 }
 
@@ -61,18 +62,18 @@ mojom::ServiceWorkerRegistrationDataPtr CreateRegistrationData(
   data->navigation_preload_state = blink::mojom::NavigationPreloadState::New();
   data->is_active = true;
 
-  int64_t resources_total_size_bytes = 0;
+  base::ByteSize resources_total_size;
   for (auto& resource : resources) {
-    resources_total_size_bytes += resource->size_bytes;
+    resources_total_size += resource->size.value();
   }
-  data->resources_total_size_bytes = resources_total_size_bytes;
+  data->resources_total_size = resources_total_size;
 
   return data;
 }
 
 void DatabaseStatusCallback(
     base::OnceClosure quit_closure,
-    absl::optional<ServiceWorkerDatabase::Status>* result,
+    std::optional<ServiceWorkerDatabase::Status>* result,
     ServiceWorkerDatabase::Status status) {
   *result = status;
   std::move(quit_closure).Run();
@@ -84,14 +85,15 @@ class ServiceWorkerStorageTest : public testing::Test {
   ~ServiceWorkerStorageTest() override = default;
 
   void SetUp() override {
-    storage_ = ServiceWorkerStorage::Create(
-        user_data_directory_path_,
-        /*database_task_runner=*/base::SingleThreadTaskRunner::
-            GetCurrentDefault());
+    storage_shared_buffer_ =
+        base::MakeRefCounted<ServiceWorkerStorage::StorageSharedBuffer>();
+    storage_ = ServiceWorkerStorage::Create(user_data_directory_path_,
+                                            storage_shared_buffer_);
   }
 
   void TearDown() override {
     storage_.reset();
+    storage_shared_buffer_ = nullptr;
     disk_cache::FlushCacheThreadForTesting();
     base::RunLoop().RunUntilIdle();
   }
@@ -146,14 +148,15 @@ class ServiceWorkerStorageTest : public testing::Test {
 
   ServiceWorkerDatabase::Status GetUsageForStorageKey(
       const blink::StorageKey& key,
-      int64_t& out_usage) {
+      base::ByteSize& out_usage) {
     ServiceWorkerDatabase::Status result;
     base::RunLoop loop;
     storage()->GetUsageForStorageKey(
         key, base::BindLambdaForTesting(
                  [&](ServiceWorkerDatabase::Status status, int64_t usage) {
                    result = status;
-                   out_usage = usage;
+                   out_usage =
+                       base::ByteSize(base::checked_cast<uint64_t>(usage));
                    loop.Quit();
                  }));
     loop.Run();
@@ -354,7 +357,7 @@ class ServiceWorkerStorageTest : public testing::Test {
         base::BindLambdaForTesting(
             [&](mojom::ServiceWorkerRegistrationDataPtr,
                 std::unique_ptr<ResourceList>,
-                const absl::optional<std::vector<GURL>>& scopes,
+                const std::optional<std::vector<GURL>>& scopes,
                 ServiceWorkerDatabase::Status status) {
               result = status;
               loop.Quit();
@@ -451,7 +454,8 @@ class ServiceWorkerStorageTest : public testing::Test {
     base::RunLoop loop;
 
     mojo::Remote<mojom::ServiceWorkerResourceReader> reader;
-    storage()->CreateResourceReader(id, reader.BindNewPipeAndPassReceiver());
+    storage()->CreateResourceReader(id, /*sha256_checksum=*/std::nullopt,
+                                    reader.BindNewPipeAndPassReceiver());
     reader.set_disconnect_handler(base::BindLambdaForTesting([&]() {
       out.result = net::ERR_CACHE_MISS;
       loop.Quit();
@@ -459,7 +463,7 @@ class ServiceWorkerStorageTest : public testing::Test {
 
     reader->ReadResponseHead(base::BindLambdaForTesting(
         [&](int result, network::mojom::URLResponseHeadPtr response_head,
-            absl::optional<mojo_base::BigBuffer> metadata) {
+            std::optional<mojo_base::BigBuffer> metadata) {
           out.result = result;
           out.response_head = std::move(response_head);
           out.metadata = std::move(metadata);
@@ -475,8 +479,7 @@ class ServiceWorkerStorageTest : public testing::Test {
     const std::string kHttpBody = "Hello";
 
     std::string headers(kHttpHeaders, std::size(kHttpHeaders));
-    mojo_base::BigBuffer body(
-        base::as_bytes(base::make_span(kHttpBody.data(), kHttpBody.length())));
+    mojo_base::BigBuffer body(base::as_byte_span(kHttpBody));
 
     mojo::Remote<mojom::ServiceWorkerResourceWriter> writer;
     storage()->CreateResourceWriter(id, writer.BindNewPipeAndPassReceiver());
@@ -518,8 +521,7 @@ class ServiceWorkerStorageTest : public testing::Test {
   }
 
   int WriteResponseMetadata(int64_t id, const std::string& metadata) {
-    mojo_base::BigBuffer buffer(
-        base::as_bytes(base::make_span(metadata.data(), metadata.length())));
+    mojo_base::BigBuffer buffer(base::as_byte_span(metadata));
 
     mojo::Remote<mojom::ServiceWorkerResourceMetadataWriter> metadata_writer;
     storage()->CreateResourceMetadataWriter(
@@ -563,6 +565,8 @@ class ServiceWorkerStorageTest : public testing::Test {
   base::ScopedTempDir user_data_directory_;
   base::FilePath user_data_directory_path_;
   std::unique_ptr<ServiceWorkerStorage> storage_;
+  scoped_refptr<ServiceWorkerStorage::StorageSharedBuffer>
+      storage_shared_buffer_;
   base::test::TaskEnvironment task_environment_;
 };
 
@@ -596,7 +600,8 @@ TEST_F(ServiceWorkerStorageTest, DisabledStorage) {
             ServiceWorkerDatabase::Status::kErrorDisabled);
 
   std::vector<ResourceRecord> resources;
-  resources.push_back(CreateResourceRecord(kResourceId, kScript, 100));
+  resources.push_back(
+      CreateResourceRecord(kResourceId, kScript, base::ByteSize(100)));
   mojom::ServiceWorkerRegistrationDataPtr registration_data =
       CreateRegistrationData(kRegistrationId, kVersionId, kScope, kKey, kScript,
                              resources);
@@ -613,7 +618,8 @@ TEST_F(ServiceWorkerStorageTest, DisabledStorage) {
             ServiceWorkerDatabase::Status::kErrorDisabled);
 
   std::vector<ResourceRecord> resources2;
-  resources2.push_back(CreateResourceRecord(kResourceId, kScript, 100));
+  resources2.push_back(
+      CreateResourceRecord(kResourceId, kScript, base::ByteSize(100)));
   CreateRegistrationData(kRegistrationId2, kVersionId, kScope, kKey, kScript,
                          resources2);
   EXPECT_EQ(
@@ -667,7 +673,7 @@ TEST_F(ServiceWorkerStorageTest, StoreUserData) {
 
   // Store a registration.
   std::vector<ResourceRecord> resources;
-  resources.push_back(CreateResourceRecord(1, kScript, 100));
+  resources.push_back(CreateResourceRecord(1, kScript, base::ByteSize(100)));
   mojom::ServiceWorkerRegistrationDataPtr registration_data =
       CreateRegistrationData(kRegistrationId,
                              /*version_id=*/1, kScope, kKey, kScript,
@@ -886,7 +892,7 @@ class ServiceWorkerStorageDiskTest : public ServiceWorkerStorageTest {
     const blink::StorageKey kKey =
         blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
     const GURL kScript("http://www.example.com/script.js");
-    const int64_t kScriptSize = 5;
+    const base::ByteSize kScriptSize = base::ByteSize(5);
     auto data = mojom::ServiceWorkerRegistrationData::New();
     data->registration_id = 1;
     data->version_id = 1;
@@ -895,7 +901,7 @@ class ServiceWorkerStorageDiskTest : public ServiceWorkerStorageTest {
     data->script = kScript;
     data->navigation_preload_state =
         blink::mojom::NavigationPreloadState::New();
-    data->resources_total_size_bytes = kScriptSize;
+    data->resources_total_size = kScriptSize;
 
     std::vector<ResourceRecord> resources;
     resources.push_back(CreateResourceRecord(1, kScript, kScriptSize));
@@ -912,7 +918,7 @@ TEST_F(ServiceWorkerStorageDiskTest, DeleteAndStartOver) {
   ASSERT_TRUE(base::DirectoryExists(storage()->GetDatabasePath()));
 
   base::RunLoop run_loop;
-  absl::optional<ServiceWorkerDatabase::Status> status;
+  std::optional<ServiceWorkerDatabase::Status> status;
   storage()->DeleteAndStartOver(
       base::BindOnce(&DatabaseStatusCallback, run_loop.QuitClosure(), &status));
   run_loop.Run();
@@ -936,7 +942,7 @@ TEST_F(ServiceWorkerStorageDiskTest, DeleteAndStartOver_UnrelatedFileExists) {
   ASSERT_TRUE(base::PathExists(file_path));
 
   base::RunLoop run_loop;
-  absl::optional<ServiceWorkerDatabase::Status> status;
+  std::optional<ServiceWorkerDatabase::Status> status;
   storage()->DeleteAndStartOver(
       base::BindOnce(&DatabaseStatusCallback, run_loop.QuitClosure(), &status));
   run_loop.Run();
@@ -961,7 +967,7 @@ TEST_F(ServiceWorkerStorageDiskTest, DeleteAndStartOver_OpenedFileExists) {
   ASSERT_TRUE(base::PathExists(file_path));
 
   base::RunLoop run_loop;
-  absl::optional<ServiceWorkerDatabase::Status> status;
+  std::optional<ServiceWorkerDatabase::Status> status;
   storage()->DeleteAndStartOver(
       base::BindOnce(&DatabaseStatusCallback, run_loop.QuitClosure(), &status));
   run_loop.Run();
@@ -994,35 +1000,35 @@ TEST_F(ServiceWorkerStorageTest, GetStorageUsageForOrigin) {
 
   // Preparation: Store two registrations.
   std::vector<ResourceRecord> resources1;
-  resources1.push_back(CreateResourceRecord(1, kScript1, 123));
+  resources1.push_back(CreateResourceRecord(1, kScript1, base::ByteSize(123)));
   mojom::ServiceWorkerRegistrationDataPtr data1 = CreateRegistrationData(
       /*registration_id=*/kRegistrationId1,
       /*version_id=*/1,
       /*scope=*/kScope1,
       /*key=*/kKey1,
       /*script_url=*/kScript1, resources1);
-  int64_t resources_total_size_bytes1 = data1->resources_total_size_bytes;
+  base::ByteSize resources_total_size1 = data1->resources_total_size;
   ASSERT_EQ(StoreRegistrationData(std::move(data1), std::move(resources1)),
             ServiceWorkerDatabase::Status::kOk);
 
   std::vector<ResourceRecord> resources2;
-  resources2.push_back(CreateResourceRecord(2, kScript2, 456));
-  resources2.push_back(CreateResourceRecord(3, kScript3, 789));
+  resources2.push_back(CreateResourceRecord(2, kScript2, base::ByteSize(456)));
+  resources2.push_back(CreateResourceRecord(3, kScript3, base::ByteSize(789)));
   mojom::ServiceWorkerRegistrationDataPtr data2 = CreateRegistrationData(
       /*registration_id=*/kRegistrationId2,
       /*version_id=*/1,
       /*scope=*/kScope1,
       /*key=*/kKey1,
       /*script_url=*/kScript2, resources2);
-  int64_t resources_total_size_bytes2 = data2->resources_total_size_bytes;
+  base::ByteSize resources_total_size2 = data2->resources_total_size;
   ASSERT_EQ(StoreRegistrationData(std::move(data2), std::move(resources2)),
             ServiceWorkerDatabase::Status::kOk);
 
   // Storage usage should report total resource size from two registrations.
-  int64_t usage;
+  base::ByteSize usage;
   EXPECT_EQ(GetUsageForStorageKey(kKey1, usage),
             ServiceWorkerDatabase::Status::kOk);
-  EXPECT_EQ(usage, resources_total_size_bytes1 + resources_total_size_bytes2);
+  EXPECT_EQ(usage, resources_total_size1 + resources_total_size2);
 
   // Delete the first registration. Storage usage should report only the second
   // registration.
@@ -1030,15 +1036,14 @@ TEST_F(ServiceWorkerStorageTest, GetStorageUsageForOrigin) {
             ServiceWorkerDatabase::Status::kOk);
   EXPECT_EQ(GetUsageForStorageKey(kKey1, usage),
             ServiceWorkerDatabase::Status::kOk);
-  EXPECT_EQ(usage, resources_total_size_bytes2);
+  EXPECT_EQ(usage, resources_total_size2);
 
   // Delete the second registration. No storage usage should be reported.
   EXPECT_EQ(DeleteRegistration(kRegistrationId2, kKey1),
             ServiceWorkerDatabase::Status::kOk);
   EXPECT_EQ(GetUsageForStorageKey(kKey1, usage),
             ServiceWorkerDatabase::Status::kOk);
-  EXPECT_EQ(usage, 0);
+  EXPECT_TRUE(usage.is_zero());
 }
 
-}  // namespace service_worker_storage_unittest
-}  // namespace storage
+}  // namespace storage::service_worker_storage_unittest

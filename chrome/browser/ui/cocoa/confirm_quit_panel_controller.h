@@ -11,19 +11,28 @@
 
 // The ConfirmQuitPanelController manages the black HUD window that tells users
 // to "Hold Cmd+Q to Quit".
-@interface ConfirmQuitPanelController : NSWindowController<NSWindowDelegate> {
- @private
-  // The content view of the window that this controller manages.
-  ConfirmQuitFrameView* _contentView;  // Weak, owned by the window.
-}
+@interface ConfirmQuitPanelController : NSWindowController <NSWindowDelegate>
 
-// Returns a singleton instance of the Controller. This will create one if it
-// does not currently exist.
-+ (ConfirmQuitPanelController*)sharedController;
+// Returns a string representation fit for display.
+@property(class, readonly) NSString* keyCommandString;
 
-// Runs a modal loop that brings up the panel and handles the logic for if and
-// when to terminate. Returns YES if the quit should continue.
-- (BOOL)runModalLoopForApplication:(NSApplication*)app;
+// For testing, a block that can be set to mock the return value of
+// `isKeyDownForKeyCode`. Used to simulate the pressing/holding of the quit
+// accelerator.
+@property(class, copy) BOOL (^isKeyDownForKeyCodeMock)(unsigned short);
+
+// Displays the "Hold to Quit" HUD and runs a nested event loop to determine
+// whether the application should terminate. This implements both the
+// "Hold to Quit" and "Double-tap to Quit" behaviors. Returns YES if the quit
+// should proceed.
+//
+// |event| is the KeyDown event that triggered the quit attempt; it is used to
+// identify the key being held (typically 'Q') without hardcoding its key code.
+//
+// |dismissedCallback| is invoked when the panel has finished dismissing or
+// closing.
+- (BOOL)runConfirmQuitLoopWithEvent:(NSEvent*)event
+                  dismissedCallback:(void (^)())dismissedCallback;
 
 // Shows the window.
 - (void)showWindow:(id)sender;
@@ -32,13 +41,11 @@
 // instructions on how to quit.
 - (void)dismissPanel;
 
-// Returns a string representation fit for display.
-+ (NSString*)keyCommandString;
+// Completely back out of the process, making all windows visible again.
+// Called when the quit was aborted *after* confirmations (for example, due to
+// pending downloads or `beforeunload`).
+- (void)cancel;
 
-@end
-
-@interface ConfirmQuitPanelController (UnitTesting)
-+ (NSString*)keyCombinationForMenuItem:(NSMenuItem*)item;
 @end
 
 #endif  // CHROME_BROWSER_UI_COCOA_CONFIRM_QUIT_PANEL_CONTROLLER_H_

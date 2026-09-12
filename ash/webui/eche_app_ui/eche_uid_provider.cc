@@ -4,11 +4,15 @@
 
 #include "ash/webui/eche_app_ui/eche_uid_provider.h"
 
-#include <base/base64.h>
 #include <openssl/base64.h>
-#include <cstring>
 
+#include <array>
+#include <cstring>
+#include <string_view>
+
+#include "base/base64.h"
 #include "base/check.h"
+#include "base/containers/span.h"
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "components/prefs/pref_service.h"
 #include "crypto/random.h"
@@ -31,20 +35,21 @@ void EcheUidProvider::GetUid(
     std::move(callback).Run(uid_);
     return;
   }
-  uint8_t public_key[ED25519_PUBLIC_KEY_LEN];
-  uint8_t private_key[ED25519_PRIVATE_KEY_LEN];
+  std::array<uint8_t, ED25519_PUBLIC_KEY_LEN> public_key;
+  std::array<uint8_t, ED25519_PRIVATE_KEY_LEN> private_key;
   std::string pref_seed = pref_service_->GetString(kEcheAppSeedPref);
   if (pref_seed.empty()) {
     GenerateKeyPair(public_key, private_key);
   } else {
-    absl::optional<std::vector<uint8_t>> result =
+    std::optional<std::vector<uint8_t>> result =
         ConvertStringToBinary(pref_seed, kSeedSizeInByte);
     if (!result) {
       PA_LOG(WARNING) << "Invalid encoded string, regenerate the keypair.";
       GenerateKeyPair(public_key, private_key);
     } else {
       DCHECK_EQ(kSeedSizeInByte, result->size());
-      ED25519_keypair_from_seed(public_key, private_key, result->data());
+      ED25519_keypair_from_seed(public_key.data(), private_key.data(),
+                                result->data());
     }
   }
   uid_ = ConvertBinaryToString(public_key);
@@ -52,18 +57,18 @@ void EcheUidProvider::GetUid(
 }
 
 void EcheUidProvider::GenerateKeyPair(
-    uint8_t public_key[ED25519_PUBLIC_KEY_LEN],
-    uint8_t private_key[ED25519_PRIVATE_KEY_LEN]) {
-  ED25519_keypair(public_key, private_key);
+    base::span<uint8_t, ED25519_PUBLIC_KEY_LEN> public_key,
+    base::span<uint8_t, ED25519_PRIVATE_KEY_LEN> private_key) {
+  ED25519_keypair(public_key.data(), private_key.data());
   // Store the seed (what RFC8032 calls a private key), which is the
   // first 32 bytes of what BoringSSL calls the private key.
   pref_service_->SetString(
       kEcheAppSeedPref,
-      ConvertBinaryToString(base::make_span(private_key, kSeedSizeInByte)));
+      ConvertBinaryToString(private_key.first(kSeedSizeInByte)));
 }
 
-absl::optional<std::vector<uint8_t>> EcheUidProvider::ConvertStringToBinary(
-    base::StringPiece str,
+std::optional<std::vector<uint8_t>> EcheUidProvider::ConvertStringToBinary(
+    std::string_view str,
     size_t expected_len) {
   std::vector<uint8_t> decoded_data(str.size());
   size_t decoded_data_len = 0;
@@ -71,11 +76,11 @@ absl::optional<std::vector<uint8_t>> EcheUidProvider::ConvertStringToBinary(
           decoded_data.data(), &decoded_data_len, decoded_data.size(),
           reinterpret_cast<const uint8_t*>(str.data()), str.size())) {
     PA_LOG(ERROR) << "Attempting to decode string failed.";
-    return absl::nullopt;
+    return std::nullopt;
   }
   if (decoded_data_len != expected_len) {
     PA_LOG(ERROR) << "Expected length is not match.";
-    return absl::nullopt;
+    return std::nullopt;
   }
   decoded_data.resize(decoded_data_len);
   return decoded_data;

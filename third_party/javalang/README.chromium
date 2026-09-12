@@ -2,9 +2,12 @@ Name: Pure Python Java parser and tools
 Short Name: javalang
 URL: https://github.com/c2nes/javalang
 Version: 0.13.0
+Revision: 566963547575e93d305871d9cb26ce47ff1a036e
+Update Mechanism: Autoroll
 License: MIT
-License File: NOT_SHIPPED
+License File: LICENSE
 Security Critical: no
+Shipped: no
 
 Description:
 javalang is a pure Python library for working with Java source code. javalang

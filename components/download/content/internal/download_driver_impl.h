@@ -53,8 +53,10 @@ class DownloadDriverImpl : public DownloadDriver,
       const net::NetworkTrafficAnnotationTag& traffic_annotation) override;
   void Remove(const std::string& guid, bool remove_file) override;
   void Pause(const std::string& guid) override;
-  void Resume(const std::string& guid) override;
-  absl::optional<DriverEntry> Find(const std::string& guid) override;
+  void ResumeWithFactory(
+      const std::string& guid,
+      scoped_refptr<network::SharedURLLoaderFactory> factory) override;
+  std::optional<DriverEntry> Find(const std::string& guid) override;
   std::set<std::string> GetActiveDownloads() override;
   size_t EstimateMemoryUsage() const override;
 
@@ -71,7 +73,14 @@ class DownloadDriverImpl : public DownloadDriver,
   void OnDownloadRemoved(SimpleDownloadManagerCoordinator* coordinator,
                          download::DownloadItem* item) override;
 
+  void NotifyClientOfUpdatedState(const DriverEntry& entry,
+                                  download::DownloadItem::DownloadState state,
+                                  download::DownloadInterruptReason reason);
+  void NotifyClientOfCreatedState(const DriverEntry& entry);
+
   void OnUploadProgress(const std::string& guid, uint64_t bytes_uploaded);
+
+  void NotifyDriverReady();
 
   void OnHardRecoverComplete(bool success);
 
@@ -89,7 +98,7 @@ class DownloadDriverImpl : public DownloadDriver,
   raw_ptr<SimpleDownloadManagerCoordinator> download_manager_coordinator_;
 
   // Whether this object is ready to handle download requests.
-  bool is_ready_;
+  bool is_ready_ = false;
 
   SEQUENCE_CHECKER(sequence_checker_);
 

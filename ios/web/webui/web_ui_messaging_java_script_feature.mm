@@ -10,10 +10,6 @@
 #import "ios/web/public/web_client.h"
 #import "ios/web/web_state/web_state_impl.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace {
 const char kWebUIMessageHandlerName[] = "WebUIMessage";
 }  // namespace
@@ -34,7 +30,7 @@ WebUIMessagingJavaScriptFeature::WebUIMessagingJavaScriptFeature()
 
 WebUIMessagingJavaScriptFeature::~WebUIMessagingJavaScriptFeature() = default;
 
-absl::optional<std::string>
+std::optional<std::string>
 WebUIMessagingJavaScriptFeature::GetScriptMessageHandlerName() const {
   return kWebUIMessageHandlerName;
 }
@@ -47,24 +43,32 @@ void WebUIMessagingJavaScriptFeature::ScriptMessageReceived(
     return;
   }
 
-  absl::optional<GURL> url = script_message.request_url();
+  std::optional<GURL> url = script_message.request_url();
   // Messages must be from an app specific url.
   if (!url || !web::GetWebClient()->IsAppSpecificURL(url.value())) {
     return;
   }
 
-  if (!script_message.body() || !script_message.body()->is_dict()) {
+  if (!script_message.security_origin().IsSameOriginWith(
+          url::Origin::Create(url.value()))) {
+    // Discard the message as the committed origin does not match the request
+    // URL
     return;
   }
 
-  const base::Value::Dict& dict = script_message.body()->GetDict();
+  if (!script_message.legacy_body() ||
+      !script_message.legacy_body()->is_dict()) {
+    return;
+  }
+
+  const base::DictValue& dict = script_message.legacy_body()->GetDict();
 
   const std::string* message_content = dict.FindString("message");
   if (!message_content) {
     return;
   }
 
-  const base::Value::List* arguments = dict.FindList("arguments");
+  const base::ListValue* arguments = dict.FindList("arguments");
   if (!arguments) {
     return;
   }

@@ -5,15 +5,17 @@
 #ifndef COMPONENTS_EXO_DATA_SOURCE_DELEGATE_H_
 #define COMPONENTS_EXO_DATA_SOURCE_DELEGATE_H_
 
+#include <optional>
 #include <string>
 
 #include "base/files/scoped_file.h"
+#include "base/memory/weak_ptr.h"
 #include "components/exo/data_device.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace exo {
 
 class DataSource;
+class SecurityDelegate;
 
 // Handles events on data devices in context-specific ways.
 class DataSourceDelegate {
@@ -22,8 +24,10 @@ class DataSourceDelegate {
   // chance to remove themselves.
   virtual void OnDataSourceDestroying(DataSource* source) = 0;
 
+  virtual base::WeakPtr<DataSourceDelegate> GetWeakPtr() = 0;
+
   // Called when a client accepts a |mime_type|.
-  virtual void OnTarget(const absl::optional<std::string>& mime_type) = 0;
+  virtual void OnTarget(const std::optional<std::string>& mime_type) = 0;
 
   // Called when the data is requested.
   virtual void OnSend(const std::string& mime_type, base::ScopedFD fd) = 0;
@@ -45,8 +49,11 @@ class DataSourceDelegate {
   // E.g. the surface is owned by the same client as the data source.
   virtual bool CanAcceptDataEventsForSurface(Surface* surface) const = 0;
 
+  // Returns the server's SecurityDelegate.
+  virtual SecurityDelegate* GetSecurityDelegate() const = 0;
+
  protected:
-  virtual ~DataSourceDelegate() {}
+  virtual ~DataSourceDelegate() = default;
 };
 
 }  // namespace exo

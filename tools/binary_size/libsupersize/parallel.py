@@ -20,7 +20,6 @@ if DISABLE_ASYNC:
   logging.warning('Running in synchronous mode.')
 
 _is_child_process = False
-_silence_exceptions = False
 
 # Used to pass parameters to forked processes without pickling.
 _fork_params = None
@@ -63,14 +62,17 @@ class _ImmediateResult:
 class _ExceptionWrapper:
   """Used to marshal exception messages back to main process."""
 
-  def __init__(self, msg, exception_type=None):
+  def __init__(self, msg, exception_class_name):
     self.msg = msg
-    self.exception_type = exception_type
+    self.exception_class_name = exception_class_name
 
-  def MaybeThrow(self):
-    if self.exception_type:
-      raise getattr(builtins,
-                    self.exception_type)('Originally caused by: ' + self.msg)
+  def Throw(self):
+    msg = f'Originally caused by: {self.msg}'
+    cls = getattr(builtins, self.exception_class_name, None)
+    if cls is None:
+      cls = RuntimeError
+      msg = f'{self.exception_class_name}: {msg}'
+    raise cls(msg)
 
 
 class _FuncWrapper:
@@ -85,14 +87,12 @@ class _FuncWrapper:
     try:
       return self._func(*_fork_params[index], **dict(_fork_kwargs))
     except BaseException as e:
-      # Only keep the exception type for builtin exception types or else risk
-      # further marshalling exceptions.
-      exception_type = None
-      if type(e).__name__ in dir(builtins):
-        exception_type = type(e).__name__
-      # multiprocessing is supposed to catch and return exceptions automatically
-      # but it doesn't seem to work properly :(.
-      return _ExceptionWrapper(traceback.format_exc(), exception_type)
+      # Marshall exception type by name to prevent further marshalling
+      # exceptions.
+      exception_class_name = type(e).__name__
+      # multiprocessing is supposed to catch and return exceptions
+      # automatically but it doesn't seem to work properly :(.
+      return _ExceptionWrapper(traceback.format_exc(), exception_class_name)
 
 
 class _WrappedResult:
@@ -126,12 +126,7 @@ class _WrappedResult:
 
 def _CheckForException(value):
   if isinstance(value, _ExceptionWrapper):
-    global _silence_exceptions
-    if not _silence_exceptions:
-      value.MaybeThrow()
-      _silence_exceptions = True
-      logging.error('Subprocess raised an exception:\n%s', value.msg)
-    sys.exit(1)
+    value.Throw()
 
 
 def _MakeProcessPool(job_params, **job_kwargs):
@@ -158,7 +153,7 @@ def ForkAndCall(func, args, decode_func=None):
     result = _ImmediateResult(func(*args))
   else:
     pool = _MakeProcessPool([args])  # Omit |kwargs|.
-    result = pool.apply_async(_FuncWrapper(func), (0, ))
+    result = pool.apply_async(_FuncWrapper(func), (0,))
     pool.close()
   return _WrappedResult(result, decode_func=decode_func)
 
@@ -214,7 +209,8 @@ def EncodeDictOfLists(d, key_transform=None, value_transform=None):
   keys = '\x01'.join(keys)
   if value_transform:
     values = '\x01'.join(
-        '\x02'.join(value_transform(y) for y in x) for x in d.values())
+      '\x02'.join(value_transform(y) for y in x) for x in d.values()
+    )
   else:
     values = '\x01'.join('\x02'.join(x) for x in d.values())
   return keys, values
@@ -222,13 +218,15 @@ def EncodeDictOfLists(d, key_transform=None, value_transform=None):
 
 def JoinEncodedDictOfLists(encoded_values):
   assert isinstance(encoded_values, list), 'Does not work with generators'
-  return ('\x01'.join(x[0] for x in encoded_values if x[0]),
-          '\x01'.join(x[1] for x in encoded_values if x[1]))
+  return (
+    '\x01'.join(x[0] for x in encoded_values if x[0]),
+    '\x01'.join(x[1] for x in encoded_values if x[1]),
+  )
 
 
-def DecodeDictOfLists(encoded_keys_and_values,
-                      key_transform=None,
-                      value_transform=None):
+def DecodeDictOfLists(
+  encoded_keys_and_values, key_transform=None, value_transform=None
+):
   """Deserializes a dict where values are lists of strings."""
   encoded_keys, encoded_values = encoded_keys_and_values
   if not encoded_keys:

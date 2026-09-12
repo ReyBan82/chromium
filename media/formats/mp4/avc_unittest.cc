@@ -8,33 +8,41 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <array>
+#include <memory>
+#include <optional>
 #include <ostream>
+#include <string_view>
 
+#include "base/containers/span.h"
+#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/notreached.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/test/scoped_feature_list.h"
 #include "media/base/decrypt_config.h"
+#include "media/base/media_switches.h"
 #include "media/base/stream_parser_buffer.h"
 #include "media/formats/mp4/bitstream_converter.h"
 #include "media/formats/mp4/box_definitions.h"
 #include "media/formats/mp4/nalu_test_helper.h"
-#include "media/video/h264_parser.h"
+#include "media/parsers/h264_parser.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
-namespace media {
-namespace mp4 {
+namespace media::mp4 {
 
-static const uint8_t kNALU1[] = {0x01, 0x02, 0x03};
-static const uint8_t kNALU2[] = {0x04, 0x05, 0x06, 0x07};
-static const uint8_t kExpected[] = {0x00, 0x00, 0x00, 0x01, 0x01,
-                                    0x02, 0x03, 0x00, 0x00, 0x00,
-                                    0x01, 0x04, 0x05, 0x06, 0x07};
+static constexpr auto kNALU1 = std::to_array<uint8_t>({0x01, 0x02, 0x03});
+static constexpr auto kNALU2 = std::to_array<uint8_t>({0x04, 0x05, 0x06, 0x07});
+static constexpr auto kExpected =
+    std::to_array<uint8_t>({0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x03, 0x00,
+                            0x00, 0x00, 0x01, 0x04, 0x05, 0x06, 0x07});
 
-static const uint8_t kExpectedParamSets[] = {
-    0x00, 0x00, 0x00, 0x01, 0x67, 0x12, 0x00, 0x00, 0x00, 0x01,
-    0x67, 0x34, 0x00, 0x00, 0x00, 0x01, 0x68, 0x56, 0x78};
+static constexpr auto kExpectedParamSets = std::to_array<uint8_t>(
+    {0x00, 0x00, 0x00, 0x01, 0x67, 0x12, 0x00, 0x00, 0x00, 0x01, 0x67, 0x34,
+     0x00, 0x00, 0x00, 0x01, 0x68, 0x56, 0x78});
 
-static std::string NALUTypeToString(int type) {
+static std::string_view NALUTypeToString(int type) {
   switch (type) {
     case H264NALU::kNonIDRSlice:
       return "P";
@@ -74,8 +82,7 @@ static std::string NALUTypeToString(int type) {
     case H264NALU::kReserved18:
     case H264NALU::kCodedSliceAux:
     case H264NALU::kCodedSliceExtension:
-      CHECK(false) << "Unexpected type: " << type;
-      break;
+      NOTREACHED() << "Unexpected type: " << type;
   };
 
   return "UnsupportedType";
@@ -101,14 +108,14 @@ static std::string AnnexBToString(
   std::stringstream ss;
 
   H264Parser parser;
-  parser.SetEncryptedStream(&buffer[0], buffer.size(), subsamples);
+  parser.SetEncryptedStream(buffer, subsamples);
 
   H264NALU nalu;
   bool first = true;
   size_t current_subsample_index = 0;
   while (parser.AdvanceToNextNALU(&nalu) == H264Parser::kOk) {
-    size_t subsample_index = AVC::FindSubsampleIndex(buffer, &subsamples,
-                                                     nalu.data);
+    size_t subsample_index =
+        AVC::FindSubsampleIndex(buffer, subsamples, nalu.data.data());
     if (!first) {
       ss << (subsample_index == current_subsample_index ? "," : " ");
     } else {
@@ -137,10 +144,10 @@ class AVCConversionTest : public testing::TestWithParam<int> {
     buf->clear();
 
     WriteLength(length_size, sizeof(kNALU1), buf);
-    buf->insert(buf->end(), kNALU1, kNALU1 + sizeof(kNALU1));
+    buf->insert(buf->end(), kNALU1.begin(), kNALU1.end());
 
     WriteLength(length_size, sizeof(kNALU2), buf);
-    buf->insert(buf->end(), kNALU2, kNALU2 + sizeof(kNALU2));
+    buf->insert(buf->end(), kNALU2.begin(), kNALU2.end());
   }
 
 };
@@ -154,12 +161,10 @@ TEST_P(AVCConversionTest, ParseCorrectly) {
   BitstreamConverter::AnalysisResult expected;
   expected.is_conformant = true;
   expected.is_keyframe = false;
-  EXPECT_PRED2(AnalysesMatch,
-               AVC::AnalyzeAnnexB(buf.data(), buf.size(), subsamples),
-               expected);
+  EXPECT_PRED2(AnalysesMatch, AVC::AnalyzeAnnexB(buf, subsamples), expected);
 
   EXPECT_EQ(buf.size(), sizeof(kExpected));
-  EXPECT_EQ(0, memcmp(kExpected, &buf[0], sizeof(kExpected)));
+  EXPECT_EQ(kExpected, base::as_byte_span(buf));
   EXPECT_EQ("P,SDC", AnnexBToString(buf, subsamples));
 }
 
@@ -167,7 +172,7 @@ TEST_P(AVCConversionTest, ParseCorrectly) {
 TEST_P(AVCConversionTest, NALUSizeTooLarge) {
   std::vector<uint8_t> buf;
   WriteLength(GetParam(), 10 * sizeof(kNALU1), &buf);
-  buf.insert(buf.end(), kNALU1, kNALU1 + sizeof(kNALU1));
+  buf.insert(buf.end(), kNALU1.begin(), kNALU1.end());
   EXPECT_FALSE(AVC::ConvertFrameToAnnexB(GetParam(), &buf, nullptr));
 }
 
@@ -176,12 +181,12 @@ TEST_P(AVCConversionTest, NALUSizeIsZero) {
   WriteLength(GetParam(), 0, &buf);
 
   WriteLength(GetParam(), sizeof(kNALU1), &buf);
-  buf.insert(buf.end(), kNALU1, kNALU1 + sizeof(kNALU1));
+  buf.insert(buf.end(), kNALU1.begin(), kNALU1.end());
 
   WriteLength(GetParam(), 0, &buf);
 
   WriteLength(GetParam(), sizeof(kNALU2), &buf);
-  buf.insert(buf.end(), kNALU2, kNALU2 + sizeof(kNALU2));
+  buf.insert(buf.end(), kNALU2.begin(), kNALU2.end());
 
   EXPECT_FALSE(AVC::ConvertFrameToAnnexB(GetParam(), &buf, nullptr));
 }
@@ -193,7 +198,7 @@ TEST_P(AVCConversionTest, SubsampleSizesUpdatedAfterAnnexBConversion) {
 
   // Write the first subsample, consisting of only one NALU
   WriteLength(GetParam(), sizeof(kNALU1), &buf);
-  buf.insert(buf.end(), kNALU1, kNALU1 + sizeof(kNALU1));
+  buf.insert(buf.end(), kNALU1.begin(), kNALU1.end());
 
   subsample.clear_bytes = GetParam() + sizeof(kNALU1);
   subsample.cypher_bytes = 0;
@@ -201,9 +206,9 @@ TEST_P(AVCConversionTest, SubsampleSizesUpdatedAfterAnnexBConversion) {
 
   // Write the second subsample, containing two NALUs
   WriteLength(GetParam(), sizeof(kNALU1), &buf);
-  buf.insert(buf.end(), kNALU1, kNALU1 + sizeof(kNALU1));
+  buf.insert(buf.end(), kNALU1.begin(), kNALU1.end());
   WriteLength(GetParam(), sizeof(kNALU2), &buf);
-  buf.insert(buf.end(), kNALU2, kNALU2 + sizeof(kNALU2));
+  buf.insert(buf.end(), kNALU2.begin(), kNALU2.end());
 
   subsample.clear_bytes = 2*GetParam() + sizeof(kNALU1) + sizeof(kNALU2);
   subsample.cypher_bytes = 0;
@@ -250,6 +255,74 @@ INSTANTIATE_TEST_SUITE_P(AVCConversionTestValues,
                          AVCConversionTest,
                          ::testing::Values(1, 2, 4));
 
+TEST_F(AVCConversionTest, AnalyzeSEI) {
+  base::test::ScopedFeatureList scoped_sei_flag(kParseSEIRecoveryPoints);
+  constexpr auto kStream = std::to_array<const uint8_t>({
+      // First NALU Start code.
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      // NALU type = 6 (kSEIMessage).
+      0x06,
+      // SEI payload type = 6 (recovery_point).
+      0x06,
+      // SEI payload size = 1.
+      0x01,
+      // SEI payload.
+      0x84,
+      // RBSP trailing bits.
+      0x80,
+      // Second NALU Start code.
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      // NALU type = 6 (kSEIMessage).
+      0x06,
+      // SEI payload type = 1 (pic_timing).
+      0x01,
+      // SEI payload size = 1.
+      0x01,
+      // SEI payload.
+      0x04,
+      // RBSP trailing bits.
+      0x80,
+  });
+
+  auto result = AVC::AnalyzeAnnexB(kStream, {});
+  EXPECT_TRUE(result.is_conformant);
+  EXPECT_FALSE(result.is_keyframe.has_value());
+  EXPECT_TRUE(result.is_sei_recovery_point.has_value());
+  EXPECT_TRUE(result.is_sei_recovery_point.value());
+}
+
+TEST_F(AVCConversionTest, AnalyzeSEICorruptionNonFatal) {
+  base::test::ScopedFeatureList scoped_sei_flag(kParseSEIRecoveryPoints);
+  constexpr auto kStream = std::to_array<const uint8_t>({
+      // First NALU Start code.
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      // NALU type = 6 (kSEIMessage).
+      0x06,
+      // SEI payload type = 6 (recovery_point).
+      0x06,
+      // SEI payload size = 255 to trigger an error.
+      0xFF,
+      // SEI payload.
+      0x84,
+      // RBSP trailing bits.
+      0x80,
+  });
+
+  auto result = AVC::AnalyzeAnnexB(kStream, {});
+  EXPECT_TRUE(result.is_conformant);
+  EXPECT_FALSE(result.is_keyframe.has_value());
+  EXPECT_FALSE(result.is_sei_recovery_point.has_value());
+}
+
 TEST_F(AVCConversionTest, ConvertConfigToAnnexB) {
   AVCDecoderConfigurationRecord avc_config;
   avc_config.sps_list.resize(2);
@@ -265,8 +338,7 @@ TEST_F(AVCConversionTest, ConvertConfigToAnnexB) {
   std::vector<uint8_t> buf;
   std::vector<SubsampleEntry> subsamples;
   EXPECT_TRUE(AVC::ConvertConfigToAnnexB(avc_config, &buf));
-  EXPECT_EQ(0, memcmp(kExpectedParamSets, &buf[0],
-                      sizeof(kExpectedParamSets)));
+  EXPECT_EQ(kExpectedParamSets, base::as_byte_span(buf));
   EXPECT_EQ("SPS,SPS,PPS", AnnexBToString(buf, subsamples));
 }
 
@@ -281,18 +353,34 @@ TEST_F(AVCConversionTest, StringConversionFunctions) {
   BitstreamConverter::AnalysisResult expected;
   expected.is_conformant = true;
   expected.is_keyframe = true;
-  EXPECT_PRED2(AnalysesMatch,
-               AVC::AnalyzeAnnexB(buf.data(), buf.size(), subsamples),
-               expected);
+  EXPECT_PRED2(AnalysesMatch, AVC::AnalyzeAnnexB(buf, subsamples), expected);
 
   EXPECT_EQ(str, AnnexBToString(buf, subsamples));
 }
 
+TEST_F(AVCConversionTest, ReservedNalUnitsIgnored) {
+  std::string str = "FILL I EOStr";
+  std::vector<uint8_t> buf;
+  std::vector<SubsampleEntry> subsamples;
+  AvcStringToAnnexB(str, &buf, &subsamples);
+  buf[4] = 25;  // Change FILL NALU type to reserved type.
+
+  BitstreamConverter::AnalysisResult expected;
+  expected.is_conformant = false;
+  expected.is_keyframe = true;
+  EXPECT_PRED2(AnalysesMatch, AVC::AnalyzeAnnexB(buf, subsamples), expected);
+}
+
 TEST_F(AVCConversionTest, ValidAnnexBConstructs) {
-  struct {
+  base::test::ScopedFeatureList scoped_feature_list(
+      kH264IDRKeyframeRequiresParameterSets);
+
+  struct TestCases {
     const char* case_string;
     const bool is_keyframe;
-  } test_cases[] = {
+    const bool allow_bare_idr = true;
+  };
+  auto test_cases = std::to_array<TestCases>({
       {"I", true},
       {"I I I I", true},
       {"AUD I", true},
@@ -319,39 +407,55 @@ TEST_F(AVCConversionTest, ValidAnnexBConstructs) {
       {"SDA I", false},
       {"SDB I", false},
       {"SDC I", false},
-  };
+
+      // Verify IDR keyframe detection when param sets are not supplied upfront
+      // (e.g., avc3 with no SPS/PPS in avc config) and must appear in-band.
+      {"I", false, false},         // Bare IDR without param sets in config
+      {"SPS PPS I", true, false},  // In-band SPS+PPS before IDR -> keyframe
+  });
 
   for (size_t i = 0; i < std::size(test_cases); ++i) {
     std::vector<uint8_t> buf;
     std::vector<SubsampleEntry> subsamples;
-    AvcStringToAnnexB(test_cases[i].case_string, &buf, NULL);
+    AvcStringToAnnexB(test_cases[i].case_string, &buf, nullptr);
 
     BitstreamConverter::AnalysisResult expected;
     expected.is_conformant = true;
     expected.is_keyframe = test_cases[i].is_keyframe;
-    EXPECT_PRED2(AnalysesMatch,
-                 AVC::AnalyzeAnnexB(buf.data(), buf.size(), subsamples),
-                 expected)
-        << "'" << test_cases[i].case_string << "' failed";
+    EXPECT_PRED2(
+        AnalysesMatch,
+        AVC::AnalyzeAnnexB(buf, subsamples, test_cases[i].allow_bare_idr),
+        expected)
+        << "'" << test_cases[i].case_string << "' failed "
+        << "(allow_bare_idr=" << test_cases[i].allow_bare_idr << ")";
   }
 }
 
+TEST_F(AVCConversionTest, EmptyBuffer) {
+  std::vector<SubsampleEntry> subsamples;
+  auto result = AVC::AnalyzeAnnexB(base::span<const uint8_t>(), subsamples);
+  EXPECT_TRUE(result.is_conformant);
+  EXPECT_TRUE(subsamples.empty());
+  EXPECT_FALSE(result.is_keyframe.has_value());
+}
+
 TEST_F(AVCConversionTest, InvalidAnnexBConstructs) {
-  struct {
+  struct TestCases {
     const char* case_string;
-    const absl::optional<bool> is_keyframe;
-  } test_cases[] = {
+    const std::optional<bool> is_keyframe;
+  };
+  auto test_cases = std::to_array<TestCases>({
       // For these cases, lack of conformance is determined before detecting any
       // IDR or non-IDR slices, so the non-conformant frames' keyframe analysis
-      // reports absl::nullopt (which means undetermined analysis result).
-      {"AUD", absl::nullopt},            // No VCL present.
-      {"AUD,SEI", absl::nullopt},        // No VCL present.
-      {"SPS PPS", absl::nullopt},        // No VCL present.
-      {"SPS PPS AUD I", absl::nullopt},  // Parameter sets must come after AUD.
-      {"SPSExt SPS P", absl::nullopt},   // SPS must come before SPSExt.
-      {"SPS PPS SPSExt P", absl::nullopt},  // SPSExt must follow an SPS.
-      {"EOSeq", absl::nullopt},             // EOSeq must come after a VCL.
-      {"EOStr", absl::nullopt},             // EOStr must come after a VCL.
+      // reports std::nullopt (which means undetermined analysis result).
+      {"AUD", std::nullopt},        // No VCL present.
+      {"AUD,SEI", std::nullopt},    // No VCL present.
+      {"SPS PPS", std::nullopt},    // No VCL present.
+      {"SPS PPS AUD I", true},      // Parameter sets must come after AUD.
+      {"SPSExt SPS P", false},      // SPS must come before SPSExt.
+      {"SPS PPS SPSExt P", false},  // SPSExt must follow an SPS.
+      {"EOSeq", std::nullopt},      // EOSeq must come after a VCL.
+      {"EOStr", std::nullopt},      // EOStr must come after a VCL.
 
       // For these cases, IDR slice is first VCL and is detected before
       // conformance failure, so the non-conformant frame is reported as a
@@ -359,12 +463,13 @@ TEST_F(AVCConversionTest, InvalidAnnexBConstructs) {
       {"I EOStr EOSeq", true},  // EOSeq must come before EOStr.
       {"I Prefix", true},       // Reserved14-18 must come before first VCL.
       {"I SEI", true},          // SEI must come before first VCL.
+      {"SEI AUD I", true},      // AUD must be first NALU.
 
       // For this case, P slice is first VCL and is detected before conformance
       // failure, so the non-conformant frame is reported as a non-keyframe.
       {"P SPS P",
        false},  // SPS after first VCL would indicate a new access unit.
-  };
+  });
 
   BitstreamConverter::AnalysisResult expected;
   expected.is_conformant = false;
@@ -372,11 +477,9 @@ TEST_F(AVCConversionTest, InvalidAnnexBConstructs) {
   for (size_t i = 0; i < std::size(test_cases); ++i) {
     std::vector<uint8_t> buf;
     std::vector<SubsampleEntry> subsamples;
-    AvcStringToAnnexB(test_cases[i].case_string, &buf, NULL);
+    AvcStringToAnnexB(test_cases[i].case_string, &buf, nullptr);
     expected.is_keyframe = test_cases[i].is_keyframe;
-    EXPECT_PRED2(AnalysesMatch,
-                 AVC::AnalyzeAnnexB(buf.data(), buf.size(), subsamples),
-                 expected)
+    EXPECT_PRED2(AnalysesMatch, AVC::AnalyzeAnnexB(buf, subsamples), expected)
         << "'" << test_cases[i].case_string << "' failed";
   }
 }
@@ -417,22 +520,259 @@ TEST_F(AVCConversionTest, InsertParamSetsAnnexB) {
   expected.is_conformant = true;
   expected.is_keyframe = true;
 
-  for (size_t i = 0; i < std::size(test_cases); ++i) {
+  for (auto test_case : test_cases) {
     std::vector<uint8_t> buf;
     std::vector<SubsampleEntry> subsamples;
 
-    AvcStringToAnnexB(test_cases[i].input, &buf, &subsamples);
+    AvcStringToAnnexB(test_case.input, &buf, &subsamples);
 
     EXPECT_TRUE(AVC::InsertParamSetsAnnexB(avc_config, &buf, &subsamples))
-        << "'" << test_cases[i].input << "' insert failed.";
-    EXPECT_PRED2(AnalysesMatch,
-                 AVC::AnalyzeAnnexB(buf.data(), buf.size(), subsamples),
-                 expected)
-        << "'" << test_cases[i].input << "' created invalid AnnexB.";
-    EXPECT_EQ(test_cases[i].expected, AnnexBToString(buf, subsamples))
-        << "'" << test_cases[i].input << "' generated unexpected output.";
+        << "'" << test_case.input << "' insert failed.";
+    EXPECT_PRED2(AnalysesMatch, AVC::AnalyzeAnnexB(buf, subsamples), expected)
+        << "'" << test_case.input << "' created invalid AnnexB.";
+    EXPECT_EQ(test_case.expected, AnnexBToString(buf, subsamples))
+        << "'" << test_case.input << "' generated unexpected output.";
   }
 }
 
-}  // namespace mp4
-}  // namespace media
+// Verify that SPS/PPS injection works for SEI recovery point frames.
+// This tests the behavior that ConvertAndAnalyzeFrame uses: when
+// is_sei_recovery_point is true, SPS/PPS should be injected so the hardware
+// decoder can initialize after a seek/reset.
+TEST_F(AVCConversionTest, InsertParamSetsForRecoveryPointFrame) {
+  base::test::ScopedFeatureList scoped_sei_flag(kParseSEIRecoveryPoints);
+
+  AVCDecoderConfigurationRecord avc_config;
+  avc_config.sps_list.resize(1);
+  avc_config.sps_list[0].push_back(0x67);
+  avc_config.sps_list[0].push_back(0x12);
+  avc_config.pps_list.resize(1);
+  avc_config.pps_list[0].push_back(0x68);
+  avc_config.pps_list[0].push_back(0x56);
+  avc_config.pps_list[0].push_back(0x78);
+
+  // Build an Annex B frame with SEI recovery point + non-IDR slice.
+  std::vector<uint8_t> buf = {
+      // Start code + SEI NALU.
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x06,
+      0x06,
+      0x01,
+      0x84,
+      0x80,
+      // Start code + non-IDR slice.
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x01,
+      0x32,
+      0x12,
+  };
+  std::vector<SubsampleEntry> subsamples;
+
+  // Analyze first to confirm it's a recovery point.
+  auto analysis = AVC::AnalyzeAnnexB(buf, subsamples);
+  EXPECT_TRUE(analysis.is_sei_recovery_point.value_or(false));
+  EXPECT_FALSE(analysis.is_keyframe.value_or(true));
+
+  // Insert SPS/PPS (as ConvertAndAnalyzeFrame does for recovery points).
+  EXPECT_TRUE(AVC::InsertParamSetsAnnexB(avc_config, &buf, &subsamples));
+
+  // Verify SPS and PPS were injected before the SEI.
+  std::string annexb_str = AnnexBToString(buf, subsamples);
+  EXPECT_NE(annexb_str.find("SPS"), std::string::npos)
+      << "SPS not found in output: " << annexb_str;
+  EXPECT_NE(annexb_str.find("PPS"), std::string::npos)
+      << "PPS not found in output: " << annexb_str;
+}
+
+// Verify that a regular non-IDR frame (no SEI recovery point) is not
+// identified as a recovery point and would not trigger SPS/PPS injection.
+TEST_F(AVCConversionTest, RegularNonIDRNotRecoveryPoint) {
+  base::test::ScopedFeatureList scoped_sei_flag(kParseSEIRecoveryPoints);
+
+  constexpr auto kNonIDRFrame = std::to_array<const uint8_t>({
+      // Start code + non-IDR slice.
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+      0x01,
+      0x32,
+      0x12,
+  });
+
+  auto result = AVC::AnalyzeAnnexB(kNonIDRFrame, {});
+  EXPECT_TRUE(result.is_conformant);
+  EXPECT_TRUE(result.is_keyframe.has_value());
+  EXPECT_FALSE(result.is_keyframe.value());
+  // No SEI recovery point — SPS/PPS injection should NOT happen.
+  EXPECT_FALSE(result.is_sei_recovery_point.has_value());
+}
+
+// Builds an MP4 length-prefixed (length_size=4) AVC frame containing an SEI
+// recovery point NALU followed by a non-IDR slice NALU. This mirrors the
+// bitstream shape that triggers the SEI-recovery branch in
+// AVCBitstreamConverter::ConvertAndAnalyzeFrame.
+static std::vector<uint8_t> MakeLengthPrefixedSEIRecoveryFrame() {
+  return {
+      // 4-byte length = 5, then SEI NALU (type=6, payload type=6
+      // recovery_point, payload size=1, payload=0x84, RBSP trailing=0x80).
+      0x00,
+      0x00,
+      0x00,
+      0x05,
+      0x06,
+      0x06,
+      0x01,
+      0x84,
+      0x80,
+      // 4-byte length = 3, then non-IDR slice NALU (type=1, data).
+      0x00,
+      0x00,
+      0x00,
+      0x03,
+      0x01,
+      0x32,
+      0x12,
+  };
+}
+
+// Length-prefixed non-IDR frame without SEI recovery point. Used to verify
+// that ConvertAndAnalyzeFrame does NOT inject SPS/PPS for regular frames.
+static std::vector<uint8_t> MakeLengthPrefixedNonIDRFrame() {
+  return {
+      // 4-byte length = 3, then non-IDR slice NALU (type=1, data).
+      0x00, 0x00, 0x00, 0x03, 0x01, 0x32, 0x12,
+  };
+}
+
+static std::unique_ptr<AVCDecoderConfigurationRecord>
+MakeAvcConfigWithSpsPps() {
+  auto config = std::make_unique<AVCDecoderConfigurationRecord>();
+  config->length_size = 4;
+  config->sps_list.resize(1);
+  config->sps_list[0].push_back(0x67);
+  config->sps_list[0].push_back(0x12);
+  config->pps_list.resize(1);
+  config->pps_list[0].push_back(0x68);
+  config->pps_list[0].push_back(0x56);
+  config->pps_list[0].push_back(0x78);
+  return config;
+}
+
+// Clear content: ConvertAndAnalyzeFrame should inject SPS/PPS for a non-IDR
+// frame carrying an SEI recovery point, so the HW decoder can initialize
+// after a seek/reset.
+TEST_F(AVCConversionTest,
+       ConvertAndAnalyzeFrameInjectsParamSetsForSEIRecoveryInClearContent) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {kParseSEIRecoveryPoints, kMediaSourceSeiRecoveryPointKeyframe}, {});
+
+  auto converter =
+      base::MakeRefCounted<AVCBitstreamConverter>(MakeAvcConfigWithSpsPps());
+  std::vector<uint8_t> buf = MakeLengthPrefixedSEIRecoveryFrame();
+  std::vector<SubsampleEntry> subsamples;  // empty = clear content.
+  BitstreamConverter::AnalysisResult analysis;
+
+  EXPECT_TRUE(converter->ConvertAndAnalyzeFrame(&buf, /*is_keyframe=*/false,
+                                                &subsamples, &analysis));
+  EXPECT_TRUE(analysis.is_sei_recovery_point.value_or(false));
+
+  const std::string annexb_str = AnnexBToString(buf, subsamples);
+  EXPECT_NE(annexb_str.find("SPS"), std::string::npos)
+      << "Expected SPS injection in clear content: " << annexb_str;
+  EXPECT_NE(annexb_str.find("PPS"), std::string::npos)
+      << "Expected PPS injection in clear content: " << annexb_str;
+}
+
+// Regular non-IDR frame (no SEI recovery point): ConvertAndAnalyzeFrame must
+// NOT inject SPS/PPS. Only keyframes and SEI recovery point frames get
+// parameter set injection.
+TEST_F(AVCConversionTest,
+       ConvertAndAnalyzeFrameSkipsParamSetsForRegularNonIDRFrame) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {kParseSEIRecoveryPoints, kMediaSourceSeiRecoveryPointKeyframe}, {});
+
+  auto converter =
+      base::MakeRefCounted<AVCBitstreamConverter>(MakeAvcConfigWithSpsPps());
+  std::vector<uint8_t> buf = MakeLengthPrefixedNonIDRFrame();
+  std::vector<SubsampleEntry> subsamples;
+  BitstreamConverter::AnalysisResult analysis;
+
+  EXPECT_TRUE(converter->ConvertAndAnalyzeFrame(&buf, /*is_keyframe=*/false,
+                                                &subsamples, &analysis));
+  EXPECT_FALSE(analysis.is_sei_recovery_point.value_or(false));
+
+  const std::string annexb_str = AnnexBToString(buf, subsamples);
+  EXPECT_EQ(annexb_str.find("SPS"), std::string::npos)
+      << "SPS must not be injected for regular non-IDR frame: " << annexb_str;
+  EXPECT_EQ(annexb_str.find("PPS"), std::string::npos)
+      << "PPS must not be injected for regular non-IDR frame: " << annexb_str;
+}
+
+// Encrypted content: ConvertAndAnalyzeFrame must NOT inject SPS/PPS for an
+// SEI recovery point frame. Some older Intel/AMD HW decoders mishandle
+// SEI + SPS/PPS and encrypted streams lack the software decode fallback
+// needed to recover. See https://crbug.com/451536366.
+TEST_F(AVCConversionTest,
+       ConvertAndAnalyzeFrameSkipsParamSetsForSEIRecoveryInEncryptedContent) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {kParseSEIRecoveryPoints, kMediaSourceSeiRecoveryPointKeyframe}, {});
+
+  auto converter =
+      base::MakeRefCounted<AVCBitstreamConverter>(MakeAvcConfigWithSpsPps());
+  std::vector<uint8_t> buf = MakeLengthPrefixedSEIRecoveryFrame();
+  // Non-empty subsamples signals encrypted content. Entries must align with
+  // NAL boundaries so H264Parser can still parse the clear headers.
+  std::vector<SubsampleEntry> subsamples;
+  subsamples.emplace_back(/*clear_bytes=*/5u, /*cypher_bytes=*/4u);
+  subsamples.emplace_back(/*clear_bytes=*/5u, /*cypher_bytes=*/2u);
+  BitstreamConverter::AnalysisResult analysis;
+
+  EXPECT_TRUE(converter->ConvertAndAnalyzeFrame(&buf, /*is_keyframe=*/false,
+                                                &subsamples, &analysis));
+  EXPECT_TRUE(analysis.is_sei_recovery_point.value_or(false));
+
+  const std::string annexb_str = AnnexBToString(buf, subsamples);
+  EXPECT_EQ(annexb_str.find("SPS"), std::string::npos)
+      << "SPS must not be injected for encrypted SEI recovery: " << annexb_str;
+  EXPECT_EQ(annexb_str.find("PPS"), std::string::npos)
+      << "PPS must not be injected for encrypted SEI recovery: " << annexb_str;
+}
+
+// Flag kill-switch: when kMediaSourceSeiRecoveryPointKeyframe is disabled,
+// ConvertAndAnalyzeFrame must NOT inject SPS/PPS for an SEI recovery point
+// frame even on clear content. This mirrors the gate in mp4_stream_parser.cc
+// so a Finch rollback fully disables the new bitstream modification.
+TEST_F(AVCConversionTest,
+       ConvertAndAnalyzeFrameSkipsParamSetsForSEIRecoveryWhenFlagDisabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures({kParseSEIRecoveryPoints},
+                                       {kMediaSourceSeiRecoveryPointKeyframe});
+
+  auto converter =
+      base::MakeRefCounted<AVCBitstreamConverter>(MakeAvcConfigWithSpsPps());
+  std::vector<uint8_t> buf = MakeLengthPrefixedSEIRecoveryFrame();
+  std::vector<SubsampleEntry> subsamples;  // empty = clear content.
+  BitstreamConverter::AnalysisResult analysis;
+
+  EXPECT_TRUE(converter->ConvertAndAnalyzeFrame(&buf, /*is_keyframe=*/false,
+                                                &subsamples, &analysis));
+  EXPECT_TRUE(analysis.is_sei_recovery_point.value_or(false));
+
+  const std::string annexb_str = AnnexBToString(buf, subsamples);
+  EXPECT_EQ(annexb_str.find("SPS"), std::string::npos)
+      << "SPS must not be injected when flag is disabled: " << annexb_str;
+  EXPECT_EQ(annexb_str.find("PPS"), std::string::npos)
+      << "PPS must not be injected when flag is disabled: " << annexb_str;
+}
+
+}  // namespace media::mp4

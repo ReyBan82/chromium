@@ -7,6 +7,9 @@
 
 #include <stdint.h>
 
+#include <optional>
+
+#include "base/numerics/safe_conversions.h"
 #include "base/time/time.h"
 #include "media/base/media_export.h"
 
@@ -31,11 +34,20 @@ class MEDIA_EXPORT AudioTimestampHelper {
  public:
   // Returns the time duration of the given number of frames of audio with the
   // given sample rate (in samples per second).
-  static base::TimeDelta FramesToTime(int64_t frames, int samples_per_second);
+  static constexpr base::TimeDelta FramesToTime(int64_t frames,
+                                                double samples_per_second) {
+    CHECK_GT(samples_per_second, 0.0);
+    return base::Microseconds(base::saturated_cast<int64_t>(
+        frames * base::Time::kMicrosecondsPerSecond / samples_per_second));
+  }
 
   // Returns the number of frames in the given duration of audio with the given
   // sample rate (in samples per second).
-  static int64_t TimeToFrames(base::TimeDelta time, int samples_per_second);
+  static constexpr int64_t TimeToFrames(base::TimeDelta time,
+                                        double samples_per_second) {
+    CHECK_GT(samples_per_second, 0.0);
+    return std::round(time.InSecondsF() * samples_per_second);
+  }
 
   AudioTimestampHelper() = delete;
 
@@ -47,12 +59,14 @@ class MEDIA_EXPORT AudioTimestampHelper {
   // Sets the base timestamp to |base_timestamp| and the sets count to 0.
   void SetBaseTimestamp(base::TimeDelta base_timestamp);
 
-  base::TimeDelta base_timestamp() const;
+  std::optional<base::TimeDelta> base_timestamp() const {
+    return base_timestamp_;
+  }
+
   int64_t frame_count() const { return frame_count_; }
 
   // Adds |frame_count| to the frame counter.
-  // Note: SetBaseTimestamp() must be called with a value other than
-  // kNoTimestamp before this method can be called.
+  // Note: SetBaseTimestamp() must be called prior to this method.
   void AddFrames(int frame_count);
 
   // Get the current timestamp. This value is computed from the base_timestamp()
@@ -68,12 +82,16 @@ class MEDIA_EXPORT AudioTimestampHelper {
   // Note: |target| must be >= |base_timestamp_|.
   int64_t GetFramesToTarget(base::TimeDelta target) const;
 
+  // Clears `base_timestamp_` and `frame_count_`. SetBaseTimestamp() must be
+  // called again.
+  void Reset();
+
  private:
   base::TimeDelta ComputeTimestamp(int64_t frame_count) const;
 
   double microseconds_per_frame_;
 
-  base::TimeDelta base_timestamp_;
+  std::optional<base::TimeDelta> base_timestamp_;
 
   // Number of frames accumulated by AddFrames() calls.
   int64_t frame_count_;

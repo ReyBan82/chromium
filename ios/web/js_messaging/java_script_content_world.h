@@ -5,12 +5,13 @@
 #ifndef IOS_WEB_JS_MESSAGING_JAVA_SCRIPT_CONTENT_WORLD_H_
 #define IOS_WEB_JS_MESSAGING_JAVA_SCRIPT_CONTENT_WORLD_H_
 
+#import <WebKit/WebKit.h>
+
 #include <map>
 #include <memory>
 #include <set>
 
-#import <WebKit/WebKit.h>
-
+#import "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #import "ios/web/js_messaging/scoped_wk_script_message_handler.h"
 #import "ios/web/public/js_messaging/java_script_feature.h"
@@ -50,16 +51,21 @@ class JavaScriptContentWorld {
 
  private:
   // Processes the response of a script message and forwards it to `handler`.
-  void ScriptMessageReceived(JavaScriptFeature::ScriptMessageHandler handler,
-                             BrowserState* browser_state,
+  void ScriptMessageReceived(base::WeakPtr<JavaScriptFeature> feature,
                              WKScriptMessage* script_message);
+
+  // Processes the response of a script message and forwards it to `handler`.
+  // Version for features that reply to messages.
+  void ScriptMessageReceivedWithReply(base::WeakPtr<JavaScriptFeature> feature,
+                                      WKScriptMessage* script_message,
+                                      ScriptMessageReplyHandler reply_handler);
 
   // The features which have already been configured for `content_world_`.
   std::set<const JavaScriptFeature*> features_;
 
   // The associated browser state for configuring injected scripts and
   // communication.
-  BrowserState* browser_state_;
+  raw_ptr<BrowserState> browser_state_;
 
   // The associated user content controller for configuring injected scripts and
   // script message handler JavaScript->native communication.

@@ -2,72 +2,92 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/notreached.h"
 #include "base/path_service.h"
+#include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
+#include "base/test/values_test_util.h"
 #include "build/build_config.h"
 #include "chrome/browser/devtools/devtools_window.h"
 #include "chrome/browser/devtools/devtools_window_testing.h"
-#include "chrome/browser/extensions/api/developer_private/developer_private_api.h"
+#include "chrome/browser/extensions/api/developer_private/developer_private_functions.h"
 #include "chrome/browser/extensions/extension_apitest.h"
-#include "chrome/browser/extensions/extension_function_test_utils.h"
 #include "chrome/browser/extensions/extension_tab_util.h"
+#include "chrome/browser/extensions/extension_util.h"
+#include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/tab_list/tab_list_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/common/chrome_paths.h"
+#include "chrome/common/pref_names.h"
+#include "chrome/test/base/chrome_test_utils.h"
+#include "components/prefs/pref_service.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/public/test/service_worker_test_helpers.h"
-#include "extensions/browser/app_window/app_window.h"
-#include "extensions/browser/app_window/app_window_registry.h"
+#include "content/public/test/test_navigation_observer.h"
+#include "extensions/browser/api_test_utils.h"
 #include "extensions/browser/browsertest_util.h"
 #include "extensions/browser/extension_host_test_helper.h"
+#include "extensions/browser/extension_prefs.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/offscreen_document_host.h"
-#include "extensions/browser/process_manager.h"
+#include "extensions/browser/permissions/permissions_updater.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_builder.h"
+#include "extensions/common/extension_features.h"
 #include "extensions/common/manifest_handlers/background_info.h"
+#include "extensions/common/mojom/manifest.mojom-shared.h"
 #include "extensions/common/mojom/view_type.mojom.h"
 #include "extensions/test/result_catcher.h"
 #include "extensions/test/test_extension_dir.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/views/widget/any_widget_observer.h"
+#include "ui/views/widget/widget.h"
+
+#if BUILDFLAG(ENABLE_PLATFORM_APPS)
+#include "extensions/browser/app_window/app_window.h"
+#include "extensions/browser/app_window/app_window_registry.h"
+#endif  // BUILDFLAG(ENABLE_PLATFORM_APPS)
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "ui/views/widget/widget_delegate.h"
+#include "ui/views/window/dialog_delegate.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 class DeveloperPrivateApiTest : public ExtensionApiTest {
  protected:
-  std::unique_ptr<api::developer_private::ExtensionInfo> GetExtensionInfo(
+  std::optional<api::developer_private::ExtensionInfo> GetExtensionInfo(
       const Extension& extension) {
     auto get_info_function =
         base::MakeRefCounted<api::DeveloperPrivateGetExtensionInfoFunction>();
-    std::unique_ptr<base::Value> result =
-        extension_function_test_utils::RunFunctionAndReturnSingleResult(
+    std::optional<base::Value> result =
+        api_test_utils::RunFunctionAndReturnSingleResult(
             get_info_function.get(),
-            content::JsReplace(R"([$1])", extension.id()), browser());
+            content::JsReplace(R"([$1])", extension.id()), profile());
     if (!result) {
       ADD_FAILURE() << "No result back when getting extension info";
-      return nullptr;
+      return std::nullopt;
     }
-    std::unique_ptr<api::developer_private::ExtensionInfo> info =
+    std::optional<api::developer_private::ExtensionInfo> info =
         api::developer_private::ExtensionInfo::FromValue(*result);
-    if (!info)
+    if (!info) {
       ADD_FAILURE() << "Problem creating ExtensionInfo from result data";
+    }
     return info;
   }
 };
 
-IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, Basics) {
-  // Load up some extensions so that we can query their info and adjust their
-  // setings in the API test.
-  base::FilePath base_dir = test_data_dir_.AppendASCII("developer");
-  EXPECT_TRUE(LoadExtension(base_dir.AppendASCII("hosted_app")));
-  EXPECT_TRUE(InstallExtension(base_dir.AppendASCII("packaged_app"), 1,
-                               mojom::ManifestLocation::kInternal));
-  LoadExtension(base_dir.AppendASCII("simple_extension"));
-
-  ASSERT_TRUE(RunExtensionTest("developer/test",
-                               {.launch_as_platform_app = true},
-                               {.load_as_component = true}));
-}
-
+#if BUILDFLAG(ENABLE_PLATFORM_APPS)
 // Tests opening the developer tools for an app window.
 IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectAppWindowView) {
   base::FilePath dir;
@@ -87,7 +107,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectAppWindowView) {
   ASSERT_EQ(2u, info->views.size());
   const api::developer_private::ExtensionView* window_view = nullptr;
   for (const auto& view : info->views) {
-    if (view.type == api::developer_private::VIEW_TYPE_APP_WINDOW) {
+    if (view.type == api::developer_private::ViewType::kAppWindow) {
       window_view = &view;
       break;
     }
@@ -97,20 +117,21 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectAppWindowView) {
   // Inspect the app window.
   auto function =
       base::MakeRefCounted<api::DeveloperPrivateOpenDevToolsFunction>();
-  extension_function_test_utils::RunFunction(
+  api_test_utils::RunFunction(
       function.get(),
       base::StringPrintf("[{\"renderViewId\": %d, \"renderProcessId\": %d}]",
                          window_view->render_view_id,
                          window_view->render_process_id),
-      browser(), api_test_utils::NONE);
+      profile());
 
   // Verify that dev tools opened.
-  std::list<AppWindow*> app_windows =
+  std::list<raw_ptr<AppWindow, CtnExperimental>> app_windows =
       AppWindowRegistry::Get(profile())->GetAppWindowsForApp(app->id());
   ASSERT_EQ(1u, app_windows.size());
   EXPECT_TRUE(DevToolsWindow::GetInstanceForInspectedWebContents(
       (*app_windows.begin())->web_contents()));
 }
+#endif  // BUILDFLAG(ENABLE_PLATFORM_APPS)
 
 IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectEmbeddedOptionsPage) {
   base::FilePath dir;
@@ -122,37 +143,58 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectEmbeddedOptionsPage) {
   ASSERT_TRUE(extension);
 
   // Open the embedded options page.
-  ASSERT_TRUE(ExtensionTabUtil::OpenOptionsPage(extension, browser()));
+  content::WebContents* web_contents =
+      chrome_test_utils::GetActiveWebContents(this);
+  ASSERT_TRUE(ExtensionTabUtil::OpenOptionsPageFromWebContents(extension,
+                                                               web_contents));
   WaitForExtensionNotIdle(extension->id());
 
+  // On Android, the option page will be opened in a new tab as the guest view
+  // is not enabled on Android yet.
+#if BUILDFLAG(IS_ANDROID)
+  web_contents = chrome_test_utils::GetActiveWebContents(this);
+  ASSERT_EQ("chrome-extension://" + extension->id() + "/popup.html",
+            web_contents->GetURL());
+#else
   // Get the info about the extension, including the inspectable views.
   auto info = GetExtensionInfo(*extension);
 
   // The embedded options page should show up.
   ASSERT_EQ(1u, info->views.size());
   const api::developer_private::ExtensionView& view = info->views[0];
-  ASSERT_EQ(api::developer_private::VIEW_TYPE_EXTENSION_GUEST, view.type);
+  ASSERT_EQ(api::developer_private::ViewType::kExtensionGuest, view.type);
 
   // Inspect the embedded options page.
   auto function =
       base::MakeRefCounted<api::DeveloperPrivateOpenDevToolsFunction>();
-  extension_function_test_utils::RunFunction(
+  api_test_utils::RunFunction(
       function.get(),
       base::StringPrintf("[{\"renderViewId\": %d, \"renderProcessId\": %d}]",
                          view.render_view_id, view.render_process_id),
-      browser(), api_test_utils::NONE);
+      profile());
 
   // Verify that dev tools opened.
-  content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(
-      view.render_process_id, view.render_view_id);
-  ASSERT_TRUE(rfh);
-  content::WebContents* wc = content::WebContents::FromRenderFrameHost(rfh);
+  content::RenderFrameHost* render_frame_host =
+      content::RenderFrameHost::FromID(view.render_process_id,
+                                       view.render_view_id);
+  ASSERT_TRUE(render_frame_host);
+  content::WebContents* wc =
+      content::WebContents::FromRenderFrameHost(render_frame_host);
   ASSERT_TRUE(wc);
   EXPECT_TRUE(DevToolsWindow::GetInstanceForInspectedWebContents(wc));
+#endif
 }
 
+// TODO(crbug.com/40273479): Test is flaky on MSan builders.
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_InspectInactiveServiceWorkerBackground \
+  DISABLED_InspectInactiveServiceWorkerBackground
+#else
+#define MAYBE_InspectInactiveServiceWorkerBackground \
+  InspectInactiveServiceWorkerBackground
+#endif
 IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
-                       InspectInactiveServiceWorkerBackground) {
+                       MAYBE_InspectInactiveServiceWorkerBackground) {
   ResultCatcher result_catcher;
   // Load an extension that is service worker-based.
   const Extension* extension =
@@ -175,9 +217,8 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   // There should be a worker based background for the extension.
   ASSERT_EQ(1u, info->views.size());
   const api::developer_private::ExtensionView& view = info->views[0];
-  EXPECT_EQ(
-      api::developer_private::VIEW_TYPE_EXTENSION_SERVICE_WORKER_BACKGROUND,
-      view.type);
+  EXPECT_EQ(api::developer_private::ViewType::kExtensionServiceWorkerBackground,
+            view.type);
   // The service worker should be inactive (indicated by -1 for
   // the process id).
   EXPECT_EQ(-1, view.render_process_id);
@@ -186,15 +227,15 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   DevToolsWindowCreationObserver devtools_window_created_observer;
   auto dev_tools_function =
       base::MakeRefCounted<api::DeveloperPrivateOpenDevToolsFunction>();
-  extension_function_test_utils::RunFunction(dev_tools_function.get(),
-                                             base::StringPrintf(
-                                                 R"([{"renderViewId": -1,
+  api_test_utils::RunFunction(dev_tools_function.get(),
+                              base::StringPrintf(
+                                  R"([{"renderViewId": -1,
                                                       "renderProcessId": -1,
                                                       "isServiceWorker": true,
                                                       "extensionId": "%s"
                                                    }])",
-                                                 extension->id().c_str()),
-                                             browser(), api_test_utils::NONE);
+                                  extension->id().c_str()),
+                              profile());
   devtools_window_created_observer.WaitForLoad();
 
   // Verify that dev tool window opened.
@@ -204,8 +245,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   for (const scoped_refptr<content::DevToolsAgentHost>& host : targets) {
     if (host->GetType() == content::DevToolsAgentHost::kTypeServiceWorker &&
         host->GetURL() ==
-            extension->GetResourceURL(
-                BackgroundInfo::GetBackgroundServiceWorkerScript(extension))) {
+            BackgroundInfo::GetBackgroundServiceWorkerScriptURL(extension)) {
       EXPECT_FALSE(service_worker_host);
       service_worker_host = host;
     }
@@ -232,15 +272,14 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   // There should be a worker based background for the extension.
   ASSERT_EQ(1u, info->views.size());
   const api::developer_private::ExtensionView& view = info->views[0];
-  EXPECT_EQ(
-      api::developer_private::VIEW_TYPE_EXTENSION_SERVICE_WORKER_BACKGROUND,
-      view.type);
+  EXPECT_EQ(api::developer_private::ViewType::kExtensionServiceWorkerBackground,
+            view.type);
   EXPECT_NE(-1, view.render_process_id);
 
   // Inspect the service worker page.
   auto dev_tools_function =
       base::MakeRefCounted<api::DeveloperPrivateOpenDevToolsFunction>();
-  extension_function_test_utils::RunFunction(
+  api_test_utils::RunFunction(
       dev_tools_function.get(),
       base::StringPrintf(
           R"([{"renderViewId": -1,
@@ -249,7 +288,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
                "extensionId": "%s"
             }])",
           info->views[0].render_process_id, extension->id().c_str()),
-      browser(), api_test_utils::NONE);
+      profile());
 
   // Find the service worker background host.
   content::DevToolsAgentHost::List targets =
@@ -258,8 +297,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   for (const scoped_refptr<content::DevToolsAgentHost>& host : targets) {
     if (host->GetType() == content::DevToolsAgentHost::kTypeServiceWorker &&
         host->GetURL() ==
-            extension->GetResourceURL(
-                BackgroundInfo::GetBackgroundServiceWorkerScript(extension))) {
+            BackgroundInfo::GetBackgroundServiceWorkerScriptURL(extension)) {
       EXPECT_FALSE(service_worker_host);
       service_worker_host = host;
     }
@@ -270,7 +308,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   EXPECT_TRUE(DevToolsWindow::FindDevToolsWindow(service_worker_host.get()));
 }
 
-// TODO(crbug.com/1395713): The test is flaky on MSAN and Linux. Re-enable it.
+// TODO(crbug.com/40882269): The test is flaky on MSAN and Linux. Re-enable it.
 #if defined(MEMORY_SANITIZER) || BUILDFLAG(IS_LINUX)
 #define MAYBE_InspectSplitModeServiceWorkerBackgrounds \
   DISABLED_InspectSplitModeServiceWorkerBackgrounds
@@ -310,7 +348,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   {
     const api::developer_private::ExtensionView& view = info->views[0];
     EXPECT_EQ(
-        api::developer_private::VIEW_TYPE_EXTENSION_SERVICE_WORKER_BACKGROUND,
+        api::developer_private::ViewType::kExtensionServiceWorkerBackground,
         view.type);
     EXPECT_NE(-1, view.render_process_id);
     main_render_process_id = view.render_process_id;
@@ -320,8 +358,9 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   // Now open up an incognito browser window page and check the inspectable
   // views again. Waiting for the result catcher will wait for the incognito
   // service worker to have become active.
-  Browser* inconito_browser = CreateIncognitoBrowser(browser()->profile());
-  ASSERT_TRUE(inconito_browser);
+  content::WebContents* const incognito_window =
+      PlatformOpenURLOffTheRecord(profile(), GURL("about:blank"));
+  ASSERT_TRUE(incognito_window);
   ASSERT_TRUE(result_catcher.GetNextResult());
   info = GetExtensionInfo(*extension);
   // The views should now have 2 entries, one for the main worker which will be
@@ -331,7 +370,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
   int incognito_render_process_id = -1;
   for (auto& view : info->views) {
     EXPECT_EQ(
-        api::developer_private::VIEW_TYPE_EXTENSION_SERVICE_WORKER_BACKGROUND,
+        api::developer_private::ViewType::kExtensionServiceWorkerBackground,
         view.type);
     EXPECT_NE(-1, view.render_process_id);
     if (view.incognito) {
@@ -355,11 +394,11 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
     DevToolsWindowCreationObserver devtools_window_created_observer;
     auto dev_tools_function =
         base::MakeRefCounted<api::DeveloperPrivateOpenDevToolsFunction>();
-    extension_function_test_utils::RunFunction(
+    api_test_utils::RunFunction(
         dev_tools_function.get(),
         content::JsReplace(kOpenDevToolsParams, main_render_process_id,
                            extension->id().c_str(), /*incognito:*/ false),
-        browser(), api_test_utils::NONE);
+        profile());
     devtools_window_created_observer.WaitForLoad();
     main_devtools_window = devtools_window_created_observer.devtools_window();
   }
@@ -368,11 +407,11 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest,
     DevToolsWindowCreationObserver devtools_window_created_observer;
     auto dev_tools_function =
         base::MakeRefCounted<api::DeveloperPrivateOpenDevToolsFunction>();
-    extension_function_test_utils::RunFunction(
+    api_test_utils::RunFunction(
         dev_tools_function.get(),
         content::JsReplace(kOpenDevToolsParams, incognito_render_process_id,
                            extension->id().c_str(), /*incognito:*/ true),
-        browser(), api_test_utils::NONE);
+        profile());
     devtools_window_created_observer.WaitForLoad();
     incognito_devtools_window =
         devtools_window_created_observer.devtools_window();
@@ -408,10 +447,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectOffscreenDocument) {
     offscreen_waiter.RestrictToType(mojom::ViewType::kOffscreenDocument);
     offscreen_document = std::make_unique<OffscreenDocumentHost>(
         *extension,
-        ProcessManager::Get(profile())
-            ->GetSiteInstanceForURL(offscreen_url)
-            .get(),
-        offscreen_url);
+        profile(), offscreen_url);
     offscreen_document->CreateRendererSoon();
     offscreen_waiter.WaitForHostCompletedFirstLoad();
   }
@@ -423,11 +459,11 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectOffscreenDocument) {
   // metadata.
   ASSERT_EQ(1u, info->views.size());
   const api::developer_private::ExtensionView& view = info->views[0];
-  EXPECT_EQ(api::developer_private::VIEW_TYPE_OFFSCREEN_DOCUMENT, view.type);
+  EXPECT_EQ(api::developer_private::ViewType::kOffscreenDocument, view.type);
   content::WebContents* offscreen_contents =
       offscreen_document->host_contents();
   EXPECT_EQ(offscreen_url.spec(), view.url);
-  EXPECT_EQ(offscreen_document->render_process_host()->GetID(),
+  EXPECT_EQ(offscreen_document->render_process_host()->GetDeprecatedID(),
             view.render_process_id);
   EXPECT_EQ(offscreen_contents->GetPrimaryMainFrame()->GetRoutingID(),
             view.render_view_id);
@@ -441,7 +477,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectOffscreenDocument) {
   // Call the API function to inspect the offscreen document.
   auto dev_tools_function =
       base::MakeRefCounted<api::DeveloperPrivateOpenDevToolsFunction>();
-  extension_function_test_utils::RunFunction(
+  api_test_utils::RunFunction(
       dev_tools_function.get(),
       content::JsReplace(
           R"([{"renderViewId": $1,
@@ -449,7 +485,7 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectOffscreenDocument) {
                "extensionId": $3
             }])",
           view.render_view_id, view.render_process_id, extension->id()),
-      browser(), api_test_utils::NONE);
+      profile());
 
   // Validate that the devtools window is now shown.
   DevToolsWindow* dev_tools_window =
@@ -458,6 +494,162 @@ IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, InspectOffscreenDocument) {
 
   // Tidy up.
   DevToolsWindowTesting::CloseDevToolsWindowSync(dev_tools_window);
+}
+
+IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiTest, UninstallMultipleExtensions) {
+  // Load first extension.
+  static constexpr char kManifest_0[] =
+      R"({
+           "name": "Multiple extensions uninstall test 0",
+           "manifest_version": 3,
+           "version": "0.1"
+         })";
+  TestExtensionDir test_dir_0;
+  test_dir_0.WriteManifest(kManifest_0);
+  const Extension* extension_0 = LoadExtension(test_dir_0.UnpackedPath());
+  ASSERT_TRUE(extension_0);
+  std::string extension_0_id = extension_0->id();
+
+  // Load second extension.
+  static constexpr char kManifest_1[] =
+      R"({
+           "name": "Multiple extensions uninstall test 1",
+           "manifest_version": 3,
+           "version": "0.1"
+         })";
+  TestExtensionDir test_dir_1;
+  test_dir_1.WriteManifest(kManifest_1);
+  const Extension* extension_1 = LoadExtension(test_dir_1.UnpackedPath());
+  ASSERT_TRUE(extension_1);
+  std::string extension_1_id = extension_1->id();
+
+  auto function = base::MakeRefCounted<
+      api::DeveloperPrivateRemoveMultipleExtensionsFunction>();
+  std::unique_ptr<ExtensionFunctionDispatcher> dispatcher =
+      std::make_unique<ExtensionFunctionDispatcher>(profile());
+  function->SetDispatcher(dispatcher->AsWeakPtr());
+
+  std::string args =
+      base::StrCat({"[[\"", extension_0_id, "\", \"", extension_1_id, "\"]]"});
+  api_test_utils::SendResponseHelper response_helper(function.get());
+  function->SetArgs(base::test::ParseJsonList(args));
+  function->accept_bubble_for_testing(true);
+  function->RunWithValidation().Execute();
+  response_helper.WaitForResponse();
+
+  // Verify the extensions are uninstalled.
+  EXPECT_FALSE(extension_registry()->GetExtensionById(
+      extension_0_id, ExtensionRegistry::EVERYTHING));
+  EXPECT_FALSE(extension_registry()->GetExtensionById(
+      extension_1_id, ExtensionRegistry::EVERYTHING));
+}
+
+class DeveloperPrivateApiRateExtensionTest : public DeveloperPrivateApiTest {
+ private:
+  base::test::ScopedFeatureList feature_list_{
+      extensions_features::kCWSReviewPromptingNativeUI};
+};
+
+IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiRateExtensionTest,
+                       OpenReviewPage_NavigatesToCWS) {
+  scoped_refptr<const Extension> cws_extension =
+      ExtensionBuilder("CWS Extension")
+          .SetLocation(mojom::ManifestLocation::kInternal)
+          .AddFlags(Extension::FROM_WEBSTORE)
+          .Build();
+  PermissionsUpdater updater(profile());
+  updater.InitializePermissions(cws_extension.get());
+  updater.GrantActivePermissions(cws_extension.get());
+  extension_registrar()->AddExtension(cws_extension.get());
+
+  base::DictValue cws_info_dict;
+  cws_info_dict.Set("is-present", true);
+  cws_info_dict.Set("is-live", true);
+  cws_info_dict.Set("violation-type", 0);
+  ExtensionPrefs::Get(profile())->UpdateExtensionPref(
+      cws_extension->id(), "cws-info", base::Value(std::move(cws_info_dict)));
+
+  content::WebContents* web_contents = GetActiveWebContents();
+  ASSERT_TRUE(web_contents);
+
+  TabListInterface* tab_list =
+      TabListInterface::From(browser_window_interface());
+  ASSERT_TRUE(tab_list);
+  int initial_tab_count = tab_list->GetTabCount();
+
+  GURL expected_url = extensions::util::GetCWSWritingReviewUrl(
+      cws_extension->id(), extensions::util::CWSReviewSource::kExtensionsPage);
+
+  content::TestNavigationObserver observer(expected_url);
+  observer.StartWatchingNewWebContents();
+
+  auto function =
+      base::MakeRefCounted<api::DeveloperPrivateOpenReviewPageFunction>();
+  function->SetRenderFrameHost(web_contents->GetPrimaryMainFrame());
+
+  std::string args =
+      base::StringPrintf(R"(["%s"])", cws_extension->id().c_str());
+  EXPECT_TRUE(api_test_utils::RunFunction(function.get(), args, profile()));
+
+  observer.Wait();
+
+  EXPECT_EQ(initial_tab_count + 1, tab_list->GetTabCount());
+  content::WebContents* new_tab = tab_list->GetActiveTab()->GetContents();
+  EXPECT_NE(web_contents, new_tab);
+
+  EXPECT_EQ(expected_url, new_tab->GetLastCommittedURL());
+}
+
+IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiRateExtensionTest,
+                       OpenReviewPage_IncognitoIneligible) {
+  content::WebContents* incognito_contents =
+      PlatformOpenURLOffTheRecord(profile(), GURL("about:blank"));
+  ASSERT_TRUE(incognito_contents);
+
+  Profile* incognito_profile =
+      Profile::FromBrowserContext(incognito_contents->GetBrowserContext());
+
+  scoped_refptr<const Extension> cws_extension =
+      ExtensionBuilder("CWS Extension")
+          .SetLocation(mojom::ManifestLocation::kInternal)
+          .AddFlags(Extension::FROM_WEBSTORE)
+          .Build();
+  PermissionsUpdater updater(profile());
+  updater.InitializePermissions(cws_extension.get());
+  updater.GrantActivePermissions(cws_extension.get());
+  extension_registrar()->AddExtension(cws_extension.get());
+
+  auto function =
+      base::MakeRefCounted<api::DeveloperPrivateOpenReviewPageFunction>();
+  function->SetRenderFrameHost(incognito_contents->GetPrimaryMainFrame());
+
+  std::string args =
+      base::StringPrintf(R"(["%s"])", cws_extension->id().c_str());
+  std::string error = api_test_utils::RunFunctionAndReturnError(
+      function.get(), args, incognito_profile);
+  EXPECT_EQ("The extension is ineligible for review prompts.", error);
+}
+
+IN_PROC_BROWSER_TEST_F(DeveloperPrivateApiRateExtensionTest,
+                       ExtensionsUI_CwsReviewPromptingEnabled) {
+  static constexpr char kScript[] =
+      "import('chrome://resources/js/load_time_data.js').then(m => "
+      "m.loadTimeData.getBoolean('cwsReviewPromptingEnabled'))";
+
+  content::WebContents* web_contents = GetActiveWebContents();
+  ASSERT_TRUE(web_contents);
+
+  // 1. Regular profile with policy allowed: cwsReviewPromptingEnabled is true.
+  ASSERT_TRUE(
+      content::NavigateToURL(web_contents, GURL("chrome://extensions")));
+  EXPECT_EQ(true, content::EvalJs(web_contents, kScript));
+
+  // 2. Enterprise policy disabled: cwsReviewPromptingEnabled is false.
+  profile()->GetPrefs()->SetBoolean(prefs::kExtensionReviewPromptsAllowed,
+                                    false);
+  ASSERT_TRUE(
+      content::NavigateToURL(web_contents, GURL("chrome://extensions")));
+  EXPECT_EQ(false, content::EvalJs(web_contents, kScript));
 }
 
 }  // namespace extensions

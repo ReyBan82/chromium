@@ -9,6 +9,11 @@ mojom("logger") {
   public_deps = [ "//mojo/public/mojom/base" ]
 }
 
+mojom("debugger") {
+  sources = [ "debugger.mojom" ]
+  public_deps = [ "//mojo/public/mojom/base" ]
+}
+
 mojom("media_controller") {
   sources = [
     "media_controller.mojom",
@@ -30,6 +35,7 @@ mojom("media_router") {
   sources = [ "media_router.mojom" ]
 
   public_deps = [
+    ":debugger",
     ":logger",
     ":media_controller",
     ":media_route_provider_id",
@@ -48,9 +54,7 @@ mojom("media_router") {
     component_deps = [ "//third_party/blink/public/common" ]
   }
 
-  cpp_only = true
-  disable_variants = true
-
+  generate_legacy_js = false
   cpp_typemaps = [
     {
       types = [
@@ -59,20 +63,12 @@ mojom("media_router") {
           cpp = "::media_router::IssueInfo"
         },
         {
-          mojom = "media_router.mojom.Issue.ActionType"
-          cpp = "::media_router::IssueInfo::Action"
-        },
-        {
           mojom = "media_router.mojom.Issue.Severity"
           cpp = "::media_router::IssueInfo::Severity"
         },
         {
           mojom = "media_router.mojom.MediaRoute"
           cpp = "::media_router::MediaRoute"
-        },
-        {
-          mojom = "media_router.mojom.MediaRouteProvider.Id"
-          cpp = "::media_router::mojom::MediaRouteProviderId"
         },
         {
           mojom = "media_router.mojom.MediaSink"
@@ -84,6 +80,7 @@ mojom("media_router") {
 
       traits_public_deps = [
         "//components/media_router/common",
+        "//components/media_router/common/providers/cast/channel:capability",
         "//net",
       ]
       traits_deps = [
@@ -99,14 +96,12 @@ mojom("media_router_test_interfaces") {
 
   public_deps = [ ":media_router" ]
 
-  cpp_only = true
-  disable_variants = true
+  generate_legacy_js = false
 }
 
 mojom("route_request_result_code") {
   sources = [ "route_request_result_code.mojom" ]
 
   webui_module_path = "/"
-  use_typescript_sources = true
   generate_legacy_js_bindings = enable_mojom_fuzzer
 }

@@ -5,12 +5,15 @@
 #ifndef MEDIA_MOJO_MOJOM_VIDEO_DECODER_CONFIG_MOJOM_TRAITS_H_
 #define MEDIA_MOJO_MOJOM_VIDEO_DECODER_CONFIG_MOJOM_TRAITS_H_
 
+#include <optional>
+
 #include "media/base/ipc/media_param_traits.h"
 #include "media/base/video_decoder_config.h"
 #include "media/mojo/mojom/media_types.mojom.h"
+#include "media/mojo/mojom/video_aspect_ratio_mojom_traits.h"
 #include "media/mojo/mojom/video_color_space_mojom_traits.h"
+#include "media/mojo/mojom/video_spatial_format_mojom_traits.h"
 #include "media/mojo/mojom/video_transformation_mojom_traits.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/mojom/geometry_mojom_traits.h"
 #include "ui/gfx/mojom/hdr_metadata_mojom_traits.h"
 
@@ -45,6 +48,11 @@ struct StructTraits<media::mojom::VideoDecoderConfigDataView,
     return input.natural_size();
   }
 
+  static const media::VideoAspectRatio& aspect_ratio(
+      const media::VideoDecoderConfig& input) {
+    return input.aspect_ratio();
+  }
+
   static const std::vector<uint8_t>& extra_data(
       const media::VideoDecoderConfig& input) {
     return input.extra_data();
@@ -65,13 +73,18 @@ struct StructTraits<media::mojom::VideoDecoderConfigDataView,
     return input.video_transformation();
   }
 
-  static const absl::optional<gfx::HDRMetadata>& hdr_metadata(
+  static const gfx::HDRMetadata& hdr_metadata(
       const media::VideoDecoderConfig& input) {
     return input.hdr_metadata();
   }
 
   static uint32_t level(const media::VideoDecoderConfig& input) {
     return input.level();
+  }
+
+  static const media::VideoSpatialFormat& spatial_format(
+      const media::VideoDecoderConfig& input) {
+    return input.spatial_format();
   }
 
   static bool Read(media::mojom::VideoDecoderConfigDataView input,

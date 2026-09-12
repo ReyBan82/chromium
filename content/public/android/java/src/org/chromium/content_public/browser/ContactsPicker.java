@@ -6,21 +6,27 @@ package org.chromium.content_public.browser;
 
 import androidx.annotation.VisibleForTesting;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+
 /**
  * A utility class that allows the embedder to provide a Contacts Picker implementation to content.
  */
+@NullMarked
 public final class ContactsPicker {
     /**
      * The current delegate for the contacts picker, or null if navigator.contacts is not
      * supported.
      */
-    private static ContactsPickerDelegate sContactsPickerDelegate;
+    private static @Nullable ContactsPickerDelegate sContactsPickerDelegate;
 
     /**
      * The object that represents the currently visible contacts picker UI, or null if none is
      * visible.
      */
-    private static Object sPicker;
+    private static @Nullable Object sPicker;
+
+    private static @Nullable WebContentsObserver sWebContentsObserver;
 
     private ContactsPicker() {}
 
@@ -45,11 +51,19 @@ public final class ContactsPicker {
         return webContents.getVisibility() == Visibility.VISIBLE;
     }
 
+    public static @Nullable Object getObserverForTesting() {
+        return sWebContentsObserver;
+    }
+
+    public static boolean hasPickerForTesting() {
+        return sPicker != null;
+    }
+
     /**
      * Called to display the contacts picker.
+     *
      * @param webContents The Web Contents that triggered this call.
-     * @param listener The listener that will be notified of the action the user took in the
-     *                 picker.
+     * @param listener The listener that will be notified of the action the user took in the picker.
      * @param allowMultiple Whether to allow multiple contacts to be selected.
      * @param includeNames Whether to include names of the shared contacts.
      * @param includeEmails Whether to include emails of the shared contacts.
@@ -57,30 +71,81 @@ public final class ContactsPicker {
      * @param includeAddresses Whether to include addresses of the shared contacts.
      * @param includeIcons Whether to include icons of the shared contacts.
      * @param formattedOrigin The origin the data will be shared with, formatted for display with
-     *         the scheme omitted.
+     *     the scheme omitted.
+     * @param contactsFetcher The source of contact information.
      * @return whether a contacts picker is successfully shown.
      */
-    public static boolean showContactsPicker(WebContents webContents,
-            ContactsPickerListener listener, boolean allowMultiple, boolean includeNames,
-            boolean includeEmails, boolean includeTel, boolean includeAddresses,
-            boolean includeIcons, String formattedOrigin) {
+    public static boolean showContactsPicker(
+            WebContents webContents,
+            ContactsPickerListener listener,
+            boolean allowMultiple,
+            boolean includeNames,
+            boolean includeEmails,
+            boolean includeTel,
+            boolean includeAddresses,
+            boolean includeIcons,
+            String formattedOrigin,
+            @Nullable ContactsFetcher contactsFetcher) {
         if (sContactsPickerDelegate == null) return false;
         assert sPicker == null;
 
         if (!canShowContactsPicker(webContents)) {
             return false;
         }
-        sPicker = sContactsPickerDelegate.showContactsPicker(webContents.getTopLevelNativeWindow(),
-                listener, allowMultiple, includeNames, includeEmails, includeTel, includeAddresses,
-                includeIcons, formattedOrigin);
+        sPicker =
+                sContactsPickerDelegate.showContactsPicker(
+                        webContents,
+                        listener,
+                        allowMultiple,
+                        includeNames,
+                        includeEmails,
+                        includeTel,
+                        includeAddresses,
+                        includeIcons,
+                        formattedOrigin,
+                        contactsFetcher);
+
+        if (sPicker != null) {
+            assert sWebContentsObserver == null;
+            sWebContentsObserver =
+                    new WebContentsObserver(webContents) {
+                        @Override
+                        public void onVisibilityChanged(@Visibility int visibility) {
+                            if (visibility != Visibility.VISIBLE) {
+                                dismissAndCleanup();
+                            }
+                        }
+
+                        @Override
+                        public void webContentsDestroyed() {
+                            dismissAndCleanup();
+                        }
+
+                        private void dismissAndCleanup() {
+                            if (sPicker != null && sContactsPickerDelegate != null) {
+                                sContactsPickerDelegate.cancelContactsPicker(sPicker);
+                            }
+                        }
+                    };
+
+            // Defensive check in case visibility changed during picker creation.
+            if (webContents.getVisibility() != Visibility.VISIBLE) {
+                if (sContactsPickerDelegate != null) {
+                    sContactsPickerDelegate.cancelContactsPicker(sPicker);
+                }
+            }
+        }
+
         return true;
     }
 
-    /**
-     * Called when the contacts picker dialog has been dismissed.
-     */
+    /** Called when the contacts picker dialog has been dismissed. */
     public static void onContactsPickerDismissed() {
         assert sPicker != null;
         sPicker = null;
+        if (sWebContentsObserver != null) {
+            sWebContentsObserver.observe(null);
+            sWebContentsObserver = null;
+        }
     }
 }

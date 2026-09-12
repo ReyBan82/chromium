@@ -9,7 +9,6 @@ tags. This approach avoids the complexties of conditional inclusions, but
 produces a conservative estimate of ID usages.
 """
 
-
 import collections
 import os
 
@@ -19,12 +18,13 @@ from grit.tool.update_resource_ids import common
 
 TAGS_OF_INTEREST = {'include', 'message', 'structure'}
 
+
 def _CountResourceUsage(grd, seen_files):
   tag_name_to_count = {tag: set() for tag in TAGS_OF_INTEREST}
   # Pass '_chromium', but '_google_chrome' would produce the same result.
-  root = grd_reader.Parse(grd,
-                          defines={'_chromium': True},
-                          skip_validation_checks=True)
+  root = grd_reader.Parse(
+    grd, defines={'_chromium': True}, skip_validation_checks=True
+  )
   seen_files.add(grd)
   # Count all descendant tags, regardless of whether they're active.
   for node in root.Preorder():
@@ -36,11 +36,14 @@ def _CountResourceUsage(grd, seen_files):
   return {k: len(v) for k, v in tag_name_to_count.items() if v}
 
 
-def GenerateResourceUsages(item_list, src_dir, fake, seen_files):
+def GenerateResourceUsages(
+  item_list, input_file_path, src_dir, fake, seen_files
+):
   """Visits a list of ItemInfo to generate maps from tag name to usage.
 
   Args:
-    root_obj: Root dict of a resource_ids file.
+    item_list: ID assignments and structure from the parsed resource_ids.
+    input_file_path: The path for the resource_ids input.
     src_dir: Absolute directory of Chrome's src/ directory.
     fake: For testing: Sets 10 as usages for all tags, to avoid reading GRD.
     seen_files: A set to collect paths of files read.
@@ -62,13 +65,16 @@ def GenerateResourceUsages(item_list, src_dir, fake, seen_files):
         tag_name_to_usage[common.StripPlural(k.val)] = sum(v.val for v in vlist)
       tag_names = set(tag_name_to_usage.keys())
       if tag_names != supported_tag_names:
-        raise ValueError('META "sizes" field have identical fields as actual '
-                         '"sizes" field.')
+        raise ValueError(
+          'META "sizes" field have identical fields as actual "sizes" field.'
+        )
     else:
       # Generated GRD start with '<(SHARED_INTERMEDIATE_DIR)'. Just check '<'.
       if item.grd.startswith('<'):
-        raise ValueError('%s: Generated GRD must use META with "sizes" field '
-                         'to specify size bounds.' % item.grd)
+        raise ValueError(
+          '%s: Generated GRD must use META with "sizes" field '
+          'to specify size bounds.' % item.grd
+        )
       grd_file = os.path.join(src_dir, item.grd)
       if not os.path.exists(grd_file):
         # Silently skip missing files so that src-internal files do not break
@@ -80,5 +86,7 @@ def GenerateResourceUsages(item_list, src_dir, fake, seen_files):
       if not tag_names.issubset(supported_tag_names):
         missing = [t + 's' for t in tag_names - supported_tag_names]
         raise ValueError(
-            'Resource ids for %s needs entry for %s' % (item.grd, missing))
+          'Resource ids for %s missing entry for %s. Check %s.'
+          % (item.grd, missing, os.path.relpath(input_file_path, src_dir))
+        )
     yield item, tag_name_to_usage

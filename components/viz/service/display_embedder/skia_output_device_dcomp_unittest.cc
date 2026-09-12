@@ -1,4 +1,4 @@
-// Copyright 2023 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,370 +6,176 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
+#include "base/containers/flat_map.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/scoped_refptr.h"
-#include "components/viz/common/resources/shared_image_format.h"
-#include "gpu/command_buffer/common/context_creation_attribs.h"
-#include "gpu/command_buffer/common/mailbox.h"
-#include "gpu/command_buffer/common/shared_image_usage.h"
-#include "gpu/command_buffer/service/feature_info.h"
-#include "gpu/command_buffer/service/service_utils.h"
+#include "components/viz/service/display/overlay_candidate.h"
 #include "gpu/command_buffer/service/shared_context_state.h"
-#include "gpu/command_buffer/service/shared_image/shared_image_backing.h"
-#include "gpu/command_buffer/service/shared_image/shared_image_backing_factory.h"
-#include "gpu/command_buffer/service/shared_image/shared_image_factory.h"
-#include "gpu/command_buffer/service/shared_image/test_image_backing.h"
 #include "gpu/config/gpu_driver_bug_workarounds.h"
-#include "gpu/config/gpu_feature_info.h"
-#include "gpu/config/gpu_preferences.h"
+#include "gpu/config/gpu_finch_features.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/skia/include/core/SkAlphaType.h"
-#include "third_party/skia/include/core/SkColorType.h"
-#include "third_party/skia/include/gpu/GrTypes.h"
-#include "ui/gfx/color_space.h"
-#include "ui/gfx/geometry/size.h"
-#include "ui/gfx/surface_origin.h"
-#include "ui/gl/dcomp_presenter.h"
-#include "ui/gl/direct_composition_surface_win.h"
-#include "ui/gl/gl_context.h"
-#include "ui/gl/gl_implementation.h"
-#include "ui/gl/gl_share_group.h"
-#include "ui/gl/gl_surface.h"
-#include "ui/gl/init/gl_factory.h"
+#include "ui/gl/dc_layer_overlay_image.h"
+#include "ui/gl/dc_layer_overlay_params.h"
+#include "ui/gl/gl_context_stub.h"
+#include "ui/gl/gl_surface_stub.h"
 #include "ui/gl/presenter.h"
 
-namespace viz {
+using ::testing::_;
+using ::testing::Invoke;
 
+namespace viz {
 namespace {
 
-class TestSharedImageBackingFactory : public gpu::SharedImageBackingFactory {
+class MockPresenter : public gl::Presenter {
  public:
-  TestSharedImageBackingFactory() : SharedImageBackingFactory(kUsageAll) {}
-
-  MOCK_METHOD(std::unique_ptr<gpu::SharedImageBacking>,
-              CreateSharedImage,
-              (const gpu::Mailbox& mailbox,
-               SharedImageFormat format,
-               gpu::SurfaceHandle surface_handle,
-               const gfx::Size& size,
-               const gfx::ColorSpace& color_space,
-               GrSurfaceOrigin surface_origin,
-               SkAlphaType alpha_type,
-               uint32_t usage,
-               bool is_thread_safe),
-              (override));
-
-  void SetCreateSharedImageSuccessByDefault() {
-    ON_CALL(*this, CreateSharedImage)
-        .WillByDefault(
-            [](const gpu::Mailbox& mailbox, SharedImageFormat format,
-               gpu::SurfaceHandle surface_handle, const gfx::Size& size,
-               const gfx::ColorSpace& color_space,
-               GrSurfaceOrigin surface_origin, SkAlphaType alpha_type,
-               uint32_t usage, bool is_thread_safe) {
-              return std::make_unique<gpu::TestImageBacking>(
-                  mailbox, format, size, color_space, surface_origin,
-                  alpha_type, usage, 1);
-            });
-  }
-
-  std::unique_ptr<gpu::SharedImageBacking> CreateSharedImage(
-      const gpu::Mailbox& mailbox,
-      SharedImageFormat format,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
-      base::span<const uint8_t> pixel_data) override {
-    NOTREACHED();
-    return nullptr;
-  }
-  std::unique_ptr<gpu::SharedImageBacking> CreateSharedImage(
-      const gpu::Mailbox& mailbox,
-      SharedImageFormat format,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
-      gfx::GpuMemoryBufferHandle handle) override {
-    NOTREACHED();
-    return nullptr;
-  }
-  std::unique_ptr<gpu::SharedImageBacking> CreateSharedImage(
-      const gpu::Mailbox& mailbox,
-      gfx::GpuMemoryBufferHandle handle,
-      gfx::BufferFormat format,
-      gfx::BufferPlane plane,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage) override {
-    NOTREACHED();
-    return nullptr;
-  }
-  bool IsSupported(uint32_t usage,
-                   SharedImageFormat format,
-                   const gfx::Size& size,
-                   bool thread_safe,
-                   gfx::GpuMemoryBufferType gmb_type,
-                   gpu::GrContextType gr_context_type,
-                   base::span<const uint8_t> pixel_data) override {
-    return true;
-  }
-};
-
-// No-op surface compatible with SkiaOutputDeviceDCompPresenter
-class NoopDCompPresenter : public gl::Presenter {
- public:
-  NoopDCompPresenter()
-      : gl::Presenter(gl::GLSurfaceEGL::GetGLDisplayEGL(), gfx::Size(1, 1)) {}
-
-  bool SupportsDCLayers() const override { return true; }
-  bool SupportsGpuVSync() const override { return true; }
-  bool SupportsCommitOverlayPlanes() override { return false; }
-
-  bool SetDrawRectangle(const gfx::Rect& rectangle) override { return true; }
+  MockPresenter() = default;
 
   void Present(SwapCompletionCallback completion_callback,
                PresentationCallback presentation_callback,
                gfx::FrameData data) override {
-    NOTREACHED();
+    std::move(completion_callback)
+        .Run(gfx::SwapCompletionResult(gfx::SwapResult::SWAP_ACK));
+    std::move(presentation_callback).Run({});
+  }
+
+  bool ScheduleOverlayPlane(
+      gl::OverlayImage image,
+      std::unique_ptr<gfx::GpuFence> gpu_fence,
+      const gfx::OverlayPlaneData& overlay_plane_data) override {
+    return true;
+  }
+
+  MOCK_METHOD1(ScheduleDCLayers, void(std::vector<gl::DCLayerOverlayParams>));
+
+  bool SupportsDelegatedInk() override { return false; }
+  HWND GetWindow() const override { return nullptr; }
+  bool DestroyDCLayerTree() override { return true; }
+
+ protected:
+  ~MockPresenter() override = default;
+};
+
+class TestSkiaOutputDeviceDComp : public SkiaOutputDeviceDComp {
+ public:
+  TestSkiaOutputDeviceDComp(scoped_refptr<gl::Presenter> presenter,
+                            gpu::SharedContextState* context_state)
+      : SkiaOutputDeviceDComp(
+            /*shared_image_representation_factory=*/nullptr,
+            context_state,
+            std::move(presenter),
+            /*workarounds=*/gpu::GpuDriverBugWorkarounds(),
+            /*memory_tracker=*/nullptr,
+            /*did_swap_buffer_complete_callback=*/base::DoNothing()) {}
+
+  void SetOverlayImageSize(const gpu::Mailbox& mailbox, const gfx::Size& size) {
+    overlay_sizes_[mailbox] = size;
   }
 
  protected:
-  ~NoopDCompPresenter() override = default;
-};
+  std::optional<gl::DCLayerOverlayImage> BeginOverlayAccess(
+      const gpu::Mailbox& mailbox) override {
+    auto it = overlay_sizes_.find(mailbox);
+    if (it != overlay_sizes_.end()) {
+      return gl::DCLayerOverlayImage(it->second,
+                                     Microsoft::WRL::ComPtr<IUnknown>());
+    }
+    return std::nullopt;
+  }
 
-}  // namespace
+ private:
+  base::flat_map<gpu::Mailbox, gfx::Size> overlay_sizes_;
+};
 
 class SkiaOutputDeviceDCompTest : public testing::Test {
  public:
-  SkiaOutputDeviceDCompTest() {}
-
- protected:
   void SetUp() override {
-    gpu::GpuDriverBugWorkarounds workarounds;
-    gpu::GpuPreferences gpu_preferences;
-    gpu_preferences.use_passthrough_cmd_decoder = true;
-    gpu_preferences.enable_gpu_debugging = true;
-    gpu::GpuFeatureInfo gpu_feature_info;
+    features::InitSkiaGraphiteDefaultParamsForTesting();
 
-    scoped_refptr<gl::GLShareGroup> share_group = new gl::GLShareGroup();
-    scoped_refptr<gl::GLSurface> surface = gl::init::CreateOffscreenGLSurface(
-        gl::GLSurfaceEGL::GetGLDisplayEGL(), gfx::Size());
+    auto presenter = base::MakeRefCounted<MockPresenter>();
+    presenter_ = presenter.get();
 
-    gpu::ContextCreationAttribs attribs_helper;
-    attribs_helper.context_type = gpu::CONTEXT_TYPE_OPENGLES3;
-    gl::GLContextAttribs attribs = gpu::gles2::GenerateGLContextAttribs(
-        attribs_helper, gpu_preferences.use_passthrough_cmd_decoder);
-    attribs.can_skip_validation = false;
-    scoped_refptr<gl::GLContext> context =
-        gl::init::CreateGLContext(share_group.get(), surface.get(), attribs);
-    ASSERT_NE(nullptr, context);
-    ASSERT_EQ(context->share_group(), share_group.get());
-    gpu_feature_info.ApplyToGLContext(context.get());
-    auto feature_info = base::MakeRefCounted<gpu::gles2::FeatureInfo>(
-        workarounds, gpu_feature_info);
-    ASSERT_TRUE(context->MakeCurrent(surface.get()));
-
+    auto surface = base::MakeRefCounted<gl::GLSurfaceStub>();
+    auto context = base::MakeRefCounted<gl::GLContextStub>();
+    context->Initialize(surface.get(), gl::GLContextAttribs());
     context_state_ = base::MakeRefCounted<gpu::SharedContextState>(
-        std::move(share_group), surface, std::move(context),
-        false /* use_virtualized_gl_contexts */, base::DoNothing());
-    ASSERT_TRUE(context_state_->MakeCurrent(surface.get()));
-    ASSERT_TRUE(context_state_->InitializeGL(gpu_preferences, feature_info));
-    ASSERT_TRUE(context_state_->InitializeGrContext(
-        gpu_preferences, workarounds, /*cache=*/nullptr));
-    EXPECT_EQ(gl::GetGLImplementation(), gl::kGLImplementationEGLANGLE);
+        /*share_group=*/nullptr,
+        surface,
+        context,
+        /*use_virtualized_gl_contexts=*/false,
+        /*context_lost_callback=*/base::DoNothing(),
+        gpu::GrContextType::kGraphiteDawn);
 
-    shared_image_factory_ = std::make_unique<gpu::SharedImageFactory>(
-        gpu_preferences, workarounds, gpu_feature_info, context_state_.get(),
-        &shared_image_manager_, nullptr,
-        /*is_for_display_compositor=*/false);
-
-    test_shared_image_factory_ =
-        std::make_unique<TestSharedImageBackingFactory>();
-    test_shared_image_factory_->SetCreateSharedImageSuccessByDefault();
-    shared_image_factory_->RegisterSharedImageBackingFactoryForTesting(
-        test_shared_image_factory_.get());
-
-    shared_image_representation_factory_ =
-        std::make_unique<gpu::SharedImageRepresentationFactory>(
-            &shared_image_manager_, nullptr);
-
-    surface_ = base::MakeRefCounted<NoopDCompPresenter>();
-
-    output_device_ = base::WrapUnique(new SkiaOutputDeviceDCompPresenter(
-        shared_image_factory_.get(), shared_image_representation_factory_.get(),
-        context_state_.get(), surface_, feature_info, nullptr,
-        base::DoNothing()));
+    output_device_ = std::make_unique<TestSkiaOutputDeviceDComp>(
+        std::move(presenter), context_state_.get());
   }
 
   void TearDown() override {
+    presenter_ = nullptr;
     output_device_.reset();
-    surface_.reset();
     context_state_.reset();
-    test_shared_image_factory_.reset();
-    shared_image_factory_.reset();
-    shared_image_representation_factory_.reset();
   }
 
-  void Reshape(const gfx::Size size,
-               SkColorType color_type,
-               bool has_alpha,
-               const gfx::ColorSpace& color_space) {
-    sk_sp<GrContextThreadSafeProxy> gr_thread_safe_proxy =
-        context_state_->gr_context()->threadSafeProxy();
-
-    SkImageInfo image_info = SkImageInfo::Make(
-        SkISize::Make(size.width(), size.height()), color_type,
-        has_alpha ? kPremul_SkAlphaType : kOpaque_SkAlphaType);
-    GrBackendFormat backend_format = gr_thread_safe_proxy->defaultBackendFormat(
-        color_type, GrRenderable::kYes);
-
-    SkSurfaceCharacterization characterization =
-        gr_thread_safe_proxy->createCharacterization(
-            context_state_->gr_context()->getResourceCacheLimit(), image_info,
-            backend_format, 1, kTopLeft_GrSurfaceOrigin, SkSurfaceProps(),
-            false);
-    EXPECT_TRUE(
-        output_device_->Reshape(characterization, color_space, 1.0,
-                                gfx::OverlayTransform::OVERLAY_TRANSFORM_NONE));
-
-    last_reshape_size_ = size;
-  }
-
-  // Do a fake draw to force the root surface to allocate.
-  void EnsureRootSurfaceAllocated() {
-    EXPECT_TRUE(
-        output_device_->SetDrawRectangle(gfx::Rect(last_reshape_size_)));
-    std::vector<GrBackendSemaphore> end_semaphores;
-    EXPECT_NE(nullptr, output_device_->BeginPaint(&end_semaphores));
-    EXPECT_EQ(0u, end_semaphores.size());
-    output_device_->EndPaint();
-  }
-
-  std::unique_ptr<SkiaOutputDeviceDCompPresenter> output_device_;
-
-  std::unique_ptr<TestSharedImageBackingFactory> test_shared_image_factory_;
-
- private:
-  // Store the last size passed to Reshape so that EnsureRootSurfaceAllocated
-  // knows what update_rect to pass.
-  gfx::Size last_reshape_size_;
-
+ protected:
   scoped_refptr<gpu::SharedContextState> context_state_;
-  std::unique_ptr<gpu::SharedImageFactory> shared_image_factory_;
-  gpu::SharedImageManager shared_image_manager_;
-  std::unique_ptr<gpu::SharedImageRepresentationFactory>
-      shared_image_representation_factory_;
-  scoped_refptr<NoopDCompPresenter> surface_;
+  std::unique_ptr<TestSkiaOutputDeviceDComp> output_device_;
+  raw_ptr<MockPresenter> presenter_ = nullptr;
 };
 
-// Tests that switching using EnableDCLayers works.
-TEST_F(SkiaOutputDeviceDCompTest, DXGIDCLayerSwitch) {
-  Reshape(gfx::Size(100, 100), kRGBA_8888_SkColorType, true,
-          gfx::ColorSpace::CreateSRGB());
+TEST_F(SkiaOutputDeviceDCompTest, ClampsOutOfBoundsUVRect) {
+  gfx::Size image_size(100, 100);
+  gpu::Mailbox mailbox = gpu::Mailbox::Generate();
+  output_device_->SetOverlayImageSize(mailbox, image_size);
 
-  // Check we allocate a a DXGI swap chain when asked.
-  output_device_->SetEnableDCLayers(false);
-  EXPECT_FALSE(output_device_->IsRootSurfaceAllocatedForTesting());
-  EXPECT_CALL(*test_shared_image_factory_,
-              CreateSharedImage(testing::_, testing::_, testing::_, testing::_,
-                                testing::_, testing::_, kPremul_SkAlphaType,
-                                gpu::SHARED_IMAGE_USAGE_DISPLAY_READ |
-                                    gpu::SHARED_IMAGE_USAGE_DISPLAY_WRITE |
-                                    gpu::SHARED_IMAGE_USAGE_SCANOUT,
-                                testing::_));
-  EnsureRootSurfaceAllocated();
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
+  OverlayCandidate candidate;
+  candidate.mailbox = mailbox;
+  candidate.display_rect = gfx::RectF(0, 0, 100, 100);
+  candidate.uv_rect = gfx::RectF(-0.1f, -0.1f, 1.2f, 1.2f);  // OOB
+  candidate.resource_size_in_pixels = image_size;
+  candidate.transform = gfx::Transform();
 
-  // Not changing the DC layer state should not affect anything. Note that since
-  // CreateSharedImage is mocked, EnsureRootSurfaceAllocated will cause the test
-  // to fail if it calls CreateSharedImage unexpectedly.
-  output_device_->SetEnableDCLayers(false);
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
-  EnsureRootSurfaceAllocated();
+  SkiaOutputSurface::OverlayList overlays;
+  overlays.push_back(candidate);
 
-  // Check that switching DC layer state releases the root surface and allocated
-  // a DComp surface
-  output_device_->SetEnableDCLayers(true);
-  EXPECT_FALSE(output_device_->IsRootSurfaceAllocatedForTesting());
-  EXPECT_CALL(*test_shared_image_factory_,
-              CreateSharedImage(
-                  testing::_, testing::_, testing::_, testing::_, testing::_,
-                  testing::_, SkAlphaType::kPremul_SkAlphaType,
-                  gpu::SHARED_IMAGE_USAGE_DISPLAY_WRITE |
-                      gpu::SHARED_IMAGE_USAGE_SCANOUT |
-                      gpu::SHARED_IMAGE_USAGE_SCANOUT_DCOMP_SURFACE,
-                  testing::_));
-  EnsureRootSurfaceAllocated();
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
+  EXPECT_CALL(*presenter_, ScheduleDCLayers(_))
+      .WillOnce([](std::vector<gl::DCLayerOverlayParams> params) {
+        ASSERT_EQ(params.size(), 1u);
+        // The uv_rect is [-0.1, -0.1, 1.2, 1.2].
+        // Content rect in pixels would be [-10, -10, 120, 120].
+        // Clamped content rect should be [0, 0, 100, 100].
+        EXPECT_EQ(params[0].content_rect, gfx::RectF(0, 0, 100, 100));
+      });
 
-  // Not changing the DC layer state should not affect anything
-  output_device_->SetEnableDCLayers(true);
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
-  EnsureRootSurfaceAllocated();
-
-  // Check that we can switch back to a swap chain
-  output_device_->SetEnableDCLayers(false);
-  EXPECT_FALSE(output_device_->IsRootSurfaceAllocatedForTesting());
-  EXPECT_CALL(*test_shared_image_factory_,
-              CreateSharedImage(testing::_, testing::_, testing::_, testing::_,
-                                testing::_, testing::_,
-                                SkAlphaType::kPremul_SkAlphaType,
-                                gpu::SHARED_IMAGE_USAGE_DISPLAY_READ |
-                                    gpu::SHARED_IMAGE_USAGE_DISPLAY_WRITE |
-                                    gpu::SHARED_IMAGE_USAGE_SCANOUT,
-                                testing::_));
-  EnsureRootSurfaceAllocated();
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
+  output_device_->ScheduleOverlays(std::move(overlays));
 }
 
-// Check that Reshape only destroys the root surface when its parameters change.
-TEST_F(SkiaOutputDeviceDCompTest, Reshape) {
-  EXPECT_FALSE(output_device_->IsRootSurfaceAllocatedForTesting());
+TEST_F(SkiaOutputDeviceDCompTest, ClampsOutOfBoundsResourceSize) {
+  gfx::Size image_size(100, 100);
+  gpu::Mailbox mailbox = gpu::Mailbox::Generate();
+  output_device_->SetOverlayImageSize(mailbox, image_size);
 
-  Reshape(gfx::Size(100, 100), kRGBA_8888_SkColorType, true,
-          gfx::ColorSpace::CreateSRGB());
-  EXPECT_FALSE(output_device_->IsRootSurfaceAllocatedForTesting());
+  OverlayCandidate candidate;
+  candidate.mailbox = mailbox;
+  candidate.display_rect = gfx::RectF(0, 0, 100, 100);
+  candidate.uv_rect = gfx::RectF(0.0f, 0.0f, 1.0f, 1.0f);
+  candidate.resource_size_in_pixels = gfx::Size(150, 150);
+  candidate.transform = gfx::Transform();
 
-  EnsureRootSurfaceAllocated();
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
+  SkiaOutputSurface::OverlayList overlays;
+  overlays.push_back(candidate);
 
-  // No parameters changed, root surface should remain allocated
-  Reshape(gfx::Size(100, 100), kRGBA_8888_SkColorType, true,
-          gfx::ColorSpace::CreateSRGB());
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
+  EXPECT_CALL(*presenter_, ScheduleDCLayers(_))
+      .WillOnce([](std::vector<gl::DCLayerOverlayParams> params) {
+        ASSERT_EQ(params.size(), 1u);
+        // ScaleRect gives [0, 0, 150, 150].
+        // Clamped to image size [100, 100] gives [0, 0, 100, 100].
+        EXPECT_EQ(params[0].content_rect, gfx::RectF(0, 0, 100, 100));
+      });
 
-  // A change in parameters results in the root surface being deallocated
-  Reshape(gfx::Size(100, 100), kRGBA_8888_SkColorType, false,
-          gfx::ColorSpace::CreateSRGB());
-  EXPECT_FALSE(output_device_->IsRootSurfaceAllocatedForTesting());
-  EnsureRootSurfaceAllocated();
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
+  output_device_->ScheduleOverlays(std::move(overlays));
 }
 
-// Check that we fallback to a swap chain when we want a DComp surface with an
-// unsupported pixel format.
-TEST_F(SkiaOutputDeviceDCompTest, HDR10ColorSpaceForcesSwapChain) {
-  output_device_->SetEnableDCLayers(true);
-  Reshape(gfx::Size(100, 100), kRGBA_1010102_SkColorType, true,
-          gfx::ColorSpace::CreateHDR10());
-  EXPECT_CALL(*test_shared_image_factory_,
-              CreateSharedImage(testing::_, testing::_, testing::_, testing::_,
-                                testing::_, testing::_,
-                                SkAlphaType::kPremul_SkAlphaType,
-                                gpu::SHARED_IMAGE_USAGE_DISPLAY_READ |
-                                    gpu::SHARED_IMAGE_USAGE_DISPLAY_WRITE |
-                                    gpu::SHARED_IMAGE_USAGE_SCANOUT,
-                                testing::_));
-  EXPECT_FALSE(output_device_->IsRootSurfaceAllocatedForTesting());
-  EnsureRootSurfaceAllocated();
-  EXPECT_TRUE(output_device_->IsRootSurfaceAllocatedForTesting());
-}
-
+}  // namespace
 }  // namespace viz

@@ -1,7 +1,7 @@
 # Service Worker OWNERS
 #
 # This file also covers ownership of the following:
-#   //chrome/browser/chrome_service_worker_browsertest.cc
+#   //chrome/browser/service_worker/
 #   //components/services/storage/service_worker/
 #   //content/browser/resources/service_worker/
 #   //content/renderer/service_worker/
@@ -16,12 +16,16 @@
 #   //third_party/blink/renderer/modules/service_worker/
 #   //third_party/blink/web_tests/external/wpt/service-workers/
 
-bashi@chromium.org
 mek@chromium.org
 nhiroki@chromium.org
-wanderview@chromium.org
+sisidovski@chromium.org
+wanderview@meta.com
 yyanagisawa@chromium.org
 
 # per-file rules:
 per-file *_type_converter*.*=set noparent
 per-file *_type_converter*.*=file://ipc/SECURITY_OWNERS
+per-file service_worker_hid_*=file://content/browser/hid/OWNERS
+per-file service_worker_device_*=file://content/browser/hid/OWNERS
+per-file service_worker_usb_*=file://content/browser/usb/OWNERS
+per-file service_worker_device_*=file://content/browser/usb/OWNERS

@@ -6,425 +6,431 @@
 
 #include <utility>
 
+#include "base/time/time.h"
+#include "base/unguessable_token.h"
+#include "media/media_buildflags.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_codec_specifics_vp_8.h"
-#include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_decode_target_indication.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_encoded_video_frame_init.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_encoded_video_frame_metadata.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_encoded_video_frame_options.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_encoded_video_frame_type.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
+#include "third_party/blink/renderer/modules/peerconnection/peer_connection_util.h"
 #include "third_party/blink/renderer/modules/peerconnection/rtc_encoded_video_frame_delegate.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "third_party/webrtc/api/frame_transformer_factory.h"
 #include "third_party/webrtc/api/frame_transformer_interface.h"
+#include "third_party/webrtc/api/units/timestamp.h"
+#include "third_party/webrtc/api/video/video_frame_metadata.h"
+#include "third_party/webrtc/api/video/video_frame_type.h"
+#include "third_party/webrtc/api/video_codecs/video_codec.h"
 
 namespace blink {
 
-namespace {
-
 // Allow all fields to be set when calling RTCEncodedVideoFrame.setMetadata.
 BASE_FEATURE(kAllowRTCEncodedVideoFrameSetMetadataAllFields,
-             "AllowRTCEncodedVideoFrameSetMetadataAllFields",
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-V8RTCDecodeTargetIndication
-V8RTCDecodeTargetIndicationFromDecodeTargetIndication(
-    webrtc::DecodeTargetIndication decode_target_indication) {
-  switch (decode_target_indication) {
-    case webrtc::DecodeTargetIndication::kNotPresent:
-      return V8RTCDecodeTargetIndication(
-          V8RTCDecodeTargetIndication::Enum::kNotPresent);
-    case webrtc::DecodeTargetIndication::kDiscardable:
-      return V8RTCDecodeTargetIndication(
-          V8RTCDecodeTargetIndication::Enum::kDiscardable);
-    case webrtc::DecodeTargetIndication::kSwitch:
-      return V8RTCDecodeTargetIndication(
-          V8RTCDecodeTargetIndication::Enum::kSwitch);
-    case webrtc::DecodeTargetIndication::kRequired:
-      return V8RTCDecodeTargetIndication(
-          V8RTCDecodeTargetIndication::Enum::kRequired);
-    default:
-      NOTREACHED();
-  }
-}
-
-webrtc::DecodeTargetIndication
-DecodeTargetIndicationFromV8RTCDecodeTargetIndication(
-    V8RTCDecodeTargetIndication decode_target_indication) {
-  switch (decode_target_indication.AsEnum()) {
-    case V8RTCDecodeTargetIndication::Enum::kNotPresent:
-      return webrtc::DecodeTargetIndication::kNotPresent;
-    case V8RTCDecodeTargetIndication::Enum::kDiscardable:
-      return webrtc::DecodeTargetIndication::kDiscardable;
-    case V8RTCDecodeTargetIndication::Enum::kSwitch:
-      return webrtc::DecodeTargetIndication::kSwitch;
-    case V8RTCDecodeTargetIndication::Enum::kRequired:
-      return webrtc::DecodeTargetIndication::kRequired;
-    default:
-      NOTREACHED();
-  }
-}
-
-String RTCVideoCodecTypeFromVideoCodecType(
-    webrtc::VideoCodecType video_codec_type) {
-  switch (video_codec_type) {
-    case webrtc::VideoCodecType::kVideoCodecVP8:
-      return "vp8";
-    case webrtc::VideoCodecType::kVideoCodecVP9:
-      return "vp9";
-    case webrtc::VideoCodecType::kVideoCodecH264:
-      return "h264";
-    default:
-      return "";
-  }
-}
-
-webrtc::VideoCodecType VideoCodecTypeFromRTCVideoCodecType(
-    const String& video_codec_type) {
-  if (video_codec_type == "vp8") {
-    return webrtc::VideoCodecType::kVideoCodecVP8;
-  } else if (video_codec_type == "vp9") {
-    return webrtc::VideoCodecType::kVideoCodecVP9;
-  } else if (video_codec_type == "h264") {
-    return webrtc::VideoCodecType::kVideoCodecH264;
-  } else {
-    NOTREACHED();
-    return webrtc::VideoCodecType::kVideoCodecGeneric;
-  }
-}
-
-String RTCEncodedVideoFrameTypeFromVideoFrameType(
-    webrtc::VideoFrameType video_frame_type) {
-  switch (video_frame_type) {
-    case webrtc::VideoFrameType::kEmptyFrame:
-      return "empty";
-    case webrtc::VideoFrameType::kVideoFrameKey:
-      return "key";
-    case webrtc::VideoFrameType::kVideoFrameDelta:
-      return "delta";
-    default:
-      NOTREACHED();
-      return "";
-  }
-}
-
-webrtc::VideoFrameType VideoFrameTypeFromRTCEncodedVideoFrameType(
-    const String& video_frame_type) {
-  if (video_frame_type == "empty") {
-    return webrtc::VideoFrameType::kEmptyFrame;
-  } else if (video_frame_type == "key") {
-    return webrtc::VideoFrameType::kVideoFrameKey;
-  } else if (video_frame_type == "delta") {
-    return webrtc::VideoFrameType::kVideoFrameDelta;
-  } else {
-    NOTREACHED();
-    return webrtc::VideoFrameType::kEmptyFrame;
-  }
-}
-
-bool IsAllowedCodecSpecificsVP8Change(
-    const RTCCodecSpecificsVP8* original_vp8_specifics,
-    const RTCCodecSpecificsVP8* vp8_specifics) {
-  if ((original_vp8_specifics == nullptr) != (vp8_specifics == nullptr)) {
-    return false;
-  }
-  return vp8_specifics->beginningOfPartition() ==
-             original_vp8_specifics->beginningOfPartition() &&
-         vp8_specifics->keyIdx() == original_vp8_specifics->keyIdx() &&
-         vp8_specifics->layerSync() == original_vp8_specifics->layerSync() &&
-         vp8_specifics->nonReference() ==
-             original_vp8_specifics->nonReference() &&
-         vp8_specifics->partitionId() ==
-             original_vp8_specifics->partitionId() &&
-         vp8_specifics->pictureId() == original_vp8_specifics->pictureId() &&
-         vp8_specifics->temporalIdx() ==
-             original_vp8_specifics->temporalIdx() &&
-         vp8_specifics->tl0PicIdx() == original_vp8_specifics->tl0PicIdx();
-}
-
-void SetCodecSpecificsVP8(webrtc::VideoFrameMetadata& webrtc_metadata,
-                          const RTCEncodedVideoFrameMetadata* original_metadata,
-                          const RTCEncodedVideoFrameMetadata* metadata,
-                          ExceptionState& exception_state) {
-  RTCCodecSpecificsVP8* vp8_specifics = metadata->codecSpecifics();
-  if (!vp8_specifics->hasNonReference() || !vp8_specifics->hasPictureId() ||
-      !vp8_specifics->hasTl0PicIdx() || !vp8_specifics->hasTemporalIdx() ||
-      !vp8_specifics->hasLayerSync() || !vp8_specifics->hasKeyIdx() ||
-      !vp8_specifics->hasPartitionId() ||
-      !vp8_specifics->hasBeginningOfPartition()) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kInvalidModificationError,
-        "Member(s) missing in RTCCodecSpecificsVP8.");
-    return;
-  }
-  RTCCodecSpecificsVP8* original_vp8_specifics =
-      original_metadata->hasCodecSpecifics()
-          ? original_metadata->codecSpecifics()
-          : nullptr;
-  if (!IsAllowedCodecSpecificsVP8Change(original_vp8_specifics,
-                                        vp8_specifics) &&
-      !base::FeatureList::IsEnabled(
-          kAllowRTCEncodedVideoFrameSetMetadataAllFields)) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kInvalidModificationError,
-        "Invalid modification of RTCCodecSpecificsVP8.");
-    return;
-  }
-  webrtc::RTPVideoHeaderVP8 webrtc_vp8_specifics;
-  webrtc_vp8_specifics.nonReference = vp8_specifics->nonReference();
-  webrtc_vp8_specifics.pictureId = vp8_specifics->pictureId();
-  webrtc_vp8_specifics.tl0PicIdx = vp8_specifics->tl0PicIdx();
-  webrtc_vp8_specifics.temporalIdx = vp8_specifics->temporalIdx();
-  webrtc_vp8_specifics.layerSync = vp8_specifics->layerSync();
-  webrtc_vp8_specifics.keyIdx = vp8_specifics->keyIdx();
-  webrtc_vp8_specifics.partitionId = vp8_specifics->partitionId();
-  webrtc_vp8_specifics.beginningOfPartition =
-      vp8_specifics->beginningOfPartition();
-  webrtc_metadata.SetRTPVideoHeaderCodecSpecifics(webrtc_vp8_specifics);
-}
+namespace {
+constexpr size_t kMaxNumDependencies = 8;
 
 bool IsAllowedSetMetadataChange(
     const RTCEncodedVideoFrameMetadata* original_metadata,
     const RTCEncodedVideoFrameMetadata* metadata) {
-  return metadata->contributingSources() ==
-             original_metadata->contributingSources() &&
-         (metadata->hasFrameId() == original_metadata->hasFrameId() &&
-          (metadata->hasFrameId()
-               ? metadata->frameId() == original_metadata->frameId()
-               : true)) &&
-         metadata->height() == original_metadata->height() &&
-         metadata->isLastFrameInPicture() ==
-             original_metadata->isLastFrameInPicture() &&
-         metadata->payloadType() == original_metadata->payloadType() &&
-         metadata->simulcastIdx() == original_metadata->simulcastIdx() &&
-         metadata->spatialIndex() == original_metadata->spatialIndex() &&
-         metadata->synchronizationSource() ==
-             original_metadata->synchronizationSource() &&
-         metadata->temporalIndex() == original_metadata->temporalIndex() &&
-         metadata->frameType() == original_metadata->frameType() &&
-         metadata->width() == original_metadata->width() &&
-         metadata->dependencies() == original_metadata->dependencies() &&
-         metadata->decodeTargetIndications() ==
-             original_metadata->decodeTargetIndications();
+  if (metadata->width() != original_metadata->width() ||
+      metadata->height() != original_metadata->height() ||
+      metadata->spatialIndex() != original_metadata->spatialIndex() ||
+      metadata->temporalIndex() != original_metadata->temporalIndex()) {
+    return false;
+  }
+
+  // It is possible to not have the RTP metadata values set. This condition
+  // checks if the value exists and if it does, it should be the same.
+  if ((metadata->hasSynchronizationSource() !=
+           original_metadata->hasSynchronizationSource() ||
+       (metadata->hasSynchronizationSource()
+            ? metadata->synchronizationSource() !=
+                  original_metadata->synchronizationSource()
+            : false)) ||
+      (metadata->hasContributingSources() !=
+           original_metadata->hasContributingSources() ||
+       (metadata->hasContributingSources()
+            ? metadata->contributingSources() !=
+                  original_metadata->contributingSources()
+            : false))) {
+    return false;
+  }
+  return true;
+}
+
+base::expected<void, String> ValidateMetadata(
+    const RTCEncodedVideoFrameMetadata* metadata) {
+  if (!metadata->hasWidth() || !metadata->hasHeight() ||
+      !metadata->hasSpatialIndex() || !metadata->hasTemporalIndex() ||
+      !metadata->hasRtpTimestamp()) {
+    return base::unexpected("new metadata has member(s) missing.");
+  }
+
+  if (!metadata->hasFrameId() && metadata->hasDependencies() &&
+      !metadata->dependencies().empty()) {
+    return base::unexpected(
+        "new metadata has frameID missing, but has dependencies");
+  }
+  if (!metadata->hasDependencies()) {
+    return base::ok();
+  }
+
+  // Ensure there are at most 8 deps. Enforced in WebRTC's
+  // RtpGenericFrameDescriptor::AddFrameDependencyDiff().
+  if (metadata->dependencies().size() > kMaxNumDependencies) {
+    return base::unexpected("new metadata has too many dependencies.");
+  }
+  // Require deps to all be before frame_id, but within 2^14 of it. Enforced in
+  // WebRTC by a DCHECK in RtpGenericFrameDescriptor::AddFrameDependencyDiff().
+  for (const int64_t dep : metadata->dependencies()) {
+    if ((dep >= metadata->frameId()) ||
+        ((metadata->frameId() - dep) >= (1 << 14))) {
+      return base::unexpected("new metadata has invalid frame dependencies.");
+    }
+  }
+
+  return base::ok();
 }
 
 }  // namespace
 
+webrtc::VideoCodecType RTCEncodedVideoFrame::StringToVideoCodecType(
+    const String& mime_type) {
+  String lower_mime_type = mime_type.ToAsciiLower();
+  if (lower_mime_type.contains("vp8")) {
+    return webrtc::kVideoCodecVP8;
+  }
+  if (lower_mime_type.contains("vp9")) {
+    return webrtc::kVideoCodecVP9;
+  }
+#if BUILDFLAG(USE_PROPRIETARY_CODECS)
+  if (lower_mime_type.contains("h264") || lower_mime_type.contains("avc1") ||
+      lower_mime_type.contains("avc3")) {
+    return webrtc::kVideoCodecH264;
+  }
+#endif
+#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+  if (lower_mime_type.contains("h265") || lower_mime_type.contains("hvc1") ||
+      lower_mime_type.contains("hev1")) {
+    return webrtc::kVideoCodecH265;
+  }
+#endif
+  // TODO(crbug.com/40923648): Remove the wrong AV1 codecs string, "av1", once
+  // we confirm nobody uses this in product.
+  if (lower_mime_type.contains("av1") || lower_mime_type.contains("av01")) {
+    return webrtc::kVideoCodecAV1;
+  }
+  return webrtc::kVideoCodecGeneric;
+}
+
+RTCEncodedVideoFrame* RTCEncodedVideoFrame::Create(
+    ExecutionContext* context,
+    RTCEncodedVideoFrame* original_frame,
+    ExceptionState& exception_state) {
+  return RTCEncodedVideoFrame::Create(context, original_frame, nullptr,
+                                      exception_state);
+}
+
+RTCEncodedVideoFrame* RTCEncodedVideoFrame::Create(
+    ExecutionContext* context,
+    RTCEncodedVideoFrame* original_frame,
+    const RTCEncodedVideoFrameOptions* options_dict,
+    ExceptionState& exception_state) {
+  RTCEncodedVideoFrame* new_frame;
+  if (original_frame) {
+    new_frame = MakeGarbageCollected<RTCEncodedVideoFrame>(
+        original_frame->Delegate()->CloneWebRtcFrame());
+  } else {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidAccessError,
+        "Cannot create a new VideoFrame from an empty VideoFrame");
+    return nullptr;
+  }
+  if (options_dict && options_dict->hasMetadata()) {
+    base::expected<void, String> set_metadata =
+        new_frame->SetMetadata(context, options_dict->metadata());
+    if (!set_metadata.has_value()) {
+      exception_state.ThrowDOMException(
+          DOMExceptionCode::kInvalidModificationError,
+          StrCat({"Cannot create a new VideoFrame: ", set_metadata.error()}));
+      return nullptr;
+    }
+  }
+  return new_frame;
+}
+
+RTCEncodedVideoFrame* RTCEncodedVideoFrame::Create(
+    ExecutionContext* context,
+    const RTCEncodedVideoFrameInit* init,
+    ExceptionState& exception_state) {
+  DOMArrayBuffer* payload_data_buffer = init->data();
+  base::span<uint8_t> buffer_span = payload_data_buffer->ByteSpan();
+
+  auto frame_type = webrtc::VideoFrameType::kEmptyFrame;
+  if (init->type().AsEnum() == V8RTCEncodedVideoFrameType::Enum::kKey) {
+    frame_type = webrtc::VideoFrameType::kVideoFrameKey;
+  } else if (init->type().AsEnum() ==
+             V8RTCEncodedVideoFrameType::Enum::kDelta) {
+    frame_type = webrtc::VideoFrameType::kVideoFrameDelta;
+  } else {
+    exception_state.ThrowTypeError("Invalid frame type");
+    return nullptr;
+  }
+
+  uint8_t payload_type = init->payloadType();
+  uint32_t rtp_timestamp_without_offset = init->rtpTimestampWithoutOffset();
+
+  std::optional<int64_t> absolute_capture_timestamp_ms;
+  if (init->hasCaptureTime()) {
+    DOMHighResTimeStamp dom_capture_time = init->captureTime();
+    DOMHighResTimeStamp dom_now =
+        RTCTimeStampFromTimeTicks(context, base::TimeTicks::Now());
+    if (dom_capture_time > dom_now) {
+      exception_state.ThrowRangeError("captureTime cannot be in the future.");
+      return nullptr;
+    }
+    base::TimeDelta absolute_capture_timestamp =
+        RTCEncodedFrameTimestampToCaptureTime(
+            context, dom_capture_time, CaptureTimeInfo::ClockType::kTimeTicks);
+    absolute_capture_timestamp_ms = absolute_capture_timestamp.InMilliseconds();
+  }
+
+  std::vector<uint32_t> csrcs(init->contributingSources().begin(),
+                              init->contributingSources().end());
+
+  webrtc::VideoCodecType codec_type = StringToVideoCodecType(init->mimeType());
+
+  std::optional<webrtc::Timestamp> presentation_timestamp;
+  if (init->hasTimestamp()) {
+    presentation_timestamp = webrtc::Timestamp::Micros(init->timestamp());
+  }
+
+  uint16_t width = init->width();
+  if (width == 0) {
+    exception_state.ThrowRangeError("width must be greater than 0.");
+    return nullptr;
+  }
+  uint16_t height = init->height();
+  if (height == 0) {
+    exception_state.ThrowRangeError("height must be greater than 0.");
+    return nullptr;
+  }
+
+  return MakeGarbageCollected<RTCEncodedVideoFrame>(
+      webrtc::CreateOutgoingVideoFrame(
+          frame_type, payload_type, rtp_timestamp_without_offset, buffer_span,
+          absolute_capture_timestamp_ms, csrcs, codec_type,
+          presentation_timestamp, width, height));
+}
+
 RTCEncodedVideoFrame::RTCEncodedVideoFrame(
     std::unique_ptr<webrtc::TransformableVideoFrameInterface> webrtc_frame)
+    : RTCEncodedVideoFrame(std::move(webrtc_frame),
+                           base::UnguessableToken::Null(),
+                           0) {}
+
+RTCEncodedVideoFrame::RTCEncodedVideoFrame(
+    std::unique_ptr<webrtc::TransformableVideoFrameInterface> webrtc_frame,
+    base::UnguessableToken owner_id,
+    int64_t counter)
     : delegate_(base::MakeRefCounted<RTCEncodedVideoFrameDelegate>(
-          std::move(webrtc_frame))) {}
+          std::move(webrtc_frame))),
+      owner_id_(owner_id),
+      counter_(counter) {}
 
 RTCEncodedVideoFrame::RTCEncodedVideoFrame(
     scoped_refptr<RTCEncodedVideoFrameDelegate> delegate)
-    : delegate_(std::move(delegate)) {}
+    : RTCEncodedVideoFrame(delegate->CloneWebRtcFrame()) {}
 
-String RTCEncodedVideoFrame::type() const {
-  return delegate_->Type();
+V8RTCEncodedVideoFrameType RTCEncodedVideoFrame::type() const {
+  return V8RTCEncodedVideoFrameType(delegate_->Type());
 }
 
 uint32_t RTCEncodedVideoFrame::timestamp() const {
-  return delegate_->Timestamp();
+  return delegate_->RtpTimestamp().value_or(0);
 }
 
-DOMArrayBuffer* RTCEncodedVideoFrame::data() const {
-  if (!frame_data_)
-    frame_data_ = delegate_->CreateDataBuffer();
-  return frame_data_;
+DOMArrayBuffer* RTCEncodedVideoFrame::data(ExecutionContext* context) const {
+  if (!frame_data_) {
+    frame_data_ = delegate_->CreateDataBuffer(context->GetIsolate());
+  }
+  return frame_data_.Get();
 }
 
-RTCEncodedVideoFrameMetadata* RTCEncodedVideoFrame::getMetadata() const {
+RTCEncodedVideoFrameMetadata* RTCEncodedVideoFrame::getMetadata(
+    ExecutionContext* context) const {
   RTCEncodedVideoFrameMetadata* metadata =
       RTCEncodedVideoFrameMetadata::Create();
   if (delegate_->PayloadType()) {
     metadata->setPayloadType(*delegate_->PayloadType());
   }
-  const auto* webrtc_metadata = delegate_->GetMetadata();
-  if (!webrtc_metadata)
+  if (delegate_->MimeType()) {
+    metadata->setMimeType(String::FromUtf8(*delegate_->MimeType()));
+  }
+
+  if (RuntimeEnabledFeatures::RTCEncodedVideoFrameAdditionalMetadataEnabled()) {
+    if (delegate_->PresentationTimestamp()) {
+      metadata->setTimestamp(delegate_->PresentationTimestamp()->us());
+    }
+  }
+
+  const std::optional<webrtc::VideoFrameMetadata> webrtc_metadata =
+      delegate_->GetMetadata();
+  if (!webrtc_metadata) {
     return metadata;
+  }
 
   metadata->setSynchronizationSource(webrtc_metadata->GetSsrc());
+  Vector<uint32_t> csrcs;
+  for (uint32_t csrc : webrtc_metadata->GetCsrcs()) {
+    csrcs.push_back(csrc);
+  }
+  metadata->setContributingSources(csrcs);
 
-  if (webrtc_metadata->GetFrameId())
+  if (webrtc_metadata->GetFrameId()) {
     metadata->setFrameId(*webrtc_metadata->GetFrameId());
+  }
 
-  Vector<int64_t> dependencies;
-  for (const auto& dependency : webrtc_metadata->GetFrameDependencies())
-    dependencies.push_back(dependency);
-  metadata->setDependencies(dependencies);
+  if (auto webrtc_deps = webrtc_metadata->GetDependencies()) {
+    Vector<int64_t> dependencies;
+    dependencies.append_range(*webrtc_deps);
+    metadata->setDependencies(std::move(dependencies));
+  }
   metadata->setWidth(webrtc_metadata->GetWidth());
   metadata->setHeight(webrtc_metadata->GetHeight());
   metadata->setSpatialIndex(webrtc_metadata->GetSpatialIndex());
   metadata->setTemporalIndex(webrtc_metadata->GetTemporalIndex());
-  if (RuntimeEnabledFeatures::RTCEncodedVideoFrameAdditionalMetadataEnabled()) {
-    Vector<V8RTCDecodeTargetIndication> decode_target_indications;
-    for (const auto& decode_target_indication :
-         webrtc_metadata->GetDecodeTargetIndications()) {
-      decode_target_indications.push_back(
-          V8RTCDecodeTargetIndicationFromDecodeTargetIndication(
-              decode_target_indication));
-    }
-    metadata->setDecodeTargetIndications(decode_target_indications);
-    metadata->setIsLastFrameInPicture(
-        webrtc_metadata->GetIsLastFrameInPicture());
-    metadata->setSimulcastIdx(webrtc_metadata->GetSimulcastIdx());
-    String codec =
-        RTCVideoCodecTypeFromVideoCodecType(webrtc_metadata->GetCodec());
-    if (!codec.empty()) {
-      metadata->setCodec(codec);
-    } else {
-      LOG(ERROR) << "Unrecognized RTCVideoCodecType "
-                 << webrtc_metadata->GetCodec();
-    }
-    switch (webrtc_metadata->GetCodec()) {
-      case webrtc::VideoCodecType::kVideoCodecVP8: {
-        const webrtc::RTPVideoHeaderVP8& webrtc_vp8_specifics =
-            absl::get<webrtc::RTPVideoHeaderVP8>(
-                webrtc_metadata->GetRTPVideoHeaderCodecSpecifics());
-        RTCCodecSpecificsVP8* vp8_specifics = RTCCodecSpecificsVP8::Create();
-        vp8_specifics->setNonReference(webrtc_vp8_specifics.nonReference);
-        vp8_specifics->setPictureId(webrtc_vp8_specifics.pictureId);
-        vp8_specifics->setTl0PicIdx(webrtc_vp8_specifics.tl0PicIdx);
-        vp8_specifics->setTemporalIdx(webrtc_vp8_specifics.temporalIdx);
-        vp8_specifics->setLayerSync(webrtc_vp8_specifics.layerSync);
-        vp8_specifics->setKeyIdx(webrtc_vp8_specifics.keyIdx);
-        vp8_specifics->setPartitionId(webrtc_vp8_specifics.partitionId);
-        vp8_specifics->setBeginningOfPartition(
-            webrtc_vp8_specifics.beginningOfPartition);
-        metadata->setCodecSpecifics(vp8_specifics);
-        break;
-      }
-      default:
-        // TODO(https://crbug.com/webrtc/14709): Support more codecs.
-        LOG(ERROR) << "Unsupported RTCCodecSpecifics "
-                   << webrtc_metadata->GetCodec();
-        break;
-    }
-
-    metadata->setFrameType(RTCEncodedVideoFrameTypeFromVideoFrameType(
-        webrtc_metadata->GetFrameType()));
-
-    Vector<uint32_t> csrcs;
-    for (uint32_t csrc : webrtc_metadata->GetCsrcs()) {
-      csrcs.push_back(csrc);
-    }
-    metadata->setContributingSources(csrcs);
+  if (delegate_->RtpTimestamp().has_value()) {
+    metadata->setRtpTimestamp(*delegate_->RtpTimestamp());
   }
+
+  if (RuntimeEnabledFeatures::RTCEncodedFrameTimestampsEnabled()) {
+    if (std::optional<base::TimeTicks> receive_time =
+            delegate_->ReceiveTime()) {
+      metadata->setReceiveTime(
+          RTCTimeStampFromTimeTicks(context, *receive_time));
+    }
+    if (std::optional<CaptureTimeInfo> capture_time_info =
+            delegate_->CaptureTime()) {
+      metadata->setCaptureTime(RTCEncodedFrameTimestampFromCaptureTimeInfo(
+          context, *capture_time_info));
+    }
+    if (std::optional<base::TimeDelta> sender_capture_time_offset =
+            delegate_->SenderCaptureTimeOffset()) {
+      metadata->setSenderCaptureTimeOffset(CalculateRTCEncodedFrameTimeDelta(
+          context, *sender_capture_time_offset));
+    }
+  }
+
   return metadata;
 }
 
-void RTCEncodedVideoFrame::setMetadata(RTCEncodedVideoFrameMetadata* metadata,
-                                       ExceptionState& exception_state) {
-  if (!metadata->hasDependencies() || !metadata->hasWidth() ||
-      !metadata->hasHeight() || !metadata->hasSpatialIndex() ||
-      !metadata->hasTemporalIndex() ||
-      !metadata->hasDecodeTargetIndications() ||
-      !metadata->hasIsLastFrameInPicture() || !metadata->hasSimulcastIdx() ||
-      !metadata->hasCodec() || !metadata->hasCodecSpecifics() ||
-      !metadata->hasSynchronizationSource()) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kInvalidModificationError,
-        "Member(s) missing in RTCEncodedVideoFrameMetadata.");
-    return;
+base::UnguessableToken RTCEncodedVideoFrame::OwnerId() {
+  return owner_id_;
+}
+int64_t RTCEncodedVideoFrame::Counter() {
+  return counter_;
+}
+
+base::expected<void, String> RTCEncodedVideoFrame::SetMetadata(
+    ExecutionContext* context,
+    const RTCEncodedVideoFrameMetadata* metadata) {
+  const std::optional<webrtc::VideoFrameMetadata> original_webrtc_metadata =
+      delegate_->GetMetadata();
+  if (!original_webrtc_metadata) {
+    return base::unexpected("underlying webrtc frame is an empty frame.");
   }
-  RTCEncodedVideoFrameMetadata* original_metadata = getMetadata();
+
+  base::expected<void, String> validate_metadata = ValidateMetadata(metadata);
+  if (!validate_metadata.has_value()) {
+    return validate_metadata;
+  }
+
+  RTCEncodedVideoFrameMetadata* original_metadata = getMetadata(context);
   if (!original_metadata) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kInvalidModificationError,
-        "Internal error when calling setMetadata.");
-    return;
+    return base::unexpected("internal error when calling getMetadata().");
   }
   if (!IsAllowedSetMetadataChange(original_metadata, metadata) &&
       !base::FeatureList::IsEnabled(
           kAllowRTCEncodedVideoFrameSetMetadataAllFields)) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kInvalidModificationError,
-        "Invalid modification of RTCEncodedVideoFrameMetadata.");
-    return;
+    return base::unexpected(
+        "invalid modification of RTCEncodedVideoFrameMetadata.");
   }
 
-  const auto* original_webrtc_metadata = delegate_->GetMetadata();
-  if (!original_metadata) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kInvalidModificationError,
-        "Internal error when calling setMetadata.");
-    return;
+  if ((metadata->hasPayloadType() != original_metadata->hasPayloadType()) ||
+      (metadata->hasPayloadType() &&
+       metadata->payloadType() != original_metadata->payloadType())) {
+    return base::unexpected(
+        "invalid modification of payloadType in RTCEncodedVideoFrameMetadata.");
   }
+
   // Initialize the new metadata from original_metadata to account for fields
   // not part of RTCEncodedVideoFrameMetadata.
   webrtc::VideoFrameMetadata webrtc_metadata = *original_webrtc_metadata;
   if (metadata->hasFrameId()) {
     webrtc_metadata.SetFrameId(metadata->frameId());
   }
-  webrtc_metadata.SetFrameDependencies(metadata->dependencies());
+  if (metadata->hasDependencies()) {
+    webrtc_metadata.SetDependencies(metadata->dependencies());
+  }
   webrtc_metadata.SetWidth(metadata->width());
   webrtc_metadata.SetHeight(metadata->height());
   webrtc_metadata.SetSpatialIndex(metadata->spatialIndex());
   webrtc_metadata.SetTemporalIndex(metadata->temporalIndex());
-  std::vector<webrtc::DecodeTargetIndication> decode_target_indications;
-  for (const auto& decode_target_indication :
-       metadata->decodeTargetIndications()) {
-    decode_target_indications.push_back(
-        DecodeTargetIndicationFromV8RTCDecodeTargetIndication(
-            decode_target_indication));
-  }
-  webrtc_metadata.SetDecodeTargetIndications(decode_target_indications);
-  webrtc_metadata.SetIsLastFrameInPicture(metadata->isLastFrameInPicture());
-  webrtc_metadata.SetSimulcastIdx(metadata->simulcastIdx());
-  webrtc::VideoCodecType codec =
-      VideoCodecTypeFromRTCVideoCodecType(metadata->codec());
-  webrtc_metadata.SetFrameType(
-      VideoFrameTypeFromRTCEncodedVideoFrameType(metadata->frameType()));
   webrtc_metadata.SetSsrc(metadata->synchronizationSource());
 
-  webrtc_metadata.SetCodec(codec);
-  switch (codec) {
-    case webrtc::VideoCodecType::kVideoCodecVP8: {
-      SetCodecSpecificsVP8(webrtc_metadata, original_metadata, metadata,
-                           exception_state);
-      if (exception_state.HadException()) {
-        return;
-      }
-      break;
+  if (metadata->hasContributingSources()) {
+    std::vector<uint32_t> csrcs;
+    for (uint32_t csrc : metadata->contributingSources()) {
+      csrcs.push_back(csrc);
     }
-    default:
-      exception_state.ThrowDOMException(
-          DOMExceptionCode::kInvalidModificationError,
-          "setMetadata() does not support this codec.");
-      return;
+    webrtc_metadata.SetCsrcs(csrcs);
   }
 
-  std::vector<uint32_t> csrcs;
-  for (uint32_t csrc : metadata->contributingSources()) {
-    csrcs.push_back(csrc);
-  }
-  webrtc_metadata.SetCsrcs(csrcs);
-
-  delegate_->SetMetadata(webrtc_metadata);
+  return delegate_->SetMetadata(webrtc_metadata, metadata->rtpTimestamp());
 }
 
-void RTCEncodedVideoFrame::setData(DOMArrayBuffer* data) {
+void RTCEncodedVideoFrame::setMetadata(ExecutionContext* context,
+                                       RTCEncodedVideoFrameMetadata* metadata,
+                                       ExceptionState& exception_state) {
+  base::expected<void, String> set_metadata = SetMetadata(context, metadata);
+  if (!set_metadata.has_value()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidModificationError,
+        StrCat({"Cannot setMetadata: ", set_metadata.error()}));
+  }
+}
+
+void RTCEncodedVideoFrame::setData(ExecutionContext*, DOMArrayBuffer* data) {
   frame_data_ = data;
 }
 
-String RTCEncodedVideoFrame::toString() const {
-  if (!delegate_)
+String RTCEncodedVideoFrame::toString(ExecutionContext* context) const {
+  if (!delegate_) {
     return "empty";
+  }
 
   StringBuilder sb;
-  sb.Append("RTCEncodedVideoFrame{rtpTimestamp: ");
-  sb.AppendNumber(timestamp());
-  sb.Append(", size: ");
-  sb.AppendNumber(data()->ByteLength());
+  sb.Append("RTCEncodedVideoFrame{");
+  if (const std::optional<uint32_t> rtp_timestamp = delegate_->RtpTimestamp()) {
+    sb.Append("rtpTimestamp: ");
+    sb.AppendNumber(*rtp_timestamp);
+    sb.Append(", ");
+  }
+  sb.Append("size: ");
+  sb.AppendNumber(data(context)->ByteLength());
   sb.Append(" bytes, type: ");
-  sb.Append(type());
+  sb.Append(type().AsCStr());
   sb.Append("}");
   return sb.ToString();
-}
-
-RTCEncodedVideoFrame* RTCEncodedVideoFrame::clone() const {
-  std::unique_ptr<webrtc::TransformableVideoFrameInterface> new_webrtc_frame =
-      delegate_->CloneWebRtcFrame();
-  return MakeGarbageCollected<RTCEncodedVideoFrame>(
-      std::move(new_webrtc_frame));
 }
 
 void RTCEncodedVideoFrame::SyncDelegate() const {
@@ -438,9 +444,21 @@ scoped_refptr<RTCEncodedVideoFrameDelegate> RTCEncodedVideoFrame::Delegate()
 }
 
 std::unique_ptr<webrtc::TransformableVideoFrameInterface>
-RTCEncodedVideoFrame::PassWebRtcFrame() {
+RTCEncodedVideoFrame::PassWebRtcFrame(v8::Isolate* isolate,
+                                      bool detach_frame_data) {
   SyncDelegate();
-  return delegate_->PassWebRtcFrame();
+  auto transformable_video_frame = delegate_->PassWebRtcFrame();
+  // Detach the `frame_data_` ArrayBuffer if it's been created, as described in
+  // the transfer on step 5 of the encoded transform spec write steps
+  // (https://www.w3.org/TR/webrtc-encoded-transform/#stream-processing)
+  if (detach_frame_data && frame_data_ && !frame_data_->IsDetached()) {
+    CHECK(isolate);
+    ArrayBufferContents contents_to_drop;
+    NonThrowableExceptionState exception_state;
+    CHECK(frame_data_->Transfer(isolate, v8::Local<v8::Value>(),
+                                contents_to_drop, exception_state));
+  }
+  return transformable_video_frame;
 }
 
 void RTCEncodedVideoFrame::Trace(Visitor* visitor) const {

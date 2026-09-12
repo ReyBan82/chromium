@@ -24,8 +24,8 @@ class ShillPropertyUtilTest : public testing::Test {
 
 std::string ShillPropertyUtilTest::GetPolicyFromSource(
     const ::onc::ONCSource& onc_source) {
-  base::Value::Dict dictionary;
-  dictionary.Set(shill::kTypeProperty, shill::kTypeWifi);
+  auto dictionary =
+      base::DictValue().Set(shill::kTypeProperty, shill::kTypeWifi);
   shill_property_util::SetRandomMACPolicy(onc_source, &dictionary);
 
   return *dictionary.FindString(shill::kWifiRandomMACPolicy);
@@ -46,6 +46,28 @@ TEST_F(ShillPropertyUtilTest, MACRandomizationOff) {
             shill::kWifiRandomMacPolicyHardware);
   EXPECT_EQ(GetPolicyFromSource(::onc::ONCSource::ONC_SOURCE_UNKNOWN),
             shill::kWifiRandomMacPolicyHardware);
+}
+
+TEST_F(ShillPropertyUtilTest, IsLoggableShillProperty) {
+  EXPECT_TRUE(shill_property_util::IsLoggableShillProperty(
+      shill::kProviderHostProperty));
+  EXPECT_TRUE(
+      shill_property_util::IsLoggableShillProperty(shill::kTypeProperty));
+
+  EXPECT_FALSE(shill_property_util::IsLoggableShillProperty(
+      shill::kEapPasswordProperty));
+  EXPECT_FALSE(shill_property_util::IsLoggableShillProperty(
+      shill::kL2TPIPsecPskProperty));
+  EXPECT_FALSE(shill_property_util::IsLoggableShillProperty(
+      shill::kOpenVPNPasswordProperty));
+  EXPECT_FALSE(
+      shill_property_util::IsLoggableShillProperty(shill::kIKEv2PskProperty));
+  EXPECT_FALSE(shill_property_util::IsLoggableShillProperty(
+      shill::kIKEv2CaCertPemProperty));
+  EXPECT_FALSE(shill_property_util::IsLoggableShillProperty(
+      shill::kWireGuardPrivateKey));
+  EXPECT_FALSE(
+      shill_property_util::IsLoggableShillProperty(shill::kWireGuardPeers));
 }
 
 TEST_F(ShillPropertyUtilTest, MACRandomizationOn) {

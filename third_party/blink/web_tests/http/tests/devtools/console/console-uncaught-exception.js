@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
 (async function() {
   TestRunner.addResult(`Tests that uncaught exceptions are logged into console.Bug 47250.\n`);
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   await TestRunner.evaluateInPagePromise(`
@@ -16,15 +18,15 @@
       }
   `);
 
-  ConsoleTestRunner.addConsoleViewSniffer(addMessage, true);
   TestRunner.evaluateInPage('loadIframe()');
-  function addMessage(viewMessage) {
-    if (viewMessage.element().deepTextContent().indexOf('setTimeout') !== -1)
-      ConsoleTestRunner.expandConsoleMessages(onExpanded);
-  }
 
-  async function onExpanded() {
-    await ConsoleTestRunner.dumpConsoleMessages();
-    TestRunner.completeTest();
-  }
+  await new Promise(resolve => {
+    let count = 0;
+    ConsoleTestRunner.addConsoleViewSniffer(() => {
+      if (++count === 3) resolve();
+    }, true);
+  });
+
+  await ConsoleTestRunner.dumpConsoleMessages();
+  TestRunner.completeTest();
 })();

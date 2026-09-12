@@ -9,16 +9,43 @@
 namespace webapps {
 
 bool IsSuccess(InstallResultCode code) {
-  // TODO(crbug.com/1296447): enumerate all the constants instead of the default
-  // clause to prevent accidentally implicitly returning false on any newly
-  // added value.
   switch (code) {
     case InstallResultCode::kSuccessNewInstall:
     case InstallResultCode::kSuccessAlreadyInstalled:
     case InstallResultCode::kSuccessOfflineOnlyInstall:
     case InstallResultCode::kSuccessOfflineFallbackInstall:
       return true;
-    default:
+    case InstallResultCode::kGetWebAppInstallInfoFailed:
+    case InstallResultCode::kPreviouslyUninstalled:
+    case InstallResultCode::kWebContentsDestroyed:
+    case InstallResultCode::kWriteDataFailed:
+    case InstallResultCode::kUserInstallDeclined:
+    case InstallResultCode::kNotValidManifestForWebApp:
+    case InstallResultCode::kIntentToPlayStore:
+    case InstallResultCode::kWebAppDisabled:
+    case InstallResultCode::kInstallURLRedirected:
+    case InstallResultCode::kInstallURLLoadFailed:
+    case InstallResultCode::kExpectedAppIdCheckFailed:
+    case InstallResultCode::kInstallURLLoadTimeOut:
+    case InstallResultCode::kFailedPlaceholderUninstall:
+    case InstallResultCode::kNotInstallable:
+    case InstallResultCode::kApkWebAppInstallFailed:
+    case InstallResultCode::kCancelledOnWebAppProviderShuttingDown:
+    case InstallResultCode::kWebAppProviderNotReady:
+    case InstallResultCode::kInstallTaskDestroyed:
+    case InstallResultCode::kUpdateTaskFailed:
+    case InstallResultCode::kAppNotInRegistrarAfterCommit:
+    case InstallResultCode::kHaltedBySyncUninstall:
+    case InstallResultCode::kInstallURLInvalid:
+    case InstallResultCode::kIconDownloadingFailed:
+    case InstallResultCode::kCancelledDueToMainFrameNavigation:
+    case InstallResultCode::kNoValidIconsInManifest:
+    case InstallResultCode::kNoCustomManifestId:
+    case InstallResultCode::kManifestIdMismatch:
+    case InstallResultCode::kFallbackInstallUsingTrustedIcons:
+    case InstallResultCode::kNoValidMigrationSource:
+    case InstallResultCode::kInvalidManifestId:
+    case InstallResultCode::kInstallAlreadyInProgress:
       return false;
   }
 }
@@ -83,6 +110,22 @@ std::ostream& operator<<(std::ostream& os, InstallResultCode code) {
       return os << "kInstallURLInvalid";
     case InstallResultCode::kIconDownloadingFailed:
       return os << "kIconDownloadingFailed";
+    case InstallResultCode::kCancelledDueToMainFrameNavigation:
+      return os << "kCancelledDueToMainFrameNavigation";
+    case InstallResultCode::kNoValidIconsInManifest:
+      return os << "kNoValidIconsInManifest";
+    case InstallResultCode::kNoCustomManifestId:
+      return os << "kNoCustomManifestId";
+    case InstallResultCode::kManifestIdMismatch:
+      return os << "kManifestIdMismatch";
+    case InstallResultCode::kFallbackInstallUsingTrustedIcons:
+      return os << "kFallbackInstallUsingTrustedIcons";
+    case InstallResultCode::kNoValidMigrationSource:
+      return os << "kNoValidMigrationSource";
+    case InstallResultCode::kInvalidManifestId:
+      return os << "kInvalidManifestId";
+    case InstallResultCode::kInstallAlreadyInProgress:
+      return os << "kInstallAlreadyInProgress";
   }
 }
 

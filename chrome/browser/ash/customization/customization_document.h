@@ -8,19 +8,21 @@
 #include <stddef.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/functional/callback_forward.h"
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/singleton.h"
 #include "base/memory/weak_ptr.h"
-#include "base/time/time.h"
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
+class ApplicationLocaleStorage;
 class PrefRegistrySimple;
+class PrefService;
 class Profile;
 
 namespace base {
@@ -63,6 +65,10 @@ class CustomizationDocument {
   // Return true if the document was successfully fetched and parsed.
   bool IsReady() const { return root_.get(); }
 
+  void set_root_for_test(std::unique_ptr<base::DictValue> root) {
+    root_ = std::move(root);
+  }
+
  protected:
   explicit CustomizationDocument(const std::string& accepted_version);
 
@@ -73,7 +79,7 @@ class CustomizationDocument {
                                       const std::string& dictionary_name,
                                       const std::string& entry_name) const;
 
-  std::unique_ptr<base::Value::Dict> root_;
+  std::unique_ptr<base::DictValue> root_;
 
   // Value of the "version" attribute that is supported.
   // Otherwise config is not loaded.
@@ -143,21 +149,29 @@ class StartupCustomizationDocument : public CustomizationDocument {
 // User of the file should check IsReady before use it.
 class ServicesCustomizationDocument : public CustomizationDocument {
  public:
-  static ServicesCustomizationDocument* GetInstance();
+  static ServicesCustomizationDocument& GetInstance();
+
+  // `local_state` and `application_locale_storage` must be non-null and must
+  // outlive `this`.
+  // `url_loader_factory` must be non-null.
+  ServicesCustomizationDocument(
+      PrefService* local_state,
+      const ApplicationLocaleStorage* application_locale_storage,
+      scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory);
 
   ServicesCustomizationDocument(const ServicesCustomizationDocument&) = delete;
   ServicesCustomizationDocument& operator=(
       const ServicesCustomizationDocument&) = delete;
 
+  ~ServicesCustomizationDocument() override;
+
   // Registers preferences.
   static void RegisterPrefs(PrefRegistrySimple* registry);
   static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
 
-  static const char kManifestUrl[];
-
-  // Return true if the customization was applied. Customization is applied only
-  // once per machine.
-  static bool WasOOBECustomizationApplied();
+  // Template URL where to fetch OEM services customization manifest from.
+  static constexpr char kManifestUrl[] =
+      "https://ssl.gstatic.com/chrome/chromeos-customization/%s.json";
 
   // If customization has not been applied, start fetching and applying.
   void EnsureCustomizationApplied();
@@ -177,7 +191,7 @@ class ServicesCustomizationDocument : public CustomizationDocument {
   bool GetDefaultWallpaperUrl(GURL* out_url) const;
 
   // Returns list of default apps.
-  absl::optional<base::Value::Dict> GetDefaultApps() const;
+  std::optional<base::DictValue> GetDefaultApps() const;
 
   // Creates an extensions::ExternalLoader that will provide OEM default apps.
   // Cache of OEM default apps stored in profile preferences.
@@ -185,14 +199,6 @@ class ServicesCustomizationDocument : public CustomizationDocument {
 
   // Returns the name of the folder for OEM apps for given |locale|.
   std::string GetOemAppsFolderName(const std::string& locale) const;
-
-  // Initialize instance of ServicesCustomizationDocument for tests that will
-  // override singleton until ShutdownForTesting is called.
-  static void InitializeForTesting(
-      scoped_refptr<network::SharedURLLoaderFactory> factory);
-
-  // Remove instance of ServicesCustomizationDocument for tests.
-  static void ShutdownForTesting();
 
   // These methods are also called by WallpaperManager to get "global default"
   // customized wallpaper path (and to init default wallpaper path from it)
@@ -205,7 +211,6 @@ class ServicesCustomizationDocument : public CustomizationDocument {
   }
 
  private:
-  friend struct base::DefaultSingletonTraits<ServicesCustomizationDocument>;
   FRIEND_TEST_ALL_PREFIXES(CustomizationWallpaperDownloaderBrowserTest,
                            OEMWallpaperIsPresent);
   FRIEND_TEST_ALL_PREFIXES(CustomizationWallpaperDownloaderBrowserTest,
@@ -217,21 +222,10 @@ class ServicesCustomizationDocument : public CustomizationDocument {
   // Guard for a single application task (wallpaper downloading, for example).
   class ApplyingTask;
 
-  // C-tor for singleton construction.
-  ServicesCustomizationDocument();
-
-  // C-tor for test construction.
-  explicit ServicesCustomizationDocument(const std::string& manifest);
-
-  ~ServicesCustomizationDocument() override;
-
-  // Save applied state in machine settings.
-  static void SetApplied(bool val);
-
   // Overriden from CustomizationDocument:
   bool LoadManifestFromString(const std::string& manifest) override;
 
-  void OnSimpleLoaderComplete(std::unique_ptr<std::string> response_body);
+  void OnSimpleLoaderComplete(std::optional<std::string> response_body);
 
   // Initiate file fetching. Wait for online status.
   void StartFileFetch();
@@ -246,8 +240,8 @@ class ServicesCustomizationDocument : public CustomizationDocument {
   void OnManifestLoaded();
 
   // Returns list of default apps in ExternalProvider format.
-  static base::Value::Dict GetDefaultAppsInProviderFormat(
-      const base::Value::Dict& root);
+  static base::DictValue GetDefaultAppsInProviderFormat(
+      const base::DictValue& root);
 
   // Update cached manifest for |profile|.
   void UpdateCachedManifest(Profile* profile);
@@ -256,11 +250,11 @@ class ServicesCustomizationDocument : public CustomizationDocument {
   void OnCustomizationNotFound();
 
   // Set OEM apps folder name for AppListSyncableService for |profile|.
-  void SetOemFolderName(Profile* profile, const base::Value::Dict& root);
+  void SetOemFolderName(Profile* profile, const base::DictValue& root);
 
   // Returns the name of the folder for OEM apps for given |locale|.
   std::string GetOemAppsFolderNameImpl(const std::string& locale,
-                                       const base::Value::Dict& root) const;
+                                       const base::DictValue& root) const;
 
   // Start download of wallpaper image if needed.
   void StartOEMWallpaperDownload(const GURL& wallpaper_url,
@@ -292,6 +286,10 @@ class ServicesCustomizationDocument : public CustomizationDocument {
   // Mark task finished and check for "all customization applied".
   void ApplyingTaskFinished(bool success);
 
+  const raw_ref<PrefService> local_state_;
+  const raw_ref<const ApplicationLocaleStorage> application_locale_storage_;
+  const scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
+
   // Services customization manifest URL.
   GURL url_;
 
@@ -303,9 +301,6 @@ class ServicesCustomizationDocument : public CustomizationDocument {
 
   // Manifest fetch is already in progress.
   bool load_started_;
-
-  // Delay between checks for network online state.
-  base::TimeDelta network_delay_;
 
   // Known external loaders.
   ExternalLoaders external_loaders_;

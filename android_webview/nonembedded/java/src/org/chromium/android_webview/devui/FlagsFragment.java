@@ -41,7 +41,6 @@ import android.widget.TextView;
 import androidx.annotation.IntDef;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.annotation.VisibleForTesting;
 
 import org.chromium.android_webview.common.DeveloperModeUtils;
 import org.chromium.android_webview.common.Flag;
@@ -50,6 +49,7 @@ import org.chromium.android_webview.common.services.IDeveloperUiService;
 import org.chromium.android_webview.common.services.ServiceHelper;
 import org.chromium.android_webview.common.services.ServiceNames;
 import org.chromium.base.Log;
+import org.chromium.base.ResettersForTesting;
 import org.chromium.base.ThreadUtils;
 import org.chromium.base.metrics.RecordHistogram;
 
@@ -60,9 +60,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * A fragment to toggle experimental WebView flags/features.
- */
+/** A fragment to toggle experimental WebView flags/features. */
 @SuppressLint("SetTextI18n")
 public class FlagsFragment extends DevUiBaseFragment {
     private static final String TAG = "WebViewDevTools";
@@ -71,14 +69,11 @@ public class FlagsFragment extends DevUiBaseFragment {
     private static final String STATE_ENABLED = "Enabled";
     private static final String STATE_DISABLED = "Disabled";
     private static final String[] sBaseFeatureStates = {
-            STATE_DEFAULT,
-            STATE_ENABLED,
-            STATE_DISABLED,
+        STATE_DEFAULT, STATE_ENABLED, STATE_DISABLED,
     };
 
     private static final String[] sCommandLineStates = {
-            STATE_DEFAULT,
-            STATE_ENABLED,
+        STATE_DEFAULT, STATE_ENABLED,
     };
 
     private boolean mEnabled;
@@ -145,33 +140,59 @@ public class FlagsFragment extends DevUiBaseFragment {
         }
 
         Button resetFlagsButton = view.findViewById(R.id.reset_flags_button);
-        resetFlagsButton.setOnClickListener((View flagButton) -> { resetAllFlags(); });
+        resetFlagsButton.setOnClickListener(
+                (View flagButton) -> {
+                    resetAllFlags();
+                });
 
         mSearchBar = view.findViewById(R.id.flag_search_bar);
-        mSearchBar.addTextChangedListener(new TextWatcher() {
-            private boolean mPreviouslyHadText;
-            @Override
-            public void onTextChanged(CharSequence cs, int start, int before, int count) {
-                mListAdapter.getFilter().filter(cs);
-                boolean currentlyHasText = !cs.toString().isEmpty();
-                // As an optimization, only change the clear text button if the search bar just now
-                // became empty or non-empty.
-                if (mPreviouslyHadText != currentlyHasText) {
-                    setClearTextButtonEnabled(mSearchBar, currentlyHasText);
-                }
-                mPreviouslyHadText = currentlyHasText;
-            }
+        mSearchBar.addTextChangedListener(
+                new TextWatcher() {
+                    private boolean mPreviouslyHadText;
 
-            @Override
-            public void beforeTextChanged(CharSequence cs, int start, int count, int after) {}
+                    @Override
+                    public void onTextChanged(CharSequence cs, int start, int before, int count) {
+                        mListAdapter.getFilter().filter(cs);
+                        boolean currentlyHasText = !cs.toString().isEmpty();
+                        // As an optimization, only change the clear text button if the search bar
+                        // just now became empty or non-empty.
+                        if (mPreviouslyHadText != currentlyHasText) {
+                            setClearTextButtonEnabled(mSearchBar, currentlyHasText);
+                        }
+                        mPreviouslyHadText = currentlyHasText;
+                    }
 
-            @Override
-            public void afterTextChanged(Editable e) {}
-        });
+                    @Override
+                    public void beforeTextChanged(
+                            CharSequence cs, int start, int count, int after) {}
 
-        mSearchBar.setOnFocusChangeListener((View v, boolean hasFocus) -> {
-            if (!hasFocus) hideKeyboard(mContext, v);
-        });
+                    @Override
+                    public void afterTextChanged(Editable e) {}
+                });
+
+        mSearchBar.setOnFocusChangeListener(
+                (View v, boolean hasFocus) -> {
+                    if (!hasFocus) hideKeyboard(mContext, v);
+                });
+
+        if (isTV()) {
+            View navBarButton = activity.findViewById(R.id.navigation_flags_ui);
+            setupTvFocusOnCreated(flagsListView, resetFlagsButton, mSearchBar, navBarButton);
+        }
+    }
+
+    private void setupTvFocusOnCreated(
+            ListView flagsListView, Button resetFlagsButton, View searchBar, View navBarButton) {
+        if (shouldRequestFocus()) {
+            searchBar.requestFocus();
+        }
+        flagsListView.setItemsCanFocus(true);
+
+        // Without forcing this, the focus will focus on a random item in the list.
+        registerDownPressToFocusOnFirstItem(searchBar, flagsListView);
+        registerDownPressToFocusOnFirstItem(resetFlagsButton, flagsListView);
+
+        registerBackPressToNavBarCallback(navBarButton);
     }
 
     private static void hideKeyboard(Context context, View view) {
@@ -181,7 +202,7 @@ public class FlagsFragment extends DevUiBaseFragment {
     }
 
     private void setClearTextButtonEnabled(EditText editText, boolean enabled) {
-        int iconColor = getResources().getColor(R.color.navigation_unselected);
+        int iconColor = getContext().getColor(R.color.navigation_unselected);
         Drawable clearTextIcon = getContext().getDrawable(R.drawable.ic_clear_text);
         clearTextIcon.mutate();
         clearTextIcon.setColorFilter(new PorterDuffColorFilter(iconColor, PorterDuff.Mode.SRC_IN));
@@ -190,25 +211,29 @@ public class FlagsFragment extends DevUiBaseFragment {
         // start.
         Drawable[] compoundDrawables = editText.getCompoundDrawablesRelative();
         compoundDrawables[2] = enabled ? clearTextIcon : null;
-        editText.setCompoundDrawablesRelativeWithIntrinsicBounds(compoundDrawables[0],
-                compoundDrawables[1], compoundDrawables[2], compoundDrawables[3]);
+        editText.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                compoundDrawables[0],
+                compoundDrawables[1],
+                compoundDrawables[2],
+                compoundDrawables[3]);
 
         // Set (or remove) the onTouchListener
         if (enabled) {
-            editText.setOnTouchListener((View v, MotionEvent event) -> {
-                int x = (int) event.getX();
-                int iconStart = editText.getWidth() - clearTextIcon.getIntrinsicWidth();
-                int iconEnd = editText.getWidth();
+            editText.setOnTouchListener(
+                    (View v, MotionEvent event) -> {
+                        int x = (int) event.getX();
+                        int iconStart = editText.getWidth() - clearTextIcon.getIntrinsicWidth();
+                        int iconEnd = editText.getWidth();
 
-                boolean didTapIcon = x >= iconStart && x <= iconEnd;
-                if (didTapIcon) {
-                    if (event.getAction() == MotionEvent.ACTION_UP) {
-                        editText.setText("");
-                    }
-                    return true;
-                }
-                return false;
-            });
+                        boolean didTapIcon = x >= iconStart && x <= iconEnd;
+                        if (didTapIcon) {
+                            if (event.getAction() == MotionEvent.ACTION_UP) {
+                                editText.setText("");
+                            }
+                            return true;
+                        }
+                        return false;
+                    });
         } else {
             editText.setOnTouchListener(null);
         }
@@ -218,15 +243,16 @@ public class FlagsFragment extends DevUiBaseFragment {
      * Notifies the caller when ListView filtering is complete, in response to modifying the text in
      * {@code R.id.flag_search_bar}.
      */
-    @VisibleForTesting
     public static void setFilterListenerForTesting(@Nullable Runnable listener) {
         sFilterListener = listener;
+        ResettersForTesting.register(() -> sFilterListener = null);
     }
 
-    @VisibleForTesting
     public static void setFlagListForTesting(@NonNull Flag[] flagList) {
         ThreadUtils.assertOnUiThread();
+        var oldValue = sFlagList;
         sFlagList = flagList;
+        ResettersForTesting.register(() -> sFlagList = oldValue);
     }
 
     private void onFilterDone() {
@@ -256,19 +282,22 @@ public class FlagsFragment extends DevUiBaseFragment {
 
     private static int booleanToBaseFeatureState(Boolean b) {
         if (b == null) {
-            return /* STATE_DEFAULT */ 0;
+            return
+            /* STATE_DEFAULT= */ 0;
         } else if (b) {
-            return /* STATE_ENABLED */ 1;
+            return
+            /* STATE_ENABLED= */ 1;
         }
-        return /* STATE_DISABLED */ 2;
+        return
+        /* STATE_DISABLED= */ 2;
     }
 
     private static int booleanToCommandLineState(Boolean b) {
-        return Boolean.TRUE.equals(b) ? /* STATE_ENABLED */ 1 : /* STATE_DEFAULT */ 0;
+        return Boolean.TRUE.equals(b) ? /* STATE_ENABLED= */ 1 : /* STATE_DEFAULT= */ 0;
     }
 
     private class FlagStateSpinnerSelectedListener implements AdapterView.OnItemSelectedListener {
-        private Flag mFlag;
+        private final Flag mFlag;
 
         FlagStateSpinnerSelectedListener(Flag flag) {
             mFlag = flag;
@@ -339,7 +368,7 @@ public class FlagsFragment extends DevUiBaseFragment {
 
     private static class FlagQuery {
         // Lower-case words from the query. Never contains empty strings.
-        String[] mLowerCaseWords;
+        final String[] mLowerCaseWords;
 
         public FlagQuery(CharSequence chars) {
             String lowerCaseTrimmed = chars.toString().toLowerCase(Locale.getDefault()).trim();
@@ -388,7 +417,10 @@ public class FlagsFragment extends DevUiBaseFragment {
                     if (startIndex == -1) break;
                     int endIndex = startIndex + word.length();
 
-                    highlighted.setSpan(new BackgroundColorSpan(Color.YELLOW), startIndex, endIndex,
+                    highlighted.setSpan(
+                            new BackgroundColorSpan(Color.YELLOW),
+                            startIndex,
+                            endIndex,
                             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
 
                     fromIndex = endIndex;
@@ -398,9 +430,7 @@ public class FlagsFragment extends DevUiBaseFragment {
         }
     }
 
-    /**
-     * Adapter to create rows of toggleable Flags.
-     */
+    /** Adapter to create rows of toggleable Flags. */
     private class FlagsListAdapter extends ArrayAdapter<Flag> {
         private FlagQuery mQuery = new FlagQuery("");
         private List<Flag> mItems;
@@ -409,35 +439,40 @@ public class FlagsFragment extends DevUiBaseFragment {
         public FlagsListAdapter(Flag[] flagsAndWarningText) {
             super(mContext, 0);
             mItems = Arrays.asList(flagsAndWarningText);
-            mFilter = new Filter() {
-                @Override
-                protected FilterResults performFiltering(CharSequence constraint) {
-                    List<Flag> matches = new ArrayList<>();
+            mFilter =
+                    new Filter() {
+                        @Override
+                        protected FilterResults performFiltering(CharSequence constraint) {
+                            List<Flag> matches = new ArrayList<>();
 
-                    // Do not store in mQuery here, since this is run off the UI
-                    // thread.
-                    FlagQuery query = new FlagQuery(constraint);
-                    for (Flag flag : flagsAndWarningText) {
-                        if (query.match(flag)) matches.add(flag);
-                    }
+                            // Do not store in mQuery here, since this is run off the UI
+                            // thread.
+                            FlagQuery query = new FlagQuery(constraint);
+                            for (Flag flag : flagsAndWarningText) {
+                                if (query.match(flag)) matches.add(flag);
+                            }
 
-                    FilterResults filterResults = new FilterResults();
-                    filterResults.values = matches;
-                    filterResults.count = matches.size();
-                    return filterResults;
-                }
+                            FilterResults filterResults = new FilterResults();
+                            filterResults.values = matches;
+                            filterResults.count = matches.size();
+                            return filterResults;
+                        }
 
-                @Override
-                protected void publishResults(CharSequence constraint, FilterResults results) {
-                    mQuery = new FlagQuery(constraint);
-                    mItems = (List<Flag>) results.values;
-                    notifyDataSetChanged();
-                    onFilterDone();
-                }
-            };
+                        @Override
+                        protected void publishResults(
+                                CharSequence constraint, FilterResults results) {
+                            mQuery = new FlagQuery(constraint);
+                            // performFiltering() always stores a List<Flag> here.
+                            @SuppressWarnings("unchecked")
+                            List<Flag> matches = (List<Flag>) results.values;
+                            mItems = matches;
+                            notifyDataSetChanged();
+                            onFilterDone();
+                        }
+                    };
         }
 
-        private View getToggleableFlag(@NonNull Flag flag, View view, ViewGroup parent) {
+        private View getToggleableFlag(@NonNull Flag flag, View view, int position) {
             // If the the old view is already created then reuse it, else create a new one by layout
             // inflation.
             if (view == null) {
@@ -447,8 +482,9 @@ public class FlagsFragment extends DevUiBaseFragment {
             TextView flagName = view.findViewById(R.id.flag_name);
             SpannableString highlightedName = mQuery.highlight(flag.getName());
             if (flag.getEnabledStateValue() != null) {
-                flagName.setText(new SpannableStringBuilder(highlightedName)
-                                         .append("=" + flag.getEnabledStateValue()));
+                flagName.setText(
+                        new SpannableStringBuilder(highlightedName)
+                                .append("=" + flag.getEnabledStateValue()));
             } else {
                 flagName.setText(highlightedName);
             }
@@ -458,6 +494,10 @@ public class FlagsFragment extends DevUiBaseFragment {
 
             Spinner flagToggle = view.findViewById(R.id.flag_toggle);
             flagToggle.setEnabled(mEnabled);
+
+            if (isTV()) {
+                setupTvFocusForToggleableFlag(view, flagToggle, position);
+            }
 
             ArrayAdapter<String> adapter;
             if (flag.isBaseFeature()) {
@@ -483,7 +523,26 @@ public class FlagsFragment extends DevUiBaseFragment {
             return view;
         }
 
-        private View getWarningMessage(View view, ViewGroup parent) {
+        private void setupTvFocusForToggleableFlag(View view, Spinner flagToggle, int position) {
+            // Properties handled by styles in values-television/styles.xml:
+            // - view focusable/clickable
+            // - flagName/flagDescription/flagToggle not focusable
+            // - flagToggle clickable
+
+            view.setOnClickListener(
+                    v -> {
+                        // Because the flag view is focusable, user would perform click on the flag
+                        // view. We need to trigger the toggle when the flag view is clicked.
+                        flagToggle.post(() -> flagToggle.performClick());
+                    });
+            if (position == 0) {
+                view.setNextFocusUpId(R.id.flag_search_bar);
+            }
+            // Without this, the focus escape to the nav bar when pressing down on the last item.
+            preventFocusEscapeFromLastItem(view, position == getCount() - 1);
+        }
+
+        private View getWarningMessage(View view) {
             // If the the old view is already created then reuse it, else create a new one by layout
             // inflation.
             if (view == null) {
@@ -491,9 +550,14 @@ public class FlagsFragment extends DevUiBaseFragment {
             }
 
             TextView flagsDescriptionView = view.findViewById(R.id.flags_description);
-            flagsDescriptionView.setText("By enabling these features, you could "
-                    + "lose app data or compromise your security or privacy. Enabled features "
-                    + "apply to WebViews across all apps on the device.");
+            flagsDescriptionView.setText(
+                    "By enabling these features, you could lose app data or compromise your"
+                        + " security or privacy. Enabled features apply to WebViews across all apps"
+                        + " on the device.");
+
+            if (isTV()) {
+                view.setNextFocusUpId(R.id.flag_search_bar);
+            }
 
             return view;
         }
@@ -524,9 +588,9 @@ public class FlagsFragment extends DevUiBaseFragment {
         public View getView(int position, View view, ViewGroup parent) {
             Flag flag = getItem(position);
             if (getItemViewType(position) == LayoutType.WARNING_MESSAGE) {
-                return getWarningMessage(view, parent);
+                return getWarningMessage(view);
             } else {
-                return getToggleableFlag(flag, view, parent);
+                return getToggleableFlag(flag, view, position);
             }
         }
 
@@ -545,7 +609,7 @@ public class FlagsFragment extends DevUiBaseFragment {
      */
     private void formatListEntry(View toggleableFlag, int state) {
         TextView flagName = toggleableFlag.findViewById(R.id.flag_name);
-        if (state == /* STATE_DEFAULT */ 0) {
+        if (state == /* STATE_DEFAULT= */ 0) {
             // Unset the compound drawable.
             flagName.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, 0, 0);
         } else { // STATE_ENABLED or STATE_DISABLED

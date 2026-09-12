@@ -6,7 +6,7 @@
 #define CONTENT_BROWSER_DEVTOOLS_DEVTOOLS_TRACEABLE_SCREENSHOT_H_
 
 #include "base/atomicops.h"
-#include "base/trace_event/trace_event_impl.h"
+#include "base/trace_event/trace_arguments.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 
 namespace content {
@@ -14,7 +14,10 @@ namespace content {
 class DevToolsTraceableScreenshot
     : public base::trace_event::ConvertableToTraceFormat {
  public:
-  static constexpr int kMaximumNumberOfScreenshots = 450;
+  // Default maximum number of screenshots captured per tracing session.
+  // Callers can override this through the `screenshotMaxCount` parameter on
+  // `Tracing.start` (subject to clamping in the tracing handler).
+  static constexpr int kDefaultMaximumNumberOfScreenshots = 450;
 
   static base::subtle::Atomic32 GetNumberOfInstances();
 

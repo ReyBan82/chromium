@@ -7,7 +7,6 @@
 #include <utility>
 
 #include "base/check.h"
-#include "build/chromeos_buildflags.h"
 #include "components/payments/core/method_strings.h"
 #include "components/payments/core/native_error_strings.h"
 #include "components/payments/core/payer_data.h"
@@ -86,15 +85,10 @@ bool AndroidPaymentApp::CanPreselect() const {
 
 std::u16string AndroidPaymentApp::GetMissingInfoLabel() const {
   NOTREACHED();
-  return std::u16string();
 }
 
 bool AndroidPaymentApp::HasEnrolledInstrument() const {
   return true;
-}
-
-void AndroidPaymentApp::RecordUse() {
-  NOTIMPLEMENTED();
 }
 
 bool AndroidPaymentApp::NeedsInstallation() const {
@@ -149,7 +143,7 @@ bool AndroidPaymentApp::IsWaitingForPaymentDetailsUpdate() const {
 
 void AndroidPaymentApp::UpdateWith(
     mojom::PaymentRequestDetailsUpdatePtr details_update) {
-  // TODO(crbug.com/1022512): Support payment method, shipping address, and
+  // TODO(crbug.com/40106647): Support payment method, shipping address, and
   // shipping option change events.
 }
 
@@ -157,10 +151,10 @@ void AndroidPaymentApp::OnPaymentDetailsNotUpdated() {}
 
 void AndroidPaymentApp::AbortPaymentApp(
     base::OnceCallback<void(bool)> abort_callback) {
-  // Browser is closing or no payment app active, so no need to invoke a
-  // callback.
-  if (!communication_ || !payment_app_open_)
+  if (!communication_ || !payment_app_open_) {
+    std::move(abort_callback).Run(false);
     return;
+  }
 
   payment_app_open_ = false;
 
@@ -173,17 +167,18 @@ bool AndroidPaymentApp::IsPreferred() const {
   // available is the trusted web application (TWA) that launched this instance
   // of Chrome with a TWA specific payment method, so this app should be
   // preferred.
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-  NOTREACHED();
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   DCHECK_EQ(1U, GetAppMethodNames().size());
   DCHECK_EQ(methods::kGooglePlayBilling, *GetAppMethodNames().begin());
   return true;
+#else
+  NOTREACHED();
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void AndroidPaymentApp::OnPaymentAppResponse(
     base::WeakPtr<Delegate> delegate,
-    const absl::optional<std::string>& error_message,
+    const std::optional<std::string>& error_message,
     bool is_activity_result_ok,
     const std::string& payment_method_identifier,
     const std::string& stringified_details) {
@@ -192,12 +187,18 @@ void AndroidPaymentApp::OnPaymentAppResponse(
     return;
 
   if (error_message.has_value()) {
-    delegate->OnInstrumentDetailsError(error_message.value());
+    // TODO(crbug.com/473478138): Enable android payment apps to indicate
+    // internal error versus user abort.
+    delegate->OnInstrumentDetailsError(
+        mojom::PaymentEventResponseType::PAYMENT_EVENT_REJECT,
+        error_message.value());
     return;
   }
 
   if (!is_activity_result_ok) {
-    delegate->OnInstrumentDetailsError(errors::kUserClosedPaymentApp);
+    delegate->OnInstrumentDetailsError(
+        mojom::PaymentEventResponseType::PAYMENT_EVENT_REJECT,
+        errors::kUserClosedPaymentApp);
     return;
   }
 

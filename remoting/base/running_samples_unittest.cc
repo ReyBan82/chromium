@@ -7,20 +7,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
+
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace remoting {
 
 typedef void (*TestFunction)(size_t i, RunningSamples& samples);
 
-static const int64_t kTestValues[] = {10, 20, 30, 10, 25, 16, 15};
+constexpr auto kTestValues =
+    std::to_array<int64_t>({10, 20, 30, 10, 25, 16, 15});
 
 // Test framework that verifies average() and max() at beginning, iterates
 // through all elements and meanwhile calls your own test function
 static void TestFramework(int windowSize, TestFunction testFn) {
   RunningSamples samples(windowSize);
-  EXPECT_EQ(0, samples.Average());
-  EXPECT_EQ(0, samples.Max());
+  EXPECT_EQ(samples.Average(), 0);
+  EXPECT_EQ(samples.Max(), 0);
 
   for (size_t i = 0; i < std::size(kTestValues); ++i) {
     samples.Record(kTestValues[i]);
@@ -31,7 +34,7 @@ static void TestFramework(int windowSize, TestFunction testFn) {
 // Average across a single element, i.e. just return the most recent.
 TEST(RunningSamplesTest, AverageOneElementWindow) {
   TestFramework(1, [](size_t i, RunningSamples& samples) {
-    EXPECT_EQ(static_cast<double>(kTestValues[i]), samples.Average());
+    EXPECT_EQ(samples.Average(), static_cast<double>(kTestValues[i]));
   });
 }
 
@@ -43,7 +46,7 @@ TEST(RunningSamplesTest, AverageTwoElementWindow) {
       expected = (expected + kTestValues[i - 1]) / 2;
     }
 
-    EXPECT_EQ(expected, samples.Average());
+    EXPECT_EQ(samples.Average(), expected);
   });
 }
 
@@ -57,14 +60,14 @@ TEST(RunningSamplesTest, AverageLongWindow) {
                   }
                   expected /= i + 1;
 
-                  EXPECT_EQ(expected, samples.Average());
+                  EXPECT_EQ(samples.Average(), expected);
                 });
 }
 
 // Max of a single element, i.e. just return the most recent.
 TEST(RunningSamplesTest, MaxOneElementWindow) {
   TestFramework(1, [](size_t i, RunningSamples& samples) {
-    EXPECT_EQ(static_cast<double>(kTestValues[i]), samples.Max());
+    EXPECT_EQ(samples.Max(), static_cast<double>(kTestValues[i]));
   });
 }
 
@@ -76,7 +79,7 @@ TEST(RunningSamplesTest, MaxTwoElementWindow) {
       expected = expected > kTestValues[i - 1] ? expected : kTestValues[i - 1];
     }
 
-    EXPECT_EQ(expected, samples.Max());
+    EXPECT_EQ(samples.Max(), expected);
   });
 }
 
@@ -89,7 +92,7 @@ TEST(RunningSamplesTest, MaxLongWindow) {
           expected = expected > kTestValues[j] ? expected : kTestValues[j];
         }
 
-        EXPECT_EQ(expected, samples.Max());
+        EXPECT_EQ(samples.Max(), expected);
       });
 }
 

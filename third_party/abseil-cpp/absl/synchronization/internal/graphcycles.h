@@ -80,20 +80,20 @@ class GraphCycles {
   // Attempt to insert an edge from source_node to dest_node.  If the
   // edge would introduce a cycle, return false without making any
   // changes. Otherwise add the edge and return true.
-  bool InsertEdge(GraphId source_node, GraphId dest_node);
+  bool InsertEdge(GraphId idx, GraphId idy);
 
   // Remove any edge that exists from source_node to dest_node.
-  void RemoveEdge(GraphId source_node, GraphId dest_node);
+  void RemoveEdge(GraphId x, GraphId y);
 
   // Return whether node exists in the graph.
   bool HasNode(GraphId node);
 
   // Return whether there is an edge directly from source_node to dest_node.
-  bool HasEdge(GraphId source_node, GraphId dest_node) const;
+  bool HasEdge(GraphId x, GraphId y) const;
 
   // Return whether dest_node is reachable from source_node
   // by following edges.
-  bool IsReachable(GraphId source_node, GraphId dest_node) const;
+  bool IsReachable(GraphId x, GraphId y) const;
 
   // Find a path from "source" to "dest".  If such a path exists,
   // place the nodes on the path in the array path[], and return
@@ -107,7 +107,7 @@ class GraphCycles {
   // source and destination node if they are identical; therefore, the
   // return value is at most one greater than the number of nodes in
   // the graph.
-  int FindPath(GraphId source, GraphId dest, int max_path_len,
+  int FindPath(GraphId idx, GraphId idy, int max_path_len,
                GraphId path[]) const;
 
   // Update the stack trace recorded for id with the current stack
@@ -126,6 +126,11 @@ class GraphCycles {
   // Expensive: should only be called from graphcycles_test.cc.
   bool CheckInvariants() const;
 
+  // Test-only method to add more nodes. The nodes will not be valid, and this
+  // method should only be used to test the behavior of the graph when it is
+  // very full.
+  void TestOnlyAddNodes(uint32_t n);
+
   // ----------------------------------------------------
   struct Rep;
  private:
@@ -138,4 +143,4 @@ class GraphCycles {
 ABSL_NAMESPACE_END
 }  // namespace absl
 
-#endif
+#endif  // ABSL_SYNCHRONIZATION_INTERNAL_GRAPHCYCLES_H_

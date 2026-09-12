@@ -5,29 +5,38 @@
 #ifndef CC_ANIMATION_KEYFRAME_EFFECT_H_
 #define CC_ANIMATION_KEYFRAME_EFFECT_H_
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
 #include "cc/animation/animation_events.h"
 #include "cc/animation/animation_export.h"
 #include "cc/animation/element_animations.h"
 #include "cc/animation/keyframe_model.h"
 #include "cc/paint/element_id.h"
-#include "cc/trees/mutator_host_client.h"
+#include "cc/trees/mutator_host_delegate.h"
 #include "cc/trees/target_property.h"
 #include "ui/gfx/animation/keyframe/keyframe_effect.h"
-#include "ui/gfx/geometry/box_f.h"
 #include "ui/gfx/geometry/point_f.h"
 
 namespace cc {
 
 class Animation;
-enum class PauseCondition { kUnconditional, kAfterStart };
+
 struct PropertyAnimationState;
+
+// Specially designed for a custom property animation on a paint worklet
+// element. It doesn't require an element id to run on the compositor thread.
+// However, our animation system requires the element to be on the property
+// tree in order to keep ticking the animation. Therefore, we use a reserved
+// element id for this animation so that the compositor animation system
+// recognize it. We do not use ElementId because it's an invalid element id.
+inline constexpr ElementId kReservedElementIdForPaintWorklet(
+    std::numeric_limits<ElementId::InternalValue>::max() - 1);
 
 // A KeyframeEffect owns a group of KeyframeModels for a single target
 // (identified by an ElementId). It is responsible for managing the
@@ -75,6 +84,7 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
 
   bool needs_push_properties() const { return needs_push_properties_; }
   void SetNeedsPushProperties();
+  void ResetNeedsPushProperties();
 
   void BindElementAnimations(ElementAnimations* element_animations);
   void UnbindElementAnimations();
@@ -82,18 +92,24 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
   void AttachElement(ElementId element_id);
   void DetachElement();
 
-  void Tick(base::TimeTicks monotonic_time) override;
+  bool Tick(base::TimeTicks monotonic_time) override;
   void RemoveFromTicking();
 
   void UpdateState(bool start_ready_keyframe_models, AnimationEvents* events);
   void UpdateTickingState();
 
-  void Pause(base::TimeDelta pause_offset,
-             PauseCondition = PauseCondition::kUnconditional);
+  // Sets the hold_time of each KeyframeModel to the specified value and
+  // clears the start time.
+  void Pause(base::TimeDelta hold_time,
+             gfx::KeyframeModel::RunState pause_run_state =
+                 gfx::KeyframeModel::RunState::PAUSED);
 
   void AddKeyframeModel(
       std::unique_ptr<gfx::KeyframeModel> keyframe_model) override;
-  void PauseKeyframeModel(int keyframe_model_id, base::TimeDelta time_offset);
+  // TODO(crbug.com/497867796): We don't need a per-keyframe Pause method.
+  // Delete this method.
+  void PauseKeyframeModelForTesting(int keyframe_model_id,
+                                    base::TimeDelta hold_time);
   void AbortKeyframeModel(int keyframe_model_id);
   void AbortKeyframeModelsWithProperty(TargetProperty::Type target_property,
                                        bool needs_completion);
@@ -104,7 +120,8 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
 
   // Dispatches animation event to a keyframe model specified as part of the
   // event. Returns true if the event is dispatched, false otherwise.
-  bool DispatchAnimationEventToKeyframeModel(const AnimationEvent& event);
+  bool DispatchAnimationEventToKeyframeModel(
+      const AnimationPlaybackEvent& event);
 
   // Returns true if there are any KeyframeModels that have neither finished
   // nor aborted.
@@ -112,8 +129,6 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
 
   bool RequiresInvalidation() const;
   bool AffectsNativeProperty() const;
-
-  bool HasNonDeletedKeyframeModel() const;
 
   bool AnimationsPreserveAxisAlignment() const;
 
@@ -143,7 +158,10 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
       KeyframeEffect* element_keyframe_effect_impl) const;
   void RemoveKeyframeModelsCompletedOnMainThread(
       KeyframeEffect* element_keyframe_effect_impl) const;
-  void PushPropertiesTo(KeyframeEffect* keyframe_effect_impl);
+  // If `replaced_start_time` is provided, it will be set as the start time on
+  // this' keyframe models prior to being pushed.
+  void PushPropertiesTo(KeyframeEffect* keyframe_effect_impl,
+                        std::optional<base::TimeTicks> replaced_start_time);
 
   std::string KeyframeModelsToString() const;
 
@@ -152,6 +170,16 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
   // Returns 0 if there is a continuous animation which should be ticked as
   // fast as possible.
   base::TimeDelta MinimumTickInterval() const;
+
+  bool awaiting_deletion() { return awaiting_deletion_; }
+
+  void set_replaced_group(int replaced_group) {
+    replaced_group_ = replaced_group;
+  }
+
+  std::optional<base::TimeTicks> last_tick_time() const {
+    return last_tick_time_;
+  }
 
  protected:
   // We override this because we have additional bookkeeping (eg, noting if
@@ -169,10 +197,10 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
   void MarkKeyframeModelsForDeletion(base::TimeTicks, AnimationEvents* events);
   void MarkFinishedKeyframeModels(base::TimeTicks monotonic_time);
 
-  absl::optional<gfx::PointF> ScrollOffsetForAnimation() const;
+  std::optional<gfx::PointF> ScrollOffsetForAnimation() const;
   void GenerateEvent(AnimationEvents* events,
                      const KeyframeModel& keyframe_model,
-                     AnimationEvent::Type type,
+                     AnimationPlaybackEvent::Type type,
                      base::TimeTicks monotonic_time);
   void GenerateTakeoverEventForScrollAnimation(
       AnimationEvents* events,
@@ -186,6 +214,11 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
   // element_animations_ is non-null if controller is attached to an element.
   scoped_refptr<ElementAnimations> element_animations_;
 
+  // When an animation is being replaced (see is_replaced_ in animation.h),
+  // this is set to the animation group being replaced. Set only on the
+  // impl-side KeyframeEffect.
+  std::optional<int> replaced_group_;
+
   // Only try to start KeyframeModels when new keyframe models are added or
   // when the previous attempt at starting KeyframeModels failed to start all
   // KeyframeModels.
@@ -194,7 +227,8 @@ class CC_ANIMATION_EXPORT KeyframeEffect : public gfx::KeyframeEffect {
   bool scroll_offset_animation_was_interrupted_;
 
   bool is_ticking_;
-  absl::optional<base::TimeTicks> last_tick_time_;
+  bool awaiting_deletion_;
+  std::optional<base::TimeTicks> last_tick_time_;
 
   bool needs_push_properties_;
 };

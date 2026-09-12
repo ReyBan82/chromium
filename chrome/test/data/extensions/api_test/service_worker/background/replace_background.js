@@ -4,17 +4,16 @@
 
 'use strict';
 
-var backgroundJS =
-  'chrome.runtime.onMessage.addListener(function(msg, _, sendResponse) {' +
-  '  if (msg.sourceCheck) {' +
-  '    sendResponse({label: "onMessage/SW BG."});' +
-  '  }' +
-  '});';
+const backgroundJS =
+    `chrome.runtime.onMessage.addListener(function(msg, _, sendResponse) {
+     if (msg.sourceCheck) {
+       sendResponse({label: 'onMessage/SW BG.'});
+     }
+   });`;
 
 self.onfetch = function(e) {
-  let requestUrl = new URL(e.request.url);
-  if (requestUrl.pathname == '/background.js') {
+  const requestUrl = new URL(e.request.url);
+  if (requestUrl.pathname === '/background.js') {
     e.respondWith(new Response(backgroundJS));
   }
 };
-

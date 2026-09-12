@@ -7,9 +7,14 @@
 #include "base/check_op.h"
 #include "base/functional/callback_helpers.h"
 #include "build/build_config.h"
-#include "components/download/public/common/auto_resumption_handler.h"
 #include "components/download/public/common/download_danger_type.h"
 #include "components/download/public/common/download_item_impl.h"
+#include "components/download/public/common/download_item_rename_handler.h"
+#include "components/download/public/common/download_target_info.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "components/download/public/common/android/auto_resumption_handler.h"
+#endif
 
 namespace download {
 
@@ -33,18 +38,27 @@ void DownloadItemImplDelegate::Detach() {
 void DownloadItemImplDelegate::DetermineDownloadTarget(
     DownloadItemImpl* download,
     DownloadTargetCallback callback) {
-  base::FilePath target_path(download->GetForcedFilePath());
-  std::move(callback).Run(
-      target_path, DownloadItem::TARGET_DISPOSITION_OVERWRITE,
-      DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS,
-      DownloadItem::InsecureDownloadStatus::UNKNOWN, target_path,
-      base::FilePath(), std::string(), DOWNLOAD_INTERRUPT_REASON_NONE);
+  DownloadTargetInfo target_info;
+  target_info.target_path = download->GetForcedFilePath();
+  target_info.intermediate_path = download->GetForcedFilePath();
+
+  std::move(callback).Run(std::move(target_info));
 }
 
 bool DownloadItemImplDelegate::ShouldCompleteDownload(
     DownloadItemImpl* download,
     base::OnceClosure complete_callback) {
-  return true;
+  // The default delegate has no way to run a content check, so defer
+  // completion of downloads whose danger type still indicates a pending
+  // verdict until a delegate that can resolve it takes over.
+  switch (download->GetDangerType()) {
+    case DOWNLOAD_DANGER_TYPE_MAYBE_DANGEROUS_CONTENT:
+    case DOWNLOAD_DANGER_TYPE_ASYNC_SCANNING:
+    case DOWNLOAD_DANGER_TYPE_ASYNC_LOCAL_PASSWORD_SCANNING:
+      return false;
+    default:
+      return true;
+  }
 }
 
 bool DownloadItemImplDelegate::ShouldOpenDownload(
@@ -96,9 +110,12 @@ bool DownloadItemImplDelegate::IsOffTheRecord() const {
 }
 
 bool DownloadItemImplDelegate::IsActiveNetworkMetered() const {
-  return download::AutoResumptionHandler::Get()
-             ? download::AutoResumptionHandler::Get()->IsActiveNetworkMetered()
-             : false;
+#if BUILDFLAG(IS_ANDROID)
+  return download::AutoResumptionHandler::Get() &&
+         download::AutoResumptionHandler::Get()->IsActiveNetworkMetered();
+#else
+  return false;
+#endif
 }
 
 void DownloadItemImplDelegate::ReportBytesWasted(DownloadItemImpl* download) {}
@@ -109,6 +126,12 @@ void DownloadItemImplDelegate::BindWakeLockProvider(
 QuarantineConnectionCallback
 DownloadItemImplDelegate::GetQuarantineConnectionCallback() {
   return base::NullCallback();
+}
+
+std::unique_ptr<DownloadItemRenameHandler>
+DownloadItemImplDelegate::GetRenameHandlerForDownload(
+    DownloadItemImpl* download_item) {
+  return nullptr;
 }
 
 }  // namespace download

@@ -30,9 +30,10 @@
 namespace {
 using ::absl::log_internal::MatchesOstream;
 using ::absl::log_internal::TextMessage;
+using ::testing::ElementsAre;
 using ::testing::Eq;
 
-auto *test_env ABSL_ATTRIBUTE_UNUSED = ::testing::AddGlobalTestEnvironment(
+auto* test_env [[maybe_unused]] = ::testing::AddGlobalTestEnvironment(
     new absl::log_internal::LogTestEnvironment);
 
 // Abseil Logging library uses these by default, so we set them on the
@@ -49,12 +50,12 @@ TEST(StreamingFormatTest, LogAsLiteral) {
   stream << LoggingDefaults << absl::LogAsLiteral(not_a_literal);
 
   absl::ScopedMockLog sink;
+  EXPECT_CALL(sink, Send).Times(0);
 
-  EXPECT_CALL(sink,
-              Send(AllOf(TextMessage(MatchesOstream(stream)),
-                         TextMessage(Eq("hello world")),
-                         ENCODED_MESSAGE(EqualsProto(
-                             R"pb(value { literal: "hello world" })pb")))));
+  EXPECT_CALL(sink, Send(AllOf(TextMessage(MatchesOstream(stream)),
+                               TextMessage(Eq("hello world")),
+                               ENCODED_MESSAGE(HasValues(ElementsAre(
+                                   ValueWithLiteral(Eq("hello world"))))))));
 
   sink.StartCapturingLogs();
   LOG(INFO) << absl::LogAsLiteral(not_a_literal);

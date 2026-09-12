@@ -5,25 +5,25 @@
 #ifndef ASH_SYSTEM_AUDIO_AUDIO_EFFECTS_CONTROLLER_H_
 #define ASH_SYSTEM_AUDIO_AUDIO_EFFECTS_CONTROLLER_H_
 
+#include <optional>
+
 #include "ash/ash_export.h"
 #include "ash/public/cpp/session/session_controller.h"
 #include "ash/public/cpp/session/session_observer.h"
 #include "ash/system/video_conference/effects/video_conference_tray_effects_delegate.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "chromeos/ash/components/audio/cras_audio_handler.h"
 
 namespace ash {
 
-class ASH_EXPORT AudioEffectsController : public VcEffectsDelegate,
-                                          public SessionObserver {
- public:
-  enum AudioEffectId {
-    kNone = 0,
-    kNoiseCancellation = 1,
-    kLiveCaption = 2,
-  };
+enum class VcEffectId;
 
+class ASH_EXPORT AudioEffectsController
+    : public CrasAudioHandler::AudioObserver,
+      public SessionObserver,
+      public VcEffectsDelegate {
+ public:
   AudioEffectsController();
 
   AudioEffectsController(const AudioEffectsController&) = delete;
@@ -31,25 +31,39 @@ class ASH_EXPORT AudioEffectsController : public VcEffectsDelegate,
 
   ~AudioEffectsController() override;
 
-  // Returns whether `effect_id` is supported. If passed an `effect_id` of
-  // `AudioEffectId::kNone`, the function returns whether *any* effects are
-  // supported.
-  bool IsEffectSupported(AudioEffectId effect_id = AudioEffectId::kNone);
+  // Returns whether `effect_id` is supported.
+  bool IsEffectSupported(VcEffectId effect_id);
 
   // VcEffectsDelegate:
-  absl::optional<int> GetEffectState(int effect_id) override;
-  void OnEffectControlActivated(absl::optional<int> effect_id,
-                                absl::optional<int> state) override;
+  std::optional<int> GetEffectState(VcEffectId effect_id) override;
+  void OnEffectControlActivated(VcEffectId effect_id,
+                                std::optional<int> state) override;
 
   // SessionObserver:
   void OnActiveUserPrefServiceChanged(PrefService* pref_service) override;
 
  private:
+  // CrasAudioHandler::AudioObserver:
+  void OnActiveInputNodeChanged() override;
+  void OnAudioNodesChanged() override;
+  void OnActiveOutputNodeChanged() override;
+  void OnNoiseCancellationStateChanged() override;
+  void OnStyleTransferStateChanged() override;
+
+  // Refresh noise cancellation supported status.
+  void RefreshNoiseCancellationOrStyleTransferSupported();
+
   // Construct effect for noise cancellation.
   void AddNoiseCancellationEffect();
 
+  // Construct effect for style transfer.
+  void AddStyleTransferEffect();
+
   // Construct effect for live caption.
   void AddLiveCaptionEffect();
+
+  // Whether the effects is added already to effects manager.
+  bool IsEffectsAdded(VcEffectId id);
 
   base::ScopedObservation<SessionController, SessionObserver>
       session_observation_{this};

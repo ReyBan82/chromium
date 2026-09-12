@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/core/layout/layout_theme_ios.h"
 
+#include "third_party/blink/public/mojom/frame/color_scheme.mojom-shared.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
 #include "ui/base/ui_base_features.h"
 
@@ -34,6 +35,18 @@ Color LayoutThemeIOS::PlatformActiveSelectionForegroundColor(
              ? Color::FromRGBA32(0xFF3B3B3B)
              : LayoutThemeMobile::PlatformActiveSelectionForegroundColor(
                    color_scheme);
+}
+
+Color LayoutThemeIOS::PlatformSpellingMarkerUnderlineColor() const {
+  // Use the same color as MacPort for spelling marker underline.
+  // See LayoutThemeMac::PlatformSpellingMarkerUnderlineColor()
+  return Color(255, 59, 48, 191);
+}
+
+Color LayoutThemeIOS::PlatformGrammarMarkerUnderlineColor() const {
+  // Use the same color as MacPort for grammar marker underline.
+  // See LayoutThemeMac::PlatformGrammarMarkerUnderlineColor()
+  return Color(25, 175, 50, 191);
 }
 
 }  // namespace blink

@@ -48,6 +48,14 @@ WebString WebOptionElement::Label() const {
   return ConstUnwrap<HTMLOptionElement>()->label();
 }
 
+bool WebOptionElement::IsEnabled() const {
+  return !ConstUnwrap<HTMLOptionElement>()->IsDisabledFormControl();
+}
+
+bool WebOptionElement::IsSelected() const {
+  return ConstUnwrap<HTMLOptionElement>()->Selected();
+}
+
 WebOptionElement::WebOptionElement(HTMLOptionElement* elem)
     : WebElement(elem) {}
 

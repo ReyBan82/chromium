@@ -46,9 +46,10 @@ enum CanPlayTypeResult { "" /* empty string */, "maybe", "probably" };
     const unsigned short NETWORK_NO_SOURCE = 3;
     [ImplementedAs=getNetworkState] readonly attribute unsigned short networkState;
     [CEReactions] attribute DOMString preload;
+    [RuntimeEnabled=LazyLoadVideoAndAudio, CEReactions, Reflect, ReflectOnly=("lazy","eager"), ReflectMissing="eager", ReflectInvalid="eager"] attribute DOMString loading;
     readonly attribute TimeRanges buffered;
     void load();
-    [CallWith=ExecutionContext, HighEntropy, Measure] CanPlayTypeResult canPlayType(DOMString type);
+    CanPlayTypeResult canPlayType(DOMString type);
 
     // ready state
     const unsigned short HAVE_NOTHING = 0;
@@ -72,7 +73,7 @@ enum CanPlayTypeResult { "" /* empty string */, "maybe", "probably" };
     readonly attribute boolean ended;
     [CEReactions, Reflect] attribute boolean autoplay;
     [CEReactions, Reflect] attribute boolean loop;
-    [CallWith=ScriptState, ImplementedAs=playForBindings] Promise<void> play();
+    [CallWith=ScriptState, ImplementedAs=playForBindings] Promise<undefined> play();
     void pause();
     [RuntimeEnabled=MediaLatencyHint, CEReactions]
     attribute double latencyHint;

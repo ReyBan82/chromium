@@ -3,6 +3,8 @@
 # found in the LICENSE file.
 
 blink_core_sources_script = [
+  "cache_hint_attribute_value.cc",
+  "cache_hint_attribute_value.h",
   "classic_pending_script.cc",
   "classic_pending_script.h",
   "classic_script.cc",
@@ -59,6 +61,8 @@ blink_core_sources_script = [
   "script_scheduling_type.h",
   "value_wrapper_synthetic_module_script.cc",
   "value_wrapper_synthetic_module_script.h",
+  "wasm_module_script.cc",
+  "wasm_module_script.h",
   "worker_modulator_impl.cc",
   "worker_modulator_impl.h",
   "worklet_modulator_impl.cc",
@@ -75,4 +79,5 @@ blink_core_tests_script = [
   "module_record_resolver_impl_test.cc",
   "module_script_test.cc",
   "script_runner_test.cc",
+  "pending_script_test.cc",
 ]

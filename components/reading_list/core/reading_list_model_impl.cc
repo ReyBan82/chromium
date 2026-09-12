@@ -4,20 +4,24 @@
 
 #include "components/reading_list/core/reading_list_model_impl.h"
 
+#include "base/auto_reset.h"
 #include "base/check_is_test.h"
 #include "base/check_op.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/location.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/notreached.h"
 #include "base/observer_list.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/time/clock.h"
 #include "components/reading_list/core/reading_list_model_storage.h"
 #include "components/reading_list/core/reading_list_sync_bridge.h"
-#include "components/sync/model/client_tag_based_model_type_processor.h"
+#include "components/sync/model/client_tag_based_data_type_processor.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "url/gurl.h"
 
 ReadingListModelImpl::ScopedReadingListBatchUpdateImpl::
@@ -62,24 +66,32 @@ void ReadingListModelImpl::ScopedReadingListBatchUpdateImpl::
 
 ReadingListModelImpl::ReadingListModelImpl(
     std::unique_ptr<ReadingListModelStorage> storage_layer,
-    syncer::StorageType sync_storage_type,
+    syncer::StorageType sync_storage_type_for_uma,
+    syncer::WipeModelUponSyncDisabledBehavior
+        wipe_model_upon_sync_disabled_behavior,
     base::Clock* clock)
     : ReadingListModelImpl(
           std::move(storage_layer),
-          sync_storage_type,
+          sync_storage_type_for_uma,
+          wipe_model_upon_sync_disabled_behavior,
           clock,
-          std::make_unique<syncer::ClientTagBasedModelTypeProcessor>(
+          std::make_unique<syncer::ClientTagBasedDataTypeProcessor>(
               syncer::READING_LIST,
               /*dump_stack=*/base::DoNothing())) {}
 
 ReadingListModelImpl::ReadingListModelImpl(
     std::unique_ptr<ReadingListModelStorage> storage_layer,
-    syncer::StorageType sync_storage_type,
+    syncer::StorageType sync_storage_type_for_uma,
+    syncer::WipeModelUponSyncDisabledBehavior
+        wipe_model_upon_sync_disabled_behavior,
     base::Clock* clock,
-    std::unique_ptr<syncer::ModelTypeChangeProcessor> change_processor)
+    std::unique_ptr<syncer::DataTypeLocalChangeProcessor> change_processor)
     : storage_layer_(std::move(storage_layer)),
       clock_(clock),
-      sync_bridge_(sync_storage_type, clock, std::move(change_processor)) {
+      sync_bridge_(sync_storage_type_for_uma,
+                   wipe_model_upon_sync_disabled_behavior,
+                   clock,
+                   std::move(change_processor)) {
   DCHECK(clock_);
   DCHECK(storage_layer_);
 
@@ -150,40 +162,23 @@ void ReadingListModelImpl::MarkAllSeen() {
       BeginBatchUpdatesWithSyncMetadata();
 
   for (auto& iterator : entries_) {
-    ReadingListEntry& entry = *(iterator.second);
-    if (entry.HasBeenSeen()) {
-      continue;
-    }
-    for (auto& observer : observers_) {
-      observer.ReadingListWillUpdateEntry(this, iterator.first);
-    }
-    UpdateEntryStateCountersOnEntryRemoval(entry);
-    entry.SetRead(false, clock_->Now());
-    UpdateEntryStateCountersOnEntryInsertion(entry);
-
-    batch->GetStorageBatch()->SaveEntry(entry);
-    sync_bridge_.DidAddOrUpdateEntry(entry, batch->GetSyncMetadataChangeList());
-
-    for (ReadingListModelObserver& observer : observers_) {
-      observer.ReadingListDidUpdateEntry(this, iterator.first);
-    }
-    for (auto& observer : observers_) {
-      observer.ReadingListDidApplyChanges(this);
-    }
+    MarkEntrySeenImpl(iterator.second.get());
   }
   DCHECK(unseen_entry_count_ == 0);
 }
 
-bool ReadingListModelImpl::DeleteAllEntries() {
+bool ReadingListModelImpl::DeleteAllEntries(const base::Location& location) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (!loaded()) {
     return false;
   }
   auto scoped_model_batch_updates = BeginBatchUpdates();
   for (const auto& url : GetKeys()) {
-    RemoveEntryByURL(url);
+    RemoveEntryByURL(url, location);
   }
-  return entries_.empty();
+
+  DCHECK(entries_.empty());
+  return true;
 }
 
 void ReadingListModelImpl::UpdateEntryStateCountersOnEntryRemoval(
@@ -238,14 +233,6 @@ ReadingListEntry* ReadingListModelImpl::GetMutableEntryFromURL(
   return iterator->second.get();
 }
 
-void ReadingListModelImpl::SyncAddEntry(scoped_refptr<ReadingListEntry> entry) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(loaded());
-  DCHECK(IsPerformingBatchUpdates());
-
-  AddEntryImpl(std::move(entry), reading_list::ADDED_VIA_SYNC);
-}
-
 ReadingListEntry* ReadingListModelImpl::SyncMergeEntry(
     scoped_refptr<ReadingListEntry> entry) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -257,7 +244,7 @@ ReadingListEntry* ReadingListModelImpl::SyncMergeEntry(
   DCHECK(existing_entry);
 
   for (auto& observer : observers_)
-    observer.ReadingListWillMoveEntry(this, url);
+    observer.ReadingListWillUpdateEntry(this, url);
 
   UpdateEntryStateCountersOnEntryRemoval(*existing_entry);
   existing_entry->MergeWithEntry(*entry);
@@ -268,7 +255,7 @@ ReadingListEntry* ReadingListModelImpl::SyncMergeEntry(
   storage_layer_->EnsureBatchCreated()->SaveEntry(*existing_entry);
 
   for (auto& observer : observers_) {
-    observer.ReadingListDidMoveEntry(this, url);
+    observer.ReadingListDidUpdateEntry(this, url);
     observer.ReadingListDidApplyChanges(this);
   }
 
@@ -280,14 +267,16 @@ void ReadingListModelImpl::SyncRemoveEntry(const GURL& url) {
   DCHECK(loaded());
   DCHECK(IsPerformingBatchUpdates());
 
-  RemoveEntryByURLImpl(url, true);
+  RemoveEntryByURLImpl(url, FROM_HERE, true);
 }
 
-void ReadingListModelImpl::RemoveEntryByURL(const GURL& url) {
-  RemoveEntryByURLImpl(url, false);
+void ReadingListModelImpl::RemoveEntryByURL(const GURL& url,
+                                            const base::Location& location) {
+  RemoveEntryByURLImpl(url, location, false);
 }
 
 void ReadingListModelImpl::RemoveEntryByURLImpl(const GURL& url,
+                                                const base::Location& location,
                                                 bool from_sync) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(loaded());
@@ -295,34 +284,52 @@ void ReadingListModelImpl::RemoveEntryByURLImpl(const GURL& url,
   if (!entry)
     return;
 
-  for (auto& observer : observers_)
-    observer.ReadingListWillRemoveEntry(this, url);
+  if (!suppress_deletions_batch_updates_notifications_) {
+    for (auto& observer : observers_) {
+      observer.ReadingListWillRemoveEntry(this, url);
+    }
+  }
 
   std::unique_ptr<ReadingListModelStorage::ScopedBatchUpdate> batch =
       storage_layer_->EnsureBatchCreated();
   batch->RemoveEntry(url);
 
   if (!from_sync) {
-    sync_bridge_.DidRemoveEntry(*entry, batch->GetSyncMetadataChangeList());
+    sync_bridge_.DidRemoveEntry(*entry, location,
+                                batch->GetSyncMetadataChangeList());
   }
 
   UpdateEntryStateCountersOnEntryRemoval(*entry);
 
   entries_.erase(url);
 
-  for (auto& observer : observers_) {
-    observer.ReadingListDidRemoveEntry(this, url);
-    observer.ReadingListDidApplyChanges(this);
+  if (!suppress_deletions_batch_updates_notifications_) {
+    for (auto& observer : observers_) {
+      observer.ReadingListDidRemoveEntry(this, url);
+      observer.ReadingListDidApplyChanges(this);
+    }
   }
 }
 
-void ReadingListModelImpl::SyncDeleteAllEntriesAndSyncMetadata() {
-  DeleteAllEntries();
-  storage_layer_->DeleteAllEntriesAndSyncMetadata();
+void ReadingListModelImpl::SyncDeleteAllEntriesAndSyncMetadata(
+    std::unique_ptr<syncer::MetadataChangeList> metadata_change_list) {
+  DeleteAllEntries(FROM_HERE);
+  storage_layer_->DeleteAllEntriesAndSyncMetadata(
+      std::move(metadata_change_list));
 }
 
 bool ReadingListModelImpl::IsUrlSupported(const GURL& url) {
   return url.SchemeIsHTTPOrHTTPS();
+}
+
+GaiaId ReadingListModelImpl::GetAccountWhereEntryIsSavedTo(const GURL& url) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(loaded());
+
+  if (entries_.find(url) == entries_.end()) {
+    return GaiaId();
+  }
+  return sync_bridge_.change_processor()->TrackedGaiaId();
 }
 
 bool ReadingListModelImpl::NeedsExplicitUploadToSyncServer(
@@ -334,11 +341,19 @@ bool ReadingListModelImpl::NeedsExplicitUploadToSyncServer(
   return false;
 }
 
+void ReadingListModelImpl::MarkAllForUploadToSyncServerIfNeeded() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  // Uploading the entries only makes sense for an implementation that maintains
+  // a separate set of local and account entries (DualReadingListModel).
+}
+
 const ReadingListEntry& ReadingListModelImpl::AddOrReplaceEntry(
     const GURL& url,
     const std::string& title,
     reading_list::EntrySource source,
-    base::TimeDelta estimated_read_time) {
+    std::optional<base::TimeDelta> estimated_read_time,
+    std::optional<base::Time> creation_time) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(loaded());
   DCHECK(IsUrlSupported(url));
@@ -347,18 +362,21 @@ const ReadingListEntry& ReadingListModelImpl::AddOrReplaceEntry(
       scoped_model_batch_updates;
   if (GetEntryByURL(url)) {
     scoped_model_batch_updates = BeginBatchUpdates();
-    RemoveEntryByURL(url);
+    RemoveEntryByURL(url, FROM_HERE);
   }
 
-  std::string trimmed_title = base::CollapseWhitespaceASCII(title, false);
+  std::string trimmed_title = TrimTitle(title);
 
-  auto entry =
-      base::MakeRefCounted<ReadingListEntry>(url, trimmed_title, clock_->Now());
-  if (!estimated_read_time.is_zero()) {
-    entry->SetEstimatedReadTime(estimated_read_time);
+  auto entry = base::MakeRefCounted<ReadingListEntry>(
+      url, trimmed_title, creation_time.value_or(clock_->Now()));
+  if (estimated_read_time.has_value()) {
+    entry->SetEstimatedReadTime(*estimated_read_time);
   }
 
-  AddEntryImpl(std::move(entry), source);
+  AddEntry(std::move(entry), source);
+
+  base::UmaHistogramEnumeration("ReadingList.AddOrReplaceEntry",
+                                GetStorageStateForUma());
 
   return *(entries_.at(url));
 }
@@ -375,11 +393,10 @@ void ReadingListModelImpl::SetReadStatusIfExists(const GURL& url, bool read) {
     return;
   }
   for (ReadingListModelObserver& observer : observers_) {
-    observer.ReadingListWillMoveEntry(this, url);
+    observer.ReadingListWillUpdateEntry(this, url);
   }
   UpdateEntryStateCountersOnEntryRemoval(entry);
   entry.SetRead(read, clock_->Now());
-  entry.MarkEntryUpdated(clock_->Now());
   UpdateEntryStateCountersOnEntryInsertion(entry);
 
   std::unique_ptr<ReadingListModelStorage::ScopedBatchUpdate> batch =
@@ -388,7 +405,7 @@ void ReadingListModelImpl::SetReadStatusIfExists(const GURL& url, bool read) {
   sync_bridge_.DidAddOrUpdateEntry(entry, batch->GetSyncMetadataChangeList());
 
   for (ReadingListModelObserver& observer : observers_) {
-    observer.ReadingListDidMoveEntry(this, url);
+    observer.ReadingListDidUpdateEntry(this, url);
     observer.ReadingListDidApplyChanges(this);
   }
 }
@@ -402,7 +419,7 @@ void ReadingListModelImpl::SetEntryTitleIfExists(const GURL& url,
     return;
   }
   ReadingListEntry& entry = *(iterator->second);
-  std::string trimmed_title = base::CollapseWhitespaceASCII(title, false);
+  std::string trimmed_title = TrimTitle(title);
   if (entry.Title() == trimmed_title) {
     return;
   }
@@ -541,107 +558,25 @@ void ReadingListModelImpl::RemoveObserver(ReadingListModelObserver* observer) {
   observers_.RemoveObserver(observer);
 }
 
-std::unique_ptr<ReadingListModelImpl::ScopedReadingListBatchUpdateImpl>
-ReadingListModelImpl::BeginBatchUpdatesWithSyncMetadata() {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  auto token = std::make_unique<ScopedReadingListBatchUpdateImpl>(this);
-  ++current_batch_updates_count_;
-  if (current_batch_updates_count_ == 1) {
-    for (auto& observer : observers_) {
-      observer.ReadingListModelBeganBatchUpdates(this);
-    }
-  }
-  return token;
-}
-
-bool ReadingListModelImpl::IsTrackingSyncMetadata() const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  return sync_bridge_.change_processor()->IsTrackingMetadata();
-}
-
-// static
-std::unique_ptr<ReadingListModelImpl> ReadingListModelImpl::BuildNewForTest(
-    std::unique_ptr<ReadingListModelStorage> storage_layer,
-    syncer::StorageType sync_storage_type,
-    base::Clock* clock,
-    std::unique_ptr<syncer::ModelTypeChangeProcessor> change_processor) {
-  CHECK_IS_TEST();
-  return base::WrapUnique(
-      new ReadingListModelImpl(std::move(storage_layer), sync_storage_type,
-                               clock, std::move(change_processor)));
-}
-
-ReadingListSyncBridge* ReadingListModelImpl::GetSyncBridgeForTest() {
-  return &sync_bridge_;
-}
-
-void ReadingListModelImpl::StoreLoaded(
-    ReadingListModelStorage::LoadResultOrError result_or_error) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-
-  if (!result_or_error.has_value()) {
-    sync_bridge_.ReportError(
-        syncer::ModelError(FROM_HERE, result_or_error.error()));
+void ReadingListModelImpl::RecordCountMetricsOnUMAUpload() const {
+  if (!loaded()) {
     return;
   }
-
-  entries_ = std::move(result_or_error.value().first);
-
-  for (auto& iterator : entries_) {
-    UpdateEntryStateCountersOnEntryInsertion(*(iterator.second));
-  }
-
-  DCHECK_EQ(read_entry_count_ + unread_entry_count_, entries_.size());
-  loaded_ = true;
-
-  sync_bridge_.ModelReadyToSync(/*model=*/this,
-                                std::move(result_or_error.value().second));
-
-  base::UmaHistogramCounts1000("ReadingList.Unread.Count.OnModelLoaded",
-                               unread_entry_count_);
-  base::UmaHistogramCounts1000("ReadingList.Read.Count.OnModelLoaded",
-                               read_entry_count_);
-
-  for (auto& observer : observers_) {
-    observer.ReadingListModelLoaded(this);
-  }
+  RecordCountMetrics(".OnUMAUpload");
 }
 
-void ReadingListModelImpl::EndBatchUpdates() {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(IsPerformingBatchUpdates());
-  DCHECK(current_batch_updates_count_ > 0);
-  --current_batch_updates_count_;
-  if (current_batch_updates_count_ == 0) {
-    for (auto& observer : observers_) {
-      observer.ReadingListModelCompletedBatchUpdates(this);
-    }
-  }
-}
-
-base::WeakPtr<syncer::ModelTypeControllerDelegate>
-ReadingListModelImpl::GetSyncControllerDelegate() {
-  return sync_bridge_.change_processor()->GetControllerDelegate();
-}
-
-base::WeakPtr<syncer::ModelTypeControllerDelegate>
-ReadingListModelImpl::GetSyncControllerDelegateForTransportMode() {
-  // ReadingListModelImpl doesn't directly implement account storage. Upper
-  // layers are responsible for maintaining two instances of
-  // ReadingListModelImpl and exposing one of them as account storage.
-  return nullptr;
-}
-
-ReadingListModelStorage* ReadingListModelImpl::StorageLayer() {
-  return storage_layer_.get();
-}
-
-void ReadingListModelImpl::AddEntryImpl(scoped_refptr<ReadingListEntry> entry,
-                                        reading_list::EntrySource source) {
+void ReadingListModelImpl::AddEntry(scoped_refptr<ReadingListEntry> entry,
+                                    reading_list::EntrySource source) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(entry);
   DCHECK(loaded());
   DCHECK(GetMutableEntryFromURL(entry->URL()) == nullptr);
+
+  // TODO(crbug.com/40899983): Should decide if the DCHECK(entry) should be
+  // removed or there's a proper fix that remove the below condition.
+  if (!entry) {
+    return;
+  }
 
   const GURL url = entry->URL();
 
@@ -666,4 +601,192 @@ void ReadingListModelImpl::AddEntryImpl(scoped_refptr<ReadingListEntry> entry,
     observer.ReadingListDidAddEntry(this, url, source);
     observer.ReadingListDidApplyChanges(this);
   }
+}
+
+std::unique_ptr<ReadingListModelImpl::ScopedReadingListBatchUpdateImpl>
+ReadingListModelImpl::BeginBatchUpdatesWithSyncMetadata() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  auto token = std::make_unique<ScopedReadingListBatchUpdateImpl>(this);
+  ++current_batch_updates_count_;
+  if (current_batch_updates_count_ == 1 &&
+      !suppress_deletions_batch_updates_notifications_) {
+    for (auto& observer : observers_) {
+      observer.ReadingListModelBeganBatchUpdates(this);
+    }
+  }
+  return token;
+}
+
+void ReadingListModelImpl::MarkEntrySeenIfExists(const GURL& url) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(loaded());
+
+  auto iterator = entries_.find(url);
+  if (iterator == entries_.end()) {
+    return;
+  }
+  MarkEntrySeenImpl(iterator->second.get());
+}
+
+bool ReadingListModelImpl::IsTrackingSyncMetadata() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  return sync_bridge_.IsTrackingMetadata();
+}
+
+// static
+std::string ReadingListModelImpl::TrimTitle(const std::string& title) {
+  return base::CollapseWhitespaceASCII(title, false);
+}
+
+// static
+std::unique_ptr<ReadingListModelImpl> ReadingListModelImpl::BuildNewForTest(
+    std::unique_ptr<ReadingListModelStorage> storage_layer,
+    syncer::StorageType sync_storage_type,
+    syncer::WipeModelUponSyncDisabledBehavior
+        wipe_model_upon_sync_disabled_behavior,
+    base::Clock* clock,
+    std::unique_ptr<syncer::DataTypeLocalChangeProcessor> change_processor) {
+  CHECK_IS_TEST();
+  return base::WrapUnique(
+      new ReadingListModelImpl(std::move(storage_layer), sync_storage_type,
+                               wipe_model_upon_sync_disabled_behavior, clock,
+                               std::move(change_processor)));
+}
+
+ReadingListSyncBridge* ReadingListModelImpl::GetSyncBridgeForTest() {
+  return &sync_bridge_;
+}
+
+ReadingListModelImpl::StorageStateForUma
+ReadingListModelImpl::GetStorageStateForUma() const {
+  switch (sync_bridge_.GetStorageTypeForUma()) {
+    case syncer::StorageType::kAccount:
+      return StorageStateForUma::kAccount;
+    case syncer::StorageType::kUnspecified:
+      return sync_bridge_.IsTrackingMetadata()
+                 ? StorageStateForUma::kSyncEnabled
+                 : StorageStateForUma::kLocalOnly;
+  }
+  NOTREACHED();
+}
+
+std::string ReadingListModelImpl::GetStorageStateSuffixForUma() const {
+  switch (GetStorageStateForUma()) {
+    case StorageStateForUma::kAccount:
+      return ".AccountStorage";
+    case StorageStateForUma::kLocalOnly:
+      return ".LocalStorage";
+    case StorageStateForUma::kSyncEnabled:
+      return ".LocalStorageSyncing";
+  }
+  NOTREACHED();
+}
+
+void ReadingListModelImpl::StoreLoaded(
+    ReadingListModelStorage::LoadResultOrError result_or_error) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  if (!result_or_error.has_value()) {
+    sync_bridge_.ReportError(
+        {FROM_HERE, syncer::ModelError::Type::kReadingListStorageLoadFailed});
+    return;
+  }
+
+  entries_ = std::move(result_or_error.value().first);
+
+  for (auto& iterator : entries_) {
+    UpdateEntryStateCountersOnEntryInsertion(*(iterator.second));
+  }
+
+  DCHECK_EQ(read_entry_count_ + unread_entry_count_, entries_.size());
+  loaded_ = true;
+
+  {
+    // In rare cases, ModelReadyToSync() leads to the deletion of all local
+    // entries. Such deletions should not be propagated to observers, because
+    // ReadingListModelLoaded hasn't been broadcasted yet.
+    base::AutoReset<bool> auto_reset_suppress_observer_notifications(
+        &suppress_deletions_batch_updates_notifications_, true);
+    sync_bridge_.ModelReadyToSync(/*model=*/this,
+                                  std::move(result_or_error.value().second));
+  }
+
+  RecordCountMetrics(".OnModelLoaded");
+
+  for (auto& observer : observers_) {
+    observer.ReadingListModelLoaded(this);
+  }
+}
+
+void ReadingListModelImpl::EndBatchUpdates() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(IsPerformingBatchUpdates());
+  DCHECK(current_batch_updates_count_ > 0);
+  --current_batch_updates_count_;
+  if (current_batch_updates_count_ == 0 &&
+      !suppress_deletions_batch_updates_notifications_) {
+    for (auto& observer : observers_) {
+      observer.ReadingListModelCompletedBatchUpdates(this);
+    }
+  }
+}
+
+base::WeakPtr<syncer::DataTypeControllerDelegate>
+ReadingListModelImpl::GetSyncControllerDelegate() {
+  return sync_bridge_.change_processor()->GetControllerDelegate();
+}
+
+base::WeakPtr<syncer::DataTypeControllerDelegate>
+ReadingListModelImpl::GetSyncControllerDelegateForTransportMode() {
+  // ReadingListModelImpl doesn't directly implement account storage. Upper
+  // layers are responsible for maintaining two instances of
+  // ReadingListModelImpl and exposing one of them as account storage.
+  return nullptr;
+}
+
+ReadingListModelStorage* ReadingListModelImpl::StorageLayer() {
+  return storage_layer_.get();
+}
+
+void ReadingListModelImpl::MarkEntrySeenImpl(ReadingListEntry* entry) {
+  DCHECK(entry);
+
+  if (entry->HasBeenSeen()) {
+    return;
+  }
+
+  for (auto& observer : observers_) {
+    observer.ReadingListWillUpdateEntry(this, entry->URL());
+  }
+
+  UpdateEntryStateCountersOnEntryRemoval(*entry);
+  DCHECK(!entry->IsRead());
+  // SetRead() is used to transition the entry from the UNSEEN state to the
+  // UNREAD state.
+  entry->SetRead(false, clock_->Now());
+  UpdateEntryStateCountersOnEntryInsertion(*entry);
+
+  std::unique_ptr<ReadingListModelStorage::ScopedBatchUpdate> batch =
+      storage_layer_->EnsureBatchCreated();
+  batch->SaveEntry(*entry);
+  sync_bridge_.DidAddOrUpdateEntry(*entry, batch->GetSyncMetadataChangeList());
+
+  for (ReadingListModelObserver& observer : observers_) {
+    observer.ReadingListDidUpdateEntry(this, entry->URL());
+  }
+  for (ReadingListModelObserver& observer : observers_) {
+    observer.ReadingListDidApplyChanges(this);
+  }
+}
+
+void ReadingListModelImpl::RecordCountMetrics(
+    const std::string& event_suffix) const {
+  CHECK(loaded());
+  std::string storage_suffix = GetStorageStateSuffixForUma();
+  base::UmaHistogramCounts1000(
+      base::StrCat({"ReadingList.Unread.Count", event_suffix, storage_suffix}),
+      unread_entry_count_);
+  base::UmaHistogramCounts1000(
+      base::StrCat({"ReadingList.Read.Count", event_suffix, storage_suffix}),
+      read_entry_count_);
 }

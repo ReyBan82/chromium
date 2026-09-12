@@ -10,12 +10,14 @@
 #include <vector>
 
 #include "components/sync/engine/data_type_activation_response.h"
-#include "components/sync/engine/nigori/nigori.h"
 #include "components/sync/engine/sync_engine.h"
 #include "components/sync/engine/sync_status.h"
+#include "components/sync/model/crypto/nigori.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 namespace syncer {
+
+class CustomPassphraseBootstrapToken;
 
 // A mock of the SyncEngine.
 //
@@ -26,34 +28,32 @@ class MockSyncEngine : public SyncEngine {
   MockSyncEngine();
   ~MockSyncEngine() override;
 
-  // ModelTypeConfigurer:
+  // DataTypeConfigurer:
   MOCK_METHOD(void, ConfigureDataTypes, (ConfigureParams), (override));
   MOCK_METHOD(void,
               ConnectDataType,
-              (ModelType, std::unique_ptr<DataTypeActivationResponse>),
+              (DataType, std::unique_ptr<DataTypeActivationResponse>),
               (override));
-  MOCK_METHOD(void, DisconnectDataType, (ModelType), (override));
-  MOCK_METHOD(void, SetProxyTabsDatatypeEnabled, (bool), (override));
+  MOCK_METHOD(void, DisconnectDataType, (DataType), (override));
 
   // SyncEngine:
   MOCK_METHOD(void, Initialize, (InitParams), (override));
   MOCK_METHOD(bool, IsInitialized, (), (const override));
-  MOCK_METHOD(void, TriggerRefresh, (const ModelTypeSet&), (override));
+  MOCK_METHOD(void, TriggerRefresh, (const DataTypeSet&), (override));
   MOCK_METHOD(void, UpdateCredentials, (const SyncCredentials&), (override));
   MOCK_METHOD(void, InvalidateCredentials, (), (override));
+  MOCK_METHOD(void, OnCredentialsChanged, (), (override));
   MOCK_METHOD(std::string, GetCacheGuid, (), (const override));
   MOCK_METHOD(std::string, GetBirthday, (), (const override));
   MOCK_METHOD(base::Time, GetLastSyncedTimeForDebugging, (), (const override));
   MOCK_METHOD(void, StartConfiguration, (), (override));
   MOCK_METHOD(void, StartSyncingWithServer, (), (override));
   MOCK_METHOD(void, StartHandlingInvalidations, (), (override));
+  MOCK_METHOD(void, SetEncryptionPassphrase, (const std::string&), (override));
+  MOCK_METHOD(void, SetDecryptionPassphrase, (const std::string&), (override));
   MOCK_METHOD(void,
-              SetEncryptionPassphrase,
-              (const std::string&, const KeyDerivationParams&),
-              (override));
-  MOCK_METHOD(void,
-              SetExplicitPassphraseDecryptionKey,
-              (std::unique_ptr<Nigori>),
+              SetDecryptionBootstrapToken,
+              (const CustomPassphraseBootstrapToken&),
               (override));
   MOCK_METHOD(void,
               AddTrustedVaultDecryptionKeys,
@@ -63,12 +63,16 @@ class MockSyncEngine : public SyncEngine {
   MOCK_METHOD(void, Shutdown, (ShutdownReason), (override));
   MOCK_METHOD(const SyncStatus&, GetDetailedStatus, (), (const override));
   MOCK_METHOD(void,
+              GetTypesWithUnsyncedData,
+              (base::OnceCallback<void(DataTypeSet)>),
+              (const override));
+  MOCK_METHOD(void,
               HasUnsyncedItemsForTest,
               (base::OnceCallback<void(bool)>),
               (const override));
   MOCK_METHOD(void,
               GetThrottledDataTypesForTest,
-              (base::OnceCallback<void(ModelTypeSet)>),
+              (base::OnceCallback<void(DataTypeSet)>),
               (const override));
   MOCK_METHOD(void,
               RequestBufferedProtocolEventsAndEnableForwarding,
@@ -76,8 +80,10 @@ class MockSyncEngine : public SyncEngine {
               (override));
   MOCK_METHOD(void, DisableProtocolEventForwarding, (), (override));
   MOCK_METHOD(void, OnCookieJarChanged, (bool, base::OnceClosure), (override));
-  MOCK_METHOD(void, SetInvalidationsForSessionsEnabled, (bool), (override));
+  MOCK_METHOD(bool, IsNextPollTimeInThePast, (), (const override));
+  MOCK_METHOD(void, ClearNigoriDataForMigration, (), (override));
   MOCK_METHOD(void, GetNigoriNodeForDebugging, (AllNodesCallback), (override));
+  MOCK_METHOD(void, RecordNigoriMemoryUsageAndCountsHistograms, (), (override));
 };
 
 }  // namespace syncer

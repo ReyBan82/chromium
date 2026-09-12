@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_FEEDBACK_FEEDBACK_UPLOADER_FACTORY_CHROME_H_
 #define CHROME_BROWSER_FEEDBACK_FEEDBACK_UPLOADER_FACTORY_CHROME_H_
 
+#include "base/no_destructor.h"
 #include "components/feedback/content/feedback_uploader_factory.h"
 
 namespace feedback {
@@ -26,7 +27,7 @@ class FeedbackUploaderFactoryChrome : public FeedbackUploaderFactory {
       const FeedbackUploaderFactoryChrome&) = delete;
 
  private:
-  friend struct base::DefaultSingletonTraits<FeedbackUploaderFactoryChrome>;
+  friend base::NoDestructor<FeedbackUploaderFactoryChrome>;
 
   FeedbackUploaderFactoryChrome();
   ~FeedbackUploaderFactoryChrome() override;
@@ -36,7 +37,7 @@ class FeedbackUploaderFactoryChrome : public FeedbackUploaderFactory {
       content::BrowserContext* context) const override;
   bool ServiceIsCreatedWithBrowserContext() const override;
   bool ServiceIsNULLWhileTesting() const override;
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
 };
 

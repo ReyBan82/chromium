@@ -6,9 +6,11 @@
 
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/synchronization/lock.h"
 #include "base/time/time.h"
@@ -49,6 +51,8 @@ class DeckLinkCaptureDelegate
     : public IDeckLinkInputCallback,
       public base::RefCountedThreadSafe<DeckLinkCaptureDelegate> {
  public:
+  REQUIRE_ADOPTION_FOR_REFCOUNTED_TYPE();
+
   DeckLinkCaptureDelegate(
       const media::VideoCaptureDeviceDescriptor& device_descriptor,
       media::VideoCaptureDeviceDeckLinkMac* frame_receiver);
@@ -298,12 +302,17 @@ HRESULT DeckLinkCaptureDelegate::VideoInputFrameArrived(
     // TODO(julien.isorce): Build a gfx::ColorSpace from DeckLink API, .i.e
     // using BMDDisplayModeFlags or BMDDeckLinkFrameMetadataID. See
     // http://crbug.com/959953.
-    frame_receiver_->OnIncomingCapturedData(
-        video_data, video_frame->GetRowBytes() * video_frame->GetHeight(),
-        capture_format, gfx::ColorSpace(),
-        0,      // Rotation.
-        false,  // Vertical flip.
-        now, timestamp);
+    // SAFETY: `video_data` points to the DeckLink frame buffer with byte size
+    // calculated as row bytes * height.
+    auto frame_span = UNSAFE_BUFFERS(base::span(
+        static_cast<const uint8_t*>(video_data),
+        base::CheckMul(video_frame->GetRowBytes(), video_frame->GetHeight())
+            .ValueOrDie<size_t>()));
+    frame_receiver_->OnIncomingCapturedData(frame_span, capture_format,
+                                            gfx::ColorSpace(),
+                                            0,      // Rotation.
+                                            false,  // Vertical flip.
+                                            now, timestamp);
   }
   return S_OK;
 }
@@ -311,8 +320,9 @@ HRESULT DeckLinkCaptureDelegate::VideoInputFrameArrived(
 HRESULT DeckLinkCaptureDelegate::QueryInterface(REFIID iid, void** ppv) {
   DCHECK(thread_checker_.CalledOnValidThread());
   CFUUIDBytes iunknown = CFUUIDGetUUIDBytes(IUnknownUUID);
-  if (memcmp(&iid, &iunknown, sizeof(REFIID)) == 0 ||
-      memcmp(&iid, &IID_IDeckLinkInputCallback, sizeof(REFIID)) == 0) {
+  if (UNSAFE_TODO(memcmp(&iid, &iunknown, sizeof(REFIID))) == 0 ||
+      UNSAFE_TODO(memcmp(&iid, &IID_IDeckLinkInputCallback, sizeof(REFIID))) ==
+          0) {
     *ppv = static_cast<IDeckLinkInputCallback*>(this);
     AddRef();
     return S_OK;
@@ -438,15 +448,15 @@ void VideoCaptureDeviceDeckLinkMac::EnumerateDevices(
 VideoCaptureDeviceDeckLinkMac::VideoCaptureDeviceDeckLinkMac(
     const VideoCaptureDeviceDescriptor& device_descriptor)
     : decklink_capture_delegate_(
-          new DeckLinkCaptureDelegate(device_descriptor, this)) {}
+          base::MakeRefCounted<DeckLinkCaptureDelegate>(device_descriptor,
+                                                        this)) {}
 
 VideoCaptureDeviceDeckLinkMac::~VideoCaptureDeviceDeckLinkMac() {
   decklink_capture_delegate_->ResetVideoCaptureDeviceReference();
 }
 
 void VideoCaptureDeviceDeckLinkMac::OnIncomingCapturedData(
-    const uint8_t* data,
-    size_t length,
+    base::span<const uint8_t> data,
     const VideoCaptureFormat& frame_format,
     const gfx::ColorSpace& color_space,
     int rotation,  // Clockwise.
@@ -456,8 +466,10 @@ void VideoCaptureDeviceDeckLinkMac::OnIncomingCapturedData(
   base::AutoLock lock(lock_);
   if (!client_)
     return;
-  client_->OnIncomingCapturedData(data, length, frame_format, color_space,
-                                  rotation, flip_y, reference_time, timestamp);
+  client_->OnIncomingCapturedData(data, frame_format, color_space, rotation,
+                                  flip_y, reference_time, timestamp,
+                                  /*capture_begin_timestamp=*/std::nullopt,
+                                  /*metadata=*/std::nullopt);
 }
 
 void VideoCaptureDeviceDeckLinkMac::SendErrorString(
@@ -496,6 +508,11 @@ void VideoCaptureDeviceDeckLinkMac::AllocateAndStart(
 void VideoCaptureDeviceDeckLinkMac::StopAndDeAllocate() {
   if (decklink_capture_delegate_.get())
     decklink_capture_delegate_->StopAndDeAllocate();
+}
+
+void VideoCaptureDeviceDeckLinkMac::InvalidateBuffers() {
+  base::AutoLock lock(lock_);
+  client_->InvalidateBuffers();
 }
 
 }  // namespace media

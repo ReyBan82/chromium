@@ -5,53 +5,85 @@
 // clang-format off
 import 'chrome://settings/lazy_load.js';
 
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
-import {SettingsPersonalizationOptionsElement} from 'chrome://settings/lazy_load.js';
-import {loadTimeData, PrivacyPageVisibility, PrivacyPageBrowserProxyImpl, StatusAction, SyncBrowserProxyImpl} from 'chrome://settings/settings.js';
+import type {SettingsPersonalizationOptionsElement} from 'chrome://settings/lazy_load.js';
+import {loadTimeData, PrefService, PrefsBrowserProxy, PrivacyPageBrowserProxyImpl, resetPageVisibilityForTesting, SignedInState, StatusAction, SyncBrowserProxyImpl} from 'chrome://settings/settings.js';
 import {assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+import {isVisible, microtasksFinished} from 'chrome://webui-test/test_util.js';
+// <if expr="_google_chrome and is_chromeos">
+import {OpenWindowProxyImpl} from 'chrome://settings/settings.js';
+import {TestOpenWindowProxy} from 'chrome://webui-test/test_open_window_proxy.js';
+import {isChildVisible} from 'chrome://webui-test/test_util.js';
+// </if>
+// <if expr="_google_chrome or not is_chromeos">
+import {assertEquals} from 'chrome://webui-test/chai_assert.js';
+// </if>
+
 // <if expr="not is_chromeos">
-import {eventToPromise, isVisible} from 'chrome://webui-test/test_util.js';
+import {eventToPromise} from 'chrome://webui-test/test_util.js';
+import {ChromeSigninUserChoice} from 'chrome://settings/settings.js';
+import {webUIListenerCallback} from 'chrome://resources/js/cr.js';
 
 // </if>
 
 import {TestPrivacyPageBrowserProxy} from './test_privacy_page_browser_proxy.js';
 import {TestSyncBrowserProxy} from './test_sync_browser_proxy.js';
+import {TestPrefsBrowserProxy} from './test_prefs_browser_proxy.js';
 
 // clang-format on
 
-suite('PersonalizationOptionsTests_AllBuilds', function() {
+function createBooleanPref(
+    name: string, value: boolean): chrome.settingsPrivate.PrefObject {
+  return {
+    key: name,
+    type: chrome.settingsPrivate.PrefType.BOOLEAN,
+    value: value,
+  };
+}
+
+function getInitialPrefs(): chrome.settingsPrivate.PrefObject[] {
+  return [
+    createBooleanPref('search.suggest_enabled', true),
+    createBooleanPref('url_keyed_anonymized_data_collection.enabled', true),
+    createBooleanPref('page_content_collection.enabled', false),
+    createBooleanPref('price_tracking.email_notifications_enabled', true),
+    createBooleanPref('signin.allowed_on_next_startup', true),
+    createBooleanPref('spellcheck.use_spelling_service', false),
+    createBooleanPref('browser.enable_spellchecking', true),
+    {
+      key: 'spellcheck.dictionaries',
+      type: chrome.settingsPrivate.PrefType.LIST,
+      value: ['en-US'],
+    },
+  ];
+}
+
+suite('AllBuilds', function() {
   let testBrowserProxy: TestPrivacyPageBrowserProxy;
   let syncBrowserProxy: TestSyncBrowserProxy;
-  let customPageVisibility: PrivacyPageVisibility;
   let testElement: SettingsPersonalizationOptionsElement;
+  let prefService: PrefService;
 
   suiteSetup(function() {
     loadTimeData.overrideValues({
-      driveSuggestAvailable: true,
       signinAvailable: true,
       changePriceEmailNotificationsEnabled: true,
+      shouldUseMetricsConsentRestructure: true,
     });
   });
 
   function buildTestElement() {
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
     testElement = document.createElement('settings-personalization-options');
-    testElement.prefs = {
-      signin: {
-        allowed_on_next_startup:
-            {type: chrome.settingsPrivate.PrefType.BOOLEAN, value: true},
-      },
-      profile: {password_manager_leak_detection: {value: true}},
-      safebrowsing:
-          {enabled: {value: true}, scout_reporting_enabled: {value: true}},
-      price_tracking: {email_notifications_enabled: {value: false}},
-    };
-    testElement.pageVisibility = customPageVisibility;
     document.body.appendChild(testElement);
-    flush();
   }
 
-  setup(function() {
+  setup(async function() {
+    const prefsBrowserProxy = new TestPrefsBrowserProxy(getInitialPrefs());
+    PrefsBrowserProxy.setInstance(prefsBrowserProxy);
+    PrefService.resetInstanceForTesting();
+    prefService = PrefService.getInstance();
+    await prefService.whenInitialized();
+
     testBrowserProxy = new TestPrivacyPageBrowserProxy();
     PrivacyPageBrowserProxyImpl.setInstance(testBrowserProxy);
     syncBrowserProxy = new TestSyncBrowserProxy();
@@ -61,54 +93,147 @@ suite('PersonalizationOptionsTests_AllBuilds', function() {
 
   teardown(function() {
     testElement.remove();
-  });
-
-  test('DriveSearchSuggestControl', function() {
-    assertFalse(
-        !!testElement.shadowRoot!.querySelector('#driveSuggestControl'));
-
-    testElement.syncStatus = {
-      signedIn: true,
-      statusAction: StatusAction.NO_ACTION,
-    };
-    flush();
-    assertTrue(!!testElement.shadowRoot!.querySelector('#driveSuggestControl'));
-
-    testElement.syncStatus = {
-      signedIn: true,
-      statusAction: StatusAction.REAUTHENTICATE,
-    };
-    flush();
-    assertFalse(
-        !!testElement.shadowRoot!.querySelector('#driveSuggestControl'));
+    resetPageVisibilityForTesting();
   });
 
   // <if expr="not is_chromeos">
-  test('signinAllowedToggle', function() {
+  test('chromeSigninUserChoiceAvailableInitialization', async function() {
+    assertFalse(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+
+    const infoResponse = {
+      shouldShowSettings: true,
+      choice: ChromeSigninUserChoice.NO_CHOICE,
+      signedInEmail: 'test@gmail.com',
+    };
+    syncBrowserProxy.setGetUserChromeSigninUserChoiceInfoResponse(infoResponse);
+
+    buildTestElement();  // Rebuild the element simulating a fresh start.
+    await syncBrowserProxy.whenCalled('getChromeSigninUserChoiceInfo');
+    await microtasksFinished();
+    assertTrue(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+    const descriptionText =
+        testElement.shadowRoot.querySelector(
+                                  '#chromeSigninChoiceDescription')!.innerHTML;
+    assertTrue(descriptionText.includes(infoResponse.signedInEmail));
+  });
+
+  test('chromeSigninUserChoiceAvailabilityUpdate', async function() {
+    const infoResponse = {
+      shouldShowSettings: true,
+      choice: ChromeSigninUserChoice.NO_CHOICE,
+      signedInEmail: 'test@gmail.com',
+    };
+    syncBrowserProxy.setGetUserChromeSigninUserChoiceInfoResponse(infoResponse);
+
+    buildTestElement();  // Rebuild the element simulating a fresh start.
+    await syncBrowserProxy.whenCalled('getChromeSigninUserChoiceInfo');
+    await microtasksFinished();
+    assertTrue(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+
+    // New response to return should not show.
+    const infoResponse_hide = {
+      shouldShowSettings: false,
+      choice: ChromeSigninUserChoice.NO_CHOICE,
+      signedInEmail: '',
+    };
+
+    webUIListenerCallback(
+        'chrome-signin-user-choice-info-change', infoResponse_hide);
+    await microtasksFinished();
+    assertFalse(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+
+    // Original response to return should show again.
+    webUIListenerCallback(
+        'chrome-signin-user-choice-info-change', infoResponse);
+    await microtasksFinished();
+    assertTrue(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+  });
+
+  test('chromeSigninUserChoiceUpdatedExternally', async function() {
+    const infoResponse = {
+      shouldShowSettings: true,
+      choice: ChromeSigninUserChoice.NO_CHOICE,
+      signedInEmail: 'test@gmail.com',
+    };
+    syncBrowserProxy.setGetUserChromeSigninUserChoiceInfoResponse(infoResponse);
+
+    buildTestElement();  // Rebuild the element simulating a fresh start.
+    await syncBrowserProxy.whenCalled('getChromeSigninUserChoiceInfo');
+    await microtasksFinished();
+    assertTrue(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+
+    // `ChromeSigninUserChoice.NO_CHOICE` leads to no value set.
+    assertEquals(
+        Number(testElement.$.chromeSigninUserChoiceSelection.value),
+        ChromeSigninUserChoice.NO_CHOICE);
+
+    infoResponse.choice = ChromeSigninUserChoice.SIGNIN;
+    webUIListenerCallback(
+        'chrome-signin-user-choice-info-change', infoResponse);
+    await microtasksFinished();
+    assertEquals(
+        Number(testElement.$.chromeSigninUserChoiceSelection.value),
+        ChromeSigninUserChoice.SIGNIN);
+  });
+
+  test(
+      'chromeSigninUserChoiceAvailabilityUpdateWithSnackbarEnabled',
+      async function() {
+        const infoResponse = {
+          shouldShowSettings: true,
+          choice: ChromeSigninUserChoice.ALWAYS_ASK,
+          signedInEmail: 'test@gmail.com',
+        };
+        syncBrowserProxy.setGetUserChromeSigninUserChoiceInfoResponse(
+            infoResponse);
+
+        // Rebuild the element simulating a fresh start.
+        buildTestElement();
+        await syncBrowserProxy.whenCalled('getChromeSigninUserChoiceInfo');
+        await microtasksFinished();
+        assertTrue(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+
+        // Update user selection
+        const menu = testElement.$.chromeSigninUserChoiceSelection;
+        menu.value = ChromeSigninUserChoice.SIGNIN.toString();
+        menu.dispatchEvent(new CustomEvent('change'));
+        await microtasksFinished();
+
+        assertTrue(isVisible(testElement.$.chromeSigninUserChoiceSelection));
+        assertTrue(testElement.$.chromeSigninUserChoiceToast.open);
+      });
+
+  test('signinAllowedToggle', async function() {
     const toggle = testElement.$.signinAllowedToggle;
     assertTrue(isVisible(toggle));
 
     testElement.syncStatus = {
-      signedIn: false,
+      signedInState: SignedInState.SIGNED_OUT,
       statusAction: StatusAction.NO_ACTION,
     };
+    await microtasksFinished();
     // Check initial setup.
     assertTrue(toggle.checked);
-    assertTrue(testElement.prefs.signin.allowed_on_next_startup.value);
-    assertFalse(!!testElement.$.toast.open);
+    assertTrue(
+        prefService.getPref<boolean>('signin.allowed_on_next_startup').value);
+    assertFalse(testElement.$.toast.open);
 
     // When the user is signed out, clicking the toggle should work
     // normally and the restart toast should be opened.
     toggle.click();
+    await microtasksFinished();
     assertFalse(toggle.checked);
-    assertFalse(testElement.prefs.signin.allowed_on_next_startup.value);
+    assertFalse(
+        prefService.getPref<boolean>('signin.allowed_on_next_startup').value);
     assertTrue(testElement.$.toast.open);
 
     // Clicking it again, turns the toggle back on. The toast remains
     // open.
     toggle.click();
+    await microtasksFinished();
     assertTrue(toggle.checked);
-    assertTrue(testElement.prefs.signin.allowed_on_next_startup.value);
+    assertTrue(
+        prefService.getPref<boolean>('signin.allowed_on_next_startup').value);
     assertTrue(testElement.$.toast.open);
 
     // Reset toast.
@@ -120,75 +245,73 @@ suite('PersonalizationOptionsTests_AllBuilds', function() {
       firstSetupInProgress: true,
       statusAction: StatusAction.NO_ACTION,
     };
+    await microtasksFinished();
     assertTrue(toggle.disabled);
     assertTrue(toggle.checked);
 
     testElement.syncStatus = {
-      signedIn: true,
+      signedInState: SignedInState.SYNCING,
       statusAction: StatusAction.NO_ACTION,
     };
+    await microtasksFinished();
     // When the user is signed in, clicking the toggle should open the
     // sign-out dialog.
     assertFalse(
-        !!testElement.shadowRoot!.querySelector('settings-signout-dialog'));
+        !!testElement.shadowRoot.querySelector('settings-signout-dialog'));
     toggle.click();
-    return eventToPromise('cr-dialog-open', testElement)
-        .then(function() {
-          flush();
-          // The toggle remains on.
-          assertTrue(toggle.checked);
-          assertTrue(testElement.prefs.signin.allowed_on_next_startup.value);
-          assertFalse(testElement.$.toast.open);
 
-          const signoutDialog =
-              testElement.shadowRoot!.querySelector('settings-signout-dialog');
-          assertTrue(!!signoutDialog);
-          assertTrue(signoutDialog!.$.dialog.open);
+    await eventToPromise('cr-dialog-open', testElement);
+    await microtasksFinished();
+    // The toggle remains on.
+    assertTrue(toggle.checked);
+    assertTrue(
+        prefService.getPref<boolean>('signin.allowed_on_next_startup').value);
+    assertFalse(testElement.$.toast.open);
 
-          // The user clicks cancel.
-          const cancel = signoutDialog!.shadowRoot!.querySelector<HTMLElement>(
-              '#disconnectCancel')!;
-          cancel.click();
+    let signoutDialog =
+        testElement.shadowRoot.querySelector('settings-signout-dialog');
+    assertTrue(!!signoutDialog);
+    assertTrue(signoutDialog.$.dialog.open);
 
-          return eventToPromise('close', signoutDialog!);
-        })
-        .then(function() {
-          flush();
-          assertFalse(!!testElement.shadowRoot!.querySelector(
-              'settings-signout-dialog'));
+    // The user clicks cancel.
+    const cancel = signoutDialog.shadowRoot.querySelector<HTMLElement>(
+        '#disconnectCancel')!;
+    cancel.click();
 
-          // After the dialog is closed, the toggle remains turned on.
-          assertTrue(toggle.checked);
-          assertTrue(testElement.prefs.signin.allowed_on_next_startup.value);
-          assertFalse(testElement.$.toast.open);
+    await eventToPromise('close', signoutDialog);
+    await microtasksFinished();
+    assertFalse(
+        !!testElement.shadowRoot.querySelector('settings-signout-dialog'));
 
-          // The user clicks the toggle again.
-          toggle.click();
-          return eventToPromise('cr-dialog-open', testElement);
-        })
-        .then(function() {
-          flush();
-          const signoutDialog =
-              testElement.shadowRoot!.querySelector('settings-signout-dialog');
-          assertTrue(!!signoutDialog);
-          assertTrue(signoutDialog!.$.dialog.open);
+    // After the dialog is closed, the toggle remains turned on.
+    assertTrue(toggle.checked);
+    assertTrue(
+        prefService.getPref<boolean>('signin.allowed_on_next_startup').value);
+    assertFalse(testElement.$.toast.open);
 
-          // The user clicks confirm, which signs them out.
-          const disconnectConfirm =
-              signoutDialog!.shadowRoot!.querySelector<HTMLElement>(
-                  '#disconnectConfirm')!;
-          disconnectConfirm.click();
+    // The user clicks the toggle again.
+    toggle.click();
+    await eventToPromise('cr-dialog-open', testElement);
+    await microtasksFinished();
+    signoutDialog =
+        testElement.shadowRoot.querySelector('settings-signout-dialog');
+    assertTrue(!!signoutDialog);
+    assertTrue(signoutDialog.$.dialog.open);
 
-          return eventToPromise('close', signoutDialog!);
-        })
-        .then(function() {
-          flush();
-          // After the dialog is closed, the toggle is turned off and the
-          // toast is shown.
-          assertFalse(toggle.checked);
-          assertFalse(testElement.prefs.signin.allowed_on_next_startup.value);
-          assertTrue(testElement.$.toast.open);
-        });
+    // The user clicks confirm, which signs them out.
+    const disconnectConfirm =
+        signoutDialog.shadowRoot.querySelector<HTMLElement>(
+            '#disconnectConfirm')!;
+    disconnectConfirm.click();
+
+    await eventToPromise('close', signoutDialog);
+    await microtasksFinished();
+    // After the dialog is closed, the toggle is turned off and the
+    // toast is shown.
+    assertFalse(toggle.checked);
+    assertFalse(
+        prefService.getPref<boolean>('signin.allowed_on_next_startup').value);
+    assertTrue(testElement.$.toast.open);
   });
 
   // Tests that the "Allow sign-in" toggle is hidden when signin is not
@@ -203,130 +326,250 @@ suite('PersonalizationOptionsTests_AllBuilds', function() {
     // This is the most common case, as in non-Guest profiles on Desktop
     // platforms pageVisibility is undefined.
     assertTrue(isVisible(
-        testElement.shadowRoot!.querySelector('#searchSuggestToggle')));
+        testElement.shadowRoot.querySelector('#searchSuggestToggle')));
   });
 
   test('searchSuggestToggleHiddenByPageVisibility', function() {
-    customPageVisibility = {
-      searchPrediction: false,
-      networkPrediction: false,
-    };
+    resetPageVisibilityForTesting({
+      privacy: {
+        searchPrediction: false,
+        networkPrediction: false,
+      },
+    });
     buildTestElement();
     assertFalse(isVisible(
-        testElement.shadowRoot!.querySelector('#searchSuggestToggle')));
+        testElement.shadowRoot.querySelector('#searchSuggestToggle')));
   });
 
   test('searchSuggestToggleShownByPageVisibility', function() {
-    customPageVisibility = {
-      searchPrediction: true,
-      networkPrediction: false,
-    };
+    resetPageVisibilityForTesting({
+      privacy: {
+        searchPrediction: true,
+        networkPrediction: false,
+      },
+    });
     buildTestElement();
     assertTrue(isVisible(
-        testElement.shadowRoot!.querySelector('#searchSuggestToggle')));
+        testElement.shadowRoot.querySelector('#searchSuggestToggle')));
   });
   // </if>
 
-  test('priceEmailNotificationsToggleHidden', function() {
+  test('searchAggregatorSuggestNotShown', function() {
+    loadTimeData.overrideValues({showSearchAggregatorSuggest: false});
+    buildTestElement();  // Rebuild the element after modifying loadTimeData.
+    assertFalse(isVisible(testElement.shadowRoot.querySelector(
+        '#searchAggregatorSuggestToggle')));
+  });
+
+  test('searchAggregatorSuggestShown', function() {
+    loadTimeData.overrideValues({showSearchAggregatorSuggest: true});
+    buildTestElement();  // Rebuild the element after modifying loadTimeData.
+    assertTrue(isVisible(testElement.shadowRoot.querySelector(
+        '#searchAggregatorSuggestToggle')));
+  });
+
+  test('priceEmailNotificationsToggleHidden', async function() {
     loadTimeData.overrideValues(
         {'changePriceEmailNotificationsEnabled': false});
     buildTestElement();  // Rebuild the element after modifying loadTimeData.
 
-    assertFalse(!!testElement.shadowRoot!.querySelector(
+    assertFalse(!!testElement.shadowRoot.querySelector(
         '#priceEmailNotificationsToggle'));
 
     testElement.syncStatus = {
-      signedIn: true,
+      signedInState: SignedInState.SYNCING,
       statusAction: StatusAction.NO_ACTION,
     };
-    flush();
-    assertFalse(!!testElement.shadowRoot!.querySelector(
+    await microtasksFinished();
+    assertFalse(!!testElement.shadowRoot.querySelector(
         '#priceEmailNotificationsToggle'));
   });
+
+  test(
+      'priceEmailNotificationsToggleShownForSignedInUsersWithFlag',
+      async function() {
+        loadTimeData.overrideValues({
+          'changePriceEmailNotificationsEnabled': true,
+          // Flag is enabled.
+          'replaceSyncPromosWithSignInPromos': true,
+        });
+        // Rebuild the element after modifying loadTimeData.
+        buildTestElement();
+
+        testElement.syncStatus = {
+          signedInState: SignedInState.SIGNED_IN,
+          statusAction: StatusAction.NO_ACTION,
+        };
+        await microtasksFinished();
+        assertTrue(!!testElement.shadowRoot.querySelector(
+            '#priceEmailNotificationsToggle'));
+      });
+
+  test(
+      'priceEmailNotificationsToggleShownForSyncingUsersWithFlag',
+      async function() {
+        loadTimeData.overrideValues({
+          'changePriceEmailNotificationsEnabled': true,
+          // Flag is enabled.
+          'replaceSyncPromosWithSignInPromos': true,
+        });
+        // Rebuild the element after modifying loadTimeData.
+        buildTestElement();
+
+        testElement.syncStatus = {
+          signedInState: SignedInState.SYNCING,
+          statusAction: StatusAction.NO_ACTION,
+        };
+        await microtasksFinished();
+        assertTrue(!!testElement.shadowRoot.querySelector(
+            '#priceEmailNotificationsToggle'));
+      });
+
+  // <if expr="is_chromeos">
+  test(
+      'priceEmailNotificationsToggleHiddenForSignedInUsersWithoutFlag',
+      async function() {
+        loadTimeData.overrideValues({
+          'changePriceEmailNotificationsEnabled': true,
+          // Flag is disabled.
+          'replaceSyncPromosWithSignInPromos': false,
+        });
+        // Rebuild the element after modifying loadTimeData.
+        buildTestElement();
+
+        testElement.syncStatus = {
+          signedInState: SignedInState.SIGNED_IN,
+          statusAction: StatusAction.NO_ACTION,
+        };
+        await microtasksFinished();
+        assertFalse(!!testElement.shadowRoot.querySelector(
+            '#priceEmailNotificationsToggle'));
+      });
+
+  test(
+      'priceEmailNotificationsToggleShownForSyncingUsersWithoutFlag',
+      async function() {
+        loadTimeData.overrideValues({
+          'changePriceEmailNotificationsEnabled': true,
+          // Flag is disabled.
+          'replaceSyncPromosWithSignInPromos': false,
+        });
+        // Rebuild the element after modifying loadTimeData.
+        buildTestElement();
+
+        testElement.syncStatus = {
+          signedInState: SignedInState.SYNCING,
+          statusAction: StatusAction.NO_ACTION,
+        };
+        await microtasksFinished();
+        assertTrue(!!testElement.shadowRoot.querySelector(
+            '#priceEmailNotificationsToggle'));
+      });
+  // </if>
 });
 
-suite('PersonalizationOptionsTests_OfficialBuild', function() {
+// <if expr="_google_chrome">
+suite('OfficialBuild', function() {
   let testBrowserProxy: TestPrivacyPageBrowserProxy;
   let testElement: SettingsPersonalizationOptionsElement;
+  let prefService: PrefService;
 
-  setup(function() {
-    testBrowserProxy = new TestPrivacyPageBrowserProxy();
-    PrivacyPageBrowserProxyImpl.setInstance(testBrowserProxy);
+  suiteSetup(function() {
+    loadTimeData.overrideValues({
+      signinAvailable: true,
+      changePriceEmailNotificationsEnabled: true,
+      shouldUseMetricsConsentRestructure: true,
+    });
+  });
+
+  function buildTestElement() {
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
     testElement = document.createElement('settings-personalization-options');
     document.body.appendChild(testElement);
+  }
+
+  setup(async function() {
+    const prefsBrowserProxy = new TestPrefsBrowserProxy(getInitialPrefs());
+    PrefsBrowserProxy.setInstance(prefsBrowserProxy);
+    PrefService.resetInstanceForTesting();
+    prefService = PrefService.getInstance();
+    await prefService.whenInitialized();
+
+    testBrowserProxy = new TestPrivacyPageBrowserProxy();
+    PrivacyPageBrowserProxyImpl.setInstance(testBrowserProxy);
+    buildTestElement();
   });
 
   teardown(function() {
     testElement.remove();
   });
 
-  // On ChromeOS Ash, the spellcheck toggle is in OS Settings, not browser
+  // On ChromeOS, the spellcheck toggle is in OS Settings, not browser
   // settings. TODO (https://www.crbug.com/1396704): Add this test in the OS
   // settings test for the OS version of personalization options, once OS
   // Settings supports TypeScript tests.
-  // <if expr="not chromeos_ash">
-  test('Spellcheck toggle', function() {
-    testElement.prefs = {
-      profile: {password_manager_leak_detection: {value: true}},
-      safebrowsing:
-          {enabled: {value: true}, scout_reporting_enabled: {value: true}},
-      spellcheck: {dictionaries: {value: ['en-US']}},
-    };
-    flush();
-    const shadowRoot = testElement.shadowRoot!;
+  // <if expr="not is_chromeos">
+  test('Spellcheck toggle', async function() {
+    prefService.setPrefValue('spellcheck.dictionaries', ['en-US']);
+    await microtasksFinished();
+    const shadowRoot = testElement.shadowRoot;
     assertFalse(
         shadowRoot.querySelector<HTMLElement>('#spellCheckControl')!.hidden);
 
-    testElement.prefs = {
-      profile: {password_manager_leak_detection: {value: true}},
-      safebrowsing:
-          {enabled: {value: true}, scout_reporting_enabled: {value: true}},
-      spellcheck: {dictionaries: {value: []}},
-    };
-    flush();
+    prefService.setPrefValue('spellcheck.dictionaries', []);
+    await microtasksFinished();
     assertTrue(
         shadowRoot.querySelector<HTMLElement>('#spellCheckControl')!.hidden);
 
-    testElement.prefs = {
-      profile: {password_manager_leak_detection: {value: true}},
-      safebrowsing:
-          {enabled: {value: true}, scout_reporting_enabled: {value: true}},
-      browser: {enable_spellchecking: {value: false}},
-      spellcheck: {
-        dictionaries: {value: ['en-US']},
-        use_spelling_service: {value: false},
-      },
-    };
-    flush();
+    prefService.setPrefValue('spellcheck.dictionaries', ['en-US']);
+    prefService.setPrefValue('spellcheck.use_spelling_service', false);
+    await microtasksFinished();
     shadowRoot.querySelector<HTMLElement>('#spellCheckControl')!.click();
-    assertTrue(testElement.prefs.spellcheck.use_spelling_service.value);
+    await microtasksFinished();
+    assertTrue(
+        prefService.getPref<boolean>('spellcheck.use_spelling_service').value);
   });
   // </if>
 
   // Only the spellcheck link is shown on Chrome OS in Browser settings.
-  // <if expr="chromeos_ash">
-  test('Spellcheck link', function() {
-    testElement.prefs = {
-      profile: {password_manager_leak_detection: {value: true}},
-      safebrowsing:
-          {enabled: {value: true}, scout_reporting_enabled: {value: true}},
-      spellcheck: {dictionaries: {value: ['en-US']}},
-    };
-    flush();
-    const shadowRoot = testElement.shadowRoot!;
+  // <if expr="is_chromeos">
+  test('Spellcheck link', async function() {
+    prefService.setPrefValue('spellcheck.dictionaries', ['en-US']);
+    await microtasksFinished();
+    const shadowRoot = testElement.shadowRoot;
     assertFalse(
         shadowRoot.querySelector<HTMLElement>('#spellCheckLink')!.hidden);
 
-    testElement.prefs = {
-      profile: {password_manager_leak_detection: {value: true}},
-      safebrowsing:
-          {enabled: {value: true}, scout_reporting_enabled: {value: true}},
-      spellcheck: {dictionaries: {value: []}},
-    };
-    flush();
+    prefService.setPrefValue('spellcheck.dictionaries', []);
+    await microtasksFinished();
     assertTrue(
         shadowRoot.querySelector<HTMLElement>('#spellCheckLink')!.hidden);
   });
+
+  test(
+      'Metrics row hidden when metrics consent restructure is enabled',
+      function() {
+        assertFalse(isChildVisible(testElement, '#metricsReportingLink'));
+      });
+
+  test(
+      'Metrics row links to OS Settings Privacy Hub subpage', async function() {
+        const openWindowProxy = new TestOpenWindowProxy();
+        OpenWindowProxyImpl.setInstance(openWindowProxy);
+
+        loadTimeData.overrideValues(
+            {shouldUseMetricsConsentRestructure: false});
+        buildTestElement();
+
+        assertTrue(isChildVisible(testElement, '#metricsReportingLink'));
+
+        testElement.shadowRoot
+            .querySelector<HTMLElement>('#metricsReportingLink')!.click();
+        const url = await openWindowProxy.whenCalled('openUrl');
+        const expectedUrl =
+            loadTimeData.getString('osSettingsPrivacyHubSubpageUrl');
+        assertEquals(expectedUrl, url);
+      });
   // </if>
 });
+// </if>

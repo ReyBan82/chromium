@@ -4,21 +4,21 @@
 
 #include "ui/display/util/gpu_info_util.h"
 
-#include "base/strings/string_piece.h"
+#include <string_view>
 
 namespace display {
 
-base::Value BuildGpuInfoEntry(base::StringPiece description,
-                              base::StringPiece value) {
-  base::Value::Dict dict;
+base::Value BuildGpuInfoEntry(std::string_view description,
+                              std::string_view value) {
+  base::DictValue dict;
   dict.Set("description", description);
   dict.Set("value", value);
   return base::Value(std::move(dict));
 }
 
-base::Value::Dict BuildGpuInfoEntry(base::StringPiece description,
-                                    base::Value value) {
-  base::Value::Dict dict;
+base::DictValue BuildGpuInfoEntry(std::string_view description,
+                                  base::Value value) {
+  base::DictValue dict;
   dict.Set("description", description);
   dict.Set("value", std::move(value));
   return dict;

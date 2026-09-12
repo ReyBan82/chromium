@@ -117,7 +117,7 @@ SyncedNetworkMetricsLogger::SyncedNetworkMetricsLogger(
 
   if (network_state_handler) {
     network_state_handler_ = network_state_handler;
-    network_state_handler_observer_.Observe(network_state_handler_);
+    network_state_handler_observer_.Observe(network_state_handler_.get());
   }
 
   if (network_connection_handler) {
@@ -228,7 +228,7 @@ bool SyncedNetworkMetricsLogger::IsEligible(const NetworkState* network) {
 void SyncedNetworkMetricsLogger::OnConnectErrorGetProperties(
     const std::string& error_name,
     const std::string& service_path,
-    absl::optional<base::Value::Dict> shill_properties) {
+    std::optional<base::DictValue> shill_properties) {
   if (!shill_properties) {
     base::UmaHistogramBoolean(kConnectionResultManualHistogram, false);
     base::UmaHistogramEnumeration(kConnectionFailureReasonManualHistogram,
@@ -262,6 +262,11 @@ void SyncedNetworkMetricsLogger::RecordApplyNetworkFailed() {
   base::UmaHistogramBoolean(kApplyResultHistogram, false);
 }
 
+void SyncedNetworkMetricsLogger::RecordApplyGenerateLocalNetworkConfig(
+    bool success) {
+  base::UmaHistogramBoolean(kApplyGenerateLocalNetworkConfigHistogram, success);
+}
+
 void SyncedNetworkMetricsLogger::RecordApplyNetworkFailureReason(
     ApplyNetworkFailureReason error_enum,
     const std::string& error_string) {
@@ -282,9 +287,8 @@ void SyncedNetworkMetricsLogger::RecordTotalCount(int count) {
 void SyncedNetworkMetricsLogger::RecordZeroNetworksEligibleForSync(
     base::flat_set<NetworkEligibilityStatus> network_eligibility_status_codes) {
   // There is an eligible network that was not synced for some reason.
-  if (network_eligibility_status_codes.find(
-          NetworkEligibilityStatus::kNetworkIsEligible) !=
-      network_eligibility_status_codes.end()) {
+  if (network_eligibility_status_codes.contains(
+          NetworkEligibilityStatus::kNetworkIsEligible)) {
     base::UmaHistogramEnumeration(kZeroNetworksSyncedReasonHistogram,
                                   NetworkEligibilityStatus::kNetworkIsEligible);
     return;

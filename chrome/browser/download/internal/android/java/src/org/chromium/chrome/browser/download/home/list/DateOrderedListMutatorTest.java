@@ -4,8 +4,6 @@
 
 package org.chromium.chrome.browser.download.home.list;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -19,16 +17,15 @@ import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.base.test.util.JniMocker;
 import org.chromium.chrome.browser.download.home.DownloadManagerUiConfig;
 import org.chromium.chrome.browser.download.home.JustNowProvider;
 import org.chromium.chrome.browser.download.home.StableIds;
 import org.chromium.chrome.browser.download.home.filter.Filters;
 import org.chromium.chrome.browser.download.home.filter.OfflineItemFilterSource;
 import org.chromium.chrome.browser.download.home.filter.TypeOfflineItemFilter;
+import org.chromium.chrome.browser.download.home.list.ListItem.CardDividerListItem.Position;
 import org.chromium.chrome.browser.download.home.list.ListItem.OfflineItemListItem;
 import org.chromium.chrome.browser.download.home.list.ListItem.SectionHeaderListItem;
 import org.chromium.chrome.browser.download.home.list.ListItem.SectionHeaderType;
@@ -41,9 +38,7 @@ import org.chromium.components.offline_items_collection.OfflineItemFilter;
 import org.chromium.components.offline_items_collection.OfflineItemState;
 import org.chromium.components.url_formatter.SchemeDisplay;
 import org.chromium.components.url_formatter.UrlFormatter;
-import org.chromium.components.url_formatter.UrlFormatterJni;
 import org.chromium.ui.modelutil.ListObservable.ListObserver;
-import org.chromium.url.GURL;
 import org.chromium.url.JUnitTestGURLs;
 
 import java.util.ArrayList;
@@ -55,22 +50,14 @@ import java.util.List;
 
 /** Unit tests for the DateOrderedListMutator class. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class DateOrderedListMutatorTest {
-    @Mock
-    private OfflineItemFilterSource mSource;
+    @Mock private OfflineItemFilterSource mSource;
 
-    @Mock
-    private ListObserver<Void> mObserver;
-    @Rule
-    public JniMocker mJniMocker = new JniMocker();
-    @Mock
-    private UrlFormatter.Natives mUrlFormatterJniMock;
+    @Mock private ListObserver<Void> mObserver;
 
     private ListItemModel mModel;
 
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
     private ListMutationController mMutationController;
 
@@ -79,10 +66,6 @@ public class DateOrderedListMutatorTest {
     @Before
     public void setUp() {
         mModel = new ListItemModel();
-        mJniMocker.mock(UrlFormatterJni.TEST_HOOKS, mUrlFormatterJniMock);
-        when(mUrlFormatterJniMock.formatUrlForSecurityDisplay(
-                     any(), eq(SchemeDisplay.OMIT_HTTP_AND_HTTPS)))
-                .then(inv -> ((GURL) (inv.getArgument(0))).getSpec());
     }
 
     @After
@@ -91,10 +74,7 @@ public class DateOrderedListMutatorTest {
         mAccessibilityMode = false;
     }
 
-    /**
-     * Action                               List
-     * 1. Set()                             [ ]
-     */
+    /** Action List 1. Set() [ ] */
     @Test
     public void testNoItemsAndSetup() {
         when(mSource.getItems()).thenReturn(Collections.emptySet());
@@ -104,11 +84,7 @@ public class DateOrderedListMutatorTest {
         Assert.assertEquals(0, mModel.size());
     }
 
-    /**
-     * Action                               List
-     * 1. Set(item1 @ 1:00 1/1/2018)        [ DATE    @ 0:00 1/1/2018,
-     *                                        item1   @ 1:00 1/1/2018 ]
-     */
+    /** Action List 1. Set(item1 @ 1:00 1/1/2018) [ DATE @ 0:00 1/1/2018, item1 @ 1:00 1/1/2018 ] */
     @Test
     public void testSingleItem() {
         OfflineItem item1 = buildItem("1", buildCalendar(2018, 1, 1, 1), OfflineItemFilter.VIDEO);
@@ -121,11 +97,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 2:00 1/1/2018,        [ DATE    @ 0:00 1/1/2018,
-     *        item2 @ 1:00 1/1/2018)
-     *                                        item1   @ 2:00 1/1/2018,
-     *                                        item2   @ 1:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 2:00 1/1/2018, [ DATE @ 0:00 1/1/2018, item2 @ 1:00 1/1/2018)
+     * item1 @ 2:00 1/1/2018, item2 @ 1:00 1/1/2018 ]
      */
     @Test
     public void testTwoItemsSameDay() {
@@ -141,10 +114,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                     List
-     * 1. Set(item1 @ 2:00 1/1/2018 Video,        [ DATE    @ 0:00 1/1/2018,
-     *        item2 @ 1:00 1/1/2018 Audio)          item1   @ 2:00 1/1/2018,
-     *                                              item2   @ 1:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 2:00 1/1/2018 Video, [ DATE @ 0:00 1/1/2018, item2 @ 1:00 1/1/2018
+     * Audio) item1 @ 2:00 1/1/2018, item2 @ 1:00 1/1/2018 ]
      */
     @Test
     public void testTwoItemsSameDayDifferentSection() {
@@ -160,10 +131,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 1:00 1/1/2018         [ DATE    Just Now,
-     *        IN_PROGRESS)
-     *                                        item1   @ 1:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 1:00 1/1/2018 [ DATE Just Now, IN_PROGRESS) item1 @ 1:00 1/1/2018
+     * ]
      */
     @Test
     public void testSingleItemInJustNowSection() {
@@ -178,12 +147,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 1:00 1/1/2018         [ DATE    Just Now,
-     *              Video IN_PROGRESS,
-     *        item2 @ 1:00 1/1/2018           item1   @ 1:00 1/1/2018,
-     *              Audio COMPLETE Recent)
-     *                                        item2   @ 1:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 1:00 1/1/2018 [ DATE Just Now, Video IN_PROGRESS, item2 @ 1:00
+     * 1/1/2018 item1 @ 1:00 1/1/2018, Audio COMPLETE Recent) item2 @ 1:00 1/1/2018 ]
      */
     @Test
     public void testMultipleSectionsInJustNowSection() {
@@ -204,14 +169,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 0:10 1/2/2018         [ DATE    Just Now,
-     *              Video COMPLETE,
-     *        item2 @ 23:55 1/1/2018         [ DATE    Just Now,
-     *              Video COMPLETE,
+     * Action List 1. Set(item1 @ 0:10 1/2/2018 [ DATE Just Now, Video COMPLETE, item2 @ 23:55
+     * 1/1/2018 [ DATE Just Now, Video COMPLETE,
      *
-     *        item3 @ 10:00 1/1/2018           DATE    1/1/2018
-     *              Audio COMPLETE)           item3   @ 1:00 1/1/2018 ]
+     * <p>item3 @ 10:00 1/1/2018 DATE 1/1/2018 Audio COMPLETE) item3 @ 1:00 1/1/2018 ]
      */
     @Test
     public void testRecentItemBeforeMidnightShowsInJustNowSection() {
@@ -238,19 +199,11 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 1:00 1/1/2018         [ DATE    Just Now,
-     *        PAUSED)
-     *                                        item1   @ 1:00 1/1/2018 ]
-     * 2. Update(item1 @ 1:00 1/1/2018      [ DATE    Just Now,
-     *        Resume --> IN_PROGRESS)
-     *                                        item1   @ 1:00 1/1/2018 ]
-     * 3. Update(item1 @ 1:00 1/1/2018      [ DATE    Just Now,
-     *       COMPLETE, completion time now)
-     *                                        item1   @ 1:00 1/1/2018 ]
-     * 4. Update(item1 @ 1:00 1/1/2018      [ DATE    Just Now,
-     *    COMPLETE, completion time 1/1/2017)
-     *                                        item1   @ 1:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 1:00 1/1/2018 [ DATE Just Now, PAUSED) item1 @ 1:00 1/1/2018 ] 2.
+     * Update(item1 @ 1:00 1/1/2018 [ DATE Just Now, Resume --> IN_PROGRESS) item1 @ 1:00 1/1/2018 ]
+     * 3. Update(item1 @ 1:00 1/1/2018 [ DATE Just Now, COMPLETE, completion time now) item1 @ 1:00
+     * 1/1/2018 ] 4. Update(item1 @ 1:00 1/1/2018 [ DATE Just Now, COMPLETE, completion time
+     * 1/1/2017) item1 @ 1:00 1/1/2018 ]
      */
     @Test
     public void testItemDoesNotMoveOutOfJustNowSection() {
@@ -298,12 +251,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 1:00 2/1/2018         [ DATE    Just Now,
-     *              Video IN_PROGRESS,
-     *        item2 @ 1:00 1/1/2018           item1   @ 1:00 2/1/2018,
-     *              Audio COMPLETE)           DATE    1/1/2018
-     *                                        item2   @ 1:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 1:00 2/1/2018 [ DATE Just Now, Video IN_PROGRESS, item2 @ 1:00
+     * 1/1/2018 item1 @ 1:00 2/1/2018, Audio COMPLETE) DATE 1/1/2018 item2 @ 1:00 1/1/2018 ]
      */
     @Test
     public void testJustNowSectionWithOtherDates() {
@@ -321,13 +270,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 0:00 1/2/2018,        [ DATE    @ 0:00 1/2/2018,
-     *        item2 @ 0:00 1/1/2018)
-     *                                        item1   @ 0:00 1/2/2018,
-     *                                        DATE  @ 0:00 1/1/2018,
+     * Action List 1. Set(item1 @ 0:00 1/2/2018, [ DATE @ 0:00 1/2/2018, item2 @ 0:00 1/1/2018)
+     * item1 @ 0:00 1/2/2018, DATE @ 0:00 1/1/2018,
      *
-     *                                        item2   @ 0:00 1/1/2018 ]
+     * <p>item2 @ 0:00 1/1/2018 ]
      */
     @Test
     public void testTwoItemsDifferentDayMatchHeader() {
@@ -344,11 +290,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 4:00 1/1/2018,        [ DATE    @ 0:00 1/1/2018,
-     *        item2 @ 5:00 1/1/2018)
-     *                                        item2   @ 5:00 1/1/2018,
-     *                                        item1   @ 4:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 4:00 1/1/2018, [ DATE @ 0:00 1/1/2018, item2 @ 5:00 1/1/2018)
+     * item2 @ 5:00 1/1/2018, item1 @ 4:00 1/1/2018 ]
      */
     @Test
     public void testTwoItemsSameDayOutOfOrder() {
@@ -364,12 +307,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                      List
-     * 1. Set(item1 @ 4:00 1/2/2018 Video,         [ DATE      @ 0:00 1/2/2018,
-     *        item2 @ 5:00 1/1/2018 Video)
-     *                                               item2     @ 4:00 1/2/2018,
-     *                                               DATE      @ 0:00 1/1/2018,
-     *                                               item1     @ 5:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 4:00 1/2/2018 Video, [ DATE @ 0:00 1/2/2018, item2 @ 5:00 1/1/2018
+     * Video) item2 @ 4:00 1/2/2018, DATE @ 0:00 1/1/2018, item1 @ 5:00 1/1/2018 ]
      */
     @Test
     public void testTwoItemsDifferentDaySameSection() {
@@ -386,12 +325,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                      List
-     * 1. Set(item1 @ 4:00 1/2/2018 Video,         [ DATE      @ 0:00 1/2/2018,
-     *        item2 @ 5:00 1/1/2018 Page )
-     *                                               item2     @ 4:00 1/2/2018,
-     *                                               DATE      @ 0:00 1/1/2018,
-     *                                               item1     @ 5:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 4:00 1/2/2018 Video, [ DATE @ 0:00 1/2/2018, item2 @ 5:00 1/1/2018
+     * Page ) item2 @ 4:00 1/2/2018, DATE @ 0:00 1/1/2018, item1 @ 5:00 1/1/2018 ]
      */
     @Test
     public void testTwoItemsDifferentDayDifferentSection() {
@@ -408,12 +343,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 4:00 1/1/2018,        [ DATE   @ 0:00 1/2/2018,
-     *        item2 @ 3:00 1/2/2018)
-     *                                        item2  @ 3:00 1/2/2018,
-     *                                        DATE   @ 0:00 1/1/2018,
-     *                                        item1  @ 4:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 4:00 1/1/2018, [ DATE @ 0:00 1/2/2018, item2 @ 3:00 1/2/2018)
+     * item2 @ 3:00 1/2/2018, DATE @ 0:00 1/1/2018, item1 @ 4:00 1/1/2018 ]
      */
     @Test
     public void testTwoItemsDifferentDayOutOfOrder() {
@@ -430,11 +361,9 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set()                             [ ]
+     * Action List 1. Set() [ ]
      *
-     * 2. Add(item1 @ 4:00 1/1/2018)        [ DATE    @ 0:00 1/1/2018,
-     *                                        item1  @ 4:00 1/1/2018 ]
+     * <p>2. Add(item1 @ 4:00 1/1/2018) [ DATE @ 0:00 1/1/2018, item1 @ 4:00 1/1/2018 ]
      */
     @Test
     public void testAddItemToEmptyList() {
@@ -451,17 +380,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 1:00 1/2/2018)        [ DATE    @ 0:00 1/2/2018,
-     *                                        item1  @ 1:00 1/2/2018 ]
-     * 2. Add(item2 @ 2:00 1/2/2018)        [ DATE    @ 0:00 1/2/2018,
-     *                                        item2  @ 2:00 1/2/2018
-     *                                        item1  @ 1:00 1/2/2018 ]
-     * 3. Add(item3 @ 2:00 1/3/2018)        [ DATE    @ 0:00 1/3/2018,
-     *                                        item3  @ 2:00 1/3/2018
-     *                                        DATE    @ 0:00 1/2/2018,
-     *                                        item2  @ 2:00 1/2/2018
-     *                                        item1  @ 1:00 1/2/2018 ]
+     * Action List 1. Set(item1 @ 1:00 1/2/2018) [ DATE @ 0:00 1/2/2018, item1 @ 1:00 1/2/2018 ] 2.
+     * Add(item2 @ 2:00 1/2/2018) [ DATE @ 0:00 1/2/2018, item2 @ 2:00 1/2/2018 item1 @ 1:00
+     * 1/2/2018 ] 3. Add(item3 @ 2:00 1/3/2018) [ DATE @ 0:00 1/3/2018, item3 @ 2:00 1/3/2018 DATE @
+     * 0:00 1/2/2018, item2 @ 2:00 1/2/2018 item1 @ 1:00 1/2/2018 ]
      */
     @Test
     public void testAddFirstItemToList() {
@@ -491,19 +413,13 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 4:00 1/2/2018)        [ DATE    @ 0:00 1/2/2018,
-     *                                        item1  @ 4:00 1/2/2018 ]
+     * Action List 1. Set(item1 @ 4:00 1/2/2018) [ DATE @ 0:00 1/2/2018, item1 @ 4:00 1/2/2018 ]
      *
-     * 2. Add(item2 @ 3:00 1/2/2018)        [ DATE    @ 0:00 1/2/2018,
-     *                                        item1  @ 4:00 1/2/2018
-     *                                        item2  @ 3:00 1/2/2018 ]
+     * <p>2. Add(item2 @ 3:00 1/2/2018) [ DATE @ 0:00 1/2/2018, item1 @ 4:00 1/2/2018 item2 @ 3:00
+     * 1/2/2018 ]
      *
-     * 3. Add(item3 @ 4:00 1/1/2018)        [ DATE    @ 0:00 1/2/2018,
-     *                                        item1  @ 4:00 1/2/2018
-     *                                        item2  @ 3:00 1/2/2018,
-     *                                        DATE    @ 0:00 1/1/2018,
-     *                                        item3  @ 4:00 1/1/2018
+     * <p>3. Add(item3 @ 4:00 1/1/2018) [ DATE @ 0:00 1/2/2018, item1 @ 4:00 1/2/2018 item2 @ 3:00
+     * 1/2/2018, DATE @ 0:00 1/1/2018, item3 @ 4:00 1/1/2018
      */
     @Test
     public void testAddLastItemToList() {
@@ -533,12 +449,11 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 2:00 1/2/2018)        [ DATE    @ 0:00 1/2/2018,
+     * Action List 1. Set(item1 @ 2:00 1/2/2018) [ DATE @ 0:00 1/2/2018,
      *
-     *                                        item1  @ 2:00 1/2/2018 ]
+     * <p>item1 @ 2:00 1/2/2018 ]
      *
-     * 2. Remove(item1)                     [ ]
+     * <p>2. Remove(item1) [ ]
      */
     @Test
     public void testRemoveOnlyItemInList() {
@@ -554,14 +469,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 3:00 1/2/2018,        [ DATE    @ 0:00 1/2/2018,
-     *        item2 @ 2:00 1/2/2018)
-     *                                        item1  @ 3:00 1/2/2018,
-     *                                        item2  @ 2:00 1/2/2018 ]
+     * Action List 1. Set(item1 @ 3:00 1/2/2018, [ DATE @ 0:00 1/2/2018, item2 @ 2:00 1/2/2018)
+     * item1 @ 3:00 1/2/2018, item2 @ 2:00 1/2/2018 ]
      *
-     * 2. Remove(item1)                     [ DATE    @ 0:00 1/2/2018,
-     *                                        item2  @ 2:00 1/2/2018 ]
+     * <p>2. Remove(item1) [ DATE @ 0:00 1/2/2018, item2 @ 2:00 1/2/2018 ]
      */
     @Test
     public void testRemoveFirstItemInListSameDay() {
@@ -580,14 +491,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 3:00 1/2/2018,        [ DATE    @ 0:00 1/2/2018,
-     *        item2 @ 2:00 1/2/2018)
-     *                                        item1  @ 3:00 1/2/2018,
-     *                                        item2  @ 2:00 1/2/2018 ]
+     * Action List 1. Set(item1 @ 3:00 1/2/2018, [ DATE @ 0:00 1/2/2018, item2 @ 2:00 1/2/2018)
+     * item1 @ 3:00 1/2/2018, item2 @ 2:00 1/2/2018 ]
      *
-     * 2. Remove(item2)                     [ DATE    @ 0:00 1/2/2018,
-     *                                        item1  @ 3:00 1/2/2018 ]
+     * <p>2. Remove(item2) [ DATE @ 0:00 1/2/2018, item1 @ 3:00 1/2/2018 ]
      */
     @Test
     public void testRemoveLastItemInListSameDay() {
@@ -606,15 +513,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 3:00 1/3/2018,        [ DATE    @ 0:00 1/3/2018,
-     *        item2 @ 2:00 1/2/2018)
-     *                                        item1  @ 3:00 1/3/2018,
-     *                                        DATE    @ 0:00 1/2/2018,
-     *                                        item2  @ 2:00 1/2/2018 ]
+     * Action List 1. Set(item1 @ 3:00 1/3/2018, [ DATE @ 0:00 1/3/2018, item2 @ 2:00 1/2/2018)
+     * item1 @ 3:00 1/3/2018, DATE @ 0:00 1/2/2018, item2 @ 2:00 1/2/2018 ]
      *
-     * 2. Remove(item2)                     [ DATE    @ 0:00 1/3/2018,
-     *                                        item1  @ 3:00 1/3/2018 ]
+     * <p>2. Remove(item2) [ DATE @ 0:00 1/3/2018, item1 @ 3:00 1/3/2018 ]
      */
     @Test
     public void testRemoveLastItemInListWithMultipleDays() {
@@ -633,17 +535,13 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set()                             [ ]
+     * Action List 1. Set() [ ]
      *
-     * 2. Add(item1 @ 6:00  1/1/2018,       [ DATE    @ 0:00  1/2/2018,
-     *        item2 @ 4:00  1/1/2018,
-     *        item3 @ 10:00 1/2/2018,         item4  @ 12:00 1/2/2018,
-     *        item4 @ 12:00 1/2/2018)         item3  @ 10:00 1/2/2018
-     *                                        DATE    @ 0:00  1/1/2018,
+     * <p>2. Add(item1 @ 6:00 1/1/2018, [ DATE @ 0:00 1/2/2018, item2 @ 4:00 1/1/2018, item3 @ 10:00
+     * 1/2/2018, item4 @ 12:00 1/2/2018, item4 @ 12:00 1/2/2018) item3 @ 10:00 1/2/2018 DATE @ 0:00
+     * 1/1/2018,
      *
-     *                                        item1  @ 6:00  1/1/2018,
-     *                                        item2  @ 4:00  1/1/2018 ]
+     * <p>item1 @ 6:00 1/1/2018, item2 @ 4:00 1/1/2018 ]
      */
     @Test
     public void testAddMultipleItems() {
@@ -669,20 +567,15 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set()                             [ ]
+     * Action List 1. Set() [ ]
      *
-     * 2. Add(item3 @ 4:00 1/1/2018)        [ DATE    @ 0:00 1/1/2018,
-     *                                        item3  @ 4:00 1/1/2018 ]
+     * <p>2. Add(item3 @ 4:00 1/1/2018) [ DATE @ 0:00 1/1/2018, item3 @ 4:00 1/1/2018 ]
      *
-     * 3. Add(item1 @ 4:00 1/1/2018)        [ DATE    @ 0:00 1/1/2018,
-     *                                        item1  @ 4:00 1/1/2018,
-     *                                        item3  @ 4:00 1/1/2018 ]
+     * <p>3. Add(item1 @ 4:00 1/1/2018) [ DATE @ 0:00 1/1/2018, item1 @ 4:00 1/1/2018, item3 @ 4:00
+     * 1/1/2018 ]
      *
-     * 4. Add(item2 @ 4:00 1/1/2018)        [ DATE    @ 0:00 1/1/2018,
-     *                                        item1  @ 4:00 1/1/2018,
-     *                                        item2  @ 4:00 1/1/2018,
-     *                                        item3  @ 4:00 1/1/2018 ]
+     * <p>4. Add(item2 @ 4:00 1/1/2018) [ DATE @ 0:00 1/1/2018, item1 @ 4:00 1/1/2018, item2 @ 4:00
+     * 1/1/2018, item3 @ 4:00 1/1/2018 ]
      */
     @Test
     public void testAddMultipleItemsSameTimestamp() {
@@ -716,17 +609,14 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                          List
-     * 1. Set(item1 @ 6:00 IN_PROGRESS 1/1/2018)       [ DATE    @ 0:00 1/1/2018,
+     * Action List 1. Set(item1 @ 6:00 IN_PROGRESS 1/1/2018) [ DATE @ 0:00 1/1/2018,
      *
-     *                                                   item1  @ 3:00 1/1/2018 IN_PROGRESS]
+     * <p>item1 @ 3:00 1/1/2018 IN_PROGRESS]
      *
-     * 2. Update(item1 @ 6:00 COMPLETE 1/1/2018)
+     * <p>2. Update(item1 @ 6:00 COMPLETE 1/1/2018)
      *
-     * 3. Add(item2 @ 4:00 IN_PROGRESS 1/1/2018)       [
-     *                                                   DATE    @ 0:00  1/1/2018,
-     *                                                   item1  @ 6:00  1/1/2018 COMPLETE,
-     *                                                   item2  @ 4:00  1/1/2018 IN_PROGRESS]
+     * <p>3. Add(item2 @ 4:00 IN_PROGRESS 1/1/2018) [ DATE @ 0:00 1/1/2018, item1 @ 6:00 1/1/2018
+     * COMPLETE, item2 @ 4:00 1/1/2018 IN_PROGRESS]
      */
     @Test
     public void testFirstItemUpdatedAfterSecondItemAdded() {
@@ -760,19 +650,13 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 2. Set(item1 @ 6:00  1/1/2018,       [ DATE    @ 0:00  1/2/2018,
-     *        item2 @ 4:00  1/1/2018,
-     *        item3 @ 10:00 1/2/2018,         item4  @ 12:00 1/2/2018,
-     *        item4 @ 12:00 1/2/2018)         item3  @ 10:00 1/2/2018
-     *                                        DATE    @ 0:00  1/1/2018,
+     * Action List 2. Set(item1 @ 6:00 1/1/2018, [ DATE @ 0:00 1/2/2018, item2 @ 4:00 1/1/2018,
+     * item3 @ 10:00 1/2/2018, item4 @ 12:00 1/2/2018, item4 @ 12:00 1/2/2018) item3 @ 10:00
+     * 1/2/2018 DATE @ 0:00 1/1/2018,
      *
-     *                                        item1  @ 6:00  1/1/2018,
-     *                                        item2  @ 4:00  1/1/2018 ]
+     * <p>item1 @ 6:00 1/1/2018, item2 @ 4:00 1/1/2018 ]
      *
-     * 2. Remove(item2,                     [ DATE    @ 0:00  1/1/2018,
-     *           item3,
-     *           item4)                       item1  @ 6:00  1/1/2018 ]
+     * <p>2. Remove(item2, [ DATE @ 0:00 1/1/2018, item3, item4) item1 @ 6:00 1/1/2018 ]
      */
     @Test
     public void testRemoveMultipleItems() {
@@ -794,15 +678,13 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 4:00 1/1/2018)        [ DATE      @ 0:00  1/1/2018,
+     * Action List 1. Set(item1 @ 4:00 1/1/2018) [ DATE @ 0:00 1/1/2018,
      *
-     *                                        item1     @ 4:00  1/1/2018 ]
+     * <p>item1 @ 4:00 1/1/2018 ]
      *
-     * 2. Update (item1,
-     *            newItem1 @ 4:00 1/1/2018) [ DATE      @ 0:00  1/1/2018,
+     * <p>2. Update (item1, newItem1 @ 4:00 1/1/2018) [ DATE @ 0:00 1/1/2018,
      *
-     *                                        newItem1  @ 4:00  1/1/2018 ]
+     * <p>newItem1 @ 4:00 1/1/2018 ]
      */
     @Test
     public void testItemUpdatedSameTimestamp() {
@@ -824,16 +706,11 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 5:00 1/1/2018,        [ DATE      @ 0:00  1/1/2018,
-     *        item2 @ 4:00 1/1/2018)
-     *                                        item1     @ 5:00  1/1/2018,
-     *                                        item2     @ 4:00  1/1/2018
-     * 2. Update (item1,
-     *            newItem1 @ 3:00 1/1/2018) [ DATE      @ 0:00  1/1/2018,
+     * Action List 1. Set(item1 @ 5:00 1/1/2018, [ DATE @ 0:00 1/1/2018, item2 @ 4:00 1/1/2018)
+     * item1 @ 5:00 1/1/2018, item2 @ 4:00 1/1/2018 2. Update (item1, newItem1 @ 3:00 1/1/2018) [
+     * DATE @ 0:00 1/1/2018,
      *
-     *                                        item2     @ 4:00  1/1/2018,
-     *                                        newItem1  @ 3:00  1/1/2018 ]
+     * <p>item2 @ 4:00 1/1/2018, newItem1 @ 3:00 1/1/2018 ]
      */
     @Test
     public void testItemUpdatedSameDay() {
@@ -857,16 +734,11 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                   List
-     * 1. Set(item1 @ 5:00 1/1/2018,            [ DATE      @ 0:00  1/1/2018,
-     *        item2 @ 4:00 1/1/2018)
-     *                                            item1     @ 5:00  1/1/2018,
-     *                                            item2     @ 4:00  1/1/2018
-     * 2. Update (item1,
-     *            newItem1 @ 3:00 1/1/2018 Image) [ DATE      @ 0:00  1/1/2018,
+     * Action List 1. Set(item1 @ 5:00 1/1/2018, [ DATE @ 0:00 1/1/2018, item2 @ 4:00 1/1/2018)
+     * item1 @ 5:00 1/1/2018, item2 @ 4:00 1/1/2018 2. Update (item1, newItem1 @ 3:00 1/1/2018
+     * Image) [ DATE @ 0:00 1/1/2018,
      *
-     *                                              item2     @ 4:00  1/1/2018,
-     *                                              newItem1  @ 3:00  1/1/2018 ]
+     * <p>item2 @ 4:00 1/1/2018, newItem1 @ 3:00 1/1/2018 ]
      */
     @Test
     public void testItemUpdatedSameDayDifferentSection() {
@@ -890,13 +762,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set(item1 @ 4:00 1/1/2018)        [ DATE      @ 0:00  1/1/2018,
-     *                                        item1     @ 4:00  1/1/2018 ]
+     * Action List 1. Set(item1 @ 4:00 1/1/2018) [ DATE @ 0:00 1/1/2018, item1 @ 4:00 1/1/2018 ]
      *
-     * 2. Update (item1,
-     *            newItem1 @ 6:00 1/2/2018) [ DATE      @ 0:00  1/2/2018,
-     *                                        newItem1  @ 6:00  1/2/2018 ]
+     * <p>2. Update (item1, newItem1 @ 6:00 1/2/2018) [ DATE @ 0:00 1/2/2018, newItem1 @ 6:00
+     * 1/2/2018 ]
      */
     @Test
     public void testItemUpdatedDifferentDay() {
@@ -918,19 +787,10 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                      List
-     * 1. Set(item1 @ 4:00 1/2/2018 Video,
-     *        item2 @ 4:00 1/2/2018 Video,
-     *        item3 @ 4:00 1/2/2018 Image,
-     *        item4 @ 4:00 1/2/2018 Image,
-     *        item5 @ 4:00 1/2/2018 Image)
-     * 2. Select Video
-     *                                              [Date - 1/2/2018, item1, item2 ]
-     * 2. Select Image
-     *                                              [Date - 1/2/2018, item3, item4, item5 ]
-     * 2. Select ALL
-     *                                              [Date - 1/2/2018, item1, item2,
-     *                                                        item3, item4, item5 ]
+     * Action List 1. Set(item1 @ 4:00 1/2/2018 Video, item2 @ 4:00 1/2/2018 Video, item3 @ 4:00
+     * 1/2/2018 Image, item4 @ 4:00 1/2/2018 Image, item5 @ 4:00 1/2/2018 Image) 2. Select Video
+     * [Date - 1/2/2018, item1, item2 ] 2. Select Image [Date - 1/2/2018, item3, item4, item5 ] 2.
+     * Select ALL [Date - 1/2/2018, item1, item2, item3, item4, item5 ]
      */
     @Test
     public void testSwitchChips() {
@@ -958,11 +818,8 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                      List
-     * 1. Set(item1 @ 4:00 1/2/2018 Prefetch,
-     *        item2 @ 5:00 1/1/2018 Prefetch )
-     *                                              [item2     @ 4:00 1/2/2018,
-     *                                               item1     @ 5:00 1/1/2018 ]
+     * Action List 1. Set(item1 @ 4:00 1/2/2018 Prefetch, item2 @ 5:00 1/1/2018 Prefetch ) [item2 @
+     * 4:00 1/2/2018, item1 @ 5:00 1/1/2018 ]
      */
     @Test
     public void testPrefetchTabBasic() {
@@ -978,11 +835,7 @@ public class DateOrderedListMutatorTest {
         assertOfflineItem(mModel.get(1), buildCalendar(2018, 1, 1, 5), item2);
     }
 
-    /**
-     * Action                                      List
-     * 1. Set(item1 @ 5:00 1/1/2018 Content indexing)
-     *                                               [item1     1/1/2018]
-     */
+    /** Action List 1. Set(item1 @ 5:00 1/1/2018 Content indexing) [item1 1/1/2018] */
     @Test
     public void testContentIndexingStandaloneCards() {
         OfflineItem item1 =
@@ -997,13 +850,9 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                      List
-     * 1. Set(item1 @ 5:00 1/1/2018 Content indexing,
-     *        item2 @ 5:00 1/2/2018 Content indexing,
-     *        item3 @ 5:00 1/3/2018 Content indexing)
-     *                                              [item3     1/3/2018,
-     *                                               item2     1/2/2018,
-     *                                               item1     1/1/2018]
+     * Action List 1. Set(item1 @ 5:00 1/1/2018 Content indexing, item2 @ 5:00 1/2/2018 Content
+     * indexing, item3 @ 5:00 1/3/2018 Content indexing) [item3 1/3/2018, item2 1/2/2018, item1
+     * 1/1/2018]
      */
     @Test
     public void testContentIndexingDoesNotGroupItemsFromDifferentDays() {
@@ -1025,21 +874,11 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                                       List
-     * 1. Set(item1 @ 1:00 1/4/2018 Content indexing Video,
-     *        item2 @ 2:00 1/4/2018 Content indexing Video,
-     *        item3 @ 3:00 1/4/2018 Content indexing Video,
-     *        item4 @ 4:00 1/4/2018 Content indexing Video)
-     *                                               [---rounded top divider -----
-     *                                               HEADER (with domain)
-     *                                               item4      1/4/2018,
-     *                                               -----divider------
-     *                                               item3      1/4/2018,
-     *                                               -----divider------
-     *                                               item2      1/4/2018
-     *                                               -----divider------
-     *                                               FOOTER (More button)
-     *                                               -----rounded footer divider ---]
+     * Action List 1. Set(item1 @ 1:00 1/4/2018 Content indexing Video, item2 @ 2:00 1/4/2018
+     * Content indexing Video, item3 @ 3:00 1/4/2018 Content indexing Video, item4 @ 4:00 1/4/2018
+     * Content indexing Video) [---rounded top divider ----- HEADER (with domain) item4 1/4/2018,
+     * -----divider------ item3 1/4/2018, -----divider------ item2 1/4/2018 -----divider------
+     * FOOTER (More button) -----rounded footer divider ---]
      */
     @Test
     public void testContentIndexingGroupCardWithAndWithoutFooterAndWithIsolatedCards() {
@@ -1057,16 +896,20 @@ public class DateOrderedListMutatorTest {
         mutator.reload();
 
         Assert.assertEquals(10, mModel.size());
-        assertDivider(mModel.get(0), ListItem.CardDividerListItem.Position.TOP);
-        assertCardHeader(mModel.get(1), buildCalendar(2018, 1, 4, 0), JUnitTestGURLs.EXAMPLE_URL);
+        assertDivider(mModel.get(0), Position.TOP);
+        assertCardHeader(
+                mModel.get(1),
+                buildCalendar(2018, 1, 4, 0),
+                UrlFormatter.formatUrlForSecurityDisplay(
+                        JUnitTestGURLs.EXAMPLE_URL, SchemeDisplay.OMIT_HTTP_AND_HTTPS));
         assertOfflineItem(mModel.get(2), buildCalendar(2018, 1, 4, 4), item4);
-        assertDivider(mModel.get(3), ListItem.CardDividerListItem.Position.MIDDLE);
+        assertDivider(mModel.get(3), Position.MIDDLE);
         assertOfflineItem(mModel.get(4), buildCalendar(2018, 1, 4, 3), item3);
-        assertDivider(mModel.get(5), ListItem.CardDividerListItem.Position.MIDDLE);
+        assertDivider(mModel.get(5), Position.MIDDLE);
         assertOfflineItem(mModel.get(6), buildCalendar(2018, 1, 4, 2), item2);
-        assertDivider(mModel.get(7), ListItem.CardDividerListItem.Position.MIDDLE);
+        assertDivider(mModel.get(7), Position.MIDDLE);
         assertCardFooter(mModel.get(8));
-        assertDivider(mModel.get(9), ListItem.CardDividerListItem.Position.BOTTOM);
+        assertDivider(mModel.get(9), Position.BOTTOM);
 
         // Remove one item. Now there should be only 3 items. The footer should be gone and get
         // replaced by bottom curve.
@@ -1075,7 +918,7 @@ public class DateOrderedListMutatorTest {
 
         Assert.assertEquals(8, mModel.size());
         assertOfflineItem(mModel.get(6), buildCalendar(2018, 1, 4, 2), item2);
-        assertDivider(mModel.get(7), ListItem.CardDividerListItem.Position.BOTTOM);
+        assertDivider(mModel.get(7), Position.BOTTOM);
 
         // Remove one more item. Now there should be only 2 items. Now they shouldn't be grouped at
         // all.
@@ -1085,22 +928,9 @@ public class DateOrderedListMutatorTest {
     }
 
     /**
-     * Action                               List
-     * 1. Set()                             [ DATE    @ 4:00 5/1/2018
-     *                                        10 items
-     *                                        DATE    @ 4:00 4/1/2018
-     *                                        20 items
-     *                                        More
-     *                                      ]
-     * 2. Click more button                 [ DATE    @ 4:00 5/1/2018
-     *                                        10 items
-     *                                        DATE    @ 4:00 4/1/2018
-     *                                        20 items
-     *                                        DATE    @ 4:00 3/1/2018
-     *                                        60 items
-     *                                        More
-     *                                      ]
-     *
+     * Action List 1. Set() [ DATE @ 4:00 5/1/2018 10 items DATE @ 4:00 4/1/2018 20 items More ] 2.
+     * Click more button [ DATE @ 4:00 5/1/2018 10 items DATE @ 4:00 4/1/2018 20 items DATE @ 4:00
+     * 3/1/2018 60 items More ]
      */
     @Test
     public void testPaginationHeaderInAccessibilityMode() {
@@ -1164,7 +994,7 @@ public class DateOrderedListMutatorTest {
         item.isSuggested = true;
         item.creationTimeMs = calendar.getTimeInMillis();
         item.filter = filter;
-        item.url = JUnitTestGURLs.getGURL(JUnitTestGURLs.EXAMPLE_URL);
+        item.url = JUnitTestGURLs.EXAMPLE_URL;
         return item;
     }
 
@@ -1176,12 +1006,13 @@ public class DateOrderedListMutatorTest {
     }
 
     private JustNowProvider buildJustNowProvider(Date overrideNow) {
-        JustNowProvider justNowProvider = new JustNowProvider(createConfig()) {
-            @Override
-            protected Date now() {
-                return overrideNow;
-            }
-        };
+        JustNowProvider justNowProvider =
+                new JustNowProvider(createConfig()) {
+                    @Override
+                    protected Date now() {
+                        return overrideNow;
+                    }
+                };
         return justNowProvider;
     }
 
@@ -1196,12 +1027,13 @@ public class DateOrderedListMutatorTest {
 
     private DateOrderedListMutator createMutatorWithoutJustNowProvider() {
         DownloadManagerUiConfig config = createConfig();
-        JustNowProvider justNowProvider = new JustNowProvider(config) {
-            @Override
-            public boolean isJustNowItem(OfflineItem item) {
-                return false;
-            }
-        };
+        JustNowProvider justNowProvider =
+                new JustNowProvider(config) {
+                    @Override
+                    public boolean isJustNowItem(OfflineItem item) {
+                        return false;
+                    }
+                };
         DateOrderedListMutator mutator =
                 new DateOrderedListMutator(mSource, mModel, justNowProvider);
         mMutationController = new ListMutationController(config, justNowProvider, mutator, mModel);
@@ -1240,11 +1072,13 @@ public class DateOrderedListMutatorTest {
         Assert.assertTrue(item instanceof SectionHeaderListItem);
         SectionHeaderListItem sectionHeader = (SectionHeaderListItem) item;
         assertDatesAreEqual(sectionHeader.date, calendar);
-        Assert.assertEquals(SectionHeaderListItem.generateStableId(
-                                    SectionHeaderType.DATE, calendar.getTimeInMillis()),
+        Assert.assertEquals(
+                SectionHeaderListItem.generateStableId(
+                        SectionHeaderType.DATE, calendar.getTimeInMillis()),
                 item.stableId);
-        Assert.assertEquals(SectionHeaderListItem.generateStableId(
-                                    SectionHeaderType.JUST_NOW, calendar.getTimeInMillis()),
+        Assert.assertEquals(
+                SectionHeaderListItem.generateStableId(
+                        SectionHeaderType.JUST_NOW, calendar.getTimeInMillis()),
                 StableIds.JUST_NOW_SECTION);
     }
 
@@ -1267,7 +1101,7 @@ public class DateOrderedListMutatorTest {
     }
 
     private static void assertDivider(
-            ListItem item, ListItem.CardDividerListItem.Position position) {
+            ListItem item, @Position int position) {
         Assert.assertTrue(item instanceof ListItem.CardDividerListItem);
         Assert.assertEquals(((ListItem.CardDividerListItem) item).position, position);
     }

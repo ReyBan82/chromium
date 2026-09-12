@@ -75,12 +75,16 @@ class DexClass:
     self.name = name
     self.methods = []
 
-  def FindMethodByteCode(self, class_name, method_name, param_types,
-                         return_type):
+  def FindMethodByteCode(
+    self, class_name, method_name, param_types, return_type
+  ):
     for method in self.methods:
-      if (method.name == method_name and method.class_name == class_name
-          and method.return_type == return_type
-          and method.param_types == param_types):
+      if (
+        method.name == method_name
+        and method.class_name == class_name
+        and method.return_type == return_type
+        and method.param_types == param_types
+      ):
         return method.bytecode
     return None
 
@@ -90,7 +94,9 @@ class _WrapPeekableNoNewLine:
 
   def __init__(self, it):
     self._it = it
-    self._buf = None
+    self._peek_lineno = 1
+    self._buf = None  # Look-ahead cache to support peek().
+    self._cur = None  # Most recent next() value.
 
   def _next_internal(self):
     ret = next(self._it, None)
@@ -98,14 +104,25 @@ class _WrapPeekableNoNewLine:
 
   def __next__(self):
     if self._buf is None:
-      return self._next_internal()
-    ret, self._buf = self._buf, None
-    return ret
+      self._cur = self._next_internal()
+    else:
+      self._cur, self._buf = self._buf, None
+    self._peek_lineno += 1
+    return self._cur
 
   def peek(self):
     if self._buf is None:
       self._buf = self._next_internal()
     return self._buf
+
+  def format_error(self, expected, is_peek=False):
+    return ' '.join(
+      (
+        'Line %d:' % (self._peek_lineno - int(not is_peek)),
+        'Expected %s,' % expected,
+        'got %r.' % (self.peek() if is_peek else self._cur),
+      )
+    )
 
 
 # pylint: disable=stop-iteration-return
@@ -143,26 +160,28 @@ def _ExtractMethodInfo(it):
     method_str = next(it).split('\'')[1]
     # Skip access flags, e.g., "# public abstract".
     line = next(it)
-    assert line.startswith('# ')
+    assert line.startswith('# '), it.format_error('comment with access flags')
     # Read "Residual:", made optional for compatibility.
     line = next(it)
     if line.startswith('# Residual:'):
       residual_str = line.split('\'')[1]
       line = next(it)
     # Eat line "#".
-    assert line == '#'
+    assert line == '#', it.format_error('empty comment')
     # Eat blank line.
-    assert next(it) == ''
+    assert next(it) == '', it.format_error('empty line')
     # Seek and read signature, possibly advance to next or exit.
     if it.peek() is None:
       break
     if it.peek().startswith('#'):
       yield (method_str, residual_str, signature, byte_code)
       continue
-    assert it.peek() != ''
+    assert it.peek() != '', it.format_error('comment or signature', True)
     signature = next(it)
     # Accumulate code, advance to next or exit.
-    assert it.peek().startswith('registers:')
+    assert it.peek().startswith('registers:'), it.format_error(
+      'registers/inputs/outputs', True
+    )
     while not is_end():
       if it.peek().startswith('#'):
         break
@@ -216,7 +235,7 @@ def _SplitMethod(signature):
     method_name = method_full_name
   else:
     class_name = method_full_name[:last_dot_pos]
-    method_name = method_full_name[last_dot_pos + 1:]
+    method_name = method_full_name[last_dot_pos + 1 :]
   param_types = param_str.split(', ') if param_str else []
   return return_type, class_name, method_name, param_types
 
@@ -270,9 +289,15 @@ def _ExtractMethod(method_str, residual_str):
     # {return_type} {class_name}.{method_name}({param_types})
     assert all(f.endswith(')') for f in alternatives)
     method_parts = [_SplitMethod(f) for f in alternatives]
-    scores = [(_CompareSignatures(method_parts[i][0], method_parts[i][3],
-                                  residual[0], residual[3]), i)
-              for i in range(len(alternatives))]
+    scores = [
+      (
+        _CompareSignatures(
+          method_parts[i][0], method_parts[i][3], residual[0], residual[3]
+        ),
+        i,
+      )
+      for i in range(len(alternatives))
+    ]
     return method_parts[max(scores)[1]]
 
   # Broken: {class_name} {method_name}
@@ -313,7 +338,8 @@ def Parse(lines):
       count_with_code += 1
       if ' ' not in method_str:
         return_type, extracted_class_name, method_name, param_types = (
-            _ExtractMethodLegacy(method_str, signature))
+          _ExtractMethodLegacy(method_str, signature)
+        )
       else:
         if signature not in ('', method_str):
           if warning_quota_signature > 0:
@@ -322,7 +348,8 @@ def Parse(lines):
             logging.warning('  %s', signature)
             logging.warning('  %s', method_str)
         return_type, extracted_class_name, method_name, param_types = (
-            _ExtractMethod(method_str, residual_str))
+          _ExtractMethod(method_str, residual_str)
+        )
       if extracted_class_name != class_name:
         if '.' not in extracted_class_name:
           # |extracted_class_name| is obfuscated,
@@ -335,8 +362,9 @@ def Parse(lines):
           if 'Synthetic' not in class_name:
             if warning_quota_synthetic > 0:
               warning_quota_synthetic -= 1
-              logging.warning('Found "$$" in non-synthetic class: %s',
-                              class_name)
+              logging.warning(
+                'Found "$$" in non-synthetic class: %s', class_name
+              )
           count_synthetics += 1
         else:
           # Anomalies: Might be from class merging, but other oddities exist:
@@ -349,22 +377,28 @@ def Parse(lines):
           # * com.google.android.play.core.splitinstall.a vs. (!)
           #   com.google.android.play.core.splitinstall.SplitInstallSessionState
           anomalies.append((class_name, extracted_class_name, method_name))
-      method_obj = DexMethod(method_name, class_name, param_types, return_type,
-                             byte_code)
+      method_obj = DexMethod(
+        method_name, class_name, param_types, return_type, byte_code
+      )
       class_obj.methods.append(method_obj)
   logging.debug(
-      'R8 disassembler method stats: Found %d total, %d with code, '
-      '%d affected by synthetics, %d anomalies.', total_methods,
-      count_with_code, count_synthetics, len(anomalies))
+    'R8 disassembler method stats: Found %d total, %d with code, '
+    '%d affected by synthetics, %d anomalies.',
+    total_methods,
+    count_with_code,
+    count_synthetics,
+    len(anomalies),
+  )
   return class_obj_map, anomalies
 
 
 def main():
   parser = argparse.ArgumentParser()
-  parser.add_argument('input',
-                      type=str,
-                      help='File containing outputs of deobfuscated R8 '
-                      'disassembly output.')
+  parser.add_argument(
+    'input',
+    type=str,
+    help='File containing outputs of deobfuscated R8 disassembly output.',
+  )
   args = parser.parse_args()
   with open(args.input, 'rt', encoding='utf-8') as fh:
     class_obj_map, anomalies = Parse(fh)

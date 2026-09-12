@@ -5,11 +5,17 @@
 #include "base/files/file_path.h"
 #include "base/functional/callback_helpers.h"
 #include "chrome/browser/extensions/extension_apitest.h"
+#include "chrome/browser/profiles/profile.h"
 #include "content/public/test/browser_test.h"
 #include "extensions/browser/extension_host.h"
 #include "extensions/browser/process_manager.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/test/extension_background_page_waiter.h"
 #include "extensions/test/extension_test_message_listener.h"
+
+// TODO(crbug.com/40290702): Enable these tests on desktop Android when shared
+// workers are supported on Android.
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS));
 
 namespace extensions {
 

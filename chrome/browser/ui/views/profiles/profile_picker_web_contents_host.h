@@ -5,15 +5,18 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_PROFILES_PROFILE_PICKER_WEB_CONTENTS_HOST_H_
 #define CHROME_BROWSER_UI_VIEWS_PROFILES_PROFILE_PICKER_WEB_CONTENTS_HOST_H_
 
+#include <variant>
+
 #include "base/functional/callback.h"
+#include "base/types/strong_alias.h"
+#include "chrome/browser/ui/views/profiles/profile_management_types.h"
 #include "components/signin/public/base/signin_buildflags.h"
 #include "components/web_modal/web_contents_modal_dialog_host.h"
-
-#if BUILDFLAG(ENABLE_DICE_SUPPORT)
 #include "ui/views/controls/webview/web_contents_set_background_color.h"
-#endif
 
 class GURL;
+class ForceSigninUIError;
+class SigninUIError;
 
 namespace content {
 class WebContents;
@@ -38,18 +41,21 @@ class ProfilePickerWebContentsHost {
   // `contents` with its currently loaded url. If both
   // `navigation_finished_closure` and `url` is non-empty, the closure is called
   // when the navigation commits (if it never commits such as when the
-  // navigation is replaced by another navigation, the closure is never called).
-  virtual void ShowScreen(
-      content::WebContents* contents,
-      const GURL& url,
-      base::OnceClosure navigation_finished_closure = base::OnceClosure()) = 0;
+  // navigation is replaced by another navigation or if an internal page fails
+  // to load, the closure is never called).
+  virtual void ShowScreen(content::WebContents* contents,
+                          const GURL& url,
+                          base::OnceClosure navigation_finished_closure) = 0;
   // Like ShowScreen() but uses the picker WebContents.
   virtual void ShowScreenInPickerContents(
       const GURL& url,
-      base::OnceClosure navigation_finished_closure = base::OnceClosure()) = 0;
+      base::OnceClosure navigation_finished_closure) = 0;
 
   // Returns whether dark colors should be used (based on native theme).
   virtual bool ShouldUseDarkColors() const = 0;
+
+  // Returns whether effects (animations/audio) are enabled.
+  virtual bool AreEffectsEnabled() const = 0;
 
   // Returns the picker WebContents.
   virtual content::WebContents* GetPickerContents() const = 0;
@@ -59,15 +65,37 @@ class ProfilePickerWebContentsHost {
   virtual web_modal::WebContentsModalDialogHost*
   GetWebContentsModalDialogHost() = 0;
 
-#if BUILDFLAG(ENABLE_DICE_SUPPORT)
-  // Changes the visibility of the host's native toolbar, which shows a back
-  // button.
-  virtual void SetNativeToolbarVisible(bool visible) = 0;
+  // Clears the current state an Shows the main screen.
+  // `callback` is run when the main screen is shown.
+  virtual void Reset(StepSwitchFinishedCallback callback) = 0;
+
+  // Used as a callback of type `StepSwitchFinishedCallback`. Allows to show the
+  // Signin error dialog after completing a step switch.
+  virtual void ShowSigninErrorDialog(
+      const std::variant<ForceSigninUIError, SigninUIError>& error,
+      bool success) = 0;
+
+  // Changes the visibility of the sign-in buttons (i.e. buttons associated with
+  // the sign-in Gaia page) in the native toolbar.
+  virtual void SetNativeToolbarSigninButtonsVisible(bool visible) = 0;
+
+  // Changes the visibility of the "Don't sign in" button in the native toolbar.
+  // Safe to call even if the button was not instantiated (no-op in that case).
+  virtual void SetNativeToolbarDontSignInButtonVisible(bool visible) = 0;
+
+  // Changes the visibility of the "Start browsing" button in the native
+  // toolbar. Safe to call even if the button was not instantiated (no-op in
+  // that case).
+  virtual void SetNativeToolbarStartBrowsingButtonVisible(bool visible) = 0;
+
+  // Changes the visibility of the effects control button in the native
+  // toolbar. Safe to call even if the button was not instantiated (no-op in
+  // that case).
+  virtual void SetNativeToolbarEffectsControlButtonVisible(bool visible) = 0;
 
   // Returns the background colors that other `content::WebContents` that are
   // rendered by this host should use to match the toolbar.
   virtual SkColor GetPreferredBackgroundColor() const = 0;
-#endif
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_PROFILES_PROFILE_PICKER_WEB_CONTENTS_HOST_H_

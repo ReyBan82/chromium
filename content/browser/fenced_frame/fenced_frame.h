@@ -22,20 +22,19 @@ class GURL;
 
 namespace content {
 
+class BackForwardCacheImpl;
 class RenderFrameHostImpl;
 class RenderFrameProxyHost;
 class WebContentsImpl;
 
 // This is the browser-side host object for the <fencedframe> element
-// implemented in Blink. This is only used for the MPArch version of fenced
-// frames, not the ShadowDOM implementation. It is owned by and stored directly
-// on `RenderFrameHostImpl`.
+// implemented in Blink. It is owned by and stored directly on
+// `RenderFrameHostImpl`.
 class CONTENT_EXPORT FencedFrame : public blink::mojom::FencedFrameOwnerHost,
                                    public FrameTree::Delegate,
                                    public NavigationControllerDelegate {
  public:
   FencedFrame(base::SafeRef<RenderFrameHostImpl> owner_render_frame_host,
-              blink::mojom::FencedFrameMode mode,
               bool was_discarded);
   ~FencedFrame() override;
 
@@ -60,15 +59,20 @@ class CONTENT_EXPORT FencedFrame : public blink::mojom::FencedFrameOwnerHost,
   void DidChangeFramePolicy(const blink::FramePolicy& frame_policy) override;
 
   // FrameTree::Delegate.
-  void DidStartLoading(FrameTreeNode* frame_tree_node,
-                       bool should_show_loading_ui) override {}
+  void LoadingStateChanged(LoadingState new_state) override {}
+  void DidStartLoading(FrameTreeNode* frame_tree_node) override {}
   void DidStopLoading() override {}
   bool IsHidden() override;
-  int GetOuterDelegateFrameTreeNodeId() override;
+  FrameTreeNodeId GetOuterDelegateFrameTreeNodeId() override;
   RenderFrameHostImpl* GetProspectiveOuterDocument() override;
-  bool IsPortal() override;
   FrameTree* LoadingTree() override;
   void SetFocusedFrame(FrameTreeNode* node, SiteInstanceGroup* source) override;
+  FrameTree* GetOwnedDocumentPictureInPictureFrameTree() override;
+  FrameTree* GetDocumentPictureInPictureOpenerFrameTree() override;
+  bool OnRenderFrameProxyVisibilityChanged(
+      RenderFrameProxyHost* render_frame_proxy_host,
+      blink::mojom::FrameVisibility visibility) override;
+  PrerenderHostId GetPrerenderHostId() override;
 
   // Returns the devtools frame token of the fenced frame's inner FrameTree's
   // main frame.
@@ -76,10 +80,9 @@ class CONTENT_EXPORT FencedFrame : public blink::mojom::FencedFrameOwnerHost,
 
   RenderFrameHostImpl* GetInnerRoot() { return frame_tree_->GetMainFrame(); }
 
-  blink::mojom::FencedFrameMode mode() const { return mode_; }
-
  private:
   // NavigationControllerDelegate
+  BackForwardCacheImpl& GetBackForwardCache() override;
   void NotifyNavigationStateChangedFromController(
       InvalidateTypes changed_flags) override {}
   void NotifyBeforeFormRepostWarningShow() override;
@@ -91,8 +94,12 @@ class CONTENT_EXPORT FencedFrame : public blink::mojom::FencedFrameOwnerHost,
   void NotifyNavigationEntriesDeleted() override;
   void ActivateAndShowRepostFormWarningDialog() override;
   bool ShouldPreserveAbortedURLs() override;
-  WebContents* DeprecatedGetWebContents() override;
   void UpdateOverridingUserAgent() override;
+#if BUILDFLAG(IS_ANDROID)
+  scoped_refptr<viz::RasterContextProvider> GetRasterContextProvider() override;
+  gfx::ColorSpace GetOutputColorSpace(gfx::ContentColorUsage color_usage,
+                                      bool needs_alpha) override;
+#endif  // BUILDFLAG(IS_ANDROID)
 
   const raw_ptr<WebContentsImpl> web_contents_;
 
@@ -115,13 +122,6 @@ class CONTENT_EXPORT FencedFrame : public blink::mojom::FencedFrameOwnerHost,
 
   // The FrameTree that we create to host the "inner" fenced frame contents.
   std::unique_ptr<FrameTree> frame_tree_;
-
-  // The `mode` attribute set on the fenced frame. The mode will stay the same
-  // across navigations to avoid privacy leak. Since each mode might have
-  // different access constraints, privacy leak might occur if the mode is
-  // mutable as a fenced frame can pass the information it learned in one mode
-  // to the other mode if mode was changed across navigations.
-  const blink::mojom::FencedFrameMode mode_;
 
   // Receives messages from the frame owner element in Blink.
   mojo::AssociatedReceiver<blink::mojom::FencedFrameOwnerHost> receiver_{this};

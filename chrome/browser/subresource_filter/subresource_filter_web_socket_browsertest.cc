@@ -7,13 +7,13 @@
 
 #include "base/strings/stringprintf.h"
 #include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
-#include "net/test/spawned_test_server/spawned_test_server.h"
+#include "net/test/embedded_test_server/embedded_test_server.h"
+#include "net/test/embedded_test_server/install_default_websocket_handlers.h"
 #include "net/test/test_data_directory.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
@@ -26,30 +26,36 @@ enum WebSocketCreationPolicy {
 };
 class SubresourceFilterWebSocketBrowserTest
     : public SubresourceFilterBrowserTest,
-      public ::testing::WithParamInterface<WebSocketCreationPolicy> {
+      public ::testing::WithParamInterface<
+          std::tuple<WebSocketCreationPolicy, bool /*use_v5*/>> {
  public:
-  SubresourceFilterWebSocketBrowserTest() {}
+  SubresourceFilterWebSocketBrowserTest() = default;
 
   SubresourceFilterWebSocketBrowserTest(
       const SubresourceFilterWebSocketBrowserTest&) = delete;
   SubresourceFilterWebSocketBrowserTest& operator=(
       const SubresourceFilterWebSocketBrowserTest&) = delete;
 
-  void SetUpOnMainThread() override {
-    SubresourceFilterBrowserTest::SetUpOnMainThread();
-    websocket_test_server_ = std::make_unique<net::SpawnedTestServer>(
-        net::SpawnedTestServer::TYPE_WS, net::GetWebSocketTestDataDirectory());
-    ASSERT_TRUE(websocket_test_server_->Start());
+  // Returns whether SafeBrowsingLocalListsUseSBv5 is enabled.
+  std::optional<bool> UseV5() const override { return std::get<1>(GetParam()); }
+
+  // Returns the policy for creating WebSockets in this test instance.
+  WebSocketCreationPolicy GetCreationPolicy() const {
+    return std::get<0>(GetParam());
   }
 
-  net::SpawnedTestServer* websocket_test_server() {
-    return websocket_test_server_.get();
+  void SetUpOnMainThread() override {
+    SubresourceFilterBrowserTest::SetUpOnMainThread();
+    net::test_server::InstallDefaultWebSocketHandlers(&websocket_test_server_);
+    ASSERT_TRUE(websocket_test_server_.Start());
+  }
+
+  net::EmbeddedTestServer& websocket_test_server() {
+    return websocket_test_server_;
   }
 
   GURL GetWebSocketUrl(const std::string& path) {
-    GURL::Replacements replacements;
-    replacements.SetSchemeStr("ws");
-    return websocket_test_server_->GetURL(path).ReplaceComponents(replacements);
+    return net::test_server::GetWebSocketURL(websocket_test_server_, path);
   }
 
   void CreateWebSocketAndExpectResult(const GURL& url,
@@ -58,58 +64,60 @@ class SubresourceFilterWebSocketBrowserTest
         expect_connection_success,
         content::EvalJs(
             browser()->tab_strip_model()->GetActiveWebContents(),
-            base::StringPrintf("connectWebSocket('%s');", url.spec().c_str()),
-            content::EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+            base::StringPrintf("connectWebSocket('%s');", url.spec().c_str())));
   }
 
  private:
-  std::unique_ptr<net::SpawnedTestServer> websocket_test_server_;
+  net::EmbeddedTestServer websocket_test_server_{
+      net::EmbeddedTestServer::Type::TYPE_HTTP};
 };
 
 IN_PROC_BROWSER_TEST_P(SubresourceFilterWebSocketBrowserTest, BlockWebSocket) {
   GURL url(GetTestUrl(
       base::StringPrintf("subresource_filter/page_with_websocket.html?%s",
-                         GetParam() == IN_WORKER ? "inWorker" : "")));
-  GURL websocket_url(GetWebSocketUrl("echo-with-no-extension"));
+                         GetCreationPolicy() == IN_WORKER ? "inWorker" : "")));
+  GURL websocket_url(GetWebSocketUrl("/echo-with-no-extension"));
   ConfigureAsPhishingURL(url);
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("echo-with-no-extension"));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   CreateWebSocketAndExpectResult(websocket_url,
-                                 false /* expect_connection_success */);
+                                 /*expect_connection_success=*/false);
 }
 
 IN_PROC_BROWSER_TEST_P(SubresourceFilterWebSocketBrowserTest,
                        DoNotBlockWebSocketNoActivatedFrame) {
   GURL url(GetTestUrl(
       base::StringPrintf("subresource_filter/page_with_websocket.html?%s",
-                         GetParam() == IN_WORKER ? "inWorker" : "")));
-  GURL websocket_url(GetWebSocketUrl("echo-with-no-extension"));
+                         GetCreationPolicy() == IN_WORKER ? "inWorker" : "")));
+  GURL websocket_url(GetWebSocketUrl("/echo-with-no-extension"));
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("echo-with-no-extension"));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   CreateWebSocketAndExpectResult(websocket_url,
-                                 true /* expect_connection_success */);
+                                 /*expect_connection_success=*/true);
 }
 
 IN_PROC_BROWSER_TEST_P(SubresourceFilterWebSocketBrowserTest,
                        DoNotBlockWebSocketInActivatedFrameWithNoRule) {
   GURL url(GetTestUrl(
       base::StringPrintf("subresource_filter/page_with_websocket.html?%s",
-                         GetParam() == IN_WORKER ? "inWorker" : "")));
-  GURL websocket_url(GetWebSocketUrl("echo-with-no-extension"));
+                         GetCreationPolicy() == IN_WORKER ? "inWorker" : "")));
+  GURL websocket_url(GetWebSocketUrl("/echo-with-no-extension"));
   ConfigureAsPhishingURL(url);
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   CreateWebSocketAndExpectResult(websocket_url,
-                                 true /* expect_connection_success */);
+                                 /*expect_connection_success=*/true);
 }
 
 INSTANTIATE_TEST_SUITE_P(
     All,
     SubresourceFilterWebSocketBrowserTest,
-    ::testing::Values(WebSocketCreationPolicy::IN_WORKER,
-                      WebSocketCreationPolicy::IN_MAIN_FRAME));
+    ::testing::Combine(
+        ::testing::Values(WebSocketCreationPolicy::IN_WORKER,
+                          WebSocketCreationPolicy::IN_MAIN_FRAME),
+        ::testing::Bool()));
 
 }  // namespace subresource_filter

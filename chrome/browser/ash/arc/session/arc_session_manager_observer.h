@@ -63,6 +63,12 @@ class ArcSessionManagerObserver {
   // before the observer is added.
   virtual void OnPropertyFilesExpanded(bool result) {}
 
+  // Called when ARC session manager is initialized.
+  virtual void OnInitialized() {}
+
+  // Called when ARC session manager is shutting down.
+  virtual void OnShutdown() {}
+
  protected:
   virtual ~ArcSessionManagerObserver() = default;
 };

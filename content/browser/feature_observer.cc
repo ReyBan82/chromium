@@ -13,7 +13,7 @@ namespace content {
 FeatureObserver::FeatureObserver(FeatureObserverClient* client,
                                  GlobalRenderFrameHostId id)
     : client_(client), id_(id) {
-  DCHECK(client_);
+  CHECK(client_, base::NotFatalUntil::M158);
 
   for (size_t i = 0;
        i <= static_cast<size_t>(blink::mojom::ObservedFeatureType::kMaxValue);
@@ -22,8 +22,9 @@ FeatureObserver::FeatureObserver(FeatureObserverClient* client,
         [](mojo::ReceiverSet<blink::mojom::ObservedFeature>* set,
            FeatureObserverClient* client, GlobalRenderFrameHostId id,
            blink::mojom::ObservedFeatureType type) {
-          if (!set->empty())
+          if (!set->empty()) {
             return;
+          }
 
           // Notify if this is the last receiver.
           client->OnStopUsing(id, type);
@@ -43,7 +44,7 @@ void FeatureObserver::GetFeatureObserver(
 void FeatureObserver::Register(
     mojo::PendingReceiver<blink::mojom::ObservedFeature> feature,
     blink::mojom::ObservedFeatureType type) {
-  DCHECK(client_);
+  CHECK(client_, base::NotFatalUntil::M158);
 
   auto& set = features_by_type_[static_cast<int>(type)];
 

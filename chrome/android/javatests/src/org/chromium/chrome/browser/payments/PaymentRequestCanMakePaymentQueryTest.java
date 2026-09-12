@@ -12,6 +12,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.DisableIf;
 import org.chromium.base.test.util.Feature;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.autofill.AutofillTestHelper;
@@ -20,6 +21,7 @@ import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.AppPresence;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.FactorySpeed;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+import org.chromium.ui.base.DeviceFormFactor;
 
 import java.util.concurrent.TimeoutException;
 
@@ -29,6 +31,7 @@ import java.util.concurrent.TimeoutException;
  */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
+@DisableIf.Device(DeviceFormFactor.DESKTOP) // https://crbug.com/376100658
 public class PaymentRequestCanMakePaymentQueryTest {
     @Rule
     public PaymentRequestTestRule mPaymentRequestTestRule =
@@ -38,9 +41,21 @@ public class PaymentRequestCanMakePaymentQueryTest {
     public void setUp() throws TimeoutException {
         // The user has a valid credit card without a billing address on file. This is sufficient
         // for canMakePayment() to return true.
-        new AutofillTestHelper().setCreditCard(new CreditCard("", "https://example.test", true,
-                true, "Jon Doe", "4111111111111111", "1111", "12", "2050", "visa",
-                R.drawable.visa_card, "" /* billingAddressId */, "" /* serverId */));
+        new AutofillTestHelper()
+                .setCreditCard(
+                        new CreditCard(
+                                "",
+                                /* isUserConfirmed= */ true,
+                                true,
+                                "Jon Doe",
+                                "4111111111111111",
+                                "1111",
+                                "12",
+                                "2050",
+                                "visa",
+                                R.drawable.visa_card,
+                                /* billingAddressId= */ "",
+                                /* serverId= */ ""));
     }
 
     @Test

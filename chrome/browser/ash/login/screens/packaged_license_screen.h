@@ -9,8 +9,13 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
+#include "chrome/browser/ash/login/screens/oobe_mojo_binder.h"
+#include "chrome/browser/ui/webui/ash/login/mojom/screens_oobe.mojom.h"
+
+class PrefService;
 
 namespace ash {
 
@@ -18,8 +23,13 @@ class PackagedLicenseView;
 
 // Screen which is shown before login and enterprise screens.
 // It advertises the packaged license which allows user enroll device.
-class PackagedLicenseScreen : public BaseScreen {
+class PackagedLicenseScreen
+    : public BaseScreen,
+      public OobeMojoBinder<screens_oobe::mojom::PackagedLicensePageHandler>,
+      public screens_oobe::mojom::PackagedLicensePageHandler {
  public:
+  using TView = PackagedLicenseView;
+
   enum class Result {
     // Show login screen
     DONT_ENROLL,
@@ -36,7 +46,9 @@ class PackagedLicenseScreen : public BaseScreen {
   static std::string GetResultString(Result result);
 
   using ScreenExitCallback = base::RepeatingCallback<void(Result result)>;
-  PackagedLicenseScreen(base::WeakPtr<PackagedLicenseView> view,
+  // `local_state` must be non-null and must outlive `this`.
+  PackagedLicenseScreen(PrefService* local_state,
+                        base::WeakPtr<PackagedLicenseView> view,
                         const ScreenExitCallback& exit_callback);
   PackagedLicenseScreen(const PackagedLicenseScreen&) = delete;
   PackagedLicenseScreen& operator=(const PackagedLicenseScreen&) = delete;
@@ -59,10 +71,15 @@ class PackagedLicenseScreen : public BaseScreen {
   // BaseScreen
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
   bool HandleAccelerator(LoginAcceleratorAction action) override;
 
+  // screens_oobe::mojom::PackagedLicensePageHandler
+  void OnDontEnrollClicked() override;
+  void OnEnrollClicked() override;
+
  private:
+  const raw_ref<PrefService> local_state_;
+
   base::WeakPtr<PackagedLicenseView> view_;
 
   ScreenExitCallback exit_callback_;

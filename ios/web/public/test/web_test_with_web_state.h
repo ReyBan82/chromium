@@ -27,10 +27,11 @@ class WebTestWithWebState : public WebTest {
 
  protected:
   explicit WebTestWithWebState(
-      WebTaskEnvironment::Options = WebTaskEnvironment::Options::DEFAULT);
-  WebTestWithWebState(
-      std::unique_ptr<web::WebClient> web_client,
-      WebTaskEnvironment::Options = WebTaskEnvironment::Options::DEFAULT);
+      WebTaskEnvironment::MainThreadType main_thread_type =
+          WebTaskEnvironment::MainThreadType::DEFAULT);
+  WebTestWithWebState(std::unique_ptr<web::WebClient> web_client,
+                      WebTaskEnvironment::MainThreadType main_thread_type =
+                          WebTaskEnvironment::MainThreadType::DEFAULT);
   ~WebTestWithWebState() override;
 
   // WebTest overrides.
@@ -66,7 +67,7 @@ class WebTestWithWebState : public WebTest {
   void WaitForBackgroundTasks();
   // Blocks until known NSRunLoop-based have completed, known message-loop-based
   // background tasks have completed and `condition` evaluates to true.
-  void WaitForCondition(ConditionBlock condition);
+  [[nodiscard]] bool WaitForCondition(ConditionBlock condition);
   // Blocks until web_state() navigation and background tasks are
   // completed. Returns false when timed out.
   bool WaitUntilLoaded();
@@ -74,13 +75,13 @@ class WebTestWithWebState : public WebTest {
   // calling `function` with `parameters` in the main frame of `web_state()`.
   std::unique_ptr<base::Value> CallJavaScriptFunction(
       const std::string& function,
-      const std::vector<base::Value>& parameters);
+      const base::ListValue& parameters);
   std::unique_ptr<base::Value> CallJavaScriptFunctionForFeature(
       const std::string& function,
-      const std::vector<base::Value>& parameters,
+      const base::ListValue& parameters,
       JavaScriptFeature* feature);
   // Synchronously executes JavaScript and returns result as id.
-  id ExecuteJavaScript(NSString* script);
+  virtual id ExecuteJavaScript(NSString* script);
 
   // Returns the base URL of the loaded page.
   std::string BaseUrl() const;

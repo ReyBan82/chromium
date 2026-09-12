@@ -10,24 +10,19 @@
 #include "base/functional/callback.h"
 #include "base/notreached.h"
 #include "base/values.h"
-#include "components/pref_registry/pref_registry_syncable.h"
-#include "components/prefs/persistent_pref_store.h"
 
 namespace {
-const char kPreferenceMACs[] = "protection.macs";
-const char kSuperMACPref[] = "protection.super_mac";
+// Despite the pathname, all authenticators for individual tracked prefs are
+// stored under this path. The pathname was chosen when the only authenticators
+// used were MACs, but it's hard to change.
+const char kPrefAuthenticatorsPath[] = "protection.macs";
+const char kSuperHmacPref[] = "protection.super_mac";
+const char kSuperEncryptedHashPref[] = "protection.super_encrypted_hash";
 }
 
 DictionaryHashStoreContents::DictionaryHashStoreContents(
-    base::Value::Dict& storage)
+    base::DictValue& storage)
     : storage_(storage) {}
-
-// static
-void DictionaryHashStoreContents::RegisterProfilePrefs(
-    user_prefs::PrefRegistrySyncable* registry) {
-  registry->RegisterDictionaryPref(kPreferenceMACs);
-  registry->RegisterStringPref(kSuperMACPref, std::string());
-}
 
 bool DictionaryHashStoreContents::IsCopyable() const {
   return false;
@@ -36,26 +31,27 @@ bool DictionaryHashStoreContents::IsCopyable() const {
 std::unique_ptr<HashStoreContents> DictionaryHashStoreContents::MakeCopy()
     const {
   NOTREACHED() << "DictionaryHashStoreContents does not support MakeCopy";
-  return nullptr;
 }
 
-base::StringPiece DictionaryHashStoreContents::GetUMASuffix() const {
+std::string_view DictionaryHashStoreContents::GetUMASuffix() const {
   // To stay consistent with existing reported data, do not append a suffix
   // when reporting UMA stats for this content.
-  return base::StringPiece();
+  return std::string_view();
 }
 
 void DictionaryHashStoreContents::Reset() {
-  storage_->RemoveByDottedPath(kPreferenceMACs);
+  storage_->RemoveByDottedPath(kPrefAuthenticatorsPath);
 }
 
-bool DictionaryHashStoreContents::GetMac(const std::string& path,
-                                         std::string* out_value) {
-  const base::Value::Dict* macs_dict = GetContents();
-  if (!macs_dict)
+bool DictionaryHashStoreContents::GetAtomicPrefAuthenticator(
+    const std::string& path,
+    std::string* out_value) {
+  const base::DictValue* authenticators_dict = GetContents();
+  if (!authenticators_dict) {
     return false;
+  }
 
-  const std::string* str = macs_dict->FindStringByDottedPath(path);
+  const std::string* str = authenticators_dict->FindStringByDottedPath(path);
   if (!str)
     return false;
 
@@ -65,85 +61,108 @@ bool DictionaryHashStoreContents::GetMac(const std::string& path,
   return true;
 }
 
-bool DictionaryHashStoreContents::GetSplitMacs(
+bool DictionaryHashStoreContents::GetSplitPrefAuthenticators(
     const std::string& path,
-    std::map<std::string, std::string>* split_macs) {
-  DCHECK(split_macs);
-  DCHECK(split_macs->empty());
+    std::map<std::string, std::string>* split_pref_authenticators) {
+  DCHECK(split_pref_authenticators);
+  DCHECK(split_pref_authenticators->empty());
 
-  const base::Value::Dict* macs_dict = GetContents();
-  if (!macs_dict)
+  const base::DictValue* authenticators_dict = GetContents();
+  if (!authenticators_dict) {
     return false;
-  const base::Value::Dict* split_macs_dict =
-      macs_dict->FindDictByDottedPath(path);
-  if (!split_macs_dict)
+  }
+  const base::DictValue* split_authenticators_dict =
+      authenticators_dict->FindDictByDottedPath(path);
+  if (!split_authenticators_dict) {
     return false;
-  for (const auto item : *split_macs_dict) {
+  }
+  for (const auto item : *split_authenticators_dict) {
     const std::string* mac_string = item.second.GetIfString();
     if (!mac_string) {
       NOTREACHED();
-      continue;
     }
-    split_macs->insert(make_pair(item.first, *mac_string));
+    split_pref_authenticators->insert(make_pair(item.first, *mac_string));
   }
   return true;
 }
 
-void DictionaryHashStoreContents::SetMac(const std::string& path,
-                                         const std::string& value) {
-  base::Value::Dict* macs_dict = GetMutableContents(true);
-  macs_dict->SetByDottedPath(path, value);
+void DictionaryHashStoreContents::SetAtomicPrefAuthenticator(
+    const std::string& path,
+    const std::string& value) {
+  base::DictValue* authenticators_dict = GetMutableContents(true);
+  authenticators_dict->SetByDottedPath(path, value);
 }
 
-void DictionaryHashStoreContents::SetSplitMac(const std::string& path,
-                                              const std::string& split_path,
-                                              const std::string& value) {
-  base::Value::Dict* macs_dict = GetMutableContents(true);
-  base::Value::Dict* split_dict = macs_dict->FindDictByDottedPath(path);
+void DictionaryHashStoreContents::SetSplitPrefAuthenticator(
+    const std::string& path,
+    const std::string& split_path,
+    const std::string& value) {
+  base::DictValue* authenticators_dict = GetMutableContents(true);
+  base::DictValue* split_dict = authenticators_dict->FindDictByDottedPath(path);
   if (!split_dict) {
-    split_dict =
-        &macs_dict->SetByDottedPath(path, base::Value::Dict())->GetDict();
+    split_dict = &authenticators_dict->SetByDottedPath(path, base::DictValue())
+                      ->GetDict();
   }
   split_dict->Set(split_path, value);
 }
 
-void DictionaryHashStoreContents::ImportEntry(const std::string& path,
-                                              const base::Value* in_value) {
-  base::Value::Dict* macs_dict = GetMutableContents(true);
-  macs_dict->SetByDottedPath(path, in_value->Clone());
+void DictionaryHashStoreContents::ImportAuthenticator(
+    const std::string& path,
+    const base::Value* in_value) {
+  base::DictValue* authenticators_dict = GetMutableContents(true);
+  authenticators_dict->SetByDottedPath(path, in_value->Clone());
 }
 
-bool DictionaryHashStoreContents::RemoveEntry(const std::string& path) {
-  base::Value::Dict* macs_dict = GetMutableContents(false);
-  if (macs_dict)
-    return macs_dict->RemoveByDottedPath(path);
+bool DictionaryHashStoreContents::RemoveAuthenticator(const std::string& path) {
+  base::DictValue* authenticators_dict = GetMutableContents(false);
+  if (authenticators_dict) {
+    return authenticators_dict->RemoveByDottedPath(path);
+  }
 
   return false;
 }
 
-std::string DictionaryHashStoreContents::GetSuperMac() const {
-  if (const std::string* super_mac_string =
-          storage_->FindStringByDottedPath(kSuperMACPref)) {
-    return *super_mac_string;
+bool DictionaryHashStoreContents::SupportsSuperAuthenticator() const {
+  return true;
+}
+
+std::string DictionaryHashStoreContents::GetSuperHmac() const {
+  if (const std::string* super_hmac_string =
+          storage_->FindStringByDottedPath(kSuperHmacPref)) {
+    return *super_hmac_string;
   }
   return std::string();
 }
 
-void DictionaryHashStoreContents::SetSuperMac(const std::string& super_mac) {
-  storage_->SetByDottedPath(kSuperMACPref, super_mac);
+void DictionaryHashStoreContents::SetSuperHmac(const std::string& super_hmac) {
+  storage_->SetByDottedPath(kSuperHmacPref, super_hmac);
 }
 
-const base::Value::Dict* DictionaryHashStoreContents::GetContents() const {
-  return storage_->FindDictByDottedPath(kPreferenceMACs);
-}
-
-base::Value::Dict* DictionaryHashStoreContents::GetMutableContents(
-    bool create_if_null) {
-  base::Value::Dict* macs_dict =
-      storage_->FindDictByDottedPath(kPreferenceMACs);
-  if (!macs_dict && create_if_null) {
-    macs_dict = &storage_->SetByDottedPath(kPreferenceMACs, base::Value::Dict())
-                     ->GetDict();
+std::string DictionaryHashStoreContents::GetSuperEncryptedHash() const {
+  if (const std::string* super_encrypted_hash_string =
+          storage_->FindStringByDottedPath(kSuperEncryptedHashPref)) {
+    return *super_encrypted_hash_string;
   }
-  return macs_dict;
+  return std::string();
+}
+
+void DictionaryHashStoreContents::SetSuperEncryptedHash(
+    const std::string& super_encrypted_hash) {
+  storage_->SetByDottedPath(kSuperEncryptedHashPref, super_encrypted_hash);
+}
+
+const base::DictValue* DictionaryHashStoreContents::GetContents() const {
+  return storage_->FindDictByDottedPath(kPrefAuthenticatorsPath);
+}
+
+base::DictValue* DictionaryHashStoreContents::GetMutableContents(
+    bool create_if_null) {
+  base::DictValue* authenticators_dict =
+      storage_->FindDictByDottedPath(kPrefAuthenticatorsPath);
+  if (!authenticators_dict && create_if_null) {
+    authenticators_dict =
+        &storage_->SetByDottedPath(kPrefAuthenticatorsPath, base::DictValue())
+             ->GetDict();
+  }
+  return authenticators_dict;
 }

@@ -3,10 +3,12 @@ include_rules = [
   "+printing/units.h",
   "+third_party/skia/include",
   "+ui/gfx",
+  "+ui/events/devices",
+  "+ui/ozone",
 ]
 
 specific_include_rules = {
-  ".*test\.cc|mock.*\.*": [
+  ".*test\\.cc|mock.*\\.*": [
     "+testing",
   ],
 }

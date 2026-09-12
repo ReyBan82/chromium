@@ -4,7 +4,8 @@
 
 #include "base/metrics/field_trial_param_associator.h"
 
-#include "base/containers/contains.h"
+#include <utility>
+
 #include "base/logging.h"
 #include "base/metrics/field_trial.h"
 
@@ -22,28 +23,30 @@ FieldTrialParamAssociator* FieldTrialParamAssociator::GetInstance() {
 bool FieldTrialParamAssociator::AssociateFieldTrialParams(
     const std::string& trial_name,
     const std::string& group_name,
-    const FieldTrialParams& params) {
+    FieldTrialParams params) {
   if (FieldTrialList::IsTrialActive(trial_name)) {
     DLOG(ERROR) << "Field trial " << trial_name << " is already active.";
     return false;
   }
 
   AutoLock scoped_lock(lock_);
-  const FieldTrialKey key(trial_name, group_name);
-  if (Contains(field_trial_params_, key)) {
+  FieldTrialKey key(trial_name, group_name);
+  auto [it, inserted] =
+      field_trial_params_.try_emplace(std::move(key), std::move(params));
+  if (!inserted) {
     DLOG(ERROR) << "You can't override the existing params for field trial: "
                 << trial_name << "." << group_name;
     return false;
   }
 
-  field_trial_params_[key] = params;
   return true;
 }
 
 bool FieldTrialParamAssociator::GetFieldTrialParams(FieldTrial* field_trial,
                                                     FieldTrialParams* params) {
-  if (!field_trial)
+  if (!field_trial) {
     return false;
+  }
   // First try the local map, falling back to getting it from shared memory.
   if (GetFieldTrialParamsWithoutFallback(field_trial->trial_name(),
                                          field_trial->group_name(), params)) {
@@ -62,8 +65,9 @@ bool FieldTrialParamAssociator::GetFieldTrialParamsWithoutFallback(
 
   const FieldTrialRefKey key(trial_name, group_name);
   auto it = field_trial_params_.find(key);
-  if (it == field_trial_params_.end())
+  if (it == field_trial_params_.end()) {
     return false;
+  }
 
   *params = it->second;
   return true;
@@ -86,6 +90,12 @@ void FieldTrialParamAssociator::ClearParamsForTesting(
 }
 
 void FieldTrialParamAssociator::ClearAllCachedParamsForTesting() {
+  AutoLock scoped_lock(lock_);
+  field_trial_params_.clear();
+}
+
+void FieldTrialParamAssociator::ClearAllCachedParams(
+    PassKey<AppShimController>) {
   AutoLock scoped_lock(lock_);
   field_trial_params_.clear();
 }

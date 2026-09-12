@@ -10,7 +10,7 @@
 
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
@@ -21,6 +21,7 @@
 #include "components/media_router/common/providers/cast/channel/cast_channel_enum.h"
 #include "components/media_router/common/providers/cast/channel/cast_socket.h"
 #include "net/base/backoff_entry.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 #include "third_party/openscreen/src/cast/common/channel/proto/cast_channel.pb.h"
 
 namespace cast_channel {
@@ -47,8 +48,8 @@ class CastMediaSinkServiceImpl : public MediaSinkServiceBase,
   static constexpr int kMaxDialSinkFailureCount = 10;
 
   // Returns a Cast MediaSink ID from a DIAL MediaSink ID, and vice versa.
-  static MediaSink::Id GetCastSinkIdFromDial(const MediaSink::Id& dial_sink_id);
-  static MediaSink::Id GetDialSinkIdFromCast(const MediaSink::Id& cast_sink_id);
+  static MediaSink::Id GetCastSinkIdFromDial(MediaSink::IdView dial_sink_id);
+  static MediaSink::Id GetDialSinkIdFromCast(MediaSink::IdView cast_sink_id);
 
   // |callback|: Callback passed to MediaSinkServiceBase.
   // |observer|: Observer to invoke on sink updates. Can be nullptr.
@@ -63,7 +64,7 @@ class CastMediaSinkServiceImpl : public MediaSinkServiceBase,
   CastMediaSinkServiceImpl(const OnSinksDiscoveredCallback& callback,
                            cast_channel::CastSocketService* cast_socket_service,
                            DiscoveryNetworkMonitor* network_monitor,
-                           MediaSinkServiceBase* dial_media_sink_service,
+                           DialMediaSinkServiceImpl* dial_media_sink_service,
                            bool allow_all_ips);
 
   CastMediaSinkServiceImpl(const CastMediaSinkServiceImpl&) = delete;
@@ -247,7 +248,8 @@ class CastMediaSinkServiceImpl : public MediaSinkServiceBase,
   void OnError(const cast_channel::CastSocket& socket,
                cast_channel::ChannelError error_state) override;
   void OnMessage(const cast_channel::CastSocket& socket,
-                 const cast::channel::CastMessage& message) override;
+                 const openscreen::cast::proto::CastMessage& message) override;
+  void OnReadyStateChanged(const cast_channel::CastSocket& socket) override;
 
   // DiscoveryNetworkMonitor::Observer implementation
   void OnNetworksChanged(const std::string& network_id) override;
@@ -318,7 +320,7 @@ class CastMediaSinkServiceImpl : public MediaSinkServiceBase,
   // device. This is heuristically determined by two things: |sink| has been
   // discovered via DIAL exclusively, and we failed to open a cast channel to
   // |sink| a number of times past a pre-determined threshold.
-  // TODO(crbug.com/774233): This is a temporary and not a definitive way to
+  // TODO(crbug.com/41349540): This is a temporary and not a definitive way to
   // tell if a device is a Cast/non-Cast device. We need to collect some metrics
   // for the device description URL advertised by Cast devices to determine the
   // long term solution for restricting dual discovery.
@@ -348,7 +350,7 @@ class CastMediaSinkServiceImpl : public MediaSinkServiceBase,
   std::string current_network_id_ = DiscoveryNetworkMonitor::kNetworkIdUnknown;
 
   // Cache of known sinks by network ID.
-  std::map<std::string, std::vector<MediaSinkInternal>> sink_cache_;
+  absl::flat_hash_map<std::string, std::vector<MediaSinkInternal>> sink_cache_;
 
   CastDeviceCountMetrics metrics_;
 
@@ -375,7 +377,7 @@ class CastMediaSinkServiceImpl : public MediaSinkServiceBase,
 
   // Non-owned pointer to DIAL MediaSinkService. Observed by |this| for dual
   // discovery.  May be nullptr if the DIAL Media Route Provider is disabled.
-  const raw_ptr<MediaSinkServiceBase> dial_media_sink_service_;
+  const raw_ptr<DialMediaSinkServiceImpl> dial_media_sink_service_;
 
   // The SequencedTaskRunner on which methods are run. This shares the
   // same SequencedTaskRunner as the one used by |cast_socket_service_|.

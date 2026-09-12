@@ -5,6 +5,8 @@
 #ifndef MEDIA_REMOTING_FAKE_REMOTER_H_
 #define MEDIA_REMOTING_FAKE_REMOTER_H_
 
+#include "base/containers/span.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/scoped_refptr.h"
 #include "media/base/decoder_buffer.h"
 #include "media/mojo/common/mojo_data_pipe_read_write.h"
@@ -14,9 +16,9 @@
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 
-namespace cast_streaming {
+namespace media::cast {
 class DecoderBufferReader;
-}  // namespace cast_streaming
+}  // namespace media::cast
 
 namespace media::remoting {
 
@@ -52,7 +54,7 @@ class FakeRemotingDataStreamSender : public mojom::RemotingDataStreamSender {
   void OnFrameRead(scoped_refptr<media::DecoderBuffer> buffer);
 
   mojo::Receiver<RemotingDataStreamSender> receiver_;
-  std::unique_ptr<cast_streaming::DecoderBufferReader> decoder_buffer_reader_;
+  std::unique_ptr<media::cast::DecoderBufferReader> decoder_buffer_reader_;
   SendFrameCallback send_frame_callback_;
 
   std::vector<scoped_refptr<media::DecoderBuffer>> received_frame_list_;
@@ -64,7 +66,9 @@ class FakeRemoter final : public mojom::Remoter {
  public:
   // |start_will_fail| indicates whether starting remoting will fail.
   FakeRemoter(mojo::PendingRemote<mojom::RemotingSource> source,
-              bool start_will_fail);
+              bool start_will_fail,
+              base::RepeatingCallback<void(base::span<const uint8_t>)>
+                  send_message_to_sink_cb = base::NullCallback());
 
   FakeRemoter(const FakeRemoter&) = delete;
   FakeRemoter& operator=(const FakeRemoter&) = delete;
@@ -96,13 +100,19 @@ class FakeRemoter final : public mojom::Remoter {
   std::unique_ptr<FakeRemotingDataStreamSender> audio_stream_sender_;
   std::unique_ptr<FakeRemotingDataStreamSender> video_stream_sender_;
 
+  base::RepeatingCallback<void(base::span<const uint8_t>)>
+      send_message_to_sink_cb_;
+
   base::WeakPtrFactory<FakeRemoter> weak_factory_{this};
 };
 
 class FakeRemoterFactory final : public mojom::RemoterFactory {
  public:
   // |start_will_fail| indicates whether starting remoting will fail.
-  explicit FakeRemoterFactory(bool start_will_fail);
+  explicit FakeRemoterFactory(
+      bool start_will_fail,
+      base::RepeatingCallback<void(base::span<const uint8_t>)>
+          send_message_to_sink_cb = base::NullCallback());
 
   FakeRemoterFactory(const FakeRemoterFactory&) = delete;
   FakeRemoterFactory& operator=(const FakeRemoterFactory&) = delete;
@@ -114,10 +124,14 @@ class FakeRemoterFactory final : public mojom::RemoterFactory {
               mojo::PendingReceiver<mojom::Remoter> receiver) override;
 
   static std::unique_ptr<RendererController> CreateController(
-      bool start_will_fail);
+      bool start_will_fail,
+      base::RepeatingCallback<void(base::span<const uint8_t>)>
+          send_message_to_sink_cb = base::NullCallback());
 
  private:
   bool start_will_fail_;
+  base::RepeatingCallback<void(base::span<const uint8_t>)>
+      send_message_to_sink_cb_;
 };
 
 }  // namespace media::remoting

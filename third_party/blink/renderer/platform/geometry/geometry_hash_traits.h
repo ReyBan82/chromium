@@ -9,13 +9,13 @@
 #include "third_party/skia/include/core/SkRect.h"
 #include "ui/gfx/geometry/size_f.h"
 
-namespace WTF {
+namespace blink {
 
 template <>
 struct HashTraits<gfx::SizeF> : GenericHashTraits<gfx::SizeF> {
   STATIC_ONLY(HashTraits);
-  static unsigned GetHash(const gfx::SizeF& key) {
-    return HashInts(WTF::GetHash(key.width()), WTF::GetHash(key.height()));
+  static uint32_t GetHash(const gfx::SizeF& key) {
+    return HashInts(blink::GetHash(key.width()), blink::GetHash(key.height()));
   }
   static bool Equal(const gfx::SizeF& a, const gfx::SizeF& b) {
     return HashTraits<float>::Equal(a.width(), b.width()) &&
@@ -34,7 +34,7 @@ struct HashTraits<gfx::SizeF> : GenericHashTraits<gfx::SizeF> {
 template <>
 struct HashTraits<SkIRect> : GenericHashTraits<SkIRect> {
   STATIC_ONLY(HashTraits);
-  static unsigned GetHash(const SkIRect& key) {
+  static uint32_t GetHash(const SkIRect& key) {
     return HashInts(HashInts(key.x(), key.y()),
                     HashInts(key.right(), key.bottom()));
   }
@@ -44,6 +44,6 @@ struct HashTraits<SkIRect> : GenericHashTraits<SkIRect> {
   static SkIRect DeletedValue() { return SkIRect::MakeWH(0, -1); }
 };
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GEOMETRY_GEOMETRY_HASH_TRAITS_H_

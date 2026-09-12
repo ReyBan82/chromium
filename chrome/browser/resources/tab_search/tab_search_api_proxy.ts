@@ -2,32 +2,44 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {PageCallbackRouter, PageHandlerFactory, PageHandlerRemote, ProfileData, SwitchToTabInfo} from './tab_search.mojom-webui.js';
+import type {ProfileData, SwitchToTabInfo} from './tab_search.mojom-webui.js';
+import {PageCallbackRouter, PageHandlerFactory, PageHandlerRemote} from './tab_search.mojom-webui.js';
 
+// LINT.IfChange(TabSearchRecentlyClosedItemOpenAction)
 /**
- * These values are persisted to logs and should not be renumbered or re-used.
- * See tools/metrics/histograms/enums.xml.
+ * These values are persisted to logs and should not be renumbered or reused.
+ * See tools/metrics/histograms/metadata/tab/enums.xml.
  */
 export enum RecentlyClosedItemOpenAction {
   WITHOUT_SEARCH = 0,
   WITH_SEARCH = 1,
+  COUNT = WITH_SEARCH + 1,
 }
+// LINT.ThenChange(//tools/metrics/histograms/metadata/tab/enums.xml:TabSearchRecentlyClosedItemOpenAction)
 
 export interface TabSearchApiProxy {
   closeTab(tabId: number): void;
 
+  closeTabs(tabIds: number[]): void;
+
+  closeWebUiTab(): void;
+
   getProfileData(): Promise<{profileData: ProfileData}>;
 
-  openRecentlyClosedEntry(
-      id: number, withSearch: boolean, isTab: boolean, index: number): void;
+  getIsSplit(): Promise<{isSplit: boolean}>;
+
+  openRecentlyClosedEntry(id: number, withSearch: boolean, isTab: boolean):
+      void;
 
   switchToTab(info: SwitchToTabInfo): void;
 
   getCallbackRouter(): PageCallbackRouter;
 
+  replaceActiveSplitTab(replacementTabId: number): void;
+
   saveRecentlyClosedExpandedPref(expanded: boolean): void;
 
-  showUi(): void;
+  maybeShowUi(): void;
 }
 
 export class TabSearchApiProxyImpl implements TabSearchApiProxy {
@@ -45,23 +57,29 @@ export class TabSearchApiProxyImpl implements TabSearchApiProxy {
     this.handler.closeTab(tabId);
   }
 
+  closeTabs(tabIds: number[]) {
+    this.handler.closeTabs(tabIds);
+  }
+
+  closeWebUiTab() {
+    this.handler.closeWebUiTab();
+  }
+
   getProfileData() {
     return this.handler.getProfileData();
   }
 
-  openRecentlyClosedEntry(
-      id: number, withSearch: boolean, isTab: boolean, index: number) {
+  getIsSplit() {
+    return this.handler.getIsSplit();
+  }
+
+  openRecentlyClosedEntry(id: number, withSearch: boolean, isTab: boolean) {
     chrome.metricsPrivate.recordEnumerationValue(
         isTab ? 'Tabs.TabSearch.WebUI.RecentlyClosedTabOpenAction' :
                 'Tabs.TabSearch.WebUI.RecentlyClosedGroupOpenAction',
         withSearch ? RecentlyClosedItemOpenAction.WITH_SEARCH :
                      RecentlyClosedItemOpenAction.WITHOUT_SEARCH,
-        Object.keys(RecentlyClosedItemOpenAction).length);
-    chrome.metricsPrivate.recordSmallCount(
-        withSearch ?
-            'Tabs.TabSearch.WebUI.IndexOfOpenRecentlyClosedEntryInFilteredList' :
-            'Tabs.TabSearch.WebUI.IndexOfOpenRecentlyClosedEntryInUnfilteredList',
-        index);
+        RecentlyClosedItemOpenAction.COUNT);
     this.handler.openRecentlyClosedEntry(id);
   }
 
@@ -73,12 +91,16 @@ export class TabSearchApiProxyImpl implements TabSearchApiProxy {
     return this.callbackRouter;
   }
 
+  replaceActiveSplitTab(replacementSplitTabId: number) {
+    this.handler.replaceActiveSplitTab(replacementSplitTabId);
+  }
+
   saveRecentlyClosedExpandedPref(expanded: boolean) {
     this.handler.saveRecentlyClosedExpandedPref(expanded);
   }
 
-  showUi() {
-    this.handler.showUI();
+  maybeShowUi() {
+    this.handler.maybeShowUI();
   }
 
   static getInstance(): TabSearchApiProxy {

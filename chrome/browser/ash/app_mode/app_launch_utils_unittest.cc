@@ -10,12 +10,14 @@
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/test/task_environment.h"
-#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/test/base/testing_browser_process.h"
+#include "chromeos/ash/components/policy/device_local_account/device_local_account_type.h"
 #include "components/prefs/json_pref_store.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service_factory.h"
 #include "components/prefs/testing_pref_service.h"
-#include "components/user_manager/scoped_user_manager.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace ash {
@@ -46,21 +48,27 @@ class AppLaunchUtilsTest : public testing::Test {
   void SetUp() override {
     testing::Test::SetUp();
 
-    const AccountId account_id = AccountId::FromUserEmail("lala@example.com");
-    auto fake_user_manager = std::make_unique<FakeChromeUserManager>();
-    // Stealing the pointer from unique ptr before it goes to the scoped user
-    // manager.
-    FakeChromeUserManager* user_manager = fake_user_manager.get();
-    scoped_user_manager_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::move(fake_user_manager));
-    user_manager->AddWebKioskAppUser(account_id);
-    user_manager->LoginUser(account_id);
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            TestingBrowserProcess::GetGlobal()->local_state());
+
+    const AccountId account_id =
+        AccountId::FromUserEmail(policy::GenerateDeviceLocalAccountUserId(
+            "lala", policy::DeviceLocalAccountType::kWebKioskApp));
+    ASSERT_TRUE(user_session_test_environment_->AddKioskWebAppUser(
+        account_id.GetUserEmail()));
+    user_session_test_environment_->LogIn(account_id);
 
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
     input_file_ = temp_dir_.GetPath().AppendASCII("prefs.json");
     ASSERT_TRUE(base::WriteFile(input_file_, kEmptyPrefsFile));
 
     registry_ = new PrefRegistrySimple;
+  }
+
+  void TearDown() override {
+    user_session_test_environment_.reset();
+    testing::Test::TearDown();
   }
 
   std::unique_ptr<PrefService> CreatePrefService() {
@@ -79,7 +87,8 @@ class AppLaunchUtilsTest : public testing::Test {
   scoped_refptr<JsonPrefStore> pref_store_;
   scoped_refptr<PrefRegistrySimple> registry_;
 
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
 };
 
 TEST_F(AppLaunchUtilsTest, ClearUserPrefs) {

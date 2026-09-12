@@ -22,7 +22,6 @@ const char* TaskPriorityToString(TaskPriority task_priority) {
       return "USER_BLOCKING";
   }
   NOTREACHED();
-  return "";
 }
 
 const char* TaskShutdownBehaviorToString(
@@ -36,7 +35,6 @@ const char* TaskShutdownBehaviorToString(
       return "BLOCK_SHUTDOWN";
   }
   NOTREACHED();
-  return "";
 }
 
 std::ostream& operator<<(std::ostream& os, const TaskPriority& task_priority) {
@@ -50,4 +48,30 @@ std::ostream& operator<<(std::ostream& os,
   return os;
 }
 
+namespace internal {
+
+ThreadType TaskPriorityToThreadType(TaskPriority priority) {
+  switch (priority) {
+    case TaskPriority::BEST_EFFORT:
+      return ThreadType::kBackground;
+    case TaskPriority::USER_VISIBLE:
+      return ThreadType::kUtility;
+    case TaskPriority::USER_BLOCKING:
+      return ThreadType::kDefault;
+  }
+}
+
+ThreadType EffectiveThreadType(const TaskTraits& traits,
+                               ThreadType originating_thread_type,
+                               bool inherit_by_default) {
+  if (traits.inherit_thread_type()) {
+    return std::min(traits.max_thread_type(), originating_thread_type);
+  }
+  if (inherit_by_default && !traits.priority_set_explicitly()) {
+    return std::min(ThreadType::kDefault, originating_thread_type);
+  }
+  return TaskPriorityToThreadType(traits.priority());
+}
+
+}  // namespace internal
 }  // namespace base

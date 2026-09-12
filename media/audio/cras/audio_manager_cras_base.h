@@ -27,7 +27,7 @@ class MEDIA_EXPORT AudioManagerCrasBase : public AudioManagerBase {
   ~AudioManagerCrasBase() override;
 
   // AudioManager implementation.
-  const char* GetName() override;
+  const std::string_view GetName() override;
 
   // AudioManagerBase implementation.
   AudioOutputStream* MakeLinearOutputStream(
@@ -59,18 +59,19 @@ class MEDIA_EXPORT AudioManagerCrasBase : public AudioManagerBase {
   // Unregisters system AEC dump. Virtual to mock in unittest.
   virtual void DeregisterSystemAecDumpSource(AecdumpRecordingSource* stream);
 
-  virtual void SetAecDumpRecordingManager(
-      base::WeakPtr<AecdumpRecordingManager> aecdump_recording_manager)
-      override;
+  void SetAecDumpRecordingManager(base::WeakPtr<AecdumpRecordingManager>
+                                      aecdump_recording_manager) override;
 
  protected:
   // Called by MakeLinearOutputStream and MakeLowLatencyOutputStream.
   AudioOutputStream* MakeOutputStream(const AudioParameters& params,
-                                      const std::string& device_id);
+                                      const std::string& device_id,
+                                      const LogCallback& log_callback);
 
   // Called by MakeLinearInputStream and MakeLowLatencyInputStream.
   AudioInputStream* MakeInputStream(const AudioParameters& params,
-                                    const std::string& device_id);
+                                    const std::string& device_id,
+                                    const LogCallback& log_callback);
 
  private:
   // Manages starting / stopping of aecdump recording.

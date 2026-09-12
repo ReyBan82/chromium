@@ -16,9 +16,9 @@
 #include "base/compiler_specific.h"
 #include "base/files/file.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/system/sys_info.h"
@@ -39,28 +39,16 @@
 #include "third_party/leveldatabase/src/include/leveldb/db.h"
 #include "third_party/leveldatabase/src/include/leveldb/slice.h"
 
-using base::StringPiece;
 using leveldb_env::DBTracker;
 
-namespace content {
+namespace content::indexed_db {
 
 namespace {
 
-// Forcing flushes to disk at the end of a transaction guarantees that the
-// data hit disk, but drastically impacts throughput when the filesystem is
-// busy with background compactions. Not syncing trades off reliability for
-// performance. Note that background compactions which move data from the
-// log to SSTs are always done with reliable writes.
-//
-// Sync writes are necessary on Windows for quota calculations; POSIX
-// calculates file sizes correctly even when not synced to disk.
-#if BUILDFLAG(IS_WIN)
+// As `TransactionLevelDBDatabase` is only used for internal transactions such
+// as DB initialization and via `LevelDBDirectTransaction`, this constant
+// doesn't apply to web API IndexedDB "readwrite" transactions.
 const bool kSyncWrites = true;
-#else
-// TODO(dgrogan): Either remove the #if block or change this back to false.
-// See http://crbug.com/338385.
-const bool kSyncWrites = true;
-#endif
 
 }  // namespace
 
@@ -102,7 +90,7 @@ TransactionalLevelDBDatabase::~TransactionalLevelDBDatabase() {
       this);
 }
 
-leveldb::Status TransactionalLevelDBDatabase::Put(const StringPiece& key,
+leveldb::Status TransactionalLevelDBDatabase::Put(std::string_view key,
                                                   std::string* value) {
   leveldb::WriteOptions write_options;
   write_options.sync = kSyncWrites;
@@ -111,11 +99,10 @@ leveldb::Status TransactionalLevelDBDatabase::Put(const StringPiece& key,
       db()->Put(write_options, leveldb_env::MakeSlice(key),
                 leveldb_env::MakeSlice(*value));
   EvictAllIterators();
-  last_modified_ = clock_->Now();
   return s;
 }
 
-leveldb::Status TransactionalLevelDBDatabase::Remove(const StringPiece& key) {
+leveldb::Status TransactionalLevelDBDatabase::Remove(std::string_view key) {
   leveldb::WriteOptions write_options;
   write_options.sync = kSyncWrites;
 
@@ -123,11 +110,10 @@ leveldb::Status TransactionalLevelDBDatabase::Remove(const StringPiece& key) {
       db()->Delete(write_options, leveldb_env::MakeSlice(key));
 
   EvictAllIterators();
-  last_modified_ = clock_->Now();
   return s;
 }
 
-leveldb::Status TransactionalLevelDBDatabase::Get(const StringPiece& key,
+leveldb::Status TransactionalLevelDBDatabase::Get(std::string_view key,
                                                   std::string* value,
                                                   bool* found) {
   *found = false;
@@ -139,24 +125,21 @@ leveldb::Status TransactionalLevelDBDatabase::Get(const StringPiece& key,
     *found = true;
     return s;
   }
-  if (LIKELY(s.IsNotFound()))
+  if (s.IsNotFound()) [[likely]] {
     return leveldb::Status::OK();
+  }
   return s;
 }
 
 leveldb::Status TransactionalLevelDBDatabase::Write(
     LevelDBWriteBatch* write_batch) {
   DCHECK(write_batch);
-  base::TimeTicks begin_time = base::TimeTicks::Now();
   leveldb::WriteOptions write_options;
   write_options.sync = kSyncWrites;
 
   const leveldb::Status s =
       db()->Write(write_options, write_batch->write_batch_.get());
-  UMA_HISTOGRAM_TIMES("WebCore.IndexedDB.LevelDB.WriteTime",
-                      base::TimeTicks::Now() - begin_time);
   EvictAllIterators();
-  last_modified_ = clock_->Now();
   return s;
 }
 
@@ -200,8 +183,8 @@ TransactionalLevelDBDatabase::CreateIterator(
       std::move(snapshot));
 }
 
-void TransactionalLevelDBDatabase::Compact(const base::StringPiece& start,
-                                           const base::StringPiece& stop) {
+void TransactionalLevelDBDatabase::Compact(std::string_view start,
+                                           std::string_view stop) {
   TRACE_EVENT0("leveldb", "LevelDBDatabase::Compact");
   const leveldb::Slice start_slice = leveldb_env::MakeSlice(start);
   const leveldb::Slice stop_slice = leveldb_env::MakeSlice(stop);
@@ -236,7 +219,7 @@ bool TransactionalLevelDBDatabase::OnMemoryDump(
     return true;
 
   auto* db_dump = pmd->CreateAllocatorDump(
-      base::StringPrintf("site_storage/index_db/db_0x%" PRIXPTR,
+      base::StringPrintf("site_storage/indexed_db/database_engine_0x%" PRIXPTR,
                          reinterpret_cast<uintptr_t>(db())));
   db_dump->AddScalar(base::trace_event::MemoryAllocatorDump::kNameSize,
                      base::trace_event::MemoryAllocatorDump::kUnitsBytes,
@@ -248,7 +231,7 @@ bool TransactionalLevelDBDatabase::OnMemoryDump(
     // an edge to the existing env.
     auto* env_tracker_dump = DBTracker::GetOrCreateAllocatorDump(pmd, env());
     auto* env_dump = pmd->CreateAllocatorDump(
-        base::StringPrintf("site_storage/index_db/memenv_0x%" PRIXPTR,
+        base::StringPrintf("site_storage/indexed_db/memenv_0x%" PRIXPTR,
                            reinterpret_cast<uintptr_t>(env())));
     env_dump->AddScalar(base::trace_event::MemoryAllocatorDump::kNameSize,
                         base::trace_event::MemoryAllocatorDump::kUnitsBytes,
@@ -259,7 +242,7 @@ bool TransactionalLevelDBDatabase::OnMemoryDump(
   // Dumps in BACKGROUND mode can only have whitelisted strings (and there are
   // currently none) so return early.
   if (args.level_of_detail ==
-      base::trace_event::MemoryDumpLevelOfDetail::BACKGROUND) {
+      base::trace_event::MemoryDumpLevelOfDetail::kBackground) {
     return true;
   }
 
@@ -291,8 +274,8 @@ void TransactionalLevelDBDatabase::EvictAllIterators() {
   if (db_only_loaded_iterators_.empty())
     return;
   is_evicting_all_loaded_iterators_ = true;
-  base::flat_set<TransactionalLevelDBIterator*> to_be_evicted =
-      std::move(db_only_loaded_iterators_);
+  base::flat_set<raw_ptr<TransactionalLevelDBIterator, CtnExperimental>>
+      to_be_evicted = std::move(db_only_loaded_iterators_);
   for (TransactionalLevelDBIterator* iter : to_be_evicted) {
     iter->EvictLevelDBIterator();
   }
@@ -340,4 +323,4 @@ void TransactionalLevelDBDatabase::OnIteratorDestroyed(
   iterator_lru_.Erase(lru_iterator);
 }
 
-}  // namespace content
+}  // namespace content::indexed_db

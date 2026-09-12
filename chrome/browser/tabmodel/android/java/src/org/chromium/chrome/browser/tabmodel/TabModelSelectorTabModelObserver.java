@@ -4,55 +4,48 @@
 
 package org.chromium.chrome.browser.tabmodel;
 
-import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.browser.tab.TabCreationState;
+import org.chromium.base.Callback;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.util.List;
 
 /**
  * Observer for all {@link TabModel}s owned by a {@link TabModelSelector}.
  *
- * <p>
- * This can safely be constructed before native libraries have been initialized as this will
+ * <p>This can safely be constructed before native libraries have been initialized as this will
  * register to observe the underlying TabModels as they are created lazily.
  */
+@NullMarked
 public class TabModelSelectorTabModelObserver implements TabModelObserver {
     private final TabModelSelector mTabModelSelector;
 
-    private TabModelSelectorObserver mSelectorObserver;
+    private @Nullable Callback<TabModel> mTabModelSupplierObserver;
 
     /**
-     * Constructs an observer that should be notified of changes for all tab models owned
-     * by a specified {@link TabModelSelector}.
+     * Constructs an observer that should be notified of changes for all tab models owned by a
+     * specified {@link TabModelSelector}.
      *
-     * <p>
-     * {@link #destroy()} must be called to unregister this observer.
+     * <p>{@link #destroy()} must be called to unregister this observer.
      *
      * @param selector The selector that owns the Tab Models that should notify this observer.
      */
     public TabModelSelectorTabModelObserver(TabModelSelector selector) {
         mTabModelSelector = selector;
 
-        List<TabModel> tabModels = mTabModelSelector.getModels();
-        if (tabModels.isEmpty()) {
-            mSelectorObserver = new TabModelSelectorObserver() {
-                @Override
-                public void onNewTabCreated(Tab tab, @TabCreationState int creationState) {
-                    throw new IllegalStateException(
-                            "onChange should have happened and unregistered this listener.");
-                }
-
-                @Override
-                public void onChange() {
-                    mTabModelSelector.removeObserver(this);
-                    mSelectorObserver = null;
+        mTabModelSupplierObserver =
+                (tabModel) -> {
+                    if (mTabModelSupplierObserver != null) {
+                        mTabModelSelector
+                                .getCurrentTabModelSupplier()
+                                .removeObserver(mTabModelSupplierObserver);
+                        mTabModelSupplierObserver = null;
+                    }
                     registerModelObservers();
-                }
-            };
-            mTabModelSelector.addObserver(mSelectorObserver);
-        } else {
-            registerModelObservers();
-        }
+                };
+        mTabModelSelector
+                .getCurrentTabModelSupplier()
+                .addSyncObserverAndCallIfNonNull(mTabModelSupplierObserver);
     }
 
     private void registerModelObservers() {
@@ -65,18 +58,16 @@ public class TabModelSelectorTabModelObserver implements TabModelObserver {
         onRegistrationComplete();
     }
 
-    /**
-     * Notifies that the registration of the observers has been completed.
-     */
+    /** Notifies that the registration of the observers has been completed. */
     protected void onRegistrationComplete() {}
 
-    /**
-     * Destroys the observer and removes itself as a listener for Tab updates.
-     */
+    /** Destroys the observer and removes itself as a listener for Tab updates. */
     public void destroy() {
-        if (mSelectorObserver != null) {
-            mTabModelSelector.removeObserver(mSelectorObserver);
-            mSelectorObserver = null;
+        if (mTabModelSupplierObserver != null) {
+            mTabModelSelector
+                    .getCurrentTabModelSupplier()
+                    .removeObserver(mTabModelSupplierObserver);
+            mTabModelSupplierObserver = null;
         }
 
         List<TabModel> tabModels = mTabModelSelector.getModels();

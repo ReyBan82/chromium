@@ -6,30 +6,51 @@
 
 #include <vector>
 
+#include "cc/input/android/offset_tag_android.h"
 #include "cc/slim/filter.h"
 #include "cc/slim/layer.h"
-#include "chrome/android/chrome_jni_headers/StaticTabSceneLayer_jni.h"
 #include "chrome/browser/android/compositor/layer/content_layer.h"
 #include "chrome/browser/android/compositor/layer_title_cache.h"
 #include "chrome/browser/android/compositor/tab_content_manager.h"
-#include "third_party/skia/include/core/SkColor.h"
-#include "ui/android/resources/resource_manager_impl.h"
+#include "chrome/browser/android/tab_android.h"
+#include "content/public/browser/web_contents.h"
+#include "ui/android/view_android.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/StaticTabSceneLayer_jni.h"
+
 using base::android::JavaRef;
 
 namespace android {
+namespace {
+
+static bool LayerDraws(scoped_refptr<cc::slim::Layer> layer) {
+  if (!layer.get() || layer->opacity() == 0.0f ||
+      layer->hide_layer_and_subtree()) {
+    return false;
+  }
+
+  if (layer->draws_content()) {
+    return true;
+  }
+
+  for (const auto& child : layer->children()) {
+    if (LayerDraws(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
 
 StaticTabSceneLayer::StaticTabSceneLayer(JNIEnv* env,
                                          const JavaRef<jobject>& jobj)
     : SceneLayer(env, jobj),
       tab_content_manager_(nullptr),
-      last_set_tab_id_(-1),
-      background_color_(SK_ColorWHITE),
-      brightness_(1.f) {}
+      background_color_(SK_ColorWHITE) {}
 
-StaticTabSceneLayer::~StaticTabSceneLayer() {
-}
+StaticTabSceneLayer::~StaticTabSceneLayer() = default;
 
 bool StaticTabSceneLayer::ShouldShowBackground() {
   scoped_refptr<cc::slim::Layer> root = layer_->RootLayer();
@@ -40,17 +61,13 @@ SkColor StaticTabSceneLayer::GetBackgroundColor() {
   return background_color_;
 }
 
-void StaticTabSceneLayer::UpdateTabLayer(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& jobj,
-    jint id,
-    jboolean can_use_live_layer,
-    jint default_background_color,
-    jfloat x,
-    jfloat y,
-    jfloat static_to_view_blend,
-    jfloat saturation,
-    jfloat brightness) {
+void StaticTabSceneLayer::UpdateTabLayer(JNIEnv* env,
+                                         int32_t id,
+                                         bool can_use_live_layer,
+                                         int32_t default_background_color,
+                                         float x,
+                                         float y,
+                                         const JavaRef<jobject>& joffset_tag) {
   DCHECK(tab_content_manager_)
       << "TabContentManager must be set before updating the layer";
 
@@ -60,48 +77,52 @@ void StaticTabSceneLayer::UpdateTabLayer(
     layer_->AddChild(content_layer_->layer());
   }
 
-  // Only override the alpha of content layers when the static tab is first
-  // assigned to the layer tree.
-  float content_alpha_override = 1.f;
-  bool should_override_content_alpha = last_set_tab_id_ != id;
-  last_set_tab_id_ = id;
+  if (id != -1 && can_use_live_layer) {
+    // StaticLayout may not know that the live layer cannot draw. Ensure it gets
+    // a thumbnail if needed.
+    bool update_visible_ids = true;
+    if (auto live_layer = tab_content_manager_->GetLiveLayer(id)) {
+      live_layer->SetHideLayerAndSubtree(!can_use_live_layer);
+      update_visible_ids = !LayerDraws(live_layer);
+    }
+    if (update_visible_ids) {
+      tab_content_manager_->UpdateVisibleIds({id}, id);
+    }
+    TabAndroid* tab = tab_content_manager_->GetTab(id);
+    if (tab && tab->web_contents() && tab->web_contents()->GetNativeView()) {
+      tab->web_contents()->GetNativeView()->set_content_offset_x(x);
+    }
+  }
 
   content_layer_->SetProperties(
-      id, can_use_live_layer, static_to_view_blend,
-      should_override_content_alpha, content_alpha_override, saturation,
-      false, gfx::Rect());
+      id, can_use_live_layer, /* static_to_view_blend= */ 0.f,
+      /* should_override_content_alpha= */ false,
+      /* content_alpha_override= */ 1.f, /* saturation= */ 1.f,
+      /* should_clip= */ false, /* clip= */ gfx::Rect());
 
   content_layer_->layer()->SetPosition(gfx::PointF(x, y));
   content_layer_->layer()->SetIsDrawable(true);
 
-  // Only applies the brightness filter if the value has changed and is less
-  // than 1.
-  if (brightness != brightness_) {
-    brightness_ = brightness;
-
-    std::vector<cc::slim::Filter> filters;
-    if (brightness_ < 1.f) {
-      filters.push_back(cc::slim::Filter::CreateBrightness(brightness_));
-    }
-    layer_->SetFilters(std::move(filters));
-  }
+  viz::OffsetTag tag = cc::android::FromJavaOffsetTag(env, joffset_tag);
+  content_layer_->layer()->SetOffsetTag(tag);
 }
 
 void StaticTabSceneLayer::SetTabContentManager(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& jobj,
-    const base::android::JavaParamRef<jobject>& jtab_content_manager) {
+    const base::android::JavaRef<jobject>& jtab_content_manager) {
   if (!tab_content_manager_) {
     tab_content_manager_ =
         TabContentManager::FromJavaObject(jtab_content_manager);
   }
 }
 
-static jlong JNI_StaticTabSceneLayer_Init(JNIEnv* env,
-                                          const JavaParamRef<jobject>& jobj) {
+static int64_t JNI_StaticTabSceneLayer_Init(JNIEnv* env,
+                                            const JavaRef<jobject>& jobj) {
   // This will automatically bind to the Java object and pass ownership there.
   StaticTabSceneLayer* scene_layer = new StaticTabSceneLayer(env, jobj);
   return reinterpret_cast<intptr_t>(scene_layer);
 }
 
 }  // namespace android
+
+DEFINE_JNI(StaticTabSceneLayer)

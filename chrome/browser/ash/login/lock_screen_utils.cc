@@ -4,16 +4,16 @@
 
 #include "chrome/browser/ash/login/lock_screen_utils.h"
 
+#include <algorithm>
+
 #include "ash/constants/ash_constants.h"
+#include "ash/constants/ash_login_pref_names.h"
 #include "ash/constants/ash_pref_names.h"
-#include "base/containers/contains.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
-#include "chrome/browser/browser_process.h"
+#include "base/time/time.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/ash/ime_controller_client_impl.h"
-#include "chrome/common/pref_names.h"
+#include "chrome/browser/ui/ash/input_method/ime_controller_client_impl.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
 #include "components/account_id/account_id.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "components/user_manager/known_user.h"
@@ -33,8 +33,8 @@ bool SetUserInputMethodImpl(
                  << " (entry dropped). Use hardware default instead.";
     return false;
   }
-  if (!base::Contains(ime_state->GetEnabledInputMethodIds(),
-                      user_input_method_id)) {
+  if (!std::ranges::contains(ime_state->GetEnabledInputMethodIds(),
+                             user_input_method_id)) {
     if (!ime_state->EnableInputMethod(user_input_method_id)) {
       DLOG(ERROR) << "SetUserInputMethod: user input method '"
                   << user_input_method_id
@@ -49,12 +49,14 @@ bool SetUserInputMethodImpl(
 
 }  // namespace
 
-void SetUserInputMethod(const AccountId& account_id,
+void SetUserInputMethod(PrefService& local_state,
+                        const AccountId& account_id,
                         input_method::InputMethodManager::State* ime_state,
                         bool honor_device_policy) {
   bool succeed = false;
 
-  const std::string input_method_id = GetUserLastInputMethodId(account_id);
+  const std::string input_method_id =
+      GetUserLastInputMethodId(local_state, account_id);
 
   if (honor_device_policy)
     EnforceDevicePolicyInputMethods(input_method_id);
@@ -69,14 +71,15 @@ void SetUserInputMethod(const AccountId& account_id,
     DVLOG(0) << "SetUserInputMethod: failed to set user layout. Switching to "
                 "default.";
 
-    ime_state->SetInputMethodLoginDefault();
+    ime_state->SetInputMethodLoginDefault(false /* is_in_oobe_context */);
   }
 }
 
-std::string GetUserLastInputMethodId(const AccountId& account_id) {
+std::string GetUserLastInputMethodId(PrefService& local_state,
+                                     const AccountId& account_id) {
   if (!account_id.is_valid())
     return std::string();
-  user_manager::KnownUser known_user(g_browser_process->local_state());
+  user_manager::KnownUser known_user(&local_state);
   if (const std::string* input_method_id =
           known_user.GetUserLastInputMethodId(account_id)) {
     return *input_method_id;
@@ -84,7 +87,8 @@ std::string GetUserLastInputMethodId(const AccountId& account_id) {
 
   // Try profile prefs. For the ephemeral case known_user does not persist the
   // data.
-  Profile* profile = ProfileHelper::Get()->GetProfileByAccountId(account_id);
+  Profile* profile = Profile::FromBrowserContext(
+      BrowserContextHelper::Get()->GetBrowserContextByAccountId(account_id));
   if (profile && profile->GetPrefs()) {
     std::string input_method_id =
         profile->GetPrefs()->GetString(prefs::kLastLoginInputMethod);
@@ -97,7 +101,7 @@ std::string GetUserLastInputMethodId(const AccountId& account_id) {
 
 void EnforceDevicePolicyInputMethods(std::string user_input_method_id) {
   auto* cros_settings = CrosSettings::Get();
-  const base::Value::List* login_screen_input_methods = nullptr;
+  const base::ListValue* login_screen_input_methods = nullptr;
   if (!cros_settings->GetList(kDeviceLoginScreenInputMethods,
                               &login_screen_input_methods) ||
       login_screen_input_methods->empty()) {
@@ -133,12 +137,13 @@ void StopEnforcingPolicyInputMethods() {
   imm_state->SetAllowedInputMethods(std::vector<std::string>());
   if (ImeControllerClientImpl::Get())  // Can be null in tests.
     ImeControllerClientImpl::Get()->SetImesManagedByPolicy(false);
-  imm_state->SetInputMethodLoginDefault();
+  imm_state->SetInputMethodLoginDefault(false /* is_in_oobe_context */);
 }
 
-void SetKeyboardSettings(const AccountId& account_id) {
-  user_manager::KnownUser known_user(g_browser_process->local_state());
-  if (absl::optional<bool> auto_repeat_enabled =
+void SetKeyboardSettings(PrefService& local_state,
+                         const AccountId& account_id) {
+  user_manager::KnownUser known_user(&local_state);
+  if (std::optional<bool> auto_repeat_enabled =
           known_user.FindBoolPath(account_id, prefs::kXkbAutoRepeatEnabled);
       auto_repeat_enabled.has_value()) {
     if (!auto_repeat_enabled.value()) {
@@ -149,15 +154,22 @@ void SetKeyboardSettings(const AccountId& account_id) {
     }
   }
 
-  input_method::AutoRepeatRate rate;
+  input_method::AutoRepeatRate rate{
+      .initial_delay = kDefaultKeyAutoRepeatDelay,
+      .repeat_interval = kDefaultKeyAutoRepeatInterval,
+  };
 
-  rate.initial_delay_in_ms =
-      known_user.FindIntPath(account_id, prefs::kXkbAutoRepeatDelay)
-          .value_or(kDefaultKeyAutoRepeatDelay.InMilliseconds());
+  if (auto delay =
+          known_user.FindIntPath(account_id, prefs::kXkbAutoRepeatDelay);
+      delay) {
+    rate.initial_delay = base::Milliseconds(delay.value());
+  }
 
-  rate.repeat_interval_in_ms =
-      known_user.FindIntPath(account_id, prefs::kXkbAutoRepeatInterval)
-          .value_or(kDefaultKeyAutoRepeatInterval.InMilliseconds());
+  if (auto interval =
+          known_user.FindIntPath(account_id, prefs::kXkbAutoRepeatInterval);
+      interval) {
+    rate.repeat_interval = base::Milliseconds(interval.value());
+  }
 
   input_method::InputMethodManager::Get()
       ->GetImeKeyboard()
@@ -166,7 +178,7 @@ void SetKeyboardSettings(const AccountId& account_id) {
       rate);
 }
 
-std::vector<LocaleItem> FromListValueToLocaleItem(base::Value::List locales) {
+std::vector<LocaleItem> FromListValueToLocaleItem(base::ListValue locales) {
   std::vector<LocaleItem> result;
   for (const auto& locale : locales) {
     if (!locale.is_dict())

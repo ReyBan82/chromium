@@ -4,6 +4,8 @@
 
 #include "chrome/browser/extensions/api/image_writer_private/tar_extractor.h"
 
+#include <array>
+#include <limits>
 #include <utility>
 
 #include "base/files/file.h"
@@ -22,7 +24,7 @@ constexpr base::FilePath::CharType kExtractedBinFileName[] =
     FILE_PATH_LITERAL("extracted.bin");
 
 // https://www.gnu.org/software/tar/manual/html_node/Standard.html
-constexpr char kExpectedMagic[5] = {'u', 's', 't', 'a', 'r'};
+constexpr unsigned char kExpectedMagic[5] = {'u', 's', 't', 'a', 'r'};
 constexpr int kMagicOffset = 257;
 
 }  // namespace
@@ -32,17 +34,19 @@ bool TarExtractor::IsTarFile(const base::FilePath& image_path) {
                                       base::File::FLAG_READ |
                                       base::File::FLAG_WIN_EXCLUSIVE_WRITE |
                                       base::File::FLAG_WIN_SHARE_DELETE);
-  if (!src_file.IsValid())
+  if (!src_file.IsValid()) {
     return false;
+  }
 
   // Tar header record is always 512 bytes, so if the file is shorter than that,
   // it's not tar.
-  char header[512] = {};
-  if (src_file.ReadAtCurrentPos(header, sizeof(header)) != sizeof(header))
+  std::array<unsigned char, 512> header = {};
+  if (src_file.ReadAtCurrentPos(header).value_or(0) != std::size(header)) {
     return false;
+  }
 
-  return std::equal(kExpectedMagic, kExpectedMagic + sizeof(kExpectedMagic),
-                    header + kMagicOffset);
+  return std::equal(std::begin(kExpectedMagic), std::end(kExpectedMagic),
+                    &header[kMagicOffset]);
 }
 
 // static
@@ -53,12 +57,27 @@ void TarExtractor::Extract(ExtractionProperties properties) {
   extractor->ExtractImpl();
 }
 
+// static
+TarExtractor* TarExtractor::CreateForTesting(ExtractionProperties properties) {
+  return new TarExtractor(std::move(properties));
+}
+
 TarExtractor::TarExtractor(ExtractionProperties properties)
     : properties_(std::move(properties)) {}
 
 TarExtractor::~TarExtractor() = default;
 
 void TarExtractor::OnProgress(uint64_t total_bytes, uint64_t progress_bytes) {
+  // Avoid division by zero in the progress callback handler by not reporting
+  // progress for 0-byte files.
+  if (total_bytes == 0) {
+    return;
+  }
+  if (total_bytes > std::numeric_limits<int64_t>::max() ||
+      progress_bytes > total_bytes) {
+    listener_.ReportBadMessage("invalid extraction progress values");
+    return;
+  }
   properties_.progress_callback.Run(total_bytes, progress_bytes);
 }
 

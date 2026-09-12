@@ -553,7 +553,7 @@ test(function() {
   }, 'Request with a url with another origin');
 
 test(function() {
-    var referrer = 'invali\0d';
+    var referrer = 'https://example[invalid].com/';
     assert_throws_js(TypeError,
         () => new Request(URL, {referrer: referrer}));
   }, 'Request with an invalid referrer');
@@ -1025,11 +1025,11 @@ promise_test(function(t) {
     req.headers.set('Content-Type', 'Text/Html');
     return req.blob()
       .then(function(blob) {
-          assert_equals(blob.type, 'text/plain');
+          assert_equals(blob.type, 'text/html');
           assert_equals(req.headers.get('Content-Type'), 'Text/Html');
         });
   },
-  'MIME type unchanged if headers are modified after Request() constructor');
+  'MIME type reflects headers modified after Request() constructor');
 
 promise_test(function(t) {
     var req = new Request('http://localhost/',

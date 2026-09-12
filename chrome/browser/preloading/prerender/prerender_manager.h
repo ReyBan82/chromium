@@ -5,9 +5,12 @@
 #ifndef CHROME_BROWSER_PRELOADING_PRERENDER_PRERENDER_MANAGER_H_
 #define CHROME_BROWSER_PRELOADING_PRERENDER_PRERENDER_MANAGER_H_
 
+#include <optional>
 #include <string>
 
+#include "chrome/browser/preloading/preloading_features.h"
 #include "components/omnibox/browser/autocomplete_match.h"
+#include "content/public/browser/preloading.h"
 #include "content/public/browser/prerender_handle.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -23,8 +26,15 @@ extern const char kHistogramPrerenderPredictionStatusDefaultSearchEngine[];
 extern const char kHistogramPrerenderPredictionStatusDirectUrlInput[];
 }  // namespace internal
 
+// If you change this, please follow the process in
+// go/preloading-dashboard-updates to update the mapping reflected in dashboard,
+// or if you are not a Googler, please file an FYI bug on https://crbug.new with
+// component Internals>Preload.
+//
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
+//
+// LINT.IfChange(PrerenderPredictionStatus)
 enum class PrerenderPredictionStatus {
   // The prerender was not started at all for this omnibox interaction.
   kNotStarted = 0,
@@ -36,11 +46,13 @@ enum class PrerenderPredictionStatus {
   kHitFinished = 3,
   kMaxValue = kHitFinished,
 };
+// LINT.ThenChange()
 
 // Manages running prerenders in the //chrome.
 // Chrome manages running prerenders separately, as it prioritizes the latest
 // prerender requests, while the //content prioritizes the earliest requests.
 class PrerenderManager : public content::WebContentsObserver,
+                         public content::PrerenderHandle::Observer,
                          public content::WebContentsUserData<PrerenderManager> {
  public:
   PrerenderManager(const PrerenderManager&) = delete;
@@ -49,18 +61,20 @@ class PrerenderManager : public content::WebContentsObserver,
   ~PrerenderManager() override;
 
   // content::WebContentsObserver
-  void DidStartNavigation(
-      content::NavigationHandle* navigation_handle) override;
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override;
 
-  // The entry of Default Search Engine prerender. Calling this method will lead
-  // to the cancellation of the previous prerender if the given `match`'s search
-  // suggestion canonical URL differs from the ongoing one's.
-  // TODO(https://crbug.com/1295170): Remove this method after Search prerender
-  // work properly with Search prefetch.
-  void StartPrerenderSearchSuggestion(const AutocompleteMatch& match,
-                                      const GURL& canonical_search_url);
+  // Maybe start prerendering a prewarm page if we haven't prewarm it yet for
+  // the underlying WebContents. Returns true if a new prerender is started.
+  // TODO(https://crbug.com/423465927): Decide a better timing to close.
+  bool MaybeStartPrewarmSearchResult();
+
+  // Deletes the existing prewarm page to start another one for testing.
+  void StopPrewarmSearchResultForTesting();
+
+  // Sets the prewarm page URL for testing as it's difficult to set the testing
+  // server's URL as a Finch parameter in the tests.
+  void SetPrewarmUrlForTesting(const GURL& url);
 
   // Calling this method will lead to the cancellation of the previous prerender
   // if the given `canonical_search_url` differs from the ongoing one's.
@@ -71,8 +85,6 @@ class PrerenderManager : public content::WebContentsObserver,
 
   // Cancels the prerender that is prerendering the given
   // `canonical_search_url`.
-  // TODO(https://crbug.com/1295170): Use the creator's address to identify the
-  // owner that can cancels the corresponding prerendering?
   void StopPrerenderSearchResult(const GURL& canonical_search_url);
 
   // The entry of direct url input prerender.
@@ -82,8 +94,6 @@ class PrerenderManager : public content::WebContentsObserver,
   // will return the weak pointer to the on-going prerender handle.
   // PreloadingAttempt represents the attempt corresponding to this prerender to
   // log the necessary metrics.
-  // TODO(https://crbug.com/1278634): Merge the start method with DSE interface
-  // using AutocompleteMatch as the parameter instead of GURL.
   base::WeakPtr<content::PrerenderHandle> StartPrerenderDirectUrlInput(
       const GURL& prerendering_url,
       content::PreloadingAttempt& preloading_attempt);
@@ -98,12 +108,32 @@ class PrerenderManager : public content::WebContentsObserver,
   // Returns empty string otherwise.
   const GURL GetPrerenderCanonicalSearchURLForTesting() const;
 
-  void set_skip_template_url_service_for_testing() {
-    skip_template_url_service_for_testing_ = true;
-  }
-
  private:
   class SearchPrerenderTask;
+
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  //
+  // LINT.IfChange(PrewarmDecision)
+  enum class PrewarmDecision {
+    kReady = 0,
+    kAlreadyExists = 1,
+    kDisabled = 2,
+    kInHeadlessMode = 3,
+    kDebuggerAttached = 4,
+    kInvalidUrl = 5,
+    kNoTemplateUrlService = 6,
+    kNoDefaultSearchProvider = 7,
+    kNotSameOriginWithDSE = 8,
+    kInPictureInPicture = 9,
+    kInIsolatedWebApp = 10,
+    kInKioskSession = 11,
+    kLowMemory = 12,
+    kDisabledByBlackout = 13,
+    kDisabledOnStartup = 14,
+    kMaxValue = kDisabledOnStartup,
+  };
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/navigation/enums.xml:PrerenderPrewarmDecision)
 
   explicit PrerenderManager(content::WebContents* web_contents);
   friend class content::WebContentsUserData<PrerenderManager>;
@@ -111,33 +141,31 @@ class PrerenderManager : public content::WebContentsObserver,
   void ResetPrerenderHandlesOnPrimaryPageChanged(
       content::NavigationHandle* navigation_handle);
 
-  // Maybe cancel the ongoing search prerender to restart a new one if this
-  // finds the callers' intentions changed. The number of concurrence search
-  // prerender is limited to 1, so it is needed to cancel the old one in order
-  // to start a new one. Returns true if this finds the caller wants to
-  // prerender another search result. Here `attempt` represents the
-  // PreloadingAttempt corresponding to this prerender attempt to log metrics.
-  bool ResetSearchPrerenderTaskIfNecessary(
-      const GURL& canonical_search_url,
-      base::WeakPtr<content::PreloadingAttempt> attempt);
+  // Decides if prewarm should be triggered. If not, returns the reason why.
+  // Otherwise, returns kReady and sets `prewarm_url`.
+  PrewarmDecision ShouldPrewarm(GURL& prewarm_url);
+  bool IsPrewarmValid();
 
-  void StartPrerenderSearchResultInternal(
-      const GURL& canonical_search_url,
-      const GURL& prerendering_url,
-      base::WeakPtr<content::PreloadingAttempt> attempt);
+  void OnSearchPrewarmPrerenderNavigationHandle(
+      content::NavigationHandle& navigation_handle);
 
-  // Stops search prefetch from being upgraded to prerender.
-  void UnregisterSearchPrerender();
+  void NotifySearchPrewarmFinished(content::PrerenderLifecycleStatus result);
+
+  // content::PrerenderHandle::Observer:
+  void OnLifecycleStateChanged(
+      content::PrerenderLifecycleStatus status) override;
+
+  std::unique_ptr<content::PrerenderHandle> search_prewarm_handle_;
+  bool is_search_prewarm_ongoing_ = false;
+  bool prewarm_scheduled_after_startup_ = false;
+  std::optional<GURL> prewarm_url_for_testing_;
 
   // Stores the prerender which serves for search results. It is responsible for
-  // tracking a started search prerender, and it keeps alive even if the
-  // prerender has been destroyed by the timer. With its help, PrerenderManager
-  // can record the prediction regardless whether a prerender is expired or not.
+  // tracking a started search prerender, and informing `SearchPrefetchService`
+  // of the prerender status.
   std::unique_ptr<SearchPrerenderTask> search_prerender_task_;
 
   std::unique_ptr<content::PrerenderHandle> direct_url_input_prerender_handle_;
-
-  bool skip_template_url_service_for_testing_ = false;
 
   base::WeakPtrFactory<PrerenderManager> weak_factory_{this};
 

@@ -7,14 +7,14 @@ package org.chromium.components.media_router.caf;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyBoolean;
-import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -32,12 +32,14 @@ import com.google.android.gms.cast.framework.media.RemoteMediaClient;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.mockito.stubbing.Answer;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
@@ -51,19 +53,18 @@ import org.chromium.components.media_router.MediaRouterClient;
 import org.chromium.components.media_router.MediaSink;
 import org.chromium.components.media_router.TestMediaRouterClient;
 
-/**
- * Robolectric tests for CafMediaRouteProvider.
- */
+import java.util.function.Function;
+
+/** Robolectric tests for CafMediaRouteProvider. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE,
-        shadows = {ShadowMediaRouter.class, ShadowCastContext.class, ShadowLooper.class,
-                ShadowCastMediaSource.class})
+@Config(
+        shadows = {
+            ShadowMediaRouter.class,
+            ShadowCastContext.class,
+            ShadowLooper.class,
+        })
 public class CafMediaRouteProviderTest {
-    private static final String SUPPORTED_SOURCE = "cast:DEADBEEF";
-
-    private static final String SUPPORTED_AUTOJOIN_SOURCE = "cast:DEADBEEF"
-            + "?clientId=12345&autoJoinPolicy=" + CastMediaSource.AUTOJOIN_TAB_AND_ORIGIN_SCOPED;
-
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
     private Context mContext;
     private CafMediaRouteProvider mProvider;
     private MediaRouterTestHelper mMediaRouterHelper;
@@ -71,38 +72,26 @@ public class CafMediaRouteProviderTest {
     private MediaRoute mRoute1;
     private MediaRoute mRoute2;
 
-    @Mock
-    private MediaRouteManager mManager;
-    @Mock
-    private CastContext mCastContext;
-    @Mock
-    private CastSession mCastSession;
-    @Mock
-    private SessionManager mSessionManager;
-    @Mock
-    private RemoteMediaClient mRemoteMediaClient;
-    @Mock
-    private BaseSessionController mSessionController;
-    @Mock
-    private ShadowCastMediaSource.ShadowImplementation mShadowCastMediaSource;
-    @Mock
-    private CafMessageHandler mMessageHandler;
-    @Mock
-    private CastMediaSource mSource1;
-    @Mock
-    private CastMediaSource mSource2;
-    @Mock
-    private MediaSink mSink;
+    @Mock private MediaRouteManager mManager;
+    @Mock private CastContext mCastContext;
+    @Mock private CastSession mCastSession;
+    @Mock private SessionManager mSessionManager;
+    @Mock private RemoteMediaClient mRemoteMediaClient;
+    @Mock private BaseSessionController mSessionController;
+    @Mock private Function<String, CastMediaSource> mMockCastMediaSource;
+    @Mock private CafMessageHandler mMessageHandler;
+    @Mock private CastMediaSource mSource1;
+    @Mock private CastMediaSource mSource2;
+    @Mock private MediaSink mSink;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
 
         MediaRouterClient.setInstance(new TestMediaRouterClient());
 
         mContext = RuntimeEnvironment.application;
         ShadowCastContext.setInstance(mCastContext);
-        ShadowCastMediaSource.setImplementation(mShadowCastMediaSource);
+        CastMediaSource.setMockBuilderForTesting(mMockCastMediaSource);
         mMediaRouterHelper = new MediaRouterTestHelper();
         mMediaRouter = MediaRouter.getInstance(mContext);
         mProvider = spy(CafMediaRouteProvider.create(mManager));
@@ -110,8 +99,8 @@ public class CafMediaRouteProviderTest {
 
         mRoute1 = new MediaRoute("sink-id", "source-id-1", "presentation-id-1");
         mRoute2 = new MediaRoute("sink-id", "source-id-2", "presentation-id-2");
-        doReturn(mSource1).when(mShadowCastMediaSource).from("source-id-1");
-        doReturn(mSource2).when(mShadowCastMediaSource).from("source-id-2");
+        doReturn(mSource1).when(mMockCastMediaSource).apply("source-id-1");
+        doReturn(mSource2).when(mMockCastMediaSource).apply("source-id-2");
         doReturn("client-id-1").when(mSource1).getClientId();
         doReturn("client-id-2").when(mSource2).getClientId();
         doReturn("app-id-1").when(mSource1).getApplicationId();
@@ -132,26 +121,28 @@ public class CafMediaRouteProviderTest {
     public void testJoinRoute() {
         InOrder inOrder = inOrder(mManager);
 
-        doReturn(mSource1).when(mShadowCastMediaSource).from("source-id-1");
+        doReturn(mSource1).when(mMockCastMediaSource).apply("source-id-1");
         doReturn(mSink).when(mSessionController).getSink();
         doReturn(true).when(mSessionController).isConnected();
-        doReturn(true).when(mProvider).canJoinExistingSession(
-                anyString(), anyString(), anyInt(), any(CastMediaSource.class));
+        doReturn(true)
+                .when(mProvider)
+                .canJoinExistingSession(
+                        anyString(), anyString(), anyInt(), any(CastMediaSource.class));
 
         // Regular case.
         mProvider.joinRoute("source-id-1", "presentation-id-1", "origin", 1, 1);
         inOrder.verify(mManager, never()).onJoinRouteRequestError(anyString(), anyInt());
-        inOrder.verify(mManager).onRouteCreated(
-                anyString(), eq("sink-id"), eq(1), eq(mProvider), eq(false));
-        assertEquals(mProvider.mRoutes.size(), 1);
-        MediaRoute route = (MediaRoute) (mProvider.mRoutes.values().toArray()[0]);
-        assertEquals(route.sinkId, "sink-id");
-        assertEquals(route.sourceId, "source-id-1");
-        assertEquals(route.presentationId, "presentation-id-1");
+        inOrder.verify(mManager)
+                .onRouteCreated(anyString(), eq("sink-id"), eq(1), eq(mProvider), eq(false));
+        assertEquals(1, mProvider.mRoutes.size());
+        MediaRoute route = (MediaRoute) mProvider.mRoutes.values().toArray()[0];
+        assertEquals("sink-id", route.sinkId);
+        assertEquals("source-id-1", route.getSourceId());
+        assertEquals("presentation-id-1", route.presentationId);
 
         // No source.
         mProvider.mRoutes.clear();
-        doReturn(null).when(mShadowCastMediaSource).from("source-id-1");
+        doReturn(null).when(mMockCastMediaSource).apply("source-id-1");
 
         mProvider.joinRoute("source-id-1", "presentation-id-1", "origin", 1, 1);
 
@@ -159,7 +150,7 @@ public class CafMediaRouteProviderTest {
         assertTrue(mProvider.mRoutes.isEmpty());
 
         // No client ID.
-        doReturn(mSource1).when(mShadowCastMediaSource).from("source-id-1");
+        doReturn(mSource1).when(mMockCastMediaSource).apply("source-id-1");
         doReturn(null).when(mSource1).getClientId();
 
         mProvider.joinRoute("source-id-1", "presentation-id-1", "origin", 1, 1);
@@ -178,8 +169,10 @@ public class CafMediaRouteProviderTest {
 
         // No matching route.
         doReturn(true).when(mSessionController).isConnected();
-        doReturn(false).when(mProvider).canJoinExistingSession(
-                anyString(), anyString(), anyInt(), any(CastMediaSource.class));
+        doReturn(false)
+                .when(mProvider)
+                .canJoinExistingSession(
+                        anyString(), anyString(), anyInt(), any(CastMediaSource.class));
 
         mProvider.joinRoute("source-id-1", "presentation-id-1", "origin", 1, 1);
 
@@ -201,8 +194,8 @@ public class CafMediaRouteProviderTest {
 
         inOrder.verify(mMessageHandler)
                 .sendReceiverActionToClient(mRoute1.id, mSink, "client-id-1", "stop");
-        assertEquals(mProvider.mRoutes.size(), 1);
-        assertEquals(mProvider.getClientIdToRecords().size(), 1);
+        assertEquals(1, mProvider.mRoutes.size());
+        assertEquals(1, mProvider.getClientIdToRecords().size());
 
         // Abnormal case when the session controller doesn't have a sink.
         doReturn(null).when(mSessionController).getSink();
@@ -212,8 +205,8 @@ public class CafMediaRouteProviderTest {
         inOrder.verify(mMessageHandler, never())
                 .sendReceiverActionToClient(
                         anyString(), any(MediaSink.class), anyString(), anyString());
-        assertEquals(mProvider.mRoutes.size(), 1);
-        assertEquals(mProvider.getClientIdToRecords().size(), 1);
+        assertEquals(1, mProvider.mRoutes.size());
+        assertEquals(1, mProvider.getClientIdToRecords().size());
 
         // Abnormal case when there is no session.
         doReturn(mSink).when(mSessionController).getSink();
@@ -275,13 +268,16 @@ public class CafMediaRouteProviderTest {
         doReturn(mSink).when(mSessionController).getSink();
         doReturn(mCastSession).when(mSessionManager).getCurrentCastSession();
         doReturn(null).when(mSessionController).getSession();
-        doAnswer(new Answer<Void>() {
-            @Override
-            public Void answer(InvocationOnMock invocation) {
-                doReturn(invocation.getArguments()[0]).when(mSessionController).getSession();
-                return null;
-            }
-        })
+        doAnswer(
+                        new Answer<>() {
+                            @Override
+                            public Void answer(InvocationOnMock invocation) {
+                                doReturn(invocation.getArguments()[0])
+                                        .when(mSessionController)
+                                        .getSession();
+                                return null;
+                            }
+                        })
                 .when(mSessionController)
                 .attachToCastSession(any(CastSession.class));
 
@@ -293,8 +289,9 @@ public class CafMediaRouteProviderTest {
         mProvider.addRoute(mRoute2, "origin", 1, 1, false);
 
         // Skip adding route when the super.onSessionStarted() is called.
-        doNothing().when(mProvider).addRoute(
-                any(MediaRoute.class), anyString(), anyInt(), anyInt(), anyBoolean());
+        doNothing()
+                .when(mProvider)
+                .addRoute(any(MediaRoute.class), anyString(), anyInt(), anyInt(), anyBoolean());
         mProvider.onSessionStarted(mCastSession, "session-id");
 
         // Verify super.onSessionStarted() is called.
@@ -310,39 +307,39 @@ public class CafMediaRouteProviderTest {
     public void testRouteManagement() {
         // Add the first route.
         mProvider.addRoute(mRoute1, "origin-1", 1, 1, false);
-        assertEquals(mProvider.mRoutes.size(), 1);
-        assertEquals(mProvider.getClientIdToRecords().size(), 1);
+        assertEquals(1, mProvider.mRoutes.size());
+        assertEquals(1, mProvider.getClientIdToRecords().size());
         ClientRecord record = mProvider.getClientIdToRecords().get("client-id-1");
         verifyClientRecord(record, mRoute1.id, "client-id-1", "app-id-1", "origin-1", 1, false);
 
         // Add the second route.
         mProvider.addRoute(mRoute2, "origin-2", 2, 2, false);
-        assertEquals(mProvider.mRoutes.size(), 2);
-        assertEquals(mProvider.getClientIdToRecords().size(), 2);
+        assertEquals(2, mProvider.mRoutes.size());
+        assertEquals(2, mProvider.getClientIdToRecords().size());
         record = mProvider.getClientIdToRecords().get("client-id-2");
         verifyClientRecord(record, mRoute2.id, "client-id-2", "app-id-2", "origin-2", 2, false);
 
         // Add a duplicate route. This addition will be ignored as `mRoute2` is already in record.
         // This should never happen in production.
         mProvider.addRoute(mRoute2, "origin-3", 3, 3, false);
-        assertEquals(mProvider.mRoutes.size(), 2);
-        assertEquals(mProvider.getClientIdToRecords().size(), 2);
+        assertEquals(2, mProvider.mRoutes.size());
+        assertEquals(2, mProvider.getClientIdToRecords().size());
         record = mProvider.getClientIdToRecords().get("client-id-2");
         verifyClientRecord(record, mRoute2.id, "client-id-2", "app-id-2", "origin-2", 2, false);
 
         // Remove a route.
         ClientRecord lastRecord = mProvider.getClientIdToRecords().get("client-id-1");
         mProvider.removeRoute(mRoute1.id, null);
-        assertEquals(mProvider.mRoutes.size(), 1);
-        assertEquals(mProvider.getClientIdToRecords().size(), 1);
+        assertEquals(1, mProvider.mRoutes.size());
+        assertEquals(1, mProvider.getClientIdToRecords().size());
         record = mProvider.getClientIdToRecords().get("client-id-2");
         verifyClientRecord(record, mRoute2.id, "client-id-2", "app-id-2", "origin-2", 2, false);
         assertEquals(mProvider.mLastRemovedRouteRecord, lastRecord);
 
         // Remove a non-existing route.
         mProvider.removeRoute(mRoute1.id, null);
-        assertEquals(mProvider.mRoutes.size(), 1);
-        assertEquals(mProvider.getClientIdToRecords().size(), 1);
+        assertEquals(1, mProvider.mRoutes.size());
+        assertEquals(1, mProvider.getClientIdToRecords().size());
         record = mProvider.getClientIdToRecords().get("client-id-2");
         verifyClientRecord(record, mRoute2.id, "client-id-2", "app-id-2", "origin-2", 2, false);
         lastRecord = record;
@@ -358,18 +355,21 @@ public class CafMediaRouteProviderTest {
     public void testCanJoin_matchingSessionId() {
         // Regular case.
         doReturn("session-id").when(mSessionController).getSessionId();
-        assertTrue(mProvider.canJoinExistingSession(
-                "cast-session_session-id", "origin", 1, mock(CastMediaSource.class)));
+        assertTrue(
+                mProvider.canJoinExistingSession(
+                        "cast-session_session-id", "origin", 1, mock(CastMediaSource.class)));
 
         // The current session ID is null.
         doReturn(null).when(mSessionController).getSessionId();
-        assertFalse(mProvider.canJoinExistingSession(
-                "cast-session_session-id", "origin", 1, mock(CastMediaSource.class)));
+        assertFalse(
+                mProvider.canJoinExistingSession(
+                        "cast-session_session-id", "origin", 1, mock(CastMediaSource.class)));
 
         // Mismatching session ID.
         doReturn("session-id").when(mSessionController).getSessionId();
-        assertFalse(mProvider.canJoinExistingSession(
-                "cast-session_other-session-id", "origin", 1, mock(CastMediaSource.class)));
+        assertFalse(
+                mProvider.canJoinExistingSession(
+                        "cast-session_other-session-id", "origin", 1, mock(CastMediaSource.class)));
     }
 
     @Test
@@ -453,12 +453,22 @@ public class CafMediaRouteProviderTest {
     private void verifyJoinRouteRequestError(InOrder inOrder, String error, int nativeRequestId) {
         inOrder.verify(mManager).onJoinRouteRequestError(error, nativeRequestId);
         inOrder.verify(mManager, never())
-                .onRouteCreated(anyString(), anyString(), anyInt(),
-                        any(CafBaseMediaRouteProvider.class), anyBoolean());
+                .onRouteCreated(
+                        anyString(),
+                        anyString(),
+                        anyInt(),
+                        any(CafBaseMediaRouteProvider.class),
+                        anyBoolean());
     }
 
-    private void verifyClientRecord(ClientRecord record, String routeId, String clientId,
-            String appId, String origin, int tabId, boolean isConnected) {
+    private void verifyClientRecord(
+            ClientRecord record,
+            String routeId,
+            String clientId,
+            String appId,
+            String origin,
+            int tabId,
+            boolean isConnected) {
         assertEquals(record.routeId, routeId);
         assertEquals(record.clientId, clientId);
         assertEquals(record.appId, appId);

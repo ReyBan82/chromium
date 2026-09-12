@@ -30,21 +30,22 @@
 #define ABSL_STRINGS_INTERNAL_STR_SPLIT_INTERNAL_H_
 
 #include <array>
+#include <cassert>
+#include <cstddef>
 #include <initializer_list>
 #include <iterator>
+#include <string>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "absl/base/attributes.h"
+#include "absl/base/config.h"
 #include "absl/base/macros.h"
 #include "absl/base/port.h"
 #include "absl/meta/type_traits.h"
 #include "absl/strings/string_view.h"
-
-#ifdef _GLIBCXX_DEBUG
-#include "absl/strings/internal/stl_type_traits.h"
-#endif  // _GLIBCXX_DEBUG
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -57,8 +58,12 @@ namespace strings_internal {
 class ConvertibleToStringView {
  public:
   ConvertibleToStringView(const char* s)  // NOLINT(runtime/explicit)
-      : value_(s) {}
-  ConvertibleToStringView(char* s) : value_(s) {}  // NOLINT(runtime/explicit)
+      : value_(s) {
+    assert(s != nullptr);
+  }
+  ConvertibleToStringView(char* s) : value_(s) {  // NOLINT(runtime/explicit)
+    assert(s != nullptr);
+  }
   ConvertibleToStringView(absl::string_view s)     // NOLINT(runtime/explicit)
       : value_(s) {}
   ConvertibleToStringView(const std::string& s)  // NOLINT(runtime/explicit)
@@ -166,28 +171,27 @@ class SplitIterator {
 template <typename T, typename = void>
 struct HasMappedType : std::false_type {};
 template <typename T>
-struct HasMappedType<T, absl::void_t<typename T::mapped_type>>
-    : std::true_type {};
+struct HasMappedType<T, std::void_t<typename T::mapped_type>> : std::true_type {
+};
 
 // HasValueType<T>::value is true iff there exists a type T::value_type.
 template <typename T, typename = void>
 struct HasValueType : std::false_type {};
 template <typename T>
-struct HasValueType<T, absl::void_t<typename T::value_type>> : std::true_type {
-};
+struct HasValueType<T, std::void_t<typename T::value_type>> : std::true_type {};
 
 // HasConstIterator<T>::value is true iff there exists a type T::const_iterator.
 template <typename T, typename = void>
 struct HasConstIterator : std::false_type {};
 template <typename T>
-struct HasConstIterator<T, absl::void_t<typename T::const_iterator>>
+struct HasConstIterator<T, std::void_t<typename T::const_iterator>>
     : std::true_type {};
 
 // HasEmplace<T>::value is true iff there exists a method T::emplace().
 template <typename T, typename = void>
 struct HasEmplace : std::false_type {};
 template <typename T>
-struct HasEmplace<T, absl::void_t<decltype(std::declval<T>().emplace())>>
+struct HasEmplace<T, std::void_t<decltype(std::declval<T>().emplace())>>
     : std::true_type {};
 
 // IsInitializerList<T>::value is true iff T is an std::initializer_list. More
@@ -197,7 +201,7 @@ template <typename T>
 std::true_type IsInitializerListDispatch(std::initializer_list<T>*);
 template <typename T>
 struct IsInitializerList
-    : decltype(IsInitializerListDispatch(static_cast<T*>(nullptr))) {};
+    : decltype(IsInitializerListDispatch(static_cast<T*>(nullptr))){};
 
 // A SplitterIsConvertibleTo<C>::type alias exists iff the specified condition
 // is true for type 'C'.
@@ -218,7 +222,7 @@ struct SplitterIsConvertibleToImpl<C, true, false>
 
 template <typename C>
 struct SplitterIsConvertibleToImpl<C, true, true>
-    : absl::conjunction<
+    : std::conjunction<
           std::is_constructible<typename C::key_type, absl::string_view>,
           std::is_constructible<typename C::mapped_type, absl::string_view>> {};
 
@@ -226,14 +230,31 @@ template <typename C>
 struct SplitterIsConvertibleTo
     : SplitterIsConvertibleToImpl<
           C,
-#ifdef _GLIBCXX_DEBUG
-          !IsStrictlyBaseOfAndConvertibleToSTLContainer<C>::value &&
-#endif  // _GLIBCXX_DEBUG
-              !IsInitializerList<
-                  typename std::remove_reference<C>::type>::value &&
+          !IsInitializerList<std::remove_reference_t<C>>::value &&
               HasValueType<C>::value && HasConstIterator<C>::value,
-          HasMappedType<C>::value> {
-};
+          HasMappedType<C>::value> {};
+
+template <typename StringType, typename Container, typename = void>
+struct ShouldUseLifetimeBound : std::false_type {};
+
+template <typename StringType, typename Container>
+struct ShouldUseLifetimeBound<
+    StringType, Container,
+    std::enable_if_t<
+        std::is_same_v<StringType, std::string> &&
+        std::is_same_v<typename Container::value_type, absl::string_view>>>
+    : std::true_type {};
+
+template <typename StringType, typename First, typename Second>
+using ShouldUseLifetimeBoundForPair =
+    std::bool_constant<std::is_same_v<StringType, std::string> &&
+                       (std::is_same_v<First, absl::string_view> ||
+                        std::is_same_v<Second, absl::string_view>)>;
+
+template <typename StringType, typename ElementType, std::size_t Size>
+using ShouldUseLifetimeBoundForArray =
+    std::bool_constant<std::is_same_v<StringType, std::string> &&
+                       std::is_same_v<ElementType, absl::string_view>>;
 
 // This class implements the range that is returned by absl::StrSplit(). This
 // class has templated conversion operators that allow it to be implicitly
@@ -281,10 +302,24 @@ class Splitter {
 
   // An implicit conversion operator that is restricted to only those containers
   // that the splitter is convertible to.
-  template <typename Container,
-            typename = typename std::enable_if<
-                SplitterIsConvertibleTo<Container>::value>::type>
-  operator Container() const {  // NOLINT(runtime/explicit)
+  template <
+      typename Container,
+      std::enable_if_t<ShouldUseLifetimeBound<StringType, Container>::value &&
+                           SplitterIsConvertibleTo<Container>::value,
+                       std::nullptr_t> = nullptr>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator Container() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return ConvertToContainer<Container, typename Container::value_type,
+                              HasMappedType<Container>::value>()(*this);
+  }
+
+  template <
+      typename Container,
+      std::enable_if_t<!ShouldUseLifetimeBound<StringType, Container>::value &&
+                           SplitterIsConvertibleTo<Container>::value,
+                       std::nullptr_t> = nullptr>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator Container() const {
     return ConvertToContainer<Container, typename Container::value_type,
                               HasMappedType<Container>::value>()(*this);
   }
@@ -293,8 +328,58 @@ class Splitter {
   // strings returned by the begin() iterator. Either/both of .first and .second
   // will be constructed with empty strings if the iterator doesn't have a
   // corresponding value.
+  template <typename First, typename Second,
+            std::enable_if_t<
+                ShouldUseLifetimeBoundForPair<StringType, First, Second>::value,
+                std::nullptr_t> = nullptr>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator std::pair<First, Second>() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return ConvertToPair<First, Second>();
+  }
+
+  template <typename First, typename Second,
+            std::enable_if_t<!ShouldUseLifetimeBoundForPair<StringType, First,
+                                                            Second>::value,
+                             std::nullptr_t> = nullptr>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator std::pair<First, Second>() const {
+    return ConvertToPair<First, Second>();
+  }
+
+  // Returns an array with its elements set to the first few strings returned by
+  // the begin() iterator.  If there is not a corresponding value the empty
+  // string is used.
+  template <typename ElementType, std::size_t Size,
+            std::enable_if_t<ShouldUseLifetimeBoundForArray<
+                                 StringType, ElementType, Size>::value,
+                             std::nullptr_t> = nullptr>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator std::array<ElementType, Size>() const ABSL_ATTRIBUTE_LIFETIME_BOUND {
+    return ConvertToArray<ElementType, Size>();
+  }
+
+  template <typename ElementType, std::size_t Size,
+            std::enable_if_t<!ShouldUseLifetimeBoundForArray<
+                                 StringType, ElementType, Size>::value,
+                             std::nullptr_t> = nullptr>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator std::array<ElementType, Size>() const {
+    return ConvertToArray<ElementType, Size>();
+  }
+
+ private:
+  template <typename ElementType, std::size_t Size>
+  std::array<ElementType, Size> ConvertToArray() const {
+    std::array<ElementType, Size> a;
+    auto it = begin();
+    for (std::size_t i = 0; i < Size && it != end(); ++i, ++it) {
+      a[i] = ElementType(*it);
+    }
+    return a;
+  }
+
   template <typename First, typename Second>
-  operator std::pair<First, Second>() const {  // NOLINT(runtime/explicit)
+  std::pair<First, Second> ConvertToPair() const {
     absl::string_view first, second;
     auto it = begin();
     if (it != end()) {
@@ -306,7 +391,6 @@ class Splitter {
     return {First(first), Second(second)};
   }
 
- private:
   // ConvertToContainer is a functor converting a Splitter to the requested
   // Container of ValueType. It is specialized below to optimize splitting to
   // certain combinations of Container and ValueType.
@@ -352,7 +436,10 @@ class Splitter {
           ar[index].size = it->size();
           ++it;
         } while (++index != ar.size() && !it.at_end());
-        v.insert(v.end(), ar.begin(), ar.begin() + index);
+        // We static_cast index to a signed type to work around overzealous
+        // compiler warnings about signedness.
+        v.insert(v.end(), ar.begin(),
+                 ar.begin() + static_cast<ptrdiff_t>(index));
       }
       return v;
     }
@@ -400,7 +487,7 @@ class Splitter {
     // Inserts the key and an empty value into the map, returning an iterator to
     // the inserted item. We use emplace() if available, otherwise insert().
     template <typename M>
-    static absl::enable_if_t<HasEmplace<M>::value, iterator> InsertOrEmplace(
+    static std::enable_if_t<HasEmplace<M>::value, iterator> InsertOrEmplace(
         M* m, absl::string_view key) {
       // Use piecewise_construct to support old versions of gcc in which pair
       // constructor can't otherwise construct string from string_view.
@@ -408,7 +495,7 @@ class Splitter {
                                std::tuple<>()));
     }
     template <typename M>
-    static absl::enable_if_t<!HasEmplace<M>::value, iterator> InsertOrEmplace(
+    static std::enable_if_t<!HasEmplace<M>::value, iterator> InsertOrEmplace(
         M* m, absl::string_view key) {
       return ToIter(m->insert(std::make_pair(First(key), Second(""))));
     }

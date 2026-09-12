@@ -8,25 +8,32 @@ details on the presubmit API built into gcl.
 """
 
 PRESUBMIT_VERSION = '2.0.0'
-USE_PYTHON3 = True
 
 
 def RunUnittests(input_api, output_api):
   results = []
   # Run Pylint over the files in the directory.
-  pylint_checks = input_api.canned_checks.GetPylint(input_api,
-                                                    output_api,
-                                                    version='2.6')
+  disabled_warnings = [
+      'bad-indentation',
+      'consider-using-from-import',
+      'consider-using-in',
+      'consider-using-with',
+      'deprecated-module',
+      'duplicate-code',
+      'line-too-long',
+      'missing-module-docstring',
+      'protected-access',
+      'superfluous-parens',
+      'unspecified-encoding',
+      'unused-import',
+  ]
+  pylint_checks = input_api.canned_checks.GetPylint(
+      input_api, output_api, disabled_warnings=disabled_warnings, version='3.2')
   results.extend(input_api.RunTests(pylint_checks))
 
   results.extend(
       input_api.canned_checks.RunUnitTestsInDirectory(
-          input_api,
-          output_api,
-          '.',
-          files_to_check=[r'.+_unittest\.py$'],
-          run_on_python2=not USE_PYTHON3,
-          skip_shebang_check=True))
+          input_api, output_api, '.', files_to_check=[r'.+_unittest\.py$']))
   return results
 
 

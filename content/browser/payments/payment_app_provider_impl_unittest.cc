@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "content/browser/payments/payment_app_provider_impl.h"
+
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -9,8 +11,11 @@
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/test/run_until.h"
 #include "content/browser/payments/installed_payment_apps_finder_impl.h"
 #include "content/browser/payments/payment_app_content_unittest_base.h"
+#include "content/browser/payments/payment_app_installer.h"
+#include "content/browser/payments/payment_handler_web_contents_observer.h"
 #include "content/public/browser/payment_app_provider.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/mock_permission_manager.h"
@@ -23,6 +28,11 @@
 #include "third_party/blink/public/mojom/permissions/permission_status.mojom.h"
 #include "url/gurl.h"
 
+MATCHER_P(PermissionTypeMatcher, id, "") {
+  return ::testing::Matches(::testing::Eq(id))(
+      blink::PermissionDescriptorToPermissionType(arg));
+}
+
 namespace content {
 
 class PaymentManager;
@@ -30,13 +40,6 @@ class PaymentManager;
 namespace {
 
 using ::payments::mojom::PaymentHandlerStatus;
-using ::payments::mojom::PaymentInstrument;
-using ::payments::mojom::PaymentInstrumentPtr;
-
-void SetPaymentInstrumentCallback(PaymentHandlerStatus* out_status,
-                                  PaymentHandlerStatus status) {
-  *out_status = status;
-}
 
 void GetAllPaymentAppsCallback(
     InstalledPaymentAppsFinder::PaymentApps* out_apps,
@@ -58,6 +61,14 @@ void InvokePaymentAppCallback(
   *called = true;
 }
 
+void CaptureInvokePaymentAppResponse(
+    bool* called,
+    payments::mojom::PaymentHandlerResponsePtr* out_response,
+    payments::mojom::PaymentHandlerResponsePtr response) {
+  *called = true;
+  *out_response = std::move(response);
+}
+
 void CaptureAbortResult(base::OnceClosure callback,
                         bool* out_payment_event_result,
                         bool payment_event_result) {
@@ -74,7 +85,8 @@ class PaymentAppProviderTest : public PaymentAppContentUnitTestBase {
         new testing::NiceMock<MockPermissionManager>());
     ON_CALL(*mock_permission_manager,
             GetPermissionResultForOriginWithoutContext(
-                blink::PermissionType::PAYMENT_HANDLER, testing::_))
+                PermissionTypeMatcher(blink::PermissionType::PAYMENT_HANDLER),
+                testing::_, testing::_))
         .WillByDefault(testing::Return(
             PermissionResult(blink::mojom::PermissionStatus::GRANTED,
                              PermissionStatusSource::UNSPECIFIED)));
@@ -90,15 +102,25 @@ class PaymentAppProviderTest : public PaymentAppContentUnitTestBase {
 
   ~PaymentAppProviderTest() override {}
 
-  void SetPaymentInstrument(
-      PaymentManager* manager,
-      const std::string& instrument_key,
-      PaymentInstrumentPtr instrument,
-      PaymentManager::SetPaymentInstrumentCallback callback) {
-    ASSERT_NE(nullptr, manager);
-    manager->SetPaymentInstrument(instrument_key, std::move(instrument),
-                                  std::move(callback));
-    base::RunLoop().RunUntilIdle();
+  void InstallPaymentApp(const GURL& scope,
+                         const GURL& sw_url,
+                         const std::string& method = "fake-method") {
+    int64_t registration_id = RegisterAndActivateServiceWorker(scope, sw_url);
+    base::RunLoop run_loop;
+    payment_app_context()
+        ->payment_app_database()
+        ->SetPaymentAppInfoForRegisteredServiceWorker(
+            registration_id, scope.spec(), "Test App", /*icon=*/"", method,
+            SupportedDelegations(),
+            base::BindOnce(
+                [](base::OnceClosure quit,
+                   payments::mojom::PaymentHandlerStatus status) {
+                  EXPECT_EQ(payments::mojom::PaymentHandlerStatus::SUCCESS,
+                            status);
+                  std::move(quit).Run();
+                },
+                run_loop.QuitClosure()));
+    run_loop.Run();
   }
 
   void GetAllPaymentApps(
@@ -144,19 +166,41 @@ class PaymentAppProviderTest : public PaymentAppContentUnitTestBase {
     base::RunLoop().RunUntilIdle();
   }
 
+  void SetOpenedWindow() {
+    WebContents* payment_handler_web_contents =
+        test_web_contents_factory_.CreateWebContents(browser_context());
+    PaymentAppProvider::GetOrCreateForWebContents(web_contents_)
+        ->SetOpenedWindow(payment_handler_web_contents);
+  }
+
+  PaymentHandlerWebContentsObserver* GetPaymentHandlerWebContentsObserver() {
+    PaymentAppProvider* provider =
+        PaymentAppProvider::GetOrCreateForWebContents(web_contents_);
+    return static_cast<PaymentAppProviderImpl*>(provider)
+        ->payment_handler_web_contents_observer_.get();
+  }
+
+  void SetRegistrationId(int64_t registration_id) {
+    PaymentAppProvider* provider =
+        PaymentAppProvider::GetOrCreateForWebContents(web_contents_);
+    provider->SetRegistrationId(registration_id);
+  }
+
+  bool PaymentHandlerDisconnected() {
+    PaymentAppProvider* provider =
+        PaymentAppProvider::GetOrCreateForWebContents(web_contents_);
+    return static_cast<PaymentAppProviderImpl*>(provider)
+        ->payment_handler_disconnected_for_test_;
+  }
+
  private:
   TestWebContentsFactory test_web_contents_factory_;
   raw_ptr<WebContents> web_contents_;
 };
 
 TEST_F(PaymentAppProviderTest, AbortPaymentTest) {
-  PaymentManager* manager = CreatePaymentManager(
-      GURL("https://example.test"), GURL("https://example.test/script.js"));
-
-  PaymentHandlerStatus status;
-  SetPaymentInstrument(manager, "payment_instrument_key",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
+  InstallPaymentApp(GURL("https://example.test"),
+                    GURL("https://example.test/script.js"));
 
   InstalledPaymentAppsFinder::PaymentApps apps;
   GetAllPaymentApps(base::BindOnce(&GetAllPaymentAppsCallback, &apps));
@@ -164,7 +208,8 @@ TEST_F(PaymentAppProviderTest, AbortPaymentTest) {
 
   bool payment_aborted = false;
   base::RunLoop loop;
-  AbortPayment(last_sw_registration_id(), url::Origin::Create(apps[0]->scope),
+  AbortPayment(last_sw_registration_id(),
+               url::Origin::Create(apps[last_sw_registration_id()]->scope),
                "id",
                base::BindOnce(&CaptureAbortResult, loop.QuitClosure(),
                               &payment_aborted));
@@ -173,13 +218,8 @@ TEST_F(PaymentAppProviderTest, AbortPaymentTest) {
 }
 
 TEST_F(PaymentAppProviderTest, CanMakePaymentTest) {
-  PaymentManager* manager = CreatePaymentManager(
-      GURL("https://example.test"), GURL("https://example.test/script.js"));
-
-  PaymentHandlerStatus status;
-  SetPaymentInstrument(manager, "payment_instrument_key",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
+  InstallPaymentApp(GURL("https://example.test"),
+                    GURL("https://example.test/script.js"));
 
   InstalledPaymentAppsFinder::PaymentApps apps;
   GetAllPaymentApps(base::BindOnce(&GetAllPaymentAppsCallback, &apps));
@@ -204,28 +244,16 @@ TEST_F(PaymentAppProviderTest, CanMakePaymentTest) {
 }
 
 TEST_F(PaymentAppProviderTest, InvokePaymentAppTest) {
-  PaymentManager* manager1 =
-      CreatePaymentManager(GURL("https://hellopay.test/a/"),
-                           GURL("https://hellopay.test/a/script.js"));
-  PaymentManager* manager2 = CreatePaymentManager(
-      GURL("https://bobpay.test/b/"), GURL("https://bobpay.test/b/script.js"));
-
-  PaymentHandlerStatus status;
-  SetPaymentInstrument(manager1, "test_key1",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-  SetPaymentInstrument(manager2, "test_key2",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-  SetPaymentInstrument(manager2, "test_key3",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
+  InstallPaymentApp(GURL("https://hellopay.test/a/"),
+                    GURL("https://hellopay.test/a/script.js"));
+  InstallPaymentApp(GURL("https://bobpay.test/b/"),
+                    GURL("https://bobpay.test/b/script.js"));
+  int64_t bobpay_registration_id = last_sw_registration_id();
 
   InstalledPaymentAppsFinder::PaymentApps apps;
   GetAllPaymentApps(base::BindOnce(&GetAllPaymentAppsCallback, &apps));
   ASSERT_EQ(2U, apps.size());
 
-  int64_t bobpay_registration_id = last_sw_registration_id();
   EXPECT_EQ(apps[bobpay_registration_id]->scope.spec(),
             "https://bobpay.test/b/");
 
@@ -243,95 +271,48 @@ TEST_F(PaymentAppProviderTest, InvokePaymentAppTest) {
 }
 
 TEST_F(PaymentAppProviderTest, GetAllPaymentAppsTest) {
-  PaymentManager* manager1 =
-      CreatePaymentManager(GURL("https://hellopay.test/a/"),
-                           GURL("https://hellopay.test/a/script.js"));
+  InstallPaymentApp(GURL("https://hellopay.test/a/"),
+                    GURL("https://hellopay.test/a/script.js"), "hellopay");
   int64_t hellopay_registration_id = last_sw_registration_id();
-
-  PaymentManager* manager2 = CreatePaymentManager(
-      GURL("https://bobpay.test/b/"), GURL("https://bobpay.test/b/script.js"));
+  InstallPaymentApp(GURL("https://bobpay.test/b/"),
+                    GURL("https://bobpay.test/b/script.js"), "bobpay");
   int64_t bobpay_registration_id = last_sw_registration_id();
-
-  PaymentHandlerStatus status;
-  PaymentInstrumentPtr instrument_1 = PaymentInstrument::New();
-  instrument_1->method = "hellopay";
-  SetPaymentInstrument(manager1, "test_key1", std::move(instrument_1),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-
-  PaymentInstrumentPtr instrument_2 = PaymentInstrument::New();
-  instrument_2->method = "hellopay";
-  SetPaymentInstrument(manager2, "test_key2", std::move(instrument_2),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-
-  PaymentInstrumentPtr instrument_3 = PaymentInstrument::New();
-  instrument_3->method = "bobpay";
-  SetPaymentInstrument(manager2, "test_key3", std::move(instrument_3),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
 
   InstalledPaymentAppsFinder::PaymentApps apps;
   GetAllPaymentApps(base::BindOnce(&GetAllPaymentAppsCallback, &apps));
 
   ASSERT_EQ(2U, apps.size());
   ASSERT_EQ(1U, apps[hellopay_registration_id]->enabled_methods.size());
-  ASSERT_EQ(2U, apps[bobpay_registration_id]->enabled_methods.size());
+  ASSERT_EQ(1U, apps[bobpay_registration_id]->enabled_methods.size());
 }
 
 TEST_F(PaymentAppProviderTest, GetAllPaymentAppsFromTheSameOriginTest) {
-  PaymentManager* manager1 = CreatePaymentManager(
-      GURL("https://bobpay.test/a/"), GURL("https://bobpay.test/a/script.js"));
+  InstallPaymentApp(GURL("https://bobpay.test/a/"),
+                    GURL("https://bobpay.test/a/script.js"), "hellopay");
   int64_t bobpay_a_registration_id = last_sw_registration_id();
-
-  PaymentManager* manager2 = CreatePaymentManager(
-      GURL("https://bobpay.test/b/"), GURL("https://bobpay.test/b/script.js"));
+  InstallPaymentApp(GURL("https://bobpay.test/b/"),
+                    GURL("https://bobpay.test/b/script.js"), "bobpay");
   int64_t bobpay_b_registration_id = last_sw_registration_id();
-
-  PaymentHandlerStatus status;
-  PaymentInstrumentPtr instrument_1 = PaymentInstrument::New();
-  instrument_1->method = "hellopay";
-  SetPaymentInstrument(manager1, "test_key1", std::move(instrument_1),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-
-  PaymentInstrumentPtr instrument_2 = PaymentInstrument::New();
-  instrument_2->method = "hellopay";
-  SetPaymentInstrument(manager2, "test_key2", std::move(instrument_2),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-
-  PaymentInstrumentPtr instrument_3 = PaymentInstrument::New();
-  instrument_3->method = "bobpay";
-  SetPaymentInstrument(manager2, "test_key3", std::move(instrument_3),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
 
   InstalledPaymentAppsFinder::PaymentApps apps;
   GetAllPaymentApps(base::BindOnce(&GetAllPaymentAppsCallback, &apps));
 
   ASSERT_EQ(2U, apps.size());
   ASSERT_EQ(1U, apps[bobpay_a_registration_id]->enabled_methods.size());
-  ASSERT_EQ(2U, apps[bobpay_b_registration_id]->enabled_methods.size());
+  ASSERT_EQ(1U, apps[bobpay_b_registration_id]->enabled_methods.size());
 }
 
 TEST_F(PaymentAppProviderTest, AbortPaymentWhenClosingOpenedWindow) {
-  PaymentManager* manager1 =
-      CreatePaymentManager(GURL("https://hellopay.test/a/"),
-                           GURL("https://hellopay.test/a/script.js"));
-  PaymentManager* manager2 = CreatePaymentManager(
-      GURL("https://bobpay.test/b/"), GURL("https://bobpay.test/b/script.js"));
-
-  PaymentHandlerStatus status;
-  SetPaymentInstrument(manager1, "test_key1",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-  SetPaymentInstrument(manager2, "test_key2",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
-  SetPaymentInstrument(manager2, "test_key3",
-                       payments::mojom::PaymentInstrument::New(),
-                       base::BindOnce(&SetPaymentInstrumentCallback, &status));
+  InstallPaymentApp(GURL("https://hellopay.test/a/"),
+                    GURL("https://hellopay.test/a/script.js"));
+  InstallPaymentApp(GURL("https://bobpay.test/b/"),
+                    GURL("https://bobpay.test/b/script.js"));
+  int64_t bobpay_registration_id = last_sw_registration_id();
 
   InstalledPaymentAppsFinder::PaymentApps apps;
   GetAllPaymentApps(base::BindOnce(&GetAllPaymentAppsCallback, &apps));
   ASSERT_EQ(2U, apps.size());
 
-  int64_t bobpay_registration_id = last_sw_registration_id();
   EXPECT_EQ(apps[bobpay_registration_id]->scope.spec(),
             "https://bobpay.test/b/");
 
@@ -355,9 +336,59 @@ TEST_F(PaymentAppProviderTest, AbortPaymentWhenClosingOpenedWindow) {
 
   // Response after abort should not crash and take effect.
   called = false;
-  RespondPendingPaymentRequest();
+  auto response_after_abort = payments::mojom::PaymentHandlerResponse::New();
+  response_after_abort->response_type =
+      payments::mojom::PaymentEventResponseType::PAYMENT_EVENT_SUCCESS;
+  RespondPendingPaymentRequest(std::move(response_after_abort));
   base::RunLoop().RunUntilIdle();
   ASSERT_FALSE(called);
+}
+
+TEST_F(PaymentAppProviderTest, InvokePaymentAppInternalErrorTest) {
+  InstallPaymentApp(GURL("https://example.test"),
+                    GURL("https://example.test/script.js"));
+
+  InstalledPaymentAppsFinder::PaymentApps apps;
+  GetAllPaymentApps(base::BindOnce(&GetAllPaymentAppsCallback, &apps));
+  ASSERT_EQ(1U, apps.size());
+
+  payments::mojom::PaymentRequestEventDataPtr event_data =
+      payments::mojom::PaymentRequestEventData::New();
+  event_data->method_data.push_back(payments::mojom::PaymentMethodData::New());
+  event_data->total = payments::mojom::PaymentCurrencyAmount::New();
+
+  SetNoPaymentRequestResponseImmediately();
+
+  bool called = false;
+  payments::mojom::PaymentHandlerResponsePtr response;
+  InvokePaymentApp(
+      last_sw_registration_id(),
+      url::Origin::Create(GURL("https://example.test")), std::move(event_data),
+      base::BindOnce(&CaptureInvokePaymentAppResponse, &called, &response));
+  ASSERT_FALSE(called);
+
+  auto internal_error_response = payments::mojom::PaymentHandlerResponse::New();
+  internal_error_response->response_type =
+      payments::mojom::PaymentEventResponseType::PAYMENT_EVENT_INTERNAL_ERROR;
+  RespondPendingPaymentRequest(std::move(internal_error_response));
+
+  // TODO(crbug.com/493823429): Replace use of base::test::RunUntil with
+  // explicitly waiting for an event.
+  EXPECT_TRUE(base::test::RunUntil([&]() { return called; }));
+  EXPECT_EQ(
+      payments::mojom::PaymentEventResponseType::PAYMENT_EVENT_INTERNAL_ERROR,
+      response->response_type);
+}
+
+TEST_F(PaymentAppProviderTest, OnPaymentHandlerDisconnectedTest) {
+  InstallPaymentApp(GURL("https://example.test"),
+                    GURL("https://example.test/script.js"));
+  SetRegistrationId(last_sw_registration_id());
+  SetOpenedWindow();
+  ASSERT_FALSE(PaymentHandlerDisconnected());
+  GetPaymentHandlerWebContentsObserver()->PrimaryMainFrameRenderProcessGone(
+      base::TERMINATION_STATUS_PROCESS_CRASHED);
+  ASSERT_TRUE(PaymentHandlerDisconnected());
 }
 
 }  // namespace content

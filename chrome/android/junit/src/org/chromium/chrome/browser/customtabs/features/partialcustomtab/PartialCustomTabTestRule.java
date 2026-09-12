@@ -8,18 +8,25 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyFloat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyObject;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
+import android.graphics.Color;
+import android.graphics.Insets;
+import android.graphics.Point;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.InsetDrawable;
+import android.os.Build;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Display;
@@ -29,7 +36,10 @@ import android.view.ViewGroup;
 import android.view.ViewPropertyAnimator;
 import android.view.ViewStub;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.WindowMetrics;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -40,18 +50,23 @@ import androidx.test.core.app.ApplicationProvider;
 import org.junit.rules.TestRule;
 import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.robolectric.shadows.ShadowLog;
-import org.robolectric.shadows.ShadowLooper;
 
 import org.chromium.base.ContextUtils;
-import org.chromium.base.supplier.Supplier;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.chrome.R;
+import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider;
 import org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar;
+import org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbarButtonsCoordinator;
 import org.chromium.chrome.browser.fullscreen.FullscreenManager;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
 import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
+import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.components.browser_ui.styles.SemanticColorUtils;
+import org.chromium.components.browser_ui.widget.TouchEventProvider;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -71,84 +86,115 @@ public class PartialCustomTabTestRule implements TestRule {
     static final int NAVBAR_HEIGHT = 160;
     static final int STATUS_BAR_HEIGHT = 68;
     static final int FULL_HEIGHT = DEVICE_HEIGHT - NAVBAR_HEIGHT;
+    static final int MULTIWINDOW_HEIGHT = FULL_HEIGHT / 2;
 
-    @Mock
-    Activity mActivity;
-    @Mock
-    Window mWindow;
-    @Mock
-    WindowManager mWindowManager;
-    @Mock
-    Resources mResources;
-    @Mock
-    Configuration mConfiguration;
+    static final int DEVICE_WIDTH_MEDIUM = 700;
+    static final int DEVICE_WIDTH_COMPACT = 500;
+    static final int DEVICE_HEIGHT_COMPACT = 300;
+    static final int DEVICE_WIDTH_COMPACT_PORTRAIT = DEVICE_HEIGHT_COMPACT;
+    static final int DEVICE_HEIGHT_COMPACT_PORTRAIT = DEVICE_WIDTH_COMPACT;
+
+    private static final int DEFAULT_BG_COLOR = Color.LTGRAY;
+
+    @Mock Activity mActivity;
+    @Mock Window mWindow;
+    @Mock WindowManager mWindowManager;
+    @Mock WindowMetrics mWindowMetrics;
+    @Mock WindowInsetsController mWindowInsetsController;
+    @Mock WindowInsets mWindowInsets;
+    @Mock Resources mResources;
+    Configuration mConfiguration = new Configuration();
     WindowManager.LayoutParams mAttributes;
-    @Mock
-    View mDecorView;
-    @Mock
-    View mRootView;
-    @Mock
-    Display mDisplay;
-    @Mock
-    CustomTabHeightStrategy.OnResizedCallback mOnResizedCallback;
-    @Mock
-    ViewGroup mCoordinatorLayout;
-    @Mock
-    ViewGroup mContentFrame;
-    @Mock
-    FullscreenManager mFullscreenManager;
-    @Mock
-    ViewStub mHandleViewStub;
-    @Mock
-    ImageView mHandleView;
-    @Mock
-    ActivityLifecycleDispatcher mActivityLifecycleDispatcher;
-    @Mock
-    LinearLayout mNavbar;
-    @Mock
-    ViewPropertyAnimator mViewAnimator;
-    @Mock
-    ImageView mSpinnerView;
-    @Mock
-    CircularProgressDrawable mSpinner;
-    @Mock
-    CustomTabToolbar mToolbarView;
-    @Mock
-    View mToolbarCoordinator;
-    @Mock
-    View mDragBar;
-    @Mock
-    View mDragHandlebar;
-    @Mock
-    GradientDrawable mDragBarBackground;
-    @Mock
-    ColorDrawable mColorDrawable;
-    @Mock
-    PartialCustomTabHandleStrategyFactory mHandleStrategyFactory;
-    @Mock
-    DisplayMetrics mMetrics;
+    @Mock TouchEventProvider mTouchEventProvider;
+    @Mock Tab mTab;
+    @Mock View mDecorView;
+    @Mock View mRootView;
+    @Mock Display mDisplay;
+    @Mock BrowserServicesIntentDataProvider mIntentData;
+    @Mock CustomTabHeightStrategy.OnResizedCallback mOnResizedCallback;
+    @Mock CustomTabHeightStrategy.OnActivityLayoutCallback mOnActivityLayoutCallback;
+    @Mock ViewGroup mCoordinatorLayout;
+    @Mock ViewGroup mContentFrame;
+    @Mock FullscreenManager mFullscreenManager;
+    @Mock ViewStub mHandleViewStub;
+    @Mock ImageView mHandleView;
+    @Mock FrameLayout mContentBackground;
+    @Mock ActivityLifecycleDispatcher mActivityLifecycleDispatcher;
+    @Mock LinearLayout mNavbar;
+    @Mock ViewPropertyAnimator mViewAnimator;
+    @Mock ImageView mSpinnerView;
+    @Mock CircularProgressDrawable mSpinner;
+    @Mock CustomTabToolbar mToolbarView;
+    @Mock View mToolbarCoordinator;
+    @Mock CustomTabDragBar mDragBar;
+    @Mock View mDragHandlebar;
+    @Mock GradientDrawable mDragBarBackground;
+    @Mock InsetDrawable mInsetDragBarBackground;
+    @Mock ColorDrawable mColorDrawable;
+    @Mock PartialCustomTabHandleStrategyFactory mHandleStrategyFactory;
+    @Mock DisplayMetrics mMetrics;
+    @Mock ViewGroup mCompositorViewHolder;
+    @Mock PackageManager mPackageManager;
+    @Mock ActivityManager mActivityManager;
+    @Mock CustomTabToolbarButtonsCoordinator mToolbarButtonsCoordinator;
+    @Captor ArgumentCaptor<View.OnAttachStateChangeListener> mAttachStateChangeListener;
 
     Context mContext;
     List<WindowManager.LayoutParams> mAttributeResults;
     DisplayMetrics mRealMetrics;
+    Point mDisplaySize;
 
-    FrameLayout.LayoutParams mLayoutParams = new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
-    FrameLayout.LayoutParams mCoordinatorLayoutParams = new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+    FrameLayout.LayoutParams mLayoutParams =
+            new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+    FrameLayout.LayoutParams mCoordinatorLayoutParams =
+            new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+    ViewGroup.LayoutParams mDragBarLayoutParams =
+            new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
 
+    @SuppressWarnings("DirectInvocationOnMock")
     private void setUp() {
-        ShadowLog.stream = System.out;
+        // MockitoRule is not processed recursively in JUnit 4, and these are
+        // TestRule or TestWatcher implementations. Manual initialization is
+        // required.
         MockitoAnnotations.initMocks(this);
+        mConfiguration.orientation = Configuration.ORIENTATION_PORTRAIT;
+        SemanticColorUtils.setDividerLineBgColorForTesting(Color.LTGRAY);
+        SemanticColorUtils.setDefaultBgColorForTesting(DEFAULT_BG_COLOR);
+
+        setUpActivityAndWindowMocks();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            setUpModernAndroidMocks();
+        }
+
+        setUpViewMocks();
+        setUpHandleStrategyFactory();
+        setUpWindowAttributesMocks();
+        setUpDisplayMocks();
+
+        mContext = ApplicationProvider.getApplicationContext();
+        ContextUtils.initApplicationContextForTests(mContext);
+        when(mActivity.getSystemService(Context.ACTIVITY_SERVICE)).thenReturn(mActivityManager);
+        when(mActivity.getSystemService(Context.WINDOW_SERVICE)).thenReturn(mWindowManager);
+        when(mActivity.getPackageManager()).thenReturn(mPackageManager);
+    }
+
+    private void setUpActivityAndWindowMocks() {
         when(mActivity.getWindow()).thenReturn(mWindow);
         when(mActivity.getResources()).thenReturn(mResources);
         when(mActivity.getWindowManager()).thenReturn(mWindowManager);
         when(mActivity.findViewById(R.id.coordinator)).thenReturn(mCoordinatorLayout);
+        when(mActivity.findViewById(R.id.compositor_view_holder)).thenReturn(mCompositorViewHolder);
         when(mActivity.findViewById(android.R.id.content)).thenReturn(mContentFrame);
         when(mActivity.findViewById(R.id.custom_tabs_handle_view_stub)).thenReturn(mHandleViewStub);
         when(mActivity.findViewById(R.id.custom_tabs_handle_view)).thenReturn(mHandleView);
+        when(mActivity.findViewById(R.id.custom_tabs_content_background))
+                .thenReturn(mContentBackground);
         when(mActivity.findViewById(R.id.drag_bar)).thenReturn(mDragBar);
-        when(mActivity.findViewById(R.id.drag_handlebar)).thenReturn(mDragHandlebar);
+        when(mActivity.findViewById(R.id.drag_handle)).thenReturn(mDragHandlebar);
+
         mAttributes = new WindowManager.LayoutParams();
         when(mWindow.getAttributes()).thenReturn(mAttributes);
         when(mWindow.getDecorView()).thenReturn(mDecorView);
@@ -156,12 +202,63 @@ public class PartialCustomTabTestRule implements TestRule {
         when(mDecorView.getRootView()).thenReturn(mRootView);
         when(mRootView.getLayoutParams()).thenReturn(mAttributes);
         when(mWindowManager.getDefaultDisplay()).thenReturn(mDisplay);
+    }
+
+    @SuppressWarnings("DirectInvocationOnMock")
+    private void setUpModernAndroidMocks() {
+        when(mWindow.getInsetsController()).thenReturn(mWindowInsetsController);
+        when(mDecorView.getWindowInsetsController()).thenReturn(mWindowInsetsController);
+        when(mWindowManager.getCurrentWindowMetrics()).thenReturn(mWindowMetrics);
+        doAnswer(
+                        invocation -> {
+                            return new Rect(
+                                    0, 0, mRealMetrics.widthPixels, mRealMetrics.heightPixels);
+                        })
+                .when(mWindowMetrics)
+                .getBounds();
+        when(mWindowMetrics.getWindowInsets()).thenReturn(mWindowInsets);
+        doAnswer(
+                        invocation -> {
+                            int type = invocation.getArgument(0);
+                            int top =
+                                    (type & WindowInsets.Type.statusBars()) != 0
+                                            ? getStatusBarHeight()
+                                            : 0;
+                            int bottom = getNavigationBarHeight(type);
+                            return Insets.of(0, top, 0, bottom);
+                        })
+                .when(mWindowInsets)
+                .getInsets(anyInt());
+    }
+
+    @SuppressWarnings("DirectInvocationOnMock")
+    private int getStatusBarHeight() {
+        int statusBarHeightResourceId =
+                mResources.getIdentifier("status_bar_height", "dimen", "android");
+        if (statusBarHeightResourceId > 0) {
+            return mResources.getDimensionPixelSize(statusBarHeightResourceId);
+        }
+        return 0;
+    }
+
+    private int getNavigationBarHeight(int type) {
+        boolean isMultiWindow = MultiWindowUtils.getInstance().isInMultiWindowMode(mActivity);
+        if ((type & WindowInsets.Type.navigationBars()) != 0
+                && mConfiguration.orientation == Configuration.ORIENTATION_PORTRAIT
+                && !isMultiWindow) {
+            return NAVBAR_HEIGHT;
+        }
+        return 0;
+    }
+
+    private void setUpViewMocks() {
         when(mResources.getConfiguration()).thenReturn(mConfiguration);
         mMetrics.density = DENSITY;
         when(mResources.getDisplayMetrics()).thenReturn(mMetrics);
         when(mContentFrame.getLayoutParams()).thenReturn(mLayoutParams);
         when(mContentFrame.getHeight()).thenReturn(DEVICE_HEIGHT - NAVBAR_HEIGHT);
         when(mCoordinatorLayout.getLayoutParams()).thenReturn(mCoordinatorLayoutParams);
+        when(mCoordinatorLayout.getBackground()).thenReturn(mDragBarBackground);
         when(mHandleView.getLayoutParams()).thenReturn(mLayoutParams);
         when(mHandleView.getBackground()).thenReturn(mDragBarBackground);
         when(mHandleView.findViewById(R.id.drag_bar)).thenReturn(mDragBar);
@@ -169,7 +266,7 @@ public class PartialCustomTabTestRule implements TestRule {
         when(mNavbar.animate()).thenReturn(mViewAnimator);
         when(mViewAnimator.alpha(anyFloat())).thenReturn(mViewAnimator);
         when(mViewAnimator.setDuration(anyLong())).thenReturn(mViewAnimator);
-        when(mViewAnimator.setListener(anyObject())).thenReturn(mViewAnimator);
+        when(mViewAnimator.setListener(any())).thenReturn(mViewAnimator);
         when(mSpinnerView.getLayoutParams()).thenReturn(mLayoutParams);
         when(mSpinnerView.getParent()).thenReturn(mContentFrame);
         when(mSpinnerView.animate()).thenReturn(mViewAnimator);
@@ -177,37 +274,58 @@ public class PartialCustomTabTestRule implements TestRule {
         when(mToolbarView.getLayoutParams()).thenReturn(mLayoutParams);
         when(mColorDrawable.getColor()).thenReturn(2);
         when(mDragBar.getBackground()).thenReturn(mDragBarBackground);
-        when(mHandleStrategyFactory.create(anyInt(), any(Context.class), any(BooleanSupplier.class),
-                     any(Supplier.class),
-                     any(PartialCustomTabHandleStrategy.DragEventCallback.class)))
-                .thenReturn(null);
-        mConfiguration.orientation = Configuration.ORIENTATION_PORTRAIT;
+        when(mDragBar.getLayoutParams()).thenReturn(mDragBarLayoutParams);
+    }
 
+    private void setUpHandleStrategyFactory() {
+        when(mHandleStrategyFactory.create(
+                        anyInt(),
+                        any(Context.class),
+                        any(BooleanSupplier.class),
+                        any(),
+                        any(PartialCustomTabHandleStrategy.DragEventCallback.class)))
+                .thenReturn(null);
+    }
+
+    private void setUpWindowAttributesMocks() {
         mAttributeResults = new ArrayList<>();
-        doAnswer(invocation -> {
-            WindowManager.LayoutParams attributes = new WindowManager.LayoutParams();
-            attributes.copyFrom((WindowManager.LayoutParams) invocation.getArgument(0));
-            mAttributes.copyFrom(attributes);
-            mAttributeResults.add(attributes);
-            return null;
-        })
+        doAnswer(
+                        invocation -> {
+                            WindowManager.LayoutParams attributes =
+                                    new WindowManager.LayoutParams();
+                            attributes.copyFrom(
+                                    (WindowManager.LayoutParams) invocation.getArgument(0));
+                            mAttributes.copyFrom(attributes);
+                            mAttributeResults.add(attributes);
+                            return null;
+                        })
                 .when(mWindow)
                 .setAttributes(any(WindowManager.LayoutParams.class));
+    }
 
+    private void setUpDisplayMocks() {
         mRealMetrics = new DisplayMetrics();
         mRealMetrics.widthPixels = DEVICE_WIDTH;
         mRealMetrics.heightPixels = DEVICE_HEIGHT;
         mRealMetrics.density = DENSITY;
-        doAnswer(invocation -> {
-            DisplayMetrics displayMetrics = invocation.getArgument(0);
-            displayMetrics.setTo(mRealMetrics);
-            return null;
-        })
+        doAnswer(
+                        invocation -> {
+                            DisplayMetrics displayMetrics = invocation.getArgument(0);
+                            displayMetrics.setTo(mRealMetrics);
+                            return null;
+                        })
                 .when(mDisplay)
                 .getRealMetrics(any(DisplayMetrics.class));
 
-        mContext = ApplicationProvider.getApplicationContext();
-        ContextUtils.initApplicationContextForTests(mContext);
+        mDisplaySize = new Point(DEVICE_WIDTH, DEVICE_HEIGHT - NAVBAR_HEIGHT);
+        doAnswer(
+                        invocation -> {
+                            Point size = invocation.getArgument(0);
+                            size.set(mDisplaySize.x, mDisplaySize.y);
+                            return null;
+                        })
+                .when(mDisplay)
+                .getSize(any(Point.class));
     }
 
     private void commonTearDown() {
@@ -217,7 +335,7 @@ public class PartialCustomTabTestRule implements TestRule {
 
     public static void waitForAnimationToFinish() {
         shadowOf(Looper.getMainLooper()).idle();
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
     }
 
     public void configPortraitMode() {
@@ -225,8 +343,14 @@ public class PartialCustomTabTestRule implements TestRule {
         mRealMetrics.widthPixels = DEVICE_WIDTH;
         mRealMetrics.heightPixels = DEVICE_HEIGHT;
         mRealMetrics.density = DENSITY;
+        mDisplaySize.set(DEVICE_WIDTH, DEVICE_HEIGHT - NAVBAR_HEIGHT);
         when(mContentFrame.getHeight()).thenReturn(DEVICE_HEIGHT - NAVBAR_HEIGHT);
         when(mDisplay.getRotation()).thenReturn(Surface.ROTATION_90);
+    }
+
+    public void configInsetDrawableBg() {
+        when(mDragBar.getBackground()).thenReturn(mInsetDragBarBackground);
+        when(mInsetDragBarBackground.getDrawable()).thenReturn(mDragBarBackground);
     }
 
     public void configLandscapeMode() {
@@ -238,8 +362,30 @@ public class PartialCustomTabTestRule implements TestRule {
         mRealMetrics.widthPixels = DEVICE_HEIGHT;
         mRealMetrics.heightPixels = DEVICE_WIDTH;
         mRealMetrics.density = DENSITY;
+        mDisplaySize.set(DEVICE_HEIGHT, DEVICE_WIDTH);
         when(mContentFrame.getHeight()).thenReturn(DEVICE_WIDTH);
         when(mDisplay.getRotation()).thenReturn(direction);
+    }
+
+    public void configDeviceWidthMedium() {
+        mRealMetrics.widthPixels = DEVICE_WIDTH_MEDIUM;
+        mDisplaySize.set(DEVICE_WIDTH_MEDIUM, DEVICE_HEIGHT - NAVBAR_HEIGHT);
+    }
+
+    public void configCompactDevice() {
+        mConfiguration.orientation = Configuration.ORIENTATION_LANDSCAPE;
+        mRealMetrics.widthPixels = DEVICE_WIDTH_COMPACT;
+        mRealMetrics.heightPixels = DEVICE_HEIGHT_COMPACT;
+        mDisplaySize.set(DEVICE_WIDTH_COMPACT, DEVICE_HEIGHT_COMPACT);
+        when(mContentFrame.getHeight()).thenReturn(DEVICE_WIDTH_COMPACT);
+    }
+
+    public void configCompactDevice_Portrait() {
+        mConfiguration.orientation = Configuration.ORIENTATION_PORTRAIT;
+        mRealMetrics.widthPixels = DEVICE_WIDTH_COMPACT_PORTRAIT;
+        mRealMetrics.heightPixels = DEVICE_HEIGHT_COMPACT_PORTRAIT;
+        mDisplaySize.set(DEVICE_WIDTH_COMPACT_PORTRAIT, DEVICE_HEIGHT_COMPACT_PORTRAIT);
+        when(mContentFrame.getHeight()).thenReturn(DEVICE_HEIGHT_COMPACT_PORTRAIT);
     }
 
     public void verifyWindowFlagsSet() {
@@ -249,6 +395,28 @@ public class PartialCustomTabTestRule implements TestRule {
 
     public WindowManager.LayoutParams getWindowAttributes() {
         return mAttributeResults.get(mAttributeResults.size() - 1);
+    }
+
+    @SuppressWarnings("DirectInvocationOnMock")
+    public float getDisplayDensity() {
+        return mActivity.getResources().getDisplayMetrics().density;
+    }
+
+    public void setupDisplayMetricsInMultiWindowMode() {
+        mMetrics = new DisplayMetrics();
+        mRealMetrics.heightPixels = MULTIWINDOW_HEIGHT;
+        mMetrics.widthPixels = DEVICE_WIDTH;
+        mMetrics.heightPixels = MULTIWINDOW_HEIGHT;
+        doAnswer(
+                        invocation -> {
+                            DisplayMetrics displayMetrics = invocation.getArgument(0);
+                            displayMetrics.setTo(mMetrics);
+                            return null;
+                        })
+                .when(mDisplay)
+                .getMetrics(any(DisplayMetrics.class));
+        mDisplaySize.y = MULTIWINDOW_HEIGHT;
+        when(mContentFrame.getHeight()).thenReturn(MULTIWINDOW_HEIGHT);
     }
 
     @Override

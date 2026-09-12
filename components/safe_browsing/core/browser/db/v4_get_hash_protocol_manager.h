@@ -15,6 +15,7 @@
 // Design doc: go/design-doc-v4-full-hash-manager
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -27,6 +28,7 @@
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "components/safe_browsing/core/browser/db/safebrowsing.pb.h"
+#include "components/safe_browsing/core/browser/db/sb_protocol_config.h"
 #include "components/safe_browsing/core/browser/db/util.h"
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
 #include "components/safe_browsing/core/common/proto/webui.pb.h"
@@ -41,11 +43,6 @@ class SharedURLLoaderFactory;
 namespace safe_browsing {
 
 class V4GetHashProtocolManagerFuzzer;
-
-// The matching hash prefixes and corresponding stores, for each full hash
-// generated for a given URL.
-typedef std::unordered_map<FullHashStr, StoreAndHashPrefixes>
-    FullHashToStoreAndHashPrefixesMap;
 
 // ----------------------------------------------------------------
 
@@ -64,14 +61,17 @@ struct FullHashInfo {
   // Any metadata for this full hash for a particular store.
   ThreatMetadata metadata;
 
+  // Set to true if the threat type is API_ABUSE and the metadata contains
+  // "NOTIFICATIONS".
+  bool is_notification_abusive = false;
+
   FullHashInfo(const FullHashStr& full_hash,
                const ListIdentifier& list_id,
                const base::Time& positive_expiry);
   FullHashInfo(const FullHashInfo& other);
   ~FullHashInfo();
 
-  bool operator==(const FullHashInfo& other) const;
-  bool operator!=(const FullHashInfo& other) const;
+  friend bool operator==(const FullHashInfo&, const FullHashInfo&) = default;
 
  private:
   FullHashInfo();
@@ -113,9 +113,7 @@ struct FullHashCallbackInfo {
                        const FullHashToStoreAndHashPrefixesMap&
                            full_hash_to_store_and_hash_prefixes,
                        FullHashCallback callback,
-                       const base::Time& network_start_time,
-                       MechanismExperimentHashDatabaseCache
-                           mechanism_experiment_cache_selection);
+                       const base::Time& network_start_time);
   ~FullHashCallbackInfo();
 
   // The FullHashInfo objects retrieved from cache. These are merged with the
@@ -140,10 +138,6 @@ struct FullHashCallbackInfo {
 
   // The prefixes that were requested from the server.
   std::vector<HashPrefixStr> prefixes_requested;
-
-  // Specifies which cache to use. For more context, see the comments above
-  // MechanismExperimentHashDatabaseCache's definition.
-  MechanismExperimentHashDatabaseCache mechanism_experiment_cache_selection;
 };
 
 // ----------------------------------------------------------------
@@ -152,11 +146,10 @@ class V4GetHashProtocolManagerFactory;
 
 class V4GetHashProtocolManager {
  public:
-  // Invoked when GetFullHashesWithApis completes.
+  // Invoked when GetFullHashesForNotificationAbuse completes.
   // Parameters:
-  //   - The API threat metadata for the given URL.
-  using ThreatMetadataForApiCallback =
-      base::OnceCallback<void(const ThreatMetadata& md)>;
+  //   - Whether the URL is abusive for notifications.
+  using NotificationAbuseCallback = base::OnceCallback<void(bool is_abusive)>;
 
   V4GetHashProtocolManager(const V4GetHashProtocolManager&) = delete;
   V4GetHashProtocolManager& operator=(const V4GetHashProtocolManager&) = delete;
@@ -178,34 +171,26 @@ class V4GetHashProtocolManager {
   // argument when the results are retrieved. The callback may be invoked
   // synchronously. |list_client_states| is needed for reporting the current
   // state of the lists on the client; it does not affect the response from the
-  // server. |mechanism_experiment_cache_selection| is used to specify
-  // which cache(s) to use for reads and writes.
+  // server.
   virtual void GetFullHashes(const FullHashToStoreAndHashPrefixesMap
                                  full_hash_to_matching_hash_prefixes,
                              const std::vector<std::string>& list_client_states,
-                             FullHashCallback callback,
-                             MechanismExperimentHashDatabaseCache
-                                 mechanism_experiment_cache_selection);
+                             FullHashCallback callback);
 
   // Retrieve the full hash and API metadata for the origin of |url|, and invoke
   // the callback argument when the results are retrieved. The callback may be
   // invoked synchronously.
-  virtual void GetFullHashesWithApis(
+  virtual void GetFullHashesForNotificationAbuse(
       const GURL& url,
       const std::vector<std::string>& list_client_states,
-      ThreatMetadataForApiCallback api_callback);
+      NotificationAbuseCallback callback);
 
   // Callback when the request completes
   void OnURLLoaderComplete(network::SimpleURLLoader* url_loader,
-                           std::unique_ptr<std::string> response_body);
+                           std::optional<std::string> response_body);
 
   // Populates the protobuf with the FullHashCache data.
   void CollectFullHashCacheInfo(FullHashCacheInfo* full_hash_cache_info);
-
-  // Sets |is_lookup_mechanism_experiment_enabled_| to true. See property
-  // comments for more details.
-  // TODO(crbug.com/1410253): Delete once temporary experiment is complete.
-  void SetLookupMechanismExperimentIsEnabled();
 
  protected:
   friend class GetHashProtocolManagerFactoryWithTestUrlLoader;
@@ -223,8 +208,6 @@ class V4GetHashProtocolManager {
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
                            TestParseHashResponseWrongThreatEntryType);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
-                           TestParseHashThreatPatternType);
-  FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
                            TestParseSubresourceFilterMetadata);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
                            TestParseHashResponseNonPermissionMetadata);
@@ -232,6 +215,7 @@ class V4GetHashProtocolManager {
                            TestParseHashResponseInconsistentThreatTypes);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
                            TestGetHashErrorHandlingOK);
+  FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest, TestGetHashCachedOK);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
                            TestResultsNotCachedForNegativeCacheDuration);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
@@ -241,8 +225,6 @@ class V4GetHashProtocolManager {
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
                            TestGetHashErrorHandlingParallelRequests);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest, GetCachedResults);
-  FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
-                           CacheResults_LookupMechanismExperiment);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest, TestUpdatesAreMerged);
   FRIEND_TEST_ALL_PREFIXES(V4GetHashProtocolManagerTest,
                            TestBackoffErrorHistogramCount);
@@ -260,8 +242,7 @@ class V4GetHashProtocolManager {
   // Looks up the cached results for full hashes in
   // |full_hash_to_store_and_hash_prefixes|. Fills |prefixes_to_request| with
   // the prefixes that need to be requested. Fills |cached_full_hash_infos|
-  // with the cached results. |mechanism_experiment_cache_selection| is used to
-  // specify which cache(s) to use.
+  // with the cached results.
   // Note: It is valid for both |prefixes_to_request| and
   // |cached_full_hash_infos| to be empty after this function finishes.
   void GetFullHashCachedResults(
@@ -269,9 +250,7 @@ class V4GetHashProtocolManager {
           full_hash_to_store_and_hash_prefixes,
       const base::Time& now,
       std::vector<HashPrefixStr>* prefixes_to_request,
-      std::vector<FullHashInfo>* cached_full_hash_infos,
-      MechanismExperimentHashDatabaseCache
-          mechanism_experiment_cache_selection);
+      std::vector<FullHashInfo>* cached_full_hash_infos);
 
   // Fills a FindFullHashesRequest protocol buffer for a request.
   // Returns the serialized and base 64 encoded request as a string.
@@ -298,12 +277,13 @@ class V4GetHashProtocolManager {
                     const std::vector<FullHashInfo>& full_hash_infos,
                     std::vector<FullHashInfo>* merged_full_hash_infos);
 
-  // Calls |api_callback| with an object of ThreatMetadata that contains
-  // permission API metadata for full hashes in those |full_hash_infos| that
-  // have a full hash in |full_hashes|.
-  void OnFullHashForApi(ThreatMetadataForApiCallback api_callback,
-                        const std::vector<FullHashStr>& full_hashes,
-                        const std::vector<FullHashInfo>& full_hash_infos);
+  // Calls |callback| with a boolean indicating whether any of the
+  // |full_hash_infos| that have a full hash in |full_hashes| are abusive
+  // for notifications.
+  void OnFullHashForNotificationAbuse(
+      NotificationAbuseCallback callback,
+      const std::vector<FullHashStr>& full_hashes,
+      const std::vector<FullHashInfo>& full_hash_infos);
 
   // Parses a FindFullHashesResponse protocol buffer and fills the results in
   // |full_hash_infos| and |negative_cache_expire|. |response_data| is a
@@ -314,10 +294,12 @@ class V4GetHashProtocolManager {
                          std::vector<FullHashInfo>* full_hash_infos,
                          base::Time* negative_cache_expire);
 
-  // Parses the store specific |metadata| information from |match|. Logs errors
-  // to UMA if the metadata information was not parsed correctly or was
-  // inconsistent with what's expected from that corresponding store.
-  static void ParseMetadata(const ThreatMatch& match, ThreatMetadata* metadata);
+  // Parses the store specific metadata information from |match| and stores it
+  // in |full_hash_info|. Logs errors to UMA if the metadata information was
+  // not parsed correctly or was inconsistent with what's expected from that
+  // corresponding store.
+  static void ParseMetadata(const ThreatMatch& match,
+                            FullHashInfo* full_hash_info);
 
   // Resets the gethash error counter and multiplier.
   void ResetGetHashErrors();
@@ -326,25 +308,14 @@ class V4GetHashProtocolManager {
   void SetClockForTests(base::Clock* clock);
 
   // Updates the state of the full hash cache upon receiving a valid response
-  // from the server. |mechanism_experiment_cache_selection| is used to specify
-  // which cache(s) to use.
+  // from the server.
   void UpdateCache(const std::vector<HashPrefixStr>& prefixes_requested,
                    const std::vector<FullHashInfo>& full_hash_infos,
-                   const base::Time& negative_cache_expire,
-                   MechanismExperimentHashDatabaseCache
-                       mechanism_experiment_cache_selection);
+                   const base::Time& negative_cache_expire);
 
  protected:
   // A cache of full hash results.
   FullHashCache full_hash_cache_;
-  // Similar |full_hash_cache_|, but for SafeBrowsingLookupMechanismExperiment
-  // for the hash real-time mechanism.
-  // TODO(crbug.com/1410253): Delete once temporary experiment is complete.
-  FullHashCache lookup_mechanism_experiment_hash_realtime_full_hash_cache_;
-  // Similar |full_hash_cache_|, but for SafeBrowsingLookupMechanismExperiment
-  // for the hash database mechanism.
-  // TODO(crbug.com/1410253): Delete once temporary experiment is complete.
-  FullHashCache lookup_mechanism_experiment_hash_database_full_hash_cache_;
 
  private:
   // Map of GetHash requests to parameters which created it.
@@ -392,31 +363,20 @@ class V4GetHashProtocolManager {
   std::vector<ThreatEntryType> threat_entry_types_;
   std::vector<ThreatType> threat_types_;
 
-  // This value determines whether the class should maintain three local caches,
-  // one for each type of SafeBrowsingLookupMechanism's usage of the
-  // HashDatabaseMechanism cache. The value is set to true on the first Safe
-  // Browsing lookup that an ESB user makes after startup. Once true, it's never
-  // set back to false, meaning that the secondary caches won't be cleaned up
-  // until restart. Note that the two secondary caches will only ever be read
-  // from / written to from an experiment lookup, which is not run if the user
-  // turns off ESB (or for any non-ESB users on the device).
-  // TODO(crbug.com/1410253): Delete once temporary experiment is complete.
-  bool is_lookup_mechanism_experiment_enabled_ = false;
-
   SEQUENCE_CHECKER(sequence_checker_);
 };
 
 // Interface of a factory to create V4GetHashProtocolManager.  Useful for tests.
 class V4GetHashProtocolManagerFactory {
  public:
-  V4GetHashProtocolManagerFactory() {}
+  V4GetHashProtocolManagerFactory() = default;
 
   V4GetHashProtocolManagerFactory(const V4GetHashProtocolManagerFactory&) =
       delete;
   V4GetHashProtocolManagerFactory& operator=(
       const V4GetHashProtocolManagerFactory&) = delete;
 
-  virtual ~V4GetHashProtocolManagerFactory() {}
+  virtual ~V4GetHashProtocolManagerFactory() = default;
   virtual std::unique_ptr<V4GetHashProtocolManager> CreateProtocolManager(
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
       const StoresToCheck& stores_to_check,

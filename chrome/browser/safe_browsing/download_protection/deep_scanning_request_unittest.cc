@@ -4,60 +4,79 @@
 
 #include "chrome/browser/safe_browsing/download_protection/deep_scanning_request.h"
 
+#include <algorithm>
 #include <unordered_map>
 
-#include "base/containers/contains.h"
+#include "base/command_line.h"
 #include "base/containers/flat_map.h"
+#include "base/containers/span.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_forward.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
+#include "base/test/bind.h"
+#include "base/test/scoped_command_line.h"
 #include "base/test/scoped_feature_list.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/download/chrome_download_manager_delegate.h"
 #include "chrome/browser/download/download_core_service.h"
 #include "chrome/browser/download/download_core_service_factory.h"
+#include "chrome/browser/download/download_item_warning_data.h"
 #include "chrome/browser/download/download_prefs.h"
 #include "chrome/browser/enterprise/connectors/common.h"
-#include "chrome/browser/enterprise/connectors/connectors_prefs.h"
 #include "chrome/browser/enterprise/connectors/connectors_service.h"
+#include "chrome/browser/enterprise/connectors/reporting/realtime_reporting_client.h"
 #include "chrome/browser/enterprise/connectors/reporting/realtime_reporting_client_factory.h"
-#include "chrome/browser/extensions/api/safe_browsing_private/safe_browsing_private_event_router.h"
-#include "chrome/browser/extensions/api/safe_browsing_private/safe_browsing_private_event_router_factory.h"
+#include "chrome/browser/enterprise/connectors/test/deep_scanning_test_utils.h"
 #include "chrome/browser/policy/dm_token_utils.h"
-#include "chrome/browser/safe_browsing/cloud_content_scanning/binary_fcm_service.h"
 #include "chrome/browser/safe_browsing/cloud_content_scanning/cloud_binary_upload_service.h"
-#include "chrome/browser/safe_browsing/cloud_content_scanning/deep_scanning_test_utils.h"
 #include "chrome/browser/safe_browsing/cloud_content_scanning/deep_scanning_utils.h"
+#include "chrome/browser/safe_browsing/download_protection/download_item_metadata.h"
 #include "chrome/browser/safe_browsing/download_protection/download_protection_service.h"
 #include "chrome/browser/safe_browsing/download_protection/download_protection_util.h"
-#include "chrome/browser/safe_browsing/test_extension_event_observer.h"
+#include "chrome/browser/safe_browsing/download_protection/file_system_access_metadata.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "components/download/public/common/mock_download_item.h"
 #include "components/enterprise/common/proto/connectors.pb.h"
+#include "components/enterprise/common/proto/synced/browser_events.pb.h"
+#include "components/enterprise/connectors/core/common.h"
+#include "components/enterprise/connectors/core/connectors_prefs.h"
+#include "components/enterprise/connectors/core/features.h"
+#include "components/enterprise/connectors/core/reporting_constants.h"
+#include "components/enterprise/obfuscation/core/download_obfuscator.h"
 #include "components/policy/core/common/cloud/dm_token.h"
 #include "components/policy/core/common/cloud/mock_cloud_policy_client.h"
+#include "components/policy/core/common/policy_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "components/safe_browsing/core/common/features.h"
 #include "components/safe_browsing/core/common/safe_browsing_prefs.h"
 #include "components/signin/public/identity_manager/identity_test_environment.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/download_item_utils.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/test/browser_task_environment.h"
+#include "content/public/test/test_renderer_host.h"
+#include "content/public/test/web_contents_tester.h"
 #include "crypto/sha2.h"
+#include "net/base/mime_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chromeos/ash/components/system/fake_statistics_provider.h"
+#endif
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+#include "chrome/browser/enterprise/data_protection/data_protection_features.h"
 #endif
 
 namespace safe_browsing {
@@ -108,6 +127,17 @@ constexpr char kScanForDlp[] = R"(
 
 constexpr char kNoScan[] = R"({"service_provider": "google"})";
 
+constexpr char kScanId[] = "scan_id";
+
+std::string GetFileName(const std::string& full_path) {
+#if BUILDFLAG(IS_CHROMEOS)
+  return base::FilePath(full_path).BaseName().AsUTF8Unsafe();
+#else
+  return full_path;
+#endif  // BUILDFLAG(IS_CHROMEOS)
+}
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
 const std::set<std::string>* ExeMimeTypes() {
   static std::set<std::string> set = {"application/x-msdownload",
                                       "application/x-ms-dos-executable",
@@ -115,18 +145,338 @@ const std::set<std::string>* ExeMimeTypes() {
   return &set;
 }
 
-const std::set<std::string>* TxtMimeTypes() {
-  static std::set<std::string> set = {"text/plain"};
-  return &set;
+struct ForceSaveToCloudPrioritizationTestParams {
+  std::vector<base::test::FeatureRef> enabled_features;
+  std::vector<base::test::FeatureRef> disabled_features;
+  enterprise_connectors::ContentAnalysisResponse response;
+  DownloadCheckResult expected_result;
+  const char* test_name;
+};
+
+// Helper to generate responses
+enterprise_connectors::ContentAnalysisResponse CreateResponse(
+    const std::vector<
+        enterprise_connectors::TriggeredRule::ForceSaveToCloudDestination>&
+        destinations) {
+  enterprise_connectors::ContentAnalysisResponse response;
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  for (auto destination : destinations) {
+    auto* dlp_rule = dlp_result->add_triggered_rules();
+    dlp_rule->set_action(
+        enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+    dlp_rule->set_force_save_to_cloud_destination(destination);
+  }
+  return response;
+}
+#endif  // BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+
+// Helpers for the proto-base reporting events
+chrome::cros::reporting::proto::UnscannedFileEvent CreateUnscannedFileEvent(
+    const std::string& profile_identifier,
+    const std::string& user_name,
+    const std::string& file_name,
+    const std::string& sha256,
+    const std::string& content_type,
+    size_t content_size,
+    chrome::cros::reporting::proto::UnscannedFileEvent::UnscannedReason reason,
+    chrome::cros::reporting::proto::EventResult event_result,
+    bool include_referrer = true) {
+  chrome::cros::reporting::proto::UnscannedFileEvent event;
+
+  event.set_url("https://example.com/download.exe");
+  event.set_tab_url("https://example.com/");
+  event.set_source("");
+  event.set_destination("");
+  event.set_trigger(
+      chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD);
+  event.set_scan_id(kScanId);
+
+  if (event_result ==
+      chrome::cros::reporting::proto::EventResult::EVENT_RESULT_BYPASSED) {
+    event.set_clicked_through(true);
+  } else {
+    event.set_clicked_through(false);
+  }
+
+  event.set_file_name(GetFileName(file_name));
+  event.set_profile_identifier(profile_identifier);
+  event.set_profile_user_name(user_name);
+
+  event.set_download_digest_sha_256(sha256);
+  event.set_content_type(content_type);
+  event.set_content_size(content_size);
+  event.set_unscanned_reason(reason);
+  event.set_event_result(event_result);
+
+  if (include_referrer &&
+      base::FeatureList::IsEnabled(safe_browsing::kEnhancedFieldsForSecOps)) {
+    auto* referrer = event.add_referrers();
+    referrer->set_url("https://example.com/download.exe");
+    referrer->set_ip("example.com");
+  }
+
+  return event;
 }
 
-constexpr char kScanId[] = "scan_id";
+chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent
+CreateDangerousDownloadEvent(
+    const std::string& url,
+    const std::string& tab_url,
+    const std::string& source,
+    const std::string& destination,
+    const std::string& file_name,
+    const std::string& sha256,
+    chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent::
+        DangerousDownloadThreatType threat_type,
+    chrome::cros::reporting::proto::DataTransferEventTrigger trigger,
+    size_t content_size,
+    chrome::cros::reporting::proto::EventResult event_result,
+    const std::string& username,
+    const std::string& profile_identifier,
+    const std::string& scan_id,
+    bool include_referrer = true) {
+  chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent event;
+
+  event.set_url(url);
+  event.set_tab_url(tab_url);
+  event.set_source(source);
+  event.set_destination(destination);
+  event.set_download_digest_sha256(sha256);
+  event.set_content_type("application/octet-stream");
+  event.set_content_size(content_size);
+  event.set_scan_id(scan_id);
+  event.set_trigger(trigger);
+  event.set_clicked_through(false);
+
+  if (include_referrer) {
+    ::chrome::cros::reporting::proto::UrlInfo referrers;
+    referrers.set_ip("example.com");
+    referrers.set_url("https://example.com/download.exe");
+    *event.add_referrers() = referrers;
+  }
+
+  event.set_file_name(GetFileName(file_name));
+  event.set_profile_identifier(profile_identifier);
+  event.set_profile_user_name(username);
+  event.set_threat_type(threat_type);
+  event.set_event_result(event_result);
+
+  return event;
+}
+
+chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent
+CreateDangerousDownloadEvent(
+    const std::string& profile_identifier,
+    const std::string& user_name,
+    const std::string& file_name,
+    chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent::
+        DangerousDownloadThreatType threat_type,
+    chrome::cros::reporting::proto::EventResult event_result,
+    bool include_referrer = true) {
+  return CreateDangerousDownloadEvent(
+      /*url=*/"https://example.com/download.exe",
+      /*tab_url=*/"https://example.com/",
+      /*source=*/"",
+      /*destination=*/"", file_name,
+      /*sha256=*/
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+      threat_type,
+      /*trigger=*/
+      chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+      /*content_size=*/std::string("download contents").size(), event_result,
+      user_name, profile_identifier,
+      /*scan_id=*/kScanId, include_referrer);
+}
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+chrome::cros::reporting::proto::DlpSensitiveDataEvent
+CreateDlpSensitiveDataEventForForceSaveToCloud(
+    const std::string& profile_identifier,
+    const std::string& user_name,
+    const std::string& file_name,
+    const std::string& destination) {
+  chrome::cros::reporting::proto::DlpSensitiveDataEvent event;
+
+  event.set_url("https://example.com/download.exe");
+  event.set_tab_url("https://example.com/");
+  event.set_source("");
+  event.set_download_digest_sha_256(
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C");
+  event.set_content_type("application/octet-stream");
+  event.set_content_size(std::string("download contents").size());
+  event.set_trigger(
+      chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD);
+  event.set_clicked_through(false);
+  event.set_scan_id("scan_id");
+  event.set_event_result(chrome::cros::reporting::proto::EventResult::
+                             EVENT_RESULT_FORCED_SAVE_TO_CLOUD);
+
+  auto* referrers = event.add_referrers();
+  referrers->set_ip("example.com");
+  referrers->set_url("https://example.com/download.exe");
+
+  auto* triggered_rule = event.add_triggered_rule_info();
+  triggered_rule->set_action(
+      chrome::cros::reporting::proto::TriggeredRuleInfo::FORCE_SAVE_TO_CLOUD);
+  triggered_rule->set_rule_name("dlp_rule");
+  triggered_rule->set_rule_id(0);
+
+  event.set_file_name(GetFileName(file_name));
+  event.set_destination(destination);
+  event.set_profile_identifier(profile_identifier);
+  event.set_profile_user_name(user_name);
+
+  return event;
+}
+
+chrome::cros::reporting::proto::DlpSensitiveDataEvent
+CreateDlpSensitiveDataEvent(
+    const std::string& url,
+    const std::string& tab_url,
+    const std::string& source,
+    const std::string& destination,
+    const std::string& file_name,
+    const std::string& sha256,
+    chrome::cros::reporting::proto::DataTransferEventTrigger trigger,
+    const enterprise_connectors::ContentAnalysisResponse::Result& dlp_result,
+    size_t content_size,
+    chrome::cros::reporting::proto::EventResult event_result,
+    const std::string& username,
+    const std::string& profile_identifier,
+    const std::string& scan_id,
+    bool include_referrer = true) {
+  chrome::cros::reporting::proto::DlpSensitiveDataEvent event;
+
+  event.set_url(url);
+  event.set_tab_url(tab_url);
+  event.set_source(source);
+  event.set_destination(destination);
+  event.set_download_digest_sha_256(sha256);
+  event.set_content_type("application/octet-stream");
+  event.set_content_size(content_size);
+  event.set_trigger(trigger);
+  event.set_clicked_through(false);
+  event.set_scan_id(scan_id);
+  event.set_event_result(event_result);
+
+  if (include_referrer) {
+    auto* referrers = event.add_referrers();
+    referrers->set_ip("example.com");
+    referrers->set_url("https://example.com/download.exe");
+  }
+
+  for (const auto& rule : dlp_result.triggered_rules()) {
+    auto* triggered_rule = event.add_triggered_rule_info();
+    int rule_id = 0;
+    if (base::StringToInt(rule.rule_id(), &rule_id)) {
+      triggered_rule->set_rule_id(rule_id);
+    }
+    triggered_rule->set_rule_name(rule.rule_name());
+
+    switch (rule.action()) {
+      case enterprise_connectors::TriggeredRule::REPORT_ONLY:
+        triggered_rule->set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::REPORT_ONLY);
+        break;
+      case enterprise_connectors::TriggeredRule::WARN:
+        triggered_rule->set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::WARN);
+        break;
+      case enterprise_connectors::TriggeredRule::BLOCK:
+        triggered_rule->set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::BLOCK);
+        break;
+      case enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD:
+        triggered_rule->set_action(chrome::cros::reporting::proto::
+                                       TriggeredRuleInfo::FORCE_SAVE_TO_CLOUD);
+        break;
+      case enterprise_connectors::TriggeredRule::JUSTIFICATION_REQUIRED:
+        triggered_rule->set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::
+                JUSTIFICATION_REQUIRED);
+        break;
+      case enterprise_connectors::TriggeredRule::KEEP_IN_MANAGED_CHROME:
+        triggered_rule->set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::
+                KEEP_IN_MANAGED_CHROME);
+        break;
+      case enterprise_connectors::TriggeredRule::ACTION_UNSPECIFIED:
+        triggered_rule->set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::ACTION_UNKNOWN);
+        break;
+    }
+  }
+
+  event.set_file_name(GetFileName(file_name));
+  event.set_profile_identifier(profile_identifier);
+  event.set_profile_user_name(username);
+
+  return event;
+}
+
+std::vector<ForceSaveToCloudPrioritizationTestParams>
+GetForceSaveToCloudPrioritizationTestCases() {
+  namespace dp_features = enterprise_data_protection;
+  const auto response_gdrive =
+      CreateResponse({enterprise_connectors::TriggeredRule::CORP_G_DRIVE});
+  const auto response_onedrive =
+      CreateResponse({enterprise_connectors::TriggeredRule::CORP_ONEDRIVE});
+  const auto response_both =
+      CreateResponse({enterprise_connectors::TriggeredRule::CORP_G_DRIVE,
+                      enterprise_connectors::TriggeredRule::CORP_ONEDRIVE});
+
+  return {
+      // Cloud feature enabled
+      {{dp_features::kEnableForceDownloadToCloud},
+       {},
+       response_gdrive,
+       DownloadCheckResult::FORCE_SAVE_TO_GDRIVE,
+       "CloudEnabledGDriveResponse"},
+      {{dp_features::kEnableForceDownloadToCloud},
+       {},
+       response_onedrive,
+       DownloadCheckResult::FORCE_SAVE_TO_ONEDRIVE,
+       "CloudEnabledOneDriveResponse"},
+      {{dp_features::kEnableForceDownloadToCloud},
+       {},
+       response_both,
+       DownloadCheckResult::FORCE_SAVE_TO_GDRIVE,
+       "CloudEnabledBothResponse"},
+
+      // Cloud feature disabled (OneDrive falls back as conditionally allowed)
+      {{},
+       {dp_features::kEnableForceDownloadToCloud},
+       response_gdrive,
+       DownloadCheckResult::SENSITIVE_CONTENT_BLOCK,
+       "CloudDisabledGDriveResponse"},
+      {{},
+       {dp_features::kEnableForceDownloadToCloud},
+       response_onedrive,
+       DownloadCheckResult::FORCE_SAVE_TO_ONEDRIVE,
+       "CloudDisabledOneDriveResponse"},
+      {{},
+       {dp_features::kEnableForceDownloadToCloud},
+       response_both,
+       DownloadCheckResult::FORCE_SAVE_TO_ONEDRIVE,
+       "CloudDisabledBothResponse"},
+  };
+}
+#endif  // BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
 
 }  // namespace
 
-class FakeBinaryUploadService : public BinaryUploadService {
+// Enum to select item type used for deep scanning metadata.
+enum class MetadataSourceType { kDownloadItem, kFileSystemAccessWriteItem };
+
+class FakeBinaryUploadService
+    : public enterprise_connectors::BinaryUploadService {
  public:
-  void MaybeUploadForDeepScanning(std::unique_ptr<Request> request) override {
+  void MaybeUploadForDeepScanning(
+      std::unique_ptr<enterprise_connectors::BinaryUploadRequest> request)
+      override {
     last_request_ = request->content_analysis_request();
     const std::string& filename = request->filename();
     request->FinishRequest(saved_results_[filename],
@@ -139,16 +489,33 @@ class FakeBinaryUploadService : public BinaryUploadService {
     }
   }
 
-  void MaybeAcknowledge(std::unique_ptr<Ack> ack) override {
+  void MaybeAcknowledge(
+      std::unique_ptr<enterprise_connectors::BinaryUploadAck> ack) override {
     EXPECT_EQ(final_action_, ack->ack().final_action());
     ++num_acks_;
-    ASSERT_TRUE(base::Contains(requests_tokens_, ack->ack().request_token()));
+    ASSERT_TRUE(
+        std::ranges::contains(requests_tokens_, ack->ack().request_token()));
   }
 
-  void MaybeCancelRequests(std::unique_ptr<CancelRequests> cancel) override {}
+  void MaybeCancelRequests(
+      std::unique_ptr<enterprise_connectors::BinaryUploadCancelRequests> cancel)
+      override {
+    was_cancelled_ = true;
+    last_cancel_user_action_id_ = cancel->get_user_action_id();
+  }
+
+  bool was_cancelled() const { return was_cancelled_; }
+  std::string last_cancel_user_action_id() const {
+    return last_cancel_user_action_id_;
+  }
+
+  base::WeakPtr<enterprise_connectors::BinaryUploadService> AsWeakPtr()
+      override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
   void SetResponse(const base::FilePath& path,
-                   BinaryUploadService::Result result,
+                   enterprise_connectors::ScanRequestUploadResult result,
                    enterprise_connectors::ContentAnalysisResponse response) {
     saved_results_[path.AsUTF8Unsafe()] = result;
     saved_responses_[path.AsUTF8Unsafe()] = response;
@@ -181,8 +548,8 @@ class FakeBinaryUploadService : public BinaryUploadService {
   }
 
  private:
-  base::flat_map<std::string, BinaryUploadService::Result> saved_results_;
-
+  base::flat_map<std::string, enterprise_connectors::ScanRequestUploadResult>
+      saved_results_;
   base::flat_map<std::string, enterprise_connectors::ContentAnalysisResponse>
       saved_responses_;
   enterprise_connectors::ContentAnalysisRequest last_request_;
@@ -194,6 +561,9 @@ class FakeBinaryUploadService : public BinaryUploadService {
   base::RepeatingClosure quit_on_last_request_;
   size_t num_finished_requests_ = 0;
   size_t num_acks_ = 0;
+  bool was_cancelled_ = false;
+  std::string last_cancel_user_action_id_;
+  base::WeakPtrFactory<FakeBinaryUploadService> weak_ptr_factory_{this};
 };
 
 class FakeDownloadProtectionService : public DownloadProtectionService {
@@ -202,9 +572,13 @@ class FakeDownloadProtectionService : public DownloadProtectionService {
 
   void RequestFinished(DeepScanningRequest* request) override {}
 
-  BinaryUploadService* GetBinaryUploadService(
+  enterprise_connectors::BinaryUploadService* GetBinaryUploadService(
       Profile* profile,
       const enterprise_connectors::AnalysisSettings&) override {
+    CHECK(profile);
+    if (binary_upload_service_override_) {
+      return binary_upload_service_override_;
+    }
     return &binary_upload_service_;
   }
 
@@ -212,12 +586,25 @@ class FakeDownloadProtectionService : public DownloadProtectionService {
     return &binary_upload_service_;
   }
 
+  void set_binary_upload_service(
+      enterprise_connectors::BinaryUploadService* service) {
+    binary_upload_service_override_ = service;
+  }
+
  private:
   FakeBinaryUploadService binary_upload_service_;
+  raw_ptr<enterprise_connectors::BinaryUploadService>
+      binary_upload_service_override_ = nullptr;
 };
 
 class DeepScanningRequestTest : public testing::Test {
  public:
+  DeepScanningRequestTest() {
+    SetFeatures(
+        /*enabled=*/{safe_browsing::kEnhancedFieldsForSecOps},
+        /*disabled=*/{});
+  }
+
   void SetUp() override {
     profile_manager_ = std::make_unique<TestingProfileManager>(
         TestingBrowserProcess::GetGlobal());
@@ -233,7 +620,7 @@ class DeepScanningRequestTest : public testing::Test {
           temp_dir_.GetPath().AppendASCII(base::StrCat({file_name, ".tmp"}));
       base::File file(current_path,
                       base::File::FLAG_CREATE | base::File::FLAG_WRITE);
-      file.WriteAtCurrentPos(file_name, 7);
+      file.WriteAtCurrentPos(base::as_byte_span(std::string_view(file_name)));
       secondary_files_.push_back(current_path);
       secondary_files_targets_.push_back(final_path);
     }
@@ -246,8 +633,7 @@ class DeepScanningRequestTest : public testing::Test {
 
     base::File download(download_path_,
                         base::File::FLAG_CREATE | base::File::FLAG_WRITE);
-    download.WriteAtCurrentPos(download_contents.c_str(),
-                               download_contents.size());
+    download.WriteAtCurrentPos(base::as_byte_span(download_contents));
     download.Close();
 
     EXPECT_CALL(item_, GetFullPath()).WillRepeatedly(ReturnRef(download_path_));
@@ -268,22 +654,33 @@ class DeepScanningRequestTest : public testing::Test {
         .WillRepeatedly(Return(download::DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS));
     EXPECT_CALL(item_, GetReceivedBytes()).WillRepeatedly(Return(0));
     EXPECT_CALL(item_, HasUserGesture()).WillRepeatedly(Return(false));
+    EXPECT_CALL(item_, RequireSafetyChecks()).WillRepeatedly(Return(true));
     content::DownloadItemUtils::AttachInfoForTesting(&item_, profile_, nullptr);
 
-    SetDMTokenForTesting(
-        policy::DMToken::CreateValidTokenForTesting("dm_token"));
+    SetDMTokenForTesting(policy::DMToken::CreateValidToken("dm_token"));
 
     DownloadCoreServiceFactory::GetForBrowserContext(profile_)
         ->SetDownloadManagerDelegateForTesting(
             std::make_unique<ChromeDownloadManagerDelegate>(profile_));
+
+    // Default source type for `DownloadItem` only tests.
+    metadata_source_type_ = MetadataSourceType::kDownloadItem;
+
+    // Create test web contents for setting FSA tab url.
+    web_contents_ =
+        content::WebContentsTester::CreateTestWebContents(profile_, nullptr);
+    content::WebContentsTester::For(web_contents_.get())
+        ->SetLastCommittedURL(tab_url_);
   }
 
   void TearDown() override {
-    SetDMTokenForTesting(policy::DMToken::CreateEmptyTokenForTesting());
+    SetDMTokenForTesting(policy::DMToken::CreateEmptyToken());
+    web_contents_.reset();
   }
 
   void AddUrlToProfilePrefList(const char* pref_name, const GURL& url) {
-    ScopedListPrefUpdate(profile_->GetPrefs(), pref_name)->Append(url.host());
+    ScopedListPrefUpdate(profile_->GetPrefs(), pref_name)
+        ->Append(url.GetHost());
   }
 
   void SetFeatures(const std::vector<base::test::FeatureRef>& enabled,
@@ -293,7 +690,7 @@ class DeepScanningRequestTest : public testing::Test {
   }
 
   void ValidateDefaultSettings(
-      const absl::optional<enterprise_connectors::AnalysisSettings>& settings) {
+      const std::optional<enterprise_connectors::AnalysisSettings>& settings) {
     ASSERT_TRUE(settings.has_value());
 
     enterprise_connectors::AnalysisSettings default_settings;
@@ -319,8 +716,6 @@ class DeepScanningRequestTest : public testing::Test {
               default_settings.block_large_files);
     ASSERT_EQ(settings.value().block_password_protected_files,
               default_settings.block_password_protected_files);
-    ASSERT_EQ(settings.value().block_unsupported_file_types,
-              default_settings.block_unsupported_file_types);
     ASSERT_EQ(settings.value().block_until_verdict,
               default_settings.block_until_verdict);
     ASSERT_EQ(settings.value().cloud_or_local_settings.analysis_url(),
@@ -329,8 +724,37 @@ class DeepScanningRequestTest : public testing::Test {
 
   void SetLastResult(DownloadCheckResult result) { last_result_ = result; }
 
-  absl::optional<enterprise_connectors::AnalysisSettings> settings() {
-    return DeepScanningRequest::ShouldUploadBinary(&item_);
+  std::optional<enterprise_connectors::AnalysisSettings> settings() {
+    std::unique_ptr<DeepScanningMetadata> metadata = CreateMetadata();
+    return DeepScanningRequest::ShouldUploadBinary(*metadata);
+  }
+
+  std::unique_ptr<DeepScanningMetadata> CreateMetadata() {
+    switch (metadata_source_type_) {
+      case MetadataSourceType::kDownloadItem:
+        return std::make_unique<DownloadItemMetadata>(&item_);
+      case MetadataSourceType::kFileSystemAccessWriteItem:
+        auto write_item =
+            std::make_unique<content::FileSystemAccessWriteItem>();
+        write_item->target_file_path = download_path_;
+        write_item->full_path = download_path_;
+        write_item->frame_url = download_url_;
+        write_item->browser_context = profile_;
+        if (web_contents_) {
+          write_item->web_contents = web_contents_->GetWeakPtr();
+        }
+        write_item->size = item_.GetTotalBytes();
+        write_item->sha256_hash = download_hash_;
+        write_item->has_user_gesture = false;
+
+        return std::make_unique<FileSystemAccessMetadata>(
+            std::move(write_item));
+    }
+    return nullptr;
+  }
+
+  void SetMetadataSourceType(MetadataSourceType type) {
+    metadata_source_type_ = type;
   }
 
   TestingProfile* profile() { return profile_; }
@@ -354,15 +778,29 @@ class DeepScanningRequestTest : public testing::Test {
   std::string download_hash_;
 
   DownloadCheckResult last_result_;
+
+  MetadataSourceType metadata_source_type_;
+  std::unique_ptr<content::WebContents> web_contents_;
+  content::RenderViewHostTestEnabler enabler_;
 };
 
-class DeepScanningRequestFeaturesEnabledTest : public DeepScanningRequestTest {
+class DeepScanningRequestSourceTypeTest
+    : public DeepScanningRequestTest,
+      public testing::WithParamInterface<MetadataSourceType> {
+ public:
+  void SetUp() override {
+    DeepScanningRequestTest::SetUp();
+    SetMetadataSourceType(GetParam());
+  }
 };
 
-TEST_F(DeepScanningRequestFeaturesEnabledTest, ChecksFeatureFlags) {
-  SetAnalysisConnector(profile_->GetPrefs(),
-                       enterprise_connectors::FILE_DOWNLOADED,
-                       kScanForDlpAndMalware);
+class DeepScanningRequestFeaturesEnabledTest
+    : public DeepScanningRequestSourceTypeTest {};
+
+TEST_P(DeepScanningRequestFeaturesEnabledTest, ChecksFeatureFlags) {
+  enterprise_connectors::test::SetAnalysisConnector(
+      profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+      kScanForDlpAndMalware);
 
   // Try each request with settings indicating both DLP and Malware requests
   // should be sent to show features work correctly.
@@ -389,12 +827,16 @@ TEST_F(DeepScanningRequestFeaturesEnabledTest, ChecksFeatureFlags) {
               download_protection_service_.GetFakeBinaryUploadService()
                   ->last_request()
                   .tags(1));
+    EXPECT_TRUE(download_protection_service_.GetFakeBinaryUploadService()
+                    ->last_request()
+                    .blocking());
   };
 
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](base::RepeatingClosure closure, DownloadCheckResult result) {
@@ -403,25 +845,71 @@ TEST_F(DeepScanningRequestFeaturesEnabledTest, ChecksFeatureFlags) {
               }
             },
             run_loop.QuitClosure()),
-        &download_protection_service_, dlp_and_malware_settings());
+        &download_protection_service_, dlp_and_malware_settings(),
+        /*password=*/std::nullopt);
+
     request.Start();
     run_loop.Run();
     expect_dlp_and_malware_tags();
   }
 }
 
-class DeepScanningRequestAllFeaturesEnabledTest
-    : public DeepScanningRequestTest {};
+TEST_P(DeepScanningRequestFeaturesEnabledTest, VerifyBlockingSet) {
+  enterprise_connectors::test::SetAnalysisConnector(
+      profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+      kScanForDlpAndMalware);
 
-TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
+  auto no_block_settings = []() {
+    enterprise_connectors::AnalysisSettings settings;
+    settings.block_until_verdict =
+        enterprise_connectors::BlockUntilVerdict::kNoBlock;
+    return settings;
+  };
+
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](base::RepeatingClosure closure, DownloadCheckResult result) {
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              closure.Run();
+            }
+          },
+          run_loop.QuitClosure()),
+      &download_protection_service_, no_block_settings(),
+      /*password=*/std::nullopt);
+
+  request.Start();
+  run_loop.Run();
+  EXPECT_FALSE(download_protection_service_.GetFakeBinaryUploadService()
+                   ->last_request()
+                   .blocking());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    FeaturesEnabled,
+    DeepScanningRequestFeaturesEnabledTest,
+    testing::Values(MetadataSourceType::kDownloadItem,
+                    MetadataSourceType::kFileSystemAccessWriteItem));
+
+class DeepScanningRequestAllFeaturesEnabledTest
+    : public DeepScanningRequestSourceTypeTest {};
+
+TEST_P(DeepScanningRequestAllFeaturesEnabledTest,
        GeneratesCorrectRequestFromPolicy) {
   {
-    SetAnalysisConnector(profile_->GetPrefs(),
-                         enterprise_connectors::FILE_DOWNLOADED,
-                         kScanForDlpAndMalware);
+    enterprise_connectors::test::SetAnalysisConnector(
+        profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+        kScanForDlpAndMalware);
+    // Override mime type to platform-independent value for testing.
+    net::ScopedOverrideGetMimeTypeForTesting override_mime_type(
+        "application/octet-stream");
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](base::RepeatingClosure closure, DownloadCheckResult result) {
@@ -430,7 +918,9 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
               }
             },
             run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
+
     request.Start();
     run_loop.Run();
     EXPECT_EQ(2, download_protection_service_.GetFakeBinaryUploadService()
@@ -458,15 +948,20 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
                   .request_data()
                   .content_type(),
               "application/octet-stream");
+    EXPECT_EQ(download_protection_service_.GetFakeBinaryUploadService()
+                  ->last_request()
+                  .reason(),
+              enterprise_connectors::ContentAnalysisRequest::NORMAL_DOWNLOAD);
   }
 
   {
     base::RunLoop run_loop;
-    SetAnalysisConnector(profile_->GetPrefs(),
-                         enterprise_connectors::FILE_DOWNLOADED,
-                         kScanForMalware);
+    enterprise_connectors::test::SetAnalysisConnector(
+        profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+        kScanForMalware);
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](base::RepeatingClosure closure, DownloadCheckResult result) {
@@ -475,7 +970,9 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
               }
             },
             run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
+
     request.Start();
     run_loop.Run();
     EXPECT_EQ(1, download_protection_service_.GetFakeBinaryUploadService()
@@ -485,14 +982,20 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
               download_protection_service_.GetFakeBinaryUploadService()
                   ->last_request()
                   .tags(0));
+    EXPECT_EQ(download_protection_service_.GetFakeBinaryUploadService()
+                  ->last_request()
+                  .reason(),
+              enterprise_connectors::ContentAnalysisRequest::NORMAL_DOWNLOAD);
   }
 
   {
     base::RunLoop run_loop;
-    SetAnalysisConnector(profile_->GetPrefs(),
-                         enterprise_connectors::FILE_DOWNLOADED, kScanForDlp);
+    enterprise_connectors::test::SetAnalysisConnector(
+        profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+        kScanForDlp);
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](base::RepeatingClosure closure, DownloadCheckResult result) {
@@ -501,7 +1004,9 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
               }
             },
             run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
+
     request.Start();
     run_loop.Run();
     EXPECT_EQ(1, download_protection_service_.GetFakeBinaryUploadService()
@@ -510,18 +1015,23 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
     EXPECT_EQ("dlp", download_protection_service_.GetFakeBinaryUploadService()
                          ->last_request()
                          .tags(0));
+    EXPECT_EQ(download_protection_service_.GetFakeBinaryUploadService()
+                  ->last_request()
+                  .reason(),
+              enterprise_connectors::ContentAnalysisRequest::NORMAL_DOWNLOAD);
   }
 
   {
     base::RunLoop run_loop;
-    SetAnalysisConnector(profile_->GetPrefs(),
-                         enterprise_connectors::FILE_DOWNLOADED, kNoScan);
+    enterprise_connectors::test::SetAnalysisConnector(
+        profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED, kNoScan);
     EXPECT_FALSE(settings().has_value());
     enterprise_connectors::AnalysisSettings analysis_settings;
     analysis_settings.block_until_verdict =
         enterprise_connectors::BlockUntilVerdict::kBlock;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](base::RepeatingClosure closure, DownloadCheckResult result) {
@@ -530,26 +1040,168 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest,
               }
             },
             run_loop.QuitClosure()),
-        &download_protection_service_, std::move(analysis_settings));
+        &download_protection_service_, std::move(analysis_settings),
+        /*password=*/std::nullopt);
+
     request.Start();
     run_loop.Run();
     EXPECT_TRUE(download_protection_service_.GetFakeBinaryUploadService()
                     ->last_request()
                     .tags()
                     .empty());
+    EXPECT_EQ(download_protection_service_.GetFakeBinaryUploadService()
+                  ->last_request()
+                  .reason(),
+              enterprise_connectors::ContentAnalysisRequest::NORMAL_DOWNLOAD);
   }
 }
 
 class DeepScanningAPPRequestTest : public DeepScanningRequestTest {};
 
-TEST_F(DeepScanningAPPRequestTest, GeneratesCorrectRequestForAPP) {
+class TestCancellationFakeBinaryUploadService : public FakeBinaryUploadService {
+ public:
+  void set_synchronous_cancel(bool sync) { synchronous_cancel_ = sync; }
+  void SetQuitOnUploadCallback(base::OnceClosure closure) {
+    quit_on_upload_ = std::move(closure);
+  }
+
+  void MaybeUploadForDeepScanning(
+      std::unique_ptr<enterprise_connectors::BinaryUploadRequest> request)
+      override {
+    pending_request_ = std::move(request);
+    if (quit_on_upload_) {
+      std::move(quit_on_upload_).Run();
+    }
+  }
+
+  void MaybeCancelRequests(
+      std::unique_ptr<enterprise_connectors::BinaryUploadCancelRequests> cancel)
+      override {
+    FakeBinaryUploadService::MaybeCancelRequests(std::move(cancel));
+    if (pending_request_ && synchronous_cancel_) {
+      pending_request_->FinishRequest(
+          enterprise_connectors::ScanRequestUploadResult::kUserCancelled,
+          enterprise_connectors::ContentAnalysisResponse());
+      pending_request_.reset();
+    }
+  }
+
+ private:
+  std::unique_ptr<enterprise_connectors::BinaryUploadRequest> pending_request_;
+  bool synchronous_cancel_ = false;
+  base::OnceClosure quit_on_upload_;
+};
+
+class TouchObserver : public DeepScanningRequest::Observer {
+ public:
+  void OnFinish(DeepScanningRequest* request) override { ++on_finish_called_; }
+
+  int on_finish_called() const { return on_finish_called_; }
+
+ private:
+  int on_finish_called_ = 0;
+};
+
+TEST_F(DeepScanningAPPRequestTest, FinishRequestCalledOnceWithCancellation) {
+  for (bool synchronous_cancel : {true, false}) {
+    TestCancellationFakeBinaryUploadService cancel_upload_service;
+    cancel_upload_service.set_synchronous_cancel(synchronous_cancel);
+    download_protection_service_.set_binary_upload_service(
+        &cancel_upload_service);
+
+    enterprise_connectors::AnalysisSettings settings;
+    settings.tags = {{"malware", enterprise_connectors::TagSettings()}};
+
+    std::unique_ptr<DeepScanningRequest> request =
+        std::make_unique<DeepScanningRequest>(
+            CreateMetadata(),
+            DownloadItemWarningData::DeepScanTrigger::TRIGGER_CONSUMER_PROMPT,
+            DownloadCheckResult::SAFE, base::DoNothing(),
+            &download_protection_service_, std::move(settings),
+            /*password=*/std::nullopt);
+
+    TouchObserver touch_observer;
+    request->AddObserver(&touch_observer);
+
+    request->Start();
+    request->OnDownloadDestroyed(&item_);
+
+    // Regardless of whether the cancellation executes synchronously or
+    // asynchronously, the WeakPtr guard inside OnDownloadDestroyed ensures
+    // FinishRequest (and thus OnFinish) is called exactly once to clear state.
+    EXPECT_EQ(touch_observer.on_finish_called(), 1);
+
+    download_protection_service_.set_binary_upload_service(nullptr);
+  }
+}
+
+TEST_F(DeepScanningAPPRequestTest,
+       DownloadDestroyedNullBrowserContextCrashTest) {
+  // Overwrite the item's browser context with nullptr to simulate a normal
+  // download destruction where the browser context is lost.
+  content::DownloadItemUtils::AttachInfoForTesting(&item_, nullptr, nullptr);
+
   enterprise_connectors::AnalysisSettings settings;
   settings.tags = {{"malware", enterprise_connectors::TagSettings()}};
+
+  std::unique_ptr<DeepScanningRequest> request =
+      std::make_unique<DeepScanningRequest>(
+          CreateMetadata(),
+          DownloadItemWarningData::DeepScanTrigger::TRIGGER_CONSUMER_PROMPT,
+          DownloadCheckResult::SAFE, base::DoNothing(),
+          &download_protection_service_, std::move(settings),
+          /*password=*/std::nullopt);
+
+  // OnDownloadDestroyed should successfully complete and call FinishRequest /
+  // AcknowledgeRequest without any null-dereference crashes because of the new
+  // null guards.
+  request->OnDownloadDestroyed(&item_);
+}
+
+TEST_F(DeepScanningAPPRequestTest, CancelsUploadOnDownloadDestroyed) {
+  enterprise_connectors::AnalysisSettings settings;
+  settings.tags = {{"malware", enterprise_connectors::TagSettings()}};
+
+  std::unique_ptr<DeepScanningRequest> request =
+      std::make_unique<DeepScanningRequest>(
+          CreateMetadata(),
+          DownloadItemWarningData::DeepScanTrigger::TRIGGER_CONSUMER_PROMPT,
+          DownloadCheckResult::SAFE, base::DoNothing(),
+          &download_protection_service_, std::move(settings),
+          /*password=*/std::nullopt);
+
+  std::string user_action_id = request->user_action_id();
+  request->Start();
+
+  request->OnDownloadDestroyed(&item_);
+
+  EXPECT_TRUE(download_protection_service_.GetFakeBinaryUploadService()
+                  ->was_cancelled());
+  EXPECT_EQ(user_action_id,
+            download_protection_service_.GetFakeBinaryUploadService()
+                ->last_cancel_user_action_id());
+}
+
+TEST_F(DeepScanningAPPRequestTest, GeneratesCorrectRequestForConsumer) {
+  enterprise_connectors::AnalysisSettings settings;
+  settings.tags = {{"malware", enterprise_connectors::TagSettings()}};
+  base::RunLoop run_loop;
   DeepScanningRequest request(
-      &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_APP_PROMPT,
-      DownloadCheckResult::SAFE, base::DoNothing(),
-      &download_protection_service_, std::move(settings));
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_CONSUMER_PROMPT,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](base::RepeatingClosure closure, DownloadCheckResult result) {
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              closure.Run();
+            }
+          },
+          run_loop.QuitClosure()),
+      &download_protection_service_, std::move(settings),
+      /*password=*/std::nullopt);
+
   request.Start();
+  run_loop.Run();
 
   EXPECT_EQ(1, download_protection_service_.GetFakeBinaryUploadService()
                    ->last_request()
@@ -571,33 +1223,34 @@ class DeepScanningReportingTest : public DeepScanningRequestTest {
 
     client_ = std::make_unique<policy::MockCloudPolicyClient>();
 
-    extensions::SafeBrowsingPrivateEventRouterFactory::GetInstance()
-        ->SetTestingFactory(
-            profile_,
-            base::BindRepeating(&BuildSafeBrowsingPrivateEventRouter));
     enterprise_connectors::RealtimeReportingClientFactory::GetInstance()
-        ->SetTestingFactory(profile_,
-                            base::BindRepeating(&BuildRealtimeReportingClient));
+        ->SetTestingFactory(
+            profile_, base::BindRepeating([](content::BrowserContext* context) {
+              return std::unique_ptr<KeyedService>(
+                  new enterprise_connectors::RealtimeReportingClient(context));
+            }));
 
     enterprise_connectors::RealtimeReportingClientFactory::GetForProfile(
         profile_)
         ->SetBrowserCloudPolicyClientForTesting(client_.get());
     identity_test_environment_.MakePrimaryAccountAvailable(
-        kUserName, signin::ConsentLevel::kSync);
-    extensions::SafeBrowsingPrivateEventRouterFactory::GetForProfile(profile_)
+        kUserName, signin::ConsentLevel::kSignin);
+    enterprise_connectors::RealtimeReportingClientFactory::GetForProfile(
+        profile_)
         ->SetIdentityManagerForTesting(
             identity_test_environment_.identity_manager());
 
-    SetOnSecurityEventReporting(profile_->GetPrefs(), true);
+    enterprise_connectors::test::SetOnSecurityEventReporting(
+        profile_->GetPrefs(), true);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-    fake_statistics_provider_.SetMachineStatistic(
-        ash::system::kSerialNumberKeyForTest, "fake_serial_number");
+#if BUILDFLAG(IS_CHROMEOS)
+    fake_statistics_provider_.SetMachineStatistic(ash::system::kSerialNumberKey,
+                                                  "fake_serial_number");
 #endif
 
-    SetAnalysisConnector(profile_->GetPrefs(),
-                         enterprise_connectors::FILE_DOWNLOADED,
-                         kScanForDlpAndMalware);
+    enterprise_connectors::test::SetAnalysisConnector(
+        profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+        kScanForDlpAndMalware);
   }
 
   void TearDown() override {
@@ -608,18 +1261,34 @@ class DeepScanningReportingTest : public DeepScanningRequestTest {
   }
 
  protected:
-  std::unique_ptr<policy::MockCloudPolicyClient> client_;
-  signin::IdentityTestEnvironment identity_test_environment_;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   ash::system::ScopedFakeStatisticsProvider fake_statistics_provider_;
 #endif
+  std::unique_ptr<policy::MockCloudPolicyClient> client_;
+  signin::IdentityTestEnvironment identity_test_environment_;
 };
 
-TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
+class DeepScanningReportingSourceTypeTest
+    : public DeepScanningReportingTest,
+      public testing::WithParamInterface<MetadataSourceType> {
+ public:
+  void SetUp() override {
+    DeepScanningReportingTest::SetUp();
+    SetMetadataSourceType(GetParam());
+  }
+
+  MetadataSourceType GetMetadataSourceType() { return GetParam(); }
+};
+
+// TODO(crbug.com/433865922): Disable this test because of flakiness.
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+TEST_P(DeepScanningReportingSourceTypeTest,
+       DISABLED_ProcessesResponseCorrectly) {
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -631,7 +1300,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     enterprise_connectors::ContentAnalysisResponse response;
     response.set_request_token(kScanId);
@@ -654,34 +1324,66 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
     dlp_rule->set_rule_id("0");
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::WARN);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectDangerousDeepScanningResultAndSensitiveDataEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]'
-        // '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_dangerous_event = CreateDangerousDownloadEvent(
+        /*url=*/"https://example.com/download.exe",
+        /*tab_url=*/"https://example.com/",
+        /*source=*/"",
+        /*destination=*/"",
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*threat_type*/ "DANGEROUS",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*dlp_verdict*/ *dlp_result,
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/ EventResultToString(EventResult::WARNED),
-        /*username*/ kUserName,
-        /*scan_id*/ kScanId);
+        /*threat_type=*/
+        chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent::
+            DANGEROUS,
+        /*trigger=*/
+        chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+        /*content_size=*/std::string("download contents").size(),
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED,
+        /*username=*/kUserName,
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*scan_id=*/kScanId,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    auto expected_dlp_event = CreateDlpSensitiveDataEvent(
+        /*url=*/"https://example.com/download.exe",
+        /*tab_url=*/"https://example.com/",
+        /*source=*/"",
+        /*destination=*/"",
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
+        "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+        /*trigger=*/
+        chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+        /*dlp_result=*/*dlp_result,
+        /*content_size=*/std::string("download contents").size(),
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED,
+        /*username=*/kUserName,
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*scan_id=*/kScanId,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectDangerousDeepScanningResultAndSensitiveDataEvent(
+        std::move(expected_dangerous_event), std::move(expected_dlp_event),
+        ExeMimeTypes());
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::DANGEROUS, last_result_);
   }
@@ -689,7 +1391,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -701,7 +1404,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     enterprise_connectors::ContentAnalysisResponse response;
     response.set_request_token(kScanId);
@@ -724,34 +1428,66 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
     dlp_rule->set_rule_id("0");
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::WARN);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectDangerousDeepScanningResultAndSensitiveDataEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]'
-        // '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_dangerous_event = CreateDangerousDownloadEvent(
+        /*url=*/"https://example.com/download.exe",
+        /*tab_url=*/"https://example.com/",
+        /*source=*/"",
+        /*destination=*/"",
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*threat_type*/ "POTENTIALLY_UNWANTED",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*dlp_verdict*/ *dlp_result,
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/ EventResultToString(EventResult::WARNED),
-        /*username*/ kUserName,
-        /*scan_id*/ kScanId);
+        /*threat_type=*/
+        chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent::
+            POTENTIALLY_UNWANTED,
+        /*trigger=*/
+        chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+        /*content_size=*/std::string("download contents").size(),
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED,
+        /*username=*/kUserName,
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*scan_id=*/kScanId,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    auto expected_dlp_event = CreateDlpSensitiveDataEvent(
+        /*url=*/"https://example.com/download.exe",
+        /*tab_url=*/"https://example.com/",
+        /*source=*/"",
+        /*destination=*/"",
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
+        "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+        /*trigger=*/
+        chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+        /*dlp_result=*/*dlp_result,
+        /*content_size=*/std::string("download contents").size(),
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED,
+        /*username=*/kUserName,
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*scan_id=*/kScanId,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectDangerousDeepScanningResultAndSensitiveDataEvent(
+        std::move(expected_dangerous_event), std::move(expected_dlp_event),
+        ExeMimeTypes());
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::POTENTIALLY_UNWANTED, last_result_);
   }
@@ -759,7 +1495,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -771,7 +1508,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     enterprise_connectors::ContentAnalysisResponse response;
     response.set_request_token(kScanId);
@@ -786,32 +1524,42 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
     dlp_rule->set_rule_id("0");
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectSensitiveDataEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_dlp_event = CreateDlpSensitiveDataEvent(
+        /*url=*/"https://example.com/download.exe",
+        /*tab_url=*/"https://example.com/",
+        /*source=*/"",
+        /*destination=*/"",
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*dlp_verdict*/ *dlp_result,
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        EventResultToString(EventResult::BLOCKED),
-        /*username*/ kUserName,
-        /*scan_id*/ kScanId);
+        /*trigger=*/
+        chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+        /*dlp_result=*/*dlp_result,
+        /*content_size=*/std::string("download contents").size(),
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_BLOCKED,
+        /*username=*/kUserName,
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*scan_id=*/kScanId,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectSensitiveDataEvent(std::move(expected_dlp_event));
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::SENSITIVE_CONTENT_BLOCK, last_result_);
   }
@@ -819,7 +1567,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -831,7 +1580,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     enterprise_connectors::ContentAnalysisResponse response;
     response.set_request_token(kScanId);
@@ -846,32 +1596,42 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
     dlp_rule->set_rule_id("0");
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::WARN);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectSensitiveDataEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_dlp_event = CreateDlpSensitiveDataEvent(
+        /*url=*/"https://example.com/download.exe",
+        /*tab_url=*/"https://example.com/",
+        /*source=*/"",
+        /*destination=*/"",
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*dlp_verdict*/ *dlp_result,
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        EventResultToString(EventResult::WARNED),
-        /*username*/ kUserName,
-        /*scan_id*/ kScanId);
+        /*trigger=*/
+        chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+        /*dlp_result=*/*dlp_result,
+        /*content_size=*/std::string("download contents").size(),
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED,
+        /*username=*/kUserName,
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*scan_id=*/kScanId,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectSensitiveDataEvent(std::move(expected_dlp_event));
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::SENSITIVE_CONTENT_WARNING, last_result_);
   }
@@ -879,7 +1639,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -891,7 +1652,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     enterprise_connectors::ContentAnalysisResponse response;
     response.set_request_token(kScanId);
@@ -910,31 +1672,42 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
     dlp_rule2->set_rule_id("0");
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectSensitiveDataEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_dlp_event = CreateDlpSensitiveDataEvent(
+        /*url=*/"https://example.com/download.exe",
+        /*tab_url=*/"https://example.com/",
+        /*source=*/"",
+        /*destination=*/"",
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*dlp_verdict*/ *dlp_result,
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        EventResultToString(EventResult::BLOCKED),
-        /*username*/ kUserName, /*scan_id*/ kScanId);
+        /*trigger=*/
+        chrome::cros::reporting::proto::DataTransferEventTrigger::FILE_DOWNLOAD,
+        /*dlp_result=*/*dlp_result,
+        /*content_size=*/std::string("download contents").size(),
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_BLOCKED,
+        /*username=*/kUserName,
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*scan_id=*/kScanId,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectSensitiveDataEvent(std::move(expected_dlp_event));
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::SENSITIVE_CONTENT_BLOCK, last_result_);
   }
@@ -942,7 +1715,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -954,42 +1728,49 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     enterprise_connectors::ContentAnalysisResponse response;
+    response.set_request_token(kScanId);
 
-    auto* malware_result = response.add_results();
-    malware_result->set_tag("dlp");
-    malware_result->set_status(
+    auto* dlp_result = response.add_results();
+    dlp_result->set_tag("dlp");
+    dlp_result->set_status(
         enterprise_connectors::ContentAnalysisResponse::Result::FAILURE);
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectUnscannedFileEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_unscanned_event = CreateUnscannedFileEvent(
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*user_name=*/kUserName,
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*reason*/ "DLP_SCAN_FAILED",
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/
-        EventResultToString(EventResult::ALLOWED),
-        /*username*/ kUserName);
+        /*content_type=*/"application/octet-stream",
+        /*content_size=*/std::string("download contents").size(),
+        /*reason=*/
+        chrome::cros::reporting::proto::UnscannedFileEvent::DLP_SCAN_FAILED,
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_ALLOWED,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectUnscannedFileEvent(std::move(expected_unscanned_event));
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
   }
@@ -997,7 +1778,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
   {
     base::RunLoop run_loop;
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::SAFE,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -1009,9 +1791,11 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     enterprise_connectors::ContentAnalysisResponse response;
+    response.set_request_token(kScanId);
 
     auto* malware_result = response.add_results();
     malware_result->set_tag("malware");
@@ -1019,32 +1803,37 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
         enterprise_connectors::ContentAnalysisResponse::Result::FAILURE);
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectUnscannedFileEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_unscanned_event = CreateUnscannedFileEvent(
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*user_name=*/kUserName,
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*reason*/ "MALWARE_SCAN_FAILED",
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/
-        EventResultToString(EventResult::ALLOWED),
-        /*username*/ kUserName);
+        /*content_type=*/"application/octet-stream",
+        /*content_size=*/std::string("download contents").size(),
+        /*reason=*/
+        chrome::cros::reporting::proto::UnscannedFileEvent::MALWARE_SCAN_FAILED,
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_ALLOWED,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectUnscannedFileEvent(std::move(expected_unscanned_event));
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
   }
@@ -1053,7 +1842,8 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
     base::RunLoop run_loop;
     // The DownloadCheckResult passed below should be used if scanning fails.
     DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
         DownloadCheckResult::DANGEROUS,
         base::BindRepeating(
             [](DeepScanningRequestTest* test,
@@ -1065,13 +1855,15 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
               }
             },
             base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
 
     EXPECT_CALL(item_, GetDangerType())
         .WillRepeatedly(Return(download::DownloadDangerType::
                                    DOWNLOAD_DANGER_TYPE_DANGEROUS_CONTENT));
 
     enterprise_connectors::ContentAnalysisResponse response;
+    response.set_request_token(kScanId);
 
     auto* malware_result = response.add_results();
     malware_result->set_tag("malware");
@@ -1079,38 +1871,495 @@ TEST_F(DeepScanningReportingTest, ProcessesResponseCorrectly) {
         enterprise_connectors::ContentAnalysisResponse::Result::FAILURE);
 
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
+        download_path_,
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
+
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
-            enterprise_connectors::ContentAnalysisAcknowledgement::WARN);
+            GetMetadataSourceType() == MetadataSourceType::kDownloadItem
+                ? enterprise_connectors::ContentAnalysisAcknowledgement::WARN
+                : enterprise_connectors::ContentAnalysisAcknowledgement::
+                      ALLOW);  // for fsa item scans, the pre-scan result is
+                               // always ALLOW
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectUnscannedFileEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_result =
+        GetMetadataSourceType() == MetadataSourceType::kDownloadItem
+            ? chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED
+            : chrome::cros::reporting::proto::EventResult::EVENT_RESULT_ALLOWED;
+
+    auto expected_unscanned_event = CreateUnscannedFileEvent(
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*user_name=*/kUserName,
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
         "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*reason*/ "MALWARE_SCAN_FAILED",
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/
-        EventResultToString(EventResult::WARNED),
-        /*username*/ kUserName);
+        /*content_type=*/"application/octet-stream",
+        /*content_size=*/std::string("download contents").size(),
+        /*reason=*/
+        chrome::cros::reporting::proto::UnscannedFileEvent::MALWARE_SCAN_FAILED,
+        /*event_result=*/expected_result,
+        /*include_referrer=*/GetMetadataSourceType() ==
+            MetadataSourceType::kDownloadItem);
+
+    validator.ExpectUnscannedFileEvent(std::move(expected_unscanned_event));
 
     request.Start();
 
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::DANGEROUS, last_result_);
   }
 }
 
-TEST_F(DeepScanningReportingTest, MultipleFiles) {
+TEST_F(DeepScanningReportingTest, ReportForceSaveToOneDrive) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(
+      enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  dlp_rule->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_ONEDRIVE);
+  dlp_rule->set_rule_name("dlp_rule");
+  dlp_rule->set_rule_id("0");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto expected_event = CreateDlpSensitiveDataEventForForceSaveToCloud(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*destination=*/"OneDrive");
+
+  validator.ExpectSensitiveDataEvent(std::move(expected_event));
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_ONEDRIVE, last_result_);
+}
+
+TEST_F(DeepScanningReportingTest, ReportForceSaveToGDrive) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(
+      enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  dlp_rule->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_G_DRIVE);
+  dlp_rule->set_rule_name("dlp_rule");
+  dlp_rule->set_rule_id("0");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto expected_event = CreateDlpSensitiveDataEventForForceSaveToCloud(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*destination=*/"Google Drive");
+  validator.ExpectSensitiveDataEvent(std::move(expected_event));
+
+  // Enable the feature to allow FORCE_SAVE_TO_GDRIVE result.
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {enterprise_data_protection::kEnableForceDownloadToCloud}, {});
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_GDRIVE, last_result_);
+}
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+class DeepScanningReportingAutomationTest : public DeepScanningReportingTest {
+ public:
+  DeepScanningReportingAutomationTest() {
+    scoped_features_.InitWithFeatures(
+        {enterprise_data_protection::kEnableForceDownloadToCloud,
+         safe_browsing::kEnhancedFieldsForSecOps},
+        {});
+  }
+
+  void SetUp() override {
+    DeepScanningReportingTest::SetUp();
+    scoped_command_line_.GetProcessCommandLine()->AppendSwitch(
+        switches::kEnableAutomation);
+    content::DownloadItemUtils::AttachInfoForTesting(&item_, profile_,
+                                                     web_contents_.get());
+  }
+
+ protected:
+  base::test::ScopedFeatureList scoped_features_;
+  base::test::ScopedCommandLine scoped_command_line_;
+};
+
+TEST_F(DeepScanningReportingAutomationTest,
+       ReportForceSaveToGDriveBypassesDialogWithAutomation) {
+  base::RunLoop run_loop;
+
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(
+      enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  dlp_rule->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_G_DRIVE);
+  dlp_rule->set_rule_name("dlp_rule");
+  dlp_rule->set_rule_id("0");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto expected_event = CreateDlpSensitiveDataEventForForceSaveToCloud(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*destination=*/"Google Drive");
+  validator.ExpectSensitiveDataEvent(std::move(expected_event));
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_GDRIVE, last_result_);
+}
+#endif  // BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+
+class ForceSaveToCloudPrioritizationTest
+    : public DeepScanningReportingTest,
+      public testing::WithParamInterface<
+          ForceSaveToCloudPrioritizationTestParams> {};
+
+TEST_P(ForceSaveToCloudPrioritizationTest, AllCases) {
+  const auto& params = GetParam();
+  SetFeatures(params.enabled_features, params.disabled_features);
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindLambdaForTesting([&](DownloadCheckResult result) {
+        SetLastResult(result);
+        if (result != DownloadCheckResult::ASYNC_SCANNING) {
+          run_loop.Quit();
+        }
+      }),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      params.response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  request.Start();
+  run_loop.Run();
+  EXPECT_EQ(params.expected_result, last_result_);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    DeepScanningReportingTest,
+    ForceSaveToCloudPrioritizationTest,
+    testing::ValuesIn(GetForceSaveToCloudPrioritizationTestCases()),
+    [](const testing::TestParamInfo<
+        ForceSaveToCloudPrioritizationTest::ParamType>& info) {
+      return info.param.test_name;
+    });
+#endif  // BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+
+TEST_F(DeepScanningReportingTest, ConsumerEncryptedArchiveSuccess) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_CONSUMER_PROMPT,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* malware_result = response.add_results();
+  malware_result->set_tag("malware");
+  malware_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
+
+  DownloadItemWarningData::SetIsTopLevelEncryptedArchive(&item_, true);
+  EXPECT_FALSE(DownloadItemWarningData::HasIncorrectPassword(&item_));
+
+  request.Start();
+
+  run_loop.Run();
+
+  EXPECT_FALSE(DownloadItemWarningData::HasIncorrectPassword(&item_));
+}
+
+TEST_F(DeepScanningReportingTest, ConsumerEncryptedArchiveFailed) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_CONSUMER_PROMPT,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* malware_result = response.add_results();
+  malware_result->set_tag("malware");
+  malware_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  malware_result->set_status_error_message(
+      enterprise_connectors::ContentAnalysisResponse::Result::
+          DECRYPTION_FAILED);
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
+
+  DownloadItemWarningData::SetIsTopLevelEncryptedArchive(&item_, true);
+  EXPECT_FALSE(DownloadItemWarningData::HasIncorrectPassword(&item_));
+
+  request.Start();
+
+  run_loop.Run();
+
+  EXPECT_TRUE(DownloadItemWarningData::HasIncorrectPassword(&item_));
+}
+
+TEST_F(DeepScanningReportingTest, ConsumerUnencryptedArchive) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_CONSUMER_PROMPT,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* malware_result = response.add_results();
+  malware_result->set_tag("malware");
+  malware_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
+
+  DownloadItemWarningData::SetIsTopLevelEncryptedArchive(&item_, false);
+  EXPECT_FALSE(DownloadItemWarningData::HasIncorrectPassword(&item_));
+
+  request.Start();
+
+  run_loop.Run();
+
+  EXPECT_FALSE(DownloadItemWarningData::HasIncorrectPassword(&item_));
+}
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+TEST_F(DeepScanningReportingTest, CustomMessagePrioritization) {
+  SetFeatures(
+      /*enabled=*/{enterprise_data_protection::kEnableForceDownloadToCloud},
+      /*disabled=*/{});
+
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  // Rule 1: WARN with a custom message.
+  auto* result1 = response.add_results();
+  result1->set_tag("dlp");
+  result1->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* rule1 = result1->add_triggered_rules();
+  rule1->set_action(enterprise_connectors::TriggeredRule::WARN);
+  rule1->mutable_custom_rule_message()->add_message_segments()->set_text(
+      "Warn Custom Message");
+
+  // Rule 2: FORCE_SAVE_TO_CLOUD without a custom message.
+  auto* rule2 = result1->add_triggered_rules();
+  rule2->set_action(enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  rule2->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_G_DRIVE);
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  request.Start();
+  run_loop.Run();
+
+  // The final result should be FORCE_SAVE_TO_GDRIVE because it's higher
+  // precedence than WARN.
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_GDRIVE, last_result_);
+}
+#endif  // BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+
+TEST_P(DeepScanningReportingSourceTypeTest, MultipleFiles) {
   {
     enterprise_connectors::ContentAnalysisResponse response;
     response.set_request_token(kScanId);
@@ -1125,11 +2374,13 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
     dlp_result->set_status(
         enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
     base::flat_map<base::FilePath, base::FilePath> current_paths_to_final_paths;
-    current_paths_to_final_paths[item_.GetFullPath()] =
-        item_.GetTargetFilePath();
+
+    auto metadata = CreateMetadata();
+    current_paths_to_final_paths[metadata->GetFullPath()] =
+        metadata->GetTargetFilePath();
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        item_.GetTargetFilePath(), BinaryUploadService::Result::SUCCESS,
-        response);
+        metadata->GetTargetFilePath(),
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
@@ -1142,12 +2393,13 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
           base::StrCat({kScanId, base::NumberToString(i)}));
 
       download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-          secondary_files_targets_[i], BinaryUploadService::Result::SUCCESS,
+          secondary_files_targets_[i],
+          enterprise_connectors::ScanRequestUploadResult::kSuccess,
           response_copy);
     }
 
     DeepScanningRequest request(
-        &item_, DownloadCheckResult::SAFE,
+        std::move(metadata), DownloadCheckResult::SAFE,
         base::BindRepeating(&DeepScanningRequestTest::SetLastResult,
                             base::Unretained(this)),
         &download_protection_service_, settings().value(),
@@ -1160,7 +2412,7 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
 
-    EventReportValidator validator(client_.get());
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
     validator.ExpectNoReport();
 
     request.Start();
@@ -1189,11 +2441,13 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
     dlp_result->set_status(
         enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
     base::flat_map<base::FilePath, base::FilePath> current_paths_to_final_paths;
-    current_paths_to_final_paths[item_.GetFullPath()] =
-        item_.GetTargetFilePath();
+
+    auto metadata = CreateMetadata();
+    current_paths_to_final_paths[metadata->GetFullPath()] =
+        metadata->GetTargetFilePath();
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        item_.GetTargetFilePath(), BinaryUploadService::Result::SUCCESS,
-        response);
+        metadata->GetTargetFilePath(),
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     download_protection_service_.GetFakeBinaryUploadService()
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
@@ -1211,12 +2465,13 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
       }
 
       download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-          secondary_files_targets_[i], BinaryUploadService::Result::SUCCESS,
+          secondary_files_targets_[i],
+          enterprise_connectors::ScanRequestUploadResult::kSuccess,
           response_copy);
     }
 
     DeepScanningRequest request(
-        &item_, DownloadCheckResult::SAFE,
+        std::move(metadata), DownloadCheckResult::SAFE,
         base::BindRepeating(&DeepScanningRequestTest::SetLastResult,
                             base::Unretained(this)),
         &download_protection_service_, settings().value(),
@@ -1229,25 +2484,33 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::ALLOW);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectUnscannedFileEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ secondary_files_targets_[0].BaseName().AsUTF8Unsafe(),
-        // printf "foo.txt" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    // Only mock the 0th file with a scan failure, so only the 0th file triggers
+    // UnscannedFileEvent with request_token (i.e. scan_id) "kScanId0" set above
+
+    auto expected_event = CreateUnscannedFileEvent(
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*user_name=*/kUserName,
+        /*file_name=*/secondary_files_targets_[0].AsUTF8Unsafe(),
+        /*sha256=*/
         "DDAB29FF2C393EE52855D21A240EB05F775DF88E3CE347DF759F0C4B80356C35",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*reason*/ "MALWARE_SCAN_FAILED",
-        /*mimetypes*/ TxtMimeTypes(),
-        /*size*/ std::string("foo.exe").size(),
-        /*result*/ EventResultToString(EventResult::ALLOWED),
-        /*username*/ kUserName);
+        /*content_type=*/"text/plain",
+        /*content_size=*/std::string("foo.exe").size(),
+        /*reason=*/
+        chrome::cros::reporting::proto::UnscannedFileEvent::MALWARE_SCAN_FAILED,
+        /*event_result=*/
+        chrome::cros::reporting::proto::EventResult::EVENT_RESULT_ALLOWED,
+        /*include_referrer=*/GetParam() == MetadataSourceType::kDownloadItem);
+    expected_event.set_scan_id(kScanId + std::string("0"));
+
+    validator.ExpectUnscannedFileEvent(std::move(expected_event));
 
     request.Start();
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
     EXPECT_EQ(4u, download_protection_service_.GetFakeBinaryUploadService()
@@ -1272,11 +2535,13 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
     dlp_result->set_status(
         enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
     base::flat_map<base::FilePath, base::FilePath> current_paths_to_final_paths;
-    current_paths_to_final_paths[item_.GetFullPath()] =
-        item_.GetTargetFilePath();
+
+    auto metadata = CreateMetadata();
+    current_paths_to_final_paths[metadata->GetFullPath()] =
+        metadata->GetTargetFilePath();
     download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        item_.GetTargetFilePath(), BinaryUploadService::Result::SUCCESS,
-        response);
+        metadata->GetTargetFilePath(),
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
     std::vector<enterprise_connectors::ContentAnalysisResponse::Result>
         expected_dlp_verdicts;
     for (size_t i = 0; i < secondary_files_.size(); ++i) {
@@ -1304,12 +2569,13 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
       }
 
       download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-          secondary_files_targets_[i], BinaryUploadService::Result::SUCCESS,
+          secondary_files_targets_[i],
+          enterprise_connectors::ScanRequestUploadResult::kSuccess,
           response_copy);
     }
 
     DeepScanningRequest request(
-        &item_, DownloadCheckResult::SAFE,
+        std::move(metadata), DownloadCheckResult::SAFE,
         base::BindRepeating(&DeepScanningRequestTest::SetLastResult,
                             base::Unretained(this)),
         &download_protection_service_, settings().value(),
@@ -1322,33 +2588,71 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
         ->SetExpectedFinalAction(
             enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
 
-    EventReportValidator validator(client_.get());
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    std::vector<chrome::cros::reporting::proto::DlpSensitiveDataEvent>
+        expected_events;
+
+    for (size_t i = 0; i < secondary_files_.size(); ++i) {
+      chrome::cros::reporting::proto::DlpSensitiveDataEvent expected_event;
+      expected_event.set_url("https://example.com/download.exe");
+      expected_event.set_tab_url("https://example.com/");
+      expected_event.set_source("");
+      expected_event.set_destination("");
+
+      expected_event.set_content_type("text/plain");
+      expected_event.set_content_size(std::string("foo.exe").size());
+      expected_event.set_trigger(chrome::cros::reporting::proto::
+                                     DataTransferEventTrigger::FILE_DOWNLOAD);
+      expected_event.set_clicked_through(false);
+
+      if (GetParam() == MetadataSourceType::kDownloadItem) {
+        ::chrome::cros::reporting::proto::UrlInfo referrers;
+        referrers.set_ip("example.com");
+        referrers.set_url("https://example.com/download.exe");
+        *expected_event.add_referrers() = referrers;
+      }
+
+      chrome::cros::reporting::proto::TriggeredRuleInfo triggered_rule;
+      if (i == 0) {
+        triggered_rule.set_rule_name("warn_dlp_rule");
+        triggered_rule.set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::WARN);
+        triggered_rule.set_rule_id(0);
+      } else if (i == 1) {
+        triggered_rule.set_rule_name("block_dlp_rule");
+        triggered_rule.set_action(
+            chrome::cros::reporting::proto::TriggeredRuleInfo::BLOCK);
+        triggered_rule.set_rule_id(1);
+      }
+      *expected_event.add_triggered_rule_info() = triggered_rule;
+
+      expected_event.set_profile_identifier(profile_->GetPath().AsUTF8Unsafe());
+      expected_event.set_profile_user_name(kUserName);
+
+      expected_events.emplace_back(expected_event);
+    }
+
+    std::vector<std::string> expected_file_names;
+    for (const auto& path : {secondary_files_targets_[0].AsUTF8Unsafe(),
+                             secondary_files_targets_[1].AsUTF8Unsafe()}) {
+      expected_file_names.push_back(GetFileName(path));
+    }
+
     validator.ExpectSensitiveDataEvents(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
+        std::move(expected_events), expected_file_names,
         {
-            secondary_files_targets_[0].BaseName().AsUTF8Unsafe(),
-            secondary_files_targets_[1].BaseName().AsUTF8Unsafe(),
+            "DDAB29FF2C393EE52855D21A240EB05F775DF88E3CE347DF759F0C4B80356C3"
+            "5",
+            "08BD2D247CC7AA38B8C4B7FD20EE7EDAD0B593C3DEBCE92F595C9D016DA40BA"
+            "E",
         },
-        // printf "foo.txt" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        // printf "bar.txt" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        {
-            "DDAB29FF2C393EE52855D21A240EB05F775DF88E3CE347DF759F0C4B80356C35",
-            "08BD2D247CC7AA38B8C4B7FD20EE7EDAD0B593C3DEBCE92F595C9D016DA40BAE",
-        },
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        expected_dlp_verdicts,
-        /*mimetypes*/ TxtMimeTypes(),
-        /*size*/ std::string("foo.exe").size(),
-        // Both results are BLOCKED since the highest precedence result will
-        // determine Chrome's UX for a given download.
-        /*results*/
-        {EventResultToString(EventResult::BLOCKED),
-         EventResultToString(EventResult::BLOCKED)},
-        /*username*/ kUserName,
-        /*scan IDs*/
+        {enterprise_connectors::EventResultToString(
+             enterprise_connectors::EventResult::BLOCKED),
+         enterprise_connectors::EventResultToString(
+             enterprise_connectors::EventResult::BLOCKED)},
         {
             kScanId + std::string("0"),
             kScanId + std::string("1"),
@@ -1356,6 +2660,7 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
 
     request.Start();
     run_loop.Run();
+    validator_run_loop.Run();
 
     EXPECT_EQ(DownloadCheckResult::SENSITIVE_CONTENT_BLOCK, last_result_);
     EXPECT_EQ(4u, download_protection_service_.GetFakeBinaryUploadService()
@@ -1365,12 +2670,159 @@ TEST_F(DeepScanningReportingTest, MultipleFiles) {
         download_protection_service_.GetFakeBinaryUploadService()->num_acks());
     download_protection_service_.GetFakeBinaryUploadService()->Reset();
   }
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+  {
+    enterprise_connectors::ContentAnalysisResponse response;
+    response.set_request_token(kScanId);
+
+    auto* malware_result = response.add_results();
+    malware_result->set_tag("malware");
+    malware_result->set_status(
+        enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+
+    auto* dlp_result = response.add_results();
+    dlp_result->set_tag("dlp");
+    dlp_result->set_status(
+        enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+    base::flat_map<base::FilePath, base::FilePath> current_paths_to_final_paths;
+
+    auto metadata = CreateMetadata();
+    current_paths_to_final_paths[metadata->GetFullPath()] =
+        metadata->GetTargetFilePath();
+    download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+        metadata->GetTargetFilePath(),
+        enterprise_connectors::ScanRequestUploadResult::kSuccess, response);
+    std::vector<enterprise_connectors::ContentAnalysisResponse::Result>
+        expected_dlp_verdicts;
+    for (size_t i = 0; i < secondary_files_.size(); ++i) {
+      current_paths_to_final_paths[secondary_files_[i]] =
+          secondary_files_targets_[i];
+
+      enterprise_connectors::ContentAnalysisResponse response_copy = response;
+      response_copy.set_request_token(
+          base::StrCat({kScanId, base::NumberToString(i)}));
+
+      if (i == 0) {
+        auto* dlp_rule =
+            response_copy.mutable_results(1)->add_triggered_rules();
+        dlp_rule->set_action(
+            enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+        dlp_rule->set_force_save_to_cloud_destination(
+            enterprise_connectors::TriggeredRule::CORP_G_DRIVE);
+        dlp_rule->set_rule_name("dlp_rule");
+        dlp_rule->set_rule_id("0");
+        expected_dlp_verdicts.push_back(response_copy.results(1));
+      }
+
+      download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+          secondary_files_targets_[i],
+          enterprise_connectors::ScanRequestUploadResult::kSuccess,
+          response_copy);
+    }
+
+    if (GetParam() == MetadataSourceType::kFileSystemAccessWriteItem) {
+      web_contents_.reset();
+    }
+
+    DeepScanningRequest request(
+        std::move(metadata), DownloadCheckResult::SAFE,
+        base::BindRepeating(&DeepScanningRequestTest::SetLastResult,
+                            base::Unretained(this)),
+        &download_protection_service_, settings().value(),
+        current_paths_to_final_paths);
+
+    base::RunLoop run_loop;
+    download_protection_service_.GetFakeBinaryUploadService()
+        ->SetQuitOnLastRequest(run_loop.QuitClosure());
+    download_protection_service_.GetFakeBinaryUploadService()
+        ->SetExpectedFinalAction(
+            enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    std::vector<chrome::cros::reporting::proto::DlpSensitiveDataEvent>
+        expected_events;
+
+    for (size_t i = 0; i < secondary_files_.size(); ++i) {
+      if (i == 0) {
+        chrome::cros::reporting::proto::DlpSensitiveDataEvent expected_event;
+        expected_event.set_url("https://example.com/download.exe");
+        expected_event.set_tab_url("https://example.com/");
+        expected_event.set_source("");
+        expected_event.set_destination("Google Drive");
+
+        expected_event.set_content_type("text/plain");
+        expected_event.set_content_size(std::string("foo.exe").size());
+        expected_event.set_trigger(chrome::cros::reporting::proto::
+                                       DataTransferEventTrigger::FILE_DOWNLOAD);
+        expected_event.set_clicked_through(false);
+
+        if (GetParam() == MetadataSourceType::kDownloadItem) {
+          ::chrome::cros::reporting::proto::UrlInfo referrers;
+          referrers.set_ip("example.com");
+          referrers.set_url("https://example.com/download.exe");
+          *expected_event.add_referrers() = referrers;
+        }
+
+        chrome::cros::reporting::proto::TriggeredRuleInfo triggered_rule;
+        triggered_rule.set_rule_name("dlp_rule");
+        triggered_rule.set_action(chrome::cros::reporting::proto::
+                                      TriggeredRuleInfo::FORCE_SAVE_TO_CLOUD);
+        triggered_rule.set_rule_id(0);
+        *expected_event.add_triggered_rule_info() = triggered_rule;
+
+        expected_event.set_profile_identifier(
+            profile_->GetPath().AsUTF8Unsafe());
+        expected_event.set_profile_user_name(kUserName);
+
+        expected_events.emplace_back(expected_event);
+      }
+    }
+
+    std::vector<std::string> expected_file_names;
+    for (const auto& path : {secondary_files_targets_[0].AsUTF8Unsafe()}) {
+      expected_file_names.push_back(GetFileName(path));
+    }
+
+    validator.ExpectSensitiveDataEvents(
+        std::move(expected_events), expected_file_names,
+        {
+            "DDAB29FF2C393EE52855D21A240EB05F775DF88E3CE347DF759F0C4B80356C3"
+            "5",
+        },
+        {enterprise_connectors::EventResultToString(
+            enterprise_connectors::EventResult::FORCED_SAVE_TO_CLOUD)},
+        {
+            kScanId + std::string("0"),
+        });
+
+    base::test::ScopedFeatureList scoped_feature_list;
+    scoped_feature_list.InitWithFeatures(
+        {enterprise_data_protection::kEnableForceDownloadToCloud}, {});
+
+    request.Start();
+    run_loop.Run();
+    validator_run_loop.Run();
+
+    EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_GDRIVE, last_result_);
+    EXPECT_EQ(4u, download_protection_service_.GetFakeBinaryUploadService()
+                      ->num_finished_requests());
+    EXPECT_EQ(
+        4u,
+        download_protection_service_.GetFakeBinaryUploadService()->num_acks());
+    download_protection_service_.GetFakeBinaryUploadService()->Reset();
+  }
+#endif  //  BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
 }
 
-TEST_F(DeepScanningReportingTest, Timeout) {
+TEST_P(DeepScanningReportingSourceTypeTest, Timeout) {
   base::RunLoop run_loop;
   DeepScanningRequest request(
-      &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
       DownloadCheckResult::SAFE,
       base::BindRepeating(
           [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
@@ -1381,84 +2833,258 @@ TEST_F(DeepScanningReportingTest, Timeout) {
             }
           },
           base::Unretained(this), run_loop.QuitClosure()),
-      &download_protection_service_, settings().value());
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kTimeout,
+      response);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto expected_event = CreateUnscannedFileEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*sha256=*/
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+      /*content_type=*/"application/octet-stream",
+      /*content_size=*/std::string("download contents").size(),
+      /*reason=*/
+      chrome::cros::reporting::proto::UnscannedFileEvent::TIMEOUT,
+      /*event_result=*/
+      chrome::cros::reporting::proto::EventResult::EVENT_RESULT_ALLOWED,
+      /*include_referrer=*/GetParam() == MetadataSourceType::kDownloadItem);
+
+  validator.ExpectUnscannedFileEvent(std::move(expected_event));
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
+}
+
+TEST_P(DeepScanningReportingSourceTypeTest, CancelledByUser) {
+  if (GetParam() != MetadataSourceType::kDownloadItem) {
+    return;
+  }
+
+  for (bool enabled : {true, false}) {
+    base::test::ScopedFeatureList scoped_feature_list;
+    if (enabled) {
+      scoped_feature_list.InitAndEnableFeature(
+          enterprise_connectors::kEnableCancelUploadOnContentAnalysis);
+    } else {
+      scoped_feature_list.InitAndDisableFeature(
+          enterprise_connectors::kEnableCancelUploadOnContentAnalysis);
+    }
+
+    // Use TestCancellationFakeBinaryUploadService to support synchronous cancel
+    // callbacks.
+    TestCancellationFakeBinaryUploadService cancel_upload_service;
+    cancel_upload_service.set_synchronous_cancel(true);
+    download_protection_service_.set_binary_upload_service(
+        &cancel_upload_service);
+
+    DeepScanningRequest request(
+        CreateMetadata(),
+        DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+        DownloadCheckResult::SAFE, base::DoNothing(),
+        &download_protection_service_, settings().value(),
+        /*password=*/std::nullopt);
+
+    // Set the download item state to CANCELLED.
+    EXPECT_CALL(item_, GetState())
+        .WillRepeatedly(testing::Return(download::DownloadItem::CANCELLED));
+
+    enterprise_connectors::test::EventReportValidator validator(client_.get());
+    base::RunLoop validator_run_loop;
+    validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+    auto expected_event = CreateUnscannedFileEvent(
+        /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+        /*user_name=*/kUserName,
+        /*file_name=*/download_path_.AsUTF8Unsafe(),
+        /*sha256=*/
+        "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+        /*content_type=*/"application/octet-stream",
+        /*content_size=*/std::string("download contents").size(),
+        /*reason=*/
+        chrome::cros::reporting::proto::UnscannedFileEvent::USER_CANCELLED,
+        /*event_result=*/
+        enabled
+            ? chrome::cros::reporting::proto::EventResult::
+                  EVENT_RESULT_CANCELLED_BY_USER
+            : chrome::cros::reporting::proto::EventResult::EVENT_RESULT_ALLOWED,
+        /*include_referrer=*/true);
+
+    expected_event.clear_scan_id();
+
+    validator.ExpectUnscannedFileEvent(std::move(expected_event));
+
+    base::RunLoop upload_run_loop;
+    cancel_upload_service.SetQuitOnUploadCallback(
+        upload_run_loop.QuitClosure());
+
+    request.Start();
+
+    upload_run_loop.Run();
+
+    // Simulate the download being cancelled by the user, which notifies
+    // observers via OnDownloadUpdated.
+    request.OnDownloadUpdated(&item_);
+
+    // Trigger OnDownloadDestroyed which launches upload cancellation and
+    // resolves reporting.
+    request.OnDownloadDestroyed(&item_);
+
+    validator_run_loop.Run();
+
+    download_protection_service_.set_binary_upload_service(nullptr);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Reporting,
+    DeepScanningReportingSourceTypeTest,
+    testing::Values(MetadataSourceType::kDownloadItem,
+                    MetadataSourceType::kFileSystemAccessWriteItem));
+
+class DeepScanningDownloadFailClosedTest
+    : public DeepScanningRequestTest,
+      public testing::WithParamInterface<
+          std::tuple<enterprise_connectors::ScanRequestUploadResult, bool>> {
+ public:
+  enterprise_connectors::ScanRequestUploadResult upload_result() const {
+    return std::get<0>(GetParam());
+  }
+
+  bool should_fail_closed() const { return std::get<1>(GetParam()); }
+
+  // Use a string since the setting value is inserted into a JSON policy.
+  const char* default_action_setting_value() const {
+    return should_fail_closed() ? "block" : "allow";
+  }
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    ,
+    DeepScanningDownloadFailClosedTest,
+    testing::Combine(
+        testing::Values(
+            enterprise_connectors::ScanRequestUploadResult::kUploadFailure,
+            enterprise_connectors::ScanRequestUploadResult::kTimeout,
+            enterprise_connectors::ScanRequestUploadResult::kFailedToGetToken,
+            enterprise_connectors::ScanRequestUploadResult::kTooManyRequests,
+            enterprise_connectors::ScanRequestUploadResult::kUnknown),
+        testing::Bool()));
+
+TEST_P(DeepScanningDownloadFailClosedTest, HandlesDefaultActionCorrectly) {
+  constexpr char kDefaultActionPref[] = R"({
+    "service_provider": "google",
+    "enable": [
+      {
+        "url_list": ["*"],
+        "tags": ["dlp"]
+      }
+    ],
+    "block_until_verdict": 1,
+    "default_action": "%s"
+    })";
+
+  enterprise_connectors::test::SetAnalysisConnector(
+      profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+      base::StringPrintf(kDefaultActionPref, default_action_setting_value()));
+
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindLambdaForTesting([this, quit_closure = run_loop.QuitClosure()](
+                                     DownloadCheckResult result) {
+        SetLastResult(result);
+        if (result != DownloadCheckResult::ASYNC_SCANNING) {
+          quit_closure.Run();
+        }
+      }),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
 
   download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-      download_path_, BinaryUploadService::Result::TIMEOUT,
+      download_path_, upload_result(),
       enterprise_connectors::ContentAnalysisResponse());
-
-  EventReportValidator validator(client_.get());
-  validator.ExpectUnscannedFileEvent(
-      /*url*/ "https://example.com/download.exe",
-      /*source*/ "",
-      /*destination*/ "",
-      /*filename*/ "download.exe",
-      // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-      /*sha256*/
-      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-      /*trigger*/
-      extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-      /*reason*/ "TIMEOUT",
-      /*mimetypes*/ ExeMimeTypes(),
-      /*size*/ std::string("download contents").size(),
-      /*result*/
-      EventResultToString(EventResult::ALLOWED),
-      /*username*/ kUserName);
 
   request.Start();
 
   run_loop.Run();
 
-  EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
+  if (should_fail_closed()) {
+    EXPECT_EQ(DownloadCheckResult::BLOCKED_SCAN_FAILED, last_result_);
+  } else {
+    EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
+  }
 }
 
 class DeepScanningDownloadRestrictionsTest
     : public DeepScanningReportingTest,
-      public testing::WithParamInterface<DownloadPrefs::DownloadRestriction> {
+      public testing::WithParamInterface<policy::DownloadRestriction> {
  public:
   void SetUp() override {
     DeepScanningReportingTest::SetUp();
-    profile_->GetPrefs()->SetInteger(prefs::kDownloadRestrictions,
-                                     static_cast<int>(download_restriction()));
+    profile_->GetPrefs()->SetInteger(
+        policy::policy_prefs::kDownloadRestrictions,
+        static_cast<int>(download_restriction()));
+
+    enterprise_connectors::test::SetAnalysisConnector(
+        profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+        kScanForDlpAndMalware);
   }
 
-  DownloadPrefs::DownloadRestriction download_restriction() const {
-    return GetParam();
+  policy::DownloadRestriction download_restriction() const {
+    return testing::WithParamInterface<policy::DownloadRestriction>::GetParam();
   }
 
-  EventResult expected_event_result_for_malware() const {
+  enterprise_connectors::EventResult expected_event_result_for_malware() const {
     switch (download_restriction()) {
-      case DownloadPrefs::DownloadRestriction::NONE:
-        return EventResult::WARNED;
-      case DownloadPrefs::DownloadRestriction::DANGEROUS_FILES:
-      case DownloadPrefs::DownloadRestriction::MALICIOUS_FILES:
-      case DownloadPrefs::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES:
-      case DownloadPrefs::DownloadRestriction::ALL_FILES:
-        return EventResult::BLOCKED;
+      case policy::DownloadRestriction::NONE:
+        return enterprise_connectors::EventResult::WARNED;
+      case policy::DownloadRestriction::DANGEROUS_FILES:
+      case policy::DownloadRestriction::MALICIOUS_FILES:
+      case policy::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES:
+      case policy::DownloadRestriction::ALL_FILES:
+        return enterprise_connectors::EventResult::BLOCKED;
     }
   }
 
-  EventResult expected_event_result_for_safe_large_file() const {
+  enterprise_connectors::EventResult expected_event_result_for_safe_large_file()
+      const {
     switch (download_restriction()) {
-      case DownloadPrefs::DownloadRestriction::NONE:
-      case DownloadPrefs::DownloadRestriction::DANGEROUS_FILES:
-      case DownloadPrefs::DownloadRestriction::MALICIOUS_FILES:
-      case DownloadPrefs::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES:
-        return EventResult::ALLOWED;
-      case DownloadPrefs::DownloadRestriction::ALL_FILES:
-        return EventResult::BLOCKED;
+      case policy::DownloadRestriction::NONE:
+      case policy::DownloadRestriction::DANGEROUS_FILES:
+      case policy::DownloadRestriction::MALICIOUS_FILES:
+      case policy::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES:
+        return enterprise_connectors::EventResult::ALLOWED;
+      case policy::DownloadRestriction::ALL_FILES:
+        return enterprise_connectors::EventResult::BLOCKED;
     }
   }
 
   enterprise_connectors::ContentAnalysisAcknowledgement::FinalAction
   expected_final_action() const {
     switch (download_restriction()) {
-      case DownloadPrefs::DownloadRestriction::NONE:
+      case policy::DownloadRestriction::NONE:
         return enterprise_connectors::ContentAnalysisAcknowledgement::WARN;
-      case DownloadPrefs::DownloadRestriction::DANGEROUS_FILES:
-      case DownloadPrefs::DownloadRestriction::MALICIOUS_FILES:
-      case DownloadPrefs::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES:
-      case DownloadPrefs::DownloadRestriction::ALL_FILES:
+      case policy::DownloadRestriction::DANGEROUS_FILES:
+      case policy::DownloadRestriction::MALICIOUS_FILES:
+      case policy::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES:
+      case policy::DownloadRestriction::ALL_FILES:
         return enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK;
     }
   }
@@ -1467,240 +3093,585 @@ class DeepScanningDownloadRestrictionsTest
 INSTANTIATE_TEST_SUITE_P(
     ,
     DeepScanningDownloadRestrictionsTest,
-    testing::Values(
-        DownloadPrefs::DownloadRestriction::NONE,
-        DownloadPrefs::DownloadRestriction::DANGEROUS_FILES,
-        DownloadPrefs::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES,
-        DownloadPrefs::DownloadRestriction::ALL_FILES,
-        DownloadPrefs::DownloadRestriction::MALICIOUS_FILES));
+    testing::Values(policy::DownloadRestriction::NONE,
+                    policy::DownloadRestriction::DANGEROUS_FILES,
+                    policy::DownloadRestriction::POTENTIALLY_DANGEROUS_FILES,
+                    policy::DownloadRestriction::ALL_FILES,
+                    policy::DownloadRestriction::MALICIOUS_FILES));
 
-TEST_P(DeepScanningDownloadRestrictionsTest, GeneratesCorrectReport) {
-  SetAnalysisConnector(profile_->GetPrefs(),
-                       enterprise_connectors::FILE_DOWNLOADED, kScanForMalware);
-  {
-    base::RunLoop run_loop;
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       GeneratesCorrectReport_DeepScanMalwareBlocked) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
 
-    DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
-        DownloadCheckResult::SAFE,
-        base::BindRepeating(
-            [](DeepScanningRequestTest* test,
-               base::RepeatingClosure quit_closure,
-               DownloadCheckResult result) {
-              test->SetLastResult(result);
-              if (result != DownloadCheckResult::ASYNC_SCANNING) {
-                quit_closure.Run();
-              }
-            },
-            base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
 
-    enterprise_connectors::ContentAnalysisResponse response;
-    response.set_request_token(kScanId);
+  auto* malware_result = response.add_results();
+  malware_result->set_tag("malware");
+  malware_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* malware_rule = malware_result->add_triggered_rules();
+  malware_rule->set_action(enterprise_connectors::TriggeredRule::BLOCK);
+  malware_rule->set_rule_name("malware");
 
-    auto* malware_result = response.add_results();
-    malware_result->set_tag("malware");
-    malware_result->set_status(
-        enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
-    auto* malware_rule = malware_result->add_triggered_rules();
-    malware_rule->set_action(enterprise_connectors::TriggeredRule::BLOCK);
-    malware_rule->set_rule_name("malware");
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(expected_final_action());
 
-    download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
-    download_protection_service_.GetFakeBinaryUploadService()
-        ->SetExpectedFinalAction(expected_final_action());
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectDangerousDeepScanningResult(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]'
-        // '[:upper:]'
-        /*sha256*/
-        "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*threat_type*/ "DANGEROUS",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/ EventResultToString(expected_event_result_for_malware()),
-        /*username*/ kUserName, /*scan_id*/ kScanId);
+  auto event_result =
+      (GetParam() == policy::DownloadRestriction::NONE)
+          ? chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED
+          : chrome::cros::reporting::proto::EventResult::EVENT_RESULT_BLOCKED;
 
-    request.Start();
+  auto expected_event = CreateDangerousDownloadEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*threat_type=*/
+      chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent::
+          DANGEROUS,
+      /*event_result=*/event_result);
 
-    run_loop.Run();
+  validator.ExpectDangerousDownloadEvent(std::move(expected_event));
 
-    EXPECT_EQ(DownloadCheckResult::DANGEROUS, last_result_);
-  }
-  {
-    base::RunLoop run_loop;
+  request.Start();
 
-    DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
-        DownloadCheckResult::SAFE,
-        base::BindRepeating(
-            [](DeepScanningRequestTest* test,
-               base::RepeatingClosure quit_closure,
-               DownloadCheckResult result) {
-              test->SetLastResult(result);
-              if (result != DownloadCheckResult::ASYNC_SCANNING) {
-                quit_closure.Run();
-              }
-            },
-            base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+  run_loop.Run();
+  validator_run_loop.Run();
 
-    enterprise_connectors::ContentAnalysisResponse response;
-    response.set_request_token(kScanId);
+  EXPECT_EQ(DownloadCheckResult::DANGEROUS, last_result_);
+}
 
-    auto* malware_result = response.add_results();
-    malware_result->set_tag("malware");
-    malware_result->set_status(
-        enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
-    auto* malware_rule = malware_result->add_triggered_rules();
-    malware_rule->set_action(enterprise_connectors::TriggeredRule::WARN);
-    malware_rule->set_rule_name("uws");
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       GeneratesCorrectReport_DeepScanMalwareWarned) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
 
-    download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::SUCCESS, response);
-    download_protection_service_.GetFakeBinaryUploadService()
-        ->SetExpectedFinalAction(
-            enterprise_connectors::ContentAnalysisAcknowledgement::WARN);
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectDangerousDeepScanningResult(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]'
-        // '[:upper:]'
-        /*sha256*/
-        "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*threat_type*/ "POTENTIALLY_UNWANTED",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/ EventResultToString(EventResult::WARNED),
-        /*username*/ kUserName, /*scan_id*/ kScanId);
+  auto* malware_result = response.add_results();
+  malware_result->set_tag("malware");
+  malware_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* malware_rule = malware_result->add_triggered_rules();
+  malware_rule->set_action(enterprise_connectors::TriggeredRule::WARN);
+  malware_rule->set_rule_name("uws");
 
-    request.Start();
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_, enterprise_connectors::ScanRequestUploadResult::kSuccess,
+      response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::WARN);
 
-    run_loop.Run();
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
 
-    EXPECT_EQ(DownloadCheckResult::POTENTIALLY_UNWANTED, last_result_);
-  }
+  auto expected_event = CreateDangerousDownloadEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*threat_type=*/
+      chrome::cros::reporting::proto::SafeBrowsingDangerousDownloadEvent::
+          POTENTIALLY_UNWANTED,
+      /*event_result=*/
+      chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED);
 
-  {
-    base::RunLoop run_loop;
-    DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
-        DownloadCheckResult::SAFE,
-        base::BindRepeating(
-            [](DeepScanningRequestTest* test,
-               base::RepeatingClosure quit_closure,
-               DownloadCheckResult result) {
-              test->SetLastResult(result);
-              if (result != DownloadCheckResult::ASYNC_SCANNING) {
-                quit_closure.Run();
-              }
-            },
-            base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+  validator.ExpectDangerousDownloadEvent(std::move(expected_event));
 
-    enterprise_connectors::ContentAnalysisResponse response;
-    response.set_request_token(kScanId);
+  request.Start();
 
-    download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::FILE_TOO_LARGE, response);
-    download_protection_service_.GetFakeBinaryUploadService()
-        ->SetExpectedFinalAction(
-            enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+  run_loop.Run();
+  validator_run_loop.Run();
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectUnscannedFileEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
-        "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*reason*/ "FILE_TOO_LARGE",
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/
-        EventResultToString(expected_event_result_for_safe_large_file()),
-        /*username*/ kUserName);
+  EXPECT_EQ(DownloadCheckResult::POTENTIALLY_UNWANTED, last_result_);
+}
 
-    request.Start();
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       GeneratesCorrectReportForLargeFiles_DeepScanSafe) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
 
-    run_loop.Run();
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
 
-    EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
-  }
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_,
+      enterprise_connectors::ScanRequestUploadResult::kFileTooLarge, response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
 
-  {
-    base::RunLoop run_loop;
-    // If `item_` has a dangerous DownloadDangerType before a deep scan and that
-    // deep scan fails, the corresponding unscanned file event should match the
-    // EventResult imposed by DownloadRestrictions.
-    EXPECT_CALL(item_, GetDangerType())
-        .WillRepeatedly(Return(download::DownloadDangerType::
-                                   DOWNLOAD_DANGER_TYPE_DANGEROUS_CONTENT));
-    DeepScanningRequest request(
-        &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
-        DownloadCheckResult::DANGEROUS,
-        base::BindRepeating(
-            [](DeepScanningRequestTest* test,
-               base::RepeatingClosure quit_closure,
-               DownloadCheckResult result) {
-              test->SetLastResult(result);
-              if (result != DownloadCheckResult::ASYNC_SCANNING) {
-                quit_closure.Run();
-              }
-            },
-            base::Unretained(this), run_loop.QuitClosure()),
-        &download_protection_service_, settings().value());
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
 
-    enterprise_connectors::ContentAnalysisResponse response;
-    response.set_request_token(kScanId);
+  auto event_result =
+      (GetParam() == policy::DownloadRestriction::ALL_FILES)
+          ? chrome::cros::reporting::proto::EventResult::EVENT_RESULT_BLOCKED
+          : chrome::cros::reporting::proto::EventResult::EVENT_RESULT_ALLOWED;
 
-    download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
-        download_path_, BinaryUploadService::Result::FILE_TOO_LARGE, response);
-    download_protection_service_.GetFakeBinaryUploadService()
-        ->SetExpectedFinalAction(
-            enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+  auto expected_event = CreateUnscannedFileEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*sha256=*/
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+      /*content_type=*/"application/octet-stream",
+      /*content_size=*/std::string("download contents").size(),
+      /*reason=*/
+      chrome::cros::reporting::proto::UnscannedFileEvent::FILE_TOO_LARGE,
+      /*event_result=*/event_result);
 
-    EventReportValidator validator(client_.get());
-    validator.ExpectUnscannedFileEvent(
-        /*url*/ "https://example.com/download.exe",
-        /*source*/ "",
-        /*destination*/ "",
-        /*filename*/ "download.exe",
-        // printf "download contents" | sha256sum |  tr '[:lower:]' '[:upper:]'
-        /*sha256*/
-        "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
-        /*trigger*/
-        extensions::SafeBrowsingPrivateEventRouter::kTriggerFileDownload,
-        /*reason*/ "FILE_TOO_LARGE",
-        /*mimetypes*/ ExeMimeTypes(),
-        /*size*/ std::string("download contents").size(),
-        /*result*/ EventResultToString(expected_event_result_for_malware()),
-        /*username*/ kUserName);
+  validator.ExpectUnscannedFileEvent(std::move(expected_event));
 
-    request.Start();
+  request.Start();
 
-    run_loop.Run();
+  run_loop.Run();
+  validator_run_loop.Run();
 
-    EXPECT_EQ(DownloadCheckResult::DANGEROUS, last_result_);
-  }
+  EXPECT_EQ(DownloadCheckResult::SAFE, last_result_);
+}
+
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       GeneratesCorrectReportForLargeFiles_DeepScanDlpBlocked) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(enterprise_connectors::TriggeredRule::BLOCK);
+  dlp_rule->set_rule_name("dlp");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_,
+      enterprise_connectors::ScanRequestUploadResult::kFileTooLarge, response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto expected_event = CreateUnscannedFileEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*sha256=*/
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+      /*content_type=*/"application/octet-stream",
+      /*content_size=*/std::string("download contents").size(),
+      /*reason=*/
+      chrome::cros::reporting::proto::UnscannedFileEvent::FILE_TOO_LARGE,
+      /*event_result=*/
+      chrome::cros::reporting::proto::EventResult::EVENT_RESULT_BLOCKED);
+
+  validator.ExpectUnscannedFileEvent(std::move(expected_event));
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::SENSITIVE_CONTENT_BLOCK, last_result_);
+}
+
+#if BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       LargeFiles_DeepScanForceSaveToGDrive) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(
+      enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  dlp_rule->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_G_DRIVE);
+  dlp_rule->set_rule_name("dlp_rule");
+  dlp_rule->set_rule_id("0");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_,
+      enterprise_connectors::ScanRequestUploadResult::kFileTooLarge, response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto expected_event = CreateUnscannedFileEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*sha256=*/
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+      /*content_type=*/"application/octet-stream",
+      /*content_size=*/std::string("download contents").size(),
+      /*reason=*/
+      chrome::cros::reporting::proto::UnscannedFileEvent::FILE_TOO_LARGE,
+      /*event_result=*/
+      chrome::cros::reporting::proto::EventResult::
+          EVENT_RESULT_FORCED_SAVE_TO_CLOUD);
+  expected_event.set_destination("Google Drive");
+
+  validator.ExpectUnscannedFileEvent(std::move(expected_event));
+
+  // Enable the feature to allow FORCE_SAVE_TO_GDRIVE result.
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {enterprise_data_protection::kEnableForceDownloadToCloud}, {});
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_GDRIVE, last_result_);
+}
+
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       LargeFiles_DeepScanForceSaveToOneDrive) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(
+      enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  dlp_rule->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_ONEDRIVE);
+  dlp_rule->set_rule_name("dlp_rule");
+  dlp_rule->set_rule_id("0");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_,
+      enterprise_connectors::ScanRequestUploadResult::kFileTooLarge, response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto expected_event = CreateUnscannedFileEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*sha256=*/
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+      /*content_type=*/"application/octet-stream",
+      /*content_size=*/std::string("download contents").size(),
+      /*reason=*/
+      chrome::cros::reporting::proto::UnscannedFileEvent::FILE_TOO_LARGE,
+      /*event_result=*/
+      chrome::cros::reporting::proto::EventResult::
+          EVENT_RESULT_FORCED_SAVE_TO_CLOUD);
+  expected_event.set_destination("OneDrive");
+
+  validator.ExpectUnscannedFileEvent(std::move(expected_event));
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_ONEDRIVE, last_result_);
+}
+
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       LargeFiles_DeepScanForceSaveToGDrive_DeferredReportingEnabled) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(
+      enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  dlp_rule->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_G_DRIVE);
+  dlp_rule->set_rule_name("dlp_rule");
+  dlp_rule->set_rule_id("0");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_,
+      enterprise_connectors::ScanRequestUploadResult::kFileTooLarge, response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  validator.ExpectNoReport();
+
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {enterprise_data_protection::kEnableForceDownloadToCloud,
+       enterprise_data_protection::kEnableForceSaveToCloudDeferredReporting},
+      {});
+
+  request.Start();
+
+  run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_GDRIVE, last_result_);
+}
+
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       LargeFiles_DeepScanForceSaveToOneDrive_DeferredReportingEnabled) {
+  base::RunLoop run_loop;
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::SAFE,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  auto* dlp_result = response.add_results();
+  dlp_result->set_tag("dlp");
+  dlp_result->set_status(
+      enterprise_connectors::ContentAnalysisResponse::Result::SUCCESS);
+  auto* dlp_rule = dlp_result->add_triggered_rules();
+  dlp_rule->set_action(
+      enterprise_connectors::TriggeredRule::FORCE_SAVE_TO_CLOUD);
+  dlp_rule->set_force_save_to_cloud_destination(
+      enterprise_connectors::TriggeredRule::CORP_ONEDRIVE);
+  dlp_rule->set_rule_name("dlp_rule");
+  dlp_rule->set_rule_id("0");
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_,
+      enterprise_connectors::ScanRequestUploadResult::kFileTooLarge, response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  validator.ExpectNoReport();
+
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {enterprise_data_protection::kEnableForceSaveToCloudDeferredReporting},
+      {});
+
+  request.Start();
+
+  run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::FORCE_SAVE_TO_ONEDRIVE, last_result_);
+}
+#endif  // BUILDFLAG(ENTERPRISE_CLOUD_CONTENT_ANALYSIS)
+
+TEST_P(DeepScanningDownloadRestrictionsTest,
+       GeneratesCorrectReportForLargeFiles_PreScanDangerous) {
+  base::RunLoop run_loop;
+  // If `item_` has a dangerous DownloadDangerType before a deep scan and that
+  // deep scan fails, the corresponding unscanned file event should match the
+  // EventResult imposed by DownloadRestrictions.
+  EXPECT_CALL(item_, GetDangerType())
+      .WillRepeatedly(Return(download::DownloadDangerType::
+                                 DOWNLOAD_DANGER_TYPE_DANGEROUS_CONTENT));
+  DeepScanningRequest request(
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
+      DownloadCheckResult::DANGEROUS,
+      base::BindRepeating(
+          [](DeepScanningRequestTest* test, base::RepeatingClosure quit_closure,
+             DownloadCheckResult result) {
+            test->SetLastResult(result);
+            if (result != DownloadCheckResult::ASYNC_SCANNING) {
+              quit_closure.Run();
+            }
+          },
+          base::Unretained(this), run_loop.QuitClosure()),
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
+  enterprise_connectors::ContentAnalysisResponse response;
+  response.set_request_token(kScanId);
+
+  download_protection_service_.GetFakeBinaryUploadService()->SetResponse(
+      download_path_,
+      enterprise_connectors::ScanRequestUploadResult::kFileTooLarge, response);
+  download_protection_service_.GetFakeBinaryUploadService()
+      ->SetExpectedFinalAction(
+          enterprise_connectors::ContentAnalysisAcknowledgement::BLOCK);
+
+  enterprise_connectors::test::EventReportValidator validator(client_.get());
+  base::RunLoop validator_run_loop;
+  validator.SetDoneClosure(validator_run_loop.QuitClosure());
+
+  auto event_result =
+      (GetParam() == policy::DownloadRestriction::NONE)
+          ? chrome::cros::reporting::proto::EventResult::EVENT_RESULT_WARNED
+          : chrome::cros::reporting::proto::EventResult::EVENT_RESULT_BLOCKED;
+
+  auto expected_event = CreateUnscannedFileEvent(
+      /*profile_identifier=*/profile_->GetPath().AsUTF8Unsafe(),
+      /*user_name=*/kUserName,
+      /*file_name=*/download_path_.AsUTF8Unsafe(),
+      /*sha256=*/
+      "76E00EB33811F5778A5EE557512C30D9341D4FEB07646BCE3E4DB13F9428573C",
+      /*content_type=*/"application/octet-stream",
+      /*content_size=*/std::string("download contents").size(),
+      /*reason=*/
+      chrome::cros::reporting::proto::UnscannedFileEvent::FILE_TOO_LARGE,
+      /*event_result=*/event_result);
+
+  validator.ExpectUnscannedFileEvent(std::move(expected_event));
+
+  request.Start();
+
+  run_loop.Run();
+  validator_run_loop.Run();
+
+  EXPECT_EQ(DownloadCheckResult::DANGEROUS, last_result_);
 }
 
 class DeepScanningRequestConnectorsFeatureTest
@@ -1708,8 +3679,9 @@ class DeepScanningRequestConnectorsFeatureTest
 
 TEST_F(DeepScanningRequestConnectorsFeatureTest,
        ShouldUploadBinary_MalwareListPolicy) {
-  SetAnalysisConnector(profile_->GetPrefs(),
-                       enterprise_connectors::FILE_DOWNLOADED, kScanForMalware);
+  enterprise_connectors::test::SetAnalysisConnector(
+      profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+      kScanForMalware);
 
   content::DownloadItemUtils::AttachInfoForTesting(&item_, profile_, nullptr);
   EXPECT_CALL(item_, GetURL()).WillRepeatedly(ReturnRef(download_url_));
@@ -1724,10 +3696,10 @@ TEST_F(DeepScanningRequestConnectorsFeatureTest,
 
   // With the new malware policy list set, the item should not be uploaded since
   // DeepScanningRequest honours that policy.
-  SetAnalysisConnector(profile_->GetPrefs(),
-                       enterprise_connectors::FILE_DOWNLOADED,
-                       base::StringPrintf(
-                           R"({
+  enterprise_connectors::test::SetAnalysisConnector(
+      profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+      base::StringPrintf(
+          R"({
                             "service_provider": "google",
                             "enable": [
                               {"url_list": ["*"], "tags": ["malware"]}
@@ -1737,14 +3709,14 @@ TEST_F(DeepScanningRequestConnectorsFeatureTest,
                             ],
                             "block_until_verdict": 1
                           })",
-                           download_url_.host().c_str()));
+          download_url_.GetHost().c_str()));
   EXPECT_FALSE(settings().has_value());
 }
 
 TEST_F(DeepScanningRequestConnectorsFeatureTest, ShouldUploadBinary_FileURLs) {
-  SetAnalysisConnector(profile_->GetPrefs(),
-                       enterprise_connectors::FILE_DOWNLOADED,
-                       kScanForDlpAndMalware);
+  enterprise_connectors::test::SetAnalysisConnector(
+      profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+      kScanForDlpAndMalware);
 
   content::DownloadItemUtils::AttachInfoForTesting(&item_, profile_, nullptr);
 
@@ -1767,14 +3739,19 @@ TEST_F(DeepScanningRequestConnectorsFeatureTest, ShouldUploadBinary_FileURLs) {
   EXPECT_FALSE(settings().has_value());
 }
 
-TEST_F(DeepScanningRequestAllFeaturesEnabledTest, PopulatesRequest) {
-  SetAnalysisConnector(profile_->GetPrefs(),
-                       enterprise_connectors::FILE_DOWNLOADED,
-                       kScanForDlpAndMalware);
+TEST_P(DeepScanningRequestAllFeaturesEnabledTest, PopulatesRequest) {
+  enterprise_connectors::test::SetAnalysisConnector(
+      profile_->GetPrefs(), enterprise_connectors::FILE_DOWNLOADED,
+      kScanForDlpAndMalware);
+
+  // Override mime type to platform-independent value for testing.
+  net::ScopedOverrideGetMimeTypeForTesting override_mime_type(
+      "application/octet-stream");
 
   base::RunLoop run_loop;
   DeepScanningRequest request(
-      &item_, DeepScanningRequest::DeepScanTrigger::TRIGGER_POLICY,
+      CreateMetadata(),
+      DownloadItemWarningData::DeepScanTrigger::TRIGGER_POLICY,
       DownloadCheckResult::SAFE,
       base::BindRepeating(
           [](base::RepeatingClosure closure, DownloadCheckResult result) {
@@ -1783,7 +3760,9 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest, PopulatesRequest) {
             }
           },
           run_loop.QuitClosure()),
-      &download_protection_service_, settings().value());
+      &download_protection_service_, settings().value(),
+      /*password=*/std::nullopt);
+
   request.Start();
   run_loop.Run();
   EXPECT_EQ(download_protection_service_.GetFakeBinaryUploadService()
@@ -1808,5 +3787,11 @@ TEST_F(DeepScanningRequestAllFeaturesEnabledTest, PopulatesRequest) {
                 .tab_url(),
             GURL("https://example.com"));
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    AllFeaturesEnabled,
+    DeepScanningRequestAllFeaturesEnabledTest,
+    testing::Values(MetadataSourceType::kDownloadItem,
+                    MetadataSourceType::kFileSystemAccessWriteItem));
 
 }  // namespace safe_browsing

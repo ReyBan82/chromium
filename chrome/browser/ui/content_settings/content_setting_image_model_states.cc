@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "chrome/browser/ui/content_settings/content_setting_image_model_states.h"
 
 #include "base/check_op.h"
@@ -11,8 +12,9 @@ ContentSettingImageModelStates::~ContentSettingImageModelStates() = default;
 // static
 ContentSettingImageModelStates* ContentSettingImageModelStates::Get(
     content::WebContents* contents) {
-  if (auto* state = FromWebContents(contents))
+  if (auto* state = FromWebContents(contents)) {
     return state;
+  }
   CreateForWebContents(contents);
   return FromWebContents(contents);
 }
@@ -72,7 +74,7 @@ ContentSettingImageModelStates::ContentSettingImageModelStates(
 
 void ContentSettingImageModelStates::VerifyType(ImageType type) const {
   CHECK_GE(type, static_cast<ImageType>(0));
-  CHECK_LT(type, ImageType::NUM_IMAGE_TYPES);
+  CHECK_LE(type, ImageType::kMaxValue);
 }
 
 WEB_CONTENTS_USER_DATA_KEY_IMPL(ContentSettingImageModelStates);

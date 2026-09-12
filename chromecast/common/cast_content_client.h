@@ -5,6 +5,7 @@
 #ifndef CHROMECAST_COMMON_CAST_CONTENT_CLIENT_H_
 #define CHROMECAST_COMMON_CAST_CONTENT_CLIENT_H_
 
+#include <string_view>
 #include <vector>
 
 #include "base/task/sequenced_task_runner.h"
@@ -23,10 +24,11 @@ class CastContentClient : public content::ContentClient {
   void SetActiveURL(const GURL& url, std::string top_origin) override;
   void AddAdditionalSchemes(Schemes* schemes) override;
   std::u16string GetLocalizedString(int message_id) override;
-  base::StringPiece GetDataResource(
+  std::string_view GetDataResource(
       int resource_id,
       ui::ResourceScaleFactor scale_factor) override;
-  base::RefCountedMemory* GetDataResourceBytes(int resource_id) override;
+  scoped_refptr<base::RefCountedMemory> GetDataResourceBytes(
+      int resource_id) override;
   std::string GetDataResourceString(int resource_id) override;
   gfx::Image& GetNativeImageNamed(int resource_id) override;
 #if BUILDFLAG(IS_ANDROID)

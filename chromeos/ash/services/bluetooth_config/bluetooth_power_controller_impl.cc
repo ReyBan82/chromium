@@ -9,6 +9,7 @@
 #include "components/device_event_log/device_event_log.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
+#include "components/session_manager/core/session_manager.h"
 #include "components/user_manager/user_manager.h"
 
 namespace ash::bluetooth_config {
@@ -21,9 +22,8 @@ namespace {
 // do not represent human account so those account should follow system-wide
 // Bluetooth setting instead.
 bool ShouldApplyUserBluetoothSetting(user_manager::UserType user_type) {
-  return user_type == user_manager::USER_TYPE_REGULAR ||
-         user_type == user_manager::USER_TYPE_CHILD ||
-         user_type == user_manager::USER_TYPE_ACTIVE_DIRECTORY;
+  return user_type == user_manager::UserType::kRegular ||
+         user_type == user_manager::UserType::kChild;
 }
 
 }  // namespace
@@ -45,7 +45,8 @@ void BluetoothPowerControllerImpl::RegisterProfilePrefs(
 BluetoothPowerControllerImpl::BluetoothPowerControllerImpl(
     AdapterStateController* adapter_state_controller)
     : adapter_state_controller_(adapter_state_controller) {
-  adapter_state_controller_observation_.Observe(adapter_state_controller_);
+  adapter_state_controller_observation_.Observe(
+      adapter_state_controller_.get());
 }
 
 BluetoothPowerControllerImpl::~BluetoothPowerControllerImpl() = default;
@@ -69,8 +70,8 @@ void BluetoothPowerControllerImpl::SetBluetoothEnabledState(bool enabled) {
   SetAdapterState(enabled);
 }
 
-void BluetoothPowerControllerImpl::SetBluetoothHidDetectionActive() {
-  BLUETOOTH_LOG(EVENT) << "HID detection started, enabling adapter.";
+void BluetoothPowerControllerImpl::SetBluetoothEnabledWithoutPersistence() {
+  BLUETOOTH_LOG(EVENT) << "Enabling adapter without persistence...";
   SetAdapterState(true);
 }
 
@@ -173,8 +174,8 @@ void BluetoothPowerControllerImpl::InitPrimaryUserPrefService(
     return;
   }
 
-  DCHECK_EQ(user_manager::UserManager::Get()->GetActiveUser(),
-            user_manager::UserManager::Get()->GetPrimaryUser());
+  DCHECK_EQ(session_manager::SessionManager::Get()->GetActiveSession(),
+            session_manager::SessionManager::Get()->GetPrimarySession());
 
   if (!has_attempted_apply_primary_user_pref_) {
     BLUETOOTH_LOG(EVENT)
@@ -185,7 +186,7 @@ void BluetoothPowerControllerImpl::InitPrimaryUserPrefService(
 }
 
 void BluetoothPowerControllerImpl::ApplyBluetoothPrimaryUserPref() {
-  absl::optional<user_manager::UserType> user_type =
+  std::optional<user_manager::UserType> user_type =
       user_manager::UserManager::Get()->GetActiveUser()->GetType();
 
   // Apply the Bluetooth pref only for regular users (i.e. users representing

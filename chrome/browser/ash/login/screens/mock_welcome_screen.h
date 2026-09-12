@@ -13,11 +13,16 @@
 #include "chrome/browser/ui/webui/ash/login/welcome_screen_handler.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
+class PrefService;
+
 namespace ash {
 
 class MockWelcomeScreen : public WelcomeScreen {
  public:
-  MockWelcomeScreen(base::WeakPtr<WelcomeView> view,
+  // `local_state` must be non-null and must outlive `this`.
+  MockWelcomeScreen(PrefService* local_state,
+                    ApplicationLocaleStorage* application_locale_storage,
+                    base::WeakPtr<WelcomeView> view,
                     const WelcomeScreen::ScreenExitCallback& exit_callback);
 
   MockWelcomeScreen(const MockWelcomeScreen&) = delete;
@@ -31,7 +36,7 @@ class MockWelcomeScreen : public WelcomeScreen {
   void ExitScreen(Result result);
 };
 
-class MockWelcomeView : public WelcomeView {
+class MockWelcomeView final : public WelcomeView {
  public:
   MockWelcomeView();
 
@@ -41,7 +46,7 @@ class MockWelcomeView : public WelcomeView {
   ~MockWelcomeView() override;
 
   MOCK_METHOD(void, Show, ());
-  MOCK_METHOD(void, SetLanguageList, (base::Value::List));
+  MOCK_METHOD(void, SetLanguageList, (base::ListValue));
   MOCK_METHOD(void, SetInputMethodId, (const std::string& input_method_id));
   MOCK_METHOD(void, SetTimezoneId, (const std::string& timezone_id));
   MOCK_METHOD(void, ShowDemoModeConfirmationDialog, ());
@@ -51,6 +56,13 @@ class MockWelcomeView : public WelcomeView {
   MOCK_METHOD(void, CancelChromeVoxHintIdleDetection, ());
   MOCK_METHOD(void, UpdateA11yState, (const A11yState&));
   MOCK_METHOD(void, SetQuickStartEnabled, ());
+
+  base::WeakPtr<WelcomeView> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+ private:
+  base::WeakPtrFactory<WelcomeView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

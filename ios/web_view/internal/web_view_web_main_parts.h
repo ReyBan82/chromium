@@ -8,6 +8,10 @@
 #include "base/metrics/field_trial.h"
 #include "ios/web/public/init/web_main_parts.h"
 
+namespace display {
+class ScopedNativeScreen;
+}  // namespace display
+
 namespace ios_web_view {
 
 // WebView implementation of WebMainParts.
@@ -24,18 +28,15 @@ class WebViewWebMainParts : public web::WebMainParts {
   // web::WebMainParts implementation.
   void PreCreateMainMessageLoop() override;
   void PreCreateThreads() override;
+  void PostCreateThreads() override;
   void PreMainMessageLoopRun() override;
   void PostMainMessageLoopRun() override;
   void PostDestroyThreads() override;
 
-  // Loads resources that are not scaled. f.e. javascript files.
-  void LoadNonScalableResources();
-  // Loads resources that can be scaled. f.e. png images for @1x, @2x, and @3x.
-  void LoadScalableResources();
-
   // Dummy FieldTrialList instance for code that consumes variations data,
   // although ios WebView does not support variations.
   base::FieldTrialList field_trial_list_;
+  std::unique_ptr<display::ScopedNativeScreen> screen_;
 };
 
 }  // namespace ios_web_view

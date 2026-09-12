@@ -92,7 +92,8 @@ ConnectivityCheckerImpl::ConnectivityCheckerImpl(
       cast_metrics_helper_(metrics::CastMetricsHelper::GetInstance()),
       connected_and_time_synced_(false),
       network_connected_(false),
-      connection_type_(network::mojom::ConnectionType::CONNECTION_NONE),
+      connection_type_(
+          net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE),
       check_errors_(0),
       network_changed_pending_(false),
       disconnected_probe_period_(disconnected_probe_period),
@@ -185,7 +186,8 @@ void ConnectivityCheckerImpl::CheckInternal() {
   DCHECK(task_runner_->BelongsToCurrentThread());
   DCHECK(url_loader_factory_);
 
-  auto connection_type = network::mojom::ConnectionType::CONNECTION_UNKNOWN;
+  auto connection_type =
+      net::NetworkChangeNotifier::ConnectionType::CONNECTION_UNKNOWN;
   bool is_sync = network_connection_tracker_->GetConnectionType(
       &connection_type,
       base::BindOnce(&ConnectivityCheckerImpl::OnConnectionChanged,
@@ -196,7 +198,8 @@ void ConnectivityCheckerImpl::CheckInternal() {
   // synchronously retrieved, since OnConnectionChanged will be triggered later
   // which will cause duplicate checks.
   if (!is_sync ||
-      connection_type == network::mojom::ConnectionType::CONNECTION_NONE) {
+      connection_type ==
+          net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE) {
     return;
   }
 
@@ -228,13 +231,12 @@ void ConnectivityCheckerImpl::CheckInternal() {
       &ConnectivityCheckerImpl::OnConnectivityCheckComplete, weak_this_);
   url_loader_->DownloadHeadersOnly(url_loader_factory_.get(),
                                    std::move(callback));
-
-  timeout_.Reset(base::BindOnce(&ConnectivityCheckerImpl::OnUrlRequestTimeout,
-                                weak_this_));
   // Exponential backoff for timeout in 3, 6 and 12 sec.
   const base::TimeDelta timeout =
       kRequestTimeout *
       std::pow(2, std::min(check_errors_, static_cast<unsigned int>(2)));
+  timeout_.Reset(base::BindOnce(&ConnectivityCheckerImpl::OnUrlRequestTimeout,
+                                weak_this_, timeout));
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, timeout_.callback(), timeout);
 }
@@ -246,7 +248,7 @@ void ConnectivityCheckerImpl::SetCastMetricsHelperForTesting(
 }
 
 void ConnectivityCheckerImpl::OnConnectionChanged(
-    network::mojom::ConnectionType type) {
+    net::NetworkChangeNotifier::ConnectionType type) {
   DVLOG(2) << "OnConnectionChanged " << type;
   connection_type_ = type;
 
@@ -269,7 +271,8 @@ void ConnectivityCheckerImpl::OnConnectionChangedInternal() {
   network_changed_pending_ = false;
   Cancel();
 
-  if (connection_type_ == network::mojom::ConnectionType::CONNECTION_NONE) {
+  if (connection_type_ ==
+      net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE) {
     SetConnected(false);
     return;
   }
@@ -323,9 +326,6 @@ void ConnectivityCheckerImpl::OnConnectivityCheckComplete(
   DVLOG(1) << "Connectivity check succeeded";
   check_errors_ = 0;
   SetConnected(true);
-  if (time_sync_tracker_) {
-    time_sync_tracker_->OnNetworkConnected();
-  }
   // Some products don't have an idle screen that makes periodic network
   // requests. Schedule another check to ensure connectivity hasn't dropped.
   delayed_check_.Reset(
@@ -357,11 +357,11 @@ void ConnectivityCheckerImpl::OnUrlRequestError(ErrorType type) {
                                 disconnected_probe_period_);
 }
 
-void ConnectivityCheckerImpl::OnUrlRequestTimeout() {
+void ConnectivityCheckerImpl::OnUrlRequestTimeout(base::TimeDelta timeout) {
   DCHECK(task_runner_->BelongsToCurrentThread());
   DCHECK(url_loader_);
   url_loader_ = nullptr;
-  LOG(ERROR) << "time out";
+  LOG(WARNING) << "timed out after " << timeout;
   OnUrlRequestError(ErrorType::REQUEST_TIMEOUT);
 }
 

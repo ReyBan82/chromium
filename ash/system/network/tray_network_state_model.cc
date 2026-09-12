@@ -9,16 +9,16 @@
 
 #include "ash/public/cpp/network_config_service.h"
 #include "ash/system/network/vpn_list.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
+#include "base/memory/raw_ptr.h"
 #include "chromeos/services/network_config/public/cpp/cros_network_config_observer.h"
 #include "chromeos/services/network_config/public/cpp/cros_network_config_util.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 
 namespace ash {
 
@@ -137,7 +137,7 @@ class TrayNetworkStateModel::Impl
     GetGlobalPolicy();
   }
 
-  TrayNetworkStateModel* model_;
+  raw_ptr<TrayNetworkStateModel> model_;
   mojo::Remote<chromeos::network_config::mojom::CrosNetworkConfig>
       remote_cros_network_config_;
   mojo::Receiver<chromeos::network_config::mojom::CrosNetworkConfigObserver>
@@ -146,8 +146,8 @@ class TrayNetworkStateModel::Impl
 
 TrayNetworkStateModel::TrayNetworkStateModel()
     : update_frequency_(kUpdateFrequencyMs) {
-  if (ui::ScopedAnimationDurationScaleMode::duration_multiplier() !=
-      ui::ScopedAnimationDurationScaleMode::NORMAL_DURATION) {
+  if (gfx::ScopedAnimationDurationScaleMode::duration_multiplier() !=
+      gfx::ScopedAnimationDurationScaleMode::NORMAL_DURATION) {
     update_frequency_ = 0;  // Send updates immediately for tests.
   }
 
@@ -211,7 +211,7 @@ void TrayNetworkStateModel::OnGetDeviceStateList(
   devices_.clear();
   for (auto& device : devices) {
     NetworkType type = device->type;
-    if (base::Contains(devices_, type))
+    if (devices_.contains(type))
       continue;  // Ignore multiple entries with the same type.
     devices_.emplace(std::make_pair(type, std::move(device)));
   }

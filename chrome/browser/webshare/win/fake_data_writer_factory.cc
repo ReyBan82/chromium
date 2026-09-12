@@ -8,6 +8,7 @@
 #include <windows.foundation.h>
 #include <wrl/async.h>
 
+#include "base/compiler_specific.h"
 #include "base/memory/weak_ptr.h"
 #include "base/test/fake_iasync_operation_win.h"
 #include "chrome/browser/webshare/win/fake_buffer.h"
@@ -38,8 +39,11 @@ class FakeDataWriter final
     : public RuntimeClass<RuntimeClassFlags<Microsoft::WRL::WinRtClassicComMix>,
                           IDataWriter> {
  public:
-  explicit FakeDataWriter(IOutputStream* output_stream)
-      : output_stream_(output_stream) {}
+  explicit FakeDataWriter(bool check_for_unflushed_writer_destroyed,
+                          IOutputStream* output_stream)
+      : check_for_unflushed_writer_destroyed_(
+            check_for_unflushed_writer_destroyed),
+        output_stream_(output_stream) {}
   FakeDataWriter(const FakeDataWriter&) = delete;
   FakeDataWriter& operator=(const FakeDataWriter&) = delete;
   ~FakeDataWriter() final {
@@ -47,33 +51,25 @@ class FakeDataWriter final
         << "FakeDataWriter destroyed with data pending storage.";
     EXPECT_FALSE(store_async_in_progress_)
         << "FakeDataWriter destroyed while store operation is in progress.";
-    EXPECT_TRUE(flush_called_)
-        << "FakeDataWriter destroyed without calling FlushAsync.";
+    if (check_for_unflushed_writer_destroyed_) {
+      EXPECT_TRUE(flush_called_)
+          << "FakeDataWriter destroyed without calling FlushAsync.";
+    }
   }
 
   // IDataWriter
-  IFACEMETHODIMP get_UnstoredBufferLength(UINT32* value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  IFACEMETHODIMP get_UnstoredBufferLength(UINT32* value) final { NOTREACHED(); }
   IFACEMETHODIMP get_UnicodeEncoding(UnicodeEncoding* value) final {
     NOTREACHED();
-    return E_NOTIMPL;
   }
   IFACEMETHODIMP put_UnicodeEncoding(UnicodeEncoding value) final {
     return S_OK;
   }
   IFACEMETHODIMP
-  get_ByteOrder(ByteOrder* value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  get_ByteOrder(ByteOrder* value) final { NOTREACHED(); }
   IFACEMETHODIMP
   put_ByteOrder(ByteOrder value) final { return S_OK; }
-  IFACEMETHODIMP WriteByte(BYTE value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  IFACEMETHODIMP WriteByte(BYTE value) final { NOTREACHED(); }
   IFACEMETHODIMP WriteBytes(UINT32 value_length, BYTE* value) final {
     if (store_async_in_progress_) {
       ADD_FAILURE()
@@ -118,77 +114,35 @@ class FakeDataWriter final
     }
 
     for (UINT32 i = 0; i < value_length; i++) {
-      raw_buffer[i] = value[i];
+      UNSAFE_TODO(raw_buffer[i]) = UNSAFE_TODO(value[i]);
     }
     return S_OK;
   }
   IFACEMETHODIMP
-  WriteBuffer(IBuffer* buffer) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  WriteBuffer(IBuffer* buffer) final { NOTREACHED(); }
   IFACEMETHODIMP
   WriteBufferRange(IBuffer* buffer, UINT32 start, UINT32 count) final {
     NOTREACHED();
-    return E_NOTIMPL;
   }
-  IFACEMETHODIMP WriteBoolean(boolean value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteGuid(GUID value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteInt16(INT16 value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteInt32(INT32 value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteInt64(INT64 value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteUInt16(UINT16 value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteUInt32(UINT32 value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteUInt64(UINT64 value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteSingle(FLOAT value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
-  IFACEMETHODIMP WriteDouble(DOUBLE value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  IFACEMETHODIMP WriteBoolean(boolean value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteGuid(GUID value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteInt16(INT16 value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteInt32(INT32 value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteInt64(INT64 value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteUInt16(UINT16 value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteUInt32(UINT32 value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteUInt64(UINT64 value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteSingle(FLOAT value) final { NOTREACHED(); }
+  IFACEMETHODIMP WriteDouble(DOUBLE value) final { NOTREACHED(); }
   IFACEMETHODIMP
-  WriteDateTime(DateTime value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  WriteDateTime(DateTime value) final { NOTREACHED(); }
   IFACEMETHODIMP
-  WriteTimeSpan(TimeSpan value) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  WriteTimeSpan(TimeSpan value) final { NOTREACHED(); }
   IFACEMETHODIMP WriteString(HSTRING value, UINT32* code_unit_count) final {
     NOTREACHED();
-    return E_NOTIMPL;
   }
   IFACEMETHODIMP MeasureString(HSTRING value, UINT32* code_unit_count) final {
     NOTREACHED();
-    return E_NOTIMPL;
   }
   IFACEMETHODIMP
   StoreAsync(IAsyncOperation<UINT32>** operation) final {
@@ -277,16 +231,13 @@ class FakeDataWriter final
     return hr;
   }
   IFACEMETHODIMP
-  DetachBuffer(IBuffer** buffer) final {
-    NOTREACHED();
-    return E_NOTIMPL;
-  }
+  DetachBuffer(IBuffer** buffer) final { NOTREACHED(); }
   IFACEMETHODIMP DetachStream(IOutputStream** output_stream) final {
     NOTREACHED();
-    return E_NOTIMPL;
   }
 
  private:
+  bool check_for_unflushed_writer_destroyed_;
   ComPtr<IBuffer> buffer_;
   bool flush_called_ = false;
   ComPtr<IOutputStream> output_stream_;
@@ -306,13 +257,18 @@ IFACEMETHODIMP FakeDataWriterFactory::CreateDataWriter(
     ADD_FAILURE() << "CreateDataWriter called with null output_stream.";
     return E_INVALIDARG;
   }
-  auto fake_data_writer = Make<FakeDataWriter>(output_stream);
+  auto fake_data_writer = Make<FakeDataWriter>(
+      check_for_unflushed_writer_destroyed_, output_stream);
   HRESULT hr = fake_data_writer->QueryInterface(IID_PPV_ARGS(data_writer));
   if (FAILED(hr)) {
     EXPECT_HRESULT_SUCCEEDED(hr);
     return hr;
   }
   return S_OK;
+}
+
+void FakeDataWriterFactory::SetCheckForUnflushedWriterDestroyed(bool check) {
+  check_for_unflushed_writer_destroyed_ = check;
 }
 
 }  // namespace webshare

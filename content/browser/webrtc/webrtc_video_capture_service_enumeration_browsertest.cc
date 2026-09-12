@@ -6,7 +6,6 @@
 #include "base/strings/stringprintf.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/video_capture_service.h"
 #include "content/public/common/content_features.h"
@@ -58,9 +57,7 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
       public testing::WithParamInterface<TestParams>,
       public video_capture::mojom::DevicesChangedObserver {
  public:
-  WebRtcVideoCaptureServiceEnumerationBrowserTest() {
-    scoped_feature_list_.InitAndEnableFeature(features::kMojoVideoCapture);
-  }
+  WebRtcVideoCaptureServiceEnumerationBrowserTest() = default;
 
   WebRtcVideoCaptureServiceEnumerationBrowserTest(
       const WebRtcVideoCaptureServiceEnumerationBrowserTest&) = delete;
@@ -83,7 +80,7 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
   void AddVirtualDevice(const std::string& device_id) {
     media::VideoCaptureDeviceInfo info;
     info.descriptor.device_id = device_id;
-    info.descriptor.set_display_name(device_id);
+    info.descriptor.set_display_name("Virtual Chromium " + device_id);
     info.descriptor.capture_api = media::VideoCaptureApi::VIRTUAL_DEVICE;
 
     base::RunLoop wait_loop;
@@ -139,8 +136,7 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
       int expected_device_count) {
     const std::string javascript_to_execute = base::StringPrintf(
         kEnumerateVideoCaptureDevicesAndVerify, expected_device_count);
-    ASSERT_EQ("OK", EvalJs(shell(), javascript_to_execute,
-                           EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+    ASSERT_TRUE(ExecJs(shell(), javascript_to_execute));
   }
 
   void RegisterForDeviceChangeEventInRenderer() {
@@ -148,8 +144,7 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
   }
 
   void WaitForDeviceChangeEventInRenderer() {
-    ASSERT_EQ("OK", EvalJs(shell(), kWaitForDeviceChangeEvent,
-                           EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+    ASSERT_TRUE(ExecJs(shell(), kWaitForDeviceChangeEvent));
   }
 
   void ResetHasReceivedChangedEventFlag() {
@@ -195,7 +190,6 @@ class WebRtcVideoCaptureServiceEnumerationBrowserTest
  private:
   mojo::Receiver<video_capture::mojom::DevicesChangedObserver>
       devices_changed_observer_receiver_{this};
-  base::test::ScopedFeatureList scoped_feature_list_;
   mojo::Remote<video_capture::mojom::VideoSourceProvider>
       video_source_provider_;
   base::OnceClosure closure_to_be_called_on_devices_changed_;
@@ -207,25 +201,34 @@ IN_PROC_BROWSER_TEST_P(WebRtcVideoCaptureServiceEnumerationBrowserTest,
   ConnectToService();
 
   // Exercise
-  AddVirtualDevice("test");
+  AddVirtualDevice("virtual-chromium-test");
   EnumerateDevicesInRendererAndVerifyDeviceCount(1);
 
   // Tear down
-  RemoveVirtualDevice("test");
+  RemoveVirtualDevice("virtual-chromium-test");
   DisconnectFromService();
 }
 
+// TODO(https://crbug.com/352672009): Flaky on Mac.
+// TODO(https://crbug.com/352092989): Flaky on Windows.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+#define MAYBE_RemoveVirtualDeviceAfterItHasBeenEnumerated \
+  DISABLED_RemoveVirtualDeviceAfterItHasBeenEnumerated
+#else
+#define MAYBE_RemoveVirtualDeviceAfterItHasBeenEnumerated \
+  RemoveVirtualDeviceAfterItHasBeenEnumerated
+#endif
 IN_PROC_BROWSER_TEST_P(WebRtcVideoCaptureServiceEnumerationBrowserTest,
-                       RemoveVirtualDeviceAfterItHasBeenEnumerated) {
+                       MAYBE_RemoveVirtualDeviceAfterItHasBeenEnumerated) {
   Initialize();
   ConnectToService();
 
-  AddVirtualDevice("test_1");
-  AddVirtualDevice("test_2");
+  AddVirtualDevice("virtual-chromium-test-1");
+  AddVirtualDevice("virtual-chromium-test-2");
   EnumerateDevicesInRendererAndVerifyDeviceCount(2);
-  RemoveVirtualDevice("test_1");
+  RemoveVirtualDevice("virtual-chromium-test-1");
   EnumerateDevicesInRendererAndVerifyDeviceCount(1);
-  RemoveVirtualDevice("test_2");
+  RemoveVirtualDevice("virtual-chromium-test-2");
   EnumerateDevicesInRendererAndVerifyDeviceCount(0);
 
   // Tear down
@@ -233,9 +236,7 @@ IN_PROC_BROWSER_TEST_P(WebRtcVideoCaptureServiceEnumerationBrowserTest,
 }
 
 // The mediadevices.ondevicechange event is currently not supported on Android.
-// Flaky on ChromeOS.  https://crbug.com/1126373
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS_ASH) || \
-    BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_ANDROID)
 #define MAYBE_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange \
   DISABLED_AddingAndRemovingVirtualDeviceTriggersMediaElementOnDeviceChange
 #else
@@ -249,14 +250,17 @@ IN_PROC_BROWSER_TEST_P(
   Initialize();
   ConnectToService();
   RegisterForDeviceChangeEventInRenderer();
+  // Waiting for enumeration ensures that the browser everything is primed for
+  // device change events.
+  EnumerateDevicesInRendererAndVerifyDeviceCount(0);
 
   // Exercise
-  AddVirtualDevice("test");
+  AddVirtualDevice("virtual-chromium-test");
 
   WaitForDeviceChangeEventInRenderer();
   ResetHasReceivedChangedEventFlag();
 
-  RemoveVirtualDevice("test");
+  RemoveVirtualDevice("virtual-chromium-test");
   WaitForDeviceChangeEventInRenderer();
 
   // Tear down

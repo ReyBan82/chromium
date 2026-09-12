@@ -6,19 +6,16 @@
 #define CHROME_BROWSER_ENTERPRISE_PLATFORM_AUTH_PLATFORM_AUTH_FEATURES_H_
 
 #include "base/feature_list.h"
-#include "build/build_config.h"
 
 namespace enterprise_auth {
 
-#if BUILDFLAG(IS_WIN)
-// Controls whether ambient authentication using the CloudAP framework is
-// enabled.
-BASE_DECLARE_FEATURE(kCloudApAuth);
+BASE_DECLARE_FEATURE(kEnableExtensibleEnterpriseSSO);
 
-// Determines whether authentication data beginning with 'x-ms-' should be added
-// to requests as a header instead of a cookie.
-BASE_DECLARE_FEATURE(kCloudApAuthAttachAsHeader);
-#endif  // BUILDFLAG(IS_WIN)
+BASE_DECLARE_FEATURE(kAndroidEntraSSO);
+
+// Kill switch for the new data queuing and concurrent request handling in
+// CloudApProviderWin. Enabled by default. See http://crbug.com/520389619.
+BASE_DECLARE_FEATURE(kCloudApAuthDataQueueing);
 
 }  // namespace enterprise_auth
 

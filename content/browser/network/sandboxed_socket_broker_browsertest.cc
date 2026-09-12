@@ -2,17 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <optional>
+
 #include "base/feature_list.h"
+#include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/test/scoped_feature_list.h"
-#include "content/browser/buildflags.h"
-#include "content/browser/network/socket_broker_impl.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/network_service_instance.h"
+#include "content/public/browser/network_service_util.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_features.h"
-#include "content/public/common/network_service_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/shell/browser/shell.h"
@@ -20,18 +21,18 @@
 #include "mojo/public/cpp/system/data_pipe_utils.h"
 #include "mojo/public/cpp/system/handle.h"
 #include "net/base/ip_endpoint.h"
+#include "net/base/net_errors.h"
 #include "net/socket/tcp_server_socket.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
-#include "sandbox/features.h"
 #include "sandbox/policy/features.h"
 #include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom.h"
+#include "services/network/public/cpp/socket_broker_impl.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/tcp_socket.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(IS_ANDROID)
-#include "base/android/build_info.h"
+#include "base/android/android_info.h"
 #endif
 
 namespace content {
@@ -47,35 +48,29 @@ class SandboxedSocketBrokerBrowserTest : public ContentBrowserTest {
     // enabled. Since it is not strictly necessary to test socket brokering core
     // functionality with the featurelist we won't enable it on Android versions
     // prior to R.
-    const int sdk_version = base::android::BuildInfo::GetInstance()->sdk_int();
-    if (sdk_version >= base::android::SdkVersion::SDK_VERSION_R) {
-      std::vector<base::test::FeatureRef> enabled_features = {
-          sandbox::policy::features::kNetworkServiceSandbox,
-      };
-      scoped_feature_list_.InitWithFeatures(
-          enabled_features, {features::kNetworkServiceInProcess});
-    } else {
+    const int sdk_version = base::android::android_info::sdk_int();
+    check_sandbox_ = sdk_version >= base::android::SdkVersion::SDK_VERSION_R;
+#endif  // BUILDFLAG(IS_ANDROID)
+
+#if BUILDFLAG(IS_WIN)
+    if (!sandbox::policy::features::IsNetworkSandboxSupported()) {
       check_sandbox_ = false;
     }
-#else
-#if BUILDFLAG(IS_WIN)
-    if (!sandbox::features::IsAppContainerSandboxSupported())
-      check_sandbox_ = false;
 #endif  // BUILDFLAG(IS_WIN)
-    std::vector<base::test::FeatureRef> enabled_features = {
+
+    if (check_sandbox_) {
 #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
       // Network Service Sandboxing is unconditionally enabled on these
       // platforms.
-      sandbox::policy::features::kNetworkServiceSandbox,
+      scoped_feature_list_.InitAndEnableFeature(
+          sandbox::policy::features::kNetworkServiceSandbox);
 #endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
-    };
-    scoped_feature_list_.InitWithFeatures(enabled_features,
-                                          {features::kNetworkServiceInProcess});
-#endif  // BUILDFLAG(IS_ANDROID)
+      ForceOutOfProcessNetworkService();
+    }
   }
 
   void SetUp() override {
-#if BUILDFLAG(USE_SOCKET_BROKER)
+#if BUILDFLAG(IS_WIN)
     if (check_sandbox_) {
       ASSERT_TRUE(IsOutOfProcessNetworkService());
       ASSERT_TRUE(sandbox::policy::features::IsNetworkSandboxEnabled());
@@ -92,7 +87,7 @@ class SandboxedSocketBrokerBrowserTest : public ContentBrowserTest {
 #endif
   }
 
-#if BUILDFLAG(USE_SOCKET_BROKER)
+#if BUILDFLAG(IS_WIN)
   void SetUpOnMainThread() override {
     embedded_test_server_.StartAcceptingConnections();
   }
@@ -101,8 +96,9 @@ class SandboxedSocketBrokerBrowserTest : public ContentBrowserTest {
   std::unique_ptr<net::test_server::HttpResponse> HandleRequest(
       const net::test_server::HttpRequest& request) {
     GURL absolute_url = embedded_test_server_.GetURL(request.relative_url);
-    if (absolute_url.path() != "/test")
+    if (absolute_url.GetPath() != "/test") {
       return nullptr;
+    }
 
     auto http_response =
         std::make_unique<net::test_server::BasicHttpResponse>();
@@ -131,8 +127,8 @@ mojo::Remote<network::mojom::NetworkContext> CreateNetworkContext() {
 
 void OnConnected(base::OnceClosure quit_closure,
                  int result,
-                 const absl::optional<net::IPEndPoint>& local_addr,
-                 const absl::optional<net::IPEndPoint>& peer_addr,
+                 const std::optional<net::IPEndPoint>& local_addr,
+                 const std::optional<net::IPEndPoint>& peer_addr,
                  mojo::ScopedDataPipeConsumerHandle receive_stream,
                  mojo::ScopedDataPipeProducerHandle send_stream) {
   base::ScopedClosureRunner closure_runner(std::move(quit_closure));
@@ -166,7 +162,7 @@ void RunTcpEndToEndTest(
 
   base::RunLoop run_loop;
   network_context->CreateTCPConnectedSocket(
-      absl::nullopt, addr,
+      std::nullopt, addr,
       use_options ? std::move(tcp_connected_socket_options) : nullptr,
       net::MutableNetworkTrafficAnnotationTag(TRAFFIC_ANNOTATION_FOR_TESTS),
       tcp_connected_socket_remote.InitWithNewPipeAndPassReceiver(),
@@ -203,14 +199,25 @@ IN_PROC_BROWSER_TEST_F(SandboxedSocketBrokerBrowserTest,
 }
 
 // Implementation of network::mojom::SocketBroker that tracks the number of
-// times CreateTcpSocket has been called.
-class CountingSocketBrokerImpl : public SocketBrokerImpl {
+// times Create*Socket has been called.
+class CountingSocketBrokerImpl : public network::SocketBrokerImpl {
  public:
-  void CreateTcpSocket(net::AddressFamily address_family,
-                       CreateTcpSocketCallback callback) override {
-    ++tcp_socket_count_;
-    SocketBrokerImpl::CreateTcpSocket(address_family, std::move(callback));
+  CountingSocketBrokerImpl() {
+    // This use of base::Unretained() is safe because we clear the callback in
+    // the destructor before `tcp_socket_count_` becomes invalid.
+    set_socket_creation_interceptor_for_testing(base::BindRepeating(
+        [](int* tcp_socket_count) -> int {
+          ++*tcp_socket_count;
+          return net::OK;
+        },
+        base::Unretained(&tcp_socket_count_)));
   }
+
+  ~CountingSocketBrokerImpl() override {
+    set_socket_creation_interceptor_for_testing(
+        network::SocketBrokerImpl::SocketCreationInterceptor());
+  }
+
   int tcp_socket_count() { return tcp_socket_count_; }
 
  private:
@@ -222,7 +229,12 @@ IN_PROC_BROWSER_TEST_F(SandboxedSocketBrokerBrowserTest,
   CountingSocketBrokerImpl socket_broker;
   network::mojom::NetworkContextParamsPtr network_context_params =
       network::mojom::NetworkContextParams::New();
-  network_context_params->socket_broker = socket_broker.BindNewRemote();
+  network_context_params->socket_brokers =
+      network::mojom::SocketBrokerRemotes::New();
+  network_context_params->socket_brokers->client =
+      socket_broker.BindNewRemote();
+  network_context_params->socket_brokers->server =
+      socket_broker.BindNewRemote();
   auto file_paths = network::mojom::NetworkContextFilePaths::New();
   base::FilePath context_path =
       shell()->web_contents()->GetBrowserContext()->GetPath().Append(
@@ -234,7 +246,7 @@ IN_PROC_BROWSER_TEST_F(SandboxedSocketBrokerBrowserTest,
   network_context_params->cert_verifier_params = GetCertVerifierParams(
       cert_verifier::mojom::CertVerifierCreationParams::New());
   network_context_params->http_cache_enabled = true;
-  network_context_params->http_cache_directory =
+  network_context_params->file_paths->http_cache_directory =
       shell()
           ->web_contents()
           ->GetBrowserContext()

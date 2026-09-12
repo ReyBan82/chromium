@@ -9,22 +9,28 @@
 #include "base/i18n/rtl.h"
 #include "base/memory/raw_ptr.h"
 #include "base/metrics/user_metrics.h"
-#include "chromeos/ui/base/tablet_state.h"
 #include "chromeos/ui/base/window_properties.h"
 #include "chromeos/ui/frame/caption_buttons/snap_controller.h"
 #include "chromeos/ui/frame/frame_utils.h"
 #include "chromeos/ui/frame/multitask_menu/multitask_menu.h"
-#include "chromeos/ui/wm/features.h"
+#include "chromeos/ui/frame/multitask_menu/multitask_menu_nudge_controller.h"
+#include "chromeos/utils/haptics_util.h"
+#include "third_party/skia/include/core/SkPath.h"
+#include "third_party/skia/include/core/SkPathBuilder.h"
+#include "ui/aura/client/cursor_client.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_observer.h"
 #include "ui/base/hit_test.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
+#include "ui/display/screen.h"
 #include "ui/display/tablet_state.h"
+#include "ui/events/devices/haptic_touchpad_effects.h"
 #include "ui/gfx/animation/animation_delegate.h"
 #include "ui/gfx/animation/slide_animation.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/vector2d.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 #include "ui/views/animation/animation_delegate_views.h"
 #include "ui/views/animation/compositor_animation_runner.h"
 #include "ui/views/widget/widget.h"
@@ -36,13 +42,15 @@ namespace {
 // The default delay between the user pressing the size button and the buttons
 // adjacent to the size button morphing into buttons for snapping left and
 // right.
-const int kSetButtonsToSnapModeDelayMs = 150;
+constexpr base::TimeDelta kSetButtonsToSnapModeDelay = base::Milliseconds(150);
 
 // The amount that a user can overshoot one of the caption buttons while in
 // "snap mode" and keep the button hovered/pressed.
-const int kMaxOvershootX = 200;
-const int kMaxOvershootY = 50;
+constexpr int kMaxOvershootX = 200;
+constexpr int kMaxOvershootY = 50;
 
+// TODO(b/277770052): Adjust the press duration to reflect the shorter overall
+// time to activate the multitask menu.
 constexpr base::TimeDelta kPieAnimationPressDuration = base::Milliseconds(150);
 constexpr base::TimeDelta kPieAnimationHoverDuration = base::Milliseconds(500);
 
@@ -77,10 +85,10 @@ SnapDirection GetSnapDirection(const views::FrameCaptionButton* to_hover) {
     case views::CAPTION_BUTTON_ICON_MENU:
     case views::CAPTION_BUTTON_ICON_ZOOM:
     case views::CAPTION_BUTTON_ICON_CENTER:
+    case views::CAPTION_BUTTON_ICON_FLOAT:
     case views::CAPTION_BUTTON_ICON_CUSTOM:
     case views::CAPTION_BUTTON_ICON_COUNT:
       NOTREACHED();
-      return SnapDirection::kNone;
   }
 }
 
@@ -90,6 +98,8 @@ SnapDirection GetSnapDirection(const views::FrameCaptionButton* to_hover) {
 // long press or long hover will end.
 class FrameSizeButton::PieAnimationView : public views::View,
                                           public views::AnimationDelegateViews {
+  METADATA_HEADER(PieAnimationView, views::View)
+
  public:
   explicit PieAnimationView(FrameSizeButton* button)
       : views::AnimationDelegateViews(this), button_(button) {
@@ -103,11 +113,23 @@ class FrameSizeButton::PieAnimationView : public views::View,
   void Start(base::TimeDelta duration, MultitaskMenuEntryType entry_type) {
     entry_type_ = entry_type;
 
-    animation_.Reset(0.0);
+    const double animation_value =
+        entry_type_ == MultitaskMenuEntryType::kFrameSizeButtonLongPress
+            ? animation_.GetCurrentValue()
+            : 0.0;
+
+    animation_.Reset(animation_value);
     // `SlideAnimation` is unaffected by debug tools such as
-    // "--ui-slow-animations" flag, so manually multiply the duration here.
+    // "--ui-slow-animations" flag, so manually multiply the duration here. Note
+    // that this will also cause `AnimationEnded` to run immediately if the test
+    // is using zero duration. If we are partially through the animation when
+    // the button is pressed, then we want the duration to be relative to the
+    // percentage of the animation that still needs to be completed. For
+    // example, if we are 1/4 through the animation when pressed, then we want
+    // the remaining animation to only take 3/4 of the full long press duration.
     animation_.SetSlideDuration(
-        ui::ScopedAnimationDurationScaleMode::duration_multiplier() * duration);
+        gfx::ScopedAnimationDurationScaleMode::duration_multiplier() *
+        duration * (1 - animation_value));
     animation_.Show();
   }
 
@@ -118,6 +140,10 @@ class FrameSizeButton::PieAnimationView : public views::View,
 
   // views::View:
   void OnPaint(gfx::Canvas* canvas) override {
+    if (!GetWidget()) {
+      return;
+    }
+
     const double animation_value = animation_.GetCurrentValue();
     if (animation_value == 0.0) {
       return;
@@ -128,12 +154,14 @@ class FrameSizeButton::PieAnimationView : public views::View,
     const SkScalar start_angle = -90.f;
     const SkScalar sweep_angle = 360.f * animation_value;
 
-    SkPath path;
     const gfx::Rect bounds = GetLocalBounds();
-    path.moveTo(bounds.CenterPoint().x(), bounds.CenterPoint().y());
-    path.arcTo(gfx::RectToSkRect(bounds), start_angle, sweep_angle,
-               /*forceMoveTo=*/false);
-    path.close();
+    const SkPath path =
+        SkPathBuilder()
+            .moveTo(bounds.CenterPoint().x(), bounds.CenterPoint().y())
+            .arcTo(gfx::RectToSkRect(bounds), start_angle, sweep_angle,
+                   /*forceMoveTo=*/false)
+            .close()
+            .detach();
 
     cc::PaintFlags flags;
     flags.setColor(
@@ -162,8 +190,11 @@ class FrameSizeButton::PieAnimationView : public views::View,
       MultitaskMenuEntryType::kFrameSizeButtonHover;
 
   // The button `this` is associated with. Unowned.
-  raw_ptr<FrameSizeButton> button_;
+  const raw_ptr<FrameSizeButton> button_;
 };
+
+BEGIN_METADATA(FrameSizeButton, PieAnimationView)
+END_METADATA
 
 // The class to observe the to-be-snapped window during the waiting-for-snap
 // mode. If the window's window state is changed or the window is put in
@@ -172,18 +203,13 @@ class FrameSizeButton::SnappingWindowObserver : public aura::WindowObserver {
  public:
   SnappingWindowObserver(aura::Window* window, FrameSizeButton* size_button)
       : window_(window), size_button_(size_button) {
-    window_->AddObserver(this);
+    window_observer_.Observe(window_);
   }
 
   SnappingWindowObserver(const SnappingWindowObserver&) = delete;
   SnappingWindowObserver& operator=(const SnappingWindowObserver&) = delete;
 
-  ~SnappingWindowObserver() override {
-    if (window_) {
-      window_->RemoveObserver(this);
-      window_ = nullptr;
-    }
-  }
+  ~SnappingWindowObserver() override = default;
 
   // aura::WindowObserver:
   void OnWindowPropertyChanged(aura::Window* window,
@@ -201,7 +227,7 @@ class FrameSizeButton::SnappingWindowObserver : public aura::WindowObserver {
 
   void OnWindowDestroying(aura::Window* window) override {
     DCHECK_EQ(window_, window);
-    window_->RemoveObserver(this);
+    window_observer_.Reset();
     window_ = nullptr;
     size_button_->CancelSnap();
   }
@@ -209,6 +235,8 @@ class FrameSizeButton::SnappingWindowObserver : public aura::WindowObserver {
  private:
   raw_ptr<aura::Window> window_;
   raw_ptr<FrameSizeButton> size_button_;
+  base::ScopedObservation<aura::Window, aura::WindowObserver> window_observer_{
+      this};
 };
 
 FrameSizeButton::FrameSizeButton(PressedCallback callback,
@@ -217,84 +245,54 @@ FrameSizeButton::FrameSizeButton(PressedCallback callback,
                                 views::CAPTION_BUTTON_ICON_MAXIMIZE_RESTORE,
                                 HTMAXBUTTON),
       delegate_(delegate),
-      set_buttons_to_snap_mode_delay_ms_(kSetButtonsToSnapModeDelayMs) {
+      long_tap_delay_(kSetButtonsToSnapModeDelay) {
   display_observer_.emplace(this);
 
-  if (chromeos::wm::features::IsWindowLayoutMenuEnabled()) {
-    pie_animation_view_ =
-        AddChildView(std::make_unique<PieAnimationView>(this));
-  }
+  pie_animation_view_ = AddChildView(std::make_unique<PieAnimationView>(this));
 }
 
 FrameSizeButton::~FrameSizeButton() = default;
 
 bool FrameSizeButton::IsMultitaskMenuShown() const {
-  return multitask_menu_ && multitask_menu_->IsBubbleShown();
+  return multitask_menu_widget_ && !multitask_menu_widget_->IsClosed();
 }
 
 void FrameSizeButton::ShowMultitaskMenu(MultitaskMenuEntryType entry_type) {
-  // Show Multitask Menu if float is enabled. Note here float flag is also used
-  // to represent other relatable UI/UX changes.
-  if (chromeos::wm::features::IsWindowLayoutMenuEnabled()) {
-    DCHECK(!chromeos::TabletState::Get()->InTabletMode());
-    RecordMultitaskMenuEntryType(entry_type);
-    // Owned by the bubble which contains this view. If there is an existing
-    // bubble, it will be deactivated and then close and destroy itself.
-    multitask_menu_ = new MultitaskMenu(
-        /*anchor=*/this, GetWidget(),
-        base::BindOnce(&FrameSizeButton::OnMultitaskMenuClosed,
-                       weak_factory_.GetWeakPtr()));
-    multitask_menu_->multitask_menu_view()->feedback_button()->SetCallback(
-        feedback_callback_);
-    multitask_menu_->ShowBubble();
-  }
+  CHECK(!display::Screen::Get()->InTabletMode());
+  RecordMultitaskMenuEntryType(entry_type);
+  // Owned by the bubble which contains this view. If there is an existing
+  // bubble, it will be deactivated and then close and destroy itself.
+  auto menu_delegate = std::make_unique<MultitaskMenu>(
+      /*anchor=*/this, GetWidget(),
+      /*close_on_move_out=*/entry_type ==
+          MultitaskMenuEntryType::kFrameSizeButtonHover);
+  multitask_menu_ = menu_delegate->GetWeakPtr();
+  multitask_menu_widget_ = base::WrapUnique(
+      views::BubbleDialogDelegateView::CreateBubble(std::move(menu_delegate)));
+  multitask_menu_widget_->Show();
+  delegate_->GetMultitaskMenuNudgeController()->OnMenuOpened(
+      /*tablet_mode=*/false);
+
+  haptics_util::PlayHapticTouchpadEffect(
+      ui::HapticTouchpadEffect::kSnap,
+      ui::HapticTouchpadEffectStrength::kMedium);
 }
 
 void FrameSizeButton::ToggleMultitaskMenu() {
-  DCHECK(chromeos::wm::features::IsWindowLayoutMenuEnabled());
-  DCHECK(!chromeos::TabletState::Get()->InTabletMode());
-  if (!multitask_menu_) {
-    RecordMultitaskMenuEntryType(MultitaskMenuEntryType::kAccel);
-    multitask_menu_ = new MultitaskMenu(
-        /*anchor=*/this, GetWidget(),
-        base::BindOnce(&FrameSizeButton::OnMultitaskMenuClosed,
-                       weak_factory_.GetWeakPtr()));
-    multitask_menu_->multitask_menu_view()->feedback_button()->SetCallback(
-        feedback_callback_);
+  CHECK(!display::Screen::Get()->InTabletMode());
+  if (!multitask_menu_widget_) {
+    ShowMultitaskMenu(MultitaskMenuEntryType::kAccel);
+  } else {
+    multitask_menu_widget_->Close();
   }
-  multitask_menu_->ToggleBubble();
-}
-
-void FrameSizeButton::OnMultitaskMenuClosed() {
-  multitask_menu_ = nullptr;
-}
-
-void FrameSizeButton::SetFeedbackButtonCallback(PressedCallback callback) {
-  // Callback cannot be set on the button here as the multitask menu has not
-  // been created yet, so store it for when it does get created.
-  feedback_callback_ = callback;
 }
 
 bool FrameSizeButton::OnMousePressed(const ui::MouseEvent& event) {
-  // Note that this triggers `StateChanged()`, and we want the changes to
-  // `pie_animation_view_` below to come after `StateChanged()`.
-  views::FrameCaptionButton::OnMousePressed(event);
-
   if (IsTriggerableEvent(event)) {
-    // Add a visual indicator of when snap mode will get triggered.
-    StartPieAnimation(kPieAnimationPressDuration,
-                      MultitaskMenuEntryType::kFrameSizeButtonLongPress);
-
-    // The minimize and close buttons are set to snap left and right when
-    // snapping is enabled. Do not enable snapping if the minimize button is not
-    // visible. The close button is always visible.
-    if (!in_snap_mode_ && delegate_->CanSnap() &&
-        delegate_->IsMinimizeButtonVisible()) {
-      StartSetButtonsToSnapModeTimer(event);
-    }
+    StartLongTapDelayTimer(event);
   }
 
-  return true;
+  return views::FrameCaptionButton::OnMousePressed(event);
 }
 
 bool FrameSizeButton::OnMouseDragged(const ui::MouseEvent& event) {
@@ -304,12 +302,26 @@ bool FrameSizeButton::OnMouseDragged(const ui::MouseEvent& event) {
   // |in_snap_mode_| == true because we want different behavior.
   if (!in_snap_mode_)
     views::FrameCaptionButton::OnMouseDragged(event);
+
+  if (multitask_menu_) {
+    multitask_menu_->multitask_menu_view()->OnSizeButtonDrag(
+        views::View::ConvertPointToScreen(this, event.location()));
+  }
+
   return true;
 }
 
 void FrameSizeButton::OnMouseReleased(const ui::MouseEvent& event) {
-  if (IsTriggerableEvent(event))
+  if (IsTriggerableEvent(event)) {
     CommitSnap(event);
+
+    if (multitask_menu_) {
+      multitask_menu_->multitask_menu_view()->OnSizeButtonRelease(
+          views::View::ConvertPointToScreen(this, event.location()));
+    }
+  }
+
+  pie_animation_view_->Stop();
 
   views::FrameCaptionButton::OnMouseReleased(event);
 }
@@ -330,31 +342,39 @@ void FrameSizeButton::OnGestureEvent(ui::GestureEvent* event) {
     SetButtonsToNormalMode(FrameSizeButtonDelegate::Animate::kYes);
     return;
   }
-  if (event->type() == ui::ET_GESTURE_TAP_DOWN && delegate_->CanSnap()) {
-    StartSetButtonsToSnapModeTimer(*event);
+  if (event->type() == ui::EventType::kGestureTapDown && delegate_->CanSnap() &&
+      !display::Screen::Get()->InTabletMode()) {
+    StartLongTapDelayTimer(*event);
 
     // Go through FrameCaptionButton's handling so that the button gets pressed.
     views::FrameCaptionButton::OnGestureEvent(event);
-
-    // Add a visual indicator of when snap mode will get triggered. Note that
-    // order matters as the subclasses will call `StateChanged()` and we want
-    // the changes there to run first.
-    StartPieAnimation(kPieAnimationPressDuration,
-                      MultitaskMenuEntryType::kFrameSizeButtonLongTouch);
     return;
   }
 
-  if (event->type() == ui::ET_GESTURE_SCROLL_BEGIN ||
-      event->type() == ui::ET_GESTURE_SCROLL_UPDATE) {
+  if (event->type() == ui::EventType::kGestureScrollBegin ||
+      event->type() == ui::EventType::kGestureScrollUpdate) {
     UpdateSnapPreview(*event);
+
+    if (multitask_menu_) {
+      multitask_menu_->multitask_menu_view()->OnSizeButtonDrag(
+          views::View::ConvertPointToScreen(this, event->location()));
+    }
+
     event->SetHandled();
     return;
   }
 
-  if (event->type() == ui::ET_GESTURE_TAP ||
-      event->type() == ui::ET_GESTURE_SCROLL_END ||
-      event->type() == ui::ET_SCROLL_FLING_START ||
-      event->type() == ui::ET_GESTURE_END) {
+  if (event->type() == ui::EventType::kGestureTap ||
+      event->type() == ui::EventType::kGestureScrollEnd ||
+      event->type() == ui::EventType::kScrollFlingStart ||
+      event->type() == ui::EventType::kGestureEnd) {
+    if (multitask_menu_ && !multitask_menu_->GetWidget()->IsClosed() &&
+        multitask_menu_->multitask_menu_view()->OnSizeButtonRelease(
+            views::View::ConvertPointToScreen(this, event->location()))) {
+      event->SetHandled();
+      return;
+    }
+
     if (CommitSnap(*event)) {
       event->SetHandled();
       return;
@@ -367,63 +387,64 @@ void FrameSizeButton::OnGestureEvent(ui::GestureEvent* event) {
 void FrameSizeButton::StateChanged(views::Button::ButtonState old_state) {
   views::FrameCaptionButton::StateChanged(old_state);
 
-  if (!chromeos::wm::features::IsWindowLayoutMenuEnabled()) {
+  // Ignore if there is no native window, which can happen during widget
+  // shutdown.
+  if (!GetWidget()->GetNativeWindow()) {
     return;
   }
 
   // Pie animation will start on both active/inactive window.
-  if (GetState() == views::Button::STATE_HOVERED) {
+  if (aura::client::CursorClient* cursor_client = aura::client::GetCursorClient(
+          GetWidget()->GetNativeWindow()->GetRootWindow());
+      cursor_client && cursor_client->IsCursorVisible() &&
+      GetState() == views::Button::STATE_HOVERED) {
     // On animation end we should show the multitask menu.
     // Note that if the window is not active, after the pie animation this will
     // activate the window.
     StartPieAnimation(kPieAnimationHoverDuration,
                       MultitaskMenuEntryType::kFrameSizeButtonHover);
-  } else if (old_state == views::Button::STATE_HOVERED) {
-    DCHECK(pie_animation_view_);
+  } else if (old_state == views::Button::STATE_HOVERED &&
+             GetState() != views::Button::STATE_PRESSED) {
+    // We want to continue the animation if the button was pressed while it was
+    // already hovered, so only stop in other instances.
     pie_animation_view_->Stop();
   }
 }
 
-void FrameSizeButton::Layout() {
-  if (pie_animation_view_) {
-    // Use the bounds of the inkdrop.
-    gfx::Rect bounds = GetLocalBounds();
-    bounds.Inset(GetInkdropInsets(bounds.size()));
-    pie_animation_view_->SetBoundsRect(bounds);
-  }
+void FrameSizeButton::Layout(PassKey) {
+  // Use the bounds of the inkdrop for the pie animation.
+  gfx::Rect bounds = GetLocalBounds();
+  bounds.Inset(GetInkdropInsets(bounds.size()));
+  pie_animation_view_->SetBoundsRect(bounds);
 
-  views::FrameCaptionButton::Layout();
+  LayoutSuperclass<views::FrameCaptionButton>(this);
 }
 
 void FrameSizeButton::OnDisplayTabletStateChanged(display::TabletState state) {
   if (state == display::TabletState::kEnteringTabletMode) {
-    if (pie_animation_view_) {
-      pie_animation_view_->Stop();
-    }
-    set_buttons_to_snap_mode_timer_.Stop();
+    pie_animation_view_->Stop();
+    long_tap_delay_timer_.Stop();
   }
 }
 
-void FrameSizeButton::StartSetButtonsToSnapModeTimer(
-    const ui::LocatedEvent& event) {
-  set_buttons_to_snap_mode_timer_event_location_ = event.location();
-  if (set_buttons_to_snap_mode_delay_ms_ == 0) {
-    AnimateButtonsToSnapMode();
+void FrameSizeButton::StartLongTapDelayTimer(const ui::LocatedEvent& event) {
+  const bool is_mouse = event.IsMouseEvent();
+  if (long_tap_delay_.is_zero()) {
+    OnLongTapDelayTimerEnded(is_mouse, event.location());
   } else {
-    set_buttons_to_snap_mode_timer_.Start(
-        FROM_HERE, base::Milliseconds(set_buttons_to_snap_mode_delay_ms_), this,
-        &FrameSizeButton::AnimateButtonsToSnapMode);
+    long_tap_delay_timer_.Start(
+        FROM_HERE, long_tap_delay_,
+        base::BindOnce(&FrameSizeButton::OnLongTapDelayTimerEnded,
+                       base::Unretained(this), is_mouse, event.location()));
   }
 }
 
 void FrameSizeButton::StartPieAnimation(base::TimeDelta duration,
                                         MultitaskMenuEntryType entry_type) {
-  if (!chromeos::wm::features::IsWindowLayoutMenuEnabled() ||
-      chromeos::TabletState::Get()->InTabletMode()) {
+  if (display::Screen::Get()->InTabletMode() || IsMultitaskMenuShown()) {
     return;
   }
 
-  DCHECK(pie_animation_view_);
   pie_animation_view_->Start(duration, entry_type);
 }
 
@@ -437,7 +458,7 @@ void FrameSizeButton::AnimateButtonsToSnapMode() {
 
 void FrameSizeButton::SetButtonsToSnapMode(
     FrameSizeButtonDelegate::Animate animate) {
-  DCHECK(!chromeos::TabletState::Get()->InTabletMode());
+  DCHECK(!display::Screen::Get()->InTabletMode());
   in_snap_mode_ = true;
 
   // When using a right-to-left layout the close button is left of the size
@@ -462,7 +483,7 @@ void FrameSizeButton::UpdateSnapPreview(const ui::LocatedEvent& event) {
     // button is pressed).
     gfx::Vector2d delta(event.location() -
                         set_buttons_to_snap_mode_timer_event_location_);
-    if (!set_buttons_to_snap_mode_timer_.IsRunning() ||
+    if (!long_tap_delay_timer_.IsRunning() ||
         !views::View::ExceededDragThreshold(delta)) {
       return;
     }
@@ -534,14 +555,29 @@ void FrameSizeButton::CancelSnap() {
 void FrameSizeButton::SetButtonsToNormalMode(
     FrameSizeButtonDelegate::Animate animate) {
   in_snap_mode_ = false;
-  if (pie_animation_view_) {
-    pie_animation_view_->Stop();
-  }
-  set_buttons_to_snap_mode_timer_.Stop();
+  pie_animation_view_->Stop();
+  long_tap_delay_timer_.Stop();
   delegate_->SetButtonsToNormal(animate);
 }
 
-BEGIN_METADATA(FrameSizeButton, views::FrameCaptionButton)
+void FrameSizeButton::OnLongTapDelayTimerEnded(bool is_mouse,
+                                               const gfx::Point& location) {
+  StartPieAnimation(kPieAnimationPressDuration,
+                    is_mouse
+                        ? MultitaskMenuEntryType::kFrameSizeButtonLongPress
+                        : MultitaskMenuEntryType::kFrameSizeButtonLongTouch);
+
+  // The minimize and close buttons are set to snap left and right when
+  // snapping is enabled. Do not enable snapping if the minimize button is not
+  // visible. The close button is always visible.
+  if (!in_snap_mode_ && delegate_->CanSnap() &&
+      delegate_->IsMinimizeButtonVisible()) {
+    set_buttons_to_snap_mode_timer_event_location_ = location;
+    AnimateButtonsToSnapMode();
+  }
+}
+
+BEGIN_METADATA(FrameSizeButton)
 END_METADATA
 
 }  // namespace chromeos

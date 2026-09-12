@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
 #include "mojo/public/mojom/base/wstring.mojom-shared.h"
@@ -17,8 +18,8 @@ template <>
 struct COMPONENT_EXPORT(MOJO_BASE_TRAITS)
     StructTraits<mojo_base::mojom::WStringDataView, std::wstring> {
   static base::span<const uint16_t> data(const std::wstring& str) {
-    return base::make_span(reinterpret_cast<const uint16_t*>(str.data()),
-                           str.size());
+    return UNSAFE_TODO(
+        base::span(reinterpret_cast<const uint16_t*>(str.data()), str.size()));
   }
 
   static bool Read(mojo_base::mojom::WStringDataView data, std::wstring* out);

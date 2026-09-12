@@ -15,15 +15,13 @@ namespace views {
 CompositorAnimationRunner::CompositorAnimationRunner(
     Widget* widget,
     const base::Location& location)
-    : ui::CompositorAnimationObserver(location), widget_(widget) {
-  widget_->AddObserver(this);
+    : ui::CompositorAnimationObserver(location) {
+  widget_observation_.Observe(widget);
 }
 
 CompositorAnimationRunner::~CompositorAnimationRunner() {
-  // Make sure we're not observing |compositor_|.
-  if (widget_)
-    OnWidgetDestroying(widget_);
-  DCHECK(!compositor_ || !compositor_->HasAnimationObserver(this));
+  StopInternal();
+  widget_observation_.Reset();
   CHECK(!IsInObserverList());
 }
 
@@ -32,11 +30,10 @@ void CompositorAnimationRunner::Stop() {
 }
 
 void CompositorAnimationRunner::OnAnimationStep(base::TimeTicks timestamp) {
-  if (timestamp - last_tick_ < min_interval_)
+  if (timestamp < start_tick_) [[unlikely]] {
     return;
-
-  last_tick_ = timestamp;
-  Step(last_tick_);
+  }
+  Step(timestamp);
 }
 
 void CompositorAnimationRunner::OnCompositingShuttingDown(
@@ -46,39 +43,30 @@ void CompositorAnimationRunner::OnCompositingShuttingDown(
 
 void CompositorAnimationRunner::OnWidgetDestroying(Widget* widget) {
   StopInternal();
-  widget_->RemoveObserver(this);
-  widget_ = nullptr;
+  widget_observation_.Reset();
 }
 
 void CompositorAnimationRunner::OnStart(base::TimeDelta min_interval,
                                         base::TimeDelta elapsed) {
-  if (!widget_)
-    return;
-
-  ui::Compositor* current_compositor = widget_->GetCompositor();
-  if (!current_compositor) {
-    StopInternal();
+  Widget* widget = widget_observation_.GetSource();
+  if (!widget) {
     return;
   }
 
-  if (current_compositor != compositor_) {
-    if (compositor_ && compositor_->HasAnimationObserver(this))
-      compositor_->RemoveAnimationObserver(this);
-    compositor_ = current_compositor;
+  // Reset the current compositor observation.
+  StopInternal();
+
+  ui::Compositor* compositor = widget->GetCompositor();
+  if (!compositor) {
+     return;
   }
 
-  last_tick_ = base::TimeTicks::Now() - elapsed;
-  min_interval_ = min_interval;
-  DCHECK(!compositor_->HasAnimationObserver(this));
-  compositor_->AddAnimationObserver(this);
+  start_tick_ = base::TimeTicks::Now() - elapsed;
+  compositor_observation_.Observe(compositor);
 }
 
 void CompositorAnimationRunner::StopInternal() {
-  if (compositor_ && compositor_->HasAnimationObserver(this))
-    compositor_->RemoveAnimationObserver(this);
-
-  min_interval_ = base::TimeDelta::Max();
-  compositor_ = nullptr;
+  compositor_observation_.Reset();
 }
 
 }  // namespace views

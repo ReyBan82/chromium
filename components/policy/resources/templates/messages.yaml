@@ -30,7 +30,7 @@ doc_back_to_top:
 doc_banner:
   desc: A banner shown at the top of the policy documentation
   text: The Chrome Enterprise policy list is moving! Please update your bookmarks
-    to <ph name="POLICY_DOCUMENTATION_URL">https://cloud.google.com/docs/chrome-enterprise/policies/<ex>https://cloud.google.com/docs/chrome-enterprise/policies/</ex></ph>.
+    to <ph name="POLICY_DOCUMENTATION_URL">https://chromeenterprise.google/policies/<ex>https://chromeenterprise.google/policies/</ex></ph>.
 doc_chrome_os_example_value:
   desc: Caption text of the field 'windows (ChromeOS clients)' in the summary chart
     of a policy in the generated documentation
@@ -99,6 +99,14 @@ doc_feature_unlisted:
   desc: The name of the feature that indicates whether a policy is set from cloud
     without any user interface.
   text: Unlisted
+doc_feature_user_only:
+  desc: The name of the feature that indicates whether a policy can only be set with
+    signed in managed account.
+  text: User Only
+doc_feature_uses_machine_and_user_values:
+  desc: The name of the feature that indicates whether a policy can be set for the
+    machine and for the user.
+  text: Can be set for machine and user
 doc_group_intro:
   desc: Introduction text for the generated policy atomic group documentation
   text: Both Chromium and Google Chrome have some groups of policies that depend on
@@ -169,7 +177,7 @@ doc_recommended:
 doc_reference_link:
   desc: Text pointing the user to the reference page for this policy, which may have
     more info (since it doesn't have a size limit)
-  text: 'Reference: <ph name="REFERENCE_URL">$6<ex>https://cloud.google.com/docs/chrome-enterprise/policies/?policy=WallpaperImage</ex></ph>'
+  text: 'Reference: <ph name="REFERENCE_URL">$6<ex>https://chromeenterprise.google/policies/?policy=WallpaperImage</ex></ph>'
 doc_schema:
   desc: Caption text of the 'schema' in the summary chart of a policy in the generated
     documentation
@@ -177,8 +185,13 @@ doc_schema:
 doc_schema_description_link:
   desc: Text pointing the user to the expanded documentation page for this policy,
     containing the information about schema and formatting.
-  text: See <ph name="REFERENCE_URL">$6<ex>https://cloud.google.com/docs/chrome-enterprise/policies/?policy=WallpaperImage</ex></ph>
+  text: See <ph name="REFERENCE_URL">$6<ex>https://chromeenterprise.google/policies/?policy=WallpaperImage</ex></ph>
     for more information about schema and formatting.
+doc_sensitive:
+  desc: A flag that indicates that this policy is only supported for users that
+    are part of an Active Directory domain on Windows, managed on the Mac, or
+    enrolled in Chrome Enterprise Core.
+  text: Sensitive
 doc_since_version:
   desc: Text in the summary chart of a policy that specifies the version number in
     which the policy was introduced.

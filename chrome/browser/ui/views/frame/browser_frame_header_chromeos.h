@@ -5,7 +5,6 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_FRAME_BROWSER_FRAME_HEADER_CHROMEOS_H_
 #define CHROME_BROWSER_UI_VIEWS_FRAME_BROWSER_FRAME_HEADER_CHROMEOS_H_
 
-#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "chromeos/ui/frame/frame_header.h"
 #include "ui/gfx/image/image_skia.h"
@@ -39,18 +38,13 @@ class BrowserFrameHeaderChromeOS : public chromeos::FrameHeader {
 
   ~BrowserFrameHeaderChromeOS() override;
 
-  // Returns the amount that the frame background is inset from the left edge of
-  // the window.
-  static int GetThemeBackgroundXInset();
-
   // FrameHeader:
   void UpdateFrameColors() override;
-  SkPath GetWindowMaskForFrameHeader(const gfx::Size& size) override;
+  views::CaptionButtonLayoutSize GetButtonLayoutSize() const override;
 
  protected:
   // FrameHeader:
   void DoPaintHeader(gfx::Canvas* canvas) override;
-  views::CaptionButtonLayoutSize GetButtonLayoutSize() const override;
   SkColor GetTitleColor() const override;
   SkColor GetCurrentFrameColor() const override;
 

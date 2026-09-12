@@ -6,13 +6,14 @@
 
 #include <windows.h>
 
+#include <cryptuiapi.h>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/task_runner.h"
 #include "base/threading/thread.h"
-#include "chrome/browser/ui/cryptuiapi_shim.h"
 #include "crypto/scoped_capi_types.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cert/x509_util_win.h"
@@ -26,7 +27,7 @@ namespace {
 // nested run loops.
 class CertificateViewerDialogWin : public ui::BaseShellDialogImpl {
  public:
-  CertificateViewerDialogWin() {}
+  CertificateViewerDialogWin() = default;
 
   CertificateViewerDialogWin(const CertificateViewerDialogWin&) = delete;
   CertificateViewerDialogWin& operator=(const CertificateViewerDialogWin&) =
@@ -68,8 +69,9 @@ class CertificateViewerDialogWin : public ui::BaseShellDialogImpl {
     // Perhaps this should show an error instead of silently failing, but it's
     // probably not even possible to get here with a cert that can't be
     // converted to a CERT_CONTEXT.
-    if (!cert_list)
+    if (!cert_list) {
       return;
+    }
 
     CRYPTUI_VIEWCERTIFICATE_STRUCT view_info = {0};
     view_info.dwSize = sizeof(view_info);
@@ -81,8 +83,9 @@ class CertificateViewerDialogWin : public ui::BaseShellDialogImpl {
     view_info.cStores = 1;
     view_info.rghStores = &cert_store;
 
-    if (mock_certificate_viewer_for_testing)
+    if (mock_certificate_viewer_for_testing) {
       return;
+    }
 
     BOOL properties_changed;
     ::CryptUIDlgViewCertificate(&view_info, &properties_changed);

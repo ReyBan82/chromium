@@ -4,8 +4,11 @@
 
 #include "chrome/browser/component_updater/ssl_error_assistant_component_installer.h"
 
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -17,8 +20,6 @@
 #include "components/security_interstitials/content/ssl_error_handler.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-
-using component_updater::ComponentUpdateService;
 
 namespace {
 
@@ -33,8 +34,9 @@ const uint8_t kSslErrorAssistantPublicKeySHA256[32] = {
     0x9c, 0xb1, 0x14, 0xcd, 0x3f, 0x54, 0x66, 0x25, 0x99, 0x3f};
 
 void LoadProtoFromDisk(const base::FilePath& pb_path) {
-  if (pb_path.empty())
+  if (pb_path.empty()) {
     return;
+  }
 
   std::string binary_pb;
   if (!base::ReadFileToString(pb_path, &binary_pb)) {
@@ -79,7 +81,7 @@ bool SSLErrorAssistantComponentInstallerPolicy::RequiresNetworkEncryption()
 
 update_client::CrxInstaller::Result
 SSLErrorAssistantComponentInstallerPolicy::OnCustomInstall(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) {
   return update_client::CrxInstaller::Result(0);  // Nothing custom here.
 }
@@ -94,7 +96,7 @@ base::FilePath SSLErrorAssistantComponentInstallerPolicy::GetInstalledPath(
 void SSLErrorAssistantComponentInstallerPolicy::ComponentReady(
     const base::Version& version,
     const base::FilePath& install_dir,
-    base::Value::Dict manifest) {
+    base::DictValue manifest) {
   DVLOG(1) << "Component ready, version " << version.GetString() << " in "
            << install_dir.value();
 
@@ -105,7 +107,7 @@ void SSLErrorAssistantComponentInstallerPolicy::ComponentReady(
 
 // Called during startup and installation before ComponentReady().
 bool SSLErrorAssistantComponentInstallerPolicy::VerifyInstallation(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) const {
   // No need to actually validate the proto here, since we'll do the checking
   // in PopulateFromDynamicUpdate().
@@ -119,9 +121,7 @@ SSLErrorAssistantComponentInstallerPolicy::GetRelativeInstallDir() const {
 
 void SSLErrorAssistantComponentInstallerPolicy::GetHash(
     std::vector<uint8_t>* hash) const {
-  hash->assign(kSslErrorAssistantPublicKeySHA256,
-               kSslErrorAssistantPublicKeySHA256 +
-                   std::size(kSslErrorAssistantPublicKeySHA256));
+  hash->assign_range(kSslErrorAssistantPublicKeySHA256);
 }
 
 std::string SSLErrorAssistantComponentInstallerPolicy::GetName() const {

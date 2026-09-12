@@ -4,6 +4,8 @@
 
 #include "mojo/core/ipcz_api.h"
 
+#include <vector>
+
 #include "base/check_op.h"
 #include "mojo/core/ipcz_driver/driver.h"
 #include "third_party/ipcz/include/ipcz/ipcz.h"
@@ -13,13 +15,6 @@ namespace mojo::core {
 
 namespace {
 
-class IpczAPIInitializer {
- public:
-  explicit IpczAPIInitializer(IpczAPI& api) {
-    IpczResult result = IpczGetAPI(&api);
-    CHECK_EQ(result, IPCZ_RESULT_OK);
-  }
-};
 
 IpczHandle g_node = IPCZ_INVALID_HANDLE;
 IpczNodeOptions g_options = {.is_broker = false,
@@ -28,9 +23,7 @@ IpczNodeOptions g_options = {.is_broker = false,
 }  // namespace
 
 const IpczAPI& GetIpczAPI() {
-  static IpczAPI api = {sizeof(api)};
-  static IpczAPIInitializer initializer(api);
-  return api;
+  return ::GetIpczAPI();
 }
 
 IpczHandle GetIpczNode() {
@@ -41,16 +34,22 @@ bool InitializeIpczNodeForProcess(const IpczNodeOptions& options) {
   g_options = options;
   const IpczCreateNodeFlags flags =
       options.is_broker ? IPCZ_CREATE_NODE_AS_BROKER : IPCZ_NO_FLAGS;
+  std::vector<IpczFeature> enabled_features;
+  if (options.enable_memv2) {
+    enabled_features.push_back(IPCZ_FEATURE_MEM_V2);
+  }
   const IpczCreateNodeOptions create_options = {
       .size = sizeof(create_options),
 
-      // TODO(https://crbug.com/1380476): Enable parcel data allocation capacity
+      // TODO(crbug.com/40876289): Enable parcel data allocation capacity
       // to be expanded.
-      .disable_parcel_memory_expansion = true,
+      .memory_flags = IPCZ_MEMORY_FIXED_PARCEL_CAPACITY,
+
+      .enabled_features = enabled_features.data(),
+      .num_enabled_features = enabled_features.size(),
   };
-  IpczResult result =
-      GetIpczAPI().CreateNode(&ipcz_driver::kDriver, IPCZ_INVALID_DRIVER_HANDLE,
-                              flags, &create_options, &g_node);
+  IpczResult result = GetIpczAPI().CreateNode(&ipcz_driver::GetIpczDriver(),
+                                              flags, &create_options, &g_node);
   return result == IPCZ_RESULT_OK;
 }
 

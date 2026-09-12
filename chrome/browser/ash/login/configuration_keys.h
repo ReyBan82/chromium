@@ -35,6 +35,12 @@ extern const char kRestoreAfterRollback[];
 extern const char kEnrollmentAssetId[];
 extern const char kEnrollmentLocation[];
 extern const char kEnrollmentAutoAttributes[];
+extern const char kEnrollmentToken[];
+extern const char kSkipEnrollmentSuccessScreen[];
+extern const char kSkipUpdateOptOutScreen[];
+extern const char kSkipHIDScreen[];
+
+extern const char kSource[];
 
 enum class ConfigurationHandlerSide : unsigned int {
   HANDLER_JS,    // Handled by JS code
@@ -45,12 +51,12 @@ enum class ConfigurationHandlerSide : unsigned int {
 
 // Checks if configuration is valid (all fields have correct types, no extra
 // fields).
-bool ValidateConfiguration(const base::Value::Dict& configuration);
+bool ValidateConfiguration(const base::DictValue& configuration);
 
 // Returns a dictionary with only fields handled by particular `side` from
 // `configuration`.
-base::Value::Dict FilterConfiguration(const base::Value::Dict& configuration,
-                                      ConfigurationHandlerSide side);
+base::DictValue FilterConfiguration(const base::DictValue& configuration,
+                                    ConfigurationHandlerSide side);
 }  // namespace configuration
 }  // namespace ash
 

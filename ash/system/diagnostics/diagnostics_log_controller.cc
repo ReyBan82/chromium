@@ -40,6 +40,7 @@ const char kRoutineLogSubsectionHeader[] = "--- Test Routines --- \n";
 const char kSystemLogSectionHeader[] = "=== System === \n";
 const char kNetworkingLogSectionHeader[] = "=== Networking === \n";
 const char kKeyboardLogSectionHeader[] = "=== Keyboard === \n";
+const char kNetworkingLogNetworkEventsHeader[] = "--- Network Events ---";
 const char kNoRoutinesRun[] =
     "No routines of this type were run in the session.\n";
 
@@ -89,6 +90,13 @@ bool ShouldUseActiveUserProfileDir(session_manager::SessionState state,
 
 }  // namespace
 
+DiagnosticsLogController::SessionLogData::SessionLogData() = default;
+DiagnosticsLogController::SessionLogData::~SessionLogData() = default;
+DiagnosticsLogController::SessionLogData::SessionLogData(SessionLogData&&) =
+    default;
+DiagnosticsLogController::SessionLogData&
+DiagnosticsLogController::SessionLogData::operator=(SessionLogData&&) = default;
+
 DiagnosticsLogController::DiagnosticsLogController()
     : log_base_path_(kDiaganosticsTmpDir) {
   DCHECK_EQ(nullptr, g_instance);
@@ -132,52 +140,85 @@ void DiagnosticsLogController::Initialize(
                      g_instance->log_base_path_));
 }
 
-std::string DiagnosticsLogController::GenerateSessionStringOnBlockingPool()
-    const {
-  std::vector<std::string> log_pieces;
+DiagnosticsLogController::SessionLogData
+DiagnosticsLogController::GetSessionLogData() const {
+  SessionLogData log_data;
 
-  // Fetch system data from TelemetryLog.
-  const std::string system_log_contents = telemetry_log_->GetContents();
-  log_pieces.push_back(kSystemLogSectionHeader);
-  if (!system_log_contents.empty()) {
-    log_pieces.push_back(system_log_contents);
+  // 1. Extract fast in-memory data on the UI thread
+  if (telemetry_log_) {
+    log_data.telemetry_contents = telemetry_log_->GetContents();
+  }
+  if (networking_log_) {
+    log_data.network_info = networking_log_->GetNetworkInfo();
   }
 
-  // Fetch system routines from RoutineLog.
-  const std::string system_routines = routine_log_->GetContentsForCategory(
-      RoutineLog::RoutineCategory::kSystem);
-  // Add the routine section for the system category.
+  // 2. Extract file paths on the UI thread to avoid blocking on file I/O.
+  if (routine_log_) {
+    log_data.system_routine_log_path =
+        routine_log_->GetLogFilePath(RoutineLog::RoutineCategory::kSystem);
+    log_data.network_routine_log_path =
+        routine_log_->GetLogFilePath(RoutineLog::RoutineCategory::kNetwork);
+  }
+  if (networking_log_) {
+    log_data.network_events_path = networking_log_->GetLogFilePath();
+  }
+  if (keyboard_input_log_) {
+    log_data.keyboard_input_path = keyboard_input_log_->GetLogFilePath();
+  }
+
+  return log_data;
+}
+
+// static
+std::string DiagnosticsLogController::GenerateSessionStringOnBlockingPool(
+    SessionLogData log_data) {
+  std::vector<std::string> log_pieces;
+
+  // 1. System Section
+  log_pieces.push_back(kSystemLogSectionHeader);
+  if (!log_data.telemetry_contents.empty()) {
+    log_pieces.push_back(std::move(log_data.telemetry_contents));
+  }
+
+  // 2. System Routines
+  std::string system_routines;
+  base::ReadFileToString(log_data.system_routine_log_path, &system_routines);
   log_pieces.push_back(GetRoutineResultsString(system_routines));
 
-  // Add networking category.
+  // 3. Networking Section
   log_pieces.push_back(kNetworkingLogSectionHeader);
+  log_pieces.push_back(std::move(log_data.network_info));
 
-  // Add the network info section.
-  log_pieces.push_back(networking_log_->GetNetworkInfo());
-
-  // Add the routine section for the network category.
-  const std::string network_routines = routine_log_->GetContentsForCategory(
-      RoutineLog::RoutineCategory::kNetwork);
+  // 4. Network Routines
+  std::string network_routines;
+  base::ReadFileToString(log_data.network_routine_log_path, &network_routines);
   log_pieces.push_back(GetRoutineResultsString(network_routines));
 
-  // Add the network events section.
-  log_pieces.push_back(networking_log_->GetNetworkEvents());
+  // 5. Network Events
+  std::string network_events;
+  base::ReadFileToString(log_data.network_events_path, &network_events);
+  log_pieces.push_back(std::string(kNetworkingLogNetworkEventsHeader) + "\n" +
+                       network_events);
 
-  if (features::IsInputInDiagnosticsAppEnabled()) {
-    std::string input_log_contents = keyboard_input_log_->GetLogContents();
-    if (!input_log_contents.empty()) {
-      log_pieces.push_back(kKeyboardLogSectionHeader);
-      log_pieces.push_back(std::move(input_log_contents));
-    }
+  // 6. Keyboard Input
+  std::string input_log_contents;
+  base::ReadFileToString(log_data.keyboard_input_path, &input_log_contents);
+  if (!input_log_contents.empty()) {
+    log_pieces.push_back(kKeyboardLogSectionHeader);
+    log_pieces.push_back(std::move(input_log_contents));
   }
 
   return base::JoinString(log_pieces, "\n");
 }
 
+// static
 bool DiagnosticsLogController::GenerateSessionLogOnBlockingPool(
-    const base::FilePath& save_file_path) {
+    const base::FilePath& save_file_path,
+    SessionLogData log_data) {
   DCHECK(!save_file_path.empty());
-  return base::WriteFile(save_file_path, GenerateSessionStringOnBlockingPool());
+
+  return base::WriteFile(
+      save_file_path, GenerateSessionStringOnBlockingPool(std::move(log_data)));
 }
 
 void DiagnosticsLogController::ResetAndInitializeLogWriters() {
@@ -192,20 +233,20 @@ void DiagnosticsLogController::ResetAndInitializeLogWriters() {
   telemetry_log_ = std::make_unique<TelemetryLog>();
 }
 
-KeyboardInputLog* DiagnosticsLogController::GetKeyboardInputLog() {
-  return keyboard_input_log_.get();
+KeyboardInputLog& DiagnosticsLogController::GetKeyboardInputLog() {
+  return *keyboard_input_log_;
 }
 
-NetworkingLog* DiagnosticsLogController::GetNetworkingLog() {
-  return networking_log_.get();
+NetworkingLog& DiagnosticsLogController::GetNetworkingLog() {
+  return *networking_log_;
 }
 
-RoutineLog* DiagnosticsLogController::GetRoutineLog() {
-  return routine_log_.get();
+RoutineLog& DiagnosticsLogController::GetRoutineLog() {
+  return *routine_log_;
 }
 
-TelemetryLog* DiagnosticsLogController::GetTelemetryLog() {
-  return telemetry_log_.get();
+TelemetryLog& DiagnosticsLogController::GetTelemetryLog() {
+  return *telemetry_log_;
 }
 
 void DiagnosticsLogController::ResetLogBasePath() {
@@ -242,6 +283,14 @@ void DiagnosticsLogController::OnLoginStatusChanged(LoginStatus login_status) {
   if (ShouldResetAndInitializeLogWritersForLoginStatus(
           g_instance->previous_status_, login_status)) {
     g_instance->ResetAndInitializeLogWriters();
+
+    // Schedule removal of log directory as this should happen every time a user
+    // logs in.
+    base::ThreadPool::PostTask(
+        FROM_HERE, {base::MayBlock()},
+        base::BindOnce(&DiagnosticsLogController::RemoveDirectory,
+                       g_instance->weak_ptr_factory_.GetWeakPtr(),
+                       g_instance->log_base_path_));
   }
 
   g_instance->previous_status_ = login_status;
@@ -253,6 +302,26 @@ void DiagnosticsLogController::RemoveDirectory(const base::FilePath& path) {
   if (base::PathExists(path)) {
     base::DeletePathRecursively(path);
   }
+}
+
+void DiagnosticsLogController::SetKeyboardInputLogForTesting(
+    std::unique_ptr<KeyboardInputLog> keyboard_input_log) {
+  keyboard_input_log_ = std::move(keyboard_input_log);
+}
+
+void DiagnosticsLogController::SetNetworkingLogForTesting(
+    std::unique_ptr<NetworkingLog> networking_log) {
+  networking_log_ = std::move(networking_log);
+}
+
+void DiagnosticsLogController::SetRoutineLogForTesting(
+    std::unique_ptr<RoutineLog> routine_log) {
+  routine_log_ = std::move(routine_log);
+}
+
+void DiagnosticsLogController::SetTelemetryLogForTesting(
+    std::unique_ptr<TelemetryLog> telemetry_log) {
+  telemetry_log_ = std::move(telemetry_log);
 }
 
 }  // namespace diagnostics

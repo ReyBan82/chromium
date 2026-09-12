@@ -6,17 +6,16 @@
 
 #include "base/command_line.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/browser_process_platform_part.h"
 #include "chrome/browser/lifetime/termination_notification.h"
 #include "chrome/common/buildflags.h"
-#include "chrome/common/chrome_switches.h"
 #include "ui/aura/client/capture_client.h"
 #include "ui/aura/window_event_dispatcher.h"
 #include "ui/views/widget/widget.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/ash_switches.h"
 #include "ash/shell.h"
 #include "chrome/browser/lifetime/application_lifetime_chromeos.h"
 #endif
@@ -31,10 +30,10 @@ void HandleAppExitingForPlatform() {
   // Close all non browser windows now. Those includes notifications
   // and windows created by Ash (launcher, background, etc).
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   if (ash::Shell::HasInstance()) {
     // Releasing the capture will close any menus that might be open:
-    // http://crbug.com/134472
+    // http://crbug.com/40853120
     aura::client::GetCaptureClient(ash::Shell::GetPrimaryRootWindow())
         ->SetCapture(nullptr);
   }
@@ -44,14 +43,18 @@ void HandleAppExitingForPlatform() {
   // This clears existing notifications from the message center and their
   // associated ScopedKeepAlives. Chrome OS doesn't use ScopedKeepAlives for
   // notifications.
-  g_browser_process->notification_ui_manager()->StartShutdown();
+  if (auto* notification_ui_manager =
+          g_browser_process->notification_ui_manager();
+      notification_ui_manager) {
+    notification_ui_manager->StartShutdown();
+  }
 #endif
 
-  views::Widget::CloseAllSecondaryWidgets();
+  views::Widget::CloseAllWidgets();
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kDisableZeroBrowsersOpenForTests)) {
+          ash::switches::kDisableZeroBrowsersOpenForTests)) {
     // App is exiting, release the keep alive on behalf of Aura Shell.
     g_browser_process->platform_part()->UnregisterKeepAlive();
     // Make sure we have notified the session manager that we are exiting.

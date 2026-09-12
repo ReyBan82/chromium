@@ -5,9 +5,9 @@
 import {skColorToRgba} from 'chrome://resources/js/color_utils.js';
 import {EventTracker} from 'chrome://resources/js/event_tracker.js';
 import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
-import {SkColor} from 'chrome://resources/mojo/skia/public/mojom/skcolor.mojom-webui.js';
+import type {SkColor} from 'chrome://resources/mojo/skia/public/mojom/skcolor.mojom-webui.js';
 
-import {BackgroundImage} from './new_tab_page.mojom-webui.js';
+import type {BackgroundImage} from './new_tab_page.mojom-webui.js';
 import {strictQuery} from './utils.js';
 import {WindowProxy} from './window_proxy.js';
 
@@ -91,9 +91,9 @@ export class BackgroundManager {
   setBackgroundImage(image: BackgroundImage) {
     const url =
         new URL('chrome-untrusted://new-tab-page/custom_background_image');
-    url.searchParams.append('url', image.url.url);
+    url.searchParams.append('url', image.url);
     if (image.url2x) {
-      url.searchParams.append('url2x', image.url2x.url);
+      url.searchParams.append('url2x', image.url2x);
     }
     if (image.size) {
       url.searchParams.append('size', image.size);
@@ -109,9 +109,6 @@ export class BackgroundManager {
     }
     if (image.positionY) {
       url.searchParams.append('positionY', image.positionY);
-    }
-    if (image.scrimDisplay) {
-      url.searchParams.append('scrimDisplay', image.scrimDisplay);
     }
     if (url.href === this.url_) {
       return;

@@ -9,8 +9,10 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
+#include "chromeos/ash/components/quick_start/quick_start_metrics.h"
 #include "chromeos/ash/services/device_sync/group_private_key_and_better_together_metadata_status.h"
 
 namespace ash {
@@ -65,7 +67,7 @@ class MultiDeviceSetupScreen : public BaseScreen {
   bool MaybeSkip(WizardContext& context) override;
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
  private:
   friend class MultiDeviceSetupScreenTest;
@@ -132,11 +134,16 @@ class MultiDeviceSetupScreen : public BaseScreen {
   void RecordOobeMultideviceScreenSkippedReasonHistogram(
       OobeMultideviceScreenSkippedReason reason);
 
+  // Record Quick Start ScreenClosed if the QS screen enhancements were shown.
+  void MaybeRecordQuickStartScreenClosed();
+
   static void RecordMultiDeviceSetupOOBEUserChoiceHistogram(
       MultiDeviceSetupOOBEUserChoice value);
 
-  multidevice_setup::MultiDeviceSetupClient* setup_client_ = nullptr;
-  device_sync::DeviceSyncClient* device_sync_client_ = nullptr;
+  raw_ptr<multidevice_setup::MultiDeviceSetupClient> setup_client_ = nullptr;
+  raw_ptr<device_sync::DeviceSyncClient> device_sync_client_ = nullptr;
+  std::unique_ptr<quick_start::QuickStartMetrics> quick_start_metrics_ =
+      nullptr;
   bool skipped_ = false;
   bool skipped_reason_determined_ = false;
 

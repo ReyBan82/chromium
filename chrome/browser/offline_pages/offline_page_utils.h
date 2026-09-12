@@ -6,12 +6,11 @@
 #define CHROME_BROWSER_OFFLINE_PAGES_OFFLINE_PAGE_UTILS_H_
 
 #include <stdint.h>
+
 #include <string>
 #include <vector>
 
-#include "base/files/file_util.h"
 #include "base/functional/callback.h"
-#include "components/offline_pages/core/offline_page_model.h"
 #include "components/offline_pages/core/offline_page_types.h"
 #include "url/gurl.h"
 
@@ -58,7 +57,8 @@ class OfflinePageUtils {
     ALL = 0xFFFF
   };
 
-  static const base::FilePath::CharType kMHTMLExtension[];
+  static constexpr base::FilePath::CharType kMHTMLExtension[] =
+      FILE_PATH_LITERAL("mhtml");
 
   // Callback to inform the duplicate checking result.
   using DuplicateCheckCallback = base::OnceCallback<void(DuplicateCheckResult)>;
@@ -171,12 +171,6 @@ class OfflinePageUtils {
 
   // Returns true if |web_contents| is showing a trusted offline page.
   static bool IsShowingTrustedOfflinePage(content::WebContents* web_contents);
-
-  // Tries to acquires the file access permission. |callback| will be called
-  // to inform if the file access permission is granted.
-  static void AcquireFileAccessPermission(
-      content::WebContents* web_contents,
-      base::OnceCallback<void(bool)> callback);
 };
 
 }  // namespace offline_pages

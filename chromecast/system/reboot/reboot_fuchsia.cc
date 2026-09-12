@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chromecast/system/reboot/reboot_fuchsia.h"
+
 #include <fuchsia/feedback/cpp/fidl.h>
 #include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
 #include <fuchsia/recovery/cpp/fidl.h>
@@ -12,23 +14,21 @@
 
 #include "base/files/file.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/fuchsia/process_context.h"
 #include "base/no_destructor.h"
 #include "chromecast/public/reboot_shlib.h"
 #include "chromecast/system/reboot/fuchsia_component_restart_reason.h"
-#include "chromecast/system/reboot/reboot_fuchsia.h"
 #include "chromecast/system/reboot/reboot_util.h"
 
 using fuchsia::feedback::LastReboot;
 using fuchsia::feedback::LastRebootInfoProviderSyncPtr;
 using fuchsia::feedback::RebootReason;
-using fuchsia::hardware::power::statecontrol::Admin_Reboot_Result;
+using fuchsia::hardware::power::statecontrol::Admin_Shutdown_Result;
 using fuchsia::hardware::power::statecontrol::AdminPtr;
 using fuchsia::recovery::FactoryResetPtr;
-using StateControlRebootReason =
-    fuchsia::hardware::power::statecontrol::RebootReason;
+using StateControlShutdownReason =
+    fuchsia::hardware::power::statecontrol::ShutdownReason;
 
 namespace chromecast {
 
@@ -115,34 +115,39 @@ bool RebootShlib::RebootNow(RebootSource reboot_source) {
     return true;
   }
 
-  StateControlRebootReason reason;
+  StateControlShutdownReason reason;
   switch (reboot_source) {
     case RebootSource::API:
-      reason = StateControlRebootReason::USER_REQUEST;
+      reason = StateControlShutdownReason::USER_REQUEST;
       break;
     case RebootSource::OTA:
       // We expect OTAs to be initiated by the platform via the
       // fuchsia.hardware.power.statecontrol/Admin FIDL service. In case
       // non-platform code wants to initiate OTAs too, we also support it here.
-      reason = StateControlRebootReason::SYSTEM_UPDATE;
+      reason = StateControlShutdownReason::SYSTEM_UPDATE;
       break;
     case RebootSource::OVERHEAT:
-      reason = StateControlRebootReason::HIGH_TEMPERATURE;
+      reason = StateControlShutdownReason::HIGH_TEMPERATURE;
       break;
     default:
-      reason = StateControlRebootReason::USER_REQUEST;
+      reason = StateControlShutdownReason::USER_REQUEST;
       break;
   }
 
   // Intentionally using async Ptr to avoid deadlock
   // Otherwise caller is blocked, and if caller needs to be notified
   // as well, it will go into a deadlock state.
-  GetAdminPtr()->Reboot(reason, [](Admin_Reboot_Result out_result) {
-    if (out_result.is_err()) {
-      LOG(ERROR) << "Failed to reboot after requested: "
-                 << zx_status_get_string(out_result.err());
-    }
-  });
+  fuchsia::hardware::power::statecontrol::ShutdownOptions shutdown_options;
+  shutdown_options.set_action(
+      fuchsia::hardware::power::statecontrol::ShutdownAction::REBOOT);
+  shutdown_options.set_reasons({reason});
+  GetAdminPtr()->Shutdown(
+      std::move(shutdown_options), [](Admin_Shutdown_Result out_result) {
+        if (out_result.is_err()) {
+          LOG(ERROR) << "Failed to reboot after requested: "
+                     << zx_status_get_string(out_result.err());
+        }
+      });
   return true;
 }
 

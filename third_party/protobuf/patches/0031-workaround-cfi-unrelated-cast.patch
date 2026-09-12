@@ -1,8 +1,8 @@
 diff --git a/src/google/protobuf/descriptor.cc b/src/google/protobuf/descriptor.cc
-index 0524fd46226e6..082e5124a023f 100644
+index 9e093c9..9c936d9 100644
 --- a/src/google/protobuf/descriptor.cc
 +++ b/src/google/protobuf/descriptor.cc
-@@ -301,22 +301,16 @@ class FlatAllocation {
+@@ -347,22 +347,16 @@ class FlatAllocation {
      return ends_.template Get<U>();
    }
  
@@ -29,20 +29,44 @@ index 0524fd46226e6..082e5124a023f 100644
    }
  
    template <typename U>
+diff --git a/src/google/protobuf/map.h b/src/google/protobuf/map.h
+index d384d2a..659f2c8 100644
+--- a/src/google/protobuf/map.h
++++ b/src/google/protobuf/map.h
+@@ -321,6 +321,7 @@ class PROTOBUF_EXPORT UntypedMapBase {
+   UntypedMapBase& operator=(const UntypedMapBase&) = delete;
+ 
+   template <typename T>
++  PROTOBUF_NO_SANITIZE("cfi-unrelated-cast", "vptr")
+   T* GetKey(NodeBase* node) const {
+     // Debug check that `T` matches what we expect from the type info.
+     ABSL_DCHECK_EQ(static_cast<int>(StaticTypeKind<T>()),
+@@ -333,6 +334,7 @@ class PROTOBUF_EXPORT UntypedMapBase {
+   }
+ 
+   template <typename T>
++  PROTOBUF_NO_SANITIZE("cfi-unrelated-cast", "vptr")
+   T* GetValue(NodeBase* node) const {
+     // Debug check that `T` matches what we expect from the type info.
+     ABSL_DCHECK_EQ(static_cast<int>(StaticTypeKind<T>()),
 diff --git a/src/google/protobuf/port_def.inc b/src/google/protobuf/port_def.inc
-index cae9ebe01ec2c..b84b55e4d8762 100644
+index 3c7c91f..4334a6e 100644
 --- a/src/google/protobuf/port_def.inc
 +++ b/src/google/protobuf/port_def.inc
-@@ -764,6 +764,12 @@
- #define PROTOBUF_UNUSED
+@@ -572,6 +572,16 @@
+ #define PROTOBUF_PREFETCH_WITH_OFFSET(base, offset)
  #endif
  
++#if !defined(_MSVC_LANG)
 +#if __has_attribute(no_sanitize)
 +#define PROTOBUF_NO_SANITIZE(...) __attribute__((no_sanitize(__VA_ARGS__)))
++#else
++#define PROTOBUF_NO_SANITIZE(...)
++#endif  // __has_attribute(no_sanitize)
 +#else
 +#define PROTOBUF_NO_SANITIZE(...)
 +#endif
 +
  // ThreadSafeArenaz is turned off completely in opensource builds.
  
- // Windows declares several inconvenient macro names.  We #undef them and then
+ #include "google/protobuf/os_macros_undef.inc"

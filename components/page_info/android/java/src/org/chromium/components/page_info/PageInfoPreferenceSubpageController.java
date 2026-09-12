@@ -4,18 +4,21 @@
 
 package org.chromium.components.page_info;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.view.View;
 
 import androidx.fragment.app.FragmentManager;
 
-import org.chromium.components.browser_ui.site_settings.SiteSettingsPreferenceFragment;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.components.browser_ui.site_settings.BaseSiteSettingsFragment;
 
-/**
- * Abstract class for controllers that use a SiteSettingsPreferenceFragment as subpage.
- */
+/** Abstract class for controllers that use a BaseSiteSettingsFragment as subpage. */
+@NullMarked
 public abstract class PageInfoPreferenceSubpageController implements PageInfoSubpageController {
     private final PageInfoControllerDelegate mDelegate;
-    private SiteSettingsPreferenceFragment mSubPage;
+    private @Nullable BaseSiteSettingsFragment mSubPage;
 
     public PageInfoPreferenceSubpageController(PageInfoControllerDelegate delegate) {
         mDelegate = delegate;
@@ -29,29 +32,28 @@ public abstract class PageInfoPreferenceSubpageController implements PageInfoSub
      * @param fragment The fragment that should be added.
      * @return The view for the fragment or null if the fragment couldn't get added.
      */
-    protected View addSubpageFragment(SiteSettingsPreferenceFragment fragment) {
+    protected @Nullable View addSubpageFragment(BaseSiteSettingsFragment fragment) {
         assert mSubPage == null;
 
-        FragmentManager fragmentManager = mDelegate.getFragmentManager();
         // If the activity is getting destroyed or saved, it is not allowed to modify fragments.
-        if (fragmentManager.isStateSaved()) return null;
+        if (!canCreateSubpageFragment()) return null;
 
+        FragmentManager fragmentManager = assumeNonNull(mDelegate.getFragmentManager());
         mSubPage = fragment;
         mSubPage.setSiteSettingsDelegate(mDelegate.getSiteSettingsDelegate());
         fragmentManager.beginTransaction().add(mSubPage, null).commitNow();
         return mSubPage.requireView();
     }
 
-    /**
-     * Removes the last added preference fragment.
-     */
+    /** Removes the last added preference fragment. */
     protected void removeSubpageFragment() {
-        assert mSubPage != null;
-        FragmentManager fragmentManager = mDelegate.getFragmentManager();
-        SiteSettingsPreferenceFragment subPage = mSubPage;
+        if (mSubPage == null) return;
+        BaseSiteSettingsFragment subPage = mSubPage;
         mSubPage = null;
         // If the activity is getting destroyed or saved, it is not allowed to modify fragments.
-        if (fragmentManager == null || fragmentManager.isStateSaved()) return;
+        if (!canCreateSubpageFragment()) return;
+
+        FragmentManager fragmentManager = assumeNonNull(mDelegate.getFragmentManager());
         fragmentManager.beginTransaction().remove(subPage).commitNow();
     }
 
@@ -59,9 +61,14 @@ public abstract class PageInfoPreferenceSubpageController implements PageInfoSub
      * @return Whether it is possible to add preference fragments.
      */
     protected boolean canCreateSubpageFragment() {
-        return !mDelegate.getFragmentManager().isStateSaved();
+        FragmentManager fragmentManager = mDelegate.getFragmentManager();
+        return fragmentManager != null
+                && !fragmentManager.isStateSaved()
+                && !fragmentManager.isDestroyed();
     }
 
     @Override
-    public void onNativeInitialized() {}
+    public @Nullable View getCurrentSubpageView() {
+        return mSubPage != null ? mSubPage.requireView() : null;
+    }
 }

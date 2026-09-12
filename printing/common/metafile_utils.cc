@@ -4,79 +4,66 @@
 
 #include "printing/common/metafile_utils.h"
 
-#include "base/strings/string_piece.h"
+#include <string_view>
+#include <variant>
+
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/containers/span_reader.h"
+#include "base/feature_list.h"
+#include "base/logging.h"
+#include "base/notreached.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
+#include "pdf/pdf_accessibility_constants.h"
 #include "printing/buildflags/buildflags.h"
+#include "printing/mojom/print.mojom.h"
+#include "skia/ext/codec_utils.h"
+#include "skia/ext/font_utils.h"
+#include "skia/ext/skia_utils_base.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/skia/include/core/SkCanvas.h"
+#include "third_party/skia/include/core/SkFontMgr.h"
+#include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkPicture.h"
 #include "third_party/skia/include/core/SkPictureRecorder.h"
 #include "third_party/skia/include/core/SkStream.h"
-#include "third_party/skia/include/core/SkTime.h"
+#include "third_party/skia/include/core/SkString.h"
+#include "third_party/skia/include/core/SkTypeface.h"
 #include "third_party/skia/include/docs/SkPDFDocument.h"
+#include "third_party/skia/include/private/chromium/SkImageChromium.h"
 #include "ui/accessibility/ax_node.h"
 #include "ui/accessibility/ax_role_properties.h"
 #include "ui/accessibility/ax_tree.h"
 #include "ui/accessibility/ax_tree_update.h"
+#include "ui/gfx/skia_span_util.h"
 
 namespace {
 
-#if BUILDFLAG(ENABLE_TAGGED_PDF)
-
-// Table 333 in PDF 32000-1:2008 spec, section 14.8.4.2
-const char kPDFStructureTypeDocument[] = "Document";
-const char kPDFStructureTypeParagraph[] = "P";
-const char kPDFStructureTypeDiv[] = "Div";
-const char kPDFStructureTypeHeading[] = "H";
-const char kPDFStructureTypeLink[] = "Link";
-const char kPDFStructureTypeList[] = "L";
-const char kPDFStructureTypeListItemLabel[] = "Lbl";
-const char kPDFStructureTypeListItemBody[] = "LI";
-const char kPDFStructureTypeTable[] = "Table";
-const char kPDFStructureTypeTableRow[] = "TR";
-const char kPDFStructureTypeTableHeader[] = "TH";
-const char kPDFStructureTypeTableCell[] = "TD";
-const char kPDFStructureTypeFigure[] = "Figure";
-const char kPDFStructureTypeNonStruct[] = "NonStruct";
-
-// Standard attribute owners from PDF 32000-1:2008 spec, section 14.8.5.2
-// (Attribute owners are kind of like "categories" for structure node
-// attributes.)
-const char kPDFTableAttributeOwner[] = "Table";
-
-// Table Attributes from PDF 32000-1:2008 spec, section 14.8.5.7
-const char kPDFTableCellColSpanAttribute[] = "ColSpan";
-const char kPDFTableCellHeadersAttribute[] = "Headers";
-const char kPDFTableCellRowSpanAttribute[] = "RowSpan";
-const char kPDFTableHeaderScopeAttribute[] = "Scope";
-const char kPDFTableHeaderScopeColumn[] = "Column";
-const char kPDFTableHeaderScopeRow[] = "Row";
-
 SkString GetHeadingStructureType(int heading_level) {
-  // From Table 333 in PDF 32000-1:2008 spec, section 14.8.4.2,
+  // From Table 366 in PDF 32000-2:2020 spec, section 14.8.4.5,
   // "H1"..."H6" are valid structure types.
   if (heading_level >= 1 && heading_level <= 6)
     return SkString(base::StringPrintf("H%d", heading_level).c_str());
 
   // If we don't have a valid heading level, use the generic heading role.
-  return SkString(kPDFStructureTypeHeading);
+  return SkString(chrome_pdf::kPDFStructureTypeHeading);
 }
 
-#endif  // BUILDFLAG(ENABLE_TAGGED_PDF)
-
-SkTime::DateTime TimeToSkTime(base::Time time) {
+SkPDF::DateTime TimeToSkTime(base::Time time) {
   base::Time::Exploded exploded;
   time.UTCExplode(&exploded);
-  SkTime::DateTime skdate;
-  skdate.fTimeZoneMinutes = 0;
-  skdate.fYear = exploded.year;
-  skdate.fMonth = exploded.month;
-  skdate.fDayOfWeek = exploded.day_of_week;
-  skdate.fDay = exploded.day_of_month;
-  skdate.fHour = exploded.hour;
-  skdate.fMinute = exploded.minute;
-  skdate.fSecond = exploded.second;
-  return skdate;
+  return SkPDF::DateTime{
+      .fTimeZoneMinutes = 0,
+      .fYear = static_cast<uint16_t>(exploded.year),
+      .fMonth = static_cast<uint8_t>(exploded.month),
+      .fDayOfWeek = static_cast<uint8_t>(exploded.day_of_week),
+      .fDay = static_cast<uint8_t>(exploded.day_of_month),
+      .fHour = static_cast<uint8_t>(exploded.hour),
+      .fMinute = static_cast<uint8_t>(exploded.minute),
+      .fSecond = static_cast<uint8_t>(exploded.second)};
 }
 
 sk_sp<SkPicture> GetEmptyPicture() {
@@ -88,61 +75,179 @@ sk_sp<SkPicture> GetEmptyPicture() {
   return rec.finishRecordingAsPicture();
 }
 
+void AppendCheckedStateIfTrue(const ui::AXNode* ax_node,
+                              SkPDF::StructureElementNode* tag) {
+  // Handle checked state (default "off").
+  if (ax_node->data().GetCheckedState() == ax::mojom::CheckedState::kTrue) {
+    tag->fAttributes.appendName(chrome_pdf::kPDFPrintFieldAttributeOwner,
+                                chrome_pdf::kPDFPrintFieldCheckedAttribute,
+                                chrome_pdf::kPDFCheckedOnAttribute);
+  }
+}
+
+void AppendFormFieldDescFromAccessibleName(const ui::AXNode* ax_node,
+                                           SkPDF::StructureElementNode* tag) {
+  auto name_from = ax_node->GetNameFrom();
+  if (name_from == ax::mojom::NameFrom::kAttributeExplicitlyEmpty) {
+    // Represent explicitly empty name (aria-label="") as an empty Desc.
+    tag->fAttributes.appendTextString(chrome_pdf::kPDFPrintFieldAttributeOwner,
+                                      chrome_pdf::kPDFPrintFieldDescAttribute,
+                                      "");
+  } else if (name_from == ax::mojom::NameFrom::kAttribute ||
+             name_from == ax::mojom::NameFrom::kTitle ||
+             name_from == ax::mojom::NameFrom::kCssAltText) {
+    const std::string& name_ref =
+        ax_node->data().GetStringAttribute(ax::mojom::StringAttribute::kName);
+    if (!name_ref.empty()) {
+      tag->fAttributes.appendTextString(
+          chrome_pdf::kPDFPrintFieldAttributeOwner,
+          chrome_pdf::kPDFPrintFieldDescAttribute, SkString(name_ref));
+    }
+  }
+}
+
+// Maps AX ListStyle to PDF ListNumbering attribute value.
+const char* GetListNumberingFromListStyle(ax::mojom::ListStyle list_style) {
+  switch (list_style) {
+    case ax::mojom::ListStyle::kDisc:
+      return chrome_pdf::kPDFListNumberingDisc;
+    case ax::mojom::ListStyle::kCircle:
+      return chrome_pdf::kPDFListNumberingCircle;
+    case ax::mojom::ListStyle::kSquare:
+      return chrome_pdf::kPDFListNumberingSquare;
+    case ax::mojom::ListStyle::kNumeric:
+      return chrome_pdf::kPDFListNumberingDecimal;
+    case ax::mojom::ListStyle::kImage:
+    case ax::mojom::ListStyle::kOther:
+    case ax::mojom::ListStyle::kNone:
+      return nullptr;
+  }
+}
+
 // Convert an AXNode into a SkPDF::StructureElementNode in order to make a
 // tagged (accessible) PDF. Returns true on success and false if we don't
 // have enough data to build a valid tree.
 bool RecursiveBuildStructureTree(const ui::AXNode* ax_node,
                                  SkPDF::StructureElementNode* tag) {
-#if BUILDFLAG(ENABLE_TAGGED_PDF)
   bool valid = false;
 
-  tag->fNodeId = ax_node->GetIntAttribute(ax::mojom::IntAttribute::kDOMNodeId);
+  tag->fNodeId = ax_node->data().GetDOMNodeId();
   switch (ax_node->GetRole()) {
     case ax::mojom::Role::kRootWebArea:
-      tag->fTypeString = kPDFStructureTypeDocument;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeDocument;
       break;
     case ax::mojom::Role::kParagraph:
-      tag->fTypeString = kPDFStructureTypeParagraph;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeParagraph;
       break;
     case ax::mojom::Role::kGenericContainer:
-      tag->fTypeString = kPDFStructureTypeDiv;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeNonStruct;
+      break;
+    case ax::mojom::Role::kGroup:
+      // A Div is not the same as an HTML div, it can be semantically
+      // meaningful. In the current draft of PDF-AAM, Div will be mapped
+      // to role group.
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeDiv;
+      break;
+    case ax::mojom::Role::kArticle:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeArticle;
+      break;
+    case ax::mojom::Role::kBlockquote:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeBlockQuote;
+      break;
+    case ax::mojom::Role::kCaption: {
+      ui::AXNode* parent = ax_node->GetParent();
+      if (parent->IsTable()) {
+        // PDF 32000-2:2020 Table 371 Caption must be the first or last child
+        // of Table, luckily, the AXTree always reorders caption to be the
+        // first child.
+        DCHECK_EQ(parent->GetUnignoredChildAtIndex(0), ax_node);
+        tag->fTypeString = chrome_pdf::kPDFStructureTypeCaption;
+      } else {
+        // TODO(crbug.com/448962793) Investigate in which other scenarios a
+        // node with role caption should be mapped to PDF Tag caption.
+        tag->fTypeString = chrome_pdf::kPDFStructureTypeNonStruct;
+      }
+      break;
+    }
+    case ax::mojom::Role::kFigcaption:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeCaption;
+      break;
+    case ax::mojom::Role::kCode:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeCode;
+      break;
+    case ax::mojom::Role::kComplementary:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeAside;
       break;
     case ax::mojom::Role::kHeading:
       tag->fTypeString = GetHeadingStructureType(ax_node->GetIntAttribute(
           ax::mojom::IntAttribute::kHierarchicalLevel));
       break;
     case ax::mojom::Role::kLink:
-      tag->fTypeString = kPDFStructureTypeLink;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeLink;
       break;
-    case ax::mojom::Role::kList:
-      tag->fTypeString = kPDFStructureTypeList;
+    case ax::mojom::Role::kEmphasis:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeEmphasis;
       break;
+    case ax::mojom::Role::kStrong:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeStrong;
+      break;
+    case ax::mojom::Role::kRuby:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeRuby;
+      break;
+    case ax::mojom::Role::kRubyAnnotation:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeRubyText;
+      break;
+    case ax::mojom::Role::kList: {
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeList;
+      // Get the list style from the first list item child to determine
+      // ordered vs unordered list type for the ListNumbering attribute.
+      for (size_t i = 0; i < ax_node->GetUnignoredChildCount(); i++) {
+        const ui::AXNode* child = ax_node->GetUnignoredChildAtIndex(i);
+        if (child->GetRole() == ax::mojom::Role::kListItem) {
+          int list_style_int =
+              child->GetIntAttribute(ax::mojom::IntAttribute::kListStyle);
+          auto list_style = static_cast<ax::mojom::ListStyle>(list_style_int);
+          const char* list_numbering =
+              GetListNumberingFromListStyle(list_style);
+          if (list_numbering) {
+            tag->fAttributes.appendName(chrome_pdf::kPDFListAttributeOwner,
+                                        chrome_pdf::kPDFListNumberingAttribute,
+                                        list_numbering);
+          }
+          break;
+        }
+      }
+      break;
+    }
     case ax::mojom::Role::kListMarker:
-      tag->fTypeString = kPDFStructureTypeListItemLabel;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeListItemLabel;
       break;
     case ax::mojom::Role::kListItem:
-      tag->fTypeString = kPDFStructureTypeListItemBody;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeListItemBody;
       break;
+    case ax::mojom::Role::kGrid:
     case ax::mojom::Role::kTable:
-      tag->fTypeString = kPDFStructureTypeTable;
+    case ax::mojom::Role::kTreeGrid:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeTable;
       break;
     case ax::mojom::Role::kRow:
-      tag->fTypeString = kPDFStructureTypeTableRow;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeTableRow;
       break;
     case ax::mojom::Role::kColumnHeader:
-      tag->fTypeString = kPDFStructureTypeTableHeader;
-      tag->fAttributes.appendName(kPDFTableAttributeOwner,
-                                  kPDFTableHeaderScopeAttribute,
-                                  kPDFTableHeaderScopeColumn);
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeTableHeader;
+      tag->fAttributes.appendName(chrome_pdf::kPDFTableAttributeOwner,
+                                  chrome_pdf::kPDFTableHeaderScopeAttribute,
+                                  chrome_pdf::kPDFTableHeaderScopeColumn);
       break;
     case ax::mojom::Role::kRowHeader:
-      tag->fTypeString = kPDFStructureTypeTableHeader;
-      tag->fAttributes.appendName(kPDFTableAttributeOwner,
-                                  kPDFTableHeaderScopeAttribute,
-                                  kPDFTableHeaderScopeRow);
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeTableHeader;
+      tag->fAttributes.appendName(chrome_pdf::kPDFTableAttributeOwner,
+                                  chrome_pdf::kPDFTableHeaderScopeAttribute,
+                                  chrome_pdf::kPDFTableHeaderScopeRow);
       break;
-    case ax::mojom::Role::kCell: {
-      tag->fTypeString = kPDFStructureTypeTableCell;
+    case ax::mojom::Role::kCell:
+    case ax::mojom::Role::kGridCell: {
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeTableCell;
 
       // Append an attribute consisting of the string IDs of all of the
       // header cells that correspond to this table cell.
@@ -152,46 +257,118 @@ bool RecursiveBuildStructureTree(const ui::AXNode* ax_node,
       std::vector<int> header_ids;
       header_ids.reserve(header_nodes.size());
       for (ui::AXNode* header_node : header_nodes) {
-        header_ids.push_back(header_node->GetIntAttribute(
-            ax::mojom::IntAttribute::kDOMNodeId));
+        header_ids.push_back(header_node->data().GetDOMNodeId());
       }
       tag->fAttributes.appendNodeIdArray(
-          kPDFTableAttributeOwner, kPDFTableCellHeadersAttribute, header_ids);
+          chrome_pdf::kPDFTableAttributeOwner,
+          chrome_pdf::kPDFTableCellHeadersAttribute, header_ids);
       break;
     }
+    case ax::mojom::Role::kCanvas:
+    case ax::mojom::Role::kDocCover:
+    case ax::mojom::Role::kSvgRoot:
+      // These roles may contain rich fallback/descendant semantics.
+      // Only map to Figure when there are no children.
+      if (ax_node->GetUnignoredChildCount() > 0) {
+        tag->fTypeString = chrome_pdf::kPDFStructureTypeNonStruct;
+        break;
+      }
+      [[fallthrough]];
+    case ax::mojom::Role::kGraphicsSymbol:
     case ax::mojom::Role::kImage:
-      // TODO(thestig): Figure out if the `ax::mojom::Role::kFigure` case should
-      // share code with the `ax::mojom::Role::kImage` case, and if `valid`
-      // should be set.
       valid = true;
       [[fallthrough]];
     case ax::mojom::Role::kFigure: {
-      tag->fTypeString = kPDFStructureTypeFigure;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeFigure;
       std::string alt =
           ax_node->GetStringAttribute(ax::mojom::StringAttribute::kName);
       tag->fAlt = SkString(alt.c_str());
       break;
     }
     case ax::mojom::Role::kStaticText:
-      tag->fTypeString = kPDFStructureTypeNonStruct;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeNonStruct;
+      valid = true;
+      break;
+    case ax::mojom::Role::kCheckBox:
+    case ax::mojom::Role::kSwitch:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeForm;
+      tag->fAttributes.appendName(chrome_pdf::kPDFPrintFieldAttributeOwner,
+                                  chrome_pdf::kPDFPrintFieldRoleAttribute,
+                                  chrome_pdf::kPDFRoleCheckBoxAttribute);
+
+      AppendCheckedStateIfTrue(ax_node, tag);
+
+      AppendFormFieldDescFromAccessibleName(ax_node, tag);
+
+      // In case someone is printing to PDF a web page that is 100% checkboxes
+      // (no kStaticText nodes), the PDF should still be tagged.
+      valid = true;
+      break;
+    case ax::mojom::Role::kRadioButton:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeForm;
+      tag->fAttributes.appendName(chrome_pdf::kPDFPrintFieldAttributeOwner,
+                                  chrome_pdf::kPDFPrintFieldRoleAttribute,
+                                  chrome_pdf::kPDFRoleRadioButtonAttribute);
+
+      AppendCheckedStateIfTrue(ax_node, tag);
+
+      AppendFormFieldDescFromAccessibleName(ax_node, tag);
+
+      valid = true;
+      break;
+    case ax::mojom::Role::kToggleButton:
+      // Toggle button has pressed state (aria-pressed) mapped to checked.
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeForm;
+      tag->fAttributes.appendName(chrome_pdf::kPDFPrintFieldAttributeOwner,
+                                  chrome_pdf::kPDFPrintFieldRoleAttribute,
+                                  chrome_pdf::kPDFRolePushButtonAttribute);
+
+      AppendCheckedStateIfTrue(ax_node, tag);
+
+      AppendFormFieldDescFromAccessibleName(ax_node, tag);
+
+      valid = true;
+      break;
+    case ax::mojom::Role::kButton:
+    case ax::mojom::Role::kPopUpButton:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeForm;
+      tag->fAttributes.appendName(chrome_pdf::kPDFPrintFieldAttributeOwner,
+                                  chrome_pdf::kPDFPrintFieldRoleAttribute,
+                                  chrome_pdf::kPDFRolePushButtonAttribute);
+
+      AppendFormFieldDescFromAccessibleName(ax_node, tag);
+
+      valid = true;
+      break;
+    case ax::mojom::Role::kTextField:
+    case ax::mojom::Role::kTextFieldWithComboBox:
+    case ax::mojom::Role::kSearchBox:
+    case ax::mojom::Role::kSpinButton:
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeForm;
+      tag->fAttributes.appendName(chrome_pdf::kPDFPrintFieldAttributeOwner,
+                                  chrome_pdf::kPDFPrintFieldRoleAttribute,
+                                  chrome_pdf::kPDFRoleTextValueAttribute);
+
+      AppendFormFieldDescFromAccessibleName(ax_node, tag);
+
       valid = true;
       break;
     default:
-      tag->fTypeString = kPDFStructureTypeNonStruct;
+      tag->fTypeString = chrome_pdf::kPDFStructureTypeNonStruct;
       break;
   }
 
   if (ui::IsCellOrTableHeader(ax_node->GetRole())) {
-    absl::optional<int> row_span = ax_node->GetTableCellRowSpan();
+    std::optional<int> row_span = ax_node->GetTableCellRowSpan();
     if (row_span.has_value()) {
-      tag->fAttributes.appendInt(kPDFTableAttributeOwner,
-                                 kPDFTableCellRowSpanAttribute,
+      tag->fAttributes.appendInt(chrome_pdf::kPDFTableAttributeOwner,
+                                 chrome_pdf::kPDFTableCellRowSpanAttribute,
                                  row_span.value());
     }
-    absl::optional<int> col_span = ax_node->GetTableCellColSpan();
+    std::optional<int> col_span = ax_node->GetTableCellColSpan();
     if (col_span.has_value()) {
-      tag->fAttributes.appendInt(kPDFTableAttributeOwner,
-                                 kPDFTableCellColSpanAttribute,
+      tag->fAttributes.appendInt(chrome_pdf::kPDFTableAttributeOwner,
+                                 chrome_pdf::kPDFTableCellColSpanAttribute,
                                  col_span.value());
     }
   }
@@ -210,47 +387,71 @@ bool RecursiveBuildStructureTree(const ui::AXNode* ax_node,
   }
 
   return valid;
-#else  // BUILDFLAG(ENABLE_TAGGED_PDF)
-  return false;
-#endif
+}
+
+sk_sp<const SkData> GetImageData(SkImage* img) {
+  // Skip the encoding step if the image is already encoded
+  if (auto data = img->refEncodedData()) {
+    return data;
+  }
+
+  // TODO(crbug.com/40073326) Convert texture-backed images to raster
+  // *before* they get this far if possible.
+  if (img->isTextureBacked()) {
+    GrDirectContext* ctx = SkImages::GetContext(img);
+    return skia::EncodePngAsSkData(ctx, img);
+  }
+  return skia::EncodePngAsSkData(nullptr, img);
 }
 
 }  // namespace
 
 namespace printing {
 
-sk_sp<SkDocument> MakePdfDocument(base::StringPiece creator,
-                                  const ui::AXTreeUpdate& accessibility_tree,
-                                  SkWStream* stream) {
+sk_sp<SkDocument> MakePdfDocument(
+    std::string_view creator,
+    std::string_view title,
+    const ui::AXTreeUpdate& accessibility_tree,
+    mojom::GenerateDocumentOutline generate_document_outline,
+    SkWStream* stream) {
   SkPDF::Metadata metadata;
-  SkTime::DateTime now = TimeToSkTime(base::Time::Now());
+  SkPDF::DateTime now = TimeToSkTime(base::Time::Now());
   metadata.fCreation = now;
   metadata.fModified = now;
-  // TODO(crbug.com/691162): Switch to SkString's string_view constructor when
-  // possible.
-  metadata.fCreator = creator.empty()
-                          ? SkString("Chromium")
-                          : SkString(creator.data(), creator.size());
+  metadata.fCreator =
+      creator.empty() ? SkString("Chromium") : SkString(creator);
+  metadata.fTitle = SkString(title);
   metadata.fRasterDPI = 300.0f;
+
+#if BUILDFLAG(IS_MAC)
+  // Avoid macOS PDF-to-PostScript aborts on Skia alpha-gradient soft masks.
+  metadata.fRasterizeAlphaGradientsForPrinting = true;
+#endif  // BUILDFLAG(IS_MAC)
 
   SkPDF::StructureElementNode tag_root = {};
   if (!accessibility_tree.nodes.empty()) {
     ui::AXTree tree(accessibility_tree);
-    if (RecursiveBuildStructureTree(tree.root(), &tag_root))
+    if (RecursiveBuildStructureTree(tree.root(), &tag_root)) {
       metadata.fStructureElementTreeRoot = &tag_root;
+      metadata.fOutline =
+          generate_document_outline == mojom::GenerateDocumentOutline::kNone
+              ? SkPDF::Metadata::Outline::None
+              : SkPDF::Metadata::Outline::StructureElementHeaders;
+    }
   }
 
   return SkPDF::MakeDocument(stream, metadata);
 }
 
-sk_sp<SkData> SerializeOopPicture(SkPicture* pic, void* ctx) {
+SkSerialReturnType SerializeOopPicture(SkPicture* pic, void* ctx) {
   const auto* context = reinterpret_cast<const ContentToProxyTokenMap*>(ctx);
   uint32_t pic_id = pic->uniqueID();
   auto iter = context->find(pic_id);
-  if (iter == context->end())
+  if (iter == context->end()) {
     return nullptr;
+  }
 
-  return SkData::MakeWithCopy(&pic_id, sizeof(pic_id));
+  return gfx::MakeSkDataFromSpanWithCopy(base::byte_span_from_ref(pic_id));
 }
 
 sk_sp<SkPicture> DeserializeOopPicture(const void* data,
@@ -259,9 +460,8 @@ sk_sp<SkPicture> DeserializeOopPicture(const void* data,
   uint32_t pic_id;
   if (length < sizeof(pic_id)) {
     NOTREACHED();  // Should not happen if the content is as written.
-    return GetEmptyPicture();
   }
-  memcpy(&pic_id, data, sizeof(pic_id));
+  UNSAFE_TODO(memcpy(&pic_id, data, sizeof(pic_id)));
 
   auto* context = reinterpret_cast<PictureDeserializationContext*>(ctx);
   auto iter = context->find(pic_id);
@@ -274,9 +474,9 @@ sk_sp<SkPicture> DeserializeOopPicture(const void* data,
   return iter->second;
 }
 
-sk_sp<SkData> SerializeOopTypeface(SkTypeface* typeface, void* ctx) {
+SkSerialReturnType SerializeOopTypeface(SkTypeface* typeface, void* ctx) {
   auto* context = reinterpret_cast<TypefaceSerializationContext*>(ctx);
-  SkFontID typeface_id = typeface->uniqueID();
+  SkTypefaceID typeface_id = typeface->uniqueID();
   bool data_included = context->insert(typeface_id).second;
 
   // Need the typeface ID to identify the desired typeface.  Include an
@@ -286,26 +486,29 @@ sk_sp<SkData> SerializeOopTypeface(SkTypeface* typeface, void* ctx) {
   stream.write32(typeface_id);
   stream.writeBool(data_included);
   if (data_included) {
-    typeface->serialize(&stream, SkTypeface::SerializeBehavior::kDoIncludeData);
+    SkTypeface::SerializeBehavior mode =
+        SkTypeface::SerializeBehavior::kDoIncludeData;
+#if BUILDFLAG(IS_MAC)
+    constexpr SkFontTableTag kHvglTag = SkSetFourByteTag('h', 'v', 'g', 'l');
+    if (typeface->getTableSize(kHvglTag) > 0) {
+      // hvgl fonts on MacOS cannot be successfully deserialized when
+      // kDoIncludeData was used due to restrictions in the CoreText API.
+      // See: https://crbug.com/455517173#comment4
+      mode = SkTypeface::SerializeBehavior::kIncludeDataIfLocal;
+    }
+#endif
+    typeface->serialize(&stream, mode);
   }
   return stream.detachAsData();
 }
 
-sk_sp<SkTypeface> DeserializeOopTypeface(const void* data,
-                                         size_t length,
-                                         void* ctx) {
-  SkStream* stream = *(reinterpret_cast<SkStream**>(const_cast<void*>(data)));
-  if (length < sizeof(stream)) {
-    NOTREACHED();  // Should not happen if the content is as written.
-    return nullptr;
-  }
-
-  SkFontID id;
-  if (!stream->readU32(&id)) {
+sk_sp<SkTypeface> DeserializeOopTypeface(SkStream& stream, void* ctx) {
+  SkTypefaceID id;
+  if (!stream.readU32(&id)) {
     return nullptr;
   }
   bool data_included;
-  if (!stream->readBool(&data_included)) {
+  if (!stream.readBool(&data_included)) {
     return nullptr;
   }
 
@@ -318,14 +521,96 @@ sk_sp<SkTypeface> DeserializeOopTypeface(const void* data,
 
   // Typeface not encountered before, expect it to be present in the stream.
   DCHECK(data_included);
-  sk_sp<SkTypeface> typeface = SkTypeface::MakeDeserialize(stream);
+  sk_sp<SkTypeface> typeface;
+  if (base::FeatureList::IsEnabled(blink::features::kFontationsPrinting)) {
+    typeface = skia::MakeTypefaceWithFontations(&stream);
+  } else {
+    typeface = SkTypeface::MakeDeserialize(&stream, skia::DefaultFontMgr());
+  }
+
   context->emplace(id, typeface);
   return typeface;
 }
 
+SkSerialReturnType SerializeRasterImage(SkImage* img, void* ctx) {
+  if (!img) {
+    return nullptr;
+  }
+
+  auto* context = reinterpret_cast<ImageSerializationContext*>(ctx);
+
+  uint32_t img_id = img->uniqueID();
+  if (context->contains(img_id)) {
+    return SkData::MakeWithCopy(&img_id, sizeof(img_id));
+  }
+
+  sk_sp<const SkData> img_data = GetImageData(img);
+  if (!img_data) {
+    return nullptr;
+  }
+
+  // Store image id followed by the image data on the first occurrence
+  // of an image.
+  auto data = SkData::MakeUninitialized(
+      base::CheckAdd(img_data->size(), sizeof(img_id)).ValueOrDie());
+
+  // SAFETY: The span is used as a view to avoid direct pointer access.
+  auto [id_span, data_span] =
+      skia::as_writable_byte_span(*data).split_at<sizeof(img_id)>();
+  id_span.copy_from(base::byte_span_from_ref(img_id));
+  data_span.copy_from(gfx::SkDataToSpan(img_data));
+
+  context->insert(img_id);
+
+  return data;
+}
+
+sk_sp<SkImage> DeserializeRasterImage(sk_sp<SkData> data,
+                                      std::optional<SkAlphaType>,
+                                      void* ctx) {
+  if (!data) {
+    return nullptr;
+  }
+  auto* context = reinterpret_cast<ImageDeserializationContext*>(ctx);
+
+  base::SpanReader reader{gfx::SkDataToSpan(data)};
+
+  uint32_t img_id;
+  if (!reader.ReadU32NativeEndian(img_id)) {
+    // If there is no room for id, there cannot be meaningful image data.
+    return nullptr;
+  }
+
+  auto iter = context->find(img_id);
+  if (iter != context->end() && iter->second) {
+    return iter->second;
+  }
+
+  if (!reader.remaining()) {
+    return nullptr;
+  }
+
+  // Copy the data to avoid `bytes` being freed before the image is decoded.
+  auto data_span = reader.remaining_span();
+  auto img_data = SkData::MakeWithCopy(data_span.data(), data_span.size());
+
+  // Need to explicitly decode here, as the data are prefixed with image id,
+  // invalidating the built-in Skia fallback.
+  auto image = SkImages::DeferredFromEncodedData(img_data);
+  if (!image) {
+    return nullptr;
+  }
+
+  (*context)[img_id] = image;
+  return image;
+}
+
 SkSerialProcs SerializationProcs(PictureSerializationContext* picture_ctx,
-                                 TypefaceSerializationContext* typeface_ctx) {
+                                 TypefaceSerializationContext* typeface_ctx,
+                                 ImageSerializationContext* image_ctx) {
   SkSerialProcs procs;
+  procs.fImageProc = SerializeRasterImage;
+  procs.fImageCtx = image_ctx;
   procs.fPictureProc = SerializeOopPicture;
   procs.fPictureCtx = picture_ctx;
   procs.fTypefaceProc = SerializeOopTypeface;
@@ -335,11 +620,14 @@ SkSerialProcs SerializationProcs(PictureSerializationContext* picture_ctx,
 
 SkDeserialProcs DeserializationProcs(
     PictureDeserializationContext* picture_ctx,
-    TypefaceDeserializationContext* typeface_ctx) {
+    TypefaceDeserializationContext* typeface_ctx,
+    ImageDeserializationContext* image_ctx) {
   SkDeserialProcs procs;
+  procs.fImageDataProc = DeserializeRasterImage;
+  procs.fImageCtx = image_ctx;
   procs.fPictureProc = DeserializeOopPicture;
   procs.fPictureCtx = picture_ctx;
-  procs.fTypefaceProc = DeserializeOopTypeface;
+  procs.fTypefaceStreamProc = DeserializeOopTypeface;
   procs.fTypefaceCtx = typeface_ctx;
   return procs;
 }

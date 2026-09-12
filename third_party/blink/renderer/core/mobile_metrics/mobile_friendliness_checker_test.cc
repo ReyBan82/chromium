@@ -10,6 +10,8 @@
 #include "third_party/blink/renderer/core/frame/frame_test_helpers.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
 #include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
+#include "third_party/blink/renderer/platform/testing/paint_test_configurations.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
@@ -22,7 +24,8 @@ static constexpr int kDeviceHeight = 800;
 static constexpr float kMinimumZoom = 0.25f;
 static constexpr float kMaximumZoom = 5;
 
-class MobileFriendlinessCheckerTest : public testing::Test {
+class MobileFriendlinessCheckerTest : public testing::Test,
+                                      private CullRectTestConfig {
   static void ConfigureAndroidSettings(WebSettings* settings) {
     settings->SetViewportEnabled(true);
     settings->SetViewportMetaEnabled(true);
@@ -38,9 +41,6 @@ class MobileFriendlinessCheckerTest : public testing::Test {
     helper->Resize(gfx::Size(kDeviceWidth, kDeviceHeight));
     helper->GetWebView()->GetPage()->SetDefaultPageScaleLimits(kMinimumZoom,
                                                                kMaximumZoom);
-    // Model Chrome text auto-sizing more accurately.
-    helper->GetWebView()->GetPage()->GetSettings().SetTextAutosizingEnabled(
-        true);
     helper->GetWebView()
         ->GetPage()
         ->GetSettings()
@@ -51,17 +51,7 @@ class MobileFriendlinessCheckerTest : public testing::Test {
 
     load(*helper);
 
-    std::unique_ptr<ukm::UkmRecorder> old_ukm_recorder =
-        std::move(helper->GetWebView()
-                      ->MainFrameImpl()
-                      ->GetFrame()
-                      ->GetDocument()
-                      ->ukm_recorder_);
-    helper->GetWebView()
-        ->MainFrameImpl()
-        ->GetFrame()
-        ->GetDocument()
-        ->ukm_recorder_ = std::make_unique<ukm::TestUkmRecorder>();
+    ukm::TestAutoSetUkmRecorder result;
 
     DCHECK(helper->GetWebView()->MainFrameImpl()->GetFrame()->IsLocalRoot());
     helper->GetWebView()
@@ -74,23 +64,10 @@ class MobileFriendlinessCheckerTest : public testing::Test {
         ->GetMobileFriendlinessChecker()
         ->ComputeNowForTesting();
 
-    std::unique_ptr<ukm::UkmRecorder> result_ukm =
-        std::move(helper->GetWebView()
-                      ->MainFrameImpl()
-                      ->GetFrame()
-                      ->GetDocument()
-                      ->ukm_recorder_);
-    ukm::TestUkmRecorder* result =
-        reinterpret_cast<ukm::TestUkmRecorder*>(result_ukm.get());
-    auto entries = result->GetEntriesByName("MobileFriendliness");
+    auto entries = result.GetEntriesByName("MobileFriendliness");
     EXPECT_EQ(entries.size(), 1u);
     EXPECT_EQ(entries[0]->event_hash,
               ukm::builders::MobileFriendliness::kEntryNameHash);
-    helper->GetWebView()
-        ->MainFrameImpl()
-        ->GetFrame()
-        ->GetDocument()
-        ->ukm_recorder_ = std::move(old_ukm_recorder);
     return *entries[0];
   }
 
@@ -115,8 +92,8 @@ class MobileFriendlinessCheckerTest : public testing::Test {
     return EvalMobileFriendlinessUKM(
         [&](frame_test_helpers::WebViewHelper& helper) {
           url_test_helpers::RegisterMockedURLLoadFromBase(
-              WebString::FromUTF8(kBaseUrl), blink::test::CoreTestDataPath(),
-              WebString::FromUTF8(path));
+              WebString::FromUtf8(kBaseUrl), blink::test::CoreTestDataPath(),
+              WebString::FromUtf8(path));
           frame_test_helpers::LoadFrame(helper.GetWebView()->MainFrameImpl(),
                                         kBaseUrl + path);
         },
@@ -146,6 +123,7 @@ class MobileFriendlinessCheckerTest : public testing::Test {
     EXPECT_NE(it, ukm.metrics.end());
     EXPECT_GT(it->second, expected);
   }
+  test::TaskEnvironment task_environment_;
 };
 
 TEST_F(MobileFriendlinessCheckerTest, NoViewportSetting) {
@@ -703,8 +681,8 @@ TEST_F(MobileFriendlinessCheckerTest,
               100);
 }
 
-// This test shows that text will grow with text-size-adjust: auto in a
-// fixed-width table.
+// This test shows that text will no longer, as of late 2025, grow with
+// text-size-adjust: auto in a fixed-width table.
 TEST_F(MobileFriendlinessCheckerTest, FixedWidthTableTextSizeAdjustAuto) {
   ukm::mojom::UkmEntry ukm = CalculateMetricsForHTMLString(R"HTML(
 <html>
@@ -720,7 +698,8 @@ TEST_F(MobileFriendlinessCheckerTest, FixedWidthTableTextSizeAdjustAuto) {
   </body>
 </html>
 )HTML");
-  ExpectUkm(ukm, ukm::builders::MobileFriendliness::kSmallTextRatioNameHash, 0);
+  ExpectUkm(ukm, ukm::builders::MobileFriendliness::kSmallTextRatioNameHash,
+            100);
 }
 
 // This test shows that text remains small with text-size-adjust: none in a
@@ -1084,7 +1063,7 @@ TEST_F(MobileFriendlinessCheckerTest, ScaleTextOutsideViewport) {
   ExpectUkmGT(ukm,
               ukm::builders::MobileFriendliness::
                   kTextContentOutsideViewportPercentageNameHash,
-              90);
+              55);
 }
 
 TEST_F(MobileFriendlinessCheckerTest, ScrollerOutsideViewport) {
@@ -1472,8 +1451,8 @@ TEST_F(MobileFriendlinessCheckerTest, ScrollableLayoutView) {
 
 TEST_F(MobileFriendlinessCheckerTest, IFrame) {
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(kBaseUrl), blink::test::CoreTestDataPath(),
-      WebString::FromUTF8("visible_iframe.html"));
+      WebString::FromUtf8(kBaseUrl), blink::test::CoreTestDataPath(),
+      WebString("visible_iframe.html"));
   const ukm::mojom::UkmEntry ukm =
       CalculateMetricsForFile("single_iframe.html");
   ExpectUkm(ukm,
@@ -1485,8 +1464,8 @@ TEST_F(MobileFriendlinessCheckerTest, IFrame) {
 
 TEST_F(MobileFriendlinessCheckerTest, IFrameVieportDeviceWidth) {
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(kBaseUrl), blink::test::CoreTestDataPath(),
-      WebString::FromUTF8("viewport/viewport-1.html"));
+      WebString::FromUtf8(kBaseUrl), blink::test::CoreTestDataPath(),
+      WebString("viewport/viewport-1.html"));
   const ukm::mojom::UkmEntry ukm =
       CalculateMetricsForFile("page_contains_viewport_iframe.html");
   ExpectUkm(ukm,
@@ -1499,8 +1478,8 @@ TEST_F(MobileFriendlinessCheckerTest, IFrameVieportDeviceWidth) {
 
 TEST_F(MobileFriendlinessCheckerTest, IFrameSmallTextRatio) {
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(kBaseUrl), blink::test::CoreTestDataPath(),
-      WebString::FromUTF8("small_text_iframe.html"));
+      WebString::FromUtf8(kBaseUrl), blink::test::CoreTestDataPath(),
+      WebString("small_text_iframe.html"));
   const ukm::mojom::UkmEntry ukm =
       CalculateMetricsForFile("page_contains_small_text_iframe.html");
   ExpectUkm(ukm,

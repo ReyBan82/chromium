@@ -12,7 +12,7 @@ namespace blink {
 
 class Node;
 
-enum AbsoluteURLs { kDoNotResolveURLs, kResolveAllURLs, kResolveNonLocalURLs };
+enum class ResolveUrls { kNone, kAll, kNonLocal };
 
 class CORE_EXPORT CreateMarkupOptions final {
   STACK_ALLOCATED();
@@ -23,7 +23,7 @@ class CORE_EXPORT CreateMarkupOptions final {
   CreateMarkupOptions() = default;
 
   const Node* ConstrainingAncestor() const { return constraining_ancestor_; }
-  AbsoluteURLs ShouldResolveURLs() const { return should_resolve_urls_; }
+  ResolveUrls ShouldResolveUrls() const { return should_resolve_urls_; }
   bool ShouldAnnotateForInterchange() const {
     return should_annotate_for_interchange_;
   }
@@ -31,13 +31,21 @@ class CORE_EXPORT CreateMarkupOptions final {
     return should_convert_blocks_to_inlines_;
   }
   bool IsForMarkupSanitization() const { return is_for_markup_sanitization_; }
+  bool IgnoresCssTextTransformsForRenderedText() const {
+    return ignores_css_text_transforms_for_rendered_text_;
+  }
+  bool ShouldSkipUnselectableContent() const {
+    return should_skip_unselectable_content_;
+  }
 
  private:
   const Node* constraining_ancestor_ = nullptr;
-  AbsoluteURLs should_resolve_urls_ = kDoNotResolveURLs;
+  ResolveUrls should_resolve_urls_ = ResolveUrls::kNone;
   bool should_annotate_for_interchange_ = false;
   bool should_convert_blocks_to_inlines_ = false;
   bool is_for_markup_sanitization_ = false;
+  bool ignores_css_text_transforms_for_rendered_text_ = false;
+  bool should_skip_unselectable_content_ = false;
 };
 
 class CORE_EXPORT CreateMarkupOptions::Builder final {
@@ -50,10 +58,13 @@ class CORE_EXPORT CreateMarkupOptions::Builder final {
   CreateMarkupOptions Build() const { return data_; }
 
   Builder& SetConstrainingAncestor(const Node* node);
-  Builder& SetShouldResolveURLs(AbsoluteURLs absolute_urls);
+  Builder& SetShouldResolveUrls(ResolveUrls resolve_urls);
   Builder& SetShouldAnnotateForInterchange(bool annotate_for_interchange);
   Builder& SetShouldConvertBlocksToInlines(bool convert_blocks_for_inlines);
   Builder& SetIsForMarkupSanitization(bool is_for_sanitization);
+  Builder& SetIgnoresCssTextTransformsForRenderedText(
+      bool text_without_transforms);
+  Builder& SetShouldSkipUnselectableContent(bool skip_unselectable_content);
 
  private:
   CreateMarkupOptions data_;

@@ -4,10 +4,12 @@
 
 #include "base/win/security_descriptor.h"
 
-#include <aclapi.h>
-#include <sddl.h>
 #include <windows.h>
 
+#include <aclapi.h>
+#include <sddl.h>
+
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,7 +21,6 @@
 #include "base/win/scoped_handle.h"
 #include "base/win/scoped_localalloc.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base::win {
 
@@ -28,18 +29,20 @@ namespace {
 constexpr wchar_t kOwnerOnly[] = L"O:BU";
 constexpr wchar_t kGroupOnly[] = L"G:SY";
 constexpr wchar_t kDaclOnly[] = L"D:(A;;GA;;;WD)";
-constexpr wchar_t kProtectedDaclOnly[] = L"D:P(A;;GA;;;WD)";
+constexpr wchar_t kProtectedDaclOnly[] = L"D:PAI(A;;GA;;;WD)";
 constexpr wchar_t kSaclOnly[] = L"S:(ML;;;;;SI)";
-constexpr wchar_t kProtectedSaclOnly[] = L"S:P(ML;;;;;SI)";
-constexpr wchar_t kSaclProtected[] = L"S:P";
-constexpr wchar_t kFullSd[] = L"O:BUG:SYD:P(A;;GA;;;WD)S:P(ML;;;;;SI)";
+constexpr wchar_t kProtectedSaclOnly[] = L"S:PAI(ML;;;;;SI)";
+constexpr wchar_t kSaclProtected[] = L"S:PAI";
+constexpr wchar_t kFullSd[] = L"O:BUG:SYD:PAI(A;;GA;;;WD)S:PAI(ML;;;;;SI)";
 constexpr wchar_t kFileProtected[] = L"D:P(A;;FA;;;WD)";
-constexpr wchar_t kFileIntegrity[] = L"S:(ML;;NW;;;ME)";
+constexpr wchar_t kFileIntegrity[] = L"S:AI(ML;;NW;;;ME)";
 constexpr wchar_t kFileIntegrityInherit[] = L"S:(ML;OICI;NW;;;ME)";
-constexpr wchar_t kFileProtectedIntegrity[] = L"D:P(A;;FA;;;WD)S:(ML;;NW;;;ME)";
+constexpr wchar_t kFileProtectedIntegrity[] =
+    L"D:P(A;;FA;;;WD)S:AI(ML;;NW;;;ME)";
 constexpr wchar_t kNewDirectory[] = L"D:P(A;OICI;FA;;;WD)";
-constexpr wchar_t kInheritedFile[] = L"D:(A;ID;FA;;;WD)";
-constexpr wchar_t kProtectedUsers[] = L"D:P(A;;FA;;;BU)";
+constexpr wchar_t kInheritedFileNoAuto[] = L"D:(A;ID;FA;;;WD)";
+constexpr wchar_t kInheritedFile[] = L"D:AI(A;ID;FA;;;WD)";
+constexpr wchar_t kProtectedUsers[] = L"D:PAI(A;;FA;;;BU)";
 constexpr wchar_t kEvent[] = L"D:(A;;0x1f0003;;;WD)";
 constexpr wchar_t kEventWithSystem[] = L"D:(D;;DC;;;SY)(A;;0x1f0003;;;WD)";
 constexpr wchar_t kEventSystemOnly[] = L"D:(D;;DC;;;SY)";
@@ -56,10 +59,10 @@ constexpr SECURITY_INFORMATION kAllSecurityInfo =
 constexpr SECURITY_INFORMATION kDaclLabelSecurityInfo =
     DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
 
-base::win::ScopedLocalAllocTyped<void> ConvertSddlToSd(const wchar_t* sddl) {
+base::win::ScopedLocalAllocTyped<void> ConvertSddlToSd(wcstring_view sddl) {
   PSECURITY_DESCRIPTOR sd = nullptr;
   CHECK(ConvertStringSecurityDescriptorToSecurityDescriptor(
-      sddl, SDDL_REVISION_1, &sd, nullptr));
+      sddl.c_str(), SDDL_REVISION_1, &sd, nullptr));
   return TakeLocalAlloc(sd);
 }
 
@@ -67,8 +70,9 @@ bool CreateFileWithSd(const FilePath& path, void* sd, bool directory) {
   SECURITY_ATTRIBUTES security_attr = {};
   security_attr.nLength = sizeof(security_attr);
   security_attr.lpSecurityDescriptor = sd;
-  if (directory)
+  if (directory) {
     return !!::CreateDirectory(path.value().c_str(), &security_attr);
+  }
 
   return ScopedHandle(::CreateFile(path.value().c_str(), GENERIC_ALL, 0,
                                    &security_attr, CREATE_ALWAYS, 0, nullptr))
@@ -76,7 +80,7 @@ bool CreateFileWithSd(const FilePath& path, void* sd, bool directory) {
 }
 
 bool CreateFileWithDacl(const FilePath& path,
-                        const wchar_t* sddl,
+                        wcstring_view sddl,
                         bool directory) {
   auto sd_ptr = ConvertSddlToSd(sddl);
   CHECK(sd_ptr);
@@ -84,7 +88,7 @@ bool CreateFileWithDacl(const FilePath& path,
 }
 
 base::win::ScopedHandle CreateEventWithDacl(const wchar_t* name,
-                                            const wchar_t* sddl) {
+                                            wcstring_view sddl) {
   auto sd_ptr = ConvertSddlToSd(sddl);
   CHECK(sd_ptr);
   SECURITY_ATTRIBUTES security_attr = {};
@@ -103,25 +107,25 @@ base::win::ScopedHandle DuplicateHandle(const base::win::ScopedHandle& handle,
   return base::win::ScopedHandle(dup_handle);
 }
 
-void ExpectSid(const absl::optional<Sid>& sid, WellKnownSid known_sid) {
+void ExpectSid(const std::optional<Sid>& sid, WellKnownSid known_sid) {
   ASSERT_TRUE(sid);
   EXPECT_EQ(*sid, Sid(known_sid));
 }
 
-void AccessCheckError(const absl::optional<AccessCheckResult>& result,
+void AccessCheckError(const std::optional<AccessCheckResult>& result,
                       DWORD expected) {
   EXPECT_FALSE(result.has_value());
   EXPECT_EQ(::GetLastError(), expected);
 }
 
-void AccessCheckStatusError(const absl::optional<AccessCheckResult>& result,
+void AccessCheckStatusError(const std::optional<AccessCheckResult>& result,
                             DWORD expected) {
   ASSERT_TRUE(result.has_value());
   EXPECT_FALSE(result->access_status);
   EXPECT_EQ(::GetLastError(), expected);
 }
 
-void AccessCheckTest(const absl::optional<AccessCheckResult>& result,
+void AccessCheckTest(const std::optional<AccessCheckResult>& result,
                      ACCESS_MASK expected_access) {
   ASSERT_TRUE(result.has_value());
   EXPECT_TRUE(result->access_status);
@@ -134,10 +138,10 @@ void AccessCheckTest(T type,
                      ACCESS_MASK generic_write,
                      ACCESS_MASK generic_execute,
                      ACCESS_MASK generic_all) {
-  absl::optional<SecurityDescriptor> sd =
+  std::optional<SecurityDescriptor> sd =
       SecurityDescriptor::FromSddl(kAccessCheckSd);
   ASSERT_TRUE(sd);
-  absl::optional<AccessToken> token = AccessToken::FromCurrentProcess(
+  std::optional<AccessToken> token = AccessToken::FromCurrentProcess(
       /*impersonation=*/true, TOKEN_ADJUST_DEFAULT);
   ASSERT_TRUE(token.has_value());
   AccessCheckTest(sd->AccessCheck(*token, GENERIC_READ, type), generic_read);
@@ -232,8 +236,10 @@ TEST(SecurityDescriptorTest, FromPointer) {
   ExpectSid(sd->group(), WellKnownSid::kLocalSystem);
   EXPECT_TRUE(sd->dacl());
   EXPECT_TRUE(sd->dacl_protected());
+  EXPECT_TRUE(sd->dacl_auto_inherited());
   EXPECT_TRUE(sd->sacl());
   EXPECT_TRUE(sd->sacl_protected());
+  EXPECT_TRUE(sd->sacl_auto_inherited());
 }
 
 TEST(SecurityDescriptorTest, ToSddl) {
@@ -246,8 +252,7 @@ TEST(SecurityDescriptorTest, ToSddl) {
   EXPECT_EQ(sd->ToSddl(LABEL_SECURITY_INFORMATION), kProtectedSaclOnly);
   EXPECT_EQ(sd->ToSddl(SACL_SECURITY_INFORMATION), kSaclProtected);
   EXPECT_EQ(sd->ToSddl(kAllSecurityInfo), kFullSd);
-  SecurityDescriptor empty_sd;
-  empty_sd.set_dacl(AccessControlList());
+  auto empty_sd = SecurityDescriptor::CreateWithEmptyDacl();
   EXPECT_EQ(empty_sd.ToSddl(DACL_SECURITY_INFORMATION), kEmptyDacl);
 }
 
@@ -268,26 +273,32 @@ TEST(SecurityDescriptorTest, FromSddl) {
   ASSERT_TRUE(sd);
   EXPECT_TRUE(sd->dacl());
   EXPECT_FALSE(sd->dacl_protected());
+  EXPECT_FALSE(sd->dacl_auto_inherited());
   sd = SecurityDescriptor::FromSddl(kProtectedDaclOnly);
   ASSERT_TRUE(sd);
   EXPECT_TRUE(sd->dacl());
   EXPECT_TRUE(sd->dacl_protected());
+  EXPECT_TRUE(sd->dacl_auto_inherited());
   sd = SecurityDescriptor::FromSddl(kSaclOnly);
   ASSERT_TRUE(sd);
   EXPECT_TRUE(sd->sacl());
   EXPECT_FALSE(sd->sacl_protected());
+  EXPECT_FALSE(sd->sacl_auto_inherited());
   sd = SecurityDescriptor::FromSddl(kProtectedSaclOnly);
   ASSERT_TRUE(sd);
   EXPECT_TRUE(sd->sacl());
   EXPECT_TRUE(sd->sacl_protected());
+  EXPECT_TRUE(sd->sacl_auto_inherited());
   sd = SecurityDescriptor::FromSddl(kFullSd);
   ASSERT_TRUE(sd);
   ExpectSid(sd->owner(), WellKnownSid::kBuiltinUsers);
   ExpectSid(sd->group(), WellKnownSid::kLocalSystem);
   EXPECT_TRUE(sd->dacl());
   EXPECT_TRUE(sd->dacl_protected());
+  EXPECT_TRUE(sd->dacl_auto_inherited());
   EXPECT_TRUE(sd->sacl());
   EXPECT_TRUE(sd->sacl_protected());
+  EXPECT_TRUE(sd->sacl_auto_inherited());
   sd = SecurityDescriptor::FromSddl(kNullDacl);
   ASSERT_TRUE(sd);
   ASSERT_TRUE(sd->dacl());
@@ -300,8 +311,10 @@ TEST(SecurityDescriptorTest, Clone) {
   EXPECT_FALSE(cloned.group());
   EXPECT_FALSE(cloned.dacl());
   EXPECT_FALSE(cloned.dacl_protected());
+  EXPECT_FALSE(cloned.dacl_auto_inherited());
   EXPECT_FALSE(cloned.sacl());
   EXPECT_FALSE(cloned.sacl_protected());
+  EXPECT_FALSE(cloned.sacl_auto_inherited());
   auto sd = SecurityDescriptor::FromSddl(kFullSd);
   ASSERT_TRUE(sd);
   cloned = sd->Clone();
@@ -311,18 +324,20 @@ TEST(SecurityDescriptorTest, Clone) {
   EXPECT_NE(sd->group()->GetPSID(), cloned.group()->GetPSID());
   EXPECT_NE(sd->dacl()->get(), cloned.dacl()->get());
   EXPECT_EQ(sd->dacl_protected(), cloned.dacl_protected());
+  EXPECT_EQ(sd->dacl_auto_inherited(), cloned.dacl_auto_inherited());
   EXPECT_NE(sd->sacl()->get(), cloned.sacl()->get());
   EXPECT_EQ(sd->sacl_protected(), cloned.sacl_protected());
+  EXPECT_EQ(sd->sacl_auto_inherited(), cloned.sacl_auto_inherited());
 }
 
 TEST(SecurityDescriptorTest, ToAbsolute) {
   auto sd = SecurityDescriptor::FromPointer(ConvertSddlToSd(kFullSd).get());
   ASSERT_TRUE(sd);
-  SECURITY_DESCRIPTOR sd_abs;
-  sd->ToAbsolute(sd_abs);
+  SECURITY_DESCRIPTOR sd_abs = sd->ToAbsolute();
   EXPECT_EQ(sd_abs.Revision, SECURITY_DESCRIPTOR_REVISION);
   EXPECT_EQ(sd_abs.Control, SE_DACL_PRESENT | SE_DACL_PROTECTED |
-                                SE_SACL_PRESENT | SE_SACL_PROTECTED);
+                                SE_DACL_AUTO_INHERITED | SE_SACL_PRESENT |
+                                SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED);
   EXPECT_EQ(sd_abs.Owner, sd->owner()->GetPSID());
   EXPECT_EQ(sd_abs.Group, sd->group()->GetPSID());
   EXPECT_EQ(sd_abs.Dacl, sd->dacl()->get());
@@ -400,6 +415,30 @@ TEST(SecurityDescriptorTest, SetDaclEntry) {
   EXPECT_EQ(sd.ToSddl(DACL_SECURITY_INFORMATION), kEventReadControl);
 }
 
+TEST(SecurityDescriptorTest, SetDaclEntryFromToken) {
+  auto token = AccessToken::FromCurrentProcess();
+  ASSERT_TRUE(token);
+  Sid user_sid = token->User();
+
+  SecurityDescriptor sd;
+  EXPECT_TRUE(
+      sd.SetDaclEntry(*token, SecurityAccessMode::kGrant, EVENT_ALL_ACCESS, 0));
+  auto sddl = sd.ToSddl(DACL_SECURITY_INFORMATION);
+  ASSERT_TRUE(sddl);
+
+  // Verify the SDDL contains the current user's SID.
+  auto user_sddl = user_sid.ToSddlString();
+  ASSERT_TRUE(user_sddl);
+  EXPECT_NE(sddl->find(*user_sddl), std::wstring::npos);
+
+  // Should produce the same result as using the SID directly.
+  SecurityDescriptor sd2;
+  EXPECT_TRUE(sd2.SetDaclEntry(user_sid, SecurityAccessMode::kGrant,
+                               EVENT_ALL_ACCESS, 0));
+  EXPECT_EQ(sd.ToSddl(DACL_SECURITY_INFORMATION),
+            sd2.ToSddl(DACL_SECURITY_INFORMATION));
+}
+
 TEST(SecurityDescriptorTest, FromFile) {
   ScopedTempDir temp_dir;
   ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
@@ -427,7 +466,7 @@ TEST(SecurityDescriptorTest, WriteToFile) {
 
   auto curr_sd = SecurityDescriptor::FromFile(path, DACL_SECURITY_INFORMATION);
   ASSERT_TRUE(curr_sd);
-  EXPECT_EQ(curr_sd->ToSddl(DACL_SECURITY_INFORMATION), kInheritedFile);
+  EXPECT_EQ(curr_sd->ToSddl(DACL_SECURITY_INFORMATION), kInheritedFileNoAuto);
 
   AccessControlList new_acl;
   EXPECT_TRUE(new_acl.SetEntry(Sid(WellKnownSid::kBuiltinUsers),
@@ -441,7 +480,7 @@ TEST(SecurityDescriptorTest, WriteToFile) {
   EXPECT_EQ(curr_sd->ToSddl(DACL_SECURITY_INFORMATION), kProtectedUsers);
 
   SecurityDescriptor empty_sd;
-  empty_sd.set_dacl(AccessControlList{});
+  empty_sd.set_dacl({});
   EXPECT_TRUE(empty_sd.WriteToFile(path, DACL_SECURITY_INFORMATION));
   curr_sd = SecurityDescriptor::FromFile(path, DACL_SECURITY_INFORMATION);
   ASSERT_TRUE(curr_sd);
@@ -461,12 +500,12 @@ TEST(SecurityDescriptorTest, WriteToFile) {
 TEST(SecurityDescriptorTest, FromName) {
   std::wstring name =
       base::ASCIIToWide(base::UnguessableToken::Create().ToString());
-  EXPECT_FALSE(SecurityDescriptor::FromName(
-      name.c_str(), SecurityObjectType::kKernel, kAllSecurityInfo));
+  EXPECT_FALSE(SecurityDescriptor::FromName(name, SecurityObjectType::kKernel,
+                                            kAllSecurityInfo));
   base::win::ScopedHandle handle = CreateEventWithDacl(name.c_str(), kEvent);
   ASSERT_TRUE(handle.is_valid());
-  auto curr_sd = SecurityDescriptor::FromName(
-      name.c_str(), SecurityObjectType::kKernel, kAllSecurityInfo);
+  auto curr_sd = SecurityDescriptor::FromName(name, SecurityObjectType::kKernel,
+                                              kAllSecurityInfo);
   ASSERT_TRUE(curr_sd);
   EXPECT_EQ(curr_sd->ToSddl(DACL_SECURITY_INFORMATION), kEvent);
   EXPECT_TRUE(SecurityDescriptor::FromName(
@@ -483,21 +522,21 @@ TEST(SecurityDescriptorTest, WriteToName) {
   std::wstring name =
       base::ASCIIToWide(base::UnguessableToken::Create().ToString());
   EXPECT_FALSE(SecurityDescriptor().WriteToName(
-      name.c_str(), SecurityObjectType::kKernel, kAllSecurityInfo));
+      name, SecurityObjectType::kKernel, kAllSecurityInfo));
   base::win::ScopedHandle handle = CreateEventWithDacl(name.c_str(), kEvent);
   ASSERT_TRUE(handle.is_valid());
-  auto curr_sd = SecurityDescriptor::FromName(
-      name.c_str(), SecurityObjectType::kKernel, kAllSecurityInfo);
+  auto curr_sd = SecurityDescriptor::FromName(name, SecurityObjectType::kKernel,
+                                              kAllSecurityInfo);
   ASSERT_TRUE(curr_sd);
   curr_sd->set_dacl_protected(true);
   curr_sd->SetMandatoryLabel(SECURITY_MANDATORY_MEDIUM_RID, 0,
                              SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
 
-  EXPECT_TRUE(curr_sd->WriteToName(name.c_str(), SecurityObjectType::kKernel,
+  EXPECT_TRUE(curr_sd->WriteToName(name, SecurityObjectType::kKernel,
                                    kDaclLabelSecurityInfo));
 
-  curr_sd = SecurityDescriptor::FromName(
-      name.c_str(), SecurityObjectType::kKernel, kAllSecurityInfo);
+  curr_sd = SecurityDescriptor::FromName(name, SecurityObjectType::kKernel,
+                                         kAllSecurityInfo);
   ASSERT_TRUE(curr_sd);
   EXPECT_EQ(curr_sd->ToSddl(kDaclLabelSecurityInfo), kEventProtectedWithLabel);
 }
@@ -545,10 +584,10 @@ TEST(SecurityDescriptorTest, WriteToHandle) {
 }
 
 TEST(SecurityDescriptorTest, AccessCheck) {
-  absl::optional<SecurityDescriptor> sd =
+  std::optional<SecurityDescriptor> sd =
       SecurityDescriptor::FromSddl(kAccessCheckSd);
   ASSERT_TRUE(sd);
-  absl::optional<AccessToken> token = AccessToken::FromCurrentProcess();
+  std::optional<AccessToken> token = AccessToken::FromCurrentProcess();
   ASSERT_TRUE(token);
   AccessCheckError(sd->AccessCheck(*token, 1, SecurityObjectType::kFile),
                    ERROR_NO_IMPERSONATION_TOKEN);
@@ -589,6 +628,19 @@ TEST(SecurityDescriptorTest, AccessCheck) {
           WINSTA_ACCESSGLOBALATOMS | WINSTA_CREATEDESKTOP |
           WINSTA_ENUMDESKTOPS | WINSTA_ENUMERATE | WINSTA_EXITWINDOWS |
           WINSTA_READATTRIBUTES | WINSTA_READSCREEN | WINSTA_WRITEATTRIBUTES);
+}
+
+TEST(SecurityDescriptorTest, CreateWithEmptyDacl) {
+  SecurityDescriptor empty = SecurityDescriptor::CreateWithEmptyDacl();
+  EXPECT_FALSE(empty.owner());
+  EXPECT_FALSE(empty.group());
+  EXPECT_TRUE(empty.dacl());
+  EXPECT_EQ(empty.dacl()->get()->AceCount, 0U);
+  EXPECT_FALSE(empty.dacl_protected());
+  EXPECT_FALSE(empty.dacl_auto_inherited());
+  EXPECT_FALSE(empty.sacl());
+  EXPECT_FALSE(empty.sacl_protected());
+  EXPECT_FALSE(empty.sacl_auto_inherited());
 }
 
 }  // namespace base::win

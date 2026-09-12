@@ -35,8 +35,10 @@
 
 #include <linux/unistd.h>
 #include <unistd.h>
+
 #include <cerrno>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdint>
 
 #ifdef __mips__
@@ -52,7 +54,9 @@
 
 // SYS_mmap and SYS_munmap are not defined in Android.
 #ifdef __BIONIC__
+#pragma GCC visibility push(default)
 extern "C" void* __mmap2(void*, size_t, int, int, int, size_t);
+#pragma GCC visibility pop
 #if defined(__NR_mmap) && !defined(SYS_mmap)
 #define SYS_mmap __NR_mmap
 #endif
@@ -72,7 +76,7 @@ namespace base_internal {
 // Platform specific logic extracted from
 // https://chromium.googlesource.com/linux-syscall-support/+/master/linux_syscall_support.h
 inline void* DirectMmap(void* start, size_t length, int prot, int flags, int fd,
-                        off64_t offset) noexcept {
+                        off_t offset) noexcept {
 #if defined(__i386__) || defined(__ARM_ARCH_3__) || defined(__ARM_EABI__) || \
     defined(__m68k__) || defined(__sh__) ||                                  \
     (defined(__hppa__) && !defined(__LP64__)) ||                             \
@@ -102,7 +106,7 @@ inline void* DirectMmap(void* start, size_t length, int prot, int flags, int fd,
 #else
   return reinterpret_cast<void*>(
       syscall(SYS_mmap2, start, length, prot, flags, fd,
-              static_cast<off_t>(offset / pagesize)));
+              static_cast<unsigned long>(offset / pagesize)));  // NOLINT
 #endif
 #elif defined(__s390x__)
   // On s390x, mmap() arguments are passed in memory.

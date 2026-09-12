@@ -3,12 +3,14 @@
 // found in the LICENSE file.
 
 #include <cmath>
-#include <unordered_map>
+#include <string_view>
 
 #include "base/command_line.h"
+#include "base/containers/flat_map.h"
 #include "base/files/file_util.h"
 #include "base/strings/stringprintf.h"
-#include "base/test/trace_event_analyzer.h"
+#include "base/strings/to_string.h"
+#include "base/test/tracing/trace_event_analyzer.h"
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/api/tab_capture/tab_capture_performance_test_base.h"
@@ -50,17 +52,16 @@ constexpr char kMetricCaptureLatencyMs[] = "capture_latency";
 constexpr char kMetricRendererFrameDrawMs[] = "renderer_frame_draw";
 
 constexpr char kEventCapture[] = "Capture";
-constexpr char kEventSuffixFailRate[] = "FailRate";
-constexpr char kEventSuffixLatency[] = "Latency";
+constexpr char kEventCaptureFailRate[] = "CaptureFailRate";
+constexpr char kEventCaptureLatency[] = "CaptureLatency";
 constexpr char kEventCommitAndDrawCompositorFrame[] =
     "WidgetBase::DidCommitAndDrawCompositorFrame";
-const std::unordered_map<std::string, std::string> kEventToMetricMap(
-    {{kEventCapture, kMetricCaptureMs},
-     {std::string(kEventCapture) + kEventSuffixFailRate,
-      kMetricCaptureFailRatePercent},
-     {std::string(kEventCapture) + kEventSuffixLatency,
-      kMetricCaptureLatencyMs},
-     {kEventCommitAndDrawCompositorFrame, kMetricRendererFrameDrawMs}});
+constexpr auto kEventToMetricMap =
+    base::MakeFixedFlatMap<std::string_view, std::string_view>(
+        {{kEventCapture, kMetricCaptureMs},
+         {kEventCaptureFailRate, kMetricCaptureFailRatePercent},
+         {kEventCaptureLatency, kMetricCaptureLatencyMs},
+         {kEventCommitAndDrawCompositorFrame, kMetricRendererFrameDrawMs}});
 
 perf_test::PerfResultReporter SetUpTabCaptureReporter(
     const std::string& story) {
@@ -72,7 +73,7 @@ perf_test::PerfResultReporter SetUpTabCaptureReporter(
   return reporter;
 }
 
-std::string GetMetricFromEventName(const std::string& event_name) {
+std::string_view GetMetricFromEventName(const std::string& event_name) {
   auto iter = kEventToMetricMap.find(event_name);
   return iter == kEventToMetricMap.end() ? event_name : iter->second;
 }
@@ -122,18 +123,25 @@ class TabCapturePerformanceTest : public TabCapturePerformanceTestBase,
   TabCapturePerformanceTest() = default;
   ~TabCapturePerformanceTest() override = default;
 
+  // Member constants to avoid exit-time destructor.
+  const std::string kEventSuffixLatency = "Latency";
+  const std::string kEventSuffixFailRate = "FailRate";
+
   bool HasFlag(TestFlags flag) const {
     return (GetParam() & flag) == flag;
   }
 
   std::string GetSuffixForTestFlags() const {
     std::string suffix;
-    if (HasFlag(kUseGpu))
+    if (HasFlag(kUseGpu)) {
       suffix += "_comp_gpu";
-    if (HasFlag(kTestThroughWebRTC))
+    }
+    if (HasFlag(kTestThroughWebRTC)) {
       suffix += "_webrtc";
-    if (HasFlag(kSmallWindow))
+    }
+    if (HasFlag(kSmallWindow)) {
       suffix += "_small";
+    }
     // Make sure we always have a story.
     if (suffix.size() == 0) {
       suffix = "_baseline_story";
@@ -151,8 +159,9 @@ class TabCapturePerformanceTest : public TabCapturePerformanceTestBase,
     CHECK(success) << "Failed to load test page at: "
                    << test_file.AsUTF8Unsafe();
 
-    if (!HasFlag(kUseGpu))
+    if (!HasFlag(kUseGpu)) {
       UseSoftwareCompositing();
+    }
 
     TabCapturePerformanceTestBase::SetUp();
   }
@@ -184,7 +193,10 @@ class TabCapturePerformanceTest : public TabCapturePerformanceTestBase,
     trace_analyzer::TraceEventVector rate_events(events.begin() + trim_count,
                                                  events.end() - trim_count);
     trace_analyzer::RateStats stats;
-    const bool have_rate_stats = GetRateStats(rate_events, &stats, nullptr);
+    if (!GetRateStats(rate_events, &stats, nullptr)) {
+      return false;
+    }
+
     double mean_ms = stats.mean_us / 1000.0;
     double std_dev_ms = stats.standard_deviation_us / 1000.0;
     std::string mean_and_error = base::StringPrintf("%f,%f", mean_ms,
@@ -192,7 +204,7 @@ class TabCapturePerformanceTest : public TabCapturePerformanceTestBase,
     auto reporter = SetUpTabCaptureReporter(GetSuffixForTestFlags());
     reporter.AddResultMeanAndError(GetMetricFromEventName(event_name),
                                    mean_and_error);
-    return have_rate_stats;
+    return true;
   }
 
   // Analyze and print the mean and stddev of the amount of time between the
@@ -218,8 +230,9 @@ class TabCapturePerformanceTest : public TabCapturePerformanceTestBase,
     int count = 0;
     for (const auto* begin_event : events_to_analyze) {
       const auto* end_event = begin_event->other_event.get();
-      if (!end_event)
+      if (!end_event) {
         continue;
+      }
       const double latency = end_event->timestamp - begin_event->timestamp;
       sum += latency;
       sqr_sum += latency * latency;
@@ -282,14 +295,15 @@ class TabCapturePerformanceTest : public TabCapturePerformanceTestBase,
 
 }  // namespace
 
-#if BUILDFLAG(IS_CHROMEOS_ASH) && defined(MEMORY_SANITIZER)
+#if BUILDFLAG(IS_CHROMEOS)
 // Using MSAN on ChromeOS causes problems due to its hardware OpenGL library.
 #define MAYBE_Performance DISABLED_Performance
 #elif BUILDFLAG(IS_MAC)
 // TODO(crbug.com/1235358): Flaky on Mac 10.11
 #define MAYBE_Performance DISABLED_Performance
-#elif BUILDFLAG(IS_LINUX) && defined(ADDRESS_SANITIZER)
-// TODO(crbug.com/1295824): Flaky on Linux ASAN
+#elif BUILDFLAG(IS_LINUX)
+// TODO(crbug.com/454008937): Flaky on Linux MSAN
+// TODO(crbug.com/40214499): Flaky on Linux ASAN
 #define MAYBE_Performance DISABLED_Performance
 #else
 #define MAYBE_Performance Performance
@@ -303,7 +317,7 @@ IN_PROC_BROWSER_TEST_P(TabCapturePerformanceTest, MAYBE_Performance) {
   NavigateToTestPage(test_page_html_);
   const base::Value response = SendMessageToExtension(
       base::StringPrintf("{start:true, passThroughWebRTC:%s}",
-                         HasFlag(kTestThroughWebRTC) ? "true" : "false"));
+                         base::ToString(HasFlag(kTestThroughWebRTC))));
   ASSERT_TRUE(response.is_dict());
   const std::string* reason = response.GetDict().FindString("reason");
   ASSERT_TRUE(response.GetDict().FindBool("success").value_or(false))
@@ -312,8 +326,8 @@ IN_PROC_BROWSER_TEST_P(TabCapturePerformanceTest, MAYBE_Performance) {
   // Observe the running browser for a while, collecting a trace.
   std::unique_ptr<trace_analyzer::TraceAnalyzer> analyzer = TraceAndObserve(
       "gpu,gpu.capture",
-      std::vector<base::StringPiece>{kEventCommitAndDrawCompositorFrame,
-                                     kEventCapture},
+      std::vector<std::string_view>{kEventCommitAndDrawCompositorFrame,
+                                    kEventCapture},
       // In a full performance run, events will be trimmed from both ends of
       // trace. Otherwise, just require the bare-minimum to verify the stats
       // calculations will work.
@@ -347,7 +361,7 @@ IN_PROC_BROWSER_TEST_P(TabCapturePerformanceTest, MAYBE_Performance) {
       PrintFailRateResults(analyzer.get(), kEventCapture));
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 
 // On ChromeOS, software compositing is not an option.
 INSTANTIATE_TEST_SUITE_P(All,
@@ -365,4 +379,4 @@ INSTANTIATE_TEST_SUITE_P(All,
                                          kTestThroughWebRTC,
                                          kTestThroughWebRTC | kUseGpu));
 
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)

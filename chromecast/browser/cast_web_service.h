@@ -12,7 +12,7 @@
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "chromecast/browser/cast_web_view.h"
@@ -118,6 +118,7 @@ class CastWebService : public mojom::CastWebService {
   bool immediately_delete_webviews_ = false;
 
   std::vector<std::string> cast_webui_hosts_;
+  bool webui_factory_registered_ = false;
 
   const scoped_refptr<base::SequencedTaskRunner> task_runner_;
   base::WeakPtr<CastWebService> weak_ptr_;

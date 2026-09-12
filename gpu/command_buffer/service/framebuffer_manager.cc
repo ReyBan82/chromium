@@ -7,8 +7,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
+
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
 #include "base/notreached.h"
+#include "base/numerics/safe_conversions.h"
 #include "gpu/command_buffer/common/gles2_cmd_utils.h"
 #include "gpu/command_buffer/service/framebuffer_completeness_cache.h"
 #include "gpu/command_buffer/service/renderbuffer_manager.h"
@@ -53,10 +59,8 @@ class RenderbufferAttachment
 
   GLuint object_name() const override { return renderbuffer_->client_id(); }
 
-  GLint level() const override {
-    NOTREACHED();
-    return -1;
-  }
+  GLint level() const override { NOTREACHED(); }
+  GLenum target() const override { return GL_RENDERBUFFER; }
 
   bool cleared() const override { return renderbuffer_->cleared(); }
 
@@ -134,6 +138,10 @@ class RenderbufferAttachment
   scoped_refptr<Renderbuffer> renderbuffer_;
 };
 
+GLint Framebuffer::Attachment::layer() const {
+  return 0;
+}
+
 class TextureAttachment
     : public Framebuffer::Attachment {
  public:
@@ -184,9 +192,9 @@ class TextureAttachment
 
   GLsizei samples() const override { return samples_; }
 
-  GLint layer() const { return layer_; }
+  GLint layer() const override { return layer_; }
 
-  GLenum target() const { return target_; }
+  GLenum target() const override { return target_; }
 
   GLint level() const override { return level_; }
 
@@ -286,7 +294,8 @@ class TextureAttachment
   }
 
   size_t GetSignatureSize(TextureManager* texture_manager) const override {
-    return texture_manager->GetSignatureSize();
+    return texture_manager->GetSignatureSize() + sizeof(samples_) +
+           sizeof(layer_);
   }
 
   void AddToSignature(TextureManager* texture_manager,
@@ -294,6 +303,9 @@ class TextureAttachment
     DCHECK(signature);
     texture_manager->AddToSignature(
         texture_ref_.get(), target_, level_, signature);
+    signature->append(reinterpret_cast<const char*>(&samples_),
+                      sizeof(samples_));
+    signature->append(reinterpret_cast<const char*>(&layer_), sizeof(layer_));
   }
 
   bool FormsFeedbackLoop(TextureRef* texture,
@@ -362,11 +374,8 @@ void FramebufferManager::StopTracking(
 void FramebufferManager::CreateFramebuffer(
     GLuint client_id, GLuint service_id) {
   std::pair<FramebufferMap::iterator, bool> result =
-      framebuffers_.insert(
-          std::make_pair(
-              client_id,
-              scoped_refptr<Framebuffer>(
-                  new Framebuffer(this, service_id))));
+      framebuffers_.insert(std::make_pair(
+          client_id, base::MakeRefCounted<Framebuffer>(this, service_id)));
   DCHECK(result.second);
 }
 
@@ -384,14 +393,13 @@ Framebuffer::Framebuffer(FramebufferManager* manager, GLuint service_id)
       read_buffer_(GL_COLOR_ATTACHMENT0) {
   manager->StartTracking(this);
   DCHECK_GT(manager->max_draw_buffers_, 0u);
-  draw_buffers_.reset(new GLenum[manager->max_draw_buffers_]);
-  adjusted_draw_buffers_.reset(new GLenum[manager->max_draw_buffers_]);
+  draw_buffers_ = base::HeapArray<GLenum>::Uninit(manager->max_draw_buffers_);
+  adjusted_draw_buffers_ =
+      base::HeapArray<GLenum>::Uninit(manager->max_draw_buffers_);
   draw_buffers_[0] = GL_COLOR_ATTACHMENT0;
   adjusted_draw_buffers_[0] = GL_COLOR_ATTACHMENT0;
-  for (uint32_t ii = 1; ii < manager->max_draw_buffers_; ++ii) {
-    draw_buffers_[ii] = GL_NONE;
-    adjusted_draw_buffers_[ii] = GL_NONE;
-  }
+  std::ranges::fill(draw_buffers_.subspan(1), GL_NONE);
+  std::ranges::fill(adjusted_draw_buffers_.subspan(1), GL_NONE);
 }
 
 Framebuffer::~Framebuffer() {
@@ -456,6 +464,33 @@ bool Framebuffer::HasUnclearedIntRenderbufferAttachments() const {
 
 void Framebuffer::ClearUnclearedIntRenderbufferAttachments(
     RenderbufferManager* renderbuffer_manager) {
+  // glClearBuffer*iv(GL_COLOR, i, ...) targets DRAW_BUFFERi, not
+  // COLOR_ATTACHMENTi (ES3 4.2.3): when DRAW_BUFFERi == GL_NONE the clear is a
+  // silent no-op. Point each draw buffer at its attachment before clearing so
+  // the clear actually lands, then restore the page-visible state.
+  base::HeapArray<GLenum> buffers =
+      base::HeapArray<GLenum>::Uninit(manager_->max_draw_buffers_);
+  for (uint32_t i = 0; i < manager_->max_draw_buffers_; ++i) {
+    buffers[i] = GL_NONE;
+  }
+  bool need_clear = false;
+  for (auto const& it : attachments_) {
+    if (!it.second->IsRenderbufferAttachment() || it.second->cleared() ||
+        !GLES2Util::IsIntegerFormat(it.second->internal_format())) {
+      continue;
+    }
+    if (it.first < GL_COLOR_ATTACHMENT0 ||
+        it.first >= GL_COLOR_ATTACHMENT0 + manager_->max_draw_buffers_) {
+      continue;
+    }
+    buffers[it.first - GL_COLOR_ATTACHMENT0] = it.first;
+    need_clear = true;
+  }
+  if (!need_clear) {
+    return;
+  }
+  glDrawBuffersARB(manager_->max_draw_buffers_, buffers.data());
+
   for (AttachmentMap::const_iterator it = attachments_.begin();
        it != attachments_.end(); ++it) {
     if (!it->second->IsRenderbufferAttachment() || it->second->cleared())
@@ -464,8 +499,11 @@ void Framebuffer::ClearUnclearedIntRenderbufferAttachments(
     if (GLES2Util::IsIntegerFormat(internal_format)) {
       GLenum attaching_point = it->first;
       DCHECK_LE(static_cast<GLenum>(GL_COLOR_ATTACHMENT0), attaching_point);
-      DCHECK_GT(GL_COLOR_ATTACHMENT0 + manager_->max_draw_buffers_,
-                attaching_point);
+      if (attaching_point >=
+          GL_COLOR_ATTACHMENT0 + manager_->max_draw_buffers_) {
+        // Can't be addressed via glClearBuffer*iv; leave it marked uncleared.
+        continue;
+      }
       GLint drawbuffer = it->first - GL_COLOR_ATTACHMENT0;
       if (GLES2Util::IsUnsignedIntegerFormat(internal_format)) {
         const GLuint kZero[] = { 0u, 0u, 0u, 0u };
@@ -478,6 +516,8 @@ void Framebuffer::ClearUnclearedIntRenderbufferAttachments(
       it->second->SetCleared(renderbuffer_manager, nullptr, true);
     }
   }
+
+  RestoreDrawBuffers();
 }
 
 bool Framebuffer::HasSRGBAttachments() const {
@@ -499,7 +539,8 @@ bool Framebuffer::HasSRGBAttachments() const {
 
 bool Framebuffer::PrepareDrawBuffersForClearingUninitializedAttachments(
     ) const {
-  std::unique_ptr<GLenum[]> buffers(new GLenum[manager_->max_draw_buffers_]);
+  base::HeapArray<GLenum> buffers =
+      base::HeapArray<GLenum>::Uninit(manager_->max_draw_buffers_);
   for (uint32_t i = 0; i < manager_->max_draw_buffers_; ++i)
     buffers[i] = GL_NONE;
   for (auto const& it : attachments_) {
@@ -523,12 +564,12 @@ bool Framebuffer::PrepareDrawBuffersForClearingUninitializedAttachments(
     }
   }
   if (different)
-    glDrawBuffersARB(manager_->max_draw_buffers_, buffers.get());
+    glDrawBuffersARB(manager_->max_draw_buffers_, buffers.data());
   return different;
 }
 
 void Framebuffer::RestoreDrawBuffers() const {
-  glDrawBuffersARB(manager_->max_draw_buffers_, adjusted_draw_buffers_.get());
+  glDrawBuffersARB(manager_->max_draw_buffers_, adjusted_draw_buffers_.data());
 }
 
 bool Framebuffer::ValidateAndAdjustDrawBuffers(
@@ -564,7 +605,7 @@ void Framebuffer::AdjustDrawBuffersImpl(uint32_t desired_mask) {
     }
   }
   adjusted_draw_buffer_bound_mask_ = desired_mask;
-  glDrawBuffersARB(manager_->max_draw_buffers_, adjusted_draw_buffers_.get());
+  glDrawBuffersARB(manager_->max_draw_buffers_, adjusted_draw_buffers_.data());
 }
 
 bool Framebuffer::ContainsActiveIntegerAttachments() const {
@@ -574,8 +615,9 @@ bool Framebuffer::ContainsActiveIntegerAttachments() const {
   return draw_buffer_type_mask_ != mask;
 }
 
-void Framebuffer::ClearUnclearedIntOr3DTexturesOrPartiallyClearedTextures(
-    GLES2Decoder* decoder, TextureManager* texture_manager) {
+bool Framebuffer::ClearUnclearedIntOr3DTexturesOrPartiallyClearedTextures(
+    GLES2Decoder* decoder,
+    TextureManager* texture_manager) {
   for (AttachmentMap::const_iterator it = attachments_.begin();
        it != attachments_.end(); ++it) {
     if (!it->second->IsTextureAttachment() || it->second->cleared())
@@ -584,12 +626,14 @@ void Framebuffer::ClearUnclearedIntOr3DTexturesOrPartiallyClearedTextures(
         reinterpret_cast<TextureAttachment*>(it->second.get());
     if (attachment->IsPartiallyCleared() || attachment->Is3D() ||
         GLES2Util::IsIntegerFormat(attachment->internal_format())) {
-      texture_manager->ClearTextureLevel(decoder,
-                                         attachment->texture(),
-                                         attachment->target(),
-                                         attachment->level());
+      if (!texture_manager->ClearTextureLevel(decoder, attachment->texture(),
+                                              attachment->target(),
+                                              attachment->level())) {
+        return false;
+      }
     }
   }
+  return true;
 }
 
 // TODO(jiawei.shao@intel.com): when the texture or the renderbuffer in
@@ -625,15 +669,15 @@ void Framebuffer::MarkAttachmentsAsCleared(
 }
 
 bool Framebuffer::HasColorAttachment(int index) const {
-  return attachments_.find(GL_COLOR_ATTACHMENT0 + index) != attachments_.end();
+  return attachments_.contains(GL_COLOR_ATTACHMENT0 + index);
 }
 
 bool Framebuffer::HasDepthAttachment() const {
-  return attachments_.find(GL_DEPTH_ATTACHMENT) != attachments_.end();
+  return attachments_.contains(GL_DEPTH_ATTACHMENT);
 }
 
 bool Framebuffer::HasStencilAttachment() const {
-  return attachments_.find(GL_STENCIL_ATTACHMENT) != attachments_.end();
+  return attachments_.contains(GL_STENCIL_ATTACHMENT);
 }
 
 bool Framebuffer::HasActiveFloat32ColorAttachment() const {
@@ -661,6 +705,13 @@ bool Framebuffer::GetReadBufferIsMultisampledTexture() const {
   return attachment
              ? attachment->IsTextureAttachment() && attachment->samples() > 0
              : false;
+}
+
+bool Framebuffer::GetReadBufferIsMultisampledRenderbuffer() const {
+  const Attachment* attachment = GetReadBufferAttachment();
+  return attachment ? attachment->IsRenderbufferAttachment() &&
+                          attachment->samples() > 0
+                    : false;
 }
 
 GLsizei Framebuffer::GetSamples() const {
@@ -724,7 +775,7 @@ GLenum Framebuffer::IsPossiblyComplete(const FeatureInfo* feature_info) const {
       // even though ES3 allows it, it is still forbidden to ensure consistent
       // behaviors across platforms.
       // Note: Framebuffer::GetFramebufferValidSize relies on this behavior.
-      return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS_EXT;
+      return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
     }
 
     if (samples < 0) {
@@ -862,23 +913,19 @@ bool Framebuffer::IsCleared() const {
 }
 
 GLenum Framebuffer::GetDrawBuffer(GLenum draw_buffer) const {
-  GLsizei index = static_cast<GLsizei>(
-      draw_buffer - GL_DRAW_BUFFER0_ARB);
+  GLsizei index = static_cast<GLsizei>(draw_buffer - GL_DRAW_BUFFER0);
   CHECK(index >= 0 &&
         index < static_cast<GLsizei>(manager_->max_draw_buffers_));
   return draw_buffers_[index];
 }
 
-void Framebuffer::SetDrawBuffers(GLsizei n, const GLenum* bufs) {
-  DCHECK(n <= static_cast<GLsizei>(manager_->max_draw_buffers_));
-  for (GLsizei ii = 0; ii < n; ++ii) {
-    draw_buffers_[ii] = bufs[ii];
-    adjusted_draw_buffers_[ii] = bufs[ii];
-  }
-  for (uint32_t ii = n; ii < manager_->max_draw_buffers_; ++ii) {
-    draw_buffers_[ii] = GL_NONE;
-    adjusted_draw_buffers_[ii] = GL_NONE;
-  }
+void Framebuffer::SetDrawBuffers(base::span<const GLenum> bufs) {
+  DCHECK(static_cast<GLsizei>(bufs.size()) <=
+         static_cast<GLsizei>(manager_->max_draw_buffers_));
+  std::ranges::fill(draw_buffers_, GL_NONE);
+  std::ranges::fill(adjusted_draw_buffers_, GL_NONE);
+  draw_buffers_.copy_prefix_from(bufs);
+  adjusted_draw_buffers_.copy_prefix_from(bufs);
   UpdateDrawBufferMasks();
   adjusted_draw_buffer_bound_mask_ = draw_buffer_bound_mask_;
 }
@@ -956,7 +1003,7 @@ void Framebuffer::UpdateDrawBufferMasks() {
   draw_buffer_type_mask_ = 0u;
   draw_buffer_float32_mask_ = 0u;
   draw_buffer_bound_mask_ = 0u;
-  for (uint32_t index = 0; index < manager_->max_color_attachments_; ++index) {
+  for (uint32_t index = 0; index < manager_->max_draw_buffers_; ++index) {
     GLenum draw_buffer = draw_buffers_[index];
     if (draw_buffer == GL_NONE)
       continue;
@@ -1004,6 +1051,71 @@ void Framebuffer::DoUnbindGLAttachmentsForWorkaround(GLenum target) {
   }
 }
 
+void Framebuffer::ReattachAttachments(GLenum framebuffer_target) {
+  for (auto const& it : attachments_) {
+    GLenum attachment_point = it.first;
+    Attachment* attachment = it.second.get();
+
+    if (attachment->IsRenderbufferAttachment()) {
+      RenderbufferAttachment* rb_att =
+          static_cast<RenderbufferAttachment*>(attachment);
+      glFramebufferRenderbufferEXT(framebuffer_target, attachment_point,
+                                   GL_RENDERBUFFER,
+                                   rb_att->renderbuffer()->service_id());
+    } else if (attachment->IsTextureAttachment()) {
+      TextureAttachment* tex_att = static_cast<TextureAttachment*>(attachment);
+      if (tex_att->Is3D()) {
+        glFramebufferTextureLayer(framebuffer_target, attachment_point,
+                                  tex_att->texture()->service_id(),
+                                  tex_att->level(), tex_att->layer());
+      } else {
+        if (tex_att->samples() > 0) {
+          glFramebufferTexture2DMultisampleEXT(
+              framebuffer_target, attachment_point, tex_att->target(),
+              tex_att->texture()->service_id(), tex_att->level(),
+              tex_att->samples());
+        } else {
+          glFramebufferTexture2DEXT(
+              framebuffer_target, attachment_point, tex_att->target(),
+              tex_att->texture()->service_id(), tex_att->level());
+        }
+      }
+    }
+  }
+  RestoreDrawBuffers();
+}
+
+// static
+void Framebuffer::BindAttachmentToPoint(GLenum target,
+                                        GLenum attachment_point,
+                                        const Attachment* attachment) {
+  if (!attachment) {
+    glFramebufferRenderbufferEXT(target, attachment_point, GL_RENDERBUFFER, 0);
+    return;
+  }
+  if (attachment->IsRenderbufferAttachment()) {
+    const RenderbufferAttachment* rb =
+        static_cast<const RenderbufferAttachment*>(attachment);
+    glFramebufferRenderbufferEXT(target, attachment_point, GL_RENDERBUFFER,
+                                 rb->renderbuffer()->service_id());
+  } else if (attachment->IsTextureAttachment()) {
+    const TextureAttachment* tex =
+        static_cast<const TextureAttachment*>(attachment);
+    if (tex->Is3D()) {
+      glFramebufferTextureLayer(target, attachment_point,
+                                tex->texture()->service_id(), tex->level(),
+                                tex->layer());
+    } else if (tex->samples() > 0) {
+      glFramebufferTexture2DMultisampleEXT(
+          target, attachment_point, tex->target(), tex->texture()->service_id(),
+          tex->level(), tex->samples());
+    } else {
+      glFramebufferTexture2DEXT(target, attachment_point, tex->target(),
+                                tex->texture()->service_id(), tex->level());
+    }
+  }
+}
+
 void Framebuffer::OnInsertUpdateLastColorAttachmentId(GLenum attachment) {
   if (attachment >= GL_COLOR_ATTACHMENT0 &&
       attachment < GL_COLOR_ATTACHMENT0 + manager_->max_color_attachments_) {
@@ -1020,9 +1132,10 @@ void Framebuffer::OnEraseUpdateLastColorAttachmentId(GLenum attachment) {
           last_color_attachment_id_) {
     for (last_color_attachment_id_--; last_color_attachment_id_ >= 0;
          last_color_attachment_id_--) {
-      if (attachments_.find(GL_COLOR_ATTACHMENT0 + last_color_attachment_id_) !=
-          attachments_.end())
+      if (attachments_.contains(GL_COLOR_ATTACHMENT0 +
+                                last_color_attachment_id_)) {
         break;
+      }
     }
   }
 }
@@ -1107,7 +1220,7 @@ gfx::Size Framebuffer::GetFramebufferValidSize() const {
   // all of the attachments have the same dimensions. So it's okay to just pick
   // any arbitrary attachment and return it as the min size.
   auto it = attachments_.begin();
-  DCHECK(it != attachments_.end());
+  CHECK(it != attachments_.end());
   const auto& attachment = it->second;
   return gfx::Size(attachment->width(), attachment->height());
 }
@@ -1123,6 +1236,18 @@ bool FramebufferManager::GetClientId(
     }
   }
   return false;
+}
+
+void FramebufferManager::RecreateFramebufferServiceId(
+    Framebuffer* framebuffer) {
+  DCHECK(framebuffer);
+  GLuint old_service_id = framebuffer->service_id();
+  GLuint new_service_id = 0;
+
+  glGenFramebuffersEXT(1, &new_service_id);
+  glDeleteFramebuffersEXT(1, &old_service_id);
+
+  framebuffer->set_service_id(new_service_id);
 }
 
 void FramebufferManager::MarkAttachmentsAsCleared(
@@ -1146,6 +1271,55 @@ bool FramebufferManager::IsComplete(const Framebuffer* framebuffer) {
   DCHECK(framebuffer);
   return framebuffer->framebuffer_complete_state_count_id() ==
       framebuffer_state_change_count_;
+}
+
+std::vector<std::pair<scoped_refptr<Framebuffer>, GLenum>>
+FramebufferManager::GetBindingFramebuffersForTexture(
+    TextureRef* texture_ref,
+    bool include_color_attachments) {
+  std::vector<std::pair<scoped_refptr<Framebuffer>, GLenum>> result;
+  if (!texture_ref) {
+    return result;
+  }
+  for (const auto& pair : framebuffers_) {
+    Framebuffer* framebuffer = pair.second.get();
+    std::vector<GLenum> attachment_points = {GL_DEPTH_ATTACHMENT,
+                                             GL_STENCIL_ATTACHMENT};
+    if (include_color_attachments) {
+      for (uint32_t i = 0; i < max_color_attachments_; ++i) {
+        attachment_points.push_back(GL_COLOR_ATTACHMENT0 + i);
+      }
+    }
+    for (GLenum attachment_point : attachment_points) {
+      const Framebuffer::Attachment* attachment =
+          framebuffer->GetAttachment(attachment_point);
+      if (attachment && attachment->IsTexture(texture_ref)) {
+        result.push_back({pair.second, attachment_point});
+      }
+    }
+  }
+  return result;
+}
+
+std::vector<std::pair<scoped_refptr<Framebuffer>, GLenum>>
+FramebufferManager::GetBindingFramebuffersForRenderbuffer(
+    Renderbuffer* renderbuffer) {
+  std::vector<std::pair<scoped_refptr<Framebuffer>, GLenum>> result;
+  if (!renderbuffer) {
+    return result;
+  }
+  for (const auto& pair : framebuffers_) {
+    Framebuffer* framebuffer = pair.second.get();
+    for (GLenum attachment_point :
+         {GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT}) {
+      const Framebuffer::Attachment* attachment =
+          framebuffer->GetAttachment(attachment_point);
+      if (attachment && attachment->IsRenderbuffer(renderbuffer)) {
+        result.push_back({pair.second, attachment_point});
+      }
+    }
+  }
+  return result;
 }
 
 }  // namespace gles2

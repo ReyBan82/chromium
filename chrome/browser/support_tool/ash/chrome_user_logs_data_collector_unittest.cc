@@ -18,16 +18,21 @@
 #include "base/test/task_environment.h"
 #include "base/test/test_file_util.h"
 #include "base/test/test_future.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
+#include "base/threading/thread_restrictions.h"
 #include "chrome/browser/support_tool/data_collector.h"
 #include "chrome/test/base/fake_profile_manager.h"
 #include "chrome/test/base/testing_browser_process.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
+#include "chromeos/ash/components/browser_context_helper/fake_browser_context_helper_delegate.h"
 #include "components/account_id/account_id.h"
 #include "components/feedback/redaction_tool/pii_types.h"
 #include "components/feedback/redaction_tool/redaction_tool.h"
+#include "components/prefs/testing_pref_service.h"
 #include "components/user_manager/fake_user_manager.h"
 #include "components/user_manager/scoped_user_manager.h"
+#include "components/user_manager/test_helper.h"
 #include "content/public/test/browser_task_environment.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -47,19 +52,19 @@ struct FakeUserLog {
 };
 
 const char kFakeUserEmail[] = "fakeusername@example.com";
-const char kFakeGaiaId[] = "gaia-id";
+const GaiaId::Literal kFakeGaiaId("gaia-id");
 
 const FakeUserLog kFakeUserLogs[] = {
     {/*path=*/base::FilePath("log/chrome"), /*log_name=*/"chrome",
      /*log_contents=*/"Fake Chrome logs\nUser is fakeusername@example.com",
-     /*redacted_contents=*/"Fake Chrome logs\nUser is <email: 1>"},
+     /*redacted_contents=*/"Fake Chrome logs\nUser is (email: 1)"},
     {/*path=*/base::FilePath("log/chrome_00000000-000000"),
      /*log_name=*/"chrome_00000000-000000",
      /*log_contents=*/"Sample logs", /*redacted_contents=*/"Sample logs"},
     {/*path=*/base::FilePath("log/chrome_00000000-111111"),
      /*log_name=*/"chrome_00000000-111111",
      /*log_contents=*/"Sample logs with PII chrome://resources/f?user=bar",
-     /*redacted_contents=*/"Sample logs with PII <URL: 1>"}};
+     /*redacted_contents=*/"Sample logs with PII (URL: 1)"}};
 
 const PIIMap kExpectedPIIMap = {
     {redaction::PIIType::kEmail, {"fakeusername@example.com"}},
@@ -68,20 +73,18 @@ const PIIMap kExpectedPIIMap = {
 class ChromeUserLogsDataCollectorTest : public ::testing::Test {
  public:
   ChromeUserLogsDataCollectorTest() {
-    std::unique_ptr<user_manager::FakeUserManager> fake_user_manager =
-        std::make_unique<user_manager::FakeUserManager>();
+    user_manager::UserManagerImpl::RegisterPrefs(local_state_.registry());
+    fake_user_manager_.Reset(
+        std::make_unique<user_manager::FakeUserManager>(&local_state_));
     AccountId fake_user_account =
         AccountId::FromUserEmailGaiaId(kFakeUserEmail, kFakeGaiaId);
     fake_user_hash_ =
-        user_manager::FakeUserManager::GetFakeUsernameHash(fake_user_account);
+        user_manager::TestHelper::GetFakeUsernameHash(fake_user_account);
     // Add the fake user to `fake_user_manager` and make it primary user by
     // making user logged in.
-    fake_user_manager->AddUser(fake_user_account);
-    fake_user_manager->UserLoggedIn(fake_user_account, fake_user_hash_,
-                                    /*browser_restart=*/false, false);
-
-    scoped_user_manager_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::move(fake_user_manager));
+    fake_user_manager_->AddGaiaUser(fake_user_account,
+                                    user_manager::UserType::kRegular);
+    fake_user_manager_->UserLoggedIn(fake_user_account, fake_user_hash_);
 
     // Set up task runner and container for RedactionTool. We will use when
     // calling CollectDataAndDetectPII() and ExportCollectedDataWithPII()
@@ -90,10 +93,13 @@ class ChromeUserLogsDataCollectorTest : public ::testing::Test {
         base::ThreadPool::CreateSequencedTaskRunner({});
     redaction_tool_container_ =
         base::MakeRefCounted<redaction::RedactionToolContainer>(
-            task_runner_for_redaction_tool_, nullptr);
+            task_runner_for_redaction_tool_);
   }
 
   void SetUp() override {
+    browser_context_helper_ = std::make_unique<ash::BrowserContextHelper>(
+        std::make_unique<ash::FakeBrowserContextHelperDelegate>());
+
     // Allow blocking for testing in this scope for temporary directory
     // creation.
     base::ScopedAllowBlockingForTesting allow_blocking;
@@ -106,6 +112,7 @@ class ChromeUserLogsDataCollectorTest : public ::testing::Test {
 
   void TearDown() override {
     TestingBrowserProcess::GetGlobal()->SetProfileManager(nullptr);
+    browser_context_helper_.reset();
     base::ScopedAllowBlockingForTesting allow_blocking;
     ASSERT_TRUE(temp_dir_.Delete());
   }
@@ -118,7 +125,8 @@ class ChromeUserLogsDataCollectorTest : public ::testing::Test {
   void WriteFakeLogFiles() {
     base::ScopedAllowBlockingForTesting allow_blocking;
     base::FilePath fake_user_profile_dir =
-        ash::ProfileHelper::Get()->GetProfilePathByUserIdHash(fake_user_hash_);
+        ash::BrowserContextHelper::Get()->GetBrowserContextPathByUserIdHash(
+            fake_user_hash_);
     // Create the directory where logs should reside.
     ASSERT_TRUE(base::CreateDirectory(
         fake_user_profile_dir.Append(FILE_PATH_LITERAL("log"))));
@@ -147,7 +155,10 @@ class ChromeUserLogsDataCollectorTest : public ::testing::Test {
 
   content::BrowserTaskEnvironment task_environment_;
   std::string fake_user_hash_;
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
+  std::unique_ptr<ash::BrowserContextHelper> browser_context_helper_;
+  TestingPrefServiceSimple local_state_;
+  user_manager::TypedScopedUserManager<user_manager::FakeUserManager>
+      fake_user_manager_;
   base::ScopedTempDir temp_dir_;
   scoped_refptr<base::SequencedTaskRunner> task_runner_for_redaction_tool_;
   scoped_refptr<redaction::RedactionToolContainer> redaction_tool_container_;
@@ -164,20 +175,20 @@ TEST_F(ChromeUserLogsDataCollectorTest, CollectAndExportData) {
   WriteFakeLogFiles();
 
   // Test data collection and PII detection.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_collect_data;
   data_collector.CollectDataAndDetectPII(test_future_collect_data.GetCallback(),
                                          task_runner_for_redaction_tool_,
                                          redaction_tool_container_);
   // Check if CollectDataAndDetectPII call returned an error.
-  absl::optional<SupportToolError> error = test_future_collect_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  std::optional<SupportToolError> error = test_future_collect_data.Get();
+  EXPECT_EQ(error, std::nullopt);
 
   // Check the PII map that `data_collector` detected.
   EXPECT_THAT(data_collector.GetDetectedPII(), ContainerEq(kExpectedPIIMap));
 
   // Check PII removal and data export.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_export_data;
   base::FilePath output_dir = GetTempDirForOutput();
   // Export collected data to a directory and remove all PII from it.
@@ -186,7 +197,7 @@ TEST_F(ChromeUserLogsDataCollectorTest, CollectAndExportData) {
       redaction_tool_container_, test_future_export_data.GetCallback());
   // Check if ExportCollectedDataWithPII call returned an error.
   error = test_future_export_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  EXPECT_EQ(error, std::nullopt);
 
   // Prepare expected logs.
   std::map<std::string, std::string> expected_logs;

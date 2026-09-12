@@ -32,7 +32,7 @@
 
 namespace blink {
 
-scoped_refptr<TransformOperation> PerspectiveTransformOperation::Accumulate(
+TransformOperation* PerspectiveTransformOperation::Accumulate(
     const TransformOperation& other) {
   DCHECK(other.IsSameType(*this));
   const auto& other_op = To<PerspectiveTransformOperation>(other);
@@ -42,7 +42,7 @@ scoped_refptr<TransformOperation> PerspectiveTransformOperation::Accumulate(
   //
   // This can be rewritten as:
   //   p'' == (p * p') / (p + p')
-  absl::optional<double> result;
+  std::optional<double> result;
   if (!Perspective()) {
     // In the special case of 'none', p is conceptually infinite, which
     // means p'' equals p' (including if it's also 'none').
@@ -55,10 +55,37 @@ scoped_refptr<TransformOperation> PerspectiveTransformOperation::Accumulate(
     result = (p * other_p) / (p + other_p);
   }
 
-  return PerspectiveTransformOperation::Create(result);
+  return MakeGarbageCollected<PerspectiveTransformOperation>(result);
 }
 
-scoped_refptr<TransformOperation> PerspectiveTransformOperation::Blend(
+TransformOperation* PerspectiveTransformOperation::AccumulateN(
+    const TransformOperation& other,
+    int n) {
+  DCHECK(other.IsSameType(*this));
+  DCHECK_GT(n, 0);
+  const auto& other_op = To<PerspectiveTransformOperation>(other);
+
+  // Accumulate applied n times:
+  //   result = (base * delta) / (delta + n * base)
+  std::optional<double> result;
+  if (!Perspective()) {
+    if (!other_op.Perspective()) {
+      result = std::nullopt;
+    } else {
+      result = other_op.UsedPerspective() / n;
+    }
+  } else if (!other_op.Perspective()) {
+    result = Perspective();
+  } else {
+    double other_p = other_op.UsedPerspective();
+    double p = UsedPerspective();
+    result = (p * other_p) / (other_p + n * p);
+  }
+
+  return MakeGarbageCollected<PerspectiveTransformOperation>(result);
+}
+
+TransformOperation* PerspectiveTransformOperation::Blend(
     const TransformOperation* from,
     double progress,
     bool blend_to_identity) {
@@ -84,19 +111,18 @@ scoped_refptr<TransformOperation> PerspectiveTransformOperation::Blend(
     to_p_inverse = InverseUsedPerspective();
   }
   double p_inverse = blink::Blend(from_p_inverse, to_p_inverse, progress);
-  absl::optional<double> p;
+  std::optional<double> p;
   if (p_inverse > 0.0 && std::isnormal(p_inverse)) {
     p = 1.0 / p_inverse;
   }
-  return PerspectiveTransformOperation::Create(p);
+  return MakeGarbageCollected<PerspectiveTransformOperation>(p);
 }
 
-scoped_refptr<TransformOperation> PerspectiveTransformOperation::Zoom(
-    double factor) {
+TransformOperation* PerspectiveTransformOperation::Zoom(double factor) {
   if (!p_) {
-    return Create(p_);
+    return MakeGarbageCollected<PerspectiveTransformOperation>(p_);
   }
-  return Create(*p_ * factor);
+  return MakeGarbageCollected<PerspectiveTransformOperation>(*p_ * factor);
 }
 
 }  // namespace blink

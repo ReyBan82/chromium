@@ -5,23 +5,32 @@
 #include "chrome/browser/ui/toolbar/app_menu_icon_controller.h"
 
 #include "base/check_op.h"
+#include "base/rand_util.h"
+#include "build/branding_buildflags.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/app/vector_icons/vector_icons.h"
 #include "chrome/browser/defaults.h"
+#include "chrome/browser/ui/global_error/global_error.h"
 #include "chrome/browser/ui/global_error/global_error_service_factory.h"
+#include "chrome/browser/ui/ui_features.h"
 #include "chrome/browser/upgrade_detector/upgrade_detector.h"
 #include "chrome/common/channel_info.h"
+#include "chrome/common/chrome_features.h"
+#include "chrome/grit/branded_strings.h"
+#include "chrome/grit/generated_resources.h"
 #include "components/version_info/channel.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "ui/gfx/paint_vector_icon.h"
+#include "ui/strings/grit/ui_strings.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/crosapi/browser_util.h"
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/global_features.h"
+#include "chrome/browser/lifetime/scheduled_restart_manager.h"
 #endif
 
 namespace {
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 // Maps an upgrade level to a severity level. When |show_very_low_upgrade_level|
 // is true, VERY_LOW through HIGH all return Severity::LOW. Otherwise, VERY_LOW
 // is ignored and LOW through HIGH return their respective Severity level, with
@@ -39,9 +48,9 @@ AppMenuIconController::Severity SeverityFromUpgradeLevel(
       case UpgradeDetector::UPGRADE_ANNOYANCE_ELEVATED:
       case UpgradeDetector::UPGRADE_ANNOYANCE_GRACE:
       case UpgradeDetector::UPGRADE_ANNOYANCE_HIGH:
-        return AppMenuIconController::Severity::LOW;
+        return AppMenuIconController::Severity::kLow;
       case UpgradeDetector::UPGRADE_ANNOYANCE_CRITICAL:
-        return AppMenuIconController::Severity::HIGH;
+        return AppMenuIconController::Severity::kHigh;
     }
   } else {
     switch (level) {
@@ -49,22 +58,37 @@ AppMenuIconController::Severity SeverityFromUpgradeLevel(
         break;
       case UpgradeDetector::UPGRADE_ANNOYANCE_VERY_LOW:
         // kVeryLow is meaningless for stable channels.
-        return AppMenuIconController::Severity::NONE;
+        return AppMenuIconController::Severity::kNone;
       case UpgradeDetector::UPGRADE_ANNOYANCE_LOW:
-        return AppMenuIconController::Severity::LOW;
+        return AppMenuIconController::Severity::kLow;
       case UpgradeDetector::UPGRADE_ANNOYANCE_ELEVATED:
-        return AppMenuIconController::Severity::MEDIUM;
+        return AppMenuIconController::Severity::kMedium;
       case UpgradeDetector::UPGRADE_ANNOYANCE_GRACE:
       case UpgradeDetector::UPGRADE_ANNOYANCE_HIGH:
       case UpgradeDetector::UPGRADE_ANNOYANCE_CRITICAL:
-        return AppMenuIconController::Severity::HIGH;
+        return AppMenuIconController::Severity::kHigh;
     }
   }
   DCHECK_EQ(level, UpgradeDetector::UPGRADE_ANNOYANCE_NONE);
 
-  return AppMenuIconController::Severity::NONE;
+  return AppMenuIconController::Severity::kNone;
 }
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+
+// Returns the app menu icon severity for a Global Error.
+AppMenuIconController::Severity SeverityFromError(GlobalError* error) {
+  CHECK(error);
+
+  switch (error->GetSeverity()) {
+    case GlobalError::SEVERITY_LOW:
+      return AppMenuIconController::Severity::kLow;
+    case GlobalError::SEVERITY_MEDIUM:
+      return AppMenuIconController::Severity::kMedium;
+    case GlobalError::SEVERITY_HIGH:
+      return AppMenuIconController::Severity::kHigh;
+  }
+  NOTREACHED();
+}
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 // Return true if the browser is updating on the dev or canary channels.
 bool IsUnstableChannel() {
@@ -75,6 +99,14 @@ bool IsUnstableChannel() {
   return channel == version_info::Channel::DEV ||
          channel == version_info::Channel::CANARY;
 }
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+scheduled_restart::ScheduledRestartManager* GetScheduledRestartManager() {
+  return g_browser_process && g_browser_process->GetFeatures()
+             ? g_browser_process->GetFeatures()->scheduled_restart_manager()
+             : nullptr;
+}
+#endif
 
 }  // namespace
 
@@ -96,6 +128,14 @@ AppMenuIconController::AppMenuIconController(UpgradeDetector* upgrade_detector,
   global_error_observation_.Observe(
       GlobalErrorServiceFactory::GetForProfile(profile_));
 
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  if (auto* srm = GetScheduledRestartManager()) {
+    schedule_subscription_ =
+        srm->AddScheduleChangedCallback(base::BindRepeating(
+            &AppMenuIconController::UpdateDelegate, base::Unretained(this)));
+  }
+#endif
+
   upgrade_detector_->AddObserver(this);
 }
 
@@ -109,13 +149,7 @@ void AppMenuIconController::UpdateDelegate() {
 
 AppMenuIconController::TypeAndSeverity
 AppMenuIconController::GetTypeAndSeverity() const {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  // In ash-chrome, the upgrade icon styling is used for upgrading the browser
-  // from ash-chrome to lacros-chrome.
-  // It can be done if Profile can be migrated into Lacros.
-  if (crosapi::browser_util::IsProfileMigrationAvailable())
-    return {IconType::UPGRADE_NOTIFICATION, Severity::LOW};
-#else
+#if !BUILDFLAG(IS_CHROMEOS)
   if (browser_defaults::kShowUpgradeMenuItem &&
       upgrade_detector_->notify_upgrade()) {
     UpgradeDetector::UpgradeNotificationAnnoyanceLevel level =
@@ -124,27 +158,29 @@ AppMenuIconController::GetTypeAndSeverity() const {
     // update. This can happen for beta and stable channels once the VERY_LOW
     // annoyance level is reached.
     auto severity = SeverityFromUpgradeLevel(is_unstable_channel_, level);
-    if (severity != Severity::NONE)
-      return {IconType::UPGRADE_NOTIFICATION, severity};
+    if (severity != Severity::kNone) {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+      if (base::FeatureList::IsEnabled(features::kScheduledRestart)) {
+        if (auto* srm = GetScheduledRestartManager();
+            srm && srm->is_scheduled()) {
+          severity =
+              Severity::kLow;  // Clamp to lowest severity when scheduled.
+        }
+      }
+#endif
+      return {IconType::kUpgradeNotification, severity};
+    }
   }
 
-  if (GlobalErrorServiceFactory::GetForProfile(profile_)
-          ->GetHighestSeverityGlobalErrorWithAppMenuItem()) {
-    // If you change the severity here, make sure to also change the menu icon
-    // and the bubble icon.
-    return {IconType::GLOBAL_ERROR, Severity::MEDIUM};
+  // If you change the severity here, make sure to also change the menu icon
+  // and the bubble icon.
+  if (auto* error = GlobalErrorServiceFactory::GetForProfile(profile_)
+                        ->GetHighestSeverityGlobalErrorWithAppMenuItem()) {
+    return {IconType::kGlobalError, SeverityFromError(error)};
   }
 #endif
-  return {IconType::NONE, Severity::NONE};
-}
 
-SkColor AppMenuIconController::GetIconColor(
-    const absl::optional<SkColor>& severity_none_color) const {
-  const Severity severity = GetTypeAndSeverity().severity;
-  return ((severity == AppMenuIconController::Severity::NONE) &&
-          severity_none_color.has_value())
-             ? severity_none_color.value()
-             : delegate_->GetDefaultColorForSeverity(severity);
+  return {IconType::kNone, Severity::kNone};
 }
 
 void AppMenuIconController::OnGlobalErrorsChanged() {
@@ -153,4 +189,73 @@ void AppMenuIconController::OnGlobalErrorsChanged() {
 
 void AppMenuIconController::OnUpgradeRecommended() {
   UpdateDelegate();
+}
+
+// static
+std::u16string AppMenuIconController::GetIconLabel(IconType type,
+                                                   Severity severity) {
+  if (severity == Severity::kNone) {
+    return std::u16string();
+  } else if (type == IconType::kUpgradeNotification) {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+    if (base::FeatureList::IsEnabled(features::kScheduledRestart)) {
+      if (auto* srm = GetScheduledRestartManager();
+          srm && srm->is_scheduled()) {
+        return l10n_util::GetStringUTF16(IDS_APP_MENU_BUTTON_RESTART_SCHEDULED);
+      }
+    }
+#endif
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING) && \
+    (BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX))
+    int message_id = IDS_APP_MENU_BUTTON_UPDATE;
+    // Select an update text option randomly. Show this text in all browser
+    // windows.
+    static const int update_text_option = base::RandIntInclusive(1, 3);
+    if (update_text_option == 1) {
+      message_id = IDS_APP_MENU_BUTTON_UPDATE_ALT1;
+    } else if (update_text_option == 2) {
+      message_id = IDS_APP_MENU_BUTTON_UPDATE_ALT2;
+    } else {
+      message_id = IDS_APP_MENU_BUTTON_UPDATE_ALT3;
+    }
+    return l10n_util::GetStringUTF16(message_id);
+#else
+    return l10n_util::GetStringUTF16(IDS_APP_MENU_BUTTON_UPDATE);
+#endif
+  } else {
+    const int text_id = severity == Severity::kLow
+                            ? IDS_APP_MENU_BUTTON_ACTION_REQUIRED
+                            : IDS_APP_MENU_BUTTON_ERROR;
+    return l10n_util::GetStringUTF16(text_id);
+  }
+}
+
+// static
+std::u16string AppMenuIconController::GetIconAccessibleName(IconType type) {
+  std::u16string accname_app = l10n_util::GetStringUTF16(IDS_ACCNAME_APP);
+  if (type == IconType::kUpgradeNotification) {
+    return l10n_util::GetStringFUTF16(IDS_ACCNAME_APP_UPGRADE_RECOMMENDED,
+                                      accname_app);
+  }
+  return accname_app;
+}
+
+// static
+std::u16string AppMenuIconController::GetIconTooltip(IconType type,
+                                                     Severity severity) {
+  if (severity == Severity::kNone) {
+    return l10n_util::GetStringUTF16(IDS_APPMENU_TOOLTIP);
+  } else if (type == IconType::kUpgradeNotification) {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+    if (base::FeatureList::IsEnabled(features::kScheduledRestart)) {
+      if (auto* srm = GetScheduledRestartManager();
+          srm && srm->is_scheduled()) {
+        return l10n_util::GetStringUTF16(IDS_APP_MENU_BUTTON_RESTART_SCHEDULED);
+      }
+    }
+#endif
+    return l10n_util::GetStringUTF16(IDS_APPMENU_TOOLTIP_UPDATE_AVAILABLE);
+  } else {
+    return l10n_util::GetStringUTF16(IDS_APPMENU_TOOLTIP_ALERT);
+  }
 }

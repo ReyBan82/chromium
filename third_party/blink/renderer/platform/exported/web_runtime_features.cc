@@ -39,7 +39,7 @@ void WebRuntimeFeatures::EnableExperimentalFeatures(bool enable) {
   RuntimeEnabledFeatures::SetExperimentalFeaturesEnabled(enable);
 }
 
-void WebRuntimeFeatures::EnableFeatureFromString(const std::string& name,
+void WebRuntimeFeatures::EnableFeatureFromString(std::string_view name,
                                                  bool enable) {
   RuntimeEnabledFeatures::SetFeatureEnabledFromString(name, enable);
 }
@@ -61,8 +61,15 @@ void WebRuntimeFeatures::EnableOverlayScrollbars(bool enable) {
 }
 
 void WebRuntimeFeatures::EnableFluentScrollbars(bool enable) {
-  RuntimeEnabledFeatures::SetFluentScrollbarsEnabled(enable);
   ScrollbarThemeSettings::SetFluentScrollbarsEnabled(enable);
+}
+
+void WebRuntimeFeatures::EnableDesktopAndroidScrollbars(bool enable) {
+  ScrollbarThemeSettings::SetDesktopAndroidScrollbarsEnabled(enable);
+}
+
+void WebRuntimeFeatures::EnableLocalNetworkAccessWebRTC(bool enable) {
+  RuntimeEnabledFeatures::SetLocalNetworkAccessWebRTCEnabled(enable);
 }
 
 }  // namespace blink

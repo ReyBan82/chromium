@@ -5,10 +5,8 @@
 #include <vector>
 
 #include "base/functional/bind.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/stringprintf.h"
 #include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/render_frame_host.h"
@@ -23,14 +21,18 @@
 namespace subresource_filter {
 
 class SubresourceFilterSpecialSubframeNavigationsBrowserTest
-    : public SubresourceFilterBrowserTest {};
+    : public SubresourceFilterBrowserTest,
+      public ::testing::WithParamInterface<bool> {
+ public:
+  std::optional<bool> UseV5() const override { return GetParam(); }
+};
 
 // Tests that navigations to special URLs (e.g. about:blank, data URLs, etc)
 // which do not trigger ReadyToCommitNavigation (and therefore our activation
 // IPC), properly inherit the activation of their parent frame.
 // Also tests that a child frame of a special url frame inherits the activation
 // state of its parent.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSpecialSubframeNavigationsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSpecialSubframeNavigationsBrowserTest,
                        NavigationsWithNoIPC_HaveActivation) {
   const GURL url(GetTestUrl("subresource_filter/frame_set_special_urls.html"));
   const std::vector<const char*> subframe_names{"blank", "grandChild", "js",
@@ -52,8 +54,8 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSpecialSubframeNavigationsBrowserTest,
 
 // Navigate to a site with site hierarchy a(b(c)). Let a navigate c to a data
 // URL, and expect that the resulting frame has activation.
-// See crbug.com/739777.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSpecialSubframeNavigationsBrowserTest,
+// See crbug.com/40528863.
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSpecialSubframeNavigationsBrowserTest,
                        NavigateCrossProcessDataUrl_MaintainsActivation) {
   const GURL main_url(embedded_test_server()->GetURL(
       "a.com", "/cross_site_iframe_factory.html?a(b(c))"));
@@ -79,11 +81,15 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSpecialSubframeNavigationsBrowserTest,
   content::RenderFrameHost* target = content::FrameMatchingPredicate(
       web_contents()->GetPrimaryPage(),
       base::BindRepeating([](content::RenderFrameHost* rfh) {
-        return rfh->GetLastCommittedURL().scheme_piece() == url::kDataScheme;
+        return rfh->GetLastCommittedURL().scheme() == url::kDataScheme;
       }));
   ASSERT_NE(target, nullptr);
   EXPECT_TRUE(target->GetLastCommittedOrigin().opaque());
   EXPECT_FALSE(WasParsedScriptElementLoaded(target));
 }
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         SubresourceFilterSpecialSubframeNavigationsBrowserTest,
+                         ::testing::Bool());
 
 }  // namespace subresource_filter

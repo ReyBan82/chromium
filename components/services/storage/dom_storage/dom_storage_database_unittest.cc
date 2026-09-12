@@ -1,441 +1,438 @@
-// Copyright 2019 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "components/services/storage/dom_storage/dom_storage_database.h"
 
-#include <algorithm>
-#include <functional>
-#include <iostream>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
 
+#include "base/byte_size.h"
 #include "base/files/file_path.h"
-#include "base/files/scoped_temp_dir.h"
-#include "base/run_loop.h"
-#include "base/strings/string_piece.h"
-#include "base/task/sequenced_task_runner.h"
-#include "base/task/thread_pool.h"
-#include "base/test/bind.h"
+#include "base/test/gmock_expected_support.h"
 #include "base/test/task_environment.h"
-#include "testing/gmock/include/gmock/gmock.h"
+#include "components/services/storage/dom_storage/leveldb/local_storage_leveldb.h"
+#include "components/services/storage/dom_storage/leveldb/session_storage_leveldb.h"
+#include "components/services/storage/dom_storage/sqlite/local_storage_sqlite.h"
+#include "components/services/storage/dom_storage/sqlite/session_storage_sqlite.h"
+#include "components/services/storage/dom_storage/test_support/dom_storage_database_testing.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/leveldatabase/env_chromium.h"
-#include "third_party/leveldatabase/src/include/leveldb/write_batch.h"
-
-using ::testing::UnorderedElementsAreArray;
-
-// Helper to make Status checks a little more legible in test failures.
-#define EXPECT_STATUS(expectation, value)                                 \
-  ([](auto s) {                                                           \
-    EXPECT_TRUE(s.expectation()) << "Actual status is: " << s.ToString(); \
-  }(value))
-
-#define EXPECT_STATUS_OK(value) EXPECT_STATUS(ok, value)
-
-// Helper to make database value expectation checks and failures more legible
-#define EXPECT_VALUE_EQ(expectation, value) \
-  EXPECT_EQ(std::string(expectation), std::string(value.begin(), value.end()))
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 
 namespace storage {
-
-std::ostream& operator<<(std::ostream& os,
-                         const DomStorageDatabase::KeyValuePair& kvp) {
-  os << "<\"" << std::string(kvp.key.begin(), kvp.key.end()) << "\", \""
-     << std::string(kvp.value.begin(), kvp.value.end()) << "\">";
-  return os;
-}
-
 namespace {
 
-// Helper for tests to create a |uint8_t| span from a StringPiece.
-base::span<const uint8_t> MakeBytes(base::StringPiece s) {
-  return base::as_bytes(base::make_span(s));
+constexpr const char kFirstUrlString[] = "https://a-fake.test/";
+constexpr const char kSecondUrlString[] = "https://b-fake.test/";
+
+constexpr const char kFirstSessionId[] = "ce8c7dc5_73b4_4320_a506_ce1f4fd3356f";
+constexpr const char kSecondSessionId[] =
+    "36356e0b_1627_4492_a474_db76a8996bed";
+
+constexpr int64_t kFirstMapId = 10;
+constexpr int64_t kSecondMapId = 11;
+
+constexpr base::ByteSize kMapTotalSize{312};
+
+std::vector<uint8_t> ToBytes(std::string_view str) {
+  return std::vector<uint8_t>(str.begin(), str.end());
 }
-
-DomStorageDatabase::KeyValuePair MakeKeyValuePair(base::StringPiece key,
-                                                  base::StringPiece value) {
-  return {DomStorageDatabase::Key(key.begin(), key.end()),
-          DomStorageDatabase::Value(value.begin(), value.end())};
-}
-
-std::string MakePrefixedKey(base::StringPiece prefix, base::StringPiece key) {
-  return std::string(prefix) + std::string(key);
-}
-
-class StorageServiceDomStorageDatabaseTest : public testing::Test {
- public:
-  StorageServiceDomStorageDatabaseTest()
-      : blocking_task_runner_(base::ThreadPool::CreateSequencedTaskRunner(
-            {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN})) {}
-
-  StorageServiceDomStorageDatabaseTest(
-      const StorageServiceDomStorageDatabaseTest&) = delete;
-  StorageServiceDomStorageDatabaseTest& operator=(
-      const StorageServiceDomStorageDatabaseTest&) = delete;
-
- protected:
-  // Helper for tests to block on the result of an OpenInMemory call.
-  base::SequenceBound<DomStorageDatabase> OpenInMemorySync(
-      const std::string& db_name) {
-    base::SequenceBound<DomStorageDatabase> result;
-    base::RunLoop loop;
-    DomStorageDatabase::OpenInMemory(
-        db_name, /*memory_dump_id=*/absl::nullopt, blocking_task_runner_,
-        base::BindLambdaForTesting(
-            [&](base::SequenceBound<DomStorageDatabase> database,
-                leveldb::Status status) {
-              result = std::move(database);
-              loop.Quit();
-            }));
-    loop.Run();
-    return result;
-  }
-
-  // Helper for tests to block on the result of an OpenDirectory call.
-  base::SequenceBound<DomStorageDatabase> OpenDirectorySync(
-      const base::FilePath& directory,
-      const std::string& db_name,
-      const leveldb_env::Options& options) {
-    base::SequenceBound<DomStorageDatabase> result;
-    base::RunLoop loop;
-    DomStorageDatabase::OpenDirectory(
-        directory, db_name, options, /*memory_dump_id=*/absl::nullopt,
-        blocking_task_runner_,
-        base::BindLambdaForTesting(
-            [&](base::SequenceBound<DomStorageDatabase> database,
-                leveldb::Status status) {
-              result = std::move(database);
-              loop.Quit();
-            }));
-    loop.Run();
-    return result;
-  }
-
-  // Helper for tests to block on the result of a Destroy call.
-  leveldb::Status DestroySync(const base::FilePath& directory,
-                              const std::string& db_name) {
-    leveldb::Status result;
-    base::RunLoop loop;
-    DomStorageDatabase::Destroy(
-        directory, db_name, blocking_task_runner_,
-        base::BindLambdaForTesting([&](leveldb::Status status) {
-          result = status;
-          loop.Quit();
-        }));
-    loop.Run();
-    return result;
-  }
-
-  // Helper to run an async operation on a DomStorageDatabase and wait for it to
-  // finish.
-  template <typename Func>
-  static void DoSync(const base::SequenceBound<DomStorageDatabase>& database,
-                     Func operation) {
-    base::RunLoop loop;
-    database.PostTaskWithThisObject(
-        base::BindLambdaForTesting([&](const DomStorageDatabase& database) {
-          operation(database);
-          loop.Quit();
-        }));
-    loop.Run();
-  }
-
- private:
-  base::test::TaskEnvironment task_environment_;
-  scoped_refptr<base::SequencedTaskRunner> blocking_task_runner_;
-};
 
 }  // namespace
 
-TEST_F(StorageServiceDomStorageDatabaseTest, BasicOpenInMemory) {
-  // Basic smoke test to verify that we can successfully create and destroy an
-  // in-memory database with no problems.
-  base::SequenceBound<DomStorageDatabase> database =
-      OpenInMemorySync("test_db");
-  EXPECT_TRUE(database);
+// Tests migrating DOM storage from LevelDB to SQLite for both local storage and
+// session storage. Local storage uses a single global session ID and includes
+// usage metadata. Session storage uses per-session IDs, includes cloned maps,
+// and does not include usage metadata.
+class DomStorageDatabaseTest : public testing::Test {
+ protected:
+  base::PassKey<DomStorageDatabaseFactory> GetPassKey() {
+    return DomStorageDatabaseFactory::CreatePassKeyForTesting();
+  }
+
+  void OpenLocalStorageLevelDB(std::unique_ptr<LocalStorageLevelDB>* result) {
+    auto instance = std::make_unique<LocalStorageLevelDB>(
+        GetPassKey(), /*write_exp_tag=*/false);
+    DbStatus status = instance->Open(/*directory=*/base::FilePath(),
+                                     /*memory_dump_id=*/std::nullopt);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    *result = std::move(instance);
+  }
+
+  void OpenLocalStorageSqlite(std::unique_ptr<LocalStorageSqlite>* result) {
+    auto instance = std::make_unique<LocalStorageSqlite>(GetPassKey());
+    DbStatus status = instance->Open(
+        /*database_path=*/base::FilePath(),
+        /*memory_dump_id=*/std::nullopt);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    *result = std::move(instance);
+  }
+
+  void OpenSessionStorageLevelDB(
+      std::unique_ptr<SessionStorageLevelDB>* result) {
+    auto instance = std::make_unique<SessionStorageLevelDB>(
+        GetPassKey(), /*write_exp_tag=*/false);
+    DbStatus status = instance->Open(
+        /*directory=*/base::FilePath(),
+        /*memory_dump_id=*/std::nullopt);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    *result = std::move(instance);
+  }
+
+  void OpenSessionStorageSqlite(std::unique_ptr<SessionStorageSqlite>* result) {
+    auto instance = std::make_unique<SessionStorageSqlite>(GetPassKey());
+    DbStatus status = instance->Open(
+        /*database_path=*/base::FilePath(),
+        /*memory_dump_id=*/std::nullopt);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    *result = std::move(instance);
+  }
+
+  const blink::StorageKey kFirstStorageKey =
+      blink::StorageKey::CreateFromStringForTesting(kFirstUrlString);
+
+  const blink::StorageKey kSecondStorageKey =
+      blink::StorageKey::CreateFromStringForTesting(kSecondUrlString);
+
+  const base::Time kMapLastAccessed = base::Time::Now() - base::Minutes(10);
+  const base::Time kMapLastModified = base::Time::Now();
+
+  base::test::TaskEnvironment task_environment_;
+};
+
+TEST_F(DomStorageDatabaseTest, MigrateLocalStorageWithEmptyDatabase) {
+  std::unique_ptr<LocalStorageLevelDB> source;
+  ASSERT_NO_FATAL_FAILURE(OpenLocalStorageLevelDB(&source));
+
+  std::unique_ptr<LocalStorageSqlite> destination;
+  ASSERT_NO_FATAL_FAILURE(OpenLocalStorageSqlite(&destination));
+
+  DbStatus status = MigrateDatabase(*source, *destination);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  ASSERT_OK_AND_ASSIGN(DomStorageDatabase::Metadata metadata,
+                       destination->ReadAllMetadata());
+  EXPECT_TRUE(metadata.map_metadata.empty());
 }
 
-TEST_F(StorageServiceDomStorageDatabaseTest, BasicOpenDirectory) {
-  // Basic smoke test to verify that we can successfully create and destroy a
-  // persistent database with no problems.
+TEST_F(DomStorageDatabaseTest, MigrateLocalStorageWithSingleMap) {
+  std::unique_ptr<LocalStorageLevelDB> source;
+  ASSERT_NO_FATAL_FAILURE(OpenLocalStorageLevelDB(&source));
 
-  base::ScopedTempDir temp_dir;
-  CHECK(temp_dir.CreateUniqueTempDir());
-  const char kTestDbName[] = "test_db";
+  // Write a map with key/value pairs and usage metadata to `source`.
+  DomStorageDatabase::MapLocator map_locator{kFirstStorageKey};
+  const std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+      kExpectedEntries = {
+          {ToBytes("key_1"), ToBytes("value_1")},
+          {ToBytes("key_2"), ToBytes("value_2")},
+      };
 
-  leveldb_env::Options options;
-  options.create_if_missing = true;
-  options.error_if_exists = true;
-  base::SequenceBound<DomStorageDatabase> database =
-      OpenDirectorySync(temp_dir.GetPath(), kTestDbName, options);
-  EXPECT_TRUE(database);
+  DomStorageDatabase::MapBatchUpdate::Usage usage;
+  usage.SetLastAccessed(kMapLastAccessed);
+  usage.SetLastModifiedAndTotalSize(kMapLastModified, kMapTotalSize);
 
-  database.Reset();
+  ASSERT_NO_FATAL_FAILURE(InsertMapEntries(*source, map_locator,
+                                           kExpectedEntries, std::move(usage)));
 
-  // Destroy the database. Note that this should be safe to call immediately
-  // after |Reset()| as long as the same TaskRunner is used to open and destroy
-  // the database.
-  //
-  // Because the database owns filesystem artifacts in the temp directory, we
-  // will wait for the DomStorageDatabase instance to actually be destroyed
-  // before completing the test.
-  EXPECT_STATUS_OK(DestroySync(temp_dir.GetPath(), kTestDbName));
+  // Migrate from LevelDB to SQLite.
+  std::unique_ptr<LocalStorageSqlite> destination;
+  ASSERT_NO_FATAL_FAILURE(OpenLocalStorageSqlite(&destination));
 
-  // Verify that the database can't be reopened.
-  options.create_if_missing = false;
-  options.error_if_exists = false;
-  database = OpenDirectorySync(temp_dir.GetPath(), kTestDbName, options);
-  EXPECT_FALSE(database);
+  DbStatus status = MigrateDatabase(*source, *destination);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  // Verify key/value pairs were migrated.
+  ASSERT_OK_AND_ASSIGN(
+      (std::map<DomStorageDatabase::Key, DomStorageDatabase::Value> entries),
+      destination->ReadMapKeyValues(map_locator.Clone()));
+  EXPECT_EQ(entries, kExpectedEntries);
+
+  // Verify usage metadata was migrated.
+  ASSERT_OK_AND_ASSIGN(DomStorageDatabase::Metadata metadata,
+                       destination->ReadAllMetadata());
+
+  const DomStorageDatabase::MapMetadata kExpectedMapMetadata[] = {
+      {
+          .map_locator{kFirstStorageKey, /*map_id=*/1},
+          .last_accessed{kMapLastAccessed},
+          .last_modified{kMapLastModified},
+          .total_size{kMapTotalSize},
+      },
+  };
+  ExpectEqualsMapMetadataSpan(metadata.map_metadata, kExpectedMapMetadata);
 }
 
-TEST_F(StorageServiceDomStorageDatabaseTest, BasicOperations) {
-  // Exercises basic Put, Get, Delete.
+TEST_F(DomStorageDatabaseTest, MigrateLocalStorageWithMultipleMaps) {
+  std::unique_ptr<LocalStorageLevelDB> source;
+  ASSERT_NO_FATAL_FAILURE(OpenLocalStorageLevelDB(&source));
 
-  base::SequenceBound<DomStorageDatabase> database =
-      OpenInMemorySync("test_db");
-  ASSERT_TRUE(database);
+  // Write key/value pairs and usage metadata for the first map.
+  DomStorageDatabase::MapLocator first_locator{kFirstStorageKey};
+  const std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+      kFirstEntries = {
+          {ToBytes("key_a"), ToBytes("value_a")},
+      };
 
-  // Write a key and read it back.
-  const char kTestKey[] = "test_key";
-  const char kTestValue[] = "test_value";
-  DoSync(database, [&](const DomStorageDatabase& db) {
-    EXPECT_STATUS_OK(db.Put(MakeBytes(kTestKey), MakeBytes(kTestValue)));
+  DomStorageDatabase::MapBatchUpdate::Usage first_usage;
+  first_usage.SetLastModifiedAndTotalSize(kMapLastModified, kMapTotalSize);
 
-    DomStorageDatabase::Value value;
-    EXPECT_STATUS_OK(db.Get(MakeBytes(kTestKey), &value));
-    EXPECT_VALUE_EQ(kTestValue, value);
+  ASSERT_NO_FATAL_FAILURE(InsertMapEntries(
+      *source, first_locator, kFirstEntries, std::move(first_usage)));
+
+  // Write key/value pairs and usage metadata for the second map.
+  DomStorageDatabase::MapLocator second_locator{kSecondStorageKey};
+  const std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+      kSecondEntries = {
+          {ToBytes("key_b"), ToBytes("value_b")},
+          {ToBytes("key_c"), ToBytes("value_c")},
+      };
+
+  DomStorageDatabase::MapBatchUpdate::Usage second_usage;
+  const base::Time kSecondLastAccessed = base::Time::Now() - base::Hours(1);
+  second_usage.SetLastAccessed(kSecondLastAccessed);
+
+  ASSERT_NO_FATAL_FAILURE(InsertMapEntries(
+      *source, second_locator, kSecondEntries, std::move(second_usage)));
+
+  // Migrate from LevelDB to SQLite.
+  std::unique_ptr<LocalStorageSqlite> destination;
+  ASSERT_NO_FATAL_FAILURE(OpenLocalStorageSqlite(&destination));
+
+  DbStatus status = MigrateDatabase(*source, *destination);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  // Verify first map's entries.
+  ASSERT_OK_AND_ASSIGN((std::map<DomStorageDatabase::Key,
+                                 DomStorageDatabase::Value> first_entries),
+                       destination->ReadMapKeyValues(first_locator.Clone()));
+  EXPECT_EQ(first_entries, kFirstEntries);
+
+  // Verify second map's entries.
+  ASSERT_OK_AND_ASSIGN((std::map<DomStorageDatabase::Key,
+                                 DomStorageDatabase::Value> second_entries),
+                       destination->ReadMapKeyValues(second_locator.Clone()));
+  EXPECT_EQ(second_entries, kSecondEntries);
+
+  // Verify metadata for both maps.
+  ASSERT_OK_AND_ASSIGN(DomStorageDatabase::Metadata metadata,
+                       destination->ReadAllMetadata());
+  ASSERT_EQ(metadata.map_metadata.size(), 2u);
+
+  // Each map must have a unique ID.
+  ASSERT_TRUE(metadata.map_metadata[0].map_locator.map_id().has_value());
+  ASSERT_TRUE(metadata.map_metadata[1].map_locator.map_id().has_value());
+
+  EXPECT_NE(metadata.map_metadata[0].map_locator.map_id().value(),
+            metadata.map_metadata[1].map_locator.map_id().value());
+
+  // Exclude map ID metadata verification because map IDs are not stable for
+  // this migration test.
+  std::vector<DomStorageDatabase::MapMetadata> actual_metadata_without_map_id;
+
+  const DomStorageDatabase::MapMetadata& first_actual =
+      metadata.map_metadata[0];
+
+  actual_metadata_without_map_id.push_back({
+      .map_locator{first_actual.map_locator.storage_key()},
+      .last_accessed = first_actual.last_accessed,
+      .last_modified = first_actual.last_modified,
+      .total_size = first_actual.total_size,
   });
 
-  // Now delete the key and expect the following read to fail.
-  DoSync(database, [&](const DomStorageDatabase& db) {
-    EXPECT_STATUS_OK(db.Delete(MakeBytes(kTestKey)));
+  const DomStorageDatabase::MapMetadata& second_actual =
+      metadata.map_metadata[1];
 
-    DomStorageDatabase::Value value;
-    EXPECT_STATUS(IsNotFound, db.Get(MakeBytes(kTestKey), &value));
+  actual_metadata_without_map_id.push_back({
+      .map_locator{second_actual.map_locator.storage_key()},
+      .last_accessed = second_actual.last_accessed,
+      .last_modified = second_actual.last_modified,
+      .total_size = second_actual.total_size,
   });
+
+  const DomStorageDatabase::MapMetadata kExpectedMapMetadata[] = {
+      {
+          .map_locator{kFirstStorageKey},
+          .last_modified{kMapLastModified},
+          .total_size{kMapTotalSize},
+      },
+      {
+          .map_locator{kSecondStorageKey},
+          .last_accessed{kSecondLastAccessed},
+      },
+  };
+  ExpectEqualsMapMetadataSpan(actual_metadata_without_map_id,
+                              kExpectedMapMetadata);
 }
 
-TEST_F(StorageServiceDomStorageDatabaseTest, Reopen) {
-  // Verifies that if we Put() something into a persistent database, we can
-  // Get() it back out when we re-open the same database later.
+TEST_F(DomStorageDatabaseTest, MigrateSessionStorageWithEmptyDatabase) {
+  std::unique_ptr<SessionStorageLevelDB> source;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageLevelDB(&source));
 
-  base::ScopedTempDir temp_dir;
-  CHECK(temp_dir.CreateUniqueTempDir());
-  const char kTestDbName[] = "test_db";
-  const char kTestKey[] = "test_key";
-  const char kTestValue[] = "test_value";
+  std::unique_ptr<SessionStorageSqlite> destination;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageSqlite(&destination));
 
-  leveldb_env::Options options;
-  options.create_if_missing = true;
-  options.error_if_exists = true;
-  base::SequenceBound<DomStorageDatabase> database =
-      OpenDirectorySync(temp_dir.GetPath(), kTestDbName, options);
-  ASSERT_TRUE(database);
-  DoSync(database, [&](const DomStorageDatabase& db) {
-    EXPECT_STATUS_OK(db.Put(MakeBytes(kTestKey), MakeBytes(kTestValue)));
-  });
-  database.Reset();
+  DbStatus status = MigrateDatabase(*source, *destination);
+  EXPECT_TRUE(status.ok()) << status.ToString();
 
-  // Re-open and verify that we can read what was written above.
-  options.create_if_missing = false;
-  options.error_if_exists = false;
-  database = OpenDirectorySync(temp_dir.GetPath(), kTestDbName, options);
-  ASSERT_TRUE(database);
-  DoSync(database, [&](const DomStorageDatabase& db) {
-    DomStorageDatabase::Value value;
-    EXPECT_STATUS_OK(db.Get(MakeBytes(kTestKey), &value));
-    EXPECT_VALUE_EQ(kTestValue, value);
-  });
-
-  // Because the database owns filesystem artifacts in the temp directory, block
-  // scope teardown until the DomStorageDatabase instance is actually destroyed
-  // on its background sequence.
-  database.SynchronouslyResetForTest();
+  ASSERT_OK_AND_ASSIGN(DomStorageDatabase::Metadata metadata,
+                       destination->ReadAllMetadata());
+  EXPECT_TRUE(metadata.map_metadata.empty());
 }
 
-TEST_F(StorageServiceDomStorageDatabaseTest, GetPrefixed) {
-  // Verifies basic prefixed reading behavior.
+TEST_F(DomStorageDatabaseTest, MigrateSessionStorageWithSingleMap) {
+  std::unique_ptr<SessionStorageLevelDB> source;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageLevelDB(&source));
 
-  base::SequenceBound<DomStorageDatabase> database =
-      OpenInMemorySync("test_db");
-  ASSERT_TRUE(database);
+  // Write metadata and key/value pairs to `source`.
+  const DomStorageDatabase::MapLocator kMapLocator{
+      kFirstSessionId, kFirstStorageKey, kFirstMapId};
+  const DomStorageDatabase::MapMetadata kExpectedMapMetadata[] = {
+      {.map_locator = kMapLocator.Clone()},
+  };
 
-  const char kTestPrefix1[] = "prefix";
-  const char kTestPrefix2[] = "something_completely_different";
-  const char kTestUnprefixedKey[] = "moot!";
-  const char kTestKeyBase1[] = "key1";
-  const char kTestKeyBase2[] = "key2";
-  auto kTestPrefix1Key1 = MakePrefixedKey(kTestPrefix1, kTestKeyBase1);
-  auto kTestPrefix1Key2 = MakePrefixedKey(kTestPrefix1, kTestKeyBase2);
-  auto kTestPrefix2Key1 = MakePrefixedKey(kTestPrefix2, kTestKeyBase1);
-  auto kTestPrefix2Key2 = MakePrefixedKey(kTestPrefix2, kTestKeyBase2);
-  DoSync(database, [&](const DomStorageDatabase& db) {
-    std::vector<DomStorageDatabase::KeyValuePair> entries;
+  DomStorageDatabase::Metadata metadata;
+  metadata.map_metadata = CloneMapMetadataVector(kExpectedMapMetadata);
 
-    // No keys, so GetPrefixed should return nothing.
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix1), &entries));
-    EXPECT_TRUE(entries.empty());
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix2), &entries));
-    EXPECT_TRUE(entries.empty());
+  DbStatus status = source->PutMetadata(std::move(metadata));
+  ASSERT_TRUE(status.ok()) << status.ToString();
 
-    // Insert a key which matches neither test prefix. GetPrefixed should still
-    // return nothing.
-    EXPECT_STATUS_OK(db.Put(MakeBytes(kTestUnprefixedKey), MakeBytes("meh")));
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix1), &entries));
-    EXPECT_TRUE(entries.empty());
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix2), &entries));
-    EXPECT_TRUE(entries.empty());
+  const std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+      kExpectedEntries = {
+          {ToBytes("key_1"), ToBytes("value_1")},
+          {ToBytes("key_2"), ToBytes("value_2")},
+      };
+  ASSERT_NO_FATAL_FAILURE(
+      InsertMapEntries(*source, kMapLocator.Clone(), kExpectedEntries));
 
-    // Insert a single prefixed key. GetPrefixed should return it when called
-    // with kTestPrefix1.
-    const char kTestValue1[] = "beep beep";
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix1Key1), MakeBytes(kTestValue1)));
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix1), &entries));
-    EXPECT_THAT(entries, UnorderedElementsAreArray({MakeKeyValuePair(
-                             kTestPrefix1Key1, kTestValue1)}));
+  // Migrate from LevelDB to SQLite.
+  std::unique_ptr<SessionStorageSqlite> destination;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageSqlite(&destination));
 
-    // But not when called with kTestPrefix2.
-    entries.clear();
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix2), &entries));
-    EXPECT_TRUE(entries.empty());
+  status = MigrateDatabase(*source, *destination);
+  EXPECT_TRUE(status.ok()) << status.ToString();
 
-    // Insert a second prefixed key with kTestPrefix1, and also insert some
-    // keys with kTestPrefix2.
-    const char kTestValue2[] = "beep bop boop";
-    const char kTestValue3[] = "vroom vroom";
-    const char kTestValue4[] = "this data is lit fam";
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix1Key2), MakeBytes(kTestValue2)));
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix2Key1), MakeBytes(kTestValue3)));
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix2Key2), MakeBytes(kTestValue4)));
+  // Verify key/value pairs were migrated.
+  ASSERT_OK_AND_ASSIGN(
+      (std::map<DomStorageDatabase::Key, DomStorageDatabase::Value> entries),
+      destination->ReadMapKeyValues(kMapLocator.Clone()));
+  EXPECT_EQ(entries, kExpectedEntries);
 
-    // Verify that getting each prefix yields only the expected results.
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix1), &entries));
-    EXPECT_THAT(entries,
-                UnorderedElementsAreArray(
-                    {MakeKeyValuePair(kTestPrefix1Key1, kTestValue1),
-                     MakeKeyValuePair(kTestPrefix1Key2, kTestValue2)}));
-    entries.clear();
-
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix2), &entries));
-    EXPECT_THAT(entries,
-                UnorderedElementsAreArray(
-                    {MakeKeyValuePair(kTestPrefix2Key1, kTestValue3),
-                     MakeKeyValuePair(kTestPrefix2Key2, kTestValue4)}));
-  });
+  // Verify metadata was migrated.
+  ASSERT_OK_AND_ASSIGN(DomStorageDatabase::Metadata dest_metadata,
+                       destination->ReadAllMetadata());
+  ExpectEqualsMapMetadataSpan(dest_metadata.map_metadata, kExpectedMapMetadata);
 }
 
-TEST_F(StorageServiceDomStorageDatabaseTest, DeletePrefixed) {
-  // Verifies basic prefixed deletion behavior.
+TEST_F(DomStorageDatabaseTest, MigrateSessionStorageWithClonedMap) {
+  std::unique_ptr<SessionStorageLevelDB> source;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageLevelDB(&source));
 
-  base::SequenceBound<DomStorageDatabase> database =
-      OpenInMemorySync("test_db");
-  ASSERT_TRUE(database);
-
-  const char kTestPrefix1[] = "prefix";
-  const char kTestPrefix2[] = "something_completely_different";
-  const char kTestUnprefixedKey[] = "moot!";
-  const char kTestKeyBase1[] = "key1";
-  const char kTestKeyBase2[] = "key2";
-  auto kTestPrefix1Key1 = MakePrefixedKey(kTestPrefix1, kTestKeyBase1);
-  auto kTestPrefix1Key2 = MakePrefixedKey(kTestPrefix1, kTestKeyBase2);
-  auto kTestPrefix2Key1 = MakePrefixedKey(kTestPrefix2, kTestKeyBase1);
-  auto kTestPrefix2Key2 = MakePrefixedKey(kTestPrefix2, kTestKeyBase2);
-  DoSync(database, [&](const DomStorageDatabase& db) {
-    // Insert a bunch of entries. One unprefixed, two with one prefix, and two
-    // with another prefix.
-    const char kTestValue1[] = "meh";
-    const char kTestValue2[] = "bah";
-    const char kTestValue3[] = "doh";
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestUnprefixedKey), MakeBytes(kTestValue1)));
-    EXPECT_STATUS_OK(db.Put(MakeBytes(kTestPrefix1Key1), MakeBytes("x")));
-    EXPECT_STATUS_OK(db.Put(MakeBytes(kTestPrefix1Key2), MakeBytes("x")));
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix2Key1), MakeBytes(kTestValue2)));
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix2Key2), MakeBytes(kTestValue3)));
-
-    // Wipe out the first prefix. We should still see the second prefix.
-    std::vector<DomStorageDatabase::KeyValuePair> entries;
-    leveldb::WriteBatch batch;
-    EXPECT_STATUS_OK(db.DeletePrefixed(MakeBytes(kTestPrefix1), &batch));
-    EXPECT_STATUS_OK(db.Commit(&batch));
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix1), &entries));
-    EXPECT_TRUE(entries.empty());
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix2), &entries));
-    EXPECT_THAT(entries,
-                UnorderedElementsAreArray(
-                    {MakeKeyValuePair(kTestPrefix2Key1, kTestValue2),
-                     MakeKeyValuePair(kTestPrefix2Key2, kTestValue3)}));
-
-    // Wipe out the second prefix.
-    batch.Clear();
-    EXPECT_STATUS_OK(db.DeletePrefixed(MakeBytes(kTestPrefix2), &batch));
-    EXPECT_STATUS_OK(db.Commit(&batch));
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix2), &entries));
-
-    // The lone unprefixed value should still exist.
-    DomStorageDatabase::Value value;
-    EXPECT_STATUS_OK(db.Get(MakeBytes(kTestUnprefixedKey), &value));
-    EXPECT_VALUE_EQ(kTestValue1, value);
+  // Create a map shared by two sessions (a cloned map).
+  std::vector<DomStorageDatabase::MapMetadata> expected_map_metadata;
+  expected_map_metadata.push_back({
+      .map_locator{kFirstSessionId, kFirstStorageKey, kFirstMapId},
   });
+  expected_map_metadata[0].map_locator.AddSession(kSecondSessionId);
+
+  DomStorageDatabase::Metadata metadata;
+  metadata.map_metadata = CloneMapMetadataVector(expected_map_metadata);
+
+  DbStatus status = source->PutMetadata(std::move(metadata));
+  ASSERT_TRUE(status.ok()) << status.ToString();
+
+  // Write key/value pairs to the cloned map.
+  const std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+      kExpectedEntries = {
+          {ToBytes("shared_key"), ToBytes("shared_value")},
+      };
+  ASSERT_NO_FATAL_FAILURE(InsertMapEntries(
+      *source, expected_map_metadata[0].map_locator.Clone(), kExpectedEntries));
+
+  // Migrate from LevelDB to SQLite.
+  std::unique_ptr<SessionStorageSqlite> destination;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageSqlite(&destination));
+
+  status = MigrateDatabase(*source, *destination);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  // Verify key/value pairs migrated.
+  ASSERT_OK_AND_ASSIGN(
+      (std::map<DomStorageDatabase::Key, DomStorageDatabase::Value> entries),
+      destination->ReadMapKeyValues(
+          expected_map_metadata[0].map_locator.Clone()));
+  EXPECT_EQ(entries, kExpectedEntries);
+
+  // Verify the cloned map's metadata migrated.
+  ASSERT_OK_AND_ASSIGN(DomStorageDatabase::Metadata dest_metadata,
+                       destination->ReadAllMetadata());
+  ExpectEqualsMapMetadataSpan(dest_metadata.map_metadata,
+                              expected_map_metadata);
 }
 
-TEST_F(StorageServiceDomStorageDatabaseTest, CopyPrefixed) {
-  // Verifies basic prefixed copying behavior.
+TEST_F(DomStorageDatabaseTest, MigrateSessionStorageWithMultipleMaps) {
+  std::unique_ptr<SessionStorageLevelDB> source;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageLevelDB(&source));
 
-  base::SequenceBound<DomStorageDatabase> database =
-      OpenInMemorySync("test_db");
-  ASSERT_TRUE(database);
+  // Create two separate maps in different sessions.
+  const DomStorageDatabase::MapLocator kFirstMapLocator{
+      kFirstSessionId, kFirstStorageKey, kFirstMapId};
 
-  const char kTestUnprefixedKey[] = "moot!";
-  const char kTestPrefix1[] = "prefix";
-  const char kTestPrefix2[] = "something_completely_different";
-  const char kTestKeyBase1[] = "key1";
-  const char kTestKeyBase2[] = "key2";
-  auto kTestPrefix1Key1 = MakePrefixedKey(kTestPrefix1, kTestKeyBase1);
-  auto kTestPrefix1Key2 = MakePrefixedKey(kTestPrefix1, kTestKeyBase2);
-  auto kTestPrefix2Key1 = MakePrefixedKey(kTestPrefix2, kTestKeyBase1);
-  auto kTestPrefix2Key2 = MakePrefixedKey(kTestPrefix2, kTestKeyBase2);
-  const char kTestValue1[] = "a value";
-  const char kTestValue2[] = "another value";
-  const char kTestValue3[] = "the only other value in the world";
+  const DomStorageDatabase::MapLocator kSecondMapLocator{
+      kSecondSessionId, kSecondStorageKey, kSecondMapId};
 
-  DoSync(database, [&](const DomStorageDatabase& db) {
-    // Populate the database with one unprefixed entry, and two values with
-    // a key prefix of |kTestPrefix1|.
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestUnprefixedKey), MakeBytes(kTestValue1)));
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix1Key1), MakeBytes(kTestValue2)));
-    EXPECT_STATUS_OK(
-        db.Put(MakeBytes(kTestPrefix1Key2), MakeBytes(kTestValue3)));
+  const DomStorageDatabase::MapMetadata kExpectedMapMetadata[] = {
+      {.map_locator = kFirstMapLocator.Clone()},
+      {.map_locator = kSecondMapLocator.Clone()},
+  };
 
-    // Copy the prefixed entries to |kTestPrefix2| and verify that we have the
-    // expected entries.
-    leveldb::WriteBatch batch;
-    EXPECT_STATUS_OK(db.CopyPrefixed(MakeBytes(kTestPrefix1),
-                                     MakeBytes(kTestPrefix2), &batch));
-    EXPECT_STATUS_OK(db.Commit(&batch));
+  DomStorageDatabase::Metadata metadata;
+  metadata.map_metadata = CloneMapMetadataVector(kExpectedMapMetadata);
 
-    std::vector<DomStorageDatabase::KeyValuePair> entries;
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix2), &entries));
-    EXPECT_THAT(entries,
-                UnorderedElementsAreArray(
-                    {MakeKeyValuePair(kTestPrefix2Key1, kTestValue2),
-                     MakeKeyValuePair(kTestPrefix2Key2, kTestValue3)}));
+  DbStatus status = source->PutMetadata(std::move(metadata));
+  ASSERT_TRUE(status.ok()) << status.ToString();
 
-    // The original prefixed values should still be there too.
-    entries.clear();
-    EXPECT_STATUS_OK(db.GetPrefixed(MakeBytes(kTestPrefix1), &entries));
-    EXPECT_THAT(entries,
-                UnorderedElementsAreArray(
-                    {MakeKeyValuePair(kTestPrefix1Key1, kTestValue2),
-                     MakeKeyValuePair(kTestPrefix1Key2, kTestValue3)}));
-  });
+  // Write key/value pairs to each map.
+  const std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+      kFirstEntries = {
+          {ToBytes("key_a"), ToBytes("value_a")},
+      };
+  ASSERT_NO_FATAL_FAILURE(
+      InsertMapEntries(*source, kFirstMapLocator.Clone(), kFirstEntries));
+
+  const std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+      kSecondEntries = {
+          {ToBytes("key_b"), ToBytes("value_b")},
+          {ToBytes("key_c"), ToBytes("value_c")},
+      };
+  ASSERT_NO_FATAL_FAILURE(
+      InsertMapEntries(*source, kSecondMapLocator.Clone(), kSecondEntries));
+
+  // Migrate from LevelDB to SQLite.
+  std::unique_ptr<SessionStorageSqlite> destination;
+  ASSERT_NO_FATAL_FAILURE(OpenSessionStorageSqlite(&destination));
+
+  status = MigrateDatabase(*source, *destination);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  // Verify first map's key/value pairs.
+  ASSERT_OK_AND_ASSIGN((std::map<DomStorageDatabase::Key,
+                                 DomStorageDatabase::Value> first_entries),
+                       destination->ReadMapKeyValues(kFirstMapLocator.Clone()));
+  EXPECT_EQ(first_entries, kFirstEntries);
+
+  // Verify second map's key/value pairs.
+  ASSERT_OK_AND_ASSIGN(
+      (std::map<DomStorageDatabase::Key, DomStorageDatabase::Value>
+           second_entries),
+      destination->ReadMapKeyValues(kSecondMapLocator.Clone()));
+  EXPECT_EQ(second_entries, kSecondEntries);
+
+  // Verify metadata for both maps.
+  ASSERT_OK_AND_ASSIGN(DomStorageDatabase::Metadata dest_metadata,
+                       destination->ReadAllMetadata());
+  ExpectEqualsMapMetadataSpan(dest_metadata.map_metadata, kExpectedMapMetadata);
 }
 
 }  // namespace storage

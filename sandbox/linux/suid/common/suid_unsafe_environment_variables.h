@@ -2,6 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// This is C code and has minimal dependencies, so it cannot use C++ safety
+// utilities like base::span or the UNSAFE_TODO macro. As a consequence, this
+// pragma cannot be removed.
+#ifdef UNSAFE_BUFFERS_BUILD
+#pragma allow_unsafe_buffers
+#endif
+
 // This is a list of environment variables which the ELF loader unsets when
 // loading a SUID binary. Because they are unset rather than just ignored, they
 // aren't passed to child processes of SUID processes either.

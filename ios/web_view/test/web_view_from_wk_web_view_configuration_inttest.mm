@@ -5,19 +5,16 @@
 #import <ChromeWebView/ChromeWebView.h>
 #import <Foundation/Foundation.h>
 
+#import "base/memory/raw_ptr.h"
 #import "base/test/ios/wait_util.h"
 #import "ios/web/common/uikit_ui_util.h"
 #import "ios/web_view/test/observer.h"
 #import "ios/web_view/test/web_view_inttest_base.h"
 #import "ios/web_view/test/web_view_test_util.h"
-#import "net/base/mac/url_conversions.h"
-#include "net/test/embedded_test_server/embedded_test_server.h"
-#include "testing/gtest_mac.h"
-#include "url/gurl.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "net/base/apple/url_conversions.h"
+#import "net/test/embedded_test_server/embedded_test_server.h"
+#import "testing/gtest_mac.h"
+#import "url/gurl.h"
 
 namespace ios_web_view {
 
@@ -79,7 +76,7 @@ class WebViewFromWKWebViewConfigurationTest : public WebViewInttestBase {
 @end
 
 @implementation WKUIDelegateForTest {
-  ios_web_view::WebViewFromWKWebViewConfigurationTest* _test;
+  raw_ptr<ios_web_view::WebViewFromWKWebViewConfigurationTest> _test;
 }
 
 - (instancetype)initWithTest:
@@ -97,7 +94,9 @@ class WebViewFromWKWebViewConfigurationTest : public WebViewInttestBase {
                     windowFeatures:(WKWindowFeatures*)windowFeatures {
   WKWebView* created_web_view = nil;
   configuration.userContentController = [[WKUserContentController alloc] init];
-  _test->SetWebView([[CWVWebView alloc] initWithFrame:UIScreen.mainScreen.bounds
+  CGRect bounds = GetAnyKeyWindow().screen.bounds;
+  CHECK(!CGRectEqualToRect(bounds, CGRectZero));
+  _test->SetWebView([[CWVWebView alloc] initWithFrame:bounds
                                         configuration:self.CWVConfiguration
                                       WKConfiguration:configuration
                                      createdWKWebView:&created_web_view]);
@@ -107,7 +106,7 @@ class WebViewFromWKWebViewConfigurationTest : public WebViewInttestBase {
 @end
 
 @interface NavigationFinishedObserver
-    : NSObject <WKNavigationDelegate, CWVNavigationDelegate>
+    : NSObject <CWVNavigationDelegate, WKNavigationDelegate>
 @property(nonatomic) BOOL navigationFinished;
 @end
 
@@ -128,7 +127,8 @@ namespace ios_web_view {
 TEST_F(WebViewFromWKWebViewConfigurationTest, FromWKWebViewConfiguration) {
   ASSERT_TRUE(test_server_->Start());
 
-  CGRect frame = UIScreen.mainScreen.bounds;
+  CGRect frame = GetAnyKeyWindow().screen.bounds;
+  ASSERT_FALSE(CGRectEqualToRect(frame, CGRectZero));
   WKWebViewConfiguration* config = [[WKWebViewConfiguration alloc] init];
   WKWebView* wk_web_view = [[WKWebView alloc] initWithFrame:frame
                                               configuration:config];

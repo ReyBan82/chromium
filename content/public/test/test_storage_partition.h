@@ -14,7 +14,10 @@
 #include "components/services/storage/public/mojom/cache_storage_control.mojom.h"
 #include "components/services/storage/public/mojom/local_storage_control.mojom.h"
 #include "content/public/browser/storage_partition.h"
+#include "content/public/browser/storage_partition_config.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "services/network/public/mojom/cert_verifier_service_updater.mojom.h"
+#include "services/network/public/mojom/device_bound_sessions.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 
 namespace blink {
@@ -24,6 +27,14 @@ class StorageKey;
 namespace leveldb_proto {
 class ProtoDatabaseProvider;
 }  // namespace leveldb_proto
+
+namespace network {
+class TestURLLoaderFactory;
+
+namespace mojom {
+class NetworkContext;
+}  // namespace mojom
+}  // namespace network
 
 namespace content {
 
@@ -37,10 +48,6 @@ class PlatformNotificationContext;
 class ServiceWorkerContext;
 class ZoomLevelDelegate;
 
-namespace mojom {
-class NetworkContext;
-}  // namespace mojom
-
 // Fake implementation of StoragePartition.
 class TestStoragePartition : public StoragePartition {
  public:
@@ -51,16 +58,24 @@ class TestStoragePartition : public StoragePartition {
 
   ~TestStoragePartition() override;
 
+  void set_config(StoragePartitionConfig config) { config_ = config; }
+  const StoragePartitionConfig& GetConfig() const override;
+
   void set_path(base::FilePath file_path) { file_path_ = file_path; }
-  base::FilePath GetPath() override;
+  const base::FilePath& GetPath() const override;
 
   void set_network_context(network::mojom::NetworkContext* context) {
     network_context_ = context;
   }
   network::mojom::NetworkContext* GetNetworkContext() override;
+  bool IsNetworkContextInitialized() override;
+  cert_verifier::mojom::CertVerifierServiceUpdater*
+  GetCertVerifierServiceUpdater() override;
 
-  storage::SharedStorageManager* GetSharedStorageManager() override;
-
+  void set_url_loader_factory_for_browser_process(
+      network::TestURLLoaderFactory* factory) {
+    test_url_loader_factory_ = factory;
+  }
   scoped_refptr<network::SharedURLLoaderFactory>
   GetURLLoaderFactoryForBrowserProcess() override;
 
@@ -78,8 +93,8 @@ class TestStoragePartition : public StoragePartition {
       const url::Origin& top_frame_origin) override;
 
   mojo::PendingRemote<network::mojom::URLLoaderNetworkServiceObserver>
-  CreateURLLoaderNetworkObserverForFrame(int process_id,
-                                         int routing_id) override;
+  CreateURLLoaderNetworkObserverForFrame(
+      const content::GlobalRenderFrameHostId& frame_id) override;
 
   mojo::PendingRemote<network::mojom::URLLoaderNetworkServiceObserver>
   CreateURLLoaderNetworkObserverForNavigationRequest(
@@ -99,11 +114,6 @@ class TestStoragePartition : public StoragePartition {
     background_sync_context_ = context;
   }
   BackgroundSyncContext* GetBackgroundSyncContext() override;
-
-  void set_database_tracker(storage::DatabaseTracker* tracker) {
-    database_tracker_ = tracker;
-  }
-  storage::DatabaseTracker* GetDatabaseTracker() override;
 
   void set_dom_storage_context(DOMStorageContext* context) {
     dom_storage_context_ = context;
@@ -140,15 +150,18 @@ class TestStoragePartition : public StoragePartition {
   }
   PlatformNotificationContext* GetPlatformNotificationContext() override;
 
-  InterestGroupManager* GetInterestGroupManager() override;
 
-  AttributionDataModel* GetAttributionDataModel() override;
+#if BUILDFLAG(ENABLE_LIBRARY_CDMS)
+  CdmStorageDataModel* GetCdmStorageDataModel() override;
+#endif  // BUILDFLAG(ENABLE_LIBRARY_CDMS)
 
-  void set_browsing_topics_site_data_manager(
-      BrowsingTopicsSiteDataManager* manager) {
-    browsing_topics_site_data_manager_ = manager;
-  }
-  BrowsingTopicsSiteDataManager* GetBrowsingTopicsSiteDataManager() override;
+  network::mojom::DeviceBoundSessionManager* GetDeviceBoundSessionManager()
+      override;
+  void OverrideDeviceBoundSessionManagerForTesting(
+      std::unique_ptr<network::mojom::DeviceBoundSessionManager>
+          device_bound_session_manager) override;
+
+  void DeleteStaleSessionData() override {}
 
   void set_devtools_background_services_context(
       DevToolsBackgroundServicesContext* context) {
@@ -183,23 +196,18 @@ class TestStoragePartition : public StoragePartition {
   ZoomLevelDelegate* GetZoomLevelDelegate() override;
 
   void ClearDataForOrigin(uint32_t remove_mask,
-                          uint32_t quota_storage_remove_mask,
                           const GURL& storage_origin,
                           base::OnceClosure callback) override;
-  void ClearDataForAllBuckets(const blink::StorageKey& storage_key,
-                              base::OnceClosure callback) override;
   void ClearDataForBuckets(const blink::StorageKey& storage_key,
                            const std::set<std::string>& buckets,
                            base::OnceClosure callback) override;
   void ClearData(uint32_t remove_mask,
-                 uint32_t quota_storage_remove_mask,
                  const blink::StorageKey& storage_key,
                  const base::Time begin,
                  const base::Time end,
                  base::OnceClosure callback) override;
 
   void ClearData(uint32_t remove_mask,
-                 uint32_t quota_storage_remove_mask,
                  BrowsingDataFilterBuilder* filter_builder,
                  StorageKeyPolicyMatcherFunction storage_key_policy_matcher,
                  network::mojom::CookieDeletionFilterPtr cookie_deletion_filter,
@@ -217,34 +225,36 @@ class TestStoragePartition : public StoragePartition {
   void Flush() override;
 
   void ResetURLLoaderFactories() override;
+  void ClearBluetoothAllowedDevicesMap() override;
 
   void AddObserver(DataRemovalObserver* observer) override;
   void RemoveObserver(DataRemovalObserver* observer) override;
   int GetDataRemovalObserverCount();
 
-  void ClearBluetoothAllowedDevicesMapForTesting() override;
-  void ResetAttributionManagerForTesting(
-      base::OnceCallback<void(bool)> callback) override;
   void FlushNetworkInterfaceForTesting() override;
+  void FlushCertVerifierInterfaceForTesting() override;
   void WaitForDeletionTasksForTesting() override;
-  void WaitForCodeCacheShutdownForTesting() override;
   void SetNetworkContextForTesting(
       mojo::PendingRemote<network::mojom::NetworkContext>
           network_context_remote) override;
+  void OverrideDeleteStaleSessionCleanupDelayForTesting(
+      const base::TimeDelta& delay) override {}
 
   base::WeakPtr<StoragePartition> GetWeakPtr();
   void InvalidateWeakPtrs();
 
  private:
+  StoragePartitionConfig config_;
   base::FilePath file_path_;
   mojo::Remote<network::mojom::NetworkContext> network_context_remote_;
-  raw_ptr<network::mojom::NetworkContext> network_context_ = nullptr;
+  raw_ptr<network::mojom::NetworkContext, DanglingUntriaged> network_context_ =
+      nullptr;
+  raw_ptr<network::TestURLLoaderFactory> test_url_loader_factory_ = nullptr;
   raw_ptr<network::mojom::CookieManager> cookie_manager_for_browser_process_ =
       nullptr;
   raw_ptr<storage::QuotaManager> quota_manager_ = nullptr;
   raw_ptr<BackgroundSyncContext> background_sync_context_ = nullptr;
   raw_ptr<storage::FileSystemContext> file_system_context_ = nullptr;
-  raw_ptr<storage::DatabaseTracker> database_tracker_ = nullptr;
   raw_ptr<DOMStorageContext> dom_storage_context_ = nullptr;
   mojo::Remote<storage::mojom::LocalStorageControl> local_storage_control_;
   mojo::Remote<storage::mojom::IndexedDBControl> indexed_db_control_;
@@ -253,8 +263,8 @@ class TestStoragePartition : public StoragePartition {
   raw_ptr<SharedWorkerService> shared_worker_service_ = nullptr;
   mojo::Remote<storage::mojom::CacheStorageControl> cache_storage_control_;
   raw_ptr<GeneratedCodeCacheContext> generated_code_cache_context_ = nullptr;
-  raw_ptr<BrowsingTopicsSiteDataManager> browsing_topics_site_data_manager_ =
-      nullptr;
+  std::unique_ptr<network::mojom::DeviceBoundSessionManager>
+      device_bound_session_manager_;
   raw_ptr<PlatformNotificationContext> platform_notification_context_ = nullptr;
   raw_ptr<DevToolsBackgroundServicesContext>
       devtools_background_services_context_ = nullptr;

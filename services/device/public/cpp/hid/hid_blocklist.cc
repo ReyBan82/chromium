@@ -4,18 +4,30 @@
 
 #include "services/device/public/cpp/hid/hid_blocklist.h"
 
+#include <algorithm>
+#include <array>
+#include <string_view>
+
+#include "base/check.h"
+#include "base/check_op.h"
 #include "base/command_line.h"
-#include "base/containers/contains.h"
+#include "base/logging.h"
 #include "base/no_destructor.h"
+#include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "components/variations/variations_associated_data.h"
+#include "services/device/public/cpp/device_features.h"
 #include "services/device/public/cpp/hid/hid_switches.h"
 #include "services/device/public/mojom/hid.mojom.h"
 
 namespace device {
 
 namespace {
+
+// Device identifiers for Google Titan.
+constexpr uint16_t kVendorGoogle = 0x18d1;
+constexpr uint16_t kProductTitan = 0x5026;
 
 #define VENDOR_PRODUCT_RULE(vid, pid)                       \
   {                                                         \
@@ -71,7 +83,7 @@ constexpr HidBlocklist::Entry kStaticEntries[] = {
     // Mooltipass Arduino sketch
     VENDOR_PRODUCT_RULE(0x1209, 0x4322),
     // Titan
-    VENDOR_PRODUCT_RULE(0x18d1, 0x5026),
+    VENDOR_PRODUCT_RULE(kVendorGoogle, kProductTitan),
     // VASCO
     VENDOR_PRODUCT_RULE(0x1a44, 0x00bb),
     // OnlyKey
@@ -98,6 +110,9 @@ constexpr HidBlocklist::Entry kStaticEntries[] = {
      true, /*reportId=*/0x05, HidBlocklist::ReportType::kReportTypeOutput},
 };
 
+constexpr auto kKnownSecurityKeys = std::to_array<HidBlocklist::VendorProduct>(
+    {{kVendorGoogle, kProductTitan}});
+
 bool IsValidBlocklistEntry(const HidBlocklist::Entry& entry) {
   // An entry with a product ID parameter must also specify a vendor ID.
   if (!entry.has_vendor_id && entry.has_product_id)
@@ -122,8 +137,21 @@ const std::vector<mojom::HidReportDescriptionPtr>& GetReportsForType(
       return collection.feature_reports;
     case HidBlocklist::kReportTypeAny:
       NOTREACHED();
-      return collection.input_reports;
   }
+}
+
+bool MatchesUsage(const HidBlocklist::Entry& entry,
+                  const mojom::HidCollectionInfo& collection) {
+  if (!entry.has_usage_page) {
+    return true;
+  }
+  if (entry.usage_page != collection.usage->usage_page) {
+    return false;
+  }
+  if (!entry.has_usage) {
+    return true;
+  }
+  return entry.usage == collection.usage->usage;
 }
 
 // Iterates over |collections| to find reports of type |report_type| that should
@@ -152,25 +180,28 @@ void CheckBlocklistEntry(
   }
 
   for (const auto& collection : collections) {
-    if (entry.has_usage_page) {
-      if (entry.usage_page != collection->usage->usage_page)
-        continue;
-
-      if (entry.has_usage && entry.usage != collection->usage->usage)
-        continue;
+    if (MatchesUsage(entry, *collection)) {
+      const auto& reports = GetReportsForType(report_type, *collection);
+      for (const auto& report : reports) {
+        if (!entry.has_report_id || entry.report_id == report->report_id) {
+          protected_ids.insert(report->report_id);
+        }
+      }
     }
-
-    const auto& reports = GetReportsForType(report_type, *collection);
-    for (const auto& report : reports) {
-      if (!entry.has_report_id || entry.report_id == report->report_id)
-        protected_ids.insert(report->report_id);
+    // A report defined in a child collection is also part of the enclosing
+    // top-level collection. Evaluate usage-based rules against child
+    // collections as well so reports defined in protected child collections
+    // are not missed.
+    if (base::FeatureList::IsEnabled(features::kWebHidRecursiveFiltering)) {
+      CheckBlocklistEntry(entry, report_type, vendor_id, product_id,
+                          collection->children, protected_ids);
     }
   }
 }
 
 // Returns true if the passed string is exactly |digits| digits long and only
 // contains valid hexadecimal characters (no leading 0x).
-bool IsHexComponent(base::StringPiece string, size_t digits) {
+bool IsHexComponent(std::string_view string, size_t digits) {
   if (string.length() != digits)
     return false;
 
@@ -190,7 +221,7 @@ bool IsHexComponent(base::StringPiece string, size_t digits) {
 
 // Returns true if the passed string is "I" (input report), "O" (output report),
 // "F" (feature report), or "" (any report type).
-bool IsReportTypeComponent(base::StringPiece string) {
+bool IsReportTypeComponent(std::string_view string) {
   return string.empty() ||
          (string.length() == 1 &&
           (string[0] == 'I' || string[0] == 'O' || string[0] == 'F'));
@@ -269,13 +300,37 @@ std::vector<uint8_t> HidBlocklist::GetProtectedReportIds(
   return std::vector<uint8_t>(protected_ids.begin(), protected_ids.end());
 }
 
+// static
+bool HidBlocklist::IsKnownSecurityKey(uint16_t vendor_id, uint16_t product_id) {
+#if BUILDFLAG(IS_ANDROID)
+  return false;
+#else   // BUILDFLAG(IS_ANDROID)
+  if (!base::FeatureList::IsEnabled(
+          features::kSecurityKeyHidInterfacesAreFido)) {
+    return false;
+  }
+  // HidDelegate::IsFidoAllowedForOrigin decides whether an origin is allowed to
+  // bypass the blocklist to access FIDO HID capabilities. Devices in
+  // kKnownSecurityKeys are considered FIDO for the purpose of this bypass, even
+  // if the device has no FIDO collection.
+  return std::ranges::contains(kKnownSecurityKeys,
+                               VendorProduct{vendor_id, product_id});
+#endif  // BUILDFLAG(IS_ANDROID)
+}
+
+// static
+base::span<const HidBlocklist::VendorProduct>
+HidBlocklist::GetKnownSecurityKeysForTesting() {
+  return kKnownSecurityKeys;
+}
+
 void HidBlocklist::PopulateWithServerProvidedValues() {
   std::string blocklist_string = kWebHidBlocklistAdditions.Get();
   DLOG(WARNING) << "HID blocklist additions: " << blocklist_string;
   for (const auto& blocklist_rule :
        base::SplitStringPiece(blocklist_string, ",", base::TRIM_WHITESPACE,
                               base::SPLIT_WANT_NONEMPTY)) {
-    std::vector<base::StringPiece> components = base::SplitStringPiece(
+    std::vector<std::string_view> components = base::SplitStringPiece(
         blocklist_rule, ":", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
     if (components.size() != 6) {
       DLOG(WARNING) << "Wrong number of components in HID blocklist rule: "
@@ -363,6 +418,7 @@ HidBlocklist::HidBlocklist() {
   for (const auto& entry : kStaticEntries)
     DCHECK(IsValidBlocklistEntry(entry));
 #endif
+  PopulateWithServerProvidedValues();
 }
 
 }  // namespace device

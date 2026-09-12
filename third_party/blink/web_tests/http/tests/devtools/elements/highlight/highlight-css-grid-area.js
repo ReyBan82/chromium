@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {dumpStableInspectorHighlightJSON} from './resources/highlight-test-helper.js';
+
 (async function() {
     TestRunner.addResult(`This test verifies the names, positions and sizes of the highlight rectangles overlayed on CSS Grid areas.\n`);
-    await TestRunner.loadLegacyModule('elements'); await TestRunner.loadTestModule('elements_test_runner');
     await TestRunner.showPanel('elements');
     await TestRunner.loadHTML(`
         <style>
@@ -40,11 +42,7 @@
         <p id="description">This test verifies the names, positions and sizes of the highlight rectangles overlayed on CSS Grid areas.</p>
       `);
 
-    function dumpGridHighlight(id) {
-      return new Promise(resolve => ElementsTestRunner.dumpInspectorHighlightJSON(id, resolve));
-    }
-
-    await dumpGridHighlight('grid-with-areas');
+    await dumpStableInspectorHighlightJSON('grid-with-areas');
 
     TestRunner.completeTest();
   })();

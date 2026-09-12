@@ -5,90 +5,131 @@
 #ifndef CHROME_BROWSER_UI_TAB_UI_HELPER_H_
 #define CHROME_BROWSER_UI_TAB_UI_HELPER_H_
 
+#include <optional>
 #include <string>
+#include <vector>
 
-#include "base/memory/weak_ptr.h"
-#include "base/strings/utf_string_conversions.h"
-#include "base/task/cancelable_task_tracker.h"
-#include "components/favicon_base/favicon_callback.h"
-#include "components/favicon_base/favicon_types.h"
+#include "base/byte_size.h"
+#include "base/callback_list.h"
+#include "base/functional/callback_forward.h"
+#include "base/types/pass_key.h"
+#include "chrome/browser/ui/tabs/contents_observing_tab_feature.h"
+#include "components/tabs/public/tab_network_state.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "content/public/browser/web_contents_user_data.h"
-#include "ui/gfx/image/image.h"
-#include "ui/gfx/image/image_skia.h"
-#include "url/gurl.h"
+#include "ui/base/models/image_model.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
+
+class BrowserUiController;
+
+namespace content {
+class NavigationEntry;
+class NavigationHandle;
+class Page;
+}  // namespace content
+
+namespace tabs {
+class TabInterface;
+}  // namespace tabs
 
 // TabUIHelper is used by UI code to obtain the title and favicon for a
 // WebContents. The values returned by TabUIHelper differ from the WebContents
 // when the WebContents hasn't loaded.
-class TabUIHelper : public content::WebContentsObserver,
-                    public content::WebContentsUserData<TabUIHelper> {
+class TabUIHelper : public tabs::ContentsObservingTabFeature {
  public:
-  TabUIHelper(const TabUIHelper&) = delete;
-  TabUIHelper& operator=(const TabUIHelper&) = delete;
+  DECLARE_USER_DATA(TabUIHelper);
 
+  explicit TabUIHelper(tabs::TabInterface& tab);
   ~TabUIHelper() override;
+
+  static TabUIHelper* From(tabs::TabInterface* tab);
+  static const TabUIHelper* From(const tabs::TabInterface* tab);
+
+  base::CallbackListSubscription AddTabUIChangeCallback(
+      base::RepeatingClosure callback);
 
   // Get the title of the tab. When the associated WebContents' title is empty,
   // a customized title is used.
   std::u16string GetTitle() const;
 
+  bool ShouldRenderLoadingTitle();
+
+  bool ShouldThemifyFavicon();
+
+  bool ShouldDisplayFavicon();
+  bool IsMonochromeFavicon();
+
   // Get the favicon of the tab. It will return a favicon from history service
   // if it needs to, otherwise, it will return the favicon of the WebContents.
-  gfx::Image GetFavicon() const;
+  ui::ImageModel GetFavicon();
 
   // Return true if the throbber should be hidden during a page load.
   bool ShouldHideThrobber() const;
 
-  // Notifies TabUIHelper that the WebContents' initial navigation is delayed.
-  // This is called by TabManager when it decides to delay a new tab's
-  // navigation. TabUIHelper will obtain appropriate title and favicon after
-  // receiving this signal.
-  void NotifyInitialNavigationDelayed(bool is_navigation_delayed);
+  void SetWasActiveAtLeastOnce();
 
-  // content::WebContentsObserver implementation
+  // Returns true if the tab is crashed and false otherwise.
+  bool IsCrashed();
+
+  bool ShouldDisplayURL();
+
+  GURL GetVisibleURL();
+
+  GURL GetLastCommittedURL();
+
+  // tabs::ContentsObservingTabFeature override:
+  void TitleWasSet(content::NavigationEntry* entry) override;
   void DidStopLoading() override;
+  void OnVisibilityChanged(content::Visibility visiblity) override;
+  void WasDiscarded() override;
+  void DidFinishNavigation(
+      content::NavigationHandle* navigation_handle) override;
+  void PrimaryMainFrameRenderProcessGone(
+      base::TerminationStatus status) override;
+  void PrimaryPageChanged(content::Page& page) override;
 
-  void set_was_active_at_least_once() { was_active_at_least_once_ = true; }
-  void set_created_by_session_restore(bool created_by_session_restore) {
-    created_by_session_restore_ = created_by_session_restore;
-  }
+  void SetCreatedBySessionRestore(bool created_by_session_restore);
   bool is_created_by_session_restore_for_testing() {
     return created_by_session_restore_;
   }
 
+  void SetNeedsAttention(bool needs_attention);
+  bool needs_attention() const { return needs_attention_; }
+
+  bool IsDiscarded();
+
+  // Returns true if the tab is eligible to show the discard UI.
+  bool ShouldShowDiscardStatus();
+
+  // Returns the amount of bytes saved from discarding the tab.
+  std::optional<base::ByteSize> GetDiscardedMemorySavings();
+
+  void NotifyTabUIChanged(base::PassKey<BrowserUiController> pass_key);
+
+  bool was_active_at_least_once_for_testing() const {
+    return was_active_at_least_once_;
+  }
+
+  tabs::TabNetworkState GetTabNetworkState();
+
  private:
-  friend class content::WebContentsUserData<TabUIHelper>;
-
-  struct TabUIData {
-    explicit TabUIData(const GURL& url);
-    std::u16string title;
-    gfx::Image favicon;
-  };
-
-  explicit TabUIHelper(content::WebContents* contents);
-
-  // Returns true if a favicon from history should be used. It is used when a
-  // new tab is opened in the background and its initial navigation is delayed.
-  bool ShouldUseFaviconFromHistory() const;
-
-  void FetchFaviconFromHistory(const GURL& url,
-                               favicon_base::FaviconImageCallback callback);
-  void OnURLFaviconFetched(const favicon_base::FaviconImageResult& favicon);
-  void OnHostFaviconFetched(const favicon_base::FaviconImageResult& favicon);
-  void UpdateFavicon(const favicon_base::FaviconImageResult& favicon);
+  void OnTabPinnedStatusChange(tabs::TabInterface* tab_interface,
+                               bool new_pinned_state);
 
   bool was_active_at_least_once_ = false;
-  bool is_navigation_delayed_ = false;
   bool created_by_session_restore_ = false;
+  bool needs_attention_ = false;
+  base::CallbackListSubscription pin_tab_subscription_;
 
-  // The data that stores favicon and title. It is non-null only during initial
-  // navigation when the tab is opened in background.
-  std::unique_ptr<TabUIData> tab_ui_data_;
-  base::CancelableTaskTracker favicon_tracker_;
-  base::WeakPtrFactory<TabUIHelper> weak_ptr_factory_{this};
+  // Cached tab-background-aware default globe favicon, returned for tabs with
+  // no page-provided favicon. Created once (bound to this tab) so repeated
+  // GetFavicon() calls return an equal model -- TabData compares favicons by
+  // value -- while the bound generator still re-resolves the light/dark variant
+  // at raster time. crbug.com/544891511
+  ui::ImageModel default_favicon_model_;
 
-  WEB_CONTENTS_USER_DATA_KEY_DECL();
+  base::RepeatingClosureList tab_ui_change_callbacks_;
+
+  ui::ScopedUnownedUserData<TabUIHelper> scoped_unowned_user_data_;
 };
 
 #endif  // CHROME_BROWSER_UI_TAB_UI_HELPER_H_

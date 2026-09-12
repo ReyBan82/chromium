@@ -4,6 +4,9 @@
 
 #include "content/browser/data_url_loader_factory.h"
 
+#include <string_view>
+
+#include "base/byte_size.h"
 #include "base/memory/ref_counted.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/data_pipe_producer.h"
@@ -32,9 +35,9 @@ void OnWrite(std::unique_ptr<WriteData> write_data, MojoResult result) {
   }
 
   network::URLLoaderCompletionStatus status(net::OK);
-  status.encoded_data_length = write_data->data.size();
-  status.encoded_body_length = write_data->data.size();
-  status.decoded_body_length = write_data->data.size();
+  status.encoded_data_length = base::ByteSize(write_data->data.size());
+  status.encoded_body_length = base::ByteSize(write_data->data.size());
+  status.decoded_body_length = base::ByteSize(write_data->data.size());
   write_data->client->OnComplete(status);
 }
 
@@ -42,8 +45,9 @@ void OnWrite(std::unique_ptr<WriteData> write_data, MojoResult result) {
 
 DataURLLoaderFactory::DataURLLoaderFactory(
     const GURL& url,
-    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver)
-    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver)),
+    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver,
+    base::SelfDeletingPassKey key)
+    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver), key),
       url_(url) {}
 
 DataURLLoaderFactory::~DataURLLoaderFactory() = default;
@@ -89,7 +93,7 @@ void DataURLLoaderFactory::CreateLoaderAndStart(
   }
 
   client_remote->OnReceiveResponse(std::move(response), std::move(consumer),
-                                   absl::nullopt);
+                                   std::nullopt);
 
   auto write_data = std::make_unique<WriteData>();
   write_data->client = std::move(client_remote);
@@ -98,7 +102,7 @@ void DataURLLoaderFactory::CreateLoaderAndStart(
       std::make_unique<mojo::DataPipeProducer>(std::move(producer));
 
   mojo::DataPipeProducer* producer_ptr = write_data->producer.get();
-  base::StringPiece string_piece(write_data->data);
+  std::string_view string_piece(write_data->data);
 
   producer_ptr->Write(
       std::make_unique<mojo::StringDataSource>(
@@ -121,8 +125,8 @@ DataURLLoaderFactory::CreateForOneSpecificUrl(const GURL& url) {
   // The DataURLLoaderFactory will delete itself when there are no more
   // receivers - see the network::SelfDeletingURLLoaderFactory::OnDisconnect
   // method.
-  new DataURLLoaderFactory(url,
-                           pending_remote.InitWithNewPipeAndPassReceiver());
+  base::MakeSelfDeleting<DataURLLoaderFactory>(
+      url, pending_remote.InitWithNewPipeAndPassReceiver());
 
   return pending_remote;
 }

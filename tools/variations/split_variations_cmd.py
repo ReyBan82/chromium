@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""A script to split Chrome variations into two sets.
+r"""A script to split Chrome variations into two sets.
 
 Chrome runs with many experiments and variations (field trials) that are
 randomly selected based on a configuration from a server. They lead to
@@ -30,10 +30,10 @@ Run Chrome through "Windows PowerShell" instead.
 """
 
 try:
-  from urllib.parse import unquote
+  from urllib.parse import unquote, unquote_plus
 except ImportError:
   # ToDo(crbug/1287214): Remove Exception case upon full migration to Python 3
-  from urllib import unquote
+  from urllib import unquote, unquote_plus
 
 import collections
 import os
@@ -45,13 +45,16 @@ _ENABLE_FEATURES_SWITCH_NAME = 'enable-features'
 _DISABLE_FEATURES_SWITCH_NAME = 'disable-features'
 _FORCE_FIELD_TRIALS_SWITCH_NAME = 'force-fieldtrials'
 _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME = 'force-fieldtrial-params'
+_DISABLE_FIELD_TRIAL_CONFIG_SWITCH_NAME = 'disable-field-trial-config'
 
 
 _Trial = collections.namedtuple('Trial', ['star', 'trial_name', 'group_name'])
 _Param = collections.namedtuple('Param', ['key', 'value'])
-_TrialParams = collections.namedtuple('TrialParams',
-                                      ['trial_name', 'group_name', 'params'])
+_TrialParams = collections.namedtuple(
+  'TrialParams', ['trial_name', 'group_name', 'params']
+)
 _Feature = collections.namedtuple('Feature', ['star', 'key', 'value'])
+
 
 def _ParseForceFieldTrials(data):
   """Parses --force-fieldtrials switch value string.
@@ -83,11 +86,10 @@ def _BuildForceFieldTrialsSwitchValue(trials):
       trials: A list of _Trial objects from which the switch value string
           is generated.
   """
-  return ''.join('%s%s/%s/' % (
-    '*' if trial.star else '',
-    trial.trial_name,
-    trial.group_name
-  ) for trial in trials)
+  return ''.join(
+    '%s%s/%s/' % ('*' if trial.star else '', trial.trial_name, trial.group_name)
+    for trial in trials
+  )
 
 
 def _ParseForceFieldTrialParams(data):
@@ -102,20 +104,24 @@ def _ParseForceFieldTrialParams(data):
   for item in items:
     tokens = item.split(':')
     if len(tokens) != 2:
-      raise ValueError('Wrong format, expected trial_name.group_name:'
-                       'p0/v0/.../pN/vN, got %s' % item)
+      raise ValueError(
+        'Wrong format, expected trial_name.group_name:'
+        'p0/v0/.../pN/vN, got %s' % item
+      )
     trial_group = tokens[0].split('.')
     if len(trial_group) != 2:
-      raise ValueError('Wrong format, expected trial_name.group_name, '
-                       'got %s' % tokens[0])
+      raise ValueError(
+        'Wrong format, expected trial_name.group_name, got %s' % tokens[0]
+      )
     trial_name = trial_group[0]
     if len(trial_name) == 0 or trial_name[0] == '*':
       raise ValueError('Wrong field trail params format: %s' % item)
     group_name = trial_group[1]
     params = tokens[1].split('/')
     if len(params) < 2 or len(params) % 2 != 0:
-      raise ValueError('Field trial params should be param/value pairs %s' %
-                       tokens[1])
+      raise ValueError(
+        'Field trial params should be param/value pairs %s' % tokens[1]
+      )
     pairs = [
       _Param(key=params[i], value=params[i + 1])
       for i in range(0, len(params), 2)
@@ -133,11 +139,15 @@ def _BuildForceFieldTrialParamsSwitchValue(trials):
       trials: A list of _TrialParams objects from which the switch value
           string is generated.
   """
-  return ','.join('%s.%s:%s' % (
-    trial.trial_name,
-    trial.group_name,
-    '/'.join('%s/%s' % (param.key, param.value) for param in trial.params),
-  ) for trial in trials)
+  return ','.join(
+    '%s.%s:%s'
+    % (
+      trial.trial_name,
+      trial.group_name,
+      '/'.join('%s/%s' % (param.key, param.value) for param in trial.params),
+    )
+    for trial in trials
+  )
 
 
 def _ValidateForceFieldTrialsAndParams(trials, params):
@@ -147,17 +157,24 @@ def _ValidateForceFieldTrialsAndParams(trials, params):
   --force-fieldtrial-params switch.
   """
   if len(params) > len(trials):
-    raise ValueError("params size (%d) larger than trials size (%d)" %
-                     (len(params), len(trials)))
+    raise ValueError(
+      "params size (%d) larger than trials size (%d)"
+      % (len(params), len(trials))
+    )
+  # Params are URL encoded, so we need to decode spaces as well. Unquote_plus
+  # acts like unquote but also decodes + into spaces.
+  # See https://docs.python.org/3/library/urllib.parse.html#urllib.parse.unquote_plus
   trial_groups = {trial.trial_name: trial.group_name for trial in trials}
   for param in params:
-    trial_name = unquote(param.trial_name)
-    group_name = unquote(param.group_name)
+    trial_name = unquote_plus(param.trial_name)
+    group_name = unquote_plus(param.group_name)
     if trial_name not in trial_groups:
       raise ValueError("Fail to find trial_name %s in trials" % trial_name)
     if group_name != trial_groups[trial_name]:
-      raise ValueError("group_name mismatch for trial_name %s, %s vs %s" %
-                       (trial_name, group_name, trial_groups[trial_name]))
+      raise ValueError(
+        "group_name mismatch for trial_name %s, %s vs %s"
+        % (trial_name, group_name, trial_groups[trial_name])
+      )
 
 
 def _SplitFieldTrials(trials, trial_params):
@@ -167,7 +184,7 @@ def _SplitFieldTrials(trials, trial_params):
   number of elements in the input lists.
   """
   middle = (len(trials) + 1) // 2
-  params = {unquote(trial.trial_name): trial for trial in trial_params}
+  params = {unquote_plus(trial.trial_name): trial for trial in trial_params}
 
   trials_first = trials[:middle]
   params_first = []
@@ -182,10 +199,14 @@ def _SplitFieldTrials(trials, trial_params):
       params_second.append(params[trial.trial_name])
 
   return [
-    {_FORCE_FIELD_TRIALS_SWITCH_NAME: trials_first,
-     _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME: params_first},
-    {_FORCE_FIELD_TRIALS_SWITCH_NAME: trials_second,
-     _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME: params_second},
+    {
+      _FORCE_FIELD_TRIALS_SWITCH_NAME: trials_first,
+      _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME: params_first,
+    },
+    {
+      _FORCE_FIELD_TRIALS_SWITCH_NAME: trials_second,
+      _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME: params_second,
+    },
   ]
 
 
@@ -225,23 +246,84 @@ def _BuildFeaturesSwitchValue(features):
       features: A list of _Feature objects from which the switch value string
           is generated.
   """
-  return ','.join('%s%s%s' % (
-    '*' if feature.star else '',
-    feature.key,
-    '<%s' % feature.value if feature.value is not None else '',
-  ) for feature in features)
+  return ','.join(
+    '%s%s%s'
+    % (
+      '*' if feature.star else '',
+      feature.key,
+      '<%s' % feature.value if feature.value is not None else '',
+    )
+    for feature in features
+  )
 
 
-def _SplitFeatures(features):
+def _SplitFeatures(features, field_trials_splits=None):
   """Splits a list of _Features objects into two lists.
 
+  This function ensures that if a feature is associated with a specific field
+  trial (by value), it stays in the same split group as that trial.
+
+  Args:
+      features: A list of _Feature objects to be split.
+      field_trials_splits: A list of <=2 dictionaries, each having key
+          _FORCE_FIELD_TRIALS_SWITCH_NAME mapping to a list of _Trial objects.
+          This is used to keep features associated with field trials in the
+          same split.
+
   Note that either returned list could be empty, depending on the number of
-  elements in the input list.
+  elements in the input list, and the organized input field_trials_splits.
   """
-  # Split a list of size N into two list: one of size middle, the other of size
-  # N - middle. This works even when N is 0 or 1, resulting in empty list(s).
-  middle = (len(features) + 1) // 2
-  return features[:middle], features[middle:]
+  # Format: [ [_Feature1, _Feature2, ...], [_Feature3, ...], ... ]
+  feature_groups = []
+  # Format: { feature_value1:group_index1, feature_value2: group_index2, ... }
+  value_to_group_index = {}
+
+  # Group features by value, those without value gets assigned to a new group.
+  for feature in features:
+    if feature.value is None:
+      feature_groups.append([feature])
+    else:
+      if feature.value in value_to_group_index:
+        feature_groups[value_to_group_index[feature.value]].append(feature)
+      else:
+        feature_groups.append([feature])
+        value_to_group_index[feature.value] = len(feature_groups) - 1
+
+  # Extract trial names from the split field trials.
+  trials_splits = []
+  if field_trials_splits:
+    trials_splits.append(
+      set(
+        t.trial_name
+        for t in field_trials_splits[0].get(_FORCE_FIELD_TRIALS_SWITCH_NAME, [])
+      )
+    )
+    trials_splits.append(
+      set(
+        t.trial_name
+        for t in field_trials_splits[1].get(_FORCE_FIELD_TRIALS_SWITCH_NAME, [])
+      )
+    )
+  else:
+    trials_splits = [set(), set()]
+
+  results = [[], []]
+
+  # Assign features into the same split with associated field_trials.
+  for group in feature_groups:
+    value = group[0].value
+    for i in range(2):
+      if value in trials_splits[i]:
+        results[i].extend(group)
+        feature_groups.remove(group)
+        break
+
+  # The rest of features are split into results, balancing with best-effort.
+  for group in feature_groups:
+    i = 0 if results[0] <= results[1] else 1
+    results[i].extend(group)
+
+  return results[0], results[1]
 
 
 def ParseCommandLineSwitchesString(data):
@@ -255,14 +337,17 @@ def ParseCommandLineSwitchesString(data):
   switch_data = {}
   for switch in switches:
     switch = switch.strip()
-    fields = switch.split('=', 1) # Split by the first '='.
+    if switch == _DISABLE_FIELD_TRIAL_CONFIG_SWITCH_NAME:
+      continue
+    fields = switch.split('=', 1)  # Split by the first '='.
     if len(fields) != 2:
       raise ValueError('Wrong format, expected name=value, got %s' % switch)
     switch_name, switch_value = fields
     if switch_value[0] == '"' and switch_value[-1] == '"':
       switch_value = switch_value[1:-1]
-    if (switch_name == _FORCE_FIELD_TRIALS_SWITCH_NAME and
-        switch_value[-1] != '/'):
+    if (
+      switch_name == _FORCE_FIELD_TRIALS_SWITCH_NAME and switch_value[-1] != '/'
+    ):
       # Older versions of Chrome do not include '/' in the end, but newer
       # versions do.
       # TODO(zmo): Verify if '/' is included in the end, older versions of
@@ -289,27 +374,34 @@ def ParseVariationsCmdFromString(input_string):
     if switch_name == _FORCE_FIELD_TRIALS_SWITCH_NAME:
       results[switch_name] = _ParseForceFieldTrials(switch_value)
       built_switch_value = _BuildForceFieldTrialsSwitchValue(
-          results[switch_name])
+        results[switch_name]
+      )
     elif switch_name == _DISABLE_FEATURES_SWITCH_NAME:
       results[switch_name] = _ParseFeatureListString(
-          switch_value, is_disable=True)
+        switch_value, is_disable=True
+      )
       built_switch_value = _BuildFeaturesSwitchValue(results[switch_name])
     elif switch_name == _ENABLE_FEATURES_SWITCH_NAME:
       results[switch_name] = _ParseFeatureListString(
-          switch_value, is_disable=False)
+        switch_value, is_disable=False
+      )
       built_switch_value = _BuildFeaturesSwitchValue(results[switch_name])
     elif switch_name == _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME:
       results[switch_name] = _ParseForceFieldTrialParams(switch_value)
       built_switch_value = _BuildForceFieldTrialParamsSwitchValue(
-          results[switch_name])
+        results[switch_name]
+      )
     else:
       raise ValueError('Unexpected: --%s=%s', switch_name, switch_value)
     assert switch_value == built_switch_value
-  if (_FORCE_FIELD_TRIALS_SWITCH_NAME in results and
-      _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME in results):
+  if (
+    _FORCE_FIELD_TRIALS_SWITCH_NAME in results
+    and _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME in results
+  ):
     _ValidateForceFieldTrialsAndParams(
-        results[_FORCE_FIELD_TRIALS_SWITCH_NAME],
-        results[_FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME])
+      results[_FORCE_FIELD_TRIALS_SWITCH_NAME],
+      results[_FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME],
+    )
   return results
 
 
@@ -343,26 +435,37 @@ def VariationsCmdToStrings(data):
   force_field_trials = data[_FORCE_FIELD_TRIALS_SWITCH_NAME]
   if len(force_field_trials) > 0:
     force_field_trials_switch_value = _BuildForceFieldTrialsSwitchValue(
-        force_field_trials)
-    cmd_list.append('--%s="%s"' % (_FORCE_FIELD_TRIALS_SWITCH_NAME,
-                                   force_field_trials_switch_value))
+      force_field_trials
+    )
+    cmd_list.append(
+      '--%s="%s"'
+      % (_FORCE_FIELD_TRIALS_SWITCH_NAME, force_field_trials_switch_value)
+    )
   force_field_trial_params = data[_FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME]
   if len(force_field_trial_params) > 0:
     force_field_trial_params_switch_value = (
-        _BuildForceFieldTrialParamsSwitchValue(force_field_trial_params))
-    cmd_list.append('--%s="%s"' % (_FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME,
-                                   force_field_trial_params_switch_value))
+      _BuildForceFieldTrialParamsSwitchValue(force_field_trial_params)
+    )
+    cmd_list.append(
+      '--%s="%s"'
+      % (
+        _FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME,
+        force_field_trial_params_switch_value,
+      )
+    )
   enable_features = data[_ENABLE_FEATURES_SWITCH_NAME]
   if len(enable_features) > 0:
     enable_features_switch_value = _BuildFeaturesSwitchValue(enable_features)
-    cmd_list.append('--%s="%s"' % (_ENABLE_FEATURES_SWITCH_NAME,
-                                   enable_features_switch_value))
+    cmd_list.append(
+      '--%s="%s"' % (_ENABLE_FEATURES_SWITCH_NAME, enable_features_switch_value)
+    )
   disable_features = data[_DISABLE_FEATURES_SWITCH_NAME]
   if len(disable_features) > 0:
-    disable_features_switch_value = _BuildFeaturesSwitchValue(
-        disable_features)
-    cmd_list.append('--%s="%s"' % (_DISABLE_FEATURES_SWITCH_NAME,
-                                   disable_features_switch_value))
+    disable_features_switch_value = _BuildFeaturesSwitchValue(disable_features)
+    cmd_list.append(
+      '--%s="%s"'
+      % (_DISABLE_FEATURES_SWITCH_NAME, disable_features_switch_value)
+    )
   return cmd_list
 
 
@@ -378,9 +481,11 @@ def SplitVariationsCmd(results):
   disable_features = results.get(_DISABLE_FEATURES_SWITCH_NAME, [])
   field_trials = results.get(_FORCE_FIELD_TRIALS_SWITCH_NAME, [])
   field_trial_params = results.get(_FORCE_FIELD_TRIAL_PARAMS_SWITCH_NAME, [])
-  enable_features_splits = _SplitFeatures(enable_features)
-  disable_features_splits = _SplitFeatures(disable_features)
   field_trials_splits = _SplitFieldTrials(field_trials, field_trial_params)
+  enable_features_splits = _SplitFeatures(enable_features, field_trials_splits)
+  disable_features_splits = _SplitFeatures(
+    disable_features, field_trials_splits
+  )
   splits = []
   for index in range(2):
     cmd_line = {}
@@ -457,11 +562,19 @@ def SplitVariationsCmdFromFile(input_filename, output_dir=None):
 
 def main():
   parser = optparse.OptionParser()
-  parser.add_option("-f", "--file", dest="filename", metavar="FILE",
-                    help="specify a file with variations cmd for processing.")
-  parser.add_option("--output-dir", dest="output_dir",
-                    help="specify a folder where output files are saved. "
-                    "If not specified, it is the folder of the input file.")
+  parser.add_option(
+    "-f",
+    "--file",
+    dest="filename",
+    metavar="FILE",
+    help="specify a file with variations cmd for processing.",
+  )
+  parser.add_option(
+    "--output-dir",
+    dest="output_dir",
+    help="specify a folder where output files are saved. "
+    "If not specified, it is the folder of the input file.",
+  )
   options, _ = parser.parse_args()
   if not options.filename:
     parser.error("Input file is not specificed")

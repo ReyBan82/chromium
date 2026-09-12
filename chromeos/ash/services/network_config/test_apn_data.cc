@@ -4,10 +4,11 @@
 
 #include "chromeos/ash/services/network_config/test_apn_data.h"
 
+#include <optional>
+
 #include "ash/constants/ash_features.h"
 #include "chromeos/ash/components/network/policy_util.h"
 #include "components/onc/onc_constants.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/shill/dbus-constants.h"
 
 namespace ash::network_config {
@@ -20,7 +21,7 @@ namespace mojom = ::chromeos::network_config::mojom;
 constexpr char kShillApnId[] = "id";
 constexpr char kShillApnAuthenticationType[] = "authentication_type";
 
-bool IsPropertyEquals(const base::Value::Dict& apn,
+bool IsPropertyEquals(const base::DictValue& apn,
                       const char* key,
                       const std::string& expected_value) {
   const std::string* actual_value = apn.FindString(key);
@@ -37,7 +38,9 @@ TestApnData::TestApnData()
       mojo_authentication(mojom::ApnAuthenticationType::kAutomatic),
       onc_authentication(::onc::cellular_apn::kAuthenticationAutomatic),
       mojo_ip_type(mojom::ApnIpType::kAutomatic),
-      onc_ip_type(::onc::cellular_apn::kIpTypeAutomatic) {}
+      onc_ip_type(::onc::cellular_apn::kIpTypeAutomatic),
+      mojo_source(mojom::ApnSource::kUi),
+      onc_source(::onc::cellular_apn::kSourceUi) {}
 
 TestApnData::TestApnData(std::string access_point_name,
                          std::string name,
@@ -51,6 +54,8 @@ TestApnData::TestApnData(std::string access_point_name,
                          std::string onc_authentication,
                          mojom::ApnIpType mojo_ip_type,
                          std::string onc_ip_type,
+                         mojom::ApnSource mojo_source,
+                         std::string onc_source,
                          const std::vector<mojom::ApnType>& mojo_apn_types,
                          const std::vector<std::string>& onc_apn_types)
     : access_point_name(access_point_name),
@@ -65,6 +70,8 @@ TestApnData::TestApnData(std::string access_point_name,
       onc_authentication(onc_authentication),
       mojo_ip_type(mojo_ip_type),
       onc_ip_type(onc_ip_type),
+      mojo_source(mojo_source),
+      onc_source(onc_source),
       mojo_apn_types(mojo_apn_types),
       onc_apn_types(onc_apn_types) {}
 
@@ -79,16 +86,17 @@ mojom::ApnPropertiesPtr TestApnData::AsMojoApn() const {
   apn->attach = attach;
   apn->authentication = mojo_authentication;
   if (features::IsApnRevampEnabled()) {
-    apn->id = id.empty() ? absl::nullopt : absl::optional<std::string>(id);
+    apn->id = id.empty() ? std::nullopt : std::optional<std::string>(id);
     apn->ip_type = mojo_ip_type;
     apn->apn_types = mojo_apn_types;
     apn->state = mojo_state;
+    apn->source = mojo_source;
   }
   return apn;
 }
 
-base::Value::Dict TestApnData::AsOncApn() const {
-  base::Value::Dict apn;
+base::DictValue TestApnData::AsOncApn() const {
+  base::DictValue apn;
   apn.Set(::onc::cellular_apn::kAccessPointName, access_point_name);
   apn.Set(::onc::cellular_apn::kName, name);
   apn.Set(::onc::cellular_apn::kUsername, username);
@@ -99,8 +107,9 @@ base::Value::Dict TestApnData::AsOncApn() const {
     apn.Set(::onc::cellular_apn::kId, id);
     apn.Set(::onc::cellular_apn::kState, onc_state);
     apn.Set(::onc::cellular_apn::kIpType, onc_ip_type);
+    apn.Set(::onc::cellular_apn::kSource, onc_source);
 
-    base::Value::List apn_types;
+    base::ListValue apn_types;
     for (const std::string& apn_type : onc_apn_types)
       apn_types.Append(apn_type);
     apn.Set(::onc::cellular_apn::kApnTypes, std::move(apn_types));
@@ -108,13 +117,14 @@ base::Value::Dict TestApnData::AsOncApn() const {
   return apn;
 }
 
-base::Value::Dict TestApnData::AsShillApn() const {
-  base::Value::Dict apn;
+base::DictValue TestApnData::AsShillApn() const {
+  base::DictValue apn;
   apn.Set(shill::kApnProperty, access_point_name);
   apn.Set(shill::kApnNameProperty, name);
   apn.Set(shill::kApnUsernameProperty, username);
   apn.Set(shill::kApnPasswordProperty, password);
   apn.Set(shill::kApnAttachProperty, attach);
+  apn.Set(shill::kApnSourceProperty, onc_source);
   apn.Set(kShillApnAuthenticationType, onc_authentication);
   if (features::IsApnRevampEnabled()) {
     apn.Set(kShillApnId, id);
@@ -157,7 +167,7 @@ bool TestApnData::MojoApnEquals(const mojom::ApnProperties& apn) const {
 
   static auto MatchOptionalString =
       [](const std::string& expected,
-         const absl::optional<std::string>& actual) -> bool {
+         const std::optional<std::string>& actual) -> bool {
     if (actual.has_value())
       return expected == *actual;
     return expected.empty();
@@ -171,11 +181,12 @@ bool TestApnData::MojoApnEquals(const mojom::ApnProperties& apn) const {
   if (features::IsApnRevampEnabled()) {
     ret &= mojo_ip_type == apn.ip_type;
     ret &= mojo_apn_types == apn.apn_types;
+    ret &= mojo_source == apn.source;
   }
   return ret;
 }
 
-bool TestApnData::OncApnEquals(const base::Value::Dict& onc_apn,
+bool TestApnData::OncApnEquals(const base::DictValue& onc_apn,
                                bool has_state_field,
                                bool is_password_masked) const {
   bool ret = true;
@@ -205,7 +216,14 @@ bool TestApnData::OncApnEquals(const base::Value::Dict& onc_apn,
 
     ret &= IsPropertyEquals(onc_apn, ::onc::cellular_apn::kIpType, onc_ip_type);
 
-    if (const base::Value::List* apn_types =
+    const std::string* source =
+        onc_apn.FindString(::onc::cellular_apn::kSource);
+    if (source) {
+      ret &=
+          IsPropertyEquals(onc_apn, ::onc::cellular_apn::kSource, onc_source);
+    }
+
+    if (const base::ListValue* apn_types =
             onc_apn.FindList(::onc::cellular_apn::kApnTypes)) {
       if (onc_apn_types.size() != apn_types->size())
         return false;

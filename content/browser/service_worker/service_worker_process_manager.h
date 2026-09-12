@@ -9,15 +9,12 @@
 #include <memory>
 #include <vector>
 
-#include "base/functional/callback.h"
-#include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/synchronization/lock.h"
 #include "content/browser/service_worker/service_worker_metrics.h"
 #include "content/common/content_export.h"
+#include "content/public/common/child_process_id.h"
 #include "services/network/public/mojom/cross_origin_embedder_policy.mojom-forward.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/service_worker/service_worker_status_code.h"
 #include "third_party/blink/public/mojom/service_worker/service_worker_ancestor_frame_type.mojom.h"
 
@@ -25,7 +22,6 @@ class GURL;
 
 namespace content {
 
-class BrowserContext;
 class SiteInstance;
 class StoragePartitionImpl;
 
@@ -33,34 +29,30 @@ class StoragePartitionImpl;
 // ServiceWorker system is using them. There is one process manager per
 // ServiceWorkerContextWrapper. Each instance of ServiceWorkerProcessManager is
 // destroyed on the UI thread shortly after its ServiceWorkerContextWrapper is
-// destroyed.
+// destroyed. All the methods must be called on the UI thread.
 class CONTENT_EXPORT ServiceWorkerProcessManager {
  public:
   // The return value for AllocateWorkerProcess().
   struct AllocatedProcessInfo {
     // Same as RenderProcessHost::GetID().
-    int process_id;
+    ChildProcessId process_id;
 
     // This must be one of NEW_PROCESS, EXISTING_UNREADY_PROCESS or
     // EXISTING_READY_PROCESS.
     ServiceWorkerMetrics::StartSituation start_situation;
   };
 
-  // |*this| must be owned by a ServiceWorkerContextWrapper in a
-  // StoragePartition within |browser_context|.
-  explicit ServiceWorkerProcessManager(BrowserContext* browser_context);
+  // |*this| must be owned by a ServiceWorkerContextWrapper.
+  ServiceWorkerProcessManager();
 
   // Shutdown must be called before the ProcessManager is destroyed.
   ~ServiceWorkerProcessManager();
 
-  // Called on the UI thread.
-  BrowserContext* browser_context();
-
   // Synchronously prevents new processes from being allocated
-  // and drops references to RenderProcessHosts. Called on the UI thread.
+  // and drops references to RenderProcessHosts.
   void Shutdown();
 
-  // Returns true if Shutdown() has been called. May be called by any thread.
+  // Returns true if Shutdown() has been called.
   bool IsShutdown();
 
   // Returns a reference to a renderer process suitable for starting the service
@@ -73,8 +65,6 @@ class CONTENT_EXPORT ServiceWorkerProcessManager {
   //
   // If blink::ServiceWorkerStatusCode::kOk is returned,
   // |out_info| contains information about the process.
-  //
-  // Called on the UI thread.
   blink::ServiceWorkerStatusCode AllocateWorkerProcess(
       int embedded_worker_id,
       const GURL& script_url,
@@ -85,8 +75,6 @@ class CONTENT_EXPORT ServiceWorkerProcessManager {
 
   // Drops a reference to a process that was running a Service Worker, and its
   // SiteInstance. This must match a call to AllocateWorkerProcess().
-  //
-  // Called on the UI thread.
   void ReleaseWorkerProcess(int embedded_worker_id);
 
   // Sets a single process ID that will be used for all embedded workers.  This
@@ -94,12 +82,12 @@ class CONTENT_EXPORT ServiceWorkerProcessManager {
   // that unittests can run without a BrowserContext.  The test is in charge of
   // making sure this is only called on the same thread as runs the UI message
   // loop.
-  void SetProcessIdForTest(int process_id) {
+  void SetProcessIdForTest(ChildProcessId process_id) {
     process_id_for_test_ = process_id;
   }
 
   // Sets the process ID to be used for tests that force creating a new process.
-  void SetNewProcessIdForTest(int process_id) {
+  void SetNewProcessIdForTest(ChildProcessId process_id) {
     new_process_id_for_test_ = process_id;
   }
 
@@ -109,32 +97,23 @@ class CONTENT_EXPORT ServiceWorkerProcessManager {
     force_new_process_for_test_ = force_new_process;
   }
 
-  // AsWeakPtr() can be called from any thread, but the WeakPtr must be
-  // dereferenced on the UI thread only.
-  base::WeakPtr<ServiceWorkerProcessManager> AsWeakPtr() { return weak_this_; }
+  base::WeakPtr<ServiceWorkerProcessManager> GetWeakPtr();
+
+  SiteInstance* GetSiteInstanceForWorker(int embedded_worker_id);
+
+ private:
+  friend class ServiceWorkerContextWrapper;
+  friend class ServiceWorkerProcessManagerTest;
 
   void set_storage_partition(StoragePartitionImpl* storage_partition) {
     storage_partition_ = storage_partition;
   }
 
-  SiteInstance* GetSiteInstanceForWorker(int embedded_worker_id);
-
- private:
-  friend class ServiceWorkerProcessManagerTest;
-
-  // Guarded by |browser_context_lock_|.
-  // Written only on the UI thread, so the UI thread doesn't need to acquire the
-  // lock when reading. Can be read from other threads with the lock.
-  raw_ptr<BrowserContext> browser_context_;
-
-  // Protects |browser_context_|.
-  base::Lock browser_context_lock_;
-
   //////////////////////////////////////////////////////////////////////////////
   // All fields below are only accessed on the UI thread.
 
   // May be null during initialization and in unit tests.
-  raw_ptr<StoragePartitionImpl> storage_partition_;
+  raw_ptr<StoragePartitionImpl, DanglingUntriaged> storage_partition_;
 
   // Maps the ID of a running EmbeddedWorkerInstance to the SiteInstance whose
   // renderer process it's running inside. Since the embedded workers themselves
@@ -145,14 +124,15 @@ class CONTENT_EXPORT ServiceWorkerProcessManager {
 
   // In unit tests, this will be returned as the process for all
   // EmbeddedWorkerInstances.
-  int process_id_for_test_;
-  int new_process_id_for_test_;
+  ChildProcessId process_id_for_test_;
+  ChildProcessId new_process_id_for_test_;
 
   bool force_new_process_for_test_;
 
-  // Used to double-check that we don't access *this after it's destroyed.
-  base::WeakPtr<ServiceWorkerProcessManager> weak_this_;
-  base::WeakPtrFactory<ServiceWorkerProcessManager> weak_this_factory_{this};
+  // If it has been shut down.
+  bool is_shutdown_ = false;
+
+  base::WeakPtrFactory<ServiceWorkerProcessManager> weak_ptr_factory_{this};
 };
 
 }  // namespace content

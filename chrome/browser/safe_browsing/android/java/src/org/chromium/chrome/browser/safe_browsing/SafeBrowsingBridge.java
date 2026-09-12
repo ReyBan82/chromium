@@ -6,14 +6,23 @@ package org.chromium.chrome.browser.safe_browsing;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.NativeMethods;
 
-/**
- * Bridge providing access to native-side Safe Browsing data.
- */
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.profiles.Profile;
+
+/** Bridge providing access to native-side Safe Browsing data. */
 @JNINamespace("safe_browsing")
+@NullMarked
 public final class SafeBrowsingBridge {
+    private final Profile mProfile;
+
+    /** Constructs a {@link SafeBrowsingBridge} associated with the given {@link Profile}. */
+    public SafeBrowsingBridge(Profile profile) {
+        mProfile = profile;
+    }
+
     /**
      * Reports UMA values based on files' extensions.
      *
@@ -27,74 +36,80 @@ public final class SafeBrowsingBridge {
     /**
      * @return Whether Safe Browsing Extended Reporting is currently enabled.
      */
-    public static boolean isSafeBrowsingExtendedReportingEnabled() {
-        return SafeBrowsingBridgeJni.get().getSafeBrowsingExtendedReportingEnabled();
+    public boolean isSafeBrowsingExtendedReportingEnabled() {
+        return SafeBrowsingBridgeJni.get().getSafeBrowsingExtendedReportingEnabled(mProfile);
     }
 
     /**
      * @param enabled Whether Safe Browsing Extended Reporting should be enabled.
      */
-    public static void setSafeBrowsingExtendedReportingEnabled(boolean enabled) {
-        SafeBrowsingBridgeJni.get().setSafeBrowsingExtendedReportingEnabled(enabled);
+    public void setSafeBrowsingExtendedReportingEnabled(boolean enabled) {
+        SafeBrowsingBridgeJni.get().setSafeBrowsingExtendedReportingEnabled(mProfile, enabled);
+    }
+
+    /** Set the Safe Browsing setting set locally pref as true. */
+    public void enableSafeBrowsingSettingSetLocallyPref() {
+        SafeBrowsingBridgeJni.get().enableSafeBrowsingSettingSetLocallyPref(mProfile);
     }
 
     /**
      * @return Whether Safe Browsing Extended Reporting is managed
      */
-    public static boolean isSafeBrowsingExtendedReportingManaged() {
-        return SafeBrowsingBridgeJni.get().getSafeBrowsingExtendedReportingManaged();
+    public boolean isSafeBrowsingExtendedReportingManaged() {
+        return SafeBrowsingBridgeJni.get().getSafeBrowsingExtendedReportingManaged(mProfile);
     }
 
     /**
      * @return The Safe Browsing state. It can be Enhanced Protection, Standard Protection, or No
-     *         Protection.
+     *     Protection.
      */
-    public static @SafeBrowsingState int getSafeBrowsingState() {
-        return SafeBrowsingBridgeJni.get().getSafeBrowsingState();
+    public @SafeBrowsingState int getSafeBrowsingState() {
+        return SafeBrowsingBridgeJni.get().getSafeBrowsingState(mProfile);
     }
 
     /**
      * @param state Set the Safe Browsing state. It can be Enhanced Protection, Standard Protection,
-     *         or No Protection.
+     *     or No Protection.
      */
-    public static void setSafeBrowsingState(@SafeBrowsingState int state) {
-        SafeBrowsingBridgeJni.get().setSafeBrowsingState(state);
+    public void setSafeBrowsingState(@SafeBrowsingState int state) {
+        SafeBrowsingBridgeJni.get().setSafeBrowsingState(mProfile, state);
     }
 
     /**
-     * @return Whether the Safe Browsing preference is managed. It can be managed by either
-     * the SafeBrowsingEnabled policy(legacy) or the SafeBrowsingProtectionLevel policy(new).
+     * @return Whether the Safe Browsing preference is managed. It can be managed by either the
+     *     SafeBrowsingEnabled policy(legacy) or the SafeBrowsingProtectionLevel policy(new).
      */
-    public static boolean isSafeBrowsingManaged() {
-        return SafeBrowsingBridgeJni.get().isSafeBrowsingManaged();
+    public boolean isSafeBrowsingManaged() {
+        return SafeBrowsingBridgeJni.get().isSafeBrowsingManaged(mProfile);
     }
 
     /**
-     * @return Whether there is a Google account to use for the leak detection check.
+     * @return Whether hash real-time lookup is enabled.
      */
-    public static boolean hasAccountForLeakCheckRequest() {
-        return SafeBrowsingBridgeJni.get().hasAccountForLeakCheckRequest();
-    }
-
-    /**
-     * @return Whether the Leak Detection for signed out users feature is enabled.
-     */
-    public static boolean isLeakDetectionUnauthenticatedEnabled() {
-        return SafeBrowsingBridgeJni.get().isLeakDetectionUnauthenticatedEnabled();
+    public static boolean isHashRealTimeLookupEligibleInSession() {
+        return SafeBrowsingBridgeJni.get().isHashRealTimeLookupEligibleInSession();
     }
 
     @NativeMethods
     @VisibleForTesting(otherwise = VisibleForTesting.PACKAGE_PRIVATE)
     public interface Natives {
         int umaValueForFile(String path);
-        boolean getSafeBrowsingExtendedReportingEnabled();
-        void setSafeBrowsingExtendedReportingEnabled(boolean enabled);
-        boolean getSafeBrowsingExtendedReportingManaged();
+
+        boolean getSafeBrowsingExtendedReportingEnabled(Profile profile);
+
+        void setSafeBrowsingExtendedReportingEnabled(Profile profile, boolean enabled);
+
+        boolean getSafeBrowsingExtendedReportingManaged(Profile profile);
+
         @SafeBrowsingState
-        int getSafeBrowsingState();
-        void setSafeBrowsingState(@SafeBrowsingState int state);
-        boolean isSafeBrowsingManaged();
-        boolean hasAccountForLeakCheckRequest();
-        boolean isLeakDetectionUnauthenticatedEnabled();
+        int getSafeBrowsingState(Profile profile);
+
+        void setSafeBrowsingState(Profile profile, @SafeBrowsingState int state);
+
+        void enableSafeBrowsingSettingSetLocallyPref(Profile profile);
+
+        boolean isSafeBrowsingManaged(Profile profile);
+
+        boolean isHashRealTimeLookupEligibleInSession();
     }
 }

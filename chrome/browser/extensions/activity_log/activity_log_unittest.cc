@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 
 #include "base/command_line.h"
@@ -14,35 +15,49 @@
 #include "base/run_loop.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/extensions/activity_log/activity_action_constants.h"
 #include "chrome/browser/extensions/activity_log/activity_log_task_runner.h"
-#include "chrome/browser/extensions/extension_service.h"
+#include "chrome/browser/extensions/extension_tab_util.h"
 #include "chrome/browser/extensions/test_extension_system.h"
+#include "chrome/browser/extensions/window_controller.h"
+#include "chrome/browser/extensions/window_controller_list.h"
 #include "chrome/browser/preloading/prefetch/no_state_prefetch/no_state_prefetch_manager_factory.h"
+#include "chrome/browser/ui/browser_window/test/mock_browser_window_interface.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/no_state_prefetch/browser/no_state_prefetch_handle.h"
 #include "components/no_state_prefetch/browser/no_state_prefetch_manager.h"
+#include "components/sessions/content/session_tab_helper.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/mock_render_process_host.h"
+#include "extensions/browser/disable_reason.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/renderer_startup_helper.h"
 #include "extensions/browser/uninstall_reason.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/dom_action_types.h"
 #include "extensions/common/extension_builder.h"
+#include "extensions/common/extension_features.h"
+#include "extensions/common/mojom/host_id.mojom.h"
 #include "extensions/common/mojom/renderer.mojom.h"
 #include "mojo/public/cpp/bindings/associated_receiver_set.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace {
 
 const char kExtensionId[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-const char* const kUrlApiCalls[] = {
+constexpr auto kUrlApiCalls = std::to_array<const char*>({
     "HTMLButtonElement.formAction", "HTMLEmbedElement.src",
     "HTMLFormElement.action",       "HTMLFrameElement.src",
     "HTMLHtmlElement.manifest",     "HTMLIFrameElement.src",
@@ -53,7 +68,8 @@ const char* const kUrlApiCalls[] = {
     "HTMLModElement.cite",          "HTMLObjectElement.data",
     "HTMLQuoteElement.cite",        "HTMLScriptElement.src",
     "HTMLSourceElement.src",        "HTMLTrackElement.src",
-    "HTMLVideoElement.poster"};
+    "HTMLVideoElement.poster",
+});
 
 }  // namespace
 
@@ -80,6 +96,7 @@ class InterceptingRendererStartupHelper : public RendererStartupHelper,
   // mojom::Renderer implementation:
   void ActivateExtension(const std::string& extension_id) override {}
   void SetActivityLoggingEnabled(bool enabled) override {}
+  void SetPolicyActivityLoggingEnabled(bool enabled) override {}
   void LoadExtensions(
       std::vector<mojom::ExtensionLoadedParamsPtr> loaded_extensions) override {
   }
@@ -91,14 +108,20 @@ class InterceptingRendererStartupHelper : public RendererStartupHelper,
   }
   void CancelSuspendExtension(const std::string& extension_id) override {}
   void SetDeveloperMode(bool current_developer_mode) override {}
+  void SetUserScriptsAllowed(const std::string& extension_id,
+                             bool allowed) override {}
   void SetSessionInfo(version_info::Channel channel,
-                      mojom::FeatureSessionType session,
-                      bool is_lock_screen_context) override {}
+                      mojom::FeatureSessionType session) override {}
   void SetSystemFont(const std::string& font_family,
                      const std::string& font_size) override {}
   void SetWebViewPartitionID(const std::string& partition_id) override {}
   void SetScriptingAllowlist(
       const std::vector<std::string>& extension_ids) override {}
+  void UpdateUserScriptWorlds(
+      std::vector<mojom::UserScriptWorldInfoPtr> info) override {}
+  void ClearUserScriptWorldConfig(
+      const std::string& extension_id,
+      const std::optional<std::string>& world_id) override {}
   void ShouldSuspend(ShouldSuspendCallback callback) override {
     std::move(callback).Run();
   }
@@ -147,9 +170,8 @@ class ActivityLogTest : public ChromeRenderViewHostTestHarness {
     }
     base::CommandLine::ForCurrentProcess()->AppendSwitch(
         switches::kEnableExtensionActivityLogTesting);
-    extension_service_ = static_cast<TestExtensionSystem*>(
-        ExtensionSystem::Get(profile()))->CreateExtensionService
-            (&command_line, base::FilePath(), false);
+    static_cast<TestExtensionSystem*>(ExtensionSystem::Get(profile()))
+        ->CreateExtensionService(&command_line, base::FilePath(), false);
 
     RendererStartupHelperFactory::GetForBrowserContext(profile())
         ->OnRenderProcessHostCreated(
@@ -164,8 +186,9 @@ class ActivityLogTest : public ChromeRenderViewHostTestHarness {
   }
 
   TestingProfile::TestingFactories GetTestingFactories() const override {
-    return {{RendererStartupHelperFactory::GetInstance(),
-             base::BindRepeating(&BuildFakeRendererStartupHelper)}};
+    return {TestingProfile::TestingFactory{
+        RendererStartupHelperFactory::GetInstance(),
+        base::BindRepeating(&BuildFakeRendererStartupHelper)}};
   }
 
   void TearDown() override {
@@ -176,17 +199,17 @@ class ActivityLogTest : public ChromeRenderViewHostTestHarness {
 
   static void RetrieveActions_LogAndFetchActions0(
       std::unique_ptr<std::vector<scoped_refptr<Action>>> i) {
-    ASSERT_EQ(0, static_cast<int>(i->size()));
+    ASSERT_EQ(0u, i->size());
   }
 
   static void RetrieveActions_LogAndFetchActions1(
       std::unique_ptr<std::vector<scoped_refptr<Action>>> i) {
-    ASSERT_EQ(1, static_cast<int>(i->size()));
+    ASSERT_EQ(1u, i->size());
   }
 
   static void RetrieveActions_LogAndFetchActions2(
       std::unique_ptr<std::vector<scoped_refptr<Action>>> i) {
-    ASSERT_EQ(2, static_cast<int>(i->size()));
+    ASSERT_EQ(2u, i->size());
   }
 
   void SetPolicy(bool log_arguments) {
@@ -236,8 +259,8 @@ class ActivityLogTest : public ChromeRenderViewHostTestHarness {
     // could be tested on all retrieved XHR actions but it would be redundant,
     // so just test once.
     ASSERT_TRUE(action->other());
-    const base::Value::Dict& other = *action->other();
-    absl::optional<int> dom_verb =
+    const base::DictValue& other = *action->other();
+    std::optional<int> dom_verb =
         other.FindInt(activity_log_constants::kActionDomVerb);
     ASSERT_EQ(DomActionType::XHR, dom_verb);
 
@@ -274,14 +297,12 @@ class ActivityLogTest : public ChromeRenderViewHostTestHarness {
                 ActivityLogPolicy::Util::Serialize(action->args()));
       ASSERT_EQ("http://www.google.co.uk/", action->arg_url().spec());
       ASSERT_TRUE(action->other());
-      const base::Value::Dict& other = *action->other();
-      absl::optional<int> dom_verb =
+      const base::DictValue& other = *action->other();
+      std::optional<int> dom_verb =
           other.FindInt(activity_log_constants::kActionDomVerb);
       ASSERT_EQ(DomActionType::SETTER, dom_verb);
     }
   }
-
-  raw_ptr<ExtensionService> extension_service_;
 };
 
 TEST_F(ActivityLogTest, Construct) {
@@ -314,15 +335,15 @@ TEST_F(ActivityLogTest, LogAndFetchActions) {
 TEST_F(ActivityLogTest, LogPrerender) {
   scoped_refptr<const Extension> extension =
       ExtensionBuilder()
-          .SetManifest(DictionaryBuilder()
+          .SetManifest(base::DictValue()
                            .Set("name", "Test extension")
                            .Set("version", "1.0.0")
-                           .Set("manifest_version", 2)
-                           .Build())
+                           .Set("manifest_version", 2))
           .Build();
-  extension_service_->AddExtension(extension.get());
+  ExtensionRegistrar::Get(profile())->AddExtension(extension);
   ActivityLog* activity_log = ActivityLog::GetInstance(profile());
-  EXPECT_TRUE(activity_log->ShouldLog(extension->id()));
+  EXPECT_TRUE(activity_log->ShouldLog(extension->id(),
+                                      Action::ACTION_CONTENT_SCRIPT, ""));
   ASSERT_TRUE(GetDatabaseEnabled());
   GURL url("http://www.google.com");
 
@@ -330,11 +351,11 @@ TEST_F(ActivityLogTest, LogPrerender) {
       prerender::NoStatePrefetchManagerFactory::GetForBrowserContext(profile());
 
   const gfx::Size kSize(640, 480);
-  std::unique_ptr<prerender::NoStatePrefetchHandle> no_state_prefetch_handle(
-      no_state_prefetch_manager->StartPrefetchingFromOmnibox(
-          url,
-          web_contents()->GetController().GetDefaultSessionStorageNamespace(),
-          kSize, nullptr));
+  std::unique_ptr<prerender::NoStatePrefetchHandle> no_state_prefetch_handle =
+      no_state_prefetch_manager->StartPrefetchingFromLinkRelPrerender(
+          /*process_id=*/-1, /*route_id=*/-1, url,
+          blink::mojom::PrerenderTriggerType::kLinkRelPrerender,
+          content::Referrer(), url::Origin::Create(url), kSize);
 
   const std::vector<content::WebContents*> contentses =
       no_state_prefetch_manager->GetAllNoStatePrefetchingContentsForTesting();
@@ -358,7 +379,8 @@ TEST_F(ActivityLogTest, ArgUrlExtraction) {
 
   // Submit a DOM API call which should have its URL extracted into the arg_url
   // field.
-  EXPECT_TRUE(activity_log->ShouldLog(kExtensionId));
+  EXPECT_TRUE(activity_log->ShouldLog(kExtensionId, Action::ACTION_DOM_ACCESS,
+                                      "XMLHttpRequest.open"));
   scoped_refptr<Action> action = new Action(kExtensionId,
                                             now,
                                             Action::ACTION_DOM_ACCESS,
@@ -394,9 +416,8 @@ TEST_F(ActivityLogTest, ArgUrlExtraction) {
   // Submit an API call with an embedded URL.
   action = new Action(kExtensionId, now - base::Seconds(3),
                       Action::ACTION_API_CALL, "windows.create");
-  base::Value::List list;
-  base::Value::Dict item;
-  item.Set("url", "http://www.google.co.uk");
+  base::ListValue list;
+  auto item = base::DictValue().Set("url", "http://www.google.co.uk");
   list.Append(std::move(item));
   action->set_args(std::move(list));
   activity_log->LogAction(action);
@@ -406,14 +427,101 @@ TEST_F(ActivityLogTest, ArgUrlExtraction) {
       base::BindOnce(ActivityLogTest::RetrieveActions_ArgUrlExtraction));
 }
 
+class MockWindowController : public WindowController {
+ public:
+  MockWindowController(Profile* profile, content::WebContents* contents)
+      : WindowController(nullptr, profile), contents_(contents) {
+    WindowControllerList::GetInstance()->AddExtensionWindow(this);
+  }
+  ~MockWindowController() override {
+    WindowControllerList::GetInstance()->RemoveExtensionWindow(this);
+  }
+  int GetWindowId() const override { return 1; }
+  std::string GetWindowTypeText() const override { return "normal"; }
+  void SetFullscreenMode(bool is_fullscreen,
+                         const GURL& extension_url) const override {}
+  content::WebContents* GetActiveTab() const override { return contents_; }
+  int GetTabCount() const override { return 1; }
+  content::WebContents* GetWebContentsAt(int i) const override {
+    return contents_;
+  }
+  bool IsVisibleToTabsAPIForExtension(
+      const Extension* extension,
+      bool include_dev_tools_windows) const override {
+    return true;
+  }
+  base::DictValue CreateWindowValueForExtension(
+      const Extension* extension,
+      PopulateTabBehavior populate_tab_behavior,
+      mojom::ContextType context) const override {
+    return base::DictValue();
+  }
+  base::ListValue CreateTabList(const Extension* extension,
+                                mojom::ContextType context) const override {
+    return base::ListValue();
+  }
+  bool OpenOptionsPage(const Extension* extension,
+                       const GURL& url,
+                       bool open_in_tab) override {
+    return false;
+  }
+  BrowserWindowInterface* GetBrowserWindowInterface() override {
+    return &browser_window_interface_;
+  }
+
+ private:
+  raw_ptr<content::WebContents> contents_;
+  testing::NiceMock<MockBrowserWindowInterface> browser_window_interface_;
+};
+
+TEST_F(ActivityLogTest, ExtractUrls_ScriptingExecuteScript) {
+  ActivityLog* activity_log = ActivityLog::GetInstance(profile());
+  base::Time now = base::Time::Now();
+
+  // Set up a tab with a URL and a SessionTabHelper.
+  GURL url("http://www.google.com");
+  NavigateAndCommit(url);
+  sessions::SessionTabHelper::CreateForWebContents(
+      web_contents(), sessions::SessionTabHelper::DelegateLookup());
+  int tab_id = ExtensionTabUtil::GetTabId(web_contents());
+  ASSERT_NE(-1, tab_id);
+
+  // Set up a WindowController so GetTabById can find the tab.
+  MockWindowController window_controller(profile(), web_contents());
+
+  // Submit a scripting.executeScript call with a nested tab ID.
+  scoped_refptr<Action> action = new Action(
+      kExtensionId, now, Action::ACTION_API_CALL, "scripting.executeScript");
+  base::DictValue target;
+  target.Set("tabId", tab_id);
+  base::DictValue arg;
+  arg.Set("target", std::move(target));
+  base::ListValue args;
+  args.Append(std::move(arg));
+  action->set_args(std::move(args));
+  activity_log->LogAction(action);
+
+  activity_log->GetFilteredActions(
+      kExtensionId, Action::ACTION_ANY, "", "", "", -1,
+      base::BindOnce([](std::unique_ptr<std::vector<scoped_refptr<Action>>> i) {
+        ASSERT_EQ(1U, i->size());
+        scoped_refptr<Action> action = i->at(0);
+        ASSERT_EQ("scripting.executeScript", action->api_name());
+        // Verify tab ID was replaced.
+        ASSERT_EQ("[{\"target\":{\"tabId\":\"\\u003Carg_url>\"}}]",
+                  ActivityLogPolicy::Util::Serialize(action->args()));
+        // Verify URL was extracted.
+        ASSERT_EQ("http://www.google.com/", action->arg_url().spec());
+      }));
+}
+
 TEST_F(ActivityLogTest, UninstalledExtension) {
   scoped_refptr<const Extension> extension =
       ExtensionBuilder()
-          .SetManifest(DictionaryBuilder()
+          .SetManifest(base::DictValue()
                            .Set("name", "Test extension")
                            .Set("version", "1.0.0")
-                           .Set("manifest_version", 2)
-                           .Build())
+                           .Set("manifest_version", 2))
           .Build();
 
   ActivityLog* activity_log = ActivityLog::GetInstance(profile());
@@ -486,8 +594,8 @@ TEST_F(ActivityLogTest, DeleteActivitiesByExtension) {
 
 class ActivityLogTestWithoutSwitch : public ActivityLogTest {
  public:
-  ActivityLogTestWithoutSwitch() {}
-  ~ActivityLogTestWithoutSwitch() override {}
+  ActivityLogTestWithoutSwitch() = default;
+  ~ActivityLogTestWithoutSwitch() override = default;
   bool enable_activity_logging_switch() const override { return false; }
 };
 
@@ -497,26 +605,96 @@ TEST_F(ActivityLogTestWithoutSwitch, TestShouldLog) {
   ActivityLog* activity_log = ActivityLog::GetInstance(profile());
   scoped_refptr<const Extension> empty_extension =
       ExtensionBuilder("Test").Build();
-  extension_service_->AddExtension(empty_extension.get());
+  ExtensionRegistrar::Get(profile())->AddExtension(empty_extension);
   // Since the command line switch for logging isn't enabled and there's no
   // watchdog app active, the activity log shouldn't log anything.
-  EXPECT_FALSE(activity_log->ShouldLog(empty_extension->id()));
+  EXPECT_FALSE(activity_log->ShouldLog(empty_extension->id(),
+                                       Action::ACTION_API_CALL, "tabs.query"));
   const char kAllowlistedExtensionId[] = "eplckmlabaanikjjcgnigddmagoglhmp";
   scoped_refptr<const Extension> activity_log_extension =
       ExtensionBuilder("Test").SetID(kAllowlistedExtensionId).Build();
-  extension_service_->AddExtension(activity_log_extension.get());
+  ExtensionRegistrar::Get(profile())->AddExtension(activity_log_extension);
   // Loading a watchdog app means the activity log should log other extension
   // activities...
-  EXPECT_TRUE(activity_log->ShouldLog(empty_extension->id()));
+  EXPECT_TRUE(activity_log->ShouldLog(empty_extension->id(),
+                                      Action::ACTION_API_CALL, "tabs.query"));
   // ... but not those of the watchdog app...
-  EXPECT_FALSE(activity_log->ShouldLog(activity_log_extension->id()));
+  EXPECT_FALSE(activity_log->ShouldLog(activity_log_extension->id(),
+                                       Action::ACTION_API_CALL, "tabs.query"));
   // ... or activities from the browser/extensions page, represented by an empty
   // extension ID.
-  EXPECT_FALSE(activity_log->ShouldLog(std::string()));
-  extension_service_->DisableExtension(activity_log_extension->id(),
-                                       disable_reason::DISABLE_USER_ACTION);
+  EXPECT_FALSE(activity_log->ShouldLog(std::string(), Action::ACTION_API_CALL,
+                                       "tabs.query"));
+  ExtensionRegistrar::Get(profile())->DisableExtension(
+      activity_log_extension->id(), {disable_reason::DISABLE_USER_ACTION});
   // Disabling the watchdog app means that we're back to never logging anything.
-  EXPECT_FALSE(activity_log->ShouldLog(empty_extension->id()));
+  EXPECT_FALSE(activity_log->ShouldLog(empty_extension->id(),
+                                       Action::ACTION_API_CALL, "tabs.query"));
+}
+
+TEST_F(ActivityLogTestWithoutSwitch, TelemetryActivation) {
+  ActivityLog* activity_log = ActivityLog::GetInstance(profile());
+  base::test::ScopedFeatureList feature_list;
+
+  // 1. Initially false.
+  EXPECT_FALSE(activity_log->IsTelemetryLoggingActive());
+
+  // 2. Register callback + Enable flag -> true.
+  feature_list.InitAndEnableFeature(
+      extensions_features::kEnterpriseExtensionDOMActivityTelemetry);
+  activity_log->SetTelemetryLoggingEnabled(
+      true, base::BindRepeating([](scoped_refptr<Action> action) {}));
+  EXPECT_TRUE(activity_log->IsTelemetryLoggingActive());
+
+  // 3. Unregister -> false.
+  activity_log->SetTelemetryLoggingEnabled(false, base::NullCallback());
+  EXPECT_FALSE(activity_log->IsTelemetryLoggingActive());
+
+  // 4. Register with flag OFF -> false.
+  base::test::ScopedFeatureList feature_list2;
+  feature_list2.InitAndDisableFeature(
+      extensions_features::kEnterpriseExtensionDOMActivityTelemetry);
+  activity_log->SetTelemetryLoggingEnabled(
+      true, base::BindRepeating([](scoped_refptr<Action> action) {}));
+  EXPECT_FALSE(activity_log->IsTelemetryLoggingActive());
+  activity_log->SetTelemetryLoggingEnabled(false, base::NullCallback());
+}
+
+TEST_F(ActivityLogTestWithoutSwitch, TelemetryShouldLog) {
+  ActivityLog* activity_log = ActivityLog::GetInstance(profile());
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      extensions_features::kEnterpriseExtensionDOMActivityTelemetry);
+
+  const char kExtensionId[] = "ext-1";
+  EXPECT_FALSE(activity_log->ShouldLog(kExtensionId, Action::ACTION_API_CALL,
+                                       "tabs.query"));
+
+  activity_log->SetTelemetryLoggingEnabled(
+      true, base::BindRepeating([](scoped_refptr<Action> action) {}));
+
+  // 1. DOM access should always be logged.
+  EXPECT_TRUE(activity_log->ShouldLog(kExtensionId, Action::ACTION_DOM_ACCESS,
+                                      "Document.cookie"));
+
+  // 2. High-risk APIs should be logged.
+  EXPECT_TRUE(activity_log->ShouldLog(kExtensionId, Action::ACTION_API_CALL,
+                                      "scripting.executeScript"));
+
+  // 3. Low-risk APIs and Content Scripts should be dropped.
+  EXPECT_FALSE(activity_log->ShouldLog(
+      kExtensionId, Action::ACTION_CONTENT_SCRIPT, std::string()));
+  EXPECT_FALSE(activity_log->ShouldLog(kExtensionId, Action::ACTION_API_CALL,
+                                       "storage.get"));
+  EXPECT_FALSE(activity_log->ShouldLog(kExtensionId, Action::ACTION_API_EVENT,
+                                       "tabs.onUpdated"));
+
+  // Verify database is NOT enabled.
+  EXPECT_FALSE(GetDatabaseEnabled());
+
+  activity_log->SetTelemetryLoggingEnabled(false, base::NullCallback());
+  EXPECT_FALSE(activity_log->ShouldLog(kExtensionId, Action::ACTION_API_CALL,
+                                       "scripting.executeScript"));
 }
 
 }  // namespace extensions

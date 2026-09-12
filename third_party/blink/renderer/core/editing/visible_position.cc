@@ -27,35 +27,27 @@
 
 #include "third_party/blink/renderer/core/editing/visible_position.h"
 
-#include <ostream>  // NOLINT
+#include <ostream>
+
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
-#include "third_party/blink/renderer/core/editing/inline_box_position.h"
 #include "third_party/blink/renderer/core/editing/local_caret_rect.h"
 #include "third_party/blink/renderer/core/editing/ng_flat_tree_shorthands.h"
 #include "third_party/blink/renderer/core/editing/text_affinity.h"
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
+#include "third_party/blink/renderer/core/layout/inline/offset_mapping.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
-#include "third_party/blink/renderer/core/layout/line/inline_box.h"
-#include "third_party/blink/renderer/core/layout/line/root_inline_box.h"
-#include "third_party/blink/renderer/core/layout/ng/inline/ng_offset_mapping.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "ui/gfx/geometry/quad_f.h"
 
 namespace blink {
 
 template <typename Strategy>
-VisiblePositionTemplate<Strategy>::VisiblePositionTemplate()
-#if DCHECK_IS_ON()
-    : dom_tree_version_(0),
-      style_version_(0)
-#endif
-{
-}
+VisiblePositionTemplate<Strategy>::VisiblePositionTemplate() = default;
 
 template <typename Strategy>
 VisiblePositionTemplate<Strategy>::VisiblePositionTemplate(

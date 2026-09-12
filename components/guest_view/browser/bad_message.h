@@ -5,6 +5,8 @@
 #ifndef COMPONENTS_GUEST_VIEW_BROWSER_BAD_MESSAGE_H_
 #define COMPONENTS_GUEST_VIEW_BROWSER_BAD_MESSAGE_H_
 
+#include "content/public/common/child_process_id.h"
+
 namespace content {
 class RenderProcessHost;
 }  // namespace content
@@ -25,6 +27,7 @@ enum BadMessageReason {
   GVM_INVALID_GUESTVIEW_TYPE = 1,
   GVMF_UNEXPECTED_MESSAGE_BEFORE_GVM_CREATION = 2,
   GVM_INVALID_ATTACH = 3,
+  GVMH_GUEST_NOT_AVAILABLE_TO_ATTACH = 4,
 
   // Please add new elements here. The naming convention is abbreviated class
   // name (e.g. GuestViewManager becomes GVM) plus a unique description of
@@ -39,8 +42,8 @@ enum BadMessageReason {
 // and terminates the process for |host| / |render_process_id|.
 void ReceivedBadMessage(content::RenderProcessHost* host,
                         BadMessageReason reason);
-void ReceivedBadMessage(int render_process_id, BadMessageReason reason);
-
+void ReceivedBadMessage(content::ChildProcessId render_process_id,
+                        BadMessageReason reason);
 }  // namespace bad_message
 }  // namespace guest_view
 

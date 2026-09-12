@@ -2,12 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {
-  ErrorInfo,
-  PerfEntry,
-  PerfEvent,
-  Resolution,
-} from './type.js';
+import type {ErrorInfo, PerfEntry} from './type.js';
+import {PerfEvent, Resolution} from './type.js';
 import {WaitableEvent} from './waitable_event.js';
 
 const TOP_BAR_HEIGHT = 32;
@@ -106,6 +102,7 @@ export class AppWindow {
     this.perfs.push({
       event: event,
       duration: (performance.now() - this.launchedTime),
+      perfInfo: {},
     });
   }
 
@@ -140,8 +137,6 @@ export class AppWindow {
 
   /**
    * Reports error and makes it visible on Tast side.
-   *
-   * @param errorInfo Information of the error.
    */
   reportError(errorInfo: ErrorInfo): void {
     this.errors.push(errorInfo);

@@ -28,21 +28,22 @@ OSServiceManager* OSServiceManager::Get() {
   return *GetInstanceStorage();
 }
 
-OSServiceManager::~OSServiceManager() {}
+OSServiceManager::~OSServiceManager() = default;
 
 DWORD OSServiceManager::InstallService(
     const base::FilePath& service_binary_path,
     ScopedScHandle* sc_handle) {
   ScopedScHandle scm_handle(
       ::OpenSCManager(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE));
-  if (!scm_handle.IsValid())
+  if (!scm_handle.is_valid()) {
     return ::GetLastError();
+  }
 
   base::CommandLine command_line(base::CommandLine::NO_PROGRAM);
   command_line.SetProgram(service_binary_path);
 
   *sc_handle = ScopedScHandle(::CreateService(
-      scm_handle.Get(),                             // SCM database
+      scm_handle.get(),                             // SCM database
       kGCPWExtensionServiceName,                    // name of service
       kGCPWExtensionServiceDisplayName,             // service name to display
       SERVICE_ALL_ACCESS,                           // desired access
@@ -56,8 +57,9 @@ DWORD OSServiceManager::InstallService(
       nullptr,                                      // LocalSystem account
       nullptr));
 
-  if (!sc_handle->IsValid())
+  if (!sc_handle->is_valid()) {
     return ::GetLastError();
+  }
 
   return ERROR_SUCCESS;
 }
@@ -67,15 +69,17 @@ DWORD OSServiceManager::GetServiceStatus(SERVICE_STATUS* service_status) {
 
   ScopedScHandle scm_handle(
       ::OpenSCManager(nullptr, nullptr, SC_MANAGER_CONNECT));
-  if (!scm_handle.IsValid())
+  if (!scm_handle.is_valid()) {
     return ::GetLastError();
+  }
 
   ScopedScHandle sc_handle(::OpenService(
-      scm_handle.Get(), kGCPWExtensionServiceName, SERVICE_QUERY_STATUS));
-  if (!sc_handle.IsValid())
+      scm_handle.get(), kGCPWExtensionServiceName, SERVICE_QUERY_STATUS));
+  if (!sc_handle.is_valid()) {
     return ::GetLastError();
+  }
 
-  if (!::QueryServiceStatus(sc_handle.Get(), service_status)) {
+  if (!::QueryServiceStatus(sc_handle.get(), service_status)) {
     return ::GetLastError();
   }
 
@@ -85,20 +89,23 @@ DWORD OSServiceManager::GetServiceStatus(SERVICE_STATUS* service_status) {
 DWORD OSServiceManager::DeleteService() {
   ScopedScHandle scm_handle(
       ::OpenSCManager(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
-  if (!scm_handle.IsValid())
+  if (!scm_handle.is_valid()) {
     return ::GetLastError();
+  }
 
   ScopedScHandle sc_handle(
-      ::OpenService(scm_handle.Get(), kGCPWExtensionServiceName, DELETE));
-  if (!sc_handle.IsValid())
+      ::OpenService(scm_handle.get(), kGCPWExtensionServiceName, DELETE));
+  if (!sc_handle.is_valid()) {
     return ::GetLastError();
+  }
 
   // The DeleteService function marks a service for deletion from the service
   // control manager database. The database entry is not removed until all open
   // handles to the service have been closed by calls to the CloseServiceHandle
   // function, and the service is not running.
-  if (!::DeleteService(sc_handle.Get()))
+  if (!::DeleteService(sc_handle.get())) {
     return ::GetLastError();
+  }
 
   return ERROR_SUCCESS;
 }
@@ -106,16 +113,19 @@ DWORD OSServiceManager::DeleteService() {
 DWORD OSServiceManager::StartGCPWService() {
   ScopedScHandle scm_handle(
       ::OpenSCManager(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
-  if (!scm_handle.IsValid())
+  if (!scm_handle.is_valid()) {
     return ::GetLastError();
+  }
 
   ScopedScHandle sc_handle(::OpenService(
-      scm_handle.Get(), kGCPWExtensionServiceName, SERVICE_START));
-  if (!sc_handle.IsValid())
+      scm_handle.get(), kGCPWExtensionServiceName, SERVICE_START));
+  if (!sc_handle.is_valid()) {
     return ::GetLastError();
+  }
 
-  if (!::StartService(sc_handle.Get(), 0, nullptr))
+  if (!::StartService(sc_handle.get(), 0, nullptr)) {
     return ::GetLastError();
+  }
 
   LOGFN(INFO) << "GCPW extension started successfully.";
 
@@ -127,19 +137,21 @@ DWORD OSServiceManager::WaitForServiceStopped() {
 
   ScopedScHandle scm_handle(
       ::OpenSCManager(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
-  if (scm_handle.Get() == nullptr)
+  if (scm_handle.get() == nullptr) {
     return ::GetLastError();
+  }
 
   ScopedScHandle s_handle(::OpenService(
-      scm_handle.Get(), kGCPWExtensionServiceName, SERVICE_QUERY_STATUS));
-  if (s_handle.Get() == nullptr)
+      scm_handle.get(), kGCPWExtensionServiceName, SERVICE_QUERY_STATUS));
+  if (s_handle.get() == nullptr) {
     return ::GetLastError();
+  }
 
   // Wait until the service is completely stopped.
   for (unsigned int iteration = 0; iteration < kMaxServiceQueryIterations;
        ++iteration) {
     SERVICE_STATUS service_status;
-    if (!QueryServiceStatus(s_handle.Get(), &service_status)) {
+    if (!QueryServiceStatus(s_handle.get(), &service_status)) {
       DWORD error = ::GetLastError();
       LOGFN(ERROR) << "QueryServiceStatus failed error=" << error;
       return error;
@@ -167,18 +179,20 @@ DWORD OSServiceManager::ControlService(DWORD control) {
 
   ScopedScHandle scm_handle(
       ::OpenSCManager(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
-  if (!scm_handle.IsValid())
+  if (!scm_handle.is_valid()) {
     return ::GetLastError();
+  }
 
-  // TODO(crbug.com/1108932): More granular access rights corresponding to the
+  // TODO(crbug.com/40141510): More granular access rights corresponding to the
   // controls can be specified.
   ScopedScHandle s_handle(::OpenService(
-      scm_handle.Get(), kGCPWExtensionServiceName, SERVICE_ALL_ACCESS));
-  if (!s_handle.IsValid())
+      scm_handle.get(), kGCPWExtensionServiceName, SERVICE_ALL_ACCESS));
+  if (!s_handle.is_valid()) {
     return ::GetLastError();
+  }
 
   SERVICE_STATUS service_status;
-  if (!::ControlService(s_handle.Get(), control, &service_status)) {
+  if (!::ControlService(s_handle.get(), control, &service_status)) {
     DWORD error = ::GetLastError();
     LOGFN(ERROR) << "ControlService failed with error=" << error;
     return error;
@@ -194,17 +208,19 @@ DWORD OSServiceManager::ChangeServiceConfig(DWORD dwServiceType,
 
   ScopedScHandle scm_handle(
       ::OpenSCManager(nullptr, nullptr, SC_MANAGER_ALL_ACCESS));
-  if (!scm_handle.IsValid())
+  if (!scm_handle.is_valid()) {
     return ::GetLastError();
+  }
 
   ScopedScHandle s_handle(::OpenService(
-      scm_handle.Get(), kGCPWExtensionServiceName, SERVICE_CHANGE_CONFIG));
-  if (!s_handle.IsValid())
+      scm_handle.get(), kGCPWExtensionServiceName, SERVICE_CHANGE_CONFIG));
+  if (!s_handle.is_valid()) {
     return ::GetLastError();
+  }
 
-  if (!::ChangeServiceConfig(s_handle.Get(), dwServiceType, dwStartType,
-                             dwErrorControl, nullptr, nullptr, nullptr,
-                             nullptr, nullptr, nullptr, nullptr)) {
+  if (!::ChangeServiceConfig(s_handle.get(), dwServiceType, dwStartType,
+                             dwErrorControl, nullptr, nullptr, nullptr, nullptr,
+                             nullptr, nullptr, nullptr)) {
     return ::GetLastError();
   }
 

@@ -4,63 +4,78 @@
 
 package org.chromium.chrome.browser.privacy_guide;
 
-import android.content.Context;
-import android.content.Intent;
+import static org.chromium.build.NullUtil.assumeNonNull;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.privacy_guide.PrivacyGuideFragment.FragmentType;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.safe_browsing.SafeBrowsingBridge;
 import org.chromium.chrome.browser.safe_browsing.SafeBrowsingState;
 import org.chromium.chrome.browser.signin.services.IdentityServicesProvider;
 import org.chromium.chrome.browser.signin.services.UnifiedConsentServiceBridge;
-import org.chromium.chrome.browser.sync.SyncService;
+import org.chromium.chrome.browser.sync.SyncServiceFactory;
+import org.chromium.chrome.browser.ui.signin.history_sync.HistorySyncHelper;
 import org.chromium.components.content_settings.CookieControlsMode;
 import org.chromium.components.content_settings.PrefNames;
-import org.chromium.components.signin.identitymanager.ConsentLevel;
 import org.chromium.components.signin.identitymanager.IdentityManager;
-import org.chromium.components.sync.UserSelectableType;
 import org.chromium.components.user_prefs.UserPrefs;
-
-import java.util.Set;
 
 /**
  * A utility class for Privacy Guide that fetches the current state of {@link
  * PrivacyGuideFragment.FragmentType}s.
  */
+@NullMarked
 class PrivacyGuideUtils {
-    static boolean isMsbbEnabled() {
-        return UnifiedConsentServiceBridge.isUrlKeyedAnonymizedDataCollectionEnabled(
-                Profile.getLastUsedRegularProfile());
+    static boolean isMsbbEnabled(Profile profile) {
+        return UnifiedConsentServiceBridge.isUrlKeyedAnonymizedDataCollectionEnabled(profile);
     }
 
-    static boolean isHistorySyncEnabled() {
-        Set<Integer> syncTypes = SyncService.get().getSelectedTypes();
-        return syncTypes.contains(UserSelectableType.HISTORY);
+    static boolean isUserSignedIn(Profile profile) {
+        IdentityManager identityManager =
+                IdentityServicesProvider.get().getIdentityManager(profile);
+        assumeNonNull(identityManager);
+        return identityManager.hasPrimaryAccount();
     }
 
-    static boolean isUserSignedIn() {
-        IdentityManager identityManager = IdentityServicesProvider.get().getIdentityManager(
-                Profile.getLastUsedRegularProfile());
-        return identityManager.hasPrimaryAccount(ConsentLevel.SIGNIN);
+    static @SafeBrowsingState int getSafeBrowsingState(Profile profile) {
+        return new SafeBrowsingBridge(profile).getSafeBrowsingState();
     }
 
-    static @SafeBrowsingState int getSafeBrowsingState() {
-        return SafeBrowsingBridge.getSafeBrowsingState();
+    static @CookieControlsMode int getCookieControlsMode(Profile profile) {
+        return UserPrefs.get(profile).getInteger(PrefNames.COOKIE_CONTROLS_MODE);
     }
 
-    static @CookieControlsMode int getCookieControlsMode() {
-        return UserPrefs.get(Profile.getLastUsedRegularProfile())
-                .getInteger(PrefNames.COOKIE_CONTROLS_MODE);
+    static boolean canUpdateHistorySyncValue(Profile profile) {
+        if (SyncServiceFactory.getForProfile(profile) == null) {
+            return false;
+        }
+
+        if (!isUserSignedIn(profile)) {
+            return false;
+        }
+
+        HistorySyncHelper historySyncHelper = HistorySyncHelper.getForProfile(profile);
+        return !historySyncHelper.isHistorySyncDisabledByPolicy()
+                && !historySyncHelper.isHistorySyncDisabledByCustodian();
     }
 
-    /**
-     * Functional interface to start a Chrome Custom Tab for the given intent, e.g. by using
-     * {@link org.chromium.chrome.browser.LaunchIntentDispatcher#createCustomTabActivityIntent}.
-     * TODO(crbug.com/1181700): Update when LaunchIntentDispatcher is (partially-)modularized.
-     */
-    public interface CustomTabIntentHelper {
-        /**
-         * @see org.chromium.chrome.browser.LaunchIntentDispatcher#createCustomTabActivityIntent
-         */
-        Intent createCustomTabActivityIntent(Context context, Intent intent);
+    static int getFragmentFocusViewId(@FragmentType int fragmentType) {
+        switch (fragmentType) {
+            case FragmentType.WELCOME:
+                return R.id.welcome_view;
+            case FragmentType.MSBB:
+                return R.id.msbb_switch;
+            case FragmentType.HISTORY_SYNC:
+                return R.id.history_sync_switch;
+            case FragmentType.SAFE_BROWSING:
+                return R.id.sb_step_header;
+            case FragmentType.COOKIES:
+                return R.id.cookies_step_header;
+            case FragmentType.DONE:
+                return R.id.done_step_header;
+            default:
+                assert false : "Unexpected fragment type: " + fragmentType;
+                return -1;
+        }
     }
 }

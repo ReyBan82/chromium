@@ -8,21 +8,19 @@
 
 #import <limits>
 
+#import "base/apple/foundation_util.h"
 #import "base/files/file.h"
 #import "base/files/file_util.h"
 #import "base/functional/bind.h"
 #import "base/strings/sys_string_conversions.h"
 #import "base/task/bind_post_task.h"
 #import "base/task/sequenced_task_runner.h"
+#import "ios/web/common/features.h"
 #import "ios/web/download/download_result.h"
 #import "ios/web/public/download/download_task_observer.h"
 #import "ios/web/public/web_state.h"
 #import "net/base/filename_util.h"
 #import "net/base/net_errors.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace web {
 namespace download {
@@ -91,11 +89,10 @@ NSData* ReadDataFromFile(base::FilePath path, int64_t bytes) {
     return nil;
   }
 
-  const int bytes_to_read = static_cast<int>(bytes);
   NSMutableData* data = [NSMutableData dataWithLength:bytes];
-  char* buffer = static_cast<char*>(data.mutableBytes);
-
-  if (base::ReadFile(path, buffer, bytes_to_read) != bytes_to_read) {
+  std::optional<uint64_t> bytes_read =
+      base::ReadFile(path, base::apple::NSMutableDataToSpan(data));
+  if (!bytes_read || *bytes_read != static_cast<uint64_t>(bytes)) {
     return nil;
   }
 
@@ -109,6 +106,7 @@ NSData* ReadDataFromFile(base::FilePath path, int64_t bytes) {
 DownloadTaskImpl::DownloadTaskImpl(
     WebState* web_state,
     const GURL& original_url,
+    NSString* originating_host,
     NSString* http_method,
     const std::string& content_disposition,
     int64_t total_bytes,
@@ -116,6 +114,7 @@ DownloadTaskImpl::DownloadTaskImpl(
     NSString* identifier,
     const scoped_refptr<base::SequencedTaskRunner>& task_runner)
     : original_url_(original_url),
+      originating_host_([originating_host copy]),
       http_method_(http_method),
       total_bytes_(total_bytes),
       content_disposition_(content_disposition),
@@ -144,8 +143,9 @@ DownloadTaskImpl::DownloadTaskImpl(
 DownloadTaskImpl::~DownloadTaskImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   [NSNotificationCenter.defaultCenter removeObserver:observer_];
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.OnDownloadDestroyed(this);
+  }
 
   // Delete the downloaded file if it was a temporary file or if the download
   // failed (it is not an error to delete a non-existent file).
@@ -197,6 +197,19 @@ NSString* DownloadTaskImpl::GetIdentifier() const {
 const GURL& DownloadTaskImpl::GetOriginalUrl() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return original_url_;
+}
+
+const GURL& DownloadTaskImpl::GetRedirectedUrl() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (redirected_url_.is_valid()) {
+    return redirected_url_;
+  }
+  return original_url_;
+}
+
+NSString* DownloadTaskImpl::GetOriginatingHost() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  return originating_host_;
 }
 
 NSString* DownloadTaskImpl::GetHttpMethod() const {
@@ -260,11 +273,26 @@ std::string DownloadTaskImpl::GetMimeType() const {
 
 base::FilePath DownloadTaskImpl::GenerateFileName() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  return net::GenerateFileName(original_url_, content_disposition_,
-                               /*referrer_charset=*/std::string(),
-                               /*suggested_name=*/GetSuggestedName(),
-                               /*mime_type=*/std::string(),
-                               /*default_name=*/"document");
+  base::FilePath generated_path =
+      net::GenerateFileName(original_url_, content_disposition_,
+                            /*referrer_charset=*/std::string(),
+                            /*suggested_name=*/GetSuggestedName(),
+                            /*mime_type=*/mime_type_,
+                            /*default_name=*/"document");
+
+  // iOS ShareSheet has a bug where it crashes when handling filenames with
+  // Precomposed (NFC) Unicode characters (e.g., "ä" as \xC3\xA4). Converting
+  // the string to the file system representation (which enforces NFD
+  // normalization on iOS) and back ensures the filename is safe to use.
+  if (base::FeatureList::IsEnabled(
+          web::features::kIOSDownloadSanitizeFilename)) {
+    NSString* path_string = base::SysUTF8ToNSString(generated_path.value());
+    const char* fs_rep = [path_string fileSystemRepresentation];
+    if (fs_rep) {
+      return base::FilePath(fs_rep);
+    }
+  }
+  return generated_path;
 }
 
 bool DownloadTaskImpl::HasPerformedBackgroundDownload() const {
@@ -297,6 +325,10 @@ const base::FilePath& DownloadTaskImpl::GetResponsePath() const {
   DCHECK(IsDone());
   static const base::FilePath kEmptyPath;
   return owns_file_ ? kEmptyPath : path_;
+}
+
+base::WeakPtr<DownloadTask> DownloadTaskImpl::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
 }
 
 std::string DownloadTaskImpl::GetSuggestedName() const {
@@ -337,8 +369,18 @@ void DownloadTaskImpl::OnDownloadFinished(DownloadResult download_result) {
 
 void DownloadTaskImpl::OnDownloadUpdated() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  for (auto& observer : observers_)
-    observer.OnDownloadUpdated(this);
+  observers_.Notify(&DownloadTaskObserver::OnDownloadUpdated, this);
+}
+
+void DownloadTaskImpl::OnRedirected(const GURL& redirected_url) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (redirected_url == GetRedirectedUrl()) {
+    // If the redirected URL is the original one, or the redirection was already
+    // known, ignore it.
+    return;
+  }
+  redirected_url_ = redirected_url;
+  observers_.Notify(&DownloadTaskObserver::OnDownloadUpdated, this);
 }
 
 }  // namespace web

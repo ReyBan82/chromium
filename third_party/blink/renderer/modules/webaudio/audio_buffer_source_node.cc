@@ -25,10 +25,9 @@
 
 #include "third_party/blink/renderer/modules/webaudio/audio_buffer_source_node.h"
 
-#include <algorithm>
-
 #include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_buffer_source_options.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_automation_rate.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_output.h"
 #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
@@ -51,19 +50,20 @@ constexpr double kDefaultDetuneValue = 0.0;
 
 AudioBufferSourceNode::AudioBufferSourceNode(BaseAudioContext& context)
     : AudioScheduledSourceNode(context),
-      playback_rate_(AudioParam::Create(
-          context,
-          Uuid(),
-          AudioParamHandler::kParamTypeAudioBufferSourcePlaybackRate,
-          kDefaultPlaybackRateValue,
-          AudioParamHandler::AutomationRate::kControl,
-          AudioParamHandler::AutomationRateMode::kFixed)),
+      playback_rate_(
+          AudioParam::Create(context,
+                             Uuid(),
+                             AudioParamHandler::AudioParamType::
+                                 kParamTypeAudioBufferSourcePlaybackRate,
+                             kDefaultPlaybackRateValue,
+                             V8AutomationRate::Enum::kKRate,
+                             AudioParamHandler::AutomationRateMode::kFixed)),
       detune_(AudioParam::Create(
           context,
           Uuid(),
-          AudioParamHandler::kParamTypeAudioBufferSourceDetune,
+          AudioParamHandler::AudioParamType::kParamTypeAudioBufferSourceDetune,
           kDefaultDetuneValue,
-          AudioParamHandler::AutomationRate::kControl,
+          V8AutomationRate::Enum::kKRate,
           AudioParamHandler::AutomationRateMode::kFixed)) {
   SetHandler(AudioBufferSourceHandler::Create(*this, context.sampleRate(),
                                               playback_rate_->Handler(),
@@ -127,11 +127,11 @@ void AudioBufferSourceNode::setBuffer(AudioBuffer* new_buffer,
 }
 
 AudioParam* AudioBufferSourceNode::playbackRate() const {
-  return playback_rate_;
+  return playback_rate_.Get();
 }
 
 AudioParam* AudioBufferSourceNode::detune() const {
-  return detune_;
+  return detune_.Get();
 }
 
 bool AudioBufferSourceNode::loop() const {

@@ -22,7 +22,8 @@ WarningService* WarningServiceFactory::GetForBrowserContext(
 
 // static
 WarningServiceFactory* WarningServiceFactory::GetInstance() {
-  return base::Singleton<WarningServiceFactory>::get();
+  static base::NoDestructor<WarningServiceFactory> instance;
+  return instance.get();
 }
 
 WarningServiceFactory::WarningServiceFactory()
@@ -32,18 +33,19 @@ WarningServiceFactory::WarningServiceFactory()
   DependsOn(ExtensionRegistryFactory::GetInstance());
 }
 
-WarningServiceFactory::~WarningServiceFactory() {
-}
+WarningServiceFactory::~WarningServiceFactory() = default;
 
-KeyedService* WarningServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+WarningServiceFactory::BuildServiceInstanceForBrowserContext(
     BrowserContext* context) const {
-  return new WarningService(context);
+  return std::make_unique<WarningService>(context);
 }
 
 BrowserContext* WarningServiceFactory::GetBrowserContextToUse(
     BrowserContext* context) const {
   // Redirected in incognito.
-  return ExtensionsBrowserClient::Get()->GetOriginalContext(context);
+  return ExtensionsBrowserClient::Get()->GetContextRedirectedToOriginal(
+      context);
 }
 
 }  // namespace extensions

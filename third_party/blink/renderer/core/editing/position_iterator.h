@@ -27,6 +27,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EDITING_POSITION_ITERATOR_H_
 
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/node.h"
 #include "third_party/blink/renderer/core/editing/editing_strategy.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
@@ -83,12 +84,12 @@ class SlowPositionIteratorAlgorithm {
   // anchor_node_;
   Node* node_after_position_in_anchor_ = nullptr;
   // In `Decrement()` `offset_in_anchor_` may not be valid.
-  int offset_in_anchor_ = 0;
+  wtf_size_t offset_in_anchor_ = 0;
   wtf_size_t depth_to_anchor_node_ = 0;
   // If |node_after_position_in_anchor_| is not null,
   // offsets_in_anchor_node_[depth_to_anchor_node_] ==
   //    Strategy::Index(node_after_position_in_anchor_).
-  Vector<int> offsets_in_anchor_node_;
+  Vector<wtf_size_t> offsets_in_anchor_node_;
   uint64_t dom_tree_version_ = 0;
 };
 
@@ -98,8 +99,6 @@ extern template class CORE_EXTERN_TEMPLATE_EXPORT
     SlowPositionIteratorAlgorithm<EditingInFlatTreeStrategy>;
 
 using SlowPositionIterator = SlowPositionIteratorAlgorithm<EditingStrategy>;
-using SlowPositionIteratorInFlatTree =
-    SlowPositionIteratorAlgorithm<EditingInFlatTreeStrategy>;
 
 // ----
 
@@ -149,7 +148,7 @@ class FastPositionIteratorAlgorithm {
     kUserSelectContainNode,
   };
 
-  static constexpr unsigned kInvalidOffset = static_cast<unsigned>(-1);
+  static constexpr wtf_size_t kInvalidOffset = static_cast<wtf_size_t>(-1);
 
   static ContainerType ContainerToContainerType(const Node* node);
 
@@ -188,7 +187,7 @@ class FastPositionIteratorAlgorithm {
   void EnsureOffsetInContainer() const;
   void MoveOffsetInContainerBy(int delta);
   void PopOffsetStack();
-  void PushThenSetOffset(unsigned offset_in_container);
+  void PushThenSetOffset(wtf_size_t offset_in_container);
 
   // We representation a position as same as`RangeBoundaryPoint`.
   Node* container_node_ = nullptr;
@@ -196,9 +195,9 @@ class FastPositionIteratorAlgorithm {
   uint64_t dom_tree_version_ = 0;
   // Note: When `child_before_position_` is `nullptr`, `offset_is_container`
   // should be zero.
-  mutable unsigned offset_in_container_ = kInvalidOffset;
+  mutable wtf_size_t offset_in_container_ = kInvalidOffset;
 
-  Vector<unsigned> offset_stack_;
+  Vector<wtf_size_t> offset_stack_;
   ContainerType container_type_ = kNullNode;
 };
 
@@ -208,8 +207,6 @@ extern template class CORE_EXTERN_TEMPLATE_EXPORT
     FastPositionIteratorAlgorithm<EditingInFlatTreeStrategy>;
 
 using FastPositionIterator = FastPositionIteratorAlgorithm<EditingStrategy>;
-using FastPositionIteratorInFlatTree =
-    FastPositionIteratorAlgorithm<EditingInFlatTreeStrategy>;
 
 // --
 

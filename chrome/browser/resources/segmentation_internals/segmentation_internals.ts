@@ -3,22 +3,21 @@
 // found in the LICENSE file.
 
 import {getTrustedHTML} from 'chrome://resources/js/static_types.js';
-import {getRequiredElement} from 'chrome://resources/js/util_ts.js';
+import {getRequiredElement} from 'chrome://resources/js/util.js';
 
-import {ClientInfo, SegmentInfo} from './segmentation_internals.mojom-webui.js';
-import {SegmentationInternalsBrowserProxy} from './segmentation_internals_browser_proxy.js';
+import {browserProxyFactory} from './segmentation_internals.mojom-webui.js';
+import type {ClientInfo, SegmentInfo} from './segmentation_internals.mojom-webui.js';
 
-function getProxy(): SegmentationInternalsBrowserProxy {
-  return SegmentationInternalsBrowserProxy.getInstance();
+function getProxy() {
+  return browserProxyFactory.getInstance();
 }
 
 function addClientInfo(parent: HTMLElement, info: ClientInfo) {
   const div = document.createElement('div');
   div.className = 'client';
   const configTitle = document.createElement('h5');
-  configTitle.textContent =
-      'Segmentation Key: ' + String(info.segmentationKey) +
-      ', Selected Segment: ' + String(info.selectedSegment);
+  configTitle.textContent = 'Segmentation Key: ' + info.segmentationKey +
+      ', Selected Segment: ' + info.selectedSegment;
   div.appendChild(configTitle);
   for (let i = 0; i < info.segmentInfo.length; ++i) {
     addSegmentInfoToParent(div, info.segmentationKey, info.segmentInfo[i]!);
@@ -31,17 +30,18 @@ function addSegmentInfoToParent(
   const div = document.createElement('div');
   div.className = 'segment';
   const targetDiv = document.createElement('div');
-  targetDiv.textContent = 'Segment Id: ' + String(info.segmentName);
+  targetDiv.textContent = 'Segment Id: ' + info.segmentName;
   div.appendChild(targetDiv);
   const resultDiv = document.createElement('div');
-  resultDiv.textContent = 'Result: ' + String(info.predictionResult);
+  resultDiv.textContent = 'Result: ' + info.predictionResult +
+      ' Time: ' + String(info.predictionTimestamp.internalValue);
   div.appendChild(resultDiv);
   const buttonDiv = document.createElement('div');
   if (info.canExecuteSegment) {
     const btn = document.createElement('button');
     btn.innerHTML = getTrustedHTML`Execute model`;
     btn.addEventListener('click', () => {
-      getProxy().executeModel(info.segmentId);
+      getProxy().handler.executeModel(info.segmentId);
     });
     buttonDiv.appendChild(btn);
   }
@@ -56,19 +56,19 @@ function addSegmentInfoToParent(
   const overwriteBtn = document.createElement('button');
   overwriteBtn.innerHTML = getTrustedHTML`Overwrite`;
   overwriteBtn.addEventListener('click', () => {
-    getProxy().overwriteResult(
+    getProxy().handler.overwriteResult(
         info.segmentId, parseFloat(overwriteValue.value));
   });
   buttonDiv.appendChild(overwriteBtn);
   const setSelectionBtn = document.createElement('button');
   setSelectionBtn.innerHTML = getTrustedHTML`Set Selected`;
   setSelectionBtn.addEventListener('click', () => {
-    getProxy().setSelected(segmentationKey, info.segmentId);
+    getProxy().handler.setSelected(segmentationKey, info.segmentId);
   });
   buttonDiv.appendChild(setSelectionBtn);
   div.appendChild(buttonDiv);
   const dataDiv = document.createElement('div');
-  dataDiv.textContent = String(info.segmentData);
+  dataDiv.textContent = info.segmentData;
   div.appendChild(dataDiv);
   dataDiv.className = 'hidden-meta';
   div.setAttribute('simple', '');
@@ -89,13 +89,13 @@ function addSegmentInfoToParent(
 }
 
 function initialize() {
-  getProxy().getCallbackRouter().onServiceStatusChanged.addListener(
+  getProxy().callbackRouter.onServiceStatusChanged.addListener(
       (initialized: boolean, status: number) => {
         getRequiredElement('initialized').textContent = String(initialized);
         getRequiredElement('service-status').textContent = String(status);
       });
 
-  getProxy().getCallbackRouter().onClientInfoAvailable.addListener(
+  getProxy().callbackRouter.onClientInfoAvailable.addListener(
       (clientInfos: ClientInfo[]) => {
         const parent = getRequiredElement('client-container');
         // Remove all current children.
@@ -108,7 +108,7 @@ function initialize() {
         }
       });
 
-  getProxy().getServiceStatus();
+  getProxy().handler.getServiceStatus();
 }
 
 document.addEventListener('DOMContentLoaded', initialize);

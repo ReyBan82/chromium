@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "base/compiler_specific.h"
+#include "base/containers/to_vector.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/run_loop.h"
@@ -62,10 +64,14 @@ class FlossAdminClientTest : public testing::Test,
  public:
   FlossAdminClientTest() = default;
 
+  base::Version GetCurrVersion() {
+    return floss::version::GetMaximalSupportedVersion();
+  }
+
   void SetUp() override {
     ::dbus::Bus::Options options;
     options.bus_type = ::dbus::Bus::BusType::SYSTEM;
-    bus_ = base::MakeRefCounted<::dbus::MockBus>(options);
+    bus_ = base::MakeRefCounted<::dbus::MockBus>(std::move(options));
     client_ = FlossAdminClient::Create();
     client_->AddObserver(this);
 
@@ -88,7 +94,7 @@ class FlossAdminClientTest : public testing::Test,
   // AdminClientObserver overrides
   void DevicePolicyEffectChanged(
       const FlossDeviceId& device_id,
-      const absl::optional<PolicyEffect>& effect) override {
+      const std::optional<PolicyEffect>& effect) override {
     fake_device_policy_effect_info_ = {device_id, effect};
   }
 
@@ -127,10 +133,10 @@ class FlossAdminClientTest : public testing::Test,
 
     // Expected call to RegisterAdminCallback when client is initialized
     EXPECT_CALL(*object_proxy_.get(),
-                DoCallMethodWithErrorResponse(
+                CallMethodWithErrorResponse(
                     HasMemberOf(admin::kRegisterCallback), _, _))
         .WillOnce([this](::dbus::MethodCall* method_call, int timeout_ms,
-                         ::dbus::ObjectProxy::ResponseOrErrorCallback* cb) {
+                         ::dbus::ObjectProxy::ResponseOrErrorCallback cb) {
           dbus::MessageReader msg(method_call);
           // D-Bus method call should have 1 parameter.
           dbus::ObjectPath param1;
@@ -141,36 +147,49 @@ class FlossAdminClientTest : public testing::Test,
           auto response = ::dbus::Response::CreateEmpty();
           dbus::MessageWriter writer(response.get());
           writer.AppendUint32(kTestCallbackId);
-          std::move(*cb).Run(response.get(), /*err=*/nullptr);
+          std::move(cb).Run(response.get(), /*err=*/nullptr);
         });
     ASSERT_FALSE(IsClientRegistered());
-    client_->Init(bus_.get(), kAdapterInterface, adapter_index_);
+    client_->Init(bus_.get(), kAdapterInterface, adapter_index_,
+                  GetCurrVersion(), base::DoNothing());
 
     // Test exported callbacks are correctly parsed
     ASSERT_TRUE(!!method_handler_on_device_policy_effect_changed);
     ASSERT_TRUE(!!method_handler_on_service_allowlist_changed);
     ASSERT_TRUE(IsClientRegistered());
+
+    // Expected call to UnregisterAdminCallback when client is destroyed
+    EXPECT_CALL(*object_proxy_.get(),
+                CallMethodWithErrorResponse(
+                    HasMemberOf(admin::kUnregisterCallback), _, _))
+        .WillOnce([](::dbus::MethodCall* method_call, int timeout_ms,
+                     ::dbus::ObjectProxy::ResponseOrErrorCallback cb) {
+          dbus::MessageReader msg(method_call);
+          // D-Bus method call should have 1 parameter.
+          uint32_t param1;
+          ASSERT_TRUE(FlossDBusClient::ReadAllDBusParams(&msg, &param1));
+          EXPECT_EQ(kTestCallbackId, param1);
+          EXPECT_FALSE(msg.HasMoreData());
+        });
   }
 
   void TestSetServiceAllowlist() {
     // Expected call to SetAllowedServices
     EXPECT_CALL(*object_proxy_.get(),
-                DoCallMethodWithErrorResponse(
+                CallMethodWithErrorResponse(
                     HasMemberOf(admin::kSetAllowedServices), _, _))
         .WillOnce([](::dbus::MethodCall* method_call, int timeout_ms,
-                     ::dbus::ObjectProxy::ResponseOrErrorCallback* cb) {
+                     ::dbus::ObjectProxy::ResponseOrErrorCallback cb) {
           dbus::MessageReader reader(method_call);
           dbus::MessageReader array_reader(nullptr);
-          const uint8_t* buf;
-          size_t sz;
+          base::span<const uint8_t> buf;
 
           EXPECT_TRUE(reader.PopArray(&array_reader));
 
-          for (auto* uuid_in_bytes : kTestUuidInBytes) {
-            EXPECT_TRUE(array_reader.PopArrayOfBytes(&buf, &sz));
-            EXPECT_EQ(sz, kUUIDSize);
-            EXPECT_EQ(std::vector<uint8_t>(uuid_in_bytes, uuid_in_bytes + sz),
-                      std::vector<uint8_t>(buf, buf + sz));
+          for (const auto& uuid_in_bytes : kTestUuidInBytes) {
+            EXPECT_TRUE(array_reader.PopArrayOfBytes(&buf));
+            EXPECT_EQ(buf.size(), kUUIDSize);
+            EXPECT_EQ(buf, uuid_in_bytes);
           }
           EXPECT_FALSE(reader.HasMoreData());
           EXPECT_FALSE(array_reader.HasMoreData());
@@ -179,11 +198,35 @@ class FlossAdminClientTest : public testing::Test,
           auto response = ::dbus::Response::CreateEmpty();
           dbus::MessageWriter writer(response.get());
           writer.AppendUint32(kTestCallbackId);
-          std::move(*cb).Run(response.get(), /*err=*/nullptr);
+          std::move(cb).Run(response.get(), /*err=*/nullptr);
         });
 
     client_->SetAllowedServices(
         base::BindLambdaForTesting([](DBusResult<Void> ret) {}), kTestUuidStr);
+  }
+
+  void TestSetSimpleSecurePairingEnabled() {
+    // Expected call to SetSimpleSecurePairingEnabled
+    EXPECT_CALL(*object_proxy_.get(),
+                CallMethodWithErrorResponse(
+                    HasMemberOf(admin::kSetSimpleSecurePairingEnabled), _, _))
+        .WillOnce([](::dbus::MethodCall* method_call, int timeout_ms,
+                     ::dbus::ObjectProxy::ResponseOrErrorCallback cb) {
+          dbus::MessageReader reader(method_call);
+          bool enable;
+
+          EXPECT_TRUE(reader.PopBool(&enable));
+          EXPECT_TRUE(enable);
+
+          // Create a fake response with uint32_t return value.
+          auto response = ::dbus::Response::CreateEmpty();
+          dbus::MessageWriter writer(response.get());
+          writer.AppendUint32(kTestCallbackId);
+          std::move(cb).Run(response.get(), /*err=*/nullptr);
+        });
+
+    client_->SetSimpleSecurePairingEnabled(
+        base::BindLambdaForTesting([](DBusResult<Void> ret) {}), true);
   }
 
   int adapter_index_ = 5;
@@ -195,7 +238,7 @@ class FlossAdminClientTest : public testing::Test,
   std::unique_ptr<FlossAdminClient> client_;
 
   // For observer test inspections.
-  absl::optional<std::tuple<FlossDeviceId, absl::optional<PolicyEffect>>>
+  std::optional<std::tuple<FlossDeviceId, std::optional<PolicyEffect>>>
       fake_device_policy_effect_info_;
   std::vector<device::BluetoothUUID> fake_service_allowlist_info_;
 
@@ -215,5 +258,22 @@ TEST_F(FlossAdminClientTest, TestSetServiceAllowlistBeforeInit) {
 TEST_F(FlossAdminClientTest, TestSetServiceAllowlistAfterInit) {
   TestInit();
   TestSetServiceAllowlist();
+}
+
+TEST_F(FlossAdminClientTest, TestSetSimpleSecurePairingEnabledAfterInit) {
+  TestInit();
+  TestSetSimpleSecurePairingEnabled();
+}
+
+TEST_F(FlossAdminClientTest, TestSetMultiplePolicyAfterInit) {
+  TestInit();
+  TestSetServiceAllowlist();
+  TestSetSimpleSecurePairingEnabled();
+}
+
+TEST_F(FlossAdminClientTest, TestSetMultiplePolicyBeforeInit) {
+  TestSetServiceAllowlist();
+  TestSetSimpleSecurePairingEnabled();
+  TestInit();
 }
 }  // namespace floss

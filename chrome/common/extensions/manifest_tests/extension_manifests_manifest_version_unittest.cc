@@ -5,42 +5,46 @@
 #include <memory>
 
 #include "chrome/common/extensions/manifest_tests/chrome_manifest_test.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/manifest_constants.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-using extensions::Extension;
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
-namespace errors = extensions::manifest_errors;
+namespace extensions {
+namespace {
+
+namespace errors = manifest_errors;
 
 TEST_F(ChromeManifestTest, ManifestVersionError) {
-  base::Value::Dict mv_missing;
+  base::DictValue mv_missing;
   mv_missing.Set("name", "Miles");
   mv_missing.Set("version", "0.55");
 
-  base::Value::Dict mv0 = mv_missing.Clone();
+  base::DictValue mv0 = mv_missing.Clone();
   mv0.Set("manifest_version", 0);
 
-  base::Value::Dict mv1 = mv_missing.Clone();
+  base::DictValue mv1 = mv_missing.Clone();
   mv1.Set("manifest_version", 1);
 
-  base::Value::Dict mv2 = mv_missing.Clone();
+  base::DictValue mv2 = mv_missing.Clone();
   mv2.Set("manifest_version", 2);
 
-  base::Value::Dict mv3 = mv_missing.Clone();
+  base::DictValue mv3 = mv_missing.Clone();
   mv3.Set("manifest_version", 3);
 
-  base::Value::Dict mv4 = mv_missing.Clone();
+  base::DictValue mv4 = mv_missing.Clone();
   mv4.Set("manifest_version", 4);
 
-  base::Value::Dict mv_string = mv_missing.Clone();
+  base::DictValue mv_string = mv_missing.Clone();
   mv_string.Set("manifest_version", "2");
 
   struct {
     const char* test_name;
     bool require_modern_manifest_version;
-    base::Value::Dict manifest;
+    base::DictValue manifest;
     std::string expected_error;
   } test_data[] = {
       {"require_modern_with_default", true, mv_missing.Clone(),
@@ -74,13 +78,16 @@ TEST_F(ChromeManifestTest, ManifestVersionError) {
     if (!entry.expected_error.empty()) {
       LoadAndExpectError(
           ManifestData(std::move(entry.manifest), entry.test_name),
-          extensions::ErrorUtils::FormatErrorMessage(
-              entry.expected_error, "either 2 or 3", "extensions"),
-          extensions::mojom::ManifestLocation::kUnpacked, create_flags);
+          ErrorUtils::FormatErrorMessage(entry.expected_error, "either 2 or 3",
+                                         "extensions"),
+          mojom::ManifestLocation::kUnpacked, create_flags);
     } else {
       LoadAndExpectSuccess(
           ManifestData(std::move(entry.manifest), entry.test_name),
-          extensions::mojom::ManifestLocation::kUnpacked, create_flags);
+          mojom::ManifestLocation::kUnpacked, create_flags);
     }
   }
 }
+
+}  // namespace
+}  // namespace extensions

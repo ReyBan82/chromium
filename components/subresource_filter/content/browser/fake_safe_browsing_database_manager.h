@@ -8,9 +8,9 @@
 #include <map>
 #include <set>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/safe_browsing/core/browser/db/test_database_manager.h"
-#include "services/network/public/mojom/fetch_api.mojom.h"
 
 class GURL;
 
@@ -28,11 +28,8 @@ class FakeSafeBrowsingDatabaseManager
 
   void AddBlocklistedUrl(const GURL& url,
                          safe_browsing::SBThreatType threat_type,
-                         const safe_browsing::ThreatMetadata& metadata);
-  void AddBlocklistedUrl(const GURL& url,
-                         safe_browsing::SBThreatType threat_type,
-                         safe_browsing::ThreatPatternType pattern_type =
-                             safe_browsing::ThreatPatternType::NONE);
+                         const safe_browsing::ThreatMetadata& metadata =
+                             safe_browsing::ThreatMetadata());
   void RemoveBlocklistedUrl(const GURL& url);
   void RemoveAllBlocklistedUrls();
 
@@ -47,20 +44,18 @@ class FakeSafeBrowsingDatabaseManager
 
   // safe_browsing::TestSafeBrowsingDatabaseManager:
   bool CheckUrlForSubresourceFilter(const GURL& url, Client* client) override;
-  bool CheckResourceUrl(const GURL& url, Client* client) override;
   void CancelCheck(Client* client) override;
-  bool ChecksAreAlwaysAsync() const override;
-  bool CanCheckRequestDestination(
-      network::mojom::RequestDestination /* request_destination */)
-      const override;
-  safe_browsing::ThreatSource GetThreatSource() const override;
+  safe_browsing::ThreatSource GetBrowseUrlThreatSource(
+      safe_browsing::CheckBrowseUrlType check_type) const override;
+  safe_browsing::ThreatSource GetNonBrowseUrlThreatSource() const override;
   bool CheckExtensionIDs(const std::set<std::string>& extension_ids,
                          Client* client) override;
 
  private:
-  void OnCheckUrlForSubresourceFilterComplete(Client* client, const GURL& url);
+  void OnCheckUrlForSubresourceFilterComplete(base::WeakPtr<Client> client,
+                                              const GURL& url);
 
-  std::set<Client*> checks_;
+  std::set<raw_ptr<Client, SetExperimental>> checks_;
   std::map<
       GURL,
       std::pair<safe_browsing::SBThreatType, safe_browsing::ThreatMetadata>>

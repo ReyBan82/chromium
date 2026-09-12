@@ -6,34 +6,31 @@
 
 #include <utility>
 
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/string_split.h"
 #include "base/test/bind.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/task_environment.h"
-#include "chrome/browser/ash/file_manager/fake_disk_mount_manager.h"
-#include "chrome/browser/ash/file_manager/volume_manager.h"
-#include "chrome/browser/ash/file_manager/volume_manager_factory.h"
-#include "chrome/browser/ash/file_manager/volume_manager_observer.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/ash/smb_client/smb_url.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chromeos/ash/components/disks/disk_mount_manager.h"
+#include "chromeos/ash/components/disks/fake_disk_mount_manager.h"
 #include "chromeos/ash/components/disks/mount_point.h"
 #include "chromeos/ash/components/smbfs/smbfs_host.h"
 #include "chromeos/ash/components/smbfs/smbfs_mounter.h"
 #include "content/public/test/browser_task_environment.h"
+#include "mojo/public/cpp/bindings/receiver.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "storage/browser/file_system/external_mount_points.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 using testing::_;
-using testing::AllOf;
-using testing::Property;
 using testing::Unused;
 
-namespace ash {
-namespace smb_client {
+namespace ash::smb_client {
 namespace {
 
 constexpr char kSharePath[] = "smb://share/path";
@@ -47,28 +44,16 @@ constexpr char kMountPath[] = "/share/mount/path";
 constexpr char kFileName[] = "file_name.ext";
 constexpr char kMountIdHashSeparator[] = "#";
 
-// Creates a new VolumeManager for tests.
-// By default, VolumeManager KeyedService is null for testing.
-std::unique_ptr<KeyedService> BuildVolumeManager(
-    content::BrowserContext* context) {
-  return std::make_unique<file_manager::VolumeManager>(
-      Profile::FromBrowserContext(context),
-      nullptr /* drive_integration_service */,
-      nullptr /* power_manager_client */,
-      disks::DiskMountManager::GetInstance(),
-      nullptr /* file_system_provider_service */,
-      file_manager::VolumeManager::GetMtpStorageInfoCallback());
-}
-
-class MockVolumeManagerObsever : public file_manager::VolumeManagerObserver {
+class MockMountObserver : public SmbFsShare::MountObserver {
  public:
   MOCK_METHOD(void,
-              OnVolumeMounted,
-              (MountError error_code, const file_manager::Volume& volume),
+              OnSmbFsMounted,
+              (const base::FilePath& mount_path,
+               const std::string& display_name),
               (override));
   MOCK_METHOD(void,
-              OnVolumeUnmounted,
-              (MountError error_code, const file_manager::Volume& volume),
+              OnSmbFsUnmounted,
+              (const base::FilePath& mount_path),
               (override));
 };
 
@@ -102,11 +87,6 @@ class SmbFsShareTest : public testing::Test {
   }
 
   void SetUp() override {
-    file_manager::VolumeManagerFactory::GetInstance()->SetTestingFactory(
-        &profile_, base::BindRepeating(&BuildVolumeManager));
-
-    file_manager::VolumeManager::Get(&profile_)->AddObserver(&observer_);
-
     mounter_creation_callback_ = base::BindLambdaForTesting(
         [this](const std::string& share_path, const std::string& mount_dir_name,
                const SmbFsShare::MountOptions& options,
@@ -117,13 +97,11 @@ class SmbFsShareTest : public testing::Test {
         });
   }
 
-  void TearDown() override {
-    file_manager::VolumeManager::Get(&profile_)->RemoveObserver(&observer_);
-  }
+  void TearDown() override {}
 
-  static file_manager::FakeDiskMountManager* disk_mount_manager() {
-    static file_manager::FakeDiskMountManager* manager =
-        new file_manager::FakeDiskMountManager();
+  static disks::FakeDiskMountManager* disk_mount_manager() {
+    static disks::FakeDiskMountManager* manager =
+        new disks::FakeDiskMountManager();
     return manager;
   }
 
@@ -144,12 +122,12 @@ class SmbFsShareTest : public testing::Test {
       content::BrowserTaskEnvironment::REAL_IO_THREAD,
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
   TestingProfile profile_;
-  MockVolumeManagerObsever observer_;
+  MockMountObserver observer_;
 
   SmbFsShare::MounterCreationCallback mounter_creation_callback_;
   std::unique_ptr<MockSmbFsMounter> mounter_ =
       std::make_unique<MockSmbFsMounter>();
-  MockSmbFsMounter* raw_mounter_ = mounter_.get();
+  raw_ptr<MockSmbFsMounter, DanglingUntriaged> raw_mounter_ = mounter_.get();
 };
 
 TEST_F(SmbFsShareTest, Mount) {
@@ -159,6 +137,7 @@ TEST_F(SmbFsShareTest, Mount) {
 
   SmbFsShare share(&profile_, SmbUrl(kSharePath), kDisplayName, {});
   share.SetMounterCreationCallbackForTest(mounter_creation_callback_);
+  share.AddMountObserver(&observer_);
 
   EXPECT_CALL(*raw_mounter_, Mount(_))
       .WillOnce([this, &share, &smbfs_receiver,
@@ -167,23 +146,10 @@ TEST_F(SmbFsShareTest, Mount) {
             smbfs::mojom::MountError::kOk,
             CreateSmbFsHost(&share, &smbfs_receiver, &delegate));
       });
-  EXPECT_CALL(
-      observer_,
-      OnVolumeMounted(
-          MountError::kSuccess,
-          AllOf(Property(&file_manager::Volume::type,
-                         file_manager::VOLUME_TYPE_SMB),
-                Property(&file_manager::Volume::mount_path,
-                         base::FilePath(kMountPath)),
-                Property(&file_manager::Volume::volume_label, kDisplayName))))
+  EXPECT_CALL(observer_,
+              OnSmbFsMounted(base::FilePath(kMountPath), kDisplayName))
       .Times(1);
-  EXPECT_CALL(observer_, OnVolumeUnmounted(
-                             MountError::kSuccess,
-                             AllOf(Property(&file_manager::Volume::type,
-                                            file_manager::VOLUME_TYPE_SMB),
-                                   Property(&file_manager::Volume::mount_path,
-                                            base::FilePath(kMountPath)))))
-      .Times(1);
+  EXPECT_CALL(observer_, OnSmbFsUnmounted(base::FilePath(kMountPath))).Times(1);
 
   base::RunLoop run_loop;
   share.Mount(base::BindLambdaForTesting([&run_loop](SmbMountResult result) {
@@ -208,11 +174,12 @@ TEST_F(SmbFsShareTest, MountFailure) {
       .WillOnce([](smbfs::SmbFsMounter::DoneCallback callback) {
         std::move(callback).Run(smbfs::mojom::MountError::kTimeout, nullptr);
       });
-  EXPECT_CALL(observer_, OnVolumeMounted(MountError::kSuccess, _)).Times(0);
-  EXPECT_CALL(observer_, OnVolumeUnmounted(MountError::kSuccess, _)).Times(0);
+  EXPECT_CALL(observer_, OnSmbFsMounted(_, _)).Times(0);
+  EXPECT_CALL(observer_, OnSmbFsUnmounted(_)).Times(0);
 
   SmbFsShare share(&profile_, SmbUrl(kSharePath), kDisplayName, {});
   share.SetMounterCreationCallbackForTest(mounter_creation_callback_);
+  share.AddMountObserver(&observer_);
 
   base::RunLoop run_loop;
   share.Mount(base::BindLambdaForTesting([&run_loop](SmbMountResult result) {
@@ -233,6 +200,7 @@ TEST_F(SmbFsShareTest, UnmountOnDisconnect) {
 
   SmbFsShare share(&profile_, SmbUrl(kSharePath), kDisplayName, {});
   share.SetMounterCreationCallbackForTest(mounter_creation_callback_);
+  share.AddMountObserver(&observer_);
 
   EXPECT_CALL(*raw_mounter_, Mount(_))
       .WillOnce([this, &share, &smbfs_receiver,
@@ -242,23 +210,11 @@ TEST_F(SmbFsShareTest, UnmountOnDisconnect) {
             CreateSmbFsHost(&share, &smbfs_receiver, &delegate));
       });
 
-  EXPECT_CALL(
-      observer_,
-      OnVolumeMounted(
-          MountError::kSuccess,
-          AllOf(Property(&file_manager::Volume::type,
-                         file_manager::VOLUME_TYPE_SMB),
-                Property(&file_manager::Volume::mount_path,
-                         base::FilePath(kMountPath)),
-                Property(&file_manager::Volume::volume_label, kDisplayName))))
+  EXPECT_CALL(observer_,
+              OnSmbFsMounted(base::FilePath(kMountPath), kDisplayName))
       .Times(1);
   base::RunLoop run_loop;
-  EXPECT_CALL(observer_, OnVolumeUnmounted(
-                             MountError::kSuccess,
-                             AllOf(Property(&file_manager::Volume::type,
-                                            file_manager::VOLUME_TYPE_SMB),
-                                   Property(&file_manager::Volume::mount_path,
-                                            base::FilePath(kMountPath)))))
+  EXPECT_CALL(observer_, OnSmbFsUnmounted(base::FilePath(kMountPath)))
       .WillOnce(base::test::RunClosure(run_loop.QuitClosure()));
 
   share.Mount(
@@ -278,6 +234,7 @@ TEST_F(SmbFsShareTest, DisallowCredentialsDialogByDefault) {
 
   SmbFsShare share(&profile_, SmbUrl(kSharePath), kDisplayName, {});
   share.SetMounterCreationCallbackForTest(mounter_creation_callback_);
+  share.AddMountObserver(&observer_);
 
   EXPECT_CALL(*raw_mounter_, Mount(_))
       .WillOnce([this, &share, &smbfs_receiver,
@@ -286,8 +243,10 @@ TEST_F(SmbFsShareTest, DisallowCredentialsDialogByDefault) {
             smbfs::mojom::MountError::kOk,
             CreateSmbFsHost(&share, &smbfs_receiver, &delegate));
       });
-  EXPECT_CALL(observer_, OnVolumeMounted(MountError::kSuccess, _)).Times(1);
-  EXPECT_CALL(observer_, OnVolumeUnmounted(MountError::kSuccess, _)).Times(1);
+  EXPECT_CALL(observer_,
+              OnSmbFsMounted(base::FilePath(kMountPath), kDisplayName))
+      .Times(1);
+  EXPECT_CALL(observer_, OnSmbFsUnmounted(base::FilePath(kMountPath))).Times(1);
 
   {
     base::RunLoop run_loop;
@@ -314,6 +273,7 @@ TEST_F(SmbFsShareTest, DisallowCredentialsDialogAfterTimeout) {
 
   SmbFsShare share(&profile_, SmbUrl(kSharePath), kDisplayName, {});
   share.SetMounterCreationCallbackForTest(mounter_creation_callback_);
+  share.AddMountObserver(&observer_);
 
   EXPECT_CALL(*raw_mounter_, Mount(_))
       .WillOnce([this, &share, &smbfs_receiver,
@@ -322,8 +282,10 @@ TEST_F(SmbFsShareTest, DisallowCredentialsDialogAfterTimeout) {
             smbfs::mojom::MountError::kOk,
             CreateSmbFsHost(&share, &smbfs_receiver, &delegate));
       });
-  EXPECT_CALL(observer_, OnVolumeMounted(MountError::kSuccess, _)).Times(1);
-  EXPECT_CALL(observer_, OnVolumeUnmounted(MountError::kSuccess, _)).Times(1);
+  EXPECT_CALL(observer_,
+              OnSmbFsMounted(base::FilePath(kMountPath), kDisplayName))
+      .Times(1);
+  EXPECT_CALL(observer_, OnSmbFsUnmounted(base::FilePath(kMountPath))).Times(1);
 
   {
     base::RunLoop run_loop;
@@ -355,6 +317,7 @@ TEST_F(SmbFsShareTest, RemoveSavedCredentials) {
 
   SmbFsShare share(&profile_, SmbUrl(kSharePath), kDisplayName, {});
   share.SetMounterCreationCallbackForTest(mounter_creation_callback_);
+  share.AddMountObserver(&observer_);
 
   EXPECT_CALL(*raw_mounter_, Mount(_))
       .WillOnce([this, &share, &smbfs_receiver,
@@ -363,8 +326,10 @@ TEST_F(SmbFsShareTest, RemoveSavedCredentials) {
             smbfs::mojom::MountError::kOk,
             CreateSmbFsHost(&share, &smbfs_receiver, &delegate));
       });
-  EXPECT_CALL(observer_, OnVolumeMounted(MountError::kSuccess, _)).Times(1);
-  EXPECT_CALL(observer_, OnVolumeUnmounted(MountError::kSuccess, _)).Times(1);
+  EXPECT_CALL(observer_,
+              OnSmbFsMounted(base::FilePath(kMountPath), kDisplayName))
+      .Times(1);
+  EXPECT_CALL(observer_, OnSmbFsUnmounted(base::FilePath(kMountPath))).Times(1);
 
   {
     base::RunLoop run_loop;
@@ -395,6 +360,7 @@ TEST_F(SmbFsShareTest, RemoveSavedCredentials_Disconnect) {
 
   SmbFsShare share(&profile_, SmbUrl(kSharePath), kDisplayName, {});
   share.SetMounterCreationCallbackForTest(mounter_creation_callback_);
+  share.AddMountObserver(&observer_);
 
   EXPECT_CALL(*raw_mounter_, Mount(_))
       .WillOnce([this, &share, &smbfs_receiver,
@@ -403,8 +369,10 @@ TEST_F(SmbFsShareTest, RemoveSavedCredentials_Disconnect) {
             smbfs::mojom::MountError::kOk,
             CreateSmbFsHost(&share, &smbfs_receiver, &delegate));
       });
-  EXPECT_CALL(observer_, OnVolumeMounted(MountError::kSuccess, _)).Times(1);
-  EXPECT_CALL(observer_, OnVolumeUnmounted(MountError::kSuccess, _)).Times(1);
+  EXPECT_CALL(observer_,
+              OnSmbFsMounted(base::FilePath(kMountPath), kDisplayName))
+      .Times(1);
+  EXPECT_CALL(observer_, OnSmbFsUnmounted(base::FilePath(kMountPath))).Times(1);
 
   {
     base::RunLoop run_loop;
@@ -452,7 +420,7 @@ TEST_F(SmbFsShareTest, GenerateStableMountIdInput) {
 
   smbfs::SmbFsMounter::MountOptions options2;
   options2.kerberos_options =
-      absl::make_optional<smbfs::SmbFsMounter::KerberosOptions>(
+      std::make_optional<smbfs::SmbFsMounter::KerberosOptions>(
           smbfs::SmbFsMounter::KerberosOptions::Source::kKerberos,
           kKerberosIdentity);
   SmbFsShare share2(&profile_, SmbUrl(kSharePath2), kDisplayName, options2);
@@ -489,5 +457,4 @@ TEST_F(SmbFsShareTest, GenerateStableMountId) {
   EXPECT_EQ(mount_id2.size(), 64u);
 }
 
-}  // namespace smb_client
-}  // namespace ash
+}  // namespace ash::smb_client

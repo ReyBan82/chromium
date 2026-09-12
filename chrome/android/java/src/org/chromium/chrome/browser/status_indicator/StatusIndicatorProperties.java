@@ -5,10 +5,14 @@
 package org.chromium.chrome.browser.status_indicator;
 
 import android.graphics.drawable.Drawable;
+import android.view.View;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.modelutil.PropertyKey;
 import org.chromium.ui.modelutil.PropertyModel;
+import org.chromium.ui.util.ViewVisibility;
 
+@NullMarked
 class StatusIndicatorProperties {
     /** The text that describes status. */
     static final PropertyModel.WritableObjectPropertyKey<String> STATUS_TEXT =
@@ -19,8 +23,8 @@ class StatusIndicatorProperties {
             new PropertyModel.WritableObjectPropertyKey<>();
 
     /** Visibility of the status indicator's Android view. */
-    static final PropertyModel.WritableIntPropertyKey ANDROID_VIEW_VISIBILITY =
-            new PropertyModel.WritableIntPropertyKey();
+    static final PropertyModel.WritableIntDefPropertyKey<ViewVisibility> ANDROID_VIEW_VISIBILITY =
+            new PropertyModel.WritableIntDefPropertyKey<>(View.GONE);
 
     /** Whether the composited version of the status indicator is visible. */
     static final PropertyModel.WritableBooleanPropertyKey COMPOSITED_VIEW_VISIBLE =
@@ -53,7 +57,17 @@ class StatusIndicatorProperties {
     static final PropertyModel.WritableBooleanPropertyKey IS_OBSCURED =
             new PropertyModel.WritableBooleanPropertyKey();
 
-    static final PropertyKey[] ALL_KEYS = new PropertyKey[] {STATUS_TEXT, STATUS_ICON,
-            ANDROID_VIEW_VISIBILITY, COMPOSITED_VIEW_VISIBLE, BACKGROUND_COLOR, TEXT_ALPHA,
-            TEXT_COLOR, ICON_TINT, CURRENT_VISIBLE_HEIGHT, IS_OBSCURED};
+    static final PropertyKey[] ALL_KEYS =
+            new PropertyKey[] {
+                STATUS_TEXT,
+                STATUS_ICON,
+                ANDROID_VIEW_VISIBILITY,
+                COMPOSITED_VIEW_VISIBLE,
+                BACKGROUND_COLOR,
+                TEXT_ALPHA,
+                TEXT_COLOR,
+                ICON_TINT,
+                CURRENT_VISIBLE_HEIGHT,
+                IS_OBSCURED
+            };
 }

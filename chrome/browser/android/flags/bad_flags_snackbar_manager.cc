@@ -6,9 +6,11 @@
 
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
-#include "chrome/android/chrome_jni_headers/BadFlagsSnackbarManager_jni.h"
 #include "ui/android/view_android.h"
 #include "ui/android/window_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/BadFlagsSnackbarManager_jni.h"
 
 void ShowBadFlagsSnackbar(content::WebContents* web_contents,
                           const std::u16string& message) {
@@ -19,6 +21,7 @@ void ShowBadFlagsSnackbar(content::WebContents* web_contents,
   if (!window_android)
     return;
   chrome::Java_BadFlagsSnackbarManager_show(
-      env, window_android->GetJavaObject(),
-      base::android::ConvertUTF16ToJavaString(env, message));
+      env, window_android->GetJavaObject(), message);
 }
+
+DEFINE_JNI(BadFlagsSnackbarManager)

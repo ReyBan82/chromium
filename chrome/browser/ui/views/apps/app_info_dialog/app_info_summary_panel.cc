@@ -19,15 +19,17 @@
 #include "components/app_constants/constants.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/browser/launch_util.h"
 #include "extensions/browser/path_util.h"
 #include "extensions/common/extension.h"
-#include "extensions/common/manifest.h"
+#include "extensions/common/manifest_handlers/description_info.h"
+#include "extensions/common/manifest_handlers/manifest_url_handlers.h"
 #include "extensions/common/manifest_handlers/shared_module_info.h"
-#include "extensions/common/manifest_url_handlers.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/combobox_model.h"
 #include "ui/gfx/geometry/insets.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/controls/combobox/combobox.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/controls/link.h"
@@ -58,18 +60,17 @@ class LaunchOptionsComboboxModel : public ui::ComboboxModel {
 };
 
 LaunchOptionsComboboxModel::LaunchOptionsComboboxModel() {
-  // Hosted apps can only toggle between LAUNCH_TYPE_WINDOW and
-  // LAUNCH_TYPE_REGULAR.
-  launch_types_.push_back(extensions::LAUNCH_TYPE_REGULAR);
+  // Hosted apps can only toggle between LaunchType::kWindow and
+  // LaunchType::kRegular.
+  launch_types_.push_back(extensions::LaunchType::kRegular);
   launch_type_messages_.push_back(
       l10n_util::GetStringUTF16(IDS_APP_CONTEXT_MENU_OPEN_TAB));
-  launch_types_.push_back(extensions::LAUNCH_TYPE_WINDOW);
+  launch_types_.push_back(extensions::LaunchType::kWindow);
   launch_type_messages_.push_back(
       l10n_util::GetStringUTF16(IDS_APP_CONTEXT_MENU_OPEN_WINDOW));
 }
 
-LaunchOptionsComboboxModel::~LaunchOptionsComboboxModel() {
-}
+LaunchOptionsComboboxModel::~LaunchOptionsComboboxModel() = default;
 
 extensions::LaunchType LaunchOptionsComboboxModel::GetLaunchTypeAtIndex(
     int index) const {
@@ -83,8 +84,19 @@ int LaunchOptionsComboboxModel::GetIndexForLaunchType(
       return i;
     }
   }
+
+  static constexpr auto kLaunchTypeStrings =
+      base::MakeFixedFlatMap<extensions::LaunchType, std::string_view>({
+          {extensions::LaunchType::kInvalid, "kInvalid"},
+          {extensions::LaunchType::kPinned, "kPinned"},
+          {extensions::LaunchType::kRegular, "kRegular"},
+          {extensions::LaunchType::kFullscreen, "kFullscreen"},
+          {extensions::LaunchType::kWindow, "kWindow"},
+      });
+
   // If the requested launch type is not available, just select the first one.
-  LOG(WARNING) << "Unavailable launch type " << launch_type << " selected.";
+  LOG(WARNING) << "Unavailable launch type "
+               << kLaunchTypeStrings.at(launch_type) << " selected.";
   return 0;
 }
 
@@ -121,9 +133,10 @@ void AppInfoSummaryPanel::AddDescriptionAndLinksControl(
           ChromeLayoutProvider::Get()->GetDistanceMetric(
               DISTANCE_RELATED_CONTROL_VERTICAL_SMALL)));
 
-  if (!app_->description().empty()) {
+  if (!extensions::DescriptionInfo::GetDescription(*app_).empty()) {
     constexpr size_t kMaxLength = 400;
-    std::u16string text = base::UTF8ToUTF16(app_->description());
+    std::u16string text =
+        base::UTF8ToUTF16(extensions::DescriptionInfo::GetDescription(*app_));
     if (text.length() > kMaxLength) {
       text = text.substr(0, kMaxLength - 5);
       text += u" ... ";
@@ -156,8 +169,9 @@ void AppInfoSummaryPanel::AddDescriptionAndLinksControl(
 
 void AppInfoSummaryPanel::AddDetailsControl(views::View* vertical_stack) {
   // Component apps have no details.
-  if (app_->location() == extensions::mojom::ManifestLocation::kComponent)
+  if (app_->location() == extensions::mojom::ManifestLocation::kComponent) {
     return;
+  }
 
   std::unique_ptr<views::View> details_list =
       CreateVerticalStack(ChromeLayoutProvider::Get()->GetDistanceMetric(
@@ -188,14 +202,15 @@ void AppInfoSummaryPanel::AddDetailsControl(views::View* vertical_stack) {
 }
 
 void AppInfoSummaryPanel::AddLaunchOptionControl(views::View* vertical_stack) {
-  if (!CanSetLaunchType())
+  if (!CanSetLaunchType()) {
     return;
+  }
 
   launch_options_combobox_model_ =
       std::make_unique<LaunchOptionsComboboxModel>();
   auto launch_options_combobox =
       std::make_unique<views::Combobox>(launch_options_combobox_model_.get());
-  launch_options_combobox->SetAccessibleName(
+  launch_options_combobox->GetViewAccessibility().SetName(
       l10n_util::GetStringUTF16(IDS_APPLICATION_INFO_LAUNCH_OPTIONS_ACCNAME));
   launch_options_combobox->SetCallback(base::BindRepeating(
       &AppInfoSummaryPanel::LaunchOptionsChanged, base::Unretained(this)));
@@ -233,7 +248,8 @@ void AppInfoSummaryPanel::StartCalculatingAppSize() {
   if (!app_->path().empty()) {
     extensions::path_util::CalculateAndFormatExtensionDirectorySize(
         app_->path(), IDS_APPLICATION_INFO_SIZE_SMALL_LABEL,
-        base::BindOnce(&AppInfoSummaryPanel::OnAppSizeCalculated, AsWeakPtr()));
+        base::BindOnce(&AppInfoSummaryPanel::OnAppSizeCalculated,
+                       weak_ptr_factory_.GetWeakPtr()));
   }
 }
 
@@ -271,8 +287,9 @@ bool AppInfoSummaryPanel::CanShowAppHomePage() const {
 
 void AppInfoSummaryPanel::DisplayLicenses() {
   DCHECK(CanDisplayLicenses());
-  for (const auto& license_url : GetLicenseUrls())
+  for (const auto& license_url : GetLicenseUrls()) {
     OpenLink(license_url);
+  }
   Close();
 }
 
@@ -281,8 +298,9 @@ bool AppInfoSummaryPanel::CanDisplayLicenses() const {
 }
 
 std::vector<GURL> AppInfoSummaryPanel::GetLicenseUrls() const {
-  if (!extensions::SharedModuleInfo::ImportsModules(app_))
+  if (!extensions::SharedModuleInfo::ImportsModules(app_)) {
     return std::vector<GURL>();
+  }
 
   std::vector<GURL> license_urls;
   extensions::ExtensionRegistry* registry =
@@ -297,11 +315,12 @@ std::vector<GURL> AppInfoSummaryPanel::GetLicenseUrls() const {
     DCHECK(imported_module);
 
     GURL about_page = extensions::ManifestURL::GetAboutPage(imported_module);
-    if (about_page != GURL::EmptyGURL())
+    if (about_page != GURL()) {
       license_urls.push_back(about_page);
+    }
   }
   return license_urls;
 }
 
-BEGIN_METADATA(AppInfoSummaryPanel, AppInfoPanel)
+BEGIN_METADATA(AppInfoSummaryPanel)
 END_METADATA

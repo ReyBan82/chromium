@@ -20,7 +20,6 @@
 #include "media/base/audio_decoder_config.h"
 #include "media/base/media_log.h"
 #include "media/base/media_tracks.h"
-#include "media/base/text_track_config.h"
 #include "media/base/video_decoder_config.h"
 #include "media/formats/webm/webm_audio_client.h"
 #include "media/formats/webm/webm_content_encodings_client.h"
@@ -32,19 +31,19 @@ namespace media {
 // Parser for WebM Tracks element.
 class MEDIA_EXPORT WebMTracksParser : public WebMParserClient {
  public:
-  WebMTracksParser(MediaLog* media_log, bool ignore_text_tracks);
+  explicit WebMTracksParser(MediaLog* media_log);
 
   WebMTracksParser(const WebMTracksParser&) = delete;
   WebMTracksParser& operator=(const WebMTracksParser&) = delete;
 
   ~WebMTracksParser() override;
 
-  // Parses a WebM Tracks element in |buf|.
+  // Parses a WebM Tracks element in `buf`.
   //
   // Returns -1 if the parse fails.
   // Returns 0 if more data is needed.
   // Returns the number of bytes parsed on success.
-  int Parse(const uint8_t* buf, int size);
+  int Parse(base::span<const uint8_t> buf);
 
   int64_t audio_track_num() const { return audio_track_num_; }
   int64_t video_track_num() const { return video_track_num_; }
@@ -76,17 +75,9 @@ class MEDIA_EXPORT WebMTracksParser : public WebMParserClient {
     return video_decoder_config_;
   }
 
-  typedef std::map<int, TextTrackConfig> TextTracks;
-
-  const TextTracks& text_tracks() const {
-    return text_tracks_;
-  }
-
   int detected_audio_track_count() const { return detected_audio_track_count_; }
 
   int detected_video_track_count() const { return detected_video_track_count_; }
-
-  int detected_text_track_count() const { return detected_text_track_count_; }
 
   // Note: Calling media_tracks() method passes the ownership of the MediaTracks
   // object from WebMTracksParser to the caller (which is typically
@@ -119,7 +110,7 @@ class MEDIA_EXPORT WebMTracksParser : public WebMParserClient {
   bool OnListEnd(int id) override;
   bool OnUInt(int id, int64_t val) override;
   bool OnFloat(int id, double val) override;
-  bool OnBinary(int id, const uint8_t* data, int size) override;
+  bool OnBinary(int id, base::span<const uint8_t> data) override;
   bool OnString(int id, const std::string& str) override;
 
   bool reset_on_next_parse_;
@@ -138,12 +129,10 @@ class MEDIA_EXPORT WebMTracksParser : public WebMParserClient {
   int64_t audio_default_duration_;
   int64_t video_track_num_;
   int64_t video_default_duration_;
-  bool ignore_text_tracks_;
-  TextTracks text_tracks_;
   std::set<int64_t> ignored_tracks_;
   std::string audio_encryption_key_id_;
   std::string video_encryption_key_id_;
-  raw_ptr<MediaLog> media_log_;
+  const std::unique_ptr<MediaLog> media_log_;
 
   WebMAudioClient audio_client_;
   AudioDecoderConfig audio_decoder_config_;
@@ -153,7 +142,6 @@ class MEDIA_EXPORT WebMTracksParser : public WebMParserClient {
 
   int detected_audio_track_count_;
   int detected_video_track_count_;
-  int detected_text_track_count_;
   std::unique_ptr<MediaTracks> media_tracks_;
 };
 

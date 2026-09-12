@@ -8,9 +8,8 @@
 
 #include "ash/public/cpp/app_list/app_list_config.h"
 #include "base/check.h"
-#include "base/containers/contains.h"
-#include "base/guid.h"
 #include "base/strings/string_util.h"
+#include "base/uuid.h"
 #include "chrome/browser/ash/app_list/app_list_model_updater.h"
 #include "chrome/browser/ash/app_list/app_list_syncable_service.h"
 #include "components/sync/model/string_ordinal.h"
@@ -50,10 +49,10 @@ void AppListSyncModelSanitizer::SanitizePageBreaks(
   for (size_t i = 0; i < sync_items.size(); ++i) {
     const AppListSyncableService::SyncItem* item = sync_items[i];
     const std::string item_id = item->item_id;
+    auto it = resolved_duplicate_positions.find(item_id);
     syncer::StringOrdinal item_ordinal =
-        resolved_duplicate_positions.count(item_id)
-            ? resolved_duplicate_positions[item_id]
-            : item->item_ordinal;
+        it != resolved_duplicate_positions.end() ? it->second
+                                                 : item->item_ordinal;
     // `AppListSyncableService::GetSortedTopLevelSyncItems()` filters out items
     // with an invalid position.
     DCHECK(item_ordinal.IsValid());
@@ -104,7 +103,7 @@ void AppListSyncModelSanitizer::SanitizePageBreaks(
     // could also unexpectedly create partially filled pages where they did not
     // previously exist (for example, if sync contains items that are not
     // installed on a portion of the user's devices).
-    if (!base::Contains(top_level_items, item_id)) {
+    if (!top_level_items.contains(item_id)) {
       last_valid_position = item_ordinal;
       continue;
     }
@@ -123,7 +122,7 @@ void AppListSyncModelSanitizer::SanitizePageBreaks(
       if (last_valid_position.Equals(item_ordinal)) {
         ResolveDuplicatePositionsStartingAtIndex(
             sync_items, i, last_valid_position, &resolved_duplicate_positions);
-        DCHECK(resolved_duplicate_positions.count(item_id));
+        DCHECK(resolved_duplicate_positions.contains(item_id));
 
         item_ordinal = resolved_duplicate_positions[item_id];
         page_breaks_to_add.push_back(
@@ -146,7 +145,8 @@ void AppListSyncModelSanitizer::SanitizePageBreaks(
 
   for (const auto& position : page_breaks_to_add) {
     syncable_service_->AddPageBreakItem(
-        std::string(kImplicitPageBreakIdPrefix) + base::GenerateGUID(),
+        std::string(kImplicitPageBreakIdPrefix) +
+            base::Uuid::GenerateRandomV4().AsLowercaseString(),
         position);
   }
 

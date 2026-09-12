@@ -5,8 +5,10 @@
 #include "cc/base/region.h"
 
 #include <stddef.h>
+
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/no_destructor.h"
 #include "base/trace_event/traced_value.h"
 #include "cc/base/simple_enclosed_region.h"
@@ -19,6 +21,10 @@ Region::Region() = default;
 Region::Region(const SkRegion& region) : skregion_(region) {}
 
 Region::Region(const Region& region) = default;
+
+Region::Region(Region&& other) {
+  skregion_.swap(other.skregion_);
+}
 
 Region::Region(const gfx::Rect& rect)
     : skregion_(gfx::RectToSkIRect(rect)) {
@@ -33,6 +39,11 @@ const Region& Region::operator=(const gfx::Rect& rect) {
 
 const Region& Region::operator=(const Region& region) {
   skregion_ = region.skregion_;
+  return *this;
+}
+
+Region& Region::operator=(Region&& other) {
+  skregion_.swap(other.skregion_);
   return *this;
 }
 
@@ -64,7 +75,7 @@ int Region::GetRegionComplexity() const {
 }
 
 void Region::GetBoundaryPath(SkPath* path) const {
-  skregion_.getBoundaryPath(path);
+  *path = skregion_.getBoundaryPath();
 }
 
 bool Region::Contains(const gfx::Point& point) const {
@@ -112,6 +123,16 @@ void Region::Union(const gfx::Rect& rect) {
 
 void Region::Union(const Region& region) {
   skregion_.op(region.skregion_, SkRegion::kUnion_Op);
+}
+
+void Region::Union(base::span<const SkIRect> rects) {
+  if (rects.empty()) {
+    return;
+  }
+
+  SkRegion batch_region;
+  batch_region.setRects({rects.data(), rects.size()});
+  skregion_.op(batch_region, SkRegion::kUnion_Op);
 }
 
 void Region::Intersect(const gfx::Rect& rect) {

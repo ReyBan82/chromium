@@ -10,8 +10,9 @@ import os
 import cr
 
 DEFAULT = cr.Config.From(
-    DEPOT_TOOLS=os.path.join('{GOOGLE_CODE}', 'depot_tools'),
-    CHROMIUM_OUT_DIR='{CR_OUT_BASE}',)
+  DEPOT_TOOLS=os.path.join('{GOOGLE_CODE}', 'depot_tools'),
+  CHROMIUM_OUT_DIR='{CR_OUT_BASE}',
+)
 
 
 class Platform(cr.Plugin, cr.Plugin.Type):
@@ -26,10 +27,11 @@ class Platform(cr.Plugin, cr.Plugin.Type):
   @classmethod
   def AddArguments(cls, parser):
     parser.add_argument(
-        '--platform', dest=cls.SELECTOR,
-        choices=cls.Choices(),
-        default=None,
-        help='Sets the target platform to use. Overrides ' + cls.SELECTOR
+      '--platform',
+      dest=cls.SELECTOR,
+      choices=cls.Choices(),
+      default=None,
+      help='Sets the target platform to use. Overrides ' + cls.SELECTOR,
     )
 
   @classmethod
@@ -62,9 +64,7 @@ def _PathFixup(base, key, value):
       if entry not in paths:
         paths.append(entry)
     for entry in value.split(os.path.pathsep):
-      if entry.endswith(os.path.sep + 'goma'):
-        pass
-      elif entry not in paths:
+      if entry not in paths:
         paths.append(entry)
     value = os.path.pathsep.join(paths)
   return value

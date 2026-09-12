@@ -29,13 +29,14 @@ TEST_F(TransferableSocketTest, MojoTraits) {
 #if BUILDFLAG(IS_WIN)
   net::EnsureWinsockInit();
 #endif
-  net::TCPSocket socket(nullptr, nullptr, net::NetLogSource());
-  socket.Open(net::AddressFamily::ADDRESS_FAMILY_IPV4);
-  auto socket_desc = socket.ReleaseSocketDescriptorForTesting();
+  std::unique_ptr<net::TCPSocket> socket =
+      net::TCPSocket::Create(nullptr, nullptr, net::NetLogSource());
+  socket->Open(net::AddressFamily::ADDRESS_FAMILY_IPV4);
+  auto socket_desc = socket->ReleaseSocketDescriptorForTesting();
   TransferableSocket transferable(socket_desc
 #if BUILDFLAG(IS_WIN)
                                   ,
-                                  base::Process::Current()
+                                  base::GetCurrentProcId()
 #endif
   );
   TransferableSocket roundtripped;
@@ -50,7 +51,7 @@ TEST_F(TransferableSocketTest, InvalidSocketMojoTraits) {
   TransferableSocket transferable(socket_desc
 #if BUILDFLAG(IS_WIN)
                                   ,
-                                  base::Process::Current()
+                                  base::GetCurrentProcId()
 #endif
   );
   TransferableSocket roundtripped;

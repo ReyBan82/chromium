@@ -8,9 +8,11 @@
 
 #include <string>
 
+#include "base/feature_list.h"
 #include "base/values.h"
 #include "build/build_config.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/ui_features.h"
 #include "chrome/common/pref_names.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
@@ -36,13 +38,12 @@ int TypeToPrefValue(SessionStartupPref::Type type) {
   }
 }
 
-void URLListToPref(const base::Value::List& url_list,
-                   SessionStartupPref* pref) {
+void URLListToPref(const base::ListValue& url_list, SessionStartupPref* pref) {
   pref->urls.clear();
   for (const base::Value& i : url_list) {
     const std::string* url_text = i.GetIfString();
     if (url_text) {
-      GURL fixed_url = url_formatter::FixupURL(*url_text, std::string());
+      GURL fixed_url = url_formatter::FixupURL(*url_text);
       pref->urls.push_back(fixed_url);
     }
   }
@@ -53,11 +54,7 @@ void URLListToPref(const base::Value::List& url_list,
 // static
 void SessionStartupPref::RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* registry) {
-#if BUILDFLAG(IS_ANDROID)
-  uint32_t flags = PrefRegistry::NO_REGISTRATION_FLAGS;
-#else
   uint32_t flags = user_prefs::PrefRegistrySyncable::SYNCABLE_PREF;
-#endif
   registry->RegisterIntegerPref(prefs::kRestoreOnStartup,
                                 TypeToPrefValue(GetDefaultStartupType()),
                                 flags);
@@ -69,6 +66,11 @@ SessionStartupPref::Type SessionStartupPref::GetDefaultStartupType() {
 #if BUILDFLAG(IS_CHROMEOS)
   return SessionStartupPref::LAST;
 #else
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC)
+  if (features::kSetDefaultToContinueSession.Get()) {
+    return SessionStartupPref::LAST;
+  }
+#endif
   return SessionStartupPref::DEFAULT;
 #endif
 }
@@ -91,9 +93,10 @@ void SessionStartupPref::SetStartupPref(PrefService* prefs,
   if (!SessionStartupPref::URLsAreManaged(prefs)) {
     // Always save the URLs, that way the UI can remain consistent even if the
     // user changes the startup type pref.
-    base::Value::List url_pref_list;
-    for (GURL url : pref.urls)
+    base::ListValue url_pref_list;
+    for (const GURL& url : pref.urls) {
       url_pref_list.Append(url.spec());
+    }
     prefs->SetList(prefs::kURLsToRestoreOnStartup, std::move(url_pref_list));
   }
 }
@@ -119,7 +122,7 @@ SessionStartupPref SessionStartupPref::GetStartupPref(
 
   // Always load the urls, even if the pref type isn't URLS. This way the
   // preferences panels can show the user their last choice.
-  const base::Value::List& url_list =
+  const base::ListValue& url_list =
       prefs->GetList(prefs::kURLsToRestoreOnStartup);
   URLListToPref(url_list, &pref);
 

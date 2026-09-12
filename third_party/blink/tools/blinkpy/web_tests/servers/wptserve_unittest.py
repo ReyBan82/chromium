@@ -4,7 +4,6 @@
 
 import json
 import logging
-import six
 
 from blinkpy.common.host_mock import MockHost
 from blinkpy.common.system.log_testing import LoggingTestCase
@@ -19,7 +18,7 @@ class TestWPTServe(LoggingTestCase):
         self.port = TestPort(self.host)
         self.host.filesystem.write_text_file(
             '/mock-checkout/third_party/blink/web_tests/'
-            'external/wpt/config.json', '{"ports": {}, "aliases": []}')
+            'external/wpt/config.tmpl.json', '{"ports": {}, "aliases": []}')
         # crbug.com/1308877: `web_test_runner.Worker.__del__` can log:
         #   worker/0 cleaning up
         #   worker/0 killing driver
@@ -42,14 +41,16 @@ class TestWPTServe(LoggingTestCase):
             self.port.python3_command(),
             '-u',
             '/mock-checkout/third_party/wpt_tools/wpt/wpt',
+            '--skip-venv-setup',
+            '--venv',
+            '/tmp/WebKit/deps',
             'serve',
             '--config',
             server._config_file,
             '--doc_root',
             '/mock-checkout/third_party/blink/web_tests/external/wpt',
+            '--webtransport-h3',
         ]
-        if six.PY3:
-            expected_start_cmd.append('--webtransport-h3')
 
         self.assertEqual(server._start_cmd, expected_start_cmd)
 
@@ -62,6 +63,9 @@ class TestWPTServe(LoggingTestCase):
             self.port.python3_command(),
             '-u',
             '/mock-checkout/third_party/wpt_tools/wpt/wpt',
+            '--skip-venv-setup',
+            '--venv',
+            '/tmp/WebKit/deps',
             'serve',
             '--config',
             server._config_file,
@@ -69,9 +73,8 @@ class TestWPTServe(LoggingTestCase):
             '/mock-checkout/third_party/blink/web_tests/external/wpt',
             '--ws_doc_root',
             '/mock-checkout/third_party/blink/web_tests/external/wpt/websockets/handlers',
+            '--webtransport-h3',
         ]
-        if six.PY3:
-            expected_start_cmd.append('--webtransport-h3')
 
         self.assertEqual(server._start_cmd, expected_start_cmd)
 

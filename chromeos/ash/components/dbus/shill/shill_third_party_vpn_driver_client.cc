@@ -8,11 +8,15 @@
 #include <stdint.h>
 
 #include <map>
-#include <set>
+#include <string_view>
 
+#include "base/compiler_specific.h"
+#include "base/containers/fixed_flat_set.h"
+#include "base/containers/to_vector.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "chromeos/ash/components/dbus/shill/fake_shill_third_party_vpn_driver_client.h"
 #include "chromeos/ash/components/dbus/shill/shill_third_party_vpn_observer.h"
@@ -25,16 +29,16 @@ namespace ash {
 
 namespace {
 
-const char* kSetParametersKeyList[] = {
-    shill::kAddressParameterThirdPartyVpn,
-    shill::kBroadcastAddressParameterThirdPartyVpn,
-    shill::kExclusionListParameterThirdPartyVpn,
-    shill::kInclusionListParameterThirdPartyVpn,
-    shill::kSubnetPrefixParameterThirdPartyVpn,
-    shill::kMtuParameterThirdPartyVpn,
-    shill::kDomainSearchParameterThirdPartyVpn,
-    shill::kDnsServersParameterThirdPartyVpn,
-    shill::kReconnectParameterThirdPartyVpn};
+constexpr auto kValidKeys = base::MakeFixedFlatSet<std::string_view>(
+    {shill::kAddressParameterThirdPartyVpn,
+     shill::kBroadcastAddressParameterThirdPartyVpn,
+     shill::kExclusionListParameterThirdPartyVpn,
+     shill::kInclusionListParameterThirdPartyVpn,
+     shill::kSubnetPrefixParameterThirdPartyVpn,
+     shill::kMtuParameterThirdPartyVpn,
+     shill::kDomainSearchParameterThirdPartyVpn,
+     shill::kDnsServersParameterThirdPartyVpn,
+     shill::kReconnectParameterThirdPartyVpn});
 
 ShillThirdPartyVpnDriverClient* g_instance = nullptr;
 
@@ -60,7 +64,7 @@ class ShillThirdPartyVpnDriverClientImpl
       const std::string& object_path_value) override;
 
   void SetParameters(const std::string& object_path_value,
-                     const base::Value::Dict& parameters,
+                     const base::DictValue& parameters,
                      StringCallback callback,
                      ErrorCallback error_callback) override;
 
@@ -94,11 +98,11 @@ class ShillThirdPartyVpnDriverClientImpl
 
    private:
     ShillClientHelper helper_;
-    ShillThirdPartyVpnObserver* observer_;
+    raw_ptr<ShillThirdPartyVpnObserver> observer_;
 
     base::WeakPtrFactory<HelperInfo> weak_ptr_factory_{this};
   };
-  using HelperMap = std::map<std::string, HelperInfo*>;
+  using HelperMap = std::map<std::string, raw_ptr<HelperInfo, CtnExperimental>>;
 
   static void OnPacketReceived(base::WeakPtr<HelperInfo> helper_info,
                                dbus::Signal* signal);
@@ -123,9 +127,8 @@ class ShillThirdPartyVpnDriverClientImpl
   // Deletes the helper object corresponding to |object_path|.
   void DeleteHelper(const dbus::ObjectPath& object_path);
 
-  dbus::Bus* bus_;
+  raw_ptr<dbus::Bus> bus_;
   HelperMap helpers_;
-  std::set<std::string> valid_keys_;
 };
 
 ShillThirdPartyVpnDriverClientImpl::HelperInfo::HelperInfo(
@@ -135,9 +138,6 @@ ShillThirdPartyVpnDriverClientImpl::HelperInfo::HelperInfo(
 ShillThirdPartyVpnDriverClientImpl::ShillThirdPartyVpnDriverClientImpl(
     dbus::Bus* bus)
     : bus_(bus) {
-  for (uint32_t i = 0; i < std::size(kSetParametersKeyList); ++i) {
-    valid_keys_.insert(kSetParametersKeyList[i]);
-  }
 }
 
 ShillThirdPartyVpnDriverClientImpl::~ShillThirdPartyVpnDriverClientImpl() {
@@ -208,7 +208,7 @@ void ShillThirdPartyVpnDriverClientImpl::DeleteHelper(
 
 void ShillThirdPartyVpnDriverClientImpl::SetParameters(
     const std::string& object_path_value,
-    const base::Value::Dict& parameters,
+    const base::DictValue& parameters,
     StringCallback callback,
     ErrorCallback error_callback) {
   dbus::MethodCall method_call(shill::kFlimflamThirdPartyVpnInterface,
@@ -217,7 +217,7 @@ void ShillThirdPartyVpnDriverClientImpl::SetParameters(
   dbus::MessageWriter array_writer(nullptr);
   writer.OpenArray("{ss}", &array_writer);
   for (auto it : parameters) {
-    if (valid_keys_.find(it.first) == valid_keys_.end()) {
+    if (!kValidKeys.contains(it.first)) {
       LOG(WARNING) << "Unknown key " << it.first;
       continue;
     }
@@ -261,8 +261,7 @@ void ShillThirdPartyVpnDriverClientImpl::SendPacket(
   dbus::MessageWriter writer(&method_call);
   static_assert(sizeof(uint8_t) == sizeof(char),
                 "Can't reinterpret ip_packet if char is not 8 bit large.");
-  writer.AppendArrayOfBytes(reinterpret_cast<const uint8_t*>(ip_packet.data()),
-                            ip_packet.size());
+  writer.AppendArrayOfBytes(base::as_byte_span(ip_packet));
   GetHelper(object_path_value)
       ->CallVoidMethodWithErrorCallback(&method_call, std::move(callback),
                                         std::move(error_callback));
@@ -276,11 +275,10 @@ void ShillThirdPartyVpnDriverClientImpl::OnPacketReceived(
     return;
 
   dbus::MessageReader reader(signal);
-  const uint8_t* data = nullptr;
-  size_t length = 0;
-  if (reader.PopArrayOfBytes(&data, &length)) {
+  base::span<const uint8_t> data;
+  if (reader.PopArrayOfBytes(&data)) {
     helper_info->observer()->OnPacketReceived(
-        std::vector<char>(data, data + length));
+        base::ToVector(data, [](uint8_t byte) -> char { return byte; }));
   }
 }
 

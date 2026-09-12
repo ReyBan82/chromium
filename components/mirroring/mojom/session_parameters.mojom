@@ -22,12 +22,6 @@ struct SessionParameters {
   SessionType type;
   network.mojom.IPAddress receiver_address;
 
-  // Used to fix bugs in capability reporting for specific receiver models,
-  // e.g. Chromecast Ultra. Eventually, when no model-specific hacks are
-  // necessary we should remove this field as part of fixing capabilities.
-  // TODO(crbug.com/1015467): Receivers should report capabilities.
-  string receiver_model_name;
-
   // Used to display on the UI surface. e.g. "Living Room TV".
   string receiver_friendly_name;
 
@@ -58,4 +52,8 @@ struct SessionParameters {
   //
   // TODO(crbug.com/1363512): Remove support for sender side letterboxing.
   bool force_letterboxing;
+
+  // If this is set to true, the Mirroring Service will fetch, analyze, and
+  // store information on the quality of the session using RTCP logs.
+  bool enable_rtcp_reporting;
 };

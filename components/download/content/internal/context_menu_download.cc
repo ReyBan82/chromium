@@ -4,6 +4,8 @@
 
 #include "components/download/content/public/context_menu_download.h"
 
+#include "base/android/device_info.h"
+#include "components/download/public/common/download_features.h"
 #include "components/download/public/common/download_url_parameters.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/context_menu_params.h"
@@ -15,11 +17,11 @@
 
 namespace download {
 
-void CreateContextMenuDownload(content::WebContents* web_contents,
+void CreateContextMenuDownload(const GURL& url,
+                               content::WebContents* web_contents,
                                const content::ContextMenuParams& params,
                                const std::string& origin,
-                               bool is_link) {
-  const GURL& url = is_link ? params.link_url : params.src_url;
+                               bool is_media) {
   const GURL& referring_url =
       params.frame_url.is_empty() ? params.page_url : params.frame_url;
   content::DownloadManager* dlm =
@@ -35,11 +37,16 @@ void CreateContextMenuDownload(content::WebContents* web_contents,
   dl_params->set_referrer_policy(
       content::Referrer::ReferrerPolicyForUrlRequest(referrer.policy));
 
-  if (is_link)
+  if (!is_media) {
     dl_params->set_referrer_encoding(params.frame_charset);
-  if (!is_link)
+  }
+  if (is_media) {
     dl_params->set_prefer_cache(true);
-  dl_params->set_prompt(false);
+  }
+  dl_params->set_prompt(
+      base::FeatureList::IsEnabled(
+          download::features::kEnableDownloadSaveAsContextMenu) &&
+      base::android::device_info::is_desktop());
   dl_params->set_request_origin(origin);
   dl_params->set_suggested_name(params.suggested_filename);
   dl_params->set_download_source(download::DownloadSource::CONTEXT_MENU);

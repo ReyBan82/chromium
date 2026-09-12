@@ -4,8 +4,12 @@
 
 #include "content/browser/service_worker/service_worker_single_script_update_checker.h"
 
+#include <optional>
+#include <string_view>
 #include <utility>
 
+#include "base/byte_size.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
@@ -14,6 +18,9 @@
 #include "content/browser/service_worker/service_worker_cache_writer.h"
 #include "content/browser/service_worker/service_worker_consts.h"
 #include "content/browser/service_worker/service_worker_loader_helpers.h"
+#include "content/browser/storage_partition_impl.h"
+#include "content/browser/worker_host/network_restrictions_worker_throttle.h"
+#include "content/public/browser/browser_context.h"
 #include "content/public/browser/content_browser_client.h"
 #include "content/public/browser/global_request_id.h"
 #include "content/public/browser/render_frame_host.h"
@@ -35,6 +42,7 @@
 #include "third_party/blink/public/common/loader/url_loader_throttle.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom.h"
 #include "third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 
 namespace content {
 
@@ -93,7 +101,8 @@ constexpr net::NetworkTrafficAnnotationTag kUpdateCheckTrafficAnnotation =
 class ServiceWorkerSingleScriptUpdateChecker::WrappedIOBuffer
     : public net::WrappedIOBuffer {
  public:
-  WrappedIOBuffer(const char* data) : net::WrappedIOBuffer(data) {}
+  explicit WrappedIOBuffer(base::span<const char> data)
+      : net::WrappedIOBuffer(data) {}
 
  private:
   ~WrappedIOBuffer() override = default;
@@ -120,6 +129,9 @@ ServiceWorkerSingleScriptUpdateChecker::ServiceWorkerSingleScriptUpdateChecker(
     mojo::Remote<storage::mojom::ServiceWorkerResourceWriter> writer,
     int64_t writer_resource_id,
     ScriptChecksumUpdateOption script_checksum_update_option,
+    const blink::StorageKey& storage_key,
+    const std::optional<base::UnguessableToken>& network_restrictions_id,
+    PolicyContainerPolicies creator_policies,
     ResultCallback callback)
     : script_url_(script_url),
       is_main_script_(is_main_script),
@@ -131,20 +143,21 @@ ServiceWorkerSingleScriptUpdateChecker::ServiceWorkerSingleScriptUpdateChecker(
       network_watcher_(FROM_HERE,
                        mojo::SimpleWatcher::ArmingPolicy::MANUAL,
                        base::SequencedTaskRunner::GetCurrentDefault()),
+      network_restrictions_id_(network_restrictions_id),
+      creator_policies_(std::move(creator_policies)),
       callback_(std::move(callback)) {
-  DCHECK(browser_context);
+  CHECK(browser_context, base::NotFatalUntil::M159);
 
-  TRACE_EVENT_WITH_FLOW2("ServiceWorker",
-                         "ServiceWorkerSingleScriptUpdateChecker::"
-                         "ServiceWorkerSingleScriptUpdateChecker",
-                         this, TRACE_EVENT_FLAG_FLOW_OUT, "script_url",
-                         script_url.spec(), "main_script_url",
-                         main_script_url.spec());
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::"
+              "ServiceWorkerSingleScriptUpdateChecker",
+              perfetto::Flow::FromPointer(this), "script_url",
+              script_url.spec(), "main_script_url", main_script_url.spec());
 
   network::ResourceRequest resource_request =
       service_worker_loader_helpers::CreateRequestForServiceWorkerScript(
-          script_url, url::Origin::Create(main_script_url), is_main_script_,
-          worker_script_type, *fetch_client_settings_object, *browser_context);
+          script_url, storage_key, is_main_script_, worker_script_type,
+          *fetch_client_settings_object, *browser_context);
 
   uint32_t options = network::mojom::kURLLoadOptionNone;
   if (is_main_script_) {
@@ -156,7 +169,7 @@ ServiceWorkerSingleScriptUpdateChecker::ServiceWorkerSingleScriptUpdateChecker(
 
   // Upgrade the request to an a priori authenticated URL, if appropriate.
   // https://w3c.github.io/webappsec-upgrade-insecure-requests/#upgrade-request
-  // TODO(https://crbug.com/987491): Set |ResourceRequest::upgrade_if_insecure_|
+  // TODO(crbug.com/40637521): Set |ResourceRequest::upgrade_if_insecure_|
   // appropriately.
 
   if (service_worker_loader_helpers::ShouldValidateBrowserCacheForScript(
@@ -184,13 +197,28 @@ ServiceWorkerSingleScriptUpdateChecker::ServiceWorkerSingleScriptUpdateChecker(
 
   // Service worker update checking doesn't have a relevant frame and tab, so
   // that `web_contents_getter` returns nullptr and the frame id is set to
-  // kNoFrameTreeNodeId.
+  // an invalid FrameTreeNodeId.
   base::RepeatingCallback<WebContents*()> web_contents_getter =
       base::BindRepeating([]() -> WebContents* { return nullptr; });
   std::vector<std::unique_ptr<blink::URLLoaderThrottle>> throttles =
       CreateContentBrowserURLLoaderThrottles(
           resource_request, browser_context, std::move(web_contents_getter),
-          /*navigation_ui_data=*/nullptr, RenderFrameHost::kNoFrameTreeNodeId);
+          /*navigation_ui_data=*/nullptr, FrameTreeNodeId(),
+          /*navigation_id=*/std::nullopt);
+
+  if (network_restrictions_id_) {
+    auto* storage_partition = static_cast<StoragePartitionImpl*>(
+        browser_context->GetStoragePartitionForUrl(scope_));
+    // Use a throttle to enforce network restrictions (like connection
+    // allowlists) inherited from the creator for this script update check.
+    if (auto throttle = NetworkRestrictionsWorkerThrottle::Create(
+            storage_partition->GetWeakPtr(), *network_restrictions_id_,
+            creator_policies_.Clone(),
+            /*ancestor_render_frame_host=*/nullptr,
+            /*is_service_worker=*/true)) {
+      throttles.push_back(std::move(throttle));
+    }
+  }
 
   network_client_remote_.Bind(
       network_client_receiver_.BindNewPipeAndPassRemote());
@@ -200,8 +228,9 @@ ServiceWorkerSingleScriptUpdateChecker::ServiceWorkerSingleScriptUpdateChecker(
       options, &resource_request, network_client_remote_.get(),
       kUpdateCheckTrafficAnnotation,
       base::SingleThreadTaskRunner::GetCurrentDefault());
-  DCHECK_EQ(network_loader_state_,
-            ServiceWorkerUpdatedScriptLoader::LoaderState::kNotStarted);
+  CHECK_EQ(network_loader_state_,
+           ServiceWorkerUpdatedScriptLoader::LoaderState::kNotStarted,
+           base::NotFatalUntil::M159);
   network_loader_state_ =
       ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingHeader;
 }
@@ -217,13 +246,13 @@ void ServiceWorkerSingleScriptUpdateChecker::OnReceiveEarlyHints(
 void ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse(
     network::mojom::URLResponseHeadPtr response_head,
     mojo::ScopedDataPipeConsumerHandle consumer,
-    absl::optional<mojo_base::BigBuffer> cached_metadata) {
-  TRACE_EVENT_WITH_FLOW0(
-      "ServiceWorker",
-      "ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse", this,
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
-  DCHECK_EQ(network_loader_state_,
-            ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingHeader);
+    std::optional<mojo_base::BigBuffer> cached_metadata) {
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse",
+              perfetto::Flow::FromPointer(this));
+  CHECK_EQ(network_loader_state_,
+           ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingHeader,
+           base::NotFatalUntil::M159);
 
   blink::ServiceWorkerStatusCode service_worker_status;
   network::URLLoaderCompletionStatus completion_status;
@@ -231,7 +260,7 @@ void ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse(
   if (!service_worker_loader_helpers::CheckResponseHead(
           *response_head, &service_worker_status, &completion_status,
           &error_message)) {
-    DCHECK_NE(net::OK, completion_status.error_code);
+    CHECK_NE(net::OK, completion_status.error_code, base::NotFatalUntil::M159);
     Fail(service_worker_status, error_message, completion_status);
     return;
   }
@@ -240,13 +269,11 @@ void ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse(
   // https://w3c.github.io/ServiceWorker/#service-worker-script-response
   // Only main script needs the following check.
   if (is_main_script_) {
-    std::string service_worker_allowed;
-    bool has_header = response_head->headers->EnumerateHeader(
-        nullptr, ServiceWorkerConsts::kServiceWorkerAllowed,
-        &service_worker_allowed);
+    std::optional<std::string_view> service_worker_allowed =
+        response_head->headers->EnumerateHeader(
+            nullptr, ServiceWorkerConsts::kServiceWorkerAllowed);
     if (!service_worker_loader_helpers::IsPathRestrictionSatisfied(
-            scope_, script_url_, has_header ? &service_worker_allowed : nullptr,
-            &error_message)) {
+            scope_, script_url_, service_worker_allowed, &error_message)) {
       Fail(blink::ServiceWorkerStatusCode::kErrorSecurity, error_message,
            network::URLLoaderCompletionStatus(net::ERR_INSECURE_RESPONSE));
       return;
@@ -257,7 +284,7 @@ void ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse(
              ->ShouldServiceWorkerInheritPolicyContainerFromCreator(
                  script_url_)) {
       policy_container_host_ = base::MakeRefCounted<PolicyContainerHost>(
-          // TODO(https://crbug.com/1366920): Ensure parsed headers are
+          // TODO(crbug.com/40867256): Ensure parsed headers are
           // available
           response_head->parsed_headers
               // This does not parse the referrer policy, which will be
@@ -270,7 +297,14 @@ void ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse(
 
   network_accessed_ = response_head->network_accessed;
 
+  // WriteHeaders() may complete synchronously and run the result callback,
+  // which is allowed to destroy |this|.
+  base::WeakPtr<ServiceWorkerSingleScriptUpdateChecker> weak_this =
+      weak_factory_.GetWeakPtr();
   WriteHeaders(std::move(response_head));
+  if (!weak_this) {
+    return;
+  }
 
   if (!consumer)
     return;
@@ -284,17 +318,16 @@ void ServiceWorkerSingleScriptUpdateChecker::OnReceiveResponse(
 void ServiceWorkerSingleScriptUpdateChecker::OnReceiveRedirect(
     const net::RedirectInfo& redirect_info,
     network::mojom::URLResponseHeadPtr response_head) {
-  TRACE_EVENT_WITH_FLOW0(
-      "ServiceWorker",
-      "ServiceWorkerSingleScriptUpdateChecker::OnReceiveRedirect", this,
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::OnReceiveRedirect",
+              perfetto::Flow::FromPointer(this));
 
   // Resource requests for the main service worker script should not follow
   // redirects.
   // Step 9.5: "Set request's redirect mode to "error"."
   // https://w3c.github.io/ServiceWorker/#update-algorithm
   //
-  // TODO(https://crbug.com/889798): Follow redirects for imported scripts.
+  // TODO(crbug.com/40595655): Follow redirects for imported scripts.
   Fail(blink::ServiceWorkerStatusCode::kErrorNetwork,
        ServiceWorkerConsts::kServiceWorkerRedirectError,
        network::URLLoaderCompletionStatus(net::ERR_INVALID_REDIRECT));
@@ -317,10 +350,10 @@ void ServiceWorkerSingleScriptUpdateChecker::OnTransferSizeUpdated(
 
 void ServiceWorkerSingleScriptUpdateChecker::OnComplete(
     const network::URLLoaderCompletionStatus& status) {
-  TRACE_EVENT_WITH_FLOW1(
-      "ServiceWorker", "ServiceWorkerSingleScriptUpdateChecker::OnComplete",
-      this, TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT, "status",
-      net::ErrorToString(status.error_code));
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::OnComplete",
+              perfetto::Flow::FromPointer(this), "status",
+              net::ErrorToString(status.error_code));
 
   ServiceWorkerUpdatedScriptLoader::LoaderState previous_loader_state =
       network_loader_state_;
@@ -332,32 +365,34 @@ void ServiceWorkerSingleScriptUpdateChecker::OnComplete(
     return;
   }
 
-  DCHECK(previous_loader_state ==
-             ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingHeader ||
-         previous_loader_state ==
-             ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingBody);
+  CHECK(previous_loader_state ==
+                ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingHeader ||
+            previous_loader_state ==
+                ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingBody,
+        base::NotFatalUntil::M159);
 
   // Response body is empty.
   if (previous_loader_state ==
       ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingHeader) {
-    DCHECK_EQ(body_writer_state_,
-              ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted);
+    CHECK_EQ(body_writer_state_,
+             ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted,
+             base::NotFatalUntil::M159);
     body_writer_state_ =
         ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted;
     switch (header_writer_state_) {
       case ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted:
         NOTREACHED()
             << "Response header should be received before OnComplete()";
-        break;
       case ServiceWorkerUpdatedScriptLoader::WriterState::kWriting:
         // Wait until it's written. OnWriteHeadersComplete() will call
         // Finish().
         return;
       case ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted:
-        DCHECK(!network_consumer_.is_valid());
+        CHECK(!network_consumer_.is_valid(), base::NotFatalUntil::M159);
         // Compare the cached data with an empty data to notify |cache_writer_|
         // of the end of the comparison.
-        CompareData(nullptr /* pending_buffer */, 0 /* bytes_available */);
+        CompareData(/*pending_buffer=*/nullptr,
+                    /*bytes_available=*/base::ByteSize(0));
         break;
     }
   }
@@ -367,21 +402,25 @@ void ServiceWorkerSingleScriptUpdateChecker::OnComplete(
       ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingBody) {
     switch (body_writer_state_) {
       case ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted:
-        DCHECK_EQ(header_writer_state_,
-                  ServiceWorkerUpdatedScriptLoader::WriterState::kWriting);
+        CHECK_EQ(header_writer_state_,
+                 ServiceWorkerUpdatedScriptLoader::WriterState::kWriting,
+                 base::NotFatalUntil::M159);
         return;
       case ServiceWorkerUpdatedScriptLoader::WriterState::kWriting:
-        DCHECK_EQ(header_writer_state_,
-                  ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted);
+        CHECK_EQ(header_writer_state_,
+                 ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted,
+                 base::NotFatalUntil::M159);
         // Still reading the body from the network. Update checking will
         // complete when all the body is read or any difference is found.
         return;
       case ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted:
-        DCHECK_EQ(header_writer_state_,
-                  ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted);
+        CHECK_EQ(header_writer_state_,
+                 ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted,
+                 base::NotFatalUntil::M159);
         // Pass empty data to notify |cache_writer_| that comparison is
         // finished.
-        CompareData(/*pending_buffer=*/nullptr, /*bytes_available=*/0);
+        CompareData(/*pending_buffer=*/nullptr,
+                    /*bytes_available=*/base::ByteSize(0));
         return;
     }
   }
@@ -402,45 +441,45 @@ const char* ServiceWorkerSingleScriptUpdateChecker::ResultToString(
   }
 }
 
+void ServiceWorkerSingleScriptUpdateChecker::FlushRemotesForTesting() {
+  if (cache_writer_) {
+    cache_writer_->FlushRemotesForTesting();  // IN-TEST
+  }
+}
+
 //------------------------------------------------------------------------------
 
 void ServiceWorkerSingleScriptUpdateChecker::WriteHeaders(
     network::mojom::URLResponseHeadPtr response_head) {
-  TRACE_EVENT_WITH_FLOW0(
-      "ServiceWorker", "ServiceWorkerSingleScriptUpdateChecker::WriteHeaders",
-      this, TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::WriteHeaders",
+              perfetto::Flow::FromPointer(this));
 
-  DCHECK_EQ(header_writer_state_,
-            ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted);
+  CHECK_EQ(header_writer_state_,
+           ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted,
+           base::NotFatalUntil::M159);
   header_writer_state_ =
       ServiceWorkerUpdatedScriptLoader::WriterState::kWriting;
 
   // Pass the header to the cache_writer_. This is written to the storage when
   // the body had changes.
-  net::Error error = cache_writer_->MaybeWriteHeaders(
+  cache_writer_->MaybeWriteHeaders(
       std::move(response_head),
       base::BindOnce(
           &ServiceWorkerSingleScriptUpdateChecker::OnWriteHeadersComplete,
           weak_factory_.GetWeakPtr()));
-  if (error == net::ERR_IO_PENDING) {
-    // OnWriteHeadersComplete() will be called asynchronously.
-    return;
-  }
-  // MaybeWriteHeaders() doesn't run the callback if it finishes synchronously,
-  // so explicitly call it here.
-  OnWriteHeadersComplete(error);
 }
 
 void ServiceWorkerSingleScriptUpdateChecker::OnWriteHeadersComplete(
     net::Error error) {
-  TRACE_EVENT_WITH_FLOW1(
-      "ServiceWorker",
-      "ServiceWorkerSingleScriptUpdateChecker::OnWriteHeadersComplete", this,
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT, "error", error);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::OnWriteHeadersComplete",
+              perfetto::Flow::FromPointer(this), "error", error);
 
-  DCHECK_EQ(header_writer_state_,
-            ServiceWorkerUpdatedScriptLoader::WriterState::kWriting);
-  DCHECK_NE(error, net::ERR_IO_PENDING);
+  CHECK_EQ(header_writer_state_,
+           ServiceWorkerUpdatedScriptLoader::WriterState::kWriting,
+           base::NotFatalUntil::M159);
+  CHECK_NE(error, net::ERR_IO_PENDING, base::NotFatalUntil::M159);
   header_writer_state_ =
       ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted;
   if (error != net::OK) {
@@ -459,40 +498,38 @@ void ServiceWorkerSingleScriptUpdateChecker::
     MaybeStartNetworkConsumerHandleWatcher() {
   if (network_loader_state_ ==
       ServiceWorkerUpdatedScriptLoader::LoaderState::kLoadingHeader) {
-    TRACE_EVENT_WITH_FLOW1("ServiceWorker",
-                           "ServiceWorkerSingleScriptUpdateChecker::"
-                           "MaybeStartNetworkConsumerHandleWatcher",
-                           this,
-                           TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                           "state", "wait for the body");
+    TRACE_EVENT("ServiceWorker",
+                "ServiceWorkerSingleScriptUpdateChecker::"
+                "MaybeStartNetworkConsumerHandleWatcher",
+                perfetto::Flow::FromPointer(this), "state",
+                "wait for the body");
 
     // OnReceiveResponse() or OnComplete() will continue the sequence.
     return;
   }
   if (header_writer_state_ !=
       ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted) {
-    TRACE_EVENT_WITH_FLOW1("ServiceWorker",
-                           "ServiceWorkerSingleScriptUpdateChecker::"
-                           "MaybeStartNetworkConsumerHandleWatcher",
-                           this,
-                           TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                           "state", "wait for writing header");
+    TRACE_EVENT("ServiceWorker",
+                "ServiceWorkerSingleScriptUpdateChecker::"
+                "MaybeStartNetworkConsumerHandleWatcher",
+                perfetto::Flow::FromPointer(this), "state",
+                "wait for writing header");
 
-    DCHECK_EQ(header_writer_state_,
-              ServiceWorkerUpdatedScriptLoader::WriterState::kWriting);
+    CHECK_EQ(header_writer_state_,
+             ServiceWorkerUpdatedScriptLoader::WriterState::kWriting,
+             base::NotFatalUntil::M159);
     // OnWriteHeadersComplete() will continue the sequence.
     return;
   }
 
-  TRACE_EVENT_WITH_FLOW1("ServiceWorker",
-                         "ServiceWorkerSingleScriptUpdateChecker::"
-                         "MaybeStartNetworkConsumerHandleWatcher",
-                         this,
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "state", "start loading body");
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::"
+              "MaybeStartNetworkConsumerHandleWatcher",
+              perfetto::Flow::FromPointer(this), "state", "start loading body");
 
-  DCHECK_EQ(body_writer_state_,
-            ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted);
+  CHECK_EQ(body_writer_state_,
+           ServiceWorkerUpdatedScriptLoader::WriterState::kNotStarted,
+           base::NotFatalUntil::M159);
   body_writer_state_ = ServiceWorkerUpdatedScriptLoader::WriterState::kWriting;
 
   network_watcher_.Watch(
@@ -508,18 +545,20 @@ void ServiceWorkerSingleScriptUpdateChecker::
 void ServiceWorkerSingleScriptUpdateChecker::OnNetworkDataAvailable(
     MojoResult,
     const mojo::HandleSignalsState& state) {
-  DCHECK_EQ(header_writer_state_,
-            ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted);
-  DCHECK(network_consumer_.is_valid());
+  CHECK_EQ(header_writer_state_,
+           ServiceWorkerUpdatedScriptLoader::WriterState::kCompleted,
+           base::NotFatalUntil::M159);
+  CHECK(network_consumer_.is_valid(), base::NotFatalUntil::M159);
   scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer;
-  uint32_t bytes_available = 0;
   MojoResult result = network::MojoToNetPendingBuffer::BeginRead(
-      &network_consumer_, &pending_buffer, &bytes_available);
-  TRACE_EVENT_WITH_FLOW2(
-      "ServiceWorker",
-      "ServiceWorkerSingleScriptUpdateChecker::OnNetworkDataAvailable", this,
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT, "result", result,
-      "bytes_available", bytes_available);
+      &network_consumer_, &pending_buffer);
+
+  const base::ByteSize bytes_available(pending_buffer ? pending_buffer->size()
+                                                      : 0);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::OnNetworkDataAvailable",
+              perfetto::Flow::FromPointer(this), "result", result,
+              "bytes_available", bytes_available.InBytes());
 
   switch (result) {
     case MOJO_RESULT_OK:
@@ -535,7 +574,8 @@ void ServiceWorkerSingleScriptUpdateChecker::OnNetworkDataAvailable(
           ServiceWorkerUpdatedScriptLoader::LoaderState::kCompleted) {
         // Compare the cached data with an empty data to notify |cache_writer_|
         // the end of the comparison.
-        CompareData(nullptr /* pending_buffer */, 0 /* bytes_available */);
+        CompareData(/*pending_buffer=*/nullptr,
+                    /*bytes_available=*/base::ByteSize(0));
       }
       return;
     case MOJO_RESULT_SHOULD_WAIT:
@@ -551,29 +591,23 @@ void ServiceWorkerSingleScriptUpdateChecker::OnNetworkDataAvailable(
 // network reaches the end. In that case, |bytes_to_compare| is zero.
 void ServiceWorkerSingleScriptUpdateChecker::CompareData(
     scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer,
-    uint32_t bytes_to_compare) {
-  TRACE_EVENT_WITH_FLOW0(
-      "ServiceWorker", "ServiceWorkerSingleScriptUpdateChecker::CompareData",
-      this, TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+    base::ByteSize bytes_to_compare) {
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::CompareData",
+              perfetto::Flow::FromPointer(this));
 
-  DCHECK(pending_buffer || bytes_to_compare == 0);
-  auto buffer = base::MakeRefCounted<WrappedIOBuffer>(
-      pending_buffer ? pending_buffer->buffer() : nullptr);
+  CHECK(pending_buffer || bytes_to_compare.is_zero(),
+        base::NotFatalUntil::M159);
+  auto buffer = base::MakeRefCounted<WrappedIOBuffer>(UNSAFE_BUFFERS(
+      base::span(pending_buffer ? pending_buffer->buffer() : nullptr,
+                 pending_buffer ? pending_buffer->size() : 0)));
 
   // Compare the network data and the stored data.
-  net::Error error = cache_writer_->MaybeWriteData(
-      buffer.get(), bytes_to_compare,
+  cache_writer_->MaybeWriteData(
+      buffer.get(), bytes_to_compare.InBytes(),
       base::BindOnce(
           &ServiceWorkerSingleScriptUpdateChecker::OnCompareDataComplete,
           weak_factory_.GetWeakPtr(), pending_buffer, bytes_to_compare));
-
-  if (error == net::ERR_IO_PENDING && !cache_writer_->is_pausing()) {
-    // OnCompareDataComplete() will be called asynchronously.
-    return;
-  }
-  // MaybeWriteData() doesn't run the callback if it finishes synchronously, so
-  // explicitly call it here.
-  OnCompareDataComplete(std::move(pending_buffer), bytes_to_compare, error);
 }
 
 // |pending_buffer| is a buffer passed from CompareData(). Please refer to the
@@ -585,20 +619,19 @@ void ServiceWorkerSingleScriptUpdateChecker::CompareData(
 // reading from the disk cache.
 void ServiceWorkerSingleScriptUpdateChecker::OnCompareDataComplete(
     scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer,
-    uint32_t bytes_written,
+    base::ByteSize bytes_written,
     net::Error error) {
-  TRACE_EVENT_WITH_FLOW2(
-      "ServiceWorker",
-      "ServiceWorkerSingleScriptUpdateChecker::OnCompareDataComplete", this,
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT, "error", error,
-      "bytes_written", bytes_written);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::OnCompareDataComplete",
+              perfetto::Flow::FromPointer(this), "error", error,
+              "bytes_written", bytes_written.InBytes());
 
-  DCHECK(pending_buffer || bytes_written == 0);
+  CHECK(pending_buffer || bytes_written.is_zero(), base::NotFatalUntil::M159);
 
   if (cache_writer_->is_pausing()) {
     // |cache_writer_| can be pausing only when it finds difference between
     // stored body and network body.
-    DCHECK_EQ(error, net::ERR_IO_PENDING);
+    CHECK_EQ(error, net::ERR_IO_PENDING, base::NotFatalUntil::M159);
     auto paused_state = std::make_unique<PausedState>(
         std::move(cache_writer_), std::move(network_loader_),
         std::move(network_client_remote_), network_client_receiver_.Unbind(),
@@ -611,7 +644,7 @@ void ServiceWorkerSingleScriptUpdateChecker::OnCompareDataComplete(
   if (pending_buffer) {
     // We consumed |bytes_written| bytes of data from the network so call
     // CompleteRead(), regardless of what |error| is.
-    pending_buffer->CompleteRead(bytes_written);
+    pending_buffer->CompleteRead(bytes_written.InBytes());
     network_consumer_ = pending_buffer->ReleaseHandle();
   }
 
@@ -623,7 +656,7 @@ void ServiceWorkerSingleScriptUpdateChecker::OnCompareDataComplete(
     return;
   }
 
-  if (bytes_written == 0) {
+  if (bytes_written.is_zero()) {
     // All data has been read. If we reach here without any error, the script
     // from the network was identical to the one in the disk cache.
     Succeed(Result::kIdentical, /*paused_state=*/nullptr);
@@ -637,26 +670,26 @@ void ServiceWorkerSingleScriptUpdateChecker::Fail(
     blink::ServiceWorkerStatusCode status,
     const std::string& error_message,
     network::URLLoaderCompletionStatus network_status) {
-  TRACE_EVENT_WITH_FLOW2("ServiceWorker",
-                         "ServiceWorkerSingleScriptUpdateChecker::Fail", this,
-                         TRACE_EVENT_FLAG_FLOW_IN, "status",
-                         blink::ServiceWorkerStatusToString(status),
-                         "error_message", error_message);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerSingleScriptUpdateChecker::Fail",
+              perfetto::TerminatingFlow::FromPointer(this), "status",
+              blink::ServiceWorkerStatusToString(status), "error_message",
+              error_message);
 
   Finish(Result::kFailed,
          /*paused_state=*/nullptr,
          std::make_unique<FailureInfo>(status, error_message,
                                        std::move(network_status)),
-         /*sha256_checksum=*/absl::nullopt);
+         /*sha256_checksum=*/std::nullopt);
 }
 
 void ServiceWorkerSingleScriptUpdateChecker::Succeed(
     Result result,
     std::unique_ptr<PausedState> paused_state) {
-  TRACE_EVENT_WITH_FLOW1(
-      "ServiceWorker", "ServiceWorkerSingleScriptUpdateChecker::Succeed", this,
-      TRACE_EVENT_FLAG_FLOW_IN, "result", ResultToString(result));
-  DCHECK_NE(result, Result::kFailed);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerSingleScriptUpdateChecker::Succeed",
+              perfetto::TerminatingFlow::FromPointer(this), "result",
+              ResultToString(result));
+  CHECK_NE(result, Result::kFailed, base::NotFatalUntil::M159);
 
   // Get calculated sha256 checksum when below conditions are both satisfied:
   // 1: |script_checksum_update_option_| is kForceUpdate.
@@ -666,13 +699,14 @@ void ServiceWorkerSingleScriptUpdateChecker::Succeed(
   // and it can be pausing. In this case, the finalized checksum is still not
   // available here, and that will be handled in
   // ServiceWorkerUpdatedScriptLoader.
-  absl::optional<std::string> sha256_checksum;
+  std::optional<std::string> sha256_checksum;
   if (script_checksum_update_option_ ==
           ScriptChecksumUpdateOption::kForceUpdate &&
       result == Result::kIdentical) {
-    DCHECK(cache_writer_);
-    DCHECK_EQ(cache_writer_->checksum_update_timing(),
-              ServiceWorkerCacheWriter::ChecksumUpdateTiming::kAlways);
+    CHECK(cache_writer_, base::NotFatalUntil::M159);
+    CHECK_EQ(cache_writer_->checksum_update_timing(),
+             ServiceWorkerCacheWriter::ChecksumUpdateTiming::kAlways,
+             base::NotFatalUntil::M159);
     sha256_checksum = cache_writer_->GetSha256Checksum();
   }
 
@@ -684,15 +718,15 @@ void ServiceWorkerSingleScriptUpdateChecker::Finish(
     Result result,
     std::unique_ptr<PausedState> paused_state,
     std::unique_ptr<FailureInfo> failure_info,
-    const absl::optional<std::string>& sha256_checksum) {
+    const std::optional<std::string>& sha256_checksum) {
   network_watcher_.Cancel();
   if (Result::kDifferent == result) {
-    DCHECK(paused_state);
+    CHECK(paused_state, base::NotFatalUntil::M159);
     // When the result if kDifferent, the checksum will be handled by
     // ServiceWorkerUpdatedScriptLoader.
     std::move(callback_).Run(script_url_, result, nullptr,
                              std::move(paused_state),
-                             /*sha256_checksum=*/absl::nullopt);
+                             /*sha256_checksum=*/std::nullopt);
     return;
   }
 
@@ -710,7 +744,7 @@ ServiceWorkerSingleScriptUpdateChecker::PausedState::PausedState(
     mojo::PendingReceiver<network::mojom::URLLoaderClient>
         network_client_receiver,
     scoped_refptr<network::MojoToNetPendingBuffer> pending_network_buffer,
-    uint32_t consumed_bytes,
+    base::ByteSize consumed_bytes,
     ServiceWorkerUpdatedScriptLoader::LoaderState network_loader_state,
     ServiceWorkerUpdatedScriptLoader::WriterState body_writer_state)
     : cache_writer(std::move(cache_writer)),

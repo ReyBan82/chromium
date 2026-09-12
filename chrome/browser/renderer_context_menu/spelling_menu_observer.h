@@ -6,7 +6,6 @@
 #define CHROME_BROWSER_RENDERER_CONTEXT_MENU_SPELLING_MENU_OBSERVER_H_
 
 #include <stddef.h>
-#include <stdint.h>
 
 #include <memory>
 #include <string>
@@ -91,6 +90,12 @@ class SpellingMenuObserver : public RenderViewContextMenuObserver {
       const std::vector<SpellCheckResult>& results);
 
  private:
+  // When a misspelled word is detected, updates the context menu with
+  // suggestions, an "Add to dictionary" item, and options to use the spelling
+  // service. Suggestions may be retrieved synchronously or asynchronously
+  // depending on the platform and configuration.
+  void UpdateMenuForMisspelledWord(const content::ContextMenuParams& params);
+
   // Method that starts the asynchronous retrieval of suggestions from the
   // remote enhanced spellcheck service.
   void GetRemoteSuggestions();
@@ -99,6 +104,19 @@ class SpellingMenuObserver : public RenderViewContextMenuObserver {
   void UpdateRemoteSuggestion(SpellingServiceClient::ServiceType type,
                               bool success,
                               const std::vector<SpellCheckResult>& results);
+
+  // Applies the spelling suggestion and registers the word as a custom
+  // dictionary word so it is no longer marked as misspelled.
+  void ApplySpellingSuggestion();
+
+  // Adds the misspelled word to the user's custom-word dictionary (both local
+  // and platform spellcheckers where supported) so it is no longer marked as
+  // misspelled.
+  void AddToDictionary();
+
+  // Toggles the user preference for using the enhanced spelling service. Shows
+  // a confirmation bubble to the user if the service is being enabled.
+  void ToggleSpellingService();
 
 #if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
   // Fires a callback for testing when local (and possibly remote) retrieval of

@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "extensions/browser/api/declarative_webrequest/webrequest_action.h"
+
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 
 #include "base/files/file_path.h"
@@ -18,18 +21,20 @@
 #include "chrome/common/extensions/extension_test_util.h"
 #include "content/public/test/browser_task_environment.h"
 #include "extensions/browser/api/declarative_webrequest/request_stage.h"
-#include "extensions/browser/api/declarative_webrequest/webrequest_action.h"
 #include "extensions/browser/api/declarative_webrequest/webrequest_condition.h"
 #include "extensions/browser/api/declarative_webrequest/webrequest_constants.h"
 #include "extensions/browser/api/web_request/permission_helper.h"
 #include "extensions/browser/api/web_request/web_request_api_helpers.h"
 #include "extensions/browser/api/web_request/web_request_info.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extensions_client.h"
 #include "net/http/http_response_headers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace helpers = extension_web_request_api_helpers;
 namespace keys = extensions::declarative_webrequest_constants;
@@ -45,12 +50,12 @@ namespace {
 const char kUnknownActionType[] = "unknownType";
 
 std::unique_ptr<WebRequestActionSet> CreateSetOfActions(const char* json) {
-  base::Value::List parsed_value = base::test::ParseJsonList(json);
+  base::ListValue parsed_value = base::test::ParseJsonList(json);
 
-  WebRequestActionSet::Values actions;
-  for (const base::Value& entry : parsed_value) {
+  base::ListValue actions;
+  for (base::Value& entry : parsed_value) {
     CHECK(entry.is_dict());
-    actions.push_back(entry.Clone());
+    actions.Append(std::move(entry));
   }
 
   std::string error;
@@ -114,14 +119,14 @@ bool WebRequestActionWithThreadsTest::ActionWorksOnRequest(
     const std::string& extension_id,
     const WebRequestActionSet* action_set,
     RequestStage stage) {
-  const int kRendererId = 2;
+  const content::ChildProcessId kRendererId(2);
   EventResponseDeltas deltas;
-  scoped_refptr<net::HttpResponseHeaders> headers(
-      new net::HttpResponseHeaders(""));
+  scoped_refptr<net::HttpResponseHeaders> headers =
+      base::MakeRefCounted<net::HttpResponseHeaders>("");
   WebRequestInfoInitParams params;
   params.url = GURL(url_string);
   WebRequestInfoInitParams request_params(std::move(params));
-  request_params.render_process_id = kRendererId;
+  request_params.global_id.child_id = kRendererId;
   WebRequestInfo request_info(std::move(request_params));
   WebRequestData request_data(&request_info, stage, headers.get());
   std::set<std::string> ignored_tags;
@@ -169,7 +174,7 @@ TEST(WebRequestActionTest, CreateAction) {
   scoped_refptr<const WebRequestAction> result;
 
   // Test missing instanceType element.
-  base::Value::Dict input;
+  base::DictValue input;
   error.clear();
   result =
       WebRequestAction::Create(nullptr, nullptr, input, &error, &bad_message);
@@ -200,7 +205,7 @@ TEST(WebRequestActionTest, CreateActionSet) {
   bool bad_message = false;
   std::unique_ptr<WebRequestActionSet> result;
 
-  WebRequestActionSet::Values input;
+  base::ListValue input;
 
   // Test empty input.
   error.clear();
@@ -212,15 +217,15 @@ TEST(WebRequestActionTest, CreateActionSet) {
   EXPECT_TRUE(result->actions().empty());
   EXPECT_EQ(std::numeric_limits<int>::min(), result->GetMinimumPriority());
 
-  base::Value::Dict correct_action;
+  base::DictValue correct_action;
   correct_action.Set(keys::kInstanceTypeKey, keys::kIgnoreRulesType);
   correct_action.Set(keys::kLowerPriorityThanKey, 10);
-  base::Value::Dict incorrect_action;
+  base::DictValue incorrect_action;
   incorrect_action.Set(keys::kInstanceTypeKey, kUnknownActionType);
-  base::Value::List wrong_format_action;
+  base::ListValue wrong_format_action;
 
   // Test success.
-  input.emplace_back(std::move(correct_action));
+  input.Append(std::move(correct_action));
   error.clear();
   result = WebRequestActionSet::Create(nullptr, nullptr, input, &error,
                                        &bad_message);
@@ -233,7 +238,7 @@ TEST(WebRequestActionTest, CreateActionSet) {
   EXPECT_EQ(10, result->GetMinimumPriority());
 
   // Test failure.
-  input.emplace_back(std::move(incorrect_action));
+  input.Append(std::move(incorrect_action));
   error.clear();
   result = WebRequestActionSet::Create(nullptr, nullptr, input, &error,
                                        &bad_message);
@@ -241,7 +246,7 @@ TEST(WebRequestActionTest, CreateActionSet) {
   EXPECT_FALSE(result.get());
 
   // Test wrong data type passed.
-  input.emplace_back(std::move(wrong_format_action));
+  input.Append(std::move(wrong_format_action));
   error.clear();
   result = WebRequestActionSet::Create(nullptr, nullptr, input, &error,
                                        &bad_message);
@@ -555,25 +560,25 @@ TEST(WebRequestActionTest, GetName) {
       " \"lowerPriorityThan\": 123,"
       " \"hasTag\": \"some_tag\""
       "}]";
-  const char* const kExpectedNames[] = {
-    "declarativeWebRequest.RedirectRequest",
-    "declarativeWebRequest.RedirectByRegEx",
-    "declarativeWebRequest.SetRequestHeader",
-    "declarativeWebRequest.RemoveRequestHeader",
-    "declarativeWebRequest.AddResponseHeader",
-    "declarativeWebRequest.RemoveResponseHeader",
-    "declarativeWebRequest.SendMessageToExtension",
-    "declarativeWebRequest.AddRequestCookie",
-    "declarativeWebRequest.AddResponseCookie",
-    "declarativeWebRequest.EditRequestCookie",
-    "declarativeWebRequest.EditResponseCookie",
-    "declarativeWebRequest.RemoveRequestCookie",
-    "declarativeWebRequest.RemoveResponseCookie",
-    "declarativeWebRequest.CancelRequest",
-    "declarativeWebRequest.RedirectToTransparentImage",
-    "declarativeWebRequest.RedirectToEmptyDocument",
-    "declarativeWebRequest.IgnoreRules",
-  };
+  const auto kExpectedNames = std::to_array<const char*>({
+      "declarativeWebRequest.RedirectRequest",
+      "declarativeWebRequest.RedirectByRegEx",
+      "declarativeWebRequest.SetRequestHeader",
+      "declarativeWebRequest.RemoveRequestHeader",
+      "declarativeWebRequest.AddResponseHeader",
+      "declarativeWebRequest.RemoveResponseHeader",
+      "declarativeWebRequest.SendMessageToExtension",
+      "declarativeWebRequest.AddRequestCookie",
+      "declarativeWebRequest.AddResponseCookie",
+      "declarativeWebRequest.EditRequestCookie",
+      "declarativeWebRequest.EditResponseCookie",
+      "declarativeWebRequest.RemoveRequestCookie",
+      "declarativeWebRequest.RemoveResponseCookie",
+      "declarativeWebRequest.CancelRequest",
+      "declarativeWebRequest.RedirectToTransparentImage",
+      "declarativeWebRequest.RedirectToEmptyDocument",
+      "declarativeWebRequest.IgnoreRules",
+  });
   std::unique_ptr<WebRequestActionSet> action_set(CreateSetOfActions(kActions));
   ASSERT_EQ(std::size(kExpectedNames), action_set->actions().size());
   size_t index = 0;

@@ -4,10 +4,9 @@
 
 import 'chrome://resources/cr_elements/cr_textarea/cr_textarea.js';
 
-import {CrTextareaElement} from 'chrome://resources/cr_elements/cr_textarea/cr_textarea.js';
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import type {CrTextareaElement} from 'chrome://resources/cr_elements/cr_textarea/cr_textarea.js';
 import {assertEquals, assertFalse, assertNotEquals, assertTrue} from 'chrome://webui-test/chai_assert.js';
-import {eventToPromise} from 'chrome://webui-test/test_util.js';
+import {eventToPromise, microtasksFinished} from 'chrome://webui-test/test_util.js';
 
 suite('cr-textarea-focus-test', function() {
   let crTextarea: CrTextareaElement;
@@ -18,51 +17,57 @@ suite('cr-textarea-focus-test', function() {
     crTextarea = document.createElement('cr-textarea');
     document.body.appendChild(crTextarea);
     textarea = crTextarea.$.input;
-    flush();
+    return microtasksFinished();
   });
 
-  test('propertyBindings', function() {
+  test('propertyBindings', async () => {
     assertFalse(textarea.autofocus);
     crTextarea.setAttribute('autofocus', 'autofocus');
+    await microtasksFinished();
     assertTrue(textarea.autofocus);
   });
 
-  test('valueSetCorrectly', function() {
+  test('valueSetCorrectly', async () => {
     crTextarea.value = 'hello';
+    await microtasksFinished();
     assertEquals(crTextarea.value, textarea.value);
 
     // |value| is copied when typing triggers inputEvent.
     textarea.value = 'hello sir';
     textarea.dispatchEvent(new InputEvent('input'));
+    await microtasksFinished();
     assertEquals(crTextarea.value, textarea.value);
   });
 
-  test('labelHiddenWhenEmpty', function() {
+  test('labelHiddenWhenEmpty', async () => {
     const label = crTextarea.$.label;
     assertTrue(label.hidden);
     crTextarea.label = 'foobar';
+    await microtasksFinished();
     assertFalse(label.hidden);
-    assertEquals('foobar', label.textContent!.trim());
+    assertEquals('foobar', label.textContent.trim());
     assertEquals('foobar', textarea.getAttribute('aria-label'));
   });
 
-  test('disabledSetCorrectly', function() {
+  test('disabledSetCorrectly', async () => {
     assertFalse(textarea.disabled);
     assertFalse(textarea.hasAttribute('disabled'));
     assertFalse(crTextarea.hasAttribute('disabled'));
     assertEquals('false', crTextarea.getAttribute('aria-disabled'));
     crTextarea.disabled = true;
+    await microtasksFinished();
     assertTrue(textarea.disabled);
     assertTrue(textarea.hasAttribute('disabled'));
     assertTrue(crTextarea.hasAttribute('disabled'));
     assertEquals('true', crTextarea.getAttribute('aria-disabled'));
   });
 
-  test('rowsSetCorrectly', function() {
+  test('rowsSetCorrectly', async () => {
     const kDefaultRows = crTextarea.rows;
     const kNewRows = 42;
     assertEquals(kDefaultRows, textarea.rows);
     crTextarea.rows = kNewRows;
+    await microtasksFinished();
     assertEquals(kNewRows, textarea.rows);
   });
 
@@ -72,37 +77,68 @@ suite('cr-textarea-focus-test', function() {
 
     const whenTransitionEnd = eventToPromise('transitionend', underline);
     crTextarea.firstFooter = 'first footer';
-    flush();
+    await microtasksFinished();
 
     assertEquals('0', getComputedStyle(underline).opacity);
     const currentColor = getComputedStyle(firstFooter).color;
 
     crTextarea.$.input.focus();
-    flush();
 
-    return whenTransitionEnd.then(() => {
-      assertEquals('1', getComputedStyle(underline).opacity);
-      assertEquals(currentColor, getComputedStyle(firstFooter).color);
-    });
+    await whenTransitionEnd;
+    assertEquals('1', getComputedStyle(underline).opacity);
+    assertEquals(currentColor, getComputedStyle(firstFooter).color);
   });
 
-  test('underlineAndFooterColorsWhenInvalid', function() {
+  test('underlineAndFooterColorsWhenInvalid', async () => {
     const firstFooter = crTextarea.$.firstFooter;
     const underline = crTextarea.$.underline;
 
     const whenTransitionEnd = eventToPromise('transitionend', underline);
     crTextarea.firstFooter = 'first footer';
-    flush();
+    await microtasksFinished();
 
     assertEquals('0', getComputedStyle(underline).opacity);
     const currentColor = getComputedStyle(firstFooter).color;
 
     crTextarea.invalid = true;
-    flush();
 
-    return whenTransitionEnd.then(() => {
-      assertEquals('1', getComputedStyle(underline).opacity);
-      assertNotEquals(currentColor, getComputedStyle(firstFooter).color);
-    });
+    await whenTransitionEnd;
+    assertEquals('1', getComputedStyle(underline).opacity);
+    assertNotEquals(currentColor, getComputedStyle(firstFooter).color);
+  });
+
+  test('autogrows', async () => {
+    let currentHeight = crTextarea.$.input.offsetHeight;
+    crTextarea.autogrow = true;
+    await microtasksFinished();
+
+    crTextarea.rows = 1;
+    await microtasksFinished();
+    assertTrue(
+        currentHeight > crTextarea.$.input.offsetHeight,
+        'decreasing rows decreases the min-height');
+    currentHeight = crTextarea.$.input.offsetHeight;
+
+    crTextarea.value = '\n\n\n\n\n';
+    await microtasksFinished();
+    assertTrue(
+        currentHeight < crTextarea.$.input.offsetHeight,
+        'textarea grows in height');
+    currentHeight = crTextarea.$.input.offsetHeight;
+
+    crTextarea.value = '\n\n\n\n\n\n\n';
+    await microtasksFinished();
+    assertTrue(
+        currentHeight < crTextarea.$.input.offsetHeight,
+        'textarea continues to grow');
+
+    const textareaStyle = crTextarea.$.input.computedStyleMap();
+    const paddingBlock =
+        (textareaStyle.get('padding-top') as CSSUnitValue).value +
+        (textareaStyle.get('padding-bottom') as CSSUnitValue).value;
+    crTextarea.style.setProperty('--cr-textarea-autogrow-max-height', '60px');
+    assertEquals(
+        60 + paddingBlock, crTextarea.$.input.offsetHeight,
+        'sets the max-height');
   });
 });

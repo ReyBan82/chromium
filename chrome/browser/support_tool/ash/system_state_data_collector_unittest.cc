@@ -6,6 +6,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
@@ -31,7 +33,6 @@
 #include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using ::testing::ContainerEq;
 
@@ -44,7 +45,7 @@ const std::map<std::string, std::string> kExpectedDebugdLogs = {
      // file.
      "Sample Log.txt",
      // Redacted version of "Your email address is abc@abc.com"
-     "Your email address is <email: 1>"}};
+     "Your email address is (email: 1)"}};
 
 // The PII in the sample logs that `FakeDebugDaemonClient` returns in
 // `GetFeedbackLogs()` call.
@@ -65,7 +66,7 @@ class SystemStateDataCollectorTest : public ::testing::Test {
         base::ThreadPool::CreateSequencedTaskRunner({});
     redaction_tool_container_ =
         base::MakeRefCounted<redaction::RedactionToolContainer>(
-            task_runner_for_redaction_tool_, nullptr);
+            task_runner_for_redaction_tool_);
   }
 
   SystemStateDataCollectorTest(const SystemStateDataCollectorTest&) = delete;
@@ -75,6 +76,13 @@ class SystemStateDataCollectorTest : public ::testing::Test {
   void SetUp() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
     ash::DebugDaemonClient::InitializeFake();
+
+    auto* fake_debugd_client =
+        static_cast<ash::FakeDebugDaemonClient*>(ash::DebugDaemonClient::Get());
+    for (const auto& extra_log : SystemStateDataCollector::GetExtraLogNames()) {
+      fake_debugd_client->SetLog(
+          extra_log, base::StrCat({extra_log, ": response from GetLog"}));
+    }
   }
 
   void TearDown() override {
@@ -116,20 +124,20 @@ TEST_F(SystemStateDataCollectorTest, CollectAndExportData) {
   SystemStateDataCollector data_collector;
 
   // Test data collection and PII detection.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_collect_data;
   data_collector.CollectDataAndDetectPII(test_future_collect_data.GetCallback(),
                                          task_runner_for_redaction_tool_,
                                          redaction_tool_container_);
   // Check if CollectDataAndDetectPII call returned an error.
-  absl::optional<SupportToolError> error = test_future_collect_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  std::optional<SupportToolError> error = test_future_collect_data.Get();
+  EXPECT_EQ(error, std::nullopt);
 
   EXPECT_THAT(data_collector.GetDetectedPII(),
               ContainerEq(kExpectedPIIInFeedbackLogs));
 
   // Check PII removal and data export.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_export_data;
   base::FilePath output_dir = GetTempDirForOutput();
   // Export collected data to a directory and remove all PII from it.
@@ -138,7 +146,7 @@ TEST_F(SystemStateDataCollectorTest, CollectAndExportData) {
       redaction_tool_container_, test_future_export_data.GetCallback());
   // Check if ExportCollectedDataWithPII call returned an error.
   error = test_future_export_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  EXPECT_EQ(error, std::nullopt);
 
   // Read the output file contents. SystemStateDataCollector opens a
   // "chromeos_system_state" file under target directory and writes the log

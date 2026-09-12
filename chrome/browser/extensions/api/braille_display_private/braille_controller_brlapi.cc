@@ -18,6 +18,7 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/memory/singleton.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "base/time/time.h"
@@ -73,16 +74,16 @@ BrailleControllerImpl::~BrailleControllerImpl() = default;
 
 void BrailleControllerImpl::TryLoadLibBrlApi() {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
-  if (skip_libbrlapi_so_load_ || libbrlapi_loader_.loaded())
+  if (skip_libbrlapi_so_load_ || libbrlapi_loader_.loaded()) {
     return;
+  }
 
   // This api version needs to match the one contained in
   // third_party/libbrlapi/brlapi.h.
   static const char* const kSupportedVersion = "libbrlapi.so.0.8";
 
   if (!libbrlapi_loader_.Load(kSupportedVersion)) {
-    LOG(WARNING) << "Couldn't load libbrlapi(" << kSupportedVersion << ": "
-                 << strerror(errno);
+    PLOG(WARNING) << "Couldn't load libbrlapi(" << kSupportedVersion << ")";
   }
 }
 
@@ -124,13 +125,15 @@ void BrailleControllerImpl::WriteDots(const std::vector<uint8_t>& cells,
     unsigned int row_limit = std::min(rows, cells_rows);
     unsigned int col_limit = std::min(columns, cells_cols);
     for (unsigned int row = 0; row < row_limit; row++) {
-      for (unsigned int col = 0; col < col_limit; col++) {
-        sized_cells[row * columns + col] = cells[row * cells_cols + col];
+      for (unsigned int col = 0;
+           col < col_limit && (row * columns + col) < cells.size(); col++) {
+        sized_cells[row * columns + col] = cells[row * columns + col];
       }
     }
 
-    if (!connection_->WriteDots(sized_cells))
+    if (!connection_->WriteDots(sized_cells)) {
       Disconnect();
+    }
   }
 }
 
@@ -165,8 +168,9 @@ void BrailleControllerImpl::PokeSocketDirForTesting() {
 
 void BrailleControllerImpl::StartConnecting() {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
-  if (started_connecting_)
+  if (started_connecting_) {
     return;
+  }
   started_connecting_ = true;
   TryLoadLibBrlApi();
   if (!libbrlapi_loader_.loaded() && !skip_libbrlapi_so_load_) {
@@ -269,8 +273,9 @@ void BrailleControllerImpl::ScheduleTryToConnect() {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
   // Don't reschedule if there's already a connect scheduled or
   // the next attempt would fall outside of the retry limit.
-  if (connect_scheduled_)
+  if (connect_scheduled_) {
     return;
+  }
   if (base::Time::Now() + kConnectionDelay > retry_connect_horizon_) {
     VLOG(1) << "Stopping to retry to connect to brlapi";
     return;
@@ -286,8 +291,9 @@ void BrailleControllerImpl::ScheduleTryToConnect() {
 
 void BrailleControllerImpl::Disconnect() {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
-  if (!connection_ || !connection_->Connected())
+  if (!connection_ || !connection_->Connected()) {
     return;
+  }
   connection_->Disconnect();
   DispatchOnDisplayStateChanged(std::make_unique<DisplayState>());
 }
@@ -305,8 +311,9 @@ void BrailleControllerImpl::DispatchKeys() {
     int result = connection_->ReadKey(&code);
     if (result < 0) {  // Error.
       brlapi_error_t* err = connection_->BrlapiError();
-      if (err->brlerrno == BRLAPI_ERROR_LIBCERR && err->libcerrno == EINTR)
+      if (err->brlerrno == BRLAPI_ERROR_LIBCERR && err->libcerrno == EINTR) {
         continue;
+      }
       // Disconnect on other errors.
       VLOG(1) << "BrlAPI error: " << connection_->BrlapiStrError();
       Disconnect();
@@ -315,8 +322,9 @@ void BrailleControllerImpl::DispatchKeys() {
       return;
     }
     std::unique_ptr<KeyEvent> event = BrlapiKeyCodeToEvent(code);
-    if (event)
+    if (event) {
       DispatchKeyEvent(std::move(event));
+    }
   }
 }
 
@@ -328,8 +336,9 @@ void BrailleControllerImpl::DispatchKeyEvent(std::unique_ptr<KeyEvent> event) {
     return;
   }
   VLOG(1) << "Dispatching key event: " << event->ToValue();
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.OnBrailleKeyEvent(*event);
+  }
 }
 
 void BrailleControllerImpl::DispatchOnDisplayStateChanged(
@@ -344,8 +353,9 @@ void BrailleControllerImpl::DispatchOnDisplayStateChanged(
     }
     return;
   }
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.OnBrailleDisplayStateChanged(*new_state);
+  }
 }
 
 }  // namespace braille_display_private

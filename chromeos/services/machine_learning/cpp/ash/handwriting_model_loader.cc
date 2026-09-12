@@ -5,6 +5,7 @@
 #include "chromeos/services/machine_learning/cpp/ash/handwriting_model_loader.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/command_line.h"
@@ -28,8 +29,7 @@ using LoadHandwritingModelCallback = ::chromeos::machine_learning::mojom::
 // Records CrOSActionRecorder event.
 void RecordLoadHandwritingModelResult(const LoadHandwritingModelResult val) {
   UMA_HISTOGRAM_ENUMERATION(
-      "MachineLearningService.HandwritingModel.LoadModelResult.Event", val,
-      LoadHandwritingModelResult::LOAD_MODEL_FILES_ERROR);
+      "MachineLearningService.HandwritingModel.LoadModelResult.Event", val);
 }
 
 constexpr char kLibHandwritingDlcId[] = "libhandwriting";
@@ -85,7 +85,7 @@ void OnGetExistingDlcsComplete(
     HandwritingRecognizer receiver,
     LoadHandwritingModelCallback callback,
     DlcserviceClient* const dlc_client,
-    const std::string& err,
+    std::string_view err,
     const dlcservice::DlcsWithContent& dlcs_with_content) {
   // Loop over dlcs_with_content, and installs libhandwriting if already exists.
   // Since we don't want to trigger downloading here, we only install(mount)

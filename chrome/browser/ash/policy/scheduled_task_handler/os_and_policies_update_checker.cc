@@ -6,18 +6,22 @@
 
 #include <utility>
 
-#include "chrome/browser/browser_process.h"
+#include "base/check_deref.h"
+#include "base/notimplemented.h"
 #include "chromeos/ash/components/dbus/update_engine/update_engine_client.h"
 #include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_state_handler.h"
 #include "components/device_event_log/device_event_log.h"
 #include "components/policy/core/common/policy_service.h"
+#include "components/policy/core/common/policy_types.h"
 
 namespace policy {
 
 OsAndPoliciesUpdateChecker::OsAndPoliciesUpdateChecker(
-    ash::NetworkStateHandler* network_state_handler)
+    ash::NetworkStateHandler* network_state_handler,
+    PolicyService* policy_service)
     : network_state_handler_(network_state_handler),
+      policy_service_(CHECK_DEREF(policy_service)),
       update_check_task_executor_(
           update_checker_internal::
               kMaxOsAndPoliciesUpdateCheckerRetryIterations,
@@ -55,7 +59,7 @@ void OsAndPoliciesUpdateChecker::Start(UpdateCheckCompletionCallback cb,
         FROM_HERE, update_checker_internal::kWaitForNetworkTimeout,
         base::BindOnce(&OsAndPoliciesUpdateChecker::OnNetworkWaitTimeout,
                        base::Unretained(this)));
-    network_state_handler_observer_.Observe(network_state_handler_);
+    network_state_handler_observer_.Observe(network_state_handler_.get());
     return;
   }
 
@@ -154,7 +158,7 @@ void OsAndPoliciesUpdateChecker::UpdateStatusChanged(
   switch (status.current_operation()) {
     case update_engine::Operation::IDLE:
       if (!ignore_idle_status_) {
-        // No update to download or an error occured mid-way of an existing
+        // No update to download or an error occurred mid-way of an existing
         // update download.
         // TODO(abhishekbh): Differentiate between the two cases and call
         // ScheduleRetry in case of error.
@@ -214,9 +218,10 @@ void OsAndPoliciesUpdateChecker::OnUpdateCheckStarted(
 }
 
 void OsAndPoliciesUpdateChecker::RefreshPolicies(bool update_check_result) {
-  g_browser_process->policy_service()->RefreshPolicies(
+  policy_service_->RefreshPolicies(
       base::BindOnce(&OsAndPoliciesUpdateChecker::OnRefreshPoliciesCompletion,
-                     weak_factory_.GetWeakPtr(), update_check_result));
+                     weak_factory_.GetWeakPtr(), update_check_result),
+      PolicyFetchReason::kScheduled);
 }
 
 void OsAndPoliciesUpdateChecker::OnRefreshPoliciesCompletion(

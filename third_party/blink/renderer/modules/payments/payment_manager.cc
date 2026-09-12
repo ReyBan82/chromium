@@ -4,11 +4,11 @@
 
 #include "third_party/blink/renderer/modules/payments/payment_manager.h"
 
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "base/task/single_thread_task_runner.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
-#include "third_party/blink/renderer/modules/payments/payment_instruments.h"
 #include "third_party/blink/renderer/modules/service_worker/service_worker_registration.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
@@ -16,31 +16,31 @@
 
 namespace blink {
 
-PaymentInstruments* PaymentManager::instruments() {
-  if (!instruments_) {
-    instruments_ = MakeGarbageCollected<PaymentInstruments>(
-        manager_, registration_->GetExecutionContext());
-  }
-  return instruments_;
-}
-
 const String& PaymentManager::userHint() {
   return user_hint_;
 }
 
 void PaymentManager::setUserHint(const String& user_hint) {
   user_hint_ = user_hint;
-  manager_->SetUserHint(user_hint_);
+  if (manager_.is_bound()) {
+    manager_->SetUserHint(user_hint_);
+  }
 }
 
-ScriptPromise PaymentManager::enableDelegations(
+ScriptPromise<IDLBoolean> PaymentManager::enableDelegations(
     ScriptState* script_state,
     const Vector<V8PaymentDelegation>& delegations,
     ExceptionState& exception_state) {
   if (!script_state->ContextIsValid()) {
     exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
                                       "Cannot enable payment delegations");
-    return ScriptPromise();
+    return EmptyPromise();
+  }
+
+  if (!manager_.is_bound()) {
+    exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                      "PaymentManager backend went away");
+    return EmptyPromise();
   }
 
   if (enable_delegations_resolver_) {
@@ -48,7 +48,7 @@ ScriptPromise PaymentManager::enableDelegations(
         DOMExceptionCode::kInvalidStateError,
         "Cannot call enableDelegations() again until the previous "
         "enableDelegations() is finished");
-    return ScriptPromise();
+    return EmptyPromise();
   }
 
   using MojoPaymentDelegation = payments::mojom::blink::PaymentDelegation;
@@ -76,37 +76,34 @@ ScriptPromise PaymentManager::enableDelegations(
 
   manager_->EnableDelegations(
       std::move(mojo_delegations),
-      WTF::BindOnce(&PaymentManager::OnEnableDelegationsResponse,
-                    WrapPersistent(this)));
+      BindOnce(&PaymentManager::OnEnableDelegationsResponse,
+               WrapPersistent(this)));
   enable_delegations_resolver_ =
-      MakeGarbageCollected<ScriptPromiseResolver>(script_state);
+      MakeGarbageCollected<ScriptPromiseResolver<IDLBoolean>>(
+          script_state, exception_state.GetContext());
   return enable_delegations_resolver_->Promise();
 }
 
 void PaymentManager::Trace(Visitor* visitor) const {
   visitor->Trace(registration_);
   visitor->Trace(manager_);
-  visitor->Trace(instruments_);
   visitor->Trace(enable_delegations_resolver_);
   ScriptWrappable::Trace(visitor);
 }
 
 PaymentManager::PaymentManager(ServiceWorkerRegistration* registration)
     : registration_(registration),
-      manager_(registration->GetExecutionContext()),
-      instruments_(nullptr) {
+      manager_(registration->GetExecutionContext()) {
   DCHECK(registration);
 
   if (ExecutionContext* context = registration->GetExecutionContext()) {
     context->GetBrowserInterfaceBroker().GetInterface(
         manager_.BindNewPipeAndPassReceiver(
             context->GetTaskRunner(TaskType::kUserInteraction)));
+    manager_.set_disconnect_handler(BindOnce(
+        &PaymentManager::OnServiceConnectionError, WrapWeakPersistent(this)));
+    manager_->Init(context->Url(), registration_->scope());
   }
-
-  manager_.set_disconnect_handler(WTF::BindOnce(
-      &PaymentManager::OnServiceConnectionError, WrapWeakPersistent(this)));
-  manager_->Init(registration_->GetExecutionContext()->Url(),
-                 registration_->scope());
 }
 
 void PaymentManager::OnEnableDelegationsResponse(

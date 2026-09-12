@@ -35,3 +35,29 @@ struct StructuredHeadersParameterizedItem {
   // Parameter order is significant, so a map is not sufficient.
   array<StructuredHeadersParameter> parameters;
 };
+
+struct StructuredHeadersInnerList {
+  array<StructuredHeadersParameterizedItem> items;
+
+  // Parameter order is significant, so a map is not sufficient.
+  array<StructuredHeadersParameter> parameters;
+};
+
+// Corresponds to net::structured_headers::ParameterizedMember.
+union StructuredHeadersParameterizedMember {
+  uint8 empty;
+  StructuredHeadersParameterizedItem item;
+  StructuredHeadersInnerList inner_list;
+};
+
+// Corresponds to net::structured_headers::DictionaryMember.
+struct StructuredHeadersDictionaryMember {
+  string key;
+  StructuredHeadersParameterizedMember value;
+};
+
+// Corresponds to net::structured_headers::Dictionary.
+struct StructuredHeadersDictionary {
+  // Member order is significant, so a map is not sufficient.
+  array<StructuredHeadersDictionaryMember> members;
+};

@@ -29,7 +29,7 @@ features:
   dynamic_refresh: true
   per_profile: false
 owners:
-- asumaneev@gogole.com
+- asumaneev@google.com
 - mpolzer@google.com
 - chromeos-commercial-remote-management@google.com
 schema:
@@ -52,3 +52,4 @@ supported_on:
 - chrome_os:69-
 tags: []
 type: dict
+generate_device_proto: False

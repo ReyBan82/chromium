@@ -10,11 +10,10 @@
 
 #include "components/feed/core/proto/v2/store.pb.h"
 #include "components/feed/core/proto/v2/ui.pb.h"
+#include "components/feed/core/proto/v2/wire/client_user_profiles.pb.h"
 #include "components/feed/core/proto/v2/wire/info_card.pb.h"
 #include "components/feed/core/proto/v2/wire/upload_actions_request.pb.h"
 #include "components/feed/core/proto/v2/wire/upload_actions_response.pb.h"
-#include "components/feed/core/proto/v2/wire/web_feed_matcher.pb.h"
-#include "components/feed/core/proto/v2/wire/web_feeds.pb.h"
 #include "components/feed/core/proto/v2/xsurface.pb.h"
 
 namespace feedwire {
@@ -40,18 +39,14 @@ struct StreamModelUpdateRequest;
 
 DECLARE_PRINTER(feedstore, Content)
 DECLARE_PRINTER(feedstore, DataOperation)
-DECLARE_PRINTER(feedstore, Image)
 DECLARE_PRINTER(feedstore, Metadata)
-DECLARE_PRINTER(feedstore, RecommendedWebFeedIndex)
 DECLARE_PRINTER(feedstore, Record)
 DECLARE_PRINTER(feedstore, StoredAction)
 DECLARE_PRINTER(feedstore, StreamData)
 DECLARE_PRINTER(feedstore, StreamSharedState)
 DECLARE_PRINTER(feedstore, StreamStructure)
 DECLARE_PRINTER(feedstore, StreamStructureSet)
-DECLARE_PRINTER(feedstore, SubscribedWebFeeds)
-DECLARE_PRINTER(feedstore, WebFeedInfo)
-DECLARE_PRINTER(feedstore, PendingWebFeedOperation)
+DECLARE_PRINTER(feedstore, DocView)
 DECLARE_PRINTER(feedui, StreamUpdate)
 DECLARE_PRINTER(feedwire, ActionPayload)
 DECLARE_PRINTER(feedwire, ClientInfo)
@@ -62,14 +57,11 @@ DECLARE_PRINTER(feedwire, FeedAction)
 DECLARE_PRINTER(feedwire, InfoCardTrackingState)
 DECLARE_PRINTER(feedwire, UploadActionsRequest)
 DECLARE_PRINTER(feedwire, UploadActionsResponse)
-DECLARE_PRINTER(feedwire::webfeed, ListRecommendedWebFeedsRequest)
-DECLARE_PRINTER(feedwire::webfeed, ListRecommendedWebFeedsResponse)
-DECLARE_PRINTER(feedwire::webfeed, ListWebFeedsRequest)
-DECLARE_PRINTER(feedwire::webfeed, ListWebFeedsResponse)
-DECLARE_PRINTER(feedwire::webfeed, Image)
-DECLARE_PRINTER(feedwire::webfeed, WebFeed)
-DECLARE_PRINTER(feedwire::webfeed, WebFeedMatcher)
-DECLARE_PRINTER(feedxsurface, WebFeedFollowState)
+DECLARE_PRINTER(feedwire, ViewDemotionProfileExtension)
+DECLARE_PRINTER(feedwire, ViewDemotionProfile)
+DECLARE_PRINTER(feedwire, Table)
+DECLARE_PRINTER(feedwire, Table::Column)
+DECLARE_PRINTER(feedwire, ClientUserProfiles)
 
 #undef DECLARE_PRINTER
 

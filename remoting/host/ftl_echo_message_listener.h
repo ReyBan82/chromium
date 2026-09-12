@@ -5,10 +5,11 @@
 #ifndef REMOTING_HOST_FTL_ECHO_MESSAGE_LISTENER_H_
 #define REMOTING_HOST_FTL_ECHO_MESSAGE_LISTENER_H_
 
-#include <string>
+#include <string_view>
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
-#include "remoting/signaling/signal_strategy.h"
+#include "remoting/signaling/ftl_signal_strategy.h"
 
 namespace remoting {
 
@@ -17,29 +18,27 @@ namespace remoting {
 // is determine whether this endpoint is reachable without requiring the
 // construction of a well-formed XMPP stanza and won't interfere with the
 // standard signaling process if sent mid-connection negotiation.
-class FtlEchoMessageListener : public SignalStrategy::Listener {
+class FtlEchoMessageListener : public FtlSignalStrategy::FtlListener {
  public:
+  using CheckAccessPermissionCallback =
+      base::RepeatingCallback<bool(std::string_view)>;
+
   // |signal_strategy| is expected to outlive this object.
-  FtlEchoMessageListener(std::string host_owner,
-                         SignalStrategy* signal_strategy);
+  FtlEchoMessageListener(CheckAccessPermissionCallback callback,
+                         FtlSignalStrategy* ftl_signal_strategy);
 
   FtlEchoMessageListener(const FtlEchoMessageListener&) = delete;
   FtlEchoMessageListener& operator=(const FtlEchoMessageListener&) = delete;
 
   ~FtlEchoMessageListener() override;
 
-  // SignalStrategy::Listener interface.
-  void OnSignalStrategyStateChange(SignalStrategy::State state) override;
-  bool OnSignalStrategyIncomingStanza(
-      const jingle_xmpp::XmlElement* stanza) override;
-  bool OnSignalStrategyIncomingMessage(
-      const ftl::Id& sender_id,
-      const std::string& sender_registration_id,
-      const ftl::ChromotingMessage& message) override;
+  // FtlSignalStrategy::FtlListener interface.
+  bool OnIncomingFtlMessage(const SignalingAddress& sender_address,
+                            const ftl::ChromotingMessage& message) override;
 
  private:
-  std::string host_owner_;
-  raw_ptr<SignalStrategy> signal_strategy_;
+  CheckAccessPermissionCallback check_access_permission_callback_;
+  raw_ptr<FtlSignalStrategy> ftl_signal_strategy_;
 };
 
 }  // namespace remoting

@@ -6,39 +6,56 @@
 
 #include <stdint.h>
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <set>
 #include <utility>
 
 #include "base/auto_reset.h"
+#include "base/byte_size.h"
+#include "base/check.h"
+#include "base/check_deref.h"
+#include "base/check_op.h"
 #include "base/command_line.h"
-#include "base/containers/contains.h"
 #include "base/containers/flat_set.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/i18n/rtl.h"
 #include "base/location.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/metrics/user_metrics.h"
-#include "base/ranges/algorithm.h"
+#include "base/notreached.h"
+#include "base/scoped_observation.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/app/chrome_command_ids.h"
+#include "chrome/browser/actor/ui/actor_overlay_web_view.h"
 #include "chrome/browser/app_mode/app_mode_utils.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chrome_notification_types.h"
-#include "chrome/browser/download/bubble/download_bubble_prefs.h"
+#include "chrome/browser/browsing_data/browsing_data_important_sites_util.h"
+#include "chrome/browser/desktop_to_mobile_promos/promos_utils.h"
+#include "chrome/browser/devtools/devtools_ui_controller.h"
+#include "chrome/browser/devtools/devtools_window.h"
+#include "chrome/browser/enterprise/data_protection/data_protection_navigation_observer.h"
+#include "chrome/browser/enterprise/data_protection/data_protection_overlay_view.h"
+#include "chrome/browser/enterprise/watermark/settings.h"
 #include "chrome/browser/extensions/browser_extension_window_controller.h"
 #include "chrome/browser/extensions/extension_util.h"
 #include "chrome/browser/feature_engagement/tracker_factory.h"
-#include "chrome/browser/native_window_notification_source.h"
+#include "chrome/browser/glic/public/features.h"
+#include "chrome/browser/headless/headless_mode_util.h"
+#include "chrome/browser/optimization_guide/optimization_guide_keyed_service.h"
+#include "chrome/browser/optimization_guide/optimization_guide_keyed_service_factory.h"
 #include "chrome/browser/platform_util.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_attributes_entry.h"
@@ -49,131 +66,197 @@
 #include "chrome/browser/sessions/tab_restore_service_factory.h"
 #include "chrome/browser/sharing_hub/sharing_hub_features.h"
 #include "chrome/browser/signin/chrome_signin_helper.h"
+#include "chrome/browser/sync/sync_service_factory.h"
 #include "chrome/browser/themes/theme_properties.h"
 #include "chrome/browser/themes/theme_service.h"
+#include "chrome/browser/themes/theme_service_factory.h"
 #include "chrome/browser/translate/chrome_translate_client.h"
+#include "chrome/browser/ui/accelerator_table.h"
+#include "chrome/browser/ui/actions/chrome_action_id.h"
+#include "chrome/browser/ui/actions/chrome_action_properties.h"
+#include "chrome/browser/ui/animation/browser_animation_controller.h"
 #include "chrome/browser/ui/autofill/autofill_bubble_base.h"
 #include "chrome/browser/ui/autofill/payments/save_card_ui.h"
+#include "chrome/browser/ui/bookmarks/bookmark_bar_controller.h"
 #include "chrome/browser/ui/bookmarks/bookmark_stats.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/bookmarks/controllers/bookmark_bar_ui_controller.h"
+#include "chrome/browser/ui/browser_actions.h"
+#include "chrome/browser/ui/browser_active_state_manager/browser_active_state_manager.h"
 #include "chrome/browser/ui/browser_command_controller.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_dialogs.h"
 #include "chrome/browser/ui/browser_element_identifiers.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_list.h"
-#include "chrome/browser/ui/browser_navigator.h"
+#include "chrome/browser/ui/browser_init_state.h"
+#include "chrome/browser/ui/browser_tabstrip.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/browser_window_state.h"
+#include "chrome/browser/ui/browser_window_theme_observer.h"
 #include "chrome/browser/ui/color/chrome_color_id.h"
+#include "chrome/browser/ui/dialogs/browser_dialogs.h"
+#include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
 #include "chrome/browser/ui/find_bar/find_bar.h"
-#include "chrome/browser/ui/find_bar/find_bar_controller.h"
+#include "chrome/browser/ui/focus/browser_focus_controller.h"
+#include "chrome/browser/ui/fullscreen/browser_window_fullscreen_controller.h"
+#include "chrome/browser/ui/global_error/global_error.h"
+#include "chrome/browser/ui/global_error/global_error_service.h"
+#include "chrome/browser/ui/global_error/global_error_service_factory.h"
 #include "chrome/browser/ui/layout_constants.h"
-#include "chrome/browser/ui/performance_controls/high_efficiency_iph_controller.h"
+#include "chrome/browser/ui/location_bar/location_bar.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/omnibox/omnibox_next_features.h"
+#include "chrome/browser/ui/omnibox/omnibox_popup_view.h"
+#include "chrome/browser/ui/omnibox/omnibox_view.h"
+#include "chrome/browser/ui/page_action/page_action_icon_type.h"
+#include "chrome/browser/ui/performance_controls/tab_resource_usage_tab_helper.h"
 #include "chrome/browser/ui/qrcode_generator/qrcode_generator_bubble_controller.h"
 #include "chrome/browser/ui/recently_audible_helper.h"
 #include "chrome/browser/ui/sad_tab_helper.h"
 #include "chrome/browser/ui/sharing_hub/sharing_hub_bubble_controller.h"
 #include "chrome/browser/ui/sharing_hub/sharing_hub_bubble_view.h"
-#include "chrome/browser/ui/side_search/side_search_utils.h"
-#include "chrome/browser/ui/sync/bubble_sync_promo_delegate.h"
-#include "chrome/browser/ui/sync/one_click_signin_links_delegate_impl.h"
+#include "chrome/browser/ui/side_panel/side_panel_action_callback.h"
+#include "chrome/browser/ui/side_panel/side_panel_enums.h"
+#include "chrome/browser/ui/side_panel/side_panel_registry.h"
+#include "chrome/browser/ui/side_panel/side_panel_ui.h"
+#include "chrome/browser/ui/tabs/alert/tab_alert_controller.h"
+#include "chrome/browser/ui/tabs/features.h"
+#include "chrome/browser/ui/tabs/organizer/organizer_panel_controller.h"
+#include "chrome/browser/ui/tabs/public/tab_dialog_manager.h"
+#include "chrome/browser/ui/tabs/saved_tab_groups/collaboration_messaging_tab_data.h"
+#include "chrome/browser/ui/tabs/tab_change_type.h"
 #include "chrome/browser/ui/tabs/tab_enums.h"
-#include "chrome/browser/ui/tabs/tab_menu_model.h"
+#include "chrome/browser/ui/tabs/tab_group_model.h"
+#include "chrome/browser/ui/tabs/tab_strip_api/tab_strip_service_feature.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/tabs/tab_strip_prefs.h"
 #include "chrome/browser/ui/tabs/tab_utils.h"
+#include "chrome/browser/ui/tabs/vertical_tab_strip_metrics.h"
+#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
 #include "chrome/browser/ui/toolbar/app_menu_model.h"
+#include "chrome/browser/ui/toolbar/chrome_labs/chrome_labs_utils.h"
+#include "chrome/browser/ui/toolbar/toolbar_pref_names.h"
+#include "chrome/browser/ui/ui_controller_factory.h"
 #include "chrome/browser/ui/ui_features.h"
-#include "chrome/browser/ui/user_education/browser_feature_promo_snooze_service.h"
-#include "chrome/browser/ui/user_education/reopen_tab_in_product_help.h"
-#include "chrome/browser/ui/user_education/reopen_tab_in_product_help_factory.h"
-#include "chrome/browser/ui/user_education/user_education_service.h"
-#include "chrome/browser/ui/user_education/user_education_service_factory.h"
+#include "chrome/browser/ui/unload_controller.h"
+#include "chrome/browser/ui/user_education/browser_user_education_interface.h"
 #include "chrome/browser/ui/view_ids.h"
-#include "chrome/browser/ui/views/accelerator_table.h"
 #include "chrome/browser/ui/views/accessibility/accessibility_focus_highlight.h"
 #include "chrome/browser/ui/views/accessibility/caret_browsing_dialog_delegate.h"
 #include "chrome/browser/ui/views/autofill/autofill_bubble_handler_impl.h"
 #include "chrome/browser/ui/views/bookmarks/bookmark_bar_view.h"
 #include "chrome/browser/ui/views/bookmarks/bookmark_bubble_view.h"
+#include "chrome/browser/ui/views/bookmarks/bookmark_page_action_controller.h"
+#include "chrome/browser/ui/views/bubble_anchor_util_views.h"
 #include "chrome/browser/ui/views/color_provider_browser_helper.h"
-#include "chrome/browser/ui/views/download/bubble/download_toolbar_button_view.h"
 #include "chrome/browser/ui/views/download/download_in_progress_dialog_view.h"
-#include "chrome/browser/ui/views/download/download_shelf_view.h"
-#include "chrome/browser/ui/views/exclusive_access_bubble_views.h"
+#include "chrome/browser/ui/views/exclusive_access/exclusive_access_bubble_views.h"
+#include "chrome/browser/ui/views/exclusive_access/exclusive_access_bubble_views_context.h"
 #include "chrome/browser/ui/views/extensions/extension_keybinding_registry_views.h"
-#include "chrome/browser/ui/views/extensions/extensions_toolbar_container.h"
+#include "chrome/browser/ui/views/extensions/extensions_toolbar_desktop.h"
 #include "chrome/browser/ui/views/eye_dropper/eye_dropper.h"
 #include "chrome/browser/ui/views/find_bar_host.h"
+#include "chrome/browser/ui/views/find_bar_owner.h"
 #include "chrome/browser/ui/views/frame/app_menu_button.h"
-#include "chrome/browser/ui/views/frame/browser_view_layout.h"
-#include "chrome/browser/ui/views/frame/browser_view_layout_delegate.h"
-#include "chrome/browser/ui/views/frame/contents_layout_manager.h"
-#include "chrome/browser/ui/views/frame/immersive_mode_controller.h"
-#include "chrome/browser/ui/views/frame/native_browser_frame.h"
+#include "chrome/browser/ui/views/frame/browser_frame_view.h"
+#include "chrome/browser/ui/views/frame/browser_native_widget.h"
+#include "chrome/browser/ui/views/frame/browser_widget.h"
+#include "chrome/browser/ui/views/frame/contents_container_view.h"
+#include "chrome/browser/ui/views/frame/contents_separator.h"
+#include "chrome/browser/ui/views/frame/custom_floating_corner.h"
+#include "chrome/browser/ui/views/frame/horizontal_tab_strip_region_view.h"
+#include "chrome/browser/ui/views/frame/layout/browser_view_layout.h"
+#include "chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.h"
+#include "chrome/browser/ui/views/frame/main_background_region_view.h"
+#include "chrome/browser/ui/views/frame/multi_contents_view.h"
+#include "chrome/browser/ui/views/frame/multi_contents_view_delegate.h"
+#include "chrome/browser/ui/views/frame/multi_contents_view_drop_target_controller.h"
+#include "chrome/browser/ui/views/frame/multi_contents_view_mini_toolbar.h"
+#include "chrome/browser/ui/views/frame/safe_invoke/safe_invoke.h"
+#include "chrome/browser/ui/views/frame/scrim_view.h"
+#include "chrome/browser/ui/views/frame/shadow_overlay_view.h"
+#include "chrome/browser/ui/views/frame/tab_modal_dialog_host.h"
 #include "chrome/browser/ui/views/frame/tab_strip_region_view.h"
-#include "chrome/browser/ui/views/frame/top_container_loading_bar.h"
 #include "chrome/browser/ui/views/frame/top_container_view.h"
+#include "chrome/browser/ui/views/frame/top_controls_slide_controller.h"
+#include "chrome/browser/ui/views/frame/vertical_tab_strip_background_blur_backdrop.h"
+#include "chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h"
 #include "chrome/browser/ui/views/frame/web_contents_close_handler.h"
 #include "chrome/browser/ui/views/fullscreen_control/fullscreen_control_host.h"
+#include "chrome/browser/ui/views/glic/glic_button_interface.h"
 #include "chrome/browser/ui/views/global_media_controls/media_toolbar_button_view.h"
 #include "chrome/browser/ui/views/hats/hats_next_web_dialog.h"
 #include "chrome/browser/ui/views/incognito_clear_browsing_data_dialog_coordinator.h"
 #include "chrome/browser/ui/views/infobars/infobar_container_view.h"
-#include "chrome/browser/ui/views/location_bar/intent_chip_button.h"
-#include "chrome/browser/ui/views/location_bar/intent_picker_view.h"
+#include "chrome/browser/ui/views/interaction/browser_elements_views.h"
+#include "chrome/browser/ui/views/interaction/browser_elements_views_impl.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
-#include "chrome/browser/ui/views/location_bar/star_view.h"
+#include "chrome/browser/ui/views/new_tab_footer/footer_web_view.h"
+#include "chrome/browser/ui/views/omnibox/omnibox_popup_closer.h"
+#include "chrome/browser/ui/views/omnibox/omnibox_popup_view_browser_view.h"
 #include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
-#include "chrome/browser/ui/views/page_action/page_action_icon_controller.h"
-#include "chrome/browser/ui/views/page_action/page_action_icon_view.h"
+#include "chrome/browser/ui/views/page_action/page_action_view.h"
+#include "chrome/browser/ui/views/permissions/chip/permission_dashboard_view.h"
 #include "chrome/browser/ui/views/profiles/avatar_toolbar_button.h"
-#include "chrome/browser/ui/views/profiles/profile_indicator_icon.h"
 #include "chrome/browser/ui/views/profiles/profile_menu_coordinator.h"
 #include "chrome/browser/ui/views/qrcode_generator/qrcode_generator_bubble.h"
 #include "chrome/browser/ui/views/send_tab_to_self/send_tab_to_self_bubble_view.h"
 #include "chrome/browser/ui/views/send_tab_to_self/send_tab_to_self_device_picker_bubble_view.h"
-#include "chrome/browser/ui/views/send_tab_to_self/send_tab_to_self_icon_view.h"
 #include "chrome/browser/ui/views/send_tab_to_self/send_tab_to_self_promo_bubble_view.h"
 #include "chrome/browser/ui/views/sharing/sharing_dialog_view.h"
 #include "chrome/browser/ui/views/sharing_hub/screenshot/screenshot_captured_bubble.h"
 #include "chrome/browser/ui/views/sharing_hub/sharing_hub_bubble_view_impl.h"
-#include "chrome/browser/ui/views/sharing_hub/sharing_hub_icon_view.h"
 #include "chrome/browser/ui/views/side_panel/side_panel.h"
+#include "chrome/browser/ui/views/side_panel/side_panel_animation_content_view.h"
 #include "chrome/browser/ui/views/side_panel/side_panel_coordinator.h"
-#include "chrome/browser/ui/views/side_panel/side_panel_registry.h"
 #include "chrome/browser/ui/views/status_bubble_views.h"
-#include "chrome/browser/ui/views/sync/one_click_signin_dialog_view.h"
 #include "chrome/browser/ui/views/tab_contents/chrome_web_contents_view_focus_helper.h"
 #include "chrome/browser/ui/views/tab_search_bubble_host.h"
 #include "chrome/browser/ui/views/tabs/browser_tab_strip_controller.h"
 #include "chrome/browser/ui/views/tabs/new_tab_button.h"
+#include "chrome/browser/ui/views/tabs/organizer/organizer_panel_view.h"
+#include "chrome/browser/ui/views/tabs/organizer/organizer_tray_view.h"
+#include "chrome/browser/ui/views/tabs/shared/tab_strip_combo_button.h"
+#include "chrome/browser/ui/views/tabs/shared/tab_strip_flat_edge_button.h"
 #include "chrome/browser/ui/views/tabs/tab.h"
-#include "chrome/browser/ui/views/tabs/tab_search_button.h"
+#include "chrome/browser/ui/views/tabs/tab/tab_accessibility.h"
 #include "chrome/browser/ui/views/tabs/tab_strip.h"
+#include "chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_top_container.h"
 #include "chrome/browser/ui/views/theme_copying_widget.h"
+#include "chrome/browser/ui/views/toolbar/app_menu_control.h"
+#include "chrome/browser/ui/views/toolbar/avatar_toolbar_button_interface.h"
 #include "chrome/browser/ui/views/toolbar/browser_app_menu_button.h"
-#include "chrome/browser/ui/views/toolbar/reload_button.h"
+#include "chrome/browser/ui/views/toolbar/chrome_labs/chrome_labs_coordinator.h"
+#include "chrome/browser/ui/views/toolbar/pinned_toolbar_actions_container.h"
+#include "chrome/browser/ui/views/toolbar/reload_control.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_view.h"
 #include "chrome/browser/ui/views/translate/translate_bubble_controller.h"
 #include "chrome/browser/ui/views/translate/translate_bubble_view.h"
 #include "chrome/browser/ui/views/update_recommended_message_box.h"
-#include "chrome/browser/ui/views/upgrade_notification_controller.h"
-#include "chrome/browser/ui/views/user_education/browser_feature_promo_controller.h"
 #include "chrome/browser/ui/views/user_education/browser_user_education_service.h"
 #include "chrome/browser/ui/views/web_apps/frame_toolbar/web_app_frame_toolbar_view.h"
+#include "chrome/browser/ui/waap/initial_web_ui_manager.h"
+#include "chrome/browser/ui/waap/initial_webui_window_metrics_manager.h"
 #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+#include "chrome/browser/ui/webui/top_chrome/webui_contents_preload_manager.h"
+#include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
+#include "chrome/browser/ui/window_metadata/window_metadata_controller.h"
 #include "chrome/browser/ui/window_sizer/window_sizer.h"
+#include "chrome/browser/ui/zoom/browser_window_zoom_observer.h"
+#include "chrome/browser/user_education/user_education_service.h"
+#include "chrome/browser/user_education/user_education_service_factory.h"
 #include "chrome/common/channel_info.h"
-#include "chrome/common/chrome_features.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/grit/theme_resources.h"
-#include "chromeos/ui/wm/features.h"
 #include "components/autofill/core/common/autofill_payments_features.h"
+#include "components/collaboration/public/messaging/message.h"
+#include "components/content_settings/core/common/features.h"
+#include "components/enterprise/buildflags/buildflags.h"
 #include "components/feature_engagement/public/event_constants.h"
 #include "components/feature_engagement/public/feature_constants.h"
 #include "components/feature_engagement/public/tracker.h"
@@ -181,40 +264,57 @@
 #include "components/javascript_dialogs/app_modal_dialog_controller.h"
 #include "components/javascript_dialogs/app_modal_dialog_queue.h"
 #include "components/javascript_dialogs/app_modal_dialog_view.h"
-#include "components/omnibox/browser/omnibox_popup_view.h"
-#include "components/omnibox/browser/omnibox_view.h"
 #include "components/performance_manager/public/features.h"
 #include "components/permissions/permission_request_manager.h"
 #include "components/prefs/pref_service.h"
 #include "components/reading_list/core/reading_list_pref_names.h"
 #include "components/safe_browsing/core/browser/password_protection/metrics_util.h"
+#include "components/saved_tab_groups/public/features.h"
+#include "components/search/ntp_features.h"
 #include "components/sessions/core/tab_restore_service.h"
+#include "components/split_tabs/split_tab_id.h"
+#include "components/split_tabs/split_tab_visual_data.h"
 #include "components/startup_metric_utils/browser/startup_metric_utils.h"
+#include "components/sync/service/sync_service.h"
+#include "components/tabs/public/split_tab_data.h"
+#include "components/tabs/public/tab_alert.h"
+#include "components/tabs/public/tab_group.h"
+#include "components/tabs/public/tab_interface.h"
 #include "components/translate/core/browser/language_state.h"
 #include "components/translate/core/browser/translate_manager.h"
-#include "components/user_education/common/feature_promo_handle.h"
-#include "components/user_education/common/help_bubble_factory_registry.h"
+#include "components/user_education/common/feature_promo/feature_promo_handle.h"
+#include "components/user_education/common/feature_promo/feature_promo_result.h"
+#include "components/user_education/common/help_bubble/help_bubble_factory_registry.h"
+#include "components/user_education/common/new_badge/new_badge_controller.h"
+#include "components/user_education/common/user_education_features.h"
 #include "components/user_education/views/help_bubble_view.h"
 #include "components/version_info/channel.h"
 #include "components/web_modal/web_contents_modal_dialog_manager.h"
-#include "components/webapps/browser/banners/app_banner_manager.h"
+#include "content/public/browser/browser_accessibility_state.h"
+#include "content/public/browser/desktop_capture_pip_utils.h"
 #include "content/public/browser/download_manager.h"
 #include "content/public/browser/keyboard_event_processing_result.h"
-#include "content/public/browser/notification_service.h"
+#include "content/public/browser/navigation_entry.h"
+#include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/permission_controller.h"
+#include "content/public/browser/permission_descriptor_util.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_view_host.h"
+#include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
-#include "content/public/browser/site_isolation_policy.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/common/content_features.h"
 #include "content/public/common/content_switches.h"
+#include "content/public/common/drop_data.h"
 #include "extensions/common/command.h"
+#include "media/capture/capture_switches.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
-#include "ui/accessibility/accessibility_features.h"
-#include "ui/accessibility/ax_enums.mojom.h"
-#include "ui/accessibility/ax_mode_observer.h"
+#include "ui/accessibility/ax_enums.mojom-shared.h"
 #include "ui/accessibility/ax_node_data.h"
-#include "ui/accessibility/platform/ax_platform_node.h"
+#include "ui/accessibility/platform/assistive_tech.h"
+#include "ui/accessibility/platform/ax_mode_observer.h"
+#include "ui/accessibility/platform/ax_platform.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/dragdrop/os_exchange_data.h"
 #include "ui/base/hit_test.h"
@@ -222,58 +322,77 @@
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/text/bytes_formatting.h"
 #include "ui/base/theme_provider.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/window_open_disposition.h"
 #include "ui/base/window_open_disposition_utils.h"
+#include "ui/color/color_id.h"
+#include "ui/compositor/debug_utils.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/paint_recorder.h"
 #include "ui/content_accelerators/accelerator_util.h"
 #include "ui/display/screen.h"
+#include "ui/display/types/display_constants.h"
 #include "ui/events/event_utils.h"
+#include "ui/gfx/animation/animation_runner.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/color_utils.h"
+#include "ui/gfx/geometry/outsets.h"
+#include "ui/gfx/geometry/point.h"
+#include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/rect_conversions.h"
+#include "ui/gfx/geometry/size.h"
 #include "ui/gfx/scoped_canvas.h"
 #include "ui/gfx/scrollbar_size.h"
 #include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/accessibility/view_accessibility_utils.h"
-#include "ui/views/background.h"
+#include "ui/views/animation/compositor_animation_runner.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/controls/button/menu_button.h"
-#include "ui/views/controls/separator.h"
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/controls/webview/webview.h"
-#include "ui/views/focus/external_focus_tracker.h"
 #include "ui/views/interaction/element_tracker_views.h"
+#include "ui/views/interaction/view_subregion_anchor.h"
+#include "ui/views/layout/fill_layout.h"
+#include "ui/views/view.h"
 #include "ui/views/view_class_properties.h"
+#include "ui/views/view_utils.h"
 #include "ui/views/views_features.h"
 #include "ui/views/widget/native_widget.h"
 #include "ui/views/widget/root_view.h"
 #include "ui/views/widget/sublevel_manager.h"
 #include "ui/views/widget/widget.h"
 #include "ui/views/window/dialog_delegate.h"
+#include "ui/views/window/hit_test_utils.h"
 
 #if BUILDFLAG(IS_CHROMEOS)
-#include "chrome/browser/ui/views/frame/browser_non_client_frame_view_chromeos.h"
-#include "chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h"
-#include "chromeos/ui/frame/caption_buttons/frame_size_button.h"
-#include "chromeos/ui/wm/desks/desks_helper.h"
-#endif
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#include "ash/constants/ash_switches.h"
 #include "ash/public/cpp/accelerators.h"
 #include "ash/public/cpp/metrics_util.h"
-#include "chrome/browser/ash/crosapi/browser_util.h"
-#include "chrome/browser/ui/ash/window_properties.h"
+#include "ash/wm/window_properties.h"
+#include "chrome/browser/ash/boca/on_task/on_task_locked_controller.h"
+#include "chrome/browser/ui/views/frame/browser_frame_view_chromeos.h"
+#include "chrome/browser/ui/views/frame/immersive_mode_controller_chromeos.h"
+#include "chrome/browser/ui/views/frame/top_controls_slide_controller_chromeos.h"
 #include "chrome/grit/chrome_unscaled_resources.h"
-#include "ui/compositor/throughput_tracker.h"
+#include "chromeos/components/mgs/managed_guest_session_utils.h"
+#include "chromeos/ui/base/window_properties.h"
+#include "chromeos/ui/frame/caption_buttons/frame_caption_button_container_view.h"
+#include "chromeos/ui/frame/caption_buttons/frame_size_button.h"
+#include "chromeos/ui/wm/desks/desks_helper.h"
+#include "ui/compositor/compositor_metrics_tracker.h"
 #else
-#include "chrome/browser/ui/signin_view_controller.h"
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#include "chrome/browser/ui/signin/signin_view_controller.h"
+#include "chrome/browser/ui/views/download/bubble/download_toolbar_ui_controller.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_MAC)
 #include "chrome/browser/global_keyboard_shortcuts_mac.h"
+#include "chrome/browser/ui/fullscreen_util_mac.h"
+#include "chrome/browser/ui/views/frame/immersive_mode_overlay_views_mac.h"
 #include "components/remote_cocoa/app_shim/application_bridge.h"
 #include "components/remote_cocoa/browser/application_host.h"
 #endif
@@ -298,22 +417,18 @@
 #undef LoadAccelerators
 #endif
 
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-#include "chrome/browser/ui/views/frame/webui_tab_strip_container_view.h"
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-
 using base::UserMetricsAction;
-using content::NativeWebKeyboardEvent;
 using content::WebContents;
+using input::NativeWebKeyboardEvent;
 using web_modal::WebContentsModalDialogHost;
 
 namespace {
 
-// The name of a key to store on the window handle so that other code can
-// locate this object using just the handle.
-const char* const kBrowserViewKey = "__BROWSER_VIEW__";
+// The visible height of the shadow above the tabs. Clicks in this area are
+// treated as clicks to the frame, rather than clicks to the tab.
+const int kTabShadowSize = 2;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 // UMA histograms that record animation smoothness for tab loading animation.
 constexpr char kTabLoadingSmoothnessHistogramName[] =
     "Chrome.Tabs.AnimationSmoothness.TabLoading";
@@ -333,7 +448,7 @@ std::string FocusListToString(views::View* view) {
   base::flat_set<views::View*> seen_views;
 
   while (view) {
-    if (base::Contains(seen_views, view)) {
+    if (seen_views.contains(view)) {
       result << "*CYCLE TO " << view->GetClassName() << "*";
       break;
     }
@@ -352,7 +467,7 @@ void CheckFocusListForCycles(views::View* const start_view) {
   base::flat_set<views::View*> seen_views;
 
   while (view) {
-    DCHECK(!base::Contains(seen_views, view)) << FocusListToString(start_view);
+    DCHECK(!seen_views.contains(view)) << FocusListToString(start_view);
     seen_views.insert(view);
 
     views::View* next_view = view->GetNextFocusableView();
@@ -371,7 +486,7 @@ bool GetGestureCommand(ui::GestureEvent* event, int* command) {
   DCHECK(command);
   *command = 0;
 #if BUILDFLAG(IS_MAC)
-  if (event->details().type() == ui::ET_GESTURE_SWIPE) {
+  if (event->details().type() == ui::EventType::kGestureSwipe) {
     if (event->details().swipe_left()) {
       *command = IDC_BACK;
       return true;
@@ -385,22 +500,41 @@ bool GetGestureCommand(ui::GestureEvent* event, int* command) {
 }
 
 bool WidgetHasChildModalDialog(views::Widget* parent_widget) {
-  views::Widget::Widgets widgets;
-  views::Widget::GetAllChildWidgets(parent_widget->GetNativeView(), &widgets);
-  for (auto* widget : widgets) {
-    if (widget == parent_widget)
+  views::Widget::Widgets widgets =
+      views::Widget::GetAllChildWidgets(parent_widget->GetNativeView());
+  for (views::Widget* widget : widgets) {
+    if (widget == parent_widget) {
       continue;
-    if (widget->IsModal())
+    }
+    if (widget->IsModal()) {
       return true;
+    }
   }
   return false;
 }
 
+#if BUILDFLAG(IS_CHROMEOS)
+// Returns whether immmersive fullscreen should replace fullscreen. This
+// should only occur for "browser-fullscreen" for tabbed-typed windows (not
+// for tab-fullscreen and not for app/popup type windows).
+bool ShouldUseImmersiveFullscreenForUrl(ExclusiveAccessBubbleType type) {
+  // Kiosk mode needs the whole screen.
+  if (IsRunningInAppMode()) {
+    return false;
+  }
+  // An empty URL signifies browser fullscreen. Immersive is used for browser
+  // fullscreen only.
+  return type ==
+         EXCLUSIVE_ACCESS_BUBBLE_TYPE_BROWSER_FULLSCREEN_EXIT_INSTRUCTION;
+}
+#endif
+
 // Overlay view that owns TopContainerView in some cases (such as during
 // immersive fullscreen reveal).
 class TopContainerOverlayView : public views::View {
+  METADATA_HEADER(TopContainerOverlayView, views::View)
+
  public:
-  METADATA_HEADER(TopContainerOverlayView);
   explicit TopContainerOverlayView(base::WeakPtr<BrowserView> browser_view)
       : browser_view_(std::move(browser_view)) {}
   ~TopContainerOverlayView() override = default;
@@ -413,8 +547,9 @@ class TopContainerOverlayView : public views::View {
     //
     // BrowserView's layout logic still applies in this case. To ensure
     // it is used, we must invalidate BrowserView's layout.
-    if (browser_view_)
+    if (browser_view_) {
       browser_view_->InvalidateLayout();
+    }
   }
 
  private:
@@ -423,7 +558,7 @@ class TopContainerOverlayView : public views::View {
   base::WeakPtr<BrowserView> browser_view_;
 };
 
-BEGIN_METADATA(TopContainerOverlayView, views::View)
+BEGIN_METADATA(TopContainerOverlayView)
 END_METADATA
 
 // A view targeter for the overlay view, which makes sure the overlay view
@@ -445,436 +580,329 @@ class OverlayViewTargeterDelegate : public views::ViewTargeterDelegate {
       views::View::ConvertRectToTarget(target, child, &child_rect);
       return child->HitTestRect(gfx::ToEnclosingRect(child_rect));
     };
-    return base::ranges::any_of(children, hits_child);
+    return std::ranges::any_of(children, hits_child);
   }
 };
 
-// This class uses a solid background instead of a views::Separator. The latter
-// is not guaranteed to fill its bounds and assumes being painted on an opaque
-// background (which is why it'd be OK to only partially fill its bounds). This
-// needs to fill its bounds to have the entire BrowserView painted.
-class ContentsSeparator : public views::View {
- public:
-  METADATA_HEADER(ContentsSeparator);
-
-  ContentsSeparator() {
-    SetBackground(
-        views::CreateThemedSolidBackground(kColorToolbarContentAreaSeparator));
-
-    // BrowserViewLayout will respect either the height or width of this,
-    // depending on orientation, not simultaneously both.
-    SetPreferredSize(
-        gfx::Size(views::Separator::kThickness, views::Separator::kThickness));
-  }
-};
-
-BEGIN_METADATA(ContentsSeparator, views::View)
-END_METADATA
-
-bool ShouldShowWindowIcon(const Browser* browser,
-                          bool app_uses_window_controls_overlay) {
+bool ShouldShowWindowIcon(const BrowserWindowInterface* browser,
+                          bool app_uses_window_controls_overlay,
+                          bool app_uses_tabbed) {
 #if BUILDFLAG(IS_CHROMEOS)
   // For Chrome OS only, trusted windows (apps and settings) do not show a
-  // window icon, crbug.com/119411. Child windows (i.e. popups) do show an icon.
-  if (browser->is_trusted_source() || app_uses_window_controls_overlay)
+  // window icon, crbug.com/40175496. Child windows (i.e. popups) do show an
+  // icon.
+  if (WindowFeatureController::From(browser)->IsTrustedSource() ||
+      app_uses_window_controls_overlay) {
     return false;
+  }
+#else
+  if (app_uses_tabbed) {
+    return false;
+  }
 #endif
-  return browser->SupportsWindowFeature(Browser::FEATURE_TITLEBAR);
+  return WindowFeatureController::From(browser)->SupportsWindowFeature(
+      WindowFeatureController::WindowFeature::kFeatureTitleBar);
 }
 
 #if BUILDFLAG(IS_MAC)
-void GetAnyTabAudioStates(const Browser* browser,
+
+void GetAnyTabAudioStates(const BrowserWindowInterface* browser,
                           bool* any_tab_playing_audio,
                           bool* any_tab_playing_muted_audio) {
-  const TabStripModel* model = browser->tab_strip_model();
+  const TabStripModel* model = browser->GetTabStripModel();
   for (int i = 0; i < model->count(); i++) {
     auto* contents = model->GetWebContentsAt(i);
     auto* helper = RecentlyAudibleHelper::FromWebContents(contents);
     if (helper && helper->WasRecentlyAudible()) {
-      if (contents->IsAudioMuted())
+      if (contents->IsAudioMuted()) {
         *any_tab_playing_muted_audio = true;
-      else
+      } else {
         *any_tab_playing_audio = true;
+      }
     }
   }
 }
-#endif  // BUILDFLAG(IS_MAC)
 
-#if BUILDFLAG(IS_MAC)
-// OverlayWidget is a child Widget of BrowserFrame used during immersive
-// fullscreen on macOS that hosts the top container. Its native Window and View
-// interface with macOS fullscreen APIs allowing separation of the top container
-// and web contents.
-// Currently the only explicit reason for OverlayWidget to be its own subclass
-// is to support GetAccelerator() forwarding.
-class OverlayWidget : public ThemeCopyingWidget {
- public:
-  explicit OverlayWidget(views::Widget* role_model)
-      : ThemeCopyingWidget(role_model) {}
+#else  // BUILDFLAG(IS_MAC)
 
-  OverlayWidget(const OverlayWidget&) = delete;
-  OverlayWidget& operator=(const OverlayWidget&) = delete;
-
-  ~OverlayWidget() override = default;
-
-  // OverlayWidget hosts the top container. Views within the top container look
-  // up accelerators by asking their hosting Widget. In non-immersive fullscreen
-  // that would be the BrowserFrame. Give top chrome what it expects and forward
-  // GetAccelerator() calls to OverlayWidget's parent (BrowserFrame).
-  bool GetAccelerator(int cmd_id, ui::Accelerator* accelerator) const override {
-    DCHECK(parent());
-    return parent()->GetAccelerator(cmd_id, accelerator);
+// Calls |method| which is either WebContents::Cut, ::Copy, or ::Paste on
+// the given WebContents, returning true if it consumed the event.
+bool DoCutCopyPasteForWebContents(content::WebContents* contents,
+                                  void (content::WebContents::*method)()) {
+  // It's possible for a non-null WebContents to have a null RWHV if it's
+  // crashed or otherwise been killed.
+  content::RenderWidgetHostView* rwhv = contents->GetRenderWidgetHostView();
+  if (!rwhv || !rwhv->HasFocus()) {
+    return false;
   }
-};
+  // Calling |method| rather than using a fake key event is important since a
+  // fake event might be consumed by the web content.
+  (contents->*method)();
+  return true;
+}
+
 #endif  // BUILDFLAG(IS_MAC)
+
+// Combines View::ConvertPointToTarget and View::HitTest for a given |point|.
+// Converts |point| from |src| to |dst| and hit tests it against |dst|. The
+// converted |point| can then be retrieved and used for additional tests.
+bool ConvertedHitTest(views::View* src, views::View* dst, gfx::Point* point) {
+  DCHECK(src);
+  DCHECK(dst);
+  DCHECK(point);
+  views::View::ConvertPointToTarget(src, dst, point);
+  return dst->HitTestPoint(*point);
+}
 
 }  // namespace
 
-///////////////////////////////////////////////////////////////////////////////
-// Delegate implementation for BrowserViewLayout. Usually just forwards calls
-// into BrowserView.
-class BrowserViewLayoutDelegateImpl : public BrowserViewLayoutDelegate {
+// Implements the exclusive access context and bubble context.
+class BrowserView::ExclusiveAccessContextImpl
+    : public ExclusiveAccessContext,
+      public ExclusiveAccessBubbleViewsContext {
  public:
-  explicit BrowserViewLayoutDelegateImpl(BrowserView* browser_view)
+  explicit ExclusiveAccessContextImpl(BrowserView& browser_view)
       : browser_view_(browser_view) {}
-  BrowserViewLayoutDelegateImpl(const BrowserViewLayoutDelegateImpl&) = delete;
-  BrowserViewLayoutDelegateImpl& operator=(
-      const BrowserViewLayoutDelegateImpl&) = delete;
-  ~BrowserViewLayoutDelegateImpl() override = default;
+  ExclusiveAccessContextImpl(const ExclusiveAccessContextImpl&) = delete;
+  void operator=(const ExclusiveAccessContextImpl&) = delete;
+  ~ExclusiveAccessContextImpl() override = default;
 
-  bool IsTabStripVisible() const override {
-    return browser_view_->GetTabStripVisible();
+  ExclusiveAccessBubbleViews* exclusive_access_bubble() {
+    return exclusive_access_bubble_.get();
   }
 
-  bool GetBorderlessModeEnabled() const override {
-    return browser_view_->IsBorderlessModeEnabled();
+  bool IsFullscreen() const override { return browser_view_->IsFullscreen(); }
+
+  Profile* GetProfile() override { return browser_view_->GetProfile(); }
+
+  void UpdateUIForTabFullscreen() override {
+    browser_view_->GetFrameView()->UpdateFullscreenTopUI();
+    // Layout can change in vertical tabstrip mode when going from fullscreen
+    // to tab fullscreen and vice-versa.
+    browser_view_->InvalidateLayout();
   }
 
-  gfx::Rect GetBoundsForTabStripRegionInBrowserView() const override {
-    const gfx::Size tabstrip_minimum_size =
-        browser_view_->tab_strip_region_view()->GetMinimumSize();
-    gfx::RectF bounds_f(browser_view_->frame()->GetBoundsForTabStripRegion(
-        tabstrip_minimum_size));
-    views::View::ConvertRectToTarget(browser_view_->parent(), browser_view_,
-        &bounds_f);
-    return gfx::ToEnclosingRect(bounds_f);
+  WebContents* GetWebContentsForExclusiveAccess() override {
+    return browser_view_->GetActiveWebContents();
   }
 
-  gfx::Rect GetBoundsForWebAppFrameToolbarInBrowserView() const override {
-    const gfx::Size web_app_frame_toolbar_preferred_size =
-        browser_view_->web_app_frame_toolbar()->GetPreferredSize();
-    gfx::RectF bounds_f(browser_view_->frame()->GetBoundsForWebAppFrameToolbar(
-        web_app_frame_toolbar_preferred_size));
-    views::View::ConvertRectToTarget(browser_view_->parent(), browser_view_,
-                                     &bounds_f);
-    return gfx::ToEnclosingRect(bounds_f);
+  bool CanUserEnterFullscreen() const override {
+    return browser_view_->CanFullscreen();
   }
 
-  void LayoutWebAppWindowTitle(
-      const gfx::Rect& available_space,
-      views::Label& window_title_label) const override {
-    browser_view_->frame()->LayoutWebAppWindowTitle(available_space,
-                                                    window_title_label);
+  bool CanUserExitFullscreen() const override {
+#if BUILDFLAG(IS_CHROMEOS)
+    return !platform_util::IsBrowserLockedFullscreen(browser_view_->browser());
+#else
+    return true;
+#endif
   }
 
-  int GetTopInsetInBrowserView() const override {
-    // BrowserView should fill the full window when window controls overlay
-    // is enabled.
-    if (browser_view_->IsWindowControlsOverlayEnabled() ||
-        browser_view_->IsBorderlessModeEnabled()) {
-      return 0;
-    }
-    return browser_view_->frame()->GetTopInset() - browser_view_->y();
+  ExclusiveAccessManager* GetExclusiveAccessManager() override {
+    return ExclusiveAccessManager::From(browser_view_->browser());
   }
 
-  int GetThemeBackgroundXInset() const override {
-    // TODO(pkotwicz): Return the inset with respect to the left edge of the
-    // BrowserView.
-    return browser_view_->frame()->GetThemeBackgroundXInset();
+  ui::AcceleratorProvider* GetAcceleratorProvider() override {
+    return &browser_view_.get();
   }
 
-  bool IsToolbarVisible() const override {
-    return browser_view_->IsToolbarVisible();
-  }
-
-  bool IsBookmarkBarVisible() const override {
-    return browser_view_->IsBookmarkBarVisible();
-  }
-
-  bool IsContentsSeparatorEnabled() const override {
-    // Web app windows manage their own separator.
-    // TODO(crbug.com/1012979): Make PWAs set the visibility of the ToolbarView
-    // based on whether it is visible instead of setting the height to 0px. This
-    // will enable BrowserViewLayout to hide the contents separator on its own
-    // using the same logic used by normal BrowserViews.
-    return !browser_view_->browser()->app_controller();
-  }
-
-  ExclusiveAccessBubbleViews* GetExclusiveAccessBubble() const override {
-    return browser_view_->exclusive_access_bubble();
-  }
-
-  bool IsTopControlsSlideBehaviorEnabled() const override {
-    return browser_view_->GetTopControlsSlideBehaviorEnabled();
-  }
-
-  float GetTopControlsSlideBehaviorShownRatio() const override {
-    return browser_view_->GetTopControlsSlideBehaviorShownRatio();
-  }
-
-  bool SupportsWindowFeature(Browser::WindowFeature feature) const override {
-    return browser_view_->browser()->SupportsWindowFeature(feature);
-  }
-
-  gfx::NativeView GetHostView() const override {
+  gfx::NativeView GetBubbleParentView() const override {
     return browser_view_->GetWidget()->GetNativeView();
   }
 
-  bool BrowserIsSystemWebApp() const override {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-    return browser_view_->browser()->app_controller()->system_app();
-#else
-    return false;
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+  gfx::Rect GetClientAreaBoundsInScreen() const override {
+    return browser_view_->GetWidget()->GetClientAreaBoundsInScreen();
   }
 
-  bool BrowserIsWebApp() const override {
-    return browser_view_->GetIsWebAppType();
+  bool IsImmersiveModeEnabled() const override {
+    return ImmersiveModeController::From(browser_view_->browser())->IsEnabled();
   }
 
-  bool BrowserIsTypeApp() const override {
-    return browser_view_->browser()->is_type_app();
+  gfx::Rect GetTopContainerBoundsInScreen() override {
+    return browser_view_->top_container_->GetBoundsInScreen();
   }
 
-  bool BrowserIsTypeNormal() const override {
-    return browser_view_->browser()->is_type_normal();
+  void DestroyAnyExclusiveAccessBubble() override {
+    exclusive_access_bubble_.reset();
+    exclusive_access_bubble_destruction_task_id_.reset();
   }
 
-  bool HasFindBarController() const override {
-    return browser_view_->browser()->HasFindBarController();
+  void EnterFullscreen(const url::Origin& origin,
+                       ExclusiveAccessBubbleType bubble_type,
+                       FullscreenTabParams fullscreen_tab_params) override {
+    int64_t display_id = fullscreen_tab_params.display_id;
+    if (base::FeatureList::IsEnabled(features::kAsyncFullscreenWindowState)) {
+      browser_view_->RequestFullscreen(true, display_id);
+    } else {
+      auto* screen = display::Screen::Get();
+      auto display =
+          screen->GetDisplayNearestWindow(browser_view_->GetNativeWindow());
+      const bool requesting_another_screen =
+          display_id != display.id() &&
+          display_id != display::kInvalidDisplayId;
+      if (IsFullscreen() && !requesting_another_screen) {
+        // Nothing to do.
+        return;
+      }
+      browser_view_->ProcessFullscreen(true, display_id);
+    }
   }
 
-  void MoveWindowForFindBarIfNecessary() const override {
-    auto* const controller = browser_view_->browser()->GetFindBarController();
-    return controller->find_bar()->MoveWindowIfNecessary();
-  }
-
-  bool IsWindowControlsOverlayEnabled() const override {
-    return browser_view_->IsWindowControlsOverlayEnabled();
-  }
-
-  void UpdateWindowControlsOverlay(
-      const gfx::Rect& available_titlebar_area) const override {
-    content::WebContents* web_contents = browser_view_->GetActiveWebContents();
-    if (!web_contents) {
+  void ExitFullscreen() override {
+    if (BrowserWindowFullscreenController::From(browser_view_->browser())
+            ->IsForceFullscreen()) {
       return;
     }
 
-    // The rect passed to WebContents is directly exposed to websites. In case
-    // of an empty rectangle, this should be exposed as 0,0 0x0 rather than
-    // whatever coordinates might be in rect.
-    web_contents->UpdateWindowControlsOverlay(
-        available_titlebar_area.IsEmpty()
-            ? gfx::Rect()
-            : browser_view_->GetMirroredRect(available_titlebar_area));
-  }
-
- private:
-  raw_ptr<BrowserView> browser_view_;
-};
-
-///////////////////////////////////////////////////////////////////////////////
-// BrowserView::AccessibilityModeObserver:
-
-class BrowserView::AccessibilityModeObserver : public ui::AXModeObserver {
- public:
-  explicit AccessibilityModeObserver(BrowserView* browser_view)
-      : browser_view_(browser_view) {
-    ui::AXPlatformNode::AddAXModeObserver(this);
-  }
-  ~AccessibilityModeObserver() override {
-    ui::AXPlatformNode::RemoveAXModeObserver(this);
-  }
-
- private:
-  // ui::AXModeObserver:
-  void OnAXModeAdded(ui::AXMode mode) override {
-    // This will have the effect of turning tablet mode off if a screen reader
-    // is enabled while Chrome is already open. It will not return the browser
-    // to tablet mode if the user kills their screen reader. This has to happen
-    // asynchronously since AXMode changes can happen while AXTree updates or
-    // notifications are in progress, and |MaybeInitializeWebUITabStrip| can
-    // destroy things synchronously.
-    if (mode.has_mode(ui::AXMode::kScreenReader)) {
-      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-          FROM_HERE, base::BindOnce(&BrowserView::MaybeInitializeWebUITabStrip,
-                                    browser_view_->GetAsWeakPtr()));
-    }
-  }
-
-  const raw_ptr<BrowserView> browser_view_;
-};
-
-///////////////////////////////////////////////////////////////////////////////
-// BrowserView::SidePanelButtonHighlighter:
-//
-// Coordinating class that manages the button highlight.
-// TODO(pbos): This is only here because there's no coordinating SidePanel entry
-// but instead multiple SidePanels, and views::Button doesn't track multiple
-// "reasons" for being highlighted (i.e. the interface is SetHighlighted(true)
-// rather than adding/removing reasons for highlighting). Remove this once
-// SidePanel is a single entry.
-class BrowserView::SidePanelButtonHighlighter : public views::ViewObserver {
- public:
-  SidePanelButtonHighlighter(views::Button* button,
-                             std::vector<views::View*> side_panels)
-      : button_(button), side_panels_(std::move(side_panels)) {
-    DCHECK(button_);
-    DCHECK(!side_panels_.empty());
-    for (views::View* view : side_panels_)
-      view->AddObserver(this);
-    UpdateHighlight();
-  }
-
-  ~SidePanelButtonHighlighter() override {
-    for (views::View* view : side_panels_)
-      view->RemoveObserver(this);
-  }
-
-  // views::ViewObserver:
-  void OnViewVisibilityChanged(views::View* observed_view,
-                               View* starting_from) override {
-    UpdateHighlight();
-  }
-
- private:
-  void UpdateHighlight() {
-    bool any_panel_visible = false;
-    for (views::View* view : side_panels_) {
-      if (view->GetVisible()) {
-        any_panel_visible = true;
-        break;
-      }
-    }
-    button_->SetHighlighted(any_panel_visible);
-    button_->SetTooltipText(l10n_util::GetStringUTF16(
-        any_panel_visible ? IDS_TOOLTIP_SIDE_PANEL_HIDE
-                          : IDS_TOOLTIP_SIDE_PANEL_SHOW));
-  }
-
-  const raw_ptr<views::Button> button_;
-  const std::vector<views::View*> side_panels_;
-};
-
-///////////////////////////////////////////////////////////////////////////////
-// BrowserView::SidePanelVisibilityController:
-//
-// Coordinating class that manages side panel visibility such that there is a
-// single RHS side panel open at a given time. It enforces the following policy:
-//   - Only one RHS panel is visible at a time.
-//   - When the contextual panel is shown, the state of the global panels is
-//     captured and global panels are hidden.
-//   - When the contextual panel is hidden, the state of the global panels is
-//     restored.
-//
-// TODO(tluk): This is intended to manage the visibility of the read later
-// (global), google lens (global) and side search (contextual) panels for the
-// interim period before side panel v2 rolls out.
-class BrowserView::SidePanelVisibilityController : public views::ViewObserver {
- public:
-  // Structures that hold the global panel views and their captured visibility
-  // state.
-  struct PanelStateEntry {
-    const raw_ptr<views::View> panel_view;
-    absl::optional<bool> captured_visibility_state;
-  };
-  using Panels = std::vector<PanelStateEntry>;
-
-  SidePanelVisibilityController(views::View* side_search_panel,
-                                views::View* rhs_panel)
-      : side_search_panel_(side_search_panel) {
-    if (rhs_panel)
-      global_panels_.push_back({rhs_panel, absl::nullopt});
-  }
-  ~SidePanelVisibilityController() override = default;
-
-  // views::ViewObserver:
-  void OnViewVisibilityChanged(views::View* observed_view,
-                               View* starting_from) override {
-    DCHECK_EQ(side_search_panel_, observed_view);
-    if (side_search_panel_->GetVisible()) {
-      CaptureGlobalPanelVisibilityStateAndHide();
+    if (base::FeatureList::IsEnabled(features::kAsyncFullscreenWindowState)) {
+      browser_view_->RequestFullscreen(false, display::kInvalidDisplayId);
     } else {
-      RestoreGlobalPanelVisibilityState();
-    }
-  }
-
-  // Called when the contextual panel is shown. Captures the current visibility
-  // state of the global panel before hiding the panel. The captured state of
-  // the global panels remains valid while the contextual panel is open.
-  void CaptureGlobalPanelVisibilityStateAndHide() {
-    for (PanelStateEntry& entry : global_panels_) {
-      auto panel_view = entry.panel_view;
-      entry.captured_visibility_state = panel_view->GetVisible();
-      panel_view->SetVisible(false);
-    }
-  }
-
-  // Called when the contextual panel is hidden. Restores the visibility state
-  // of the global panels.
-  void RestoreGlobalPanelVisibilityState() {
-    for (PanelStateEntry& entry : global_panels_) {
-      if (entry.captured_visibility_state.has_value()) {
-        entry.panel_view->SetVisible(entry.captured_visibility_state.value());
-
-        // After restoring global panel state reset the stored visibility bits.
-        // These will not remain valid while the contextual panel is closed.
-        entry.captured_visibility_state.reset();
+      if (!IsFullscreen()) {
+        return;  // Nothing to do.
       }
+      browser_view_->ProcessFullscreen(false, display::kInvalidDisplayId);
     }
   }
 
-  // Returns true if one of its managed panels is currently visible in the
-  // browser window.
-  bool IsManagedSidePanelVisible() const {
-    if (side_search_panel_ && side_search_panel_->GetVisible())
-      return true;
-    return base::ranges::any_of(global_panels_,
-                                [](const PanelStateEntry& entry) {
-                                  return entry.panel_view->GetVisible();
-                                });
+  void UpdateExclusiveAccessBubble(
+      const ExclusiveAccessBubbleParams& params,
+      ExclusiveAccessBubbleHideCallback first_hide_callback) override {
+    // Whether we should remove the bubble if it exists, or not show the bubble.
+    // TODO(jamescook): Figure out what to do with mouse-lock.
+    bool should_close_bubble = false;
+#if BUILDFLAG(IS_CHROMEOS)
+    // Trusted pinned mode does not allow to escape. So do not show the bubble.
+    should_close_bubble =
+        platform_util::IsBrowserLockedFullscreen(browser_view_->browser_.get());
+#endif
+    if (!params.has_download) {
+      // ...TYPE_NONE indicates deleting the bubble, except when used with
+      // download.
+      should_close_bubble |= params.type == EXCLUSIVE_ACCESS_BUBBLE_TYPE_NONE;
+#if BUILDFLAG(IS_CHROMEOS)
+      // Immersive mode allows the toolbar to be shown, so do not show the
+      // bubble. However, do show the bubble in a managed guest session (see
+      // crbug.com/741069).
+      // Immersive mode logic for downloads is handled by the download
+      // controller.
+      should_close_bubble |= ShouldUseImmersiveFullscreenForUrl(params.type) &&
+                             !chromeos::IsManagedGuestSession();
+#endif
+    }
+
+    if (should_close_bubble) {
+      if (first_hide_callback) {
+        std::move(first_hide_callback)
+            .Run(ExclusiveAccessBubbleHideReason::kNotShown);
+      }
+
+      // If we intend to close the bubble but it has already been deleted no
+      // action is needed.
+      if (!exclusive_access_bubble_) {
+        return;
+      }
+      // Exit if we've already queued up a task to close the bubble.
+      if (exclusive_access_bubble_destruction_task_id_) {
+        return;
+      }
+      // `HideImmediately()` will trigger a callback for the current bubble with
+      // `ExclusiveAccessBubbleHideReason::kInterrupted` if available.
+      exclusive_access_bubble_->HideImmediately();
+
+      // Perform the destroy async. State updates in the exclusive access bubble
+      // view may call back into this method. This otherwise results in
+      // premature deletion of the bubble view and UAFs. See crbug.com/40063714.
+      exclusive_access_bubble_destruction_task_id_ =
+          exclusive_access_bubble_cancelable_task_tracker_.PostTask(
+              base::SingleThreadTaskRunner::GetCurrentDefault().get(),
+              FROM_HERE,
+              base::BindOnce(
+                  &ExclusiveAccessContextImpl::DestroyAnyExclusiveAccessBubble,
+                  weak_ptr_factory_.GetWeakPtr()));
+      return;
+    }
+
+    if (exclusive_access_bubble_) {
+      if (exclusive_access_bubble_destruction_task_id_) {
+        // We previously posted a destruction task, but now we want to reuse the
+        // bubble. Cancel the destruction task.
+        exclusive_access_bubble_cancelable_task_tracker_.TryCancel(
+            exclusive_access_bubble_destruction_task_id_.value());
+        exclusive_access_bubble_destruction_task_id_.reset();
+      }
+      exclusive_access_bubble_->Update(params, std::move(first_hide_callback));
+      return;
+    }
+
+    exclusive_access_bubble_ = std::make_unique<ExclusiveAccessBubbleViews>(
+        this, params, std::move(first_hide_callback));
+  }
+
+  bool IsExclusiveAccessBubbleDisplayed() const override {
+    return exclusive_access_bubble_ && (exclusive_access_bubble_->IsShowing() ||
+                                        exclusive_access_bubble_->IsVisible());
+  }
+
+  void OnExclusiveAccessUserInput() override {
+    if (exclusive_access_bubble_.get()) {
+      exclusive_access_bubble_->OnUserInput();
+    }
   }
 
  private:
-  // We observe the side search panel when improved clobbering is enabled to
-  // implement the correct view visibility transitions.
-  const raw_ptr<views::View> side_search_panel_;
-
-  // The set of global panels that this maintains visibility for.
-  Panels global_panels_;
-
-  // Keep track of the side search panel's visibility so that we can hide /
-  // restore global panels as the side search panel is shown / hidden
-  // respectively.
-  base::ScopedObservation<views::View, views::ViewObserver>
-      side_search_panel_observation_{this};
+  const raw_ref<BrowserView> browser_view_;
+  std::unique_ptr<ExclusiveAccessBubbleViews> exclusive_access_bubble_;
+  // Tracks the task to asynchronously destroy the exclusive access bubble.
+  base::CancelableTaskTracker exclusive_access_bubble_cancelable_task_tracker_;
+  std::optional<base::CancelableTaskTracker::TaskId>
+      exclusive_access_bubble_destruction_task_id_;
+  base::WeakPtrFactory<ExclusiveAccessContextImpl> weak_ptr_factory_{this};
 };
+
+#if BUILDFLAG(IS_WIN)
+class BrowserView::PipExclusionObserverImpl
+    : public content::desktop_capture::PipScreenCaptureExclusionObserver {
+ public:
+  explicit PipExclusionObserverImpl(views::Widget* widget) : widget_(widget) {
+    CHECK(widget_);
+    content::desktop_capture::AddPipExclusionObserver(this);
+  }
+
+  PipExclusionObserverImpl(const PipExclusionObserverImpl&) = delete;
+  PipExclusionObserverImpl& operator=(const PipExclusionObserverImpl&) = delete;
+
+  ~PipExclusionObserverImpl() override {
+    content::desktop_capture::RemovePipExclusionObserver(this);
+  }
+
+  // content::desktop_capture::PipScreenCaptureExclusionObserver:
+  void OnExcludeFromScreenCaptureChanged(bool is_excluded) override {
+    widget_->SetExcludeFromScreenCapture(is_excluded);
+  }
+
+ private:
+  const raw_ptr<views::Widget> widget_;
+};
+#endif
 
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, public:
 
-BrowserView::BrowserView(std::unique_ptr<Browser> browser)
+BrowserView::BrowserView(BrowserWindowInterface* browser)
     : views::ClientView(nullptr, nullptr),
-      browser_(std::move(browser)),
-      accessibility_mode_observer_(
-          std::make_unique<AccessibilityModeObserver>(this)) {
-  SetShowIcon(
-      ::ShouldShowWindowIcon(browser_.get(), AppUsesWindowControlsOverlay()));
+      exclusive_access_context_(
+          std::make_unique<ExclusiveAccessContextImpl>(*this)),
+      browser_(browser) {
+  if (auto* manager = InitialWebUIWindowMetricsManager::From(browser_.get())) {
+    manager->OnBrowserWindowCreated();
+  }
+
+  SetShowIcon(::ShouldShowWindowIcon(
+      browser_.get(), AppUsesWindowControlsOverlay(), AppUsesTabbed()));
 
   // In forced app mode, all size controls are always disabled. Otherwise, use
   // `create_params` to enable/disable specific size controls.
-  // Allow devtools window to be movable and resizable.
-  if (chrome::IsRunningInForcedAppMode() && !browser_->is_type_devtools()) {
+  if (IsRunningInForcedAppMode()) {
     SetHasWindowSizeControls(false);
   } else if (GetIsPictureInPictureType()) {
     // Picture in picture windows must always have a title, can never minimize,
@@ -882,128 +910,124 @@ BrowserView::BrowserView(std::unique_ptr<Browser> browser)
     SetShowTitle(true);
     SetCanMinimize(false);
     SetCanMaximize(false);
+    SetCanFullscreen(false);
     SetCanResize(true);
   } else {
-    SetCanResize(browser_->create_params().can_resize);
-    SetCanMaximize(browser_->create_params().can_maximize);
+    SetCanResize(
+        BrowserInitState::From(&*browser_)->create_params().can_resize);
+    SetCanMaximize(
+        BrowserInitState::From(&*browser_)->create_params().can_maximize);
+    SetCanFullscreen(
+        BrowserInitState::From(&*browser_)->create_params().can_fullscreen);
     SetCanMinimize(true);
   }
 
   SetProperty(views::kElementIdentifierKey, kBrowserViewElementId);
 
-  // Create user education resources.
-  UserEducationService* const user_education_service =
-      UserEducationServiceFactory::GetForProfile(GetProfile());
-  if (user_education_service) {
-    RegisterChromeHelpBubbleFactories(
-        user_education_service->help_bubble_factory_registry());
-    MaybeRegisterChromeFeaturePromos(
-        user_education_service->feature_promo_registry());
-    MaybeRegisterChromeTutorials(user_education_service->tutorial_registry());
-    feature_promo_snooze_service_ =
-        std::make_unique<BrowserFeaturePromoSnoozeService>(GetProfile());
-    feature_promo_controller_ = std::make_unique<BrowserFeaturePromoController>(
-        this,
-        feature_engagement::TrackerFactory::GetForBrowserContext(GetProfile()),
-        &user_education_service->feature_promo_registry(),
-        &user_education_service->help_bubble_factory_registry(),
-        feature_promo_snooze_service_.get(),
-        &user_education_service->tutorial_service());
-  }
+  browser_->GetTabStripModel()->AddObserver(this);
 
-  browser_->tab_strip_model()->AddObserver(this);
-  immersive_mode_controller_ = chrome::CreateImmersiveModeController(this);
+  main_background_region_ =
+      AddChildView(std::make_unique<MainBackgroundRegionView>(*this));
+  main_background_region_->SetProperty(
+      views::kElementIdentifierKey,
+      BrowserViewLayoutViews::kMainBackgroundRegionElementId);
 
-  // Top container holds tab strip region and toolbar and lives at the front of
-  // the view hierarchy.
-
-  std::unique_ptr<TabMenuModelFactory> tab_menu_model_factory;
-  if (browser_->app_controller()) {
-    tab_menu_model_factory =
-        browser_->app_controller()->GetTabMenuModelFactory();
-
-    UpdateWindowControlsOverlayEnabled();
-    UpdateBorderlessModeEnabled();
-  }
-  // TabStrip takes ownership of the controller.
-  auto tabstrip_controller = std::make_unique<BrowserTabStripController>(
-      browser_->tab_strip_model(), this, std::move(tab_menu_model_factory));
-  BrowserTabStripController* tabstrip_controller_ptr =
-      tabstrip_controller.get();
-  auto tabstrip = std::make_unique<TabStrip>(std::move(tabstrip_controller));
-  tabstrip_ = tabstrip.get();
-  tabstrip_controller_ptr->InitFromModel(tabstrip_);
   top_container_ = AddChildView(std::make_unique<TopContainerView>(this));
-
-  if (GetIsWebAppType() && base::FeatureList::IsEnabled(
-                               features::kWebAppFrameToolbarInBrowserView)) {
-    web_app_frame_toolbar_ = top_container_->AddChildView(
-        std::make_unique<WebAppFrameToolbarView>(this));
-    if (ShouldShowWindowTitle()) {
-      web_app_window_title_ = top_container_->AddChildView(
-          std::make_unique<views::Label>(GetWindowTitle()));
-      web_app_window_title_->SetID(VIEW_ID_WINDOW_TITLE);
-    }
-  }
-  tab_strip_region_view_ = top_container_->AddChildView(
-      std::make_unique<TabStripRegionView>(std::move(tabstrip)));
-
-  ColorProviderBrowserHelper::CreateForBrowser(browser_.get());
-
-  // Create WebViews early so |webui_tab_strip_| can observe their size.
-  auto devtools_web_view =
-      std::make_unique<views::WebView>(browser_->profile());
-  devtools_web_view->SetID(VIEW_ID_DEV_TOOLS_DOCKED);
-  devtools_web_view->SetVisible(false);
-
-  auto contents_web_view =
-      std::make_unique<ContentsWebView>(browser_->profile());
-  contents_web_view->SetID(VIEW_ID_TAB_CONTAINER);
-
-  auto contents_container = std::make_unique<views::View>();
-  devtools_web_view_ =
-      contents_container->AddChildView(std::move(devtools_web_view));
-  contents_web_view_ =
-      contents_container->AddChildView(std::move(contents_web_view));
-  contents_web_view_->set_is_primary_web_contents_for_window(true);
-  contents_container->SetLayoutManager(std::make_unique<ContentsLayoutManager>(
-      devtools_web_view_, contents_web_view_));
+  top_container_insertion_index_ = GetIndexOf(top_container_.get());
 
   toolbar_ = top_container_->AddChildView(
       std::make_unique<ToolbarView>(browser_.get(), this));
 
-  contents_separator_ =
-      top_container_->AddChildView(std::make_unique<ContentsSeparator>());
+  top_container_separator_ = top_container_->AddChildView(
+      ContentsSeparator::CreateContentsSeparator());
+  top_container_separator_->SetProperty(views::kElementIdentifierKey,
+                                        kContentsSeparatorTopEdgeElementId);
 
-  web_contents_close_handler_ =
-      std::make_unique<WebContentsCloseHandler>(contents_web_view_);
+  auto multi_contents_view = std::make_unique<MultiContentsView>(
+      this, std::make_unique<MultiContentsViewDelegateImpl>(*browser_));
+  multi_contents_view_ = AddChildView(std::move(multi_contents_view));
 
-  contents_container_ = AddChildView(std::move(contents_container));
-  set_contents_view(contents_container_);
-
-  right_aligned_side_panel_separator_ =
-      AddChildView(std::make_unique<ContentsSeparator>());
-
-  const bool is_right_aligned = GetProfile()->GetPrefs()->GetBoolean(
-      prefs::kSidePanelHorizontalAlignment);
-  unified_side_panel_ = AddChildView(std::make_unique<SidePanel>(
-      this, is_right_aligned ? SidePanel::kAlignRight : SidePanel::kAlignLeft));
-  left_aligned_side_panel_separator_ =
-      AddChildView(std::make_unique<ContentsSeparator>());
-  side_panel_coordinator_ = std::make_unique<SidePanelCoordinator>(this);
+  set_contents_view(multi_contents_view_);
 
   // InfoBarContainer needs to be added as a child here for drop-shadow, but
   // needs to come after toolbar in focus order (see EnsureFocusOrder()).
   infobar_container_ =
       AddChildView(std::make_unique<InfoBarContainerView>(this));
 
-  InitStatusBubble();
+  // This frames some/all of the top container plus infobars, contents, and
+  // contents-height side panel when the toolbar-height side panel is visible.
+  // It must render after those elements.
+  main_shadow_overlay_ =
+      AddChildView(std::make_unique<ShadowOverlayView>(*this));
+  main_shadow_overlay_->SetProperty(
+      views::kElementIdentifierKey,
+      BrowserViewLayoutViews::kShadowOverlayElementId);
+
+  side_panel_ = AddChildView(std::make_unique<SidePanel>(this));
+
+  // Tabstrip comes basically last because it should be before toolbar in the
+  // focus order but also needs to paint on top of everything.
+  horizontal_tab_strip_region_view_ =
+      AddChildView(CreateHorizontalTabStripRegionView(this));
+  horizontal_tab_strip_region_insertion_index_ =
+      GetIndexOf(horizontal_tab_strip_region_view_.get());
+
+  auto* const vertical_tab_strip_state_controller =
+      tabs::VerticalTabStripStateController::From(browser_);
+  if (vertical_tab_strip_state_controller) {
+    auto vertical_tab_strip_container =
+        std::make_unique<VerticalTabStripRegionView>(
+            vertical_tab_strip_state_controller,
+            BrowserActions::From(browser_)->root_action_item(), this);
+
+    if (features::IsGlassFrameEnabled()) {
+      vertical_tab_strip_background_blur_backdrop_ = AddChildView(
+          std::make_unique<VerticalTabStripBackgroundBlurBackdrop>());
+    }
+    vertical_tab_strip_region_view_ =
+        AddChildView(std::move(vertical_tab_strip_container));
+
+    vertical_tab_strip_top_corner_ =
+        AddChildView(std::make_unique<CustomFloatingCorner>(
+            *this, CornerOrientation::kTopLeading,
+            views::ShapeContextTokens::kContentSeparatorRadius,
+            CustomFloatingCorner::FrameTheme(), kColorVerticalTabStripShadow,
+            /*is_vertical_window_edge=*/true));
+    vertical_tab_strip_top_corner_->SetProperty(
+        views::kElementIdentifierKey,
+        BrowserViewLayoutViews::kVerticalTabStripTopCornerElementId);
+    vertical_tab_strip_bottom_corner_ =
+        AddChildView(std::make_unique<CustomFloatingCorner>(
+            *this, CornerOrientation::kBottomLeading,
+            views::ShapeContextTokens::kContentSeparatorRadius,
+            CustomFloatingCorner::FrameTheme(), kColorVerticalTabStripShadow,
+            /*is_vertical_window_edge=*/true));
+    vertical_tab_strip_bottom_corner_->SetProperty(
+        views::kElementIdentifierKey,
+        BrowserViewLayoutViews::kVerticalTabStripBottomCornerElementId);
+  } else {
+    horizontal_tab_strip_region_view_->InitializeTabStrip();
+  }
+
+  if (auto* const organizer_panel_controller =
+          OrganizerPanelController::From(browser_)) {
+    organizer_tray_ =
+        AddChildView(std::make_unique<OrganizerTrayView>(*browser_, this));
+    organizer_panel_controller->SetPanelView(
+        base::PassKey<BrowserView>(), OrganizerPanelView::Create(*browser_));
+  }
 
   // Create do-nothing view for the sake of controlling the z-order of the find
   // bar widget.
   find_bar_host_view_ = AddChildView(std::make_unique<View>());
 
-  UpgradeNotificationController::CreateForBrowser(browser_.get());
+  window_scrim_view_ = AddChildView(std::make_unique<ScrimView>());
+  window_scrim_view_->layer()->SetName("WindowScrimView");
+
+  side_panel_content_transition_scrim_view_ =
+      AddChildView(std::make_unique<ScrimView>(kColorToolbar));
+  side_panel_content_transition_scrim_view_->layer()->SetOpacity(0.0f);
+  side_panel_content_transition_scrim_view_->SetVisible(false);
 
 #if BUILDFLAG(IS_WIN)
   // Create a custom JumpList and add it to an observer of TabRestoreService
@@ -1018,52 +1042,110 @@ BrowserView::BrowserView(std::unique_ptr<Browser> browser)
   }
 #endif
 
-  // High Efficiency mode is default off but is available to turn on
-  if (!performance_manager::features::kHighEfficiencyModeDefaultState.Get() &&
-      base::FeatureList::IsEnabled(
-          performance_manager::features::kHighEfficiencyModeAvailable)) {
-    high_efficiency_iph_controller_ =
-        std::make_unique<HighEfficiencyIPHController>(browser_.get());
+  registrar_.Init(GetProfile()->GetPrefs());
+  registrar_.Add(
+      prefs::kFullscreenAllowed,
+      base::BindRepeating(&BrowserView::UpdateFullscreenAllowedFromPolicy,
+                          base::Unretained(this), CanFullscreen()));
+  UpdateFullscreenAllowedFromPolicy(CanFullscreen());
+
+  WebUIContentsPreloadManager::GetInstance()->WarmupForBrowser(browser_.get());
+
+  browser_->GetFeatures().InitPostBrowserViewConstruction(this);
+
+  if (auto* theme_observer = BrowserWindowThemeObserver::From(browser_.get())) {
+    theme_changed_subscription_ =
+        theme_observer->RegisterThemeChangedCallback(base::BindRepeating(
+            &BrowserView::UserChangedTheme, base::Unretained(this)));
   }
+
+  if (auto* zoom_observer = BrowserWindowZoomObserver::From(browser_.get())) {
+    zoom_changed_subscription_ =
+        zoom_observer->RegisterZoomChangedCallback(base::BindRepeating(
+            &BrowserView::ZoomChangedForActiveTab, base::Unretained(this)));
+  }
+
+  if (vertical_tab_strip_state_controller) {
+    vertical_tab_subscription_ =
+        vertical_tab_strip_state_controller->RegisterOnModeChanged(
+            base::BindRepeating(&BrowserView::OnVerticalTabStripModeChanged,
+                                base::Unretained(this)));
+  }
+
+  GetViewAccessibility().SetRole(ax::mojom::Role::kClient);
+
+  if (GetFocusManager()) {
+    focus_manager_observation_.Observe(GetFocusManager());
+  }
+
+#if BUILDFLAG(IS_CHROMEOS)
+  on_locked_task_subscription_ =
+      ash::boca::OnTaskLockedController::From(browser_)
+          ->AddLockedForOnTaskUpdatedCallback(base::BindRepeating(
+              &BrowserView::OnLockedForOnTaskUpdated, base::Unretained(this)));
+#endif
+
+  // This must be set before BrowserView::AddedToWidget() which relies on
+  // a fully-initialized BrowserAnimationController for initial layout setup.
+  auto* const animation_controller = BrowserAnimationController::From(browser_);
+  CHECK(animation_controller);
+  animation_controller->set_browser_view(this);
 }
 
 BrowserView::~BrowserView() {
+  // Remove the layout manager to avoid dangling. This needs to be earlier than
+  // other cleanups that destroy views referenced in the layout manager.
+  SetLayoutManager(nullptr);
+
+  tab_search_bubble_host_.reset();
+
   // Destroy the top controls slide controller first as it depends on the
   // tabstrip model and the browser frame.
   top_controls_slide_controller_.reset();
 
   // All the tabs should have been destroyed already. If we were closed by the
-  // OS with some tabs than the NativeBrowserFrame should have destroyed them.
-  DCHECK_EQ(0, browser_->tab_strip_model()->count());
+  // OS with some tabs than the BrowserNativeWidget should have destroyed them.
+  DCHECK_EQ(0, browser_->GetTabStripModel()->count());
 
   // Stop the animation timer explicitly here to avoid running it in a nested
   // message loop, which may run by Browser destructor.
   loading_animation_timer_.Stop();
-
-  // Immersive mode may need to reparent views before they are removed/deleted.
-  immersive_mode_controller_.reset();
 
   // Reset autofill bubble handler to make sure it does not out-live toolbar,
   // since it is responsible for showing autofill related bubbles from toolbar's
   // child views and it is an observer for avatar toolbar button if any.
   autofill_bubble_handler_.reset();
 
-  auto* global_registry =
-      extensions::ExtensionCommandsGlobalRegistry::Get(browser_->profile());
-  if (global_registry->registry_for_active_window() ==
-          extension_keybinding_registry_.get())
-    global_registry->set_registry_for_active_window(nullptr);
+  // These are raw pointers to child views, so they need to be set to null
+  // before `RemoveAllChildViews()` is called to avoid dangling.
+  browser_widget_ = nullptr;
+  main_background_region_ = nullptr;
+  top_container_ = nullptr;
+  web_app_frame_toolbar_ = nullptr;
+  web_app_window_title_ = nullptr;
+  horizontal_tab_strip_region_view_ = nullptr;
 
-  // The TabStrip attaches a listener to the model. Make sure we shut down the
-  // TabStrip first so that it can cleanly remove the listener.
-  if (tabstrip_)
-    tabstrip_->parent()->RemoveChildViewT(tabstrip_.get());
+  toolbar_ = nullptr;
+  top_container_separator_ = nullptr;
+  find_bar_host_view_ = nullptr;
+  infobar_container_ = nullptr;
+  multi_contents_view_ = nullptr;
+  main_shadow_overlay_ = nullptr;
+  window_scrim_view_ = nullptr;
+  side_panel_content_transition_scrim_view_ = nullptr;
+  vertical_tab_strip_region_view_ = nullptr;
+  vertical_tab_strip_background_blur_backdrop_ = nullptr;
+  vertical_tab_strip_top_corner_ = nullptr;
+  vertical_tab_strip_bottom_corner_ = nullptr;
+  organizer_tray_ = nullptr;
+  side_panel_ = nullptr;
 
-  // This highlighter and visibility controller refer to side-panel objects
-  // (children of this) and to children inside ToolbarView and of this, remove
-  // this observer before those children are removed.
-  side_panel_button_highlighter_.reset();
-  side_panel_visibility_controller_.reset();
+#if BUILDFLAG(IS_MAC)
+  tab_overlay_view_ = nullptr;
+
+  overlay_widget_.reset();
+  tab_overlay_widget_.reset();
+#endif
 
   // Child views maintain PrefMember attributes that point to
   // OffTheRecordProfile's PrefService which gets deleted by ~Browser.
@@ -1085,24 +1167,24 @@ BrowserWindow* BrowserWindow::FindBrowserWindowWithWebContents(
     return BrowserView::GetBrowserViewForNativeWindow(
         widget->GetNativeWindow());
   }
-  const auto* browser = chrome::FindBrowserWithWebContents(web_contents);
-  return browser ? browser->window() : nullptr;
+  const auto* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
+  return browser ? BrowserView::GetBrowserViewForBrowser(browser) : nullptr;
 }
 
 // static
 BrowserView* BrowserView::GetBrowserViewForNativeWindow(
     gfx::NativeWindow window) {
   views::Widget* widget = views::Widget::GetWidgetForNativeWindow(window);
-  return widget ?
-      reinterpret_cast<BrowserView*>(widget->GetNativeWindowProperty(
-          kBrowserViewKey)) : nullptr;
+  return widget ? reinterpret_cast<BrowserView*>(
+                      widget->GetNativeWindowProperty(kBrowserViewKey))
+                : nullptr;
 }
 
 // static
-BrowserView* BrowserView::GetBrowserViewForBrowser(const Browser* browser) {
-  // It might look like this method should be implemented as:
-  //   return static_cast<BrowserView*>(browser->window())
-  // but in fact in unit tests browser->window() may not be a BrowserView even
+BrowserView* BrowserView::GetBrowserViewForBrowser(
+    const BrowserWindowInterface* browser) {
+  // In unit tests, the BrowserWindow may not be a BrowserView even
   // in Views Browser builds. Always go through the ForNativeWindow path, which
   // is robust against being given any kind of native window.
   //
@@ -1110,14 +1192,11 @@ BrowserView* BrowserView::GetBrowserViewForBrowser(const Browser* browser) {
   // BrowserWindow, so be sure to check for that as well.
   //
   // Lastly note that this function can be called during construction of
-  // Browser, at which point browser->window() might return nullptr.
-  if (!browser->window() || !browser->window()->GetNativeWindow())
+  // Browser, at which point `browser->GetWindow()` might return nullptr.
+  if (!browser->GetWindow() || !browser->GetWindow()->GetNativeWindow()) {
     return nullptr;
-  return GetBrowserViewForNativeWindow(browser->window()->GetNativeWindow());
-}
-
-void BrowserView::SetDownloadShelfForTest(DownloadShelf* download_shelf) {
-  download_shelf_ = download_shelf;
+  }
+  return GetBrowserViewForNativeWindow(browser->GetWindow()->GetNativeWindow());
 }
 
 // static
@@ -1125,39 +1204,51 @@ void BrowserView::SetDisableRevealerDelayForTesting(bool disable) {
   g_disable_revealer_delay_for_testing = disable;
 }
 
-void BrowserView::DisableTopControlsSlideForTesting() {
-  top_controls_slide_controller_.reset();
-}
-
-void BrowserView::InitStatusBubble() {
-  status_bubble_ = std::make_unique<StatusBubbleViews>(contents_web_view_);
-  contents_web_view_->SetStatusBubble(status_bubble_.get());
-}
-
 gfx::Rect BrowserView::GetFindBarBoundingBox() const {
-  gfx::Rect contents_bounds = contents_container_->ConvertRectToWidget(
-      contents_container_->GetLocalBounds());
+  gfx::Rect contents_bounds = multi_contents_view_->ConvertRectToWidget(
+      multi_contents_view_->GetLocalBounds());
 
   // If the location bar is visible use it to position the bounding box,
   // otherwise use the contents container.
-  if (!immersive_mode_controller_->IsEnabled() ||
-      immersive_mode_controller_->IsRevealed()) {
+  auto* const immersive_mode_controller =
+      ImmersiveModeController::From(browser());
+  if (!immersive_mode_controller->IsEnabled() ||
+      immersive_mode_controller->IsRevealed()) {
     const gfx::Rect bounding_box =
-        toolbar_button_provider_->GetFindBarBoundingBox(
+        ToolbarButtonProvider::From(browser_)->GetFindBarBoundingBox(
             contents_bounds.bottom());
-    if (!bounding_box.IsEmpty())
+    if (!bounding_box.IsEmpty()) {
       return bounding_box;
+    }
   }
 
   contents_bounds.Inset(gfx::Insets::TLBR(0, 0, 0, gfx::scrollbar_size()));
-  return contents_container_->GetMirroredRect(contents_bounds);
+  return multi_contents_view_->GetMirroredRect(contents_bounds);
 }
 
-int BrowserView::GetTabStripHeight() const {
+ClientFrameElementInfo BrowserView::GetFrameElementInfo() const {
   // We want to return tabstrip_->height(), but we might be called in the midst
   // of layout, when that hasn't yet been updated to reflect the current state.
   // So return what the tabstrip height _ought_ to be right now.
-  return GetTabStripVisible() ? tabstrip_->GetPreferredSize().height() : 0;
+  ClientFrameElementInfo info;
+  info.tabstrip_preferred_height =
+      ShouldDrawTabStrip() && !ShouldDrawVerticalTabStrip() &&
+              horizontal_tab_strip_region_view_ &&
+              horizontal_tab_strip_region_view_->GetTabStripView()
+          ? horizontal_tab_strip_region_view_->GetTabStripView()
+                ->GetPreferredSize()
+                .height()
+          : 0;
+  if (toolbar_ && ShouldDrawVerticalTabStrip()) {
+    info.toolbar_minimum_height = toolbar_->GetMinimumSize().height();
+  } else if (web_app_frame_toolbar_ && ShouldDrawWebAppFrameToolbar()) {
+    info.toolbar_minimum_height =
+        web_app_frame_toolbar_->GetMinimumSize().height();
+  }
+  if (toolbar_ && IsToolbarVisible()) {
+    info.toolbar_preferred_height = toolbar_->GetPreferredSize().height();
+  }
+  return info;
 }
 
 gfx::Size BrowserView::GetWebAppFrameToolbarPreferredSize() const {
@@ -1165,46 +1256,215 @@ gfx::Size BrowserView::GetWebAppFrameToolbarPreferredSize() const {
                                 : gfx::Size();
 }
 
-#if BUILDFLAG(IS_MAC)
-bool BrowserView::UsesImmersiveFullscreenMode() const {
-  return base::FeatureList::IsEnabled(features::kImmersiveFullscreen) &&
-         (!GetIsWebAppType() ||
-          base::FeatureList::IsEnabled(features::kImmersiveFullscreenPWAs));
+SidePanelAnimationContentView* BrowserView::SetSidePanelAnimationContent(
+    std::unique_ptr<SidePanelAnimationContentView> content) {
+  CHECK(!content || !GetSidePanelAnimationContent());
+  SidePanelAnimationContentView* content_ptr = content.get();
+  SidePanelAnimationContentView* current = GetSidePanelAnimationContent();
+  GetBrowserViewLayout()->set_side_panel_animation_content(content_ptr);
+  if (content) {
+    // Insert the animation content at the scrim's index so that the scrim
+    // covers the animation content when it is visible.
+    const std::optional<size_t> scrim_index =
+        GetIndexOf(side_panel_content_transition_scrim_view_.get());
+    CHECK(scrim_index.has_value());
+    AddChildViewAt(std::move(content), *scrim_index);
+  } else if (current) {
+    RemoveChildViewT(current);
+  }
+  return content_ptr;
 }
-#endif
+
+SidePanelAnimationContentView* BrowserView::GetSidePanelAnimationContent() {
+  return GetBrowserViewLayout()->side_panel_animation_content();
+}
+
+ContentsContainerView* BrowserView::GetActiveContentsContainerView() {
+  return multi_contents_view_->GetActiveContentsContainerView();
+}
+
+ContentsContainerView* BrowserView::GetContentsContainerViewFor(
+    content::WebContents* web_contents) {
+  return multi_contents_view_->GetContentsContainerViewFor(web_contents);
+}
+
+std::vector<raw_ptr<ContentsContainerView, DanglingUntriaged>>
+BrowserView::GetContentsContainerViews() {
+  return multi_contents_view_->contents_container_views();
+}
+
+TabStrip* BrowserView::horizontal_tab_strip_for_testing() {
+  if (views::IsViewClass<HorizontalTabStripRegionViewOld>(
+          horizontal_tab_strip_region_view_)) {
+    return static_cast<HorizontalTabStripRegionViewOld*>(
+               horizontal_tab_strip_region_view_)
+        ->tab_strip();
+  }
+  return nullptr;
+}
+
+views::View* BrowserView::contents_container() {
+  return multi_contents_view_;
+}
+
+TabStripRegionView* BrowserView::tab_strip_view() const {
+  auto* controller = tabs::VerticalTabStripStateController::From(browser_);
+  if (vertical_tab_strip_region_view_ && controller &&
+      controller->ShouldDisplayVerticalTabs()) {
+    return vertical_tab_strip_region_view_.get();
+  }
+
+  return horizontal_tab_strip_region_view_.get();
+}
+
+views::LabelButton* BrowserView::GetGlicButton() {
+  auto* controller = tabs::VerticalTabStripStateController::From(browser_);
+  if ((vertical_tab_strip_region_view_ && controller &&
+       controller->ShouldDisplayVerticalTabs()) ||
+      base::FeatureList::IsEnabled(features::kGlicHorizontalTabToolbarButton)) {
+    return toolbar()->GetGlicButton();
+  }
+
+  return BrowserElementsViews::From(browser_.get())
+      ->GetViewAs<views::LabelButton>(kGlicButtonElementId);
+}
 
 TabSearchBubbleHost* BrowserView::GetTabSearchBubbleHost() {
-  if (auto* tab_search_host = frame_->GetFrameView()->GetTabSearchBubbleHost())
-    return tab_search_host;
-  auto* tab_search_button = tab_strip_region_view_->tab_search_button();
-  return tab_search_button ? tab_search_button->tab_search_bubble_host()
-                           : nullptr;
+  return tab_search_bubble_host_.get();
+}
+
+ExclusiveAccessBubbleViews* BrowserView::GetExclusiveAccessBubble() {
+  return exclusive_access_context_->exclusive_access_bubble();
+}
+
+ExclusiveAccessBubbleViewsContext*
+BrowserView::GetExclusiveAccessBubbleViewsContextForTesting() {
+  return exclusive_access_context_.get();
 }
 
 bool BrowserView::GetTabStripVisible() const {
+  if (!ShouldDrawTabStrip()) {
+    return false;
+  }
+
+  // In non-fullscreen the tabstrip should always be visible.
+  auto* const immersive_mode_controller =
+      ImmersiveModeController::From(browser());
+  if (!immersive_mode_controller || !immersive_mode_controller->IsEnabled()) {
+    return true;
+  }
+
+  return immersive_mode_controller->IsRevealed();
+}
+
+bool BrowserView::ShouldDrawTabStrokes() const {
+#if BUILDFLAG(IS_CHROMEOS)
+  return false;
+#else   // BUILDFLAG(IS_CHROMEOS)
+
+  if (web_app::AppBrowserController::From(browser()) &&
+      !web_app::AppBrowserController::From(browser())->has_tab_strip()) {
+    // Web apps only draw strokes when there is a TabStrip.
+    return false;
+  }
+
+  if (ShouldDrawVerticalTabStrip()) {
+    // Strokes are not drawn in VerticalTabs.
+    return false;
+  }
+
+  bool using_system_theme = false;
+  if (GetProfile()) {
+    auto* theme_service = ThemeServiceFactory::GetForProfile(GetProfile());
+    using_system_theme =
+        theme_service->IsSystemThemeDistinctFromDefaultTheme() &&
+        theme_service->UsingSystemTheme();
+  }
+
+  if (!using_system_theme) {
+    // Strokes are only supported for system themes.
+    return false;
+  }
+
+  // The tabstrip normally avoids strokes and relies on the active tab
+  // contrasting sufficiently with the frame background.  When there isn't
+  // enough contrast, fall back to a stroke.  Always compute the contrast ratio
+  // against the active frame color, to avoid toggling the stroke on and off as
+  // the window activation state changes.
+  constexpr float kMinimumContrastRatioForOutlines = 1.3f;
+  const SkColor background_color = TabStyle::Get()->GetTabBackgroundColor(
+      TabStyle::TabSelectionState::kActive, /*hovered=*/false,
+      /*frame_active=*/true, GetColorProvider());
+  const SkColor frame_color =
+      GetFrameView()->GetFrameColor(BrowserFrameActiveState::kActive);
+  const float contrast_ratio =
+      color_utils::GetContrastRatio(background_color, frame_color);
+  return contrast_ratio < kMinimumContrastRatioForOutlines;
+#endif  // !BUILDFLAG(IS_CHROMEOS)
+}
+
+bool BrowserView::ShouldDrawTabStrip() const {
   // Return false if this window does not normally display a tabstrip or if the
   // tabstrip is currently hidden, e.g. because we're in fullscreen.
-  if (!browser_->SupportsWindowFeature(Browser::FEATURE_TABSTRIP))
+  if (!WindowFeatureController::From(browser_)->SupportsWindowFeature(
+          WindowFeatureController::WindowFeature::kFeatureTabStrip)) {
     return false;
-
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  if (WebUITabStripContainerView::UseTouchableTabStrip(browser_.get()))
-    return false;
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
+  }
 
   // Return false if the tabstrip has not yet been created (by InitViews()),
-  // since callers may otherwise try to access it. Note that we can't just check
-  // this alone, as the tabstrip is created unconditionally even for windows
-  // that won't display it.
-  return tabstrip_ != nullptr;
+  // since callers may otherwise try to access it.
+  // Under the TabStripUnification feature, we only initialize the tab strip
+  // region view that is active (horizontal or vertical). When the feature is
+  // disabled, the horizontal tab strip is created unconditionally.
+  if (base::FeatureList::IsEnabled(tabs::kTabStripUnification)) {
+    const auto* controller =
+        tabs::VerticalTabStripStateController::From(browser_);
+    const bool displays_vertical_tabs =
+        controller && controller->ShouldDisplayVerticalTabs() &&
+        browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL;
+
+    if (displays_vertical_tabs) {
+      return vertical_tab_strip_region_view_ &&
+             vertical_tab_strip_region_view_->GetTabStripView() != nullptr;
+    }
+
+    return horizontal_tab_strip_region_view_ &&
+           horizontal_tab_strip_region_view_->GetTabStripView() != nullptr;
+  }
+
+  return horizontal_tab_strip_region_view_->GetTabStripView() != nullptr;
+}
+
+bool BrowserView::ShouldDrawVerticalTabStrip() const {
+  auto* controller = tabs::VerticalTabStripStateController::From(browser_);
+  return ShouldDrawTabStrip() && controller &&
+         controller->ShouldDisplayVerticalTabs() &&
+         browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL;
+}
+
+bool BrowserView::ShouldDrawWebAppFrameToolbar() const {
+  return !IsUnframedModeEnabled() &&
+         GetFrameView()->ShouldShowWebAppFrameToolbar();
+}
+
+bool BrowserView::IsVerticalTabStripCollapsed() const {
+  if (auto* const controller =
+          tabs::VerticalTabStripStateController::From(browser_)) {
+    return controller->IsCollapsed();
+  }
+  return false;
 }
 
 bool BrowserView::GetIncognito() const {
-  return browser_->profile()->IsIncognitoProfile();
+  return browser_->GetProfile()->IsIncognitoProfile();
+}
+
+bool BrowserView::GetEnterpriseIsolatedMode() const {
+  return browser_->GetProfile()->IsEnterpriseIsolatedModeProfile();
 }
 
 bool BrowserView::GetGuestSession() const {
-  return browser_->profile()->IsGuestSession();
+  return browser_->GetProfile()->IsGuestSession();
 }
 
 bool BrowserView::GetRegularOrGuestSession() const {
@@ -1213,6 +1473,14 @@ bool BrowserView::GetRegularOrGuestSession() const {
 
 bool BrowserView::GetAccelerator(int cmd_id,
                                  ui::Accelerator* accelerator) const {
+  // Different command IDs are used for the task manager for telemetry
+  // purpose. Map thees commands to the Task Manager shortcut ID.
+  if (cmd_id == IDC_TASK_MANAGER || cmd_id == IDC_TASK_MANAGER_APP_MENU ||
+      cmd_id == IDC_TASK_MANAGER_CONTEXT_MENU ||
+      cmd_id == IDC_TASK_MANAGER_MAIN_MENU) {
+    cmd_id = IDC_TASK_MANAGER_SHORTCUT;
+  }
+
 #if BUILDFLAG(IS_MAC)
   // On macOS, most accelerators are defined in MainMenu.xib and are user
   // configurable. Furthermore, their values and enabled state depends on the
@@ -1220,13 +1488,15 @@ bool BrowserView::GetAccelerator(int cmd_id,
   // the key window. Thus, we provide the default Mac accelerator for each
   // CommandId, which is static. This may be inaccurate, but is at least
   // sufficiently well defined for Views to use.
-  if (GetDefaultMacAcceleratorForCommandId(cmd_id, accelerator))
+  if (GetDefaultMacAcceleratorForCommandId(cmd_id, accelerator)) {
     return true;
+  }
 #else
   // We retrieve the accelerator information for standard accelerators
   // for cut, copy and paste.
-  if (GetStandardAcceleratorForCommandId(cmd_id, accelerator))
+  if (GetStandardAcceleratorForCommandId(cmd_id, accelerator)) {
     return true;
+  }
 #endif
   // Else, we retrieve the accelerator information from the accelerator table.
   for (const auto& it : accelerator_table_) {
@@ -1242,16 +1512,17 @@ bool BrowserView::IsAcceleratorRegistered(const ui::Accelerator& accelerator) {
   return accelerator_table_.find(accelerator) != accelerator_table_.end();
 }
 
-WebContents* BrowserView::GetActiveWebContents() const {
-  return browser_->tab_strip_model()->GetActiveWebContents();
+WebContents* BrowserView::GetActiveWebContents() {
+  return browser_->GetTabStripModel()->GetActiveWebContents();
 }
 
 bool BrowserView::GetSupportsTabStrip() const {
-  return browser_->CanSupportWindowFeature(Browser::FEATURE_TABSTRIP);
+  return WindowFeatureController::From(browser_)->CanSupportWindowFeature(
+      WindowFeatureController::WindowFeature::kFeatureTabStrip);
 }
 
 bool BrowserView::GetIsNormalType() const {
-  return browser_->is_type_normal();
+  return browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL;
 }
 
 bool BrowserView::GetIsWebAppType() const {
@@ -1259,15 +1530,13 @@ bool BrowserView::GetIsWebAppType() const {
 }
 
 bool BrowserView::GetIsPictureInPictureType() const {
-  return browser_->is_type_picture_in_picture();
+  return browser_->GetType() ==
+         BrowserWindowInterface::Type::TYPE_PICTURE_IN_PICTURE;
 }
 
-float BrowserView::GetInitialAspectRatio() const {
-  return browser_->create_params().initial_aspect_ratio;
-}
-
-bool BrowserView::GetLockAspectRatio() const {
-  return browser_->create_params().lock_aspect_ratio;
+std::optional<blink::mojom::PictureInPictureWindowOptions>
+BrowserView::GetDocumentPictureInPictureOptions() const {
+  return BrowserInitState::From(&*browser_)->create_params().pip_options;
 }
 
 bool BrowserView::GetTopControlsSlideBehaviorEnabled() const {
@@ -1276,146 +1545,231 @@ bool BrowserView::GetTopControlsSlideBehaviorEnabled() const {
 }
 
 float BrowserView::GetTopControlsSlideBehaviorShownRatio() const {
-  if (top_controls_slide_controller_)
+  if (top_controls_slide_controller_) {
     return top_controls_slide_controller_->GetShownRatio();
+  }
 
   return 1.f;
 }
 
 views::Widget* BrowserView::GetWidgetForAnchoring() {
 #if BUILDFLAG(IS_MAC)
-  if (UsesImmersiveFullscreenMode()) {
+  if (WindowFeatureController::From(browser())->UsesImmersiveFullscreenMode()) {
     return IsFullscreen() ? overlay_widget_.get() : GetWidget();
   }
 #endif
   return GetWidget();
 }
 
+bool BrowserView::IsInSplitView() const {
+  return multi_contents_view_->IsInSplitView();
+}
+
+void BrowserView::OnVerticalTabStripModeChanged(
+    tabs::VerticalTabStripStateController* controller) {
+  // Clear selection model
+  if (auto* active_tab = browser_->GetTabStripModel()->GetActiveTab()) {
+    tabs::TabStripModelSelectionState selection_state(
+        browser_->GetTabStripModel());
+    selection_state.SetActiveTab(active_tab);
+    selection_state.SetAnchorTab(active_tab);
+    selection_state.set_focused_group(
+        browser_->GetTabStripModel()->GetFocusedGroup());
+    browser_->GetTabStripModel()->SetSelectionFromModel(
+        std::move(selection_state));
+  }
+
+  if (controller->ShouldDisplayVerticalTabs()) {
+    horizontal_tab_strip_region_view_->ResetTabStrip();
+    vertical_tab_strip_region_view_->InitializeTabStrip();
+  } else {
+    vertical_tab_strip_region_view_->ResetTabStrip();
+    horizontal_tab_strip_region_view_->InitializeTabStrip();
+  }
+
+  GetFrameView()->OnTabStripStateChanged();
+
+  UpdateTabSearchBubbleHost();
+  InvalidateLayout();
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, BrowserWindow implementation:
 
 void BrowserView::Show() {
-#if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_CHROMEOS_ASH)
+  // Attempts to show closed windows should no-op.
+  if (browser_widget_->IsClosed()) {
+    return;
+  }
+
+  if (auto* manager = InitialWebUIManager::From(browser())) {
+    if (manager->RequestDeferShow(base::BindOnce(
+            &BrowserView::Show, weak_ptr_factory_.GetWeakPtr()))) {
+      return;
+    }
+  }
+
+#if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_CHROMEOS)
   // The Browser associated with this browser window must become the active
   // browser at the time |Show()| is called. This is the natural behavior under
   // Windows and Chrome OS, but other platforms will not trigger
   // OnWidgetActivationChanged() until we return to the runloop. Therefore any
   // calls to Browser::GetLastActive() will return the wrong result if we do not
   // explicitly set it here.
-  BrowserList::SetLastActive(browser());
+  BrowserActiveStateManager::From(browser())->DidBecomeActive();
 #endif
 
   // If the window is already visible, just activate it.
-  if (frame_->IsVisible()) {
-    frame_->Activate();
+  if (browser_widget_->IsVisible()) {
+    browser_widget_->Activate();
     return;
   }
 
   // Only set |restore_focus_on_activation_| when it is not set so that restore
   // focus on activation only happen once for the very first Show() call.
-  if (!restore_focus_on_activation_.has_value())
+  if (!restore_focus_on_activation_.has_value()) {
     restore_focus_on_activation_ = true;
+  }
 
-  frame_->Show();
+  if (base::FeatureList::IsEnabled(features::kArtificialUIDelay)) {
+    base::PlatformThread::Sleep(features::kViewsUIDelayDuration.Get());
+  }
 
-  browser()->OnWindowDidShow();
+  // Guard against destruction by platform event handlers called during Show().
+  auto weak_ptr = weak_ptr_factory_.GetWeakPtr();
+  browser_widget_->Show();
+  if (!weak_ptr) {
+    return;
+  }
+
+  OnWindowDidShow();
 
   // The fullscreen transition clears out focus, but there are some cases (for
   // example, new window in Mac fullscreen with toolbar showing) where we need
   // restore it.
-  if (frame_->IsFullscreen() &&
-      !frame_->GetFrameView()->ShouldHideTopUIForFullscreen() &&
-      GetFocusManager() && !GetFocusManager()->GetFocusedView()) {
+  if (browser_widget_->IsFullscreen() &&
+      !GetFrameView()->ShouldHideTopUIInFullscreen() && GetFocusManager() &&
+      !GetFocusManager()->GetFocusedView()) {
     SetFocusToLocationBar(false);
   }
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-  if (features::IsAccessibilityFocusHighlightEnabled() &&
-      !accessibility_focus_highlight_) {
+#if !BUILDFLAG(IS_CHROMEOS)
+  if (!accessibility_focus_highlight_) {
     accessibility_focus_highlight_ =
         std::make_unique<AccessibilityFocusHighlight>(this);
   }
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 }
 
 void BrowserView::ShowInactive() {
-  if (!frame_->IsVisible()) {
-    frame_->ShowInactive();
+  if (!browser_widget_->IsVisible()) {
+    browser_widget_->ShowInactive();
   }
 }
 
 void BrowserView::Hide() {
-  // Not implemented.
+  browser_widget_->Hide();
 }
 
 bool BrowserView::IsVisible() const {
-  return frame_->IsVisible();
+  return browser_widget_->IsVisible();
 }
 
 void BrowserView::SetBounds(const gfx::Rect& bounds) {
-  if (IsForceFullscreen())
+  if (BrowserWindowFullscreenController::From(browser())->IsForceFullscreen()) {
     return;
+  }
 
-  ExitFullscreen();
-  frame_->SetBounds(bounds);
+  auto weak_ptr = weak_ptr_factory_.GetWeakPtr();
+  exclusive_access_context_->ExitFullscreen();
+  if (!weak_ptr) {
+    return;
+  }
+
+  // If the BrowserFrameView has been created, give it a chance to handle the
+  // BrowserWidget's bounds change.
+  if (auto* const frame_view = GetFrameView()) {
+    frame_view->SetFrameBounds(bounds);
+  } else {
+    browser_widget_->SetBounds(bounds);
+  }
 }
 
 void BrowserView::Close() {
-  frame_->Close();
+  browser_widget_->Close();
 }
 
 void BrowserView::Activate() {
-  frame_->Activate();
+  if (browser_widget_->IsClosed()) {
+    // Since the activation is asynchronous, it's possible that the browser has
+    // been closed before the activation is ready, in this case, we don't have
+    // to continue.
+    return;
+  }
+
+  if (auto* manager = InitialWebUIManager::From(browser())) {
+    if (manager->RequestDeferShow(base::BindOnce(
+            &BrowserView::Activate, weak_ptr_factory_.GetWeakPtr()))) {
+      return;
+    }
+  }
+
+#if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_CHROMEOS)
+  // Update the list managed by `BrowserList` synchronously the same way
+  // `BrowserView::Show()` does.
+  BrowserActiveStateManager::From(browser_)->DidBecomeActive();
+#endif
+  browser_widget_->Activate();
 }
 
 void BrowserView::Deactivate() {
-  frame_->Deactivate();
+  browser_widget_->Deactivate();
 }
 
 bool BrowserView::IsActive() const {
-  return frame_->IsActive();
+  return browser_widget_->IsActive();
 }
 
 void BrowserView::FlashFrame(bool flash) {
-  frame_->FlashFrame(flash);
+  browser_widget_->FlashFrame(flash);
 }
 
 ui::ZOrderLevel BrowserView::GetZOrderLevel() const {
-  return ui::ZOrderLevel::kNormal;
+  return browser_widget_->GetZOrderLevel();
 }
 
 void BrowserView::SetZOrderLevel(ui::ZOrderLevel level) {
-  // Not implemented for browser windows.
-  NOTIMPLEMENTED();
+  browser_widget_->SetZOrderLevel(level);
 }
 
 gfx::NativeWindow BrowserView::GetNativeWindow() const {
   // While the browser destruction is going on, the widget can already be gone,
-  // but utility functions like FindBrowserWithWindow will still call this.
-  return GetWidget() ? GetWidget()->GetNativeWindow() : nullptr;
+  // but utility functions like BrowserCollection::FindBrowserWithWindow will
+  // still call this.
+  return GetWidget() ? GetWidget()->GetNativeWindow() : gfx::NativeWindow();
 }
 
 bool BrowserView::IsOnCurrentWorkspace() const {
   // In tests, the native window can be nullptr.
   gfx::NativeWindow native_win = GetNativeWindow();
-  if (!native_win)
+  if (!native_win) {
     return true;
+  }
 
 #if BUILDFLAG(IS_CHROMEOS)
-  return chromeos::DesksHelper::Get(native_win)
-      ->BelongsToActiveDesk(native_win);
+  return chromeos::DesksHelper::Get()->BelongsToActiveDesk(native_win);
 #elif BUILDFLAG(IS_WIN)
-  absl::optional<bool> on_current_workspace =
+  std::optional<bool> on_current_workspace =
       native_win->GetHost()->on_current_workspace();
-  base::UmaHistogramBoolean("Windows.OnCurrentWorkspaceCached",
-                            on_current_workspace.has_value());
-  if (on_current_workspace.has_value())
+  if (on_current_workspace.has_value()) {
     return on_current_workspace.value();
+  }
 
   // If the window is not cloaked, it is not on another desktop because
   // windows on another virtual desktop are always cloaked.
-  if (!gfx::IsWindowCloaked(native_win->GetHost()->GetAcceleratedWidget()))
+  if (!gfx::IsWindowCloaked(native_win->GetHost()->GetAcceleratedWidget())) {
     return true;
+  }
 
   Microsoft::WRL::ComPtr<IVirtualDesktopManager> virtual_desktop_manager;
   if (!SUCCEEDED(::CoCreateInstance(_uuidof(VirtualDesktopManager), nullptr,
@@ -1433,10 +1787,22 @@ bool BrowserView::IsOnCurrentWorkspace() const {
 #endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
+bool BrowserView::IsVisibleOnScreen() const {
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+  // TODO(crbug.com/405283740): currently only works for mac and windows. See
+  // comments around Widget::IsVisibleOnScreen() for more details. Eventually
+  // this should work for all platforms.
+  return browser_widget_->IsVisibleOnScreen();
+#else
+  return IsOnCurrentWorkspace();
+#endif
+}
+
 void BrowserView::SetTopControlsShownRatio(content::WebContents* web_contents,
                                            float ratio) {
-  if (top_controls_slide_controller_)
+  if (top_controls_slide_controller_) {
     top_controls_slide_controller_->SetShownRatio(web_contents, ratio);
+  }
 }
 
 bool BrowserView::DoBrowserControlsShrinkRendererSize(
@@ -1481,72 +1847,92 @@ void BrowserView::SetTopControlsGestureScrollInProgress(bool in_progress) {
   }
 }
 
-StatusBubble* BrowserView::GetStatusBubble() {
-  return status_bubble_.get();
+std::vector<StatusBubble*> BrowserView::GetStatusBubbles() {
+  std::vector<StatusBubble*> status_bubbles;
+  for (auto* contents_web_view : GetAllVisibleContentsWebViews()) {
+    if (StatusBubble* bubble = contents_web_view->GetStatusBubble()) {
+      status_bubbles.push_back(bubble);
+    }
+  }
+  return status_bubbles;
 }
 
 void BrowserView::UpdateTitleBar() {
-  frame_->UpdateWindowTitle();
+  browser_widget_->UpdateWindowTitle();
   if (web_app_window_title_) {
     DCHECK(GetIsWebAppType());
     web_app_window_title_->SetText(GetWindowTitle());
     InvalidateLayout();
   }
-  if (!loading_animation_timer_.IsRunning() && CanChangeWindowIcon())
-    frame_->UpdateWindowIcon();
+  if (!IsLoadingAnimationRunning() && CanChangeWindowIcon()) {
+    browser_widget_->UpdateWindowIcon();
+  }
 }
 
-void BrowserView::BookmarkBarStateChanged(
+void BrowserView::OnBookmarkBarStateChanged(
     BookmarkBar::AnimateChangeType change_type) {
   if (bookmark_bar_view_.get()) {
-    BookmarkBar::State new_state = browser_->bookmark_bar_state();
+    BookmarkBar::State new_state = bookmark_bar_state();
     bookmark_bar_view_->SetBookmarkBarState(new_state, change_type);
   }
 
-  if (MaybeShowBookmarkBar(GetActiveWebContents()))
-    Layout();
-}
-
-void BrowserView::UpdateDevTools() {
-  UpdateDevToolsForContents(GetActiveWebContents(), true);
-  Layout();
+  if (MaybeShowBookmarkBar(GetActiveWebContents())) {
+    // TODO(crbug.com/326362544): Once BrowserViewLayout extends from
+    // LayoutManagerBase we should be able to remove this call as
+    // LayoutManagerBase will handle invalidating layout when children are added
+    // and removed.
+    InvalidateLayout();
+  }
 }
 
 void BrowserView::UpdateLoadingAnimations(bool is_visible) {
-  bool should_animate = browser_->tab_strip_model()->TabsAreLoading();
+  const bool tabs_need_loading_ui =
+      browser_->GetTabStripModel()->TabsNeedLoadingUI();
+  const bool should_animate = is_visible && tabs_need_loading_ui;
 
-  if (base::FeatureList::IsEnabled(
-          features::kStopLoadingAnimationForHiddenWindow)) {
-    should_animate &= is_visible;
+  if (should_animate == IsLoadingAnimationRunning()) {
+    return;
   }
 
-  if (should_animate == loading_animation_timer_.IsRunning()) {
-    // Early return if the loading animation state doesn't change.
-    return;
+  if (should_animate) {
+    loading_animation_start_ = base::TimeTicks::Now();
   }
 
   if (!loading_animation_state_change_closure_.is_null()) {
     std::move(loading_animation_state_change_closure_).Run();
   }
 
-  if (should_animate) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+  const bool should_use_timer_driven_animation =
+      should_animate &&
+      (!base::FeatureList::IsEnabled(features::kCompositorLoadingThrobber) ||
+       ShouldShowWindowIcon());
+
+  if (should_use_timer_driven_animation) {
+    if (!loading_animation_timer_.IsRunning()) {
+#if BUILDFLAG(IS_CHROMEOS)
       loading_animation_tracker_.emplace(
-        GetWidget()->GetCompositor()->RequestNewThroughputTracker());
-      loading_animation_tracker_->Start(ash::metrics_util::ForSmoothness(
-        base::BindRepeating(&RecordTabLoadingSmoothness)));
+          GetWidget()->GetCompositor()->RequestNewCompositorMetricsTracker());
+      loading_animation_tracker_->Start(ash::metrics_util::ForSmoothnessV3(
+          base::BindRepeating(&RecordTabLoadingSmoothness)));
 #endif
-      // Loads are happening, and the timer isn't running, so start it.
-      loading_animation_start_ = base::TimeTicks::Now();
-      loading_animation_timer_.Start(FROM_HERE, base::Milliseconds(30), this,
-                                     &BrowserView::LoadingAnimationCallback);
+      static constexpr base::TimeDelta kAnimationUpdateInterval =
+          base::Milliseconds(30);
+      loading_animation_timer_.Start(
+          FROM_HERE, kAnimationUpdateInterval, this,
+          &BrowserView::LoadingAnimationTimerCallback);
+    }
   } else {
-    loading_animation_timer_.Stop();
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+    if (loading_animation_timer_.IsRunning()) {
+      loading_animation_timer_.Stop();
+#if BUILDFLAG(IS_CHROMEOS)
       loading_animation_tracker_->Stop();
 #endif
-      // Loads are now complete, update the state if a task was scheduled.
-      LoadingAnimationCallback();
+    }
+  }
+  if (!should_animate) {
+    // Loads are now complete, update the state if a task was scheduled.
+    loading_animation_start_ = base::TimeTicks();
+    LoadingAnimationCallback(base::TimeTicks::Now());
   }
 }
 
@@ -1555,20 +1941,20 @@ void BrowserView::SetLoadingAnimationStateChangeClosureForTesting(
   loading_animation_state_change_closure_ = std::move(closure);
 }
 
-bool BrowserView::IsLoadingAnimationRunningForTesting() const {
-  return loading_animation_timer_.IsRunning();
+gfx::Point BrowserView::GetThemeOffsetFromBrowserView() const {
+  gfx::Point browser_view_origin;
+  const views::View* root_view = this;
+  while (root_view->parent()) {
+    root_view = root_view->parent();
+  }
+  views::View::ConvertPointToTarget(this, root_view, &browser_view_origin);
+  return gfx::Point(
+      -browser_view_origin.x(),
+      ThemeProperties::kFrameHeightAboveTabs - browser_view_origin.y());
 }
 
-void BrowserView::SetStarredState(bool is_starred) {
-  PageActionIconView* star_icon =
-      toolbar_button_provider_->GetPageActionIconView(
-          PageActionIconType::kBookmarkStar);
-  if (star_icon)
-    star_icon->SetActive(is_starred);
-}
-
-void BrowserView::SetTranslateIconToggled(bool is_lit) {
-  // Translate icon is never active on Views.
+bool BrowserView::IsLoadingAnimationRunning() const {
+  return !loading_animation_start_.is_null();
 }
 
 void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
@@ -1577,6 +1963,9 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
                                      int reason) {
   DCHECK(new_contents);
   TRACE_EVENT0("ui", "BrowserView::OnActiveTabChanged");
+  views::WebView* active_contents_view = GetActiveContentsWebView();
+  bool tab_change_in_split_view =
+      IsTabChangeInSplitView(old_contents, new_contents);
 
   if (old_contents && !old_contents->IsBeingDestroyed()) {
     // We do not store the focus when closing the tab to work-around bug 4633.
@@ -1585,22 +1974,27 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
     old_contents->StoreFocus();
   }
 
-  // If |contents_container_| already has the correct WebContents, we can save
+  WebContentsObserver::Observe(new_contents);
+
+  // If |contents_web_view| already has the correct WebContents, we can save
   // some work.  This also prevents extra events from being reported by the
   // Visibility API under Windows, as ChangeWebContents will briefly hide
   // the WebContents window.
   bool change_tab_contents =
-      contents_web_view_->web_contents() != new_contents;
+      active_contents_view->web_contents() != new_contents &&
+      !tab_change_in_split_view;
 
 #if BUILDFLAG(IS_MAC)
   // Widget::IsActive is inconsistent between Mac and Aura, so don't check for
   // it on Mac. The check is also unnecessary for Mac, since restoring focus
   // won't activate the widget on that platform.
-  bool will_restore_focus =
-      !browser_->tab_strip_model()->closing_all() && GetWidget()->IsVisible();
+  bool will_restore_focus = !browser_->GetTabStripModel()->closing_all() &&
+                            GetWidget()->IsVisible() &&
+                            !tab_change_in_split_view;
 #else
-  bool will_restore_focus = !browser_->tab_strip_model()->closing_all() &&
-                            GetWidget()->IsActive() && GetWidget()->IsVisible();
+  bool will_restore_focus =
+      !browser_->GetTabStripModel()->closing_all() && GetWidget()->IsActive() &&
+      GetWidget()->IsVisible() && !tab_change_in_split_view;
 #endif
   // Update various elements that are interested in knowing the current
   // WebContents.
@@ -1618,101 +2012,114 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
       // read out to screen readers, even if focus doesn't actually change.
       GetWidget()->GetFocusManager()->ClearFocus();
     }
-    if (loading_bar_)
-      loading_bar_->SetWebContents(nullptr);
-    contents_web_view_->SetWebContents(nullptr);
-    devtools_web_view_->SetWebContents(nullptr);
+
+    multi_contents_view_->GetInactiveContentsView()->SetWebContents(nullptr);
+    active_contents_view->SetWebContents(nullptr);
   }
 
   // Do this before updating InfoBarContainer as the InfoBarContainer may
   // callback to us and trigger layout.
   if (bookmark_bar_view_.get()) {
     bookmark_bar_view_->SetBookmarkBarState(
-        browser_->bookmark_bar_state(),
-        BookmarkBar::DONT_ANIMATE_STATE_CHANGE);
+        bookmark_bar_state(), BookmarkBar::DONT_ANIMATE_STATE_CHANGE);
   }
 
   infobar_container_->ChangeInfoBarManager(
       infobars::ContentInfoBarManager::FromWebContents(new_contents));
 
-  auto* app_banner_manager =
-      webapps::AppBannerManager::FromWebContents(new_contents);
-  // May be null in unit tests.
-  if (app_banner_manager)
-    ObserveAppBannerManager(app_banner_manager);
+  // When switching tabs within a split, we want to layout to be done
+  // asynchronously in order to ensure the input events are triggered at the
+  // expected position.
+  UpdateUIForContents(new_contents, !tab_change_in_split_view);
 
-  UpdateUIForContents(new_contents);
-  RevealTabStripIfNeeded();
-
-  // Layout for DevTools _before_ setting the both main and devtools WebContents
-  // to avoid toggling the size of any of them.
-  UpdateDevToolsForContents(new_contents, !change_tab_contents);
+  if (!IsFullscreen() || !tab_change_in_split_view) {
+    RevealTopContainerIfNeeded();
+  }
 
   if (change_tab_contents) {
-    // When the location bar or other UI focus will be restored, first focus the
-    // root view so that screen readers announce the current page title. The
-    // kFocusContext event will delay the subsequent focus event so that screen
-    // readers register them as distinct events.
+    // When the location bar or other UI focus will be restored, first send a
+    // transient root focus so that screen readers announce the current page
+    // title before the restored UI focus.
     if (will_restore_focus) {
       ChromeWebContentsViewFocusHelper* focus_helper =
           ChromeWebContentsViewFocusHelper::FromWebContents(new_contents);
       if (focus_helper &&
-          focus_helper->GetStoredFocus() != contents_web_view_) {
-        GetWidget()->GetRootView()->NotifyAccessibilityEvent(
-            ax::mojom::Event::kFocusContext, true);
+          focus_helper->GetStoredFocus() != active_contents_view) {
+        GetWidget()->UpdateAccessibleNameForRootView();
+        GetWidget()
+            ->GetRootView()
+            ->GetViewAccessibility()
+            .NotifyTransientFocus();
       }
     }
 
-    web_contents_close_handler_->ActiveTabChanged();
-    if (loading_bar_)
-      loading_bar_->SetWebContents(new_contents);
-    contents_web_view_->SetWebContents(new_contents);
-    SadTabHelper* sad_tab_helper = SadTabHelper::FromWebContents(new_contents);
-    if (sad_tab_helper)
-      sad_tab_helper->ReinstallInWebView();
+    multi_contents_view_->ExecuteOnEachVisibleContentsView(
+        base::BindRepeating([](ContentsWebView* contents_view) {
+          contents_view->GetWebContentsCloseHandler()->ActiveTabChanged();
+        }));
 
-    // The second layout update should be no-op. It will just set the
-    // DevTools WebContents.
-    UpdateDevToolsForContents(new_contents, true);
+    const tabs::TabInterface* active_tab =
+        tabs::TabInterface::GetFromContents(new_contents);
+    if (active_tab->IsSplit()) {
+      ShowSplitView(/*focus_active_view=*/false);
+    } else {
+      if (multi_contents_view_->IsInSplitView()) {
+        HideSplitView();
+      }
+      multi_contents_view_->GetActiveContentsView()->SetWebContents(
+          new_contents);
+    }
+
+    tabs::TabInterface* tab =
+        tabs::TabInterface::MaybeGetFromContents(new_contents);
+    SadTabHelper* sad_tab_helper = tab ? SadTabHelper::From(tab) : nullptr;
+    if (sad_tab_helper) {
+      sad_tab_helper->ReinstallInWebView();
+    }
+
+    // Temporarily disable fast resize to ensure that the new active tab
+    // updates its layout.
+    const bool original_fast_resize =
+        multi_contents_view_->GetActiveContentsView()->GetFastResize();
+    UpdateFastResizeForContentViews(false);
+    multi_contents_view_->DeprecatedLayoutImmediately();
+    UpdateFastResizeForContentViews(original_fast_resize);
+  } else if (tab_change_in_split_view) {
+    UpdateActiveTabInSplitView();
   }
+
+  MaybeUpdateStoredFocusForWebContents(new_contents);
 
   if (will_restore_focus) {
     // We only restore focus if our window is visible, to avoid invoking blur
     // handlers when we are eventually shown.
     new_contents->RestoreFocus();
+  } else if (!GetWidget()->IsActive()) {
+    // When the window is inactive during tab switch, restore focus for the
+    // active web content on activation.
+    GetFocusManager()->SetStoredFocusView(nullptr);
+    restore_focus_on_activation_ = true;
   }
 
   // Update all the UI bits.
   UpdateTitleBar();
 
-  if (old_contents) {
-    TranslateBubbleController* translate_bubble_controller =
-        TranslateBubbleController::FromWebContents(old_contents);
-
-    if (translate_bubble_controller)
-      translate_bubble_controller->CloseBubble();
-  }
-
-  // This is only done once when the app is first opened so that there is only
-  // one subscriber per web contents.
-  if (AppUsesBorderlessMode() && !old_contents) {
-    SetWindowManagementPermissionSubscriptionForBorderlessMode(new_contents);
-    UpdateIsIsolatedWebApp();
-  }
+  CHECK_DEREF(TranslateBubbleController::From(browser_.get())).CloseBubble();
 }
 
 void BrowserView::OnTabDetached(content::WebContents* contents,
                                 bool was_active) {
   DCHECK(contents);
-  if (!was_active)
+  if (!was_active) {
     return;
+  }
 
   // This is to unsubscribe the Window Management permission subscriber.
   if (window_management_subscription_id_) {
     contents->GetPrimaryMainFrame()
         ->GetBrowserContext()
         ->GetPermissionController()
-        ->UnsubscribePermissionStatusChange(
+        ->UnsubscribeFromPermissionResultChange(
             window_management_subscription_id_.value());
     window_management_subscription_id_.reset();
   }
@@ -1720,63 +2127,71 @@ void BrowserView::OnTabDetached(content::WebContents* contents,
   // We need to reset the current tab contents to null before it gets
   // freed. This is because the focus manager performs some operations
   // on the selected WebContents when it is removed.
-  web_contents_close_handler_->ActiveTabChanged();
-  if (loading_bar_)
-    loading_bar_->SetWebContents(nullptr);
-  contents_web_view_->SetWebContents(nullptr);
-  infobar_container_->ChangeInfoBarManager(nullptr);
-  app_banner_manager_observation_.Reset();
-  UpdateDevToolsForContents(nullptr, true);
-}
+  multi_contents_view_->ExecuteOnEachVisibleContentsView(
+      base::BindRepeating([](ContentsWebView* contents_view) {
+        contents_view->GetWebContentsCloseHandler()->ActiveTabChanged();
+      }));
 
-void BrowserView::OnTabRestored(int command_id) {
-  // Ignore if a tab other than the last closed tab was restored.
-  if (command_id != AppMenuModel::kMinRecentTabsCommandId &&
-      command_id != IDC_RESTORE_TAB)
-    return;
-  CloseFeaturePromo(feature_engagement::kIPHReopenTabFeature);
+  GetActiveContentsWebView()->SetWebContents(nullptr);
+  infobar_container_->ChangeInfoBarManager(nullptr);
 }
 
 void BrowserView::ZoomChangedForActiveTab(bool can_show_bubble) {
-  const AppMenuButton* app_menu_button =
-      toolbar_button_provider()->GetAppMenuButton();
-  bool app_menu_showing = app_menu_button && app_menu_button->IsMenuShowing();
-  toolbar_button_provider()
-      ->ZoomChangedForActiveTab(can_show_bubble && !app_menu_showing);
+  auto* app_menu_control = toolbar_button_provider()->GetAppMenuControl();
+  bool app_menu_showing = app_menu_control && app_menu_control->IsMenuShowing();
+  toolbar_button_provider()->ZoomChangedForActiveTab(can_show_bubble &&
+                                                     !app_menu_showing);
 }
 
 gfx::Rect BrowserView::GetRestoredBounds() const {
   gfx::Rect bounds;
-  ui::WindowShowState state;
-  frame_->GetWindowPlacement(&bounds, &state);
+  ui::mojom::WindowShowState state = ui::mojom::WindowShowState::kDefault;
+  browser_widget_->GetWindowPlacement(&bounds, &state);
   return bounds;
 }
 
-ui::WindowShowState BrowserView::GetRestoredState() const {
+ui::mojom::WindowShowState BrowserView::GetRestoredState() const {
   gfx::Rect bounds;
-  ui::WindowShowState state;
-  frame_->GetWindowPlacement(&bounds, &state);
+  ui::mojom::WindowShowState state = ui::mojom::WindowShowState::kDefault;
+  browser_widget_->GetWindowPlacement(&bounds, &state);
   return state;
 }
 
 gfx::Rect BrowserView::GetBounds() const {
-  return frame_->GetWindowBoundsInScreen();
+  return browser_widget_->GetWindowBoundsInScreen();
 }
 
 gfx::Size BrowserView::GetContentsSize() const {
   DCHECK(initialized_);
-  return contents_web_view_->size();
+  return multi_contents_view_->GetActiveContentsContainerView()->size();
 }
 
 void BrowserView::SetContentsSize(const gfx::Size& size) {
   DCHECK(!GetContentsSize().IsEmpty());
 
-  const int width_diff = size.width() - GetContentsSize().width();
-  const int height_diff = size.height() - GetContentsSize().height();
+  int width_diff = size.width() - GetContentsSize().width();
+  int height_diff = size.height() - GetContentsSize().height();
 
   // Resizing the window may be expensive, so only do it if the size is wrong.
-  if (width_diff == 0 && height_diff == 0)
+  if (width_diff == 0 && height_diff == 0) {
     return;
+  }
+
+  // If in split view, the size diff needs to be scaled by the split ratio to
+  // account for the combined width of both contents views.
+  if (multi_contents_view_->IsInSplitView()) {
+    const double split_ratio = multi_contents_view_->GetSplitRatio();
+    CHECK(split_ratio > 0.0 && split_ratio < 1.0);
+    const double divider = multi_contents_view_->GetActiveIndex() == 0
+                               ? split_ratio
+                               : (1.0 - split_ratio);
+    if (multi_contents_view_->GetSplitLayout() ==
+        split_tabs::SplitTabLayout::kSideBySide) {
+      width_diff = std::round(width_diff / divider);
+    } else {
+      height_diff = std::round(height_diff / divider);
+    }
+  }
 
   gfx::Rect bounds = GetBounds();
   bounds.set_width(bounds.width() + width_diff);
@@ -1786,205 +2201,128 @@ void BrowserView::SetContentsSize(const gfx::Size& size) {
   // enforcement applied earlier does not know the specific frame dimensions.
   // Changes to the window size should not generally trigger screen changes.
   auto display =
-      display::Screen::GetScreen()->GetDisplayNearestWindow(GetNativeWindow());
+      display::Screen::Get()->GetDisplayNearestWindow(GetNativeWindow());
   bounds.AdjustToFit(display.work_area());
   SetBounds(bounds);
 }
 
 bool BrowserView::IsMaximized() const {
-  return frame_->IsMaximized();
+  return browser_widget_->IsMaximized();
 }
 
 bool BrowserView::IsMinimized() const {
-  return frame_->IsMinimized();
+  return browser_widget_->IsMinimized();
 }
 
 void BrowserView::Maximize() {
-  frame_->Maximize();
+  browser_widget_->Maximize();
 }
 
 void BrowserView::Minimize() {
-  frame_->Minimize();
+  browser_widget_->Minimize();
 }
 
 void BrowserView::Restore() {
-  frame_->Restore();
-}
-
-void BrowserView::EnterFullscreen(const GURL& url,
-                                  ExclusiveAccessBubbleType bubble_type,
-                                  const int64_t display_id) {
-  auto* screen = display::Screen::GetScreen();
-  auto display = screen->GetDisplayNearestWindow(GetNativeWindow());
-  const bool requesting_another_screen =
-      display_id != display.id() && display_id != display::kInvalidDisplayId;
-  if (IsFullscreen() && !requesting_another_screen) {
-    // Nothing to do.
-    return;
-  }
-
-  if (unified_side_panel_ && unified_side_panel_->GetVisible() &&
-      GetExclusiveAccessManager()
-          ->fullscreen_controller()
-          ->IsWindowFullscreenForTabOrPending()) {
-    toolbar_button_provider_->GetSidePanelButton()->HideSidePanel();
-  }
-
-  ProcessFullscreen(true, url, bubble_type, display_id);
-}
-
-void BrowserView::ExitFullscreen() {
-  if (!IsFullscreen())
-    return;  // Nothing to do.
-
-  if (IsForceFullscreen())
-    return;
-
-  ProcessFullscreen(false, GURL(), EXCLUSIVE_ACCESS_BUBBLE_TYPE_NONE,
-                    display::kInvalidDisplayId);
-}
-
-void BrowserView::UpdateExclusiveAccessExitBubbleContent(
-    const GURL& url,
-    ExclusiveAccessBubbleType bubble_type,
-    ExclusiveAccessBubbleHideCallback bubble_first_hide_callback,
-    bool notify_download,
-    bool force_update) {
-  DCHECK(!notify_download || exclusive_access_bubble_);
-  // Trusted pinned mode does not allow to escape. So do not show the bubble.
-  bool is_trusted_pinned =
-      platform_util::IsBrowserLockedFullscreen(browser_.get());
-
-  // Immersive mode has no exit bubble because it has a visible strip at the
-  // top that gives the user a hover target. In a public session we show the
-  // bubble.
-  // TODO(jamescook): Figure out what to do with mouse-lock.
-  if (is_trusted_pinned ||
-      (!notify_download && bubble_type == EXCLUSIVE_ACCESS_BUBBLE_TYPE_NONE) ||
-      (ShouldUseImmersiveFullscreenForUrl(url) &&
-       !profiles::IsPublicSession())) {
-    // |exclusive_access_bubble_.reset()| will trigger callback for current
-    // bubble with |ExclusiveAccessBubbleHideReason::kInterrupted| if available.
-    exclusive_access_bubble_.reset();
-    if (bubble_first_hide_callback) {
-      std::move(bubble_first_hide_callback)
-          .Run(ExclusiveAccessBubbleHideReason::kNotShown);
-    }
-    return;
-  }
-
-  if (exclusive_access_bubble_) {
-    exclusive_access_bubble_->UpdateContent(
-        url, bubble_type, std::move(bubble_first_hide_callback),
-        notify_download, force_update);
-    return;
-  }
-
-  // Notification about download should only be considered for a bubble that
-  // exists already.
-  exclusive_access_bubble_ = std::make_unique<ExclusiveAccessBubbleViews>(
-      this, url, bubble_type, std::move(bubble_first_hide_callback));
-}
-
-bool BrowserView::IsExclusiveAccessBubbleDisplayed() const {
-  return exclusive_access_bubble_ && exclusive_access_bubble_->IsShowing();
-}
-
-void BrowserView::OnExclusiveAccessUserInput() {
-  if (exclusive_access_bubble_.get())
-    exclusive_access_bubble_->OnUserInput();
-}
-
-bool BrowserView::ShouldHideUIForFullscreen() const {
-  // Immersive mode needs UI for the slide-down top panel.
-  if (immersive_mode_controller_->IsEnabled())
-    return false;
-
-  return frame_->GetFrameView()->ShouldHideTopUIForFullscreen();
+  browser_widget_->Restore();
 }
 
 bool BrowserView::IsFullscreen() const {
-  return frame_->IsFullscreen();
-}
-
-bool BrowserView::IsFullscreenBubbleVisible() const {
-  return exclusive_access_bubble_ != nullptr;
-}
-
-bool BrowserView::IsForceFullscreen() const {
-  return force_fullscreen_;
-}
-
-void BrowserView::SetForceFullscreen(bool force_fullscreen) {
-  force_fullscreen_ = force_fullscreen;
+  return browser_widget_->IsFullscreen();
 }
 
 void BrowserView::RestoreFocus() {
   WebContents* selected_web_contents = GetActiveWebContents();
-  if (selected_web_contents)
+  if (selected_web_contents) {
     selected_web_contents->RestoreFocus();
+  }
 }
 
 void BrowserView::FullscreenStateChanging() {
-  bool fullscreen = IsFullscreen();
-  ProcessFullscreen(
-      fullscreen, GURL(),
-      fullscreen
-          ? GetExclusiveAccessManager()->GetExclusiveAccessExitBubbleType()
-          : EXCLUSIVE_ACCESS_BUBBLE_TYPE_NONE,
-      display::kInvalidDisplayId);
-}
-
-void BrowserView::FullscreenStateChanged() {
-#if BUILDFLAG(IS_MAC)
-  if (!IsFullscreen() && restore_pre_fullscreen_bounds_callback_) {
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, std::move(restore_pre_fullscreen_bounds_callback_));
-  }
-
-  if (AppUsesWindowControlsOverlay())
-    UpdateWindowControlsOverlayEnabled();
-#endif  // BUILDFLAG(IS_MAC)
-
-  browser_->WindowFullscreenStateChanged();
-
-  GetExclusiveAccessManager()
-      ->fullscreen_controller()
-      ->FullscreenTransititionCompleted();
-}
-
-void BrowserView::SetToolbarButtonProvider(ToolbarButtonProvider* provider) {
-  toolbar_button_provider_ = provider;
-  // Recreate the autofill bubble handler when toolbar button provider changes.
-  autofill_bubble_handler_ =
-      std::make_unique<autofill::AutofillBubbleHandlerImpl>(
-          browser_.get(), toolbar_button_provider_);
-}
-
-void BrowserView::UpdatePageActionIcon(PageActionIconType type) {
-  // When present, the intent chip replaces the intent picker page action icon.
-  if (type == PageActionIconType::kIntentPicker &&
-      toolbar_button_provider()->GetIntentChipButton()) {
-    toolbar_button_provider()->GetIntentChipButton()->Update();
+  // Skip view changes during close, especially to avoid making new OS requests.
+  if (browser_widget_->IsClosed()) {
     return;
   }
 
-  PageActionIconView* icon =
-      toolbar_button_provider_->GetPageActionIconView(type);
-  if (icon)
-    icon->Update();
+  if (base::FeatureList::IsEnabled(features::kAsyncFullscreenWindowState)) {
+    PrepareFullscreen(IsFullscreen());
+  } else {
+    ProcessFullscreen(IsFullscreen(), display::kInvalidDisplayId);
+  }
+}
+
+void BrowserView::FullscreenStateChanged() {
+#if BUILDFLAG(IS_CHROMEOS)
+  const auto* frame_view =
+      views::AsViewClass<BrowserFrameViewChromeOS>(GetFrameView());
+  ImmersiveModeController::From(browser())->SetEnabled(
+      frame_view->ShouldEnableImmersiveModeController());
+#endif
+
+#if !BUILDFLAG(IS_MAC)
+  if (AppUsesWindowControlsOverlay()) {
+    // Defer the refresh: the fullscreen transition resizes the HWND
+    // synchronously, and updating layer state mid-paint trips
+    // cc::Layer::IsPropertyChangeAllowed().
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            &BrowserView::RefreshWindowControlsOverlayAfterFullscreenTransition,
+            GetAsWeakPtr()));
+  }
+#endif
+
+#if BUILDFLAG(IS_MAC)
+  if (AppUsesWindowControlsOverlay()) {
+    UpdateWindowControlsOverlayEnabled();
+  }
+
+  // In mac fullscreen the toolbar view is hosted in the overlay widget that has
+  // a higher z-order level. This overlay widget should be used for anchoring
+  // secondary UIs, otherwise they will be covered by the toolbar.
+  views::Widget* widget_for_anchoring =
+      WindowFeatureController::From(browser())->UsesImmersiveFullscreenMode() &&
+              IsFullscreen()
+          ? overlay_widget_.get()
+          : nullptr;
+
+  multi_contents_view_->SetProperty(views::kWidgetForAnchoringKey,
+                                    widget_for_anchoring);
+  GetFrameView()->OnFullscreenStateChanged();
+
+#endif  // BUILDFLAG(IS_MAC)
+
+  ExclusiveAccessManager::From(browser_)
+      ->fullscreen_controller()
+      ->WindowFullscreenStateChanged();
+
+  if (base::FeatureList::IsEnabled(features::kAsyncFullscreenWindowState)) {
+    ToolbarSizeChanged(false);
+    GetFrameView()->OnFullscreenStateChanged();
+
+    // Reshow the split view after completing the toolbar sizing.
+    const tabs::TabInterface* active_tab =
+        browser_->GetTabStripModel()->GetActiveTab();
+    if (!IsFullscreen() && active_tab && active_tab->IsSplit()) {
+      ShowSplitView(GetActiveContentsWebView()->HasFocus() ||
+                    !GetFocusManager()->GetFocusedView());
+    }
+  }
+}
+
+ToolbarButtonProvider* BrowserView::toolbar_button_provider() {
+  return ToolbarButtonProvider::From(browser_);
 }
 
 autofill::AutofillBubbleHandler* BrowserView::GetAutofillBubbleHandler() {
   return autofill_bubble_handler_.get();
 }
 
-void BrowserView::ExecutePageActionIconForTesting(PageActionIconType type) {
-  toolbar_button_provider_->GetPageActionIconView(type)->ExecuteForTesting();
+LocationBar* BrowserView::GetLocationBar() const {
+  return toolbar_ ? toolbar_->location_bar() : nullptr;
 }
 
-LocationBar* BrowserView::GetLocationBar() const {
-  return GetLocationBarView();
+ui::AcceleratorProvider* BrowserView::GetAcceleratorProvider() {
+  return this;
 }
 
 void BrowserView::SetFocusToLocationBar(bool is_user_initiated) {
@@ -1993,116 +2331,191 @@ void BrowserView::SetFocusToLocationBar(bool is_user_initiated) {
   // already. On Chrome OS, changing focus makes a view believe it has a focus
   // even if the widget doens't have a focus. Either cases, we need to ignore
   // this when the browser window isn't active.
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS_ASH)
-  if (!IsActive())
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+  if (!IsActive()) {
     return;
-#endif
-  if (!IsLocationBarVisible())
-    return;
-
-  LocationBarView* location_bar = GetLocationBarView();
-  location_bar->FocusLocation(is_user_initiated);
-  if (!location_bar->omnibox_view()->HasFocus()) {
-    // If none of location bar got focus, then clear focus.
-    views::FocusManager* focus_manager = GetFocusManager();
-    DCHECK(focus_manager);
-    focus_manager->ClearFocus();
   }
+#endif
+  if (!IsLocationBarVisible()) {
+    return;
+  }
+
+  LocationBar* location_bar = GetLocationBar();
+  location_bar->FocusLocation(is_user_initiated,
+                              /*clear_focus_if_failed=*/true);
 }
 
 void BrowserView::UpdateReloadStopState(bool is_loading, bool force) {
-  if (toolbar_button_provider_->GetReloadButton()) {
-    toolbar_button_provider_->GetReloadButton()->ChangeMode(
-        is_loading ? ReloadButton::Mode::kStop : ReloadButton::Mode::kReload,
-        force);
+  ReloadControl::Mode mode =
+      is_loading ? ReloadControl::Mode::kStop : ReloadControl::Mode::kReload;
+  ReloadControl* reload_button =
+      ToolbarButtonProvider::From(browser_)->GetReloadButton();
+  if (reload_button) {
+    reload_button->ChangeMode(mode, force);
   }
 }
 
 void BrowserView::UpdateToolbar(content::WebContents* contents) {
   // We may end up here during destruction.
-  if (toolbar_)
+  if (toolbar_) {
     toolbar_->Update(contents);
+  }
+  for (ContentsContainerView* contents_container :
+       multi_contents_view_->contents_container_views()) {
+    contents_container->mini_toolbar()->UpdateContents();
+  }
+}
+
+bool BrowserView::UpdateToolbarSecurityState() {
+  // We may end up here during destruction.
+  if (toolbar_) {
+    return toolbar_->UpdateSecurityState();
+  }
+
+  return false;
 }
 
 void BrowserView::UpdateCustomTabBarVisibility(bool visible, bool animate) {
-  if (toolbar_)
+  if (toolbar_) {
     toolbar_->UpdateCustomTabBarVisibility(visible, animate);
+  }
 }
 
 void BrowserView::ResetToolbarTabState(content::WebContents* contents) {
   // We may end up here during destruction.
-  if (toolbar_)
+  if (toolbar_) {
     toolbar_->ResetTabState(contents);
+  }
 }
 
 void BrowserView::FocusToolbar() {
   // Temporarily reveal the top-of-window views (if not already revealed) so
   // that the toolbar is visible and is considered focusable. If the
-  // toolbar gains focus, `immersive_mode_controller_` will keep the
-  // top-of-window views revealed.
+  // toolbar gains focus, ImmersiveModeController will keep the top-of-window
+  // views revealed.
   std::unique_ptr<ImmersiveRevealedLock> focus_reveal_lock =
-      immersive_mode_controller_->GetRevealedLock(
+      ImmersiveModeController::From(browser())->GetRevealedLock(
           ImmersiveModeController::ANIMATE_REVEAL_YES);
 
   // Start the traversal within the main toolbar. SetPaneFocus stores
   // the current focused view before changing focus.
-  toolbar_button_provider_->FocusToolbar();
-}
-
-ExtensionsContainer* BrowserView::GetExtensionsContainer() {
-  return toolbar_button_provider_->GetExtensionsToolbarContainer();
+  ToolbarButtonProvider::From(browser_)->FocusToolbar();
 }
 
 void BrowserView::ToolbarSizeChanged(bool is_animating) {
-  if (is_animating)
-    contents_web_view_->SetFastResize(true);
+  // No need to re-layout if the browser has already closed. This is unnecessary
+  // and dangerous. For tab modal, its modal dialog manager have already gone.
+  // Layout will cause CHECK failure due to missing modal dialog manager.
+  if (browser()->IsDeleteScheduled()) {
+    return;
+  }
+
+  if (is_animating) {
+    UpdateFastResizeForContentViews(true);
+  }
   UpdateUIForContents(GetActiveWebContents());
 
   // Do nothing if we're currently participating in a tab dragging process. The
   // fast resize bit will be reset and the web contents will get re-layed out
   // after the tab dragging ends.
-  if (frame()->tab_drag_kind() != TabDragKind::kNone)
+  if (browser_widget()->tab_drag_kind() != TabDragKind::kNone) {
     return;
+  }
 
-  if (is_animating)
-    contents_web_view_->SetFastResize(false);
+  if (is_animating) {
+    UpdateFastResizeForContentViews(false);
+  }
 
   // When transitioning from animating to not animating we need to make sure the
-  // contents_container_ gets layed out. If we don't do this and the bounds
-  // haven't changed contents_container_ won't get a Layout and we'll end up
+  // multi_contents_view_ gets laid out. If we don't do this and the bounds
+  // haven't changed multi_contents_view_ won't get a Layout and we'll end up
   // with a gray rect because the clip wasn't updated.
   if (!is_animating) {
-    contents_web_view_->InvalidateLayout();
-    contents_container_->Layout();
+    for (auto* contents_web_view : GetAllVisibleContentsWebViews()) {
+      contents_web_view->InvalidateLayout();
+    }
+    multi_contents_view_->DeprecatedLayoutImmediately();
   }
 
   // Web apps that use Window Controls Overlay (WCO) revert back to the
   // standalone style title bar when infobars are visible. Update the enabled
   // state of WCO when the size of the toolbar changes since this indicates
   // that the visibility of the infobar may have changed.
-  if (AppUsesWindowControlsOverlay())
+  if (AppUsesWindowControlsOverlay()) {
     UpdateWindowControlsOverlayEnabled();
+  }
 
-  if (AppUsesBorderlessMode())
-    UpdateBorderlessModeEnabled();
+  if (AppUsesUnframedMode()) {
+    UpdateUnframedModeEnabled();
+  }
 }
 
 void BrowserView::TabDraggingStatusChanged(bool is_dragging) {
-  // TODO(crbug.com/1110266): Remove explicit OS_CHROMEOS check once OS_LINUX
-  // CrOS cleanup is done.
-// TODO(crbug.com/1052397): Revisit the macro expression once build flag switch
-// of lacros-chrome is complete.
-#if !(BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS))
-  contents_web_view_->SetFastResize(is_dragging);
+#if !BUILDFLAG(IS_LINUX)
+  UpdateFastResizeForContentViews(is_dragging);
+
   if (!is_dragging) {
     // When tab dragging is ended, we need to make sure the web contents get
     // re-layed out. Otherwise we may see web contents get clipped to the window
     // size that was used during dragging.
-    contents_web_view_->InvalidateLayout();
-    contents_container_->Layout();
+    for (auto* contents_web_view : GetAllVisibleContentsWebViews()) {
+      contents_web_view->InvalidateLayout();
+    }
+    multi_contents_view_->DeprecatedLayoutImmediately();
   }
 #endif
 }
+
+TabDragTarget* BrowserView::GetTabDragTarget(
+    const gfx::Point& point_in_screen) {
+  if (ShouldDrawVerticalTabStrip()) {
+    if (vertical_tab_strip_region_view_) {
+      if (auto* target = vertical_tab_strip_region_view_->GetTabDragTarget(
+              point_in_screen)) {
+        return target;
+      }
+    }
+  } else if (base::FeatureList::IsEnabled(tabs::kTabStripUnification) &&
+             horizontal_tab_strip_region_view_) {
+    if (auto* target = horizontal_tab_strip_region_view_->GetTabDragTarget(
+            point_in_screen)) {
+      return target;
+    }
+  }
+  if (multi_contents_view_->IsInSplitView() ||
+      !multi_contents_view_->IsDragAndDropEnabled()) {
+    return nullptr;
+  }
+  if (!multi_contents_view_->GetBoundsInScreen().Contains(point_in_screen)) {
+    return nullptr;
+  }
+  return &multi_contents_view_->drop_target_controller();
+}
+
+#if BUILDFLAG(IS_CHROMEOS)
+
+void BrowserView::OnLockedForOnTaskUpdated(bool locked_for_on_task) {
+  // Use immersive mode for tabbed PWA.
+  if (WindowFeatureController::From(browser())->CanSupportWindowFeature(
+          WindowFeatureController::WindowFeature::kFeatureTabStrip)) {
+    CHECK_NE(
+        GetNativeWindow()->GetProperty(chromeos::kUseImmersiveInTrustedPinned),
+        locked_for_on_task);
+    GetNativeWindow()->SetProperty(chromeos::kUseImmersiveInTrustedPinned,
+                                   locked_for_on_task);
+  }
+  // TODO(crbug.com/429215055): Move this logic to window manager.
+  SetCanMinimize(!locked_for_on_task);
+  SetShowCloseButton(!locked_for_on_task);
+}
+
+bool BrowserView::IsLockedFullscreen() const {
+  const auto* frame_view =
+      views::AsViewClass<BrowserFrameViewChromeOS>(GetFrameView());
+  return frame_view->IsLockedFullscreen();
+}
+
+#endif
 
 base::CallbackListSubscription BrowserView::AddOnLinkOpeningFromGestureCallback(
     OnLinkOpeningFromGestureCallback callback) {
@@ -2114,8 +2527,13 @@ void BrowserView::LinkOpeningFromGesture(WindowOpenDisposition disposition) {
 }
 
 bool BrowserView::AppUsesWindowControlsOverlay() const {
-  return browser()->app_controller() &&
-         browser()->app_controller()->AppUsesWindowControlsOverlay();
+  auto* const app_controller = web_app::AppBrowserController::From(browser());
+  return app_controller && app_controller->AppUsesWindowControlsOverlay();
+}
+
+bool BrowserView::AppUsesTabbed() const {
+  auto* const app_controller = web_app::AppBrowserController::From(browser());
+  return app_controller && app_controller->AppUsesTabbed();
 }
 
 bool BrowserView::IsWindowControlsOverlayEnabled() const {
@@ -2123,13 +2541,17 @@ bool BrowserView::IsWindowControlsOverlayEnabled() const {
 }
 
 void BrowserView::UpdateWindowControlsOverlayEnabled() {
-  UpdateWindowControlsOverlayToggleVisible();
+  UpdateWindowControlsOverlayAvailable();
 
-  // If the toggle is not visible, we can assume that Window Controls Overlay
-  // is not enabled.
-  bool enabled = should_show_window_controls_overlay_toggle_ &&
-                 browser()->app_controller() &&
-                 browser()->app_controller()->IsWindowControlsOverlayEnabled();
+  // Window Controls Overlay (WCO) is enabled when it is available in the window
+  // and declared in the app manifest. Additionally, if the
+  // `kDesktopPWAsWindowControlsOverlayWithNoToggle` feature flag is disabled,
+  // the user must also enable WCO via the toggle; otherwise, no further user
+  // action is required. See `UpdateWindowControlsOverlayAvailable()` for the
+  // conditions under which WCO is available.
+  auto* const app_controller = web_app::AppBrowserController::From(browser());
+  bool enabled = is_window_controls_overlay_available_ && app_controller &&
+                 app_controller->IsWindowControlsOverlayEnabled();
 
   if (enabled == window_controls_overlay_enabled_) {
     return;
@@ -2139,16 +2561,19 @@ void BrowserView::UpdateWindowControlsOverlayEnabled() {
 
   // Clear the title-bar-area rect when window controls overlay is disabled.
   if (!window_controls_overlay_enabled_) {
-    GetActiveWebContents()->UpdateWindowControlsOverlay(gfx::Rect());
+    // The web contents can be null while the window is closing, but possibly
+    // also at other times. See https://crbug.com/40924318.
+    SafeInvoke(GetActiveWebContents())
+        .Then(&content::WebContents::UpdateWindowControlsOverlay, gfx::Rect());
   }
 
   if (web_app_frame_toolbar()) {
     web_app_frame_toolbar()->OnWindowControlsOverlayEnabledChanged();
   }
 
-  if (frame_ && frame_->GetFrameView()) {
-    frame_->GetFrameView()->WindowControlsOverlayEnabledChanged();
-  }
+  SafeInvoke(browser_widget_.get())
+      .Then(&BrowserWidget::GetFrameView)
+      .Then(&BrowserFrameView::WindowControlsOverlayEnabledChanged);
 
   // When Window Controls Overlay is enabled or disabled, the browser window
   // needs to be re-layed out to make sure the title bar and web contents appear
@@ -2162,8 +2587,8 @@ void BrowserView::UpdateWindowControlsOverlayEnabled() {
           : l10n_util::GetStringUTF16(
                 IDS_WEB_APP_WINDOW_CONTROLS_OVERLAY_DISABLED_ALERT);
 #if BUILDFLAG(IS_MAC)
-  if (frame_) {
-    frame_->native_browser_frame()->AnnounceTextInInProcessWindow(
+  if (browser_widget_) {
+    browser_widget_->browser_native_widget()->AnnounceTextInInProcessWindow(
         state_change_text);
   }
 #else
@@ -2171,50 +2596,94 @@ void BrowserView::UpdateWindowControlsOverlayEnabled() {
 #endif
 }
 
-void BrowserView::UpdateWindowControlsOverlayToggleVisible() {
-  bool should_show = AppUsesWindowControlsOverlay();
+void BrowserView::RefreshWindowControlsOverlayAfterFullscreenTransition() {
+  UpdateWindowControlsOverlayEnabled();
+  // Schedule (don't force) a layout; a synchronous layout here can mutate
+  // compositor state while a frame is still being painted.
+  InvalidateLayout();
+}
 
-  if ((toolbar_ && toolbar_->custom_tab_bar() &&
-       toolbar_->custom_tab_bar()->GetVisible()) ||
-      (infobar_container_ && infobar_container_->GetVisible())) {
-    should_show = false;
+void BrowserView::OnWindowDidShow() {
+  if (window_has_shown_) {
+    return;
+  }
+  window_has_shown_ = true;
+
+  startup_metric_utils::GetBrowser().RecordBrowserWindowDisplay(
+      base::TimeTicks::Now());
+
+  // Nothing to do for non-tabbed windows.
+  if (browser_->GetType() != BrowserWindowInterface::Type::TYPE_NORMAL) {
+    return;
   }
 
-  if (IsImmersiveModeEnabled())
-    should_show = false;
+  // Show any pending global error bubble.
+  GlobalErrorService* service =
+      GlobalErrorServiceFactory::GetForProfile(browser_->GetProfile());
+  GlobalError* error = service->GetFirstGlobalErrorWithBubbleView();
+  if (error) {
+    error->ShowBubbleView(browser_);
+  }
+}
+
+void BrowserView::UpdateWindowControlsOverlayAvailable() {
+  bool available = AppUsesWindowControlsOverlay();
+
+  // An empty InfoBarContainerView should not disable WCO, even before layout
+  // updates visibility.
+  if ((toolbar_ && toolbar_->custom_tab_bar() &&
+       toolbar_->custom_tab_bar()->GetVisible()) ||
+      (infobar_container_ && !infobar_container_->IsEmpty())) {
+    available = false;
+  }
+
+  if (ImmersiveModeController::From(browser())->IsEnabled()) {
+    available = false;
+  }
 
 #if BUILDFLAG(IS_MAC)
   // On macOS, when in fullscreen mode, window controls (the menu bar, title
   // bar, and toolbar) are attached to a separate NSView that slides down from
   // the top of the screen, independent of, and overlapping the WebContents.
   // Disable WCO when in fullscreen, because this space is inaccessible to
-  // WebContents. https://crbug.com/915110.
-  if (frame_ && IsFullscreen()) {
-    should_show = false;
+  // WebContents. https://crbug.com/41431787.
+  if (browser_widget_ && IsFullscreen()) {
+    available = false;
   }
 #endif
 
-  if (should_show == should_show_window_controls_overlay_toggle_)
+  if (available == is_window_controls_overlay_available_) {
     return;
+  }
 
   DCHECK(AppUsesWindowControlsOverlay());
-  should_show_window_controls_overlay_toggle_ = should_show;
+  is_window_controls_overlay_available_ = available;
 
   if (web_app_frame_toolbar()) {
-    web_app_frame_toolbar()->SetWindowControlsOverlayToggleVisible(should_show);
+    web_app_frame_toolbar()->SetWindowControlsOverlayToggleVisible(available);
   }
 }
 
-void BrowserView::UpdateBorderlessModeEnabled() {
-  bool borderless_mode_enabled = AppUsesBorderlessMode();
+void BrowserView::UpdateUnframedModeEnabled() {
+  bool unframed_mode_enabled = AppUsesUnframedMode();
 
-  if (toolbar_ && toolbar_->custom_tab_bar() &&
+  // The final visibility of both the CustomTabBarView and the
+  // InfobarContainerView is determined by BrowserView::Layout() - initially
+  // they will start as visible by default. However BrowserView::Layout() is
+  // also dependent on the state of `unframed_mode_enabled_`. To ensure these
+  // visibility checks are performed once both views have reached a valid state
+  // we must wait for BrowserView::Layout() to resolve first.
+  // TODO(crbug.com/429093006): This circular dependency should be resolved and
+  // checks against the existence of the custom tab bar or infobar container
+  // should be independent of layout state.
+  if (!needs_layout() && toolbar_ && toolbar_->custom_tab_bar() &&
       toolbar_->custom_tab_bar()->GetVisible()) {
-    borderless_mode_enabled = false;
-  } else if (infobar_container_ && infobar_container_->GetVisible()) {
-    borderless_mode_enabled = false;
-  } else if (IsImmersiveModeEnabled()) {
-    borderless_mode_enabled = false;
+    unframed_mode_enabled = false;
+  } else if (!needs_layout() && infobar_container_ &&
+             infobar_container_->GetVisible()) {
+    unframed_mode_enabled = false;
+  } else if (ImmersiveModeController::From(browser())->IsEnabled()) {
+    unframed_mode_enabled = false;
   }
 
   if (auto* web_contents = GetActiveWebContents()) {
@@ -2226,39 +2695,49 @@ void BrowserView::UpdateBorderlessModeEnabled() {
               ->GetBrowserContext()
               ->GetPermissionController()
               ->GetPermissionResultForOriginWithoutContext(
-                  blink::PermissionType::WINDOW_MANAGEMENT, origin)
+                  content::PermissionDescriptorUtil::
+                      CreatePermissionDescriptorForPermissionType(
+                          blink::PermissionType::WINDOW_MANAGEMENT),
+                  origin)
               .status;
 
       window_management_permission_granted_ =
           status == blink::mojom::PermissionStatus::GRANTED;
     }
+
+    auto* const app_controller = web_app::AppBrowserController::From(browser());
+    if (unframed_mode_enabled && app_controller &&
+        !app_controller->UrlMatchesUnframedPattern(
+            web_contents->GetVisibleURL())) {
+      unframed_mode_enabled = false;
+    }
   } else {
-    // Defaults to the value of borderless_mode_enabled if web contents are
+    // Defaults to the value of `unframed_mode_enabled` if web contents are
     // null. These get overridden when the app is launched and its web contents
     // are ready.
-    window_management_permission_granted_ = borderless_mode_enabled;
-    is_isolated_web_app_ = borderless_mode_enabled;
+    window_management_permission_granted_ = unframed_mode_enabled;
   }
 
-  if (borderless_mode_enabled == borderless_mode_enabled_)
+  if (unframed_mode_enabled == unframed_mode_enabled_) {
     return;
-  borderless_mode_enabled_ = borderless_mode_enabled;
+  }
+  unframed_mode_enabled_ = unframed_mode_enabled;
 
   if (web_app_frame_toolbar()) {
-    web_app_frame_toolbar()->UpdateBorderlessModeEnabled();
+    web_app_frame_toolbar()->UpdateUnframedModeEnabled();
   }
 }
 
 void BrowserView::UpdateWindowManagementPermission(
-    blink::mojom::PermissionStatus status) {
+    content::PermissionResult result) {
   window_management_permission_granted_ =
-      status == blink::mojom::PermissionStatus::GRANTED;
+      result.status == blink::mojom::PermissionStatus::GRANTED;
 
-  // The layout has to update to reflect the borderless mode view change.
+  // The layout has to update to reflect the unframed mode view change.
   InvalidateLayout();
 }
 
-void BrowserView::SetWindowManagementPermissionSubscriptionForBorderlessMode(
+void BrowserView::SetWindowManagementPermissionSubscriptionForUnframedMode(
     content::WebContents* web_contents) {
   content::RenderFrameHost* rfh = web_contents->GetPrimaryMainFrame();
   auto* controller = rfh->GetBrowserContext()->GetPermissionController();
@@ -2267,69 +2746,85 @@ void BrowserView::SetWindowManagementPermissionSubscriptionForBorderlessMode(
   url::Origin origin = url::Origin::Create(web_contents->GetVisibleURL());
   if (origin.opaque()) {
     // Permission check should not be tied to an empty origin. This can happen
-    // when opening popups from borderless IWAs.
+    // when opening popups from unframed IWAs.
     return;
   }
 
   UpdateWindowManagementPermission(
-      controller
-          ->GetPermissionResultForOriginWithoutContext(
-              blink::PermissionType::WINDOW_MANAGEMENT, origin)
-          .status);
+      controller->GetPermissionResultForOriginWithoutContext(
+          content::PermissionDescriptorUtil::
+              CreatePermissionDescriptorForPermissionType(
+                  blink::PermissionType::WINDOW_MANAGEMENT),
+          origin));
 
   // It is safe to bind base::Unretained(this) because WebContents is
   // owned by BrowserView.
   window_management_subscription_id_ =
-      controller->SubscribePermissionStatusChange(
-          blink::PermissionType::WINDOW_MANAGEMENT, rfh->GetProcess(), origin,
+      controller->SubscribeToPermissionResultChange(
+          content::PermissionDescriptorUtil::
+              CreatePermissionDescriptorForPermissionType(
+                  blink::PermissionType::WINDOW_MANAGEMENT),
+          /*render_process_host*/ nullptr, rfh, origin.GetURL(),
+          /*should_include_device_status=*/false,
           base::BindRepeating(&BrowserView::UpdateWindowManagementPermission,
                               base::Unretained(this)));
 }
 
-void BrowserView::UpdateIsIsolatedWebApp() {
-  is_isolated_web_app_ = browser()->app_controller() &&
-                         browser()->app_controller()->IsIsolatedWebApp();
-}
-
 void BrowserView::ToggleWindowControlsOverlayEnabled(base::OnceClosure done) {
-  browser()->app_controller()->ToggleWindowControlsOverlayEnabled(
-      base::BindOnce(&BrowserView::UpdateWindowControlsOverlayEnabled,
-                     weak_ptr_factory_.GetWeakPtr())
-          .Then(std::move(done)));
+  web_app::AppBrowserController::From(browser())
+      ->ToggleWindowControlsOverlayEnabled(
+          base::BindOnce(&BrowserView::UpdateWindowControlsOverlayEnabled,
+                         weak_ptr_factory_.GetWeakPtr())
+              .Then(std::move(done)));
 }
 
-bool BrowserView::IsBorderlessModeEnabled() const {
-  return borderless_mode_enabled_ && window_management_permission_granted_ &&
-         is_isolated_web_app_;
+bool BrowserView::WidgetOwnedByAnchorContainsPoint(
+    const gfx::Point& point_in_browser_view_coords) {
+  const auto point_in_screen_coords =
+      views::View::ConvertPointToScreen(this, point_in_browser_view_coords);
+
+  auto* anchor_widget = GetWidgetForAnchoring();
+
+  views::Widget::Widgets widgets =
+      views::Widget::GetAllOwnedWidgets(anchor_widget->GetNativeView());
+  return std::ranges::any_of(widgets, [point_in_screen_coords,
+                                       anchor_widget](views::Widget* widget) {
+    return widget != anchor_widget && widget->IsVisible() &&
+           widget->GetWindowBoundsInScreen().Contains(point_in_screen_coords);
+  });
 }
 
-bool BrowserView::AppUsesBorderlessMode() const {
-  return browser()->app_controller() &&
-         browser()->app_controller()->AppUsesBorderlessMode();
+bool BrowserView::IsUnframedModeEnabled() const {
+  return unframed_mode_enabled_ && window_management_permission_granted_;
 }
 
-void BrowserView::UpdateSidePanelHorizontalAlignment() {
-  const bool is_right_aligned = GetProfile()->GetPrefs()->GetBoolean(
-      prefs::kSidePanelHorizontalAlignment);
-  unified_side_panel_->SetHorizontalAlignment(
-      is_right_aligned ? SidePanel::kAlignRight : SidePanel::kAlignLeft);
-  GetBrowserViewLayout()->Layout(this);
+void BrowserView::ShowChromeLabs() {
+  CHECK(IsChromeLabsEnabled());
+  ChromeLabsCoordinator::From(browser_)->ShowOrHide();
 }
 
-void BrowserView::FocusBookmarksToolbar() {
-  DCHECK(!immersive_mode_controller_->IsEnabled());
+views::WebView* BrowserView::GetActiveContentsWebView() {
+  return multi_contents_view_->GetActiveContentsView();
+}
+
+BrowserView* BrowserView::AsBrowserView() {
+  return this;
+}
+
+bool BrowserView::AppUsesUnframedMode() const {
+  auto* const app_controller = web_app::AppBrowserController::From(browser());
+  return app_controller && app_controller->AppUsesUnframedMode();
+}
+
+bool BrowserView::AreDraggableRegionsEnabled() const {
+  return IsWindowControlsOverlayEnabled() || IsUnframedModeEnabled();
+}
+
+void BrowserView::OnFocusBookmarksToolbar() {
   if (bookmark_bar_view_ && bookmark_bar_view_->GetVisible() &&
       bookmark_bar_view_->GetPreferredSize().height() != 0) {
     bookmark_bar_view_->SetPaneFocusAndFocusDefault();
   }
-}
-
-void BrowserView::FocusInactivePopupForAccessibility() {
-  if (ActivateFirstInactiveBubbleForAccessibility())
-    return;
-
-  if (!infobar_container_->children().empty())
-    infobar_container_->SetPaneFocusAndFocusDefault();
 }
 
 void BrowserView::FocusAppMenu() {
@@ -2343,150 +2838,191 @@ void BrowserView::FocusAppMenu() {
   if (toolbar_->GetAppMenuFocused()) {
     RestoreFocus();
   } else {
-    DCHECK(!immersive_mode_controller_->IsEnabled());
+    DCHECK(!ImmersiveModeController::From(browser())->IsEnabled());
     toolbar_->SetPaneFocusAndFocusAppMenu();
   }
 }
 
-void BrowserView::RotatePaneFocus(bool forwards) {
-  // If an inactive bubble is showing this intentionally focuses that dialog to
-  // provide an easy access method to these dialogs without requiring additional
-  // keyboard shortcuts or commands. To get back out to pane cycling the dialog
-  // needs to be accepted or dismissed.
-  if (ActivateFirstInactiveBubbleForAccessibility())
-    return;
-
-  GetFocusManager()->RotatePaneFocus(
-      forwards ? views::FocusManager::Direction::kForward
-               : views::FocusManager::Direction::kBackward,
-      views::FocusManager::FocusCycleWrapping::kEnabled);
-}
-
-void BrowserView::FocusWebContentsPane() {
-  contents_web_view_->RequestFocus();
-}
-
-bool BrowserView::ActivateFirstInactiveBubbleForAccessibility() {
-  if (feature_promo_controller_ &&
-      feature_promo_controller_->bubble_factory_registry()
-          ->ToggleFocusForAccessibility(GetElementContext())) {
-    // Record that the user successfully used the accelerator to focus the
-    // bubble, reducing the need to describe the accelerator the next time a
-    // help bubble is shown.
-    feature_engagement::TrackerFactory::GetForBrowserContext(GetProfile())
-        ->NotifyEvent(
-            feature_engagement::events::kFocusHelpBubbleAcceleratorPressed);
-    return true;
-  }
-
-  if (GetLocationBarView()->ActivateFirstInactiveBubbleForAccessibility())
-    return true;
-
-  // TODO: this fixes crbug.com/1042010 and crbug.com/1052676, but a more
-  // general solution should be desirable to find any bubbles anchored in the
-  // views hierarchy.
-  if (toolbar_ && toolbar_->app_menu_button()) {
-    views::DialogDelegate* bubble =
-        toolbar_->app_menu_button()->GetProperty(views::kAnchoredDialogKey);
-    if ((!bubble || user_education::HelpBubbleView::IsHelpBubble(bubble)) &&
-        GetLocationBarView())
-      bubble = GetLocationBarView()->GetProperty(views::kAnchoredDialogKey);
-    if ((!bubble || user_education::HelpBubbleView::IsHelpBubble(bubble)) &&
-        toolbar_button_provider_ &&
-        toolbar_button_provider_->GetAvatarToolbarButton()) {
-      bubble = toolbar_button_provider_->GetAvatarToolbarButton()->GetProperty(
-          views::kAnchoredDialogKey);
-    }
-
-    if (bubble && !user_education::HelpBubbleView::IsHelpBubble(bubble)) {
-      View* focusable = bubble->GetInitiallyFocusedView();
-
-      // A PermissionPromptBubbleView will explicitly return nullptr due to
-      // crbug.com/619429. In that case, we explicitly focus the cancel button.
-      if (!focusable)
-        focusable = bubble->GetCancelButton();
-
-      if (focusable) {
-        focusable->RequestFocus();
-#if BUILDFLAG(IS_MAC)
-        // TODO(crbug.com/650859): When a view requests focus on other
-        // platforms, its widget is activated. When doing so in FocusManager on
-        // MacOS a lot of interactive tests fail when the widget is destroyed.
-        // Activating the widget here should be safe as this happens only
-        // after explicit user action (focusing inactive dialog or rotating
-        // panes).
-        views::Widget* const widget = bubble->GetWidget();
-        if (widget && widget->IsVisible() && !widget->IsActive()) {
-          DCHECK(browser_->window()->IsActive());
-          widget->Activate();
-        }
-#endif
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
 void BrowserView::TryNotifyWindowBoundsChanged(const gfx::Rect& widget_bounds) {
-  if (interactive_resize_in_progress_ || last_widget_bounds_ == widget_bounds)
+  if (interactive_resize_in_progress_ || last_widget_bounds_ == widget_bounds) {
     return;
+  }
 
   last_widget_bounds_ = widget_bounds;
-  browser()->extension_window_controller()->NotifyWindowBoundsChanged();
+
+  // `extensions::BrowserExtensionWindowController::From()` may be null if we
+  // are in the process of creating the Browser. In that case, skip the
+  // notification.
+  if (auto* const controller =
+          extensions::BrowserExtensionWindowController::From(browser())) {
+    controller->NotifyWindowBoundsChanged();
+  }
 }
 
 void BrowserView::OnWidgetVisibilityChanged(views::Widget* widget,
                                             bool visible) {
-  if (base::FeatureList::IsEnabled(
-          features::kStopLoadingAnimationForHiddenWindow)) {
-    UpdateLoadingAnimations(visible);
+  UpdateLoadingAnimations(visible);
+
+  if (visible &&
+      base::FeatureList::IsEnabled(
+          features::kDeferLayoutDuringBrowserStartup) &&
+      startup_layout_state_ != StartupLayoutState::kDisabled) {
+    // Once the browser window becomes visible for the first time during
+    // startup, transition to the disabled state and flush any layouts
+    // deferred while invisible to ensure the screen paints with correct
+    // bounds. InvalidateLayout() marks the hierarchy dirty, and
+    // Widget::LayoutRootViewIfNecessary() lays it out synchronously so that
+    // callers or tests inspecting child view bounds immediately after Show()
+    // receive up-to-date geometry before the next paint tick.
+    startup_layout_state_ = StartupLayoutState::kDisabled;
+    if (layout_deferred_while_invisible_) {
+      layout_deferred_while_invisible_ = false;
+      InvalidateLayout();
+      widget->LayoutRootViewIfNecessary();
+    }
+  }
+}
+
+std::optional<bool> BrowserView::GetWebApiWindowResizable() const {
+  return resizable_from_web_api_;
+}
+
+bool BrowserView::GetCanResize() {
+  return CanResize();
+}
+
+// TODO(laurila, crbug.com/40276534): Map into new `ui::DisplayState` enum
+// instead of `ui::mojom::WindowShowState`.
+ui::mojom::WindowShowState BrowserView::GetWindowShowState() const {
+  if (IsMaximized()) {
+    return ui::mojom::WindowShowState::kMaximized;
+  } else if (IsMinimized()) {
+    return ui::mojom::WindowShowState::kMinimized;
+  } else if (IsFullscreen()) {
+    return ui::mojom::WindowShowState::kFullscreen;
+  } else {
+    return ui::mojom::WindowShowState::kDefault;
+  }
+}
+
+void BrowserView::SetResizableFromWebApi(std::optional<bool> resizable) {
+  // The API is allowed only for PWAs and IWAs
+  CHECK(web_app::AppBrowserController::From(browser()));
+  if (resizable == resizable_from_web_api_) {
+    return;
+  }
+  resizable_from_web_api_ = resizable;
+  NotifyWidgetSizeConstraintsChanged();
+  InvalidateLayout();  // To show/hide the maximize button.
+}
+
+void BrowserView::SynchronizeRenderWidgetHostVisualPropertiesForMainFrame() {
+  if (!base::FeatureList::IsEnabled(
+          blink::features::kDesktopPWAsAdditionalWindowingControls)) {
+    return;
+  }
+  content::WebContents* web_contents = GetActiveWebContents();
+  if (!web_contents || !web_contents->GetPrimaryMainFrame()) {
+    return;
+  }
+
+  if (content::RenderWidgetHost* render_widget_host =
+          web_contents->GetPrimaryMainFrame()->GetRenderWidgetHost()) {
+    render_widget_host->SynchronizeVisualProperties();
+  }
+}
+
+void BrowserView::NotifyWidgetSizeConstraintsChanged() {
+  if (!GetWidget()) {
+    return;
+  }
+
+  // TODO(crbug.com/40943569): Undo changes in this CL and return to use
+  // `WidgetObserver::OnWidgetSizeConstraintsChanged` once zoom levels are
+  // refactored so that visual properties can be updated during page load.
+  GetWidget()->OnSizeConstraintsChanged();
+
+  // `resizable` @media feature value in renderer needs to be updated.
+  SynchronizeRenderWidgetHostVisualPropertiesForMainFrame();
+}
+
+void BrowserView::OnWidgetShowStateChanged(views::Widget* widget) {
+  // `display-state` @media feature value in renderer needs to be updated.
+  SynchronizeRenderWidgetHostVisualPropertiesForMainFrame();
+}
+
+void BrowserView::OnWidgetWindowModalVisibilityChanged(views::Widget* widget,
+                                                       bool visible) {
+#if !BUILDFLAG(IS_MAC)
+  // MacOS does not need views window scrim. We use sheets to show window modals
+  // (-[NSWindow beginSheet:]), which natively draw a scrim.
+  window_scrim_view_->SetVisible(visible);
+#endif
+}
+
+void BrowserView::TitleWasSet(content::NavigationEntry* entry) {
+  UpdateAccessibleNameForRootView();
+}
+
+void BrowserView::DidFinishNavigation(
+    content::NavigationHandle* navigation_handle) {
+  if (!navigation_handle->IsInPrimaryMainFrame() ||
+      !navigation_handle->HasCommitted()) {
+    return;
+  }
+
+  if (AppUsesUnframedMode() && !window_management_subscription_id_) {
+    SetWindowManagementPermissionSubscriptionForUnframedMode(
+        navigation_handle->GetWebContents());
   }
 }
 
 void BrowserView::TouchModeChanged() {
-  MaybeInitializeWebUITabStrip();
-  MaybeShowWebUITabStripIPH();
-}
-
-void BrowserView::MaybeShowWebUITabStripIPH() {
-  if (!webui_tab_strip_)
-    return;
-  MaybeShowStartupFeaturePromo(feature_engagement::kIPHWebUITabStripFeature);
+#if BUILDFLAG(IS_CHROMEOS)
+  if (ui::TouchUiController::Get()->touch_ui()) {
+    ReparentTabStripAndWebAppViewsToTopContainer(
+        TabStripAndWebAppViewsReparentedState::kTouchMode);
+  } else {
+    ReparentTabStripAndWebAppViewsToBrowserView(
+        TabStripAndWebAppViewsReparentedState::kTouchMode);
+  }
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void BrowserView::MaybeShowReadingListInSidePanelIPH() {
   // TODO(dfried): This promo is potentially superfluous since the pref is never
   // set; remove.
-  const PrefService* const pref_service = browser()->profile()->GetPrefs();
+  const PrefService* const pref_service = browser()->GetProfile()->GetPrefs();
   if (pref_service &&
       pref_service->GetBoolean(
           reading_list::prefs::kReadingListDesktopFirstUseExperienceShown)) {
-    MaybeShowFeaturePromo(
+    BrowserUserEducationInterface::From(browser())->MaybeShowFeaturePromo(
         feature_engagement::kIPHReadingListInSidePanelFeature);
   }
 }
 
-void BrowserView::DestroyBrowser() {
-  // After this returns other parts of Chrome are going to be shutdown. Close
-  // the window now so that we are deleted immediately and aren't left holding
-  // references to deleted objects.
-  GetWidget()->RemoveObserver(this);
-  frame_->CloseNow();
-}
-
 bool BrowserView::IsBookmarkBarVisible() const {
-  if (!browser_->SupportsWindowFeature(Browser::FEATURE_BOOKMARKBAR))
+  if (!WindowFeatureController::From(browser_)->SupportsWindowFeature(
+          WindowFeatureController::WindowFeature::kFeatureBookmarkBar)) {
     return false;
-  if (!bookmark_bar_view_)
+  }
+  if (!bookmark_bar_view_) {
     return false;
-  if (!bookmark_bar_view_->parent())
+  }
+  if (!bookmark_bar_view_->parent()) {
     return false;
-  if (bookmark_bar_view_->GetPreferredSize().height() == 0)
+  }
+  if (bookmark_bar_view_->GetPreferredSize().height() == 0) {
     return false;
-  if (immersive_mode_controller_->ShouldHideTopViews())
+  }
+#if !BUILDFLAG(IS_CHROMEOS)
+  auto* const immersive_mode_controller =
+      ImmersiveModeController::From(browser());
+  if (immersive_mode_controller->IsEnabled() &&
+      !immersive_mode_controller->IsRevealed()) {
     return false;
+  }
+#endif  // !BUILDFLAG(IS_CHROMEOS)
   return true;
 }
 
@@ -2496,48 +3032,44 @@ bool BrowserView::IsBookmarkBarAnimating() const {
 }
 
 bool BrowserView::IsTabStripEditable() const {
-  return tabstrip_->IsTabStripEditable();
+  return tab_strip_view()->IsTabStripEditable();
+}
+
+void BrowserView::DisableTabStripEditingForTesting() {
+  tab_strip_view()->DisableTabStripEditingForTesting();  // IN-TEST
 }
 
 bool BrowserView::IsToolbarVisible() const {
 #if BUILDFLAG(IS_MAC)
-  // This Mac-only preference disables display of the toolbar in fullscreen mode
-  // so we need to take it into account when determining if the toolbar is
-  // visible - especially as pertains to anchoring views.
-  bool show_fullscreen_toolbar = true;
-  if (web_app::AppBrowserController::IsWebApp(browser())) {
-    const web_app::AppBrowserController* controller =
-        browser()->app_controller();
-    show_fullscreen_toolbar = controller->AlwaysShowToolbarInFullscreen();
-  } else {
-    show_fullscreen_toolbar = browser()->profile()->GetPrefs()->GetBoolean(
-        prefs::kShowFullscreenToolbar);
-  }
   // Immersive full screen makes it possible to display the toolbar when
   // kShowFullscreenToolbar is not set.
-  if (!UsesImmersiveFullscreenMode()) {
-    if (IsFullscreen() && !show_fullscreen_toolbar) {
+  if (!WindowFeatureController::From(browser())
+           ->UsesImmersiveFullscreenMode()) {
+    if (IsFullscreen() &&
+        !fullscreen_utils::IsAlwaysShowToolbarEnabled(browser())) {
       return false;
     }
   }
 #endif
-  if (immersive_mode_controller_->ShouldHideTopViews())
-    return false;
+
   // It's possible to reach here before we've been notified of being added to a
   // widget, so |toolbar_| is still null.  Return false in this case so callers
   // don't assume they can access the toolbar yet.
-  return (browser_->SupportsWindowFeature(Browser::FEATURE_TOOLBAR) ||
-          browser_->SupportsWindowFeature(Browser::FEATURE_LOCATIONBAR)) &&
+  return (WindowFeatureController::From(browser_)->SupportsWindowFeature(
+              WindowFeatureController::WindowFeature::kFeatureToolbar) ||
+          WindowFeatureController::From(browser_)->SupportsWindowFeature(
+              WindowFeatureController::WindowFeature::kFeatureLocationBar)) &&
          toolbar_;
 }
 
 bool BrowserView::IsToolbarShowing() const {
-  return IsToolbarVisible();
+  return GetTabStripVisible();
 }
 
 bool BrowserView::IsLocationBarVisible() const {
-  return browser_->SupportsWindowFeature(Browser::FEATURE_LOCATIONBAR) &&
-         GetLocationBarView()->GetVisible();
+  return WindowFeatureController::From(browser_)->SupportsWindowFeature(
+             WindowFeatureController::WindowFeature::kFeatureLocationBar) &&
+         GetLocationBar()->IsVisible();
 }
 
 void BrowserView::ShowUpdateChromeDialog() {
@@ -2549,7 +3081,7 @@ void BrowserView::ShowIntentPickerBubble(
     bool show_stay_in_chrome,
     bool show_remember_selection,
     apps::IntentPickerBubbleType bubble_type,
-    const absl::optional<url::Origin>& initiating_origin,
+    const std::optional<url::Origin>& initiating_origin,
     IntentPickerResponse callback) {
   toolbar_->ShowIntentPickerBubble(std::move(app_info), show_stay_in_chrome,
                                    show_remember_selection, bubble_type,
@@ -2560,120 +3092,10 @@ void BrowserView::ShowBookmarkBubble(const GURL& url, bool already_bookmarked) {
   toolbar_->ShowBookmarkBubble(url, already_bookmarked);
 }
 
-qrcode_generator::QRCodeGeneratorBubbleView*
-BrowserView::ShowQRCodeGeneratorBubble(content::WebContents* contents,
-                                       const GURL& url,
-                                       bool show_back_button) {
-  auto* controller =
-      qrcode_generator::QRCodeGeneratorBubbleController::Get(contents);
-  base::OnceClosure on_closing = controller->GetOnBubbleClosedCallback();
-  base::OnceClosure on_back_button_pressed;
-  if (show_back_button) {
-    on_back_button_pressed = controller->GetOnBackButtonPressedCallback();
-  }
-
-  PageActionIconType icon_type =
-      sharing_hub::SharingHubOmniboxEnabled(browser_->profile())
-          ? PageActionIconType::kSharingHub
-          : PageActionIconType::kQRCodeGenerator;
-
-  auto* bubble = new qrcode_generator::QRCodeGeneratorBubble(
-      toolbar_button_provider()->GetAnchorView(icon_type), contents,
-      std::move(on_closing), std::move(on_back_button_pressed), url);
-
-  PageActionIconView* icon_view =
-      toolbar_button_provider()->GetPageActionIconView(icon_type);
-  if (icon_view)
-    bubble->SetHighlightedButton(icon_view);
-
-  views::BubbleDialogDelegateView::CreateBubble(bubble);
-  bubble->Show();
-
-  return bubble;
-}
-
-sharing_hub::ScreenshotCapturedBubble*
-BrowserView::ShowScreenshotCapturedBubble(content::WebContents* contents,
-                                          const gfx::Image& image) {
-  auto* bubble = new sharing_hub::ScreenshotCapturedBubble(
-      toolbar_button_provider()->GetAnchorView(PageActionIconType::kSharingHub),
-      contents, image, browser_->profile());
-
-  views::BubbleDialogDelegateView::CreateBubble(bubble);
-  bubble->ShowForReason(LocationBarBubbleDelegateView::USER_GESTURE);
-  return bubble;
-}
-
-SharingDialog* BrowserView::ShowSharingDialog(
-    content::WebContents* web_contents,
-    SharingDialogData data) {
-  // TODO(https://crbug.com/1311680): Remove this altogether. This used to
-  // be hardcoded to anchor off the shared clipboard bubble, but that bubble is
-  // now gone altogether.
-  auto* dialog_view =
-      new SharingDialogView(toolbar_button_provider()->GetAnchorView(
-                                PageActionIconType::kClickToCall),
-                            web_contents, std::move(data));
-
-  views::BubbleDialogDelegateView::CreateBubble(dialog_view)->Show();
-
-  return dialog_view;
-}
-
-send_tab_to_self::SendTabToSelfBubbleView*
-BrowserView::ShowSendTabToSelfDevicePickerBubble(
-    content::WebContents* web_contents) {
-  PageActionIconType icon_type =
-      sharing_hub::SharingHubOmniboxEnabled(browser_->profile())
-          ? PageActionIconType::kSharingHub
-          : PageActionIconType::kSendTabToSelf;
-
-  auto* bubble = new send_tab_to_self::SendTabToSelfDevicePickerBubbleView(
-      toolbar_button_provider()->GetAnchorView(icon_type), web_contents);
-  PageActionIconView* icon_view =
-      toolbar_button_provider()->GetPageActionIconView(icon_type);
-  if (icon_view)
-    bubble->SetHighlightedButton(icon_view);
-
-  views::BubbleDialogDelegateView::CreateBubble(bubble);
-  // This is always triggered due to a user gesture, c.f. this method's
-  // documentation in the interface.
-  bubble->ShowForReason(LocationBarBubbleDelegateView::USER_GESTURE);
-  return bubble;
-}
-
-send_tab_to_self::SendTabToSelfBubbleView*
-BrowserView::ShowSendTabToSelfPromoBubble(content::WebContents* web_contents,
-                                          bool show_signin_button) {
-  PageActionIconType icon_type =
-      sharing_hub::SharingHubOmniboxEnabled(web_contents->GetBrowserContext())
-          ? PageActionIconType::kSharingHub
-          : PageActionIconType::kSendTabToSelf;
-
-  auto* bubble = new send_tab_to_self::SendTabToSelfPromoBubbleView(
-      toolbar_button_provider()->GetAnchorView(icon_type), web_contents,
-      show_signin_button);
-  PageActionIconView* icon_view =
-      toolbar_button_provider()->GetPageActionIconView(icon_type);
-  if (icon_view)
-    bubble->SetHighlightedButton(icon_view);
-
-  views::BubbleDialogDelegateView::CreateBubble(bubble);
-  // This is always triggered due to a user gesture, c.f. method documentation.
-  bubble->ShowForReason(LocationBarBubbleDelegateView::USER_GESTURE);
-  return bubble;
-}
-
 #if BUILDFLAG(IS_CHROMEOS)
-views::Button* BrowserView::GetSharingHubIconButton() {
-  return toolbar_button_provider()->GetPageActionIconView(
-      PageActionIconType::kSharingHub);
-}
-
-void BrowserView::ToggleMultitaskMenu() const {
-  DCHECK(chromeos::wm::features::IsWindowLayoutMenuEnabled());
+void BrowserView::ToggleMultitaskMenu() {
   auto* frame_view =
-      static_cast<BrowserNonClientFrameViewChromeOS*>(frame_->GetFrameView());
+      views::AsViewClass<BrowserFrameViewChromeOS>(GetFrameView());
   if (!frame_view) {
     return;
   }
@@ -2682,26 +3104,6 @@ void BrowserView::ToggleMultitaskMenu() const {
   if (size_button && size_button->GetVisible()) {
     size_button->ToggleMultitaskMenu();
   }
-}
-#else
-sharing_hub::SharingHubBubbleView* BrowserView::ShowSharingHubBubble(
-    share::ShareAttempt attempt) {
-  auto* bubble = new sharing_hub::SharingHubBubbleViewImpl(
-      toolbar_button_provider()->GetAnchorView(PageActionIconType::kSharingHub),
-      attempt,
-      sharing_hub::SharingHubBubbleController::CreateOrGetFromWebContents(
-          attempt.web_contents.get()));
-  PageActionIconView* icon_view =
-      toolbar_button_provider()->GetPageActionIconView(
-          PageActionIconType::kSharingHub);
-  if (icon_view)
-    bubble->SetHighlightedButton(icon_view);
-
-  views::BubbleDialogDelegateView::CreateBubble(bubble);
-  // This is always triggered due to a user gesture, c.f. method documentation.
-  bubble->Show(sharing_hub::SharingHubBubbleViewImpl::USER_GESTURE);
-
-  return bubble;
 }
 #endif  // BUILDFLAG(IS_CHROMEOS)
 
@@ -2712,10 +3114,11 @@ ShowTranslateBubbleResult BrowserView::ShowTranslateBubble(
     const std::string& target_language,
     translate::TranslateErrors error_type,
     bool is_user_gesture) {
-  if (contents_web_view_->HasFocus() &&
-      !GetLocationBarView()->IsMouseHovered() &&
+  views::View* contents_view = GetActiveContentsWebView();
+
+  if (contents_view->HasFocus() && !GetLocationBar()->IsMouseHovered() &&
       web_contents->IsFocusedElementEditable()) {
-    return ShowTranslateBubbleResult::EDITABLE_FIELD_IS_ACTIVE;
+    return ShowTranslateBubbleResult::kEditableFieldIsActive;
   }
 
   ChromeTranslateClient::FromWebContents(web_contents)
@@ -2723,115 +3126,74 @@ ShowTranslateBubbleResult BrowserView::ShowTranslateBubble(
       ->GetLanguageState()
       ->SetTranslateEnabled(true);
 
-  if (IsMinimized())
-    return ShowTranslateBubbleResult::BROWSER_WINDOW_MINIMIZED;
-
-  PageActionIconView* translate_icon =
-      toolbar_button_provider()
-          ->GetPageActionIconView(PageActionIconType::kTranslate);
-  TranslateBubbleController::GetOrCreate(web_contents)
-      ->ShowTranslateBubble(toolbar_button_provider()->GetAnchorView(
-                                PageActionIconType::kTranslate),
-                            translate_icon, step, source_language,
-                            target_language, error_type,
-                            is_user_gesture ? TranslateBubbleView::USER_GESTURE
-                                            : TranslateBubbleView::AUTOMATIC);
-
-  return ShowTranslateBubbleResult::SUCCESS;
-}
-
-void BrowserView::StartPartialTranslate(const std::string& source_language,
-                                        const std::string& target_language,
-                                        const std::u16string& text_selection) {
-  // Show the Translate icon and enabled the associated command to show the
-  // Translate UI.
-  ChromeTranslateClient::FromWebContents(GetActiveWebContents())
-      ->GetTranslateManager()
-      ->GetLanguageState()
-      ->SetTranslateEnabled(true);
-
-  TranslateBubbleController::GetOrCreate(GetActiveWebContents())
-      ->StartPartialTranslate(toolbar_button_provider()->GetAnchorView(
-                                  PageActionIconType::kTranslate),
-                              toolbar_button_provider()->GetPageActionIconView(
-                                  PageActionIconType::kTranslate),
-                              source_language, target_language, text_selection);
-}
-
-void BrowserView::ShowOneClickSigninConfirmation(
-    const std::u16string& email,
-    base::OnceCallback<void(bool)> confirmed_callback) {
-  std::unique_ptr<OneClickSigninLinksDelegate> delegate(
-      new OneClickSigninLinksDelegateImpl(browser()));
-  OneClickSigninDialogView::ShowDialog(email, std::move(delegate),
-                                       GetNativeWindow(),
-                                       std::move(confirmed_callback));
-}
-
-void BrowserView::SetDownloadShelfVisible(bool visible) {
-  DCHECK(download_shelf_);
-  browser_->UpdateDownloadShelfVisibility(visible);
-
-  // SetDownloadShelfVisible can force-close the shelf, so make sure we lay out
-  // everything correctly, as if the animation had finished. This doesn't
-  // matter for showing the shelf, as the show animation will do it.
-  ToolbarSizeChanged(false);
-}
-
-bool BrowserView::IsDownloadShelfVisible() const {
-  return download_shelf_ && download_shelf_->IsShowing();
-}
-
-DownloadShelf* BrowserView::GetDownloadShelf() {
-  // Don't show download shelf if download bubble is enabled, except that the
-  // shelf is already showing (this can happen if prefs were changed at
-  // runtime).
-  if (download::IsDownloadBubbleEnabled(browser_->profile()) &&
-      !download_shelf_) {
-    return nullptr;
+  if (IsMinimized()) {
+    return ShowTranslateBubbleResult::kBrowserWindowMinimized;
   }
-  if (!download_shelf_) {
-    download_shelf_ =
-        AddChildView(std::make_unique<DownloadShelfView>(browser_.get(), this));
-    GetBrowserViewLayout()->set_download_shelf(download_shelf_->GetView());
+
+  std::optional<ui::ElementIdentifier> highlight_element =
+      kTranslatePageActionElementId;
+
+  views::BubbleAnchor anchor =
+      toolbar_button_provider()->GetBubbleAnchor(kActionShowTranslate);
+  if (bubble_anchor_util::IsHighlightable(anchor)) {
+    // No need for a separate highlight.
+    highlight_element = std::nullopt;
   }
-  return download_shelf_;
+  CHECK_DEREF(TranslateBubbleController::From(browser_.get()))
+      .ShowTranslateBubble(web_contents, anchor, highlight_element, step,
+                           source_language, target_language, error_type,
+                           is_user_gesture ? TranslateBubbleView::USER_GESTURE
+                                           : TranslateBubbleView::AUTOMATIC);
+
+  return ShowTranslateBubbleResult::kSuccess;
 }
 
 DownloadBubbleUIController* BrowserView::GetDownloadBubbleUIController() {
-  DCHECK(toolbar_button_provider_);
-  if (auto* download_button = toolbar_button_provider_->GetDownloadButton())
-    return download_button->bubble_controller();
+#if !BUILDFLAG(IS_CHROMEOS)
+  if (auto* download_controller =
+          DownloadToolbarUIController::From(browser_.get())) {
+    return download_controller->bubble_controller();
+  }
+#endif
   return nullptr;
 }
 
 void BrowserView::ConfirmBrowserCloseWithPendingDownloads(
     int download_count,
-    Browser::DownloadCloseType dialog_type,
+    UnloadController::DownloadCloseType dialog_type,
     base::OnceCallback<void(bool)> callback) {
   // The dialog eats mouse events which results in the close button
   // getting stuck in the hover state. Reset the window controls to
   // prevent this.
-  frame()->non_client_view()->ResetWindowControls();
+  browser_widget()->non_client_view()->ResetWindowControls();
   DownloadInProgressDialogView::Show(GetNativeWindow(), download_count,
                                      dialog_type, std::move(callback));
 }
 
 void BrowserView::UserChangedTheme(BrowserThemeChangeType theme_change_type) {
-  frame()->UserChangedTheme(theme_change_type);
+  browser_widget()->UserChangedTheme(theme_change_type);
+  // Because the theme change may cause the browser frame to be regenerated,
+  // which can mess with tutorials (which expect their bubble anchors to remain
+  // visible), this event is sent after the theme change. It can be used to
+  // advance a tutorial that expects a theme change.
+  if (theme_change_type == BrowserThemeChangeType::kBrowserTheme) {
+    views::ElementTrackerViews::GetInstance()->NotifyCustomEvent(
+        kBrowserThemeChangedEventId, this);
+  }
 }
+
 void BrowserView::ShowAppMenu() {
-  if (!toolbar_button_provider_->GetAppMenuButton())
+  auto* control = ToolbarButtonProvider::From(browser_)->GetAppMenuControl();
+  if (!control) {
     return;
+  }
 
   // Keep the top-of-window views revealed as long as the app menu is visible.
   std::unique_ptr<ImmersiveRevealedLock> revealed_lock =
-      immersive_mode_controller_->GetRevealedLock(
+      ImmersiveModeController::From(browser())->GetRevealedLock(
           ImmersiveModeController::ANIMATE_REVEAL_NO);
 
-  toolbar_button_provider_->GetAppMenuButton()
-      ->menu_button_controller()
-      ->Activate(nullptr);
+  control->ShowMenu();
 }
 
 content::KeyboardEventProcessingResult BrowserView::PreHandleKeyboardEvent(
@@ -2844,8 +3206,9 @@ content::KeyboardEventProcessingResult BrowserView::PreHandleKeyboardEvent(
   views::FocusManager* focus_manager = GetFocusManager();
   DCHECK(focus_manager);
 
-  if (focus_manager->shortcut_handling_suspended())
+  if (focus_manager->shortcut_handling_suspended()) {
     return content::KeyboardEventProcessingResult::NOT_HANDLED;
+  }
 
   ui::Accelerator accelerator =
       ui::GetAcceleratorFromNativeWebKeyboardEvent(event);
@@ -2861,40 +3224,44 @@ content::KeyboardEventProcessingResult BrowserView::PreHandleKeyboardEvent(
   // - If the |browser_| is not for an app, and the |accelerator| is associated
   //   with the browser, and it is not a reserved one, do nothing.
 
-  if (browser_->is_type_app() || browser_->is_type_app_popup()) {
+  if (browser_->GetType() == BrowserWindowInterface::Type::TYPE_APP ||
+      browser_->GetType() == BrowserWindowInterface::Type::TYPE_APP_POPUP) {
     // Let all keys fall through to a v1 app's web content, even accelerators.
     // We don't use NOT_HANDLED_IS_SHORTCUT here. If we do that, the app
-    // might not be able to see a subsequent Char event. See OnHandleInputEvent
-    // in content/renderer/render_widget.cc for details.
+    // might not be able to see a subsequent Char event. See
+    // blink::WidgetBaseInputHandler::HandleInputEvent for details.
     return content::KeyboardEventProcessingResult::NOT_HANDLED;
   }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   if (ash::AcceleratorController::Get()->IsDeprecated(accelerator)) {
     return (event.GetType() == blink::WebInputEvent::Type::kRawKeyDown)
                ? content::KeyboardEventProcessingResult::NOT_HANDLED_IS_SHORTCUT
                : content::KeyboardEventProcessingResult::NOT_HANDLED;
   }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
   content::KeyboardEventProcessingResult result =
-      frame_->PreHandleKeyboardEvent(event);
-  if (result != content::KeyboardEventProcessingResult::NOT_HANDLED)
+      browser_widget_->PreHandleKeyboardEvent(event);
+  if (result != content::KeyboardEventProcessingResult::NOT_HANDLED) {
     return result;
+  }
 
   int id;
   if (!FindCommandIdForAccelerator(accelerator, &id)) {
     // |accelerator| is not a browser command, it may be handled by ash (e.g.
     // F4-F10). Report if we handled it.
-    if (focus_manager->ProcessAccelerator(accelerator))
+    if (focus_manager->ProcessAccelerator(accelerator)) {
       return content::KeyboardEventProcessingResult::HANDLED;
+    }
     // Otherwise, it's not an accelerator.
     return content::KeyboardEventProcessingResult::NOT_HANDLED;
   }
 
   // If it's a known browser command, we decide whether to consume it now, i.e.
   // reserved by browser.
-  chrome::BrowserCommandController* controller = browser_->command_controller();
+  chrome::BrowserCommandController* controller =
+      chrome::BrowserCommandController::From(browser_);
   // Executing the command may cause |this| object to be destroyed.
   if (controller->IsReservedCommandOrKey(id, event)) {
     UpdateAcceleratorMetrics(accelerator, id);
@@ -2912,9 +3279,39 @@ content::KeyboardEventProcessingResult BrowserView::PreHandleKeyboardEvent(
   return content::KeyboardEventProcessingResult::NOT_HANDLED_IS_SHORTCUT;
 }
 
+void BrowserView::PreHandleDragUpdate(const content::DropData& drop_data,
+                                      const gfx::PointF& point) {
+  if (multi_contents_view_->IsDragAndDropEnabled()) {
+    // Read the split state from the active tab because when BrowserView is in
+    // full screen it may not be rendering a split, even though the active tab
+    // is in a split.
+    const bool is_in_split_view =
+        browser_->GetTabStripModel()->GetActiveTab()->IsSplit();
+    const gfx::Point point_in_multi_contents_view =
+        views::View::ConvertPointToTarget(GetActiveContentsContainerView(),
+                                          multi_contents_view_,
+                                          gfx::ToRoundedPoint(point));
+    multi_contents_view_->drop_target_controller().OnWebContentsDragUpdate(
+        drop_data, point_in_multi_contents_view, is_in_split_view);
+  }
+}
+
+void BrowserView::PreHandleDragExit() {
+  if (multi_contents_view_->IsDragAndDropEnabled()) {
+    multi_contents_view_->drop_target_controller().OnWebContentsDragExit();
+  }
+}
+
+void BrowserView::HandleDragEnded() {
+  if (multi_contents_view_->IsDragAndDropEnabled()) {
+    multi_contents_view_->drop_target_controller().OnWebContentsDragEnded();
+  }
+}
+
 bool BrowserView::HandleKeyboardEvent(const NativeWebKeyboardEvent& event) {
-  if (frame_->HandleKeyboardEvent(event))
+  if (browser_widget_->HandleKeyboardEvent(event)) {
     return true;
+  }
 
   return unhandled_keyboard_event_handler_.HandleKeyboardEvent(
       event, GetFocusManager());
@@ -2924,17 +3321,31 @@ bool BrowserView::HandleKeyboardEvent(const NativeWebKeyboardEvent& event) {
 namespace {
 remote_cocoa::mojom::CutCopyPasteCommand CommandFromBrowserCommand(
     int command_id) {
-  if (command_id == IDC_CUT)
+  if (command_id == IDC_CUT) {
     return remote_cocoa::mojom::CutCopyPasteCommand::kCut;
-  else if (command_id == IDC_COPY)
+  }
+  if (command_id == IDC_COPY) {
     return remote_cocoa::mojom::CutCopyPasteCommand::kCopy;
-  else if (command_id == IDC_PASTE)
-    return remote_cocoa::mojom::CutCopyPasteCommand::kPaste;
-  NOTREACHED();
+  }
+  CHECK_EQ(command_id, IDC_PASTE);
   return remote_cocoa::mojom::CutCopyPasteCommand::kPaste;
 }
+
 }  // namespace
 #endif
+
+void BrowserView::Cut() {
+  base::RecordAction(UserMetricsAction("Cut"));
+  CutCopyPaste(IDC_CUT);
+}
+void BrowserView::Copy() {
+  base::RecordAction(UserMetricsAction("Copy"));
+  CutCopyPaste(IDC_COPY);
+}
+void BrowserView::Paste() {
+  base::RecordAction(UserMetricsAction("Paste"));
+  CutCopyPaste(IDC_PASTE);
+}
 
 // TODO(devint): http://b/issue?id=1117225 Cut, Copy, and Paste are always
 // enabled in the page menu regardless of whether the command will do
@@ -2963,45 +3374,62 @@ void BrowserView::CutCopyPaste(int command_id) {
   // whether that would still allow keypresses of ctrl-X/C/V to be sent as
   // key events (and not accelerators) to the WebContents so it can give the web
   // page a chance to override them.
-  WebContents* contents = browser_->tab_strip_model()->GetActiveWebContents();
+  WebContents* contents = browser_->GetTabStripModel()->GetActiveWebContents();
   if (contents) {
     void (WebContents::*method)();
-    if (command_id == IDC_CUT)
+    if (command_id == IDC_CUT) {
       method = &content::WebContents::Cut;
-    else if (command_id == IDC_COPY)
+    } else if (command_id == IDC_COPY) {
       method = &content::WebContents::Copy;
-    else
+    } else {
       method = &content::WebContents::Paste;
-    if (DoCutCopyPasteForWebContents(contents, method))
+    }
+    if (DoCutCopyPasteForWebContents(contents, method)) {
       return;
+    }
 
     WebContents* devtools =
         DevToolsWindow::GetInTabWebContents(contents, nullptr);
-    if (devtools && DoCutCopyPasteForWebContents(devtools, method))
+    if (devtools && DoCutCopyPasteForWebContents(devtools, method)) {
       return;
+    }
   }
 
-  // Any Views which want to handle the clipboard commands in the Chrome menu
-  // should:
-  //   (a) Register ctrl-X/C/V as accelerators
-  //   (b) Implement CanHandleAccelerators() to not return true unless they're
-  //       focused, as the FocusManager will try all registered accelerator
-  //       handlers, not just the focused one.
-  // Currently, Textfield (which covers the omnibox and find bar, and likely any
-  // other native UI in the future that wants to deal with clipboard commands)
-  // does the above.
-  ui::Accelerator accelerator;
-  GetAccelerator(command_id, &accelerator);
-  GetFocusManager()->ProcessAccelerator(accelerator);
+  // If a native View (such as the Omnibox or FindBar) is focused, execute the
+  // accelerator directly on it rather than processing through FocusManager
+  // (which would re-enter BrowserView and ActionItems).
+  views::View* focused_view = GetFocusManager()->GetFocusedView();
+  if (focused_view) {
+    ui::Accelerator accelerator;
+    if (GetAccelerator(command_id, &accelerator) &&
+        focused_view->CanHandleAccelerators() &&
+        focused_view->AcceleratorPressed(accelerator)) {
+      return;
+    }
+  }
 #endif  // BUILDFLAG(IS_MAC)
 }
 
 std::unique_ptr<FindBar> BrowserView::CreateFindBar() {
-  return std::make_unique<FindBarHost>(this);
+  return std::make_unique<FindBarHost>(FindBarOwner::From(browser_.get()));
 }
 
 WebContentsModalDialogHost* BrowserView::GetWebContentsModalDialogHost() {
   return GetBrowserViewLayout()->GetWebContentsModalDialogHost();
+}
+
+WebContentsModalDialogHost* BrowserView::GetWebContentsModalDialogHostFor(
+    content::WebContents* web_contents) {
+  ContentsContainerView* const contents_container_view =
+      multi_contents_view_->GetContentsContainerViewFor(web_contents);
+  // `contents_container_view` can be null in cases where a modal dialog is
+  // being created for a tab that was just created but isn't attached to the
+  // view yet.
+  if (contents_container_view) {
+    return contents_container_view->web_contents_modal_dialog_host();
+  } else {
+    return GetActiveContentsContainerView()->web_contents_modal_dialog_host();
+  }
 }
 
 BookmarkBarView* BrowserView::GetBookmarkBarView() const {
@@ -3009,44 +3437,145 @@ BookmarkBarView* BrowserView::GetBookmarkBarView() const {
 }
 
 LocationBarView* BrowserView::GetLocationBarView() const {
-  return toolbar_ ? toolbar_->location_bar() : nullptr;
+  return toolbar_ ? toolbar_->location_bar_view() : nullptr;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, TabStripModelObserver implementation:
 
+void BrowserView::OnSplitTabChanged(const SplitTabChange& change) {
+  switch (change.type) {
+    case SplitTabChange::Type::kAdded: {
+      const tabs::TabInterface* active_tab =
+          browser_->GetTabStripModel()->GetActiveTab();
+      if (active_tab->IsSplit()) {
+        ShowSplitView(GetActiveContentsWebView()->HasFocus() ||
+                      !GetFocusManager()->GetFocusedView());
+      }
+      break;
+    }
+
+    case SplitTabChange::Type::kVisualsChanged: {
+      const tabs::TabInterface* active_tab =
+          browser_->GetTabStripModel()->GetActiveTab();
+
+      if (active_tab->GetSplit() == change.split_id) {
+        multi_contents_view_->UpdateSplitVisualData(
+            change.GetVisualsChange()->new_visual_data());
+      }
+
+      if (change.GetVisualsChange()->reason() ==
+          SplitTabChange::SplitVisualChangeReason::kLayoutUpdated) {
+        gfx::Range split_indices_range = browser_->GetTabStripModel()
+                                             ->GetSplitData(change.split_id)
+                                             ->GetIndexRange();
+        for (size_t i = split_indices_range.start();
+             i < split_indices_range.end(); ++i) {
+          UpdateAccessibleNameForTabAt(i);
+        }
+      }
+      break;
+    }
+
+    case SplitTabChange::Type::kContentsChanged: {
+      const tabs::TabInterface* active_tab =
+          browser_->GetTabStripModel()->GetActiveTab();
+
+      if (active_tab->GetSplit() == change.split_id) {
+        multi_contents_view_->SwapContentsInSplitView();
+      }
+      break;
+    }
+
+    case SplitTabChange::Type::kRemoved: {
+      content::WebContents* active_web_contents =
+          multi_contents_view_->GetActiveContentsView()->web_contents();
+
+      if (std::any_of(change.GetRemovedChange()->tabs().begin(),
+                      change.GetRemovedChange()->tabs().end(),
+                      [active_web_contents](
+                          const std::pair<tabs::TabInterface*, int>& pair) {
+                        return pair.first->GetContents() == active_web_contents;
+                      })) {
+        HideSplitView();
+      }
+      break;
+    }
+  }
+
+  // TabDialogManager handles updates based on web contents resizing.
+  if (change.type != SplitTabChange::Type::kVisualsChanged) {
+    UpdateTabModalDialogHost();
+  }
+}
+
+void BrowserView::OnTabChangedAt(tabs::TabInterface* tab,
+                                 TabChangeType change_type) {
+  content::WebContents* contents = tab->GetContents();
+
+  if (change_type == TabChangeType::kBlockedOnly) {
+    if (auto* container =
+            multi_contents_view_->GetContentsContainerViewFor(contents)) {
+      container->contents_view()->UpdateIsBlockedByModal();
+    }
+  }
+
+  if (change_type != TabChangeType::kLoadingOnly || contents->IsLoading()) {
+    return;
+  }
+
+  if (contents != GetActiveWebContents()) {
+    return;
+  }
+
+  UpdateAccessibleURLForRootView(contents->GetURL());
+}
+
 void BrowserView::OnTabStripModelChanged(
     TabStripModel* tab_strip_model,
     const TabStripModelChange& change,
     const TabStripSelectionChange& selection) {
-  // When the selected tab changes, elements in the omnibox can change, which
+  // When the active tab changes, elements in the omnibox can change, which
   // can change its preferred size. Re-lay-out the toolbar to reflect the
   // possible change.
-  if (selection.selection_changed())
+  if (selection.active_tab_changed()) {
     toolbar_->InvalidateLayout();
 
-  if (loading_bar_)
-    loading_bar_->SetWebContents(GetActiveWebContents());
+    // Update the accessible URL when the selected tab changes. This ensures
+    // that the accessibility document URL is updated for both keyboard and
+    // mouse tab switching, not just when tabs finish loading.
+    WebContents* active_contents = GetActiveWebContents();
+    if (active_contents) {
+      UpdateAccessibleURLForRootView(active_contents->GetURL());
+    }
+  }
 
-  if (change.type() != TabStripModelChange::kInserted)
+  if (change.type() != TabStripModelChange::kInserted) {
     return;
+  }
 
   for ([[maybe_unused]] const auto& contents : change.GetInsert()->contents) {
 #if defined(USE_AURA)
     // WebContents inserted in tabs might not have been added to the root
-    // window yet. Per http://crbug/342672 add them now since drawing the
+    // window yet. Per http://crbug.com/41089037 add them now since drawing the
     // WebContents requires root window specific data - information about
     // the screen the WebContents is drawn on, for example.
     if (!contents.contents->GetNativeView()->GetRootWindow()) {
       aura::Window* window = contents.contents->GetNativeView();
       aura::Window* root_window = GetNativeWindow()->GetRootWindow();
       aura::client::ParentWindowWithContext(window, root_window,
-                                            root_window->GetBoundsInScreen());
+                                            root_window->GetBoundsInScreen(),
+                                            display::kInvalidDisplayId);
       DCHECK(contents.contents->GetNativeView()->GetRootWindow());
     }
 #endif
-    web_contents_close_handler_->TabInserted();
+    multi_contents_view_->ExecuteOnEachVisibleContentsView(
+        base::BindRepeating([](ContentsWebView* contents_view) {
+          contents_view->GetWebContentsCloseHandler()->TabInserted();
+        }));
   }
+
+  UpdateAccessibleNameForRootView();
 }
 
 void BrowserView::TabStripEmpty() {
@@ -3057,13 +3586,21 @@ void BrowserView::TabStripEmpty() {
 }
 
 void BrowserView::WillCloseAllTabs(TabStripModel* tab_strip_model) {
-  web_contents_close_handler_->WillCloseAllTabs();
+  multi_contents_view_->ExecuteOnEachVisibleContentsView(
+      base::BindRepeating([](ContentsWebView* contents_view) {
+        contents_view->GetWebContentsCloseHandler()->WillCloseAllTabs();
+      }));
 }
 
 void BrowserView::CloseAllTabsStopped(TabStripModel* tab_strip_model,
                                       CloseAllStoppedReason reason) {
-  if (reason == kCloseAllCanceled)
-    web_contents_close_handler_->CloseAllTabsCanceled();
+  if (reason != kCloseAllCanceled) {
+    return;
+  }
+  multi_contents_view_->ExecuteOnEachVisibleContentsView(
+      base::BindRepeating([](ContentsWebView* contents_view) {
+        contents_view->GetWebContentsCloseHandler()->CloseAllTabsCanceled();
+      }));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3079,6 +3616,21 @@ bool BrowserView::GetAcceleratorForCommandId(
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, views::WidgetDelegate implementation:
 
+bool BrowserView::CanResize() const {
+  return WidgetDelegate::CanResize() &&
+         GetWebApiWindowResizable().value_or(true);
+}
+
+bool BrowserView::CanFullscreen() const {
+  return WidgetDelegate::CanFullscreen() &&
+         GetWebApiWindowResizable().value_or(true);
+}
+
+bool BrowserView::CanMaximize() const {
+  return WidgetDelegate::CanMaximize() &&
+         GetWebApiWindowResizable().value_or(true);
+}
+
 bool BrowserView::CanActivate() const {
   javascript_dialogs::AppModalDialogQueue* queue =
       javascript_dialogs::AppModalDialogQueue::GetInstance();
@@ -3090,7 +3642,7 @@ bool BrowserView::CanActivate() const {
   // If another browser is app modal, flash and activate the modal browser. This
   // has to be done in a post task, otherwise if the user clicked on a window
   // that doesn't have the modal dialog the windows keep trying to get the focus
-  // from each other on Windows. http://crbug.com/141650.
+  // from each other on Windows. http://crbug.com/40256884.
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&BrowserView::ActivateAppModalDialog,
                                 weak_ptr_factory_.GetWeakPtr()));
@@ -3099,7 +3651,8 @@ bool BrowserView::CanActivate() const {
 
 std::u16string BrowserView::GetWindowTitle() const {
   std::u16string title =
-      browser_->GetWindowTitleForCurrentTab(true /* include_app_name */);
+      WindowMetadataController::From(browser_.get())
+          ->GetWindowTitleForCurrentTab(true /* include_app_name */);
 #if BUILDFLAG(IS_MAC)
   bool any_tab_playing_audio = false;
   bool any_tab_playing_muted_audio = false;
@@ -3122,11 +3675,12 @@ std::u16string BrowserView::GetAccessibleWindowTitle() const {
   views::Widget* tab_modal =
       views::ViewAccessibilityUtils::GetFocusedChildWidgetForAccessibility(
           this);
-  if (tab_modal)
+  if (tab_modal) {
     return tab_modal->widget_delegate()->GetAccessibleWindowTitle();
+  }
 
   return GetAccessibleWindowTitleForChannelAndProfile(chrome::GetChannel(),
-                                                      browser_->profile());
+                                                      browser_->GetProfile());
 }
 
 std::u16string BrowserView::GetAccessibleWindowTitleForChannelAndProfile(
@@ -3134,16 +3688,20 @@ std::u16string BrowserView::GetAccessibleWindowTitleForChannelAndProfile(
     Profile* profile) const {
   // Start with the tab title, which includes properties of the tab
   // like playing audio or network error.
-  const bool include_app_name = false;
-  int active_index = browser_->tab_strip_model()->active_index();
+  int active_index = browser_->GetTabStripModel()->active_index();
   std::u16string title;
-  if (active_index > -1)
-    title = GetAccessibleTabLabel(include_app_name, active_index);
-  else
-    title = browser_->GetWindowTitleForCurrentTab(include_app_name);
+  if (active_index > -1) {
+    title = tabs::GetAccessibleTabLabel(
+        browser_->GetTabStripModel()->GetActiveTab(),
+        /*is_for_tab=*/false);
+  } else {
+    title = WindowMetadataController::From(browser_.get())
+                ->GetWindowTitleForCurrentTab(false /* include_app_name */);
+  }
 
   // Add the name of the browser, unless this is an app window.
-  if (browser()->is_type_normal() || browser()->is_type_popup()) {
+  if (browser()->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL ||
+      browser()->GetType() == BrowserWindowInterface::Type::TYPE_POPUP) {
     int message_id;
     switch (channel) {
       case version_info::Channel::CANARY:
@@ -3185,132 +3743,140 @@ std::u16string BrowserView::GetAccessibleWindowTitleForChannelAndProfile(
   return title;
 }
 
-std::u16string BrowserView::GetAccessibleTabLabel(bool include_app_name,
-                                                  int index) const {
-  std::u16string title =
-      browser_->GetWindowTitleForTab(include_app_name, index);
-
-  absl::optional<tab_groups::TabGroupId> group =
-      tabstrip_->tab_at(index)->group();
-  if (group.has_value()) {
-    std::u16string group_title = tabstrip_->GetGroupTitle(group.value());
-    if (group_title.empty()) {
-      title = l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_UNNAMED_GROUP_FORMAT,
-                                         title);
-    } else {
-      title = l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_NAMED_GROUP_FORMAT,
-                                         title, group_title);
-    }
-  }
-
-  // Tab is pinned.
-  if (tabstrip_->IsTabPinned(tabstrip_->tab_at(index)))
-    title = l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_PINNED_FORMAT, title);
-
-  // Tab has crashed.
-  if (tabstrip_->IsTabCrashed(index))
-    return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_CRASHED_FORMAT, title);
-
-  // Network error interstitial.
-  if (tabstrip_->TabHasNetworkError(index)) {
-    return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_NETWORK_ERROR_FORMAT,
-                                      title);
-  }
-
-  // Tab has a pending permission request.
-  if (toolbar_ && toolbar_->location_bar() &&
-      toolbar_->location_bar()->chip_controller() &&
-      toolbar_->location_bar()
-          ->chip_controller()
-          ->IsPermissionPromptChipVisible()) {
-    return l10n_util::GetStringFUTF16(
-        IDS_TAB_AX_LABEL_PERMISSION_REQUESTED_FORMAT, title);
-  }
-
-  // Alert tab states.
-  absl::optional<TabAlertState> alert = tabstrip_->GetTabAlertState(index);
-  if (!alert.has_value())
-    return title;
-
-  switch (alert.value()) {
-    case TabAlertState::AUDIO_PLAYING:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_AUDIO_PLAYING_FORMAT,
-                                        title);
-    case TabAlertState::USB_CONNECTED:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_USB_CONNECTED_FORMAT,
-                                        title);
-    case TabAlertState::BLUETOOTH_CONNECTED:
-      return l10n_util::GetStringFUTF16(
-          IDS_TAB_AX_LABEL_BLUETOOTH_CONNECTED_FORMAT, title);
-    case TabAlertState::BLUETOOTH_SCAN_ACTIVE:
-      return l10n_util::GetStringFUTF16(
-          IDS_TAB_AX_LABEL_BLUETOOTH_SCAN_ACTIVE_FORMAT, title);
-    case TabAlertState::HID_CONNECTED:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_HID_CONNECTED_FORMAT,
-                                        title);
-    case TabAlertState::SERIAL_CONNECTED:
-      return l10n_util::GetStringFUTF16(
-          IDS_TAB_AX_LABEL_SERIAL_CONNECTED_FORMAT, title);
-    case TabAlertState::MEDIA_RECORDING:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_MEDIA_RECORDING_FORMAT,
-                                        title);
-    case TabAlertState::AUDIO_MUTING:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_AUDIO_MUTING_FORMAT,
-                                        title);
-    case TabAlertState::TAB_CAPTURING:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_TAB_CAPTURING_FORMAT,
-                                        title);
-    case TabAlertState::PIP_PLAYING:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_PIP_PLAYING_FORMAT,
-                                        title);
-    case TabAlertState::DESKTOP_CAPTURING:
-      return l10n_util::GetStringFUTF16(
-          IDS_TAB_AX_LABEL_DESKTOP_CAPTURING_FORMAT, title);
-    case TabAlertState::VR_PRESENTING_IN_HEADSET:
-      return l10n_util::GetStringFUTF16(IDS_TAB_AX_LABEL_VR_PRESENTING, title);
-  }
-
-  NOTREACHED();
-  return std::u16string();
-}
-
 std::vector<views::NativeViewHost*>
-BrowserView::GetNativeViewHostsForTopControlsSlide() const {
+BrowserView::GetNativeViewHostsForTopControlsSlide() {
   std::vector<views::NativeViewHost*> results;
-  results.push_back(contents_web_view_->holder());
 
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  if (webui_tab_strip_)
-    results.push_back(webui_tab_strip_->GetNativeViewHost());
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
+  for (auto* contents_web_view : GetAllVisibleContentsWebViews()) {
+    results.push_back(contents_web_view->holder());
+  }
 
   return results;
 }
 
-void BrowserView::ReparentTopContainerForEndOfImmersive() {
-  if (top_container()->parent() == this)
-    return;
+void BrowserView::ReparentTopContainerForStartOfImmersive() {
+  top_container()->SetPaintToLayer();
+  top_container()->layer()->SetFillsBoundsOpaquely(false);
 
-  overlay_view_->SetVisible(false);
+  ReparentTabStripAndWebAppViewsToTopContainer(
+      TabStripAndWebAppViewsReparentedState::kImmersiveMode);
+
+  CHECK(overlay_view_tracker_);
+
+  // Note: while `BrowserViewLayout` is responsible for positioning controls in
+  // the top container, these controls can still internally invalidate. When the
+  // top container is not in the browser view, invalidations are not propagated
+  // up to the browser view, and the layout is not triggered.
+  //
+  // Therefore, let the top container lay itself out when it is not parented to
+  // the browser view.
+  //
+  // A more correct solution would be to let invalidations in the top container
+  // transfer over to the browser. See https://crbug.com/520458975 for analysis.
+  if (!Contains(overlay_view_tracker_.view())) {
+    top_container()->SetProperty(views::kViewDoesNotLayOutChildren, false);
+  }
+
+  overlay_view_tracker_.view()->AddChildView(top_container());
+
+  overlay_view_tracker_.view()->SetVisible(true);
+}
+
+void BrowserView::ReparentTopContainerForEndOfImmersive() {
+  if (top_container()->parent() == this && tab_strip_view()->parent() == this) {
+    return;
+  }
+
+  overlay_view_tracker_.view()->SetVisible(false);
   top_container()->DestroyLayer();
-  AddChildViewAt(top_container(), 0);
+
+  // The top container must be placed in the same position before the
+  // reparenting to maintain the correct Z-order to ensure it can receive mouse
+  // events. See crbug.com/454852658.
+  DCHECK(top_container_insertion_index_);
+  AddChildViewAt(top_container_.get(), top_container_insertion_index_.value());
+
+  ReparentTabStripAndWebAppViewsToBrowserView(
+      TabStripAndWebAppViewsReparentedState::kImmersiveMode);
+
   EnsureFocusOrder();
+
+  // See comment in `ReparentTopContainerForStartOfImmersive()`; this isn't
+  // strictly necessary on all platforms but doesn't break anything either as
+  // this is the default state.
+  top_container()->SetProperty(views::kViewDoesNotLayOutChildren, true);
+}
+
+void BrowserView::ReparentTabStripAndWebAppViewsToTopContainer(
+    TabStripAndWebAppViewsReparentedState mode) {
+  const bool needs_reparenting = tab_strip_web_apps_reparented_state_.empty();
+  tab_strip_web_apps_reparented_state_.Put(mode);
+
+  if (!needs_reparenting) {
+    return;
+  }
+
+#if BUILDFLAG(IS_MAC)
+  if (!WindowFeatureController::From(browser())
+           ->UsesImmersiveFullscreenTabbedMode()) {
+    top_container()->AddChildViewAt(horizontal_tab_strip_region_view_.get(), 0);
+  }
+#endif  // BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_CHROMEOS)
+  // Only reparent if the tab_strip_region_view_ is parented to browser_view.
+  top_container()->AddChildViewAt(horizontal_tab_strip_region_view_.get(), 0);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+  if (web_app_frame_toolbar_ &&
+      web_app_frame_toolbar_->parent() != top_container()) {
+    top_container()->AddChildView(web_app_frame_toolbar_);
+  }
+  if (web_app_window_title_ &&
+      web_app_window_title_->parent() != top_container()) {
+    top_container()->AddChildView(web_app_window_title_);
+  }
+}
+
+void BrowserView::ReparentTabStripAndWebAppViewsToBrowserView(
+    TabStripAndWebAppViewsReparentedState mode) {
+  // If nothing has moved off browser_view as a parent, no need to do any work.
+  if (tab_strip_web_apps_reparented_state_.empty()) {
+    return;
+  }
+
+  // Remove this mode and only continue if reparented state is empty, meaning
+  // all states requiring the reparenting have been exited.
+  tab_strip_web_apps_reparented_state_.Remove(mode);
+  if (!tab_strip_web_apps_reparented_state_.empty()) {
+    return;
+  }
+
+  // The TabStrip must be placed in the same position before the reparenting
+  // to maintain the correct Z-order to ensure it can receive mouse events.
+  // See crbug.com/454852658.
+  DCHECK(horizontal_tab_strip_region_insertion_index_);
+  AddChildViewAt(horizontal_tab_strip_region_view_.get(),
+                 horizontal_tab_strip_region_insertion_index_.value());
+
+  // Reparent PWA views that were moved for immersive and ChromeOS tablet
+  // mode.
+  if (web_app_frame_toolbar_ && web_app_frame_toolbar_->parent() != this) {
+    AddChildView(web_app_frame_toolbar_.get());
+  }
+  if (web_app_window_title_ && web_app_window_title_->parent() != this) {
+    AddChildView(web_app_window_title_.get());
+  }
 }
 
 void BrowserView::EnsureFocusOrder() {
   // We want the infobar to come before the content pane, but after the bookmark
   // bar (if present) or top container (i.e. toolbar, again if present).
-  if (bookmark_bar_view_ && bookmark_bar_view_->parent() == this)
+  if (bookmark_bar_view_ && bookmark_bar_view_->parent() == this) {
     infobar_container_->InsertAfterInFocusList(bookmark_bar_view_.get());
-  else if (top_container_->parent() == this)
+  } else if (top_container_->parent() == this) {
     infobar_container_->InsertAfterInFocusList(top_container_);
-
-  // We want the download shelf to come after the contents container (which also
-  // contains the debug console, etc.) This prevents it from intruding into the
-  // focus order, but makes it easily accessible by using SHIFT-TAB (reverse
-  // focus traversal) from the toolbar/omnibox.
-  if (download_shelf_ && contents_container_)
-    download_shelf_->GetView()->InsertAfterInFocusList(contents_container_);
+  }
 
 #if DCHECK_IS_ON()
   // Make sure we didn't create any cycles in the focus order.
@@ -3320,15 +3886,18 @@ void BrowserView::EnsureFocusOrder() {
 
 bool BrowserView::CanChangeWindowIcon() const {
   // The logic of this function needs to be same as GetWindowIcon().
-  if (browser_->is_type_devtools())
+  if (browser_->GetType() == BrowserWindowInterface::Type::TYPE_DEVTOOLS) {
     return false;
-  if (browser_->app_controller())
+  }
+  if (web_app::AppBrowserController::From(browser_)) {
     return true;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+  }
+#if BUILDFLAG(IS_CHROMEOS)
   // On ChromeOS, the tabbed browser always use a static image for the window
   // icon. See GetWindowIcon().
-  if (browser_->is_type_normal())
+  if (browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL) {
     return false;
+  }
 #endif
   return true;
 }
@@ -3337,76 +3906,80 @@ views::View* BrowserView::GetInitiallyFocusedView() {
   return nullptr;
 }
 
-#if BUILDFLAG(IS_WIN)
-bool BrowserView::GetSupportsTitle() const {
-  return browser_->SupportsWindowFeature(Browser::FEATURE_TITLEBAR) ||
-         WebUITabStripContainerView::SupportsTouchableTabStrip(browser());
-}
-
-bool BrowserView::GetSupportsIcon() const {
-  return browser_->SupportsWindowFeature(Browser::FEATURE_TITLEBAR);
-}
-#endif
-
 bool BrowserView::ShouldShowWindowTitle() const {
-#if BUILDFLAG(IS_CHROMEOS)
-  // For Chrome OS only, trusted windows (apps and settings) do not show a
-  // title, crbug.com/119411. Child windows (i.e. popups) do show a title.
-  if (browser_->is_trusted_source() || AppUsesWindowControlsOverlay())
-    return false;
-#elif BUILDFLAG(IS_WIN)
-  // On Windows in touch mode we display a window title.
-  if (WebUITabStripContainerView::UseTouchableTabStrip(browser()))
-    return true;
-#endif
+  return WindowFeatureController::From(browser_)->SupportsWindowFeature(
+      WindowFeatureController::WindowFeature::kFeatureTitleBar);
+}
 
-  return browser_->SupportsWindowFeature(Browser::FEATURE_TITLEBAR);
+bool BrowserView::ShouldShowWindowIcon() const {
+#if !BUILDFLAG(IS_CHROMEOS)
+  if (GetIsWebAppType() && !GetSupportsTabStrip()) {
+    return true;
+  }
+#endif
+  return WidgetDelegate::ShouldShowWindowIcon();
 }
 
 ui::ImageModel BrowserView::GetWindowAppIcon() {
-  web_app::AppBrowserController* app_controller = browser()->app_controller();
+  web_app::AppBrowserController* app_controller =
+      web_app::AppBrowserController::From(browser());
   return app_controller ? app_controller->GetWindowAppIcon() : GetWindowIcon();
 }
 
 ui::ImageModel BrowserView::GetWindowIcon() {
   // Use the default icon for devtools.
-  if (browser_->is_type_devtools())
+  if (browser_->GetType() == BrowserWindowInterface::Type::TYPE_DEVTOOLS) {
     return ui::ImageModel();
+  }
 
   // Hosted apps always show their app icon.
-  web_app::AppBrowserController* app_controller = browser()->app_controller();
-  if (app_controller)
+  web_app::AppBrowserController* app_controller =
+      web_app::AppBrowserController::From(browser());
+  if (app_controller) {
     return app_controller->GetWindowIcon();
+  }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
-  if (browser_->is_type_normal())
+  if (browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL) {
     return ui::ImageModel::FromImage(rb.GetImageNamed(IDR_CHROME_APP_ICON_192));
+  }
   auto* window = GetNativeWindow();
   int override_window_icon_resource_id =
-      window ? window->GetProperty(kOverrideWindowIconResourceIdKey) : -1;
-  if (override_window_icon_resource_id >= 0)
+      window ? window->GetProperty(ash::kOverrideWindowIconResourceIdKey) : -1;
+  if (override_window_icon_resource_id >= 0) {
     return ui::ImageModel::FromImage(
         rb.GetImageNamed(override_window_icon_resource_id));
+  }
 #endif
 
-  if (!browser_->is_type_normal())
-    return ui::ImageModel::FromImage(browser_->GetCurrentPageIcon());
+  if (browser_->GetType() != BrowserWindowInterface::Type::TYPE_NORMAL) {
+    return ui::ImageModel::FromImage(
+        WindowMetadataController::From(browser_.get())->GetCurrentPageIcon());
+  }
 
   return ui::ImageModel();
 }
 
 bool BrowserView::ExecuteWindowsCommand(int command_id) {
-  // This function handles WM_SYSCOMMAND, WM_APPCOMMAND, and WM_COMMAND.
-#if BUILDFLAG(IS_WIN)
-  if (command_id == IDC_DEBUG_FRAME_TOGGLE)
-    GetWidget()->DebugToggleFrameType();
-#endif
   // Translate WM_APPCOMMAND command ids into a command id that the browser
   // knows how to handle.
   int command_id_from_app_command = GetCommandIDForAppCommandID(command_id);
-  if (command_id_from_app_command != -1)
+  if (command_id_from_app_command != -1) {
     command_id = command_id_from_app_command;
+  }
+
+  // Because Windows does not go through the SystemMenuModelDelegate's
+  // ExecuteCommand, we intercept the execution here.
+  if (command_id == IDC_TOGGLE_VERTICAL_TABS) {
+    auto* controller = tabs::VerticalTabStripStateController::From(browser_);
+    if (controller) {
+      // State is flipped because controller has not been updated yet.
+      const bool is_vertical = !controller->ShouldDisplayVerticalTabs();
+      tabs::RecordVerticalTabStripModeChanged(
+          is_vertical, tabs::VerticalTabStripEntryPoint::kSystemContextMenu);
+    }
+  }
 
   return chrome::ExecuteCommand(browser_.get(), command_id);
 }
@@ -3419,22 +3992,22 @@ bool BrowserView::ShouldSaveWindowPlacement() const {
   // If IsFullscreen() is true, we've just changed into fullscreen mode, and
   // we're catching the going-into-fullscreen sizing and positioning calls,
   // which we want to ignore.
-  return !IsFullscreen() && frame_->ShouldSaveWindowPlacement() &&
+  return !IsFullscreen() && browser_widget_->ShouldSaveWindowPlacement() &&
          chrome::ShouldSaveWindowPlacement(browser_.get());
 }
 
 void BrowserView::SaveWindowPlacement(const gfx::Rect& bounds,
-                                      ui::WindowShowState show_state) {
+                                      ui::mojom::WindowShowState show_state) {
   DCHECK(ShouldSaveWindowPlacement());
 
   WidgetDelegate::SaveWindowPlacement(bounds, show_state);
   gfx::Rect saved_bounds = bounds;
   if (chrome::SavedBoundsAreContentBounds(browser_.get())) {
     // Invert the transformation done in GetSavedWindowPlacement().
-    gfx::Size client_size =
-        frame_->GetFrameView()->GetBoundsForClientView().size();
-    if (IsToolbarVisible())
+    gfx::Size client_size = GetFrameView()->GetBoundsForClientView().size();
+    if (IsToolbarVisible()) {
       client_size.Enlarge(0, -toolbar_->GetPreferredSize().height());
+    }
     saved_bounds.set_size(client_size);
   }
   chrome::SaveWindowPlacement(browser_.get(), saved_bounds, show_state);
@@ -3443,11 +4016,11 @@ void BrowserView::SaveWindowPlacement(const gfx::Rect& bounds,
 bool BrowserView::GetSavedWindowPlacement(
     const views::Widget* widget,
     gfx::Rect* bounds,
-    ui::WindowShowState* show_state) const {
+    ui::mojom::WindowShowState* show_state) const {
   chrome::GetSavedWindowBoundsAndShowState(browser_.get(), bounds, show_state);
-  // TODO(crbug.com/897300): Generalize this code for app and non-app popups?
+  // TODO(crbug.com/40092782): Generalize this code for app and non-app popups?
   if (chrome::SavedBoundsAreContentBounds(browser_.get()) &&
-      browser_->is_type_popup()) {
+      browser_->GetType() == BrowserWindowInterface::Type::TYPE_POPUP) {
     // This is normal non-app popup window. The value passed in |bounds|
     // represents two pieces of information:
     // - the position of the window, in screen coordinates (outer position).
@@ -3459,30 +4032,33 @@ bool BrowserView::GetSavedWindowPlacement(
       // its desired height, since the toolbar is considered part of the
       // window's client area as far as GetWindowBoundsForClientBounds is
       // concerned...
-      bounds->set_height(
-          bounds->height() + toolbar_->GetPreferredSize().height());
+      bounds->set_height(bounds->height() +
+                         toolbar_->GetPreferredSize().height());
     }
 
     gfx::Rect rect =
-        frame_->non_client_view()->GetWindowBoundsForClientBounds(*bounds);
+        browser_widget_->non_client_view()->GetWindowBoundsForClientBounds(
+            *bounds);
     rect.set_origin(bounds->origin());
 
     // Set a default popup origin if the x/y coordinates are 0 and the original
     // values were not known to be explicitly specified via window.open() in JS.
     if (rect.origin().IsOrigin() &&
-        browser_->create_params().initial_origin_specified !=
-            Browser::ValueSpecified::kSpecified) {
+        BrowserInitState::From(&*browser_)
+                ->create_params()
+                .initial_origin_specified !=
+            BrowserWindowCreateParams::ValueSpecified::kSpecified) {
       rect.set_origin(WindowSizer::GetDefaultPopupOrigin(rect.size()));
     }
 
     // Constrain the final bounds to the target screen's available area. Bounds
     // enforcement applied earlier does not know the specific frame dimensions,
     // but generally yields bounds on the appropriate screen.
-    auto display = display::Screen::GetScreen()->GetDisplayMatching(rect);
+    auto display = display::Screen::Get()->GetDisplayMatching(rect);
     rect.AdjustToFit(display.work_area());
 
     *bounds = rect;
-    *show_state = ui::SHOW_STATE_NORMAL;
+    *show_state = ui::mojom::WindowShowState::kNormal;
   }
 
   // We return true because we can _always_ locate reasonable bounds using the
@@ -3492,7 +4068,7 @@ bool BrowserView::GetSavedWindowPlacement(
 }
 
 views::View* BrowserView::GetContentsView() {
-  return contents_web_view_;
+  return multi_contents_view_->GetActiveContentsView();
 }
 
 views::ClientView* BrowserView::CreateClientView(views::Widget* widget) {
@@ -3500,69 +4076,85 @@ views::ClientView* BrowserView::CreateClientView(views::Widget* widget) {
 }
 
 views::View* BrowserView::CreateOverlayView() {
-  overlay_view_ = new TopContainerOverlayView(weak_ptr_factory_.GetWeakPtr());
-  overlay_view_->SetVisible(false);
-  overlay_view_targeter_ = std::make_unique<OverlayViewTargeterDelegate>();
-  overlay_view_->SetEventTargeter(
-      std::make_unique<views::ViewTargeter>(overlay_view_targeter_.get()));
-  return overlay_view_;
+  auto* overlay_view =
+      new TopContainerOverlayView(weak_ptr_factory_.GetWeakPtr());
+  overlay_view_tracker_.SetView(overlay_view);
+  overlay_view->SetVisible(false);
+  overlay_view->SetEventTargeter(std::make_unique<views::ViewTargeter>(
+      std::make_unique<OverlayViewTargeterDelegate>()));
+  return overlay_view;
 }
 
 #if BUILDFLAG(IS_MAC)
 views::View* BrowserView::CreateMacOverlayView() {
-  DCHECK(UsesImmersiveFullscreenMode());
-  views::Widget::InitParams params;
-  params.type = views::Widget::InitParams::TYPE_POPUP;
-  params.child = true;
-  params.parent = GetWidget()->GetNativeView();
-  overlay_widget_ = new OverlayWidget(GetWidget());
-  overlay_widget_->Init(std::move(params));
-  overlay_widget_->SetNativeWindowProperty(kBrowserViewKey, this);
+  DCHECK(
+      WindowFeatureController::From(browser())->UsesImmersiveFullscreenMode());
 
-  // Disable sublevel widget layering because in fullscreen the NSWindow of
-  // `overlay_widget_` is reparented to a AppKit-owned NSWindow that does not
-  // have an associated Widget. This will cause issues in sublevel manager
-  // which operates at the Widget level.
-  if (overlay_widget_->GetSublevelManager()) {
-    overlay_widget_->parent()->GetSublevelManager()->UntrackChildWidget(
-        overlay_widget_);
-  }
+  // Create the toolbar overlay widget.
+  overlay_widget_ = OverlayWidgetMac::Create(this, GetWidget());
 
   // Create a new TopContainerOverlayView. The tab strip, omnibox, bookmarks
   // etc. will be contained within this view. Right clicking on the blank space
   // that is not taken up by the child views should show the context menu. Set
-  // the BrowserFrame as the context menu controller to handle displaying the
+  // the BrowserWidget as the context menu controller to handle displaying the
   // top container context menu.
   std::unique_ptr<TopContainerOverlayView> overlay_view =
       std::make_unique<TopContainerOverlayView>(weak_ptr_factory_.GetWeakPtr());
-  overlay_view->set_context_menu_controller(frame());
+  overlay_view->set_context_menu_controller(browser_widget());
 
-  overlay_view_targeter_ = std::make_unique<OverlayViewTargeterDelegate>();
-  overlay_view->SetEventTargeter(
-      std::make_unique<views::ViewTargeter>(overlay_view_targeter_.get()));
-  overlay_view_ = overlay_view.get();
-  overlay_widget_->GetRootView()->AddChildView(std::move(overlay_view));
-  return overlay_view_;
+  overlay_view->SetEventTargeter(std::make_unique<views::ViewTargeter>(
+      std::make_unique<OverlayViewTargeterDelegate>()));
+  overlay_view_tracker_.SetView(overlay_view.get());
+  // crbug.com/457473745: Set the overlay view as the widget's contents view
+  // to ensure it's sized to the widget. This prevents the overlay from having
+  // empty bounds during layout, which might hide its children.
+  overlay_widget_->SetContentsView(std::move(overlay_view));
+
+  if (WindowFeatureController::From(browser())
+          ->UsesImmersiveFullscreenTabbedMode()) {
+    // Create the tab overlay widget as a child of overlay_widget_.
+    tab_overlay_widget_ = OverlayWidgetMac::Create(this, overlay_widget_.get());
+    auto tab_overlay_view = std::make_unique<TabContainerOverlayViewMac>(
+        weak_ptr_factory_.GetWeakPtr());
+    tab_overlay_view->set_context_menu_controller(browser_widget());
+    tab_overlay_view->SetEventTargeter(std::make_unique<views::ViewTargeter>(
+        std::make_unique<OverlayViewTargeterDelegate>()));
+    tab_overlay_view_ = tab_overlay_view.get();
+    tab_overlay_widget_->SetContentsView(std::move(tab_overlay_view));
+  }
+
+  return overlay_view_tracker_.view();
 }
 #endif  // IS_MAC
 
 void BrowserView::OnWidgetDestroying(views::Widget* widget) {
   DCHECK(widget_observation_.IsObservingSource(widget));
   widget_observation_.Reset();
+
+  // Permanently suppress layout during teardown to avoid running layout on
+  // destroying child views or widgets.
+  suppress_layout_for_teardown_ = true;
+
   // Destroy any remaining WebContents early on. Doing so may result in
   // calling back to one of the Views/LayoutManagers or supporting classes of
   // BrowserView. By destroying here we ensure all said classes are valid.
   // Note: The BrowserViewTest tests rely on the contents being destroyed in the
   // order that they were present in the tab strip.
-  while (browser()->tab_strip_model()->count())
-    browser()->tab_strip_model()->DetachAndDeleteWebContentsAt(0);
-  // Destroy the fullscreen control host, as it observes the native window.
-  fullscreen_control_host_.reset();
+  while (browser()->GetTabStripModel()->count()) {
+    browser()->GetTabStripModel()->DetachAndDeleteWebContentsAt(0);
+  }
+
+  // Also destroy WebUI toolbar WebContents early so that its renderer process
+  // halts script execution and does not try to query browser IPC services
+  // (such as Windows DirectWrite font proxy) after teardown begins.
+  if (toolbar_) {
+    toolbar_->DestroyWebUIToolbarWebContents();
+  }
 }
 
 void BrowserView::OnWidgetActivationChanged(views::Widget* widget,
                                             bool active) {
-  if (browser_->window()) {
+  if (browser_->GetWindow()) {
     if (active) {
       if (restore_focus_on_activation_.has_value() &&
           restore_focus_on_activation_.value()) {
@@ -3570,35 +4162,15 @@ void BrowserView::OnWidgetActivationChanged(views::Widget* widget,
 
         // Set initial focus change on the first activation if there is no
         // modal dialog.
-        if (!WidgetHasChildModalDialog(GetWidget()))
+        if (!WidgetHasChildModalDialog(GetWidget())) {
           RestoreFocus();
+        }
       }
-
-      BrowserList::SetLastActive(browser_.get());
-    } else {
-      BrowserList::NotifyBrowserNoLongerActive(browser_.get());
     }
   }
 
-  if (!extension_keybinding_registry_ &&
-      GetFocusManager()) {  // focus manager can be null in tests.
-    extension_keybinding_registry_ =
-        std::make_unique<ExtensionKeybindingRegistryViews>(
-            browser_->profile(), GetFocusManager(),
-            extensions::ExtensionKeybindingRegistry::ALL_EXTENSIONS, this);
-  }
-
-  extensions::ExtensionCommandsGlobalRegistry* registry =
-      extensions::ExtensionCommandsGlobalRegistry::Get(browser_->profile());
-  if (active) {
-    registry->set_registry_for_active_window(
-        extension_keybinding_registry_.get());
-  } else if (registry->registry_for_active_window() ==
-             extension_keybinding_registry_.get()) {
-    registry->set_registry_for_active_window(nullptr);
-  }
-
-  immersive_mode_controller()->OnWidgetActivationChanged(widget, active);
+  ExtensionKeybindingRegistryViews::From(browser_)->OnHostActivationChanged(
+      active);
 }
 
 void BrowserView::OnWidgetBoundsChanged(views::Widget* widget,
@@ -3607,11 +4179,13 @@ void BrowserView::OnWidgetBoundsChanged(views::Widget* widget,
 }
 
 void BrowserView::OnWindowBeginUserBoundsChange() {
-  if (interactive_resize_in_progress_)
+  if (interactive_resize_in_progress_) {
     return;
+  }
   WebContents* web_contents = GetActiveWebContents();
-  if (!web_contents)
+  if (!web_contents) {
     return;
+  }
   interactive_resize_in_progress_ = true;
 }
 
@@ -3627,21 +4201,19 @@ void BrowserView::OnWidgetMove() {
     return;
   }
 
-  // Cancel any tabstrip animations, some of them may be invalidated by the
-  // window being repositioned.
-  // Comment out for one cycle to see if this fixes dist tests.
-  // tabstrip_->DestroyDragController();
-
-  // status_bubble_ may be null if this is invoked during construction.
-  if (status_bubble_.get())
-    status_bubble_->Reposition();
+  // There may be no status bubbles if this is invoked during construction.
+  std::vector<StatusBubble*> status_bubbles = GetStatusBubbles();
+  for (StatusBubble* status_bubble : status_bubbles) {
+    static_cast<StatusBubbleViews*>(status_bubble)->Reposition();
+  }
 
   BookmarkBubbleView::Hide();
 
   // Close the omnibox popup, if any.
-  LocationBarView* location_bar_view = GetLocationBarView();
-  if (location_bar_view)
-    location_bar_view->GetOmniboxView()->CloseOmniboxPopup();
+  if (auto* popup_closer = omnibox::OmniboxPopupCloser::From(browser())) {
+    popup_closer->CloseWithReason(
+        omnibox::PopupCloseReason::kBrowserWidgetMoved);
+  }
 }
 
 views::Widget* BrowserView::GetWidget() {
@@ -3653,46 +4225,223 @@ const views::Widget* BrowserView::GetWidget() const {
 }
 
 void BrowserView::CreateTabSearchBubble() {
-  // Do not spawn the bubble if using the WebUITabStrip.
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  if (WebUITabStripContainerView::UseTouchableTabStrip(browser_.get()))
-    return;
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-
-  if (auto* tab_search_host = GetTabSearchBubbleHost())
+  if (auto* tab_search_host = GetTabSearchBubbleHost()) {
     tab_search_host->ShowTabSearchBubble(true);
+  }
 }
 
 void BrowserView::CloseTabSearchBubble() {
-  if (auto* tab_search_host = GetTabSearchBubbleHost())
+  if (auto* tab_search_host = GetTabSearchBubbleHost()) {
     tab_search_host->CloseTabSearchBubble();
+  }
 }
 
-bool BrowserView::CloseOpenRightAlignedSidePanel(bool exclude_side_search) {
-  // Check if any side panels are open before closing side panels.
-  if (!side_panel_visibility_controller_ ||
-      !side_panel_visibility_controller_->IsManagedSidePanelVisible()) {
-    return false;
+void BrowserView::DeleteBrowserWindow() {
+  CHECK(browser_widget_);
+
+  // Window placement is expected to be saved when the window closes.
+  // Determination for whether placement should be saved depends on the
+  // BrowserWidget object. `SaveWindowPlacementIfNeeded()` must be called here
+  // before the frame is destroyed to mitigate UAF risk.
+  browser_widget_->SaveWindowPlacementIfNeeded();
+
+  browser_widget_.reset();
+  // BrowserWidget owns BrowserView in its views::View hierarchy and `this` will
+  // not be valid after this returns.
+}
+
+void BrowserView::SetForceShowBookmarkBarFlag(
+    BookmarkBarController::ForceShowFlag flag) {
+  BookmarkBarController::From(browser_.get())
+      ->SetForceShowBookmarkBarFlag(flag);
+}
+
+void BrowserView::ClearForceShowBookmarkBarFlag(
+    BookmarkBarController::ForceShowFlag flag) {
+  BookmarkBarController::From(browser_.get())
+      ->ClearForceShowBookmarkBarFlag(flag);
+}
+
+BookmarkBar::State BrowserView::bookmark_bar_state() const {
+  return BookmarkBarController::From(browser_.get())->bookmark_bar_state();
+}
+
+void BrowserView::UpdateTabSearchBubbleHost() {
+  if (!GetIsNormalType()) {
+    return;
   }
 
-  toolbar()->side_panel_button()->HideSidePanel();
-
-  return true;
+  auto* vertical_tab_strip_state_controller =
+      tabs::VerticalTabStripStateController::From(browser_);
+  if (vertical_tab_strip_state_controller &&
+      vertical_tab_strip_state_controller->ShouldDisplayVerticalTabs()) {
+    auto* combo_button =
+        vertical_tab_strip_region_view_->GetTopContainer()->GetComboButton();
+    tab_search_bubble_host_ = std::make_unique<TabSearchBubbleHost>(
+        combo_button->end_button(), browser_.get());
+    combo_button->SetTabSearchBubbleHost(tab_search_bubble_host_.get());
+  } else {
+    auto* combo_button =
+        BrowserElementsViews::From(browser_.get())
+            ->GetViewAs<TabStripComboButton>(kTabStripComboButtonElementId);
+    tab_search_bubble_host_ = std::make_unique<TabSearchBubbleHost>(
+        combo_button->end_button(), browser_.get());
+    combo_button->SetTabSearchBubbleHost(tab_search_bubble_host_.get());
+  }
 }
 
-void BrowserView::RevealTabStripIfNeeded() {
-  if (!immersive_mode_controller_->IsEnabled())
+void BrowserView::ShowSplitView(bool focus_active_view) {
+  const int active_index = browser_->GetTabStripModel()->active_index();
+
+  std::optional<split_tabs::SplitTabId> split_tab_id =
+      browser_->GetTabStripModel()->GetTabAtIndex(active_index)->GetSplit();
+
+  CHECK(split_tab_id.has_value());
+  split_tabs::SplitTabData* split_data =
+      browser_->GetTabStripModel()->GetSplitData(split_tab_id.value());
+
+  std::vector<tabs::TabInterface*> split_tabs = split_data->ListTabs();
+
+  for (size_t i = 0; tabs::TabInterface* tab : split_tabs) {
+    multi_contents_view_->SetWebContentsAtIndex(tab->GetContents(), i++);
+  }
+  const int first_split_tab_index =
+      browser_->GetTabStripModel()->GetIndexOfTab(split_tabs[0]);
+  const int relative_active_position = active_index - first_split_tab_index;
+  multi_contents_view_->SetActiveIndex(relative_active_position);
+
+  multi_contents_view_->UpdateSplitVisualData(*split_data->visual_data());
+
+  // Set focus to the active contents avoid reentrency when setting the web
+  // contents within MultiContentsView. See crbug.com/458189541 and
+  // crbug.com/447369458
+  if (focus_active_view) {
+    if (!GetWidget()->IsActive()) {
+      GetFocusManager()->SetStoredFocusView(
+          multi_contents_view_->GetActiveContentsView());
+      restore_focus_on_activation_ = true;
+    } else {
+      multi_contents_view_->GetActiveContentsView()->RequestFocus();
+    }
+  }
+}
+
+void BrowserView::HideSplitView() {
+  multi_contents_view_->CloseSplitView();
+}
+
+void BrowserView::UpdateActiveTabInSplitView() {
+  CHECK(multi_contents_view_->IsInSplitView());
+  const int active_index = browser_->GetTabStripModel()->active_index();
+
+  std::optional<split_tabs::SplitTabId> split_tab_id =
+      browser_->GetTabStripModel()->GetTabAtIndex(active_index)->GetSplit();
+
+  CHECK(split_tab_id.has_value());
+
+  tabs::TabInterface* first_tab = browser_->GetTabStripModel()
+                                      ->GetSplitData(split_tab_id.value())
+                                      ->ListTabs()[0];
+  const int first_split_tab_index =
+      browser_->GetTabStripModel()->GetIndexOfTab(first_tab);
+  const int relative_active_position = active_index - first_split_tab_index;
+  multi_contents_view_->SetActiveIndex(relative_active_position);
+
+  // When active tab changes inside a split, it's generally due to focus change.
+  // However, there are cases where inactive tab can be activated without a
+  // focus change e.g. using tab shortcuts and in these cases update focus.
+  if (GetWidget()->IsActive() &&
+      multi_contents_view_->GetInactiveContentsView()->HasFocus()) {
+    multi_contents_view_->GetActiveContentsView()->RequestFocus();
+  }
+}
+
+bool BrowserView::IsTabChangeInSplitView(content::WebContents* old_contents,
+                                         content::WebContents* new_contents) {
+  return multi_contents_view_->IsInSplitView() &&
+         multi_contents_view_->GetActiveContentsView()->web_contents() ==
+             old_contents &&
+         multi_contents_view_->GetInactiveContentsView()->web_contents() ==
+             new_contents;
+}
+
+void BrowserView::UpdateTabModalDialogHost() {
+  multi_contents_view_->ExecuteOnEachVisibleContentsView(
+      base::BindRepeating([](ContentsWebView* contents_view) {
+        SafeInvoke(contents_view->web_contents())
+            .Then(Overload<content::WebContents*>(
+                &tabs::TabInterface::GetFromContents))
+            .Then(Overload<>(&tabs::TabInterface::GetTabFeatures))
+            .Then(&tabs::TabFeatures::tab_dialog_manager)
+            .Then(&tabs::TabDialogManager::UpdateModalDialogHost);
+      }));
+}
+
+void BrowserView::MaybeUpdateStoredFocusForWebContents(
+    content::WebContents* web_contents) {
+  ChromeWebContentsViewFocusHelper* focus_helper =
+      ChromeWebContentsViewFocusHelper::FromWebContents(web_contents);
+  if (!focus_helper) {
     return;
+  }
+
+  views::View* stored_focus = focus_helper->GetStoredFocus();
+  if (!stored_focus) {
+    return;
+  }
+
+  ContentsContainerView* container = GetActiveContentsContainerView();
+
+  const MultiContentsView::FocusableViewMap* view_map =
+      multi_contents_view_->GetFocusableViewsMapFor(container);
+
+  // In the case that the last focused view of the WebContents is a
+  // focusable in the content container view, but not corresponding to the right
+  // webcontents itself, we must reset the stored focus to prevent incorrect tab
+  // activation behavior when the split view is swapped in during a tab switch.
+  auto it = view_map->find(stored_focus->GetClassName());
+  if (it != view_map->end()) {
+    views::View* current_instance = it->second;
+    if (stored_focus != current_instance) {
+      focus_helper->SetStoredFocusView(current_instance);
+    }
+  }
+}
+
+std::vector<ContentsWebView*> BrowserView::GetAllVisibleContentsWebViews() {
+  std::vector<ContentsWebView*> contents_views;
+  contents_views.push_back(multi_contents_view_->GetActiveContentsView());
+  ContentsWebView* inactive_contents_view =
+      multi_contents_view_->GetInactiveContentsView();
+  if (multi_contents_view_->IsInSplitView()) {
+    contents_views.push_back(inactive_contents_view);
+  }
+  return contents_views;
+}
+
+void BrowserView::RevealTopContainerIfNeeded() {
+  auto* const immersive_mode_controller =
+      ImmersiveModeController::From(browser());
+  if (!immersive_mode_controller->IsEnabled()) {
+    return;
+  }
+
+  // With vertical tab strip, the tab strip isn't in the immersive bar so it
+  // only needs to be shown if the toolbar or location bar had focus.
+  if (auto* vertical_tab_strip_state_controller =
+          tabs::VerticalTabStripStateController::From(browser());
+      vertical_tab_strip_state_controller &&
+      vertical_tab_strip_state_controller->ShouldDisplayVerticalTabs()) {
+    return;
+  }
 
   std::unique_ptr<ImmersiveRevealedLock> revealer =
-      immersive_mode_controller_->GetRevealedLock(
+      immersive_mode_controller->GetRevealedLock(
           ImmersiveModeController::ANIMATE_REVEAL_YES);
-  auto delete_revealer = base::BindOnce(
-      [](std::unique_ptr<ImmersiveRevealedLock>) {}, std::move(revealer));
   constexpr auto kDefaultDelay = base::Seconds(1);
   constexpr auto kZeroDelay = base::Seconds(0);
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
-      FROM_HERE, std::move(delete_revealer),
+      FROM_HERE, base::DoNothingWithBoundArgs(std::move(revealer)),
       g_disable_revealer_delay_for_testing ? kZeroDelay : kDefaultDelay);
 }
 
@@ -3701,38 +4450,56 @@ void BrowserView::GetAccessiblePanes(std::vector<views::View*>* panes) {
   // (Windows) or Ctrl+Back/Forward (Chrome OS).  If one of these is
   // invisible or has no focusable children, it will be automatically
   // skipped.
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  if (webui_tab_strip_)
-    panes->push_back(webui_tab_strip_);
-#endif
-  // When permission is requested, permission chip must be first pane in the
-  // pane traversal order to be easily accessible for keyboard users.
-  if (toolbar_ && toolbar_->location_bar() &&
-      toolbar_->location_bar()->chip_controller() &&
-      toolbar_->location_bar()
-          ->chip_controller()
-          ->IsPermissionPromptChipVisible()) {
-    panes->push_back(toolbar_->location_bar()->chip_controller()->chip());
+  // If activity indicators or a permission request chip is visible, it must be
+  // in the first position in the pane traversal order to be easily accessible
+  // for keyboard users.
+  if (base::FeatureList::IsEnabled(
+          content_settings::features::kLeftHandSideActivityIndicators)) {
+    if (toolbar_ && toolbar_->location_bar_view() &&
+        toolbar_->location_bar_view()->permission_dashboard_view() &&
+        toolbar_->location_bar_view()
+            ->permission_dashboard_view()
+            ->GetVisible()) {
+      panes->push_back(
+          toolbar_->location_bar_view()->permission_dashboard_view());
+    }
+  } else if (toolbar_ && toolbar_->location_bar() &&
+             toolbar_->location_bar()->GetChipController() &&
+             toolbar_->location_bar()
+                 ->GetChipController()
+                 ->IsPermissionPromptChipVisible()) {
+    // TODO(crbug.com/495419742): For WebUI, chip_view() will return nullptr
+    // and individual chips won't be added here. Instead, the WebUI container
+    // itself will act as the pane, and DOM focus management will handle
+    // traversing the internal chips.
+    if (GetLocationBarView() && GetLocationBarView()->chip_view()) {
+      panes->push_back(GetLocationBarView()->chip_view());
+    }
   }
-  panes->push_back(toolbar_button_provider_->GetAsAccessiblePaneView());
-  if (tab_strip_region_view_)
-    panes->push_back(tab_strip_region_view_);
-  if (toolbar_ && toolbar_->custom_tab_bar())
+
+  panes->push_back(
+      ToolbarButtonProvider::From(browser_)->GetAsAccessiblePaneView());
+  if (horizontal_tab_strip_region_view_) {
+    panes->push_back(horizontal_tab_strip_region_view_);
+  }
+  if (vertical_tab_strip_region_view_) {
+    panes->push_back(vertical_tab_strip_region_view_);
+  }
+  if (toolbar_ && toolbar_->custom_tab_bar()) {
     panes->push_back(toolbar_->custom_tab_bar());
-  if (bookmark_bar_view_.get())
+  }
+  if (bookmark_bar_view_.get()) {
     panes->push_back(bookmark_bar_view_.get());
-  if (infobar_container_)
+  }
+  if (infobar_container_) {
     panes->push_back(infobar_container_);
-  if (download_shelf_)
-    panes->push_back(download_shelf_->GetView());
-  if (unified_side_panel_)
-    panes->push_back(unified_side_panel_);
-  if (side_search_side_panel_)
-    panes->push_back(side_search_side_panel_);
-  // TODO(crbug.com/1055150): Implement for mac.
-  panes->push_back(contents_web_view_);
-  if (devtools_web_view_->GetVisible())
-    panes->push_back(devtools_web_view_);
+  }
+  if (side_panel_) {
+    panes->push_back(side_panel_);
+  }
+  for (views::View* pane : multi_contents_view_->GetAccessiblePanes()) {
+    panes->push_back(pane);
+  }
 }
 
 bool BrowserView::ShouldDescendIntoChildForEventHandling(
@@ -3740,23 +4507,51 @@ bool BrowserView::ShouldDescendIntoChildForEventHandling(
     const gfx::Point& location) {
   // Window for PWAs with window-controls-overlay display override should claim
   // mouse events that fall within the draggable region.
-  web_app::AppBrowserController* controller = browser()->app_controller();
-  bool is_wco_or_borderless_mode =
-      IsWindowControlsOverlayEnabled() || IsBorderlessModeEnabled();
-  if (is_wco_or_borderless_mode && controller &&
+  web_app::AppBrowserController* controller =
+      web_app::AppBrowserController::From(browser());
+  if (AreDraggableRegionsEnabled() && controller &&
       controller->draggable_region().has_value()) {
     // Draggable regions are defined relative to the web contents.
     gfx::Point point_in_contents_web_view_coords(location);
     views::View::ConvertPointToTarget(GetWidget()->GetRootView(),
-                                      contents_web_view_,
+                                      GetActiveContentsWebView(),
                                       &point_in_contents_web_view_coords);
 
+    // Draggable regions should be ignored for clicks into any browser view's
+    // owned widgets, for example alerts, permission prompts or find bar.
     return !controller->draggable_region()->contains(
-        point_in_contents_web_view_coords.x(),
-        point_in_contents_web_view_coords.y());
+               point_in_contents_web_view_coords.x(),
+               point_in_contents_web_view_coords.y()) ||
+           WidgetOwnedByAnchorContainsPoint(point_in_contents_web_view_coords);
   }
 
   return true;
+}
+
+bool BrowserView::RotatePaneFocusFromView(views::View* focused_view,
+                                          bool forward,
+                                          bool enable_wrapping) {
+  // If an inactive bubble is showing this intentionally focuses that dialog to
+  // provide an easy access method to these dialogs without requiring additional
+  // keyboard shortcuts or commands. To get back out to pane cycling the dialog
+  // needs to be accepted or dismissed.
+  if (BrowserFocusController::From(browser())
+          ->ActivateFirstInactiveBubbleForAccessibility()) {
+    // We only want to signal that we have performed a rotation once for an
+    // accessibility bubble. This is important for ChromeOS because the result
+    // of this operation is used to determine whether or not we should rotate
+    // focus out of the browser.
+    // |enable_wrapping| is overloaded with the start of a rotation. Therefore,
+    // we can use it to ensure that we only return that we have rotated once to
+    // the caller.
+    // TODO(crbug.com/40274273): the overloaded |enable_wrapping| is not
+    // intuitive and confusing. Refactor this so that start of rotation is more
+    // clear and not mangled up with wrapping.
+    return enable_wrapping;
+  }
+
+  return views::WidgetDelegate::RotatePaneFocusFromView(focused_view, forward,
+                                                        enable_wrapping);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -3765,76 +4560,312 @@ bool BrowserView::ShouldDescendIntoChildForEventHandling(
 views::CloseRequestResult BrowserView::OnWindowCloseRequested() {
   // You cannot close a frame for which there is an active originating drag
   // session.
-  if (tabstrip_ && !tabstrip_->IsTabStripCloseable())
+  if (tab_strip_view() && !tab_strip_view()->IsTabStripCloseable()) {
     return views::CloseRequestResult::kCannotClose;
+  }
 
-  // Give beforeunload handlers the chance to cancel the close before we hide
-  // the window below.
-  if (!browser_->ShouldCloseWindow())
+  // Give beforeunload handlers, the user, or policy the chance to cancel the
+  // close before we hide the window below.
+  if (!UnloadController::From(browser_)->HandleBeforeClose()) {
     return views::CloseRequestResult::kCannotClose;
+  }
 
   views::CloseRequestResult result = views::CloseRequestResult::kCanClose;
-  if (!browser_->tab_strip_model()->empty()) {
+  if (!browser_->GetTabStripModel()->empty()) {
     // Tab strip isn't empty.  Hide the frame (so it appears to have closed
     // immediately) and close all the tabs, allowing the renderers to shut
     // down. When the tab strip is empty we'll be called back again.
-    frame_->Hide();
+    browser_widget_->Hide();
     result = views::CloseRequestResult::kCannotClose;
   }
 
-  browser_->OnWindowClosing();
+  // Layout must be suppressed during teardown permanently once window closing
+  // has started to prevent any subsequent layout passes while tabs and child
+  // views are torn down.
+  suppress_layout_for_teardown_ = true;
+
+  UnloadController::From(browser_)->OnWindowClosing();
   return result;
 }
 
 int BrowserView::NonClientHitTest(const gfx::Point& point) {
 #if BUILDFLAG(IS_MAC)
   // The top container while in immersive fullscreen on macOS lives in another
-  // Widget (OverlayWidget). This means that BrowserView does not need to
+  // Widget (OverlayWidgetMac). This means that BrowserView does not need to
   // consult BrowserViewLayout::NonClientHitTest() to calculate the hit test.
-  if (IsImmersiveModeEnabled()) {
+  //
+  // Note that this can occasionally be hit during teardown, so check if the
+  // controller still exists.
+  if (auto* controller = ImmersiveModeController::From(browser());
+      controller && controller->IsEnabled()) {
     // Handle hits on the overlay widget when it is hovering overtop of the
     // content view.
     gfx::Point screen_point(point);
     View::ConvertPointToScreen(this, &screen_point);
-    if (overlay_widget()->GetWindowBoundsInScreen().Contains(screen_point)) {
-      return HTNOWHERE;
+    if (tab_overlay_widget() && tab_overlay_widget()->IsVisible() &&
+        tab_overlay_widget()->GetWindowBoundsInScreen().Contains(
+            screen_point)) {
+      return HTCAPTION;
+    } else if (overlay_widget() && overlay_widget()->IsVisible() &&
+               overlay_widget()->GetWindowBoundsInScreen().Contains(
+                   screen_point)) {
+      return HTCLIENT;
     }
+
+    // The vertical tabstrip is not part of the overlay in immersive mode and
+    // must be tested separately.
+    if (vertical_tab_strip_region_view_ &&
+        vertical_tab_strip_region_view_->GetVisible()) {
+      gfx::Point test_point(point);
+      if (ConvertedHitTest(parent(), vertical_tab_strip_region_view_,
+                           &test_point)) {
+        if (vertical_tab_strip_region_view_->IsPositionInWindowCaption(
+                test_point)) {
+          return HTCAPTION;
+        }
+        return HTCLIENT;
+      }
+    }
+
     return views::ClientView::NonClientHitTest(point);
   }
 #endif  // BUILDFLAG(IS_MAC)
 
-  return GetBrowserViewLayout()->NonClientHitTest(point);
+  // Since the TabStrip only renders in some parts of the top of the window,
+  // the un-obscured area is considered to be part of the non-client caption
+  // area of the window. So we need to treat hit-tests in these regions as
+  // hit-tests of the titlebar.
+  gfx::Point point_in_browser_view_coords(point);
+  views::View::ConvertPointToTarget(parent(), this,
+                                    &point_in_browser_view_coords);
+
+  // Check if the point is in the web_app_frame_toolbar_. Because this toolbar
+  // can entirely be within the window controls overlay area, this check needs
+  // to be done before the window controls overlay area check below.
+  if (web_app_frame_toolbar_) {
+    int web_app_component =
+        views::GetHitTestComponent(web_app_frame_toolbar_, point);
+    if (web_app_component != HTNOWHERE) {
+      return web_app_component;
+    }
+  }
+
+  // Let the frame handle any events that fall within the bounds of the window
+  // controls overlay.
+  if (IsWindowControlsOverlayEnabled() && GetActiveWebContents()) {
+    // The window controls overlays are to the left and/or right of the
+    // |titlebar_area_rect|.
+    gfx::Rect titlebar_area_rect =
+        GetActiveWebContents()->GetWindowsControlsOverlayRect();
+
+    // The top area rect is the same height as the |titlebar_area_rect| but
+    // fills the full width of the browser view.
+    gfx::Rect top_area_rect(0, titlebar_area_rect.y(), width(),
+                            titlebar_area_rect.height());
+
+    // If the point is within the top_area_rect but not the titlebar_area_rect,
+    // then it must be in the window controls overlay.
+    if (top_area_rect.Contains(point_in_browser_view_coords) &&
+        !titlebar_area_rect.Contains(point_in_browser_view_coords)) {
+      return HTNOWHERE;
+    }
+  }
+
+  // See if the mouse pointer is within the bounds of the
+  // OrganizerPanelView.
+  if (organizer_tray_ && organizer_tray_->GetVisible()) {
+    gfx::Point test_point(point);
+    if (ConvertedHitTest(parent(), organizer_tray_, &test_point)) {
+      if (organizer_tray_->IsPositionInWindowCaption(test_point)) {
+        return HTCAPTION;
+      }
+      return HTCLIENT;
+    }
+  }
+
+  if (vertical_tab_strip_region_view_ &&
+      vertical_tab_strip_region_view_->GetVisible()) {
+    // See if the mouse pointer is within the bounds of the
+    // VerticalTabStripRegionView.
+    gfx::Point test_point(point);
+    if (ConvertedHitTest(parent(), vertical_tab_strip_region_view_,
+                         &test_point)) {
+      if (vertical_tab_strip_region_view_->IsPositionInWindowCaption(
+              test_point)) {
+        // We return HTNOWHERE so that the caller will hit-test the window
+        // controls before finally falling back to HTCAPTION.
+        return HTNOWHERE;
+      }
+      return HTCLIENT;
+    } else {
+      gfx::Point test_point2(point);
+      if (ConvertedHitTest(parent(), top_container_, &test_point2) &&
+          top_container_->IsPositionInWindowCaption(test_point2)) {
+        // We return HTNOWHERE so that the caller will hit-test the window
+        // controls before finally falling back to HTCAPTION.
+        return HTNOWHERE;
+      }
+    }
+  } else if (GetTabStripVisible()) {
+    // Determine if the Horizontal TabStrip exists and is capable of being
+    // clicked on. We might be a popup window without a TabStrip. Use
+    // `GetTabStripVisible` as the tabstrip might have been hidden in immersive
+    // mode.
+
+    // See if the mouse pointer is within the bounds of the
+    // HorizontalTabStripRegionView.
+    gfx::Point test_point(point);
+    if (ConvertedHitTest(parent(), horizontal_tab_strip_region_view_,
+                         &test_point)) {
+      if (horizontal_tab_strip_region_view_->IsPositionInWindowCaption(
+              test_point)) {
+        return HTCAPTION;
+      }
+      return HTCLIENT;
+    }
+
+    // The top few pixels of the TabStrip are a drop-shadow - as we're pretty
+    // starved of draggable area, let's give it to window dragging (this also
+    // makes sense visually).
+    // TODO(tluk): Investigate the impact removing this has on draggable area
+    // given the tab strip no longer uses shadows.
+    views::Widget* widget = GetWidget();
+    if (!(widget->IsMaximized() || widget->IsFullscreen()) &&
+        (point_in_browser_view_coords.y() <
+         (horizontal_tab_strip_region_view_->y() + kTabShadowSize))) {
+      // We return HTNOWHERE as this is a signal to our containing
+      // NonClientView that it should figure out what the correct hit-test
+      // code is given the mouse position...
+      return HTNOWHERE;
+    }
+  }
+
+  // For apps with window-controls-overlay or unframed display mode, see if
+  // we're in an app defined draggable region so we can return `HTCAPTION`.
+  web_app::AppBrowserController* controller =
+      web_app::AppBrowserController::From(browser());
+
+  if (AreDraggableRegionsEnabled() && controller &&
+      controller->draggable_region().has_value()) {
+    // Draggable regions are defined relative to the web contents.
+    gfx::Point point_in_contents_web_view_coords(point_in_browser_view_coords);
+    views::View::ConvertPointToTarget(this, contents_web_view(),
+                                      &point_in_contents_web_view_coords);
+
+    if (controller->draggable_region()->contains(
+            point_in_contents_web_view_coords.x(),
+            point_in_contents_web_view_coords.y())) {
+      // Draggable regions should be ignored for clicks into any browser view's
+      // owned widgets, for example alerts, permission prompts or find bar.
+      return WidgetOwnedByAnchorContainsPoint(point_in_browser_view_coords)
+                 ? HTCLIENT
+                 : HTCAPTION;
+    }
+  }
+
+  // If the point's y coordinate is below the top of the topmost view and
+  // otherwise within the bounds of this view, the point is considered to be
+  // within the client area.
+  gfx::Rect bounds_from_toolbar_top = bounds();
+  bounds_from_toolbar_top.Inset(gfx::Insets::TLBR(GetClientAreaTop(), 0, 0, 0));
+  if (bounds_from_toolbar_top.Contains(point)) {
+    return HTCLIENT;
+  }
+
+  // If the point's y coordinate is above the top of the toolbar, but not
+  // over the tabstrip (per previous checking in this function), then we
+  // consider it in the window caption (e.g. the area to the right of the
+  // tabstrip underneath the window controls). However, note that we DO NOT
+  // return HTCAPTION here, because when the window is maximized the window
+  // controls will fall into this space (since the BrowserView is sized to
+  // entire size of the window at that point), and the HTCAPTION value will
+  // cause the window controls not to work. So we return HTNOWHERE so that the
+  // caller will hit-test the window controls before finally falling back to
+  // HTCAPTION.
+  gfx::Rect tabstrip_background_bounds = bounds();
+  gfx::Point toolbar_origin = toolbar_->origin();
+  views::View::ConvertPointToTarget(top_container_, this, &toolbar_origin);
+  tabstrip_background_bounds.set_height(toolbar_origin.y());
+  if (tabstrip_background_bounds.Contains(point)) {
+    return HTNOWHERE;
+  }
+
+  // If the point is somewhere else, delegate to the default implementation.
+  return views::ClientView::NonClientHitTest(point);
 }
 
 gfx::Size BrowserView::GetMinimumSize() const {
-  return GetBrowserViewLayout()->GetMinimumSize(this);
+  auto* const layout = GetBrowserViewLayout();
+  return layout ? layout->GetMinimumSize(this) : gfx::Size();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, views::View overrides:
 
-void BrowserView::Layout() {
+void BrowserView::Layout(PassKey) {
   TRACE_EVENT0("ui", "BrowserView::Layout");
-  if (!initialized_ || in_process_fullscreen_)
+  // Do not perform layout if the view is not yet initialized, in fullscreen
+  // transition, shutting down, or if the underlying widget has already closed.
+  if (!initialized_ || in_process_fullscreen_ ||
+      suppress_layout_for_teardown_ ||
+      (browser_widget_ && browser_widget_->IsClosed())) {
     return;
+  }
+
+  if (base::FeatureList::IsEnabled(
+          features::kDeferLayoutDuringBrowserStartup) &&
+      startup_layout_state_ == StartupLayoutState::kDeferring &&
+      browser_widget_ && !browser_widget_->IsVisible()) {
+    // If the browser window is invisible during early startup, defer any layout
+    // requests that occur after the first initial layout pass. This absorbs the
+    // storm of redundant layout calculations triggered by asynchronously
+    // loading components (such as the WebUI Toolbar) before they are painted.
+    //
+    // Note that the first initial layout pass (where state is kInitial) is NOT
+    // deferred. This initial pass establishes the starting bounds for all child
+    // views, including WebUIToolbarWebView (which sizes its child
+    // views::WebView via FillLayout). Subsequent layouts while invisible are
+    // safe to skip because the window size has not changed, meaning the initial
+    // bounds remain valid.
+    //
+    // However, if the active contents container has not yet received its
+    // initial non-empty bounds (e.g. during tab restore or when the first tab
+    // is added to the window), allow this layout pass so that the web contents
+    // gets properly sized before it starts loading.
+    if (size().IsEmpty() || !GetContentsSize().IsEmpty()) {
+      layout_deferred_while_invisible_ = true;
+      return;
+    }
+  }
 
   // Allow only a single layout operation once top controls sliding begins.
   if (top_controls_slide_controller_ &&
       top_controls_slide_controller_->IsEnabled() &&
       top_controls_slide_controller_->IsTopControlsSlidingInProgress()) {
-    if (did_first_layout_while_top_controls_are_sliding_)
+    if (did_first_layout_while_top_controls_are_sliding_) {
       return;
+    }
     did_first_layout_while_top_controls_are_sliding_ = true;
   } else {
     did_first_layout_while_top_controls_are_sliding_ = false;
   }
 
-  views::View::Layout();
+  LayoutSuperclass<views::View>(this);
 
   // TODO(jamescook): Why was this in the middle of layout code?
-  toolbar_->location_bar()->omnibox_view()->SetFocusBehavior(
-      IsToolbarVisible() ? FocusBehavior::ALWAYS : FocusBehavior::NEVER);
-  frame()->GetFrameView()->UpdateMinimumSize();
+  toolbar_->location_bar()->UpdateFocusBehavior(IsToolbarVisible());
+  GetFrameView()->UpdateMinimumSize();
+
+  if (omnibox::IsWebUIOmniboxInBrowserViewEnabled()) {
+    // When the WebUI Omnibox is embedded directly in the `BrowserView` (instead
+    // of being a separate popup widget), its layout depends on the position of
+    // the `LocationBarView`. We must update its layout after the
+    // `BrowserView` layout to ensure it aligns correctly with the location bar.
+    auto* popup_view = toolbar_->location_bar_view()->GetOmniboxPopupView();
+    SafeInvoke(popup_view)
+        .Then(&OmniboxPopupView::AsOmniboxPopupViewBrowserView)
+        .Then(&OmniboxPopupViewBrowserView::UpdateLayout);
+  }
 
   // Some of the situations when the BrowserView is laid out are:
   // - Enter/exit immersive fullscreen mode.
@@ -3843,16 +4874,53 @@ void BrowserView::Layout() {
   // The above may result in a change in the location bar's position, to which a
   // permission bubble may be anchored. For that we must update its anchor
   // position.
-  WebContents* contents = browser_->tab_strip_model()->GetActiveWebContents();
+  WebContents* contents = browser_->GetTabStripModel()->GetActiveWebContents();
   if (contents &&
       permissions::PermissionRequestManager::FromWebContents(contents)) {
     permissions::PermissionRequestManager::FromWebContents(contents)
         ->UpdateAnchor();
   }
 
-  if (feature_promo_controller_) {
-    feature_promo_controller_->bubble_factory_registry()
-        ->NotifyAnchorBoundsChanged(GetElementContext());
+  // Update dialog and bubble anchors.
+
+  if (dialog_anchor_ || fallback_popup_anchor_) {
+    // This needs to be enough that any bubble is visually overlapping the
+    // toolbar, to keep it from rendering entirely in the contents area.
+    constexpr int kAdditionalDialogToolbarOverlap = 3;
+    gfx::Rect rect(GetBrowserViewLayout()
+                       ->GetWebContentsModalDialogHost()
+                       ->GetDialogPosition(gfx::Size()),
+                   gfx::Size());
+    // Move up and make its size nonzero.
+    rect.Outset(gfx::Outsets::TLBR(1, 1, 0, 1));
+
+    if (fallback_popup_anchor_) {
+      fallback_popup_anchor_->MaybeUpdateAnchor(rect);
+    }
+
+    if (dialog_anchor_) {
+      rect.Offset(0, -kAdditionalDialogToolbarOverlap);
+      // When the dialog anchor is still within the bounds of the contents
+      // container, it is hidden. This handles immersive fullscreen cases,
+      // including "always show toolbar" mode on Mac, where it is not possible
+      // to position the dialog safely.
+      dialog_anchor_->SetHidden(
+          multi_contents_view_->bounds().Contains(rect.bottom_center()));
+      dialog_anchor_->MaybeUpdateAnchor(rect);
+    }
+  }
+
+  if (auto* const user_education =
+          UserEducationServiceFactory::GetForBrowserContext(GetProfile())) {
+    user_education->help_bubble_factory_registry().NotifyAnchorBoundsChanged(
+        GetElementContext());
+  }
+
+  // Mark the first layout pass as complete. This initial layout allows the
+  // window to calculate its starting bounds. Subsequent layouts while the
+  // window is invisible can then be safely deferred.
+  if (startup_layout_state_ == StartupLayoutState::kInitial) {
+    startup_layout_state_ = StartupLayoutState::kDeferring;
   }
 }
 
@@ -3878,12 +4946,34 @@ void BrowserView::AddedToWidget() {
   // BrowserView may be added to a widget more than once if the user changes
   // themes after starting the browser. Do not re-initialize BrowserView in
   // this case.
-  if (initialized_)
+  if (initialized_) {
     return;
+  }
 
   views::ClientView::AddedToWidget();
 
+#if BUILDFLAG(IS_WIN)
+  // Register for screen capture exclusion updates. This is specific to
+  // Document PiP windows, which are fully-fledged BrowserViews.
+  if (GetIsPictureInPictureType() &&
+      base::FeatureList::IsEnabled(features::kExcludePipFromScreenCapture)) {
+    pip_exclusion_observer_ =
+        std::make_unique<PipExclusionObserverImpl>(GetWidget());
+    bool is_excluded =
+        content::desktop_capture::IsPipExcludedFromScreenCapture();
+    GetWidget()->SetExcludeFromScreenCapture(is_excluded);
+  }
+#endif
+
   widget_observation_.Observe(GetWidget());
+
+  auto* browser_elements =
+      BrowserElements::From(browser_)->AsA<BrowserElementsViewsImpl>();
+  browser_elements->Init(this);
+  browser_elements->AddRetrievalCallback(
+      kActiveContentsWebViewRetrievalId,
+      base::BindRepeating(&BrowserView::GetActiveContentsWebView,
+                          base::Unretained(this)));
 
   // Stow a pointer to this object onto the window handle so that we can get at
   // it later when all we have is a native view.
@@ -3892,36 +4982,28 @@ void BrowserView::AddedToWidget() {
   // Stow a pointer to the browser's profile onto the window handle so that we
   // can get it later when all we have is a native view.
   GetWidget()->SetNativeWindowProperty(Profile::kProfileKey,
-                                       browser_->profile());
+                                       browser_->GetProfile());
 
 #if defined(USE_AURA)
   // Stow a pointer to the browser's profile onto the window handle so
   // that windows will be styled with the appropriate NativeTheme.
-  SetThemeProfileForWindow(GetNativeWindow(), browser_->profile());
+  SetThemeProfileForWindow(GetNativeWindow(), browser_->GetProfile());
 #endif
 
   toolbar_->Init();
 
-  // TODO(pbos): Manage this either inside SidePanel or the corresponding button
-  // when SidePanel is singular, at least per button/side.
-  // TODO(pbos): Investigate whether the side panels should be creatable when
-  // the ToolbarView does not create a button for them. This specifically seems
-  // to hit web apps. See https://crbug.com/1267781.
-  if (toolbar_->side_panel_button() && unified_side_panel_) {
-    std::vector<View*> panels;
-    if (unified_side_panel_)
-      panels.push_back(unified_side_panel_);
-    if (side_search_side_panel_) {
-      panels.push_back(side_search_side_panel_);
-    }
-    side_panel_button_highlighter_ =
-        std::make_unique<SidePanelButtonHighlighter>(
-            toolbar_->side_panel_button(), panels);
-
-    side_panel_visibility_controller_ =
-        std::make_unique<SidePanelVisibilityController>(side_search_side_panel_,
-                                                        unified_side_panel_);
+  if (omnibox::IsWebUIOmniboxInBrowserViewEnabled()) {
+    // When the WebUI Omnibox is embedded directly in the `BrowserView` (instead
+    // of being a separate popup widget), the popup view needs a reference to
+    // `BrowserView` to add the popup frame as a child view. We inject it here
+    // after the toolbar (and location bar) have been initialized.
+    auto* popup_view = toolbar_->location_bar_view()->GetOmniboxPopupView();
+    SafeInvoke(popup_view)
+        .Then(&OmniboxPopupView::AsOmniboxPopupViewBrowserView)
+        .Then(&OmniboxPopupViewBrowserView::SetBrowserView, this);
   }
+
+  UpdateTabSearchBubbleHost();
 
 #if BUILDFLAG(IS_CHROMEOS)
   // TopControlsSlideController must be initialized here in AddedToWidget()
@@ -3929,7 +5011,7 @@ void BrowserView::AddedToWidget() {
   // It also needs to be after the |toolbar_| had been initialized since it uses
   // the omnibox.
   if (GetIsNormalType()) {
-    DCHECK(frame_);
+    DCHECK(browser_widget_);
     DCHECK(toolbar_);
     top_controls_slide_controller_ =
         std::make_unique<TopControlsSlideControllerChromeOS>(this);
@@ -3938,35 +5020,90 @@ void BrowserView::AddedToWidget() {
 
   LoadAccelerators();
 
-  // |immersive_mode_controller_| may depend on the presence of a Widget, so it
+  // ImmersiveModeController may depend on the presence of a Widget, so it
   // is initialized here.
-  immersive_mode_controller_->Init(this);
-  immersive_mode_controller_->AddObserver(this);
+  auto* const immersive_mode_controller =
+      ImmersiveModeController::From(browser());
+  immersive_mode_controller->Init(this);
+  immersive_mode_controller->AddObserver(this);
 
-  // TODO(https://crbug.com/1036519): Remove BrowserViewLayout dependence on
+  // WebAppFrameToolbarView depends on ImmersiveModeController so initialize it
+  // here.
+  if (GetIsWebAppType()) {
+    web_app_frame_toolbar_ =
+        AddChildView(std::make_unique<WebAppFrameToolbarView>(this));
+    if (ShouldShowWindowTitle()) {
+      web_app_window_title_ =
+          AddChildView(std::make_unique<views::Label>(GetWindowTitle()));
+      web_app_window_title_->SetID(VIEW_ID_WINDOW_TITLE);
+    }
+  }
+
+#if BUILDFLAG(IS_CHROMEOS)
+  // If in tablet mode, reparent web app views since they have different
+  // parent requirements.
+  if (ui::TouchUiController::Get()->touch_ui()) {
+    ReparentTabStripAndWebAppViewsToTopContainer(
+        TabStripAndWebAppViewsReparentedState::kTouchMode);
+  }
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+  UpdateWindowControlsOverlayEnabled();
+  UpdateUnframedModeEnabled();
+
+  // TODO(crbug.com/40664862): Remove BrowserViewLayout dependence on
   // Widget and move to the constructor.
-  SetLayoutManager(std::make_unique<BrowserViewLayout>(
-      std::make_unique<BrowserViewLayoutDelegateImpl>(this), this,
-      top_container_, web_app_frame_toolbar_, web_app_window_title_,
-      tab_strip_region_view_, tabstrip_, toolbar_, infobar_container_,
-      contents_container_, side_search_side_panel_,
-      left_aligned_side_panel_separator_, unified_side_panel_,
-      right_aligned_side_panel_separator_, immersive_mode_controller_.get(),
-      contents_separator_));
+  BrowserViewLayoutViews layout_views;
+
+  // LINT.IfChange(BrowserViewLayoutViews)
+  layout_views.browser_view = this;
+  layout_views.window_scrim = window_scrim_view_;
+  layout_views.side_panel_content_transition_scrim =
+      side_panel_content_transition_scrim_view_;
+  layout_views.main_shadow_overlay = main_shadow_overlay_;
+  layout_views.main_background_region = main_background_region_;
+  layout_views.top_container = top_container_;
+  layout_views.web_app_frame_toolbar = web_app_frame_toolbar_;
+  layout_views.web_app_window_title = web_app_window_title_;
+  layout_views.horizontal_tab_strip_region_view =
+      horizontal_tab_strip_region_view_;
+  layout_views.vertical_tab_strip_region_view = vertical_tab_strip_region_view_;
+  layout_views.vertical_tab_strip_background_blur_backdrop =
+      vertical_tab_strip_background_blur_backdrop_;
+  layout_views.vertical_tab_strip_bottom_corner =
+      vertical_tab_strip_bottom_corner_;
+  layout_views.vertical_tab_strip_top_corner = vertical_tab_strip_top_corner_;
+  layout_views.organizer_tray = organizer_tray_;
+  layout_views.toolbar = toolbar_;
+  layout_views.infobar_container = infobar_container_;
+  layout_views.multi_contents_view = multi_contents_view_;
+  layout_views.side_panel = side_panel_;
+  layout_views.top_container_separator = top_container_separator_;
+  // LINT.ThenChange(//chrome/browser/ui/views/frame/layout/browser_view_layout.h:BrowserViewLayoutViews)
+
+  SetLayoutManager(BrowserViewLayout::CreateLayout(
+      std::make_unique<BrowserViewLayoutDelegateImpl>(*this), browser(),
+      std::move(layout_views)));
 
   EnsureFocusOrder();
 
-  // This browser view may already have a custom button provider set (e.g the
-  // hosted app frame).
-  if (!toolbar_button_provider_)
-    SetToolbarButtonProvider(toolbar_);
+  // At this point a ToolbarButtonProvider must have been set. It is set only
+  // once per browser instance.
+  auto* toolbar_button_provider = ToolbarButtonProvider::From(browser_);
+  CHECK(toolbar_button_provider);
 
-  frame_->OnBrowserViewInitViewsComplete();
-  frame_->GetFrameView()->UpdateMinimumSize();
-  using_native_frame_ = frame_->ShouldUseNativeFrame();
+  // `AutofillBubbleHandlerImpl` depends on the ToolbarButtonProvider so it must
+  // be constructed following the check above.
+  autofill_bubble_handler_ =
+      std::make_unique<autofill::AutofillBubbleHandlerImpl>(
+          browser_.get(), toolbar_button_provider);
 
-  MaybeInitializeWebUITabStrip();
-  MaybeShowWebUITabStripIPH();
+  auto* const frame_view = GetFrameView();
+  frame_view->OnBrowserViewInitViewsComplete();
+  frame_view->UpdateMinimumSize();
+  using_native_frame_ = browser_widget_->ShouldUseNativeFrame();
+
+  MaybeShowSignInBenefitsIPH();
 
   // Want to show this promo, but not right at startup.
   base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
@@ -3975,29 +5112,66 @@ void BrowserView::AddedToWidget() {
                      GetAsWeakPtr()),
       base::Minutes(5));
 
+  // Accessible name of the tab is dependent on the visibility state of the chip
+  // view, so it needs to be made aware of any changes.
+  if (auto* chip = SafeInvoke(toolbar_.get())
+                       .Then(&ToolbarView::location_bar)
+                       .Then(&LocationBar::GetChipController)
+                       .Then(&ChipController::chip)
+                       .get()) {
+    chip_visibility_subscription_ = chip->AddVisibilityCallback(
+        base::BindRepeating(&BrowserView::UpdateAccessibleNameForAllTabs,
+                            weak_ptr_factory_.GetWeakPtr()));
+  }
+
+  if (auto* const vertical_tab_strip_state_controller =
+          tabs::VerticalTabStripStateController::From(browser_)) {
+    if (vertical_tab_strip_state_controller->ShouldDisplayVerticalTabs()) {
+      vertical_tab_strip_region_view_->InitializeTabStrip();
+    } else {
+      horizontal_tab_strip_region_view_->InitializeTabStrip();
+    }
+  }
+
+  dialog_anchor_ = std::make_unique<views::ViewSubregionAnchor>(
+      kBrowserDialogAnchorElementId, *this);
+  fallback_popup_anchor_ = std::make_unique<views::ViewSubregionAnchor>(
+      kFallbackPopupAnchorElementId, *this);
+
   initialized_ = true;
 }
 
+void BrowserView::RemovedFromWidget() {
+  CHECK(GetFocusManager());
+#if BUILDFLAG(IS_WIN)
+  pip_exclusion_observer_.reset();
+#endif
+
+  focus_manager_observation_.Reset();
+}
+
 void BrowserView::PaintChildren(const views::PaintInfo& paint_info) {
+  if (GetWidget()) {
+    GetWidget()->GetCompositor()->RequestSuccessfulPresentationTimeForNextFrame(
+        base::BindOnce(&BrowserView::OnFirstPresentation,
+                       weak_ptr_factory_.GetWeakPtr()));
+  }
+
   views::ClientView::PaintChildren(paint_info);
+
   static bool did_first_paint = false;
   if (!did_first_paint) {
     did_first_paint = true;
-    startup_metric_utils::RecordBrowserWindowFirstPaint(base::TimeTicks::Now());
+    startup_metric_utils::GetBrowser().RecordBrowserWindowFirstPaint(
+        base::TimeTicks::Now());
   }
-}
-
-void BrowserView::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  node_data->role = ax::mojom::Role::kClient;
 }
 
 void BrowserView::OnThemeChanged() {
   views::ClientView::OnThemeChanged();
-  if (!initialized_)
+  if (!initialized_) {
     return;
-
-  if (status_bubble_)
-    status_bubble_->OnThemeChanged();
+  }
 
   FrameColorsChanged();
 }
@@ -4005,18 +5179,7 @@ void BrowserView::OnThemeChanged() {
 bool BrowserView::GetDropFormats(
     int* formats,
     std::set<ui::ClipboardFormatType>* format_types) {
-  const bool parent_result =
-      views::ClientView::GetDropFormats(formats, format_types);
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  if (webui_tab_strip_) {
-    WebUITabStripContainerView::GetDropFormatsForView(formats, format_types);
-    return true;
-  } else {
-    return parent_result;
-  }
-#else
-  return parent_result;
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
+  return views::ClientView::GetDropFormats(formats, format_types);
 }
 
 bool BrowserView::AreDropTypesRequired() {
@@ -4024,37 +5187,64 @@ bool BrowserView::AreDropTypesRequired() {
 }
 
 bool BrowserView::CanDrop(const ui::OSExchangeData& data) {
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  if (!webui_tab_strip_)
-    return false;
-  return WebUITabStripContainerView::IsDraggedTab(data);
-#else
   return false;
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
 }
 
 void BrowserView::OnDragEntered(const ui::DropTargetEvent& event) {
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  if (!webui_tab_strip_)
-    return;
-  if (WebUITabStripContainerView::IsDraggedTab(event.data()))
-    webui_tab_strip_->OpenForTabDrag();
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
+  // TODO(421465978): Investigate if these drag related methods are necessary
+  // without WebUITabStrip.
+}
+
+views::View* BrowserView::GetViewByElementId(ui::ElementIdentifier element_id) {
+  NOTREACHED()
+      << "Use BrowserElements isntead when searching the entire browser";
+}
+
+const views::View* BrowserView::GetViewByElementId(
+    ui::ElementIdentifier element_id) const {
+  NOTREACHED()
+      << "Use BrowserElements isntead when searching the entire browser";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, ui::AcceleratorTarget overrides:
 
 bool BrowserView::AcceleratorPressed(const ui::Accelerator& accelerator) {
+  NativeWebKeyboardEvent native_event(accelerator.ToKeyEvent());
+  if (ExclusiveAccessManager::From(browser_)->HandleUserKeyEvent(
+          native_event)) {
+    return true;
+  }
+
   int command_id;
   // Though AcceleratorManager should not send unknown |accelerator| to us, it's
   // still possible the command cannot be executed now.
-  if (!FindCommandIdForAccelerator(accelerator, &command_id))
+  if (!FindCommandIdForAccelerator(accelerator, &command_id)) {
     return false;
+  }
 
   UpdateAcceleratorMetrics(accelerator, command_id);
-  return chrome::ExecuteCommand(browser_.get(), command_id,
-                                accelerator.time_stamp());
+
+  if (command_id == IDC_CLEAR_BROWSING_DATA) {
+    views::ElementTrackerViews::GetInstance()->NotifyCustomEvent(
+        browsing_data_important_sites_util::
+            kOpenClearBrowsingDataDialogViaAcceleratorEventId,
+        this);
+  }
+
+  actions::ActionInvocationContext context;
+  context.SetProperty(chrome::kActionInvocationSourceKey,
+                      chrome::ActionInvocationSource::kKeyboardShortcut);
+
+  if (command_id == IDC_SHOW_READING_MODE_SIDE_PANEL) {
+    context.SetProperty(
+        kSidePanelOpenTriggerKey,
+        static_cast<std::underlying_type_t<SidePanelOpenTrigger>>(
+            SidePanelOpenTrigger::kReadAnythingKeyboardShortcut));
+  }
+
+  return chrome::ExecuteCommandWithContext(
+      browser_.get(), command_id, std::move(context), accelerator.time_stamp());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -4064,58 +5254,34 @@ void BrowserView::InfoBarContainerStateChanged(bool is_animating) {
   ToolbarSizeChanged(is_animating);
 }
 
-void BrowserView::MaybeInitializeWebUITabStrip() {
-#if BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
-  TRACE_EVENT0("ui", "BrowserView::MaybeInitializeWebUITabStrip");
-  if (browser_->CanSupportWindowFeature(Browser::FEATURE_TABSTRIP) &&
-      WebUITabStripContainerView::UseTouchableTabStrip(browser_.get())) {
-    if (!webui_tab_strip_) {
-      // We use |contents_container_| here so that enabling or disabling
-      // devtools won't affect the tab sizes. We still use only
-      // |contents_web_view_| for screenshotting and will adjust the
-      // screenshot accordingly. Ideally, the thumbnails should be sized
-      // based on a typical tab size, ignoring devtools or e.g. the
-      // downloads bar.
-      webui_tab_strip_ = top_container_->AddChildView(
-          std::make_unique<WebUITabStripContainerView>(
-              this, contents_container_, top_container_,
-              GetLocationBarView()->omnibox_view()));
-      loading_bar_ = top_container_->AddChildView(
-          std::make_unique<TopContainerLoadingBar>(browser_.get()));
-      loading_bar_->SetWebContents(GetActiveWebContents());
-    }
-  } else if (webui_tab_strip_) {
-    top_container_->RemoveChildView(webui_tab_strip_);
-    delete webui_tab_strip_;
-    webui_tab_strip_ = nullptr;
-
-    top_container_->RemoveChildView(loading_bar_);
-    delete loading_bar_;
-    loading_bar_ = nullptr;
-  }
-  GetBrowserViewLayout()->set_webui_tab_strip(webui_tab_strip_);
-  GetBrowserViewLayout()->set_loading_bar(loading_bar_);
-  if (toolbar_)
-    toolbar_->UpdateForWebUITabStrip();
-#endif  // BUILDFLAG(ENABLE_WEBUI_TAB_STRIP)
+void BrowserView::LoadingAnimationTimerCallback() {
+  LoadingAnimationCallback(base::TimeTicks::Now());
 }
 
-void BrowserView::LoadingAnimationCallback() {
-  if (GetSupportsTabStrip()) {
+void BrowserView::LoadingAnimationCallback(base::TimeTicks timestamp) {
+  // Loading callbacks may trigger during Widget destruction after it has closed
+  // (in response to visibility change callbacks for e.g.). In such cases early
+  // return to avoid dereferencing partially torn-down state.
+  if (!GetWidget() || GetWidget()->IsClosed()) {
+    return;
+  }
+
+  if (GetSupportsTabStrip() &&
+      !base::FeatureList::IsEnabled(features::kCompositorLoadingThrobber)) {
     // Loading animations are shown in the tab for tabbed windows. Update them
     // even if the tabstrip isn't currently visible so they're in the right
     // state when it returns.
-    tabstrip_->UpdateLoadingAnimations(base::TimeTicks::Now() -
-                                       loading_animation_start_);
+    tab_strip_view()->UpdateLoadingAnimations(timestamp -
+                                              loading_animation_start_);
   }
 
   if (ShouldShowWindowIcon()) {
     WebContents* web_contents =
-        browser_->tab_strip_model()->GetActiveWebContents();
+        browser_->GetTabStripModel()->GetActiveWebContents();
     // GetActiveWebContents can return null for example under Purify when
     // the animations are running slowly and this function is called on a timer
     // through LoadingAnimationCallback.
-    frame_->UpdateThrobber(web_contents && web_contents->IsLoading());
+    GetFrameView()->UpdateThrobber(web_contents && web_contents->IsLoading());
   }
 }
 
@@ -4123,174 +5289,258 @@ void BrowserView::LoadingAnimationCallback() {
 void BrowserView::CreateJumpList() {
   // Ensure that this browser's Profile has a JumpList so that the JumpList is
   // kept up to date.
-  JumpListFactory::GetForProfile(browser_->profile());
+  JumpListFactory::GetForProfile(browser_->GetProfile());
 }
 #endif
+
+bool BrowserView::ShouldShowAvatarToolbarIPH() {
+  if (GetGuestSession() || GetIncognito() || GetEnterpriseIsolatedMode()) {
+    return false;
+  }
+  AvatarToolbarButtonInterface* avatar_button =
+      ToolbarButtonProvider::From(browser_)->GetAvatarToolbarButtonInterface();
+  return avatar_button != nullptr;
+}
+
+BrowserFrameView* BrowserView::GetFrameView() {
+  return browser_widget_ ? browser_widget_->GetFrameView() : nullptr;
+}
+
+const BrowserFrameView* BrowserView::GetFrameView() const {
+  return browser_widget_ ? browser_widget_->GetFrameView() : nullptr;
+}
 
 BrowserViewLayout* BrowserView::GetBrowserViewLayout() const {
   return static_cast<BrowserViewLayout*>(GetLayoutManager());
 }
 
-ContentsLayoutManager* BrowserView::GetContentsLayoutManager() const {
-  return static_cast<ContentsLayoutManager*>(
-      contents_container_->GetLayoutManager());
-}
-
 bool BrowserView::MaybeShowBookmarkBar(WebContents* contents) {
   const bool show_bookmark_bar =
-      contents && browser_->SupportsWindowFeature(Browser::FEATURE_BOOKMARKBAR);
-  if (!show_bookmark_bar && !bookmark_bar_view_.get())
+      contents &&
+      WindowFeatureController::From(browser_)->SupportsWindowFeature(
+          WindowFeatureController::WindowFeature::kFeatureBookmarkBar);
+  if (!show_bookmark_bar && !bookmark_bar_view_) {
     return false;
-  if (!bookmark_bar_view_.get()) {
-    bookmark_bar_view_ =
-        std::make_unique<BookmarkBarView>(browser_.get(), this);
-    bookmark_bar_view_->set_owned_by_client();
-    bookmark_bar_view_->SetBookmarkBarState(
-        browser_->bookmark_bar_state(),
-        BookmarkBar::DONT_ANIMATE_STATE_CHANGE);
-    GetBrowserViewLayout()->set_bookmark_bar(bookmark_bar_view_.get());
   }
-  // Don't change the visibility of the BookmarkBarView. BrowserViewLayout
-  // handles it.
-  bookmark_bar_view_->SetPageNavigator(GetActiveWebContents());
 
-  // Update parenting for the bookmark bar. This may detach it from all views.
-  bool needs_layout = false;
-  views::View* new_parent = nullptr;
-  if (show_bookmark_bar) {
-    new_parent = top_container_;
+  if (!bookmark_bar_view_) {
+    auto* factory = UIControllerFactory::From(browser_.get());
+    auto controller = factory->CreateBookmarkBarController();
+    detached_bookmark_bar_view_ = std::make_unique<BookmarkBarView>(
+        browser_.get(), std::move(controller), this);
+    bookmark_bar_view_ = detached_bookmark_bar_view_.get();
+    bookmark_bar_view_->SetBookmarkBarState(
+        bookmark_bar_state(), BookmarkBar::DONT_ANIMATE_STATE_CHANGE);
+    GetBrowserViewLayout()->set_bookmark_bar(bookmark_bar_view_);
   }
-  if (new_parent != bookmark_bar_view_->parent()) {
-    if (new_parent == top_container_) {
-      // BookmarkBarView is attached.
-      new_parent->AddChildView(bookmark_bar_view_.get());
-    } else {
-      DCHECK(!new_parent);
-      // Bookmark bar is being detached from all views because it is hidden.
-      bookmark_bar_view_->parent()->RemoveChildView(bookmark_bar_view_.get());
-    }
+
+  // BrowserViewLayout is responsible for handling the final visibility and
+  // animation of the BookmarkBar.
+  bool needs_layout = false;
+  if (show_bookmark_bar && detached_bookmark_bar_view_) {
+    // Add the bookmark bar to the view hierarchy if it might be shown.
+    top_container_->AddChildView(std::move(detached_bookmark_bar_view_));
+    // Make sure the contents separator is painted last as the background for
+    // BookmarkVieBar may paint over it otherwise.
+    top_container_->ReorderChildView(top_container_separator_,
+                                     top_container_->children().size());
+    needs_layout = true;
+  } else if (!show_bookmark_bar && !detached_bookmark_bar_view_) {
+    // Remove the bookmark bar from the view hierarchy if it should be hidden.
+    detached_bookmark_bar_view_ =
+        top_container_->RemoveChildViewT(bookmark_bar_view_);
     needs_layout = true;
   }
 
   // Check for updates to the desired size.
   if (bookmark_bar_view_->GetPreferredSize().height() !=
-      bookmark_bar_view_->height())
+      bookmark_bar_view_->height()) {
     needs_layout = true;
+  }
 
   return needs_layout;
 }
 
 bool BrowserView::MaybeShowInfoBar(WebContents* contents) {
   // TODO(beng): Remove this function once the interface between
-  //             InfoBarContainer, DownloadShelfView and WebContents and this
+  //             InfoBarContainer and WebContents and this
   //             view is sorted out.
   return true;
 }
 
-void BrowserView::UpdateDevToolsForContents(
-    WebContents* web_contents, bool update_devtools_web_contents) {
-  DevToolsContentsResizingStrategy strategy;
-  WebContents* devtools = DevToolsWindow::GetInTabWebContents(
-      web_contents, &strategy);
+bool BrowserView::MaybeUpdateSplitView(content::WebContents* contents) {
+  const bool current_state = multi_contents_view_->IsInSplitView();
+  const tabs::TabInterface* const new_tab =
+      contents ? tabs::TabInterface::GetFromContents(contents) : nullptr;
+  const bool updated_state =
+      new_tab && new_tab->IsSplit() &&
+      !exclusive_access_context_->GetExclusiveAccessManager()
+           ->fullscreen_controller()
+           ->IsTabFullscreen();
 
-  if (!devtools_web_view_->web_contents() && devtools &&
-      !devtools_focus_tracker_.get()) {
-    // Install devtools focus tracker when dev tools window is shown for the
-    // first time.
-    devtools_focus_tracker_ = std::make_unique<views::ExternalFocusTracker>(
-        devtools_web_view_, GetFocusManager());
-  }
-
-  // Restore focus to the last focused view when hiding devtools window.
-  if (devtools_web_view_->web_contents() && !devtools &&
-      devtools_focus_tracker_.get()) {
-    devtools_focus_tracker_->FocusLastFocusedExternalView();
-    devtools_focus_tracker_.reset();
-  }
-
-  // Replace devtools WebContents.
-  if (devtools_web_view_->web_contents() != devtools &&
-      update_devtools_web_contents) {
-    devtools_web_view_->SetWebContents(devtools);
-  }
-
-  if (devtools) {
-    devtools_web_view_->SetVisible(true);
-    GetContentsLayoutManager()->SetContentsResizingStrategy(strategy);
+  if (updated_state) {
+    split_tabs::SplitTabData* split_data =
+        browser_->GetTabStripModel()->GetSplitData(new_tab->GetSplit().value());
+    multi_contents_view_->ShowSplitView(*split_data->visual_data());
+  } else if (current_state != updated_state) {
+    multi_contents_view_->CloseSplitView();
   } else {
-    devtools_web_view_->SetVisible(false);
-    GetContentsLayoutManager()->SetContentsResizingStrategy(
-        DevToolsContentsResizingStrategy());
+    return false;
   }
-  contents_container_->Layout();
 
-  if (devtools) {
-    // When strategy.hide_inspected_contents() returns true, we are hiding
-    // contents_web_view_ behind the devtools_web_view_. Otherwise,
-    // contents_web_view_ should be right above the devtools_web_view_.
-    size_t devtools_index =
-        contents_container_->GetIndexOf(devtools_web_view_).value();
-    size_t contents_index =
-        contents_container_->GetIndexOf(contents_web_view_).value();
-    bool devtools_is_on_top = devtools_index > contents_index;
-    if (strategy.hide_inspected_contents() != devtools_is_on_top)
-      contents_container_->ReorderChildView(contents_web_view_, devtools_index);
-  }
+  return true;
 }
 
-void BrowserView::UpdateUIForContents(WebContents* contents) {
+bool BrowserView::MaybeUpdateDevtools(content::WebContents* contents) {
+  const tabs::TabInterface* const new_tab =
+      contents ? tabs::TabInterface::GetFromContents(contents) : nullptr;
+  auto* devtools_ui_controller = DevtoolsUIController::From(browser_.get());
+  if (!devtools_ui_controller) {
+    return false;
+  }
+
+  bool devtools_layout_updated = false;
+  if (IsInSplitView()) {
+    std::optional<split_tabs::SplitTabId> split_tab_id = new_tab->GetSplit();
+    CHECK(split_tab_id.has_value());
+    split_tabs::SplitTabData* split_data =
+        browser_->GetTabStripModel()->GetSplitData(split_tab_id.value());
+    std::vector<tabs::TabInterface*> split_tabs = split_data->ListTabs();
+    for (tabs::TabInterface* tab : split_tabs) {
+      devtools_layout_updated |=
+          devtools_ui_controller->UpdateDevtools(tab->GetContents(), false);
+    }
+  } else {
+    devtools_layout_updated =
+        devtools_ui_controller->UpdateDevtools(contents, false);
+  }
+  return devtools_layout_updated;
+}
+
+void BrowserView::UpdateUIForContents(WebContents* contents,
+                                      bool should_layout_immediately) {
   TRACE_EVENT0("ui", "BrowserView::UpdateUIForContents");
   bool needs_layout = MaybeShowBookmarkBar(contents);
+
   // TODO(jamescook): This function always returns true. Remove it and figure
   // out when layout is actually required.
   needs_layout |= MaybeShowInfoBar(contents);
-  if (needs_layout)
-    Layout();
+
+  needs_layout |= MaybeUpdateSplitView(contents);
+
+  needs_layout |= MaybeUpdateDevtools(contents);
+
+  if (needs_layout) {
+    if (should_layout_immediately) {
+      DeprecatedLayoutImmediately();
+    } else {
+      InvalidateLayout();
+    }
+  }
 }
 
-void BrowserView::ProcessFullscreen(bool fullscreen,
-                                    const GURL& url,
-                                    ExclusiveAccessBubbleType bubble_type,
-                                    const int64_t display_id) {
-  if (in_process_fullscreen_)
-    return;
-  in_process_fullscreen_ = true;
+void BrowserView::UpdateFastResizeForContentViews(bool fast_resize) {
+  for (auto* contents_web_view : GetAllVisibleContentsWebViews()) {
+    contents_web_view->SetFastResize(fast_resize);
+  }
+}
 
-  if (top_controls_slide_controller_)
+int BrowserView::GetClientAreaTop() {
+  views::View* top_view = toolbar_;
+
+  // Get the top of the top view in browser view coordinates.
+  return views::View::ConvertPointToTarget(top_view, this, top_view->origin())
+      .y();
+}
+
+void BrowserView::PrepareFullscreen(bool fullscreen) {
+  if (top_controls_slide_controller_) {
     top_controls_slide_controller_->OnBrowserFullscreenStateWillChange(
         fullscreen);
+  }
 
   // Reduce jankiness during the following position changes by:
   //   * Hiding the window until it's in the final position
-  //   * Ignoring all intervening Layout() calls, which resize the webpage and
-  //     thus are slow and look ugly (enforced via |in_process_fullscreen_|).
+  //   * Ignoring all intervening layout attempts, which would resize the
+  //     webpage and thus are slow and look ugly (enforced via
+  //     |in_process_fullscreen_|).
   if (fullscreen) {
     // Move focus out of the location bar if necessary.
-    views::FocusManager* focus_manager = GetFocusManager();
-    DCHECK(focus_manager);
-    // Look for focus in the location bar itself or any child view.
-    if (GetLocationBarView()->Contains(focus_manager->GetFocusedView()))
+    LocationBar* location_bar = GetLocationBar();
+    if (location_bar && location_bar->IsFocusWithin()) {
+      views::FocusManager* focus_manager = GetFocusManager();
+      DCHECK(focus_manager);
       focus_manager->ClearFocus();
+    }
 
-    fullscreen_control_host_ = std::make_unique<FullscreenControlHost>(this);
+    if (auto* const fullscreen_control_host =
+            FullscreenControlHost::From(browser_.get())) {
+      fullscreen_control_host->OnEnterFullscreen();
+    }
   } else {
     // Hide the fullscreen bubble as soon as possible, since the mode toggle can
     // take enough time for the user to notice.
-    exclusive_access_bubble_.reset();
+    exclusive_access_context_->DestroyAnyExclusiveAccessBubble();
 
-    if (fullscreen_control_host_) {
-      fullscreen_control_host_->Hide(false);
-      fullscreen_control_host_.reset();
+    if (auto* const fullscreen_control_host =
+            FullscreenControlHost::From(browser_.get())) {
+      fullscreen_control_host->OnExitFullscreen();
+    }
+
+    // Clear the active web contents when exiting a tab fullscreen to prepare
+    // to reshow the split view after toolbar sizing.
+    const tabs::TabInterface* active_tab =
+        browser_->GetTabStripModel()->GetActiveTab();
+    if (!IsInSplitView() && active_tab && active_tab->IsSplit()) {
+      multi_contents_view_->GetActiveContentsView()->SetWebContents(nullptr);
     }
   }
+}
 
-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS_ASH)
+void BrowserView::ProcessFullscreen(bool fullscreen, const int64_t display_id) {
+  CHECK(!base::FeatureList::IsEnabled(features::kAsyncFullscreenWindowState));
+
+  if (in_process_fullscreen_) {
+    return;
+  }
+  in_process_fullscreen_ = true;
+
+  PrepareFullscreen(fullscreen);
+
+  // TODO(b/40276379): Move this out from ProcessFullscreen.
+  RequestFullscreen(fullscreen, display_id);
+
+#if !BUILDFLAG(IS_MAC)
+  // On Mac platforms, FullscreenStateChanged() is invoked from
+  // BrowserNativeWidgetMac::OnWindowFullscreenTransitionComplete when the
+  // asynchronous fullscreen transition is complete. On other platforms, there
+  // is no asynchronous transition so we synchronously invoke the function.
+  FullscreenStateChanged();
+#endif
+
+  // Undo our anti-jankiness hacks and force a re-layout.
+  in_process_fullscreen_ = false;
+  ToolbarSizeChanged(false);
+  GetFrameView()->OnFullscreenStateChanged();
+
+  // Reshow the split view after completing the toolbar sizing.
+  const tabs::TabInterface* active_tab =
+      browser_->GetTabStripModel()->GetActiveTab();
+  if (!fullscreen && active_tab && active_tab->IsSplit()) {
+    ShowSplitView(GetActiveContentsWebView()->HasFocus() ||
+                  !GetFocusManager()->GetFocusedView());
+  }
+}
+
+void BrowserView::RequestFullscreen(bool fullscreen, int64_t display_id) {
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
   // Request target display fullscreen from lower layers on supported platforms.
-  frame_->SetFullscreen(fullscreen, display_id);
-#else   // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS_ASH)
-  // TODO(crbug.com/1034783): Reimplement this at lower layers on all platforms.
+  browser_widget_->SetFullscreen(fullscreen, display_id);
+#else   // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+  // TODO(crbug.com/40111909): Reimplement this at lower layers on all
+  // platforms.
   if (fullscreen && display_id != display::kInvalidDisplayId) {
-    display::Screen* screen = display::Screen::GetScreen();
+    display::Screen* screen = display::Screen::Get();
     display::Display display;
     display::Display current_display =
         screen->GetDisplayNearestWindow(GetNativeWindow());
@@ -4298,7 +5548,7 @@ void BrowserView::ProcessFullscreen(bool fullscreen,
         current_display.id() != display_id) {
       // Fullscreen windows must exit fullscreen to move to another display.
       if (IsFullscreen()) {
-        frame_->SetFullscreen(false);
+        browser_widget_->SetFullscreen(false);
 
         // Activate the window to give it input focus and bring it to the front
         // of the z-order. This prevents an inactive fullscreen window from
@@ -4312,117 +5562,78 @@ void BrowserView::ProcessFullscreen(bool fullscreen,
       if (restore_pre_fullscreen_bounds_callback_.is_null()) {
         // Use GetBounds(), rather than GetRestoredBounds(), when the window is
         // not maximized, to restore snapped window bounds on fullscreen exit.
-        // TODO(crbug.com/1034783): Support lower-layer fullscreen-on-display.
+        // TODO(crbug.com/40111909): Support lower-layer fullscreen-on-display.
         const gfx::Rect bounds_to_restore =
             was_maximized ? GetRestoredBounds() : GetBounds();
         restore_pre_fullscreen_bounds_callback_ = base::BindOnce(
             [](base::WeakPtr<BrowserView> view, const gfx::Rect& bounds,
                bool maximize) {
-              if (view && view->frame()) {
+              if (view && view->browser_widget()) {
                 // Adjust restored bounds to be on-screen, in case the original
                 // screen was disconnected or repositioned during fullscreen.
-                view->frame()->SetBoundsConstrained(bounds);
-                if (maximize)
+                view->browser_widget()->SetBoundsConstrained(bounds);
+                if (maximize) {
                   view->Maximize();
+                }
               }
             },
             weak_ptr_factory_.GetWeakPtr(), bounds_to_restore, was_maximized);
       }
 
       // Restore the window as needed, so it can be moved to the target display.
-      // TODO(crbug.com/1250088): Support cross-display fullscreen for Lacros.
-      // TODO(crbug.com/1034783): Support lower-layer fullscreen-on-display.
+      // TODO(crbug.com/40111909): Support lower-layer fullscreen-on-display.
       if (was_maximized) {
         Restore();
       }
       SetBounds({display.work_area().origin(),
-                 frame_->GetWindowBoundsInScreen().size()});
+                 browser_widget_->GetWindowBoundsInScreen().size()});
     }
   }
-  frame_->SetFullscreen(fullscreen);
-  if (!fullscreen && restore_pre_fullscreen_bounds_callback_)
+  browser_widget_->SetFullscreen(fullscreen);
+  if (!fullscreen && restore_pre_fullscreen_bounds_callback_) {
     std::move(restore_pre_fullscreen_bounds_callback_).Run();
-#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS_ASH)
-
-  // Enable immersive before the browser refreshes its list of enabled commands.
-  const bool should_stay_in_immersive =
-      !fullscreen &&
-      immersive_mode_controller_->ShouldStayImmersiveAfterExitingFullscreen();
-  // Never use immersive in locked fullscreen as it allows the user to exit the
-  // locked mode.
-  if (platform_util::IsBrowserLockedFullscreen(browser_.get())) {
-    immersive_mode_controller_->SetEnabled(false);
-  } else if (ShouldUseImmersiveFullscreenForUrl(url) &&
-             !should_stay_in_immersive) {
-    immersive_mode_controller_->SetEnabled(fullscreen);
   }
-
-#if !BUILDFLAG(IS_MAC)
-  // On Mac platforms, FullscreenStateChanged() is invoked from
-  // BrowserFrameMac::OnWindowFullscreenTransitionComplete when the asynchronous
-  // fullscreen transition is complete. On other platforms, there is no
-  // asynchronous transition so we synchronously invoke the function.
-  FullscreenStateChanged();
-#endif
-
-  // Undo our anti-jankiness hacks and force a re-layout.
-  in_process_fullscreen_ = false;
-  ToolbarSizeChanged(false);
-  frame_->GetFrameView()->OnFullscreenStateChanged();
+#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
 }
-
-bool BrowserView::ShouldUseImmersiveFullscreenForUrl(const GURL& url) const {
-#if BUILDFLAG(IS_CHROMEOS)
-  // Kiosk mode needs the whole screen.
-  if (chrome::IsRunningInAppMode())
-    return false;
-  return url.is_empty();
-#else
-  // No immersive except in Chrome OS.
-  return false;
-#endif
-}
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-namespace {
-bool ShouldBeHandledByLacrosInstead(int command) {
-  switch (command) {
-    case IDC_NEW_INCOGNITO_WINDOW:
-    case IDC_NEW_TAB:
-    case IDC_NEW_WINDOW:
-    case IDC_RESTORE_TAB:
-      // TODO(neis): Add more here, perhaps anything tab-related.
-      return true;
-    default:
-      return false;
-  }
-}
-}  // namespace
-#endif
 
 void BrowserView::LoadAccelerators() {
   views::FocusManager* focus_manager = GetFocusManager();
   DCHECK(focus_manager);
 
   // Let's fill our own accelerator table.
-  const bool is_app_mode = chrome::IsRunningInForcedAppMode();
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  const bool is_lacros_only = !crosapi::browser_util::IsAshWebBrowserEnabled();
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+  const bool is_app_mode = IsRunningInForcedAppMode();
+#if BUILDFLAG(IS_CHROMEOS)
+  const bool is_captive_portal_signin_window =
+      browser_->GetProfile()->IsOffTheRecord() &&
+      browser_->GetProfile()->GetOTRProfileID().IsCaptivePortal();
+#endif
   const std::vector<AcceleratorMapping> accelerator_list(GetAcceleratorList());
   for (const auto& entry : accelerator_list) {
-    // In app mode, only allow accelerators of white listed commands to pass
+    // In app mode, only allow accelerators of allowlisted commands to pass
     // through.
-    if (is_app_mode && !chrome::IsCommandAllowedInAppMode(
-                           entry.command_id, browser()->is_type_popup()))
+    if (is_app_mode &&
+        !IsCommandAllowedInAppMode(
+            entry.command_id,
+            browser()->GetType() == BrowserWindowInterface::Type::TYPE_POPUP)) {
       continue;
+    }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-    // When Lacros is the only browser, disable some browser commands in Ash so
-    // that Lacros can handle them instead.
-    if (is_lacros_only && ShouldBeHandledByLacrosInstead(entry.command_id))
-      continue;
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
+    if (is_captive_portal_signin_window) {
+      int command = entry.command_id;
+      // Captive portal signin uses an OTR profile without history.
+      if (command == IDC_SHOW_HISTORY) {
+        continue;
+      }
+      // The NewTab command expects navigation to occur in the same browser
+      // window. For captive portal signin this is not the case, so hide these
+      // to reduce confusion.
+      if (command == IDC_NEW_TAB || command == IDC_NEW_TAB_TO_RIGHT ||
+          command == IDC_CREATE_NEW_TAB_GROUP) {
+        continue;
+      }
+    }
+#endif
 
     ui::Accelerator accelerator(entry.keycode, entry.modifiers);
     accelerator_table_[accelerator] = entry.command_id;
@@ -4431,6 +5642,22 @@ void BrowserView::LoadAccelerators() {
     focus_manager->RegisterAccelerator(
         accelerator, ui::AcceleratorManager::kNormalPriority, this);
   }
+
+  // Register the Esc accelerators (both press and release) to ensure they are
+  // sent to the ExclusiveAccessManager for press-and-hold fullscreen exit.
+  ui::Accelerator escape_pressed(ui::VKEY_ESCAPE, ui::EF_NONE,
+                                 ui::Accelerator::KeyState::PRESSED);
+  if (accelerator_table_.find(escape_pressed) == accelerator_table_.end()) {
+    focus_manager->RegisterAccelerator(
+        escape_pressed, ui::AcceleratorManager::kNormalPriority, this);
+  }
+
+  ui::Accelerator escape_released(ui::VKEY_ESCAPE, ui::EF_NONE,
+                                  ui::Accelerator::KeyState::RELEASED);
+  if (accelerator_table_.find(escape_released) == accelerator_table_.end()) {
+    focus_manager->RegisterAccelerator(
+        escape_released, ui::AcceleratorManager::kNormalPriority, this);
+  }
 }
 
 int BrowserView::GetCommandIDForAppCommandID(int app_command_id) const {
@@ -4438,27 +5665,43 @@ int BrowserView::GetCommandIDForAppCommandID(int app_command_id) const {
   switch (app_command_id) {
     // NOTE: The order here matches the APPCOMMAND declaration order in the
     // Windows headers.
-    case APPCOMMAND_BROWSER_BACKWARD: return IDC_BACK;
-    case APPCOMMAND_BROWSER_FORWARD:  return IDC_FORWARD;
-    case APPCOMMAND_BROWSER_REFRESH:  return IDC_RELOAD;
-    case APPCOMMAND_BROWSER_HOME:     return IDC_HOME;
-    case APPCOMMAND_BROWSER_STOP:     return IDC_STOP;
-    case APPCOMMAND_BROWSER_SEARCH:   return IDC_FOCUS_SEARCH;
-    case APPCOMMAND_HELP:             return IDC_HELP_PAGE_VIA_KEYBOARD;
-    case APPCOMMAND_NEW:              return IDC_NEW_TAB;
-    case APPCOMMAND_OPEN:             return IDC_OPEN_FILE;
-    case APPCOMMAND_CLOSE:            return IDC_CLOSE_TAB;
-    case APPCOMMAND_SAVE:             return IDC_SAVE_PAGE;
-    case APPCOMMAND_PRINT:            return IDC_PRINT;
-    case APPCOMMAND_COPY:             return IDC_COPY;
-    case APPCOMMAND_CUT:              return IDC_CUT;
-    case APPCOMMAND_PASTE:            return IDC_PASTE;
+    case APPCOMMAND_BROWSER_BACKWARD:
+      return IDC_BACK;
+    case APPCOMMAND_BROWSER_FORWARD:
+      return IDC_FORWARD;
+    case APPCOMMAND_BROWSER_REFRESH:
+      return IDC_RELOAD;
+    case APPCOMMAND_BROWSER_HOME:
+      return IDC_HOME;
+    case APPCOMMAND_BROWSER_STOP:
+      return IDC_STOP;
+    case APPCOMMAND_BROWSER_SEARCH:
+      return IDC_FOCUS_SEARCH;
+    case APPCOMMAND_HELP:
+      return IDC_HELP_PAGE_VIA_KEYBOARD;
+    case APPCOMMAND_NEW:
+      return IDC_NEW_TAB;
+    case APPCOMMAND_OPEN:
+      return IDC_OPEN_FILE;
+    case APPCOMMAND_CLOSE:
+      return IDC_CLOSE_TAB;
+    case APPCOMMAND_SAVE:
+      return IDC_SAVE_PAGE;
+    case APPCOMMAND_PRINT:
+      return IDC_PRINT;
+    case APPCOMMAND_COPY:
+      return IDC_COPY;
+    case APPCOMMAND_CUT:
+      return IDC_CUT;
+    case APPCOMMAND_PASTE:
+      return IDC_PASTE;
 
       // TODO(pkasting): http://b/1113069 Handle these.
     case APPCOMMAND_UNDO:
     case APPCOMMAND_REDO:
     case APPCOMMAND_SPELL_CHECK:
-    default:                          return -1;
+    default:
+      return -1;
   }
 #else
   // App commands are Windows-specific so there's nothing to do here.
@@ -4468,60 +5711,82 @@ int BrowserView::GetCommandIDForAppCommandID(int app_command_id) const {
 
 void BrowserView::UpdateAcceleratorMetrics(const ui::Accelerator& accelerator,
                                            int command_id) {
+  if (!accelerator.IsRepeat()) {
+    base::UmaHistogramSparse("Browser.Shortcuts.TriggeredCommandId",
+                             command_id);
+  }
+
   const ui::KeyboardCode key_code = accelerator.key_code();
-  if (command_id == IDC_HELP_PAGE_VIA_KEYBOARD && key_code == ui::VKEY_F1)
+  if (command_id == IDC_HELP_PAGE_VIA_KEYBOARD && key_code == ui::VKEY_F1) {
     base::RecordAction(UserMetricsAction("ShowHelpTabViaF1"));
+  }
 
   if (command_id == IDC_BOOKMARK_THIS_TAB) {
     UMA_HISTOGRAM_ENUMERATION("Bookmarks.EntryPoint",
                               BookmarkEntryPoint::kAccelerator);
   }
   if (command_id == IDC_NEW_TAB &&
-      browser_->SupportsWindowFeature(Browser::FEATURE_TABSTRIP)) {
-    TabStripModel* const model = browser_->tab_strip_model();
+      WindowFeatureController::From(browser_)->SupportsWindowFeature(
+          WindowFeatureController::WindowFeature::kFeatureTabStrip)) {
+    TabStripModel* const model = browser_->GetTabStripModel();
     const auto group_id = model->GetTabGroupForTab(model->active_index());
-    if (group_id.has_value())
+    if (group_id.has_value()) {
       base::RecordAction(base::UserMetricsAction("Accel_NewTabInGroup"));
+    }
   }
 
   if (command_id == IDC_NEW_INCOGNITO_WINDOW) {
     base::RecordAction(base::UserMetricsAction("Accel_NewIncognitoWindow"));
   }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+  if (command_id == IDC_FULLSCREEN) {
+    if (browser_->GetWindow()->IsFullscreen()) {
+      base::RecordAction(base::UserMetricsAction("ExitFullscreen_Accelerator"));
+    } else {
+      base::RecordAction(
+          base::UserMetricsAction("EnterFullscreen_Accelerator"));
+    }
+  }
+
+#if BUILDFLAG(IS_CHROMEOS)
   // Collect information about the relative popularity of various accelerators
   // on Chrome OS.
   switch (command_id) {
     case IDC_BACK:
-      if (key_code == ui::VKEY_BROWSER_BACK)
+      if (key_code == ui::VKEY_BROWSER_BACK) {
         base::RecordAction(UserMetricsAction("Accel_Back_F1"));
-      else if (key_code == ui::VKEY_LEFT)
+      } else if (key_code == ui::VKEY_LEFT) {
         base::RecordAction(UserMetricsAction("Accel_Back_Left"));
+      }
       break;
     case IDC_FORWARD:
-      if (key_code == ui::VKEY_BROWSER_FORWARD)
+      if (key_code == ui::VKEY_BROWSER_FORWARD) {
         base::RecordAction(UserMetricsAction("Accel_Forward_F2"));
-      else if (key_code == ui::VKEY_RIGHT)
+      } else if (key_code == ui::VKEY_RIGHT) {
         base::RecordAction(UserMetricsAction("Accel_Forward_Right"));
+      }
       break;
     case IDC_RELOAD:
     case IDC_RELOAD_BYPASSING_CACHE:
-      if (key_code == ui::VKEY_R)
+      if (key_code == ui::VKEY_R) {
         base::RecordAction(UserMetricsAction("Accel_Reload_R"));
-      else if (key_code == ui::VKEY_BROWSER_REFRESH)
+      } else if (key_code == ui::VKEY_BROWSER_REFRESH) {
         base::RecordAction(UserMetricsAction("Accel_Reload_F3"));
+      }
       break;
     case IDC_FOCUS_LOCATION:
-      if (key_code == ui::VKEY_D)
+      if (key_code == ui::VKEY_D) {
         base::RecordAction(UserMetricsAction("Accel_FocusLocation_D"));
-      else if (key_code == ui::VKEY_L)
+      } else if (key_code == ui::VKEY_L) {
         base::RecordAction(UserMetricsAction("Accel_FocusLocation_L"));
+      }
       break;
     case IDC_FOCUS_SEARCH:
-      if (key_code == ui::VKEY_E)
+      if (key_code == ui::VKEY_E) {
         base::RecordAction(UserMetricsAction("Accel_FocusSearch_E"));
-      else if (key_code == ui::VKEY_K)
+      } else if (key_code == ui::VKEY_K) {
         base::RecordAction(UserMetricsAction("Accel_FocusSearch_K"));
+      }
       break;
     default:
       // Do nothing.
@@ -4531,42 +5796,83 @@ void BrowserView::UpdateAcceleratorMetrics(const ui::Accelerator& accelerator,
 }
 
 void BrowserView::ShowAvatarBubbleFromAvatarButton(bool is_source_accelerator) {
-  ProfileMenuCoordinator::GetOrCreateForBrowser(browser())->Show(
-      is_source_accelerator);
+  // TODO(b/323362927): rename the function and equivalent shortcut ID name to
+  // be more precise -- about being the same as button being pressed instead of
+  // just showing the avatar bubble since the action can be modified within the
+  // button itself, like dismissing some other bubbles.
+  if (AvatarToolbarButtonInterface* avatar_button =
+          ToolbarButtonProvider::From(browser_)
+              ->GetAvatarToolbarButtonInterface()) {
+    avatar_button->ButtonPressed(is_source_accelerator);
+    return;
+  }
+
+  // Default behavior -- show the profile menu.
+  ProfileMenuCoordinator::From(browser())->Show(is_source_accelerator);
 }
 
 void BrowserView::MaybeShowProfileSwitchIPH() {
-  if (GetGuestSession() || GetIncognito())
+  if (!ShouldShowAvatarToolbarIPH()) {
     return;
-  AvatarToolbarButton* avatar_button =
-      toolbar_button_provider_
-          ? toolbar_button_provider_->GetAvatarToolbarButton()
-          : nullptr;
-  if (avatar_button)
-    avatar_button->MaybeShowProfileSwitchIPH();
+  }
+  ToolbarButtonProvider::From(browser_)
+      ->GetAvatarToolbarButtonInterface()
+      ->MaybeShowProfileSwitchIPH();
+}
+
+void BrowserView::MaybeShowSupervisedUserProfileSignInIPH() {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  if (!ShouldShowAvatarToolbarIPH()) {
+    return;
+  }
+  ToolbarButtonProvider::From(browser_)
+      ->GetAvatarToolbarButtonInterface()
+      ->MaybeShowSupervisedUserSignInIPH();
+#endif
+}
+
+void BrowserView::MaybeShowSignInBenefitsIPH() {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  if (!ShouldShowAvatarToolbarIPH()) {
+    return;
+  }
+  ToolbarButtonProvider::From(browser_)
+      ->GetAvatarToolbarButtonInterface()
+      ->MaybeShowSignInBenefitsIPH();
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 }
 
 void BrowserView::ShowHatsDialog(
     const std::string& site_id,
+    const std::optional<std::string>& hats_histogram_name,
+    const std::optional<uint64_t> hats_survey_ukm_id,
     base::OnceClosure success_callback,
     base::OnceClosure failure_callback,
     const SurveyBitsData& product_specific_bits_data,
     const SurveyStringData& product_specific_string_data) {
   // Self deleting on close.
-  new HatsNextWebDialog(browser(), site_id, std::move(success_callback),
+  new HatsNextWebDialog(browser(), site_id, hats_histogram_name,
+                        hats_survey_ukm_id, std::move(success_callback),
                         std::move(failure_callback), product_specific_bits_data,
                         product_specific_string_data);
 }
 
 void BrowserView::ShowIncognitoClearBrowsingDataDialog() {
-  IncognitoClearBrowsingDataDialogCoordinator::GetOrCreateForBrowser(browser())
-      ->Show(IncognitoClearBrowsingDataDialogInterface::Type::kDefaultBubble);
+  CHECK(ToolbarButtonProvider::From(browser_));
+  IncognitoClearBrowsingDataDialogCoordinator::From(browser())->Show(
+      IncognitoClearBrowsingDataDialogInterface::Type::kDefaultBubble,
+      ToolbarButtonProvider::From(browser_)
+          ->GetAvatarToolbarButtonInterface()
+          ->GetBubbleAnchor(*browser()));
 }
 
 void BrowserView::ShowIncognitoHistoryDisclaimerDialog() {
-  IncognitoClearBrowsingDataDialogCoordinator::GetOrCreateForBrowser(browser())
-      ->Show(IncognitoClearBrowsingDataDialogInterface::Type::
-                 kHistoryDisclaimerBubble);
+  CHECK(ToolbarButtonProvider::From(browser_));
+  IncognitoClearBrowsingDataDialogCoordinator::From(browser())->Show(
+      IncognitoClearBrowsingDataDialogInterface::Type::kHistoryDisclaimerBubble,
+      ToolbarButtonProvider::From(browser_)
+          ->GetAvatarToolbarButtonInterface()
+          ->GetBubbleAnchor(*browser()));
 }
 
 void BrowserView::UpdateWebAppStatusIconsVisiblity() {
@@ -4576,18 +5882,27 @@ void BrowserView::UpdateWebAppStatusIconsVisiblity() {
 }
 
 ExclusiveAccessContext* BrowserView::GetExclusiveAccessContext() {
-  return this;
+  return exclusive_access_context_.get();
 }
 
 std::string BrowserView::GetWorkspace() const {
-  return frame_->GetWorkspace();
+  return browser_widget_->GetWorkspace();
 }
 
 bool BrowserView::IsVisibleOnAllWorkspaces() const {
-  return frame_->IsVisibleOnAllWorkspaces();
+  return browser_widget_->IsVisibleOnAllWorkspaces();
 }
 
 void BrowserView::ShowEmojiPanel() {
+  // Unlike modal dialogs (which drop fullscreen via SetWebContentsBlocked),
+  // the emoji panel is non-modal UI that can interfere with the fullscreen
+  // bubble. Drop fullscreen when showing the emoji panel to prevent UI
+  // spoofing.
+  if (content::WebContents* web_contents = GetActiveWebContents()) {
+    if (!web_contents->ForSecurityDropFullscreen(display::kInvalidDisplayId)) {
+      return;
+    }
+  }
   GetWidget()->ShowEmojiPanel();
 }
 
@@ -4602,88 +5917,20 @@ std::unique_ptr<content::EyeDropper> BrowserView::OpenEyeDropper(
   return ShowEyeDropper(frame, listener);
 }
 
-BrowserFeaturePromoController* BrowserView::GetFeaturePromoController() {
-  return feature_promo_controller_.get();
-}
-
-bool BrowserView::IsFeaturePromoActive(const base::Feature& iph_feature) const {
-  return feature_promo_controller_ &&
-         feature_promo_controller_->IsPromoActive(
-             iph_feature, user_education::FeaturePromoStatus::kContinued);
-}
-
-bool BrowserView::MaybeShowFeaturePromo(
-    const base::Feature& iph_feature,
-    user_education::FeaturePromoSpecification::StringReplacements
-        body_text_replacements,
-    user_education::FeaturePromoController::BubbleCloseCallback
-        close_callback) {
-  return feature_promo_controller_ &&
-         feature_promo_controller_->MaybeShowPromo(
-             iph_feature, body_text_replacements, std::move(close_callback));
-}
-
-bool BrowserView::MaybeShowStartupFeaturePromo(
-    const base::Feature& iph_feature,
-    user_education::FeaturePromoSpecification::StringReplacements
-        body_text_replacements,
-    user_education::FeaturePromoController::StartupPromoCallback promo_callback,
-    user_education::FeaturePromoController::BubbleCloseCallback
-        close_callback) {
-  return feature_promo_controller_ &&
-         feature_promo_controller_->MaybeShowStartupPromo(
-             iph_feature, body_text_replacements, std::move(promo_callback),
-             std::move(close_callback));
-}
-
-bool BrowserView::CloseFeaturePromo(const base::Feature& iph_feature) {
-  return feature_promo_controller_ &&
-         feature_promo_controller_->EndPromo(iph_feature);
-}
-
-user_education::FeaturePromoHandle BrowserView::CloseFeaturePromoAndContinue(
-    const base::Feature& iph_feature) {
-  if (!feature_promo_controller_ ||
-      feature_promo_controller_->GetPromoStatus(iph_feature) !=
-          user_education::FeaturePromoStatus::kBubbleShowing) {
-    return user_education::FeaturePromoHandle();
-  }
-  return feature_promo_controller_->CloseBubbleAndContinuePromo(iph_feature);
-}
-
-void BrowserView::NotifyFeatureEngagementEvent(const char* event_name) {
-  if (!feature_promo_controller_)
-    return;
-  feature_promo_controller_->feature_engagement_tracker()->NotifyEvent(
-      event_name);
-}
-
-bool BrowserView::DoCutCopyPasteForWebContents(
-    WebContents* contents,
-    void (WebContents::*method)()) {
-  // It's possible for a non-null WebContents to have a null RWHV if it's
-  // crashed or otherwise been killed.
-  content::RenderWidgetHostView* rwhv = contents->GetRenderWidgetHostView();
-  if (!rwhv || !rwhv->HasFocus())
-    return false;
-  // Calling |method| rather than using a fake key event is important since a
-  // fake event might be consumed by the web content.
-  (contents->*method)();
-  return true;
-}
-
 void BrowserView::ActivateAppModalDialog() const {
   // If another browser is app modal, flash and activate the modal browser.
   javascript_dialogs::AppModalDialogController* active_dialog =
       javascript_dialogs::AppModalDialogQueue::GetInstance()->active_dialog();
-  if (!active_dialog)
+  if (!active_dialog) {
     return;
+  }
 
-  Browser* modal_browser =
-      chrome::FindBrowserWithWebContents(active_dialog->web_contents());
+  BrowserWindowInterface* modal_browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+          active_dialog->web_contents());
   if (modal_browser && (browser_.get() != modal_browser)) {
-    modal_browser->window()->FlashFrame(true);
-    modal_browser->window()->Activate();
+    modal_browser->GetWindow()->FlashFrame(true);
+    modal_browser->GetWindow()->Activate();
   }
 
   javascript_dialogs::AppModalDialogQueue::GetInstance()->ActivateModalDialog();
@@ -4693,125 +5940,43 @@ bool BrowserView::FindCommandIdForAccelerator(
     const ui::Accelerator& accelerator,
     int* command_id) const {
   auto iter = accelerator_table_.find(accelerator);
-  if (iter == accelerator_table_.end())
+  if (iter == accelerator_table_.end()) {
     return false;
+  }
 
   *command_id = iter->second;
-  if (accelerator.IsRepeat() && !IsCommandRepeatable(*command_id))
+  if (accelerator.IsRepeat() && !IsCommandRepeatable(*command_id)) {
     return false;
+  }
 
   return true;
 }
 
-void BrowserView::ObserveAppBannerManager(
-    webapps::AppBannerManager* new_manager) {
-  app_banner_manager_observation_.Reset();
-  app_banner_manager_observation_.Observe(new_manager);
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, ExclusiveAccessContext implementation:
-Profile* BrowserView::GetProfile() {
-  return browser_->profile();
-}
-
-void BrowserView::UpdateUIForTabFullscreen() {
-  frame()->GetFrameView()->UpdateFullscreenTopUI();
-}
-
-WebContents* BrowserView::GetActiveWebContents() {
-  return browser_->tab_strip_model()->GetActiveWebContents();
-}
-
-void BrowserView::UnhideDownloadShelf() {
-  if (download_shelf_)
-    download_shelf_->Unhide();
-}
-
-void BrowserView::HideDownloadShelf() {
-  if (download_shelf_)
-    download_shelf_->Hide();
-
-  StatusBubble* status_bubble = GetStatusBubble();
-  if (status_bubble)
-    status_bubble->Hide();
-}
-
-bool BrowserView::CanUserExitFullscreen() const {
-  return frame_->GetFrameView()->CanUserExitFullscreen();
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// BrowserView, ExclusiveAccessBubbleViewsContext implementation:
-ExclusiveAccessManager* BrowserView::GetExclusiveAccessManager() {
-  return browser_->exclusive_access_manager();
-}
-
-views::Widget* BrowserView::GetBubbleAssociatedWidget() {
-  return GetWidget();
-}
-
-ui::AcceleratorProvider* BrowserView::GetAcceleratorProvider() {
-  return this;
-}
-
-gfx::NativeView BrowserView::GetBubbleParentView() const {
-  return GetWidget()->GetNativeView();
-}
-
-gfx::Point BrowserView::GetCursorPointInParent() const {
-  gfx::Point cursor_pos = display::Screen::GetScreen()->GetCursorScreenPoint();
-  views::View::ConvertPointFromScreen(GetWidget()->GetRootView(), &cursor_pos);
-  return cursor_pos;
-}
-
-gfx::Rect BrowserView::GetClientAreaBoundsInScreen() const {
-  return GetWidget()->GetClientAreaBoundsInScreen();
-}
-
-bool BrowserView::IsImmersiveModeEnabled() const {
-  return immersive_mode_controller()->IsEnabled();
-}
-
-gfx::Rect BrowserView::GetTopContainerBoundsInScreen() {
-  return top_container_->GetBoundsInScreen();
-}
-
-void BrowserView::DestroyAnyExclusiveAccessBubble() {
-  exclusive_access_bubble_.reset();
-}
-
-bool BrowserView::CanTriggerOnMouse() const {
-  return !IsImmersiveModeEnabled();
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// BrowserView, extension::ExtensionKeybindingRegistry::Delegate implementation:
-content::WebContents* BrowserView::GetWebContentsForExtension() {
-  return GetActiveWebContents();
+Profile* BrowserView::GetProfile() const {
+  return browser_->GetProfile();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // BrowserView, ImmersiveModeController::Observer implementation:
-void BrowserView::OnImmersiveRevealStarted() {
-  AppMenuButton* app_menu_button =
-      toolbar_button_provider()->GetAppMenuButton();
-  if (app_menu_button)
-    app_menu_button->CloseMenu();
+void BrowserView::OnImmersiveFullscreenEntered() {
+  if (auto* controller =
+          tabs::VerticalTabStripStateController::From(browser())) {
+    vertical_tabs_enable_state_lock_ = controller->GetEnableStateLock();
+  }
 
-  top_container()->SetPaintToLayer();
-  top_container()->layer()->SetFillsBoundsOpaquely(false);
-  overlay_view_->AddChildView(top_container());
-  overlay_view_->SetVisible(true);
+  if (auto* control = toolbar_button_provider()->GetAppMenuControl()) {
+    control->CloseMenu();
+  }
+
+  ReparentTopContainerForStartOfImmersive();
+
   InvalidateLayout();
-  GetWidget()->GetRootView()->Layout();
+  GetWidget()->GetRootView()->DeprecatedLayoutImmediately();
 }
 
-void BrowserView::OnImmersiveRevealEnded() {
-  ReparentTopContainerForEndOfImmersive();
-  InvalidateLayout();
-  GetWidget()->GetRootView()->Layout();
-
+void BrowserView::OnImmersiveFullscreenExited() {
 #if BUILDFLAG(IS_CHROMEOS)
   // Ensure that entering/exiting tablet mode on ChromeOS also updates Window
   // Controls Overlay (WCO). This forces a re-check of the immersive mode flag.
@@ -4821,65 +5986,140 @@ void BrowserView::OnImmersiveRevealEnded() {
     UpdateWindowControlsOverlayEnabled();
   }
 #endif  // BUILDFLAG(IS_CHROMEOS)
-}
 
-void BrowserView::OnImmersiveFullscreenExited() {
-  OnImmersiveRevealEnded();
+  ReparentTopContainerForEndOfImmersive();
+
+  InvalidateLayout();
+  GetWidget()->GetRootView()->DeprecatedLayoutImmediately();
+
+  vertical_tabs_enable_state_lock_.reset();
 }
 
 void BrowserView::OnImmersiveModeControllerDestroyed() {
   ReparentTopContainerForEndOfImmersive();
+
+  vertical_tabs_enable_state_lock_.reset();
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// BrowserView, webapps::AppBannerManager::Observer implementation:
-void BrowserView::OnInstallableWebAppStatusUpdated() {
-  UpdatePageActionIcon(PageActionIconType::kPwaInstall);
+void BrowserView::OnWillChangeFocus(View* focused_before, View* focused_now) {
+  UpdateAccessibleNameForRootView();
+}
+void BrowserView::OnDidChangeFocus(View* focused_before, View* focused_now) {
+  UpdateAccessibleNameForRootView();
 }
 
 WebAppFrameToolbarView* BrowserView::web_app_frame_toolbar() {
-  if (web_app_frame_toolbar_) {
-    return web_app_frame_toolbar_;
-  }
-  if (frame_ && frame_->GetFrameView()) {
-    return frame_->GetFrameView()->web_app_frame_toolbar(
-        base::PassKey<BrowserView>());
-  }
-  return nullptr;
+  return web_app_frame_toolbar_;
 }
 
 const WebAppFrameToolbarView* BrowserView::web_app_frame_toolbar() const {
-  if (web_app_frame_toolbar_) {
-    return web_app_frame_toolbar_;
-  }
-  if (frame_ && frame_->GetFrameView()) {
-    return frame_->GetFrameView()->web_app_frame_toolbar(
-        base::PassKey<BrowserView>());
-  }
-  return nullptr;
+  return web_app_frame_toolbar_;
 }
 
 void BrowserView::PaintAsActiveChanged() {
+  // Do not propagate Browser active state changes if the Browser has already
+  // been scheduled for destruction.
+  if (browser_->IsDeleteScheduled()) {
+    return;
+  }
+
+  const bool is_active = browser_widget_->ShouldPaintAsActive();
+
+  // TODO: Unify semantics of "active" between the BrowserList and
+  // BrowserWindowInterface clients. The latter is more accurate definition
+  // where the top level window or any of its child widgets can have focus.
+  if (is_active) {
+    BrowserActiveStateManager::From(browser_)->DidBecomeActive();
+  } else {
+    BrowserActiveStateManager::From(browser_)->DidBecomeInactive();
+  }
+
   if (web_app_frame_toolbar()) {
-    web_app_frame_toolbar()->SetPaintAsActive(frame_->ShouldPaintAsActive());
+    web_app_frame_toolbar()->SetPaintAsActive(is_active);
   }
   FrameColorsChanged();
 }
 
 void BrowserView::FrameColorsChanged() {
   if (web_app_window_title_) {
-    SkColor frame_color = frame_->GetFrameView()->GetFrameColor(
-        BrowserFrameActiveState::kUseCurrent);
-    SkColor caption_color = frame_->GetFrameView()->GetCaptionColor(
-        BrowserFrameActiveState::kUseCurrent);
+    SkColor frame_color =
+        GetFrameView()->GetFrameColor(BrowserFrameActiveState::kUseCurrent);
+    SkColor caption_color =
+        GetFrameView()->GetCaptionColor(BrowserFrameActiveState::kUseCurrent);
     web_app_window_title_->SetBackgroundColor(frame_color);
     web_app_window_title_->SetEnabledColor(caption_color);
   }
+  GetWidget()->SetBackgroundColor(kColorToolbar);
 }
 
-BEGIN_METADATA(BrowserView, views::ClientView)
+void BrowserView::UpdateAccessibleNameForAllTabs() {
+  for (int i = 0; i < browser()->GetTabStripModel()->count(); ++i) {
+    UpdateAccessibleNameForTabAt(i);
+  }
+}
+
+// TODO(crbug.com/529834985): See if we can consolidate the logic here and in
+// TabView::UpdateAccessibleName/TabView::UpdateAccessibleName.
+void BrowserView::UpdateAccessibleNameForTabAt(int index) {
+  tabs::TabInterface* tab_interface =
+      browser()->GetTabStripModel()->GetTabAtIndex(index);
+  std::u16string accessible_title =
+      tabs::GetAccessibleTabLabel(tab_interface, /*is_for_tab=*/true);
+  views::View* tab =
+      tab_strip_view()->GetTabAnchorView(tab_interface->GetHandle());
+  CHECK(tab);
+  if (accessible_title.empty()) {
+    // Under the right conditions GetAccessibleTabLabel can return an empty
+    // string.
+    tab->GetViewAccessibility().SetName(
+        std::string(), ax::mojom::NameFrom::kAttributeExplicitlyEmpty);
+  } else {
+    tab->GetViewAccessibility().SetName(accessible_title);
+  }
+}
+
+void BrowserView::UpdateAccessibleNameForRootView() {
+  if (GetWidget()) {
+    GetWidget()->UpdateAccessibleNameForRootView();
+  }
+}
+
+void BrowserView::UpdateAccessibleURLForRootView(const GURL& url) {
+  if (GetWidget()) {
+    GetWidget()->UpdateAccessibleURLForRootView(url);
+  }
+}
+
+void BrowserView::UpdateFullscreenAllowedFromPolicy(
+    bool allowed_without_policy) {
+  auto* fullscreen_pref_path = prefs::kFullscreenAllowed;
+  if (GetProfile()->GetPrefs()->HasPrefPath(fullscreen_pref_path)) {
+    SetCanFullscreen(
+        allowed_without_policy &&
+        GetProfile()->GetPrefs()->GetBoolean(fullscreen_pref_path));
+  }
+}
+
+void BrowserView::OnFirstPresentation(
+    const viz::FrameTimingDetails& frame_timing_details) {
+  if (auto* manager = InitialWebUIWindowMetricsManager::From(browser_)) {
+    manager->OnBrowserWindowFirstPresentation(
+        frame_timing_details.presentation_feedback.timestamp);
+  }
+}
+
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+void BrowserView::ApplyScreenshotSettings(bool allow) {
+#if BUILDFLAG(IS_WIN)
+  DCHECK_NE(GetWidget()->GetNativeWindow()->GetHost()->GetAcceleratedWidget(),
+            gfx::kNullAcceleratedWidget);
+#endif  // BUILDFLAG(IS_WIN)
+  GetWidget()->SetAllowScreenshots(allow);
+}
+#endif  // BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+
+BEGIN_METADATA(BrowserView)
 ADD_READONLY_PROPERTY_METADATA(gfx::Rect, FindBarBoundingBox)
-ADD_READONLY_PROPERTY_METADATA(int, TabStripHeight)
 ADD_READONLY_PROPERTY_METADATA(bool, TabStripVisible)
 ADD_READONLY_PROPERTY_METADATA(bool, Incognito)
 ADD_READONLY_PROPERTY_METADATA(bool, GuestSession)
@@ -4888,9 +6128,5 @@ ADD_READONLY_PROPERTY_METADATA(bool, SupportsTabStrip)
 ADD_READONLY_PROPERTY_METADATA(bool, IsNormalType)
 ADD_READONLY_PROPERTY_METADATA(bool, IsWebAppType)
 ADD_READONLY_PROPERTY_METADATA(bool, TopControlsSlideBehaviorEnabled)
-#if BUILDFLAG(IS_WIN)
-ADD_READONLY_PROPERTY_METADATA(bool, SupportsTitle)
-ADD_READONLY_PROPERTY_METADATA(bool, SupportsIcon)
-#endif
 ADD_READONLY_PROPERTY_METADATA(float, TopControlsSlideBehaviorShownRatio)
 END_METADATA

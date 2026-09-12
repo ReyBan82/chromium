@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
 #include "base/hash/hash.h"
@@ -36,7 +37,7 @@ FileManager::~FileManager() = default;
 
 DirectoryKey FileManager::CreateKey(const GURL& url) const {
   uint32_t hash = base::PersistentHash(url.spec());
-  return DirectoryKey{base::HexEncode(&hash, sizeof(uint32_t))};
+  return DirectoryKey{base::HexEncode(base::byte_span_from_ref(hash))};
 }
 
 DirectoryKey FileManager::CreateKey(uint64_t tab_id) const {
@@ -53,10 +54,11 @@ size_t FileManager::GetSizeOfArtifacts(const DirectoryKey& key) const {
           root_directory_.AppendASCII(key.AsciiDirname()));
     }
     case kZip: {
-      int64_t file_size = 0;
-      if (!base::GetFileSize(path, &file_size) || file_size < 0)
+      std::optional<int64_t> file_size = base::GetFileSize(path);
+      if (!file_size.has_value() || file_size.value() < 0) {
         return 0;
-      return file_size;
+      }
+      return file_size.value();
     }
     case kNone:  // fallthrough
     default:
@@ -64,16 +66,16 @@ size_t FileManager::GetSizeOfArtifacts(const DirectoryKey& key) const {
   }
 }
 
-absl::optional<base::File::Info> FileManager::GetInfo(
+std::optional<base::File::Info> FileManager::GetInfo(
     const DirectoryKey& key) const {
   DCHECK(io_task_runner_->RunsTasksInCurrentSequence());
   base::FilePath path;
   StorageType storage_type = GetPathForKey(key, &path);
   if (storage_type == FileManager::StorageType::kNone)
-    return absl::nullopt;
+    return std::nullopt;
   base::File::Info info;
   if (!base::GetFileInfo(path, &info))
-    return absl::nullopt;
+    return std::nullopt;
   return info;
 }
 
@@ -102,7 +104,7 @@ bool FileManager::CaptureExists(const DirectoryKey& key) const {
   }
 }
 
-absl::optional<base::FilePath> FileManager::CreateOrGetDirectory(
+std::optional<base::FilePath> FileManager::CreateOrGetDirectory(
     const DirectoryKey& key,
     bool clear) const {
   DCHECK(io_task_runner_->RunsTasksInCurrentSequence());
@@ -120,7 +122,7 @@ absl::optional<base::FilePath> FileManager::CreateOrGetDirectory(
       }
       DVLOG(1) << "ERROR: failed to create directory: " << path
                << " with error code " << error;
-      return absl::nullopt;
+      return std::nullopt;
     }
     case kDirectory:
       return path;
@@ -130,17 +132,17 @@ absl::optional<base::FilePath> FileManager::CreateOrGetDirectory(
       if (!base::CreateDirectoryAndGetError(dst_path, &error)) {
         DVLOG(1) << "ERROR: failed to create directory: " << path
                  << " with error code " << error;
-        return absl::nullopt;
+        return std::nullopt;
       }
       if (!zip::Unzip(path, dst_path)) {
         DVLOG(1) << "ERROR: failed to unzip: " << path << " to " << dst_path;
-        return absl::nullopt;
+        return std::nullopt;
       }
       base::DeletePathRecursively(path);
       return dst_path;
     }
     default:
-      return absl::nullopt;
+      return std::nullopt;
   }
 }
 

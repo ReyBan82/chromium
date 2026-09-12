@@ -4,14 +4,18 @@
 
 #include "components/password_manager/core/browser/leak_detection_delegate_helper.h"
 
+#include <algorithm>
+
 #include "base/barrier_closure.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/callback.h"
-#include "base/ranges/algorithm.h"
 #include "components/password_manager/core/browser/leak_detection/encryption_utils.h"
+#include "components/password_manager/core/browser/leak_detection_dialog_utils.h"
 #include "components/password_manager/core/browser/password_form.h"
-#include "components/password_manager/core/browser/password_store_interface.h"
-#include "components/password_manager/core/browser/psl_matching_helper.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
+#include "components/password_manager/core/browser/password_store/psl_matching_helper.h"
+#include "crypto/process_bound_string.h"
 
 namespace password_manager {
 
@@ -29,12 +33,8 @@ LeakDetectionDelegateHelper::LeakDetectionDelegateHelper(
 LeakDetectionDelegateHelper::~LeakDetectionDelegateHelper() = default;
 
 void LeakDetectionDelegateHelper::ProcessLeakedPassword(
-    GURL url,
-    std::u16string username,
-    std::u16string password) {
-  url_ = std::move(url);
-  username_ = std::move(username);
-  password_ = std::move(password);
+    StoredCredential credentials) {
+  credentials_ = std::move(credentials);
 
   int wait_counter = 1 + (account_store_ ? 1 : 0);
   barrier_closure_ = base::BarrierClosure(
@@ -48,16 +48,22 @@ void LeakDetectionDelegateHelper::ProcessLeakedPassword(
   }
 }
 
-void LeakDetectionDelegateHelper::OnGetPasswordStoreResults(
-    std::vector<std::unique_ptr<PasswordForm>> results) {
-  // Store the results.
-  base::ranges::move(results, std::back_inserter(partial_results_));
-
+void LeakDetectionDelegateHelper::OnGetPasswordStoreResultsOrErrorFrom(
+    PasswordStoreInterface* store,
+    base::expected<std::vector<StoredCredential>, PasswordStoreBackendError>
+        results_or_error) {
+  if (!results_or_error) {
+    barrier_closure_.Run();
+    return;
+  }
+  std::vector<StoredCredential> results = std::move(*results_or_error);
+  std::ranges::move(std::move(results), std::back_inserter(partial_results_));
   barrier_closure_.Run();
 }
 
 void LeakDetectionDelegateHelper::ProcessResults() {
-  std::u16string canonicalized_username = CanonicalizeUsername(username_);
+  std::u16string canonicalized_username =
+      CanonicalizeUsername(credentials_.username_value);
   std::vector<GURL> all_urls_with_leaked_credentials;
   PasswordForm::Store in_stores = PasswordForm::Store::kNotSet;
 
@@ -66,40 +72,50 @@ void LeakDetectionDelegateHelper::ProcessResults() {
     return url1 == url2 || IsPublicSuffixDomainMatch(url1.spec(), url2.spec());
   };
 
+  crypto::SecureU16String credentials_password_value =
+      credentials_.password_value.secure_value();
   for (const auto& form : partial_results_) {
-    if (CanonicalizeUsername(form->username_value) == canonicalized_username &&
-        form->password_value == password_) {
+    if (CanonicalizeUsername(form.username_value) == canonicalized_username &&
+        form.password_value == credentials_password_value) {
       PasswordStoreInterface& store =
-          form->IsUsingAccountStore() ? *account_store_ : *profile_store_;
+          form.IsUsingAccountStore() ? *account_store_ : *profile_store_;
       // crbug.com/1381203: It's very important not to touch already leaked
       // passwords. It overwrites the date and leads to performance problems as
       // called in the loop.
-      if (!form->password_issues.contains(InsecureType::kLeaked)) {
-        PasswordForm form_to_update = *form.get();
+      if (!form.password_issues.contains(InsecureType::kLeaked)) {
+        StoredCredential form_to_update = CloneStoredCredential(form);
         form_to_update.password_issues.insert_or_assign(
             InsecureType::kLeaked,
-            InsecurityMetadata(base::Time::Now(), IsMuted(false)));
-        store.UpdateLogin(form_to_update);
+            InsecurityMetadata(base::Time::Now(), IsMuted(false),
+                               TriggerBackendNotification(false)));
+        store.UpdateLogin(std::move(form_to_update));
       }
-      all_urls_with_leaked_credentials.push_back(form->url);
+      all_urls_with_leaked_credentials.push_back(form.url);
 
-      if (are_urls_equivalent(form->url, url_)) {
-        in_stores = in_stores | form->in_store;
+      if (are_urls_equivalent(form.url, credentials_.url)) {
+        in_stores = in_stores | form.in_store;
       }
     }
   }
 
   // Check if the password is reused on a different origin, or on the same
   // origin with a different username.
-  IsReused is_reused(base::ranges::any_of(
+  IsReused is_reused(std::ranges::any_of(
       partial_results_, [this, are_urls_equivalent](const auto& form) {
-        return form->password_value == password_ &&
-               (!are_urls_equivalent(form->url, url_) ||
-                form->username_value != username_);
+        return form.password_value == credentials_.password_value &&
+               (!are_urls_equivalent(form.url, credentials_.url) ||
+                form.username_value != credentials_.username_value);
       }));
 
-  std::move(callback_).Run(in_stores, is_reused, std::move(url_),
-                           std::move(username_),
+  IsSavedAsBackup is_saved_as_backup(std::ranges::any_of(
+      partial_results_, [this, are_urls_equivalent](const auto& form) {
+        return form.GetPasswordBackup() == credentials_.password_value &&
+               form.username_value == credentials_.username_value &&
+               are_urls_equivalent(form.url, credentials_.url);
+      }));
+
+  std::move(callback_).Run(in_stores, is_reused, is_saved_as_backup,
+                           std::move(credentials_),
                            std::move(all_urls_with_leaked_credentials));
 }
 

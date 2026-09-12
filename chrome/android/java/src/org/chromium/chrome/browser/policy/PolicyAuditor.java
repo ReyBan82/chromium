@@ -8,21 +8,28 @@ import android.content.Context;
 
 import androidx.annotation.IntDef;
 
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.base.ServiceLoaderUtil;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.content_public.browser.WebContents;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
-/**
- * Base class for policy auditors providing an empty implementation.
- */
+/** Base class for policy auditors providing an empty implementation. */
+@NullMarked
 public class PolicyAuditor {
-    /**
-     * Events that a policy administrator may want to track.
-     */
-    @IntDef({AuditEvent.OPEN_URL_SUCCESS, AuditEvent.OPEN_URL_FAILURE, AuditEvent.OPEN_URL_BLOCKED,
-            AuditEvent.OPEN_POPUP_URL_SUCCESS, AuditEvent.AUTOFILL_SELECTED})
+
+    /** Events that a policy administrator may want to track. */
+    @IntDef({
+        AuditEvent.OPEN_URL_SUCCESS,
+        AuditEvent.OPEN_URL_FAILURE,
+        AuditEvent.OPEN_URL_BLOCKED,
+        AuditEvent.OPEN_POPUP_URL_SUCCESS,
+        AuditEvent.AUTOFILL_SELECTED
+    })
     @Retention(RetentionPolicy.SOURCE)
     public @interface AuditEvent {
         int OPEN_URL_SUCCESS = 0;
@@ -32,9 +39,22 @@ public class PolicyAuditor {
         int AUTOFILL_SELECTED = 4;
     }
 
+    private static @Nullable PolicyAuditor sInstance;
+
     /**
-     * Make it non-obvious to accidentally instantiate this outside of ChromeApplicationImpl.
+     * Returns an instance of PolicyAuditor if it is enabled, otherwise returns null.
+     *
+     * <p>This method is used to get the PolicyAuditor instance in a way that is compatible with
+     * ChromeApplicationImpl.
      */
+    public static @Nullable PolicyAuditor maybeGetInstance() {
+        if (sInstance == null) {
+            sInstance = ServiceLoaderUtil.maybeCreate(PolicyAuditor.class);
+        }
+        return sInstance;
+    }
+
+    /** Make it non-obvious to accidentally instantiate this outside of ChromeApplicationImpl. */
     protected PolicyAuditor() {}
 
     public void notifyAuditEvent(

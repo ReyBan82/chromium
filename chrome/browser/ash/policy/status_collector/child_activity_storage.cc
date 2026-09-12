@@ -6,9 +6,9 @@
 
 #include <algorithm>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
-#include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "components/user_manager/user_manager.h"
@@ -30,7 +30,7 @@ void ChildActivityStorage::AddActivityPeriod(base::Time start,
   DCHECK(start <= end);
 
   ScopedDictPrefUpdate update(pref_service_, pref_name_);
-  base::Value::Dict& activity_times = update.Get();
+  base::DictValue& activity_times = update.Get();
 
   // Assign the period to day buckets in local time.
   base::Time day_start = GetBeginningOfDay(start);
@@ -71,14 +71,14 @@ void ChildActivityStorage::StoreChildScreenTime(base::Time activity_day_start,
   DCHECK(activity_day_start <= today_start);
 
   base::TimeDelta previous_activity = base::Milliseconds(
-      pref_service_->GetInteger(prefs::kChildScreenTimeMilliseconds));
+      pref_service_->GetInteger(ash::prefs::kChildScreenTimeMilliseconds));
 
   // If this activity window belongs to the current day, the screen time pref
   // should be updated.
   if (activity_day_start == today_start) {
-    pref_service_->SetInteger(prefs::kChildScreenTimeMilliseconds,
+    pref_service_->SetInteger(ash::prefs::kChildScreenTimeMilliseconds,
                               (previous_activity + activity).InMilliseconds());
-    pref_service_->SetTime(prefs::kLastChildScreenTimeSaved, now);
+    pref_service_->SetTime(ash::prefs::kLastChildScreenTimeSaved, now);
     pref_service_->CommitPendingWrite();
   }
 }

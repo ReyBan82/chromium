@@ -6,7 +6,9 @@
 #define COMPONENTS_TRANSLATE_CORE_BROWSER_TRANSLATE_METRICS_LOGGER_H_
 
 #include <stdint.h>
+
 #include <string>
+#include <string_view>
 
 #include "components/translate/core/browser/translate_browser_metrics.h"
 #include "components/translate/core/common/translate_errors.h"
@@ -84,7 +86,7 @@ enum class TranslationStatus {
 enum class TranslationType {
   kUninitialized = 0,
   // kManualInitialTranslation = 1,  // no longer used, split into
-  // kManualUiInitialTranslation and kManualContextMenuInitialranslation
+  // kManualUiInitialTranslation and kManualContextMenuInitialTranslation
   // kManualReTranslation = 2,  // no longer used, split into
   // kManualUiReTranslation and kManualContextMenuReTranslation
   kAutomaticTranslationByPref = 3,
@@ -95,7 +97,8 @@ enum class TranslationType {
   kManualContextMenuReTranslation = 8,
   kAutomaticTranslationToPredefinedTarget = 9,
   kAutomaticTranslationByHref = 10,
-  kMaxValue = kAutomaticTranslationByHref,
+  kForcedTranslationByCommandline = 11,
+  kMaxValue = kForcedTranslationByCommandline,
 };
 
 // These values are persisted to logs. Entries should not be renumbered and
@@ -121,24 +124,37 @@ enum class TriggerDecision {
   kAutomaticTranslationByHref = 17,
   kAutomaticTranslationToPredefinedTarget = 18,
   kShowIcon = 19,
-  kMaxValue = kShowIcon,
+  kDisabledMatchesPreviousLanguage = 20,
+  kForcedTranslationByCommandline = 21,
+  kMaxValue = kForcedTranslationByCommandline,
 };
 
 // These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
+// numeric values should never be reused. Keep in sync with
+// |TranslateUIInteraction| in translate/enums.xml.
 enum class UIInteraction {
   kUninitialized = 0,
   kTranslate = 1,
   kRevert = 2,
-  kAlwaysTranslateLanguage = 3,
+  // kAlwaysTranslateLanguage = 3, // no longer used, split into
+  // kAddAlwaysTranslateLanguage and kRemoveAlwaysTranslateLanguage
   kChangeSourceLanguage = 4,
   kChangeTargetLanguage = 5,
-  kNeverTranslateLanguage = 6,
-  kNeverTranslateSite = 7,
+  // kNeverTranslateLanguage = 6, // no longer used, split into
+  // kAddNeverTranslateLanguage and kRemoveNeverTranslateLanguage
+  // kNeverTranslateSite = 7, // no longer used, split into
+  // kAddNeverTranslateSite and kRemoveNeverTranslateSite
   kCloseUIExplicitly = 8,
   kCloseUILostFocus = 9,
   kCloseUITimerRanOut = 10,
-  kMaxValue = kCloseUITimerRanOut,
+  kAddAlwaysTranslateLanguage = 11,
+  kRemoveAlwaysTranslateLanguage = 12,
+  kAddNeverTranslateLanguage = 13,
+  kRemoveNeverTranslateLanguage = 14,
+  kAddNeverTranslateSite = 15,
+  kRemoveNeverTranslateSite = 16,
+  kOpenLanguageSettings = 17,
+  kMaxValue = kOpenLanguageSettings,
 };
 
 // TranslateMetricsLogger tracks and logs various UKM and UMA metrics for Chrome
@@ -184,23 +200,22 @@ class TranslateMetricsLogger {
 
   // Used to record the source language and target language both initially and
   // if the user changes these values.
-  virtual void LogInitialSourceLanguage(const std::string& source_language_code,
+  virtual void LogInitialSourceLanguage(std::string_view source_language_code,
                                         bool is_in_users_content_language) = 0;
-  virtual void LogSourceLanguage(const std::string& source_language_code) = 0;
+  virtual void LogSourceLanguage(std::string_view source_language_code) = 0;
   virtual void LogTargetLanguage(
-      const std::string& target_language_code,
+      std::string_view target_language_code,
       TranslateBrowserMetrics::TargetLanguageOrigin target_language_origin) = 0;
 
   // Used to record the language attributes specified by the HTML document.
   // Recorded for each language detection.
-  virtual void LogHTMLDocumentLanguage(
-      const std::string& html_doc_language) = 0;
+  virtual void LogHTMLDocumentLanguage(std::string_view html_doc_language) = 0;
   virtual void LogHTMLContentLanguage(
-      const std::string& html_content_language) = 0;
+      std::string_view html_content_language) = 0;
 
   // Used to record the language detection model's prediction and reliability
   // based on the page content's text. Recorded for each language detection.
-  virtual void LogDetectedLanguage(const std::string& detected_language) = 0;
+  virtual void LogDetectedLanguage(std::string_view detected_language) = 0;
   virtual void LogDetectionReliabilityScore(
       const float& model_detection_reliability_score) = 0;
 

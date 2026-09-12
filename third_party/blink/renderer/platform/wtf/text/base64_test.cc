@@ -2,20 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "third_party/blink/renderer/platform/wtf/text/base64.h"
+
+#include <optional>
+#include <string_view>
 
 #include "base/containers/span.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
-namespace WTF {
+namespace blink {
 
 TEST(Base64Test, Encode) {
   struct {
-    const char* in;
+    std::string_view in;
     Vector<char> expected_out;
   } kTestCases[] = {{"", {}},
                     {"i", {'a', 'Q', '=', '='}},
@@ -23,16 +26,50 @@ TEST(Base64Test, Encode) {
                     {"i\xB7\x1D", {'a', 'b', 'c', 'd'}}};
 
   for (const auto& test : kTestCases) {
-    base::span<const uint8_t> in =
-        base::as_bytes(base::make_span(test.in, strlen(test.in)));
+    auto in = base::as_byte_span(test.in);
 
     Vector<char> out_vec;
     Base64Encode(in, out_vec);
     EXPECT_EQ(out_vec, test.expected_out);
 
     String out_str = Base64Encode(in);
-    EXPECT_EQ(out_str,
-              String(test.expected_out.data(), test.expected_out.size()));
+    EXPECT_EQ(out_str, String(test.expected_out));
+  }
+}
+
+TEST(Base64Test, EncodeUrl) {
+  // 62 (0b00111110, '+') and 63 (0b00111111, '/') should be encoded as '-' and
+  // '_' respectively.
+  const struct {
+    Vector<uint8_t> in;
+    std::string_view expected_padded;
+    std::string_view expected_unpadded;
+  } kTestCases[] = {
+      {{}, {}, {}},
+      // Code 62 (+ maps to -)
+      {{0xfb}, "-w==", "-w"},
+      {{0xfb, 0xef}, "--8=", "--8"},
+      {{0xfb, 0xef, 0xbe}, "----", "----"},
+      // Code 63 (/ maps to _)
+      {{0xff}, "_w==", "_w"},
+      {{0xff, 0xff}, "__8=", "__8"},
+      {{0xff, 0xff, 0xff}, "____", "____"},
+      // Mixed
+      {{0xff, 0xef}, "_-8=", "_-8"},
+      {{0xff, 0xef, 0xfe}, "_-_-", "_-_-"},
+      {{0xff, 0xef, 0xfe, 0xff}, "_-_-_w==", "_-_-_w"},
+  };
+
+  for (const auto& test : kTestCases) {
+    String out_str;
+
+    // Has padding.
+    out_str = Base64UrlEncode(test.in, Base64UrlEncodePolicy::kIncludePadding);
+    EXPECT_EQ(out_str, String(test.expected_padded));
+
+    // No padding.
+    out_str = Base64UrlEncode(test.in, Base64UrlEncodePolicy::kOmitPadding);
+    EXPECT_EQ(out_str, String(test.expected_unpadded));
   }
 }
 
@@ -75,12 +112,13 @@ TEST(Base64Test, DecodeNoPaddingValidation) {
 
   for (const auto& test : kTestCases) {
     SCOPED_TRACE(::testing::Message() << test.in);
-    Vector<char> out;
+    Vector<uint8_t> out;
     String in = String(test.in);
     bool expected_success = test.expected_out != nullptr;
-    Vector<char> expected_out;
+    Vector<uint8_t> expected_out;
     if (expected_success) {
-      expected_out.insert(0, test.expected_out, strlen(test.expected_out));
+      expected_out.insert(0, test.expected_out,
+                          static_cast<wtf_size_t>(strlen(test.expected_out)));
     }
 
     bool success_8bit = Base64Decode(in, out);
@@ -137,12 +175,13 @@ TEST(Base64Test, ForgivingBase64Decode) {
 
   for (const auto& test : kTestCases) {
     SCOPED_TRACE(::testing::Message() << test.in);
-    Vector<char> out;
+    Vector<uint8_t> out;
     String in = String(test.in);
     bool expected_success = test.expected_out != nullptr;
-    Vector<char> expected_out;
+    Vector<uint8_t> expected_out;
     if (expected_success) {
-      expected_out.insert(0, test.expected_out, strlen(test.expected_out));
+      expected_out.insert(0, test.expected_out,
+                          static_cast<wtf_size_t>(strlen(test.expected_out)));
     }
 
     bool success_8bit = Base64Decode(in, out, Base64DecodePolicy::kForgiving);
@@ -160,4 +199,4 @@ TEST(Base64Test, ForgivingBase64Decode) {
   }
 }
 
-}  // namespace WTF
+}  // namespace blink

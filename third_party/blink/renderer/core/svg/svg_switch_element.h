@@ -30,9 +30,12 @@ class SVGSwitchElement final : public SVGGraphicsElement {
 
  public:
   explicit SVGSwitchElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGSwitchElement;
+  }
 
  private:
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 };
 
 }  // namespace blink

@@ -10,8 +10,7 @@
 #include "base/check.h"
 #include "ui/chromeos/styles/cros_tokens_color_mappings.h"
 #include "ui/color/color_provider.h"
-#include "ui/compositor/layer.h"
-#include "ui/compositor/layer_type.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/compositor/paint_recorder.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/dip_util.h"
@@ -43,12 +42,12 @@ SkColor GetColor() {
 
 SkColor GetHighlightBorderInnerColor() {
   return capture_mode_util::GetColorProviderForNativeTheme()->GetColor(
-      ui::kColorHighlightBorderHighlight1);
+      ui::kColorCrosSystemHighlight);
 }
 
 SkColor GetHighlightBorderOuterColor() {
   return capture_mode_util::GetColorProviderForNativeTheme()->GetColor(
-      ui::kColorHighlightBorderBorder1);
+      ui::kColorCrosSystemHighlightBorder);
 }
 
 }  // namespace
@@ -57,7 +56,7 @@ PointerHighlightLayer::PointerHighlightLayer(
     const gfx::PointF& event_location_in_window,
     ui::Layer* parent_layer) {
   DCHECK(parent_layer);
-  SetLayer(std::make_unique<ui::Layer>(ui::LAYER_TEXTURED));
+  SetLayer(std::make_unique<ui::LayerTextured>());
   layer()->SetFillsBoundsOpaquely(false);
   CenterAroundPoint(event_location_in_window);
   layer()->SetRoundedCornerRadius(

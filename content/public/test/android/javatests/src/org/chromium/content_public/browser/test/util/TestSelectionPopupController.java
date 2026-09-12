@@ -4,28 +4,26 @@
 
 package org.chromium.content_public.browser.test.util;
 
-import android.content.Intent;
-import android.view.ActionMode;
 import android.view.textclassifier.TextClassifier;
 
-import org.chromium.base.supplier.ObservableSupplier;
-import org.chromium.base.supplier.ObservableSupplierImpl;
+import androidx.annotation.Nullable;
+
+import org.chromium.content_public.browser.ActionModeCallback;
 import org.chromium.content_public.browser.ActionModeCallbackHelper;
 import org.chromium.content_public.browser.SelectionClient;
 import org.chromium.content_public.browser.SelectionPopupController;
+import org.chromium.content_public.browser.selection.SelectionActionMenuDelegate;
+import org.chromium.content_public.browser.selection.SelectionDropdownMenuDelegate;
 
 /**
- * A dummy {@link SelectionPopupController} implementation that can be overriden by tests
- * to customize behavior.
+ * An empty {@link SelectionPopupController} implementation that can be overridden by tests to
+ * customize behavior.
  */
 public class TestSelectionPopupController implements SelectionPopupController {
     public TestSelectionPopupController() {}
 
     @Override
-    public void setActionModeCallback(ActionMode.Callback2 callback) {}
-
-    @Override
-    public void setNonSelectionActionModeCallback(ActionMode.Callback callback) {}
+    public void setActionModeCallback(ActionModeCallback callback) {}
 
     @Override
     public SelectionClient.ResultCallback getResultCallback() {
@@ -56,11 +54,6 @@ public class TestSelectionPopupController implements SelectionPopupController {
     }
 
     @Override
-    public ObservableSupplier<Boolean> isSelectActionBarShowingSupplier() {
-        return new ObservableSupplierImpl<>();
-    }
-
-    @Override
     public ActionModeCallbackHelper getActionModeCallbackHelper() {
         return null;
     }
@@ -69,10 +62,15 @@ public class TestSelectionPopupController implements SelectionPopupController {
     public void clearSelection() {}
 
     @Override
-    public void onReceivedProcessTextResult(int resultCode, Intent data) {}
+    public void handleTextReplacementAction(String text) {}
 
     @Override
     public void setSelectionClient(SelectionClient selectionClient) {}
+
+    @Override
+    public SelectionClient getSelectionClient() {
+        return null;
+    }
 
     @Override
     public void setTextClassifier(TextClassifier textClassifier) {}
@@ -91,5 +89,19 @@ public class TestSelectionPopupController implements SelectionPopupController {
     public void setPreserveSelectionOnNextLossOfFocus(boolean preserve) {}
 
     @Override
+    public void hidePopupsAndPreserveSelection() {}
+
+    @Override
     public void updateTextSelectionUI(boolean focused) {}
+
+    @Override
+    public void setDropdownMenuDelegate(SelectionDropdownMenuDelegate dropdownMenuDelegate) {}
+
+    @Override
+    public void setSelectionActionMenuDelegate(@Nullable SelectionActionMenuDelegate delegate) {}
+
+    @Override
+    public SelectionActionMenuDelegate getSelectionActionMenuDelegate() {
+        return null;
+    }
 }

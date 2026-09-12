@@ -75,7 +75,7 @@ class Entry {
         },
         null, children);
   }
-};
+}
 
 export class TestFileSystemProvider {
   constructor(fileSystemId) {
@@ -420,7 +420,7 @@ export class TestFileSystemProvider {
     this.recordEvent(`${name}Stalled`, options);
     return new Promise(resolve => {
       this.stalledRequests[options.requestId] = resolve;
-    })
+    });
   }
 
   /**
@@ -472,7 +472,7 @@ export class TestFileSystemProvider {
       return this.root;
     }
     let path = pathString.split('/');
-    if (path[0] != '') {
+    if (path[0] !== '') {
       // Must start with "/"
       return null;
     }
@@ -514,7 +514,7 @@ export class TestFileSystemProvider {
       return;
     }
 
-    if (options.entryPath === '/' + TestFileSystemProvider.FILE_FAIL) {
+    if (options.entryPath === `/${TestFileSystemProvider.FILE_FAIL}`) {
       onError(chrome.fileSystemProvider.ProviderError.FAILED);
       return;
     }
@@ -525,7 +525,7 @@ export class TestFileSystemProvider {
     }
 
     onError(chrome.fileSystemProvider.ProviderError.NOT_FOUND);
-  };
+  }
 
   /**
    * FSP: implementation for the file close request event. The file,
@@ -548,7 +548,7 @@ export class TestFileSystemProvider {
 
     delete this.openedFiles[options.openRequestId];
     onSuccess();
-  };
+  }
 
   /**
    *
@@ -657,7 +657,7 @@ export class TestFileSystemProvider {
       isDirectory: true,
       name: dirName,
       modificationTime: new Date(2014, 4, 28, 10, 39, 15),
-    }
+    };
 
     const entry = new Entry(dirName, emptyDirMetadata, null, null);
     parentDir.children[dirName] = entry;
@@ -699,7 +699,7 @@ export class TestFileSystemProvider {
 
     dir.children[fileName] = Entry.file(fileName, new Date(), '');
     onSuccess();
-  };
+  }
 
   /**
    * FSP: implementation for the execute action request event.
@@ -736,13 +736,13 @@ export class TestFileSystemProvider {
     }
 
     if (options.entryPaths.indexOf(
-            '/' + TestFileSystemProvider.DIR_WITH_NO_ACTIONS) !== -1) {
+            `/${TestFileSystemProvider.DIR_WITH_NO_ACTIONS}`) !== -1) {
       onSuccess([]);
       return;
     }
 
     if (options.entryPaths.indexOf(
-            '/' + TestFileSystemProvider.DIR_WITH_ACTIONS) !== -1) {
+            `/${TestFileSystemProvider.DIR_WITH_ACTIONS}`) !== -1) {
       onSuccess(TestFileSystemProvider.ACTIONS);
       return;
     }
@@ -787,7 +787,7 @@ export class TestFileSystemProvider {
       return;
     }
     onSuccess(entry.metadata);
-  };
+  }
 
   /**
    * FSP: implementation for the file open request event. Further file
@@ -817,13 +817,13 @@ export class TestFileSystemProvider {
     this.maxOpenedFiles =
         Math.max(this.maxOpenedFiles, Object.keys(this.openedFiles).length);
 
-    if (options.filePath === '/' + TestFileSystemProvider.FILE_BLOCK_OPEN) {
+    if (options.filePath === `/${TestFileSystemProvider.FILE_BLOCK_OPEN}`) {
       this.stallRequest('onOpenFileRequested', options).then(onSuccess);
       return;
     }
 
     onSuccess();
-  };
+  }
 
   /**
    * FSP: implementation of moving an entry within the same file system.
@@ -945,7 +945,7 @@ export class TestFileSystemProvider {
       }
     };
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_TOO_LARGE_CHUNK) {
+    if (filePath === `/${TestFileSystemProvider.FILE_TOO_LARGE_CHUNK}`) {
       // Invalid file: returns more data than the file size.
       const buffer = textToBuffer('A'.repeat(entry.metadata.size * 4));
       onSuccess(buffer, /*hasMore=*/ true);
@@ -955,7 +955,7 @@ export class TestFileSystemProvider {
       return;
     }
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_INVALID_CALLBACK) {
+    if (filePath === `/${TestFileSystemProvider.FILE_INVALID_CALLBACK}`) {
       // Invalid file: invokes both success and error callbacks.
       const buffer = textToBuffer('A'.repeat(options.length));
       onError(chrome.fileSystemProvider.ProviderError.NOT_FOUND);
@@ -963,24 +963,24 @@ export class TestFileSystemProvider {
       return;
     }
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_FAIL) {
+    if (filePath === `/${TestFileSystemProvider.FILE_FAIL}`) {
       onError(chrome.fileSystemProvider.ProviderError.FAILED);
       return;
     }
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_DENIED) {
+    if (filePath === `/${TestFileSystemProvider.FILE_DENIED}`) {
       onError(chrome.fileSystemProvider.ProviderError.ACCESS_DENIED);
       return;
     }
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_BLOCK_IO) {
+    if (filePath === `/${TestFileSystemProvider.FILE_BLOCK_IO}`) {
       // Block the read until it's unblocked.
       this.stallRequest('onReadFileRequested', options)
           .then(() => sendFileInChunks(entry));
       return;
     }
 
-    if (filePath == '/' + TestFileSystemProvider.FILE_BIG) {
+    if (filePath === `/${TestFileSystemProvider.FILE_BIG}`) {
       // This file is not intended to be read below the max 32-bit unsigned
       // value, so fail immediately.
       if (options.offset <= 2 ** 32 - 1) {
@@ -1025,7 +1025,7 @@ export class TestFileSystemProvider {
     }
 
     onError(chrome.fileSystemProvider.ProviderError.NOT_FOUND);
-  };
+  }
 
   /**
    * FSP: implementation for truncating a file to the specified length.
@@ -1041,7 +1041,7 @@ export class TestFileSystemProvider {
       return;
     }
 
-    let entry = this.findEntryByPath(options.filePath);
+    const entry = this.findEntryByPath(options.filePath);
     if (!entry) {
       onError(chrome.fileSystemProvider.ProviderError.NOT_FOUND);
       return;
@@ -1069,7 +1069,7 @@ export class TestFileSystemProvider {
     // This handler does not take the options arguments.
     this.recordEvent('onMountRequested', {});
     onSuccess();
-  };
+  }
 
   /**
    * FSP: requests to unmount this filesystem.
@@ -1087,7 +1087,7 @@ export class TestFileSystemProvider {
     } else {
       onSuccess();
     }
-  };
+  }
 
   /**
    * FSP: requests writing contents to a file, previously opened with <code>
@@ -1122,12 +1122,12 @@ export class TestFileSystemProvider {
       return;
     }
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_FAIL) {
+    if (filePath === `/${TestFileSystemProvider.FILE_FAIL}`) {
       onError(chrome.fileSystemProvider.ProviderError.FAILED);
       return;
     }
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_DENIED) {
+    if (filePath === `/${TestFileSystemProvider.FILE_DENIED}`) {
       onError(chrome.fileSystemProvider.ProviderError.ACCESS_DENIED);
       return;
     }
@@ -1153,7 +1153,7 @@ export class TestFileSystemProvider {
       onSuccess();
     };
 
-    if (filePath === '/' + TestFileSystemProvider.FILE_BLOCK_IO) {
+    if (filePath === `/${TestFileSystemProvider.FILE_BLOCK_IO}`) {
       // Block the write until it's unblocked.
       this.stallRequest('onWriteFileRequested', options).then(continueWrite);
       return;
@@ -1201,7 +1201,7 @@ export class TestFileSystemProvider {
 
     onSuccess();
   }
-};
+}
 
 /**
  * @type {string}

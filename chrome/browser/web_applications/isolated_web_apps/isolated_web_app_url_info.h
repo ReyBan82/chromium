@@ -6,12 +6,14 @@
 #define CHROME_BROWSER_WEB_APPLICATIONS_ISOLATED_WEB_APPS_ISOLATED_WEB_APP_URL_INFO_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/functional/callback_forward.h"
 #include "base/types/expected.h"
-#include "chrome/browser/web_applications/isolated_web_apps/isolated_web_app_location.h"
-#include "chrome/browser/web_applications/web_app_id.h"
 #include "components/web_package/signed_web_bundles/signed_web_bundle_id.h"
+#include "components/webapps/common/web_app_id.h"
+#include "components/webapps/isolated_web_apps/types/iwa_origin.h"
+#include "components/webapps/isolated_web_apps/types/source.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -38,23 +40,29 @@ class IsolatedWebAppUrlInfo {
   static IsolatedWebAppUrlInfo CreateFromSignedWebBundleId(
       const web_package::SignedWebBundleId& web_bundle_id);
 
-  // Creates an IsolatedWebAppUrlInfo instance corresponding to the IWA
-  // located at |location|.
+  // Creates an IsolatedWebAppUrlInfo instance from a host string (which is
+  // the web bundle ID). Returns an error if the host is not a valid web
+  // bundle ID.
+  static base::expected<IsolatedWebAppUrlInfo, std::string> CreateFromHost(
+      std::string_view host);
+
+  // Creates an `IsolatedWebAppUrlInfo` instance corresponding to the IWA
+  // baked by `source`.
   //
   // For proxy-based dev mode IWAs a random hostname will be generated, and
   // for signed bundles the hostname will be extracted from the bundle's
   // integrity block.
-  static void CreateFromIsolatedWebAppLocation(
-      const IsolatedWebAppLocation& location,
+  static void CreateFromIsolatedWebAppSource(
+      const IwaSource& source,
       base::OnceCallback<
           void(base::expected<IsolatedWebAppUrlInfo, std::string>)> callback);
 
   // Returns the origin of the IWA that this URL refers to.
   const url::Origin& origin() const;
 
-  // Returns the AppId that should be used when installing the app hosted at
-  // this URL.
-  const AppId& app_id() const;
+  // Returns the webapps::AppId that should be used when installing the app
+  // hosted at this URL.
+  const webapps::AppId& app_id() const;
 
   // Returns the Web Bundle ID of the IWA that this URL refers to.
   const web_package::SignedWebBundleId& web_bundle_id() const;
@@ -71,15 +79,13 @@ class IsolatedWebAppUrlInfo {
       const std::string& partition_name,
       bool in_memory) const;
 
+  bool operator<=>(const IsolatedWebAppUrlInfo& other) const = default;
+
  private:
-  explicit IsolatedWebAppUrlInfo(
-      const web_package::SignedWebBundleId& web_bundle_id);
+  explicit IsolatedWebAppUrlInfo(const IwaOrigin& iwa_origin);
 
-  std::string partition_domain() const;
-
-  url::Origin origin_;
-  AppId app_id_;
-  web_package::SignedWebBundleId web_bundle_id_;
+  IwaOrigin iwa_origin_;
+  webapps::AppId app_id_;
 };
 
 }  // namespace web_app

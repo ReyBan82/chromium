@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include "base/files/scoped_temp_dir.h"
 #include "chrome/browser/ash/app_list/app_list_syncable_service.h"
 #include "chrome/browser/ash/app_list/app_list_test_util.h"
 
@@ -26,8 +25,11 @@ class AppListSyncableServiceTestBase : public app_list::AppListTestBase {
 
   // AppListTestBase:
   void SetUp() override;
+  void TearDown() override;
 
  protected:
+  void RestartSyncableService();
+
   // Remove all existing sync items.
   void RemoveAllExistingItems();
 
@@ -69,7 +71,6 @@ class AppListSyncableServiceTestBase : public app_list::AppListTestBase {
     return app_list_syncable_service_.get();
   }
 
-  base::ScopedTempDir temp_dir_;
   std::unique_ptr<app_list::AppListSyncableService> app_list_syncable_service_;
 };
 

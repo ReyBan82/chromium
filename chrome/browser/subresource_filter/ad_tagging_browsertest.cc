@@ -7,10 +7,10 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
@@ -25,9 +25,12 @@
 #include "components/subresource_filter/content/browser/subresource_filter_observer_test_utils.h"
 #include "components/subresource_filter/core/common/test_ruleset_utils.h"
 #include "components/ukm/test_ukm_recorder.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/test/back_forward_cache_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "content/public/test/hit_test_region_observer.h"
+#include "content/public/test/test_frame_navigation_observer.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -95,7 +98,7 @@ class AdTaggingPageLoadMetricsTestWaiter
     // results in a cache miss, by using the fact that it will have no received
     // data. Note that this only impacts this class's expectations, not those in
     // PageLoadMetricsTestWaiter itself.
-    if (resource->is_complete && resource->received_data_length != 0) {
+    if (resource->is_complete && !resource->received_data_length.is_zero()) {
       if (resource->reported_as_ad_resource) {
         current_complete_ad_resources_++;
       } else {
@@ -119,7 +122,7 @@ class AdTaggingBrowserTest : public SubresourceFilterBrowserTest {
   AdTaggingBrowserTest(const AdTaggingBrowserTest&) = delete;
   AdTaggingBrowserTest& operator=(const AdTaggingBrowserTest&) = delete;
 
-  ~AdTaggingBrowserTest() override {}
+  ~AdTaggingBrowserTest() override = default;
 
   void SetUpOnMainThread() override {
     SubresourceFilterBrowserTest::SetUpOnMainThread();
@@ -127,6 +130,14 @@ class AdTaggingBrowserTest : public SubresourceFilterBrowserTest {
     SetRulesetWithRules({CreateSuffixRule("ad_script.js"),
                          CreateSuffixRule("ad=true"),
                          CreateAllowlistSuffixRule("allowed=true")});
+
+    ukm_recorder_ = std::make_unique<ukm::TestAutoSetUkmRecorder>();
+
+    // The test assumes page gets deleted after navigation, triggering metrics
+    // recording. Disable back/forward cache to ensure that pages don't get
+    // preserved in the cache.
+    content::DisableBackForwardCacheForTesting(
+        web_contents(), content::BackForwardCache::TEST_REQUIRES_NO_CACHING);
   }
 
   content::WebContents* GetWebContents() {
@@ -194,6 +205,107 @@ class AdTaggingBrowserTest : public SubresourceFilterBrowserTest {
         GetWebContents());
   }
 
+  void ExpectWindowOpenUkmEntry(bool from_root_frame,
+                                const GURL& root_frame_url,
+                                bool from_ad_frame,
+                                bool from_ad_script) {
+    auto entries = ukm_recorder_->GetEntriesByName(
+        ukm::builders::AbusiveExperienceHeuristic_WindowOpen::kEntryName);
+    EXPECT_EQ(1u, entries.size());
+
+    // Check that the event is keyed to |root_frame_url| only if it was from the
+    // top frame.
+    if (from_root_frame) {
+      ukm_recorder_->ExpectEntrySourceHasUrl(entries.back(), root_frame_url);
+    } else {
+      EXPECT_FALSE(
+          ukm_recorder_->GetSourceForSourceId(entries.back()->source_id));
+    }
+
+    // Check that a DocumentCreated entry was created, and it's keyed to
+    // |root_frame_url| only if it was from the top frame. However, we can
+    // always use the navigation source ID to link this source to
+    // |root_frame_url|.
+    const ukm::mojom::UkmEntry* dc_entry =
+        ukm_recorder_->GetDocumentCreatedEntryForSourceId(
+            entries.back()->source_id);
+    EXPECT_TRUE(dc_entry);
+    EXPECT_EQ(entries.back()->source_id, dc_entry->source_id);
+    if (from_root_frame) {
+      ukm_recorder_->ExpectEntrySourceHasUrl(dc_entry, root_frame_url);
+    } else {
+      EXPECT_FALSE(ukm_recorder_->GetSourceForSourceId(dc_entry->source_id));
+    }
+
+    const ukm::UkmSource* navigation_source =
+        ukm_recorder_->GetSourceForSourceId(*ukm_recorder_->GetEntryMetric(
+            dc_entry, ukm::builders::DocumentCreated::kNavigationSourceIdName));
+    EXPECT_EQ(root_frame_url, navigation_source->url());
+
+    EXPECT_EQ(from_root_frame,
+              *ukm_recorder_->GetEntryMetric(
+                  dc_entry, ukm::builders::DocumentCreated::kIsMainFrameName));
+
+    ukm_recorder_->ExpectEntryMetric(
+        entries.back(),
+        ukm::builders::AbusiveExperienceHeuristic_WindowOpen::
+            kFromAdSubframeName,
+        from_ad_frame);
+    ukm_recorder_->ExpectEntryMetric(
+        entries.back(),
+        ukm::builders::AbusiveExperienceHeuristic_WindowOpen::kFromAdScriptName,
+        from_ad_script);
+  }
+
+  bool HasUseCounterForUrl(const GURL& url,
+                           blink::mojom::WebFeature feature) const {
+    int count = 0;
+
+    auto entries = ukm_recorder_->GetEntriesByName(
+        ukm::builders::Blink_UseCounter::kEntryName);
+    for (const ukm::mojom::UkmEntry* entry : entries) {
+      const ukm::UkmSource* src =
+          ukm_recorder_->GetSourceForSourceId(entry->source_id);
+      if (src->url() != url) {
+        continue;
+      }
+
+      const int64_t* metric = ukm_recorder_->GetEntryMetric(
+          entry, ukm::builders::Blink_UseCounter::kFeatureName);
+      if (!metric) {
+        continue;
+      }
+
+      if (*metric != static_cast<int>(feature)) {
+        continue;
+      }
+
+      count++;
+    }
+
+    EXPECT_LE(count, 1);
+    return (count == 1);
+  }
+
+  bool HasAdClickMainFrameNavigationUseCounterForUrl(const GURL& url) const {
+    return HasUseCounterForUrl(
+        url, blink::mojom::WebFeature::kAdClickMainFrameNavigation);
+  }
+
+  bool HasAdNavWithoutGestureUseCounter(const GURL& url) const {
+    return HasUseCounterForUrl(
+        url, blink::mojom::WebFeature::
+                 kAdScriptMainFrameNavigationWithoutUserGesture);
+  }
+
+  void NavigateAwayToFlushUseCounterUKM(content::WebContents* web_contents) {
+    ASSERT_TRUE(
+        content::NavigateToURL(web_contents, GURL(url::kAboutBlankURL)));
+  }
+
+ protected:
+  std::unique_ptr<ukm::TestAutoSetUkmRecorder> ukm_recorder_;
+
  private:
   content::RenderFrameHost* CreateDocWrittenFrameImpl(
       const content::ToRenderFrameHost& adapter,
@@ -220,8 +332,7 @@ content::RenderFrameHost* AdTaggingBrowserTest::CreateDocWrittenFrameImpl(
   content::WebContents* web_contents =
       content::WebContents::FromRenderFrameHost(rfh);
   content::TestNavigationObserver navigation_observer(web_contents, 1);
-  EXPECT_EQ(true, content::EvalJs(rfh, script,
-                                  content::EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+  EXPECT_EQ(true, content::EvalJs(rfh, script));
   navigation_observer.Wait();
   EXPECT_TRUE(navigation_observer.last_navigation_succeeded())
       << navigation_observer.last_net_error_code();
@@ -341,7 +452,8 @@ IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest,
       observer.GetIsAdFrame(ad_frame_tagged_by_script->GetFrameTreeNodeId()));
 }
 
-IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest, FramesByURL) {
+// TODO(474081102): Reenable this test once the issue is addressed.
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest, DISABLED_FramesByURL) {
   TestSubresourceFilterObserver observer(web_contents());
 
   // Main frame.
@@ -400,7 +512,7 @@ IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest, VerifySameOriginWithoutNavigate) {
   // The test assumes pages gets deleted after navigation, triggering histogram
   // recording. Disable back/forward cache to ensure that pages don't get
   // preserved in the cache.
-  // TODO(https://crbug.com/1229122): Investigate if this needs further fix.
+  // TODO(crbug.com/40189815): Investigate if this needs further fix.
   content::DisableBackForwardCacheForTesting(
       browser()->tab_strip_model()->GetActiveWebContents(),
       content::BackForwardCache::TEST_REQUIRES_NO_CACHING);
@@ -440,7 +552,7 @@ IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest, VerifyCrossOriginWithoutNavigate) {
       ui_test_utils::NavigateToURL(browser(), GURL(url::kAboutBlankURL)));
 
   // TODO(johnidel): Check that frame was reported properly. See
-  // crbug.com/914893.
+  // crbug.com/40606432.
 }
 
 // Ad script creates a frame and navigates it cross origin.
@@ -727,7 +839,7 @@ IN_PROC_BROWSER_TEST_F(
 
 // Test that the children of a frame with its initial load aborted due to a
 // window.stop are reported correctly as vanilla or ad frames.
-// This test is flaky. See crbug.com/1069346.
+// This test is flaky. See crbug.com/40683973.
 IN_PROC_BROWSER_TEST_F(
     AdTaggingBrowserTest,
     ChildrenOfFrameWithWindowStopAbortedLoad_StillCorrectlyTagged) {
@@ -806,6 +918,7 @@ IN_PROC_BROWSER_TEST_F(
       blink::mojom::FrameCreationStackEvidence::kNotCreatedByAdScript));
 
   NavigateFrame(test_frame, GetURL("frame_factory.html"));
+  test_frame = content::ChildFrameAt(web_contents()->GetPrimaryMainFrame(), 0);
   EXPECT_FALSE(observer.GetIsAdFrame(test_frame->GetFrameTreeNodeId()));
   EXPECT_TRUE(EvidenceForFrameComprises(
       test_frame, /*parent_is_ad=*/false,
@@ -816,6 +929,7 @@ IN_PROC_BROWSER_TEST_F(
       blink::mojom::FrameCreationStackEvidence::kNotCreatedByAdScript));
 
   NavigateFrame(test_frame, GetURL("frame_factory.html?allowed=true"));
+  test_frame = content::ChildFrameAt(web_contents()->GetPrimaryMainFrame(), 0);
   EXPECT_FALSE(observer.GetIsAdFrame(test_frame->GetFrameTreeNodeId()));
   EXPECT_TRUE(EvidenceForFrameComprises(
       test_frame, /*parent_is_ad=*/false,
@@ -826,6 +940,7 @@ IN_PROC_BROWSER_TEST_F(
       blink::mojom::FrameCreationStackEvidence::kNotCreatedByAdScript));
 
   NavigateFrame(test_frame, GetURL("frame_factory.html?ad=true"));
+  test_frame = content::ChildFrameAt(web_contents()->GetPrimaryMainFrame(), 0);
   EXPECT_TRUE(observer.GetIsAdFrame(test_frame->GetFrameTreeNodeId()));
   EXPECT_TRUE(EvidenceForFrameComprises(
       test_frame, /*parent_is_ad=*/false,
@@ -836,6 +951,7 @@ IN_PROC_BROWSER_TEST_F(
       blink::mojom::FrameCreationStackEvidence::kNotCreatedByAdScript));
 
   NavigateFrame(test_frame, GetURL("frame_factory.html"));
+  test_frame = content::ChildFrameAt(web_contents()->GetPrimaryMainFrame(), 0);
   EXPECT_TRUE(observer.GetIsAdFrame(test_frame->GetFrameTreeNodeId()));
   EXPECT_TRUE(EvidenceForFrameComprises(
       test_frame, /*parent_is_ad=*/false,
@@ -882,147 +998,20 @@ IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest,
   EXPECT_EQ(waiter->current_complete_ad_resources(), 3);
 }
 
-void ExpectWindowOpenUkmEntry(const ukm::TestUkmRecorder& ukm_recorder,
-                              bool from_root_frame,
-                              const GURL& root_frame_url,
-                              bool from_ad_frame,
-                              bool from_ad_script) {
-  auto entries = ukm_recorder.GetEntriesByName(
-      ukm::builders::AbusiveExperienceHeuristic_WindowOpen::kEntryName);
-  EXPECT_EQ(1u, entries.size());
+// Regression test for crbug.com/336753737.
+IN_PROC_BROWSER_TEST_F(
+    AdTaggingBrowserTest,
+    SameDocumentHistoryNavigationAbortedByParentHistoryNavigation) {
+  GURL url = embedded_test_server()->GetURL(
+      "a.com", "/ad_tagging/abort_regression.html");
 
-  // Check that the event is keyed to |root_frame_url| only if it was from the
-  // top frame.
-  if (from_root_frame) {
-    ukm_recorder.ExpectEntrySourceHasUrl(entries.back(), root_frame_url);
-  } else {
-    EXPECT_FALSE(ukm_recorder.GetSourceForSourceId(entries.back()->source_id));
-  }
+  content::TestNavigationObserver navigation_observer(web_contents());
 
-  // Check that a DocumentCreated entry was created, and it's keyed to
-  // |root_frame_url| only if it was from the top frame. However, we can always
-  // use the navigation source ID to link this source to |root_frame_url|.
-  const ukm::mojom::UkmEntry* dc_entry =
-      ukm_recorder.GetDocumentCreatedEntryForSourceId(
-          entries.back()->source_id);
-  EXPECT_TRUE(dc_entry);
-  EXPECT_EQ(entries.back()->source_id, dc_entry->source_id);
-  if (from_root_frame) {
-    ukm_recorder.ExpectEntrySourceHasUrl(dc_entry, root_frame_url);
-  } else {
-    EXPECT_FALSE(ukm_recorder.GetSourceForSourceId(dc_entry->source_id));
-  }
-
-  const ukm::UkmSource* navigation_source =
-      ukm_recorder.GetSourceForSourceId(*ukm_recorder.GetEntryMetric(
-          dc_entry, ukm::builders::DocumentCreated::kNavigationSourceIdName));
-  EXPECT_EQ(root_frame_url, navigation_source->url());
-
-  EXPECT_EQ(from_root_frame,
-            *ukm_recorder.GetEntryMetric(
-                dc_entry, ukm::builders::DocumentCreated::kIsMainFrameName));
-
-  ukm_recorder.ExpectEntryMetric(
-      entries.back(),
-      ukm::builders::AbusiveExperienceHeuristic_WindowOpen::kFromAdSubframeName,
-      from_ad_frame);
-  ukm_recorder.ExpectEntryMetric(
-      entries.back(),
-      ukm::builders::AbusiveExperienceHeuristic_WindowOpen::kFromAdScriptName,
-      from_ad_script);
-}
-
-enum class NavigationInitiationType {
-  kWindowOpen,
-  kSetLocation,
-  kAnchorLinkActivate,
-};
-
-class AdClickNavigationBrowserTest
-    : public AdTaggingBrowserTest,
-      public ::testing::WithParamInterface<
-          std::tuple<NavigationInitiationType, bool /* gesture */>> {
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    // Popups without user gesture is blocked by default. Turn off the switch
-    // here to unblock that, so as to be able to test that the UseCounter not
-    // being recorded was due to the filtering in our recording function, rather
-    // than the default popup blocking.
-    command_line->AppendSwitch(embedder_support::kDisablePopupBlocking);
-  }
-};
-
-IN_PROC_BROWSER_TEST_P(AdClickNavigationBrowserTest, UseCounter) {
-  auto [type, gesture] = GetParam();
-  auto web_feature_waiter =
-      std::make_unique<page_load_metrics::PageLoadMetricsTestWaiter>(
-          GetWebContents());
-  blink::mojom::WebFeature ad_click_navigation_feature =
-      blink::mojom::WebFeature::kAdClickNavigation;
-  web_feature_waiter->AddWebFeatureExpectation(ad_click_navigation_feature);
-  GURL url =
-      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
-
+  // We should not crash in this line.
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
-  content::WebContents* main_tab = GetWebContents();
-  RenderFrameHost* child = CreateSrcFrame(
-      main_tab, embedded_test_server()->GetURL(
-                    "a.com", "/ad_tagging/frame_factory.html?1&ad=true"));
-
-  std::string script;
-  switch (type) {
-    case NavigationInitiationType::kWindowOpen:
-      script = "window.open('frame_factory.html')";
-      break;
-    case NavigationInitiationType::kSetLocation:
-      script = "location='frame_factory.html'";
-      break;
-    case NavigationInitiationType::kAnchorLinkActivate:
-      script =
-          "var a = document.createElement('a');"
-          "a.setAttribute('href', 'frame_factory.html');"
-          "a.click();";
-      break;
-  }
-
-  if (gesture) {
-    EXPECT_TRUE(ExecJs(child, script));
-    web_feature_waiter->Wait();
-  } else {
-    switch (type) {
-      case NavigationInitiationType::kSetLocation:
-      case NavigationInitiationType::kAnchorLinkActivate: {
-        content::TestNavigationObserver navigation_observer(web_contents());
-        EXPECT_TRUE(content::ExecJs(child, script,
-                                    content::EXECUTE_SCRIPT_NO_USER_GESTURE));
-        // To report metrics.
-        navigation_observer.Wait();
-        break;
-      }
-      case NavigationInitiationType::kWindowOpen: {
-        EXPECT_TRUE(content::ExecJs(child, script,
-                                    content::EXECUTE_SCRIPT_NO_USER_GESTURE));
-        // To report metrics.
-        ASSERT_EQ(2, browser()->tab_strip_model()->count());
-        browser()->tab_strip_model()->MoveSelectedTabsTo(0);
-        ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
-        break;
-      }
-    }
-    EXPECT_FALSE(
-        web_feature_waiter->DidObserveWebFeature(ad_click_navigation_feature));
-  }
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    All,
-    AdClickNavigationBrowserTest,
-    ::testing::Combine(
-        ::testing::Values(NavigationInitiationType::kWindowOpen,
-                          NavigationInitiationType::kSetLocation,
-                          NavigationInitiationType::kAnchorLinkActivate),
-        ::testing::Bool()));
-
-class AdClickLandingPageMetricsBrowserTest : public AdTaggingBrowserTest {
+class AdClickMetricsBrowserTest : public AdTaggingBrowserTest {
  public:
   void SetUpCommandLine(base::CommandLine* command_line) override {
     // Popups without user gesture is blocked by default. Turn off the switch
@@ -1031,34 +1020,33 @@ class AdClickLandingPageMetricsBrowserTest : public AdTaggingBrowserTest {
   }
 };
 
-IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest, BrowserInitiated) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest, BrowserInitiated) {
   GURL url =
       embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
 
   content::TestNavigationObserver navigation_observer(web_contents());
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
-  EXPECT_EQ(
-      navigation_observer.last_navigation_initiator_activation_and_ad_status(),
-      blink::mojom::NavigationInitiatorActivationAndAdStatus::
-          kDidNotStartWithTransientActivation);
+  EXPECT_FALSE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_FALSE(navigation_observer.last_navigation_started_by_ad());
 
-  auto entries = ukm_recorder.GetEntriesByName(
+  auto entries = ukm_recorder_->GetEntriesByName(
       ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
   EXPECT_EQ(entries.size(), 1u);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries[0], ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName,
       1);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries[0],
       ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
+
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
 }
 
-IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest, WindowOpen) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       WindowOpen_FromAdScriptWithoutGesture) {
   GURL url =
       embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -1066,169 +1054,500 @@ IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest, WindowOpen) {
   GURL popup_url =
       embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
 
-  // Popup from ad script without gesture
-  {
-    browser()->tab_strip_model()->MoveSelectedTabsTo(0);
+  content::WebContentsAddedObserver observer;
+  content::ExecuteScriptAsyncWithoutUserGesture(
+      GetWebContents()->GetPrimaryMainFrame(),
+      content::JsReplace("windowOpenFromAdScript($1)", popup_url));
 
-    content::WebContentsAddedObserver observer;
-    content::ExecuteScriptAsyncWithoutUserGesture(
-        GetWebContents()->GetPrimaryMainFrame(),
-        content::JsReplace("windowOpenFromAdScript($1)", popup_url));
+  content::WebContents* new_web_contents = observer.GetWebContents();
+  content::TestNavigationObserver navigation_observer(new_web_contents);
+  navigation_observer.Wait();
 
-    content::WebContents* new_web_contents = observer.GetWebContents();
-    content::TestNavigationObserver navigation_observer(new_web_contents);
-    navigation_observer.Wait();
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
 
-    ASSERT_EQ(2, browser()->tab_strip_model()->count());
+  EXPECT_FALSE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kDidNotStartWithTransientActivation);
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 0);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
 
-    auto entries = ukm_recorder.GetEntriesByName(
-        ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
-    EXPECT_EQ(entries.size(), 2u);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 0);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
-  }
+  NavigateAwayToFlushUseCounterUKM(
+      browser()->tab_strip_model()->GetWebContentsAt(0));
 
-  // Popup from non-ad script with gesture
-  {
-    browser()->tab_strip_model()->MoveSelectedTabsTo(0);
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
+}
 
-    content::WebContentsAddedObserver observer;
-    content::ExecuteScriptAsync(
-        GetWebContents()->GetPrimaryMainFrame(),
-        content::JsReplace("window.open($1)", popup_url));
+IN_PROC_BROWSER_TEST_F(
+    AdClickMetricsBrowserTest,
+    WindowOpenWithGesture_NavigateFromAdScriptWithoutGesture) {
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
-    content::WebContents* new_web_contents = observer.GetWebContents();
-    content::TestNavigationObserver navigation_observer(new_web_contents);
-    navigation_observer.Wait();
+  GURL popup_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
 
-    ASSERT_EQ(3, browser()->tab_strip_model()->count());
+  content::WebContents* original_web_contents = GetWebContents();
+  content::WebContentsAddedObserver observer;
+  // Open a new tab with gesture, but no URL (initial empty document).
+  EXPECT_TRUE(content::ExecJs(original_web_contents->GetPrimaryMainFrame(),
+                              "window.my_popup = window.open('');"));
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kStartedWithTransientActivationFromNonAd);
+  content::WebContents* new_web_contents = observer.GetWebContents();
+  content::TestNavigationObserver navigation_observer(new_web_contents);
 
-    auto entries = ukm_recorder.GetEntriesByName(
-        ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
-    EXPECT_EQ(entries.size(), 3u);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
-  }
+  // Now navigate that frame from ad script without gesture.
+  content::ExecuteScriptAsyncWithoutUserGesture(
+      original_web_contents->GetPrimaryMainFrame(),
+      content::JsReplace("navigatePopupFromAdScript($1)", popup_url));
 
-  // Popup from ad script with gesture
-  {
-    browser()->tab_strip_model()->MoveSelectedTabsTo(0);
+  navigation_observer.Wait();
 
-    content::WebContentsAddedObserver observer;
-    content::ExecuteScriptAsync(
-        GetWebContents()->GetPrimaryMainFrame(),
-        content::JsReplace("windowOpenFromAdScript($1)", popup_url));
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
 
-    content::WebContents* new_web_contents = observer.GetWebContents();
-    content::TestNavigationObserver navigation_observer(new_web_contents);
-    navigation_observer.Wait();
+  EXPECT_FALSE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
 
-    ASSERT_EQ(4, browser()->tab_strip_model()->count());
+  NavigateAwayToFlushUseCounterUKM(
+      browser()->tab_strip_model()->GetWebContentsAt(0));
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kStartedWithTransientActivationFromAd);
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  // We expect FALSE because the filter in BeginNavigation should trigger
+  // (target is outermost main frame, opener is initiator, and last committed
+  // URL was empty).
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
+}
 
-    auto entries = ukm_recorder.GetEntriesByName(
-        ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
-    EXPECT_EQ(entries.size(), 4u);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
-  }
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       LocationAssign_FromAdScriptWithoutGesture_SameSite) {
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  GURL new_url = embedded_test_server()->GetURL(
+      "a.com", "/ad_tagging/frame_factory.html?same_site=true");
+
+  content::TestNavigationObserver navigation_observer(GetWebContents());
+  // Use a script that is tagged as an ad.
+  EXPECT_TRUE(content::ExecJs(
+      GetWebContents()->GetPrimaryMainFrame(),
+      content::JsReplace("executeLocationAssignFromAdScript($1)", new_url),
+      content::EXECUTE_SCRIPT_NO_USER_GESTURE));
+  navigation_observer.Wait();
+
+  EXPECT_FALSE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
+
+  NavigateAwayToFlushUseCounterUKM(GetWebContents());
+
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+}
+
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       LocationAssign_FromAdScriptWithoutGesture) {
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  GURL new_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
+
+  content::TestNavigationObserver navigation_observer(GetWebContents());
+  // Use a script that is tagged as an ad.
+  EXPECT_TRUE(content::ExecJs(
+      GetWebContents()->GetPrimaryMainFrame(),
+      content::JsReplace("executeLocationAssignFromAdScript($1)", new_url),
+      content::EXECUTE_SCRIPT_NO_USER_GESTURE));
+  navigation_observer.Wait();
+
+  EXPECT_FALSE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
+
+  NavigateAwayToFlushUseCounterUKM(GetWebContents());
+
+  EXPECT_TRUE(HasAdNavWithoutGestureUseCounter(url));
+}
+
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       WindowOpen_FromNonAdScriptWithGesture) {
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  GURL popup_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
+
+  content::WebContentsAddedObserver observer;
+  content::ExecuteScriptAsync(GetWebContents()->GetPrimaryMainFrame(),
+                              content::JsReplace("window.open($1)", popup_url));
+
+  content::WebContents* new_web_contents = observer.GetWebContents();
+  content::TestNavigationObserver navigation_observer(new_web_contents);
+  navigation_observer.Wait();
+
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
+
+  EXPECT_TRUE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_FALSE(navigation_observer.last_navigation_started_by_ad());
+
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
+
+  NavigateAwayToFlushUseCounterUKM(
+      browser()->tab_strip_model()->GetWebContentsAt(0));
+
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
+}
+
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       WindowOpen_FromAdScriptWithGesture) {
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  GURL popup_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
+
+  content::WebContentsAddedObserver observer;
+  content::ExecuteScriptAsync(
+      GetWebContents()->GetPrimaryMainFrame(),
+      content::JsReplace("windowOpenFromAdScript($1)", popup_url));
+
+  content::WebContents* new_web_contents = observer.GetWebContents();
+  content::TestNavigationObserver navigation_observer(new_web_contents);
+  navigation_observer.Wait();
+
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
+
+  EXPECT_TRUE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
+
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+
+  NavigateAwayToFlushUseCounterUKM(
+      browser()->tab_strip_model()->GetWebContentsAt(0));
+
+  EXPECT_TRUE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
+}
+
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       AnchorClick_FromAdFrameWithRealGesture) {
+  // Load a page that has createFrame defined.
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  // Make iframes full viewport to ensure the click hits it.
+  EXPECT_TRUE(
+      content::ExecJs(GetWebContents()->GetPrimaryMainFrame(),
+                      "const style = document.createElement('style');"
+                      "style.textContent = 'iframe { position: absolute; "
+                      "height: 100%; width: 100%; top: 0; left: 0; }';"
+                      "document.head.appendChild(style);"));
+
+  GURL popup_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
+
+  // Create a same-origin ad iframe covering the full viewport.
+  GURL ad_iframe_url = embedded_test_server()->GetURL(
+      "a.com", "/ad_tagging/page_with_full_viewport_link.html?ad=true");
+  RenderFrameHost* child_rfh = CreateSrcFrame(GetWebContents(), ad_iframe_url);
+  ASSERT_TRUE(child_rfh);
+  EXPECT_TRUE(child_rfh->IsAdFrame());
+
+  // Set the link's href and target in the iframe.
+  EXPECT_TRUE(content::ExecJs(
+      child_rfh, content::JsReplace(
+                     "document.getElementsByTagName('a')[0].href = $1; "
+                     "document.getElementsByTagName('a')[0].target='_blank';",
+                     popup_url)));
+
+  // We should wait for the hit-test data to be ready before sending the click
+  // event below to avoid flakiness.
+  content::WaitForHitTestData(child_rfh);
+
+  content::WebContentsAddedObserver observer;
+  // Click in the center of the viewport, which should hit the full-viewport
+  // link in the ad iframe.
+  content::SimulateMouseClick(web_contents(),
+                              blink::WebInputEvent::kNoModifiers,
+                              blink::WebMouseEvent::Button::kLeft);
+
+  content::WebContents* new_web_contents = observer.GetWebContents();
+  content::TestNavigationObserver popup_navigation_observer(new_web_contents);
+  popup_navigation_observer.Wait();
+
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
+
+  EXPECT_TRUE(popup_navigation_observer
+                  .last_navigation_started_with_transient_activation());
+
+  // The bit should now be propagated correctly from the ad frame.
+  EXPECT_TRUE(popup_navigation_observer.last_navigation_started_by_ad());
+
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+}
+
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       WindowOpen_FromAdIframeWithoutGesture) {
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+
+  GURL popup_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
 
   RenderFrameHost* child =
       CreateSrcFrame(GetWebContents(),
                      embedded_test_server()->GetURL(
                          "b.com", "/ad_tagging/frame_factory.html?1&ad=true"));
 
-  // Popup from ad iframe without gesture
-  {
-    browser()->tab_strip_model()->MoveSelectedTabsTo(0);
+  content::WebContentsAddedObserver observer;
+  content::ExecuteScriptAsyncWithoutUserGesture(
+      child, content::JsReplace("window.open($1)", popup_url));
 
-    content::WebContentsAddedObserver observer;
-    content::ExecuteScriptAsyncWithoutUserGesture(
-        child, content::JsReplace("window.open($1)", popup_url));
+  content::WebContents* new_web_contents = observer.GetWebContents();
+  content::TestNavigationObserver navigation_observer(new_web_contents);
+  navigation_observer.Wait();
 
-    content::WebContents* new_web_contents = observer.GetWebContents();
-    content::TestNavigationObserver navigation_observer(new_web_contents);
-    navigation_observer.Wait();
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
 
-    ASSERT_EQ(5, browser()->tab_strip_model()->count());
+  EXPECT_FALSE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kDidNotStartWithTransientActivation);
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 0);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
 
-    auto entries = ukm_recorder.GetEntriesByName(
-        ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
-    EXPECT_EQ(entries.size(), 5u);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 0);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
-  }
+  NavigateAwayToFlushUseCounterUKM(
+      browser()->tab_strip_model()->GetWebContentsAt(0));
 
-  // Popup from ad iframe with gesture
-  {
-    browser()->tab_strip_model()->MoveSelectedTabsTo(0);
-
-    content::WebContentsAddedObserver observer;
-    content::ExecuteScriptAsync(
-        child, content::JsReplace("window.open($1)", popup_url));
-
-    content::WebContents* new_web_contents = observer.GetWebContents();
-    content::TestNavigationObserver navigation_observer(new_web_contents);
-    navigation_observer.Wait();
-
-    ASSERT_EQ(6, browser()->tab_strip_model()->count());
-
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kStartedWithTransientActivationFromAd);
-
-    auto entries = ukm_recorder.GetEntriesByName(
-        ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
-    EXPECT_EQ(entries.size(), 6u);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
-    ukm_recorder.ExpectEntryMetric(
-        entries.back(),
-        ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
-  }
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
 }
 
-IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
-                       SetTopLocationFromCrossOriginAdIframe) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       WindowOpen_FromAdIframeWithGesture) {
+  GURL url =
+      embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
+  GURL popup_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
+
+  RenderFrameHost* child =
+      CreateSrcFrame(GetWebContents(),
+                     embedded_test_server()->GetURL(
+                         "b.com", "/ad_tagging/frame_factory.html?1&ad=true"));
+
+  content::WebContentsAddedObserver observer;
+  content::ExecuteScriptAsync(child,
+                              content::JsReplace("window.open($1)", popup_url));
+
+  content::WebContents* new_web_contents = observer.GetWebContents();
+  content::TestNavigationObserver navigation_observer(new_web_contents);
+  navigation_observer.Wait();
+
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
+
+  EXPECT_TRUE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
+
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+
+  NavigateAwayToFlushUseCounterUKM(
+      browser()->tab_strip_model()->GetWebContentsAt(0));
+
+  EXPECT_TRUE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    AdClickMetricsBrowserTest,
+    AdClickMetrics_AnchorClickTopNavigationFromCrossOriginAdIframe) {
+  GURL main_frame_url = embedded_test_server()->GetURL(
+      "a.com", "/ad_tagging/page_with_full_viewport_style_frame.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_frame_url));
+
+  GURL ad_iframe_url = embedded_test_server()->GetURL(
+      "b.com", "/ad_tagging/page_with_full_viewport_link.html?ad=true");
+
+  GURL top_navigation_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
+
+  content::TestNavigationObserver iframe_navigation_observer(GetWebContents(),
+                                                             1);
+  EXPECT_TRUE(content::ExecJs(GetWebContents()->GetPrimaryMainFrame(),
+                              content::JsReplace(R"(
+        const ad_iframe = document.createElement('iframe');
+        ad_iframe.id = 'frame-id';
+        ad_iframe.src = $1;
+        document.body.appendChild(ad_iframe);
+      )",
+                                                 ad_iframe_url)));
+  iframe_navigation_observer.Wait();
+
+  RenderFrameHost* child_rfh =
+      ChildFrameAt(GetWebContents()->GetPrimaryMainFrame(), 0);
+
+  EXPECT_TRUE(content::ExecJs(
+      child_rfh,
+      content::JsReplace("document.getElementsByTagName('a')[0].href = $1; "
+                         "document.getElementsByTagName('a')[0].target='_top';",
+                         top_navigation_url)));
+
+  // We should wait for the hit-test data to be ready before sending the click
+  // event below to avoid flakiness.
+  content::WaitForHitTestData(child_rfh);
+
+  // Ensure the compositor thread is aware of the event listener.
+  content::MainThreadFrameObserver compositor_thread(
+      child_rfh->GetRenderWidgetHost());
+  compositor_thread.Wait();
+
+  content::TestNavigationObserver top_navigation_observer(web_contents());
+  content::SimulateMouseClick(web_contents(),
+                              blink::WebInputEvent::kNoModifiers,
+                              blink::WebMouseEvent::Button::kLeft);
+  top_navigation_observer.Wait();
+
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+
+  EXPECT_TRUE(HasAdClickMainFrameNavigationUseCounterForUrl(main_frame_url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(main_frame_url));
+}
+
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       AdClickMetrics_AnchorClickPopupFromCrossOriginAdIframe) {
+  GURL main_frame_url = embedded_test_server()->GetURL(
+      "a.com", "/ad_tagging/page_with_full_viewport_style_frame.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_frame_url));
+
+  GURL ad_iframe_url = embedded_test_server()->GetURL(
+      "b.com", "/ad_tagging/page_with_full_viewport_link.html?ad=true");
+
+  GURL popup_url =
+      embedded_test_server()->GetURL("c.com", "/ad_tagging/frame_factory.html");
+
+  content::TestNavigationObserver iframe_navigation_observer(GetWebContents(),
+                                                             1);
+  EXPECT_TRUE(content::ExecJs(GetWebContents()->GetPrimaryMainFrame(),
+                              content::JsReplace(R"(
+        const ad_iframe = document.createElement('iframe');
+        ad_iframe.src = $1;
+        document.body.appendChild(ad_iframe);
+      )",
+                                                 ad_iframe_url)));
+  iframe_navigation_observer.Wait();
+
+  RenderFrameHost* child_rfh =
+      ChildFrameAt(GetWebContents()->GetPrimaryMainFrame(), 0);
+
+  EXPECT_TRUE(content::ExecJs(
+      child_rfh, content::JsReplace(
+                     "document.getElementsByTagName('a')[0].href = $1; "
+                     "document.getElementsByTagName('a')[0].target='_blank';",
+                     popup_url)));
+
+  // We should wait for the hit-test data to be ready before sending the click
+  // event below to avoid flakiness.
+  content::WaitForHitTestData(child_rfh);
+
+  // Ensure the compositor thread is aware of the event listener.
+  content::MainThreadFrameObserver compositor_thread(
+      child_rfh->GetRenderWidgetHost());
+  compositor_thread.Wait();
+
+  content::WebContentsAddedObserver popup_web_contents_observer;
+  content::SimulateMouseClick(web_contents(),
+                              blink::WebInputEvent::kNoModifiers,
+                              blink::WebMouseEvent::Button::kLeft);
+  content::WebContents* new_web_contents =
+      popup_web_contents_observer.GetWebContents();
+
+  content::TestNavigationObserver popup_navigation_observer(new_web_contents);
+  popup_navigation_observer.Wait();
+
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+
+  NavigateAwayToFlushUseCounterUKM(
+      browser()->tab_strip_model()->GetWebContentsAt(0));
+
+  EXPECT_TRUE(HasAdClickMainFrameNavigationUseCounterForUrl(main_frame_url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(main_frame_url));
+}
+
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
+                       SetTopLocationFromCrossOriginAdIframe) {
   GURL url =
       embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -1246,26 +1565,26 @@ IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
       content::ExecJs(child, content::JsReplace("top.location = $1", new_url)));
   navigation_observer.Wait();
 
-  EXPECT_EQ(
-      navigation_observer.last_navigation_initiator_activation_and_ad_status(),
-      blink::mojom::NavigationInitiatorActivationAndAdStatus::
-          kStartedWithTransientActivationFromAd);
+  EXPECT_TRUE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
 
-  auto entries = ukm_recorder.GetEntriesByName(
+  auto entries = ukm_recorder_->GetEntriesByName(
       ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
   EXPECT_EQ(entries.size(), 2u);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries.back(),
       ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries.back(),
       ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+
+  EXPECT_TRUE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
 }
 
-IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
                        SetTopLocationFromCrossOriginNonAdIframe) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
   GURL url =
       embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -1282,26 +1601,26 @@ IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
       content::ExecJs(child, content::JsReplace("top.location = $1", new_url)));
   navigation_observer.Wait();
 
-  EXPECT_EQ(
-      navigation_observer.last_navigation_initiator_activation_and_ad_status(),
-      blink::mojom::NavigationInitiatorActivationAndAdStatus::
-          kStartedWithTransientActivationFromNonAd);
+  EXPECT_TRUE(
+      navigation_observer.last_navigation_started_with_transient_activation());
+  EXPECT_FALSE(navigation_observer.last_navigation_started_by_ad());
 
-  auto entries = ukm_recorder.GetEntriesByName(
+  auto entries = ukm_recorder_->GetEntriesByName(
       ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
   EXPECT_EQ(entries.size(), 2u);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries.back(),
       ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries.back(),
       ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
+
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
+  EXPECT_FALSE(HasAdNavWithoutGestureUseCounter(url));
 }
 
-IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
                        NavigateCrossOriginIframeFromNonAdScript) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
   GURL url =
       embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -1312,10 +1631,9 @@ IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
                    embedded_test_server()->GetURL(
                        "b.com", "/ad_tagging/frame_factory.html?1&ad=true"));
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kStartedWithTransientActivationFromNonAd);
+    EXPECT_TRUE(navigation_observer
+                    .last_navigation_started_with_transient_activation());
+    EXPECT_FALSE(navigation_observer.last_navigation_started_by_ad());
   }
 
   {
@@ -1329,23 +1647,24 @@ IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
                            new_url)));
     navigation_observer.Wait();
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kStartedWithTransientActivationFromNonAd);
+    EXPECT_TRUE(navigation_observer
+                    .last_navigation_started_with_transient_activation());
+    EXPECT_FALSE(navigation_observer.last_navigation_started_by_ad());
   }
 
   // No event is recorded for subframe navigation. The recorded event is for the
   // initial page load.
-  auto entries = ukm_recorder.GetEntriesByName(
+  auto entries = ukm_recorder_->GetEntriesByName(
       ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
   EXPECT_EQ(entries.size(), 1u);
+
+  NavigateAwayToFlushUseCounterUKM(GetWebContents());
+
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
 }
 
-IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
+IN_PROC_BROWSER_TEST_F(AdClickMetricsBrowserTest,
                        NavigateCrossOriginIframeFromAdScript) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
   GURL url =
       embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -1356,10 +1675,9 @@ IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
                    embedded_test_server()->GetURL(
                        "b.com", "/ad_tagging/frame_factory.html?1&ad=true"));
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kStartedWithTransientActivationFromNonAd);
+    EXPECT_TRUE(navigation_observer
+                    .last_navigation_started_with_transient_activation());
+    EXPECT_FALSE(navigation_observer.last_navigation_started_by_ad());
   }
 
   {
@@ -1373,17 +1691,20 @@ IN_PROC_BROWSER_TEST_F(AdClickLandingPageMetricsBrowserTest,
                            new_url)));
     navigation_observer.Wait();
 
-    EXPECT_EQ(navigation_observer
-                  .last_navigation_initiator_activation_and_ad_status(),
-              blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                  kStartedWithTransientActivationFromAd);
+    EXPECT_TRUE(navigation_observer
+                    .last_navigation_started_with_transient_activation());
+    EXPECT_TRUE(navigation_observer.last_navigation_started_by_ad());
   }
 
   // No event is recorded for subframe navigation. The recorded event is for the
   // initial page load.
-  auto entries = ukm_recorder.GetEntriesByName(
+  auto entries = ukm_recorder_->GetEntriesByName(
       ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
   EXPECT_EQ(entries.size(), 1u);
+
+  NavigateAwayToFlushUseCounterUKM(GetWebContents());
+
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(url));
 }
 
 class AdTaggingEventFromSubframeBrowserTest
@@ -1391,14 +1712,13 @@ class AdTaggingEventFromSubframeBrowserTest
       public ::testing::WithParamInterface<
           std::tuple<bool /* cross_origin */, bool /* from_ad_frame */>> {};
 
-// crbug.com/997410. The test is flaky on multiple platforms.
+// crbug.com/41478023. The test is flaky on multiple platforms.
 IN_PROC_BROWSER_TEST_P(AdTaggingEventFromSubframeBrowserTest,
                        DISABLED_WindowOpenFromSubframe) {
   auto [cross_origin, from_ad_frame] = GetParam();
   SCOPED_TRACE(::testing::Message() << "cross_origin = " << cross_origin << ", "
                                     << "from_ad_frame = " << from_ad_frame);
 
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
   base::HistogramTester histogram_tester;
   GURL root_frame_url =
       embedded_test_server()->GetURL("a.com", "/ad_tagging/frame_factory.html");
@@ -1414,8 +1734,8 @@ IN_PROC_BROWSER_TEST_P(AdTaggingEventFromSubframeBrowserTest,
   EXPECT_TRUE(content::ExecJs(child, "window.open();"));
 
   bool from_ad_script = from_ad_frame;
-  ExpectWindowOpenUkmEntry(ukm_recorder, false /* from_root_frame */,
-                           root_frame_url, from_ad_frame, from_ad_script);
+  ExpectWindowOpenUkmEntry(false /* from_root_frame */, root_frame_url,
+                           from_ad_frame, from_ad_script);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1427,13 +1747,12 @@ class AdTaggingEventWithScriptInStackBrowserTest
     : public AdTaggingBrowserTest,
       public ::testing::WithParamInterface<bool /* from_ad_script */> {};
 
-// crbug.com/998405. The test is flaky on multiple platforms.
+// crbug.com/40642419. The test is flaky on multiple platforms.
 IN_PROC_BROWSER_TEST_P(AdTaggingEventWithScriptInStackBrowserTest,
                        DISABLED_WindowOpenWithScriptInStack) {
   bool from_ad_script = GetParam();
   SCOPED_TRACE(::testing::Message() << "from_ad_script = " << from_ad_script);
 
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
   base::HistogramTester histogram_tester;
   GURL root_frame_url = GetURL("frame_factory.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), root_frame_url));
@@ -1445,8 +1764,8 @@ IN_PROC_BROWSER_TEST_P(AdTaggingEventWithScriptInStackBrowserTest,
   EXPECT_TRUE(content::ExecJs(main_tab, script));
 
   bool from_ad_frame = false;
-  ExpectWindowOpenUkmEntry(ukm_recorder, true /* from_root_frame */,
-                           root_frame_url, from_ad_frame, from_ad_script);
+  ExpectWindowOpenUkmEntry(true /* from_root_frame */, root_frame_url,
+                           from_ad_frame, from_ad_script);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1494,328 +1813,28 @@ class AdTaggingFencedFrameBrowserTest : public AdTaggingBrowserTest {
 
 // Test that a fenced frame itself can be tagged as an ad and that iframes
 // nested within it see it as an ancestor ad frame.
-IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
-                       FencedFrameMatchingSuffixRuleIsTagged) {
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GetURL("frame_factory.html?primary")));
 
-  // Create a fenced frame which should be tagged as an ad.
-  const GURL kUrl = GetURL("frame_factory.html?fencedframe&ad=true");
-  RenderFrameHost* fenced_frame = CreateFencedFrame(PrimaryMainFrame(), kUrl);
-
-  EXPECT_TRUE(EvaluatedChildFrameLoad(kUrl));
-  EXPECT_TRUE(IsAdFrame(fenced_frame));
-  EXPECT_TRUE(EvidenceForFrameComprises(
-      fenced_frame, /*parent_is_ad=*/false,
-      blink::mojom::FilterListResult::kMatchedBlockingRule,
-      blink::mojom::FrameCreationStackEvidence::kNotCreatedByAdScript));
-
-  // Create an iframe in the fenced frame that doesn't match any rules. Since
-  // the fenced frame was tagged as an ad, this should be as well.
-  GURL kInnerUrl = GetURL("test_div.html");
-  RenderFrameHost* inner_frame = CreateSrcFrame(fenced_frame, kInnerUrl);
-
-  EXPECT_TRUE(EvaluatedChildFrameLoad(kInnerUrl));
-  EXPECT_TRUE(IsAdFrame(inner_frame));
-  // Note: kCreatedByAdScript is expected since any script running in an ad is
-  // considered ad script.
-  EXPECT_TRUE(EvidenceForFrameComprises(
-      inner_frame, /*parent_is_ad=*/true,
-      blink::mojom::FilterListResult::kMatchedNoRules,
-      blink::mojom::FrameCreationStackEvidence::kCreatedByAdScript));
-}
 
 // Test that a fenced frame created by ad script is tagged as an ad.
-IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
-                       FencedFrameCreatedByAdScriptIsTagged) {
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GetURL("frame_factory.html?primary")));
 
-  {
-    // Create a fenced frame from an ad script so it should be tagged as an ad.
-    const GURL kUrl = GetURL("frame_factory.html?fencedframe");
-    RenderFrameHost* fenced_frame =
-        CreateFencedFrameFromAdScript(PrimaryMainFrame(), kUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kUrl));
-    EXPECT_TRUE(IsAdFrame(fenced_frame));
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        fenced_frame, /*parent_is_ad=*/false,
-        blink::mojom::FilterListResult::kMatchedNoRules,
-        blink::mojom::FrameCreationStackEvidence::kCreatedByAdScript));
-
-    // Create a plain frame in the fenced frame. Since the fenced frame was
-    // tagged as an ad, this should be as well.
-    const GURL kInnerUrl = GetURL("test_div.html");
-    RenderFrameHost* inner_frame = CreateSrcFrame(fenced_frame, kInnerUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kInnerUrl));
-    EXPECT_TRUE(IsAdFrame(inner_frame));
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        inner_frame, /*parent_is_ad=*/true,
-        blink::mojom::FilterListResult::kMatchedNoRules,
-        blink::mojom::FrameCreationStackEvidence::kCreatedByAdScript));
-  }
-
-  // Create a fenced frame from a non-ad script, ensure it isn't tagged.
-  {
-    const GURL kUrl = GetURL("frame_factory.html?non+ad+fencedframe");
-    RenderFrameHost* fenced_frame = CreateFencedFrame(PrimaryMainFrame(), kUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kUrl));
-    EXPECT_FALSE(IsAdFrame(fenced_frame));
-  }
-}
 
 // Test that a fenced frame not matching any rules, created in an ad-frame is
 // also tagged as an ad.
-IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
-                       FencedFrameWithAdParentIsTagged) {
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GetURL("frame_factory.html?primary")));
 
-  {
-    // Create a fenced frame to an ad URL.
-    const GURL kAdUrl = GetURL("frame_factory.html?fencedframe&ad=true");
-    RenderFrameHost* ad_frame = CreateFencedFrame(PrimaryMainFrame(), kAdUrl);
-
-    ASSERT_TRUE(EvaluatedChildFrameLoad(kAdUrl));
-    ASSERT_TRUE(IsAdFrame(ad_frame));
-
-    // Create another fenced frame, nested in the first one, that doesn't match
-    // any rules. Since the first fenced frame was tagged as an ad, the inner
-    // one should be as well.
-    const GURL kInnerUrl = GetURL("test_div.html?nested+in+fenced+frame");
-    RenderFrameHost* inner_frame = CreateFencedFrame(ad_frame, kInnerUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kInnerUrl));
-    EXPECT_TRUE(IsAdFrame(inner_frame));
-    // Note: kCreatedByAdScript is expected since any script running in an ad
-    // is considered ad script.
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        inner_frame, /*parent_is_ad=*/true,
-        blink::mojom::FilterListResult::kMatchedNoRules,
-        blink::mojom::FrameCreationStackEvidence::kCreatedByAdScript));
-  }
-
-  {
-    // Create an iframe to an ad URL
-    const GURL kAdUrl = GetURL("frame_factory.html?iframe&ad=true");
-    RenderFrameHost* ad_frame = CreateSrcFrame(PrimaryMainFrame(), kAdUrl);
-
-    ASSERT_TRUE(EvaluatedChildFrameLoad(kAdUrl));
-    ASSERT_TRUE(IsAdFrame(ad_frame));
-
-    // Create a fenced frame, nested in the ad iframe, that doesn't match any
-    // rules. Since the iframe was tagged as an ad, the fenced frame should be
-    // as well.
-    const GURL kInnerUrl = GetURL("test_div.html?nested+in+iframe");
-    RenderFrameHost* inner_frame = CreateFencedFrame(ad_frame, kInnerUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kInnerUrl));
-    EXPECT_TRUE(IsAdFrame(inner_frame));
-    // Note: kCreatedByAdScript is expected since any script running in an ad
-    // is considered ad script.
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        inner_frame, /*parent_is_ad=*/true,
-        blink::mojom::FilterListResult::kMatchedNoRules,
-        blink::mojom::FrameCreationStackEvidence::kCreatedByAdScript));
-  }
-}
 
 // Test ad tagging for iframes nested within a fenced frame.
-IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
-                       IFrameNestedInFencedFrameIsTagged) {
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GetURL("frame_factory.html?primary")));
 
-  // Create a fenced frame into which we'll nest iframes.
-  const GURL kOuterUrl = GetURL("frame_factory.html?fencedframe");
-  RenderFrameHost* fenced_frame =
-      CreateFencedFrame(PrimaryMainFrame(), kOuterUrl);
-
-  ASSERT_TRUE(EvaluatedChildFrameLoad(kOuterUrl));
-  ASSERT_FALSE(IsAdFrame(fenced_frame));
-
-  // Create an iframe inside the fenced frame that matches an ad rule. It
-  // should be tagged as an ad.
-  {
-    const GURL kAdUrl = GetURL("test_div.html?ad=true");
-    RenderFrameHost* inner_frame = CreateSrcFrame(fenced_frame, kAdUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kAdUrl));
-    EXPECT_TRUE(IsAdFrame(inner_frame));
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        inner_frame, /*parent_is_ad=*/false,
-        blink::mojom::FilterListResult::kMatchedBlockingRule,
-        blink::mojom::FrameCreationStackEvidence::kNotCreatedByAdScript));
-  }
-
-  // Create an iframe inside the fenced frame that doesn't match any rules but
-  // is created from an ad script. It should be tagged as an ad.
-  {
-    const GURL kNotAdUrl = GetURL("test_div.html?not+an+ad");
-    RenderFrameHost* inner_frame =
-        CreateSrcFrameFromAdScript(fenced_frame, kNotAdUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kNotAdUrl));
-    EXPECT_TRUE(IsAdFrame(inner_frame));
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        inner_frame, /*parent_is_ad=*/false,
-        blink::mojom::FilterListResult::kMatchedNoRules,
-        blink::mojom::FrameCreationStackEvidence::kCreatedByAdScript));
-  }
-
-  // Create an iframe inside the fenced frame that doesn't match any rules. It
-  // should not be tagged as an ad.
-  {
-    const GURL kNotAdUrl = GetURL("test_div.html?also+not+an+ad");
-    RenderFrameHost* inner_frame = CreateSrcFrame(fenced_frame, kNotAdUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kNotAdUrl));
-    EXPECT_FALSE(IsAdFrame(inner_frame));
-  }
-}
 
 // Test ad tagging for fenced frames nested within a fenced frame.
-IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
-                       FencedFrameNestedInFencedFrameIsTagged) {
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GetURL("frame_factory.html?primary")));
 
-  // Create a fenced frame into which we'll nest other fenced frames.
-  const GURL kOuterUrl = GetURL("frame_factory.html?fencedframe");
-  RenderFrameHost* fenced_frame =
-      CreateFencedFrame(PrimaryMainFrame(), kOuterUrl);
 
-  ASSERT_TRUE(EvaluatedChildFrameLoad(kOuterUrl));
-  ASSERT_FALSE(IsAdFrame(fenced_frame));
 
-  // Create a fenced frame inside the fenced frame that matches an ad rule. It
-  // should be tagged as an ad.
-  {
-    const GURL kAdUrl = GetURL("test_div.html?ad=true");
-    RenderFrameHost* inner_frame = CreateFencedFrame(fenced_frame, kAdUrl);
 
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kAdUrl));
-    EXPECT_TRUE(IsAdFrame(inner_frame));
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        inner_frame, /*parent_is_ad=*/false,
-        blink::mojom::FilterListResult::kMatchedBlockingRule,
-        blink::mojom::FrameCreationStackEvidence::kNotCreatedByAdScript));
-  }
 
-  // Create a fenced frame inside the fenced frame that doesn't match any rules
-  // but is created from an ad script. It should be tagged as an ad.
-  {
-    const GURL kNotAdUrl = GetURL("test_div.html?not+an+ad");
-    RenderFrameHost* inner_frame =
-        CreateFencedFrameFromAdScript(fenced_frame, kNotAdUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kNotAdUrl));
-    EXPECT_TRUE(IsAdFrame(inner_frame));
-    EXPECT_TRUE(EvidenceForFrameComprises(
-        inner_frame, /*parent_is_ad=*/false,
-        blink::mojom::FilterListResult::kMatchedNoRules,
-        blink::mojom::FrameCreationStackEvidence::kCreatedByAdScript));
-  }
-
-  // Create a fenced frame inside the fenced frame that doesn't match any
-  // rules. It should not be tagged as an ad.
-  {
-    const GURL kNotAdUrl = GetURL("test_div.html?also+not+an+ad");
-    RenderFrameHost* inner_frame = CreateFencedFrame(fenced_frame, kNotAdUrl);
-
-    EXPECT_TRUE(EvaluatedChildFrameLoad(kNotAdUrl));
-    EXPECT_FALSE(IsAdFrame(inner_frame));
-  }
-}
-
-IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
-                       AdClickLandingPageMetrics_PopupFromAdFencedFrame) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GetURL("frame_factory.html?primary")));
-
-  const GURL kOuterUrl = GetURL("frame_factory.html?fencedframe&ad=true");
-  RenderFrameHost* fenced_frame =
-      CreateFencedFrame(PrimaryMainFrame(), kOuterUrl);
-
-  ASSERT_TRUE(EvaluatedChildFrameLoad(kOuterUrl));
-  ASSERT_TRUE(IsAdFrame(fenced_frame));
-
-  GURL new_url = GetURL("frame_factory.html?primary123");
-
-  content::WebContentsAddedObserver observer;
-  content::ExecuteScriptAsync(fenced_frame,
-                              content::JsReplace("window.open($1)", new_url));
-
-  content::WebContents* new_web_contents = observer.GetWebContents();
-  content::TestNavigationObserver navigation_observer(new_web_contents);
-  navigation_observer.Wait();
-
-  EXPECT_EQ(
-      navigation_observer.last_navigation_initiator_activation_and_ad_status(),
-      blink::mojom::NavigationInitiatorActivationAndAdStatus::
-          kStartedWithTransientActivationFromAd);
-
-  auto entries = ukm_recorder.GetEntriesByName(
-      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
-  EXPECT_EQ(entries.size(), 2u);
-  ukm_recorder.ExpectEntryMetric(
-      entries[1], ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName,
-      1);
-  ukm_recorder.ExpectEntryMetric(
-      entries[1],
-      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
-}
-
-IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
-                       AdClickLandingPageMetrics_PopupFromNonAdFencedFrame) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), GetURL("frame_factory.html?primary")));
-
-  const GURL kOuterUrl = GetURL("frame_factory.html?fencedframe");
-  RenderFrameHost* fenced_frame =
-      CreateFencedFrame(PrimaryMainFrame(), kOuterUrl);
-
-  ASSERT_TRUE(EvaluatedChildFrameLoad(kOuterUrl));
-  ASSERT_FALSE(IsAdFrame(fenced_frame));
-
-  GURL new_url = GetURL("frame_factory.html?primary");
-
-  content::WebContentsAddedObserver observer;
-  content::ExecuteScriptAsync(fenced_frame,
-                              content::JsReplace("window.open($1)", new_url));
-
-  content::WebContents* new_web_contents = observer.GetWebContents();
-  content::TestNavigationObserver navigation_observer(new_web_contents);
-  navigation_observer.Wait();
-
-  EXPECT_EQ(
-      navigation_observer.last_navigation_initiator_activation_and_ad_status(),
-      blink::mojom::NavigationInitiatorActivationAndAdStatus::
-          kStartedWithTransientActivationFromNonAd);
-
-  auto entries = ukm_recorder.GetEntriesByName(
-      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
-  EXPECT_EQ(entries.size(), 2u);
-  ukm_recorder.ExpectEntryMetric(
-      entries[1], ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName,
-      1);
-  ukm_recorder.ExpectEntryMetric(
-      entries[1],
-      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
-}
 
 IN_PROC_BROWSER_TEST_F(
     AdTaggingFencedFrameBrowserTest,
-    AdClickLandingPageMetrics_TopNavigationFromOpaqueModeAdFencedFrame) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
-
+    AdClickMetrics_TopNavigationFromOpaqueModeAdFencedFrame) {
   GURL main_url = GetURL("frame_factory.html?primary");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
 
@@ -1823,7 +1842,7 @@ IN_PROC_BROWSER_TEST_F(
   content::RenderFrameHost* fenced_frame =
       fenced_frame_test_helper().CreateFencedFrame(
           PrimaryMainFrame(), kOuterUrl, net::OK,
-          blink::mojom::FencedFrameMode::kOpaqueAds);
+          blink::FencedFrame::DeprecatedFencedFrameMode::kOpaqueAds);
 
   GURL new_url = GetURL("frame_factory.html?primary");
 
@@ -1833,27 +1852,101 @@ IN_PROC_BROWSER_TEST_F(
              content::JsReplace("window.open($1, '_unfencedTop')", new_url)));
   top_navigation_observer.Wait();
 
-  EXPECT_EQ(top_navigation_observer
-                .last_navigation_initiator_activation_and_ad_status(),
-            blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                kStartedWithTransientActivationFromAd);
+  EXPECT_TRUE(top_navigation_observer
+                  .last_navigation_started_with_transient_activation());
+  EXPECT_TRUE(top_navigation_observer.last_navigation_started_by_ad());
 
-  auto entries = ukm_recorder.GetEntriesByName(
+  auto entries = ukm_recorder_->GetEntriesByName(
       ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
   EXPECT_EQ(entries.size(), 2u);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries[1], ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName,
       1);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries[1],
       ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+
+  EXPECT_TRUE(HasAdClickMainFrameNavigationUseCounterForUrl(main_url));
+}
+
+IN_PROC_BROWSER_TEST_F(AdTaggingFencedFrameBrowserTest,
+                       AdClickMetrics_ReloadFromOpaqueModeAdFencedFrame) {
+  GURL main_url = GetURL("frame_factory.html?primary");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  const GURL kOuterUrl = GetURL("frame_factory.html?fencedframe&ad=true");
+  content::RenderFrameHost* fenced_frame =
+      fenced_frame_test_helper().CreateFencedFrame(
+          PrimaryMainFrame(), kOuterUrl, net::OK,
+          blink::FencedFrame::DeprecatedFencedFrameMode::kOpaqueAds);
+
+  content::TestFrameNavigationObserver observer(fenced_frame);
+  EXPECT_TRUE(ExecJs(fenced_frame, content::JsReplace("location.reload()")));
+  observer.Wait();
+
+  // No event is recorded for fenced frame reload. The recorded event is for the
+  // initial page load.
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 1u);
+
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(main_url));
 }
 
 IN_PROC_BROWSER_TEST_F(
     AdTaggingFencedFrameBrowserTest,
-    AdClickLandingPageMetrics_TopNavigationFromOpaqueModeNonAdFencedFrame) {
-  ukm::TestAutoSetUkmRecorder ukm_recorder;
+    AdClickMetrics_AnchorClickTopNavigationFromOpaqueModeAdFencedFrame) {
+  GURL main_frame_url = GetURL("page_with_full_viewport_style_frame.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_frame_url));
 
+  GURL ad_fenced_frame_url =
+      GetURL("page_with_full_viewport_link.html?ad=true");
+
+  content::RenderFrameHost* fenced_frame =
+      fenced_frame_test_helper().CreateFencedFrame(
+          PrimaryMainFrame(), ad_fenced_frame_url, net::OK,
+          blink::FencedFrame::DeprecatedFencedFrameMode::kOpaqueAds);
+
+  GURL top_navigation_url = GetURL("frame_factory.html?primary");
+
+  EXPECT_TRUE(content::ExecJs(
+      fenced_frame,
+      content::JsReplace(
+          "document.getElementsByTagName('a')[0].href = $1; "
+          "document.getElementsByTagName('a')[0].target='_unfencedTop';",
+          top_navigation_url)));
+
+  // We should wait for the hit-test data to be ready before sending the click
+  // event below to avoid flakiness.
+  content::WaitForHitTestData(fenced_frame);
+
+  // Ensure the compositor thread is aware of the event listener.
+  content::MainThreadFrameObserver compositor_thread(
+      fenced_frame->GetRenderWidgetHost());
+  compositor_thread.Wait();
+
+  content::TestNavigationObserver top_navigation_observer(web_contents());
+  content::SimulateMouseClick(web_contents(),
+                              blink::WebInputEvent::kNoModifiers,
+                              blink::WebMouseEvent::Button::kLeft);
+  top_navigation_observer.Wait();
+
+  auto entries = ukm_recorder_->GetEntriesByName(
+      ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
+  EXPECT_EQ(entries.size(), 2u);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName, 1);
+  ukm_recorder_->ExpectEntryMetric(
+      entries.back(),
+      ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 1);
+
+  EXPECT_TRUE(HasAdClickMainFrameNavigationUseCounterForUrl(main_frame_url));
+}
+
+IN_PROC_BROWSER_TEST_F(
+    AdTaggingFencedFrameBrowserTest,
+    AdClickMetrics_TopNavigationFromOpaqueModeNonAdFencedFrame) {
   GURL main_url = GetURL("frame_factory.html?primary");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
 
@@ -1861,7 +1954,7 @@ IN_PROC_BROWSER_TEST_F(
   content::RenderFrameHost* fenced_frame =
       fenced_frame_test_helper().CreateFencedFrame(
           PrimaryMainFrame(), kOuterUrl, net::OK,
-          blink::mojom::FencedFrameMode::kOpaqueAds);
+          blink::FencedFrame::DeprecatedFencedFrameMode::kOpaqueAds);
 
   GURL new_url = GetURL("frame_factory.html?primary");
 
@@ -1871,20 +1964,273 @@ IN_PROC_BROWSER_TEST_F(
              content::JsReplace("window.open($1, '_unfencedTop')", new_url)));
   top_navigation_observer.Wait();
 
-  EXPECT_EQ(top_navigation_observer
-                .last_navigation_initiator_activation_and_ad_status(),
-            blink::mojom::NavigationInitiatorActivationAndAdStatus::
-                kStartedWithTransientActivationFromNonAd);
+  EXPECT_TRUE(top_navigation_observer
+                  .last_navigation_started_with_transient_activation());
+  EXPECT_FALSE(top_navigation_observer.last_navigation_started_by_ad());
 
-  auto entries = ukm_recorder.GetEntriesByName(
+  auto entries = ukm_recorder_->GetEntriesByName(
       ukm::builders::PageLoadInitiatorForAdTagging::kEntryName);
   EXPECT_EQ(entries.size(), 2u);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries[1], ukm::builders::PageLoadInitiatorForAdTagging::kFromUserName,
       1);
-  ukm_recorder.ExpectEntryMetric(
+  ukm_recorder_->ExpectEntryMetric(
       entries[1],
       ukm::builders::PageLoadInitiatorForAdTagging::kFromAdClickName, 0);
+
+  EXPECT_FALSE(HasAdClickMainFrameNavigationUseCounterForUrl(main_url));
+}
+
+// TODO(crbug.com/541062235): This test is flaky.
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest, DISABLED_AdImageHDRUseCounter) {
+  base::HistogramTester histogram_tester;
+
+  GURL main_url = GetURL("frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  // Create an ad subframe.
+  GURL ad_url = GetURL("frame_factory.html?ad=true");
+  RenderFrameHost* ad_frame = CreateSrcFrame(GetWebContents(), ad_url);
+
+  // Load an UltraHDR gainmap image in the ad subframe.
+  GURL image_url = GetURL("gainmap-trattore0.jpg");
+  EXPECT_TRUE(ExecJs(ad_frame, content::JsReplace(R"(
+    let img = document.createElement('img');
+    img.src = $1;
+    document.body.appendChild(img);
+  )",
+                                                  image_url)));
+
+  // Wait for the image to finish loading.
+  EXPECT_TRUE(ExecJs(ad_frame, R"(
+    new Promise(resolve => {
+      let img = document.querySelector('img');
+      if (img.complete) resolve();
+      else img.onload = () => resolve();
+    });
+  )"));
+
+  NavigateAwayToFlushUseCounterUKM(web_contents());
+
+  histogram_tester.ExpectBucketCount("Blink.UseCounter.Features",
+                                     blink::mojom::WebFeature::kAdImageHDR, 1);
+}
+
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest,
+                       AdImageHDRUseCounter_NormalBrightness) {
+  base::HistogramTester histogram_tester;
+
+  GURL main_url = GetURL("frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  // Create an ad subframe.
+  GURL ad_url = GetURL("frame_factory.html?ad=true");
+  RenderFrameHost* ad_frame = CreateSrcFrame(GetWebContents(), ad_url);
+
+  // Load a standard SDR image (no gainmap, normal brightness).
+  GURL image_url = GetURL("pixel.png");
+  EXPECT_TRUE(ExecJs(ad_frame, content::JsReplace(R"(
+    let img = document.createElement('img');
+    img.src = $1;
+    document.body.appendChild(img);
+  )",
+                                                  image_url)));
+
+  // Wait for image to load.
+  EXPECT_TRUE(ExecJs(ad_frame, R"(
+    new Promise(resolve => {
+      let img = document.querySelector('img');
+      if (img.complete) resolve();
+      else img.onload = () => resolve();
+    });
+  )"));
+
+  NavigateAwayToFlushUseCounterUKM(web_contents());
+
+  histogram_tester.ExpectBucketCount("Blink.UseCounter.Features",
+                                     blink::mojom::WebFeature::kAdImageHDR, 0);
+}
+
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest, AdImageHDRUseCounter_NonAdFrame) {
+  base::HistogramTester histogram_tester;
+
+  GURL main_url = GetURL("frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  // Create a non-ad subframe.
+  GURL non_ad_url = GetURL("frame_factory.html?allowed=true");
+  RenderFrameHost* non_ad_frame = CreateSrcFrame(GetWebContents(), non_ad_url);
+
+  // Load an UltraHDR gainmap image in the non-ad subframe.
+  GURL image_url = GetURL("gainmap-trattore0.jpg");
+  EXPECT_TRUE(ExecJs(non_ad_frame, content::JsReplace(R"(
+    let img = document.createElement('img');
+    img.src = $1;
+    document.body.appendChild(img);
+  )",
+                                                      image_url)));
+
+  // Wait for image to load.
+  EXPECT_TRUE(ExecJs(non_ad_frame, R"(
+    new Promise(resolve => {
+      let img = document.querySelector('img');
+      if (img.complete) resolve();
+      else img.onload = () => resolve();
+    });
+  )"));
+
+  NavigateAwayToFlushUseCounterUKM(web_contents());
+
+  histogram_tester.ExpectBucketCount("Blink.UseCounter.Features",
+                                     blink::mojom::WebFeature::kAdImageHDR, 0);
+}
+
+// TODO(crbug.com/541062235): This test is flaky.
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest,
+                       DISABLED_AdCSSBackgroundImageHDRUseCounter) {
+  base::HistogramTester histogram_tester;
+
+  GURL main_url = GetURL("frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  // Create an ad subframe.
+  GURL ad_url = GetURL("frame_factory.html?ad=true");
+  RenderFrameHost* ad_frame = CreateSrcFrame(GetWebContents(), ad_url);
+
+  // Set a CSS background image with an UltraHDR gainmap in the ad subframe.
+  GURL image_url = GetURL("gainmap-trattore0.jpg");
+  EXPECT_TRUE(ExecJs(ad_frame, content::JsReplace(R"(
+    let div = document.createElement('div');
+    div.style.width = '100px';
+    div.style.height = '100px';
+    div.style.backgroundImage = 'url("' + $1 + '")';
+    document.body.appendChild(div);
+  )",
+                                                  image_url)));
+
+  // Wait for background image to load.
+  EXPECT_TRUE(ExecJs(ad_frame, content::JsReplace(R"(
+    new Promise(resolve => {
+      let img = new Image();
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+      img.src = $1;
+    });
+  )",
+                                                  image_url)));
+
+  NavigateAwayToFlushUseCounterUKM(web_contents());
+
+  histogram_tester.ExpectBucketCount("Blink.UseCounter.Features",
+                                     blink::mojom::WebFeature::kAdImageHDR, 1);
+}
+
+// TODO(crbug.com/541062235): This test is flaky.
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest,
+                       DISABLED_AdCSSBackgroundImageHDRUseCounter_AdScript) {
+  base::HistogramTester histogram_tester;
+
+  GURL main_url = GetURL("frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  // Create an ad subframe created by ad script.
+  RenderFrameHost* ad_frame = CreateSrcFrameFromAdScript(
+      GetWebContents(), GetURL("frame_factory.html"));
+
+  // Set a CSS background image with an UltraHDR gainmap in the ad subframe.
+  GURL image_url = GetURL("gainmap-trattore0.jpg");
+  EXPECT_TRUE(ExecJs(ad_frame, content::JsReplace(R"(
+    let div = document.createElement('div');
+    div.style.width = '100px';
+    div.style.height = '100px';
+    div.style.backgroundImage = 'url("' + $1 + '")';
+    document.body.appendChild(div);
+  )",
+                                                  image_url)));
+
+  // Wait for background image to load.
+  EXPECT_TRUE(ExecJs(ad_frame, content::JsReplace(R"(
+    new Promise(resolve => {
+      let img = new Image();
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+      img.src = $1;
+    });
+  )",
+                                                  image_url)));
+
+  NavigateAwayToFlushUseCounterUKM(web_contents());
+
+  histogram_tester.ExpectBucketCount("Blink.UseCounter.Features",
+                                     blink::mojom::WebFeature::kAdImageHDR, 1);
+}
+
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest,
+                       AdCSSBackgroundImageHDRUseCounter_MainFrameAdScript) {
+  base::HistogramTester histogram_tester;
+
+  GURL main_url = GetURL("frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  // In the main frame (not an ad frame), load an ad image matching the ad rule
+  // as a CSS background image on a <div> element.
+  GURL image_url = GetURL("gainmap-trattore0.jpg?ad=true");
+  EXPECT_TRUE(ExecJs(GetWebContents(), content::JsReplace(R"(
+    createCSSBackgroundImageFromAdScript($1);
+  )",
+                                                          image_url)));
+
+  // Wait for the background image to load.
+  EXPECT_TRUE(ExecJs(GetWebContents(), content::JsReplace(R"(
+    new Promise(resolve => {
+      let img = new Image();
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+      img.src = $1;
+    });
+  )",
+                                                          image_url)));
+
+  NavigateAwayToFlushUseCounterUKM(web_contents());
+
+  histogram_tester.ExpectBucketCount("Blink.UseCounter.Features",
+                                     blink::mojom::WebFeature::kAdImageHDR, 1);
+}
+
+IN_PROC_BROWSER_TEST_F(AdTaggingBrowserTest,
+                       AdCSSBackgroundImageHDRUseCounter_AdUrlOnly) {
+  base::HistogramTester histogram_tester;
+
+  GURL main_url = GetURL("frame_factory.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), main_url));
+
+  // In the main frame (not an ad frame), load an ad image matching the ad rule
+  // as a CSS background image from a non-ad script.
+  GURL image_url = GetURL("gainmap-trattore0.jpg?ad=true");
+  EXPECT_TRUE(ExecJs(GetWebContents(), content::JsReplace(R"(
+    let div = document.createElement('div');
+    div.style.width = '100px';
+    div.style.height = '100px';
+    div.style.backgroundImage = 'url("' + $1 + '")';
+    document.body.appendChild(div);
+  )",
+                                                          image_url)));
+
+  // Wait for the background image to load.
+  EXPECT_TRUE(ExecJs(GetWebContents(), content::JsReplace(R"(
+    new Promise(resolve => {
+      let img = new Image();
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+      img.src = $1;
+    });
+  )",
+                                                          image_url)));
+
+  NavigateAwayToFlushUseCounterUKM(web_contents());
+
+  histogram_tester.ExpectBucketCount("Blink.UseCounter.Features",
+                                     blink::mojom::WebFeature::kAdImageHDR, 1);
 }
 
 }  // namespace

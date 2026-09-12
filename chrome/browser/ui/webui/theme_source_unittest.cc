@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ui/webui/theme_source.h"
+
 #include <stddef.h>
+
 #include <vector>
 
 #include "base/functional/bind.h"
@@ -10,9 +13,9 @@
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
 #include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/webui/theme_source.h"
-#include "chrome/browser/ui/webui/webui_util.h"
+#include "chrome/browser/ui/webui/util/webui_util_desktop.h"
 #include "chrome/common/url_constants.h"
 #include "chrome/grit/theme_resources.h"
 #include "chrome/test/base/test_theme_provider.h"
@@ -21,10 +24,11 @@
 #include "content/public/test/test_renderer_host.h"
 #include "content/public/test/web_contents_tester.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/ui_base_features.h"
 
 class WebUISourcesTest : public testing::Test {
  public:
-  WebUISourcesTest() : result_data_size_(0) {}
+  WebUISourcesTest() = default;
 
   TestingProfile* profile() const { return profile_.get(); }
   ThemeSource* theme_source() const { return theme_source_.get(); }
@@ -39,11 +43,11 @@ class WebUISourcesTest : public testing::Test {
                        base::Unretained(this)));
   }
 
-  size_t result_data_size_;
+  size_t result_data_size_ = 0;
 
  private:
   void SetUp() override {
-    webui::SetThemeProviderForTesting(&test_theme_provider_);
+    webui::SetThemeProviderForTestingDeprecated(&test_theme_provider_);
     profile_ = std::make_unique<TestingProfile>();
     theme_source_ = std::make_unique<ThemeSource>(profile_.get());
     test_web_contents_ = content::WebContentsTester::CreateTestWebContents(
@@ -57,7 +61,7 @@ class WebUISourcesTest : public testing::Test {
     test_web_contents_.reset();
     test_web_contents_getter_ = content::WebContents::Getter();
     profile_.reset();
-    webui::SetThemeProviderForTesting(nullptr);
+    webui::SetThemeProviderForTestingDeprecated(nullptr);
   }
 
   void SendResponse(scoped_refptr<base::RefCountedMemory> data) {
@@ -131,14 +135,19 @@ TEST_F(WebUISourcesTest, ThemeSourceCSS) {
 }
 
 TEST_F(WebUISourcesTest, ThemeSourceColorsCSS) {
-  // Check for a successful request and that the data is non-null. The actual
-  // conversion of color provider colors to css colors is tested in helper
-  // functions.
-  size_t empty_size = 0;
+  // Check for a successful request and that the data is non-null under both
+  // optimized and unoptimized (baseline) paths. The actual conversion of color
+  // provider colors to css colors is tested in helper functions.
+  for (bool feature_enabled : {false, true}) {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitWithFeatureState(
+        features::kColorIdCssStyleSheetOptimization, feature_enabled);
 
-  StartDataRequest("colors.css?sets=ui");
-  base::RunLoop().RunUntilIdle();
-  EXPECT_NE(result_data_size_, empty_size);
+    result_data_size_ = 0;
+    StartDataRequest("colors.css?sets=ui");
+    base::RunLoop().RunUntilIdle();
+    EXPECT_NE(result_data_size_, 0u);
+  }
 }
 
 TEST_F(WebUISourcesTest, ThemeAllowedOrigin) {

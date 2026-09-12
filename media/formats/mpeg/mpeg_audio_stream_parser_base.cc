@@ -6,19 +6,23 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/numerics/checked_math.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/time/time.h"
 #include "media/base/byte_queue.h"
+#include "media/base/channel_layout.h"
 #include "media/base/media_log.h"
+#include "media/base/media_switches.h"
 #include "media/base/media_tracks.h"
 #include "media/base/media_util.h"
 #include "media/base/stream_parser.h"
 #include "media/base/stream_parser_buffer.h"
-#include "media/base/text_track_config.h"
 #include "media/base/timestamp_constants.h"
 #include "media/base/video_decoder_config.h"
+#include "media/formats/mpeg/lib.rs.h"
 
 namespace media {
 
@@ -40,7 +44,7 @@ static int LocateEndOfHeaders(const uint8_t* buf, int buf_len, int i) {
   bool was_lf = false;
   char last_c = '\0';
   for (; i < buf_len; ++i) {
-    char c = buf[i];
+    char c = UNSAFE_TODO(buf[i]);
     if (c == '\n') {
       if (was_lf)
         return i + 1;
@@ -56,10 +60,7 @@ static int LocateEndOfHeaders(const uint8_t* buf, int buf_len, int i) {
 MPEGAudioStreamParserBase::MPEGAudioStreamParserBase(uint32_t start_code_mask,
                                                      AudioCodec audio_codec,
                                                      int codec_delay)
-    : state_(UNINITIALIZED),
-      media_log_(nullptr),
-      in_media_segment_(false),
-      start_code_mask_(start_code_mask),
+    : start_code_mask_(start_code_mask),
       audio_codec_(audio_codec),
       codec_delay_(codec_delay) {}
 
@@ -69,7 +70,6 @@ void MPEGAudioStreamParserBase::Init(
     InitCB init_cb,
     NewConfigCB config_cb,
     NewBuffersCB new_buffers_cb,
-    bool ignore_text_tracks,
     EncryptedMediaInitDataCB encrypted_media_init_data_cb,
     NewMediaSegmentCB new_segment_cb,
     EndMediaSegmentCB end_of_segment_cb,
@@ -81,7 +81,7 @@ void MPEGAudioStreamParserBase::Init(
   new_buffers_cb_ = std::move(new_buffers_cb);
   new_segment_cb_ = std::move(new_segment_cb);
   end_of_segment_cb_ = std::move(end_of_segment_cb);
-  media_log_ = media_log;
+  media_log_ = MediaLog::CloneSafely(media_log);
 
   ChangeState(INITIALIZED);
 }
@@ -102,12 +102,11 @@ bool MPEGAudioStreamParserBase::GetGenerateTimestampsFlag() const {
   return true;
 }
 
-bool MPEGAudioStreamParserBase::AppendToParseBuffer(const uint8_t* buf,
-                                                    size_t size) {
-  DVLOG(1) << __func__ << "(" << size << ")";
+bool MPEGAudioStreamParserBase::AppendToParseBuffer(
+    base::span<const uint8_t> buf) {
+  DVLOG(1) << __func__ << "(" << buf.size() << ")";
 
-  DCHECK(buf);
-  DCHECK_GT(size, 0UL);
+  DCHECK(!buf.empty());
   DCHECK_NE(state_, UNINITIALIZED);
 
   if (state_ == PARSE_ERROR) {
@@ -119,8 +118,8 @@ bool MPEGAudioStreamParserBase::AppendToParseBuffer(const uint8_t* buf,
     // synchronous with the app's appendBuffer() call, instead of async decode
     // error during async parse. Since Parse() cannot succeed in kError state,
     // don't even copy `buf` into `queue_` in this case.
-    // TODO(crbug.com/1379160): Instrument this path to see if it can be changed
-    // to just DCHECK_NE(state_, PARSE_ERROR).
+    // TODO(crbug.com/40244241): Instrument this path to see if it can be
+    // changed to just DCHECK_NE(state_, PARSE_ERROR).
     return true;
   }
 
@@ -132,12 +131,13 @@ bool MPEGAudioStreamParserBase::AppendToParseBuffer(const uint8_t* buf,
   // could lead to memory corruption, preferring CHECK.
   CHECK_EQ(uninspected_pending_bytes_, 0);
 
-  uninspected_pending_bytes_ = base::checked_cast<int>(size);
-  if (!queue_.Push(buf, uninspected_pending_bytes_)) {
-    DVLOG(2) << "AppendToParseBuffer(): Failed to push buf of size " << size;
+  if (!queue_.Push(buf)) {
+    DVLOG(2) << "AppendToParseBuffer(): Failed to push buf of size "
+             << buf.size();
     return false;
   }
 
+  uninspected_pending_bytes_ = base::checked_cast<int>(buf.size());
   return true;
 }
 
@@ -153,12 +153,19 @@ StreamParser::ParseStatus MPEGAudioStreamParserBase::Parse(
 
   DCHECK_EQ(state_, INITIALIZED);
 
+  if (base::FeatureList::IsEnabled(kRustMpegAudioDataParser)) {
+    return ParseRust(max_pending_bytes_to_inspect);
+  }
+  return ParseLegacy(max_pending_bytes_to_inspect);
+}
+
+StreamParser::ParseStatus MPEGAudioStreamParserBase::ParseLegacy(
+    int max_pending_bytes_to_inspect) {
   bool end_of_segment = true;
   BufferQueue buffers;
 
-  const uint8_t* data = nullptr;
-  int queue_size = 0;
-  queue_.Peek(&data, &queue_size);
+  const uint8_t* data = queue_.Data().data();
+  int queue_size = queue_.Data().size();
 
   // First, determine the amount of bytes not yet popped, though already
   // inspected by previous call(s) to Parse().
@@ -182,12 +189,14 @@ StreamParser::ParseStatus MPEGAudioStreamParserBase::Parse(
     if (data_size < 4)
       break;
 
-    uint32_t start_code =
-        data[0] << 24 | data[1] << 16 | data[2] << 8 | data[3];
+    uint32_t start_code = data[0] << 24 | UNSAFE_TODO(data[1]) << 16 |
+                          UNSAFE_TODO(data[2]) << 8 | UNSAFE_TODO(data[3]);
     int bytes_read = 0;
     bool parsed_metadata = true;
     if ((start_code & start_code_mask_) == start_code_mask_) {
-      bytes_read = ParseFrame(data, data_size, &buffers);
+      bytes_read = ParseFrame(
+          UNSAFE_TODO(base::span(data, base::checked_cast<size_t>(data_size))),
+          &buffers);
 
       // Only allow the current segment to end if a full frame has been parsed.
       end_of_segment = bytes_read > 0;
@@ -224,7 +233,7 @@ StreamParser::ParseStatus MPEGAudioStreamParserBase::Parse(
 
     CHECK_GE(data_size, bytes_read);
     data_size -= bytes_read;
-    data += bytes_read;
+    UNSAFE_TODO(data += bytes_read);
     bytes_to_pop += bytes_read;
     end_of_segment = true;
   }
@@ -246,64 +255,82 @@ void MPEGAudioStreamParserBase::ChangeState(State state) {
   state_ = state;
 }
 
-int MPEGAudioStreamParserBase::ParseFrame(const uint8_t* data,
-                                          int size,
+int MPEGAudioStreamParserBase::ParseFrame(base::span<const uint8_t> data,
                                           BufferQueue* buffers) {
-  DVLOG(2) << __func__ << "(" << size << ")";
+  DVLOG(2) << __func__ << "(" << data.size() << ")";
 
-  int sample_rate;
-  ChannelLayout channel_layout;
-  int frame_size;
-  int sample_count;
-  bool metadata_frame = false;
-  std::vector<uint8_t> extra_data;
-  int bytes_read =
-      ParseFrameHeader(data, size, &frame_size, &sample_rate, &channel_layout,
-                       &sample_count, &metadata_frame, &extra_data);
+  if (data.size() < GetMinHeaderSize()) {
+    return 0;
+  }
 
-  if (bytes_read <= 0)
-    return bytes_read;
+  const auto header = ParseFrameHeader(data);
+  if (!header) {
+    return -1;
+  }
 
   // Make sure data contains the entire frame.
-  if (size < frame_size)
+  if (data.size() < header->frame_size) {
     return 0;
+  }
 
-  DVLOG(2) << " sample_rate " << sample_rate << " channel_layout "
-           << channel_layout << " frame_size " << frame_size << " sample_count "
-           << sample_count;
+  if (!ProcessAudioFrame(*header, data.first(header->frame_size), buffers)) {
+    return -1;
+  }
 
-  if (config_.IsValidConfig() && (config_.samples_per_second() != sample_rate ||
-                                  config_.channel_layout() != channel_layout)) {
+  return header->frame_size;
+}
+
+bool MPEGAudioStreamParserBase::ProcessAudioFrame(
+    const Header& header,
+    base::span<const uint8_t> data,
+    BufferQueue* buffers) {
+  DVLOG(2) << __func__ << "(" << data.size() << ")";
+
+  DVLOG(2) << " sample_rate " << header.sample_rate << " channel_layout "
+           << header.channel_layout << " frame_size " << data.size()
+           << " sample_count " << header.sample_count;
+
+  if (config_.IsValidConfig() &&
+      (config_.samples_per_second() !=
+           base::checked_cast<int>(header.sample_rate) ||
+       config_.channel_layout() != header.channel_layout)) {
     // Clear config data so that a config change is initiated.
     config_ = AudioDecoderConfig();
 
     // Send all buffers associated with the previous config.
-    if (!buffers->empty() && !SendBuffers(buffers, true))
-      return -1;
+    if (!buffers->empty() && !SendBuffers(buffers, true)) {
+      return false;
+    }
   }
 
   if (!config_.IsValidConfig()) {
-    config_.Initialize(audio_codec_, kSampleFormatF32, channel_layout,
-                       sample_rate, extra_data, EncryptionScheme::kUnencrypted,
-                       base::TimeDelta(), codec_delay_);
-    if (audio_codec_ == AudioCodec::kAAC)
+    config_.Initialize(audio_codec_, kSampleFormatF32,
+                       ChannelLayoutConfig::FromLayout(header.channel_layout),
+                       header.sample_rate, header.extra_data,
+                       EncryptionScheme::kUnencrypted, base::TimeDelta(),
+                       codec_delay_);
+    if (audio_codec_ == AudioCodec::kAAC) {
       config_.disable_discard_decoder_delay();
+    }
 
     base::TimeDelta base_timestamp;
-    if (timestamp_helper_)
+    if (timestamp_helper_) {
       base_timestamp = timestamp_helper_->GetTimestamp();
+    }
 
-    timestamp_helper_ = std::make_unique<AudioTimestampHelper>(sample_rate);
+    timestamp_helper_ =
+        std::make_unique<AudioTimestampHelper>(header.sample_rate);
     timestamp_helper_->SetBaseTimestamp(base_timestamp);
 
-    std::unique_ptr<MediaTracks> media_tracks(new MediaTracks());
+    auto media_tracks = std::make_unique<MediaTracks>();
     if (config_.IsValidConfig()) {
-      media_tracks->AddAudioTrack(config_, kMpegAudioTrackId,
+      media_tracks->AddAudioTrack(config_, true, kMpegAudioTrackId,
                                   MediaTrack::Kind("main"), MediaTrack::Label(),
                                   MediaTrack::Language());
     }
-    if (!config_cb_.Run(std::move(media_tracks), TextTrackConfigMap()))
-      return -1;
+    if (!config_cb_.Run(std::move(media_tracks))) {
+      return false;
+    }
 
     if (init_cb_) {
       InitParameters params(kInfiniteDuration);
@@ -312,21 +339,23 @@ int MPEGAudioStreamParserBase::ParseFrame(const uint8_t* data,
     }
   }
 
-  if (metadata_frame)
-    return frame_size;
+  if (header.metadata_frame) {
+    return true;
+  }
 
   // TODO(wolenetz/acolwell): Validate and use a common cross-parser TrackId
   // type and allow multiple audio tracks, if applicable. See
   // https://crbug.com/341581.
   scoped_refptr<StreamParserBuffer> buffer = StreamParserBuffer::CopyFrom(
-      data, frame_size, true, DemuxerStream::AUDIO, kMpegAudioTrackId);
+      data, true, DemuxerStream::AUDIO, kMpegAudioTrackId);
   buffer->set_timestamp(timestamp_helper_->GetTimestamp());
-  buffer->set_duration(timestamp_helper_->GetFrameDuration(sample_count));
+  buffer->set_duration(
+      timestamp_helper_->GetFrameDuration(header.sample_count));
   buffers->push_back(buffer);
 
-  timestamp_helper_->AddFrames(sample_count);
+  timestamp_helper_->AddFrames(header.sample_count);
 
-  return frame_size;
+  return true;
 }
 
 int MPEGAudioStreamParserBase::ParseIcecastHeader(const uint8_t* data,
@@ -336,8 +365,9 @@ int MPEGAudioStreamParserBase::ParseIcecastHeader(const uint8_t* data,
   if (size < 4)
     return 0;
 
-  if (memcmp("ICY ", data, 4))
+  if (UNSAFE_TODO(memcmp("ICY ", data, 4))) {
     return -1;
+  }
 
   int locate_size = std::min(size, kMaxIcecastHeaderSize);
   int offset = LocateEndOfHeaders(data, locate_size, 4);
@@ -356,13 +386,11 @@ int MPEGAudioStreamParserBase::ParseIcecastHeader(const uint8_t* data,
 int MPEGAudioStreamParserBase::ParseID3v1(const uint8_t* data, int size) {
   DVLOG(1) << __func__ << "(" << size << ")";
 
-  // TODO(acolwell): Add code to actually validate ID3v1 data and
-  // expose it as a metadata text track.
-
   if (size < 4)
     return 0;
 
-  int needed_size = !memcmp(data, "TAG+", 4) ? kID3v1ExtendedSize : kID3v1Size;
+  int needed_size =
+      !UNSAFE_TODO(memcmp(data, "TAG+", 4)) ? kID3v1ExtendedSize : kID3v1Size;
 
   return (size < needed_size) ? 0 : needed_size;
 }
@@ -373,9 +401,11 @@ int MPEGAudioStreamParserBase::ParseID3v2(const uint8_t* data, int size) {
   if (size < 10)
     return 0;
 
-  BitReader reader(data, size);
-  int32_t id;
-  int version;
+  // TODO(crbug.com/40284755): Spanify ParseID3v2 so this can drop UNSAFE_TODO.
+  BitReader reader(
+      UNSAFE_TODO(base::span(data, base::checked_cast<size_t>(size))));
+  uint32_t id;
+  uint16_t version;
   uint8_t flags;
   int32_t id3_size;
 
@@ -394,8 +424,6 @@ int MPEGAudioStreamParserBase::ParseID3v2(const uint8_t* data, int size) {
   if (size < actual_tag_size)
     return 0;
 
-  // TODO(acolwell): Add code to actually validate ID3v2 data and
-  // expose it as a metadata text track.
   return actual_tag_size;
 }
 
@@ -422,12 +450,12 @@ bool MPEGAudioStreamParserBase::ParseSyncSafeInt(BitReader* reader,
 int MPEGAudioStreamParserBase::FindNextValidStartCode(const uint8_t* data,
                                                       int size) {
   const uint8_t* start = data;
-  const uint8_t* end = data + size;
+  const uint8_t* end = UNSAFE_TODO(data + size);
 
   while (start < end) {
     int bytes_left = end - start;
-    const uint8_t* candidate_start_code =
-        static_cast<const uint8_t*>(memchr(start, 0xff, bytes_left));
+    const uint8_t* candidate_start_code = static_cast<const uint8_t*>(
+        UNSAFE_TODO(memchr(start, 0xff, bytes_left)));
 
     if (!candidate_start_code)
       return 0;
@@ -438,18 +466,16 @@ int MPEGAudioStreamParserBase::FindNextValidStartCode(const uint8_t* data,
     // the probability of false positives.
     for (int i = 0; i < 3; ++i) {
       int sync_size = end - sync;
-      int frame_size;
-      int sync_bytes = ParseFrameHeader(sync, sync_size, &frame_size, nullptr,
-                                        nullptr, nullptr, nullptr, nullptr);
-
-      if (sync_bytes == 0)
+      if (base::checked_cast<size_t>(sync_size) < GetMinHeaderSize()) {
         return 0;
+      }
 
-      if (sync_bytes > 0) {
-        DCHECK_LE(sync_bytes, sync_size);
+      const auto header = ParseFrameHeader(
+          UNSAFE_TODO(base::span(sync, base::checked_cast<size_t>(sync_size))));
 
+      if (header) {
         // Skip over this frame so we can check the next one.
-        sync += frame_size;
+        UNSAFE_TODO(sync += header->frame_size);
 
         // Make sure the next frame starts inside the buffer.
         if (sync >= end)
@@ -465,7 +491,7 @@ int MPEGAudioStreamParserBase::FindNextValidStartCode(const uint8_t* data,
       // One of the frame header parses failed so |candidate_start_code|
       // did not point to the start of a real frame. Move |start| forward
       // so we can find the next candidate.
-      start = candidate_start_code + 1;
+      start = UNSAFE_TODO(candidate_start_code + 1);
       continue;
     }
 
@@ -499,4 +525,109 @@ bool MPEGAudioStreamParserBase::SendBuffers(BufferQueue* buffers,
   return true;
 }
 
+StreamParser::ParseStatus MPEGAudioStreamParserBase::ParseRust(
+    int max_pending_bytes_to_inspect) {
+  CHECK_GE(max_pending_bytes_to_inspect, 0);
+  CHECK_GE(uninspected_pending_bytes_, 0);
+
+  base::span<const uint8_t> queue_span = queue_.Data();
+  CHECK_LE(uninspected_pending_bytes_, static_cast<int>(queue_span.size()));
+
+  // First, determine the amount of bytes not yet popped, though already
+  // inspected by previous call(s) to Parse().
+  const size_t previously_inspected_bytes =
+      queue_span.size() - static_cast<size_t>(uninspected_pending_bytes_);
+
+  // Next, allow up to `max_pending_bytes_to_inspect` more of `queue_` contents
+  // beyond those previously inspected to be involved in this Parse() call.
+  const int new_bytes_to_inspect =
+      std::min(max_pending_bytes_to_inspect, uninspected_pending_bytes_);
+
+  const size_t total_bytes_to_inspect =
+      previously_inspected_bytes + static_cast<size_t>(new_bytes_to_inspect);
+
+  // Eagerly assume we will successfully inspect these new bytes. Since parse
+  // failures are fatal, this is safe because the parser state will be
+  // discarded if an error occurs.
+  uninspected_pending_bytes_ -= new_bytes_to_inspect;
+
+  base::span<const uint8_t> active_data =
+      queue_span.first(total_bytes_to_inspect);
+
+  BufferQueue buffers;
+  size_t bytes_to_pop = 0;
+  bool end_of_segment = true;
+  while (true) {
+    auto rust_data = ::rust::Slice<const uint8_t>(active_data);
+    auto action = audio_codec_ == AudioCodec::kAAC
+                      ? media::formats::mpeg::parse_adts_action(rust_data)
+                      : media::formats::mpeg::parse_mp3_action(rust_data);
+
+    bool need_more_data = false;
+    size_t bytes_read = 0;
+    bool parsed_metadata = true;
+
+    using ActionType = media::formats::mpeg::ActionType;
+    switch (action.action_type) {
+      case ActionType::NeedMoreData:
+        if (action.partial_frame) {
+          end_of_segment = false;
+        }
+        need_more_data = true;
+        break;
+
+      case ActionType::Error:
+        ChangeState(PARSE_ERROR);
+        return ParseStatus::kFailed;
+
+      case ActionType::Skip:
+        bytes_read = action.bytes_to_skip;
+        parsed_metadata = false;
+        break;
+
+      case ActionType::Metadata:
+        bytes_read = action.bytes_to_skip;
+        parsed_metadata = true;
+        break;
+
+      case ActionType::AudioFrame: {
+        const Header header = FfiHeaderToHeader(action.header_info);
+        if (!ProcessAudioFrame(header, active_data.first(header.frame_size),
+                               &buffers)) {
+          ChangeState(PARSE_ERROR);
+          return ParseStatus::kFailed;
+        }
+        bytes_read = header.frame_size;
+        end_of_segment = true;
+        parsed_metadata = false;
+        break;
+      }
+    }
+
+    if (need_more_data) {
+      break;
+    }
+
+    CHECK_LE(bytes_read, active_data.size());
+
+    if (parsed_metadata && !buffers.empty() && !SendBuffers(&buffers, true)) {
+      return ParseStatus::kFailed;
+    }
+
+    active_data = active_data.subspan(bytes_read);
+    bytes_to_pop += bytes_read;
+    end_of_segment = true;
+  }
+
+  queue_.Pop(base::checked_cast<int>(bytes_to_pop));
+
+  if (buffers.empty() || SendBuffers(&buffers, end_of_segment)) {
+    if (uninspected_pending_bytes_ > 0) {
+      return ParseStatus::kSuccessHasMoreData;
+    }
+    return ParseStatus::kSuccess;
+  }
+
+  return ParseStatus::kFailed;
+}
 }  // namespace media

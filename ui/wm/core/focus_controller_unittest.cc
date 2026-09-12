@@ -7,6 +7,7 @@
 #include <map>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/test/scoped_feature_list.h"
 #include "ui/aura/client/aura_constants.h"
 #include "ui/aura/client/default_capture_client.h"
@@ -17,6 +18,7 @@
 #include "ui/aura/window.h"
 #include "ui/aura/window_event_dispatcher.h"
 #include "ui/aura/window_tracker.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/base/ui_base_features.h"
 #include "ui/events/event.h"
 #include "ui/events/event_constants.h"
@@ -102,7 +104,7 @@ class FocusNotificationObserver : public ActivationChangeObserver,
 
 class WindowDeleter {
  public:
-  virtual aura::Window* GetDeletedWindow() = 0;
+  virtual bool IsDeletedWindow(const aura::Window* window) const = 0;
 
  protected:
   virtual ~WindowDeleter() {}
@@ -142,29 +144,29 @@ class RecordingActivationAndFocusChangeObserver
   void OnWindowActivating(ActivationReason reason,
                           aura::Window* gaining_active,
                           aura::Window* losing_active) override {
-    if (deleter_->GetDeletedWindow()) {
-      // A deleted window during activation should never be return as either the
-      // gaining or losing active windows, nor should it be returned as the
-      // currently active one.
-      auto* active_window = GetActivationClient(root_)->GetActiveWindow();
-      EXPECT_NE(active_window, deleter_->GetDeletedWindow());
-      EXPECT_NE(gaining_active, deleter_->GetDeletedWindow());
-      EXPECT_NE(losing_active, deleter_->GetDeletedWindow());
-    }
+    // A deleted window during activation should never be return as either the
+    // gaining or losing active windows, nor should it be returned as the
+    // currently active one.
+    auto* active_window = GetActivationClient(root_)->GetActiveWindow();
+    EXPECT_FALSE(deleter_->IsDeletedWindow(active_window));
+    EXPECT_FALSE(deleter_->IsDeletedWindow(gaining_active));
+    EXPECT_FALSE(deleter_->IsDeletedWindow(losing_active));
   }
 
   void OnWindowActivated(ActivationReason reason,
                          aura::Window* gained_active,
                          aura::Window* lost_active) override {
-    if (lost_active && lost_active == deleter_->GetDeletedWindow())
+    if (lost_active && deleter_->IsDeletedWindow(lost_active)) {
       was_notified_with_deleted_window_ = true;
+    }
   }
 
   // Overridden from aura::client::FocusChangeObserver:
   void OnWindowFocused(aura::Window* gained_focus,
                        aura::Window* lost_focus) override {
-    if (lost_focus && lost_focus == deleter_->GetDeletedWindow())
+    if (lost_focus && deleter_->IsDeletedWindow(lost_focus)) {
       was_notified_with_deleted_window_ = true;
+    }
   }
 
  private:
@@ -231,8 +233,7 @@ class DeleteOnActivationChangeObserver : public ActivationChangeObserver,
       : root_(window->GetRootWindow()),
         window_(window),
         delete_on_activating_(delete_on_activating),
-        delete_window_losing_active_(delete_window_losing_active),
-        did_delete_(false) {
+        delete_window_losing_active_(delete_window_losing_active) {
     GetActivationClient(root_)->AddObserver(this);
   }
 
@@ -275,16 +276,18 @@ class DeleteOnActivationChangeObserver : public ActivationChangeObserver,
   }
 
   // Overridden from WindowDeleter:
-  aura::Window* GetDeletedWindow() override {
-    return did_delete_ ? window_.get() : nullptr;
+  bool IsDeletedWindow(const aura::Window* window) const override {
+    return did_delete_ && window == window_;
   }
 
  private:
   raw_ptr<aura::Window> root_;
-  raw_ptr<aura::Window> window_;
+  // Intentionally held as a dangling pointer to enable safe comparison with
+  // already-deleted windows.
+  RAW_PTR_EXCLUSION const aura::Window* window_;
   const bool delete_on_activating_;
   const bool delete_window_losing_active_;
-  bool did_delete_;
+  bool did_delete_ = false;
 };
 
 // FocusChangeObserver that deletes the window losing focus.
@@ -293,7 +296,7 @@ class DeleteOnLoseFocusChangeObserver
       public WindowDeleter {
  public:
   explicit DeleteOnLoseFocusChangeObserver(aura::Window* window)
-      : root_(window->GetRootWindow()), window_(window), did_delete_(false) {
+      : root_(window->GetRootWindow()), window_(window) {
     aura::client::GetFocusClient(root_)->AddObserver(this);
   }
 
@@ -316,14 +319,16 @@ class DeleteOnLoseFocusChangeObserver
   }
 
   // Overridden from WindowDeleter:
-  aura::Window* GetDeletedWindow() override {
-    return did_delete_ ? window_.get() : nullptr;
+  bool IsDeletedWindow(const aura::Window* window) const override {
+    return did_delete_ && window == window_;
   }
 
  private:
   raw_ptr<aura::Window> root_;
-  raw_ptr<aura::Window> window_;
-  bool did_delete_;
+  // Intentionally held as a dangling pointer to enable safe comparison with
+  // already-deleted windows.
+  RAW_PTR_EXCLUSION const aura::Window* window_;
+  bool did_delete_ = false;
 };
 
 class ScopedFocusNotificationObserver : public FocusNotificationObserver {
@@ -350,11 +355,11 @@ class ScopedFocusNotificationObserver : public FocusNotificationObserver {
 
 class ScopedTargetFocusNotificationObserver : public FocusNotificationObserver {
  public:
-  ScopedTargetFocusNotificationObserver(aura::Window* root_window, int id)
-      : target_(root_window->GetChildById(id)) {
-    SetActivationChangeObserver(target_, this);
-    aura::client::SetFocusChangeObserver(target_, this);
-    tracker_.Add(target_);
+  ScopedTargetFocusNotificationObserver(aura::Window* root_window, int id) {
+    aura::Window* target = root_window->GetChildById(id);
+    SetActivationChangeObserver(target, this);
+    aura::client::SetFocusChangeObserver(target, this);
+    tracker_.Add(target);
   }
 
   ScopedTargetFocusNotificationObserver(
@@ -363,15 +368,52 @@ class ScopedTargetFocusNotificationObserver : public FocusNotificationObserver {
       const ScopedTargetFocusNotificationObserver&) = delete;
 
   ~ScopedTargetFocusNotificationObserver() override {
-    if (tracker_.Contains(target_)) {
-      SetActivationChangeObserver(target_, nullptr);
-      aura::client::SetFocusChangeObserver(target_, nullptr);
+    if (!tracker_.windows().empty()) {
+      aura::Window* target = tracker_.Pop();
+      SetActivationChangeObserver(target, nullptr);
+      aura::client::SetFocusChangeObserver(target, nullptr);
     }
   }
 
  private:
-  raw_ptr<aura::Window> target_;
   aura::WindowTracker tracker_;
+};
+
+class DetachFocusChangeObserver : public aura::client::FocusChangeObserver {
+ public:
+  explicit DetachFocusChangeObserver(aura::Window* root_window)
+      : focus_client_(aura::client::GetFocusClient(root_window)) {
+    focus_client_->AddObserver(this);
+  }
+
+  DetachFocusChangeObserver(const DetachFocusChangeObserver&) = delete;
+  DetachFocusChangeObserver& operator=(const DetachFocusChangeObserver&) =
+      delete;
+
+  ~DetachFocusChangeObserver() override { focus_client_->RemoveObserver(this); }
+
+  void OnWindowFocused(aura::Window* gained_focus,
+                       aura::Window* lost_focus) override {
+    ++notification_count_;
+    if (lost_focus) {
+      lost_focus_had_parent_ = (lost_focus->parent() != nullptr);
+      lost_focus_had_root_ = (lost_focus->GetRootWindow() != nullptr);
+    }
+  }
+
+  int notification_count() const { return notification_count_; }
+  std::optional<bool> lost_focus_had_parent() const {
+    return lost_focus_had_parent_;
+  }
+  std::optional<bool> lost_focus_had_root() const {
+    return lost_focus_had_root_;
+  }
+
+ private:
+  raw_ptr<aura::client::FocusClient> focus_client_;
+  int notification_count_ = 0;
+  std::optional<bool> lost_focus_had_parent_;
+  std::optional<bool> lost_focus_had_root_;
 };
 
 // Used to fake the handling of events in the pre-target phase.
@@ -562,27 +604,58 @@ class FocusControllerTestBase : public aura::test::AuraTestBase {
     //       |    +-- w21
     //       |         +-- w211
     //       +-- w3
-    aura::Window* w1 = aura::test::CreateTestWindowWithDelegate(
-        aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 1,
-        gfx::Rect(0, 0, 50, 50), root_window());
-    aura::test::CreateTestWindowWithDelegate(
-        aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 11,
-        gfx::Rect(5, 5, 10, 10), w1);
-    aura::test::CreateTestWindowWithDelegate(
-        aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 12,
-        gfx::Rect(15, 15, 10, 10), w1);
-    aura::Window* w2 = aura::test::CreateTestWindowWithDelegate(
-        aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 2,
-        gfx::Rect(75, 75, 50, 50), root_window());
-    aura::Window* w21 = aura::test::CreateTestWindowWithDelegate(
-        aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 21,
-        gfx::Rect(5, 5, 10, 10), w2);
-    aura::test::CreateTestWindowWithDelegate(
-        aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 211,
-        gfx::Rect(1, 1, 5, 5), w21);
-    aura::test::CreateTestWindowWithDelegate(
-        aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 3,
-        gfx::Rect(125, 125, 50, 50), root_window());
+    aura::Window* w1 =
+        aura::test::CreateTestWindow(
+            {.delegate =
+                 aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+             .parent = root_window(),
+             .bounds = {50, 50},
+             .window_id = 1})
+            .release();
+    aura::test::CreateTestWindow(
+        {.delegate =
+             aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+         .parent = w1,
+         .bounds = {5, 5, 10, 10},
+         .window_id = 11})
+        .release();
+    aura::test::CreateTestWindow(
+        {.delegate =
+             aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+         .parent = w1,
+         .bounds = {15, 15, 10, 10},
+         .window_id = 12})
+        .release();
+    aura::Window* w2 =
+        aura::test::CreateTestWindow(
+            {.delegate =
+                 aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+             .parent = root_window(),
+             .bounds = {75, 75, 50, 50},
+             .window_id = 2})
+            .release();
+    aura::Window* w21 =
+        aura::test::CreateTestWindow(
+            {.delegate =
+                 aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+             .parent = w2,
+             .bounds = {5, 5, 10, 10},
+             .window_id = 21})
+            .release();
+    aura::test::CreateTestWindow(
+        {.delegate =
+             aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+         .parent = w21,
+         .bounds = {1, 1, 5, 5},
+         .window_id = 211})
+        .release();
+    aura::test::CreateTestWindow(
+        {.delegate =
+             aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+         .parent = root_window(),
+         .bounds = {125, 125, 50, 50},
+         .window_id = 3})
+        .release();
   }
   void TearDown() override {
     root_window()->RemovePreTargetHandler(focus_controller_.get());
@@ -639,6 +712,8 @@ class FocusControllerTestBase : public aura::test::AuraTestBase {
   virtual void StackWindowAtTopOnActivation() {}
   virtual void HideFocusedWindowDuringActivationLoss() {}
   virtual void ActivateWhileActivating() {}
+  virtual void RestackChildrenDoesNotChangeFocus() {}
+  virtual void ReparentingFocusTest() {}
 
  private:
   std::unique_ptr<FocusController> focus_controller_;
@@ -1009,7 +1084,7 @@ class FocusControllerDirectTestBase : public FocusControllerTestBase {
       EXPECT_EQ(2, GetActiveWindowId());
       EXPECT_EQ(2, GetFocusedWindowId());
 
-      EXPECT_EQ(to_delete, observer1.GetDeletedWindow());
+      EXPECT_TRUE(observer1.IsDeletedWindow(to_delete));
       EXPECT_FALSE(observer2.was_notified_with_deleted_window());
     }
 
@@ -1026,14 +1101,18 @@ class FocusControllerDirectTestBase : public FocusControllerTestBase {
       EXPECT_EQ(3, GetActiveWindowId());
       EXPECT_EQ(3, GetFocusedWindowId());
 
-      EXPECT_EQ(to_delete, observer1.GetDeletedWindow());
+      EXPECT_TRUE(observer1.IsDeletedWindow(to_delete));
       EXPECT_FALSE(observer2.was_notified_with_deleted_window());
     }
 
     {
-      aura::test::CreateTestWindowWithDelegate(
-          aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 4,
-          gfx::Rect(125, 125, 50, 50), root_window());
+      aura::test::CreateTestWindow(
+          {.delegate =
+               aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+           .parent = root_window(),
+           .bounds = {125, 125, 50, 50},
+           .window_id = 4})
+          .release();
 
       EXPECT_EQ(3, GetActiveWindowId());
       EXPECT_EQ(3, GetFocusedWindowId());
@@ -1048,17 +1127,25 @@ class FocusControllerDirectTestBase : public FocusControllerTestBase {
       EXPECT_EQ(4, GetActiveWindowId());
       EXPECT_EQ(4, GetFocusedWindowId());
 
-      EXPECT_EQ(to_delete, observer1.GetDeletedWindow());
+      EXPECT_TRUE(observer1.IsDeletedWindow(to_delete));
       EXPECT_FALSE(observer2.was_notified_with_deleted_window());
     }
 
     {
-      aura::test::CreateTestWindowWithDelegate(
-          aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 5,
-          gfx::Rect(125, 125, 50, 50), root_window());
-      aura::test::CreateTestWindowWithDelegate(
-          aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(), 6,
-          gfx::Rect(125, 125, 50, 50), root_window());
+      aura::test::CreateTestWindow(
+          {.delegate =
+               aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+           .parent = root_window(),
+           .bounds = {125, 125, 50, 50},
+           .window_id = 5})
+          .release();
+      aura::test::CreateTestWindow(
+          {.delegate =
+               aura::test::TestWindowDelegate::CreateSelfDestroyingDelegate(),
+           .parent = root_window(),
+           .bounds = {125, 125, 50, 50},
+           .window_id = 6})
+          .release();
 
       EXPECT_EQ(4, GetActiveWindowId());
       EXPECT_EQ(4, GetFocusedWindowId());
@@ -1086,9 +1173,9 @@ class FocusControllerDirectTestBase : public FocusControllerTestBase {
       EXPECT_EQ(4, GetActiveWindowId());
       EXPECT_EQ(4, GetFocusedWindowId());
 
-      EXPECT_EQ(to_delete1, observer1.GetDeletedWindow());
+      EXPECT_TRUE(observer1.IsDeletedWindow(to_delete1));
       EXPECT_FALSE(observer2.was_notified_with_deleted_window());
-      EXPECT_EQ(to_delete2, observer3.GetDeletedWindow());
+      EXPECT_TRUE(observer3.IsDeletedWindow(to_delete2));
       EXPECT_FALSE(observer4.was_notified_with_deleted_window());
     }
   }
@@ -1199,6 +1286,198 @@ class FocusControllerDirectTestBase : public FocusControllerTestBase {
           },
           "");
     }
+  }
+
+  // Verifies that changing the stacking order of children does not change
+  // focus or activation.
+  //
+  // Hierarchy:
+  // root_window
+  //       +-- w1 (active)
+  //       |    +-- w11 (focused)
+  //       |    +-- w12
+  //       +-- w2
+  //       |    +-- w21
+  //       |         +-- w211
+  //       +-- w3
+  void RestackChildrenDoesNotChangeFocus() override {
+    aura::Window* w1 = root_window()->GetChildById(1);
+    aura::Window* w11 = root_window()->GetChildById(11);
+    aura::Window* w12 = root_window()->GetChildById(12);
+    aura::Window* w2 = root_window()->GetChildById(2);
+
+    FocusWindow(w11);
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+
+    ScopedFocusNotificationObserver observer(root_window());
+
+    // 1. Restack child windows within an active window.
+    // Stack w12 at top.
+    w1->StackChildAtTop(w12);
+    EXPECT_EQ(w12, w1->children().back());
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+
+    // Stack w11 at bottom.
+    w1->StackChildAtBottom(w11);
+    EXPECT_EQ(w11, w1->children().front());
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+
+    // Stack w11 above w12.
+    w1->StackChildAbove(w11, w12);
+    EXPECT_EQ(w11, w1->children().back());
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+
+    // Stack w11 below w12.
+    w1->StackChildBelow(w11, w12);
+    EXPECT_EQ(w11, w1->children().front());
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+
+    // 2. Restack toplevel windows within root_window.
+    // Stack w2 at top of root window.
+    root_window()->StackChildAtTop(w2);
+    EXPECT_EQ(w2, root_window()->children().back());
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+
+    // Stack w1 at bottom of root window.
+    root_window()->StackChildAtBottom(w1);
+    EXPECT_EQ(w1, root_window()->children().front());
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+
+    // Stack w1 above w2.
+    root_window()->StackChildAbove(w1, w2);
+    EXPECT_EQ(w1, root_window()->children().back());
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+
+    // Stack w1 below w2.
+    root_window()->StackChildBelow(w1, w2);
+    EXPECT_EQ(11, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+    observer.ExpectCounts(/*activation_changed_count=*/0,
+                          /*focus_changed_count=*/0);
+  }
+
+  // Verifies focus behavior when reparenting within the window tree.
+  //
+  // Initial hierarchy:
+  // root_window
+  //       +-- w1
+  //       |    +-- w11
+  //       |    +-- w12
+  //       +-- w2 (active)
+  //       |    +-- w21
+  //       |         +-- w211 (focused)
+  //       +-- w3
+  void ReparentingFocusTest() override {
+    aura::Window* w1 = root_window()->GetChildById(1);
+    aura::Window* w2 = root_window()->GetChildById(2);
+    aura::Window* w21 = root_window()->GetChildById(21);
+    aura::Window* w211 = root_window()->GetChildById(211);
+
+    // Case 1: Direct move within the active window hierarchy.
+    // Moving w211 directly from w21 to w2:
+    // root_window
+    //       +-- w2 (active)
+    //            +-- w21
+    //            +-- w211 (focused)
+    FocusWindow(w211);
+    EXPECT_EQ(211, GetFocusedWindowId());
+    EXPECT_EQ(2, GetActiveWindowId());
+
+    {
+      ScopedFocusNotificationObserver observer(root_window());
+      // Moving w211 directly to w2 (making w211 a child of w2) without explicit
+      // detachment. Since w211 remains in the active window hierarchy, it
+      // retains focus.
+      w2->AddChild(w211);
+      EXPECT_EQ(211, GetFocusedWindowId());
+      EXPECT_EQ(2, GetActiveWindowId());
+      observer.ExpectCounts(/*activation_changed_count=*/0,
+                            /*focus_changed_count=*/0);
+
+      // Move w211 back to w21. Focus is retained.
+      w21->AddChild(w211);
+      EXPECT_EQ(211, GetFocusedWindowId());
+      EXPECT_EQ(2, GetActiveWindowId());
+      observer.ExpectCounts(/*activation_changed_count=*/0,
+                            /*focus_changed_count=*/0);
+    }
+
+    // Case 2: Direct move across different toplevel windows.
+    // Moving w211 from w21 (under w2) to w1:
+    // root_window
+    //       +-- w1
+    //       |    +-- w11
+    //       |    +-- w12
+    //       |    +-- w211
+    //       +-- w2 (active)
+    //            +-- w21 (focused)
+    {
+      ScopedFocusNotificationObserver observer(root_window());
+      // Moving w211 directly to w1 (an inactive toplevel window). Since w211 is
+      // no longer a descendant of the active window w2, focus is removed from
+      // w211 and shifted back to w21 (in the active window hierarchy).
+      w1->AddChild(w211);
+      EXPECT_EQ(21, GetFocusedWindowId());
+      EXPECT_EQ(2, GetActiveWindowId());
+      observer.ExpectCounts(/*activation_changed_count=*/0,
+                            /*focus_changed_count=*/1);
+
+      // Move w211 back to w21. Focus remains on w21.
+      w21->AddChild(w211);
+      EXPECT_EQ(21, GetFocusedWindowId());
+      EXPECT_EQ(2, GetActiveWindowId());
+    }
+
+    // Case 3: Reparenting from child to sibling via Detach + Add:
+    // Detaching w211 from w21 shifts focus to w21:
+    // root_window
+    //       +-- w2 (active)
+    //            +-- w21 (focused)
+    // (w211 detached)
+    //
+    // Adding w211 to w2 (making w211 a sibling of w21):
+    // root_window
+    //       +-- w2 (active)
+    //            +-- w21 (focused)
+    //            +-- w211
+    FocusWindow(w211);
+    EXPECT_EQ(211, GetFocusedWindowId());
+    EXPECT_EQ(2, GetActiveWindowId());
+
+    // Detaching w211 from w21 shifts focus to w21.
+    w21->RemoveChild(w211);
+    EXPECT_EQ(21, GetFocusedWindowId());
+
+    // Adding w211 to w2 (making w211 a sibling of w21) does not restore focus
+    // to w211; focus remains on w21.
+    w2->AddChild(w211);
+    EXPECT_EQ(21, GetFocusedWindowId());
+
+    // Restore hierarchy for clean teardown.
+    w2->RemoveChild(w211);
+    w21->AddChild(w211);
   }
 };
 
@@ -1514,18 +1793,22 @@ class FocusControllerParentHideTest : public FocusControllerHideTest {
     aura::Window* w1 = root_window()->GetChildById(1);
     aura::Window* w11 = root_window()->GetChildById(11);
     ::wm::AddTransientChild(w1, w11);
-    w11->SetProperty(aura::client::kModalKey, ui::MODAL_TYPE_WINDOW);
+    w11->SetProperty(aura::client::kModalKey, ui::mojom::ModalType::kWindow);
 
-    EXPECT_EQ(ui::MODAL_TYPE_NONE, w1->GetProperty(aura::client::kModalKey));
-    EXPECT_EQ(ui::MODAL_TYPE_WINDOW, w11->GetProperty(aura::client::kModalKey));
+    EXPECT_EQ(ui::mojom::ModalType::kNone,
+              w1->GetProperty(aura::client::kModalKey));
+    EXPECT_EQ(ui::mojom::ModalType::kWindow,
+              w11->GetProperty(aura::client::kModalKey));
 
     // Hide the parent window w1 and show it again.
     w1->Hide();
     w1->Show();
 
     // Test that child window w11 doesn't change its modality property.
-    EXPECT_EQ(ui::MODAL_TYPE_NONE, w1->GetProperty(aura::client::kModalKey));
-    EXPECT_EQ(ui::MODAL_TYPE_WINDOW, w11->GetProperty(aura::client::kModalKey));
+    EXPECT_EQ(ui::mojom::ModalType::kNone,
+              w1->GetProperty(aura::client::kModalKey));
+    EXPECT_EQ(ui::mojom::ModalType::kWindow,
+              w11->GetProperty(aura::client::kModalKey));
   }
 };
 
@@ -1570,6 +1853,75 @@ class FocusControllerRemovalTest : public FocusControllerImplicitTestBase {
   FocusControllerRemovalTest(const FocusControllerRemovalTest&) = delete;
   FocusControllerRemovalTest& operator=(const FocusControllerRemovalTest&) =
       delete;
+
+  // Verifies whether focus change events on window detachment are fired before
+  // or after the window is detached from the window tree.
+  //
+  // Window hierarchy:
+  // root_window
+  //       +-- w1
+  //       |    +-- w11
+  //       |    +-- w12
+  //       +-- w2
+  //       |    +-- w21
+  //       |         +-- w211
+  //       +-- w3
+  void FocusEventsOnDetach() {
+    // Case 1: Detach a focused child window (non-active window).
+    // root_window
+    //       +-- w2 (active)
+    //            +-- w21
+    //                 +-- w211 (focused -> detached)
+    aura::Window* w21 = root_window()->GetChildById(21);
+    aura::Window* w211 = root_window()->GetChildById(211);
+    FocusWindow(w211);
+    EXPECT_EQ(211, GetFocusedWindowId());
+
+    DetachFocusChangeObserver observer_child(root_window());
+    w21->RemoveChild(w211);
+    std::unique_ptr<aura::Window> w211_owner(w211);
+
+    EXPECT_EQ(1, observer_child.notification_count());
+    // For a child window, focus change is fired AFTER detachment.
+    EXPECT_FALSE(observer_child.lost_focus_had_parent().value());
+    EXPECT_FALSE(observer_child.lost_focus_had_root().value());
+
+    // Case 2: Detach the active window (which is also focused).
+    // root_window
+    //       +-- w1 (active, focused -> detached)
+    aura::Window* w1 = root_window()->GetChildById(1);
+    FocusWindow(w1);
+    EXPECT_EQ(1, GetFocusedWindowId());
+    EXPECT_EQ(1, GetActiveWindowId());
+
+    DetachFocusChangeObserver observer_active(root_window());
+    root_window()->RemoveChild(w1);
+    std::unique_ptr<aura::Window> w1_owner(w1);
+
+    EXPECT_EQ(1, observer_active.notification_count());
+    // For the active window, focus change is fired BEFORE detachment.
+    EXPECT_TRUE(observer_active.lost_focus_had_parent().value());
+    EXPECT_TRUE(observer_active.lost_focus_had_root().value());
+
+    // Case 3: Detach the active window hierarchy when a child is focused.
+    // root_window
+    //       +-- w2 (active -> detached)
+    //            +-- w21 (focused)
+    //                 +-- w211
+    aura::Window* w2 = root_window()->GetChildById(2);
+    FocusWindow(w21);
+    EXPECT_EQ(21, GetFocusedWindowId());
+    EXPECT_EQ(2, GetActiveWindowId());
+
+    DetachFocusChangeObserver observer_active_hierarchy(root_window());
+    root_window()->RemoveChild(w2);
+    std::unique_ptr<aura::Window> w2_owner(w2);
+
+    EXPECT_EQ(1, observer_active_hierarchy.notification_count());
+    // For the active window hierarchy, focus change is fired BEFORE detachment.
+    EXPECT_TRUE(observer_active_hierarchy.lost_focus_had_parent().value());
+    EXPECT_TRUE(observer_active_hierarchy.lost_focus_had_root().value());
+  }
 
  protected:
   FocusControllerRemovalTest(bool parent)
@@ -1717,5 +2069,16 @@ FOCUS_CONTROLLER_TEST(FocusControllerMouseEnterEventTest, MouseEnteredEvent)
 // Mouse over window with active parent should not focus it.
 FOCUS_CONTROLLER_TEST(FocusControllerMouseEnterEventTest,
                       MouseEnteredWithActiveParent)
+
+// Verifies whether focus change events on window detachment are fired before
+// or after the window is detached from the window tree.
+FOCUS_CONTROLLER_TEST(FocusControllerRemovalTest, FocusEventsOnDetach)
+
+// Verifies that changing the stacking order of children does not change
+// focus or activation.
+FOCUS_CONTROLLER_TEST(FocusControllerApiTest, RestackChildrenDoesNotChangeFocus)
+
+// Verifies focus behavior when reparenting within the window tree.
+FOCUS_CONTROLLER_TEST(FocusControllerApiTest, ReparentingFocusTest)
 
 }  // namespace wm

@@ -8,19 +8,25 @@
 
 #include "ash/login/ui/views_utils.h"
 #include "ash/public/cpp/shell_window_ids.h"
+#include "ash/screen_util.h"
 #include "ash/shell.h"
-#include "ash/style/ash_color_provider.h"
-#include "base/debug/dump_without_crashing.h"
+#include "ash/style/system_shadow.h"
+#include "base/memory/raw_ptr.h"
+#include "chromeos/constants/chromeos_features.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/aura/client/focus_change_observer.h"
 #include "ui/aura/client/focus_client.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/chromeos/styles/cros_tokens_color_mappings.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animator.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
 #include "ui/events/event_handler.h"
 #include "ui/gfx/geometry/point.h"
+#include "ui/gfx/geometry/rounded_corners_f.h"
 #include "ui/views/animation/ink_drop.h"
 #include "ui/views/background.h"
+#include "ui/views/highlight_border.h"
 #include "ui/views/layout/box_layout.h"
 #include "ui/wm/core/coordinate_conversion.h"
 
@@ -59,20 +65,20 @@ class LoginBubbleHandler : public ui::EventHandler {
 
   // ui::EventHandler:
   void OnMouseEvent(ui::MouseEvent* event) override {
-    if (event->type() == ui::ET_MOUSE_PRESSED) {
+    if (event->type() == ui::EventType::kMousePressed) {
       ProcessPressedEvent(event->AsLocatedEvent());
     }
   }
 
   void OnGestureEvent(ui::GestureEvent* event) override {
-    if (event->type() == ui::ET_GESTURE_TAP ||
-        event->type() == ui::ET_GESTURE_TAP_DOWN) {
+    if (event->type() == ui::EventType::kGestureTap ||
+        event->type() == ui::EventType::kGestureTapDown) {
       ProcessPressedEvent(event->AsLocatedEvent());
     }
   }
 
   void OnKeyEvent(ui::KeyEvent* event) override {
-    if (event->type() != ui::ET_KEY_PRESSED ||
+    if (event->type() != ui::EventType::kKeyPressed ||
         event->key_code() == ui::VKEY_PROCESSKEY) {
       return;
     }
@@ -89,6 +95,11 @@ class LoginBubbleHandler : public ui::EventHandler {
     }
 
     if (login_views_utils::HasFocusInAnyChildView(bubble_)) {
+      return;
+    }
+
+    views::View* anchor = bubble_->GetAnchorView();
+    if (anchor && login_views_utils::HasFocusInAnyChildView(anchor)) {
       return;
     }
 
@@ -124,7 +135,7 @@ class LoginBubbleHandler : public ui::EventHandler {
     }
   }
 
-  LoginBaseBubbleView* bubble_;
+  raw_ptr<LoginBaseBubbleView> bubble_;
 };
 
 LoginBaseBubbleView::LoginBaseBubbleView(base::WeakPtr<views::View> anchor_view)
@@ -141,21 +152,31 @@ LoginBaseBubbleView::LoginBaseBubbleView(base::WeakPtr<views::View> anchor_view,
   layout_manager->set_cross_axis_alignment(
       views::BoxLayout::CrossAxisAlignment::kStart);
 
-  SetVisible(false);
-}
+  const ui::ColorId background_color_id = static_cast<ui::ColorId>(
+      chromeos::features::IsSystemBlurEnabled()
+          ? cros_tokens::kCrosSysSystemBaseElevated
+          : cros_tokens::kCrosSysSystemBaseElevatedOpaque);
 
-void LoginBaseBubbleView::EnsureLayer() {
-  if (layer()) {
-    return;
-  }
-  // Layer rendering is needed for animation.
+  SetBackground(views::CreateSolidBackground(background_color_id));
+  SetBorder(std::make_unique<views::HighlightBorder>(
+      kBubbleBorderRadius,
+      views::HighlightBorder::Type::kHighlightBorderOnShadow));
+
+  // Set shadow
+  shadow_ = SystemShadow::CreateShadowOnNinePatchLayerForView(
+      this, SystemShadow::Type::kElevation12);
+  shadow_->SetRoundedCorners(gfx::RoundedCornersF(kBubbleBorderRadius));
+
   SetPaintToLayer();
-  SkColor background_color = AshColorProvider::Get()->GetBaseLayerColor(
-      AshColorProvider::BaseLayerType::kTransparent80);
-  SetBackground(views::CreateRoundedRectBackground(background_color,
-                                                   kBubbleBorderRadius));
-  layer()->SetBackgroundBlur(ColorProvider::kBackgroundBlurSigma);
-  layer()->SetFillsBoundsOpaquely(false);
+  layer()->SetRoundedCornerRadius(gfx::RoundedCornersF(kBubbleBorderRadius));
+  layer()->SetIsFastRoundedCorner(true);
+  if (chromeos::features::IsSystemBlurEnabled()) {
+    layer()->SetFillsBoundsOpaquely(false);
+    layer()->SetBackgroundBlur(ColorProvider::kBackgroundBlurSigma);
+    layer()->SetBackdropFilterQuality(ColorProvider::kBackgroundBlurQuality);
+  }
+
+  SetVisible(false);
 }
 
 LoginBaseBubbleView::~LoginBaseBubbleView() = default;
@@ -172,8 +193,8 @@ void LoginBaseBubbleView::Show() {
 
   // Tell ChromeVox to read bubble contents.
   if (notify_a11y_alert_on_show_) {
-    NotifyAccessibilityEvent(ax::mojom::Event::kAlert,
-                             true /*send_native_event*/);
+    NotifyAccessibilityEventDeprecated(ax::mojom::Event::kAlert,
+                                       true /*send_native_event*/);
   }
 }
 
@@ -249,6 +270,9 @@ gfx::Point LoginBaseBubbleView::CalculatePosition() {
 
 void LoginBaseBubbleView::SetAnchorView(
     base::WeakPtr<views::View> anchor_view) {
+  if (layer()) {
+    layer()->GetAnimator()->StopAnimating();
+  }
   anchor_view_ = std::move(anchor_view);
 }
 
@@ -265,19 +289,21 @@ void LoginBaseBubbleView::OnLayerAnimationAborted(
   NOTREACHED();
 }
 
-gfx::Size LoginBaseBubbleView::CalculatePreferredSize() const {
+gfx::Size LoginBaseBubbleView::CalculatePreferredSize(
+    const views::SizeBounds& available_size) const {
   gfx::Size size;
   size.set_width(kBubbleTotalWidthDp);
-  size.set_height(GetHeightForWidth(kBubbleTotalWidthDp));
+  size.set_height(GetLayoutManager()->GetPreferredHeightForWidth(
+      this, kBubbleTotalWidthDp));
   return size;
 }
 
-void LoginBaseBubbleView::Layout() {
-  views::View::Layout();
+void LoginBaseBubbleView::Layout(PassKey) {
+  LayoutSuperclass<views::View>(this);
 
-  // If a Layout() is called while the bubble is visible (i.e. due to Show()),
-  // its bounds may change because of the parent's LayoutManager. This allows
-  // the bubbles to always determine their own size and position.
+  // If layout occurs while the bubble is visible (i.e. due to Show()), its
+  // bounds may change because of the parent's LayoutManager. This allows the
+  // bubbles to always determine their own size and position.
   if (GetVisible()) {
     SetSize(GetPreferredSize());
     SetPosition(CalculatePosition());
@@ -286,14 +312,6 @@ void LoginBaseBubbleView::Layout() {
 
 void LoginBaseBubbleView::OnBlur() {
   Hide();
-}
-
-void LoginBaseBubbleView::OnThemeChanged() {
-  views::View::OnThemeChanged();
-  SkColor background_color = AshColorProvider::Get()->GetBaseLayerColor(
-      AshColorProvider::BaseLayerType::kTransparent80);
-  SetBackground(views::CreateRoundedRectBackground(background_color,
-                                                   kBubbleBorderRadius));
 }
 
 void LoginBaseBubbleView::SetPadding(int horizontal_padding,
@@ -313,10 +331,8 @@ gfx::Rect LoginBaseBubbleView::GetBoundsAvailableToShowBubble() const {
 views::View* LoginBaseBubbleView::GetAnchorView() const {
   if (anchor_view_.WasInvalidated()) {
     // TODO(crbug.com/1171827): This is to detect dangling anchor_view_
-    // pointers. This should not cause a crash, but is still indicative of UI
-    // bugs.
-    base::debug::DumpWithoutCrashing();
-    NOTREACHED();
+    // pointers.
+    DUMP_WILL_BE_NOTREACHED();
   }
   return anchor_view_.get();
 }
@@ -334,9 +350,8 @@ gfx::Rect LoginBaseBubbleView::GetWorkArea() const {
     return gfx::Rect();
   }
 
-  return display::Screen::GetScreen()
-      ->GetDisplayNearestWindow(GetAnchorView()->GetWidget()->GetNativeWindow())
-      .work_area();
+  return screen_util::GetDisplayWorkAreaBoundsInParentForLockScreen(
+      GetAnchorView()->GetWidget()->GetNativeWindow());
 }
 
 void LoginBaseBubbleView::ScheduleAnimation(bool visible) {
@@ -351,7 +366,6 @@ void LoginBaseBubbleView::ScheduleAnimation(bool visible) {
     layer()->GetAnimator()->StopAnimating();
   }
 
-  EnsureLayer();
   float opacity_start = 0.0f;
   float opacity_end = 1.0f;
   if (!visible) {
@@ -372,5 +386,8 @@ void LoginBaseBubbleView::ScheduleAnimation(bool visible) {
     layer()->SetOpacity(opacity_end);
   }
 }
+
+BEGIN_METADATA(LoginBaseBubbleView)
+END_METADATA
 
 }  // namespace ash

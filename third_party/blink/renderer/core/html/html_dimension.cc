@@ -33,6 +33,7 @@
 #include "third_party/blink/renderer/core/css/css_value_clamping_utils.h"
 #include "third_party/blink/renderer/core/html/parser/html_parser_idioms.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+#include "third_party/blink/renderer/platform/wtf/text/character_visitor.h"
 #include "third_party/blink/renderer/platform/wtf/text/parsing_utilities.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
@@ -40,64 +41,59 @@
 namespace blink {
 
 template <typename CharacterType>
-static HTMLDimension ParseDimension(const CharacterType* characters,
-                                    size_t last_parsed_index,
-                                    size_t end_of_current_token) {
-  HTMLDimension::HTMLDimensionType type = HTMLDimension::kAbsolute;
-  double value = 0.;
-
+static HTMLDimension ParseDimension(
+    base::span<const CharacterType> characters) {
   // HTML5's split removes leading and trailing spaces so we need to skip the
   // leading spaces here.
-  while (last_parsed_index < end_of_current_token &&
-         IsASCIISpace((characters[last_parsed_index])))
-    ++last_parsed_index;
+  const size_t digits_start =
+      SkipWhile<CharacterType, IsAsciiSpace>(characters, 0);
 
   // This is Step 5.5. in the algorithm. Going to the last step would make the
   // code less readable.
-  if (last_parsed_index >= end_of_current_token)
-    return HTMLDimension(value, HTMLDimension::kRelative);
+  if (digits_start >= characters.size()) {
+    return HTMLDimension(0., HTMLDimension::kRelative);
+  }
 
-  size_t position = last_parsed_index;
-  while (position < end_of_current_token && IsASCIIDigit(characters[position]))
-    ++position;
+  size_t position =
+      SkipWhile<CharacterType, IsAsciiDigit>(characters, digits_start);
 
-  if (position > last_parsed_index) {
-    bool ok = false;
-    unsigned integer_value = CharactersToUInt(characters + last_parsed_index,
-                                              position - last_parsed_index,
-                                              WTF::NumberParsingOptions(), &ok);
-    if (!ok)
+  double value = 0.;
+  if (position > digits_start) {
+    std::optional<unsigned> integer_value = CharactersToUInt(
+        characters.subspan(digits_start, position - digits_start),
+        NumberParsingOptions());
+    if (!integer_value) {
       return HTMLDimension(0., HTMLDimension::kRelative);
-    value += integer_value;
+    }
+    value += *integer_value;
 
-    if (position < end_of_current_token && characters[position] == '.') {
-      ++position;
+    if (SkipExactly<CharacterType>(characters, '.', position)) {
       Vector<CharacterType> fraction_numbers;
-      while (position < end_of_current_token &&
-             (IsASCIIDigit(characters[position]) ||
-              IsASCIISpace(characters[position]))) {
-        if (IsASCIIDigit(characters[position]))
+      while (position < characters.size() &&
+             (IsAsciiDigit(characters[position]) ||
+              IsAsciiSpace(characters[position]))) {
+        if (IsAsciiDigit(characters[position])) {
           fraction_numbers.push_back(characters[position]);
+        }
         ++position;
       }
 
       if (fraction_numbers.size()) {
-        double fraction_value =
-            CharactersToUInt(fraction_numbers.data(), fraction_numbers.size(),
-                             WTF::NumberParsingOptions(), &ok);
-        if (!ok)
+        std::optional<unsigned> fraction_value = CharactersToUInt(
+            base::span(fraction_numbers), NumberParsingOptions());
+        if (!fraction_value) {
           return HTMLDimension(0., HTMLDimension::kRelative);
-
-        value += fraction_value /
+        }
+        value += static_cast<double>(*fraction_value) /
                  pow(10., static_cast<double>(fraction_numbers.size()));
       }
     }
   }
 
-  while (position < end_of_current_token && IsASCIISpace(characters[position]))
-    ++position;
+  position = SkipWhile<CharacterType, IsAsciiSpace>(characters, position);
 
-  if (position < end_of_current_token) {
+  HTMLDimension::HTMLDimensionType type = HTMLDimension::kAbsolute;
+  if (position < characters.size()) {
     if (characters[position] == '*')
       type = HTMLDimension::kRelative;
     else if (characters[position] == '%')
@@ -107,76 +103,72 @@ static HTMLDimension ParseDimension(const CharacterType* characters,
   return HTMLDimension(value, type);
 }
 
-static HTMLDimension ParseDimension(const String& raw_token,
-                                    size_t last_parsed_index,
-                                    size_t end_of_current_token) {
-  if (raw_token.Is8Bit())
-    return ParseDimension<LChar>(raw_token.Characters8(), last_parsed_index,
-                                 end_of_current_token);
-  return ParseDimension<UChar>(raw_token.Characters16(), last_parsed_index,
-                               end_of_current_token);
+static HTMLDimension ParseDimension(const StringView& token) {
+  return VisitCharacters(token,
+                         [](auto chars) { return ParseDimension(chars); });
 }
 
 // This implements the "rules for parsing a list of dimensions" per HTML5.
 // http://www.whatwg.org/specs/web-apps/current-work/multipage/common-microsyntaxes.html#rules-for-parsing-a-list-of-dimensions
-Vector<HTMLDimension> ParseListOfDimensions(const String& input) {
+Vector<HTMLDimension> ParseListOfDimensions(const StringView& input) {
   static const char kComma = ',';
 
   // Step 2. Remove the last character if it's a comma.
-  String trimmed_string = input;
-  if (trimmed_string.EndsWith(kComma))
-    trimmed_string.Truncate(trimmed_string.length() - 1);
+  StringView trimmed_input = input;
+  if (trimmed_input.ends_with(kComma)) {
+    trimmed_input.remove_suffix(1);
+  }
 
   // HTML5's split doesn't return a token for an empty string so
   // we need to match them here.
-  if (trimmed_string.empty())
+  if (trimmed_input.empty()) {
     return Vector<HTMLDimension>();
+  }
 
   // Step 3. To avoid String copies, we just look for commas instead of
   // splitting.
   Vector<HTMLDimension> parsed_dimensions;
-  wtf_size_t last_parsed_index = 0;
   while (true) {
-    wtf_size_t next_comma = trimmed_string.find(kComma, last_parsed_index);
+    const wtf_size_t next_comma = trimmed_input.find(kComma);
     if (next_comma == kNotFound)
       break;
 
     parsed_dimensions.push_back(
-        ParseDimension(trimmed_string, last_parsed_index, next_comma));
-    last_parsed_index = next_comma + 1;
+        ParseDimension(StringView(trimmed_input, 0, next_comma)));
+    trimmed_input.remove_prefix(next_comma + 1);
   }
 
-  parsed_dimensions.push_back(ParseDimension(trimmed_string, last_parsed_index,
-                                             trimmed_string.length()));
+  parsed_dimensions.push_back(ParseDimension(trimmed_input));
   return parsed_dimensions;
 }
 
 template <typename CharacterType>
-static bool ParseDimensionValue(const CharacterType* current,
-                                const CharacterType* end,
+static bool ParseDimensionValue(base::span<const CharacterType> characters,
                                 HTMLDimension& dimension) {
-  SkipWhile<CharacterType, IsHTMLSpace>(current, end);
+  size_t current = SkipWhile<CharacterType, IsHTMLSpace>(characters, 0);
   // Deviation: HTML allows '+' here.
-  const CharacterType* number_start = current;
-  if (!SkipExactly<CharacterType, IsASCIIDigit>(current, end))
+  const size_t number_start = current;
+  if (!SkipExactly<CharacterType, IsAsciiDigit>(characters, current)) {
     return false;
-  SkipWhile<CharacterType, IsASCIIDigit>(current, end);
-  if (SkipExactly<CharacterType>(current, end, '.')) {
+  }
+  current = SkipWhile<CharacterType, IsAsciiDigit>(characters, current);
+  if (SkipExactly<CharacterType>(characters, '.', current)) {
     // Deviation: HTML requires a digit after the full stop to be able to treat
     // the value as a percentage (if not, the '.' will considered "garbage",
     // yielding a regular length.) Gecko and Edge does not.
-    SkipWhile<CharacterType, IsASCIIDigit>(current, end);
+    current = SkipWhile<CharacterType, IsAsciiDigit>(characters, current);
   }
-  bool ok;
-  double value = CSSValueClampingUtils::ClampDouble(
-      CharactersToDouble(number_start, current - number_start, &ok));
-  if (!ok)
+  std::optional<double> value = CharactersToDouble(
+      characters.subspan(number_start, current - number_start));
+  if (!value) {
     return false;
+  }
   HTMLDimension::HTMLDimensionType type = HTMLDimension::kAbsolute;
-  if (current < end) {
-    if (*current == '%') {
+  if (current < characters.size()) {
+    const auto c = characters[current];
+    if (c == '%') {
       type = HTMLDimension::kPercentage;
-    } else if (*current == '*') {
+    } else if (c == '*') {
       // Deviation: HTML does not recognize '*' in this context, and we don't
       // treat it as a valid value. We do count it though, so this is purely
       // for statistics. Note though that per the specced behavior, "<number>*"
@@ -185,20 +177,18 @@ static bool ParseDimensionValue(const CharacterType* current,
       type = HTMLDimension::kRelative;
     }
   }
-  dimension = HTMLDimension(value, type);
+  dimension = HTMLDimension(CSSValueClampingUtils::ClampDouble(*value), type);
   return true;
 }
 
 // https://html.spec.whatwg.org/C/#rules-for-parsing-dimension-values
 bool ParseDimensionValue(const String& input, HTMLDimension& dimension) {
-  if (input.empty())
+  if (input.empty()) {
     return false;
-  if (input.Is8Bit()) {
-    return ParseDimensionValue(input.Characters8(),
-                               input.Characters8() + input.length(), dimension);
   }
-  return ParseDimensionValue(input.Characters16(),
-                             input.Characters16() + input.length(), dimension);
+  return VisitCharacters(input, [&dimension](auto chars) {
+    return ParseDimensionValue(chars, dimension);
+  });
 }
 
 }  // namespace blink

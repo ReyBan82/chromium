@@ -11,12 +11,24 @@
 
 #include "cc/cc_export.h"
 #include "cc/layers/layer.h"
-#include "cc/metrics/web_vital_metrics.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
 #include "third_party/skia/include/core/SkTypeface.h"
 #include "ui/gfx/geometry/rect.h"
 
 namespace cc {
+
+enum class WebVitalMetricType {
+  kLayoutShift,
+  kInteractionContentfulPaint,
+  kNavigationContentfulPaint,
+};
+
+struct WebVitalsDebugRect {
+  WebVitalsDebugRect(WebVitalMetricType new_type, const gfx::Rect& new_rect)
+      : type(new_type), rect(new_rect) {}
+  WebVitalMetricType type;
+  gfx::Rect rect;
+};
 
 class CC_EXPORT HeadsUpDisplayLayer : public Layer {
  public:
@@ -27,32 +39,31 @@ class CC_EXPORT HeadsUpDisplayLayer : public Layer {
 
   void UpdateLocationAndSize(const gfx::Size& device_viewport,
                              float device_scale_factor);
-  void UpdateWebVitalMetrics(
-      std::unique_ptr<WebVitalMetrics> web_vital_metrics);
 
-  const std::vector<gfx::Rect>& LayoutShiftRects() const;
-  void SetLayoutShiftRects(const std::vector<gfx::Rect>& rects);
+  void ClearWebVitalsDebugRects();
+  void AddWebVitalsDebugRect(const WebVitalsDebugRect& rect);
 
+  void SetLayerTreeHost(LayerTreeHost* host) override;
   std::unique_ptr<LayerImpl> CreateLayerImpl(
       LayerTreeImpl* tree_impl) const override;
-
-  // Layer overrides.
-  void PushPropertiesTo(LayerImpl* layer,
-                        const CommitState& commit_state,
-                        const ThreadUnsafeCommitState& unsafe_state) override;
 
  protected:
   HeadsUpDisplayLayer();
   bool HasDrawableContent() const override;
 
+  // Layer overrides.
+  void PushDirtyPropertiesTo(LayerImpl* layer,
+                             uint8_t dirty_flag,
+                             CommitState& commit_state) override;
+
  private:
   ~HeadsUpDisplayLayer() override;
 
   ProtectedSequenceWritable<sk_sp<SkTypeface>> typeface_;
-  ProtectedSequenceWritable<std::vector<gfx::Rect>> layout_shift_rects_;
+  ProtectedSequenceWritable<std::vector<WebVitalsDebugRect>>
+      web_vitals_debug_rects_;
 
-  ProtectedSequenceWritable<std::unique_ptr<WebVitalMetrics>>
-      web_vital_metrics_;
+  std::string paused_debugger_message_;
 };
 
 }  // namespace cc

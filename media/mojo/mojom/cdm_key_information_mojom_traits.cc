@@ -29,40 +29,34 @@ MojomKeyStatus EnumTraits<MojomKeyStatus, NativeKeyStatus>::ToMojom(
       return MojomKeyStatus::KEY_STATUS_PENDING;
     case NativeKeyStatus::RELEASED:
       return MojomKeyStatus::RELEASED;
+    case NativeKeyStatus::USABLE_IN_FUTURE:
+      return MojomKeyStatus::USABLE_IN_FUTURE;
   }
   NOTREACHED();
-  return MojomKeyStatus::INTERNAL_ERROR;
 }
 
 // static
-bool EnumTraits<MojomKeyStatus, NativeKeyStatus>::FromMojom(
-    MojomKeyStatus error,
-    NativeKeyStatus* out) {
+NativeKeyStatus EnumTraits<MojomKeyStatus, NativeKeyStatus>::FromMojom(
+    MojomKeyStatus error) {
   switch (error) {
     case MojomKeyStatus::USABLE:
-      *out = NativeKeyStatus::USABLE;
-      return true;
+      return NativeKeyStatus::USABLE;
     case MojomKeyStatus::INTERNAL_ERROR:
-      *out = NativeKeyStatus::INTERNAL_ERROR;
-      return true;
+      return NativeKeyStatus::INTERNAL_ERROR;
     case MojomKeyStatus::EXPIRED:
-      *out = NativeKeyStatus::EXPIRED;
-      return true;
+      return NativeKeyStatus::EXPIRED;
     case MojomKeyStatus::OUTPUT_RESTRICTED:
-      *out = NativeKeyStatus::OUTPUT_RESTRICTED;
-      return true;
+      return NativeKeyStatus::OUTPUT_RESTRICTED;
     case MojomKeyStatus::OUTPUT_DOWNSCALED:
-      *out = NativeKeyStatus::OUTPUT_DOWNSCALED;
-      return true;
+      return NativeKeyStatus::OUTPUT_DOWNSCALED;
     case MojomKeyStatus::KEY_STATUS_PENDING:
-      *out = NativeKeyStatus::KEY_STATUS_PENDING;
-      return true;
+      return NativeKeyStatus::KEY_STATUS_PENDING;
     case MojomKeyStatus::RELEASED:
-      *out = NativeKeyStatus::RELEASED;
-      return true;
+      return NativeKeyStatus::RELEASED;
+    case MojomKeyStatus::USABLE_IN_FUTURE:
+      return NativeKeyStatus::USABLE_IN_FUTURE;
   }
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -77,8 +71,8 @@ bool StructTraits<media::mojom::CdmKeyInformationDataView,
   if (!input.ReadStatus(&status))
     return false;
 
-  *output = std::make_unique<media::CdmKeyInformation>(
-      key_id.data(), key_id.size(), status, input.system_code());
+  *output = std::make_unique<media::CdmKeyInformation>(key_id, status,
+                                                       input.system_code());
   return true;
 }
 

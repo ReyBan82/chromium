@@ -7,11 +7,15 @@
 #include <lib/sys/cpp/component_context.h>
 #include <lib/zx/vmo.h>
 
+#include "base/bits.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/fuchsia/process_context.h"
 #include "base/logging.h"
+#include "base/notimplemented.h"
 #include "media/audio/audio_device_description.h"
 #include "media/audio/fuchsia/audio_manager_fuchsia.h"
+#include "media/base/audio_bus.h"
+#include "media/base/audio_sample_types.h"
 
 namespace media {
 
@@ -22,6 +26,12 @@ constexpr uint32_t kBufferId = 0;
 
 // Number of audio packets that should fit in the capture buffer.
 constexpr size_t kBufferPacketCapacity = 10;
+
+bool IsDeviceStateMuted(const fuchsia::settings::DeviceState& state) {
+  return state.has_toggle_flags() &&
+         (state.toggle_flags() & fuchsia::settings::ToggleStateFlags::MUTED) ==
+             fuchsia::settings::ToggleStateFlags::MUTED;
+}
 
 }  // namespace
 
@@ -54,7 +64,7 @@ AudioInputStream::OpenOutcome AudioInputStreamFuchsia::Open() {
   factory->CreateAudioCapturer(capturer_.NewRequest(), is_loopback);
   capturer_.set_error_handler([this](zx_status_t status) {
     ZX_LOG(ERROR, status) << "AudioCapturer disconnected";
-    ReportError();
+    ReportError(Error::kRuntimeError);
   });
 
   // Bind the event for incoming packets.
@@ -69,9 +79,10 @@ AudioInputStream::OpenOutcome AudioInputStreamFuchsia::Open() {
   capturer_->SetPcmStreamType(std::move(stream_type));
 
   // Allocate shared buffer.
+  const size_t page_size = static_cast<size_t>(zx_system_get_page_size());
   size_t capture_buffer_size =
       parameters_.GetBytesPerBuffer(kSampleFormatF32) * kBufferPacketCapacity;
-  capture_buffer_size = base::bits::AlignUp(capture_buffer_size, ZX_PAGE_SIZE);
+  capture_buffer_size = base::bits::AlignUp(capture_buffer_size, page_size);
 
   zx::vmo buffer_vmo;
   zx_status_t status = zx::vmo::create(capture_buffer_size, 0, &buffer_vmo);
@@ -84,7 +95,7 @@ AudioInputStream::OpenOutcome AudioInputStreamFuchsia::Open() {
   bool mapped =
       capture_buffer_.Initialize(std::move(buffer_vmo), /*writable=*/false,
                                  /*offset=*/0, /*size=*/capture_buffer_size,
-                                 fuchsia::sysmem::CoherencyDomain::CPU);
+                                 fuchsia::sysmem2::CoherencyDomain::CPU);
 
   if (!mapped)
     return OpenOutcome::kFailed;
@@ -93,12 +104,22 @@ AudioInputStream::OpenOutcome AudioInputStreamFuchsia::Open() {
   capturer_->AddPayloadBuffer(kBufferId,
                               capture_buffer_.Duplicate(/*writable=*/true));
 
+  if (!is_loopback) {
+    input_service_ = base::ComponentContextForProcess()
+                         ->svc()
+                         ->Connect<fuchsia::settings::Input>();
+    input_service_.set_error_handler([](zx_status_t status) {
+      ZX_LOG(ERROR, status) << "fuchsia.settings.Input disconnected";
+    });
+    WatchInputSettings();
+  }
+
   return OpenOutcome::kSuccess;
 }
 
 void AudioInputStreamFuchsia::Start(AudioInputCallback* callback) {
   if (!capturer_) {
-    callback->OnError();
+    callback->OnError(Error::kStartupFailed);
     return;
   }
 
@@ -145,7 +166,46 @@ bool AudioInputStreamFuchsia::GetAutomaticGainControl() {
 }
 
 bool AudioInputStreamFuchsia::IsMuted() {
-  return false;
+  return is_muted_;
+}
+
+void AudioInputStreamFuchsia::WatchInputSettings() {
+  input_service_->Watch([this](fuchsia::settings::InputSettings settings) {
+    OnInputSettingsReceived(std::move(settings));
+  });
+}
+
+void AudioInputStreamFuchsia::OnInputSettingsReceived(
+    fuchsia::settings::InputSettings settings) {
+  bool mic_found = false;
+  if (settings.has_devices()) {
+    for (const auto& device : settings.devices()) {
+      if (device.has_device_type() &&
+          device.device_type() == fuchsia::settings::DeviceType::MICROPHONE) {
+        // TODO(crbug.com/42050621): Match device_name when we support
+        // selecting non-default devices.
+        mic_found = true;
+        bool is_muted = false;
+        if (device.has_state()) {
+          is_muted = IsDeviceStateMuted(device.state());
+        }
+        if (!is_muted && device.has_source_states()) {
+          for (const auto& source : device.source_states()) {
+            if (source.has_state() && IsDeviceStateMuted(source.state())) {
+              is_muted = true;
+              break;
+            }
+          }
+        }
+        is_muted_ = is_muted;
+        break;
+      }
+    }
+  }
+  if (!mic_found) {
+    LOG(WARNING) << "No microphone found in input settings.";
+  }
+  WatchInputSettings();
 }
 
 void AudioInputStreamFuchsia::SetOutputDeviceForAec(
@@ -162,29 +222,30 @@ void AudioInputStreamFuchsia::OnPacketProduced(
       packet.payload_size % bytes_per_frame != 0 ||
       packet.payload_size < bytes_per_frame) {
     LOG(ERROR) << "Received invalid packet from AudioCapturer.";
-    ReportError();
+    ReportError(Error::kRuntimeError);
     return;
   }
 
   if (callback_) {
-    int num_frames = packet.payload_size / bytes_per_frame;
-    if (!audio_bus_ || num_frames != audio_bus_->frames())
+    const int num_frames = packet.payload_size / bytes_per_frame;
+    if (!audio_bus_ || num_frames != audio_bus_->frames()) {
       audio_bus_ = AudioBus::Create(parameters_.channels(), num_frames);
-    audio_bus_->FromInterleaved<Float32SampleTypeTraits>(
-        reinterpret_cast<const float*>(capture_buffer_.GetMemory().data() +
-                                       packet.payload_offset),
-        num_frames);
+    }
+    auto source = capture_buffer_.GetMemory().subspan(packet.payload_offset,
+                                                      packet.payload_size);
+
+    audio_bus_->FromInterleavedBytes<Float32SampleTypeTraits>(source);
     callback_->OnData(audio_bus_.get(), base::TimeTicks::FromZxTime(packet.pts),
-                      /*volume=*/1.0);
+                      /*volume=*/1.0, {});
   }
 
   capturer_->ReleasePacket(std::move(packet));
 }
 
-void AudioInputStreamFuchsia::ReportError() {
+void AudioInputStreamFuchsia::ReportError(Error error_code) {
   capturer_.Unbind();
   if (callback_)
-    callback_->OnError();
+    callback_->OnError(error_code);
 }
 
 }  // namespace media

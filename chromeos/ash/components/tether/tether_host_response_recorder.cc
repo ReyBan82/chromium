@@ -11,9 +11,7 @@
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
 
-namespace ash {
-
-namespace tether {
+namespace ash::tether {
 
 // static
 void TetherHostResponseRecorder::RegisterPrefs(
@@ -44,8 +42,8 @@ void TetherHostResponseRecorder::RemoveObserver(Observer* observer) {
 }
 
 void TetherHostResponseRecorder::RecordSuccessfulTetherAvailabilityResponse(
-    multidevice::RemoteDeviceRef remote_device) {
-  AddRecentResponse(remote_device.GetDeviceId(),
+    const std::string& device_id) {
+  AddRecentResponse(device_id,
                     prefs::kMostRecentTetherAvailablilityResponderIds);
 }
 
@@ -55,8 +53,8 @@ TetherHostResponseRecorder::GetPreviouslyAvailableHostIds() const {
 }
 
 void TetherHostResponseRecorder::RecordSuccessfulConnectTetheringResponse(
-    multidevice::RemoteDeviceRef remote_device) {
-  if (AddRecentResponse(remote_device.GetDeviceId(),
+    const std::string& device_id) {
+  if (AddRecentResponse(device_id,
                         prefs::kMostRecentConnectTetheringResponderIds)) {
     NotifyObserversPreviouslyConnectedHostIdsChanged();
   }
@@ -77,7 +75,7 @@ void TetherHostResponseRecorder::
 bool TetherHostResponseRecorder::AddRecentResponse(
     const std::string& device_id,
     const std::string& pref_name) {
-  const base::Value::List& ids_list = pref_service_->GetList(pref_name);
+  const base::ListValue& ids_list = pref_service_->GetList(pref_name);
 
   std::string first_device_id_in_list;
   if (!ids_list.empty() && ids_list[0].is_string())
@@ -90,7 +88,7 @@ bool TetherHostResponseRecorder::AddRecentResponse(
   }
 
   // Create a mutable copy of the stored IDs.
-  base::Value::List updated_ids = ids_list.Clone();
+  base::ListValue updated_ids = ids_list.Clone();
 
   // Remove the device ID if it was already present in the list.
   base::Value device_id_value(device_id);
@@ -109,7 +107,7 @@ std::vector<std::string> TetherHostResponseRecorder::GetDeviceIdsForPref(
     const std::string& pref_name) const {
   std::vector<std::string> device_ids;
 
-  const base::Value::List& ids = pref_service_->GetList(pref_name);
+  const base::ListValue& ids = pref_service_->GetList(pref_name);
   for (const auto& entry : ids) {
     if (entry.is_string())
       device_ids.push_back(entry.GetString());
@@ -118,6 +116,4 @@ std::vector<std::string> TetherHostResponseRecorder::GetDeviceIdsForPref(
   return device_ids;
 }
 
-}  // namespace tether
-
-}  // namespace ash
+}  // namespace ash::tether

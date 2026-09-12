@@ -18,7 +18,7 @@ found in the LICENSE file.
         android:layout_height="@dimen/tile_view_icon_size"
         android:layout_gravity="center_horizontal"
         android:layout_marginTop="@dimen/tile_view_icon_background_margin_top_modern"
-        android:background="?attr/tileViewIconBackgroundModern"/>
+        android:background="@drawable/tile_view_icon_background_modern"/>
 
     <!-- The main icon. -->
     <ImageView
@@ -48,5 +48,6 @@ found in the LICENSE file.
         android:layout_marginEnd="@dimen/tile_view_offline_badge_margin_end_modern_condensed"
         android:visibility="gone"
         android:contentDescription="@string/accessibility_ntp_offline_badge"
-        app:srcCompat="@drawable/ic_offline_pin_blue_white" />
+        app:srcCompat="@drawable/ic_offline_pin_fill_24dp"
+        app:tint="@macro/default_icon_color_accent1"/>
 </merge>

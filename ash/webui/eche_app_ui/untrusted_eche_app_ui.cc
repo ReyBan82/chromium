@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "ash/webui/eche_app_ui/untrusted_eche_app_ui.h"
 
 #include "ash/webui/eche_app_ui/url_constants.h"
@@ -19,15 +20,10 @@ namespace ash {
 namespace eche_app {
 
 UntrustedEcheAppUIConfig::UntrustedEcheAppUIConfig()
-    : WebUIConfig(content::kChromeUIUntrustedScheme,
-                  kChromeUIEcheAppGuestHost) {}
+    : DefaultWebUIConfig(content::kChromeUIUntrustedScheme,
+                         kChromeUIEcheAppGuestHost) {}
 
 UntrustedEcheAppUIConfig::~UntrustedEcheAppUIConfig() = default;
-
-std::unique_ptr<content::WebUIController>
-UntrustedEcheAppUIConfig::CreateWebUIController(content::WebUI* web_ui) {
-  return std::make_unique<UntrustedEcheAppUI>(web_ui);
-}
 
 UntrustedEcheAppUI::UntrustedEcheAppUI(content::WebUI* web_ui)
     : ui::UntrustedWebUIController(web_ui) {
@@ -47,8 +43,7 @@ UntrustedEcheAppUI::UntrustedEcheAppUI(content::WebUI* web_ui)
                                IDR_ASH_ECHE_APP_MESSAGE_TYPES_JS);
   html_source->AddResourcePath("receiver.js", IDR_ASH_ECHE_APP_RECEIVER_JS);
 
-  html_source->AddResourcePaths(
-      base::make_span(kAshEcheBundleResources, kAshEcheBundleResourcesSize));
+  html_source->AddResourcePaths(kAshEcheBundleResources);
 
   html_source->AddFrameAncestor(GURL(kChromeUIEcheAppURL));
 

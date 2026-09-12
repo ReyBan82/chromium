@@ -6,13 +6,14 @@ Session 1:
 {
     body : {
         blockedURL : inline
+        columnNumber : 13
         disposition : report
         documentURL : <string>
         effectiveDirective : script-src-elem
         lineNumber : 9
         originalPolicy : script-src 'none'; object-src 'none'; report-to csp
-        referrer : 
-        sample : 
+        referrer :
+        sample :
         sourceFile : http://127.0.0.1:8000/inspector-protocol/network/resources/generate-report.php
         statusCode : 200
     }
@@ -29,13 +30,14 @@ Session 1:
 {
     body : {
         blockedURL : inline
+        columnNumber : 13
         disposition : report
         documentURL : <string>
         effectiveDirective : script-src-elem
         lineNumber : 9
         originalPolicy : script-src 'none'; object-src 'none'; report-to csp
-        referrer : 
-        sample : 
+        referrer :
+        sample :
         sourceFile : http://127.0.0.1:8000/inspector-protocol/network/resources/generate-report.php
         statusCode : 200
     }

@@ -10,20 +10,39 @@
 #include "ash/webui/help_app_ui/help_app_ui.mojom.h"
 #include "ash/webui/help_app_ui/help_app_ui_delegate.h"
 #include "ash/webui/help_app_ui/search/search.mojom.h"
+#include "ash/webui/help_app_ui/url_constants.h"
+#include "ash/webui/system_apps/public/system_web_app_ui_config.h"
+#include "base/memory/raw_ref.h"
 #include "chromeos/ash/components/local_search_service/public/mojom/index.mojom.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "ui/webui/mojo_web_ui_controller.h"
 
+class PrefService;
+
 namespace ash {
 
 class HelpAppPageHandler;
+class HelpAppUI;
+
+// The WebUIConfig for chrome://help-app.
+class HelpAppUIConfig : public SystemWebAppUIConfig<HelpAppUI> {
+ public:
+  explicit HelpAppUIConfig(
+      SystemWebAppUIConfig::CreateWebUIControllerFunc create_controller_func)
+      : SystemWebAppUIConfig(ash::kChromeUIHelpAppHost,
+                             SystemWebAppType::HELP,
+                             create_controller_func) {}
+};
 
 // The WebUI controller for chrome://help-app.
 class HelpAppUI : public ui::MojoWebUIController,
                   public help_app::mojom::PageHandlerFactory {
  public:
+  // `local_state` and `pref_service` must be non-null and must outlive `this`.
   HelpAppUI(content::WebUI* web_ui,
-            std::unique_ptr<HelpAppUIDelegate> delegate);
+            std::unique_ptr<HelpAppUIDelegate> delegate,
+            PrefService* local_state,
+            PrefService* pref_service);
   ~HelpAppUI() override;
 
   HelpAppUI(const HelpAppUI&) = delete;
@@ -52,6 +71,9 @@ class HelpAppUI : public ui::MojoWebUIController,
   mojo::Receiver<help_app::mojom::PageHandlerFactory> page_factory_receiver_{
       this};
   std::unique_ptr<HelpAppUIDelegate> delegate_;
+
+  const raw_ref<PrefService> local_state_;
+  const raw_ref<PrefService> pref_service_;
 
   WEB_UI_CONTROLLER_TYPE_DECL();
 };

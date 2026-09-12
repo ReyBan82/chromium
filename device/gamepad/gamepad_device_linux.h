@@ -5,6 +5,7 @@
 #ifndef DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_H_
 #define DEVICE_GAMEPAD_GAMEPAD_DEVICE_LINUX_H_
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -130,7 +131,7 @@ class GamepadDeviceLinux final : public AbstractHapticGamepad {
 
   // Maps from indices in the Gamepad buttons array to a boolean value
   // indicating whether the button index is already mapped.
-  std::vector<bool> button_indices_used_;
+  std::array<bool, Gamepad::kButtonsLengthCap> button_indices_used_ = {};
 
   // An identifier for the gamepad device model.
   GamepadId gamepad_id_ = GamepadId::kUnknownGamepad;
@@ -175,6 +176,8 @@ class GamepadDeviceLinux final : public AbstractHapticGamepad {
   // The type of the bus through which the device is connected, or
   // GAMEPAD_BUS_UNKNOWN if the bus type could not be determined.
   GamepadBusType bus_type_ = GAMEPAD_BUS_UNKNOWN;
+
+  GamepadDriver driver_ = kGamepadDriverUnknown;
 
   // Dualshock4 functionality, if available.
   std::unique_ptr<Dualshock4Controller> dualshock4_;

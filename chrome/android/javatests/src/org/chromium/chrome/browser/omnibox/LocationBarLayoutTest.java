@@ -4,29 +4,25 @@
 
 package org.chromium.chrome.browser.omnibox;
 
-import static android.view.View.GONE;
-import static android.view.View.VISIBLE;
-
-import static androidx.test.espresso.Espresso.onView;
 import static androidx.test.espresso.assertion.ViewAssertions.matches;
-import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
-import static androidx.test.espresso.matcher.ViewMatchers.withId;
+import static androidx.test.espresso.matcher.ViewMatchers.withText;
 
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.not;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 
-import android.view.View;
-import android.view.ViewGroup.MarginLayoutParams;
-import android.view.WindowManager;
-import android.widget.ImageButton;
+import static org.chromium.base.test.util.Batch.PER_CLASS;
 
-import androidx.core.view.MarginLayoutParamsCompat;
+import android.app.Activity;
+import android.view.View;
+import android.view.View.MeasureSpec;
+import android.view.ViewGroup.MarginLayoutParams;
+
 import androidx.test.filters.MediumTest;
 import androidx.test.filters.SmallTest;
 
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -35,281 +31,478 @@ import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 
-import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.base.MathUtils;
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CommandLineFlags;
-import org.chromium.base.test.util.Criteria;
 import org.chromium.base.test.util.CriteriaHelper;
-import org.chromium.base.test.util.Feature;
-import org.chromium.base.test.util.Matchers;
+import org.chromium.base.test.util.DisabledTest;
+import org.chromium.base.test.util.Features.DisableFeatures;
+import org.chromium.base.test.util.Features.EnableFeatures;
 import org.chromium.base.test.util.Restriction;
 import org.chromium.chrome.R;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
-import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.browser.toolbar.LocationBarModel;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
-import org.chromium.chrome.test.util.OmniboxTestUtils;
-import org.chromium.content_public.browser.test.util.ClickUtils;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.FreshCtaTransitTestRule;
+import org.chromium.chrome.test.transit.omnibox.OmniboxFacility;
+import org.chromium.chrome.test.transit.page.WebPageStation;
+import org.chromium.components.omnibox.AutocompleteInput;
+import org.chromium.components.omnibox.OmniboxCapabilities;
+import org.chromium.components.omnibox.OmniboxFocusReason;
+import org.chromium.ui.base.DeviceFormFactor;
+import org.chromium.ui.base.ViewUtils;
 import org.chromium.ui.permissions.AndroidPermissionDelegate;
-import org.chromium.ui.test.util.UiRestriction;
 
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-
-/**
- * Unit tests for {@link LocationBarLayout}.
- */
+/** Unit tests for {@link LocationBarLayout}. */
+@Batch(PER_CLASS)
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class LocationBarLayoutTest {
-    private static final String SEARCH_TERMS = "machine learning";
-    private static final String SEARCH_TERMS_URL = "testing.com";
-    private static final String GOOGLE_SRP_URL = "https://www.google.com/search?q=machine+learning";
+    // Tolerance in pixels for filling space checks to account for accumulated rounding errors
+    // from two independent view boundaries (StatusView and Barrier).
+    private static final int LAYOUT_ROUNDING_TOLERANCE_PX = 2;
 
     @Rule
-    public ChromeTabbedActivityTestRule mActivityTestRule = new ChromeTabbedActivityTestRule();
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    public FreshCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.freshChromeTabbedActivityRule();
 
-    @Mock
-    AndroidPermissionDelegate mAndroidPermissionDelegate;
-    @Mock
-    SearchEngineLogoUtils mSearchEngineLogoUtils;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    private OmniboxTestUtils mOmnibox;
-
-    public static final LocationBarModel.OfflineStatus OFFLINE_STATUS =
-            new LocationBarModel.OfflineStatus() {
-                @Override
-                public boolean isShowingTrustedOfflinePage(Tab tab) {
-                    return false;
-                }
-
-                @Override
-                public boolean isOfflinePage(Tab tab) {
-                    return false;
-                }
-            };
+    @Mock AndroidPermissionDelegate mAndroidPermissionDelegate;
+    private WebPageStation mPage;
 
     @Before
     public void setUp() throws InterruptedException {
-        mActivityTestRule.startMainActivityOnBlankPage();
-        mOmnibox = new OmniboxTestUtils(mActivityTestRule.getActivity());
+        mPage = mActivityTestRule.startOnBlankPage();
 
         doReturn(true).when(mAndroidPermissionDelegate).hasPermission(anyString());
-        mActivityTestRule.getActivity().getWindowAndroid().setAndroidPermissionDelegate(
-                mAndroidPermissionDelegate);
-    }
-
-    private String getUrlText(UrlBar urlBar) {
-        try {
-            return TestThreadUtils.runOnUiThreadBlocking(() -> urlBar.getText().toString());
-        } catch (ExecutionException ex) {
-            throw new RuntimeException(
-                    "Failed to get the UrlBar's text! Exception below:\n" + ex.toString());
-        }
+        mActivityTestRule
+                .getActivity()
+                .getWindowAndroid()
+                .setAndroidPermissionDelegate(mAndroidPermissionDelegate);
     }
 
     private UrlBar getUrlBar() {
-        return (UrlBar) mActivityTestRule.getActivity().findViewById(R.id.url_bar);
+        return mActivityTestRule.getActivity().findViewById(R.id.url_bar);
     }
 
     private LocationBarLayout getLocationBar() {
-        return (LocationBarLayout) mActivityTestRule.getActivity().findViewById(R.id.location_bar);
+        return mActivityTestRule.getActivity().findViewById(R.id.location_bar);
     }
 
     private LocationBarMediator getLocationBarMediator() {
         LocationBarCoordinator locationBarCoordinator =
-                (LocationBarCoordinator) mActivityTestRule.getActivity()
-                        .getToolbarManager()
-                        .getLocationBarForTesting();
+                (LocationBarCoordinator)
+                        mActivityTestRule.getActivity().getToolbarManager().getLocationBar();
         return locationBarCoordinator.getMediatorForTesting();
     }
 
-    private ImageButton getDeleteButton() {
-        return mActivityTestRule.getActivity().findViewById(R.id.delete_button);
-    }
-
-    private ImageButton getMicButton() {
-        return mActivityTestRule.getActivity().findViewById(R.id.mic_button);
-    }
-
-    private View getStatusIconView() {
-        return mActivityTestRule.getActivity().findViewById(R.id.location_bar_status_icon_frame);
-    }
-
-    private void setUrlBarTextAndFocus(String text) {
-        final UrlBar urlBar = getUrlBar();
-        TestThreadUtils.runOnUiThreadBlocking(() -> { urlBar.requestFocus(); });
-        CriteriaHelper.pollUiThread(() -> urlBar.hasFocus());
-
-        try {
-            TestThreadUtils.runOnUiThreadBlocking(new Callable<Void>() {
-                @Override
-                public Void call() throws InterruptedException {
-                    mActivityTestRule.typeInOmnibox(text, false);
-                    return null;
-                }
-            });
-        } catch (ExecutionException e) {
-            throw new RuntimeException("Failed to type \"" + text + "\" into the omnibox!");
-        }
-    }
-
     @Test
     @SmallTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
-    public void testNotShowingVoiceSearchButtonIfUrlBarContainsText() throws ExecutionException {
+    @Restriction(DeviceFormFactor.PHONE)
+    public void testNotShowingVoiceSearchButtonIfUrlBarContainsText() {
         // When there is text, the delete button should be visible.
-        setUrlBarTextAndFocus("testing");
+        OmniboxFacility omnibox = mPage.openOmnibox();
+        omnibox.setText("testing");
 
-        onView(withId(R.id.delete_button)).check(matches(isDisplayed()));
-        onView(withId(R.id.mic_button)).check(matches(not(isDisplayed())));
+        omnibox.deleteButtonElement.checkPresent();
+        omnibox.micButtonElement.checkAbsent();
     }
 
     @Test
     @SmallTest
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
-    public void testShowingVoiceSearchButtonIfUrlBarIsEmpty() throws ExecutionException {
+    @Restriction(DeviceFormFactor.PHONE)
+    public void testShowingVoiceSearchButtonIfUrlBarIsEmpty() {
         // When there's no text, the mic button should be visible.
-        setUrlBarTextAndFocus("");
+        OmniboxFacility omnibox = mPage.openOmnibox();
 
-        onView(withId(R.id.mic_button)).check(matches(isDisplayed()));
-        onView(withId(R.id.delete_button)).check(matches(not(isDisplayed())));
+        omnibox.micButtonElement.checkPresent();
+        omnibox.deleteButtonElement.checkAbsent();
     }
 
     @Test
     @SmallTest
-    public void testDeleteButton() throws ExecutionException {
-        setUrlBarTextAndFocus("testing");
-        Assert.assertEquals(getDeleteButton().getVisibility(), VISIBLE);
-        ClickUtils.clickButton(getDeleteButton());
-        CriteriaHelper.pollUiThread(() -> {
-            Criteria.checkThat(getDeleteButton().getVisibility(), Matchers.not(VISIBLE));
-        });
-        Assert.assertEquals("", getUrlText(getUrlBar()));
-    }
+    public void testDeleteButton() {
+        OmniboxCapabilities.setHasDesktopExperienceForTesting(false);
+        OmniboxFacility omnibox = mPage.openOmnibox();
+        omnibox.setText("testing").clickDelete();
 
-    @Test
-    @SmallTest
-    public void testSetUrlBarFocus() {
-        final LocationBarLayout locationBar = getLocationBar();
-        LocationBarMediator locationBarMediator = getLocationBarMediator();
-
-        Assert.assertEquals(
-                0, RecordHistogram.getHistogramTotalCountForTesting("Android.OmniboxFocusReason"));
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            locationBarMediator.setUrlBarFocus(
-                    true, SEARCH_TERMS_URL, OmniboxFocusReason.FAKE_BOX_LONG_PRESS);
-        });
-        Assert.assertTrue(getLocationBarMediator().isUrlBarFocused());
-        Assert.assertTrue(getLocationBarMediator().didFocusUrlFromFakebox());
-        Assert.assertEquals(SEARCH_TERMS_URL, getUrlText(getUrlBar()));
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting("Android.OmniboxFocusReason"));
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            locationBarMediator.setUrlBarFocus(true, SEARCH_TERMS, OmniboxFocusReason.SEARCH_QUERY);
-        });
-        Assert.assertTrue(getLocationBarMediator().isUrlBarFocused());
-        Assert.assertTrue(getLocationBarMediator().didFocusUrlFromFakebox());
-        Assert.assertEquals(SEARCH_TERMS, getUrlText(getUrlBar()));
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting("Android.OmniboxFocusReason"));
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            locationBarMediator.setUrlBarFocus(false, null, OmniboxFocusReason.UNFOCUS);
-        });
-        Assert.assertFalse(getLocationBarMediator().isUrlBarFocused());
-        Assert.assertFalse(getLocationBarMediator().didFocusUrlFromFakebox());
-        Assert.assertEquals(
-                1, RecordHistogram.getHistogramTotalCountForTesting("Android.OmniboxFocusReason"));
-
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            locationBarMediator.setUrlBarFocus(true, null, OmniboxFocusReason.OMNIBOX_TAP);
-        });
-        Assert.assertTrue(getLocationBarMediator().isUrlBarFocused());
-        Assert.assertFalse(getLocationBarMediator().didFocusUrlFromFakebox());
-        Assert.assertEquals(
-                2, RecordHistogram.getHistogramTotalCountForTesting("Android.OmniboxFocusReason"));
-    }
-
-    /**
-     * Test for checking whether soft input model switches with focus.
-     */
-    @Test
-    @MediumTest
-    @Feature("Omnibox")
-    public void testFocusChangingSoftInputMode() {
-        final UrlBar urlBar = getUrlBar();
-
-        Callable<Integer> softInputModeCallable = () -> {
-            return mActivityTestRule.getActivity().getWindow().getAttributes().softInputMode;
-        };
-        mOmnibox.requestFocus();
-        CriteriaHelper.pollUiThread(() -> {
-            int inputMode =
-                    mActivityTestRule.getActivity().getWindow().getAttributes().softInputMode;
-            Criteria.checkThat(inputMode, is(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN));
-        });
-
-        mOmnibox.clearFocus();
-        CriteriaHelper.pollUiThread(() -> {
-            int inputMode =
-                    mActivityTestRule.getActivity().getWindow().getAttributes().softInputMode;
-            Criteria.checkThat(inputMode, is(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE));
-        });
+        omnibox.deleteButtonElement.checkAbsent();
+        omnibox.urlBarElement.check(matches(withText("")));
     }
 
     @Test
     @MediumTest
-    public void testUpdateLayoutParams() {
-        LocationBarLayout locationBar = (LocationBarLayout) getLocationBar();
-        View statusIcon = getStatusIconView();
-        View urlContainer = getUrlBar();
+    @DisabledTest(message = "flaky, see crbug.com/359597342")
+    public void testEnforceMinimumUrlBarWidth() {
+        mPage.openOmnibox();
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            getUrlBar().requestFocus();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    View urlBar = getUrlBar();
+                    LocationBarLayout locationBar = getLocationBar();
 
-            MarginLayoutParams urlLayoutParams =
-                    (MarginLayoutParams) urlContainer.getLayoutParams();
-            MarginLayoutParamsCompat.setMarginEnd(
-                    urlLayoutParams, /* very random, and only used to fail a check */ 13047);
-            urlContainer.setLayoutParams(urlLayoutParams);
+                    int originalWidth = locationBar.getMeasuredWidth();
+                    int constrainedWidth =
+                            ((MarginLayoutParams) urlBar.getLayoutParams()).getMarginStart()
+                                    + locationBar
+                                            .getResources()
+                                            .getDimensionPixelSize(
+                                                    R.dimen.location_bar_min_url_width);
+                    int urlContainerMarginEnd =
+                            ((MarginLayoutParams) urlBar.getLayoutParams()).getMarginEnd();
 
-            statusIcon.setVisibility(GONE);
-            locationBar.updateLayoutParams();
-            urlLayoutParams = (MarginLayoutParams) urlContainer.getLayoutParams();
-            int endMarginNoIcon = MarginLayoutParamsCompat.getMarginEnd(urlLayoutParams);
+                    locationBar.measure(
+                            MeasureSpec.makeMeasureSpec(constrainedWidth, MeasureSpec.EXACTLY),
+                            MeasureSpec.makeMeasureSpec(200, MeasureSpec.EXACTLY));
+                    assertFalse(locationBar.getLocationBarButtonsVisibilityForTesting());
 
-            MarginLayoutParamsCompat.setMarginEnd(
-                    urlLayoutParams, /* very random, and only used to fail a check */ 13047);
-            urlContainer.setLayoutParams(urlLayoutParams);
+                    locationBar.measure(
+                            MeasureSpec.makeMeasureSpec(originalWidth, MeasureSpec.EXACTLY),
+                            MeasureSpec.makeMeasureSpec(200, MeasureSpec.EXACTLY));
+                    assertTrue(locationBar.getLocationBarButtonsVisibilityForTesting());
 
-            statusIcon.setVisibility(VISIBLE);
-            locationBar.updateLayoutParams();
-            urlLayoutParams = (MarginLayoutParams) urlContainer.getLayoutParams();
-            int endMarginWithIcon = MarginLayoutParamsCompat.getMarginEnd(urlLayoutParams);
+                    locationBar.measure(
+                            MeasureSpec.makeMeasureSpec(
+                                    constrainedWidth + urlContainerMarginEnd - 1,
+                                    MeasureSpec.EXACTLY),
+                            MeasureSpec.makeMeasureSpec(200, MeasureSpec.EXACTLY));
+                    assertFalse(locationBar.getLocationBarButtonsVisibilityForTesting());
 
-            Assert.assertEquals(endMarginNoIcon + locationBar.getEndPaddingPixelSizeOnFocusDelta(),
-                    endMarginWithIcon);
-        });
+                    locationBar.setUrlActionContainerVisibility(true);
+                    assertFalse(locationBar.getLocationBarButtonsVisibilityForTesting());
+                });
     }
 
-    /** Load a new URL and also update the location bar models. */
-    private Tab loadUrlInNewTabAndUpdateModels(String url, boolean incognito) {
-        Tab tab = mActivityTestRule.loadUrlInNewTab(url, incognito);
-        updateLocationBar();
-        return tab;
+    @Test
+    @MediumTest
+    @Restriction(DeviceFormFactor.TABLET_OR_DESKTOP)
+    public void testTabletUrlBarTranslation_revampEnabled() {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    LocationBarLayout locationBar = getLocationBar();
+                    View urlBar = getUrlBar();
+
+                    urlBar.requestFocus();
+                    locationBar.setUrlFocusChangePercent(
+                            /* ntpSearchBoxScrollFraction= */ 0,
+                            /* urlFocusChangeFraction= */ MathUtils.EPSILON,
+                            /* isUrlFocusChangeInProgress= */ true);
+
+                    assertEquals(
+                            0, ((MarginLayoutParams) urlBar.getLayoutParams()).getMarginStart());
+                    assertEquals(0f, urlBar.getTranslationX(), MathUtils.EPSILON);
+
+                    locationBar.setUrlFocusChangePercent(
+                            /* ntpSearchBoxScrollFraction= */ 0.5f,
+                            /* urlFocusChangeFraction= */ 0.5f,
+                            /* isUrlFocusChangeInProgress= */ false);
+                    assertEquals(0f, urlBar.getTranslationX(), MathUtils.EPSILON);
+
+                    locationBar.setUrlFocusChangePercent(
+                            /* ntpSearchBoxScrollFraction= */ 1.0f,
+                            /* urlFocusChangeFraction= */ 1.0f,
+                            /* isUrlFocusChangeInProgress= */ false);
+                    assertEquals(0f, urlBar.getTranslationX(), MathUtils.EPSILON);
+                });
     }
 
-    private void updateLocationBar() {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            LocationBarMediator mediator = getLocationBarMediator();
-            mediator.onPrimaryColorChanged();
-            mediator.onSecurityStateChanged();
-            mediator.onUrlChanged();
-        });
+    @Test
+    @MediumTest
+    @Restriction({DeviceFormFactor.PHONE})
+    public void testPhoneUrlBarAndStatusViewTranslation() {
+        Activity activity = mActivityTestRule.getActivity();
+        LocationBarLayout locationBar = getLocationBar();
+        View urlBar = getUrlBar();
+        View statusView = locationBar.findViewById(R.id.location_bar_status);
+
+        // "Reference is ambiguous" -> Runnalbe vs Callable<boolean>
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    urlBar.requestFocus();
+                });
+
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    locationBar.setUrlFocusChangePercent(
+                            /* ntpSearchBoxScrollFraction= */ 1,
+                            /* urlFocusChangeFraction= */ MathUtils.EPSILON,
+                            /* isUrlFocusChangeInProgress= */ true);
+                    assertEquals(0f, urlBar.getTranslationX(), MathUtils.EPSILON);
+                    assertEquals(0f, statusView.getTranslationX(), MathUtils.EPSILON);
+
+                    locationBar.setUrlFocusChangePercent(
+                            /* ntpSearchBoxScrollFraction= */ 1,
+                            /* urlFocusChangeFraction= */ 0.5f,
+                            /* isUrlFocusChangeInProgress= */ true);
+                    assertEquals(0f, urlBar.getTranslationX(), MathUtils.EPSILON);
+                    assertEquals(0f, statusView.getTranslationX(), MathUtils.EPSILON);
+
+                    locationBar.setUrlFocusChangePercent(
+                            /* ntpSearchBoxScrollFraction= */ 1.0f,
+                            /* urlFocusChangeFraction= */ 1.0f,
+                            /* isUrlFocusChangeInProgress= */ true);
+                    assertEquals(0f, urlBar.getTranslationX(), MathUtils.EPSILON);
+                    assertEquals(0f, statusView.getTranslationX(), MathUtils.EPSILON);
+
+                    int focusedWidth =
+                            activity.getResources()
+                                    .getDimensionPixelSize(R.dimen.status_view_width_wide);
+                    assertEquals(focusedWidth, statusView.getMinimumWidth());
+                });
+    }
+
+    @Test
+    @MediumTest
+    @Restriction({DeviceFormFactor.PHONE})
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testPhoneUrlBarCentering_EnabledAndUnfocused() {
+        UrlBar urlBar = getUrlBar();
+        CriteriaHelper.pollUiThread(
+                () -> urlBar.getVisibility() == View.VISIBLE, "URL bar failed to become visible");
+
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    LocationBarLayout locationBar = getLocationBar();
+                    View statusView = locationBar.findViewById(R.id.location_bar_status);
+                    boolean isStatusVisible = statusView.getVisibility() == View.VISIBLE;
+
+                    int leftSpace = isStatusVisible ? statusView.getLeft() : urlBar.getLeft();
+                    int rightSpace = locationBar.getWidth() - urlBar.getRight();
+
+                    return Math.abs(leftSpace - rightSpace) <= LAYOUT_ROUNDING_TOLERANCE_PX;
+                },
+                "URL bar failed to center");
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    assertFalse(urlBar.isHorizontallyScrollable());
+                    assertEquals(0, urlBar.getScrollX());
+                });
+    }
+
+    @Test
+    @MediumTest
+    @Restriction({DeviceFormFactor.PHONE})
+    @DisableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testPhoneUrlBarCentering_FeatureDisabled() {
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    LocationBarLayout locationBar = getLocationBar();
+                    View statusView = locationBar.findViewById(R.id.location_bar_status);
+                    View urlBar = getUrlBar();
+                    View actionButtonsSegment =
+                            locationBar.findViewById(R.id.action_buttons_segment);
+                    if (actionButtonsSegment == null) return false;
+
+                    int availableSpace = actionButtonsSegment.getLeft() - statusView.getRight();
+
+                    return Math.abs(urlBar.getWidth() - availableSpace)
+                            <= LAYOUT_ROUNDING_TOLERANCE_PX;
+                },
+                "URL bar should not center when feature is disabled");
+    }
+
+    @Test
+    @MediumTest
+    @Restriction({DeviceFormFactor.PHONE})
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testPhoneUrlBarCentering_Focused() {
+        LocationBarMediator mediator = getLocationBarMediator();
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mediator.beginInput(
+                            new AutocompleteInput().setFocusReason(OmniboxFocusReason.OMNIBOX_TAP));
+                });
+
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    LocationBarLayout locationBar = getLocationBar();
+                    View statusView = locationBar.findViewById(R.id.location_bar_status);
+                    View urlBar = getUrlBar();
+                    View actionButtonsSegment =
+                            locationBar.findViewById(R.id.action_buttons_segment);
+                    if (actionButtonsSegment == null) return false;
+
+                    int availableSpace = actionButtonsSegment.getLeft() - statusView.getRight();
+
+                    return Math.abs(urlBar.getWidth() - availableSpace)
+                            <= LAYOUT_ROUNDING_TOLERANCE_PX;
+                },
+                "URL bar should not center when focused");
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mediator.endInput();
+                });
+    }
+
+    @Test
+    @MediumTest
+    @Restriction({DeviceFormFactor.PHONE})
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testPhoneUrlBarCentering_LongUrlCapping() {
+        UrlBar urlBar = getUrlBar();
+
+        // Wait for initial centering to apply
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    LocationBarLayout locationBar = getLocationBar();
+                    View statusView = locationBar.findViewById(R.id.location_bar_status);
+
+                    boolean isStatusVisible = statusView.getVisibility() == View.VISIBLE;
+
+                    int leftSpace = isStatusVisible ? statusView.getLeft() : urlBar.getLeft();
+                    int rightSpace = locationBar.getWidth() - urlBar.getRight();
+
+                    return Math.abs(leftSpace - rightSpace) <= LAYOUT_ROUNDING_TOLERANCE_PX;
+                },
+                "URL bar failed to center initially");
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    StringBuilder sb = new StringBuilder("https://www.google.com/search?q=");
+                    for (int i = 0; i < 200; i++) {
+                        sb.append("verylong");
+                    }
+                    urlBar.setText(sb.toString());
+                    ViewUtils.requestLayout(
+                            getLocationBar(),
+                            "LocationBarLayoutTest.testPhoneUrlBarCentering_LongUrlCapping");
+                });
+
+        // Verify that the width is capped and does not exceed available space
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    LocationBarLayout locationBar = getLocationBar();
+                    int centeringSpace =
+                            locationBar
+                                    .getResources()
+                                    .getDimensionPixelSize(
+                                            R.dimen.location_bar_url_centering_edge_space);
+                    int maxComponentWidth = locationBar.getWidth() - 2 * centeringSpace;
+
+                    return urlBar.getWidth() <= maxComponentWidth;
+                },
+                "URL bar width should be capped for long URLs");
+    }
+
+    @Test
+    @MediumTest
+    @Restriction({DeviceFormFactor.PHONE})
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testPhoneUrlBarCentering_StatusViewToggle() {
+        View urlBar = getUrlBar();
+        View statusView = getLocationBar().findViewById(R.id.location_bar_status);
+
+        CriteriaHelper.pollUiThread(
+                () -> urlBar.getVisibility() == View.VISIBLE, "URL bar failed to become visible");
+
+        // Wait for initial centering to apply
+        CriteriaHelper.pollUiThread(() -> urlBar.getLeft() != 0, "URL bar failed to layout");
+
+        int initialLeft = urlBar.getLeft();
+
+        // Hide status view
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    statusView.setVisibility(View.GONE);
+                });
+
+        // Wait for position to change
+        CriteriaHelper.pollUiThread(
+                () -> urlBar.getLeft() != initialLeft,
+                "Position should change when status view is hidden");
+
+        // Restore visibility for other tests
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    statusView.setVisibility(View.VISIBLE);
+                });
+    }
+
+    @Test
+    @MediumTest
+    @Restriction({DeviceFormFactor.PHONE})
+    @EnableFeatures(ChromeFeatureList.ANDROID_BOTTOM_BAR)
+    public void testPhoneUrlBarCentering_UrlChange() {
+        UrlBar urlBar = getUrlBar();
+        LocationBarLayout locationBar = getLocationBar();
+
+        CriteriaHelper.pollUiThread(
+                () -> urlBar.getVisibility() == View.VISIBLE, "URL bar failed to become visible");
+
+        // 1. Set short URL
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    urlBar.setText("google.com");
+                    ViewUtils.requestLayout(
+                            locationBar,
+                            "LocationBarLayoutTest.testPhoneUrlBarCentering_UrlChange");
+                });
+
+        // Wait for centering
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    View statusView = locationBar.findViewById(R.id.location_bar_status);
+                    boolean isStatusVisible = statusView.getVisibility() == View.VISIBLE;
+                    int leftSpace = isStatusVisible ? statusView.getLeft() : urlBar.getLeft();
+                    int rightSpace = locationBar.getWidth() - urlBar.getRight();
+                    return Math.abs(leftSpace - rightSpace) <= LAYOUT_ROUNDING_TOLERANCE_PX;
+                },
+                "URL bar failed to center for short URL");
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    assertFalse(urlBar.isHorizontallyScrollable());
+                    assertEquals(0, urlBar.getScrollX());
+                });
+
+        int initialLeft = urlBar.getLeft();
+
+        // 2. Set long URL to force expansion/shifting
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    StringBuilder sb = new StringBuilder("https://www.google.com/search?q=");
+                    for (int i = 0; i < 100; i++) {
+                        sb.append("long");
+                    }
+                    urlBar.setText(sb.toString());
+                    ViewUtils.requestLayout(
+                            locationBar,
+                            "LocationBarLayoutTest.testPhoneUrlBarCentering_UrlChange");
+                });
+
+        // Wait for position to change
+        CriteriaHelper.pollUiThread(
+                () -> urlBar.getLeft() != initialLeft, "Position should change for long URL");
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    assertTrue(urlBar.isHorizontallyScrollable());
+                });
+
+        // 3. Set short URL again
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    urlBar.setText("google.com");
+                    ViewUtils.requestLayout(
+                            locationBar,
+                            "LocationBarLayoutTest.testPhoneUrlBarCentering_UrlChange");
+                });
+
+        // Wait for centering again
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    View statusView = locationBar.findViewById(R.id.location_bar_status);
+                    boolean isStatusVisible = statusView.getVisibility() == View.VISIBLE;
+                    int leftSpace = isStatusVisible ? statusView.getLeft() : urlBar.getLeft();
+                    int rightSpace = locationBar.getWidth() - urlBar.getRight();
+                    return Math.abs(leftSpace - rightSpace) <= LAYOUT_ROUNDING_TOLERANCE_PX;
+                },
+                "URL bar failed to center again after URL change");
     }
 }

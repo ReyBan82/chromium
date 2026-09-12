@@ -4,7 +4,11 @@
 
 #include "components/performance_manager/graph/worker_node_impl_describer.h"
 
+#include <utility>
+
 #include "base/strings/string_number_conversions.h"
+#include "base/values.h"
+#include "components/performance_manager/graph/worker_node_impl.h"
 #include "components/performance_manager/public/graph/node_data_describer_registry.h"
 #include "components/performance_manager/public/graph/node_data_describer_util.h"
 
@@ -12,7 +16,7 @@ namespace performance_manager {
 
 namespace {
 
-const char kDescriberName[] = "WorkerNode";
+const char kDescriberName[] = "WorkerNodeImpl";
 
 const char* WorkerTypeToString(WorkerNode::WorkerType state) {
   switch (state) {
@@ -36,18 +40,28 @@ void WorkerNodeImplDescriber::OnTakenFromGraph(Graph* graph) {
   graph->GetNodeDataDescriberRegistry()->UnregisterDescriber(this);
 }
 
-base::Value::Dict WorkerNodeImplDescriber::DescribeWorkerNodeData(
+base::DictValue WorkerNodeImplDescriber::DescribeWorkerNodeData(
     const WorkerNode* node) const {
   const WorkerNodeImpl* impl = WorkerNodeImpl::FromNode(node);
   if (!impl)
-    return base::Value::Dict();
+    return base::DictValue();
 
-  base::Value::Dict ret;
-  ret.Set("browser_context_id", impl->browser_context_id());
-  ret.Set("worker_token", impl->worker_token().ToString());
-  ret.Set("url", impl->url().spec());
-  ret.Set("worker_type", WorkerTypeToString(impl->worker_type()));
-  ret.Set("priority", PriorityAndReasonToValue(impl->priority_and_reason()));
+  base::DictValue ret;
+  ret.Set("worker_type", WorkerTypeToString(impl->GetWorkerType()));
+  ret.Set("browser_context_id", impl->GetBrowserContextID().ToString());
+  ret.Set("worker_token", impl->GetWorkerToken().ToString());
+  ret.Set("resource_context", impl->GetResourceContext().ToString());
+  ret.Set("url", impl->GetURL().spec());
+  ret.Set("origin", impl->GetOrigin().GetDebugString());
+  ret.Set("priority", PriorityAndReasonToValue(impl->GetPriorityAndReason()));
+
+  base::DictValue metrics;
+  metrics.Set("resident_set",
+              base::NumberToString(impl->GetResidentSetEstimate().InKiB()));
+  metrics.Set(
+      "private_footprint",
+      base::NumberToString(impl->GetPrivateFootprintEstimate().InKiB()));
+  ret.Set("metrics_estimates", std::move(metrics));
 
   return ret;
 }

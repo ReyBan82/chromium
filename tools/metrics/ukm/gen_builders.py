@@ -13,9 +13,11 @@ entries and metrics.
 import argparse
 import sys
 
-import ukm_model
-import builders_template
-import decode_template
+import setup_modules  # pylint: disable=unused-import
+
+import chromium_src.tools.metrics.ukm.ukm_model as ukm_model
+import chromium_src.tools.metrics.ukm.builders_template as builders_template
+import chromium_src.tools.metrics.ukm.decode_template as decode_template
 
 parser = argparse.ArgumentParser(description='Generate UKM entry builders')
 parser.add_argument('--input', help='Path to ukm.xml')
@@ -24,14 +26,14 @@ parser.add_argument('--output', help='Path to generated files.')
 
 def main(argv):
   args = parser.parse_args()
-  data = ReadFilteredData(args.input)
+  data = read_filtered_data(args.input)
   relpath = 'services/metrics/public/cpp/'
-  builders_template.WriteFiles(args.output, relpath, data)
-  decode_template.WriteFiles(args.output, relpath, data)
+  builders_template.write_files(args.output, relpath, data)
+  decode_template.write_files(args.output, relpath, data)
   return 0
 
 
-def ReadFilteredData(path):
+def read_filtered_data(path):
   """Reads data from path and filters out any obsolete metrics.
 
   Parses data from given path and removes all nodes that contain an
@@ -44,14 +46,15 @@ def ReadFilteredData(path):
   Returns:
     A dict of the data not including any obsolete events or metrics.
   """
-  with open(path) as ukm_file:
+  with open(path, encoding='utf-8') as ukm_file:
     data = ukm_model.UKM_XML_TYPE.Parse(ukm_file.read())
     event_tag = ukm_model._EVENT_TYPE.tag
     metric_tag = ukm_model._METRIC_TYPE.tag
-    data[event_tag] = list(filter(ukm_model.IsNotObsolete, data[event_tag]))
+    data[event_tag] = list(filter(ukm_model.is_not_obsolete, data[event_tag]))
     for event in data[event_tag]:
       event[metric_tag] = list(
-          filter(ukm_model.IsNotObsolete, event[metric_tag]))
+        filter(ukm_model.is_not_obsolete, event[metric_tag])
+      )
     return data
 
 

@@ -13,11 +13,8 @@ namespace ui {
 WaylandBufferBacking::WaylandBufferBacking(const WaylandConnection* connection,
                                            uint32_t buffer_id,
                                            const gfx::Size& size,
-                                           uint32_t format)
-    : connection_(connection),
-      format_(format),
-      buffer_id_(buffer_id),
-      size_(size) {
+                                           BufferBackingType type)
+    : connection_(connection), buffer_id_(buffer_id), size_(size), type_(type) {
   DCHECK(connection_);
   DCHECK_NE(buffer_id_, kInvalidBufferId);
 }
@@ -25,7 +22,8 @@ WaylandBufferBacking::WaylandBufferBacking(const WaylandConnection* connection,
 WaylandBufferBacking::~WaylandBufferBacking() = default;
 
 bool WaylandBufferBacking::UseExplicitSyncRelease() const {
-  return connection_->linux_explicit_synchronization_v1();
+  return connection_->SupportsExplicitSync() &&
+         type() == BufferBackingType::kDmabuf;
 }
 
 WaylandBufferHandle* WaylandBufferBacking::EnsureBufferHandle(

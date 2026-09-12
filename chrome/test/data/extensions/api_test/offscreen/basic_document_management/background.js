@@ -2,20 +2,45 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-const VALID_PARAMS =
-    {
-      url: 'offscreen.html',
-      reasons: ['TESTING'],
-      justification: 'ignored',
-    };
+const VALID_PARAMS = {
+  url: 'offscreen.html',
+  reasons: ['TESTING'],
+  justification: 'ignored',
+};
 
+async function hasOffscreenDocument() {
+  const contexts = await chrome.runtime.getContexts(
+      {contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]});
+  chrome.test.assertTrue(!!contexts);
+  chrome.test.assertTrue(contexts.length <= 1);
+  return contexts.length === 1;
+}
+
+self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+  if (url.pathname === '/request_handled_by_sw.html') {
+    e.respondWith(new Response('<html>Hello, world!</html>'));
+  }
+});
 
 chrome.test.runTests([
+  // TODO(crbug.com/378916068): Enable the test on desktop android.
   async function createDocumentAndEnsureItExistsAndThenClose() {
-    chrome.test.assertFalse(await chrome.offscreen.hasDocument());
+    // Skip this test on Android, which does not yet support messaging.
+    const isAndroid = await new Promise((resolve) => {
+      chrome.runtime.getPlatformInfo(info => resolve(info.os === 'android'));
+    });
+    if (isAndroid) {
+      // Skip this test on Android because the underlying call to
+      // com.google.android.gms.iid.InstanceID.deleteToken() always succeeds,
+      // even for non-existent tokens.
+      chrome.test.succeed('skipped');
+      return;
+    }
+    chrome.test.assertFalse(await hasOffscreenDocument());
 
     await chrome.offscreen.createDocument(VALID_PARAMS);
-    chrome.test.assertTrue(await chrome.offscreen.hasDocument());
+    chrome.test.assertTrue(await hasOffscreenDocument());
 
     // Sanity check that the document exists and can be reached by passing a
     // message and expecting a reply. Note that general offscreen document
@@ -32,21 +57,20 @@ chrome.test.runTests([
 
     // Close the document to tidy up for the next test.
     await chrome.offscreen.closeDocument();
-    chrome.test.assertFalse(await chrome.offscreen.hasDocument());
+    chrome.test.assertFalse(await hasOffscreenDocument());
 
     chrome.test.succeed();
   },
 
   async function createDocumentWithAbsoluteSameOriginUrlSucceeds() {
-    chrome.test.assertFalse(await chrome.offscreen.hasDocument());
+    chrome.test.assertFalse(await hasOffscreenDocument());
 
-    await chrome.offscreen.createDocument(
-        {
-          url: chrome.runtime.getURL('offscreen.html'),
-          reasons: ['TESTING'],
-          justification: 'ignored',
-        });
-    chrome.test.assertTrue(await chrome.offscreen.hasDocument());
+    await chrome.offscreen.createDocument({
+      url: chrome.runtime.getURL('offscreen.html'),
+      reasons: ['TESTING'],
+      justification: 'ignored',
+    });
+    chrome.test.assertTrue(await hasOffscreenDocument());
 
     // Tidy up.
     await chrome.offscreen.closeDocument();
@@ -54,7 +78,7 @@ chrome.test.runTests([
   },
 
   async function createDocumentWithInvalidUrlsRejects() {
-    chrome.test.assertFalse(await chrome.offscreen.hasDocument());
+    chrome.test.assertFalse(await hasOffscreenDocument());
 
     const urlsToTest = [
       // Web URL
@@ -67,25 +91,24 @@ chrome.test.runTests([
       'http://:/<>/',
     ];
 
-    for (let url of urlsToTest) {
+    for (const url of urlsToTest) {
       await chrome.test.assertPromiseRejects(
-          chrome.offscreen.createDocument(
-              {
-                url,
-                reasons: ['TESTING'],
-                justification: 'ignored',
-              }),
+          chrome.offscreen.createDocument({
+            url,
+            reasons: ['TESTING'],
+            justification: 'ignored',
+          }),
           'Error: Invalid URL.');
       // No document should have been created.
-      chrome.test.assertFalse(await chrome.offscreen.hasDocument());
+      chrome.test.assertFalse(await hasOffscreenDocument());
     }
     chrome.test.succeed();
   },
 
   async function cannotCreateMoreThanOneOffscreenDocument() {
-    chrome.test.assertFalse(await chrome.offscreen.hasDocument());
+    chrome.test.assertFalse(await hasOffscreenDocument());
     await chrome.offscreen.createDocument(VALID_PARAMS);
-    chrome.test.assertTrue(await chrome.offscreen.hasDocument());
+    chrome.test.assertTrue(await hasOffscreenDocument());
 
     await chrome.test.assertPromiseRejects(
         chrome.offscreen.createDocument(VALID_PARAMS),
@@ -97,7 +120,7 @@ chrome.test.runTests([
   },
 
   async function callingCloseDocumentWhenNoneOpenRejects() {
-    chrome.test.assertFalse(await chrome.offscreen.hasDocument());
+    chrome.test.assertFalse(await hasOffscreenDocument());
     await chrome.test.assertPromiseRejects(
         chrome.offscreen.closeDocument(),
         'Error: No current offscreen document.');
@@ -106,8 +129,7 @@ chrome.test.runTests([
 
   async function callingCreateDocumentWithNoReasonsRejects() {
     await chrome.test.assertPromiseRejects(
-        chrome.offscreen.createDocument(
-        {
+        chrome.offscreen.createDocument({
           url: 'offscreen.html',
           reasons: [],
           justification: 'ignored',
@@ -116,36 +138,57 @@ chrome.test.runTests([
     chrome.test.succeed();
   },
 
-  async function callingCreateDocumentWithMultipleReasonsRejects() {
-    await chrome.test.assertPromiseRejects(
-        chrome.offscreen.createDocument(
-        {
-          url: 'offscreen.html',
-          reasons: ['TESTING', 'AUDIO_PLAYBACK'],
-          justification: 'ignored',
-        }),
-        'Error: Only a single `reason` is currently supported.');
-    chrome.test.succeed();
-  },
-
-  async function nonexistentRelativePathIsAccepted() {
+  async function callingCreateDocumentWithMultipleReasonsIsAccepted() {
     chrome.test.assertFalse(await chrome.offscreen.hasDocument());
-    // Questionable behavior: A non-existent relative path is accepted and the
-    // document is created. In many cases, this could be an extension bug, but
-    // there are valid cases when extensions may do this (e.g., with custom
-    // service worker handling for a fetch event). Additionally, this matches
-    // our behavior with other contexts like tabs (where we will commit the URL,
-    // but show an error).
-    await chrome.offscreen.createDocument(
-        {
-          url: 'non_extistent.html',
-          reasons: ['TESTING'],
-          justification: 'ignored',
-        });
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['TESTING', 'AUDIO_PLAYBACK'],
+      justification: 'ignored',
+    });
     chrome.test.assertTrue(await chrome.offscreen.hasDocument());
 
     // Tidy up.
     await chrome.offscreen.closeDocument();
     chrome.test.succeed();
   },
-])
+
+  // Regression test for https://crbug.com/330570363.
+  async function nonExistentRelativePathThrowsAnError() {
+    // Try to create an offscreen with a nonexistent resource that results in
+    // an error page.
+    await chrome.test.assertPromiseRejects(
+        chrome.offscreen.createDocument({
+          url: 'nonexistent.html',
+          reasons: ['TESTING'],
+          justification: 'testing',
+        }),
+        'Error: Page failed to load.');
+    // There should be no corresponding offscreen context...
+    chrome.test.assertFalse(await hasOffscreenDocument());
+    // ... and creating a new offscreen document should succeed.
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['TESTING'],
+      justification: 'testing',
+    });
+
+    // Tidy up.
+    await chrome.offscreen.closeDocument();
+    chrome.test.succeed();
+  },
+
+  async function serviceWorkerServedDocumentSucceeds() {
+    // Create a document with a resource served by the service worker. This
+    // should succeed.
+    await chrome.offscreen.createDocument({
+      url: 'request_handled_by_sw.html',
+      reasons: ['TESTING'],
+      justification: 'testing',
+    });
+    chrome.test.assertTrue(await hasOffscreenDocument());
+
+    // Tidy up.
+    await chrome.offscreen.closeDocument();
+    chrome.test.succeed();
+  },
+]);

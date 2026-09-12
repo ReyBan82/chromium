@@ -5,9 +5,13 @@
 #ifndef BASE_AUTO_RESET_H_
 #define BASE_AUTO_RESET_H_
 
+// Necessary per <utility>'s usage of `sizeof(std::intmax_t)` without IWYU.
+#include <stdint.h>
+
 #include <utility>
 
-#include "base/memory/raw_ptr_exclusion.h"
+#include "base/check_op.h"
+#include "base/memory/raw_ptr.h"
 
 // base::AutoReset<> is useful for setting a variable to a new value only within
 // a particular scope. An base::AutoReset<> object resets a variable to its
@@ -21,7 +25,7 @@
 namespace base {
 
 template <typename T>
-class AutoReset {
+class [[maybe_unused, nodiscard]] AutoReset {
  public:
   template <typename U>
   AutoReset(T* scoped_variable, U&& new_value)
@@ -29,26 +33,37 @@ class AutoReset {
         original_value_(
             std::exchange(*scoped_variable_, std::forward<U>(new_value))) {}
 
+  // A constructor that's useful for asserting the old value of
+  // `scoped_variable`, especially when it's inconvenient to check this before
+  // constructing the AutoReset object (e.g. in a class member initializer
+  // list).
+  template <typename U>
+  AutoReset(T* scoped_variable, U&& new_value, const T& expected_old_value)
+      : AutoReset(scoped_variable, new_value) {
+    DCHECK_EQ(original_value_, expected_old_value);
+  }
+
   AutoReset(AutoReset&& other)
       : scoped_variable_(std::exchange(other.scoped_variable_, nullptr)),
         original_value_(std::move(other.original_value_)) {}
 
   AutoReset& operator=(AutoReset&& rhs) {
+    Reset();
     scoped_variable_ = std::exchange(rhs.scoped_variable_, nullptr);
     original_value_ = std::move(rhs.original_value_);
     return *this;
   }
 
-  ~AutoReset() {
-    if (scoped_variable_)
-      *scoped_variable_ = std::move(original_value_);
-  }
+  ~AutoReset() { Reset(); }
 
  private:
-  // `scoped_variable_` is not a raw_ptr<T> for performance reasons: Large
-  // number of non-PartitionAlloc pointees + AutoReset is typically short-lived
-  // (e.g. allocated on the stack).
-  RAW_PTR_EXCLUSION T* scoped_variable_;
+  void Reset() {
+    if (scoped_variable_) {
+      *scoped_variable_ = std::move(original_value_);
+    }
+  }
+
+  raw_ptr<T> scoped_variable_;
 
   T original_value_;
 };

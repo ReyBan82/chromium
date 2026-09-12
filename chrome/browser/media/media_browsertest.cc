@@ -11,7 +11,6 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/navigation_controller.h"
@@ -24,9 +23,9 @@
 #include "media/base/test_data_util.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 
-MediaBrowserTest::MediaBrowserTest() {}
+MediaBrowserTest::MediaBrowserTest() = default;
 
-MediaBrowserTest::~MediaBrowserTest() {}
+MediaBrowserTest::~MediaBrowserTest() = default;
 
 void MediaBrowserTest::SetUpCommandLine(base::CommandLine* command_line) {
   command_line->AppendSwitchASCII(
@@ -46,7 +45,7 @@ void MediaBrowserTest::SetUpCommandLine(base::CommandLine* command_line) {
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
     // Disable out of process audio on Linux due to process spawn
-    // failures. http://crbug.com/986021
+    // failures. http://crbug.com/40636948
     features::kAudioServiceOutOfProcess,
 #endif
   };
@@ -58,7 +57,8 @@ void MediaBrowserTest::RunMediaTestPage(const std::string& html_page,
                                         const base::StringPairs& query_params,
                                         const std::string& expected_title,
                                         bool http,
-                                        bool with_transient_activation) {
+                                        bool with_transient_activation,
+                                        int port) {
   GURL gurl;
   std::string query = media::GetURLQueryString(query_params);
   std::unique_ptr<net::EmbeddedTestServer> http_test_server;
@@ -67,7 +67,7 @@ void MediaBrowserTest::RunMediaTestPage(const std::string& html_page,
              << " Starting HTTP server";
     http_test_server = std::make_unique<net::EmbeddedTestServer>();
     http_test_server->ServeFilesFromSourceDirectory(media::GetTestDataPath());
-    CHECK(http_test_server->Start());
+    CHECK(http_test_server->Start(port));
     gurl = http_test_server->GetURL("/" + html_page + "?" + query);
   } else {
     gurl = content::GetFileUrlWithQuery(media::GetTestDataFilePath(html_page),

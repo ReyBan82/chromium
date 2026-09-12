@@ -7,12 +7,13 @@
 
 #include "base/containers/circular_deque.h"
 #include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/task/sequenced_task_runner.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/base/ip_endpoint.h"
 #include "services/network/public/mojom/tcp_socket.mojom.h"
 
-namespace ash {
-namespace nearby {
+namespace ash::nearby {
 
 // An implementation of TCPServerSocket used for unit tests. The user sets
 // expectations--via SetAcceptCallExpectations()--for the number of Accept()
@@ -22,7 +23,8 @@ namespace nearby {
 // AcceptCallback.
 class FakeTcpServerSocket : public network::mojom::TCPServerSocket {
  public:
-  FakeTcpServerSocket();
+  explicit FakeTcpServerSocket(
+      scoped_refptr<base::SequencedTaskRunner> main_task_runner);
   ~FakeTcpServerSocket() override;
 
   size_t num_pending_accept_callbacks() const {
@@ -42,19 +44,19 @@ class FakeTcpServerSocket : public network::mojom::TCPServerSocket {
   // FakeTcpConnectedSocket will be used in the AcceptCallback. For errors, null
   // or trivial values are used for the AcceptCallback.
   void FinishNextAccept(int32_t net_error,
-                        const absl::optional<::net::IPEndPoint>& remote_addr);
+                        const std::optional<::net::IPEndPoint>& remote_addr);
 
  private:
   // network::mojom::TCPServerSocket:
   void Accept(mojo::PendingRemote<network::mojom::SocketObserver> observer,
               AcceptCallback callback) override;
 
+  scoped_refptr<base::SequencedTaskRunner> main_task_runner_;
   size_t expected_num_accept_calls_ = 0;
   base::OnceClosure on_all_accept_calls_queued_;
   base::circular_deque<AcceptCallback> pending_accept_callbacks_;
 };
 
-}  // namespace nearby
-}  // namespace ash
+}  // namespace ash::nearby
 
 #endif  // CHROMEOS_ASH_SERVICES_NEARBY_PUBLIC_CPP_FAKE_TCP_SERVER_SOCKET_H_

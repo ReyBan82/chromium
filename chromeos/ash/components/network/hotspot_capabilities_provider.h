@@ -6,9 +6,11 @@
 #define CHROMEOS_ASH_COMPONENTS_NETWORK_HOTSPOT_CAPABILITIES_PROVIDER_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
@@ -17,7 +19,6 @@
 #include "chromeos/ash/components/network/network_state_handler.h"
 #include "chromeos/ash/components/network/network_state_handler_observer.h"
 #include "chromeos/ash/services/hotspot_config/public/mojom/cros_hotspot_config.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -56,8 +57,13 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotCapabilitiesProvider
   enum class CheckTetheringReadinessResult {
     kReady = 0,
     kNotAllowed = 1,
-    kUpstreamNetworkNotAvailable = 2,
-    kShillOperationFailed = 3,
+    kNotAllowedByCarrier = 2,
+    kNotAllowedOnFW = 3,
+    kNotAllowedOnVariant = 4,
+    kNotAllowedUserNotEntitled = 5,
+    kUpstreamNetworkNotAvailable = 6,
+    kShillOperationFailed = 7,
+    kUnknownResult = 8,
   };
 
   HotspotCapabilitiesProvider();
@@ -66,15 +72,11 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotCapabilitiesProvider
       delete;
   ~HotspotCapabilitiesProvider() override;
 
-  void Init(NetworkStateHandler* network_state_handler);
+  void Init(NetworkStateHandler* network_state_handler,
+            HotspotAllowedFlagHandler* hotspot_allowed_flag_handler);
 
   // Return the latest hotspot capabilities
   const HotspotCapabilities& GetHotspotCapabilities() const;
-
-  // Update the hotspot allow status with the given |new_allow_status|
-  // and then notify observers if it changes.
-  void SetHotspotAllowStatus(
-      hotspot_config::mojom::HotspotAllowStatus new_allow_status);
 
   // Return callback for the CheckTetheringReadiness method.
   using CheckTetheringReadinessCallback =
@@ -91,6 +93,11 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotCapabilitiesProvider
   bool HasObserver(Observer* observer) const;
 
  private:
+  friend class HotspotMetricsHelperTest;
+  friend class HotspotFeatureUsageMetricsTest;
+  friend class HotspotControllerTest;
+  friend class HotspotControllerConcurrencyApiTest;
+
   // ShillPropertyChangedObserver overrides
   void OnPropertyChanged(const std::string& key,
                          const base::Value& value) override;
@@ -100,7 +107,12 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotCapabilitiesProvider
   void OnShuttingDown() override;
 
   // Callback to handle the manager properties with hotspot related properties.
-  void OnManagerProperties(absl::optional<base::Value::Dict> properties);
+  void OnManagerProperties(std::optional<base::DictValue> properties);
+
+  // Update the hotspot allow status with the given |new_allow_status|
+  // and then notify observers if it changes.
+  void SetHotspotAllowStatus(
+      hotspot_config::mojom::HotspotAllowStatus new_allow_status);
 
   // Notify observer that hotspot capabilities was changed.
   void NotifyHotspotCapabilitiesChanged();
@@ -108,7 +120,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotCapabilitiesProvider
   // Update the cached hotspot_capabilities_ from the tethering capabilities
   // values from Shill. This function is called whenever the tethering
   // capabilities value is changed in Shill.
-  void UpdateHotspotCapabilities(const base::Value::Dict& capabilities);
+  void UpdateHotspotCapabilities(const base::DictValue& capabilities);
 
   // Callback when the CheckTetheringReadiness operation succeeded.
   void OnCheckReadinessSuccess(CheckTetheringReadinessCallback callback,
@@ -125,7 +137,8 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotCapabilitiesProvider
       hotspot_config::mojom::HotspotAllowStatus::kDisallowedNoCellularUpstream};
 
   bool policy_allow_hotspot_ = true;
-  NetworkStateHandler* network_state_handler_ = nullptr;
+  raw_ptr<NetworkStateHandler> network_state_handler_ = nullptr;
+  raw_ptr<HotspotAllowedFlagHandler> hotspot_allowed_flag_handler_;
   base::ScopedObservation<NetworkStateHandler, NetworkStateHandlerObserver>
       network_state_handler_observer_{this};
   base::ObserverList<Observer> observer_list_;

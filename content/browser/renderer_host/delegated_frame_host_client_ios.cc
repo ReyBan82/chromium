@@ -16,14 +16,15 @@ DelegatedFrameHostClientIOS::DelegatedFrameHostClientIOS(
 
 DelegatedFrameHostClientIOS::~DelegatedFrameHostClientIOS() {}
 
-ui::Layer* DelegatedFrameHostClientIOS::DelegatedFrameHostGetLayer() const {
-  // TODO(crbug.com/1411704): Fix me
+ui::LayerSurface* DelegatedFrameHostClientIOS::GetDelegatedFrameHostLayer()
+    const {
+  // TODO(crbug.com/40254930): Fix me
   // return render_widget_host_view_->layer();
   return nullptr;
 }
 
 bool DelegatedFrameHostClientIOS::DelegatedFrameHostIsVisible() const {
-  return !render_widget_host_view_->host()->is_hidden();
+  return !render_widget_host_view_->host()->IsHidden();
 }
 
 SkColor DelegatedFrameHostClientIOS::DelegatedFrameHostGetGutterColor() const {
@@ -52,13 +53,16 @@ float DelegatedFrameHostClientIOS::GetDeviceScaleFactor() const {
 }
 
 void DelegatedFrameHostClientIOS::InvalidateLocalSurfaceIdOnEviction() {
-  // TODO(crbug.com/1411704): Fix me
+  // TODO(crbug.com/40254930): Fix me
   // render_widget_host_view_->InvalidateLocalSurfaceIdOnEviction();
 }
 
-std::vector<viz::SurfaceId>
+viz::FrameEvictorClient::EvictIds
 DelegatedFrameHostClientIOS::CollectSurfaceIdsForEviction() {
-  return render_widget_host_view_->host()->CollectSurfaceIdsForEviction();
+  viz::FrameEvictorClient::EvictIds ids;
+  ids.embedded_ids =
+      render_widget_host_view_->host()->CollectSurfaceIdsForEviction();
+  return ids;
 }
 
 bool DelegatedFrameHostClientIOS::ShouldShowStaleContentOnEviction() {

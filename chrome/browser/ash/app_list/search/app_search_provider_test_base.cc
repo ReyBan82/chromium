@@ -10,8 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include "ash/components/arc/mojom/app.mojom.h"
-#include "ash/components/arc/test/fake_app_instance.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
@@ -28,7 +26,10 @@
 #include "chrome/browser/ash/app_list/test/test_app_list_controller_delegate.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/test/base/testing_profile.h"
+#include "chromeos/ash/experiences/arc/mojom/app.mojom.h"
+#include "chromeos/ash/experiences/arc/test/fake_app_instance.h"
 #include "components/sync/model/string_ordinal.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/common/extension_builder.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -48,10 +49,18 @@ void AppSearchProviderTestBase::SetUp() {
   ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
 }
 
+void AppSearchProviderTestBase::TearDown() {
+  controller_.reset();
+  app_search_ = nullptr;
+  data_source_.reset();
+  search_controller_.reset();
+  AppListTestBase::TearDown();
+}
+
 void AppSearchProviderTestBase::InitializeSearchProvider() {
   search_controller_ = std::make_unique<TestSearchController>();
   data_source_ =
-      std::make_unique<AppSearchDataSource>(profile_.get(), nullptr, &clock_);
+      std::make_unique<AppSearchDataSource>(profile(), nullptr, &clock_);
 
   std::unique_ptr<SearchProvider> app_search;
   if (zero_state_provider_) {
@@ -117,7 +126,7 @@ std::string AppSearchProviderTestBase::AddArcApp(const std::string& name,
   app_info.activity = activity;
   app_info.sticky = sticky;
   app_info.notifications_enabled = false;
-  arc_test_.app_instance()->SendAppAdded(app_info);
+  arc_app_test_.app_instance()->SendAppAdded(app_info);
   return ArcAppListPrefs::GetAppId(package, activity);
 }
 
@@ -129,27 +138,18 @@ void AppSearchProviderTestBase::AddExtension(const std::string& id,
   scoped_refptr<const extensions::Extension> extension =
       extensions::ExtensionBuilder()
           .SetManifest(
-              extensions::DictionaryBuilder()
+              base::DictValue()
                   .Set("name", name)
                   .Set("version", "0.1")
-                  .Set("app",
-                       extensions::DictionaryBuilder()
-                           .Set("urls",
-                                extensions::ListBuilder()
-                                    .Append("http://localhost/extensions/"
-                                            "hosted_app/main.html")
-                                    .Build())
-                           .Build())
-                  .Set("launch",
-                       extensions::DictionaryBuilder()
-                           .Set("urls",
-                                extensions::ListBuilder()
-                                    .Append("http://localhost/extensions/"
-                                            "hosted_app/main.html")
-                                    .Build())
-                           .Build())
-                  .Set("display_in_launcher", display_in_launcher)
-                  .Build())
+                  .Set("app", base::DictValue().Set(
+                                  "urls", base::ListValue().Append(
+                                              "http://localhost/extensions/"
+                                              "hosted_app/main.html")))
+                  .Set("launch", base::DictValue().Set(
+                                     "urls", base::ListValue().Append(
+                                                 "http://localhost/extensions/"
+                                                 "hosted_app/main.html")))
+                  .Set("display_in_launcher", display_in_launcher))
           .SetLocation(location)
           .AddFlags(init_from_value_flags)
           .SetID(id)
@@ -158,8 +158,8 @@ void AppSearchProviderTestBase::AddExtension(const std::string& id,
   const syncer::StringOrdinal& page_ordinal =
       syncer::StringOrdinal::CreateInitialOrdinal();
 
-  service()->OnExtensionInstalled(extension.get(), page_ordinal,
-                                  extensions::kInstallFlagNone);
+  registrar()->OnExtensionInstalled(extension.get(), page_ordinal,
+                                    extensions::kInstallFlagNone);
 }
 
 void AppSearchProviderTestBase::CallViewClosing() {

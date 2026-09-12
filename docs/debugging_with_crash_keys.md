@@ -34,7 +34,7 @@ information, etc.
 
 ## Redaction
 
-Beware that certain on certain platforms (e.g. Android Webview) we
+Beware that certain on certain platforms (e.g. Android WebView) we
 [sanitize the stack in the dump](https://cs.chromium.org/chromium/src/third_party/crashpad/crashpad/snapshot/sanitized/memory_snapshot_sanitized.h)
 and only crash keys on an
 [allowlist](https://cs.chromium.org/chromium/src/android_webview/common/crash_reporter/crash_keys.cc)
@@ -91,7 +91,7 @@ the dependency will resolve them.
 
 #### 2. Set the Crash Key
 
-After a key has been allocated, its `Set(base::StringPiece)` and
+After a key has been allocated, its `Set(std::string_view)` and
 `Clear()` methods can be used to record and clear a value. In addition,
 crash_key.h provides a `ScopedCrashKeyString` class to set the value for the
 duration of a scope and clear it upon exiting.

@@ -4,10 +4,12 @@
 
 #include "third_party/blink/renderer/core/css/cssom/inline_style_property_map.h"
 
-#include "third_party/blink/renderer/core/css/css_custom_property_declaration.h"
 #include "third_party/blink/renderer/core/css/css_property_value_set.h"
-#include "third_party/blink/renderer/core/css/css_variable_reference_value.h"
+#include "third_party/blink/renderer/core/css/css_style_sheet.h"
+#include "third_party/blink/renderer/core/css/css_unparsed_declaration_value.h"
+#include "third_party/blink/renderer/core/css/style_attribute_mutation_scope.h"
 #include "third_party/blink/renderer/core/css/style_property_serializer.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 
 namespace blink {
 
@@ -33,8 +35,12 @@ const CSSValue* InlineStylePropertyMap::GetCustomProperty(
 void InlineStylePropertyMap::SetProperty(CSSPropertyID property_id,
                                          const CSSValue& value) {
   DCHECK_NE(property_id, CSSPropertyID::kVariable);
-  owner_element_->SetInlineStyleProperty(property_id, value);
+  StyleAttributeMutationScope mutation_scope(owner_element_.Get());
+  owner_element_->EnsureMutableInlineStyle().SetProperty(property_id, value);
   owner_element_->NotifyInlineStyleMutation();
+  owner_element_->InvalidateStyleAttribute(false);
+  mutation_scope.DidInvalidateStyleAttr();
+  mutation_scope.EnqueueMutationRecord();
 }
 
 bool InlineStylePropertyMap::SetShorthandProperty(
@@ -42,44 +48,82 @@ bool InlineStylePropertyMap::SetShorthandProperty(
     const String& value,
     SecureContextMode secure_context_mode) {
   DCHECK(CSSProperty::Get(property_id).IsShorthand());
+  StyleAttributeMutationScope mutation_scope(owner_element_.Get());
   const auto result =
       owner_element_->EnsureMutableInlineStyle().ParseAndSetProperty(
-          property_id, value, false /* important */, secure_context_mode);
-  return result != MutableCSSPropertyValueSet::kParseError;
+          property_id, value, false /* important */, secure_context_mode,
+          owner_element_->GetDocument().ElementSheet().Contents());
+  if (result == MutableCSSPropertyValueSet::kParseError) {
+    return false;
+  }
+  owner_element_->NotifyInlineStyleMutation();
+  owner_element_->InvalidateStyleAttribute(false);
+  mutation_scope.DidInvalidateStyleAttr();
+  mutation_scope.EnqueueMutationRecord();
+  return true;
 }
 
 void InlineStylePropertyMap::SetCustomProperty(
     const AtomicString& property_name,
     const CSSValue& value) {
-  DCHECK(value.IsVariableReferenceValue());
-  const auto& variable_value = To<CSSVariableReferenceValue>(value);
+  DCHECK(value.IsUnparsedDeclaration());
+  const auto& variable_value = To<CSSUnparsedDeclarationValue>(value);
   CSSVariableData* variable_data = variable_value.VariableDataValue();
-  owner_element_->SetInlineStyleProperty(
+  StyleAttributeMutationScope mutation_scope(owner_element_.Get());
+  owner_element_->EnsureMutableInlineStyle().SetProperty(
       CSSPropertyName(property_name),
-      *MakeGarbageCollected<CSSCustomPropertyDeclaration>(
+      *MakeGarbageCollected<CSSUnparsedDeclarationValue>(
           variable_data, variable_value.ParserContext()));
   owner_element_->NotifyInlineStyleMutation();
+  owner_element_->InvalidateStyleAttribute(false);
+  mutation_scope.DidInvalidateStyleAttr();
+  mutation_scope.EnqueueMutationRecord();
 }
 
 void InlineStylePropertyMap::RemoveProperty(CSSPropertyID property_id) {
-  owner_element_->RemoveInlineStyleProperty(property_id);
+  StyleAttributeMutationScope mutation_scope(owner_element_.Get());
+  bool did_change =
+      owner_element_->EnsureMutableInlineStyle().RemoveProperty(property_id);
+  if (!did_change) {
+    return;
+  }
+  owner_element_->ClearMutableInlineStyleIfEmpty();
+  owner_element_->InvalidateStyleAttribute(false);
+  mutation_scope.DidInvalidateStyleAttr();
+  mutation_scope.EnqueueMutationRecord();
 }
 
 void InlineStylePropertyMap::RemoveCustomProperty(
     const AtomicString& property_name) {
-  owner_element_->RemoveInlineStyleProperty(property_name);
+  StyleAttributeMutationScope mutation_scope(owner_element_.Get());
+  bool did_change =
+      owner_element_->EnsureMutableInlineStyle().RemoveProperty(property_name);
+  if (!did_change) {
+    return;
+  }
+  owner_element_->ClearMutableInlineStyleIfEmpty();
+  owner_element_->InvalidateStyleAttribute(false);
+  mutation_scope.DidInvalidateStyleAttr();
+  mutation_scope.EnqueueMutationRecord();
 }
 
 void InlineStylePropertyMap::RemoveAllProperties() {
-  owner_element_->RemoveAllInlineStyleProperties();
+  StyleAttributeMutationScope mutation_scope(owner_element_.Get());
+  if (!owner_element_->InlineStyle()) {
+    return;
+  }
+  owner_element_->EnsureMutableInlineStyle().Clear();
+  owner_element_->ClearMutableInlineStyleIfEmpty();
+  owner_element_->InvalidateStyleAttribute(false);
+  mutation_scope.DidInvalidateStyleAttr();
+  mutation_scope.EnqueueMutationRecord();
 }
 
 void InlineStylePropertyMap::ForEachProperty(IterationFunction visitor) {
   CSSPropertyValueSet& inline_style_set =
       owner_element_->EnsureMutableInlineStyle();
-  for (unsigned i = 0; i < inline_style_set.PropertyCount(); i++) {
-    const auto& property_reference = inline_style_set.PropertyAt(i);
-    visitor(property_reference.Name(), property_reference.Value());
+  for (const CSSPropertyValue& property : inline_style_set.Properties()) {
+    visitor(property.Name(), property.Value());
   }
 }
 

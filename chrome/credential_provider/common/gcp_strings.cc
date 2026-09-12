@@ -34,11 +34,12 @@ const wchar_t kUserEmail[] = L"email";
 const wchar_t kUserId[] = L"id";
 const wchar_t kUserPictureUrl[] = L"pic";
 
-// Username and password key for special GAIA account to run GLS.
+// Username, password and sid key for special GAIA account to run GLS.
 const wchar_t kDefaultGaiaAccountName[] = L"gaia";
 // L$ prefix means this secret can only be accessed locally.
 const wchar_t kLsaKeyGaiaUsername[] = L"L$GAIA_USERNAME";
 const wchar_t kLsaKeyGaiaPassword[] = L"L$GAIA_PASSWORD";
+const wchar_t kLsaKeyGaiaSid[] = L"L$GAIA_SID";
 
 // These two variables need to remain consistent.
 const wchar_t kDesktopName[] = L"Winlogon";
@@ -103,6 +104,9 @@ const char kGcpwAdditionalOauthScopes[] = "gcpw-additional-oauth-scopes";
 // The show_tos parameter is used to specify whether tos screen needs to be
 // shown as part of the login process or not.
 const char kShowTosSwitch[] = "show_tos";
+
+// Enables modal dialogs for GCPW.
+const char kEnableGcpwModalDialog[] = "enable-gcpw-modal-dialog";
 
 // Parameter appended to sign in URL to pass valid signin domains to the inline
 // login handler. These domains are separated by ','.

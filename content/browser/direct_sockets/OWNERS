@@ -1,1 +1,5 @@
-file://third_party/blink/renderer/modules/direct_sockets/OWNERS
+vkrot@google.com
+
+# Secondary
+file://components/webapps/isolated_web_apps/PLATFORM_OWNERS  #{LAST_RESORT_SUGGESTION}
+

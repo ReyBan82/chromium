@@ -20,6 +20,7 @@
 
 #include "third_party/blink/renderer/core/svg/svg_string_list.h"
 
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
 #include "third_party/blink/renderer/core/svg/svg_parser_utilities.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_visitor.h"
@@ -49,33 +50,42 @@ void SVGStringListBase::Replace(uint32_t index, const String& new_item) {
   values_[index] = new_item;
 }
 
-template <typename CharType>
-void SVGStringListBase::ParseInternal(const CharType* ptr,
-                                      const CharType* end,
-                                      char list_delimiter) {
-  while (ptr < end) {
-    const CharType* start = ptr;
-    while (ptr < end && *ptr != list_delimiter && !IsHTMLSpace<CharType>(*ptr))
-      ptr++;
-    if (ptr == start)
-      break;
-    values_.push_back(String(start, static_cast<wtf_size_t>(ptr - start)));
-    SkipOptionalSVGSpacesOrDelimiter(ptr, end, list_delimiter);
+void SVGStringListBase::ParseCommaSeparated(const StringView& data) {
+  Vector<StringView> tokens = data.Split(',');
+  for (const StringView& token : tokens) {
+    values_.emplace_back(StripLeadingAndTrailingHtmlSpaces(token).ToString());
   }
+}
+
+void SVGStringListBase::ParseSpaceSeparated(const StringView& data) {
+  VisitCharacters(data, [&](auto chars) {
+    size_t position = 0;
+    while (SkipOptionalSVGSpaces(chars, position)) {
+      auto token = TokenUntilSvgSpaceOrDelimiter(chars, position, ' ');
+      position += token.size();
+      values_.emplace_back(token);
+    }
+  });
 }
 
 SVGParsingError SVGStringListBase::SetValueAsStringWithDelimiter(
     const String& data,
     char list_delimiter) {
-  // FIXME: Add more error checking and reporting.
   values_.clear();
 
-  if (data.empty())
+  if (!data) {
     return SVGParseStatus::kNoError;
-
-  WTF::VisitCharacters(data, [&](const auto* chars, unsigned length) {
-    ParseInternal(chars, chars + length, list_delimiter);
-  });
+  }
+  switch (list_delimiter) {
+    case ',':
+      ParseCommaSeparated(data);
+      break;
+    case ' ':
+      ParseSpaceSeparated(data);
+      break;
+    default:
+      NOTREACHED();
+  }
   return SVGParseStatus::kNoError;
 }
 
@@ -85,23 +95,12 @@ String SVGStringListBase::ValueAsStringWithDelimiter(
     return String();
 
   StringBuilder builder;
-
-  Vector<String>::const_iterator it = values_.begin();
-  Vector<String>::const_iterator it_end = values_.end();
-  if (it != it_end) {
-    builder.Append(*it);
-    ++it;
-
-    for (; it != it_end; ++it) {
-      builder.Append(list_delimiter);
-      builder.Append(*it);
-    }
-  }
-
-  return builder.ToString();
+  builder.AppendRange(values_,
+                      StringView(base::byte_span_from_ref(list_delimiter)));
+  return builder.ReleaseString();
 }
 
-void SVGStringListBase::Add(const SVGPropertyBase* other,
+bool SVGStringListBase::Add(const SVGPropertyBase* other,
                             const SVGElement* context_element) {
   // SVGStringList is never animated.
   NOTREACHED();
@@ -123,7 +122,6 @@ float SVGStringListBase::CalculateDistance(const SVGPropertyBase*,
                                            const SVGElement*) const {
   // SVGStringList is never animated.
   NOTREACHED();
-  return -1.0f;
 }
 
 }  // namespace blink

@@ -6,35 +6,15 @@
 
 #include "base/strings/strcat.h"
 
-namespace gin {
+namespace gin::internal {
 
-namespace internal {
+CallbackHolderBase::CallbackHolderBase(uintptr_t type_identifier)
+    : type_identifier_(type_identifier) {}
 
-CallbackHolderBase::CallbackHolderBase(v8::Isolate* isolate)
-    : v8_ref_(isolate, v8::External::New(isolate, this)) {
-  v8_ref_.SetWeak(this, &CallbackHolderBase::FirstWeakCallback,
-                  v8::WeakCallbackType::kParameter);
-}
+CallbackHolderBase::~CallbackHolderBase() = default;
 
-CallbackHolderBase::~CallbackHolderBase() {
-  DCHECK(v8_ref_.IsEmpty());
-}
-
-v8::Local<v8::External> CallbackHolderBase::GetHandle(v8::Isolate* isolate) {
-  return v8::Local<v8::External>::New(isolate, v8_ref_);
-}
-
-// static
-void CallbackHolderBase::FirstWeakCallback(
-    const v8::WeakCallbackInfo<CallbackHolderBase>& data) {
-  data.GetParameter()->v8_ref_.Reset();
-  data.SetSecondPassCallback(SecondWeakCallback);
-}
-
-// static
-void CallbackHolderBase::SecondWeakCallback(
-    const v8::WeakCallbackInfo<CallbackHolderBase>& data) {
-  delete data.GetParameter();
+const WrapperInfo* CallbackHolderBase::wrapper_info() const {
+  return &kWrapperInfo;
 }
 
 void ThrowConversionError(Arguments* args,
@@ -61,6 +41,4 @@ void ThrowConversionError(Arguments* args,
   }
 }
 
-}  // namespace internal
-
-}  // namespace gin
+}  // namespace gin::internal

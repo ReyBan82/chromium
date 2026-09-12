@@ -4,7 +4,7 @@
 
 #include "ash/system/accessibility/autoclick_menu_view.h"
 
-#include "ash/accessibility/accessibility_controller_impl.h"
+#include "ash/accessibility/accessibility_controller.h"
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
@@ -26,6 +26,7 @@
 #include "ui/views/controls/button/button.h"
 #include "ui/views/controls/separator.h"
 #include "ui/views/layout/box_layout.h"
+#include "ui/views/metadata/view_factory.h"
 
 namespace ash {
 
@@ -226,7 +227,7 @@ void AutoclickMenuView::OnPositionButtonPressed() {
       "Accessibility.CrosAutoclick.TrayMenu.ChangePosition"));
 }
 
-BEGIN_METADATA(AutoclickMenuView, views::BoxLayoutView)
+BEGIN_METADATA(AutoclickMenuView)
 END_METADATA
 
 }  // namespace ash

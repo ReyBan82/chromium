@@ -50,6 +50,9 @@ Input before setting suggested values:
 |       shadow:pseudoId="-webkit-input-placeholder"
 |       "initial placeholder"
 |     <div>
+|       <br>
+|         aria-hidden="true"
+|         id="textarea-placeholder-break"
 | <br>
 | "
 "
@@ -58,16 +61,47 @@ Input before setting suggested values:
 |   <option>
 |     "CA"
 |     <shadow:root>
-|       "CA"
+|       <span>
+|         aria-hidden="true"
+|         pseudo="-internal-option-label-container"
+|         shadow:pseudoId="-internal-option-label-container"
+|         "CA"
+|       <slot>
+|         pseudo="-internal-option-slot"
+|         shadow:pseudoId="-internal-option-slot"
 |   <option>
 |     "TX"
 |     <shadow:root>
-|       "TX"
+|       <span>
+|         aria-hidden="true"
+|         pseudo="-internal-option-label-container"
+|         shadow:pseudoId="-internal-option-label-container"
+|         "TX"
+|       <slot>
+|         pseudo="-internal-option-slot"
+|         shadow:pseudoId="-internal-option-slot"
 |   <shadow:root>
 |     <div>
 |       aria-hidden="true"
+|       pseudo="-internal-select-inner-element"
+|       shadow:pseudoId="-internal-select-inner-element"
 |       ""
 |     <slot>
+|       pseudo="-internal-select-button-slot"
+|       shadow:pseudoId="-internal-select-button-slot"
+|     <div>
+|       popover="auto"
+|       pseudo="picker(select)"
+|       shadow:pseudoId="picker(select)"
+|       <slot>
+|         id="select-options"
+|     <div>
+|       popover="manual"
+|       pseudo="-internal-select-autofill-preview"
+|       shadow:pseudoId="-internal-select-autofill-preview"
+|       <div>
+|         pseudo="-internal-select-autofill-preview-text"
+|         shadow:pseudoId="-internal-select-autofill-preview-text"
 | "input.value: initial value"
 | "internals.suggestedValue(input): "
 | "inputWithPlaceholder.value: "
@@ -141,6 +175,9 @@ Input after setting suggestedValue:
 |       shadow:pseudoId="-internal-input-suggested"
 |       "suggested value"
 |     <div>
+|       <br>
+|         aria-hidden="true"
+|         id="textarea-placeholder-break"
 | <br>
 | "
 "
@@ -149,16 +186,48 @@ Input after setting suggestedValue:
 |   <option>
 |     "CA"
 |     <shadow:root>
-|       "CA"
+|       <span>
+|         aria-hidden="true"
+|         pseudo="-internal-option-label-container"
+|         shadow:pseudoId="-internal-option-label-container"
+|         "CA"
+|       <slot>
+|         pseudo="-internal-option-slot"
+|         shadow:pseudoId="-internal-option-slot"
 |   <option>
 |     "TX"
 |     <shadow:root>
-|       "TX"
+|       <span>
+|         aria-hidden="true"
+|         pseudo="-internal-option-label-container"
+|         shadow:pseudoId="-internal-option-label-container"
+|         "TX"
+|       <slot>
+|         pseudo="-internal-option-slot"
+|         shadow:pseudoId="-internal-option-slot"
 |   <shadow:root>
 |     <div>
 |       aria-hidden="true"
-|       "TX"
+|       pseudo="-internal-select-inner-element"
+|       shadow:pseudoId="-internal-select-inner-element"
+|       ""
 |     <slot>
+|       pseudo="-internal-select-button-slot"
+|       shadow:pseudoId="-internal-select-button-slot"
+|     <div>
+|       popover="auto"
+|       pseudo="picker(select)"
+|       shadow:pseudoId="picker(select)"
+|       <slot>
+|         id="select-options"
+|     <div>
+|       popover="manual"
+|       pseudo="-internal-select-autofill-preview"
+|       shadow:pseudoId="-internal-select-autofill-preview"
+|       <div>
+|         pseudo="-internal-select-autofill-preview-text"
+|         shadow:pseudoId="-internal-select-autofill-preview-text"
+|         "TX"
 | "input.value: initial value"
 | "internals.suggestedValue(input): "
 | "inputWithPlaceholder.value: "
@@ -230,6 +299,9 @@ After resetting suggestedValue value:
 |       shadow:pseudoId="-webkit-input-placeholder"
 |       "initial placeholder"
 |     <div>
+|       <br>
+|         aria-hidden="true"
+|         id="textarea-placeholder-break"
 | <br>
 | "
 "
@@ -238,16 +310,47 @@ After resetting suggestedValue value:
 |   <option>
 |     "CA"
 |     <shadow:root>
-|       "CA"
+|       <span>
+|         aria-hidden="true"
+|         pseudo="-internal-option-label-container"
+|         shadow:pseudoId="-internal-option-label-container"
+|         "CA"
+|       <slot>
+|         pseudo="-internal-option-slot"
+|         shadow:pseudoId="-internal-option-slot"
 |   <option>
 |     "TX"
 |     <shadow:root>
-|       "TX"
+|       <span>
+|         aria-hidden="true"
+|         pseudo="-internal-option-label-container"
+|         shadow:pseudoId="-internal-option-label-container"
+|         "TX"
+|       <slot>
+|         pseudo="-internal-option-slot"
+|         shadow:pseudoId="-internal-option-slot"
 |   <shadow:root>
 |     <div>
 |       aria-hidden="true"
+|       pseudo="-internal-select-inner-element"
+|       shadow:pseudoId="-internal-select-inner-element"
 |       ""
 |     <slot>
+|       pseudo="-internal-select-button-slot"
+|       shadow:pseudoId="-internal-select-button-slot"
+|     <div>
+|       popover="auto"
+|       pseudo="picker(select)"
+|       shadow:pseudoId="picker(select)"
+|       <slot>
+|         id="select-options"
+|     <div>
+|       popover="manual"
+|       pseudo="-internal-select-autofill-preview"
+|       shadow:pseudoId="-internal-select-autofill-preview"
+|       <div>
+|         pseudo="-internal-select-autofill-preview-text"
+|         shadow:pseudoId="-internal-select-autofill-preview-text"
 | "input.value: initial value"
 | "internals.suggestedValue(input): "
 | "inputWithPlaceholder.value: "

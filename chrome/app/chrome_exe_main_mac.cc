@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 // The entry point for all Mac Chromium processes, including the outer app
 // bundle (browser) and helper app (renderer, plugin, and friends).
 
@@ -19,9 +20,11 @@
 
 #include <memory>
 
-#include "base/allocator/early_zone_registration_mac.h"
+#include "base/allocator/early_zone_registration_apple.h"
+#include "base/compiler_specific.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
+#include "chrome/app/llvm_profile_util.h"
 #include "chrome/common/chrome_version.h"
 
 #if defined(HELPER_EXECUTABLE)
@@ -38,12 +41,10 @@ void abort_report_np(const char* fmt, ...);
 
 namespace {
 
-typedef int (*ChromeMainPtr)(int, char**);
-
 #if !defined(HELPER_EXECUTABLE) && defined(OFFICIAL_BUILD) && \
     BUILDFLAG(GOOGLE_CHROME_BRANDING) && defined(ARCH_CPU_X86_64)
-// This is for https://crbug.com/1300598, and more generally,
-// https://crbug.com/1297588 (and all of the associated bugs). It's horrible!
+// This is for https://crbug.com/40216333, and more generally,
+// https://crbug.com/40215211 (and all of the associated bugs). It's horrible!
 //
 // When the main executable is updated on disk while the application is running,
 // and the offset of the Mach-O image at the main executable's path changes from
@@ -73,21 +74,7 @@ typedef int (*ChromeMainPtr)(int, char**);
 // As quite a hack of a workaround, the offset of the arm64 slice within the fat
 // main executable is influenced to land at the desired location by introducing
 // padding to the x86_64 slice that precedes it. The arm64 slice needs to remain
-// at offset 272kB (since 106.0.5249.61). The signed x86_64 slice has size
-// 260704 bytes (including 68kB of padding) in 106.0.5249.61, but has grown
-// since then, and before the introduction of any padding, would now be 194412
-// bytes long. It needs to be padded to be in the range (245760, 262144] so that
-// the arm64 slice that follows it begins at offset 272kB. To allow for the
-// possibility of small-scale (up to +/-8kB) size changes, the target size for
-// the padded x86_64 slice is 253952 bytes. To make up the 59540-byte
-// difference, 56kB (57344 bytes) of padding is added to the x86_64 slice. to
-// ensure that its size is stable, causing the arm64 slice to land where it
-// needs to be when universalized. This padding needs to be added to the thin
-// form of the x86_64 image before being fed to universalizer.py. Why 57344
-// bytes and not 59540? To keep it an even multiple of linker pages (not machine
-// pages: linker pages are 4kB for lld targeting x86_64 and 16kB for ld64
-// targeting x86_64, but Chrome uses lld). In any case, I'll make up some of the
-// 2196-byte difference with one more weird trick below.
+// at offset 288kB (since 123.0.6312.10).
 //
 // There are several terrible ways to insert this padding into the x86_64 image.
 // Best would be something that considers the size of the x86_64 image without
@@ -103,45 +90,50 @@ typedef int (*ChromeMainPtr)(int, char**);
 // suppresses the warning, but does not prevent the compiler or linker from
 // removing it.
 //
-// The introduction of this fixed 56kB of padding causes the unsigned linker
-// output to grow by 56kB precisely, but the signed output will grow by slightly
-// more. This is because the code signature's code directory contains SHA-1 and
-// SHA-256 hashes of each 4kB code signing page (note, not machine pages or
-// linker pages) in the image, adding 20 and 32 bytes each (macOS 12.0.1
-// https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_codesigning/lib/signer.cpp#L298
-// Security::CodeSigning::SecCodeSigner::Signer::prepare). For the 56kB
-// addition, the code signature grows by (56 / 4) * (20 + 32) = 728 bytes, thus
-// the total size of the linker output grows by 56kB + 728 = 58072 bytes. It is
-// not possible to control this any more granularly: if the buffer were sized at
-// 56kB - 728 = 56616 bytes, it would either cause no change in the space
-// allocated to the __TEXT segment (due to padding for alignment) or would cause
-// the segment to shrink by a linker page (note, not a code signing or machine
-// page) which would which would cause the linker output to shrink by the same
-// amount and would be absolutely undesirable. Luckily, the net growth of 58072
-// bytes is almost at the target of 59540. In any event, having the signed
-// x86_64 slice sized at 252484 bytes instead of 253952 should not be a problem.
-// So long as the size is in the proper 16kB range, the 16kB alignment for the
-// arm64 slice that follows it in the fat file will cause it to appear at the
-// desired 272kB.
+// The arm64 slice will be 16kB-aligned, so as long as the signed x86_64 slice
+// ends anywhere in the offset range (272kB, 288kB], the desired alignment will
+// be preserved. The x86_64 slice begins at offset 16kB (the fat header precedes
+// it, and it is also 16kB-aligned), so the signed x86_64 slice’s size must be
+// in the range (256kB, 272kB] in order for the slice’s end to be in the
+// required range of offsets. To allow for small amounts of growth and
+// shrinkage, the signed x86_64 slice’s size should target the middle of this
+// range, or 264kB.
+//
+// At build time, the signed slice’s size is not known. Although subject to
+// change, recent (2025-05, 138.0.7160) code signatures for official builds of
+// the correct size introduce 22656 extra bytes beyond the size of the unsigned
+// slice. With this signature length in mind, the size target for the unsigned
+// x86_64 slice is 264kB - 22656 = 247680.
+//
+// With an unpadded unsigned size of 27024, (247680 - 27024) = 220656 bytes of
+// padding are desirable. The padding can only be introduced with 4kB precision,
+// so 216kB of padding is introduced.
 //
 // If the main executable has a significant change in size, this will need to be
-// revised. Hopefully a more elegant solution will become apparent before that's
-// required.
-#if !defined(DCHECK_ALWAYS_ON)
-__attribute__((used)) const char kGrossPaddingForCrbug1300598[56 * 1024] = {};
-#else
-// DCHECK builds are larger and therefore require less padding. See
-// https://crbug.com/1394196 for the calculations.
-__attribute__((used)) const char kGrossPaddingForCrbug1300598[36 * 1024] = {};
-#endif  // !defined(DCHECK_ALWAYS_ON)
+// revised.
+//
+// If you’re here because of an InvalidAppGeometryException (checked at code
+// signing time), recalculate the required padding for the x86_64 slice: take
+// the reported signed x86_64 slice’s size reported by lipo -detailed_info and
+// subtract 264k (270336) from it. If positive, remove padding in 4kB
+// increments, and if negative, add padding in 4kB increments. The objective is
+// to arrive at a signed x86_64 slice whose size is as close to 264kB as
+// possible.
+//
+// (Each 4kB page added or removed here will result in slightly more than 4kB
+// added or removed from the signed slice: it’s actually 4kB plus 32 bytes, 4128
+// bytes total, accounting for both the padding and the additional SHA-256 hash
+// incorporated into the code signature. The difference is <1% and can be
+// ignored in most cases.)
+__attribute__((used)) const char kGrossPaddingForCrbug1300598[216 * 1024] = {};
 #endif
 
 [[noreturn]] void FatalError(const char* format, ...) {
   va_list valist;
   va_start(valist, format);
   char message[4096];
-  if (vsnprintf(message, sizeof(message), format, valist) >= 0) {
-    fputs(message, stderr);
+  if (UNSAFE_TODO(vsnprintf(message, sizeof(message), format, valist)) >= 0) {
+    UNSAFE_TODO(fputs(message, stderr));
     abort_report_np("%s", message);
   }
   va_end(valist);
@@ -152,6 +144,10 @@ __attribute__((used)) const char kGrossPaddingForCrbug1300598[36 * 1024] = {};
 
 __attribute__((visibility("default"))) int main(int argc, char* argv[]) {
   partition_alloc::EarlyMallocZoneRegistration();
+
+#if defined(RENDERER_HELPER_EXECUTABLE)
+  SetLLVMProfileProcessType(ProfileProcessType::kRenderer);
+#endif
 
   uint32_t exec_path_size = 0;
   int rv = _NSGetExecutablePath(NULL, &exec_path_size);
@@ -177,15 +173,24 @@ __attribute__((visibility("default"))) int main(int argc, char* argv[]) {
       FatalError("Failed to initialize sandbox.");
     }
   }
+#endif
 
+#if defined(RENDERER_HELPER_EXECUTABLE)
+  static constexpr char entry_symbol[] = "ChromeRendererMain";
+  static constexpr char rel_path[] = "../../../../Libraries/librenderer.dylib";
+#elif defined(HELPER_EXECUTABLE)  // defined(HELPER_EXECUTABLE)
   // The helper lives within the versioned framework directory, so simply
   // go up to find the main dylib.
-  const char rel_path[] = "../../../../" PRODUCT_FULLNAME_STRING " Framework";
-#else
-  const char rel_path[] = "../Frameworks/" PRODUCT_FULLNAME_STRING
-                          " Framework.framework/Versions/" CHROME_VERSION_STRING
-                          "/" PRODUCT_FULLNAME_STRING " Framework";
-#endif  // defined(HELPER_EXECUTABLE)
+  static constexpr char entry_symbol[] = "ChromeMain";
+  static constexpr char rel_path[] =
+      "../../../../" PRODUCT_FULLNAME_STRING " Framework";
+#else                             // defined(HELPER_EXECUTABLE)
+  static constexpr char entry_symbol[] = "ChromeMain";
+  static constexpr char rel_path[] =
+      "../Frameworks/" PRODUCT_FULLNAME_STRING
+      " Framework.framework/Versions/" CHROME_VERSION_STRING
+      "/" PRODUCT_FULLNAME_STRING " Framework";
+#endif                            // defined(RENDERER_HELPER_EXECUTABLE)
 
   // Slice off the last part of the main executable path, and append the
   // version framework information.
@@ -199,8 +204,8 @@ __attribute__((visibility("default"))) int main(int argc, char* argv[]) {
   // 2 accounts for a trailing NUL byte and the '/' in the middle of the paths.
   const size_t framework_path_size = parent_dir_len + rel_path_len + 2;
   std::unique_ptr<char[]> framework_path(new char[framework_path_size]);
-  snprintf(framework_path.get(), framework_path_size, "%s/%s", parent_dir,
-           rel_path);
+  UNSAFE_TODO(snprintf(framework_path.get(), framework_path_size, "%s/%s",
+                       parent_dir, rel_path));
 
   void* library =
       dlopen(framework_path.get(), RTLD_LAZY | RTLD_LOCAL | RTLD_FIRST);
@@ -208,12 +213,13 @@ __attribute__((visibility("default"))) int main(int argc, char* argv[]) {
     FatalError("dlopen %s: %s.", framework_path.get(), dlerror());
   }
 
+  using ChromeMainPtr = int (*)(int, const char**);
   const ChromeMainPtr chrome_main =
-      reinterpret_cast<ChromeMainPtr>(dlsym(library, "ChromeMain"));
+      reinterpret_cast<ChromeMainPtr>(dlsym(library, entry_symbol));
   if (!chrome_main) {
-    FatalError("dlsym ChromeMain: %s.", dlerror());
+    FatalError("dlsym %s: %s.", entry_symbol, dlerror());
   }
-  rv = chrome_main(argc, argv);
+  rv = chrome_main(argc, const_cast<const char**>(argv));
 
   // exit, don't return from main, to avoid the apparent removal of main from
   // stack backtraces under tail call optimization.

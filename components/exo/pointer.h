@@ -6,14 +6,16 @@
 #define COMPONENTS_EXO_POINTER_H_
 
 #include <memory>
+#include <optional>
 
 #include "ash/shell_observer.h"
+#include "ash/wm/desks/desks_controller.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/unguessable_token.h"
 #include "components/exo/surface_observer.h"
 #include "components/exo/surface_tree_host.h"
 #include "components/exo/wm_helper.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/aura/client/cursor_client_observer.h"
 #include "ui/aura/client/drag_drop_client_observer.h"
@@ -24,7 +26,7 @@
 #include "ui/events/types/event_type.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/point_f.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace viz {
 class CopyOutputResult;
@@ -53,16 +55,19 @@ class Pointer : public SurfaceTreeHost,
                 public aura::client::DragDropClientObserver,
                 public aura::client::CursorClientObserver,
                 public aura::client::FocusChangeObserver,
-                public ash::ShellObserver {
+                public ash::ShellObserver,
+                public ash::DesksController::Observer {
  public:
-  Pointer(PointerDelegate* delegate, Seat* seat);
+  Pointer(PointerDelegate* delegate,
+          Seat* seat,
+          std::unique_ptr<aura::Window> host_window = nullptr);
 
   Pointer(const Pointer&) = delete;
   Pointer& operator=(const Pointer&) = delete;
 
   ~Pointer() override;
 
-  PointerDelegate* delegate() const { return delegate_; }
+  PointerDelegate* delegate() const { return delegate_.get(); }
 
   // Set the pointer surface, i.e., the surface that contains the pointer image
   // (cursor). The |hotspot| argument defines the position of the pointer
@@ -105,6 +110,9 @@ class Pointer : public SurfaceTreeHost,
   void OnRootWindowAdded(aura::Window* root_window) override;
   void OnRootWindowWillShutdown(aura::Window* root_window) override;
 
+  // ash::DesksController::Observer:
+  void OnDeskSwitchAnimationFinished() override;
+
   // Relative motion registration.
   void RegisterRelativePointerDelegate(RelativePointerDelegate* delegate);
   void UnregisterRelativePointerDelegate(RelativePointerDelegate* delegate);
@@ -138,7 +146,19 @@ class Pointer : public SurfaceTreeHost,
   void SetStylusDelegate(PointerStylusDelegate* delegate);
   bool HasStylusDelegate() const;
 
+  // Pointer capture is enabled if and only if `capture_window_` is not null.
+  bool GetIsPointerConstrainedForTesting() {
+    return capture_window_ != nullptr;
+  }
+
+  int button_flags_on_drag_drop_start_for_testing() const {
+    return button_flags_on_drag_drop_start_;
+  }
+  Surface* focus_surface_for_testing() const { return focus_surface_; }
+
  private:
+  class ScopedCursorLocker;
+
   // Remove |delegate| from |constraints_|.
   void RemoveConstraintDelegate(PointerConstraintDelegate* delegate);
 
@@ -179,7 +199,13 @@ class Pointer : public SurfaceTreeHost,
   void OnCursorCaptured(const gfx::Point& hotspot,
                         std::unique_ptr<viz::CopyOutputResult> result);
 
-  // Update |cursor_| to |cursor_bitmap_| transformed for the current display.
+  // Called when cursor bitmap has been obtained either from viz copy output
+  // results or directly from the buffer.
+  void OnCursorBitmapObtained(const gfx::Point& hotspot,
+                              const SkBitmap& cursor_bitmap,
+                              float cursor_scale);
+
+  // Update |cursor_| to |cursor_bitmap_| transformed with |cursor_scale_|.
   void UpdateCursor();
 
   // Called to check if cursor should be moved to the center of the window when
@@ -196,7 +222,7 @@ class Pointer : public SurfaceTreeHost,
   bool HandleRelativePointerMotion(
       base::TimeTicks time_stamp,
       gfx::PointF location_in_target,
-      const absl::optional<gfx::Vector2dF>& ordinal_motion);
+      const std::optional<gfx::Vector2dF>& ordinal_motion);
 
   // Whether this Pointer should observe the given |surface|.
   bool ShouldObserveSurface(Surface* surface);
@@ -210,28 +236,29 @@ class Pointer : public SurfaceTreeHost,
                            const gfx::PointF& location_in_target);
 
   // The delegate instance that all events are dispatched to.
-  PointerDelegate* const delegate_;
+  base::WeakPtr<PointerDelegate> delegate_;
 
-  Seat* const seat_;
+  const raw_ptr<Seat> seat_;
 
   // The delegate instance that all pinch related events are dispatched to.
-  PointerGesturePinchDelegate* pinch_delegate_ = nullptr;
+  raw_ptr<PointerGesturePinchDelegate> pinch_delegate_ = nullptr;
 
   // The delegate instance that relative movement events are dispatched to.
-  RelativePointerDelegate* relative_pointer_delegate_ = nullptr;
+  raw_ptr<RelativePointerDelegate> relative_pointer_delegate_ = nullptr;
 
   // Delegate that owns the currently granted pointer lock, if any.
-  PointerConstraintDelegate* pointer_constraint_delegate_ = nullptr;
+  raw_ptr<PointerConstraintDelegate> pointer_constraint_delegate_ = nullptr;
 
   // All delegates currently requesting a pointer locks, whether granted or
   // not. Only one such request may exist per surface; others will be denied.
-  base::flat_map<Surface*, PointerConstraintDelegate*> constraints_;
+  base::flat_map<Surface*, raw_ptr<PointerConstraintDelegate, CtnExperimental>>
+      constraints_;
 
   // The delegate instance that stylus/pen events are dispatched to.
-  PointerStylusDelegate* stylus_delegate_ = nullptr;
+  raw_ptr<PointerStylusDelegate> stylus_delegate_ = nullptr;
 
   // The current focus surface for the pointer.
-  Surface* focus_surface_ = nullptr;
+  raw_ptr<Surface> focus_surface_ = nullptr;
 
   // The location of the pointer in the root window.
   gfx::PointF location_in_root_;
@@ -240,15 +267,21 @@ class Pointer : public SurfaceTreeHost,
   gfx::PointF location_in_surface_;
 
   // The location of the pointer when pointer capture is first enabled.
-  absl::optional<gfx::Point> location_when_pointer_capture_enabled_;
+  std::optional<gfx::Point> location_when_pointer_capture_enabled_;
 
   // If this is not nullptr, a synthetic move was sent and this points to the
   // location of a generated move that was sent which should not be forwarded.
-  absl::optional<gfx::Point> expected_next_mouse_location_;
+  std::optional<gfx::Point> expected_next_mouse_location_;
 
   // The window with pointer capture. Pointer capture is enabled if and only if
   // this is not null.
-  aura::Window* capture_window_ = nullptr;
+  raw_ptr<aura::Window> capture_window_ = nullptr;
+
+  // True iff `this` is currently registered as a pre-target handler on
+  // aura::Env. Tracked explicitly because EnablePointerCapture() can be called
+  // for multiple surfaces without an intervening DisablePointerCapture(), and
+  // EventTarget permits duplicate handlers but only removes one per call.
+  bool env_pre_target_handler_added_ = false;
 
   // True if this pointer is permitted to be captured.
   //
@@ -262,25 +295,31 @@ class Pointer : public SurfaceTreeHost,
   // Latest cursor snapshot.
   SkBitmap cursor_bitmap_;
 
+  // Latest cursor image scale;
+  float cursor_scale_ = 1.0f;
+
   // The current cursor.
   ui::Cursor cursor_;
 
   // Hotspot to use with latest cursor snapshot.
   gfx::Point cursor_hotspot_;
 
-  // Scale at which cursor snapshot is captured.
-  float capture_scale_;
-
   // Source used for cursor capture copy output requests.
   const base::UnguessableToken cursor_capture_source_id_;
 
   // Last received event type.
-  ui::EventType last_event_type_ = ui::ET_UNKNOWN;
+  ui::EventType last_event_type_ = ui::EventType::kUnknown;
 
   // Last reported stylus values.
   ui::EventPointerType last_pointer_type_ = ui::EventPointerType::kUnknown;
   float last_force_ = std::numeric_limits<float>::quiet_NaN();
   gfx::Vector2dF last_tilt_;
+
+  // Bitmask of the button event flags that started the drag and drop operation.
+  // Used to send the release events upon drop.
+  int button_flags_on_drag_drop_start_ = 0;
+
+  std::unique_ptr<ScopedCursorLocker> cursor_locker_;
 
   // Weak pointer factory used for cursor capture callbacks.
   base::WeakPtrFactory<Pointer> cursor_capture_weak_ptr_factory_{this};

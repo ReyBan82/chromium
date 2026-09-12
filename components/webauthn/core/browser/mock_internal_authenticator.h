@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,19 +22,20 @@ class MockInternalAuthenticator : public webauthn::InternalAuthenticator {
       MakeCredential,
       void(blink::mojom::PublicKeyCredentialCreationOptionsPtr options,
            blink::mojom::Authenticator::MakeCredentialCallback callback));
-  MOCK_METHOD2(
-      GetAssertion,
-      void(blink::mojom::PublicKeyCredentialRequestOptionsPtr options,
-           blink::mojom::Authenticator::GetAssertionCallback callback));
+  MOCK_METHOD2(GetAssertion,
+               void(blink::mojom::PublicKeyCredentialRequestOptionsPtr options,
+                    GetAssertionCallback callback));
   MOCK_METHOD1(IsUserVerifyingPlatformAuthenticatorAvailable,
                void(blink::mojom::Authenticator::
                         IsUserVerifyingPlatformAuthenticatorAvailableCallback));
   MOCK_METHOD0(IsGetMatchingCredentialIdsSupported, bool());
-  MOCK_METHOD4(GetMatchingCredentialIds,
-               void(const std::string& relying_party_id,
-                    const std::vector<std::vector<uint8_t>>& credential_ids,
-                    bool require_third_party_payment_bit,
-                    webauthn::GetMatchingCredentialIdsCallback callback));
+  MOCK_METHOD(void,
+              GetMatchingCredentialIds,
+              (std::string_view,
+               base::span<const std::vector<uint8_t>>,
+               bool,
+               webauthn::GetMatchingCredentialIdsCallback),
+              (override));
   MOCK_METHOD0(Cancel, void());
 
   content::RenderFrameHost* GetRenderFrameHost() override {

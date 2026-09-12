@@ -6,6 +6,7 @@
 
 #include "third_party/blink/public/mojom/input/focus_type.mojom-blink.h"
 #include "third_party/blink/public/mojom/scroll/scroll_into_view_params.mojom-blink.h"
+#include "third_party/blink/renderer/core/css/style_change_reason.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/element_traversal.h"
@@ -22,7 +23,11 @@
 #include "third_party/blink/renderer/core/frame/visual_viewport.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_control_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
+#include "third_party/blink/renderer/core/html/html_area_element.h"
+#include "third_party/blink/renderer/core/html/html_body_element.h"
 #include "third_party/blink/renderer/core/html/html_frame_owner_element.h"
+#include "third_party/blink/renderer/core/html/html_html_element.h"
+#include "third_party/blink/renderer/core/html/html_image_element.h"
 #include "third_party/blink/renderer/core/html/media/html_video_element.h"
 #include "third_party/blink/renderer/core/input/event_handler.h"
 #include "third_party/blink/renderer/core/layout/hit_test_location.h"
@@ -32,9 +37,7 @@
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/page/spatial_navigation.h"
 #include "third_party/blink/renderer/core/scroll/scroll_into_view_util.h"
-#include "third_party/blink/renderer/platform/geometry/layout_rect.h"
-
-#include "third_party/blink/renderer/core/css/style_change_reason.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -45,14 +48,16 @@ SpatialNavigationDirection FocusDirectionForKey(KeyboardEvent* event) {
     return SpatialNavigationDirection::kNone;
 
   SpatialNavigationDirection ret_val = SpatialNavigationDirection::kNone;
-  if (event->key() == "ArrowDown")
+  const AtomicString key(event->key());
+  if (key == keywords::kArrowDown) {
     ret_val = SpatialNavigationDirection::kDown;
-  else if (event->key() == "ArrowUp")
+  } else if (key == keywords::kArrowUp) {
     ret_val = SpatialNavigationDirection::kUp;
-  else if (event->key() == "ArrowLeft")
+  } else if (key == keywords::kArrowLeft) {
     ret_val = SpatialNavigationDirection::kLeft;
-  else if (event->key() == "ArrowRight")
+  } else if (key == keywords::kArrowRight) {
     ret_val = SpatialNavigationDirection::kRight;
+  }
 
   // TODO(bokan): We should probably assert that we don't get anything else but
   // currently KeyboardEventManager sends non-arrow keys here.
@@ -88,6 +93,17 @@ bool IsSkippableCandidate(const Element* element) {
     return false;
 
   return true;
+}
+
+bool IsEqualDistanceAndContainsBestCandidate(
+    const FocusCandidate& candidate,
+    const FocusCandidate& best_candidate,
+    const double& candidate_distance,
+    const double& best_distance) {
+  return std::fabs(candidate_distance - best_distance) <
+             std::numeric_limits<double>::epsilon() &&
+         candidate.rect_in_root_frame.Contains(
+             best_candidate.rect_in_root_frame);
 }
 
 // Determines whether the given candidate is closer to the current interested
@@ -134,26 +150,17 @@ static void ConsiderForBestCandidate(SpatialNavigationDirection direction,
     previous_best_distance = kMaxDistance;
   }
 
-  if (distance < best_distance && IsUnobscured(candidate)) {
+  // In case of a tie, we must prefer a container to a contained element since
+  // interest moves from outside in (e.g. see ComputeDistanceDataForNode)
+  if ((distance < best_distance ||
+       IsEqualDistanceAndContainsBestCandidate(candidate, *best_candidate,
+                                               distance, best_distance)) &&
+      IsUnobscured(candidate)) {
     *previous_best_candidate = *best_candidate;
     previous_best_distance = best_distance;
     *best_candidate = candidate;
     best_distance = distance;
   }
-}
-
-bool IsInAccessibilityMode(Page* page) {
-  Frame* frame = page->GetFocusController().FocusedOrMainFrame();
-  auto* local_frame = DynamicTo<LocalFrame>(frame);
-  if (!local_frame)
-    return false;
-
-  Document* document = local_frame->GetDocument();
-  if (!document)
-    return false;
-
-  // We do not support focusless spatial navigation in accessibility mode.
-  return document->ExistingAXObjectCache();
 }
 
 }  // namespace
@@ -175,21 +182,10 @@ bool SpatialNavigationController::HandleArrowKeyboardEvent(
 
   // If the focus has already moved by a previous handler, return false.
   const Element* focused = GetFocusedElement();
-  if (focused && focused != event->target()) {
+  if (focused && focused != event->RawTarget()) {
     // SpatNav does not need to handle this arrow key because
     // the webpage had a key-handler that already moved focus.
     return false;
-  }
-
-  // In focusless mode, the user must explicitly move focus in and out of an
-  // editable so we can avoid advancing interest and we should swallow the
-  // event. This prevents double-handling actions for things like search box
-  // suggestions.
-  if (RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled()) {
-    if (focused) {
-      if (IsEditable(*focused) || focused->IsTextControl())
-        return true;
-    }
   }
 
   return Advance(direction);
@@ -205,34 +201,12 @@ bool SpatialNavigationController::HandleEnterKeyboardEvent(
     return false;
 
   if (event->type() == event_type_names::kKeydown) {
-    enter_key_down_seen_ = true;
     interest_element->SetActive(true);
-  } else if (event->type() == event_type_names::kKeypress) {
-    enter_key_press_seen_ = true;
   } else if (event->type() == event_type_names::kKeyup) {
     interest_element->SetActive(false);
-
-    // Ensure that the enter key has not already been handled by something else,
-    // or we can end up clicking elements multiple times. Some elements already
-    // convert the Enter key into click on down and press (and up) events.
-    if (RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled() &&
-        enter_key_down_seen_ && enter_key_press_seen_) {
-      interest_element->Focus(
-          FocusParams(SelectionBehaviorOnFocus::kReset,
-                      mojom::blink::FocusType::kSpatialNavigation, nullptr));
-      // We need enter to activate links, etc. The click should be after the
-      // focus in case the site transfers focus upon clicking.
-      interest_element->DispatchSimulatedClick(
-          event, SimulatedClickCreationScope::kFromAccessibility);
-    }
   }
 
   return true;
-}
-
-void SpatialNavigationController::ResetEnterKeyState() {
-  enter_key_down_seen_ = false;
-  enter_key_press_seen_ = false;
 }
 
 bool SpatialNavigationController::HandleImeSubmitKeyboardEvent(
@@ -254,9 +228,6 @@ bool SpatialNavigationController::HandleEscapeKeyboardEvent(
     KeyboardEvent* event) {
   DCHECK(page_->GetSettings().GetSpatialNavigationEnabled());
 
-  if (!interest_element_)
-    return false;
-
   if (Element* focused = GetFocusedElement())
     focused->blur();
   else
@@ -265,32 +236,7 @@ bool SpatialNavigationController::HandleEscapeKeyboardEvent(
   return true;
 }
 
-Element* SpatialNavigationController::GetInterestedElement() const {
-  if (RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled())
-    return interest_element_;
-
-  Frame* frame = page_->GetFocusController().FocusedOrMainFrame();
-  auto* local_frame = DynamicTo<LocalFrame>(frame);
-  if (!local_frame)
-    return nullptr;
-
-  Document* document = local_frame->GetDocument();
-  if (!document)
-    return nullptr;
-
-  return document->ActiveElement();
-}
-
-void SpatialNavigationController::DidDetachFrameView(
-    const LocalFrameView& view) {
-  // If the interested element's view was lost (frame detached, navigated,
-  // etc.) then reset navigation.
-  if (interest_element_ && !interest_element_->GetDocument().View())
-    interest_element_ = nullptr;
-}
-
 void SpatialNavigationController::Trace(Visitor* visitor) const {
-  visitor->Trace(interest_element_);
   visitor->Trace(page_);
 }
 
@@ -303,14 +249,14 @@ bool SpatialNavigationController::Advance(
   interest_node->GetDocument().View()->UpdateAllLifecyclePhasesExceptPaint(
       DocumentUpdateReason::kSpatialNavigation);
 
-  Node* container = ScrollableAreaOrDocumentOf(interest_node);
+  Node* container = ScrollableAreaOrDocumentOf(interest_node, direction);
 
   const PhysicalRect visible_rect =
       PhysicalRect::EnclosingRect(page_->GetVisualViewport().VisibleRect());
   const PhysicalRect start_box =
       SearchOrigin(visible_rect, interest_node, direction);
 
-  if (IsScrollableAreaOrDocument(interest_node) &&
+  if (IsScrollableAreaOrDocument(interest_node, direction) &&
       !IsOffscreen(interest_node)) {
     // A visible scroller has interest. Search inside of it from one of its
     // edges.
@@ -332,7 +278,7 @@ bool SpatialNavigationController::Advance(
     // When the scroll container <c> is focused, we move focus back to <a>...
     skipped_tree = container;
     // Nothing found in |container| so search the parent container.
-    container = ScrollableAreaOrDocumentOf(container);
+    container = ScrollableAreaOrDocumentOf(container, direction);
 
     // TODO(bokan): This needs to update the parent document when the _current_
     // container is a document since we're crossing the document boundary.
@@ -356,13 +302,20 @@ FocusCandidate SpatialNavigationController::FindNextCandidateInContainer(
   current_interest.rect_in_root_frame = starting_rect_in_root_frame;
   current_interest.focusable_node = interest_child_in_container;
   current_interest.visible_node = interest_child_in_container;
+  // An <area> has no box of its own; it is rendered by the <img> that uses its
+  // <map>. Use that image as the visible node, like FocusCandidate does.
+  if (auto* area = DynamicTo<HTMLAreaElement>(interest_child_in_container);
+      area && !area->GetLayoutObject() &&
+      RuntimeEnabledFeatures::HTMLAreaElementDisplayNoneEnabled()) {
+    current_interest.visible_node = area->ImageElement();
+  }
 
   FocusCandidate best_candidate, previous_best_candidate;
   double previous_best_distance = kMaxDistance;
   double best_distance = kMaxDistance;
   for (; element;
        element =
-           IsScrollableAreaOrDocument(element)
+           IsScrollableAreaOrDocument(element, direction)
                ? ElementTraversal::NextSkippingChildren(*element, &container)
                : ElementTraversal::Next(*element, &container)) {
     if (element == interest_child_in_container)
@@ -391,7 +344,8 @@ bool SpatialNavigationController::AdvanceWithinContainer(
     const PhysicalRect& starting_rect_in_root_frame,
     SpatialNavigationDirection direction,
     Node* interest_child_in_container) {
-  DCHECK(IsScrollableAreaOrDocument(&container));
+  DCHECK(IsScrollableAreaOrDocument(&container,
+                                    SpatialNavigationDirection::kNone));
 
   FocusCandidate candidate =
       FindNextCandidateInContainer(container, starting_rect_in_root_frame,
@@ -411,25 +365,6 @@ bool SpatialNavigationController::AdvanceWithinContainer(
 }
 
 Node* SpatialNavigationController::StartingNode() {
-  if (RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled()) {
-    if (interest_element_ && IsValidCandidate(interest_element_)) {
-      // If an iframe is interested, start the search from its document node.
-      // This matches the behavior in the focus case below where focusing a
-      // frame means the focused document doesn't have a focused element and so
-      // we return the document itself.
-      if (auto* frame_owner =
-              DynamicTo<HTMLFrameOwnerElement>(interest_element_.Get()))
-        return frame_owner->contentDocument();
-
-      return interest_element_;
-    }
-
-    if (auto* main_local_frame = DynamicTo<LocalFrame>(page_->MainFrame()))
-      return main_local_frame->GetDocument();
-
-    return nullptr;
-  }
-
   // FIXME: Directional focus changes don't yet work with RemoteFrames.
   const auto* current_frame =
       DynamicTo<LocalFrame>(page_->GetFocusController().FocusedOrMainFrame());
@@ -451,42 +386,6 @@ void SpatialNavigationController::MoveInterestTo(Node* next_node) {
   DCHECK(!next_node || next_node->IsElementNode());
   auto* element = To<Element>(next_node);
 
-  if (RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled()) {
-    if (interest_element_) {
-      interest_element_->blur();
-      interest_element_->SetNeedsStyleRecalc(
-          kLocalStyleChange, StyleChangeReasonForTracing::Create(
-                                 style_change_reason::kPseudoClass));
-    }
-
-    interest_element_ = element;
-
-    if (interest_element_) {
-      interest_element_->SetNeedsStyleRecalc(
-          kLocalStyleChange, StyleChangeReasonForTracing::Create(
-                                 style_change_reason::kPseudoClass));
-
-      LayoutObject* layout_object = interest_element_->GetLayoutObject();
-      DCHECK(layout_object);
-
-      scroll_into_view_util::ScrollRectToVisible(
-          *layout_object, element->BoundingBoxForScrollIntoView(),
-          ScrollAlignment::CreateScrollIntoViewParams());
-    }
-
-    // Despite the name, we actually do move focus in "focusless" mode if we're
-    // also in accessibility mode since much of the existing machinery is tied
-    // to the concept of focus.
-    if (!IsInAccessibilityMode(page_)) {
-      DispatchMouseMoveAt(interest_element_);
-      return;
-    }
-
-    // Update |element| in order to use the non-focusless code to apply focus in
-    // accessibility mode.
-    element = interest_element_;
-  }
-
   if (!element) {
     DispatchMouseMoveAt(nullptr);
     return;
@@ -500,7 +399,8 @@ void SpatialNavigationController::MoveInterestTo(Node* next_node) {
 
   element->Focus(FocusParams(SelectionBehaviorOnFocus::kReset,
                              mojom::blink::FocusType::kSpatialNavigation,
-                             nullptr));
+                             nullptr, FocusOptions::Create(),
+                             FocusTrigger::kUserGesture));
   // The focused element could be changed due to elm.focus() on focus handlers.
   // So we need to update the current focused element before DispatchMouseMove.
   // This is tested in snav-applies-hover-with-focused.html.
@@ -535,8 +435,22 @@ void SpatialNavigationController::DispatchMouseMoveAt(Element* element) {
 
 bool SpatialNavigationController::IsValidCandidate(
     const Element* element) const {
-  if (!element || !element->isConnected() || !element->GetLayoutObject())
+  if (!element || !element->isConnected()) {
     return false;
+  }
+
+  if (!element->GetLayoutObject()) {
+    const auto* area = DynamicTo<HTMLAreaElement>(element);
+    if (!area || !RuntimeEnabledFeatures::HTMLAreaElementDisplayNoneEnabled()) {
+      return false;
+    }
+    // An <area> has no box of its own; it is rendered by the <img> that uses
+    // its <map>, so require that image to be laid out instead.
+    const HTMLImageElement* image = area->ImageElement();
+    if (!image || !image->GetLayoutObject()) {
+      return false;
+    }
+  }
 
   LocalFrame* frame = element->GetDocument().GetFrame();
   if (!frame)
@@ -551,56 +465,31 @@ bool SpatialNavigationController::IsValidCandidate(
       return false;
   }
 
-  return element->IsKeyboardFocusable();
+  return element->IsKeyboardFocusableSlow();
+}
+
+Element* SpatialNavigationController::GetInterestedElement() const {
+  Frame* frame = page_->GetFocusController().FocusedOrMainFrame();
+  auto* local_frame = DynamicTo<LocalFrame>(frame);
+  if (!local_frame) {
+    return nullptr;
+  }
+
+  Document* document = local_frame->GetDocument();
+  if (!document) {
+    return nullptr;
+  }
+
+  return document->ActiveElement();
 }
 
 Element* SpatialNavigationController::GetFocusedElement() const {
   LocalFrame* frame = page_->GetFocusController().FocusedFrame();
-  if (!frame || !frame->GetDocument())
+  if (!frame || !frame->GetDocument()) {
     return nullptr;
+  }
 
   return frame->GetDocument()->FocusedElement();
-}
-
-void SpatialNavigationController::OnSpatialNavigationSettingChanged() {
-  if (!RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled())
-    return;
-  if (!page_->GetSettings().GetSpatialNavigationEnabled()) {
-    MoveInterestTo(nullptr);
-    return;
-  }
-  // FocusedController::FocusedOrMainFrame will crash if called before the
-  // MainFrame is set.
-  if (!page_->MainFrame())
-    return;
-  LocalFrame* frame =
-      DynamicTo<LocalFrame>(page_->GetFocusController().FocusedOrMainFrame());
-  if (frame && frame->GetDocument() &&
-      IsValidCandidate(frame->GetDocument()->FocusedElement())) {
-    MoveInterestTo(frame->GetDocument()->FocusedElement());
-  }
-}
-
-void SpatialNavigationController::FocusedNodeChanged(Document* document) {
-  if (!RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled())
-    return;
-  if (page_->GetFocusController().FocusedOrMainFrame() != document->GetFrame())
-    return;
-
-  if (document->FocusedElement() &&
-      interest_element_ != document->FocusedElement()) {
-    MoveInterestTo(document->FocusedElement());
-  }
-}
-
-void SpatialNavigationController::FullscreenStateChanged(Element* element) {
-  if (!RuntimeEnabledFeatures::FocuslessSpatialNavigationEnabled())
-    return;
-  if (IsA<HTMLMediaElement>(element)) {
-    element->Focus(FocusParams(SelectionBehaviorOnFocus::kReset,
-                               mojom::blink::FocusType::kSpatialNavigation,
-                               nullptr));
-  }
 }
 
 }  // namespace blink

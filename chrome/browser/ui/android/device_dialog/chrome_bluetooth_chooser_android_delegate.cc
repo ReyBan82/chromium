@@ -5,12 +5,17 @@
 #include "chrome/browser/ui/android/device_dialog/chrome_bluetooth_chooser_android_delegate.h"
 
 #include "base/android/jni_android.h"
-#include "chrome/android/chrome_jni_headers/ChromeBluetoothChooserAndroidDelegate_jni.h"
-#include "chrome/browser/ssl/security_state_tab_helper.h"
+#include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ssl/chrome_security_state_util.h"
 
-ChromeBluetoothChooserAndroidDelegate::ChromeBluetoothChooserAndroidDelegate() {
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/ChromeBluetoothChooserAndroidDelegate_jni.h"
+
+ChromeBluetoothChooserAndroidDelegate::ChromeBluetoothChooserAndroidDelegate(
+    Profile* profile) {
   JNIEnv* env = base::android::AttachCurrentThread();
-  java_delegate_.Reset(Java_ChromeBluetoothChooserAndroidDelegate_create(env));
+  java_delegate_.Reset(Java_ChromeBluetoothChooserAndroidDelegate_Constructor(
+      env, profile->GetJavaObject()));
 }
 
 ChromeBluetoothChooserAndroidDelegate::
@@ -24,8 +29,7 @@ ChromeBluetoothChooserAndroidDelegate::GetJavaObject() {
 security_state::SecurityLevel
 ChromeBluetoothChooserAndroidDelegate::GetSecurityLevel(
     content::WebContents* web_contents) {
-  SecurityStateTabHelper* helper =
-      SecurityStateTabHelper::FromWebContents(web_contents);
-  DCHECK(helper);
-  return helper->GetSecurityLevel();
+  return chrome_security_state::GetSecurityLevel(web_contents);
 }
+
+DEFINE_JNI(ChromeBluetoothChooserAndroidDelegate)

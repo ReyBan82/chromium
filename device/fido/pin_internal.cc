@@ -7,42 +7,24 @@
 #include <string>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/containers/to_vector.h"
 #include "base/i18n/char_iterator.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_util.h"
+#include "crypto/hash.h"
+#include "crypto/kdf.h"
+#include "crypto/kex.h"
+#include "crypto/keypair.h"
 #include "crypto/random.h"
 #include "third_party/boringssl/src/include/openssl/aes.h"
-#include "third_party/boringssl/src/include/openssl/bn.h"
-#include "third_party/boringssl/src/include/openssl/ec.h"
-#include "third_party/boringssl/src/include/openssl/ec_key.h"
-#include "third_party/boringssl/src/include/openssl/ecdh.h"
 #include "third_party/boringssl/src/include/openssl/evp.h"
-#include "third_party/boringssl/src/include/openssl/hkdf.h"
 #include "third_party/boringssl/src/include/openssl/hmac.h"
 #include "third_party/boringssl/src/include/openssl/mem.h"
 #include "third_party/boringssl/src/include/openssl/sha.h"
 
 namespace device {
 namespace pin {
-
-absl::optional<bssl::UniquePtr<EC_POINT>> PointFromKeyAgreementResponse(
-    const EC_GROUP* group,
-    const KeyAgreementResponse& response) {
-  bssl::UniquePtr<EC_POINT> ret(EC_POINT_new(group));
-
-  bssl::UniquePtr<BIGNUM> x_bn(BN_new()), y_bn(BN_new());
-  BN_bin2bn(response.x, sizeof(response.x), x_bn.get());
-  BN_bin2bn(response.y, sizeof(response.y), y_bn.get());
-  const bool on_curve =
-      EC_POINT_set_affine_coordinates_GFp(group, ret.get(), x_bn.get(),
-                                          y_bn.get(), nullptr /* ctx */) == 1;
-
-  if (!on_curve) {
-    return absl::nullopt;
-  }
-
-  return ret;
-}
 
 // ProtocolV1 implements CTAP2.1 PIN/UV Auth Protocol One (6.5.10).
 class ProtocolV1 : public Protocol {
@@ -53,20 +35,10 @@ class ProtocolV1 : public Protocol {
   std::array<uint8_t, kP256X962Length> Encapsulate(
       const KeyAgreementResponse& peers_key,
       std::vector<uint8_t>* out_shared_key) const override {
-    bssl::UniquePtr<EC_KEY> key(EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
-    CHECK(EC_KEY_generate_key(key.get()));
-    absl::optional<bssl::UniquePtr<EC_POINT>> peers_point =
-        PointFromKeyAgreementResponse(EC_KEY_get0_group(key.get()), peers_key);
-    *out_shared_key = CalculateSharedKey(key.get(), peers_point->get());
-    // KeyAgreementResponse parsing ensures that the point is on the curve.
-    DCHECK(peers_point);
+    const auto key = crypto::keypair::PrivateKey::GenerateEcP256();
+    *out_shared_key = CalculateSharedKey(key, peers_key.key);
     std::array<uint8_t, kP256X962Length> x962;
-    CHECK_EQ(x962.size(),
-             EC_POINT_point2oct(EC_KEY_get0_group(key.get()),
-                                EC_KEY_get0_public_key(key.get()),
-                                POINT_CONVERSION_UNCOMPRESSED, x962.data(),
-                                x962.size(), nullptr /* BN_CTX */));
-
+    base::span(x962).copy_from(key.ToUncompressedX962Point());
     return x962;
   }
 
@@ -143,24 +115,11 @@ class ProtocolV1 : public Protocol {
   }
 
   std::vector<uint8_t> CalculateSharedKey(
-      const EC_KEY* key,
-      const EC_POINT* peers_key) const override {
-    std::vector<uint8_t> shared_key(SHA256_DIGEST_LENGTH);
-    CHECK_EQ(static_cast<int>(SHA256_DIGEST_LENGTH),
-             ECDH_compute_key(shared_key.data(), shared_key.size(), peers_key,
-                              key, SHA256KDF));
-    return shared_key;
-  }
-
-  static void* SHA256KDF(const void* in,
-                         size_t in_len,
-                         void* out,
-                         size_t* out_len) {
-    DCHECK_GE(*out_len, static_cast<size_t>(SHA256_DIGEST_LENGTH));
-    SHA256(reinterpret_cast<const uint8_t*>(in), in_len,
-           reinterpret_cast<uint8_t*>(out));
-    *out_len = SHA256_DIGEST_LENGTH;
-    return out;
+      crypto::keypair::PrivateKey ours,
+      crypto::keypair::PublicKey theirs) const override {
+    std::array<uint8_t, 32> shared_value;
+    crypto::kex::EcdhP256(theirs, ours, shared_value);
+    return base::ToVector(crypto::hash::Sha256(shared_value));
   }
 };
 
@@ -176,15 +135,13 @@ class ProtocolV2 : public ProtocolV1 {
   // GetHMACSubKey returns the HMAC-key portion of the shared secret.
   static base::span<const uint8_t, kHMACKeyLength> GetHMACSubKey(
       base::span<const uint8_t, kSharedKeyLength> shared_key) {
-    CHECK_EQ(shared_key.size(), kSharedKeyLength);
-    return base::make_span<kHMACKeyLength>(
-        shared_key.subspan(0, kHMACKeyLength));
+    return shared_key.first<kHMACKeyLength>();
   }
 
   // GetAESSubKey returns the HMAC-key portion of the shared secret.
   static base::span<const uint8_t, kAESKeyLength> GetAESSubKey(
       base::span<const uint8_t, kSharedKeyLength> shared_key) {
-    return base::make_span<kAESKeyLength>(shared_key.subspan(kHMACKeyLength));
+    return shared_key.last<kAESKeyLength>();
   }
 
   std::vector<uint8_t> Encrypt(
@@ -193,13 +150,10 @@ class ProtocolV2 : public ProtocolV1 {
     DCHECK_EQ(plaintext.size() % AES_BLOCK_SIZE, 0u);
 
     const base::span<const uint8_t, kAESKeyLength> aes_key =
-        GetAESSubKey(base::make_span<kSharedKeyLength>(shared_key));
+        GetAESSubKey(*shared_key.to_fixed_extent<kSharedKeyLength>());
 
     std::vector<uint8_t> result(AES_BLOCK_SIZE + plaintext.size());
-    const base::span<uint8_t> iv =
-        base::make_span(result).subspan(0, AES_BLOCK_SIZE);
-    const base::span<uint8_t> ciphertext =
-        base::make_span(result).subspan(AES_BLOCK_SIZE);
+    const auto [iv, ciphertext] = base::span(result).split_at<AES_BLOCK_SIZE>();
 
     crypto::RandBytes(iv);
 
@@ -220,9 +174,8 @@ class ProtocolV2 : public ProtocolV1 {
     DCHECK_EQ(input.size() % AES_BLOCK_SIZE, 0u);
 
     const base::span<const uint8_t, kAESKeyLength> aes_key =
-        GetAESSubKey(base::make_span<kSharedKeyLength>(shared_key));
-    const base::span<const uint8_t> iv = input.subspan(0, AES_BLOCK_SIZE);
-    const base::span<const uint8_t> ciphertext = input.subspan(AES_BLOCK_SIZE);
+        GetAESSubKey(*shared_key.to_fixed_extent<kSharedKeyLength>());
+    const auto [iv, ciphertext] = input.split_at<AES_BLOCK_SIZE>();
     std::vector<uint8_t> plaintext(ciphertext.size());
 
     EVP_CIPHER_CTX aes_ctx;
@@ -247,8 +200,8 @@ class ProtocolV2 : public ProtocolV1 {
            key.size() == kPINUVAuthTokenLength);
     const base::span<const uint8_t, kHMACKeyLength> hmac_key =
         (key.size() == kSharedKeyLength
-             ? GetHMACSubKey(base::make_span<kSharedKeyLength>(key))
-             : base::make_span<kPINUVAuthTokenLength>(key));
+             ? GetHMACSubKey(*key.to_fixed_extent<kSharedKeyLength>())
+             : *key.to_fixed_extent<kPINUVAuthTokenLength>());
 
     std::vector<uint8_t> pin_auth(SHA256_DIGEST_LENGTH);
     unsigned hmac_bytes;
@@ -271,38 +224,21 @@ class ProtocolV2 : public ProtocolV1 {
   }
 
   std::vector<uint8_t> CalculateSharedKey(
-      const EC_KEY* key,
-      const EC_POINT* peers_key) const override {
+      crypto::keypair::PrivateKey ours,
+      crypto::keypair::PublicKey theirs) const override {
+    std::array<uint8_t, 32> shared_value;
+    crypto::kex::EcdhP256(theirs, ours, shared_value);
+
     std::vector<uint8_t> shared_key(kSharedKeyLength);
-    CHECK_EQ(static_cast<int>(kSharedKeyLength),
-             ECDH_compute_key(shared_key.data(), shared_key.size(), peers_key,
-                              key, KDF));
+    const auto [hmac_key, aes_key] =
+        base::span(shared_key).split_at<crypto::hash::kSha256Size>();
+    constexpr std::string_view kHMACKeyInfo = "CTAP2 HMAC key";
+    constexpr std::string_view kAESKeyInfo = "CTAP2 AES key";
+    crypto::kdf::Hkdf(crypto::hash::kSha256, shared_value, /*salt=*/{},
+                      base::as_byte_span(kHMACKeyInfo), hmac_key);
+    crypto::kdf::Hkdf(crypto::hash::kSha256, shared_value, /*salt=*/{},
+                      base::as_byte_span(kAESKeyInfo), aes_key);
     return shared_key;
-  }
-
-  static void* KDF(const void* in, size_t in_len, void* out, size_t* out_len) {
-    static_assert(kSharedKeyLength == 2 * SHA256_DIGEST_LENGTH, "");
-    DCHECK_GE(*out_len, static_cast<size_t>(kSharedKeyLength));
-    auto hmac_key_out =
-        base::make_span(reinterpret_cast<uint8_t*>(out),
-                        static_cast<size_t>(SHA256_DIGEST_LENGTH));
-    auto aes_key_out =
-        base::make_span(reinterpret_cast<uint8_t*>(out) + SHA256_DIGEST_LENGTH,
-                        static_cast<size_t>(SHA256_DIGEST_LENGTH));
-
-    constexpr uint8_t kHMACKeyInfo[] = "CTAP2 HMAC key";
-    constexpr uint8_t kAESKeyInfo[] = "CTAP2 AES key";
-    constexpr uint8_t kZeroSalt[32] = {};
-
-    CHECK(HKDF(hmac_key_out.data(), hmac_key_out.size(), EVP_sha256(),
-               reinterpret_cast<const uint8_t*>(in), in_len, kZeroSalt,
-               sizeof(kZeroSalt), kHMACKeyInfo, sizeof(kHMACKeyInfo) - 1));
-    CHECK(HKDF(aes_key_out.data(), aes_key_out.size(), EVP_sha256(),
-               reinterpret_cast<const uint8_t*>(in), in_len, kZeroSalt,
-               sizeof(kZeroSalt), kAESKeyInfo, sizeof(kAESKeyInfo) - 1));
-
-    *out_len = kSharedKeyLength;
-    return out;
   }
 };
 

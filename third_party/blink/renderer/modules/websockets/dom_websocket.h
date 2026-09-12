@@ -33,9 +33,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
+#include "base/functional/callback.h"
+#include "services/network/public/mojom/ip_address_space.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
 #include "third_party/blink/renderer/bindings/core/v8/capture_source_location.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_binary_type.h"
 #include "third_party/blink/renderer/core/dom/events/event_listener.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_state_observer.h"
@@ -50,6 +54,7 @@
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/timer.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 #include "third_party/blink/renderer/platform/wtf/deque.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
@@ -61,10 +66,12 @@ class DOMArrayBuffer;
 class DOMArrayBufferView;
 class ExceptionState;
 class ExecutionContext;
-class V8UnionStringOrStringSequence;
+class ScriptValue;
 
+// Implementation of the WebSocket JavaScript API.
+// See https://websockets.spec.whatwg.org/#the-websocket-interface.
 class MODULES_EXPORT DOMWebSocket
-    : public EventTargetWithInlineData,
+    : public EventTarget,
       public ActiveScriptWrappable<DOMWebSocket>,
       public ExecutionContextLifecycleStateObserver,
       public WebSocketChannelClient {
@@ -72,10 +79,7 @@ class MODULES_EXPORT DOMWebSocket
 
  public:
   // These definitions are required by V8DOMWebSocket.
-  static constexpr auto kConnecting = WebSocketCommon::kConnecting;
-  static constexpr auto kOpen = WebSocketCommon::kOpen;
-  static constexpr auto kClosing = WebSocketCommon::kClosing;
-  static constexpr auto kClosed = WebSocketCommon::kClosed;
+  using enum WebSocketCommon::State;
 
   // DOMWebSocket instances must be used with a wrapper since this class's
   // lifetime management is designed assuming the V8 holds a ref on it while
@@ -85,7 +89,7 @@ class MODULES_EXPORT DOMWebSocket
                               ExceptionState&);
   static DOMWebSocket* Create(ExecutionContext* execution_context,
                               const String& url,
-                              const V8UnionStringOrStringSequence* protocols,
+                              ScriptValue protocols_or_options,
                               ExceptionState& exception_state);
 
   explicit DOMWebSocket(ExecutionContext*);
@@ -93,7 +97,9 @@ class MODULES_EXPORT DOMWebSocket
 
   void Connect(const String& url,
                const Vector<String>& protocols,
-               ExceptionState&);
+               ExceptionState&,
+               network::mojom::blink::IPAddressSpace target_address_space =
+                   network::mojom::blink::IPAddressSpace::kUnknown);
 
   void send(const String& message, ExceptionState&);
   void send(DOMArrayBuffer*, ExceptionState&);
@@ -116,8 +122,8 @@ class MODULES_EXPORT DOMWebSocket
   String protocol() const;
   String extensions() const;
 
-  String binaryType() const;
-  void setBinaryType(const String&);
+  V8BinaryType binaryType() const;
+  void setBinaryType(const V8BinaryType&);
 
   DEFINE_ATTRIBUTE_EVENT_LISTENER(open, kOpen)
   DEFINE_ATTRIBUTE_EVENT_LISTENER(message, kMessage)
@@ -141,7 +147,7 @@ class MODULES_EXPORT DOMWebSocket
   void DidConnect(const String& subprotocol, const String& extensions) override;
   void DidReceiveTextMessage(const String& message) override;
   void DidReceiveBinaryMessage(
-      const Vector<base::span<const char>>& data) override;
+      const Vector<base::span<const uint8_t>>& data) override;
   void DidError() override;
   void DidConsumeBufferedAmount(uint64_t) override;
   void DidStartClosingHandshake() override;
@@ -160,7 +166,6 @@ class MODULES_EXPORT DOMWebSocket
     }
 
     explicit EventQueue(EventTarget*);
-    ~EventQueue();
 
     // Dispatches the event if this queue is active.
     // Queues the event if this queue is suspended.
@@ -203,14 +208,8 @@ class MODULES_EXPORT DOMWebSocket
     kMaxValue = kBlob,
   };
 
-  enum BinaryType { kBinaryTypeBlob, kBinaryTypeArrayBuffer };
-
-  // This function is virtual for unittests.
-  virtual WebSocketChannel* CreateChannel(ExecutionContext* context,
-                                          WebSocketChannelClient* client) {
-    return WebSocketChannelImpl::Create(context, client,
-                                        CaptureSourceLocation(context));
-  }
+  WebSocketChannel* CreateChannel(ExecutionContext* context,
+                                  WebSocketChannelClient* client);
 
   // Adds a console message with JSMessageSource and ErrorMessageLevel.
   void LogError(const String& message);
@@ -218,7 +217,7 @@ class MODULES_EXPORT DOMWebSocket
   // Handle the JavaScript close method call. close() methods on this class
   // are just for determining if the optional code argument is supplied or
   // not.
-  void CloseInternal(int, const String&, ExceptionState&);
+  void CloseInternal(std::optional<uint16_t>, const String&, ExceptionState&);
 
   // Updates |buffered_amount_after_close_| given the amount of data passed to
   // send() method after the state changed to CLOSING or CLOSED.
@@ -237,20 +236,24 @@ class MODULES_EXPORT DOMWebSocket
   void ReflectBufferedAmountConsumption();
 
   void ReleaseChannel();
-  void RecordSendTypeHistogram(WebSocketSendType);
+
+  // Called on web socket message activity (sending or receiving a message) that
+  // the execution context may want to handle, such as to extend its own
+  // lifetime.
+  void NotifyWebSocketActivity();
 
   Member<WebSocketChannel> channel_;
 
   WebSocketCommon common_;
 
-  String origin_string_;
+  scoped_refptr<const SecurityOrigin> origin_;
 
   uint64_t buffered_amount_;
   // The consumed buffered amount that will be reflected to |buffered_amount_|
   // later. It will be cleared once reflected.
   uint64_t consumed_buffered_amount_;
   uint64_t buffered_amount_after_close_;
-  BinaryType binary_type_;
+  V8BinaryType::Enum binary_type_ = V8BinaryType::Enum::kBlob;
   // The subprotocol the server selected.
   String subprotocol_;
   String extensions_;
@@ -258,6 +261,26 @@ class MODULES_EXPORT DOMWebSocket
   Member<EventQueue> event_queue_;
 
   bool buffered_amount_update_task_pending_;
+};
+
+// ScopedWebSocketChannelCreateFunctionForTesting can be used by tests to
+// change how DOMWebSocket creates a WebSocketChannel implementation.
+class MODULES_EXPORT ScopedWebSocketChannelCreateFunctionForTesting {
+ public:
+  using WebSocketChannelCreateFunction =
+      base::RepeatingCallback<WebSocketChannel*(ExecutionContext*,
+                                                WebSocketChannelClient*)>;
+
+  explicit ScopedWebSocketChannelCreateFunctionForTesting(
+      WebSocketChannelCreateFunction create_function);
+  ~ScopedWebSocketChannelCreateFunctionForTesting();
+  ScopedWebSocketChannelCreateFunctionForTesting(
+      const ScopedWebSocketChannelCreateFunctionForTesting&) = delete;
+  ScopedWebSocketChannelCreateFunctionForTesting& operator=(
+      const ScopedWebSocketChannelCreateFunctionForTesting&) = delete;
+
+ private:
+  WebSocketChannelCreateFunction previous_create_function_;
 };
 
 }  // namespace blink

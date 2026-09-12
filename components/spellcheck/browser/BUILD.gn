@@ -11,7 +11,6 @@ if (is_android) {
 source_set("browser") {
   sources = [
     "platform_spell_checker.h",
-    "pref_names.cc",
     "pref_names.h",
     "spell_check_host_impl.cc",
     "spell_check_host_impl.h",
@@ -42,6 +41,7 @@ source_set("browser") {
     "//components/spellcheck/common",
   ]
   deps = [
+    "//components/enterprise/connectors/core",
     "//components/prefs",
     "//components/user_prefs",
     "//content/public/browser",

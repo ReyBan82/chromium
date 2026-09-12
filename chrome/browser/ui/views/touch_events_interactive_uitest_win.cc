@@ -11,9 +11,9 @@
 #include "ui/aura/test/env_test_helper.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
-#include "ui/base/models/simple_menu_model.h"
 #include "ui/base/test/ui_controls.h"
 #include "ui/events/gestures/gesture_recognizer_impl.h"
+#include "ui/menus/simple_menu_model.h"
 #include "ui/views/controls/menu/menu_runner.h"
 
 namespace {
@@ -30,7 +30,7 @@ class TouchEventHandler : public ui::EventHandler {
   TouchEventHandler(const TouchEventHandler&) = delete;
   TouchEventHandler& operator=(const TouchEventHandler&) = delete;
 
-  ~TouchEventHandler() override {}
+  ~TouchEventHandler() override = default;
 
   // OnTouchEvent will simulate a second touch event (at |touch_point|) to force
   // recursion in event handling.
@@ -62,19 +62,20 @@ class TouchEventHandler : public ui::EventHandler {
   void OnTouchEvent(ui::TouchEvent* event) override {
     max_call_depth_ = std::max(++call_depth_, max_call_depth_);
 
-    if (recursion_enabled_ && (event->type() == ui::ET_TOUCH_RELEASED)) {
+    if (recursion_enabled_ &&
+        (event->type() == ui::EventType::kTouchReleased)) {
       recursion_enabled_ = false;
-      ui_controls::SendTouchEvents(ui_controls::PRESS | ui_controls::PRESS, 1,
+      ui_controls::SendTouchEvents(ui_controls::kTouchPress, 1,
                                    touch_point_.x(), touch_point_.y());
       WaitForIdle();
     }
 
     switch (event->type()) {
-      case ui::ET_TOUCH_PRESSED:
+      case ui::EventType::kTouchPressed:
         num_touch_presses_++;
         num_pointers_down_++;
         break;
-      case ui::ET_TOUCH_RELEASED:
+      case ui::EventType::kTouchReleased:
         num_pointers_down_--;
         if (!quit_closure_.is_null() && num_pointers_down_ == 0) {
           quit_closure_.Run();
@@ -112,10 +113,10 @@ class TestingGestureRecognizer : public ui::GestureRecognizerImpl {
   bool ProcessTouchEventPreDispatch(ui::TouchEvent* event,
                                     ui::GestureConsumer* consumer) override {
     switch (event->type()) {
-      case ui::ET_TOUCH_PRESSED:
+      case ui::EventType::kTouchPressed:
         num_touch_press_events_++;
         break;
-      case ui::ET_TOUCH_RELEASED:
+      case ui::EventType::kTouchReleased:
         num_touch_release_events_++;
         break;
       default:
@@ -168,7 +169,7 @@ class TouchEventsViewTest : public ViewEventTestBase {
     gfx::Point in_content(touch_view_->width() / 2, touch_view_->height() / 2);
     views::View::ConvertPointToScreen(touch_view_, &in_content);
 
-    ASSERT_TRUE(ui_controls::SendTouchEvents(ui_controls::PRESS,
+    ASSERT_TRUE(ui_controls::SendTouchEvents(ui_controls::kTouchPress,
                                              touch_pointer_count,
                                              in_content.x(), in_content.y()));
     touch_event_handler.WaitForIdle();
@@ -193,7 +194,7 @@ class TouchEventsViewTest : public ViewEventTestBase {
 };
 
 #if BUILDFLAG(IS_WIN)  // Fails on latest versions of Windows.
-                       // https://crbug.com/1108551.
+                       // https://crbug.com/40141353.
 #define MAYBE_CheckWindowsNativeMessageForTouchEvents \
   DISABLED_CheckWindowsNativeMessageForTouchEvents
 #else
@@ -204,7 +205,7 @@ VIEW_TEST(TouchEventsViewTest, MAYBE_CheckWindowsNativeMessageForTouchEvents)
 
 class TouchEventsRecursiveViewTest : public TouchEventsViewTest {
  public:
-  TouchEventsRecursiveViewTest() {}
+  TouchEventsRecursiveViewTest() = default;
 
   TouchEventsRecursiveViewTest(const TouchEventsRecursiveViewTest&) = delete;
   TouchEventsRecursiveViewTest& operator=(const TouchEventsRecursiveViewTest&) =
@@ -219,7 +220,7 @@ class TouchEventsRecursiveViewTest : public TouchEventsViewTest {
     views::View::ConvertPointToScreen(touch_view_, &in_content);
     touch_event_handler.ForceRecursionInEventHandler(in_content);
 
-    ASSERT_TRUE(ui_controls::SendTouchEvents(ui_controls::PRESS,
+    ASSERT_TRUE(ui_controls::SendTouchEvents(ui_controls::kTouchPress,
                                              touch_pointer_count,
                                              in_content.x(), in_content.y()));
     touch_event_handler.WaitForEvents();
@@ -234,7 +235,7 @@ class TouchEventsRecursiveViewTest : public TouchEventsViewTest {
 };
 
 #if BUILDFLAG(IS_WIN)  // Fails on latest versions of Windows.
-                       // https://crbug.com/1108551.
+                       // https://crbug.com/40141353.
 #define MAYBE_CheckWindowsRecursiveHandler DISABLED_CheckWindowsRecursiveHandler
 #else
 #define MAYBE_CheckWindowsRecursiveHandler CheckWindowsRecursiveHandler

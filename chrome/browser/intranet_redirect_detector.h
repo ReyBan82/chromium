@@ -7,14 +7,13 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
 #include "components/pref_registry/pref_registry_syncable.h"
-#include "content/public/browser/notification_observer.h"
-#include "content/public/browser/notification_registrar.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "services/network/public/cpp/network_connection_tracker.h"
 #include "services/network/public/mojom/host_resolver.mojom.h"
@@ -27,8 +26,10 @@ class SimpleURLLoader;
 class PrefRegistrySimple;
 
 #if !(BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || \
-      BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_FUCHSIA))
-#error "IntranetRedirectDetector should only be built on Desktop platforms."
+      BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID))
+#error \
+    "IntranetRedirectDetector should only be built on Desktop platforms " \
+    "and Android."
 #endif
 
 // This object is responsible for determining whether the user is on a network
@@ -81,10 +82,11 @@ class IntranetRedirectDetector
 
   // Invoked from SimpleURLLoader after download is complete.
   void OnSimpleLoaderComplete(network::SimpleURLLoader* source,
-                              std::unique_ptr<std::string> response_body);
+                              std::optional<std::string> response_body);
 
   // NetworkConnectionTracker::NetworkConnectionObserver
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   // network::mojom::DnsConfigChangeManagerClient
   void OnDnsConfigChanged() override;

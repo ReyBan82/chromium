@@ -8,7 +8,6 @@
 #include "base/check_op.h"
 #include "base/dcheck_is_on.h"
 #include "build/build_config.h"
-#include "third_party/blink/public/common/buildflags.h"
 #include "third_party/blink/public/common/common_export.h"
 
 class GURL;
@@ -22,62 +21,111 @@ namespace blink {
 // too) should rather be implemented by embedders.
 
 // Full about URLs (including schemes).
-BLINK_COMMON_EXPORT extern const char kChromeUIBadCastCrashURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUICheckCrashURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIBrowserCrashURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIBrowserDcheckURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIBrowserUIHang[];
-BLINK_COMMON_EXPORT extern const char kChromeUICrashURL[];
-#if BUILDFLAG(BUILD_RUST_CRASH)
-BLINK_COMMON_EXPORT extern const char kChromeUICrashRustURL[];
-#endif
-BLINK_COMMON_EXPORT extern const char kChromeUIDelayedBrowserUIHang[];
-BLINK_COMMON_EXPORT extern const char kChromeUIDumpURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIGpuCleanURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIGpuCrashURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIGpuHangURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIHangURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIKillURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIMemoryExhaustURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIMemoryPressureCriticalURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIMemoryPressureModerateURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUINetworkErrorsListingURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUINetworkErrorURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIProcessInternalsURL[];
+inline constexpr char kChromeUIBadCastCrashURL[] = "chrome://badcastcrash/";
+inline constexpr char kChromeUIBrowserCrashURL[] =
+    "chrome://inducebrowsercrashforrealz/";
+inline constexpr char kChromeUIBrowserDcheckURL[] =
+    "chrome://inducebrowserdcheckforrealz/";
+inline constexpr char kChromeUIBrowserHeapUaFURL[] =
+    "chrome://crash/browser/use-after-free";
+inline constexpr char kChromeUIBrowserHeapOverflowURL[] =
+    "chrome://crash/browser/heap-overflow";
+inline constexpr char kChromeUIBrowserHeapUnderflowURL[] =
+    "chrome://crash/browser/heap-underflow";
+inline constexpr char kChromeUIBrowserHeapMemberDerefAfterFreeURL[] =
+    "chrome://crash/browser/member-dereference-after-free";
+inline constexpr char kChromeUIGpuHeapUaFURL[] =
+    "chrome://crash/gpu/use-after-free";
+inline constexpr char kChromeUIGpuHeapOverflowURL[] =
+    "chrome://crash/gpu/heap-overflow";
+inline constexpr char kChromeUIGpuHeapUnderflowURL[] =
+    "chrome://crash/gpu/heap-underflow";
+inline constexpr char kChromeUIGpuHeapMemberDerefAfterFreeURL[] =
+    "chrome://crash/gpu/member-dereference-after-free";
+inline constexpr char kChromeUIRendererHeapUaFURL[] =
+    "chrome://crash/renderer/use-after-free";
+inline constexpr char kChromeUIRendererHeapOverflowURL[] =
+    "chrome://crash/renderer/heap-overflow";
+inline constexpr char kChromeUIRendererHeapUnderflowURL[] =
+    "chrome://crash/renderer/heap-underflow";
+inline constexpr char kChromeUIRendererHeapMemberDerefAfterFreeURL[] =
+    "chrome://crash/renderer/member-dereference-after-free";
+inline constexpr char kChromeUIBrowserUIHang[] = "chrome://uithreadhang/";
+inline constexpr char kChromeUICheckCrashURL[] = "chrome://checkcrash/";
+inline constexpr char kChromeUICrashURL[] = "chrome://crash/";
+inline constexpr char kChromeUIDelayedBrowserUIHang[] =
+    "chrome://delayeduithreadhang/";
+inline constexpr char kChromeUIDumpURL[] = "chrome://crashdump/";
+inline constexpr char kChromeUIGpuCleanURL[] = "chrome://gpuclean/";
+inline constexpr char kChromeUIGpuCrashURL[] = "chrome://gpucrash/";
+inline constexpr char kChromeUIGpuHangURL[] = "chrome://gpuhang/";
+inline constexpr char kChromeUIHangURL[] = "chrome://hang/";
+inline constexpr char kChromeUIKillURL[] = "chrome://kill/";
+inline constexpr char kChromeUIMemoryExhaustURL[] = "chrome://memory-exhaust/";
+inline constexpr char kChromeUIMemoryPressureCriticalURL[] =
+    "chrome://memory-pressure-critical/";
+inline constexpr char kChromeUIMemoryPressureModerateURL[] =
+    "chrome://memory-pressure-moderate/";
+inline constexpr char kChromeUINetworkErrorsListingURL[] =
+    "chrome://network-errors/";
+inline constexpr char kChromeUINetworkErrorURL[] = "chrome://network-error/";
+inline constexpr char kChromeUIProcessInternalsURL[] =
+    "chrome://process-internals/";
+
 #if BUILDFLAG(IS_ANDROID)
-BLINK_COMMON_EXPORT extern const char kChromeUIGpuJavaCrashURL[];
+inline constexpr char kChromeUIGpuJavaCrashURL[] = "chrome://gpu-java-crash/";
 #endif
+inline constexpr char kChromeUICrashRustURL[] = "chrome://crash/rust";
 #if BUILDFLAG(IS_WIN)
-BLINK_COMMON_EXPORT extern const char kChromeUIBrowserHeapCorruptionURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUICfgViolationCrashURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIHeapCorruptionCrashURL[];
+inline constexpr char kChromeUIBrowserHeapCorruptionURL[] =
+    "chrome://inducebrowserheapcorruption/";
+inline constexpr char kChromeUICfgViolationCrashURL[] = "chrome://crash/cfg";
+inline constexpr char kChromeUIHeapCorruptionCrashURL[] =
+    "chrome://heapcorruptioncrash/";
 #endif
 
 #if defined(ADDRESS_SANITIZER)
-BLINK_COMMON_EXPORT extern const char kChromeUICrashHeapOverflowURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUICrashHeapUnderflowURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUICrashUseAfterFreeURL[];
 #if BUILDFLAG(IS_WIN)
-BLINK_COMMON_EXPORT extern const char kChromeUICrashCorruptHeapBlockURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUICrashCorruptHeapURL[];
+inline constexpr char kChromeUICrashCorruptHeapBlockURL[] =
+    "chrome://crash/corrupt-heap-block";
+inline constexpr char kChromeUICrashCorruptHeapURL[] =
+    "chrome://crash/corrupt-heap";
 #endif  // BUILDFLAG(IS_WIN)
-#if BUILDFLAG(BUILD_RUST_CRASH)
-BLINK_COMMON_EXPORT extern const char kChromeUICrashRustOverflowURL[];
-#endif  // BUILDFLAG(BUILD_RUST_CRASH)
+inline constexpr char kChromeUICrashRustOverflowURL[] =
+    "chrome://crash/rust-overflow";
 #endif  // ADDRESS_SANITIZER
 
 #if DCHECK_IS_ON()
-BLINK_COMMON_EXPORT extern const char kChromeUICrashDcheckURL[];
+inline constexpr char kChromeUICrashDcheckURL[] = "chrome://crash/dcheck";
 #endif
 
 // Full about URLs (including schemes).
-BLINK_COMMON_EXPORT extern const char kChromeUIResourcesURL[];
-BLINK_COMMON_EXPORT extern const char kChromeUIShorthangURL[];
+inline constexpr char kChromeUIResourcesURL[] = "chrome://resources/";
+inline constexpr char kChromeUIShorthangURL[] = "chrome://shorthang/";
+
+// Action names for generalized crash URLs.
+inline constexpr char kAsanHeapOverflowAction[] = "heap-overflow";
+inline constexpr char kAsanHeapUnderflowAction[] = "heap-underflow";
+inline constexpr char kAsanUseAfterFreeAction[] = "use-after-free";
+inline constexpr char kAsanMemberDereferenceAfterFreeAction[] =
+    "member-dereference-after-free";
+
+// Process names for generalized crash URLs.
+inline constexpr char kAsanBrowserProcess[] = "browser";
+inline constexpr char kAsanGpuProcess[] = "gpu";
+inline constexpr char kAsanRendererProcess[] = "renderer";
 
 // Returns whether the given url is either a debugging url handled in the
 // renderer process, such as one that crashes or hangs the renderer, or a
 // javascript: URL that operates on the current page in the renderer.  Such URLs
 // do not represent actual navigations and can be loaded in any SiteInstance.
+// Parses a generalized crash URL in the format chrome://crash/<process>/<type>.
+// Returns true if parsing was successful and populates `process` and
+// `crash_type`.
+BLINK_COMMON_EXPORT bool ParseCrashURL(const GURL& url,
+                                       std::string* process,
+                                       std::string* crash_type);
+
 BLINK_COMMON_EXPORT bool IsRendererDebugURL(const GURL& url);
 
 // Handles the given debug URL. These URLs do not commit, though they are

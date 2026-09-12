@@ -7,7 +7,9 @@
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/base/ui_base_types.h"
+#include "ui/base/window_open_disposition.h"
 
 using content::WebContents;
 
@@ -26,8 +28,9 @@ TabModalConfirmDialogDelegate::~TabModalConfirmDialogDelegate() {
 }
 
 void TabModalConfirmDialogDelegate::Cancel() {
-  if (closing_)
+  if (closing_) {
     return;
+  }
   // Make sure we won't do anything when another action occurs.
   closing_ = true;
   OnCanceled();
@@ -35,8 +38,9 @@ void TabModalConfirmDialogDelegate::Cancel() {
 }
 
 void TabModalConfirmDialogDelegate::Accept() {
-  if (closing_)
+  if (closing_) {
     return;
+  }
   // Make sure we won't do anything when another action occurs.
   closing_ = true;
   OnAccepted();
@@ -44,8 +48,9 @@ void TabModalConfirmDialogDelegate::Accept() {
 }
 
 void TabModalConfirmDialogDelegate::Close() {
-  if (closing_)
+  if (closing_) {
     return;
+  }
   // Make sure we won't do anything when another action occurs.
   closing_ = true;
   OnClosed();
@@ -54,8 +59,9 @@ void TabModalConfirmDialogDelegate::Close() {
 
 void TabModalConfirmDialogDelegate::LinkClicked(
     WindowOpenDisposition disposition) {
-  if (closing_)
+  if (closing_) {
     return;
+  }
   OnLinkClicked(disposition);
 }
 
@@ -64,7 +70,8 @@ gfx::Image* TabModalConfirmDialogDelegate::GetIcon() {
 }
 
 int TabModalConfirmDialogDelegate::GetDialogButtons() const {
-  return ui::DIALOG_BUTTON_OK | ui::DIALOG_BUTTON_CANCEL;
+  return static_cast<int>(ui::mojom::DialogButton::kOk) |
+         static_cast<int>(ui::mojom::DialogButton::kCancel);
 }
 
 std::u16string TabModalConfirmDialogDelegate::GetAcceptButtonTitle() {
@@ -97,18 +104,19 @@ void TabModalConfirmDialogDelegate::OnLinkClicked(
 void TabModalConfirmDialogDelegate::OnClosed() {}
 
 void TabModalConfirmDialogDelegate::CloseDialog() {
-  if (close_delegate_)
+  if (close_delegate_) {
     close_delegate_->CloseDialog();
+  }
 }
 
-absl::optional<int> TabModalConfirmDialogDelegate::GetDefaultDialogButton() {
+std::optional<int> TabModalConfirmDialogDelegate::GetDefaultDialogButton() {
   // Use the default, don't override.
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<int> TabModalConfirmDialogDelegate::GetInitiallyFocusedButton() {
+std::optional<int> TabModalConfirmDialogDelegate::GetInitiallyFocusedButton() {
   // Use the default, don't override.
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 void TabModalConfirmDialogDelegate::DidStartLoading() {

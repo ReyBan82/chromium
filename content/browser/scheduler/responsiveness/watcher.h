@@ -5,11 +5,15 @@
 #ifndef CONTENT_BROWSER_SCHEDULER_RESPONSIVENESS_WATCHER_H_
 #define CONTENT_BROWSER_SCHEDULER_RESPONSIVENESS_WATCHER_H_
 
+#include <stdint.h>
+
+#include <variant>
 #include <vector>
 
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/ref_counted.h"
 #include "base/time/time.h"
 #include "content/browser/scheduler/responsiveness/metric_source.h"
 #include "content/common/content_export.h"
@@ -54,8 +58,8 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
                              bool was_blocked_or_low_priority) override;
   void DidRunTaskOnIOThread(const base::PendingTask* task) override;
 
-  void WillRunEventOnUIThread(const void* opaque_identifier) override;
-  void DidRunEventOnUIThread(const void* opaque_identifier) override;
+  void WillRunEventOnUIThread(uintptr_t opaque_identifier) override;
+  void DidRunEventOnUIThread(uintptr_t opaque_identifier) override;
 
  private:
   FRIEND_TEST_ALL_PREFIXES(ResponsivenessWatcherTest, TaskForwarding);
@@ -67,7 +71,7 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
   // Metadata for currently running tasks and events is needed to track whether
   // or not they caused reentrancy.
   struct Metadata {
-    explicit Metadata(const void* identifier,
+    explicit Metadata(uintptr_t identifier,
                       bool was_blocked_or_low_priority,
                       base::TimeTicks execution_start_time);
 
@@ -75,7 +79,7 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
     //
     // `identifier` is not a raw_ptr<...> for performance reasons (based on
     // analysis of sampling profiler data and tab_search:top100:2020).
-    RAW_PTR_EXCLUSION const void* const identifier;
+    uintptr_t const identifier;
 
     // Whether the task was at some point in a queue that was blocked or low
     // priority.
@@ -96,9 +100,15 @@ class CONTENT_EXPORT Watcher : public base::RefCounted<Watcher>,
                    bool was_blocked_or_low_priority,
                    std::vector<Metadata>* currently_running_metadata);
 
+  // TODO(crbug.com/40287434): After the "ReduceCpuUtilization2" feature is
+  // cleaned up (~January 2025), remove the std::variant in favor of a
+  // base::FunctionRef.
+  using TaskOrEventFinishedSignature = void(base::TimeTicks,
+                                            base::TimeTicks,
+                                            base::TimeTicks);
+  using TaskOrEventFinishedCallback =
+      base::FunctionRef<TaskOrEventFinishedSignature>;
   // |callback| will either be synchronously invoked, or else never invoked.
-  using TaskOrEventFinishedCallback = base::OnceCallback<
-      void(base::TimeTicks, base::TimeTicks, base::TimeTicks)>;
   void DidRunTask(const base::PendingTask* task,
                   std::vector<Metadata>* currently_running_metadata,
                   int* mismatched_task_identifiers,

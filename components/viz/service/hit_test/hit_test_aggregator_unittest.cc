@@ -4,8 +4,10 @@
 
 #include "components/viz/service/hit_test/hit_test_aggregator.h"
 
+#include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "base/memory/raw_ptr.h"
@@ -13,7 +15,6 @@
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/surfaces/surface_id.h"
 #include "components/viz/host/host_frame_sink_manager.h"
-#include "components/viz/service/display_embedder/server_shared_bitmap_manager.h"
 #include "components/viz/service/frame_sinks/compositor_frame_sink_support.h"
 #include "components/viz/service/frame_sinks/frame_sink_manager_impl.h"
 #include "components/viz/service/hit_test/hit_test_aggregator_delegate.h"
@@ -22,7 +23,8 @@
 #include "components/viz/test/surface_id_allocator_set.h"
 #include "components/viz/test/test_latest_local_surface_id_lookup_delegate.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "ui/gfx/geometry/rounded_corners_f.h"
+#include "ui/gfx/geometry/rrect_f.h"
 
 namespace viz {
 namespace {
@@ -57,9 +59,8 @@ class TestHostFrameSinkManager : public HostFrameSinkManager {
 
 class TestFrameSinkManagerImpl : public FrameSinkManagerImpl {
  public:
-  explicit TestFrameSinkManagerImpl(SharedBitmapManager* shared_bitmap_manager)
-      : FrameSinkManagerImpl(
-            FrameSinkManagerImpl::InitParams(shared_bitmap_manager)) {}
+  TestFrameSinkManagerImpl()
+      : FrameSinkManagerImpl(FrameSinkManagerImpl::InitParams()) {}
 
   TestFrameSinkManagerImpl(const TestFrameSinkManagerImpl&) = delete;
   TestFrameSinkManagerImpl& operator=(const TestFrameSinkManagerImpl&) = delete;
@@ -98,7 +99,7 @@ class TestHitTestAggregator final : public HitTestAggregator {
                           local_surface_id_lookup_delegate,
                           frame_sink_id),
         frame_sink_id_(frame_sink_id) {}
-  ~TestHitTestAggregator() = default;
+  ~TestHitTestAggregator() override = default;
 
   int GetRegionCount() const { return hit_test_data_size_; }
   int GetHitTestRegionListCapacity() { return hit_test_data_capacity_; }
@@ -121,8 +122,7 @@ class HitTestAggregatorTest : public testing::Test {
 
   // testing::Test:
   void SetUp() override {
-    frame_sink_manager_ =
-        std::make_unique<TestFrameSinkManagerImpl>(&shared_bitmap_manager_);
+    frame_sink_manager_ = std::make_unique<TestFrameSinkManagerImpl>();
     host_frame_sink_manager_ = std::make_unique<TestHostFrameSinkManager>();
     local_surface_id_lookup_delegate_ =
         std::make_unique<TestLatestLocalSurfaceIdLookupDelegate>();
@@ -135,6 +135,7 @@ class HitTestAggregatorTest : public testing::Test {
         local_surface_id_lookup_delegate(), kDisplayFrameSink);
   }
   void TearDown() override {
+    hit_test_aggregator_.reset();
     support_.reset();
     frame_sink_manager_.reset();
     host_frame_sink_manager_.reset();
@@ -160,12 +161,14 @@ class HitTestAggregatorTest : public testing::Test {
 
     for (int i = 0; i < 8; i++) {
       HitTestRegion hit_test_region;
-      hit_test_region.rect.SetRect(100, 100, 100, 100);
+      hit_test_region.rect = gfx::RRectF(gfx::RectF(100, 100, 100, 100));
       SurfaceId child_surface_id = MakeSurfaceId(client_id);
       hit_test_region.frame_sink_id = child_surface_id.frame_sink_id();
 
       if (depth > 0) {
         hit_test_region.flags = HitTestRegionFlags::kHitTestChildSurface;
+        frame_sink_manager()->RegisterFrameSinkHierarchy(
+            surface_id.frame_sink_id(), hit_test_region.frame_sink_id);
         client_id =
             CreateAndSubmitHitTestRegionListWith8Children(client_id, depth - 1);
       } else {
@@ -229,7 +232,6 @@ class HitTestAggregatorTest : public testing::Test {
   }
 
  private:
-  ServerSharedBitmapManager shared_bitmap_manager_;
   std::unique_ptr<TestHitTestAggregator> hit_test_aggregator_;
   std::unique_ptr<TestFrameSinkManagerImpl> frame_sink_manager_;
   std::unique_ptr<TestHostFrameSinkManager> host_frame_sink_manager_;
@@ -274,7 +276,7 @@ TEST_F(HitTestAggregatorTest, OneSurface) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, display_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -300,12 +302,12 @@ TEST_F(HitTestAggregatorTest, OneEmbedderTwoRegions) {
   HitTestRegion e_hit_test_region_r1;
   e_hit_test_region_r1.frame_sink_id = e_surface_id.frame_sink_id();
   e_hit_test_region_r1.flags = HitTestRegionFlags::kHitTestMine;
-  e_hit_test_region_r1.rect.SetRect(100, 100, 200, 400);
+  e_hit_test_region_r1.rect = gfx::RRectF(gfx::RectF(100, 100, 200, 400));
 
   HitTestRegion e_hit_test_region_r2;
   e_hit_test_region_r2.frame_sink_id = e_surface_id.frame_sink_id();
   e_hit_test_region_r2.flags = HitTestRegionFlags::kHitTestMine;
-  e_hit_test_region_r2.rect.SetRect(400, 100, 300, 400);
+  e_hit_test_region_r2.rect = gfx::RRectF(gfx::RectF(400, 100, 300, 400));
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_r1));
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_r2));
@@ -324,17 +326,17 @@ TEST_F(HitTestAggregatorTest, OneEmbedderTwoRegions) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 2);
 
   region = host_regions()[1];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 200, 400));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 200, 400)));
   EXPECT_EQ(region.child_count, 0);
 
   region = host_regions()[2];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
-  EXPECT_EQ(region.rect, gfx::Rect(400, 100, 300, 400));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(400, 100, 300, 400)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -356,6 +358,11 @@ TEST_F(HitTestAggregatorTest, OneEmbedderTwoChildren) {
   SurfaceId c1_surface_id = MakeSurfaceId(kDisplayClientId + 1);
   SurfaceId c2_surface_id = MakeSurfaceId(kDisplayClientId + 2);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c1_surface_id.frame_sink_id());
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c2_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -363,12 +370,12 @@ TEST_F(HitTestAggregatorTest, OneEmbedderTwoChildren) {
   HitTestRegion e_hit_test_region_c1;
   e_hit_test_region_c1.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c1.frame_sink_id = c1_surface_id.frame_sink_id();
-  e_hit_test_region_c1.rect.SetRect(100, 100, 200, 300);
+  e_hit_test_region_c1.rect = gfx::RRectF(gfx::RectF(100, 100, 200, 300));
 
   HitTestRegion e_hit_test_region_c2;
   e_hit_test_region_c2.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c2.frame_sink_id = c2_surface_id.frame_sink_id();
-  e_hit_test_region_c2.rect.SetRect(400, 100, 400, 300);
+  e_hit_test_region_c2.rect = gfx::RRectF(gfx::RectF(400, 100, 400, 300));
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c1));
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c2));
@@ -407,19 +414,19 @@ TEST_F(HitTestAggregatorTest, OneEmbedderTwoChildren) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 2);
 
   region = host_regions()[1];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestChildSurface);
   EXPECT_EQ(region.frame_sink_id, c1_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 200, 300));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 200, 300)));
   EXPECT_EQ(region.child_count, 0);
 
   region = host_regions()[2];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestChildSurface);
   EXPECT_EQ(region.frame_sink_id, c2_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(400, 100, 400, 300));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(400, 100, 400, 300)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -441,6 +448,9 @@ TEST_F(HitTestAggregatorTest, OccludedChildFrame) {
   SurfaceId e_surface_id = MakeSurfaceId(kDisplayClientId);
   SurfaceId c_surface_id = MakeSurfaceId(kDisplayClientId + 1);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -448,12 +458,12 @@ TEST_F(HitTestAggregatorTest, OccludedChildFrame) {
   HitTestRegion e_hit_test_region_div;
   e_hit_test_region_div.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_div.frame_sink_id = e_surface_id.frame_sink_id();
-  e_hit_test_region_div.rect.SetRect(200, 200, 300, 200);
+  e_hit_test_region_div.rect = gfx::RRectF(gfx::RectF(200, 200, 300, 200));
 
   HitTestRegion e_hit_test_region_c;
   e_hit_test_region_c.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c.frame_sink_id = c_surface_id.frame_sink_id();
-  e_hit_test_region_c.rect.SetRect(100, 100, 200, 500);
+  e_hit_test_region_c.rect = gfx::RRectF(gfx::RectF(100, 100, 200, 500));
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_div));
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c));
@@ -484,13 +494,13 @@ TEST_F(HitTestAggregatorTest, OccludedChildFrame) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 2);
 
   region = host_regions()[1];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(200, 200, 300, 200));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(200, 200, 300, 200)));
   EXPECT_EQ(region.child_count, 0);
 
   region = host_regions()[2];
@@ -498,7 +508,7 @@ TEST_F(HitTestAggregatorTest, OccludedChildFrame) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 200, 500));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 200, 500)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -521,6 +531,9 @@ TEST_F(HitTestAggregatorTest, ForegroundChildFrame) {
   SurfaceId e_surface_id = MakeSurfaceId(kDisplayClientId);
   SurfaceId c_surface_id = MakeSurfaceId(kDisplayClientId + 1);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -528,12 +541,12 @@ TEST_F(HitTestAggregatorTest, ForegroundChildFrame) {
   HitTestRegion e_hit_test_region_div;
   e_hit_test_region_div.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_div.frame_sink_id = e_surface_id.frame_sink_id();
-  e_hit_test_region_div.rect.SetRect(200, 200, 300, 200);
+  e_hit_test_region_div.rect = gfx::RRectF(gfx::RectF(200, 200, 300, 200));
 
   HitTestRegion e_hit_test_region_c;
   e_hit_test_region_c.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c.frame_sink_id = c_surface_id.frame_sink_id();
-  e_hit_test_region_c.rect.SetRect(100, 100, 200, 500);
+  e_hit_test_region_c.rect = gfx::RRectF(gfx::RectF(100, 100, 200, 500));
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c));
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_div));
@@ -565,7 +578,7 @@ TEST_F(HitTestAggregatorTest, ForegroundChildFrame) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 2);
 
   region = host_regions()[1];
@@ -573,13 +586,13 @@ TEST_F(HitTestAggregatorTest, ForegroundChildFrame) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 200, 500));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 200, 500)));
   EXPECT_EQ(region.child_count, 0);
 
   region = host_regions()[2];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(200, 200, 300, 200));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(200, 200, 300, 200)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -604,6 +617,13 @@ TEST_F(HitTestAggregatorTest, ClippedChildWithTabAndTransparentBackground) {
   SurfaceId a_surface_id = MakeSurfaceId(kDisplayClientId + 2);
   SurfaceId b_surface_id = MakeSurfaceId(kDisplayClientId + 3);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c_surface_id.frame_sink_id());
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      c_surface_id.frame_sink_id(), a_surface_id.frame_sink_id());
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      c_surface_id.frame_sink_id(), b_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -611,7 +631,7 @@ TEST_F(HitTestAggregatorTest, ClippedChildWithTabAndTransparentBackground) {
   HitTestRegion e_hit_test_region_c;
   e_hit_test_region_c.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c.frame_sink_id = c_surface_id.frame_sink_id();
-  e_hit_test_region_c.rect.SetRect(300, 100, 1600, 800);
+  e_hit_test_region_c.rect = gfx::RRectF(gfx::RectF(300, 100, 1600, 800));
   e_hit_test_region_c.transform.Translate(200, 100);
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c));
@@ -623,12 +643,12 @@ TEST_F(HitTestAggregatorTest, ClippedChildWithTabAndTransparentBackground) {
   HitTestRegion c_hit_test_region_a;
   c_hit_test_region_a.flags = HitTestRegionFlags::kHitTestChildSurface;
   c_hit_test_region_a.frame_sink_id = a_surface_id.frame_sink_id();
-  c_hit_test_region_a.rect.SetRect(0, 0, 200, 100);
+  c_hit_test_region_a.rect = gfx::RRectF(gfx::RectF(0, 0, 200, 100));
 
   HitTestRegion c_hit_test_region_b;
   c_hit_test_region_b.flags = HitTestRegionFlags::kHitTestChildSurface;
   c_hit_test_region_b.frame_sink_id = b_surface_id.frame_sink_id();
-  c_hit_test_region_b.rect.SetRect(0, 100, 800, 600);
+  c_hit_test_region_b.rect = gfx::RRectF(gfx::RectF(0, 100, 800, 600));
 
   c_hit_test_region_list.regions.push_back(std::move(c_hit_test_region_a));
   c_hit_test_region_list.regions.push_back(std::move(c_hit_test_region_b));
@@ -678,7 +698,7 @@ TEST_F(HitTestAggregatorTest, ClippedChildWithTabAndTransparentBackground) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 3);
 
   region = host_regions()[1];
@@ -686,7 +706,7 @@ TEST_F(HitTestAggregatorTest, ClippedChildWithTabAndTransparentBackground) {
                 HitTestRegionFlags::kHitTestIgnore,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(300, 100, 1600, 800));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(300, 100, 1600, 800)));
   EXPECT_EQ(region.child_count, 2);
 
   EXPECT_EQ(gfx::Point(100, 200),
@@ -697,7 +717,7 @@ TEST_F(HitTestAggregatorTest, ClippedChildWithTabAndTransparentBackground) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, a_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 200, 100));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 200, 100)));
   EXPECT_EQ(region.child_count, 0);
 
   region = host_regions()[3];
@@ -705,7 +725,7 @@ TEST_F(HitTestAggregatorTest, ClippedChildWithTabAndTransparentBackground) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, b_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 100, 800, 600));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 100, 800, 600)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -731,6 +751,13 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
   SurfaceId c2_surface_id = MakeSurfaceId(kDisplayClientId + 2);
   SurfaceId c3_surface_id = MakeSurfaceId(kDisplayClientId + 3);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c1_surface_id.frame_sink_id());
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      c1_surface_id.frame_sink_id(), c2_surface_id.frame_sink_id());
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      c2_surface_id.frame_sink_id(), c3_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -738,7 +765,7 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
   HitTestRegion e_hit_test_region_c1;
   e_hit_test_region_c1.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c1.frame_sink_id = c1_surface_id.frame_sink_id();
-  e_hit_test_region_c1.rect.SetRect(100, 100, 700, 700);
+  e_hit_test_region_c1.rect = gfx::RRectF(gfx::RectF(100, 100, 700, 700));
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c1));
 
@@ -749,7 +776,7 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
   HitTestRegion c1_hit_test_region_c2;
   c1_hit_test_region_c2.flags = HitTestRegionFlags::kHitTestChildSurface;
   c1_hit_test_region_c2.frame_sink_id = c2_surface_id.frame_sink_id();
-  c1_hit_test_region_c2.rect.SetRect(100, 100, 500, 500);
+  c1_hit_test_region_c2.rect = gfx::RRectF(gfx::RectF(100, 100, 500, 500));
 
   c1_hit_test_region_list.regions.push_back(std::move(c1_hit_test_region_c2));
 
@@ -760,7 +787,7 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
   HitTestRegion c2_hit_test_region_c3;
   c2_hit_test_region_c3.flags = HitTestRegionFlags::kHitTestChildSurface;
   c2_hit_test_region_c3.frame_sink_id = c3_surface_id.frame_sink_id();
-  c2_hit_test_region_c3.rect.SetRect(100, 100, 300, 300);
+  c2_hit_test_region_c3.rect = gfx::RRectF(gfx::RectF(100, 100, 300, 300));
 
   c2_hit_test_region_list.regions.push_back(std::move(c2_hit_test_region_c3));
 
@@ -805,7 +832,7 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 3);
 
   region = host_regions()[1];
@@ -813,7 +840,7 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c1_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 700, 700));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 700, 700)));
   EXPECT_EQ(region.child_count, 2);
 
   region = host_regions()[2];
@@ -821,7 +848,7 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c2_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 500, 500));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 500, 500)));
   EXPECT_EQ(region.child_count, 1);
 
   region = host_regions()[3];
@@ -829,7 +856,7 @@ TEST_F(HitTestAggregatorTest, ThreeChildrenDeep) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c3_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 300, 300));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 300, 300)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -851,6 +878,9 @@ TEST_F(HitTestAggregatorTest, MissingChildFrame) {
   SurfaceId e_surface_id = MakeSurfaceId(kDisplayClientId);
   SurfaceId c_surface_id = MakeSurfaceId(kDisplayClientId + 1);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -858,12 +888,12 @@ TEST_F(HitTestAggregatorTest, MissingChildFrame) {
   HitTestRegion e_hit_test_region_div;
   e_hit_test_region_div.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_div.frame_sink_id = e_surface_id.frame_sink_id();
-  e_hit_test_region_div.rect.SetRect(200, 200, 300, 200);
+  e_hit_test_region_div.rect = gfx::RRectF(gfx::RectF(200, 200, 300, 200));
 
   HitTestRegion e_hit_test_region_c;
   e_hit_test_region_c.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c.frame_sink_id = c_surface_id.frame_sink_id();
-  e_hit_test_region_c.rect.SetRect(100, 100, 200, 500);
+  e_hit_test_region_c.rect = gfx::RRectF(gfx::RectF(100, 100, 200, 500));
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c));
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_div));
@@ -888,7 +918,7 @@ TEST_F(HitTestAggregatorTest, MissingChildFrame) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 2);
 
   // |c_hit_test_region_list| was not submitted on time, so we should do
@@ -898,13 +928,13 @@ TEST_F(HitTestAggregatorTest, MissingChildFrame) {
                               HitTestRegionFlags::kHitTestAsk |
                               HitTestRegionFlags::kHitTestNotActive);
   EXPECT_EQ(region.frame_sink_id, c_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(100, 100, 200, 500));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(100, 100, 200, 500)));
   EXPECT_EQ(region.child_count, 0);
 
   region = host_regions()[2];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(200, 200, 300, 200));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(200, 200, 300, 200)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -959,6 +989,9 @@ TEST_F(HitTestAggregatorTest, DiscardedSurfaces) {
   SurfaceId e_surface_id = MakeSurfaceId(kDisplayClientId);
   SurfaceId c_surface_id = MakeSurfaceId(kDisplayClientId + 1);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -966,12 +999,12 @@ TEST_F(HitTestAggregatorTest, DiscardedSurfaces) {
   HitTestRegion e_hit_test_region_div;
   e_hit_test_region_div.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_div.frame_sink_id = e_surface_id.frame_sink_id();
-  e_hit_test_region_div.rect.SetRect(200, 200, 300, 200);
+  e_hit_test_region_div.rect = gfx::RRectF(gfx::RectF(200, 200, 300, 200));
 
   HitTestRegion e_hit_test_region_c;
   e_hit_test_region_c.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c.frame_sink_id = c_surface_id.frame_sink_id();
-  e_hit_test_region_c.rect.SetRect(100, 100, 200, 500);
+  e_hit_test_region_c.rect = gfx::RRectF(gfx::RectF(100, 100, 200, 500));
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c));
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_div));
@@ -1044,6 +1077,13 @@ TEST_F(HitTestAggregatorTest, TransparentOverlayRegions) {
   SurfaceId c2_surface_id = MakeSurfaceId(kDisplayClientId + 2);
   SurfaceId d1_surface_id = MakeSurfaceId(kDisplayClientId + 3);
 
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c1_surface_id.frame_sink_id());
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      e_surface_id.frame_sink_id(), c2_surface_id.frame_sink_id());
+  frame_sink_manager()->RegisterFrameSinkHierarchy(
+      c1_surface_id.frame_sink_id(), d1_surface_id.frame_sink_id());
+
   HitTestRegionList e_hit_test_region_list;
   e_hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
   e_hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
@@ -1051,12 +1091,12 @@ TEST_F(HitTestAggregatorTest, TransparentOverlayRegions) {
   HitTestRegion e_hit_test_region_c1;
   e_hit_test_region_c1.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c1.frame_sink_id = c1_surface_id.frame_sink_id();
-  e_hit_test_region_c1.rect.SetRect(0, 0, 1024, 768);
+  e_hit_test_region_c1.rect = gfx::RRectF(gfx::RectF(0, 0, 1024, 768));
 
   HitTestRegion e_hit_test_region_c2;
   e_hit_test_region_c2.flags = HitTestRegionFlags::kHitTestChildSurface;
   e_hit_test_region_c2.frame_sink_id = c2_surface_id.frame_sink_id();
-  e_hit_test_region_c2.rect.SetRect(0, 0, 200, 100);
+  e_hit_test_region_c2.rect = gfx::RRectF(gfx::RectF(0, 0, 200, 100));
   e_hit_test_region_c2.transform.Translate(200, 100);
 
   e_hit_test_region_list.regions.push_back(std::move(e_hit_test_region_c1));
@@ -1069,7 +1109,7 @@ TEST_F(HitTestAggregatorTest, TransparentOverlayRegions) {
   HitTestRegion c1_hit_test_region_d1;
   c1_hit_test_region_d1.flags = HitTestRegionFlags::kHitTestChildSurface;
   c1_hit_test_region_d1.frame_sink_id = d1_surface_id.frame_sink_id();
-  c1_hit_test_region_d1.rect.SetRect(0, 100, 800, 600);
+  c1_hit_test_region_d1.rect = gfx::RRectF(gfx::RectF(0, 100, 800, 600));
   c1_hit_test_region_d1.transform.Translate(200, 100);
 
   c1_hit_test_region_list.regions.push_back(std::move(c1_hit_test_region_d1));
@@ -1119,7 +1159,7 @@ TEST_F(HitTestAggregatorTest, TransparentOverlayRegions) {
   AggregatedHitTestRegion region = host_regions()[0];
   EXPECT_EQ(region.flags, HitTestRegionFlags::kHitTestMine);
   EXPECT_EQ(region.frame_sink_id, e_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 3);
 
   region = host_regions()[1];
@@ -1127,7 +1167,7 @@ TEST_F(HitTestAggregatorTest, TransparentOverlayRegions) {
                 HitTestRegionFlags::kHitTestIgnore,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c1_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 1024, 768));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 1024, 768)));
   EXPECT_EQ(region.child_count, 1);
 
   region = host_regions()[2];
@@ -1135,7 +1175,7 @@ TEST_F(HitTestAggregatorTest, TransparentOverlayRegions) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, d1_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 100, 800, 600));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 100, 800, 600)));
   EXPECT_EQ(region.child_count, 0);
 
   region = host_regions()[3];
@@ -1143,7 +1183,7 @@ TEST_F(HitTestAggregatorTest, TransparentOverlayRegions) {
                 HitTestRegionFlags::kHitTestMine,
             region.flags);
   EXPECT_EQ(region.frame_sink_id, c2_surface_id.frame_sink_id());
-  EXPECT_EQ(region.rect, gfx::Rect(0, 0, 200, 100));
+  EXPECT_EQ(region.rect, gfx::RRectF(gfx::RectF(0, 0, 200, 100)));
   EXPECT_EQ(region.child_count, 0);
 }
 
@@ -1166,7 +1206,7 @@ TEST_F(HitTestAggregatorTest, HitTestDataNotUpdated) {
   // We did not update the hit-test data. Expect the index from Aggregator /
   // Manager to remain unchanged.
   support()->SubmitCompositorFrame(surface_id.local_surface_id(),
-                                   MakeDefaultCompositorFrame(), absl::nullopt);
+                                   MakeDefaultCompositorFrame(), std::nullopt);
   aggregator->Aggregate(surface_id);
   EXPECT_EQ(last_index, aggregator->GetLastSubmitHitTestRegionListIndex());
 
@@ -1176,6 +1216,150 @@ TEST_F(HitTestAggregatorTest, HitTestDataNotUpdated) {
                                    std::move(hit_test_region_list_copy));
   aggregator->Aggregate(surface_id);
   EXPECT_NE(last_index, aggregator->GetLastSubmitHitTestRegionListIndex());
+}
+
+TEST_F(HitTestAggregatorTest, InvalidChildFrameSinkIdRejected) {
+  // Setup: Parent (P) and Child (C).
+  // Browser registers C as child of P.
+  // BUT we will also have an unrelated Sibling (S).
+  FrameSinkId parent_id(1, 1);
+  FrameSinkId child_id(1, 2);
+  FrameSinkId sibling_id(1, 3);
+
+  // Register legitimate hierarchy.
+  frame_sink_manager()->RegisterFrameSinkId(parent_id, true);
+  frame_sink_manager()->RegisterFrameSinkId(sibling_id, true);
+  frame_sink_manager()->RegisterFrameSinkHierarchy(parent_id, child_id);
+  frame_sink_manager()->RegisterFrameSinkHierarchy(parent_id, sibling_id);
+
+  // Now submit hit-test data.
+  HitTestRegionList hit_test_region_list;
+  hit_test_region_list.bounds = gfx::Rect(0, 0, 100, 100);
+
+  // Invalid data for a sibling.
+  HitTestRegion spoofed_sibling;
+  spoofed_sibling.frame_sink_id = sibling_id;
+  spoofed_sibling.flags = HitTestRegionFlags::kHitTestChildSurface |
+                          HitTestRegionFlags::kHitTestMine;
+  spoofed_sibling.rect = gfx::RRectF(gfx::RectF(50, 50, 50, 50));
+  hit_test_region_list.regions.push_back(spoofed_sibling);
+
+  SurfaceId child_surface_id(
+      child_id, LocalSurfaceId(1, 1, base::UnguessableToken::Create()));
+
+  // Register child in delegate.
+  local_surface_id_lookup_delegate()->SetSurfaceIdMap(child_surface_id);
+
+  // Submit CompositorFrame which also submits hit-test data.
+  // This should be accepted, because the full FrameSink hierarchy arrives
+  // asynchronously. We can only validate during aggregation.
+  auto child_support = std::make_unique<CompositorFrameSinkSupport>(
+      nullptr, frame_sink_manager(), child_id, /*is_root=*/false);
+  child_support->SubmitCompositorFrame(child_surface_id.local_surface_id(),
+                                       MakeDefaultCompositorFrame(),
+                                       std::move(hit_test_region_list), 0);
+
+  // We should have a list active before aggregation.
+  const HitTestRegionList* active_list =
+      hit_test_manager()->GetActiveHitTestRegionList(
+          local_surface_id_lookup_delegate(), child_id);
+  EXPECT_NE(nullptr, active_list);
+
+  // Aggregation will detect the non-child and omit that region.
+  // The root region itself is still added.
+  hit_test_aggregator()->Aggregate(child_surface_id);
+  EXPECT_EQ(1, hit_test_aggregator()->GetRegionCount());
+
+  // The HitTestRegionList for child_id should still exist in HitTestManager,
+  // AND its regions should still be there, so that it can be aggregated if
+  // the hierarchy changes.
+  const HitTestRegionList* post_aggregation_list =
+      hit_test_manager()->GetActiveHitTestRegionList(
+          local_surface_id_lookup_delegate(), child_id);
+  EXPECT_NE(nullptr, post_aggregation_list);
+  EXPECT_FALSE(post_aggregation_list->regions.empty());
+  EXPECT_EQ(1u, post_aggregation_list->regions.size());
+  EXPECT_EQ(sibling_id, post_aggregation_list->regions[0].frame_sink_id);
+}
+
+TEST_F(HitTestAggregatorTest, RoundedCornersPropagate) {
+  TestHitTestAggregator* aggregator = hit_test_aggregator();
+  EXPECT_EQ(aggregator->GetRegionCount(), 0);
+
+  SurfaceId display_surface_id = MakeSurfaceId(kDisplayClientId);
+
+  HitTestRegionList hit_test_region_list;
+  hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
+  hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
+
+  const gfx::RRectF expected_rect(gfx::RectF(100, 100, 200, 200), 15.f);
+
+  HitTestRegion region;
+  region.frame_sink_id = display_surface_id.frame_sink_id();
+  region.flags = HitTestRegionFlags::kHitTestMine;
+  region.rect = expected_rect;
+  hit_test_region_list.regions.push_back(std::move(region));
+
+  support()->SubmitCompositorFrame(display_surface_id.local_surface_id(),
+                                   MakeDefaultCompositorFrame(),
+                                   std::move(hit_test_region_list));
+  local_surface_id_lookup_delegate()->SetSurfaceIdMap(display_surface_id);
+  aggregator->Aggregate(display_surface_id);
+
+  EXPECT_EQ(aggregator->GetRegionCount(), 2);
+
+  AggregatedHitTestRegion agg_region = host_regions()[1];
+  EXPECT_EQ(agg_region.rect, expected_rect);
+}
+
+// Aggregation routes RRectF through the same type used by the draw pipeline.
+TEST_F(HitTestAggregatorTest, RoundedCornersNormalizedDuringAggregation) {
+  TestHitTestAggregator* aggregator = hit_test_aggregator();
+  EXPECT_EQ(aggregator->GetRegionCount(), 0);
+
+  SurfaceId display_surface_id = MakeSurfaceId(kDisplayClientId);
+
+  HitTestRegionList hit_test_region_list;
+  hit_test_region_list.flags = HitTestRegionFlags::kHitTestMine;
+  hit_test_region_list.bounds.SetRect(0, 0, 1024, 768);
+
+  // Mixed corners scenario. A +Inf component is non-finite, so the entire
+  // shape is devolved to a plain rect with zeroed corners, matching the draw
+  // pipeline.
+  HitTestRegion mixed_region;
+  mixed_region.frame_sink_id = display_surface_id.frame_sink_id();
+  mixed_region.flags = HitTestRegionFlags::kHitTestMine;
+  mixed_region.rect = gfx::RRectF(
+      gfx::RectF(100, 100, 60, 80),
+      gfx::RoundedCornersF(std::numeric_limits<float>::max(),
+                           std::numeric_limits<float>::infinity(), 20.f, -5.f));
+  hit_test_region_list.regions.push_back(std::move(mixed_region));
+
+  // Oversized but finite/non-negative radii are scaled to fit by the W3C
+  // overlap rule. The computed uniform scale factor (0.15) is applied, inside
+  // of RRectF's c'tor, to all four corners, matching the draw pipeline.
+  HitTestRegion oversized_region;
+  oversized_region.frame_sink_id = display_surface_id.frame_sink_id();
+  oversized_region.flags = HitTestRegionFlags::kHitTestMine;
+  oversized_region.rect =
+      gfx::RRectF(gfx::RectF(0, 0, 60, 80),
+                  gfx::RoundedCornersF(200.f, 200.f, 200.f, 200.f));
+  hit_test_region_list.regions.push_back(std::move(oversized_region));
+
+  support()->SubmitCompositorFrame(display_surface_id.local_surface_id(),
+                                   MakeDefaultCompositorFrame(),
+                                   std::move(hit_test_region_list));
+  local_surface_id_lookup_delegate()->SetSurfaceIdMap(display_surface_id);
+  aggregator->Aggregate(display_surface_id);
+
+  ASSERT_EQ(aggregator->GetRegionCount(), 3);
+  const AggregatedHitTestRegion& mixed_agg_region = host_regions()[1];
+  EXPECT_EQ(mixed_agg_region.rect,
+            gfx::RRectF(gfx::RectF(100, 100, 60, 80), /*radius=*/0));
+
+  const AggregatedHitTestRegion& oversized_agg_region = host_regions()[2];
+  EXPECT_EQ(gfx::RRectF(gfx::RectF(0, 0, 60, 80), 30.f),
+            oversized_agg_region.rect);
 }
 
 }  // namespace viz

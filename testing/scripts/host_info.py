@@ -9,10 +9,7 @@ import os
 import platform
 import sys
 
-# Add src/testing/ into sys.path for importing common without pylint errors.
-sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-from scripts import common
+import common
 
 
 def is_linux():
@@ -29,7 +26,7 @@ def get_free_disk_space(failures):
     # Stat the current path for info on the current disk.
     stat_result = os.statvfs('.')
     # Multiply block size by number of free blocks, express in GiB.
-    return stat_result.f_frsize * stat_result.f_bavail / (1024.0 ** 3)
+    return stat_result.f_frsize * stat_result.f_bavail / (1024.0**3)
 
   failures.append('get_free_disk_space: OS %s not supported.' % os.name)
   return 0
@@ -60,18 +57,21 @@ def get_device_info(args, failures):
 
   with common.temporary_file() as tempfile_path:
     test_cmd = [
-        sys.executable,
-        os.path.join(args.paths['checkout'],
-                     'third_party',
-                     'catapult',
-                     'devil',
-                     'devil',
-                     'android',
-                     'tools',
-                     'device_status.py'),
-        '--json-output', tempfile_path,
-        '--denylist-file', os.path.join(
-              args.paths['checkout'], 'out', 'bad_devices.json')
+      sys.executable,
+      os.path.join(
+        args.paths['checkout'],
+        'third_party',
+        'catapult',
+        'devil',
+        'devil',
+        'android',
+        'tools',
+        'device_status.py',
+      ),
+      '--json-output',
+      tempfile_path,
+      '--denylist-file',
+      os.path.join(args.paths['checkout'], 'out', 'bad_devices.json'),
     ]
     if args.args:
       test_cmd.extend(args.args)
@@ -88,7 +88,8 @@ def get_device_info(args, failures):
   results['devices'] = sorted(v['serial'] for v in device_info)
 
   details = [
-      v['ro.build.fingerprint'] for v in device_info if not v['denylisted']]
+    v['ro.build.fingerprint'] for v in device_info if not v['denylisted']
+  ]
 
   def unique_build_details(index):
     return sorted(list({v.split(':')[index] for v in details}))
@@ -129,11 +130,14 @@ def main_run(args):
 
   host_info['devices'] = get_device_info(args, failures)
 
-  json.dump({
+  json.dump(
+    {
       'valid': True,
       'failures': failures,
       '_host_info': host_info,
-  }, args.output)
+    },
+    args.output,
+  )
 
   if len(failures) != 0:
     return common.INFRA_FAILURE_EXIT_CODE

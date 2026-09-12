@@ -6,9 +6,13 @@
 
 #include <utility>
 
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/glic/public/glic_keyed_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sessions/chrome_tab_restore_service_client.h"
+#include "chrome/common/buildflags.h"
 #include "components/sessions/core/tab_restore_service_impl.h"
+
 
 namespace {
 
@@ -18,7 +22,8 @@ std::unique_ptr<KeyedService> BuildTemplateService(
   DCHECK(!profile->IsOffTheRecord());
   auto client = std::make_unique<ChromeTabRestoreServiceClient>(profile);
   return std::make_unique<sessions::TabRestoreServiceImpl>(
-      std::move(client), profile->GetPrefs(), nullptr);
+      std::move(client), profile->GetPrefs(), /*time_factory=*/nullptr,
+      g_browser_process->os_crypt_async());
 }
 
 }  // namespace
@@ -45,7 +50,8 @@ void TabRestoreServiceFactory::ResetForProfile(Profile* profile) {
 }
 
 TabRestoreServiceFactory* TabRestoreServiceFactory::GetInstance() {
-  return base::Singleton<TabRestoreServiceFactory>::get();
+  static base::NoDestructor<TabRestoreServiceFactory> instance;
+  return instance.get();
 }
 
 // static
@@ -55,7 +61,19 @@ TabRestoreServiceFactory::GetDefaultFactory() {
 }
 
 TabRestoreServiceFactory::TabRestoreServiceFactory()
-    : ProfileKeyedServiceFactory("sessions::TabRestoreService") {}
+    : ProfileKeyedServiceFactory(
+          "sessions::TabRestoreService",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOriginalOnly)
+              .Build()) {
+  DependsOn(glic::GlicKeyedServiceFactory::GetInstance());
+}
 
 TabRestoreServiceFactory::~TabRestoreServiceFactory() = default;
 
@@ -63,7 +81,8 @@ bool TabRestoreServiceFactory::ServiceIsNULLWhileTesting() const {
   return true;
 }
 
-KeyedService* TabRestoreServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+TabRestoreServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* browser_context) const {
-  return BuildTemplateService(browser_context).release();
+  return BuildTemplateService(browser_context);
 }

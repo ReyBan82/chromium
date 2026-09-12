@@ -4,11 +4,11 @@
 
 #include "ash/rounded_display/rounded_display_gutter_factory.h"
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
 #include "ash/rounded_display/rounded_display_gutter.h"
-#include "base/ranges/algorithm.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/geometry/rounded_corners_f.h"
@@ -32,7 +32,7 @@ auto GutterWithMatchingCorners(Matchers&&... positions) {
       [](const std::unique_ptr<RoundedDisplayGutter>& gutter) {
         std::vector<RoundedCornerPosition> positions;
         const std::vector<RoundedCorner>& corners = gutter->GetGutterCorners();
-        base::ranges::transform(
+        std::ranges::transform(
             corners.begin(), corners.end(), std::back_inserter(positions),
             [](const RoundedCorner& corner) { return corner.position(); });
         return positions;
@@ -87,31 +87,6 @@ TEST_F(RoundedDisplayGutterFactoryTest,
                                      RoundedCornerPosition::kUpperRight,
                                      RoundedCornerPosition::kLowerRight)));
   }
-}
-
-TEST_F(RoundedDisplayGutterFactoryTest,
-       NonOverlayGuttersAreNotCreatedIfNotNeeded) {
-  constexpr gfx::RoundedCornersF radii(10, 12, 0, 0);
-
-  auto non_overlay_gutters =
-      factory_->CreateNonOverlayGutters(kTestDisplaySize, radii);
-
-  EXPECT_EQ(non_overlay_gutters.size(), 2u);
-
-  EXPECT_THAT(non_overlay_gutters, testing::Contains(GutterWithMatchingCorners(
-                                       RoundedCornerPosition::kUpperLeft)));
-
-  EXPECT_THAT(non_overlay_gutters, testing::Contains(GutterWithMatchingCorners(
-                                       RoundedCornerPosition::kUpperRight)));
-
-  //  We do not create these non-overlay gutters as lower_right and
-  //  lower_left corners have zero radius.
-  EXPECT_THAT(non_overlay_gutters,
-              testing::Not(testing::Contains(GutterWithMatchingCorners(
-                  RoundedCornerPosition::kLowerLeft))));
-  EXPECT_THAT(non_overlay_gutters,
-              testing::Not(testing::Contains(GutterWithMatchingCorners(
-                  RoundedCornerPosition::kLowerRight))));
 }
 
 TEST_F(RoundedDisplayGutterFactoryTest,

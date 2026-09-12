@@ -7,12 +7,15 @@
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "base/component_export.h"
 #include "base/functional/callback_forward.h"
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/sequence_checker.h"
 #include "base/timer/elapsed_timer.h"
@@ -22,7 +25,6 @@
 #include "chromeos/ash/components/network/network_state.h"
 #include "chromeos/ash/components/network/network_type_pattern.h"
 #include "chromeos/ash/components/network/shill_property_handler.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class Location;
@@ -85,7 +87,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
     virtual ~StubCellularNetworksProvider() = default;
 
     // Checks |network_list| to add or remove stub cellular networks. New
-    // stub networks will be addeded to |new_stub_networks| list. Stub networks
+    // stub networks will be added to |new_stub_networks| list. Stub networks
     // that are not required anymore are removed from |network_list|. Returns
     // true if networks were removed from |network_list| or |new_stub_networks|
     // is non empty.
@@ -124,15 +126,17 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   void Shutdown();
 
   // Add/remove observers.
-  void AddObserver(NetworkStateHandlerObserver* observer,
-                   const base::Location& from_here);
-  void AddObserver(NetworkStateHandlerObserver* observer);
+  using Observer = NetworkStateHandlerObserver;
 
-  void RemoveObserver(NetworkStateHandlerObserver* observer,
-                      const base::Location& from_here);
-  void RemoveObserver(NetworkStateHandlerObserver* observer);
+  void AddObserver(Observer* observer, const base::Location& from_here);
+  virtual void AddObserver(Observer* observer);
 
-  bool HasObserver(NetworkStateHandlerObserver* observer);
+  void RemoveObserver(Observer* observer, const base::Location& from_here);
+  virtual void RemoveObserver(Observer* observer);
+
+  bool HasObserver(Observer* observer) {
+    return observers_.HasObserver(observer);
+  }
 
   // Returns the state for technology |type|. Only
   // NetworkTypePattern::Primitive, ::Mobile, ::Ethernet, and ::Tether are
@@ -218,15 +222,6 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   void SetShillConnectError(const std::string& service_path,
                             const std::string& shill_connect_error);
 
-  // Called from Chrome's network portal detector when Chrome has detected
-  // that a network is in a captive portal state.
-  void SetNetworkChromePortalState(const std::string& service_path,
-                                   NetworkState::PortalState portal_state);
-
-  // Returns the aa:bb formatted hardware (MAC) address for the first connected
-  // network matching |type|, or an empty string if none is connected.
-  std::string FormattedHardwareAddressForType(const NetworkTypePattern& type);
-
   // Convenience method to call GetNetworkListByType(visible=true).
   void GetVisibleNetworkListByType(const NetworkTypePattern& type,
                                    NetworkStateList* list);
@@ -306,7 +301,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   bool RemoveTetherNetworkState(const std::string& guid);
 
   // Disassociates the Tether network specified by |tether_network_guid| from
-  // its associated Wi-Fi network. Returns whether the networkd were
+  // its associated Wi-Fi network. Returns whether the networks were
   // successfully disassociated.
   bool DisassociateTetherNetworkStateFromWifiNetwork(
       const std::string& tether_network_guid);
@@ -370,9 +365,6 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
 
   // Clears the last_error value for the NetworkState for |service_path|.
   void ClearLastErrorForNetwork(const std::string& service_path);
-
-  // Sets the list of devices on which portal check is enabled.
-  void SetCheckPortalList(const std::string& check_portal_list);
 
   // Sets the Manager.WakeOnLan property. Note: we do not track this state, we
   // only set it.
@@ -484,18 +476,17 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   // This adds new entries to |network_list_| or |device_list_| and deletes any
   // entries that are no longer in the list.
   void UpdateManagedList(ManagedState::ManagedType type,
-                         const base::Value& entries) override;
+                         const base::ListValue& entries) override;
 
   // The list of profiles changed (i.e. a user has logged in). Re-request
   // properties for all services since they may have changed.
-  void ProfileListChanged(const base::Value& profile_list) override;
+  void ProfileListChanged(const base::ListValue& profile_list) override;
 
   // Parses the properties for the network service or device. Mostly calls
   // managed->PropertyChanged(key, value) for each dictionary entry.
-  void UpdateManagedStateProperties(
-      ManagedState::ManagedType type,
-      const std::string& path,
-      const base::Value::Dict& properties) override;
+  void UpdateManagedStateProperties(ManagedState::ManagedType type,
+                                    const std::string& path,
+                                    const base::DictValue& properties) override;
 
   // Called by ShillPropertyHandler when a watched service property changes.
   void UpdateNetworkServiceProperty(const std::string& service_path,
@@ -512,7 +503,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   void UpdateIPConfigProperties(ManagedState::ManagedType type,
                                 const std::string& path,
                                 const std::string& ip_config_path,
-                                base::Value::Dict properties) override;
+                                base::DictValue properties) override;
 
   void CheckPortalListChanged(const std::string& check_portal_list) override;
   void HostnameChanged(const std::string& hostname) override;
@@ -531,8 +522,17 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   // test observers.
   void InitShillPropertyHandler();
 
+  // Observer list
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/true,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
+      observers_;
+
  private:
   typedef std::map<std::string, std::string> SpecifierGuidMap;
+  friend class DeviceStateTest;
   friend class NetworkStateHandlerTest;
   friend class TechnologyStateController;
 
@@ -594,13 +594,10 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   // * Hidden (wifi) networks
   void SortNetworkList();
 
-  // Updates UMA stats. Called once after all requested networks are updated.
-  void UpdateNetworkStats();
-
   // NetworkState specific method for UpdateManagedStateProperties which
   // notifies observers.
   void UpdateNetworkStateProperties(NetworkState* network,
-                                    const base::Value::Dict& properties);
+                                    const base::DictValue& properties);
 
   // Ensure a valid GUID for NetworkState.
   void UpdateGuid(NetworkState* network);
@@ -746,13 +743,14 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   void SetDefaultNetworkValues(const std::string& path, bool metered);
 
   // Determines whether the user is logged in and sets |is_user_logged_in_|.
-  void ProcessIsUserLoggedIn(const base::Value& profile_list);
+  void ProcessIsUserLoggedIn(const base::ListValue& profile_list);
+
+  // Requests an update for an existing DeviceState. This is a no-op if
+  // there's no device state for the given `device_path`.
+  void RequestUpdateForDevice(const std::string& device_path);
 
   // Shill property handler instance, owned by this class.
   std::unique_ptr<internal::ShillPropertyHandler> shill_property_handler_;
-
-  // Observer list
-  base::ObserverList<NetworkStateHandlerObserver, true>::Unchecked observers_;
 
   // List of managed network states
   ManagedStateList network_list_;
@@ -788,10 +786,10 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
       NetworkState::PortalState::kUnknown;
 
   // Tracks the time spent in a Portal or PortalSuspected state.
-  absl::optional<base::ElapsedTimer> time_in_portal_;
+  std::optional<base::ElapsedTimer> time_in_portal_;
 
   // Tracks the default network proxy config for triggering PortalStateChanged.
-  base::Value default_network_proxy_config_;
+  std::optional<base::DictValue> default_network_proxy_config_;
 
   // DHCP Hostname.
   std::string hostname_;
@@ -806,10 +804,11 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
       TechnologyState::TECHNOLOGY_UNAVAILABLE;
 
   // Provides stub cellular networks. Not owned by this instance.
-  StubCellularNetworksProvider* stub_cellular_networks_provider_ = nullptr;
+  raw_ptr<StubCellularNetworksProvider, DanglingUntriaged>
+      stub_cellular_networks_provider_ = nullptr;
 
   // Not owned by this instance.
-  const TetherSortDelegate* tether_sort_delegate_ = nullptr;
+  raw_ptr<const TetherSortDelegate> tether_sort_delegate_ = nullptr;
 
   // Ensure that Shutdown() gets called exactly once.
   bool did_shutdown_ = false;
@@ -829,6 +828,15 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkStateHandler
   // user's saved networks are done updating.
   bool is_profile_networks_loaded_ = false;
   bool is_user_logged_in_ = false;
+
+  // A set of device or network service paths that need to request another
+  // GetProperties to get latest properties. Shill may send a device property
+  // update after Chrome sends a GetProperties request to Shill and before
+  // completing Shill's response. If this occurs, the initial response may not
+  // include the latest changed property value and we will need to store the
+  // device or service paths to issue another round of GetProperties.
+  std::set<std::string> device_paths_with_stale_properties_;
+  std::set<std::string> network_service_paths_with_stale_properties_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 };

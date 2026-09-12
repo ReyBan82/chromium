@@ -4,9 +4,11 @@
 
 #include <string>
 
+#include "ash/constants/ash_features.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "chromeos/ash/components/dbus/hermes/hermes_euicc_client.h"
 #include "chromeos/ash/components/dbus/hermes/hermes_profile_client.h"
 #include "chromeos/ash/components/network/fake_network_connection_handler.h"
@@ -162,6 +164,7 @@ class ESimProfileTest : public ESimTestBase {
   }
 
  private:
+  base::test::ScopedFeatureList feature_list_;
   std::unique_ptr<TestUserManager> test_user_manager_;
 };
 

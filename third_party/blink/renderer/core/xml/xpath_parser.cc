@@ -29,11 +29,13 @@
 
 #include "base/memory/ptr_util.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_xpath_ns_resolver.h"
+#include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/xml/xpath_evaluator.h"
 #include "third_party/blink/renderer/core/xml/xpath_grammar_generated.h"
 #include "third_party/blink/renderer/core/xml/xpath_path.h"
 #include "third_party/blink/renderer/core/xml/xpath_util.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
 #include "third_party/blink/renderer/platform/wtf/text/unicode.h"
@@ -58,17 +60,17 @@ static XMLCat CharCat(UChar a_char) {
 
   if (a_char == '.' || a_char == '-')
     return kNameCont;
-  WTF::unicode::CharCategory category = WTF::unicode::Category(a_char);
-  if (category &
-      (WTF::unicode::kLetter_Uppercase | WTF::unicode::kLetter_Lowercase |
-       WTF::unicode::kLetter_Other | WTF::unicode::kLetter_Titlecase |
-       WTF::unicode::kNumber_Letter))
+  unicode::CharCategory category = unicode::Category(a_char);
+  if (category & (unicode::kLetter_Uppercase | unicode::kLetter_Lowercase |
+                  unicode::kLetter_Other | unicode::kLetter_Titlecase |
+                  unicode::kNumber_Letter)) {
     return kNameStart;
-  if (category &
-      (WTF::unicode::kMark_NonSpacing | WTF::unicode::kMark_SpacingCombining |
-       WTF::unicode::kMark_Enclosing | WTF::unicode::kLetter_Modifier |
-       WTF::unicode::kNumber_DecimalDigit))
+  }
+  if (category & (unicode::kMark_NonSpacing | unicode::kMark_SpacingCombining |
+                  unicode::kMark_Enclosing | unicode::kLetter_Modifier |
+                  unicode::kNumber_DecimalDigit)) {
     return kNameCont;
+  }
   return kNotPartOfName;
 }
 
@@ -192,7 +194,7 @@ Token Parser::LexString() {
 
   for (next_pos_ = start_pos; next_pos_ < data_.length(); ++next_pos_) {
     if (data_[next_pos_] == delimiter) {
-      String value = data_.Substring(start_pos, next_pos_ - start_pos);
+      String value = data_.substr(start_pos, next_pos_ - start_pos);
       if (value.IsNull())
         value = "";
       ++next_pos_;  // Consume the char.
@@ -205,7 +207,7 @@ Token Parser::LexString() {
 }
 
 Token Parser::LexNumber() {
-  int start_pos = next_pos_;
+  wtf_size_t start_pos = next_pos_;
   bool seen_dot = false;
 
   // Go until end or a non-digits character.
@@ -214,7 +216,7 @@ Token Parser::LexNumber() {
     if (a_char >= 0xff)
       break;
 
-    if (a_char < '0' || a_char > '9') {
+    if (!IsAsciiDigit(a_char)) {
       if (a_char == '.' && !seen_dot)
         seen_dot = true;
       else
@@ -223,7 +225,7 @@ Token Parser::LexNumber() {
   }
 
   return Token(TokenType::kNumber,
-               data_.Substring(start_pos, next_pos_ - start_pos));
+               data_.substr(start_pos, next_pos_ - start_pos));
 }
 
 bool Parser::LexNCName(String& name) {
@@ -240,7 +242,7 @@ bool Parser::LexNCName(String& name) {
       break;
   }
 
-  name = data_.Substring(start_pos, next_pos_ - start_pos);
+  name = data_.substr(start_pos, next_pos_ - start_pos);
   return true;
 }
 
@@ -262,7 +264,7 @@ bool Parser::LexQName(String& name) {
   if (!LexNCName(n2))
     return false;
 
-  name = n1 + ":" + n2;
+  name = StrCat({n1, ":", n2});
   return true;
 }
 
@@ -300,8 +302,9 @@ Token Parser::NextTokenInternal() {
       char next = PeekAheadHelper();
       if (next == '.')
         return MakeTokenAndAdvance(TokenType::kDotDot, 2);
-      if (next >= '0' && next <= '9')
+      if (IsAsciiDigit(next)) {
         return LexNumber();
+      }
       return MakeTokenAndAdvance('.');
     }
     case '/':
@@ -343,6 +346,11 @@ Token Parser::NextTokenInternal() {
       String name;
       if (!LexQName(name))
         return Token(TokenType::kXPathError);
+      // DOM XPath API doesn't support any variables.
+      if (use_counter_) {
+        UseCounter::Count(use_counter_,
+                          WebFeature::kXPathMissingVariableParsed);
+      }
       return Token(TokenType::kVariableReference, name);
     }
   }
@@ -384,7 +392,7 @@ Token Parser::NextTokenInternal() {
     SkipWS();
     if (PeekCurHelper() == '*') {
       next_pos_++;
-      return Token(TokenType::kNameTest, name + ":*");
+      return Token(TokenType::kNameTest, StrCat({name, ":*"}));
     }
 
     // Make a full qname.
@@ -392,7 +400,7 @@ Token Parser::NextTokenInternal() {
     if (!LexNCName(n2))
       return Token(TokenType::kXPathError);
 
-    name = name + ":" + n2;
+    name = StrCat({name, ":", n2});
   }
 
   SkipWS();
@@ -420,7 +428,7 @@ Token Parser::NextToken() {
   return to_ret;
 }
 
-Parser::Parser() {
+Parser::Parser(UseCounter* use_counter) : use_counter_(use_counter) {
   Reset(String());
 }
 
@@ -471,7 +479,7 @@ bool Parser::ExpandQName(const String& q_name,
   if (colon != kNotFound) {
     if (!resolver_)
       return false;
-    String prefix = q_name.Left(colon);
+    String prefix = q_name.substr(0, colon);
     v8::TryCatch try_catch(resolver_->GetIsolate());
     try_catch.SetVerbose(true);  // Print exceptions to console.
     String uri;
@@ -480,7 +488,7 @@ bool Parser::ExpandQName(const String& q_name,
     if (uri.IsNull())
       return false;
     namespace_uri = AtomicString(uri);
-    local_name = AtomicString(q_name.Substring(colon + 1));
+    local_name = AtomicString(q_name.subview(colon + 1));
   } else {
     local_name = AtomicString(q_name);
   }
@@ -503,14 +511,17 @@ Expression* Parser::ParseStatement(const String& statement,
   if (parse_error) {
     top_expr_ = nullptr;
 
-    if (got_namespace_error_)
+    if (got_namespace_error_) {
       exception_state.ThrowDOMException(
           DOMExceptionCode::kNamespaceError,
-          "The string '" + statement + "' contains unresolvable namespaces.");
-    else
+          StrCat({"The string '", statement,
+                  "' contains unresolvable namespaces."}));
+    } else {
       exception_state.ThrowDOMException(
           DOMExceptionCode::kSyntaxError,
-          "The string '" + statement + "' is not a valid XPath expression.");
+          StrCat({"The string '", statement,
+                  "' is not a valid XPath expression."}));
+    }
     return nullptr;
   }
   Expression* result = top_expr_;

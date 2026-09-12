@@ -4,37 +4,34 @@
 
 package org.chromium.chrome.browser.crash;
 
-import android.annotation.SuppressLint;
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.app.job.JobInfo;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.os.PersistableBundle;
-import android.os.Process;
 
 import androidx.annotation.StringDef;
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.ApplicationState;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JniType;
+
 import org.chromium.base.ApplicationStatus;
-import org.chromium.base.ApplicationStatus.ApplicationStateListener;
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
 import org.chromium.base.StreamUtil;
-import org.chromium.base.ThreadUtils;
-import org.chromium.base.annotations.CalledByNative;
 import org.chromium.base.metrics.RecordHistogram;
-import org.chromium.base.task.PostTask;
-import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.base.SplitCompatIntentService;
 import org.chromium.chrome.browser.privacy.settings.PrivacyPreferencesManagerImpl;
 import org.chromium.components.background_task_scheduler.TaskIds;
-import org.chromium.components.crash.browser.ProcessExitReasonFromSystem;
 import org.chromium.components.minidump_uploader.CrashFileManager;
 import org.chromium.components.minidump_uploader.MinidumpUploadCallable;
 import org.chromium.components.minidump_uploader.MinidumpUploadCallable.MinidumpUploadStatus;
 import org.chromium.components.minidump_uploader.MinidumpUploadJobService;
 import org.chromium.components.minidump_uploader.util.CrashReportingPermissionManager;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -44,10 +41,9 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Service that is responsible for uploading crash minidumps to the Google crash server.
- */
-public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
+/** Service that is responsible for uploading crash minidumps to the Google crash server. */
+@NullMarked
+public class MinidumpUploadServiceImpl extends SplitCompatIntentService.Impl {
     private static final String TAG = "MinidmpUploadService";
 
     // Intent actions
@@ -55,25 +51,21 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
     static final String ACTION_UPLOAD = "com.google.android.apps.chrome.crash.ACTION_UPLOAD";
 
     // Intent bundle keys
-    @VisibleForTesting
-    static final String FILE_TO_UPLOAD_KEY = "minidump_file";
+    @VisibleForTesting static final String FILE_TO_UPLOAD_KEY = "minidump_file";
     static final String UPLOAD_LOG_KEY = "upload_log";
 
-    /**
-     * The number of times we will try to upload a crash.
-     */
+    /** The number of times we will try to upload a crash. */
     public static final int MAX_TRIES_ALLOWED = 3;
 
-    /**
-     * Histogram related constants.
-     */
+    /** Histogram related constants. */
     private static final String HISTOGRAM_NAME_PREFIX = "Tab.AndroidCrashUpload_";
+
     private static final int HISTOGRAM_MAX = 2;
     private static final int FAILURE = 0;
     private static final int SUCCESS = 1;
 
-    private static AtomicBoolean sBrowserCrashMetricsInitialized = new AtomicBoolean();
-    private static AtomicBoolean sDidBrowserCrashRecently = new AtomicBoolean();
+    private static final AtomicBoolean sBrowserCrashMetricsInitialized = new AtomicBoolean();
+    private static final AtomicBoolean sDidBrowserCrashRecently = new AtomicBoolean();
 
     @StringDef({ProcessType.BROWSER, ProcessType.RENDERER, ProcessType.GPU, ProcessType.OTHER})
     @Retention(RetentionPolicy.SOURCE)
@@ -85,78 +77,40 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
     }
 
     static final String[] TYPES = {
-            ProcessType.BROWSER, ProcessType.RENDERER, ProcessType.GPU, ProcessType.OTHER};
+        ProcessType.BROWSER, ProcessType.RENDERER, ProcessType.GPU, ProcessType.OTHER
+    };
 
     @Override
     protected void onServiceSet() {
-        getService().setIntentRedelivery(true);
+        assumeNonNull(getService()).setIntentRedelivery(true);
     }
 
-    /**
-     * Schedules uploading of all pending minidumps, using the JobScheduler API.
-     */
-    @SuppressLint("NewApi")
+    /** Schedules uploading of all pending minidumps, using the JobScheduler API. */
     public static void scheduleUploadJob() {
         CrashReportingPermissionManager permissionManager =
                 PrivacyPreferencesManagerImpl.getInstance();
         PersistableBundle permissions = new PersistableBundle();
-        permissions.putBoolean(ChromeMinidumpUploaderDelegate.IS_CLIENT_IN_METRICS_SAMPLE,
-                permissionManager.isClientInMetricsSample());
-        permissions.putBoolean(ChromeMinidumpUploaderDelegate.IS_UPLOAD_ENABLED_FOR_TESTS,
+        permissions.putBoolean(
+                ChromeMinidumpUploaderDelegate.IS_CLIENT_IN_SAMPLE_FOR_CRASHES,
+                permissionManager.isClientInSampleForCrashes());
+        permissions.putBoolean(
+                ChromeMinidumpUploaderDelegate.IS_UPLOAD_ENABLED_FOR_TESTS,
                 permissionManager.isUploadEnabledForTests());
 
         JobInfo.Builder builder =
-                new JobInfo
-                        .Builder(TaskIds.CHROME_MINIDUMP_UPLOADING_JOB_ID,
-                                new ComponentName(ContextUtils.getApplicationContext(),
+                new JobInfo.Builder(
+                                TaskIds.CHROME_MINIDUMP_UPLOADING_JOB_ID,
+                                new ComponentName(
+                                        ContextUtils.getApplicationContext(),
                                         ChromeMinidumpUploadJobService.class))
-                        .setExtras(permissions);
+                        .setExtras(permissions)
+                        .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED);
         MinidumpUploadJobService.scheduleUpload(builder);
     }
 
-    private static ApplicationStateListener createApplicationStateListener() {
-        return newState -> {
-            SharedPreferencesManager.getInstance().writeInt(
-                    ChromePreferenceKeys.LAST_SESSION_APPLICATION_STATE, newState);
-        };
-    }
-
-    /**
-     * Stores the successes and failures from uploading crash to UMA,
-     */
+    /** Stores the successes and failures from uploading crash to UMA, */
     public static void storeBreakpadUploadStatsInUma(CrashUploadCountStore pref) {
         sBrowserCrashMetricsInitialized.set(true);
-
-        SharedPreferencesManager sharedPrefs = SharedPreferencesManager.getInstance();
-        int previousPid = sharedPrefs.readInt(ChromePreferenceKeys.LAST_SESSION_BROWSER_PID);
-        @ApplicationState
-        int applicationExitState =
-                sharedPrefs.readInt(ChromePreferenceKeys.LAST_SESSION_APPLICATION_STATE);
-        String umaSuffix;
-        if (applicationExitState == ApplicationState.HAS_RUNNING_ACTIVITIES) {
-            umaSuffix = "Foreground2";
-        } else {
-            umaSuffix = "Background2";
-        }
-        sharedPrefs.writeInt(ChromePreferenceKeys.LAST_SESSION_BROWSER_PID, Process.myPid());
-        ApplicationStateListener appStateListener = createApplicationStateListener();
-        appStateListener.onApplicationStateChange(ApplicationStatus.getStateForApplication());
-
-        if (ThreadUtils.runningOnUiThread()) {
-            ApplicationStatus.registerApplicationStateListener(appStateListener);
-        } else {
-            PostTask.postTask(UiThreadTaskTraits.BEST_EFFORT, () -> {
-                ApplicationStatus.registerApplicationStateListener(appStateListener);
-            });
-        }
-
-        if (previousPid != 0) {
-            int reason = ProcessExitReasonFromSystem.getExitReason(previousPid);
-            ProcessExitReasonFromSystem.recordAsEnumHistogram(
-                    "Stability.Android.SystemExitReason.Browser", reason);
-            ProcessExitReasonFromSystem.recordAsEnumHistogram(
-                    "Stability.Android.SystemExitReason.Browser." + umaSuffix, reason);
-        }
 
         for (String type : TYPES) {
             for (int success = pref.getCrashSuccessUploadCount(type); success > 0; success--) {
@@ -174,9 +128,7 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
         }
     }
 
-    /**
-     * Returns true if the initial breakpad upload stats have been recorded.
-     */
+    /** Returns true if the initial breakpad upload stats have been recorded. */
     @CalledByNative
     private static boolean browserCrashMetricsInitialized() {
         return sBrowserCrashMetricsInitialized.get();
@@ -200,7 +152,7 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
     }
 
     @Override
-    protected void onHandleIntent(Intent intent) {
+    protected void onHandleIntent(@Nullable Intent intent) {
         if (intent == null) return;
         if (!ACTION_UPLOAD.equals(intent.getAction())) {
             Log.w(TAG, "Got unknown action from intent: " + intent.getAction());
@@ -214,8 +166,10 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
         }
         File minidumpFile = new File(minidumpFileName);
         if (!minidumpFile.isFile()) {
-            Log.w(TAG,
-                    "Cannot upload crash data since specified minidump " + minidumpFileName
+            Log.w(
+                    TAG,
+                    "Cannot upload crash data since specified minidump "
+                            + minidumpFileName
                             + " is not present.");
             return;
         }
@@ -226,20 +180,21 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
         if (tries >= MAX_TRIES_ALLOWED || tries < 0) {
             // Reachable only if the file naming is incorrect by current standard.
             // Thus we log an error instead of recording failure to UMA.
-            Log.e(TAG,
-                    "Giving up on trying to upload " + minidumpFileName
+            Log.e(
+                    TAG,
+                    "Giving up on trying to upload "
+                            + minidumpFileName
                             + " after failing to read a valid attempt number.");
             return;
         }
 
-        String logfileName = intent.getStringExtra(UPLOAD_LOG_KEY);
+        String logfileName = assumeNonNull(intent.getStringExtra(UPLOAD_LOG_KEY));
         File logfile = new File(logfileName);
 
         // Try to upload minidump
         MinidumpUploadCallable minidumpUploadCallable =
                 createMinidumpUploadCallable(minidumpFile, logfile);
-        @MinidumpUploadStatus
-        int uploadStatus = minidumpUploadCallable.call();
+        @MinidumpUploadStatus int uploadStatus = minidumpUploadCallable.call();
 
         if (uploadStatus == MinidumpUploadStatus.SUCCESS) {
             // Only update UMA stats if an intended and successful upload.
@@ -258,9 +213,11 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
                 if (tries < MAX_TRIES_ALLOWED) {
                     MinidumpUploadServiceImpl.scheduleUploadJob();
                 } else {
-                    Log.d(TAG,
-                            "Giving up on trying to upload " + minidumpFileName + "after " + tries
-                                    + " number of tries.");
+                    Log.d(
+                            TAG,
+                            "Giving up on trying to upload %s after %d number of tries.",
+                            minidumpFileName,
+                            tries);
                 }
             } else {
                 Log.w(TAG, "Failed to rename minidump " + minidumpFileName);
@@ -268,9 +225,7 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
         }
     }
 
-    /**
-     * Get the permission manager, can be overridden for testing.
-     */
+    /** Get the permission manager, can be overridden for testing. */
     CrashReportingPermissionManager getCrashReportingPermissionManager() {
         return PrivacyPreferencesManagerImpl.getInstance();
     }
@@ -312,17 +267,19 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
      * crashes by looking into the file contents. Because this code can execute in a context when
      * the main Chrome activity is no longer running, the counts are stored in shared preferences;
      * they are later read and recorded as metrics by the main Chrome activity.
-     * NOTE: This method should be called *after* renaming the file, since renaming occurs as a
+     *
+     * <p>NOTE: This method should be called *after* renaming the file, since renaming occurs as a
      * side-effect of a successful upload.
+     *
      * @param originalFilename The name of the successfully uploaded minidump, *prior* to uploading.
      */
     public static void incrementCrashSuccessUploadCount(String originalFilename) {
-        final @ProcessType String process_type =
+        final @ProcessType String processType =
                 getCrashType(getNewNameAfterSuccessfulUpload(originalFilename));
-        if (ProcessType.BROWSER.equals(process_type)) {
+        if (ProcessType.BROWSER.equals(processType)) {
             sDidBrowserCrashRecently.set(true);
         }
-        CrashUploadCountStore.getInstance().incrementCrashSuccessUploadCount(process_type);
+        CrashUploadCountStore.getInstance().incrementCrashSuccessUploadCount(processType);
     }
 
     /**
@@ -330,15 +287,17 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
      * by looking into the file contents. Because this code can execute in a context when the main
      * Chrome activity is no longer running, the counts are stored in shared preferences; they are
      * later read and recorded as metrics by the main Chrome activity.
-     * NOTE: This method should be called *prior* to renaming the file.
+     *
+     * <p>NOTE: This method should be called *prior* to renaming the file.
+     *
      * @param originalFilename The name of the successfully uploaded minidump, *prior* to uploading.
      */
     public static void incrementCrashFailureUploadCount(String originalFilename) {
-        final @ProcessType String process_type = getCrashType(originalFilename);
-        if (ProcessType.BROWSER.equals(process_type)) {
+        final @ProcessType String processType = getCrashType(originalFilename);
+        if (ProcessType.BROWSER.equals(processType)) {
             sDidBrowserCrashRecently.set(true);
         }
-        CrashUploadCountStore.getInstance().incrementCrashFailureUploadCount(process_type);
+        CrashUploadCountStore.getInstance().incrementCrashFailureUploadCount(processType);
     }
 
     /**
@@ -357,13 +316,20 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
     }
 
     /**
-     * Attempts to upload the specified {@param minidumpFile} directly even when JobScheduler is
-     * available. This function is same as |tryUploadCrashDump| without the JobScheduler check.
+     * Attempts to upload the specified {@code minidumpFile} directly. If Android doesn't allow a
+     * direct upload, then fallback to JobScheduler.
      *
-     * Note that the preferred way to upload minidump is through JobScheduler when possible, use
-     * this function if want to upload ASAP.
+     * <p>Note that the preferred way to upload minidump is only through JobScheduler, use this
+     * function if you need to upload it urgently.
      */
     static void tryUploadCrashDumpNow(File minidumpFile) {
+        if (!(ApplicationStatus.isInitialized() && ApplicationStatus.hasVisibleActivities())) {
+            // Android does not allow us to start services from the background. If we are in the
+            // background, then go through the JobScheduler path instead. See crbug.com/40903537
+            // and crbug.com/407575680 for crashes caused by not doing this.
+            scheduleUploadJob();
+            return;
+        }
         CrashFileManager fileManager =
                 new CrashFileManager(ContextUtils.getApplicationContext().getCacheDir());
         Intent intent =
@@ -377,15 +343,15 @@ public class MinidumpUploadServiceImpl extends MinidumpUploadService.Impl {
     /**
      * Attempts to upload the crash report with the given local ID.
      *
-     * Note that this method is asynchronous. All that is guaranteed is that
-     * upload attempts will be enqueued.
+     * <p>Note that this method is asynchronous. All that is guaranteed is that upload attempts will
+     * be enqueued.
      *
-     * This method is safe to call from the UI thread.
+     * <p>This method is safe to call from the UI thread.
      *
      * @param localId The local ID of the crash report.
      */
     @CalledByNative
-    public static void tryUploadCrashDumpWithLocalId(String localId) {
+    public static void tryUploadCrashDumpWithLocalId(@JniType("std::string") String localId) {
         if (localId == null || localId.isEmpty()) {
             Log.w(TAG, "Cannot force crash upload since local crash id is absent.");
             return;

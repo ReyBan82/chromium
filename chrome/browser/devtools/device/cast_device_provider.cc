@@ -11,11 +11,15 @@
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/logging.h"
+#include "base/memory/weak_ptr.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/task/single_thread_task_runner.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/local_discovery/service_discovery_shared_client.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "chrome/browser/media/router/media_router_feature.h"
+#include "content/public/browser/browser_thread.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/ip_address.h"
 
@@ -71,7 +75,7 @@ AndroidDeviceManager::DeviceInfo ServiceDescriptionToDeviceInfo(
       ParseServiceTxtRecord(service_description.metadata);
 
   AndroidDeviceManager::DeviceInfo device_info;
-  device_info.connected = true;
+  device_info.connected_state = AndroidDeviceManager::DeviceInfo::kConnected;
   device_info.model = GetServiceMapValue(*record_map, "md", kUnknownCastDevice);
   AndroidDeviceManager::BrowserInfo browser_info;
   browser_info.socket_name = base::NumberToString(kCastInspectPort);
@@ -89,16 +93,15 @@ AndroidDeviceManager::DeviceInfo ServiceDescriptionToDeviceInfo(
 // CastDeviceProvider and ServiceDiscoveryDeviceLister are destroyed on
 // different threads in undefined order.
 //
-// TODO(crbug.com/963216): Consolidate DNS-SD implementations for Cast.
-class CastDeviceProvider::DeviceListerDelegate
-    : public ServiceDiscoveryDeviceLister::Delegate,
-      public base::SupportsWeakPtr<DeviceListerDelegate> {
+// TODO(crbug.com/240202188): Consolidate DNS-SD implementations for Cast.
+class CastDeviceProvider::DeviceListerDelegate final
+    : public ServiceDiscoveryDeviceLister::Delegate {
  public:
   DeviceListerDelegate(base::WeakPtr<CastDeviceProvider> provider,
                        scoped_refptr<base::SingleThreadTaskRunner> runner)
       : provider_(provider), runner_(runner) {}
 
-  virtual ~DeviceListerDelegate() {}
+  ~DeviceListerDelegate() = default;
 
   void StartDiscovery() {
     // This must be called on the UI thread; ServiceDiscoverySharedClient and
@@ -117,10 +120,15 @@ class CastDeviceProvider::DeviceListerDelegate
   void OnDeviceChanged(const std::string& service_type,
                        bool added,
                        const ServiceDescription& service_description) override {
+    bool allow_all_ips = false;
+    if (g_browser_process && g_browser_process->local_state()) {
+      allow_all_ips = media_router::GetCastAllowAllIPsPref(
+          g_browser_process->local_state());
+    }
     runner_->PostTask(
         FROM_HERE,
-        base::BindOnce(&CastDeviceProvider::OnDeviceChanged, provider_,
-                       service_type, added, service_description));
+        base::BindOnce(&CastDeviceProvider::OnDeviceChangedWithPref, provider_,
+                       service_type, added, service_description, allow_all_ips));
   }
 
   void OnDeviceRemoved(const std::string& service_type,
@@ -136,6 +144,16 @@ class CastDeviceProvider::DeviceListerDelegate
                                      provider_, service_type));
   }
 
+  void OnPermissionRejected() override {
+    runner_->PostTask(
+        FROM_HERE,
+        base::BindOnce(&CastDeviceProvider::OnPermissionRejected, provider_));
+  }
+
+  base::WeakPtr<DeviceListerDelegate> AsWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
  private:
   // The device provider to notify of device changes.
   base::WeakPtr<CastDeviceProvider> provider_;
@@ -144,11 +162,12 @@ class CastDeviceProvider::DeviceListerDelegate
   scoped_refptr<base::SingleThreadTaskRunner> runner_;
   scoped_refptr<ServiceDiscoverySharedClient> service_discovery_client_;
   std::unique_ptr<ServiceDiscoveryDeviceLister> device_lister_;
+  base::WeakPtrFactory<DeviceListerDelegate> weak_ptr_factory_{this};
 };
 
-CastDeviceProvider::CastDeviceProvider() {}
+CastDeviceProvider::CastDeviceProvider() = default;
 
-CastDeviceProvider::~CastDeviceProvider() {}
+CastDeviceProvider::~CastDeviceProvider() = default;
 
 void CastDeviceProvider::QueryDevices(SerialsCallback callback) {
   if (!lister_delegate_) {
@@ -184,13 +203,25 @@ void CastDeviceProvider::OnDeviceChanged(
     const std::string& service_type,
     bool added,
     const ServiceDescription& service_description) {
+  OnDeviceChangedWithPref(service_type, added, service_description, false);
+}
+
+void CastDeviceProvider::OnDeviceChangedWithPref(
+    const std::string& service_type,
+    bool added,
+    const ServiceDescription& service_description,
+    bool allow_all_ips) {
   VLOG(1) << "Device " << (added ? "added: " : "changed: ")
           << service_description.service_name;
   if (service_description.service_type() != kCastServiceType)
     return;
   const net::IPAddress& ip_address = service_description.ip_address;
-  if (!ip_address.IsValid()) {
-    // An invalid IP address is not queryable.
+  if (!ip_address.IsValid() ||
+      (!allow_all_ips &&
+       (ip_address.IsPubliclyRoutable() || ip_address.IsLoopback()))) {
+    // Cast devices are discovered via mDNS and are expected to be on the local
+    // network, so only valid non-publicly-routable addresses are accepted.
+    // Requirements should match CastMediaSinkServiceImpl::OpenChannel.
     return;
   }
   const std::string& name = service_description.service_name;
@@ -212,6 +243,12 @@ void CastDeviceProvider::OnDeviceRemoved(const std::string& service_type,
 
 void CastDeviceProvider::OnDeviceCacheFlushed(const std::string& service_type) {
   VLOG(1) << "Device cache flushed";
+  service_hostname_map_.clear();
+  device_info_map_.clear();
+}
+
+void CastDeviceProvider::OnPermissionRejected() {
+  VLOG(1) << "Permission for local discovery is rejected.";
   service_hostname_map_.clear();
   device_info_map_.clear();
 }

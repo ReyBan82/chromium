@@ -2,9 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+
+import * as SourceMapScopesModule from 'devtools/models/source_map_scopes/source_map_scopes.js';
+
 (async function() {
   TestRunner.addResult(`Tests resolving variable names via source maps.\n`);
-  await TestRunner.loadLegacyModule('sources'); await TestRunner.loadTestModule('sources_test_runner');
   await TestRunner.showPanel('sources');
   await TestRunner.addScriptTag('resources/resolve-identifiers.js');
 
@@ -12,10 +16,27 @@
 
   function onSourceMapLoaded() {
     SourcesTestRunner.startDebuggerTest(() => SourcesTestRunner.runTestFunctionAndWaitUntilPaused());
-    TestRunner.addSniffer(Sources.SourceMapNamesResolver, '_scopeResolvedForTest', onAllScopesResolved, true);
+    SourceMapScopesModule.NamesResolver.setScopeResolvedForTest(onAllScopesResolved);
   }
 
   function onAllScopesResolved() {
+    void resolveScopesAndExpand();
+  }
+
+  async function resolveScopesAndExpand() {
+    let Sources;
+    try {
+      Sources = await import('devtools/panels/sources/sources.js');
+    } catch (e) {
+      TestRunner.addResult('Failed to import sources: ' + e);
+      TestRunner.completeDebuggerTest();
+      return;
+    }
+
+    const instance = Sources.ScopeChainSidebarPane.ScopeChainSidebarPane.instance();
+    if (!SourcesTestRunner.scopeChainSections()) {
+      await TestRunner.addSnifferPromise(instance, 'sidebarPaneUpdatedForTest');
+    }
     SourcesTestRunner.expandScopeVariablesSidebarPane(onSidebarsExpanded);
   }
 

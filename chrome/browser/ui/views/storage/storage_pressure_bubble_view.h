@@ -10,18 +10,18 @@
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "url/origin.h"
 
-class Browser;
+class BrowserWindowInterface;
 
 class StoragePressureBubbleView : public views::BubbleDialogDelegateView {
- public:
-  METADATA_HEADER(StoragePressureBubbleView);
+  METADATA_HEADER(StoragePressureBubbleView, views::BubbleDialogDelegateView)
 
-  static void ShowBubble(const url::Origin origin);
+ public:
+  static void ShowBubble(const url::Origin& origin);
 
  private:
-  StoragePressureBubbleView(views::View* anchor_view,
-                            Browser* browser,
-                            const url::Origin origin);
+  StoragePressureBubbleView(views::BubbleAnchor anchor,
+                            BrowserWindowInterface* browser,
+                            const url::Origin& origin);
   ~StoragePressureBubbleView() override;
 
   void OnDialogAccepted();
@@ -30,11 +30,8 @@ class StoragePressureBubbleView : public views::BubbleDialogDelegateView {
   void Init() override;
   bool ShouldShowCloseButton() const override;
 
-  const raw_ptr<Browser> browser_;
+  const raw_ptr<BrowserWindowInterface> bwi_;
   const url::Origin origin_;
-  // Whether or not the user opened the all sites page from the notification
-  // positive button.
-  bool ignored_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_STORAGE_STORAGE_PRESSURE_BUBBLE_VIEW_H_

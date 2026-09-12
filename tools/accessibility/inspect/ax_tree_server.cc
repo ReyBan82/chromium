@@ -8,7 +8,6 @@
 #include <string>
 
 #include "base/at_exit.h"
-#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/path_service.h"
@@ -30,7 +29,8 @@ namespace content {
 
 AXTreeServer::AXTreeServer(const AXTreeSelector& selector,
                            const ui::AXInspectScenario& scenario,
-                           ui::AXApiType::Type api) {
+                           ui::AXApiType::Type api)
+    : error(false) {
   // If an API is not supplied, use the default API for this platform.
   std::unique_ptr<AXTreeFormatter> formatter =
       api != ui::AXApiType::kNone ? AXInspectFactory::CreateFormatter(api)
@@ -60,8 +60,13 @@ AXTreeServer::AXTreeServer(const AXTreeSelector& selector,
   formatter->SetPropertyFilters(property_filters_ext,
                                 AXTreeFormatter::kFiltersDefaultSet);
 
+  // Set subtree pattern if provided.
+  if (!scenario.subtree_pattern.empty()) {
+    formatter->SetSubtreePattern(scenario.subtree_pattern);
+  }
+
   // Get accessibility tree as a nested dictionary.
-  base::Value::Dict dict = formatter->BuildTreeForSelector(selector);
+  base::DictValue dict = formatter->BuildTreeForSelector(selector);
 
   if (dict.empty()) {
     LOG(ERROR) << "Failed to get accessibility tree.";

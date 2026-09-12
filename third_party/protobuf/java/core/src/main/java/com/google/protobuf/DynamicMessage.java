@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -54,7 +31,18 @@ public final class DynamicMessage extends AbstractMessage {
   private final FieldSet<FieldDescriptor> fields;
   private final FieldDescriptor[] oneofCases;
   private final UnknownFieldSet unknownFields;
-  private int memoizedSize = -1;
+
+  /**
+   * Stores previously-computed {@code isInitialized} results. {@code isInitialized} can be
+   * expensive to compute in situations where a large message is converted to a builder, modified,
+   * and then rebuilt. A byte field used instead of an idiomatic tristate enum to follow the pattern
+   * established on gencode, micro-optimizing for better layout.
+   */
+  private transient byte memoizedIsInitialized = NO_MEMO_PRESENT;
+
+  private static final byte NO_MEMO_PRESENT = -1;
+  private static final byte IS_INITIALIZED_FALSE = 0;
+  private static final byte IS_INITIALIZED_TRUE = 1;
 
   /**
    * Construct a {@code DynamicMessage} using the given {@code FieldSet}. oneofCases stores the
@@ -85,7 +73,6 @@ public final class DynamicMessage extends AbstractMessage {
         oneofCases,
         UnknownFieldSet.getDefaultInstance());
   }
-
 
   /** Parse a message of the given type from the given input stream. */
   public static DynamicMessage parseFrom(Descriptor type, CodedInputStream input)
@@ -225,7 +212,9 @@ public final class DynamicMessage extends AbstractMessage {
 
   static boolean isInitialized(Descriptor type, FieldSet<FieldDescriptor> fields) {
     // Check that all required fields are present.
-    for (final FieldDescriptor field : type.getFields()) {
+    int numFields = type.getFieldCount();
+    for (int i = 0; i < numFields; i++) {
+      FieldDescriptor field = type.getField(i);
       if (field.isRequired()) {
         if (!fields.hasField(field)) {
           return false;
@@ -239,7 +228,18 @@ public final class DynamicMessage extends AbstractMessage {
 
   @Override
   public boolean isInitialized() {
-    return isInitialized(type, fields);
+    if (memoizedIsInitialized == IS_INITIALIZED_TRUE) {
+      return true;
+    }
+    if (memoizedIsInitialized == IS_INITIALIZED_FALSE) {
+      return false;
+    }
+    if (isInitialized(type, fields)) {
+      memoizedIsInitialized = IS_INITIALIZED_TRUE;
+      return true;
+    }
+    memoizedIsInitialized = IS_INITIALIZED_FALSE;
+    return false;
   }
 
   @Override
@@ -256,7 +256,9 @@ public final class DynamicMessage extends AbstractMessage {
   @Override
   public int getSerializedSize() {
     int size = memoizedSize;
-    if (size != -1) return size;
+    if (size != -1) {
+      return size;
+    }
 
     if (type.getOptions().getMessageSetWireFormat()) {
       size = fields.getMessageSetSerializedSize();
@@ -400,7 +402,9 @@ public final class DynamicMessage extends AbstractMessage {
     public DynamicMessage buildPartial() {
       // Set default values for all fields in a MapEntry.
       if (type.getOptions().getMapEntry()) {
-        for (FieldDescriptor field : type.getFields()) {
+        int numFields = type.getFieldCount();
+        for (int i = 0; i < numFields; i++) {
+          FieldDescriptor field = type.getField(i);
           if (field.isOptional() && !fields.hasField(field)) {
             if (field.getJavaType() == FieldDescriptor.JavaType.MESSAGE) {
               fields.setField(field, getDefaultInstance(field.getMessageType()));
@@ -432,7 +436,9 @@ public final class DynamicMessage extends AbstractMessage {
     @Override
     public boolean isInitialized() {
       // Check that all required fields are present.
-      for (FieldDescriptor field : type.getFields()) {
+      int numFields = type.getFieldCount();
+      for (int i = 0; i < numFields; i++) {
+        FieldDescriptor field = type.getField(i);
         if (field.isRequired()) {
           if (!fields.hasField(field)) {
             return false;
@@ -521,8 +527,14 @@ public final class DynamicMessage extends AbstractMessage {
 
     @Override
     public Builder setField(FieldDescriptor field, Object value) {
+      // This should be kept as long as LazyField is still around. We will use InternalLazyField
+      // as the internal details so we should not allow the legacy LazyField to be passed in.
+      // TODO: Consider converting from LazyField to InternalLazyField here.
+      if (value instanceof LazyField) {
+        value = ((LazyField) value).getValue();
+      }
       verifyContainingType(field);
-      // TODO(xiaofeng): This check should really be put in FieldSet.setField()
+      // TODO: This check should really be put in FieldSet.setField()
       // where all other such checks are done. However, currently
       // FieldSet.setField() permits Integer value for enum fields probably
       // because of some internal features we support. Should figure it out
@@ -536,11 +548,12 @@ public final class DynamicMessage extends AbstractMessage {
           fields.clearField(oldField);
         }
         oneofCases[index] = field;
-      } else if (field.getFile().getSyntax() == Descriptors.FileDescriptor.Syntax.PROTO3) {
-        if (!field.isRepeated()
-            && field.getJavaType() != FieldDescriptor.JavaType.MESSAGE
-            && value.equals(field.getDefaultValue())) {
-          // In proto3, setting a field to its default value is equivalent to clearing the field.
+      } else if (!field.hasPresence()) {
+        if (field.isRepeated()
+            ? ((List<?>) value).isEmpty()
+            : value.equals(field.getDefaultValue())) {
+          // Setting a field without presence to its default value is equivalent to clearing the
+          // field.
           fields.clearField(field);
           return this;
         }
@@ -639,7 +652,7 @@ public final class DynamicMessage extends AbstractMessage {
             throw new IllegalArgumentException(
                 "DynamicMessage should use EnumValueDescriptor to set Enum Value.");
           }
-          // TODO(xiaofeng): Re-enable this check after Orgstore is fixed to not
+          // TODO: Re-enable this check after Orgstore is fixed to not
           // set incorrect EnumValueDescriptors.
           // EnumDescriptor fieldType = field.getEnumType();
           // EnumDescriptor fieldValueType = ((EnumValueDescriptor) value).getType();
@@ -724,8 +737,8 @@ public final class DynamicMessage extends AbstractMessage {
         return (Message.Builder) o;
       }
 
-      if (o instanceof LazyField) {
-        o = ((LazyField) o).getValue();
+      if (o instanceof InternalLazyField) {
+        o = ((InternalLazyField) o).getValue();
       }
       if (o instanceof Message) {
         return ((Message) o).toBuilder();

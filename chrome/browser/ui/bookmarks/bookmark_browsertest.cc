@@ -3,30 +3,40 @@
 // found in the LICENSE file.
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/scoped_observation.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/metrics/user_action_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/timer/timer.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/bookmarks/bookmark_model_factory.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chrome_notification_types.h"
+#include "chrome/browser/interstitials/security_interstitial_page_test_utils.h"
 #include "chrome/browser/platform_util.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
+#include "chrome/browser/tab_group_sync/tab_group_sync_service_factory.h"
+#include "chrome/browser/ui/bookmarks/bookmark_bar.h"
+#include "chrome/browser/ui/bookmarks/bookmark_bar_controller.h"
 #include "chrome/browser/ui/bookmarks/bookmark_drag_drop.h"
 #include "chrome/browser/ui/bookmarks/bookmark_tab_helper.h"
+#include "chrome/browser/ui/bookmarks/bookmark_tab_helper_observer.h"
 #include "chrome/browser/ui/bookmarks/bookmark_utils_desktop.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_element_identifiers.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/tabs/tab_group_model.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/ui_features.h"
+#include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/common/webui_url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -34,8 +44,10 @@
 #include "components/bookmarks/browser/bookmark_utils.h"
 #include "components/bookmarks/browser/url_and_title.h"
 #include "components/bookmarks/test/bookmark_test_helpers.h"
+#include "components/saved_tab_groups/public/tab_group_sync_service.h"
 #include "components/security_interstitials/content/security_interstitial_tab_helper.h"
-#include "content/public/browser/notification_service.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -45,8 +57,18 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "ui/base/dragdrop/mojom/drag_drop_types.mojom-shared.h"
 #include "ui/base/dragdrop/os_exchange_data.h"
+#include "ui/base/interaction/element_tracker.h"
+#include "ui/base/page_transition_types.h"
 #include "ui/base/ui_base_features.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/gfx/image/image_skia.h"
+#include "ui/views/controls/button/checkbox.h"
+#include "ui/views/interaction/element_tracker_views.h"
+#include "ui/views/test/button_test_api.h"
+#include "ui/views/widget/any_widget_observer.h"
+#include "ui/views/widget/widget.h"
+#include "ui/views/widget/widget_delegate.h"
+#include "ui/views/window/dialog_delegate.h"
 
 using bookmarks::BookmarkModel;
 using bookmarks::BookmarkNode;
@@ -59,14 +81,6 @@ const char16_t kPersistBookmarkTitle[] = u"CNN";
 const base::Time kPersistLastUsedTime =
     base::Time() + base::Days(7) + base::Hours(2) + base::Minutes(55) +
     base::Seconds(24) + base::Milliseconds(133);
-
-bool IsShowingInterstitial(content::WebContents* tab) {
-  security_interstitials::SecurityInterstitialTabHelper* helper =
-      security_interstitials::SecurityInterstitialTabHelper::FromWebContents(
-          tab);
-  return helper &&
-         helper->GetBlockingPageForCurrentlyCommittedNavigationForTesting();
-}
 
 }  // namespace
 
@@ -97,23 +111,31 @@ class TestBookmarkTabHelperObserver : public BookmarkTabHelperObserver {
 class BookmarkBrowsertest : public InProcessBrowserTest {
  public:
   BookmarkBrowsertest() {
-    // This needs to be disabled so that animations are guaranteed to work.
-#if BUILDFLAG(IS_WIN)
     feature_list_.InitWithFeatures(
-        {}, {features::kApplyNativeOcclusionToCompositor});
+        /*enabled_features=*/{switches::kSyncEnableBookmarksInTransportMode},
+        /*disabled_features=*/{
+#if BUILDFLAG(IS_WIN)
+            // This needs to be disabled so that animations are guaranteed to
+            // work.
+            features::kApplyNativeOcclusionToCompositor
 #endif
+        });
   }
 
   BookmarkBrowsertest(const BookmarkBrowsertest&) = delete;
   BookmarkBrowsertest& operator=(const BookmarkBrowsertest&) = delete;
 
   bool IsVisible() {
-    return browser()->bookmark_bar_state() == BookmarkBar::SHOW;
+    return BookmarkBarController::From(browser())->bookmark_bar_state() ==
+           BookmarkBar::SHOW;
   }
 
-  static void CheckAnimation(Browser* browser, base::RunLoop* loop) {
-    if (!browser->window()->IsBookmarkBarAnimating())
+  static void CheckAnimation(BrowserWindowInterface* browser,
+                             base::RunLoop* loop) {
+    if (!BrowserView::GetBrowserViewForBrowser(browser)
+             ->IsBookmarkBarAnimating()) {
       loop->Quit();
+    }
   }
 
   base::TimeDelta WaitForBookmarkBarAnimationToFinish() {
@@ -138,9 +160,7 @@ class BookmarkBrowsertest : public InProcessBrowserTest {
   base::HistogramTester* histogram_tester() { return &histogram_tester_; }
 
  private:
-#if BUILDFLAG(IS_WIN)
   base::test::ScopedFeatureList feature_list_;
-#endif
 
   // We make the histogram tester a member field to make sure it starts
   // recording as early as possible.
@@ -162,26 +182,27 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, BookmarkBarVisibleWait) {
 
 // Verify that bookmarks persist browser restart.
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, PRE_Persist) {
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
 
   const BookmarkNode* node = bookmarks::AddIfNotBookmarked(
       bookmark_model, GURL(kPersistBookmarkURL), kPersistBookmarkTitle);
-  bookmark_model->UpdateLastUsedTime(node, kPersistLastUsedTime);
+  bookmark_model->UpdateLastUsedTime(node, kPersistLastUsedTime,
+                                     /*just_opened=*/true);
 }
 
 #if BUILDFLAG(IS_WIN)
-// TODO(crbug.com/935607): The test fails on Windows.
+// TODO(crbug.com/41443454): The test fails on Windows.
 #define MAYBE_Persist DISABLED_Persist
 #else
 #define MAYBE_Persist Persist
 #endif
 
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, MAYBE_Persist) {
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
 
   GURL url(kPersistBookmarkURL);
-  std::vector<const BookmarkNode*> nodes;
-  bookmark_model->GetNodesByURL(url, &nodes);
+  std::vector<raw_ptr<const BookmarkNode, VectorExperimental>> nodes =
+      bookmark_model->GetNodesByURL(url);
 
   ASSERT_EQ(1u, nodes.size());
   ASSERT_EQ(url, nodes[0]->url());
@@ -189,11 +210,12 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, MAYBE_Persist) {
   EXPECT_EQ(kPersistLastUsedTime, nodes[0]->date_last_used());
 }
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)  // No multi-profile on ChromeOS.
+#if !BUILDFLAG(IS_CHROMEOS)  // No multi-profile on ChromeOS.
 
 // Sanity check that bookmarks from different profiles are separate.
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, MultiProfile) {
-  BookmarkModel* bookmark_model1 = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model1 =
+      WaitForBookmarkModel(browser()->GetProfile());
 
   base::RunLoop run_loop;
   Profile* profile2 = nullptr;
@@ -210,61 +232,53 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, MultiProfile) {
 
   bookmarks::AddIfNotBookmarked(bookmark_model1, GURL(kPersistBookmarkURL),
                                 kPersistBookmarkTitle);
-  std::vector<UrlAndTitle> urls1, urls2;
-  bookmark_model1->GetBookmarks(&urls1);
-  bookmark_model2->GetBookmarks(&urls2);
-  ASSERT_EQ(1u, urls1.size());
-  ASSERT_TRUE(urls2.empty());
+
+  ASSERT_EQ(1u, bookmark_model1->GetUniqueUrls().size());
+  ASSERT_TRUE(bookmark_model2->GetUniqueUrls().empty());
 }
 
 #endif
 
 // Sanity check that bookmarks from Incognito mode persist Incognito restart.
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, IncognitoPersistence) {
-  Browser* incognito_browser = CreateIncognitoBrowser();
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser();
   BookmarkModel* bookmark_model =
-      WaitForBookmarkModel(incognito_browser->profile());
+      WaitForBookmarkModel(incognito_browser->GetProfile());
 
   // Add bookmark for Incognito and ensure it is added.
   bookmarks::AddIfNotBookmarked(bookmark_model, GURL(kPersistBookmarkURL),
                                 kPersistBookmarkTitle);
 
-  std::vector<UrlAndTitle> urls;
-  bookmark_model->GetBookmarks(&urls);
-  ASSERT_EQ(1u, urls.size());
+  ASSERT_EQ(1u, bookmark_model->GetUniqueUrls().size());
 
   // Restart Incognito, and check again.
   CloseBrowserSynchronously(incognito_browser);
   incognito_browser = CreateIncognitoBrowser();
-  bookmark_model = WaitForBookmarkModel(incognito_browser->profile());
-  urls.clear();
-  bookmark_model->GetBookmarks(&urls);
-  ASSERT_EQ(1u, urls.size());
+  bookmark_model = WaitForBookmarkModel(incognito_browser->GetProfile());
+  ASSERT_EQ(1u, bookmark_model->GetUniqueUrls().size());
 
   // Ensure it is also available in regular mode.
-  bookmark_model = WaitForBookmarkModel(browser()->profile());
-  urls.clear();
-  bookmark_model->GetBookmarks(&urls);
-  ASSERT_EQ(1u, urls.size());
+  bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
+  ASSERT_EQ(1u, bookmark_model->GetUniqueUrls().size());
 }
 
 // Regression for crash caused by opening folder as a group in an incognito
 // window when the folder contains URLs that cannot be displayed in incognito.
-// See discussion starting at crbug.com/1242351#c15
+// See discussion starting at crbug.com/40786567#comment16
 IN_PROC_BROWSER_TEST_F(
     BookmarkBrowsertest,
     OpenFolderAsGroupInIncognitoWhenBookmarksCantOpenInIncognito) {
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
   const BookmarkNode* const folder = bookmark_model->AddFolder(
       bookmark_model->bookmark_bar_node(), 0, u"Folder");
   const BookmarkNode* const page1 = bookmark_model->AddURL(
-      folder, 0, u"BookmarkManager", GURL(chrome::kChromeUIBookmarksURL));
+      folder, 0, u"Extensions", GURL(chrome::kChromeUIExtensionsURL));
   const BookmarkNode* const page2 = bookmark_model->AddURL(
       folder, 1, u"Settings", GURL(chrome::kChromeUISettingsURL));
 
-  Browser* incognito_browser = CreateIncognitoBrowser();
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser();
   BookmarkModel* incognito_model =
-      WaitForBookmarkModel(incognito_browser->profile());
+      WaitForBookmarkModel(incognito_browser->GetProfile());
   ASSERT_FALSE(incognito_model->root_node()->children().empty());
   ASSERT_TRUE(incognito_model->root_node()->children()[0]->is_folder());
   BookmarkNode* const incognito_folder =
@@ -273,38 +287,67 @@ IN_PROC_BROWSER_TEST_F(
   EXPECT_EQ(page1->url(), incognito_folder->children()[0]->url());
   EXPECT_EQ(page2->url(), incognito_folder->children()[1]->url());
 
-  const int browser_tabs = browser()->tab_strip_model()->GetTabCount();
-  const int incognito_tabs =
-      incognito_browser->tab_strip_model()->GetTabCount();
+  const int browser_tabs = browser()->GetTabStripModel()->count();
+  const int incognito_tabs = incognito_browser->GetTabStripModel()->count();
 
-  chrome::OpenAllIfAllowed(incognito_browser, {incognito_folder},
-                           WindowOpenDisposition::NEW_BACKGROUND_TAB,
-                           /* add_to_group =*/true);
+  bookmarks::OpenAllIfAllowed(incognito_browser, {incognito_folder},
+                              WindowOpenDisposition::NEW_BACKGROUND_TAB,
+                              bookmarks::OpenAllBookmarksContext::kInGroup);
 
-  EXPECT_EQ(incognito_tabs,
-            incognito_browser->tab_strip_model()->GetTabCount());
-  EXPECT_EQ(browser_tabs + 2, browser()->tab_strip_model()->GetTabCount());
+  EXPECT_EQ(incognito_tabs, incognito_browser->GetTabStripModel()->count());
+  EXPECT_EQ(browser_tabs + 2, browser()->GetTabStripModel()->count());
 }
 
-IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
-  Browser* regular_browser = browser();
+IN_PROC_BROWSER_TEST_F(
+    BookmarkBrowsertest,
+    OpenBookmarkInSplitInIncognitoWhenBookmarkCantOpenInIncognito) {
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
+  bookmark_model->AddURL(bookmark_model->bookmark_bar_node(), 0, u"Settings",
+                         GURL(chrome::kChromeUISettingsURL));
+
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser();
+  BookmarkModel* incognito_model =
+      WaitForBookmarkModel(incognito_browser->GetProfile());
+  ASSERT_FALSE(incognito_model->bookmark_bar_node()->children().empty());
+  BookmarkNode* const incognito_page =
+      incognito_model->bookmark_bar_node()->children()[0].get();
+
+  const int browser_tabs = browser()->GetTabStripModel()->count();
+  const int incognito_tabs = incognito_browser->GetTabStripModel()->count();
+
+  bookmarks::OpenAllIfAllowed(incognito_browser, {incognito_page},
+                              WindowOpenDisposition::NEW_BACKGROUND_TAB,
+                              bookmarks::OpenAllBookmarksContext::kInSplit);
+
+  EXPECT_EQ(incognito_tabs, incognito_browser->GetTabStripModel()->count());
+  EXPECT_EQ(browser_tabs + 1, browser()->GetTabStripModel()->count());
+}
+
+#if !defined(NDEBUG) || defined(ADDRESS_SANITIZER) || defined(MEMORY_SANITIZER)
+// TODO(https://crbug.com/556290954): de-flake and re-enable.
+#define MAYBE_OpenAllBookmarks DISABLED_OpenAllBookmarks
+#else
+#define MAYBE_OpenAllBookmarks OpenAllBookmarks
+#endif
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, MAYBE_OpenAllBookmarks) {
+  BrowserWindowInterface* regular_browser = browser();
   BookmarkModel* bookmark_model =
-      WaitForBookmarkModel(regular_browser->profile());
+      WaitForBookmarkModel(regular_browser->GetProfile());
   const BookmarkNode* const bbar = bookmark_model->bookmark_bar_node();
   ASSERT_TRUE(bbar->children().empty());
 
-  Browser* incognito_browser = CreateIncognitoBrowser();
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser();
   BookmarkModel* incognito_model =
-      WaitForBookmarkModel(incognito_browser->profile());
+      WaitForBookmarkModel(incognito_browser->GetProfile());
   const BookmarkNode* const incognito_bbar =
       incognito_model->bookmark_bar_node();
 
-  auto close_all_tabs_except_first = [](Browser* browser) {
-    int num_tabs = browser->tab_strip_model()->GetTabCount();
+  auto close_all_tabs_except_first = [](BrowserWindowInterface* browser) {
+    int num_tabs = browser->GetTabStripModel()->count();
     for (int i = 0; i < num_tabs - 1; ++i) {
-      ASSERT_TRUE(
-          browser->tab_strip_model()->CloseWebContentsAt(num_tabs - 1 - i, 0));
+      browser->GetTabStripModel()->CloseWebContentsAt(num_tabs - 1 - i, 0);
     }
+    EXPECT_EQ(1, browser->GetTabStripModel()->count());
   };
 
   auto open_urls_and_test = [&regular_browser, &incognito_browser, &bbar,
@@ -313,12 +356,10 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
     {
       close_all_tabs_except_first(regular_browser);
       close_all_tabs_except_first(incognito_browser);
-      chrome::OpenAllIfAllowed(regular_browser, {bbar},
-                               WindowOpenDisposition::NEW_BACKGROUND_TAB,
-                               false);
-      int num_tabs_regular = regular_browser->tab_strip_model()->GetTabCount();
-      int num_tabs_incognito =
-          incognito_browser->tab_strip_model()->GetTabCount();
+      bookmarks::OpenAllIfAllowed(regular_browser, {bbar},
+                                  WindowOpenDisposition::NEW_BACKGROUND_TAB);
+      int num_tabs_regular = regular_browser->tab_strip_model()->count();
+      int num_tabs_incognito = incognito_browser->tab_strip_model()->count();
       EXPECT_EQ(num_tabs_regular, 5);
       EXPECT_EQ(num_tabs_incognito, 1);
     }
@@ -327,19 +368,20 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
     {
       close_all_tabs_except_first(regular_browser);
       close_all_tabs_except_first(incognito_browser);
-      chrome::OpenAllIfAllowed(regular_browser, {bbar},
-                               WindowOpenDisposition::NEW_WINDOW, false);
-      Browser* regular_browser2 = nullptr;
-      for (auto* browser_instance : *BrowserList::GetInstance()) {
-        if (browser_instance != incognito_browser &&
-            browser_instance != regular_browser)
-          regular_browser2 = browser_instance;
-      }
+      bookmarks::OpenAllIfAllowed(regular_browser, {bbar},
+                                  WindowOpenDisposition::NEW_WINDOW);
+      BrowserWindowInterface* regular_browser2 = nullptr;
+      ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+          [&](BrowserWindowInterface* browser) {
+            if (browser != incognito_browser && browser != regular_browser) {
+              regular_browser2 = browser;
+            }
+            return !regular_browser2;
+          });
       // new browser needs to be opened
       EXPECT_NE(regular_browser2, nullptr);
-      int num_tabs_regular = regular_browser->tab_strip_model()->GetTabCount();
-      int num_tabs_regular2 =
-          regular_browser2->tab_strip_model()->GetTabCount();
+      int num_tabs_regular = regular_browser->tab_strip_model()->count();
+      int num_tabs_regular2 = regular_browser2->GetTabStripModel()->count();
       EXPECT_EQ(num_tabs_regular, 1);
       EXPECT_EQ(num_tabs_regular2, 4);
       CloseBrowserSynchronously(regular_browser2);
@@ -349,10 +391,9 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
     {
       close_all_tabs_except_first(regular_browser);
       close_all_tabs_except_first(incognito_browser);
-      chrome::OpenAllIfAllowed(regular_browser, {bbar},
-                               WindowOpenDisposition::OFF_THE_RECORD, false);
-      int num_tabs_incognito =
-          incognito_browser->tab_strip_model()->GetTabCount();
+      bookmarks::OpenAllIfAllowed(regular_browser, {bbar},
+                                  WindowOpenDisposition::OFF_THE_RECORD);
+      int num_tabs_incognito = incognito_browser->tab_strip_model()->count();
       EXPECT_EQ(num_tabs_incognito, 3);
     }
   };
@@ -365,12 +406,10 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
     {
       close_all_tabs_except_first(regular_browser);
       close_all_tabs_except_first(incognito_browser);
-      chrome::OpenAllIfAllowed(incognito_browser, {incognito_bbar},
-                               WindowOpenDisposition::NEW_BACKGROUND_TAB,
-                               false);
-      int num_tabs_regular = regular_browser->tab_strip_model()->GetTabCount();
-      int num_tabs_incognito =
-          incognito_browser->tab_strip_model()->GetTabCount();
+      bookmarks::OpenAllIfAllowed(incognito_browser, {incognito_bbar},
+                                  WindowOpenDisposition::NEW_BACKGROUND_TAB);
+      int num_tabs_regular = regular_browser->tab_strip_model()->count();
+      int num_tabs_incognito = incognito_browser->tab_strip_model()->count();
       EXPECT_EQ(num_tabs_regular, 3);
       EXPECT_EQ(num_tabs_incognito, 3);
     }
@@ -379,21 +418,21 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
     {
       close_all_tabs_except_first(regular_browser);
       close_all_tabs_except_first(incognito_browser);
-      chrome::OpenAllIfAllowed(incognito_browser, {incognito_bbar},
-                               WindowOpenDisposition::NEW_WINDOW, false);
-      Browser* incognito_browser2 = nullptr;
-      for (auto* browser_instance : *BrowserList::GetInstance()) {
-        if (browser_instance != incognito_browser &&
-            browser_instance != regular_browser)
-          incognito_browser2 = browser_instance;
-      }
+      bookmarks::OpenAllIfAllowed(incognito_browser, {incognito_bbar},
+                                  WindowOpenDisposition::NEW_WINDOW);
+      BrowserWindowInterface* incognito_browser2 = nullptr;
+      ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+          [&](BrowserWindowInterface* browser) {
+            if (browser != incognito_browser && browser != regular_browser) {
+              incognito_browser2 = browser;
+            }
+            return !incognito_browser2;
+          });
       // new browser needs to be opened
       EXPECT_NE(incognito_browser2, nullptr);
-      int num_tabs_regular = regular_browser->tab_strip_model()->GetTabCount();
-      int num_tabs_incognito =
-          incognito_browser->tab_strip_model()->GetTabCount();
-      int num_tabs_incognito2 =
-          incognito_browser2->tab_strip_model()->GetTabCount();
+      int num_tabs_regular = regular_browser->tab_strip_model()->count();
+      int num_tabs_incognito = incognito_browser->tab_strip_model()->count();
+      int num_tabs_incognito2 = incognito_browser2->GetTabStripModel()->count();
       EXPECT_EQ(num_tabs_regular, 3);
       EXPECT_EQ(num_tabs_incognito, 1);
       EXPECT_EQ(num_tabs_incognito2, 2);
@@ -412,7 +451,7 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
     bookmark_model->AddURL(bbar, 3, u"Gmail", GURL("http://mail.google.com"));
     open_urls_and_test();
     open_urls_from_incognito_and_test();
-    bookmark_model->RemoveAllUserBookmarks();
+    bookmark_model->RemoveAllUserBookmarks(FROM_HERE);
   }
   {
     // Bookmark 4 pages, with the second and fourth one not being able to be
@@ -425,8 +464,29 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllBookmarks) {
                            GURL(chrome::kChromeUIExtensionsURL));
     open_urls_and_test();
     open_urls_from_incognito_and_test();
-    bookmark_model->RemoveAllUserBookmarks();
+    bookmark_model->RemoveAllUserBookmarks(FROM_HERE);
   }
+}
+
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, OpenAllFiltersJavascriptURLs) {
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
+  const BookmarkNode* const folder = bookmark_model->AddFolder(
+      bookmark_model->bookmark_bar_node(), 0, u"Folder");
+
+  // Add a normal URL and a javascript: URL.
+  bookmark_model->AddURL(folder, 0, u"Normal URL",
+                         GURL("https://www.example.com"));
+  bookmark_model->AddURL(folder, 1, u"Script URL", GURL("javascript:alert()"));
+
+  ASSERT_EQ(1, browser()->GetTabStripModel()->count());
+
+  bookmarks::OpenAllIfAllowed(browser(), {folder},
+                              WindowOpenDisposition::NEW_BACKGROUND_TAB,
+                              bookmarks::OpenAllBookmarksContext::kNone);
+  EXPECT_EQ(2, browser()->GetTabStripModel()->count());
+  EXPECT_EQ(
+      GURL("https://www.example.com"),
+      browser()->GetTabStripModel()->GetWebContentsAt(1)->GetVisibleURL());
 }
 
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest,
@@ -438,33 +498,35 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest,
   ASSERT_TRUE(https_server.Start());
   ASSERT_TRUE(embedded_test_server()->Start());
 
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
   GURL bookmark_url = embedded_test_server()->GetURL("example.test", "/");
   bookmarks::AddIfNotBookmarked(bookmark_model, bookmark_url, u"Bookmark");
 
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   BookmarkTabHelper* tab_helper =
       BookmarkTabHelper::FromWebContents(web_contents);
   TestBookmarkTabHelperObserver bookmark_observer(tab_helper);
 
   // Go to a bookmarked url. Bookmark star should show.
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), bookmark_url));
-  EXPECT_FALSE(IsShowingInterstitial(web_contents));
+  EXPECT_FALSE(
+      chrome_browser_interstitials::IsShowingInterstitial(web_contents));
   EXPECT_TRUE(bookmark_observer.is_starred());
   // Now go to a non-bookmarked url which triggers an SSL warning. Bookmark
   // star should disappear.
   GURL error_url = https_server.GetURL("/");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), error_url));
-  web_contents = browser()->tab_strip_model()->GetActiveWebContents();
-  EXPECT_TRUE(IsShowingInterstitial(web_contents));
+  web_contents = browser()->GetTabStripModel()->GetActiveWebContents();
+  EXPECT_TRUE(
+      chrome_browser_interstitials::IsShowingInterstitial(web_contents));
   EXPECT_FALSE(bookmark_observer.is_starred());
 }
 
 // Provides coverage for the Bookmark Manager bookmark drag and drag image
 // generation for dragging a single bookmark.
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragSingleBookmark) {
-  BookmarkModel* model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* model = WaitForBookmarkModel(browser()->GetProfile());
   const std::u16string page_title(u"foo");
   const GURL page_url("http://www.google.com");
   const BookmarkNode* root = model->bookmark_bar_node();
@@ -478,16 +540,15 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragSingleBookmark) {
           std::unique_ptr<ui::OSExchangeData> drag_data,
           gfx::NativeView native_view, ui::mojom::DragEventSource source,
           gfx::Point point, int operation) {
-        GURL url;
-        std::u16string title;
-        EXPECT_TRUE(drag_data->provider().GetURLAndTitle(
-            ui::FilenameToURLPolicy::DO_NOT_CONVERT_FILENAMES, &url, &title));
-        EXPECT_EQ(page_url, url);
-        EXPECT_EQ(page_title, title);
+        std::vector<ui::ClipboardUrlInfo> url_infos = drag_data->GetURLs(
+            ui::FilenameToURLPolicy::DO_NOT_CONVERT_FILENAMES);
+        ASSERT_FALSE(url_infos.empty());
+        EXPECT_EQ(page_url, url_infos.front().url);
+        EXPECT_EQ(page_title, url_infos.front().title);
 #if !BUILDFLAG(IS_WIN)
         // On Windows, GetDragImage() is a NOTREACHED() as the Windows
         // implementation of OSExchangeData just sets the drag image on the OS
-        // API. https://crbug.com/893388
+        // API. https://crbug.com/41419592
         EXPECT_FALSE(drag_data->provider().GetDragImage().isNull());
 #endif
         EXPECT_EQ(expected_point, point);
@@ -496,10 +557,10 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragSingleBookmark) {
 
   constexpr int kDragNodeIndex = 0;
   chrome::DragBookmarksForTest(
-      browser()->profile(),
+      browser()->GetProfile(),
       {{node},
        kDragNodeIndex,
-       browser()->tab_strip_model()->GetActiveWebContents(),
+       browser()->GetTabStripModel()->GetActiveWebContents(),
        ui::mojom::DragEventSource::kMouse,
        expected_point},
       std::move(cb));
@@ -509,9 +570,9 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragSingleBookmark) {
 
 // A favicon update during drag shouldn't trigger the drag flow again. The test
 // passes if the favicon update does not cause a crash. (see
-// https://crbug.com/1364056)
+// https://crbug.com/40865326)
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, FaviconChangeDuringBookmarkDrag) {
-  BookmarkModel* model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* model = WaitForBookmarkModel(browser()->GetProfile());
   const std::u16string kPageTitle(u"foo");
   const GURL kPageUrl("http://www.google.com");
   const GURL kFaviconUrl("http://www.google.com/favicon.ico");
@@ -533,10 +594,10 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, FaviconChangeDuringBookmarkDrag) {
 
   constexpr int kDragNodeIndex = 0;
   chrome::DragBookmarksForTest(
-      browser()->profile(),
+      browser()->GetProfile(),
       {{node},
        kDragNodeIndex,
-       browser()->tab_strip_model()->GetActiveWebContents(),
+       browser()->GetTabStripModel()->GetActiveWebContents(),
        ui::mojom::DragEventSource::kMouse,
        kExpectedPoint},
       std::move(cb));
@@ -547,8 +608,8 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, FaviconChangeDuringBookmarkDrag) {
 // Provides coverage for the Bookmark Manager bookmark drag and drag image
 // generation for dragging multiple bookmarks.
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragMultipleBookmarks) {
-  BookmarkModel* model = WaitForBookmarkModel(browser()->profile());
-  const std::u16string page_title(u"foo");
+  BookmarkModel* model = WaitForBookmarkModel(browser()->GetProfile());
+  const std::u16string page_title = u"foo";
   const GURL page_url("http://www.google.com");
   const BookmarkNode* root = model->bookmark_bar_node();
   const BookmarkNode* node1 = model->AddURL(root, 0, page_title, page_url);
@@ -558,40 +619,23 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragMultipleBookmarks) {
   auto run_loop = std::make_unique<base::RunLoop>();
 
   chrome::DoBookmarkDragCallback cb = base::BindLambdaForTesting(
-      [&run_loop, expected_point](std::unique_ptr<ui::OSExchangeData> drag_data,
-                                  gfx::NativeView native_view,
-                                  ui::mojom::DragEventSource source,
-                                  gfx::Point point, int operation) {
-        GURL url;
-        std::u16string title;
-        // The platform difference here is due to platform capabilities. On the
-        // Mac, the clipboard can hold multiple items, each with different
-        // representations. Therefore, in `bookmark_node_data_mac.mm`'s version
-        // of `BookmarkNodeData::Read`/`Write`, a full-fledged array of objects
-        // and types are written to the clipboard, providing rich
-        // interoperability with the rest of the OS and other apps. Then, when
-        // `GetURLAndTitle` is called, it looks at the clipboard, sees URL and
-        // title data, and returns true. On the other hand, in
-        // `bookmark_node_data_views.cc`'s version used on other platforms,
-        // because other platforms don't have the concept of multiple items on
-        // the clipboard, single URLs are added as a URL, but multiple URLs are
-        // added as a data blob opaque to the outside world. Then, when
-        // `GetURLAndTitle` is called, it's unable to extract any single URL,
-        // and returns false. This is a core difference in the capabilities of
-        // the platform. Because interoperability and a good user experience
-        // outweigh strict platform consistency, expect different behaviors on
-        // different platforms.
-#if BUILDFLAG(IS_MAC)
-        EXPECT_TRUE(drag_data->provider().GetURLAndTitle(
-            ui::FilenameToURLPolicy::DO_NOT_CONVERT_FILENAMES, &url, &title));
-#else
-        EXPECT_FALSE(drag_data->provider().GetURLAndTitle(
-            ui::FilenameToURLPolicy::DO_NOT_CONVERT_FILENAMES, &url, &title));
-#endif
+      [&run_loop, expected_point, page_title, page_url](
+          std::unique_ptr<ui::OSExchangeData> drag_data,
+          gfx::NativeView native_view, ui::mojom::DragEventSource source,
+          gfx::Point point, int operation) {
+        const std::vector<ui::ClipboardUrlInfo> url_infos = drag_data->GetURLs(
+            ui::FilenameToURLPolicy::DO_NOT_CONVERT_FILENAMES);
+        ASSERT_FALSE(url_infos.empty());
+
+        // The bookmarks are added in order, and the first is retrieved, so
+        // expect the values from the first bookmark.
+        // TODO(http://crbug.com/41011768): test the bookmark folder.
+        EXPECT_EQ(page_title, url_infos.front().title);
+        EXPECT_EQ(page_url, url_infos.front().url);
 #if !BUILDFLAG(IS_WIN)
         // On Windows, GetDragImage() is a NOTREACHED() as the Windows
         // implementation of OSExchangeData just sets the drag image on the OS
-        // API. https://crbug.com/893388
+        // API. https://crbug.com/41419592
         EXPECT_FALSE(drag_data->provider().GetDragImage().isNull());
 #endif
         EXPECT_EQ(expected_point, point);
@@ -600,11 +644,11 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragMultipleBookmarks) {
 
   constexpr int kDragNodeIndex = 1;
   chrome::DragBookmarksForTest(
-      browser()->profile(),
+      browser()->GetProfile(),
       {
           {node1, node2},
           kDragNodeIndex,
-          browser()->tab_strip_model()->GetActiveWebContents(),
+          browser()->GetTabStripModel()->GetActiveWebContents(),
           ui::mojom::DragEventSource::kMouse,
           expected_point,
       },
@@ -613,12 +657,8 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, DragMultipleBookmarks) {
   run_loop->Run();
 }
 
-// ChromeOS initializes two profiles (Default and test-user) and it's impossible
-// to distinguish UMA samples separately.
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-
-IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, PRE_EmitUmaForDuplicates) {
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, PRE_EmitUmaForTimeMetrics) {
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
   const BookmarkNode* parent = bookmarks::GetParentForNewNodes(bookmark_model);
   const BookmarkNode* other_parent =
       bookmark_model->AddFolder(parent, 0, u"Folder");
@@ -641,8 +681,8 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, PRE_EmitUmaForDuplicates) {
                          u"title5", GURL("http://c.com"));
 }
 
-IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, EmitUmaForDuplicates) {
-  WaitForBookmarkModel(browser()->profile());
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, EmitUmaForTimeMetrics) {
+  WaitForBookmarkModel(browser()->GetProfile());
 
   // The total number of bookmarks is 7, but it gets rounded down due to
   // bucketing.
@@ -650,53 +690,78 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, EmitUmaForDuplicates) {
       histogram_tester()->GetAllSamples("Bookmarks.Count.OnProfileLoad3"),
       testing::ElementsAre(base::Bucket(/*min=*/6, /*count=*/1)));
 
-  // 2 bookmarks have URL http://b.com and 4 have http://c.com. This counts as 4
-  // duplicates.
-  EXPECT_THAT(histogram_tester()->GetAllSamples(
-                  "Bookmarks.Count.OnProfileLoad.DuplicateUrl3"),
-              testing::ElementsAre(base::Bucket(/*min=*/4, /*count=*/1)));
-  // 3 bookmarks have the pair (http://c.com, title5). This counts as 2
-  // duplicates when considering URLs and titles.
-  EXPECT_THAT(histogram_tester()->GetAllSamples(
-                  "Bookmarks.Count.OnProfileLoad.DuplicateUrlAndTitle3"),
-              testing::ElementsAre(base::Bucket(/*min=*/2, /*count=*/1)));
-  // Among the three above, only two have the same parent. This means only one
-  // counts as duplicate when considering all three attributes.
-  EXPECT_THAT(
-      histogram_tester()->GetAllSamples(
-          "Bookmarks.Count.OnProfileLoad.DuplicateUrlAndTitleAndParent3"),
-      testing::ElementsAre(base::Bucket(/*min=*/1, /*count=*/1)));
-
-  // The remaining histograms are the result of subtracting the number of
-  // duplicates from the total, which is 7 despite the bucket for the first
-  // histogram above suggesting 6.
-  EXPECT_THAT(histogram_tester()->GetAllSamples(
-                  "Bookmarks.Count.OnProfileLoad.UniqueUrl3"),
-              testing::ElementsAre(base::Bucket(/*min=*/3, /*count=*/1)));
-  EXPECT_THAT(histogram_tester()->GetAllSamples(
-                  "Bookmarks.Count.OnProfileLoad.UniqueUrlAndTitle3"),
-              testing::ElementsAre(base::Bucket(/*min=*/5, /*count=*/1)));
-  EXPECT_THAT(histogram_tester()->GetAllSamples(
-                  "Bookmarks.Count.OnProfileLoad.UniqueUrlAndTitleAndParent3"),
-              testing::ElementsAre(base::Bucket(/*min=*/6, /*count=*/1)));
   EXPECT_THAT(histogram_tester()->GetAllSamples(
                   "Bookmarks.Times.OnProfileLoad.TimeSinceAdded3"),
               testing::ElementsAre(base::Bucket(/*min=*/0, /*count=*/1)));
 }
 
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, PRE_EmitUmaForMostRecentlyUsed) {
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
+  BookmarkNode* parent = const_cast<BookmarkNode*>(bookmark_model->AddFolder(
+      bookmarks::GetParentForNewNodes(bookmark_model), 0, u"Test Folder"));
+  parent->set_date_added(base::Time::Now() - base::Days(3));
+
+  BookmarkNode* node = const_cast<BookmarkNode*>(bookmark_model->AddURL(
+      parent, parent->children().size(), u"title1", GURL("http://a.com")));
+  node->set_date_added(base::Time::Now() - base::Days(2));
+  node->set_date_last_used(base::Time::Now() - base::Days(1));
+
+  // This shouldn't count towards metrics because there's another node which
+  // is more recently saved/used.
+  node = const_cast<BookmarkNode*>(bookmark_model->AddURL(
+      parent, parent->children().size(), u"title1", GURL("http://a.com")));
+  node->set_date_added(base::Time::Now() - base::Days(3));
+  node->set_date_last_used(base::Time::Now() - base::Days(3));
+}
+
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, EmitUmaForMostRecentlyUsed) {
+  WaitForBookmarkModel(browser()->GetProfile());
+
+  EXPECT_THAT(
+      histogram_tester()->GetAllSamples(
+          "Bookmarks.Times.OnProfileLoad.MostRecentlyUsedBookmarkInDays"),
+      testing::ElementsAre(base::Bucket(/*min=*/1, /*count=*/1)));
+
+  EXPECT_THAT(
+      histogram_tester()->GetAllSamples(
+          "Bookmarks.Times.OnProfileLoad.MostRecentlySavedBookmarkInDays"),
+      testing::ElementsAre(base::Bucket(/*min=*/2, /*count=*/1)));
+  EXPECT_THAT(
+      histogram_tester()->GetAllSamples(
+          "Bookmarks.Times.OnProfileLoad.MostRecentlyAddedFolderInDays"),
+      testing::ElementsAre(base::Bucket(/*min=*/3, /*count=*/1)));
+}
+
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest,
+                       EmitUmaForMostRecentlyUsed_NoBookmarks) {
+  WaitForBookmarkModel(browser()->GetProfile());
+
+  EXPECT_THAT(
+      histogram_tester()->GetAllSamples(
+          "Bookmarks.Times.OnProfileLoad.MostRecentlyUsedBookmarkInDays"),
+      testing::ElementsAre());
+
+  EXPECT_THAT(
+      histogram_tester()->GetAllSamples(
+          "Bookmarks.Times.OnProfileLoad.MostRecentlySavedBookmarkInDays"),
+      testing::ElementsAre());
+  EXPECT_THAT(
+      histogram_tester()->GetAllSamples(
+          "Bookmarks.Times.OnProfileLoad.MostRecentlyAddedFolderInDays"),
+      testing::ElementsAre());
+}
 
 // Test that the bookmark star state updates in response to same document
 // navigations that change the URL
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, SameDocumentNavigation) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
   GURL bookmark_url = embedded_test_server()->GetURL("/title1.html");
   bookmarks::AddIfNotBookmarked(bookmark_model, bookmark_url, u"Bookmark");
 
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   BookmarkTabHelper* tab_helper =
       BookmarkTabHelper::FromWebContents(web_contents);
   TestBookmarkTabHelperObserver bookmark_observer(tab_helper);
@@ -713,12 +778,12 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest,
                        DifferentDocumentNavigationWithoutFinishing) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
   GURL bookmark_url = embedded_test_server()->GetURL("/title1.html");
   bookmarks::AddIfNotBookmarked(bookmark_model, bookmark_url, u"Bookmark");
 
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   BookmarkTabHelper* tab_helper =
       BookmarkTabHelper::FromWebContents(web_contents);
   TestBookmarkTabHelperObserver bookmark_observer(tab_helper);
@@ -743,12 +808,12 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest,
 IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, NonCommitURLNavigation) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
   GURL bookmark_url = embedded_test_server()->GetURL("/title1.html");
   bookmarks::AddIfNotBookmarked(bookmark_model, bookmark_url, u"Bookmark");
 
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   BookmarkTabHelper* tab_helper =
       BookmarkTabHelper::FromWebContents(web_contents);
   TestBookmarkTabHelperObserver bookmark_observer(tab_helper);
@@ -774,6 +839,62 @@ IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest, NonCommitURLNavigation) {
   EXPECT_TRUE(bookmark_observer.is_starred());
 }
 
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest,
+                       BookmarkCurrentTab_WithoutAccountNodes) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
+
+  // If no folders have been modified, bookmarks are saved to other bookmarks by
+  // default.
+  ASSERT_EQ(bookmark_model->other_node(),
+            bookmarks::GetParentForNewNodes(bookmark_model));
+
+  ASSERT_TRUE(chrome::ExecuteCommand(browser(), IDC_BOOKMARK_THIS_TAB));
+  EXPECT_THAT(1u, bookmark_model->other_node()->children().size());
+
+  // Add a bookmark to the local bookmark bar node, so that it becomes the most
+  // recently modified one.
+  bookmark_model->AddURL(bookmark_model->bookmark_bar_node(), 0, u"Title",
+                         GURL("http://google.com"));
+  ASSERT_EQ(bookmark_model->bookmark_bar_node(),
+            bookmarks::GetParentForNewNodes(bookmark_model));
+
+  // After the bookmarks bar was modified, it should be the new default save
+  // location.
+  ASSERT_TRUE(chrome::ExecuteCommand(browser(), IDC_BOOKMARK_THIS_TAB));
+  EXPECT_THAT(1u, bookmark_model->bookmark_bar_node()->children().size());
+}
+
+// Account nodes don't exist on ChromeOS, so this test does not apply.
+#if !BUILDFLAG(IS_CHROMEOS)
+IN_PROC_BROWSER_TEST_F(BookmarkBrowsertest,
+                       BookmarkCurrentTab_WithAccountNodes) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
+  bookmark_model->CreateAccountPermanentFolders();
+
+  // If no folders have been modified, bookmarks are saved to account other
+  // bookmarks by default.
+  ASSERT_EQ(bookmark_model->account_other_node(),
+            bookmarks::GetParentForNewNodes(bookmark_model));
+
+  ASSERT_TRUE(chrome::ExecuteCommand(browser(), IDC_BOOKMARK_THIS_TAB));
+  EXPECT_THAT(1u, bookmark_model->account_other_node()->children().size());
+
+  // Add a bookmark to the local bookmark bar node, so that it becomes the most
+  // recently modified one.
+  bookmark_model->AddURL(bookmark_model->bookmark_bar_node(), 0, u"Title",
+                         GURL("http://google.com"));
+  ASSERT_EQ(bookmark_model->bookmark_bar_node(),
+            bookmarks::GetParentForNewNodes(bookmark_model));
+
+  // After the bookmarks bar was modified, it should be the new default save
+  // location.
+  ASSERT_TRUE(chrome::ExecuteCommand(browser(), IDC_BOOKMARK_THIS_TAB));
+  EXPECT_THAT(1u, bookmark_model->bookmark_bar_node()->children().size());
+}
+#endif  // !BUILDFLAG(IS_CHROMEOS)
+
 class BookmarkPrerenderBrowsertest : public BookmarkBrowsertest {
  public:
   BookmarkPrerenderBrowsertest()
@@ -787,7 +908,7 @@ class BookmarkPrerenderBrowsertest : public BookmarkBrowsertest {
       delete;
 
   void SetUp() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     BookmarkBrowsertest::SetUp();
   }
 
@@ -802,7 +923,7 @@ class BookmarkPrerenderBrowsertest : public BookmarkBrowsertest {
   }
 
   content::WebContents* GetWebContents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
  private:
@@ -814,7 +935,7 @@ IN_PROC_BROWSER_TEST_F(BookmarkPrerenderBrowsertest,
   GURL initial_url = embedded_test_server()->GetURL("/empty.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), initial_url));
 
-  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->profile());
+  BookmarkModel* bookmark_model = WaitForBookmarkModel(browser()->GetProfile());
   GURL bookmark_url = embedded_test_server()->GetURL("/title1.html");
   bookmarks::AddIfNotBookmarked(bookmark_model, bookmark_url, u"Bookmark");
 
@@ -824,7 +945,8 @@ IN_PROC_BROWSER_TEST_F(BookmarkPrerenderBrowsertest,
 
   // Load a prerender page and prerendering should not notify to
   // URLStarredChanged listener.
-  const int host_id = prerender_test_helper().AddPrerender(bookmark_url);
+  const content::PrerenderHostId host_id =
+      prerender_test_helper().AddPrerender(bookmark_url);
   content::test::PrerenderHostObserver host_observer(*GetWebContents(),
                                                      host_id);
   EXPECT_FALSE(host_observer.was_activated());

@@ -8,30 +8,48 @@
 
 #include "base/check_op.h"
 #include "media/base/audio_bus.h"
+#include "media/base/audio_latency.h"
 #include "media/base/channel_layout.h"
 #include "media/base/limits.h"
 
 namespace media {
 
-namespace {
+AudioOutputBufferParametersHelper::AudioOutputBufferParametersHelper() =
+    default;
+AudioOutputBufferParametersHelper::~AudioOutputBufferParametersHelper() =
+    default;
+AudioGlitchInfo
+AudioOutputBufferParametersHelper::GetGlitchIncrementSinceLastCall(
+    AudioOutputBufferParameters& params) {
+  base::TimeDelta current_glitch_duration = base::Microseconds(
+      std::atomic_ref<int64_t>(params.cumulative_glitch_duration_us)
+          .load(std::memory_order_relaxed));
+  uint64_t current_glitch_count =
+      std::atomic_ref<uint64_t>(params.cumulative_glitch_count)
+          .load(std::memory_order_relaxed);
 
-int ComputeChannelCount(ChannelLayout channel_layout, int channels) {
-  if (channel_layout == CHANNEL_LAYOUT_DISCRETE) {
-    CHECK_NE(0, channels);
-    return channels;
-  } else if (channel_layout == CHANNEL_LAYOUT_5_1_4_DOWNMIX && channels != 0) {
-    // For CHANNEL_LAYOUT_5_1_4_DOWNMIX we can set a custom number of channels,
-    // but we are not forced to.
-    return channels;
-  }
-  const int calculated_channel_count =
-      ChannelLayoutToChannelCount(channel_layout);
-  DCHECK(channel_layout == CHANNEL_LAYOUT_UNSUPPORTED ||
-         calculated_channel_count == channels);
-  return calculated_channel_count;
+  DCHECK_GE(current_glitch_duration, previous_glitch_duration_);
+  DCHECK_GE(current_glitch_count, previous_glitch_count_);
+
+  media::AudioGlitchInfo glitch_info{
+      .duration = current_glitch_duration - previous_glitch_duration_,
+      .count = base::saturated_cast<uint32_t>(current_glitch_count -
+                                              previous_glitch_count_)};
+  previous_glitch_duration_ = current_glitch_duration;
+  previous_glitch_count_ = current_glitch_count;
+  return glitch_info;
 }
 
-}  // namespace
+// static
+void AudioOutputBufferParametersHelper::AddGlitchIncrementToBuffer(
+    AudioOutputBufferParameters& params,
+    AudioGlitchInfo glitch_info) {
+  std::atomic_ref<int64_t>(params.cumulative_glitch_duration_us)
+      .fetch_add(glitch_info.duration.InMicroseconds(),
+                 std::memory_order_relaxed);
+  std::atomic_ref<uint64_t>(params.cumulative_glitch_count)
+      .fetch_add(glitch_info.count, std::memory_order_relaxed);
+}
 
 static_assert(AudioBus::kChannelAlignment == kParametersAlignment,
               "Audio buffer parameters struct alignment not same as AudioBus");
@@ -115,31 +133,91 @@ uint32_t ComputeAudioOutputBufferSize(int channels, int frames) {
   return result.ValueOrDie();
 }
 
-ChannelLayoutConfig::ChannelLayoutConfig(const ChannelLayoutConfig& other) =
-    default;
-ChannelLayoutConfig& ChannelLayoutConfig::operator=(
-    const ChannelLayoutConfig& other) = default;
-ChannelLayoutConfig::~ChannelLayoutConfig() = default;
-
-ChannelLayoutConfig::ChannelLayoutConfig()
-    : ChannelLayoutConfig(
-          ChannelLayoutConfig::FromLayout<CHANNEL_LAYOUT_NONE>()) {}
-
-ChannelLayoutConfig::ChannelLayoutConfig(ChannelLayout channel_layout,
-                                         int channels)
-    : channel_layout_(channel_layout),
-      channels_(ComputeChannelCount(channel_layout, channels)) {}
-
-ChannelLayoutConfig ChannelLayoutConfig::Mono() {
-  return FromLayout<CHANNEL_LAYOUT_MONO>();
+static auto FuchsiaRenderUsageToString(int usage) {
+  switch (usage) {
+    case AudioParameters::FUCHSIA_RENDER_USAGE_UNKNOWN:
+      return "FUCHSIA_RENDER_USAGE_UNKNOWN";
+    case AudioParameters::FUCHSIA_RENDER_USAGE_BACKGROUND:
+      return "FUCHSIA_RENDER_USAGE_BACKGROUND";
+    case AudioParameters::FUCHSIA_RENDER_USAGE_MEDIA:
+      return "FUCHSIA_RENDER_USAGE_MEDIA";
+    case AudioParameters::FUCHSIA_RENDER_USAGE_INTERRUPTION:
+      return "FUCHSIA_RENDER_USAGE_INTERRUPTION";
+    case AudioParameters::FUCHSIA_RENDER_USAGE_SYSTEM_AGENT:
+      return "FUCHSIA_RENDER_USAGE_SYSTEM_AGENT";
+    case AudioParameters::FUCHSIA_RENDER_USAGE_COMMUNICATION:
+      return "FUCHSIA_RENDER_USAGE_COMMUNICATION";
+    case AudioParameters::FUCHSIA_RENDER_USAGE_ACCESSIBILITY:
+      return "FUCHSIA_RENDER_USAGE_ACCESSIBILITY";
+    default:
+      return "FUCHSIA_RENDER_USAGE_INVALID";
+  }
 }
 
-ChannelLayoutConfig ChannelLayoutConfig::Stereo() {
-  return FromLayout<CHANNEL_LAYOUT_STEREO>();
-}
+// static
+std::string AudioParameters::EffectsMaskToString(int mask) {
+  if (mask == AudioParameters::NO_EFFECTS) {
+    return "NONE";
+  }
 
-ChannelLayoutConfig ChannelLayoutConfig::Guess(int channels) {
-  return ChannelLayoutConfig(GuessChannelLayout(channels), channels);
+  std::vector<std::string> effects;
+  if (mask & AudioParameters::ECHO_CANCELLER) {
+    effects.push_back("ECHO_CANCELLER");
+  }
+  if (mask & AudioParameters::DUCKING) {
+    effects.push_back("DUCKING");
+  }
+  if (mask & AudioParameters::HOTWORD) {
+    effects.push_back("HOTWORD");
+  }
+  if (mask & AudioParameters::NOISE_SUPPRESSION) {
+    effects.push_back("NOISE_SUPPRESSION");
+  }
+  if (mask & AudioParameters::AUTOMATIC_GAIN_CONTROL) {
+    effects.push_back("AUTOMATIC_GAIN_CONTROL");
+  }
+  if (mask & AudioParameters::MULTIZONE) {
+    effects.push_back("MULTIZONE");
+  }
+  if (mask & AudioParameters::AUDIO_PREFETCH) {
+    effects.push_back("AUDIO_PREFETCH");
+  }
+  if (mask & AudioParameters::ALLOW_DSP_ECHO_CANCELLER) {
+    effects.push_back("ALLOW_DSP_ECHO_CANCELLER");
+  }
+  if (mask & AudioParameters::ALLOW_DSP_NOISE_SUPPRESSION) {
+    effects.push_back("ALLOW_DSP_NOISE_SUPPRESSION");
+  }
+  if (mask & AudioParameters::ALLOW_DSP_AUTOMATIC_GAIN_CONTROL) {
+    effects.push_back("ALLOW_DSP_AUTOMATIC_GAIN_CONTROL");
+  }
+  if (auto fuchsia_usage = mask & AudioParameters::FUCHSIA_RENDER_USAGE_MASK) {
+    effects.push_back(FuchsiaRenderUsageToString(fuchsia_usage));
+  }
+  if (mask & AudioParameters::IGNORE_UI_GAINS) {
+    effects.push_back("IGNORE_UI_GAINS");
+  }
+  if (mask & AudioParameters::VOICE_ISOLATION_SUPPORTED) {
+    effects.push_back("VOICE_ISOLATION_SUPPORTED");
+  }
+  if (mask & AudioParameters::CLIENT_CONTROLLED_VOICE_ISOLATION) {
+    effects.push_back("CLIENT_CONTROLLED_VOICE_ISOLATION");
+  }
+  if (mask & AudioParameters::VOICE_ISOLATION) {
+    effects.push_back("VOICE_ISOLATION");
+  }
+  if (mask & AudioParameters::DEEP_NOISE_SUPPRESSION) {
+    effects.push_back("WINDOWS_DEEP_NOISE_SUPPRESSION");
+  }
+
+  std::string result;
+  for (size_t i = 0; i < effects.size(); ++i) {
+    if (i > 0) {
+      result += " | ";
+    }
+    result += effects[i];
+  }
+  return result;
 }
 
 AudioParameters::AudioParameters()
@@ -152,7 +230,7 @@ AudioParameters::AudioParameters(Format format,
                                  ChannelLayoutConfig channel_layout_config,
                                  int sample_rate,
                                  int frames_per_buffer)
-    : latency_tag_(AudioLatency::LATENCY_COUNT) {
+    : latency_tag_(AudioLatency::Type::kUnknown) {
   Reset(format, channel_layout_config, sample_rate, frames_per_buffer);
 }
 
@@ -162,7 +240,7 @@ AudioParameters::AudioParameters(
     int sample_rate,
     int frames_per_buffer,
     const HardwareCapabilities& hardware_capabilities)
-    : latency_tag_(AudioLatency::LATENCY_COUNT),
+    : latency_tag_(AudioLatency::Type::kUnknown),
       hardware_capabilities_(hardware_capabilities) {
   Reset(format, channel_layout_config, sample_rate, frames_per_buffer);
 }
@@ -211,8 +289,9 @@ std::string AudioParameters::AsHumanReadableString() const {
     << ", channel_layout: " << channel_layout() << ", channels: " << channels()
     << ", sample_rate: " << sample_rate()
     << ", frames_per_buffer: " << frames_per_buffer()
-    << ", effects: " << effects()
-    << ", mic_positions: " << PointsToString(mic_positions_);
+    << ", effects: " << AudioParameters::EffectsMaskToString(effects())
+    << ", mic_positions: " << PointsToString(mic_positions_)
+    << ", latency_tag: " << AudioLatency::ToString(latency_tag());
   if (hardware_capabilities_.has_value()) {
     s << ", hw_capabilities: min_frames_per_buffer: "
       << hardware_capabilities_->min_frames_per_buffer
@@ -220,21 +299,20 @@ std::string AudioParameters::AsHumanReadableString() const {
       << hardware_capabilities_->max_frames_per_buffer
       << ", bitstream_formats:" << hardware_capabilities_->bitstream_formats
       << ", require_encapsulation:"
-      << hardware_capabilities_->require_encapsulation;
+      << hardware_capabilities_->require_encapsulation
+      << ", require_audio_offload:"
+      << hardware_capabilities_->require_audio_offload;
   }
   return s.str();
 }
 
 int AudioParameters::GetBytesPerBuffer(SampleFormat fmt) const {
-  return GetBytesPerFrame(fmt) * frames_per_buffer_;
+  return base::CheckMul(GetBytesPerFrame(fmt), frames_per_buffer_)
+      .ValueOrDie<int>();
 }
 
 int AudioParameters::GetBytesPerFrame(SampleFormat fmt) const {
   return channels() * SampleFormatToBytesPerChannel(fmt);
-}
-
-double AudioParameters::GetMicrosecondsPerFrame() const {
-  return static_cast<double>(base::Time::kMicrosecondsPerSecond) / sample_rate_;
 }
 
 base::TimeDelta AudioParameters::GetBufferDuration() const {
@@ -278,6 +356,11 @@ void AudioParameters::SetChannelLayoutConfig(ChannelLayout layout,
 bool AudioParameters::RequireEncapsulation() const {
   return hardware_capabilities_.has_value() &&
          hardware_capabilities_->require_encapsulation;
+}
+
+bool AudioParameters::RequireOffload() const {
+  return hardware_capabilities_.has_value() &&
+         hardware_capabilities_->require_audio_offload;
 }
 
 // static

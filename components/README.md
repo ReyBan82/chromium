@@ -1,7 +1,16 @@
 # About //components
 
 This directory is meant to house features or subsystems that are used in more
-than one part of the Chromium codebase.
+than one part of the Chromium codebase (as described below). It is acceptable
+to bring up a feature in //components that has a single initial use case but
+for which a second use case is targeted (e.g., a feature that is initially
+used on Chrome Desktop but for which integration on Chrome for iOS is
+planned in the future). In that case, if the planned second use case ends up not
+occurring when the dust settles, the feature team and/or eng from the relevant
+platform team should loop back to do the relevant architectural
+simplifications (e.g., eliminating the component being layered, moving the
+code to //chrome if it becomes clear that it's actually a desktop Chrome-only
+feature).
 
 ## Use cases:
 
@@ -24,19 +33,41 @@ than one part of the Chromium codebase.
 
 Note that the above list is meant to be exhaustive. A component should not be
 added just to separate it from other code in the same layer that is the only
-consumer; that can be done with strict `DEPS` or GN `visibility` rules.
+consumer; that can be done with strict `DEPS` and GN `visibility` rules. In
+particular, features that are added to //chrome can (and should) have
+proper modularity both between each other and between //chrome glue code such
+as Profile.
+
+## Before adding a new component
+
+  * Is there an existing component that you can leverage instead of introducing
+    a new component?
+      * Can you restructure an existing component to logically encompass the
+        proposed new code?
+      * As a general rule, we prefer fewer top level components. So, consider
+        whether adding sub-features within an existing component is more
+        appropriate for your use case.
+      * Historically, dependency issues were simply addressed by adding new
+        components. But, you can (and it is preferred to) solve that by
+        restructing an existing component and its dependencies where possible.
 
 ## Guidelines for adding a new component
 
   * You will be added to an `OWNERS` file under `//components/{your component}`
     and be responsible for maintaining your addition.
+      * You must specify at least two OWNERS for any new component.
   * A `//components/OWNER` must approve of the location of your code.
+  * The CL (either commit message or comment) must explicitly specify what [use
+    case(s)](#use-cases) justify the new component.
   * Code must be needed in at least 2 places in Chrome that don't have a "higher
     layered" directory that could facilitate sharing (e.g. `//content/common`,
     `//chrome/utility`, etc.).
   * The CL adding a new component should be substantial enough so that
     //components/OWNERS can see its basic intended structure and usage before
     approving the addition (e.g., it should not just be an empty shell).
+  * You must add a [`DIR_METADATA`](https://source.chromium.org/chromium/infra/infra/+/main:go/src/infra/tools/dirmd/README.md)
+    file under `//components/{your component}` with an appropriately specified
+    bug-component.
 
 ## Dependencies of a component
 
@@ -65,7 +96,13 @@ Components **can** depend on `//content/public`, `//ipc`, and
 `//third_party/blink/public`. This must be made explicit in the `DEPS` file of
 the component. If such a component is used by Chrome for iOS (which does not
 use content or IPC), the component will have to be in the form of a [layered
-component](http://www.chromium.org/developers/design-documents/layered-components-design).
+component](https://www.chromium.org/developers/design-documents/layered-components-design).
+In particular, code that is shared with iOS *cannot* depend on any of the
+above modules; those dependencies must be injected into the shared code (either via
+a layered component structure or directly from the embedder for simple dependencies
+such as booleans that can be passed as constructor parameters). It is not
+an acceptable solution to conditionally depend on the above modules in code shared
+with iOS.
 
 `//chrome`, `//ios/chrome`, `//content` and `//ios/web` **can** depend on
 individual components. The dependency might have to be made explicit in the

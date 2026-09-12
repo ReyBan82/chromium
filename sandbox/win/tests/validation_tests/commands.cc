@@ -2,13 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <Aclapi.h>
-#include <windows.h>
-#include <stddef.h>
-#include <string>
-
 #include "sandbox/win/tests/validation_tests/commands.h"
 
+#include <windows.h>
+
+#include <Aclapi.h>
+#include <stddef.h>
+
+#include <string>
+
+#include "base/compiler_specific.h"
+#include "sandbox/win/src/sandbox_factory.h"
+#include "sandbox/win/src/target_services.h"
 #include "sandbox/win/tests/common/controller.h"
 
 namespace {
@@ -42,7 +47,7 @@ void trim_quote(std::wstring* string) {
 }
 
 int TestOpenFile(std::wstring path, bool for_write) {
-  wchar_t path_expanded[MAX_PATH + 1] = {0};
+  wchar_t path_expanded[MAX_PATH + 1] = {};
   DWORD size = ::ExpandEnvironmentStrings(path.c_str(), path_expanded,
                                           MAX_PATH);
   if (!size)
@@ -69,21 +74,21 @@ int TestOpenFile(std::wstring path, bool for_write) {
 
 namespace sandbox {
 
-SBOX_TESTS_COMMAND int ValidWindow(int argc, wchar_t **argv) {
-  return (argc == 1) ?
-      TestValidWindow(
-          reinterpret_cast<HWND>(static_cast<ULONG_PTR>(_wtoi(argv[0])))) :
-      SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
+SBOX_TEST_DEFINE_COMMAND(ValidWindow) {
+  return (args.size() == 1)
+             ? TestValidWindow(reinterpret_cast<HWND>(
+                   static_cast<ULONG_PTR>(_wtoi(args[0].c_str()))))
+             : SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
 }
 
 int TestValidWindow(HWND window) {
   return ::IsWindow(window) ? SBOX_TEST_SUCCEEDED : SBOX_TEST_DENIED;
 }
 
-SBOX_TESTS_COMMAND int OpenProcessCmd(int argc, wchar_t **argv) {
-  return (argc == 2) ?
-      TestOpenProcess(_wtol(argv[0]), _wtol(argv[1])) :
-      SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
+SBOX_TEST_DEFINE_COMMAND(OpenProcessCmd) {
+  return (args.size() == 2)
+             ? TestOpenProcess(_wtol(args[0].c_str()), _wtol(args[1].c_str()))
+             : SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
 }
 
 int TestOpenProcess(DWORD process_id, DWORD access_mask) {
@@ -98,9 +103,9 @@ int TestOpenProcess(DWORD process_id, DWORD access_mask) {
       sandbox::SBOX_TEST_DENIED : sandbox::SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
 }
 
-SBOX_TESTS_COMMAND int OpenThreadCmd(int argc, wchar_t **argv) {
-  return (argc == 1) ?
-      TestOpenThread(_wtoi(argv[0])) : SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
+SBOX_TEST_DEFINE_COMMAND(OpenThreadCmd) {
+  return (args.size() == 1) ? TestOpenThread(_wtoi(args[0].c_str()))
+                            : SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
 }
 
 int TestOpenThread(DWORD thread_id) {
@@ -115,11 +120,12 @@ int TestOpenThread(DWORD thread_id) {
       sandbox::SBOX_TEST_DENIED : sandbox::SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
 }
 
-SBOX_TESTS_COMMAND int OpenFileCmd(int argc, wchar_t **argv) {
-  if (1 != argc)
+SBOX_TEST_DEFINE_COMMAND(OpenFileCmd) {
+  if (1 != args.size()) {
     return SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
+  }
 
-  std::wstring path = argv[0];
+  std::wstring path = args[0];
   trim_quote(&path);
 
   return TestOpenReadFile(path);
@@ -142,17 +148,18 @@ int TestOpenWriteFile(const std::wstring& path) {
   return TestOpenFile(path, true);
 }
 
-SBOX_TESTS_COMMAND int OpenKey(int argc, wchar_t **argv) {
-  if (argc != 1 && argc != 2)
+SBOX_TEST_DEFINE_COMMAND(OpenKey) {
+  if (args.size() != 1 && args.size() != 2) {
     return SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
+  }
 
   // Get the hive.
-  HKEY base_key = GetHKEYFromString(argv[0]);
+  HKEY base_key = GetHKEYFromString(args[0]);
 
   // Get the subkey.
   std::wstring subkey;
-  if (argc == 2) {
-    subkey = argv[1];
+  if (args.size() == 2) {
+    subkey = args[1];
     trim_quote(&subkey);
   }
 
@@ -181,7 +188,7 @@ bool IsInteractiveDesktop(bool* is_interactive) {
   HDESK current_desk = ::GetThreadDesktop(::GetCurrentThreadId());
   if (current_desk == NULL)
     return false;
-  wchar_t current_desk_name[256] = {0};
+  wchar_t current_desk_name[256] = {};
   if (!::GetUserObjectInformationW(current_desk, UOI_NAME, current_desk_name,
                                    sizeof(current_desk_name), NULL))
     return false;
@@ -189,7 +196,7 @@ bool IsInteractiveDesktop(bool* is_interactive) {
   return true;
 }
 
-SBOX_TESTS_COMMAND int OpenInteractiveDesktop(int, wchar_t **) {
+SBOX_TEST_DEFINE_COMMAND(OpenInteractiveDesktop) {
   return TestOpenInputDesktop();
 }
 
@@ -205,7 +212,7 @@ int TestOpenInputDesktop() {
   return SBOX_TEST_DENIED;
 }
 
-SBOX_TESTS_COMMAND int SwitchToSboxDesktop(int, wchar_t **) {
+SBOX_TEST_DEFINE_COMMAND(SwitchToSboxDesktop) {
   return TestSwitchDesktop();
 }
 
@@ -216,8 +223,8 @@ int TestSwitchDesktop() {
   return ::SwitchDesktop(desktop) ? SBOX_TEST_SUCCEEDED : SBOX_TEST_DENIED;
 }
 
-SBOX_TESTS_COMMAND int OpenAlternateDesktop(int, wchar_t **argv) {
-  return TestOpenAlternateDesktop(argv[0]);
+SBOX_TEST_DEFINE_COMMAND(OpenAlternateDesktop) {
+  return TestOpenAlternateDesktop(const_cast<wchar_t*>(args[0].c_str()));
 }
 
 int TestOpenAlternateDesktop(wchar_t *desktop_name) {
@@ -251,7 +258,7 @@ BOOL CALLBACK DesktopTestEnumProc(LPTSTR desktop_name, LPARAM result) {
   return TRUE;
 }
 
-SBOX_TESTS_COMMAND int EnumAlternateWinsta(int, wchar_t **) {
+SBOX_TEST_DEFINE_COMMAND(EnumAlternateWinsta) {
   return TestEnumAlternateWinsta();
 }
 
@@ -261,19 +268,21 @@ int TestEnumAlternateWinsta() {
       SBOX_TEST_SUCCEEDED : SBOX_TEST_DENIED;
 }
 
-SBOX_TESTS_COMMAND int SleepCmd(int argc, wchar_t **argv) {
-  if (argc != 1)
+SBOX_TEST_DEFINE_COMMAND(SleepCmd) {
+  if (args.size() != 1) {
     return SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
+  }
 
-  ::Sleep(_wtoi(argv[0]));
+  ::Sleep(_wtoi(args[0].c_str()));
   return SBOX_TEST_SUCCEEDED;
 }
 
-SBOX_TESTS_COMMAND int AllocateCmd(int argc, wchar_t **argv) {
-  if (argc != 1)
+SBOX_TEST_DEFINE_COMMAND(AllocateCmd) {
+  if (args.size() != 1) {
     return SBOX_TEST_FAILED_TO_EXECUTE_COMMAND;
+  }
 
-  size_t mem_size = static_cast<size_t>(_wtoll(argv[0]));
+  size_t mem_size = static_cast<size_t>(_wtoll(args[0].c_str()));
   void* memory = ::VirtualAlloc(NULL, mem_size, MEM_COMMIT | MEM_RESERVE,
                                 PAGE_READWRITE);
   if (!memory) {
@@ -286,5 +295,15 @@ SBOX_TESTS_COMMAND int AllocateCmd(int argc, wchar_t **argv) {
       SBOX_TEST_SUCCEEDED : SBOX_TEST_FAILED;
 }
 
+SBOX_TEST_DEFINE_COMMAND(InitCompleted) {
+  auto* target_services = sandbox::SandboxFactory::GetTargetServices();
+  if (!target_services) {
+    return SBOX_TEST_FAILED;
+  }
+  if (!target_services->GetState()->InitCompleted()) {
+    return SBOX_TEST_FIRST_ERROR;
+  }
+  return SBOX_TEST_SUCCEEDED;
+}
 
 }  // namespace sandbox

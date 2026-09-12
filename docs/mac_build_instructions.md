@@ -80,6 +80,19 @@ If you don't need the full repo history, you can save time by using
 `fetch --no-history chromium`. You can call `git fetch --unshallow` to retrieve
 the full history later.
 
+You can make this much faster by passing `--git-cache` to `fetch`, which
+seeds the checkout from a shared, prebuilt snapshot instead of cloning from
+scratch (and, unlike `--no-history`, keeps the full history):
+
+```shell
+$ fetch --git-cache chromium
+```
+
+The cache directory is chosen automatically (override with `$GIT_CACHE_PATH`).
+It mirrors every repo it fetches (~30 GB for Chromium) and is shared by all
+checkouts on the machine: working trees reference it instead of copying the
+objects, so the per-checkout `.git` stays small.
+
 Expect the command to take 30 minutes on even a fast connection, and many
 hours on slower ones.
 
@@ -154,6 +167,29 @@ in your args.gn to disable debug symbols altogether.  This makes both full
 rebuilds and linking faster (at the cost of not getting symbolized backtraces
 in gdb).
 
+Put
+
+```
+use_lld = false
+```
+
+in your `args.gn` to use Apple's linker (ld-prime) instead of LLVM's LLD.
+This is supported for local non-cross arm64 macOS builds (ARM Mac) and
+improves link speed. See
+[Linkers for macOS and iOS builds](apple_platform_linkers.md)
+for more information.
+
+#### Use Reclient
+
+In addition, Google employees should use Reclient, a distributed compilation system.
+Detailed information is available internally but the relevant gn arg is:
+* `use_remoteexec = true`
+
+Google employees can visit
+[go/building-chrome-mac#using-remote-execution](https://goto.google.com/building-chrome-mac#using-remote-execution)
+for more information. For external contributors, Reclient does not support Mac
+builds.
+
 #### CCache
 
 You might also want to [install ccache](ccache_mac.md) to speed up the build.
@@ -173,6 +209,8 @@ You can get a list of all of the other build targets from GN by running `gn ls
 out/Default` from the command line. To compile one, pass the GN label to Ninja
 with no preceding "//" (so, for `//chrome/test:unit_tests` use `autoninja -C
 out/Default chrome/test:unit_tests`).
+
+See [Siso tips](siso_tips.md) too.
 
 ## Run Chromium
 
@@ -198,17 +236,27 @@ course beware that they will change the behavior of certain subsystems):
 
 ## Build and run test targets
 
-You can build a test in the same way, e.g.:
+Tests are split into multiple test targets based on their type and where they
+exist in the directory structure. To see what target a given unit test or
+browser test file corresponds to, the following command can be used:
+
+```shell
+$ gn refs out/Default --testonly=true --type=executable --all chrome/browser/ui/browser_unittest.cc
+//chrome/test:unit_tests
+```
+
+In the example above, the target is unit_tests. The unit_tests binary can be
+built by running the following command:
 
 ```shell
 $ autoninja -C out/Default unit_tests
 ```
 
-and can run the tests in the same way. You can also limit which tests are
-run using the `--gtest_filter` arg, e.g.:
+You can run the tests by running the unit_tests binary. You can also limit which
+tests are run using the `--gtest_filter` arg, e.g.:
 
-```
-$ out/Default/unit_tests --gtest_filter="PushClientTest.*"
+```shell
+$ out/Default/unit_tests --gtest_filter="BrowserListUnitTest.*"
 ```
 
 You can find out more about GoogleTest at its
@@ -272,7 +320,7 @@ ask there. Be sure that the
 [waterfall](https://build.chromium.org/buildbot/waterfall/) is green and the
 tree is open before checking out. This will increase your chances of success.
 
-### Improving performance of `git status`
+### Improving performance of git commands
 
 #### Increase the vnode cache size
 
@@ -319,7 +367,7 @@ Or edit the file directly.
 
 #### Configure git to use an untracked cache
 
-If `git --version` reports 2.8 or higher, try running
+Try running
 
 ```shell
 $ git update-index --test-untracked-cache
@@ -332,10 +380,16 @@ If the output ends with `OK`, then the following may also improve performance of
 $ git config core.untrackedCache true
 ```
 
-If `git --version` reports 2.6 or higher, but below 2.8, you can instead run
+#### Configure git to use fsmonitor
+
+You can significantly speed up git by using [fsmonitor.](https://github.blog/2022-06-29-improve-git-monorepo-performance-with-a-file-system-monitor/)
+You should enable fsmonitor in large repos, such as Chromium and v8. Enabling
+it globally will launch many processes and probably isn't worthwhile. Be sure
+you have at least version 2.43 (fsmonitor on the Mac is broken before then). The
+command to enable fsmonitor in the current repo is:
 
 ```shell
-$ git update-index --untracked-cache
+$ git config core.fsmonitor true
 ```
 
 ### Xcode license agreement

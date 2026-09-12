@@ -49,9 +49,9 @@ class COMPONENTS_DOWNLOAD_EXPORT SimpleDownloadManagerCoordinator
 
   using DownloadWhenFullManagerStartsCallBack =
       base::RepeatingCallback<void(std::unique_ptr<DownloadUrlParameters>)>;
-  SimpleDownloadManagerCoordinator(const DownloadWhenFullManagerStartsCallBack&
-                                       download_when_full_manager_starts_cb,
-                                   bool record_full_download_manager_delay);
+  explicit SimpleDownloadManagerCoordinator(
+      const DownloadWhenFullManagerStartsCallBack&
+          download_when_full_manager_starts_cb);
 
   SimpleDownloadManagerCoordinator(const SimpleDownloadManagerCoordinator&) =
       delete;
@@ -73,7 +73,8 @@ class COMPONENTS_DOWNLOAD_EXPORT SimpleDownloadManagerCoordinator
   // Gets all the downloads. Caller needs to call has_all_history_downloads() to
   // check if all downloads are initialized. If only active downloads are
   // initialized, this method will only return all active downloads.
-  void GetAllDownloads(std::vector<DownloadItem*>* downloads);
+  void GetAllDownloads(
+      std::vector<raw_ptr<DownloadItem, VectorExperimental>>* downloads);
 
   // Get the download item for |guid|.
   DownloadItem* GetDownloadByGuid(const std::string& guid);
@@ -90,6 +91,10 @@ class COMPONENTS_DOWNLOAD_EXPORT SimpleDownloadManagerCoordinator
   // that refer to removed files. The check runs in the background and may
   // finish asynchronously after this method returns.
   void CheckForExternallyRemovedDownloads();
+
+  // Calls `callback` when active/in-progress downloads are initialized.
+  // Buffers the callback if simple_download_manager_ is not yet set.
+  void WaitForActiveDownloadsInitialization(base::OnceClosure callback);
 
  private:
   // SimpleDownloadManager::Observer implementation.
@@ -115,11 +120,11 @@ class COMPONENTS_DOWNLOAD_EXPORT SimpleDownloadManagerCoordinator
   // Callback to download the url when full manager becomes ready.
   DownloadWhenFullManagerStartsCallBack download_when_full_manager_starts_cb_;
 
+  // Callbacks waiting for active downloads to be initialized.
+  std::vector<base::OnceClosure> active_downloads_callbacks_;
+
   // Observers that want to be notified of changes to the set of downloads.
   base::ObserverList<Observer> observers_;
-
-  // Time when this object was created.
-  base::TimeTicks creation_time_ticks_;
 
   base::WeakPtrFactory<SimpleDownloadManagerCoordinator> weak_factory_{this};
 };

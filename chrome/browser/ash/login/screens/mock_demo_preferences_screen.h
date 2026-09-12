@@ -12,11 +12,15 @@
 #include "chrome/browser/ui/webui/ash/login/demo_preferences_screen_handler.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
+class PrefService;
+
 namespace ash {
 
 class MockDemoPreferencesScreen : public DemoPreferencesScreen {
  public:
-  MockDemoPreferencesScreen(base::WeakPtr<DemoPreferencesScreenView> view,
+  // `local_state` must be non-null and must outlive `this`.
+  MockDemoPreferencesScreen(PrefService* local_state,
+                            base::WeakPtr<DemoPreferencesScreenView> view,
                             const ScreenExitCallback& exit_callback);
 
   MockDemoPreferencesScreen(const MockDemoPreferencesScreen&) = delete;
@@ -31,7 +35,7 @@ class MockDemoPreferencesScreen : public DemoPreferencesScreen {
   void ExitScreen(Result result);
 };
 
-class MockDemoPreferencesScreenView : public DemoPreferencesScreenView {
+class MockDemoPreferencesScreenView final : public DemoPreferencesScreenView {
  public:
   MockDemoPreferencesScreenView();
 
@@ -43,6 +47,13 @@ class MockDemoPreferencesScreenView : public DemoPreferencesScreenView {
 
   MOCK_METHOD(void, Show, ());
   MOCK_METHOD(void, SetInputMethodId, (const std::string& input_method));
+
+  base::WeakPtr<DemoPreferencesScreenView> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+ private:
+  base::WeakPtrFactory<DemoPreferencesScreenView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

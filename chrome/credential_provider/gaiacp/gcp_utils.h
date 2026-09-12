@@ -9,18 +9,22 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
+#include "base/types/optional_ref.h"
 #include "base/values.h"
 #include "base/version.h"
 #include "base/win/scoped_handle.h"
 #include "base/win/windows_types.h"
+#include "chrome/credential_provider/gaiacp/internet_availability_checker.h"
 #include "chrome/credential_provider/gaiacp/scoped_lsa_policy.h"
 #include "chrome/credential_provider/gaiacp/win_http_url_fetcher.h"
+#include "services/device/public/proto/hid_gcpw.pb.h"
 #include "url/gurl.h"
 
 // These define are documented in
@@ -42,23 +46,25 @@ class FilePath;
 namespace credential_provider {
 
 // Windows supports a maximum of 20 characters plus null in username.
-constexpr int kWindowsUsernameBufferLength = 21;
+inline constexpr int kWindowsUsernameBufferLength = 21;
+
+inline constexpr int kWindowsPasswordBufferLength = 32;
 
 // Maximum domain length is 256 characters including null.
 // https://support.microsoft.com/en-ca/help/909264/naming-conventions-in-active-directory-for-computers-domains-sites-and
-constexpr int kWindowsDomainBufferLength = 256;
+inline constexpr int kWindowsDomainBufferLength = 256;
 
 // According to:
 // https://stackoverflow.com/questions/1140528/what-is-the-maximum-length-of-a-sid-in-sddl-format
-constexpr int kWindowsSidBufferLength = 184;
+inline constexpr int kWindowsSidBufferLength = 184;
 
 // Max number of attempts to find a new username when a user already exists
 // with the same username.
-constexpr int kMaxUsernameAttempts = 10;
+inline constexpr int kMaxUsernameAttempts = 10;
 
 // First index to append to a username when another user with the same name
 // already exists.
-constexpr int kInitialDuplicateUsernameIndex = 2;
+inline constexpr int kInitialDuplicateUsernameIndex = 2;
 
 // Default extension used as a fallback if the picture_url returned from gaia
 // does not have a file extension.
@@ -218,6 +224,7 @@ enum class CommDirection {
 };
 HRESULT InitializeStdHandles(CommDirection direction,
                              StdHandlesToCreate to_create,
+                             bool create_named_pipe_for_stdin,
                              ScopedStartupInfo* startupinfo,
                              StdParentHandles* parent_handles);
 
@@ -265,6 +272,19 @@ bool WriteToStartupSentinel();
 void DeleteStartupSentinel();
 void DeleteStartupSentinelForVersion(const std::wstring& version);
 
+// Returns the root GCPW ProgramData directory
+// ("C:\ProgramData\Google\Credential Provider"), ensuring it is created and
+// secured with restrictive DACLs. Returns an empty path on failure.
+base::FilePath GetDataDirectory();
+
+// Creates a directory with restrictive DACLs that limit access exclusively to
+// NT AUTHORITY\SYSTEM and BUILTIN\Administrators, preventing inheritance from
+// parent folders (such as ProgramData). If the directory already exists, its
+// DACL is updated to be secure. Parent directories of `path` are created
+// as-needed. Returns false if the directory could not be created or the DACL
+// could not be applied.
+bool SecureCreateDirectory(const base::FilePath& path);
+
 // Gets a string resource from the DLL with the given id.
 std::wstring GetStringResource(UINT base_message_id);
 
@@ -273,14 +293,14 @@ std::wstring GetStringResource(UINT base_message_id);
 std::wstring GetStringResource(UINT base_message_id,
                                const std::vector<std::wstring>& subst);
 
-// Gets the language selected by the base::win::i18n::LanguageSelector.
+// Gets the language selected by the base::i18n::LanguageSelector.
 std::wstring GetSelectedLanguage();
 
-// Securely clear a base::Value that may be a dictionary value that may
-// have a password field.
-void SecurelyClearDictionaryValue(absl::optional<base::Value>* value);
-void SecurelyClearDictionaryValueWithKey(absl::optional<base::Value>* value,
-                                         const std::string& password_key);
+// Securely clear a base::DictValue that may have a password field.
+void SecurelyClearDictionaryValue(base::optional_ref<base::DictValue> dict);
+void SecurelyClearDictionaryValueWithKey(
+    base::optional_ref<base::DictValue> dict,
+    const std::string& password_key);
 
 // Securely clear std::wstring and std::string.
 void SecurelyClearString(std::wstring& str);
@@ -289,12 +309,10 @@ void SecurelyClearString(std::string& str);
 // Securely clear a given |buffer| with size |length|.
 void SecurelyClearBuffer(void* buffer, size_t length);
 
-// Helpers to get strings from base::Values that are expected to be
-// DictionaryValues.
+// Helpers to get strings from base::DictValue.
+std::wstring GetDictString(const base::DictValue& dict, const char* name);
+std::string GetDictStringUTF8(const base::DictValue& dict, const char* name);
 
-std::wstring GetDictString(const base::Value& dict, const char* name);
-std::wstring GetDictString(const std::unique_ptr<base::Value>& dict,
-                           const char* name);
 // Perform a recursive search on a nested dictionary object. Note that the
 // names provided in the input should be in order. Below is an example : Lets
 // say the json object is {"key1": {"key2": {"key3": "value1"}}, "key4":
@@ -302,7 +320,7 @@ std::wstring GetDictString(const std::unique_ptr<base::Value>& dict,
 // by providing the |path| as {"key1", "key2", "key3"}.
 std::string SearchForKeyInStringDictUTF8(
     const std::string& json_string,
-    const std::initializer_list<base::StringPiece>& path);
+    const std::initializer_list<std::string_view>& path);
 
 // Perform a recursive search on a nested dictionary object. Note that the
 // names provided in the input should be in order. Below is an example : Lets
@@ -314,11 +332,8 @@ std::string SearchForKeyInStringDictUTF8(
 HRESULT SearchForListInStringDictUTF8(
     const std::string& list_key,
     const std::string& json_string,
-    const std::initializer_list<base::StringPiece>& path,
+    const std::initializer_list<std::string_view>& path,
     std::vector<std::string>* output);
-std::string GetDictStringUTF8(const base::Value& dict, const char* name);
-std::string GetDictStringUTF8(const std::unique_ptr<base::Value>& dict,
-                              const char* name);
 
 // Returns the major build version of Windows by reading the registry.
 // See:
@@ -341,6 +356,8 @@ struct FakesForTesting {
   raw_ptr<OSUserManager> os_user_manager_for_testing = nullptr;
   raw_ptr<OSProcessManager> os_process_manager_for_testing = nullptr;
   WinHttpUrlFetcher::CreatorCallback fake_win_http_url_fetcher_creator;
+  raw_ptr<InternetAvailabilityChecker>
+      internet_availability_checker_for_testing = nullptr;
 };
 
 // DLL entrypoint signature for settings testing fakes.  This is used by
@@ -366,7 +383,7 @@ void InitWindowsStringWithString(const WindowsStringCharT* string,
 // Extracts the provided keys from the given dictionary. Returns true if all
 // keys are found. If any of the key isn't found, returns false.
 bool ExtractKeysFromDict(
-    const base::Value& dict,
+    const base::DictValue& dict,
     const std::vector<std::pair<std::string, std::string*>>& needed_outputs);
 
 // Gets the bios serial number of the windows device.
@@ -427,6 +444,20 @@ std::unique_ptr<base::File> GetOpenedFileForUser(const std::wstring& sid,
 // stores the last fetch time.
 base::TimeDelta GetTimeDeltaSinceLastFetch(const std::wstring& sid,
                                            const std::wstring& flag);
+
+// Reads a single message from the pipe. The message is expected to be prefixed
+// with a 32-bit size.
+HRESULT ReadMessageFromPipe(base::win::ScopedHandle& pipe,
+                            std::vector<uint8_t>* buffer);
+
+// Writes a single message to the pipe. The message is prefixed with a 32-bit
+// size.
+HRESULT WriteMessageToPipe(base::win::ScopedHandle& pipe,
+                           const std::vector<uint8_t>& buffer);
+
+device::gcpw::HidOpenDeviceGcpwResponse ProcessHidOpenDeviceRequest(
+    const device::gcpw::HidOpenDeviceGcpwRequest& request,
+    HANDLE logon_ui_process);
 
 }  // namespace credential_provider
 

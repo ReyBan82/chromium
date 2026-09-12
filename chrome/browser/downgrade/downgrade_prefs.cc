@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef CHROME_BROWSER_DOWNGRADE_DOWNGRADE_PREFS_H_
-#define CHROME_BROWSER_DOWNGRADE_DOWNGRADE_PREFS_H_
-
 #include "chrome/browser/downgrade/downgrade_prefs.h"
 
 #include "chrome/common/pref_names.h"
@@ -14,15 +11,16 @@ namespace downgrade {
 
 namespace {
 
+#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)
 constexpr int kDefaultMaxNumberOfSnapshots = 3;
-
+#endif
 }
 
 void RegisterPrefs(PrefRegistrySimple* registry) {
+#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)
   registry->RegisterIntegerPref(prefs::kUserDataSnapshotRetentionLimit,
                                 kDefaultMaxNumberOfSnapshots);
+#endif
 }
 
 }  // namespace downgrade
-
-#endif  // CHROME_BROWSER_DOWNGRADE_DOWNGRADE_PREFS_H_

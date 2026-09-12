@@ -20,6 +20,18 @@
 
 namespace blink {
 namespace scheduler {
+namespace {
+
+base::sequence_manager::SequenceManager::Settings::Builder
+CreateSequenceManagerSettings() {
+  return std::move(base::sequence_manager::SequenceManager::Settings::Builder()
+                       .SetMessagePumpType(base::MessagePumpType::DEFAULT)
+                       .SetShouldSampleCPUTime(true)
+                       .SetAddQueueTimeToTasks(true)
+                       .SetPrioritySettings(CreatePrioritySettings()));
+}
+
+}  // namespace
 
 WebThreadScheduler::~WebThreadScheduler() = default;
 
@@ -27,41 +39,48 @@ WebThreadScheduler::~WebThreadScheduler() = default;
 std::unique_ptr<WebThreadScheduler>
 WebThreadScheduler::CreateMainThreadScheduler(
     std::unique_ptr<base::MessagePump> message_pump) {
-  auto settings = base::sequence_manager::SequenceManager::Settings::Builder()
-                      .SetMessagePumpType(base::MessagePumpType::DEFAULT)
-                      .SetRandomisedSamplingEnabled(true)
-                      .SetAddQueueTimeToTasks(true)
-                      .SetPrioritySettings(CreatePrioritySettings())
+  DCHECK(message_pump);
+  auto settings = CreateSequenceManagerSettings()
+                      .SetIsMainThread(true)
                       .Build();
   auto sequence_manager =
-      message_pump
-          ? base::sequence_manager::
-                CreateSequenceManagerOnCurrentThreadWithPump(
-                    std::move(message_pump), std::move(settings))
-          : base::sequence_manager::CreateSequenceManagerOnCurrentThread(
-                std::move(settings));
+      base::sequence_manager::CreateSequenceManagerOnCurrentThreadWithPump(
+          std::move(message_pump), std::move(settings));
   return std::make_unique<MainThreadSchedulerImpl>(std::move(sequence_manager));
+}
+
+// static
+std::unique_ptr<WebThreadScheduler>
+WebThreadScheduler::CreateInProcessMainThreadScheduler(
+    std::unique_ptr<base::MessagePump> message_pump) {
+  DCHECK(message_pump);
+  auto settings = CreateSequenceManagerSettings().Build();
+  auto sequence_manager =
+      base::sequence_manager::CreateSequenceManagerOnCurrentThreadWithPump(
+          std::move(message_pump), std::move(settings));
+  return std::make_unique<MainThreadSchedulerImpl>(std::move(sequence_manager));
+}
+
+// static
+std::unique_ptr<WebThreadScheduler>
+WebThreadScheduler::CreateMainThreadSchedulerForTesting(
+    base::sequence_manager::SequenceManager* sequence_manager) {
+  return std::make_unique<MainThreadSchedulerImpl>(sequence_manager);
+}
+
+// static
+base::sequence_manager::SequenceManager::PrioritySettings
+WebThreadScheduler::CreatePrioritySettingsForTesting() {
+  return CreatePrioritySettings();
 }
 
 // Stubs for main thread only virtual functions.
 scoped_refptr<base::SingleThreadTaskRunner>
-WebThreadScheduler::CompositorTaskRunner() {
-  NOTREACHED();
-  return nullptr;
-}
-
-scoped_refptr<base::SingleThreadTaskRunner>
 WebThreadScheduler::DeprecatedDefaultTaskRunner() {
   NOTREACHED();
-  return nullptr;
 }
 
 std::unique_ptr<MainThread> WebThreadScheduler::CreateMainThread() {
-  NOTREACHED();
-  return nullptr;
-}
-
-void WebThreadScheduler::SetRendererHidden(bool hidden) {
   NOTREACHED();
 }
 
@@ -79,7 +98,11 @@ void WebThreadScheduler::ResumeTimersForAndroidWebView() {
 }
 #endif  // BUILDFLAG(IS_ANDROID)
 
-void WebThreadScheduler::SetRendererProcessType(WebRendererProcessType type) {
+void WebThreadScheduler::OnUrgentMessageReceived() {
+  NOTREACHED();
+}
+
+void WebThreadScheduler::OnUrgentMessageProcessed() {
   NOTREACHED();
 }
 

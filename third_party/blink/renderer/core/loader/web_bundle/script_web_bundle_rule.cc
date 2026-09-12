@@ -4,11 +4,14 @@
 
 #include "third_party/blink/renderer/core/loader/web_bundle/script_web_bundle_rule.h"
 
-#include "base/containers/contains.h"
+#include <algorithm>
+#include <variant>
+
 #include "base/metrics/histogram_macros.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink.h"
 #include "third_party/blink/renderer/platform/json/json_parser.h"
 #include "third_party/blink/renderer/platform/json/json_values.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -50,20 +53,16 @@ network::mojom::CredentialsMode ParseCredentials(const String& credentials) {
 
 }  // namespace
 
-absl::variant<ScriptWebBundleRule, ScriptWebBundleError>
+std::variant<ScriptWebBundleRule, ScriptWebBundleError>
 ScriptWebBundleRule::ParseJson(const String& inline_text,
                                const KURL& base_url,
                                ConsoleLogger* logger) {
-  // TODO(crbug.com/1264024): Deprecate JSON comments here, if possible.
-  bool has_comments = false;
-  std::unique_ptr<JSONValue> json = ParseJSONWithCommentsDeprecated(
-      inline_text, /*opt_error=*/nullptr, &has_comments);
+  std::unique_ptr<JSONValue> json = ParseJSON(inline_text);
   if (!json) {
     return ScriptWebBundleError(
         ScriptWebBundleError::Type::kSyntaxError,
         "Failed to parse web bundle rule: invalid JSON.");
   }
-  UMA_HISTOGRAM_BOOLEAN("SubresourceWebBundles.HasJSONComments", has_comments);
   std::unique_ptr<JSONObject> json_obj = JSONObject::From(std::move(json));
   if (!json_obj) {
     return ScriptWebBundleError(
@@ -75,11 +74,12 @@ ScriptWebBundleRule::ParseJson(const String& inline_text,
   if (logger) {
     for (wtf_size_t i = 0; i < json_obj->size(); ++i) {
       JSONObject::Entry entry = json_obj->at(i);
-      if (!base::Contains(kKnownKeys, entry.first)) {
+      if (!std::ranges::contains(kKnownKeys, entry.first)) {
         logger->AddConsoleMessage(
             mojom::blink::ConsoleMessageSource::kOther,
             mojom::blink::ConsoleMessageLevel::kWarning,
-            "Invalid top-level key \"" + entry.first + "\" in WebBundle rule.");
+            StrCat({"Invalid top-level key \"", entry.first,
+                    "\" in WebBundle rule."}));
       }
     }
   }
@@ -142,8 +142,9 @@ bool ScriptWebBundleRule::ResourcesOrScopesMatch(const KURL& url) const {
   if (resource_urls_.Contains(url))
     return true;
   for (const auto& scope : scope_urls_) {
-    if (url.GetString().StartsWith(scope.GetString()))
+    if (url.GetString().starts_with(scope.GetString())) {
       return true;
+    }
   }
   return false;
 }

@@ -8,7 +8,7 @@
 #include <memory>
 
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "components/keyed_service/core/keyed_service.h"
 
 namespace network {
@@ -57,9 +57,13 @@ class ImageFetcherService : public KeyedService {
   ~ImageFetcherService() override;
 
   // Get an image fetcher according to the given config.
-  ImageFetcher* GetImageFetcher(ImageFetcherConfig config);
+  virtual ImageFetcher* GetImageFetcher(ImageFetcherConfig config);
 
   scoped_refptr<ImageCache> ImageCacheForTesting() const;
+
+ protected:
+  // This constructor exists to allow mocking the service in tests.
+  ImageFetcherService();
 
  private:
   // TODO(wylieb): Make this a unique_ptr.

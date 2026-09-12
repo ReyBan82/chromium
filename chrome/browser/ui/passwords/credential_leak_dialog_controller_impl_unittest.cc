@@ -11,6 +11,7 @@
 #include "base/test/task_environment.h"
 #include "chrome/browser/ui/passwords/password_dialog_prompts.h"
 #include "chrome/browser/ui/passwords/passwords_leak_dialog_delegate_mock.h"
+#include "components/password_manager/core/browser/features/password_features.h"
 #include "components/password_manager/core/browser/leak_detection_dialog_utils.h"
 #include "components/password_manager/core/browser/password_manager_metrics_util.h"
 #include "components/password_manager/core/common/password_manager_features.h"
@@ -21,11 +22,15 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 
+namespace views {
+class Widget;
+}
 namespace {
 
 constexpr ukm::SourceId kTestSourceId = 0x1234;
 
 using password_manager::CreateLeakType;
+using password_manager::HasChangePasswordUrl;
 using password_manager::IsReused;
 using password_manager::IsSaved;
 using password_manager::IsSyncing;
@@ -35,9 +40,6 @@ using password_manager::metrics_util::LeakDialogType;
 using testing::StrictMock;
 using UkmEntry = ukm::builders::PasswordManager_LeakWarningDialog;
 
-constexpr char kUrl[] = "https://www.example.co.uk";
-constexpr char16_t kUsername[] = u"Jane";
-
 class MockCredentialLeakPrompt : public CredentialLeakPrompt {
  public:
   MockCredentialLeakPrompt() = default;
@@ -45,8 +47,8 @@ class MockCredentialLeakPrompt : public CredentialLeakPrompt {
   MockCredentialLeakPrompt(const MockCredentialLeakPrompt&) = delete;
   MockCredentialLeakPrompt& operator=(const MockCredentialLeakPrompt&) = delete;
 
-  MOCK_METHOD0(ShowCredentialLeakPrompt, void());
-  MOCK_METHOD0(ControllerGone, void());
+  MOCK_METHOD(void, ShowCredentialLeakPrompt, (), (override));
+  MOCK_METHOD(views::Widget*, GetWidgetForTesting, (), (override));
 };
 
 class CredentialLeakDialogControllerTest : public testing::Test {
@@ -57,8 +59,11 @@ class CredentialLeakDialogControllerTest : public testing::Test {
     // Set sampling rate to 100% for UKM metrics.
     recorder->SetSamplingRateForTesting(1.0);
     controller_ = std::make_unique<CredentialLeakDialogControllerImpl>(
-        &ui_controller_mock_, leak_type, GURL(kUrl), kUsername,
-        std::move(recorder));
+        &ui_controller_mock_, leak_type, std::move(recorder));
+  }
+
+  std::unique_ptr<StrictMock<MockCredentialLeakPrompt>> SetupLeakPrompt() {
+    return std::make_unique<StrictMock<MockCredentialLeakPrompt>>();
   }
 
   base::HistogramTester& histogram_tester() { return histogram_tester_; }
@@ -71,8 +76,6 @@ class CredentialLeakDialogControllerTest : public testing::Test {
     return test_ukm_recorder_;
   }
 
-  MockCredentialLeakPrompt& leak_prompt() { return leak_prompt_; }
-
   CredentialLeakDialogControllerImpl& controller() { return *controller_; }
 
  private:
@@ -80,7 +83,6 @@ class CredentialLeakDialogControllerTest : public testing::Test {
   base::HistogramTester histogram_tester_;
   ukm::TestAutoSetUkmRecorder test_ukm_recorder_;
   StrictMock<PasswordsLeakDialogDelegateMock> ui_controller_mock_;
-  StrictMock<MockCredentialLeakPrompt> leak_prompt_;
   std::unique_ptr<CredentialLeakDialogControllerImpl> controller_;
 };
 
@@ -90,7 +92,7 @@ void CheckUkmMetricsExpectations(
     LeakDialogDismissalReason expected_dismissal_reason) {
   const auto& entries = recorder.GetEntriesByName(UkmEntry::kEntryName);
   EXPECT_EQ(1u, entries.size());
-  for (const auto* entry : entries) {
+  for (const ukm::mojom::UkmEntry* entry : entries) {
     EXPECT_EQ(kTestSourceId, entry->source_id);
     recorder.ExpectEntryMetric(entry,
                                UkmEntry::kPasswordLeakDetectionDialogTypeName,
@@ -105,8 +107,10 @@ TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogClose) {
   SetUpController(
       CreateLeakType(IsSaved(false), IsReused(false), IsSyncing(false)));
 
-  EXPECT_CALL(leak_prompt(), ShowCredentialLeakPrompt());
-  controller().ShowCredentialLeakPrompt(&leak_prompt());
+  auto leak_prompt = SetupLeakPrompt();
+
+  EXPECT_CALL(*leak_prompt, ShowCredentialLeakPrompt());
+  controller().ShowCredentialLeakPrompt(std::move(leak_prompt));
 
   EXPECT_CALL(ui_controller_mock(), OnLeakDialogHidden());
   controller().OnCloseDialog();
@@ -121,16 +125,16 @@ TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogClose) {
 
   CheckUkmMetricsExpectations(test_ukm_recorder(), LeakDialogType::kChange,
                               LeakDialogDismissalReason::kNoDirectInteraction);
-
-  EXPECT_CALL(leak_prompt(), ControllerGone());
 }
 
 TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogOk) {
   SetUpController(
       CreateLeakType(IsSaved(true), IsReused(false), IsSyncing(false)));
 
-  EXPECT_CALL(leak_prompt(), ShowCredentialLeakPrompt());
-  controller().ShowCredentialLeakPrompt(&leak_prompt());
+  auto leak_prompt = SetupLeakPrompt();
+
+  EXPECT_CALL(*leak_prompt, ShowCredentialLeakPrompt());
+  controller().ShowCredentialLeakPrompt(std::move(leak_prompt));
 
   EXPECT_CALL(ui_controller_mock(), OnLeakDialogHidden());
   controller().OnAcceptDialog();
@@ -145,16 +149,50 @@ TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogOk) {
 
   CheckUkmMetricsExpectations(test_ukm_recorder(), LeakDialogType::kChange,
                               LeakDialogDismissalReason::kClickedOk);
-
-  EXPECT_CALL(leak_prompt(), ControllerGone());
 }
 
 TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogCancel) {
+  // With kUnifiedPasswordLeakDialog enabled by default, unsaved reused credentials
+  // route to kCheckup.
   SetUpController(
       CreateLeakType(IsSaved(false), IsReused(true), IsSyncing(true)));
 
-  EXPECT_CALL(leak_prompt(), ShowCredentialLeakPrompt());
-  controller().ShowCredentialLeakPrompt(&leak_prompt());
+  auto leak_prompt = SetupLeakPrompt();
+
+  EXPECT_CALL(*leak_prompt, ShowCredentialLeakPrompt());
+  controller().ShowCredentialLeakPrompt(std::move(leak_prompt));
+
+  EXPECT_CALL(ui_controller_mock(), OnLeakDialogHidden());
+  controller().OnCancelDialog();
+
+  histogram_tester().ExpectUniqueSample(
+      "PasswordManager.LeakDetection.DialogDismissalReason",
+      LeakDialogDismissalReason::kClickedClose, 1);
+
+  histogram_tester().ExpectUniqueSample(
+      "PasswordManager.LeakDetection.DialogDismissalReason.Checkup",
+      LeakDialogDismissalReason::kClickedClose, 1);
+
+  CheckUkmMetricsExpectations(test_ukm_recorder(),
+                              LeakDialogType::kCheckup,
+                              LeakDialogDismissalReason::kClickedClose);
+}
+
+TEST_F(CredentialLeakDialogControllerTest,
+       CredentialLeakDialogKillswitchDisabledCancel) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      password_manager::features::kUnifiedPasswordLeakDialog);
+
+  // When killswitch is active (feature disabled), unsaved reused credentials
+  // route to kCheckupAndChange.
+  SetUpController(
+      CreateLeakType(IsSaved(false), IsReused(true), IsSyncing(true)));
+
+  auto leak_prompt = SetupLeakPrompt();
+
+  EXPECT_CALL(*leak_prompt, ShowCredentialLeakPrompt());
+  controller().ShowCredentialLeakPrompt(std::move(leak_prompt));
 
   EXPECT_CALL(ui_controller_mock(), OnLeakDialogHidden());
   controller().OnCancelDialog();
@@ -170,16 +208,16 @@ TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogCancel) {
   CheckUkmMetricsExpectations(test_ukm_recorder(),
                               LeakDialogType::kCheckupAndChange,
                               LeakDialogDismissalReason::kClickedClose);
-
-  EXPECT_CALL(leak_prompt(), ControllerGone());
 }
 
 TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogCheckPasswords) {
   SetUpController(
       CreateLeakType(IsSaved(true), IsReused(true), IsSyncing(true)));
 
-  EXPECT_CALL(leak_prompt(), ShowCredentialLeakPrompt());
-  controller().ShowCredentialLeakPrompt(&leak_prompt());
+  auto leak_prompt = SetupLeakPrompt();
+
+  EXPECT_CALL(*leak_prompt, ShowCredentialLeakPrompt());
+  controller().ShowCredentialLeakPrompt(std::move(leak_prompt));
 
   EXPECT_CALL(
       ui_controller_mock(),
@@ -199,8 +237,6 @@ TEST_F(CredentialLeakDialogControllerTest, CredentialLeakDialogCheckPasswords) {
   CheckUkmMetricsExpectations(
       test_ukm_recorder(), LeakDialogType::kCheckup,
       LeakDialogDismissalReason::kClickedCheckPasswords);
-
-  EXPECT_CALL(leak_prompt(), ControllerGone());
 }
 
 }  // namespace

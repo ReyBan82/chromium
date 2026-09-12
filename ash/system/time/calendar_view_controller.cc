@@ -200,8 +200,6 @@ void CalendarViewController::ShowEventListView(
 }
 
 void CalendarViewController::CloseEventListView() {
-  selected_date_ = absl::nullopt;
-
   for (auto& observer : observers_)
     observer.CloseEventList();
 }
@@ -212,6 +210,13 @@ void CalendarViewController::OnEventListOpened() {
 
 void CalendarViewController::OnEventListClosed() {
   is_event_list_showing_ = false;
+  selected_date_ = std::nullopt;
+}
+
+void CalendarViewController::CalendarLoaded() {
+  for (auto& observer : observers_) {
+    observer.OnCalendarLoaded();
+  }
 }
 
 void CalendarViewController::RecordEventListItemActivated(
@@ -252,9 +257,21 @@ void CalendarViewController::OnTodaysEventFetchComplete() {
   if (todays_date_cell_fetch_recorded_)
     return;
 
-  UmaHistogramMediumTimes("Ash.Calendar.TimeToSeeTodaysEventDots",
-                          base::TimeTicks::Now() - calendar_open_time_);
+  calendar_metrics::RecordTimeToSeeTodaysEventDots(
+      base::TimeTicks::Now() - calendar_open_time_,
+      /*multi_calendar_enabled=*/calendar_utils::IsMultiCalendarEnabled());
   todays_date_cell_fetch_recorded_ = true;
+}
+
+void CalendarViewController::EventsDisplayedToUser() {
+  // Only record this once per lifetime of the `CalendarView` (and therefore the
+  // controller).
+  if (events_shown_to_user_recorded_) {
+    return;
+  }
+
+  calendar_metrics::RecordEventsDisplayedToUser();
+  events_shown_to_user_recorded_ = true;
 }
 
 bool CalendarViewController::IsSelectedDateInCurrentMonth() {

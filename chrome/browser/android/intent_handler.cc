@@ -4,23 +4,35 @@
 
 #include "base/android/jni_string.h"
 #include "base/strings/string_util.h"
-#include "chrome/android/chrome_jni_headers/IntentHandler_jni.h"
+#include "chrome/browser/ui/startup/url_util.h"
 #include "services/network/public/cpp/cors/cors.h"
+#include "url/android/gurl_android.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/ExternalIntentUrlChecker_jni.h"
+#include "chrome/android/chrome_jni_headers/IntentHandler_jni.h"
+
+using base::android::JavaRef;
 
 namespace chrome {
 namespace android {
 
-jboolean JNI_IntentHandler_IsCorsSafelistedHeader(
+static bool JNI_IntentHandler_IsCorsSafelistedHeader(
     JNIEnv* env,
-    const JavaParamRef<jstring>& j_header_name,
-    const JavaParamRef<jstring>& j_header_value) {
-  std::string header_name(ConvertJavaStringToUTF8(env, j_header_name));
-  std::string header_value(ConvertJavaStringToUTF8(env, j_header_value));
-
+    const std::string& header_name,
+    const std::string& header_value) {
   return network::cors::IsCorsSafelistedHeader(header_name, header_value);
+}
+
+static bool JNI_ExternalIntentUrlChecker_ValidateUrl(
+    JNIEnv* env,
+    const JavaRef<jobject>& url) {
+  return startup::ValidateLaunchUrlWebUnsafe(
+      url::GURLAndroid::ToNativeGURL(env, url));
 }
 
 }  // namespace android
 }  // namespace chrome
+
+DEFINE_JNI(IntentHandler)
+DEFINE_JNI(ExternalIntentUrlChecker)

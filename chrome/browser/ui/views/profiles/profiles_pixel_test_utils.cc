@@ -3,55 +3,122 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/profiles/profiles_pixel_test_utils.h"
+
 #include <memory>
+#include <string_view>
+
 #include "base/command_line.h"
 #include "base/scoped_environment_variable_override.h"
 #include "base/test/scoped_feature_list.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
-#include "chrome/browser/signin/signin_features.h"
-#include "chrome/common/chrome_features.h"
 #include "components/signin/public/base/signin_buildflags.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "components/signin/public/identity_manager/account_capabilities_test_mutator.h"
 #include "components/signin/public/identity_manager/account_info.h"
+#include "components/signin/public/identity_manager/identity_test_environment.h"
 #include "components/signin/public/identity_manager/identity_test_utils.h"
+#include "components/signin/public/identity_manager/tribool.h"
+#include "content/public/test/browser_test_utils.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/ui_base_switches.h"
+#include "ui/gfx/image/image_skia.h"
+#include "ui/gfx/image/image_unittest_util.h"
 
-namespace {
-AccountInfo FillAccountInfo(const CoreAccountInfo& core_info,
-                            AccountManagementStatus management_status) {
+AccountInfo FillAccountInfo(
+    const CoreAccountInfo& core_info,
+    AccountManagementStatus management_status,
+    signin::Tribool
+        can_show_history_sync_opt_ins_without_minor_mode_restrictions) {
   const char kHostedDomain[] = "example.com";
-  AccountInfo account_info;
+  AccountInfo account_info =
+      AccountInfo::Builder(core_info)
+          .SetFullName("Test Full Name")
+          .SetGivenName("Joe")
+          .SetHostedDomain(management_status ==
+                                   AccountManagementStatus::kManaged
+                               ? kHostedDomain
+                               : std::string())
+          .SetLocale("en")
+          .SetAvatarUrl("https://example.com")
+          .Build();
+  AccountCapabilitiesTestMutator mutator(&account_info);
+  mutator.set_is_subject_to_enterprise_features(
+      management_status == AccountManagementStatus::kManaged);
 
-  account_info.email = core_info.email;
-  account_info.gaia = core_info.gaia;
-  account_info.account_id = core_info.account_id;
-  account_info.is_under_advanced_protection =
-      core_info.is_under_advanced_protection;
-  account_info.full_name = "Test Full Name";
-  account_info.given_name = "Joe";
-  account_info.hosted_domain =
-      management_status == AccountManagementStatus::kManaged
-          ? kHostedDomain
-          : kNoHostedDomainFound;
-  account_info.locale = "en";
-  account_info.picture_url = "https://example.com";
+  if (can_show_history_sync_opt_ins_without_minor_mode_restrictions !=
+      signin::Tribool::kUnknown) {
+    mutator.set_can_show_history_sync_opt_ins_without_minor_mode_restrictions(
+        signin::TriboolToBoolOrDie(
+            can_show_history_sync_opt_ins_without_minor_mode_restrictions));
+  }
+
   return account_info;
 }
-}  // namespace
 
-AccountInfo SignInWithPrimaryAccount(
-    Profile* profile,
-    AccountManagementStatus management_status) {
-  DCHECK(profile);
+std::string GetWaitForAnimationsScript(std::string_view component_name) {
+  return content::JsReplace(
+      R"(
+        (async () => {
+          const componentName = $1;
+          await customElements.whenDefined(componentName);
+          const component = document.querySelector(componentName);
+          if (!component) {
+            return false;
+          }
 
-  auto* identity_manager = IdentityManagerFactory::GetForProfile(profile);
-  auto core_account_info = signin::MakePrimaryAccountAvailable(
-      identity_manager,
+          await component.updateComplete;
+
+          const anims = component.shadowRoot.querySelectorAll('cr-lottie');
+          if (anims.length === 0) {
+            return false;
+          }
+
+          await Promise.all(Array.from(anims, anim => {
+            return new Promise(resolve => {
+              if (anim.isAnimationLoaded_) {
+                resolve(true);
+              } else {
+                anim.addEventListener('cr-lottie-initialized',
+                                      () => resolve(true), {once: true});
+              }
+            });
+          }));
+          return true;
+        })();
+      )",
+      component_name);
+}
+
+AccountInfo SignInWithAccount(
+    signin::IdentityTestEnvironment& identity_test_env,
+    AccountManagementStatus management_status,
+    std::optional<signin::ConsentLevel> consent_level,
+    signin::Tribool
+        can_show_history_sync_opt_ins_without_minor_mode_restrictions) {
+  auto* identity_manager = identity_test_env.identity_manager();
+
+  const std::string email =
       management_status == AccountManagementStatus::kManaged
           ? "joe.consumer@example.com"
-          : "joe.consumer@gmail.com",
-      signin::ConsentLevel::kSignin);
-  auto account_info = FillAccountInfo(core_account_info, management_status);
-  signin::UpdateAccountInfoForAccount(identity_manager, account_info);
+          : "joe.consumer@gmail.com";
+
+  AccountInfo base_account_info = identity_test_env.MakeAccountAvailable(
+      email,
+      {.primary_account_consent_level = consent_level, .set_cookie = true});
+
+  identity_test_env.UpdateAccountInfoForAccount(FillAccountInfo(
+      base_account_info.GetCoreAccountInfo(), management_status,
+      can_show_history_sync_opt_ins_without_minor_mode_restrictions));
+
+  // Set account image
+  SimulateAccountImageFetch(identity_manager, base_account_info.GetAccountId(),
+                            "GAIA_IMAGE_URL_WITH_SIZE",
+                            gfx::Image(gfx::test::CreatePlatformImage()));
+
+  AccountInfo account_info =
+      identity_manager->FindExtendedAccountInfoByEmailAddress(email);
+  CHECK_EQ(account_info.GetAccountId(), base_account_info.GetAccountId());
+  CHECK(account_info.IsValid());
 
   return account_info;
 }
@@ -64,27 +131,20 @@ void SetUpPixelTestCommandLine(
     command_line->AppendSwitch(switches::kForceDarkMode);
   }
   if (params.use_right_to_left_language) {
-    command_line->AppendSwitchASCII(switches::kLang, "ar");
+    const std::string language = "ar-XB";
+    command_line->AppendSwitchASCII(switches::kLang, language);
 
-    // On Linux & Lacros the command line switch has no effect, we need to use
+    // On Linux the command line switch has no effect, we need to use
     // environment variables to change the language.
     env_variables = std::make_unique<base::ScopedEnvironmentVariableOverride>(
-        "LANGUAGE", "ar");
+        "LANGUAGE", language);
   }
 }
 
-void InitPixelTestFeatures(
-    const PixelTestParam& params,
-    base::test::ScopedFeatureList& feature_list,
-    std::vector<base::test::FeatureRef>& enabled_features,
-    std::vector<base::test::FeatureRef>& disabled_features) {
-  if (params.use_dark_theme) {
-    enabled_features.push_back(features::kWebUIDarkMode);
-  }
-#if BUILDFLAG(ENABLE_DICE_SUPPORT)
-  if (params.use_fre_style) {
-    enabled_features.push_back(kForYouFre);
-  }
-#endif
+void InitPixelTestFeatures(const PixelTestParam& params,
+                           base::test::ScopedFeatureList& feature_list) {
+  std::vector<base::test::FeatureRef> enabled_features;
+  std::vector<base::test::FeatureRef> disabled_features;
+
   feature_list.InitWithFeatures(enabled_features, disabled_features);
 }

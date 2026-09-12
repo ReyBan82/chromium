@@ -5,7 +5,7 @@ Use of this source code is governed by a BSD-style license that can be
 found in the LICENSE file.
 -->
 
-<!-- TODO(crbug.com/1179539): For some reason the layout measurements in AnchoredPopupWindow are
+<!-- TODO(crbug.com/40749767): For some reason the layout measurements in AnchoredPopupWindow are
      cutting off part of the text when a text view with a compound drawable is used. Figure out
      why and switch this to use TextViewWithCompoundDrawable. -->
 <LinearLayout
@@ -21,7 +21,7 @@ found in the LICENSE file.
     android:paddingBottom="10dp"
     android:gravity="center" >
 
-    <org.chromium.ui.widget.ChromeImageView
+    <ImageView
         android:id="@+id/image"
         android:layout_width="24sp"
         android:layout_height="24sp"
@@ -50,6 +50,6 @@ found in the LICENSE file.
         android:id="@+id/message"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:textAppearance="@style/TextAppearance.TextMediumThick.Primary.OnAccent1" />
+        android:textAppearance="@style/TextAppearance.TextMediumThick.OnAccent1" />
 
 </LinearLayout>

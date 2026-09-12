@@ -5,6 +5,7 @@
 #include "chrome/browser/ash/printing/printer_setup_util.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -18,18 +19,18 @@
 #include "base/threading/scoped_blocking_call.h"
 #include "chrome/browser/ash/printing/cups_printers_manager.h"
 #include "chrome/browser/ash/printing/cups_printers_manager_factory.h"
-#include "chrome/browser/ash/printing/printer_configurer.h"
-#include "chrome/browser/browser_process.h"
 #include "chromeos/printing/printer_configuration.h"
+#include "components/application_locale_storage/application_locale_storage.h"
 #include "components/crash/core/common/crash_keys.h"
 #include "content/public/browser/browser_thread.h"
 #include "printing/buildflags/buildflags.h"
 #include "printing/mojom/print.mojom.h"
 #include "printing/printing_features.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(ENABLE_OOP_PRINTING)
+#include "chrome/browser/printing/oop_features.h"
 #include "chrome/browser/printing/print_backend_service_manager.h"
+#include "chrome/services/printing/public/mojom/print_backend_service.mojom.h"
 #endif
 
 namespace ash {
@@ -45,7 +46,7 @@ void LogPrinterSetup(const chromeos::Printer& printer,
       printer.IsZeroconf()
           ? "Printing.CUPS.ZeroconfPrinterSetupResult.PrintPreview"
           : "Printing.CUPS.PrinterSetupResult.PrintPreview",
-      result, PrinterSetupResult::kMaxValue);
+      result);
 
   switch (result) {
     case PrinterSetupResult::kSuccess: {
@@ -64,7 +65,9 @@ void LogPrinterSetup(const chromeos::Printer& printer,
     case PrinterSetupResult::kPpdUnretrievable:
       // Prompt user to update configuration or check internet connection.
       // TODO(skau): Fill me in
-      LOG(WARNING) << ResultCodeToMessage(result);
+      LOG(WARNING) << printer.id() << ": printer setup failed for "
+                   << printer.make_and_model() << ": "
+                   << ResultCodeToMessage(result);
       break;
     case PrinterSetupResult::kFatalError:
     case PrinterSetupResult::kDbusError:
@@ -77,57 +80,63 @@ void LogPrinterSetup(const chromeos::Printer& printer,
     case PrinterSetupResult::kDbusNoReply:
     case PrinterSetupResult::kDbusTimeout:
     case PrinterSetupResult::kManualSetupRequired:
-      LOG(ERROR) << ResultCodeToMessage(result);
+    case PrinterSetupResult::kPrinterRemoved:
+    case PrinterSetupResult::kPrintscanmgrDbusNoReply:
+    case PrinterSetupResult::kDebugdDbusNoReply:
+      LOG(ERROR) << printer.id() << ": printer setup failed for "
+                 << printer.make_and_model() << ": "
+                 << ResultCodeToMessage(result);
       break;
     case PrinterSetupResult::kInvalidPrinterUpdate:
     case PrinterSetupResult::kEditSuccess:
     case PrinterSetupResult::kPrinterIsNotAutoconfigurable:
     case PrinterSetupResult::kComponentUnavailable:
-    case PrinterSetupResult::kMaxValue:
-      LOG(ERROR) << "Unexpected error in printer setup: "
+      LOG(ERROR) << printer.id() << ": unexpected error in printer setup for "
+                 << printer.make_and_model() << ": "
                  << ResultCodeToMessage(result);
       break;
   }
 }
 
 // This runs on a ThreadPoolForegroundWorker and not the UI thread.
-absl::optional<::printing::PrinterSemanticCapsAndDefaults>
-FetchCapabilitiesOnBlockingTaskRunner(const std::string& printer_id,
-                                      const std::string& locale) {
-  auto print_backend = ::printing::PrintBackend::CreateInstance(locale);
+std::optional<::printing::PrinterSemanticCapsAndDefaults>
+FetchCapabilitiesOnBlockingTaskRunner(const std::string& application_locale,
+                                      const std::string& printer_id) {
+  auto print_backend =
+      ::printing::PrintBackend::CreateInstance(application_locale);
   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
                                                 base::BlockingType::MAY_BLOCK);
 
   VLOG(1) << "Get printer capabilities start for " << printer_id;
   crash_keys::ScopedPrinterInfo crash_key(
-      print_backend->GetPrinterDriverInfo(printer_id));
+      printer_id, print_backend->GetPrinterDriverInfo(printer_id));
 
-  auto caps = absl::make_optional<::printing::PrinterSemanticCapsAndDefaults>();
+  auto caps = std::make_optional<::printing::PrinterSemanticCapsAndDefaults>();
   if (print_backend->GetPrinterSemanticCapsAndDefaults(printer_id, &*caps) !=
       ::printing::mojom::ResultCode::kSuccess) {
     // Failed to get capabilities, but proceed to assemble the settings to
     // return what information we do have.
     LOG(WARNING) << "Failed to get capabilities for " << printer_id;
-    return absl::nullopt;
+    return std::nullopt;
   }
   return caps;
 }
 
 #if BUILDFLAG(ENABLE_OOP_PRINTING)
 void CapabilitiesFetchedFromService(
+    ::printing::PrintBackendServiceManager::ClientId client_id,
     const std::string& printer_id,
     bool elevated_privileges,
     GetPrinterCapabilitiesCallback cb,
-    ::printing::mojom::PrinterSemanticCapsAndDefaultsResultPtr printer_caps) {
-  if (printer_caps->is_result_code()) {
+    ::printing::mojom::PrintBackendService::
+        GetPrinterSemanticCapsAndDefaultsResult printer_caps) {
+  if (!printer_caps.has_value()) {
     LOG(WARNING) << "Failure fetching printer capabilities from service for "
-                 << printer_id << " - error "
-                 << printer_caps->get_result_code();
+                 << printer_id << " - error " << printer_caps.error();
 
     // If we failed because of access denied then we could retry at an elevated
     // privilege (if not already elevated).
-    if (printer_caps->get_result_code() ==
-            ::printing::mojom::ResultCode::kAccessDenied &&
+    if (printer_caps.error() == ::printing::mojom::ResultCode::kAccessDenied &&
         !elevated_privileges) {
       // Register that this printer requires elevated privileges.
       ::printing::PrintBackendServiceManager& service_mgr =
@@ -138,35 +147,46 @@ void CapabilitiesFetchedFromService(
       // level.
       service_mgr.GetPrinterSemanticCapsAndDefaults(
           printer_id,
-          base::BindOnce(&CapabilitiesFetchedFromService, printer_id,
+          base::BindOnce(&CapabilitiesFetchedFromService, client_id, printer_id,
                          /*elevated_privileges=*/true, std::move(cb)));
       return;
     }
+    // No more attempts to get capabilities for this client.
+    ::printing::PrintBackendServiceManager::GetInstance().UnregisterClient(
+        client_id);
 
     // Unable to fallback, call back without data.
-    std::move(cb).Run(absl::nullopt);
+    std::move(cb).Run(std::nullopt);
     return;
   }
 
+  // Done getting capabilities, no more need for this client.
+  ::printing::PrintBackendServiceManager::GetInstance().UnregisterClient(
+      client_id);
+
   VLOG(1) << "Successfully received printer capabilities from service for "
           << printer_id;
-  std::move(cb).Run(printer_caps->get_printer_caps());
+  std::move(cb).Run(printer_caps.value());
 }
 #endif  // BUILDFLAG(ENABLE_OOP_PRINTING)
 
-void FetchCapabilities(const std::string& printer_id,
+void FetchCapabilities(const std::string& application_locale,
+                       const std::string& printer_id,
                        GetPrinterCapabilitiesCallback cb) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
 #if BUILDFLAG(ENABLE_OOP_PRINTING)
-  if (base::FeatureList::IsEnabled(
-          ::printing::features::kEnableOopPrintDrivers)) {
+  if (::printing::IsOopPrintingEnabled()) {
     VLOG(1) << "Fetching printer capabilities via service";
     ::printing::PrintBackendServiceManager& service_mgr =
         ::printing::PrintBackendServiceManager::GetInstance();
+    // Require client ID before making call.  Client scope is just the time
+    // to get the capabilities.
+    ::printing::PrintBackendServiceManager::ClientId client_id =
+        service_mgr.RegisterQueryClient();
     service_mgr.GetPrinterSemanticCapsAndDefaults(
         printer_id,
-        base::BindOnce(&CapabilitiesFetchedFromService, printer_id,
+        base::BindOnce(&CapabilitiesFetchedFromService, client_id, printer_id,
                        service_mgr.PrinterDriverFoundToRequireElevatedPrivilege(
                            printer_id),
                        std::move(cb)));
@@ -178,35 +198,37 @@ void FetchCapabilities(const std::string& printer_id,
   // USER_VISIBLE because the result is displayed in the print preview dialog.
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
-      base::BindOnce(FetchCapabilitiesOnBlockingTaskRunner, printer_id,
-                     g_browser_process->GetApplicationLocale()),
+      base::BindOnce(FetchCapabilitiesOnBlockingTaskRunner, application_locale,
+                     printer_id),
       std::move(cb));
 }
 
 void OnPrinterInstalled(
+    const ApplicationLocaleStorage* application_locale_storage,
     CupsPrintersManager* printers_manager,
     const chromeos::Printer& printer,
     base::OnceCallback<void(
-        const absl::optional<::printing::PrinterSemanticCapsAndDefaults>&)> cb,
+        const std::optional<::printing::PrinterSemanticCapsAndDefaults>&)> cb,
     PrinterSetupResult result) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   LogPrinterSetup(printer, result);
   if (result != PrinterSetupResult::kSuccess) {
-    std::move(cb).Run(absl::nullopt);
+    std::move(cb).Run(std::nullopt);
     return;
   }
-  printers_manager->PrinterInstalled(printer, /*is_automatic=*/true);
   // Fetch settings off of the UI thread and invoke callback.
-  FetchCapabilities(printer.id(), std::move(cb));
+  FetchCapabilities(application_locale_storage->Get(), printer.id(),
+                    std::move(cb));
 }
 
 }  // namespace
 
-void SetUpPrinter(CupsPrintersManager* printers_manager,
-                  PrinterConfigurer* printer_configurer,
+void SetUpPrinter(const ApplicationLocaleStorage* application_locale_storage,
+                  CupsPrintersManager* printers_manager,
                   const chromeos::Printer& printer,
                   GetPrinterCapabilitiesCallback cb) {
+  CHECK(application_locale_storage);
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   // Log printer configuration for selected printer.
@@ -217,13 +239,15 @@ void SetUpPrinter(CupsPrintersManager* printers_manager,
   if (printers_manager->IsPrinterInstalled(printer)) {
     // Skip setup if the printer does not need to be installed.
     // Fetch settings off of the UI thread and invoke callback.
-    FetchCapabilities(printer.id(), std::move(cb));
+    FetchCapabilities(application_locale_storage->Get(), printer.id(),
+                      std::move(cb));
     return;
   }
 
-  printer_configurer->SetUpPrinter(
-      printer, base::BindOnce(OnPrinterInstalled, printers_manager, printer,
-                              std::move(cb)));
+  printers_manager->SetUpPrinter(
+      printer, /*is_automatic_installation=*/true,
+      base::BindOnce(OnPrinterInstalled, application_locale_storage,
+                     printers_manager, printer, std::move(cb)));
 }
 
 }  // namespace printing

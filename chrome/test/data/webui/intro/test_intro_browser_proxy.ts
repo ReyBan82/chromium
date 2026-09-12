@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {IntroBrowserProxy} from 'chrome://intro/browser_proxy.js';
+import type {IntroBrowserProxy} from 'chrome://intro/browser_proxy.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
+import {FakeMediaQueryList} from 'chrome://webui-test/fake_media_query_list.js';
 
 export class TestIntroBrowserProxy extends TestBrowserProxy implements
     IntroBrowserProxy {
@@ -15,6 +16,8 @@ export class TestIntroBrowserProxy extends TestBrowserProxy implements
     ]);
   }
 
+  private mediaQueryList_: FakeMediaQueryList = new FakeMediaQueryList('dummy');
+
   continueWithAccount() {
     this.methodCalled('continueWithAccount');
   }
@@ -25,5 +28,13 @@ export class TestIntroBrowserProxy extends TestBrowserProxy implements
 
   initializeMainView() {
     this.methodCalled('initializeMainView');
+  }
+
+  matchMedia(_query: string): MediaQueryList {
+    return this.mediaQueryList_;
+  }
+
+  setMatchMediaMatches(matches: boolean): void {
+    this.mediaQueryList_.matches = matches;
   }
 }

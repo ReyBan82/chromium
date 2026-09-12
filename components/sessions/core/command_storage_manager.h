@@ -7,16 +7,24 @@
 
 #include <stddef.h>
 
+#include <list>
 #include <memory>
 #include <vector>
 
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/metrics/field_trial_params.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
+#include "components/os_crypt/async/common/encryptor.h"
 #include "components/sessions/core/sessions_export.h"
+
+namespace base {
+class Value;
+}
 
 namespace sessions {
 class CommandStorageManagerDelegate;
@@ -40,37 +48,24 @@ class SESSIONS_EXPORT CommandStorageManager {
 
   // Identifies the type of session service this is. This is used by the
   // backend to determine the name of the files.
-  // TODO(sky): this enum is purely for legacy reasons, and should be replaced
-  // with consumers building the path (similar to weblayer). Remove in
-  // approximately a year (1/2022), when we shouldn't need to worry too much
-  // about migrating older data.
-  enum SessionType { kAppRestore, kSessionRestore, kTabRestore, kOther };
+  enum class SessionType { kAppRestore, kSessionRestore, kTabRestore };
 
-  // Creates a new CommandStorageManager. After creation you need to invoke
-  // Init(). `delegate` is not owned by this and must outlive this. If
-  // `enable_crypto` is true, the contents of the file are encrypted.
+  // Creates a new CommandStorageManager. `delegate` is not owned by this and
+  // must outlive this.
   //
-  // The meaning of `path` depends upon the type. If `type` is `kOther`, then
-  // the path is a file name to which `_TIMESTAMP` is added. If `type` is not
-  // `kOther`, then it is a path to a directory. The actual file name used
-  // depends upon the type. Once SessionType can be removed, this logic can
-  // standardize on that of `kOther`.
+  // `path` is the base directory into which session files are written.
   CommandStorageManager(
       SessionType type,
       const base::FilePath& path,
       CommandStorageManagerDelegate* delegate,
-      bool enable_crypto = false,
-      const std::vector<uint8_t>& decryption_key = {},
-      scoped_refptr<base::SequencedTaskRunner> backend_task_runner = nullptr);
+      os_crypt_async::OSCryptAsync* os_crypt_async,
+      scoped_refptr<base::SequencedTaskRunner> backend_task_runner);
   CommandStorageManager(const CommandStorageManager&) = delete;
   CommandStorageManager& operator=(const CommandStorageManager&) = delete;
   virtual ~CommandStorageManager();
 
   static scoped_refptr<base::SequencedTaskRunner>
   CreateDefaultBackendTaskRunner();
-
-  // Helper to generate a new key.
-  static std::vector<uint8_t> CreateCryptoKey();
 
   // Returns the set of commands which were scheduled to be written. Once
   // committed to the backend, the commands are removed from here.
@@ -130,19 +125,52 @@ class SESSIONS_EXPORT CommandStorageManager {
   // deleted.
   void GetLastSessionCommands(GetCommandsCallback callback);
 
+#if DCHECK_IS_ON()
+  // Returns the state of this class and logs for the
+  // chrome://internals/session-service debug page. The logs are in reverse
+  // order for truncation ease. This value is NOT STABLE - do not rely on it's
+  // contents for anything.
+  base::Value ToDebugValue() const;
+#endif  // DCHECK_IS_ON()
+
+  base::FilePath GetBackendDirectoryForTesting(bool is_encrypted);
+
  private:
   friend class CommandStorageManagerTestHelper;
-
-  CommandStorageBackend* backend() { return backend_.get(); }
 
   // Called by the backend if writing to the file failed.
   void OnErrorWritingToFile();
 
-  // The backend object which reads and saves commands.
+  // Returns true if cleartext files should be written.
+  bool ShouldWriteCleartextFiles() const;
+
+  // Returns true if encrypted files should be written.
+  bool ShouldWriteEncryptedFiles() const;
+
+  // Called when an Encryptor is ready to be used.  start_time is the time when
+  // os_crypt_async->GetInstance() was called.
+  void OnEncryptorReady(base::TimeTicks start_time,
+                        scoped_refptr<os_crypt_async::Encryptor> encryptor);
+
+  const base::FilePath file_path_;
+  const SessionType session_type_;
+
+  // TaskRunner all backend tasks are run on. This is a SequencedTaskRunner as
+  // all tasks *must* be processed in the order they are scheduled.
+  scoped_refptr<base::SequencedTaskRunner> backend_task_runner_;
+
+  // A backend which reads and saves commands in cleartext.
+  // TODO(crbug.com/479420496): Remove this backend once transition to
+  // `encrypted_backend_` is complete.
   scoped_refptr<CommandStorageBackend> backend_;
 
-  // If true, all commands are encrypted.
-  const bool use_crypto_;
+  // A backend that stores commands in encrypted form.
+  // This backend will eventually replace the cleartext |backend_|; the launch
+  // is being tracked in crbug.com/479420496.
+  scoped_refptr<CommandStorageBackend> encrypted_backend_;
+
+  // Pending operations waiting for `encrypted_backend_` initialization.
+  std::vector<base::OnceClosure> pending_encrypted_ops_;
 
   // Commands we need to send over to the backend.
   std::vector<std::unique_ptr<SessionCommand>> pending_commands_;
@@ -156,9 +184,11 @@ class SESSIONS_EXPORT CommandStorageManager {
 
   raw_ptr<CommandStorageManagerDelegate> delegate_;
 
-  // TaskRunner all backend tasks are run on. This is a SequencedTaskRunner as
-  // all tasks *must* be processed in the order they are scheduled.
-  scoped_refptr<base::SequencedTaskRunner> backend_task_runner_;
+#if DCHECK_IS_ON()
+  // Used to store debug log entries for this command manager.
+  constexpr static int kMaxLogSize = 100;
+  std::list<base::Value> written_commands_reverse_debug_log_;
+#endif  // DCHECK_IS_ON()
 
   base::WeakPtrFactory<CommandStorageManager> weak_factory_{this};
 

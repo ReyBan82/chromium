@@ -6,6 +6,7 @@
 #define CHROME_BROWSER_SSL_SSL_ERROR_CONTROLLER_CLIENT_H_
 
 #include "components/security_interstitials/content/security_interstitial_controller_client.h"
+#include "net/base/net_errors.h"
 #include "net/ssl/ssl_info.h"
 
 namespace content {
@@ -20,19 +21,10 @@ class SettingsPageHelper;
 class SSLErrorControllerClient
     : public security_interstitials::SecurityInterstitialControllerClient {
  public:
-  // Actions recorded on recurrent error interstitials. This enum is
-  // histogrammed, so do not add, reorder, or remove values. Exposed for
-  // testing.
-  enum class RecurrentErrorAction {
-    kShow,
-    kProceed,
-    kMaxValue = kProceed,
-  };
-
   SSLErrorControllerClient(
       content::WebContents* web_contents,
       const net::SSLInfo& ssl_info,
-      int cert_error,
+      net::Error cert_error,
       const GURL& request_url,
       std::unique_ptr<security_interstitials::MetricsHelper> metrics_helper,
       std::unique_ptr<security_interstitials::SettingsPageHelper>
@@ -48,12 +40,14 @@ class SSLErrorControllerClient
   void Proceed() override;
   bool CanLaunchDateAndTimeSettings() override;
   void LaunchDateAndTimeSettings() override;
-  bool HasSeenRecurrentError() override;
+#if !BUILDFLAG(IS_ANDROID)
+  void ShowCertificateViewer() override;
+#endif
 
  private:
   const net::SSLInfo ssl_info_;
   const GURL request_url_;
-  const int cert_error_;
+  const net::Error cert_error_;
 };
 
 #endif  // CHROME_BROWSER_SSL_SSL_ERROR_CONTROLLER_CLIENT_H_

@@ -8,12 +8,13 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/memory/ref_counted.h"
@@ -34,7 +35,6 @@
 #include "storage/browser/test/fake_blob_data_handle.h"
 #include "storage/browser/test/test_file_system_context.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace storage {
 namespace {
@@ -140,7 +140,7 @@ class BlobStorageContextTest : public testing::Test {
 
   std::vector<FileCreationInfo> files_;
   base::ScopedTempDir temp_dir_;
-  absl::optional<base::ScopedDisallowBlocking> disallow_blocking_;
+  std::optional<base::ScopedDisallowBlocking> disallow_blocking_;
   scoped_refptr<TestSimpleTaskRunner> file_runner_ = new TestSimpleTaskRunner();
   scoped_refptr<FileSystemContext> file_system_context_;
 
@@ -173,7 +173,8 @@ TEST_F(BlobStorageContextTest, BuildBlobAsync) {
 
   EXPECT_EQ(10u, context_->memory_controller().memory_usage());
 
-  future_data.Populate(base::as_bytes(base::make_span("abcdefghij", 10u)), 0u);
+  future_data.Populate(base::as_bytes(base::span_from_cstring("abcdefghij")),
+                       0u);
   context_->NotifyTransportComplete(kId);
 
   // Check we're done.
@@ -732,10 +733,11 @@ void PopulateDataInBuilder(
     size_t index,
     base::TaskRunner* file_runner) {
   if (index % 2 != 0) {
-    (*future_datas)[0].Populate(base::as_bytes(base::make_span("abcde", 5u)),
-                                0);
+    (*future_datas)[0].Populate(
+        base::as_bytes(base::span_from_cstring("abcde")), 0);
     if (index % 3 == 0) {
-      (*future_datas)[1].Populate(base::as_bytes(base::make_span("1", 1u)), 0);
+      (*future_datas)[1].Populate(base::as_bytes(base::span_from_cstring("1")),
+                                  0);
     }
   } else if (index % 3 == 0) {
     scoped_refptr<ShareableFileReference> file_ref =
@@ -789,7 +791,8 @@ TEST_F(BlobStorageContextTest, BuildBlobCombinations) {
     std::unique_ptr<BlobDataHandle> handle = context_->BuildBlob(
         std::move(builder),
         has_pending_memory
-            ? base::BindOnce(&SaveBlobStatusAndFiles, &statuses[0] + i, &files_)
+            ? base::BindOnce(&SaveBlobStatusAndFiles,
+                             UNSAFE_TODO(&statuses[0] + i), &files_)
             : BlobStorageContext::TransportAllowedCallback());
     handle->RunOnConstructionComplete(
         base::BindOnce(&IncrementNumber, &total_finished_blobs));

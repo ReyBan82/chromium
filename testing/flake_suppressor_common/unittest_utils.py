@@ -3,10 +3,12 @@
 # found in the LICENSE file.
 
 import os
-
-from pyfakefs import fake_filesystem_unittest  # pylint: disable=import-error
 from typing import List, Tuple, Iterable
 
+# vpython-provided modules.
+from pyfakefs import fake_filesystem_unittest  # pylint: disable=import-error
+
+# //testing imports.
 from flake_suppressor_common import common_typing as ct
 from flake_suppressor_common import expectations as expectations_module
 from flake_suppressor_common import queries
@@ -15,12 +17,14 @@ from flake_suppressor_common import tag_utils
 
 
 CHROMIUM_SRC_DIR = os.path.realpath(
-    os.path.join(os.path.dirname(__file__), '..', '..'))
-RELATIVE_EXPECTATION_FILE_DIRECTORY = os.path.join('content', 'test', 'gpu',
-                                                   'gpu_tests',
-                                                   'test_expectations')
+  os.path.join(os.path.dirname(__file__), '..', '..')
+)
+RELATIVE_EXPECTATION_FILE_DIRECTORY = os.path.join(
+  'content', 'test', 'gpu', 'gpu_tests', 'test_expectations'
+)
 ABSOLUTE_EXPECTATION_FILE_DIRECTORY = os.path.join(
-    CHROMIUM_SRC_DIR, RELATIVE_EXPECTATION_FILE_DIRECTORY)
+  CHROMIUM_SRC_DIR, RELATIVE_EXPECTATION_FILE_DIRECTORY
+)
 
 TAG_HEADER = """\
 # OS
@@ -36,13 +40,14 @@ TAG_HEADER = """\
 #         debug debug-x64
 #         release release-x64
 #         fuchsia-chrome web-engine-shell ]
-# results: [ Failure RetryOnFailure Skip Slow ]
+# results: [ Failure RetryOnFailure Pass Skip Slow ]
 """
 
 
-def CreateFile(test: fake_filesystem_unittest.TestCase, *args,
-               **kwargs) -> None:
-  # TODO(crbug.com/1156806): Remove this and just use fs.create_file() when
+def CreateFile(
+  test: fake_filesystem_unittest.TestCase, *args, **kwargs
+) -> None:
+  # TODO(crbug.com/40160566): Remove this and just use fs.create_file() when
   # Catapult is updated to a newer version of pyfakefs that is compatible with
   # Chromium's version.
   if hasattr(test.fs, 'create_file'):
@@ -51,7 +56,7 @@ def CreateFile(test: fake_filesystem_unittest.TestCase, *args,
     test.fs.CreateFile(*args, **kwargs)
 
 
-class FakeProcess():
+class FakeProcess:
   def __init__(self, stdout: str):
     self.stdout = stdout or ''
 
@@ -74,8 +79,9 @@ class UnitTest_BigQueryQuerier(queries.BigQueryQuerier):
 
 
 class UnitTestResultProcessor(results_module.ResultProcessor):
-  def GetTestSuiteAndNameFromResultDbName(self, result_db_name: str
-                                          ) -> Tuple[str, str]:
+  def GetTestSuiteAndNameFromResultDbName(
+    self, result_db_name: str
+  ) -> Tuple[str, str]:
     _, suite, __, test_name = result_db_name.split('.', 3)
     return suite, test_name
 
@@ -89,8 +95,9 @@ class UnitTestTagUtils(tag_utils.BaseTagUtils):
 
 # pylint: disable=unused-argument
 class UnitTestExpectationProcessor(expectations_module.ExpectationProcessor):
-  def GetExpectationFileForSuite(self, suite: str,
-                                 typ_tags: ct.TagTupleType) -> str:
+  def GetExpectationFileForSuite(
+    self, suite: str, typ_tags: ct.TagTupleType
+  ) -> str:
     filename = suite.replace('integration_test', 'expectations.txt')
     return os.path.join(ABSOLUTE_EXPECTATION_FILE_DIRECTORY, filename)
 
@@ -107,5 +114,6 @@ class UnitTestExpectationProcessor(expectations_module.ExpectationProcessor):
 
   def ListOriginExpectationFiles(self) -> List[str]:
     raise NotImplementedError()
+
 
 # pylint: enable=unused-argument

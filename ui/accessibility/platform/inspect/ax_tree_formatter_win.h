@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include "base/component_export.h"
+#include "third_party/iaccessible2/ia2_api_all.h"
 #include "ui/accessibility/platform/inspect/ax_tree_formatter_base.h"
 
 namespace ui {
@@ -19,15 +20,14 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterWin
   AXTreeFormatterWin();
   ~AXTreeFormatterWin() override;
 
-  base::Value::Dict BuildTree(AXPlatformNodeDelegate* start) const override;
-  base::Value::Dict BuildTreeForSelector(
+  base::DictValue BuildTree(AXPlatformNodeDelegate* start) const override;
+  base::DictValue BuildTreeForSelector(
       const AXTreeSelector& selector) const override;
 
-  base::Value::Dict BuildNode(AXPlatformNodeDelegate* node) const override;
+  base::DictValue BuildNode(AXPlatformNodeDelegate* node) const override;
 
-  std::string EvaluateScript(
-      const AXTreeSelector& selector,
-      const ui::AXInspectScenario& scenario) const override;
+  std::string EvaluateScript(const AXTreeSelector& selector,
+                             const AXInspectScenario& scenario) const override;
   std::string EvaluateScript(
       AXPlatformNodeDelegate* root,
       const std::vector<AXScriptInstruction>& instructions,
@@ -40,42 +40,46 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterWin
 
  private:
   std::string EvaluateScript(
-      Microsoft::WRL::ComPtr<IAccessible> root,
+      const Microsoft::WRL::ComPtr<IAccessible>& root,
       const std::vector<AXScriptInstruction>& instructions,
       size_t start_index,
       size_t end_index) const;
 
-  void RecursiveBuildTree(const Microsoft::WRL::ComPtr<IAccessible> node,
-                          base::Value::Dict* dict,
+  void RecursiveBuildTree(const Microsoft::WRL::ComPtr<IAccessible>& node,
+                          base::DictValue* dict,
                           LONG root_x,
                           LONG root_y) const;
 
-  void AddProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                     base::Value::Dict* dict,
+  void AddProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                     base::DictValue* dict,
                      LONG root_x,
                      LONG root_y) const;
-  void AddMSAAProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                         base::Value::Dict* dict,
+  void AddMSAAProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                         base::DictValue* dict,
                          LONG root_x,
                          LONG root_y) const;
-  void AddSimpleDOMNodeProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                                  base::Value::Dict* dict) const;
-  bool AddIA2Properties(const Microsoft::WRL::ComPtr<IAccessible>,
-                        base::Value::Dict* dict) const;
-  void AddIA2ActionProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                              base::Value::Dict* dict) const;
-  void AddIA2HypertextProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                                 base::Value::Dict* dict) const;
-  void AddIA2TextProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                            base::Value::Dict* dict) const;
-  void AddIA2TableProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                             base::Value::Dict* dict) const;
-  void AddIA2TableCellProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                                 base::Value::Dict* dict) const;
-  void AddIA2ValueProperties(const Microsoft::WRL::ComPtr<IAccessible>,
-                             base::Value::Dict* dict) const;
-  std::string ProcessTreeForOutput(
-      const base::Value::Dict& node) const override;
+  void AddSimpleDOMNodeProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                                  base::DictValue* dict) const;
+  bool AddIA2Properties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                        base::DictValue* dict) const;
+  void AddIA2ActionProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                              base::DictValue* dict) const;
+  void AddIA2HypertextProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                                 base::DictValue* dict) const;
+  void AddIA2RelationProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                                base::DictValue* dict) const;
+  void AddIA2RelationProperty(
+      const Microsoft::WRL::ComPtr<IAccessibleRelation>&,
+      base::DictValue* dict) const;
+  void AddIA2TextProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                            base::DictValue* dict) const;
+  void AddIA2TableProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                             base::DictValue* dict) const;
+  void AddIA2TableCellProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                                 base::DictValue* dict) const;
+  void AddIA2ValueProperties(const Microsoft::WRL::ComPtr<IAccessible>&,
+                             base::DictValue* dict) const;
+  std::string ProcessTreeForOutput(const base::DictValue& node) const override;
 
   // Returns the root IAccessible object for the selector.
   Microsoft::WRL::ComPtr<IAccessible> FindAccessibleRoot(

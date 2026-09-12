@@ -7,32 +7,36 @@ import json
 import os
 import sys
 
-# Add src/testing/ into sys.path for importing common without pylint errors.
-sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
-from scripts import common
+import common
 
 
 def main_run(args):
   with common.temporary_file() as tempfile_path:
-    rc = common.run_command([
+    rc = common.run_command(
+      [
         sys.executable,
         os.path.join(common.SRC_DIR, 'build', 'check_gn_headers.py'),
         '--out-dir',
-        os.path.join(args.paths['checkout'], 'out', args.build_config_fs),
-        '--whitelist',
-        os.path.join(common.SRC_DIR, 'build', 'check_gn_headers_whitelist.txt'),
-        '--json', tempfile_path,
+        args.build_dir,
+        '--allowlist',
+        os.path.join(common.SRC_DIR, 'build', 'check_gn_headers_allowlist.txt'),
+        '--json',
+        tempfile_path,
         '--verbose',
-    ], cwd=common.SRC_DIR)
+      ],
+      cwd=common.SRC_DIR,
+    )
 
     with open(tempfile_path) as f:
       failures = json.load(f)
 
-  json.dump({
+  json.dump(
+    {
       'valid': True,
       'failures': failures,
-  }, args.output)
+    },
+    args.output,
+  )
 
   return rc
 

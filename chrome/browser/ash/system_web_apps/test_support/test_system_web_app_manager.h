@@ -10,10 +10,10 @@
 
 #include "base/callback_list.h"
 #include "base/functional/callback.h"
-#include "base/strings/string_piece_forward.h"
 #include "base/version.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
 
+class ApplicationLocaleStorage;
 class KeyedService;
 class Profile;
 
@@ -38,31 +38,30 @@ class TestSystemWebAppManager : public SystemWebAppManager {
   // `on_apps_synchronized()` event ready.
   static TestSystemWebAppManager* Get(Profile* profile);
 
-  explicit TestSystemWebAppManager(Profile* profile);
+  // `application_locale_storage` must be non-null and must outlive `this`.
+  TestSystemWebAppManager(ApplicationLocaleStorage* application_locale_storage,
+                          Profile* profile);
   TestSystemWebAppManager(const TestSystemWebAppManager&) = delete;
   TestSystemWebAppManager& operator=(const TestSystemWebAppManager&) = delete;
   ~TestSystemWebAppManager() override;
 
   void SetUpdatePolicy(SystemWebAppManager::UpdatePolicy policy);
 
+  void SetCurrentLocale(const std::string& locale);
+
   void set_current_version(const base::Version& version) {
     current_version_ = version;
-  }
-
-  void set_current_locale(const std::string& locale) {
-    current_locale_ = locale;
   }
 
   void set_icons_are_broken(bool broken) { icons_are_broken_ = broken; }
 
   // SystemWebAppManager:
   const base::Version& CurrentVersion() const override;
-  const std::string& CurrentLocale() const override;
   bool PreviousSessionHadBrokenIcons() const override;
 
  private:
+  const raw_ref<ApplicationLocaleStorage> application_locale_storage_;
   base::Version current_version_{"0.0.0.0"};
-  std::string current_locale_;
   bool icons_are_broken_ = false;
 };
 
@@ -79,7 +78,7 @@ class TestSystemWebAppManagerCreator {
   ~TestSystemWebAppManagerCreator();
 
  private:
-  void OnWillCreateBrowserContextServices(content::BrowserContext* context);
+  void SetUpBrowserContextKeyedServices(content::BrowserContext* context);
   std::unique_ptr<KeyedService> CreateSystemWebAppManager(
       content::BrowserContext* context);
 

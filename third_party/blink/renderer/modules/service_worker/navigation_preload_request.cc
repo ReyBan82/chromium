@@ -6,7 +6,10 @@
 
 #include <utility>
 
+#include "base/byte_size.h"
+#include "base/task/thread_pool.h"
 #include "net/http/http_response_headers.h"
+#include "services/network/public/cpp/content_decoding_interceptor.h"
 #include "services/network/public/cpp/record_ontransfersizeupdate_utils.h"
 #include "services/network/public/mojom/early_hints.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
@@ -47,8 +50,34 @@ void NavigationPreloadRequest::OnReceiveEarlyHints(
 void NavigationPreloadRequest::OnReceiveResponse(
     network::mojom::URLResponseHeadPtr response_head,
     mojo::ScopedDataPipeConsumerHandle body,
-    absl::optional<mojo_base::BigBuffer> cached_metadata) {
+    std::optional<mojo_base::BigBuffer> cached_metadata) {
   DCHECK(!response_);
+
+  if (!response_head->client_side_content_decoding_types.empty()) {
+    auto endpoints = network::mojom::URLLoaderClientEndpoints::New(
+        mojo::PendingRemote<network::mojom::URLLoader>(), receiver_.Unbind());
+    // Attempt to create the data pipe needed for content decoding.
+    auto data_pipe_pair =
+        network::ContentDecodingInterceptor::CreateDataPipePair(
+            network::ContentDecodingInterceptor::ClientType::
+                kNavigationPreload);
+    if (!data_pipe_pair) {
+      // If pipe creation fails, report an error and stop processing.
+      // This will cause the navigation preload fetch to fail.
+      OnComplete(
+          network::URLLoaderCompletionStatus(net::ERR_INSUFFICIENT_RESOURCES));
+      return;
+    }
+    // If pipe creation succeeds, intercept the response to set up decoding.
+    network::ContentDecodingInterceptor::Intercept(
+        response_head->client_side_content_decoding_types, endpoints, body,
+        std::move(*data_pipe_pair),
+        base::ThreadPool::CreateSequencedTaskRunner(
+            {base::TaskPriority::USER_BLOCKING}));
+    decoder_loader_ = std::move(endpoints->url_loader);
+    receiver_.Bind(std::move(endpoints->url_loader_client));
+  }
+
   response_ = std::make_unique<WebURLResponse>();
   // TODO(horo): Set report_security_info to true when DevTools is attached.
   const bool report_security_info = false;
@@ -93,6 +122,7 @@ void NavigationPreloadRequest::OnTransferSizeUpdated(
 
 void NavigationPreloadRequest::OnComplete(
     const network::URLLoaderCompletionStatus& status) {
+  decoder_loader_.reset();
   if (status.error_code != net::OK) {
     WebString message;
     WebServiceWorkerError::Mode error_mode = WebServiceWorkerError::Mode::kNone;
@@ -124,9 +154,10 @@ void NavigationPreloadRequest::OnComplete(
                                         mojo::ScopedDataPipeConsumerHandle());
   }
   // This will delete |this|.
-  owner_->OnNavigationPreloadComplete(
-      fetch_event_id_, status.completion_time, status.encoded_data_length,
-      status.encoded_body_length, status.decoded_body_length);
+  owner_->OnNavigationPreloadComplete(fetch_event_id_, status.completion_time,
+                                      status.encoded_data_length.InBytes(),
+                                      status.encoded_body_length.InBytes(),
+                                      status.decoded_body_length.InBytes());
 }
 
 void NavigationPreloadRequest::MaybeReportResponseToOwner() {

@@ -5,12 +5,18 @@
 #include "ui/ozone/demo/window_manager.h"
 
 #include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_split.h"
 #include "base/task/single_thread_task_runner.h"
+#include "ui/display/types/display_configuration_params.h"
 #include "ui/display/types/display_snapshot.h"
 #include "ui/display/types/native_display_delegate.h"
 #include "ui/ozone/demo/demo_window.h"
@@ -43,10 +49,21 @@ WindowManager::WindowManager(std::unique_ptr<RendererFactory> renderer_factory,
     LOG(WARNING) << "No display delegate; falling back to test window";
     int width = kTestWindowWidth;
     int height = kTestWindowHeight;
-    sscanf(base::CommandLine::ForCurrentProcess()
-               ->GetSwitchValueASCII(kWindowSize)
-               .c_str(),
-           "%dx%d", &width, &height);
+    const std::string window_size =
+        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+            kWindowSize);
+    const std::vector<std::string_view> parts = base::SplitStringPiece(
+        window_size, "x", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    if (parts.size() == 2) {
+      int parsed_width = 0;
+      int parsed_height = 0;
+      if (base::StringToInt(parts[0], &parsed_width) &&
+          base::StringToInt(parts[1], &parsed_height) && parsed_width > 0 &&
+          parsed_height > 0) {
+        width = parsed_width;
+        height = parsed_height;
+      }
+    }
 
     DemoWindow* window = new DemoWindow(this, renderer_factory_.get(),
                                         gfx::Rect(gfx::Size(width, height)));
@@ -77,11 +94,12 @@ void WindowManager::OnConfigurationChanged() {
 void WindowManager::OnDisplaySnapshotsInvalidated() {}
 
 void WindowManager::OnDisplaysAcquired(
-    const std::vector<display::DisplaySnapshot*>& displays) {
+    const std::vector<raw_ptr<display::DisplaySnapshot, VectorExperimental>>&
+        displays) {
   windows_.clear();
 
   gfx::Point origin;
-  for (auto* display : displays) {
+  for (display::DisplaySnapshot* display : displays) {
     if (!display->native_mode()) {
       LOG(ERROR) << "Display " << display->display_id()
                  << " doesn't have a native mode";
@@ -92,12 +110,11 @@ void WindowManager::OnDisplaysAcquired(
         display->display_id(), origin, display->native_mode());
     std::vector<display::DisplayConfigurationParams> config_request;
     config_request.push_back(std::move(display_config_params));
-    delegate_->Configure(
-        config_request,
-        base::BindOnce(&WindowManager::OnDisplayConfigured,
-                       base::Unretained(this), display->display_id(),
-                       gfx::Rect(origin, display->native_mode()->size())),
-        display::kTestModeset | display::kCommitModeset);
+    delegate_->Configure(config_request,
+                         base::BindOnce(&WindowManager::OnDisplayConfigured,
+                                        base::Unretained(this)),
+                         {display::ModesetFlag::kTestModeset,
+                          display::ModesetFlag::kCommitModeset});
     origin.Offset(display->native_mode()->size().width(), 0);
   }
   is_configuring_ = false;
@@ -110,9 +127,12 @@ void WindowManager::OnDisplaysAcquired(
   }
 }
 
-void WindowManager::OnDisplayConfigured(const int64_t display_id,
-                                        const gfx::Rect& bounds,
-                                        bool config_success) {
+void WindowManager::OnDisplayConfigured(
+    const std::vector<display::DisplayConfigurationParams>& request_results,
+    bool config_success) {
+  CHECK_EQ(request_results.size(), 1u);
+  const auto& request = request_results[0];
+  const gfx::Rect bounds(request.origin, request.mode->size());
   if (config_success) {
     std::unique_ptr<DemoWindow> window(
         new DemoWindow(this, renderer_factory_.get(), bounds));

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <tuple>
+#include <type_traits>
 
 #include "ipcz/buffer_id.h"
 #include "ipcz/ipcz.h"
@@ -36,7 +37,6 @@ struct IPCZ_ALIGN(8) FragmentDescriptor {
   BufferId buffer_id() const { return buffer_id_; }
   uint32_t offset() const { return offset_; }
   uint32_t size() const { return size_; }
-  uint32_t end() const { return offset_ + size_; }
 
  private:
   // Identifies the shared memory buffer in which the memory resides. This ID is

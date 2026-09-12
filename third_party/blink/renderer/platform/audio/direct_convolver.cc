@@ -30,60 +30,49 @@
 
 #include <utility>
 
-#include "build/build_config.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/platform/audio/vector_math.h"
 
-#if BUILDFLAG(IS_MAC)
-#include <Accelerate/Accelerate.h>
-#endif
-
-#if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_MAC)
-#include <emmintrin.h>
-#endif
-
 namespace blink {
-
-namespace {
-using vector_math::Conv;
-using vector_math::PrepareFilterForConv;
-}  // namespace
 
 DirectConvolver::DirectConvolver(
     size_t input_block_size,
     std::unique_ptr<AudioFloatArray> convolution_kernel)
     : input_block_size_(input_block_size),
-      buffer_(input_block_size * 2),
       convolution_kernel_(std::move(convolution_kernel)) {
-  size_t kernel_size = ConvolutionKernelSize();
-  PrepareFilterForConv(convolution_kernel_->Data() + kernel_size - 1, -1,
-                       kernel_size, &prepared_convolution_kernel_);
+  CHECK(convolution_kernel_);
+  CHECK_GT(convolution_kernel_->size(), 0u);
+  buffer_.Allocate(convolution_kernel_->size() - 1 + input_block_size);
+  vector_math::PrepareFilterForConv(convolution_kernel_->as_span(),
+                                    prepared_convolution_kernel_);
 }
 
-void DirectConvolver::Process(const float* source_p,
-                              float* dest_p,
-                              uint32_t frames_to_process) {
+void DirectConvolver::Process(base::span<const float> source,
+                              base::span<float> destination) {
+  const uint32_t frames_to_process =
+      base::checked_cast<uint32_t>(destination.size());
   DCHECK_EQ(frames_to_process, input_block_size_);
 
-  size_t kernel_size = ConvolutionKernelSize();
-  DCHECK_LE(kernel_size, input_block_size_);
-
-  float* kernel_p = convolution_kernel_->Data();
-
-  DCHECK(kernel_p);
-  DCHECK(source_p);
-  DCHECK(dest_p);
+  const size_t kernel_size = ConvolutionKernelSize();
   DCHECK(buffer_.Data());
 
-  float* input_p = buffer_.Data() + input_block_size_;
+  const size_t history_size = kernel_size - 1;
 
-  // Copy samples to 2nd half of input buffer.
-  memcpy(input_p, source_p, sizeof(float) * frames_to_process);
+  // Copy new samples to the end of the input buffer.
+  buffer_.as_span()
+      .subspan(history_size, frames_to_process)
+      .copy_from(source.first(frames_to_process));
 
-  Conv(input_p - kernel_size + 1, 1, kernel_p + kernel_size - 1, -1, dest_p, 1,
-       frames_to_process, kernel_size, &prepared_convolution_kernel_);
+  vector_math::Conv(buffer_.as_span(), convolution_kernel_->as_span(),
+                    destination, frames_to_process,
+                    prepared_convolution_kernel_);
 
-  // Copy 2nd half of input buffer to 1st half.
-  memcpy(buffer_.Data(), input_p, sizeof(float) * frames_to_process);
+  // Copy the last `history_size` samples to the beginning of the buffer.
+  buffer_.as_span()
+      .first(history_size)
+      .copy_from(buffer_.as_span().subspan(frames_to_process, history_size));
 }
 
 void DirectConvolver::Reset() {

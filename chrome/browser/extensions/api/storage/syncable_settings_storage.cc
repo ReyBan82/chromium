@@ -14,6 +14,10 @@
 #include "components/sync/protocol/extension_setting_specifics.pb.h"
 #include "extensions/browser/api/storage/backend_task_runner.h"
 #include "extensions/browser/api/storage/storage_area_namespace.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 using value_store::ValueStore;
 
@@ -21,9 +25,9 @@ namespace extensions {
 
 SyncableSettingsStorage::SyncableSettingsStorage(
     SequenceBoundSettingsChangedCallback observer,
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     ValueStore* delegate,
-    syncer::ModelType sync_type,
+    syncer::DataType sync_type,
     const syncer::SyncableService::StartSyncFlare& flare)
     : observer_(std::move(observer)),
       extension_id_(extension_id),
@@ -67,6 +71,11 @@ T SyncableSettingsStorage::HandleResult(T result) {
   return result;
 }
 
+ValueStore::ReadResult SyncableSettingsStorage::GetKeys() {
+  DCHECK(IsOnBackendSequence());
+  return HandleResult(delegate_->GetKeys());
+}
+
 ValueStore::ReadResult SyncableSettingsStorage::Get(
     const std::string& key) {
   DCHECK(IsOnBackendSequence());
@@ -88,19 +97,21 @@ ValueStore::WriteResult SyncableSettingsStorage::Set(
     WriteOptions options, const std::string& key, const base::Value& value) {
   DCHECK(IsOnBackendSequence());
   WriteResult result = HandleResult(delegate_->Set(options, key, value));
-  if (!result.status().ok())
+  if (!result.status().ok()) {
     return result;
+  }
   SyncResultIfEnabled(result);
   return result;
 }
 
 ValueStore::WriteResult SyncableSettingsStorage::Set(
     WriteOptions options,
-    const base::Value::Dict& values) {
+    const base::DictValue& values) {
   DCHECK(IsOnBackendSequence());
   WriteResult result = HandleResult(delegate_->Set(options, values));
-  if (!result.status().ok())
+  if (!result.status().ok()) {
     return result;
+  }
   SyncResultIfEnabled(result);
   return result;
 }
@@ -109,8 +120,9 @@ ValueStore::WriteResult SyncableSettingsStorage::Remove(
     const std::string& key) {
   DCHECK(IsOnBackendSequence());
   WriteResult result = HandleResult(delegate_->Remove(key));
-  if (!result.status().ok())
+  if (!result.status().ok()) {
     return result;
+  }
   SyncResultIfEnabled(result);
   return result;
 }
@@ -119,8 +131,9 @@ ValueStore::WriteResult SyncableSettingsStorage::Remove(
     const std::vector<std::string>& keys) {
   DCHECK(IsOnBackendSequence());
   WriteResult result = HandleResult(delegate_->Remove(keys));
-  if (!result.status().ok())
+  if (!result.status().ok()) {
     return result;
+  }
   SyncResultIfEnabled(result);
   return result;
 }
@@ -128,22 +141,25 @@ ValueStore::WriteResult SyncableSettingsStorage::Remove(
 ValueStore::WriteResult SyncableSettingsStorage::Clear() {
   DCHECK(IsOnBackendSequence());
   WriteResult result = HandleResult(delegate_->Clear());
-  if (!result.status().ok())
+  if (!result.status().ok()) {
     return result;
+  }
   SyncResultIfEnabled(result);
   return result;
 }
 
 void SyncableSettingsStorage::SyncResultIfEnabled(
     const ValueStore::WriteResult& result) {
-  if (result.changes().empty())
+  if (result.changes().empty()) {
     return;
+  }
 
   if (sync_processor_.get()) {
-    absl::optional<syncer::ModelError> error =
+    std::optional<syncer::ModelError> error =
         sync_processor_->SendChanges(result.changes());
-    if (error.has_value())
+    if (error.has_value()) {
       StopSyncing();
+    }
   } else {
     // Tell sync to try and start soon, because syncable changes to sync_type_
     // have started happening. This will cause sync to call us back
@@ -154,8 +170,8 @@ void SyncableSettingsStorage::SyncResultIfEnabled(
 
 // Sync-related methods.
 
-absl::optional<syncer::ModelError> SyncableSettingsStorage::StartSyncing(
-    base::Value::Dict sync_state,
+std::optional<syncer::ModelError> SyncableSettingsStorage::StartSyncing(
+    base::DictValue sync_state,
     std::unique_ptr<SettingsSyncProcessor> sync_processor) {
   DCHECK(IsOnBackendSequence());
   DCHECK(!sync_processor_.get());
@@ -166,50 +182,50 @@ absl::optional<syncer::ModelError> SyncableSettingsStorage::StartSyncing(
   ReadResult maybe_settings = delegate_->Get();
   if (!maybe_settings.status().ok()) {
     return syncer::ModelError(
-        FROM_HERE, base::StringPrintf("Failed to get settings: %s",
-                                      maybe_settings.status().message.c_str()));
+        FROM_HERE, syncer::ModelError::Type::kSettingsFailedToGetLocalSettings);
   }
 
-  base::Value::Dict current_settings = maybe_settings.PassSettings();
+  base::DictValue current_settings = maybe_settings.PassSettings();
   return sync_state.empty()
              ? SendLocalSettingsToSync(std::move(current_settings))
              : OverwriteLocalSettingsWithSync(std::move(sync_state),
                                               std::move(current_settings));
 }
 
-absl::optional<syncer::ModelError>
-SyncableSettingsStorage::SendLocalSettingsToSync(
-    base::Value::Dict local_state) {
+std::optional<syncer::ModelError>
+SyncableSettingsStorage::SendLocalSettingsToSync(base::DictValue local_state) {
   DCHECK(IsOnBackendSequence());
 
-  if (local_state.empty())
-    return absl::nullopt;
+  if (local_state.empty()) {
+    return std::nullopt;
+  }
 
   // Transform the current settings into a list of sync changes.
   value_store::ValueStoreChangeList changes;
   for (auto pair : local_state) {
-    changes.push_back(value_store::ValueStoreChange(pair.first, absl::nullopt,
+    changes.push_back(value_store::ValueStoreChange(pair.first, std::nullopt,
                                                     std::move(pair.second)));
   }
 
-  absl::optional<syncer::ModelError> error =
+  std::optional<syncer::ModelError> error =
       sync_processor_->SendChanges(std::move(changes));
-  if (error.has_value())
+  if (error.has_value()) {
     StopSyncing();
+  }
   return error;
 }
 
-absl::optional<syncer::ModelError>
+std::optional<syncer::ModelError>
 SyncableSettingsStorage::OverwriteLocalSettingsWithSync(
-    base::Value::Dict sync_state,
-    base::Value::Dict local_state) {
+    base::DictValue sync_state,
+    base::DictValue local_state) {
   DCHECK(IsOnBackendSequence());
   // This is implemented by building up a list of sync changes then sending
   // those to ProcessSyncChanges. This generates events like onStorageChanged.
   auto changes = std::make_unique<SettingSyncDataList>();
 
   for (auto it : local_state) {
-    absl::optional<base::Value> sync_value = sync_state.Extract(it.first);
+    std::optional<base::Value> sync_value = sync_state.Extract(it.first);
     if (sync_value.has_value()) {
       // If the sync value is different, update local setting with new value.
       if (*sync_value != it.second) {
@@ -221,7 +237,7 @@ SyncableSettingsStorage::OverwriteLocalSettingsWithSync(
       // Not synced, delete local setting.
       changes->push_back(std::make_unique<SettingSyncData>(
           syncer::SyncChange::ACTION_DELETE, extension_id_, it.first,
-          base::Value(base::Value::Dict())));
+          base::Value(base::DictValue())));
     }
   }
 
@@ -232,8 +248,9 @@ SyncableSettingsStorage::OverwriteLocalSettingsWithSync(
         std::move(pair.second)));
   }
 
-  if (changes->empty())
-    return absl::nullopt;
+  if (changes->empty()) {
+    return std::nullopt;
+  }
   return ProcessSyncChanges(std::move(changes));
 }
 
@@ -242,14 +259,14 @@ void SyncableSettingsStorage::StopSyncing() {
   sync_processor_.reset();
 }
 
-absl::optional<syncer::ModelError> SyncableSettingsStorage::ProcessSyncChanges(
+std::optional<syncer::ModelError> SyncableSettingsStorage::ProcessSyncChanges(
     std::unique_ptr<SettingSyncDataList> sync_changes) {
   DCHECK(IsOnBackendSequence());
   DCHECK(!sync_changes->empty()) << "No sync changes for " << extension_id_;
 
   if (!sync_processor_.get()) {
-    return syncer::ModelError(
-        FROM_HERE, std::string("Sync is inactive for ") + extension_id_);
+    return syncer::ModelError(FROM_HERE,
+                              syncer::ModelError::Type::kSettingsSyncInactive);
   }
 
   std::vector<syncer::ModelError> errors;
@@ -260,21 +277,19 @@ absl::optional<syncer::ModelError> SyncableSettingsStorage::ProcessSyncChanges(
     const std::string& key = sync_change->key();
     base::Value change_value = sync_change->ExtractValue();
 
-    absl::optional<base::Value> current_value;
+    std::optional<base::Value> current_value;
     {
       ReadResult maybe_settings = Get(key);
       if (!maybe_settings.status().ok()) {
         errors.emplace_back(
             FROM_HERE,
-            base::StringPrintf("Error getting current sync state for %s/%s: %s",
-                               extension_id_.c_str(), key.c_str(),
-                               maybe_settings.status().message.c_str()));
+            syncer::ModelError::Type::kSettingsFailedToGetLocalSettingForKey);
         continue;
       }
       current_value = maybe_settings.settings().Extract(key);
     }
 
-    absl::optional<syncer::ModelError> error;
+    std::optional<syncer::ModelError> error;
 
     DCHECK(sync_change->change_type().has_value());
 
@@ -323,15 +338,17 @@ absl::optional<syncer::ModelError> SyncableSettingsStorage::ProcessSyncChanges(
   sync_processor_->NotifyChanges(changes);
 
   observer_->Run(extension_id_, StorageAreaNamespace::kSync,
+                 /*session_access_level=*/std::nullopt,
                  value_store::ValueStoreChange::ToValue(std::move(changes)));
 
   // TODO(kalman): Something sensible with multiple errors.
-  if (errors.empty())
-    return absl::nullopt;
+  if (errors.empty()) {
+    return std::nullopt;
+  }
   return errors[0];
 }
 
-absl::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncAdd(
+std::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncAdd(
     const std::string& key,
     base::Value new_value,
     value_store::ValueStoreChangeList* changes) {
@@ -339,16 +356,14 @@ absl::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncAdd(
       HandleResult(delegate_->Set(IGNORE_QUOTA, key, new_value));
   if (!result.status().ok()) {
     return syncer::ModelError(
-        FROM_HERE,
-        base::StringPrintf("Error pushing sync add to local settings: %s",
-                           result.status().message.c_str()));
+        FROM_HERE, syncer::ModelError::Type::kSettingsFailedToApplySyncAdd);
   }
   changes->push_back(
-      value_store::ValueStoreChange(key, absl::nullopt, std::move(new_value)));
-  return absl::nullopt;
+      value_store::ValueStoreChange(key, std::nullopt, std::move(new_value)));
+  return std::nullopt;
 }
 
-absl::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncUpdate(
+std::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncUpdate(
     const std::string& key,
     base::Value old_value,
     base::Value new_value,
@@ -357,29 +372,25 @@ absl::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncUpdate(
       HandleResult(delegate_->Set(IGNORE_QUOTA, key, new_value));
   if (!result.status().ok()) {
     return syncer::ModelError(
-        FROM_HERE,
-        base::StringPrintf("Error pushing sync update to local settings: %s",
-                           result.status().message.c_str()));
+        FROM_HERE, syncer::ModelError::Type::kSettingsFailedToApplySyncUpdate);
   }
   changes->push_back(value_store::ValueStoreChange(key, std::move(old_value),
                                                    std::move(new_value)));
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncDelete(
+std::optional<syncer::ModelError> SyncableSettingsStorage::OnSyncDelete(
     const std::string& key,
     base::Value old_value,
     value_store::ValueStoreChangeList* changes) {
   WriteResult result = HandleResult(delegate_->Remove(key));
   if (!result.status().ok()) {
     return syncer::ModelError(
-        FROM_HERE,
-        base::StringPrintf("Error pushing sync remove to local settings: %s",
-                           result.status().message.c_str()));
+        FROM_HERE, syncer::ModelError::Type::kSettingsFailedToApplySyncDelete);
   }
   changes->push_back(
-      value_store::ValueStoreChange(key, std::move(old_value), absl::nullopt));
-  return absl::nullopt;
+      value_store::ValueStoreChange(key, std::move(old_value), std::nullopt));
+  return std::nullopt;
 }
 
 }  // namespace extensions

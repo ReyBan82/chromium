@@ -56,9 +56,11 @@ class BASE_EXPORT TrackEventHandle {
   }
 
  private:
-  raw_ptr<TrackEvent> event_;
-  raw_ptr<IncrementalState> incremental_state_;
-  raw_ptr<CompletionListener> listener_;
+  // Uses UnprotectedInRelease: Performance reasons: based on this sampling
+  // profiler result on ChromeOS. go/brp-cros-prof-diff-20230403
+  raw_ptr<TrackEvent, UnprotectedInRelease> event_;
+  raw_ptr<IncrementalState, UnprotectedInRelease> incremental_state_;
+  raw_ptr<CompletionListener, UnprotectedInRelease> listener_;
   const bool filter_debug_annotations_ = false;
 };
 

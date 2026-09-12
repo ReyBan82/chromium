@@ -51,9 +51,7 @@ BLINK_EXPORT void SystemColorsChanged();
 
 BLINK_EXPORT void ColorSchemeChanged();
 
-// Called when the ColorProviders used for painting in Blink have been updated.
-// This invalidates paint for all local frames hosted in the renderer.
-BLINK_EXPORT void ColorProvidersChanged();
+BLINK_EXPORT void RegisteredFontsChanged();
 
 }  // namespace blink
 

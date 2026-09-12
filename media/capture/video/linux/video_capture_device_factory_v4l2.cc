@@ -10,17 +10,22 @@
 #include <sys/ioctl.h>
 
 #include <algorithm>
+#include <string_view>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
+#include "base/logging.h"
+#include "base/notimplemented.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
 #include "media/capture/video/linux/scoped_v4l2_device_fd.h"
+#include "media/capture/video/linux/v4l2_capture_device.h"
+#include "media/capture/video/linux/v4l2_capture_device_impl.h"
 #include "media/capture/video/linux/video_capture_device_linux.h"
 
 #if BUILDFLAG(IS_OPENBSD)
@@ -50,25 +55,22 @@ const char kInterfacePathTemplate[] =
     "/sys/class/video4linux/%s/device/interface";
 
 bool ReadIdFile(const std::string& path, std::string* id) {
-  char id_buf[kVidPidSize];
-  FILE* file = fopen(path.c_str(), "rb");
-  if (!file) {
+  std::string content;
+  if (!base::ReadFileToString(base::FilePath(path), &content)) {
     return false;
   }
-  const bool success = fread(id_buf, kVidPidSize, 1, file) == 1;
-  fclose(file);
-  if (!success) {
+  if (content.length() < kVidPidSize) {
     return false;
   }
-  id->append(id_buf, kVidPidSize);
+  id->append(content, 0, kVidPidSize);
   return true;
 }
 
 std::string ExtractFileNameFromDeviceId(const std::string& device_id) {
   // |unique_id| is of the form "/dev/video2".  |file_name| is "video2".
-  const char kDevDir[] = "/dev/";
+  constexpr std::string_view kDevDir = "/dev/";
   DCHECK(base::StartsWith(device_id, kDevDir, base::CompareCase::SENSITIVE));
-  return device_id.substr(strlen(kDevDir), device_id.length());
+  return device_id.substr(kDevDir.length());
 }
 
 class DevVideoFilePathsDeviceProvider
@@ -252,7 +254,7 @@ bool VideoCaptureDeviceFactoryV4L2::HasUsableFormats(int fd,
   v4l2_fmtdesc fmtdesc = {};
   fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   for (; DoIoctl(fd, VIDIOC_ENUM_FMT, &fmtdesc) == 0; ++fmtdesc.index) {
-    if (base::Contains(usable_fourccs, fmtdesc.pixelformat)) {
+    if (std::ranges::contains(usable_fourccs, fmtdesc.pixelformat)) {
       return true;
     }
   }

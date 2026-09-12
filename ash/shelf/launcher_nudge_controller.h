@@ -10,17 +10,21 @@
 #include "ash/ash_export.h"
 #include "ash/public/cpp/app_list/app_list_controller_observer.h"
 #include "ash/public/cpp/session/session_observer.h"
-#include "ash/public/cpp/tablet_mode_observer.h"
-#include "ash/wm/tablet_mode/tablet_mode_controller.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
+#include "ui/display/display_observer.h"
 
 namespace base {
 class Clock;
 class TickClock;
 class WallClockTimer;
 }  // namespace base
+
+namespace display {
+enum class TabletState;
+}  // namespace display
 
 class PrefRegistrySimple;
 class PrefService;
@@ -33,7 +37,7 @@ class HomeButton;
 // open the launcher. The animation is implemented in HomeButton class.
 class ASH_EXPORT LauncherNudgeController : public SessionObserver,
                                            public AppListControllerObserver,
-                                           public TabletModeObserver {
+                                           public display::DisplayObserver {
  public:
   // Maximum number of times that the nudge will be shown to the users.
   static constexpr int kMaxShownCount = 3;
@@ -61,9 +65,7 @@ class ASH_EXPORT LauncherNudgeController : public SessionObserver,
 
   // Returns the time delta between user's first login and the first time
   // showing the nudge if `is_first_time` is true. Otherwise, returns the time
-  // delta between each time showing the nudge to the user. If the
-  // `kLauncherNudgeShortInterval` feature is enabled, use a short interval for
-  // testing.
+  // delta between each time showing the nudge to the user.
   base::TimeDelta GetNudgeInterval(bool is_first_time) const;
 
   // Sets custom Clock and TickClock for testing. Note that this should be
@@ -95,14 +97,13 @@ class ASH_EXPORT LauncherNudgeController : public SessionObserver,
   // AppListControllerObserver:
   void OnAppListVisibilityChanged(bool shown, int64_t display_id) override;
 
-  // TabletModeObserver:
-  void OnTabletModeEnded() override;
-  void OnTabletControllerDestroyed() override;
+  // display::DisplayObserver:
+  void OnDisplayTabletStateChanged(display::TabletState state) override;
 
   // Returns the current time. The clock may be overridden for testing.
   base::Time GetNow() const;
 
-  const base::Clock* clock_for_test_ = nullptr;
+  raw_ptr<const base::Clock> clock_for_test_ = nullptr;
 
   // The timer that keeps track of when should the nudge be shown next time.
   std::unique_ptr<base::WallClockTimer> show_nudge_timer_;
@@ -112,8 +113,7 @@ class ASH_EXPORT LauncherNudgeController : public SessionObserver,
   base::Time earliest_available_time_;
 
   ScopedSessionObserver session_observer_{this};
-  base::ScopedObservation<TabletModeController, TabletModeObserver>
-      tablet_mode_observation_{this};
+  display::ScopedDisplayObserver display_observer_{this};
 
   base::WeakPtrFactory<LauncherNudgeController> weak_ptr_factory_{this};
 };

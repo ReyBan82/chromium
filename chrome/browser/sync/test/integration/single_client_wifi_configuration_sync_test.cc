@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "ash/public/cpp/network_config_service.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/sync/test/integration/single_client_status_change_checker.h"
 #include "chrome/browser/sync/test/integration/status_change_checker.h"
 #include "chrome/browser/sync/test/integration/sync_engine_stopped_checker.h"
@@ -16,6 +17,7 @@
 #include "chromeos/ash/components/sync_wifi/network_identifier.h"
 #include "chromeos/ash/components/sync_wifi/test_data_generator.h"
 #include "chromeos/services/network_config/public/cpp/cros_network_config_observer.h"
+#include "components/sync/base/features.h"
 #include "components/sync/engine/loopback_server/persistent_unique_client_entity.h"
 #include "components/sync/nigori/cryptographer_impl.h"
 #include "components/sync/protocol/wifi_configuration_specifics.pb.h"
@@ -117,7 +119,7 @@ class LocalWifiConfigurationChecker
   std::vector<chromeos::network_config::mojom::NetworkStatePropertiesPtr>
       networks_;
 
-  mojo::Remote<chromeos::network_config::mojom::CrosNetworkConfig>*
+  raw_ptr<mojo::Remote<chromeos::network_config::mojom::CrosNetworkConfig>>
       remote_cros_network_config_;
   mojo::Receiver<chromeos::network_config::mojom::CrosNetworkConfigObserver>
       receiver_{this};
@@ -125,9 +127,16 @@ class LocalWifiConfigurationChecker
 };
 
 // TODO(crbug.com/1077152): add more tests.
-class SingleClientWifiConfigurationSyncTest : public SyncTest {
+class SingleClientWifiConfigurationSyncTest
+    : public SyncTest,
+      public testing::WithParamInterface<SyncTest::SetupSyncMode> {
  public:
-  SingleClientWifiConfigurationSyncTest() : SyncTest(SINGLE_CLIENT) {}
+  SingleClientWifiConfigurationSyncTest() : SyncTest(SINGLE_CLIENT) {
+    if (GetSetupSyncMode() == SetupSyncMode::kSyncTransportOnly) {
+      features_.InitAndEnableFeature(
+          syncer::kReplaceSyncPromosWithSignInPromos);
+    }
+  }
   SingleClientWifiConfigurationSyncTest(
       const SingleClientWifiConfigurationSyncTest&) = delete;
   SingleClientWifiConfigurationSyncTest& operator=(
@@ -139,6 +148,10 @@ class SingleClientWifiConfigurationSyncTest : public SyncTest {
         remote_cros_network_config_.BindNewPipeAndPassReceiver());
 
     SyncTest::SetUpOnMainThread();
+  }
+
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return GetParam();
   }
 
   void SetupShill() {
@@ -154,11 +167,21 @@ class SingleClientWifiConfigurationSyncTest : public SyncTest {
   }
 
  private:
+  base::test::ScopedFeatureList features_;
   mojo::Remote<chromeos::network_config::mojom::CrosNetworkConfig>
       remote_cros_network_config_;
 };
 
-IN_PROC_BROWSER_TEST_F(SingleClientWifiConfigurationSyncTest,
+INSTANTIATE_TEST_SUITE_P(
+    ,
+    SingleClientWifiConfigurationSyncTest,
+    // TODO(crbug.com/509847617): Use GetSyncTestModes() when the sync
+    // integration tests get parameterized on ChromeOS.
+    testing::Values(SyncTest::SetupSyncMode::kSyncTransportOnly,
+                    SyncTest::SetupSyncMode::kSyncTheFeature),
+    testing::PrintToStringParamName());
+
+IN_PROC_BROWSER_TEST_P(SingleClientWifiConfigurationSyncTest,
                        ShouldDownloadSingleWifiConfiguration) {
   const std::string kTestSsid = "test_wifi";
   InjectKeystoreEncryptedServerWifiConfiguration(
@@ -174,10 +197,10 @@ IN_PROC_BROWSER_TEST_F(SingleClientWifiConfigurationSyncTest,
           .Wait());
 }
 
-// Regression test for crbug.com/1318390: the client should clear metadata when
+// Regression test for crbug.com/40835352: the client should clear metadata when
 // sync requires it and perform initial sync again (was crashing before the
 // fix).
-IN_PROC_BROWSER_TEST_F(SingleClientWifiConfigurationSyncTest,
+IN_PROC_BROWSER_TEST_P(SingleClientWifiConfigurationSyncTest,
                        ShouldHandleClientDataObsolete) {
   const std::string kTestSsid1 = "test_wifi";
   InjectKeystoreEncryptedServerWifiConfiguration(

@@ -6,12 +6,13 @@
 #define CHROMEOS_ASH_SERVICES_MULTIDEVICE_SETUP_FEATURE_STATE_MANAGER_IMPL_H_
 
 #include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/timer/timer.h"
 #include "chromeos/ash/services/device_sync/public/cpp/device_sync_client.h"
 #include "chromeos/ash/services/multidevice_setup/feature_state_manager.h"
 #include "chromeos/ash/services/multidevice_setup/global_state_feature_manager.h"
 #include "chromeos/ash/services/multidevice_setup/host_status_provider.h"
-#include "chromeos/ash/services/multidevice_setup/public/cpp/android_sms_pairing_state_tracker.h"
 #include "chromeos/ash/services/multidevice_setup/public/mojom/multidevice_setup.mojom.h"
 #include "components/prefs/pref_change_registrar.h"
 
@@ -28,8 +29,7 @@ namespace multidevice_setup {
 // class utilizes per-user preferences.
 class FeatureStateManagerImpl : public FeatureStateManager,
                                 public HostStatusProvider::Observer,
-                                public device_sync::DeviceSyncClient::Observer,
-                                public AndroidSmsPairingStateTracker::Observer {
+                                public device_sync::DeviceSyncClient::Observer {
  public:
   class Factory {
    public:
@@ -37,8 +37,9 @@ class FeatureStateManagerImpl : public FeatureStateManager,
         PrefService* pref_service,
         HostStatusProvider* host_status_provider,
         device_sync::DeviceSyncClient* device_sync_client,
-        AndroidSmsPairingStateTracker* android_sms_pairing_state_tracker,
-        const base::flat_map<mojom::Feature, GlobalStateFeatureManager*>&
+        const base::flat_map<
+            mojom::Feature,
+            raw_ptr<GlobalStateFeatureManager, CtnExperimental>>&
             global_state_feature_managers,
         bool is_secondary_user);
     static void SetFactoryForTesting(Factory* test_factory);
@@ -49,8 +50,9 @@ class FeatureStateManagerImpl : public FeatureStateManager,
         PrefService* pref_service,
         HostStatusProvider* host_status_provider,
         device_sync::DeviceSyncClient* device_sync_client,
-        AndroidSmsPairingStateTracker* android_sms_pairing_state_tracker,
-        const base::flat_map<mojom::Feature, GlobalStateFeatureManager*>&
+        const base::flat_map<
+            mojom::Feature,
+            raw_ptr<GlobalStateFeatureManager, CtnExperimental>>&
             global_state_feature_managers,
         bool is_secondary_user) = 0;
 
@@ -68,8 +70,8 @@ class FeatureStateManagerImpl : public FeatureStateManager,
       PrefService* pref_service,
       HostStatusProvider* host_status_provider,
       device_sync::DeviceSyncClient* device_sync_client,
-      AndroidSmsPairingStateTracker* android_sms_pairing_state_tracker,
-      const base::flat_map<mojom::Feature, GlobalStateFeatureManager*>&
+      const base::flat_map<mojom::Feature,
+                           raw_ptr<GlobalStateFeatureManager, CtnExperimental>>&
           global_state_feature_managers,
       bool is_secondary_user);
 
@@ -84,9 +86,6 @@ class FeatureStateManagerImpl : public FeatureStateManager,
 
   // DeviceSyncClient::Observer:
   void OnNewDevicesSynced() override;
-
-  // AndroidSmsPairingStateTracker::Observer:
-  void OnPairingStateChanged() override;
 
   void OnPrefValueChanged();
   void UpdateFeatureStateCache(bool notify_observers_of_changes);
@@ -106,11 +105,11 @@ class FeatureStateManagerImpl : public FeatureStateManager,
   // than UMA aggregation periods and don't change feature state.
   void LogFeatureStates() const;
 
-  PrefService* pref_service_;
-  HostStatusProvider* host_status_provider_;
-  device_sync::DeviceSyncClient* device_sync_client_;
-  AndroidSmsPairingStateTracker* android_sms_pairing_state_tracker_;
-  const base::flat_map<mojom::Feature, GlobalStateFeatureManager*>
+  raw_ptr<PrefService> pref_service_;
+  raw_ptr<HostStatusProvider> host_status_provider_;
+  raw_ptr<device_sync::DeviceSyncClient> device_sync_client_;
+  const base::flat_map<mojom::Feature,
+                       raw_ptr<GlobalStateFeatureManager, CtnExperimental>>
       global_state_feature_managers_;
 
   // Certain features may be unavailable to secondary users logged into a
@@ -133,6 +132,12 @@ class FeatureStateManagerImpl : public FeatureStateManager,
   base::RepeatingTimer feature_state_metric_timer_;
 
   PrefChangeRegistrar registrar_;
+
+  base::ScopedObservation<HostStatusProvider, HostStatusProvider::Observer>
+      host_status_observation_{this};
+  base::ScopedObservation<device_sync::DeviceSyncClient,
+                          device_sync::DeviceSyncClient::Observer>
+      device_sync_observation_{this};
 };
 
 }  // namespace multidevice_setup

@@ -6,14 +6,18 @@
 #define NET_DNS_DNS_CLIENT_H_
 
 #include <memory>
+#include <optional>
 
+#include "base/values.h"
+#include "net/base/ech_mode.h"
+#include "net/base/features.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_export.h"
 #include "net/base/rand_callback.h"
 #include "net/dns/dns_config.h"
 #include "net/dns/dns_hosts.h"
 #include "net/dns/public/dns_config_overrides.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "net/dns/public/insecure_dns_mode.h"
 
 namespace url {
 
@@ -30,12 +34,44 @@ class DnsTransactionFactory;
 class NetLog;
 class ResolveContext;
 
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class DnsConfigLocalNameserverState {
+  kNoLocal = 0,
+  kOnlyLoopback = 1,
+  kOnlyNonLoopbackLocal = 2,
+  kLoopbackAndNonLoopback = 3,
+  kMaxValue = kLoopbackAndNonLoopback,
+};
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+// LINT.IfChange(FallbackFromSecureTransactionPreferredReason)
+enum class FallbackFromSecureTransactionPreferredReason {
+  kFallbackNotPreferred = 0,
+  kFallbackPreferredCannotUseSecureDns = 1,
+  kFallbackPreferredCanaryDomainCheckPending = 2,
+  kFallbackPreferredCanaryDomainCheckNegative = 3,
+  kFallbackPreferredNoAvailableDohServers = 4,
+  // kFallbackPreferredDohFallbackUpgradeNotAllowed = 5,
+  // kFallbackPreferredDohFallbackExperimentDisabled = 6,
+  kMaxValue = kFallbackPreferredNoAvailableDohServers,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/net/enums.xml:FallbackFromSecureTransactionPreferredReason)
+
 // Entry point for HostResolverManager to interact with the built-in async
 // resolver, as implemented by DnsTransactionFactory. Manages configuration and
 // status of the resolver.
 class NET_EXPORT DnsClient {
  public:
   static const int kMaxInsecureFallbackFailures = 16;
+
+  // Whether TaskType::DNS_PLATFORM should be used instead of whichever TaskType
+  // would normally be selected.
+  static bool UseDnsPlatformDueToEchMode(std::optional<EchMode> ech_mode) {
+    return ech_mode.has_value() && *ech_mode == EchMode::kStrict &&
+           features::IsDnsPlatformSupported();
+  }
 
   virtual ~DnsClient() = default;
 
@@ -45,12 +81,20 @@ class NET_EXPORT DnsClient {
   virtual bool CanUseSecureDnsTransactions() const = 0;
 
   // Returns true if the DnsClient is able and allowed to make insecure DNS
-  // transactions. If false, insecure transactions should not be created. Will
-  // always be false unless SetInsecureEnabled(true) has been called.
-  virtual bool CanUseInsecureDnsTransactions() const = 0;
-  virtual bool CanQueryAdditionalTypesViaInsecureDns() const = 0;
-  virtual void SetInsecureEnabled(bool enabled,
+  // transactions. If false, insecure transactions should not be created.
+  // TODO(crbug.com/448975408): Remove `ech_mode` (here and in other places)
+  // once the performance regression introduced by `TaskType::DNS_PLATFORM` has
+  // been addressed. For the time being, it is necessary to enable support
+  // `EchMode::kStrict` without causing a performance regression for non-kStrict
+  // requests.
+  virtual bool CanUseInsecureDnsTransactions(
+      std::optional<EchMode> ech_mode) const = 0;
+  virtual bool CanQueryAdditionalTypesViaInsecureDns(
+      std::optional<EchMode> ech_mode) const = 0;
+  virtual void SetInsecureEnabled(InsecureDnsMode mode,
                                   bool additional_types_enabled) = 0;
+  virtual InsecureDnsMode GetInsecureDnsMode(
+      std::optional<EchMode> ech_mode) const = 0;
 
   // When true, DoH should not be used in AUTOMATIC mode since no DoH servers
   // have a successful probe state.
@@ -59,14 +103,15 @@ class NET_EXPORT DnsClient {
 
   // When true, insecure DNS transactions should not be used when reasonable
   // fallback alternatives, e.g. system resolution can be used instead.
-  virtual bool FallbackFromInsecureTransactionPreferred() const = 0;
+  virtual bool FallbackFromInsecureTransactionPreferred(
+      std::optional<EchMode> ech_mode) const = 0;
 
   // Updates DNS config.  If effective config has changed, destroys the current
   // DnsTransactionFactory and creates a new one according to the effective
   // config, unless it is invalid or has |unhandled_options|.
   //
   // Returns whether or not the effective config changed.
-  virtual bool SetSystemConfig(absl::optional<DnsConfig> system_config) = 0;
+  virtual bool SetSystemConfig(std::optional<DnsConfig> system_config) = 0;
   virtual bool SetConfigOverrides(DnsConfigOverrides config_overrides) = 0;
 
   // If there is a current session, forces replacement with a new current
@@ -75,21 +120,20 @@ class NET_EXPORT DnsClient {
   virtual void ReplaceCurrentSession() = 0;
 
   // Used for tracking per-context-per-session data.
-  // TODO(crbug.com/1022059): Once more per-context-per-session data has been
+  // TODO(crbug.com/40106440): Once more per-context-per-session data has been
   // moved to ResolveContext and it doesn't need to call back into DnsSession,
   // convert this to a more limited session handle to prevent overuse of
   // DnsSession outside the DnsClient code.
   virtual DnsSession* GetCurrentSession() = 0;
 
   // Retrieve the current DNS configuration that would be used if transactions
-  // were otherwise currently allowed. Returns null if configuration is
-  // invalid or a configuration has not yet been read from the system.
-  virtual const DnsConfig* GetEffectiveConfig() const = 0;
+  // were otherwise currently allowed.
+  virtual const DnsConfig& GetEffectiveConfig() const = 0;
   virtual const DnsHosts* GetHosts() const = 0;
 
   // Returns all preset addresses for the specified endpoint, if any are
   // present in the current effective DnsConfig.
-  virtual absl::optional<std::vector<IPEndPoint>> GetPresetAddrs(
+  virtual std::optional<std::vector<IPEndPoint>> GetPresetAddrs(
       const url::SchemeHostPort& endpoint) const = 0;
 
   // Returns null if the current config is not valid.
@@ -103,13 +147,15 @@ class NET_EXPORT DnsClient {
   // Return the effective DNS configuration as a value that can be recorded in
   // the NetLog. This also synthesizes interpretative data to the Value, e.g.
   // whether secure and insecure transactions are enabled.
-  virtual base::Value GetDnsConfigAsValueForNetLog() const = 0;
+  virtual base::DictValue GetDnsConfigAsValueForNetLog() const = 0;
 
-  virtual absl::optional<DnsConfig> GetSystemConfigForTesting() const = 0;
+  virtual std::optional<DnsConfig> GetSystemConfigForTesting() const = 0;
   virtual DnsConfigOverrides GetConfigOverridesForTesting() const = 0;
 
   virtual void SetTransactionFactoryForTesting(
       std::unique_ptr<DnsTransactionFactory> factory) = 0;
+  virtual void SetAddressSorterForTesting(
+      std::unique_ptr<AddressSorter> address_sorter) = 0;
 
   // Creates default client.
   static std::unique_ptr<DnsClient> CreateClient(NetLog* net_log);

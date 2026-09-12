@@ -45,32 +45,42 @@ BEGIN
           gettext("URL_FORWARDER_INCORRECTLY_CONFIGURED")|
             format(url_forwarder_name)|
             replace('"', '""') }}"
+  IDS_MOVE_TO_TOP_BUTTON "{% trans %}MOVE_TO_TOP_BUTTON{% endtrans %}"
+  IDS_MOVE_TO_BOTTOM_BUTTON "{% trans %}MOVE_TO_BOTTOM_BUTTON{% endtrans %}"
 END
 
 IDI_CHROME_REMOTE_DESKTOP      ICON    "remoting/resources/chromoting.ico"
 
 #endif  // (REMOTING_HOST_BINARY == BINARY_CORE)
 
+// Note on dialog extended styles:
+// WS_EX_TOOLWINDOW is required so that Desktop Window Manager (DWM) treats
+// this unowned dialog as a tool window and excludes it from Windows Shell
+// Virtual Desktop management. This ensures the indicator dialog is never
+// cloaked (DWMWA_CLOAKED) and remains visible and interactive across all
+// virtual desktops (e.g. when Win+Ctrl+D is pressed).
+// WS_EX_APPWINDOW must NOT be added here, as it would force the window into
+// virtual desktop tracking and cause it to be cloaked when switching desktops.
+// See crbug.com/556259957.
 IDD_DISCONNECT DIALOGEX 0, 0, 145, 24
 STYLE DS_SETFONT | WS_POPUP
 EXSTYLE WS_EX_TOPMOST | WS_EX_TOOLWINDOW {% if IsRtlLanguage(lang) %} | WS_EX_LAYOUTRTL | WS_EX_RTLREADING {% endif %}
 FONT 9, "Microsoft Sans Serif", 400, 0, 0x0
 BEGIN
+    PUSHBUTTON      "",IDC_TOGGLE_ALIGNMENT,6,5,14,14,BS_PUSHBUTTON | WS_TABSTOP
     DEFPUSHBUTTON   "{% trans %}STOP_SHARING_BUTTON{% endtrans %}",IDC_DISCONNECT,68,5,70,14
-    LTEXT           "{% trans %}MESSAGE_SHARED{% endtrans %}",IDC_DISCONNECT_SHARINGWITH,18,7,43,8
-    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDVERT,6,6,1,12
-    CONTROL         "",IDC_STATIC,"Static",SS_ETCHEDVERT,8,6,1,12
+    LTEXT           "{% trans %}MESSAGE_SHARED{% endtrans %}",IDC_DISCONNECT_SHARINGWITH,24,7,43,8
 END
 
 IDD_CONTINUE DIALOGEX 0, 0, 221, 58
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION
-EXSTYLE WS_EX_TOPMOST | WS_EX_TOOLWINDOW {% if IsRtlLanguage(lang) %} | WS_EX_LAYOUTRTL | WS_EX_RTLREADING {% endif %}
+EXSTYLE WS_EX_TOPMOST {% if IsRtlLanguage(lang) %} | WS_EX_LAYOUTRTL | WS_EX_RTLREADING {% endif %}
 CAPTION "{% trans %}PRODUCT_NAME{% endtrans %}"
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
-    DEFPUSHBUTTON   "{% trans %}CONTINUE_BUTTON{% endtrans %}",IDC_CONTINUE_DEFAULT,116,38,98,14
+    DEFPUSHBUTTON   "{% trans %}STOP_SHARING_BUTTON{% endtrans %}",IDC_CONTINUE_CANCEL,7,38,98,14
     LTEXT           "{% trans %}CONTINUE_PROMPT{% endtrans %}",IDC_CONTINUE_MESSAGE,7,7,207,30
-    PUSHBUTTON      "{% trans %}STOP_SHARING_BUTTON{% endtrans %}",IDC_CONTINUE_CANCEL,7,38,98,14
+    PUSHBUTTON      "{% trans %}CONTINUE_BUTTON{% endtrans %}",IDC_CONTINUE_BUTTON,116,38,98,14
 END
 
 {% endfor %}

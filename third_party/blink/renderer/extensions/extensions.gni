@@ -6,7 +6,7 @@ import("//third_party/blink/renderer/config.gni")
 blink_extensions_output_dir =
     "$root_gen_dir/third_party/blink/renderer/extensions"
 
-# Defines a part of blink extensions_chromeos. This is either a source set or a
+# Defines a part of blink extensions_webview. This is either a source set or a
 # static library with defaults for commonly-used values.
 #
 #   deps
@@ -15,8 +15,8 @@ blink_extensions_output_dir =
 #   visibility
 #      Normal meaning if defined. If undefined, defaults to everything in
 # extensions.
-template("blink_extensions_chromeos_sources") {
-  assert(use_blink_extensions_chromeos)
+template("blink_extensions_webview_sources") {
+  assert(use_blink_extensions_webview)
 
   if (is_component_build) {
     target_type = "source_set"
@@ -31,7 +31,6 @@ template("blink_extensions_chromeos_sources") {
 
     deps = [
       "//third_party/blink/renderer/core",
-      "//third_party/blink/renderer/extensions/chromeos:make_chromeos_generated",
       "//third_party/blink/renderer/modules",
     ]
     if (defined(invoker.deps)) {
@@ -42,10 +41,12 @@ template("blink_extensions_chromeos_sources") {
     forward_variables_from(invoker, "*", [ "deps" ])
   }
 }
-set_defaults("blink_extensions_chromeos_sources") {
-  # This sets the default list of configs when the blink_extensions_chromeos_sources
-  # target is defined. The default_compiler_configs comes from BUILDCONFIG.gn
-  # and is the list normally applied to static libraries and source sets.
+
+set_defaults("blink_extensions_webview_sources") {
+  # This sets the default list of configs when the
+  # blink_extensions_webview_sources target is defined. The
+  # default_compiler_configs comes from BUILDCONFIG.gn and is the list normally
+  # applied to static libraries and source sets.
   configs = default_compiler_configs
   configs -= [ "//build/config/compiler:default_symbols" ]
   configs += blink_symbols_config
@@ -54,5 +55,5 @@ set_defaults("blink_extensions_chromeos_sources") {
     "//third_party/blink/renderer:non_test_config",
     "//third_party/blink/renderer:inside_blink",
   ]
-  configs += [ "//third_party/blink/renderer/extensions/chromeos:extensions_chromeos_implementation" ]
+  configs += [ "//third_party/blink/renderer/extensions/webview:extensions_webview_implementation" ]
 }

@@ -5,6 +5,9 @@
 #include "net/http/http_auth.h"
 
 #include <algorithm>
+#include <array>
+#include <optional>
+#include <string_view>
 
 #include "base/strings/string_tokenizer.h"
 #include "base/strings/string_util.h"
@@ -24,9 +27,14 @@
 namespace net {
 
 namespace {
-const char* const kSchemeNames[] = {kBasicAuthScheme,     kDigestAuthScheme,
-                                    kNtlmAuthScheme,      kNegotiateAuthScheme,
-                                    kSpdyProxyAuthScheme, kMockAuthScheme};
+constexpr auto kSchemeNames = std::to_array<const char*>({
+    kBasicAuthScheme,
+    kDigestAuthScheme,
+    kNtlmAuthScheme,
+    kNegotiateAuthScheme,
+    kSpdyProxyAuthScheme,
+    kMockAuthScheme,
+});
 }  // namespace
 
 HttpAuth::Identity::Identity() = default;
@@ -48,17 +56,18 @@ void HttpAuth::ChooseBestChallenge(
 
   // Choose the challenge whose authentication handler gives the maximum score.
   std::unique_ptr<HttpAuthHandler> best;
-  const std::string header_name = GetChallengeHeaderName(target);
-  std::string cur_challenge;
+  const auto header_name = GetChallengeHeaderName(target);
+  std::optional<std::string_view> cur_challenge;
   size_t iter = 0;
-  while (response_headers.EnumerateHeader(&iter, header_name, &cur_challenge)) {
+  while (
+      (cur_challenge = response_headers.EnumerateHeader(&iter, header_name))) {
     std::unique_ptr<HttpAuthHandler> cur;
     int rv = http_auth_handler_factory->CreateAuthHandlerFromString(
-        cur_challenge, target, ssl_info, network_anonymization_key,
+        *cur_challenge, target, ssl_info, network_anonymization_key,
         scheme_host_port, net_log, host_resolver, &cur);
     if (rv != OK) {
-      VLOG(1) << "Unable to create AuthHandler. Status: "
-              << ErrorToString(rv) << " Challenge: " << cur_challenge;
+      VLOG(1) << "Unable to create AuthHandler. Status: " << ErrorToString(rv)
+              << " Challenge: " << *cur_challenge;
       continue;
     }
     if (cur.get() && (!best.get() || best->score() < cur->score()) &&
@@ -82,20 +91,19 @@ HttpAuth::AuthorizationResult HttpAuth::HandleChallengeResponse(
   HttpAuth::Scheme current_scheme = handler->auth_scheme();
   if (disabled_schemes.find(current_scheme) != disabled_schemes.end())
     return HttpAuth::AUTHORIZATION_RESULT_REJECT;
-  const char* current_scheme_name = SchemeToString(current_scheme);
-  const std::string header_name = GetChallengeHeaderName(target);
+  const auto current_scheme_name = SchemeToString(current_scheme);
+  const std::string_view header_name = GetChallengeHeaderName(target);
   size_t iter = 0;
-  std::string challenge;
+  std::optional<std::string_view> challenge;
   HttpAuth::AuthorizationResult authorization_result =
       HttpAuth::AUTHORIZATION_RESULT_INVALID;
-  while (response_headers.EnumerateHeader(&iter, header_name, &challenge)) {
-    HttpAuthChallengeTokenizer challenge_tokens(challenge.begin(),
-                                                challenge.end());
+  while ((challenge = response_headers.EnumerateHeader(&iter, header_name))) {
+    HttpAuthChallengeTokenizer challenge_tokens(*challenge);
     if (challenge_tokens.auth_scheme() != current_scheme_name)
       continue;
     authorization_result = handler->HandleAnotherChallenge(&challenge_tokens);
     if (authorization_result != HttpAuth::AUTHORIZATION_RESULT_INVALID) {
-      *challenge_used = challenge;
+      *challenge_used = *challenge;
       return authorization_result;
     }
   }
@@ -104,7 +112,7 @@ HttpAuth::AuthorizationResult HttpAuth::HandleChallengeResponse(
 }
 
 // static
-std::string HttpAuth::GetChallengeHeaderName(Target target) {
+std::string_view HttpAuth::GetChallengeHeaderName(Target target) {
   switch (target) {
     case AUTH_PROXY:
       return "Proxy-Authenticate";
@@ -112,12 +120,11 @@ std::string HttpAuth::GetChallengeHeaderName(Target target) {
       return "WWW-Authenticate";
     default:
       NOTREACHED();
-      return std::string();
   }
 }
 
 // static
-std::string HttpAuth::GetAuthorizationHeaderName(Target target) {
+std::string_view HttpAuth::GetAuthorizationHeaderName(Target target) {
   switch (target) {
     case AUTH_PROXY:
       return HttpRequestHeaders::kProxyAuthorization;
@@ -125,12 +132,11 @@ std::string HttpAuth::GetAuthorizationHeaderName(Target target) {
       return HttpRequestHeaders::kAuthorization;
     default:
       NOTREACHED();
-      return std::string();
   }
 }
 
 // static
-std::string HttpAuth::GetAuthTargetString(Target target) {
+std::string_view HttpAuth::GetAuthTargetString(Target target) {
   switch (target) {
     case AUTH_PROXY:
       return "proxy";
@@ -138,17 +144,15 @@ std::string HttpAuth::GetAuthTargetString(Target target) {
       return "server";
     default:
       NOTREACHED();
-      return std::string();
   }
 }
 
 // static
-const char* HttpAuth::SchemeToString(Scheme scheme) {
+std::string_view HttpAuth::SchemeToString(Scheme scheme) {
   static_assert(std::size(kSchemeNames) == AUTH_SCHEME_MAX,
                 "http auth scheme names incorrect size");
   if (scheme < AUTH_SCHEME_BASIC || scheme >= AUTH_SCHEME_MAX) {
     NOTREACHED();
-    return "invalid_scheme";
   }
   return kSchemeNames[scheme];
 }
@@ -160,11 +164,10 @@ HttpAuth::Scheme HttpAuth::StringToScheme(const std::string& str) {
       return static_cast<Scheme>(i);
   }
   NOTREACHED();
-  return AUTH_SCHEME_MAX;
 }
 
 // static
-const char* HttpAuth::AuthorizationResultToString(
+std::string_view HttpAuth::AuthorizationResultToString(
     AuthorizationResult authorization_result) {
   switch (authorization_result) {
     case AUTHORIZATION_RESULT_ACCEPT:
@@ -179,11 +182,10 @@ const char* HttpAuth::AuthorizationResultToString(
       return "different_realm";
   }
   NOTREACHED();
-  return "(invalid result)";
 }
 
 // static
-base::Value HttpAuth::NetLogAuthorizationResultParams(
+base::DictValue HttpAuth::NetLogAuthorizationResultParams(
     const char* name,
     AuthorizationResult authorization_result) {
   return NetLogParamsWithString(

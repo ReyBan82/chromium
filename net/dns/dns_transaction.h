@@ -8,18 +8,18 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece.h"
 #include "base/time/time.h"
+#include "net/base/network_handle.h"
 #include "net/base/request_priority.h"
 #include "net/dns/opt_record_rdata.h"
+#include "net/dns/public/resolution_details.h"
 #include "net/dns/public/secure_dns_mode.h"
-#include "net/dns/record_rdata.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "url/gurl.h"
 
 namespace net {
 
@@ -29,7 +29,7 @@ class NetLogWithSource;
 class ResolveContext;
 
 // The hostname probed by CreateDohProbeRunner().
-inline constexpr base::StringPiece kDohProbeHostname = "www.gstatic.com";
+inline constexpr std::string_view kDohProbeHostname = "www.gstatic.com";
 
 // DnsTransaction implements a stub DNS resolver as defined in RFC 1034.
 // The DnsTransaction takes care of retransmissions, name server fallback (or
@@ -58,6 +58,9 @@ class NET_EXPORT_PRIVATE DnsTransaction {
   virtual void Start(ResponseCallback callback) = 0;
 
   virtual void SetRequestPriority(RequestPriority priority) = 0;
+
+  virtual std::optional<DohResolutionDetails> GetDohResolutionDetails()
+      const = 0;
 };
 
 // Startable/Cancellable object to represent a DNS probe sequence.
@@ -90,6 +93,16 @@ class DnsProbeRunner {
 // the factory is still alive.
 class NET_EXPORT_PRIVATE DnsTransactionFactory {
  public:
+
+  // Defines the underlying implementation used to implement a single DNS
+  // exchange.
+  enum class AttemptMode {
+    kClassic,   // Plaintext DNS (either over TCP or UDP)
+    kHttp,      // DNS-over-HTTPS (DoH)
+    kPlatform,  // Platform DNS API (currently this is only supported on
+                // Android)
+  };
+
   DnsTransactionFactory();
   virtual ~DnsTransactionFactory();
 
@@ -100,8 +113,8 @@ class NET_EXPORT_PRIVATE DnsTransactionFactory {
   //
   // The |net_log| is used as the parent log.
   //
-  // |secure| specifies whether DNS lookups should be performed using DNS-over-
-  // HTTPS (DoH) or using plaintext DNS.
+  // |attempt_mode| specifies whether DNS lookups should be performed using
+  // DNS-over-HTTPS (DoH) or using classic DNS.
   //
   // When |fast_timeout| is true, the transaction will timeout quickly after
   // making its DNS attempts, without necessarily waiting long enough to allow
@@ -113,8 +126,9 @@ class NET_EXPORT_PRIVATE DnsTransactionFactory {
       std::string hostname,
       uint16_t qtype,
       const NetLogWithSource& net_log,
-      bool secure,
+      AttemptMode attempt_mode,
       SecureDnsMode secure_dns_mode,
+      handles::NetworkHandle target_network,
       ResolveContext* resolve_context,
       bool fast_timeout) = 0;
 
@@ -122,10 +136,6 @@ class NET_EXPORT_PRIVATE DnsTransactionFactory {
   // resolvers.
   [[nodiscard]] virtual std::unique_ptr<DnsProbeRunner> CreateDohProbeRunner(
       ResolveContext* resolve_context) = 0;
-
-  // The given EDNS0 option will be included in all DNS queries performed by
-  // transactions from this factory.
-  virtual void AddEDNSOption(std::unique_ptr<OptRecordRdata::Opt> opt) = 0;
 
   // Returns the default SecureDnsMode in the config.
   virtual SecureDnsMode GetSecureDnsModeForTest() = 0;

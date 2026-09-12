@@ -2,14 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {openTab} from '/_test_resources/test_util/tabs_util.js';
-
-function getInjectedElementIds() {
-  let childIds = [];
-  for (const child of document.body.children)
-    childIds.push(child.id);
-  return childIds.sort();
-};
+import {getInjectedElementIds, openTab} from '/_test_resources/test_util/tabs_util.js';
 
 function getFileTooLargeError(fileName) {
   return `Error: Scripts could not be loaded because '${fileName}' exceeds ` +
@@ -54,7 +47,7 @@ chrome.test.runTests([
         id: 'too_big_part2',
         matches: ['https://example.com/*'],
         js: [bigScriptFile],
-      }
+      },
     ];
 
     await chrome.test.assertPromiseRejects(
@@ -96,13 +89,11 @@ chrome.test.runTests([
     // will not affect the tab's contents.
     const config = await chrome.test.getConfig();
     const url = `http://example.com:${config.testServer.port}/simple.html`;
-    let tab = await openTab(url);
-    let results = await chrome.scripting.executeScript(
-        {target: {tabId: tab.id}, func: getInjectedElementIds});
+    const tab = await openTab(url);
 
-    chrome.test.assertEq(1, results.length);
     chrome.test.assertEq(
-        ['dynamic-1', 'dynamic-2', 'manifest'], results[0].result);
+        ['dynamic-1', 'dynamic-2', 'manifest'],
+        await getInjectedElementIds(tab.id));
     const registeredScripts =
         await chrome.scripting.getRegisteredContentScripts();
     chrome.test.assertEq(1, registeredScripts.length);

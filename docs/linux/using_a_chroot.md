@@ -27,11 +27,10 @@ home directory is inaccessible by root (typically because it is mounted on NFS),
 then move this directory onto your local disk and change the corresponding entry
 in `/etc/schroot/mount-lucid64bit`.
 
-### Goma builds
+### Reclient builds
 
-If you get mysterious compile errors (glibconfig.h or dbus header error), make
-sure that goma is running in the chroot, or don't use goma for builds inside the
-chroot.
+If you get mysterious compile errors (glibconfig.h or dbus header error), don't
+use reclient for builds inside the chroot.
 
 ### Different color prompt
 
@@ -70,7 +69,7 @@ number may vary (`echo $DISPLAY` outside the chroot to see what your display
 number is).
 
 You can also use `Xvfb` if you only want to
-[run tests headless](web_tests_linux.md#Using-an-embedded-X-server).
+[run tests headless](../testing/web_tests_linux.md#Using-an-embedded-X-server).
 
 ### Having web test results open in a browser
 

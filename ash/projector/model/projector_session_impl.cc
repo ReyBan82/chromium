@@ -5,6 +5,7 @@
 #include "ash/projector/model/projector_session_impl.h"
 
 #include "ash/projector/projector_metrics.h"
+#include "base/files/safe_base_name.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
 
@@ -12,18 +13,13 @@ namespace ash {
 
 namespace {
 
-// String format of the screencast name.
-constexpr char kScreencastPathFmtStr[] =
-    "Screencast %d-%02d-%02d %02d.%02d.%02d";
-
 // Only call this function on projector session starts.
 std::string GenerateScreencastName() {
-  base::Time::Exploded exploded_time;
-  base::Time::Now().LocalExplode(&exploded_time);
-  return base::StringPrintf(kScreencastPathFmtStr, exploded_time.year,
-                            exploded_time.month, exploded_time.day_of_month,
-                            exploded_time.hour, exploded_time.minute,
-                            exploded_time.second);
+  base::Time::Exploded exploded;
+  base::Time::Now().LocalExplode(&exploded);
+  return base::StringPrintf(
+      "Screencast %04d-%02d-%02d %02d.%02d.%02d", exploded.year, exploded.month,
+      exploded.day_of_month, exploded.hour, exploded.minute, exploded.second);
 }
 
 }  // namespace
@@ -32,7 +28,7 @@ ProjectorSessionImpl::ProjectorSessionImpl() = default;
 
 ProjectorSessionImpl::~ProjectorSessionImpl() = default;
 
-void ProjectorSessionImpl::Start(const std::string& storage_dir) {
+void ProjectorSessionImpl::Start(const base::SafeBaseName& storage_dir) {
   DCHECK(!active_);
 
   active_ = true;

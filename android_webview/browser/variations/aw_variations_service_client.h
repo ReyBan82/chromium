@@ -28,13 +28,15 @@ class AwVariationsServiceClient : public variations::VariationsServiceClient {
 
   ~AwVariationsServiceClient() override;
 
+  bool EnableSignatureVerificationOnLoad() override;
+
  private:
   base::Version GetVersionForSimulation() override;
   scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory() override;
   network_time::NetworkTimeTracker* GetNetworkTimeTracker() override;
-  version_info::Channel GetChannel() override;
   bool OverridesRestrictParameter(std::string* parameter) override;
   bool IsEnterprise() override;
+  version_info::Channel GetChannel() override;
 };
 
 }  // namespace android_webview

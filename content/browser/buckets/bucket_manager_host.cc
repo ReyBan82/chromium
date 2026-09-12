@@ -4,10 +4,14 @@
 
 #include "content/browser/buckets/bucket_manager_host.h"
 
-#include "base/containers/contains.h"
+#include <algorithm>
+
+#include "base/metrics/histogram_functions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
 #include "base/types/pass_key.h"
 #include "components/services/storage/public/cpp/buckets/bucket_info.h"
+#include "content/browser/buckets/bucket_host.h"
 #include "content/browser/buckets/bucket_manager.h"
 #include "content/browser/buckets/bucket_utils.h"
 #include "content/browser/storage_partition_impl.h"
@@ -16,6 +20,21 @@
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 
 namespace content {
+
+// These enums are used in metrics. Do not reorder or change their values.
+// Append new values to the end.
+enum class DurabilityMetric {
+  kNoneProvided = 0,
+  kRelaxed = 1,
+  kStrict = 2,
+  kMaxValue = kStrict,
+};
+enum class PersistenceMetric {
+  kNoneProvided = 0,
+  kNotPersisted = 1,
+  kPersisted = 2,
+  kMaxValue = kPersisted,
+};
 
 BucketManagerHost::BucketManagerHost(BucketManager* manager,
                                      const blink::StorageKey& storage_key)
@@ -69,11 +88,39 @@ void BucketManagerHost::OpenBucket(const std::string& name,
       // Only grant persistence if permitted.
       if (receivers_.current_context() &&
           receivers_.current_context()->GetPermissionStatus(
-              blink::PermissionType::DURABLE_STORAGE) ==
+              blink::PermissionType::PERSISTENT_STORAGE) ==
               blink::mojom::PermissionStatus::GRANTED) {
         params.persistent = policies->persisted;
       }
     }
+
+    // Count the number of minutes until expiration. This doesn't use the TIMES
+    // histogram variant because that counts in milliseconds and caps the max at
+    // ~24 days. Note that negative counts are logged as zero, so all
+    // expirations less than one minute in the future (including none specified)
+    // will be logged in the underflow bucket. Max duration we care about is 500
+    // days.
+    base::UmaHistogramCustomCounts(
+        "Storage.Buckets.Parameters.Expiration",
+        (params.expiration - base::Time::Now()).InMinutes(), 1,
+        base::Days(500).InMinutes(), 50);
+    // Convert quota to kB before logging.
+    base::UmaHistogramCustomCounts("Storage.Buckets.Parameters.QuotaKb",
+                                   params.quota / 1024, 1,
+                                   /* 20 GB */ 20L * 1024 * 1024, 50);
+    base::UmaHistogramEnumeration(
+        "Storage.Buckets.Parameters.Durability",
+        policies->has_durability
+            ? policies->durability == blink::mojom::BucketDurability::kStrict
+                  ? DurabilityMetric::kStrict
+                  : DurabilityMetric::kRelaxed
+            : DurabilityMetric::kNoneProvided);
+    base::UmaHistogramEnumeration("Storage.Buckets.Parameters.Persisted",
+                                  policies->has_persisted
+                                      ? policies->persisted
+                                            ? PersistenceMetric::kPersisted
+                                            : PersistenceMetric::kNotPersisted
+                                      : PersistenceMetric::kNoneProvided);
   }
 
   GetQuotaManagerProxy()->UpdateOrCreateBucket(
@@ -83,9 +130,19 @@ void BucketManagerHost::OpenBucket(const std::string& name,
                      std::move(callback)));
 }
 
+void BucketManagerHost::GetBucketForDevtools(
+    const std::string& name,
+    mojo::PendingReceiver<blink::mojom::BucketHost> receiver) {
+  GetQuotaManagerProxy()->GetBucketByNameUnsafe(
+      storage_key_, name, base::SequencedTaskRunner::GetCurrentDefault(),
+      base::BindOnce(&BucketManagerHost::DidGetBucketForDevtools,
+                     weak_factory_.GetWeakPtr(), receivers_.current_context(),
+                     std::move(receiver)));
+}
+
 void BucketManagerHost::Keys(KeysCallback callback) {
   GetQuotaManagerProxy()->GetBucketsForStorageKey(
-      storage_key_, blink::mojom::StorageType::kTemporary,
+      storage_key_,
       /*delete_expired=*/true, base::SequencedTaskRunner::GetCurrentDefault(),
       base::BindOnce(&BucketManagerHost::DidGetBuckets,
                      weak_factory_.GetWeakPtr(), std::move(callback)));
@@ -105,7 +162,7 @@ void BucketManagerHost::DeleteBucket(const std::string& name,
 }
 
 void BucketManagerHost::RemoveBucketHost(storage::BucketId id) {
-  DCHECK(base::Contains(bucket_map_, id));
+  DCHECK(bucket_map_.contains(id));
   bucket_map_.erase(id);
 }
 
@@ -134,7 +191,7 @@ void BucketManagerHost::DidGetBucket(
     return;
   }
 
-  if (!result.ok()) {
+  if (!result.has_value()) {
     auto error = [](storage::QuotaError code) {
       switch (code) {
         case storage::QuotaError::kQuotaExceeded:
@@ -142,16 +199,17 @@ void BucketManagerHost::DidGetBucket(
         case storage::QuotaError::kInvalidExpiration:
           return blink::mojom::BucketError::kInvalidExpiration;
         case storage::QuotaError::kNone:
-        case storage::QuotaError::kNotFound:
         case storage::QuotaError::kEntryExistsError:
         case storage::QuotaError::kFileOperationError:
           NOTREACHED();
-          ABSL_FALLTHROUGH_INTENDED;
+        case storage::QuotaError::kNotFound:
         case storage::QuotaError::kDatabaseError:
+        case storage::QuotaError::kDatabaseDisabled:
         case storage::QuotaError::kUnknownError:
+        case storage::QuotaError::kStorageKeyError:
           return blink::mojom::BucketError::kUnknown;
       }
-    }(result.error());
+    }(result.error().quota_error);
     std::move(callback).Run(mojo::NullRemote(), error);
     return;
   }
@@ -169,23 +227,37 @@ void BucketManagerHost::DidGetBucket(
                           blink::mojom::BucketError::kUnknown);
 }
 
-void BucketManagerHost::DidGetBuckets(
-    KeysCallback callback,
-    storage::QuotaErrorOr<std::set<storage::BucketInfo>> buckets) {
-  if (!buckets.ok()) {
-    std::move(callback).Run({}, false);
+void BucketManagerHost::DidGetBucketForDevtools(
+    base::WeakPtr<BucketContext> bucket_context,
+    mojo::PendingReceiver<blink::mojom::BucketHost> receiver,
+    storage::QuotaErrorOr<storage::BucketInfo> result) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  if (!bucket_context || !result.has_value()) {
     return;
   }
 
+  const auto& bucket = result.value();
+  auto it = bucket_map_.find(bucket.id);
+  if (it == bucket_map_.end()) {
+    it = bucket_map_
+             .emplace(bucket.id, std::make_unique<BucketHost>(this, bucket))
+             .first;
+  }
+
+  it->second->PassStorageBucketBinding(bucket_context, std::move(receiver));
+}
+
+void BucketManagerHost::DidGetBuckets(
+    KeysCallback callback,
+    storage::QuotaErrorOr<std::set<storage::BucketInfo>> buckets) {
   std::vector<std::string> keys;
-  for (auto& bucket : buckets.value()) {
+  for (const auto& bucket : buckets.value_or(std::set<storage::BucketInfo>())) {
     if (!bucket.is_default()) {
-      keys.push_back(bucket.name);
+      keys.insert(std::ranges::upper_bound(keys, bucket.name), bucket.name);
     }
   }
-  std::sort(keys.begin(), keys.end());
-
-  std::move(callback).Run(keys, true);
+  std::move(callback).Run(keys, buckets.has_value());
 }
 
 void BucketManagerHost::DidDeleteBucket(const std::string& bucket_name,

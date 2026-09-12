@@ -5,6 +5,7 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_FONT_FEATURE_VALUES_MAP_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_FONT_FEATURE_VALUES_MAP_H_
 
+#include "base/memory/raw_ptr.h"
 #include "third_party/blink/renderer/bindings/core/v8/idl_types.h"
 #include "third_party/blink/renderer/bindings/core/v8/iterable.h"
 #include "third_party/blink/renderer/bindings/core/v8/maplike.h"
@@ -37,6 +38,12 @@ class CSSFontFeatureValuesMap : public ScriptWrappable,
   CSSFontFeatureValuesMap(const CSSFontFeatureValuesMap&) = delete;
   CSSFontFeatureValuesMap& operator=(const CSSFontFeatureValuesMap&) = delete;
 
+  void Reattach(StyleRuleFontFeatureValues* style_rule_font_feature_values,
+                FontFeatureAliases* aliases) {
+    backing_style_rule_ = style_rule_font_feature_values;
+    aliases_ = aliases;
+  }
+
   // IDL attributes / methods
   uint32_t size() const;
 
@@ -56,15 +63,15 @@ class CSSFontFeatureValuesMap : public ScriptWrappable,
   CSSFontFeatureValuesMap() = default;
 
   PairSyncIterable<CSSFontFeatureValuesMap>::IterationSource*
-  CreateIterationSource(ScriptState*, ExceptionState&) override;
+  CreateIterationSource(ScriptState*) override;
   bool GetMapEntry(ScriptState*,
                    const String& key,
-                   Vector<uint32_t>& value,
-                   ExceptionState&) override;
+                   Vector<uint32_t>& value) override;
 
   Member<CSSFontFeatureValuesRule> parent_rule_;
   Member<StyleRuleFontFeatureValues> backing_style_rule_;
-  FontFeatureAliases* aliases_ = nullptr;
+  raw_ptr<FontFeatureAliases, UnprotectedInRelease | DanglingUntriaged>
+      aliases_ = nullptr;
 };
 
 }  // namespace blink

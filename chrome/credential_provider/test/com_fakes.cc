@@ -4,14 +4,14 @@
 
 #include "chrome/credential_provider/test/com_fakes.h"
 
-#include <sddl.h>  // For ConvertSidToStringSid()
+#include <sddl.h>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "chrome/credential_provider/gaiacp/gaia_credential.h"
 #include "chrome/credential_provider/gaiacp/gaia_credential_other_user.h"
 #include "chrome/credential_provider/gaiacp/os_user_manager.h"
 #include "chrome/credential_provider/gaiacp/reauth_credential.h"
-#include "chrome/credential_provider/gaiacp/stdafx.h"
 #include "chrome/credential_provider/test/test_credential.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -21,7 +21,7 @@ namespace testing {
 
 // This class is used to implement a test credential based off a
 // CGaiaCredential.
-class ATL_NO_VTABLE CTestGaiaCredential
+class __declspec(novtable) CTestGaiaCredential
     : public CTestCredentialBase<CGaiaCredential> {
  public:
   DECLARE_NO_REGISTRY()
@@ -43,7 +43,7 @@ CTestGaiaCredential::~CTestGaiaCredential() = default;
 
 // This class is used to implement a test credential based off a
 // COtherUserGaiaCredential.
-class ATL_NO_VTABLE CTestOtherUserGaiaCredential
+class __declspec(novtable) CTestOtherUserGaiaCredential
     : public CTestCredentialBase<COtherUserGaiaCredential> {
  public:
   DECLARE_NO_REGISTRY()
@@ -87,7 +87,7 @@ FakeCredentialProviderUser::~FakeCredentialProviderUser() {
 HRESULT FakeCredentialProviderUser::GetSid(wchar_t** sid) {
   DWORD length = sid_.length() + 1;
   *sid = static_cast<wchar_t*>(::CoTaskMemAlloc(length * sizeof(wchar_t)));
-  EXPECT_EQ(0, wcscpy_s(*sid, length, sid_.c_str()));
+  EXPECT_EQ(0, UNSAFE_TODO(wcscpy_s(*sid, length, sid_.c_str())));
   return S_OK;
 }
 
@@ -102,7 +102,7 @@ HRESULT FakeCredentialProviderUser::GetStringValue(REFPROPERTYKEY key,
 
   DWORD length = username_.length() + 1;
   *value = static_cast<wchar_t*>(::CoTaskMemAlloc(length * sizeof(wchar_t)));
-  EXPECT_EQ(0, wcscpy_s(*value, length, username_.c_str()));
+  EXPECT_EQ(0, UNSAFE_TODO(wcscpy_s(*value, length, username_.c_str())));
   return S_OK;
 }
 
@@ -115,7 +115,7 @@ IMPL_IUNKOWN_NOQI_WITH_REF(FakeCredentialProviderUser)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-FakeCredentialProviderUserArray::FakeCredentialProviderUserArray() {}
+FakeCredentialProviderUserArray::FakeCredentialProviderUserArray() = default;
 
 FakeCredentialProviderUserArray::~FakeCredentialProviderUserArray() {
   EXPECT_EQ(ref_count_, 1u);
@@ -150,7 +150,7 @@ IMPL_IUNKOWN_NOQI_WITH_REF(FakeCredentialProviderUserArray)
 
 ///////////////////////////////////////////////////////////////////////////////
 
-FakeCredentialProviderEvents::FakeCredentialProviderEvents() {}
+FakeCredentialProviderEvents::FakeCredentialProviderEvents() = default;
 
 FakeCredentialProviderEvents::~FakeCredentialProviderEvents() {
   EXPECT_EQ(ref_count_, 1u);
@@ -167,10 +167,10 @@ IMPL_IUNKOWN_NOQI_WITH_REF(FakeCredentialProviderEvents)
 ///////////////////////////////////////////////////////////////////////////////
 
 FakeCredentialProviderCredentialEvents::
-    FakeCredentialProviderCredentialEvents() {}
+    FakeCredentialProviderCredentialEvents() = default;
 
 FakeCredentialProviderCredentialEvents::
-    ~FakeCredentialProviderCredentialEvents() {}
+    ~FakeCredentialProviderCredentialEvents() = default;
 
 HRESULT FakeCredentialProviderCredentialEvents::AppendFieldComboBoxItem(
     ICredentialProviderCredential* pcpc,
@@ -290,17 +290,17 @@ CTestGaiaCredentialProvider::CTestGaiaCredentialProvider() {
       });
 }
 
-CTestGaiaCredentialProvider::~CTestGaiaCredentialProvider() {}
+CTestGaiaCredentialProvider::~CTestGaiaCredentialProvider() = default;
 
-const CComBSTR& CTestGaiaCredentialProvider::username() const {
+const base::win::ScopedBstr& CTestGaiaCredentialProvider::username() const {
   return username_;
 }
 
-const CComBSTR& CTestGaiaCredentialProvider::password() const {
+const base::win::ScopedBstr& CTestGaiaCredentialProvider::password() const {
   return password_;
 }
 
-const CComBSTR& CTestGaiaCredentialProvider::sid() const {
+const base::win::ScopedBstr& CTestGaiaCredentialProvider::sid() const {
   return sid_;
 }
 
@@ -318,9 +318,9 @@ HRESULT CTestGaiaCredentialProvider::OnUserAuthenticatedImpl(
     BSTR password,
     BSTR sid,
     BOOL fire_credentials_changed) {
-  username_ = username;
-  password_ = password;
-  sid_ = sid;
+  username_.Reset(::SysAllocString(username));
+  password_.Reset(::SysAllocString(password));
+  sid_.Reset(::SysAllocString(sid));
   credentials_changed_fired_ = fire_credentials_changed;
   return CGaiaCredentialProvider::OnUserAuthenticatedImpl(
       credential, username, password, sid, fire_credentials_changed);

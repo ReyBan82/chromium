@@ -4,9 +4,9 @@
 
 #include "services/device/public/cpp/test/hid_test_util.h"
 
-#include "base/guid.h"
+#include "base/uuid.h"
+#include "services/device/hid/hid_report_descriptor.h"
 #include "services/device/public/cpp/hid/hid_blocklist.h"
-#include "services/device/public/cpp/hid/hid_report_descriptor.h"
 #include "services/device/public/mojom/hid.mojom.h"
 
 namespace device {
@@ -16,7 +16,7 @@ mojom::HidDeviceInfoPtr CreateDeviceFromReportDescriptor(
     uint16_t product_id,
     base::span<const uint8_t> report_descriptor_data) {
   auto device = mojom::HidDeviceInfo::New();
-  device->guid = base::GenerateGUID();
+  device->guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
   device->vendor_id = vendor_id;
   device->product_id = product_id;
   device->product_name = "Test Device";

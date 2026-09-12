@@ -5,22 +5,49 @@
 #include "chrome/browser/ash/printing/printer_event_tracker.h"
 
 #include "base/time/time.h"
+#include "chromeos/printing/ppd_provider.h"
 #include "chromeos/printing/printer_configuration.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/metrics_proto/printer_event.pb.h"
 
 namespace ash {
 namespace {
 
+using ::chromeos::IppPrinterInfo;
 using ::chromeos::Printer;
 
 constexpr int kVendorId = 0x3241;
 constexpr int kProductId = 0x1337;
 constexpr char kUsbManufacturer[] = "Usb MakesPrinters";
 constexpr char kUsbModel[] = "Printer ModelName";
+constexpr char kDeviceId[] = "USB DeviceId";
 
 constexpr char kMakeAndModel[] = "Chromium RazLazer X4321er";
 constexpr char kEffectiveMakeAndModel[] = "Generic PostScript";
+
+constexpr char kDocumentFormatDefault[] = "Default";
+constexpr char kDocumentFormatPreferred[] = "Preferred";
+constexpr char kFirstDocumentFormatSupported[] = "First";
+constexpr char kSecondDocumentFormatSupported[] = "Second";
+constexpr char kFirstUrfSupported[] = "IS4-20";
+constexpr char kSecondUrfSupported[] = "W8";
+constexpr char kFirstIppFeatureString[] = "adf";
+constexpr char kSecondIppFeatureString[] = "platen";
+constexpr metrics::PrinterEventProto::IppFeature kFirstIppFeatureSupported =
+    metrics::PrinterEventProto::ADF;
+constexpr metrics::PrinterEventProto::IppFeature kSecondIppFeatureSupported =
+    metrics::PrinterEventProto::PLATEN;
+constexpr char kFirstPdfVersionString[] = "iso-32000-1_2008";
+constexpr char kSecondPdfVersionString[] = "adobe-1.4";
+constexpr metrics::PrinterEventProto::PdfVersion kFirstPdfVersionSupported =
+    metrics::PrinterEventProto::ISO_32000_1_2008;
+constexpr metrics::PrinterEventProto::PdfVersion kSecondPdfVersionSupported =
+    metrics::PrinterEventProto::ADOBE_1_4;
+constexpr char kMopriaCertified[] = "1.3";
+constexpr char kFirstPrinterKind[] = "document";
+constexpr char kSecondPrinterKind[] = "photo";
+constexpr char kPpdFilename[] = "HP-Laserjet";
 
 class PrinterEventTrackerTest : public testing::Test {
  public:
@@ -51,7 +78,8 @@ TEST_F(PrinterEventTrackerTest, RecordsWhenEnabled) {
   test_printer.mutable_ppd_reference()->effective_make_and_model =
       kEffectiveMakeAndModel;
 
-  tracker_.RecordIppPrinterInstalled(test_printer, PrinterEventTracker::kUser);
+  tracker_.RecordIppPrinterInstalled(test_printer, PrinterEventTracker::kUser,
+                                     chromeos::IppPrinterInfo{}, "");
 
   auto events = GetEvents();
   EXPECT_EQ(1U, events.size());
@@ -64,7 +92,8 @@ TEST_F(PrinterEventTrackerTest, DefaultLoggingOff) {
       kEffectiveMakeAndModel;
 
   tracker_.RecordIppPrinterInstalled(test_printer,
-                                     PrinterEventTracker::kAutomatic);
+                                     PrinterEventTracker::kAutomatic,
+                                     chromeos::IppPrinterInfo{}, "");
 
   auto events = GetEvents();
   EXPECT_TRUE(events.empty());
@@ -79,7 +108,8 @@ TEST_F(PrinterEventTrackerTest, DoesNotRecordWhileDisabled) {
       kEffectiveMakeAndModel;
 
   tracker_.RecordIppPrinterInstalled(test_printer,
-                                     PrinterEventTracker::kAutomatic);
+                                     PrinterEventTracker::kAutomatic,
+                                     chromeos::IppPrinterInfo{}, "");
 
   auto events = GetEvents();
   EXPECT_TRUE(events.empty());
@@ -93,7 +123,25 @@ TEST_F(PrinterEventTrackerTest, InstalledIppPrinter) {
   test_printer.mutable_ppd_reference()->effective_make_and_model =
       kEffectiveMakeAndModel;
 
-  tracker_.RecordIppPrinterInstalled(test_printer, PrinterEventTracker::kUser);
+  IppPrinterInfo ipp_printer_info;
+  ipp_printer_info.document_format_default = kDocumentFormatDefault;
+  ipp_printer_info.document_format_preferred = kDocumentFormatPreferred;
+  ipp_printer_info.document_formats.push_back(kFirstDocumentFormatSupported);
+  ipp_printer_info.document_formats.push_back(kSecondDocumentFormatSupported);
+  ipp_printer_info.document_formats.push_back(kDocumentFormatDefault);
+  ipp_printer_info.document_formats.push_back(kDocumentFormatPreferred);
+  ipp_printer_info.urf_supported.push_back(kFirstUrfSupported);
+  ipp_printer_info.urf_supported.push_back(kSecondUrfSupported);
+  ipp_printer_info.pdf_versions.push_back(kFirstPdfVersionString);
+  ipp_printer_info.pdf_versions.push_back(kSecondPdfVersionString);
+  ipp_printer_info.ipp_features.push_back(kFirstIppFeatureString);
+  ipp_printer_info.ipp_features.push_back(kSecondIppFeatureString);
+  ipp_printer_info.mopria_certified = kMopriaCertified;
+  ipp_printer_info.printer_kind.push_back(kFirstPrinterKind);
+  ipp_printer_info.printer_kind.push_back(kSecondPrinterKind);
+
+  tracker_.RecordIppPrinterInstalled(test_printer, PrinterEventTracker::kUser,
+                                     ipp_printer_info, kPpdFilename);
 
   auto events = GetEvents();
   ASSERT_FALSE(events.empty());
@@ -102,6 +150,28 @@ TEST_F(PrinterEventTrackerTest, InstalledIppPrinter) {
             recorded_event.event_type());
   EXPECT_EQ(kMakeAndModel, recorded_event.ipp_make_and_model());
   EXPECT_EQ(kEffectiveMakeAndModel, recorded_event.ppd_identifier());
+  EXPECT_EQ(kPpdFilename, recorded_event.ppd_file_name());
+  EXPECT_EQ(kDocumentFormatDefault, recorded_event.document_format_default());
+  EXPECT_EQ(kDocumentFormatPreferred,
+            recorded_event.document_format_preferred());
+  EXPECT_THAT(
+      recorded_event.document_format_supported(),
+      testing::UnorderedElementsAreArray(
+          {kFirstDocumentFormatSupported, kSecondDocumentFormatSupported,
+           kDocumentFormatDefault, kDocumentFormatPreferred}));
+  EXPECT_THAT(recorded_event.urf_supported(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstUrfSupported, kSecondUrfSupported}));
+  EXPECT_THAT(recorded_event.pdf_versions_supported(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstPdfVersionSupported, kSecondPdfVersionSupported}));
+  EXPECT_THAT(recorded_event.ipp_features_supported(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstIppFeatureSupported, kSecondIppFeatureSupported}));
+  EXPECT_EQ(recorded_event.mopria_certified(), kMopriaCertified);
+  EXPECT_THAT(recorded_event.printer_kind(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstPrinterKind, kSecondPrinterKind}));
 
   EXPECT_FALSE(recorded_event.has_usb_printer_manufacturer());
   EXPECT_FALSE(recorded_event.has_usb_printer_model());
@@ -117,8 +187,26 @@ TEST_F(PrinterEventTrackerTest, InstalledPrinterAuto) {
   test_printer.set_make_and_model(kMakeAndModel);
   test_printer.mutable_ppd_reference()->autoconf = true;
 
-  tracker_.RecordIppPrinterInstalled(
-      test_printer, PrinterEventTracker::SetupMode::kAutomatic);
+  IppPrinterInfo ipp_printer_info;
+  ipp_printer_info.document_format_default = kDocumentFormatDefault;
+  ipp_printer_info.document_format_preferred = kDocumentFormatPreferred;
+  ipp_printer_info.document_formats.push_back(kFirstDocumentFormatSupported);
+  ipp_printer_info.document_formats.push_back(kSecondDocumentFormatSupported);
+  ipp_printer_info.document_formats.push_back(kDocumentFormatDefault);
+  ipp_printer_info.document_formats.push_back(kDocumentFormatPreferred);
+  ipp_printer_info.urf_supported.push_back(kFirstUrfSupported);
+  ipp_printer_info.urf_supported.push_back(kSecondUrfSupported);
+  ipp_printer_info.pdf_versions.push_back(kFirstPdfVersionString);
+  ipp_printer_info.pdf_versions.push_back(kSecondPdfVersionString);
+  ipp_printer_info.ipp_features.push_back(kFirstIppFeatureString);
+  ipp_printer_info.ipp_features.push_back(kSecondIppFeatureString);
+  ipp_printer_info.mopria_certified = kMopriaCertified;
+  ipp_printer_info.printer_kind.push_back(kFirstPrinterKind);
+  ipp_printer_info.printer_kind.push_back(kSecondPrinterKind);
+
+  tracker_.RecordIppPrinterInstalled(test_printer,
+                                     PrinterEventTracker::kAutomatic,
+                                     ipp_printer_info, kPpdFilename);
 
   auto events = GetEvents();
   ASSERT_FALSE(events.empty());
@@ -127,6 +215,30 @@ TEST_F(PrinterEventTrackerTest, InstalledPrinterAuto) {
   EXPECT_EQ(metrics::PrinterEventProto::SETUP_AUTOMATIC,
             recorded_event.event_type());
   EXPECT_EQ(kMakeAndModel, recorded_event.ipp_make_and_model());
+  EXPECT_EQ(kPpdFilename, recorded_event.ppd_file_name());
+
+  EXPECT_EQ(kDocumentFormatDefault, recorded_event.document_format_default());
+  EXPECT_EQ(kDocumentFormatPreferred,
+            recorded_event.document_format_preferred());
+  EXPECT_THAT(
+      recorded_event.document_format_supported(),
+      testing::UnorderedElementsAreArray(
+          {kFirstDocumentFormatSupported, kSecondDocumentFormatSupported,
+           kDocumentFormatDefault, kDocumentFormatPreferred}));
+  EXPECT_THAT(recorded_event.urf_supported(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstUrfSupported, kSecondUrfSupported}));
+  EXPECT_THAT(recorded_event.pdf_versions_supported(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstPdfVersionSupported, kSecondPdfVersionSupported}));
+  EXPECT_THAT(recorded_event.ipp_features_supported(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstIppFeatureSupported, kSecondIppFeatureSupported}));
+  EXPECT_EQ(recorded_event.mopria_certified(), kMopriaCertified);
+  EXPECT_THAT(recorded_event.printer_kind(),
+              testing::UnorderedElementsAreArray(
+                  {kFirstPrinterKind, kSecondPrinterKind}));
+
   // For autoconf printers, ppd identifier is blank but a successful setup is
   // recorded.
   EXPECT_FALSE(recorded_event.has_ppd_identifier());
@@ -145,8 +257,8 @@ TEST_F(PrinterEventTrackerTest, InstalledPrinterUserPpd) {
   test_printer.mutable_ppd_reference()->user_supplied_ppd_url =
       "file:///i_dont_record_this_field/blah/blah/blah/some_ppd.ppd";
 
-  tracker_.RecordIppPrinterInstalled(test_printer,
-                                     PrinterEventTracker::SetupMode::kUser);
+  tracker_.RecordIppPrinterInstalled(test_printer, PrinterEventTracker::kUser,
+                                     chromeos::IppPrinterInfo{}, "");
 
   auto events = GetEvents();
   ASSERT_FALSE(events.empty());
@@ -159,6 +271,7 @@ TEST_F(PrinterEventTrackerTest, InstalledPrinterUserPpd) {
   // recorded.
   EXPECT_TRUE(recorded_event.user_ppd());
   EXPECT_FALSE(recorded_event.has_ppd_identifier());
+  EXPECT_TRUE(recorded_event.ppd_file_name().empty());
 
   // This is empty if it was not detected.
   EXPECT_FALSE(recorded_event.has_ipp_make_and_model());
@@ -172,16 +285,18 @@ TEST_F(PrinterEventTrackerTest, InstalledPrinterUserPpd) {
 
 TEST_F(PrinterEventTrackerTest, InstalledUsbPrinter) {
   tracker_.set_logging(true);
-  PrinterDetector::DetectedPrinter usb_printer;
-  usb_printer.ppd_search_data.usb_vendor_id = kVendorId;
-  usb_printer.ppd_search_data.usb_product_id = kProductId;
-  usb_printer.ppd_search_data.usb_manufacturer = kUsbManufacturer;
-  usb_printer.ppd_search_data.usb_model = kUsbModel;
-  usb_printer.printer.mutable_ppd_reference()->effective_make_and_model =
-      kEffectiveMakeAndModel;
+  chromeos::Printer::PpdReference ppd_reference;
+  ppd_reference.effective_make_and_model = kEffectiveMakeAndModel;
+  chromeos::PrinterSearchData ppd_search_data;
+  ppd_search_data.usb_vendor_id = kVendorId,
+  ppd_search_data.usb_product_id = kProductId,
+  ppd_search_data.usb_manufacturer = kUsbManufacturer,
+  ppd_search_data.usb_model = kUsbModel,
+  ppd_search_data.printer_id.set_raw_id(kDeviceId),
 
-  tracker_.RecordUsbPrinterInstalled(usb_printer,
-                                     PrinterEventTracker::SetupMode::kUser);
+  tracker_.RecordUsbPrinterInstalled(ppd_reference, ppd_search_data,
+                                     PrinterEventTracker::SetupMode::kUser,
+                                     kPpdFilename);
 
   auto events = GetEvents();
   ASSERT_FALSE(events.empty());
@@ -192,8 +307,10 @@ TEST_F(PrinterEventTrackerTest, InstalledUsbPrinter) {
   EXPECT_EQ(kProductId, record.usb_model_id());
   EXPECT_EQ(kUsbManufacturer, record.usb_printer_manufacturer());
   EXPECT_EQ(kUsbModel, record.usb_printer_model());
+  EXPECT_EQ(kDeviceId, record.device_id());
 
   EXPECT_EQ(kEffectiveMakeAndModel, record.ppd_identifier());
+  EXPECT_EQ(kPpdFilename, record.ppd_file_name());
   EXPECT_FALSE(record.user_ppd());
 
   // USB doesn't detect this field.
@@ -229,13 +346,14 @@ TEST_F(PrinterEventTrackerTest, AbandonedNetworkPrinter) {
 TEST_F(PrinterEventTrackerTest, AbandonedUsbPrinter) {
   tracker_.set_logging(true);
 
-  PrinterDetector::DetectedPrinter usb_printer;
-  usb_printer.ppd_search_data.usb_vendor_id = kVendorId;
-  usb_printer.ppd_search_data.usb_product_id = kProductId;
-  usb_printer.ppd_search_data.usb_manufacturer = kUsbManufacturer;
-  usb_printer.ppd_search_data.usb_model = kUsbModel;
+  chromeos::PrinterSearchData ppd_search_data;
+  ppd_search_data.usb_vendor_id = kVendorId;
+  ppd_search_data.usb_product_id = kProductId;
+  ppd_search_data.usb_manufacturer = kUsbManufacturer;
+  ppd_search_data.usb_model = kUsbModel;
+  ppd_search_data.printer_id.set_raw_id(kDeviceId);
 
-  tracker_.RecordUsbSetupAbandoned(usb_printer);
+  tracker_.RecordUsbSetupAbandoned(ppd_search_data);
 
   auto events = GetEvents();
   ASSERT_FALSE(events.empty());
@@ -246,6 +364,7 @@ TEST_F(PrinterEventTrackerTest, AbandonedUsbPrinter) {
   EXPECT_EQ(kProductId, record.usb_model_id());
   EXPECT_EQ(kUsbManufacturer, record.usb_printer_manufacturer());
   EXPECT_EQ(kUsbModel, record.usb_printer_model());
+  EXPECT_EQ(kDeviceId, record.device_id());
 
   EXPECT_FALSE(record.has_user_ppd());
   EXPECT_FALSE(record.has_ppd_identifier());

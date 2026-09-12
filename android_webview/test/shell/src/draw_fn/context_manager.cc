@@ -7,16 +7,18 @@
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 
+#include "android_webview/browser/gfx/test/fake_hwui_gl_context.h"
 #include "android_webview/public/browser/draw_fn.h"
-#include "android_webview/test/draw_fn_impl_jni_headers/ContextManager_jni.h"
 #include "android_webview/test/shell/src/draw_fn/allocator.h"
 #include "base/android/jni_array.h"
+#include "base/compiler_specific.h"
+#include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/native_library.h"
 #include "base/threading/thread_restrictions.h"
-#include "gpu/vulkan/init/gr_vk_memory_allocator_impl.h"
 #include "gpu/vulkan/init/vulkan_factory.h"
+#include "gpu/vulkan/skia_vk_memory_allocator_impl.h"
 #include "gpu/vulkan/vulkan_device_queue.h"
 #include "gpu/vulkan/vulkan_function_pointers.h"
 #include "gpu/vulkan/vulkan_implementation.h"
@@ -29,15 +31,25 @@
 #include "third_party/skia/include/core/SkDrawable.h"
 #include "third_party/skia/include/core/SkSurface.h"
 #include "third_party/skia/include/core/SkSurfaceProps.h"
-#include "third_party/skia/include/gpu/GrBackendDrawableInfo.h"
-#include "third_party/skia/include/gpu/GrBackendSemaphore.h"
-#include "third_party/skia/include/gpu/GrBackendSurface.h"
-#include "third_party/skia/include/gpu/GrBackendSurfaceMutableState.h"
-#include "third_party/skia/include/gpu/GrDirectContext.h"
-#include "third_party/skia/include/gpu/vk/GrVkBackendContext.h"
-#include "third_party/skia/include/gpu/vk/GrVkExtensions.h"
-#include "third_party/skia/include/gpu/vk/GrVkTypes.h"
+#include "third_party/skia/include/gpu/MutableTextureState.h"
+#include "third_party/skia/include/gpu/ganesh/GrBackendSemaphore.h"
+#include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
+#include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/GrTypes.h"
+#include "third_party/skia/include/gpu/ganesh/SkSurfaceGanesh.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrBackendDrawableInfo.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrVkBackendSemaphore.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrVkBackendSurface.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrVkDirectContext.h"
+#include "third_party/skia/include/gpu/ganesh/vk/GrVkTypes.h"
+#include "third_party/skia/include/gpu/vk/VulkanBackendContext.h"
+#include "third_party/skia/include/gpu/vk/VulkanExtensions.h"
+#include "third_party/skia/include/gpu/vk/VulkanMutableTextureState.h"
+#include "third_party/skia/include/gpu/vk/VulkanTypes.h"
 #include "ui/gfx/color_space.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/test/draw_fn_impl_jni_headers/ContextManager_jni.h"
 
 namespace draw_fn {
 
@@ -65,156 +77,6 @@ void SetColorSpace(T* params) {
 }
 
 class ContextManagerGL : public ContextManager {
-  // TODO(penghuang): remove those proc types when EGL header is updated to 1.5.
-  typedef EGLBoolean(EGLAPIENTRYP PFNEGLINITIALIZEPROC)(EGLDisplay dpy,
-                                                        EGLint* major,
-                                                        EGLint* minor);
-  typedef EGLBoolean(EGLAPIENTRYP PFNEGLCHOOSECONFIGPROC)(
-      EGLDisplay dpy,
-      const EGLint* attrib_list,
-      EGLConfig* configs,
-      EGLint config_size,
-      EGLint* num_config);
-  typedef EGLContext(EGLAPIENTRYP PFNEGLCREATECONTEXTPROC)(
-      EGLDisplay dpy,
-      EGLConfig config,
-      EGLContext share_context,
-      const EGLint* attrib_list);
-  typedef EGLSurface(EGLAPIENTRYP PFNEGLCREATEWINDOWSURFACEPROC)(
-      EGLDisplay dpy,
-      EGLConfig config,
-      EGLNativeWindowType win,
-      const EGLint* attrib_list);
-  typedef EGLBoolean(EGLAPIENTRYP PFNEGLDESTROYCONTEXTPROC)(EGLDisplay dpy,
-                                                            EGLContext ctx);
-  typedef EGLBoolean(EGLAPIENTRYP PFNEGLDESTROYSURFACEPROC)(EGLDisplay dpy,
-                                                            EGLSurface surface);
-  typedef EGLDisplay(EGLAPIENTRYP PFNEGLGETDISPLAYPROC)(
-      EGLNativeDisplayType display_id);
-  typedef __eglMustCastToProperFunctionPointerType(
-      EGLAPIENTRYP PFNEGLGETPROCADDRESSPROC)(const char* procname);
-  typedef EGLBoolean(EGLAPIENTRYP PFNEGLMAKECURRENTPROC)(EGLDisplay dpy,
-                                                         EGLSurface draw,
-                                                         EGLSurface read,
-                                                         EGLContext ctx);
-  typedef EGLBoolean(EGLAPIENTRYP PFNEGLSWAPBUFFERSPROC)(EGLDisplay dpy,
-                                                         EGLSurface surface);
-  typedef EGLBoolean(EGLAPIENTRYP PFNEGLBINDAPIPROC)(EGLenum api);
-
-  // These bindings could be static, but ContextManager is effectively a
-  // singleton so just keeping them as member variables / functions.
-  PFNEGLGETPROCADDRESSPROC eglGetProcAddressFn = nullptr;
-  PFNEGLBINDAPIPROC eglBindAPIFn = nullptr;
-  PFNEGLINITIALIZEPROC eglInitialize = nullptr;
-  PFNEGLGETDISPLAYPROC eglGetDisplayFn = nullptr;
-  PFNEGLMAKECURRENTPROC eglMakeCurrentFn = nullptr;
-  PFNEGLSWAPBUFFERSPROC eglSwapBuffersFn = nullptr;
-  PFNEGLCHOOSECONFIGPROC eglChooseConfigFn = nullptr;
-  PFNEGLCREATECONTEXTPROC eglCreateContextFn = nullptr;
-  PFNEGLDESTROYCONTEXTPROC eglDestroyContextFn = nullptr;
-  PFNEGLCREATEWINDOWSURFACEPROC eglCreateWindowSurfaceFn = nullptr;
-  PFNEGLDESTROYSURFACEPROC eglDestroySurfaceFn = nullptr;
-  PFNGLREADPIXELSPROC glReadPixelsFn = nullptr;
-
-  template <typename T>
-  void AssignProc(T& fn, const char* name) {
-    fn = reinterpret_cast<T>(eglGetProcAddressFn(name));
-    CHECK(fn) << "Failed to get " << name;
-  }
-
-  void InitializeGLBindings() {
-    if (eglGetProcAddressFn)
-      return;
-
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    base::NativeLibraryLoadError error;
-    base::FilePath filename("libEGL.so");
-    base::NativeLibrary egl_library = base::LoadNativeLibrary(filename, &error);
-    CHECK(egl_library) << "Failed to load " << filename.MaybeAsASCII() << ": "
-                       << error.ToString();
-
-    eglGetProcAddressFn = reinterpret_cast<PFNEGLGETPROCADDRESSPROC>(
-        base::GetFunctionPointerFromNativeLibrary(egl_library,
-                                                  "eglGetProcAddress"));
-    CHECK(eglGetProcAddressFn) << "Failed to get eglGetProcAddress.";
-
-    AssignProc(eglBindAPIFn, "eglBindAPI");
-    AssignProc(eglInitialize, "eglInitialize");
-    AssignProc(eglGetDisplayFn, "eglGetDisplay");
-    AssignProc(eglMakeCurrentFn, "eglMakeCurrent");
-    AssignProc(eglSwapBuffersFn, "eglSwapBuffers");
-    AssignProc(eglChooseConfigFn, "eglChooseConfig");
-    AssignProc(eglCreateContextFn, "eglCreateContext");
-    AssignProc(eglDestroyContextFn, "eglDestroyContext");
-    AssignProc(eglCreateWindowSurfaceFn, "eglCreateWindowSurface");
-    AssignProc(eglDestroySurfaceFn, "eglDestroySurface");
-    AssignProc(glReadPixelsFn, "glReadPixels");
-  }
-
-  EGLDisplay GetDisplay() {
-    static EGLDisplay display = nullptr;
-    if (!display) {
-      display = eglGetDisplayFn(EGL_DEFAULT_DISPLAY);
-      CHECK_NE(display, EGL_NO_DISPLAY);
-      CHECK(eglInitialize(display, nullptr, nullptr));
-    }
-    return display;
-  }
-
-  int rgbaToArgb(GLubyte* bytes) {
-    return (bytes[3] & 0xff) << 24 | (bytes[0] & 0xff) << 16 |
-           (bytes[1] & 0xff) << 8 | (bytes[2] & 0xff);
-  }
-
-  EGLConfig GetConfig(bool* out_use_es3) {
-    static EGLConfig config = nullptr;
-    static bool use_es3 = false;
-    if (config) {
-      *out_use_es3 = use_es3;
-      return config;
-    }
-
-    for (bool try_es3 : std::vector<bool>{true, false}) {
-      EGLint config_attribs[] = {
-          EGL_BUFFER_SIZE,
-          32,
-          EGL_ALPHA_SIZE,
-          8,
-          EGL_BLUE_SIZE,
-          8,
-          EGL_GREEN_SIZE,
-          8,
-          EGL_RED_SIZE,
-          8,
-          EGL_SAMPLES,
-          -1,
-          EGL_DEPTH_SIZE,
-          -1,
-          EGL_STENCIL_SIZE,
-          -1,
-          EGL_RENDERABLE_TYPE,
-          try_es3 ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT,
-          EGL_SURFACE_TYPE,
-          EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
-          EGL_NONE};
-      EGLint num_configs = 0;
-      if (!eglChooseConfigFn(GetDisplay(), config_attribs, nullptr, 0,
-                             &num_configs) ||
-          num_configs == 0) {
-        continue;
-      }
-
-      CHECK(eglChooseConfigFn(GetDisplay(), config_attribs, &config, 1,
-                              &num_configs));
-      use_es3 = try_es3;
-      break;
-    }
-
-    CHECK(config);
-    *out_use_es3 = use_es3;
-    return config;
-  }
-
  public:
   ContextManagerGL();
   ~ContextManagerGL() override;
@@ -226,25 +88,18 @@ class ContextManagerGL : public ContextManager {
       int height,
       int scroll_x,
       int scroll_y,
-      jboolean readback_quadrants) override;
+      bool readback_quadrants) override;
   void DoCreateContext(JNIEnv* env, int width, int height) override;
   void DestroyContext() override;
   void CurrentFunctorChanged() override {}
 
  private:
-  void MakeCurrent();
-
-  EGLSurface gl_surface_ = nullptr;
-  EGLContext gl_context_ = nullptr;
+  android_webview::FakeHWUIGLContext fake_hwui_context_;
 };
 
-ContextManagerGL::ContextManagerGL() {
-  InitializeGLBindings();
-}
+ContextManagerGL::ContextManagerGL() = default;
 
-ContextManagerGL::~ContextManagerGL() {
-  DestroyContext();
-}
+ContextManagerGL::~ContextManagerGL() = default;
 
 base::android::ScopedJavaLocalRef<jintArray> ContextManagerGL::Draw(
     JNIEnv* env,
@@ -252,16 +107,17 @@ base::android::ScopedJavaLocalRef<jintArray> ContextManagerGL::Draw(
     int height,
     int scroll_x,
     int scroll_y,
-    jboolean readback_quadrants) {
+    bool readback_quadrants) {
   int results[] = {0, 0, 0, 0};
-  if (!current_functor_ || !gl_context_) {
-    LOG(ERROR) << "Draw failed. context:" << gl_context_
+  if (!current_functor_ || !fake_hwui_context_.HaveContext()) {
+    LOG(ERROR) << "Draw failed. have context:"
+               << fake_hwui_context_.HaveContext()
                << " functor:" << current_functor_;
     return readback_quadrants ? base::android::ToJavaIntArray(env, results)
                               : nullptr;
   }
 
-  MakeCurrent();
+  fake_hwui_context_.MakeCurrent();
   AwDrawFn_DrawGLParams params{kAwDrawFnVersion};
   params.width = width;
   params.height = height;
@@ -297,51 +153,23 @@ base::android::ScopedJavaLocalRef<jintArray> ContextManagerGL::Draw(
   if (readback_quadrants) {
     int quarter_width = width / 4;
     int quarter_height = height / 4;
-    GLubyte bytes[4] = {};
-    glReadPixelsFn(quarter_width, quarter_height * 3, 1, 1, GL_RGBA,
-                   GL_UNSIGNED_BYTE, bytes);
-    results[0] = rgbaToArgb(bytes);
-    glReadPixelsFn(quarter_width * 3, quarter_height * 3, 1, 1, GL_RGBA,
-                   GL_UNSIGNED_BYTE, bytes);
-    results[1] = rgbaToArgb(bytes);
-    glReadPixelsFn(quarter_width, quarter_height, 1, 1, GL_RGBA,
-                   GL_UNSIGNED_BYTE, bytes);
-    results[2] = rgbaToArgb(bytes);
-    glReadPixelsFn(quarter_width * 3, quarter_height, 1, 1, GL_RGBA,
-                   GL_UNSIGNED_BYTE, bytes);
-    results[3] = rgbaToArgb(bytes);
+    results[0] =
+        fake_hwui_context_.ReadPixel(quarter_width, quarter_height * 3);
+    results[1] =
+        fake_hwui_context_.ReadPixel(quarter_width * 3, quarter_height * 3);
+    results[2] = fake_hwui_context_.ReadPixel(quarter_width, quarter_height);
+    results[3] =
+        fake_hwui_context_.ReadPixel(quarter_width * 3, quarter_height);
   }
 
-  CHECK(eglSwapBuffersFn(GetDisplay(), gl_surface_));
+  fake_hwui_context_.SwapBuffers();
 
   return readback_quadrants ? base::android::ToJavaIntArray(env, results)
                             : nullptr;
 }
 
 void ContextManagerGL::DoCreateContext(JNIEnv* env, int width, int height) {
-  bool use_es3 = false;
-  {
-    std::vector<EGLint> egl_window_attributes;
-    egl_window_attributes.push_back(EGL_NONE);
-    gl_surface_ = eglCreateWindowSurfaceFn(GetDisplay(), GetConfig(&use_es3),
-                                           native_window_.a_native_window(),
-                                           &egl_window_attributes[0]);
-    CHECK(gl_surface_);
-  }
-
-  {
-    std::vector<EGLint> context_attributes;
-    context_attributes.push_back(EGL_CONTEXT_CLIENT_VERSION);
-    context_attributes.push_back(use_es3 ? 3 : 2);
-    context_attributes.push_back(EGL_NONE);
-
-    CHECK(eglBindAPIFn(EGL_OPENGL_ES_API));
-
-    gl_context_ = eglCreateContextFn(GetDisplay(), GetConfig(&use_es3), nullptr,
-                                     context_attributes.data());
-    CHECK(gl_context_);
-  }
-  return;
+  fake_hwui_context_.CreateWindowContext(native_window_.a_native_window());
 }
 
 void ContextManagerGL::DestroyContext() {
@@ -350,28 +178,16 @@ void ContextManagerGL::DestroyContext() {
   }
 
   if (current_functor_) {
-    MakeCurrent();
+    fake_hwui_context_.MakeCurrent();
     FunctorData& data = Allocator::Get()->get(current_functor_);
     overlays_manager_.RemoveOverlays(data);
     data.functor_callbacks->on_context_destroyed(data.functor, data.data);
   }
 
-  DCHECK(gl_context_);
-  CHECK(eglDestroyContextFn(GetDisplay(), gl_context_));
-  gl_context_ = nullptr;
-
-  DCHECK(gl_surface_);
-  CHECK(eglDestroySurfaceFn(GetDisplay(), gl_surface_));
-  gl_surface_ = nullptr;
+  fake_hwui_context_.DestroyContext();
 
   native_window_ = nullptr;
   java_surface_ = nullptr;
-}
-
-void ContextManagerGL::MakeCurrent() {
-  DCHECK(gl_surface_);
-  DCHECK(gl_context_);
-  CHECK(eglMakeCurrentFn(GetDisplay(), gl_surface_, gl_surface_, gl_context_));
 }
 
 class VkFunctorDrawHandler : public SkDrawable::GpuDrawHandler {
@@ -486,7 +302,7 @@ class ContextManagerVulkan : public ContextManager {
       int height,
       int scroll_x,
       int scroll_y,
-      jboolean readback_quadrants) override;
+      bool readback_quadrants) override;
   void DoCreateContext(JNIEnv* env, int width, int height) override;
   void DestroyContext() override;
   void CurrentFunctorChanged() override;
@@ -535,7 +351,7 @@ base::android::ScopedJavaLocalRef<jintArray> ContextManagerVulkan::Draw(
     int height,
     int scroll_x,
     int scroll_y,
-    jboolean readback_quadrants) {
+    bool readback_quadrants) {
   int results[] = {0, 0, 0, 0};
   if (!current_functor_) {
     LOG(ERROR) << "Draw failed no functor:" << current_functor_;
@@ -565,29 +381,29 @@ base::android::ScopedJavaLocalRef<jintArray> ContextManagerVulkan::Draw(
       vk_image_info.fCurrentQueueFamily = VK_QUEUE_FAMILY_IGNORED;
       vk_image_info.fProtected = GrProtected::kNo;
       const auto& vk_image_size = vulkan_surface_->image_size();
-      GrBackendRenderTarget render_target(vk_image_size.width(),
-                                          vk_image_size.height(),
-                                          0 /* sample_cnt */, vk_image_info);
+      auto render_target = GrBackendRenderTargets::MakeVk(
+          vk_image_size.width(), vk_image_size.height(), vk_image_info);
 
       auto sk_color_type = surface_format == VK_FORMAT_B8G8R8A8_UNORM
                                ? kBGRA_8888_SkColorType
                                : kRGBA_8888_SkColorType;
-      sk_surface = SkSurface::MakeFromBackendRenderTarget(
+      sk_surface = SkSurfaces::WrapBackendRenderTarget(
           gr_context_.get(), render_target, kTopLeft_GrSurfaceOrigin,
           sk_color_type, gfx::ColorSpace::CreateSRGB().ToSkColorSpace(),
           &surface_props);
       CHECK(sk_surface);
     } else {
-      auto backend = sk_surface->getBackendRenderTarget(
-          SkSurface::kFlushRead_BackendHandleAccess);
-      backend.setVkImageLayout(scoped_write.image_layout());
+      auto backend = SkSurfaces::GetBackendRenderTarget(
+          sk_surface.get(), SkSurfaces::BackendHandleAccess::kFlushRead);
+      GrBackendRenderTargets::SetVkImageLayout(&backend,
+                                               scoped_write.image_layout());
     }
 
     {
       VkSemaphore vk_semaphore = scoped_write.begin_semaphore();
       DCHECK(vk_semaphore != VK_NULL_HANDLE);
-      GrBackendSemaphore begin_semaphore;
-      begin_semaphore.initVulkan(vk_semaphore);
+      GrBackendSemaphore begin_semaphore =
+          GrBackendSemaphores::MakeVk(vk_semaphore);
       bool result = sk_surface->wait(1, &begin_semaphore,
                                      /*deleteSemaphoresAfterWait=*/false);
       CHECK(result);
@@ -617,19 +433,21 @@ base::android::ScopedJavaLocalRef<jintArray> ContextManagerVulkan::Draw(
     }
 
     {
-      GrBackendSemaphore end_semaphore;
-      end_semaphore.initVulkan(scoped_write.end_semaphore());
+      GrBackendSemaphore end_semaphore =
+          GrBackendSemaphores::MakeVk(scoped_write.end_semaphore());
       GrFlushInfo flush_info = {
           .fNumSemaphores = 1,
           .fSignalSemaphores = &end_semaphore,
       };
       uint32_t queue_index = device_queue_->GetVulkanQueueIndex();
-      GrBackendSurfaceMutableState state(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                         queue_index);
-      GrSemaphoresSubmitted submitted = sk_surface->flush(flush_info, &state);
+      skgpu::MutableTextureState state =
+          skgpu::MutableTextureStates::MakeVulkan(
+              VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, queue_index);
+      GrSemaphoresSubmitted submitted =
+          gr_context_->flush(sk_surface.get(), flush_info, &state);
       CHECK_EQ(GrSemaphoresSubmitted::kYes, submitted);
     }
-    CHECK(gr_context_->submit(/*sync_cpu=*/false));
+    CHECK(gr_context_->submit(GrSyncCpu::kNo));
   }
 
   gfx::SwapResult result = vulkan_surface_->SwapBuffers(
@@ -646,7 +464,7 @@ void ContextManagerVulkan::DoCreateContext(JNIEnv* env, int width, int height) {
                                     gpu::VulkanSurface::FORMAT_RGBA_32));
   ResizeSurface(env, width, height);
 
-  GrVkBackendContext backend_context;
+  skgpu::VulkanBackendContext backend_context;
   backend_context.fInstance = device_queue_->GetVulkanInstance();
   backend_context.fPhysicalDevice = device_queue_->GetVulkanPhysicalDevice();
   backend_context.fDevice = device_queue_->GetVulkanDevice();
@@ -655,11 +473,10 @@ void ContextManagerVulkan::DoCreateContext(JNIEnv* env, int width, int height) {
   backend_context.fMaxAPIVersion = vulkan_implementation_->GetVulkanInstance()
                                        ->vulkan_info()
                                        .used_api_version;
-  backend_context.fMemoryAllocator =
-      gpu::CreateGrVkMemoryAllocator(device_queue_.get());
+  backend_context.fMemoryAllocator = device_queue_->GetSkiaVkMemoryAllocator();
 
-  GrVkGetProc get_proc = [](const char* proc_name, VkInstance instance,
-                            VkDevice device) {
+  skgpu::VulkanGetProc get_proc = [](const char* proc_name, VkInstance instance,
+                                     VkDevice device) {
     if (device) {
       return vkGetDeviceProcAddr(device, proc_name);
     }
@@ -674,20 +491,20 @@ void ContextManagerVulkan::DoCreateContext(JNIEnv* env, int width, int height) {
   device_extensions.reserve(device_queue_->enabled_extensions().size());
   for (const auto& extension : device_queue_->enabled_extensions())
     device_extensions.push_back(extension.data());
-  GrVkExtensions gr_extensions;
-  gr_extensions.init(get_proc,
+  skgpu::VulkanExtensions vk_extensions;
+  vk_extensions.init(get_proc,
                      vulkan_implementation_->GetVulkanInstance()->vk_instance(),
                      device_queue_->GetVulkanPhysicalDevice(),
                      instance_extensions.size(), instance_extensions.data(),
                      device_extensions.size(), device_extensions.data());
-  backend_context.fVkExtensions = &gr_extensions;
+  backend_context.fVkExtensions = &vk_extensions;
   backend_context.fDeviceFeatures2 =
       &device_queue_->enabled_device_features_2();
   backend_context.fGetProc = get_proc;
   backend_context.fProtectedContext = GrProtected::kNo;
 
   GrContextOptions options;
-  gr_context_ = GrDirectContext::MakeVulkan(backend_context, options);
+  gr_context_ = GrDirectContexts::MakeVulkan(backend_context, options);
   CHECK(gr_context_);
 
   MaybeCallFunctorInitVk();
@@ -808,13 +625,13 @@ void ContextManager::CreateContext(
   DoCreateContext(env, width, height);
 }
 
-static jlong JNI_ContextManager_GetDrawFnFunctionTable(JNIEnv* env,
-                                                       jboolean use_vulkan) {
+static int64_t JNI_ContextManager_GetDrawFnFunctionTable(JNIEnv* env,
+                                                         bool use_vulkan) {
   draw_fn::SetDrawFnUseVulkan(use_vulkan);
   return reinterpret_cast<intptr_t>(draw_fn::GetDrawFnFunctionTable());
 }
 
-static jlong JNI_ContextManager_Init(JNIEnv* env, jboolean use_vulkan) {
+static int64_t JNI_ContextManager_Init(JNIEnv* env, bool use_vulkan) {
   ContextManager* manager = nullptr;
   if (use_vulkan) {
     manager = new draw_fn::ContextManagerVulkan;
@@ -825,3 +642,5 @@ static jlong JNI_ContextManager_Init(JNIEnv* env, jboolean use_vulkan) {
 }
 
 }  // namespace draw_fn
+
+DEFINE_JNI(ContextManager)

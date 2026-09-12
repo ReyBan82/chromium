@@ -14,14 +14,17 @@
 
 #include "absl/base/internal/thread_identity.h"
 
+#include <cstdint>
 #include <thread>  // NOLINT(build/c++11)
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "absl/base/attributes.h"
+#include "absl/base/config.h"
 #include "absl/base/internal/spinlock.h"
 #include "absl/base/macros.h"
 #include "absl/base/thread_annotations.h"
+#include "absl/synchronization/internal/create_thread_identity.h"
 #include "absl/synchronization/internal/per_thread_sem.h"
 #include "absl/synchronization/mutex.h"
 
@@ -31,7 +34,7 @@ namespace base_internal {
 namespace {
 
 ABSL_CONST_INIT static absl::base_internal::SpinLock map_lock(
-    absl::kConstInit, base_internal::SCHEDULE_KERNEL_ONLY);
+    base_internal::SCHEDULE_KERNEL_ONLY);
 ABSL_CONST_INIT static int num_identities_reused ABSL_GUARDED_BY(map_lock);
 
 static const void* const kCheckNoIdentity = reinterpret_cast<void*>(1);
@@ -58,7 +61,7 @@ static void TestThreadIdentityCurrent(const void* assert_no_identity) {
                    PerThreadSynch::kAlignment);
   EXPECT_EQ(identity, identity->per_thread_synch.thread_identity());
 
-  absl::base_internal::SpinLockHolder l(&map_lock);
+  absl::base_internal::SpinLockHolder l(map_lock);
   num_identities_reused++;
 }
 
@@ -90,12 +93,12 @@ TEST(ThreadIdentityTest, BasicIdentityWorksThreaded) {
   // We should have recycled ThreadIdentity objects above; while (external)
   // library threads allocating their own identities may preclude some
   // reuse, we should have sufficient repetitions to exclude this.
-  absl::base_internal::SpinLockHolder l(&map_lock);
+  absl::base_internal::SpinLockHolder l(map_lock);
   EXPECT_LT(kNumThreads, num_identities_reused);
 }
 
 TEST(ThreadIdentityTest, ReusedThreadIdentityMutexTest) {
-  // This test repeatly creates and joins a series of threads, each of
+  // This test repeatedly creates and joins a series of threads, each of
   // which acquires and releases shared Mutex locks. This verifies
   // Mutex operations work correctly under a reused
   // ThreadIdentity. Note that the most likely failure mode of this
@@ -112,7 +115,7 @@ TEST(ThreadIdentityTest, ReusedThreadIdentityMutexTest) {
       threads.push_back(std::thread([&]() {
         for (int l = 0; l < kNumLockLoops; ++l) {
           for (int m = 0; m < kNumMutexes; ++m) {
-            MutexLock lock(&mutexes[m]);
+            MutexLock lock(mutexes[m]);
           }
         }
       }));

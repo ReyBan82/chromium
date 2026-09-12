@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ash/policy/core/device_local_account_policy_service.h"
 #include "components/policy/core/browser/webui/policy_status_provider.h"
 
@@ -32,7 +33,8 @@ class DeviceLocalAccountPolicyStatusProvider
   ~DeviceLocalAccountPolicyStatusProvider() override;
 
   // PolicyStatusProvider implementation.
-  base::Value::Dict GetStatus() override;
+  base::DictValue GetStatus() override;
+  policy::mojom::StatusPtr GetStatusMojo() override;
 
   // policy::DeviceLocalAccountPolicyService::Observer implementation.
   void OnPolicyUpdated(const std::string& user_id) override;
@@ -40,7 +42,7 @@ class DeviceLocalAccountPolicyStatusProvider
 
  private:
   const std::string user_id_;
-  policy::DeviceLocalAccountPolicyService* service_;
+  raw_ptr<policy::DeviceLocalAccountPolicyService> service_;
 };
 
 #endif  // CHROME_BROWSER_POLICY_STATUS_PROVIDER_DEVICE_LOCAL_ACCOUNT_POLICY_STATUS_PROVIDER_H_

@@ -8,15 +8,17 @@
 #include <utility>
 
 #include "base/location.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/task/sequence_manager/sequence_manager.h"
 #include "base/task/sequence_manager/task_queue.h"
 #include "base/task/sequence_manager/test/sequence_manager_for_test.h"
-#include "base/test/task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/platform/scheduler/public/non_main_thread.h"
+#include "third_party/blink/renderer/platform/scheduler/test/task_environment.h"
+#include "third_party/blink/renderer/platform/wtf/threading.h"
 
 namespace blink::scheduler {
 
@@ -33,7 +35,7 @@ class TestObject {
   ~TestObject() { ++(*counter_); }
 
  private:
-  int* counter_;
+  raw_ptr<int> counter_;
 };
 
 }  // namespace
@@ -41,17 +43,15 @@ class TestObject {
 class BlinkSchedulerSingleThreadTaskRunnerTest : public testing::Test {
  public:
   BlinkSchedulerSingleThreadTaskRunnerTest()
-      : task_environment_(TaskEnvironment::TimeSource::MOCK_TIME,
-                          TaskEnvironment::ThreadPoolExecutionMode::QUEUED) {
-    sequence_manager_ = base::sequence_manager::SequenceManagerForTest::Create(
-        nullptr, task_environment_.GetMainThreadTaskRunner(),
-        task_environment_.GetMockTickClock());
+      : task_environment_(
+            base::test::TaskEnvironment::TimeSource::MOCK_TIME,
+            base::test::TaskEnvironment::ThreadPoolExecutionMode::QUEUED) {
     backup_task_queue_ =
-        sequence_manager_->CreateTaskQueue(TaskQueue::Spec(QueueName::TEST_TQ));
+        task_environment_.CreateTaskQueue(TaskQueue::Spec(QueueName::TEST_TQ));
     backup_task_runner_ = backup_task_queue_->CreateTaskRunner(
         static_cast<int>(TaskType::kInternalTest));
     test_task_queue_ =
-        sequence_manager_->CreateTaskQueue(TaskQueue::Spec(QueueName::TEST_TQ));
+        task_environment_.CreateTaskQueue(TaskQueue::Spec(QueueName::TEST_TQ));
     test_task_runner_ = test_task_queue_->CreateTaskRunner(
         static_cast<int>(TaskType::kInternalTest));
   }
@@ -65,7 +65,6 @@ class BlinkSchedulerSingleThreadTaskRunnerTest : public testing::Test {
   void TearDown() override {
     ShutDownTestTaskQueue();
     ShutDownBackupTaskQueue();
-    sequence_manager_.reset();
   }
 
  protected:
@@ -81,28 +80,23 @@ class BlinkSchedulerSingleThreadTaskRunnerTest : public testing::Test {
     if (!test_task_queue_) {
       return;
     }
-    test_task_queue_->ShutdownTaskQueue();
-    test_task_queue_ = nullptr;
+    test_task_queue_.reset();
   }
 
   void ShutDownBackupTaskQueue() {
     if (!backup_task_queue_) {
       return;
     }
-    backup_task_queue_->ShutdownTaskQueue();
-    backup_task_queue_ = nullptr;
+    backup_task_queue_.reset();
   }
 
-  base::test::TaskEnvironment task_environment_;
+  blink::test::TaskEnvironmentWithPrioritySettings task_environment_;
 
  private:
-  std::unique_ptr<base::sequence_manager::SequenceManagerForTest>
-      sequence_manager_;
-
-  scoped_refptr<base::sequence_manager::TaskQueue> backup_task_queue_;
+  base::sequence_manager::TaskQueue::Handle backup_task_queue_;
   scoped_refptr<base::SingleThreadTaskRunner> backup_task_runner_;
 
-  scoped_refptr<base::sequence_manager::TaskQueue> test_task_queue_;
+  base::sequence_manager::TaskQueue::Handle test_task_queue_;
   scoped_refptr<base::SingleThreadTaskRunner> test_task_runner_;
 };
 
@@ -186,24 +180,29 @@ TEST_F(BlinkSchedulerSingleThreadTaskRunnerTest,
 
 TEST_F(BlinkSchedulerSingleThreadTaskRunnerTest,
        PostingToShutDownThreadLeaksObject) {
-  std::unique_ptr<NonMainThread> thread =
-      NonMainThread::CreateThread(ThreadCreationParams(ThreadType::kTestThread)
-                                      .SetThreadNameForTest("TestThread"));
-  scoped_refptr<base::SingleThreadTaskRunner> thread_task_runner =
-      thread->GetTaskRunner();
-  thread.reset();
+  {
+    std::unique_ptr<NonMainThread> thread = NonMainThread::CreateThread(
+        ThreadCreationParams(ThreadType::kTestThread)
+            .SetThreadNameForTest("TestThread"));
+    scoped_refptr<base::SingleThreadTaskRunner> thread_task_runner =
+        thread->GetTaskRunner();
+    thread.reset();
 
-  int counter = 0;
-  std::unique_ptr<TestObject> test_object =
-      std::make_unique<TestObject>(&counter);
-  TestObject* unowned_test_object = test_object.get();
-  bool result =
-      thread_task_runner->DeleteSoon(FROM_HERE, std::move(test_object));
-  // This should always return true.
-  EXPECT_TRUE(result);
-  EXPECT_EQ(0, counter);
-  // Delete this manually since it leaked.
-  delete (unowned_test_object);
+    int counter = 0;
+    std::unique_ptr<TestObject> test_object =
+        std::make_unique<TestObject>(&counter);
+    TestObject* unowned_test_object = test_object.get();
+    bool result =
+        thread_task_runner->DeleteSoon(FROM_HERE, std::move(test_object));
+    // This should always return true.
+    EXPECT_TRUE(result);
+    EXPECT_EQ(0, counter);
+    // Delete this manually since it leaked.
+    delete (unowned_test_object);
+  }
+#if DCHECK_IS_ON()
+  SetIsBeforeThreadCreatedForTest();
+#endif
 }
 
 }  // namespace blink::scheduler

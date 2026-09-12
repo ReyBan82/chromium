@@ -5,10 +5,10 @@
 #include "chrome/browser/ash/arc/print_spooler/print_session_impl.h"
 
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 
-#include "ash/components/arc/mojom/print_common.mojom.h"
 #include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
@@ -22,20 +22,27 @@
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/arc/print_spooler/arc_print_spooler_util.h"
+#include "chrome/browser/pdf/pdf_pref_names.h"
 #include "chrome/browser/printing/print_view_manager_common.h"
+#include "chrome/browser/printing/printing_init.h"
 #include "chrome/browser/printing/printing_service.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/services/printing/public/mojom/printing_service.mojom.h"
-#include "components/arc/intent_helper/custom_tab.h"
+#include "chromeos/ash/experiences/arc/intent_helper/custom_tab.h"
+#include "chromeos/ash/experiences/arc/mojom/print_common.mojom.h"
+#include "components/pdf/browser/pdf_document_helper.h"
+#include "components/pdf/browser/pdf_frame_util.h"
+#include "components/prefs/pref_service.h"
 #include "content/public/browser/web_contents.h"
 #include "mojo/public/c/system/types.h"
 #include "net/base/filename_util.h"
+#include "pdf/pdf_features.h"
 #include "printing/mojom/print.mojom.h"
 #include "printing/page_range.h"
 #include "printing/print_job_constants.h"
 #include "printing/print_settings.h"
 #include "printing/print_settings_conversion.h"
 #include "printing/units.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/aura/window.h"
 #include "ui/gfx/geometry/size.h"
 
@@ -51,7 +58,7 @@ constexpr int kMinimumPdfSize = 50;
 
 // Converts a color mode to its Mojo type.
 mojom::PrintColorMode ToArcColorMode(int color_mode) {
-  absl::optional<bool> is_color = printing::IsColorModelSelected(
+  std::optional<bool> is_color = printing::IsColorModelSelected(
       printing::ColorModeToColorModel(color_mode));
   return is_color.value() ? mojom::PrintColorMode::COLOR
                           : mojom::PrintColorMode::MONOCHROME;
@@ -73,9 +80,9 @@ mojom::PrintDuplexMode ToArcDuplexMode(int duplex_mode) {
 
 // Gets and builds the print attributes from the job settings.
 mojom::PrintAttributesPtr GetPrintAttributes(
-    const base::Value::Dict& job_settings) {
+    const base::DictValue& job_settings) {
   // PrintMediaSize:
-  const base::Value::Dict* media_size_value =
+  const base::DictValue* media_size_value =
       job_settings.FindDict(printing::kSettingMediaSize);
   if (!media_size_value)
     return nullptr;
@@ -86,14 +93,14 @@ mojom::PrintAttributesPtr GetPrintAttributes(
   if (vendor_id && !vendor_id->empty()) {
     id = *vendor_id;
   }
-  absl::optional<int> width_microns =
+  std::optional<int> width_microns =
       media_size_value->FindInt(printing::kSettingMediaSizeWidthMicrons);
-  absl::optional<int> height_microns =
+  std::optional<int> height_microns =
       media_size_value->FindInt(printing::kSettingMediaSizeHeightMicrons);
   if (!width_microns.has_value() || !height_microns.has_value())
     return nullptr;
   // Swap the width and height if layout is landscape.
-  absl::optional<bool> landscape =
+  std::optional<bool> landscape =
       job_settings.FindBool(printing::kSettingLandscape);
   if (!landscape.has_value())
     return nullptr;
@@ -121,13 +128,13 @@ mojom::PrintAttributesPtr GetPrintAttributes(
   mojom::PrintMarginsPtr margins = mojom::PrintMargins::New(0, 0, 0, 0);
 
   // PrintColorMode:
-  absl::optional<int> color = job_settings.FindInt(printing::kSettingColor);
+  std::optional<int> color = job_settings.FindInt(printing::kSettingColor);
   if (!color.has_value())
     return nullptr;
   mojom::PrintColorMode color_mode = ToArcColorMode(color.value());
 
   // PrintDuplexMode:
-  absl::optional<int> duplex =
+  std::optional<int> duplex =
       job_settings.FindInt(printing::kSettingDuplexMode);
   if (!duplex.has_value())
     return nullptr;
@@ -141,7 +148,7 @@ mojom::PrintAttributesPtr GetPrintAttributes(
 // Creates a PrintDocumentRequest from the provided |job_settings|. Uses helper
 // functions to parse |job_settings|.
 mojom::PrintDocumentRequestPtr PrintDocumentRequestFromJobSettings(
-    const base::Value::Dict& job_settings) {
+    const base::DictValue& job_settings) {
   return mojom::PrintDocumentRequest::New(
       printing::GetPageRangesFromJobSettings(job_settings),
       GetPrintAttributes(job_settings));
@@ -189,8 +196,12 @@ bool IsPdfPluginLoaded(content::WebContents* web_contents) {
     return false;
   }
 
+  // Refer to
+  // chrome/browser/printing/print_view_manager_common.cc::GetRenderFrameHostToUse.
   content::RenderFrameHost* plugin_frame =
-      printing::GetFullPagePlugin(web_contents);
+      chrome_pdf::features::IsOopifPdfEnabled()
+          ? pdf_frame_util::FindFullPagePdfExtensionHost(web_contents)
+          : printing::GetFullPagePlugin(web_contents);
   if (!plugin_frame) {
     VLOG(1) << "No plugin frame found yet.";
     return false;
@@ -207,6 +218,18 @@ bool IsPdfPluginLoaded(content::WebContents* web_contents) {
     return false;
   }
 
+  // The plugin has loaded.  Now make sure it finished loading the document.
+  auto* pdf_helper =
+      pdf::PDFDocumentHelper::MaybeGetForWebContents(*web_contents);
+  if (!pdf_helper) {
+    VLOG(1) << "PDFDocumentHelper not ready yet.";
+    return false;
+  }
+  if (!pdf_helper->IsDocumentLoadComplete()) {
+    VLOG(1) << "PDFDocumentHelper has not finished loading yet.";
+    return false;
+  }
+
   VLOG(1) << "PDF plugin has loaded.";
   return true;
 }
@@ -217,7 +240,8 @@ bool IsPdfPluginLoaded(content::WebContents* web_contents) {
 mojo::PendingRemote<mojom::PrintSessionHost> PrintSessionImpl::Create(
     std::unique_ptr<content::WebContents> web_contents,
     aura::Window* arc_window,
-    mojo::PendingRemote<mojom::PrintSessionInstance> instance) {
+    mojo::PendingRemote<mojom::PrintSessionInstance> instance,
+    base::FilePath document_path) {
   DCHECK(arc_window);
   if (!instance)
     return mojo::NullRemote();
@@ -225,7 +249,8 @@ mojo::PendingRemote<mojom::PrintSessionHost> PrintSessionImpl::Create(
   // This object will be deleted when the mojo connection is closed.
   mojo::PendingRemote<mojom::PrintSessionHost> remote;
   new PrintSessionImpl(std::move(web_contents), arc_window, std::move(instance),
-                       remote.InitWithNewPipeAndPassReceiver());
+                       remote.InitWithNewPipeAndPassReceiver(),
+                       std::move(document_path));
   return remote;
 }
 
@@ -233,15 +258,18 @@ PrintSessionImpl::PrintSessionImpl(
     std::unique_ptr<content::WebContents> web_contents,
     aura::Window* arc_window,
     mojo::PendingRemote<mojom::PrintSessionInstance> instance,
-    mojo::PendingReceiver<mojom::PrintSessionHost> receiver)
+    mojo::PendingReceiver<mojom::PrintSessionHost> receiver,
+    base::FilePath document_path)
     : ArcCustomTabModalDialogHost(std::make_unique<CustomTab>(arc_window),
                                   web_contents.get()),
       content::WebContentsUserData<PrintSessionImpl>(*web_contents),
       instance_(std::move(instance)),
       session_receiver_(this, std::move(receiver)),
-      web_contents_(std::move(web_contents)) {
+      web_contents_(std::move(web_contents)),
+      document_path_(std::move(document_path)) {
   session_receiver_.set_disconnect_handler(
       base::BindOnce(&PrintSessionImpl::Close, weak_ptr_factory_.GetWeakPtr()));
+  printing::InitializePrintingForWebContents(web_contents_.get());
   web_contents_->SetUserData(UserDataKey(), base::WrapUnique(this));
   arc_window_observation_.Observe(arc_window);
 
@@ -249,7 +277,7 @@ PrintSessionImpl::PrintSessionImpl(
   custom_tab_->Attach(window);
   window->Show();
 
-  // TODO(http://crbug.com/636642): Handle this correctly once the bug is
+  // TODO(http://crbug.com/172225872): Handle this correctly once the bug is
   // resolved. Until then, give the PDF plugin time to load.
   VLOG(1) << "Waiting for PDF plugin to load.";
   StartPrintAfterPluginIsLoaded();
@@ -257,23 +285,19 @@ PrintSessionImpl::PrintSessionImpl(
 
 PrintSessionImpl::~PrintSessionImpl() {
   // Delete the saved print document now that it's no longer needed.
-  base::FilePath file_path;
-  if (!net::FileURLToFilePath(web_contents_->GetVisibleURL(), &file_path)) {
-    LOG(ERROR) << "Failed to obtain file path from URL.";
-    return;
-  }
-
-  base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock()},
-                             base::BindOnce(&DeletePrintDocument, file_path));
+  base::ThreadPool::PostTask(
+      FROM_HERE, {base::MayBlock()},
+      base::BindOnce(&DeletePrintDocument, document_path_));
 }
 
 void PrintSessionImpl::OnWindowDestroying(aura::Window* window) {
+  arc_window_observation_.Reset();
   // The parent window is being destroyed. Close this print session.
   Close();
 }
 
 void PrintSessionImpl::CreatePreviewDocument(
-    base::Value::Dict job_settings,
+    base::DictValue job_settings,
     CreatePreviewDocumentCallback callback) {
   mojom::PrintDocumentRequestPtr request =
       PrintDocumentRequestFromJobSettings(job_settings);
@@ -325,6 +349,13 @@ void PrintSessionImpl::OnPreviewDocumentRead(
     pdf_flattener_.set_disconnect_handler(
         base::BindOnce(&PrintSessionImpl::OnPdfFlattenerDisconnected,
                        weak_ptr_factory_.GetWeakPtr()));
+    const PrefService* prefs =
+        Profile::FromBrowserContext(web_contents_->GetBrowserContext())
+            ->GetPrefs();
+    if (prefs->IsManagedPreference(prefs::kPdfUseSkiaRendererEnabled)) {
+      pdf_flattener_->SetUseSkiaRendererPolicy(
+          prefs->GetBoolean(prefs::kPdfUseSkiaRendererEnabled));
+    }
   }
 
   bool inserted = callbacks_.emplace(request_id, std::move(callback)).second;
@@ -338,9 +369,11 @@ void PrintSessionImpl::OnPreviewDocumentRead(
 
 void PrintSessionImpl::OnPdfFlattened(
     int request_id,
-    base::ReadOnlySharedMemoryRegion flattened_document_region) {
+    printing::mojom::FlattenPdfResultPtr result) {
   auto it = callbacks_.find(request_id);
-  std::move(it->second).Run(std::move(flattened_document_region));
+  std::move(it->second)
+      .Run(result ? std::move(result->flattened_pdf_region)
+                  : base::ReadOnlySharedMemoryRegion());
   callbacks_.erase(it);
 }
 
@@ -363,8 +396,8 @@ void PrintSessionImpl::StartPrintAfterPluginIsLoaded() {
   // the PDF plugin to load and create its document structure.  If StartPrint()
   // is called too soon, it won't find this structure and will attach to the
   // top-level frame instead of the correct PDF element.  The PDF plugin doesn't
-  // have a way to notify the browser when it's ready (crbug.com/636642), so we
-  // need to poll for the PDF frame to "look ready" before we start printing.
+  // have a way to notify the browser when it's ready (crbug.com/172225872), so
+  // we need to poll for the PDF frame to "look ready" before we start printing.
   if (!IsPdfPluginLoaded(web_contents_.get())) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
@@ -386,9 +419,13 @@ void PrintSessionImpl::StartPrintAfterPluginIsLoaded() {
 }
 
 void PrintSessionImpl::StartPrintNow() {
-  printing::StartPrint(web_contents_.get(),
-                       print_renderer_receiver_.BindNewEndpointAndPassRemote(),
-                       false, false);
+  VLOG(1) << "Starting print preview.";
+  if (!printing::StartPrint(
+          web_contents_.get(),
+          print_renderer_receiver_.BindNewEndpointAndPassRemote(), false,
+          false)) {
+    LOG(ERROR) << "Failed to start print preview.";
+  }
 }
 
 WEB_CONTENTS_USER_DATA_KEY_IMPL(PrintSessionImpl);

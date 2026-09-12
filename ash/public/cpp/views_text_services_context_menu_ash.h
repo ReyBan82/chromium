@@ -5,12 +5,19 @@
 #ifndef ASH_PUBLIC_CPP_VIEWS_TEXT_SERVICES_CONTEXT_MENU_ASH_H_
 #define ASH_PUBLIC_CPP_VIEWS_TEXT_SERVICES_CONTEXT_MENU_ASH_H_
 
+#include <memory>
+
 #include "ash/public/cpp/ash_public_export.h"
+#include "chromeos/ui/clipboard_history/clipboard_history_types.h"
 #include "ui/views/controls/views_text_services_context_menu_base.h"
+
+namespace chromeos::clipboard_history {
+class ClipboardHistorySubmenuModel;
+}  // namespace chromeos::clipboard_history
 
 namespace views {
 class Textfield;
-}
+}  // namespace views
 
 namespace ash {
 
@@ -35,6 +42,16 @@ class ASH_PUBLIC_EXPORT ViewsTextServicesContextMenuAsh
   bool IsCommandIdEnabled(int command_id) const override;
   void ExecuteCommand(int command_id, int event_flags) override;
   bool SupportsCommand(int command_id) const override;
+
+ private:
+  // Shows the standalone clipboard history menu. `event_flags` describes the
+  // event that caused the menu to show.
+  void ShowClipboardHistoryMenu(int event_flags);
+
+  // A submenu model of clipboard history item descriptors. Used only if the
+  // clipboard history refresh feature is enabled.
+  std::unique_ptr<chromeos::clipboard_history::ClipboardHistorySubmenuModel>
+      submenu_model_;
 };
 
 }  // namespace ash

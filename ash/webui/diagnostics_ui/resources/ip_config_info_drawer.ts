@@ -4,17 +4,17 @@
 
 import './data_point.js';
 import './diagnostics_shared.css.js';
-import 'chrome://resources/cr_elements/cr_expand_button/cr_expand_button.js';
+import 'chrome://resources/ash/common/cr_elements/cr_expand_button/cr_expand_button.js';
 
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {DiagnosticsBrowserProxyImpl} from './diagnostics_browser_proxy.js';
 import {getSubnetMaskFromRoutingPrefix} from './diagnostics_utils.js';
 import {getTemplate} from './ip_config_info_drawer.html.js';
-import {Network} from './network_health_provider.mojom-webui.js';
+import type {Network} from './network_health_provider.mojom-webui.js';
 
 /**
  * @fileoverview
@@ -38,6 +38,7 @@ export class IpConfigInfoDrawerElement extends IpConfigInfoDrawerElementBase {
       expanded: {
         type: Boolean,
         value: false,
+        reflectToAttribute: true,
       },
 
       gateway: {
@@ -66,13 +67,13 @@ export class IpConfigInfoDrawerElement extends IpConfigInfoDrawerElementBase {
     };
   }
 
-  network: Network;
-  protected expanded: boolean;
-  protected gateway: string;
-  protected nameServers: string;
-  protected subnetMask: string;
-  protected nameServersHeader: string;
-  private browserProxy: DiagnosticsBrowserProxyImpl =
+  declare network: Network;
+  declare protected expanded: boolean;
+  declare protected gateway: string;
+  declare protected nameServers: string;
+  declare protected subnetMask: string;
+  declare protected nameServersHeader: string;
+  private readonly browserProxy: DiagnosticsBrowserProxyImpl =
       DiagnosticsBrowserProxyImpl.getInstance();
 
   static get observers(): string[] {

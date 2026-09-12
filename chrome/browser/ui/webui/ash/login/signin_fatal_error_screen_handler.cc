@@ -6,13 +6,14 @@
 
 #include <string>
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/values.h"
 #include "chrome/browser/ash/login/oobe_screen.h"
 #include "chrome/browser/ash/login/screens/signin_fatal_error_screen.h"
-#include "chrome/grit/chromium_strings.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
 #include "components/strings/grit/components_strings.h"
+#include "ui/chromeos/devicetype_utils.h"
 
 namespace ash {
 
@@ -36,14 +37,23 @@ void SignInFatalErrorScreenHandler::DeclareLocalizedValues(
                IDS_LOGIN_FATAL_ERROR_NO_ACCOUNT_DETAILS);
   builder->Add("fatalErrorMessageInsecureURL",
                IDS_LOGIN_FATAL_ERROR_TEXT_INSECURE_URL);
+  builder->AddF("fatalErrorAutoEnrollmentSkipped",
+                IDS_LOGIN_FATAL_ERROR_AUTO_ENROLLMENT_SKIPPED,
+                ui::GetChromeOSDeviceName());
+  builder->Add("fatalErrorRestartAndPowerwash",
+               IDS_LOGIN_FATAL_ERROR_RESTART_AND_POWERWASH_BUTTON);
 }
 
 void SignInFatalErrorScreenHandler::Show(SignInFatalErrorScreen::Error error,
-                                         const base::Value::Dict& params) {
-  base::Value::Dict screen_data = params.Clone();
+                                         const base::DictValue& params) {
+  base::DictValue screen_data = params.Clone();
   screen_data.Set("errorState", base::Value(static_cast<int>(error)));
 
   ShowInWebUI(std::move(screen_data));
+}
+
+base::WeakPtr<SignInFatalErrorView> SignInFatalErrorScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace ash

@@ -7,7 +7,6 @@
 #include <memory>
 #include <utility>
 
-#include "base/containers/contains.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -74,7 +73,7 @@ void LocalFileSyncContext::MaybeInitializeFileSystemContext(
     FileSystemContext* file_system_context,
     SyncStatusCallback callback) {
   DCHECK(ui_task_runner_->RunsTasksInCurrentSequence());
-  if (base::Contains(file_system_contexts_, file_system_context)) {
+  if (file_system_contexts_.contains(file_system_context)) {
     // The context has been already initialized. Just dispatch the callback
     // with SYNC_STATUS_OK.
     ui_task_runner_->PostTask(
@@ -307,7 +306,6 @@ void LocalFileSyncContext::ApplyRemoteChange(
       return;
   }
   NOTREACHED();
-  std::move(callback).Run(SYNC_STATUS_FAILED);
 }
 
 void LocalFileSyncContext::HandleRemoteDelete(
@@ -461,9 +459,9 @@ void LocalFileSyncContext::GetFileMetadata(
       file_system_context, url);
   file_system_context->operation_runner()->GetMetadata(
       url_for_sync,
-      FileSystemOperation::GET_METADATA_FIELD_IS_DIRECTORY |
-          FileSystemOperation::GET_METADATA_FIELD_SIZE |
-          FileSystemOperation::GET_METADATA_FIELD_LAST_MODIFIED,
+      {storage::FileSystemOperation::GetMetadataField::kIsDirectory,
+       storage::FileSystemOperation::GetMetadataField::kSize,
+       storage::FileSystemOperation::GetMetadataField::kLastModified},
       base::BindOnce(&LocalFileSyncContext::DidGetFileMetadata, this,
                      std::move(callback)));
 }
@@ -578,8 +576,7 @@ void LocalFileSyncContext::OnWriteEnabled(const FileSystemURL& url) {
   // Nothing to do for now.
 }
 
-LocalFileSyncContext::~LocalFileSyncContext() {
-}
+LocalFileSyncContext::~LocalFileSyncContext() = default;
 
 void LocalFileSyncContext::ScheduleNotifyChangesUpdatedOnIOThread(
     base::OnceClosure callback) {
@@ -653,8 +650,8 @@ void LocalFileSyncContext::InitializeFileSystemContextOnIOThread(
     // Create and initialize LocalFileChangeTracker and call back this method
     // later again.
     std::set<GURL>* origins_with_changes = new std::set<GURL>;
-    std::unique_ptr<LocalFileChangeTracker>* tracker_ptr(
-        new std::unique_ptr<LocalFileChangeTracker>);
+    scoped_refptr<LocalFileChangeTracker>* tracker_ptr(
+        new scoped_refptr<LocalFileChangeTracker>);
     file_system_context->default_file_task_runner()->PostTaskAndReplyWithResult(
         FROM_HERE,
         base::BindOnce(
@@ -683,13 +680,13 @@ void LocalFileSyncContext::InitializeFileSystemContextOnIOThread(
 }
 
 SyncStatusCode LocalFileSyncContext::InitializeChangeTrackerOnFileThread(
-    std::unique_ptr<LocalFileChangeTracker>* tracker_ptr,
+    scoped_refptr<LocalFileChangeTracker>* tracker_ptr,
     FileSystemContext* file_system_context,
     std::set<GURL>* origins_with_changes) {
   DCHECK(file_system_context);
   DCHECK(tracker_ptr);
   DCHECK(origins_with_changes);
-  *tracker_ptr = std::make_unique<LocalFileChangeTracker>(
+  *tracker_ptr = base::MakeRefCounted<LocalFileChangeTracker>(
       file_system_context->partition_path(), env_override_,
       file_system_context->default_file_task_runner());
   const SyncStatusCode status = (*tracker_ptr)->Initialize(file_system_context);
@@ -711,7 +708,7 @@ SyncStatusCode LocalFileSyncContext::InitializeChangeTrackerOnFileThread(
 }
 
 void LocalFileSyncContext::DidInitializeChangeTrackerOnIOThread(
-    std::unique_ptr<LocalFileChangeTracker>* tracker_ptr,
+    scoped_refptr<LocalFileChangeTracker>* tracker_ptr,
     const GURL& source_url,
     FileSystemContext* file_system_context,
     std::set<GURL>* origins_with_changes,
@@ -752,8 +749,8 @@ void LocalFileSyncContext::DidInitialize(
     return;
   }
   DCHECK(ui_task_runner_->RunsTasksInCurrentSequence());
-  DCHECK(!base::Contains(file_system_contexts_, file_system_context));
-  DCHECK(base::Contains(pending_initialize_callbacks_, file_system_context));
+  DCHECK(!file_system_contexts_.contains(file_system_context));
+  DCHECK(pending_initialize_callbacks_.contains(file_system_context));
 
   SyncFileSystemBackend* backend =
       SyncFileSystemBackend::GetBackend(file_system_context);

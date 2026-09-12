@@ -8,10 +8,19 @@
 
 #include "base/functional/callback.h"
 #include "chrome/browser/extensions/component_loader.h"
-#include "chrome/browser/extensions/extension_service.h"
 #include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "components/user_manager/user.h"
+#include "content/public/browser/browser_context.h"
+#include "content/public/browser/browser_thread.h"
+#include "content/public/browser/service_worker_context.h"
+#include "extensions/browser/disable_reason.h"
+#include "extensions/browser/extension_registrar.h"
+#include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_system.h"
+#include "extensions/browser/extension_util.h"
+#include "extensions/browser/service_worker/service_worker_task_queue.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
+#include "url/origin.h"
 
 namespace ash {
 
@@ -35,8 +44,9 @@ void AccessibilityExtensionLoader::SetBrowserContext(
   content::BrowserContext* prev_browser_context = browser_context_;
   browser_context_ = browser_context;
 
-  if (!loaded_)
+  if (!loaded_) {
     return;
+  }
 
   // If the extension was loaded on the previous browser context (which isn't
   // the current browser context), unload it there.
@@ -46,10 +56,8 @@ void AccessibilityExtensionLoader::SetBrowserContext(
 
   // If the extension was already enabled, but not for this profile, add it
   // to this profile.
-  auto* extension_service =
-      extensions::ExtensionSystem::Get(browser_context_)->extension_service();
-  auto* component_loader = extension_service->component_loader();
-  if (!component_loader->Exists(extension_id_)) {
+  auto* component_loader = extensions::ComponentLoader::Get(browser_context_);
+  if (!component_loader->ExistsOrPendingAdd(extension_id_)) {
     LoadExtension(browser_context_, std::move(done_callback));
   }
 }
@@ -59,8 +67,15 @@ void AccessibilityExtensionLoader::Load(
     base::OnceClosure done_cb) {
   browser_context_ = browser_context;
 
-  if (loaded_)
+  content::BrowserContext* signin_context =
+      BrowserContextHelper::Get()->GetSigninBrowserContext();
+  if (signin_context && browser_context_ != signin_context) {
+    UnloadExtension(signin_context);
+  }
+
+  if (loaded_) {
     return;
+  }
 
   loaded_ = true;
   LoadExtension(browser_context_, std::move(done_cb));
@@ -90,50 +105,57 @@ void AccessibilityExtensionLoader::LoadExtension(
   DCHECK(manifest_filename_);
   DCHECK(guest_manifest_filename_);
 
-  extensions::ExtensionService* extension_service =
-      extensions::ExtensionSystem::Get(browser_context)->extension_service();
-
+  auto* extension_registrar =
+      extensions::ExtensionRegistrar::Get(browser_context);
   // In Kiosk mode, we should reinstall the extension upon first load. This way,
   // no state from the previous session is preserved.
   const user_manager::User* user =
       BrowserContextHelper::Get()->GetUserByBrowserContext(browser_context);
   if (user && user->IsKioskType() && !was_reset_for_kiosk_) {
     was_reset_for_kiosk_ = true;
-    extension_service->DisableExtension(
-        extension_id_, extensions::disable_reason::DISABLE_REINSTALL);
+    extension_registrar->DisableExtension(
+        extension_id_, {extensions::disable_reason::DISABLE_REINSTALL});
     done_cb = base::BindOnce(
         &AccessibilityExtensionLoader::ReinstallExtensionForKiosk,
         weak_ptr_factory_.GetWeakPtr(), browser_context, std::move(done_cb));
   }
 
-  extension_service->component_loader()
+  extensions::ComponentLoader::Get(browser_context)
       ->AddComponentFromDirWithManifestFilename(
           extension_path_, extension_id_.c_str(), manifest_filename_,
-          guest_manifest_filename_, std::move(done_cb));
+          guest_manifest_filename_, std::move(done_cb), {});
 }
 
 void AccessibilityExtensionLoader::ReinstallExtensionForKiosk(
     content::BrowserContext* browser_context,
     base::OnceClosure done_cb) {
   DCHECK(was_reset_for_kiosk_);
-
-  auto* extension_service =
-      extensions::ExtensionSystem::Get(browser_context)->extension_service();
   std::u16string error;
-  extension_service->UninstallExtension(
-      extension_id_, extensions::UninstallReason::UNINSTALL_REASON_REINSTALL,
-      &error);
-  extension_service->component_loader()->Reload(extension_id_);
+  extensions::ExtensionRegistrar::Get(browser_context)
+      ->UninstallExtension(
+          extension_id_,
+          extensions::UninstallReason::UNINSTALL_REASON_REINSTALL, &error);
+  extensions::ComponentLoader::Get(browser_context)->Reload(extension_id_);
 
-  if (done_cb)
+  if (done_cb) {
     std::move(done_cb).Run();
+  }
 }
 
 void AccessibilityExtensionLoader::UnloadExtension(
     content::BrowserContext* browser_context) {
-  auto* extension_service =
-      extensions::ExtensionSystem::Get(browser_context)->extension_service();
-  extension_service->component_loader()->Remove(extension_id_);
+  extensions::ComponentLoader::Get(browser_context)->Remove(extension_id_);
+
+  if (browser_context && browser_context->IsOffTheRecord()) {
+    content::ServiceWorkerContext* service_worker_context =
+        extensions::util::GetServiceWorkerContextForExtensionId(
+            extension_id_, browser_context);
+    GURL scope = extensions::Extension::GetServiceWorkerScopeFromExtensionId(
+        extension_id_);
+    service_worker_context->UnregisterServiceWorkerImmediately(
+        scope, blink::StorageKey::CreateFirstParty(url::Origin::Create(scope)),
+        base::DoNothing());
+  }
 }
 
 }  // namespace ash

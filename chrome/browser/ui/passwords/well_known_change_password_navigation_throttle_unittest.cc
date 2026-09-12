@@ -3,17 +3,23 @@
 // found in the LICENSE file.
 #include "chrome/browser/ui/passwords/well_known_change_password_navigation_throttle.h"
 
+#include <optional>
+
 #include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
+#include "components/enterprise/isolated_mode/isolated_mode_features.h"
+#include "components/enterprise/isolated_mode/prefs.h"
+#include "components/prefs/pref_service.h"
 #include "components/variations/scoped_variations_ids_provider.h"
 #include "content/public/browser/navigation_throttle.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/test/mock_navigation_handle.h"
+#include "content/public/test/mock_navigation_throttle_registry.h"
 #include "content/public/test/navigation_simulator.h"
 #include "content/public/test/test_renderer_host.h"
+#include "content/public/test/web_contents_tester.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/features.h"
 #include "ui/base/page_transition_types.h"
 #include "url/gurl.h"
@@ -26,7 +32,7 @@ struct NavigationThrottleOptions {
   GURL url;
   raw_ptr<content::RenderFrameHost> rfh = nullptr;
   ui::PageTransition page_transition = ui::PAGE_TRANSITION_FROM_API;
-  absl::optional<url::Origin> initiator_origin;
+  std::optional<url::Origin> initiator_origin;
 };
 
 }  // namespace
@@ -38,27 +44,25 @@ class WellKnownChangePasswordNavigationThrottleTest
     ChromeRenderViewHostTestHarness::SetUp();
     content::RenderFrameHostTester::For(main_rfh())
         ->InitializeRenderFrameIfNeeded();
-    subframe_ = content::RenderFrameHostTester::For(main_rfh())
-                    ->AppendChild("subframe");
   }
 
-  content::RenderFrameHost* subframe() const { return subframe_; }
-
-  std::unique_ptr<WellKnownChangePasswordNavigationThrottle>
-  CreateNavigationThrottle(NavigationThrottleOptions opts) {
+  bool CreateNavigationThrottle(NavigationThrottleOptions opts) {
     content::MockNavigationHandle handle(
         opts.url, opts.rfh ? opts.rfh.get() : main_rfh());
     handle.set_page_transition(opts.page_transition);
-    if (opts.initiator_origin)
+    if (opts.initiator_origin) {
       handle.set_initiator_origin(*opts.initiator_origin);
-    return WellKnownChangePasswordNavigationThrottle::MaybeCreateThrottleFor(
-        &handle);
+    }
+    content::MockNavigationThrottleRegistry registry(
+        &handle,
+        content::MockNavigationThrottleRegistry::RegistrationMode::kHold);
+    WellKnownChangePasswordNavigationThrottle::MaybeCreateAndAdd(registry);
+    return !registry.throttles().empty();
   }
 
  private:
-  variations::ScopedVariationsIdsProvider scoped_variations_ids_provider_{
+  variations::test::ScopedVariationsIdsProvider scoped_variations_ids_provider_{
       variations::VariationsIdsProvider::Mode::kUseSignedInState};
-  raw_ptr<content::RenderFrameHost> subframe_ = nullptr;
 };
 
 TEST_F(WellKnownChangePasswordNavigationThrottleTest,
@@ -123,13 +127,15 @@ TEST_F(WellKnownChangePasswordNavigationThrottleTest,
 // navigation initiated by a subframe.
 TEST_F(WellKnownChangePasswordNavigationThrottleTest,
        NeverCreateNavigationThrottle_Subframe) {
+  content::RenderFrameHost* subframe =
+      content::RenderFrameHostTester::For(main_rfh())->AppendChild("subframe");
   // change-password url without trailing slash
   GURL url("https://google.com/.well-known/change-password");
-  EXPECT_FALSE(CreateNavigationThrottle({url, subframe()}));
+  EXPECT_FALSE(CreateNavigationThrottle({url, subframe}));
 
   // change-password url with trailing slash
   url = GURL("https://google.com/.well-known/change-password/");
-  EXPECT_FALSE(CreateNavigationThrottle({url, subframe()}));
+  EXPECT_FALSE(CreateNavigationThrottle({url, subframe}));
 }
 
 class WellKnownChangePasswordNavigationThrottleFencedFramesTest
@@ -155,4 +161,51 @@ TEST_F(WellKnownChangePasswordNavigationThrottleFencedFramesTest,
 
   GURL url("https://google.com/.well-known/change-password");
   EXPECT_FALSE(CreateNavigationThrottle({url, fenced_frame}));
+}
+
+TEST_F(WellKnownChangePasswordNavigationThrottleTest,
+       CreateNavigationThrottle_IncognitoProfile) {
+  Profile* incognito_profile = profile()->GetPrimaryOTRProfile(true);
+  ASSERT_TRUE(incognito_profile->IsIncognitoProfile());
+
+  std::unique_ptr<content::WebContents> incognito_web_contents =
+      content::WebContentsTester::CreateTestWebContents(incognito_profile,
+                                                        nullptr);
+
+  GURL url("https://google.com/.well-known/change-password");
+  content::MockNavigationHandle handle(
+      url, incognito_web_contents->GetPrimaryMainFrame());
+  handle.set_page_transition(ui::PAGE_TRANSITION_FROM_API);
+  content::MockNavigationThrottleRegistry registry(
+      &handle,
+      content::MockNavigationThrottleRegistry::RegistrationMode::kHold);
+  WellKnownChangePasswordNavigationThrottle::MaybeCreateAndAdd(registry);
+  EXPECT_FALSE(registry.throttles().empty());
+}
+
+TEST_F(WellKnownChangePasswordNavigationThrottleTest,
+       CreateNavigationThrottle_EnterpriseIsolatedModeProfile) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      enterprise_isolated_mode::kEnableEnterpriseIsolatedMode);
+  profile()->GetPrefs()->SetInteger(
+      enterprise_isolated_mode::kEnterpriseIsolatedModeSettings,
+      static_cast<int>(
+          enterprise_isolated_mode::IsolatedModeSetting::kEnabled));
+  Profile* isolated_profile = profile()->GetPrimaryOTRProfile(true);
+  ASSERT_TRUE(isolated_profile->IsEnterpriseIsolatedModeProfile());
+
+  std::unique_ptr<content::WebContents> isolated_web_contents =
+      content::WebContentsTester::CreateTestWebContents(isolated_profile,
+                                                        nullptr);
+
+  GURL url("https://google.com/.well-known/change-password");
+  content::MockNavigationHandle handle(
+      url, isolated_web_contents->GetPrimaryMainFrame());
+  handle.set_page_transition(ui::PAGE_TRANSITION_FROM_API);
+  content::MockNavigationThrottleRegistry registry(
+      &handle,
+      content::MockNavigationThrottleRegistry::RegistrationMode::kHold);
+  WellKnownChangePasswordNavigationThrottle::MaybeCreateAndAdd(registry);
+  EXPECT_FALSE(registry.throttles().empty());
 }

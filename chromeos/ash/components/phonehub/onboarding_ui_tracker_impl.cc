@@ -4,6 +4,7 @@
 
 #include "chromeos/ash/components/phonehub/onboarding_ui_tracker_impl.h"
 
+#include "base/functional/callback_helpers.h"
 #include "chromeos/ash/components/phonehub/feature_status.h"
 #include "chromeos/ash/components/phonehub/pref_names.h"
 #include "chromeos/ash/components/phonehub/util/histogram_util.h"
@@ -11,8 +12,7 @@
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 void OnboardingUiTrackerImpl::RegisterPrefs(PrefRegistrySimple* registry) {
   registry->RegisterBooleanPref(prefs::kHideOnboardingUi, false);
@@ -28,16 +28,13 @@ OnboardingUiTrackerImpl::OnboardingUiTrackerImpl(
       multidevice_setup_client_(multidevice_setup_client),
       show_multidevice_setup_dialog_callback_(
           std::move(show_multidevice_setup_dialog_callback)) {
-  feature_status_provider_->AddObserver(this);
-  multidevice_setup_client_->AddObserver(this);
+  feature_status_provider_observation_.Observe(feature_status_provider);
+  multidevice_setup_client_observation_.Observe(multidevice_setup_client);
 
   should_show_onboarding_ui_ = ComputeShouldShowOnboardingUi();
 }
 
-OnboardingUiTrackerImpl::~OnboardingUiTrackerImpl() {
-  feature_status_provider_->RemoveObserver(this);
-  multidevice_setup_client_->RemoveObserver(this);
-}
+OnboardingUiTrackerImpl::~OnboardingUiTrackerImpl() = default;
 
 bool OnboardingUiTrackerImpl::ShouldShowOnboardingUi() const {
   return should_show_onboarding_ui_;
@@ -48,12 +45,20 @@ void OnboardingUiTrackerImpl::DismissSetupUi() {
   UpdateShouldShowOnboardingUi();
 }
 
-void OnboardingUiTrackerImpl::HandleGetStarted() {
+void OnboardingUiTrackerImpl::HandleGetStarted(
+    bool is_icon_clicked_when_nudge_visible) {
   FeatureStatus status = feature_status_provider_->GetStatus();
 
   // The user is not opted into Better Together yet.
   if (status == FeatureStatus::kEligiblePhoneButNotSetUp) {
     show_multidevice_setup_dialog_callback_.Run();
+    if (is_icon_clicked_when_nudge_visible) {
+      util::LogMultiDeviceSetupDialogEntryPoint(
+          util::MultiDeviceSetupDialogEntrypoint::kPhoneHubBubbleAferNudge);
+    } else {
+      util::LogMultiDeviceSetupDialogEntryPoint(
+          util::MultiDeviceSetupDialogEntrypoint::kPhoneHubBubble);
+    }
     return;
   }
 
@@ -61,7 +66,7 @@ void OnboardingUiTrackerImpl::HandleGetStarted() {
   if (status == FeatureStatus::kDisabled) {
     multidevice_setup_client_->SetFeatureEnabledState(
         multidevice_setup::mojom::Feature::kPhoneHub,
-        /*enabled=*/true, /*auth_token=*/absl::nullopt, base::DoNothing());
+        /*enabled=*/true, /*auth_token=*/std::nullopt, base::DoNothing());
     util::LogFeatureOptInEntryPoint(util::OptInEntryPoint::kOnboardingFlow);
     return;
   }
@@ -107,5 +112,4 @@ void OnboardingUiTrackerImpl::UpdateShouldShowOnboardingUi() {
   NotifyShouldShowOnboardingUiChanged();
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

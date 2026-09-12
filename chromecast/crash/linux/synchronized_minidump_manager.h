@@ -5,12 +5,12 @@
 #ifndef CHROMECAST_CRASH_LINUX_SYNCHRONIZED_MINIDUMP_MANAGER_H_
 #define CHROMECAST_CRASH_LINUX_SYNCHRONIZED_MINIDUMP_MANAGER_H_
 
+#include <optional>
 #include <vector>
 
 #include "base/files/file_path.h"
 #include "base/values.h"
 #include "chromecast/crash/linux/dump_info.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace chromecast {
 
@@ -134,8 +134,8 @@ class SynchronizedMinidumpManager {
 
   // Write deserialized |dumps| to |lockfile_path_| and the deserialized
   // |metadata| to |metadata_path_|.
-  bool WriteFiles(const base::Value::List& dumps,
-                  const base::Value::Dict& metadata);
+  bool WriteFiles(const base::ListValue& dumps,
+                  const base::DictValue& metadata);
 
   // Creates an empty lock file and an initialized metadata file.
   bool InitializeFiles();
@@ -146,8 +146,8 @@ class SynchronizedMinidumpManager {
   const base::FilePath lockfile_path_;
   const base::FilePath metadata_path_;
   int lockfile_fd_;
-  absl::optional<base::Value::Dict> metadata_;
-  absl::optional<base::Value::List> dumps_;
+  std::optional<base::DictValue> metadata_;
+  std::optional<base::ListValue> dumps_;
 };
 
 }  // namespace chromecast

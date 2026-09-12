@@ -27,6 +27,10 @@ class XRCanvasInputEventListener : public NativeEventListener {
     if (!input_provider_->ShouldProcessEvents())
       return;
 
+    if (!event->isTrusted()) {
+      return;
+    }
+
     auto* pointer_event = To<PointerEvent>(event);
     DCHECK(pointer_event);
     if (!pointer_event->isPrimary())
@@ -96,7 +100,7 @@ void XRCanvasInputProvider::OnPointerUp(PointerEvent* event) {
 }
 
 XRInputSource* XRCanvasInputProvider::GetInputSource() {
-  return input_source_;
+  return input_source_.Get();
 }
 
 void XRCanvasInputProvider::UpdateInputSource(PointerEvent* event) {
@@ -120,7 +124,8 @@ void XRCanvasInputProvider::UpdateInputSource(PointerEvent* event) {
   // position of the screen interaction and shoves it backwards through the
   // projection matrix to get a 3D point in space, which is then returned in
   // matrix form so we can use it as an XRInputSource's pointerMatrix.
-  XRViewData* view = session_->views()[0];
+  XRViewData* view =
+      session_->ViewDataForEye(device::mojom::blink::XREye::kNone);
   gfx::Transform viewer_from_pointer = view->UnprojectPointer(
       element_x, element_y, canvas_->OffsetWidth(), canvas_->OffsetHeight());
 

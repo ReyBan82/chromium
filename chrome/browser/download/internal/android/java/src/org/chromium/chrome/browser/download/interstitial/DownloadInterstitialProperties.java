@@ -7,24 +7,32 @@ package org.chromium.chrome.browser.download.interstitial;
 import androidx.annotation.IntDef;
 
 import org.chromium.base.Callback;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.download.home.list.ListProperties;
 import org.chromium.components.offline_items_collection.OfflineItem;
 import org.chromium.ui.modelutil.PropertyKey;
 import org.chromium.ui.modelutil.PropertyModel.WritableBooleanPropertyKey;
-import org.chromium.ui.modelutil.PropertyModel.WritableIntPropertyKey;
+import org.chromium.ui.modelutil.PropertyModel.WritableIntDefPropertyKey;
 import org.chromium.ui.modelutil.PropertyModel.WritableObjectPropertyKey;
 
 /**
- * Extends the properties defined in {@link ListProperties} to facilitate the logic for an entire
- * UI containing a download ListItem.
+ * Extends the properties defined in {@link ListProperties} to facilitate the logic for an entire UI
+ * containing a download ListItem.
  */
+@NullMarked
 interface DownloadInterstitialProperties extends ListProperties {
-    @IntDef({State.UNKNOWN, State.IN_PROGRESS, State.SUCCESSFUL, State.CANCELLED, State.PAUSED,
-            State.PENDING})
     /**
      * Keeps track of the state of the DownloadInterstitial. This may be different to the state of
      * the offline item displayed within the UI.
      */
+    @IntDef({
+        State.UNKNOWN,
+        State.IN_PROGRESS,
+        State.SUCCESSFUL,
+        State.CANCELLED,
+        State.PAUSED,
+        State.PENDING
+    })
     @interface State {
         int UNKNOWN = 0;
         int IN_PROGRESS = 1;
@@ -36,7 +44,7 @@ interface DownloadInterstitialProperties extends ListProperties {
 
     WritableObjectPropertyKey<OfflineItem> DOWNLOAD_ITEM = new WritableObjectPropertyKey<>();
 
-    WritableIntPropertyKey STATE = new WritableIntPropertyKey();
+    WritableIntDefPropertyKey<State> STATE = new WritableIntDefPropertyKey<>(State.UNKNOWN);
 
     WritableObjectPropertyKey<String> TITLE_TEXT = new WritableObjectPropertyKey<>();
 
@@ -58,11 +66,32 @@ interface DownloadInterstitialProperties extends ListProperties {
 
     WritableBooleanPropertyKey PENDING_MESSAGE_IS_VISIBLE = new WritableBooleanPropertyKey();
 
-    PropertyKey[] ALL_KEYS = new PropertyKey[] {ENABLE_ITEM_ANIMATIONS, CALLBACK_OPEN,
-            CALLBACK_PAUSE, CALLBACK_RESUME, CALLBACK_CANCEL, CALLBACK_SHARE, CALLBACK_REMOVE,
-            CALLBACK_RENAME, PROVIDER_VISUALS, PROVIDER_FAVICON, CALLBACK_SELECTION,
-            SELECTION_MODE_ACTIVE, CALLBACK_PAGINATION_CLICK, CALLBACK_GROUP_PAGINATION_CLICK,
-            DOWNLOAD_ITEM, STATE, TITLE_TEXT, PRIMARY_BUTTON_IS_VISIBLE, PRIMARY_BUTTON_TEXT,
-            PRIMARY_BUTTON_CALLBACK, SECONDARY_BUTTON_IS_VISIBLE, SECONDARY_BUTTON_TEXT,
-            SECONDARY_BUTTON_CALLBACK, RELOAD_TAB, PENDING_MESSAGE_IS_VISIBLE};
+    PropertyKey[] ALL_KEYS =
+            new PropertyKey[] {
+                ENABLE_ITEM_ANIMATIONS,
+                CALLBACK_OPEN,
+                CALLBACK_PAUSE,
+                CALLBACK_RESUME,
+                CALLBACK_CANCEL,
+                CALLBACK_SHARE,
+                CALLBACK_REMOVE,
+                CALLBACK_RENAME,
+                PROVIDER_VISUALS,
+                PROVIDER_FAVICON,
+                CALLBACK_SELECTION,
+                SELECTION_MODE_ACTIVE,
+                CALLBACK_PAGINATION_CLICK,
+                CALLBACK_GROUP_PAGINATION_CLICK,
+                DOWNLOAD_ITEM,
+                STATE,
+                TITLE_TEXT,
+                PRIMARY_BUTTON_IS_VISIBLE,
+                PRIMARY_BUTTON_TEXT,
+                PRIMARY_BUTTON_CALLBACK,
+                SECONDARY_BUTTON_IS_VISIBLE,
+                SECONDARY_BUTTON_TEXT,
+                SECONDARY_BUTTON_CALLBACK,
+                RELOAD_TAB,
+                PENDING_MESSAGE_IS_VISIBLE
+            };
 }

@@ -6,6 +6,7 @@
 #define CHROMEOS_ASH_COMPONENTS_DBUS_SHILL_SHILL_CLIENT_HELPER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,7 +16,7 @@
 #include "base/observer_list.h"
 #include "base/values.h"
 #include "chromeos/ash/components/dbus/shill/shill_property_changed_observer.h"
-#include "chromeos/dbus/common/dbus_method_call_status.h"
+#include "chromeos/dbus/common/dbus_callback.h"
 
 namespace dbus {
 
@@ -33,9 +34,9 @@ class ShillClientHelper {
  public:
   class RefHolder;
 
-  // A callback to handle responses of methods returning a `base::Value::List`.
+  // A callback to handle responses of methods returning a `base::ListValue`.
   using ListValueCallback =
-      base::OnceCallback<void(const base::Value::List& result)>;
+      base::OnceCallback<void(const base::ListValue& result)>;
 
   // A callback to handle errors for method call.
   using ErrorCallback =
@@ -47,6 +48,9 @@ class ShillClientHelper {
 
   // A callback that handles responses for methods with boolean results.
   using BooleanCallback = base::OnceCallback<void(bool result)>;
+
+  // A callback that handles responses for methods with byte array results.
+  using BytesCallback = base::OnceCallback<void(const std::vector<uint8_t>&)>;
 
   // Callback used to notify owner when this can be safely released.
   using ReleasedCallback = base::OnceCallback<void(ShillClientHelper* helper)>;
@@ -90,7 +94,7 @@ class ShillClientHelper {
   // Calls a method with a value dictionary result.
   void CallDictValueMethod(
       dbus::MethodCall* method_call,
-      chromeos::DBusMethodCallback<base::Value::Dict> callback);
+      chromeos::DBusMethodCallback<base::DictValue> callback);
 
   // Calls a method without results with error callback.
   void CallVoidMethodWithErrorCallback(dbus::MethodCall* method_call,
@@ -110,13 +114,21 @@ class ShillClientHelper {
   // Calls a method with a dictionary value result with error callback.
   void CallDictValueMethodWithErrorCallback(
       dbus::MethodCall* method_call,
-      base::OnceCallback<void(base::Value::Dict result)> callback,
+      base::OnceCallback<void(base::DictValue result)> callback,
       ErrorCallback error_callback);
 
   // Calls a method with a boolean array result with error callback.
   void CallListValueMethodWithErrorCallback(dbus::MethodCall* method_call,
                                             ListValueCallback callback,
                                             ErrorCallback error_callback);
+
+  // Calls a method with a byte array (`ay`) result with error callback.
+  // `timeout_ms` overrides the default D-Bus timeout when provided.
+  void CallBytesMethodWithErrorCallback(
+      dbus::MethodCall* method_call,
+      BytesCallback callback,
+      ErrorCallback error_callback,
+      std::optional<int> timeout_ms = std::nullopt);
 
   const dbus::ObjectProxy* object_proxy() const { return proxy_; }
 
@@ -132,7 +144,7 @@ class ShillClientHelper {
   // Appends a string-to-variant dictionary to the writer as an '{sv}' array.
   // Each value is written using AppendValueDataAsVariant.
   static void AppendServiceProperties(dbus::MessageWriter* writer,
-                                      const base::Value::Dict& dictionary);
+                                      const base::DictValue& dictionary);
 
  protected:
   // Reference / Ownership management. If the number of active refs (observers
@@ -156,8 +168,8 @@ class ShillClientHelper {
   raw_ptr<dbus::ObjectProxy> proxy_;
   ReleasedCallback released_callback_;
   int active_refs_;
-  base::ObserverList<ShillPropertyChangedObserver,
-                     true /* check_empty */>::Unchecked observer_list_;
+  base::ObserverList<ShillPropertyChangedObserver, true /* check_empty */>
+      observer_list_;
   std::vector<std::string> interfaces_to_be_monitored_;
 
   // Note: This should remain the last member so it'll be destroyed and

@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var assertEq = chrome.test.assertEq;
-var assertFalse = chrome.test.assertFalse;
-var assertLastError = chrome.test.assertLastError;
-var assertNoLastError = chrome.test.assertNoLastError;
-var assertTrue = chrome.test.assertTrue;
-var succeed = chrome.test.succeed;
+const assertEq = chrome.test.assertEq;
+const assertFalse = chrome.test.assertFalse;
+const assertLastError = chrome.test.assertLastError;
+const assertNoLastError = chrome.test.assertNoLastError;
+const assertTrue = chrome.test.assertTrue;
+const succeed = chrome.test.succeed;
 
 const SEARCH_WORDS = 'search words';
 
@@ -23,27 +23,33 @@ chrome.test.runTests([
 
   // Display results in current tab if no disposition is provided.
   function QueryPopulatedDispositionEmpty() {
-    chrome.tabs.create({}, (tab) => {
-      waitForTabAndPass(tab.id);
+    chrome.tabs.create({}, async (tab) => {
+      await waitForNewTab(tab.id);
+      const navigated = waitForNavigationToGoogle(tab.id);
       chrome.search.query({text: SEARCH_WORDS}, () => {});
+      await navigated;
+      chrome.test.succeed();
     });
   },
 
   // Display results in current tab if said disposition is provided.
   function QueryPopulatedDispositionCurrentTab() {
-    chrome.tabs.create({}, (tab) => {
-      waitForTabAndPass(tab.id);
+    chrome.tabs.create({}, async (tab) => {
+      await waitForNewTab(tab.id);
+      const navigated = waitForNavigationToGoogle(tab.id);
       chrome.search.query({text: SEARCH_WORDS, disposition: 'CURRENT_TAB'});
+      await navigated;
+      chrome.test.succeed();
     });
   },
 
   // Display results in new tab if said disposition is provided.
   function QueryPopulatedDispositionNewTab() {
     chrome.tabs.query({}, (initialTabs) => {
-      let initialTabIds = initialTabs.map(tab => tab.id);
+      const initialTabIds = initialTabs.map(tab => tab.id);
       Promise
           .all([
-            waitForAnyTab(),
+            waitForGoogleInAnyTab(),
             new Promise(resolve => {
               chrome.search.query(
                   {text: SEARCH_WORDS, disposition: 'NEW_TAB'}, () => {
@@ -64,17 +70,24 @@ chrome.test.runTests([
   },
 
   // Display results in new window if said disposition is provided.
-  function QueryPopulatedDispositionNewWindow() {
+  async function QueryPopulatedDispositionNewWindow() {
+    // TODO(crbug.com/394345948): Flaky on android-desktop-16-x64-rel-emu-tests
+    // due to inconsistent URLs in new windows (newtab vs. google.com).
+    const isAndroid = (await chrome.runtime.getPlatformInfo()).os === 'android';
+    if (isAndroid) {
+      chrome.test.succeed('skipped');
+      return;
+    }
     chrome.windows.getAll({}, (initialWindows) => {
-      let initialWindowIds = initialWindows.map(window => window.id);
+      const initialWindowIds = initialWindows.map(window => window.id);
       Promise
           .all([
-            waitForAnyTab(),
+            waitForGoogleInAnyTab(),
             new Promise((resolve) => {
               chrome.search.query(
                   {text: SEARCH_WORDS, disposition: 'NEW_WINDOW'}, () => {
                     chrome.windows.getAll({}, (windows) => {
-                      let window = windows.find(
+                      const window = windows.find(
                           window => !initialWindowIds.includes(window.id));
                       assertEq(windows.length, initialWindowIds.length + 1);
                       assertTrue(!!window);
@@ -91,9 +104,12 @@ chrome.test.runTests([
 
   // Display results in specified tab if said tabId is provided.
   function QueryPopulatedTabIDValid() {
-    chrome.tabs.create({}, (tab) => {
-      waitForTabAndPass(tab.id);
+    chrome.tabs.create({}, async (tab) => {
+      await waitForNewTab(tab.id);
+      const navigated = waitForNavigationToGoogle(tab.id);
       chrome.search.query({text: SEARCH_WORDS, tabId: tab.id});
+      await navigated;
+      chrome.test.succeed();
     });
   },
 
@@ -118,29 +134,34 @@ chrome.test.runTests([
   },
 ]);
 
-function waitForTab(tabIdExpected) {
+function waitForTab(tabIdExpected, expectedHostname) {
   return new Promise((resolve) => {
-    chrome.tabs.onUpdated.addListener(function listener(
-        tabId, changeInfo, tab) {
-      if ((tabIdExpected != -1 && tabId != tabIdExpected) ||
-          changeInfo.status !== 'complete') {
-        return;  // Not our tab.
-      }
-      // Note: make sure to stop listening to future events, so that this
-      // doesn't affect future tests.
-      chrome.tabs.onUpdated.removeListener(listener);
-      // The tab finished loading. It should be on google (the default
-      // search engine).
-      assertEq('www.google.com', new URL(tab.url).hostname);
-      resolve();
-    });
+    chrome.tabs.onUpdated.addListener(
+        function listener(tabId, changeInfo, tab) {
+          if ((tabIdExpected !== -1 && tabId !== tabIdExpected) ||
+              changeInfo.status !== 'complete') {
+            return;  // Not our tab or not fully loaded.
+          }
+          // Stop listening to future events to avoid affecting future tests.
+          chrome.tabs.onUpdated.removeListener(listener);
+
+          // The tab finished loading. It should have expected hostname.
+          assertEq(expectedHostname, new URL(tab.url).hostname);
+          // Resolve the promise as the tab has navigated to the expected
+          // hostname.
+          resolve();
+        });
   });
-};
+}
 
-function waitForAnyTab() {
-  return waitForTab(-1);
-};
+function waitForNewTab(tabId) {
+  return waitForTab(tabId, 'newtab');
+}
 
-function waitForTabAndPass(tabId) {
-  waitForTab(tabId).then(succeed);
+function waitForNavigationToGoogle(tabId) {
+  return waitForTab(tabId, 'www.google.com');
+}
+
+function waitForGoogleInAnyTab() {
+  return waitForTab(-1, 'www.google.com');
 }

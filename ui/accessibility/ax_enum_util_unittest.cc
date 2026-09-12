@@ -89,9 +89,6 @@ TEST(AXEnumUtilTest, Action) {
   TestEnumStringConversion<ax::mojom::Action>();
 }
 
-TEST(AXEnumUtilTest, ActionFlags) {
-  TestEnumStringConversion<ax::mojom::ActionFlags>();
-}
 
 TEST(AXEnumUtilTest, DefaultActionVerb) {
   TestEnumStringConversion<ax::mojom::DefaultActionVerb>();
@@ -247,10 +244,6 @@ TEST(AXEnumUtilTest, TreeOrder) {
 
 TEST(AXEnumUtilTest, ImageAnnotationStatus) {
   TestEnumStringConversion<ax::mojom::ImageAnnotationStatus>();
-}
-
-TEST(AXEnumUtilTest, Dropeffect) {
-  TestEnumStringConversion<ax::mojom::Dropeffect>();
 }
 
 }  // namespace ui

@@ -5,9 +5,11 @@
 #ifndef CHROME_BROWSER_AUTOFILL_MOCK_MANUAL_FILLING_VIEW_H_
 #define CHROME_BROWSER_AUTOFILL_MOCK_MANUAL_FILLING_VIEW_H_
 
+#include <optional>
+
 #include "chrome/browser/autofill/manual_filling_view_interface.h"
-#include "components/autofill/core/browser/ui/accessory_sheet_data.h"
-#include "components/autofill/core/browser/ui/accessory_sheet_enums.h"
+#include "chrome/browser/keyboard_accessory/android/accessory_sheet_data.h"
+#include "chrome/browser/keyboard_accessory/android/accessory_sheet_enums.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 class MockManualFillingView : public ManualFillingViewInterface {
@@ -19,13 +21,30 @@ class MockManualFillingView : public ManualFillingViewInterface {
 
   ~MockManualFillingView() override;
 
-  MOCK_METHOD1(OnItemsAvailable, void(autofill::AccessorySheetData));
-  MOCK_METHOD1(OnAutomaticGenerationStatusChanged, void(bool));
-  MOCK_METHOD0(CloseAccessorySheet, void());
-  MOCK_METHOD0(SwapSheetWithKeyboard, void());
-  MOCK_METHOD1(Show, void(WaitForKeyboard));
-  MOCK_METHOD0(Hide, void());
-  MOCK_METHOD1(ShowAccessorySheetTab, void(const autofill::AccessoryTabType&));
+  MOCK_METHOD((void),
+              OnItemsAvailable,
+              (autofill::AccessorySheetData),
+              (override));
+  MOCK_METHOD((void),
+              OnAccessoryActionAvailabilityChanged,
+              (ShouldShowAction, autofill::AccessoryAction),
+              (override));
+  MOCK_METHOD((void), CloseAccessorySheet, (), (override));
+  MOCK_METHOD((void), SwapSheetWithKeyboard, (), (override));
+  MOCK_METHOD((void),
+              Show,
+              (WaitForKeyboard, ShouldShowOnLargeFormFactor, IsContentEditable),
+              (override));
+  MOCK_METHOD((void), Hide, (), (override));
+  MOCK_METHOD((void),
+              ShowAccessorySheetTab,
+              (const autofill::AccessoryTabType&),
+              (override));
+  MOCK_METHOD((void), SetSelectedSuggestion, (std::optional<int>), (override));
+  MOCK_METHOD((bool),
+              NavigateSuggestions,
+              (autofill::NavigationDirection),
+              (override));
 };
 
 #endif  // CHROME_BROWSER_AUTOFILL_MOCK_MANUAL_FILLING_VIEW_H_

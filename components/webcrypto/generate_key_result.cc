@@ -47,12 +47,11 @@ void GenerateKeyResult::Complete(blink::WebCryptoResult* out) const {
   switch (type_) {
     case TYPE_NULL:
       NOTREACHED();
-      break;
     case TYPE_SECRET_KEY:
-      out->CompleteWithKey(secret_key());
+      out->CompleteWithKeyForGenerateKey(secret_key());
       break;
     case TYPE_PUBLIC_PRIVATE_KEY_PAIR:
-      out->CompleteWithKeyPair(public_key(), private_key());
+      out->CompleteWithKeyPairForGenerateKey(public_key(), private_key());
       break;
   }
 }

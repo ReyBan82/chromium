@@ -24,7 +24,6 @@
 ../grit/grit/gather/skeleton_gatherer.py
 ../grit/grit/gather/tr_html.py
 ../grit/grit/gather/txt.py
-../grit/grit/lazy_re.py
 ../grit/grit/node/__init__.py
 ../grit/grit/node/base.py
 ../grit/grit/node/brotli_util.py
@@ -44,6 +43,7 @@ libsupersize/apkanalyzer.py
 libsupersize/ar.py
 libsupersize/archive.py
 libsupersize/archive_util.py
+libsupersize/arsc_parser.py
 libsupersize/bcanalyzer.py
 libsupersize/canned_queries.py
 libsupersize/console.py
@@ -56,6 +56,7 @@ libsupersize/dex_disassembly.py
 libsupersize/dex_parser.py
 libsupersize/diff.py
 libsupersize/dir_metadata.py
+libsupersize/disassembly_util.py
 libsupersize/dwarfdump.py
 libsupersize/file_format.py
 libsupersize/function_signature.py

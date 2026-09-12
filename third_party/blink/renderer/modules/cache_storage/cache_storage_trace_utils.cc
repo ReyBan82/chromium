@@ -34,15 +34,14 @@ std::unique_ptr<TracedValue> CacheStorageTracedValue(
   auto value = std::make_unique<TracedValue>();
   if (request) {
     value->SetString("url", request->url.GetString());
-    value->SetString("method",
-                     String(MojoEnumToString(request->method).data()));
-    value->SetString("mode", String(MojoEnumToString(request->mode).data()));
+    value->SetString("method", String(MojoEnumToString(request->method)));
+    value->SetString("mode", String(MojoEnumToString(request->mode)));
   }
   return value;
 }
 
 std::unique_ptr<TracedValue> CacheStorageTracedValue(
-    const WTF::Vector<mojom::blink::FetchAPIRequestPtr>& requests) {
+    const Vector<mojom::blink::FetchAPIRequestPtr>& requests) {
   auto value = std::make_unique<TracedValue>();
   value->SetInteger("count", requests.size());
   if (!requests.empty()) {
@@ -92,7 +91,7 @@ std::unique_ptr<TracedValue> CacheStorageTracedValue(
 }
 
 std::unique_ptr<TracedValue> CacheStorageTracedValue(
-    const WTF::Vector<mojom::blink::FetchAPIResponsePtr>& responses) {
+    const Vector<mojom::blink::FetchAPIResponsePtr>& responses) {
   auto value = std::make_unique<TracedValue>();
   value->SetInteger("count", responses.size());
   if (!responses.empty()) {
@@ -114,7 +113,7 @@ std::unique_ptr<TracedValue> CacheStorageTracedValue(
 }
 
 std::unique_ptr<TracedValue> CacheStorageTracedValue(
-    const WTF::Vector<String>& string_list) {
+    const Vector<String>& string_list) {
   auto value = std::make_unique<TracedValue>();
   value->SetInteger("count", string_list.size());
   if (!string_list.empty()) {

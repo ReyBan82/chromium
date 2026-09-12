@@ -5,7 +5,7 @@
 #include "chrome/browser/ash/sync/sync_appsync_service_factory.h"
 
 #include "base/check_is_test.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/ash/sync/sync_appsync_service.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_keyed_service_factory.h"
@@ -22,17 +22,29 @@ SyncAppsyncService* SyncAppsyncServiceFactory::GetForProfile(Profile* profile) {
 
 // static
 SyncAppsyncServiceFactory* SyncAppsyncServiceFactory::GetInstance() {
-  return base::Singleton<SyncAppsyncServiceFactory>::get();
+  static base::NoDestructor<SyncAppsyncServiceFactory> instance;
+  return instance.get();
 }
 
 SyncAppsyncServiceFactory::SyncAppsyncServiceFactory()
-    : ProfileKeyedServiceFactory("SyncAppsyncService") {
+    : ProfileKeyedServiceFactory(
+          "SyncAppsyncService",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOriginalOnly)
+              .Build()) {
   DependsOn(SyncServiceFactory::GetInstance());
 }
 
 SyncAppsyncServiceFactory::~SyncAppsyncServiceFactory() = default;
 
-KeyedService* SyncAppsyncServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+SyncAppsyncServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   Profile* profile = Profile::FromBrowserContext(context);
   syncer::SyncService* sync_service =
@@ -52,7 +64,19 @@ KeyedService* SyncAppsyncServiceFactory::BuildServiceInstanceFor(
 
   user_manager::UserManager* user_manager = user_manager::UserManager::Get();
 
-  return new SyncAppsyncService(sync_service, user_manager);
+  return std::make_unique<SyncAppsyncService>(sync_service, user_manager);
+}
+
+// SyncAppsyncService needs to be created by default as it is responsible for
+// populating the current profile's apps sync status to the daemon-store, as
+// well as monitoring for changes, and we need this information to exist / be
+// current.
+bool SyncAppsyncServiceFactory::ServiceIsCreatedWithBrowserContext() const {
+  return true;
+}
+
+bool SyncAppsyncServiceFactory::ServiceIsNULLWhileTesting() const {
+  return true;
 }
 
 }  // namespace ash

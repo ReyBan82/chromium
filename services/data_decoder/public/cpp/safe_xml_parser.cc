@@ -4,6 +4,8 @@
 
 #include "services/data_decoder/public/cpp/safe_xml_parser.h"
 
+#include <string_view>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/threading/thread_checker.h"
@@ -13,7 +15,7 @@
 
 namespace data_decoder {
 
-const base::Value::List* GetXmlElementChildren(const base::Value& element) {
+const base::ListValue* GetXmlElementChildren(const base::Value& element) {
   if (!element.is_dict())
     return nullptr;
   return element.GetDict().FindList(mojom::XmlParser::kChildrenKey);
@@ -29,7 +31,7 @@ bool IsXmlElementNamed(const base::Value& element, const std::string& name) {
     return false;
   const std::string* tag_text =
       element.GetDict().FindString(mojom::XmlParser::kTagKey);
-  return tag_text ? *tag_text == name : false;
+  return tag_text && *tag_text == name;
 }
 
 bool IsXmlElementOfType(const base::Value& element, const std::string& type) {
@@ -37,7 +39,7 @@ bool IsXmlElementOfType(const base::Value& element, const std::string& type) {
     return false;
   const std::string* type_text =
       element.GetDict().FindString(mojom::XmlParser::kTypeKey);
-  return type_text ? *type_text == type : false;
+  return type_text && *type_text == type;
 }
 
 bool GetXmlElementTagName(const base::Value& element, std::string* tag_name) {
@@ -54,7 +56,7 @@ bool GetXmlElementTagName(const base::Value& element, std::string* tag_name) {
 
 bool GetXmlElementText(const base::Value& element, std::string* text) {
   DCHECK(text);
-  const base::Value::List* children = GetXmlElementChildren(element);
+  const base::ListValue* children = GetXmlElementChildren(element);
   if (!children)
     return false;
 
@@ -84,7 +86,7 @@ bool GetXmlElementNamespacePrefix(const base::Value& element,
   }
 
   prefix->clear();
-  const base::Value::Dict* namespaces =
+  const base::DictValue* namespaces =
       element.GetDict().FindDict(mojom::XmlParser::kNamespacesKey);
   if (!namespaces)
     return false;
@@ -102,7 +104,7 @@ bool GetXmlElementNamespacePrefix(const base::Value& element,
 
 int GetXmlElementChildrenCount(const base::Value& element,
                                const std::string& name) {
-  const base::Value::List* children = GetXmlElementChildren(element);
+  const base::ListValue* children = GetXmlElementChildren(element);
   if (!children)
     return 0;
   int child_count = 0;
@@ -118,7 +120,7 @@ int GetXmlElementChildrenCount(const base::Value& element,
 
 const base::Value* GetXmlElementChildWithType(const base::Value& element,
                                               const std::string& type) {
-  const base::Value::List* children = GetXmlElementChildren(element);
+  const base::ListValue* children = GetXmlElementChildren(element);
   if (!children)
     return nullptr;
   for (const base::Value& value : *children) {
@@ -132,7 +134,7 @@ const base::Value* GetXmlElementChildWithType(const base::Value& element,
 
 const base::Value* GetXmlElementChildWithTag(const base::Value& element,
                                              const std::string& tag) {
-  const base::Value::List* children = GetXmlElementChildren(element);
+  const base::ListValue* children = GetXmlElementChildren(element);
   if (!children)
     return nullptr;
   for (const base::Value& value : *children) {
@@ -147,7 +149,7 @@ bool GetAllXmlElementChildrenWithTag(
     const base::Value& element,
     const std::string& tag,
     std::vector<const base::Value*>* children_out) {
-  const base::Value::List* children = GetXmlElementChildren(element);
+  const base::ListValue* children = GetXmlElementChildren(element);
   if (!children)
     return false;
   bool found = false;
@@ -163,13 +165,13 @@ bool GetAllXmlElementChildrenWithTag(
 
 const base::Value* FindXmlElementPath(
     const base::Value& element,
-    std::initializer_list<base::StringPiece> path,
+    std::initializer_list<std::string_view> path,
     bool* unique_path) {
   const base::Value* cur = nullptr;
   if (unique_path)
     *unique_path = true;
 
-  for (const base::StringPiece component_piece : path) {
+  for (const std::string_view component_piece : path) {
     std::string component(component_piece);
     if (!cur) {
       // First element has to match the current node.
@@ -197,7 +199,7 @@ std::string GetXmlElementAttribute(const base::Value& element,
   if (!element.is_dict())
     return "";
 
-  const base::Value::Dict* attributes =
+  const base::DictValue* attributes =
       element.GetDict().FindDict(mojom::XmlParser::kAttributesKey);
   if (!attributes)
     return "";

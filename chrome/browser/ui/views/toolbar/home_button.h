@@ -7,34 +7,41 @@
 
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_button.h"
+#include "ui/base/interaction/element_identifier.h"
 #include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/compositor/layer_tree_owner.h"
+#include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/metadata/view_factory.h"
 #include "ui/views/view_tracker.h"
 
+class BrowserWindowInterface;
 class PrefService;
 
 class HomePageUndoBubbleCoordinator {
  public:
-  HomePageUndoBubbleCoordinator(views::View* anchor_view, PrefService* prefs);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kHomePageUndoBubbleMainViewId);
+
+  explicit HomePageUndoBubbleCoordinator(PrefService* prefs);
   HomePageUndoBubbleCoordinator(const HomePageUndoBubbleCoordinator&) = delete;
   HomePageUndoBubbleCoordinator& operator=(
       const HomePageUndoBubbleCoordinator&) = delete;
   ~HomePageUndoBubbleCoordinator();
 
-  void Show(const GURL& undo_url, bool undo_value_is_ntp);
+  void Show(const GURL& undo_url,
+            bool undo_value_is_ntp,
+            const views::BubbleAnchor& anchor);
 
  private:
-  const raw_ptr<views::View> anchor_view_;
   const raw_ptr<PrefService> prefs_;
   views::ViewTracker tracker_;
 };
 
 class HomeButton : public ToolbarButton {
- public:
-  METADATA_HEADER(HomeButton);
+  METADATA_HEADER(HomeButton, ToolbarButton)
 
-  explicit HomeButton(PressedCallback callback = PressedCallback(),
-                      PrefService* prefs = nullptr);
+ public:
+  explicit HomeButton(BrowserWindowInterface* browser_window_interface,
+                      PressedCallback callback);
   HomeButton(const HomeButton&) = delete;
   HomeButton& operator=(const HomeButton&) = delete;
   ~HomeButton() override;
@@ -48,8 +55,10 @@ class HomeButton : public ToolbarButton {
       const ui::DropTargetEvent& event) override;
 
  private:
-  void UpdateHomePage(const ui::DropTargetEvent& event,
-                      ui::mojom::DragOperation& output_drag_op);
+  void UpdateHomePage(
+      const ui::DropTargetEvent& event,
+      ui::mojom::DragOperation& output_drag_op,
+      std::unique_ptr<ui::LayerTreeOwner> drag_image_layer_owner);
 
   const raw_ptr<PrefService> prefs_;
   HomePageUndoBubbleCoordinator coordinator_;

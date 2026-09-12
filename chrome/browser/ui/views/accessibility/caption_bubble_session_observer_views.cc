@@ -4,8 +4,6 @@
 
 #include "chrome/browser/ui/views/accessibility/caption_bubble_session_observer_views.h"
 
-#include <memory>
-
 #include "components/live_caption/caption_bubble_session_observer.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/navigation_handle.h"
@@ -16,8 +14,7 @@ namespace captions {
 
 CaptionBubbleSessionObserverViews::CaptionBubbleSessionObserverViews(
     content::WebContents* web_contents)
-    : CaptionBubbleSessionObserver(),
-      content::WebContentsObserver(web_contents),
+    : content::WebContentsObserver(web_contents),
       web_contents_id_(web_contents->GetBrowserContext()->UniqueId()) {}
 
 CaptionBubbleSessionObserverViews::~CaptionBubbleSessionObserverViews() =
@@ -37,8 +34,9 @@ void CaptionBubbleSessionObserverViews::DidFinishNavigation(
 }
 
 void CaptionBubbleSessionObserverViews::WebContentsDestroyed() {
-  if (end_session_callback_)
+  if (end_session_callback_) {
     end_session_callback_.Run(web_contents_id_);
+  }
 }
 
 void CaptionBubbleSessionObserverViews::SetEndSessionCallback(

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   const {page, session, dp} = await testRunner.startBlank(
       `Tests basic virtual time functionality in workers.`);
 
@@ -25,7 +25,7 @@
   wp.Runtime.onConsoleAPICalled(({params}) => {
     testRunner.log(params.args[0].value);
   });
-  await wp.Runtime.runIfWaitingForDebugger();
+  wp.Runtime.runIfWaitingForDebugger();
   // From now on, VT runs in both page and the worker and one will
   // block another if VT expires, so make sure we drive the time in
   // page to avoid worker being blocked on the page.

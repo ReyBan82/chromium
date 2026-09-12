@@ -5,27 +5,44 @@
 #ifndef CHROME_BROWSER_ASH_POLICY_CORE_DEVICE_LOCAL_ACCOUNT_EXTERNAL_CACHE_H_
 #define CHROME_BROWSER_ASH_POLICY_CORE_DEVICE_LOCAL_ACCOUNT_EXTERNAL_CACHE_H_
 
+#include <memory>
+#include <set>
+#include <string>
+
 #include "base/files/file_path.h"
-#include "base/functional/callback_forward.h"
+#include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
 #include "chrome/browser/ash/extensions/external_cache_delegate.h"
-#include "chrome/browser/chromeos/extensions/device_local_account_external_policy_loader.h"
 #include "chrome/browser/extensions/external_loader.h"
+
+namespace network {
+class SharedURLLoaderFactory;
+}  // namespace network
 
 namespace chromeos {
 
 class ExternalCache;
 
 /**
- * Wrapper class around ExternalCache that also handles the callbacks from
- * ExternalCacheDelegate.
+ * Wrapper class around `ExternalCache` that will inform the given loader when
+ * extensions have been downloaded by the cache. Instantiated once per device
+ * local account.
  */
 class DeviceLocalAccountExternalCache : public ExternalCacheDelegate {
  public:
-  DeviceLocalAccountExternalCache(const std::string& user_id,
-                                  const base::FilePath& cache_dir);
+  // Callback invoked when the list of cached extensions is updated.
+  using ExtensionListCallback =
+      base::RepeatingCallback<void(const std::string& user_id,
+                                   base::DictValue cached_extensions)>;
+
+  // `shared_url_loader_factory` must be non-null.
+  DeviceLocalAccountExternalCache(
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      ExtensionListCallback loader,
+      const std::string& user_id,
+      const base::FilePath& cache_dir);
   ~DeviceLocalAccountExternalCache() override;
 
   // Start the cache using the supplied |cache_task_runner|.
@@ -38,21 +55,38 @@ class DeviceLocalAccountExternalCache : public ExternalCacheDelegate {
   // Return whether the cache is currently running.
   bool IsCacheRunning() const;
 
-  // Send the new extension dictionary down to the ExternalCache.
-  void UpdateExtensionsList(base::Value::Dict dict);
-
-  // ExternalCacheDelegate:
-  void OnExtensionListsUpdated(const base::Value::Dict& prefs) override;
+  // Sends all extensions down to the `ExternalCache`.
+  // Then when the extensions are downloaded by the cache they will be sent to
+  // the `loader`.
+  void UpdateExtensionsList(base::DictValue extensions);
 
   scoped_refptr<extensions::ExternalLoader> GetExtensionLoader();
 
-  base::Value::Dict GetCachedExtensions() const;
+  // Returns all cached extensions.
+  base::DictValue GetCachedExtensionsForTesting() const;
+
+  // Pretends the external cache responded to `OnExtensionListUpdated` with the
+  // given list of cached/downloaded extensions.
+  void SetCacheResponseForTesting(const base::DictValue& cached_extensions);
 
  private:
+  // `ExternalCacheDelegate`:
+  void OnExtensionListsUpdated(const base::DictValue& prefs) override;
+  bool IsRollbackAllowed() const override;
+  bool CanRollbackNow() const override;
+
+  const scoped_refptr<network::SharedURLLoaderFactory>
+      shared_url_loader_factory_;
+
   const std::string user_id_;
   const base::FilePath cache_dir_;
   std::unique_ptr<ExternalCache> external_cache_;
-  scoped_refptr<DeviceLocalAccountExternalPolicyLoader> loader_;
+
+  std::set<std::string> extension_keys_;
+
+  // Callback invoked when the list of cached extensions that must be installed
+  // is updated.
+  ExtensionListCallback loader_;
 };
 
 }  // namespace chromeos

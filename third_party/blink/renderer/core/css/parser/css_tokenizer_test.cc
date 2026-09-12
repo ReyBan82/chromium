@@ -5,7 +5,7 @@
 #include "third_party/blink/renderer/core/css/parser/css_tokenizer.h"
 
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/renderer/core/css/parser/css_parser_token_range.h"
+#include "third_party/blink/renderer/core/css/parser/css_parser_token_stream.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/partitions.h"
 
 namespace blink {
@@ -56,31 +56,50 @@ void CompareTokens(const CSSParserToken& expected,
   }
 }
 
+void TestTokensForOneRepresentation(const String& string,
+                                    const CSSParserToken& token1,
+                                    const CSSParserToken& token2,
+                                    const CSSParserToken& token3,
+                                    bool unicode_ranges_allowed) {
+  CSSParserTokenStream stream(string);
+  CSSParserTokenStream::EnableUnicodeRanges enable(stream,
+                                                   unicode_ranges_allowed);
+  CompareTokens(token1, stream.Peek());
+  if (!stream.AtEnd()) {
+    stream.ConsumeRaw();
+    CompareTokens(token2, stream.Peek());
+    if (!stream.AtEnd()) {
+      stream.ConsumeRaw();
+      CompareTokens(token3, stream.Peek());
+    }
+  }
+}
+
 void TestTokens(const String& string,
                 const CSSParserToken& token1,
                 const CSSParserToken& token2 = CSSParserToken(kEOFToken),
-                const CSSParserToken& token3 = CSSParserToken(kEOFToken)) {
-  Vector<CSSParserToken> expected_tokens;
-  expected_tokens.push_back(token1);
-  if (token2.GetType() != kEOFToken) {
-    expected_tokens.push_back(token2);
-    if (token3.GetType() != kEOFToken) {
-      expected_tokens.push_back(token3);
-    }
+                const CSSParserToken& token3 = CSSParserToken(kEOFToken),
+                bool unicode_ranges_allowed = false) {
+  TestTokensForOneRepresentation(string, token1, token2, token3,
+                                 unicode_ranges_allowed);
+  // A stylesheet is 16-bit as soon as it contains a single non-Latin-1
+  // character, and the tokenizer has separate code paths for 8-bit and
+  // 16-bit input in places, so make sure both agree.
+  if (string.Is8Bit()) {
+    String wide = string;
+    wide.Ensure16Bit();
+    SCOPED_TRACE("as 16-bit");
+    TestTokensForOneRepresentation(wide, token1, token2, token3,
+                                   unicode_ranges_allowed);
   }
+}
 
-  CSSParserTokenRange expected(expected_tokens);
-
-  CSSTokenizer tokenizer(string);
-  const auto tokens = tokenizer.TokenizeToEOF();
-  CSSParserTokenRange actual(tokens);
-
-  // Just check that serialization doesn't hit any asserts
-  actual.Serialize();
-
-  while (!expected.AtEnd() || !actual.AtEnd()) {
-    CompareTokens(expected.Consume(), actual.Consume());
-  }
+void TestUnicodeRangeTokens(
+    const String& string,
+    const CSSParserToken& token1,
+    const CSSParserToken& token2 = CSSParserToken(kEOFToken),
+    const CSSParserToken& token3 = CSSParserToken(kEOFToken)) {
+  TEST_TOKENS(string, token1, token2, token3, true);
 }
 
 static CSSParserToken Ident(const String& string) {
@@ -131,10 +150,10 @@ static CSSParserToken Percentage(NumericValueType type, double value) {
 
 // We need to initialize PartitionAlloc before creating CSSParserTokens
 // because CSSParserToken depends on PartitionAlloc. It is safe to call
-// WTF::Partitions::initialize() multiple times.
+// Partitions::initialize() multiple times.
 #define DEFINE_TOKEN(name, argument)                       \
   static CSSParserToken& name() {                          \
-    WTF::Partitions::Initialize();                         \
+    Partitions::Initialize();                              \
     DEFINE_STATIC_LOCAL(CSSParserToken, name, (argument)); \
     return name;                                           \
   }
@@ -236,8 +255,9 @@ TEST(CSSTokenizerTest, Escapes) {
   TEST_TOKENS("\\\f", Delim('\\'), Whitespace());
   TEST_TOKENS("\\\r\n", Delim('\\'), Whitespace());
   String replacement = FromUChar32(0xFFFD);
-  TEST_TOKENS(String("null\\\0", 6u), Ident("null" + replacement));
-  TEST_TOKENS(String("null\\\0\0", 7u),
+  TEST_TOKENS(String(base::span_from_cstring("null\\\0")),
+              Ident("null" + replacement));
+  TEST_TOKENS(String(base::span_from_cstring("null\\\0\0")),
               Ident("null" + replacement + replacement));
   TEST_TOKENS("null\\0", Ident("null" + replacement));
   TEST_TOKENS("null\\0000", Ident("null" + replacement));
@@ -250,6 +270,65 @@ TEST(CSSTokenizerTest, Escapes) {
   TEST_TOKENS("\\10fFfF0", Ident(FromUChar32(0x10ffff) + "0"));
   TEST_TOKENS("\\10000000", Ident(FromUChar32(0x100000) + "00"));
   TEST_TOKENS("eof\\", Ident("eof" + replacement));
+
+  // Long names with escapes.
+  StringBuilder long_escaped;
+  StringBuilder long_expected;
+  for (int i = 0; i < 400; ++i) {
+    long_escaped.Append("segment\\:");
+    long_expected.Append("segment:");
+  }
+  TEST_TOKENS(long_escaped.ToString(), Ident(long_expected.ToString()));
+  StringBuilder huge_escaped;
+  StringBuilder huge_expected;
+  for (int i = 0; i < 2000; ++i) {
+    huge_escaped.Append("abcdefghijklmnop\\.");
+    huge_expected.Append("abcdefghijklmnop.");
+  }
+  TEST_TOKENS(huge_escaped.ToString(), Ident(huge_expected.ToString()));
+  // Many escaped names in one stream.
+  {
+    StringBuilder many;
+    for (int i = 0; i < 3000; ++i) {
+      many.Append(".w-\\[24px\\] ");
+    }
+    CSSParserTokenStream stream(many.ToString());
+    int count = 0;
+    while (!stream.AtEnd()) {
+      const CSSParserToken& token = stream.ConsumeRaw();
+      if (token.GetType() == kIdentToken) {
+        EXPECT_EQ(token.Value(), "w-[24px]");
+        ++count;
+      }
+    }
+    EXPECT_EQ(count, 3000);
+  }
+  // Escapes right at the boundaries of 16-character blocks (the name
+  // scanner works in blocks of 16 where SIMD is available).
+  TEST_TOKENS("abcdefghijklmnop\\:x", Ident("abcdefghijklmnop:x"));
+  TEST_TOKENS("abcdefghijklmno\\:x", Ident("abcdefghijklmno:x"));
+  TEST_TOKENS("abcdefghijklmnopq\\:x", Ident("abcdefghijklmnopq:x"));
+  TEST_TOKENS("\\:abcdefghijklmnopqrstuvwxyz",
+              Ident(":abcdefghijklmnopqrstuvwxyz"));
+  // Latin-1 and non-Latin-1 characters mixed with escapes.
+  TEST_TOKENS(String::FromUtf8("caf\u00e9\\:x"),
+              Ident(String::FromUtf8("caf\u00e9:x")));
+  TEST_TOKENS(String::FromUtf8("na\\:\u00efve"),
+              Ident(String::FromUtf8("na:\u00efve")));
+  TEST_TOKENS(String::FromUtf8("a\\:\u2026b"),
+              Ident(String::FromUtf8("a:\u2026b")));
+  TEST_TOKENS(String::FromUtf8("a\\:\U0001F600b"),
+              Ident(String::FromUtf8("a:\U0001F600b")));
+  TEST_TOKENS(String::FromUtf8("\u2026\\:a"),
+              Ident(String::FromUtf8("\u2026:a")));
+  TEST_TOKENS("a\\e9 b", Ident(String::FromUtf8("a\u00e9b")));
+  TEST_TOKENS("a\\2026 b", Ident(String::FromUtf8("a\u2026b")));
+  TEST_TOKENS("a\\:\\", Ident("a:" + replacement));
+  TEST_TOKENS("a\\:\\\n", Ident("a:"), Delim('\\'), Whitespace());
+  TEST_TOKENS(String(base::span_from_cstring("a\\:\0b")),
+              Ident("a:" + replacement + "b"));
+  TEST_TOKENS(String(base::span_from_cstring("a\\:b\\\0")),
+              Ident("a:b" + replacement));
 }
 
 TEST(CSSTokenizerTest, IdentToken) {
@@ -270,9 +349,43 @@ TEST(CSSTokenizerTest, IdentToken) {
               Ident(FromUChar32(0xA0)));  // non-breaking space
   TEST_TOKENS(FromUChar32(0x1234), Ident(FromUChar32(0x1234)));
   TEST_TOKENS(FromUChar32(0x12345), Ident(FromUChar32(0x12345)));
-  TEST_TOKENS(String("\0", 1u), Ident(FromUChar32(0xFFFD)));
-  TEST_TOKENS(String("ab\0c", 4u), Ident("ab" + FromUChar32(0xFFFD) + "c"));
-  TEST_TOKENS(String("ab\0c", 4u), Ident("ab" + FromUChar32(0xFFFD) + "c"));
+  TEST_TOKENS(String(base::span_from_cstring("\0")),
+              Ident(FromUChar32(0xFFFD)));
+  TEST_TOKENS(String(base::span_from_cstring("-\0")),
+              Ident("-" + FromUChar32(0xFFFD)));
+  TEST_TOKENS(String(base::span_from_cstring("ab\0c")),
+              Ident("ab" + FromUChar32(0xFFFD) + "c"));
+  TEST_TOKENS(String(base::span_from_cstring("ab\0c")),
+              Ident("ab" + FromUChar32(0xFFFD) + "c"));
+  // Lone surrogates are replaced with U+FFFD per CSS input preprocessing.
+  TEST_TOKENS(FromUChar32(0xD800), Ident(FromUChar32(0xFFFD)));
+  TEST_TOKENS("foo" + FromUChar32(0xD800), Ident("foo" + FromUChar32(0xFFFD)));
+  TEST_TOKENS(FromUChar32(0xD800) + "foo", Ident(FromUChar32(0xFFFD) + "foo"));
+  TEST_TOKENS("f" + FromUChar32(0xD800) + "oo",
+              Ident("f" + FromUChar32(0xFFFD) + "oo"));
+  TEST_TOKENS(FromUChar32(0xDBFF), Ident(FromUChar32(0xFFFD)));
+  TEST_TOKENS(FromUChar32(0xDC00), Ident(FromUChar32(0xFFFD)));
+  TEST_TOKENS(FromUChar32(0xDFFF), Ident(FromUChar32(0xFFFD)));
+  // Valid surrogate pairs (supplementary characters) are preserved.
+  TEST_TOKENS(FromUChar32(0x10000), Ident(FromUChar32(0x10000)));
+  TEST_TOKENS(FromUChar32(0x1F600), Ident(FromUChar32(0x1F600)));  // 😀
+  TEST_TOKENS("foo" + FromUChar32(0x1F600),
+              Ident("foo" + FromUChar32(0x1F600)));
+  TEST_TOKENS(FromUChar32(0x1F600) + "foo",
+              Ident(FromUChar32(0x1F600) + "foo"));
+  TEST_TOKENS(FromUChar32(0x10FFFF), Ident(FromUChar32(0x10FFFF)));
+  // Long identifiers (>16 chars) with lone surrogates.
+  TEST_TOKENS("abcdefghijklmnopqr" + FromUChar32(0xD800),
+              Ident("abcdefghijklmnopqr" + FromUChar32(0xFFFD)));
+  TEST_TOKENS("abcdefghijklmnopqr" + FromUChar32(0xDC00),
+              Ident("abcdefghijklmnopqr" + FromUChar32(0xFFFD)));
+  TEST_TOKENS("abcdefghijklmnopqr" + FromUChar32(0xD800) + "suffix",
+              Ident("abcdefghijklmnopqr" + FromUChar32(0xFFFD) + "suffix"));
+  // Long identifiers with valid surrogate pairs.
+  TEST_TOKENS("abcdefghijklmnopqr" + FromUChar32(0x1F600),
+              Ident("abcdefghijklmnopqr" + FromUChar32(0x1F600)));
+  TEST_TOKENS("abcdefghijklmnopqr" + FromUChar32(0x1F600) + "suffix",
+              Ident("abcdefghijklmnopqr" + FromUChar32(0x1F600) + "suffix"));
 }
 
 TEST(CSSTokenizerTest, FunctionToken) {
@@ -300,6 +413,8 @@ TEST(CSSTokenizerTest, AtKeywordToken) {
   TEST_TOKENS("@---", AtKeyword("---"));
   TEST_TOKENS("@\\ ", AtKeyword(" "));
   TEST_TOKENS("@-\\ ", AtKeyword("- "));
+  TEST_TOKENS(String(base::span_from_cstring("@-\0")),
+              AtKeyword("-" + FromUChar32(0xFFFD)));
   TEST_TOKENS("@@", Delim('@'), Delim('@'));
   TEST_TOKENS("@2", Delim('@'), Number(kIntegerValueType, 2, kNoSign));
   TEST_TOKENS("@-1", Delim('@'), Number(kIntegerValueType, -1, kMinusSign));
@@ -347,10 +462,11 @@ TEST(CSSTokenizerTest, StringToken) {
   TEST_TOKENS("'bad\rstring", BadString(), Whitespace(), Ident("string"));
   TEST_TOKENS("'bad\r\nstring", BadString(), Whitespace(), Ident("string"));
   TEST_TOKENS("'bad\fstring", BadString(), Whitespace(), Ident("string"));
-  TEST_TOKENS(String("'\0'", 3u), GetString(FromUChar32(0xFFFD)));
-  TEST_TOKENS(String("'hel\0lo'", 8u),
+  TEST_TOKENS(String(base::span_from_cstring("'\0'")),
+              GetString(FromUChar32(0xFFFD)));
+  TEST_TOKENS(String(base::span_from_cstring("'hel\0lo'")),
               GetString("hel" + FromUChar32(0xFFFD) + "lo"));
-  TEST_TOKENS(String("'h\\65l\0lo'", 10u),
+  TEST_TOKENS(String(base::span_from_cstring("'h\\65l\0lo'")),
               GetString("hel" + FromUChar32(0xFFFD) + "lo"));
 }
 
@@ -359,6 +475,10 @@ TEST(CSSTokenizerTest, HashToken) {
   TEST_TOKENS("#FF7700", GetHash("FF7700", kHashTokenId));
   TEST_TOKENS("#3377FF", GetHash("3377FF", kHashTokenUnrestricted));
   TEST_TOKENS("#\\ ", GetHash(" ", kHashTokenId));
+  TEST_TOKENS(String(base::span_from_cstring("#\0")),
+              GetHash(FromUChar32(0xFFFD), kHashTokenId));
+  TEST_TOKENS(String(base::span_from_cstring("#-\0")),
+              GetHash("-" + FromUChar32(0xFFFD), kHashTokenId));
   TEST_TOKENS("# ", Delim('#'), Whitespace());
   TEST_TOKENS("#\\\n", Delim('#'), Delim('\\'), Whitespace());
   TEST_TOKENS("#\\\r\n", Delim('#'), Delim('\\'), Whitespace());
@@ -408,6 +528,8 @@ TEST(CSSTokenizerTest, DimensionToken) {
   TEST_TOKENS("4e3e2", Dimension(kNumberValueType, 4000, "e2"));
   TEST_TOKENS("0x10px", Dimension(kIntegerValueType, 0, "x10px"));
   TEST_TOKENS("4unit ", Dimension(kIntegerValueType, 4, "unit"), Whitespace());
+  TEST_TOKENS(String(base::span_from_cstring("1-\0")),
+              Dimension(kIntegerValueType, 1, "-" + FromUChar32(0xFFFD)));
   TEST_TOKENS("5e+", Dimension(kIntegerValueType, 5, "e"), Delim('+'));
   TEST_TOKENS("2e.5", Dimension(kIntegerValueType, 2, "e"),
               Number(kNumberValueType, 0.5, kNoSign));
@@ -424,32 +546,39 @@ TEST(CSSTokenizerTest, PercentageToken) {
 }
 
 TEST(CSSTokenizerTest, UnicodeRangeToken) {
-  TEST_TOKENS("u+012345-123456", UnicodeRng(0x012345, 0x123456));
-  TEST_TOKENS("U+1234-2345", UnicodeRng(0x1234, 0x2345));
-  TEST_TOKENS("u+222-111", UnicodeRng(0x222, 0x111));
-  TEST_TOKENS("U+CafE-d00D", UnicodeRng(0xcafe, 0xd00d));
-  TEST_TOKENS("U+2??", UnicodeRng(0x200, 0x2ff));
-  TEST_TOKENS("U+ab12??", UnicodeRng(0xab1200, 0xab12ff));
-  TEST_TOKENS("u+??????", UnicodeRng(0x000000, 0xffffff));
-  TEST_TOKENS("u+??", UnicodeRng(0x00, 0xff));
+  TestUnicodeRangeTokens("u+012345-123456", UnicodeRng(0x012345, 0x123456));
+  TestUnicodeRangeTokens("U+1234-2345", UnicodeRng(0x1234, 0x2345));
+  TestUnicodeRangeTokens("u+222-111", UnicodeRng(0x222, 0x111));
+  TestUnicodeRangeTokens("U+CafE-d00D", UnicodeRng(0xcafe, 0xd00d));
+  TestUnicodeRangeTokens("U+2??", UnicodeRng(0x200, 0x2ff));
+  TestUnicodeRangeTokens("U+ab12??", UnicodeRng(0xab1200, 0xab12ff));
+  TestUnicodeRangeTokens("u+??????", UnicodeRng(0x000000, 0xffffff));
+  TestUnicodeRangeTokens("u+??", UnicodeRng(0x00, 0xff));
 
-  TEST_TOKENS("u+222+111", UnicodeRng(0x222, 0x222),
-              Number(kIntegerValueType, 111, kPlusSign));
-  TEST_TOKENS("u+12345678", UnicodeRng(0x123456, 0x123456),
-              Number(kIntegerValueType, 78, kNoSign));
-  TEST_TOKENS("u+123-12345678", UnicodeRng(0x123, 0x123456),
-              Number(kIntegerValueType, 78, kNoSign));
-  TEST_TOKENS("u+cake", UnicodeRng(0xca, 0xca), Ident("ke"));
-  TEST_TOKENS("u+1234-gggg", UnicodeRng(0x1234, 0x1234), Ident("-gggg"));
-  TEST_TOKENS("U+ab12???", UnicodeRng(0xab1200, 0xab12ff), Delim('?'));
-  TEST_TOKENS("u+a1?-123", UnicodeRng(0xa10, 0xa1f),
-              Number(kIntegerValueType, -123, kMinusSign));
-  TEST_TOKENS("u+1??4", UnicodeRng(0x100, 0x1ff),
-              Number(kIntegerValueType, 4, kNoSign));
+  TestUnicodeRangeTokens("u+222+111", UnicodeRng(0x222, 0x222),
+                         Number(kIntegerValueType, 111, kPlusSign));
+  TestUnicodeRangeTokens("u+12345678", UnicodeRng(0x123456, 0x123456),
+                         Number(kIntegerValueType, 78, kNoSign));
+  TestUnicodeRangeTokens("u+123-12345678", UnicodeRng(0x123, 0x123456),
+                         Number(kIntegerValueType, 78, kNoSign));
+  TestUnicodeRangeTokens("u+cake", UnicodeRng(0xca, 0xca), Ident("ke"));
+  TestUnicodeRangeTokens("u+1234-gggg", UnicodeRng(0x1234, 0x1234),
+                         Ident("-gggg"));
+  TestUnicodeRangeTokens("U+ab12???", UnicodeRng(0xab1200, 0xab12ff),
+                         Delim('?'));
+  TestUnicodeRangeTokens("u+a1?-123", UnicodeRng(0xa10, 0xa1f),
+                         Number(kIntegerValueType, -123, kMinusSign));
+  TestUnicodeRangeTokens("u+1??4", UnicodeRng(0x100, 0x1ff),
+                         Number(kIntegerValueType, 4, kNoSign));
   TEST_TOKENS("u+z", Ident("u"), Delim('+'), Ident("z"));
   TEST_TOKENS("u+", Ident("u"), Delim('+'));
   TEST_TOKENS("u+-543", Ident("u"), Delim('+'),
               Number(kIntegerValueType, -543, kMinusSign));
+
+  TEST_TOKENS("u+012345", Ident("u"),
+              Number(kIntegerValueType, 12345, kPlusSign));
+  TEST_TOKENS("u+a", Ident("u"), Delim('+'), Ident("a"));
+  TestUnicodeRangeTokens("u+a", UnicodeRng(0xa, 0xa));
 }
 
 TEST(CSSTokenizerTest, CommentToken) {

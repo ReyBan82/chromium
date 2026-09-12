@@ -6,7 +6,10 @@
 
 #include <stdint.h>
 
+#include <algorithm>
+
 #include "base/check.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "media/audio/audio_device_description.h"
 #include "media/audio/pulse/audio_manager_pulse.h"
@@ -15,22 +18,26 @@
 
 namespace media {
 
+using Error = AudioInputStream::AudioInputCallback::Error;
+
 using pulse::AutoPulseLock;
 using pulse::WaitForOperationCompletion;
 
 // Number of blocks of buffers used in the |fifo_|.
-const int kNumberOfBlocksBufferInFifo = 2;
+constexpr int kNumberOfBlocksBufferInFifo = 2;
+
+constexpr SampleFormat kSampleFormat = pulse::kInputSampleFormat;
 
 PulseAudioInputStream::PulseAudioInputStream(
     AudioManagerPulse* audio_manager,
-    const std::string& device_name,
+    const std::string& source_name,
     const AudioParameters& params,
     pa_threaded_mainloop* mainloop,
     pa_context* context,
     AudioManager::LogCallback log_callback)
     : audio_manager_(audio_manager),
       callback_(nullptr),
-      device_name_(device_name),
+      source_name_(source_name),
       params_(params),
       channels_(0),
       volume_(0.0),
@@ -42,12 +49,24 @@ PulseAudioInputStream::PulseAudioInputStream(
       pa_mainloop_(mainloop),
       pa_context_(context),
       log_callback_(std::move(log_callback)),
-      handle_(nullptr) {
+      handle_(nullptr),
+      peak_detector_(
+          audio_manager ? base::BindRepeating(&AudioManager::TraceAmplitudePeak,
+                                              base::Unretained(audio_manager_),
+                                              /*trace_start=*/true)
+                        : base::RepeatingClosure()) {
   DCHECK(mainloop);
   DCHECK(context);
   CHECK(params_.IsValid());
-  SendLogMessage("%s({device_id=%s}, {params=[%s]})", __func__,
-                 device_name.c_str(), params.AsHumanReadableString().c_str());
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s({device_id=%s}, {params=[%s]})",
+                                      __func__, source_name.c_str(),
+                                      params.AsHumanReadableString().c_str()));
+  }
+  // TODO(crbug.com/40281249): PulseLoopbackAudioStream gives
+  // PulseAudioInputStream a nullptr for `audio_manager`, which is risky.
+  // Refactor such that this is not the case, or separate the
+  // AudioManager-independent logic into a "PulseUnmanagedAudioInputStream".
 }
 
 PulseAudioInputStream::~PulseAudioInputStream() {
@@ -58,17 +77,25 @@ PulseAudioInputStream::~PulseAudioInputStream() {
 
 AudioInputStream::OpenOutcome PulseAudioInputStream::Open() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  SendLogMessage("%s()", __func__);
-  if (device_name_ == AudioDeviceDescription::kDefaultDeviceId &&
-      audio_manager_->DefaultSourceIsMonitor()) {
-    SendLogMessage("%s => (ERROR: can't open monitor device)", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
+  if (source_name_ == AudioDeviceDescription::kDefaultDeviceId &&
+      audio_manager_ && audio_manager_->DefaultSourceIsMonitor()) {
+    if (ShouldLog()) {
+      SendLogMessage(base::StringPrintf(
+          "%s => (ERROR: can't open monitor device)", __func__));
+    }
     return OpenOutcome::kFailed;
   }
 
   AutoPulseLock auto_lock(pa_mainloop_);
   if (!pulse::CreateInputStream(pa_mainloop_, pa_context_, &handle_, params_,
-                                device_name_, &StreamNotifyCallback, this)) {
-    SendLogMessage("%s => (ERROR: failed to open PA stream)", __func__);
+                                source_name_, &StreamNotifyCallback, this)) {
+    if (ShouldLog()) {
+      SendLogMessage(base::StringPrintf(
+          "%s => (ERROR: failed to open PA stream)", __func__));
+    }
     return OpenOutcome::kFailed;
   }
 
@@ -81,7 +108,9 @@ void PulseAudioInputStream::Start(AudioInputCallback* callback) {
   DCHECK(thread_checker_.CalledOnValidThread());
   DCHECK(callback);
   DCHECK(handle_);
-  SendLogMessage("%s()", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
 
   // AGC needs to be started out of the lock.
   StartAgc();
@@ -102,13 +131,15 @@ void PulseAudioInputStream::Start(AudioInputCallback* callback) {
 
   if (!WaitForOperationCompletion(pa_mainloop_, operation, pa_context_,
                                   handle_)) {
-    callback_->OnError();
+    callback_->OnError(Error::kStartupFailed);
   }
 }
 
 void PulseAudioInputStream::Stop() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  SendLogMessage("%s()", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
   AutoPulseLock auto_lock(pa_mainloop_);
   if (!stream_started_)
     return;
@@ -126,7 +157,7 @@ void PulseAudioInputStream::Stop() {
       pa_stream_flush(handle_, &pulse::StreamSuccessCallback, pa_mainloop_);
   if (!WaitForOperationCompletion(pa_mainloop_, operation, pa_context_,
                                   handle_)) {
-    callback_->OnError();
+    callback_->OnError(Error::kRuntimeError);
   }
 
   // Stop the stream.
@@ -135,14 +166,16 @@ void PulseAudioInputStream::Stop() {
       pa_stream_cork(handle_, 1, &pulse::StreamSuccessCallback, pa_mainloop_);
   if (!WaitForOperationCompletion(pa_mainloop_, operation, pa_context_,
                                   handle_)) {
-    callback_->OnError();
+    callback_->OnError(Error::kRuntimeError);
   }
   callback_ = nullptr;
 }
 
 void PulseAudioInputStream::Close() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  SendLogMessage("%s()", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
   {
     AutoPulseLock auto_lock(pa_mainloop_);
     if (handle_) {
@@ -156,14 +189,18 @@ void PulseAudioInputStream::Close() {
         pa_stream_disconnect(handle_);
 
       // Release PulseAudio structures.
-      pa_stream_unref(handle_);
+      pa_stream_unref(handle_.ExtractAsDangling());
       handle_ = nullptr;
     }
   }
 
-  // Signal to the manager that we're closed and can be removed.
-  // This should be the last call in the function as it deletes "this".
-  audio_manager_->ReleaseInputStream(this);
+  // If the stream is not managed by AudioManager, the owner is responsible to
+  // destroy the object.
+  if (audio_manager_) {
+    // Signal to the manager that we're closed and can be removed.
+    // This should be the last call in the function as it deletes `this`.
+    audio_manager_->ReleaseInputStream(this);
+  }
 }
 
 double PulseAudioInputStream::GetMaxVolume() {
@@ -174,7 +211,9 @@ void PulseAudioInputStream::SetVolume(double volume) {
   AutoPulseLock auto_lock(pa_mainloop_);
   if (!handle_)
     return;
-  SendLogMessage("%s({volume=%.2f})", __func__, volume);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s({volume=%.2f})", __func__, volume));
+  }
 
   size_t index = pa_stream_get_device_index(handle_);
   pa_operation* operation = nullptr;
@@ -186,8 +225,10 @@ void PulseAudioInputStream::SetVolume(double volume) {
     if (!WaitForOperationCompletion(pa_mainloop_, operation, pa_context_,
                                     handle_) ||
         !channels_) {
-      SendLogMessage("%s => (WARNING: failed to read number of channels)",
-                     __func__);
+      if (ShouldLog()) {
+        SendLogMessage(base::StringPrintf(
+            "%s => (WARNING: failed to read number of channels)", __func__));
+      }
       return;
     }
   }
@@ -233,13 +274,11 @@ void PulseAudioInputStream::SetOutputDeviceForAec(
   // Not supported. Do nothing.
 }
 
-void PulseAudioInputStream::SendLogMessage(const char* format, ...) {
-  if (log_callback_.is_null())
+void PulseAudioInputStream::SendLogMessage(const std::string& message) {
+  if (!ShouldLog()) {
     return;
-  va_list args;
-  va_start(args, format);
-  log_callback_.Run("PAIS::" + base::StringPrintV(format, args));
-  va_end(args);
+  }
+  log_callback_.Run("PAIS::" + message);
 }
 
 // static, used by pa_stream_set_read_callback.
@@ -267,12 +306,9 @@ void PulseAudioInputStream::VolumeCallback(pa_context* context,
   if (stream->channels_ != info->channel_map.channels)
     stream->channels_ = info->channel_map.channels;
 
-  pa_volume_t volume = PA_VOLUME_MUTED;  // Minimum possible value.
   // Use the max volume of any channel as the volume.
-  for (int i = 0; i < stream->channels_; ++i) {
-    if (volume < info->volume.values[i])
-      volume = info->volume.values[i];
-  }
+  pa_volume_t volume = std::ranges::max(
+      base::span(info->volume.values).first(info->volume.channels));
 
   // It is safe to access |volume_| here since VolumeCallback() is running
   // under PulseLock.
@@ -307,7 +343,7 @@ void PulseAudioInputStream::StreamNotifyCallback(pa_stream* s,
 
   if (s && stream->callback_ &&
       pa_stream_get_state(s) == PA_STREAM_FAILED) {
-    stream->callback_->OnError();
+    stream->callback_->OnError(Error::kRuntimeError);
   }
 
   pa_threaded_mainloop_signal(stream->pa_mainloop_, 0);
@@ -323,14 +359,6 @@ void PulseAudioInputStream::ReadData() {
   GetAgcVolume(&normalized_volume);
   normalized_volume = volume_ / GetMaxVolume();
 
-  // Compensate the audio delay caused by the FIFO.
-  // TODO(dalecurtis): This should probably use pa_stream_get_time() so we can
-  // get the capture time directly.
-  base::TimeTicks capture_time =
-      base::TimeTicks::Now() -
-      (pulse::GetHardwareLatency(handle_) +
-       AudioTimestampHelper::FramesToTime(fifo_.GetAvailableFrames(),
-                                          params_.sample_rate()));
   do {
     size_t length = 0;
     const void* data = nullptr;
@@ -338,9 +366,26 @@ void PulseAudioInputStream::ReadData() {
     if (!data || length == 0)
       break;
 
-    const int number_of_frames =
-        length / params_.GetBytesPerFrame(pulse::kInputSampleFormat);
-    if (number_of_frames > fifo_.GetUnfilledFrames()) {
+    // SAFETY:
+    // https://freedesktop.org/software/pulseaudio/doxygen/stream_8h.html#ac2838c449cde56e169224d7fe3d00824
+    // The pulseaudio documentation says that if there is data at the current
+    // read index, data will point to the actual data, and `length` will contain
+    // the size of the data in bytes (which can be smaller or larger than a
+    // complete fragment).
+    //
+    // If there is no data at the current read index, it means that either the
+    // buffer is empty or it contains a hole (that is, the write index is ahead
+    // of the read index but there's no data where the read index points at). If
+    // the buffer is empty, data will be NULL and nbytes will be 0. If there is
+    // a hole, data will be NULL and nbytes will contain the length of the hole.
+    //
+    // We have already checked for null pointers and size 0 above.
+    UNSAFE_BUFFERS(base::span<const uint8_t> pa_stream(
+        reinterpret_cast<const uint8_t*>(data), length));
+    const size_t number_of_frames =
+        length / params_.GetBytesPerFrame(kSampleFormat);
+    if (number_of_frames >
+        base::checked_cast<size_t>(fifo_.GetUnfilledFrames())) {
       // Dynamically increase capacity to the FIFO to handle larger buffer got
       // from Pulse.
       const int increase_blocks_of_buffer =
@@ -350,28 +395,27 @@ void PulseAudioInputStream::ReadData() {
       fifo_.IncreaseCapacity(increase_blocks_of_buffer);
     }
 
-    fifo_.Push(data, number_of_frames,
-               SampleFormatToBytesPerChannel(pulse::kInputSampleFormat));
+    peak_detector_.FindPeak(pa_stream, kSampleFormat);
+    fifo_.Push(pa_stream, number_of_frames, kSampleFormat);
 
     // Checks if we still have data.
     pa_stream_drop(handle_);
   } while (pa_stream_readable_size(handle_) > 0);
 
+  const base::TimeTicks capture_time_base =
+      base::TimeTicks::Now() - pulse::GetHardwareLatency(handle_);
   while (fifo_.available_blocks()) {
+    // Compensate the audio delay caused by the FIFO.
+    // TODO(dalecurtis): This should probably use pa_stream_get_time() so we can
+    // get the capture time directly.
+    const base::TimeTicks capture_time =
+        capture_time_base -
+        AudioTimestampHelper::FramesToTime(fifo_.GetAvailableFrames(),
+                                           params_.sample_rate());
     const AudioBus* audio_bus = fifo_.Consume();
 
-    callback_->OnData(audio_bus, capture_time, normalized_volume);
+    callback_->OnData(audio_bus, capture_time, normalized_volume, {});
 
-    // Move the capture time forward for each vended block.
-    capture_time += AudioTimestampHelper::FramesToTime(audio_bus->frames(),
-                                                       params_.sample_rate());
-
-    // Sleep 5ms to wait until render consumes the data in order to avoid
-    // back to back OnData() method.
-    // TODO(dalecurtis): Delete all this. It shouldn't be necessary now that we
-    // have a ring buffer and FIFO on the actual shared memory.,
-    if (fifo_.available_blocks())
-      base::PlatformThread::Sleep(base::Milliseconds(5));
   }
 
   pa_threaded_mainloop_signal(pa_mainloop_, 0);

@@ -23,10 +23,8 @@
 #include "chrome/browser/ash/policy/core/device_policy_cros_browser_test.h"
 #include "chrome/browser/ash/policy/core/user_cloud_policy_manager_ash.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/lifetime/application_lifetime.h"
 #include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
 #include "chromeos/ash/components/dbus/dbus_thread_manager.h"
@@ -45,11 +43,13 @@
 #include "components/policy/core/common/policy_service.h"
 #include "components/policy/proto/chrome_device_policy.pb.h"
 #include "components/policy/proto/device_management_backend.pb.h"
+#include "components/session_manager/core/session_manager.h"
 #include "components/user_manager/user_names.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
 #include "extensions/browser/api/power/power_api.h"
 #include "extensions/common/api/power.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -192,7 +192,7 @@ void PowerPolicyBrowserTestBase::SetUpOnMainThread() {
   user_policy_.policy_data().set_username(
       user_manager::StubAccountId().GetUserEmail());
   user_policy_.policy_data().set_gaia_id(
-      user_manager::StubAccountId().GetGaiaId());
+      user_manager::StubAccountId().GetGaiaId().ToString());
 }
 
 void PowerPolicyBrowserTestBase::InstallUserKey() {
@@ -217,14 +217,14 @@ void PowerPolicyBrowserTestBase::StoreAndReloadUserPolicy() {
   session_manager_client()->set_user_policy(
       cryptohome::CreateAccountIdentifierFromAccountId(
           AccountId::FromUserEmail(user_policy_.policy_data().username())),
-      user_policy_.GetBlob());
+      login_manager::POLICY_DOMAIN_CHROME, user_policy_.GetBlob());
 
   // Reload user policy from session manager client and wait for the update to
   // take effect.
   RunClosureAndWaitForUserPolicyUpdate(
       base::BindOnce(&PowerPolicyBrowserTestBase::ReloadUserPolicy,
-                     base::Unretained(this), browser()->profile()),
-      browser()->profile());
+                     base::Unretained(this), browser()->GetProfile()),
+      browser()->GetProfile());
 }
 
 void PowerPolicyBrowserTestBase::
@@ -270,7 +270,8 @@ void PowerPolicyBrowserTestBase::ReloadUserPolicy(Profile* profile) {
   policy_manager->core()->store()->Load();
 }
 
-PowerPolicyLoginScreenBrowserTest::PowerPolicyLoginScreenBrowserTest() {}
+PowerPolicyLoginScreenBrowserTest::PowerPolicyLoginScreenBrowserTest() =
+    default;
 
 void PowerPolicyLoginScreenBrowserTest::SetUpCommandLine(
     base::CommandLine* command_line) {
@@ -288,12 +289,14 @@ void PowerPolicyLoginScreenBrowserTest::SetUpOnMainThread() {
 
 void PowerPolicyLoginScreenBrowserTest::TearDownOnMainThread() {
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&chrome::AttemptExit));
+      FROM_HERE, base::BindOnce([]() {
+        session_manager::SessionManager::Get()->RequestSignOut();
+      }));
   base::RunLoop().RunUntilIdle();
   PowerPolicyBrowserTestBase::TearDownOnMainThread();
 }
 
-PowerPolicyInSessionBrowserTest::PowerPolicyInSessionBrowserTest() {}
+PowerPolicyInSessionBrowserTest::PowerPolicyInSessionBrowserTest() = default;
 
 void PowerPolicyInSessionBrowserTest::SetUpOnMainThread() {
   PowerPolicyBrowserTestBase::SetUpOnMainThread();
@@ -542,15 +545,14 @@ IN_PROC_BROWSER_TEST_F(PowerPolicyInSessionBrowserTest, AllowScreenWakeLocks) {
   pm::PowerManagementPolicy baseline_policy = power_manager_client()->policy();
 
   // Default settings should not report any wake locks.
-  pm::PowerManagementPolicy power_management_policy = baseline_policy;
   EXPECT_FALSE(baseline_policy.screen_wake_lock());
   EXPECT_FALSE(baseline_policy.dim_wake_lock());
   EXPECT_FALSE(baseline_policy.system_wake_lock());
 
   // Pretend an extension grabs a screen wake lock.
   const char kExtensionId[] = "abcdefghijklmnopabcdefghijlkmnop";
-  extensions::PowerAPI::Get(browser()->profile())
-      ->AddRequest(kExtensionId, extensions::api::power::LEVEL_DISPLAY);
+  extensions::PowerAPI::Get(browser()->GetProfile())
+      ->AddRequest(kExtensionId, extensions::api::power::Level::kDisplay);
 
   // The PowerAPI requests system wake lock asynchronously.
   base::RunLoop run_loop;

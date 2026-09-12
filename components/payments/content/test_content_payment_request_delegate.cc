@@ -9,7 +9,7 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/task/single_thread_task_runner.h"
-#include "components/payments/content/payment_manifest_web_data_service.h"
+#include "components/payments/content/web_payments_web_data_service.h"
 #include "components/payments/core/error_strings.h"
 #include "content/public/browser/render_frame_host.h"
 
@@ -33,8 +33,8 @@ TestContentPaymentRequestDelegate::CreateInternalAuthenticator() const {
   return nullptr;
 }
 
-scoped_refptr<PaymentManifestWebDataService>
-TestContentPaymentRequestDelegate::GetPaymentManifestWebDataService() const {
+scoped_refptr<WebPaymentsWebDataService>
+TestContentPaymentRequestDelegate::GetWebPaymentsWebDataService() const {
   return nullptr;
 }
 
@@ -64,6 +64,10 @@ void TestContentPaymentRequestDelegate::ShowProcessingSpinner() {
   core_delegate_.ShowProcessingSpinner();
 }
 
+void TestContentPaymentRequestDelegate::ShowLoadingView() {
+  core_delegate_.ShowLoadingView();
+}
+
 bool TestContentPaymentRequestDelegate::IsBrowserWindowActive() const {
   return core_delegate_.IsBrowserWindowActive();
 }
@@ -75,11 +79,6 @@ void TestContentPaymentRequestDelegate::GetTwaPackageName(
 }
 
 PaymentRequestDialog* TestContentPaymentRequestDelegate::GetDialogForTesting() {
-  return nullptr;
-}
-
-SecurePaymentConfirmationNoCreds*
-TestContentPaymentRequestDelegate::GetNoMatchingCredentialsDialogForTesting() {
   return nullptr;
 }
 
@@ -106,18 +105,6 @@ TestContentPaymentRequestDelegate::GetAddressNormalizer() {
   return core_delegate_.GetAddressNormalizer();
 }
 
-autofill::RegionDataLoader*
-TestContentPaymentRequestDelegate::GetRegionDataLoader() {
-  return core_delegate_.GetRegionDataLoader();
-}
-
-ukm::UkmRecorder* TestContentPaymentRequestDelegate::GetUkmRecorder() {
-  return core_delegate_.GetUkmRecorder();
-}
-
-std::string TestContentPaymentRequestDelegate::GetAuthenticatedEmail() const {
-  return core_delegate_.GetAuthenticatedEmail();
-}
 
 PrefService* TestContentPaymentRequestDelegate::GetPrefService() {
   return core_delegate_.GetPrefService();
@@ -154,10 +141,9 @@ TestContentPaymentRequestDelegate::GetPaymentUIObserver() const {
   return nullptr;
 }
 
-void TestContentPaymentRequestDelegate::ShowNoMatchingPaymentCredentialDialog(
-    const std::u16string& merchant_name,
-    const std::string& rp_id,
-    base::OnceClosure response_callback,
-    base::OnceClosure opt_out_callback) {}
+std::string TestContentPaymentRequestDelegate::
+    GetSecurePaymentConfirmationKeychainAccessGroup() const {
+  return "";
+}
 
 }  // namespace payments

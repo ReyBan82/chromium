@@ -4,7 +4,9 @@
 
 #include "content/app_shim_remote_cocoa/web_contents_ns_view_bridge.h"
 
+#include "base/apple/foundation_util.h"
 #import "base/task/sequenced_task_runner.h"
+#import "components/remote_cocoa/app_shim/native_widget_mac_nswindow.h"
 #include "components/remote_cocoa/app_shim/ns_view_ids.h"
 #import "content/app_shim_remote_cocoa/web_contents_view_cocoa.h"
 #include "content/browser/web_contents/web_contents_view_mac.h"
@@ -18,22 +20,21 @@ WebContentsNSViewBridge::WebContentsNSViewBridge(
     mojo::PendingAssociatedRemote<mojom::WebContentsNSViewHost> client)
     : host_(std::move(client),
             ui::WindowResizeHelperMac::Get()->task_runner()) {
-  ns_view_.reset(
-      [[WebContentsViewCocoa alloc] initWithViewsHostableView:nullptr]);
+  ns_view_ = [[WebContentsViewCocoa alloc] initWithViewsHostableView:nullptr];
   [ns_view_ setHost:host_.get()];
   [ns_view_ enableDroppedScreenShotCopier];
-  view_id_ = std::make_unique<remote_cocoa::ScopedNSViewIdMapping>(
-      view_id, ns_view_.get());
+  view_id_ =
+      std::make_unique<remote_cocoa::ScopedNSViewIdMapping>(view_id, ns_view_);
 }
 
 WebContentsNSViewBridge::WebContentsNSViewBridge(
     uint64_t view_id,
     content::WebContentsViewMac* web_contents_view) {
-  ns_view_.reset([[WebContentsViewCocoa alloc]
-      initWithViewsHostableView:web_contents_view]);
+  ns_view_ = [[WebContentsViewCocoa alloc]
+      initWithViewsHostableView:web_contents_view];
   [ns_view_ setHost:web_contents_view];
-  view_id_ = std::make_unique<remote_cocoa::ScopedNSViewIdMapping>(
-      view_id, ns_view_.get());
+  view_id_ =
+      std::make_unique<remote_cocoa::ScopedNSViewIdMapping>(view_id, ns_view_);
 }
 
 WebContentsNSViewBridge::~WebContentsNSViewBridge() {
@@ -69,20 +70,44 @@ void WebContentsNSViewBridge::ResetParentNSView() {
   [ns_view_ removeFromSuperview];
 }
 
-void WebContentsNSViewBridge::SetBounds(const gfx::Rect& bounds_in_window) {
-  NSWindow* window = [ns_view_ window];
-  NSRect window_content_rect = [window contentRectForFrameRect:[window frame]];
-  NSRect ns_bounds_in_window =
-      NSMakeRect(bounds_in_window.x(),
-                 window_content_rect.size.height - bounds_in_window.y() -
-                     bounds_in_window.height(),
-                 bounds_in_window.width(), bounds_in_window.height());
-  NSRect ns_bounds_in_superview =
-      [[ns_view_ superview] convertRect:ns_bounds_in_window fromView:nil];
+void WebContentsNSViewBridge::SetBounds(const gfx::Rect& bounds_in_superview,
+                                        int32_t superview_height) {
+  // superview.bounds can be stale during setFrameSize update, so use
+  // `superview_height` (from the host's content rect) for Y flipping instead.
+  NSView* superview = [ns_view_ superview];
+  NSRect ns_bounds_in_superview = NSMakeRect(
+      bounds_in_superview.x(),
+      [superview isFlipped] ? bounds_in_superview.y()
+                            : superview_height - bounds_in_superview.y() -
+                                  bounds_in_superview.height(),
+      bounds_in_superview.width(), bounds_in_superview.height());
   [ns_view_ setFrame:ns_bounds_in_superview];
 }
 
 void WebContentsNSViewBridge::SetVisible(bool visible) {
+  // If the first responder is a child of the current view, AppKit will search
+  // for a new first responder during `-setHidden:`. The key view loop is
+  // searched for a view that can become key. Typically this search yields no
+  // results and the window becomes the default first responder. However if this
+  // occurs after an immersive fullscreen restore an infinite loop can occur
+  // leading to an OOM. This occurs because of the existence of an NSToolbar,
+  // which causes the key loop traversal to jump back and forth between the
+  // view's window and the AppKit owned NSToolbarFullscreenWindow which hosts
+  // the toolbar in immersive fullscreen. To prevent this set the window's first
+  // responder to nil which will make the window the first responder before the
+  // hide.
+  // TODO(http://crbug.com/40261565): Remove when FB12010731 is fixed in
+  // AppKit.
+  NativeWidgetMacNSWindow* widget_window =
+      base::apple::ObjCCast<NativeWidgetMacNSWindow>(ns_view_.window);
+  if (!visible && [widget_window immersiveFullscreen]) {
+    NSView* first_responder =
+        base::apple::ObjCCast<NSView>(ns_view_.window.firstResponder);
+    if ([first_responder isDescendantOf:ns_view_]) {
+      [ns_view_.window makeFirstResponder:nil];
+    }
+  }
+
   [ns_view_ setHidden:!visible];
 }
 
@@ -98,23 +123,25 @@ void WebContentsNSViewBridge::TakeFocus(bool reverse) {
     [[ns_view_ window] selectNextKeyView:ns_view_];
 }
 
-void WebContentsNSViewBridge::StartDrag(const content::DropData& drop_data,
-                                        uint32_t operation_mask,
-                                        const gfx::ImageSkia& image,
-                                        const gfx::Vector2d& image_offset,
-                                        bool is_privileged) {
-  NSPoint offset = NSPointFromCGPoint(
-      gfx::PointAtOffsetFromOrigin(image_offset).ToCGPoint());
+void WebContentsNSViewBridge::StartDrag(
+    content::ChildProcessId render_process_id,
+    const blink::DocumentToken& document_token,
+    const url::Origin& source_origin,
+    const content::DropData& drop_data,
+    uint32_t operation_mask,
+    const gfx::ImageSkia& image,
+    const gfx::Vector2d& image_offset,
+    bool is_privileged) {
+  NSPoint offset = gfx::PointAtOffsetFromOrigin(image_offset).ToCGPoint();
+  // TODO(dcheng): Check if is_privileged still needs to be passed here.
   [ns_view_ startDragWithDropData:drop_data
+                  renderProcessId:render_process_id
+                    documentToken:document_token
+                     sourceOrigin:source_origin
                 dragOperationMask:operation_mask
                             image:gfx::NSImageFromImageSkia(image)
                            offset:offset
                      isPrivileged:is_privileged];
-}
-
-void WebContentsNSViewBridge::UpdateWindowControlsOverlay(
-    const gfx::Rect& bounding_rect) {
-  [ns_view_ updateWindowControlsOverlay:bounding_rect];
 }
 
 }  // namespace remote_cocoa

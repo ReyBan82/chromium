@@ -5,7 +5,7 @@
 #ifndef BASE_TEST_SCOPED_MOCK_TIME_MESSAGE_LOOP_TASK_RUNNER_H_
 #define BASE_TEST_SCOPED_MOCK_TIME_MESSAGE_LOOP_TASK_RUNNER_H_
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/test/test_mock_time_task_runner.h"
 
 namespace base {
@@ -41,6 +41,10 @@ class ScopedMockTimeMessageLoopTaskRunner {
  private:
   const scoped_refptr<TestMockTimeTaskRunner> task_runner_;
   scoped_refptr<SingleThreadTaskRunner> previous_task_runner_;
+  std::optional<SingleThreadTaskRunner::CurrentDefaultHandle>
+      current_default_handle_;
+  std::optional<SingleThreadTaskRunner::MainThreadDefaultHandle>
+      main_thread_default_task_runner_handle_;
 };
 
 }  // namespace base

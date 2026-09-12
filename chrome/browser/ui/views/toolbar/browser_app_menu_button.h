@@ -11,10 +11,11 @@
 #include "chrome/browser/ui/toolbar/app_menu_icon_controller.h"
 #include "chrome/browser/ui/toolbar/app_menu_model.h"
 #include "chrome/browser/ui/views/frame/app_menu_button.h"
-#include "components/user_education/common/feature_promo_controller.h"
-#include "components/user_education/common/feature_promo_handle.h"
+#include "components/user_education/common/feature_promo/feature_promo_controller.h"
+#include "components/user_education/common/feature_promo/feature_promo_handle.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/gfx/animation/throb_animation.h"
 #include "ui/views/view.h"
 
 class ToolbarView;
@@ -22,30 +23,48 @@ class ToolbarView;
 // The app menu button in the main browser window (as opposed to web app
 // windows, which is implemented in WebAppMenuButton).
 class BrowserAppMenuButton : public AppMenuButton {
- public:
-  METADATA_HEADER(BrowserAppMenuButton);
+  METADATA_HEADER(BrowserAppMenuButton, AppMenuButton)
 
+ public:
   explicit BrowserAppMenuButton(ToolbarView* toolbar_view);
   BrowserAppMenuButton(const BrowserAppMenuButton&) = delete;
   BrowserAppMenuButton& operator=(const BrowserAppMenuButton&) = delete;
   ~BrowserAppMenuButton() override;
 
-  void SetTypeAndSeverity(
-      AppMenuIconController::TypeAndSeverity type_and_severity);
+  // Returns true if a text is set and is visible.
+  bool IsLabelPresentAndVisible() const;
 
   // Shows the app menu. |run_types| denotes the MenuRunner::RunTypes associated
   // with the menu.
+  using AppMenuButton::ShowMenu;
   void ShowMenu(int run_types);
 
   // Opens the app menu immediately during a drag-and-drop operation.
   // Used only in testing.
   static bool g_open_app_immediately_for_testing;
 
+  void UpdateThemeBasedState();
+
+  // Updates the inkdrop highlight and ripple properties depending on whether
+  // the chip is expanded.
+  void UpdateInkdrop();
+
   // AppMenuButton:
+  void SetTypeAndSeverity(
+      AppMenuIconController::TypeAndSeverity type_and_severity) override;
+  void OnMenuClosed() override;
   void OnThemeChanged() override;
   // Updates the presentation according to |severity_| and the theme provider.
   void UpdateIcon() override;
-  void HandleMenuClosed() override;
+
+  // ToolbarButton:
+  void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
+
+  // Need to override to implement the Expand and Collapse actions.
+  bool HandleAccessibleAction(const ui::AXActionData& action_data) override;
+
+  // views::View:
+  gfx::Size GetMinimumSize() const override;
 
  private:
   void OnTouchUiChanged();
@@ -54,15 +73,19 @@ class BrowserAppMenuButton : public AppMenuButton {
 
   void UpdateTextAndHighlightColor();
 
+  bool ShouldPaintBorder() const override;
+  std::optional<SkColor> GetHighlightTextColor() const override;
+  std::optional<SkColor> GetHighlightColor() const;
+
+  SkColor GetForegroundColor(ButtonState state) const override;
   void SetHasInProductHelpPromo(bool has_in_product_help_promo);
 
-  // Closes and continue the flow of an in-product help promo; Returns
-  // AlertMenuItem which indicates the app menu item that should be alerted.
-  AlertMenuItem CloseFeaturePromoAndContinue();
+  // Sets the padding values depending on whether label is visible.
+  void UpdateLayoutInsets();
 
   AppMenuIconController::TypeAndSeverity type_and_severity_{
-      AppMenuIconController::IconType::NONE,
-      AppMenuIconController::Severity::NONE};
+      AppMenuIconController::IconType::kNone,
+      AppMenuIconController::Severity::kNone};
 
   // Our owning toolbar view.
   const raw_ptr<ToolbarView> toolbar_view_;

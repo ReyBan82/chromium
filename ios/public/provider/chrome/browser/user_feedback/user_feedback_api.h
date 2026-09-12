@@ -15,15 +15,13 @@ namespace provider {
 // Returns true if user feedback is supported.
 bool IsUserFeedbackSupported();
 
-// Returns a view controller to present to the user to collect their
-// feedback. The information required to construct the user feedback
-// and the objects used to interact with the application are passed
-// via the `configuration` object.
-//
-// This function must only be called if `IsUserFeedbackSupported()`
-// returns true.
-UIViewController* CreateUserFeedbackViewController(
-    UserFeedbackConfiguration* configuration);
+// Asks the provider to start the user feedback flow presented off of the
+// provided `presenting_view_controller`. The information required to construct
+// the user feedback and the objects used to interact with the application are
+// passed via the `configuration` object and errors are returned in `error`.
+bool StartUserFeedbackFlow(UserFeedbackConfiguration* configuration,
+                           UIViewController* presenting_view_controller,
+                           NSError** error);
 
 // Uploads all pending user feedbacks.
 //

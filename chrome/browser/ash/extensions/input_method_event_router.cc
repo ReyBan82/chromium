@@ -35,7 +35,7 @@ void ExtensionInputMethodEventRouter::InputMethodChanged(
     ash::input_method::InputMethodManager* manager,
     Profile* profile,
     bool show_message) {
-  // If an event is recieved from a different profile, e.g. while switching
+  // If an event is received from a different profile, e.g. while switching
   // between multiple profiles, ignore it.
   if (!profile->IsSameOrParent(Profile::FromBrowserContext(context_)))
     return;
@@ -44,7 +44,7 @@ void ExtensionInputMethodEventRouter::InputMethodChanged(
   if (!router->HasEventListener(OnChanged::kEventName))
     return;
 
-  base::Value::List args;
+  base::ListValue args;
   args.Append(manager->GetActiveIMEState()->GetCurrentInputMethod().id());
 
   // The router will only send the event to extensions that are listening.

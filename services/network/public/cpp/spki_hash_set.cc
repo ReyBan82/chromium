@@ -4,7 +4,7 @@
 
 #include "services/network/public/cpp/spki_hash_set.h"
 
-#include "base/check_op.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "net/base/hash_value.h"
 
@@ -14,14 +14,14 @@ namespace network {
 SPKIHashSet CreateSPKIHashSet(const std::vector<std::string>& fingerprints) {
   SPKIHashSet spki_hash_list;
   for (const std::string& fingerprint : fingerprints) {
-    net::HashValue hash;
-    if (!hash.FromString("sha256/" + fingerprint)) {
+    std::optional<net::HashValue> hash =
+        net::HashValue::FromString("sha256/" + fingerprint);
+    if (!hash) {
       LOG(ERROR) << "Invalid SPKI: " << fingerprint;
       continue;
     }
     net::SHA256HashValue sha256;
-    DCHECK_EQ(hash.size(), sizeof(sha256));
-    memcpy(&sha256, hash.data(), sizeof(sha256));
+    base::span(sha256).copy_from(hash->span());
     spki_hash_list.insert(sha256);
   }
   return spki_hash_list;

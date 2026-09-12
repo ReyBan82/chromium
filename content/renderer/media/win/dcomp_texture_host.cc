@@ -10,8 +10,8 @@
 #include "gpu/ipc/client/gpu_channel_host.h"
 #include "gpu/ipc/common/command_buffer_id.h"
 #include "gpu/ipc/common/gpu_channel.mojom.h"
-#include "ipc/ipc_message_macros.h"
 #include "ipc/ipc_mojo_bootstrap.h"
+#include "ipc/param_traits_macros.h"
 #include "media/base/win/mf_helpers.h"
 
 namespace content {
@@ -49,7 +49,8 @@ DCOMPTextureHost::~DCOMPTextureHost() {
   // to ensure this is ordered correctly with regards to previous deferred
   // messages, such as CreateSharedImage.
   uint32_t flush_id = channel_->EnqueueDeferredMessage(
-      gpu::mojom::DeferredRequestParams::NewDestroyDcompTexture(route_id_));
+      gpu::mojom::DeferredRequestParams::NewDestroyDcompTexture(route_id_),
+      /*sync_token_fences=*/{}, /*release_count=*/0);
   channel_->EnsureFlush(flush_id);
 }
 

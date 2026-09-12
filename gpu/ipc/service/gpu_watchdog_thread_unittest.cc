@@ -121,33 +121,7 @@ void GpuWatchdogTest::SetUp() {
 
   TimeOutType timeout_type = kNormal;
 
-#if BUILDFLAG(IS_MAC)
-  // Use slow timeout for Mac versions < 11.00 and for MacBookPro model <
-  // MacBookPro14,1
-  int os_version = base::mac::internal::MacOSVersion();
-
-  if (os_version <= 1100) {
-    // Check MacOS version.
-    timeout_type = kSlow;
-  } else {
-    // Check Mac machine model version.
-    std::string model_str = base::SysInfo::HardwareModelName();
-    size_t found_position = model_str.find("MacBookPro");
-    constexpr size_t model_version_pos = 10;
-
-    // A MacBookPro is found.
-    if (found_position == 0 && model_str.size() > model_version_pos) {
-      // model_ver_str = "MacBookProXX,X", model_ver_str = "XX,X"
-      std::string model_ver_str = model_str.substr(model_version_pos);
-      int major_model_ver = std::atoi(model_ver_str.c_str());
-      // For model version < 14,1
-      if (major_model_ver < 14) {
-        timeout_type = kSlow;
-      }
-    }
-  }
-
-#elif BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_ANDROID)
   int32_t major_version = 0;
   int32_t minor_version = 0;
   int32_t bugfix_version = 0;
@@ -178,7 +152,6 @@ void GpuWatchdogTest::SetUp() {
   watchdog_thread_ = gpu::GpuWatchdogThread::Create(
       /*start_backgrounded=*/false,
       /*timeout=*/timeout_,
-      /*init_factor=*/kInitFactor,
       /*restart_factor=*/kRestartFactor,
       /*test_mode=*/true, /*thread_name=*/"GpuWatchdog");
 }
@@ -252,8 +225,7 @@ TEST_F(GpuWatchdogTest, GpuInitializationComplete) {
 
 // GPU Hang In Initialization.
 TEST_F(GpuWatchdogTest, GpuInitializationHang) {
-  auto allowed_time =
-      timeout_ * (kInitFactor + 1) + full_thread_time_on_windows_;
+  auto allowed_time = timeout_ * 2 + full_thread_time_on_windows_;
 
   // GPU init takes longer than timeout.
   SimpleTask(allowed_time, /*extra_time=*/extra_gpu_job_time_);
@@ -261,26 +233,6 @@ TEST_F(GpuWatchdogTest, GpuInitializationHang) {
   // Gpu hangs. OnInitComplete() is not called
   bool result = watchdog_thread_->IsGpuHangDetectedForTesting();
   EXPECT_TRUE(result);
-  // retry on failure.
-}
-
-// GPU Hang In Initialization.
-TEST_F(GpuWatchdogTest, GpuInitializationHangWithReportOnly) {
-  auto allowed_time =
-      timeout_ * (kInitFactor + 1) + full_thread_time_on_windows_;
-
-  watchdog_thread_->EnableReportOnlyMode();
-
-  // GPU init takes longer than timeout.
-  SimpleTask(allowed_time, /*extra_time=*/extra_gpu_job_time_);
-
-  // Gpu hangs. OnInitComplete() is not called
-  bool result = watchdog_thread_->IsGpuHangDetectedWithoutKillForTesting();
-  bool non_result = watchdog_thread_->IsGpuHangDetectedForTesting();
-  EXPECT_TRUE(result);
-  EXPECT_FALSE(non_result);
-
-  watchdog_thread_->DisableReportOnlyMode();
   // retry on failure.
 }
 
@@ -411,8 +363,7 @@ TEST_F(GpuWatchdogTest, GpuInitializationPause) {
   watchdog_thread_->ResumeWatchdog();
 
   // The Gpu init continues for longer than allowed init time.
-  auto allowed_time =
-      timeout_ * (kInitFactor + 1) + full_thread_time_on_windows_;
+  auto allowed_time = timeout_ * 2 + full_thread_time_on_windows_;
 
   SimpleTask(allowed_time, /*extra_time=*/extra_gpu_job_time_);
 

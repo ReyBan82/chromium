@@ -8,10 +8,12 @@
 #include <utility>
 
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ref.h"
 #include "third_party/blink/renderer/core/animation/interpolable_length.h"
 #include "third_party/blink/renderer/core/animation/length_list_property_functions.h"
 #include "third_party/blink/renderer/core/animation/list_interpolation_functions.h"
 #include "third_party/blink/renderer/core/animation/underlying_length_checker.h"
+#include "third_party/blink/renderer/core/animation/underlying_value_owner.h"
 #include "third_party/blink/renderer/core/css/css_primitive_value.h"
 #include "third_party/blink/renderer/core/css/css_value_list.h"
 #include "third_party/blink/renderer/core/css/resolver/style_resolver.h"
@@ -21,6 +23,27 @@
 
 namespace blink {
 
+namespace {
+
+// SVG 2 defines stroke-dasharray values as non-additive.
+// https://w3c.github.io/svgwg/svg2-draft/painting.html#interpolationDashPattern
+bool IsNonAdditiveLengthListProperty(const CSSProperty& property) {
+  return property.IDEquals(CSSPropertyID::kStrokeDasharray);
+}
+
+// The neutral value of a non-additive property is a copy of the underlying
+// value, so it has to be converted again whenever that value may have changed.
+class AlwaysInvalidateChecker final
+    : public CSSInterpolationType::CSSConversionChecker {
+ public:
+  bool IsValid(const StyleResolverState&,
+               const InterpolationValue&) const final {
+    return false;
+  }
+};
+
+}  // namespace
+
 CSSLengthListInterpolationType::CSSLengthListInterpolationType(
     PropertyHandle property)
     : CSSInterpolationType(property),
@@ -29,10 +52,16 @@ CSSLengthListInterpolationType::CSSLengthListInterpolationType(
 InterpolationValue CSSLengthListInterpolationType::MaybeConvertNeutral(
     const InterpolationValue& underlying,
     ConversionCheckers& conversion_checkers) const {
+  if (IsNonAdditiveLengthListProperty(CssProperty())) {
+    conversion_checkers.push_back(
+        MakeGarbageCollected<AlwaysInvalidateChecker>());
+    return underlying.Clone();
+  }
+
   wtf_size_t underlying_length =
       UnderlyingLengthChecker::GetUnderlyingLength(underlying);
   conversion_checkers.push_back(
-      std::make_unique<UnderlyingLengthChecker>(underlying_length));
+      MakeGarbageCollected<UnderlyingLengthChecker>(underlying_length));
 
   if (underlying_length == 0)
     return nullptr;
@@ -45,14 +74,16 @@ InterpolationValue CSSLengthListInterpolationType::MaybeConvertNeutral(
 
 static InterpolationValue MaybeConvertLengthList(
     const Vector<Length>& length_list,
+    const CSSProperty& property,
     float zoom) {
   if (length_list.empty())
     return nullptr;
 
   return ListInterpolationFunctions::CreateList(
-      length_list.size(), [&length_list, zoom](wtf_size_t index) {
-        return InterpolationValue(
-            InterpolableLength::MaybeConvertLength(length_list[index], zoom));
+      length_list.size(), [&length_list, &property, zoom](wtf_size_t index) {
+        return InterpolationValue(InterpolableLength::MaybeConvertLength(
+            length_list[index], property, zoom,
+            /*interpolate_size=*/std::nullopt));
       });
 }
 
@@ -64,7 +95,7 @@ InterpolationValue CSSLengthListInterpolationType::MaybeConvertInitial(
           CssProperty(), state.GetDocument().GetStyleResolver().InitialStyle(),
           initial_length_list))
     return nullptr;
-  return MaybeConvertLengthList(initial_length_list, 1);
+  return MaybeConvertLengthList(initial_length_list, CssProperty(), 1);
 }
 
 class InheritedLengthListChecker final
@@ -79,12 +110,13 @@ class InheritedLengthListChecker final
   bool IsValid(const StyleResolverState& state,
                const InterpolationValue& underlying) const final {
     Vector<Length> inherited_length_list;
-    LengthListPropertyFunctions::GetLengthList(property_, *state.ParentStyle(),
+    LengthListPropertyFunctions::GetLengthList(*property_, *state.ParentStyle(),
                                                inherited_length_list);
     return inherited_length_list_ == inherited_length_list;
   }
 
-  const CSSProperty& property_;
+  const raw_ref<const CSSProperty, UnprotectedInRelease | DanglingUntriaged>
+      property_;
   Vector<Length> inherited_length_list_;
 };
 
@@ -94,17 +126,18 @@ InterpolationValue CSSLengthListInterpolationType::MaybeConvertInherit(
   Vector<Length> inherited_length_list;
   bool success = LengthListPropertyFunctions::GetLengthList(
       CssProperty(), *state.ParentStyle(), inherited_length_list);
-  conversion_checkers.push_back(std::make_unique<InheritedLengthListChecker>(
-      CssProperty(), inherited_length_list));
+  conversion_checkers.push_back(
+      MakeGarbageCollected<InheritedLengthListChecker>(CssProperty(),
+                                                       inherited_length_list));
   if (!success)
     return nullptr;
-  return MaybeConvertLengthList(inherited_length_list,
+  return MaybeConvertLengthList(inherited_length_list, CssProperty(),
                                 state.ParentStyle()->EffectiveZoom());
 }
 
 InterpolationValue CSSLengthListInterpolationType::MaybeConvertValue(
     const CSSValue& value,
-    const StyleResolverState*,
+    const StyleResolverState&,
     ConversionCheckers&) const {
   if (!value.IsBaseValueList())
     return nullptr;
@@ -123,12 +156,11 @@ PairwiseInterpolationValue CSSLengthListInterpolationType::MaybeMergeSingles(
   return ListInterpolationFunctions::MaybeMergeSingles(
       std::move(start), std::move(end),
       ListInterpolationFunctions::LengthMatchingStrategy::kLowestCommonMultiple,
-      WTF::BindRepeating(
-          [](InterpolationValue&& start_item, InterpolationValue&& end_item) {
-            return InterpolableLength::MergeSingles(
-                std::move(start_item.interpolable_value),
-                std::move(end_item.interpolable_value));
-          }));
+      [](InterpolationValue&& start_item, InterpolationValue&& end_item) {
+        return InterpolableLength::MaybeMergeSingles(
+            std::move(start_item.interpolable_value),
+            std::move(end_item.interpolable_value));
+      });
 }
 
 InterpolationValue
@@ -138,7 +170,8 @@ CSSLengthListInterpolationType::MaybeConvertStandardPropertyUnderlyingValue(
   if (!LengthListPropertyFunctions::GetLengthList(CssProperty(), style,
                                                   underlying_length_list))
     return nullptr;
-  return MaybeConvertLengthList(underlying_length_list, style.EffectiveZoom());
+  return MaybeConvertLengthList(underlying_length_list, CssProperty(),
+                                style.EffectiveZoom());
 }
 
 void CSSLengthListInterpolationType::Composite(
@@ -146,20 +179,22 @@ void CSSLengthListInterpolationType::Composite(
     double underlying_fraction,
     const InterpolationValue& value,
     double interpolation_fraction) const {
+  if (IsNonAdditiveLengthListProperty(CssProperty())) {
+    underlying_value_owner.Set(this, value);
+    return;
+  }
+
   ListInterpolationFunctions::Composite(
-      underlying_value_owner, underlying_fraction, *this, value,
+      underlying_value_owner, underlying_fraction, this, value,
       ListInterpolationFunctions::LengthMatchingStrategy::kLowestCommonMultiple,
-      WTF::BindRepeating(
-          ListInterpolationFunctions::InterpolableValuesKnownCompatible),
-      WTF::BindRepeating(
-          ListInterpolationFunctions::VerifyNoNonInterpolableValues),
-      WTF::BindRepeating([](UnderlyingValue& underlying_value,
-                            double underlying_fraction,
-                            const InterpolableValue& interpolable_value,
-                            const NonInterpolableValue*) {
+      ListInterpolationFunctions::InterpolableValuesKnownCompatible,
+      ListInterpolationFunctions::VerifyNoNonInterpolableValues,
+      [](UnderlyingValue& underlying_value, double underlying_fraction,
+         const InterpolableValue& interpolable_value,
+         const NonInterpolableValue*) {
         underlying_value.MutableInterpolableValue().ScaleAndAdd(
             underlying_fraction, interpolable_value);
-      }));
+      });
 }
 
 void CSSLengthListInterpolationType::ApplyStandardPropertyValue(

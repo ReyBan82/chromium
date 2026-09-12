@@ -6,6 +6,7 @@
 #define BASE_TEST_GTEST_UTIL_H_
 
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -31,21 +32,21 @@
 // EXPECT/ASSERT_DCHECK_DEATH tests verify that a DCHECK is hit ("Check failed"
 // is part of the error message). Optionally you may specify part of the message
 // to verify which DCHECK (or LOG(DFATAL)) is being hit.
-#define EXPECT_DCHECK_DEATH(statement) EXPECT_DEATH(statement, "Check failed")
+#define EXPECT_DCHECK_DEATH(statement) EXPECT_DEATH(statement, "DCHECK failed")
 #define EXPECT_DCHECK_DEATH_WITH(statement, msg) EXPECT_DEATH(statement, msg)
-#define ASSERT_DCHECK_DEATH(statement) ASSERT_DEATH(statement, "Check failed")
+#define ASSERT_DCHECK_DEATH(statement) ASSERT_DEATH(statement, "DCHECK failed")
 #define ASSERT_DCHECK_DEATH_WITH(statement, msg) ASSERT_DEATH(statement, msg)
 
 #else
 
 #define EXPECT_DCHECK_DEATH(statement) \
-  GTEST_UNSUPPORTED_DEATH_TEST(statement, "Check failed", )
+  GTEST_UNSUPPORTED_DEATH_TEST(statement, "DCHECK failed", )
 #define EXPECT_DCHECK_DEATH_WITH(statement, msg) \
   GTEST_UNSUPPORTED_DEATH_TEST(statement, msg, )
 #define ASSERT_DCHECK_DEATH(statement) \
-  GTEST_UNSUPPORTED_DEATH_TEST(statement, "Check failed", return )
+  GTEST_UNSUPPORTED_DEATH_TEST(statement, "DCHECK failed", return)
 #define ASSERT_DCHECK_DEATH_WITH(statement, msg) \
-  GTEST_UNSUPPORTED_DEATH_TEST(statement, msg, return )
+  GTEST_UNSUPPORTED_DEATH_TEST(statement, msg, return)
 
 #endif  // DCHECK_IS_ON() && defined(GTEST_HAS_DEATH_TEST) &&
         // !BUILDFLAG(DCHECK_IS_CONFIGURABLE) && !BUILDFLAG(IS_ANDROID)
@@ -57,10 +58,16 @@
 #define EXPECT_CHECK_DEATH(statement) EXPECT_DEATH(statement, "Check failed")
 #define EXPECT_CHECK_DEATH_WITH(statement, msg) EXPECT_DEATH(statement, msg)
 #define ASSERT_CHECK_DEATH(statement) ASSERT_DEATH(statement, "Check failed")
+#define EXPECT_NOTREACHED_DEATH(statement) \
+  EXPECT_DEATH(statement, "NOTREACHED hit")
+#define ASSERT_NOTREACHED_DEATH(statement) \
+  ASSERT_DEATH(statement, "NOTREACHED hit")
 #else
 #define EXPECT_CHECK_DEATH(statement) EXPECT_DEATH(statement, "")
 #define EXPECT_CHECK_DEATH_WITH(statement, msg) EXPECT_DEATH(statement, "")
 #define ASSERT_CHECK_DEATH(statement) ASSERT_DEATH(statement, "")
+#define EXPECT_NOTREACHED_DEATH(statement) EXPECT_DEATH(statement, "")
+#define ASSERT_NOTREACHED_DEATH(statement) ASSERT_DEATH(statement, "")
 #endif  // CHECK_WILL_STREAM()
 
 #else  // defined(GTEST_HAS_DEATH_TEST) && !BUILDFLAG(IS_ANDROID)
@@ -72,7 +79,11 @@
 #define EXPECT_CHECK_DEATH_WITH(statement, msg) \
   GTEST_UNSUPPORTED_DEATH_TEST(statement, "", )
 #define ASSERT_CHECK_DEATH(statement) \
-  GTEST_UNSUPPORTED_DEATH_TEST(statement, "", return )
+  GTEST_UNSUPPORTED_DEATH_TEST(statement, "", return)
+#define EXPECT_NOTREACHED_DEATH(statement) \
+  GTEST_UNSUPPORTED_DEATH_TEST(statement, "", )
+#define ASSERT_NOTREACHED_DEATH(statement) \
+  GTEST_UNSUPPORTED_DEATH_TEST(statement, "", return)
 
 #endif  // defined(GTEST_HAS_DEATH_TEST) && !BUILDFLAG(IS_ANDROID)
 
@@ -106,8 +117,8 @@ struct TestIdentifier {
 
 // Constructs a full test name given a test case name and a test name,
 // e.g. for test case "A" and test name "B" returns "A.B".
-std::string FormatFullTestName(const std::string& test_case_name,
-                               const std::string& test_name);
+std::string FormatFullTestName(std::string_view test_case_name,
+                               std::string_view test_name);
 
 // Returns the full test name with the "DISABLED_" prefix stripped out.
 // e.g. for the full test names "A.DISABLED_B", "DISABLED_A.B", and

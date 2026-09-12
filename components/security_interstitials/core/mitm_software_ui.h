@@ -9,6 +9,7 @@
 #include "base/values.h"
 #include "components/security_interstitials/core/controller_client.h"
 #include "components/ssl_errors/error_classification.h"
+#include "net/base/net_errors.h"
 #include "net/ssl/ssl_info.h"
 #include "url/gurl.h"
 
@@ -18,7 +19,7 @@ namespace security_interstitials {
 class MITMSoftwareUI {
  public:
   MITMSoftwareUI(const GURL& request_url,
-                 int cert_error,
+                 net::Error cert_error,
                  const net::SSLInfo& ssl_info,
                  const std::string& mitm_software_name,
                  bool is_enterprise_managed,
@@ -29,16 +30,16 @@ class MITMSoftwareUI {
 
   ~MITMSoftwareUI();
 
-  void PopulateStringsForHTML(base::Value::Dict& load_time_data);
+  void PopulateStringsForHTML(base::DictValue& load_time_data);
   void HandleCommand(SecurityInterstitialCommand command);
 
  protected:
-  void PopulateEnterpriseUserStringsForHTML(base::Value::Dict& load_time_data);
-  void PopulateAtHomeUserStringsForHTML(base::Value::Dict& load_time_data);
+  void PopulateEnterpriseUserStringsForHTML(base::DictValue& load_time_data);
+  void PopulateAtHomeUserStringsForHTML(base::DictValue& load_time_data);
 
  private:
   const GURL request_url_;
-  const int cert_error_;
+  const net::Error cert_error_;
   const net::SSLInfo ssl_info_;
   const std::string mitm_software_name_;
   const bool is_enterprise_managed_;

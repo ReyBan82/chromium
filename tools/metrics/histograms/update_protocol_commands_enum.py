@@ -3,34 +3,29 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import os
-import re
-import sys
-import hashlib
 import ctypes
-
+import hashlib
+import os
 from xml.dom import minidom
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'common'))
-import path_util
+import setup_modules  # pylint: disable=unused-import
 
-sys.path.append(
-    os.path.join(os.path.dirname(__file__), '..', '..', '..', 'third_party',
-                 'inspector_protocol'))
-import pdl
+import chromium_src.third_party.inspector_protocol.pdl as pdl
+import chromium_src.tools.metrics.common.path_util as path_util
+import chromium_src.tools.metrics.histograms.update_histogram_enum as update_histogram_enum
 
-import update_histogram_enum
-import histogram_paths
+
+DEV_ENUMS_XML_PATH = 'tools/metrics/histograms/metadata/dev/enums.xml'
 
 
 def GetCommandUMAId(cdp_command):
   """Generate a hash consistent with GetCommandUMAId() in ChromeDevToolsSession.
 
-   Args:
-    cdp_command: A string containing a CDP command.
+  Args:
+   cdp_command: A string containing a CDP command.
 
-   Returns:
-    The hashed value for the CDP command.
+  Returns:
+   The hashed value for the CDP command.
   """
   digest = hashlib.md5(cdp_command.encode('utf-8')).hexdigest()
   first_eight_bytes = digest[:16]
@@ -50,21 +45,24 @@ def ParseProtocolCommandsFromPDL(file_path):
     A dictionary with the hashes as keys and the CDP commands as values.
   """
   file_name = path_util.GetInputFile(file_path)
-  input_file = open(file_name, "r")
+  input_file = open(file_name, 'r')
   pdl_string = input_file.read()
   protocol = pdl.loads(pdl_string, file_name, False)
   input_file.close()
 
   result = {}
-  for domain in protocol["domains"]:
-    if "commands" in domain:
-      for command in domain["commands"]:
-        command_name = domain["domain"] + "." + command["name"]
+  for domain in protocol['domains']:
+    if 'commands' in domain:
+      for command in domain['commands']:
+        command_name = domain['domain'] + '.' + command['name']
         hashed_command = GetCommandUMAId(command_name)
-        if (hashed_command in result):
-          print('Hash collision between "{}" and "{}" in {} when '\
-          'generating CDPCommands for enums.xml'
-          .format(result[hashed_command], command_name, file_path))
+        if hashed_command in result:
+          print(
+            'Hash collision between "{}" and "{}" in {} when '
+            'generating CDPCommands for enums.xml'.format(
+              result[hashed_command], command_name, file_path
+            )
+          )
         result[hashed_command] = command_name
 
   return result
@@ -73,11 +71,10 @@ def ParseProtocolCommandsFromPDL(file_path):
 def ParseProtocolCommandsFromXML():
   """Parses the 'CDPCommands' enum in enums.xml.
 
-   Returns:
-    A dictionary with the hashes as keys and the CDP commands as values.
+  Returns:
+   A dictionary with the hashes as keys and the CDP commands as values.
   """
-  document = minidom.parse(
-      path_util.GetInputFile(histogram_paths.ENUMS_XML_RELATIVE))
+  document = minidom.parse(path_util.GetInputFile(DEV_ENUMS_XML_PATH))
   result = {}
 
   # Get DOM of the <enum name="CDPCommands"> node.
@@ -85,7 +82,7 @@ def ParseProtocolCommandsFromXML():
     if enum_node.attributes['name'].value == 'CDPCommands':
       break
   else:
-    raise UserError('CDPCommands enum node not found in enums.xml')
+    raise Exception('CDPCommands enum node not found in enums.xml')
 
   for child in enum_node.childNodes:
     if child.nodeName == 'int':
@@ -106,11 +103,11 @@ def CheckDictsForCollisions(first, second):
     second: A dictionary.
   """
   for hashedValue in first.keys():
-    if (hashedValue in second and second[hashedValue] != first[hashedValue]):
+    if hashedValue in second and second[hashedValue] != first[hashedValue]:
       print(
-        'Hash collision between "{}" and "{}" when generating CDPCommands '\
-        'for enums.xml'
-        .format(first[hashedValue], second[hashedValue]))
+        'Hash collision between "{}" and "{}" when generating CDPCommands '
+        'for enums.xml'.format(first[hashedValue], second[hashedValue])
+      )
 
 
 def MaybeUpdateEnumFromFile(file_path):
@@ -125,9 +122,13 @@ def MaybeUpdateEnumFromFile(file_path):
   xml_dict = ParseProtocolCommandsFromXML()
   CheckDictsForCollisions(pdl_dict, xml_dict)
   files_for_enum_comment = '*.pdl files'
-  update_histogram_enum.UpdateHistogramFromDict('CDPCommands', pdl_dict,
-                                                files_for_enum_comment,
-                                                os.path.basename(__file__))
+  update_histogram_enum.UpdateHistogramFromDict(
+    DEV_ENUMS_XML_PATH,
+    'CDPCommands',
+    pdl_dict,
+    files_for_enum_comment,
+    os.path.basename(__file__),
+  )
 
 
 def main():
@@ -136,10 +137,11 @@ def main():
   """
 
   pdl_file_paths = [
-      'third_party/blink/public/devtools_protocol/browser_protocol.pdl',
-      'v8/include/js_protocol.pdl', 'chrome/browser/devtools/cros_protocol.pdl',
-      'components/viz/common/debugger/viz_debugger.pdl',
-      'content/browser/native_profiling.pdl'
+    'third_party/blink/public/devtools_protocol/browser_protocol.pdl',
+    'v8/include/js_protocol.pdl',
+    'chrome/browser/devtools/cros_protocol.pdl',
+    'components/viz/common/debugger/viz_debugger.pdl',
+    'content/browser/native_profiling.pdl',
   ]
   for pdl_file_path in pdl_file_paths:
     MaybeUpdateEnumFromFile(pdl_file_path)

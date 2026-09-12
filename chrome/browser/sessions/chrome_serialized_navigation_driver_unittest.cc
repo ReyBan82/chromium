@@ -5,6 +5,7 @@
 #include "chrome/browser/sessions/chrome_serialized_navigation_driver.h"
 
 #include "components/sessions/core/serialized_navigation_entry_test_helper.h"
+#include "content/public/browser/navigation_entry.h"
 #include "services/network/public/mojom/referrer_policy.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/page_state/page_state.h"
@@ -12,14 +13,14 @@
 
 class ChromeSerializedNavigationDriverTest : public ::testing::Test {
  public:
-  ChromeSerializedNavigationDriverTest() {}
+  ChromeSerializedNavigationDriverTest() = default;
 
   ChromeSerializedNavigationDriverTest(
       const ChromeSerializedNavigationDriverTest&) = delete;
   ChromeSerializedNavigationDriverTest& operator=(
       const ChromeSerializedNavigationDriverTest&) = delete;
 
-  ~ChromeSerializedNavigationDriverTest() override {}
+  ~ChromeSerializedNavigationDriverTest() override = default;
 
   void SetUp() override {
     sessions::ContentSerializedNavigationDriver::SetInstance(

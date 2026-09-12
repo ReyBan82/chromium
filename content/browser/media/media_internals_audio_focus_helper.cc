@@ -4,11 +4,12 @@
 
 #include "content/browser/media/media_internals_audio_focus_helper.h"
 
+#include <algorithm>
 #include <string>
+#include <string_view>
 
 #include "base/containers/adapters.h"
 #include "base/functional/bind.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/strcat.h"
 #include "base/values.h"
 #include "content/browser/media/media_internals.h"
@@ -42,7 +43,6 @@ const char kMediaSessionPlaybackStatePaused[] = "Paused";
 const char kMediaSessionPlaybackStatePlaying[] = "Playing";
 
 const char kMediaSessionIsControllable[] = "Controllable";
-const char kMediaSessionIsSensitive[] = "Sensitive";
 
 const char kMediaSessionHasAudio[] = "HasAudio";
 const char kMediaSessionHasVideo[] = "HasVideo";
@@ -155,13 +155,13 @@ void MediaInternalsAudioFocusHelper::DidGetAudioFocusRequestList(
 
   // We should go backwards through the stack so the top of the stack is
   // always shown first in the list.
-  base::Value::List stack_data;
+  base::ListValue stack_data;
   for (const auto& session : base::Reversed(stack)) {
     if (!session->request_id.has_value())
       continue;
 
     std::string id_string = session->request_id.value().ToString();
-    base::Value::Dict media_session_data;
+    base::DictValue media_session_data;
     media_session_data.Set(kAudioFocusIdKey, id_string);
     stack_data.Append(std::move(media_session_data));
 
@@ -190,18 +190,18 @@ void MediaInternalsAudioFocusHelper::DidGetAudioFocusDebugInfo(
   if (!EnsureServiceConnection())
     return;
 
-  base::Value::List* sessions_list =
+  base::ListValue* sessions_list =
       audio_focus_data_.FindList(kAudioFocusSessionsKey);
   DCHECK(sessions_list);
 
   bool updated = false;
   for (auto& value : *sessions_list) {
-    base::Value::Dict& session = value.GetDict();
+    base::DictValue& session = value.GetDict();
     if (session.Find(kAudioFocusIdKey)->GetString() != id)
       continue;
 
     auto state = request_state_.find(id);
-    DCHECK(state != request_state_.end());
+    CHECK(state != request_state_.end());
 
     session.Set("name", BuildNameString(state->second, info->name));
     session.Set("owner", info->owner);
@@ -216,8 +216,8 @@ void MediaInternalsAudioFocusHelper::DidGetAudioFocusDebugInfo(
 }
 
 void MediaInternalsAudioFocusHelper::SerializeAndSendUpdate(
-    base::StringPiece function,
-    const base::Value::Dict& value) {
+    std::string_view function,
+    const base::DictValue& value) {
   base::ValueView args[] = {value};
   return MediaInternals::GetInstance()->SendUpdate(
       content::WebUI::GetJavascriptCall(function, args));
@@ -293,7 +293,7 @@ std::string MediaInternalsAudioFocusHelper::BuildStateString(
   // Convert the audio_video_states to a string.
   if (state->session_info->audio_video_states) {
     result.append(" {");
-    base::ranges::for_each(
+    std::ranges::for_each(
         *state->session_info->audio_video_states, [&result](const auto& state) {
           result.append(" ");
           switch (state) {
@@ -308,7 +308,6 @@ std::string MediaInternalsAudioFocusHelper::BuildStateString(
               break;
             case media_session::mojom::MediaAudioVideoState::kDeprecatedUnknown:
               NOTREACHED();
-              break;
           }
         });
     result.append(" }");
@@ -325,10 +324,6 @@ std::string MediaInternalsAudioFocusHelper::BuildStateString(
   // Convert the |is_controllable| boolean into a string.
   if (state->session_info->is_controllable)
     base::StrAppend(&result, {" ", kMediaSessionIsControllable});
-
-  // Convert the |is_sensitive| boolean into a string.
-  if (state->session_info->is_sensitive)
-    base::StrAppend(&result, {" ", kMediaSessionIsSensitive});
 
   if (!provided_state.empty())
     base::StrAppend(&result, {" ", provided_state});

@@ -68,8 +68,8 @@ TEST(ChromeLocatorTest, GetChromeBundleInfoWithLatestVersion) {
   base::FilePath framework_path;
   base::FilePath framework_dylib_path;
   EXPECT_TRUE(app_mode::GetChromeBundleInfo(
-      chrome_bundle_path, version_info::GetVersionNumber(), &executable_path,
-      &framework_path, &framework_dylib_path));
+      chrome_bundle_path, std::string(version_info::GetVersionNumber()),
+      &executable_path, &framework_path, &framework_dylib_path));
   EXPECT_TRUE(base::PathExists(executable_path));
   EXPECT_TRUE(base::DirectoryExists(framework_path));
   EXPECT_TRUE(base::PathExists(framework_dylib_path));
@@ -118,4 +118,28 @@ TEST(ChromeLocatorTest, GetChromeBundleInfoWithPreviousVersion) {
   EXPECT_TRUE(base::PathExists(framework_dylib_path));
 
   base::DeleteFile(fake_version_directory);
+}
+
+TEST(ChromeLocatorTest, GetChromeBundleInfoWithPathTraversal) {
+  base::FilePath chrome_bundle_path;
+  GetChromeBundlePath(&chrome_bundle_path);
+  ASSERT_TRUE(base::DirectoryExists(chrome_bundle_path));
+
+  base::FilePath default_executable_path;
+  base::FilePath default_framework_path;
+  base::FilePath default_framework_dylib_path;
+  ASSERT_TRUE(app_mode::GetChromeBundleInfo(
+      chrome_bundle_path, std::string(), &default_executable_path,
+      &default_framework_path, &default_framework_dylib_path));
+
+  base::FilePath executable_path;
+  base::FilePath framework_path;
+  base::FilePath framework_dylib_path;
+  // Path traversal should be rejected and default to the latest version.
+  EXPECT_TRUE(app_mode::GetChromeBundleInfo(
+      chrome_bundle_path, std::string("../../evil"), &executable_path,
+      &framework_path, &framework_dylib_path));
+  EXPECT_EQ(default_framework_dylib_path, framework_dylib_path);
+  EXPECT_EQ(default_framework_path, framework_path);
+  EXPECT_EQ(default_executable_path, executable_path);
 }

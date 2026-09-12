@@ -5,12 +5,14 @@
 import("//build/config/compiler/pgo/pgo.gni")
 import("//build/config/devtools.gni")
 import("//components/viz/common/debugger/viz_debugger.gni")
+import("//content/browser/devtools/features.gni")
+import("//device/bluetooth/emulation/buildflags.gni")
+import("//third_party/blink/public/public_features.gni")
 import("//third_party/inspector_protocol/inspector_protocol.gni")
 import("//third_party/protobuf/proto_library.gni")
 import("//tools/grit/grit_rule.gni")
 
-# Android does not support DevTools front-end.
-if (!is_android) {
+if (enable_devtools_frontend) {
   source_set("devtools_resources_extern") {
     sources = [ "devtools_resources.cc" ]
 
@@ -20,6 +22,7 @@ if (!is_android) {
 
     deps = [ ":devtools_resources" ]
   }
+
   grit("devtools_resources") {
     source = "$root_gen_dir/$devtools_grd_location"
 
@@ -55,13 +58,18 @@ if (!is_android) {
 # done for cros_protocol.pdl in chrome/browser/devtools
 _concatenated_protocol_path =
     "$root_gen_dir/content/browser/devtools/protocol.json"
+
 action("concatenate_protocols") {
   script = "//third_party/inspector_protocol/concatenate_protocols.py"
   deps = [ "//third_party/blink/public/devtools_protocol:protocol_version" ]
 
   _blink_protocol_path =
       "$root_gen_dir/third_party/blink/public/devtools_protocol/protocol.json"
-  inputs = [ _blink_protocol_path ]
+  inputs = [
+    _blink_protocol_path,
+    "//v8/include/js_protocol.pdl",
+    "//third_party/inspector_protocol/pdl.py",
+  ]
   output_file = _concatenated_protocol_path
   outputs = [ output_file ]
 
@@ -106,10 +114,18 @@ inspector_protocol_generate("protocol_sources") {
     "protocol/browser.h",
     "protocol/device_access.cc",
     "protocol/device_access.h",
+    "protocol/device_orientation.cc",
+    "protocol/device_orientation.h",
+    "protocol/digital_credentials.cc",
+    "protocol/digital_credentials.h",
     "protocol/dom.cc",
     "protocol/dom.h",
+    "protocol/debugger.cc",
+    "protocol/debugger.h",
     "protocol/emulation.cc",
     "protocol/emulation.h",
+    "protocol/fed_cm.cc",
+    "protocol/fed_cm.h",
     "protocol/fetch.cc",
     "protocol/fetch.h",
     "protocol/forward.h",
@@ -129,6 +145,8 @@ inspector_protocol_generate("protocol_sources") {
     "protocol/overlay.h",
     "protocol/page.cc",
     "protocol/page.h",
+    "protocol/preload.cc",
+    "protocol/preload.h",
     "protocol/protocol.h",
     "protocol/runtime.cc",
     "protocol/runtime.h",
@@ -148,6 +166,8 @@ inspector_protocol_generate("protocol_sources") {
     "protocol/tethering.h",
     "protocol/tracing.cc",
     "protocol/tracing.h",
+    "protocol/web_mcp.cc",
+    "protocol/web_mcp.h",
     "protocol/web_authn.cc",
     "protocol/web_authn.h",
   ]
@@ -163,6 +183,20 @@ inspector_protocol_generate("protocol_sources") {
     outputs += [
       "protocol/native_profiling.cc",
       "protocol/native_profiling.h",
+    ]
+  }
+
+  if (enable_bluetooth_emulation) {
+    outputs += [
+      "protocol/bluetooth_emulation.cc",
+      "protocol/bluetooth_emulation.h",
+    ]
+  }
+
+  if (enable_smart_card) {
+    outputs += [
+      "protocol/smart_card_emulation.cc",
+      "protocol/smart_card_emulation.h",
     ]
   }
 }

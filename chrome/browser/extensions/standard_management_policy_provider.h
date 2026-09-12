@@ -8,7 +8,11 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "chrome/browser/profiles/profile.h"
 #include "extensions/browser/management_policy.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -19,16 +23,17 @@ class ExtensionManagement;
 // extension block/allowlists and admin block/allowlists.
 class StandardManagementPolicyProvider : public ManagementPolicy::Provider {
  public:
-  explicit StandardManagementPolicyProvider(ExtensionManagement* settings);
-
+  explicit StandardManagementPolicyProvider(ExtensionManagement* settings,
+                                            Profile* profile);
   ~StandardManagementPolicyProvider() override;
 
   // ManagementPolicy::Provider implementation.
   std::string GetDebugPolicyProviderName() const override;
   bool UserMayLoad(const Extension* extension,
                    std::u16string* error) const override;
-  bool UserMayInstall(const Extension* extension,
-                      std::u16string* error) const override;
+  void UserMayInstall(scoped_refptr<const Extension> extension,
+                      base::OnceCallback<void(ManagementPolicy::Decision)>
+                          callback) const override;
   bool UserMayModifySettings(const Extension* extension,
                              std::u16string* error) const override;
   bool ExtensionMayModifySettings(const Extension* source_extension,
@@ -37,17 +42,18 @@ class StandardManagementPolicyProvider : public ManagementPolicy::Provider {
   bool MustRemainEnabled(const Extension* extension,
                          std::u16string* error) const override;
   bool MustRemainDisabled(const Extension* extension,
-                          disable_reason::DisableReason* reason,
-                          std::u16string* error) const override;
+                          disable_reason::DisableReason* reason) const override;
   bool MustRemainInstalled(const Extension* extension,
                            std::u16string* error) const override;
   bool ShouldForceUninstall(const Extension* extension,
                             std::u16string* error) const override;
 
  private:
+  std::u16string GetLoadErrorMessage(
+      const extensions::Extension* extension) const;
+
+  raw_ptr<Profile> profile_;
   raw_ptr<ExtensionManagement> settings_;
-  bool ReturnLoadError(const extensions::Extension* extension,
-                       std::u16string* error) const;
 };
 
 }  // namespace extensions

@@ -5,28 +5,21 @@
 #include "services/device/serial/serial_device_enumerator_mac.h"
 
 #include <IOKit/serial/IOSerialKeys.h>
+#include <IOKit/usb/IOUSBHostFamilyDefinitions.h>
 #include <IOKit/usb/IOUSBLib.h>
+#include <IOKit/usb/USBSpec.h>
 #include <stdint.h>
 
-#include <algorithm>
-#include <memory>
-#include <set>
+#include <optional>
 #include <string>
-#include <unordered_set>
-#include <utility>
-#include <vector>
 
-#include "base/files/file_enumerator.h"
+#include "base/apple/foundation_util.h"
+#include "base/apple/scoped_cftyperef.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
-#include "base/mac/scoped_cftyperef.h"
 #include "base/mac/scoped_ioobject.h"
-#include "base/metrics/histogram_functions.h"
-#include "base/strings/pattern.h"
-#include "base/strings/string_util.h"
+#include "base/memory/scoped_policy.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
-#include "base/threading/scoped_blocking_call.h"
 #include "components/device_event_log/device_event_log.h"
 
 namespace device {
@@ -38,93 +31,102 @@ std::string HexErrorCode(IOReturn error_code) {
 }
 
 // Searches a service and all ancestor services for a property with the
-// specified key, returning NULL if no such key was found.
-CFTypeRef GetCFProperty(io_service_t service, const CFStringRef key) {
+// specified key, returning null if no such key was found.
+base::apple::ScopedCFTypeRef<CFTypeRef> GetCFProperty(io_service_t service,
+                                                      const CFStringRef key) {
   // We search for the specified property not only on the specified service, but
   // all ancestors of that service. This is important because if a device is
   // both serial and USB, in the registry tree it appears as a serial service
   // with a USB service as its ancestor. Without searching ancestors services
   // for the specified property, we'd miss all USB properties.
-  return IORegistryEntrySearchCFProperty(
-      service, kIOServicePlane, key, NULL,
-      kIORegistryIterateRecursively | kIORegistryIterateParents);
+  return base::apple::ScopedCFTypeRef<CFTypeRef>(
+      IORegistryEntrySearchCFProperty(
+          service, kIOServicePlane, key, nullptr,
+          kIORegistryIterateRecursively | kIORegistryIterateParents));
 }
 
 // Searches a service and all ancestor services for a string property with the
-// specified key, returning NULL if no such key was found.
-CFStringRef GetCFStringProperty(io_service_t service, const CFStringRef key) {
-  CFTypeRef value = GetCFProperty(service, key);
-  if (value && (CFGetTypeID(value) == CFStringGetTypeID()))
-    return static_cast<CFStringRef>(value);
+// specified key, returning null if no such key was found.
+base::apple::ScopedCFTypeRef<CFStringRef> GetCFStringProperty(
+    io_service_t service,
+    const CFStringRef key) {
+  base::apple::ScopedCFTypeRef<CFTypeRef> value = GetCFProperty(service, key);
 
-  return NULL;
+  return base::apple::ScopedCFTypeRef<CFStringRef>(
+      base::apple::CFCast<CFStringRef>(value.get()),
+      base::scoped_policy::RETAIN);
 }
 
 // Searches a service and all ancestor services for a number property with the
-// specified key, returning NULL if no such key was found.
-CFNumberRef GetCFNumberProperty(io_service_t service, const CFStringRef key) {
-  CFTypeRef value = GetCFProperty(service, key);
-  if (value && (CFGetTypeID(value) == CFNumberGetTypeID()))
-    return static_cast<CFNumberRef>(value);
+// specified key, returning null if no such key was found.
+base::apple::ScopedCFTypeRef<CFNumberRef> GetCFNumberProperty(
+    io_service_t service,
+    const CFStringRef key) {
+  base::apple::ScopedCFTypeRef<CFTypeRef> value = GetCFProperty(service, key);
 
-  return NULL;
+  return base::apple::ScopedCFTypeRef<CFNumberRef>(
+      base::apple::CFCast<CFNumberRef>(value.get()),
+      base::scoped_policy::RETAIN);
 }
 
 // Searches the specified service for a string property with the specified key.
-absl::optional<std::string> GetStringProperty(io_service_t service,
-                                              const CFStringRef key) {
-  CFStringRef propValue = GetCFStringProperty(service, key);
-  if (propValue)
-    return base::SysCFStringRefToUTF8(propValue);
+std::optional<std::string> GetStringProperty(io_service_t service,
+                                             const CFStringRef key) {
+  base::apple::ScopedCFTypeRef<CFStringRef> property =
+      GetCFStringProperty(service, key);
+  if (property) {
+    return base::SysCFStringRefToUTF8(property.get());
+  }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 // Searches the specified service for a uint16_t property with the specified
 // key.
-absl::optional<uint16_t> GetUInt16Property(io_service_t service,
-                                           const CFStringRef key) {
-  CFNumberRef propValue = GetCFNumberProperty(service, key);
-  if (propValue) {
-    int intValue;
-    if (CFNumberGetValue(propValue, kCFNumberIntType, &intValue))
-      return static_cast<uint16_t>(intValue);
+std::optional<uint16_t> GetUInt16Property(io_service_t service,
+                                          const CFStringRef key) {
+  base::apple::ScopedCFTypeRef<CFNumberRef> property =
+      GetCFNumberProperty(service, key);
+  if (property) {
+    int value;
+    if (CFNumberGetValue(property.get(), kCFNumberIntType, &value)) {
+      return static_cast<uint16_t>(value);
+    }
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 // Finds the name of the USB driver for |device| by walking up the
-// IORegistry tree to find the first entry provided by the IOUSBInterface
-// class. For drivers compiled for macOS 10.11 and later this was renamed
-// to IOUSBHostInterface.
-absl::optional<std::string> GetUsbDriverName(
+// IORegistry tree to find the first entry provided by the IOUSBHostInterface
+// class.
+std::optional<std::string> GetUsbDriverName(
     base::mac::ScopedIOObject<io_object_t> device) {
   base::mac::ScopedIOObject<io_iterator_t> iterator;
   kern_return_t kr = IORegistryEntryCreateIterator(
       device.get(), kIOServicePlane,
       kIORegistryIterateRecursively | kIORegistryIterateParents,
       iterator.InitializeInto());
-  if (kr != KERN_SUCCESS)
-    return absl::nullopt;
+  if (kr != KERN_SUCCESS) {
+    return std::nullopt;
+  }
 
   base::mac::ScopedIOObject<io_service_t> ancestor;
-  while (ancestor.reset(IOIteratorNext(iterator)), ancestor) {
-    absl::optional<std::string> provider_class =
+  while (ancestor.reset(IOIteratorNext(iterator.get())), ancestor) {
+    std::optional<std::string> provider_class =
         GetStringProperty(ancestor.get(), CFSTR(kIOProviderClassKey));
-    if (provider_class && (*provider_class == "IOUSBInterface" ||
-                           *provider_class == "IOUSBHostInterface")) {
+    if (provider_class && *provider_class == kIOUSBHostInterfaceClassName) {
       return GetStringProperty(ancestor.get(), kCFBundleIdentifierKey);
     }
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace
 
 SerialDeviceEnumeratorMac::SerialDeviceEnumeratorMac() {
-  notify_port_.reset(IONotificationPortCreate(kIOMasterPortDefault));
+  notify_port_.reset(IONotificationPortCreate(kIOMainPortDefault));
   CFRunLoopAddSource(CFRunLoopGetMain(),
                      IONotificationPortGetRunLoopSource(notify_port_.get()),
                      kCFRunLoopDefaultMode);
@@ -162,7 +164,7 @@ SerialDeviceEnumeratorMac::~SerialDeviceEnumeratorMac() = default;
 void SerialDeviceEnumeratorMac::FirstMatchCallback(void* context,
                                                    io_iterator_t iterator) {
   auto* enumerator = static_cast<SerialDeviceEnumeratorMac*>(context);
-  DCHECK_EQ(enumerator->devices_added_iterator_, iterator);
+  DCHECK_EQ(enumerator->devices_added_iterator_.get(), iterator);
   enumerator->AddDevices();
 }
 
@@ -170,7 +172,7 @@ void SerialDeviceEnumeratorMac::FirstMatchCallback(void* context,
 void SerialDeviceEnumeratorMac::TerminatedCallback(void* context,
                                                    io_iterator_t iterator) {
   auto* enumerator = static_cast<SerialDeviceEnumeratorMac*>(context);
-  DCHECK_EQ(enumerator->devices_removed_iterator_, iterator);
+  DCHECK_EQ(enumerator->devices_removed_iterator_.get(), iterator);
   enumerator->RemoveDevices();
 }
 
@@ -178,25 +180,27 @@ void SerialDeviceEnumeratorMac::AddDevices() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   base::mac::ScopedIOObject<io_service_t> device;
-  while (device.reset(IOIteratorNext(devices_added_iterator_)), device) {
+  while (device.reset(IOIteratorNext(devices_added_iterator_.get())), device) {
     uint64_t entry_id;
-    IOReturn result = IORegistryEntryGetRegistryEntryID(device, &entry_id);
-    if (result != kIOReturnSuccess)
+    IOReturn result =
+        IORegistryEntryGetRegistryEntryID(device.get(), &entry_id);
+    if (result != kIOReturnSuccess) {
       continue;
+    }
 
     auto info = mojom::SerialPortInfo::New();
-    absl::optional<uint16_t> vendor_id =
+    std::optional<uint16_t> vendor_id =
         GetUInt16Property(device.get(), CFSTR(kUSBVendorID));
-    absl::optional<std::string> vendor_id_str;
+    std::optional<std::string> vendor_id_str;
     if (vendor_id) {
       info->has_vendor_id = true;
       info->vendor_id = *vendor_id;
       vendor_id_str = base::StringPrintf("%04X", *vendor_id);
     }
 
-    absl::optional<uint16_t> product_id =
+    std::optional<uint16_t> product_id =
         GetUInt16Property(device.get(), CFSTR(kUSBProductID));
-    absl::optional<std::string> product_id_str;
+    std::optional<std::string> product_id_str;
     if (product_id) {
       info->has_product_id = true;
       info->product_id = *product_id;
@@ -213,15 +217,16 @@ void SerialDeviceEnumeratorMac::AddDevices() {
     // starting with "tty" and a "callout" path starting with "cu". The
     // call-out device is typically preferred but requesting the dial-in device
     // is supported for the legacy Chrome Apps API.
-    absl::optional<std::string> dialin_device =
+    std::optional<std::string> dialin_device =
         GetStringProperty(device.get(), CFSTR(kIODialinDeviceKey));
-    absl::optional<std::string> callout_device =
+    std::optional<std::string> callout_device =
         GetStringProperty(device.get(), CFSTR(kIOCalloutDeviceKey));
 
     if (callout_device) {
       info->path = base::FilePath(*callout_device);
-      if (dialin_device)
+      if (dialin_device) {
         info->alternate_path = base::FilePath(*dialin_device);
+      }
     } else if (dialin_device) {
       info->path = base::FilePath(*dialin_device);
     } else {
@@ -250,15 +255,19 @@ void SerialDeviceEnumeratorMac::RemoveDevices() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   base::mac::ScopedIOObject<io_service_t> device;
-  while (device.reset(IOIteratorNext(devices_removed_iterator_)), device) {
+  while (device.reset(IOIteratorNext(devices_removed_iterator_.get())),
+         device) {
     uint64_t entry_id;
-    IOReturn result = IORegistryEntryGetRegistryEntryID(device, &entry_id);
-    if (result != kIOReturnSuccess)
+    IOReturn result =
+        IORegistryEntryGetRegistryEntryID(device.get(), &entry_id);
+    if (result != kIOReturnSuccess) {
       continue;
+    }
 
     auto it = entries_.find(entry_id);
-    if (it == entries_.end())
+    if (it == entries_.end()) {
       continue;
+    }
 
     base::UnguessableToken token = it->second;
     entries_.erase(it);

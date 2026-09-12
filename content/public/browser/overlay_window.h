@@ -7,7 +7,12 @@
 
 #include <memory>
 
-#include "ui/gfx/native_widget_types.h"
+#include "build/build_config.h"
+#include "content/public/browser/immersive_playback_options.h"
+#include "services/media_session/public/cpp/media_image.h"
+#include "services/media_session/public/cpp/media_position.h"
+#include "third_party/blink/public/mojom/picture_in_picture/picture_in_picture.mojom-forward.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace gfx {
 class Rect;
@@ -19,8 +24,6 @@ class SurfaceId;
 }
 
 namespace content {
-
-class VideoPictureInPictureWindowController;
 
 // This window will always float above other windows. The intention is to show
 // content perpetually while the user is still interacting with the other
@@ -34,16 +37,6 @@ class VideoOverlayWindow {
     kPaused,
     kEndOfVideo,
   };
-
-  VideoOverlayWindow() = default;
-
-  VideoOverlayWindow(const VideoOverlayWindow&) = delete;
-  VideoOverlayWindow& operator=(const VideoOverlayWindow&) = delete;
-
-  // Returns a created VideoOverlayWindow. This is defined in the
-  // platform-specific implementation for the class.
-  static std::unique_ptr<VideoOverlayWindow> Create(
-      VideoPictureInPictureWindowController* controller);
 
   virtual ~VideoOverlayWindow() = default;
 
@@ -60,15 +53,23 @@ class VideoOverlayWindow {
   virtual void SetSkipAdButtonVisibility(bool is_visible) = 0;
   virtual void SetNextTrackButtonVisibility(bool is_visible) = 0;
   virtual void SetPreviousTrackButtonVisibility(bool is_visible) = 0;
+  virtual void SetHidePictureInPictureButtonVisibility(bool is_visible) = 0;
   virtual void SetMicrophoneMuted(bool muted) = 0;
   virtual void SetCameraState(bool turned_on) = 0;
+  virtual void SetMediaMuted(bool muted) = 0;
   virtual void SetToggleMicrophoneButtonVisibility(bool is_visible) = 0;
   virtual void SetToggleCameraButtonVisibility(bool is_visible) = 0;
   virtual void SetHangUpButtonVisibility(bool is_visible) = 0;
   virtual void SetNextSlideButtonVisibility(bool is_visible) = 0;
   virtual void SetPreviousSlideButtonVisibility(bool is_visible) = 0;
-
+  virtual void SetMediaPosition(
+      const media_session::MediaPosition& position) = 0;
+  virtual void SetSourceTitle(const std::u16string& source_title) = 0;
+  virtual void SetFaviconImages(
+      const std::vector<media_session::MediaImage>& images) = 0;
   virtual void SetSurfaceId(const viz::SurfaceId& surface_id) = 0;
+  virtual void SetPlaybackControlsVisibility(bool is_visible) = 0;
+  virtual void SetImmersiveVideoOptions(const ImmersiveOptions& options) = 0;
 };
 
 }  // namespace content

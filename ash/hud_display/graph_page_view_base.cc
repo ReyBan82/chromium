@@ -4,6 +4,8 @@
 
 #include "ash/hud_display/graph_page_view_base.h"
 
+#include <utility>
+
 #include "ash/hud_display/hud_constants.h"
 #include "ash/hud_display/hud_properties.h"
 #include "ash/hud_display/legend.h"
@@ -12,7 +14,9 @@
 #include "base/functional/bind.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/canvas.h"
+#include "ui/gfx/geometry/point.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/views/border.h"
 #include "ui/views/controls/button/button.h"
@@ -31,11 +35,11 @@ constexpr int kMinMaxButtonBorder = 5;
 
 // ImageButton with underline
 class MinMaxButton : public views::ImageButton {
- public:
-  METADATA_HEADER(MinMaxButton);
+  METADATA_HEADER(MinMaxButton, views::ImageButton)
 
+ public:
   explicit MinMaxButton(views::Button::PressedCallback callback)
-      : views::ImageButton(callback) {
+      : views::ImageButton(std::move(callback)) {
     SetBorder(views::CreateEmptyBorder(kMinMaxButtonBorder));
     SetBackground(std::make_unique<SolidSourceBackground>(kHUDLegendBackground,
                                                           /*radius=*/0));
@@ -54,40 +58,41 @@ class MinMaxButton : public views::ImageButton {
   void PaintButtonContents(gfx::Canvas* canvas) override {
     views::ImageButton::PaintButtonContents(canvas);
 
-    SkPath path;
-    path.moveTo(0, height());
-    path.lineTo(height(), width());
-
     cc::PaintFlags flags;
     flags.setAntiAlias(true);
     flags.setBlendMode(SkBlendMode::kSrc);
     flags.setStyle(cc::PaintFlags::kStroke_Style);
     flags.setStrokeWidth(1);
     flags.setColor(kHUDDefaultColor);
-    canvas->DrawPath(path, flags);
+    canvas->DrawLine(gfx::Point{0, height()}, gfx::Point{height(), width()},
+                     flags);
   }
 };
 
-BEGIN_METADATA(MinMaxButton, views::ImageButton)
+BEGIN_METADATA(MinMaxButton)
 END_METADATA
 
 void SetMinimizeIconToButton(views::ImageButton* button) {
   button->SetImageModel(
       views::Button::ButtonState::STATE_NORMAL,
-      ui::ImageModel::FromVectorIcon(views::kWindowControlMinimizeIcon,
+      ui::ImageModel::FromVectorIcon(::features::IsRoundedIconsEnabled()
+                                         ? views::kChromeMinimizeIcon
+                                         : views::kWindowControlMinimizeOldIcon,
                                      kHUDDefaultColor, kMinMaxButtonIconSize));
 }
 
 void SetRestoreIconToButton(views::ImageButton* button) {
   button->SetImageModel(
       views::Button::ButtonState::STATE_NORMAL,
-      ui::ImageModel::FromVectorIcon(views::kWindowControlRestoreIcon,
+      ui::ImageModel::FromVectorIcon(::features::IsRoundedIconsEnabled()
+                                         ? views::kChromeRestoreIcon
+                                         : views::kWindowControlRestoreOldIcon,
                                      kHUDDefaultColor, kMinMaxButtonIconSize));
 }
 
 }  // namespace
 
-BEGIN_METADATA(GraphPageViewBase, views::View)
+BEGIN_METADATA(GraphPageViewBase)
 END_METADATA
 
 GraphPageViewBase::GraphPageViewBase() {

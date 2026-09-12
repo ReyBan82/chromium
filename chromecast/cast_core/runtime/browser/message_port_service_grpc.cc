@@ -5,6 +5,7 @@
 #include "chromecast/cast_core/runtime/browser/message_port_service_grpc.h"
 
 #include <sstream>
+#include <string_view>
 
 #include "base/logging.h"
 #include "base/task/bind_post_task.h"
@@ -25,7 +26,6 @@ MessagePortServiceGrpc::~MessagePortServiceGrpc() = default;
 cast_receiver::Status MessagePortServiceGrpc::HandleMessage(
     cast::web::Message message) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  cast::web::MessagePortStatus response;
   const uint32_t channel_id = message.channel().channel_id();
   auto entry = ports_.find(channel_id);
   if (entry == ports_.end()) {
@@ -39,7 +39,7 @@ cast_receiver::Status MessagePortServiceGrpc::HandleMessage(
 }
 
 void MessagePortServiceGrpc::ConnectToPortAsync(
-    base::StringPiece port_name,
+    std::string_view port_name,
     std::unique_ptr<cast_api_bindings::MessagePort> port) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DLOG(INFO) << "Connecting to port '" << port_name << "' as channel "

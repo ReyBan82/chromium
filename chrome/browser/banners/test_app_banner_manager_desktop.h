@@ -5,22 +5,30 @@
 #ifndef CHROME_BROWSER_BANNERS_TEST_APP_BANNER_MANAGER_DESKTOP_H_
 #define CHROME_BROWSER_BANNERS_TEST_APP_BANNER_MANAGER_DESKTOP_H_
 
+#include <optional>
+
 #include "base/values.h"
 #include "chrome/browser/banners/app_banner_manager_desktop.h"
-
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "content/public/browser/web_contents_observer.h"
 
 namespace content {
 class WebContents;
+}
+
+namespace tabs {
+class TabInterface;
 }
 
 namespace webapps {
 
 // Provides the ability to await the results of the installability check that
 // happens for every page load.
-class TestAppBannerManagerDesktop : public AppBannerManagerDesktop {
+class TestAppBannerManagerDesktop : public AppBannerManagerDesktop,
+                                    private AppBannerManager::Observer,
+                                    private content::WebContentsObserver {
  public:
-  explicit TestAppBannerManagerDesktop(content::WebContents* web_contents);
+  TestAppBannerManagerDesktop(tabs::TabInterface& tab,
+                              content::WebContents* web_contents);
 
   TestAppBannerManagerDesktop(const TestAppBannerManagerDesktop&) = delete;
   TestAppBannerManagerDesktop& operator=(const TestAppBannerManagerDesktop&) =
@@ -43,47 +51,58 @@ class TestAppBannerManagerDesktop : public AppBannerManagerDesktop {
   bool WaitForInstallableCheck();
 
   // Configures a callback to be invoked when the app banner flow finishes.
-  void PrepareDone(base::OnceClosure on_done);
+  void SetBannerPromptReplyCallback(base::OnceClosure on_banner_prompt_reply);
+
+  // Configures a callback to be invoked when the app banner flow finishes.
+  void SetCompleteCallback(base::OnceClosure on_complete);
 
   // Returns the internal state of the AppBannerManager.
-  AppBannerManager::State state();
+  AppBannerManager::State state_for_testing() const;
 
   // Block until the current app has been installed.
   void AwaitAppInstall();
 
-  // AppBannerManager:
-  void OnDidGetManifest(const InstallableData& result) override;
-  void OnDidPerformInstallableWebAppCheck(
-      const InstallableData& result) override;
-  void PerformServiceWorkerCheck() override;
-  void OnDidPerformWorkerCheck(const InstallableData& result) override;
-  void ResetCurrentPageData() override;
-
   // AppBannerManagerDesktop:
+  void OnWebAppInstallableCheckedNoErrors(
+      const ManifestId& manifest_id) override;
+  void ResetCurrentPageData() override;
   TestAppBannerManagerDesktop* AsTestAppBannerManagerDesktopForTesting()
       override;
 
+  bool IsPromptAvailableForTesting() const {
+    return app_banner_manager()->IsPromptAvailableForTesting();
+  }
+
+  InstallableWebAppCheckResult GetInstallableWebAppCheckResult() const {
+    return app_banner_manager()->GetInstallableWebAppCheckResult();
+  }
+
+  const base::ListValue& debug_log() const { return debug_log_; }
+
  protected:
-  // AppBannerManager:
-  void OnInstall(blink::mojom::DisplayMode display) override;
-  void DidFinishCreatingWebApp(const web_app::AppId& app_id,
-                               webapps::InstallResultCode code) override;
+  // WebContentsObserver:
   void DidFinishLoad(content::RenderFrameHost* render_frame_host,
                      const GURL& validated_url) override;
-  void UpdateState(AppBannerManager::State state) override;
 
  private:
-  void SetInstallable(bool installable);
-  void SetPromotable(bool promotable);
-  void OnFinished();
+  void RunInstallableQuitClosureIfNeeded();
 
-  absl::optional<bool> installable_;
-  base::Value::List debug_log_;
-  bool waiting_for_worker_;
+  // AppBannerManager::Observer:
+  void OnInstallableWebAppStatusUpdated(
+      InstallableWebAppCheckResult,
+      const std::optional<WebAppBannerData>&) override {}
+  void WillFetchManifest() override;
+  void OnInstall() override;
+  void OnBannerShown() override;
+  void OnBannerPromptReply() override;
+  void OnComplete(InstallableStatusCode code) override;
+
+  bool installable_check_in_progress_ = true;
+  base::ListValue debug_log_;
   base::OnceClosure tear_down_quit_closure_;
   base::OnceClosure installable_quit_closure_;
-  base::OnceClosure promotable_quit_closure_;
-  base::OnceClosure on_done_;
+  base::OnceClosure on_banner_prompt_reply_;
+  base::OnceClosure on_complete_;
   base::OnceClosure on_install_;
 };
 

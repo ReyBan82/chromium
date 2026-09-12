@@ -4,12 +4,42 @@
 
 module network.mojom;
 
+import "mojo/public/mojom/base/byte_size.mojom";
 import "mojo/public/mojom/base/string16.mojom";
 import "mojo/public/mojom/base/time.mojom";
 import "mojo/public/mojom/base/unguessable_token.mojom";
+import "services/network/public/mojom/auth.mojom";
 import "services/network/public/mojom/cookie_partition_key.mojom";
+import "services/network/public/mojom/http_response_headers.mojom";
+import "services/network/public/mojom/ip_address.mojom";
+import "services/network/public/mojom/ip_address_space.mojom";
 import "services/network/public/mojom/network_param.mojom";
+import "services/network/public/mojom/ssl_info.mojom";
+import "services/network/public/mojom/x509_certificate.mojom";
+import "url/mojom/origin.mojom";
 import "url/mojom/url.mojom";
+
+// Result of a Local Network Access permission check.
+enum LocalNetworkAccessResult {
+  kGranted,
+  kDenied,
+  // Used to signal to the network service that the request should be retried
+  // over the network due to cached IP address information.
+  kRetryDueToCache,
+};
+
+// Specifies the type of a network transport over which a resource is loaded.
+// See net/base/transport_info.h
+enum TransportType {
+  // The transport was established directly to a peer.
+  kDirect,
+  // The transport was established to a proxy of some kind.
+  kProxied,
+  // The transport was "established" to a cache entry.
+  kCached,
+  // Same as `kCached`, but the resource was initially loaded through a proxy.
+  kCachedFromProxy,
+};
 
 // Loading info.
 struct LoadInfo {
@@ -64,30 +94,29 @@ interface ClientCertificateResponder {
 // net::SSLPrivateKey::SignCallback.
 interface SSLPrivateKey {
   // Sign |input| using the private key and |algorithm|.
-  Sign(uint16 algorithm,
-       array<uint8> input) => (int32 net_error, array<uint8> signature);
+  Sign(uint16 algorithm, array<uint8> input)
+      => (int32 net_error, array<uint8> signature);
 };
 
 // The |credentials| output parameter is given to URLRequest::SetAuth()
 // through this mojo interface. It is not set when URLRequest::CancelAuth()
 // needs to be called.
 interface AuthChallengeResponder {
-   // Called in response to an authentication request. See
-   // URLLoaderNetworkServiceObserver::OnAuthRequired.
-   OnAuthCredentials(AuthCredentials? credentials);
+  // Called in response to an authentication request. See
+  // URLLoaderNetworkServiceObserver::OnAuthRequired.
+  OnAuthCredentials(AuthCredentials? credentials);
 };
 
 // This interface is used by an URLLoaderFactory to provide notification
 // of authentication and certificate events. This is typically implemented
 // by a trusted process such as the browser process.
 interface URLLoaderNetworkServiceObserver {
-  // Called when an SSL certificate is encountered.
+  // Called when an SSL certificate error is encountered.
   // The callback argument is a net::ERROR value. If it's net::OK, then the
   // request is resumed. Otherwise it's cancelled with the given error.
-  OnSSLCertificateError(url.mojom.Url url,
-                        int32 net_error,
-                        SSLInfo ssl_info,
-                        bool fatal) => (int32 net_error);
+  OnSSLCertificateError(
+      url.mojom.Url url, int32 net_error, SSLInfo ssl_info, bool fatal)
+      => (int32 net_error);
 
   // Called when an SSL certificate requested message is received for client
   // authentication.
@@ -119,22 +148,43 @@ interface URLLoaderNetworkServiceObserver {
   // frame.
   OnAuthRequired(
       mojo_base.mojom.UnguessableToken? window_id,
-      uint32 request_id,
+      int32 request_id,
       url.mojom.Url url,
       bool first_auth_attempt,
       AuthChallengeInfo auth_info,
       HttpResponseHeaders? head_headers,
       pending_remote<AuthChallengeResponder> auth_challenge_responder);
 
+  // Asks the URL loader observer if the caller has permission to issue a local
+  // network request to the given ip_address_space.
+  //
+  // `result` is an enum specifying the result of the permission check.
+  //
+  // Calling this function may result in a permission prompt being shown. It is
+  // okay to call this multiple times, the permissions infrastructure will
+  // ensure that multiple permission prompts are not shown at the same time, and
+  // that there aren't any race conditions to worry about with respect to the
+  // permission value.
+  OnLocalNetworkAccessPermissionRequired(
+      TransportType transport_type, IPAddressSpace ip_address_space)
+      => (LocalNetworkAccessResult result);
+
+  // Called when a platform-specific (OS-level) Local Network Access permission
+  // prompt is required.
+  // This must not be called again while a previous call's response is pending.
+  // Returns true if the user granted the permission.
+  OnPlatformLocalNetworkPermissionRequired() => (bool granted);
+
   // Called when the Clear-Site-Data header has been received. The callback
   // should be run after the data is deleted.
   // https://www.w3.org/TR/clear-site-data/
-  // TODO(crbug.com/876931): We might want to move header parsing work to
+  // TODO(crbug.com/41409604): We might want to move header parsing work to
   // Network Service for security concerns (e.g. |header_value| => booleans).
   OnClearSiteData(url.mojom.Url url,
                   string header_value,
                   int32 load_flags,
-                  CookiePartitionKey? cookie_partition_key) => ();
+                  CookiePartitionKey? cookie_partition_key,
+                  bool partitioned_state_allowed_only) => ();
 
   // Called periodically to update the client about progress of the current
   // loads. To avoid flooding the client, it has to ack the update before it can
@@ -146,11 +196,24 @@ interface URLLoaderNetworkServiceObserver {
   // ID, and the total bytes received and sent.
   // |network_traffic_annotation_id_hash| represents the hash of unique tag that
   // identifies the annotation of the request.
-  OnDataUseUpdate(int32 network_traffic_annotation_id_hash, int64 recv_bytes,
-                  int64 sent_bytes);
+  OnDataUseUpdate(int32 network_traffic_annotation_id_hash,
+                  mojo_base.mojom.ByteSize recv_bytes,
+                  mojo_base.mojom.ByteSize sent_bytes);
 
   // Used by the NetworkService to create a copy of this observer.
   // (e.g. when creating an observer for URLLoader from URLLoaderFactory's
   // observer).
   Clone(pending_receiver<URLLoaderNetworkServiceObserver> listener);
+
+  // Called when a WebSocket is connected to a local or loopback IP address
+  // space.
+  OnWebSocketConnectedToLocalNetwork(
+      url.mojom.Url request_url, IPAddressSpace ip_address_space);
+
+  // Called when a URLLoader is connected to a local or loopback IP address
+  // space.
+  OnUrlLoaderConnectedToLocalNetwork(url.mojom.Url request_url,
+                                     IPAddressSpace response_address_space,
+                                     IPAddressSpace client_address_space,
+                                     IPAddressSpace target_address_space);
 };

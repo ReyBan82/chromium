@@ -12,7 +12,9 @@
 #include "base/containers/flat_set.h"
 #include "base/functional/bind.h"
 #include "base/lazy_instance.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "base/values.h"
 #include "components/storage_monitor/removable_storage_observer.h"
 #include "components/storage_monitor/storage_info.h"
@@ -82,7 +84,7 @@ class SystemInfoEventRouter : public storage_monitor::RemovableStorageObserver {
   // processes cross multiple profiles. Currently only used for storage events.
   void DispatchEvent(events::HistogramValue histogram_value,
                      const std::string& event_name,
-                     base::Value::List args) const;
+                     base::ListValue args) const;
 
   // When true, the DisplayInfoProvider is observing for changes to the display
   // and, subsequently, dispatching on-display-changed events.
@@ -93,16 +95,16 @@ class SystemInfoEventRouter : public storage_monitor::RemovableStorageObserver {
   // dispatches on-attached/detached events.
   bool is_dispatching_storage_events_ = false;
 
-  base::flat_set<content::BrowserContext*> contexts_with_display_listeners_;
-  base::flat_set<content::BrowserContext*> contexts_with_storage_listeners_;
+  base::flat_set<raw_ptr<content::BrowserContext>>
+      contexts_with_display_listeners_;
+  base::flat_set<raw_ptr<content::BrowserContext>>
+      contexts_with_storage_listeners_;
 };
-
-static base::LazyInstance<SystemInfoEventRouter>::Leaky
-    g_system_info_event_router = LAZY_INSTANCE_INITIALIZER;
 
 // static
 SystemInfoEventRouter* SystemInfoEventRouter::GetInstance() {
-  return g_system_info_event_router.Pointer();
+  static base::NoDestructor<SystemInfoEventRouter> instance;
+  return instance.get();
 }
 
 SystemInfoEventRouter::SystemInfoEventRouter() = default;
@@ -201,7 +203,7 @@ void SystemInfoEventRouter::OnRemovableStorageAttached(
     const storage_monitor::StorageInfo& info) {
   StorageUnitInfo unit;
   systeminfo::BuildStorageUnitInfo(info, &unit);
-  base::Value::List args;
+  base::ListValue args;
   args.Append(unit.ToValue());
 
   DispatchEvent(events::SYSTEM_STORAGE_ON_ATTACHED,
@@ -210,7 +212,7 @@ void SystemInfoEventRouter::OnRemovableStorageAttached(
 
 void SystemInfoEventRouter::OnRemovableStorageDetached(
     const storage_monitor::StorageInfo& info) {
-  base::Value::List args;
+  base::ListValue args;
   std::string transient_id =
       StorageMonitor::GetInstance()->GetTransientIdForDeviceId(
           info.device_id());
@@ -223,7 +225,7 @@ void SystemInfoEventRouter::OnRemovableStorageDetached(
 void SystemInfoEventRouter::DispatchEvent(
     events::HistogramValue histogram_value,
     const std::string& event_name,
-    base::Value::List args) const {
+    base::ListValue args) const {
   ExtensionsBrowserClient::Get()->BroadcastEventToRenderers(
       histogram_value, event_name, std::move(args), false);
 }

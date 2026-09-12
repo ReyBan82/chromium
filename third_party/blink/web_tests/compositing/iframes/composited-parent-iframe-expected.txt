@@ -1,27 +1,26 @@
 {
   "layers": [
     {
-      "name": "Scrolling background of LayoutNGView #document",
+      "name": "Scrolling background of LayoutView #document",
       "bounds": [800, 600],
       "contentsOpaque": true,
       "backgroundColor": "#FFFFFF"
     },
     {
-      "name": "LayoutIFrame IFRAME",
+      "name": "LayoutIFrame (relayout-boundary) IFRAME",
       "position": [-30, -30],
       "bounds": [390, 240],
-      "contentsOpaqueForText": true,
       "transform": 1
     },
     {
-      "name": "Scrolling background of LayoutNGView #document",
+      "name": "Scrolling background of LayoutView #document",
       "bounds": [285, 230],
       "contentsOpaque": true,
       "backgroundColor": "#C0C0C0",
       "transform": 2
     },
     {
-      "name": "LayoutNGBlockFlow DIV id='iframe-content' class='box'",
+      "name": "LayoutBlockFlow (relayout-boundary) DIV id='iframe-content' class='box'",
       "bounds": [210, 210],
       "contentsOpaque": true,
       "backgroundColor": "#0000FF",

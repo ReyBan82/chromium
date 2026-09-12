@@ -6,26 +6,39 @@
 
 #include "base/check_op.h"
 #include "base/functional/bind.h"
+#include "base/metrics/field_trial_params.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/time/time.h"
-#include "base/trace_event/base_tracing.h"
+#include "base/trace_event/memory_pressure_level_proto.h"
+#include "base/trace_event/trace_event.h"
 #include "base/tracing_buildflags.h"
+#include "build/build_config.h"
 #include "components/memory_pressure/system_memory_pressure_evaluator.h"
-
-#if BUILDFLAG(ENABLE_BASE_TRACING)
-#include "base/trace_event/memory_pressure_level_proto.h"  // no-presubmit-check
-#endif
 
 namespace memory_pressure {
 
+namespace {
+
+MultiSourceMemoryPressureMonitor* g_monitor = nullptr;
+
+}  // namespace
+
 MultiSourceMemoryPressureMonitor::MultiSourceMemoryPressureMonitor()
-    : current_pressure_level_(
-          base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_NONE),
+    : current_pressure_level_(base::MEMORY_PRESSURE_LEVEL_NONE),
       dispatch_callback_(base::BindRepeating(
           &base::MemoryPressureListener::NotifyMemoryPressure)),
       aggregator_(this),
-      level_reporter_(current_pressure_level_) {}
+      level_reporter_(current_pressure_level_,
+                      "Memory.PressureLevel2",
+#if BUILDFLAG(IS_MAC)
+                      std::nullopt
+#else
+                      "Memory.PressureWindowDuration."
+#endif
+      ) {
+  CHECK(!g_monitor);
+  g_monitor = this;
+}
 
 MultiSourceMemoryPressureMonitor::~MultiSourceMemoryPressureMonitor() {
   // Destroy system evaluator early while the remaining members of this class
@@ -34,17 +47,19 @@ MultiSourceMemoryPressureMonitor::~MultiSourceMemoryPressureMonitor() {
   // delegate_->OnMemoryPressureLevelChanged() gets indirectly called during
   // ~SystemMemoryPressureEvaluator().
   system_evaluator_.reset();
+
+  CHECK_EQ(g_monitor, this);
+  g_monitor = nullptr;
+}
+
+// static
+MultiSourceMemoryPressureMonitor* MultiSourceMemoryPressureMonitor::Get() {
+  return g_monitor;
 }
 
 void MultiSourceMemoryPressureMonitor::MaybeStartPlatformVoter() {
   system_evaluator_ =
       SystemMemoryPressureEvaluator::CreateDefaultSystemEvaluator(this);
-}
-
-base::MemoryPressureListener::MemoryPressureLevel
-MultiSourceMemoryPressureMonitor::GetCurrentPressureLevel() const {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  return current_pressure_level_;
 }
 
 std::unique_ptr<MemoryPressureVoter>
@@ -53,8 +68,16 @@ MultiSourceMemoryPressureMonitor::CreateVoter() {
   return aggregator_.CreateVoter();
 }
 
+void MultiSourceMemoryPressureMonitor::UpdateDiskPressureState(
+    bool new_is_disk_pressure,
+    base::MemoryPressureLevel new_os_pressure_level) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  level_reporter_.UpdateDiskPressureState(new_is_disk_pressure,
+                                          new_os_pressure_level);
+}
+
 void MultiSourceMemoryPressureMonitor::OnMemoryPressureLevelChanged(
-    base::MemoryPressureListener::MemoryPressureLevel level) {
+    base::MemoryPressureLevel level) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK_NE(current_pressure_level_, level);
 

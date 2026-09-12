@@ -5,7 +5,10 @@
 #ifndef CHROME_BROWSER_ANDROID_HISTORY_BROWSING_HISTORY_BRIDGE_H_
 #define CHROME_BROWSER_ANDROID_HISTORY_BROWSING_HISTORY_BRIDGE_H_
 
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "base/android/scoped_java_ref.h"
@@ -13,7 +16,7 @@
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/history/profile_based_browsing_history_driver.h"
 
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 
 // The bridge for fetching browsing history information for the Android
 // history UI. This queries the history::BrowsingHistoryService and listens
@@ -21,42 +24,39 @@ using base::android::JavaParamRef;
 class BrowsingHistoryBridge : public ProfileBasedBrowsingHistoryDriver {
  public:
   explicit BrowsingHistoryBridge(JNIEnv* env,
-                                 const JavaParamRef<jobject>& obj,
-                                 const JavaParamRef<jobject>& j_profile);
+                                 const JavaRef<jobject>& obj,
+                                 Profile* profile);
 
   BrowsingHistoryBridge(const BrowsingHistoryBridge&) = delete;
   BrowsingHistoryBridge& operator=(const BrowsingHistoryBridge&) = delete;
 
-  void Destroy(JNIEnv*, const JavaParamRef<jobject>&);
+  void Destroy();
 
   void QueryHistory(JNIEnv* env,
-                    const JavaParamRef<jobject>& obj,
-                    const JavaParamRef<jobject>& j_result_obj,
-                    jstring j_query,
-                    jboolean j_host_only);
+                    const JavaRef<jobject>& j_result_obj,
+                    const std::u16string& query,
+                    const std::optional<std::string>& app_id,
+                    bool j_host_only);
 
   void QueryHistoryContinuation(JNIEnv* env,
-                                const JavaParamRef<jobject>& obj,
-                                const JavaParamRef<jobject>& j_result_obj);
+                                const JavaRef<jobject>& j_result_obj);
+
+  void GetAllAppIds(JNIEnv* env, const JavaRef<jobject>& j_result_obj);
 
   void GetLastVisitToHostBeforeRecentNavigations(
-      JNIEnv* env,
-      const JavaParamRef<jobject>& obj,
-      jstring j_host_name,
-      const JavaParamRef<jobject>& jcallback_);
+      const std::string& host_name,
+      const JavaRef<jobject>& jcallback_);
 
-  // Adds a HistoryEntry with the |j_url| and |j_native_timestamps| to the list
+  // Adds a HistoryEntry with the |url|, |app_id|, and |timestamps| to the list
   // of items being removed. The removal will not be committed until
   // ::removeItems() is called.
-  void MarkItemForRemoval(JNIEnv* env,
-                          const JavaParamRef<jobject>& obj,
-                          const JavaParamRef<jobject>& j_url,
-                          const JavaParamRef<jlongArray>& j_native_timestamps);
+  void MarkItemForRemoval(const GURL& url,
+                          const std::optional<std::string>& app_id,
+                          const std::vector<int64_t>& timestamps);
 
   // Removes all items that have been marked for removal through
   // ::markItemForRemoval().
-  void RemoveItems(JNIEnv* env,
-                   const JavaParamRef<jobject>& obj);
+  void RemoveItems();
 
   // BrowsingHistoryDriver implementation.
   void OnQueryComplete(
@@ -69,6 +69,7 @@ class BrowsingHistoryBridge : public ProfileBasedBrowsingHistoryDriver {
   void HistoryDeleted() override;
   void HasOtherFormsOfBrowsingHistory(
       bool has_other_forms, bool has_synced_results) override;
+  void OnGetAllAppIds(const std::vector<std::string>& app_ids) override;
 
   // ProfileBasedBrowsingHistoryDriver implementation.
   Profile* GetProfile() override;
@@ -79,6 +80,7 @@ class BrowsingHistoryBridge : public ProfileBasedBrowsingHistoryDriver {
   std::unique_ptr<history::BrowsingHistoryService> browsing_history_service_;
   base::android::ScopedJavaGlobalRef<jobject> j_history_service_obj_;
   base::android::ScopedJavaGlobalRef<jobject> j_query_result_obj_;
+  base::android::ScopedJavaGlobalRef<jobject> j_app_ids_result_obj_;
 
   std::vector<history::BrowsingHistoryService::HistoryEntry> items_to_remove_;
 

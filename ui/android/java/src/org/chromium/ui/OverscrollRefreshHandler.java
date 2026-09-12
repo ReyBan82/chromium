@@ -4,51 +4,84 @@
 
 package org.chromium.ui;
 
-import org.chromium.base.annotations.CalledByNative;
+import static org.chromium.build.NullUtil.assertNonNull;
 
-/**
- * Simple interface allowing customized response to an overscrolling pull input.
- */
+import org.jni_zero.CalledByNative;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.ui.base.BackGestureEventSwipeEdge;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/** Simple interface allowing customized response to an overscrolling pull input. */
+@NullMarked
 public interface OverscrollRefreshHandler {
+    // Use a map to store refs to Java objects. This is necessary to avoid a ScopedJavaGlobalRef in
+    // C++ of which there are only 51200 app wide. Effectively private.
+    static final Map<Long, OverscrollRefreshHandler> sRefs = new HashMap<>();
+
+    // LINT.IfChange
+    int DEFAULT_NAVIGATION_EDGE_WIDTH = 24;
+
+    // LINT.ThenChange(//ui/android/overscroll_refresh.h:kDefaultNavigationEdgeWidth)
+
     /**
      * Signals the start of an overscrolling pull.
+     *
      * @param type Type of the overscroll action.
-     * @param startX X position of touch event at the beginning of overscroll.
-     * @param startY Y position of touch event at the beginning of overscroll.
-     * @param navigateForward {@code true} for forward navigation, {@code false} for back.
-     *        Used only for {@link OverscrollAction.HISTORY_NAVIGATION}.
+     * @param initiatingEdge Whether the history gesture is being initiated from the LEFT or RIGHT
+     *     edge of the screen. Only used with the HISTORY_NAVIGATION `type`. TODO(bokan): Can we
+     *     make the initiatingEdge param nullable in JNI?
      * @return Whether the handler will consume the overscroll sequence.
      */
     @CalledByNative
-    public boolean start(
-            @OverscrollAction int type, float startX, float startY, boolean navigateForward);
+    boolean start(@OverscrollAction int type, @BackGestureEventSwipeEdge int initiatingEdge);
 
     /**
      * Signals a pull update.
+     *
      * @param xDelta The change in horizontal pull distance (positive if pulling down, negative if
-     *         up).
+     *     up).
      * @param yDelta The change in vertical pull distance.
      */
     @CalledByNative
-    public void pull(float xDelta, float yDelta);
+    void pull(float xDelta, float yDelta);
 
     /**
      * Signals the release of the pull.
-     * @param allowRefresh Whether the release signal should be allowed to trigger a refresh.
+     *
+     * @param status The activation status of the release gesture.
      */
     @CalledByNative
-    public void release(boolean allowRefresh);
+    void release(@OverscrollActivationStatus int status);
 
-    /**
-     * Reset the active pull state.
-     */
+    /** Reset the active pull state. */
     @CalledByNative
-    public void reset();
+    void reset();
 
     /**
      * Toggle whether the effect is active.
-     * @param enabled Whether to enable the effect.
-     *                If disabled, the effect should deactive itself apropriately.
+     *
+     * @param enabled Whether to enable the effect. If disabled, the effect should deactivate itself
+     *     appropriately.
      */
-    public void setEnabled(boolean enabled);
+    void setEnabled(boolean enabled);
+
+    @CalledByNative
+    private static void setRef(long nativePtr, OverscrollRefreshHandler handler) {
+        var oldValue = sRefs.put(nativePtr, handler);
+        assert oldValue == null;
+    }
+
+    @CalledByNative
+    private static OverscrollRefreshHandler getRef(long nativePtr) {
+        return assertNonNull(sRefs.get(nativePtr));
+    }
+
+    @CalledByNative
+    private static void removeRef(long nativePtr) {
+        var oldValue = sRefs.remove(nativePtr);
+        assert oldValue != null;
+    }
 }

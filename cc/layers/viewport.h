@@ -33,17 +33,12 @@ struct ScrollNode;
 // we should still scroll using this class.
 class CC_EXPORT Viewport {
  public:
+  using ScrollResult = InputHandler::ViewportScrollResult;
+
   // If the pinch zoom anchor on the first PinchUpdate is within this length
   // of the screen edge, "snap" the zoom to that edge. Experimentally
   // determined.
   static const int kPinchZoomSnapMarginDips = 100;
-
-  // TODO(tdresser): eventually |consumed_delta| should equal
-  // |content_scrolled_delta|. See crbug.com/510045 for details.
-  struct ScrollResult {
-    gfx::Vector2dF consumed_delta;
-    gfx::Vector2dF content_scrolled_delta;
-  };
 
   static std::unique_ptr<Viewport> Create(LayerTreeHostImpl* host_impl);
 
@@ -63,7 +58,8 @@ class CC_EXPORT Viewport {
                         const gfx::Point& viewport_point,
                         bool is_direct_manipulation,
                         bool affect_browser_controls,
-                        bool scroll_outer_viewport);
+                        bool scroll_outer_viewport,
+                        bool is_inertial);
 
   // TODO(bokan): Callers can now be replaced by ScrollBy.
   void ScrollByInnerFirst(const gfx::Vector2dF& delta);
@@ -71,10 +67,11 @@ class CC_EXPORT Viewport {
   // Scrolls the viewport, bubbling the delta between the inner and outer
   // viewport. Only animates either of the two viewports. Returns the amount of
   // delta that was consumed.
-  gfx::Vector2dF ScrollAnimated(const gfx::Vector2dF& delta,
-                                base::TimeDelta delayed_by);
+  ScrollResult ScrollAnimated(const gfx::Vector2dF& delta,
+                              base::TimeDelta delayed_by);
 
   gfx::PointF TotalScrollOffset() const;
+  float MaxUserReachableTotalScrollOffsetY() const;
 
   void PinchUpdate(float magnify_delta, const gfx::Point& anchor);
   void PinchEnd(const gfx::Point& anchor, bool snap_to_min);
@@ -105,6 +102,10 @@ class CC_EXPORT Viewport {
   // inner viewport where content is visible.
   gfx::SizeF GetInnerViewportSizeExcludingScrollbars() const;
 
+  // Performs an instant snap if the viewport is a snap container and no scroll
+  // gesture is in progress.
+  void SnapIfNeeded();
+
  private:
   explicit Viewport(LayerTreeHostImpl* host_impl);
 
@@ -116,9 +117,8 @@ class CC_EXPORT Viewport {
   gfx::Vector2dF AdjustOverscroll(const gfx::Vector2dF& delta) const;
 
   // Sends the delta to the browser controls, returns the amount applied.
-  gfx::Vector2dF ScrollBrowserControls(const gfx::Vector2dF& delta);
-
-  float MaxUserReachableTotalScrollOffsetY() const;
+  gfx::Vector2dF ScrollBrowserControls(const gfx::Vector2dF& delta,
+                                       bool is_inertial);
 
   ScrollNode* InnerScrollNode() const;
   ScrollNode* OuterScrollNode() const;

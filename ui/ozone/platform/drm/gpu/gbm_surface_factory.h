@@ -6,15 +6,22 @@
 #define UI_OZONE_PLATFORM_DRM_GPU_GBM_SURFACE_FACTORY_H_
 
 #include <stdint.h>
+
 #include <map>
 #include <memory>
 #include <vector>
 
+#include "base/files/file.h"
+#include "base/memory/raw_ptr.h"
+#include "base/synchronization/lock.h"
+#include "base/thread_annotations.h"
 #include "base/threading/thread_checker.h"
 #include "gpu/vulkan/buildflags.h"
+#include "ui/gfx/linux/scoped_gbm_device.h"
 #include "ui/gl/gl_implementation.h"
 #include "ui/gl/gl_surface.h"
 #include "ui/ozone/common/gl_ozone_egl.h"
+#include "ui/ozone/public/drm_modifiers_filter.h"
 #include "ui/ozone/public/surface_factory_ozone.h"
 
 namespace ui {
@@ -47,7 +54,6 @@ class GbmSurfaceFactory : public SurfaceFactoryOzone {
   scoped_refptr<gfx::NativePixmap> CreateNativePixmapForVulkan(
       gfx::AcceleratedWidget widget,
       gfx::Size size,
-      gfx::BufferFormat format,
       gfx::BufferUsage usage,
       VkDevice vk_device,
       VkDeviceMemory* vk_device_memory,
@@ -62,19 +68,13 @@ class GbmSurfaceFactory : public SurfaceFactoryOzone {
       gfx::AcceleratedWidget widget,
       gpu::VulkanDeviceQueue* device_queue,
       gfx::Size size,
-      gfx::BufferFormat format,
+      viz::SharedImageFormat format,
       gfx::BufferUsage usage,
-      absl::optional<gfx::Size> framebuffer_size = absl::nullopt) override;
-  void CreateNativePixmapAsync(gfx::AcceleratedWidget widget,
-                               gpu::VulkanDeviceQueue* device_queue,
-                               gfx::Size size,
-                               gfx::BufferFormat format,
-                               gfx::BufferUsage usage,
-                               NativePixmapCallback callback) override;
+      std::optional<gfx::Size> framebuffer_size = std::nullopt) override;
   scoped_refptr<gfx::NativePixmap> CreateNativePixmapFromHandle(
       gfx::AcceleratedWidget widget,
       gfx::Size size,
-      gfx::BufferFormat format,
+      viz::SharedImageFormat format,
       gfx::NativePixmapHandle handle) override;
   void SetGetProtectedNativePixmapDelegate(
       const GetProtectedNativePixmapCallback&
@@ -82,28 +82,47 @@ class GbmSurfaceFactory : public SurfaceFactoryOzone {
   scoped_refptr<gfx::NativePixmap> CreateNativePixmapForProtectedBufferHandle(
       gfx::AcceleratedWidget widget,
       gfx::Size size,
-      gfx::BufferFormat format,
+      viz::SharedImageFormat format,
       gfx::NativePixmapHandle handle) override;
+  bool SupportsDrmModifiersFilter() const override;
+  void SetDrmModifiersFilter(
+      std::unique_ptr<DrmModifiersFilter> filter) override;
 
-  std::vector<gfx::BufferFormat> GetSupportedFormatsForTexturing()
-      const override;
+  bool IsFormatSupportedForTexturing(
+      viz::SharedImageFormat format) const override;
 
  private:
+  struct GbmDeviceAndFile {
+    GbmDeviceAndFile(base::File file, ScopedGbmDevice device);
+    ~GbmDeviceAndFile();
+    GbmDeviceAndFile(GbmDeviceAndFile&&);
+    GbmDeviceAndFile& operator=(GbmDeviceAndFile&&);
+
+    base::File file;
+    ScopedGbmDevice device;
+  };
+
   scoped_refptr<gfx::NativePixmap> CreateNativePixmapFromHandleInternal(
       gfx::AcceleratedWidget widget,
       gfx::Size size,
-      gfx::BufferFormat format,
+      viz::SharedImageFormat format,
       gfx::NativePixmapHandle handle);
 
   std::unique_ptr<GLOzone> egl_implementation_;
 
   base::ThreadChecker thread_checker_;
 
-  DrmThreadProxy* const drm_thread_proxy_;
+  const raw_ptr<DrmThreadProxy> drm_thread_proxy_;
 
-  std::map<gfx::AcceleratedWidget, GbmSurfaceless*> widget_to_surface_map_;
+  std::map<gfx::AcceleratedWidget, raw_ptr<GbmSurfaceless, CtnExperimental>>
+      widget_to_surface_map_;
 
   GetProtectedNativePixmapCallback get_protected_native_pixmap_callback_;
+
+  mutable base::Lock gbm_devices_lock_;
+  mutable bool gbm_devices_initialized_ GUARDED_BY(gbm_devices_lock_) = false;
+  mutable std::vector<GbmDeviceAndFile> gbm_devices_
+      GUARDED_BY(gbm_devices_lock_);
 
   base::WeakPtrFactory<GbmSurfaceFactory> weak_factory_{this};
 };

@@ -4,9 +4,11 @@
 
 #include "chrome/chrome_elf/chrome_elf_main.h"
 
-#include <assert.h>
 #include <windows.h>
 
+#include <assert.h>
+
+#include "base/compiler_specific.h"
 #include "chrome/chrome_elf/chrome_elf_security.h"
 #include "chrome/chrome_elf/crash/crash_helper.h"
 #include "chrome/chrome_elf/third_party_dlls/beacon.h"
@@ -41,12 +43,20 @@ bool GetUserDataDirectoryThunk(wchar_t* user_data_dir,
                                                   &invalid_user_data_dir_str);
   assert(ret);
   install_static::IgnoreUnused(ret);
-  wcsncpy_s(user_data_dir, user_data_dir_length, user_data_dir_str.c_str(),
-            _TRUNCATE);
-  wcsncpy_s(invalid_user_data_dir, invalid_user_data_dir_length,
-            invalid_user_data_dir_str.c_str(), _TRUNCATE);
+  // SAFETY: This function is exported via a C interface and cannot use spans
+  // or std::wstring in its signature. The callers (e.g.
+  // chrome_main_delegate.cc) pass pre-allocated arrays and their correct
+  // sizes, so writing up to the specified length is safe.
+  UNSAFE_BUFFERS(wcsncpy_s(user_data_dir, user_data_dir_length,
+                           user_data_dir_str.c_str(), _TRUNCATE));
+  UNSAFE_BUFFERS(wcsncpy_s(invalid_user_data_dir, invalid_user_data_dir_length,
+                           invalid_user_data_dir_str.c_str(), _TRUNCATE));
 
   return true;
+}
+
+bool IsTemporaryUserDataDirectoryCreatedForHeadless() {
+  return install_static::IsTemporaryUserDataDirectoryCreatedForHeadless();
 }
 
 // DllMain
@@ -57,7 +67,7 @@ bool GetUserDataDirectoryThunk(wchar_t* user_data_dir,
 // - Note: Do not use install_static::GetUserDataDir from inside DllMain.
 //         This can result in path expansion that triggers secondary DLL loads,
 //         that will blow up with the loader lock held.
-//         https://bugs.chromium.org/p/chromium/issues/detail?id=748949#c18
+//         https://crbug.com/41335819#comment19
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
   if (reason == DLL_PROCESS_ATTACH) {
     install_static::InitializeProductDetailsForPrimaryModule();

@@ -5,46 +5,47 @@
 #ifndef BASE_STRINGS_STRING_SPLIT_INTERNAL_H_
 #define BASE_STRINGS_STRING_SPLIT_INTERNAL_H_
 
+#include <string_view>
 #include <vector>
 
-#include "base/strings/string_piece.h"
-#include "base/strings/string_util.h"
+#include "base/strings/trim_string_internal.h"
+#include "base/strings/whitespace_constants.h"
 
-namespace base {
-
-namespace internal {
+namespace base::internal {
 
 // Returns either the ASCII or UTF-16 whitespace.
 template <typename CharT>
-BasicStringPiece<CharT> WhitespaceForType();
+constexpr std::basic_string_view<CharT> WhitespaceForType();
 
 template <>
-inline StringPiece16 WhitespaceForType<char16_t>() {
+inline constexpr std::u16string_view WhitespaceForType<char16_t>() {
   return kWhitespaceUTF16;
 }
 template <>
-inline StringPiece WhitespaceForType<char>() {
+inline constexpr std::string_view WhitespaceForType<char>() {
   return kWhitespaceASCII;
 }
 
-// General string splitter template. Can take 8- or 16-bit input, can produce
-// the corresponding string or StringPiece output.
+// General string splitter template. Can take 8- or 16-bit input, can
+// produce the corresponding string or std::string_view output.
 template <typename OutputStringType,
           typename T,
           typename CharT = typename T::value_type>
-static std::vector<OutputStringType> SplitStringT(T str,
-                                                  T delimiter,
-                                                  WhitespaceHandling whitespace,
-                                                  SplitResult result_type) {
+constexpr std::vector<OutputStringType> SplitStringT(
+    T str,
+    T delimiter,
+    WhitespaceHandling whitespace,
+    SplitResult result_type) {
   std::vector<OutputStringType> result;
-  if (str.empty())
+  if (str.empty()) {
     return result;
+  }
 
   size_t start = 0;
   while (start != std::basic_string<CharT>::npos) {
     size_t end = str.find_first_of(delimiter, start);
 
-    BasicStringPiece<CharT> piece;
+    std::basic_string_view<CharT> piece;
     if (end == std::basic_string<CharT>::npos) {
       piece = str.substr(start);
       start = std::basic_string<CharT>::npos;
@@ -53,11 +54,14 @@ static std::vector<OutputStringType> SplitStringT(T str,
       start = end + 1;
     }
 
-    if (whitespace == TRIM_WHITESPACE)
-      piece = TrimString(piece, WhitespaceForType<CharT>(), TRIM_ALL);
+    if (whitespace == TRIM_WHITESPACE) {
+      piece = TrimStringPieceT<std::basic_string_view<CharT>>(
+          piece, WhitespaceForType<CharT>(), true, true);
+    }
 
-    if (result_type == SPLIT_WANT_ALL || !piece.empty())
+    if (result_type == SPLIT_WANT_ALL || !piece.empty()) {
       result.emplace_back(piece);
+    }
   }
   return result;
 }
@@ -65,12 +69,12 @@ static std::vector<OutputStringType> SplitStringT(T str,
 template <typename OutputStringType,
           typename T,
           typename CharT = typename T::value_type>
-std::vector<OutputStringType> SplitStringUsingSubstrT(
+constexpr std::vector<OutputStringType> SplitStringUsingSubstrT(
     T input,
     T delimiter,
     WhitespaceHandling whitespace,
     SplitResult result_type) {
-  using Piece = BasicStringPiece<CharT>;
+  using Piece = std::basic_string_view<CharT>;
   using size_type = typename Piece::size_type;
 
   std::vector<OutputStringType> result;
@@ -86,18 +90,19 @@ std::vector<OutputStringType> SplitStringUsingSubstrT(
                      ? input.substr(begin_index)
                      : input.substr(begin_index, end_index - begin_index);
 
-    if (whitespace == TRIM_WHITESPACE)
-      term = TrimString(term, WhitespaceForType<CharT>(), TRIM_ALL);
+    if (whitespace == TRIM_WHITESPACE) {
+      term =
+          TrimStringPieceT<Piece>(term, WhitespaceForType<CharT>(), true, true);
+    }
 
-    if (result_type == SPLIT_WANT_ALL || !term.empty())
+    if (result_type == SPLIT_WANT_ALL || !term.empty()) {
       result.emplace_back(term);
+    }
   }
 
   return result;
 }
 
-}  // namespace internal
-
-}  // namespace base
+}  // namespace base::internal
 
 #endif  // BASE_STRINGS_STRING_SPLIT_INTERNAL_H_

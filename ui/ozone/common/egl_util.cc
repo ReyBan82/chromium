@@ -4,17 +4,28 @@
 
 #include "ui/ozone/common/egl_util.h"
 
+#include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/path_service.h"
+#include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
 #include "ui/gl/buildflags.h"
 #include "ui/gl/egl_util.h"
 #include "ui/gl/gl_bindings.h"
 #include "ui/gl/gl_implementation.h"
+#include "ui/gl/gl_switches.h"
 
 #if BUILDFLAG(USE_OPENGL_APITRACE)
 #include <stdlib.h>
 #endif
+
+#if BUILDFLAG(USE_STATIC_ANGLE)
+extern "C" {
+// The ANGLE internal eglGetProcAddress
+EGLAPI __eglMustCastToProperFunctionPointerType EGLAPIENTRY
+EGL_GetProcAddress(const char* procname);
+}
+#endif  // BUILDFLAG(USE_STATIC_ANGLE)
 
 namespace ui {
 namespace {
@@ -30,6 +41,7 @@ const base::FilePath::CharType kDefaultEglSoname[] =
 const base::FilePath::CharType kDefaultGlesSoname[] =
     FILE_PATH_LITERAL("libGLESv2.so.2");
 #endif
+
 const base::FilePath::CharType kAngleEglSoname[] =
     FILE_PATH_LITERAL("libEGL.so");
 const base::FilePath::CharType kAngleGlesSoname[] =
@@ -38,16 +50,23 @@ const base::FilePath::CharType kAngleGlesSoname[] =
 bool LoadEGLGLES2Bindings(const base::FilePath& egl_library_path,
                           const base::FilePath& gles_library_path) {
   base::NativeLibraryLoadError error;
-  base::NativeLibrary gles_library =
-      base::LoadNativeLibrary(gles_library_path, &error);
+  base::NativeLibrary gles_library;
+  {
+    TRACE_EVENT("gpu,startup", "Load gles_library");
+    gles_library = base::LoadNativeLibrary(gles_library_path, &error);
+  }
   if (!gles_library) {
     LOG(ERROR) << "Failed to load GLES library: " << gles_library_path << ": "
                << error.ToString();
     return false;
   }
 
-  base::NativeLibrary egl_library =
-      base::LoadNativeLibrary(base::FilePath(egl_library_path), &error);
+  base::NativeLibrary egl_library;
+  {
+    TRACE_EVENT("gpu,startup", "Load egl_library");
+    egl_library =
+        base::LoadNativeLibrary(base::FilePath(egl_library_path), &error);
+  }
   if (!egl_library) {
     LOG(ERROR) << "Failed to load EGL library: " << egl_library_path << ": "
                << error.ToString();
@@ -125,10 +144,19 @@ bool LoadDefaultEGLGLES2Bindings(
   base::FilePath egl_path;
 
   if (implementation.gl == gl::kGLImplementationEGLANGLE) {
+#if BUILDFLAG(USE_STATIC_ANGLE)
+    if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
+            switches::kUseDynamicAngle)) {
+      gl::SetGLGetProcAddressProc(&EGL_GetProcAddress);
+      return true;
+    }
+#endif  // BUILDFLAG(USE_STATIC_ANGLE)
+
     base::FilePath module_path;
 #if !BUILDFLAG(IS_FUCHSIA)
-    if (!base::PathService::Get(base::DIR_MODULE, &module_path))
+    if (!base::PathService::Get(base::DIR_MODULE, &module_path)) {
       return false;
+    }
 #endif
 
     glesv2_path = module_path.Append(kAngleGlesSoname);

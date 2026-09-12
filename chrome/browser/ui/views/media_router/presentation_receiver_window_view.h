@@ -9,25 +9,34 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "base/observer_list.h"
+#include "base/scoped_observation.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/command_updater_delegate.h"
 #include "chrome/browser/command_updater_impl.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
 #include "chrome/browser/ui/media_router/presentation_receiver_window.h"
 #include "chrome/browser/ui/toolbar/chrome_location_bar_model_delegate.h"
-#include "chrome/browser/ui/views/exclusive_access_bubble_views_context.h"
+#include "chrome/browser/ui/views/exclusive_access/exclusive_access_bubble_views_context.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+#include "components/web_modal/modal_dialog_host.h"
+#include "components/web_modal/web_contents_modal_dialog_host.h"
+#include "components/web_modal/web_contents_modal_dialog_manager_delegate.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/widget/widget_delegate.h"
+#include "ui/views/widget/widget_observer.h"
 
 class ExclusiveAccessBubbleViews;
 class PresentationReceiverWindowDelegate;
 class PresentationReceiverWindowFrame;
 class LocationBarModelImpl;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+namespace views {
+class WebView;
+}
+
+#if BUILDFLAG(IS_CHROMEOS)
 class FullscreenWindowObserver;
 #endif
 
@@ -42,9 +51,13 @@ class PresentationReceiverWindowView final
       public ChromeLocationBarModelDelegate,
       public ExclusiveAccessContext,
       public ExclusiveAccessBubbleViewsContext,
-      public ui::AcceleratorProvider {
+      public ui::AcceleratorProvider,
+      public views::WidgetObserver,
+      public web_modal::WebContentsModalDialogManagerDelegate,
+      public web_modal::WebContentsModalDialogHost {
+  METADATA_HEADER(PresentationReceiverWindowView, views::WidgetDelegateView)
+
  public:
-  METADATA_HEADER(PresentationReceiverWindowView);
   PresentationReceiverWindowView(PresentationReceiverWindowFrame* frame,
                                  PresentationReceiverWindowDelegate* delegate);
   PresentationReceiverWindowView(const PresentationReceiverWindowView&) =
@@ -56,6 +69,7 @@ class PresentationReceiverWindowView final
   void Init();
 
   LocationBarView* location_bar_view() { return location_bar_view_; }
+  views::WebView* web_view_for_testing() const { return web_view_; }
 
   // PresentationReceiverWindow overrides.
   void Close() final;
@@ -74,8 +88,9 @@ class PresentationReceiverWindowView final
       final;
 
   // CommandUpdaterDelegate overrides.
-  void ExecuteCommandWithDisposition(int id,
-                                     WindowOpenDisposition disposition) final;
+  void HandleCommandWithDisposition(int id,
+                                    WindowOpenDisposition disposition,
+                                    base::TimeTicks time_stamp) final;
 
   // ChromeLocationBarModelDelegate overrides.
   content::WebContents* GetActiveWebContents() const final;
@@ -83,38 +98,56 @@ class PresentationReceiverWindowView final
   // views::WidgetDelegateView overrides.
   std::u16string GetWindowTitle() const final;
 
+  // views::View overrides.
+  void OnBoundsChanged(const gfx::Rect& previous_bounds) final;
+  void AddedToWidget() final;
+  void RemovedFromWidget() final;
+
+  // views::WidgetObserver overrides.
+  void OnWidgetBoundsChanged(views::Widget* widget,
+                             const gfx::Rect& new_bounds) final;
+  void OnWidgetDestroying(views::Widget* widget) final;
+
+  // web_modal::WebContentsModalDialogManagerDelegate overrides.
+  web_modal::WebContentsModalDialogHost* GetWebContentsModalDialogHost(
+      content::WebContents* web_contents) final;
+  bool IsWebContentsVisible(content::WebContents* web_contents) final;
+
+  // web_modal::WebContentsModalDialogHost overrides.
+  gfx::NativeView GetHostView() const final;
+  gfx::Point GetDialogPosition(const gfx::Size& size) final;
+  gfx::Size GetMaximumDialogSize() final;
+  void AddObserver(web_modal::ModalDialogHostObserver* observer) final;
+  void RemoveObserver(web_modal::ModalDialogHostObserver* observer) final;
+  void NotifyPositionRequiresUpdate() final;
+
   // ui::AcceleratorTarget overrides.
   bool AcceleratorPressed(const ui::Accelerator& accelerator) final;
 
   // ExclusiveAccessContext overrides.
   Profile* GetProfile() final;
   bool IsFullscreen() const final;
-  void EnterFullscreen(const GURL& url,
+  void EnterFullscreen(const url::Origin& origin,
                        ExclusiveAccessBubbleType bubble_type,
-                       const int64_t display_id) final;
+                       FullscreenTabParams fullscreen_tab_params) final;
   void ExitFullscreen() final;
-  void UpdateExclusiveAccessExitBubbleContent(
-      const GURL& url,
-      ExclusiveAccessBubbleType bubble_type,
-      ExclusiveAccessBubbleHideCallback bubble_first_hide_callback,
-      bool notify_download,
-      bool force_update) final;
+  void UpdateExclusiveAccessBubble(
+      const ExclusiveAccessBubbleParams& params,
+      ExclusiveAccessBubbleHideCallback first_hide_callback) override;
   bool IsExclusiveAccessBubbleDisplayed() const final;
   void OnExclusiveAccessUserInput() final;
-  content::WebContents* GetActiveWebContents() final;
+  content::WebContents* GetWebContentsForExclusiveAccess() final;
+  bool CanUserEnterFullscreen() const final;
   bool CanUserExitFullscreen() const final;
 
   // ExclusiveAccessBubbleViewsContext overrides.
   ExclusiveAccessManager* GetExclusiveAccessManager() final;
-  views::Widget* GetBubbleAssociatedWidget() final;
   ui::AcceleratorProvider* GetAcceleratorProvider() final;
   gfx::NativeView GetBubbleParentView() const final;
-  gfx::Point GetCursorPointInParent() const final;
   gfx::Rect GetClientAreaBoundsInScreen() const final;
   bool IsImmersiveModeEnabled() const final;
   gfx::Rect GetTopContainerBoundsInScreen() final;
   void DestroyAnyExclusiveAccessBubble() final;
-  bool CanTriggerOnMouse() const final;
 
   // ui::AcceleratorProvider overrides.
   bool GetAcceleratorForCommandId(int command_id,
@@ -130,11 +163,15 @@ class PresentationReceiverWindowView final
   const std::unique_ptr<LocationBarModelImpl> location_bar_model_;
   CommandUpdaterImpl command_updater_;
   raw_ptr<LocationBarView> location_bar_view_ = nullptr;
+  raw_ptr<views::WebView> web_view_ = nullptr;
+  base::ObserverList<web_modal::ModalDialogHostObserver> observer_list_;
+  base::ScopedObservation<views::Widget, views::WidgetObserver>
+      widget_observation_{this};
   ExclusiveAccessManager exclusive_access_manager_;
   ui::Accelerator fullscreen_accelerator_;
   std::unique_ptr<ExclusiveAccessBubbleViews> exclusive_access_bubble_;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<FullscreenWindowObserver> window_observer_;
 #endif
 };

@@ -5,9 +5,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_WORKLET_MODULE_RESPONSES_MAP_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_WORKLET_MODULE_RESPONSES_MAP_H_
 
+#include <optional>
+#include <variant>
+
 #include "base/synchronization/lock.h"
 #include "base/task/single_thread_task_runner.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/loader/modulescript/module_script_creation_params.h"
 #include "third_party/blink/renderer/core/loader/modulescript/module_script_fetcher.h"
@@ -18,6 +20,22 @@
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
 namespace blink {
+
+struct WorkletModuleError {
+  enum class Type {
+    kUnknown,
+    kNetwork,
+    kHttp,
+    kCors,
+    kMime,
+    kIntegrity,
+    kDisposed
+  };
+
+  Type type = Type::kUnknown;
+  int http_status_code = 0;
+  bool is_cross_origin = false;
+};
 
 // WorkletModuleResponsesMap implements the module responses map concept and the
 // "fetch a worklet script" algorithm:
@@ -50,9 +68,16 @@ class CORE_EXPORT WorkletModuleResponsesMap final
       LOCKS_EXCLUDED(lock_);
 
   // Called on worklet threads.
-  void SetEntryParams(const KURL&,
-                      ModuleType,
-                      const absl::optional<ModuleScriptCreationParams>&)
+  void SetEntryParams(const KURL&, ModuleType, ModuleScriptCreationParams)
+      LOCKS_EXCLUDED(lock_);
+
+  void SetEntryError(const KURL& url,
+                     ModuleType module_type,
+                     WorkletModuleError error) LOCKS_EXCLUDED(lock_);
+
+  // Returns the error for a given entry if it failed.
+  std::optional<WorkletModuleError> GetEntryError(const KURL& url,
+                                                  ModuleType module_type)
       LOCKS_EXCLUDED(lock_);
 
   // Called when the associated document is destroyed and clears the map.
@@ -73,16 +98,26 @@ class CORE_EXPORT WorkletModuleResponsesMap final
 
     State GetState() const { return state_; }
     ModuleScriptCreationParams GetParams() const {
-      return params_->IsolatedCopy();
+      CHECK_EQ(state_, State::kFetched);
+      CHECK(params_or_error_.has_value());
+      return std::get<ModuleScriptCreationParams>(*params_or_error_)
+          .IsolatedCopy();
+    }
+    WorkletModuleError GetError() const {
+      CHECK_EQ(state_, State::kFailed);
+      CHECK(params_or_error_.has_value());
+      return std::get<WorkletModuleError>(*params_or_error_);
     }
     void AddClient(
         ModuleScriptFetcher::Client* client,
         scoped_refptr<base::SingleThreadTaskRunner> client_task_runner);
-    void SetParams(const absl::optional<ModuleScriptCreationParams>& params);
+    void SetParams(ModuleScriptCreationParams params);
+    void SetError(WorkletModuleError error);
 
    private:
     State state_ = State::kFetching;
-    absl::optional<ModuleScriptCreationParams> params_;
+    std::optional<std::variant<ModuleScriptCreationParams, WorkletModuleError>>
+        params_or_error_;
     HashMap<CrossThreadPersistent<ModuleScriptFetcher::Client>,
             scoped_refptr<base::SingleThreadTaskRunner>>
         clients_;

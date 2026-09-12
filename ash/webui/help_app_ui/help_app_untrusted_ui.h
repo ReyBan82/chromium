@@ -24,6 +24,10 @@ class HelpAppUntrustedUI : public ui::UntrustedWebUIController {
   HelpAppUntrustedUI(const HelpAppUntrustedUI&) = delete;
   HelpAppUntrustedUI& operator=(const HelpAppUntrustedUI&) = delete;
   ~HelpAppUntrustedUI() override;
+
+ private:
+  WEB_UI_CONTROLLER_TYPE_DECL();
+
 };
 
 }  // namespace ash

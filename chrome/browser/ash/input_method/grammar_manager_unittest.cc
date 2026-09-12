@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ash/input_method/grammar_manager.h"
 
+#include "base/functional/callback_helpers.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "chrome/browser/ash/input_method/assistive_window_properties.h"
 #include "chrome/browser/ash/input_method/grammar_service_client.h"
@@ -38,7 +39,7 @@ const char16_t kIgnoreButtonMessage[] =
 
 class TestGrammarServiceClient : public GrammarServiceClient {
  public:
-  TestGrammarServiceClient() {}
+  TestGrammarServiceClient() = default;
   ~TestGrammarServiceClient() override = default;
 
   bool RequestTextCheck(Profile* profile,
@@ -56,8 +57,8 @@ class TestGrammarServiceClient : public GrammarServiceClient {
 };
 
 ui::KeyEvent CreateKeyEvent(const ui::DomCode& code) {
-  return ui::KeyEvent(ui::ET_KEY_PRESSED, ui::VKEY_UNKNOWN, code, ui::EF_NONE,
-                      ui::DomKey::NONE, ui::EventTimeForNow());
+  return ui::KeyEvent(ui::EventType::kKeyPressed, ui::VKEY_UNKNOWN, code,
+                      ui::EF_NONE, ui::DomKey::NONE, ui::EventTimeForNow());
 }
 
 class MockSuggestionHandler : public SuggestionHandlerInterface {

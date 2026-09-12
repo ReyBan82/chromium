@@ -20,9 +20,8 @@ const char kDisableVariationsSafeMode[] = "disable-variations-safe-mode";
 const char kDisableVariationsSeedFetchThrottling[] =
     "disable-variations-seed-fetch-throttling";
 
-// TODO(asvitkine): Consider removing or renaming this functionality.
-// Enables the benchmarking extensions.
-const char kEnableBenchmarking[] = "enable-benchmarking";
+// Enables the benchmarking JavaScript API.
+const char kEnableBenchmarkingApi[] = "enable-benchmarking-api";
 
 // Enable field trial tests configured in fieldtrial_testing_config.json. If the
 // "disable_fieldtrial_testing_config" GN flag is set to true, then this switch
@@ -33,12 +32,21 @@ const char kEnableBenchmarking[] = "enable-benchmarking";
 // additional field trials (using "--force-fieldtrials") by using this switch.
 // For Chrome-branded builds, the testing config is not enabled by default, so
 // this switch is required to enable it.
+// If this switch is set to "benchmarking", it enables variations benchmarking
+// mode, which skips experiments that are disabled for benchmarking.
 const char kEnableFieldTrialTestingConfig[] = "enable-field-trial-config";
 
 // Fakes the channel of the browser for purposes of Variations filtering. This
 // is to be used for testing only. Possible values are "stable", "beta", "dev"
 // and "canary". This works for official builds as well.
 const char kFakeVariationsChannel[] = "fake-variations-channel";
+
+// Fakes the platform of the browser for variations seed fetching and field
+// trial filtering. Possible values are as follows: "android",
+// "android_webview", "chromeos", "fuchsia", "ios", "linux", "mac", and "win".
+//
+// Intended only for testing.
+const char kFakeVariationsPlatform[] = "fake-variations-platform";
 
 // This option can be used to force parameters of field trials when testing
 // changes locally. The argument is a param list of (key, value) pairs prefixed
@@ -53,12 +61,20 @@ const char kForceFieldTrialParams[] = "force-fieldtrial-params";
 // Forces additional Chrome Variation Ids that will be sent in X-Client-Data
 // header, specified as a 64-bit encoded list of numeric experiment ids. Ids
 // prefixed with the character "t" will be treated as Trigger Variation Ids.
+//
+// IMPORTANT: You can use this switch for test purposes (e.g. a manual command
+// line run or from a unit test), but NOT for production code in the browser, as
+// the latter is not allowed for privacy reasons (except for the current use by
+// about:flags code).
 const char kForceVariationIds[] = "force-variation-ids";
 
 // Forces to remove Chrome Variation Ids from being sent in X-Client-Data
 // header, specified as a 64-bit encoded list of numeric experiment ids. Ids
 // prefixed with the character "t" will be treated as Trigger Variation Ids.
 const char kForceDisableVariationIds[] = "force-disable-variation-ids";
+
+// Used to share variations seed version with child processes.
+const char kVariationsSeedVersion[] = "variations-seed-version";
 
 // Allows overriding the country used for evaluating variations. This is similar
 // to the "Override Variations Country" entry on chrome://translate-internals,
@@ -67,10 +83,18 @@ const char kForceDisableVariationIds[] = "force-disable-variation-ids";
 // across sessions.
 const char kVariationsOverrideCountry[] = "variations-override-country";
 
+// Allows overriding the administrative area code used for evaluating
+// variations and regional eligibility features.
+const char kVariationsOverrideGeoLevel1[] = "variations-override-geo-level-1";
+
 // Specifies the location of a seed file for Local State's seed to be
 // populated from. The seed file must be in json format with the keys
 // |kVariationsCompressedSeed| and |kVariationsSeedSignature|.
-const char kVariationsTestSeedPath[] = "variations-test-seed-path";
+const char kVariationsTestSeedJsonPath[] = "variations-test-seed-path";
+
+// Specifies the value of the variations seed corpus to use. When unspecified or
+// unrecognized, the default corpus will be used.
+const char kVariationsSeedCorpus[] = "variations-seed-corpus";
 
 // Specifies a custom URL for the server which reports variation data to the
 // client. Specifying this switch enables the Variations service on
@@ -90,6 +114,22 @@ const char kVariationsSeedFetchInterval[] = "variations-seed-fetch-interval";
 // path on Android.
 const char kEnableFinchSeedDeltaCompression[] =
     "enable-finch-seed-delta-compression";
+
+// Accept an empty signature when loading a variations seed. This is for
+// testing purposes.
+const char kAcceptEmptySeedSignatureForTesting[] =
+    "accept-empty-variations-seed-signature";
+
+// Use features defined in the value. Use this flag to reproduce experiments
+// related issues.
+// Copy 'Command-line Variations' value from chrome://version page. Save it
+// to a file and pass it via this flag.
+// The value is a base64 encoded JSON format produced by
+// `variations::VariationsCommandLine::WriteToString`.
+const char kVariationsStateFile[] = "variations-state-file";
+
+// Disable fetching of variations seed from the server for testing.
+const char kDisableVariationsSeedFetch[] = "disable-variations-seed-fetch";
 
 }  // namespace switches
 }  // namespace variations

@@ -9,7 +9,7 @@
 #include "chrome/browser/accessibility/live_caption/live_caption_controller_factory.h"
 #include "chrome/browser/accessibility/live_caption/live_caption_test_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/live_caption/caption_bubble_controller.h"
 #include "components/live_caption/live_caption_controller.h"
@@ -61,14 +61,14 @@ class LiveCaptionUnavailabilityNotifierTest : public LiveCaptionBrowserTest {
   }
 
   bool HasBubbleController() {
-    return LiveCaptionControllerFactory::GetForProfile(browser()->profile())
+    return LiveCaptionControllerFactory::GetForProfile(browser()->GetProfile())
                ->caption_bubble_controller_for_testing() != nullptr;
   }
 
   void ExpectIsWidgetVisible(bool visible) {
 #if defined(TOOLKIT_VIEWS)
     CaptionBubbleController* bubble_controller =
-        LiveCaptionControllerFactory::GetForProfile(browser()->profile())
+        LiveCaptionControllerFactory::GetForProfile(browser()->GetProfile())
             ->caption_bubble_controller_for_testing();
     EXPECT_EQ(visible, bubble_controller->IsWidgetVisibleForTesting());
 #endif
@@ -84,6 +84,10 @@ class LiveCaptionUnavailabilityNotifierTest : public LiveCaptionBrowserTest {
 
 IN_PROC_BROWSER_TEST_F(LiveCaptionUnavailabilityNotifierTest,
                        CaptionBubbleDestroyed) {
+#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
+  // TODO(crbug.com/40898509): Remove when live captioning is supported.
+  GTEST_SKIP() << "Live captioning not supported on Win Arm64";
+#else
   content::RenderFrameHost* frame_host = browser()
                                              ->tab_strip_model()
                                              ->GetActiveWebContents()
@@ -101,6 +105,7 @@ IN_PROC_BROWSER_TEST_F(LiveCaptionUnavailabilityNotifierTest,
   DestroyNotifiers();
   base::RunLoop().RunUntilIdle();
   ExpectIsWidgetVisible(false);
+#endif  // BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
 }
 
 }  // namespace captions

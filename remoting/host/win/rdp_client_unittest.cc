@@ -10,12 +10,13 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/guid.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/task_environment.h"
 #include "base/win/atl.h"
 #include "base/win/scoped_com_initializer.h"
+#include "base/win/windows_version.h"
+#include "build/build_config.h"
 #include "remoting/base/auto_thread_task_runner.h"
 #include "remoting/host/base/screen_resolution.h"
 #include "remoting/host/win/wts_terminal_monitor.h"
@@ -48,8 +49,8 @@ class MockRdpClientEventHandler : public RdpClient::EventHandler {
 
   ~MockRdpClientEventHandler() override {}
 
-  MOCK_METHOD0(OnRdpConnected, void());
-  MOCK_METHOD0(OnRdpClosed, void());
+  MOCK_METHOD(void, OnRdpConnected, (), (override));
+  MOCK_METHOD(void, OnRdpClosed, (), (override));
 };
 
 // a14498c6-7f3b-4e42-9605-6c4a20d53c87
@@ -153,8 +154,19 @@ void RdpClientTest::CloseRdpClient() {
 }
 
 // Creates a loopback RDP connection.
-TEST_F(RdpClientTest, Basic) {
-  terminal_id_ = base::GenerateGUID();
+// TODO(crbug.com/41496654): Consistently times out on Windows 11 ARM64.
+#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_ARM64)
+#define MAYBE_Basic DISABLED_Basic
+#else
+#define MAYBE_Basic Basic
+#endif
+TEST_F(RdpClientTest, MAYBE_Basic) {
+  if (base::win::OSInfo::GetInstance()->version() >=
+      base::win::Version::WIN11_23H2) {
+    GTEST_SKIP() << "https://crbug.com/365126540: Skipping test for WIN11_23H2 "
+                    "and greater";
+  }
+  terminal_id_ = WtsTerminalMonitor::GenerateVirtualTerminalId();
 
   // An ability to establish a loopback RDP connection depends on many factors
   // including OS SKU and having RDP enabled. Accept both successful connection

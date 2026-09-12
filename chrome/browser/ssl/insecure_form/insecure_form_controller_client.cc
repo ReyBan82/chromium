@@ -10,6 +10,7 @@
 #include "chrome/common/webui_url_constants.h"
 #include "components/security_interstitials/content/insecure_form_tab_storage.h"
 #include "components/security_interstitials/content/settings_page_helper.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
 
 // static
@@ -30,7 +31,7 @@ InsecureFormControllerClient::InsecureFormControllerClient(
           Profile::FromBrowserContext(web_contents->GetBrowserContext())
               ->GetPrefs(),
           g_browser_process->GetApplicationLocale(),
-          GURL(chrome::kChromeUINewTabURL),
+          chrome::ChromeUINewTabURLAsGURL(),
           /*settings_page_helper=*/nullptr),
       web_contents_(web_contents) {}
 

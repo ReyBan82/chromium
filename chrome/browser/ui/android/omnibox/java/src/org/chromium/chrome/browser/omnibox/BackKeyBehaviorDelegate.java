@@ -4,13 +4,15 @@
 
 package org.chromium.chrome.browser.omnibox;
 
+import org.chromium.build.annotations.NullMarked;
+
 /**
  * Delegate interface that allows implementers to override the default back key behavior of the
  * LocationBar.
  */
+@NullMarked
+@FunctionalInterface
 public interface BackKeyBehaviorDelegate {
     /** Returns true if the delegate will handle the back key event. */
-    default boolean handleBackKeyPressed() {
-        return false;
-    }
+    boolean handleBackKeyPressed();
 }

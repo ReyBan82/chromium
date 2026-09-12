@@ -35,7 +35,7 @@ MATCHER_P(PointsAre, expected, "") {
   }
 
   std::vector<SkPoint> actual(expected_size);
-  if (arg.getPoints(&actual.front(), expected_size) != expected_size) {
+  if (arg.getPoints(actual) != static_cast<size_t>(expected_size)) {
     *result_listener << "Failed extracting " << expected.size()
                      << " points from path.";
     return false;
@@ -47,13 +47,9 @@ MATCHER_P(PointsAre, expected, "") {
 
 TEST(InkDropMaskTest, PathInkDropMaskPaintsTriangle) {
   gfx::Size layer_size(10, 10);
-  SkPath path;
   std::vector<SkPoint> points = {SkPoint::Make(3, 3), SkPoint::Make(5, 6),
                                  SkPoint::Make(8, 1)};
-  path.moveTo(points[0].x(), points[0].y());
-  path.lineTo(points[1].x(), points[1].y());
-  path.lineTo(points[2].x(), points[2].y());
-  path.close();
+  const SkPath path = SkPath::Polygon(points, /*isClosed=*/true);
   PathInkDropMask mask(layer_size, path);
 
   auto list = base::MakeRefCounted<cc::DisplayItemList>();
@@ -61,7 +57,7 @@ TEST(InkDropMaskTest, PathInkDropMaskPaintsTriangle) {
       ui::PaintContext(list.get(), 1.f, gfx::Rect(layer_size), false));
   EXPECT_EQ(1u, list->num_paint_ops()) << list->ToString();
 
-  cc::PaintRecord record = list->FinalizeAndReleaseAsRecord();
+  cc::PaintRecord record = list->FinalizeAndReleaseAsRecordForTesting();
   EXPECT_THAT(
       record,
       ElementsAre(AllOf(

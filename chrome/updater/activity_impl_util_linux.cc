@@ -2,22 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/updater/activity_impl_util_posix.h"
-
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "base/containers/to_vector.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/ranges/algorithm.h"
+#include "base/files/safe_base_name.h"
 #include "base/strings/string_split.h"
+#include "chrome/updater/activity_impl_util_posix.h"
 #include "chrome/updater/updater_branding.h"
 #include "chrome/updater/updater_scope.h"
 
 namespace updater {
 namespace {
-// Attempts to discover all of the home directories on the system by parsing
-// /etc/passwd.
+
+// Discovers all system home directories by parsing /etc/passwd.
 std::vector<base::FilePath> ReadHomeDirsFromPasswd() {
   std::string passwd_contents;
   if (!base::ReadFileToString(base::FilePath("/etc/passwd"),
@@ -25,24 +26,23 @@ std::vector<base::FilePath> ReadHomeDirsFromPasswd() {
     return {};
   }
 
-  // /etc/passwd contains one line for each user account, with seven
-  // fields delimited by colons.
-  std::vector<base::FilePath> home_dirs;
-  base::ranges::transform(
+  // /etc/passwd has one line per user account, with seven colon-delimited
+  // fields.
+  std::vector<base::FilePath> home_dirs = base::ToVector(
       base::SplitString(passwd_contents, "\n",
                         base::WhitespaceHandling::TRIM_WHITESPACE,
                         base::SplitResult::SPLIT_WANT_NONEMPTY),
-      std::back_inserter(home_dirs), [](const std::string& line) {
+      [](const std::string& line) {
         std::vector<std::string> entries = base::SplitString(
             line, ":", base::WhitespaceHandling::KEEP_WHITESPACE,
             base::SplitResult::SPLIT_WANT_ALL);
-        // The sixth entry (index 5) of the line will be the user's home
-        // directory.
+        // The sixth field (index 5) is the user's home directory.
         return entries.size() == 7 ? base::FilePath(entries[5])
                                    : base::FilePath();
       });
-  // Remove invalid paths
-  base::ranges::remove(home_dirs, base::FilePath());
+
+  // Remove invalid paths.
+  std::erase(home_dirs, base::FilePath());
   return home_dirs;
 }
 }  // namespace
@@ -63,12 +63,18 @@ std::vector<base::FilePath> GetHomeDirPaths(UpdaterScope scope) {
   return {};
 }
 
-base::FilePath GetActiveFile(const base::FilePath& home_dir,
-                             const std::string& id) {
-  return home_dir.AppendASCII(".local")
-      .AppendASCII(COMPANY_SHORTNAME_STRING)
-      .AppendASCII(PRODUCT_FULLNAME_STRING)
-      .AppendASCII("Actives")
-      .AppendASCII(id);
+std::optional<base::FilePath> GetActiveFile(const base::FilePath& home_dir,
+                                            const std::string& id) {
+  std::optional<base::SafeBaseName> basename = base::SafeBaseName::Create(id);
+  if (!basename || basename->path() != base::FilePath(id) ||
+      basename->empty() || basename->path() == base::FilePath(".")) {
+    return std::nullopt;
+  }
+  return home_dir.Append(".local")
+      .Append(COMPANY_SHORTNAME_STRING)
+      .Append(PRODUCT_FULLNAME_STRING)
+      .Append("Actives")
+      .Append(*basename);
 }
+
 }  // namespace updater

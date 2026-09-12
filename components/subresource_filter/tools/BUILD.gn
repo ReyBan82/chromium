@@ -13,7 +13,6 @@ static_library("tools_lib") {
     "indexing_tool.h",
   ]
   deps = [
-    "../core/browser",
     "../core/common",
     "//base",
     "//components/url_pattern_index",
@@ -104,6 +103,7 @@ if (use_blink) {
       rebase_path(outputs[0], root_build_dir),
       "--version_output=" + rebase_path(outputs[1], root_build_dir),
       "--content_version=1000",
+      "--ruleset_id=0",
     ]
   }
 }

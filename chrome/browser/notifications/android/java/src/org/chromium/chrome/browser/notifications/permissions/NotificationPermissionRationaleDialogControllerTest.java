@@ -7,6 +7,8 @@ package org.chromium.chrome.browser.notifications.permissions;
 import static androidx.test.espresso.matcher.ViewMatchers.assertThat;
 import static androidx.test.espresso.matcher.ViewMatchers.withText;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -25,7 +27,6 @@ import org.mockito.Mockito;
 
 import org.chromium.base.Callback;
 import org.chromium.base.metrics.RecordHistogram;
-import org.chromium.base.metrics.UmaRecorderHolder;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.browser.notifications.NotificationUmaTracker.NotificationRationaleResult;
 import org.chromium.chrome.browser.notifications.R;
@@ -35,10 +36,9 @@ import org.chromium.ui.modaldialog.ModalDialogManager;
 import org.chromium.ui.modaldialog.ModalDialogProperties;
 import org.chromium.ui.modaldialog.ModalDialogProperties.ButtonStyles;
 import org.chromium.ui.modelutil.PropertyModel;
+import org.chromium.ui.test.util.MockitoHelper;
 
-/**
- * Tests for {@link NotificationPermissionRationaleDialogController}.
- */
+/** Tests for {@link NotificationPermissionRationaleDialogController}. */
 @RunWith(BaseRobolectricTestRunner.class)
 public class NotificationPermissionRationaleDialogControllerTest {
     private ModalDialogManager mModalDialogManager;
@@ -46,7 +46,6 @@ public class NotificationPermissionRationaleDialogControllerTest {
 
     @Before
     public void setUp() {
-        UmaRecorderHolder.resetForTesting();
         mModalDialogManager =
                 new ModalDialogManager(Mockito.mock(ModalDialogManager.Presenter.class), 0);
         mContext = ApplicationProvider.getApplicationContext();
@@ -58,7 +57,10 @@ public class NotificationPermissionRationaleDialogControllerTest {
                 new NotificationPermissionRationaleDialogController(mContext, mModalDialogManager);
 
         // Show the dialog, we don't dismiss it so the callback shouldn't be called.
-        dialog.showRationaleUi(result -> { assert false; });
+        dialog.showRationaleUi(
+                result -> {
+                    throw new AssertionError();
+                });
 
         PropertyModel dialogModel = mModalDialogManager.getCurrentDialogForTest();
 
@@ -68,7 +70,8 @@ public class NotificationPermissionRationaleDialogControllerTest {
         assertNull(dialogModel.get(ModalDialogProperties.TITLE));
         assertNull(dialogModel.get(ModalDialogProperties.MESSAGE_PARAGRAPH_1));
 
-        assertEquals(ButtonStyles.PRIMARY_FILLED_NEGATIVE_OUTLINE,
+        assertEquals(
+                ButtonStyles.PRIMARY_FILLED_NEGATIVE_OUTLINE,
                 dialogModel.get(ModalDialogProperties.BUTTON_STYLES));
 
         assertTrue(dialogModel.get(ModalDialogProperties.CANCEL_ON_TOUCH_OUTSIDE));
@@ -81,6 +84,7 @@ public class NotificationPermissionRationaleDialogControllerTest {
 
         // Check that the custom view contains the expected title and message.
         assertThat(dialogTitle, withText(R.string.notification_permission_rationale_dialog_title));
+        assertTrue(dialogTitle.isAccessibilityHeading());
         assertThat(
                 dialogMessage, withText(R.string.notification_permission_rationale_dialog_message));
     }
@@ -90,7 +94,7 @@ public class NotificationPermissionRationaleDialogControllerTest {
         NotificationPermissionRationaleDialogController dialog =
                 new NotificationPermissionRationaleDialogController(mContext, mModalDialogManager);
 
-        Callback<Integer> mockCallback = Mockito.mock(Callback.class);
+        Callback<Integer> mockCallback = MockitoHelper.mockCallback();
         dialog.showRationaleUi(mockCallback);
 
         PropertyModel dialogModel = mModalDialogManager.getCurrentDialogForTest();
@@ -98,7 +102,8 @@ public class NotificationPermissionRationaleDialogControllerTest {
         mModalDialogManager.dismissDialog(
                 dialogModel, DialogDismissalCause.NEGATIVE_BUTTON_CLICKED);
         verify(mockCallback).onResult(RationaleUiResult.REJECTED);
-        assertEquals(1,
+        assertEquals(
+                1,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "Mobile.SystemNotification.Permission.RationaleResult",
                         NotificationRationaleResult.NEGATIVE_BUTTON_CLICKED));
@@ -109,7 +114,7 @@ public class NotificationPermissionRationaleDialogControllerTest {
         NotificationPermissionRationaleDialogController dialog =
                 new NotificationPermissionRationaleDialogController(mContext, mModalDialogManager);
 
-        Callback<Integer> mockCallback = Mockito.mock(Callback.class);
+        Callback<Integer> mockCallback = MockitoHelper.mockCallback();
         dialog.showRationaleUi(mockCallback);
 
         PropertyModel dialogModel = mModalDialogManager.getCurrentDialogForTest();
@@ -117,7 +122,8 @@ public class NotificationPermissionRationaleDialogControllerTest {
         mModalDialogManager.dismissDialog(
                 dialogModel, DialogDismissalCause.NAVIGATE_BACK_OR_TOUCH_OUTSIDE);
         verify(mockCallback).onResult(RationaleUiResult.REJECTED);
-        assertEquals(1,
+        assertEquals(
+                1,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "Mobile.SystemNotification.Permission.RationaleResult",
                         NotificationRationaleResult.NAVIGATE_BACK_OR_TOUCH_OUTSIDE));
@@ -128,7 +134,7 @@ public class NotificationPermissionRationaleDialogControllerTest {
         NotificationPermissionRationaleDialogController dialog =
                 new NotificationPermissionRationaleDialogController(mContext, mModalDialogManager);
 
-        Callback<Integer> mockCallback = Mockito.mock(Callback.class);
+        Callback<Integer> mockCallback = MockitoHelper.mockCallback();
         dialog.showRationaleUi(mockCallback);
 
         PropertyModel dialogModel = mModalDialogManager.getCurrentDialogForTest();
@@ -136,7 +142,8 @@ public class NotificationPermissionRationaleDialogControllerTest {
         mModalDialogManager.dismissDialog(
                 dialogModel, DialogDismissalCause.POSITIVE_BUTTON_CLICKED);
         verify(mockCallback).onResult(RationaleUiResult.ACCEPTED);
-        assertEquals(1,
+        assertEquals(
+                1,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "Mobile.SystemNotification.Permission.RationaleResult",
                         NotificationRationaleResult.POSITIVE_BUTTON_CLICKED));
@@ -147,14 +154,15 @@ public class NotificationPermissionRationaleDialogControllerTest {
         NotificationPermissionRationaleDialogController dialog =
                 new NotificationPermissionRationaleDialogController(mContext, mModalDialogManager);
 
-        Callback<Integer> mockCallback = Mockito.mock(Callback.class);
+        Callback<Integer> mockCallback = MockitoHelper.mockCallback();
         dialog.showRationaleUi(mockCallback);
 
         PropertyModel dialogModel = mModalDialogManager.getCurrentDialogForTest();
 
         mModalDialogManager.dismissDialog(dialogModel, DialogDismissalCause.ACTIVITY_DESTROYED);
         verify(mockCallback).onResult(RationaleUiResult.REJECTED);
-        assertEquals(1,
+        assertEquals(
+                1,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "Mobile.SystemNotification.Permission.RationaleResult",
                         NotificationRationaleResult.ACTIVITY_DESTROYED));
@@ -165,14 +173,15 @@ public class NotificationPermissionRationaleDialogControllerTest {
         NotificationPermissionRationaleDialogController dialog =
                 new NotificationPermissionRationaleDialogController(mContext, mModalDialogManager);
 
-        Callback<Integer> mockCallback = Mockito.mock(Callback.class);
+        Callback<Integer> mockCallback = MockitoHelper.mockCallback();
         dialog.showRationaleUi(mockCallback);
 
         PropertyModel dialogModel = mModalDialogManager.getCurrentDialogForTest();
 
         mModalDialogManager.dismissDialog(dialogModel, DialogDismissalCause.NOT_ATTACHED_TO_WINDOW);
         verify(mockCallback).onResult(RationaleUiResult.REJECTED);
-        assertEquals(1,
+        assertEquals(
+                1,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "Mobile.SystemNotification.Permission.RationaleResult",
                         NotificationRationaleResult.NOT_ATTACHED_TO_WINDOW));

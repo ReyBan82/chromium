@@ -5,7 +5,7 @@
 #ifndef COMPONENTS_WEBRTC_MEDIA_STREAM_DEVICES_CONTROLLER_H_
 #define COMPONENTS_WEBRTC_MEDIA_STREAM_DEVICES_CONTROLLER_H_
 
-#include <map>
+#include <optional>
 #include <string>
 
 #include "base/functional/callback.h"
@@ -14,9 +14,12 @@
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/webrtc/media_stream_device_enumerator_impl.h"
 #include "content/public/browser/media_stream_request.h"
+#include "content/public/browser/permission_result.h"
 #include "third_party/blink/public/common/mediastream/media_stream_request.h"
 #include "third_party/blink/public/mojom/mediastream/media_stream.mojom-shared.h"
+#include "third_party/blink/public/mojom/permissions/permission.mojom.h"
 #include "third_party/blink/public/mojom/permissions/permission_status.mojom.h"
+#include "url/gurl.h"
 
 namespace blink {
 enum class PermissionType;
@@ -24,8 +27,9 @@ enum class PermissionType;
 
 namespace content {
 enum class PermissionStatusSource;
+class RenderFrameHost;
 class WebContents;
-}
+}  // namespace content
 
 namespace webrtc {
 
@@ -88,20 +92,25 @@ class MediaStreamDevicesController {
       const content::MediaStreamRequest& request,
       blink::mojom::MediaStreamRequestResult* denial_reason) const;
 
+#if BUILDFLAG(IS_ANDROID)
   // Returns true if clicking allow on the dialog should give access to the
   // requested devices.
-  bool IsUserAcceptAllowed(blink::PermissionType permission) const;
+  bool IsUserAcceptAllowedOnAndroid(
+      blink::PermissionType permission_descriptor) const;
+#endif
 
   bool PermissionIsBlockedForReason(
-      blink::PermissionType permission,
+      blink::PermissionType permission_descriptor,
       content::PermissionStatusSource reason) const;
 
   // Called when a permission prompt is answered through the PermissionManager.
   void PromptAnsweredGroupedRequest(
-      const std::vector<blink::mojom::PermissionStatus>& permissions_status);
+      const std::vector<content::PermissionResult>& permission_result);
+
+  content::RenderFrameHost* GetTargetRenderFrameHost() const;
 
   bool HasAvailableDevices(blink::PermissionType permission,
-                           const std::string& device_id) const;
+                           const std::vector<std::string>& device_ids) const;
 
   // The current state of the audio/video content settings which may be updated
   // through the lifetime of the request.
@@ -120,6 +129,12 @@ class MediaStreamDevicesController {
 
   // The original request for access to devices.
   const content::MediaStreamRequest request_;
+
+#if BUILDFLAG(IS_ANDROID)
+  // The URL of the primary main frame at the time the request was made, if the
+  // request originated from the primary main frame.
+  std::optional<GURL> request_main_frame_url_;
+#endif
 
   // The callback that needs to be run to notify WebRTC of whether access to
   // audio/video devices was granted or not.

@@ -6,6 +6,8 @@
 #define NET_COOKIES_COOKIE_CONSTANTS_H_
 
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include "base/time/time.h"
 #include "net/base/net_export.h"
@@ -18,6 +20,13 @@ namespace net {
 NET_EXPORT extern const base::TimeDelta kLaxAllowUnsafeMaxAge;
 // The short version of the above time threshold, to be used for tests.
 NET_EXPORT extern const base::TimeDelta kShortLaxAllowUnsafeMaxAge;
+
+// We collect multiple histograms when getting and setting cookies. The cost
+// of reporting adds up, contributing to latency of operations. But we don't
+// need the absolute numbers, we just need to see trends, so we can down
+// sample. Cookies are written and obtained a lot, so we can use a very low
+// probability.
+static constexpr double kHistogramSampleProbability = 0.001;
 
 enum CookiePriority {
   COOKIE_PRIORITY_LOW     = 0,
@@ -118,15 +127,18 @@ enum class CookieAccessSemantics {
   LEGACY,
 };
 
-enum class CookieSamePartyStatus {
-  // Used when there should be no SameParty enforcement (either because the
-  // cookie is not marked SameParty, or the enforcement is irrelevant).
-  kNoSamePartyEnforcement = 0,
-  // Used when SameParty enforcement says to exclude the cookie.
-  kEnforceSamePartyExclude = 1,
-  // Used when SameParty enforcement says to include the cookie.
-  kEnforceSamePartyInclude = 2,
+// When the scope is LEGACY, Origin-Bound Cookies behavior is disabled.
+// LINT.IfChange(CookieScopeSemantics)
+enum class CookieScopeSemantics {
+  // Has not been checked yet or there is no way to check.
+  UNKNOWN = -1,
+  // Has been checked and the cookie should *not* be subject to legacy scope
+  // rules
+  NONLEGACY = 0,
+  // Has been checked and the cookie should be subject to legacy scope rules
+  LEGACY = 1,
 };
+// LINT.ThenChange(/services/network/public/mojom/cookie_manager.mojom:CookieScopeSemanticsMojom)
 
 // What scheme was used in the setting of a cookie.
 // Do not renumber.
@@ -297,7 +309,7 @@ enum class CookieSourceSchemeName {
   kHttpsScheme = 14,
   kJavaScriptScheme = 15,
   kMailToScheme = 16,
-  kQuicTransportScheme = 17,
+  kQuicTransportScheme_Obsoleted = 17,
   kTelScheme = 18,
   kUrnScheme = 19,
   kWsScheme = 20,
@@ -319,12 +331,10 @@ NET_EXPORT std::string CookieSameSiteToString(CookieSameSite same_site);
 
 // Converts the Set-Cookie header SameSite token |same_site| to a
 // CookieSameSite. Defaults to CookieSameSite::UNSPECIFIED for empty or
-// unrecognized strings. Returns an appropriate value of CookieSameSiteString in
-// |samesite_string| to indicate what type of string was parsed as the SameSite
-// attribute value, if a pointer is provided.
-NET_EXPORT CookieSameSite
-StringToCookieSameSite(const std::string& same_site,
-                       CookieSameSiteString* samesite_string = nullptr);
+// unrecognized strings. Returns an appropriate value of CookieSameSiteString to
+// indicate what type of string was parsed as the SameSite attribute value.
+NET_EXPORT std::pair<CookieSameSite, CookieSameSiteString>
+StringToCookieSameSite(std::string_view same_site);
 
 NET_EXPORT void RecordCookieSameSiteAttributeValueHistogram(
     CookieSameSiteString value);
@@ -344,21 +354,74 @@ CookieSourceSchemeName GetSchemeNameEnum(const GURL& url);
 // Empty string was chosen because it is the smallest, non-null value.
 NET_EXPORT extern const char kEmptyCookiePartitionKey[];
 
-// Used for a histogram that measures which character caused the cookie
-// string to be truncated.
+// Enum for measuring usage patterns of CookiesAllowedForUrls.
+// The policy supports wildcards in the primary or secondary content setting
+// pattern, and explicit patterns for both. Each variant of this enum represents
+// policies set with each possible combination of rule types. These values are
+// persisted to logs. Entries should not be renumbered and numeric values should
+// never be reused.
+enum class CookiesAllowedForUrlsUsage {
+  kExplicitOnly = 0,
+  kWildcardPrimaryOnly = 1,
+  kWildcardSecondaryOnly = 2,
+  kExplicitAndPrimaryWildcard = 3,
+  kExplicitAndSecondaryWildcard = 4,
+  kWildcardOnly = 5,
+  kAllPresent = 6,
+
+  kMaxValue = kAllPresent,
+};
+
+// Possible values for the 'source_type' column.
 //
 // Do not reorder or renumber. Used for metrics.
-enum class TruncatingCharacterInCookieStringType {
-  // No truncating character in the cookie line.
-  kTruncatingCharNone = 0,
-  // Cookie line truncated because of \x0.
-  kTruncatingCharNull = 1,
-  // Cookie line truncated because of \xD.
-  kTruncatingCharNewline = 2,
-  // Cookie line truncated because of \xA.
-  kTruncatingCharLineFeed = 3,
+enum class CookieSourceType {
+  // 'http' is used for cookies set via HTTP Response Headers.
+  kHTTP = 1,
+  // 'script' is used for cookies set via document.cookie.
+  kScript = 2,
+  // 'other' is used for cookies set via browser login, iOS, WebView APIs,
+  // Extension APIs, or DevTools.
+  kOther = 3,
 
-  kMaxValue = kTruncatingCharLineFeed,  // Keep as the last value.
+  kMaxValue = kOther,  // Keep as the last value.
+};
+
+// The special cookie prefixes as defined in
+// https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-13#name-cookie-name-prefixes
+//
+// This enum is being histogrammed; do not reorder or remove values.
+enum class CookiePrefix {
+  kNone = 0,
+  kSecure,
+  kHost,
+  kHttp,
+  kHostHttp,
+  kMaxValue = kHostHttp
+};
+
+// For metrics about how a cookie line may end up parsed as a cookie having an
+// empty name. These buckets are mutually exclusive. This only includes parsing
+// of cookie lines. Does not include cookies set explicitly via APIs that set
+// the name and value separately.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class NamelessCookieLineParseType {
+  // A cookie set as a bare token, relying on the parsing behavior that turns
+  // a cookie line of "Foo" into a nameless cookie with value "Foo".
+  kBareToken = 0,
+  // A cookie set as a bare token, as above, but more specifically having a
+  // value that matches any cookie attribute name (e.g. "secure", "httponly",
+  // etc.). These are very likely to be configuration mistakes rather than
+  // intentionally set nameless cookies.
+  kBareTokenMatchingAttributeName = 1,
+  // A cookie set with an empty name using a cookie line such as "=Foo", where
+  // the first non-whitespace character is an equals sign.
+  kEqualsPrecedingToken = 2,
+  // A cookie set with an ambiguous value, via a cookie line such as "=Foo=Bar",
+  // which is parsed as a nameless cookie with value "Foo=Bar".
+  kNamelessWithAmbiguousValue = 3,
+  kMaxValue = kNamelessWithAmbiguousValue,
 };
 
 }  // namespace net

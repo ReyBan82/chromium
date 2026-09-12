@@ -2,9 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "media/capture/video/win/pin_base_win.h"
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/notreached.h"
 
 namespace media {
@@ -13,6 +17,8 @@ namespace media {
 class TypeEnumerator final : public IEnumMediaTypes,
                              public base::RefCountedThreadSafe<TypeEnumerator> {
  public:
+  REQUIRE_ADOPTION_FOR_REFCOUNTED_TYPE();
+
   explicit TypeEnumerator(PinBase* pin) : pin_(pin), index_(0) {}
 
   // Implement from IUnknown.
@@ -49,7 +55,7 @@ class TypeEnumerator final : public IEnumMediaTypes,
         FreeAllocatedMediaTypes(types_fetched, types);
         return E_OUTOFMEMORY;
       }
-      ZeroMemory(type, sizeof(AM_MEDIA_TYPE));
+      UNSAFE_TODO(ZeroMemory(type, sizeof(AM_MEDIA_TYPE)));
 
       // Allocate a VIDEOINFOHEADER and connect it to the AM_MEDIA_TYPE.
       type->cbFormat = sizeof(VIDEOINFOHEADER);
@@ -63,7 +69,7 @@ class TypeEnumerator final : public IEnumMediaTypes,
       type->pbFormat = format;
       // Get the media type from the pin.
       if (pin_->GetValidMediaType(index_++, type)) {
-        types[types_fetched++] = type;
+        UNSAFE_TODO(types[types_fetched++]) = type;
       } else {
         CoTaskMemFree(format);
         CoTaskMemFree(type);
@@ -88,21 +94,21 @@ class TypeEnumerator final : public IEnumMediaTypes,
   }
 
   IFACEMETHODIMP Clone(IEnumMediaTypes** clone) override {
-    TypeEnumerator* type_enum = new TypeEnumerator(pin_.get());
+    auto type_enum = base::MakeRefCounted<TypeEnumerator>(pin_.get());
     type_enum->AddRef();
     type_enum->index_ = index_;
-    *clone = type_enum;
+    *clone = type_enum.get();
     return S_OK;
   }
 
  private:
   friend class base::RefCountedThreadSafe<TypeEnumerator>;
-  ~TypeEnumerator() {}
+  ~TypeEnumerator() = default;
 
   void FreeAllocatedMediaTypes(ULONG allocated, AM_MEDIA_TYPE** types) {
     for (ULONG i = 0; i < allocated; ++i) {
-      CoTaskMemFree(types[i]->pbFormat);
-      CoTaskMemFree(types[i]);
+      CoTaskMemFree(UNSAFE_TODO(types[i]->pbFormat));
+      CoTaskMemFree(UNSAFE_TODO(types[i]));
     }
   }
 
@@ -111,7 +117,7 @@ class TypeEnumerator final : public IEnumMediaTypes,
 };
 
 PinBase::PinBase(IBaseFilter* owner) : owner_(owner) {
-  memset(&current_media_type_, 0, sizeof(current_media_type_));
+  UNSAFE_TODO(memset(&current_media_type_, 0, sizeof(current_media_type_)));
 }
 
 void PinBase::SetOwner(IBaseFilter* owner) {
@@ -186,7 +192,6 @@ HRESULT PinBase::QueryDirection(PIN_DIRECTION* pin_dir) {
 
 HRESULT PinBase::QueryId(LPWSTR* id) {
   NOTREACHED();
-  return E_OUTOFMEMORY;
 }
 
 HRESULT PinBase::QueryAccept(const AM_MEDIA_TYPE* media_type) {
@@ -194,8 +199,9 @@ HRESULT PinBase::QueryAccept(const AM_MEDIA_TYPE* media_type) {
 }
 
 HRESULT PinBase::EnumMediaTypes(IEnumMediaTypes** types) {
-  *types = new TypeEnumerator(this);
-  (*types)->AddRef();
+  auto type_enum = base::MakeRefCounted<TypeEnumerator>(this);
+  type_enum->AddRef();
+  *types = type_enum.get();
   return S_OK;
 }
 
@@ -219,7 +225,6 @@ HRESULT PinBase::NewSegment(REFERENCE_TIME start,
                             REFERENCE_TIME stop,
                             double rate) {
   NOTREACHED();
-  return E_NOTIMPL;
 }
 
 // Inherited from IMemInputPin.
@@ -243,7 +248,7 @@ HRESULT PinBase::ReceiveMultiple(IMediaSample** samples,
   HRESULT hr = S_OK;
   *processed = 0;
   while (sample_count--) {
-    hr = Receive(samples[*processed]);
+    hr = Receive(UNSAFE_TODO(samples[*processed]));
     // S_FALSE means don't send any more.
     if (hr != S_OK)
       break;

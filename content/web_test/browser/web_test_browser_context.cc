@@ -8,13 +8,11 @@
 #include <utility>
 
 #include "base/command_line.h"
-#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/push_messaging_service.h"
-#include "content/public/browser/resource_context.h"
 #include "content/public/test/mock_client_hints_controller_delegate.h"
 #include "content/shell/browser/shell_content_browser_client.h"
 #include "content/test/mock_background_sync_controller.h"
@@ -32,8 +30,8 @@
 #elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #include "base/nix/xdg_util.h"
 #elif BUILDFLAG(IS_MAC)
+#include "base/apple/foundation_util.h"
 #include "base/base_paths_mac.h"
-#include "base/mac/foundation_util.h"
 #endif
 
 namespace content {
@@ -79,7 +77,7 @@ PushMessagingService* WebTestBrowserContext::GetPushMessagingService() {
 PermissionControllerDelegate*
 WebTestBrowserContext::GetPermissionControllerDelegate() {
   if (!permission_manager_.get())
-    permission_manager_ = std::make_unique<WebTestPermissionManager>();
+    permission_manager_ = std::make_unique<WebTestPermissionManager>(*this);
   return permission_manager_.get();
 }
 
@@ -123,12 +121,12 @@ WebTestBrowserContext::GetClientHintsControllerDelegate() {
 
 ReduceAcceptLanguageControllerDelegate*
 WebTestBrowserContext::GetReduceAcceptLanguageControllerDelegate() {
-  if (!reduce_accept_lang_controller_delegate_) {
-    reduce_accept_lang_controller_delegate_ =
+  if (!reduce_accept_language_delegate_) {
+    reduce_accept_language_delegate_ =
         std::make_unique<content::MockReduceAcceptLanguageControllerDelegate>(
             content::GetShellLanguage());
   }
-  return reduce_accept_lang_controller_delegate_.get();
+  return reduce_accept_language_delegate_.get();
 }
 
 }  // namespace content

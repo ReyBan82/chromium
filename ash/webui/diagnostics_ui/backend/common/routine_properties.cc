@@ -6,9 +6,11 @@
 
 namespace ash::diagnostics {
 
+namespace {
+
 namespace healthd = cros_healthd::mojom;
 
-const RoutineProperties kRoutineProperties[] = {
+constexpr RoutineProperties kRoutinePropertiesArray[] = {
     {mojom::RoutineType::kBatteryCharge, "BatteryChargeResult",
      /*duration_seconds=*/30, healthd::DiagnosticRoutineEnum::kBatteryCharge},
     {mojom::RoutineType::kBatteryDischarge, "BatteryDischargeResult",
@@ -57,8 +59,18 @@ const RoutineProperties kRoutineProperties[] = {
      /*duration_seconds=*/1, healthd::DiagnosticRoutineEnum::kArcPing},
     {mojom::RoutineType::kArcDnsResolution, "ArcDnsResolutionResult",
      /*duration_seconds=*/1, healthd::DiagnosticRoutineEnum::kArcDnsResolution},
+    // GoogleServicesConnectivity bypasses cros_healthd (uses
+    // SystemRoutineControllerDelegate). healthd_type is kUnknown (unused)
+    // and duration_seconds is 0 (no cros_healthd polling).
+    {mojom::RoutineType::kGoogleServicesConnectivity,
+     "GoogleServicesConnectivityResult",
+     /*duration_seconds=*/0, healthd::DiagnosticRoutineEnum::kUnknown},
 };
 
+}  // namespace
+
+constexpr base::span<const RoutineProperties> kRoutineProperties =
+    kRoutinePropertiesArray;
 const size_t kRoutinePropertiesLength = std::size(kRoutineProperties);
 
 static_assert(kRoutinePropertiesLength ==

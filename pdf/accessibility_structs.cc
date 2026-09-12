@@ -6,16 +6,6 @@
 
 namespace chrome_pdf {
 
-bool AccessibilityDocInfo::operator==(const AccessibilityDocInfo& other) const {
-  return page_count == other.page_count &&
-         text_accessible == other.text_accessible &&
-         text_copyable == other.text_copyable;
-}
-
-bool AccessibilityDocInfo::operator!=(const AccessibilityDocInfo& other) const {
-  return !(*this == other);
-}
-
 AccessibilityTextStyleInfo::AccessibilityTextStyleInfo() = default;
 
 AccessibilityTextStyleInfo::AccessibilityTextStyleInfo(
@@ -25,16 +15,14 @@ AccessibilityTextStyleInfo::AccessibilityTextStyleInfo(
     float font_size,
     uint32_t fill_color,
     uint32_t stroke_color,
-    bool is_italic,
-    bool is_bold)
+    bool is_italic)
     : font_name(font_name),
       font_weight(font_weight),
       render_mode(render_mode),
       font_size(font_size),
       fill_color(fill_color),
       stroke_color(stroke_color),
-      is_italic(is_italic),
-      is_bold(is_bold) {}
+      is_italic(is_italic) {}
 
 AccessibilityTextStyleInfo::AccessibilityTextStyleInfo(
     const AccessibilityTextStyleInfo& other) = default;
@@ -44,16 +32,60 @@ AccessibilityTextStyleInfo::~AccessibilityTextStyleInfo() = default;
 AccessibilityTextRunInfo::AccessibilityTextRunInfo() = default;
 
 AccessibilityTextRunInfo::AccessibilityTextRunInfo(
+    uint32_t start_index,
     uint32_t len,
     const gfx::RectF& bounds,
     AccessibilityTextDirection direction,
     const AccessibilityTextStyleInfo& style)
-    : len(len), bounds(bounds), direction(direction), style(style) {}
+    : AccessibilityTextRunInfo(start_index,
+                               len,
+                               bounds,
+                               direction,
+                               style,
+                               /*is_searchified=*/false) {}
+
+AccessibilityTextRunInfo::AccessibilityTextRunInfo(
+    uint32_t start_index,
+    uint32_t len,
+    const gfx::RectF& bounds,
+    AccessibilityTextDirection direction,
+    const AccessibilityTextStyleInfo& style,
+    bool is_searchified)
+    : start_index(start_index),
+      len(len),
+      bounds(bounds),
+      direction(direction),
+      style(style),
+      is_searchified(is_searchified) {}
 
 AccessibilityTextRunInfo::AccessibilityTextRunInfo(
     const AccessibilityTextRunInfo& other) = default;
 
 AccessibilityTextRunInfo::~AccessibilityTextRunInfo() = default;
+
+AccessibilityImageInfo::AccessibilityImageInfo() = default;
+
+AccessibilityImageInfo::AccessibilityImageInfo(const std::string& alt_text,
+                                               uint32_t text_run_index,
+                                               const gfx::RectF& bounds,
+                                               int32_t page_object_index)
+    : alt_text(alt_text),
+      text_run_index(text_run_index),
+      bounds(bounds),
+      page_object_index(page_object_index) {}
+
+AccessibilityImageInfo::AccessibilityImageInfo(
+    const AccessibilityImageInfo& other) = default;
+
+AccessibilityImageInfo::~AccessibilityImageInfo() = default;
+
+AccessibilityStructureElement::AccessibilityStructureElement() = default;
+
+AccessibilityStructureElement::~AccessibilityStructureElement() = default;
+
+AccessibilityDocInfo::AccessibilityDocInfo() = default;
+
+AccessibilityDocInfo::~AccessibilityDocInfo() = default;
 
 AccessibilityLinkInfo::AccessibilityLinkInfo() = default;
 
@@ -71,22 +103,6 @@ AccessibilityLinkInfo::AccessibilityLinkInfo(
     const AccessibilityLinkInfo& other) = default;
 
 AccessibilityLinkInfo::~AccessibilityLinkInfo() = default;
-
-AccessibilityImageInfo::AccessibilityImageInfo() = default;
-
-AccessibilityImageInfo::AccessibilityImageInfo(const std::string& alt_text,
-                                               uint32_t text_run_index,
-                                               const gfx::RectF& bounds,
-                                               const SkBitmap& image_data)
-    : alt_text(alt_text),
-      text_run_index(text_run_index),
-      bounds(bounds),
-      image_data(image_data) {}
-
-AccessibilityImageInfo::AccessibilityImageInfo(
-    const AccessibilityImageInfo& other) = default;
-
-AccessibilityImageInfo::~AccessibilityImageInfo() = default;
 
 AccessibilityHighlightInfo::AccessibilityHighlightInfo() = default;
 
@@ -107,116 +123,23 @@ AccessibilityHighlightInfo::AccessibilityHighlightInfo(
 
 AccessibilityHighlightInfo::~AccessibilityHighlightInfo() = default;
 
-AccessibilityTextFieldInfo::AccessibilityTextFieldInfo() = default;
-
-AccessibilityTextFieldInfo::AccessibilityTextFieldInfo(const std::string& name,
-                                                       const std::string& value,
-                                                       bool is_read_only,
-                                                       bool is_required,
-                                                       bool is_password,
-                                                       uint32_t index_in_page,
-                                                       uint32_t text_run_index,
-                                                       const gfx::RectF& bounds)
-    : name(name),
-      value(value),
-      is_read_only(is_read_only),
-      is_required(is_required),
-      is_password(is_password),
-      index_in_page(index_in_page),
-      text_run_index(text_run_index),
-      bounds(bounds) {}
-
-AccessibilityTextFieldInfo::AccessibilityTextFieldInfo(
-    const AccessibilityTextFieldInfo& other) = default;
-
-AccessibilityTextFieldInfo::~AccessibilityTextFieldInfo() = default;
-
-AccessibilityChoiceFieldInfo::AccessibilityChoiceFieldInfo() = default;
-
-AccessibilityChoiceFieldInfo::AccessibilityChoiceFieldInfo(
-    const std::string& name,
-    const std::vector<AccessibilityChoiceFieldOptionInfo>& options,
-    ChoiceFieldType type,
-    bool is_read_only,
-    bool is_multi_select,
-    bool has_editable_text_box,
-    uint32_t index_in_page,
-    uint32_t text_run_index,
-    const gfx::RectF& bounds)
-    : name(name),
-      options(options),
-      type(type),
-      is_read_only(is_read_only),
-      is_multi_select(is_multi_select),
-      has_editable_text_box(has_editable_text_box),
-      index_in_page(index_in_page),
-      text_run_index(text_run_index),
-      bounds(bounds) {}
-
-AccessibilityChoiceFieldInfo::AccessibilityChoiceFieldInfo(
-    const AccessibilityChoiceFieldInfo& other) = default;
-
-AccessibilityChoiceFieldInfo::~AccessibilityChoiceFieldInfo() = default;
-
-AccessibilityButtonInfo::AccessibilityButtonInfo() = default;
-
-AccessibilityButtonInfo::AccessibilityButtonInfo(const std::string& name,
-                                                 const std::string& value,
-                                                 ButtonType type,
-                                                 bool is_read_only,
-                                                 bool is_checked,
-                                                 uint32_t control_count,
-                                                 uint32_t control_index,
-                                                 uint32_t index_in_page,
-                                                 uint32_t text_run_index,
-                                                 const gfx::RectF& bounds)
-    : name(name),
-      value(value),
-      type(type),
-      is_read_only(is_read_only),
-      is_checked(is_checked),
-      control_count(control_count),
-      control_index(control_index),
-      index_in_page(index_in_page),
-      text_run_index(text_run_index),
-      bounds(bounds) {}
-
-AccessibilityButtonInfo::AccessibilityButtonInfo(
-    const AccessibilityButtonInfo& other) = default;
-
-AccessibilityButtonInfo::~AccessibilityButtonInfo() = default;
-
-AccessibilityFormFieldInfo::AccessibilityFormFieldInfo() = default;
-
-AccessibilityFormFieldInfo::AccessibilityFormFieldInfo(
-    const std::vector<AccessibilityTextFieldInfo>& text_fields,
-    const std::vector<AccessibilityChoiceFieldInfo>& choice_fields,
-    const std::vector<AccessibilityButtonInfo>& buttons)
-    : text_fields(text_fields),
-      choice_fields(choice_fields),
-      buttons(buttons) {}
-
-AccessibilityFormFieldInfo::AccessibilityFormFieldInfo(
-    const AccessibilityFormFieldInfo& other) = default;
-
-AccessibilityFormFieldInfo::~AccessibilityFormFieldInfo() = default;
-
 AccessibilityPageObjects::AccessibilityPageObjects() = default;
 
 AccessibilityPageObjects::AccessibilityPageObjects(
     const std::vector<AccessibilityLinkInfo>& links,
     const std::vector<AccessibilityImageInfo>& images,
-    const std::vector<AccessibilityHighlightInfo>& highlights,
-    const AccessibilityFormFieldInfo& form_fields)
-    : links(links),
-      images(images),
-      highlights(highlights),
-      form_fields(form_fields) {}
+    const std::vector<AccessibilityHighlightInfo>& highlights)
+    : links(links), images(images), highlights(highlights) {}
 
 AccessibilityPageObjects::AccessibilityPageObjects(
     const AccessibilityPageObjects& other) = default;
 
 AccessibilityPageObjects::~AccessibilityPageObjects() = default;
+
+AccessibilityViewportInfo::AccessibilityViewportInfo() = default;
+AccessibilityViewportInfo::AccessibilityViewportInfo(
+    const AccessibilityViewportInfo& other) = default;
+AccessibilityViewportInfo::~AccessibilityViewportInfo() = default;
 
 AccessibilityActionData::AccessibilityActionData() = default;
 

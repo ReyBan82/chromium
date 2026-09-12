@@ -7,7 +7,7 @@ function getStyle(elem, name) {
     name = name.toLowerCase();
 
     try {
-      var s = document.defaultView.getComputedStyle(elem, '');
+      const s = document.defaultView.getComputedStyle(elem, '');
       return s && s.getPropertyValue(name);
     } catch (ex) {
       return null;
@@ -17,7 +17,10 @@ function getStyle(elem, name) {
   }
 }
 
-var bElement = document.getElementById('test2');
+// NOTE: Need to use `var` here since multiple scripts can be injected and
+// otherwise it may throw a "variable already declared" error.
+var bElement = document.getElementById('test2');  // eslint-disable-line no-var
+// eslint-disable-next-line no-var
 var display = getStyle(bElement, 'display').toLowerCase();
-var extensionPort = chrome.runtime.connect();
+var extensionPort = chrome.runtime.connect();  // eslint-disable-line no-var
 extensionPort.postMessage({message: display});

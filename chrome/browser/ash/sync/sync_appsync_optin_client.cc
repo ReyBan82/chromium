@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/ash/sync/sync_appsync_optin_client.h"
+
+#include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -10,20 +12,18 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
+#include "components/account_id/account_id.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/sync/base/user_selectable_type.h"
-#include "components/sync/driver/sync_service.h"
-#include "components/sync/driver/sync_user_settings.h"
+#include "components/sync/service/sync_service.h"
+#include "components/sync/service/sync_user_settings.h"
 #include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
 
 namespace ash {
 
-constexpr char kOldDaemonStorePath[] = "/run/daemon-store/appsync-consent";
 constexpr char kDaemonStorePath[] = "/run/daemon-store/appsync-optin";
 constexpr char kDaemonStoreFileName[] = "opted-in";
-constexpr char kAppsSyncOptinIOHistogram[] =
-    "Cros.AppsSyncOptinFileWriteAttempts";
 
 namespace {
 bool IsAppsSyncEnabledForSyncService(const syncer::SyncService& sync_service) {
@@ -31,31 +31,28 @@ bool IsAppsSyncEnabledForSyncService(const syncer::SyncService& sync_service) {
       syncer::UserSelectableOsType::kOsApps);
 }
 
+// The daemon-store directory is shared with a minijailed daemon that owns it
+// per the /etc/daemon-store template. Use WriteFileNoFollow() so a
+// compromised daemon cannot redirect this chronos-uid write via a planted
+// symlink.
+bool WriteFileNoFollow(const base::FilePath& filepath,
+                       std::string_view file_contents) {
+  base::File file(filepath, base::File::FLAG_CREATE_ALWAYS |
+                                base::File::FLAG_WRITE |
+                                base::File::FLAG_NO_FOLLOW);
+  return file.IsValid() &&
+         file.WriteAndCheck(0, base::as_byte_span(file_contents));
+}
+
 void WriteOptinFile(base::FilePath filepath, bool opted_in) {
   const std::string file_contents = opted_in ? "1" : "0";
 
-  base::UmaHistogramEnumeration(
-      kAppsSyncOptinIOHistogram,
-      SyncAppsyncOptinClient::AppsSyncOptinFileWrite::kAttempt);
-  if (!base::WriteFile(filepath, file_contents)) {
+  if (!WriteFileNoFollow(filepath, file_contents)) {
     DLOG(ERROR) << "Failed to persist opt-in change " << file_contents
                 << " to daemon-store. State on disk will be inaccurate!";
-    base::UmaHistogramEnumeration(
-        kAppsSyncOptinIOHistogram,
-        SyncAppsyncOptinClient::AppsSyncOptinFileWrite::kFailure);
   }
 }
 
-void DeleteConsentDir(const base::FilePath& app_sync_consent_dir) {
-  if (!base::DirectoryExists(app_sync_consent_dir)) {
-    // defunct daemon-store directory does not exist, no need to migrate
-    return;
-  }
-
-  if (!base::DeletePathRecursively(app_sync_consent_dir)) {
-    DLOG(WARNING) << "Failed to delete " << app_sync_consent_dir;
-  }
-}
 }  // namespace
 
 std::string SyncAppsyncOptinClient::GetActiveProfileHash(
@@ -68,8 +65,8 @@ std::string SyncAppsyncOptinClient::GetActiveProfileHash(
     return "";
   }
 
-  AccountId account_id = AccountId::FromUserEmailGaiaId(sync_user_account.email,
-                                                        sync_user_account.gaia);
+  AccountId account_id = AccountId::FromNonCanonicalEmail(
+      sync_user_account.email, sync_user_account.gaia, AccountType::GOOGLE);
 
   const user_manager::User* user = user_manager_->FindUser(account_id);
 
@@ -98,56 +95,22 @@ void SyncAppsyncOptinClient::UpdateOptinFile(
       base::BindOnce(&WriteOptinFile, app_sync_optin_path, opted_in));
 }
 
-void SyncAppsyncOptinClient::RemoveOldAppsyncDaemonDir(
-    const syncer::SyncService* sync_service) {
-  std::string hash = GetActiveProfileHash(sync_service);
-  if (hash.empty()) {
-    return;
-  }
-
-  base::FilePath app_sync_consent_dir = old_daemon_store_filepath_.Append(hash);
-
-  base::ThreadPool::PostTask(
-      FROM_HERE, {base::MayBlock()},
-      base::BindOnce(&DeleteConsentDir, app_sync_consent_dir));
-}
-
 SyncAppsyncOptinClient::SyncAppsyncOptinClient(
     syncer::SyncService* sync_service,
     user_manager::UserManager* user_manager)
     : SyncAppsyncOptinClient(sync_service,
                              user_manager,
-                             base::FilePath(kDaemonStorePath),
-                             base::FilePath(kOldDaemonStorePath)) {}
-
-SyncAppsyncOptinClient::SyncAppsyncOptinClient(
-    syncer::SyncService* sync_service,
-    user_manager::UserManager* user_manager,
-    const base::FilePath& daemon_store_filepath)
-    : SyncAppsyncOptinClient(sync_service,
-                             user_manager,
-                             daemon_store_filepath,
                              base::FilePath(kDaemonStorePath)) {}
 
 SyncAppsyncOptinClient::SyncAppsyncOptinClient(
     syncer::SyncService* sync_service,
     user_manager::UserManager* user_manager,
-    const base::FilePath& daemon_store_filepath,
-    const base::FilePath& old_daemon_store_filepath)
+    const base::FilePath& daemon_store_filepath)
     : sync_service_(sync_service),
       user_manager_(user_manager),
       is_apps_sync_enabled_(IsAppsSyncEnabledForSyncService(*sync_service)),
-      daemon_store_filepath_(daemon_store_filepath),
-      old_daemon_store_filepath_(old_daemon_store_filepath) {
+      daemon_store_filepath_(daemon_store_filepath) {
   sync_service_->AddObserver(this);
-  // When SyncAppsyncOptinClient is instantiated, it attempts to do 2 things:
-  // 1 - delete any existing directory at a legacy location
-  // 2 - create a file indicating a user's opt-in status to Apps Sync
-  // Either of these may safely fail, as they will be reattempted in the future,
-  // and the ordering of events does not matter as they interact with 2
-  // different directories.
-  // TODO(b/264677999): remove migration code on 2024-01-30.
-  RemoveOldAppsyncDaemonDir(sync_service);
   UpdateOptinFile(is_apps_sync_enabled_, sync_service);
 }
 
@@ -163,6 +126,12 @@ void SyncAppsyncOptinClient::OnStateChanged(syncer::SyncService* sync_service) {
     UpdateOptinFile(new_is_apps_sync_enabled, sync_service);
     is_apps_sync_enabled_ = new_is_apps_sync_enabled;
   }
+}
+
+void SyncAppsyncOptinClient::OnSyncShutdown(syncer::SyncService* sync_service) {
+  // Unreachable, since `this` must be destroyed before SyncService shutdown,
+  // per precondition specified in the constructor.
+  NOTREACHED();
 }
 
 }  // namespace ash

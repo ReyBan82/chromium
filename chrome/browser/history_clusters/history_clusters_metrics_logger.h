@@ -5,18 +5,21 @@
 #ifndef CHROME_BROWSER_HISTORY_CLUSTERS_HISTORY_CLUSTERS_METRICS_LOGGER_H_
 #define CHROME_BROWSER_HISTORY_CLUSTERS_HISTORY_CLUSTERS_METRICS_LOGGER_H_
 
-#include "components/history_clusters/core/cluster_metrics_utils.h"
-#include "content/public/browser/page.h"
+#include <optional>
+
 #include "content/public/browser/page_user_data.h"
-#include "content/public/browser/web_contents_observer.h"
 
 namespace history_clusters {
+
+enum class ClusterAction;
+enum class RelatedSearchAction;
+enum class VisitAction;
+enum class VisitType;
 
 // The initial state that describes how an interaction with the HistoryClusters
 // UI was started.
 //
-// Keep in sync with HistoryClustersInitialState in
-// tools/metrics/histograms/enums.xml.
+// LINT.IfChange(HistoryClustersInitialState)
 enum class HistoryClustersInitialState {
   kUnknown = 0,
   // The HistoryClusters UI was opened via direct URL, i.e., not opened via any
@@ -38,6 +41,7 @@ enum class HistoryClustersInitialState {
   // Add new values above this line.
   kMaxValue = kSidePanelFromToolbarButton,
 };
+// LINT.ThenChange(//tools/metrics/histograms/metadata/history/enums.xml:HistoryClustersInitialState)
 
 // HistoryClustersMetricsLogger contains all the metrics/events associated with
 // interactions and internals of HistoryClusters in Chrome. It has the same
@@ -50,7 +54,7 @@ class HistoryClustersMetricsLogger
   ~HistoryClustersMetricsLogger() override;
   PAGE_USER_DATA_KEY_DECL();
 
-  absl::optional<HistoryClustersInitialState> initial_state() const {
+  std::optional<HistoryClustersInitialState> initial_state() const {
     return initial_state_;
   }
 
@@ -84,6 +88,9 @@ class HistoryClustersMetricsLogger
   void RecordClusterAction(ClusterAction cluster_action,
                            uint32_t cluster_index);
 
+  // Called when the UI becomes visible.
+  void WasShown();
+
  private:
   // Whether the journeys interaction captured by |this| is considered a
   // successful outcome.
@@ -91,11 +98,15 @@ class HistoryClustersMetricsLogger
 
   // The navigation ID of the navigation handle that this data is associated
   // with, used for recording the metrics to UKM.
-  absl::optional<int64_t> navigation_id_;
+  std::optional<int64_t> navigation_id_;
 
   // The initial state of how this interaction with the HistoryClusters UI was
   // started.
-  absl::optional<HistoryClustersInitialState> initial_state_;
+  std::optional<HistoryClustersInitialState> initial_state_;
+
+  // True if the the HistoryClusters UI is ever shown. This can be false for the
+  // entire lifetime of HistoryClusters UI if it is preloaded but never shown.
+  bool is_ever_shown_ = false;
 
   // The number of queries made on the tracker history clusters event. Only
   // queries containing a string should be counted.

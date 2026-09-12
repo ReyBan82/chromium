@@ -4,11 +4,14 @@
 
 #include "chrome/browser/ash/accessibility/dictation_bubble_test_helper.h"
 
-#include "ash/accessibility/accessibility_controller_impl.h"
+#include <string_view>
+
+#include "ash/accessibility/accessibility_controller.h"
 #include "ash/public/cpp/accessibility_controller_enums.h"
 #include "ash/shell.h"
 #include "ash/system/accessibility/dictation_bubble_view.h"
 #include "base/run_loop.h"
+#include "content/public/browser/navigation_controller.h"
 
 namespace ash {
 
@@ -18,7 +21,12 @@ DictationBubbleTestHelper::DictationBubbleTestHelper() {
   GetController()->AddObserver(this);
 }
 
-DictationBubbleTestHelper::~DictationBubbleTestHelper() = default;
+DictationBubbleTestHelper::~DictationBubbleTestHelper() {
+  auto* controller = GetController();
+  if (controller) {
+    controller->RemoveObserver(this);
+  }
+}
 
 bool DictationBubbleTestHelper::IsVisible() {
   return GetController()->widget_->IsVisible();
@@ -37,7 +45,7 @@ DictationBubbleIconType DictationBubbleTestHelper::GetVisibleIcon() {
   return DictationBubbleIconType::kHidden;
 }
 
-std::u16string DictationBubbleTestHelper::GetText() {
+std::u16string_view DictationBubbleTestHelper::GetText() {
   return GetController()->dictation_bubble_view_->GetTextForTesting();
 }
 
@@ -75,12 +83,13 @@ std::vector<std::u16string> DictationBubbleTestHelper::GetVisibleHints() {
 }
 
 DictationBubbleController* DictationBubbleTestHelper::GetController() {
-  DictationBubbleController* controller =
-      Shell::Get()
-          ->accessibility_controller()
-          ->GetDictationBubbleControllerForTest();
-  DCHECK(controller != nullptr);
-  return controller;
+  if (!Shell::HasInstance()) {
+    return nullptr;
+  }
+
+  return Shell::Get()
+      ->accessibility_controller()
+      ->GetDictationBubbleControllerForTest();
 }
 
 void DictationBubbleTestHelper::WaitForVisibility(bool visible) {

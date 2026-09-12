@@ -8,10 +8,11 @@
 #include <utility>
 
 #include "chrome/browser/extensions/api/tabs/app_base_window.h"
-#include "chrome/browser/extensions/api/tabs/tabs_constants.h"
 #include "chrome/browser/extensions/extension_tab_util.h"
 #include "chrome/browser/extensions/window_controller.h"
 #include "chrome/browser/extensions/window_controller_list.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/common/extensions/api/tabs.h"
 #include "chrome/common/url_constants.h"
 #include "extensions/browser/app_window/app_window.h"
 #include "extensions/browser/app_window/native_app_window.h"
@@ -38,15 +39,28 @@ int AppWindowController::GetWindowId() const {
 }
 
 std::string AppWindowController::GetWindowTypeText() const {
-  return tabs_constants::kWindowTypeValueApp;
+  return api::tabs::ToString(api::tabs::WindowType::kApp);
 }
 
-bool AppWindowController::CanClose(Reason* reason) const {
-  return true;
+void AppWindowController::SetFullscreenMode(bool is_fullscreen,
+                                            const GURL& extension_url) const {
+  // Full screen not supported by app windows.
 }
 
-Browser* AppWindowController::GetBrowser() const {
+BrowserWindowInterface* AppWindowController::GetBrowser() const {
   return nullptr;
+}
+
+content::WebContents* AppWindowController::GetActiveTab() const {
+  return app_window_->web_contents();
+}
+
+int AppWindowController::GetTabCount() const {
+  return 1;  // Only one "tab" in an app window.
+}
+
+content::WebContents* AppWindowController::GetWebContentsAt(int i) const {
+  return i == 0 ? app_window_->web_contents() : nullptr;
 }
 
 bool AppWindowController::IsVisibleToTabsAPIForExtension(
@@ -54,6 +68,25 @@ bool AppWindowController::IsVisibleToTabsAPIForExtension(
     bool allow_dev_tools_windows) const {
   DCHECK(extension);
   return extension->id() == app_window_->extension_id();
+}
+
+base::DictValue AppWindowController::CreateWindowValueForExtension(
+    const Extension* extension,
+    PopulateTabBehavior populate_tab_behavior,
+    mojom::ContextType context) const {
+  return base::DictValue();
+}
+
+base::ListValue AppWindowController::CreateTabList(
+    const Extension* extension,
+    mojom::ContextType context) const {
+  return base::ListValue();
+}
+
+bool AppWindowController::OpenOptionsPage(const Extension* extension,
+                                          const GURL& url,
+                                          bool open_in_tab) {
+  return false;
 }
 
 }  // namespace extensions

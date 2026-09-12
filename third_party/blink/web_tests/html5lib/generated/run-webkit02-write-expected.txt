@@ -1,17 +1,44 @@
+CONSOLE WARNING: A <select> tag was parsed within another <select> tag and was converted into </select>. Please add the missing </select> end tag.
+CONSOLE WARNING: A <select> tag was parsed within another <select> tag and was converted into </select>. Please add the missing </select> end tag.
 ../resources/webkit02.dat:
-12
+3
+44
 
-Test 12 of 16 in ../resources/webkit02.dat failed. Input:
-<isindex action="x">
+Test 3 of 49 in ../resources/webkit02.dat failed. Input:
+<p id="status"><noscript><strong>A</strong></noscript><span>B</span></p>
 Got:
-| <isindex>
-|   action="x"
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       id="status"
+|       <noscript>
+|         "<strong>A</strong>"
+|       <span>
+|         "B"
 Expected:
-| <form>
-|   action="x"
-| <hr>
-| <label>
-|   "This is a searchable index. Enter search keywords: "
-|   <input>
-|     name="isindex"
-| <hr>
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       id="status"
+|       <noscript>
+|         <strong>
+|           "A"
+|       <span>
+|         "B"
+
+Test 44 of 49 in ../resources/webkit02.dat failed. Input:
+<select><input>
+Got:
+| <html>
+|   <head>
+|   <body>
+|     <select>
+|       <input>
+Expected:
+| <html>
+|   <head>
+|   <body>
+|     <select>
+|     <input>

@@ -24,18 +24,22 @@
 #include <utility>
 
 #include "base/memory/ptr_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element_traversal.h"
 #include "third_party/blink/renderer/core/dom/events/scoped_event_queue.h"
 #include "third_party/blink/renderer/core/html/custom/custom_element.h"
 #include "third_party/blink/renderer/core/html/custom/element_internals.h"
+#include "third_party/blink/renderer/core/html/forms/control_key.h"
 #include "third_party/blink/renderer/core/html/forms/file_chooser.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/html/forms/listed_element.h"
+#include "third_party/blink/renderer/core/input_type_names.h"
 #include "third_party/blink/renderer/platform/wtf/deque.h"
 #include "third_party/blink/renderer/platform/wtf/hash_table_deleted_value_type.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 
 namespace blink {
 
@@ -97,11 +101,13 @@ void FormControlState::SerializeTo(Vector<String>& state_vector) const {
 FormControlState FormControlState::Deserialize(
     const Vector<String>& state_vector,
     wtf_size_t& index) {
-  if (index >= state_vector.size())
+  if (index >= state_vector.size()) {
     return FormControlState(kTypeFailure);
-  unsigned value_size = state_vector[index++].ToUInt();
-  if (!value_size)
+  }
+  unsigned value_size = StringToUintLoose(state_vector[index++]).value_or(0);
+  if (!value_size) {
     return FormControlState();
+  }
   if (index + value_size > state_vector.size())
     return FormControlState(kTypeFailure);
   FormControlState state;
@@ -110,83 +116,6 @@ FormControlState FormControlState::Deserialize(
     state.Append(state_vector[index++]);
   return state;
 }
-
-// ----------------------------------------------------------------------------
-
-class ControlKey {
- public:
-  ControlKey(StringImpl* = nullptr, StringImpl* = nullptr);
-  ~ControlKey();
-  ControlKey(const ControlKey&);
-  ControlKey& operator=(const ControlKey&);
-
-  StringImpl* GetName() const { return name_; }
-  StringImpl* GetType() const { return type_; }
-
-  // Hash table deleted values, which are only constructed and never copied or
-  // destroyed.
-  ControlKey(WTF::HashTableDeletedValueType) : name_(HashTableDeletedValue()) {}
-  bool IsHashTableDeletedValue() const {
-    return name_ == HashTableDeletedValue();
-  }
-
- private:
-  void Ref() const;
-  void Deref() const;
-
-  static StringImpl* HashTableDeletedValue() {
-    return reinterpret_cast<StringImpl*>(-1);
-  }
-
-  StringImpl* name_;
-  StringImpl* type_;
-};
-
-ControlKey::ControlKey(StringImpl* name, StringImpl* type)
-    : name_(name), type_(type) {
-  Ref();
-}
-
-ControlKey::~ControlKey() {
-  Deref();
-}
-
-ControlKey::ControlKey(const ControlKey& other)
-    : name_(other.GetName()), type_(other.GetType()) {
-  Ref();
-}
-
-ControlKey& ControlKey::operator=(const ControlKey& other) {
-  other.Ref();
-  Deref();
-  name_ = other.GetName();
-  type_ = other.GetType();
-  return *this;
-}
-
-void ControlKey::Ref() const {
-  if (GetName())
-    GetName()->AddRef();
-  if (GetType())
-    GetType()->AddRef();
-}
-
-void ControlKey::Deref() const {
-  if (GetName())
-    GetName()->Release();
-  if (GetType())
-    GetType()->Release();
-}
-
-inline bool operator==(const ControlKey& a, const ControlKey& b) {
-  return a.GetName() == b.GetName() && a.GetType() == b.GetType();
-}
-
-struct ControlKeyHashTraits : SimpleClassHashTraits<ControlKey> {
-  static unsigned GetHash(const ControlKey& key) {
-    return StringHasher::HashMemory<sizeof(ControlKey)>(&key);
-  }
-};
 
 // ----------------------------------------------------------------------------
 
@@ -221,20 +150,21 @@ class SavedFormState {
 };
 
 static bool IsNotFormControlTypeCharacter(UChar ch) {
-  return ch != '-' && (ch > 'z' || ch < 'a');
+  return ch != '-' && !IsAsciiLower(ch);
 }
 
 std::unique_ptr<SavedFormState> SavedFormState::Deserialize(
     const Vector<String>& state_vector,
     wtf_size_t& index) {
-  if (index >= state_vector.size())
+  if (index >= state_vector.size()) {
     return nullptr;
-  // FIXME: We need String::toSizeT().
-  wtf_size_t item_count = state_vector[index++].ToUInt();
-  if (!item_count)
+  }
+  wtf_size_t item_count = StringToUintLoose(state_vector[index++]).value_or(0);
+  if (!item_count) {
     return nullptr;
+  }
   std::unique_ptr<SavedFormState> saved_form_state =
-      base::WrapUnique(new SavedFormState);
+      std::make_unique<SavedFormState>();
   while (item_count--) {
     if (index + 1 >= state_vector.size())
       return nullptr;
@@ -268,14 +198,15 @@ void SavedFormState::SerializeTo(Vector<String>& state_vector) const {
 void SavedFormState::AppendControlState(const AtomicString& name,
                                         const AtomicString& type,
                                         const FormControlState& state) {
-  ControlKey key(name.Impl(), type.Impl());
-  ControlStateMap::iterator it = state_for_new_controls_.find(key);
+  ControlStateMap::iterator it =
+      state_for_new_controls_.Find<ControlKeyTranslator, ControlKeyData>(
+          {name, type});
   if (it != state_for_new_controls_.end()) {
     it->value.push_back(state);
   } else {
     Deque<FormControlState> state_list;
     state_list.push_back(state);
-    state_for_new_controls_.Set(key, state_list);
+    state_for_new_controls_.Set(ControlKey(name, type), state_list);
   }
   control_state_count_++;
 }
@@ -285,7 +216,8 @@ FormControlState SavedFormState::TakeControlState(const AtomicString& name,
   if (state_for_new_controls_.empty())
     return FormControlState();
   ControlStateMap::iterator it =
-      state_for_new_controls_.find(ControlKey(name.Impl(), type.Impl()));
+      state_for_new_controls_.Find<ControlKeyTranslator, ControlKeyData>(
+          {name, type});
   if (it == state_for_new_controls_.end())
     return FormControlState();
   DCHECK_GT(it->value.size(), 0u);
@@ -300,11 +232,12 @@ Vector<String> SavedFormState::GetReferencedFilePaths() const {
   Vector<String> to_return;
   for (const auto& form_control : state_for_new_controls_) {
     const ControlKey& key = form_control.key;
-    if (!Equal(key.GetType(), "file", 4))
+    if (key.GetType() != input_type_names::kFile) {
       continue;
+    }
     const Deque<FormControlState>& queue = form_control.value;
     for (const FormControlState& form_control_state : queue) {
-      to_return.AppendVector(
+      to_return.append_range(
           HTMLInputElement::FilesFromFileInputFormControlState(
               form_control_state));
     }
@@ -362,7 +295,7 @@ static inline void RecordFormStructure(const HTMLFormElement& form,
 }
 
 String FormSignature(const HTMLFormElement& form) {
-  KURL action_url = form.GetURLAttribute(html_names::kActionAttr);
+  KURL action_url = form.GetURLAttributeAsKURL(html_names::kActionAttr);
   // Remove the query part because it might contain volatile parameters such
   // as a session key.
   if (!action_url.IsEmpty())
@@ -448,7 +381,7 @@ static String FormStateSignature() {
 Vector<String> DocumentState::ToStateVector() {
   auto* key_generator = MakeGarbageCollected<FormKeyGenerator>();
   std::unique_ptr<SavedFormStateMap> state_map =
-      base::WrapUnique(new SavedFormStateMap);
+      std::make_unique<SavedFormStateMap>();
   for (auto& control : GetControlList()) {
     DCHECK(control->ToHTMLElement().isConnected());
     if (!control->ShouldSaveAndRestoreFormControlState())
@@ -487,6 +420,21 @@ void FormController::Trace(Visitor* visitor) const {
   visitor->Trace(document_);
   visitor->Trace(document_state_);
   visitor->Trace(form_key_generator_);
+  visitor->Trace(last_autofill_invalidation_insertion_point_);
+}
+
+bool FormController::ShouldInvalidateAncestorFormsForAutofill(
+    const ContainerNode& insertion_point) {
+  DCHECK_EQ(document_.Get(), &insertion_point.GetDocument());
+  // The DOM tree version stays fixed throughout a subtree notification.
+  const uint64_t dom_tree_version = document_->DomTreeVersion();
+  if (last_autofill_invalidation_insertion_point_ == &insertion_point &&
+      last_autofill_invalidation_dom_tree_version_ == dom_tree_version) {
+    return false;
+  }
+  last_autofill_invalidation_insertion_point_ = &insertion_point;
+  last_autofill_invalidation_dom_tree_version_ = dom_tree_version;
+  return true;
 }
 
 DocumentState* FormController::ControlStates() const {
@@ -559,8 +507,10 @@ void FormController::RestoreControlStateIn(HTMLFormElement& form) {
   if (!document_->HasFinishedParsing())
     return;
   EventQueueScope scope;
-  const ListedElement::List& elements = form.ListedElements();
-  for (const auto& control : elements) {
+  // Make a copy of the list because the DOM could be modified during
+  // restoration of a <select> with a <selectedcontent> element.
+  ListedElement::List elements_copy(form.ListedElements());
+  for (const auto& control : elements_copy) {
     if (!control->ClassSupportsStateRestore())
       continue;
     if (OwnerFormForState(*control) != &form)
@@ -601,10 +551,9 @@ void FormController::RestoreControlStateOnUpgrade(ListedElement& control) {
 
 void FormController::ScheduleRestore() {
   document_->GetTaskRunner(TaskType::kInternalLoading)
-      ->PostTask(
-          FROM_HERE,
-          WTF::BindOnce(&FormController::RestoreAllControlsInDocumentOrder,
-                        WrapPersistent(this)));
+      ->PostTask(FROM_HERE,
+                 BindOnce(&FormController::RestoreAllControlsInDocumentOrder,
+                          WrapPersistent(this)));
 }
 
 void FormController::RestoreImmediately() {
@@ -618,7 +567,11 @@ void FormController::RestoreAllControlsInDocumentOrder() {
     return;
   HeapHashSet<Member<HTMLFormElement>> finished_forms;
   EventQueueScope scope;
-  for (auto& control : document_state_->GetControlList()) {
+  // Make a copy of the list because the DOM could be modified during
+  // restoration of a <select> with a <selectedcontent> element.
+  DocumentState::ControlList control_list_copy(
+      document_state_->GetControlList());
+  for (auto& control : control_list_copy) {
     auto* owner = OwnerFormForState(*control);
     if (!owner)
       RestoreControlStateFor(*control);
@@ -634,7 +587,7 @@ Vector<String> FormController::GetReferencedFilePaths(
   SavedFormStateMap map;
   ControlStatesFromStateVector(state_vector, map);
   for (const auto& saved_form_state : map)
-    to_return.AppendVector(saved_form_state.value->GetReferencedFilePaths());
+    to_return.append_range(saved_form_state.value->GetReferencedFilePaths());
   return to_return;
 }
 

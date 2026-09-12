@@ -5,16 +5,17 @@
 #include "chrome/browser/ash/app_restore/arc_app_single_restore_handler.h"
 
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ash/app_restore/arc_ghost_window_handler.h"
-#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/signin/identity_test_environment_profile_adaptor.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "components/exo/wm_helper.h"
-#include "components/user_manager/scoped_user_manager.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/display/types/display_constants.h"
 
 namespace ash::app_restore {
 
@@ -22,14 +23,7 @@ namespace {
 
 constexpr char kTestProfileName[] = "user@gmail.com";
 
-std::unique_ptr<TestingProfileManager> CreateTestingProfileManager() {
-  auto profile_manager = std::make_unique<TestingProfileManager>(
-      TestingBrowserProcess::GetGlobal());
-  EXPECT_TRUE(profile_manager->SetUp());
-  return profile_manager;
-}
-
-class FakeArcGhostWindwoHandler : public full_restore::ArcGhostWindowHandler {
+class FakeArcGhostWindowHandler : public full_restore::ArcGhostWindowHandler {
  public:
   bool LaunchArcGhostWindow(
       const std::string& app_id,
@@ -43,43 +37,59 @@ class FakeArcGhostWindwoHandler : public full_restore::ArcGhostWindowHandler {
 
 class ArcAppSingleRestoreHandlerTest : public testing::Test {
  public:
-  ArcAppSingleRestoreHandlerTest()
-      : profile_manager_(CreateTestingProfileManager()),
-        profile_(profile_manager_->CreateTestingProfile(kTestProfileName)),
-        user_manager_(new FakeChromeUserManager),
-        user_manager_owner_(base::WrapUnique(user_manager_)),
-        wm_helper_(std::make_unique<exo::WMHelper>()) {
-    const user_manager::User* user =
-        user_manager_->AddUser(AccountId::FromUserEmail(kTestProfileName));
-    user_manager_->LoginUser(user->GetAccountId());
-    user_manager_->SwitchActiveUser(user->GetAccountId());
-  }
+  ArcAppSingleRestoreHandlerTest() = default;
   ArcAppSingleRestoreHandlerTest(const ArcAppSingleRestoreHandlerTest&) =
       delete;
   ArcAppSingleRestoreHandlerTest& operator=(
       const ArcAppSingleRestoreHandlerTest&) = delete;
   ~ArcAppSingleRestoreHandlerTest() override = default;
 
+  void SetUp() override {
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            TestingBrowserProcess::GetGlobal()->local_state());
+
+    profile_manager_ = std::make_unique<TestingProfileManager>(
+        TestingBrowserProcess::GetGlobal());
+    ASSERT_TRUE(profile_manager_->SetUp());
+
+    wm_helper_ = std::make_unique<exo::WMHelper>();
+    ghost_window_handler_ = std::make_unique<FakeArcGhostWindowHandler>();
+
+    auto account_id =
+        AccountId::FromUserEmailGaiaId(kTestProfileName, GaiaId("12345678"));
+    ASSERT_TRUE(user_session_test_environment_->AddRegularUser(account_id));
+    user_session_test_environment_->LogIn(account_id);
+
+    profile_ = profile_manager_->CreateTestingProfile(kTestProfileName);
+  }
+
+  void TearDown() override {
+    profile_ = nullptr;
+    ghost_window_handler_.reset();
+    wm_helper_.reset();
+    profile_manager_.reset();
+    user_session_test_environment_.reset();
+  }
+
   TestingProfile* profile() const { return profile_; }
 
   full_restore::ArcGhostWindowHandler* window_handler() {
-    return static_cast<full_restore::ArcGhostWindowHandler*>(
-        &ghost_window_handler_);
+    return ghost_window_handler_.get();
   }
 
- protected:
+ private:
   content::BrowserTaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
-
- private:
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
   std::unique_ptr<TestingProfileManager> profile_manager_;
-  TestingProfile* profile_;
-  FakeChromeUserManager* user_manager_;  // Not own.
-  user_manager::ScopedUserManager user_manager_owner_;
 
   // Initialize WMHelper to create ARC ghost window handler.
   std::unique_ptr<exo::WMHelper> wm_helper_;
-  FakeArcGhostWindwoHandler ghost_window_handler_;
+  std::unique_ptr<FakeArcGhostWindowHandler> ghost_window_handler_;
+
+  raw_ptr<TestingProfile> profile_ = nullptr;
 };
 
 TEST_F(ArcAppSingleRestoreHandlerTest, NotLaunchIfShelfNotReady) {

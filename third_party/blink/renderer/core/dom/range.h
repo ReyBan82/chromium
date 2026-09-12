@@ -28,7 +28,7 @@
 
 #include "base/dcheck_is_on.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/core/dom/abstract_range.h"
+#include "third_party/blink/renderer/core/dom/node_range.h"
 #include "third_party/blink/renderer/core/dom/range_boundary_point.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
@@ -53,7 +53,7 @@ class Node;
 class NodeWithIndex;
 class Text;
 
-class CORE_EXPORT Range final : public AbstractRange {
+class CORE_EXPORT Range final : public NodeRange {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
@@ -115,8 +115,9 @@ class CORE_EXPORT Range final : public AbstractRange {
 
   String GetText() const;
 
-  DocumentFragment* createContextualFragment(const String& html,
-                                             ExceptionState&);
+  DocumentFragment* createContextualFragment(
+      const V8UnionStringOrTrustedHTML* html,
+      ExceptionState&);
 
   void detach();
   Range* cloneRange() const;
@@ -206,9 +207,24 @@ class CORE_EXPORT Range final : public AbstractRange {
   void ScheduleVisualUpdateIfInRegisteredHighlight(Document& document);
   void RemoveFromSelectionIfInDifferentRoot(Document& old_document);
 
+  void CollapseIfNeeded(bool did_move_document, bool collapse_to_start);
+
   Member<Document> owner_document_;  // Cannot be null.
   RangeBoundaryPoint start_;
   RangeBoundaryPoint end_;
+
+  // This tracks how the range updates the selection:
+  // If kAll, set selection to have the same start and end as range.
+  // If kStartOnly, set selection to have the same start as range.
+  // If kEndOnly, set selection to have the same end as range.
+  enum class UpdateSelectionBehavior {
+    kAll,
+    kStartOnly,
+    kEndOnly,
+  };
+  UpdateSelectionBehavior update_selection_behavior_ =
+      UpdateSelectionBehavior::kAll;
+  void ResetUpdateSelectionBehavior();
 
   friend class RangeUpdateScope;
 };

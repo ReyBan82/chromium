@@ -6,9 +6,13 @@
 #define GOOGLE_APIS_GAIA_OAUTH2_API_CALL_FLOW_H_
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
+#include "base/component_export.h"
 #include "base/memory/scoped_refptr.h"
+#include "google_apis/credentials_mode.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/mojom/url_response_head.mojom-forward.h"
 #include "url/gurl.h"
@@ -26,7 +30,7 @@ class HttpRequestHeaders;
 // given an access token to the service.  This class abstracts the basic steps
 // and exposes template methods for sub-classes to implement for API specific
 // details.
-class OAuth2ApiCallFlow {
+class COMPONENT_EXPORT(GOOGLE_APIS) OAuth2ApiCallFlow {
  public:
   OAuth2ApiCallFlow();
 
@@ -46,12 +50,16 @@ class OAuth2ApiCallFlow {
   // Methods to help create the API request.
   virtual GURL CreateApiCallUrl() = 0;
   virtual net::HttpRequestHeaders CreateApiCallHeaders();
+  // If the returned string is not empty, it will be added to the request
+  // headers as the "Authorization" header value.
+  virtual std::string CreateAuthorizationHeaderValue(
+      const std::string& access_token);
   virtual std::string CreateApiCallBody() = 0;
   virtual std::string CreateApiCallBodyContentType();
 
   // Returns the request type (e.g. GET, POST) for the |body| that will be sent
   // with the request.
-  virtual std::string GetRequestTypeForBody(const std::string& body);
+  virtual std::string GetRequestTypeForBody(std::string_view body);
 
   // Called when the API call ends without network error to check whether the
   // request succeeded, to decide which of the following 2 process functions to
@@ -59,20 +67,23 @@ class OAuth2ApiCallFlow {
   // code is not 200 or 204.
   virtual bool IsExpectedSuccessCode(int code) const;
 
+  // Returns the credentials mode for the API call.
+  virtual network::mojom::CredentialsMode GetCredentialsMode() const;
+
   // Sub-classes can expose an appropriate observer interface by implementing
   // these template methods.
   // Called when there is no network error and IsExpectedSuccessCode() returns
   // true. |body| may be null.
   virtual void ProcessApiCallSuccess(
       const network::mojom::URLResponseHead* head,
-      std::unique_ptr<std::string> body) = 0;
+      std::optional<std::string> body) = 0;
 
   // Called when there is a network error or IsExpectedSuccessCode() returns
   // false. |head| or |body| might be null.
   virtual void ProcessApiCallFailure(
       int net_error,
       const network::mojom::URLResponseHead* head,
-      std::unique_ptr<std::string> body) = 0;
+      std::optional<std::string> body) = 0;
 
   virtual net::PartialNetworkTrafficAnnotationTag
   GetNetworkTrafficAnnotationTag() = 0;
@@ -86,7 +97,7 @@ class OAuth2ApiCallFlow {
   };
 
   // Called when loading has finished.
-  void OnURLLoadComplete(std::unique_ptr<std::string> body);
+  void OnURLLoadComplete(std::optional<std::string> body);
 
   // Creates an instance of SimpleURLLoader that does not send or save cookies.
   // Template method CreateApiCallUrl is used to get the URL.
@@ -97,7 +108,7 @@ class OAuth2ApiCallFlow {
 
   // Helper methods to implement the state machine for the flow.
   void BeginApiCall();
-  void EndApiCall(std::unique_ptr<std::string> body);
+  void EndApiCall(std::optional<std::string> body);
 
   State state_;
   std::unique_ptr<network::SimpleURLLoader> url_loader_;

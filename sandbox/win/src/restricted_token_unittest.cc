@@ -8,13 +8,16 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "base/ranges/algorithm.h"
 #include "base/win/access_control_list.h"
 #include "base/win/access_token.h"
 #include "base/win/scoped_handle.h"
+#include "base/win/scoped_process_information.h"
 #include "base/win/security_descriptor.h"
 #include "base/win/security_util.h"
 #include "base/win/sid.h"
@@ -22,13 +25,14 @@
 #include "sandbox/win/src/restricted_token_utils.h"
 #include "sandbox/win/tests/common/test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace sandbox {
 
 namespace {
 
-void TestDefaultDacl(bool restricted_required, bool additional_sid_required) {
+void TestDefaultDacl(bool restricted_required,
+                     bool additional_sid_required,
+                     std::wstring_view security_attr = {}) {
   RestrictedToken token;
 
   if (!restricted_required)
@@ -43,6 +47,9 @@ void TestDefaultDacl(bool restricted_required, bool additional_sid_required) {
   }
 
   token.AddRestrictingSid(base::win::WellKnownSid::kWorld);
+  if (!security_attr.empty()) {
+    token.SetIsolationSecurityAttribute(security_attr);
+  }
   auto restricted_token = *token.GetRestrictedToken();
   auto dacl = *restricted_token.DefaultDacl();
 
@@ -56,7 +63,16 @@ void TestDefaultDacl(bool restricted_required, bool additional_sid_required) {
   auto logon_sid = restricted_token.LogonId();
   if (logon_sid) {
     EXPECT_EQ(restricted_required,
-              IsSidInDacl(dacl, true, absl::nullopt, *logon_sid));
+              IsSidInDacl(dacl, true, std::nullopt, *logon_sid));
+  }
+  if (!security_attr.empty()) {
+    EXPECT_TRUE(IsSidInDacl(
+        dacl, /*allowed=*/true, READ_CONTROL,
+        base::win::Sid(base::win::WellKnownSid::kCreatorOwnerRights)));
+    EXPECT_TRUE(IsSidInDacl(dacl, /*allowed=*/true, GENERIC_EXECUTE,
+                            restricted_token.User(), /*conditional=*/false));
+    EXPECT_TRUE(IsSidInDacl(dacl, /*allowed=*/true, GENERIC_ALL,
+                            restricted_token.User(), /*conditional=*/true));
   }
 }
 
@@ -89,7 +105,7 @@ void CheckRestrictingSid(const base::win::AccessToken& token,
 }
 
 DWORD GetMandatoryPolicy(const base::win::AccessToken& token) {
-  absl::optional<base::win::SecurityDescriptor> sd =
+  std::optional<base::win::SecurityDescriptor> sd =
       base::win::SecurityDescriptor::FromHandle(
           token.get(), base::win::SecurityObjectType::kKernel,
           LABEL_SECURITY_INFORMATION);
@@ -112,10 +128,11 @@ base::win::AccessToken GetPrimaryToken(ACCESS_MASK desired_access) {
 }
 
 void CheckUniqueSid(TokenLevel level, bool check_present) {
-  absl::optional<base::win::Sid> random_sid =
+  std::optional<base::win::Sid> random_sid =
       base::win::Sid::GenerateRandomSid();
-  auto token = *CreateRestrictedToken(level, INTEGRITY_LEVEL_LAST,
-                                      TokenType::kPrimary, false, random_sid);
+  auto token =
+      *CreateRestrictedToken(level, INTEGRITY_LEVEL_LAST, TokenType::kPrimary,
+                             false, random_sid, std::nullopt);
   CheckRestrictingSid(token, *random_sid, -1, check_present);
   auto dacl = *token.DefaultDacl();
   EXPECT_TRUE(IsSidInDacl(dacl, true, GENERIC_ALL, *random_sid));
@@ -125,11 +142,11 @@ void CheckUniqueSid(TokenLevel level, bool check_present) {
 }
 
 void CheckIntegrityLevel(IntegrityLevel integrity_level) {
-  absl::optional<base::win::AccessToken> token =
+  std::optional<base::win::AccessToken> token =
       CreateRestrictedToken(USER_LOCKDOWN, integrity_level, TokenType::kPrimary,
-                            false, absl::nullopt);
+                            false, std::nullopt, std::nullopt);
   ASSERT_TRUE(token);
-  absl::optional<DWORD> rid = GetIntegrityLevelRid(integrity_level);
+  std::optional<DWORD> rid = GetIntegrityLevelRid(integrity_level);
   if (rid) {
     EXPECT_EQ(token->IntegrityLevel(), *rid);
   } else {
@@ -138,8 +155,9 @@ void CheckIntegrityLevel(IntegrityLevel integrity_level) {
 }
 
 void CheckPrivileges(TokenLevel level, bool delete_all, bool remove_traversal) {
-  absl::optional<base::win::AccessToken> token = CreateRestrictedToken(
-      level, INTEGRITY_LEVEL_LAST, TokenType::kPrimary, false, absl::nullopt);
+  std::optional<base::win::AccessToken> token =
+      CreateRestrictedToken(level, INTEGRITY_LEVEL_LAST, TokenType::kPrimary,
+                            false, std::nullopt, std::nullopt);
   ASSERT_TRUE(token);
   std::vector<base::win::AccessToken::Privilege> privs = token->Privileges();
   if (remove_traversal) {
@@ -173,15 +191,16 @@ void CheckRestricted(TokenLevel level,
                      const std::vector<base::win::WellKnownSid>& known_sids,
                      bool user,
                      bool logon) {
-  absl::optional<base::win::AccessToken> token = CreateRestrictedToken(
-      level, INTEGRITY_LEVEL_LAST, TokenType::kPrimary, false, absl::nullopt);
+  std::optional<base::win::AccessToken> token =
+      CreateRestrictedToken(level, INTEGRITY_LEVEL_LAST, TokenType::kPrimary,
+                            false, std::nullopt, std::nullopt);
   std::vector<base::win::Sid> sids =
       base::win::Sid::FromKnownSidVector(known_sids);
   if (user) {
     sids.push_back(token->User());
   }
   if (logon) {
-    absl::optional<base::win::Sid> logon_sid = token->LogonId();
+    std::optional<base::win::Sid> logon_sid = token->LogonId();
     if (logon_sid) {
       sids.push_back(logon_sid->Clone());
     }
@@ -194,8 +213,9 @@ void CompareDenyOnly(
     const std::vector<base::win::WellKnownSid>& known_exceptions,
     bool allow_all,
     bool user) {
-  absl::optional<base::win::AccessToken> token = CreateRestrictedToken(
-      level, INTEGRITY_LEVEL_LAST, TokenType::kPrimary, false, absl::nullopt);
+  std::optional<base::win::AccessToken> token =
+      CreateRestrictedToken(level, INTEGRITY_LEVEL_LAST, TokenType::kPrimary,
+                            false, std::nullopt, std::nullopt);
   ASSERT_TRUE(token);
   std::vector<base::win::Sid> exceptions =
       base::win::Sid::FromKnownSidVector(known_exceptions);
@@ -210,9 +230,50 @@ void CompareDenyOnly(
         groups[i].IsDenyOnly() || compare_groups[i].IsDenyOnly() || allow_all) {
       continue;
     }
-    EXPECT_NE(base::ranges::find(exceptions, group_sid), exceptions.end());
+    EXPECT_NE(std::ranges::find(exceptions, group_sid), exceptions.end());
   }
   EXPECT_EQ(user, token->UserGroup().IsDenyOnly());
+}
+
+constexpr wchar_t kProcUniqueAttribute[] = L"TSA://ProcUnique";
+
+class ScopedImpersonation {
+ public:
+  ScopedImpersonation(const base::win::AccessToken& token) {
+    CHECK(::ImpersonateLoggedOnUser(token.get()));
+  }
+  ~ScopedImpersonation() { ::RevertToSelf(); }
+};
+
+bool CanOpenProcess(DWORD pid, DWORD desired_access) {
+  base::win::ScopedHandle handle(::OpenProcess(desired_access, FALSE, pid));
+  return handle.is_valid();
+}
+
+bool CanOpenThread(DWORD tid, DWORD desired_access) {
+  base::win::ScopedHandle handle(::OpenThread(desired_access, FALSE, tid));
+  return handle.is_valid();
+}
+
+void CheckProcessAccess(const base::win::AccessToken& token,
+                        const base::win::ScopedProcessInformation& proc_info,
+                        bool access_granted) {
+  auto imp_token = token.DuplicateImpersonation(
+      base::win::SecurityImpersonationLevel::kImpersonation,
+      TOKEN_IMPERSONATE | TOKEN_ADJUST_PRIVILEGES);
+  ASSERT_TRUE(imp_token);
+  imp_token->SetPrivilege(SE_DEBUG_NAME, false);
+  ScopedImpersonation imp(*imp_token);
+  EXPECT_TRUE(CanOpenProcess(proc_info.process_id(), READ_CONTROL));
+  // Being the owner normally grants WRITE_DAC access, if the caller doesn't
+  // have the security attribute it should not be granted automatically.
+  EXPECT_EQ(CanOpenProcess(proc_info.process_id(), WRITE_DAC), access_granted);
+  EXPECT_EQ(CanOpenProcess(proc_info.process_id(), PROCESS_ALL_ACCESS),
+            access_granted);
+  EXPECT_TRUE(CanOpenThread(proc_info.thread_id(), READ_CONTROL));
+  EXPECT_EQ(CanOpenThread(proc_info.thread_id(), WRITE_DAC), access_granted);
+  EXPECT_EQ(CanOpenThread(proc_info.thread_id(), THREAD_ALL_ACCESS),
+            access_granted);
 }
 
 }  // namespace
@@ -220,12 +281,12 @@ void CompareDenyOnly(
 // Tests default initialization of the class.
 TEST(RestrictedTokenTest, DefaultInit) {
   RestrictedToken token_default;
-  absl::optional<base::win::AccessToken> restricted_token =
+  std::optional<base::win::AccessToken> restricted_token =
       token_default.GetRestrictedToken();
   ASSERT_TRUE(restricted_token);
 
   // Get the current process token.
-  absl::optional<base::win::AccessToken> access_token =
+  std::optional<base::win::AccessToken> access_token =
       base::win::AccessToken::FromCurrentProcess();
   ASSERT_TRUE(access_token);
   // Check if both token have the same owner and user.
@@ -242,7 +303,7 @@ TEST(RestrictedTokenTest, ResultToken) {
   RestrictedToken token;
   token.AddRestrictingSid(base::win::WellKnownSid::kWorld);
 
-  absl::optional<base::win::AccessToken> restricted_token =
+  std::optional<base::win::AccessToken> restricted_token =
       token.GetRestrictedToken();
   ASSERT_TRUE(restricted_token);
   EXPECT_TRUE(restricted_token->IsRestricted());
@@ -276,7 +337,7 @@ TEST(RestrictedTokenTest, DenySid) {
   RestrictedToken token;
 
   token.AddSidForDenyOnly(base::win::WellKnownSid::kWorld);
-  absl::optional<base::win::AccessToken> restricted_token =
+  std::optional<base::win::AccessToken> restricted_token =
       token.GetRestrictedToken();
   ASSERT_TRUE(restricted_token);
   base::win::Sid sid(base::win::WellKnownSid::kWorld);
@@ -435,7 +496,7 @@ TEST(RestrictedTokenTest, AddAllSidToRestrictingSids) {
 
 TEST(RestrictedTokenTest, LockdownDefaultDaclNoLogonSid) {
   ASSERT_TRUE(::ImpersonateAnonymousToken(::GetCurrentThread()));
-  absl::optional<base::win::AccessToken> anonymous_token =
+  std::optional<base::win::AccessToken> anonymous_token =
       base::win::AccessToken::FromCurrentThread(/*open_as_self=*/true,
                                                 TOKEN_ALL_ACCESS);
   ::RevertToSelf();
@@ -447,24 +508,6 @@ TEST(RestrictedTokenTest, LockdownDefaultDaclNoLogonSid) {
   token.SetLockdownDefaultDacl();
 
   ASSERT_TRUE(token.GetRestrictedTokenForTesting(*anonymous_token));
-}
-
-// Checks the functionality of CanLowIntegrityAccessDesktop
-TEST(RestrictedTokenTest, MediumIlDesktop) {
-  ASSERT_TRUE(CanLowIntegrityAccessDesktop());
-
-  // Create a desktop using the default security descriptor (the last parameter)
-  // which doesn't allow low IL to access it in practice.
-  HDESK hdesk = ::CreateDesktopW(L"medium_il_desktop", nullptr, nullptr, 0,
-                                 GENERIC_ALL, nullptr);
-  ASSERT_TRUE(hdesk);
-
-  HDESK old_hdesk = ::GetThreadDesktop(::GetCurrentThreadId());
-  ASSERT_TRUE(hdesk);
-  ASSERT_TRUE(::SetThreadDesktop(hdesk));
-  ASSERT_FALSE(CanLowIntegrityAccessDesktop());
-  ASSERT_TRUE(::SetThreadDesktop(old_hdesk));
-  ASSERT_TRUE(::CloseDesktop(hdesk));
 }
 
 TEST(RestrictedTokenTest, HardenProcessIntegrityLevelPolicy) {
@@ -479,15 +522,15 @@ TEST(RestrictedTokenTest, HardenProcessIntegrityLevelPolicy) {
 }
 
 TEST(RestrictedTokenTest, TokenType) {
-  absl::optional<base::win::AccessToken> token =
-      CreateRestrictedToken(USER_LOCKDOWN, INTEGRITY_LEVEL_LAST,
-                            TokenType::kPrimary, false, absl::nullopt);
+  std::optional<base::win::AccessToken> token = CreateRestrictedToken(
+      USER_LOCKDOWN, INTEGRITY_LEVEL_LAST, TokenType::kPrimary, false,
+      std::nullopt, std::nullopt);
   ASSERT_TRUE(token);
   EXPECT_FALSE(token->IsImpersonation());
   EXPECT_EQ(DWORD{TOKEN_ALL_ACCESS}, base::win::GetGrantedAccess(token->get()));
-  token =
-      CreateRestrictedToken(USER_LOCKDOWN, INTEGRITY_LEVEL_LAST,
-                            TokenType::kImpersonation, false, absl::nullopt);
+  token = CreateRestrictedToken(USER_LOCKDOWN, INTEGRITY_LEVEL_LAST,
+                                TokenType::kImpersonation, false, std::nullopt,
+                                std::nullopt);
   ASSERT_TRUE(token);
   EXPECT_TRUE(token->IsImpersonation());
   EXPECT_EQ(token->ImpersonationLevel(),
@@ -544,9 +587,9 @@ TEST(RestrictedTokenTest, Restricted) {
   CheckRestricted(USER_LOCKDOWN, {base::win::WellKnownSid::kNull}, false,
                   false);
 
-  absl::optional<base::win::AccessToken> token =
-      CreateRestrictedToken(USER_RESTRICTED_SAME_ACCESS, INTEGRITY_LEVEL_LAST,
-                            TokenType::kPrimary, false, absl::nullopt);
+  std::optional<base::win::AccessToken> token = CreateRestrictedToken(
+      USER_RESTRICTED_SAME_ACCESS, INTEGRITY_LEVEL_LAST, TokenType::kPrimary,
+      false, std::nullopt, std::nullopt);
   ASSERT_TRUE(token);
   std::vector<base::win::Sid> sids;
   sids.push_back(token->User());
@@ -579,6 +622,62 @@ TEST(RestrictedTokenTest, DenyOnly) {
        base::win::WellKnownSid::kInteractive},
       false, false);
   CompareDenyOnly(USER_LOCKDOWN, {}, false, true);
+}
+
+TEST(RestrictedTokenTest, SetIsolationSecurityAttribute) {
+  RestrictedToken token;
+  ASSERT_TRUE(token.GetRestrictedToken());
+  token.SetIsolationSecurityAttribute(L"Invalid");
+  EXPECT_FALSE(token.GetRestrictedToken());
+  TestDefaultDacl(/*restricted_required=*/false,
+                  /*additional_sid_required=*/false, kProcUniqueAttribute);
+  TestDefaultDacl(/*restricted_required=*/true,
+                  /*additional_sid_required=*/false, kProcUniqueAttribute);
+  TestDefaultDacl(/*restricted_required=*/false,
+                  /*additional_sid_required=*/true, kProcUniqueAttribute);
+  TestDefaultDacl(/*restricted_required=*/true,
+                  /*additional_sid_required=*/true, kProcUniqueAttribute);
+}
+
+TEST(RestrictedTokenTest, SetIsolationSecurityAttributeAccessCheck) {
+  RestrictedToken token;
+  token.SetIsolationSecurityAttribute(kProcUniqueAttribute);
+  token.SetLockdownDefaultDacl();
+  token.AddSidForDenyOnly(base::win::WellKnownSid::kBuiltinAdministrators);
+  auto restricted_token = token.GetRestrictedToken();
+  ASSERT_TRUE(restricted_token);
+  STARTUPINFO start_info = {};
+  PROCESS_INFORMATION proc_info = {};
+  WCHAR cmdline[MAX_PATH] = {};
+  ASSERT_GE(::GetModuleFileName(nullptr, cmdline, _countof(cmdline)), 0U);
+  ASSERT_TRUE(::CreateProcessAsUser(restricted_token->get(), nullptr, cmdline,
+                                    nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+                                    nullptr, nullptr, &start_info, &proc_info));
+  base::win::ScopedProcessInformation scoped_info(proc_info);
+  EXPECT_TRUE(::TerminateProcess(scoped_info.process_handle(), 0));
+  CheckProcessAccess(*restricted_token, scoped_info,
+                     /*access_granted=*/true);
+  // Token of the new process should have a different security attribute.
+  auto new_token = base::win::AccessToken::FromProcess(
+      scoped_info.process_handle(), /*impersonation=*/false, TOKEN_DUPLICATE);
+  ASSERT_TRUE(new_token);
+  CheckProcessAccess(*new_token, scoped_info,
+                     /*access_granted=*/false);
+}
+
+TEST(RestrictedTokenTest, IsolationSecurityAttributeName) {
+  std::optional<base::win::AccessToken> token = CreateRestrictedToken(
+      USER_LOCKDOWN, INTEGRITY_LEVEL_LAST, TokenType::kPrimary, false,
+      std::nullopt, kProcUniqueAttribute);
+  ASSERT_TRUE(token);
+  auto dacl = token->DefaultDacl();
+  ASSERT_TRUE(dacl);
+
+  EXPECT_TRUE(IsSidInDacl(
+      *dacl, /*allowed=*/true, READ_CONTROL,
+      base::win::Sid(base::win::WellKnownSid::kCreatorOwnerRights)));
+  EXPECT_TRUE(IsSidInDacl(*dacl, /*allowed=*/true, GENERIC_ALL, token->User(),
+                          /*conditional=*/true));
 }
 
 }  // namespace sandbox

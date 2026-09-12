@@ -9,6 +9,7 @@
 
 #include "base/android/jni_android.h"
 #include "base/android/scoped_java_ref.h"
+#include "base/functional/callback.h"
 #include "components/thin_webview/compositor_view.h"
 #include "content/public/browser/android/compositor_client.h"
 
@@ -33,7 +34,7 @@ class CompositorViewImpl : public CompositorView,
                            public content::CompositorClient {
  public:
   CompositorViewImpl(JNIEnv* env,
-                     jobject obj,
+                     const base::android::JavaRef<jobject>& obj,
                      ui::WindowAndroid* window_android,
                      int64_t java_background_color);
 
@@ -42,21 +43,18 @@ class CompositorViewImpl : public CompositorView,
 
   ~CompositorViewImpl() override;
 
-  void Destroy(JNIEnv* env, const base::android::JavaParamRef<jobject>& object);
+  void Destroy(JNIEnv* env);
 
-  void SetNeedsComposite(JNIEnv* env,
-                         const base::android::JavaParamRef<jobject>& object);
-  void SurfaceCreated(JNIEnv* env,
-                      const base::android::JavaParamRef<jobject>& object);
-  void SurfaceDestroyed(JNIEnv* env,
-                        const base::android::JavaParamRef<jobject>& object);
+  void SetNeedsComposite(JNIEnv* env);
+  void RunOnNextFrame(JNIEnv* env, base::OnceClosure callback);
+  void SurfaceCreated(JNIEnv* env);
+  void SurfaceDestroyed(JNIEnv* env);
   void SurfaceChanged(JNIEnv* env,
-                      const base::android::JavaParamRef<jobject>& object,
-                      jint format,
-                      jint width,
-                      jint height,
+                      int32_t format,
+                      int32_t width,
+                      int32_t height,
                       bool can_be_used_with_surface_control,
-                      const base::android::JavaParamRef<jobject>& surface);
+                      const base::android::JavaRef<jobject>& surface);
 
   // CompositorView implementation.
   void SetRootLayer(scoped_refptr<cc::slim::Layer> layer) override;

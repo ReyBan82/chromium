@@ -11,12 +11,21 @@
 #include <gtk/gtk.h>
 #include <gtk/gtkunixprint.h>
 
+#include <optional>
+
+#include "base/component_export.h"
 #include "base/files/file_path.h"
 #include "base/version.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/glib/scoped_gobject.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gtk/gtk_types.h"
+#include "ui/linux/linux_ui_delegate.h"
+
+#if GTK_CHECK_VERSION(4, 1, 1)
+#define UI_GTK_CONST const
+#else
+#define UI_GTK_CONST
+#endif
 
 extern "C" {
 #include "ui/gtk/gdk.sigs"
@@ -35,19 +44,20 @@ using SkColor = uint32_t;
 namespace gtk {
 
 // Loads libgtk and related libraries and returns true on success.
-bool LoadGtk();
+COMPONENT_EXPORT(GTK) bool LoadGtk(ui::LinuxUiBackend backend);
 
 const base::Version& GtkVersion();
 
 // Returns true iff the runtime version of Gtk used meets
 // |major|.|minor|.|micro|. LoadGtk() must have been called
 // prior to calling this function.
+COMPONENT_EXPORT(GTK)
 bool GtkCheckVersion(uint32_t major, uint32_t minor = 0, uint32_t micro = 0);
 
 // The below functions replace GTK functions whose interface has
 // changed across versions, but whose (symbol) names have not.
 
-[[nodiscard]] bool GtkInitCheck(int* argc, char** argv);
+[[nodiscard]] COMPONENT_EXPORT(GTK) bool GtkInitCheck(int* argc, char** argv);
 
 gfx::Insets GtkStyleContextGetPadding(GtkStyleContext* context);
 
@@ -61,8 +71,8 @@ SkColor GtkStyleContextGetColor(GtkStyleContext* context);
 SkColor GtkStyleContextGetBackgroundColor(GtkStyleContext* context);
 
 // Only available in Gtk3.
-absl::optional<SkColor> GtkStyleContextLookupColor(GtkStyleContext* context,
-                                                   const gchar* color_name);
+std::optional<SkColor> GtkStyleContextLookupColor(GtkStyleContext* context,
+                                                  const gchar* color_name);
 
 bool GtkImContextFilterKeypress(GtkIMContext* context, GdkEventKey* event);
 

@@ -11,6 +11,8 @@
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/common/content_features.h"
 #include "content/public/common/content_switches.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+#include "third_party/blink/public/common/input/web_gesture_device.h"
 #include "third_party/blink/public/common/input/web_gesture_event.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
 #include "ui/android/edge_effect.h"
@@ -18,9 +20,12 @@
 #include "ui/android/window_android.h"
 #include "ui/android/window_android_compositor.h"
 #include "ui/base/l10n/l10n_util_android.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/ui_base_switches.h"
 #include "ui/base/ui_base_switches_util.h"
+#include "ui/events/android/motion_event_android.h"
 #include "ui/events/blink/did_overscroll_params.h"
+#include "ui/gfx/geometry/vector2d_f.h"
 
 using ui::DidOverscrollParams;
 using ui::EdgeEffect;
@@ -40,7 +45,7 @@ const float kMinGlowAlphaToDisableRefresh = 0.085f;
 std::unique_ptr<EdgeEffect> CreateGlowEdgeEffect(
     ui::ResourceManager* resource_manager,
     float dpi_scale) {
-  DCHECK(resource_manager);
+  CHECK(resource_manager, base::NotFatalUntil::M159);
   return std::make_unique<EdgeEffect>(resource_manager);
 }
 
@@ -50,11 +55,16 @@ std::unique_ptr<OverscrollGlow> CreateGlowEffect(OverscrollGlowClient* client) {
     return nullptr;
   }
 
+  if (base::FeatureList::IsEnabled(features::kSuppressOverscrollGlow)) {
+    return nullptr;
+  }
+
   // The elastic overscroll feature indicates when the user is scrolling beyond
   // the range of the scrollable area. Showing a glow in addition would be
   // redundant.
-  if (switches::IsElasticOverscrollEnabled())
+  if (switches::IsElasticOverscrollEnabledOnRoot()) {
     return nullptr;
+  }
 
   return std::make_unique<OverscrollGlow>(client);
 }
@@ -101,50 +111,48 @@ OverscrollControllerAndroid::OverscrollControllerAndroid(
 OverscrollControllerAndroid::OverscrollControllerAndroid(
     ui::OverscrollRefreshHandler* overscroll_refresh_handler,
     ui::WindowAndroidCompositor* compositor,
-    float dpi_scale)
+    float dpi_scale,
+    RenderWidgetHost* host)
     : compositor_(compositor),
       dpi_scale_(dpi_scale),
       enabled_(true),
       glow_effect_(CreateGlowEffect(this)),
       refresh_effect_(
           CreateRefreshEffect(overscroll_refresh_handler, dpi_scale_)) {
-  DCHECK(compositor_);
+  CHECK(compositor_, base::NotFatalUntil::M159);
+  if (host) {
+    obs_.Observe(host);
+  }
 }
 
 OverscrollControllerAndroid::~OverscrollControllerAndroid() {
 }
 
-bool OverscrollControllerAndroid::WillHandleGestureEvent(
+void OverscrollControllerAndroid::OnGestureEvent(
     const blink::WebGestureEvent& event) {
-  if (!enabled_)
-    return false;
-
-  if (!refresh_effect_)
-    return false;
-
-  // Suppress refresh detection if the glow effect is still prominent.
-  if (glow_effect_ && glow_effect_->IsActive()) {
-    if (glow_effect_->GetVisibleAlpha() > kMinGlowAlphaToDisableRefresh)
-      return false;
+  if (!ShouldHandleInputEvents()) {
+    return;
   }
 
-  bool handled = false;
   switch (event.GetType()) {
     case blink::WebInputEvent::Type::kGestureScrollBegin:
       refresh_effect_->OnScrollBegin(
           gfx::ScalePoint(event.PositionInWidget(), dpi_scale_));
       break;
-
     case blink::WebInputEvent::Type::kGestureScrollUpdate: {
-      gfx::Vector2dF scroll_delta(event.data.scroll_update.delta_x,
-                                  event.data.scroll_update.delta_y);
-      scroll_delta.Scale(dpi_scale_);
-      handled = refresh_effect_->WillHandleScrollUpdate(scroll_delta);
+      if (event.SourceDevice() == blink::WebGestureDevice::kTouchpad) {
+        gfx::Vector2dF scroll_delta(event.data.scroll_update.delta_x,
+                                    event.data.scroll_update.delta_y);
+        scroll_delta.Scale(dpi_scale_);
+        refresh_effect_->WillHandleScrollUpdate(scroll_delta);
+      }
     } break;
-
-    case blink::WebInputEvent::Type::kGestureScrollEnd:
-      refresh_effect_->OnScrollEnd(gfx::Vector2dF());
+    case blink::WebInputEvent::Type::kGestureScrollEnd: {
+      if (event.SourceDevice() == blink::WebGestureDevice::kTouchpad) {
+        refresh_effect_->OnScrollEnd(gfx::Vector2dF());
+      }
       break;
+    }
 
     case blink::WebInputEvent::Type::kGestureFlingStart: {
       if (refresh_effect_->IsActive()) {
@@ -166,15 +174,9 @@ bool OverscrollControllerAndroid::WillHandleGestureEvent(
       }
     } break;
 
-    case blink::WebInputEvent::Type::kGesturePinchBegin:
-      refresh_effect_->ReleaseWithoutActivation();
-      break;
-
     default:
       break;
   }
-
-  return handled;
 }
 
 void OverscrollControllerAndroid::OnGestureEventAck(
@@ -190,7 +192,7 @@ void OverscrollControllerAndroid::OnGestureEventAck(
     OnOverscrolled(DidOverscrollParams());
   }
 
-  if (event.GetType() == blink::WebInputEvent::Type::kGestureScrollUpdate &&
+  if (event.GetType() == blink::WebInputEvent::Type::kGestureScrollBegin &&
       refresh_effect_) {
     // The effect should only be allowed if the scroll events go unconsumed.
     if (refresh_effect_->IsAwaitingScrollUpdateAck() &&
@@ -206,10 +208,13 @@ void OverscrollControllerAndroid::OnOverscrolled(
     return;
 
   if (refresh_effect_) {
-    refresh_effect_->OnOverscrolled(params.overscroll_behavior);
+    refresh_effect_->OnOverscrolled(params.overscroll_behavior,
+                                    params.accumulated_overscroll,
+                                    params.source_device);
+    bool refresh_effect_active = refresh_effect_->IsActive();
+    is_handling_sequence_ |= refresh_effect_active;
 
-    if (refresh_effect_->IsActive() ||
-        refresh_effect_->IsAwaitingScrollUpdateAck()) {
+    if (refresh_effect_active || refresh_effect_->IsAwaitingScrollUpdateAck()) {
       // An active (or potentially active) refresh effect should always pre-empt
       // the passive glow effect.
       return;
@@ -224,13 +229,13 @@ void OverscrollControllerAndroid::OnOverscrolled(
   gfx::Vector2dF overscroll_location =
       params.causal_event_viewport_point.OffsetFromOrigin();
 
-  if (params.overscroll_behavior.x == cc::OverscrollBehavior::Type::kNone) {
+  if (!params.overscroll_behavior.HasXLocalBorderEffects()) {
     accumulated_overscroll.set_x(0);
     latest_overscroll_delta.set_x(0);
     current_fling_velocity.set_x(0);
   }
 
-  if (params.overscroll_behavior.y == cc::OverscrollBehavior::Type::kNone) {
+  if (!params.overscroll_behavior.HasYLocalBorderEffects()) {
     accumulated_overscroll.set_y(0);
     latest_overscroll_delta.set_y(0);
     current_fling_velocity.set_y(0);
@@ -246,7 +251,7 @@ void OverscrollControllerAndroid::OnOverscrolled(
 
 bool OverscrollControllerAndroid::Animate(base::TimeTicks current_time,
                                           cc::slim::Layer* parent_layer) {
-  DCHECK(parent_layer);
+  CHECK(parent_layer, base::NotFatalUntil::M159);
   if (!enabled_ || !glow_effect_)
     return false;
 
@@ -254,6 +259,7 @@ bool OverscrollControllerAndroid::Animate(base::TimeTicks current_time,
 }
 
 void OverscrollControllerAndroid::OnFrameMetadataUpdated(
+    float view_width_px,
     float page_scale_factor,
     float device_scale_factor,
     const gfx::SizeF& scrollable_viewport_size,
@@ -273,7 +279,8 @@ void OverscrollControllerAndroid::OnFrameMetadataUpdated(
       gfx::ScalePoint(root_scroll_offset, scale_factor);
 
   if (refresh_effect_) {
-    refresh_effect_->OnFrameUpdated(viewport_size, content_scroll_offset,
+    refresh_effect_->OnFrameUpdated(view_width_px, viewport_size.height(),
+                                    content_scroll_offset, content_size,
                                     root_overflow_y_hidden);
   }
 
@@ -297,6 +304,112 @@ void OverscrollControllerAndroid::Disable() {
     if (glow_effect_)
       glow_effect_->Reset();
   }
+}
+
+void OverscrollControllerAndroid::SetTouchpadOverscrollHistoryNavigation(
+    bool enabled) {
+  if (refresh_effect_) {
+    refresh_effect_->SetTouchpadOverscrollHistoryNavigation(enabled);
+  }
+}
+
+void OverscrollControllerAndroid::SetIsGestureNavigationMode(
+    bool is_gesture_navigation_mode) {
+  if (refresh_effect_) {
+    refresh_effect_->SetIsGestureNavigationMode(is_gesture_navigation_mode);
+  }
+}
+
+bool OverscrollControllerAndroid::ShouldHandleInputEvents() {
+  if (!enabled_) {
+    return false;
+  }
+
+  if (!refresh_effect_) {
+    return false;
+  }
+
+  // Suppress refresh detection if the glow effect is still prominent.
+  if (glow_effect_ && glow_effect_->IsActive()) {
+    if (glow_effect_->GetVisibleAlpha() > kMinGlowAlphaToDisableRefresh) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool OverscrollControllerAndroid::IsHandlingInputSequence() {
+  return is_handling_sequence_;
+}
+
+bool OverscrollControllerAndroid::OnTouchEvent(
+    const ui::MotionEventAndroid& event) {
+  const auto action = event.GetAction();
+  // This will consume touch events until the next Action::DOWN. Ideally we
+  // should consume until the final Action::UP/Action::CANCEL. But, apparently,
+  // we can't reliably determine the final Action::CANCEL in a multi-touch
+  // scenario. See https://crbug.com/653212.
+  if (action == ui::MotionEventAndroid::Action::DOWN) {
+    is_handling_sequence_ = false;
+  }
+
+  const bool handles_current_event = IsHandlingInputSequence();
+
+  // |refresh_effect_| might have been consuming input events earlier, return if
+  // the OverscrollController is consuming the whole input sequence.
+  if (!ShouldHandleInputEvents()) {
+    return handles_current_event;
+  }
+
+  switch (action) {
+    case ui::MotionEventAndroid::Action::DOWN:
+      last_pos_ = gfx::Vector2dF(event.GetXPix(0), event.GetYPix(0));
+      break;
+
+    case ui::MotionEventAndroid::Action::MOVE: {
+      gfx::Vector2dF curr_pointer(event.GetXPix(0), event.GetYPix(0));
+      gfx::Vector2dF scroll_delta = curr_pointer - last_pos_;
+      refresh_effect_->WillHandleScrollUpdate(scroll_delta);
+      last_pos_ = curr_pointer;
+    } break;
+
+    case ui::MotionEventAndroid::Action::CANCEL:
+    case ui::MotionEventAndroid::Action::UP: {
+      refresh_effect_->OnScrollEnd(gfx::Vector2dF());
+    } break;
+
+    default:
+      break;
+  }
+
+  return handles_current_event;
+}
+
+void OverscrollControllerAndroid::OnInputEvent(
+    const RenderWidgetHost& widget,
+    const blink::WebInputEvent& input_event,
+    InputEventSource source) {
+  if (!blink::WebInputEvent::IsGestureEventType(input_event.GetType())) {
+    return;
+  }
+
+  blink::WebGestureEvent gesture_event =
+      static_cast<const blink::WebGestureEvent&>(input_event);
+  OnGestureEvent(gesture_event);
+}
+
+void OverscrollControllerAndroid::OnInputEventAck(
+    const RenderWidgetHost& widget,
+    blink::mojom::InputEventResultSource source,
+    blink::mojom::InputEventResultState state,
+    const blink::WebInputEvent& input_event) {
+  if (!blink::WebInputEvent::IsGestureEventType(input_event.GetType())) {
+    return;
+  }
+
+  blink::WebGestureEvent gesture_event =
+      static_cast<const blink::WebGestureEvent&>(input_event);
+  OnGestureEventAck(gesture_event, state);
 }
 
 std::unique_ptr<EdgeEffect> OverscrollControllerAndroid::CreateEdgeEffect() {

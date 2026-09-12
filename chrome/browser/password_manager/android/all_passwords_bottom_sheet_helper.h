@@ -5,11 +5,16 @@
 #ifndef CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_ALL_PASSWORDS_BOTTOM_SHEET_HELPER_H_
 #define CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_ALL_PASSWORDS_BOTTOM_SHEET_HELPER_H_
 
+#include <optional>
+#include <vector>
+
 #include "base/functional/callback_forward.h"
 #include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "components/autofill/core/common/mojom/autofill_types.mojom-shared.h"
-#include "components/password_manager/core/browser/password_store_consumer.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/password_manager/core/browser/password_store/password_store_backend_error.h"
+#include "components/password_manager/core/browser/password_store/password_store_consumer.h"
+#include "components/password_manager/core/browser/password_store/stored_credential.h"
 
 // This class helps to determine the visibility of the "All Passwords Sheet"
 // button by requesting whether there are any passwords stored at all.
@@ -20,7 +25,8 @@ class AllPasswordsBottomSheetHelper
     : public password_manager::PasswordStoreConsumer {
  public:
   explicit AllPasswordsBottomSheetHelper(
-      password_manager::PasswordStoreInterface* store);
+      password_manager::PasswordStoreInterface* profile_store,
+      password_manager::PasswordStoreInterface* account_store);
   AllPasswordsBottomSheetHelper(const AllPasswordsBottomSheetHelper&) = delete;
   AllPasswordsBottomSheetHelper& operator=(
       const AllPasswordsBottomSheetHelper&) = delete;
@@ -28,7 +34,7 @@ class AllPasswordsBottomSheetHelper
 
   // Returns the number of found credentials only if the helper already finished
   // querying the password store.
-  absl::optional<size_t> available_credentials() const {
+  std::optional<size_t> available_credentials() const {
     return available_credentials_;
   }
 
@@ -39,16 +45,18 @@ class AllPasswordsBottomSheetHelper
 
  private:
   // PasswordStoreConsumer:
-  void OnGetPasswordStoreResults(
-      std::vector<std::unique_ptr<password_manager::PasswordForm>> results)
-      override;
+  void OnGetPasswordStoreResultsOrErrorFrom(
+      password_manager::PasswordStoreInterface* store,
+      base::expected<std::vector<password_manager::StoredCredential>,
+                     password_manager::PasswordStoreBackendError>
+          results_or_error) override;
 
   // A callback used to update the suggestions if the password store provides
   // credentials and the focused field might still profit from them.
   base::OnceClosure update_callback_;
 
   // Stores whether the store returned credentials the sheet can show.
-  absl::optional<size_t> available_credentials_ = absl::nullopt;
+  std::optional<size_t> available_credentials_;
 
   // Records the last focused field type to infer whether an update should be
   // triggered if the store returns suggestions.

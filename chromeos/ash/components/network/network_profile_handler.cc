@@ -6,12 +6,12 @@
 
 #include <stddef.h>
 
-#include "base/containers/contains.h"
+#include <algorithm>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_util.h"
 #include "base/values.h"
 #include "chromeos/ash/components/dbus/shill/shill_manager_client.h"
@@ -24,7 +24,7 @@ namespace ash {
 
 namespace {
 
-bool ConvertListValueToStringVector(const base::Value::List& string_list,
+bool ConvertListValueToStringVector(const base::ListValue& string_list,
                                     std::vector<std::string>* result) {
   for (const base::Value& i : string_list) {
     const std::string* str = i.GetIfString();
@@ -72,7 +72,7 @@ bool NetworkProfileHandler::HasObserver(NetworkProfileObserver* observer) {
 }
 
 void NetworkProfileHandler::GetManagerPropertiesCallback(
-    absl::optional<base::Value::Dict> properties) {
+    std::optional<base::DictValue> properties) {
   if (!properties) {
     LOG(ERROR) << "Error when requesting manager properties.";
     return;
@@ -104,7 +104,7 @@ void NetworkProfileHandler::OnPropertyChanged(const std::string& name,
   std::vector<std::string> removed_profile_paths;
   for (ProfileList::const_iterator it = profiles_.begin();
        it != profiles_.end(); ++it) {
-    if (!base::Contains(new_profile_paths, it->path)) {
+    if (!std::ranges::contains(new_profile_paths, it->path)) {
       removed_profile_paths.push_back(it->path);
     }
   }
@@ -133,7 +133,7 @@ void NetworkProfileHandler::OnPropertyChanged(const std::string& name,
 
 void NetworkProfileHandler::GetProfilePropertiesCallback(
     const std::string& profile_path,
-    base::Value::Dict properties) {
+    base::DictValue properties) {
   if (pending_profile_creations_.erase(profile_path) == 0) {
     VLOG(1) << "Ignore received properties, profile was removed.";
     return;
@@ -158,7 +158,7 @@ void NetworkProfileHandler::AddProfile(const NetworkProfile& profile) {
 void NetworkProfileHandler::RemoveProfile(const std::string& profile_path) {
   VLOG(2) << "Removing profile for path " << profile_path << ".";
   ProfileList::iterator found =
-      base::ranges::find(profiles_, profile_path, &NetworkProfile::path);
+      std::ranges::find(profiles_, profile_path, &NetworkProfile::path);
   if (found == profiles_.end()) {
     return;
   }
@@ -172,7 +172,7 @@ void NetworkProfileHandler::RemoveProfile(const std::string& profile_path) {
 const NetworkProfile* NetworkProfileHandler::GetProfileForPath(
     const std::string& profile_path) const {
   ProfileList::const_iterator found =
-      base::ranges::find(profiles_, profile_path, &NetworkProfile::path);
+      std::ranges::find(profiles_, profile_path, &NetworkProfile::path);
 
   if (found == profiles_.end()) {
     return nullptr;
@@ -212,7 +212,7 @@ void NetworkProfileHandler::GetAlwaysOnVpnConfiguration(
 
 void NetworkProfileHandler::GetAlwaysOnVpnConfigurationCallback(
     base::OnceCallback<void(std::string, std::string)> callback,
-    base::Value::Dict properties) {
+    base::DictValue properties) {
   // A profile always contains the mode.
   std::string* mode = properties.FindString(shill::kAlwaysOnVpnModeProperty);
   DCHECK(mode);

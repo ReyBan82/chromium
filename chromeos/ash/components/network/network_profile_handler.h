@@ -5,6 +5,7 @@
 #ifndef CHROMEOS_ASH_COMPONENTS_NETWORK_NETWORK_PROFILE_HANDLER_H_
 #define CHROMEOS_ASH_COMPONENTS_NETWORK_NETWORK_PROFILE_HANDLER_H_
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -17,7 +18,6 @@
 #include "chromeos/ash/components/dbus/shill/shill_property_changed_observer.h"
 #include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_profile.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -37,15 +37,14 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkProfileHandler
   void RemoveObserver(NetworkProfileObserver* observer);
   bool HasObserver(NetworkProfileObserver* observer);
 
-  void GetManagerPropertiesCallback(
-      absl::optional<base::Value::Dict> properties);
+  void GetManagerPropertiesCallback(std::optional<base::DictValue> properties);
 
   // ShillPropertyChangedObserver overrides
   void OnPropertyChanged(const std::string& name,
                          const base::Value& value) override;
 
   void GetProfilePropertiesCallback(const std::string& profile_path,
-                                    base::Value::Dict properties);
+                                    base::DictValue properties);
 
   const NetworkProfile* GetProfileForPath(
       const std::string& profile_path) const;
@@ -95,7 +94,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkProfileHandler
   // settings and transmit them to the original caller through |callback|.
   void GetAlwaysOnVpnConfigurationCallback(
       base::OnceCallback<void(std::string, std::string)> callback,
-      base::Value::Dict properties);
+      base::DictValue properties);
 
   ProfileList profiles_;
 

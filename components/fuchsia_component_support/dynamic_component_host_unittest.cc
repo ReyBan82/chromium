@@ -13,12 +13,15 @@
 #include <memory>
 #include <utility>
 
+#include "base/files/file_path.h"
 #include "base/fuchsia/process_context.h"
 #include "base/fuchsia/scoped_service_binding.h"
 #include "base/fuchsia/test_component_context_for_process.h"
+#include "base/functional/callback_helpers.h"
 #include "base/test/bind.h"
 #include "base/test/gtest_util.h"
 #include "base/test/task_environment.h"
+#include "components/fuchsia_component_support/mock_realm.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -67,10 +70,9 @@ fidl::InterfaceHandle<fuchsia::io::Directory> GetSvcFromChildArgs(
     // capability.
     fidl::InterfacePtr<fuchsia::io::Directory> root_dir;
     base::ComponentContextForProcess()->outgoing()->root_dir()->Serve(
-        fuchsia::io::OpenFlags::RIGHT_READABLE |
-            fuchsia::io::OpenFlags::RIGHT_WRITABLE |
-            fuchsia::io::OpenFlags::DIRECTORY,
-        root_dir.NewRequest().TakeChannel());
+        fuchsia_io::wire::kPermReadable,
+        fidl::ServerEnd<fuchsia_io::Directory>(
+            root_dir.NewRequest().TakeChannel()));
 
     // Determine the capability path, relative to the outgoing directory of
     // the calling process, and request to open it.
@@ -81,10 +83,10 @@ fidl::InterfaceHandle<fuchsia::io::Directory> GetSvcFromChildArgs(
       path = path.Append(directory_offer.subdir());
     }
     fidl::InterfaceHandle<fuchsia::io::Node> services_handle;
-    root_dir->Open(fuchsia::io::OpenFlags::RIGHT_READABLE |
-                       fuchsia::io::OpenFlags::RIGHT_WRITABLE |
-                       fuchsia::io::OpenFlags::DIRECTORY,
-                   {}, path.value(), services_handle.NewRequest());
+    root_dir->Open(
+        path.value(),
+        fuchsia::io::PERM_READABLE | fuchsia::io::Flags::PROTOCOL_DIRECTORY, {},
+        services_handle.NewRequest().TakeChannel());
     return fidl::InterfaceHandle<fuchsia::io::Directory>(
         services_handle.TakeChannel());
   }
@@ -101,34 +103,6 @@ bool HasPeerClosedHandle(
 constexpr char kTestCollection[] = "test_collection";
 constexpr char kTestChildId[] = "test-child-id";
 constexpr char kTestComponentUrl[] = "dummy:url";
-
-class MockRealm : public fuchsia::component::testing::Realm_TestBase {
- public:
-  MockRealm(sys::OutgoingDirectory* outgoing) : binding_(outgoing, this) {}
-
-  MOCK_METHOD(void,
-              CreateChild,
-              (fuchsia::component::decl::CollectionRef collection,
-               fuchsia::component::decl::Child decl,
-               fuchsia::component::CreateChildArgs args,
-               fuchsia::component::Realm::CreateChildCallback callback));
-  MOCK_METHOD(void,
-              OpenExposedDir,
-              (fuchsia::component::decl::ChildRef child,
-               fidl::InterfaceRequest<fuchsia::io::Directory> exposed_dir,
-               fuchsia::component::Realm::OpenExposedDirCallback callback));
-  MOCK_METHOD(void,
-              DestroyChild,
-              (fuchsia::component::decl::ChildRef child,
-               fuchsia::component::Realm::DestroyChildCallback callback));
-
-  void NotImplemented_(const std::string& name) override {
-    ADD_FAILURE() << "NotImplemented_: " << name;
-  }
-
- protected:
-  base::ScopedServiceBinding<fuchsia::component::Realm> binding_;
-};
 
 class DynamicComponentHostTest : public testing::Test {
  protected:
@@ -156,9 +130,9 @@ class DynamicComponentHostTest : public testing::Test {
             [this](fuchsia::component::decl::ChildRef,
                    fidl::InterfaceRequest<fuchsia::io::Directory> exposed_dir,
                    fuchsia::component::Realm::OpenExposedDirCallback callback) {
-              exposed_.Serve(fuchsia::io::OpenFlags::RIGHT_READABLE |
-                                 fuchsia::io::OpenFlags::RIGHT_WRITABLE,
-                             exposed_dir.TakeChannel());
+              exposed_.Serve(fuchsia_io::wire::kPermReadable,
+                             fidl::ServerEnd<fuchsia_io::Directory>(
+                                 exposed_dir.TakeChannel()));
               callback({});
             });
   }
@@ -325,9 +299,9 @@ TEST_F(DynamicComponentHostTest, WithServiceDirectory) {
     // Create a directory handle for the service directory.
     fidl::InterfaceHandle<fuchsia::io::Directory> handle;
     vfs::PseudoDir service_directory;
-    service_directory.Serve(fuchsia::io::OpenFlags::RIGHT_READABLE |
-                                fuchsia::io::OpenFlags::RIGHT_WRITABLE,
-                            handle.NewRequest().TakeChannel());
+    service_directory.Serve(fuchsia_io::wire::kPermReadable,
+                            fidl::ServerEnd<fuchsia_io::Directory>(
+                                handle.NewRequest().TakeChannel()));
 
     DynamicComponentHost component(kTestCollection, kTestChildId,
                                    kTestComponentUrl, base::DoNothing(),

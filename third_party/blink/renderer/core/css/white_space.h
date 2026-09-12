@@ -5,92 +5,143 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CSS_WHITE_SPACE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_CSS_WHITE_SPACE_H_
 
+#include <bit>
 #include <cstdint>
+
+#include "third_party/blink/renderer/core/style/computed_style_base_constants.h"
 
 namespace blink {
 
-// Semantic behaviors of the `white-space` property. All values of the
-// `white-space` property can be expressed by combinations of these bits.
-enum class WhiteSpaceBehavior : uint8_t {
-  kPreserveSpacesAndTabs = 1,
+//
+// This file contains definitions of the `white-space` shorthand property and
+// its longhands.
+// https://w3c.github.io/csswg-drafts/css-text-4/#propdef-white-space
+//
+
+//
+// The `white-space-collapse` property.
+// https://w3c.github.io/csswg-drafts/css-text-4/#white-space-collapsing
+//
+enum class WhiteSpaceCollapse : uint8_t {
+  kCollapse = 0,
+  kPreserve = 1,
+  // `KPreserve` is a bit-flag, but bit 2 is shared by two different behaviors
+  // below to save memory. Use functions below instead of direct comparisons.
   kPreserveBreaks = 2,
-  kPreserveAllWhiteSpaces = kPreserveSpacesAndTabs | kPreserveBreaks,
-  kNoWrapLine = 4,
-  kBreakSpaces = 8,
-  // Ensure `kWhiteSpaceBehaviorBits` has enough bits.
+  kBreakSpaces = kPreserve | 2,
+  // Ensure `kWhiteSpaceCollapseBits` can hold all values.
 };
 
 // Ensure this is in sync with `css_properties.json5`.
-static constexpr int kWhiteSpaceBehaviorBits = 4;
+static constexpr int kWhiteSpaceCollapseBits = 2;
+static constexpr uint8_t kWhiteSpaceCollapseMask =
+    (1 << kWhiteSpaceCollapseBits) - 1;
 
-constexpr WhiteSpaceBehavior operator|(WhiteSpaceBehavior a,
-                                       WhiteSpaceBehavior b) {
-  return static_cast<WhiteSpaceBehavior>(static_cast<unsigned>(a) |
-                                         static_cast<unsigned>(b));
-}
-
-// The `white-space` property.
-// https://w3c.github.io/csswg-drafts/css-text-4/#propdef-white-space
-enum class EWhiteSpace : uint8_t {
-  kNormal = 0,
-  kNowrap = static_cast<uint8_t>(WhiteSpaceBehavior::kNoWrapLine),
-  kPre = static_cast<uint8_t>(WhiteSpaceBehavior::kPreserveAllWhiteSpaces |
-                              WhiteSpaceBehavior::kNoWrapLine),
-  kPreLine = static_cast<uint8_t>(WhiteSpaceBehavior::kPreserveBreaks),
-  kPreWrap = static_cast<uint8_t>(WhiteSpaceBehavior::kPreserveAllWhiteSpaces),
-  kBreakSpaces =
-      static_cast<uint8_t>(WhiteSpaceBehavior::kPreserveAllWhiteSpaces |
-                           WhiteSpaceBehavior::kBreakSpaces),
-};
-
-// Ensure this is in sync with `css_properties.json5`.
-static constexpr int kEWhiteSpaceBits = kWhiteSpaceBehaviorBits;
-
-//
-// Functions for semantic behaviors.
-//
-// Note that functions in `ComputedStyle` are preferred over these functions
-// because the `white-space` property may become a shorthand in future. When
-// that happens, these functions may be removed, or less performant than
-// functions in `ComputedStyle`.
-// https://w3c.github.io/csswg-drafts/css-text-4/#propdef-white-space
-//
-
-inline bool IsWhiteSpaceAny(EWhiteSpace value, WhiteSpaceBehavior flags) {
+inline bool IsWhiteSpaceCollapseAny(WhiteSpaceCollapse value,
+                                    WhiteSpaceCollapse flags) {
   return static_cast<uint8_t>(value) & static_cast<uint8_t>(flags);
 }
 
-// `text-space-collapse`: Collapsing/preserving white-spaces.
-// https://w3c.github.io/csswg-drafts/css-text-4/#propdef-text-space-collapse
-// Naming TBD: https://github.com/w3c/csswg-drafts/issues/8273
-inline bool ShouldPreserveBreaks(EWhiteSpace value) {
-  return IsWhiteSpaceAny(value, WhiteSpaceBehavior::kPreserveBreaks);
+// Whether to collapse or preserve all whitespaces: spaces (U+0020), tabs
+// (U+0009), and segment breaks.
+// https://w3c.github.io/csswg-drafts/css-text-4/#white-space
+inline bool ShouldPreserveWhiteSpaces(WhiteSpaceCollapse collapse) {
+  return IsWhiteSpaceCollapseAny(collapse, WhiteSpaceCollapse::kPreserve);
 }
-inline bool ShouldPreserveSpacesAndTabs(EWhiteSpace value) {
-  return IsWhiteSpaceAny(value, WhiteSpaceBehavior::kPreserveSpacesAndTabs);
+inline bool ShouldCollapseWhiteSpaces(WhiteSpaceCollapse collapse) {
+  return !ShouldPreserveWhiteSpaces(collapse);
 }
-inline bool ShouldCollapseBreaks(EWhiteSpace value) {
-  return !ShouldPreserveBreaks(value);
+// Whether to collapse or preserve segment breaks.
+// https://w3c.github.io/csswg-drafts/css-text-4/#segment-break
+inline bool ShouldPreserveBreaks(WhiteSpaceCollapse collapse) {
+  return collapse != WhiteSpaceCollapse::kCollapse;
 }
-inline bool ShouldCollapseSpacesAndTabs(EWhiteSpace value) {
-  return !ShouldPreserveSpacesAndTabs(value);
+inline bool ShouldCollapseBreaks(WhiteSpaceCollapse collapse) {
+  return !ShouldPreserveBreaks(collapse);
+}
+inline bool ShouldBreakSpaces(WhiteSpaceCollapse collapse) {
+  return collapse == WhiteSpaceCollapse::kBreakSpaces;
 }
 
-// `text-wrap` and `white-space`: Wrap/nowrap and trailing/braeking spaces.
-// https://w3c.github.io/csswg-drafts/css-text-4/#propdef-text-wrap
-// `break-spaces` TBD: https://github.com/w3c/csswg-drafts/issues/3794
-inline bool ShouldWrapLine(EWhiteSpace value) {
-  return !IsWhiteSpaceAny(value, WhiteSpaceBehavior::kNoWrapLine);
+//
+// The `text-wrap-mode` property.
+// https://drafts.csswg.org/css-text-4/#propdef-text-wrap-mode
+//
+inline constexpr unsigned kTextWrapModeBits =
+    std::bit_width(static_cast<unsigned>(TextWrapMode::kMaxEnumValue));
+
+// Returns `true` if lines should wrap.
+inline bool ShouldWrapLine(TextWrapMode mode) {
+  return mode != TextWrapMode::kNowrap;
 }
-inline bool ShouldWrapLineBreakingSpaces(EWhiteSpace value) {
-  // `ShouldWrapLine` should be `true` if `break-spaces`.
-  DCHECK(!IsWhiteSpaceAny(value, WhiteSpaceBehavior::kBreakSpaces) ||
-         ShouldWrapLine(value));
-  return IsWhiteSpaceAny(value, WhiteSpaceBehavior::kBreakSpaces);
+
+//
+// The `text-wrap-style` property.
+// https://drafts.csswg.org/css-text-4/#propdef-text-wrap-style
+//
+
+// Returns `true` if the greedy line breaker should be used.
+inline bool ShouldWrapLineGreedy(TextWrapStyle style) {
+  return style == TextWrapStyle::kAuto || style == TextWrapStyle::kStable;
 }
-inline bool ShouldWrapLineTrailingSpaces(EWhiteSpace value) {
-  return ShouldWrapLine(value) &&
-         !IsWhiteSpaceAny(value, WhiteSpaceBehavior::kBreakSpaces);
+
+//
+// The `white-space` property.
+// https://w3c.github.io/csswg-drafts/css-text-4/#propdef-white-space
+//
+// `EWhiteSpace` is represented by bit-flags of combinations of all possible
+// longhand values. Thus `ToWhiteSpace()` may return values that are not defined
+// as the `EWhiteSpace` value. `IsValidWhiteSpace()` can check if a value is one
+// of pre-defined keywords.
+//
+constexpr uint8_t ToWhiteSpaceValue(WhiteSpaceCollapse collapse,
+                                    TextWrapMode wrap) {
+  return static_cast<uint8_t>(collapse) |
+         (static_cast<uint8_t>(wrap) << kWhiteSpaceCollapseBits);
+}
+
+enum class EWhiteSpace : uint8_t {
+  kNormal =
+      ToWhiteSpaceValue(WhiteSpaceCollapse::kCollapse, TextWrapMode::kWrap),
+  kNowrap =
+      ToWhiteSpaceValue(WhiteSpaceCollapse::kCollapse, TextWrapMode::kNowrap),
+  kPre =
+      ToWhiteSpaceValue(WhiteSpaceCollapse::kPreserve, TextWrapMode::kNowrap),
+  kPreLine = ToWhiteSpaceValue(WhiteSpaceCollapse::kPreserveBreaks,
+                               TextWrapMode::kWrap),
+  kPreWrap =
+      ToWhiteSpaceValue(WhiteSpaceCollapse::kPreserve, TextWrapMode::kWrap),
+  kBreakSpaces =
+      ToWhiteSpaceValue(WhiteSpaceCollapse::kBreakSpaces, TextWrapMode::kWrap),
+};
+
+static_assert(kWhiteSpaceCollapseBits + kTextWrapModeBits <=
+              sizeof(EWhiteSpace) * 8);
+
+// Convert longhands of `white-space` to `EWhiteSpace`. The return value may not
+// be one of the defined enum values. Please see the comment above.
+inline EWhiteSpace ToWhiteSpace(WhiteSpaceCollapse collapse,
+                                TextWrapMode wrap) {
+  return static_cast<EWhiteSpace>(ToWhiteSpaceValue(collapse, wrap));
+}
+
+inline bool IsValidWhiteSpace(EWhiteSpace whitespace) {
+  return whitespace == EWhiteSpace::kNormal ||
+         whitespace == EWhiteSpace::kNowrap ||
+         whitespace == EWhiteSpace::kPre ||
+         whitespace == EWhiteSpace::kPreLine ||
+         whitespace == EWhiteSpace::kPreWrap ||
+         whitespace == EWhiteSpace::kBreakSpaces;
+}
+
+// Convert `EWhiteSpace` to longhands.
+inline WhiteSpaceCollapse ToWhiteSpaceCollapse(EWhiteSpace whitespace) {
+  return static_cast<WhiteSpaceCollapse>(static_cast<uint8_t>(whitespace) &
+                                         kWhiteSpaceCollapseMask);
+}
+inline TextWrapMode ToTextWrapMode(EWhiteSpace whitespace) {
+  return static_cast<TextWrapMode>(static_cast<uint8_t>(whitespace) >>
+                                   kWhiteSpaceCollapseBits);
 }
 
 }  // namespace blink

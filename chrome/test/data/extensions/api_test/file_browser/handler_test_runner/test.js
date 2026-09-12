@@ -27,7 +27,7 @@
  * Files for which the file browser handlers will be executed by the extension.
  * @type {Array<string>}
  */
-var kTestPaths = ['test_dir/test_file.xul', 'test_dir/test_file.tiff'];
+const TEST_PATHS = ['test_dir/test_file.xul', 'test_dir/test_file.tiff'];
 
 // Starts the test extension.
 function run() {
@@ -37,7 +37,7 @@ function run() {
    *
    * @type {!Array<!FileEntry>}
    */
-  var resolvedEntries = [];
+  const resolvedEntries = [];
 
   /**
    * List of tasks found for a testCase. Each object contains the found task id
@@ -45,14 +45,14 @@ function run() {
    *
    * @type {!Array<!Object<string, !Entry>>}
    */
-  var foundTasks = [];
+  const foundTasks = [];
 
   /**
    * Whether the test extension has done its job. When done is set |onError|
    * calls will be ignored.
    * @type {boolean}
    */
-  var done = false;
+  let done = false;
 
   /**
    * Function called when an error is encountered. It sends test failure
@@ -61,8 +61,9 @@ function run() {
    * @param {string} errorMessage The error message to be send.
    */
   function onError(errorMessage) {
-    if (done)
+    if (done) {
       return;
+    }
 
     chrome.test.notifyFail(errorMessage);
     // there should be at most one notifyFail call.
@@ -77,8 +78,9 @@ function run() {
    * @param {boolean} success Whether the function succeeded.
    */
   function onExecuteTask(entry, success) {
-    if (!success)
-      onError('Failed to execute task for ' + entry.fullPath);
+    if (!success) {
+      onError(`Failed to execute task for ${entry.fullPath}`);
+    }
   }
 
   /**
@@ -93,18 +95,18 @@ function run() {
 
   function onGotNonDefaultTasks(entry, resultingTasks) {
     if (!resultingTasks || !resultingTasks.tasks) {
-      onError('Failed getting tasks for ' + entry.fullPath);
+      onError(`Failed getting tasks for ${entry.fullPath}`);
       return;
     }
     const tasks = resultingTasks.tasks;
-    if (tasks.length != 1) {
-      onError('Got invalid number of tasks for "' + entry.fullPath + '": ' +
-              tasks.length);
+    if (tasks.length !== 1) {
+      onError(`Got invalid number of tasks for '${entry.fullPath}': ${
+          tasks.length}`);
     }
     // Task could be default from an explicit file extension match
     // but if matched on MIME type we need to set the task as default
     chrome.fileManagerPrivate.setDefaultTask(
-      tasks[0].descriptor, [entry], [], function() {
+        tasks[0].descriptor, [entry], [], function() {
           if (chrome.runtime.lastError) {
             const {appId, taskType, actionId} = tasks[0].descriptor;
             onError(`Failed to set a task to default: ${appId}|${taskType}|${
@@ -127,26 +129,27 @@ function run() {
    */
   function onGotTasks(entry, resultingTasks) {
     if (!resultingTasks || !resultingTasks.tasks) {
-      onError('Failed getting tasks for ' + entry.fullPath);
+      onError(`Failed getting tasks for ${entry.fullPath}`);
       return;
     }
     const tasks = resultingTasks.tasks;
 
-    if (tasks.length != 1) {
-      onError('Got invalid number of tasks for "' + entry.fullPath + '": ' +
-              tasks.length);
+    if (tasks.length !== 1) {
+      onError(`Got invalid number of tasks for '${entry.fullPath}': ${
+          tasks.length}`);
     }
     const {appId, taskType, actionId} = tasks[0].descriptor;
     const taskId = `${appId}|${taskType}|${actionId}`;
     if (!tasks[0].isDefault) {
-      onError(`Task "${taskId}" is not default for "${entry.fullPath}"`);
+      onError(`Task '${taskId}' is not default for '${entry.fullPath}'`);
     }
 
     foundTasks.push({descriptor: tasks[0].descriptor, entry: entry});
 
-    if (foundTasks.length == kTestPaths.length) {
+    if (foundTasks.length === TEST_PATHS.length) {
       foundTasks.forEach(function(task) {
-        chrome.fileManagerPrivate.executeTask(task.descriptor, [task.entry],
+        chrome.fileManagerPrivate.executeTask(
+            task.descriptor, [task.entry],
             onExecuteTask.bind(null, task.entry));
       });
     }
@@ -163,10 +166,9 @@ function run() {
     // TODO(mtomasz): Remove this hack after migrating chrome.fileManagerPrivate
     // API to isolated context.
     chrome.fileManagerPrivate.resolveIsolatedEntries(
-        [isolatedEntry],
-        function(externalEntries) {
+        [isolatedEntry], function(externalEntries) {
           resolvedEntries.push(externalEntries[0]);
-          if (resolvedEntries.length == kTestPaths.length) {
+          if (resolvedEntries.length === TEST_PATHS.length) {
             resolvedEntries.forEach(function(entry) {
               chrome.fileManagerPrivate.getFileTasks(
                   [entry], [''], onGotNonDefaultTasks.bind(null, entry));
@@ -183,31 +185,32 @@ function run() {
    * @param {string} volumeType Type of the volume.
    */
   function onGotFileSystem(fileSystem, volumeType) {
-    var isOnDrive = volumeType == 'drive';
-    kTestPaths.forEach(function(filePath) {
+    const isOnDrive = volumeType === 'drive';
+    TEST_PATHS.forEach(function(filePath) {
       fileSystem.root.getFile(
-          (isOnDrive ? 'root/' : '') + filePath, {},
-          onGotEntry.bind(null),
-          onError.bind(null, 'Unable to get file: ' + filePath));
+          `${isOnDrive ? 'root/' : ''}${filePath}`, {}, onGotEntry.bind(null),
+          onError.bind(null, `Unable to get file: ${filePath}`));
     });
   }
 
   chrome.fileManagerPrivate.getVolumeMetadataList(function(volumeMetadataList) {
     // Try to acquire the first volume which is either TESTING or DRIVE type.
-    var possibleVolumeTypes = ['testing', 'drive'];
-    var sortedVolumeMetadataList = volumeMetadataList.filter(function(volume) {
-      return possibleVolumeTypes.indexOf(volume.volumeType) != -1;
-    }).sort(function(volumeA, volumeB) {
-      return possibleVolumeTypes.indexOf(volumeA.volumeType) -
-             possibleVolumeTypes.indexOf(volumeB.volumeType);
-    });
-    if (sortedVolumeMetadataList.length == 0) {
+    const possibleVolumeTypes = ['testing', 'drive'];
+    const sortedVolumeMetadataList =
+        volumeMetadataList
+            .filter(function(volume) {
+              return possibleVolumeTypes.indexOf(volume.volumeType) !== -1;
+            })
+            .sort(function(volumeA, volumeB) {
+              return possibleVolumeTypes.indexOf(volumeA.volumeType) -
+                  possibleVolumeTypes.indexOf(volumeB.volumeType);
+            });
+    if (sortedVolumeMetadataList.length === 0) {
       onError('No volumes available, which could be used for testing.');
       return;
     }
     chrome.fileSystem.requestFileSystem(
-        {volumeId: sortedVolumeMetadataList[0].volumeId},
-        function(fileSystem) {
+        {volumeId: sortedVolumeMetadataList[0].volumeId}, function(fileSystem) {
           if (!fileSystem) {
             onError('Failed to acquire the testing volume.');
             return;

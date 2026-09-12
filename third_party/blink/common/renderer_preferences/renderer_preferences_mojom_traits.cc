@@ -28,6 +28,11 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
     return false;
   out->use_subpixel_positioning = data.use_subpixel_positioning();
 
+#if BUILDFLAG(IS_WIN)
+  out->text_contrast = data.text_contrast();
+  out->text_gamma = data.text_gamma();
+#endif  // BUILDFLAG(IS_WIN)
+
   out->focus_ring_color = data.focus_ring_color();
   out->active_selection_bg_color = data.active_selection_bg_color();
   out->active_selection_fg_color = data.active_selection_fg_color();
@@ -41,6 +46,12 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
     return false;
 
   out->use_custom_colors = data.use_custom_colors();
+
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC) || \
+    BUILDFLAG(IS_WIN)
+  out->use_overlay_scrollbar = data.use_overlay_scrollbar();
+#endif
+
   out->enable_referrers = data.enable_referrers();
   out->allow_cross_origin_auth_prompt = data.allow_cross_origin_auth_prompt();
   out->enable_do_not_track = data.enable_do_not_track();
@@ -49,20 +60,24 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
   if (!data.ReadWebrtcIpHandlingPolicy(&out->webrtc_ip_handling_policy))
     return false;
 
+  if (!data.ReadWebrtcIpHandlingUrls(&out->webrtc_ip_handling_urls)) {
+    return false;
+  }
+  out->webrtc_post_quantum_key_agreement =
+      data.webrtc_post_quantum_key_agreement();
   out->webrtc_udp_min_port = data.webrtc_udp_min_port();
   out->webrtc_udp_max_port = data.webrtc_udp_max_port();
 
   if (!data.ReadWebrtcLocalIpsAllowedUrls(&out->webrtc_local_ips_allowed_urls))
     return false;
 
-  out->webrtc_allow_legacy_tls_protocols =
-      data.webrtc_allow_legacy_tls_protocols();
-
   if (!data.ReadUserAgentOverride(&out->user_agent_override))
     return false;
 
   if (!data.ReadAcceptLanguages(&out->accept_languages))
     return false;
+
+  out->send_subresource_notification = data.send_subresource_notification();
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
   if (!data.ReadSystemFontFamilyName(&out->system_font_family_name))
@@ -89,27 +104,39 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
   if (!data.ReadMessageFontFamilyName(&out->message_font_family_name))
     return false;
   out->message_font_height = data.message_font_height();
-
-  out->vertical_scroll_bar_width_in_dips =
-      data.vertical_scroll_bar_width_in_dips();
-  out->horizontal_scroll_bar_height_in_dips =
-      data.horizontal_scroll_bar_height_in_dips();
-  out->arrow_bitmap_height_vertical_scroll_bar_in_dips =
-      data.arrow_bitmap_height_vertical_scroll_bar_in_dips();
-  out->arrow_bitmap_width_horizontal_scroll_bar_in_dips =
-      data.arrow_bitmap_width_horizontal_scroll_bar_in_dips();
 #endif
 #if BUILDFLAG(IS_OZONE)
   out->selection_clipboard_buffer_available =
       data.selection_clipboard_buffer_available();
 #endif
+#if BUILDFLAG(IS_LINUX)
+  out->middle_click_paste_allowed = data.middle_click_paste_allowed();
+#endif
   out->plugin_fullscreen_allowed = data.plugin_fullscreen_allowed();
   out->caret_browsing_enabled = data.caret_browsing_enabled();
+
+#if BUILDFLAG(IS_ANDROID)
+  out->uses_platform_autofill = data.uses_platform_autofill();
+#endif  // BUILDFLAG(IS_ANDROID)
+
+  out->autofill_shortcut_key_code =
+      static_cast<ui::KeyboardCode>(data.autofill_shortcut_key_code());
+  out->autofill_shortcut_modifiers = data.autofill_shortcut_modifiers();
+  if (!data.ReadAutofillTriggerString(&out->autofill_trigger_string)) {
+    return false;
+  }
 
   if (!data.ReadExplicitlyAllowedNetworkPorts(
           &out->explicitly_allowed_network_ports)) {
     return false;
   }
+
+  out->view_source_line_wrap_enabled = data.view_source_line_wrap_enabled();
+
+  out->system_color_chooser_is_modal = data.system_color_chooser_is_modal();
+
+  out->is_global_privacy_control_setting_enabled =
+      data.is_global_privacy_control_setting_enabled();
 
   return true;
 }

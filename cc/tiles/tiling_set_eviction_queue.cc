@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "base/memory/raw_ptr.h"
 #include "base/notreached.h"
 #include "cc/tiles/tiling_set_eviction_queue.h"
 
@@ -44,25 +45,10 @@ void TilingSetEvictionQueue::GenerateTilingOrder(
       tilings_.push_back(tiling);
   }
 
-  range = tiling_set->GetTilingRange(PictureLayerTilingSet::LOWER_THAN_LOW_RES);
+  range =
+      tiling_set->GetTilingRange(PictureLayerTilingSet::LOWER_THAN_HIGH_RES);
   for (size_t i = range.start; i < range.end; ++i) {
     size_t index = range.start + (range.end - 1 - i);
-    PictureLayerTiling* tiling = tiling_set->tiling_at(index);
-    if (tiling->has_tiles())
-      tilings_.push_back(tiling);
-  }
-
-  range = tiling_set->GetTilingRange(
-      PictureLayerTilingSet::BETWEEN_HIGH_AND_LOW_RES);
-  for (size_t i = range.start; i < range.end; ++i) {
-    size_t index = range.start + (range.end - 1 - i);
-    PictureLayerTiling* tiling = tiling_set->tiling_at(index);
-    if (tiling->has_tiles())
-      tilings_.push_back(tiling);
-  }
-
-  range = tiling_set->GetTilingRange(PictureLayerTilingSet::LOW_RES);
-  for (size_t index = range.start; index < range.end; ++index) {
     PictureLayerTiling* tiling = tiling_set->tiling_at(index);
     if (tiling->has_tiles())
       tilings_.push_back(tiling);
@@ -85,7 +71,6 @@ void TilingSetEvictionQueue::AdvancePhase() {
     switch (phase_) {
       case EVENTUALLY_RECT:
         NOTREACHED();
-        break;
       case SOON_BORDER_RECT:
         soon_iterator_ = SoonBorderTilingIterator(&tilings_, tree_);
         if (!soon_iterator_.done())
@@ -193,14 +178,13 @@ TilingSetEvictionQueue::EvictionRectIterator::EvictionRectIterator()
 }
 
 TilingSetEvictionQueue::EvictionRectIterator::EvictionRectIterator(
-    std::vector<PictureLayerTiling*>* tilings,
+    std::vector<raw_ptr<PictureLayerTiling, UnprotectedInRelease>>* tilings,
     WhichTree tree,
     PictureLayerTiling::PriorityRectType priority_rect_type)
     : tilings_(tilings),
       tree_(tree),
       priority_rect_type_(priority_rect_type),
-      tiling_index_(0) {
-}
+      tiling_index_(0) {}
 
 template <typename TilingIteratorType>
 bool TilingSetEvictionQueue::EvictionRectIterator::AdvanceToNextTile(
@@ -243,7 +227,7 @@ bool TilingSetEvictionQueue::EvictionRectIterator::GetFirstTileAndCheckIfValid(
 
 // EventuallyTilingIterator
 TilingSetEvictionQueue::EventuallyTilingIterator::EventuallyTilingIterator(
-    std::vector<PictureLayerTiling*>* tilings,
+    std::vector<raw_ptr<PictureLayerTiling, UnprotectedInRelease>>* tilings,
     WhichTree tree)
     : EvictionRectIterator(tilings, tree, PictureLayerTiling::EVENTUALLY_RECT) {
   // Find the first tiling with a tile.
@@ -293,7 +277,7 @@ TilingSetEvictionQueue::EventuallyTilingIterator&
 
 // SoonBorderTilingIterator
 TilingSetEvictionQueue::SoonBorderTilingIterator::SoonBorderTilingIterator(
-    std::vector<PictureLayerTiling*>* tilings,
+    std::vector<raw_ptr<PictureLayerTiling, UnprotectedInRelease>>* tilings,
     WhichTree tree)
     : EvictionRectIterator(tilings,
                            tree,
@@ -345,7 +329,7 @@ TilingSetEvictionQueue::SoonBorderTilingIterator&
 
 // SkewportTilingIterator
 TilingSetEvictionQueue::SkewportTilingIterator::SkewportTilingIterator(
-    std::vector<PictureLayerTiling*>* tilings,
+    std::vector<raw_ptr<PictureLayerTiling, UnprotectedInRelease>>* tilings,
     WhichTree tree)
     : EvictionRectIterator(tilings, tree, PictureLayerTiling::SKEWPORT_RECT) {
   // Find the first tiling with a tile.
@@ -395,9 +379,10 @@ TilingSetEvictionQueue::SkewportTilingIterator&
 
 // PendingVisibleIterator
 TilingSetEvictionQueue::PendingVisibleTilingIterator::
-    PendingVisibleTilingIterator(std::vector<PictureLayerTiling*>* tilings,
-                                 WhichTree tree,
-                                 bool return_required_for_activation_tiles)
+    PendingVisibleTilingIterator(
+        std::vector<raw_ptr<PictureLayerTiling, UnprotectedInRelease>>* tilings,
+        WhichTree tree,
+        bool return_required_for_activation_tiles)
     : EvictionRectIterator(tilings,
                            tree,
                            PictureLayerTiling::PENDING_VISIBLE_RECT),
@@ -460,7 +445,7 @@ bool TilingSetEvictionQueue::PendingVisibleTilingIterator::
 
 // VisibleTilingIterator
 TilingSetEvictionQueue::VisibleTilingIterator::VisibleTilingIterator(
-    std::vector<PictureLayerTiling*>* tilings,
+    std::vector<raw_ptr<PictureLayerTiling, UnprotectedInRelease>>* tilings,
     WhichTree tree,
     bool return_occluded_tiles,
     bool return_required_for_activation_tiles)

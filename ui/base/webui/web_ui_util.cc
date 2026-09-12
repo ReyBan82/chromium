@@ -4,27 +4,33 @@
 
 #include "ui/base/webui/web_ui_util.h"
 
+#include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/base64.h"
+#include "base/check.h"
+#include "base/i18n/language_tag.h"
 #include "base/i18n/rtl.h"
+#include "base/i18n/tag_converters.h"
+#include "base/json/json_writer.h"
 #include "base/logging.h"
 #include "base/strings/escape.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/base/template_expressions.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/window_open_disposition.h"
 #include "ui/base/window_open_disposition_utils.h"
 #include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/font.h"
-#include "ui/resources/grit/webui_resources.h"
 #include "ui/strings/grit/app_locale_settings.h"
+#include "ui/webui/resources/grit/webui_resources.h"
 #include "url/gurl.h"
 
 #if BUILDFLAG(IS_WIN)
@@ -37,11 +43,20 @@ namespace {
 // Generous cap to guard against out-of-memory issues.
 constexpr float kMaxScaleFactor = 1000.0f;
 
+std::string GetFontFamilyMd() {
+#if BUILDFLAG(IS_LINUX)
+  return "Roboto, " + GetFontFamily();
+#else
+  return GetFontFamily();
+#endif
+}
+
 std::string GetWebUiCssTextDefaults(const std::string& css_template) {
   ui::TemplateReplacements placeholders;
-  placeholders["textDirection"] = GetTextDirection();
-  placeholders["fontFamily"] = GetFontFamily();
-  placeholders["fontSize"] = GetFontSize();
+  placeholders["textdirection"] = GetTextDirection();
+  placeholders["fontfamily"] = GetFontFamily();
+  placeholders["fontfamilyMd"] = GetFontFamilyMd();
+  placeholders["fontsize"] = GetFontSize();
   return ui::ReplaceTemplateExpressions(css_template, placeholders);
 }
 
@@ -50,18 +65,18 @@ std::string GetWebUiCssTextDefaults(const std::string& css_template) {
 std::string GetBitmapDataUrl(const SkBitmap& bitmap) {
   TRACE_EVENT2("ui", "GetBitmapDataUrl", "width", bitmap.width(), "height",
                bitmap.height());
-  std::vector<unsigned char> output;
-  gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, false, &output);
-  return GetPngDataUrl(output.data(), output.size());
+  std::optional<std::vector<uint8_t>> output =
+      gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, /*discard_transparency=*/false);
+  return GetPngDataUrl(output.value_or(std::vector<uint8_t>()));
 }
 
-std::string GetPngDataUrl(const unsigned char* data, size_t size) {
+std::string GetPngDataUrl(base::span<const uint8_t> data) {
   std::string output = "data:image/png;base64,";
-  base::Base64EncodeAppend(base::make_span(data, size), &output);
+  base::Base64EncodeAppend(data, &output);
   return output;
 }
 
-WindowOpenDisposition GetDispositionFromClick(const base::Value::List& list,
+WindowOpenDisposition GetDispositionFromClick(const base::ListValue& list,
                                               size_t start_index) {
   double button = list[start_index].GetDouble();
   bool alt_key = list[start_index + 1].GetBool();
@@ -73,8 +88,7 @@ WindowOpenDisposition GetDispositionFromClick(const base::Value::List& list,
       button == 1.0, alt_key, ctrl_key, meta_key, shift_key);
 }
 
-bool ParseScaleFactor(const base::StringPiece& identifier,
-                      float* scale_factor) {
+bool ParseScaleFactor(std::string_view identifier, float* scale_factor) {
   *scale_factor = 1.0f;
   if (identifier.empty()) {
     DLOG(WARNING) << "Invalid scale factor format: " << identifier;
@@ -105,7 +119,7 @@ bool ParseScaleFactor(const base::StringPiece& identifier,
 }
 
 // Parse a formatted frame index string into int and sets to |frame_index|.
-bool ParseFrameIndex(const base::StringPiece& identifier, int* frame_index) {
+bool ParseFrameIndex(std::string_view identifier, int* frame_index) {
   *frame_index = -1;
   if (identifier.empty()) {
     DLOG(WARNING) << "Invalid frame index format: " << identifier;
@@ -131,7 +145,7 @@ void ParsePathAndImageSpec(const GURL& url,
                            std::string* path,
                            float* scale_factor,
                            int* frame_index) {
-  *path = base::UnescapeBinaryURLComponent(url.path_piece().substr(1));
+  *path = base::UnescapeBinaryURLComponent(url.path().substr(1));
   if (scale_factor)
     *scale_factor = 1.0f;
   if (frame_index)
@@ -140,14 +154,14 @@ void ParsePathAndImageSpec(const GURL& url,
   // Detect and parse resource string ending in @<scale>x.
   std::size_t pos = path->rfind('@');
   if (pos != std::string::npos) {
-    base::StringPiece stripped_path(*path);
+    std::string_view stripped_path(*path);
     float factor;
 
     if (ParseScaleFactor(stripped_path.substr(
             pos + 1, stripped_path.length() - pos - 1), &factor)) {
       // Strip scale factor specification from path.
       stripped_path.remove_suffix(stripped_path.length() - pos);
-      path->assign(stripped_path.data(), stripped_path.size());
+      *path = std::string(stripped_path);
     }
     if (scale_factor)
       *scale_factor = factor;
@@ -156,7 +170,7 @@ void ParsePathAndImageSpec(const GURL& url,
   // Detect and parse resource string ending in [<frame>].
   pos = path->rfind('[');
   if (pos != std::string::npos) {
-    base::StringPiece stripped_path(*path);
+    std::string_view stripped_path(*path);
     int index;
 
     if (ParseFrameIndex(
@@ -164,7 +178,7 @@ void ParsePathAndImageSpec(const GURL& url,
             &index)) {
       // Strip frame index specification from path.
       stripped_path.remove_suffix(stripped_path.length() - pos);
-      path->assign(stripped_path.data(), stripped_path.size());
+      *path = std::string(stripped_path);
     }
     if (frame_index)
       *frame_index = index;
@@ -172,19 +186,41 @@ void ParsePathAndImageSpec(const GURL& url,
 }
 
 void SetLoadTimeDataDefaults(const std::string& app_locale,
-                             base::Value::Dict* localized_strings) {
+                             base::DictValue* localized_strings) {
   localized_strings->Set("fontfamily", GetFontFamily());
+  localized_strings->Set("fontfamilyMd", GetFontFamilyMd());
   localized_strings->Set("fontsize", GetFontSize());
-  localized_strings->Set("language", l10n_util::GetLanguage(app_locale));
+  localized_strings->Set(
+      "language", base::i18n::GetLanguageTagFromString(app_locale)
+                      .transform(&base::i18n::LanguageTag::language_subtag)
+                      .value_or(std::string_view()));
   localized_strings->Set("textdirection", GetTextDirection());
+  localized_strings->Set(
+      "roundedIconsAttribute",
+      features::IsRoundedIconsEnabled() ? "rounded-icons" : "");
+  localized_strings->Set("webuiRoundedIconsEnabled",
+                         features::IsWebUIRoundedIconsEnabled());
+  localized_strings->Set(
+      "webuiRoundedIconsAttribute",
+      features::IsWebUIRoundedIconsEnabled() ? "webui-rounded-icons" : "");
 }
 
 void SetLoadTimeDataDefaults(const std::string& app_locale,
                              ui::TemplateReplacements* replacements) {
   (*replacements)["fontfamily"] = GetFontFamily();
+  (*replacements)["fontfamilyMd"] = GetFontFamilyMd();
   (*replacements)["fontsize"] = GetFontSize();
-  (*replacements)["language"] = l10n_util::GetLanguage(app_locale);
+  (*replacements)["language"] =
+      base::i18n::GetLanguageTagFromString(app_locale)
+          .transform(&base::i18n::LanguageTag::language_subtag)
+          .value_or(std::string_view());
   (*replacements)["textdirection"] = GetTextDirection();
+  (*replacements)["roundedIconsAttribute"] =
+      features::IsRoundedIconsEnabled() ? "rounded-icons" : "";
+  (*replacements)["webuiRoundedIconsEnabled"] =
+      features::IsWebUIRoundedIconsEnabled() ? "true" : "false";
+  (*replacements)["webuiRoundedIconsAttribute"] =
+      features::IsWebUIRoundedIconsEnabled() ? "webui-rounded-icons" : "";
 }
 
 std::string GetWebUiCssTextDefaults() {
@@ -192,13 +228,6 @@ std::string GetWebUiCssTextDefaults() {
       ui::ResourceBundle::GetSharedInstance();
   return GetWebUiCssTextDefaults(
       resource_bundle.LoadDataResourceString(IDR_WEBUI_CSS_TEXT_DEFAULTS_CSS));
-}
-
-std::string GetWebUiCssTextDefaultsMd() {
-  const ui::ResourceBundle& resource_bundle =
-      ui::ResourceBundle::GetSharedInstance();
-  return GetWebUiCssTextDefaults(resource_bundle.LoadDataResourceString(
-      IDR_WEBUI_CSS_TEXT_DEFAULTS_MD_CSS));
 }
 
 void AppendWebUiCssTextDefaults(std::string* html) {
@@ -210,16 +239,14 @@ void AppendWebUiCssTextDefaults(std::string* html) {
 std::string GetFontFamily() {
   std::string font_family = l10n_util::GetStringUTF8(IDS_WEB_FONT_FAMILY);
 
-// TODO(crbug.com/1052397): Revisit the macro expression once build flag switch
-// of lacros-chrome is complete.
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_LINUX)
   std::string font_name = ui::ResourceBundle::GetSharedInstance()
                               .GetFont(ui::ResourceBundle::BaseFont)
                               .GetFontName();
   // Wrap |font_name| with quotes to ensure it will always be parsed correctly
   // in CSS.
   font_family = "\"" + font_name + "\", " + font_family;
-#endif
+#endif  // BUILDFLAG(IS_LINUX)
 
   return font_family;
 }
@@ -230,6 +257,27 @@ std::string GetFontSize() {
 
 std::string GetTextDirection() {
   return base::i18n::IsRTL() ? "rtl" : "ltr";
+}
+
+std::string GetLocalizedHtml(std::string_view html_template,
+                             const base::DictValue& strings) {
+  // Populate $i18n{...} placeholders.
+  ui::TemplateReplacements replacements;
+  ui::TemplateReplacementsFromDictionaryValue(strings, &replacements);
+  std::string output =
+      ui::ReplaceTemplateExpressions(html_template, replacements);
+
+  // Inject data to the UI that will be used to populate loadTimeData upon
+  // initialization.
+  std::optional<std::string> json = base::WriteJson(strings);
+  CHECK(json);
+  output.append("<script>");
+  output.append("var loadTimeDataRaw = ");
+  output.append(*json);
+  output.append(";");
+  output.append("</script>");
+
+  return output;
 }
 
 }  // namespace webui

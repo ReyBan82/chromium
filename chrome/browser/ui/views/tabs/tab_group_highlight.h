@@ -11,17 +11,18 @@
 #include "ui/views/view.h"
 
 class TabGroupViews;
-class TabGroupStyle;
+class TabGroupStyleViews;
 
 // View for tab group highlights in the tab strip, which indicate that a group
 // is in a selected state. There is one highlight for each group, which is
 // positioned across all tabs in the group and painted by the tab strip.
 class TabGroupHighlight : public views::View {
+  METADATA_HEADER(TabGroupHighlight, views::View)
+
  public:
-  METADATA_HEADER(TabGroupHighlight);
   TabGroupHighlight(TabGroupViews* tab_group_views,
                     const tab_groups::TabGroupId& group,
-                    const TabGroupStyle& style);
+                    const TabGroupStyleViews& style);
   TabGroupHighlight(const TabGroupHighlight&) = delete;
   TabGroupHighlight& operator=(const TabGroupHighlight&) = delete;
 
@@ -29,7 +30,6 @@ class TabGroupHighlight : public views::View {
 
   // views::View:
   void OnPaint(gfx::Canvas* canvas) override;
-  bool GetCanProcessEventsWithinSubtree() const override;
 
  private:
   // Returns the highlight shape, which immitates the tab highlight shape.
@@ -37,7 +37,7 @@ class TabGroupHighlight : public views::View {
 
   const raw_ptr<TabGroupViews> tab_group_views_;
   const tab_groups::TabGroupId group_;
-  const raw_ref<const TabGroupStyle> style_;
+  const raw_ref<const TabGroupStyleViews> style_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_TABS_TAB_GROUP_HIGHLIGHT_H_

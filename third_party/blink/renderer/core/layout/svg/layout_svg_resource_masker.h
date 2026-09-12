@@ -20,15 +20,15 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_RESOURCE_MASKER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_LAYOUT_SVG_LAYOUT_SVG_RESOURCE_MASKER_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_resource_container.h"
+#include "third_party/blink/renderer/core/paint/paint_flags.h"
 #include "third_party/blink/renderer/core/svg/svg_unit_types.h"
 #include "ui/gfx/geometry/rect_f.h"
 
 namespace blink {
 
-class AffineTransform;
-class GraphicsContext;
 class SVGMaskElement;
 
 class LayoutSVGResourceMasker final : public LayoutSVGResourceContainer {
@@ -55,10 +55,11 @@ class LayoutSVGResourceMasker final : public LayoutSVGResourceContainer {
     return kResourceType;
   }
 
-  PaintRecord CreatePaintRecord(const AffineTransform&, GraphicsContext&);
+  PaintRecord CreatePaintRecord(PaintFlags paint_flags);
 
  private:
-  absl::optional<PaintRecord> cached_paint_record_;
+  std::optional<PaintRecord> cached_paint_record_;
+  PaintFlags cached_paint_flags_ = PaintFlag::kNoFlag;
 };
 
 template <>

@@ -2,19 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import './colors.js';
 import './theme_snapshot.js';
 import './hover_button.js';
-import './strings.m.js'; // Required by <managed-dialog>.
+import '/strings.m.js'; // Required by <managed-dialog>.
+import 'chrome://resources/cr_components/customize_color_scheme_mode/customize_color_scheme_mode.js';
+import 'chrome://resources/cr_components/theme_color_picker/theme_color_picker.js';
+import 'chrome://resources/cr_components/managed_dialog/managed_dialog.js';
 import 'chrome://resources/cr_elements/cr_button/cr_button.js';
-import 'chrome://resources/cr_elements/cr_hidden_style.css.js';
-import 'chrome://resources/cr_elements/cr_icons.css.js';
+import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {getInstance as getAnnouncerInstance} from 'chrome://resources/cr_elements/cr_a11y_announcer/cr_a11y_announcer.js';
+import type {CrToggleElement} from 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
+import {I18nMixinLit} from 'chrome://resources/cr_elements/i18n_mixin_lit.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-import {getTemplate} from './appearance.html.js';
-import {CustomizeChromePageCallbackRouter, CustomizeChromePageHandlerInterface, Theme} from './customize_chrome.mojom-webui.js';
+import {getCss} from './appearance.css.js';
+import {getHtml} from './appearance.html.js';
+import {CustomizeChromeAction, recordCustomizeChromeAction} from './common.js';
+import {NewTabPageType} from './customize_chrome.mojom-webui.js';
+import type {Theme} from './customize_chrome.mojom-webui.js';
 import {CustomizeChromeApiProxy} from './customize_chrome_api_proxy.js';
 
 export interface AppearanceElement {
@@ -23,89 +32,185 @@ export interface AppearanceElement {
     editThemeButton: HTMLButtonElement,
     themeSnapshot: HTMLElement,
     setClassicChromeButton: HTMLButtonElement,
-    thirdPartyLinkButton: HTMLButtonElement,
+    thirdPartyThemeLinkButton: HTMLButtonElement,
+    followThemeToggle: HTMLElement,
+    followThemeToggleControl: CrToggleElement,
+    uploadedImageButton: HTMLButtonElement,
+    searchedImageButton: HTMLButtonElement,
   };
 }
 
-export class AppearanceElement extends PolymerElement {
+const AppearanceElementBase = I18nMixinLit(CrLitElement);
+
+export class AppearanceElement extends AppearanceElementBase {
   static get is() {
     return 'customize-chrome-appearance';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
-      theme_: Object,
+      theme_: {type: Object},
+      editThemeButtonText_: {type: String},
 
       thirdPartyThemeId_: {
         type: String,
-        computed: 'computeThirdPartyThemeId_(theme_)',
-        reflectToAttribute: true,
+        reflect: true,
       },
 
       thirdPartyThemeName_: {
         type: String,
-        computed: 'computeThirdPartyThemeName_(theme_)',
-        reflectToAttribute: true,
+        reflect: true,
       },
 
-      // Prevents side panel from showing theme snapshot and colors before
-      // thirdPartyThemeName_ is determined if third party theme is installed.
-      showFirstPartyThemeView_: {
+      showBottomDivider_: {type: Boolean},
+      showClassicChromeButton_: {type: Boolean},
+      showColorPicker_: {type: Boolean},
+      showDeviceThemeToggle_: {type: Boolean},
+      showThemeSnapshot_: {type: Boolean},
+      showUploadedImageButton_: {type: Boolean},
+      showSearchedImageButton_: {type: Boolean},
+      showManagedButton_: {type: Boolean},
+      showManagedDialog_: {type: Boolean},
+      showEditTheme_: {type: Boolean},
+      managedByName_: {type: String},
+      managedByDesc_: {type: String},
+      newTabPageType_: {type: Number},
+
+      wallpaperSearchButtonEnabled_: {
         type: Boolean,
-        value: false,
-        computed: 'computeShowFirstPartyThemeView_(theme_)',
+        reflect: true,
       },
 
-      showClassicChromeButton_: {
-        type: Boolean,
-        value: false,
-        computed: 'computeShowClassicChromeButton_(theme_)',
-      },
-
-      showManagedDialog_: Boolean,
+      wallpaperSearchEnabled_: {type: Boolean},
+      footerEnabled_: {type: Boolean},
     };
   }
 
-  private theme_: Theme|undefined = undefined;
-  private thirdPartyThemeId_: string|null = null;
-  private thirdPartyThemeName_: string|null = null;
-  private showClassicChromeButton_: boolean;
-  private showFirstPartyThemeView_: boolean;
-  private showManagedDialog_: boolean;
-
-  private setThemeListenerId_: number|null = null;
-
-  private callbackRouter_: CustomizeChromePageCallbackRouter;
-  private pageHandler_: CustomizeChromePageHandlerInterface;
-
-  constructor() {
-    super();
-    this.pageHandler_ = CustomizeChromeApiProxy.getInstance().handler;
-    this.callbackRouter_ = CustomizeChromeApiProxy.getInstance().callbackRouter;
-  }
+  protected accessor theme_: Theme|undefined;
+  protected accessor editThemeButtonText_: string = '';
+  protected accessor thirdPartyThemeId_: string|null = null;
+  protected accessor thirdPartyThemeName_: string|null = null;
+  protected accessor showBottomDivider_: boolean = false;
+  protected accessor showClassicChromeButton_: boolean = false;
+  protected accessor showColorPicker_: boolean = false;
+  protected accessor showDeviceThemeToggle_: boolean = false;
+  protected accessor showThemeSnapshot_: boolean = false;
+  protected accessor showUploadedImageButton_: boolean = false;
+  protected accessor showSearchedImageButton_: boolean = false;
+  protected accessor showManagedButton_: boolean = false;
+  protected accessor showManagedDialog_: boolean = false;
+  protected accessor wallpaperSearchButtonEnabled_: boolean =
+      loadTimeData.getBoolean('wallpaperSearchButtonEnabled');
+  private accessor wallpaperSearchEnabled_: boolean =
+      loadTimeData.getBoolean('wallpaperSearchEnabled');
+  private accessor footerEnabled_: boolean =
+      loadTimeData.getBoolean('footerEnabled');
+  protected accessor newTabPageType_: NewTabPageType =
+      NewTabPageType.kFirstPartyWebUI;
+  protected accessor showEditTheme_: boolean = true;
+  protected accessor managedByName_: string = '';
+  protected accessor managedByDesc_: string = '';
+  private listenerIds_: number[] = [];
+  private apiProxy_: CustomizeChromeApiProxy =
+      CustomizeChromeApiProxy.getInstance();
 
   override connectedCallback() {
     super.connectedCallback();
-    this.setThemeListenerId_ =
-        this.callbackRouter_.setTheme.addListener((theme: Theme) => {
-          this.theme_ = theme;
-        });
-    this.pageHandler_.updateTheme();
-  }
 
+    this.listenerIds_ = [
+      this.apiProxy_.callbackRouter.setTheme.addListener(theme => {
+        this.theme_ = theme;
+      }),
+      this.apiProxy_.callbackRouter.attachedTabStateUpdated.addListener(
+          newTabPageType => {
+            this.newTabPageType_ = newTabPageType;
+          }),
+      this.apiProxy_.callbackRouter.setThemeEditable.addListener(
+          isThemeEditable => {
+            this.showEditTheme_ = isThemeEditable;
+          }),
+      this.apiProxy_.callbackRouter.ntpManagedByNameUpdated.addListener(
+          (name, description) => {
+            this.managedByName_ = name;
+            this.managedByDesc_ = description;
+          }),
+    ];
+
+    this.apiProxy_.handler.updateTheme();
+    this.apiProxy_.handler.updateAttachedTabState();
+    this.apiProxy_.handler.updateNtpManagedByName();
+  }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
-    assert(this.setThemeListenerId_);
-    this.callbackRouter_.removeListener(this.setThemeListenerId_);
+
+    for (const id of this.listenerIds_) {
+      assert(this.apiProxy_.callbackRouter.removeListener(id));
+    }
+    this.listenerIds_ = [];
+  }
+
+  override willUpdate(changedProperties: PropertyValues<this>) {
+    super.willUpdate(changedProperties);
+
+    const changedPrivateProperties =
+        changedProperties as Map<PropertyKey, unknown>;
+
+    this.editThemeButtonText_ = this.computeEditThemeButtonText_();
+
+    if (changedPrivateProperties.has('theme_') ||
+        changedPrivateProperties.has('newTabPageType_')) {
+      this.thirdPartyThemeId_ = this.computeThirdPartyThemeId_();
+      this.thirdPartyThemeName_ = this.computeThirdPartyThemeName_();
+      this.showClassicChromeButton_ = this.computeShowClassicChromeButton_();
+      this.showColorPicker_ = this.computeShowColorPicker_();
+      this.showDeviceThemeToggle_ = this.computeShowDeviceThemeToggle_();
+      this.showThemeSnapshot_ = this.computeShowThemeSnapshot_();
+      this.showUploadedImageButton_ = this.computeShowUploadedImageButton_();
+      this.showSearchedImageButton_ = this.computeShowSearchedImageButton_();
+    }
+
+    if (changedPrivateProperties.has('newTabPageType_') ||
+        changedPrivateProperties.has('managedByName_') ||
+        changedPrivateProperties.has('managedByDesc_')) {
+      this.showManagedButton_ = this.computeShowManagedButton_();
+    }
+
+    this.showBottomDivider_ = this.computeShowBottomDivider_();
+
+    // Announce when theme is set to Classic Chrome.
+    // This should only be triggered if the classic chrome's button is hidden
+    // after the initial theme value has already been set.
+    if (changedPrivateProperties.has('theme_') &&
+        changedPrivateProperties.has('showClassicChromeButton_') &&
+        !!changedPrivateProperties.get('theme_') &&
+        !this.showClassicChromeButton_) {
+      const announcer = getAnnouncerInstance();
+      announcer.announce(this.i18n('updatedToClassicChrome'));
+      // If the classicChrome button has focus, change focus to editTheme
+      // button, since the button is disappearing.
+      if (this.shadowRoot.activeElement === this.$.setClassicChromeButton) {
+        this.focusOnThemeButton();
+      }
+    }
   }
 
   focusOnThemeButton() {
     this.$.editThemeButton.focus();
+  }
+
+  private computeEditThemeButtonText_(): string {
+    return this.i18n(
+        this.wallpaperSearchButtonEnabled_ ? 'categoriesHeader' :
+                                             'changeTheme');
   }
 
   private computeThirdPartyThemeId_(): string|null {
@@ -124,39 +229,120 @@ export class AppearanceElement extends PolymerElement {
     }
   }
 
-  private computeShowFirstPartyThemeView_(): boolean {
-    return !!this.theme_ && !this.theme_.thirdPartyThemeInfo;
+  private computeShowBottomDivider_(): boolean {
+    return this.showClassicChromeButton_ || this.showDeviceThemeToggle_;
   }
 
   private computeShowClassicChromeButton_(): boolean {
+    if (this.footerEnabled_) {
+      return !!(
+          this.theme_ && this.theme_.backgroundImage &&
+          (this.newTabPageType_ === NewTabPageType.kFirstPartyWebUI ||
+           this.newTabPageType_ === NewTabPageType.kThirdPartyWebUI));
+    }
     return !!(
         this.theme_ &&
         (this.theme_.backgroundImage || this.theme_.thirdPartyThemeInfo));
   }
 
-  private onEditThemeClicked_() {
+  private computeShowColorPicker_(): boolean {
+    return !!this.theme_ && !this.theme_.thirdPartyThemeInfo;
+  }
+
+  private computeShowDeviceThemeToggle_(): boolean {
+    return loadTimeData.getBoolean('showDeviceThemeToggle') &&
+        !(!!this.theme_ && !!this.theme_.thirdPartyThemeInfo);
+  }
+
+  private computeShowThemeSnapshot_(): boolean {
+    return !!this.theme_ && !this.theme_.thirdPartyThemeInfo &&
+        (!(this.theme_.backgroundImage &&
+           this.theme_.backgroundImage.isUploadedImage)) &&
+        // TODO(crbug.com/404247286) Enable snapshots for extension NTP with 1P
+        // theme.
+        this.newTabPageType_ === NewTabPageType.kFirstPartyWebUI;
+  }
+
+  private computeShowUploadedImageButton_(): boolean {
+    return !!(
+        this.theme_ && this.theme_.backgroundImage &&
+        this.theme_.backgroundImage.isUploadedImage &&
+        !this.theme_.backgroundImage.localBackgroundId);
+  }
+
+  private computeShowSearchedImageButton_(): boolean {
+    return !!(
+        this.theme_ && this.theme_.backgroundImage &&
+        this.theme_.backgroundImage.localBackgroundId);
+  }
+
+  private computeShowManagedButton_(): boolean {
+    return this.newTabPageType_ !== NewTabPageType.kFirstPartyWebUI &&
+        !!this.managedByName_;
+  }
+
+  protected onThemeSnapshotKeydown_(e: KeyboardEvent) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      this.onEditThemeClick_();
+    }
+  }
+
+  protected onEditThemeClick_() {
+    recordCustomizeChromeAction(CustomizeChromeAction.EDIT_THEME_CLICKED);
     if (this.handleClickForManagedThemes_()) {
       return;
     }
     this.dispatchEvent(new Event('edit-theme-click'));
   }
 
-  private onThirdPartyLinkButtonClick_() {
-    if (this.thirdPartyThemeId_) {
-      this.pageHandler_.openThirdPartyThemePage(this.thirdPartyThemeId_);
-    }
-  }
-
-  private onSetClassicChromeClicked_() {
+  protected onWallpaperSearchClick_() {
+    recordCustomizeChromeAction(
+        CustomizeChromeAction.WALLPAPER_SEARCH_APPEARANCE_BUTTON_CLICKED);
     if (this.handleClickForManagedThemes_()) {
       return;
     }
-    this.pageHandler_.removeBackgroundImage();
-    this.pageHandler_.setDefaultColor();
+    this.dispatchEvent(new Event('wallpaper-search-click'));
   }
 
-  private onManagedDialogClosed_() {
+  protected onThirdPartyThemeLinkButtonClick_() {
+    if (this.thirdPartyThemeId_) {
+      this.apiProxy_.handler.openThirdPartyThemePage(this.thirdPartyThemeId_);
+    }
+  }
+
+  protected onUploadedImageButtonClick_() {
+    this.apiProxy_.handler.chooseLocalCustomBackground();
+  }
+
+  protected onSearchedImageButtonClick_() {
+    if (this.wallpaperSearchEnabled_) {
+      this.dispatchEvent(new CustomEvent('wallpaper-search-click'));
+    } else {
+      this.dispatchEvent(new Event('edit-theme-click'));
+    }
+  }
+
+  protected onSetClassicChromeClick_() {
+    if (this.handleClickForManagedThemes_()) {
+      return;
+    }
+    this.apiProxy_.handler.removeBackgroundImage();
+    this.apiProxy_.handler.setDefaultColor();
+    recordCustomizeChromeAction(
+        CustomizeChromeAction.SET_CLASSIC_CHROME_THEME_CLICKED);
+  }
+
+  protected onFollowThemeToggleChange_(e: CustomEvent<boolean>) {
+    this.apiProxy_.handler.setFollowDeviceTheme(e.detail);
+  }
+
+  protected onManagedDialogClose_() {
     this.showManagedDialog_ = false;
+  }
+
+  protected onNewTabPageManageByButtonClick_() {
+    this.apiProxy_.handler.openNtpManagedByPage();
   }
 
   private handleClickForManagedThemes_(): boolean {

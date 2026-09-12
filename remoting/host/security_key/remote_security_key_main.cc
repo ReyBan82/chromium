@@ -17,28 +17,26 @@
 #include "build/build_config.h"
 #include "mojo/core/embedder/embedder.h"
 #include "mojo/core/embedder/scoped_ipc_support.h"
-#include "remoting/base/breakpad.h"
 #include "remoting/base/logging.h"
 #include "remoting/host/base/host_exit_codes.h"
 #include "remoting/host/security_key/security_key_ipc_client.h"
 #include "remoting/host/security_key/security_key_message_handler.h"
 #include "remoting/host/usage_stats_consent.h"
 
+#if BUILDFLAG(IS_LINUX)
+#include "remoting/base/crash/crash_reporting_crashpad.h"
+#endif  // BUILDFLAG(IS_LINUX)
+
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
 
-#include "remoting/host/win/acl_util.h"
+#include "remoting/base/crash/crash_reporting_breakpad.h"
 #endif  // BUILDFLAG(IS_WIN)
 
 namespace remoting {
 
 int StartRemoteSecurityKey() {
 #if BUILDFLAG(IS_WIN)
-  if (!AddProcessAccessRightForWellKnownSid(
-          WinLocalServiceSid, PROCESS_QUERY_LIMITED_INFORMATION)) {
-    return kInitializationFailed;
-  }
-
   // GetStdHandle() returns pseudo-handles for stdin and stdout even if
   // the hosting executable specifies "Windows" subsystem. However the returned
   // handles are invalid in that case unless standard input and output are
@@ -64,7 +62,7 @@ int StartRemoteSecurityKey() {
 #error Not implemented.
 #endif
 
-  mojo::core::Init(mojo::core::Configuration{.disable_ipcz = true});
+  mojo::core::Init();
   mojo::core::ScopedIPCSupport ipc_support(
       base::SingleThreadTaskRunner::GetCurrentDefault(),
       mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST);
@@ -90,11 +88,15 @@ int RemoteSecurityKeyMain(int argc, char** argv) {
   base::CommandLine::Init(argc, argv);
   remoting::InitHostLogging();
 
-#if defined(REMOTING_ENABLE_BREAKPAD)
+#if defined(REMOTING_ENABLE_CRASH_REPORTING)
   if (IsUsageStatsAllowed()) {
-    InitializeCrashReporting();
+#if BUILDFLAG(IS_LINUX)
+    InitializeCrashpadReporting();
+#elif BUILDFLAG(IS_WIN)
+    InitializeBreakpadReporting();
+#endif  // BUILDFLAG(IS_LINUX)
   }
-#endif  // defined(REMOTING_ENABLE_BREAKPAD)
+#endif  // defined(REMOTING_ENABLE_CRASH_REPORTING)
 
   return StartRemoteSecurityKey();
 }

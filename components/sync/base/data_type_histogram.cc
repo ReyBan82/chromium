@@ -5,18 +5,41 @@
 #include "components/sync/base/data_type_histogram.h"
 
 #include <string>
+#include <string_view>
 
+#include "base/containers/fixed_flat_map.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
+#include "components/sync/base/data_type.h"
 
 namespace syncer {
 
 namespace {
-const char kModelTypeMemoryHistogramPrefix[] = "Sync.ModelTypeMemoryKB.";
-const char kModelTypeCountHistogramPrefix[] = "Sync.ModelTypeCount4.";
-const char kModelTypeUpdateDropHistogramPrefix[] = "Sync.ModelTypeUpdateDrop.";
-const char kSyncEntitySizeHistogramPrefix[] = "Sync.EntitySizeOnCommit.";
 
-std::string GetHistogramSuffixForUpdateDropReason(UpdateDropReason reason) {
+constexpr char kDataTypeMemoryHistogramPrefix[] = "Sync.DataTypeMemoryKB.";
+constexpr char kDataTypeCountHistogramPrefix[] = "Sync.DataTypeCount.";
+constexpr char kDataTypeUpdateDropHistogramPrefix[] = "Sync.DataTypeUpdateDrop.";
+constexpr char kDataTypeNumUnsyncedEntities[] = "Sync.DataTypeNumUnsyncedEntities";
+
+// Suffixes for `kDataTypeNumUnsyncedEntities`:
+constexpr char kDataTypeNumUnsyncedEntitiesOnModelReady[] = "OnModelReady";
+constexpr char
+    kDataTypeNumUnsyncedEntitiesOnSignoutConfirmationFromPendingState[] =
+        "OnSignoutConfirmationFromPendingState";
+constexpr char kDataTypeNumUnsyncedEntitiesOnSignoutConfirmation[] =
+    "OnSignoutConfirmation";
+constexpr char kDataTypeNumUnsyncedEntitiesOnReauthFromPendingState[] =
+    "OnReauthFromPendingState";
+
+constexpr char kEntitySizeWithMetadataHistogramPrefix[] =
+    "Sync.EntitySizeOnCommit.Entity.WithMetadata.";
+constexpr char kEntitySizeSpecificsOnlyHistogramPrefix[] =
+    "Sync.EntitySizeOnCommit.Entity.SpecificsOnly.";
+constexpr char kEntitySizeTombstoneHistogramPrefix[] =
+    "Sync.EntitySizeOnCommit.Tombstone.";
+
+std::string_view GetHistogramSuffixForUpdateDropReason(
+    UpdateDropReason reason) {
   switch (reason) {
     case UpdateDropReason::kInconsistentClientTag:
       return "InconsistentClientTag";
@@ -37,37 +60,111 @@ std::string GetHistogramSuffixForUpdateDropReason(UpdateDropReason reason) {
   }
 }
 
+// Returns the suffix  for the histograms recording the number of unsynced
+// entities.
+const char* SyncGetNumUnsyncedEntitiesHistogramSuffix(
+    UnsyncedDataRecordingEvent event) {
+  switch (event) {
+    case UnsyncedDataRecordingEvent::kOnModelReady:
+      return kDataTypeNumUnsyncedEntitiesOnModelReady;
+    case UnsyncedDataRecordingEvent::kOnSignoutConfirmationFromPendingState:
+      return kDataTypeNumUnsyncedEntitiesOnSignoutConfirmationFromPendingState;
+    case UnsyncedDataRecordingEvent::kOnSignoutConfirmation:
+      return kDataTypeNumUnsyncedEntitiesOnSignoutConfirmation;
+    case UnsyncedDataRecordingEvent::kOnReauthFromPendingState:
+      return kDataTypeNumUnsyncedEntitiesOnReauthFromPendingState;
+  }
+}
+
 }  // namespace
 
-void SyncRecordModelTypeUpdateDropReason(UpdateDropReason reason,
-                                         ModelType type) {
-  std::string full_histogram_name =
-      kModelTypeUpdateDropHistogramPrefix +
-      GetHistogramSuffixForUpdateDropReason(reason);
+void SyncRecordDataTypeUpdateDropReason(UpdateDropReason reason,
+                                        DataType type) {
+  const std::string full_histogram_name =
+      base::StrCat({kDataTypeUpdateDropHistogramPrefix,
+                    GetHistogramSuffixForUpdateDropReason(reason)});
   base::UmaHistogramEnumeration(full_histogram_name,
-                                ModelTypeHistogramValue(type));
+                                DataTypeHistogramValue(type));
 }
 
-void SyncRecordModelTypeMemoryHistogram(ModelType model_type, size_t bytes) {
-  std::string type_string = ModelTypeToHistogramSuffix(model_type);
-  std::string full_histogram_name =
-      kModelTypeMemoryHistogramPrefix + type_string;
-  base::UmaHistogramCounts1M(full_histogram_name, bytes / 1024);
+void SyncRecordDataTypeMemoryHistogram(DataType data_type, size_t bytes) {
+  base::UmaHistogramCounts1M(
+      base::StrCat({kDataTypeMemoryHistogramPrefix,
+                    DataTypeToHistogramSuffix(data_type)}),
+      bytes / 1024);
 }
 
-void SyncRecordModelTypeCountHistogram(ModelType model_type, size_t count) {
-  std::string type_string = ModelTypeToHistogramSuffix(model_type);
-  std::string full_histogram_name =
-      kModelTypeCountHistogramPrefix + type_string;
-  base::UmaHistogramCounts1M(full_histogram_name, count);
+void SyncRecordDataTypeCountHistogram(DataType data_type, size_t count) {
+  base::UmaHistogramCounts1M(
+      base::StrCat({kDataTypeCountHistogramPrefix,
+                    DataTypeToHistogramSuffix(data_type)}),
+      count);
 }
 
-void SyncRecordModelTypeEntitySizeHistogram(ModelType model_type,
-                                            size_t bytes) {
-  std::string type_string = ModelTypeToHistogramSuffix(model_type);
-  std::string full_histogram_name =
-      kSyncEntitySizeHistogramPrefix + type_string;
-  base::UmaHistogramCounts100000(full_histogram_name, bytes);
+void SyncRecordDataTypeEntitySizeHistogram(DataType data_type,
+                                           bool is_tombstone,
+                                           size_t specifics_bytes,
+                                           size_t total_bytes) {
+  std::string_view type_string = DataTypeToHistogramSuffix(data_type);
+  if (is_tombstone) {
+    // For tombstones, don't bother recording the `specifics_size` since the
+    // specifics is always empty.
+    base::UmaHistogramCounts100000(
+        base::StrCat({kEntitySizeTombstoneHistogramPrefix, type_string}),
+        total_bytes);
+  } else {
+    base::UmaHistogramCounts100000(
+        base::StrCat({kEntitySizeSpecificsOnlyHistogramPrefix, type_string}),
+        specifics_bytes);
+    base::UmaHistogramCounts100000(
+        base::StrCat({kEntitySizeWithMetadataHistogramPrefix, type_string}),
+        total_bytes);
+  }
+}
+
+void SyncRecordDataTypeNumUnsyncedEntitiesFromDataCounts(
+    UnsyncedDataRecordingEvent event,
+    absl::flat_hash_map<DataType, size_t> unsynced_data) {
+  for (const auto& [type, count] : unsynced_data) {
+    base::UmaHistogramCounts1000(
+        base::StrCat({kDataTypeNumUnsyncedEntities,
+                      SyncGetNumUnsyncedEntitiesHistogramSuffix(event), ".",
+                      DataTypeToHistogramSuffix(type)}),
+        count);
+  }
+}
+
+void RecordSyncToSigninMigrationReadingListStep(ReadingListMigrationStep step) {
+  base::UmaHistogramEnumeration(
+      "Sync.SyncToSigninMigration.ReadingListMigrationStep", step);
+}
+
+void RecordSyncToSigninMigrationExtensionsStep(
+    SyncToSigninMigrationExtensionsStep step) {
+  base::UmaHistogramEnumeration(
+      "Sync.SyncToSigninMigration.ExtensionsMigrationStep", step);
+}
+
+void RecordSyncToSigninMigrationExtensionsDeduplicatedCount(int count) {
+  base::UmaHistogramCounts100(
+      "Sync.SyncToSigninMigrationOutcome.ExtensionsDeduplicatedCount", count);
+}
+
+void RecordSyncToSigninMigrationThemeStep(SyncToSigninMigrationThemeStep step) {
+  base::UmaHistogramEnumeration("Sync.SyncToSigninMigration.ThemeMigrationStep",
+                                step);
+}
+
+void RecordSyncToSigninMigrationThemeOutcome(
+    SyncToSigninMigrationThemeOutcome outcome) {
+  base::UmaHistogramEnumeration(
+      "Sync.SyncToSigninMigrationOutcome.ThemeDeduplication", outcome);
+}
+
+void RecordSyncToSigninMigrationStatsTableCleanupStep(
+    SyncToSigninMigrationStatsTableCleanupStep step) {
+  base::UmaHistogramEnumeration(
+      "Sync.SyncToSigninMigration.StatsTableCleanupStep", step);
 }
 
 }  // namespace syncer

@@ -5,6 +5,7 @@
 #include "third_party/blink/renderer/core/html/parser/html_preload_scanner.h"
 
 #include <memory>
+
 #include "base/strings/stringprintf.h"
 #include "base/test/scoped_feature_list.h"
 #include "services/network/public/mojom/web_client_hints_types.mojom-blink.h"
@@ -12,6 +13,7 @@
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/platform/web_runtime_features.h"
 #include "third_party/blink/renderer/core/css/media_values_cached.h"
+#include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/html/cross_origin_attribute.h"
@@ -20,12 +22,13 @@
 #include "third_party/blink/renderer/core/html/parser/html_resource_preloader.h"
 #include "third_party/blink/renderer/core/html/parser/html_tokenizer.h"
 #include "third_party/blink/renderer/core/html/parser/preload_request.h"
+#include "third_party/blink/renderer/core/lcp_critical_path_predictor/element_locator.h"
 #include "third_party/blink/renderer/core/media_type_names.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
 #include "third_party/blink/renderer/platform/exported/wrapped_resource_response.h"
-#include "third_party/blink/renderer/platform/loader/attribution_header_constants.h"
 #include "third_party/blink/renderer/platform/loader/fetch/client_hints_preferences.h"
 #include "third_party/blink/renderer/platform/network/http_names.h"
+#include "third_party/blink/renderer/platform/network/http_parsers.h"
 #include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/url_loader_mock_factory.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
@@ -41,6 +44,12 @@ struct PreloadScannerTestCase {
   ResourceType type;
   int resource_width;
   ClientHintsPreferences preferences;
+};
+
+struct RenderBlockingTestCase {
+  const char* base_url;
+  const char* input_html;
+  RenderBlockingBehavior renderBlocking;
 };
 
 struct HTMLPreconnectTestCase {
@@ -96,16 +105,16 @@ struct IntegrityTestCase {
 
 struct LazyLoadImageTestCase {
   const char* input_html;
-  bool lazy_load_image_enabled;
+  bool should_preload;
 };
 
-struct AttributionSrcTestCase {
-  bool use_secure_document_url;
-  const char* base_url;
+struct TokenStreamMatcherTestCase {
+  ElementLocator locator;
   const char* input_html;
-  const char* expected_eligible_header;
-  const char* expected_support_header;
+  const char* potentially_lcp_preload_url;
+  bool should_preload;
 };
+
 
 class HTMLMockHTMLResourcePreloader : public ResourcePreloader {
  public:
@@ -132,7 +141,7 @@ class HTMLMockHTMLResourcePreloader : public ResourcePreloader {
       EXPECT_EQ(type, preload_request_->GetResourceType());
       EXPECT_EQ(url, preload_request_->ResourceURL());
       EXPECT_EQ(base_url, preload_request_->BaseURL().GetString());
-      EXPECT_EQ(width, preload_request_->ResourceWidth());
+      EXPECT_EQ(width, preload_request_->GetResourceWidth().value_or(0));
 
       ClientHintsPreferences preload_preferences;
       for (const auto& value : preload_data_->meta_ch_values) {
@@ -196,6 +205,12 @@ class HTMLMockHTMLResourcePreloader : public ResourcePreloader {
               resource->GetResourceRequest().ReferrerString());
   }
 
+  void RenderBlockingRequestVerification(
+      RenderBlockingBehavior renderBlocking) {
+    ASSERT_TRUE(preload_request_);
+    EXPECT_EQ(preload_request_->GetRenderBlockingBehavior(), renderBlocking);
+  }
+
   void PreconnectRequestVerification(const String& host,
                                      CrossOriginAttributeValue cross_origin) {
     if (!host.IsNull()) {
@@ -233,33 +248,26 @@ class HTMLMockHTMLResourcePreloader : public ResourcePreloader {
   void CheckNumberOfIntegrityConstraints(size_t expected) {
     size_t actual = 0;
     if (preload_request_) {
-      actual = preload_request_->IntegrityMetadataForTestingOnly().size();
+      IntegrityMetadataSet test_set =
+          preload_request_->IntegrityMetadataForTestingOnly();
+      actual = test_set.hashes.size() + test_set.public_keys.size();
       EXPECT_EQ(expected, actual);
     }
   }
 
-  void LazyLoadImageEnabledVerification(bool expected_enabled) {
-    if (expected_enabled) {
-      EXPECT_FALSE(preload_request_) << preload_request_->ResourceURL();
+  void LazyLoadImagePreloadVerification(bool expected) {
+    if (expected) {
+      EXPECT_TRUE(preload_request_.get());
     } else {
-      ASSERT_TRUE(preload_request_.get());
+      EXPECT_FALSE(preload_request_) << preload_request_->ResourceURL();
     }
   }
 
-  void AttributionSrcRequestVerification(Document* document,
-                                         const char* expected_eligible_header,
-                                         const char* expected_support_header) {
-    ASSERT_TRUE(preload_request_.get());
-    Resource* resource = preload_request_->Start(document);
-    ASSERT_TRUE(resource);
-
-    EXPECT_EQ(expected_eligible_header,
-              resource->GetResourceRequest().HttpHeaderField(
-                  http_names::kAttributionReportingEligible));
-    EXPECT_EQ(expected_support_header,
-              resource->GetResourceRequest().HttpHeaderField(
-                  http_names::kAttributionReportingSupport));
+  void IsPotentiallyLCPElementFlagVerification(bool expected) {
+    EXPECT_EQ(expected, preload_request_->IsPotentiallyLCPElement())
+        << preload_request_->ResourceURL();
   }
+
 
  protected:
   void Preload(std::unique_ptr<PreloadRequest> preload_request) override {
@@ -284,20 +292,21 @@ class HTMLPreloadScannerTest : public PageTestBase {
     kPreloadDisabled,
   };
 
-  MediaValuesCached::MediaValuesCachedData CreateMediaValuesData() {
-    MediaValuesCached::MediaValuesCachedData data;
-    data.viewport_width = 500;
-    data.viewport_height = 600;
-    data.device_width = 700;
-    data.device_height = 800;
-    data.device_pixel_ratio = 2.0;
-    data.color_bits_per_component = 24;
-    data.monochrome_bits_per_component = 0;
-    data.primary_pointer_type = mojom::blink::PointerType::kPointerFineType;
-    data.three_d_enabled = true;
-    data.media_type = media_type_names::kScreen;
-    data.strict_mode = true;
-    data.display_mode = blink::mojom::DisplayMode::kBrowser;
+  std::unique_ptr<MediaValuesCached::MediaValuesCachedData>
+  CreateMediaValuesData() {
+    auto data = std::make_unique<MediaValuesCached::MediaValuesCachedData>();
+    data->viewport_width = 500;
+    data->viewport_height = 600;
+    data->device_width = 700;
+    data->device_height = 800;
+    data->device_pixel_ratio = 2.0;
+    data->color_bits_per_component = 24;
+    data->monochrome_bits_per_component = 0;
+    data->primary_pointer_type = mojom::blink::PointerType::kPointerFineType;
+    data->three_d_enabled = true;
+    data->media_type = media_type_names::kScreen;
+    data->strict_mode = true;
+    data->display_mode = blink::mojom::DisplayMode::kBrowser;
     return data;
   }
 
@@ -305,7 +314,8 @@ class HTMLPreloadScannerTest : public PageTestBase {
                 PreloadState preload_state = kPreloadEnabled,
                 network::mojom::ReferrerPolicy document_referrer_policy =
                     network::mojom::ReferrerPolicy::kDefault,
-                bool use_secure_document_url = false) {
+                bool use_secure_document_url = false,
+                Vector<ElementLocator> locators = {}) {
     HTMLParserOptions options(&GetDocument());
     KURL document_url = KURL("http://whatever.test/");
     if (use_secure_document_url)
@@ -319,10 +329,12 @@ class HTMLPreloadScannerTest : public PageTestBase {
                                                           kPreloadEnabled);
     GetFrame().DomWindow()->SetReferrerPolicy(document_referrer_policy);
     scanner_ = std::make_unique<HTMLPreloadScanner>(
-        std::make_unique<HTMLTokenizer>(options), false, document_url,
+        std::make_unique<HTMLTokenizer>(options), document_url,
         std::make_unique<CachedDocumentParameters>(&GetDocument()),
         CreateMediaValuesData(),
-        TokenPreloadScanner::ScannerType::kMainDocument, nullptr);
+        TokenPreloadScanner::ScannerType::kMainDocument,
+        /* script_token_scanner=*/nullptr,
+        /* take_preload=*/HTMLPreloadScanner::TakePreloadFn(), locators);
   }
 
   void SetUp() override {
@@ -341,6 +353,18 @@ class HTMLPreloadScannerTest : public PageTestBase {
     preloader.PreloadRequestVerification(
         test_case.type, test_case.preloaded_url, test_case.output_base_url,
         test_case.resource_width, test_case.preferences);
+  }
+
+  void Test(RenderBlockingTestCase test_case) {
+    SCOPED_TRACE(test_case.input_html);
+    RunSetUp(kViewportEnabled, kPreloadEnabled,
+             network::mojom::ReferrerPolicy::kDefault, true);
+    HTMLMockHTMLResourcePreloader preloader(GetDocument().Url());
+    KURL base_url(test_case.base_url);
+    scanner_->AppendToEnd(String(test_case.input_html));
+    std::unique_ptr<PendingPreloadData> preload_data = scanner_->Scan(base_url);
+    preloader.TakePreloadData(std::move(preload_data));
+    preloader.RenderBlockingRequestVerification(test_case.renderBlocking);
   }
 
   void Test(HTMLPreconnectTestCase test_case) {
@@ -387,7 +411,7 @@ class HTMLPreloadScannerTest : public PageTestBase {
     KURL base_url(test_case.base_url);
     scanner_->AppendToEnd(String(test_case.input_html));
     auto data = scanner_->Scan(base_url);
-    EXPECT_EQ(test_case.should_see_csp_tag, data->has_csp_meta_tag);
+    EXPECT_EQ(test_case.should_see_csp_tag, data->csp_meta_tag_count > 0);
   }
 
   void Test(NonceTestCase test_case) {
@@ -428,23 +452,31 @@ class HTMLPreloadScannerTest : public PageTestBase {
     scanner_->AppendToEnd(String(test_case.input_html));
     std::unique_ptr<PendingPreloadData> preload_data = scanner_->Scan(base_url);
     preloader.TakePreloadData(std::move(preload_data));
-    preloader.LazyLoadImageEnabledVerification(
-        test_case.lazy_load_image_enabled);
+    preloader.LazyLoadImagePreloadVerification(test_case.should_preload);
   }
 
-  void Test(AttributionSrcTestCase test_case) {
+  void Test(TokenStreamMatcherTestCase test_case) {
     SCOPED_TRACE(test_case.input_html);
-    HTMLMockHTMLResourcePreloader preloader(GetDocument().Url());
-    KURL base_url(test_case.base_url);
+    RunSetUp(kViewportEnabled, kPreloadEnabled,
+             network::mojom::ReferrerPolicy::kDefault,
+             /* use_secure_document_url=*/true, {test_case.locator});
     scanner_->AppendToEnd(String(test_case.input_html));
-    std::unique_ptr<PendingPreloadData> preload_data = scanner_->Scan(base_url);
-    preloader.TakePreloadData(std::move(preload_data));
-    preloader.AttributionSrcRequestVerification(
-        &GetDocument(), test_case.expected_eligible_header,
-        test_case.expected_support_header);
+    std::unique_ptr<PendingPreloadData> preload_data =
+        scanner_->Scan(GetDocument().Url());
+    int count = 0;
+    for (const auto& request_ptr : preload_data->requests) {
+      if (request_ptr->IsPotentiallyLCPElement()) {
+        EXPECT_EQ(request_ptr->ResourceURL(),
+                  String(test_case.potentially_lcp_preload_url));
+        count++;
+      }
+    }
+
+    EXPECT_EQ(test_case.should_preload ? 1 : 0, count);
   }
 
- private:
+
+ protected:
   std::unique_ptr<HTMLPreloadScanner> scanner_;
 };
 
@@ -500,6 +532,140 @@ TEST_F(HTMLPreloadScannerTest, testImages) {
 
   for (const auto& test_case : test_cases)
     Test(test_case);
+}
+
+TEST_F(HTMLPreloadScannerTest, testLinkRelStylesheetDisabled) {
+  PreloadScannerTestCase test_cases[] = {
+      {"http://example.test", "<link rel=stylesheet href='sheet.css'>",
+       "sheet.css", "http://example.test/", ResourceType::kCSSStyleSheet, 0},
+      // The real parser does not load disabled stylesheets, so the
+      // speculative parser must not fetch them either.
+      {"http://example.test", "<link rel=stylesheet href='sheet.css' disabled>",
+       nullptr, "http://example.test/", ResourceType::kCSSStyleSheet, 0},
+      {"http://example.test",
+       "<link rel=stylesheet href='sheet.css' disabled=''>", nullptr,
+       "http://example.test/", ResourceType::kCSSStyleSheet, 0},
+      // disabled only applies to stylesheets, not to rel=preload.
+      {"http://example.test",
+       "<link rel=preload as=style href='sheet.css' disabled>", "sheet.css",
+       "http://example.test/", ResourceType::kCSSStyleSheet, 0},
+  };
+
+  for (const auto& test_case : test_cases) {
+    Test(test_case);
+  }
+}
+
+TEST_F(HTMLPreloadScannerTest, testImageElement) {
+  PreloadScannerTestCase test_cases[] = {
+      // A bare <image> is rewritten to <img> by the tree builder.
+      {"http://example.test", "<image src='bla.gif'>", "bla.gif",
+       "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test", "<image srcset='bla.gif 320w, blabla.gif 640w'>",
+       "blabla.gif", "http://example.test/", ResourceType::kImage, 0},
+      // In SVG/MathML foreign content <image> is not rewritten and has no src
+      // loading.
+      {"http://example.test", "<svg><image src='bla.gif'></image></svg>",
+       nullptr, "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test", "<math><image src='bla.gif'></image></math>",
+       nullptr, "http://example.test/", ResourceType::kImage, 0},
+      // The rewrite resumes after the foreign content subtree closes.
+      {"http://example.test", "<svg></svg><image src='bla.gif'>", "bla.gif",
+       "http://example.test/", ResourceType::kImage, 0},
+  };
+
+  for (const auto& test_case : test_cases) {
+    Test(test_case);
+  }
+}
+
+TEST_F(HTMLPreloadScannerTest, testSVGImage) {
+  PreloadScannerTestCase test_cases[] = {
+      // SVG <image> loads via href/xlink:href, not src.
+      {"http://example.test", "<svg><image href='bla.gif'></image></svg>",
+       "bla.gif", "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test", "<svg><image xlink:href='bla.gif'></image></svg>",
+       "bla.gif", "http://example.test/", ResourceType::kImage, 0},
+      // href takes precedence over xlink:href regardless of order.
+      {"http://example.test",
+       "<svg><image href='a.gif' xlink:href='b.gif'></image></svg>", "a.gif",
+       "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test",
+       "<svg><image xlink:href='b.gif' href='a.gif'></image></svg>", "a.gif",
+       "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test", "<svg><image src='bla.gif'></image></svg>",
+       nullptr, "http://example.test/", ResourceType::kImage, 0},
+      // MathML <image> is an unknown element and does not load.
+      {"http://example.test", "<math><image href='bla.gif'></image></math>",
+       nullptr, "http://example.test/", ResourceType::kImage, 0},
+      // HTML <image> becomes <img>, which has no href attribute.
+      {"http://example.test", "<image href='bla.gif'>", nullptr,
+       "http://example.test/", ResourceType::kImage, 0},
+  };
+
+  for (const auto& test_case : test_cases) {
+    Test(test_case);
+  }
+}
+
+TEST_F(HTMLPreloadScannerTest, testSVGScript) {
+  PreloadScannerTestCase test_cases[] = {
+      // SVG <script> loads via href/xlink:href, not src.
+      {"http://example.test", "<svg><script href='bla.js'></script></svg>",
+       "bla.js", "http://example.test/", ResourceType::kScript, 0},
+      {"http://example.test",
+       "<svg><script xlink:href='bla.js'></script></svg>", "bla.js",
+       "http://example.test/", ResourceType::kScript, 0},
+      // href takes precedence over xlink:href regardless of order.
+      {"http://example.test",
+       "<svg><script href='a.js' xlink:href='b.js'></script></svg>", "a.js",
+       "http://example.test/", ResourceType::kScript, 0},
+      {"http://example.test",
+       "<svg><script xlink:href='b.js' href='a.js'></script></svg>", "a.js",
+       "http://example.test/", ResourceType::kScript, 0},
+      {"http://example.test", "<svg><script src='bla.js'></script></svg>",
+       nullptr, "http://example.test/", ResourceType::kScript, 0},
+      // HTML <script> has no href attribute.
+      {"http://example.test", "<script href='bla.js'></script>", nullptr,
+       "http://example.test/", ResourceType::kScript, 0},
+      {"http://example.test", "<svg></svg><script src='bla.js'></script>",
+       "bla.js", "http://example.test/", ResourceType::kScript, 0},
+  };
+
+  for (const auto& test_case : test_cases) {
+    Test(test_case);
+  }
+}
+
+TEST_F(HTMLPreloadScannerTest, testMathScript) {
+  PreloadScannerTestCase test_cases[] = {
+      // MathML script is an unknown element and does not load.
+      {"http://example.test", "<math><script src='bla.js'></script></math>",
+       nullptr, "http://example.test/", ResourceType::kScript, 0},
+      {"http://example.test",
+       "<math><font><script src='bla.js'></script></font></math>", nullptr,
+       "http://example.test/", ResourceType::kScript, 0},
+      // <font> with face/color/size breaks out of foreign content, making
+      // the script an HTML script.
+      {"http://example.test",
+       "<math><font face=''><script src='bla.js'></script></font></math>",
+       "bla.js", "http://example.test/", ResourceType::kScript, 0},
+      {"http://example.test",
+       "<math><font color='red'><script src='bla.js'></script></font></math>",
+       "bla.js", "http://example.test/", ResourceType::kScript, 0},
+      // Other HTML breakout tags work the same way.
+      {"http://example.test",
+       "<math><div><script src='bla.js'></script></div></math>", "bla.js",
+       "http://example.test/", ResourceType::kScript, 0},
+      {"http://example.test", "<math><img src='bla.gif'></math>", "bla.gif",
+       "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test", "<math></math><script src='bla.js'></script>",
+       "bla.js", "http://example.test/", ResourceType::kScript, 0},
+  };
+
+  for (const auto& test_case : test_cases) {
+    Test(test_case);
+  }
 }
 
 TEST_F(HTMLPreloadScannerTest, testImagesWithViewport) {
@@ -831,6 +997,37 @@ TEST_F(HTMLPreloadScannerTest, testMetaAcceptCHInsecureDocument) {
   Test(expect_client_hint);
 }
 
+TEST_F(HTMLPreloadScannerTest, testRenderBlocking) {
+  RenderBlockingTestCase test_cases[] = {
+      {"http://example.test", "<link rel=preload href='bla.gif' as=image>",
+       RenderBlockingBehavior::kNonBlocking},
+      {"http://example.test",
+       "<script type='module' src='test.js' defer></script>",
+       RenderBlockingBehavior::kNonBlocking},
+      {"http://example.test",
+       "<script type='module' src='test.js' async></script>",
+       RenderBlockingBehavior::kPotentiallyBlocking},
+      {"http://example.test",
+       "<script type='module' src='test.js' defer blocking='render'></script>",
+       RenderBlockingBehavior::kBlocking},
+      {"http://example.test", "<script src='test.js'></script>",
+       RenderBlockingBehavior::kBlocking},
+      {"http://example.test", "<body><script src='test.js'></script></body>",
+       RenderBlockingBehavior::kInBodyParserBlocking},
+      {"http://example.test", "<script src='test.js' disabled></script>",
+       RenderBlockingBehavior::kBlocking},
+      {"http://example.test", "<link rel=stylesheet href=http://example2.test>",
+       RenderBlockingBehavior::kBlocking},
+      {"http://example.test",
+       "<body><link rel=stylesheet href=http://example2.test></body>",
+       RenderBlockingBehavior::kInBodyParserBlocking},
+  };
+
+  for (const auto& test_case : test_cases) {
+    Test(test_case);
+  }
+}
+
 TEST_F(HTMLPreloadScannerTest, testPreconnect) {
   HTMLPreconnectTestCase test_cases[] = {
       {"http://example.test", "<link rel=preconnect href=http://example2.test>",
@@ -934,6 +1131,34 @@ TEST_F(HTMLPreloadScannerTest, testPicture) {
 
   for (const auto& test_case : test_cases)
     Test(test_case);
+}
+
+TEST_F(HTMLPreloadScannerTest, testPictureVoidChildren) {
+  PreloadScannerTestCase test_cases[] = {
+      // Void elements cannot contain the <img>, so it remains a direct
+      // <picture> child and uses the picked <source>.
+      {"http://example.test",
+       "<picture><source srcset='srcset_bla.gif'><br><img "
+       "src='bla.gif'></picture>",
+       "srcset_bla.gif", "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test",
+       "<picture><source srcset='srcset_bla.gif'><br><img></picture>",
+       "srcset_bla.gif", "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test",
+       "<picture><source srcset='srcset_bla.gif'><wbr><img "
+       "src='bla.gif'></picture>",
+       "srcset_bla.gif", "http://example.test/", ResourceType::kImage, 0},
+      // A non-void element may contain the <img>, so the scanner
+      // conservatively stops treating it as a picture child.
+      {"http://example.test",
+       "<picture><source srcset='srcset_bla.gif'><div><img "
+       "src='bla.gif'></div></picture>",
+       "bla.gif", "http://example.test/", ResourceType::kImage, 0},
+  };
+
+  for (const auto& test_case : test_cases) {
+    Test(test_case);
+  }
 }
 
 TEST_F(HTMLPreloadScannerTest, testContext) {
@@ -1073,6 +1298,47 @@ TEST_F(HTMLPreloadScannerTest, testCSP) {
   }
 }
 
+TEST_F(HTMLPreloadScannerTest, BaseURICSPEnforcement) {
+  // Regression test for crbug.com/502354038.
+  KURL document_url("http://whatever.test/");
+  NavigateTo(document_url);
+
+  // Set up the document with a CSP that restricts base-uri to 'none'.
+  GetDocument().GetExecutionContext()->GetContentSecurityPolicy()->AddPolicies(
+      ParseContentSecurityPolicies(
+          "base-uri 'none'",
+          network::mojom::blink::ContentSecurityPolicyType::kEnforce,
+          network::mojom::blink::ContentSecurityPolicySource::kHTTP,
+          document_url));
+
+  // Create the scanner manually after setting up the CSP.
+  HTMLParserOptions options(&GetDocument());
+  scanner_ = std::make_unique<HTMLPreloadScanner>(
+      std::make_unique<HTMLTokenizer>(options), document_url,
+      std::make_unique<CachedDocumentParameters>(&GetDocument()),
+      CreateMediaValuesData(), TokenPreloadScanner::ScannerType::kMainDocument,
+      /* script_token_scanner=*/nullptr,
+      /* take_preload=*/HTMLPreloadScanner::TakePreloadFn(),
+      Vector<ElementLocator>());
+
+  HTMLMockHTMLResourcePreloader preloader(GetDocument().Url());
+
+  // HTML with a cross-origin <base> tag and a relative image.
+  // The <base> tag should be blocked by CSP, so the image should be resolved
+  // against the document URL, not the blocked base URL.
+  scanner_->AppendToEnd(
+      String("<base href='http://attacker.test/'><img src='test.png'>"));
+
+  std::unique_ptr<PendingPreloadData> preload_data = scanner_->Scan(KURL());
+  preloader.TakePreloadData(std::move(preload_data));
+
+  // EXPECTATION: The base URL used for the preload request should be the
+  // original document base URL, NOT the attacker-controlled one from the <base>
+  // tag, because 'http://attacker.test/' violates 'base-uri 'none''.
+  preloader.PreloadRequestVerification(ResourceType::kImage, "test.png",
+                                       nullptr, 0, ClientHintsPreferences());
+}
+
 TEST_F(HTMLPreloadScannerTest, testNonce) {
   NonceTestCase test_cases[] = {
       {"http://example.test", "<script src='/script'></script>", ""},
@@ -1097,48 +1363,31 @@ TEST_F(HTMLPreloadScannerTest, testNonce) {
   }
 }
 
-TEST_F(HTMLPreloadScannerTest, testAttributionSrc) {
-  base::test::ScopedFeatureList scoped_feature_list_{
-      blink::features::kAttributionReportingCrossAppWeb};
-
-  static constexpr bool kSecureDocumentUrl = true;
-  static constexpr bool kInsecureDocumentUrl = false;
-
-  static constexpr char kSecureBaseURL[] = "https://example.test";
-  static constexpr char kInsecureBaseURL[] = "http://example.test";
-
-  AttributionSrcTestCase test_cases[] = {
-      // Insecure context
-      {kInsecureDocumentUrl, kSecureBaseURL,
-       "<img src='/image' attributionsrc>", nullptr, nullptr},
-      {kInsecureDocumentUrl, kSecureBaseURL,
-       "<script src='/script' attributionsrc></script>", nullptr, nullptr},
-      // No attributionsrc attribute
-      {kSecureDocumentUrl, kSecureBaseURL, "<img src='/image'>", nullptr,
-       nullptr},
-      {kSecureDocumentUrl, kSecureBaseURL, "<script src='/script'></script>",
-       nullptr, nullptr},
-      // Irrelevant element type
-      {kSecureDocumentUrl, kSecureBaseURL,
-       "<video poster='/image' attributionsrc>", nullptr, nullptr},
-      // Not potentially trustworthy reporting origin
-      {kSecureDocumentUrl, kInsecureBaseURL,
-       "<img src='/image' attributionsrc>", nullptr, nullptr},
-      {kSecureDocumentUrl, kInsecureBaseURL,
-       "<script src='/script' attributionsrc></script>", nullptr, nullptr},
-      // Secure context, potentially trustworthy reporting origin,
-      // attributionsrc attribute
-      {kSecureDocumentUrl, kSecureBaseURL, "<img src='/image' attributionsrc>",
-       kAttributionEligibleEventSourceAndTrigger, "web"},
-      {kSecureDocumentUrl, kSecureBaseURL,
-       "<script src='/script' attributionsrc></script>",
-       kAttributionEligibleEventSourceAndTrigger, "web"},
+TEST_F(HTMLPreloadScannerTest, testNonceDanglingMarkup) {
+  NonceTestCase test_cases[] = {
+      // Dangling markup in attribute value should strip nonce.
+      {"http://example.test",
+       "<script src='/script' nonce='abc' foo='x<script'></script>", ""},
+      {"http://example.test",
+       "<script src='/script' nonce='abc' foo='x<style'></script>", ""},
+      {"http://example.test",
+       "<script src='/script' nonce='abc' foo='x<link'></script>", ""},
+      // Dangling markup in attribute name should strip nonce.
+      {"http://example.test",
+       "<script src='/script' nonce='abc' x<script='foo'></script>", ""},
+      // Duplicate attributes should strip nonce.
+      {"http://example.test",
+       "<script src='/script' nonce='abc' foo='a' foo='b'></script>", ""},
+      // Normal case: nonce preserved when no dangling markup signals.
+      {"http://example.test", "<script src='/script' nonce='abc'></script>",
+       "abc"},
+      // Link with dangling markup should also be stripped.
+      {"http://example.test",
+       "<link rel='stylesheet' href='/style' nonce='abc' bar='<link'>", ""},
   };
 
   for (const auto& test_case : test_cases) {
-    RunSetUp(kViewportDisabled, kPreloadEnabled,
-             network::mojom::ReferrerPolicy::kDefault,
-             /*use_secure_document_url=*/test_case.use_secure_document_url);
+    SCOPED_TRACE(test_case.input_html);
     Test(test_case);
   }
 }
@@ -1224,21 +1473,6 @@ TEST_F(HTMLPreloadScannerTest, testLinkRelPreload) {
        nullptr, "http://example.test/", ResourceType::kImage, 0},
       {"http://example.test", "<link rel=preload href=bla>", nullptr,
        "http://example.test/", ResourceType::kRaw, 0},
-  };
-
-  for (const auto& test_case : test_cases)
-    Test(test_case);
-}
-
-TEST_F(HTMLPreloadScannerTest, testNoDataUrls) {
-  PreloadScannerTestCase test_cases[] = {
-      {"http://example.test",
-       "<link rel=preload href='data:text/html,<p>data</data>'>", nullptr,
-       "http://example.test/", ResourceType::kRaw, 0},
-      {"http://example.test", "<img src='data:text/html,<p>data</data>'>",
-       nullptr, "http://example.test/", ResourceType::kImage, 0},
-      {"data:text/html,<a>anchor</a>", "<img src='#anchor'>", nullptr,
-       "http://example.test/", ResourceType::kImage, 0},
   };
 
   for (const auto& test_case : test_cases)
@@ -1352,186 +1586,66 @@ TEST_F(HTMLPreloadScannerTest, Integrity) {
     Test(test_case);
 }
 
+class MetaCspNoPreloadsAfterTest : public HTMLPreloadScannerTest,
+                                   public ::testing::WithParamInterface<bool> {
+ public:
+  MetaCspNoPreloadsAfterTest() : scopedAllow(GetParam()) {}
+
+  bool ExpectPreloads() const { return GetParam(); }
+
+ private:
+  blink::RuntimeEnabledFeaturesTestHelpers::ScopedAllowPreloadingWithCSPMetaTag
+      scopedAllow;
+};
+
+INSTANTIATE_TEST_SUITE_P(MetaCspNoPreloadsAfterTests,
+                         MetaCspNoPreloadsAfterTest,
+                         testing::Bool());
+
 // Regression test for http://crbug.com/898795 where preloads after a
 // dynamically inserted meta csp tag are dispatched on subsequent calls to the
 // HTMLPreloadScanner, after they had been parsed.
-TEST_F(HTMLPreloadScannerTest, MetaCsp_NoPreloadsAfter) {
+TEST_P(MetaCspNoPreloadsAfterTest, NoPreloadsAfter) {
   PreloadScannerTestCase test_cases[] = {
       {"http://example.test",
        "<meta http-equiv='Content-Security-Policy'><link rel=preload href=bla "
        "as=SCRIPT>",
-       nullptr, "http://example.test/", ResourceType::kScript, 0},
-      // The buffered text referring to the preload above should be cleared, so
-      // make sure it is not preloaded on subsequent calls to Scan.
+       ExpectPreloads() ? "bla" : nullptr, "http://example.test/",
+       ResourceType::kScript, 0},
+      // The buffered text referring to the preload above should be
+      // cleared, so make sure it is not preloaded on subsequent calls to
+      // Scan.
       {"http://example.test", "", nullptr, "http://example.test/",
        ResourceType::kScript, 0},
   };
 
-  for (const auto& test_case : test_cases)
+  for (const auto& test_case : test_cases) {
     Test(test_case);
+  }
 }
 
-TEST_F(HTMLPreloadScannerTest, LazyLoadImage_SmallImages) {
-  ScopedLazyImageLoadingForTest scoped_lazy_image_loading_for_test(true);
+TEST_F(HTMLPreloadScannerTest, LazyLoadImage) {
   RunSetUp(kViewportEnabled);
   LazyLoadImageTestCase test_cases[] = {
-      {"<img src='foo.jpg' loading='lazy'>", true},
-      {"<img src='foo.jpg' height='1px' width='1px' loading='lazy'>", true},
-      {"<img src='foo.jpg' style='height: 1px; width: 1px' loading='lazy'>",
-       true},
-      {"<img src='foo.jpg' height='10px' width='10px' loading='lazy'>", true},
-      {"<img src='foo.jpg' style='height: 10px; width: 10px' loading='lazy'>",
-       true},
-      {"<img src='foo.jpg' height='1px' loading='lazy'>", true},
-      {"<img src='foo.jpg' style='height: 1px;' loading='lazy'>", true},
-      {"<img src='foo.jpg' width='1px' loading='lazy'>", true},
-      {"<img src='foo.jpg' style='width: 1px;' loading='lazy'>", true},
-  };
-
-  for (const auto& test_case : test_cases)
-    Test(test_case);
-}
-
-TEST_F(HTMLPreloadScannerTest, LazyLoadImage_FeatureDisabledWithAttribute) {
-  ScopedLazyImageLoadingForTest scoped_lazy_image_loading_for_test(false);
-  RunSetUp(kViewportEnabled);
-  LazyLoadImageTestCase test_cases[] = {
-      {"<img src='foo.jpg' loading='auto'>", false},
+      {"<img src='foo.jpg' loading='auto'>", true},
       {"<img src='foo.jpg' loading='lazy'>", false},
-      {"<img src='foo.jpg' loading='eager'>", false},
+      {"<img src='foo.jpg' loading='eager'>", true},
   };
   for (const auto& test_case : test_cases)
     Test(test_case);
 }
 
-TEST_F(HTMLPreloadScannerTest,
-       LazyLoadImage_FeatureAutomaticEnabledWithAttribute) {
-  ScopedLazyImageLoadingForTest scoped_lazy_image_loading_for_test(true);
+TEST_F(HTMLPreloadScannerTest, LazyLoadVideoPoster) {
+  ScopedLazyLoadVideoAndAudioForTest scoped_feature(true);
   RunSetUp(kViewportEnabled);
   LazyLoadImageTestCase test_cases[] = {
-      {"<img src='foo.jpg' loading='auto'>", false},
-      {"<img src='foo.jpg' loading='lazy'>", true},
-      {"<img src='foo.jpg' loading='eager'>", false},
-      // loading=lazy should override other conditions.
-      {"<img src='foo.jpg' style='height: 1px;' loading='lazy'>", true},
-      {"<img src='foo.jpg' style='height: 1px; width: 1px' loading='lazy'>",
-       true},
-  };
-  for (const auto& test_case : test_cases)
-    Test(test_case);
-}
-
-TEST_F(HTMLPreloadScannerTest,
-       LazyLoadImage_FeatureExplicitEnabledWithAttribute) {
-  ScopedLazyImageLoadingForTest scoped_lazy_image_loading_for_test(true);
-  RunSetUp(kViewportEnabled);
-  LazyLoadImageTestCase test_cases[] = {
-      {"<img src='foo.jpg' loading='auto'>", false},
-      {"<img src='foo.jpg' loading='lazy'>", true},
-      {"<img src='foo.jpg' loading='eager'>", false},
-  };
-  for (const auto& test_case : test_cases)
-    Test(test_case);
-}
-
-TEST_F(HTMLPreloadScannerTest,
-       LazyLoadImage_FeatureAutomaticPreloadForLargeImages) {
-  // Large images should not be preloaded, when loading is auto or lazy.
-  ScopedLazyImageLoadingForTest scoped_lazy_image_loading_for_test(true);
-  RunSetUp(kViewportEnabled);
-  PreloadScannerTestCase test_cases[] = {
-      {"http://example.test",
-       "<img src='foo.jpg' height='20px' width='20px' loading='lazy'>", nullptr,
-       "http://example.test/", ResourceType::kImage, 0},
-      {"http://example.test",
-       "<img src='foo.jpg' style='height: 20px; width: 20px' loading='lazy'>",
-       nullptr, "http://example.test/", ResourceType::kImage, 0},
-      {"http://example.test",
-       "<img src='foo.jpg' height='20px' width='20px' loading='lazy'>", nullptr,
-       "http://example.test/", ResourceType::kImage, 0},
-      {"http://example.test",
-       "<img src='foo.jpg' height='20px' width='20px' loading='lazy'>", nullptr,
-       "http://example.test/", ResourceType::kImage, 0},
-      {"http://example.test",
-       "<img src='foo.jpg' style='height: 20px; width: 20px' loading='lazy'>",
-       nullptr, "http://example.test/", ResourceType::kImage, 0},
-      {"http://example.test",
-       "<img src='foo.jpg' style='height: 20px; width: 20px' loading='lazy'>",
-       nullptr, "http://example.test/", ResourceType::kImage, 0},
-  };
-  for (const auto& test_case : test_cases)
-    Test(test_case);
-
-  // When loading is eager, lazyload is disabled and preload happens.
-  LazyLoadImageTestCase test_cases_that_preload[] = {
-      {"<img src='foo.jpg' height='20px' width='20px' loading='eager'>", false},
-      {"<img src='foo.jpg' style='height: 20px; width: 20px' loading='eager'>",
-       false},
-  };
-  for (const auto& test_case : test_cases_that_preload)
-    Test(test_case);
-}
-
-TEST_F(HTMLPreloadScannerTest,
-       LazyLoadImage_FeatureExplicitPreloadForLargeImages) {
-  // Large images should not be preloaded, when loading is lazy.
-  ScopedLazyImageLoadingForTest scoped_lazy_image_loading_for_test(true);
-  RunSetUp(kViewportEnabled);
-  PreloadScannerTestCase test_cases[] = {
-      {"http://example.test",
-       "<img src='foo.jpg' height='20px' width='20px' loading='lazy'>", nullptr,
-       "http://example.test/", ResourceType::kImage, 0},
-      {"http://example.test",
-       "<img src='foo.jpg' style='height: 20px; width: 20px' loading='lazy'>",
-       nullptr, "http://example.test/", ResourceType::kImage, 0},
-  };
-  for (const auto& test_case : test_cases)
-    Test(test_case);
-
-  // When loading is eager or auto, lazyload is disabled and preload happens.
-  LazyLoadImageTestCase test_cases_that_preload[] = {
-      {"<img src='foo.jpg' height='20px' width='20px' loading='eager'>", false},
-      {"<img src='foo.jpg' style='height: 20px; width: 20px' loading='eager'>",
-       false},
-      {"<img src='foo.jpg' height='20px' width='20px' loading='auto'>", false},
-      {"<img src='foo.jpg' style='height: 20px; width: 20px' loading='auto'>",
-       false},
-  };
-  for (const auto& test_case : test_cases_that_preload)
-    Test(test_case);
-}
-
-// TODO(domfarolino): Before merging, can we just delete this test, since we no
-// longer have metadata fetching?
-TEST_F(HTMLPreloadScannerTest, LazyLoadImage_DisableMetadataFetch) {
-  struct TestCase {
-    const char* loading_attr_value;
-    bool expected_is_preload;
-  };
-  const TestCase test_cases[] = {
-      // The lazyload eligible cases should not trigger a preload.
-      {"lazy", false},
-
-      // Lazyload ineligible case.
-      {"auto", true},
-
-      // Full image should be fetched when loading='eager' irrespective of
-      // automatic lazyload feature state.
-      {"eager", true},
+      {"<video poster='foo.jpg'>", true},
+      {"<video poster='foo.jpg' loading='lazy'>", false},
+      {"<video poster='foo.jpg' loading='eager'>", true},
+      {"<video poster='foo.jpg' loading='auto'>", true},
   };
   for (const auto& test_case : test_cases) {
-    RunSetUp(kViewportEnabled);
-    const std::string img_html = base::StringPrintf(
-        "<img src='foo.jpg' loading='%s'>", test_case.loading_attr_value);
-    if (test_case.expected_is_preload) {
-      LazyLoadImageTestCase test_preload = {img_html.c_str(), false};
-      Test(test_preload);
-    } else {
-      PreloadScannerTestCase test_no_preload = {
-          "http://example.test",  img_html.c_str(),     nullptr,
-          "http://example.test/", ResourceType::kImage, 0};
-      Test(test_no_preload);
-    }
+    Test(test_case);
   }
 }
 
@@ -1739,6 +1853,202 @@ TEST_F(HTMLPreloadScannerTest, PreloadLayeredImport) {
 
   for (const auto& test : test_cases)
     Test(test);
+}
+
+TEST_F(HTMLPreloadScannerTest, TokenStreamMatcher) {
+  ElementLocator locator;
+  auto* c = locator.add_components()->mutable_id();
+  c->set_id_attr("target");
+
+  TokenStreamMatcherTestCase test_case = {locator,
+                                          R"HTML(
+    <div>
+      <img src="not-interesting.jpg">
+      <img src="super-interesting.jpg" id="target">
+      <img src="not-interesting2.jpg">
+    </div>
+    )HTML",
+                                          "super-interesting.jpg", true};
+  Test(test_case);
+}
+
+
+class HTMLPreloadScannerDataUrlsTest
+    : public HTMLPreloadScannerTest,
+      public testing::WithParamInterface<bool> {
+ public:
+  HTMLPreloadScannerDataUrlsTest() = default;
+
+ protected:
+  bool IsPreloadLinkRelDataUrlsEnabled() { return GetParam(); }
+};
+
+INSTANTIATE_TEST_SUITE_P(HTMLPreloadScannerDataUrlsTest,
+                         HTMLPreloadScannerDataUrlsTest,
+                         testing::Bool());
+
+TEST_P(HTMLPreloadScannerDataUrlsTest, testDataUrls) {
+  ScopedPreloadLinkRelDataUrlsForTest preload_link_rel_data_urls(
+      IsPreloadLinkRelDataUrlsEnabled());
+  PreloadScannerTestCase test_cases[] = {
+      {"http://example.test",
+       "<link rel=preload href='data:text/html,<p>data</data>'>", nullptr,
+       "http://example.test/", ResourceType::kRaw, 0},
+      {"http://example.test",
+       "<link rel=preload as=style "
+       "href='data:text/css;charset=UTF-8,*%7Bcolor%3Ablue%3B%7D'>",
+       IsPreloadLinkRelDataUrlsEnabled()
+           ? "data:text/css;charset=UTF-8,*%7Bcolor%3Ablue%3B%7D"
+           : nullptr,
+       "http://example.test/", ResourceType::kCSSStyleSheet, 0},
+      {"http://example.test", "<img src='data:text/html,<p>data</data>'>",
+       nullptr, "http://example.test/", ResourceType::kImage, 0},
+      {"data:text/html,<a>anchor</a>", "<img src='#anchor'>", nullptr,
+       "http://example.test/", ResourceType::kImage, 0},
+      {"http://example.test",
+       "<link rel=preload as=image "
+       "href='data:image/"
+       "png;base64,"
+       "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVQYlWNk+M/"
+       "wn4GBgYGJAQoAHhgCAh6X4CYAAAAASUVORK5CYII='>",
+       IsPreloadLinkRelDataUrlsEnabled()
+           ? "data:image/"
+             "png;base64,"
+             "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVQYlWNk+M/"
+             "wn4GBgYGJAQoAHhgCAh6X4CYAAAAASUVORK5CYII="
+           : nullptr,
+       "http://example.test/", ResourceType::kImage, 0},
+  };
+
+  for (const auto& test_case : test_cases) {
+    HTMLPreloadScannerTest::Test(test_case);
+  }
+}
+
+enum class LcppPreloadLazyLoadImageType {
+  kNativeLazyLoad,
+  kCustomLazyLoad,
+  kAll,
+};
+
+class HTMLPreloadScannerLCPPLazyLoadImageTest
+    : public HTMLPreloadScannerTest,
+      public testing::WithParamInterface<LcppPreloadLazyLoadImageType> {
+ public:
+  HTMLPreloadScannerLCPPLazyLoadImageTest() {
+    switch (GetParam()) {
+      case LcppPreloadLazyLoadImageType::kNativeLazyLoad:
+        scoped_feature_list_.InitAndEnableFeatureWithParameters(
+            blink::features::kLCPPLazyLoadImagePreload,
+            {{blink::features::kLCPCriticalPathPredictorPreloadLazyLoadImageType
+                  .name,
+              "native_lazy_loading"}});
+        break;
+      case LcppPreloadLazyLoadImageType::kCustomLazyLoad:
+        scoped_feature_list_.InitAndEnableFeatureWithParameters(
+            blink::features::kLCPPLazyLoadImagePreload,
+            {{blink::features::kLCPCriticalPathPredictorPreloadLazyLoadImageType
+                  .name,
+              "custom_lazy_loading"}});
+        break;
+      case LcppPreloadLazyLoadImageType::kAll:
+        scoped_feature_list_.InitAndEnableFeatureWithParameters(
+            blink::features::kLCPPLazyLoadImagePreload,
+            {{blink::features::kLCPCriticalPathPredictorPreloadLazyLoadImageType
+                  .name,
+              "all"}});
+        break;
+    }
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    HTMLPreloadScannerLCPPLazyLoadImageTest,
+    ::testing::Values(LcppPreloadLazyLoadImageType::kNativeLazyLoad,
+                      LcppPreloadLazyLoadImageType::kCustomLazyLoad,
+                      LcppPreloadLazyLoadImageType::kAll));
+
+TEST_P(HTMLPreloadScannerLCPPLazyLoadImageTest,
+       TokenStreamMatcherWithLoadingLazy) {
+  ElementLocator locator;
+  auto* c = locator.add_components()->mutable_id();
+  c->set_id_attr("target");
+
+  switch (GetParam()) {
+    case LcppPreloadLazyLoadImageType::kNativeLazyLoad:
+      CachedDocumentParameters::SetLcppPreloadLazyLoadImageTypeForTesting(
+          features::LcppPreloadLazyLoadImageType::kNativeLazyLoading);
+      Test(TokenStreamMatcherTestCase{locator, R"HTML(
+        <div>
+          <img src="not-interesting.jpg">
+          <img src="super-interesting.jpg" id="target" loading="lazy">
+          <img src="not-interesting2.jpg">
+        </div>
+        )HTML",
+                                      "super-interesting.jpg", true});
+      break;
+    case LcppPreloadLazyLoadImageType::kCustomLazyLoad:
+      CachedDocumentParameters::SetLcppPreloadLazyLoadImageTypeForTesting(
+          features::LcppPreloadLazyLoadImageType::kCustomLazyLoading);
+      Test(TokenStreamMatcherTestCase{locator, R"HTML(
+        <div>
+          <img src="not-interesting.jpg">
+          <img data-src="super-interesting.jpg" id="target">
+          <img src="not-interesting2.jpg">
+        </div>
+        )HTML",
+                                      "super-interesting.jpg", true});
+      break;
+    case LcppPreloadLazyLoadImageType::kAll:
+      CachedDocumentParameters::SetLcppPreloadLazyLoadImageTypeForTesting(
+          features::LcppPreloadLazyLoadImageType::kAll);
+      Test(TokenStreamMatcherTestCase{locator, R"HTML(
+        <div>
+          <img src="not-interesting.jpg">
+          <img src="super-interesting.jpg" id="target" loading="lazy">
+          <img src="not-interesting2.jpg">
+        </div>
+        )HTML",
+                                      "super-interesting.jpg", true});
+      Test(TokenStreamMatcherTestCase{locator, R"HTML(
+        <div>
+          <img src="not-interesting.jpg">
+          <img data-src="super-interesting.jpg" id="target">
+          <img src="not-interesting2.jpg">
+        </div>
+        )HTML",
+                                      "super-interesting.jpg", true});
+      break;
+  }
+
+  CachedDocumentParameters::SetLcppPreloadLazyLoadImageTypeForTesting(
+      std::nullopt);
+}
+
+TEST_P(HTMLPreloadScannerLCPPLazyLoadImageTest,
+       TokenStreamMatcherWithLoadingLazyAutoSizes) {
+  ElementLocator locator;
+  auto* c = locator.add_components()->mutable_id();
+  c->set_id_attr("target");
+
+  switch (GetParam()) {
+    case LcppPreloadLazyLoadImageType::kNativeLazyLoad:
+    case LcppPreloadLazyLoadImageType::kCustomLazyLoad:
+    case LcppPreloadLazyLoadImageType::kAll:
+      Test(TokenStreamMatcherTestCase{locator, R"HTML(
+        <div>
+          <img src="not-interesting.jpg">
+          <img src="super-interesting.jpg" id="target" loading="lazy" sizes="auto">
+          <img src="not-interesting2.jpg">
+        </div>
+        )HTML",
+                                      nullptr, false});
+      break;
+  }
 }
 
 }  // namespace blink

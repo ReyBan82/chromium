@@ -7,6 +7,7 @@
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/logging.h"
+#include "base/logging/logging_settings.h"
 #include "base/path_service.h"
 #include "base/process/launch.h"
 #include "chrome/common/chrome_switches.h"
@@ -22,7 +23,7 @@ constexpr base::FilePath::CharType kChromeProxyExecutable[] =
 }  // namespace
 
 // This binary is a workaround for Windows 10 start menu pinning icon bug:
-// https://crbug.com/732357.
+// https://crbug.com/40525317.
 //
 // When a shortcut is pinned in the Windows 10 start menu Windows will follow
 // the shortcut, find the target executable, look for a <target>.manifest file
@@ -67,6 +68,8 @@ int WINAPI wWinMain(HINSTANCE instance,
   if (si.dwFlags & STARTF_TITLEISLINKNAME) {
     chrome_command_line.AppendSwitchNative(switches::kSourceShortcut,
                                            si.lpTitle);
+  } else if (si.dwFlags & STARTF_TITLEISAPPID) {
+    chrome_command_line.AppendSwitch(switches::kSourceAppId);
   }
 
   base::LaunchOptions launch_options;

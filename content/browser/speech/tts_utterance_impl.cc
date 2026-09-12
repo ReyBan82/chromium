@@ -35,7 +35,7 @@ int TtsUtteranceImpl::next_utterance_id_ = 0;
 
 // static
 std::unique_ptr<TtsUtterance> TtsUtterance::Create(WebContents* web_contents) {
-  DCHECK(web_contents);
+  CHECK(web_contents, base::NotFatalUntil::M159);
   return std::make_unique<TtsUtteranceImpl>(web_contents->GetBrowserContext(),
                                             web_contents);
 }
@@ -76,7 +76,7 @@ TtsUtteranceImpl::TtsUtteranceImpl(BrowserContext* browser_context,
 TtsUtteranceImpl::~TtsUtteranceImpl() {
   // It's an error if an Utterance is destructed without being finished,
   // unless |browser_context_| is nullptr because it's a unit test.
-  DCHECK(finished_ || !browser_context_);
+  CHECK(finished_ || !browser_context_, base::NotFatalUntil::M159);
 }
 
 void TtsUtteranceImpl::OnTtsEvent(TtsEventType event_type,
@@ -85,19 +85,13 @@ void TtsUtteranceImpl::OnTtsEvent(TtsEventType event_type,
                                   const std::string& error_message) {
   if (char_index >= 0)
     char_index_ = char_index;
-  if (IsFinalTtsEventType(event_type))
+  if (IsFinalTtsEventType(event_type)) {
     finished_ = true;
+  }
 
   if (event_delegate_) {
-    // If |finished_| is set, we need to reset |event_delegate_| because it
-    // will self destroy on the call to OnTtsEvent.
-    if (finished_) {
-      event_delegate_.ExtractAsDangling()->OnTtsEvent(
-          this, event_type, char_index, length, error_message);
-    } else {
-      event_delegate_->OnTtsEvent(this, event_type, char_index, length,
-                                  error_message);
-    }
+    event_delegate_->OnTtsEvent(this, event_type, char_index, length,
+                                error_message);
   }
 }
 
@@ -113,11 +107,11 @@ const std::string& TtsUtteranceImpl::GetText() {
   return text_;
 }
 
-void TtsUtteranceImpl::SetOptions(base::Value::Dict options) {
+void TtsUtteranceImpl::SetOptions(base::DictValue options) {
   options_ = std::move(options);
 }
 
-const base::Value::Dict* TtsUtteranceImpl::GetOptions() {
+const base::DictValue* TtsUtteranceImpl::GetOptions() {
   return &options_;
 }
 
@@ -174,19 +168,19 @@ bool TtsUtteranceImpl::GetShouldClearQueue() {
 }
 
 void TtsUtteranceImpl::SetRequiredEventTypes(
-    const std::set<TtsEventType>& types) {
+    const base::flat_set<TtsEventType>& types) {
   required_event_types_ = types;
 }
 
-const std::set<TtsEventType>& TtsUtteranceImpl::GetRequiredEventTypes() {
+const base::flat_set<TtsEventType>& TtsUtteranceImpl::GetRequiredEventTypes() {
   return required_event_types_;
 }
 
 void TtsUtteranceImpl::SetDesiredEventTypes(
-    const std::set<TtsEventType>& types) {
+    const base::flat_set<TtsEventType>& types) {
   desired_event_types_ = types;
 }
-const std::set<TtsEventType>& TtsUtteranceImpl::GetDesiredEventTypes() {
+const base::flat_set<TtsEventType>& TtsUtteranceImpl::GetDesiredEventTypes() {
   return desired_event_types_;
 }
 
@@ -199,12 +193,12 @@ const std::string& TtsUtteranceImpl::GetEngineId() {
 }
 
 void TtsUtteranceImpl::SetEventDelegate(
-    UtteranceEventDelegate* event_delegate) {
-  event_delegate_ = event_delegate;
+    std::unique_ptr<UtteranceEventDelegate> event_delegate) {
+  event_delegate_ = std::move(event_delegate);
 }
 
 UtteranceEventDelegate* TtsUtteranceImpl::GetEventDelegate() {
-  return event_delegate_;
+  return event_delegate_.get();
 }
 
 BrowserContext* TtsUtteranceImpl::GetBrowserContext() {

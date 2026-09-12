@@ -5,6 +5,7 @@
 #include "chromecast/browser/cast_display_configurator.h"
 
 #include <math.h>
+
 #include <algorithm>
 #include <string>
 
@@ -20,6 +21,7 @@
 #include "chromecast/graphics/cast_display_util.h"
 #include "chromecast/graphics/cast_screen.h"
 #include "chromecast/public/graphics_properties_shlib.h"
+#include "ui/display/types/display_configuration_params.h"
 #include "ui/display/types/display_snapshot.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/ozone/public/ozone_platform.h"
@@ -33,9 +35,6 @@ constexpr char kCastGraphicsHeight[] = "cast-graphics-height";
 constexpr char kCastGraphicsWidth[] = "cast-graphics-width";
 
 gfx::Size GetDefaultScreenResolution() {
-#if BUILDFLAG(IS_CAST_AUDIO_ONLY)
-  return gfx::Size(1, 1);
-#else
   const base::CommandLine* cmd_line = base::CommandLine::ForCurrentProcess();
   if (!chromecast::IsFeatureEnabled(kTripleBuffer720) &&
       GraphicsPropertiesShlib::IsSupported(GraphicsPropertiesShlib::k1080p,
@@ -44,7 +43,6 @@ gfx::Size GetDefaultScreenResolution() {
   }
 
   return gfx::Size(1280, 720);
-#endif
 }
 
 // Helper to return the screen resolution (device pixels)
@@ -96,7 +94,7 @@ gfx::Rect GetScreenBounds(const gfx::Size& size_in_pixels,
 
 CastDisplayConfigurator::CastDisplayConfigurator(CastScreen* screen)
     : delegate_(
-#if BUILDFLAG(IS_OZONE) && !BUILDFLAG(IS_CAST_AUDIO_ONLY)
+#if BUILDFLAG(IS_OZONE)
           ui::OzonePlatform::GetInstance()->CreateNativeDisplayDelegate()
 #else
           nullptr
@@ -143,7 +141,8 @@ void CastDisplayConfigurator::EnableDisplay(
   config_request.push_back(std::move(display_config_params));
 
   delegate_->Configure(config_request, std::move(callback),
-                       display::kTestModeset | display::kCommitModeset);
+                       {display::ModesetFlag::kTestModeset,
+                        display::ModesetFlag::kCommitModeset});
   NotifyObservers();
 }
 
@@ -158,7 +157,8 @@ void CastDisplayConfigurator::DisableDisplay(
   config_request.push_back(std::move(display_config_params));
 
   delegate_->Configure(config_request, std::move(callback),
-                       display::kTestModeset | display::kCommitModeset);
+                       {display::ModesetFlag::kTestModeset,
+                        display::ModesetFlag::kCommitModeset});
 }
 
 void CastDisplayConfigurator::ConfigureDisplayFromCommandLine() {
@@ -167,21 +167,20 @@ void CastDisplayConfigurator::ConfigureDisplayFromCommandLine() {
                display::Display::ROTATE_0);
 }
 
-void CastDisplayConfigurator::SetColorMatrix(
-    const std::vector<float>& color_matrix) {
+void CastDisplayConfigurator::SetColorTemperatureAdjustment(
+    const display::ColorTemperatureAdjustment& cta) {
   if (!delegate_ || !display_)
     return;
-  delegate_->SetColorMatrix(display_->display_id(), color_matrix);
+  delegate_->SetColorTemperatureAdjustment(display_->display_id(), cta);
+
   NotifyObservers();
 }
 
-void CastDisplayConfigurator::SetGammaCorrection(
-    const std::vector<display::GammaRampRGBEntry>& degamma_lut,
-    const std::vector<display::GammaRampRGBEntry>& gamma_lut) {
+void CastDisplayConfigurator::SetGammaAdjustment(
+    const display::GammaAdjustment& adjustment) {
   if (!delegate_ || !display_)
     return;
-
-  delegate_->SetGammaCorrection(display_->display_id(), degamma_lut, gamma_lut);
+  delegate_->SetGammaAdjustment(display_->display_id(), adjustment);
   NotifyObservers();
 }
 
@@ -200,7 +199,8 @@ void CastDisplayConfigurator::ForceInitialConfigure() {
 
 void CastDisplayConfigurator::OnDisplaysAcquired(
     bool force_initial_configure,
-    const std::vector<display::DisplaySnapshot*>& displays) {
+    const std::vector<raw_ptr<display::DisplaySnapshot, VectorExperimental>>&
+        displays) {
   DCHECK(delegate_);
   if (displays.empty()) {
     LOG(WARNING) << "No displays detected, skipping display init.";
@@ -238,18 +238,17 @@ void CastDisplayConfigurator::OnDisplaysAcquired(
   delegate_->Configure(
       config_request,
       base::BindRepeating(&CastDisplayConfigurator::OnDisplayConfigured,
-                          weak_factory_.GetWeakPtr(), display_,
-                          display_->native_mode(), origin),
-      display::kTestModeset | display::kCommitModeset);
+                          weak_factory_.GetWeakPtr()),
+      {display::ModesetFlag::kTestModeset,
+       display::ModesetFlag::kCommitModeset});
 }
 
 void CastDisplayConfigurator::OnDisplayConfigured(
-    display::DisplaySnapshot* display,
-    const display::DisplayMode* mode,
-    const gfx::Point& origin,
+    const std::vector<display::DisplayConfigurationParams>& request_results,
     bool config_success) {
-  DCHECK(display);
-  DCHECK(mode);
+  DCHECK_EQ(request_results.size(), 1u);
+  const auto& result = request_results[0];
+  DCHECK(result.mode);
 
   // Discard events for previous configurations. It is safe to discard since a
   // new configuration round was initiated and we're waiting for another
@@ -257,19 +256,20 @@ void CastDisplayConfigurator::OnDisplayConfigured(
   //
   // This typically only happens when there's crashes and the state updates at
   // the same time old notifications are received.
-  if (display != display_)
+  if (result.id != display_->display_id()) {
     return;
+  }
 
-  const gfx::Rect bounds(origin, mode->size());
+  const gfx::Rect bounds(result.origin, result.mode->size());
   DVLOG(1) << __func__ << " success=" << config_success
            << " bounds=" << bounds.ToString();
   if (config_success) {
     // Need to update the display state otherwise it becomes stale.
-    display_->set_current_mode(mode);
-    display_->set_origin(origin);
+    display_->set_current_mode(result.mode.get());
+    display_->set_origin(result.origin);
 
     UpdateScreen(display_->display_id(), bounds,
-                 GetDeviceScaleFactor(display->native_mode()->size()),
+                 GetDeviceScaleFactor(display_->native_mode()->size()),
                  RotationFromPanelOrientation(display_->panel_orientation()));
   } else {
     LOG(FATAL) << "Failed to configure display";

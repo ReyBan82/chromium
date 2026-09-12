@@ -52,9 +52,9 @@ class NTPTilesInternalsMessageHandler : public MostVisitedSites::Observer {
                                     favicon_base::FaviconRawBitmapResult>;
 
   // Callbacks registered in RegisterMessages().
-  void HandleRegisterForEvents(const base::Value::List& args);
-  void HandleUpdate(const base::Value::List& args);
-  void HandleViewPopularSitesJson(const base::Value::List& args);
+  void HandleRegisterForEvents(const base::ListValue& args);
+  void HandleUpdate(const base::ListValue& args);
+  void HandleViewPopularSitesJson(const base::ListValue& args);
 
   void SendSourceInfo();
   void SendTiles(const NTPTilesVector& tiles,
@@ -62,6 +62,7 @@ class NTPTilesInternalsMessageHandler : public MostVisitedSites::Observer {
 
   // MostVisitedSites::Observer.
   void OnURLsAvailable(
+      bool is_user_triggered,
       const std::map<SectionType, NTPTilesVector>& sections) override;
   void OnIconMadeAvailable(const GURL& site_url) override;
 

@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,9 +31,11 @@ bool CriticalOriginTrialsThrottle::IsNavigationRequest(
 
 CriticalOriginTrialsThrottle::CriticalOriginTrialsThrottle(
     OriginTrialsControllerDelegate& origin_trials_delegate,
-    absl::optional<url::Origin> top_frame_origin)
+    std::optional<url::Origin> top_frame_origin,
+    std::optional<ukm::SourceId> source_id)
     : origin_trials_delegate_(origin_trials_delegate),
-      top_frame_origin_(std::move(top_frame_origin)) {}
+      top_frame_origin_(std::move(top_frame_origin)),
+      source_id_(source_id) {}
 
 CriticalOriginTrialsThrottle::~CriticalOriginTrialsThrottle() = default;
 
@@ -52,29 +54,27 @@ void CriticalOriginTrialsThrottle::WillStartRequest(
 void CriticalOriginTrialsThrottle::BeforeWillProcessResponse(
     const GURL& response_url,
     const network::mojom::URLResponseHead& response_head,
-    bool* defer) {
+    RestartWithURLReset* restart_with_url_reset) {
   if (is_navigation_request_) {
-    DCHECK_EQ(response_url, request_url_);
-    MaybeRestartWithTrials(response_head);
+    CHECK_EQ(response_url, request_url_, base::NotFatalUntil::M159);
+    MaybeRestartWithTrials(response_head, restart_with_url_reset);
   }
 }
 
 void CriticalOriginTrialsThrottle::BeforeWillRedirectRequest(
-    net::RedirectInfo* redirect_info,
+    const net::RedirectInfo& redirect_info,
     const network::mojom::URLResponseHead& response_head,
-    bool* defer,
-    std::vector<std::string>* to_be_removed_request_headers,
-    net::HttpRequestHeaders* modified_request_headers,
-    net::HttpRequestHeaders* modified_cors_exempt_request_headers) {
+    RestartWithURLReset* restart_with_url_reset) {
   if (is_navigation_request_) {
-    MaybeRestartWithTrials(response_head);
+    MaybeRestartWithTrials(response_head, restart_with_url_reset);
     // Update the stored information for the new request
-    SetPreRequestFields(redirect_info->new_url);
+    SetPreRequestFields(redirect_info.new_url);
   }
 }
 
 void CriticalOriginTrialsThrottle::MaybeRestartWithTrials(
-    const network::mojom::URLResponseHead& response_head) {
+    const network::mojom::URLResponseHead& response_head,
+    RestartWithURLReset* restart_with_url_reset) {
   if (!response_head.headers)
     return;
 
@@ -121,11 +121,12 @@ void CriticalOriginTrialsThrottle::MaybeRestartWithTrials(
   if (needs_restart) {
     // Persist the trials that were set, so we can try again.
     url::Origin partition_origin = top_frame_origin_.value_or(request_origin);
-    origin_trials_delegate_->PersistTrialsFromTokens(
-        request_origin, partition_origin, origin_trial_tokens,
-        base::Time::Now());
+    // Add the new tokens to the set of persisted trials
+    origin_trials_delegate_->PersistAdditionalTrialsFromTokens(
+        request_origin, partition_origin, /*script_origins=*/{},
+        origin_trial_tokens, base::Time::Now(), source_id_);
     restarted_origins_.insert(request_origin);
-    delegate_->RestartWithURLResetAndFlags(0);
+    *restart_with_url_reset = RestartWithURLReset(true);
   }
 }
 

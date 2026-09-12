@@ -8,13 +8,13 @@
 
 #include "ash/public/cpp/desk_template.h"
 #include "ash/wm/desks/desks_controller.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/notreached.h"
+#include "base/notimplemented.h"
 #include "base/numerics/safe_conversions.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/ash/app_restore/app_launch_handler.h"
 #include "chrome/browser/ash/app_restore/app_restore_arc_task_handler.h"
+#include "chrome/browser/ash/app_restore/app_restore_arc_task_handler_factory.h"
 #include "chrome/browser/ash/app_restore/arc_app_queue_restore_handler.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
 #include "chrome/browser/profiles/profile.h"
@@ -22,21 +22,25 @@
 #include "chrome/browser/ui/ash/desks/desks_client.h"
 #include "chrome/browser/ui/ash/shelf/chrome_shelf_controller_util.h"
 #include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_tabstrip.h"
-#include "chrome/browser/ui/browser_window.h"
-#include "chrome/browser/ui/tabs/tab_group_model.h"
-#include "chrome/browser/web_applications/web_app_provider.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+#include "chromeos/ash/components/browser_delegate/browser_controller.h"
+#include "chromeos/ash/components/browser_delegate/browser_delegate.h"
 #include "components/app_constants/constants.h"
 #include "components/app_restore/app_restore_data.h"
+#include "components/app_restore/app_restore_utils.h"
 #include "components/app_restore/desk_template_read_handler.h"
 #include "components/app_restore/restore_data.h"
 #include "components/app_restore/window_info.h"
 #include "components/services/app_service/public/cpp/app_types.h"
+#include "components/services/app_service/public/cpp/types_util.h"
 #include "components/tab_groups/tab_group_info.h"
 #include "extensions/common/extension.h"
 
 namespace {
+
+// Used to generate unique IDs for desk launches.
+int32_t g_launch_id = 0;
 
 // Returns the browser app name if it's an app type browser. Returns an empty
 // string otherwise.
@@ -44,20 +48,24 @@ std::string GetBrowserAppName(
     const std::unique_ptr<app_restore::AppRestoreData>& app_restore_data,
     const std::string& app_id) {
   const bool app_type_browser =
-      app_restore_data->app_type_browser.value_or(false);
-  if (!app_type_browser)
+      app_restore_data->browser_extra_info.app_type_browser.value_or(false);
+  if (!app_type_browser) {
     return std::string();
+  }
 
-  const absl::optional<std::string>& maybe_app_name =
-      app_restore_data->app_name;
+  const std::optional<std::string>& maybe_app_name =
+      app_restore_data->browser_extra_info.app_name;
   return maybe_app_name.has_value() && !maybe_app_name.value().empty()
              ? maybe_app_name.value()
              : app_id;
 }
+
 }  // namespace
 
-DesksTemplatesAppLaunchHandler::DesksTemplatesAppLaunchHandler(Profile* profile)
+DesksTemplatesAppLaunchHandler::DesksTemplatesAppLaunchHandler(Profile* profile,
+                                                               Type type)
     : ash::AppLaunchHandler(profile),
+      type_(type),
       read_handler_(app_restore::DeskTemplateReadHandler::Get()) {}
 
 DesksTemplatesAppLaunchHandler::~DesksTemplatesAppLaunchHandler() {
@@ -65,36 +73,73 @@ DesksTemplatesAppLaunchHandler::~DesksTemplatesAppLaunchHandler() {
     read_handler_->ClearRestoreData(launch_id_);
 
     if (auto* arc_task_handler =
-            ash::app_restore::AppRestoreArcTaskHandler::GetForProfile(
+            ash::app_restore::AppRestoreArcTaskHandlerFactory::GetForProfile(
                 profile())) {
       arc_task_handler->ClearDeskTemplateArcAppQueueRestoreHandler(launch_id_);
     }
   }
 }
 
+// static
+int32_t DesksTemplatesAppLaunchHandler::GetNextLaunchId() {
+  return ++g_launch_id;
+}
+
 void DesksTemplatesAppLaunchHandler::LaunchTemplate(
-    const ash::DeskTemplate& desk_template) {
+    const ash::DeskTemplate& desk_template,
+    int32_t launch_id) {
   // Ensure that the handler isn't re-used.
   DCHECK_EQ(launch_id_, 0);
-  launch_id_ = desk_template.launch_id();
+  launch_id_ = launch_id;
 
   DCHECK(desk_template.desk_restore_data());
   auto restore_data = desk_template.desk_restore_data()->Clone();
   DCHECK(!restore_data->app_id_to_launch_list().empty());
+
+  // Note: Keep this until we have an OS Stepping Stone that performs the final
+  // Lacros cleanup. See b/380780352.
+  restore_data->RemoveApp(app_constants::kLacrosAppId);
 
   read_handler_->SetRestoreData(launch_id_, restore_data->Clone());
   set_restore_data(std::move(restore_data));
 
   // Launch the different types of apps. They can be done in any order.
   MaybeLaunchArcApps();
-  MaybeLaunchLacrosBrowsers();
   LaunchApps();
   LaunchBrowsers();
+}
+
+void DesksTemplatesAppLaunchHandler::LaunchCoralGroup(
+    std::unique_ptr<app_restore::RestoreData> restore_data,
+    int32_t launch_id) {
+  // Ensure that the handler isn't re-used.
+  CHECK_EQ(launch_id_, 0);
+  launch_id_ = launch_id;
+
+  read_handler_->SetRestoreData(launch_id_, restore_data->Clone());
+  set_restore_data(std::move(restore_data));
+
+  LaunchBrowsers();
+  LaunchApps();
+  MaybeLaunchArcApps();
+}
+
+void DesksTemplatesAppLaunchHandler::RecordRestoredAppLaunch(
+    apps::AppTypeName app_type_name) {
+  // TODO: Add UMA Histogram.
+  NOTIMPLEMENTED();
 }
 
 bool DesksTemplatesAppLaunchHandler::ShouldLaunchSystemWebAppOrChromeApp(
     const std::string& app_id,
     const app_restore::RestoreData::LaunchList& launch_list) {
+  // Launched coral groups are intended to be done in the post-login screen. At
+  // this point, the assumption is that there are no apps, so we should always
+  // launch.
+  if (type_ == Type::kCoral) {
+    return true;
+  }
+
   // Find out if the app can have multiple instances. Apps that can have
   // multiple instances are:
   //   1) System web apps which can open multiple windows
@@ -117,7 +162,7 @@ bool DesksTemplatesAppLaunchHandler::ShouldLaunchSystemWebAppOrChromeApp(
 
   // A SWA can handle multiple instances if it can open multiple windows.
   if (is_system_web_app) {
-    absl::optional<ash::SystemWebAppType> swa_type =
+    std::optional<ash::SystemWebAppType> swa_type =
         ash::GetSystemWebAppTypeForAppId(profile(), app_id);
     if (swa_type.has_value()) {
       auto* swa_manager = ash::SystemWebAppManager::Get(profile());
@@ -137,8 +182,9 @@ bool DesksTemplatesAppLaunchHandler::ShouldLaunchSystemWebAppOrChromeApp(
 
   // Do not try sending an existing window to the active desk and launch a new
   // instance.
-  if (is_multi_instance_window)
+  if (is_multi_instance_window) {
     return true;
+  }
 
   const bool should_launch =
       ash::DesksController::Get()->OnSingleInstanceAppLaunchingFromSavedDesk(
@@ -146,8 +192,9 @@ bool DesksTemplatesAppLaunchHandler::ShouldLaunchSystemWebAppOrChromeApp(
 
   // Notify performance tracker that some tracked windows will be moving.
   if (!should_launch) {
-    for (const auto& window : launch_list)
+    for (const auto& window : launch_list) {
       NotifyMovedSingleInstanceApp(window.first);
+    }
   }
 
   return should_launch;
@@ -169,75 +216,92 @@ void DesksTemplatesAppLaunchHandler::LaunchBrowsers() {
   const auto& launch_list = restore_data()->app_id_to_launch_list();
   for (const auto& iter : launch_list) {
     const std::string& app_id = iter.first;
-    if (app_id != app_constants::kChromeAppId)
+    if (app_id != app_constants::kChromeAppId) {
       continue;
-
+    }
     for (const auto& window_iter : iter.second) {
       const std::unique_ptr<app_restore::AppRestoreData>& app_restore_data =
           window_iter.second;
 
-      absl::optional<std::vector<GURL>> urls = app_restore_data->urls;
-      if (!urls || urls->empty())
+      const app_restore::BrowserExtraInfo browser_extra_info =
+          app_restore_data->browser_extra_info;
+      const std::vector<GURL>& urls = browser_extra_info.urls;
+      if (urls.empty()) {
         continue;
+      }
 
       const gfx::Rect current_bounds =
-          app_restore_data->current_bounds.value_or(gfx::Rect());
+          app_restore_data->window_info.current_bounds.value_or(gfx::Rect());
       const std::string app_name = GetBrowserAppName(app_restore_data, app_id);
+      if (!app_name.empty() && !IsBrowserAppInstalled(app_name)) {
+        continue;
+      }
 
-      Browser::CreateParams create_params =
+      BrowserWindowCreateParams create_params =
           !app_name.empty()
-              ? Browser::CreateParams::CreateForApp(app_name,
-                                                    /*trusted_source=*/true,
-                                                    current_bounds, profile(),
-                                                    /*user_gesture=*/false)
-              : Browser::CreateParams(Browser::TYPE_NORMAL, profile(),
-                                      /*user_gesture=*/false);
+              ? BrowserWindowCreateParams::CreateForApp(
+                    app_name, /*trusted_source=*/true, current_bounds,
+                    profile(),
+                    /*user_gesture=*/false)
+              : BrowserWindowCreateParams(BrowserWindowInterface::TYPE_NORMAL,
+                                          profile(),
+                                          /*from_user_gesture=*/false);
 
       create_params.restore_id = window_iter.first;
-      create_params.creation_source = Browser::CreationSource::kDeskTemplate;
+      create_params.creation_source =
+          BrowserWindowCreateParams::CreationSource::kDeskTemplate;
 
-      absl::optional<chromeos::WindowStateType> window_state_type(
-          app_restore_data->window_state_type);
+      const std::optional<chromeos::WindowStateType>& window_state_type =
+          app_restore_data->window_info.window_state_type;
       if (window_state_type) {
         create_params.initial_show_state =
             chromeos::ToWindowShowState(*window_state_type);
       }
 
-      if (!current_bounds.IsEmpty())
+      if (!current_bounds.IsEmpty()) {
         create_params.initial_bounds = current_bounds;
-
-      Browser* browser = Browser::Create(create_params);
-
-      absl::optional<int32_t> active_tab_index =
-          app_restore_data->active_tab_index;
-      for (size_t i = 0; i < urls->size(); i++) {
-        chrome::AddTabAt(browser, urls->at(i), /*index=*/-1,
-                         /*foreground=*/
-                         (active_tab_index &&
-                          base::checked_cast<int32_t>(i) == *active_tab_index));
       }
 
-      if (app_restore_data->tab_group_infos.has_value()) {
+      if (type_ == Type::kCoral) {
+        create_params.should_trigger_session_restore = false;
+      }
+
+      ash::BrowserDelegate* browser =
+          ash::BrowserController::GetInstance()->GetDelegate(
+              CreateBrowserWindow(std::move(create_params)));
+
+      std::optional<int32_t> active_tab_index =
+          browser_extra_info.active_tab_index;
+      for (size_t i = 0; i < urls.size(); i++) {
+        browser->AddTab(
+            urls[i], /*index=*/std::nullopt,
+            (active_tab_index &&
+             base::checked_cast<int32_t>(i) == *active_tab_index)
+                ? ash::BrowserDelegate::TabDisposition::kForeground
+                : ash::BrowserDelegate::TabDisposition::kBackground);
+      }
+
+      if (!browser_extra_info.tab_group_infos.empty()) {
         chrome_desks_util::AttachTabGroupsToBrowserInstance(
-            app_restore_data->tab_group_infos.value(), browser);
+            browser_extra_info.tab_group_infos, browser);
       }
 
-      if (app_restore_data->first_non_pinned_tab_index.has_value() &&
-          app_restore_data->first_non_pinned_tab_index.value() <=
-              static_cast<int>(urls->size())) {
+      if (browser_extra_info.first_non_pinned_tab_index.has_value() &&
+          browser_extra_info.first_non_pinned_tab_index.value() <=
+              static_cast<int>(urls.size())) {
         chrome_desks_util::SetBrowserPinnedTabs(
-            app_restore_data->first_non_pinned_tab_index.value(), browser);
+            browser_extra_info.first_non_pinned_tab_index.value(), browser);
       }
 
       // We need to handle minimized windows separately since unlike other
       // window types, it's not shown.
       if (window_state_type &&
           *window_state_type == chromeos::WindowStateType::kMinimized) {
-        browser->window()->Minimize();
+        browser->Minimize();
         continue;
       }
 
-      browser->window()->ShowInactive();
+      browser->ShowInactive();
     }
   }
   restore_data()->RemoveApp(app_constants::kChromeAppId);
@@ -256,30 +320,36 @@ void DesksTemplatesAppLaunchHandler::MaybeLaunchArcApps() {
       [&app_ids, &app_id_to_launch_list](const apps::AppUpdate& update) {
         if (update.Readiness() == apps::Readiness::kReady &&
             update.AppType() == apps::AppType::kArc &&
-            base::Contains(app_id_to_launch_list, update.AppId())) {
+            app_id_to_launch_list.contains(update.AppId())) {
           app_ids.insert(update.AppId());
         }
       });
 
   // For each ARC app, check and see if there is an existing instance. We will
-  // move this instance over instead of launching a new one. Remove the app from
-  // the restore data if it was successfully moved so that the ARC launch
+  // move this instance over instead of launching a new one. Remove the app
+  // from the restore data if it was successfully moved so that the ARC launch
   // handler does not try to launch it later.
-  for (const std::string& app_id : app_ids) {
-    auto it = app_id_to_launch_list.find(app_id);
-    DCHECK(it != app_id_to_launch_list.end());
-    if (!ash::DesksController::Get()->OnSingleInstanceAppLaunchingFromSavedDesk(
-            app_id, it->second)) {
-      for (auto& window : it->second)
-        NotifyMovedSingleInstanceApp(window.first);
-      restore_data()->RemoveApp(app_id);
+  if (type_ == Type::kTemplate) {
+    for (const std::string& app_id : app_ids) {
+      auto it = app_id_to_launch_list.find(app_id);
+      DCHECK(it != app_id_to_launch_list.end());
+      if (!ash::DesksController::Get()
+               ->OnSingleInstanceAppLaunchingFromSavedDesk(app_id,
+                                                           it->second)) {
+        for (auto& window : it->second) {
+          NotifyMovedSingleInstanceApp(window.first);
+        }
+        restore_data()->RemoveApp(app_id);
+      }
     }
   }
 
   auto* arc_task_handler =
-      ash::app_restore::AppRestoreArcTaskHandler::GetForProfile(profile());
-  if (!arc_task_handler)
+      ash::app_restore::AppRestoreArcTaskHandlerFactory::GetForProfile(
+          profile());
+  if (!arc_task_handler) {
     return;
+  }
 
   if (auto* launch_handler =
           arc_task_handler->GetDeskTemplateArcAppQueueRestoreHandler(
@@ -289,46 +359,25 @@ void DesksTemplatesAppLaunchHandler::MaybeLaunchArcApps() {
   }
 }
 
-void DesksTemplatesAppLaunchHandler::MaybeLaunchLacrosBrowsers() {
-  DCHECK(restore_data());
-
-  const auto& launch_list = restore_data()->app_id_to_launch_list();
-  for (const auto& iter : launch_list) {
-    const std::string& app_id = iter.first;
-    if (app_id != app_constants::kLacrosAppId)
-      continue;
-
-    for (const auto& [restore_window_id, app_restore_data] : iter.second) {
-      if (!app_restore_data->active_tab_index.has_value() ||
-          !app_restore_data->urls.has_value()) {
-        continue;
-      }
-
-      crosapi::BrowserManager::Get()->CreateBrowserWithRestoredData(
-          app_restore_data->urls.value(),
-          app_restore_data->current_bounds.value_or(gfx::Rect()),
-          app_restore_data->tab_group_infos.value_or(
-              std::vector<tab_groups::TabGroupInfo>()),
-          chromeos::ToWindowShowState(
-              app_restore_data->window_state_type.value_or(
-                  chromeos::WindowStateType::kDefault)),
-          app_restore_data->active_tab_index.value(),
-          // Values of 0 will be ignored, other type constraints are
-          // enforced on the browser side.
-          app_restore_data->first_non_pinned_tab_index.value_or(0),
-          GetBrowserAppName(app_restore_data, app_id), restore_window_id);
-    }
-  }
-  restore_data()->RemoveApp(app_constants::kLacrosAppId);
-}
-
-void DesksTemplatesAppLaunchHandler::RecordRestoredAppLaunch(
-    apps::AppTypeName app_type_name) {
-  // TODO: Add UMA Histogram.
-  NOTIMPLEMENTED();
-}
-
 void DesksTemplatesAppLaunchHandler::NotifyMovedSingleInstanceApp(
     int32_t window_id) {
+  CHECK_EQ(Type::kTemplate, type_);
   DesksClient::Get()->NotifyMovedSingleInstanceApp(window_id);
+}
+
+bool DesksTemplatesAppLaunchHandler::IsBrowserAppInstalled(
+    const std::string& app_name) {
+  apps::AppRegistryCache& cache =
+      apps::AppServiceProxyFactory::GetForProfile(profile())
+          ->AppRegistryCache();
+
+  std::string app_id = app_restore::GetAppIdFromAppName(app_name);
+  bool result = false;
+  cache.ForOneApp(app_id, [&result](const apps::AppUpdate& update) {
+    if (apps_util::IsInstalled(update.Readiness()) &&
+        update.AppType() != apps::AppType::kUnknown) {
+      result = true;
+    }
+  });
+  return result;
 }

@@ -4,6 +4,7 @@
 
 package org.chromium.chrome.browser.dom_distiller;
 
+import androidx.test.annotation.UiThreadTest;
 import androidx.test.filters.SmallTest;
 
 import com.google.common.util.concurrent.AtomicDouble;
@@ -11,19 +12,17 @@ import com.google.common.util.concurrent.AtomicDouble;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
-import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.BaseJUnit4ClassRunner;
-import org.chromium.base.test.UiThreadTest;
 import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.Feature;
-import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.test.ChromeBrowserTestRule;
+import org.chromium.chrome.browser.profiles.ProfileManager;
 import org.chromium.components.dom_distiller.core.DistilledPagePrefs;
 import org.chromium.components.dom_distiller.core.DomDistillerService;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.content_public.browser.test.NativeLibraryTestUtils;
 import org.chromium.dom_distiller.mojom.FontFamily;
 import org.chromium.dom_distiller.mojom.Theme;
 
@@ -32,15 +31,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Test class for {@link DistilledPagePrefs}.
- */
+/** Test class for {@link DistilledPagePrefs}. */
 @RunWith(BaseJUnit4ClassRunner.class)
 @Batch(Batch.PER_CLASS)
 public class DistilledPagePrefsTest {
-    @ClassRule
-    public static final ChromeBrowserTestRule sChromeBrowserTestRule = new ChromeBrowserTestRule();
-
     private DistilledPagePrefs mDistilledPagePrefs;
 
     private static final double EPSILON = 1e-5;
@@ -50,37 +44,40 @@ public class DistilledPagePrefsTest {
 
     @Before
     public void setUp() {
+        NativeLibraryTestUtils.loadNativeLibraryAndInitBrowserProcess();
         getDistilledPagePrefs();
     }
 
     @After
     public void tearDown() {
         // Set back to default theme
-        setTheme(Theme.LIGHT);
+        setUserPrefTheme(Theme.LIGHT);
     }
 
     private void getDistilledPagePrefs() {
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            // TODO (https://crbug.com/1063807):  Add incognito mode tests.
-            DomDistillerService domDistillerService =
-                    DomDistillerServiceFactory.getForProfile(Profile.getLastUsedRegularProfile());
-            mDistilledPagePrefs = domDistillerService.getDistilledPagePrefs();
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    // TODO (https://crbug.com/40680929):  Add incognito mode tests.
+                    DomDistillerService domDistillerService =
+                            DomDistillerServiceFactory.getForProfile(
+                                    ProfileManager.getLastUsedRegularProfile());
+                    mDistilledPagePrefs = domDistillerService.getDistilledPagePrefs();
+                });
     }
 
     @Test
     @SmallTest
     @UiThreadTest
     @Feature({"DomDistiller"})
-    public void testGetAndSetTheme() {
+    public void testGetAndSetUserPrefTheme() {
         // Check the default theme.
         Assert.assertEquals(Theme.LIGHT, mDistilledPagePrefs.getTheme());
         // Check that theme can be correctly set.
-        setTheme(Theme.DARK);
+        setUserPrefTheme(Theme.DARK);
         Assert.assertEquals(Theme.DARK, mDistilledPagePrefs.getTheme());
-        setTheme(Theme.LIGHT);
+        setUserPrefTheme(Theme.LIGHT);
         Assert.assertEquals(Theme.LIGHT, mDistilledPagePrefs.getTheme());
-        setTheme(Theme.SEPIA);
+        setUserPrefTheme(Theme.SEPIA);
         Assert.assertEquals(Theme.SEPIA, mDistilledPagePrefs.getTheme());
     }
 
@@ -92,7 +89,7 @@ public class DistilledPagePrefsTest {
         addObserver(testObserver);
 
         Assert.assertEquals(Theme.LIGHT, testObserver.getTheme());
-        setTheme(Theme.DARK);
+        setUserPrefTheme(Theme.DARK);
         // Check that testObserver's theme has been updated,
         Assert.assertEquals(Theme.DARK, testObserver.getThemeAfterWaiting());
         removeObserver(testObserver);
@@ -107,12 +104,12 @@ public class DistilledPagePrefsTest {
         TestingObserver testObserverTwo = new TestingObserver();
         addObserver(testObserverTwo);
 
-        setTheme(Theme.SEPIA);
+        setUserPrefTheme(Theme.SEPIA);
         Assert.assertEquals(Theme.SEPIA, testObserverOne.getThemeAfterWaiting());
         Assert.assertEquals(Theme.SEPIA, testObserverTwo.getThemeAfterWaiting());
         removeObserver(testObserverOne);
 
-        setTheme(Theme.DARK);
+        setUserPrefTheme(Theme.DARK);
         // Check that testObserverOne's theme is not changed but testObserverTwo's is.
         Assert.assertEquals(Theme.DARK, testObserverTwo.getThemeAfterWaiting());
         // There is no simple way to safely wait for something not to happen unless we force a timed
@@ -242,13 +239,26 @@ public class DistilledPagePrefsTest {
         Assert.assertFalse(removeObserver(test));
     }
 
+    @Test
+    @SmallTest
+    @UiThreadTest
+    @Feature({"DomDistiller"})
+    public void testGetAndSetLinksEnabled() {
+        // Check the default links enabled.
+        Assert.assertTrue(mDistilledPagePrefs.getLinksEnabled());
+        // Check that links enabled can be correctly set.
+        setLinksEnabled(false);
+        Assert.assertFalse(mDistilledPagePrefs.getLinksEnabled());
+    }
+
     private static class TestingObserver implements DistilledPagePrefs.Observer {
         private final AtomicInteger mFontFamily = new AtomicInteger();
-        private Semaphore mFontFamilySemaphore = new Semaphore(0);
+        private final Semaphore mFontFamilySemaphore = new Semaphore(0);
         private final AtomicInteger mTheme = new AtomicInteger();
-        private Semaphore mThemeSemaphore = new Semaphore(0);
+        private final Semaphore mThemeSemaphore = new Semaphore(0);
         private final AtomicDouble mFontScaling = new AtomicDouble();
-        private Semaphore mFontScalingSemaphore = new Semaphore(0);
+        private final Semaphore mFontScalingSemaphore = new Semaphore(0);
+        private final AtomicBoolean mLinksEnabled = new AtomicBoolean(true);
 
         public TestingObserver() {}
 
@@ -257,7 +267,8 @@ public class DistilledPagePrefsTest {
         }
 
         public int getFontFamilyAfterWaiting() throws InterruptedException {
-            Assert.assertTrue("Did not receive an update for font family",
+            Assert.assertTrue(
+                    "Did not receive an update for font family",
                     mFontFamilySemaphore.tryAcquire(
                             SEMAPHORE_TIMEOUT_VALUE, SEMAPHORE_TIMEOUT_UNIT));
             return getFontFamily();
@@ -274,7 +285,8 @@ public class DistilledPagePrefsTest {
         }
 
         public int getThemeAfterWaiting() throws InterruptedException {
-            Assert.assertTrue("Did not receive an update for theme",
+            Assert.assertTrue(
+                    "Did not receive an update for theme",
                     mThemeSemaphore.tryAcquire(SEMAPHORE_TIMEOUT_VALUE, SEMAPHORE_TIMEOUT_UNIT));
             return getTheme();
         }
@@ -290,7 +302,8 @@ public class DistilledPagePrefsTest {
         }
 
         public float getFontScalingAfterWaiting() throws InterruptedException {
-            Assert.assertTrue("Did not receive an update for font scaling",
+            Assert.assertTrue(
+                    "Did not receive an update for font scaling",
                     mFontScalingSemaphore.tryAcquire(
                             SEMAPHORE_TIMEOUT_VALUE, SEMAPHORE_TIMEOUT_UNIT));
             return getFontScaling();
@@ -301,30 +314,39 @@ public class DistilledPagePrefsTest {
             mFontScaling.set(scaling);
             mFontScalingSemaphore.release();
         }
+
+        @Override
+        public void onChangeLinksEnabled(boolean enabled) {
+            mLinksEnabled.set(enabled);
+        }
     }
 
     private void setFontFamily(final int font) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> mDistilledPagePrefs.setFontFamily(font));
+        ThreadUtils.runOnUiThreadBlocking(() -> mDistilledPagePrefs.setFontFamily(font));
     }
 
-    private void setTheme(final int theme) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> mDistilledPagePrefs.setTheme(theme));
+    private void setUserPrefTheme(final int theme) {
+        ThreadUtils.runOnUiThreadBlocking(() -> mDistilledPagePrefs.setUserPrefTheme(theme));
     }
 
     private void setFontScaling(final float scaling) {
-        TestThreadUtils.runOnUiThreadBlocking(() -> mDistilledPagePrefs.setFontScaling(scaling));
+        ThreadUtils.runOnUiThreadBlocking(() -> mDistilledPagePrefs.setFontScaling(scaling));
+    }
+
+    private void setLinksEnabled(final boolean enabled) {
+        ThreadUtils.runOnUiThreadBlocking(() -> mDistilledPagePrefs.setLinksEnabled(enabled));
     }
 
     private boolean removeObserver(TestingObserver testObserver) {
         AtomicBoolean wasRemoved = new AtomicBoolean();
-        TestThreadUtils.runOnUiThreadBlocking(
+        ThreadUtils.runOnUiThreadBlocking(
                 () -> wasRemoved.set(mDistilledPagePrefs.removeObserver(testObserver)));
         return wasRemoved.get();
     }
 
     private boolean addObserver(TestingObserver testObserver) {
         AtomicBoolean wasAdded = new AtomicBoolean();
-        TestThreadUtils.runOnUiThreadBlocking(
+        ThreadUtils.runOnUiThreadBlocking(
                 () -> wasAdded.set(mDistilledPagePrefs.addObserver(testObserver)));
         return wasAdded.get();
     }

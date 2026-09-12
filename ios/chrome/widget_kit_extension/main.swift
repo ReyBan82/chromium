@@ -6,46 +6,26 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
-struct Provider: TimelineProvider {
-  typealias Entry = SimpleEntry
-  func placeholder(in context: Context) -> SimpleEntry {
-    SimpleEntry(date: Date())
-  }
-
-  func getSnapshot(
-    in context: Context,
-    completion: @escaping (SimpleEntry) -> Void
-  ) {
-    let entry = SimpleEntry(date: Date())
-    completion(entry)
-  }
-
-  func getTimeline(
-    in context: Context,
-    completion: @escaping (Timeline<Entry>) -> Void
-  ) {
-    let entry = SimpleEntry(date: Date())
-    let timeline = Timeline(entries: [entry], policy: .never)
-    completion(timeline)
-  }
-}
-
-struct SimpleEntry: TimelineEntry {
-  let date: Date
-}
-
 @main
-struct ChromeWidgets: WidgetBundle {
-  init() {
+struct ChromeWidgetsMain {
+
+  static func main() {
     CrashHelper.configure()
+
+    return ChromeWidgetsForMIM.main()
   }
+}
+
+struct ChromeWidgetsForMIM: WidgetBundle {
   @WidgetBundleBuilder
   var body: some Widget {
-    QuickActionsWidget()
-    SearchWidget()
-    DinoGameWidget()
-    #if IOS_ENABLE_LOCKSCREEN_EXTENSION
-      #if IOS_AVAILABLE_LOCKSCREEN_EXTENSION
+    QuickActionsWidgetConfigurable()
+    SearchWidgetConfigurable()
+    ShortcutsWidgetConfigurable()
+    SearchPasswordsWidgetConfigurable()
+    DinoGameWidgetConfigurable()
+    #if IOS_ENABLE_LOCKSCREEN_WIDGET
+      #if IOS_AVAILABLE_LOCKSCREEN_WIDGET
         LockscreenLauncherSearchWidget()
         LockscreenLauncherIncognitoWidget()
         LockscreenLauncherVoiceSearchWidget()

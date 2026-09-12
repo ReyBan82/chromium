@@ -9,6 +9,7 @@
 
 #include "ash/constants/ash_pref_names.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/scoped_feature_list.h"
 #include "chrome/browser/extensions/external_provider_impl.h"
@@ -30,12 +31,12 @@ namespace {
 
 class TestSyncService : public syncer::TestSyncService {
  public:
-  TestSyncService() {}
+  TestSyncService() = default;
 
   TestSyncService(const TestSyncService&) = delete;
   TestSyncService& operator=(const TestSyncService&) = delete;
 
-  ~TestSyncService() override {}
+  ~TestSyncService() override = default;
 
   // syncer::SyncService:
   void AddObserver(syncer::SyncServiceObserver* observer) override {
@@ -52,7 +53,7 @@ class TestSyncService : public syncer::TestSyncService {
   }
 
  private:
-  syncer::SyncServiceObserver* observer_ = nullptr;
+  raw_ptr<syncer::SyncServiceObserver, DanglingUntriaged> observer_ = nullptr;
 };
 
 std::unique_ptr<KeyedService> TestingSyncFactoryFunction(
@@ -83,7 +84,7 @@ class TestExternalPrefLoader : public ExternalPrefLoader {
   }
 
  private:
-  ~TestExternalPrefLoader() override {}
+  ~TestExternalPrefLoader() override = default;
   base::OnceClosure load_callback_;
 };
 
@@ -97,7 +98,7 @@ class ExternalPrefLoaderTest : public ::testing::Test {
     sync_service_ = static_cast<TestSyncService*>(
         SyncServiceFactory::GetInstance()->SetTestingFactoryAndUse(
             profile(), base::BindRepeating(&TestingSyncFactoryFunction)));
-    sync_service_->SetFirstSetupComplete(true);
+    sync_service_->SetInitialSyncFeatureSetupComplete(true);
   }
 
   void TearDown() override { profile_.reset(); }
@@ -115,7 +116,7 @@ class ExternalPrefLoaderTest : public ::testing::Test {
  private:
   content::BrowserTaskEnvironment task_environment_;
   std::unique_ptr<TestingProfile> profile_;
-  TestSyncService* sync_service_ = nullptr;
+  raw_ptr<TestSyncService, DanglingUntriaged> sync_service_ = nullptr;
 };
 
 // TODO(lazyboy): Add a test to cover
@@ -134,8 +135,7 @@ TEST_F(ExternalPrefLoaderTest, PrefReadInitiatesCorrectly) {
 
   // Initially CanSyncFeatureStart() returns true, returning false will let
   // |loader| proceed.
-  sync_service()->SetDisableReasons(
-      syncer::SyncService::DISABLE_REASON_USER_CHOICE);
+  sync_service()->SetSignedIn(signin::ConsentLevel::kSignin);
   ASSERT_FALSE(sync_service()->CanSyncFeatureStart());
   sync_service()->FireOnStateChanged();
   run_loop.Run();

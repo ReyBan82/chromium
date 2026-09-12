@@ -13,9 +13,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * Utility functions for calculating Rectangle properties (i.e. Area of a single Rect)
- */
+/** Utility functions for calculating Rectangle properties (i.e. Area of a single Rect) */
 public final class RectUtils {
     private RectUtils() {}
 
@@ -23,9 +21,7 @@ public final class RectUtils {
         return rect.width() * rect.height();
     }
 
-    /**
-     * Segment Type Constants
-     */
+    /** Segment Type Constants */
     @Retention(RetentionPolicy.SOURCE)
     @IntDef({SegmentType.START, SegmentType.END})
     private @interface SegmentType {
@@ -65,7 +61,7 @@ public final class RectUtils {
             if (mX == other.mX) {
                 return compareSegmentTypes(mSegmentType, other.mSegmentType);
             }
-            return mX - other.mX;
+            return Integer.compare(mX, other.mX);
         }
     }
 
@@ -91,12 +87,12 @@ public final class RectUtils {
             if (mY == other.mY) {
                 return compareSegmentTypes(mSegmentType, other.mSegmentType);
             }
-            return mY - other.mY;
+            return Integer.compare(mY, other.mY);
         }
     }
 
     private static void insertSorted(
-            VerticalSegment arr[], int n, VerticalSegment verticalSegment, int capacity) {
+            VerticalSegment[] arr, int n, VerticalSegment verticalSegment, int capacity) {
         assert n < capacity;
 
         int i;
@@ -104,13 +100,13 @@ public final class RectUtils {
             arr[i + 1].set(arr[i]);
         }
 
-        int insert_index = i + 1;
-        assert insert_index >= 0 && insert_index < capacity;
-        arr[insert_index].set(verticalSegment);
+        int insertIndex = i + 1;
+        assert insertIndex >= 0 && insertIndex < capacity;
+        arr[insertIndex].set(verticalSegment);
     }
 
     private static int deleteElement(
-            VerticalSegment arr[], int n, VerticalSegment verticalSegment) {
+            VerticalSegment[] arr, int n, VerticalSegment verticalSegment) {
         int pos = Arrays.binarySearch(arr, 0, n, verticalSegment);
         if (pos < 0) {
             return -1;
@@ -124,7 +120,7 @@ public final class RectUtils {
     }
 
     private static int getCoverageOfVerticalSegments(
-            VerticalSegment vSegments[], int numVerticalSegments) {
+            VerticalSegment[] vSegments, int numVerticalSegments) {
         int scanCount = 0;
         int coveredPixels = 0;
         int start = -1;
@@ -141,42 +137,42 @@ public final class RectUtils {
         return coveredPixels;
     }
 
-    private static HorizontalSegment sHorizontalSegments[];
-    private static VerticalSegment sVerticalSegments[];
-    private static VerticalSegment sVerticalSegment1 = new VerticalSegment();
-    private static VerticalSegment sVerticalSegment2 = new VerticalSegment();
-    private static Rect sClippedRects[];
+    private static HorizontalSegment[] sHorizontalSegments;
+    private static VerticalSegment[] sVerticalSegments;
+    private static final VerticalSegment sVerticalSegment1 = new VerticalSegment();
+    private static final VerticalSegment sVerticalSegment2 = new VerticalSegment();
+    private static Rect[] sClippedRects;
 
     /*
-        This is a 2d extension of the 1d range intersection problem.
-        In one dimension we are interested in calculating the
-        intersected set of ranges for an input. To do this we decompose
-        each input range into a start and an end position, plus whether
-        it is entering a range or leaving it. Once these decomposed
-        positions are sorted, we can compute the intersection by
-        iterating over the list and recording transitions from not being
-        in a range to being in a range, and vice versa.
+            This is a 2d extension of the 1d range intersection problem.
+            In one dimension we are interested in calculating the
+            intersected set of ranges for an input. To do this we decompose
+            each input range into a start and an end position, plus whether
+            it is entering a range or leaving it. Once these decomposed
+            positions are sorted, we can compute the intersection by
+            iterating over the list and recording transitions from not being
+            in a range to being in a range, and vice versa.
 
-        E.g. [1,4] U [2,5] U [7,9] -> [1,+1] [2,+1] [4,-1] [5,-1]
-        [7,+1] [9,-1]. Then, summing the second component as we
-        traverse, and looking for 0->1 and 1->0 transitions, we end up
-        finding the union ranges [1,5], [7,9]
+            E.g. [1,4] U [2,5] U [7,9] -> [1,+1] [2,+1] [4,-1] [5,-1]
+            [7,+1] [9,-1]. Then, summing the second component as we
+            traverse, and looking for 0->1 and 1->0 transitions, we end up
+            finding the union ranges [1,5], [7,9]
 
-        In order to extend this to 2d axis aligned rectangles, we
-        decompose rectangles into top and bottom edges that add or
-        remove a range from the 1d data data structure. Before we add or
-        remove a range to the 1d data structure we accumulate area equal
-        to the current 1d coverage multiplied by the delta-y from the
-        last point at which we updated the coverage.
+            In order to extend this to 2d axis aligned rectangles, we
+            decompose rectangles into top and bottom edges that add or
+            remove a range from the 1d data data structure. Before we add or
+            remove a range to the 1d data structure we accumulate area equal
+            to the current 1d coverage multiplied by the delta-y from the
+            last point at which we updated the coverage.
 
-1  4  7   11 14  18
-1     +------+         [4,+1], [11,-1] cov=7 area += 0
-2  +----------------+  [1,+1], [4,+1], [11,-1], [18,-1], cov=17, rea += 7*1
-3  |  |  +------+   |  [1,+1], [4,+1], [7,+1], [11,-1], [14,-1], [18,-1], cov=17 area += 17*1
-4  |  +------+  |   |  [1,+1], [7,+1], [14,-1], [18,-1], cov=17 area += 17*1
-5  +----------------+  [7,+1], [14,-1] cov=7 area += 17*1
-6        +------+      [] area += 7*1
-    */
+    1  4  7   11 14  18
+    1     +------+         [4,+1], [11,-1] cov=7 area += 0
+    2  +----------------+  [1,+1], [4,+1], [11,-1], [18,-1], cov=17, rea += 7*1
+    3  |  |  +------+   |  [1,+1], [4,+1], [7,+1], [11,-1], [14,-1], [18,-1], cov=17 area += 17*1
+    4  |  +------+  |   |  [1,+1], [7,+1], [14,-1], [18,-1], cov=17 area += 17*1
+    5  +----------------+  [7,+1], [14,-1] cov=7 area += 17*1
+    6        +------+      [] area += 7*1
+        */
 
     public static int calculatePixelsOfCoverage(Rect screenRect, List<Rect> coverageRects) {
         if (coverageRects.size() == 0) {
@@ -193,7 +189,7 @@ public final class RectUtils {
         for (int i = 0; i < coverageRects.size(); i++) {
             Rect clipRect = coverageRects.get(i);
             if (clipRect.intersect(screenRect)) { // This line may modify the value of the passed
-                                                  // in coverage rects
+                // in coverage rects
                 sClippedRects[numClippedRects++] = clipRect;
             }
         }
@@ -225,12 +221,13 @@ public final class RectUtils {
 
         Arrays.sort(sHorizontalSegments, 0, maxSegments);
 
-        int prev_x = -1;
+        int prevX = -1;
         int coveredPixels = 0;
         for (int i = 0; i < maxSegments; i++) {
             HorizontalSegment hSegment = sHorizontalSegments[i];
-            coveredPixels += getCoverageOfVerticalSegments(sVerticalSegments, numVerticalSegments)
-                    * (hSegment.mX - prev_x);
+            coveredPixels +=
+                    getCoverageOfVerticalSegments(sVerticalSegments, numVerticalSegments)
+                            * (hSegment.mX - prevX);
             sVerticalSegment1.set(hSegment.mTop, SegmentType.START);
             sVerticalSegment2.set(hSegment.mBottom, SegmentType.END);
 
@@ -250,7 +247,7 @@ public final class RectUtils {
                 assert ret != -1;
                 numVerticalSegments = ret;
             }
-            prev_x = hSegment.mX;
+            prevX = hSegment.mX;
         }
 
         return coveredPixels;

@@ -4,11 +4,8 @@
 
 package org.chromium.chrome.browser.media.ui;
 
-import static org.chromium.base.test.util.Restriction.RESTRICTION_TYPE_NON_LOW_END_DEVICE;
-
 import android.content.Context;
 import android.media.AudioManager;
-import android.support.test.InstrumentationRegistry;
 
 import androidx.test.filters.SmallTest;
 
@@ -19,43 +16,49 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CommandLineFlags;
-import org.chromium.base.test.util.Restriction;
+import org.chromium.base.test.util.DisableIf;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.FreshCtaTransitTestRule;
 import org.chromium.components.browser_ui.media.MediaNotificationManager;
 import org.chromium.content_public.browser.test.util.DOMUtils;
 import org.chromium.content_public.browser.test.util.JavaScriptUtils;
-import org.chromium.net.test.EmbeddedTestServer;
+import org.chromium.ui.base.DeviceFormFactor;
 
 /**
  * Integration test that checks that autoplay muted doesn't show a notification nor take audio focus
  */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
+@Batch(Batch.PER_CLASS)
 public class AutoplayMutedNotificationTest {
     @Rule
-    public ChromeTabbedActivityTestRule mActivityTestRule = new ChromeTabbedActivityTestRule();
+    public FreshCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.freshChromeTabbedActivityRule();
 
     private static final String TEST_PATH = "/content/test/data/media/session/autoplay-muted.html";
     private static final String VIDEO_ID = "video";
     private static final String PLAY_BUTTON_ID = "play";
     private static final String UNMUTE_BUTTON_ID = "unmute";
-    private static final int AUDIO_FOCUS_CHANGE_TIMEOUT = 500;  // ms
-
-    private EmbeddedTestServer mTestServer;
+    private static final int AUDIO_FOCUS_CHANGE_TIMEOUT = 500; // ms
 
     private AudioManager getAudioManager() {
-        return (AudioManager) mActivityTestRule.getActivity()
-                .getApplicationContext()
-                .getSystemService(Context.AUDIO_SERVICE);
+        return (AudioManager)
+                mActivityTestRule
+                        .getActivity()
+                        .getApplicationContext()
+                        .getSystemService(Context.AUDIO_SERVICE);
     }
 
     private boolean isMediaNotificationVisible() {
-        return MediaNotificationManager.getController(R.id.media_playback_notification) != null;
+        return MediaNotificationManager.getActiveOrFallbackControllerByMediaTypeId(
+                        R.id.media_playback_notification)
+                != null;
     }
 
     private class MockAudioFocusChangeListener implements AudioManager.OnAudioFocusChangeListener {
@@ -71,8 +74,8 @@ public class AutoplayMutedNotificationTest {
         }
 
         public void requestAudioFocus(int focusType) {
-            int result = getAudioManager().requestAudioFocus(
-                    this, AudioManager.STREAM_MUSIC, focusType);
+            int result =
+                    getAudioManager().requestAudioFocus(this, AudioManager.STREAM_MUSIC, focusType);
             if (result != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 Assert.fail("Did not get audio focus");
             } else {
@@ -85,21 +88,22 @@ public class AutoplayMutedNotificationTest {
 
     @Before
     public void setUp() {
-        mTestServer = EmbeddedTestServer.createAndStartServer(InstrumentationRegistry.getContext());
         mAudioFocusChangeListener = new MockAudioFocusChangeListener();
-        mActivityTestRule.startMainActivityWithURL(mTestServer.getURL(TEST_PATH));
+        mActivityTestRule.startOnTestServerUrl(TEST_PATH);
     }
 
     @After
     public void tearDown() {
-        mTestServer.stopAndDestroyServer();
+        if (mAudioFocusChangeListener != null) {
+            getAudioManager().abandonAudioFocus(mAudioFocusChangeListener);
+        }
+        MediaNotificationManager.resetForTesting();
     }
 
     @Test
     @SmallTest
-    @Restriction(RESTRICTION_TYPE_NON_LOW_END_DEVICE)
     public void testBasic() throws Exception {
-        Tab tab = mActivityTestRule.getActivity().getActivityTab();
+        Tab tab = mActivityTestRule.getActivityTab();
 
         // Taking audio focus.
         Assert.assertEquals(
@@ -122,9 +126,8 @@ public class AutoplayMutedNotificationTest {
 
     @Test
     @SmallTest
-    @Restriction(RESTRICTION_TYPE_NON_LOW_END_DEVICE)
     public void testDoesNotReactToAudioFocus() throws Exception {
-        Tab tab = mActivityTestRule.getActivity().getActivityTab();
+        Tab tab = mActivityTestRule.getActivityTab();
 
         // The page will autoplay the video.
         DOMUtils.waitForMediaPlay(tab.getWebContents(), VIDEO_ID);
@@ -148,9 +151,8 @@ public class AutoplayMutedNotificationTest {
 
     @Test
     @SmallTest
-    @Restriction(RESTRICTION_TYPE_NON_LOW_END_DEVICE)
     public void testAutoplayMutedThenUnmute() throws Exception {
-        Tab tab = mActivityTestRule.getActivity().getActivityTab();
+        Tab tab = mActivityTestRule.getActivityTab();
 
         // Taking audio focus.
         Assert.assertEquals(
@@ -170,8 +172,9 @@ public class AutoplayMutedNotificationTest {
         sb.append("})();");
 
         // Unmute from script.
-        String result = JavaScriptUtils.executeJavaScriptAndWaitForResult(
-                tab.getWebContents(), sb.toString());
+        String result =
+                JavaScriptUtils.executeJavaScriptAndWaitForResult(
+                        tab.getWebContents(), sb.toString());
         Assert.assertTrue(result.trim().equalsIgnoreCase("false"));
 
         // Video is paused.
@@ -188,9 +191,9 @@ public class AutoplayMutedNotificationTest {
 
     @Test
     @SmallTest
-    @Restriction(RESTRICTION_TYPE_NON_LOW_END_DEVICE)
+    @DisableIf.Device(DeviceFormFactor.DESKTOP) // https://crbug.com/481443731
     public void testMutedPlaybackDoesNotTakeAudioFocus() throws Exception {
-        Tab tab = mActivityTestRule.getActivity().getActivityTab();
+        Tab tab = mActivityTestRule.getActivityTab();
 
         // Taking audio focus.
         Assert.assertEquals(
@@ -208,7 +211,7 @@ public class AutoplayMutedNotificationTest {
         DOMUtils.pauseMedia(tab.getWebContents(), VIDEO_ID);
 
         // Restart the video with a gesture: no longer "muted autoplay".
-        DOMUtils.clickNode(tab.getWebContents(), PLAY_BUTTON_ID);
+        DOMUtils.clickNodeWithJavaScript(tab.getWebContents(), PLAY_BUTTON_ID);
         DOMUtils.waitForMediaPlay(tab.getWebContents(), VIDEO_ID);
 
         // Audio focus was not taken and no notification is visible.
@@ -219,9 +222,9 @@ public class AutoplayMutedNotificationTest {
 
     @Test
     @SmallTest
-    @Restriction(RESTRICTION_TYPE_NON_LOW_END_DEVICE)
+    @DisableIf.Device(DeviceFormFactor.DESKTOP) // https://crbug.com/481443731
     public void testUnmutedPlaybackTakesAudioFocus() throws Exception {
-        Tab tab = mActivityTestRule.getActivity().getActivityTab();
+        Tab tab = mActivityTestRule.getActivityTab();
 
         // Taking audio focus.
         Assert.assertEquals(
@@ -237,7 +240,7 @@ public class AutoplayMutedNotificationTest {
         Thread.sleep(AUDIO_FOCUS_CHANGE_TIMEOUT);
 
         // Restart the video with a gesture: no longer "muted autoplay".
-        DOMUtils.clickNode(tab.getWebContents(), UNMUTE_BUTTON_ID);
+        DOMUtils.clickNodeWithJavaScript(tab.getWebContents(), UNMUTE_BUTTON_ID);
         Assert.assertFalse(DOMUtils.isMediaPaused(tab.getWebContents(), VIDEO_ID));
 
         Thread.sleep(AUDIO_FOCUS_CHANGE_TIMEOUT);

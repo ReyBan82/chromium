@@ -4,21 +4,23 @@
 
 #include "services/network/cookie_access_delegate_impl.h"
 
+#include <optional>
+
 #include "base/test/task_environment.h"
 #include "net/base/schemeful_site.h"
 #include "net/first_party_sets/first_party_set_metadata.h"
-#include "net/first_party_sets/same_party_context.h"
+#include "net/first_party_sets/first_party_sets_cache_filter.h"
 #include "services/network/first_party_sets/first_party_sets_manager.h"
 #include "services/network/public/mojom/cookie_manager.mojom-shared.h"
 #include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace network {
 namespace {
 
 using testing::_;
+using testing::FieldsAre;
 using testing::IsEmpty;
 using testing::Optional;
 
@@ -44,19 +46,12 @@ TEST_F(CookieAccessDelegateImplTest, NullFirstPartySetsManager) {
   // non-nullopt.
 
   // Same as the default ctor, but just to be explicit:
-  net::FirstPartySetMetadata expected_metadata(net::SamePartyContext(),
-                                               /*frame_entry=*/nullptr,
-                                               /*top_frame_entry=*/nullptr);
-  EXPECT_THAT(delegate().ComputeFirstPartySetMetadataMaybeAsync(
-                  site, &site, {},
-                  base::BindOnce([](net::FirstPartySetMetadata) { FAIL(); })),
-              Optional(std::ref(expected_metadata)));
-
-  EXPECT_THAT(
-      delegate().FindFirstPartySetEntries(
-          {site},
-          base::BindOnce([](FirstPartySetsManager::EntriesResult) { FAIL(); })),
-      Optional(IsEmpty()));
+  net::FirstPartySetMetadata expected_metadata(
+      /*frame_entry=*/std::nullopt,
+      /*top_frame_entry=*/std::nullopt);
+  EXPECT_THAT(delegate().ComputeFirstPartySetMetadata(site, &site),
+              std::make_pair(std::cref(expected_metadata),
+                             net::FirstPartySetsCacheFilter::MatchInfo()));
 }
 
 }  // namespace

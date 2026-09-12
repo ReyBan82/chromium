@@ -16,10 +16,12 @@ namespace remoting {
 // Ensures there is no DCHECK failure or crash in Register() and Callbacks.
 TEST(HostAttributesTest, Sanity) {
   std::string result = GetHostAttributes();
+  bool is_debug_build = result.contains("Debug-Build");
+
 #if defined(NDEBUG)
-  ASSERT_EQ(result.find("Debug-Build"), std::string::npos);
+  ASSERT_FALSE(is_debug_build);
 #else
-  ASSERT_NE(result.find("Debug-Build"), std::string::npos);
+  ASSERT_TRUE(is_debug_build);
 #endif
 }
 

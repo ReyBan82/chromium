@@ -12,22 +12,19 @@
 #include "chrome/browser/ash/account_manager/account_manager_edu_coexistence_controller.h"
 #include "chrome/browser/ash/account_manager/account_manager_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "components/account_manager_core/account_manager_facade.h"
 #include "components/account_manager_core/chromeos/account_manager.h"
-#include "components/account_manager_core/chromeos/account_manager_facade_factory.h"
 #include "components/account_manager_core/pref_names.h"
 #include "components/prefs/pref_service.h"
+#include "google_apis/gaia/gaia_id.h"
 
 namespace ash {
 
 AccountManagerPolicyController::AccountManagerPolicyController(
     Profile* profile,
     account_manager::AccountManager* account_manager,
-    account_manager::AccountManagerFacade* account_manager_facade,
     const AccountId& device_account_id)
     : profile_(profile),
       account_manager_(account_manager),
-      account_manager_facade_(account_manager_facade),
       device_account_id_(device_account_id) {}
 
 AccountManagerPolicyController::~AccountManagerPolicyController() {
@@ -61,8 +58,7 @@ void AccountManagerPolicyController::Start() {
   if (profile_->IsChild()) {
     edu_coexistence_consent_invalidation_controller_ =
         std::make_unique<EduCoexistenceConsentInvalidationController>(
-            profile_, account_manager_, account_manager_facade_,
-            device_account_id_);
+            profile_, account_manager_, device_account_id_);
     edu_coexistence_consent_invalidation_controller_->Init();
   }
 }
@@ -86,7 +82,7 @@ void AccountManagerPolicyController::RemoveSecondaryAccounts(
     }
 
     if (device_account_id_.GetAccountType() == AccountType::GOOGLE &&
-        account.key.id() == device_account_id_.GetGaiaId()) {
+        GaiaId(account.key.id()) == device_account_id_.GetGaiaId()) {
       // Do not remove the Device Account.
       continue;
     }
@@ -104,7 +100,7 @@ void AccountManagerPolicyController::
     return;
   }
 
-  account_manager_facade_->GetAccounts(
+  account_manager_->GetAccounts(
       base::BindOnce(&AccountManagerPolicyController::RemoveSecondaryAccounts,
                      weak_factory_.GetWeakPtr()));
 }
@@ -117,7 +113,7 @@ void AccountManagerPolicyController::OnChildAccountTypeChanged(
     return;
   }
 
-  account_manager_facade_->GetAccounts(
+  account_manager_->GetAccounts(
       base::BindOnce(&AccountManagerPolicyController::RemoveSecondaryAccounts,
                      weak_factory_.GetWeakPtr()));
 }

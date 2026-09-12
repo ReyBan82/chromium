@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+<meta name=fuzzy content="maxDifference=0-3; totalPixels=0-2000">
 <head>
 <style type="text/css">
 body {
@@ -22,10 +23,15 @@ ad_frame.height = 1000;
 // Scroll down to verify that the overlay is drawn correctly for the portion of the
 // frame that is larger than the viewport.
 window.scrollTo(0, 400);
-// Finish the test once the ad frame is loaded.
+
 ad_frame.onload = function () {
-  if (window.testRunner)
-    testRunner.notifyDone();
+  // Finish the test after the ad highlight is drawn.
+  requestAnimationFrame(function() {
+    requestAnimationFrame(function() {
+      if (window.testRunner)
+        testRunner.notifyDone();
+    });
+  });
 }
 ad_frame.src = "about:blank";
 

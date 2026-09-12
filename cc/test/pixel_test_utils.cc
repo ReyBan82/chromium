@@ -8,45 +8,105 @@
 #include <vector>
 
 #include "base/base64.h"
+#include "base/feature_list.h"
+#include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/path_service.h"
+#include "base/strings/escape.h"
+#include "base/strings/strcat.h"
+#include "base/strings/stringprintf.h"
+#include "components/viz/test/paths.h"
+#include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/gfx/codec/png_codec.h"
 
 namespace cc {
 
-bool WritePNGFile(const SkBitmap& bitmap, const base::FilePath& file_path,
-    bool discard_transparency) {
-  std::vector<unsigned char> png_data;
-  if (gfx::PNGCodec::EncodeBGRASkBitmap(bitmap,
-                                        discard_transparency,
-                                        &png_data) &&
-      base::CreateDirectory(file_path.DirName())) {
-    char* data = reinterpret_cast<char*>(&png_data[0]);
-    int size = static_cast<int>(png_data.size());
-    return base::WriteFile(file_path, data, size) == size;
+namespace {
+
+// On pixel mismatch, output a HTML-based diff page containing both images,
+// instead of the base64-encoded actual and expected images separately.
+BASE_FEATURE(kCcPixelTestHtmlDiffPage,
+#if BUILDFLAG(IS_ANDROID)
+             // Android test runners don't have access to the diff page.
+             base::FEATURE_DISABLED_BY_DEFAULT
+#else
+             base::FEATURE_ENABLED_BY_DEFAULT
+#endif
+);
+
+std::string GetImageDiffUrl(const SkBitmap& left, const SkBitmap& right) {
+  std::stringstream test_name;
+  if (const ::testing::TestInfo* test_info =
+          ::testing::UnitTest::GetInstance()->current_test_info()) {
+    test_name << test_info->test_suite_name() << "." << test_info->name();
+    const char* type_param = test_info->type_param();
+    const char* value_param = test_info->value_param();
+    if (type_param != nullptr || value_param != nullptr) {
+      test_name << ", where ";
+      if (type_param != nullptr) {
+        test_name << "TypeParam = " << type_param;
+        if (value_param != nullptr) {
+          test_name << " and ";
+        }
+      }
+      if (value_param != nullptr) {
+        test_name << "GetParam() = " << value_param;
+      }
+    }
+  }
+
+  // Avoid using `viz::Paths::DIR_TEST_DATA`, since there may be callers of this
+  // helper from outside Viz.
+  const base::FilePath image_diff_path =
+      base::PathService::CheckedGet(base::DIR_SRC_TEST_DATA_ROOT)
+          .AppendASCII("components")
+          .AppendASCII("test")
+          .AppendASCII("data")
+          .AppendASCII("viz")
+          .AppendASCII("image_diff.html");
+
+  const bool use_plus = true;
+  return base::StringPrintf(
+      "file:///%s?testName=%s&leftName=%s&leftSrc=%s&rightName=%s&"
+      "rightSrc=%s",
+      image_diff_path.AsUTF8Unsafe(),
+      base::EscapeUrlEncodedData(test_name.str(), use_plus).c_str(), "Actual",
+      base::EscapeUrlEncodedData(GetPNGDataUrl(left), use_plus).c_str(),
+      "Expected",
+      base::EscapeUrlEncodedData(GetPNGDataUrl(right), use_plus).c_str());
+}
+
+}  // namespace
+
+bool WritePNGFile(const SkBitmap& bitmap,
+                  const base::FilePath& file_path,
+                  bool discard_transparency) {
+  std::optional<std::vector<uint8_t>> png_data =
+      gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, discard_transparency);
+  if (png_data && base::CreateDirectory(file_path.DirName())) {
+    return base::WriteFile(file_path, png_data.value());
   }
   return false;
 }
 
 std::string GetPNGDataUrl(const SkBitmap& bitmap) {
-  std::vector<unsigned char> png_data;
-  gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, false, &png_data);
-  std::string data_url;
-  data_url.insert(data_url.end(), png_data.begin(), png_data.end());
-  base::Base64Encode(data_url, &data_url);
-  data_url.insert(0, "data:image/png;base64,");
-
-  return data_url;
+  std::optional<std::vector<uint8_t>> png_data =
+      gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, /*discard_transparency=*/false);
+  return base::StrCat(
+      {"data:image/png;base64,",
+       base::Base64Encode(png_data.value_or(std::vector<uint8_t>()))});
 }
 
-bool ReadPNGFile(const base::FilePath& file_path, SkBitmap* bitmap) {
-  DCHECK(bitmap);
-  std::string png_data;
-  return base::ReadFileToString(file_path, &png_data) &&
-         gfx::PNGCodec::Decode(reinterpret_cast<unsigned char*>(&png_data[0]),
-                               png_data.length(),
-                               bitmap);
+SkBitmap ReadPNGFile(const base::FilePath& file_path) {
+  std::optional<std::vector<uint8_t>> png_data =
+      base::ReadFileToBytes(file_path);
+  if (!png_data) {
+    return SkBitmap();
+  }
+
+  return gfx::PNGCodec::Decode(png_data.value());
 }
 
 bool MatchesBitmap(const SkBitmap& gen_bmp,
@@ -75,10 +135,12 @@ bool MatchesBitmap(const SkBitmap& gen_bmp,
   }
 
   if (!pixels_match) {
-    LOG(ERROR) << "Actual pixels (open in browser):\n"
-               << GetPNGDataUrl(gen_bmp);
-    LOG(ERROR) << "Expected pixels (open in browser):\n"
-               << GetPNGDataUrl(ref_bmp);
+    if (base::FeatureList::IsEnabled(kCcPixelTestHtmlDiffPage)) {
+      LOG(ERROR) << "Diff (open in browser):\n"
+                 << GetImageDiffUrl(gen_bmp, ref_bmp) << "\n";
+    }
+    LOG(ERROR) << "Actual (open in browser):\n" << GetPNGDataUrl(gen_bmp);
+    LOG(ERROR) << "Expected (open in browser):\n" << GetPNGDataUrl(ref_bmp);
   }
   return pixels_match;
 }
@@ -86,8 +148,8 @@ bool MatchesBitmap(const SkBitmap& gen_bmp,
 bool MatchesPNGFile(const SkBitmap& gen_bmp,
                     base::FilePath ref_img_path,
                     const PixelComparator& comparator) {
-  SkBitmap ref_bmp;
-  if (!ReadPNGFile(ref_img_path, &ref_bmp)) {
+  SkBitmap ref_bmp = ReadPNGFile(ref_img_path);
+  if (ref_bmp.isNull()) {
     LOG(ERROR) << "Cannot read reference image: " << ref_img_path.value();
     return false;
   }

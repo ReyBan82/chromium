@@ -13,12 +13,13 @@
 #include "ui/accessibility/ax_serializable_tree.h"
 #include "ui/accessibility/ax_tree.h"
 #include "ui/accessibility/ax_tree_serializer.h"
+#include "ui/accessibility/test_ax_tree_update.h"
 
 namespace ui {
 
 // Required by gmock to print TargetedEvent in a human-readable way.
 void PrintTo(const AXEventGenerator::TargetedEvent& event, std::ostream* os) {
-  *os << event.event_params.event << " on " << event.node_id;
+  *os << event.event_params->event << " on " << event.node_id;
 }
 
 namespace {
@@ -29,8 +30,6 @@ using testing::Matches;
 using testing::PrintToString;
 using testing::UnorderedElementsAre;
 
-// TODO(gilmanmh): Improve printing of test failure messages when the expected
-// values are themselves matchers (e.g. Not(3)).
 MATCHER_P2(HasEventAtNode,
            expected_event_type,
            expected_node_id,
@@ -38,8 +37,24 @@ MATCHER_P2(HasEventAtNode,
                PrintToString(expected_event_type) + " on " +
                PrintToString(expected_node_id)) {
   const auto& event = arg;
-  return Matches(expected_event_type)(event.event_params.event) &&
-         Matches(expected_node_id)(event.node_id);
+  std::string failure_message;
+  if (!Matches(expected_event_type)(event.event_params->event)) {
+    failure_message +=
+        "Expected event type: " + PrintToString(expected_event_type) +
+        ", actual event type: " + PrintToString(event.event_params->event);
+  }
+  if (!Matches(expected_node_id)(event.node_id)) {
+    if (!failure_message.empty()) {
+      failure_message += "; ";
+    }
+    failure_message += "Expected node id: " + PrintToString(expected_node_id) +
+                       ", actual node id: " + PrintToString(event.node_id);
+  }
+  if (!failure_message.empty()) {
+    *result_listener << failure_message;
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -158,10 +173,10 @@ TEST(AXEventGeneratorTest, IterateThroughEmptyEventSets) {
         << (map_iter != expected_event_map.end());
 
     std::set<AXEventGenerator::Event>& node_events = map_iter->second;
-    auto event_iter = node_events.find(targeted_event.event_params.event);
+    auto event_iter = node_events.find(targeted_event.event_params->event);
 
     ASSERT_NE(event_iter, node_events.end())
-        << "Event=" << targeted_event.event_params.event
+        << "Event=" << targeted_event.event_params->event
         << ", on node_id=" << targeted_event.node_id
         << " NOT found in |expected_event_map|";
 
@@ -240,7 +255,8 @@ TEST(AXEventGeneratorTest, ExpandedAndRowCount) {
   ASSERT_THAT(event_generator, IsEmpty());
   AXTreeUpdate update = initial_state;
   update.nodes[2].AddState(ax::mojom::State::kExpanded);
-  update.nodes[3].state = 0;
+  update.nodes[3].RemoveState(ax::mojom::State::kExpanded);
+  update.nodes[3].AddState(ax::mojom::State::kCollapsed);
 
   ASSERT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(
@@ -658,12 +674,112 @@ TEST(AXEventGeneratorTest, ActiveDescendantChanged) {
   update.nodes[0].int_attributes.clear();
   update.nodes[0].AddIntAttribute(ax::mojom::IntAttribute::kActivedescendantId,
                                   3);
+  event_generator.RegisterEventOnNode(
+      AXEventGenerator::Event::RELATED_NODE_CHANGED, update.nodes[0].id);
   ASSERT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(
       event_generator,
       UnorderedElementsAre(
           HasEventAtNode(AXEventGenerator::Event::ACTIVE_DESCENDANT_CHANGED, 1),
           HasEventAtNode(AXEventGenerator::Event::RELATED_NODE_CHANGED, 1)));
+}
+
+TEST(AXEventGeneratorTest, ActiveDescendantChangedAndNewNodeSelection) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(3);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].role = ax::mojom::Role::kGrid;
+  initial_state.nodes[0].child_ids.push_back(2);
+  initial_state.nodes[0].child_ids.push_back(3);
+  initial_state.nodes[0].AddIntAttribute(
+      ax::mojom::IntAttribute::kActivedescendantId, 2);
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].role = ax::mojom::Role::kCell;
+  initial_state.nodes[1].AddBoolAttribute(ax::mojom::BoolAttribute::kSelected,
+                                          true);
+  initial_state.nodes[2].id = 3;
+  initial_state.nodes[2].role = ax::mojom::Role::kCell;
+  AXTree tree(initial_state);
+
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+  AXTreeUpdate update = initial_state;
+  update.nodes.resize(4);
+  update.nodes[0].int_attributes.clear();
+  update.nodes[0].child_ids.push_back(4);
+  update.nodes[0].AddIntAttribute(ax::mojom::IntAttribute::kActivedescendantId,
+                                  4);
+  update.nodes[1].AddBoolAttribute(ax::mojom::BoolAttribute::kSelected, false);
+  update.nodes[3].id = 4;
+  update.nodes[3].role = ax::mojom::Role::kCell;
+  update.nodes[3].AddBoolAttribute(ax::mojom::BoolAttribute::kSelected, true);
+  ASSERT_TRUE(tree.Unserialize(update));
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::ACTIVE_DESCENDANT_CHANGED, 1),
+          HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 1),
+          HasEventAtNode(AXEventGenerator::Event::SELECTED_CHILDREN_CHANGED, 1),
+          HasEventAtNode(AXEventGenerator::Event::SELECTED_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::WIN_IACCESSIBLE_STATE_CHANGED,
+                         2),
+          HasEventAtNode(AXEventGenerator::Event::SELECTED_CHANGED, 4),
+          HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 4),
+          HasEventAtNode(AXEventGenerator::Event::WIN_IACCESSIBLE_STATE_CHANGED,
+                         4)));
+}
+
+TEST(AXEventGeneratorTest, ActiveDescendantChangedAndNewNodeSelectionIndirect) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(5);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].role = ax::mojom::Role::kGrid;
+  initial_state.nodes[0].child_ids.push_back(2);
+  initial_state.nodes[0].child_ids.push_back(4);
+  initial_state.nodes[0].AddIntAttribute(
+      ax::mojom::IntAttribute::kActivedescendantId, 3);
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].child_ids.push_back(3);
+  initial_state.nodes[2].id = 3;
+  initial_state.nodes[2].role = ax::mojom::Role::kCell;
+  initial_state.nodes[2].AddBoolAttribute(ax::mojom::BoolAttribute::kSelected,
+                                          true);
+  initial_state.nodes[3].id = 4;
+  initial_state.nodes[3].child_ids.push_back(5);
+  initial_state.nodes[4].id = 5;
+  initial_state.nodes[4].role = ax::mojom::Role::kCell;
+  AXTree tree(initial_state);
+
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+  AXTreeUpdate update = initial_state;
+  update.nodes.resize(7);
+  update.nodes[0].int_attributes.clear();
+  update.nodes[0].child_ids.push_back(6);
+  update.nodes[0].AddIntAttribute(ax::mojom::IntAttribute::kActivedescendantId,
+                                  7);
+  update.nodes[2].AddBoolAttribute(ax::mojom::BoolAttribute::kSelected, false);
+  update.nodes[5].id = 6;
+  update.nodes[5].child_ids.push_back(7);
+  update.nodes[6].id = 7;
+  update.nodes[6].role = ax::mojom::Role::kCell;
+  update.nodes[6].AddBoolAttribute(ax::mojom::BoolAttribute::kSelected, true);
+  ASSERT_TRUE(tree.Unserialize(update));
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::ACTIVE_DESCENDANT_CHANGED, 1),
+          HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 1),
+          HasEventAtNode(AXEventGenerator::Event::SELECTED_CHILDREN_CHANGED, 1),
+          HasEventAtNode(AXEventGenerator::Event::SELECTED_CHANGED, 3),
+          HasEventAtNode(AXEventGenerator::Event::WIN_IACCESSIBLE_STATE_CHANGED,
+                         3),
+          HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 6),
+          HasEventAtNode(AXEventGenerator::Event::SELECTED_CHANGED, 7),
+          HasEventAtNode(AXEventGenerator::Event::WIN_IACCESSIBLE_STATE_CHANGED,
+                         7)));
 }
 
 TEST(AXEventGeneratorTest, CreateAlertAndLiveRegion) {
@@ -706,6 +822,33 @@ TEST(AXEventGeneratorTest, CreateAlertAndLiveRegion) {
           HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 2),
           HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 3),
           HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 4)));
+}
+
+TEST(AXEventGeneratorTest, AlertBecomingUnignored) {
+  // Test that when a node with alert role becomes unignored, an ALERT event
+  // is fired. This handles cases where role and ignored state change
+  // simultaneously (e.g. visibility:hidden->visible + role="alert").
+  TestAXTreeUpdate initial_state(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kAlert state=kIgnored
+  )HTML"));
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  // Update: make the alert node unignored.
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].RemoveState(ax::mojom::State::kIgnored);
+
+  ASSERT_TRUE(tree.Unserialize(update));
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::ALERT, 2),
+          HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 2),
+          HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 1)));
 }
 
 TEST(AXEventGeneratorTest, LiveRegionChanged) {
@@ -1017,6 +1160,10 @@ TEST(AXEventGeneratorTest, TextAttributeChanged) {
   initial_state.nodes[14].id = 15;
   initial_state.nodes[15].id = 16;
   initial_state.nodes[16].id = 17;
+  // Text attribute changes are only fired in richly editable areas.
+  for (int count = 1; count <= 16; ++count) {
+    initial_state.nodes[count].AddState(ax::mojom::State::kRichlyEditable);
+  }
 
   // To test changing the start and end of existing markers.
   initial_state.nodes[11].AddIntListAttribute(
@@ -1088,7 +1235,9 @@ TEST(AXEventGeneratorTest, TextAttributeChanged) {
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 8),
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 9),
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 10),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 10),
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 11),
+          HasEventAtNode(AXEventGenerator::Event::GRAMMAR_MARKER_CHANGED, 11),
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 12),
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 13),
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 14),
@@ -1105,6 +1254,9 @@ TEST(AXEventGeneratorTest, ObjectAttributeChanged) {
   initial_state.nodes[0].child_ids = {2, 3};
   initial_state.nodes[1].id = 2;
   initial_state.nodes[2].id = 3;
+  // Text attribute changes are only fired in richly editable areas.
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+  initial_state.nodes[2].AddState(ax::mojom::State::kRichlyEditable);
   AXTree tree(initial_state);
 
   AXEventGenerator event_generator(&tree);
@@ -1126,6 +1278,8 @@ TEST(AXEventGeneratorTest, ObjectAttributeChanged) {
                          3)));
 }
 
+// Note: we no longer fire OTHER_ATTRIBUTE_CHANGED for general attributes.
+// We only fire specific events.
 TEST(AXEventGeneratorTest, OtherAttributeChanged) {
   AXTreeUpdate initial_state;
   initial_state.root_id = 1;
@@ -1138,6 +1292,8 @@ TEST(AXEventGeneratorTest, OtherAttributeChanged) {
   initial_state.nodes[0].child_ids.push_back(6);
   initial_state.nodes[1].id = 2;
   initial_state.nodes[2].id = 3;
+  // Font size attribute changes are only fired in richly editable areas.
+  initial_state.nodes[3].AddState(ax::mojom::State::kRichlyEditable);
   initial_state.nodes[3].id = 4;
   initial_state.nodes[4].id = 5;
   initial_state.nodes[5].id = 6;
@@ -1156,15 +1312,15 @@ TEST(AXEventGeneratorTest, OtherAttributeChanged) {
   std::vector<int> ids = {2};
   update.nodes[5].AddIntListAttribute(ax::mojom::IntListAttribute::kControlsIds,
                                       ids);
+  event_generator.RegisterEventOnNode(
+      AXEventGenerator::Event::RELATED_NODE_CHANGED, update.nodes[0].id);
   ASSERT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(
       event_generator,
       UnorderedElementsAre(
           HasEventAtNode(AXEventGenerator::Event::CONTROLS_CHANGED, 6),
           HasEventAtNode(AXEventGenerator::Event::LANGUAGE_CHANGED, 2),
-          HasEventAtNode(AXEventGenerator::Event::OTHER_ATTRIBUTE_CHANGED, 3),
           HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 4),
-          HasEventAtNode(AXEventGenerator::Event::OTHER_ATTRIBUTE_CHANGED, 5),
           HasEventAtNode(AXEventGenerator::Event::RELATED_NODE_CHANGED, 6)));
 }
 
@@ -1221,6 +1377,114 @@ TEST(AXEventGeneratorTest, RoleChanged) {
                                    AXEventGenerator::Event::ROLE_CHANGED, 1)));
 }
 
+TEST(AXEventGeneratorTest, MenuPopupStartOnDynamicCreation) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(1);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
+  AXTree tree(initial_state);
+
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[0].child_ids.push_back(2);
+  update.nodes.resize(2);
+  update.nodes[1].id = 2;
+  update.nodes[1].role = ax::mojom::Role::kMenu;
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(event_generator,
+              IsSupersetOf({HasEventAtNode(
+                  AXEventGenerator::Event::MENU_POPUP_START, 2)}));
+}
+
+TEST(AXEventGeneratorTest, MenuPopupStartNotFiredOnInitialTreeCreation) {
+  AXTree tree;
+  AXEventGenerator event_generator(&tree);
+
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
+  initial_state.nodes[0].child_ids.push_back(2);
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].role = ax::mojom::Role::kMenu;
+  ASSERT_TRUE(tree.Unserialize(initial_state));
+
+  for (const auto& event : event_generator) {
+    EXPECT_FALSE(event.event_params->event ==
+                     AXEventGenerator::Event::MENU_POPUP_START &&
+                 event.node_id == 2);
+  }
+}
+
+TEST(AXEventGeneratorTest, MenuPopupStartNotFiredForIgnoredMenuCreation) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(1);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
+  AXTree tree(initial_state);
+
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[0].child_ids.push_back(2);
+  update.nodes.resize(2);
+  update.nodes[1].id = 2;
+  update.nodes[1].role = ax::mojom::Role::kMenu;
+  update.nodes[1].AddState(ax::mojom::State::kIgnored);
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  for (const auto& event : event_generator) {
+    EXPECT_FALSE(event.event_params->event ==
+                     AXEventGenerator::Event::MENU_POPUP_START &&
+                 event.node_id == 2);
+  }
+}
+
+TEST(AXEventGeneratorTest, MenuPopupStartOnIgnoredToUnignored) {
+  TestAXTreeUpdate initial_state(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kMenu state=kIgnored
+  )HTML"));
+  AXTree tree(initial_state);
+
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].RemoveState(ax::mojom::State::kIgnored);
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(event_generator,
+              IsSupersetOf({HasEventAtNode(
+                  AXEventGenerator::Event::MENU_POPUP_START, 2)}));
+}
+
+TEST(AXEventGeneratorTest, MenuPopupEndOnUnignoredToIgnored) {
+  TestAXTreeUpdate initial_state(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kMenu
+  )HTML"));
+  AXTree tree(initial_state);
+
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddState(ax::mojom::State::kIgnored);
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(event_generator,
+              IsSupersetOf({HasEventAtNode(
+                  AXEventGenerator::Event::MENU_POPUP_END, 2)}));
+}
+
 TEST(AXEventGeneratorTest, MenuItemSelected) {
   AXTreeUpdate initial_state;
   initial_state.root_id = 1;
@@ -1243,6 +1507,8 @@ TEST(AXEventGeneratorTest, MenuItemSelected) {
   update.nodes[0].int_attributes.clear();
   update.nodes[0].AddIntAttribute(ax::mojom::IntAttribute::kActivedescendantId,
                                   3);
+  event_generator.RegisterEventOnNode(
+      AXEventGenerator::Event::RELATED_NODE_CHANGED, update.nodes[0].id);
   ASSERT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(
       event_generator,
@@ -1349,7 +1615,7 @@ TEST(AXEventGeneratorTest, NodeBecomesUnignored) {
   AXEventGenerator event_generator(&tree);
   ASSERT_THAT(event_generator, IsEmpty());
   AXTreeUpdate update = initial_state;
-  update.nodes[3].state = 0;
+  update.nodes[3].state = AXStates(0U);
   ASSERT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(event_generator,
               UnorderedElementsAre(
@@ -1386,7 +1652,7 @@ TEST(AXEventGeneratorTest, NodeBecomesUnignored2) {
   ASSERT_THAT(event_generator, IsEmpty());
   AXTreeUpdate update = initial_state;
   // Marking as no longer ignored should fire CHILDREN_CHANGED on 2
-  update.nodes[3].state = 0;
+  update.nodes[3].state = AXStates(0U);
   // Remove node id 5 so it also fires CHILDREN_CHANGED on 4.
   update.nodes.pop_back();
   update.nodes[3].child_ids.clear();
@@ -1396,56 +1662,6 @@ TEST(AXEventGeneratorTest, NodeBecomesUnignored2) {
                   HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 2),
                   HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 4),
                   HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 4)));
-}
-
-TEST(AXEventGeneratorTest, NodeChangesIsIgnoredDueToFocusChange) {
-  AXTree::SetFocusedNodeShouldNeverBeIgnored();
-
-  AXNodeData root;
-  AXNodeData button_1;
-  AXNodeData button_2;
-  root.id = 1;
-  button_1.id = 2;
-  button_2.id = 3;
-
-  root.role = ax::mojom::Role::kRootWebArea;
-  root.child_ids = {button_1.id, button_2.id};
-
-  button_1.role = ax::mojom::Role::kButton;
-  button_1.AddState(ax::mojom::State::kIgnored);
-
-  button_2.role = ax::mojom::Role::kButton;
-  button_2.AddState(ax::mojom::State::kIgnored);
-
-  AXTreeUpdate update;
-  update.root_id = root.id;
-  update.nodes = {root, button_1, button_2};
-
-  AXTreeData tree_data;
-  tree_data.focus_id = button_1.id;
-  update.has_tree_data = true;
-  update.tree_data = tree_data;
-
-  AXTree tree(update);
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-
-  tree_data = tree.data();
-  tree_data.focused_tree_id = tree.GetAXTreeID();
-  tree_data.focus_id = button_2.id;
-  AXTreeUpdate update_2;
-  update_2.has_tree_data = true;
-  update_2.tree_data = tree_data;
-
-  ASSERT_TRUE(tree.Unserialize(update_2));
-  EXPECT_THAT(
-      event_generator,
-      UnorderedElementsAre(
-          HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, button_1.id),
-          HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, button_2.id),
-          HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, root.id),
-          HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED,
-                         button_2.id)));
 }
 
 TEST(AXEventGeneratorTest, NodeInsertedViaRoleChange) {
@@ -1609,48 +1825,6 @@ TEST(AXEventGeneratorTest, TwoNodesSwapIgnored2) {
                   HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 2)));
 }
 
-TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly1) {
-  // BEFORE
-  //   1 (IGN)
-  //  / \
-  // 2   3 (IGN)
-
-  // AFTER
-  //   1 (IGN)
-  //  /      \
-  // 2 (IGN)  3
-  // IGNORED_CHANGED expected on #2, #3
-
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(3);
-  initial_state.nodes[0].id = 1;
-  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
-  initial_state.nodes[0].AddState(ax::mojom::State::kIgnored);
-  initial_state.nodes[0].child_ids = {2, 3};
-
-  initial_state.nodes[1].id = 2;
-  initial_state.nodes[1].role = ax::mojom::Role::kStaticText;
-
-  initial_state.nodes[2].id = 3;
-  initial_state.nodes[2].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[2].AddState(ax::mojom::State::kIgnored);
-
-  AXTree tree(initial_state);
-
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-  update.nodes[1].AddState(ax::mojom::State::kIgnored);
-  update.nodes[2].RemoveState(ax::mojom::State::kIgnored);
-  ASSERT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 2),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 3),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 3)));
-}
-
 TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly2) {
   // BEFORE
   //   1
@@ -1699,381 +1873,6 @@ TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly2) {
                   HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 3),
                   HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 4),
                   HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 4)));
-}
-
-TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly3) {
-  // BEFORE
-  //   1
-  //   |
-  //   2 ___
-  //  /      \
-  // 3 (IGN)  4
-
-  // AFTER
-  //   1 (IGN)
-  //   |
-  //   2
-  //  /  \
-  // 3    4 (IGN)
-  // IGNORED_CHANGED expected on #1, #3
-
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(4);
-  initial_state.nodes[0].id = 1;
-  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
-  initial_state.nodes[0].child_ids = {2};
-
-  initial_state.nodes[1].id = 2;
-  initial_state.nodes[1].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[1].child_ids = {3, 4};
-
-  initial_state.nodes[2].id = 3;
-  initial_state.nodes[2].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[2].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[3].id = 4;
-  initial_state.nodes[3].role = ax::mojom::Role::kStaticText;
-
-  AXTree tree(initial_state);
-
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-  update.nodes[0].AddState(ax::mojom::State::kIgnored);
-  update.nodes[2].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[3].AddState(ax::mojom::State::kIgnored);
-  ASSERT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(
-                  HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 2),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 1),
-                  HasEventAtNode(AXEventGenerator::Event::PARENT_CHANGED, 2),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 3),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 3)));
-}
-
-TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly4) {
-  // BEFORE
-  //         1 (IGN)
-  //         |
-  //         2
-  //         |
-  //         3 (IGN)
-  //         |
-  //         4 (IGN)
-  //         |
-  //    ____ 5  _____
-  //  /       |       \
-  // 6 (IGN)  7 (IGN)  8
-
-  // AFTER
-  //         1 (IGN)
-  //         |
-  //         2
-  //         |
-  //         3 (IGN)
-  //         |
-  //         4 (IGN)
-  //         |
-  //    ____ 5  _____
-  //  /       |       \
-  // 6        7        8 (IGN)
-
-  // IGNORED_CHANGED expected on #6, #7, #8
-
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(8);
-  initial_state.nodes[0].id = 1;
-  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
-  initial_state.nodes[0].child_ids = {2};
-
-  initial_state.nodes[1].id = 2;
-  initial_state.nodes[1].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[1].child_ids = {3};
-
-  initial_state.nodes[2].id = 3;
-  initial_state.nodes[2].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[2].child_ids = {4};
-  initial_state.nodes[2].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[3].id = 4;
-  initial_state.nodes[3].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[3].child_ids = {5};
-  initial_state.nodes[3].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[4].id = 5;
-  initial_state.nodes[4].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[4].child_ids = {6, 7, 8};
-
-  initial_state.nodes[5].id = 6;
-  initial_state.nodes[5].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[5].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[6].id = 7;
-  initial_state.nodes[6].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[6].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[7].id = 8;
-  initial_state.nodes[7].role = ax::mojom::Role::kStaticText;
-
-  AXTree tree(initial_state);
-
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-  update.nodes[5].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[6].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[7].AddState(ax::mojom::State::kIgnored);
-  ASSERT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(
-                  HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 5),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 6),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 7),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 6),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 7),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 8)));
-}
-
-TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly5) {
-  // BEFORE
-  //         1
-  //         |
-  //         2
-  //         |
-  //         3 (IGN)
-  //         |
-  //         4 (IGN)
-  //         |
-  //    ____ 5  _____
-  //  /       |       \
-  // 6 (IGN)  7        8
-
-  // AFTER
-  //         1 (IGN)
-  //         |
-  //         2
-  //         |
-  //         3 (IGN)
-  //         |
-  //         4 (IGN)
-  //         |
-  //    ____ 5  _____
-  //  /       |       \
-  // 6        7 (IGN)  8 (IGN)
-
-  // IGNORED_CHANGED expected on #1, #6
-
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(8);
-  initial_state.nodes[0].id = 1;
-  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
-  initial_state.nodes[0].child_ids = {2};
-
-  initial_state.nodes[1].id = 2;
-  initial_state.nodes[1].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[1].child_ids = {3};
-
-  initial_state.nodes[2].id = 3;
-  initial_state.nodes[2].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[2].child_ids = {4};
-  initial_state.nodes[2].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[3].id = 4;
-  initial_state.nodes[3].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[3].child_ids = {5};
-  initial_state.nodes[3].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[4].id = 5;
-  initial_state.nodes[4].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[4].child_ids = {6, 7, 8};
-
-  initial_state.nodes[5].id = 6;
-  initial_state.nodes[5].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[5].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[6].id = 7;
-  initial_state.nodes[6].role = ax::mojom::Role::kStaticText;
-
-  initial_state.nodes[7].id = 8;
-  initial_state.nodes[7].role = ax::mojom::Role::kStaticText;
-
-  AXTree tree(initial_state);
-
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-  update.nodes[0].AddState(ax::mojom::State::kIgnored);
-  update.nodes[5].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[6].AddState(ax::mojom::State::kIgnored);
-  update.nodes[7].AddState(ax::mojom::State::kIgnored);
-  ASSERT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(
-                  HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 5),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 6),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 1),
-                  HasEventAtNode(AXEventGenerator::Event::PARENT_CHANGED, 2),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 6)));
-}
-
-TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly6) {
-  // BEFORE
-  //         1 (IGN)
-  //         |
-  //         2
-  //         |
-  //         3
-  //         |
-  //         4
-  //         |
-  //    ____ 5  _____
-  //  /       |       \
-  // 6 (IGN)  7 (IGN)  8
-
-  // AFTER
-  //         1
-  //         |
-  //         2
-  //         |
-  //         3
-  //         |
-  //         4
-  //         |
-  //    ____ 5  _____
-  //  /       |       \
-  // 6        7        8 (IGN)
-
-  // IGNORED_CHANGED expected on #1, #8
-
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(8);
-  initial_state.nodes[0].id = 1;
-  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
-  initial_state.nodes[0].child_ids = {2};
-  initial_state.nodes[0].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[1].id = 2;
-  initial_state.nodes[1].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[1].child_ids = {3};
-
-  initial_state.nodes[2].id = 3;
-  initial_state.nodes[2].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[2].child_ids = {4};
-
-  initial_state.nodes[3].id = 4;
-  initial_state.nodes[3].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[3].child_ids = {5};
-
-  initial_state.nodes[4].id = 5;
-  initial_state.nodes[4].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[4].child_ids = {6, 7, 8};
-
-  initial_state.nodes[5].id = 6;
-  initial_state.nodes[5].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[5].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[6].id = 7;
-  initial_state.nodes[6].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[6].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[7].id = 8;
-  initial_state.nodes[7].role = ax::mojom::Role::kStaticText;
-
-  AXTree tree(initial_state);
-
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-  update.nodes[0].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[5].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[6].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[7].AddState(ax::mojom::State::kIgnored);
-  ASSERT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(
-                  HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 5),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 1),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 6),
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 7),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 1),
-                  HasEventAtNode(AXEventGenerator::Event::PARENT_CHANGED, 2),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 8)));
-}
-
-TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly7) {
-  // BEFORE
-  //       1 (IGN)
-  //       |
-  //       2 (IGN)
-  //       |
-  //       3
-  //       |
-  //    __ 4 ___
-  //  /          \
-  // 5 (IGN)      6 (IGN)
-
-  // AFTER
-  //       1
-  //       |
-  //       2
-  //       |
-  //       3 (IGN)
-  //       |
-  //    __ 4 (IGN)
-  //  /           \
-  // 5 (IGN)       6 (IGN)
-
-  // IGNORED_CHANGED expected on #1, #3
-
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(6);
-  initial_state.nodes[0].id = 1;
-  initial_state.nodes[0].role = ax::mojom::Role::kRootWebArea;
-  initial_state.nodes[0].child_ids = {2};
-  initial_state.nodes[0].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[1].id = 2;
-  initial_state.nodes[1].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[1].child_ids = {3};
-  initial_state.nodes[1].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[2].id = 3;
-  initial_state.nodes[2].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[2].child_ids = {4};
-
-  initial_state.nodes[3].id = 4;
-  initial_state.nodes[3].role = ax::mojom::Role::kGroup;
-  initial_state.nodes[3].child_ids = {5, 6};
-
-  initial_state.nodes[4].id = 5;
-  initial_state.nodes[4].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[4].AddState(ax::mojom::State::kIgnored);
-
-  initial_state.nodes[5].id = 6;
-  initial_state.nodes[5].role = ax::mojom::Role::kStaticText;
-  initial_state.nodes[5].AddState(ax::mojom::State::kIgnored);
-
-  AXTree tree(initial_state);
-
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-  update.nodes[0].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[1].RemoveState(ax::mojom::State::kIgnored);
-  update.nodes[2].AddState(ax::mojom::State::kIgnored);
-  update.nodes[3].AddState(ax::mojom::State::kIgnored);
-  ASSERT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(
-                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 1),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 1),
-                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 3)));
 }
 
 TEST(AXEventGeneratorTest, IgnoredChangedFiredOnAncestorOnly8) {
@@ -2193,6 +1992,8 @@ TEST(AXEventGeneratorTest, ActiveDescendantChangeOnDescendant) {
   // create all of the node's children. Since node 3 already exists and remains
   // in the tree, that (re)created child is reporting a new parent.
   update.node_id_to_clear = 2;
+  event_generator.RegisterEventOnNode(
+      AXEventGenerator::Event::RELATED_NODE_CHANGED, update.nodes[0].id);
   ASSERT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(
       event_generator,
@@ -2257,7 +2058,7 @@ TEST(AXEventGeneratorTest, StringPropertyChanges) {
       {ax::mojom::StringAttribute::kPlaceholder, "a", "b"},
   };
   for (auto&& attrib : attributes) {
-    initial_state.nodes.push_back({});
+    initial_state.nodes.emplace_back();
     initial_state.nodes.back().id = initial_state.nodes.size();
     initial_state.nodes.back().AddStringAttribute(attrib.id, attrib.old_value);
     initial_state.nodes[0].child_ids.push_back(initial_state.nodes.size());
@@ -2278,7 +2079,6 @@ TEST(AXEventGeneratorTest, StringPropertyChanges) {
       event_generator,
       UnorderedElementsAre(
           HasEventAtNode(AXEventGenerator::Event::ACCESS_KEY_CHANGED, 2),
-          HasEventAtNode(AXEventGenerator::Event::CLASS_NAME_CHANGED, 3),
           HasEventAtNode(AXEventGenerator::Event::KEY_SHORTCUTS_CHANGED, 4),
           HasEventAtNode(AXEventGenerator::Event::LANGUAGE_CHANGED, 5),
           HasEventAtNode(AXEventGenerator::Event::PLACEHOLDER_CHANGED, 6)));
@@ -2300,7 +2100,7 @@ TEST(AXEventGeneratorTest, IntPropertyChanges) {
       {ax::mojom::IntAttribute::kSetSize, 1, 2},
   };
   for (auto&& attrib : attributes) {
-    initial_state.nodes.push_back({});
+    initial_state.nodes.emplace_back();
     initial_state.nodes.back().id = initial_state.nodes.size();
     initial_state.nodes.back().AddIntAttribute(attrib.id, attrib.old_value);
     initial_state.nodes[0].child_ids.push_back(initial_state.nodes.size());
@@ -2340,7 +2140,7 @@ TEST(AXEventGeneratorTest, IntListPropertyChanges) {
       {ax::mojom::IntListAttribute::kLabelledbyIds, {1}, {2}},
   };
   for (auto&& attrib : attributes) {
-    initial_state.nodes.push_back({});
+    initial_state.nodes.emplace_back();
     initial_state.nodes.back().id = initial_state.nodes.size();
     initial_state.nodes.back().AddIntListAttribute(attrib.id, attrib.old_value);
     initial_state.nodes[0].child_ids.push_back(initial_state.nodes.size());
@@ -2364,10 +2164,10 @@ TEST(AXEventGeneratorTest, IntListPropertyChanges) {
           HasEventAtNode(AXEventGenerator::Event::FLOW_FROM_CHANGED, 1),
           HasEventAtNode(AXEventGenerator::Event::FLOW_FROM_CHANGED, 2),
           HasEventAtNode(AXEventGenerator::Event::FLOW_TO_CHANGED, 3),
-          HasEventAtNode(AXEventGenerator::Event::LABELED_BY_CHANGED, 4),
-          HasEventAtNode(AXEventGenerator::Event::RELATED_NODE_CHANGED, 2),
-          HasEventAtNode(AXEventGenerator::Event::RELATED_NODE_CHANGED, 3),
-          HasEventAtNode(AXEventGenerator::Event::RELATED_NODE_CHANGED, 4)));
+          HasEventAtNode(AXEventGenerator::Event::LABELED_BY_CHANGED, 4)
+          // Related node changed not fired because it requires explicit
+          // registration.
+          ));
 }
 
 TEST(AXEventGeneratorTest, AriaBusyChanged) {
@@ -2473,6 +2273,8 @@ TEST(AXEventGeneratorTest, FlowToChanged) {
   AXTreeUpdate update = initial_state;
   update.nodes[1].AddIntListAttribute(ax::mojom::IntListAttribute::kFlowtoIds,
                                       {4, 5, 6});
+  event_generator.RegisterEventOnNode(
+      AXEventGenerator::Event::RELATED_NODE_CHANGED, update.nodes[0].id);
 
   EXPECT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(
@@ -2501,6 +2303,8 @@ TEST(AXEventGeneratorTest, ControlsChanged) {
   std::vector<int> ids = {2};
   update.nodes[0].AddIntListAttribute(ax::mojom::IntListAttribute::kControlsIds,
                                       ids);
+  event_generator.RegisterEventOnNode(
+      AXEventGenerator::Event::RELATED_NODE_CHANGED, update.nodes[0].id);
   EXPECT_TRUE(tree.Unserialize(update));
   EXPECT_THAT(
       event_generator,
@@ -2525,42 +2329,6 @@ TEST(AXEventGeneratorTest, AtomicChanged) {
   EXPECT_THAT(event_generator,
               UnorderedElementsAre(
                   HasEventAtNode(AXEventGenerator::Event::ATOMIC_CHANGED, 1)));
-}
-
-TEST(AXEventGeneratorTest, DropeffectChanged) {
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(1);
-  initial_state.nodes[0].id = 1;
-
-  AXTree tree(initial_state);
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-
-  update.nodes[0].AddDropeffect(ax::mojom::Dropeffect::kCopy);
-  EXPECT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(HasEventAtNode(
-                  AXEventGenerator::Event::DROPEFFECT_CHANGED, 1)));
-}
-
-TEST(AXEventGeneratorTest, GrabbedChanged) {
-  AXTreeUpdate initial_state;
-  initial_state.root_id = 1;
-  initial_state.nodes.resize(1);
-  initial_state.nodes[0].id = 1;
-
-  AXTree tree(initial_state);
-  AXEventGenerator event_generator(&tree);
-  ASSERT_THAT(event_generator, IsEmpty());
-  AXTreeUpdate update = initial_state;
-
-  update.nodes[0].AddBoolAttribute(ax::mojom::BoolAttribute::kGrabbed, true);
-  EXPECT_TRUE(tree.Unserialize(update));
-  EXPECT_THAT(event_generator,
-              UnorderedElementsAre(
-                  HasEventAtNode(AXEventGenerator::Event::GRABBED_CHANGED, 1)));
 }
 
 TEST(AXEventGeneratorTest, HasPopupChanged) {
@@ -3450,6 +3218,501 @@ TEST(AXEventGenerator, ParsingUnknownEvent) {
 
   // Event should not be changed
   EXPECT_EQ(event, AXEventGenerator::Event::CARET_BOUNDS_CHANGED);
+}
+
+TEST(AXEventGeneratorTest, UnignoredWithNodeCleared) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  {
+    AXNodeData data;
+    data.id = 1;
+    data.role = ax::mojom::Role::kRootWebArea;
+    data.child_ids = {2};
+    initial_state.nodes.push_back(data);
+  }
+  {
+    AXNodeData data;
+    data.id = 2;
+    data.role = ax::mojom::Role::kGenericContainer;
+    data.child_ids = {3};
+    initial_state.nodes.push_back(data);
+  }
+  {
+    AXNodeData data;
+    data.id = 3;
+    data.role = ax::mojom::Role::kGenericContainer;
+    data.AddState(ax::mojom::State::kIgnored);
+    data.child_ids = {4};
+    initial_state.nodes.push_back(data);
+  }
+  {
+    AXNodeData data;
+    data.id = 4;
+    data.role = ax::mojom::Role::kGenericContainer;
+    data.AddState(ax::mojom::State::kIgnored);
+    initial_state.nodes.push_back(data);
+  }
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update;
+  update.node_id_to_clear = 3;
+  {
+    AXNodeData data;
+    data.id = 3;
+    data.role = ax::mojom::Role::kGenericContainer;
+    data.child_ids = {4};
+    update.nodes.push_back(data);
+  }
+  {
+    AXNodeData data;
+    data.id = 4;
+    data.role = ax::mojom::Role::kGenericContainer;
+    update.nodes.push_back(data);
+  }
+
+  ASSERT_TRUE(tree.Unserialize(update));
+  EXPECT_THAT(event_generator,
+              UnorderedElementsAre(
+                  HasEventAtNode(AXEventGenerator::Event::CHILDREN_CHANGED, 2),
+                  HasEventAtNode(AXEventGenerator::Event::IGNORED_CHANGED, 3),
+                  HasEventAtNode(AXEventGenerator::Event::SUBTREE_CREATED, 3)));
+}
+
+// Tests that adding a spelling marker via kMarkerTypes fires both
+// TEXT_ATTRIBUTE_CHANGED and SPELLING_MARKER_CHANGED.
+TEST(AXEventGeneratorTest, SpellingMarkerAddedViaMarkerTypes) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kNone)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 2)));
+}
+
+// Tests that adding a grammar marker via kMarkerTypes fires both
+// TEXT_ATTRIBUTE_CHANGED and GRAMMAR_MARKER_CHANGED.
+TEST(AXEventGeneratorTest, GrammarMarkerAddedViaMarkerTypes) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kGrammar)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kNone)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::GRAMMAR_MARKER_CHANGED, 2)));
+}
+
+// Tests that adding both spelling and grammar markers at the same time fires
+// TEXT_ATTRIBUTE_CHANGED, SPELLING_MARKER_CHANGED, and GRAMMAR_MARKER_CHANGED.
+TEST(AXEventGeneratorTest, SpellingAndGrammarMarkersAddedViaMarkerTypes) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  // Two markers: one spelling, one grammar.
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int32_t>(ax::mojom::MarkerType::kGrammar)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kNone),
+       static_cast<int32_t>(ax::mojom::HighlightType::kNone)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::GRAMMAR_MARKER_CHANGED, 2)));
+}
+
+// Tests that removing markers fires only
+// TEXT_ATTRIBUTE_CHANGED and not specific marker events.
+TEST(AXEventGeneratorTest, MarkerTypesRemovedNoSpecificEvent) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+  // Start with two markers.
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling),
+       static_cast<int32_t>(ax::mojom::MarkerType::kGrammar)});
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kNone),
+       static_cast<int32_t>(ax::mojom::HighlightType::kNone)});
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  // Remove one marker (size decreases).
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kNone)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  // Only TEXT_ATTRIBUTE_CHANGED should fire, not SPELLING_MARKER_CHANGED or
+  // GRAMMAR_MARKER_CHANGED.
+  EXPECT_THAT(event_generator,
+              UnorderedElementsAre(HasEventAtNode(
+                  AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2)));
+}
+
+// Tests that changing a marker type at an existing index (e.g., from
+// kTextMatch to kSpelling) fires the newly added marker event.
+TEST(AXEventGeneratorTest, MarkerTypeChangedAtExistingIndex) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kTextMatch)});
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kNone)});
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  // Change marker from kTextMatch to kSpelling at the same index.
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 2)));
+}
+
+// Tests that adding a highlight type of kSpellingError fires
+// SPELLING_MARKER_CHANGED via kHighlightTypes.
+TEST(AXEventGeneratorTest, HighlightTypeSpellingErrorAdded) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kSpellingError)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 2)));
+}
+
+// Tests that adding a highlight type of kGrammarError fires
+// GRAMMAR_MARKER_CHANGED via kHighlightTypes.
+TEST(AXEventGeneratorTest, HighlightTypeGrammarErrorAdded) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kGrammarError)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::GRAMMAR_MARKER_CHANGED, 2)));
+}
+
+// Tests that adding a highlight type of kHighlight fires
+// HIGHLIGHT_MARKER_CHANGED via kHighlightTypes.
+TEST(AXEventGeneratorTest, HighlightTypeHighlightAdded) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kHighlight)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::HIGHLIGHT_MARKER_CHANGED,
+                         2)));
+}
+
+// Tests that removing highlight types (old_value.size() > new_value.size())
+// fires only TEXT_ATTRIBUTE_CHANGED and not specific marker events.
+TEST(AXEventGeneratorTest, HighlightTypesRemovedNoSpecificEvent) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kHighlight),
+       static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)});
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kSpellingError),
+       static_cast<int32_t>(ax::mojom::HighlightType::kGrammarError)});
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  // Remove one highlight type.
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kSpellingError)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(event_generator,
+              UnorderedElementsAre(HasEventAtNode(
+                  AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2)));
+}
+
+// Tests that changing a highlight type at an existing index fires the
+// appropriate specific marker event.
+TEST(AXEventGeneratorTest, HighlightTypeChangedAtExistingIndex) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)});
+  // Start with kHighlight.
+  initial_state.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kHighlight)});
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  // Change from kHighlight to kSpellingError at the same index.
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kSpellingError)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 2)));
+}
+
+// Tests that all three highlight types can be added at once and fire
+// their respective events.
+TEST(AXEventGeneratorTest, MultipleHighlightTypesAdded) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  initial_state.nodes[1].AddState(ax::mojom::State::kRichlyEditable);
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kHighlight),
+       static_cast<int32_t>(ax::mojom::MarkerType::kHighlight),
+       static_cast<int32_t>(ax::mojom::MarkerType::kHighlight)});
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kHighlightTypes,
+      {static_cast<int32_t>(ax::mojom::HighlightType::kSpellingError),
+       static_cast<int32_t>(ax::mojom::HighlightType::kGrammarError),
+       static_cast<int32_t>(ax::mojom::HighlightType::kHighlight)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::GRAMMAR_MARKER_CHANGED, 2),
+          HasEventAtNode(AXEventGenerator::Event::HIGHLIGHT_MARKER_CHANGED,
+                         2)));
+}
+
+// Tests that marker events are fired on the text field ancestor node when the
+// child node is not richly editable but has a text field ancestor.
+TEST(AXEventGeneratorTest, MarkerEventsOnTextFieldAncestor) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].role = ax::mojom::Role::kTextField;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  // Node 2 is not richly editable, but has a text field ancestor (node 1).
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  // Events should be fired on the text field ancestor (node 1), not node 2.
+  EXPECT_THAT(
+      event_generator,
+      UnorderedElementsAre(
+          HasEventAtNode(AXEventGenerator::Event::TEXT_ATTRIBUTE_CHANGED, 1),
+          HasEventAtNode(AXEventGenerator::Event::SPELLING_MARKER_CHANGED, 1)));
+}
+
+// Tests that marker events are not fired when node has no text field ancestor
+// and is not richly editable.
+TEST(AXEventGeneratorTest, MarkerEventsNoTargetNoEvent) {
+  AXTreeUpdate initial_state;
+  initial_state.root_id = 1;
+  initial_state.nodes.resize(2);
+  initial_state.nodes[0].id = 1;
+  initial_state.nodes[0].child_ids = {2};
+  initial_state.nodes[1].id = 2;
+  // Node 2 is neither richly editable nor has a text field ancestor.
+
+  AXTree tree(initial_state);
+  AXEventGenerator event_generator(&tree);
+  ASSERT_THAT(event_generator, IsEmpty());
+
+  AXTreeUpdate update = initial_state;
+  update.nodes[1].AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling)});
+  ASSERT_TRUE(tree.Unserialize(update));
+
+  // No events should be fired since there's no valid target.
+  EXPECT_THAT(event_generator, IsEmpty());
 }
 
 }  // namespace ui

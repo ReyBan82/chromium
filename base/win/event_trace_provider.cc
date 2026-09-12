@@ -1,7 +1,7 @@
 // Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-//
+
 #include "base/win/event_trace_provider.h"
 
 #include <windows.h>
@@ -17,7 +17,10 @@ EtwTraceProvider::EtwTraceProvider(const GUID& provider_name)
 
 EtwTraceProvider::EtwTraceProvider() = default;
 
-EtwTraceProvider::~EtwTraceProvider() {
+// NOOPT prevents dead code elimination of writes to member variables, to allow
+// accessing them after the object is destructed (even though that's UB.) See
+// crbug.com/483349684.
+NOINLINE NOOPT EtwTraceProvider::~EtwTraceProvider() {
   Unregister();
 }
 
@@ -71,8 +74,9 @@ ULONG WINAPI EtwTraceProvider::ControlCallback(WMIDPREQUESTCODE request,
 }
 
 ULONG EtwTraceProvider::Register() {
-  if (provider_name_ == GUID_NULL)
+  if (provider_name_ == GUID_NULL) {
     return ERROR_INVALID_NAME;
+  }
 
   return ::RegisterTraceGuids(ControlCallback, this, &provider_name_, 1,
                               &obligatory_guid_registration_, nullptr, nullptr,
@@ -81,8 +85,9 @@ ULONG EtwTraceProvider::Register() {
 
 ULONG EtwTraceProvider::Unregister() {
   // If a session is active, notify subclasses that it's going away.
-  if (session_handle_ != NULL)
+  if (session_handle_ != NULL) {
     DisableEvents();
+  }
 
   ULONG ret = ::UnregisterTraceGuids(registration_handle_);
 
@@ -95,8 +100,9 @@ ULONG EtwTraceProvider::Log(const EtwEventClass& event_class,
                             EtwEventType type,
                             EtwEventLevel level,
                             const char* message) {
-  if (NULL == session_handle_ || enable_level_ < level)
+  if (NULL == session_handle_ || enable_level_ < level) {
     return ERROR_SUCCESS;  // No one listening.
+  }
 
   EtwMofEvent<1> event(event_class, type, level);
 
@@ -112,8 +118,9 @@ ULONG EtwTraceProvider::Log(const EtwEventClass& event_class,
                             EtwEventType type,
                             EtwEventLevel level,
                             const wchar_t* message) {
-  if (NULL == session_handle_ || enable_level_ < level)
+  if (NULL == session_handle_ || enable_level_ < level) {
     return ERROR_SUCCESS;  // No one listening.
+  }
 
   EtwMofEvent<1> event(event_class, type, level);
 
@@ -126,8 +133,9 @@ ULONG EtwTraceProvider::Log(const EtwEventClass& event_class,
 }
 
 ULONG EtwTraceProvider::Log(EVENT_TRACE_HEADER* event) {
-  if (enable_level_ < event->Class.Level)
+  if (enable_level_ < event->Class.Level) {
     return ERROR_SUCCESS;
+  }
 
   return ::TraceEvent(session_handle_, event);
 }

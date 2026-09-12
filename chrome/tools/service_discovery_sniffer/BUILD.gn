@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/features.gni")
-
 executable("service_discovery_sniffer") {
   testonly = true
   sources = [
@@ -15,6 +13,8 @@ executable("service_discovery_sniffer") {
     "//base",
     "//base/test:test_support",
     "//chrome/browser",
+    "//chrome/browser/local_discovery",
+    "//chrome/browser/local_discovery:impl",
     "//net",
     "//third_party/webrtc_overrides:webrtc_component",
   ]

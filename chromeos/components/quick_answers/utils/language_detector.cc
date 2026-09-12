@@ -5,6 +5,7 @@
 #include "chromeos/components/quick_answers/utils/language_detector.h"
 
 #include "base/functional/callback.h"
+#include "base/i18n/legacy_language_tag_helpers.h"
 #include "base/metrics/field_trial_params.h"
 #include "ui/base/l10n/l10n_util.h"
 
@@ -15,7 +16,7 @@ constexpr double kSelectedTextConfidenceThreshold = 0.9;
 
 constexpr double kSurroundingTextConfidenceThreshold = 0.9;
 
-absl::optional<std::string> GetLanguageWithConfidence(
+std::optional<std::string> GetLanguageWithConfidence(
     const std::vector<chromeos::machine_learning::mojom::TextLanguagePtr>&
         languages,
     double confidence_threshold) {
@@ -23,9 +24,10 @@ absl::optional<std::string> GetLanguageWithConfidence(
   // highest to the lowest (according to the mojom method documentation).
   if (!languages.empty() &&
       languages.front()->confidence > confidence_threshold) {
-    return l10n_util::GetLanguage(languages.front()->locale);
+    return base::i18n::GetLanguageSubtagUsingLanguageTag(
+        languages.front()->locale);
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace

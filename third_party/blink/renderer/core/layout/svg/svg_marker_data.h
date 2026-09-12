@@ -22,7 +22,7 @@
 
 #include "base/notreached.h"
 #include "third_party/blink/renderer/core/svg/svg_path_consumer.h"
-#include "third_party/blink/renderer/platform/graphics/path.h"
+#include "third_party/blink/renderer/platform/geometry/path.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 
@@ -53,7 +53,6 @@ struct MarkerPosition {
         return marker_end;
     }
     NOTREACHED();
-    return nullptr;
   }
 
   SVGMarkerType type;
@@ -66,9 +65,7 @@ class SVGMarkerDataBuilder : private SVGPathConsumer {
 
  public:
   explicit SVGMarkerDataBuilder(Vector<MarkerPosition>& positions)
-      : positions_(positions),
-        last_moveto_index_(0),
-        last_element_type_(kPathElementMoveToPoint) {}
+      : positions_(positions) {}
 
   // Build marker data for a Path.
   void Build(const Path&);
@@ -84,8 +81,6 @@ class SVGMarkerDataBuilder : private SVGPathConsumer {
  private:
   // SVGPathConsumer
   void EmitSegment(const PathSegmentData&) override;
-
-  static void UpdateFromPathElement(void* info, const PathElement*);
 
   enum AngleType {
     kBisecting,
@@ -113,8 +108,8 @@ class SVGMarkerDataBuilder : private SVGPathConsumer {
   void Flush();
 
   Vector<MarkerPosition>& positions_;
-  unsigned last_moveto_index_;
-  PathElementType last_element_type_;
+  unsigned last_moveto_index_ = 0;
+  PathElementType last_element_type_ = kPathElementMoveToPoint;
   gfx::PointF origin_;
   gfx::PointF subpath_start_;
   gfx::Vector2dF in_slope_;

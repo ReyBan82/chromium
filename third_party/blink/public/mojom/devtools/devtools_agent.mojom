@@ -98,7 +98,7 @@ interface DevToolsAgent {
   AttachDevToolsSession(pending_associated_remote<DevToolsSessionHost> host,
                         pending_associated_receiver<DevToolsSession> session,
                         pending_receiver<DevToolsSession> io_session,
-                        DevToolsSessionState? reattach_session_state,
+                        DevToolsSessionState reattach_session_state,
                         bool client_expects_binary_responses,
                         bool client_is_trusted,
                         string session_id,
@@ -136,6 +136,43 @@ interface DevToolsAgentHost {
       mojo_base.mojom.UnguessableToken devtools_worker_token,
       bool waiting_for_debugger,
       DevToolsExecutionContextType context_type);
+
+  // Informs the host that the main thread debugger is paused. Must be used only
+  // for recording histograms.
+  // TODO(https://crbug.com/1449114): Remove this method once we collect enough
+  // data.
+  MainThreadDebuggerPaused();
+
+  // Informs the host that the main thread debugger is resumed. Must be used
+  // only for recording histograms.
+  // TODO(https://crbug.com/1449114): Remove this method once we collect enough
+  // data.
+  MainThreadDebuggerResumed();
+
+  // Bring the associated frame to the foreground if possible.
+  BringToForeground();
+};
+
+struct ScriptToEvaluateOnNewDocument {
+  // Script source code.
+  string source;
+  // World name to inject script in (empty for main world).
+  string world_name;
+  // Whether the script gets access to DevTools command line API.
+  bool include_command_line_api;
+};
+
+union URLBreakpointLocator {
+  string url;
+  string url_regex;
+  string script_hash;
+};
+
+struct URLBreakpoint {
+  int32 line_number;
+  URLBreakpointLocator locator;
+  int32? column_number;
+  string? condition;
 };
 
 // Represents an attached session which exposes remote debugging protocol.
@@ -149,9 +186,16 @@ interface DevToolsSession {
   // |method| is a method name as defined in protocol (e.g. "Runtime.evaluate").
   // |call_id| is a command id as defined in protocol, and is going to be
   // reported back to host in a response message (see DevToolsSessionHost).
+  // |fallthrough_data| is an opaque, command-dependent STRING data that is
+  // passed along with the command.
   DispatchProtocolCommand(int32 call_id,
                           string method,
-                          mojo_base.mojom.ReadOnlyBuffer message);
+                          mojo_base.mojom.ReadOnlyBuffer message,
+                          string fallthrough_data);
+
+  // Disables all breakpoints and terminates script currently executing.
+  UnpauseAndTerminate();
+
 };
 
 // A peer of DevToolsSession representing a remote debugging client
@@ -169,20 +213,42 @@ interface DevToolsSessionHost {
   [UnlimitedSize]
   DispatchProtocolResponse(DevToolsMessage message,
                            int32 call_id,
-                           DevToolsSessionState? updates);
+                           RendererOriginatingSessionState? updates);
 
   // Dispatches protocol notification to a remote debugging client.
   [UnlimitedSize]
   DispatchProtocolNotification(DevToolsMessage message,
-                               DevToolsSessionState? updates);
+                               RendererOriginatingSessionState? updates);
 };
 
-// The session state is a mapping from keys to either values or missing
-// values. Missing values are only used when updates are sent; that's
-// in DispatchProtocolResponse and DispatchProtocolNotification. The
-// DevToolsSession will then interpret these missing values by deleting
+// The browser originating session state is managed by the browser-side agents
+// (i.e. "handlers") and is only ever sent from the browser to renderer.
+// Unlike the renderer originating session state, it is intended to be strongly typed.
+struct BrowserOriginatingSessionState {
+  // scriptId is an opaque string uniquely identifying the script in case it
+  // needs to be removed (see also
+  // DevToolsSession::{add,remove}ScriptToEvaluateOnNewDocument above).
+  map<string /* scriptId */, ScriptToEvaluateOnNewDocument> scripts_to_evaluate_on_new_document;
+  string script_to_evaluate_on_load_once;
+  map<string /* header name */, string /* header value */> extra_request_headers;
+  bool overlay_enabled = false;
+  string paused_in_debugger_message;
+  map<string /* breakpointId */, URLBreakpoint> url_breakpoints;
+};
+
+// The renderer originating session state is a mapping from keys to either values
+// or missing values and is maintained by the renderer, but sent to the browser for
+// reattach after a renderer swap.
+// Missing values are only used when updates are sent; that's in
+// DispatchProtocolResponse and DispatchProtocolNotification.
+// The DevToolsSession will then interpret these missing values by deleting
 // the respective key when its applying the updates in
 // DevToolsSession::ApplySessionStateUpdates.
-struct DevToolsSessionState {
+struct RendererOriginatingSessionState {
   map<string, array<uint8>?> entries;
+};
+
+struct DevToolsSessionState {
+  BrowserOriginatingSessionState browser_originating_session_state;
+  RendererOriginatingSessionState? renderer_originating_session_state;
 };

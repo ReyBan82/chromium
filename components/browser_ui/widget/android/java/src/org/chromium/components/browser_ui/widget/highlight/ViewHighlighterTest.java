@@ -10,51 +10,61 @@ import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.ColorDrawable;
-import android.support.test.InstrumentationRegistry;
 import android.view.ContextThemeWrapper;
 import android.view.View;
+import android.view.View.MeasureSpec;
 import android.widget.ImageView;
 
+import androidx.test.InstrumentationRegistry;
 import androidx.test.filters.MediumTest;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseJUnit4ClassRunner;
 import org.chromium.base.test.util.Batch;
-import org.chromium.components.browser_ui.widget.test.R;
+import org.chromium.components.browser_ui.widget.R;
 
-/**
- * Tests the utility methods for highlighting of a view.
- */
+/** Tests the utility methods for highlighting of a view. */
 @RunWith(BaseJUnit4ClassRunner.class)
 @Batch(Batch.UNIT_TESTS)
 public class ViewHighlighterTest {
-    @Mock
-    Canvas mCanvas;
+    @Mock Canvas mCanvas;
 
     private Context mContext;
     private final ViewHighlighter.HighlightParams mCircleParams =
             new ViewHighlighter.HighlightParams(ViewHighlighter.HighlightShape.CIRCLE);
     private final ViewHighlighter.HighlightParams mRectangleParams =
             new ViewHighlighter.HighlightParams(ViewHighlighter.HighlightShape.RECTANGLE);
+    private static final int DEFAULT_VIEW_WIDTH = 100;
+    private static final int DEFAULT_VIEW_HEIGHT = 100;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
     @Before
     public void setUp() {
-        mContext = new ContextThemeWrapper(
-                InstrumentationRegistry.getTargetContext(), R.style.Theme_BrowserUI_DayNight);
-        MockitoAnnotations.initMocks(this);
+        mContext =
+                new ContextThemeWrapper(
+                        InstrumentationRegistry.getTargetContext(),
+                        R.style.Theme_BrowserUI_DayNight);
     }
 
     @Test
     @MediumTest
     public void testRepeatedCallsToHighlightWorksCorrectly() {
         View tintedImageButton = new ImageView(mContext);
+        // Create and lay out the view.
+        tintedImageButton.measure(
+                View.MeasureSpec.makeMeasureSpec(DEFAULT_VIEW_WIDTH, MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(DEFAULT_VIEW_HEIGHT, MeasureSpec.EXACTLY));
+        tintedImageButton.layout(0, 0, DEFAULT_VIEW_WIDTH, DEFAULT_VIEW_HEIGHT);
+
         tintedImageButton.setBackground(new ColorDrawable(Color.LTGRAY));
         checkHighlightOff(tintedImageButton);
 
@@ -77,6 +87,12 @@ public class ViewHighlighterTest {
     @MediumTest
     public void testViewWithNullBackground() {
         View tintedImageButton = new ImageView(mContext);
+        // Create and lay out the view.
+        tintedImageButton.measure(
+                View.MeasureSpec.makeMeasureSpec(DEFAULT_VIEW_WIDTH, MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(DEFAULT_VIEW_HEIGHT, MeasureSpec.EXACTLY));
+        tintedImageButton.layout(0, 0, DEFAULT_VIEW_WIDTH, DEFAULT_VIEW_HEIGHT);
+
         checkHighlightOff(tintedImageButton);
 
         ViewHighlighter.turnOffHighlight(tintedImageButton);
@@ -97,6 +113,12 @@ public class ViewHighlighterTest {
     public void testHighlightExtension() {
         int highlightExtension = 10;
         View tintedImageButton = new ImageView(mContext);
+        // Create and lay out the view.
+        tintedImageButton.measure(
+                View.MeasureSpec.makeMeasureSpec(DEFAULT_VIEW_WIDTH, MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(DEFAULT_VIEW_HEIGHT, MeasureSpec.EXACTLY));
+        tintedImageButton.layout(0, 0, DEFAULT_VIEW_WIDTH, DEFAULT_VIEW_HEIGHT);
+
         ViewHighlighter.HighlightParams highlightParams =
                 new ViewHighlighter.HighlightParams(ViewHighlighter.HighlightShape.RECTANGLE);
         highlightParams.setHighlightExtension(highlightExtension);
@@ -104,15 +126,29 @@ public class ViewHighlighterTest {
         ViewHighlighter.turnOnHighlight(tintedImageButton, highlightParams);
         checkHighlightOn(tintedImageButton);
 
-        Rect viewBounds = tintedImageButton.getBackground().getBounds();
-        RectF expectedBounds = new RectF(viewBounds.left - highlightExtension,
-                viewBounds.top - highlightExtension, viewBounds.right + highlightExtension,
-                viewBounds.bottom + highlightExtension);
+        // Get the highlight.
+        PulseDrawable pulseDrawable =
+                (PulseDrawable) tintedImageButton.getTag(R.id.highlight_drawable);
+        Assert.assertNotNull("Highlight should not be null", pulseDrawable);
 
+        // Get the highlight bounds.
+        Rect highlightBounds = pulseDrawable.getBounds();
+
+        // Check that the bounds are configured properly.
+        Assert.assertEquals(-highlightExtension, highlightBounds.left);
+        Assert.assertEquals(-highlightExtension, highlightBounds.top);
+        Assert.assertEquals(DEFAULT_VIEW_WIDTH + highlightExtension, highlightBounds.right);
+        Assert.assertEquals(DEFAULT_VIEW_HEIGHT + highlightExtension, highlightBounds.bottom);
+
+        // Verify that the highlight is drawn properly.
         ViewHighlighterTestUtils.drawPulseDrawable(tintedImageButton, mCanvas);
-
-        Mockito.verify(mCanvas).drawRoundRect(
-                Mockito.eq(expectedBounds), Mockito.anyFloat(), Mockito.anyFloat(), Mockito.any());
+        RectF expectedBounds = new RectF(highlightBounds);
+        Mockito.verify(mCanvas)
+                .drawRoundRect(
+                        Mockito.eq(expectedBounds),
+                        Mockito.anyFloat(),
+                        Mockito.anyFloat(),
+                        Mockito.any());
     }
 
     /**

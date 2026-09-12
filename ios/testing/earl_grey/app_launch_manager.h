@@ -12,7 +12,6 @@
 
 @class AppLaunchManager;
 
-
 // Protocol that test cases can implement to be notified by AppLaunchManager.
 @protocol AppLaunchManagerObserver
 @optional
@@ -65,6 +64,9 @@
 // Moves app to background and then moves it back. In EG1, this method is a
 // no-op.
 - (void)backgroundAndForegroundApp;
+
+// Moves app to background and waits until it is backgrounded.
+- (BOOL)backgroundApplication;
 
 // Adds an observer for AppLaunchManager.
 - (void)addObserver:(id<AppLaunchManagerObserver>)observer;

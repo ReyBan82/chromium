@@ -4,25 +4,27 @@
 
 #include "chrome/browser/ui/webui/theme_source.h"
 
+#include <algorithm>
+#include <string_view>
+
 #include "base/functional/bind.h"
+#include "base/logging.h"
 #include "base/memory/ref_counted_memory.h"
-#include "base/ranges/algorithm.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
-#include "build/branding_buildflags.h"
-#include "build/chromeos_buildflags.h"
+#include "base/timer/elapsed_timer.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/resources_util.h"
-#include "chrome/browser/search/instant_service.h"
-#include "chrome/browser/themes/browser_theme_pack.h"
 #include "chrome/browser/themes/theme_properties.h"
 #include "chrome/browser/themes/theme_service.h"
 #include "chrome/browser/themes/theme_service_factory.h"
 #include "chrome/browser/ui/color/chrome_color_id.h"
 #include "chrome/browser/ui/color/chrome_color_provider_utils.h"
+#include "chrome/browser/ui/webui/current_channel_logo.h"
 #include "chrome/browser/ui/webui/ntp/ntp_resource_cache.h"
 #include "chrome/browser/ui/webui/ntp/ntp_resource_cache_factory.h"
 #include "chrome/common/channel_info.h"
@@ -36,41 +38,42 @@
 #include "content/public/common/url_constants.h"
 #include "net/base/url_util.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
-#include "ui/base/layout.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/resource/resource_scale_factor.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/webui/web_ui_util.h"
 #include "ui/color/color_provider.h"
 #include "ui/color/color_provider_utils.h"
 #include "ui/gfx/codec/png_codec.h"
+#include "ui/gfx/color_utils.h"
 #include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/image/image_skia_rep.h"
 #include "url/gurl.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/search/instant_service.h"
+#include "chrome/browser/themes/browser_theme_pack.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/grit/cros_styles_resources.h"  // nogncheck crbug.com/40143654
 #include "ui/chromeos/styles/cros_tokens_color_mappings.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace {
 
 GURL GetThemeUrl(const std::string& path) {
-  return GURL(std::string(content::kChromeUIScheme) + "://" +
-              std::string(chrome::kChromeUIThemeHost) + "/" + path);
+  return GURL(base::StrCat({content::kChromeUIScheme, "://",
+                            chrome::kChromeUIThemeHost, "/", path}));
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 bool IsNewTabCssPath(const std::string& path) {
   static const char kNewTabThemeCssPath[] = "css/new_tab_theme.css";
   static const char kIncognitoTabThemeCssPath[] = "css/incognito_tab_theme.css";
   return path == kNewTabThemeCssPath || path == kIncognitoTabThemeCssPath;
 }
-
-void ProcessImageOnUiThread(const gfx::ImageSkia& image,
-                            float scale,
-                            scoped_refptr<base::RefCountedBytes> data) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  const gfx::ImageSkiaRep& rep = image.GetRepresentation(scale);
-  gfx::PNGCodec::EncodeBGRASkBitmap(
-      rep.GetBitmap(), false /* discard transparency */, &data->data());
-}
+#endif
 
 }  // namespace
 
@@ -94,7 +97,8 @@ void ThemeSource::StartDataRequest(
     const GURL& url,
     const content::WebContents::Getter& wc_getter,
     content::URLDataSource::GotDataCallback callback) {
-  // TODO(crbug/1009127): Simplify usages of |path| since |url| is available.
+  // TODO(crbug.com/40050262): Simplify usages of |path| since |url| is
+  // available.
   const std::string path = content::URLDataSource::URLToRequestPath(url);
   // Default scale factor if not specified.
   float scale = 1.0f;
@@ -103,6 +107,7 @@ void ThemeSource::StartDataRequest(
   std::string parsed_path;
   webui::ParsePathAndImageSpec(GetThemeUrl(path), &parsed_path, &scale, &frame);
 
+#if !BUILDFLAG(IS_ANDROID)
   if (IsNewTabCssPath(parsed_path)) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     NTPResourceCache::WindowType type =
@@ -111,6 +116,7 @@ void ThemeSource::StartDataRequest(
     std::move(callback).Run(cache->GetNewTabCSS(type, wc_getter));
     return;
   }
+#endif
 
   // kColorsCssPath should stay consistent with COLORS_CSS_SELECTOR in
   // colors_css_updater.js.
@@ -120,34 +126,17 @@ void ThemeSource::StartDataRequest(
     return;
   }
 
+#if BUILDFLAG(IS_CHROMEOS)
+  constexpr char kTypographyCssPath[] = "typography.css";
+  if (parsed_path == kTypographyCssPath) {
+    SendTypographyCss(std::move(callback));
+    return;
+  }
+#endif
+
   int resource_id = -1;
   if (parsed_path == "current-channel-logo") {
-    switch (chrome::GetChannel()) {
-#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-      case version_info::Channel::CANARY:
-        resource_id = IDR_PRODUCT_LOGO_32_CANARY;
-        break;
-      case version_info::Channel::DEV:
-        resource_id = IDR_PRODUCT_LOGO_32_DEV;
-        break;
-      case version_info::Channel::BETA:
-        resource_id = IDR_PRODUCT_LOGO_32_BETA;
-        break;
-      case version_info::Channel::STABLE:
-        resource_id = IDR_PRODUCT_LOGO_32;
-        break;
-#else
-      case version_info::Channel::CANARY:
-      case version_info::Channel::DEV:
-      case version_info::Channel::BETA:
-      case version_info::Channel::STABLE:
-        NOTREACHED();
-        [[fallthrough]];
-#endif
-      case version_info::Channel::UNKNOWN:
-        resource_id = IDR_PRODUCT_LOGO_32;
-        break;
-    }
+    resource_id = webui::CurrentChannelLogoResourceId();
   } else {
     resource_id = ResourcesUtil::GetThemeResourceId(parsed_path);
   }
@@ -160,7 +149,7 @@ void ThemeSource::StartDataRequest(
   const float max_scale = ui::GetScaleForResourceScaleFactor(
       ui::ResourceBundle::GetSharedInstance().GetMaxResourceScaleFactor());
   const float unreasonable_scale = max_scale * 32;
-  // TODO(reveman): Add support frames beyond 0 (crbug.com/750064).
+  // TODO(reveman): Add support frames beyond 0 (crbug.com/40532347).
   if ((resource_id == -1) || (scale >= unreasonable_scale) || (frame > 0)) {
     // Either we have no data to send back, or the requested scale is
     // unreasonably large.  This shouldn't happen normally, as chrome://theme/
@@ -172,7 +161,7 @@ void ThemeSource::StartDataRequest(
              ((scale > max_scale) || (frame != -1))) {
     // This will extract and scale frame 0 of animated images.
     // TODO(reveman): Support scaling of animated images and avoid scaling and
-    // re-encode when specific frame is specified (crbug.com/750064).
+    // re-encode when specific frame is specified (crbug.com/40532347).
     DCHECK_LE(frame, 0);
     SendThemeImage(std::move(callback), resource_id, scale);
   } else {
@@ -181,7 +170,7 @@ void ThemeSource::StartDataRequest(
 }
 
 std::string ThemeSource::GetMimeType(const GURL& url) {
-  const base::StringPiece file_path = url.path_piece();
+  const std::string_view file_path = url.path();
 
   if (base::EndsWith(file_path, ".css", base::CompareCase::INSENSITIVE_ASCII)) {
     return "text/css";
@@ -197,11 +186,14 @@ bool ThemeSource::AllowCaching() {
 bool ThemeSource::ShouldServiceRequest(const GURL& url,
                                        content::BrowserContext* browser_context,
                                        int render_process_id) {
-  return url.SchemeIs(chrome::kChromeSearchScheme)
-             ? InstantService::ShouldServiceRequest(url, browser_context,
-                                                    render_process_id)
-             : URLDataSource::ShouldServiceRequest(url, browser_context,
-                                                   render_process_id);
+#if !BUILDFLAG(IS_ANDROID)
+  if (url.SchemeIs(chrome::kChromeSearchScheme)) {
+    return InstantService::ShouldServiceRequest(url, browser_context,
+                                                render_process_id);
+  }
+#endif
+  return URLDataSource::ShouldServiceRequest(url, browser_context,
+                                             render_process_id);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -213,16 +205,18 @@ void ThemeSource::SendThemeBitmap(
     float scale) {
   ui::ResourceScaleFactor scale_factor =
       ui::GetSupportedResourceScaleFactor(scale);
+#if !BUILDFLAG(IS_ANDROID)
   if (BrowserThemePack::IsPersistentImageID(resource_id)) {
     scoped_refptr<base::RefCountedMemory> image_data(
         ThemeService::GetThemeProviderForProfile(profile_->GetOriginalProfile())
             .GetRawData(resource_id, scale_factor));
     std::move(callback).Run(image_data.get());
-  } else {
-    const ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
-    std::move(callback).Run(
-        rb.LoadDataResourceBytesForScale(resource_id, scale_factor));
+    return;
   }
+#endif
+  const ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
+  std::move(callback).Run(
+      rb.LoadDataResourceBytesForScale(resource_id, scale_factor));
 }
 
 void ThemeSource::SendThemeImage(
@@ -230,106 +224,277 @@ void ThemeSource::SendThemeImage(
     int resource_id,
     float scale) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  scoped_refptr<base::RefCountedBytes> data(new base::RefCountedBytes());
+
+  gfx::ImageSkia* image = nullptr;
+#if !BUILDFLAG(IS_ANDROID)
   if (BrowserThemePack::IsPersistentImageID(resource_id)) {
     const ui::ThemeProvider& tp = ThemeService::GetThemeProviderForProfile(
         profile_->GetOriginalProfile());
-    ProcessImageOnUiThread(*tp.GetImageSkiaNamed(resource_id), scale, data);
-  } else {
-    ProcessImageOnUiThread(
-        *ui::ResourceBundle::GetSharedInstance().GetImageSkiaNamed(resource_id),
-        scale, data);
+    image = tp.GetImageSkiaNamed(resource_id);
   }
-  std::move(callback).Run(data.get());
+#endif
+  if (!image) {
+    image =
+        ui::ResourceBundle::GetSharedInstance().GetImageSkiaNamed(resource_id);
+  }
+
+  const gfx::ImageSkiaRep& rep = image->GetRepresentation(scale);
+  std::optional<std::vector<uint8_t>> result =
+      gfx::PNGCodec::EncodeBGRASkBitmap(rep.GetBitmap(),
+                                        /*discard_transparency=*/false);
+  if (result) {
+    std::move(callback).Run(
+        base::MakeRefCounted<base::RefCountedBytes>(std::move(result.value())));
+  } else {
+    std::move(callback).Run(base::MakeRefCounted<base::RefCountedBytes>());
+  }
+}
+
+// static
+std::optional<std::string> ThemeSource::GenerateColorsCss(
+    const ui::ColorProvider& color_provider,
+    const GURL& url,
+    bool is_grayscale,
+    bool is_baseline) {
+  auto get_bool_param = [&](std::string_view key) {
+    std::string value;
+    return net::GetValueForKeyInQuery(url, key, &value) &&
+           base::EqualsCaseInsensitiveASCII(value, "true");
+  };
+
+  const bool generate_rgb_vars = get_bool_param("generate_rgb_vars");
+  const bool shadow_host = get_bool_param("shadow_host");
+
+  std::string sets_param;
+  if (!net::GetValueForKeyInQuery(url, "sets", &sets_param)) {
+    LOG(ERROR)
+        << "colors.css requires a 'sets' query parameter to specify the color "
+           "id sets returned e.g chrome://theme/colors.css?sets=ui,chrome";
+    return std::nullopt;
+  }
+
+  std::vector<std::string_view> color_id_sets = base::SplitStringPiece(
+      sets_param, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
+
+  if (features::IsColorIdCssStyleSheetOptimizationEnabled()) {
+    // Define the logic for each set. This allows us to validate input before
+    // generating the CSS string.
+    struct ColorSetDefinition {
+      std::string_view name;
+      ui::ColorId start;
+      ui::ColorId end;
+      // Callback converts ColorId to CSS variable name view.
+      base::RepeatingCallback<std::string_view(ui::ColorId)> name_mapper;
+    };
+
+    const std::vector<ColorSetDefinition> definitions = {
+        {"ui", ui::kUiColorsStart, ui::kUiColorsEnd,
+         base::BindRepeating(&ui::ColorIdToCSSColorId)},
+        {"chrome", kChromeColorsStart, kChromeColorsEnd,
+         base::BindRepeating(&ChromeColorIdToCSSColorId)},
+#if BUILDFLAG(IS_CHROMEOS)
+        {"ref", cros_tokens::kCrosRefColorsStart,
+         cros_tokens::kCrosRefColorsEnd,
+         base::BindRepeating(&cros_tokens::ColorIdName)},
+        {"sys", cros_tokens::kCrosSysColorsStart,
+         cros_tokens::kCrosSysColorsEnd,
+         base::BindRepeating(&cros_tokens::ColorIdName)},
+        {"legacy", cros_tokens::kLegacySemanticColorsStart,
+         cros_tokens::kLegacySemanticColorsEnd,
+         base::BindRepeating(&cros_tokens::ColorIdName)},
+#elif BUILDFLAG(IS_ANDROID)
+        {"ref", ui::kColorRefPrimary0, ui::kColorRefNeutralVariant100,
+         base::BindRepeating(&ui::ColorIdToCSSColorId)},
+        {"sys", ui::kColorSysPrimary, ui::kColorSysOmniboxContainer,
+         base::BindRepeating(&ui::ColorIdToCSSColorId)},
+#endif
+    };
+
+    // Validate only valid `color_id_sets` were requested.
+    for (const auto& set_name : color_id_sets) {
+      bool is_valid = std::ranges::any_of(
+          definitions, [&](const auto& def) { return def.name == set_name; });
+      if (!is_valid) {
+        LOG(ERROR) << "Unrecognized color set specified: " << set_name;
+        return std::nullopt;
+      }
+    }
+
+    // Generate the CSS. Pre-calculate selector and theme info.
+    std::string css_string;
+    css_string.reserve(75000);
+
+    if (shadow_host) {
+      css_string.append(":host{");
+    } else {
+      css_string.append("html:not(#z){");
+    }
+
+    if (is_grayscale) {
+      css_string.append("--user-color-source:baseline-grayscale;");
+    } else if (is_baseline) {
+      css_string.append("--user-color-source:baseline-default;");
+    }
+
+    for (const auto& def : definitions) {
+      if (!std::ranges::contains(color_id_sets, def.name)) {
+        continue;
+      }
+
+      for (ui::ColorId id = def.start; id < def.end; ++id) {
+        const SkColor color = color_provider.GetColor(id);
+        const std::string_view var_name = def.name_mapper.Run(id);
+        if (var_name.empty()) {
+          continue;
+        }
+
+        // Format: --var-name:#RRGGBBAA;
+        css_string.append(var_name);
+        css_string.push_back(':');
+        ui::FastAppendCssHexColor(color, css_string);
+        css_string.push_back(';');
+
+        if (generate_rgb_vars) {
+          // Format: --var-name-rgb:R,G,B;
+          css_string.append(var_name);
+          css_string.append("-rgb:");
+          ui::FastAppendRgbColor(color, css_string);
+          css_string.push_back(';');
+        }
+      }
+    }
+
+    css_string.push_back('}');
+    return css_string;
+  }
+
+  // Legacy unoptimized path.
+  struct ColorSetDefinition {
+    std::string_view name;
+    ui::ColorId start;
+    ui::ColorId end;
+    // Callback converts ColorId to CSS variable name.
+    base::RepeatingCallback<std::string(ui::ColorId)> name_mapper;
+  };
+
+  // Helper to adapt ui::ColorIdName to the CSS mapping callback format.
+  auto to_css_id = [](std::string (*name_func)(ui::ColorId), ui::ColorId id) {
+    return ui::ConvertColorProviderColorIdToCSSColorId(name_func(id));
+  };
+
+  const std::vector<ColorSetDefinition> definitions = {
+      {"ui", ui::kUiColorsStart, ui::kUiColorsEnd,
+       base::BindRepeating(to_css_id, ui::ColorIdName)},
+      {"chrome", kChromeColorsStart, kChromeColorsEnd,
+       base::BindRepeating(to_css_id, &ChromeColorIdName)},
+#if BUILDFLAG(IS_CHROMEOS)
+      {"ref", cros_tokens::kCrosRefColorsStart, cros_tokens::kCrosRefColorsEnd,
+       base::BindRepeating([](ui::ColorId id) {
+         return std::string(cros_tokens::ColorIdName(id));
+       })},
+      {"sys", cros_tokens::kCrosSysColorsStart, cros_tokens::kCrosSysColorsEnd,
+       base::BindRepeating([](ui::ColorId id) {
+         return std::string(cros_tokens::ColorIdName(id));
+       })},
+      {"legacy", cros_tokens::kLegacySemanticColorsStart,
+       cros_tokens::kLegacySemanticColorsEnd,
+       base::BindRepeating([](ui::ColorId id) {
+         return std::string(cros_tokens::ColorIdName(id));
+       })},
+#elif BUILDFLAG(IS_ANDROID)
+      {"ref", ui::kColorRefPrimary0, ui::kColorRefNeutralVariant100,
+       base::BindRepeating(to_css_id, ui::ColorIdName)},
+      {"sys", ui::kColorSysPrimary, ui::kColorSysOmniboxContainer,
+       base::BindRepeating(to_css_id, ui::ColorIdName)},
+#endif
+  };
+
+  // Validate only valid `color_id_sets` were requested.
+  for (const auto& set_name : color_id_sets) {
+    bool is_valid = std::ranges::any_of(
+        definitions, [&](const auto& def) { return def.name == set_name; });
+    if (!is_valid) {
+      LOG(ERROR) << "Unrecognized color set specified: " << set_name;
+      return std::nullopt;
+    }
+  }
+
+  // Generate the CSS. Pre-calculate selector and theme info.
+  std::string css_header;
+  if (shadow_host) {
+    css_header = ":host{";
+  } else {
+    css_header = "html:not(#z){";
+  }
+
+  if (is_grayscale) {
+    base::StrAppend(&css_header, {"--user-color-source:baseline-grayscale;"});
+  } else if (is_baseline) {
+    base::StrAppend(&css_header, {"--user-color-source:baseline-default;"});
+  }
+
+  // Reserve memory to reduce reallocations. 75KB is a reasonable heuristic for
+  // a full theme dump, minimizing string resizing during the loop.
+  std::string css_string;
+  css_string.reserve(75000);
+  css_string.append(css_header);
+
+  for (const auto& def : definitions) {
+    if (!std::ranges::contains(color_id_sets, def.name)) {
+      continue;
+    }
+
+    for (ui::ColorId id = def.start; id < def.end; ++id) {
+      const SkColor color = color_provider.GetColor(id);
+      const std::string var_name = def.name_mapper.Run(id);
+      const std::string color_str = ui::ConvertSkColorToCSSColor(color);
+
+      // Format: --var-name: #RRGGBBAA;
+      base::StrAppend(&css_string, {var_name, ":", color_str, ";"});
+
+      if (generate_rgb_vars) {
+        // Format: --var-name-rgb: R,G,B;
+        const std::string rgb_str = color_utils::SkColorToRgbString(color);
+        base::StrAppend(&css_string, {var_name, "-rgb:", rgb_str, ";"});
+      }
+    }
+  }
+
+  css_string.push_back('}');
+  return css_string;
 }
 
 void ThemeSource::SendColorsCss(
     const GURL& url,
     const content::WebContents::Getter& wc_getter,
     content::URLDataSource::GotDataCallback callback) {
+  base::ElapsedTimer timer;
   const ui::ColorProvider& color_provider = wc_getter.Run()->GetColorProvider();
 
-  std::string sets_param;
-  std::vector<base::StringPiece> color_id_sets;
-  if (!net::GetValueForKeyInQuery(url, "sets", &sets_param)) {
-    LOG(ERROR)
-        << "colors.css requires a 'sets' query parameter to specify the color "
-           "id sets returned e.g chrome://theme/colors.css?sets=ui,chrome";
+#if BUILDFLAG(IS_ANDROID)
+  bool is_grayscale = false;
+  bool is_baseline = true;
+#else
+  const auto* theme_service =
+      ThemeServiceFactory::GetForProfile(profile_->GetOriginalProfile());
+  bool is_grayscale = theme_service->GetIsGrayscale();
+  bool is_baseline = theme_service->GetIsBaseline();
+#endif
+
+  std::optional<std::string> css_content =
+      GenerateColorsCss(color_provider, url, is_grayscale, is_baseline);
+
+  if (!css_content) {
     std::move(callback).Run(nullptr);
     return;
   }
-  color_id_sets = base::SplitStringPiece(sets_param, ",", base::TRIM_WHITESPACE,
-                                         base::SPLIT_WANT_ALL);
 
-  using ColorIdCSSCallback = base::RepeatingCallback<std::string(ui::ColorId)>;
-  auto generate_color_mapping = [&color_id_sets, &color_provider](
-                                    std::string set_name, ui::ColorId start,
-                                    ui::ColorId end,
-                                    ColorIdCSSCallback color_css_name) {
-    // Only return these mappings if specified in the query parameter.
-    auto it = base::ranges::find(color_id_sets, set_name);
-    if (it == color_id_sets.end()) {
-      return std::string();
-    }
-    color_id_sets.erase(it);
-    std::string css_string;
-    for (ui::ColorId id = start; id < end; ++id) {
-      const SkColor color = color_provider.GetColor(id);
-      std::string css_id_to_color_mapping =
-          base::StringPrintf("%s:%s;", color_css_name.Run(id).c_str(),
-                             ui::ConvertSkColorToCSSColor(color).c_str());
-      base::StrAppend(&css_string, {css_id_to_color_mapping});
-    }
-    return css_string;
-  };
-
-  // Convenience lambda for wrapping
-  // |ConvertColorProviderColorIdToCSSColorId|.
-  auto generate_color_provider_mapping = [&generate_color_mapping](
-                                             std::string set_name,
-                                             ui::ColorId start, ui::ColorId end,
-                                             std::string (*color_id_name)(
-                                                 ui::ColorId)) {
-    auto color_id_to_css_name = base::BindRepeating(
-        [](std::string (*color_id_name)(ui::ColorId), ui::ColorId id) {
-          return ui::ConvertColorProviderColorIdToCSSColorId(color_id_name(id));
-        },
-        color_id_name);
-    return generate_color_mapping(set_name, start, end, color_id_to_css_name);
-  };
-
-  std::string css_string = base::StrCat({
-    // This selector requires more specificity than other existing CSS
-    // selectors that define variables. We increase the specifity by adding
-    // a pseudoselector.
-    "html:not(#z) {",
-        generate_color_provider_mapping("ui", ui::kUiColorsStart,
-                                        ui::kUiColorsEnd, ui::ColorIdName),
-        generate_color_provider_mapping("chrome", kChromeColorsStart,
-                                        kChromeColorsEnd, &ChromeColorIdName),
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-        generate_color_mapping("ref", cros_tokens::kCrosRefColorsStart,
-                               cros_tokens::kCrosRefColorsEnd,
-                               base::BindRepeating(cros_tokens::ColorIdName)),
-        generate_color_mapping("sys", cros_tokens::kCrosSysColorsStart,
-                               cros_tokens::kCrosSysColorsEnd,
-                               base::BindRepeating(cros_tokens::ColorIdName)),
-        generate_color_mapping("legacy",
-                               cros_tokens::kLegacySemanticColorsStart,
-                               cros_tokens::kLegacySemanticColorsEnd,
-                               base::BindRepeating(cros_tokens::ColorIdName)),
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
-        "}"
-  });
-  if (!color_id_sets.empty()) {
-    LOG(ERROR)
-        << "Unrecognized color set(s) specified for chrome://theme/colors.css: "
-        << base::JoinString(color_id_sets, ",");
-    std::move(callback).Run(nullptr);
-    return;
-  }
   std::move(callback).Run(
-      base::MakeRefCounted<base::RefCountedString>(std::move(css_string)));
+      base::MakeRefCounted<base::RefCountedString>(std::move(*css_content)));
+
+  // Measures the time it takes to generate the colors.css and queue it for the
+  // renderer.
+  UmaHistogramTimes("WebUI.ColorsStylesheetServingDuration", timer.Elapsed());
 }
 
 std::string ThemeSource::GetAccessControlAllowOriginForOrigin(
@@ -344,11 +509,21 @@ std::string ThemeSource::GetAccessControlAllowOriginForOrigin(
   return content::URLDataSource::GetAccessControlAllowOriginForOrigin(origin);
 }
 
+#if BUILDFLAG(IS_CHROMEOS)
+void ThemeSource::SendTypographyCss(
+    content::URLDataSource::GotDataCallback callback) {
+  const ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
+  std::move(callback).Run(rb.LoadDataResourceBytesForScale(
+      IDR_CROS_STYLES_UI_CHROMEOS_STYLES_CROS_TYPOGRAPHY_CSS,
+      ui::kScaleFactorNone));
+}
+#endif
+
 std::string ThemeSource::GetContentSecurityPolicy(
     network::mojom::CSPDirectiveName directive) {
   if (directive == network::mojom::CSPDirectiveName::DefaultSrc &&
       serve_untrusted_) {
-    // TODO(https://crbug.com/1085327): Audit and tighten CSP.
+    // TODO(crbug.com/40693568): Audit and tighten CSP.
     return std::string();
   }
 

@@ -9,6 +9,8 @@
 
 #include "base/metrics/histogram_functions.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
+#include "third_party/blink/public/mojom/page/page.mojom-blink.h"
+#include "third_party/blink/public/mojom/permissions/permission_status.mojom-blink.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
@@ -29,6 +31,33 @@
 #include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
 
 namespace blink {
+namespace {
+void RecordTopLevelStorageAccessQueryMetrics(bool is_top_level_storage_access) {
+  base::UmaHistogramBoolean("Permissions.Query.TopLevelStorageAccess",
+                            is_top_level_storage_access);
+}
+
+bool ArePermissionDescriptorsEquivalent(
+    const mojom::blink::PermissionDescriptor& left,
+    const mojom::blink::PermissionDescriptor& right) {
+  if (left.name != right.name) {
+    return false;
+  }
+  if (!left.extension && !right.extension) {
+    return true;
+  }
+  if (!left.extension || !right.extension) {
+    return false;
+  }
+  return left.extension->Equals(*right.extension);
+}
+}  // namespace
+
+bool ArePermissionDescriptorsEquivalentForTesting(
+    const mojom::blink::PermissionDescriptor& left,
+    const mojom::blink::PermissionDescriptor& right) {
+  return ArePermissionDescriptorsEquivalent(left, right);
+}
 
 using mojom::blink::PermissionDescriptorPtr;
 using mojom::blink::PermissionName;
@@ -53,9 +82,10 @@ Permissions::Permissions(NavigatorBase& navigator)
       ExecutionContextLifecycleObserver(navigator.GetExecutionContext()),
       service_(navigator.GetExecutionContext()) {}
 
-ScriptPromise Permissions::query(ScriptState* script_state,
-                                 const ScriptValue& raw_permission,
-                                 ExceptionState& exception_state) {
+ScriptPromise<PermissionStatus> Permissions::query(
+    ScriptState* script_state,
+    const ScriptValue& raw_permission,
+    ExceptionState& exception_state) {
   // https://www.w3.org/TR/permissions/#query-method
   // If this's relevant global object is a Window object, and if the current
   // settings object's associated Document is not fully active, return a promise
@@ -72,17 +102,22 @@ ScriptPromise Permissions::query(ScriptState* script_state,
       }
       exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
                                         "The document is not active");
-      return ScriptPromise();
+      return EmptyPromise();
     }
   }
 
   PermissionDescriptorPtr descriptor =
       ParsePermissionDescriptor(script_state, raw_permission, exception_state);
   if (exception_state.HadException())
-    return ScriptPromise();
+    return EmptyPromise();
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
+  RecordTopLevelStorageAccessQueryMetrics(
+      descriptor->name == PermissionName::TOP_LEVEL_STORAGE_ACCESS);
+
+  auto* resolver =
+      MakeGarbageCollected<ScriptPromiseResolver<PermissionStatus>>(
+          script_state, exception_state.GetContext());
+  auto promise = resolver->Promise();
 
   // If the current origin is a file scheme, it will unlikely return a
   // meaningful value because most APIs are broken on file scheme and no
@@ -91,60 +126,78 @@ ScriptPromise Permissions::query(ScriptState* script_state,
   PermissionDescriptorPtr descriptor_copy = descriptor->Clone();
   GetService(context)->HasPermission(
       std::move(descriptor),
-      WTF::BindOnce(&Permissions::TaskComplete, WrapPersistent(this),
-                    WrapPersistent(resolver), std::move(descriptor_copy)));
+      blink::BindOnce(&Permissions::TaskComplete,
+
+                      WrapPersistent(this), WrapPersistent(resolver),
+                      std::move(descriptor_copy)));
   return promise;
 }
 
-ScriptPromise Permissions::request(ScriptState* script_state,
-                                   const ScriptValue& raw_permission,
-                                   ExceptionState& exception_state) {
+ScriptPromise<PermissionStatus> Permissions::request(
+    ScriptState* script_state,
+    const ScriptValue& raw_permission,
+    ExceptionState& exception_state) {
   PermissionDescriptorPtr descriptor =
       ParsePermissionDescriptor(script_state, raw_permission, exception_state);
   if (exception_state.HadException())
-    return ScriptPromise();
+    return EmptyPromise();
 
   ExecutionContext* context = ExecutionContext::From(script_state);
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
+  auto* resolver =
+      MakeGarbageCollected<ScriptPromiseResolver<PermissionStatus>>(
+          script_state, exception_state.GetContext());
+  auto promise = resolver->Promise();
 
   PermissionDescriptorPtr descriptor_copy = descriptor->Clone();
-  LocalDOMWindow* window = DynamicTo<LocalDOMWindow>(context);
-  LocalFrame* frame = window ? window->GetFrame() : nullptr;
 
   GetService(context)->RequestPermission(
-      std::move(descriptor), LocalFrame::HasTransientUserActivation(frame),
-      WTF::BindOnce(&Permissions::VerifyPermissionAndReturnStatus,
-                    WrapPersistent(this), WrapPersistent(resolver),
-                    std::move(descriptor_copy)));
+      std::move(descriptor),
+      BindOnce(&Permissions::VerifyPermissionAndReturnStatus,
+               WrapPersistent(this), WrapPersistent(resolver),
+               std::move(descriptor_copy)));
   return promise;
 }
 
-ScriptPromise Permissions::revoke(ScriptState* script_state,
-                                  const ScriptValue& raw_permission,
-                                  ExceptionState& exception_state) {
+ScriptPromise<PermissionStatus> Permissions::revoke(
+    ScriptState* script_state,
+    const ScriptValue& raw_permission,
+    ExceptionState& exception_state) {
   PermissionDescriptorPtr descriptor =
       ParsePermissionDescriptor(script_state, raw_permission, exception_state);
   if (exception_state.HadException())
-    return ScriptPromise();
+    return EmptyPromise();
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
+  auto* resolver =
+      MakeGarbageCollected<ScriptPromiseResolver<PermissionStatus>>(
+          script_state, exception_state.GetContext());
+  auto promise = resolver->Promise();
 
   PermissionDescriptorPtr descriptor_copy = descriptor->Clone();
   GetService(ExecutionContext::From(script_state))
       ->RevokePermission(
           std::move(descriptor),
-          WTF::BindOnce(&Permissions::TaskComplete, WrapPersistent(this),
-                        WrapPersistent(resolver), std::move(descriptor_copy)));
+          blink::BindOnce(&Permissions::TaskComplete, WrapPersistent(this),
+                          WrapPersistent(resolver),
+                          std::move(descriptor_copy)));
   return promise;
 }
 
-ScriptPromise Permissions::requestAll(
+ScriptPromise<IDLSequence<PermissionStatus>> Permissions::requestAll(
     ScriptState* script_state,
-    const HeapVector<ScriptValue>& raw_permissions,
+    const HeapVector<ScriptObject>& raw_permissions,
     ExceptionState& exception_state) {
+  auto* resolver = MakeGarbageCollected<
+      ScriptPromiseResolver<IDLSequence<PermissionStatus>>>(
+      script_state, exception_state.GetContext());
+  auto promise = resolver->Promise();
+
+  if (raw_permissions.empty()) {
+    HeapVector<Member<PermissionStatus>> result;
+    resolver->Resolve(result);
+    return promise;
+  }
+
   Vector<PermissionDescriptorPtr> internal_permissions;
   Vector<int> caller_index_to_internal_index;
   caller_index_to_internal_index.resize(raw_permissions.size());
@@ -152,17 +205,18 @@ ScriptPromise Permissions::requestAll(
   ExecutionContext* context = ExecutionContext::From(script_state);
 
   for (wtf_size_t i = 0; i < raw_permissions.size(); ++i) {
-    const ScriptValue& raw_permission = raw_permissions[i];
+    const ScriptObject& raw_permission = raw_permissions[i];
 
     auto descriptor = ParsePermissionDescriptor(script_state, raw_permission,
                                                 exception_state);
     if (exception_state.HadException())
-      return ScriptPromise();
+      return ScriptPromise<IDLSequence<PermissionStatus>>();
 
     // Only append permissions types that are not already present in the vector.
     wtf_size_t internal_index = kNotFound;
     for (wtf_size_t j = 0; j < internal_permissions.size(); ++j) {
-      if (internal_permissions[j]->name == descriptor->name) {
+      if (ArePermissionDescriptorsEquivalent(*internal_permissions[j],
+                                             *descriptor)) {
         internal_index = j;
         break;
       }
@@ -174,31 +228,19 @@ ScriptPromise Permissions::requestAll(
     caller_index_to_internal_index[i] = internal_index;
   }
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
-
   Vector<PermissionDescriptorPtr> internal_permissions_copy;
   internal_permissions_copy.reserve(internal_permissions.size());
   for (const auto& descriptor : internal_permissions)
     internal_permissions_copy.push_back(descriptor->Clone());
 
-  LocalDOMWindow* window = DynamicTo<LocalDOMWindow>(context);
-  LocalFrame* frame = window ? window->GetFrame() : nullptr;
-
   GetService(context)->RequestPermissions(
       std::move(internal_permissions),
-      LocalFrame::HasTransientUserActivation(frame),
-      WTF::BindOnce(
+      BindOnce(
           &Permissions::VerifyPermissionsAndReturnStatus, WrapPersistent(this),
           WrapPersistent(resolver), std::move(internal_permissions_copy),
           std::move(caller_index_to_internal_index),
           -1 /* last_verified_permission_index */, true /* is_bulk_request */));
   return promise;
-}
-
-void Permissions::ContextDestroyed() {
-  base::UmaHistogramCounts1000("Permissions.API.CreatedPermissionStatusObjects",
-                               created_permission_status_objects_);
 }
 
 void Permissions::Trace(Visitor* visitor) const {
@@ -216,7 +258,7 @@ PermissionService* Permissions::GetService(
         execution_context,
         service_.BindNewPipeAndPassReceiver(
             execution_context->GetTaskRunner(TaskType::kPermission)));
-    service_.set_disconnect_handler(WTF::BindOnce(
+    service_.set_disconnect_handler(BindOnce(
         &Permissions::ServiceConnectionError, WrapWeakPersistent(this)));
   }
   return service_.get();
@@ -226,26 +268,27 @@ void Permissions::ServiceConnectionError() {
   service_.reset();
 }
 
-void Permissions::TaskComplete(ScriptPromiseResolver* resolver,
-                               mojom::blink::PermissionDescriptorPtr descriptor,
-                               mojom::blink::PermissionStatus result) {
+void Permissions::TaskComplete(
+    ScriptPromiseResolver<PermissionStatus>* resolver,
+    mojom::blink::PermissionDescriptorPtr descriptor,
+    mojom::blink::PermissionStatusWithDetailsPtr result) {
   if (!resolver->GetExecutionContext() ||
       resolver->GetExecutionContext()->IsContextDestroyed())
     return;
 
-  PermissionStatusListener* listener =
-      GetOrCreatePermissionStatusListener(result, std::move(descriptor));
+  PermissionStatusListener* listener = GetOrCreatePermissionStatusListener(
+      std::move(result), std::move(descriptor));
   if (listener)
     resolver->Resolve(PermissionStatus::Take(listener, resolver));
 }
 
 void Permissions::VerifyPermissionAndReturnStatus(
-    ScriptPromiseResolver* resolver,
+    ScriptPromiseResolverBase* resolver,
     mojom::blink::PermissionDescriptorPtr descriptor,
-    mojom::blink::PermissionStatus result) {
+    mojom::blink::PermissionStatusWithDetailsPtr result) {
   Vector<int> caller_index_to_internal_index;
   caller_index_to_internal_index.push_back(0);
-  Vector<mojom::blink::PermissionStatus> results;
+  Vector<mojom::blink::PermissionStatusWithDetailsPtr> results;
   results.push_back(std::move(result));
   Vector<mojom::blink::PermissionDescriptorPtr> descriptors;
   descriptors.push_back(std::move(descriptor));
@@ -258,22 +301,19 @@ void Permissions::VerifyPermissionAndReturnStatus(
 }
 
 void Permissions::VerifyPermissionsAndReturnStatus(
-    ScriptPromiseResolver* resolver,
+    ScriptPromiseResolverBase* resolver,
     Vector<mojom::blink::PermissionDescriptorPtr> descriptors,
     Vector<int> caller_index_to_internal_index,
     int last_verified_permission_index,
     bool is_bulk_request,
-    const Vector<mojom::blink::PermissionStatus>& results) {
-  DCHECK(caller_index_to_internal_index.size() == 1u || is_bulk_request);
-  DCHECK_EQ(descriptors.size(), caller_index_to_internal_index.size());
-
+    Vector<mojom::blink::PermissionStatusWithDetailsPtr> results) {
   if (!resolver->GetExecutionContext() ||
       resolver->GetExecutionContext()->IsContextDestroyed())
     return;
 
-  // Create the response vector by finding the status for each index by
-  // using the caller to internal index mapping and looking up the status
-  // using the internal index obtained.
+  // `descriptors` and `results` use indexes from the deduplicated permission
+  // list. `caller_index_to_internal_index` has one entry per caller-supplied
+  // permission, including duplicates.
   HeapVector<Member<PermissionStatus>> result;
   result.ReserveInitialCapacity(caller_index_to_internal_index.size());
   for (int internal_index : caller_index_to_internal_index) {
@@ -288,12 +328,12 @@ void Permissions::VerifyPermissionsAndReturnStatus(
       auto descriptor_copy = descriptors[internal_index]->Clone();
       service_->HasPermission(
           std::move(descriptor_copy),
-          WTF::BindOnce(&Permissions::PermissionVerificationComplete,
-                        WrapPersistent(this), WrapPersistent(resolver),
-                        std::move(descriptors),
-                        std::move(caller_index_to_internal_index),
-                        std::move(results), std::move(verification_descriptor),
-                        internal_index, is_bulk_request));
+          blink::BindOnce(
+              &Permissions::PermissionVerificationComplete,
+              WrapPersistent(this), WrapPersistent(resolver),
+              std::move(descriptors), std::move(caller_index_to_internal_index),
+              std::move(results), std::move(verification_descriptor),
+              internal_index, is_bulk_request));
       return;
     }
 
@@ -301,30 +341,35 @@ void Permissions::VerifyPermissionsAndReturnStatus(
     if (internal_index == last_verified_permission_index)
       last_verified_permission_index = -1;
 
+    // The same internal permission can be used for multiple caller entries when
+    // the request contains duplicates, so clone the descriptor and result for
+    // each listener.
     PermissionStatusListener* listener = GetOrCreatePermissionStatusListener(
-        results[internal_index], descriptors[internal_index]->Clone());
+        results[internal_index]->Clone(), descriptors[internal_index]->Clone());
     if (listener) {
       // If it's not a bulk request, return the first (and only) result.
       if (!is_bulk_request) {
-        resolver->Resolve(PermissionStatus::Take(listener, resolver));
+        resolver->DowncastTo<PermissionStatus>()->Resolve(
+            PermissionStatus::Take(listener, resolver));
         return;
       }
       result.push_back(PermissionStatus::Take(listener, resolver));
     }
   }
-  resolver->Resolve(result);
+  resolver->DowncastTo<IDLSequence<PermissionStatus>>()->Resolve(result);
 }
 
 void Permissions::PermissionVerificationComplete(
-    ScriptPromiseResolver* resolver,
+    ScriptPromiseResolverBase* resolver,
     Vector<mojom::blink::PermissionDescriptorPtr> descriptors,
     Vector<int> caller_index_to_internal_index,
-    const Vector<mojom::blink::PermissionStatus>& results,
+    Vector<mojom::blink::PermissionStatusWithDetailsPtr> results,
     mojom::blink::PermissionDescriptorPtr verification_descriptor,
     int internal_index_to_verify,
     bool is_bulk_request,
-    mojom::blink::PermissionStatus verification_result) {
-  if (verification_result != results[internal_index_to_verify]) {
+    mojom::blink::PermissionStatusWithDetailsPtr verification_result) {
+  if (verification_result->status !=
+      results[internal_index_to_verify]->status) {
     // The permission actually came from the verification descriptor, so use
     // that descriptor when returning the permission status.
     descriptors[internal_index_to_verify] = std::move(verification_descriptor);
@@ -337,24 +382,24 @@ void Permissions::PermissionVerificationComplete(
 }
 
 PermissionStatusListener* Permissions::GetOrCreatePermissionStatusListener(
-    mojom::blink::PermissionStatus status,
+    mojom::blink::PermissionStatusWithDetailsPtr status,
     mojom::blink::PermissionDescriptorPtr descriptor) {
   auto type = GetPermissionType(*descriptor);
   if (!type)
     return nullptr;
 
   if (!listeners_.Contains(*type)) {
-    listeners_.insert(
-        *type, PermissionStatusListener::Create(*this, GetExecutionContext(),
-                                                status, std::move(descriptor)));
+    listeners_.insert(*type, PermissionStatusListener::Create(
+                                 GetExecutionContext(), std::move(status),
+                                 std::move(descriptor)));
   } else {
-    listeners_.at(*type)->SetStatus(status);
+    listeners_.at(*type)->SetStatus(std::move(status));
   }
 
   return listeners_.at(*type);
 }
 
-absl::optional<PermissionType> Permissions::GetPermissionType(
+std::optional<PermissionType> Permissions::GetPermissionType(
     const mojom::blink::PermissionDescriptor& descriptor) {
   return PermissionDescriptorInfoToPermissionType(
       descriptor.name,
@@ -365,7 +410,9 @@ absl::optional<PermissionType> Permissions::GetPermissionType(
       descriptor.extension && descriptor.extension->is_clipboard() &&
           descriptor.extension->get_clipboard()->will_be_sanitized,
       descriptor.extension && descriptor.extension->is_clipboard() &&
-          descriptor.extension->get_clipboard()->has_user_gesture);
+          descriptor.extension->get_clipboard()->has_user_gesture,
+      descriptor.extension && descriptor.extension->is_fullscreen() &&
+          descriptor.extension->get_fullscreen()->allow_without_user_gesture);
 }
 
 mojom::blink::PermissionDescriptorPtr

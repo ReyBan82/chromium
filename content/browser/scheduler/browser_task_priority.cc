@@ -7,6 +7,8 @@
 #include "base/notreached.h"
 #include "base/task/sequence_manager/sequence_manager.h"
 #include "base/tracing/protos/chrome_track_event.pbzero.h"
+#include "components/performance_manager/scenario_api/performance_scenarios.h"
+#include "content/public/common/content_features.h"
 
 namespace content::internal {
 
@@ -30,7 +32,6 @@ ProtoPriority ToProtoPriority(BrowserTaskPriority priority) {
       return ProtoPriority::BEST_EFFORT_PRIORITY;
     case BrowserTaskPriority::kPriorityCount:
       NOTREACHED();
-      return ProtoPriority::UNKNOWN;
   }
 }
 
@@ -39,6 +40,30 @@ ProtoPriority TaskPriorityToProto(
   DCHECK_LT(static_cast<size_t>(priority),
             static_cast<size_t>(BrowserTaskPriority::kPriorityCount));
   return ToProtoPriority(static_cast<BrowserTaskPriority>(priority));
+}
+
+base::ThreadType ToThreadType(BrowserTaskPriority priority) {
+  switch (priority) {
+    case BrowserTaskPriority::kControlPriority:
+    case BrowserTaskPriority::kHighestPriority:
+    case BrowserTaskPriority::kHighPriority:
+      return base::ThreadType::kPresentation;
+    case BrowserTaskPriority::kNormalPriority:
+      return base::ThreadType::kDefault;
+    case BrowserTaskPriority::kLowPriority:
+      return base::ThreadType::kUtility;
+    case BrowserTaskPriority::kBestEffortPriority:
+      return base::ThreadType::kBackground;
+    case BrowserTaskPriority::kPriorityCount:
+      NOTREACHED();
+  }
+}
+
+base::ThreadType TaskPriorityToThreadType(
+    base::sequence_manager::TaskQueue::QueuePriority priority) {
+  DCHECK_LT(static_cast<size_t>(priority),
+            static_cast<size_t>(BrowserTaskPriority::kPriorityCount));
+  return ToThreadType(static_cast<BrowserTaskPriority>(priority));
 }
 
 }  // namespace
@@ -50,6 +75,7 @@ CreateBrowserTaskPrioritySettings() {
       BrowserTaskPriority::kPriorityCount,
       BrowserTaskPriority::kDefaultPriority);
   settings.SetProtoPriorityConverter(&TaskPriorityToProto);
+  settings.SetThreadTypeMapping(&TaskPriorityToThreadType);
   return settings;
 }
 

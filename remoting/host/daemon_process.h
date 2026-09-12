@@ -7,34 +7,55 @@
 
 #include <stdint.h>
 
-#include <list>
 #include <memory>
 #include <string>
 
+#include "base/base_switches.h"
 #include "base/compiler_specific.h"
+#include "base/containers/circular_deque.h"
+#include "base/containers/flat_set.h"
+#include "base/containers/unique_ptr_adapters.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/process/process.h"
-#include "base/time/time.h"
-#include "ipc/ipc_message.h"
+#include "base/memory/weak_ptr.h"
+#include "build/build_config.h"
+#include "mojo/core/embedder/scoped_ipc_support.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
+#include "mojo/public/cpp/bindings/associated_remote.h"
+#include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/scoped_interface_endpoint_handle.h"
 #include "mojo/public/cpp/system/message_pipe.h"
+#include "remoting/base/auto_thread_task_runner.h"
+#include "remoting/base/errors.h"
+#include "remoting/base/source_location.h"
+#include "remoting/host/base/switches.h"
 #include "remoting/host/config_watcher.h"
 #include "remoting/host/host_status_monitor.h"
 #include "remoting/host/host_status_observer.h"
+#include "remoting/host/mojom/chromoting_host_services.mojom.h"
 #include "remoting/host/mojom/desktop_session.mojom.h"
+#include "remoting/host/mojom/peer_session.mojom.h"
+#include "remoting/host/mojom/remoting_host.mojom.h"
 #include "remoting/host/worker_process_ipc_delegate.h"
+#include "remoting/host/worker_process_launcher.h"
 
 namespace base {
 class Location;
 }  // namespace base
 
+namespace named_mojo_ipc_server {
+struct ConnectionInfo;
+}
+
 namespace remoting {
 
-class AutoThreadTaskRunner;
+#if BUILDFLAG(IS_WIN)
+class CertificateBrokerImpl;
+#endif
+class ChromotingHostServicesServer;
 class DesktopSession;
+class PeerConnectionProcessHandler;
 class HostEventLogger;
-class ScreenResolution;
 
 // This class implements core of the daemon process. It manages the networking
 // process running at lower privileges and maintains the list of desktop
@@ -42,9 +63,20 @@ class ScreenResolution;
 class DaemonProcess : public ConfigWatcher::Delegate,
                       public WorkerProcessIpcDelegate,
                       public HostStatusObserver,
-                      public mojom::DesktopSessionManager {
+                      public mojom::DesktopSessionManager,
+                      public mojom::PeerSessionManager,
+                      public mojom::ChromotingHostServices {
  public:
-  typedef std::list<DesktopSession*> DesktopSessionList;
+  // List of command-line switch names to copy from the Daemon process to child
+  // worker processes (Network and PeerConnection processes).
+  static inline constexpr const char* const kCopiedSwitchNames[] = {
+      switches::kV,
+      switches::kVModule,
+  };
+
+  using StoppedCallback = base::OnceCallback<void(int /*exit_code*/)>;
+  using DesktopSessionMap =
+      std::map<int, raw_ptr<DesktopSession, CtnExperimental>>;
 
   DaemonProcess(const DaemonProcess&) = delete;
   DaemonProcess& operator=(const DaemonProcess&) = delete;
@@ -58,7 +90,10 @@ class DaemonProcess : public ConfigWatcher::Delegate,
   static std::unique_ptr<DaemonProcess> Create(
       scoped_refptr<AutoThreadTaskRunner> caller_task_runner,
       scoped_refptr<AutoThreadTaskRunner> io_task_runner,
-      const base::OnceClosure stopped_callback);
+      StoppedCallback stopped_callback);
+
+  // Gets the location of the config file.
+  static base::FilePath GetConfigPath();
 
   // ConfigWatcher::Delegate
   void OnConfigUpdated(const std::string& serialized_config) override;
@@ -74,40 +109,73 @@ class DaemonProcess : public ConfigWatcher::Delegate,
       const std::string& interface_name,
       mojo::ScopedInterfaceEndpointHandle handle) override;
 
-  // mojom::DesktopSessionManager implementation.
-  void CreateDesktopSession(int terminal_id,
-                            const ScreenResolution& resolution,
-                            bool virtual_terminal) override;
-  void CloseDesktopSession(int terminal_id) override;
-  void SetScreenResolution(int terminal_id,
-                           const ScreenResolution& resolution) override;
+  void CloseDesktopSession(int terminal_id);
+  void CloseDesktopSessionWithError(int terminal_id,
+                                    ErrorCode error_code,
+                                    const std::string& error_details,
+                                    const SourceLocation& error_location);
+
+  // mojom::PeerSessionManager implementation.
+  void LaunchPeerSession(
+      mojo::PendingReceiver<mojom::PeerSession> peer_session_receiver) override;
 
   // Called when a desktop integration process attaches to |terminal_id|.
-  // |session_id| is the id of the desktop session being attached.
   // |desktop_pipe| specifies the client end of the desktop pipe. Returns true
   // on success, false otherwise.
   virtual bool OnDesktopSessionAgentAttached(
       int terminal_id,
-      int session_id,
-      mojo::ScopedMessagePipeHandle desktop_pipe) = 0;
+      mojo::ScopedMessagePipeHandle desktop_pipe);
 
   // Requests the network process to crash.
   void CrashNetworkProcess(const base::Location& location);
 
+  // Called whenever the daemon process is asked to terminate gracefully. The
+  // implementation may cleanup resources such as closing desktop sessions.
+  // `callback` is called once the cleanup has complete.
+  virtual void Cleanup(base::OnceClosure callback);
+
+  // mojom::DesktopSessionManager implementation.
+  void GetDesktopSession(
+      mojo::PendingReceiver<mojom::DesktopSession> control_receiver,
+      mojo::PendingRemote<mojom::DesktopSessionEvents> events_remote,
+      mojom::DesktopSessionOptionsPtr options) override;
+
+  void CreateDesktopSession(
+      int terminal_id,
+      mojo::PendingReceiver<mojom::DesktopSession> control_receiver,
+      mojo::PendingRemote<mojom::DesktopSessionEvents> events_remote,
+      mojom::DesktopSessionOptionsPtr options);
+  void ReconnectDesktopSession(
+      int terminal_id,
+      mojo::PendingReceiver<mojom::DesktopSession> control_receiver,
+      mojo::PendingRemote<mojom::DesktopSessionEvents> events_remote,
+      mojom::DesktopSessionOptionsPtr options);
+
  protected:
   DaemonProcess(scoped_refptr<AutoThreadTaskRunner> caller_task_runner,
                 scoped_refptr<AutoThreadTaskRunner> io_task_runner,
-                base::OnceClosure stopped_callback);
+                StoppedCallback stopped_callback);
 
   // Reads the host configuration and launches the network process.
   void Initialize();
 
   // Invokes |stopped_callback_| to ask the owner to delete |this|.
-  void Stop();
+  void Stop(int exit_code);
 
   // Returns true if |terminal_id| is in the range of allocated IDs. I.e. it is
   // less or equal to the highest ID we have seen so far.
   bool WasTerminalIdAllocated(int terminal_id);
+
+  void StartChromotingHostServices();
+
+  void BindChromotingHostServices(
+      mojo::PendingReceiver<mojom::ChromotingHostServices> receiver,
+      std::unique_ptr<named_mojo_ipc_server::ConnectionInfo> connection_info);
+
+  // mojom::ChromotingHostServices implementation.
+  void BindSessionServices(
+      mojo::PendingReceiver<mojom::ChromotingSessionServices> receiver)
+      override = 0;
 
   // HostStatusObserver overrides.
   void OnClientAccessDenied(const std::string& signaling_id) override;
@@ -124,24 +192,31 @@ class DaemonProcess : public ConfigWatcher::Delegate,
   // An implementation should validate |params| as they are received via IPC.
   virtual std::unique_ptr<DesktopSession> DoCreateDesktopSession(
       int terminal_id,
-      const ScreenResolution& resolution,
-      bool virtual_terminal) = 0;
-
-  // Requests the network process to crash.
-  virtual void DoCrashNetworkProcess(const base::Location& location) = 0;
+      const mojom::DesktopSessionOptions& options) = 0;
 
   // Launches the network process and establishes an IPC channel with it.
   virtual void LaunchNetworkProcess() = 0;
 
-  // Sends |serialized_config| to the network process. The config includes
-  // details such as the host owner email and robot account refresh token which
-  // are required to start the host and get online.
-  virtual void SendHostConfigToNetworkProcess(
-      const std::string& serialized_config) = 0;
+  // Platform-specific initialization after the IPC channel is connected.
+  virtual bool OnInitAfterChannelConnected(int32_t peer_pid);
 
-  // Notifies the network process that the daemon has disconnected the desktop
-  // session from the associated desktop environment.
-  virtual void SendTerminalDisconnected(int terminal_id) = 0;
+  // Factory method implemented by platform subclasses to create their
+  // specific launcher delegate.
+  virtual std::unique_ptr<WorkerProcessLauncher::Delegate>
+  CreatePeerConnectionProcessLauncherDelegate() = 0;
+
+  // Virtual for testing.
+  virtual void SendHostConfigToNetworkProcess(
+      const std::string& serialized_config);
+
+  // Virtual for testing.
+  virtual void SendTerminalDisconnected(int terminal_id,
+                                        ErrorCode error_code,
+                                        const std::string& error_details,
+                                        const SourceLocation& error_location);
+
+  // Requests the network process to crash. Virtual for testing.
+  virtual void DoCrashNetworkProcess(const base::Location& location);
 
   scoped_refptr<AutoThreadTaskRunner> caller_task_runner() {
     return caller_task_runner_;
@@ -153,16 +228,46 @@ class DaemonProcess : public ConfigWatcher::Delegate,
 
   // Let the test code analyze the list of desktop sessions.
   friend class DaemonProcessTest;
-  const DesktopSessionList& desktop_sessions() const {
+  const DesktopSessionMap& desktop_sessions() const {
     return desktop_sessions_;
   }
 
+  mojo::ReceiverSet<mojom::ChromotingHostServices,
+                    std::unique_ptr<named_mojo_ipc_server::ConnectionInfo>>&
+  host_services_receivers() {
+    return host_services_receivers_;
+  }
+
+  bool IsNetworkProcessReady() const {
+    return remoting_host_control_.is_bound();
+  }
+
+  void SetNetworkLauncherDelegate(
+      std::unique_ptr<WorkerProcessLauncher::Delegate> delegate);
+
+  mojom::RemotingHostControl* remoting_host_control() {
+    return remoting_host_control_.get();
+  }
+
  private:
+  // Launches a peer connection process and establishes an IPC channel with it.
+  // Returns a pointer to the created handler, or nullptr if creation failed.
+  PeerConnectionProcessHandler* LaunchPeerConnectionProcess();
+
+  // Called when a peer connection process stops.
+  void OnPeerConnectionProcessStopped(
+      base::WeakPtr<PeerConnectionProcessHandler> handler);
+
+  // Tracks active peer connection process launchers.
+  base::flat_set<std::unique_ptr<PeerConnectionProcessHandler>,
+                 base::UniquePtrComparator>
+      peer_connection_launchers_;
+
+  // Binds associated interfaces to the network process launcher.
+  void BindAssociatedInterfaces();
+
   // Deletes all desktop sessions.
   void DeleteAllDesktopSessions();
-
-  // Gets the location of the config file.
-  base::FilePath GetConfigPath();
 
   // Task runner on which public methods of this class must be called.
   scoped_refptr<AutoThreadTaskRunner> caller_task_runner_;
@@ -170,29 +275,52 @@ class DaemonProcess : public ConfigWatcher::Delegate,
   // Handles IPC and background I/O tasks.
   scoped_refptr<AutoThreadTaskRunner> io_task_runner_;
 
+  // Mojo keeps the task runner passed to it alive forever, so an
+  // AutoThreadTaskRunner should not be passed to it. Otherwise, the process may
+  // never shut down cleanly.
+  mojo::core::ScopedIPCSupport ipc_support_;
+
+  std::unique_ptr<WorkerProcessLauncher> network_launcher_;
+
+  mojo::AssociatedRemote<mojom::RemotingHostControl> remoting_host_control_;
+
   std::unique_ptr<ConfigWatcher> config_watcher_;
 
   // The configuration file contents.
   std::string serialized_config_;
 
-  // The list of active desktop sessions.
-  DesktopSessionList desktop_sessions_;
+  // The list of active desktop sessions. Keys are `terminal_id`.
+  DesktopSessionMap desktop_sessions_;
 
   // The highest desktop session ID that has been seen so far.
   int next_terminal_id_;
 
   // Invoked to ask the owner to delete |this|.
-  base::OnceClosure stopped_callback_;
+  StoppedCallback stopped_callback_;
 
   // Writes host status updates to the system event log.
   std::unique_ptr<HostEventLogger> host_event_logger_;
 
   mojo::AssociatedReceiver<mojom::DesktopSessionManager>
       desktop_session_manager_{this};
+  mojo::AssociatedReceiver<mojom::PeerSessionManager> peer_session_manager_{
+      this};
   mojo::AssociatedReceiver<mojom::HostStatusObserver> host_status_observer_{
       this};
 
+#if BUILDFLAG(IS_WIN)
+  std::unique_ptr<CertificateBrokerImpl> certificate_broker_impl_;
+  std::unique_ptr<mojo::AssociatedReceiver<mojom::CertificateBroker>>
+      certificate_broker_;
+#endif
+
   scoped_refptr<HostStatusMonitor> status_monitor_;
+
+  mojo::ReceiverSet<mojom::ChromotingHostServices,
+                    std::unique_ptr<named_mojo_ipc_server::ConnectionInfo>>
+      host_services_receivers_;
+
+  std::unique_ptr<ChromotingHostServicesServer> host_services_server_;
 };
 
 }  // namespace remoting

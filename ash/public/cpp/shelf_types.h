@@ -61,6 +61,8 @@ enum ShelfAutoHideState {
 };
 
 ASH_PUBLIC_EXPORT std::ostream& operator<<(std::ostream& out,
+                                           ShelfAlignment alignment);
+ASH_PUBLIC_EXPORT std::ostream& operator<<(std::ostream& out,
                                            ShelfAutoHideState state);
 
 enum ShelfVisibilityState {
@@ -108,22 +110,22 @@ ASH_PUBLIC_EXPORT std::ostream& operator<<(std::ostream& out,
 // Source of the launch or activation request, for tracking.
 enum ShelfLaunchSource {
   // The item was launched from an unknown source.
-  LAUNCH_FROM_UNKNOWN,
+  LAUNCH_FROM_UNKNOWN = 0,
 
   // The item was launched from a generic app list view.
-  LAUNCH_FROM_APP_LIST,
+  LAUNCH_FROM_APP_LIST = 1,
 
   // The item was launched from an app list search view.
-  LAUNCH_FROM_APP_LIST_SEARCH,
+  LAUNCH_FROM_APP_LIST_SEARCH = 2,
 
   // The item was launched from an app list search Recommendation.
-  LAUNCH_FROM_APP_LIST_RECOMMENDATION,
+  LAUNCH_FROM_APP_LIST_RECOMMENDATION = 3,
 
   // The item was launched from the shelf itself.
-  LAUNCH_FROM_SHELF,
+  LAUNCH_FROM_SHELF = 4,
 
   // The item was launched internally, for example from test.
-  LAUNCH_FROM_INTERNAL,
+  LAUNCH_FROM_INTERNAL = 5,
 };
 
 // The actions that may be performed when a shelf item is selected.
@@ -162,14 +164,7 @@ enum ShelfItemType {
   // - Extension "V1" (legacy packaged and hosted) apps,
   // - Extension "V2" (platform) apps,
   // - ARC (App Runtime for Chrome - Android Play Store) apps.
-  // - Lacros.
   TYPE_APP,
-
-  // Similar to TYPE_BROWSER_SHORTCUT, but not pinned.
-  // This is for the Lacros migration.
-  // After Lacros is completely made, TYPE_BROWSER_SHORTCUT and
-  // TYPE_UNPINNED_BROWSER_SHORTCUT will be removed, eventually.
-  TYPE_UNPINNED_BROWSER_SHORTCUT,
 
   // Represents an open dialog.
   TYPE_DIALOG,
@@ -207,6 +202,16 @@ enum AppStatus {
   kBlocked,
   // The app is paused.
   kPaused,
+  // (For promise apps only) The promise app is pending installation.
+  kPending,
+  // (For promise apps only) The promise app is currently downloading/
+  // installing.
+  kInstalling,
+  // (For promise apps only) The promise app is finished downloading/
+  // installing.
+  kInstallSuccess,
+  // (For promise apps only) The promise app installing is cancelled.
+  kInstallCancelled,
 };
 
 // A unique shelf item id composed of an |app_id| and a |launch_id|.

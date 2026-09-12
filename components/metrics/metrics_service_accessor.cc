@@ -4,9 +4,14 @@
 
 #include "components/metrics/metrics_service_accessor.h"
 
+#include <string_view>
+
 #include "base/base_switches.h"
+#include "base/feature_list.h"
 #include "build/branding_buildflags.h"
+#include "components/metrics/metrics_features.h"
 #include "components/metrics/metrics_pref_names.h"
+#include "components/metrics/metrics_reporting_choice_service.h"
 #include "components/metrics/metrics_service.h"
 #include "components/metrics/metrics_switches.h"
 #include "components/prefs/pref_service.h"
@@ -18,38 +23,39 @@ namespace {
 
 bool g_force_official_enabled_test = false;
 
-bool IsMetricsReportingEnabledForOfficialBuild(PrefService* pref_service) {
-  return pref_service->GetBoolean(prefs::kMetricsReportingEnabled);
+bool IsMetricsReportingEnabledForOfficialBuild(PrefService* local_state) {
+  return MetricsReportingChoiceService::IsBasicMetricsReportingEnabled(
+      local_state);
 }
 
 }  // namespace
 
 // static
 bool MetricsServiceAccessor::IsMetricsReportingEnabled(
-    PrefService* pref_service) {
+    PrefService* local_state) {
   if (IsMetricsReportingForceEnabled()) {
     LOG(WARNING) << "Metrics Reporting is force enabled, data will be sent to "
                     "servers. Should not be used for tests.";
     return true;
   }
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-  return IsMetricsReportingEnabledForOfficialBuild(pref_service);
+  return IsMetricsReportingEnabledForOfficialBuild(local_state);
 #else
   // In non-official builds, disable metrics reporting completely.
-  return g_force_official_enabled_test
-             ? IsMetricsReportingEnabledForOfficialBuild(pref_service)
-             : false;
+  return g_force_official_enabled_test &&
+         IsMetricsReportingEnabledForOfficialBuild(local_state);
 #endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
 }
 
 // static
 bool MetricsServiceAccessor::RegisterSyntheticFieldTrial(
     MetricsService* metrics_service,
-    base::StringPiece trial_name,
-    base::StringPiece group_name,
+    std::string_view trial_name,
+    std::string_view group_name,
     variations::SyntheticTrialAnnotationMode annotation_mode) {
-  if (!metrics_service)
+  if (!metrics_service) {
     return false;
+  }
 
   variations::SyntheticTrialGroup trial_group(trial_name, group_name,
                                               annotation_mode);

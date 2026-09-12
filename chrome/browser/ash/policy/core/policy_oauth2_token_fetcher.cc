@@ -99,7 +99,7 @@ class PolicyOAuth2TokenFetcherImpl : public PolicyOAuth2TokenFetcher,
   void ForwardPolicyToken(const std::string& token,
                           const GoogleServiceAuthError& error);
 
-  // Auth code which is used to retreive a refresh token.
+  // Auth code which is used to retrieve a refresh token.
   std::string auth_code_;
 
   scoped_refptr<network::SharedURLLoaderFactory> system_url_loader_factory_;
@@ -131,7 +131,7 @@ PolicyOAuth2TokenFetcherImpl::PolicyOAuth2TokenFetcherImpl(
     const std::string& consumer_name)
     : consumer_name_(consumer_name) {}
 
-PolicyOAuth2TokenFetcherImpl::~PolicyOAuth2TokenFetcherImpl() {}
+PolicyOAuth2TokenFetcherImpl::~PolicyOAuth2TokenFetcherImpl() = default;
 
 void PolicyOAuth2TokenFetcherImpl::StartWithAuthCode(
     const std::string& auth_code,
@@ -164,7 +164,7 @@ void PolicyOAuth2TokenFetcherImpl::StartFetchingRefreshToken() {
     failed_ = true;
     ForwardPolicyToken(
         std::string(),
-        GoogleServiceAuthError(GoogleServiceAuthError::CONNECTION_FAILED));
+        GoogleServiceAuthError::FromConnectionError(net::ERR_FAILED));
     return;
   }
 
@@ -209,7 +209,7 @@ void PolicyOAuth2TokenFetcherImpl::OnGetTokenSuccess(
   VLOG(1) << "OAuth2 access token (device management) fetching succeeded.";
   oauth2_access_token_ = token_response.access_token;
   ForwardPolicyToken(token_response.access_token,
-                     GoogleServiceAuthError(GoogleServiceAuthError::NONE));
+                     GoogleServiceAuthError::AuthErrorNone());
 }
 
 void PolicyOAuth2TokenFetcherImpl::OnGetTokenFailure(
@@ -252,13 +252,13 @@ void PolicyOAuth2TokenFetcherImpl::ForwardPolicyToken(
 // requests.
 class PolicyOAuth2TokenFetcherFake : public PolicyOAuth2TokenFetcher {
  public:
-  PolicyOAuth2TokenFetcherFake() {}
+  PolicyOAuth2TokenFetcherFake() = default;
 
   PolicyOAuth2TokenFetcherFake(const PolicyOAuth2TokenFetcherFake&) = delete;
   PolicyOAuth2TokenFetcherFake& operator=(const PolicyOAuth2TokenFetcherFake&) =
       delete;
 
-  ~PolicyOAuth2TokenFetcherFake() override {}
+  ~PolicyOAuth2TokenFetcherFake() override = default;
 
  private:
   void StartWithAuthCode(
@@ -309,8 +309,8 @@ PolicyOAuth2TokenFetcher::CreateInstance(const std::string& consumer_name) {
   return std::make_unique<PolicyOAuth2TokenFetcherImpl>(consumer_name);
 }
 
-PolicyOAuth2TokenFetcher::PolicyOAuth2TokenFetcher() {}
+PolicyOAuth2TokenFetcher::PolicyOAuth2TokenFetcher() = default;
 
-PolicyOAuth2TokenFetcher::~PolicyOAuth2TokenFetcher() {}
+PolicyOAuth2TokenFetcher::~PolicyOAuth2TokenFetcher() = default;
 
 }  // namespace policy

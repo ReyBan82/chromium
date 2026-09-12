@@ -5,6 +5,7 @@
 #include "chrome/browser/ash/net/network_diagnostics/network_diagnostics.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -16,6 +17,7 @@
 #include "chrome/browser/ash/net/network_diagnostics/dns_resolution_routine.h"
 #include "chrome/browser/ash/net/network_diagnostics/dns_resolver_present_routine.h"
 #include "chrome/browser/ash/net/network_diagnostics/gateway_can_be_pinged_routine.h"
+#include "chrome/browser/ash/net/network_diagnostics/google_services_connectivity_routine.h"
 #include "chrome/browser/ash/net/network_diagnostics/has_secure_wifi_connection_routine.h"
 #include "chrome/browser/ash/net/network_diagnostics/http_firewall_routine.h"
 #include "chrome/browser/ash/net/network_diagnostics/https_firewall_routine.h"
@@ -24,9 +26,9 @@
 #include "chrome/browser/ash/net/network_diagnostics/signal_strength_routine.h"
 #include "chrome/browser/ash/net/network_diagnostics/video_conferencing_routine.h"
 #include "chromeos/ash/components/dbus/debug_daemon/debug_daemon_client.h"
+#include "chromeos/ash/components/dbus/shill/shill_manager_client.h"
 #include "chromeos/ash/components/mojo_service_manager/connection.h"
 #include "components/device_event_log/device_event_log.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/mojo/service_constants.h"
 
 namespace ash {
@@ -46,7 +48,7 @@ NetworkDiagnostics::NetworkDiagnostics(DebugDaemonClient* debug_daemon_client) {
   }
 }
 
-NetworkDiagnostics::~NetworkDiagnostics() {}
+NetworkDiagnostics::~NetworkDiagnostics() = default;
 
 void NetworkDiagnostics::BindReceiver(
     mojo::PendingReceiver<mojom::NetworkDiagnosticsRoutines> receiver) {
@@ -57,8 +59,8 @@ void NetworkDiagnostics::BindReceiver(
 void NetworkDiagnostics::GetResult(mojom::RoutineType type,
                                    GetResultCallback callback) {
   mojom::RoutineResultPtr result;
-  if (results_.count(type)) {
-    result = results_[type].Clone();
+  if (auto it = results_.find(type); it != results_.end()) {
+    result = it->second.Clone();
   }
   std::move(callback).Run(std::move(result));
 }
@@ -72,91 +74,202 @@ void NetworkDiagnostics::GetAllResults(GetAllResultsCallback callback) {
 }
 
 void NetworkDiagnostics::RunLanConnectivity(
+    std::optional<mojom::RoutineCallSource> source,
     RunLanConnectivityCallback callback) {
-  auto routine = std::make_unique<LanConnectivityRoutine>();
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<LanConnectivityRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunSignalStrength(RunSignalStrengthCallback callback) {
-  auto routine = std::make_unique<SignalStrengthRoutine>();
+void NetworkDiagnostics::RunSignalStrength(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunSignalStrengthCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<SignalStrengthRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
 void NetworkDiagnostics::RunGatewayCanBePinged(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
     RunGatewayCanBePingedCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
   auto routine =
-      std::make_unique<GatewayCanBePingedRoutine>(debug_daemon_client_);
+      std::make_unique<GatewayCanBePingedRoutine>(src, debug_daemon_client_);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunHttpFirewall(RunHttpFirewallCallback callback) {
-  auto routine = std::make_unique<HttpFirewallRoutine>();
+void NetworkDiagnostics::RunHttpFirewall(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunHttpFirewallCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<HttpFirewallRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunHttpsFirewall(RunHttpsFirewallCallback callback) {
-  auto routine = std::make_unique<HttpsFirewallRoutine>();
+void NetworkDiagnostics::RunHttpsFirewall(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunHttpsFirewallCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<HttpsFirewallRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
 void NetworkDiagnostics::RunHasSecureWiFiConnection(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
     RunHasSecureWiFiConnectionCallback callback) {
-  auto routine = std::make_unique<HasSecureWiFiConnectionRoutine>();
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<HasSecureWiFiConnectionRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
 void NetworkDiagnostics::RunDnsResolverPresent(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
     RunDnsResolverPresentCallback callback) {
-  auto routine = std::make_unique<DnsResolverPresentRoutine>();
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<DnsResolverPresentRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunDnsLatency(RunDnsLatencyCallback callback) {
-  auto routine = std::make_unique<DnsLatencyRoutine>();
+void NetworkDiagnostics::RunDnsLatency(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunDnsLatencyCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<DnsLatencyRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunDnsResolution(RunDnsResolutionCallback callback) {
-  auto routine = std::make_unique<DnsResolutionRoutine>();
+void NetworkDiagnostics::RunDnsResolution(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunDnsResolutionCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<DnsResolutionRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunCaptivePortal(RunCaptivePortalCallback callback) {
-  auto routine = std::make_unique<CaptivePortalRoutine>();
+void NetworkDiagnostics::RunCaptivePortal(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunCaptivePortalCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<CaptivePortalRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunHttpsLatency(RunHttpsLatencyCallback callback) {
-  auto routine = std::make_unique<HttpsLatencyRoutine>();
+void NetworkDiagnostics::RunHttpsLatency(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunHttpsLatencyCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<HttpsLatencyRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
 void NetworkDiagnostics::RunVideoConferencing(
-    const absl::optional<std::string>& stun_server_name,
+    const std::optional<std::string>& stun_server_name,
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
     RunVideoConferencingCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
   std::unique_ptr<NetworkDiagnosticsRoutine> routine;
   if (stun_server_name) {
-    routine =
-        std::make_unique<VideoConferencingRoutine>(stun_server_name.value());
+    routine = std::make_unique<VideoConferencingRoutine>(
+        src, stun_server_name.value());
   } else {
-    routine = std::make_unique<VideoConferencingRoutine>();
+    routine = std::make_unique<VideoConferencingRoutine>(src);
   }
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunArcHttp(RunArcHttpCallback callback) {
-  auto routine = std::make_unique<ArcHttpRoutine>();
+void NetworkDiagnostics::RunArcHttp(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunArcHttpCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<ArcHttpRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
 void NetworkDiagnostics::RunArcDnsResolution(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
     RunArcDnsResolutionCallback callback) {
-  auto routine = std::make_unique<ArcDnsResolutionRoutine>();
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<ArcDnsResolutionRoutine>(src);
   RunRoutine(std::move(routine), std::move(callback));
 }
 
-void NetworkDiagnostics::RunArcPing(RunArcPingCallback callback) {
-  auto routine = std::make_unique<ArcPingRoutine>();
+void NetworkDiagnostics::RunArcPing(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunArcPingCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<ArcPingRoutine>(src);
+  RunRoutine(std::move(routine), std::move(callback));
+}
+
+void NetworkDiagnostics::RunGoogleServicesConnectivity(
+    std::optional<chromeos::network_diagnostics::mojom::RoutineCallSource>
+        source,
+    RunGoogleServicesConnectivityCallback callback) {
+  mojom::RoutineCallSource src = mojom::RoutineCallSource::kUnknown;
+  if (source.has_value()) {
+    src = source.value();
+  }
+  auto routine = std::make_unique<GoogleServicesConnectivityRoutine>(
+      src, ShillManagerClient::Get());
   RunRoutine(std::move(routine), std::move(callback));
 }
 

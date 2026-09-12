@@ -6,6 +6,7 @@
 
 #include <limits>
 
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/pickle.h"
 #include "base/stl_util.h"
@@ -65,8 +66,8 @@ bool QuicServerInfo::ParseInner(const string& data) {
     return false;
   }
 
-  base::Pickle p(data.data(), data.size());
-  base::PickleIterator iter(p);
+  base::PickleIterator iter =
+      base::PickleIterator::WithData(base::as_byte_span(data));
 
   int version = -1;
   if (!iter.ReadInt(&version)) {
@@ -141,7 +142,7 @@ string QuicServerInfo::SerializeInner() const {
   for (const auto& cert : state_.certs)
     p.WriteString(cert);
 
-  return string(reinterpret_cast<const char*>(p.data()), p.size());
+  return string(p.AsStringView());
 }
 
 }  // namespace net

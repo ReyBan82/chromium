@@ -10,6 +10,8 @@
 
 #include <cstdint>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/notreached.h"
 #include "components/exo/data_offer.h"
 #include "components/exo/data_source.h"
@@ -48,23 +50,17 @@ class ZcrExtendedDragSourceDelegate : public ExtendedDragSource::Delegate {
     return settings_ & ZCR_EXTENDED_DRAG_V1_OPTIONS_LOCK_CURSOR;
   }
 
-  void OnSwallowed(const std::string& mime_type) override {
-    zcr_extended_drag_source_v1_send_swallow(resource_, mime_type.c_str());
-    wl_client_flush(wl_resource_get_client(resource_));
-  }
-
-  void OnUnswallowed(const std::string& mime_type,
-                     const gfx::Vector2d& offset) override {
-    zcr_extended_drag_source_v1_send_unswallow(resource_, mime_type.c_str(),
-                                               offset.x(), offset.y());
-    wl_client_flush(wl_resource_get_client(resource_));
-  }
-
   void OnDataSourceDestroying() override { delete this; }
 
+  base::WeakPtr<ExtendedDragSource::Delegate> GetWeakPtr() override {
+    return weak_factory_.GetWeakPtr();
+  }
+
  private:
-  wl_resource* const resource_;
+  const raw_ptr<wl_resource> resource_;
   const uint32_t settings_;
+
+  base::WeakPtrFactory<ZcrExtendedDragSourceDelegate> weak_factory_{this};
 };
 
 void extended_drag_source_destroy(wl_client* client, wl_resource* resource) {
@@ -105,7 +101,7 @@ class ZcrExtendedOfferDelegate : public ExtendedDragOffer::Delegate {
   void OnDataOfferDestroying() override { delete this; }
 
  private:
-  wl_resource* const resource_;
+  const raw_ptr<wl_resource> resource_;
 };
 
 void extended_drag_offer_destroy(wl_client* client, wl_resource* resource) {
@@ -116,7 +112,7 @@ void extended_drag_offer_swallow(wl_client* client,
                                  wl_resource* resource,
                                  uint32_t serial,
                                  const char* mime_type) {
-  GetUserDataAs<ExtendedDragOffer>(resource)->Swallow(serial, mime_type);
+  // [deprecatd]: No need to implement this.
 }
 
 void extended_drag_offer_unswallow(wl_client* client,
@@ -125,9 +121,7 @@ void extended_drag_offer_unswallow(wl_client* client,
                                    const char* mime_type,
                                    int32_t x_offset,
                                    int32_t y_offset) {
-  gfx::Vector2d offset{x_offset, y_offset};
-  GetUserDataAs<ExtendedDragOffer>(resource)->Unswallow(serial, mime_type,
-                                                        offset);
+  // [deprecatd]: No need to implement this.
 }
 
 const struct zcr_extended_drag_offer_v1_interface

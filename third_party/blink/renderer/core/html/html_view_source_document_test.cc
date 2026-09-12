@@ -4,11 +4,17 @@
 
 #include "third_party/blink/renderer/core/html/html_view_source_document.h"
 
+#include <optional>
+
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/platform/web_runtime_features.h"
 #include "third_party/blink/renderer/core/dom/element.h"
+#include "third_party/blink/renderer/core/editing/frame_selection.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_request.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_test.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
 
@@ -22,9 +28,13 @@ class HTMLViewSourceDocumentTest : public SimTest {
   }
 
   void SetUp() override {
+    scoped_feature_.emplace(true);
     SimTest::SetUp();
     MainFrame().EnableViewSourceMode(true);
   }
+
+ private:
+  std::optional<ScopedHTMLProcessingInstructionForTest> scoped_feature_;
 };
 
 TEST_F(HTMLViewSourceDocumentTest, ViewSource1) {
@@ -37,12 +47,13 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource1) {
       </div>
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\">      <span "
       "class=\"html-doctype\">&lt;!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML "
@@ -68,8 +79,7 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource1) {
       "class=\"line-number\" value=\"7\"></td><td class=\"line-content\">      "
       "<span class=\"html-tag\">&lt;/div&gt;</span></td></tr><tr><td "
       "class=\"line-number\" value=\"8\"></td><td class=\"line-content\">  "
-      "<span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -92,12 +102,13 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource2) {
       </textarea>
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\">      <span "
       "class=\"html-tag\">&lt;script&gt;</span></td></tr><tr><td "
@@ -130,8 +141,7 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource2) {
       "value=\"16\"></td><td class=\"line-content\">      <span "
       "class=\"html-tag\">&lt;/textarea&gt;</span></td></tr><tr><td "
       "class=\"line-number\" value=\"17\"></td><td class=\"line-content\">  "
-      "<span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -146,12 +156,13 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource3) {
       </body>
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\">      <span "
       "class=\"html-tag\">&lt;head&gt;</span><span class=\"html-tag\">&lt;base "
@@ -197,8 +208,7 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource3) {
       "class=\"line-number\" value=\"8\"></td><td class=\"line-content\">      "
       "<span class=\"html-tag\">&lt;/body&gt;</span></td></tr><tr><td "
       "class=\"line-number\" value=\"9\"></td><td class=\"line-content\">  "
-      "<span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -213,12 +223,13 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource4) {
       </BODY>
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\">      <span "
       "class=\"html-tag\">&lt;HEAD&gt;</span><span class=\"html-tag\">&lt;BASE "
@@ -264,8 +275,7 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource4) {
       "class=\"line-number\" value=\"8\"></td><td class=\"line-content\">      "
       "<span class=\"html-tag\">&lt;/BODY&gt;</span></td></tr><tr><td "
       "class=\"line-number\" value=\"9\"></td><td class=\"line-content\">  "
-      "<span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -283,12 +293,13 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource5) {
 
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\"><br></td></tr><tr><td "
       "class=\"line-number\" value=\"3\"></td><td "
@@ -299,18 +310,20 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource5) {
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"6\"></td><td class=\"line-content\">      <span "
       "class=\"html-tag\">&lt;input</span></td></tr><tr><td "
-      "class=\"line-number\" value=\"7\"></td><td "
-      "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
-      "value=\"8\"></td><td class=\"line-content\"><br></td></tr><tr><td "
-      "class=\"line-number\" value=\"9\"></td><td class=\"line-content\">      "
-      "<span class=\"html-attribute-name\">type</span>=\"<span "
-      "class=\"html-attribute-value\">text</span>\"&gt;</td></tr><tr><td "
+      "class=\"line-number\" value=\"7\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\"><br></span></td></tr><tr><td class=\"line-number\" "
+      "value=\"8\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\"><br></span></td></tr><tr><td class=\"line-number\" "
+      "value=\"9\"></td><td class=\"line-content\"><span class=\"html-tag\">   "
+      "   <span class=\"html-attribute-name\">type</span>=\"<span "
+      "class=\"html-attribute-value\">text</span>\"&gt;</span></td></"
+      "tr><tr><td "
       "class=\"line-number\" value=\"10\"></td><td class=\"line-content\">     "
       " <span class=\"html-tag\">&lt;/p&gt;</span></td></tr><tr><td "
       "class=\"line-number\" value=\"11\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
-      "value=\"12\"></td><td class=\"line-content\">  <span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "value=\"12\"></td><td class=\"line-content\">  "
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -322,28 +335,30 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource6) {
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\">"
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\">"
       "</td><td class=\"line-content\">      ");
   std::string expected_ending(
       " <span class=\"html-tag\">&lt;b&gt;</span>A<span "
-      "class=\"html-tag\">&lt;/b&gt;</span>  <span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "class=\"html-tag\">&lt;/b&gt;</span>  "
+      "</td></tr></tbody></table></div></body></"
       "html>");
-  EXPECT_EQ(GetDocument().documentElement()->outerHTML(),
+  EXPECT_EQ(GetDocument().documentElement()->GetOuterHTMLString(),
             (expected_beginning + many_spaces + expected_ending).c_str());
 }
 
 TEST_F(HTMLViewSourceDocumentTest, ViewSource7) {
   LoadMainResource("1234567");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\">"
-      "</td><td class=\"line-content\">1234567<span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></"
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\">"
+      "</td><td class=\"line-content\">1234567"
+      "</td></tr></tbody></table></div></"
       "body></html>");
 }
 
@@ -360,12 +375,13 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource8) {
       </html>
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\">      <span "
       "class=\"html-doctype\">&lt;!DOCTYPE html&gt;</span></td></tr><tr><td "
@@ -383,7 +399,8 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource8) {
       "class=\"html-tag\">&lt;img <span "
       "class=\"html-attribute-name\">srcset</span>=\"<a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
-      "href=\"img.png\" rel=\"noreferrer noopener\">img.png</a>,<a "
+      "href=\"img.png\" rel=\"noreferrer noopener\">img.png</a>"
+      "<span class=\"html-attribute-value\">,</span><a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
       "href=\"img2.png\" rel=\"noreferrer noopener\"> img2.png</a>\" "
       "/&gt;</span></td></tr><tr><td class=\"line-number\" "
@@ -394,9 +411,11 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource8) {
       "href=\"img.png\" rel=\"noreferrer noopener\">img.png</a>\" <span "
       "class=\"html-attribute-name\">srcset</span>=\"<a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
-      "href=\"img.png\" rel=\"noreferrer noopener\">img.png 1x</a>,<a "
+      "href=\"img.png\" rel=\"noreferrer noopener\">img.png 1x</a>"
+      "<span class=\"html-attribute-value\">,</span><a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
-      "href=\"img2.png\" rel=\"noreferrer noopener\"> img2.png 2x</a>,<a "
+      "href=\"img2.png\" rel=\"noreferrer noopener\"> img2.png 2x</a>"
+      "<span class=\"html-attribute-value\">,</span><a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
       "href=\"img3.png\" rel=\"noreferrer noopener\"> img3.png 3x</a>\" "
       "/&gt;</span></td></tr><tr><td class=\"line-number\" "
@@ -404,9 +423,11 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource8) {
       "class=\"html-tag\">&lt;img <span "
       "class=\"html-attribute-name\">srcset</span>=\"<a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
-      "href=\"img.png\" rel=\"noreferrer noopener\">img.png 480w</a>,<a "
+      "href=\"img.png\" rel=\"noreferrer noopener\">img.png 480w</a>"
+      "<span class=\"html-attribute-value\">,</span><a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
-      "href=\"img2.png\" rel=\"noreferrer noopener\"> img2.png 640w</a>,<a "
+      "href=\"img2.png\" rel=\"noreferrer noopener\"> img2.png 640w</a>"
+      "<span class=\"html-attribute-value\">,</span><a "
       "class=\"html-attribute-value html-resource-link\" target=\"_blank\" "
       "href=\"img3.png\" rel=\"noreferrer noopener\"> img3.png 1024w</a>\" "
       "/&gt;</span></td></tr><tr><td class=\"line-number\" "
@@ -415,8 +436,7 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource8) {
       "class=\"line-number\" value=\"10\"></td><td class=\"line-content\">     "
       " <span class=\"html-tag\">&lt;/html&gt;</span></td></tr><tr><td "
       "class=\"line-number\" value=\"11\"></td><td class=\"line-content\">  "
-      "<span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -429,12 +449,13 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource9) {
       "<!--  --!><script>";
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\">      <span "
       "class=\"html-doctype\">&lt;!DOCTYPE html&gt;</span></td></tr><tr><td "
@@ -450,8 +471,8 @@ TEST_F(HTMLViewSourceDocumentTest, ViewSource9) {
       "td></tr><tr><td class=\"line-number\" value=\"6\"></td><td "
       "class=\"line-content\">      \"&lt;!--  "
       "--!&gt;&lt;script&gt;\";</td></tr><tr><td class=\"line-number\" "
-      "value=\"7\"></td><td class=\"line-content\">  <span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "value=\"7\"></td><td class=\"line-content\">  "
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -462,12 +483,13 @@ TEST_F(HTMLViewSourceDocumentTest, IncompleteToken) {
       But it should be in view-source.
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td><td "
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
       "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
       "value=\"2\"></td><td class=\"line-content\">      Incomplete token "
       "test</td></tr><tr><td class=\"line-number\" value=\"3\"></td><td "
@@ -479,24 +501,25 @@ TEST_F(HTMLViewSourceDocumentTest, IncompleteToken) {
       "view-source.</span></td></tr><tr><td class=\"line-number\" "
       "value=\"5\"></td><td class=\"line-content\"><span "
       "class=\"html-end-of-file\">  "
-      "</span></td></tr></tbody></table></body></html>");
+      "</span></td></tr></tbody></table></div></body></html>");
 }
 
 TEST_F(HTMLViewSourceDocumentTest, UnfinishedTextarea) {
   LoadMainResource(R"HTML(<textarea>foobar in textarea
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td>"
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td>"
       "<td class=\"line-content\"><span "
       "class=\"html-tag\">&lt;textarea&gt;</span>foobar in "
       "textarea</td></tr><tr><td class=\"line-number\" value=\"2\"></td><td "
-      "class=\"line-content\">  <span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "class=\"line-content\">  "
+      "</td></tr></tbody></table></div></body></"
       "html>");
 }
 
@@ -504,18 +527,277 @@ TEST_F(HTMLViewSourceDocumentTest, UnfinishedScript) {
   LoadMainResource(R"HTML(<script>foobar in script
   )HTML");
   EXPECT_EQ(
-      GetDocument().documentElement()->outerHTML(),
+      GetDocument().documentElement()->GetOuterHTMLString(),
       "<html><head><meta name=\"color-scheme\" content=\"light "
       "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
       "autocomplete=\"off\"><label class=\"line-wrap-control\">"
       "<input type=\"checkbox\"></label>"
-      "</form><table><tbody><tr><td class=\"line-number\" value=\"1\"></td>"
+      "</form><div class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td>"
       "<td class=\"line-content\"><span "
       "class=\"html-tag\">&lt;script&gt;</span>foobar in "
       "script</td></tr><tr><td class=\"line-number\" value=\"2\"></td><td "
-      "class=\"line-content\">  <span "
-      "class=\"html-end-of-file\"></span></td></tr></tbody></table></body></"
+      "class=\"line-content\">  "
+      "</td></tr></tbody></table></div></body></"
       "html>");
+}
+
+TEST_F(HTMLViewSourceDocumentTest, Linebreak) {
+  LoadMainResource("<html>\nR\n\rN\n\nNR\n\n\rRN\n\r\n</html>");
+  EXPECT_EQ(
+      GetDocument().documentElement()->GetOuterHTMLString(),
+      "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head>"
+      "<body><div class=\"line-gutter-backdrop\"></div>"
+      "<form autocomplete=\"off\"><label class=\"line-wrap-control\">"
+      "<input type=\"checkbox\"></label></form>"
+      "<div class=\"source-container\"><table><tbody>"
+      "<tr><td class=\"line-number\" value=\"1\"></td>"
+      "<td class=\"line-content\">"
+      "<span class=\"html-tag\">&lt;html&gt;</span></td></tr>"
+      "<tr><td class=\"line-number\" value=\"2\"></td>"
+      "<td class=\"line-content\">R</td></tr>"  // \r -> 1 linebreak
+      "<tr><td class=\"line-number\" value=\"3\"></td>"
+      "<td class=\"line-content\"><br></td></tr>"
+      "<tr><td class=\"line-number\" value=\"4\"></td>"
+      "<td class=\"line-content\">N</td></tr>"  // \n -> 1 linebraek
+      "<tr><td class=\"line-number\" value=\"5\"></td>"
+      "<td class=\"line-content\"><br></td></tr><tr>"
+      "<td class=\"line-number\" value=\"6\"></td>"
+      "<td class=\"line-content\">NR</td></tr>"  // \n\r -> 2 linebreaks
+      "<tr><td class=\"line-number\" value=\"7\"></td>"
+      "<td class=\"line-content\"><br></td></tr>"
+      "<tr><td class=\"line-number\" value=\"8\"></td>"
+      "<td class=\"line-content\"><br></td></tr>"
+      "<tr><td class=\"line-number\" value=\"9\"></td>"
+      "<td class=\"line-content\">RN</td></tr>"  // \r\n -> 1 linebreak
+      "<tr><td class=\"line-number\" value=\"10\"></td>"
+      "<td class=\"line-content\"><br></td></tr>"
+      "<tr><td class=\"line-number\" value=\"11\"></td>"
+      "<td class=\"line-content\">"
+      "<span class=\"html-tag\">&lt;/html&gt;</span>"
+      "</td></tr></tbody></table></div></body></html>");
+}
+
+TEST_F(HTMLViewSourceDocumentTest, DOMParts) {
+  LoadMainResource(
+      R"HTML(<div parseparts>{{#}}foo{{/}}<span {{}}>bar</span></div>)HTML");
+  EXPECT_EQ(
+      GetDocument().documentElement()->GetOuterHTMLString(),
+      "<html><head><meta name=\"color-scheme\" content=\"light "
+      "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
+      "autocomplete=\"off\"><label class=\"line-wrap-control\"><input "
+      "type=\"checkbox\"></label></form><div "
+      "class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\">&lt;div <span "
+      "class=\"html-attribute-name\">parseparts</span>&gt;</span>{{#}}foo{{/"
+      "}}<span class=\"html-tag\">&lt;span <span "
+      "class=\"html-attribute-name\">{{}}</span>&gt;</span>bar<span "
+      "class=\"html-tag\">&lt;/span&gt;</span><span "
+      "class=\"html-tag\">&lt;/div&gt;</span>"
+      "</td></tr></tbody></table></div></body></"
+      "html>");
+}
+
+TEST_F(HTMLViewSourceDocumentTest, LinebreakInTag) {
+  LoadMainResource(R"HTML(
+    <a href="http://example.org/foo/">
+      Foo
+    </a>
+    <a href="http://example.org/bar/"
+      style="color: red;">
+      Bar
+    </a>
+    <a
+      href="http://example.org/baz/" style="color: red;">
+      Baz
+    </a>
+    <a
+      href="http://example.org/qux/" style="
+        color: red;">
+      Qux
+    </a>
+  )HTML");
+  EXPECT_EQ(
+      GetDocument().documentElement()->GetOuterHTMLString(),
+      "<html><head><meta name=\"color-scheme\" content=\"light "
+      "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
+      "autocomplete=\"off\"><label class=\"line-wrap-control\"><input "
+      "type=\"checkbox\"></label></form><div "
+      "class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
+      "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
+      "value=\"2\"></td><td class=\"line-content\">    <span "
+      "class=\"html-tag\">&lt;a <span "
+      "class=\"html-attribute-name\">href</span>=\"<a "
+      "class=\"html-attribute-value html-external-link\" target=\"_blank\" "
+      "href=\"http://example.org/foo/\" rel=\"noreferrer "
+      "noopener\">http://example.org/foo/</a>\"&gt;</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"3\"></td><td class=\"line-content\">      "
+      "Foo</td></tr><tr><td class=\"line-number\" value=\"4\"></td><td "
+      "class=\"line-content\">    <span "
+      "class=\"html-tag\">&lt;/a&gt;</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"5\"></td><td class=\"line-content\">    "
+      "<span class=\"html-tag\">&lt;a <span "
+      "class=\"html-attribute-name\">href</span>=\"<a "
+      "class=\"html-attribute-value html-external-link\" target=\"_blank\" "
+      "href=\"http://example.org/bar/\" rel=\"noreferrer "
+      "noopener\">http://example.org/bar/</a>\"</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"6\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\">      <span "
+      "class=\"html-attribute-name\">style</span>=\"<span "
+      "class=\"html-attribute-value\">color: "
+      "red;</span>\"&gt;</span></td></tr><tr><td class=\"line-number\" "
+      "value=\"7\"></td><td class=\"line-content\">      Bar</td></tr><tr><td "
+      "class=\"line-number\" value=\"8\"></td><td class=\"line-content\">    "
+      "<span class=\"html-tag\">&lt;/a&gt;</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"9\"></td><td class=\"line-content\">    "
+      "<span class=\"html-tag\">&lt;a</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"10\"></td><td "
+      "class=\"line-content\"><span class=\"html-tag\">      <span "
+      "class=\"html-attribute-name\">href</span>=\"<a "
+      "class=\"html-attribute-value html-external-link\" target=\"_blank\" "
+      "href=\"http://example.org/baz/\" rel=\"noreferrer "
+      "noopener\">http://example.org/baz/</a>\" <span "
+      "class=\"html-attribute-name\">style</span>=\"<span "
+      "class=\"html-attribute-value\">color: "
+      "red;</span>\"&gt;</span></td></tr><tr><td class=\"line-number\" "
+      "value=\"11\"></td><td class=\"line-content\">      Baz</td></tr><tr><td "
+      "class=\"line-number\" value=\"12\"></td><td class=\"line-content\">    "
+      "<span class=\"html-tag\">&lt;/a&gt;</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"13\"></td><td class=\"line-content\">    "
+      "<span class=\"html-tag\">&lt;a</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"14\"></td><td "
+      "class=\"line-content\"><span class=\"html-tag\">      <span "
+      "class=\"html-attribute-name\">href</span>=\"<a "
+      "class=\"html-attribute-value html-external-link\" target=\"_blank\" "
+      "href=\"http://example.org/qux/\" rel=\"noreferrer "
+      "noopener\">http://example.org/qux/</a>\" <span "
+      "class=\"html-attribute-name\">style</span>=\""
+      "</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"15\"></td><td "
+      "class=\"line-content\"><span class=\"html-tag\"><span "
+      "class=\"html-attribute-value\">        color: "
+      "red;</span>\"&gt;</span></td></tr><tr><td class=\"line-number\" "
+      "value=\"16\"></td><td class=\"line-content\">      Qux</td></tr><tr><td "
+      "class=\"line-number\" value=\"17\"></td><td class=\"line-content\">    "
+      "<span class=\"html-tag\">&lt;/a&gt;</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"18\"></td><td class=\"line-content\">  "
+      "</td></tr></tbody></table></div></body></"
+      "html>");
+}
+
+TEST_F(HTMLViewSourceDocumentTest, AttributeNameAtLineStart) {
+  LoadMainResource("<input\n\r\ntype=\"text\">\n<input\ntype=\"text\" />");
+  EXPECT_EQ(
+      GetDocument().documentElement()->GetOuterHTMLString(),
+      "<html><head><meta name=\"color-scheme\" content=\"light "
+      "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
+      "autocomplete=\"off\"><label class=\"line-wrap-control\"><input "
+      "type=\"checkbox\"></label></form><div "
+      "class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\">&lt;input</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"2\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\"><br></span></td></tr><tr><td class=\"line-number\" "
+      "value=\"3\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\"><span "
+      "class=\"html-attribute-name\">type</span>=\"<span "
+      "class=\"html-attribute-value\">text</span>\"&gt;</span></td></"
+      "tr><tr><td class=\"line-number\" value=\"4\"></td><td "
+      "class=\"line-content\"><span "
+      "class=\"html-tag\">&lt;input</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"5\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\"><span "
+      "class=\"html-attribute-name\">type</span>=\"<span "
+      "class=\"html-attribute-value\">text</span>\" /&gt;</span>"
+      "</td></tr></tbody></table></div></body></"
+      "html>");
+}
+
+TEST_F(HTMLViewSourceDocumentTest, MultiLineComment) {
+  LoadMainResource("<!--\n\r\nfoo\nbar\n-->");
+  EXPECT_EQ(
+      GetDocument().documentElement()->GetOuterHTMLString(),
+      "<html><head><meta name=\"color-scheme\" content=\"light "
+      "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
+      "autocomplete=\"off\"><label class=\"line-wrap-control\"><input "
+      "type=\"checkbox\"></label></form><div "
+      "class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td class=\"line-content\"><span "
+      "class=\"html-comment\">&lt;!--</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"2\"></td><td class=\"line-content\">"
+      "<br></td></tr><tr><td "
+      "class=\"line-number\" value=\"3\"></td><td class=\"line-content\"><span "
+      "class=\"html-comment\">foo</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"4\"></td><td class=\"line-content\"><span "
+      "class=\"html-comment\">bar</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"5\"></td><td class=\"line-content\"><span "
+      "class=\"html-comment\">--&gt;</span>"
+      "</td></tr></tbody></table></div></body></"
+      "html>");
+}
+
+TEST_F(HTMLViewSourceDocumentTest, LinebreakInLink) {
+  LoadMainResource(R"HTML(
+    <a href="
+      http://example.org/foo/
+    ">
+      Foo
+    </a>
+  )HTML");
+  EXPECT_EQ(
+      GetDocument().documentElement()->GetOuterHTMLString(),
+      "<html><head><meta name=\"color-scheme\" content=\"light "
+      "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
+      "autocomplete=\"off\"><label class=\"line-wrap-control\"><input "
+      "type=\"checkbox\"></label></form><div "
+      "class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td "
+      "class=\"line-content\"><br></td></tr><tr><td class=\"line-number\" "
+      "value=\"2\"></td><td class=\"line-content\">    <span "
+      "class=\"html-tag\">&lt;a <span "
+      "class=\"html-attribute-name\">href</span>=\"</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"3\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\"><a class=\"html-attribute-value html-external-link\" "
+      "target=\"_blank\" href=\"\n      http://example.org/foo/\n    \" "
+      "rel=\"noreferrer noopener\">      "
+      "http://example.org/foo/</a></span></td></tr><tr><td "
+      "class=\"line-number\" value=\"4\"></td><td class=\"line-content\"><span "
+      "class=\"html-tag\"><a class=\"html-attribute-value html-external-link\" "
+      "target=\"_blank\" href=\"\n      http://example.org/foo/\n    \" "
+      "rel=\"noreferrer noopener\">    </a>\"&gt;</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"5\"></td><td class=\"line-content\">      "
+      "Foo</td></tr><tr><td class=\"line-number\" value=\"6\"></td><td "
+      "class=\"line-content\">    <span "
+      "class=\"html-tag\">&lt;/a&gt;</span></td></tr><tr><td "
+      "class=\"line-number\" value=\"7\"></td><td class=\"line-content\">  "
+      "</td></tr></tbody></table></div></body></"
+      "html>");
+}
+
+TEST_F(HTMLViewSourceDocumentTest, ProcessingInstruction) {
+  LoadMainResource(R"HTML(<?foo bar?>)HTML");
+  EXPECT_EQ(
+      GetDocument().documentElement()->GetOuterHTMLString(),
+      "<html><head><meta name=\"color-scheme\" content=\"light "
+      "dark\"></head><body><div class=\"line-gutter-backdrop\"></div><form "
+      "autocomplete=\"off\"><label class=\"line-wrap-control\"><input "
+      "type=\"checkbox\"></label></form><div "
+      "class=\"source-container\"><table><tbody><tr><td "
+      "class=\"line-number\" value=\"1\"></td><td class=\"line-content\">"
+      "<span class=\"html-processing-instruction\">&lt;?foo bar?&gt;</span>"
+      "</td></tr></tbody></table></div></body></html>");
+}
+
+// Selecting the whole view-source document and copying it must reproduce the
+// source exactly, without a leading newline for the gutter backdrop and the
+// line-wrap control that precede the source table.
+TEST_F(HTMLViewSourceDocumentTest, SelectAllHasNoLeadingNewline) {
+  LoadMainResource("<html>\n<body>hello</body>\n</html>");
+  GetDocument().GetFrame()->Selection().SelectAll();
+  EXPECT_EQ(GetDocument().GetFrame()->Selection().SelectedTextForClipboard(),
+            "<html>\n<body>hello</body>\n</html>");
 }
 
 }  // namespace blink

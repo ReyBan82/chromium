@@ -41,15 +41,18 @@ const char kDocumentPip[] = "The video is currently in document pip mode.";
 }  // namespace
 
 // static
-ScriptPromise HTMLVideoElementPictureInPicture::requestPictureInPicture(
+ScriptPromise<PictureInPictureWindow>
+HTMLVideoElementPictureInPicture::requestPictureInPicture(
     ScriptState* script_state,
     HTMLVideoElement& element,
     ExceptionState& exception_state) {
   CheckIfPictureInPictureIsAllowed(element, exception_state);
   if (exception_state.HadException())
-    return ScriptPromise();
+    return EmptyPromise();
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
+  auto* resolver =
+      MakeGarbageCollected<ScriptPromiseResolver<PictureInPictureWindow>>(
+          script_state, exception_state.GetContext());
   auto promise = resolver->Promise();
 
   PictureInPictureController::From(element.GetDocument())
@@ -64,25 +67,6 @@ bool HTMLVideoElementPictureInPicture::FastHasAttribute(
     const QualifiedName& name) {
   DCHECK(name == html_names::kDisablepictureinpictureAttr);
   return element.FastHasAttribute(name);
-}
-
-// static
-void HTMLVideoElementPictureInPicture::SetBooleanAttribute(
-    HTMLVideoElement& element,
-    const QualifiedName& name,
-    bool value) {
-  DCHECK(name == html_names::kDisablepictureinpictureAttr);
-  element.SetBooleanAttribute(name, value);
-
-  Document& document = element.GetDocument();
-  TreeScope& scope = element.GetTreeScope();
-  PictureInPictureController& controller =
-      PictureInPictureController::From(document);
-
-  if (name == html_names::kDisablepictureinpictureAttr && value &&
-      controller.PictureInPictureElement(scope) == &element) {
-    controller.ExitPictureInPicture(&element, nullptr);
-  }
 }
 
 // static

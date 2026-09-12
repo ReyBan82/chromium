@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ui/status_bubble.h"
+
 #import <Cocoa/Cocoa.h>
 
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
-#include "chrome/browser/ui/status_bubble.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/test/browser_test.h"
 
@@ -23,7 +23,8 @@ class StatusBubbleMacInteractiveUITest : public InProcessBrowserTest {
 // do not work properly.
 IN_PROC_BROWSER_TEST_F(StatusBubbleMacInteractiveUITest,
                        DISABLED_TestSettingStatusDoesNotUnhideApp) {
-  StatusBubble* status_bubble = browser()->window()->GetStatusBubble();
+  StatusBubble* status_bubble =
+      BrowserWindow::FromBrowser(browser())->GetStatusBubbles().front();
 
   EXPECT_FALSE(NSApp.hidden);
   [NSApp hide:nil];

@@ -23,7 +23,7 @@ namespace ui {
 // core value and 0 or or more qualifiers.
 //
 // A Java counterpart will be generated for this enum.  This is why the enum
-// uses int32_t and not uint32_t as the underlying type (jint cannot
+// uses int32_t and not uint32_t as the underlying type (int32_t cannot
 // represent uint32_t).
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.ui.base
 enum PageTransition : int32_t {
@@ -150,15 +150,23 @@ enum PageTransition : int32_t {
   // Redirects sent from the server by HTTP headers. It might be nice to
   // break this out into 2 types in the future, permanent or temporary, if we
   // can get that information from WebKit.
-  // TODO(https://crbug.com/1291237): Remove this as it's inaccurate.
+  // TODO(crbug.com/40212666): Remove this as it's inaccurate.
   // NavigationHandle::WasServerRedirect() should be used instead.
   PAGE_TRANSITION_SERVER_REDIRECT = -2147483648,  // 0x80000000
 
   // Used to test whether a transition involves a redirect.
-  PAGE_TRANSITION_IS_REDIRECT_MASK = -1073741824,  // 0xC0000000
+  PAGE_TRANSITION_IS_REDIRECT_MASK =
+      PAGE_TRANSITION_CLIENT_REDIRECT | PAGE_TRANSITION_SERVER_REDIRECT,
 
   // General mask defining the bits used for the qualifiers.
   PAGE_TRANSITION_QUALIFIER_MASK = -256,  // 0xFFFFFF00
+
+  // Mask of qualifiers that the renderer is not allowed to add unless already
+  // set by the browser.
+  PAGE_TRANSITION_RENDERER_DISALLOWED_QUALIFIERS_MASK =
+      PAGE_TRANSITION_FORWARD_BACK | PAGE_TRANSITION_FROM_ADDRESS_BAR |
+      PAGE_TRANSITION_HOME_PAGE | PAGE_TRANSITION_FROM_API |
+      PAGE_TRANSITION_SERVER_REDIRECT,
 };
 
 // Compares two PageTransition types ignoring qualifiers. |rhs| is taken to
@@ -205,18 +213,15 @@ bool PageTransitionIsWebTriggerable(PageTransition type);
 COMPONENT_EXPORT(UI_BASE)
 const char* PageTransitionGetCoreTransitionString(PageTransition type);
 
-// Declare a dummy class that is intentionally never defined.
-class DontUseOperatorEquals;
-
 // Ban operator== and operator!= as it's way too easy to forget to strip the
 // qualifiers. Use PageTransitionCoreTypeIs() instead or, in rare cases,
 // PageTransitionTypeIncludingQualifiersIs().
-DontUseOperatorEquals operator==(PageTransition, PageTransition);
-DontUseOperatorEquals operator==(PageTransition, int32_t);
-DontUseOperatorEquals operator==(int32_t, PageTransition);
-DontUseOperatorEquals operator!=(PageTransition, PageTransition);
-DontUseOperatorEquals operator!=(PageTransition, int32_t);
-DontUseOperatorEquals operator!=(int32_t, PageTransition);
+bool operator==(PageTransition, PageTransition) = delete;
+bool operator==(PageTransition, int32_t) = delete;
+bool operator==(int32_t, PageTransition) = delete;
+bool operator!=(PageTransition, PageTransition) = delete;
+bool operator!=(PageTransition, int32_t) = delete;
+bool operator!=(int32_t, PageTransition) = delete;
 
 }  // namespace ui
 

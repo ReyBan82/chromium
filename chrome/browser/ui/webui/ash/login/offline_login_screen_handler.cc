@@ -4,8 +4,7 @@
 
 #include "chrome/browser/ui/webui/ash/login/offline_login_screen_handler.h"
 
-#include "chrome/grit/chromium_strings.h"
-#include "chrome/grit/generated_resources.h"
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "components/login/localized_values_builder.h"
 #include "components/user_manager/known_user.h"
 #include "google_apis/gaia/gaia_auth_util.h"
@@ -21,9 +20,11 @@ void OfflineLoginScreenHandler::DeclareLocalizedValues(
     ::login::LocalizedValuesBuilder* builder) {
   builder->Add("offlineLoginEmail", IDS_OFFLINE_LOGIN_EMAIL);
   builder->Add("offlineLoginPassword", IDS_OFFLINE_LOGIN_PASSWORD);
+  builder->Add("offlineLoginPin", IDS_OFFLINE_LOGIN_PIN);
   builder->Add("offlineLoginInvalidEmail", IDS_OFFLINE_LOGIN_INVALID_EMAIL);
   builder->Add("offlineLoginInvalidPassword",
                IDS_OFFLINE_LOGIN_INVALID_PASSWORD);
+  builder->Add("offlineLoginInvalidPin", IDS_OFFLINE_LOGIN_INVALID_PIN);
   builder->Add("offlineLoginNextBtn", IDS_OFFLINE_LOGIN_NEXT_BUTTON_TEXT);
   builder->Add("offlineLoginForgotPasswordBtn",
                IDS_OFFLINE_LOGIN_FORGOT_PASSWORD_BUTTON_TEXT);
@@ -35,7 +36,7 @@ void OfflineLoginScreenHandler::DeclareLocalizedValues(
   builder->Add("offlineLoginOkBtn", IDS_OFFLINE_LOGIN_OK_BUTTON_TEXT);
 }
 
-void OfflineLoginScreenHandler::Show(base::Value::Dict params) {
+void OfflineLoginScreenHandler::Show(base::DictValue params) {
   ShowInWebUI(std::move(params));
 }
 
@@ -47,8 +48,8 @@ void OfflineLoginScreenHandler::Reset() {
   CallExternalAPI("reset");
 }
 
-void OfflineLoginScreenHandler::ShowPasswordPage() {
-  CallExternalAPI("proceedToPasswordPage");
+void OfflineLoginScreenHandler::ShowPasswordPage(bool authenticate_by_pin) {
+  CallExternalAPI("proceedToPasswordPage", authenticate_by_pin);
 }
 
 void OfflineLoginScreenHandler::ShowOnlineRequiredDialog() {
@@ -57,6 +58,10 @@ void OfflineLoginScreenHandler::ShowOnlineRequiredDialog() {
 
 void OfflineLoginScreenHandler::ShowPasswordMismatchMessage() {
   CallExternalAPI("showPasswordMismatchMessage");
+}
+
+base::WeakPtr<OfflineLoginView> OfflineLoginScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace ash

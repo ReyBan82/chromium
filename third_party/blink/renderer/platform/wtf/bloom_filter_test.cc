@@ -3,11 +3,12 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/platform/wtf/bloom_filter.h"
-#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 
-namespace WTF {
+namespace blink {
 
 class BloomFilterTest : public ::testing::Test {
  protected:
@@ -31,8 +32,8 @@ class BloomFilterTest : public ::testing::Test {
     static_assert(max_key_bits + keyBits <= sizeof(unsigned) * 8);
     for (unsigned i = max_key_bits; i < max_key_bits + keyBits; i++) {
       unsigned hash = 1u << i;
-      EXPECT_FALSE(filter.MayContain(hash)) << String::Format(
-          "BloomFilter<%d>.Add(0) Must not contain 0x%08x", keyBits, hash);
+      EXPECT_FALSE(filter.MayContain(hash)) << Format(
+          "BloomFilter<{}>.Add(0) Must not contain 0x{:08x}", keyBits, hash);
     }
   }
 };
@@ -78,9 +79,9 @@ TEST_F(BloomFilterTest, NonCountingBloomFilterKeyBoundary) {
 }
 
 TEST_F(BloomFilterTest, NonCountingBloomFilterBasic) {
-  unsigned alfa = AtomicString("Alfa").Impl()->ExistingHash();
-  unsigned bravo = AtomicString("Bravo").Impl()->ExistingHash();
-  unsigned charlie = AtomicString("Charlie").Impl()->ExistingHash();
+  unsigned alfa = AtomicString("Alfa").Hash();
+  unsigned bravo = AtomicString("Bravo").Hash();
+  unsigned charlie = AtomicString("Charlie").Hash();
 
   BloomFilter<12> filter;
   EXPECT_FALSE(filter.MayContain(alfa));
@@ -108,4 +109,4 @@ TEST_F(BloomFilterTest, NonCountingBloomFilterBasic) {
   EXPECT_FALSE(filter.MayContain(charlie));
 }
 
-}  // namespace WTF
+}  // namespace blink

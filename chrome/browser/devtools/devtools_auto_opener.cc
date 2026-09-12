@@ -6,14 +6,14 @@
 
 #include "base/command_line.h"
 #include "chrome/browser/devtools/devtools_window.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 
 DevToolsAutoOpener::DevToolsAutoOpener()
     : browser_tab_strip_tracker_(this, nullptr) {
   browser_tab_strip_tracker_.Init();
 }
 
-DevToolsAutoOpener::~DevToolsAutoOpener() {
-}
+DevToolsAutoOpener::~DevToolsAutoOpener() = default;
 
 void DevToolsAutoOpener::OnTabStripModelChanged(
     TabStripModel* tab_strip_model,
@@ -22,7 +22,10 @@ void DevToolsAutoOpener::OnTabStripModelChanged(
   if (change.type() != TabStripModelChange::kInserted)
     return;
 
-  for (const auto& contents : change.GetInsert()->contents)
-    if (!DevToolsWindow::IsDevToolsWindow(contents.contents))
-      DevToolsWindow::OpenDevToolsWindow(contents.contents);
+  for (const auto& contents : change.GetInsert()->contents) {
+    if (!DevToolsWindow::IsDevToolsWindow(contents.contents)) {
+      DevToolsWindow::OpenDevToolsWindow(
+          contents.contents, DevToolsOpenedByAction::kAutomaticForNewTarget);
+    }
+  }
 }

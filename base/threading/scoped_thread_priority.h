@@ -6,28 +6,26 @@
 #define BASE_THREADING_SCOPED_THREAD_PRIORITY_H_
 
 #include <atomic>
+#include <optional>
 
 #include "base/base_export.h"
 #include "base/compiler_specific.h"
 #include "base/location.h"
+#include "base/macros/uniquify.h"
 #include "base/memory/raw_ptr.h"
+#include "base/task/task_observer.h"
+#include "base/threading/platform_thread.h"
+#include "base/threading/thread_checker.h"
 #include "build/build_config.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+#if BUILDFLAG(IS_WIN)
+#include "base/win/scoped_handle.h"
+#endif
 
 namespace base {
 
 class Location;
 enum class ThreadType : int;
-
-// INTERNAL_SCOPED_THREAD_PRIORITY_APPEND_LINE(name) produces an identifier by
-// appending the current line number to |name|. This is used to avoid name
-// collisions from variables defined inside a macro.
-#define INTERNAL_SCOPED_THREAD_PRIORITY_CONCAT(a, b) a##b
-// CONCAT1 provides extra level of indirection so that __LINE__ macro expands.
-#define INTERNAL_SCOPED_THREAD_PRIORITY_CONCAT1(a, b) \
-  INTERNAL_SCOPED_THREAD_PRIORITY_CONCAT(a, b)
-#define INTERNAL_SCOPED_THREAD_PRIORITY_APPEND_LINE(name) \
-  INTERNAL_SCOPED_THREAD_PRIORITY_CONCAT1(name, __LINE__)
 
 // All code that may load a DLL on a background thread must be surrounded by a
 // scope that starts with this macro.
@@ -40,49 +38,110 @@ enum class ThreadType : int;
 //   }
 //   Bar();
 //
-// The macro raises the thread priority to NORMAL for the scope if no other
-// thread has completed the current scope already (multiple threads can racily
-// begin the initialization and will all be boosted for it). On Windows, loading
-// a DLL on a background thread can lead to a priority inversion on the loader
-// lock and cause huge janks.
-#define SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY()               \
-  static std::atomic_bool INTERNAL_SCOPED_THREAD_PRIORITY_APPEND_LINE( \
-      already_loaded){false};                                          \
-  base::internal::ScopedMayLoadLibraryAtBackgroundPriority             \
-      INTERNAL_SCOPED_THREAD_PRIORITY_APPEND_LINE(                     \
-          scoped_may_load_library_at_background_priority)(             \
-          FROM_HERE,                                                   \
-          &INTERNAL_SCOPED_THREAD_PRIORITY_APPEND_LINE(already_loaded));
+// The macro raises the thread priority to match ThreadType::kDefault for the
+// scope if no other thread has completed the current scope already (multiple
+// threads can racily begin the initialization and will all be boosted for it).
+// On Windows, loading a DLL on a background thread can lead to a priority
+// inversion on the loader lock and cause huge janks.
+#define SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY()                  \
+  static std::atomic_bool BASE_UNIQUIFY(already_loaded){false};           \
+  base::internal::ScopedMayLoadLibraryAtBackgroundPriority BASE_UNIQUIFY( \
+      scoped_may_load_library_at_background_priority)(                    \
+      FROM_HERE, &BASE_UNIQUIFY(already_loaded));
 
 // Like SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY, but raises the thread
 // priority every time the scope is entered. Use this around code that may
 // conditionally load a DLL each time it is executed, or which repeatedly loads
 // and unloads DLLs.
-#define SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY_REPEATEDLY() \
-  base::internal::ScopedMayLoadLibraryAtBackgroundPriority          \
-      INTERNAL_SCOPED_THREAD_PRIORITY_APPEND_LINE(                  \
-          scoped_may_load_library_at_background_priority)(FROM_HERE, nullptr);
+#define SCOPED_MAY_LOAD_LIBRARY_AT_BACKGROUND_PRIORITY_REPEATEDLY()       \
+  base::internal::ScopedMayLoadLibraryAtBackgroundPriority BASE_UNIQUIFY( \
+      scoped_may_load_library_at_background_priority)(FROM_HERE, nullptr);
+
+namespace internal {
+
+class BASE_EXPORT ScopedBoostPriorityBase {
+ public:
+  ScopedBoostPriorityBase(const ScopedBoostPriorityBase&) = delete;
+  ScopedBoostPriorityBase& operator=(const ScopedBoostPriorityBase&) = delete;
+
+  bool IsActive() { return target_thread_type_.has_value(); }
+
+  // Adopts this boost into a PlatformThread::RaiseThreadTypeLease requesting
+  // `target_thread_type`. This must happen on the thread where this boost was
+  // instantiated, and requires that this boost be the only active one on its
+  // thread. This then allows other leases to be applied against this thread.
+  PlatformThread::RaiseThreadTypeLease AdoptAsLease(
+      ThreadType target_thread_type) &&;
+
+  static bool CurrentThreadHasScope();
+
+ protected:
+  ScopedBoostPriorityBase(PlatformThreadHandle thread_handle);
+  ~ScopedBoostPriorityBase();
+
+  bool ShouldBoostTo(ThreadType target_thread_type) const;
+
+  void Reset();
+
+  const ThreadType initial_thread_type_;
+  PlatformThreadHandle thread_handle_;
+  std::optional<ThreadType> target_thread_type_;
+  internal::PlatformPriorityOverride priority_override_handle_ = {};
+  raw_ptr<ScopedBoostPriorityBase> previous_boost_scope_;
+
+ private:
+  THREAD_CHECKER(thread_checker_);
+};
+
+}  // namespace internal
 
 // Boosts the current thread's priority to match the priority of threads of
-// |target_thread_type| in this scope.
-class BASE_EXPORT ScopedBoostPriority {
+// `target_thread_type` in this scope. `target_thread_type` must be lower
+// priority than kRealtimeAudio, since realtime priority should only be used by
+// dedicated media threads.
+class BASE_EXPORT ScopedBoostPriority
+    : public internal::ScopedBoostPriorityBase {
  public:
   explicit ScopedBoostPriority(ThreadType target_thread_type);
   ~ScopedBoostPriority();
+};
 
-  ScopedBoostPriority(const ScopedBoostPriority&) = delete;
-  ScopedBoostPriority& operator=(const ScopedBoostPriority&) = delete;
+// Allows another thread to temporarily boost the current thread's priority to
+// match the priority of threads of `target_thread_type`. The priority is reset
+// when the object is destroyed, which must happens on the current thread.
+// `target_thread_type` must be lower priority than kRealtimeAudio, since
+// realtime priority should only be used by dedicated media threads.
+class BASE_EXPORT ScopedBoostablePriority
+    : public internal::ScopedBoostPriorityBase {
+ public:
+  ScopedBoostablePriority();
+  ~ScopedBoostablePriority();
+
+  // Boosts the priority of the thread where this ScopedBoostablePriority was
+  // created. Can be called from any thread, but requires proper external
+  // synchronization with the constructor, destructor and any other call to
+  // BoostPriority/Reset()/AdoptAsLease(). If called multiple times, only the
+  // first call takes effect.
+  bool BoostPriority(ThreadType target_thread_type);
+
+  // Resets the priority of the thread where this ScopedBoostablePriority was
+  // created to its original priority. Can be called from any thread, but
+  // requires proper external synchronization with the constructor, destructor
+  // and any other call to BoostPriority/Reset()/AdoptAsLease().
+  void Reset();
 
  private:
-  absl::optional<ThreadType> original_thread_type_;
+#if BUILDFLAG(IS_WIN)
+  win::ScopedHandle scoped_handle_;
+#endif
 };
 
 namespace internal {
 
 class BASE_EXPORT ScopedMayLoadLibraryAtBackgroundPriority {
  public:
-  // Boosts thread priority to NORMAL within its scope if |already_loaded| is
-  // nullptr or set to false.
+  // Boosts thread priority to match ThreadType::kDefault within its scope if
+  // `already_loaded` is nullptr or set to false.
   explicit ScopedMayLoadLibraryAtBackgroundPriority(
       const Location& from_here,
       std::atomic_bool* already_loaded);
@@ -97,7 +156,7 @@ class BASE_EXPORT ScopedMayLoadLibraryAtBackgroundPriority {
  private:
 #if BUILDFLAG(IS_WIN)
   // The original priority when invoking entering the scope().
-  absl::optional<ThreadType> original_thread_type_;
+  std::optional<ScopedBoostPriority> boost_priority_;
   const raw_ptr<std::atomic_bool> already_loaded_;
 #endif
 };

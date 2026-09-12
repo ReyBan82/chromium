@@ -7,12 +7,14 @@
 
 #include <stdint.h>
 
+#include <algorithm>
+#include <optional>
+
 #include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/types/strong_alias.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 #include "mojo/public/cpp/system/simple_watcher.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
@@ -40,9 +42,13 @@ class MODULES_EXPORT IncomingStream final
     kClosed,
   };
 
-  IncomingStream(ScriptState*,
-                 base::OnceCallback<void(absl::optional<uint8_t>)> on_abort,
-                 mojo::ScopedDataPipeConsumerHandle);
+  // |on_abort| is called when the stream is aborted. The first parameter is
+  // the stop_sending code (if any), and the second indicates whether
+  // OnIncomingStreamClosed() was called before the stream was aborted.
+  IncomingStream(
+      ScriptState*,
+      base::OnceCallback<void(std::optional<uint8_t>, bool)> on_abort,
+      mojo::ScopedDataPipeConsumerHandle);
   ~IncomingStream();
 
   // Init() or InitWithExistingReadableStream() must be called before the stream
@@ -56,7 +62,7 @@ class MODULES_EXPORT IncomingStream final
   ReadableStream* Readable() const {
     DVLOG(1) << "IncomingStream::readable() called";
 
-    return readable_;
+    return readable_.Get();
   }
 
   // Called from WebTransport via a WebTransportStream class. May execute
@@ -73,6 +79,14 @@ class MODULES_EXPORT IncomingStream final
   void ContextDestroyed();
 
   State GetState() const { return state_; }
+
+  uint64_t BytesReceived() const {
+    return std::max(bytes_received_, network_bytes_received_);
+  }
+
+  void UpdateNetworkBytesReceived(uint64_t bytes_received) {
+    network_bytes_received_ = std::max(network_bytes_received_, bytes_received);
+  }
 
   void Trace(Visitor*) const;
 
@@ -96,9 +110,8 @@ class MODULES_EXPORT IncomingStream final
   // Responds current BYOB request or copies a sequence of bytes into an
   // ArrayBuffer and enqueues it if there is no BYOB request. Returns the size
   // of bytes responded or copied.
-  uint32_t RespondBYOBRequestOrEnqueueBytes(const void* source,
-                                            uint32_t byte_length,
-                                            ExceptionState&);
+  size_t RespondBYOBRequestOrEnqueueBytes(base::span<const uint8_t> source,
+                                          ExceptionState&);
 
   // Closes |readable_|, and resets |data_pipe_|.
   void CloseAbortAndReset(ExceptionState&);
@@ -108,7 +121,7 @@ class MODULES_EXPORT IncomingStream final
   void ErrorStreamAbortAndReset(ScriptValue exception);
 
   // Resets the |data_pipe_|.
-  void AbortAndReset(absl::optional<uint8_t> code);
+  void AbortAndReset(std::optional<uint8_t> code);
 
   // Resets |data_pipe_| and clears the watchers.
   // If the pipe is open it will be closed as a side-effect.
@@ -119,7 +132,7 @@ class MODULES_EXPORT IncomingStream final
 
   const Member<ScriptState> script_state_;
 
-  base::OnceCallback<void(absl::optional<uint8_t>)> on_abort_;
+  base::OnceCallback<void(std::optional<uint8_t>, bool)> on_abort_;
 
   mojo::ScopedDataPipeConsumerHandle data_pipe_;
 
@@ -132,7 +145,7 @@ class MODULES_EXPORT IncomingStream final
   State state_ = State::kOpen;
 
   // This is set when OnIncomingStreamClosed() is called.
-  absl::optional<bool> fin_received_;
+  std::optional<bool> fin_received_;
 
   // True when |data_pipe_| has been detected to be closed. The close is not
   // processed until |fin_received_| is also set.
@@ -145,6 +158,10 @@ class MODULES_EXPORT IncomingStream final
   // Indicates if we need to perform another read after the current one
   // completes.
   bool read_pending_ = false;
+
+  // Number of bytes received through |data_pipe_|.
+  uint64_t bytes_received_ = 0;
+  uint64_t network_bytes_received_ = 0;
 };
 
 }  // namespace blink

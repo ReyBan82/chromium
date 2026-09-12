@@ -21,12 +21,12 @@
 #include "chrome/browser/printing/print_job.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/device_event_log/device_event_log.h"
+#include "components/enterprise/buildflags/buildflags.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
-#include "printing/buildflags/buildflags.h"
 #include "printing/mojom/print.mojom.h"
 #include "printing/print_job_constants.h"
 #include "printing/printed_document.h"
@@ -37,10 +37,6 @@
 #if BUILDFLAG(IS_WIN)
 #include "base/threading/thread_restrictions.h"
 #include "printing/printed_page_win.h"
-#endif
-
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(ENABLE_OOP_PRINTING)
-#include "printing/printing_features.h"
 #endif
 
 using content::BrowserThread;
@@ -61,14 +57,21 @@ void FailedNotificationCallback(PrintJob* print_job) {
 
 }  // namespace
 
+bool PrintJobWorkerThread::IsRunning() const {
+  return Thread::IsRunning() && !is_cleaned_up_.IsSet();
+}
+
+void PrintJobWorkerThread::CleanUp() {
+  is_cleaned_up_.Set();
+}
+
 PrintJobWorker::PrintJobWorker(
     std::unique_ptr<PrintingContext::Delegate> printing_context_delegate,
     std::unique_ptr<PrintingContext> printing_context,
     PrintJob* print_job)
     : printing_context_delegate_(std::move(printing_context_delegate)),
       printing_context_(std::move(printing_context)),
-      print_job_(print_job),
-      thread_("Printing_Worker") {
+      print_job_(print_job) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 }
 
@@ -77,32 +80,20 @@ PrintJobWorker::~PrintJobWorker() {
   Stop();
 }
 
-#if BUILDFLAG(ENABLE_OOP_BASIC_PRINT_DIALOG)
-void PrintJobWorker::SetPrintDocumentClient(
-    PrintBackendServiceManager::ClientId client_id) {
-  // This call should only be made for configurations that use
-  // `PrintJobWorkerOop`.
-  NOTREACHED();
-}
-#endif
-
 bool PrintJobWorker::StartPrintingSanityCheck(
     const PrintedDocument* new_document) const {
   DCHECK(task_runner_->RunsTasksInCurrentSequence());
 
   if (page_number_ != PageNumber::npos()) {
     NOTREACHED();
-    return false;
   }
 
   if (!document_) {
     NOTREACHED();
-    return false;
   }
 
   if (document_.get() != new_document) {
     NOTREACHED();
-    return false;
   }
 
   return true;
@@ -155,7 +146,6 @@ void PrintJobWorker::OnDocumentChanged(PrintedDocument* new_document) {
 
   if (page_number_ != PageNumber::npos()) {
     NOTREACHED();
-    return;
   }
 
   document_ = new_document;
@@ -172,30 +162,24 @@ void PrintJobWorker::PostWaitForPage() {
 void PrintJobWorker::OnNewPage() {
   DCHECK(task_runner_->RunsTasksInCurrentSequence());
 
-  if (!document_)
+  if (!document_) {
     return;
+  }
 
-  bool do_spool_document = true;
 #if BUILDFLAG(IS_WIN)
-  const bool source_is_pdf =
-      !print_job_->document()->settings().is_modifiable();
-  if (!features::ShouldPrintUsingXps(source_is_pdf)) {
-    // Using the Windows GDI print API.
-    if (!OnNewPageHelperGdi())
-      return;
-
-    do_spool_document = false;
+  // Using the Windows GDI print API.
+  if (!OnNewPageHelperGdi()) {
+    return;
+  }
+#else
+  if (!document_->HasDocument()) {
+    PostWaitForPage();
+    return;
+  }
+  if (!SpoolDocument()) {
+    return;
   }
 #endif  // BUILDFLAG(IS_WIN)
-
-  if (do_spool_document) {
-    if (!document_->GetMetafile()) {
-      PostWaitForPage();
-      return;
-    }
-    if (!SpoolDocument())
-      return;
-  }
 
   OnDocumentDone();
   // Don't touch `this` anymore since the instance could be destroyed.
@@ -237,6 +221,13 @@ void PrintJobWorker::Cancel() {
   // Cannot touch any member variable since we don't know in which thread
   // context we run.
 }
+
+#if BUILDFLAG(ENTERPRISE_CONTENT_ANALYSIS)
+void PrintJobWorker::CleanupAfterContentAnalysisDenial() {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  DVLOG(1) << "Canceling job due to content analysis";
+}
+#endif
 
 bool PrintJobWorker::IsRunning() const {
   return thread_.IsRunning();
@@ -281,6 +272,7 @@ void PrintJobWorker::OnDocumentDone() {
 }
 
 void PrintJobWorker::FinishDocumentDone(int job_id) {
+  DCHECK(task_runner_->RunsTasksInCurrentSequence());
   DCHECK(document_);
   print_job_->PostTask(
       FROM_HERE, base::BindOnce(&DocDoneNotificationCallback,

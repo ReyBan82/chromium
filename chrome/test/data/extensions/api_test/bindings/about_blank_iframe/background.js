@@ -3,16 +3,16 @@
 // found in the LICENSE file.
 
 function test() {
-  chrome.test.assertTrue(chrome.runtime != null);
+  chrome.test.assertNe(null, chrome.runtime);
 
-  var iframe = document.createElement('iframe');
+  const iframe = document.createElement('iframe');
   document.body.appendChild(iframe);
   iframe.contentWindow.chrome = chrome;
 
   // The context-wide bindings recalculation happens when extensions are
   // enabled and disabled.
   chrome.test.sendMessage('load', chrome.test.callbackPass(function(msg) {
-    chrome.test.assertTrue(chrome.runtime != null);
+    chrome.test.assertNe(null, chrome.runtime);
   }));
 }
 

@@ -4,13 +4,17 @@
 
 #include "content/browser/webid/test/webid_test_content_browser_client.h"
 
-namespace content {
+#include "content/browser/webid/test/mock_modal_dialog_view_delegate.h"
+#include "content/public/browser/digital_identity_provider.h"
+
+namespace content::webid {
 
 WebIdTestContentBrowserClient::WebIdTestContentBrowserClient() = default;
 WebIdTestContentBrowserClient::~WebIdTestContentBrowserClient() = default;
 
 std::unique_ptr<IdentityRequestDialogController>
-WebIdTestContentBrowserClient::CreateIdentityRequestDialogController() {
+WebIdTestContentBrowserClient::CreateIdentityRequestDialogController(
+    WebContents* rp_web_contents) {
   DCHECK(test_dialog_controller_);
   return std::move(test_dialog_controller_);
 }
@@ -20,4 +24,22 @@ void WebIdTestContentBrowserClient::SetIdentityRequestDialogController(
   test_dialog_controller_ = std::move(controller);
 }
 
-}  // namespace content
+std::unique_ptr<DigitalIdentityProvider>
+WebIdTestContentBrowserClient::CreateDigitalIdentityProvider() {
+  DCHECK(test_digital_identity_provider_);
+  return std::move(test_digital_identity_provider_);
+}
+
+void WebIdTestContentBrowserClient::SetDigitalIdentityProvider(
+    std::unique_ptr<DigitalIdentityProvider> provider) {
+  test_digital_identity_provider_ = std::move(provider);
+}
+
+void WebIdTestContentBrowserClient::SetIdentityRegistry(
+    WebContents* web_contents,
+    base::WeakPtr<IdentityRegistryDelegate> delegate,
+    const GURL& config_url) {
+  IdentityRegistry::CreateForWebContents(web_contents, delegate, config_url);
+}
+
+}  // namespace content::webid

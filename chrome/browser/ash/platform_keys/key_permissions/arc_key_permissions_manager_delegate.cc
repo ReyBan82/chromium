@@ -133,7 +133,7 @@ void UserPrivateTokenArcKpmDelegate::CheckArcKeyAvailibility() {
 
   std::vector<std::string> corporate_key_usage_allowed_app_ids =
       chromeos::platform_keys::ExtensionKeyPermissionsService::
-          GetCorporateKeyUsageAllowedAppIds(policy_service_);
+          GetCorporateKeyUsageAllowedAndroidAppIds(policy_service_);
 
   for (const auto& package_name : corporate_key_usage_allowed_app_ids) {
     auto* arc_app_list_prefs = ArcAppListPrefs::Get(profile_);
@@ -226,7 +226,7 @@ void SystemTokenArcKpmDelegate::SetPrimaryUserArcKpmDelegate(
 
   primary_user_arc_usage_manager_ = primary_user_arc_usage_manager;
   primary_user_arc_usage_manager_delegate_observation_.Observe(
-      primary_user_arc_usage_manager_);
+      primary_user_arc_usage_manager_.get());
   OnArcUsageAllowanceForCorporateKeysChanged(
       primary_user_arc_usage_manager_->AreCorporateKeysAllowedForArcUsage());
 }
@@ -237,7 +237,7 @@ void SystemTokenArcKpmDelegate::ClearPrimaryUserArcKpmDelegate() {
   }
 
   DCHECK(primary_user_arc_usage_manager_delegate_observation_.IsObservingSource(
-      primary_user_arc_usage_manager_));
+      primary_user_arc_usage_manager_.get()));
   primary_user_arc_usage_manager_delegate_observation_.Reset();
   primary_user_arc_usage_manager_ = nullptr;
   OnArcUsageAllowanceForCorporateKeysChanged(false);

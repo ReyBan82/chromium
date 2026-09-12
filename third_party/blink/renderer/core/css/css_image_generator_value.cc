@@ -33,6 +33,7 @@
 namespace blink {
 
 using cssvalue::CSSConicGradientValue;
+using cssvalue::CSSConstantGradientValue;
 using cssvalue::CSSLinearGradientValue;
 using cssvalue::CSSRadialGradientValue;
 
@@ -41,7 +42,7 @@ Image* GeneratedImageCache::GetImage(const gfx::SizeF& size) const {
     return nullptr;
   }
 
-  DCHECK(sizes_.find(size) != sizes_.end());
+  DCHECK(sizes_.Contains(size));
   GeneratedImageMap::const_iterator image_iter = images_.find(size);
   if (image_iter == images_.end()) {
     return nullptr;
@@ -62,10 +63,10 @@ void GeneratedImageCache::AddSize(const gfx::SizeF& size) {
 
 void GeneratedImageCache::RemoveSize(const gfx::SizeF& size) {
   DCHECK(!size.IsEmpty());
-  SECURITY_DCHECK(sizes_.find(size) != sizes_.end());
+  SECURITY_DCHECK(sizes_.Contains(size));
   bool fully_erased = sizes_.erase(size);
   if (fully_erased) {
-    DCHECK(images_.find(size) != images_.end());
+    DCHECK(images_.Contains(size));
     images_.erase(images_.find(size));
   }
 }
@@ -77,11 +78,6 @@ CSSImageGeneratorValue::~CSSImageGeneratorValue() = default;
 
 void CSSImageGeneratorValue::AddClient(const ImageResourceObserver* client) {
   DCHECK(client);
-  if (clients_.empty()) {
-    DCHECK(!keep_alive_);
-    keep_alive_ = this;
-  }
-
   SizeAndCount& size_count =
       clients_.insert(client, SizeAndCount()).stored_value->value;
   size_count.count++;
@@ -90,7 +86,7 @@ void CSSImageGeneratorValue::AddClient(const ImageResourceObserver* client) {
 void CSSImageGeneratorValue::RemoveClient(const ImageResourceObserver* client) {
   DCHECK(client);
   ClientSizeCountMap::iterator it = clients_.find(client);
-  SECURITY_DCHECK(it != clients_.end());
+  SECURITY_CHECK(it != clients_.end());
 
   SizeAndCount& size_count = it->value;
   if (!size_count.size.IsEmpty()) {
@@ -100,11 +96,6 @@ void CSSImageGeneratorValue::RemoveClient(const ImageResourceObserver* client) {
 
   if (!--size_count.count) {
     clients_.erase(client);
-  }
-
-  if (clients_.empty()) {
-    DCHECK(keep_alive_);
-    keep_alive_.Clear();
   }
 }
 
@@ -117,7 +108,6 @@ Image* CSSImageGeneratorValue::GetImage(const ImageResourceObserver* client,
                                         const gfx::SizeF& size) const {
   ClientSizeCountMap::iterator it = clients_.find(client);
   if (it != clients_.end()) {
-    DCHECK(keep_alive_);
     SizeAndCount& size_count = it->value;
     if (size_count.size != size) {
       if (!size_count.size.IsEmpty()) {
@@ -141,27 +131,30 @@ void CSSImageGeneratorValue::PutImage(const gfx::SizeF& size,
 
 scoped_refptr<Image> CSSImageGeneratorValue::GetImage(
     const ImageResourceObserver& client,
-    const Document& document,
+    const Node& node,
     const ComputedStyle& style,
     const ContainerSizes& container_sizes,
     const gfx::SizeF& target_size) {
   switch (GetClassType()) {
     case kLinearGradientClass:
       return To<CSSLinearGradientValue>(this)->GetImage(
-          client, document, style, container_sizes, target_size);
+          client, node, style, container_sizes, target_size);
     case kPaintClass:
-      return To<CSSPaintValue>(this)->GetImage(client, document, style,
+      return To<CSSPaintValue>(this)->GetImage(client, node, style,
                                                target_size);
     case kRadialGradientClass:
       return To<CSSRadialGradientValue>(this)->GetImage(
-          client, document, style, container_sizes, target_size);
+          client, node, style, container_sizes, target_size);
     case kConicGradientClass:
       return To<CSSConicGradientValue>(this)->GetImage(
-          client, document, style, container_sizes, target_size);
+          client, node, style, container_sizes, target_size);
+    case kConstantGradientClass:
+    case kColorImageClass:
+      return To<CSSConstantGradientValue>(this)->GetImage(
+          client, node, style, container_sizes, target_size);
     default:
       NOTREACHED();
   }
-  return nullptr;
 }
 
 bool CSSImageGeneratorValue::IsUsingCustomProperty(
@@ -182,6 +175,9 @@ bool CSSImageGeneratorValue::IsUsingCurrentColor() const {
       return To<CSSRadialGradientValue>(this)->IsUsingCurrentColor();
     case kConicGradientClass:
       return To<CSSConicGradientValue>(this)->IsUsingCurrentColor();
+    case kConstantGradientClass:
+    case kColorImageClass:
+      return To<CSSConstantGradientValue>(this)->IsUsingCurrentColor();
     default:
       return false;
   }
@@ -200,6 +196,24 @@ bool CSSImageGeneratorValue::IsUsingContainerRelativeUnits() const {
   }
 }
 
+bool CSSImageGeneratorValue::IsCorsSameOrigin() const {
+  switch (GetClassType()) {
+    case kLinearGradientClass:
+      return To<CSSLinearGradientValue>(this)->IsCorsSameOrigin();
+    case kPaintClass:
+      return To<CSSPaintValue>(this)->IsCorsSameOrigin();
+    case kRadialGradientClass:
+      return To<CSSRadialGradientValue>(this)->IsCorsSameOrigin();
+    case kConicGradientClass:
+      return To<CSSConicGradientValue>(this)->IsCorsSameOrigin();
+    case kConstantGradientClass:
+    case kColorImageClass:
+      return To<CSSConstantGradientValue>(this)->IsCorsSameOrigin();
+    default:
+      NOTREACHED();
+  }
+}
+
 bool CSSImageGeneratorValue::KnownToBeOpaque(const Document& document,
                                              const ComputedStyle& style) const {
   switch (GetClassType()) {
@@ -211,10 +225,13 @@ bool CSSImageGeneratorValue::KnownToBeOpaque(const Document& document,
       return To<CSSRadialGradientValue>(this)->KnownToBeOpaque(document, style);
     case kConicGradientClass:
       return To<CSSConicGradientValue>(this)->KnownToBeOpaque(document, style);
+    case kConstantGradientClass:
+    case kColorImageClass:
+      return To<CSSConstantGradientValue>(this)->KnownToBeOpaque(document,
+                                                                 style);
     default:
       NOTREACHED();
   }
-  return false;
 }
 
 }  // namespace blink

@@ -11,14 +11,16 @@
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/notifications/notification_display_service_tester.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/test/base/chrome_test_path_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/common/child_process_id.h"
 #include "content/public/common/result_codes.h"
 #include "content/public/common/url_constants.h"
 #include "content/public/test/browser_test.h"
@@ -32,7 +34,9 @@
 #include "extensions/browser/process_map.h"
 #include "extensions/browser/test_extension_registry_observer.h"
 #include "extensions/common/constants.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/test/extension_background_page_waiter.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_delegate.h"
 
@@ -50,16 +54,15 @@ class ExtensionCrashRecoveryTest : public extensions::ExtensionBrowserTest {
   }
 
   extensions::ExtensionService* GetExtensionService() {
-    return extensions::ExtensionSystem::Get(browser()->profile())->
-        extension_service();
+    return extensions::ExtensionSystem::Get(profile())->extension_service();
   }
 
   extensions::ProcessManager* GetProcessManager() {
-    return extensions::ProcessManager::Get(browser()->profile());
+    return extensions::ProcessManager::Get(profile());
   }
 
   ExtensionRegistry* GetExtensionRegistry() {
-    return ExtensionRegistry::Get(browser()->profile());
+    return ExtensionRegistry::Get(profile());
   }
 
   size_t GetEnabledExtensionCount() {
@@ -70,9 +73,9 @@ class ExtensionCrashRecoveryTest : public extensions::ExtensionBrowserTest {
     return GetExtensionRegistry()->terminated_extensions().size();
   }
 
-  void CrashExtension(const std::string& extension_id) {
-    const Extension* extension = GetExtensionRegistry()->GetExtensionById(
-        extension_id, ExtensionRegistry::ENABLED);
+  void CrashExtension(const extensions::ExtensionId& extension_id) {
+    const Extension* extension =
+        GetExtensionRegistry()->enabled_extensions().GetByID(extension_id);
     ASSERT_TRUE(extension);
     extensions::ExtensionHost* extension_host = GetProcessManager()->
         GetBackgroundHostForExtension(extension_id);
@@ -89,9 +92,9 @@ class ExtensionCrashRecoveryTest : public extensions::ExtensionBrowserTest {
     base::RunLoop().RunUntilIdle();
   }
 
-  void CheckExtensionConsistency(const std::string& extension_id) {
-    const Extension* extension = GetExtensionRegistry()->GetExtensionById(
-        extension_id, ExtensionRegistry::ENABLED);
+  void CheckExtensionConsistency(const extensions::ExtensionId& extension_id) {
+    const Extension* extension =
+        GetExtensionRegistry()->enabled_extensions().GetByID(extension_id);
     ASSERT_TRUE(extension);
     extensions::ExtensionHost* extension_host = GetProcessManager()->
         GetBackgroundHostForExtension(extension_id);
@@ -104,7 +107,7 @@ class ExtensionCrashRecoveryTest : public extensions::ExtensionBrowserTest {
     ASSERT_FALSE(GetProcessManager()->GetAllFrames().empty());
     ASSERT_TRUE(extension_host->IsRendererLive());
     extensions::ProcessMap* process_map =
-        extensions::ProcessMap::Get(browser()->profile());
+        extensions::ProcessMap::Get(profile());
     ASSERT_TRUE(process_map->Contains(
         extension_id, extension_host->render_process_host()->GetID()));
   }
@@ -126,11 +129,11 @@ class ExtensionCrashRecoveryTest : public extensions::ExtensionBrowserTest {
     CheckExtensionConsistency(second_extension_id_);
   }
 
-  void AcceptNotification(const std::string& extension_id) {
+  void AcceptNotification(const extensions::ExtensionId& extension_id) {
     extensions::TestExtensionRegistryObserver observer(GetExtensionRegistry());
     display_service_->SimulateClick(NotificationHandler::Type::TRANSIENT,
                                     "app.background.crashed." + extension_id,
-                                    absl::nullopt, absl::nullopt);
+                                    std::nullopt, std::nullopt);
     scoped_refptr<const Extension> extension =
         observer.WaitForExtensionLoaded();
     extensions::ExtensionBackgroundPageWaiter(profile(), *extension.get())
@@ -143,13 +146,14 @@ class ExtensionCrashRecoveryTest : public extensions::ExtensionBrowserTest {
         .size();
   }
 
-  std::string first_extension_id_;
-  std::string second_extension_id_;
+  extensions::ExtensionId first_extension_id_;
+  extensions::ExtensionId second_extension_id_;
   std::unique_ptr<NotificationDisplayServiceTester> display_service_;
   content::ScopedAllowRendererCrashes scoped_allow_renderer_crashes_;
 };
 
-IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest, Basic) {
+// TODO(crbug.com/40931462): timeout on wayland, chromeos and mac.
+IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest, DISABLED_Basic) {
   const size_t count_before = GetEnabledExtensionCount();
   const size_t crash_count_before = GetTerminatedExtensionCount();
   LoadTestExtension();
@@ -190,8 +194,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest, ReloadIndependently) {
   SCOPED_TRACE("after reloading");
   CheckExtensionConsistency(first_extension_id_);
 
-  WebContents* current_tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+  WebContents* current_tab = GetActiveWebContents();
   ASSERT_TRUE(current_tab);
 
   // The balloon should automatically hide after the extension is successfully
@@ -199,22 +202,21 @@ IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest, ReloadIndependently) {
   ASSERT_EQ(0U, CountNotifications());
 }
 
+// TODO(crbug.com/40931462): Flaky on wayland and mac.
 IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
-                       ReloadIndependentlyChangeTabs) {
+                       DISABLED_ReloadIndependentlyChangeTabs) {
   const size_t count_before = GetEnabledExtensionCount();
   LoadTestExtension();
   CrashExtension(first_extension_id_);
   ASSERT_EQ(count_before, GetEnabledExtensionCount());
 
-  WebContents* original_tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+  WebContents* original_tab = GetActiveWebContents();
   ASSERT_TRUE(original_tab);
   ASSERT_EQ(1U, CountNotifications());
 
   // Open a new tab, but the balloon will still be there.
-  chrome::NewTab(browser());
-  WebContents* new_current_tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+  chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
+  WebContents* new_current_tab = GetActiveWebContents();
   ASSERT_TRUE(new_current_tab);
   ASSERT_NE(new_current_tab, original_tab);
   ASSERT_EQ(1U, CountNotifications());
@@ -229,21 +231,21 @@ IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
   ASSERT_EQ(0U, CountNotifications());
 }
 
+// TODO(crbug.com/40931462): timeout on wayland and mac.
 IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
-                       ReloadIndependentlyNavigatePage) {
+                       DISABLED_ReloadIndependentlyNavigatePage) {
   const size_t count_before = GetEnabledExtensionCount();
   LoadTestExtension();
   CrashExtension(first_extension_id_);
   ASSERT_EQ(count_before, GetEnabledExtensionCount());
 
-  WebContents* current_tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+  WebContents* current_tab = GetActiveWebContents();
   ASSERT_TRUE(current_tab);
   ASSERT_EQ(1U, CountNotifications());
 
   // Navigate to another page.
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), ui_test_utils::GetTestUrl(
+      browser(), chrome_test_utils::GetTestUrl(
                      base::FilePath(base::FilePath::kCurrentDirectory),
                      base::FilePath(FILE_PATH_LITERAL("title1.html")))));
   ASSERT_EQ(1U, CountNotifications());
@@ -355,7 +357,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
   ASSERT_EQ(count_before, GetEnabledExtensionCount());
 }
 
-// Flaky, http://crbug.com/241573.
+// Flaky, http://crbug.com/41012851.
 IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
                        DISABLED_TwoExtensionsIgnoreFirst) {
   const size_t count_before = GetEnabledExtensionCount();
@@ -391,8 +393,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
 
   {
     SCOPED_TRACE("first: reload");
-    WebContents* current_tab =
-        browser()->tab_strip_model()->GetActiveWebContents();
+    WebContents* current_tab = GetActiveWebContents();
     ASSERT_TRUE(current_tab);
     // At the beginning we should have one balloon displayed for each extension.
     ASSERT_EQ(2U, CountNotifications());
@@ -447,17 +448,17 @@ IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest, CrashAndUnloadAll) {
 // Regression test for issue 71629 and 763808.
 IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
                        ReloadTabsWithBackgroundPage) {
-  // TODO(https://crbug.com/831078): Fix the test.
+  // TODO(crbug.com/40570941): Fix the test.
   if (content::AreAllSitesIsolatedForTesting())
     return;
 
-  TabStripModel* tab_strip = browser()->tab_strip_model();
+  TabStripModel* tab_strip = browser()->GetTabStripModel();
   const size_t count_before = GetEnabledExtensionCount();
   const size_t crash_count_before = GetTerminatedExtensionCount();
   LoadTestExtension();
 
   // Open a tab extension.
-  chrome::NewTab(browser());
+  chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), GURL(std::string(extensions::kExtensionScheme) +
                       url::kStandardSchemeSeparator + first_extension_id_ +
@@ -473,8 +474,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionCrashRecoveryTest,
 
   extensions::TestExtensionRegistryObserver observer(GetExtensionRegistry());
   {
-    content::LoadStopObserver notification_observer(
-        browser()->tab_strip_model()->GetActiveWebContents());
+    content::LoadStopObserver notification_observer(GetActiveWebContents());
     chrome::Reload(browser(), WindowOpenDisposition::CURRENT_TAB);
     notification_observer.Wait();
   }

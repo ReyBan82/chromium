@@ -4,15 +4,17 @@
 
 #include "base/win/com_init_check_hook.h"
 
+#include <objbase.h>
+
 #include <windows.h>
 
-#include <objbase.h>
 #include <stdint.h>
 #include <string.h>
 
 #include <ostream>
 #include <string>
 
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
 #include "base/strings/stringprintf.h"
 #include "base/synchronization/lock.h"
@@ -106,29 +108,35 @@ class HookManager {
   void RegisterHook() {
     AutoLock auto_lock(lock_);
     ++init_count_;
-    if (disabled_)
+    if (disabled_) {
       return;
-    if (init_count_ == 1)
+    }
+    if (init_count_ == 1) {
       WriteHook();
+    }
   }
 
   void UnregisterHook() {
     AutoLock auto_lock(lock_);
     DCHECK_NE(0U, init_count_);
     --init_count_;
-    if (disabled_)
+    if (disabled_) {
       return;
-    if (init_count_ == 0)
+    }
+    if (init_count_ == 0) {
       RevertHook();
+    }
   }
 
   void DisableCOMChecksForProcess() {
     AutoLock auto_lock(lock_);
-    if (disabled_)
+    if (disabled_) {
       return;
+    }
     disabled_ = true;
-    if (init_count_ > 0)
+    if (init_count_ > 0) {
       RevertHook();
+    }
   }
 
  private:
@@ -153,13 +161,14 @@ class HookManager {
     DCHECK(!ole32_library_);
     ole32_library_ = ::LoadLibrary(L"ole32.dll");
 
-    if (!ole32_library_)
+    if (!ole32_library_) {
       return;
+    }
 
     // See banner comment above why this subtracts 5 bytes.
     co_create_instance_padded_address_ =
         reinterpret_cast<uint32_t>(
-            GetProcAddress(ole32_library_, "CoCreateInstance")) -
+            ::GetProcAddress(ole32_library_, "CoCreateInstance")) -
         5;
 
     // See banner comment above why this adds 7 bytes.
@@ -179,9 +188,7 @@ class HookManager {
       NOTREACHED() << "Unrecognized hotpatch function format: "
                    << FirstSevenBytesToString(
                           co_create_instance_padded_address_);
-      return;
     } else if (format == HotpatchPlaceholderFormat::EXTERNALLY_PATCHED) {
-      hotpatch_placeholder_format_ = format;
       NOTREACHED() << "CoCreateInstance appears to be previously patched. <"
                    << FirstSevenBytesToString(
                           co_create_instance_padded_address_)
@@ -189,7 +196,6 @@ class HookManager {
                    << FirstSevenBytesToString(
                           reinterpret_cast<uint32_t>(&structured_hotpatch_))
                    << ">";
-      return;
     } else if (format == HotpatchPlaceholderFormat::APPHELP_SHIM) {
       // The apphelp shim placeholder does not allocate enough bytes for a
       // trampolined jump. In this case, we skip patching.
@@ -202,8 +208,9 @@ class HookManager {
         reinterpret_cast<void*>(co_create_instance_padded_address_),
         reinterpret_cast<void*>(&structured_hotpatch_),
         sizeof(structured_hotpatch_));
-    if (patch_result == NO_ERROR)
+    if (patch_result == NO_ERROR) {
       hotpatch_placeholder_format_ = format;
+    }
   }
 
   void RevertHook() {
@@ -212,16 +219,18 @@ class HookManager {
     DWORD revert_result = NO_ERROR;
     switch (hotpatch_placeholder_format_) {
       case HotpatchPlaceholderFormat::INT3:
-        if (WasHotpatchChanged())
+        if (WasHotpatchChanged()) {
           return;
+        }
         revert_result = internal::ModifyCode(
             reinterpret_cast<void*>(co_create_instance_padded_address_),
             reinterpret_cast<const void*>(&g_hotpatch_placeholder_int3),
             sizeof(g_hotpatch_placeholder_int3));
         break;
       case HotpatchPlaceholderFormat::NOP:
-        if (WasHotpatchChanged())
+        if (WasHotpatchChanged()) {
           return;
+        }
         revert_result = internal::ModifyCode(
             reinterpret_cast<void*>(co_create_instance_padded_address_),
             reinterpret_cast<const void*>(&g_hotpatch_placeholder_nop),
@@ -247,28 +256,31 @@ class HookManager {
   }
 
   HotpatchPlaceholderFormat GetHotpatchPlaceholderFormat(const void* address) {
-    if (::memcmp(reinterpret_cast<void*>(co_create_instance_padded_address_),
-                 reinterpret_cast<const void*>(&g_hotpatch_placeholder_int3),
-                 sizeof(g_hotpatch_placeholder_int3)) == 0) {
+    if (UNSAFE_TODO(::memcmp(
+            reinterpret_cast<void*>(co_create_instance_padded_address_),
+            reinterpret_cast<const void*>(&g_hotpatch_placeholder_int3),
+            sizeof(g_hotpatch_placeholder_int3))) == 0) {
       return HotpatchPlaceholderFormat::INT3;
     }
 
-    if (::memcmp(reinterpret_cast<void*>(co_create_instance_padded_address_),
-                 reinterpret_cast<const void*>(&g_hotpatch_placeholder_nop),
-                 sizeof(g_hotpatch_placeholder_nop)) == 0) {
+    if (UNSAFE_TODO(::memcmp(
+            reinterpret_cast<void*>(co_create_instance_padded_address_),
+            reinterpret_cast<const void*>(&g_hotpatch_placeholder_nop),
+            sizeof(g_hotpatch_placeholder_nop))) == 0) {
       return HotpatchPlaceholderFormat::NOP;
     }
 
-    if (::memcmp(reinterpret_cast<void*>(co_create_instance_padded_address_),
-                 reinterpret_cast<const void*>(&g_hotpatch_placeholder_apphelp),
-                 sizeof(g_hotpatch_placeholder_apphelp)) == 0) {
+    if (UNSAFE_TODO(::memcmp(
+            reinterpret_cast<void*>(co_create_instance_padded_address_),
+            reinterpret_cast<const void*>(&g_hotpatch_placeholder_apphelp),
+            sizeof(g_hotpatch_placeholder_apphelp))) == 0) {
       return HotpatchPlaceholderFormat::APPHELP_SHIM;
     }
 
     const unsigned char* instruction_bytes =
         reinterpret_cast<const unsigned char*>(
             co_create_instance_padded_address_);
-    const unsigned char entry_point_byte = instruction_bytes[5];
+    const unsigned char entry_point_byte = UNSAFE_TODO(instruction_bytes[5]);
     // Check for all of the common jmp opcodes.
     if (entry_point_byte == 0xeb || entry_point_byte == 0xe9 ||
         entry_point_byte == 0xff || entry_point_byte == 0xea) {
@@ -279,9 +291,10 @@ class HookManager {
   }
 
   bool WasHotpatchChanged() {
-    if (::memcmp(reinterpret_cast<void*>(co_create_instance_padded_address_),
-                 reinterpret_cast<const void*>(&structured_hotpatch_),
-                 sizeof(structured_hotpatch_)) == 0) {
+    if (UNSAFE_TODO(::memcmp(
+            reinterpret_cast<void*>(co_create_instance_padded_address_),
+            reinterpret_cast<const void*>(&structured_hotpatch_),
+            sizeof(structured_hotpatch_))) == 0) {
       return false;
     }
 
@@ -291,12 +304,11 @@ class HookManager {
                  << FirstSevenBytesToString(
                         reinterpret_cast<uint32_t>(&structured_hotpatch_))
                  << ">";
-    return true;
   }
 
   // Indirect call to original_co_create_instance_body_function_ triggers CFI
   // so this function must have CFI disabled.
-  static DISABLE_CFI_ICALL HRESULT __stdcall DCheckedCoCreateInstance(
+  DISABLE_CFI_ICALL static HRESULT __stdcall DCheckedCoCreateInstance(
       const CLSID& rclsid,
       IUnknown* pUnkOuter,
       DWORD dwClsContext,
@@ -324,9 +336,9 @@ class HookManager {
   static std::string FirstSevenBytesToString(uint32_t address) {
     const unsigned char* bytes =
         reinterpret_cast<const unsigned char*>(address);
-    return base::StringPrintf("%02x %02x %02x %02x %02x %02x %02x", bytes[0],
-                              bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                              bytes[6]);
+    return UNSAFE_TODO(base::StringPrintf(
+        "%02x %02x %02x %02x %02x %02x %02x", bytes[0], bytes[1], bytes[2],
+        bytes[3], bytes[4], bytes[5], bytes[6]));
   }
 
   // Synchronizes everything in this class.
@@ -338,8 +350,8 @@ class HookManager {
   HotpatchPlaceholderFormat hotpatch_placeholder_format_ =
       HotpatchPlaceholderFormat::UNKNOWN;
   StructuredHotpatch structured_hotpatch_;
-  static decltype(
-      ::CoCreateInstance)* original_co_create_instance_body_function_;
+  static decltype(::CoCreateInstance)*
+      original_co_create_instance_body_function_;
 };
 
 decltype(::CoCreateInstance)*

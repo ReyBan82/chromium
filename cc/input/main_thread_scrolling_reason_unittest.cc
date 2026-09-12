@@ -11,21 +11,25 @@ namespace cc {
 using MainThreadScrollingReasonTest = testing::Test;
 
 TEST_F(MainThreadScrollingReasonTest, AsText) {
-  EXPECT_EQ("", MainThreadScrollingReason::AsText(0));
+  EXPECT_EQ("", MainThreadScrollingReason::AsText(MainThreadRepaintReasons{}));
   EXPECT_EQ(
       "Has background-attachment:fixed, "
-      "Threaded scrolling is disabled, "
-      "Scrollbar scrolling, "
       "Not opaque for text and LCD text, "
-      "Can't paint scrolling background and LCD text, "
-      "Non fast scrollable region, "
-      "Failed hit test, "
-      "No scrolling layer, "
-      "Not scrollable, "
-      "Non-invertible transform, "
+      "Prefer non-composited scrolling, "
+      "Background needs repaint on scroll",
+      MainThreadScrollingReason::AsText(MainThreadRepaintReasons::All()));
+  EXPECT_EQ(
+      "Scrollbar scrolling, "
+      "Main thread scroll hit test region, "
+      "Failed hit test",
+      MainThreadScrollingReason::AsText(MainThreadHitTestReasons::All()));
+
+  EXPECT_EQ(
+      "Popup scrolling (no threaded input handler), "
       "Wheel event handler region, "
       "Touch event handler region",
-      MainThreadScrollingReason::AsText(0xffffffffu));
+      MainThreadScrollingReason::AsText(
+          MainThreadScrollingOtherReasons::All()));
 }
 
 }  // namespace cc

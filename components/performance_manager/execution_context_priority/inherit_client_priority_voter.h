@@ -5,8 +5,9 @@
 #ifndef COMPONENTS_PERFORMANCE_MANAGER_EXECUTION_CONTEXT_PRIORITY_INHERIT_CLIENT_PRIORITY_VOTER_H_
 #define COMPONENTS_PERFORMANCE_MANAGER_EXECUTION_CONTEXT_PRIORITY_INHERIT_CLIENT_PRIORITY_VOTER_H_
 
-#include "components/performance_manager/execution_context_priority/max_vote_aggregator.h"
 #include "components/performance_manager/public/execution_context_priority/execution_context_priority.h"
+#include "components/performance_manager/public/execution_context_priority/max_vote_aggregator.h"
+#include "components/performance_manager/public/execution_context_priority/priority_voting_system.h"
 #include "components/performance_manager/public/graph/frame_node.h"
 #include "components/performance_manager/public/graph/worker_node.h"
 
@@ -15,8 +16,9 @@ namespace execution_context_priority {
 
 // This voter ensures the priority of a client is inherited by its children
 // workers.
-class InheritClientPriorityVoter : public FrameNode::ObserverDefaultImpl,
-                                   public WorkerNode::ObserverDefaultImpl {
+class InheritClientPriorityVoter : public PriorityVoter,
+                                   public FrameNodeObserver,
+                                   public WorkerNodeObserver {
  public:
   static const char kPriorityInheritedReason[];
 
@@ -27,8 +29,9 @@ class InheritClientPriorityVoter : public FrameNode::ObserverDefaultImpl,
   InheritClientPriorityVoter& operator=(const InheritClientPriorityVoter&) =
       delete;
 
-  // Sets the voting channel where the votes will be cast.
-  void SetVotingChannel(VotingChannel voting_channel);
+  // PriorityVoter:
+  void InitializeOnGraph(Graph* graph, VotingChannel voting_channel) override;
+  void TearDownOnGraph(Graph* graph) override;
 
   // FrameNodeObserver:
   void OnFrameNodeAdded(const FrameNode* frame_node) override;
@@ -53,17 +56,15 @@ class InheritClientPriorityVoter : public FrameNode::ObserverDefaultImpl,
       const WorkerNode* worker_node,
       const PriorityAndReason& previous_value) override;
 
- private:
-  void OnExecutionContextAdded(const ExecutionContext* execution_context);
-  void OnBeforeExecutionContextRemoved(
-      const ExecutionContext* execution_context);
-  void OnPriorityAndReasonChanged(const ExecutionContext* execution_context,
-                                  const PriorityAndReason& previous_value);
+  VoterId voter_id() const { return voter_id_; }
 
+ private:
   // Aggregates the votes from multiple clients of the same child worker.
   MaxVoteAggregator max_vote_aggregator_;
 
-  // Each frame or worker gets a VotingChannel to cast votes for its children.
+  VoterId voter_id_;
+
+  // Each frame or worker gets a voting channel to cast votes for its children.
   base::flat_map<const ExecutionContext*, VotingChannel> voting_channels_;
 };
 

@@ -7,16 +7,21 @@
 #include <jni.h>
 #include <sstream>
 
-#include "android_webview/js_sandbox/js_sandbox_jni_headers/JsSandboxIsolateCallback_jni.h"
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "base/android/scoped_java_ref.h"
+#include "base/files/file_util.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/js_sandbox/js_sandbox_jni_headers/JsSandboxIsolateCallback_jni.h"
+#include "android_webview/js_sandbox/js_sandbox_jni_headers/JsSandboxIsolateFdCallback_jni.h"
 
 namespace android_webview {
 
 JsSandboxIsolateCallback::JsSandboxIsolateCallback(
-    base::android::ScopedJavaGlobalRef<jobject>&& callback)
-    : callback_(std::move(callback)) {
+    base::android::ScopedJavaGlobalRef<jobject>&& callback,
+    bool use_fd)
+    : callback_(std::move(callback)), use_fd(use_fd) {
   CHECK(callback_) << "JsSandboxIsolateCallback java object is null";
 }
 
@@ -24,15 +29,28 @@ JsSandboxIsolateCallback::~JsSandboxIsolateCallback() = default;
 
 void JsSandboxIsolateCallback::ReportResult(const std::string& result) {
   JNIEnv* env = base::android::AttachCurrentThread();
-  base::android::ScopedJavaLocalRef<jstring> java_string_result =
-      base::android::ConvertUTF8ToJavaString(env, result);
-  Java_JsSandboxIsolateCallback_onResult(env, UseCallback(),
-                                         java_string_result);
+  if (use_fd) {
+    base::ScopedFD read_fd, write_fd;
+    CHECK(base::CreatePipe(&read_fd, &write_fd));
+    Java_JsSandboxIsolateFdCallback_onResult(
+        env, UseCallback(), static_cast<int32_t>(read_fd.release()),
+        static_cast<int32_t>(result.length()));
+    // This might return false due to EPIPE if the client closes the fd without
+    // reading from it. That is not an error for our use case.
+    base::WriteFileDescriptor(write_fd.get(), std::move(result));
+  } else {
+    Java_JsSandboxIsolateCallback_onResult(env, UseCallback(), result);
+  }
 }
 
 void JsSandboxIsolateCallback::ReportJsEvaluationError(
     const std::string& error) {
   ReportError(ErrorType::kJsEvaluationError, error);
+}
+
+void JsSandboxIsolateCallback::ReportFileDescriptorIOFailedError(
+    const std::string& error) {
+  ReportError(ErrorType::kFileDescriptorIOFailedError, error);
 }
 
 void JsSandboxIsolateCallback::ReportMemoryLimitExceededError(
@@ -54,10 +72,20 @@ void JsSandboxIsolateCallback::ReportMemoryLimitExceededError(
 void JsSandboxIsolateCallback::ReportError(const ErrorType error_type,
                                            const std::string& error) {
   JNIEnv* env = base::android::AttachCurrentThread();
-  base::android::ScopedJavaLocalRef<jstring> java_string_error =
-      base::android::ConvertUTF8ToJavaString(env, error);
-  Java_JsSandboxIsolateCallback_onError(
-      env, UseCallback(), static_cast<jint>(error_type), java_string_error);
+  if (use_fd) {
+    base::ScopedFD read_fd, write_fd;
+    CHECK(base::CreatePipe(&read_fd, &write_fd));
+    Java_JsSandboxIsolateFdCallback_onError(
+        env, UseCallback(), static_cast<int32_t>(error_type),
+        static_cast<int32_t>(read_fd.release()),
+        static_cast<int32_t>(error.length()));
+    // This might return false due to EPIPE if the client closes the fd without
+    // reading from it. That is not an error for our use case.
+    base::WriteFileDescriptor(write_fd.get(), std::move(error));
+  } else {
+    Java_JsSandboxIsolateCallback_onError(
+        env, UseCallback(), static_cast<int32_t>(error_type), error);
+  }
 }
 
 base::android::ScopedJavaGlobalRef<jobject>
@@ -68,3 +96,6 @@ JsSandboxIsolateCallback::UseCallback() {
 }
 
 }  // namespace android_webview
+
+DEFINE_JNI(JsSandboxIsolateCallback)
+DEFINE_JNI(JsSandboxIsolateFdCallback)

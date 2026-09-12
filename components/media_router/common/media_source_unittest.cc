@@ -6,7 +6,11 @@
 
 #include <string>
 
+#include "base/test/scoped_feature_list.h"
+#include "build/build_config.h"
+#include "media/audio/audio_features.h"
 #include "media/base/audio_codecs.h"
+#include "media/base/media_switches.h"
 #include "media/base/video_codecs.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -29,6 +33,24 @@ TEST(MediaSourceTest, IsValidPresentationUrl) {
   EXPECT_TRUE(IsValidPresentationUrl(GURL("cast://foo")));
   EXPECT_TRUE(IsValidPresentationUrl(GURL("cast:foo")));
   EXPECT_TRUE(IsValidPresentationUrl(GURL("remote-playback:foo")));
+
+  EXPECT_TRUE(IsValidPresentationUrl(GURL("http://127.0.0.1")));
+  EXPECT_TRUE(IsValidPresentationUrl(GURL("http://localhost")));
+  EXPECT_FALSE(IsValidPresentationUrl(GURL("http://google.com")));
+}
+
+TEST(MediaSourceTest, IsValidStandardPresentationSource) {
+  EXPECT_FALSE(IsValidStandardPresentationSource(""));
+  EXPECT_FALSE(IsValidStandardPresentationSource("unsupported-scheme://foo"));
+
+  EXPECT_TRUE(IsValidStandardPresentationSource("https://google.com"));
+  EXPECT_TRUE(IsValidStandardPresentationSource("http://127.0.0.1"));
+  EXPECT_TRUE(IsValidStandardPresentationSource("http://localhost"));
+  EXPECT_FALSE(IsValidStandardPresentationSource("http://google.com"));
+
+  // Legacy Cast presentation URL is not a standard presentation source.
+  EXPECT_FALSE(IsValidStandardPresentationSource(
+      "https://google.com/cast#__castAppId__=DEADBEEF"));
 }
 
 TEST(MediaSourceTest, IsAutoJoinPresentationId) {
@@ -44,14 +66,14 @@ TEST(MediaSourceTest, Constructor) {
 }
 
 TEST(MediaSourceTest, ConstructorWithGURL) {
-  GURL test_url = GURL("http://google.com");
+  GURL test_url = GURL("https://google.com");
   MediaSource source1(test_url);
   EXPECT_EQ(test_url.spec(), source1.id());
   EXPECT_EQ(test_url, source1.url());
 }
 
 TEST(MediaSourceTest, ConstructorWithURLString) {
-  GURL test_url = GURL("http://google.com");
+  GURL test_url = GURL("https://google.com");
   MediaSource source1(test_url.spec());
   EXPECT_EQ(test_url.spec(), source1.id());
   EXPECT_EQ(test_url, source1.url());
@@ -148,6 +170,29 @@ TEST(MediaSourceTest, ForDesktopWithAudio) {
   EXPECT_FALSE(source.IsRemotePlaybackSource());
 }
 
+TEST(MediaSourceTest, ForUnchosenDesktop) {
+#if BUILDFLAG(IS_MAC)
+  base::test::ScopedFeatureList scoped_features;
+  scoped_features.InitAndEnableFeature(media::kMacCatapLoopbackAudioForCast);
+#elif BUILDFLAG(IS_LINUX)
+  base::test::ScopedFeatureList scoped_features;
+  scoped_features.InitAndEnableFeature(media::kPulseaudioLoopbackForCast);
+#endif
+
+  auto source = MediaSource::ForUnchosenDesktop();
+  EXPECT_TRUE(source.IsDesktopMirroringSource());
+  EXPECT_FALSE(source.IsTabMirroringSource());
+  EXPECT_FALSE(source.IsCastPresentationUrl());
+  EXPECT_FALSE(source.IsDialSource());
+  EXPECT_FALSE(source.IsRemotePlaybackSource());
+
+  if (media::IsSystemLoopbackCaptureSupported()) {
+    EXPECT_TRUE(source.IsDesktopSourceWithAudio());
+  } else {
+    EXPECT_FALSE(source.IsDesktopSourceWithAudio());
+  }
+}
+
 TEST(MediaSourceTest, ForPresentationUrl) {
   constexpr char kPresentationUrl[] =
       "https://www.example.com/presentation.html";
@@ -162,7 +207,7 @@ TEST(MediaSourceTest, ForPresentationUrl) {
 
 TEST(MediaSourceTest, ForRemotePlayback) {
   constexpr char kRemotePlaybackUrl[] =
-      "remote-playback:media-session?tab_id=1&video_codec=vp8&audio_codec=aac";
+      "remote-playback:media-session?video_codec=vp8&audio_codec=aac&tab_id=1";
   auto source = MediaSource::ForRemotePlayback(1, media::VideoCodec::kVP8,
                                                media::AudioCodec::kAAC);
   EXPECT_EQ(kRemotePlaybackUrl, source.id());
@@ -206,10 +251,36 @@ TEST(MediaSourceTest, IsDialSource) {
                    .IsDialSource());
 }
 
+TEST(MediaSourceTest, IsDialAppName) {
+  EXPECT_TRUE(IsDialAppName("YouTube"));
+  EXPECT_TRUE(IsDialAppName("com.google.YouTube"));
+  EXPECT_TRUE(IsDialAppName("App_Name-1.2~"));
+  EXPECT_FALSE(IsDialAppName(""));
+  EXPECT_FALSE(IsDialAppName("."));
+  EXPECT_FALSE(IsDialAppName(".."));
+  EXPECT_FALSE(IsDialAppName("App Name"));
+  EXPECT_FALSE(IsDialAppName("App/Name"));
+  EXPECT_FALSE(IsDialAppName("."));
+  EXPECT_FALSE(IsDialAppName(".."));
+  EXPECT_FALSE(IsDialAppName("App\nName"));
+}
+
 TEST(MediaSourceTest, AppNameFromDialSource) {
   MediaSource media_source(
       "cast-dial:YouTube?dialPostData=postData&clientId=1234");
   EXPECT_EQ("YouTube", media_source.AppNameFromDialSource());
+
+  media_source = MediaSource("cast-dial:..");
+  EXPECT_TRUE(media_source.AppNameFromDialSource().empty());
+
+  media_source = MediaSource("cast-dial:.");
+  EXPECT_TRUE(media_source.AppNameFromDialSource().empty());
+
+  media_source = MediaSource("cast-dial:../YouTube");
+  EXPECT_TRUE(media_source.AppNameFromDialSource().empty());
+
+  media_source = MediaSource("cast-dial:App/Name");
+  EXPECT_TRUE(media_source.AppNameFromDialSource().empty());
 
   media_source = MediaSource("dial:YouTube");
   EXPECT_TRUE(media_source.AppNameFromDialSource().empty());

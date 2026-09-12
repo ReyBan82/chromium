@@ -11,7 +11,7 @@
 
 #include <memory>
 
-#include "base/mac/scoped_cftyperef.h"
+#include "base/apple/scoped_cftyperef.h"
 #include "base/memory/scoped_refptr.h"
 #include "device/gamepad/gamepad_data_fetcher.h"
 #include "device/gamepad/public/cpp/gamepad.h"
@@ -93,9 +93,12 @@ class GamepadPlatformDataFetcherMac : public GamepadDataFetcher {
 
   bool DisconnectUnrecognizedGamepad(int source_id) override;
 
+  static bool IsSupportedByGameController(uint16_t vendor_id,
+                                          uint16_t product_id);
+
   bool enabled_ = false;
   bool paused_ = false;
-  base::ScopedCFTypeRef<IOHIDManagerRef> hid_manager_ref_;
+  base::apple::ScopedCFTypeRef<IOHIDManagerRef> hid_manager_ref_;
 
   // A map of all devices using this data fetcher with the source_id as the key.
   std::unordered_map<int, std::unique_ptr<GamepadDeviceMac>> devices_;

@@ -11,7 +11,11 @@
 
 #include "base/android/jni_android.h"
 #include "base/values.h"
+#include "base/test/task_environment.h"
+#include "content/browser/android/java/gin_java_script_to_java_types_coercion.h"
 #include "content/common/android/gin_java_bridge_value.h"
+#include "mojo/public/cpp/test_support/fake_message_dispatch_context.h"
+#include "mojo/public/cpp/test_support/test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace content {
@@ -73,6 +77,8 @@ class NullDispatcherDelegate
 }  // namespace
 
 class GinJavaMethodInvocationHelperTest : public testing::Test {
+ private:
+  base::test::SingleThreadTaskEnvironment task_environment_;
 };
 
 namespace {
@@ -112,7 +118,7 @@ class CountingDispatcherDelegate
 }  // namespace
 
 TEST_F(GinJavaMethodInvocationHelperTest, RetrievalOfObjectsNoObjects) {
-  base::Value::List no_objects;
+  base::ListValue no_objects;
   for (int i = 0; i < 10; ++i) {
     no_objects.Append(i);
   }
@@ -125,28 +131,28 @@ TEST_F(GinJavaMethodInvocationHelperTest, RetrievalOfObjectsNoObjects) {
 }
 
 TEST_F(GinJavaMethodInvocationHelperTest, RetrievalOfObjectsHaveObjects) {
-  base::Value::List objects;
+  base::ListValue objects;
   objects.Append(100);
   objects.Append(base::Value::FromUniquePtrValue(
       GinJavaBridgeValue::CreateObjectIDValue(1)));
-  base::Value::List sub_list;
+  base::ListValue sub_list;
   sub_list.Append(200);
   sub_list.Append(base::Value::FromUniquePtrValue(
       GinJavaBridgeValue::CreateObjectIDValue(2)));
   objects.Append(std::move(sub_list));
-  base::Value::Dict sub_dict;
+  base::DictValue sub_dict;
   sub_dict.Set("1", 300);
   sub_dict.Set("2", base::Value::FromUniquePtrValue(
                         GinJavaBridgeValue::CreateObjectIDValue(3)));
   objects.Append(std::move(sub_dict));
-  base::Value::List sub_list_with_dict;
-  base::Value::Dict sub_sub_dict;
+  base::ListValue sub_list_with_dict;
+  base::DictValue sub_sub_dict;
   sub_sub_dict.Set("1", base::Value::FromUniquePtrValue(
                             GinJavaBridgeValue::CreateObjectIDValue(4)));
   sub_list_with_dict.Append(std::move(sub_sub_dict));
   objects.Append(std::move(sub_list_with_dict));
-  base::Value::Dict sub_dict_with_list;
-  base::Value::List sub_sub_list;
+  base::DictValue sub_dict_with_list;
+  base::ListValue sub_sub_list;
   sub_sub_list.Append(base::Value::FromUniquePtrValue(
       GinJavaBridgeValue::CreateObjectIDValue(5)));
   sub_dict_with_list.Set("1", std::move(sub_sub_list));
@@ -173,7 +179,7 @@ class ObjectIsGoneObjectDelegate : public NullObjectDelegate {
         base::android::MethodID::Get<base::android::MethodID::TYPE_INSTANCE>(
             env, clazz.obj(), "hashCode", "()I");
     EXPECT_TRUE(method_id);
-    base::android::ScopedJavaLocalRef<jobject> method_obj(
+    auto method_obj = jni_zero::AdoptRef(
         env, env->ToReflectedMethod(clazz.obj(), method_id, false));
     EXPECT_TRUE(method_obj.obj());
     method_ = std::make_unique<JavaMethod>(method_obj);
@@ -207,7 +213,7 @@ class ObjectIsGoneObjectDelegate : public NullObjectDelegate {
 }  // namespace
 
 TEST_F(GinJavaMethodInvocationHelperTest, HandleObjectIsGone) {
-  base::Value::List no_objects;
+  base::ListValue no_objects;
   auto object_delegate_unique = std::make_unique<ObjectIsGoneObjectDelegate>();
   ObjectIsGoneObjectDelegate* object_delegate = object_delegate_unique.get();
   auto helper = base::MakeRefCounted<GinJavaMethodInvocationHelper>(
@@ -216,12 +222,14 @@ TEST_F(GinJavaMethodInvocationHelperTest, HandleObjectIsGone) {
   NullDispatcherDelegate dispatcher;
   helper->Init(&dispatcher);
   EXPECT_FALSE(object_delegate->get_local_ref_called());
-  EXPECT_EQ(kGinJavaBridgeNoError, helper->GetInvocationError());
+  EXPECT_EQ(mojom::GinJavaBridgeError::kGinJavaBridgeNoError,
+            helper->GetInvocationError());
   helper->Invoke();
   EXPECT_TRUE(object_delegate->get_local_ref_called());
   EXPECT_TRUE(helper->HoldsPrimitiveResult());
   EXPECT_TRUE(helper->GetPrimitiveResult().empty());
-  EXPECT_EQ(kGinJavaBridgeObjectIsGone, helper->GetInvocationError());
+  EXPECT_EQ(mojom::GinJavaBridgeError::kGinJavaBridgeObjectIsGone,
+            helper->GetInvocationError());
 }
 
 namespace {
@@ -237,7 +245,7 @@ class MethodNotFoundObjectDelegate : public NullObjectDelegate {
   ~MethodNotFoundObjectDelegate() override = default;
 
   base::android::ScopedJavaLocalRef<jobject> GetLocalRef(JNIEnv* env) override {
-    return base::android::ScopedJavaLocalRef<jobject>(
+    return jni_zero::AdoptRef(
         env, static_cast<jobject>(env->FindClass("java/lang/String")));
   }
 
@@ -256,7 +264,7 @@ class MethodNotFoundObjectDelegate : public NullObjectDelegate {
 }  // namespace
 
 TEST_F(GinJavaMethodInvocationHelperTest, HandleMethodNotFound) {
-  base::Value::List no_objects;
+  base::ListValue no_objects;
   auto object_delegate_unique =
       std::make_unique<MethodNotFoundObjectDelegate>();
   MethodNotFoundObjectDelegate* object_delegate = object_delegate_unique.get();
@@ -265,12 +273,14 @@ TEST_F(GinJavaMethodInvocationHelperTest, HandleMethodNotFound) {
   NullDispatcherDelegate dispatcher;
   helper->Init(&dispatcher);
   EXPECT_FALSE(object_delegate->find_method_called());
-  EXPECT_EQ(kGinJavaBridgeNoError, helper->GetInvocationError());
+  EXPECT_EQ(mojom::GinJavaBridgeError::kGinJavaBridgeNoError,
+            helper->GetInvocationError());
   helper->Invoke();
   EXPECT_TRUE(object_delegate->find_method_called());
   EXPECT_TRUE(helper->HoldsPrimitiveResult());
   EXPECT_TRUE(helper->GetPrimitiveResult().empty());
-  EXPECT_EQ(kGinJavaBridgeMethodNotFound, helper->GetInvocationError());
+  EXPECT_EQ(mojom::GinJavaBridgeError::kGinJavaBridgeMethodNotFound,
+            helper->GetInvocationError());
 }
 
 namespace {
@@ -311,7 +321,7 @@ const JavaMethod* GetClassObjectDelegate::kFakeGetClass =
 }  // namespace
 
 TEST_F(GinJavaMethodInvocationHelperTest, HandleGetClassInvocation) {
-  base::Value::List no_objects;
+  base::ListValue no_objects;
   auto object_delegate_unique = std::make_unique<GetClassObjectDelegate>();
   GetClassObjectDelegate* object_delegate = object_delegate_unique.get();
   auto helper = base::MakeRefCounted<GinJavaMethodInvocationHelper>(
@@ -320,14 +330,37 @@ TEST_F(GinJavaMethodInvocationHelperTest, HandleGetClassInvocation) {
   helper->Init(&dispatcher);
   EXPECT_FALSE(object_delegate->find_method_called());
   EXPECT_FALSE(object_delegate->get_class_called());
-  EXPECT_EQ(kGinJavaBridgeNoError, helper->GetInvocationError());
+  EXPECT_EQ(mojom::GinJavaBridgeError::kGinJavaBridgeNoError,
+            helper->GetInvocationError());
   helper->Invoke();
   EXPECT_TRUE(object_delegate->find_method_called());
   EXPECT_TRUE(object_delegate->get_class_called());
   EXPECT_TRUE(helper->HoldsPrimitiveResult());
   EXPECT_TRUE(helper->GetPrimitiveResult().empty());
-  EXPECT_EQ(kGinJavaBridgeAccessToObjectGetClassIsBlocked,
-            helper->GetInvocationError());
+  EXPECT_EQ(
+      mojom::GinJavaBridgeError::kGinJavaBridgeAccessToObjectGetClassIsBlocked,
+      helper->GetInvocationError());
+}
+
+TEST_F(GinJavaMethodInvocationHelperTest, MalformedBinaryValueKillsRenderer) {
+  // Create a malformed BinaryValue (only 4 bytes, header requires 12).
+  std::vector<uint8_t> bad_data(4, 0);
+  base::Value bad_value(bad_data);
+
+  JNIEnv* env = base::android::AttachCurrentThread();
+  JavaType target_type = JavaType::CreateFromBinaryName("java.lang.Object");
+  ObjectRefs object_refs;
+  mojom::GinJavaBridgeError error =
+      mojom::GinJavaBridgeError::kGinJavaBridgeNoError;
+
+  mojo::FakeMessageDispatchContext fake_dispatch_context;
+  mojo::test::BadMessageObserver bad_message_observer;
+
+  CoerceJavaScriptValueToJavaValue(env, bad_value, target_type, true,
+                                   object_refs, &error);
+
+  EXPECT_EQ("Malformed GinJavaBridgeValue",
+            bad_message_observer.WaitForBadMessage());
 }
 
 }  // namespace content

@@ -2,12 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
 
-import {NamedDestinationMessageData, SaveRequestType} from './constants.js';
-import {PdfPluginElement} from './internal_plugin.js';
-import {PinchPhase, Viewport} from './viewport.js';
+// clang-format off
+// <if expr="enable_pdf_ink2">
+import type {AnnotationBrush, AnnotationBrushType, AnnotationMode, TextAnnotation, TextAnnotationMessageData} from './constants.js';
+// </if>
+import type {NamedDestinationMessageData, Rect} from './constants.js';
+// clang-format on
+import type {PdfPluginElement} from './internal_plugin.js';
+import type {DestinationMessageData} from './pdf_viewer_utils.js';
+import {verifyPdfHeader} from './pdf_viewer_utils.js';
+import type {LayoutOptions, Viewport} from './viewport.js';
+import {PinchPhase} from './viewport.js';
+
+type SaveRequestType = chrome.pdfViewerPrivate.SaveRequestType;
 
 export interface MessageData {
   type: string;
@@ -17,13 +27,18 @@ export interface MessageData {
 export interface SaveAttachmentMessageData {
   type: string;
   dataToSave: ArrayBuffer;
-  messageId: string;
 }
 
 interface SaveDataMessageData {
   dataToSave: ArrayBuffer;
   token: string;
   fileName: string;
+}
+
+interface SaveDataBlockMessageData {
+  dataToSave: ArrayBuffer;
+  totalFileSize: number;
+  token: string;
 }
 
 export interface PrintPreviewParams {
@@ -40,6 +55,224 @@ interface ThumbnailMessageData {
   height: number;
 }
 
+export interface SelectedTextData {
+  type: 'getSelectedTextReply';
+  selectedText: string;
+}
+
+// <if expr="enable_pdf_ink2">
+// Messages for setting and getting the annotation brush.
+export interface AnnotationBrushMessage {
+  type: 'setAnnotationBrush'|'getAnnotationBrush';
+  data: AnnotationBrush;
+}
+
+interface AllTextAnnotationsMessage {
+  type: 'getAllTextAnnotations';
+  annotations: TextAnnotation[];
+}
+
+interface EditTextAnnotationMessage {
+  type: 'editTextAnnotation';
+  data: number;
+}
+
+// finishTextAnnotation goes from the viewer to the plugin.
+interface FinishTextAnnotationMessage {
+  type: 'finishTextAnnotation';
+  data: TextAnnotationMessageData;
+}
+// </if>
+
+export interface ViewportMessage {
+  type: 'viewport';
+  userInitiated: boolean;
+  zoom: number;
+  layoutOptions?: LayoutOptions;
+  xOffset: number;
+  yOffset: number;
+  pinchPhase?: PinchPhase;
+  pinchX?: number;
+  pinchY?: number;
+  pinchVectorX?: number;
+  pinchVectorY?: number;
+}
+
+export interface StopScrollingMessage {
+  type: 'stopScrolling';
+}
+
+export interface RotateClockwiseMessage {
+  type: 'rotateClockwise';
+}
+
+export interface RotateCounterclockwiseMessage {
+  type: 'rotateCounterclockwise';
+}
+
+export interface DisplayAnnotationsMessage {
+  type: 'displayAnnotations';
+  display: boolean;
+}
+
+export interface SetTwoUpViewMessage {
+  type: 'setTwoUpView';
+  enableTwoUpView: boolean;
+}
+
+export interface PrintMessage {
+  type: 'print';
+}
+
+export interface SelectAllMessage {
+  type: 'selectAll';
+}
+
+export interface HighlightTextFragmentsMessage {
+  type: 'highlightTextFragments';
+  textFragments: string[];
+}
+
+export interface GetSelectedTextMessage {
+  type: 'getSelectedText';
+}
+
+export interface GetThumbnailMessage {
+  type: 'getThumbnail';
+  pageIndex: number;
+}
+
+export interface ResetPrintPreviewModeMessage {
+  type: 'resetPrintPreviewMode';
+  url: string;
+  grayscale: boolean;
+  pageCount: number;
+}
+
+export interface SetBackgroundColorMessage {
+  type: 'setBackgroundColor';
+  color: number;
+}
+
+export interface LoadPreviewPageMessage {
+  type: 'loadPreviewPage';
+  url: string;
+  index: number;
+}
+
+export interface GetPageBoundingBoxMessage {
+  type: 'getPageBoundingBox';
+  page: number;
+}
+
+export interface GetPasswordCompleteMessage {
+  type: 'getPasswordComplete';
+  password: string;
+}
+
+export interface GetNamedDestinationMessage {
+  type: 'getNamedDestination';
+  namedDestination: string;
+}
+
+export interface SetPresentationModeMessage {
+  type: 'setPresentationMode';
+  enablePresentationMode: boolean;
+}
+
+export interface SaveMessage {
+  type: 'save';
+  token: string;
+  saveRequestType: SaveRequestType;
+}
+
+export interface GetSaveDataBlockMessage {
+  type: 'getSaveDataBlock';
+  token: string;
+  saveRequestType: SaveRequestType;
+  offset: number;
+  blockSize: number;
+}
+
+export interface GetSuggestedFileNameMessage {
+  type: 'getSuggestedFileName';
+  saveRequestTypeForTesting: SaveRequestType;
+}
+
+export interface ReleaseSaveInBlockBuffersMessage {
+  type: 'releaseSaveInBlockBuffers';
+}
+
+export interface SaveAttachmentMessage {
+  type: 'saveAttachment';
+  attachmentIndex: number;
+}
+
+export interface FocusMessage {
+  type: 'focus';
+}
+
+// <if expr="enable_pdf_ink2">
+export interface SetAnnotationModeMessage {
+  type: 'setAnnotationMode';
+  mode: AnnotationMode;
+}
+
+export interface GetAnnotationBrushMessage {
+  type: 'getAnnotationBrush';
+  brushType?: AnnotationBrushType;
+}
+
+export interface AnnotationRedoMessage {
+  type: 'annotationRedo';
+}
+
+export interface GetAllTextAnnotationsRequestMessage {
+  type: 'getAllTextAnnotations';
+}
+
+export interface AnnotationUndoMessage {
+  type: 'annotationUndo';
+}
+// </if>
+
+export type PluginMessageWithReply =
+    GetSelectedTextMessage|GetThumbnailMessage|GetPageBoundingBoxMessage|
+    GetNamedDestinationMessage|GetSuggestedFileNameMessage|SaveAttachmentMessage
+    // <if expr="enable_pdf_ink2">
+    |GetAnnotationBrushMessage|GetAllTextAnnotationsRequestMessage
+    // </if>
+    ;
+
+export type PluginMessageWithoutReply = StopScrollingMessage|ViewportMessage|
+    RotateClockwiseMessage|RotateCounterclockwiseMessage|
+    DisplayAnnotationsMessage|SetTwoUpViewMessage|PrintMessage|SelectAllMessage|
+    HighlightTextFragmentsMessage|ResetPrintPreviewModeMessage|
+    SetBackgroundColorMessage|LoadPreviewPageMessage|GetPasswordCompleteMessage|
+    SetPresentationModeMessage|SaveMessage|GetSaveDataBlockMessage|
+    ReleaseSaveInBlockBuffersMessage|FocusMessage
+    // <if expr="enable_pdf_ink2">
+    |SetAnnotationModeMessage|AnnotationBrushMessage|EditTextAnnotationMessage|
+    FinishTextAnnotationMessage|AnnotationRedoMessage|AnnotationUndoMessage
+    // </if>
+    ;
+
+export type PluginMessage = PluginMessageWithReply|PluginMessageWithoutReply;
+
+export interface MessageResponseMap {
+  'getSelectedText': SelectedTextData;
+  'getThumbnail': ThumbnailMessageData;
+  'getPageBoundingBox': Rect;
+  'getNamedDestination': NamedDestinationMessageData;
+  'getSuggestedFileName':
+      {fileName: string, bypassSaveFileForTesting?: boolean};
+  'saveAttachment': SaveAttachmentMessageData;
+  // <if expr="enable_pdf_ink2">
+  'getAnnotationBrush': AnnotationBrushMessage;
+  'getAllTextAnnotations': AllTextAnnotationsMessage;
+  // </if>
+}
+
 /**
  * Creates a cryptographically secure pseudorandom 128-bit token.
  * @return The generated token as a hex string.
@@ -51,8 +284,6 @@ function createToken(): string {
 }
 
 export interface ContentController {
-  isActive: boolean;
-
   getEventTarget(): EventTarget;
   beforeZoom(): void;
   afterZoom(): void;
@@ -65,10 +296,10 @@ export interface ContentController {
   /** Triggers printing of the current document. */
   print(): void;
 
-  /** Undo an edit action. */
+  /** Undo an annotation mode edit action. */
   undo(): void;
 
-  /** Redo an edit action. */
+  /** Redo an annotation mode edit action. */
   redo(): void;
 
   /**
@@ -80,6 +311,7 @@ export interface ContentController {
   save(requestType: SaveRequestType): Promise<{
     fileName: string,
     dataToSave: ArrayBuffer,
+    bypassSaveFileForTesting?: boolean,
     editModeForTesting?: boolean,
   }|null>;
 
@@ -88,16 +320,15 @@ export interface ContentController {
    * @param index The index of the attachment to be saved.
    */
   saveAttachment(index: number): Promise<SaveAttachmentMessageData>;
-
-  /** Loads PDF document from `data` activates UI. */
-  load(fileName: string, data: ArrayBuffer): Promise<void>;
-
-  /** Unloads the current document and removes the UI. */
-  unload(): void;
 }
 
 /** Event types dispatched by the plugin controller. */
 export enum PluginControllerEventType {
+  // <if expr="enable_pdf_ink2">
+  FINISH_INK_STROKE = 'PluginControllerEventType.FINISH_INK_STROKE',
+  START_INK_STROKE = 'PluginControllerEventType.START_INK_STROKE',
+  UPDATE_THUMBNAIL = 'PluginControllerEventType.UPDATE_THUMBNAIL',
+  // </if>
   IS_ACTIVE_CHANGED = 'PluginControllerEventType.IS_ACTIVE_CHANGED',
   PLUGIN_MESSAGE = 'PluginControllerEventType.PLUGIN_MESSAGE',
 }
@@ -111,37 +342,38 @@ export enum PluginControllerEventType {
 export class PluginController implements ContentController {
   private eventTarget_: EventTarget = new EventTarget();
   private isActive_: boolean = false;
-  private plugin_: PdfPluginElement;
-  private delayedMessages_: Array<{message: any, transfer?: Transferable[]}>|
-      null = [];
-  private viewport_: Viewport;
-  private getIsUserInitiatedCallback_: () => boolean;
-  private getLoadedCallback_: () => Promise<void>| null;
-  private pendingTokens_:
+  private plugin_?: PdfPluginElement;
+  private delayedMessages_:
+      Array<{message: unknown, transfer?: Transferable[]}>|null = [];
+  private viewport_?: Viewport;
+  private getIsUserInitiatedCallback_: () => boolean = () => false;
+  private pendingSaveTokens_:
       Map<string,
-          PromiseResolver<{fileName: string, dataToSave: ArrayBuffer}|null>>;
-  private requestResolverMap_: Map<string, PromiseResolver<any>>;
+          PromiseResolver<{fileName: string, dataToSave: ArrayBuffer}|null>> =
+          new Map();
+  private pendingSaveDataBlockTokens_:
+      Map<string,
+          PromiseResolver<{dataToSave: ArrayBuffer, totalFileSize: number}>> =
+          new Map();
+  private requestResolverMap_: Map<string, PromiseResolver<unknown>> =
+      new Map();
   private uidCounter_: number = 1;
+  private port_: MessagePort|null = null;
 
   init(
       plugin: HTMLEmbedElement, viewport: Viewport,
-      getIsUserInitiatedCallback: () => boolean,
-      getLoadedCallback: () => Promise<void>| null) {
-    this.plugin_ = plugin as PdfPluginElement;
-    this.plugin_.addEventListener(
-        'message', e => this.handlePluginMessage_(e as MessageEvent), false);
-    this.plugin_.postMessage = (message, transfer) => {
-      this.delayedMessages_!.push({message, transfer});
-    };
-
+      getIsUserInitiatedCallback: () => boolean) {
+    if (this.port_) {
+      this.port_.onmessage = null;
+      this.port_ = null;
+    }
     this.viewport_ = viewport;
     this.getIsUserInitiatedCallback_ = getIsUserInitiatedCallback;
-    this.getLoadedCallback_ = getLoadedCallback;
-    this.pendingTokens_ = new Map();
+    this.pendingSaveTokens_ = new Map();
+    this.pendingSaveDataBlockTokens_ = new Map();
     this.requestResolverMap_ = new Map();
 
-    this.viewport_.setContent(this.plugin_);
-    this.viewport_.setRemoteContent(this.plugin_);
+    this.setPlugin_(plugin);
   }
 
   get isActive(): boolean {
@@ -160,6 +392,21 @@ export class PluginController implements ContentController {
         PluginControllerEventType.IS_ACTIVE_CHANGED, {detail: this.isActive}));
   }
 
+  private setPlugin_(plugin: HTMLEmbedElement) {
+    this.plugin_ = plugin as PdfPluginElement;
+    this.plugin_.addEventListener(
+        'message', e => this.handlePluginMessage_(e as MessageEvent), false);
+    if (this.delayedMessages_) {
+      this.plugin_.postMessage = (message, transfer) => {
+        this.delayedMessages_!.push({message, transfer});
+      };
+    }
+
+    // Called only from init() which always initializes |viewport_|.
+    this.viewport_!.setContent(this.plugin_);
+    this.viewport_!.setRemoteContent(this.plugin_);
+  }
+
   private createUid_(): number {
     return this.uidCounter_++;
   }
@@ -170,9 +417,67 @@ export class PluginController implements ContentController {
 
   viewportChanged() {}
 
-  redo() {}
+  // <if expr="enable_pdf_ink2">
+  setAnnotationMode(mode: AnnotationMode) {
+    this.postMessage_({
+      type: 'setAnnotationMode',
+      mode,
+    });
+  }
 
-  undo() {}
+  getAnnotationBrush(brushType?: AnnotationBrushType):
+      Promise<AnnotationBrushMessage> {
+    return this.postMessageWithReply_({
+      type: 'getAnnotationBrush',
+      brushType,
+    });
+  }
+
+  setAnnotationBrush(brush: AnnotationBrush) {
+    const message: AnnotationBrushMessage = {
+      type: 'setAnnotationBrush',
+      data: brush,
+    };
+
+    this.postMessage_(message);
+  }
+
+  getAllTextAnnotations(): Promise<AllTextAnnotationsMessage> {
+    return this.postMessageWithReply_({
+      type: 'getAllTextAnnotations',
+    });
+  }
+
+  editTextAnnotation(id: number) {
+    const message: EditTextAnnotationMessage = {
+      type: 'editTextAnnotation',
+      data: id,
+    };
+
+    this.postMessage_(message);
+  }
+
+  finishTextAnnotation(annotation: TextAnnotationMessageData) {
+    const message: FinishTextAnnotationMessage = {
+      type: 'finishTextAnnotation',
+      data: annotation,
+    };
+
+    this.postMessage_(message);
+  }
+  // </if>
+
+  redo() {
+    // <if expr="enable_pdf_ink2">
+    this.postMessage_({type: 'annotationRedo'});
+    // </if>
+  }
+
+  undo() {
+    // <if expr="enable_pdf_ink2">
+    this.postMessage_({type: 'annotationUndo'});
+    // </if>
+  }
 
   /**
    * Notify the plugin to stop reacting to scroll events while zoom is taking
@@ -180,7 +485,7 @@ export class PluginController implements ContentController {
    */
   beforeZoom() {
     this.postMessage_({type: 'stopScrolling'});
-
+    assert(this.viewport_);
     if (this.viewport_.pinchPhase === PinchPhase.START) {
       const position = this.viewport_.position;
       const zoom = this.viewport_.getZoom();
@@ -203,6 +508,7 @@ export class PluginController implements ContentController {
    * events.
    */
   afterZoom() {
+    assert(this.viewport_);
     const position = this.viewport_.position;
     const zoom = this.viewport_.getZoom();
     const layoutOptions = this.viewport_.getLayoutOptions();
@@ -229,7 +535,8 @@ export class PluginController implements ContentController {
    * Post a message to the plugin. Some messages will cause an async reply to be
    * received through handlePluginMessage_().
    */
-  private postMessage_<M extends MessageData>(message: M) {
+  private postMessage_(message: PluginMessage) {
+    assert(this.plugin_);
     this.plugin_.postMessage(message);
   }
 
@@ -238,11 +545,14 @@ export class PluginController implements ContentController {
    * from the plugin.
    * @return A promise holding the response from the plugin.
    */
-  private postMessageWithReply_<T, M extends MessageData>(message: M):
-      Promise<T> {
-    const promiseResolver = new PromiseResolver<T>();
-    message.messageId = `${message.type}_${this.createUid_()}`;
-    this.requestResolverMap_.set(message.messageId, promiseResolver);
+  private postMessageWithReply_<K extends keyof MessageResponseMap>(
+      message: Extract<PluginMessageWithReply, {type: K}>):
+      Promise<MessageResponseMap[K]> {
+    const promiseResolver = new PromiseResolver<MessageResponseMap[K]>();
+    const messageId = `${(message as MessageData).type}_${this.createUid_()}`;
+    (message as MessageData).messageId = messageId;
+    this.requestResolverMap_.set(
+        messageId, promiseResolver as PromiseResolver<unknown>);
     this.postMessage_(message);
     return promiseResolver.promise;
   }
@@ -277,7 +587,14 @@ export class PluginController implements ContentController {
     this.postMessage_({type: 'selectAll'});
   }
 
-  getSelectedText(): Promise<{selectedText: string}> {
+  highlightTextFragments(textFragments: string[]) {
+    this.postMessage_({
+      type: 'highlightTextFragments',
+      textFragments,
+    });
+  }
+
+  getSelectedText(): Promise<SelectedTextData> {
     return this.postMessageWithReply_({type: 'getSelectedText'});
   }
 
@@ -285,11 +602,10 @@ export class PluginController implements ContentController {
    * Post a thumbnail request message to the plugin.
    * @return A promise holding the thumbnail response from the plugin.
    */
-  requestThumbnail(page: number): Promise<ThumbnailMessageData> {
+  requestThumbnail(pageIndex: number): Promise<ThumbnailMessageData> {
     return this.postMessageWithReply_({
       type: 'getThumbnail',
-      // The plugin references pages using zero-based indices.
-      page: page - 1,
+      pageIndex: pageIndex,
     });
   }
 
@@ -322,6 +638,13 @@ export class PluginController implements ContentController {
     this.postMessage_({type: 'loadPreviewPage', url: url, index: index});
   }
 
+  getPageBoundingBox(page: number): Promise<Rect> {
+    return this.postMessageWithReply_({
+      type: 'getPageBoundingBox',
+      page,
+    });
+  }
+
   getPasswordComplete(password: string) {
     this.postMessage_({type: 'getPasswordComplete', password: password});
   }
@@ -338,6 +661,10 @@ export class PluginController implements ContentController {
     });
   }
 
+  focus() {
+    this.postMessage_({type: 'focus'});
+  }
+
   setPresentationMode(enablePresentationMode: boolean) {
     this.postMessage_({
       type: 'setPresentationMode',
@@ -349,13 +676,61 @@ export class PluginController implements ContentController {
     const resolver =
         new PromiseResolver<{fileName: string, dataToSave: ArrayBuffer}|null>();
     const newToken = createToken();
-    this.pendingTokens_.set(newToken, resolver);
+    this.pendingSaveTokens_.set(newToken, resolver);
     this.postMessage_({
       type: 'save',
       token: newToken,
       saveRequestType: requestType,
     });
     return resolver.promise;
+  }
+
+  /**
+   * Requests data to save a block of the current document. The reply will
+   * include bytes to save and total file size. A 0 total file size is an error
+   * indicator.
+   * @param requestType The type of save request.
+   * @param offset The offset of the requested data.
+   * @param blockSize The size of requested data. This parameter can be 0 when
+   *     the offset is 0 since the caller may not know yet the total file size.
+   *     Otherwise it specifies the upper limit on the returned data and the
+   *     plugin may return less data than requested.
+   */
+  getSaveDataBlock(
+      requestType: SaveRequestType, offset: number, blockSize: number) {
+    const resolver =
+        new PromiseResolver<{dataToSave: ArrayBuffer, totalFileSize: number}>();
+    const newToken = createToken();
+    this.pendingSaveDataBlockTokens_.set(newToken, resolver);
+    this.postMessage_({
+      type: 'getSaveDataBlock',
+      token: newToken,
+      saveRequestType: requestType,
+      offset: offset,
+      blockSize: blockSize,
+    });
+    return resolver.promise;
+  }
+
+  /**
+   * Requests suggested filename for saving the current document.
+   * @param requestType The type of the request, only used for testing.
+   */
+  getSuggestedFileName(requestType: SaveRequestType):
+      Promise<{fileName: string, bypassSaveFileForTesting?: boolean}> {
+    return this.postMessageWithReply_({
+      type: 'getSuggestedFileName',
+      saveRequestTypeForTesting: requestType,
+    });
+  }
+
+  /**
+   * Releases any memory buffers kept for saving the PDF in blocks.
+   */
+  releaseSaveInBlockBuffers() {
+    this.postMessage_({
+      type: 'releaseSaveInBlockBuffers',
+    });
   }
 
   saveAttachment(index: number): Promise<SaveAttachmentMessageData> {
@@ -365,26 +740,10 @@ export class PluginController implements ContentController {
     });
   }
 
-  async load(_fileName: string, data: ArrayBuffer) {
-    // Load `data` into the PDF plugin. The plugin transfers the data to be
-    // loaded within the inner frame.
-    this.viewport_.setRemoteContent(this.plugin_);
-    this.plugin_.postMessage({type: 'loadArray', dataToLoad: data}, [data]);
-
-    this.plugin_.style.display = 'block';
-    await this.getLoadedCallback_();
-    this.isActive = true;
-  }
-
-  unload() {
-    this.plugin_.style.display = 'none';
-    this.isActive = false;
-  }
-
   /**
    * Binds an event handler for messages received from the plugin.
    *
-   * TODO(crbug.com/1228987): Remove this method when a permanent postMessage()
+   * TODO(crbug.com/40189769): Remove this method when a permanent postMessage()
    * bridge is implemented for the viewer.
    */
   bindMessageHandler(port: MessagePort) {
@@ -393,6 +752,7 @@ export class PluginController implements ContentController {
     const delayedMessages = this.delayedMessages_;
     this.delayedMessages_ = null;
 
+    this.port_ = port;
     this.plugin_.postMessage = port.postMessage.bind(port);
     port.onmessage = e => this.handlePluginMessage_(e);
 
@@ -418,36 +778,51 @@ export class PluginController implements ContentController {
       return;
     }
 
+    assert(this.viewport_);
     switch (messageData.type) {
+      case 'ackScrollToRemote':
+        this.viewport_.ackScrollToRemote(messageData);
+        break;
+      case 'consumeSaveToken':
+        const resolver = this.pendingSaveTokens_.get(messageData.token);
+        assert(resolver);
+        assert(this.pendingSaveTokens_.delete(messageData.token));
+        resolver.resolve(null);
+        break;
       case 'gesture':
         this.viewport_.dispatchGesture(messageData.gesture);
-        break;
-      case 'swipe':
-        this.viewport_.dispatchSwipe(messageData.direction);
         break;
       case 'goToPage':
         this.viewport_.goToPage(messageData.page);
         break;
-      case 'setScrollPosition':
-        this.viewport_.scrollTo(messageData);
+      case 'navigateToDestination':
+        const destinationData = messageData as DestinationMessageData;
+        this.viewport_.handleNavigateToDestination(
+            destinationData.page, destinationData.x, destinationData.y,
+            destinationData.zoom);
+        return;
+      case 'saveData':
+        this.saveData_(messageData);
+        break;
+      case 'saveDataBlock':
+        this.saveDataBlock_(messageData);
         break;
       case 'scrollBy':
         this.viewport_.scrollBy(messageData);
         break;
+      case 'setScrollPosition':
+        this.viewport_.scrollTo(messageData);
+        break;
+      case 'setSmoothScrolling':
+        this.viewport_.setSmoothScrolling((messageData as unknown as {
+                                            smoothScrolling: boolean,
+                                          }).smoothScrolling);
+        return;
+      case 'swipe':
+        this.viewport_.dispatchSwipe(messageData.direction);
+        break;
       case 'syncScrollFromRemote':
         this.viewport_.syncScrollFromRemote(messageData);
-        break;
-      case 'ackScrollToRemote':
-        this.viewport_.ackScrollToRemote(messageData);
-        break;
-      case 'saveData':
-        this.saveData_(messageData);
-        break;
-      case 'consumeSaveToken':
-        const resolver = this.pendingTokens_.get(messageData.token);
-        assert(resolver);
-        assert(this.pendingTokens_.delete(messageData.token));
-        resolver.resolve(null);
         break;
       default:
         this.eventTarget_.dispatchEvent(new CustomEvent(
@@ -459,33 +834,49 @@ export class PluginController implements ContentController {
   private saveData_(messageData: SaveDataMessageData) {
     // Verify a token that was created by this instance is included to avoid
     // being spammed.
-    const resolver = this.pendingTokens_.get(messageData.token);
+    const resolver = this.pendingSaveTokens_.get(messageData.token);
     assert(resolver);
-    assert(this.pendingTokens_.delete(messageData.token));
+    assert(this.pendingSaveTokens_.delete(messageData.token));
 
     if (!messageData.dataToSave) {
       resolver.reject();
       return;
     }
 
-    // Verify the file size and the first bytes to make sure it's a PDF. Cap at
-    // 100 MB. This cap should be kept in sync with and is also enforced in
-    // pdf/out_of_process_instance.cc.
-    const MIN_FILE_SIZE = '%PDF1.0'.length;
+    // Verify the file size is capped at 100 MB. This cap should be kept in sync
+    // with and is also enforced in pdf/out_of_process_instance.cc.
     const MAX_FILE_SIZE = 100 * 1000 * 1000;
+    assert(
+        messageData.dataToSave.byteLength <= MAX_FILE_SIZE,
+        `File too large to be saved: ${
+            messageData.dataToSave.byteLength} bytes.`);
 
-    const buffer = messageData.dataToSave;
-    const bufView = new Uint8Array(buffer);
-    assert(
-        bufView.length <= MAX_FILE_SIZE,
-        `File too large to be saved: ${bufView.length} bytes.`);
-    assert(bufView.length >= MIN_FILE_SIZE);
-    assert(
-        String.fromCharCode(bufView[0], bufView[1], bufView[2], bufView[3]) ===
-        '%PDF');
+    verifyPdfHeader(messageData.dataToSave);
 
     resolver.resolve(messageData);
   }
+
+  /** Handles the partial pdf file buffer received from the plugin. */
+  private saveDataBlock_(messageData: SaveDataBlockMessageData) {
+    // Verify a token that was created by this instance is included to avoid
+    // being spammed.
+    const resolver = this.pendingSaveDataBlockTokens_.get(messageData.token);
+    assert(resolver);
+    assert(this.pendingSaveDataBlockTokens_.delete(messageData.token));
+
+    if (!messageData.dataToSave) {
+      resolver.reject();
+      return;
+    }
+
+    resolver.resolve(messageData);
+  }
+
+  // <if expr="enable_pdf_ink2">
+  setPluginForTesting(plugin: HTMLEmbedElement) {
+    this.setPlugin_(plugin);
+  }
+  // </if>
 
   static getInstance(): PluginController {
     return instance || (instance = new PluginController());

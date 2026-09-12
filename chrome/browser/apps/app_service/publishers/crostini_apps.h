@@ -11,16 +11,14 @@
 
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
-#include "chrome/browser/apps/app_service/launch_result_type.h"
 #include "chrome/browser/apps/app_service/publishers/guest_os_apps.h"
 #include "chrome/browser/ash/guest_os/guest_os_registry_service.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "components/services/app_service/public/cpp/app_types.h"
+#include "components/services/app_service/public/cpp/launch_result.h"
 #include "components/services/app_service/public/cpp/menu.h"
 
 namespace apps {
-
-struct AppLaunchParams;
 
 // An app publisher (in the App Service sense) of Crostini apps,
 // See components/services/app_service/README.md.
@@ -37,12 +35,7 @@ class CrostiniApps : public GuestOSApps {
   guest_os::VmType VmType() const override;
 
   // apps::AppPublisher overrides.
-  void LoadIcon(const std::string& app_id,
-                const IconKey& icon_key,
-                IconType icon_type,
-                int32_t size_hint_in_dip,
-                bool allow_placeholder_icon,
-                apps::LoadIconCallback callback) override;
+  int DefaultIconResourceId() const override;
   void Launch(const std::string& app_id,
               int32_t event_flags,
               LaunchSource launch_source,
@@ -53,12 +46,6 @@ class CrostiniApps : public GuestOSApps {
                            LaunchSource launch_source,
                            WindowInfoPtr window_info,
                            LaunchCallback callback) override;
-  void LaunchAppWithParams(AppLaunchParams&& params,
-                           LaunchCallback callback) override;
-  void Uninstall(const std::string& app_id,
-                 UninstallSource uninstall_source,
-                 bool clear_site_data,
-                 bool report_abuse) override;
   void GetMenuModel(const std::string& app_id,
                     MenuType menu_type,
                     int64_t display_id,

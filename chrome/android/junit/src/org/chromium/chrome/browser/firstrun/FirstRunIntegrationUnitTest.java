@@ -4,15 +4,19 @@
 
 package org.chromium.chrome.browser.firstrun;
 
+import static org.robolectric.Shadows.shadowOf;
+
 import android.app.Activity;
+import android.app.Application;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.UserManager;
 
 import androidx.browser.customtabs.CustomTabsIntent;
+import androidx.test.core.app.ApplicationProvider;
 
 import org.junit.After;
 import org.junit.Assert;
@@ -20,22 +24,22 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.Mockito;
+import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.robolectric.Robolectric;
-import org.robolectric.RuntimeEnvironment;
-import org.robolectric.Shadows;
 import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
-import org.robolectric.annotation.Implementation;
-import org.robolectric.annotation.Implements;
 import org.robolectric.shadows.ShadowApplication;
 
+import org.chromium.base.FeatureOverrides;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
+import org.chromium.base.test.util.Features;
+import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
 import org.chromium.chrome.browser.document.ChromeLauncherActivity;
-import org.chromium.chrome.browser.init.BrowserParts;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.init.ChromeBrowserInitializer;
 import org.chromium.chrome.browser.searchwidget.SearchActivity;
 import org.chromium.chrome.browser.webapps.WebApkIntentDataProviderFactory;
@@ -43,6 +47,7 @@ import org.chromium.chrome.browser.webapps.WebappActivity;
 import org.chromium.chrome.browser.webapps.WebappLauncherActivity;
 import org.chromium.components.webapk.lib.client.WebApkValidator;
 import org.chromium.components.webapk.lib.common.WebApkMetaDataKeys;
+import org.chromium.ui.base.UiAndroidFeatures;
 import org.chromium.webapk.lib.common.WebApkConstants;
 import org.chromium.webapk.test.WebApkTestHelper;
 
@@ -51,21 +56,11 @@ import java.util.List;
 
 /** JUnit tests for first run triggering code. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE,
-        shadows = {FirstRunIntegrationUnitTest.MockChromeBrowserInitializer.class})
 public final class FirstRunIntegrationUnitTest {
-    /** Do nothing version of {@link ChromeBrowserInitializer}. */
-    @Implements(ChromeBrowserInitializer.class)
-    public static class MockChromeBrowserInitializer {
-        @Implementation
-        public void __constructor__() {}
 
-        @Implementation
-        public void handlePreNativeStartupAndLoadLibraries(final BrowserParts parts) {}
-    }
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private ChromeBrowserInitializer mChromeBrowserInitializer;
 
     private final List<ActivityController> mActivityControllerList = new ArrayList<>();
 
@@ -74,12 +69,14 @@ public final class FirstRunIntegrationUnitTest {
 
     @Before
     public void setUp() {
-        mContext = RuntimeEnvironment.application;
-        mShadowApplication = ShadowApplication.getInstance();
+        mContext = ApplicationProvider.getApplicationContext();
+        mShadowApplication = shadowOf((Application) ApplicationProvider.getApplicationContext());
 
-        UserManager userManager = Mockito.mock(UserManager.class);
-        Mockito.when(userManager.isDemoUser()).thenReturn(false);
-        mShadowApplication.setSystemService(Context.USER_SERVICE, userManager);
+        ChromeBrowserInitializer.setForTesting(mChromeBrowserInitializer);
+
+        FeatureOverrides.newBuilder()
+                .enable(UiAndroidFeatures.ANDROID_UPDATE_DISPLAY_FOR_CONTEXT)
+                .apply();
 
         FirstRunStatus.setFirstRunFlowComplete(false);
         WebApkValidator.setDisableValidationForTesting(true);
@@ -94,27 +91,10 @@ public final class FirstRunIntegrationUnitTest {
 
     /** Checks that the intent component targets the passed-in class. */
     private boolean checkIntentComponentClass(Intent intent, Class componentClass) {
-        return checkIntentComponentClassOneOf(intent, new Class[] {componentClass});
-    }
-
-    /** Checks that the intent component is one of the provided classes. */
-    private boolean checkIntentComponentClassOneOf(Intent intent, Class[] componentClassOptions) {
         if (intent == null || intent.getComponent() == null) return false;
 
-        String componentClassName = intent.getComponent().getClassName();
-        for (Class componentClassOption : componentClassOptions) {
-            if (componentClassOption.getName().equals(componentClassName)) return true;
-        }
-        return false;
-    }
-
-    /**
-     * Checks that intent is either for {@link FirstRunActivity} or
-     * {@link TabbedModeFirstRunActivity}.
-     */
-    private boolean checkIntentIsForFre(Intent intent) {
-        return checkIntentComponentClassOneOf(
-                intent, new Class[] {FirstRunActivity.class, TabbedModeFirstRunActivity.class});
+        String intentClassName = intent.getComponent().getClassName();
+        return componentClass.getName().equals(intentClassName);
     }
 
     /** Builds activity using the component class name from the provided intent. */
@@ -125,7 +105,7 @@ public final class FirstRunIntegrationUnitTest {
             activityClass =
                     (Class<? extends Activity>) Class.forName(intent.getComponent().getClassName());
         } catch (ClassNotFoundException e) {
-            Assert.fail();
+            throw new RuntimeException(e);
         }
         createActivity(activityClass, intent);
     }
@@ -144,22 +124,21 @@ public final class FirstRunIntegrationUnitTest {
         }
     }
 
-    /**
-     * Checks that either {@link FirstRunActivity} or {@link TabbedModeFirstRunActivity}
-     * was launched.
-     */
+    /** Checks that {@link FirstRunActivity} was launched. */
     private void assertFirstRunActivityLaunched() {
         Intent launchedIntent = mShadowApplication.getNextStartedActivity();
         Assert.assertNotNull(launchedIntent);
 
-        Assert.assertTrue(checkIntentIsForFre(launchedIntent));
+        Assert.assertTrue(checkIntentComponentClass(launchedIntent, FirstRunActivity.class));
     }
 
     private <T extends Activity> Activity createActivity(Class<T> clazz, Intent intent) {
-        ActivityController<T> activityController =
-                Robolectric.buildActivity(clazz, intent).create();
+        ActivityController<T> activityController = Robolectric.buildActivity(clazz, intent);
+        activityController.get().setTheme(R.style.Theme_BrowserUI_DayNight);
+        activityController.create();
         T activity = activityController.get();
         mActivityControllerList.add(activityController);
+        RobolectricUtil.runAllBackgroundAndUi();
         return activity;
     }
 
@@ -219,7 +198,7 @@ public final class FirstRunIntegrationUnitTest {
         Bundle bundle = new Bundle();
         bundle.putString(WebApkMetaDataKeys.START_URL, startUrl);
         WebApkTestHelper.registerWebApkWithMetaData(
-                webApkPackageName, bundle, null /* shareTargetMetaData */);
+                webApkPackageName, bundle, /* shareTargetMetaData= */ null);
         WebApkTestHelper.addIntentFilterForUrl(webApkPackageName, startUrl);
 
         Intent intent = WebApkTestHelper.createMinimalWebApkIntent(webApkPackageName, startUrl);
@@ -228,12 +207,13 @@ public final class FirstRunIntegrationUnitTest {
         launchWebappLauncherActivityProcessRelaunch(intent);
 
         Intent launchedIntent = mShadowApplication.getNextStartedActivity();
-        Assert.assertTrue(checkIntentIsForFre(launchedIntent));
-        PendingIntent freCompleteLaunchIntent = launchedIntent.getParcelableExtra(
-                FirstRunActivityBase.EXTRA_FRE_COMPLETE_LAUNCH_INTENT);
+        Assert.assertTrue(checkIntentComponentClass(launchedIntent, FirstRunActivity.class));
+        PendingIntent freCompleteLaunchIntent =
+                launchedIntent.getParcelableExtra(
+                        FirstRunActivityBase.EXTRA_FRE_COMPLETE_LAUNCH_INTENT);
         Assert.assertNotNull(freCompleteLaunchIntent);
-        Assert.assertEquals(webApkPackageName,
-                Shadows.shadowOf(freCompleteLaunchIntent).getSavedIntent().getPackage());
+        Assert.assertEquals(
+                webApkPackageName, shadowOf(freCompleteLaunchIntent).getSavedIntent().getPackage());
     }
 
     /**
@@ -250,7 +230,7 @@ public final class FirstRunIntegrationUnitTest {
         Bundle bundle = new Bundle();
         bundle.putString(WebApkMetaDataKeys.START_URL, startUrl);
         WebApkTestHelper.registerWebApkWithMetaData(
-                webApkPackageName, bundle, null /* shareTargetMetaData */);
+                webApkPackageName, bundle, /* shareTargetMetaData= */ null);
         WebApkTestHelper.addIntentFilterForUrl(webApkPackageName, startUrl);
 
         Intent intent = WebApkTestHelper.createMinimalWebApkIntent(webApkPackageName, startUrl);
@@ -265,9 +245,7 @@ public final class FirstRunIntegrationUnitTest {
         Assert.assertNull(mShadowApplication.getNextStartedActivity());
     }
 
-    /**
-     * Test that the lightweight first run experience is used for unbound WebAPKs.
-     */
+    /** Test that the lightweight first run experience is used for unbound WebAPKs. */
     @Test
     public void testLightweightFre() {
         String webApkPackageName = "unbound.webapk";
@@ -276,7 +254,7 @@ public final class FirstRunIntegrationUnitTest {
         Bundle bundle = new Bundle();
         bundle.putString(WebApkMetaDataKeys.START_URL, startUrl);
         WebApkTestHelper.registerWebApkWithMetaData(
-                webApkPackageName, bundle, null /* shareTargetMetaData */);
+                webApkPackageName, bundle, /* shareTargetMetaData= */ null);
         WebApkTestHelper.addIntentFilterForUrl(webApkPackageName, startUrl);
 
         Intent intent = WebApkTestHelper.createMinimalWebApkIntent(webApkPackageName, startUrl);
@@ -291,8 +269,11 @@ public final class FirstRunIntegrationUnitTest {
     /**
      * Test that {@link WebappLauncherActivity} shows the regular full first run experience when it
      * is launched with an intent which both:
+     *
+     * <pre>
      * - Has a WebAPK package extra which meets the lightweight first run activity requirements
      * - Refers to an invalid WebAPK
+     * </pre>
      */
     @Test
     public void testFullFreIfWebApkInvalid() {
@@ -302,7 +283,7 @@ public final class FirstRunIntegrationUnitTest {
         Bundle bundle = new Bundle();
         bundle.putString(WebApkMetaDataKeys.START_URL, startUrl);
         WebApkTestHelper.registerWebApkWithMetaData(
-                webApkPackageName, bundle, null /* shareTargetMetaData */);
+                webApkPackageName, bundle, /* shareTargetMetaData= */ null);
         // Cause WebApkValidator#canWebApkHandleUrl() to fail (but not
         // WebApkIntentDataProviderFactory#create()) by not registering the intent handlers for the
         // WebAPK.
@@ -316,10 +297,83 @@ public final class FirstRunIntegrationUnitTest {
         Assert.assertTrue(checkIntentComponentClass(launchedIntent, FirstRunActivity.class));
 
         // WebappLauncherActivity (not the WebAPK) should be launched when the WebAPK completes.
-        PendingIntent freCompleteLaunchIntent = launchedIntent.getParcelableExtra(
-                FirstRunActivityBase.EXTRA_FRE_COMPLETE_LAUNCH_INTENT);
+        PendingIntent freCompleteLaunchIntent =
+                launchedIntent.getParcelableExtra(
+                        FirstRunActivityBase.EXTRA_FRE_COMPLETE_LAUNCH_INTENT);
         Assert.assertNotNull(freCompleteLaunchIntent);
-        Assert.assertEquals(mContext.getPackageName(),
-                Shadows.shadowOf(freCompleteLaunchIntent).getSavedIntent().getPackage());
+        Assert.assertEquals(
+                mContext.getPackageName(),
+                shadowOf(freCompleteLaunchIntent).getSavedIntent().getPackage());
+    }
+
+    @Test
+    @Config(qualifiers = "large")
+    @Features.DisableFeatures({ChromeFeatureList.EDGE_TO_EDGE_EVERYWHERE})
+    public void testFirstRunActivityScreenLayoutLarge() {
+        Activity firstRunActivity = createActivity(FirstRunActivity.class, new Intent());
+        Assert.assertEquals(Color.BLACK, firstRunActivity.getWindow().getStatusBarColor());
+    }
+
+    @Test
+    @Features.EnableFeatures(ChromeFeatureList.DEFAULT_BROWSER_PROMO_FRE)
+    public void testDefaultBrowserPromoStatePersistence() {
+        FeatureOverrides.newBuilder().enable(ChromeFeatureList.DEFAULT_BROWSER_PROMO_FRE).apply();
+
+        FirstRunActivity activity =
+                (FirstRunActivity) createActivity(FirstRunActivity.class, new Intent());
+
+        // Initialize mPager.
+        activity.setContentView(activity.createContentView());
+
+        activity.setPromoRoleManagerDialogTriggered(true);
+
+        Assert.assertTrue(
+                "Getter failed for RMD shown", activity.getPromoRoleManagerDialogTriggered());
+
+        Bundle outState = new Bundle();
+        activity.onSaveInstanceState(outState);
+
+        Assert.assertTrue(
+                "onSaveInstanceState failed to save RMD state",
+                outState.getBoolean("DEFAULT_BROWSER_ROLE_MANAGER_DIALOG_TRIGGERED"));
+
+        Assert.assertEquals(
+                "Pager index should be saved", 0, outState.getInt("LAST_PAGER_INDEX", -1));
+    }
+
+    @Test
+    @Features.EnableFeatures(ChromeFeatureList.DEFAULT_BROWSER_PROMO_FRE)
+    public void testHistorySyncStepPersistence() {
+        FeatureOverrides.newBuilder().enable(ChromeFeatureList.DEFAULT_BROWSER_PROMO_FRE).apply();
+
+        FirstRunActivity activity =
+                (FirstRunActivity) createActivity(FirstRunActivity.class, new Intent());
+
+        // Initialize mPager by inflating the content view.
+        activity.setContentView(activity.createContentView());
+
+        Assert.assertFalse(
+                "History sync step should not be completed initially",
+                activity.getHistorySyncStepCompleted());
+
+        // Simulate the user completing the history sync step.
+        activity.setHistorySyncStepCompleted(true);
+        Assert.assertTrue(
+                "Getter failed for History Sync step completed",
+                activity.getHistorySyncStepCompleted());
+
+        // Trigger onSaveInstanceState to simulate activity destruction & recreation.
+        Bundle outState = new Bundle();
+        activity.onSaveInstanceState(outState);
+
+        // Verify the state was saved into the Bundle with the correct key.
+        Assert.assertTrue(
+                "onSaveInstanceState failed to save History Sync step state",
+                outState.getBoolean("HISTORY_SYNC_STEP_COMPLETED"));
+
+        // Verify the key actually exists in the bundle.
+        Assert.assertTrue(
+                "Bundle should contain the completion key",
+                outState.containsKey("HISTORY_SYNC_STEP_COMPLETED"));
     }
 }

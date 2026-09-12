@@ -34,8 +34,6 @@ source_set("lib") {
     "init_aware_scheduler.h",
     "noop_notification_schedule_service.cc",
     "noop_notification_schedule_service.h",
-    "notification_entry.cc",
-    "notification_entry.h",
     "notification_schedule_service_impl.cc",
     "notification_schedule_service_impl.h",
     "notification_scheduler.cc",
@@ -56,24 +54,38 @@ source_set("lib") {
     "scheduler_utils.h",
     "stats.cc",
     "stats.h",
+    "tips_client.cc",
+    "tips_client.h",
     "webui_client.cc",
     "webui_client.h",
   ]
 
   configs += [ "//build/config/compiler:wexit_time_destructors" ]
 
-  # This target should not depend on anything in //chrome/* except the proto library.
+  # This target should not depend on anything in //chrome/* except the proto
+  # library.
   deps = [
     "//base",
     "//chrome/app:generated_resources",
     "//chrome/browser/notifications/proto",
     "//chrome/browser/notifications/scheduler/public",
+    "//chrome/browser/tips/core",
     "//components/keyed_service/core",
     "//components/leveldb_proto",
+    "//components/prefs",
     "//skia",
     "//ui/base",
     "//ui/gfx/codec",
+    "//url",
   ]
+
+  if (is_android) {
+    sources += [
+      "clients/finds_client.cc",
+      "clients/finds_client.h",
+    ]
+    deps += [ "//chrome/browser/finds/core" ]
+  }
 }
 
 source_set("unit_tests") {
@@ -94,6 +106,7 @@ source_set("unit_tests") {
     "scheduler_config_unittest.cc",
     "scheduler_utils_unittest.cc",
     "stats_unittest.cc",
+    "tips_client_unittest.cc",
   ]
 
   deps = [
@@ -102,9 +115,24 @@ source_set("unit_tests") {
     "//chrome/browser/notifications/scheduler/public",
     "//chrome/browser/notifications/scheduler/test:test_lib",
     "//chrome/browser/notifications/scheduler/test:test_support",
+    "//chrome/browser/tips/core",
+    "//chrome/common:constants",
     "//components/leveldb_proto:test_support",
+    "//components/optimization_guide/core:features",
+    "//components/optimization_guide/proto:optimization_guide_proto",
+    "//components/prefs:test_support",
     "//skia",
     "//testing/gmock",
     "//testing/gtest",
+    "//url",
   ]
+
+  if (is_android) {
+    sources += [ "clients/finds_client_unittest.cc" ]
+    deps += [ "//chrome/browser/finds/core" ]
+  }
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }

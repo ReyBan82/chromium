@@ -14,11 +14,11 @@ source_set("base") {
   public = [
     "desktop_environment_options.h",
     "host_exit_codes.h",
+    "pointer_utils.h",
     "process_util.h",
     "screen_controls.h",
     "screen_resolution.h",
     "switches.h",
-    "username.h",
   ]
 
   sources = [
@@ -27,7 +27,6 @@ source_set("base") {
     "process_util.cc",
     "screen_resolution.cc",
     "switches.cc",
-    "username.cc",
   ]
 
   public_deps = [ "//remoting/base:logging" ]
@@ -35,6 +34,8 @@ source_set("base") {
   deps = [
     "//base",
     "//remoting/base",
+    "//remoting/base:name_value_map",
+    "//remoting/base:session_policies",
     "//third_party/webrtc_overrides:webrtc_component",
   ]
 }
@@ -53,4 +54,8 @@ source_set("unit_tests") {
     "//testing/gtest",
     "//third_party/webrtc_overrides:webrtc_component",
   ]
+
+  if (is_win) {
+    sources += [ "process_util_win_unittest.cc" ]
+  }
 }

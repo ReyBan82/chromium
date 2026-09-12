@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/support_tool/policy_data_collector.h"
+
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -14,13 +17,13 @@
 #include "base/json/json_reader.h"
 #include "base/strings/stringprintf.h"
 #include "base/test/test_future.h"
+#include "base/threading/thread_restrictions.h"
 #include "base/values.h"
+#include "build/build_config.h"
 #include "chrome/browser/policy/policy_value_and_status_aggregator.h"
 #include "chrome/browser/policy/profile_policy_connector_builder.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/support_tool/data_collector.h"
-#include "chrome/browser/support_tool/policy_data_collector.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/feedback/redaction_tool/pii_types.h"
 #include "components/policy/core/browser/browser_policy_connector.h"
@@ -38,44 +41,44 @@
 #include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/l10n/l10n_util.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/login/test/device_state_mixin.h"
 #include "chrome/browser/ash/login/test/logged_in_user_mixin.h"
 #include "chrome/test/base/mixin_based_in_process_browser_test.h"
 #include "components/account_id/account_id.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 using ::testing::IsSubsetOf;
 
 namespace {
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 
 // The set of PII types that can be found in policy status.
 const std::set<redaction::PIIType> kExpectedPIITypesInPolicyStatus = {
-    redaction::PIIType::kStableIdentifier, redaction::PIIType::kLocationInfo,
-    redaction::PIIType::kGaiaID, redaction::PIIType::kEmail};
+    redaction::PIIType::kStableIdentifier,
+    redaction::PIIType::kStableIdentifier, redaction::PIIType::kGaiaID,
+    redaction::PIIType::kEmail};
 
 // The set of pairs with policy status keys which are considered as PII. These
 // are the common keys between user and device policy status.
-const char* kPolicyStatusFieldsWithPII[] = {policy::kClientIdKey,
-                                            policy::kEnterpriseDomainManagerKey,
-                                            policy::kUsernameKey};
+constexpr const char* kPolicyStatusFieldsWithPII[] = {
+    policy::kClientIdKey, policy::kEnterpriseDomainManagerKey,
+    policy::kUsernameKey};
 
 // The set of pairs with policy status keys which don't contain PII. These are
 // the common keys between user and device policy status.
-const char* kPolicyStatusFields[] = {policy::kPolicyDescriptionKey, "error",
-                                     "policiesPushAvailable", "status",
-                                     "timeSinceLastRefresh"};
+constexpr const char* kPolicyStatusFields[] = {
+    policy::kPolicyDescriptionKey, "error", "policiesPushAvailable", "status",
+    "timeSinceLastRefresh"};
 
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 // Reads the contents of exported policy Json file in to `policies`
 // dictionary.
-void ReadExportedPolicyFile(base::Value::Dict* policies,
+void ReadExportedPolicyFile(base::DictValue* policies,
                             base::FilePath file_path) {
   // Allow blocking for testing in this scope for IO operations.
   base::ScopedAllowBlockingForTesting allow_blocking;
@@ -83,13 +86,13 @@ void ReadExportedPolicyFile(base::Value::Dict* policies,
   // "policies.json" under `output_path`.
   std::string file_contents;
   ASSERT_TRUE(base::ReadFileToString(file_path, &file_contents));
-  absl::optional<base::Value> dict_value =
-      base::JSONReader::Read(file_contents);
+  std::optional<base::Value> dict_value = base::JSONReader::Read(
+      file_contents, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(dict_value);
   *policies = std::move(dict_value->GetDict());
 }
 
-class PolicyDataCollectorBrowserTest : public PlatformBrowserTest {
+class PolicyDataCollectorBrowserTest : public InProcessBrowserTest {
  public:
   PolicyDataCollectorBrowserTest() = default;
 
@@ -116,7 +119,7 @@ class PolicyDataCollectorBrowserTest : public PlatformBrowserTest {
 
  protected:
   void AddExpectedChromePolicy(policy::PolicyMap* policy_map,
-                               base::Value::Dict* expected_policies,
+                               base::DictValue* expected_policies,
                                const std::string& policy,
                                policy::PolicyLevel level,
                                const std::string& level_str,
@@ -128,7 +131,7 @@ class PolicyDataCollectorBrowserTest : public PlatformBrowserTest {
                                base::Value value) {
     policy_map->Set(policy, level, scope, source, value.Clone(),
                     /*external_data_fetcher=*/nullptr);
-    base::Value::Dict policy_dict;
+    base::DictValue policy_dict;
     policy_dict.Set("level", level_str);
     policy_dict.Set("scope", scope_str);
     policy_dict.Set("source", source_str);
@@ -145,7 +148,7 @@ class PolicyDataCollectorBrowserTest : public PlatformBrowserTest {
   base::ScopedTempDir temp_dir_;
 };
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 class PolicyDataCollectorBrowserTestAsh
     : public MixinBasedInProcessBrowserTest {
  public:
@@ -192,36 +195,31 @@ class PolicyDataCollectorBrowserTestAsh
       &mixin_host_,
       ash::DeviceStateMixin::State::OOBE_COMPLETED_CLOUD_ENROLLED};
   ash::LoggedInUserMixin logged_in_user_mixin_{
-      &mixin_host_,
-      ash::LoggedInUserMixin::LogInType::kRegular,
-      embedded_test_server(),
-      this,
-      /*should_launch_browser=*/true,
-      AccountId::FromUserEmailGaiaId(policy::PolicyBuilder::kFakeUsername,
-                                     policy::PolicyBuilder::kFakeGaiaId)};
+      &mixin_host_, /*test_base=*/this, embedded_test_server(),
+      ash::LoggedInUserMixin::LogInType::kManaged};
   // Use a temporary directory to store data collector output.
   base::ScopedTempDir temp_dir_;
 };
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace
 
 IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTest,
                        CollectPolicyValuesAndMetadata) {
   // PolicyDataCollector for testing.
-  PolicyDataCollector data_collector(browser()->profile());
+  PolicyDataCollector data_collector(browser()->GetProfile());
 
   // We will use `values` for mocking the policy values `policy_provider_` will
   // return.
   policy::PolicyMap values;
 
   // Set expected policy values.
-  base::Value::Dict expected_policies;
+  base::DictValue expected_policies;
   expected_policies.Set(policy::kNameKey, policy::kChromePoliciesName);
-  expected_policies.Set(policy::kPoliciesKey, base::Value::Dict());
+  expected_policies.Set(policy::kPoliciesKey, base::DictValue());
 
   // Add policies for testing.
-  base::Value::List popups_blocked_for_urls;
+  base::ListValue popups_blocked_for_urls;
   popups_blocked_for_urls.Append("aaa");
   popups_blocked_for_urls.Append("bbb");
   popups_blocked_for_urls.Append("ccc");
@@ -238,7 +236,7 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTest,
       /*error=*/std::string(), base::Value(2));
 
   // This also checks that we save unknown policies correctly.
-  base::Value::List unknown_policy;
+  base::ListValue unknown_policy;
   unknown_policy.Append(true);
   unknown_policy.Append(12);
   const std::string kUnknownPolicy = "NoSuchThing";
@@ -253,20 +251,20 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTest,
   policy_provider_.UpdateChromePolicy(values);
 
   // Collect policies and assert no error returned.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_collect_data;
   data_collector.CollectDataAndDetectPII(
       test_future_collect_data.GetCallback(),
       /*task_runner_for_redaction_tool=*/nullptr,
       /*redaction_tool_container=*/nullptr);
-  absl::optional<SupportToolError> error = test_future_collect_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  std::optional<SupportToolError> error = test_future_collect_data.Get();
+  EXPECT_EQ(error, std::nullopt);
 
   // Create a temporary directory to store the output file.
   base::FilePath output_path = temp_dir_.GetPath();
   // Export the collected data into `output_path` and make sure no error is
   // returned.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_export_data;
   data_collector.ExportCollectedDataWithPII(
       /*pii_types_to_keep=*/{}, output_path,
@@ -274,15 +272,15 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTest,
       /*redaction_tool_container=*/nullptr,
       test_future_export_data.GetCallback());
   error = test_future_export_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  EXPECT_EQ(error, std::nullopt);
 
   // The result must contain three main parts: "chromeMetadata", policies and
   // "status".
-  base::Value::Dict policy_result;
+  base::DictValue policy_result;
   ASSERT_NO_FATAL_FAILURE(ReadExportedPolicyFile(
       &policy_result, output_path.Append(FILE_PATH_LITERAL("policies.json"))));
 
-  base::Value::Dict* chrome_metadata = policy_result.FindDict("chromeMetadata");
+  base::DictValue* chrome_metadata = policy_result.FindDict("chromeMetadata");
   ASSERT_TRUE(chrome_metadata);
   // Check that `chrome_metadata` contains all the expected keys.
   // The keys that are expected to be in "chromeMetadata" dictionary are
@@ -293,40 +291,40 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTest,
   EXPECT_TRUE(chrome_metadata->contains("revision"));
 
   // Check that policy values are the same as expected.
-  base::Value::Dict* policy_values =
+  base::DictValue* policy_values =
       policy_result.FindDict(policy::kPolicyValuesKey);
   ASSERT_TRUE(policy_values);
   // We only check Chrome policies as it's common between all platforms. We
   // don't test platform specific policies in this test.
-  base::Value::Dict* chrome_policies =
+  base::DictValue* chrome_policies =
       policy_values->FindDict(policy::kChromePoliciesId);
   ASSERT_TRUE(chrome_policies);
   EXPECT_EQ(*chrome_policies, expected_policies);
 
   // Check that the returned contains "status". We just check if the returned
   // status is not empty.
-  base::Value::Dict* status = policy_result.FindDict("status");
+  base::DictValue* status = policy_result.FindDict("status");
   ASSERT_TRUE(status);
   EXPECT_FALSE(status->empty());
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-// We test the status in detail for only Ash in
+#if BUILDFLAG(IS_CHROMEOS)
+// We test the status in detail for only ChromeOS in
 // PolicyDataCollectorBrowserTestAsh.CollectPolicyStatus because the Mixins
-// for logged-in user only exists for Ash.
+// for logged-in user only exists for ChromeOS.
 IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTestAsh, CollectPolicyStatus) {
   // PolicyDataCollector for testing.
   PolicyDataCollector data_collector(ProfileManager::GetActiveUserProfile());
 
   // Collect policies and assert no error returned.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_collect_data;
   data_collector.CollectDataAndDetectPII(
       test_future_collect_data.GetCallback(),
       /*task_runner_for_redaction_tool=*/nullptr,
       /*redaction_tool_container=*/nullptr);
-  absl::optional<SupportToolError> error = test_future_collect_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  std::optional<SupportToolError> error = test_future_collect_data.Get();
+  EXPECT_EQ(error, std::nullopt);
 
   // Check the returned map of detected PII inside the collected data to see if
   // it contains the PII types we expect.
@@ -338,7 +336,7 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTestAsh, CollectPolicyStatus) {
   base::FilePath output_path = temp_dir_.GetPath();
   // Export the collected data into `output_path` and make sure no error is
   // returned.
-  base::test::TestFuture<absl::optional<SupportToolError>>
+  base::test::TestFuture<std::optional<SupportToolError>>
       test_future_export_data;
   data_collector.ExportCollectedDataWithPII(
       /*pii_types_to_keep=*/{}, output_path,
@@ -346,18 +344,18 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTestAsh, CollectPolicyStatus) {
       /*redaction_tool_container=*/nullptr,
       test_future_export_data.GetCallback());
   error = test_future_export_data.Get();
-  EXPECT_EQ(error, absl::nullopt);
+  EXPECT_EQ(error, std::nullopt);
 
-  base::Value::Dict policy_result;
+  base::DictValue policy_result;
   ASSERT_NO_FATAL_FAILURE(ReadExportedPolicyFile(
       &policy_result, output_path.Append(FILE_PATH_LITERAL("policies.json"))));
   EXPECT_FALSE(policy_result.empty());
 
-  base::Value::Dict* status = policy_result.FindDict("status");
+  base::DictValue* status = policy_result.FindDict("status");
   ASSERT_TRUE(status);
 
   // Check device policy status.
-  base::Value::Dict* device_policy_status =
+  base::DictValue* device_policy_status =
       status->FindDict(policy::kDeviceStatusKey);
   EXPECT_TRUE(device_policy_status);
   // Check the policy status fields with PII.
@@ -386,7 +384,7 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTestAsh, CollectPolicyStatus) {
   }
 
   // Check user policy status.
-  base::Value::Dict* user_policy_status =
+  base::DictValue* user_policy_status =
       status->FindDict(policy::kUserStatusKey);
   EXPECT_TRUE(user_policy_status);
   // Check the policy status fields with PII.
@@ -414,4 +412,4 @@ IN_PROC_BROWSER_TEST_F(PolicyDataCollectorBrowserTestAsh, CollectPolicyStatus) {
     }
   }
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)

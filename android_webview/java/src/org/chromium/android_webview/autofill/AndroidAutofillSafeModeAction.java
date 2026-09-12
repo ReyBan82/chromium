@@ -4,35 +4,25 @@
 
 package org.chromium.android_webview.autofill;
 
-import androidx.annotation.NonNull;
-
+import org.chromium.android_webview.common.Lifetime;
 import org.chromium.android_webview.common.SafeModeAction;
+import org.chromium.android_webview.common.SafeModeActionIds;
+import org.chromium.build.annotations.NullMarked;
 
 /**
  * A {@link SafeModeAction} to disable autofill provided by Android framework.
  *
- * This action does not itself do any work. AwContents checks if this action
- * is enabled, to decide whether to initialize android autofill or not.
+ * <p>This action does not itself do any work. AwContents checks if this action is enabled, to
+ * decide whether to initialize android autofill or not.
  */
-public class AndroidAutofillSafeModeAction implements SafeModeAction {
+@Lifetime.Singleton
+@NullMarked
+public class AndroidAutofillSafeModeAction extends SafeModeAction {
     // This ID should not be changed or reused.
-    public static final String ID = "disable_android_autofill";
-
-    private static boolean sIsAndroidAutofillDisabled;
+    private static final String ID = SafeModeActionIds.DISABLE_ANDROID_AUTOFILL;
 
     @Override
-    @NonNull
     public String getId() {
         return ID;
-    }
-
-    @Override
-    public boolean execute() {
-        sIsAndroidAutofillDisabled = true;
-        return true;
-    }
-
-    public static boolean isAndroidAutofillDisabled() {
-        return sIsAndroidAutofillDisabled;
     }
 }

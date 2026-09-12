@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/trace_event/trace_event.h"
+
 #include <memory>
 
 #include "base/functional/bind.h"
@@ -9,11 +11,14 @@
 #include "base/memory/ref_counted_memory.h"
 #include "base/pending_task.h"
 #include "base/run_loop.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/common/task_annotator.h"
 #include "base/test/task_environment.h"
+#include "base/test/tracing/trace_test_utils.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
-#include "base/trace_event/trace_event.h"
+#include "base/trace_event/trace_config.h"
+#include "base/trace_event/trace_log.h"
 #include "base/trace_event/traced_value.h"
 #include "perf_test_helpers.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -42,7 +47,7 @@ class TraceEventPerfTest : public ::testing::Test {
   void BeginTrace() {
     TraceConfig config("*", "");
     config.SetTraceRecordMode(TraceRecordMode::RECORD_CONTINUOUSLY);
-    TraceLog::GetInstance()->SetEnabled(config, TraceLog::RECORDING_MODE);
+    TraceLog::GetInstance()->SetEnabled(config);
   }
 
   void EndTraceAndFlush() {
@@ -95,6 +100,7 @@ class TraceEventPerfTest : public ::testing::Test {
 
  private:
   base::test::SingleThreadTaskEnvironment task_environment;
+  base::test::TracingEnvironment tracing_environment_;
 };
 
 TEST_F(TraceEventPerfTest, Submit_10000_TRACE_EVENT0) {
@@ -134,8 +140,8 @@ TEST_F(TraceEventPerfTest, Submit_10000_TRACE_EVENT_with_TracedValue) {
   IterableStopwatch trace_sw(kMetricEventSubmitTimeMs);
   for (int lap = 0; lap < kNumRuns; lap++) {
     for (int i = 0; i < 10000; i++) {
-      TRACE_EVENT_INSTANT1("test_category", "event_with_value",
-          TRACE_EVENT_SCOPE_THREAD, "value", MakeTracedValue(i));
+      TRACE_EVENT_INSTANT("test_category", "event_with_value", "value",
+                          MakeTracedValue(i));
     }
     trace_sw.NextLap();
   }
@@ -150,7 +156,8 @@ TEST_F(TraceEventPerfTest, Submit_10000_TRACE_EVENT0_multithreaded) {
   std::vector<std::unique_ptr<WaitableEvent>> complete_events;
 
   for (int i = 0; i < kNumThreads; i++) {
-    Thread* thread = new Thread(std::string("thread_%d") + std::to_string(i));
+    Thread* thread =
+        new Thread(std::string("thread_%d") + base::NumberToString(i));
     WaitableEvent* complete_event =
         new WaitableEvent(WaitableEvent::ResetPolicy::AUTOMATIC,
                           WaitableEvent::InitialState::NOT_SIGNALED);

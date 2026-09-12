@@ -5,6 +5,8 @@
 #include "chrome/browser/nearby_sharing/paired_key_verification_runner.h"
 
 #include <stdint.h>
+
+#include <optional>
 #include <vector>
 
 #include "base/functional/callback.h"
@@ -15,15 +17,14 @@
 #include "chrome/browser/nearby_sharing/certificates/fake_nearby_share_certificate_manager.h"
 #include "chrome/browser/nearby_sharing/certificates/nearby_share_decrypted_public_certificate.h"
 #include "chrome/browser/nearby_sharing/certificates/test_util.h"
-#include "chrome/browser/nearby_sharing/fake_nearby_connection.h"
 #include "chrome/browser/nearby_sharing/incoming_frames_reader.h"
 #include "chrome/browser/nearby_sharing/share_target.h"
 #include "chrome/services/sharing/public/proto/wire_format.pb.h"
+#include "chromeos/ash/components/nearby/common/connections_manager/fake_nearby_connection.h"
 #include "chromeos/ash/services/nearby/public/cpp/mock_nearby_process_manager.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace {
 
@@ -58,14 +59,14 @@ class MockIncomingFramesReader : public IncomingFramesReader {
   MOCK_METHOD(void,
               ReadFrame,
               (base::OnceCallback<
-                  void(absl::optional<sharing::mojom::V1FramePtr>)> callback),
+                  void(std::optional<sharing::mojom::V1FramePtr>)> callback),
               (override));
 
   MOCK_METHOD(
       void,
       ReadFrame,
       (sharing::mojom::V1Frame::Tag frame_type,
-       base::OnceCallback<void(absl::optional<sharing::mojom::V1FramePtr>)>
+       base::OnceCallback<void(std::optional<sharing::mojom::V1FramePtr>)>
            callback,
        base::TimeDelta timeout),
       (override));
@@ -94,7 +95,7 @@ PairedKeyVerificationRunner::PairedKeyVerificationResult Merge(
 class PairedKeyVerificationRunnerTest : public testing::Test {
  public:
   enum class ReturnFrameType {
-    // Return absl::nullopt for the frame.
+    // Return std::nullopt for the frame.
     kNull,
     // Return an empty frame.
     kEmpty,
@@ -117,11 +118,11 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
                        bool restricted_to_contacts,
                        PairedKeyVerificationRunner::PairedKeyVerificationResult
                            expected_result) {
-    absl::optional<NearbyShareDecryptedPublicCertificate> public_certificate =
+    std::optional<NearbyShareDecryptedPublicCertificate> public_certificate =
         use_valid_public_certificate
-            ? absl::make_optional<NearbyShareDecryptedPublicCertificate>(
+            ? std::make_optional<NearbyShareDecryptedPublicCertificate>(
                   GetNearbyShareTestDecryptedPublicCertificate())
-            : absl::nullopt;
+            : std::nullopt;
 
     PairedKeyVerificationRunner runner(
         share_target_, kEndpointId, kAuthToken, &connection_,
@@ -144,12 +145,12 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
         ReadFrame(
             testing::Eq(sharing::mojom::V1Frame::Tag::kPairedKeyEncryption),
             testing::_, testing::Eq(kTimeout)))
-        .WillOnce(testing::WithArg<1>(testing::Invoke(
+        .WillOnce(testing::WithArg<1>(
             [frame_type](
                 base::OnceCallback<void(
-                    absl::optional<sharing::mojom::V1FramePtr>)> callback) {
+                    std::optional<sharing::mojom::V1FramePtr>)> callback) {
               if (frame_type == ReturnFrameType::kNull) {
-                std::move(callback).Run(absl::nullopt);
+                std::move(callback).Run(std::nullopt);
                 return;
               }
 
@@ -159,7 +160,7 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
                 mojo_v1frame = sharing::mojom::V1Frame::NewPairedKeyEncryption(
                     sharing::mojom::PairedKeyEncryptionFrame::New(
                         kIncomingConnectionSignedData,
-                        kPrivateCertificateHashAuthToken, absl::nullopt));
+                        kPrivateCertificateHashAuthToken, std::nullopt));
               } else if (frame_type ==
                          ReturnFrameType::kOptionalSignedDataValid) {
                 mojo_v1frame = sharing::mojom::V1Frame::NewPairedKeyEncryption(
@@ -180,7 +181,7 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
               }
 
               std::move(callback).Run(std::move(mojo_v1frame));
-            })));
+            }));
   }
 
   void SetUpPairedKeyResultFrame(
@@ -191,11 +192,11 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
         frames_reader_,
         ReadFrame(testing::Eq(sharing::mojom::V1Frame::Tag::kPairedKeyResult),
                   testing::_, testing::Eq(kTimeout)))
-        .WillOnce(testing::WithArg<1>(testing::Invoke(
+        .WillOnce(testing::WithArg<1>(
             [=](base::OnceCallback<void(
-                    absl::optional<sharing::mojom::V1FramePtr>)> callback) {
+                    std::optional<sharing::mojom::V1FramePtr>)> callback) {
               if (frame_type == ReturnFrameType::kNull) {
-                std::move(callback).Run(absl::nullopt);
+                std::move(callback).Run(std::nullopt);
                 return;
               }
 
@@ -204,7 +205,7 @@ class PairedKeyVerificationRunnerTest : public testing::Test {
                       sharing::mojom::PairedKeyResultFrame::New(status));
 
               std::move(callback).Run(std::move(mojo_v1frame));
-            })));
+            }));
   }
 
   sharing::nearby::Frame GetWrittenFrame() {

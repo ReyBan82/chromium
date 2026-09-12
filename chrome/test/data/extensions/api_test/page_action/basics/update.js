@@ -4,9 +4,10 @@
 
 // Test that we can change various properties of the browser action.
 // The C++ verifies.
-chrome.tabs.getSelected(null, function(tab) {
+chrome.tabs.query({active: true}, function(tabs) {
+  const tab = tabs[0];
   chrome.pageAction.show(tab.id);
-  chrome.pageAction.setTitle({title: "Modified", tabId: tab.id});
+  chrome.pageAction.setTitle({title: 'Modified', tabId: tab.id});
 
   chrome.test.notifyPass();
 });

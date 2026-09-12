@@ -8,8 +8,8 @@
 #import <UIKit/UIKit.h>
 #include <stddef.h>
 
-#import "base/ios/device_util.h"
-#include "base/mac/foundation_util.h"
+#include "base/apple/foundation_util.h"
+#include "base/compiler_specific.h"
 #include "base/system/sys_info.h"
 
 namespace {
@@ -18,31 +18,30 @@ std::string* g_icudtl_path_override = nullptr;
 
 }  // namespace
 
-namespace base {
-namespace ios {
-
-bool IsRunningOnIOS12OrLater() {
-  static const bool is_running_on_or_later = IsRunningOnOrLater(12, 0, 0);
-  return is_running_on_or_later;
-}
-
-bool IsRunningOnIOS13OrLater() {
-  static const bool is_running_on_or_later = IsRunningOnOrLater(13, 0, 0);
-  return is_running_on_or_later;
-}
-
-bool IsRunningOnIOS14OrLater() {
-  static const bool is_running_on_or_later = IsRunningOnOrLater(14, 0, 0);
-  return is_running_on_or_later;
-}
-
-bool IsRunningOnIOS15OrLater() {
-  static const bool is_running_on_or_later = IsRunningOnOrLater(15, 0, 0);
-  return is_running_on_or_later;
-}
+namespace base::ios {
 
 bool IsRunningOnIOS16OrLater() {
   static const bool is_running_on_or_later = IsRunningOnOrLater(16, 0, 0);
+  return is_running_on_or_later;
+}
+
+bool IsRunningOnIOS17OrLater() {
+  static const bool is_running_on_or_later = IsRunningOnOrLater(17, 0, 0);
+  return is_running_on_or_later;
+}
+
+bool IsRunningOnIOS18OrLater() {
+  static const bool is_running_on_or_later = IsRunningOnOrLater(18, 0, 0);
+  return is_running_on_or_later;
+}
+
+bool IsRunningOnIOS26OrLater() {
+  static const bool is_running_on_or_later = IsRunningOnOrLater(26, 0, 0);
+  return is_running_on_or_later;
+}
+
+bool IsRunningOnIOS27OrLater() {
+  static const bool is_running_on_or_later = IsRunningOnOrLater(27, 0, 0);
   return is_running_on_or_later;
 }
 
@@ -56,8 +55,9 @@ bool IsRunningOnOrLater(int32_t major, int32_t minor, int32_t bug_fix) {
 
     bool IsRunningOnOrLater(int32_t version[3]) const {
       for (size_t i = 0; i < std::size(current_version_); ++i) {
-        if (current_version_[i] != version[i])
-          return current_version_[i] > version[i];
+        if (UNSAFE_TODO(current_version_[i]) != UNSAFE_TODO(version[i])) {
+          return UNSAFE_TODO(current_version_[i]) > UNSAFE_TODO(version[i]);
+        }
       }
       return true;
     }
@@ -87,23 +87,14 @@ FilePath FilePathOfEmbeddedICU() {
   return FilePath();
 }
 
+#if !BUILDFLAG(IS_IOS_APP_EXTENSION)
 bool IsMultipleScenesSupported() {
-  if (@available(iOS 13, *)) {
-    return UIApplication.sharedApplication.supportsMultipleScenes;
-  }
-  return false;
+  return UIApplication.sharedApplication.supportsMultipleScenes;
 }
+#endif
 
 bool IsApplicationPreWarmed() {
   return [NSProcessInfo.processInfo.environment objectForKey:@"ActivePrewarm"];
 }
 
-bool HasDynamicIsland() {
-  std::string hardware_model = ::ios::device_util::GetPlatform();
-  static bool is_dynamic_island_model =
-      (hardware_model == "iPhone15,2" || hardware_model == "iPhone15,3");
-  return is_dynamic_island_model;
-}
-
-}  // namespace ios
-}  // namespace base
+}  // namespace base::ios

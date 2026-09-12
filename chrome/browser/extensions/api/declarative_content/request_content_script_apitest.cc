@@ -6,33 +6,34 @@
 #include "base/memory/raw_ptr.h"
 #include "base/strings/stringprintf.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/test/extension_test_message_listener.h"
 #include "extensions/test/test_extension_dir.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 namespace {
 
 // Manifest permissions injected into |kManifest|:
-const char* const kPermissions[] = {
-  "*://*/*",              // ALL
-  "http://127.0.0.1/*",   // PARTICULAR
-  "http://nowhere.com/*"  // NOWHERE
-};
+constexpr auto kPermissions = std::to_array<const char*>({
+    "*://*/*",               // ALL
+    "http://127.0.0.1/*",    // PARTICULAR
+    "http://nowhere.com/*",  // NOWHERE
+});
 
 // Script matchers for injected into |kBackgroundScriptSource|:
-const char* const kScriptMatchers[] = {
-  "{ pageUrl: { hostContains: '' } }",          // ALL
-  "{ pageUrl: { hostEquals: '127.0.0.1' } }",   // PARTICULAR
-  "{ pageUrl: { hostEquals: 'nowhere.com' } }"  // NOWHERE
-};
+constexpr auto kScriptMatchers = std::to_array<const char*>({
+    "{ pageUrl: { hostContains: '' } }",           // ALL
+    "{ pageUrl: { hostEquals: '127.0.0.1' } }",    // PARTICULAR
+    "{ pageUrl: { hostEquals: 'nowhere.com' } }",  // NOWHERE
+});
 
 enum PermissionOrMatcherType {
   ALL = 0,
@@ -84,16 +85,16 @@ bool RunAllPendingInRenderer(content::WebContents* web_contents) {
   // common.
   // This is slight hack to achieve a RunPendingInRenderer() method. Since IPCs
   // are sent synchronously, anything started prior to this method will finish
-  // before this method returns (as content::ExecuteScript() is synchronous).
-  return content::ExecuteScript(web_contents, "1 == 1;");
+  // before this method returns (as content::ExecJs() is synchronous).
+  return content::ExecJs(web_contents, "1 == 1;");
 }
 
 }  // namespace
 
 class RequestContentScriptAPITest : public ExtensionBrowserTest {
  public:
-  RequestContentScriptAPITest();
-  ~RequestContentScriptAPITest() override {}
+  RequestContentScriptAPITest() = default;
+  ~RequestContentScriptAPITest() override = default;
 
   // Performs script injection test on a common local URL using the given
   // |manifest_permission| and |script_matcher|. Does not return until
@@ -109,40 +110,36 @@ class RequestContentScriptAPITest : public ExtensionBrowserTest {
       PermissionOrMatcherType script_matcher);
 
   std::unique_ptr<TestExtensionDir> test_extension_dir_;
-  raw_ptr<const Extension> extension_;
+  raw_ptr<const Extension> extension_ = nullptr;
 };
-
-RequestContentScriptAPITest::RequestContentScriptAPITest()
-    : extension_(nullptr) {}
 
 testing::AssertionResult RequestContentScriptAPITest::RunTest(
     PermissionOrMatcherType manifest_permission,
     PermissionOrMatcherType script_matcher,
     bool should_inject) {
-  if (extension_)
-    UnloadExtension(extension_->id());
   testing::AssertionResult result = CreateAndLoadExtension(manifest_permission,
                                                            script_matcher);
-  if (!result)
+  if (!result) {
     return result;
+  }
 
   // Setup listener for actual injection of script.
   ExtensionTestMessageListener injection_succeeded_listener(
       kInjectionSucceeded);
   injection_succeeded_listener.set_extension_id(extension_->id());
 
-  EXPECT_TRUE(ui_test_utils::NavigateToURL(
-      browser(), embedded_test_server()->GetURL("/extensions/test_file.html")));
-
-  content::WebContents* web_contents =
-      browser() ? browser()->tab_strip_model()->GetActiveWebContents()
-                : nullptr;
-  if (!web_contents)
+  content::WebContents* web_contents = GetActiveWebContents();
+  if (!web_contents) {
     return testing::AssertionFailure() << "No web contents.";
+  }
+
+  EXPECT_TRUE(NavigateToURL(web_contents, embedded_test_server()->GetURL(
+                                              "/extensions/test_file.html")));
 
   // Give the extension plenty of time to inject.
-  if (!RunAllPendingInRenderer(web_contents))
+  if (!RunAllPendingInRenderer(web_contents)) {
     return testing::AssertionFailure() << "Could not run pending in renderer.";
+  }
 
   // Make sure all running tasks are complete.
   content::RunAllPendingInMessageLoop();
@@ -154,6 +151,12 @@ testing::AssertionResult RequestContentScriptAPITest::RunTest(
             "Expected no injection, but got one.");
   }
 
+  if (extension_) {
+    ExtensionId extension_id = extension_->id();
+    // Avoid dangling pointers by clearing `extension_` before unloading.
+    extension_ = nullptr;
+    UnloadExtension(extension_id);
+  }
   return testing::AssertionSuccess();
 }
 
@@ -169,15 +172,16 @@ testing::AssertionResult RequestContentScriptAPITest::CreateAndLoadExtension(
       kBackgroundScriptSource,
       kScriptMatchers[script_matcher]);
 
-  std::unique_ptr<TestExtensionDir> dir(new TestExtensionDir);
+  auto dir = std::make_unique<TestExtensionDir>();
   dir->WriteManifest(manifest);
   dir->WriteFile(FILE_PATH_LITERAL("background.js"), background_src);
   dir->WriteFile(FILE_PATH_LITERAL("script.js"),
                  kContentScriptSource);
 
   const Extension* extension = LoadExtension(dir->UnpackedPath());
-  if (!extension)
+  if (!extension) {
     return testing::AssertionFailure() << "Failed to load extension.";
+  }
 
   test_extension_dir_ = std::move(dir);
   extension_ = extension;
@@ -188,11 +192,10 @@ testing::AssertionResult RequestContentScriptAPITest::CreateAndLoadExtension(
   return testing::AssertionSuccess();
 }
 
-
 // Try different permutations of "match all", "match particular domain (that is
 // visited by test)", and "match nonsense domain (not visited by test)" for
 // both manifest permissions and injection matcher conditions.
-// http://crbug.com/421118
+// http://crbug.com/41135960
 IN_PROC_BROWSER_TEST_F(RequestContentScriptAPITest,
                        DISABLED_PermissionMatcherAgreementInjection) {
   ASSERT_TRUE(embedded_test_server()->Start());

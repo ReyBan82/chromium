@@ -10,6 +10,7 @@
 #include <string>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/string_util_win.h"
 #include "base/strings/stringprintf.h"
@@ -88,9 +89,9 @@ struct MockContext {
 
   std::string ToString() const {
     return base::StringPrintf(
-        "%s's token #%d for %S",
+        "%s's token #%d for %s",
         base::UTF16ToUTF8(credential->source_principal).c_str(), rounds + 1,
-        base::as_wcstr(target_principal));
+        base::UTF16ToUTF8(target_principal).c_str());
   }
 
   static MockContext* FromHandle(PCtxtHandle handle) {
@@ -172,9 +173,16 @@ SECURITY_STATUS MockSSPILibrary::InitializeSecurityContext(
 
   auto token = new_context->ToString();
   PSecBuffer out_buffer = pOutput->pBuffers;
-  out_buffer->cbBuffer = std::min<ULONG>(out_buffer->cbBuffer, token.size());
-  std::memcpy(out_buffer->pvBuffer, token.data(), out_buffer->cbBuffer);
+  // SAFETY: out_buffer->pvBuffer has length out_buffer->cbBuffer. See
+  // https://learn.microsoft.com/en-us/windows/win32/api/sspi/ns-sspi-secbuffer.
+  auto dest_span = UNSAFE_BUFFERS(base::span(
+      static_cast<uint8_t*>(out_buffer->pvBuffer), out_buffer->cbBuffer));
 
+  size_t copy_size = std::min(dest_span.size(), token.size());
+  out_buffer->cbBuffer = static_cast<ULONG>(copy_size);
+
+  dest_span.first(copy_size).copy_from(
+      base::as_byte_span(token).first(copy_size));
   if (ptsExpiry) {
     ptsExpiry->LowPart = 0xBAA5B780;
     ptsExpiry->HighPart = 0x01D54E15;

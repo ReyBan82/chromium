@@ -15,17 +15,23 @@
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/core/mac/secure_enclave_client.h"
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/installer/key_rotation_manager.h"
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/installer/key_rotation_types.h"
+#include "components/policy/core/common/cloud/dmserver_job_configurations.h"
 
-namespace network {
-class SharedURLLoaderFactory;
-}  // namespace network
+namespace enterprise_attestation {
+class CloudManagementDelegate;
+}  // namespace enterprise_attestation
+
+namespace enterprise_management {
+class DeviceManagementRequest;
+}  // namespace enterprise_management
 
 namespace enterprise_connectors {
 
 class MacKeyRotationCommand : public KeyRotationCommand {
  public:
   explicit MacKeyRotationCommand(
-      scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory);
+      std::unique_ptr<enterprise_attestation::CloudManagementDelegate>
+          cloud_management_delegate);
 
   ~MacKeyRotationCommand() override;
 
@@ -42,8 +48,17 @@ class MacKeyRotationCommand : public KeyRotationCommand {
   // Notifies the pending callback of a timeout.
   void OnKeyRotationTimeout();
 
-  scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
-  std::unique_ptr<KeyRotationManager> key_rotation_manager_;
+  void UploadPublicKeyToDmServer(
+      base::expected<const enterprise_management::DeviceManagementRequest,
+                     KeyRotationResult> request);
+
+  void OnUploadingPublicKeyCompleted(policy::DMServerJobResult result);
+
+  bool IsDmTokenValid();
+
+  std::unique_ptr<enterprise_attestation::CloudManagementDelegate>
+      cloud_management_delegate_;
+
   scoped_refptr<base::SequencedTaskRunner> background_task_runner_;
 
   base::OneShotTimer timeout_timer_;

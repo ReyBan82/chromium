@@ -82,14 +82,16 @@ MediaStreamComponentImpl::MediaStreamComponentImpl(
 MediaStreamComponentImpl::MediaStreamComponentImpl(
     MediaStreamSource* source,
     std::unique_ptr<MediaStreamTrackPlatform> platform_track)
-    : MediaStreamComponentImpl(WTF::CreateCanonicalUUIDString(),
+    : MediaStreamComponentImpl(CreateCanonicalUuidString(),
                                source,
                                std::move(platform_track)) {}
 
-MediaStreamComponentImpl* MediaStreamComponentImpl::Clone(
-    std::unique_ptr<MediaStreamTrackPlatform> cloned_platform_track) const {
+MediaStreamComponentImpl* MediaStreamComponentImpl::Clone() const {
+  const String id = CreateCanonicalUuidString();
+  std::unique_ptr<MediaStreamTrackPlatform> cloned_platform_track =
+      platform_track_->CreateFromComponent(this, id);
   auto* cloned_component = MakeGarbageCollected<MediaStreamComponentImpl>(
-      Source(), std::move(cloned_platform_track));
+      id, Source(), std::move(cloned_platform_track));
   cloned_component->SetEnabled(enabled_);
   cloned_component->SetContentHint(content_hint_);
   return cloned_component;
@@ -165,9 +167,8 @@ void MediaStreamComponentImpl::AddSink(
 }
 
 String MediaStreamComponentImpl::ToString() const {
-  return String::Format("[id: %s, unique_id: %d, enabled: %s]",
-                        Id().Utf8().c_str(), UniqueId(),
-                        Enabled() ? "true" : "false");
+  return StrCat({"[id: ", Id(), ", unique_id: ", String::Number(UniqueId()),
+                 ", enabled: ", Enabled() ? "true" : "false", "]"});
 }
 
 void MediaStreamComponentImpl::Trace(Visitor* visitor) const {

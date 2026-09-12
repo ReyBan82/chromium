@@ -31,36 +31,41 @@
 #include "third_party/blink/renderer/core/animation/inert_effect.h"
 
 #include "third_party/blink/renderer/core/animation/interpolation.h"
+#include "third_party/blink/renderer/core/animation/timing_calculations.h"
 
 namespace blink {
 
 InertEffect::InertEffect(KeyframeEffectModelBase* model,
                          const Timing& timing,
-                         bool paused,
-                         absl::optional<AnimationTimeDelta> inherited_time,
-                         absl::optional<AnimationTimeDelta> timeline_duration,
-                         double playback_rate)
+                         const AnimationProxy& proxy)
     : AnimationEffect(timing),
       model_(model),
-      paused_(paused),
-      inherited_time_(inherited_time),
-      timeline_duration_(timeline_duration),
-      playback_rate_(playback_rate) {}
+      paused_(proxy.Paused()),
+      inherited_time_(proxy.InheritedTime()),
+      timeline_duration_(proxy.TimelineDuration()),
+      intrinsic_iteration_duration_(proxy.IntrinsicIterationDuration()),
+      playback_rate_(proxy.PlaybackRate()),
+      at_scroll_timeline_boundary_(proxy.AtScrollTimelineBoundary()) {}
 
 void InertEffect::Sample(HeapVector<Member<Interpolation>>& result) const {
-  UpdateInheritedTime(inherited_time_, /* at_scroll_timeline_boundary */ false,
-                      /* is_idle */ false, playback_rate_,
+  UpdateInheritedTime(inherited_time_, /* is_idle */ false, playback_rate_,
                       kTimingUpdateOnDemand);
   if (!IsInEffect()) {
     result.clear();
     return;
   }
 
-  absl::optional<double> iteration = CurrentIteration();
+  std::optional<double> iteration = CurrentIteration();
   DCHECK(iteration);
   DCHECK_GE(iteration.value(), 0);
+
+  TimingFunction::LimitDirection limit_direction =
+      TimingCalculations::LimitDirectionForPhase(GetPhase(),
+                                                 IsCurrentDirectionForward());
+
   model_->Sample(ClampTo<int>(iteration.value(), 0), Progress().value(),
-                 NormalizedTiming().iteration_duration, result);
+                 limit_direction, NormalizedTiming().iteration_duration,
+                 result);
 }
 
 bool InertEffect::Affects(const PropertyHandle& property) const {
@@ -69,13 +74,17 @@ bool InertEffect::Affects(const PropertyHandle& property) const {
 
 AnimationTimeDelta InertEffect::CalculateTimeToEffectChange(
     bool,
-    absl::optional<AnimationTimeDelta>,
+    std::optional<AnimationTimeDelta>,
     AnimationTimeDelta) const {
   return AnimationTimeDelta::Max();
 }
 
-absl::optional<AnimationTimeDelta> InertEffect::TimelineDuration() const {
+std::optional<AnimationTimeDelta> InertEffect::TimelineDuration() const {
   return timeline_duration_;
+}
+
+AnimationTimeDelta InertEffect::IntrinsicIterationDuration() const {
+  return intrinsic_iteration_duration_;
 }
 
 void InertEffect::Trace(Visitor* visitor) const {

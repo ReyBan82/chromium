@@ -7,6 +7,9 @@
 
 #include <stdint.h>
 
+#include <optional>
+
+#include "base/byte_size.h"
 #include "base/feature_list.h"
 #include "base/functional/callback_forward.h"
 #include "net/base/net_export.h"
@@ -18,9 +21,10 @@ class FilePath;
 
 namespace disk_cache {
 
-// Experiment to increase the cache size to see the impact on various
-// performance metrics.
-NET_EXPORT_PRIVATE BASE_DECLARE_FEATURE(kChangeDiskCacheSizeExperiment);
+// Experiment to increase the generated code cache size to see the impact on
+// various performance metrics.
+NET_EXPORT_PRIVATE BASE_DECLARE_FEATURE(
+    kChangeGeneratedCodeCacheSizeExperiment);
 
 // Moves the cache files from the given path to another location.
 // Fails if the destination exists already, or if it doesn't have
@@ -52,13 +56,18 @@ bool CleanupDirectorySync(const base::FilePath& path);
 
 // Returns the preferred max cache size given the available disk space and
 // cache type.
-NET_EXPORT_PRIVATE int PreferredCacheSize(
-    int64_t available,
+NET_EXPORT_PRIVATE base::ByteSize PreferredCacheSize(
+    std::optional<base::ByteSize> available,
+    net::CacheType type = net::DISK_CACHE);
+
+// Returns the preferred max cache size given a cache path and type.
+NET_EXPORT_PRIVATE base::ByteSize PreferredCacheSizeForPath(
+    const base::FilePath& path,
     net::CacheType type = net::DISK_CACHE);
 
 // The default cache size should not ideally be exposed, but the blockfile
 // backend uses it for reasons that include testing.
-NET_EXPORT_PRIVATE extern const int kDefaultCacheSize;
+NET_EXPORT_PRIVATE extern const base::ByteSize kDefaultCacheSize;
 
 }  // namespace disk_cache
 

@@ -30,11 +30,13 @@ class QuickPairBrowserDelegateImpl final : public QuickPairBrowserDelegate {
 
   // QuickPairBrowserDelegate:
   scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory() override;
-  signin::IdentityManager* GetIdentityManager() override;
   std::unique_ptr<image_fetcher::ImageFetcher> GetImageFetcher() override;
   PrefService* GetActivePrefService() override;
   void RequestService(
       mojo::PendingReceiver<mojom::QuickPairService> receiver) override;
+  bool CompanionAppInstalled(const std::string& app_id) override;
+  void LaunchCompanionApp(const std::string& app_id) override;
+  void OpenPlayStorePage(GURL play_store_uri) override;
 
  private:
   Profile* GetActiveProfile();

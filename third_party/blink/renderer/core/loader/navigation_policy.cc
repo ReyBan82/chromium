@@ -41,6 +41,7 @@
 #include "third_party/blink/renderer/core/events/mouse_event.h"
 #include "third_party/blink/renderer/core/events/ui_event_with_key_state.h"
 #include "third_party/blink/renderer/platform/keyboard_codes.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/assertions.h"
 
 namespace blink {
@@ -57,10 +58,12 @@ NavigationPolicy NavigationPolicyFromEventModifiers(int16_t button,
 #else
   const bool new_tab_modifier = (button == 1) || ctrl;
 #endif
-  if (!new_tab_modifier && !shift && !alt)
+  if (new_tab_modifier && alt && !shift) {
+    return kNavigationPolicySplitView;
+  }
+  if (!new_tab_modifier && !shift && !alt) {
     return kNavigationPolicyCurrentTab;
-
-  if (new_tab_modifier) {
+  } else if (new_tab_modifier) {
     return shift ? kNavigationPolicyNewForegroundTab
                  : kNavigationPolicyNewBackgroundTab;
   }
@@ -148,6 +151,12 @@ NavigationPolicy NavigationPolicyFromEvent(const Event* event) {
     return kNavigationPolicyNewForegroundTab;
   }
 
+  if (event_policy == kNavigationPolicySplitView &&
+      input_policy != kNavigationPolicySplitView) {
+    // No split view from synthesized events without user intention.
+    return kNavigationPolicyCurrentTab;
+  }
+
   return event_policy;
 }
 
@@ -192,5 +201,6 @@ STATIC_ASSERT_ENUM(kWebNavigationPolicyNewWindow, kNavigationPolicyNewWindow);
 STATIC_ASSERT_ENUM(kWebNavigationPolicyNewPopup, kNavigationPolicyNewPopup);
 STATIC_ASSERT_ENUM(kWebNavigationPolicyPictureInPicture,
                    kNavigationPolicyPictureInPicture);
+STATIC_ASSERT_ENUM(kWebNavigationPolicySplitView, kNavigationPolicySplitView);
 
 }  // namespace blink

@@ -41,3 +41,9 @@ tslib/tslib.js
 
 # @lit
 @lit/*/node/*
+
+# @types
+@types/trusted-types/
+
+# @lit-labs
+@lit-labs/

@@ -5,15 +5,37 @@
 #ifndef COMPONENTS_VIZ_CLIENT_FRAME_EVICTOR_H_
 #define COMPONENTS_VIZ_CLIENT_FRAME_EVICTOR_H_
 
+#include <vector>
+
 #include "base/memory/raw_ptr.h"
 #include "components/viz/client/frame_eviction_manager.h"
+#include "components/viz/common/surfaces/surface_id.h"
 
 namespace viz {
 
-class FrameEvictorClient {
+class VIZ_CLIENT_EXPORT FrameEvictorClient {
  public:
-  virtual ~FrameEvictorClient() {}
-  virtual void EvictDelegatedFrame() = 0;
+  struct VIZ_CLIENT_EXPORT EvictIds {
+    EvictIds();
+    ~EvictIds();
+
+    EvictIds(const EvictIds&) = delete;
+    EvictIds& operator=(const EvictIds&) = delete;
+
+    EvictIds(EvictIds&& other);
+    EvictIds& operator=(EvictIds&& other);
+
+    // `embedded_ids` contains a list of SurfaceIds embedded by the UI
+    // compositor.
+    std::vector<SurfaceId> embedded_ids;
+  };
+
+  virtual ~FrameEvictorClient() = default;
+  virtual void EvictDelegatedFrame(
+      const std::vector<SurfaceId>& surface_ids) = 0;
+  virtual EvictIds CollectSurfaceIdsForEviction() const = 0;
+  virtual SurfaceId GetCurrentSurfaceId() const = 0;
+  virtual SurfaceId GetPreNavigationSurfaceId() const = 0;
 };
 
 // Keeps track of the visibility state of a child and notifies when the parent
@@ -40,7 +62,16 @@ class VIZ_CLIENT_EXPORT FrameEvictor : public FrameEvictionManagerClient {
   // Notifies that the visibility state of the child has changed.
   void SetVisible(bool visible);
 
+  // Opts this frame out of frame eviction. Once opted out, the frame cannot
+  // be opted back in and is unregistered from FrameEvictionManager.
+  void OptOutFrameEviction();
+
   bool visible() const { return visible_; }
+
+  void SetEvictOnHide(bool evict_on_hide) { evict_on_hide_ = evict_on_hide; }
+
+  // Returns an ordered collection of `SurfaceIds` that should be evicted.
+  std::vector<SurfaceId> CollectSurfaceIdsForEviction() const;
 
  private:
   // FrameEvictionManagerClient implementation.
@@ -49,6 +80,8 @@ class VIZ_CLIENT_EXPORT FrameEvictor : public FrameEvictionManagerClient {
   raw_ptr<FrameEvictorClient> client_;
   bool has_surface_ = false;
   bool visible_ = false;
+  bool opted_out_from_frame_eviction_ = false;
+  bool evict_on_hide_ = false;
 };
 
 }  // namespace viz

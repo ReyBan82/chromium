@@ -8,14 +8,16 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sessions/tab_restore_service_factory.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_init_state.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/web_applications/test/web_app_browsertest_util.h"
 #include "chrome/browser/web_applications/web_app_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
 
-using Window = sessions::TabRestoreService::Window;
+using Window = sessions::tab_restore::Window;
 
 class TabRestoreServiceImplBrowserTest : public InProcessBrowserTest {
  public:
@@ -29,21 +31,21 @@ class TabRestoreServiceImplBrowserTest : public InProcessBrowserTest {
 };
 
 IN_PROC_BROWSER_TEST_F(TabRestoreServiceImplBrowserTest, RestoreApp) {
-  Profile* profile = browser()->profile();
+  Profile* profile = browser()->GetProfile();
   sessions::TabRestoreService* trs =
       TabRestoreServiceFactory::GetForProfile(profile);
   const char* app_name = "TestApp";
 
-  Browser* app_browser = CreateBrowserForApp(app_name, profile);
+  BrowserWindowInterface* app_browser = CreateBrowserForApp(app_name, profile);
   CloseBrowserSynchronously(app_browser);
 
   // One entry should be created.
   ASSERT_EQ(1U, trs->entries().size());
-  const sessions::TabRestoreService::Entry* restored_entry =
+  const sessions::tab_restore::Entry* restored_entry =
       trs->entries().front().get();
 
   // It should be a window with an app.
-  ASSERT_EQ(sessions::TabRestoreService::WINDOW, restored_entry->type);
+  ASSERT_EQ(sessions::tab_restore::Type::WINDOW, restored_entry->type);
   const Window* restored_window = static_cast<const Window*>(restored_entry);
   EXPECT_EQ(app_name, restored_window->app_name);
 }
@@ -52,32 +54,32 @@ IN_PROC_BROWSER_TEST_F(TabRestoreServiceImplBrowserTest, RestoreApp) {
 // reopened in the correct app browser.
 IN_PROC_BROWSER_TEST_F(TabRestoreServiceImplBrowserTest,
                        LastAppTabSavesWindow) {
-  Profile* profile = browser()->profile();
+  Profile* profile = browser()->GetProfile();
   sessions::TabRestoreService* trs =
       TabRestoreServiceFactory::GetForProfile(profile);
 
   test_system_web_app_installation_->WaitForAppInstall();
-  Browser* app_browser = web_app::LaunchWebAppBrowser(
-      browser()->profile(), test_system_web_app_installation_->GetAppId());
+  BrowserWindowInterface* app_browser = web_app::LaunchWebAppBrowser(
+      browser()->GetProfile(), test_system_web_app_installation_->GetAppId());
   GURL app_url = test_system_web_app_installation_->GetAppUrl();
   ASSERT_TRUE(ui_test_utils::NavigateToURL(app_browser, app_url));
 
   // Create second tab and close it, TAB entry should be created.
-  chrome::NewTab(app_browser);
+  chrome::NewTab(app_browser, NewTabTypes::kNoUserAction);
   ASSERT_TRUE(ui_test_utils::NavigateToURL(app_browser, app_url));
   chrome::CloseTab(app_browser);
   ASSERT_EQ(1U, trs->entries().size());
-  const sessions::TabRestoreService::Entry* tab_entry =
-      trs->entries().front().get();
-  EXPECT_EQ(sessions::TabRestoreService::TAB, tab_entry->type);
+  const sessions::tab_restore::Entry* tab_entry = trs->entries().front().get();
+  EXPECT_EQ(sessions::tab_restore::Type::TAB, tab_entry->type);
 
   // Close last tab, WINDOW entry should be created.
   chrome::CloseTab(app_browser);
   EXPECT_EQ(2U, trs->entries().size());
-  const sessions::TabRestoreService::Entry* window_entry =
+  const sessions::tab_restore::Entry* window_entry =
       trs->entries().front().get();
-  ASSERT_EQ(sessions::TabRestoreService::WINDOW, window_entry->type);
+  ASSERT_EQ(sessions::tab_restore::Type::WINDOW, window_entry->type);
   const Window* restored_window = static_cast<const Window*>(window_entry);
-  EXPECT_EQ(app_browser->app_name(), restored_window->app_name);
+  EXPECT_EQ(BrowserInitState::From(app_browser)->create_params().app_name,
+            restored_window->app_name);
   EXPECT_EQ(1U, restored_window->tabs.size());
 }

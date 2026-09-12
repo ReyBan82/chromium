@@ -6,25 +6,28 @@
 
 #include <stddef.h>
 
-#include "base/containers/contains.h"
-#include "base/cxx17_backports.h"
+#include <algorithm>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/metrics/user_metrics.h"
 #include "base/strings/string_number_conversions.h"
 #include "build/build_config.h"
+#include "chrome/app/vector_icons/vector_icons.h"
 #include "chrome/browser/favicon/favicon_service_factory.h"
 #include "chrome/browser/favicon/favicon_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/singleton_tabs.h"
+#include "chrome/browser/ui/tabs/back_to_opener/back_to_opener_controller.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/common/chrome_features.h"
+#include "chrome/browser/ui/user_education/browser_user_education_interface.h"
 #include "chrome/common/url_constants.h"
 #include "components/favicon_base/favicon_types.h"
+#include "components/feature_engagement/public/feature_constants.h"
 #include "components/grit/components_scaled_resources.h"
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/favicon_status.h"
@@ -36,10 +39,14 @@
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/models/image_model.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/window_open_disposition.h"
 #include "ui/base/window_open_disposition_utils.h"
+#include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
+#include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/text_elider.h"
+#include "ui/menus/simple_menu_model.h"
 
 using base::UserMetricsAction;
 using content::NavigationController;
@@ -50,39 +57,30 @@ const size_t BackForwardMenuModel::kMaxHistoryItems = 12;
 const size_t BackForwardMenuModel::kMaxChapterStops = 5;
 static const int kMaxBackForwardMenuWidth = 700;
 
-BackForwardMenuModel::BackForwardMenuModel(Browser* browser,
-                                           ModelType model_type)
-    : browser_(browser), model_type_(model_type) {}
+BackForwardMenuModel::BackForwardMenuModel(
+    BrowserWindowInterface* browser_window_interface,
+    ModelType model_type)
+    : browser_window_interface_(browser_window_interface),
+      model_type_(model_type) {}
 
 BackForwardMenuModel::~BackForwardMenuModel() = default;
 
-bool BackForwardMenuModel::HasIcons() const {
-  return true;
+base::WeakPtr<ui::MenuModel> BackForwardMenuModel::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 size_t BackForwardMenuModel::GetItemCount() const {
-  size_t items = GetHistoryItemCount();
-  if (items == 0)
-    return items;
+  size_t total = 0;
 
-  size_t chapter_stops = 0;
+  // Sum up all sections in order
+  for (MenuSection section :
+       {MenuSection::kHistory, MenuSection::kSeparator,
+        MenuSection::kChapterStops, MenuSection::kBackToOpener,
+        MenuSection::kShowFullHistory}) {
+    total += GetSectionItemCount(section);
+  }
 
-  // Next, we count ChapterStops, if any.
-  if (items == kMaxHistoryItems)
-    chapter_stops = GetChapterStopCount(items);
-
-  if (chapter_stops)
-    items += chapter_stops + 1;  // Chapter stops also need a separator.
-
-  // If the current mode is incognito, "Show Full History" should not be
-  // visible.
-  if (!ShouldShowFullHistoryBeVisible())
-    return items;
-
-  // If the menu is not empty, add two positions in the end
-  // for a separator and a "Show Full History" item.
-  items += 2;
-  return items;
+  return total;
 }
 
 ui::MenuModel::ItemType BackForwardMenuModel::GetTypeAt(size_t index) const {
@@ -99,23 +97,32 @@ int BackForwardMenuModel::GetCommandIdAt(size_t index) const {
 }
 
 std::u16string BackForwardMenuModel::GetLabelAt(size_t index) const {
-  // Return label "Show Full History" for the last item of the menu.
-  if (ShouldShowFullHistoryBeVisible() && index == GetItemCount() - 1)
-    return l10n_util::GetStringUTF16(IDS_HISTORY_SHOWFULLHISTORY_LINK);
-
-  // Return an empty string for a separator.
-  if (IsSeparator(index))
+  std::optional<MenuSection> section = GetSectionForIndex(index);
+  if (!section.has_value()) {
     return std::u16string();
+  }
 
-  // Return the entry title, escaping any '&' characters and eliding it if it's
-  // super long.
-  NavigationEntry* entry = GetNavigationEntry(index);
-  std::u16string menu_text(entry->GetTitleForDisplay());
-  menu_text = ui::EscapeMenuLabelAmpersands(menu_text);
-  menu_text = gfx::ElideText(menu_text, gfx::FontList(),
-                             kMaxBackForwardMenuWidth, gfx::ELIDE_TAIL);
-
-  return menu_text;
+  switch (section.value()) {
+    case MenuSection::kHistory:
+    case MenuSection::kChapterStops: {
+      // Return the entry title, escaping any '&' characters and eliding it if
+      // it's super long.
+      NavigationEntry* entry = GetNavigationEntry(index);
+      std::u16string menu_text(entry->GetTitleForDisplay());
+      menu_text = ui::EscapeMenuLabelAmpersands(menu_text);
+      menu_text = gfx::ElideText(menu_text, gfx::FontList(),
+                                 kMaxBackForwardMenuWidth, gfx::ELIDE_TAIL);
+      return menu_text;
+    }
+    case MenuSection::kBackToOpener: {
+      return back_to_opener::BackToOpenerController::GetFormattedOpenerTitle(
+          GetWebContents());
+    }
+    case MenuSection::kSeparator:
+      return std::u16string();
+    case MenuSection::kShowFullHistory:
+      return l10n_util::GetStringUTF16(IDS_HISTORY_SHOWFULLHISTORY_LINK);
+  }
 }
 
 bool BackForwardMenuModel::IsItemDynamicAt(size_t index) const {
@@ -138,38 +145,49 @@ int BackForwardMenuModel::GetGroupIdAt(size_t index) const {
 }
 
 ui::ImageModel BackForwardMenuModel::GetIconAt(size_t index) const {
-  if (!ItemHasIcon(index))
+  std::optional<MenuSection> section = GetSectionForIndex(index);
+  if (!section.has_value()) {
     return ui::ImageModel();
-
-  // Return icon of "Show Full History" for the last item of the menu.
-  if (ShouldShowFullHistoryBeVisible() && index == GetItemCount() - 1) {
-    return ui::ImageModel::FromImage(
-        ui::ResourceBundle::GetSharedInstance().GetNativeImageNamed(
-            IDR_HISTORY_FAVICON));
-  }
-  NavigationEntry* entry = GetNavigationEntry(index);
-  content::FaviconStatus fav_icon = entry->GetFavicon();
-  if (!fav_icon.valid && menu_model_delegate()) {
-    // FetchFavicon is not const because it caches the result, but GetIconAt
-    // is const because it is not be apparent to outside observers that an
-    // internal change is taking place. Compared to spreading const in
-    // unintuitive places (e.g. making menu_model_delegate() const but
-    // returning a non-const while sprinkling virtual on member variables),
-    // this const_cast is the lesser evil.
-    const_cast<BackForwardMenuModel*>(this)->FetchFavicon(entry);
   }
 
-  // Only apply theming to certain chrome:// favicons.
-  if (favicon::ShouldThemifyFaviconForEntry(entry)) {
-    const ui::ColorProvider* const cp = &GetWebContents()->GetColorProvider();
-    gfx::ImageSkia themed_favicon = favicon::ThemeFavicon(
-        fav_icon.image.AsImageSkia(), cp->GetColor(ui::kColorMenuIcon),
-        cp->GetColor(ui::kColorMenuItemBackgroundHighlighted),
-        cp->GetColor(ui::kColorMenuBackground));
-    return ui::ImageModel::FromImageSkia(themed_favicon);
-  }
+  switch (section.value()) {
+    case MenuSection::kHistory:
+    case MenuSection::kChapterStops: {
+      NavigationEntry* entry = GetNavigationEntry(index);
+      content::FaviconStatus fav_icon = entry->GetFavicon();
+      if (!fav_icon.valid && menu_model_delegate()) {
+        // FetchFavicon is not const because it caches the result, but GetIconAt
+        // is const because it is not be apparent to outside observers that an
+        // internal change is taking place. Compared to spreading const in
+        // unintuitive places (e.g. making menu_model_delegate() const but
+        // returning a non-const while sprinkling virtual on member variables),
+        // this const_cast is the lesser evil.
+        const_cast<BackForwardMenuModel*>(this)->FetchFavicon(entry);
+      }
 
-  return ui::ImageModel::FromImage(fav_icon.image);
+      // Only apply theming to certain chrome:// favicons.
+      if (favicon::ShouldThemifyFaviconForEntry(entry)) {
+        const ui::ColorProvider* const cp =
+            &GetWebContents()->GetColorProvider();
+        gfx::ImageSkia themed_favicon = favicon::ThemeFavicon(
+            fav_icon.image.AsImageSkia(), cp->GetColor(ui::kColorMenuIcon),
+            cp->GetColor(ui::kColorMenuItemBackgroundHighlighted),
+            cp->GetColor(ui::kColorMenuBackground));
+        return ui::ImageModel::FromImageSkia(themed_favicon);
+      }
+
+      return ui::ImageModel::FromImage(fav_icon.image);
+    }
+    case MenuSection::kBackToOpener:
+      return back_to_opener::BackToOpenerController::GetOpenerMenuIcon(
+          GetWebContents());
+    case MenuSection::kSeparator:
+      return ui::ImageModel();
+    case MenuSection::kShowFullHistory:
+      return ui::ImageModel::FromVectorIcon(
+          features::IsRoundedIconsEnabled() ? kHistoryIcon : kHistoryOldIcon,
+          ui::kColorMenuIcon, ui::SimpleMenuModel::kDefaultIconSize);
+  }
 }
 
 ui::ButtonMenuItemModel* BackForwardMenuModel::GetButtonMenuItemAt(
@@ -178,7 +196,8 @@ ui::ButtonMenuItemModel* BackForwardMenuModel::GetButtonMenuItemAt(
 }
 
 bool BackForwardMenuModel::IsEnabledAt(size_t index) const {
-  return index < GetItemCount() && !IsSeparator(index);
+  std::optional<MenuSection> section = GetSectionForIndex(index);
+  return section.has_value() && section.value() != MenuSection::kSeparator;
 }
 
 ui::MenuModel* BackForwardMenuModel::GetSubmenuModelAt(size_t index) const {
@@ -192,78 +211,261 @@ void BackForwardMenuModel::ActivatedAt(size_t index) {
 void BackForwardMenuModel::ActivatedAt(size_t index, int event_flags) {
   DCHECK(!IsSeparator(index));
 
-  // Execute the command for the last item: "Show Full History".
-  if (ShouldShowFullHistoryBeVisible() && index == GetItemCount() - 1) {
-    base::RecordComputedAction(
-        BuildActionName("ShowFullHistory", absl::nullopt));
-    NavigateParams params(GetSingletonTabNavigateParams(
-        browser_, GURL(chrome::kChromeUIHistoryURL)));
-    ShowSingletonTabOverwritingNTP(browser_, &params);
+  std::optional<MenuSection> section = GetSectionForIndex(index);
+  if (!section.has_value()) {
     return;
   }
 
-  // Log whether it was a history or chapter click.
-  size_t items = GetHistoryItemCount();
-  if (index < items) {
-    base::RecordComputedAction(BuildActionName("HistoryClick", index));
-  } else {
-    const auto chapter_index = (index == items)
-                                   ? absl::nullopt
-                                   : absl::make_optional(index - items - 1);
-    base::RecordComputedAction(BuildActionName("ChapterClick", chapter_index));
+  switch (section.value()) {
+    case MenuSection::kHistory: {
+      base::RecordComputedAction(BuildActionName("HistoryClick", index));
+      break;
+    }
+    case MenuSection::kChapterStops: {
+      // Calculate chapter index: use section start to get accurate offset.
+      std::optional<size_t> chapter_start =
+          GetStartingIndexOfSection(MenuSection::kChapterStops);
+      CHECK(chapter_start.has_value());
+      size_t chapter_index = index - chapter_start.value();
+      base::RecordComputedAction(
+          BuildActionName("ChapterClick", chapter_index));
+      break;
+    }
+    case MenuSection::kBackToOpener: {
+      base::RecordComputedAction(
+          BuildActionName("BackToOpenerClick", std::nullopt));
+      back_to_opener::BackToOpenerController::GoBackToOpener(GetWebContents());
+      return;
+    }
+    case MenuSection::kSeparator:
+      return;
+    case MenuSection::kShowFullHistory:
+      base::RecordComputedAction(
+          BuildActionName("ShowFullHistory", std::nullopt));
+      if (browser_window_interface_) {
+        ShowSingletonTabOverwritingNTP(browser_window_interface_,
+                                       GURL(chrome::kChromeUIHistoryURL));
+      }
+      return;
   }
 
-  absl::optional<size_t> controller_index = MenuIndexToNavEntryIndex(index);
-  DCHECK(controller_index.has_value());
+  CHECK(menu_model_open_timestamp_.has_value());
+  base::TimeDelta time =
+      base::TimeTicks::Now() - menu_model_open_timestamp_.value();
+  base::UmaHistogramLongTimes(
+      "Navigation.BackForward.TimeFromOpenBackNavigationMenuToActivateItem",
+      time);
 
-  UMA_HISTOGRAM_BOOLEAN(
-      "Navigation.BackForward.NavigatingToEntryMarkedToBeSkipped",
-      GetWebContents()->GetController().IsEntryMarkedToBeSkipped(
-          controller_index.value()));
+  std::optional<size_t> controller_index = MenuIndexToNavEntryIndex(index);
+  DCHECK(controller_index.has_value());
 
   WindowOpenDisposition disposition =
       ui::DispositionFromEventFlags(event_flags);
-  chrome::NavigateToIndexWithDisposition(browser_, controller_index.value(),
-                                         disposition);
+  if (browser_window_interface_) {
+    chrome::NavigateToIndexWithDisposition(
+        browser_window_interface_, controller_index.value(), disposition);
+  }
 }
 
 void BackForwardMenuModel::MenuWillShow() {
-  base::RecordComputedAction(BuildActionName("Popup", absl::nullopt));
+  base::RecordComputedAction(BuildActionName("Popup", std::nullopt));
   requested_favicons_.clear();
   cancelable_task_tracker_.TryCancelAll();
+  menu_model_open_timestamp_ = base::TimeTicks::Now();
+  // Observe the web contents for navigation changes which could
+  // happen while the menu is open.
+  content::WebContentsObserver::Observe(GetWebContents());
+
+  // Close the IPH popup if the user opens the menu.
+  if (browser_window_interface_) {
+    if (auto* user_education =
+            BrowserUserEducationInterface::From(browser_window_interface_)) {
+      user_education->NotifyFeaturePromoFeatureUsed(
+          feature_engagement::kIPHBackNavigationMenuFeature,
+          FeaturePromoFeatureUsedAction::kClosePromoIfPresent);
+    }
+  }
+}
+
+void BackForwardMenuModel::MenuWillClose() {
+  content::WebContentsObserver::Observe(nullptr);
+  CHECK(menu_model_open_timestamp_.has_value());
+  base::TimeDelta time =
+      base::TimeTicks::Now() - menu_model_open_timestamp_.value();
+  base::UmaHistogramLongTimes(
+      "Navigation.BackForward.TimeFromOpenBackNavigationMenuToCloseMenu", time);
+}
+
+void BackForwardMenuModel::NavigationEntryCommitted(
+    const content::LoadCommittedDetails& load_details) {
+  if (menu_model_delegate()) {
+    menu_model_delegate()->OnMenuStructureChanged();
+  }
+}
+
+void BackForwardMenuModel::NavigationEntriesDeleted() {
+  if (menu_model_delegate()) {
+    menu_model_delegate()->OnMenuStructureChanged();
+  }
+}
+
+std::optional<BackForwardMenuModel::MenuSection>
+BackForwardMenuModel::GetSectionForIndex(size_t index) const {
+  if (index >= GetItemCount()) {
+    return std::nullopt;
+  }
+
+  size_t history_items = GetHistoryItemCount();
+
+  // History section: indices 0 to history_items-1
+  if (index < history_items) {
+    return MenuSection::kHistory;
+  }
+
+  // Chapter stops section: appears when menu is full (kMaxHistoryItems) and
+  // there are domain transitions. They're separated from history items by a
+  // separator.
+  if (HasSection(MenuSection::kChapterStops)) {
+    // Separator is right after history items (before chapter stops)
+    if (index == history_items) {
+      return MenuSection::kSeparator;
+    }
+    // Chapter stops start after history items and separator
+    std::optional<size_t> chapter_stops_start =
+        GetStartingIndexOfSection(MenuSection::kChapterStops);
+    CHECK(chapter_stops_start.has_value());
+    size_t chapter_stops_count =
+        GetSectionItemCount(MenuSection::kChapterStops);
+    if (index >= chapter_stops_start.value() &&
+        index < chapter_stops_start.value() + chapter_stops_count) {
+      return MenuSection::kChapterStops;
+    }
+  }
+
+  // Back-to-opener section: comes after history and chapter stops (if they
+  // exist), and before the separator and "Show Full History" sections.
+  bool has_back_to_opener =
+      back_to_opener::BackToOpenerController::HasValidOpener(GetWebContents());
+  if (has_back_to_opener) {
+    std::optional<size_t> opener_index =
+        GetStartingIndexOfSection(MenuSection::kBackToOpener);
+    if (opener_index.has_value() && index == opener_index.value()) {
+      return MenuSection::kBackToOpener;
+    }
+  }
+
+  // "Show Full History" and separator sections:
+  // "Show Full History" is always the last item if it exists.
+  if (HasSection(MenuSection::kShowFullHistory)) {
+    size_t item_count = GetItemCount();
+    if (index == item_count - 1) {
+      return MenuSection::kShowFullHistory;
+    }
+    // Separator is right before "Show Full History"
+    if (index == item_count - 2) {
+      return MenuSection::kSeparator;
+    }
+  }
+
+  return std::nullopt;
+}
+
+bool BackForwardMenuModel::HasSection(MenuSection section) const {
+  return GetSectionItemCount(section) > 0;
+}
+
+std::optional<size_t> BackForwardMenuModel::GetStartingIndexOfSection(
+    MenuSection section) const {
+  // Separators can appear at multiple positions in the menu (before chapter
+  // stops and/or before "Show Full History"), so there's no single "starting
+  // index" for the separator section. This function should not be called with
+  // kSeparator. Instead, separators are identified by their specific index
+  // positions in GetSectionForIndex().
+  CHECK(section != MenuSection::kSeparator);
+
+  if (!HasSection(section)) {
+    return std::nullopt;
+  }
+
+  switch (section) {
+    case MenuSection::kHistory:
+      return 0;  // History starts at 0
+    case MenuSection::kChapterStops: {
+      // Chapter stops start after history items and the separator before them.
+      // Since HasSection already verified chapter stops exist, there's always
+      // exactly one separator before them.
+      return GetHistoryItemCount() + 1;
+    }
+    case MenuSection::kBackToOpener: {
+      // Back-to-opener comes before the separator and "Show Full History"
+      // sections.
+      size_t item_count = GetItemCount();
+      if (HasSection(MenuSection::kShowFullHistory)) {
+        // "Show Full History" is at item_count - 1, separator at item_count -
+        // 2, so back-to-opener is at item_count - 3
+        return item_count - 3;
+      }
+      // If "Show Full History" doesn't exist, back-to-opener is the last item
+      return item_count - 1;
+    }
+    case MenuSection::kSeparator:
+      NOTREACHED();
+    case MenuSection::kShowFullHistory:
+      // "Show Full History" is always the last item in the menu.
+      return GetItemCount() - 1;
+  }
+}
+
+size_t BackForwardMenuModel::GetSectionItemCount(MenuSection section) const {
+  switch (section) {
+    case MenuSection::kHistory:
+      return GetHistoryItemCount();
+    case MenuSection::kChapterStops: {
+      size_t history_items = GetHistoryItemCount();
+      return GetChapterStopCount(history_items);
+    }
+    case MenuSection::kBackToOpener:
+      return back_to_opener::BackToOpenerController::HasValidOpener(
+                 GetWebContents())
+                 ? 1u
+                 : 0u;
+    case MenuSection::kSeparator:
+      return GetSeparatorCount();
+    case MenuSection::kShowFullHistory:
+      // "Show Full History" should only be visible if the menu has items and
+      // we're not in incognito mode. And when we have opener.
+      return (ShouldShowFullHistoryBeVisible() &&
+              (GetHistoryItemCount() > 0 ||
+               back_to_opener::BackToOpenerController::HasValidOpener(
+                   GetWebContents())))
+                 ? 1u
+                 : 0u;
+  }
 }
 
 bool BackForwardMenuModel::IsSeparator(size_t index) const {
-  size_t history_items = GetHistoryItemCount();
-  // If the index is past the number of history items + separator,
-  // we then consider if it is a chapter-stop entry.
-  if (index > history_items) {
-    // We either are in ChapterStop area, or at the end of the list (the "Show
-    // Full History" link).
-    size_t chapter_stops = GetChapterStopCount(history_items);
-    if (chapter_stops == 0)
-      return false;  // We must have reached the "Show Full History" link.
-    // Otherwise, look to see if we have reached the separator for the
-    // chapter-stops. If not, this is a chapter stop.
-    return index == history_items + 1 + chapter_stops;
-  }
-
-  // Look to see if we have reached the separator for the history items.
-  return index == history_items;
+  std::optional<MenuSection> section = GetSectionForIndex(index);
+  return section.has_value() && section.value() == MenuSection::kSeparator;
 }
 
 void BackForwardMenuModel::FetchFavicon(NavigationEntry* entry) {
   // If the favicon has already been requested for this menu, don't do
   // anything.
-  if (base::Contains(requested_favicons_, entry->GetUniqueID()))
+  if (requested_favicons_.contains(entry->GetUniqueID())) {
     return;
+  }
 
   requested_favicons_.insert(entry->GetUniqueID());
-  favicon::FaviconService* favicon_service =
-      FaviconServiceFactory::GetForProfile(browser_->profile(),
-                                           ServiceAccessType::EXPLICIT_ACCESS);
-  if (!favicon_service)
+  Profile* profile = GetProfile();
+  if (!profile) {
     return;
+  }
+  favicon::FaviconService* favicon_service =
+      FaviconServiceFactory::GetForProfile(profile,
+                                           ServiceAccessType::EXPLICIT_ACCESS);
+  if (!favicon_service) {
+    return;
+  }
 
   favicon_service->GetFaviconImageForPageURL(
       entry->GetURL(),
@@ -275,15 +477,17 @@ void BackForwardMenuModel::FetchFavicon(NavigationEntry* entry) {
 void BackForwardMenuModel::OnFavIconDataAvailable(
     int navigation_entry_unique_id,
     const favicon_base::FaviconImageResult& image_result) {
-  if (image_result.image.IsEmpty())
+  if (image_result.image.IsEmpty()) {
     return;
+  }
 
   // Find the current model_index for the unique id.
   NavigationEntry* entry = nullptr;
   size_t model_index = 0;
   for (size_t i = 0; i + 1 < GetItemCount(); ++i) {
-    if (IsSeparator(i))
+    if (IsSeparator(i)) {
       continue;
+    }
     if (GetNavigationEntry(i)->GetUniqueID() == navigation_entry_unique_id) {
       model_index = i;
       entry = GetNavigationEntry(i);
@@ -310,8 +514,9 @@ void BackForwardMenuModel::OnFavIconDataAvailable(
 
 size_t BackForwardMenuModel::GetHistoryItemCount() const {
   WebContents* contents = GetWebContents();
-  if (!contents)
+  if (!contents) {
     return 0;
+  }
 
   size_t items = contents->GetController().GetCurrentEntryIndex();
   if (model_type_ == ModelType::kForward) {
@@ -323,25 +528,28 @@ size_t BackForwardMenuModel::GetHistoryItemCount() const {
 }
 
 size_t BackForwardMenuModel::GetChapterStopCount(size_t history_items) const {
-  if (history_items != kMaxHistoryItems)
+  if (history_items != kMaxHistoryItems) {
     return 0;
+  }
 
   WebContents* contents = GetWebContents();
   size_t current_entry = contents->GetController().GetCurrentEntryIndex();
 
   const bool forward = model_type_ == ModelType::kForward;
   size_t chapter_id = current_entry;
-  if (!forward && chapter_id < history_items)
+  if (!forward && chapter_id < history_items) {
     return 0;
+  }
   chapter_id =
       forward ? (chapter_id + history_items) : (chapter_id - history_items);
 
   size_t chapter_stops = 0;
   do {
-    const absl::optional<size_t> index =
+    const std::optional<size_t> index =
         GetIndexOfNextChapterStop(chapter_id, forward);
-    if (!index.has_value())
+    if (!index.has_value()) {
       break;
+    }
     chapter_id = index.value();
     ++chapter_stops;
   } while (chapter_stops < kMaxChapterStops);
@@ -349,18 +557,39 @@ size_t BackForwardMenuModel::GetChapterStopCount(size_t history_items) const {
   return chapter_stops;
 }
 
-absl::optional<size_t> BackForwardMenuModel::GetIndexOfNextChapterStop(
+size_t BackForwardMenuModel::GetSeparatorCount() const {
+  size_t separator_count = 0;
+
+  // Separator before chapter stops (if chapter stops exist)
+  size_t history_items = GetHistoryItemCount();
+  if (GetChapterStopCount(history_items) > 0) {
+    separator_count += 1;
+  }
+
+  // Separator before "Show Full History" (if it exists)
+  // "Show Full History" can exist when there are history items or
+  // back-to-opener
+  if (GetSectionItemCount(MenuSection::kShowFullHistory) > 0) {
+    separator_count += 1;
+  }
+
+  return separator_count;
+}
+
+std::optional<size_t> BackForwardMenuModel::GetIndexOfNextChapterStop(
     size_t start_from,
     bool forward) const {
   // We want to advance over the current chapter stop, so we add one.
   // We don't need to do this when direction is backwards.
-  if (forward)
+  if (forward) {
     start_from++;
+  }
 
   NavigationController& controller = GetWebContents()->GetController();
   const size_t max_count = controller.GetEntryCount();
-  if (start_from >= max_count)
-    return absl::nullopt;  // Out of bounds.
+  if (start_from >= max_count) {
+    return std::nullopt;  // Out of bounds.
+  }
 
   NavigationEntry* start_entry = controller.GetEntryAtIndex(start_from);
   const GURL& url = start_entry->GetURL();
@@ -375,8 +604,9 @@ absl::optional<size_t> BackForwardMenuModel::GetIndexOfNextChapterStop(
     // When going forwards we return the entry before the entry that has a
     // different domain.
     for (size_t i = start_from + 1; i < max_count; ++i) {
-      if (!same_domain_func(i))
+      if (!same_domain_func(i)) {
         return i - 1;
+      }
     }
     // Last entry is always considered a chapter stop.
     return max_count - 1;
@@ -385,39 +615,33 @@ absl::optional<size_t> BackForwardMenuModel::GetIndexOfNextChapterStop(
   // When going backwards we return the first entry we find that has a
   // different domain.
   for (size_t i = start_from; i > 0; --i) {
-    if (!same_domain_func(i - 1))
+    if (!same_domain_func(i - 1)) {
       return i - 1;
+    }
   }
   // We have reached the beginning without finding a chapter stop.
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<size_t> BackForwardMenuModel::FindChapterStop(
-    size_t offset,
-    bool forward,
-    size_t skip) const {
+std::optional<size_t> BackForwardMenuModel::FindChapterStop(size_t offset,
+                                                            bool forward,
+                                                            size_t skip) const {
   WebContents* contents = GetWebContents();
   size_t entry = contents->GetController().GetCurrentEntryIndex();
-  if (!forward && entry < offset)
-    return absl::nullopt;
+  if (!forward && entry < offset) {
+    return std::nullopt;
+  }
   entry = forward ? (entry + offset) : (entry - offset);
   for (size_t i = 0; i <= skip; ++i) {
-    const absl::optional<size_t> index =
+    const std::optional<size_t> index =
         GetIndexOfNextChapterStop(entry, forward);
-    if (!index.has_value())
-      return absl::nullopt;
+    if (!index.has_value()) {
+      return std::nullopt;
+    }
     entry = index.value();
   }
 
   return entry;
-}
-
-bool BackForwardMenuModel::ItemHasCommand(size_t index) const {
-  return index < GetItemCount() && !IsSeparator(index);
-}
-
-bool BackForwardMenuModel::ItemHasIcon(size_t index) const {
-  return index < GetItemCount() && !IsSeparator(index);
 }
 
 std::u16string BackForwardMenuModel::GetShowFullHistoryLabel() const {
@@ -426,39 +650,62 @@ std::u16string BackForwardMenuModel::GetShowFullHistoryLabel() const {
 
 WebContents* BackForwardMenuModel::GetWebContents() const {
   // We use the test web contents if the unit test has specified it.
-  return test_web_contents_
-             ? test_web_contents_.get()
-             : browser_->tab_strip_model()->GetActiveWebContents();
+  if (test_web_contents_) {
+    return test_web_contents_.get();
+  }
+  return browser_window_interface_
+             ? browser_window_interface_->GetTabStripModel()
+                   ->GetActiveWebContents()
+             : nullptr;
 }
 
-absl::optional<size_t> BackForwardMenuModel::MenuIndexToNavEntryIndex(
-    size_t index) const {
-  WebContents* contents = GetWebContents();
-  size_t history_items = GetHistoryItemCount();
-
-  // Convert anything above the History items separator.
-  if (index < history_items) {
-    const size_t current_index =
-        contents->GetController().GetCurrentEntryIndex();
-    const bool forward = model_type_ == ModelType::kForward;
-    if (!forward && current_index <= index)
-      return absl::nullopt;
-    return forward ? (current_index + index + 1)
-                   : (current_index - (index + 1));
+Profile* BackForwardMenuModel::GetProfile() const {
+  if (WebContents* contents = GetWebContents()) {
+    return Profile::FromBrowserContext(contents->GetBrowserContext());
   }
-  if (index == history_items)
-    return absl::nullopt;  // Don't translate the separator for history items.
+  return browser_window_interface_ ? browser_window_interface_->GetProfile()
+                                   : nullptr;
+}
 
-  if (index >= history_items + 1 + GetChapterStopCount(history_items))
-    return absl::nullopt;  // This is beyond the last chapter stop so we abort.
+std::optional<size_t> BackForwardMenuModel::MenuIndexToNavEntryIndex(
+    size_t index) const {
+  std::optional<MenuSection> section = GetSectionForIndex(index);
+  if (!section.has_value()) {
+    return std::nullopt;
+  }
 
-  // This menu item is a chapter stop located between the two separators.
-  return FindChapterStop(history_items, model_type_ == ModelType::kForward,
-                         index - history_items - 1);
+  switch (section.value()) {
+    case MenuSection::kHistory: {
+      // Convert history index to navigation entry index
+      const size_t current_index =
+          GetWebContents()->GetController().GetCurrentEntryIndex();
+      const bool forward = model_type_ == ModelType::kForward;
+      if (!forward && current_index <= index) {
+        return std::nullopt;
+      }
+      return forward ? (current_index + index + 1)
+                     : (current_index - (index + 1));
+    }
+    case MenuSection::kChapterStops: {
+      // Calculate offset within chapter stops section.
+      std::optional<size_t> chapter_start =
+          GetStartingIndexOfSection(MenuSection::kChapterStops);
+      CHECK(chapter_start.has_value());
+      size_t offset_in_section = index - chapter_start.value();
+      size_t history_items = GetHistoryItemCount();
+      return FindChapterStop(history_items, model_type_ == ModelType::kForward,
+                             offset_in_section);
+    }
+    case MenuSection::kBackToOpener:
+    case MenuSection::kSeparator:
+    case MenuSection::kShowFullHistory:
+      // These sections don't have navigation entries.
+      return std::nullopt;
+  }
 }
 
 NavigationEntry* BackForwardMenuModel::GetNavigationEntry(size_t index) const {
-  absl::optional<size_t> controller_index = MenuIndexToNavEntryIndex(index);
+  std::optional<size_t> controller_index = MenuIndexToNavEntryIndex(index);
   NavigationController& controller = GetWebContents()->GetController();
 
   DCHECK(controller_index.has_value());
@@ -470,13 +717,14 @@ NavigationEntry* BackForwardMenuModel::GetNavigationEntry(size_t index) const {
 
 std::string BackForwardMenuModel::BuildActionName(
     const std::string& action,
-    absl::optional<size_t> index) const {
+    std::optional<size_t> index) const {
   DCHECK(!action.empty());
   std::string metric_string;
-  if (model_type_ == ModelType::kForward)
+  if (model_type_ == ModelType::kForward) {
     metric_string += "ForwardMenu_";
-  else
+  } else {
     metric_string += "BackMenu_";
+  }
   metric_string += action;
   if (index.has_value()) {
     // +1 is for historical reasons (indices used to start at 1).
@@ -486,5 +734,6 @@ std::string BackForwardMenuModel::BuildActionName(
 }
 
 bool BackForwardMenuModel::ShouldShowFullHistoryBeVisible() const {
-  return !browser_->profile()->IsOffTheRecord();
+  Profile* profile = GetProfile();
+  return profile && !profile->IsOffTheRecord();
 }

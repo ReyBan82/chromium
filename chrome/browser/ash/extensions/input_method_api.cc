@@ -5,11 +5,14 @@
 #include "chrome/browser/ash/extensions/input_method_api.h"
 
 #include <stddef.h>
+
 #include <memory>
 #include <set>
 #include <string>
 #include <utility>
 
+#include "ash/constants/ash_pref_names.h"
+#include "base/check_op.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/lazy_instance.h"
@@ -17,21 +20,26 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "chrome/browser/ash/crosapi/browser_util.h"
 #include "chrome/browser/ash/extensions/dictionary_event_router.h"
 #include "chrome/browser/ash/extensions/ime_menu_event_router.h"
 #include "chrome/browser/ash/extensions/input_method_event_router.h"
+#include "chrome/browser/ash/extensions/language_packs/language_pack_event_router.h"
+#include "chrome/browser/ash/extensions/language_packs/language_packs_extensions_util.h"
 #include "chrome/browser/ash/input_method/autocorrect_manager.h"
+#include "chrome/browser/ash/input_method/input_method_settings_consts.h"
 #include "chrome/browser/ash/input_method/native_input_method_engine.h"
 #include "chrome/browser/extensions/api/input_ime/input_ime_api.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/spellchecker/spellcheck_factory.h"
 #include "chrome/browser/spellchecker/spellcheck_service.h"
 #include "chrome/browser/ui/ash/keyboard/chrome_keyboard_controller_client.h"
-#include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/common/extensions/api/input_method_private.h"
-#include "chrome/common/pref_names.h"
+#include "chromeos/ash/components/browser_delegate/browser_controller.h"
+#include "chromeos/ash/components/browser_delegate/browser_delegate.h"
+#include "chromeos/ash/components/language_packs/handwriting.h"
+#include "chromeos/ash/components/language_packs/language_pack_manager.h"
+#include "chromeos/components/kiosk/kiosk_utils.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "extensions/browser/extension_function_registry.h"
@@ -42,7 +50,8 @@
 #include "ui/base/ime/ash/input_method_descriptor.h"
 #include "ui/base/ime/ash/input_method_manager.h"
 #include "ui/base/ime/ash/input_method_util.h"
-#include "ui/display/screen.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 
 namespace {
 
@@ -76,8 +85,10 @@ namespace SetCompositionRange =
 namespace OnInputMethodOptionsChanged =
     extensions::api::input_method_private::OnInputMethodOptionsChanged;
 namespace OnAutocorrect = extensions::api::input_method_private::OnAutocorrect;
-namespace GetTextFieldBounds =
-    extensions::api::input_method_private::GetTextFieldBounds;
+namespace GetLanguagePackStatus =
+    extensions::api::input_method_private::GetLanguagePackStatus;
+namespace OnLanguagePackStatusChanged =
+    extensions::api::input_method_private::OnLanguagePackStatusChanged;
 
 using ::ash::input_method::InputMethodEngine;
 
@@ -117,12 +128,12 @@ namespace extensions {
 
 ExtensionFunction::ResponseAction
 InputMethodPrivateGetInputMethodConfigFunction::Run() {
-  base::Value::Dict output;
+  base::DictValue output;
   output.Set("isPhysicalKeyboardAutocorrectEnabled", true);
   output.Set("isImeMenuActivated",
              Profile::FromBrowserContext(browser_context())
                  ->GetPrefs()
-                 ->GetBoolean(prefs::kLanguageImeMenuActivated));
+                 ->GetBoolean(ash::prefs::kLanguageImeMenuActivated));
   return RespondNow(WithArguments(std::move(output)));
 }
 
@@ -135,9 +146,9 @@ InputMethodPrivateGetCurrentInputMethodFunction::Run() {
 
 ExtensionFunction::ResponseAction
 InputMethodPrivateSetCurrentInputMethodFunction::Run() {
-  std::unique_ptr<SetCurrentInputMethod::Params> params(
-      SetCurrentInputMethod::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<SetCurrentInputMethod::Params> params =
+      SetCurrentInputMethod::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
   scoped_refptr<ash::input_method::InputMethodManager::State> ime_state =
       ash::input_method::InputMethodManager::Get()->GetActiveIMEState();
   const std::vector<std::string>& input_methods =
@@ -165,7 +176,7 @@ InputMethodPrivateSwitchToLastUsedInputMethodFunction::Run() {
 
 ExtensionFunction::ResponseAction
 InputMethodPrivateGetInputMethodsFunction::Run() {
-  base::Value::List output;
+  base::ListValue output;
   auto* manager = ash::input_method::InputMethodManager::Get();
   ash::input_method::InputMethodUtil* util = manager->GetInputMethodUtil();
   scoped_refptr<ash::input_method::InputMethodManager::State> ime_state =
@@ -175,7 +186,7 @@ InputMethodPrivateGetInputMethodsFunction::Run() {
   for (size_t i = 0; i < input_methods.size(); ++i) {
     const ash::input_method::InputMethodDescriptor& input_method =
         input_methods[i];
-    base::Value::Dict val;
+    base::DictValue val;
     val.Set("id", input_method.id());
     val.Set("name", util->GetInputMethodLongName(input_method));
     val.Set("indicator", input_method.GetIndicator());
@@ -198,19 +209,20 @@ InputMethodPrivateFetchAllDictionaryWordsFunction::Run() {
                                              static_function_name())));
   }
 
-  const std::set<std::string>& words = dictionary->GetWords();
-  base::Value::List output;
-  for (const auto& word : words) {
-    output.Append(word);
+  std::set<std::string> words = dictionary->GetWords();
+  base::ListValue output;
+  output.reserve(words.size());
+  for (auto it = words.begin(); it != words.end();) {
+    output.Append(std::move(words.extract(it++).value()));
   }
   return RespondNow(WithArguments(std::move(output)));
 }
 
 ExtensionFunction::ResponseAction
 InputMethodPrivateAddWordToDictionaryFunction::Run() {
-  std::unique_ptr<AddWordToDictionary::Params> params(
-      AddWordToDictionary::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<AddWordToDictionary::Params> params =
+      AddWordToDictionary::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
   SpellcheckService* spellcheck =
       SpellcheckServiceFactory::GetForContext(browser_context());
   if (!spellcheck) {
@@ -239,12 +251,12 @@ InputMethodPrivateAddWordToDictionaryFunction::Run() {
 
 ExtensionFunction::ResponseAction
 InputMethodPrivateSetXkbLayoutFunction::Run() {
-  std::unique_ptr<SetXkbLayout::Params> params(
-      SetXkbLayout::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<SetXkbLayout::Params> params =
+      SetXkbLayout::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
   auto* manager = ash::input_method::InputMethodManager::Get();
   ash::input_method::ImeKeyboard* keyboard = manager->GetImeKeyboard();
-  keyboard->SetCurrentKeyboardLayoutByName(params->xkb_name);
+  keyboard->SetCurrentKeyboardLayoutByName(params->xkb_name, base::DoNothing());
   return RespondNow(NoArguments());
 }
 
@@ -272,9 +284,9 @@ InputMethodPrivateHideInputViewFunction::Run() {
 
 ExtensionFunction::ResponseAction
 InputMethodPrivateOpenOptionsPageFunction::Run() {
-  std::unique_ptr<OpenOptionsPage::Params> params(
-      OpenOptionsPage::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<OpenOptionsPage::Params> params =
+      OpenOptionsPage::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
   scoped_refptr<ash::input_method::InputMethodManager::State> ime_state =
       ash::input_method::InputMethodManager::Get()->GetActiveIMEState();
   const ash::input_method::InputMethodDescriptor* ime =
@@ -287,28 +299,17 @@ InputMethodPrivateOpenOptionsPageFunction::Run() {
 
   const GURL& options_page_url = ime->options_page_url();
   if (!options_page_url.is_empty()) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-    // If Lacros is the only browser, open the options page in an Ash app window
-    // instead of a regular Ash browser window.
-    if (!crosapi::browser_util::IsAshWebBrowserEnabled()) {
-      auto* profile = ProfileManager::GetPrimaryUserProfile();
-      ash::SystemAppLaunchParams launch_params;
-      launch_params.url = options_page_url;
-      int64_t display_id =
-          display::Screen::GetScreen()->GetDisplayForNewWindows().id();
-      ash::LaunchSystemWebAppAsync(
-          profile, ash::SystemWebAppType::OS_URL_HANDLER, launch_params,
-          std::make_unique<apps::WindowInfo>(display_id));
-      return RespondNow(NoArguments());
-    }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
     content::WebContents* web_contents = GetSenderWebContents();
-    if (web_contents) {
-      Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
+    ash::BrowserDelegate* browser =
+        web_contents ? ash::BrowserController::GetInstance()->GetBrowserForTab(
+                           web_contents)
+                     : nullptr;
+    if (browser) {
       content::OpenURLParams url_params(options_page_url, content::Referrer(),
                                         WindowOpenDisposition::SINGLETON_TAB,
                                         ui::PAGE_TRANSITION_LINK, false);
-      browser->OpenURL(url_params);
+      browser->GetBrowser().OpenURL(url_params,
+                                    /*navigation_handle_callback=*/{});
     }
   }
   return RespondNow(NoArguments());
@@ -322,8 +323,8 @@ InputMethodPrivateGetSurroundingTextFunction::Run() {
     return RespondNow(Error(InformativeError(
         kErrorInputContextHandlerNotAvailable, static_function_name())));
 
-  std::unique_ptr<GetSurroundingText::Params> params(
-      GetSurroundingText::Params::Create(args()));
+  std::optional<GetSurroundingText::Params> params =
+      GetSurroundingText::Params::Create(args());
   if (params->before_length < 0 || params->after_length < 0)
     return RespondNow(Error(InformativeError(
         base::StringPrintf("%s before_length = %d, after_length = %d.",
@@ -338,7 +339,7 @@ InputMethodPrivateGetSurroundingTextFunction::Run() {
   if (!info.selection_range.IsValid())
     return RespondNow(WithArguments(base::Value()));
 
-  base::Value::Dict ret;
+  base::DictValue ret;
   uint32_t selection_start = info.selection_range.start();
   uint32_t selection_end = info.selection_range.end();
   // Makes sure |selection_start| is less or equals to |selection_end|.
@@ -368,27 +369,40 @@ InputMethodPrivateGetSurroundingTextFunction::Run() {
 
 ExtensionFunction::ResponseAction InputMethodPrivateGetSettingsFunction::Run() {
   const auto params = GetSettings::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
-  const base::Value::Dict& input_methods =
+  const base::DictValue& input_methods =
       Profile::FromBrowserContext(browser_context())
           ->GetPrefs()
-          ->GetDict(prefs::kLanguageInputMethodSpecificSettings);
-  const base::Value* engine_result =
-      input_methods.FindByDottedPath(params->engine_id);
+          ->GetDict(ash::prefs::kLanguageInputMethodSpecificSettings);
+  const base::DictValue* engine_result =
+      input_methods.FindDictByDottedPath(params->engine_id);
   base::Value result;
-  if (engine_result)
-    result = engine_result->Clone();
+
+  if (engine_result) {
+    base::DictValue modified_engine_result = engine_result->Clone();
+
+    // For Japanese IME, internal use only. Hyphen in name would complicate API.
+    modified_engine_result.Remove(
+        ash::input_method::kJpPrefMetadataOptionsSource);
+
+    // For Japanese IME, obsolete no-longer-used, hence excluded in API specs.
+    modified_engine_result.Remove(
+        ash::input_method::kJpPrefAutomaticallySendStatisticsToGoogle);
+
+    result = base::Value(std::move(modified_engine_result));
+  }
+
   return RespondNow(WithArguments(std::move(result)));
 }
 
 ExtensionFunction::ResponseAction InputMethodPrivateSetSettingsFunction::Run() {
   const auto params = SetSettings::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   ScopedDictPrefUpdate update(
       Profile::FromBrowserContext(browser_context())->GetPrefs(),
-      prefs::kLanguageInputMethodSpecificSettings);
+      ash::prefs::kLanguageInputMethodSpecificSettings);
   update->SetByDottedPath(params->engine_id, params->settings.ToValue());
 
   // The router will only send the event to extensions that are listening.
@@ -423,17 +437,17 @@ InputMethodPrivateSetCompositionRangeFunction::Run() {
       segment_info.start = segments_arg.start;
       segment_info.end = segments_arg.end;
       switch (segments_arg.style) {
-        case input_method_private::UNDERLINE_STYLE_UNDERLINE:
+        case input_method_private::UnderlineStyle::kUnderline:
           segment_info.style = InputMethodEngine::SEGMENT_STYLE_UNDERLINE;
           break;
-        case input_method_private::UNDERLINE_STYLE_DOUBLEUNDERLINE:
+        case input_method_private::UnderlineStyle::kDoubleUnderline:
           segment_info.style =
               InputMethodEngine::SEGMENT_STYLE_DOUBLE_UNDERLINE;
           break;
-        case input_method_private::UNDERLINE_STYLE_NOUNDERLINE:
+        case input_method_private::UnderlineStyle::kNoUnderline:
           segment_info.style = InputMethodEngine::SEGMENT_STYLE_NO_UNDERLINE;
           break;
-        case input_method_private::UNDERLINE_STYLE_NONE:
+        case input_method_private::UnderlineStyle::kNone:
           EXTENSION_FUNCTION_VALIDATE(false);
           break;
       }
@@ -449,29 +463,6 @@ InputMethodPrivateSetCompositionRangeFunction::Run() {
   return RespondNow(WithArguments(base::Value(true)));
 }
 
-ExtensionFunction::ResponseAction
-InputMethodPrivateGetTextFieldBoundsFunction::Run() {
-  std::string error;
-  InputMethodEngine* engine =
-      GetEngineIfActive(browser_context(), extension_id(), &error);
-  if (!engine)
-    return RespondNow(Error(InformativeError(error, static_function_name())));
-
-  const auto parent_params = GetTextFieldBounds::Params::Create(args());
-  const auto& params = parent_params->parameters;
-  const gfx::Rect rect =
-      engine->InputMethodEngine::GetTextFieldBounds(params.context_id, &error);
-  if (rect.IsEmpty()) {
-    return RespondNow(Error(InformativeError(error, static_function_name())));
-  }
-  base::Value::Dict ret;
-  ret.Set("x", rect.x());
-  ret.Set("y", rect.y());
-  ret.Set("width", rect.width());
-  ret.Set("height", rect.height());
-  return RespondNow(WithArguments(std::move(ret)));
-}
-
 ExtensionFunction::ResponseAction InputMethodPrivateResetFunction::Run() {
   std::string error;
   InputMethodEngine* engine =
@@ -485,8 +476,8 @@ ExtensionFunction::ResponseAction InputMethodPrivateResetFunction::Run() {
 
 ExtensionFunction::ResponseAction
 InputMethodPrivateOnAutocorrectFunction::Run() {
-  std::unique_ptr<OnAutocorrect::Params> parent_params(
-      OnAutocorrect::Params::Create(args()));
+  std::optional<OnAutocorrect::Params> parent_params =
+      OnAutocorrect::Params::Create(args());
   const OnAutocorrect::Params::Parameters& params = parent_params->parameters;
   std::string error;
   ash::input_method::NativeInputMethodEngine* engine =
@@ -518,6 +509,64 @@ InputMethodPrivateNotifyInputMethodReadyForTestingFunction::Run() {
   return RespondNow(NoArguments());
 }
 
+ExtensionFunction::ResponseAction
+InputMethodPrivateGetLanguagePackStatusFunction::Run() {
+  std::optional<GetLanguagePackStatus::Params> params =
+      GetLanguagePackStatus::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
+  // This currently only handles handwriting, but this should (in theory)
+  // handle a collection of language packs once input methods depend on multiple
+  // language packs.
+  auto* manager = ash::input_method::InputMethodManager::Get();
+
+  std::optional<std::string> handwriting_locale =
+      ash::language_packs::MapInputMethodIdToHandwritingLocale(
+          manager->GetInputMethodUtil(), params->input_method_id);
+  // If there are no language packs associated with an input method, installed
+  // is returned.
+  if (!handwriting_locale.has_value()) {
+    return RespondNow(WithArguments(
+        ToString(input_method_private::LanguagePackStatus::kInstalled)));
+  }
+  if (!ash::language_packs::HandwritingLocaleToDlc(*handwriting_locale)
+           .has_value()) {
+    // We obtained a handwriting locale, but it doesn't have an associated
+    // language pack. This means that there are no language packs associated
+    // with this input method.
+    //
+    // "en" is the only handwriting locale which does not have an associated
+    // language pack (as of writing).
+    if (*handwriting_locale != "en") {
+      LOG(DFATAL) << "Got non-English handwriting locale from manifest which "
+                     "does not have DLC: "
+                  << *handwriting_locale;
+    }
+    return RespondNow(WithArguments(
+        ToString(input_method_private::LanguagePackStatus::kInstalled)));
+  }
+
+  ash::language_packs::LanguagePackManager::GetPackState(
+      ash::language_packs::kHandwritingFeatureId, *handwriting_locale,
+      // This `BindOnce` into a `.Then` is required to avoid having a method on
+      // this class which has a language pack type in its function signature,
+      // which would cause language packs to be included in this file's headers,
+      // which would cause a slew of dependency issues.
+      base::BindOnce(&chromeos::LanguagePackResultToExtensionStatus)
+          .Then(
+              base::BindOnce(&InputMethodPrivateGetLanguagePackStatusFunction::
+                                 OnGetLanguagePackStatusComplete,
+                             this)));
+  return RespondLater();
+}
+
+void InputMethodPrivateGetLanguagePackStatusFunction::
+    OnGetLanguagePackStatusComplete(
+        const input_method_private::LanguagePackStatus status) {
+  base::ListValue results =
+      input_method_private::GetLanguagePackStatus::Results::Create(status);
+  Respond(ArgumentList(std::move(results)));
+}
+
 InputMethodAPI::InputMethodAPI(content::BrowserContext* context)
     : context_(context) {
   EventRouter::Get(context_)->RegisterObserver(this, OnChanged::kEventName);
@@ -531,6 +580,8 @@ InputMethodAPI::InputMethodAPI(content::BrowserContext* context)
       ->RegisterObserver(this, OnImeMenuListChanged::kEventName);
   EventRouter::Get(context_)
       ->RegisterObserver(this, OnImeMenuItemsChanged::kEventName);
+  EventRouter::Get(context_)->RegisterObserver(
+      this, OnLanguagePackStatusChanged::kEventName);
   ExtensionFunctionRegistry& registry =
       ExtensionFunctionRegistry::GetInstance();
   registry.RegisterFunction<InputMethodPrivateGetInputMethodConfigFunction>();
@@ -579,6 +630,10 @@ void InputMethodAPI::OnListenerAdded(
              !ime_menu_event_router_.get()) {
     ime_menu_event_router_ =
         std::make_unique<chromeos::ExtensionImeMenuEventRouter>(context_);
+  } else if (details.event_name == OnLanguagePackStatusChanged::kEventName &&
+             !language_pack_event_router_.get()) {
+    language_pack_event_router_ =
+        std::make_unique<chromeos::LanguagePackEventRouter>(context_);
   }
 }
 

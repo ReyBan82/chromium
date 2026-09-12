@@ -53,7 +53,7 @@ class CellularSetupOtaActivatorImplTest : public testing::Test {
 
  protected:
   CellularSetupOtaActivatorImplTest()
-      : test_helper_(false /* use_default_devices_and_services */) {}
+      : test_helper_(/*use_default_devices_and_services=*/false) {}
   ~CellularSetupOtaActivatorImplTest() override = default;
 
   // testing::Test:
@@ -93,7 +93,7 @@ class CellularSetupOtaActivatorImplTest : public testing::Test {
           CreateCellularSIMSlotInfo(kTestCellularServiceIccid),
           false /* notify_changed */);
 
-      base::Value::Dict home_provider;
+      base::DictValue home_provider;
       home_provider.Set(shill::kOperatorNameKey, kTestCellularDeviceCarrier);
       device_test->SetDeviceProperty(
           kTestCellularDevicePath, shill::kHomeProviderProperty,
@@ -142,7 +142,7 @@ class CellularSetupOtaActivatorImplTest : public testing::Test {
             : base::Value(shill::kActivationStateNotActivated));
 
     if (has_valid_payment_info) {
-      base::Value::Dict payment_portal;
+      base::DictValue payment_portal;
       payment_portal.Set(shill::kPaymentPortalURL,
                          kTestCellularServicePaymentUrl);
       payment_portal.Set(shill::kPaymentPortalMethod, kPaymentPortalMethodPost);
@@ -264,8 +264,8 @@ class CellularSetupOtaActivatorImplTest : public testing::Test {
   base::Value CreateCellularSIMSlotInfo(
       const std::string& iccid,
       const std::string& eid = std::string()) {
-    base::Value::List sim_slot_infos;
-    base::Value::Dict slot_info_item;
+    base::ListValue sim_slot_infos;
+    base::DictValue slot_info_item;
     slot_info_item.Set(shill::kSIMSlotInfoEID, eid);
     slot_info_item.Set(shill::kSIMSlotInfoICCID, iccid);
     slot_info_item.Set(shill::kSIMSlotInfoPrimary, false);

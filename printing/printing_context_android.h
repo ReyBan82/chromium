@@ -9,6 +9,7 @@
 
 #include "base/android/scoped_java_ref.h"
 #include "base/file_descriptor_posix.h"
+#include "base/files/scoped_file.h"
 #include "printing/mojom/print.mojom.h"
 #include "printing/printing_context.h"
 
@@ -32,7 +33,7 @@ class COMPONENT_EXPORT(PRINTING) PrintingContextAndroid
   // descriptor specified, or when the printing operation failed. On success,
   // the PDF has `page_count` pages. Non-positive `page_count` indicates
   // failure.
-  static void PdfWritingDone(int page_count);
+  static void PdfWritingDone(int page_count, ui::WindowAndroid* window);
 
   static void SetPendingPrint(
       ui::WindowAndroid* window,
@@ -42,13 +43,10 @@ class COMPONENT_EXPORT(PRINTING) PrintingContextAndroid
 
   // Called from Java, when printing settings from the user are ready or the
   // printing operation is canceled.
-  void AskUserForSettingsReply(JNIEnv* env,
-                               const base::android::JavaParamRef<jobject>& obj,
-                               jboolean success);
+  void AskUserForSettingsReply(JNIEnv* env, bool success);
 
   // Called from Java, when a printing process initiated by a script finishes.
-  void ShowSystemDialogDone(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>& obj);
+  void ShowSystemDialogDone(JNIEnv* env);
 
   // PrintingContext implementation.
   void AskUserForSettings(int max_pages,
@@ -69,15 +67,16 @@ class COMPONENT_EXPORT(PRINTING) PrintingContextAndroid
   printing::NativeDrawingContext context() const override;
 
  private:
-  bool is_file_descriptor_valid() const { return fd_ > base::kInvalidFd; }
-
   base::android::ScopedJavaGlobalRef<jobject> j_printing_context_;
 
   // The callback from AskUserForSettings to be called when the settings are
   // ready on the Java side
   PrintSettingsCallback callback_;
 
-  int fd_ = base::kInvalidFd;
+  // File descriptor for the PDF file and owned by this layer.
+  base::ScopedFD scoped_fd_;
+
+  bool print_selection_only_ = false;
 };
 
 }  // namespace printing

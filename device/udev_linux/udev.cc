@@ -31,6 +31,10 @@ const char* udev_device_get_devtype(udev_device* udev_device) {
   return UdevLoader::Get()->udev_device_get_devtype(udev_device);
 }
 
+const char* udev_device_get_driver(struct udev_device* udev_device) {
+  return UdevLoader::Get()->udev_device_get_driver(udev_device);
+}
+
 udev_device* udev_device_get_parent(udev_device* udev_device) {
   return UdevLoader::Get()->udev_device_get_parent(udev_device);
 }
@@ -151,17 +155,6 @@ udev* udev_new() {
   return UdevLoader::Get()->udev_new();
 }
 
-void udev_set_log_fn(
-    struct udev* udev,
-    void (*log_fn)(struct udev* udev, int priority, const char* file, int line,
-                   const char* fn, const char* format, va_list args)) {
-  return UdevLoader::Get()->udev_set_log_fn(udev, log_fn);
-}
-
-void udev_set_log_priority(struct udev* udev, int priority) {
-  return UdevLoader::Get()->udev_set_log_priority(udev, priority);
-}
-
 void udev_unref(udev* udev) {
   UdevLoader::Get()->udev_unref(udev);
 }
@@ -174,6 +167,10 @@ std::string UdevDeviceGetPropertyValue(udev_device* udev_device,
 std::string UdevDeviceGetSysattrValue(udev_device* udev_device,
                                       const char* key) {
   return StringOrEmptyIfNull(udev_device_get_sysattr_value(udev_device, key));
+}
+
+std::string UdevDeviceGetAction(udev_device* udev_device) {
+  return StringOrEmptyIfNull(udev_device_get_action(udev_device));
 }
 
 std::string UdevDeviceRecursiveGetSysattrValue(udev_device* udev_device,

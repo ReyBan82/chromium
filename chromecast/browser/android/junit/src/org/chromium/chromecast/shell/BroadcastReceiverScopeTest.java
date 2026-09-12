@@ -6,9 +6,9 @@ package org.chromium.chromecast.shell;
 
 import static android.os.Looper.getMainLooper;
 
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.emptyIterable;
-import static org.junit.Assert.assertThat;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.content.Context;
@@ -20,21 +20,14 @@ import androidx.test.core.app.ApplicationProvider;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
-import org.robolectric.annotation.LooperMode;
-import org.robolectric.annotation.LooperMode.Mode;
 
-import org.chromium.testing.local.LocalRobolectricTestRunner;
+import org.chromium.base.test.BaseRobolectricTestRunner;
 
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Tests for BroadcastReceiverScope.
- */
-@RunWith(LocalRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
-@LooperMode(Mode.PAUSED)
+/** Tests for BroadcastReceiverScope. */
+@RunWith(BaseRobolectricTestRunner.class)
 public class BroadcastReceiverScopeTest {
     private Context mContext;
 
@@ -49,7 +42,9 @@ public class BroadcastReceiverScopeTest {
         IntentFilter filter = new IntentFilter();
         filter.addAction(action);
         List<String> result = new ArrayList<>();
-        new BroadcastReceiverScope(mContext, filter,
+        new BroadcastReceiverScope(
+                mContext,
+                filter,
                 (Intent intent) -> result.add("Intent received: " + intent.getAction()));
         Intent intent = new Intent().setAction(action);
         mContext.sendBroadcast(intent);
@@ -64,7 +59,9 @@ public class BroadcastReceiverScopeTest {
         IntentFilter filter = new IntentFilter();
         filter.addAction(helloAction);
         List<String> result = new ArrayList<>();
-        new BroadcastReceiverScope(mContext, filter,
+        new BroadcastReceiverScope(
+                mContext,
+                filter,
                 (Intent intent) -> result.add("Intent received: " + intent.getAction()));
         Intent intent = new Intent().setAction(goodbyeAction);
         mContext.sendBroadcast(intent);
@@ -79,8 +76,11 @@ public class BroadcastReceiverScopeTest {
         filter.addAction(action);
         List<String> result = new ArrayList<>();
         // Wrap scope in try-with-resources to call close() on it.
-        try (AutoCloseable scope = new BroadcastReceiverScope(mContext, filter,
-                     (Intent intent) -> result.add("Intent received: " + intent.getAction()))) {
+        try (AutoCloseable scope =
+                new BroadcastReceiverScope(
+                        mContext,
+                        filter,
+                        (Intent intent) -> result.add("Intent received: " + intent.getAction()))) {
         } catch (Exception e) {
             result.add("Exception during lifetime of BroadcastReceiver scope: " + e);
         }

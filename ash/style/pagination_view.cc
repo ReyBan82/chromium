@@ -4,12 +4,14 @@
 
 #include "ash/style/pagination_view.h"
 
+#include <optional>
+#include <utility>
+
 #include "ash/public/cpp/pagination/pagination_model.h"
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/style/style_util.h"
 #include "base/i18n/number_formatting.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
@@ -18,6 +20,7 @@
 #include "ui/gfx/animation/tween.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/rounded_corners_f.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/background.h"
 #include "ui/views/controls/button/image_button.h"
 #include "ui/views/controls/scroll_view.h"
@@ -27,6 +30,9 @@
 namespace ash {
 
 namespace {
+
+// The minimum number of pages to show the pagination view.
+constexpr int kMinNumPages = 2;
 
 // Attributes of arrow buttons.
 constexpr int kArrowButtonIconSize = 20;
@@ -40,6 +46,17 @@ constexpr int kIndicatorStrokeWidth = 1;
 constexpr int kIndicatorSpacing = 2;
 constexpr ui::ColorId kIndicatorColorId = cros_tokens::kCrosSysPrimary;
 constexpr int kMaxNumVisibleIndicators = 5;
+
+// Get the width of the indicator container.
+int GetIndicatorContainerWidth(int total_pages) {
+  if (total_pages < kMinNumPages) {
+    return 0;
+  }
+
+  const int visible_num = std::min(total_pages, kMaxNumVisibleIndicators);
+  return visible_num * kIndicatorButtonSize +
+         (visible_num - 1) * kIndicatorSpacing;
+}
 
 // A structure holds the info needed by interpolation.
 template <typename T>
@@ -55,14 +72,14 @@ struct InterpolationInterval {
 // IndicatorButton:
 // A button with a hollow circle in the center.
 class IndicatorButton : public views::Button {
- public:
-  METADATA_HEADER(IndicatorButton);
+  METADATA_HEADER(IndicatorButton, views::Button)
 
+ public:
   IndicatorButton(PressedCallback callback,
                   const std::u16string& accessible_name)
-      : views::Button(callback) {
+      : views::Button(std::move(callback)) {
     SetFocusBehavior(views::View::FocusBehavior::ACCESSIBLE_ONLY);
-    SetAccessibleName(accessible_name);
+    GetViewAccessibility().SetName(accessible_name);
   }
 
   IndicatorButton(const IndicatorButton&) = delete;
@@ -78,7 +95,8 @@ class IndicatorButton : public views::Button {
   }
 
   // views::Button:
-  gfx::Size CalculatePreferredSize() const override {
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& available_size) const override {
     return gfx::Size(kIndicatorButtonSize, kIndicatorButtonSize);
   }
 
@@ -94,7 +112,7 @@ class IndicatorButton : public views::Button {
   }
 };
 
-BEGIN_METADATA(IndicatorButton, views::Button)
+BEGIN_METADATA(IndicatorButton)
 END_METADATA
 
 }  // namespace
@@ -103,9 +121,9 @@ END_METADATA
 // PaginationView::SelectorDotView:
 // A solid circle that performs deformation with the pace of page transition.
 class PaginationView::SelectorDotView : public views::View {
- public:
-  METADATA_HEADER(SelectorDotView);
+  METADATA_HEADER(SelectorDotView, views::View)
 
+ public:
   using DeformInterval = InterpolationInterval<gfx::Rect>;
 
   SelectorDotView() {
@@ -173,7 +191,7 @@ class PaginationView::SelectorDotView : public views::View {
   std::vector<DeformInterval> deform_intervals_;
 };
 
-BEGIN_METADATA(PaginationView, SelectorDotView, views::View)
+BEGIN_METADATA(PaginationView, SelectorDotView)
 END_METADATA
 
 //------------------------------------------------------------------------------
@@ -181,10 +199,11 @@ END_METADATA
 // The container of indicators. If the indicator to be selected is not visible,
 // the container will scroll with the pace of pagination transition.
 class PaginationView::IndicatorContainer : public views::BoxLayoutView {
- public:
-  METADATA_HEADER(IndicatorContainer);
+  METADATA_HEADER(IndicatorContainer, views::BoxLayoutView)
 
-  IndicatorContainer() {
+ public:
+  explicit IndicatorContainer(views::BoxLayout::Orientation orientation) {
+    SetOrientation(orientation);
     SetMainAxisAlignment(views::BoxLayout::MainAxisAlignment::kCenter);
     SetCrossAxisAlignment(views::BoxLayout::CrossAxisAlignment::kCenter);
     SetBetweenChildSpacing(kIndicatorSpacing);
@@ -219,7 +238,7 @@ class PaginationView::IndicatorContainer : public views::BoxLayoutView {
     DCHECK(buttons_.size());
     auto indicator_button = buttons_.back();
     buttons_.pop_back();
-    RemoveChildViewT(indicator_button);
+    RemoveChildViewT(std::exchange(indicator_button, nullptr));
   }
 
   // Gets indicator corresponding to the given page.
@@ -229,6 +248,8 @@ class PaginationView::IndicatorContainer : public views::BoxLayoutView {
     return buttons_[page].get();
   }
 
+  int GetNumberOfIndicators() const { return buttons_.size(); }
+
   // Sets up scrolling if an invisible page is selected.
   void StartScroll(int start_page, int target_page) {
     // Scroll the indicator container by the distance of a indicator button size
@@ -236,11 +257,11 @@ class PaginationView::IndicatorContainer : public views::BoxLayoutView {
     // TODO(zxdan): settings bounds at each step will cause repainting which is
     // expensive. However, using transform sometimes makes the stroke of
     // indicator circle become thicker. Will investigate the cause latter.
-    const bool left = start_page < target_page;
+    const bool forward = start_page < target_page;
     const int start_page_offset =
-        left ? kMaxNumVisibleIndicators - start_page - 1 : -start_page;
+        forward ? kMaxNumVisibleIndicators - start_page - 1 : -start_page;
     const int target_page_offset =
-        left ? kMaxNumVisibleIndicators - target_page - 1 : -target_page;
+        forward ? kMaxNumVisibleIndicators - target_page - 1 : -target_page;
     const int scroll_unit = kIndicatorButtonSize + kIndicatorSpacing;
     scroll_interval_ = {0.0, start_page_offset * scroll_unit, 1.0,
                         target_page_offset * scroll_unit};
@@ -253,99 +274,128 @@ class PaginationView::IndicatorContainer : public views::BoxLayoutView {
     }
 
     // Interpolate the scroll interval to get current container bounds.
-    SetX(gfx::Tween::IntValueBetween(progress, scroll_interval_->start_value,
-                                     scroll_interval_->target_value));
+    ScrollWithOffset(
+        gfx::Tween::IntValueBetween(progress, scroll_interval_->start_value,
+                                    scroll_interval_->target_value));
   }
 
   void ResetScroll(bool canceled) {
     if (scroll_interval_) {
-      SetX(canceled ? scroll_interval_->start_value
-                    : scroll_interval_->target_value);
+      ScrollWithOffset(canceled ? scroll_interval_->start_value
+                                : scroll_interval_->target_value);
     }
-    scroll_interval_ = absl::nullopt;
+    scroll_interval_ = std::nullopt;
   }
 
   // Returns true if the scrolling is in progress.
   bool ScrollingInProgress() { return !!scroll_interval_; }
 
  private:
-  std::vector<base::raw_ptr<IndicatorButton>> buttons_;
-  absl::optional<InterpolationInterval<int>> scroll_interval_;
+  // Scroll horizontally or vertically with given offset.
+  void ScrollWithOffset(int offset) {
+    if (GetOrientation() == views::BoxLayout::Orientation::kHorizontal) {
+      SetX(offset);
+    } else {
+      SetY(offset);
+    }
+  }
+
+  std::vector<raw_ptr<IndicatorButton>> buttons_;
+  std::optional<InterpolationInterval<int>> scroll_interval_;
 };
 
-BEGIN_METADATA(PaginationView, IndicatorContainer, views::BoxLayoutView)
+BEGIN_METADATA(PaginationView, IndicatorContainer)
 END_METADATA
 
 //------------------------------------------------------------------------------
 // PaginationView:
-PaginationView::PaginationView(PaginationModel* model)
+PaginationView::PaginationView(PaginationModel* model, Orientation orientation)
     : model_(model),
+      orientation_(orientation),
       indicator_scroll_view_(
           AddChildView(std::make_unique<views::ScrollView>())),
       indicator_container_(indicator_scroll_view_->SetContents(
-          std::make_unique<IndicatorContainer>())) {
+          std::make_unique<IndicatorContainer>(
+              orientation == Orientation::kHorizontal
+                  ? views::BoxLayout::Orientation::kHorizontal
+                  : views::BoxLayout::Orientation::kVertical))) {
   DCHECK(model_);
-
   model_observation_.Observe(model_.get());
 
-  // The scroll view does not accept scroll event.
+  // Remove the default background color.
+  indicator_scroll_view_->SetBackgroundColor(std::nullopt);
+
+  // The scroll view does not accept any scroll event.
   indicator_scroll_view_->SetHorizontalScrollBarMode(
       views::ScrollView::ScrollBarMode::kDisabled);
   indicator_scroll_view_->SetVerticalScrollBarMode(
       views::ScrollView::ScrollBarMode::kDisabled);
 
-  TotalPagesChanged(0, model_->total_pages());
+  if (model_->total_pages() >= kMinNumPages) {
+    TotalPagesChanged(0, model_->total_pages());
+  }
 
-  if (model_->is_valid_page(model_->selected_page())) {
+  if (ShouldShowSelectorDot()) {
     CreateSelectorDot();
   }
 }
 
 PaginationView::~PaginationView() = default;
 
-gfx::Size PaginationView::CalculatePreferredSize() const {
+gfx::Size PaginationView::CalculatePreferredSize(
+    const views::SizeBounds& available_size) const {
   const int total_pages = model_->total_pages();
-  const int visible_num = std::min(total_pages, kMaxNumVisibleIndicators);
-  const int container_width = visible_num * kIndicatorButtonSize +
-                              (visible_num - 1) * kIndicatorSpacing;
-
-  // If the number of total pages does not exceed visible maximum, only show
-  // indicator container.
-  if (total_pages <= visible_num) {
-    return gfx::Size(container_width, kIndicatorButtonSize);
+  if (total_pages < kMinNumPages) {
+    return gfx::Size();
   }
 
-  // Otherwise, show indicator container and arrow buttons.
-  return gfx::Size(
-      container_width + 2 * (kArrowButtonIconSize + kArrowIndicatorSpacing),
-      kIndicatorButtonSize);
+  // Initialize container size with indicator container size.
+  int container_size = GetIndicatorContainerWidth(total_pages);
+  if (total_pages > kMaxNumVisibleIndicators) {
+    // If the number of total pages exceeds visible maximum, add arrow buttons.
+    container_size += 2 * (kArrowButtonIconSize + kArrowIndicatorSpacing);
+  }
+
+  return (orientation_ == Orientation::kHorizontal)
+             ? gfx::Size(container_size, kIndicatorButtonSize)
+             : gfx::Size(kIndicatorButtonSize, container_size);
 }
 
-void PaginationView::Layout() {
-  int offset_x = 0;
-  // Set the left arrow button if exists.
-  if (left_arrow_button_) {
-    left_arrow_button_->SetBounds(offset_x, 0, kArrowButtonIconSize,
-                                  kArrowButtonIconSize);
-    offset_x += left_arrow_button_->width() + kArrowIndicatorSpacing;
-  }
+void PaginationView::Layout(PassKey) {
+  const bool horizontal = (orientation_ == Orientation::kHorizontal);
+  int offset = 0;
+
+  // A callback to set the bounds of given arrow button if it exists. Return the
+  // button size if the button exists. Otherwise, return 0.
+  auto set_arrow_button = [&](views::ImageButton* arrow_button) -> int {
+    if (arrow_button) {
+      gfx::Point origin =
+          horizontal ? gfx::Point(offset, 0) : gfx::Point(0, offset);
+      arrow_button->SetBoundsRect(gfx::Rect(
+          origin, gfx::Size(kArrowButtonIconSize, kArrowButtonIconSize)));
+      return kArrowButtonIconSize;
+    }
+    return 0;
+  };
+
+  // Set the backward arrow button if exists.
+  offset += set_arrow_button(backward_arrow_button_);
 
   // Set the indicator container.
   indicator_container_->SizeToPreferredSize();
-  const int visible_num =
-      std::min(model_->total_pages(), kMaxNumVisibleIndicators);
-  indicator_scroll_view_->SetBounds(offset_x, 0,
-                                    visible_num * kIndicatorButtonSize +
-                                        (visible_num - 1) * kIndicatorSpacing,
-                                    kIndicatorButtonSize);
-
-  offset_x += indicator_scroll_view_->width() + kArrowIndicatorSpacing;
+  const int scroll_view_size =
+      GetIndicatorContainerWidth(model_->total_pages());
+  if (horizontal) {
+    indicator_scroll_view_->SetBounds(offset, 0, scroll_view_size,
+                                      kIndicatorButtonSize);
+  } else {
+    indicator_scroll_view_->SetBounds(0, offset, kIndicatorButtonSize,
+                                      scroll_view_size);
+  }
+  offset += scroll_view_size + kArrowIndicatorSpacing;
 
   // Set the right arrow button if exists.
-  if (right_arrow_button_) {
-    right_arrow_button_->SetBounds(offset_x, 0, kIndicatorButtonSize,
-                                   kIndicatorButtonSize);
-  }
+  set_arrow_button(forward_arrow_button_);
 
   // Update arrow button visibility and selector dot position.
   UpdateArrowButtonsVisiblity();
@@ -353,52 +403,53 @@ void PaginationView::Layout() {
 }
 
 void PaginationView::CreateArrowButtons() {
-  for (bool left : {true, false}) {
+  const bool horizontal = (orientation_ == Orientation::kHorizontal);
+  for (bool forward : {true, false}) {
     auto arrow_button = std::make_unique<views::ImageButton>(
         base::BindRepeating(&PaginationView::OnArrowButtonPressed,
-                            base::Unretained(this), left));
+                            base::Unretained(this), forward));
 
     arrow_button->SetImageModel(
         views::ImageButton::ButtonState::STATE_NORMAL,
         ui::ImageModel::FromVectorIcon(
-            left ? kOverflowShelfLeftIcon : kOverflowShelfRightIcon,
+            forward
+                ? (horizontal ? kOverflowShelfRightIcon : kChevronDownSmallIcon)
+                : (horizontal ? kOverflowShelfLeftIcon : kChevronUpSmallIcon),
             kArrowButtonColorId, kArrowButtonIconSize));
 
-    if (left) {
+    if (forward) {
       arrow_button->SetTooltipText(
-          l10n_util::GetStringUTF16(IDS_ASH_PAGINATION_LEFT_ARROW_TOOLTIP));
-      left_arrow_button_ = AddChildView(std::move(arrow_button));
+          l10n_util::GetStringUTF16(IDS_ASH_PAGINATION_FORWARD_ARROW_TOOLTIP));
+      forward_arrow_button_ = AddChildView(std::move(arrow_button));
     } else {
       arrow_button->SetTooltipText(
-          l10n_util::GetStringUTF16(IDS_ASH_PAGINATION_RIGHT_ARROW_TOOLTIP));
-      right_arrow_button_ = AddChildView(std::move(arrow_button));
+          l10n_util::GetStringUTF16(IDS_ASH_PAGINATION_BACKWARD_ARROW_TOOLTIP));
+      backward_arrow_button_ = AddChildView(std::move(arrow_button));
     }
   }
 }
 
 void PaginationView::RemoveArrowButtons() {
-  RemoveChildViewT(left_arrow_button_);
-  left_arrow_button_ = nullptr;
-
-  RemoveChildViewT(right_arrow_button_);
-  right_arrow_button_ = nullptr;
+  RemoveChildViewT(std::exchange(backward_arrow_button_, nullptr));
+  RemoveChildViewT(std::exchange(forward_arrow_button_, nullptr));
 }
 
 void PaginationView::UpdateArrowButtonsVisiblity() {
   // If the first page indicator is visible, hide the left arrow button.
-  if (left_arrow_button_) {
-    left_arrow_button_->SetVisible(!IsIndicatorVisible(0));
+  if (backward_arrow_button_) {
+    backward_arrow_button_->SetVisible(!IsIndicatorVisible(0));
   }
 
   // If the last page indicator is visible, hide the right arrow button.
-  if (right_arrow_button_) {
-    right_arrow_button_->SetVisible(
+  if (forward_arrow_button_) {
+    forward_arrow_button_->SetVisible(
         !IsIndicatorVisible(model_->total_pages() - 1));
   }
 }
 
-void PaginationView::OnArrowButtonPressed(bool left, const ui::Event& event) {
-  const int page_offset = left ? -1 : 1;
+void PaginationView::OnArrowButtonPressed(bool forward,
+                                          const ui::Event& event) {
+  const int page_offset = forward ? 1 : -1;
   model_->SelectPage(model_->selected_page() + page_offset, /*animate=*/true);
 }
 
@@ -416,6 +467,11 @@ void PaginationView::MaybeSetUpScroll() {
   }
 }
 
+bool PaginationView::ShouldShowSelectorDot() const {
+  return model_->total_pages() >= kMinNumPages &&
+         model_->is_valid_page(model_->selected_page());
+}
+
 void PaginationView::CreateSelectorDot() {
   if (selector_dot_) {
     return;
@@ -431,8 +487,7 @@ void PaginationView::RemoveSelectorDot() {
     return;
   }
 
-  indicator_container_->RemoveChildViewT(selector_dot_);
-  selector_dot_ = nullptr;
+  indicator_container_->RemoveChildViewT(std::exchange(selector_dot_, nullptr));
 }
 
 void PaginationView::UpdateSelectorDot() {
@@ -440,10 +495,14 @@ void PaginationView::UpdateSelectorDot() {
     return;
   }
 
+  // The selected page may become invalid when total pages is changing.
+  const int selected_page = model_->selected_page();
+  if (!model_->is_valid_page(selected_page)) {
+    return;
+  }
+
   // Move the selector dot to the position of selected page indicator if the
   // selector dot is not deforming.
-  const int selected_page = model_->selected_page();
-  DCHECK(model_->is_valid_page(selected_page));
   if (!selector_dot_->DeformingInProgress()) {
     selector_dot_->SetBoundsRect(
         indicator_container_->GetIndicatorByPage(selected_page)
@@ -452,7 +511,8 @@ void PaginationView::UpdateSelectorDot() {
 }
 
 void PaginationView::SetUpSelectorDotDeformation() {
-  DCHECK(!selector_dot_->DeformingInProgress());
+  CHECK(selector_dot_);
+  CHECK(!selector_dot_->DeformingInProgress());
 
   const int current_page = model_->selected_page();
   const int target_page = model_->transition().target_page;
@@ -501,7 +561,7 @@ bool PaginationView::IsIndicatorVisible(int page) const {
 
 void PaginationView::SelectedPageChanged(int old_selected, int new_selected) {
   // Update selector dot position and arrow buttons visibility.
-  if (model_->is_valid_page(new_selected)) {
+  if (ShouldShowSelectorDot()) {
     if (!selector_dot_) {
       CreateSelectorDot();
     } else {
@@ -521,41 +581,59 @@ void PaginationView::SelectedPageChanged(int old_selected, int new_selected) {
 
 void PaginationView::TotalPagesChanged(int previous_page_count,
                                        int new_page_count) {
-  if (previous_page_count < new_page_count) {
+  const int current_indicator_num =
+      indicator_container_->GetNumberOfIndicators();
+  new_page_count = new_page_count < kMinNumPages ? 0 : new_page_count;
+  if (current_indicator_num == new_page_count) {
+    return;
+  }
+
+  if (current_indicator_num < new_page_count) {
     // Add more indicators at the end of container.
-    for (int i = previous_page_count; i < new_page_count; i++) {
+    for (int i = current_indicator_num; i < new_page_count; i++) {
       indicator_container_->PushIndicator(model_.get());
     }
 
     // Add arrow buttons if the number of total pages exceeds the visible
     // maximum.
-    if (previous_page_count <= kMaxNumVisibleIndicators &&
+    if (current_indicator_num <= kMaxNumVisibleIndicators &&
         new_page_count > kMaxNumVisibleIndicators) {
       CreateArrowButtons();
     }
+
+    // Create selector dot if the number of total pages exceeds the minimum
+    // number of pages.
+    if (new_page_count >= kMinNumPages && !selector_dot_) {
+      CreateSelectorDot();
+    }
   } else {
     // Remove indicators from the end of the container.
-    for (int i = previous_page_count; i > new_page_count; i--) {
+    for (int i = current_indicator_num; i > new_page_count; i--) {
       indicator_container_->PopIndicator();
     }
 
     // Remove arrow buttons if the number of total pages does not exceed the
     // visible maximum.
-    if (previous_page_count > kMaxNumVisibleIndicators &&
+    if (current_indicator_num > kMaxNumVisibleIndicators &&
         new_page_count <= kMaxNumVisibleIndicators) {
       RemoveArrowButtons();
     }
 
-    // Remove the selector dot if there is no pages.
-    if (new_page_count == 0) {
+    // Remove the selector dot if the number of pages is less than the minimum
+    // number of pages.
+    if (new_page_count < kMinNumPages && selector_dot_) {
       RemoveSelectorDot();
     }
   }
 
-  Layout();
+  DeprecatedLayoutImmediately();
 }
 
 void PaginationView::TransitionChanged() {
+  if (!selector_dot_) {
+    return;
+  }
+
   // If there is no transition, reset and cancel current selector dot
   // deformation and indicator container scrolling.
   if (!model_->has_transition()) {
@@ -580,6 +658,6 @@ void PaginationView::TransitionChanged() {
   selector_dot_->Deform(progress);
 }
 
-BEGIN_METADATA(PaginationView, views::View)
+BEGIN_METADATA(PaginationView)
 END_METADATA
 }  // namespace ash

@@ -4,24 +4,32 @@
 
 #include "net/test/embedded_test_server/controllable_http_response.h"
 
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+
 #include "base/check_op.h"
 #include "base/functional/bind.h"
+#include "base/strings/cstring_view.h"
+#include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/trace_event/typed_macros.h"
+#include "base/trace_event/trace_event.h"
 #include "net/test/embedded_test_server/http_response.h"
 
 namespace net::test_server {
-
-class ControllableHttpResponse::Interceptor : public HttpResponse {
+class Interceptor : public HttpResponse {
  public:
+  using ResponceCallback =
+      base::OnceCallback<void(scoped_refptr<base::SingleThreadTaskRunner>,
+                              base::WeakPtr<HttpResponseDelegate>)>;
+
   explicit Interceptor(
-      base::WeakPtr<ControllableHttpResponse> controller,
       scoped_refptr<base::SingleThreadTaskRunner> controller_task_runner,
-      const HttpRequest& http_request)
-      : controller_(controller),
-        controller_task_runner_(controller_task_runner),
-        http_request_(std::make_unique<HttpRequest>(http_request)) {}
+      ResponceCallback callback)
+      : controller_task_runner_(controller_task_runner),
+        callback_(std::move(callback)) {}
 
   Interceptor(const Interceptor&) = delete;
   Interceptor& operator=(const Interceptor&) = delete;
@@ -34,16 +42,29 @@ class ControllableHttpResponse::Interceptor : public HttpResponse {
         base::SingleThreadTaskRunner::GetCurrentDefault();
     CHECK(task_runner);
     controller_task_runner_->PostTask(
-        FROM_HERE, base::BindOnce(&ControllableHttpResponse::OnRequest,
-                                  controller_, std::move(task_runner), delegate,
-                                  std::move(http_request_)));
+        FROM_HERE, base::BindOnce(&Interceptor::OnRequest, std::move(callback_),
+                                  std::move(task_runner), std::move(delegate)));
   }
 
-  base::WeakPtr<ControllableHttpResponse> controller_;
-  scoped_refptr<base::SingleThreadTaskRunner> controller_task_runner_;
+  static void OnRequest(ResponceCallback callback,
+                        scoped_refptr<base::SingleThreadTaskRunner>
+                            embedded_test_server_task_runner,
+                        base::WeakPtr<HttpResponseDelegate> delegate) {
+    std::move(callback).Run(std::move(embedded_test_server_task_runner),
+                            std::move(delegate));
+  }
 
-  std::unique_ptr<HttpRequest> http_request_;
+  scoped_refptr<base::SingleThreadTaskRunner> controller_task_runner_;
+  ResponceCallback callback_;
 };
+
+bool DoesRequestMatchURL(const HttpRequest& request,
+                         std::string_view relative_url,
+                         bool relative_url_is_prefix) {
+  return request.relative_url == relative_url ||
+         (relative_url_is_prefix &&
+          request.relative_url.starts_with(relative_url));
+}
 
 ControllableHttpResponse::ControllableHttpResponse(
     EmbeddedTestServer* embedded_test_server,
@@ -55,6 +76,16 @@ ControllableHttpResponse::ControllableHttpResponse(
       base::SingleThreadTaskRunner::GetCurrentDefault(),
       base::Owned(new bool(true)), relative_url, relative_url_is_prefix));
 }
+
+ControllableHttpResponse::ControllableHttpResponse(
+    scoped_refptr<base::SingleThreadTaskRunner>
+        embedded_test_server_task_runner,
+    base::WeakPtr<HttpResponseDelegate> delegate,
+    std::unique_ptr<HttpRequest> http_request)
+    : state_(State::READY_TO_SEND_DATA),
+      embedded_test_server_task_runner_(embedded_test_server_task_runner),
+      delegate_(delegate),
+      http_request_(std::move(http_request)) {}
 
 ControllableHttpResponse::~ControllableHttpResponse() = default;
 
@@ -70,26 +101,27 @@ void ControllableHttpResponse::WaitForRequest() {
 
 void ControllableHttpResponse::Send(
     net::HttpStatusCode http_status,
-    const std::string& content_type,
-    const std::string& content,
-    const std::vector<std::string>& cookies,
-    const std::vector<std::string>& extra_headers) {
+    base::cstring_view content_type,
+    std::string_view content,
+    base::span<const std::string> cookies,
+    base::span<const std::string> extra_headers) {
   TRACE_EVENT("test", "ControllableHttpResponse::Send", "http_status",
               http_status, "content_type", content_type, "content", content,
               "cookies", cookies);
   std::string content_data(base::StringPrintf(
       "HTTP/1.1 %d %s\nContent-type: %s\n", static_cast<int>(http_status),
       net::GetHttpReasonPhrase(http_status), content_type.c_str()));
-  for (auto& cookie : cookies)
-    content_data += "Set-Cookie: " + cookie + "\n";
-  for (auto& header : extra_headers)
-    content_data += header + "\n";
-  content_data += "\n";
-  content_data += content;
+  for (const auto& cookie : cookies) {
+    base::StrAppend(&content_data, {"Set-Cookie: ", cookie, "\n"});
+  }
+  for (const auto& header : extra_headers) {
+    base::StrAppend(&content_data, {header, "\n"});
+  }
+  base::StrAppend(&content_data, {"\n", content});
   Send(content_data);
 }
 
-void ControllableHttpResponse::Send(const std::string& bytes) {
+void ControllableHttpResponse::Send(std::string_view bytes) {
   TRACE_EVENT("test", "ControllableHttpResponse::Send", "bytes", bytes);
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   CHECK_EQ(State::READY_TO_SEND_DATA, state_) << "Send() called without any "
@@ -118,10 +150,10 @@ bool ControllableHttpResponse::has_received_request() {
 }
 
 void ControllableHttpResponse::OnRequest(
+    std::unique_ptr<HttpRequest> http_request,
     scoped_refptr<base::SingleThreadTaskRunner>
         embedded_test_server_task_runner,
-    base::WeakPtr<HttpResponseDelegate> delegate,
-    std::unique_ptr<HttpRequest> http_request) {
+    base::WeakPtr<HttpResponseDelegate> delegate) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   CHECK(embedded_test_server_task_runner);
   CHECK(!embedded_test_server_task_runner_)
@@ -138,22 +170,80 @@ std::unique_ptr<HttpResponse> ControllableHttpResponse::RequestHandler(
     base::WeakPtr<ControllableHttpResponse> controller,
     scoped_refptr<base::SingleThreadTaskRunner> controller_task_runner,
     bool* available,
-    const std::string& relative_url,
+    std::string_view relative_url,
     bool relative_url_is_prefix,
     const HttpRequest& request) {
   if (!*available)
     return nullptr;
 
-  if (request.relative_url == relative_url ||
-      (relative_url_is_prefix &&
-       base::StartsWith(request.relative_url, relative_url,
-                        base::CompareCase::SENSITIVE))) {
+  if (DoesRequestMatchURL(request, relative_url, relative_url_is_prefix)) {
     *available = false;
-    return std::make_unique<ControllableHttpResponse::Interceptor>(
-        controller, controller_task_runner, request);
+    return std::make_unique<Interceptor>(
+        std::move(controller_task_runner),
+        base::BindOnce(&ControllableHttpResponse::OnRequest,
+                       std::move(controller),
+                       std::make_unique<HttpRequest>(request)));
   }
 
   return nullptr;
+}
+
+ControllableHttpResponseManager::ControllableHttpResponseManager(
+    EmbeddedTestServer* embedded_test_server,
+    const std::string& relative_url,
+    bool relative_url_is_prefix) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  embedded_test_server->RegisterRequestHandler(
+      base::BindRepeating(RequestHandler, weak_ptr_factory_.GetWeakPtr(),
+                          base::SingleThreadTaskRunner::GetCurrentDefault(),
+                          relative_url, relative_url_is_prefix));
+}
+
+ControllableHttpResponseManager::~ControllableHttpResponseManager() = default;
+
+std::unique_ptr<HttpResponse> ControllableHttpResponseManager::RequestHandler(
+    base::WeakPtr<ControllableHttpResponseManager> controller,
+    scoped_refptr<base::SingleThreadTaskRunner> controller_task_runner,
+    std::string_view relative_url,
+    bool relative_url_is_prefix,
+    const HttpRequest& request) {
+  if (DoesRequestMatchURL(request, relative_url, relative_url_is_prefix)) {
+    return std::make_unique<Interceptor>(
+        std::move(controller_task_runner),
+        base::BindOnce(&ControllableHttpResponseManager::OnRequest,
+                       std::move(controller),
+                       std::make_unique<HttpRequest>(request)));
+  }
+
+  return nullptr;
+}
+
+void ControllableHttpResponseManager::OnRequest(
+    std::unique_ptr<HttpRequest> http_request,
+    scoped_refptr<base::SingleThreadTaskRunner>
+        embedded_test_server_task_runner,
+    base::WeakPtr<HttpResponseDelegate> delegate) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CHECK(!current_response_) << "A ControllableHttpResponseManager can only "
+                               "handle one request at a time";
+  current_response_ =
+      std::unique_ptr<ControllableHttpResponse>(new ControllableHttpResponse(
+          embedded_test_server_task_runner, delegate, std::move(http_request)));
+  if (loop_) {
+    loop_->Quit();
+  }
+}
+
+std::unique_ptr<ControllableHttpResponse>
+ControllableHttpResponseManager::WaitForRequest() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (current_response_) {
+    return std::move(current_response_);
+  }
+
+  loop_ = std::make_unique<base::RunLoop>();
+  loop_->Run();
+  return std::move(current_response_);
 }
 
 }  // namespace net::test_server

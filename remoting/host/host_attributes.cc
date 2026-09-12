@@ -8,18 +8,18 @@
 #include <type_traits>
 #include <vector>
 
-#include "base/atomicops.h"
 #include "base/check_op.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
 
 #if BUILDFLAG(IS_WIN)
-#include "media/base/win/mf_initializer.h"
-#include "media/gpu/windows/media_foundation_video_encode_accelerator_win.h"
 #include "remoting/host/win/evaluate_3d_display_mode.h"
 #include "remoting/host/win/evaluate_d3d.h"
+#endif
+
+#if BUILDFLAG(IS_LINUX)
+#include "remoting/base/username.h"
 #endif
 
 namespace remoting {
@@ -67,6 +67,18 @@ inline constexpr bool IsNonOfficialBuild() {
   return !IsOfficialBuild();
 }
 
+bool IsMultiProcessHost() {
+#if BUILDFLAG(IS_WIN)
+  return true;
+#elif BUILDFLAG(IS_LINUX)
+  // The Linux host is multi-process only when GetHostAttributes() is called in
+  // the network process, which is run as the CRD network user.
+  return GetUsername() == GetNetworkProcessUsername();
+#else
+  return false;
+#endif
+}
+
 // By using std::size() macro in base/macros.h, it's illegal to have empty
 // arrays.
 //
@@ -83,11 +95,10 @@ static constexpr Attribute kAttributes[] = {
     {"ChromiumBrand", &IsChromiumBranded},
     {"OfficialBuild", &IsOfficialBuild},
     {"NonOfficialBuild", &IsNonOfficialBuild},
+    {"MultiProcessHost", &IsMultiProcessHost},
 };
 
 }  // namespace
-
-static_assert(std::is_pod<Attribute>::value, "Attribute should be POD.");
 
 std::string GetHostAttributes() {
   std::vector<std::string> result;
@@ -100,16 +111,6 @@ std::string GetHostAttributes() {
 #if BUILDFLAG(IS_WIN)
   GetD3DCapabilities(&result);
   result.push_back("Win10+");
-
-  // TODO(crbug.com/1184041): Remove this and/or the entire HostAttributes class
-  // so we can remove //remoting/host:common from //media/gpu's visibility list.
-  if (media::MediaFoundationVideoEncodeAccelerator
-      ::PreSandboxInitialization() &&
-      media::InitializeMediaFoundation()) {
-    result.push_back("HWEncoder");
-  }
-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-  result.push_back("HWEncoder");
 #endif
 
   return base::JoinString(result, kSeparator);

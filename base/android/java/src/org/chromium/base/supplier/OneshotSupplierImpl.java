@@ -4,12 +4,11 @@
 
 package org.chromium.base.supplier;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-
 import org.chromium.base.Callback;
 import org.chromium.base.Promise;
 import org.chromium.base.ThreadUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * Concrete implementation of {@link OneshotSupplier} to be used by classes owning a
@@ -26,31 +25,39 @@ import org.chromium.base.ThreadUtils;
  *
  * @param <T> The type of the wrapped object.
  */
+@NullMarked
 public class OneshotSupplierImpl<T> implements OneshotSupplier<T> {
     private final Promise<T> mPromise = new Promise<>();
     private final ThreadUtils.ThreadChecker mThreadChecker = new ThreadUtils.ThreadChecker();
 
+    public OneshotSupplierImpl() {
+        // Guard against creation on Instrumentation thread, since this causes the ThreadChecker
+        // to be associated with it (it should be UI thread).
+        assert !ThreadUtils.runningOnInstrumentationThread();
+    }
+
     @Override
-    public T onAvailable(Callback<T> callback) {
-        mThreadChecker.assertOnValidThread();
+    public @Nullable T onAvailable(Callback<T> callback) {
+        mThreadChecker.assertOnValidOrInstrumentationThread();
         mPromise.then(callback);
         return get();
     }
 
     @Override
     public @Nullable T get() {
-        mThreadChecker.assertOnValidThread();
+        mThreadChecker.assertOnValidOrInstrumentationThread();
         return mPromise.isFulfilled() ? mPromise.getResult() : null;
     }
 
     /**
-     * Set the object supplied by this supplier. This will notify registered callbacks that the
-     * dependency is available. If set() has already been called, this method will assert.
+     * Set the object supplied by this supplier. This will post notifications to registered
+     * callbacks that the dependency is available. If set() has already been called, this method
+     * will assert.
      *
      * @param object The object to supply.
      */
-    public void set(@NonNull T object) {
-        mThreadChecker.assertOnValidThread();
+    public void set(T object) {
+        mThreadChecker.assertOnValidOrInstrumentationThread();
         assert !mPromise.isFulfilled();
         assert object != null;
         mPromise.fulfill(object);

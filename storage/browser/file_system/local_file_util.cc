@@ -36,24 +36,43 @@ class LocalFileUtil::LocalFileEnumerator
                       bool recursive,
                       int file_type)
       : file_util_(file_util),
-        file_enum_(platform_root_path, recursive, file_type),
+        file_enum_(platform_root_path,
+                   recursive,
+                   file_type,
+                   base::FilePath::StringType(),
+                   base::FileEnumerator::FolderSearchPolicy::MATCH_ONLY,
+                   base::FileEnumerator::ErrorPolicy::STOP_ENUMERATION),
         platform_root_path_(platform_root_path),
         virtual_root_path_(virtual_root_path) {}
 
   ~LocalFileEnumerator() override = default;
 
   base::FilePath Next() override {
-    base::FilePath next = file_enum_.Next();
-    while (!next.empty() && file_util_->IsHiddenItem(next))
-      next = file_enum_.Next();
-    if (next.empty())
-      return next;
-    file_util_info_ = file_enum_.GetInfo();
+    while (true) {
+      base::FilePath next = file_enum_.Next();
+      if (next.empty()) {
+        error_ = file_enum_.GetError();
+        return next;
+      } else if (file_util_->IsHiddenItem(next)) {
+        continue;
+      }
+      file_util_info_ = file_enum_.GetInfo();
 
-    base::FilePath path;
-    platform_root_path_.AppendRelativePath(next, &path);
-    return virtual_root_path_.Append(path);
+#if BUILDFLAG(IS_ANDROID)
+      if (next.IsContentUri()) {
+        return next;
+      }
+#endif
+
+      base::FilePath path;
+      platform_root_path_.AppendRelativePath(next, &path);
+      return virtual_root_path_.Append(path);
+    }
   }
+
+  base::File::Error GetError() override { return error_; }
+
+  base::FilePath GetName() override { return file_util_info_.GetName(); }
 
   int64_t Size() override { return file_util_info_.GetSize(); }
 
@@ -67,6 +86,7 @@ class LocalFileUtil::LocalFileEnumerator
   // The |LocalFileUtil| producing |this| is expected to remain valid
   // through the whole lifetime of the enumerator.
   const raw_ptr<const LocalFileUtil> file_util_;
+  base::File::Error error_ = base::File::FILE_OK;
   base::FileEnumerator file_enum_;
   base::FileEnumerator::FileInfo file_util_info_;
   base::FilePath platform_root_path_;
@@ -84,8 +104,6 @@ base::File LocalFileUtil::CreateOrOpen(FileSystemOperationContext* context,
   base::File::Error error = GetLocalFilePath(context, url, &file_path);
   if (error != base::File::FILE_OK)
     return base::File(error);
-  if (IsHiddenItem(file_path))
-    return base::File(base::File::FILE_ERROR_NOT_FOUND);
 
   return NativeFileUtil::CreateOrOpen(file_path, file_flags);
 }
@@ -122,8 +140,6 @@ base::File::Error LocalFileUtil::GetFileInfo(
   base::File::Error error = GetLocalFilePath(context, url, &file_path);
   if (error != base::File::FILE_OK)
     return error;
-  if (IsHiddenItem(file_path))
-    return base::File::FILE_ERROR_NOT_FOUND;
 
   error = NativeFileUtil::GetFileInfo(file_path, file_info);
   if (error == base::File::FILE_OK)
@@ -155,6 +171,9 @@ base::File::Error LocalFileUtil::GetLocalFilePath(
     return base::File::FILE_ERROR_ACCESS_DENIED;
   }
   *local_file_path = url.path();
+  if (IsHiddenItem(*local_file_path)) {
+    return base::File::FILE_ERROR_NOT_FOUND;
+  }
   return base::File::FILE_OK;
 }
 
@@ -212,6 +231,9 @@ base::File::Error LocalFileUtil::CopyInForeignFile(
       GetLocalFilePath(context, dest_url, &dest_file_path);
   if (error != base::File::FILE_OK)
     return error;
+  if (IsHiddenItem(src_file_path)) {
+    return base::File::FILE_ERROR_NOT_FOUND;
+  }
   return NativeFileUtil::CopyOrMoveFile(
       src_file_path, dest_file_path, FileSystemOperation::CopyOrMoveOptionSet(),
       NativeFileUtil::CopyOrMoveModeForDestination(dest_url, true /* copy */));

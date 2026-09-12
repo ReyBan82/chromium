@@ -15,16 +15,17 @@ using CastViewsTest = views::ViewsTestBase;
 
 TEST_F(CastViewsTest, ProgressBar) {
   std::unique_ptr<CastWindowManager> window_manager =
-      std::make_unique<CastWindowManagerAura>(true /* enable input */);
+      std::make_unique<CastWindowManagerAura>();
   gfx::Rect bounds = window_manager->GetRootWindow()->bounds();
 
-  views::ProgressBar* progress_bar = new views::ProgressBar(bounds.height());
+  views::ProgressBar* progress_bar = new views::ProgressBar();
+  progress_bar->SetPreferredHeight(bounds.height());
   progress_bar->SetValue(0.5);
 
   // Create the window.  We close the window by deleting it, so we take
   // ownership of the widget + native widget.
-  views::Widget::InitParams params;
-  params.ownership = views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET;
+  views::Widget::InitParams params(
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET);
   params.context = window_manager->GetRootWindow();
   params.type = views::Widget::InitParams::TYPE_WINDOW_FRAMELESS;
   params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;

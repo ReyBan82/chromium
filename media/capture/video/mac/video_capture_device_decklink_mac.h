@@ -8,14 +8,14 @@
 #ifndef MEDIA_CAPTURE_VIDEO_MAC_VIDEO_CAPTURE_DEVICE_DECKLINK_MAC_H_
 #define MEDIA_CAPTURE_VIDEO_MAC_VIDEO_CAPTURE_DEVICE_DECKLINK_MAC_H_
 
-#include "media/capture/video/video_capture_device.h"
-
-#import <Foundation/Foundation.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include <vector>
+
 #include "base/synchronization/lock.h"
 #include "base/threading/thread_checker.h"
+#include "media/capture/video/video_capture_device.h"
 
 namespace {
 class DeckLinkCaptureDelegate;
@@ -53,8 +53,7 @@ class CAPTURE_EXPORT VideoCaptureDeviceDeckLinkMac : public VideoCaptureDevice {
 
   // Copy of VideoCaptureDevice::Client::OnIncomingCapturedData(). Used by
   // |decklink_capture_delegate_| to forward captured frames.
-  void OnIncomingCapturedData(const uint8_t* data,
-                              size_t length,
+  void OnIncomingCapturedData(base::span<const uint8_t> data,
                               const VideoCaptureFormat& frame_format,
                               const gfx::ColorSpace& color_space,
                               int rotation,  // Clockwise.
@@ -79,6 +78,7 @@ class CAPTURE_EXPORT VideoCaptureDeviceDeckLinkMac : public VideoCaptureDevice {
       const VideoCaptureParams& params,
       std::unique_ptr<VideoCaptureDevice::Client> client) override;
   void StopAndDeAllocate() override;
+  void InvalidateBuffers() override;
 
   // Protects concurrent setting and using of |client_|.
   base::Lock lock_;

@@ -3,10 +3,12 @@
 // found in the LICENSE file.
 
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {assert, assertNotReached} from 'chrome://resources/js/assert_ts.js';
+import {assert, assertNotReached} from 'chrome://resources/js/assert.js';
 
-import {NavigationView, RoutineProperties} from './diagnostics_types.js';
-import {LockType, Network, NetworkState, NetworkType} from './network_health_provider.mojom-webui.js';
+import type {RoutineProperties} from './diagnostics_types.js';
+import {NavigationView} from './diagnostics_types.js';
+import type {Network} from './network_health_provider.mojom-webui.js';
+import {LockType, NetworkState, NetworkType} from './network_health_provider.mojom-webui.js';
 import {RoutineGroup} from './routine_group.js';
 import {RoutineType} from './system_routine_controller.mojom-webui.js';
 
@@ -79,7 +81,6 @@ export function getNetworkState(state: NetworkState): string {
     case NetworkState.kDisabled:
       return loadTimeData.getString('networkStateDisabledText');
   }
-  assertNotReached();
 }
 
 export function getLockType(lockType: LockType): string {
@@ -88,10 +89,11 @@ export function getLockType(lockType: LockType): string {
       return 'sim-puk';
     case LockType.kSimPin:
       return 'sim-pin';
+    case LockType.kNetworkPin:
+      return 'network-pin';
     case LockType.kNone:
       return '';
   }
-  assertNotReached();
 }
 
 /**
@@ -138,16 +140,23 @@ export function getRoutineGroups(type: NetworkType): RoutineGroup[] {
       ],
       'internetConnectivityGroupLabel');
 
-  const groupsToAdd = type === NetworkType.kWiFi ?
-      [wifiGroup, internetConnectivityGroup] :
-      [internetConnectivityGroup];
+  const googleServicesGroup = new RoutineGroup(
+      [
+        createRoutine(RoutineType.kGoogleServicesConnectivity, true),
+      ],
+      'googleServicesGroupLabel');
 
-  const networkRoutineGroups = [
+  const output = [
     localNetworkGroup,
     nameResolutionGroup,
   ];
 
-  return networkRoutineGroups.concat(groupsToAdd);
+  if (type === NetworkType.kWiFi) {
+    output.push(wifiGroup);
+  }
+
+  output.push(internetConnectivityGroup, googleServicesGroup);
+  return output;
 }
 
 export function getSubnetMaskFromRoutingPrefix(prefix: number): string {
@@ -219,6 +228,8 @@ export function getRoutineFailureMessage(routineType: RoutineType): string {
       return loadTimeData.getString('arcPingFailedText');
     case RoutineType.kArcDnsResolution:
       return loadTimeData.getString('arcDnsResolutionFailedText');
+    case RoutineType.kGoogleServicesConnectivity:
+      return loadTimeData.getString('googleServicesConnectivityFailedText');
     case RoutineType.kBatteryCharge:
     case RoutineType.kBatteryDischarge:
     case RoutineType.kCpuCache:

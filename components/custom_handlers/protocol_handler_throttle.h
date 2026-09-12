@@ -5,10 +5,9 @@
 #ifndef COMPONENTS_CUSTOM_HANDLERS_PROTOCOL_HANDLER_THROTTLE_H_
 #define COMPONENTS_CUSTOM_HANDLERS_PROTOCOL_HANDLER_THROTTLE_H_
 
-#include "base/memory/ref_counted.h"
-#include "url/gurl.h"
-
+#include "base/memory/weak_ptr.h"
 #include "third_party/blink/public/common/loader/url_loader_throttle.h"
+#include "url/gurl.h"
 
 namespace custom_handlers {
 
@@ -26,9 +25,7 @@ class ProtocolHandlerThrottle : public blink::URLLoaderThrottle {
       net::RedirectInfo* redirect_info,
       const network::mojom::URLResponseHead& response_head,
       bool* defer,
-      std::vector<std::string>* to_be_removed_headers,
-      net::HttpRequestHeaders* modified_headers,
-      net::HttpRequestHeaders* modified_cors_exempt_headers) override;
+      network::HttpRequestHeadersUpdateParams* headers_update_params) override;
 
  private:
   // If the @url has a custom protocol handler, the argument will return the

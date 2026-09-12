@@ -12,6 +12,8 @@
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/loader/cors/cors.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_utils.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_view.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -26,8 +28,7 @@ void Headers::HeadersIterationSource::ResetHeaderList() {
 
 bool Headers::HeadersIterationSource::FetchNextItem(ScriptState* script_state,
                                                     String& key,
-                                                    String& value,
-                                                    ExceptionState& exception) {
+                                                    String& value) {
   // This simply advances an index and returns the next value if any;
   if (current_ >= headers_list_.size())
     return false;
@@ -96,15 +97,21 @@ void Headers::append(ScriptState* script_state,
     return;
   }
   // UseCounter for usages of "set-cookie" in kRequestGuard'ed Headers.
-  if (guard_ == kRequestGuard && name.LowerASCII() == "set-cookie") {
+  if (guard_ == kRequestGuard && EqualIgnoringAsciiCase(name, "set-cookie")) {
     ExecutionContext* execution_context = ExecutionContext::From(script_state);
     UseCounter::Count(execution_context,
                       WebFeature::kFetchSetCookieInRequestGuardedHeaders);
   }
-  // "4. Otherwise, if guard is |request| and |name| is a forbidden header
-  //     name, return."
-  if (guard_ == kRequestGuard && cors::IsForbiddenRequestHeader(name, value))
+  // "4. Otherwise, if guard is |request| and |name| is a forbidden header name,
+  //     return."
+  // Note: The user agent may choose to skip this step and allow the header in
+  // certain contexts with `is_bypassed_origin`.
+  bool is_bypassed_origin = bypass_request_forbidden_header_check_ &&
+                            EqualIgnoringAsciiCase(name, "origin");
+  if (guard_ == kRequestGuard && !is_bypassed_origin &&
+      cors::IsForbiddenRequestHeader(name, value)) {
     return;
+  }
   // 5. Otherwise, if guard is |request-no-cors|:
   if (guard_ == kRequestNoCorsGuard) {
     // Let |temporaryValue| be the result of getting name from |headers|’s
@@ -118,7 +125,7 @@ void Headers::append(ScriptState* script_state,
     if (temp.IsNull()) {
       temp = normalized_value;
     } else {
-      temp = temp + ", " + normalized_value;
+      temp = StrCat({temp, ", ", normalized_value});
     }
 
     // If |name|/|temporaryValue| is not a no-CORS-safelisted request-header,
@@ -159,7 +166,7 @@ void Headers::remove(ScriptState* script_state,
     return;
   }
   // UseCounter for usages of "set-cookie" in kRequestGuard'ed Headers.
-  if (guard_ == kRequestGuard && name.LowerASCII() == "set-cookie") {
+  if (guard_ == kRequestGuard && EqualIgnoringAsciiCase(name, "set-cookie")) {
     ExecutionContext* execution_context = ExecutionContext::From(script_state);
     UseCounter::Count(execution_context,
                       WebFeature::kFetchSetCookieInRequestGuardedHeaders);
@@ -212,6 +219,10 @@ String Headers::get(const String& name, ExceptionState& exception_state) {
   return result;
 }
 
+Vector<String> Headers::getSetCookie() {
+  return header_list_->GetSetCookie();
+}
+
 bool Headers::has(const String& name, ExceptionState& exception_state) {
   // "The has(|name|) method, when invoked, must run these steps:"
   // "1. If |name| is not a name, throw a TypeError."
@@ -247,15 +258,21 @@ void Headers::set(ScriptState* script_state,
     return;
   }
   // UseCounter for usages of "set-cookie" in kRequestGuard'ed Headers.
-  if (guard_ == kRequestGuard && name.LowerASCII() == "set-cookie") {
+  if (guard_ == kRequestGuard && EqualIgnoringAsciiCase(name, "set-cookie")) {
     ExecutionContext* execution_context = ExecutionContext::From(script_state);
     UseCounter::Count(execution_context,
                       WebFeature::kFetchSetCookieInRequestGuardedHeaders);
   }
   // "4. Otherwise, if guard is |request| and (|name|, |value|) is a forbidden
   //     request header, return."
-  if (guard_ == kRequestGuard && cors::IsForbiddenRequestHeader(name, value))
+  // Note: The user agent may choose to skip this step and allow the header in
+  // certain contexts with `is_bypassed_origin`.
+  bool is_bypassed_origin = bypass_request_forbidden_header_check_ &&
+                            EqualIgnoringAsciiCase(name, "origin");
+  if (guard_ == kRequestGuard && !is_bypassed_origin &&
+      cors::IsForbiddenRequestHeader(name, value)) {
     return;
+  }
   // "5. Otherwise, if guard is |request-no-CORS| and |name|/|value| is not a
   //     no-CORS-safelisted header, return."
   if (guard_ == kRequestNoCorsGuard &&
@@ -368,8 +385,7 @@ void Headers::Trace(Visitor* visitor) const {
 }
 
 PairSyncIterable<Headers>::IterationSource* Headers::CreateIterationSource(
-    ScriptState*,
-    ExceptionState&) {
+    ScriptState*) {
   auto* iter = MakeGarbageCollected<HeadersIterationSource>(this);
   iterators_.insert(iter);
   return iter;

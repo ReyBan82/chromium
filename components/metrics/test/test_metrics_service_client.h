@@ -9,12 +9,19 @@
 
 #include <set>
 #include <string>
+#include <string_view>
 
 #include "base/memory/raw_ptr.h"
+#include "build/build_config.h"
 #include "components/metrics/metrics_log_store.h"
 #include "components/metrics/metrics_log_uploader.h"
 #include "components/metrics/metrics_service_client.h"
 #include "components/metrics/test/test_metrics_log_uploader.h"
+#include "components/regional_capabilities/regional_capabilities_country_id.h"
+
+namespace variations {
+class SyntheticTrialRegistry;
+}
 
 namespace metrics {
 
@@ -33,7 +40,9 @@ class TestMetricsServiceClient : public MetricsServiceClient {
   variations::SyntheticTrialRegistry* GetSyntheticTrialRegistry() override;
   metrics::MetricsService* GetMetricsService() override;
   void SetMetricsClientId(const std::string& client_id) override;
+#if BUILDFLAG(IS_CHROMEOS)
   bool ShouldUploadMetricsForUserId(uint64_t user_id) override;
+#endif  // BUILDFLAG(IS_CHROMEOS)
   int32_t GetProduct() override;
   std::string GetApplicationLocale() override;
   const network_time::NetworkTimeTracker* GetNetworkTimeTracker() override;
@@ -45,15 +54,20 @@ class TestMetricsServiceClient : public MetricsServiceClient {
   std::unique_ptr<MetricsLogUploader> CreateUploader(
       const GURL& server_url,
       const GURL& insecure_server_url,
-      base::StringPiece mime_type,
+      std::string_view mime_type,
       MetricsLogUploader::MetricServiceType service_type,
       const MetricsLogUploader::UploadCallback& on_upload_complete) override;
+#if BUILDFLAG(IS_ANDROID)
+  bool IsJobSchedulerSupported() const override;
+#endif  // BUILDFLAG(IS_ANDROID)
   base::TimeDelta GetStandardUploadInterval() override;
   bool IsReportingPolicyManaged() override;
   EnableMetricsDefault GetMetricsReportingDefaultState() override;
   std::string GetAppPackageNameIfLoggable() override;
   bool ShouldResetClientIdsOnClonedInstall() override;
   MetricsLogStore::StorageLimits GetStorageLimits() const override;
+  std::optional<regional_capabilities::CountryIdHolder>
+  GetProfileCountryIdForPrivateMetricsReporting() override;
 
   // Adds/removes |user_id| from the set of user ids that have metrics consent
   // as true.
@@ -77,18 +91,30 @@ class TestMetricsServiceClient : public MetricsServiceClient {
   void set_should_reset_client_ids_on_cloned_install(bool state) {
     should_reset_client_ids_on_cloned_install_ = state;
   }
-  void set_max_ongoing_log_size(size_t bytes) {
-    storage_limits_.max_ongoing_log_size = bytes;
+  void set_max_ongoing_log_size_bytes(size_t bytes) {
+    storage_limits_.ongoing_log_queue_limits.max_log_size_bytes = bytes;
   }
   void set_min_ongoing_log_queue_count(size_t log_count) {
-    storage_limits_.min_ongoing_log_queue_count = log_count;
+    storage_limits_.ongoing_log_queue_limits.min_log_count = log_count;
   }
-  void set_min_ongoing_log_queue_size(size_t bytes) {
-    storage_limits_.min_ongoing_log_queue_size = bytes;
+  void set_min_ongoing_log_queue_size_bytes(size_t bytes) {
+    storage_limits_.ongoing_log_queue_limits.min_queue_size_bytes = bytes;
+  }
+
+  void set_max_initial_log_size_bytes(size_t bytes) {
+    storage_limits_.initial_log_queue_limits.max_log_size_bytes = bytes;
+  }
+  void set_synthetic_trial_registry(
+      variations::SyntheticTrialRegistry* registry) {
+    synthetic_trial_registry_ = registry;
+  }
+  void set_country_id_holder(
+      const regional_capabilities::CountryIdHolder& country_id_holder) {
+    country_id_holder_ = country_id_holder;
   }
 
  private:
-  std::string client_id_;
+  std::string client_id_{"0a94430b-18e5-43c8-a657-580f7e855ce1"};
   std::string version_string_{"5.0.322.0-64-devel"};
   int32_t product_ = ChromeUserMetricsExtension::CHROME;
   bool reporting_is_managed_ = false;
@@ -98,6 +124,11 @@ class TestMetricsServiceClient : public MetricsServiceClient {
   MetricsLogStore::StorageLimits storage_limits_ =
       MetricsServiceClient::GetStorageLimits();
   std::set<uint64_t> allowed_user_ids_;
+  std::optional<regional_capabilities::CountryIdHolder> country_id_holder_ =
+      MetricsServiceClient::GetProfileCountryIdForPrivateMetricsReporting();
+
+  raw_ptr<variations::SyntheticTrialRegistry> synthetic_trial_registry_ =
+      nullptr;
 
   // A weak ref to the last created TestMetricsLogUploader.
   base::WeakPtr<TestMetricsLogUploader> uploader_ = nullptr;

@@ -1,5 +1,6 @@
 include_rules = [
   # Other libraries.
-  "+chrome/third_party/mozilla_security_manager",
+  "+components/certificate_model",
   "+components/google/core/common",
+  "+third_party/boringssl/src/pki",
 ]

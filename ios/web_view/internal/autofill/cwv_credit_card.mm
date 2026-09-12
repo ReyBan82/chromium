@@ -2,22 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#import "base/strings/sys_string_conversions.h"
+#import "base/strings/utf_string_conversions.h"
+#import "components/autofill/core/browser/data_model/payments/credit_card.h"
+#import "ios/web_view/internal/app/application_context.h"
 #import "ios/web_view/internal/autofill/cwv_credit_card_internal.h"
-
-#include "base/strings/sys_string_conversions.h"
-#include "components/autofill/core/browser/data_model/credit_card.h"
-#include "ios/web_view/internal/app/application_context.h"
 #import "ios/web_view/internal/utils/nsobject_description_utils.h"
-#include "ui/base/resource/resource_bundle.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ui/base/resource/resource_bundle.h"
 
 @interface CWVCreditCard ()
 
 // Gets |value| for |type| from |_internalCard|.
-- (NSString*)valueForType:(autofill::ServerFieldType)type;
+- (NSString*)valueForType:(autofill::FieldType)type;
 
 @end
 
@@ -41,6 +37,10 @@
 
 - (NSString*)cardNumber {
   return [self valueForType:autofill::CREDIT_CARD_NUMBER];
+}
+
+- (NSString*)CVC {
+  return base::SysUTF16ToNSString(_internalCard.cvc());
 }
 
 - (NSString*)networkName {
@@ -67,6 +67,32 @@
   return base::SysUTF8ToNSString(_internalCard.bank_name());
 }
 
+- (NSString*)cardNameForDisplay {
+  return base::SysUTF16ToNSString(_internalCard.CardNameForAutofillDisplay());
+}
+
+- (CWVCreditCardRecordType)recordType {
+  switch (_internalCard.record_type()) {
+    case autofill::CreditCard::RecordType::kLocalCard:
+      return CWVCreditCardRecordTypeLocalCard;
+    case autofill::CreditCard::RecordType::kMaskedServerCard:
+      return CWVCreditCardRecordTypeMaskedServerCard;
+    case autofill::CreditCard::RecordType::kFullServerCard:
+      return CWVCreditCardRecordTypeFullServerCard;
+    case autofill::CreditCard::RecordType::kVirtualCard:
+      return CWVCreditCardRecordTypeVirtualCard;
+  }
+}
+
+- (BOOL)isVirtual {
+  return _internalCard.record_type() ==
+         autofill::CreditCard::RecordType::kVirtualCard;
+}
+
+- (NSString*)GUID {
+  return base::SysUTF8ToNSString(_internalCard.guid());
+}
+
 #pragma mark - NSObject
 
 - (NSString*)debugDescription {
@@ -83,7 +109,7 @@
 
 #pragma mark - Private Methods
 
-- (NSString*)valueForType:(autofill::ServerFieldType)type {
+- (NSString*)valueForType:(autofill::FieldType)type {
   const std::string& locale =
       ios_web_view::ApplicationContext::GetInstance()->GetApplicationLocale();
   return base::SysUTF16ToNSString(_internalCard.GetInfo(type, locale));

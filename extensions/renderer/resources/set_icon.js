@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var exceptionHandler = require('uncaught_exception_handler');
-var SetIconCommon = requireNative('setIcon').SetIconCommon;
-var inServiceWorker = requireNative('utils').isInServiceWorker();
+const exceptionHandler = require('uncaught_exception_handler');
+const imageUtil = require('imageUtil');
+const SetIconCommon = requireNative('setIcon').SetIconCommon;
+const inServiceWorker = requireNative('utils').isInServiceWorker();
 
 function loadImagePathForServiceWorker(path, callback, failureCallback) {
   let fetchPromise = fetch(path);
@@ -46,15 +47,24 @@ function loadImagePathForNonServiceWorker(path, callback, failureCallback) {
     failureCallback(message);
   };
   img.onload = function() {
-    var canvas = document.createElement('canvas');
-    canvas.width = img.width;
-    canvas.height = img.height
-    var canvasContext = canvas.getContext('2d');
-    canvasContext.clearRect(0, 0, canvas.width, canvas.height);
-    canvasContext.drawImage(img, 0, 0, canvas.width, canvas.height);
-    var imageData = canvasContext.getImageData(0, 0, canvas.width,
-                                               canvas.height);
-    callback(imageData);
+    const drawAndCallback = function(imageSource) {
+      const canvas = document.createElement('canvas');
+      canvas.width = imageSource.width;
+      canvas.height = imageSource.height;
+      const canvasContext = canvas.getContext('2d');
+      canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+      canvasContext.drawImage(imageSource, 0, 0, canvas.width, canvas.height);
+      const imageData =
+          canvasContext.getImageData(0, 0, canvas.width, canvas.height);
+      callback(imageData);
+    };
+    if (typeof createImageBitmap === 'function') {
+      $Promise.then($Promise.catch(createImageBitmap(img), function() {
+        return img;
+      }), drawAndCallback);
+    } else {
+      drawAndCallback(img);
+    }
   };
   img.src = path;
 }
@@ -64,25 +74,6 @@ function loadImagePath(path, callback, failureCallback) {
     loadImagePathForServiceWorker(path, callback, failureCallback);
   } else {
     loadImagePathForNonServiceWorker(path, callback, failureCallback);
-  }
-}
-
-function smellsLikeImageData(imageData) {
-  // See if this object at least looks like an ImageData element.
-  // Unfortunately, we cannot use instanceof because the ImageData
-  // constructor is not public.
-  //
-  // We do this manually instead of using JSONSchema to avoid having these
-  // properties show up in the doc.
-  return (typeof imageData == 'object') && ('width' in imageData) &&
-         ('height' in imageData) && ('data' in imageData);
-}
-
-function verifyImageData(imageData) {
-  if (!smellsLikeImageData(imageData)) {
-    throw new Error(
-        'The imageData property must contain an ImageData object or' +
-        ' dictionary of ImageData objects.');
   }
 }
 
@@ -113,17 +104,17 @@ function setIcon(details, callback, failureCallback) {
   }
 
   if ('imageData' in details) {
-    if (smellsLikeImageData(details.imageData)) {
+    if (imageUtil.smellsLikeImageData(details.imageData)) {
       var imageData = details.imageData;
       details.imageData = {__proto__: null};
       details.imageData[imageData.width.toString()] = imageData;
     } else if (typeof details.imageData == 'object' &&
                Object.getOwnPropertyNames(details.imageData).length !== 0) {
       for (var sizeKey in details.imageData) {
-        verifyImageData(details.imageData[sizeKey]);
+        imageUtil.verifyImageData(details.imageData[sizeKey]);
       }
     } else {
-      verifyImageData(false);
+      imageUtil.verifyImageData(false);
     }
 
     callback(SetIconCommon(details));
@@ -152,8 +143,9 @@ function setIcon(details, callback, failureCallback) {
               }
             });
       }
-      if (detailKeyCount == 0)
+      if (detailKeyCount == 0) {
         throw new Error('The path property must not be empty.');
+      }
     } else if (typeof details.path == 'string') {
       details.imageData = {__proto__: null};
       loadImagePath(details.path, function(imageData) {
@@ -180,7 +172,7 @@ function getSetIconHandler(methodName) {
   };
 }
 
-// TODO(crbug.com/462542): The setIcon export is only used by the declarative
+// TODO(crbug.com/41159896): The setIcon export is only used by the declarative
 // content custom bindings and it actually has some major problems with how it
 // uses it. When that is resolved we can likely remove this export.
 exports.$set('setIcon', setIcon);

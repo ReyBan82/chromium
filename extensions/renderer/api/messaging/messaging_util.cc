@@ -4,31 +4,41 @@
 
 #include "extensions/renderer/api/messaging/messaging_util.h"
 
+#include <cstddef>
 #include <string>
 
 #include "base/check.h"
+#include "base/containers/span.h"
+#include "base/feature_list.h"
+#include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/strings/stringprintf.h"
 #include "components/crx_file/id_util.h"
 #include "extensions/common/api/messaging/message.h"
-#include "extensions/common/api/messaging/serialization_format.h"
+#include "extensions/common/api/messaging/messaging_endpoint.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_features.h"
 #include "extensions/common/manifest.h"
 #include "extensions/common/manifest_handlers/background_info.h"
+#include "extensions/common/manifest_handlers/message_serialization_info.h"
+#include "extensions/common/mojom/context_type.mojom.h"
+#include "extensions/common/mojom/message_port.mojom.h"
+#include "extensions/renderer/extension_interaction_provider.h"
 #include "extensions/renderer/get_script_context.h"
 #include "extensions/renderer/script_context.h"
+#include "extensions/renderer/worker_thread_util.h"
 #include "gin/converter.h"
 #include "gin/dictionary.h"
+#include "mojo/public/cpp/base/big_buffer.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+#include "third_party/blink/public/web/web_serialized_script_value.h"
 #include "v8/include/v8-context.h"
 #include "v8/include/v8-exception.h"
 #include "v8/include/v8-json.h"
 #include "v8/include/v8-object.h"
 #include "v8/include/v8-primitive.h"
 
-namespace extensions {
-namespace messaging_util {
+namespace extensions::messaging_util {
 
 namespace {
 
@@ -38,69 +48,17 @@ constexpr char kExtensionIdRequiredErrorTemplate[] =
 
 constexpr char kErrorCouldNotSerialize[] = "Could not serialize message.";
 
-std::unique_ptr<Message> MessageFromJSONString(v8::Isolate* isolate,
-                                               v8::Local<v8::String> json,
-                                               std::string* error_out,
-                                               blink::WebLocalFrame* web_frame,
-                                               bool privileged_context) {
-  std::string message;
-  message = gin::V8ToString(isolate, json);
-  // JSON.stringify can fail to produce a string value in one of two ways: it
-  // can throw an exception (as with unserializable objects), or it can return
-  // `undefined` (as with e.g. passing a function). If JSON.stringify returns
-  // `undefined`, the v8 API then coerces it to the string value "undefined".
-  // Check for this, and consider it a failure (since we didn't properly
-  // serialize a value).
-  if (message == "undefined") {
-    *error_out = kErrorCouldNotSerialize;
-    return nullptr;
-  }
+constexpr char kErrorMalformedJSONMessage[] =
+    "The sender sent an invalid JSON message; message ignored.";
 
-  size_t message_length = message.length();
-
-  // IPC messages will fail at > 128 MB. Restrict extension messages to 64 MB.
-  // A 64 MB JSON-ifiable object is scary enough as is.
-  static constexpr size_t kMaxMessageLength = 1024 * 1024 * 64;
-  if (message_length > kMaxMessageLength) {
-    *error_out = "Message length exceeded maximum allowed length.";
-    return nullptr;
-  }
-
-  // The message should carry user activation information only if the last
-  // activation in |web_frame| was triggered by a real user interaction.  See
-  // |UserActivationState::LastActivationWasRestricted()|.
-  bool has_unrestricted_user_activation =
-      web_frame && web_frame->HasTransientUserActivation() &&
-      !web_frame->LastActivationWasRestricted();
-  return std::make_unique<Message>(message, SerializationFormat::kJson,
-                                   has_unrestricted_user_activation,
-                                   privileged_context);
-}
-
-}  // namespace
-
-const char kSendMessageChannel[] = "chrome.runtime.sendMessage";
-const char kSendRequestChannel[] = "chrome.extension.sendRequest";
-
-const char kOnMessageEvent[] = "runtime.onMessage";
-const char kOnMessageExternalEvent[] = "runtime.onMessageExternal";
-const char kOnRequestEvent[] = "extension.onRequest";
-const char kOnRequestExternalEvent[] = "extension.onRequestExternal";
-const char kOnConnectEvent[] = "runtime.onConnect";
-const char kOnConnectExternalEvent[] = "runtime.onConnectExternal";
-const char kOnConnectNativeEvent[] = "runtime.onConnectNative";
-
-const int kNoFrameId = -1;
-
-std::unique_ptr<Message> MessageFromV8(v8::Local<v8::Context> context,
-                                       v8::Local<v8::Value> value,
-                                       SerializationFormat format,
-                                       std::string* error_out) {
-  // TODO(crbug.com/248548): Incorporate `format` while serializing the message.
-  DCHECK(!value.IsEmpty());
-  v8::Isolate* isolate = context->GetIsolate();
-  v8::Context::Scope context_scope(context);
-
+// Serializes the given `value` into a JSON string and returns it wrapped in a
+// Message object. This also populates user gesture and context privilege
+// information. Returns empty string on failure, and populates `error` with the
+// failure reason.
+std::string MessageFromV8UsingJSON(v8::Local<v8::Context> context,
+                                   v8::Isolate& isolate,
+                                   v8::Local<v8::Value> value,
+                                   std::string* error) {
   // TODO(devlin): For some reason, we don't use the signature for
   // Port.postMessage when evaluating the parameters. We probably should, but
   // we don't know how many extensions that may break. It would be good to
@@ -110,70 +68,258 @@ std::unique_ptr<Message> MessageFromV8(v8::Local<v8::Context> context,
     // JSON.stringify won't serialized undefined (it returns undefined), but it
     // will serialized null. We've always converted undefined to null in JS
     // bindings, so preserve this behavior for now.
-    value = v8::Null(isolate);
+    value = v8::Null(&isolate);
   }
 
   bool success = false;
   v8::Local<v8::String> stringified;
   {
-    v8::TryCatch try_catch(isolate);
+    v8::TryCatch try_catch(&isolate);
     success = v8::JSON::Stringify(context, value).ToLocal(&stringified);
   }
 
   if (!success) {
-    *error_out = kErrorCouldNotSerialize;
-    return nullptr;
+    *error = kErrorCouldNotSerialize;
+    return std::string();
   }
 
-  ScriptContext* script_context = GetScriptContextFromV8Context(context);
-  blink::WebLocalFrame* web_frame =
-      script_context ? script_context->web_frame() : nullptr;
-  bool privileged_context =
-      script_context && script_context->context_type() ==
-                            extensions::Feature::BLESSED_EXTENSION_CONTEXT;
-  return MessageFromJSONString(isolate, stringified, error_out, web_frame,
-                               privileged_context);
+  std::string message;
+  message = gin::V8ToString(&isolate, stringified);
+  // JSON.stringify can fail to produce a string value in one of two ways: it
+  // can throw an exception (as with unserializable objects), or it can return
+  // `undefined` (as with e.g. passing a function). If JSON.stringify returns
+  // `undefined`, the v8 API then coerces it to the string value "undefined".
+  // Check for this, and consider it a failure (since we didn't properly
+  // serialize a value).
+  if (message == "undefined") {
+    *error = kErrorCouldNotSerialize;
+    return std::string();
+  }
+
+  return message;
 }
 
-v8::Local<v8::Value> MessageToV8(v8::Local<v8::Context> context,
-                                 const Message& message) {
-  // TODO(crbug.com/248548): Incorporate `message.format` while deserializing
-  // the message.
+struct MessageMetadata {
+  bool has_user_gesture;
+  bool is_from_privileged_context;
+};
 
-  v8::Isolate* isolate = context->GetIsolate();
-  v8::Context::Scope context_scope(context);
+// Returns metadata about the message, including whether it originated from a
+// privileged context and if there's an active user gesture.
+MessageMetadata GetMessageMetadata(v8::Local<v8::Context> context) {
+  ScriptContext* script_context = GetScriptContextFromV8Context(context);
+  bool is_from_privileged_context =
+      script_context && script_context->context_type() ==
+                            mojom::ContextType::kPrivilegedExtension;
 
+  // Check if there's an active user gesture.
+  // For service workers, use the ExtensionInteractionProvider, since there is
+  // no associated render frame (and we synthesize user gestures). Otherwise,
+  // check the render frame.
+  // TODO(https://crbug.com/326889650): Ideally, we'd just check
+  // ExtensionInteractionProvider here, because that also knows how to look for
+  // user gestures on frame-based contexts. However, one additional check was
+  // added here, `LastActivationWasRestricted()`, that isn't in
+  // ExtensionInteractionProvider. We should move that check to
+  // ExtensionInteractionProvider and then just use that for all gestures
+  // checks.
+  bool has_unrestricted_user_activation = false;
+  if (worker_thread_util::IsWorkerThread()) {
+    has_unrestricted_user_activation =
+        ExtensionInteractionProvider::HasActiveExtensionInteraction(context);
+  } else {
+    blink::WebLocalFrame* web_frame =
+        script_context ? script_context->web_frame() : nullptr;
+    // The message should carry user activation information only if the last
+    // activation in `web_frame` was triggered by a real user interaction.  See
+    // `UserActivationState::LastActivationWasRestricted()`.
+    has_unrestricted_user_activation =
+        web_frame && web_frame->HasTransientUserActivation() &&
+        !web_frame->LastActivationWasRestricted();
+  }
+  return {has_unrestricted_user_activation, is_from_privileged_context};
+}
+
+// Serializes the given `value` using structured cloning and returns it wrapped
+// in a `Message object`. This also populates user gesture and context privilege
+// information. Returns empty `StructuredCloneMessageData` on failure, and
+// populates `error` with the failure reason.
+StructuredCloneMessageData MessageFromV8UsingStructuredClone(
+    v8::Isolate& isolate,
+    v8::Local<v8::Value> value,
+    std::string* error) {
+  // Catch top-level JS `SharedArrayBuffers` and fast-fail serialization so we
+  // don't inefficiently send them over IPC to the receiver where they will just
+  // serialize to JS `null` anyways. `SharedArrayBuffers` embedded in other
+  // objects will still serialize, but we'll handle them as deserialization
+  // errors in the message receiver.
+  if (value->IsSharedArrayBuffer()) {
+    *error = kErrorCouldNotSerialize;
+    return StructuredCloneMessageData();
+  }
+
+  blink::WebSerializedScriptValue serialized =
+      blink::WebSerializedScriptValue::Serialize(&isolate, value);
+  if (!serialized.IsValid()) {
+    *error = kErrorCouldNotSerialize;
+    return StructuredCloneMessageData();
+  }
+  return serialized.GetCloneableMessage(base::UnguessableToken::Create());
+}
+
+}  // namespace
+
+const char kSendMessageChannel[] = "chrome.runtime.sendMessage";
+const char kSendRequestChannel[] = "chrome.extension.sendRequest";
+
+const char kOnMessageEvent[] = "runtime.onMessage";
+const char kOnUserScriptMessageEvent[] = "runtime.onUserScriptMessage";
+const char kOnMessageExternalEvent[] = "runtime.onMessageExternal";
+const char kOnRequestEvent[] = "extension.onRequest";
+const char kOnRequestExternalEvent[] = "extension.onRequestExternal";
+const char kOnConnectEvent[] = "runtime.onConnect";
+const char kOnUserScriptConnectEvent[] = "runtime.onUserScriptConnect";
+const char kOnConnectExternalEvent[] = "runtime.onConnectExternal";
+const char kOnConnectNativeEvent[] = "runtime.onConnectNative";
+
+std::optional<Message> MessageFromV8(v8::Local<v8::Context> context,
+                                     v8::Local<v8::Value> value,
+                                     mojom::SerializationFormat format,
+                                     std::string* error) {
+  DCHECK(!value.IsEmpty());
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  CHECK(isolate);
+
+  size_t message_size = 0;
+  std::string json_message;
+  StructuredCloneMessageData structured_message;
+  switch (format) {
+    // TODO(crbug.com/40321352): Return an std::optional<> `std::string` or
+    // `StructuredCloneMessageData` to be clearer about when serialization has
+    // failed.
+    case mojom::SerializationFormat::kJson: {
+      json_message = MessageFromV8UsingJSON(context, *isolate, value, error);
+      if (!error->empty()) {
+        return std::nullopt;
+      }
+      message_size = json_message.length();
+      break;
+    }
+    case mojom::SerializationFormat::kStructuredClone: {
+      structured_message =
+          MessageFromV8UsingStructuredClone(*isolate, value, error);
+      if (!error->empty()) {
+        return std::nullopt;
+      }
+      message_size = structured_message.encoded_message.size();
+      break;
+    }
+  }
+
+  // IPC messages will fail at > 128 MiB. Restrict extension messages to 64 MiB.
+  // A 64 MiB JSON serialized object is scary enough as it is.
+  // TODO(crbug.com/40321352): The 64 MiB limit also applies to structured
+  // messages. Can we unrestrict that since it uses `blink::CloneableMessage`
+  // (which contains `mojo_base::BigBuffer` that has shared memory benefits for
+  // large messages)?
+  if (message_size > mojom::kMaxMessageBytes) {
+    *error = "Message exceeded maximum allowed size of 64MiB.";
+    return std::nullopt;
+  }
+
+  MessageMetadata metadata = GetMessageMetadata(context);
+  switch (format) {
+    case mojom::SerializationFormat::kJson: {
+      return std::make_optional<Message>(std::move(json_message),
+                                         metadata.has_user_gesture,
+                                         metadata.is_from_privileged_context);
+    }
+    case mojom::SerializationFormat::kStructuredClone: {
+      return std::make_optional<Message>(std::move(structured_message),
+                                         metadata.has_user_gesture,
+                                         metadata.is_from_privileged_context);
+    }
+  }
+
+  // We only support JSON or structured cloning serialization formats.
+  NOTREACHED();
+}
+
+// Deserializes the given `message` using structured cloning and returns it as a
+// v8::Value. Returns an empty handle on failure, and populates `error`.
+// TODO(crbug.com/40321352): Return a `std::optional<v8::Local<v8::Value>>` to
+// be more clear when deserialization has failed.
+v8::Local<v8::Value> MessageToV8UsingStructuredClone(v8::Isolate& isolate,
+                                                     Message message,
+                                                     std::string* error) {
+  blink::WebSerializedScriptValue serialized_message =
+      blink::WebSerializedScriptValue::CreateFromCloneableMessage(
+          message.TakeStructuredMessage());
+  // `message` no longer has valid message data because we've just taken it to
+  // create `serialized`.
+  base::expected<v8::Local<v8::Value>, blink::DeserializationError>
+      deserialized_message = serialized_message.Deserialize(&isolate);
+  if (!deserialized_message.has_value()) {
+    *error = "Could not deserialize message.";
+    return v8::Local<v8::Value>();
+  }
+  return deserialized_message.value();
+}
+
+// Deserializes the given JSON string `message` and returns it as a v8::Value.
+// For well-formed inputs, this will always return a valid value. For malformed
+// inputs, the behavior is:
+//
+// If `is_parsing_fail_safe` is true, this function will return an empty handle
+// and populate `error`.
+//
+// If `is_parsing_fail_safe` is false, this function will CHECK() and cause a
+// crash.
+v8::Local<v8::Value> MessageToV8UsingJSON(v8::Local<v8::Context> context,
+                                          v8::Isolate& isolate,
+                                          const Message& message,
+                                          bool is_parsing_fail_safe,
+                                          std::string* error) {
   v8::Local<v8::String> v8_message_string =
-      gin::StringToV8(isolate, message.data);
+      gin::StringToV8(&isolate, message.data());
   v8::Local<v8::Value> parsed_message;
-  v8::TryCatch try_catch(isolate);
   if (!v8::JSON::Parse(context, v8_message_string).ToLocal(&parsed_message)) {
-    NOTREACHED();
+    CHECK(is_parsing_fail_safe);
+    if (error) {
+      *error = kErrorMalformedJSONMessage;
+    }
     return v8::Local<v8::Value>();
   }
   return parsed_message;
 }
 
+v8::Local<v8::Value> MessageToV8(v8::Local<v8::Context> context,
+                                 Message message,
+                                 bool is_parsing_fail_safe,
+                                 std::string* error) {
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  CHECK(isolate);
+
+  switch (message.format()) {
+    case mojom::SerializationFormat::kStructuredClone:
+      return MessageToV8UsingStructuredClone(*isolate, std::move(message),
+                                             error);
+    case mojom::SerializationFormat::kJson:
+      return MessageToV8UsingJSON(context, *isolate, message,
+                                  is_parsing_fail_safe, error);
+  }
+  // We only support JSON or structured cloning serialization formats.
+  NOTREACHED();
+}
+
 int ExtractIntegerId(v8::Local<v8::Value> value) {
-  if (value->IsInt32())
+  if (value->IsInt32()) {
     return value.As<v8::Int32>()->Value();
+  }
 
   // Account for -0, which is a valid integer, but is stored as a number in v8.
   DCHECK(value->IsNumber() && value.As<v8::Number>()->Value() == 0.0);
   return 0;
-}
-
-SerializationFormat GetSerializationFormat(
-    const ScriptContext& script_context) {
-  if (!base::FeatureList::IsEnabled(
-          extensions_features::kStructuredCloningForMV3Messaging)) {
-    return SerializationFormat::kJson;
-  }
-
-  const Extension* extension = script_context.extension();
-  return extension && extension->manifest_version() >= 3
-             ? SerializationFormat::kStructuredCloned
-             : SerializationFormat::kJson;
 }
 
 MessageOptions ParseMessageOptions(v8::Local<v8::Context> context,
@@ -182,7 +328,7 @@ MessageOptions ParseMessageOptions(v8::Local<v8::Context> context,
   DCHECK(!v8_options.IsEmpty());
   DCHECK(!v8_options->IsNull());
 
-  v8::Isolate* isolate = context->GetIsolate();
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
 
   MessageOptions options;
 
@@ -239,7 +385,7 @@ bool GetTargetExtensionId(ScriptContext* script_context,
   std::string target_id;
   // If omitted, we use the extension associated with the context.
   // Note: we deliberately treat the empty string as omitting the id, even
-  // though it's not strictly correct. See https://crbug.com/823577.
+  // though it's not strictly correct. See https://crbug.com/41377567.
   if (v8_target_id->IsNull() ||
       (v8_target_id->IsString() &&
        v8_target_id.As<v8::String>()->Length() == 0)) {
@@ -265,24 +411,34 @@ bool GetTargetExtensionId(ScriptContext* script_context,
     }
   }
 
+  if (script_context->context_type() == mojom::ContextType::kUserScript) {
+    // User scripts should *always* have an associated extension.
+    CHECK(script_context->extension());
+    if (script_context->extension()->id() != target_id) {
+      *error_out = "User scripts may not message external extensions.";
+      return false;
+    }
+  }
+
   *target_out = std::move(target_id);
   return true;
 }
 
-void MassageSendMessageArguments(
-    v8::Isolate* isolate,
-    bool allow_options_argument,
-    std::vector<v8::Local<v8::Value>>* arguments_out) {
+void MassageSendMessageArguments(v8::Isolate* isolate,
+                                 bool allow_options_argument,
+                                 v8::LocalVector<v8::Value>* arguments_out) {
   base::span<const v8::Local<v8::Value>> arguments = *arguments_out;
   size_t max_size = allow_options_argument ? 4u : 3u;
-  if (arguments.empty() || arguments.size() > max_size)
+  if (arguments.empty() || arguments.size() > max_size) {
     return;
+  }
 
   v8::Local<v8::Value> target_id = v8::Null(isolate);
   v8::Local<v8::Value> message = v8::Null(isolate);
   v8::Local<v8::Value> options;
-  if (allow_options_argument)
+  if (allow_options_argument) {
     options = v8::Null(isolate);
+  }
   v8::Local<v8::Value> response_callback = v8::Null(isolate);
 
   // If the last argument is a function, it is the response callback.
@@ -294,8 +450,9 @@ void MassageSendMessageArguments(
 
   // Re-check for too many arguments after looking for the callback. If there
   // are, early-out and rely on normal signature parsing to report the error.
-  if (arguments.size() >= max_size)
+  if (arguments.size() >= max_size) {
     return;
+  }
 
   switch (arguments.size()) {
     case 0:
@@ -332,10 +489,11 @@ void MassageSendMessageArguments(
       NOTREACHED();
   }
 
-  if (allow_options_argument)
+  if (allow_options_argument) {
     *arguments_out = {target_id, message, options, response_callback};
-  else
+  } else {
     *arguments_out = {target_id, message, response_callback};
+  }
 }
 
 bool IsSendRequestDisabled(ScriptContext* script_context) {
@@ -344,5 +502,48 @@ bool IsSendRequestDisabled(ScriptContext* script_context) {
          BackgroundInfo::HasLazyBackgroundPage(extension);
 }
 
-}  // namespace messaging_util
-}  // namespace extensions
+std::string GetEventForChannel(const MessagingEndpoint& source_endpoint,
+                               const ExtensionId& target_extension_id,
+                               mojom::ChannelType channel_type) {
+  bool is_external_event =
+      MessagingEndpoint::IsExternal(source_endpoint, target_extension_id);
+  bool is_user_script_event =
+      source_endpoint.type == MessagingEndpoint::Type::kUserScript;
+  // We (deliberately) do not support external user script events.
+  CHECK(!is_user_script_event || !is_external_event);
+
+  std::string event_name;
+  switch (channel_type) {
+    case mojom::ChannelType::kSendRequest:
+      CHECK(!is_user_script_event);
+      event_name = is_external_event ? messaging_util::kOnRequestExternalEvent
+                                     : messaging_util::kOnRequestEvent;
+      break;
+    case mojom::ChannelType::kSendMessage:
+      if (is_external_event) {
+        event_name = messaging_util::kOnMessageExternalEvent;
+      } else if (is_user_script_event) {
+        event_name = messaging_util::kOnUserScriptMessageEvent;
+      } else {
+        event_name = messaging_util::kOnMessageEvent;
+      }
+      break;
+    case mojom::ChannelType::kConnect:
+      if (is_external_event) {
+        event_name = messaging_util::kOnConnectExternalEvent;
+      } else if (is_user_script_event) {
+        event_name = messaging_util::kOnUserScriptConnectEvent;
+      } else {
+        event_name = messaging_util::kOnConnectEvent;
+      }
+      break;
+    case mojom::ChannelType::kNative:
+      CHECK(!is_user_script_event);
+      event_name = messaging_util::kOnConnectNativeEvent;
+      break;
+  }
+
+  return event_name;
+}
+
+}  // namespace extensions::messaging_util

@@ -5,6 +5,11 @@
 #ifndef MEDIA_BASE_VIDEO_ENCODER_H_
 #define MEDIA_BASE_VIDEO_ENCODER_H_
 
+#include <cstdint>
+#include <optional>
+#include <vector>
+
+#include "base/containers/heap_array.h"
 #include "base/functional/callback.h"
 #include "base/task/bind_post_task.h"
 #include "base/time/time.h"
@@ -13,7 +18,8 @@
 #include "media/base/media_export.h"
 #include "media/base/svc_scalability_mode.h"
 #include "media/base/video_codecs.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "media/base/video_types.h"
+#include "third_party/abseil-cpp/absl/container/inlined_vector.h"
 #include "ui/gfx/color_space.h"
 #include "ui/gfx/geometry/size.h"
 
@@ -22,8 +28,19 @@ namespace media {
 struct VideoEncoderInfo;
 class VideoFrame;
 
+// Returns the drop frame threshold for media::VideoEncoder used in WebCodecs.
+MEDIA_EXPORT uint8_t GetDefaultVideoEncoderDropFrameThreshold();
+
 MEDIA_EXPORT uint32_t GetDefaultVideoEncodeBitrate(gfx::Size frame_size,
                                                    uint32_t framerate);
+
+MEDIA_EXPORT int GetNumberOfThreadsForSoftwareEncoding(gfx::Size frame_size);
+
+// Converts AV1/VP9 qindex (0-255) to the quantizer parameter (0-63).
+MEDIA_EXPORT uint8_t QIndexToQuantizer(VideoCodec codec, uint8_t q_index);
+
+// Converts AV1/VP9 quantizer parameter (0-63) to qindex (0-255) range.
+MEDIA_EXPORT uint8_t QuantizerToQIndex(VideoCodec codec, uint8_t quantizer);
 
 // Encoded video frame, its data and metadata.
 struct MEDIA_EXPORT VideoEncoderOutput {
@@ -31,10 +48,10 @@ struct MEDIA_EXPORT VideoEncoderOutput {
   VideoEncoderOutput(VideoEncoderOutput&&);
   ~VideoEncoderOutput();
 
-  // Feel free take this buffer out and use underlying memory as is without
+  // Feel free take these buffers out and use underlying memory as is without
   // copying.
-  std::unique_ptr<uint8_t[]> data;
-  size_t size = 0;
+  base::HeapArray<uint8_t> data;
+  base::HeapArray<uint8_t> alpha_data;
 
   base::TimeDelta timestamp;
   bool key_frame = false;
@@ -43,7 +60,7 @@ struct MEDIA_EXPORT VideoEncoderOutput {
 
   // Some platforms may adjust the encoding size to meet hardware requirements.
   // If not set, the encoded size is the same as configured.
-  absl::optional<gfx::Size> encoded_size;
+  std::optional<gfx::Size> encoded_size;
 };
 
 class MEDIA_EXPORT VideoEncoder {
@@ -58,27 +75,65 @@ class MEDIA_EXPORT VideoEncoder {
   };
 
   enum class LatencyMode { Realtime, Quality };
+  enum class ContentHint { Camera, Screen };
 
   struct MEDIA_EXPORT Options {
     Options();
     Options(const Options&);
     ~Options();
-    absl::optional<Bitrate> bitrate;
-    absl::optional<double> framerate;
+
+    std::string ToString();
+
+    std::optional<Bitrate> bitrate;
+    std::optional<double> framerate;
 
     gfx::Size frame_size;
 
-    absl::optional<int> keyframe_interval = 10000;
+    std::optional<int> keyframe_interval = 10000;
 
     LatencyMode latency_mode = LatencyMode::Realtime;
 
-    absl::optional<SVCScalabilityMode> scalability_mode;
+    std::optional<SVCScalabilityMode> scalability_mode;
+
+    std::optional<ContentHint> content_hint;
+
+    // Controls encoded pixel format.
+    std::optional<VideoChromaSampling> subsampling;
+
+    // Controls encoded bit depth.
+    std::optional<uint8_t> bit_depth;
 
     // Only used for H264 encoding.
     AvcOptions avc;
 
     // Only used for HEVC encoding.
     HevcOptions hevc;
+
+    // Allow clients to choose reference pattern for frames.
+    bool manual_reference_buffer_control = false;
+  };
+
+  struct MEDIA_EXPORT EncodeOptions {
+    explicit EncodeOptions(bool key_frame);
+    EncodeOptions();
+    EncodeOptions(const EncodeOptions&);
+    ~EncodeOptions();
+    bool key_frame = false;
+    // Per-frame codec-specific quantizer value.
+    // Should only be used when encoder configured with kExternal bitrate mode.
+    std::optional<int> quantizer;
+
+    // Ids of the encoder's buffers (past frames) that this frame can reference
+    // for inter-frame prediction.
+    // Valid values: [0..VideoEncoderInfo::number_of_manual_reference_buffers)
+    absl::InlinedVector<uint8_t, 4> reference_buffers;
+
+    // Id of the encoder's buffer where this frame should be kept after
+    // encoding. This frames can later be referenced via `reference_buffers`.
+    // If empty, this frame can't be used for inter-frame prediction by future
+    // frames.
+    // Valid values: [0..VideoEncoderInfo::number_of_manual_reference_buffers)
+    std::optional<uint8_t> update_buffer;
   };
 
   // A sequence of codec specific bytes, commonly known as extradata.
@@ -95,18 +150,18 @@ class MEDIA_EXPORT VideoEncoder {
   // becomes available.
   using OutputCB =
       base::RepeatingCallback<void(VideoEncoderOutput output,
-                                   absl::optional<CodecDescription>)>;
+                                   std::optional<CodecDescription>)>;
 
   // Callback to report success and errors in encoder calls.
   using EncoderStatusCB = base::OnceCallback<void(EncoderStatus error)>;
 
-  struct PendingEncode {
+  struct MEDIA_EXPORT PendingEncode {
     PendingEncode();
     PendingEncode(PendingEncode&&);
     ~PendingEncode();
     EncoderStatusCB done_callback;
     scoped_refptr<VideoFrame> frame;
-    bool key_frame;
+    EncodeOptions options;
   };
 
   VideoEncoder();
@@ -140,7 +195,7 @@ class MEDIA_EXPORT VideoEncoder {
   // Encode() does not expect EOS frames, use Flush() to finalize the stream
   // and harvest the outputs.
   virtual void Encode(scoped_refptr<VideoFrame> frame,
-                      bool key_frame,
+                      const EncodeOptions& options,
                       EncoderStatusCB done_cb) = 0;
 
   // Adjust encoder options and the output callback for future frames, executing

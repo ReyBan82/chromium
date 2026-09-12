@@ -5,7 +5,7 @@
 #ifndef CHROME_BROWSER_THEMES_THEME_SERVICE_FACTORY_H_
 #define CHROME_BROWSER_THEMES_THEME_SERVICE_FACTORY_H_
 
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/profiles/profile_keyed_service_factory.h"
 
 class Profile;
@@ -25,6 +25,10 @@ class ThemeServiceFactory : public ProfileKeyedServiceFactory {
   // still needs a ThemeService to hand back the default theme images.
   static ThemeService* GetForProfile(Profile* profile);
 
+  // Same as GetForProfile(), but returns nullptr if the service does not
+  // already exist.
+  static ThemeService* GetForProfileIfExists(Profile* profile);
+
   // Returns the Extension that implements the theme associated with
   // |profile|. Returns NULL if the theme is no longer installed, if there is
   // no installed theme, or the theme was cleared.
@@ -36,17 +40,17 @@ class ThemeServiceFactory : public ProfileKeyedServiceFactory {
   ThemeServiceFactory& operator=(const ThemeServiceFactory&) = delete;
 
  private:
-  friend struct base::DefaultSingletonTraits<ThemeServiceFactory>;
+  friend base::NoDestructor<ThemeServiceFactory>;
 
   ThemeServiceFactory();
   ~ThemeServiceFactory() override;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* profile) const override;
-  void RegisterProfilePrefs(
-      user_prefs::PrefRegistrySyncable* registry) override;
   bool ServiceIsCreatedWithBrowserContext() const override;
+  void BrowserContextDestroyed(
+      content::BrowserContext* browser_context) override;
 };
 
 #endif  // CHROME_BROWSER_THEMES_THEME_SERVICE_FACTORY_H_

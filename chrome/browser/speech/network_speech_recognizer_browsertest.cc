@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 
 #include "base/command_line.h"
 #include "base/memory/weak_ptr.h"
@@ -14,7 +15,7 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "chrome/browser/speech/speech_recognizer_delegate.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/testing_profile.h"
@@ -24,16 +25,16 @@
 #include "content/public/test/fake_speech_recognition_manager.h"
 #include "content/public/test/test_utils.h"
 #include "media/mojo/mojom/speech_recognition.mojom.h"
+#include "media/mojo/mojom/speech_recognition_service.mojom.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using ::testing::DoDefault;
 using ::testing::InvokeWithoutArgs;
 
 class MockSpeechRecognizerDelegate : public SpeechRecognizerDelegate {
  public:
-  MockSpeechRecognizerDelegate() {}
+  MockSpeechRecognizerDelegate() = default;
 
   base::WeakPtr<MockSpeechRecognizerDelegate> GetWeakPtr() {
     return weak_factory_.GetWeakPtr();
@@ -43,10 +44,12 @@ class MockSpeechRecognizerDelegate : public SpeechRecognizerDelegate {
       OnSpeechResult,
       void(const std::u16string& text,
            bool is_final,
-           const absl::optional<media::SpeechRecognitionResult>& timing));
+           const std::optional<media::SpeechRecognitionResult>& timing));
   MOCK_METHOD1(OnSpeechSoundLevelChanged, void(int16_t));
   MOCK_METHOD1(OnSpeechRecognitionStateChanged, void(SpeechRecognizerStatus));
   MOCK_METHOD0(OnSpeechRecognitionStopped, void());
+  MOCK_METHOD1(OnLanguageIdentificationEvent,
+               void(media::mojom::LanguageIdentificationEventPtr));
 
  private:
   base::WeakPtrFactory<MockSpeechRecognizerDelegate> weak_factory_{this};
@@ -84,10 +87,10 @@ IN_PROC_BROWSER_TEST_F(NetworkSpeechRecognizerBrowserTest, RecognizeSpeech) {
   NetworkSpeechRecognizer recognizer(
       mock_speech_delegate_->GetWeakPtr(),
       browser()
-          ->profile()
+          ->GetProfile()
           ->GetDefaultStoragePartition()
           ->GetURLLoaderFactoryForBrowserProcessIOThread(),
-      "en" /* accept_language */, "en" /* locale */);
+      "en" /* locale */);
 
   testing::InSequence seq;
   EXPECT_CALL(*mock_speech_delegate_,

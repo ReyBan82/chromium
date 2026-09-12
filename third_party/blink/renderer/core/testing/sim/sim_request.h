@@ -5,7 +5,9 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_TESTING_SIM_SIM_REQUEST_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_TESTING_SIM_SIM_REQUEST_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
+#include "base/memory/raw_ptr.h"
 #include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_url_error.h"
 #include "third_party/blink/public/platform/web_url_response.h"
@@ -41,7 +43,7 @@ class SimRequestBase {
     // The origin of the request used to load the main resource.
     WebSecurityOrigin requestor_origin;
 
-    WTF::HashMap<String, String> response_http_headers;
+    HashMap<String, String> response_http_headers;
 
     // The HTTP status code of the response. |response_http_status| is ignored
     // if |redirect_url| is non-empty, since a redirect implies a 302 status
@@ -94,12 +96,15 @@ class SimRequestBase {
   const bool start_immediately_;
   bool started_ = false;
   WebURLResponse response_;
-  absl::optional<WebURLError> error_;
-  URLLoaderClient* client_ = nullptr;
+  std::optional<WebURLError> error_;
+  raw_ptr<URLLoaderClient, UnprotectedInRelease | DanglingUntriaged> client_ =
+      nullptr;
   unsigned total_encoded_data_length_ = 0;
-  WTF::HashMap<String, String> response_http_headers_;
+  HashMap<String, String> response_http_headers_;
   int response_http_status_;
-  StaticDataNavigationBodyLoader* navigation_body_loader_ = nullptr;
+  raw_ptr<StaticDataNavigationBodyLoader,
+          UnprotectedInRelease | DanglingUntriaged>
+      navigation_body_loader_ = nullptr;
 };
 
 // This request can be used as a main resource request for navigation.

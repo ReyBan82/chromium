@@ -10,7 +10,7 @@
 
 class TestComponentsHandler : public ComponentsHandler {
  public:
-  TestComponentsHandler(
+  explicit TestComponentsHandler(
       component_updater::ComponentUpdateService* component_update_service)
       : ComponentsHandler(component_update_service) {
     set_web_ui(&test_web_ui_);
@@ -27,7 +27,7 @@ TEST(ComponentsHandlerTest, RemovesObserver) {
 
   {
     TestComponentsHandler handler(&mock_service);
-    base::Value::List args;
+    base::ListValue args;
     args.Append("unused");
     handler.HandleRequestComponentsData(args);
   }

@@ -4,28 +4,44 @@
 
 package org.chromium.content_public.browser;
 
-import org.chromium.ui.base.WindowAndroid;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
-/**
- * A delegate interface for the contacts picker.
- */
+/** A delegate interface for the contacts picker. */
+@NullMarked
 public interface ContactsPickerDelegate {
     /**
      * Called to display the contacts picker.
-     * @param windowAndroid The window of the Web Contents that triggered the dialog.
-     * @param listener The listener that will be notified of the action the user took in the
-     *                 picker.
+     *
+     * @param webContents The Web Contents that triggered the dialog.
+     * @param listener The listener that will be notified of the action the user took in the picker.
      * @param allowMultiple Whether to allow multiple contacts to be picked.
      * @param includeNames Whether to include names of the shared contacts.
      * @param includeEmails Whether to include emails of the shared contacts.
      * @param includeTel Whether to include telephone numbers of the shared contacts.
      * @param includeAddresses Whether to include addresses of the shared contacts.
      * @param includeIcons Whether to include icons of the shared contacts.
-     * @param formattedOrigin The origin the data will be shared with, formatted for display
-     *                        with the scheme omitted.
+     * @param formattedOrigin The origin the data will be shared with, formatted for display with
+     *     the scheme omitted.
+     * @param contactsFetcher The source of contact information.
      * @return the contacts picker object.
      */
-    Object showContactsPicker(WindowAndroid windowAndroid, ContactsPickerListener listener,
-            boolean allowMultiple, boolean includeNames, boolean includeEmails, boolean includeTel,
-            boolean includeAddresses, boolean includeIcons, String formattedOrigin);
+    Object showContactsPicker(
+            WebContents webContents,
+            ContactsPickerListener listener,
+            boolean allowMultiple,
+            boolean includeNames,
+            boolean includeEmails,
+            boolean includeTel,
+            boolean includeAddresses,
+            boolean includeIcons,
+            String formattedOrigin,
+            @Nullable ContactsFetcher contactsFetcher);
+
+    /**
+     * Called to cancel the contacts picker.
+     *
+     * @param picker The contacts picker object returned by showContactsPicker.
+     */
+    void cancelContactsPicker(Object picker);
 }

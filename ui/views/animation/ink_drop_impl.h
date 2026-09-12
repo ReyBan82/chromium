@@ -6,16 +6,20 @@
 #define UI_VIEWS_ANIMATION_INK_DROP_IMPL_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/views/animation/ink_drop.h"
 #include "ui/views/animation/ink_drop_highlight_observer.h"
 #include "ui/views/animation/ink_drop_ripple_observer.h"
 #include "ui/views/views_export.h"
+
+namespace ui {
+class LayerNotDrawn;
+}  // namespace ui
 
 namespace views {
 namespace test {
@@ -60,12 +64,13 @@ class VIEWS_EXPORT InkDropImpl : public InkDrop,
 
   ~InkDropImpl() override;
 
-  const absl::optional<base::TimeDelta>& hover_highlight_fade_duration() const {
+  const std::optional<base::TimeDelta>& hover_highlight_fade_duration() const {
     return hover_highlight_fade_duration_;
   }
 
   // InkDrop:
   void HostSizeChanged(const gfx::Size& new_size) override;
+  void HostViewThemeChanged() override;
   void HostTransformChanged(const gfx::Transform& new_transform) override;
   InkDropState GetTargetInkDropState() const override;
   void AnimateToState(InkDropState ink_drop_state) override;
@@ -263,6 +268,9 @@ class VIEWS_EXPORT InkDropImpl : public InkDrop,
   // builds.
   void ExitHighlightState();
 
+  // Recreate the ripple and highlight.
+  void RecreateRippleAndHighlight();
+
   // The host of the ink drop. Used to create the ripples and highlights, and to
   // add/remove the root layer to/from it.
   const raw_ptr<InkDropHost> ink_drop_host_;
@@ -274,7 +282,7 @@ class VIEWS_EXPORT InkDropImpl : public InkDrop,
   // The root Layer that parents the InkDropRipple layers and the
   // InkDropHighlight layers. The |root_layer_| is the one that is added and
   // removed from the |ink_drop_host_|.
-  std::unique_ptr<ui::Layer> root_layer_;
+  std::unique_ptr<ui::LayerNotDrawn> root_layer_;
 
   // True when the |root_layer_| has been added to the |ink_drop_host_|.
   bool root_layer_added_to_host_ = false;
@@ -305,7 +313,7 @@ class VIEWS_EXPORT InkDropImpl : public InkDrop,
   std::unique_ptr<HighlightState> highlight_state_;
 
   // Overrides the default hover highlight fade durations when set.
-  absl::optional<base::TimeDelta> hover_highlight_fade_duration_;
+  std::optional<base::TimeDelta> hover_highlight_fade_duration_;
 
   // Used to ensure highlight state transitions are not triggered when exiting
   // the current state.

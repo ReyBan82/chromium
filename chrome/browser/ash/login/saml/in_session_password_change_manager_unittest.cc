@@ -4,27 +4,35 @@
 
 #include "chrome/browser/ash/login/saml/in_session_password_change_manager.h"
 
-#include "ash/public/cpp/session/session_activation_observer.h"
-#include "ash/public/cpp/session/session_controller.h"
+#include <memory>
+#include <string>
+
+#include "ash/constants/ash_features.h"
+#include "ash/constants/ash_login_pref_names.h"
+#include "ash/public/cpp/notification_utils.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
-#include "build/build_config.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
+#include "base/time/time.h"
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/notifications/notification_display_service_impl.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
-#include "chromeos/ash/components/dbus/userdataauth/userdataauth_client.h"
+#include "chromeos/ash/components/dbus/cryptohome/auth_factor.pb.h"
+#include "chromeos/ash/components/dbus/userdataauth/fake_userdataauth_client.h"
+#include "chromeos/ash/components/login/auth/public/cryptohome_key_constants.h"
 #include "chromeos/ash/components/login/auth/public/saml_password_attributes.h"
+#include "components/prefs/pref_service.h"
 #include "components/user_manager/scoped_user_manager.h"
+#include "components/user_manager/user.h"
 #include "components/user_manager/user_names.h"
 #include "content/public/test/browser_task_environment.h"
-#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/message_center/message_center.h"
+#include "ui/message_center/public/cpp/notification.h"
 
 namespace ash {
 namespace {
@@ -43,15 +51,18 @@ inline std::u16string utf16(const char* ascii) {
 
 }  // namespace
 
-class InSessionPasswordChangeManagerTest : public testing::Test {
+class InSessionPasswordChangeManagerTestBase : public testing::Test {
  public:
-  InSessionPasswordChangeManagerTest() { UserDataAuthClient::InitializeFake(); }
+  InSessionPasswordChangeManagerTestBase() {
+    UserDataAuthClient::InitializeFake();
+  }
 
-  ~InSessionPasswordChangeManagerTest() override {
+  ~InSessionPasswordChangeManagerTestBase() override {
     UserDataAuthClient::Shutdown();
   }
 
   void SetUp() override {
+    message_center::MessageCenter::Initialize();
     ASSERT_TRUE(profile_manager_.SetUp());
     profile_ = profile_manager_.CreateTestingProfile("test");
     profile_->GetPrefs()->SetBoolean(prefs::kSamlInSessionPasswordChangeEnabled,
@@ -60,33 +71,45 @@ class InSessionPasswordChangeManagerTest : public testing::Test {
         prefs::kSamlPasswordExpirationAdvanceWarningDays,
         kAdvanceWarningTime.InDays());
 
-    std::unique_ptr<FakeChromeUserManager> fake_user_manager =
-        std::make_unique<FakeChromeUserManager>();
-    fake_user_manager->AddUser(user_manager::StubAccountId());
-    fake_user_manager->LoginUser(user_manager::StubAccountId());
-    ASSERT_TRUE(fake_user_manager->GetPrimaryUser());
-    scoped_user_manager_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::move(fake_user_manager));
+    fake_user_manager_->AddUser(user_manager::StubAccountId());
+    fake_user_manager_->LoginUser(user_manager::StubAccountId());
+    ASSERT_TRUE(fake_user_manager_->GetPrimaryUser());
 
-    display_service_tester_ =
-        std::make_unique<NotificationDisplayServiceTester>(profile_);
-    manager_ = std::make_unique<InSessionPasswordChangeManager>(profile_);
+    manager_ = std::make_unique<InSessionPasswordChangeManager>(
+        TestingBrowserProcess::GetGlobal()->local_state(), profile_);
 
     // urgent_warning_days_ = -1: This means we only ever show a standard
     // notification, instead of an urgent one, because it is simpler to test.
-    // TODO(https://crbug.com/930109): Test both types of notification.
+    // TODO(crbug.com/40613129): Test both types of notification.
     manager_->urgent_warning_days_ = -1;
     InSessionPasswordChangeManager::SetForTesting(manager_.get());
   }
 
   void TearDown() override {
     InSessionPasswordChangeManager::ResetForTesting();
+    message_center::MessageCenter::Shutdown();
   }
 
  protected:
-  absl::optional<Notification> Notification() {
-    return NotificationDisplayServiceTester::Get()->GetNotification(
-        "saml.password-expiry-notification");
+  void ConfigureOnlinePassword() {
+    // Configure an online password for the user.
+    const auto cryptohome_id = cryptohome::CreateAccountIdentifierFromAccountId(
+        user_manager::StubAccountId());
+    FakeUserDataAuthClient::TestApi::Get()->AddExistingUser(cryptohome_id);
+    user_data_auth::AuthFactor factor;
+    factor.set_type(user_data_auth::AUTH_FACTOR_TYPE_PASSWORD);
+    factor.set_label(ash::kCryptohomeGaiaKeyLabel);
+    user_data_auth::AuthInput input;
+    input.mutable_password_input()->set_secret("secret");
+    FakeUserDataAuthClient::TestApi::Get()->AddAuthFactor(cryptohome_id, factor,
+                                                          input);
+  }
+
+  const Notification* Notification() {
+    return message_center::MessageCenter::Get()->FindNotificationById(
+        CreateUserScopedNotificationId(
+            "saml.password-expiry-notification",
+            fake_user_manager_->GetPrimaryUser()->username_hash()));
   }
 
   void SetExpirationTime(base::Time expiration_time) {
@@ -95,91 +118,119 @@ class InSessionPasswordChangeManagerTest : public testing::Test {
   }
 
   void ExpectNotificationAndDismiss() {
-    EXPECT_TRUE(Notification().has_value());
+    EXPECT_TRUE(Notification());
     manager_->DismissExpiryNotification();
-    EXPECT_FALSE(Notification().has_value());
+    EXPECT_FALSE(Notification());
   }
 
+  void MaybeShowExpiryNotificationAndWait() {
+    manager_->MaybeShowExpiryNotification();
+    // When kManagedLocalPinAndPassword is enabled, MaybeShowExpiryNotification
+    // triggers an asynchronous check for auth factors. We need to run until
+    // idle to ensure the callback is executed.
+    test_environment_.RunUntilIdle();
+  }
+
+  base::test::ScopedFeatureList feature_list_;
   content::BrowserTaskEnvironment test_environment_{
       base::test::TaskEnvironment::MainThreadType::UI,
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+  user_manager::TypedScopedUserManager<ash::FakeChromeUserManager>
+      fake_user_manager_{std::make_unique<ash::FakeChromeUserManager>()};
   TestingProfileManager profile_manager_{TestingBrowserProcess::GetGlobal()};
-  TestingProfile* profile_;
+  raw_ptr<TestingProfile> profile_;
 
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
-  std::unique_ptr<NotificationDisplayServiceTester> display_service_tester_;
   std::unique_ptr<InSessionPasswordChangeManager> manager_;
 };
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_PolicyDisabled) {
+class InSessionPasswordChangeManagerTest
+    : public InSessionPasswordChangeManagerTestBase,
+      public testing::WithParamInterface<bool> {
+ public:
+  InSessionPasswordChangeManagerTest() {
+    if (GetParam()) {
+      feature_list_.InitAndEnableFeature(features::kManagedLocalPinAndPassword);
+    } else {
+      feature_list_.InitAndDisableFeature(
+          features::kManagedLocalPinAndPassword);
+    }
+  }
+
+  void SetUp() override {
+    InSessionPasswordChangeManagerTestBase::SetUp();
+    ConfigureOnlinePassword();
+  }
+};
+
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_PolicyDisabled) {
   SetExpirationTime(base::Time::Now());
   profile_->GetPrefs()->SetBoolean(prefs::kSamlInSessionPasswordChangeEnabled,
                                    false);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_WillNotExpire) {
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_WillNotExpire) {
   SamlPasswordAttributes::DeleteFromPrefs(profile_->GetPrefs());
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
   // No notification shown now and nothing shown in the next 3 years.
   test_environment_.FastForwardBy(kThreeYears);
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_AlreadyExpired) {
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_AlreadyExpired) {
   SetExpirationTime(base::Time::Now() - kOneYear);  // Expired last year.
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is shown immediately since password has expired.
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password change overdue"), Notification()->title());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_WillSoonExpire) {
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_WillSoonExpire) {
   SetExpirationTime(base::Time::Now() + (kAdvanceWarningTime / 2) - kOneHour);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is shown immediately since password will soon expire.
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password expires in 7 days"), Notification()->title());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_WillEventuallyExpire) {
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_WillEventuallyExpire) {
   SetExpirationTime(base::Time::Now() + kOneYear + kAdvanceWarningTime);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is not shown when expiration is still over a year away.
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 
   // But, it will be shown once we are in the advance warning window:
   test_environment_.FastForwardBy(kOneYear + kOneHour);
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password expires in 14 days"), Notification()->title());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_DeleteExpirationTime) {
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_DeleteExpirationTime) {
   SetExpirationTime(base::Time::Now() + kOneYear);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is not shown immediately.
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 
   // Since expiration time is now removed, it is not shown later either.
   SamlPasswordAttributes::DeleteFromPrefs(profile_->GetPrefs());
   test_environment_.FastForwardBy(kThreeYears);
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_PasswordChanged) {
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_PasswordChanged) {
   SetExpirationTime(base::Time::Now() + (kAdvanceWarningTime / 2) - kOneHour);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is shown immediately since password will soon expire.
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password expires in 7 days"), Notification()->title());
 
   // Password is changed and notification is dismissed.
@@ -188,68 +239,71 @@ TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_PasswordChanged) {
 
   // From now on, notification will not be reshown.
   test_environment_.FastForwardBy(kThreeYears);
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, MaybeShow_Idempotent) {
+TEST_P(InSessionPasswordChangeManagerTest, MaybeShow_Idempotent) {
   SetExpirationTime(base::Time::Now() + kOneYear);
+  // Ensure any initial asynchronous work (like auth factor check) is complete
+  // before we start counting tasks.
+  test_environment_.RunUntilIdle();
 
   // Calling MaybeShowSamlPasswordExpiryNotification should only add one task -
   // to maybe show the notification in about a year.
   int baseline_task_count = test_environment_.GetPendingMainThreadTaskCount();
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
   int new_task_count = test_environment_.GetPendingMainThreadTaskCount();
   EXPECT_EQ(1, new_task_count - baseline_task_count);
 
   // Calling it many times shouldn't create more tasks - we only need one task
   // to show the notification in about a year.
   for (int i = 0; i < 10; i++) {
-    manager_->MaybeShowExpiryNotification();
+    MaybeShowExpiryNotificationAndWait();
   }
   new_task_count = test_environment_.GetPendingMainThreadTaskCount();
   EXPECT_EQ(1, new_task_count - baseline_task_count);
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, TimePasses_NoUserActionTaken) {
+TEST_P(InSessionPasswordChangeManagerTest, TimePasses_NoUserActionTaken) {
   SetExpirationTime(base::Time::Now() + kOneYear + kAdvanceWarningTime);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is not shown immediately.
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 
   // After one year, we are still not quite inside the advance warning window.
   test_environment_.FastForwardBy(kOneYear - (kOneDay / 2));
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 
   // But the next day, the notification is shown.
   test_environment_.FastForwardBy(kOneDay);
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password expires in 14 days"), Notification()->title());
   EXPECT_EQ(utf16("Choose a new one now"), Notification()->message());
 
   // As time passes, the notification updates each day.
   test_environment_.FastForwardBy(kAdvanceWarningTime / 2);
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password expires in 7 days"), Notification()->title());
   EXPECT_EQ(utf16("Choose a new one now"), Notification()->message());
 
   test_environment_.FastForwardBy(kAdvanceWarningTime / 2);
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password change overdue"), Notification()->title());
   EXPECT_EQ(utf16("Choose a new one now"), Notification()->message());
 
   test_environment_.FastForwardBy(kOneYear);
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(utf16("Password change overdue"), Notification()->title());
   EXPECT_EQ(utf16("Choose a new one now"), Notification()->message());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, TimePasses_NotificationDismissed) {
+TEST_P(InSessionPasswordChangeManagerTest, TimePasses_NotificationDismissed) {
   SetExpirationTime(base::Time::Now() + kOneYear + kAdvanceWarningTime / 2);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is not shown immediately.
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 
   // Notification appears once we are inside the advance warning window.
   test_environment_.FastForwardBy(kOneYear);
@@ -267,48 +321,109 @@ TEST_F(InSessionPasswordChangeManagerTest, TimePasses_NotificationDismissed) {
   ExpectNotificationAndDismiss();
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, ReshowOnUnlock) {
+TEST_P(InSessionPasswordChangeManagerTest, ReshowOnUnlock) {
   SetExpirationTime(base::Time::Now() + kAdvanceWarningTime / 2);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is shown immediately.
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   base::Time first_shown_at = Notification()->timestamp();
 
   // This notification is still present an hour later - but it is the same
   // notification as before. So it is no longer shown prominently on screen.
   test_environment_.FastForwardBy(kOneHour);
-  EXPECT_TRUE(Notification().has_value());
+  ASSERT_TRUE(Notification());
   EXPECT_EQ(first_shown_at, Notification()->timestamp());
 
   // But when the screen is unlocked, the old notification is replaced with a
   // newer one. The new one is prominently shown on screen for a few seconds.
   manager_->OnScreenUnlocked();
-  EXPECT_TRUE(Notification().has_value());
+  // OnScreenUnlocked calls MaybeShowExpiryNotification, which performs an
+  // asynchronous auth factor check when kManagedLocalPinAndPassword is enabled.
+  // We need to run until idle to ensure this check completes and the
+  // notification is reshown.
+  test_environment_.RunUntilIdle();
+  ASSERT_TRUE(Notification());
   EXPECT_NE(first_shown_at, Notification()->timestamp());
 }
 
-TEST_F(InSessionPasswordChangeManagerTest, DontReshowWhenDismissed) {
+TEST_P(InSessionPasswordChangeManagerTest, DontReshowWhenDismissed) {
   SetExpirationTime(base::Time::Now() + kAdvanceWarningTime / 2);
-  manager_->MaybeShowExpiryNotification();
+  MaybeShowExpiryNotificationAndWait();
 
   // Notification is shown immediately.
-  EXPECT_TRUE(Notification().has_value());
+  EXPECT_TRUE(Notification());
 
   // If dismissed, the notification won't reappear within the next hour, since
   // we don't want to nag the user continuously.
   manager_->DismissExpiryNotification();
   manager_->OnExpiryNotificationDismissedByUser();
   test_environment_.FastForwardBy(kOneHour);
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 
   // Nor will it reappear if the user unlocks the screen.
   manager_->OnScreenUnlocked();
-  EXPECT_FALSE(Notification().has_value());
+  EXPECT_FALSE(Notification());
 
   // But it will eventually reappear the next day.
   test_environment_.FastForwardBy(kOneDay);
-  EXPECT_TRUE(Notification().has_value());
+  EXPECT_TRUE(Notification());
 }
+
+class InSessionPasswordChangeManagerLocalFactorCheckTest
+    : public InSessionPasswordChangeManagerTestBase {
+ public:
+  InSessionPasswordChangeManagerLocalFactorCheckTest() {
+    feature_list_.InitAndEnableFeature(features::kManagedLocalPinAndPassword);
+  }
+};
+
+TEST_F(InSessionPasswordChangeManagerLocalFactorCheckTest,
+       MaybeShow_LocalFactorIsPin) {
+  // Add only a PIN.
+  const auto cryptohome_id = cryptohome::CreateAccountIdentifierFromAccountId(
+      user_manager::StubAccountId());
+  FakeUserDataAuthClient::TestApi::Get()->AddExistingUser(cryptohome_id);
+
+  user_data_auth::AuthFactor factor;
+  factor.set_type(user_data_auth::AUTH_FACTOR_TYPE_PIN);
+  factor.set_label("pin");
+  user_data_auth::AuthInput input;
+  input.mutable_pin_input()->set_secret("123456");
+  FakeUserDataAuthClient::TestApi::Get()->AddAuthFactor(cryptohome_id, factor,
+                                                        input);
+
+  SetExpirationTime(base::Time::Now() - kOneYear);  // Expired last year.
+  MaybeShowExpiryNotificationAndWait();
+
+  // Notification is NOT shown because there is no online password.
+  EXPECT_FALSE(Notification());
+}
+
+TEST_F(InSessionPasswordChangeManagerLocalFactorCheckTest,
+       MaybeShow_LocalPassword) {
+  // Add only a local password.
+  const auto cryptohome_id = cryptohome::CreateAccountIdentifierFromAccountId(
+      user_manager::StubAccountId());
+  FakeUserDataAuthClient::TestApi::Get()->AddExistingUser(cryptohome_id);
+
+  user_data_auth::AuthFactor factor;
+  factor.set_type(user_data_auth::AUTH_FACTOR_TYPE_PASSWORD);
+  factor.set_label(ash::kCryptohomeLocalPasswordKeyLabel);
+  user_data_auth::AuthInput input;
+  input.mutable_password_input()->set_secret("local-secret");
+  FakeUserDataAuthClient::TestApi::Get()->AddAuthFactor(cryptohome_id, factor,
+                                                        input);
+
+  SetExpirationTime(base::Time::Now() - kOneYear);  // Expired last year.
+  MaybeShowExpiryNotificationAndWait();
+
+  // Notification is NOT shown because it's a local password, not an online
+  // password.
+  EXPECT_FALSE(Notification());
+}
+INSTANTIATE_TEST_SUITE_P(All,
+                         InSessionPasswordChangeManagerTest,
+                         testing::Bool());
 
 }  // namespace ash

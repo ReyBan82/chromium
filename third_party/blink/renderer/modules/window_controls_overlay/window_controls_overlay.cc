@@ -72,20 +72,19 @@ DOMRect* WindowControlsOverlay::getTitlebarAreaRect() const {
                          ->DomWindow()
                          ->GetFrame()
                          ->GetWindowControlsOverlayRect();
-  return DOMRect::Create(rect.x(), rect.y(), rect.width(), rect.height());
+  return DOMRect::FromRect(rect);
 }
 
 void WindowControlsOverlay::WindowControlsOverlayChanged(
     const gfx::Rect& rect) {
   DispatchEvent(
       *(MakeGarbageCollected<WindowControlsOverlayGeometryChangeEvent>(
-          event_type_names::kGeometrychange,
-          DOMRect::Create(rect.x(), rect.y(), rect.width(), rect.height()),
+          event_type_names::kGeometrychange, DOMRect::FromRect(rect),
           !rect.IsEmpty())));
 }
 
 void WindowControlsOverlay::Trace(blink::Visitor* visitor) const {
-  EventTargetWithInlineData::Trace(visitor);
+  EventTarget::Trace(visitor);
   Supplement<Navigator>::Trace(visitor);
 }
 

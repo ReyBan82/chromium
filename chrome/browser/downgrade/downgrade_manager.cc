@@ -4,7 +4,10 @@
 
 #include "chrome/browser/downgrade/downgrade_manager.h"
 
+#include <algorithm>
 #include <iterator>
+#include <optional>
+#include <string_view>
 #include <utility>
 
 #include "base/command_line.h"
@@ -16,26 +19,21 @@
 #include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/syslog_logging.h"
 #include "base/task/thread_pool.h"
 #include "base/version.h"
 #include "build/build_config.h"
-#include "chrome/browser/browser_process.h"
+#include "chrome/browser/downgrade/downgrade_manager_delegate.h"
 #include "chrome/browser/downgrade/downgrade_utils.h"
 #include "chrome/browser/downgrade/snapshot_manager.h"
 #include "chrome/browser/downgrade/user_data_downgrade.h"
 #include "chrome/common/channel_info.h"
 #include "chrome/common/chrome_switches.h"
-#include "chrome/common/pref_names.h"
-#include "components/enterprise/browser/controller/browser_dm_token_storage.h"
-#include "components/prefs/pref_service.h"
 #include "components/version_info/version_info.h"
 #include "components/version_info/version_info_values.h"
 #include "content/public/browser/browser_thread.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(IS_WIN)
 #include "chrome/installer/util/install_util.h"
@@ -56,7 +54,7 @@ void MoveUserData(const base::FilePath& source, const base::FilePath& target) {
   auto exclusion_predicate =
       base::BindRepeating([](const base::FilePath& name) -> bool {
         // TODO(ydago): Share constants instead of hardcoding values here.
-        static constexpr base::FilePath::StringPieceType kFilesToKeep[] = {
+        static constexpr base::FilePath::StringViewType kFilesToKeep[] = {
             FILE_PATH_LITERAL("browsermetrics"),
             FILE_PATH_LITERAL("crashpad"),
             FILE_PATH_LITERAL("first run"),
@@ -68,7 +66,7 @@ void MoveUserData(const base::FilePath& source, const base::FilePath& target) {
         // Don't try to move the dir into which everything is being moved.
         if (name.FinalExtension() == kDowngradeDeleteSuffix)
           return true;
-        return base::ranges::any_of(kFilesToKeep, [&name](const auto& keep) {
+        return std::ranges::any_of(kFilesToKeep, [&name](const auto& keep) {
           return base::EqualsCaseInsensitiveASCII(name.value(), keep);
         });
       });
@@ -148,14 +146,6 @@ void DeleteMovedUserData(const base::FilePath& user_data_dir,
   }
 }
 
-bool UserDataSnapshotEnabled() {
-  return g_snapshots_enabled_for_testing ||
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
-         base::IsEnterpriseDevice() ||
-#endif
-         policy::BrowserDMTokenStorage::Get()->RetrieveDMToken().is_valid();
-}
-
 #if BUILDFLAG(IS_WIN)
 bool IsAdministratorDrivenDowngrade(uint16_t current_milestone) {
   const auto downgrade_version = InstallUtil::GetDowngradeVersion();
@@ -167,27 +157,38 @@ bool IsAdministratorDrivenDowngrade(uint16_t current_milestone) {
 }  // namespace
 
 bool DowngradeManager::PrepareUserDataDirectoryForCurrentVersion(
-    const base::FilePath& user_data_dir) {
+    const base::FilePath& user_data_dir,
+    DowngradeManagerDelegate* delegate) {
   DCHECK_EQ(type_, Type::kNone);
   DCHECK(!user_data_dir.empty());
 
+  auto& command_line = *base::CommandLine::ForCurrentProcess();
+  // Ensure extensions are repaired only the first time the browser starts
+  // after a downgrade.
+  if (command_line.HasSwitch(switches::kRepairAllValidExtensions)) {
+    command_line.RemoveSwitch(switches::kRepairAllValidExtensions);
+  }
   // Do not attempt migration if this process is the product of a relaunch from
   // a previous in which migration was attempted/performed.
-  auto& command_line = *base::CommandLine::ForCurrentProcess();
+#if BUILDFLAG(ENABLE_DOWNGRADE_PROCESSING)
   if (command_line.HasSwitch(switches::kUserDataMigrated)) {
     // Strip the switch from the command line so that it does not propagate to
     // any subsequent relaunches.
     command_line.RemoveSwitch(switches::kUserDataMigrated);
+    // Ensure all extensions are repaired.
+    command_line.AppendSwitch(switches::kRepairAllValidExtensions);
     return false;
   }
+#endif
 
-  absl::optional<base::Version> last_version = GetLastVersion(user_data_dir);
+  std::optional<base::Version> last_version = GetLastVersion(user_data_dir);
   if (!last_version)
     return false;
 
   const base::Version& current_version = version_info::GetVersion();
 
-  const bool user_data_snapshot_enabled = UserDataSnapshotEnabled();
+  const bool user_data_snapshot_enabled =
+      delegate->UserDataSnapshotEnabled() || g_snapshots_enabled_for_testing;
 
   if (!user_data_snapshot_enabled) {
     if (current_version >= *last_version)
@@ -195,7 +196,6 @@ bool DowngradeManager::PrepareUserDataDirectoryForCurrentVersion(
 
     type_ = GetDowngradeType(user_data_dir, current_version, *last_version);
     DCHECK(type_ == Type::kAdministrativeWipe || type_ == Type::kUnsupported);
-    base::UmaHistogramEnumeration("Downgrade.Type", type_);
     return type_ == Type::kAdministrativeWipe;
   }
 
@@ -205,17 +205,14 @@ bool DowngradeManager::PrepareUserDataDirectoryForCurrentVersion(
   if (current_version < *last_version) {
     type_ = GetDowngradeTypeWithSnapshot(user_data_dir, current_version,
                                          *last_version);
-    if (type_ != Type::kNone)
-      base::UmaHistogramEnumeration("Downgrade.Type", type_);
 
     return type_ == Type::kAdministrativeWipe ||
            type_ == Type::kSnapshotRestore;
   }
 
   auto current_milestone = current_version.components()[0];
-  int max_number_of_snapshots = g_browser_process->local_state()->GetInteger(
-      prefs::kUserDataSnapshotRetentionLimit);
-  absl::optional<uint32_t> purge_milestone;
+  int max_number_of_snapshots = delegate->GetMaxNumberOfSnapshots();
+  std::optional<uint32_t> purge_milestone;
   if (current_milestone == last_version->components()[0]) {
     // Mid-milestone snapshots are only taken on canary installs.
     if (chrome::GetChannel() != version_info::Channel::CANARY)
@@ -224,7 +221,7 @@ bool DowngradeManager::PrepareUserDataDirectoryForCurrentVersion(
     max_number_of_snapshots = std::min(max_number_of_snapshots, 1);
     purge_milestone = current_milestone;
   }
-  SnapshotManager snapshot_manager(user_data_dir);
+  SnapshotManager snapshot_manager(user_data_dir, delegate);
   snapshot_manager.TakeSnapshot(*last_version);
   snapshot_manager.PurgeInvalidAndOldSnapshots(max_number_of_snapshots,
                                                purge_milestone);
@@ -234,13 +231,13 @@ bool DowngradeManager::PrepareUserDataDirectoryForCurrentVersion(
 void DowngradeManager::UpdateLastVersion(const base::FilePath& user_data_dir) {
   DCHECK(!user_data_dir.empty());
   DCHECK_NE(type_, Type::kAdministrativeWipe);
-  const base::StringPiece version(PRODUCT_VERSION);
-  base::WriteFile(GetLastVersionFile(user_data_dir), version.data(),
-                  version.size());
+  const std::string_view version(PRODUCT_VERSION);
+  base::WriteFile(GetLastVersionFile(user_data_dir), version);
 }
 
 void DowngradeManager::DeleteMovedUserDataSoon(
-    const base::FilePath& user_data_dir) {
+    const base::FilePath& user_data_dir,
+    DowngradeManagerDelegate* delegate) {
   DCHECK(!user_data_dir.empty());
   // IWYU note: base/location.h and base/task/task_traits.h are guaranteed to be
   // available via base/task/thread_pool.h.
@@ -249,14 +246,16 @@ void DowngradeManager::DeleteMovedUserDataSoon(
       base::ThreadPool::CreateTaskRunner(
           {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
            base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN}),
-      base::BindOnce(&DeleteMovedUserData, user_data_dir, GetDiskCacheDir()));
+      base::BindOnce(&DeleteMovedUserData, user_data_dir,
+                     delegate->GetDiskCacheDir()));
 }
 
-void DowngradeManager::ProcessDowngrade(const base::FilePath& user_data_dir) {
+void DowngradeManager::ProcessDowngrade(const base::FilePath& user_data_dir,
+                                        DowngradeManagerDelegate* delegate) {
   DCHECK(type_ == Type::kAdministrativeWipe || type_ == Type::kSnapshotRestore);
   DCHECK(!user_data_dir.empty());
 
-  const base::FilePath disk_cache_dir(GetDiskCacheDir());
+  const base::FilePath disk_cache_dir(delegate->GetDiskCacheDir());
   if (!disk_cache_dir.empty())
     MoveCache(disk_cache_dir);
 
@@ -274,15 +273,17 @@ void DowngradeManager::ProcessDowngrade(const base::FilePath& user_data_dir) {
                                   user_data_dir, user_data_dir.BaseName()));
 
   if (type_ == Type::kSnapshotRestore) {
-    SnapshotManager snapshot_manager(user_data_dir);
+    SnapshotManager snapshot_manager(user_data_dir, delegate);
     snapshot_manager.RestoreSnapshot(version_info::GetVersion());
   }
 
   // Add the migration switch to the command line so that it is propagated to
   // the relaunched process. This is used to prevent a relaunch bomb in case of
   // pathological failure.
+#if BUILDFLAG(ENABLE_DOWNGRADE_PROCESSING)
   base::CommandLine::ForCurrentProcess()->AppendSwitch(
       switches::kUserDataMigrated);
+#endif
 }
 
 // static

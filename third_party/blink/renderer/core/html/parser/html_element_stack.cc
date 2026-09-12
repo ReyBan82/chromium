@@ -29,7 +29,11 @@
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_control_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_select_element.h"
+#include "third_party/blink/renderer/core/html/html_body_element.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/core/html/html_head_element.h"
+#include "third_party/blink/renderer/core/html/html_html_element.h"
+#include "third_party/blink/renderer/core/html/html_template_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/mathml_names.h"
 #include "third_party/blink/renderer/core/svg_names.h"
@@ -40,25 +44,16 @@ using HTMLTag = html_names::HTMLTag;
 
 namespace {
 
-// The following macro is used in switch statements for common types. It is
-// defined so that it looks like a normal case statement, e.g.:
-//   case FOO_CASES:
-
-// Disable formatting as it mangles the formatting.
-// clang-format off
-
-#define SCOPE_MARKER_CASES \
-  HTMLTag::kApplet: \
-  case HTMLTag::kCaption: \
-  case HTMLTag::kHTML: \
-  case HTMLTag::kMarquee: \
-  case HTMLTag::kObject: \
-  case HTMLTag::kTable: \
-  case HTMLTag::kTd: \
-  case HTMLTag::kTemplate: \
-  case HTMLTag::kTh
-
-// clang-format on
+inline bool IsScopeMarkerTag(const HTMLTag& tag) {
+  if (tag == HTMLTag::kCaption || tag == HTMLTag::kApplet ||
+      tag == HTMLTag::kHTML || tag == HTMLTag::kMarquee ||
+      tag == HTMLTag::kObject || tag == HTMLTag::kTable ||
+      tag == HTMLTag::kTd || tag == HTMLTag::kTemplate || tag == HTMLTag::kTh ||
+      tag == HTMLTag::kSelect) {
+    return true;
+  }
+  return false;
+}
 
 inline bool IsRootNode(HTMLStackItem* item) {
   return item->IsDocumentFragmentNode() ||
@@ -80,26 +75,18 @@ inline bool IsScopeMarkerNonHTML(HTMLStackItem* item) {
 
 inline bool IsScopeMarker(HTMLStackItem* item) {
   if (item->IsHTMLNamespace()) {
-    switch (item->GetHTMLTag()) {
-      case SCOPE_MARKER_CASES:
-        return true;
-      default:
-        return item->IsDocumentFragmentNode();
-    }
+    return IsScopeMarkerTag(item->GetHTMLTag()) ||
+           item->IsDocumentFragmentNode();
   }
   return IsScopeMarkerNonHTML(item);
 }
 
 inline bool IsListItemScopeMarker(HTMLStackItem* item) {
   if (item->IsHTMLNamespace()) {
-    switch (item->GetHTMLTag()) {
-      case SCOPE_MARKER_CASES:
-      case HTMLTag::kOl:
-      case HTMLTag::kUl:
-        return true;
-      default:
-        return item->IsDocumentFragmentNode();
-    }
+    return IsScopeMarkerTag(item->GetHTMLTag()) ||
+           item->IsDocumentFragmentNode() ||
+           item->GetHTMLTag() == HTMLTag::kOl ||
+           item->GetHTMLTag() == HTMLTag::kUl;
   }
   return IsScopeMarkerNonHTML(item);
 }
@@ -156,20 +143,11 @@ inline bool IsForeignContentScopeMarker(HTMLStackItem* item) {
 
 inline bool IsButtonScopeMarker(HTMLStackItem* item) {
   if (item->IsHTMLNamespace()) {
-    switch (item->GetHTMLTag()) {
-      case SCOPE_MARKER_CASES:
-      case HTMLTag::kButton:
-        return true;
-      default:
-        return item->IsDocumentFragmentNode();
-    }
+    return IsScopeMarkerTag(item->GetHTMLTag()) ||
+           item->IsDocumentFragmentNode() ||
+           item->GetHTMLTag() == HTMLTag::kButton;
   }
   return IsScopeMarkerNonHTML(item);
-}
-
-inline bool IsSelectScopeMarker(HTMLStackItem* item) {
-  return !item->HasTagName(html_names::kOptgroupTag) &&
-         !item->HasTagName(html_names::kOptionTag);
 }
 
 }  // namespace
@@ -231,8 +209,8 @@ void HTMLElementStack::Pop() {
 }
 
 void HTMLElementStack::PopUntil(html_names::HTMLTag tag) {
-  // kUnknown by itself is not enough to uniquely a tag. This code should only
-  // be called with HTMLTags other than kUnknown.
+  // kUnknown by itself is not enough to uniquely identify a tag. This code
+  // should only be called with HTMLTags other than kUnknown.
   DCHECK_NE(tag, HTMLTag::kUnknown);
   while (!TopStackItem()->IsHTMLNamespace() ||
          TopStackItem()->GetHTMLTag() != tag) {
@@ -300,8 +278,8 @@ bool HTMLElementStack::IsHTMLIntegrationPoint(HTMLStackItem* item) {
         item->GetAttributeItem(mathml_names::kEncodingAttr);
     if (encoding_attr) {
       const String& encoding = encoding_attr->Value();
-      return EqualIgnoringASCIICase(encoding, "text/html") ||
-             EqualIgnoringASCIICase(encoding, "application/xhtml+xml");
+      return EqualIgnoringAsciiCase(encoding, "text/html") ||
+             EqualIgnoringAsciiCase(encoding, "application/xhtml+xml");
     }
     return false;
   }
@@ -376,6 +354,7 @@ void HTMLElementStack::InsertAbove(HTMLStackItem* item,
     }
 
     stack_depth_++;
+    item->SetSanitizer(item_below->GetSanitizer());
     item->SetNextItemInStack(item_above->ReleaseNextItemInStack());
     item_above->SetNextItemInStack(item);
     item->GetElement()->BeginParsingChildren();
@@ -423,8 +402,8 @@ HTMLStackItem* HTMLElementStack::Find(Element* element) const {
 }
 
 HTMLStackItem* HTMLElementStack::Topmost(html_names::HTMLTag tag) const {
-  // kUnknown by itself is not enough to uniquely a tag. This code should only
-  // be called with HTMLTags other than kUnknown.
+  // kUnknown by itself is not enough to uniquely identify a tag. This code
+  // should only be called with HTMLTags other than kUnknown.
   DCHECK_NE(tag, HTMLTag::kUnknown);
   for (HTMLStackItem* item = top_.Get(); item; item = item->NextItemInStack()) {
     if (item->IsHTMLNamespace() && tag == item->GetHTMLTag()) {
@@ -440,8 +419,8 @@ bool HTMLElementStack::Contains(Element* element) const {
 
 template <bool isMarker(HTMLStackItem*)>
 bool InScopeCommon(HTMLStackItem* top, html_names::HTMLTag tag) {
-  // kUnknown by itself is not enough to uniquely a tag. This code should only
-  // be called with HTMLTags other than kUnknown.
+  // kUnknown by itself is not enough to uniquely identify a tag. This code
+  // should only be called with HTMLTags other than kUnknown.
   DCHECK_NE(HTMLTag::kUnknown, tag);
   for (HTMLStackItem* item = top; item; item = item->NextItemInStack()) {
     if (tag == item->GetHTMLTag() && item->IsHTMLNamespace())
@@ -450,7 +429,29 @@ bool InScopeCommon(HTMLStackItem* top, html_names::HTMLTag tag) {
       return false;
   }
   NOTREACHED();  // <html> is always on the stack and is a scope marker.
-  return false;
+}
+
+// Like InScopeCommon above, but matches any of |tags| in a single walk of the
+// stack instead of requiring one walk per tag.
+template <bool isMarker(HTMLStackItem*)>
+bool InScopeCommon(HTMLStackItem* top,
+                   std::initializer_list<html_names::HTMLTag> tags) {
+  // kUnknown by itself is not enough to uniquely identify a tag. This code
+  // should only be called with HTMLTags other than kUnknown.
+  for (html_names::HTMLTag tag : tags) {
+    DCHECK_NE(HTMLTag::kUnknown, tag);
+  }
+  for (HTMLStackItem* item = top; item; item = item->NextItemInStack()) {
+    if (item->IsHTMLNamespace()) {
+      for (html_names::HTMLTag tag : tags) {
+        if (tag == item->GetHTMLTag())
+          return true;
+      }
+    }
+    if (isMarker(item))
+      return false;
+  }
+  NOTREACHED();  // <html> is always on the stack and is a scope marker.
 }
 
 bool HTMLElementStack::HasNumberedHeaderElementInScope() const {
@@ -461,7 +462,6 @@ bool HTMLElementStack::HasNumberedHeaderElementInScope() const {
       return false;
   }
   NOTREACHED();  // <html> is always on the stack and is a scope marker.
-  return false;
 }
 
 bool HTMLElementStack::InScope(Element* target_element) const {
@@ -472,7 +472,6 @@ bool HTMLElementStack::InScope(Element* target_element) const {
       return false;
   }
   NOTREACHED();  // <html> is always on the stack and is a scope marker.
-  return false;
 }
 
 bool HTMLElementStack::InScope(html_names::HTMLTag tag) const {
@@ -487,12 +486,13 @@ bool HTMLElementStack::InTableScope(html_names::HTMLTag tag) const {
   return InScopeCommon<IsTableScopeMarker>(top_.Get(), tag);
 }
 
-bool HTMLElementStack::InButtonScope(html_names::HTMLTag tag) const {
-  return InScopeCommon<IsButtonScopeMarker>(top_.Get(), tag);
+bool HTMLElementStack::InTableScope(
+    std::initializer_list<html_names::HTMLTag> tags) const {
+  return InScopeCommon<IsTableScopeMarker>(top_.Get(), tags);
 }
 
-bool HTMLElementStack::InSelectScope(html_names::HTMLTag tag) const {
-  return InScopeCommon<IsSelectScopeMarker>(top_.Get(), tag);
+bool HTMLElementStack::InButtonScope(html_names::HTMLTag tag) const {
+  return InScopeCommon<IsButtonScopeMarker>(top_.Get(), tag);
 }
 
 bool HTMLElementStack::HasTemplateInHTMLScope() const {
@@ -506,23 +506,26 @@ Element* HTMLElementStack::HtmlElement() const {
 
 Element* HTMLElementStack::HeadElement() const {
   DCHECK(head_element_);
-  return head_element_;
+  return head_element_.Get();
 }
 
 Element* HTMLElementStack::BodyElement() const {
   DCHECK(body_element_);
-  return body_element_;
+  return body_element_.Get();
 }
 
 ContainerNode* HTMLElementStack::RootNode() const {
   DCHECK(root_node_);
-  return root_node_;
+  return root_node_.Get();
 }
 
 void HTMLElementStack::PushCommon(HTMLStackItem* item) {
   DCHECK(root_node_);
 
   stack_depth_++;
+  if (top_) {
+    item->SetSanitizer(top_->GetSanitizer());
+  }
   item->SetNextItemInStack(top_.Release());
   top_ = item;
 }
@@ -532,6 +535,7 @@ void HTMLElementStack::PopCommon() {
   DCHECK(!TopStackItem()->HasTagName(html_names::kHeadTag) || !head_element_);
   DCHECK(!TopStackItem()->HasTagName(html_names::kBodyTag) || !body_element_);
   Top()->FinishParsingChildren();
+
   top_ = top_->ReleaseNextItemInStack();
 
   stack_depth_--;
@@ -546,6 +550,7 @@ void HTMLElementStack::RemoveNonTopCommon(Element* element) {
       // FIXME: Is it OK to call finishParsingChildren()
       // when the children aren't actually finished?
       element->FinishParsingChildren();
+
       item->SetNextItemInStack(
           item->ReleaseNextItemInStack()->ReleaseNextItemInStack());
       stack_depth_--;
@@ -567,7 +572,6 @@ HTMLStackItem* HTMLElementStack::FurthestBlockForFormattingElement(
     }
   }
   NOTREACHED();
-  return nullptr;
 }
 
 void HTMLElementStack::Replace(HTMLStackItem* old_item,

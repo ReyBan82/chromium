@@ -3,18 +3,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import logging
 import os
 import sys
 
-import extract_actions
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'common'))
-import presubmit_util
+import setup_modules  # pylint: disable=unused-import
 
-def main(argv):
-  presubmit_util.DoPresubmitMain(argv, 'actions.xml', 'actions.old.xml',
-                                 extract_actions.UpdateXml)
+import chromium_src.tools.metrics.common.presubmit_util as presubmit_util
+import chromium_src.tools.metrics.common.utf8_encoding as utf8_encoding
+import chromium_src.tools.metrics.actions.extract_actions as extract_actions
 
 
-if '__main__' == __name__:
-  sys.exit(main(sys.argv))
+def main():
+  """Pretty-prints the User Actions in actions.xml file."""
+  utf8_encoding.setup_stdout_and_stderr_utf8_encoding()
+
+  presubmit_util.DoPresubmitMain(
+    'actions.xml',
+    'actions.old.xml',
+    lambda file_content: extract_actions.UpdateXml(
+      file_content, extract_actions._GeneratedActions()
+    ),
+  )
+
+
+if __name__ == '__main__':
+  main()

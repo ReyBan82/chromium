@@ -7,8 +7,14 @@
 
 #include <string>
 
-#include "base/functional/callback.h"
 #include "chrome/browser/ui/webid/account_selection_view.h"
+#include "content/public/browser/web_contents.h"
+#include "third_party/blink/public/mojom/webid/federated_request.mojom-shared.h"
+
+using IdentityProviderDataPtr = scoped_refptr<content::IdentityProviderData>;
+using IdentityRequestAccountPtr =
+    scoped_refptr<content::IdentityRequestAccount>;
+using TokenError = content::IdentityCredentialTokenError;
 
 // This class provides an implementation of the AccountSelectionView interface
 // and communicates via JNI with its AccountSelectionBridge Java counterpart.
@@ -19,28 +25,67 @@ class AccountSelectionViewAndroid : public AccountSelectionView {
   ~AccountSelectionViewAndroid() override;
 
   // AccountSelectionView:
-  void Show(
-      const std::string& rp_for_display,
-      const std::vector<content::IdentityProviderData>& identity_provider_data,
-      Account::SignInMode sign_in_mode,
-      bool show_auto_reauthn_checkbox) override;
-  void ShowFailureDialog(const std::string& rp_for_display,
-                         const std::string& idp_for_display) override;
+  void OnPageActionClicked() override;
+  bool Show(
+      const content::RelyingPartyData& rp_data,
+      const std::vector<IdentityProviderDataPtr>& idp_list,
+      const std::vector<IdentityRequestAccountPtr>& accounts,
+      blink::mojom::RpMode rp_mode,
+      const std::vector<IdentityRequestAccountPtr>& new_accounts) override;
+  bool ShowFailureDialog(
+      const content::RelyingPartyData& rp_data,
+      const std::string& idp_for_display,
+      blink::mojom::RpContext rp_context,
+      blink::mojom::RpMode rp_mode,
+      const content::IdentityProviderMetadata& idp_metadata) override;
+  bool ShowErrorDialog(const content::RelyingPartyData& rp_data,
+                       const std::string& idp_for_display,
+                       blink::mojom::RpContext rp_context,
+                       blink::mojom::RpMode rp_mode,
+                       const content::IdentityProviderMetadata& idp_metadata,
+                       const std::optional<TokenError>& error) override;
+  bool ShowLoadingDialog(const content::RelyingPartyData& rp_data,
+                         const std::string& idp_for_display,
+                         blink::mojom::RpContext rp_context,
+                         blink::mojom::RpMode rp_mode) override;
+  bool ShowVerifyingDialog(const content::RelyingPartyData& rp_data,
+                           const IdentityProviderDataPtr& idp_data,
+                           const IdentityRequestAccountPtr& account,
+                           Account::SignInMode sign_in_mode,
+                           blink::mojom::RpMode rp_mode) override;
 
-  void OnAccountSelected(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& idp_config_url,
-      const base::android::JavaParamRef<jobjectArray>& account_string_fields,
-      const base::android::JavaParamRef<jobject>& account_picture_url,
-      bool is_sign_in);
-  void OnDismiss(JNIEnv* env, jint dismiss_reason);
+  std::string GetTitle() const override;
+  std::optional<std::string> GetSubtitle() const override;
+  void ShowUrl(LinkType link_type, const GURL& url) override;
+  content::WebContents* ShowModalDialog(
+      const GURL& url,
+      blink::mojom::RpMode rp_mode,
+      content::IdentityRequestDialogController::ShownModalAsyncCallback
+          on_shown_async) override;
+  void CloseModalDialog() override;
+  content::WebContents* GetRpWebContents() override;
+  void SetCanShowUi(bool can_show_ui) override;
+
+  void OnAccountSelected(JNIEnv* env,
+                         const GURL& idp_config_url,
+                         const std::string& account_id,
+                         bool is_sign_in);
+  void OnDismiss(JNIEnv* env, int32_t dismiss_reason);
+  void OnLoginToIdP(JNIEnv* env,
+                    const GURL& idp_config_url,
+                    const GURL& idp_login_url);
+  void OnMoreDetails(JNIEnv* env);
+  void OnAccountsDisplayed(JNIEnv* env);
+  void OnNativeAppResult(JNIEnv* env, const std::string& token);
+  void OnNativeAppLoginFinished(JNIEnv* env);
 
  private:
   // Returns either true if the java counterpart of this bridge is initialized
-  // successfully or false if the creation failed. This method will recreate the
-  // java object whenever Show() is called.
-  bool RecreateJavaObject();
+  // successfully or false if the creation failed.
+  bool MaybeCreateJavaObject(std::optional<blink::mojom::RpMode> rp_mode);
 
+  // Applies to both active mode (modal) and passive mode (widget/bottom sheet).
+  bool can_show_ui_ = true;
   base::android::ScopedJavaGlobalRef<jobject> java_object_internal_;
 };
 

@@ -4,11 +4,11 @@
 
 #include "chrome/browser/ui/webui/ash/login/fingerprint_setup_screen_handler.h"
 
+#include "ash/strings/grit/ash_strings.h"
 #include "base/containers/fixed_flat_map.h"
 #include "base/strings/string_number_conversions.h"
 #include "chrome/browser/ash/login/quick_unlock/quick_unlock_utils.h"
 #include "chrome/browser/ash/login/screens/fingerprint_setup_screen.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
 #include "components/user_manager/user_manager.h"
 #include "ui/chromeos/devicetype_utils.h"
@@ -59,7 +59,7 @@ void FingerprintSetupScreenHandler::DeclareLocalizedValues(
 
 void FingerprintSetupScreenHandler::Show() {
   auto* user_manager = user_manager::UserManager::Get();
-  base::Value::Dict data;
+  base::DictValue data;
   data.Set("isChildAccount", user_manager->IsLoggedInAsChildUser());
   ShowInWebUI(std::move(data));
 }
@@ -74,6 +74,11 @@ void FingerprintSetupScreenHandler::OnEnrollScanDone(
 
 void FingerprintSetupScreenHandler::EnableAddAnotherFinger(bool enable) {
   CallExternalAPI("enableAddAnotherFinger", enable);
+}
+
+base::WeakPtr<FingerprintSetupScreenView>
+FingerprintSetupScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace ash

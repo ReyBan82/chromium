@@ -5,17 +5,20 @@
 #ifndef BASE_TEST_TASK_ENVIRONMENT_H_
 #define BASE_TEST_TASK_ENVIRONMENT_H_
 
+#include <array>
 #include <memory>
 
 #include "base/compiler_specific.h"
 #include "base/functional/callback_forward.h"
-#include "base/memory/raw_ptr_exclusion.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/observer_list_types.h"
 #include "base/run_loop.h"
 #include "base/task/lazy_thread_pool_task_runner.h"
 #include "base/task/sequence_manager/sequence_manager.h"
+#include "base/task/sequence_manager/task_queue.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/task_traits.h"
 #include "base/test/scoped_run_loop_timeout.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
@@ -26,7 +29,6 @@ namespace base {
 
 class Clock;
 class FileDescriptorWatcher;
-class SimpleTaskExecutor;
 class TickClock;
 
 namespace subtle {
@@ -126,7 +128,7 @@ class TaskEnvironment {
   // This type will determine what types of messages will get pumped by the main
   // thread.
   // Note: If your test needs to use a custom MessagePump you should
-  // consider using a SingleThreadTaskExecutor instead.
+  // consider using a SingleThreadTaskEnvironment instead.
   enum class MainThreadType {
     // The main thread doesn't pump system messages.
     DEFAULT,
@@ -186,22 +188,33 @@ class TaskEnvironment {
     DEFAULT = COM_MTA,
   };
 
-  // List of traits that are valid inputs for the constructor below.
-  struct ValidTraits {
-    ValidTraits(TimeSource);
-    ValidTraits(MainThreadType);
-    ValidTraits(ThreadPoolExecutionMode);
-    ValidTraits(SubclassCreatesDefaultTaskRunner);
-    ValidTraits(ThreadingMode);
-    ValidTraits(ThreadPoolCOMEnvironment);
+  // Defines how the scoped execution fences defined in
+  // base/task/execution_fence.h interact with TaskEnvironment threads.
+  enum class ScopedExecutionFenceBehaviour {
+    // Scoped execution fences only block tasks on the ThreadPool.
+    THREAD_POOL_ONLY,
+    // Scoped execution fences block tasks on the main thread as well as the
+    // ThreadPool. (Except for ScopedThreadPoolExecutionFence which only ever
+    // affects the ThreadPool.)
+    MAIN_THREAD_AND_THREAD_POOL,
+
+    DEFAULT = THREAD_POOL_ONLY
   };
+
+  // List of traits that are valid inputs for the constructor below.
+  using ValidTraits = ParameterPack<TimeSource,
+                                    MainThreadType,
+                                    ThreadPoolExecutionMode,
+                                    SubclassCreatesDefaultTaskRunner,
+                                    ThreadingMode,
+                                    ThreadPoolCOMEnvironment,
+                                    ScopedExecutionFenceBehaviour>;
 
   // Constructor accepts zero or more traits which customize the testing
   // environment.
-  template <typename... TaskEnvironmentTraits,
-            class CheckArgumentsAreValid = std::enable_if_t<
-                trait_helpers::AreValidTraits<ValidTraits,
-                                              TaskEnvironmentTraits...>::value>>
+  template <typename... TaskEnvironmentTraits>
+    requires trait_helpers::AreValidTraits<ValidTraits,
+                                           TaskEnvironmentTraits...>
   NOINLINE explicit TaskEnvironment(TaskEnvironmentTraits... traits)
       : TaskEnvironment(sequence_manager::SequenceManager::PrioritySettings::
                             CreateDefault(),
@@ -228,18 +241,18 @@ class TaskEnvironment {
   // condition, do not call QuitClosure() while RunUntilQuit() is running.
   RepeatingClosure QuitClosure();
 
-  // Runs tasks on both the main thread and the thread pool, until a quit
-  // closure is executed. When RunUntilQuit() returns, all previous quit
+  // Runs tasks on both the main thread and the thread pool (if any) until a
+  // quit closure is executed. When RunUntilQuit() returns, all previous quit
   // closures are invalidated, and will have no effect on future calls. Be sure
   // to create a new quit closure before calling RunUntilQuit() again.
   void RunUntilQuit();
 
   // Runs tasks until both the
   // (SingleThread|Sequenced)TaskRunner::CurrentDefaultHandle and the
-  // ThreadPool's non-delayed queues are empty.  While RunUntilIdle() is quite
-  // practical and sometimes even necessary -- for example, to flush all tasks
-  // bound to Unretained() state before destroying test members -- it should be
-  // used with caution per the following warnings:
+  // ThreadPool's non-delayed queues (if any) are empty.  While RunUntilIdle()
+  // is quite practical and sometimes even necessary -- for example, to flush
+  // all tasks bound to Unretained() state before destroying test members -- it
+  // should be used with caution per the following warnings:
   //
   // WARNING #1: This may run long (flakily timeout) and even never return! Do
   //             not use this when repeating tasks such as animated web pages
@@ -253,14 +266,20 @@ class TaskEnvironment {
   // possible.
   void RunUntilIdle();
 
-  // Only valid for instances using TimeSource::MOCK_TIME. Fast-forwards
+  // Only valid for instances using |TimeSource::MOCK_TIME|. Fast-forwards
   // virtual time by |delta|, causing all tasks on the main thread and thread
-  // pool with a remaining delay less than or equal to |delta| to be executed in
-  // their natural order before this returns. |delta| must be non-negative. Upon
-  // returning from this method, NowTicks() will be >= the initial |NowTicks() +
-  // delta|. It is guaranteed to be == iff tasks executed in this
-  // FastForwardBy() didn't result in nested calls to time-advancing-methods.
+  // pool with a remaining delay less than or equal to |delta| to be executed
+  // in their natural order before this method returns. Undelayed tasks are just
+  // delayed tasks with a delay of 0, so they are also executed. |delta| must be
+  // non-negative. Upon returning from this method, NowTicks() will be >= the
+  // initial |NowTicks() + delta|. It is guaranteed to be == iff tasks executed
+  // in this FastForwardBy() didn't result in nested calls to
+  // time-advancing-methods.
   void FastForwardBy(TimeDelta delta);
+
+  // Similar to `FastForwardBy` but doesn't advance `base::LiveTicks`, behaving
+  // as if the system was suspended for `delta` time and immediately woken up.
+  void SuspendedFastForwardBy(TimeDelta delta);
 
   // Only valid for instances using TimeSource::MOCK_TIME.
   // Short for FastForwardBy(TimeDelta::Max()).
@@ -284,6 +303,12 @@ class TaskEnvironment {
   // specifically handle more time than expected to have passed.
   void AdvanceClock(TimeDelta delta);
 
+  // Similar to `AdvanceClock` but doesn't advance `base::LiveTicks`, behaving
+  // as if the system was suspended for `delta` time and immediately woken up.
+  void SuspendedAdvanceClock(TimeDelta delta);
+
+  bool UsesMockTime() const { return !!mock_clock_; }
+
   // Only valid for instances using TimeSource::MOCK_TIME. Returns a
   // TickClock whose time is updated by FastForward(By|UntilNoTasksRemain).
   const TickClock* GetMockTickClock() const;
@@ -302,6 +327,13 @@ class TaskEnvironment {
   // This is always equivalent to base::TimeTicks::Now() under
   // TimeSource::MOCK_TIME.
   base::TimeTicks NowTicks() const;
+
+  // Only valid for instances using TimeSource::MOCK_TIME. Returns the current
+  // virtual live time (based on a realistic Now(), sampled when this
+  // TaskEnvironment was created, and manually advanced from that point on).
+  // This is always equivalent to base::LiveTicks::Now() under
+  // TimeSource::MOCK_TIME.
+  base::LiveTicks NowLiveTicks() const;
 
   // Only valid for instances using TimeSource::MOCK_TIME. Returns the number of
   // pending tasks (delayed and non-delayed) of the main thread's TaskRunner.
@@ -378,10 +410,9 @@ class TaskEnvironment {
   static constexpr int kNumForegroundThreadPoolThreads = 4;
 
  protected:
-  template <typename... TaskEnvironmentTraits,
-            class CheckArgumentsAreValid = std::enable_if_t<
-                trait_helpers::AreValidTraits<ValidTraits,
-                                              TaskEnvironmentTraits...>::value>>
+  template <typename... TaskEnvironmentTraits>
+    requires trait_helpers::AreValidTraits<ValidTraits,
+                                           TaskEnvironmentTraits...>
   NOINLINE static TaskEnvironment CreateTaskEnvironmentWithPriorities(
       sequence_manager::SequenceManager::PrioritySettings priority_settings,
       TaskEnvironmentTraits... traits) {
@@ -390,10 +421,9 @@ class TaskEnvironment {
 
   // Constructor accepts zero or more traits which customize the testing
   // environment.
-  template <typename... TaskEnvironmentTraits,
-            class CheckArgumentsAreValid = std::enable_if_t<
-                trait_helpers::AreValidTraits<ValidTraits,
-                                              TaskEnvironmentTraits...>::value>>
+  template <typename... TaskEnvironmentTraits>
+    requires trait_helpers::AreValidTraits<ValidTraits,
+                                           TaskEnvironmentTraits...>
   NOINLINE explicit TaskEnvironment(
       sequence_manager::SequenceManager::PrioritySettings priority_settings,
       TaskEnvironmentTraits... traits)
@@ -408,6 +438,9 @@ class TaskEnvironment {
                 traits...),
             trait_helpers::GetEnum<ThreadPoolCOMEnvironment,
                                    ThreadPoolCOMEnvironment::DEFAULT>(
+                traits...),
+            trait_helpers::GetEnum<ScopedExecutionFenceBehaviour,
+                                   ScopedExecutionFenceBehaviour::DEFAULT>(
                 traits...),
             trait_helpers::HasTrait<SubclassCreatesDefaultTaskRunner,
                                     TaskEnvironmentTraits...>(),
@@ -429,8 +462,7 @@ class TaskEnvironment {
 
   sequence_manager::SequenceManager* sequence_manager() const;
 
-  void DeferredInitFromSubclass(
-      scoped_refptr<base::SingleThreadTaskRunner> task_runner);
+  void DeferredInitFromSubclass(sequence_manager::TaskQueue* task_queue);
 
   // Derived classes may need to control when the task environment goes away
   // (e.g. ~FooTaskEnvironment() may want to effectively trigger
@@ -441,9 +473,12 @@ class TaskEnvironment {
   class MockTimeDomain;
 
   void InitializeThreadPool();
+  void ShutdownAndJoinThreadPool();
   void DestroyThreadPool();
 
   void CompleteInitialization();
+
+  void FastForwardByInternal(TimeDelta delta, bool advance_live_ticks);
 
   // The template constructor has to be in the header but it delegates to this
   // constructor to initialize all other members out-of-line.
@@ -454,13 +489,16 @@ class TaskEnvironment {
       ThreadPoolExecutionMode thread_pool_execution_mode,
       ThreadingMode threading_mode,
       ThreadPoolCOMEnvironment thread_pool_com_environment,
+      ScopedExecutionFenceBehaviour scoped_execution_fence_behaviour,
       bool subclass_creates_default_taskrunner,
       trait_helpers::NotATraitTag tag);
 
   const MainThreadType main_thread_type_;
   const ThreadPoolExecutionMode thread_pool_execution_mode_;
   const ThreadingMode threading_mode_;
-  const ThreadPoolCOMEnvironment thread_pool_com_environment_;
+  [[maybe_unused]] const ThreadPoolCOMEnvironment thread_pool_com_environment_;
+  [[maybe_unused]] const ScopedExecutionFenceBehaviour
+      scoped_execution_fence_behaviour_;
   const bool subclass_creates_default_taskrunner_;
 
   std::unique_ptr<sequence_manager::SequenceManager> sequence_manager_;
@@ -473,7 +511,7 @@ class TaskEnvironment {
   // Null in other modes.
   std::unique_ptr<subtle::ScopedTimeClockOverrides> time_overrides_;
 
-  scoped_refptr<sequence_manager::TaskQueue> task_queue_;
+  sequence_manager::TaskQueue::Handle task_queue_;
   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
 
   // Only set for instances using TimeSource::MOCK_TIME.
@@ -485,9 +523,7 @@ class TaskEnvironment {
 #endif
 
   // Owned by the ThreadPoolInstance.
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION TestTaskTracker* task_tracker_ = nullptr;
+  raw_ptr<TestTaskTracker, DanglingUntriaged> task_tracker_ = nullptr;
 
   // Ensures destruction of lazy TaskRunners when this is destroyed.
   std::unique_ptr<base::internal::ScopedLazyTaskRunnerListForTesting>
@@ -497,9 +533,6 @@ class TaskEnvironment {
   std::unique_ptr<ScopedRunLoopTimeout> run_loop_timeout_;
 
   std::unique_ptr<bool> owns_instance_ = std::make_unique<bool>(true);
-
-  // To support base::CurrentThread().
-  std::unique_ptr<SimpleTaskExecutor> simple_task_executor_;
 
   std::unique_ptr<RunLoop> run_until_quit_loop_;
 
@@ -517,6 +550,54 @@ class SingleThreadTaskEnvironment : public TaskEnvironment {
   template <class... ArgTypes>
   SingleThreadTaskEnvironment(ArgTypes... args)
       : TaskEnvironment(ThreadingMode::MAIN_THREAD_ONLY, args...) {}
+};
+
+// TaskEnvironment that orders tasks on the main thread by priority. For
+// convenience the list of priorities is taken from base::TaskPriority.
+class TaskEnvironmentWithMainThreadPriorities : public TaskEnvironment {
+ public:
+  // Constructor accepts zero or more traits which customize the testing
+  // environment.
+  template <typename... TaskEnvironmentTraits>
+    requires trait_helpers::AreValidTraits<ValidTraits,
+                                           TaskEnvironmentTraits...>
+  NOINLINE explicit TaskEnvironmentWithMainThreadPriorities(
+      TaskEnvironmentTraits... traits)
+      : TaskEnvironment(CreateBaseTaskPrioritySettings(),
+                        SubclassCreatesDefaultTaskRunner{},
+                        traits...) {
+    InitTaskQueues();
+  }
+
+  ~TaskEnvironmentWithMainThreadPriorities() override;
+
+  // Returns a TaskRunner that schedules tasks on the main thread with priority
+  // `task_priority`. The inherited GetMainThreadTaskRunner() returns the
+  // default (USER_BLOCKING) task runner.
+  scoped_refptr<base::SingleThreadTaskRunner>
+  GetMainThreadTaskRunnerWithPriority(TaskPriority task_priority);
+
+ private:
+  using QueuePriority = sequence_manager::TaskQueue::QueuePriority;
+
+  static constexpr QueuePriority kMaxPriority =
+      static_cast<QueuePriority>(TaskPriority::HIGHEST) -
+      static_cast<QueuePriority>(TaskPriority::LOWEST);
+
+  // Returns PrioritySettings based on priorities from base::TaskPriority.
+  static sequence_manager::SequenceManager::PrioritySettings
+  CreateBaseTaskPrioritySettings();
+
+  static constexpr QueuePriority GetDefaultQueuePriority();
+  static constexpr ThreadType TaskPriorityToThreadType(QueuePriority priority);
+  static constexpr QueuePriority BaseTaskPriorityToQueuePriority(
+      TaskPriority task_priority);
+
+  // Initializes a TaskQueue and TaskRunner for each priority.
+  void InitTaskQueues();
+
+  std::array<sequence_manager::TaskQueue::Handle, kMaxPriority + 1>
+      task_queues_;
 };
 
 }  // namespace test

@@ -10,6 +10,7 @@
 
 #include "base/memory/raw_ptr.h"
 #include "components/safe_browsing/core/browser/db/util.h"
+#include "components/safe_browsing/core/common/proto/safebrowsingv5.pb.h"
 
 namespace safe_browsing {
 class ListIdentifier;
@@ -19,7 +20,9 @@ class TestV4GetHashProtocolManagerFactory;
 
 class InsertingDatabaseFactory;
 class GURL;
+class Profile;
 
+// TODO(crbug.com/362791941): Handle v4 references.
 // This class wraps a couple of safe browsing utilities that enable updating
 // underlying SafeBrowsing lists to match URLs.
 class TestSafeBrowsingDatabaseHelper {
@@ -49,11 +52,14 @@ class TestSafeBrowsingDatabaseHelper {
   ~TestSafeBrowsingDatabaseHelper();
 
   // Only compatible with the kMock policy. Marks the hash prefix for the URL as
-  // bad in the local database and inserts it  into the full hash cache.
+  // bad in the local database and inserts it into the full hash cache.
   void AddFullHashToDbAndFullHashCache(
       const GURL& bad_url,
       const safe_browsing::ListIdentifier& list_id,
-      const safe_browsing::ThreatMetadata& threat_metadata);
+      const safe_browsing::ThreatMetadata& threat_metadata,
+      safe_browsing::V5::ThreatType threat_type,
+      bool is_warn_only,
+      Profile* profile);
 
   // Only marks the prefix as bad in the local database. Does not cache any full
   // hash response.
@@ -64,12 +70,14 @@ class TestSafeBrowsingDatabaseHelper {
 
  private:
   std::unique_ptr<safe_browsing::TestSafeBrowsingServiceFactory> sb_factory_;
-  // Owned by the V4Database.
-  raw_ptr<InsertingDatabaseFactory> v4_db_factory_ = nullptr;
+  // Owned by the SBDatabase.
+  raw_ptr<InsertingDatabaseFactory, AcrossTasksDanglingUntriaged>
+      sb_db_factory_ = nullptr;
 
   // Owned by the V4GetHashProtocolManager. Will stay nullptr if the v4 hash
   // factory is not being mocked.
-  raw_ptr<safe_browsing::TestV4GetHashProtocolManagerFactory>
+  raw_ptr<safe_browsing::TestV4GetHashProtocolManagerFactory,
+          AcrossTasksDanglingUntriaged>
       v4_get_hash_factory_ = nullptr;
 };
 

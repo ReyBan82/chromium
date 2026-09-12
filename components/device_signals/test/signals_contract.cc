@@ -8,31 +8,30 @@
 #include "base/functional/callback.h"
 #include "base/test/bind.h"
 #include "build/build_config.h"
+#include "components/device_signals/core/browser/signals_types.h"
 #include "components/device_signals/core/common/signals_constants.h"
 
 namespace device_signals::test {
 
 namespace {
 
-#if BUILDFLAG(IS_WIN)
 // Only return false if the value is set to something other than a string.
 bool VerifyOptionalString(const std::string& signal_name,
-                          const base::Value::Dict& signals) {
+                          const base::DictValue& signals) {
   if (!signals.Find(signal_name)) {
     return true;
   }
 
   return signals.FindString(signal_name);
 }
-#endif  // BUILDFLAG(IS_WIN)
 
 bool VerifyIsString(const std::string& signal_name,
-                    const base::Value::Dict& signals) {
+                    const base::DictValue& signals) {
   return signals.FindString(signal_name);
 }
 
 bool VerifyIsBoolean(const std::string& signal_name,
-                     const base::Value::Dict& signals) {
+                     const base::DictValue& signals) {
   return signals.FindBool(signal_name).has_value();
 }
 
@@ -40,7 +39,7 @@ bool VerifyIsBoolean(const std::string& signal_name,
 bool VerifyIsIntegerWithRange(const std::string& signal_name,
                               int32_t min_value,
                               int32_t max_value,
-                              const base::Value::Dict& signals) {
+                              const base::DictValue& signals) {
   auto int_value = signals.FindInt(signal_name);
   if (!int_value) {
     return false;
@@ -50,10 +49,10 @@ bool VerifyIsIntegerWithRange(const std::string& signal_name,
 }
 
 bool VerifyIsSettingInteger(const std::string& signal_name,
-                            const base::Value::Dict& signals) {
+                            const base::DictValue& signals) {
   // Verify the value is in the valid enum values range.
   // Enum defined at:
-  // //chrome/browser/enterprise/signals/signals_common.h
+  // //components/device_signals/core/common/common_types.h
   return VerifyIsIntegerWithRange(signal_name, 0, 2, signals);
 }
 
@@ -61,7 +60,7 @@ bool VerifyIsSettingInteger(const std::string& signal_name,
 // set in the array.
 bool VerifyIsStringArray(const std::string& signal_name,
                          bool enforce_value,
-                         const base::Value::Dict& signals) {
+                         const base::DictValue& signals) {
   const auto* list_value = signals.FindList(signal_name);
   if (!list_value) {
     return false;
@@ -81,17 +80,42 @@ bool VerifyIsStringArray(const std::string& signal_name,
 }
 
 bool VerifyUnset(const std::string& signal_name,
-                 const base::Value::Dict& signals) {
+                 const base::DictValue& signals) {
   return !signals.Find(signal_name);
 }
+
+#if BUILDFLAG(IS_CHROMEOS)
+void ChangeContractForUnmanagedDevices(
+    base::flat_map<std::string,
+                   base::RepeatingCallback<bool(const base::DictValue&)>>&
+        contract) {
+  contract[names::kDeviceAffiliationIds] =
+      base::BindRepeating(VerifyIsStringArray, names::kDeviceAffiliationIds,
+                          /*enforce_value=*/false);
+
+  // Signals containing stable device identifiers should be unset.
+  contract[names::kDisplayName] =
+      base::BindRepeating(VerifyUnset, names::kDisplayName);
+  contract[names::kSystemDnsServers] = base::BindRepeating(
+      base::BindRepeating(VerifyUnset, names::kSystemDnsServers));
+  contract[names::kSerialNumber] =
+      base::BindRepeating(VerifyUnset, names::kSerialNumber);
+  contract[names::kDeviceHostName] =
+      base::BindRepeating(VerifyUnset, names::kDeviceHostName);
+  contract[names::kMacAddresses] =
+      base::BindRepeating(VerifyUnset, names::kMacAddresses);
+  contract[names::kImei] = base::BindRepeating(VerifyUnset, names::kImei);
+  contract[names::kMeid] = base::BindRepeating(VerifyUnset, names::kMeid);
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace
 
 base::flat_map<std::string,
-               base::RepeatingCallback<bool(const base::Value::Dict&)>>
+               base::RepeatingCallback<bool(const base::DictValue&)>>
 GetSignalsContract() {
   base::flat_map<std::string,
-                 base::RepeatingCallback<bool(const base::Value::Dict&)>>
+                 base::RepeatingCallback<bool(const base::DictValue&)>>
       contract;
 
   // Common signals.
@@ -132,7 +156,9 @@ GetSignalsContract() {
   // Signals added for both CrOS and Browser but from different collection
   // locations.
   contract[names::kDeviceEnrollmentDomain] =
-      base::BindRepeating(VerifyIsString, names::kDeviceEnrollmentDomain);
+      base::BindRepeating(VerifyOptionalString, names::kDeviceEnrollmentDomain);
+  contract[names::kUserEnrollmentDomain] =
+      base::BindRepeating(VerifyOptionalString, names::kUserEnrollmentDomain);
   contract[names::kDiskEncrypted] =
       base::BindRepeating(VerifyIsSettingInteger, names::kDiskEncrypted);
   contract[names::kSerialNumber] =
@@ -145,8 +171,8 @@ GetSignalsContract() {
       base::BindRepeating(VerifyIsSettingInteger, names::kScreenLockSecured);
 
 #if BUILDFLAG(IS_WIN)
-  contract[names::kChromeCleanupEnabled] =
-      base::BindRepeating(VerifyIsBoolean, names::kChromeCleanupEnabled);
+    contract[names::kAntivirusState] =
+        base::BindRepeating(VerifyIsSettingInteger, names::kAntivirusState);
   contract[names::kWindowsMachineDomain] =
       base::BindRepeating(VerifyOptionalString, names::kWindowsMachineDomain);
   contract[names::kWindowsUserDomain] =
@@ -155,7 +181,7 @@ GetSignalsContract() {
       base::BindRepeating(VerifyIsSettingInteger, names::kSecureBootEnabled);
 
   contract[names::kCrowdStrike] =
-      base::BindLambdaForTesting([](const base::Value::Dict& signals) {
+      base::BindLambdaForTesting([](const base::DictValue& signals) {
         // CrowdStrike signals are optional. But if the object is set, then at
         // least one of the values must be present.
         auto* cs_value = signals.Find(device_signals::names::kCrowdStrike);
@@ -178,8 +204,8 @@ GetSignalsContract() {
 
 #else
   // Windows-only signals that shouldn't be set on other platforms.
-  contract[names::kChromeCleanupEnabled] =
-      base::BindRepeating(VerifyUnset, names::kChromeCleanupEnabled);
+  contract[names::kAntivirusState] =
+      base::BindRepeating(VerifyUnset, names::kAntivirusState);
   contract[names::kWindowsMachineDomain] =
       base::BindRepeating(VerifyUnset, names::kWindowsMachineDomain);
   contract[names::kWindowsUserDomain] =
@@ -195,6 +221,11 @@ GetSignalsContract() {
       base::BindRepeating(VerifyUnset, names::kAllowScreenLock);
   contract[names::kImei] = base::BindRepeating(VerifyUnset, names::kImei);
   contract[names::kMeid] = base::BindRepeating(VerifyUnset, names::kMeid);
+  contract[names::kTrigger] =
+      base::BindLambdaForTesting([](const base::DictValue& signals) {
+        return signals.FindInt(names::kTrigger) ==
+               static_cast<int>(device_signals::Trigger::kBrowserNavigation);
+      });
 #else
   // Chrome OS Signals.
   contract[names::kAllowScreenLock] =
@@ -203,9 +234,24 @@ GetSignalsContract() {
       VerifyIsStringArray, names::kImei, /*enforce_value=*/false);
   contract[names::kMeid] = base::BindRepeating(
       VerifyIsStringArray, names::kMeid, /*enforce_value=*/false);
+  contract[names::kTrigger] =
+      base::BindRepeating(VerifyIsIntegerWithRange, names::kTrigger, 0, 2);
 #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 
   return contract;
 }
+
+#if BUILDFLAG(IS_CHROMEOS)
+base::flat_map<std::string,
+               base::RepeatingCallback<bool(const base::DictValue&)>>
+GetSignalsContractForUnmanagedDevices() {
+  base::flat_map<std::string,
+                 base::RepeatingCallback<bool(const base::DictValue&)>>
+      contract = GetSignalsContract();
+
+  ChangeContractForUnmanagedDevices(contract);
+  return contract;
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace device_signals::test

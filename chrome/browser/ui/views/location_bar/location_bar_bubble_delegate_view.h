@@ -5,10 +5,9 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_LOCATION_BAR_LOCATION_BAR_BUBBLE_DELEGATE_VIEW_H_
 #define CHROME_BROWSER_UI_VIEWS_LOCATION_BAR_LOCATION_BAR_BUBBLE_DELEGATE_VIEW_H_
 
+#include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
-#include "base/scoped_observation.h"
 #include "chrome/browser/ui/exclusive_access/fullscreen_controller.h"
-#include "chrome/browser/ui/exclusive_access/fullscreen_observer.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/events/event_observer.h"
@@ -23,13 +22,13 @@ class WebContents;
 // Base class for bubbles that are shown from location bar icons. The bubble
 // will automatically close when the browser transitions in or out of fullscreen
 // mode.
-// TODO(https://crbug.com/788051): Move to chrome/browser/ui/views/page_action/.
+// TODO(crbug.com/40551360): Move to chrome/browser/ui/views/page_action/.
 class LocationBarBubbleDelegateView : public views::BubbleDialogDelegateView,
-                                      public FullscreenObserver,
                                       public content::WebContentsObserver {
- public:
-  METADATA_HEADER(LocationBarBubbleDelegateView);
+  METADATA_HEADER(LocationBarBubbleDelegateView,
+                  views::BubbleDialogDelegateView)
 
+ public:
   enum DisplayReason {
     // The bubble appears as a direct result of a user action (clicking on the
     // location bar icon).
@@ -46,8 +45,14 @@ class LocationBarBubbleDelegateView : public views::BubbleDialogDelegateView,
   // (0,0).
   // Registers with a fullscreen controller identified by |web_contents| to
   // close the bubble if the fullscreen state changes.
+  LocationBarBubbleDelegateView(views::BubbleAnchor anchor_view,
+                                content::WebContents* web_contents,
+                                bool autosize = false);
+
+  // Compat alias for old type.
   LocationBarBubbleDelegateView(views::View* anchor_view,
-                                content::WebContents* web_contents);
+                                content::WebContents* web_contents,
+                                bool autosize = false);
 
   LocationBarBubbleDelegateView(const LocationBarBubbleDelegateView&) = delete;
   LocationBarBubbleDelegateView& operator=(
@@ -62,8 +67,8 @@ class LocationBarBubbleDelegateView : public views::BubbleDialogDelegateView,
   // user).
   void ShowForReason(DisplayReason reason, bool allow_refocus_alert = true);
 
-  // FullscreenObserver:
-  void OnFullscreenStateChanged() override;
+  // Closes the bubble when the browser's fullscreen state changes.
+  void OnFullscreenStateChanged();
 
   // content::WebContentsObserver:
   void OnVisibilityChanged(content::Visibility visibility) override;
@@ -110,11 +115,10 @@ class LocationBarBubbleDelegateView : public views::BubbleDialogDelegateView,
   bool GetCloseOnMainFrameOriginNavigation() const;
 
  private:
-  base::ScopedObservation<FullscreenController, FullscreenObserver>
-      fullscreen_observation_{this};
+  base::CallbackListSubscription fullscreen_subscription_;
 
-  // Use to track down potential UaF. See https://crbug.com/1304280. Remove this
-  // code when issue is fixed.
+  // Use to track down potential UaF. See https://crbug.com/40217661. Remove
+  // this code when issue is fixed.
   base::WeakPtr<FullscreenController> fullscreen_controller_;
 
   // A flag controlling bubble closure when the main frame navigates to a

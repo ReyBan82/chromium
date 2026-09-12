@@ -7,12 +7,11 @@
 #include <memory>
 #include <vector>
 
-#include "ash/curtain/input_event_filter.h"
 #include "base/scoped_observation.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/aura/window_observer.h"
-#include "ui/compositor/layer.h"
-#include "ui/compositor/layer_type.h"
+#include "ui/compositor/layer_solid_color.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/views/view.h"
 #include "ui/views/widget/widget.h"
@@ -26,11 +25,11 @@ std::vector<std::unique_ptr<ui::Layer>> InitWidgetLayers(
   // In rare cases the compositor might fail to allocate the textures.
   // To prevent the widget from being transparent in this case, we add a
   // solid color layer.
-  auto solid_color_layer = std::make_unique<ui::Layer>(ui::LAYER_SOLID_COLOR);
-  solid_color_layer->SetColor(SK_ColorLTGRAY);
+  auto solid_color_layer = std::make_unique<ui::LayerSolidColor>();
+  solid_color_layer->SetColor(SkColors::kLtGray);
   root_layer.Add(solid_color_layer.get());
 
-  auto textured_layer = std::make_unique<ui::Layer>(ui::LAYER_TEXTURED);
+  auto textured_layer = std::make_unique<ui::LayerTextured>();
   root_layer.Add(textured_layer.get());
   root_layer.StackAtTop(textured_layer.get());
 
@@ -41,9 +40,9 @@ std::vector<std::unique_ptr<ui::Layer>> InitWidgetLayers(
 }
 
 views::Widget::InitParams GetWidgetInitParams(aura::Window* parent) {
-  views::Widget::InitParams result;
-  result.type = views::Widget::InitParams::TYPE_WINDOW_FRAMELESS;
-  result.ownership = views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET;
+  views::Widget::InitParams result(
+      views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET,
+      views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
   result.name = "CurtainOverlayWidget";
   result.opacity = views::Widget::InitParams::WindowOpacity::kOpaque;
   result.parent = parent;
@@ -126,15 +125,13 @@ SecurityCurtainWidgetController::~SecurityCurtainWidgetController() = default;
 
 SecurityCurtainWidgetController::SecurityCurtainWidgetController(
     std::unique_ptr<views::Widget> widget,
-    Layers layers,
-    std::unique_ptr<InputEventFilter> input_event_filter)
+    Layers layers)
     : widget_layers_(std::move(layers)),
       widget_(std::move(widget)),
       occlusion_tracker_exclude_(
           std::make_unique<aura::WindowOcclusionTracker::ScopedExclude>(
               widget_->GetNativeView())),
-      widget_maximizer_(std::make_unique<WidgetMaximizer>(widget_.get())),
-      input_event_filter_(std::move(input_event_filter)) {
+      widget_maximizer_(std::make_unique<WidgetMaximizer>(widget_.get())) {
   DCHECK(widget_);
   widget_->Show();
 }
@@ -143,13 +140,10 @@ SecurityCurtainWidgetController::SecurityCurtainWidgetController(
 SecurityCurtainWidgetController
 SecurityCurtainWidgetController::CreateForRootWindow(
     aura::Window* root_window,
-    EventFilter event_filter,
     std::unique_ptr<views::View> curtain_view) {
   auto widget = CreateWidget(root_window, std::move(curtain_view));
   auto layers = InitWidgetLayers(*widget->GetLayer());
-  return SecurityCurtainWidgetController(
-      std::move(widget), std::move(layers),
-      std::make_unique<InputEventFilter>(root_window, event_filter));
+  return SecurityCurtainWidgetController(std::move(widget), std::move(layers));
 }
 
 const views::Widget& SecurityCurtainWidgetController::GetWidget() const {

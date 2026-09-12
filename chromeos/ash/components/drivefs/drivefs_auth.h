@@ -6,15 +6,17 @@
 #define CHROMEOS_ASH_COMPONENTS_DRIVEFS_DRIVEFS_AUTH_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "chromeos/ash/components/drivefs/mojom/drivefs.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class AccountId;
 class GoogleServiceAuthError;
@@ -31,6 +33,9 @@ class PrimaryAccountAccessTokenFetcher;
 
 namespace drivefs {
 
+using AccessTokenCallback =
+    mojom::DriveFsDelegate::GetAccessTokenWithExpiryCallback;
+
 class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_DRIVEFS) DriveFsAuth {
  public:
   class Delegate {
@@ -44,14 +49,15 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_DRIVEFS) DriveFsAuth {
 
     virtual scoped_refptr<network::SharedURLLoaderFactory>
     GetURLLoaderFactory() = 0;
-    virtual signin::IdentityManager* GetIdentityManager() = 0;
     virtual const AccountId& GetAccountId() = 0;
     virtual std::string GetObfuscatedAccountId() = 0;
     virtual bool IsMetricsCollectionEnabled() = 0;
   };
 
+  // `identity_manager` must not be nullptr and must outlive this.
   DriveFsAuth(const base::Clock* clock,
               const base::FilePath& profile_path,
+              signin::IdentityManager* identity_manager,
               std::unique_ptr<base::OneShotTimer> timer,
               Delegate* delegate);
 
@@ -72,11 +78,9 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_DRIVEFS) DriveFsAuth {
     return delegate_->IsMetricsCollectionEnabled();
   }
 
-  absl::optional<std::string> GetCachedAccessToken();
+  std::optional<std::string> GetCachedAccessToken();
 
-  virtual void GetAccessToken(
-      bool use_cached,
-      mojom::DriveFsDelegate::GetAccessTokenCallback callback);
+  virtual void GetAccessToken(bool use_cached, AccessTokenCallback callback);
 
  private:
   void GotChromeAccessToken(GoogleServiceAuthError error,
@@ -89,16 +93,17 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_DRIVEFS) DriveFsAuth {
   void AuthTimeout();
 
   SEQUENCE_CHECKER(sequence_checker_);
-  const base::Clock* const clock_;
+  const raw_ptr<const base::Clock> clock_;
   const base::FilePath profile_path_;
+  const raw_ref<signin::IdentityManager> identity_manager_;
   const std::unique_ptr<base::OneShotTimer> timer_;
-  Delegate* const delegate_;
+  const raw_ptr<Delegate, DanglingUntriaged> delegate_;
 
   std::unique_ptr<signin::PrimaryAccountAccessTokenFetcher>
       access_token_fetcher_;
 
-  // Pending callback for an in-flight GetAccessToken request.
-  mojom::DriveFsDelegate::GetAccessTokenCallback get_access_token_callback_;
+  // Pending callback for an in-flight GetAccessToken{WithExpiry} request.
+  AccessTokenCallback get_access_token_callback_;
 
   std::string last_token_;
   base::Time last_token_expiry_;

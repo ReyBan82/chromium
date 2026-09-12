@@ -9,13 +9,11 @@
 #include <utility>
 #include <vector>
 
-#include "base/strings/utf_string_conversions.h"
-#include "components/bookmarks/browser/bookmark_model.h"
 #include "components/bookmarks/browser/bookmark_node.h"
 #include "components/sync/base/time.h"
-#include "components/sync/protocol/bookmark_model_metadata.pb.h"
+#include "components/sync/base/unique_position.h"
+#include "components/sync_bookmarks/bookmark_model_view.h"
 #include "components/sync_bookmarks/bookmark_specifics_conversions.h"
-#include "components/sync_bookmarks/switches.h"
 #include "components/sync_bookmarks/synced_bookmark_tracker.h"
 #include "components/sync_bookmarks/synced_bookmark_tracker_entity.h"
 
@@ -23,23 +21,21 @@ namespace sync_bookmarks {
 
 BookmarkLocalChangesBuilder::BookmarkLocalChangesBuilder(
     SyncedBookmarkTracker* const bookmark_tracker,
-    bookmarks::BookmarkModel* bookmark_model)
+    BookmarkModelView* bookmark_model)
     : bookmark_tracker_(bookmark_tracker), bookmark_model_(bookmark_model) {
   DCHECK(bookmark_tracker);
   DCHECK(bookmark_model);
 }
 
 syncer::CommitRequestDataList BookmarkLocalChangesBuilder::BuildCommitRequests(
-    size_t max_entries) const {
+    size_t max_entries) {
   DCHECK(bookmark_tracker_);
 
-  const std::vector<const SyncedBookmarkTrackerEntity*>
-      entities_with_local_changes =
-          bookmark_tracker_->GetEntitiesWithLocalChanges();
+  const std::vector<SyncedBookmarkTrackerEntity*> entities_with_local_changes =
+      bookmark_tracker_->GetMutableEntitiesWithLocalChanges();
 
   syncer::CommitRequestDataList commit_requests;
-  for (const SyncedBookmarkTrackerEntity* entity :
-       entities_with_local_changes) {
+  for (SyncedBookmarkTrackerEntity* entity : entities_with_local_changes) {
     if (commit_requests.size() >= max_entries) {
       break;
     }
@@ -61,9 +57,17 @@ syncer::CommitRequestDataList BookmarkLocalChangesBuilder::BuildCommitRequests(
            data->client_tag_hash ==
                syncer::ClientTagHash::FromUnhashed(
                    syncer::BOOKMARKS,
-                   entity->bookmark_node()->guid().AsLowercaseString()));
+                   entity->bookmark_node()->uuid().AsLowercaseString()));
 
-    if (!metadata.is_deleted()) {
+    if (metadata.is_deleted()) {
+      // Absence of deletion origin is primarily needed for pre-existing
+      // tombstones in storage before this field was introduced. Nevertheless,
+      // it seems best to treat it as optional here, in case some codepaths
+      // don't provide it in the future.
+      if (metadata.has_deletion_origin()) {
+        data->deletion_origin = metadata.deletion_origin();
+      }
+    } else {
       const bookmarks::BookmarkNode* node = entity->bookmark_node();
       DCHECK(!node->is_permanent_node());
 
@@ -80,7 +84,7 @@ syncer::CommitRequestDataList BookmarkLocalChangesBuilder::BuildCommitRequests(
 
       DCHECK(node);
       DCHECK_EQ(syncer::ClientTagHash::FromUnhashed(
-                    syncer::BOOKMARKS, node->guid().AsLowercaseString()),
+                    syncer::BOOKMARKS, node->uuid().AsLowercaseString()),
                 syncer::ClientTagHash::FromHashed(metadata.client_tag_hash()));
 
       const bookmarks::BookmarkNode* parent = node->parent();
@@ -93,7 +97,7 @@ syncer::CommitRequestDataList BookmarkLocalChangesBuilder::BuildCommitRequests(
       data->specifics = CreateSpecificsFromBookmarkNode(
           node, bookmark_model_, metadata.unique_position(),
           /*force_favicon_load=*/true);
-      // TODO(crbug.com/1058376): check after finishing if we need to use full
+      // TODO(crbug.com/40677937): check after finishing if we need to use full
       // title instead of legacy canonicalized one.
       data->name = data->specifics.bookmark().legacy_canonicalized_title();
     }
@@ -106,7 +110,15 @@ syncer::CommitRequestDataList BookmarkLocalChangesBuilder::BuildCommitRequests(
     // added/updated.
     request->specifics_hash = metadata.specifics_hash();
 
-    bookmark_tracker_->MarkCommitMayHaveStarted(entity);
+    if (!metadata.is_deleted()) {
+      const bookmarks::BookmarkNode* node = entity->bookmark_node();
+      CHECK(node);
+      request->deprecated_bookmark_folder = node->is_folder();
+      request->deprecated_bookmark_unique_position =
+          syncer::UniquePosition::FromProto(metadata.unique_position());
+    }
+
+    entity->MarkCommitMayHaveStarted();
 
     commit_requests.push_back(std::move(request));
   }

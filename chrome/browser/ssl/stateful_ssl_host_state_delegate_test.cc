@@ -5,6 +5,7 @@
 #include "components/security_interstitials/content/stateful_ssl_host_state_delegate.h"
 
 #include <stdint.h>
+
 #include <utility>
 
 #include "base/command_line.h"
@@ -19,7 +20,7 @@
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ssl/stateful_ssl_host_state_delegate_factory.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -52,6 +53,7 @@ const char kExampleHost[] = "example.com";
 
 const uint64_t kDeltaOneDayInSeconds = UINT64_C(86400);
 const uint64_t kDeltaOneWeekInSeconds = UINT64_C(604800);
+const uint64_t kDeltaFifteenDaysInSeconds = UINT64_C(1296000);
 
 scoped_refptr<net::X509Certificate> GetOkCert() {
   return net::ImportCertFromFile(net::GetTestCertsDirectory(), kOkCertFile);
@@ -77,7 +79,7 @@ class StatefulSSLHostStateDelegateTest : public InProcessBrowserTest {};
 IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, QueryPolicy) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
   auto* storage_partition = tab->GetPrimaryMainFrame()->GetStoragePartition();
@@ -129,10 +131,38 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, QueryPolicy) {
                                storage_partition));
 }
 
+// Tests the expected behavior of calling HasAllowExceptionForAnyHost on the
+// SSLHostStateDelegate class after setting website settings for
+// different ContentSettingsType.
+IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
+                       HasAllowExceptionForAnyHost) {
+  scoped_refptr<net::X509Certificate> cert = GetOkCert();
+  content::WebContents* tab =
+      browser()->GetTabStripModel()->GetActiveWebContents();
+  Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
+  content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
+  auto* storage_partition = tab->GetPrimaryMainFrame()->GetStoragePartition();
+  auto* host_content_settings_map =
+      HostContentSettingsMapFactory::GetForProfile(profile);
+  GURL url = GURL("https://example1.com/");
+
+  EXPECT_EQ(false, state->HasAllowExceptionForAnyHost(storage_partition));
+
+  host_content_settings_map->SetContentSettingDefaultScope(
+      url, url, ContentSettingsType::COOKIES, CONTENT_SETTING_DEFAULT);
+  EXPECT_EQ(false, state->HasAllowExceptionForAnyHost(storage_partition));
+
+  // Simulate a user decision to allow an invalid certificate exception for
+  // kWWWGoogleHost.
+  state->AllowCert(kWWWGoogleHost, *cert, net::ERR_CERT_DATE_INVALID,
+                   storage_partition);
+  EXPECT_EQ(true, state->HasAllowExceptionForAnyHost(storage_partition));
+}
+
 // Tests the expected behavior of calling IsHttpAllowedForHost on the
 // SSLHostStateDelegate class after various HTTP decisions have been made.
 IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, HttpAllowlisting) {
-  auto* tab = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* tab = browser()->GetTabStripModel()->GetActiveWebContents();
   auto* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   auto* state = profile->GetSSLHostStateDelegate();
   auto* storage_partition = tab->GetPrimaryMainFrame()->GetStoragePartition();
@@ -168,7 +198,7 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, HttpAllowlisting) {
 IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, HasPolicyAndRevoke) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   StatefulSSLHostStateDelegate* state =
       StatefulSSLHostStateDelegateFactory::GetForProfile(profile);
@@ -219,7 +249,7 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, HasPolicyAndRevoke) {
 IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, Clear) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   StatefulSSLHostStateDelegate* state =
       StatefulSSLHostStateDelegateFactory::GetForProfile(profile);
@@ -292,229 +322,69 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest, Clear) {
 IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
                        DidHostRunInsecureContent) {
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
 
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 42, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "www.google.com", content::SSLHostStateDelegate::MIXED_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 191, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "example.com", content::SSLHostStateDelegate::MIXED_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "www.google.com", content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 42,
-      content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
-  EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 191,
-      content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
-  EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
+      "example.com", content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
 
   // Mark a site as MIXED_CONTENT and check that only that host/child id
   // is affected, and only for MIXED_CONTENT (not for
   // CERT_ERRORS_CONTENT);
-  state->HostRanInsecureContent("www.google.com", 42,
+  state->HostRanInsecureContent("www.google.com",
                                 content::SSLHostStateDelegate::MIXED_CONTENT);
 
   EXPECT_TRUE(state->DidHostRunInsecureContent(
-      "www.google.com", 42, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "www.google.com", content::SSLHostStateDelegate::MIXED_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 42,
-      content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
+      "www.google.com", content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 191, content::SSLHostStateDelegate::MIXED_CONTENT));
-  EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "example.com", content::SSLHostStateDelegate::MIXED_CONTENT));
 
-  // Mark another site as MIXED_CONTENT, and check that that host/child
-  // id is affected (for MIXED_CONTENT only), and that the previously
-  // host/child id is still marked as MIXED_CONTENT.
-  state->HostRanInsecureContent("example.com", 42,
+  // Mark another site as MIXED_CONTENT, and check that that host is affected
+  // (for MIXED_CONTENT only), and that the previously host is still marked as
+  // MIXED_CONTENT.
+  state->HostRanInsecureContent("example.com",
                                 content::SSLHostStateDelegate::MIXED_CONTENT);
 
   EXPECT_TRUE(state->DidHostRunInsecureContent(
-      "www.google.com", 42, content::SSLHostStateDelegate::MIXED_CONTENT));
-  EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 191, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "www.google.com", content::SSLHostStateDelegate::MIXED_CONTENT));
   EXPECT_TRUE(state->DidHostRunInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "example.com", content::SSLHostStateDelegate::MIXED_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
+      "example.com", content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
 
-  // Mark a MIXED_CONTENT host/child id as CERT_ERRORS_CONTENT also.
+  // Mark a MIXED_CONTENT host as CERT_ERRORS_CONTENT also.
   state->HostRanInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::CERT_ERRORS_CONTENT);
+      "example.com", content::SSLHostStateDelegate::CERT_ERRORS_CONTENT);
 
+  EXPECT_TRUE(state->DidHostRunInsecureContent(
+      "www.google.com", content::SSLHostStateDelegate::MIXED_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 191, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "www.google.com", content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
   EXPECT_TRUE(state->DidHostRunInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::MIXED_CONTENT));
+      "example.com", content::SSLHostStateDelegate::MIXED_CONTENT));
   EXPECT_TRUE(state->DidHostRunInsecureContent(
-      "example.com", 42, content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
+      "example.com", content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
 
   // Mark a non-MIXED_CONTENT host as CERT_ERRORS_CONTENT.
   state->HostRanInsecureContent(
-      "www.google.com", 191,
+      "www.not-mixed-content.test",
       content::SSLHostStateDelegate::CERT_ERRORS_CONTENT);
 
   EXPECT_TRUE(state->DidHostRunInsecureContent(
-      "www.google.com", 191,
+      "www.not-mixed-content.test",
       content::SSLHostStateDelegate::CERT_ERRORS_CONTENT));
   EXPECT_FALSE(state->DidHostRunInsecureContent(
-      "www.google.com", 191, content::SSLHostStateDelegate::MIXED_CONTENT));
-}
-
-// Tests that StatefulSSLHostStateDelegate::HasSeenRecurrentErrors returns true
-// after seeing an error of interest multiple times, in the default mode in
-// which error occurrences are stored in-memory.
-IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
-                       HasSeenRecurrentErrors) {
-  content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
-  Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
-  content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
-  StatefulSSLHostStateDelegate* chrome_state =
-      static_cast<StatefulSSLHostStateDelegate*>(state);
-  chrome_state->SetRecurrentInterstitialThresholdForTesting(2);
-  chrome_state->SetRecurrentInterstitialModeForTesting(
-      StatefulSSLHostStateDelegate::RecurrentInterstitialMode::PREF);
-
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERT_SYMANTEC_LEGACY);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_TRUE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-}
-
-// Tests that StatefulSSLHostStateDelegate::HasSeenRecurrentErrors returns true
-// after seeing an error of interest multiple times in pref mode (where the
-// count of each error is persisted across browsing sessions).
-IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
-                       HasSeenRecurrentErrorsPref) {
-  content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
-  Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
-  content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
-  StatefulSSLHostStateDelegate* chrome_state =
-      static_cast<StatefulSSLHostStateDelegate*>(state);
-  chrome_state->SetRecurrentInterstitialThresholdForTesting(2);
-  chrome_state->SetRecurrentInterstitialModeForTesting(
-      StatefulSSLHostStateDelegate::RecurrentInterstitialMode::PREF);
-
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERT_SYMANTEC_LEGACY);
-  EXPECT_FALSE(
-      chrome_state->HasSeenRecurrentErrors(net::ERR_CERT_SYMANTEC_LEGACY));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_TRUE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERT_SYMANTEC_LEGACY);
-  EXPECT_TRUE(
-      chrome_state->HasSeenRecurrentErrors(net::ERR_CERT_SYMANTEC_LEGACY));
-
-  // Create a new StatefulSSLHostStateDelegate to check that the state has been
-  // saved to the pref and that the new StatefulSSLHostStateDelegate reads it.
-  StatefulSSLHostStateDelegate new_state(
-      profile, profile->GetPrefs(),
-      HostContentSettingsMapFactory::GetForProfile(profile));
-  new_state.SetRecurrentInterstitialThresholdForTesting(2);
-  new_state.SetRecurrentInterstitialModeForTesting(
-      StatefulSSLHostStateDelegate::RecurrentInterstitialMode::PREF);
-
-  EXPECT_TRUE(new_state.HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  EXPECT_TRUE(new_state.HasSeenRecurrentErrors(net::ERR_CERT_SYMANTEC_LEGACY));
-
-  // Also test the logic for when the number of displayed errors exceeds the
-  // threshold.
-  new_state.DidDisplayErrorPage(net::ERR_CERT_SYMANTEC_LEGACY);
-  EXPECT_TRUE(new_state.HasSeenRecurrentErrors(net::ERR_CERT_SYMANTEC_LEGACY));
-}
-
-// Tests that StatefulSSLHostStateDelegate::HasSeenRecurrentErrors handles
-// clocks going backwards in pref mode.
-IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
-                       HasSeenRecurrentErrorsPrefClockGoesBackwards) {
-  content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
-  Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
-  content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
-  StatefulSSLHostStateDelegate* chrome_state =
-      static_cast<StatefulSSLHostStateDelegate*>(state);
-  chrome_state->SetRecurrentInterstitialThresholdForTesting(2);
-  chrome_state->SetRecurrentInterstitialModeForTesting(
-      StatefulSSLHostStateDelegate::RecurrentInterstitialMode::PREF);
-
-  base::SimpleTestClock* clock = new base::SimpleTestClock();
-  clock->SetNow(base::Time::Now());
-  chrome_state->SetClockForTesting(
-      std::unique_ptr<base::SimpleTestClock>(clock));
-
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-
-  // Move the clock backwards and test that the recurrent error state is reset.
-  clock->Advance(-base::Seconds(10));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-
-  // If the clock continues to move forwards, a subsequent error page should
-  // trigger the recurrent error message.
-  clock->Advance(base::Seconds(10));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_TRUE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-}
-
-// Tests that StatefulSSLHostStateDelegate::HasSeenRecurrentErrors in pref mode
-// ignores errors that occurred too far in the past. Note that this test uses a
-// threshold of 3 errors, unlike previous tests which use a threshold of 2.
-IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
-                       HasSeenRecurrentErrorsPrefErrorsInPast) {
-  content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
-  Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
-  content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
-  StatefulSSLHostStateDelegate* chrome_state =
-      static_cast<StatefulSSLHostStateDelegate*>(state);
-  chrome_state->SetRecurrentInterstitialResetTimeForTesting(10);
-  chrome_state->SetRecurrentInterstitialModeForTesting(
-      StatefulSSLHostStateDelegate::RecurrentInterstitialMode::PREF);
-
-  base::SimpleTestClock* clock = new base::SimpleTestClock();
-  clock->SetNow(base::Time::Now());
-  chrome_state->SetClockForTesting(
-      std::unique_ptr<base::SimpleTestClock>(clock));
-
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-
-  // Subsequent errors more than 10 seconds later shouldn't trigger the
-  // recurrent error message.
-  clock->Advance(base::Seconds(12));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-  clock->Advance(base::Seconds(3));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_FALSE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
-
-  // But a third subsequent error within 10 seconds should.
-  clock->Advance(base::Seconds(3));
-  chrome_state->DidDisplayErrorPage(net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED);
-  EXPECT_TRUE(chrome_state->HasSeenRecurrentErrors(
-      net::ERR_CERTIFICATE_TRANSPARENCY_REQUIRED));
+      "www.not-mixed-content.test",
+      content::SSLHostStateDelegate::MIXED_CONTENT));
 }
 
 // Tests the basic behavior of cert memory in incognito.
@@ -524,7 +394,7 @@ class IncognitoSSLHostStateDelegateTest
 IN_PROC_BROWSER_TEST_F(IncognitoSSLHostStateDelegateTest, PRE_AfterRestart) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
 
@@ -565,7 +435,7 @@ IN_PROC_BROWSER_TEST_F(IncognitoSSLHostStateDelegateTest, PRE_AfterRestart) {
 IN_PROC_BROWSER_TEST_F(IncognitoSSLHostStateDelegateTest, AfterRestart) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
 
@@ -593,10 +463,10 @@ IN_PROC_BROWSER_TEST_F(IncognitoSSLHostStateDelegateTest, AfterRestart) {
                 incognito_tab->GetPrimaryMainFrame()->GetStoragePartition()));
 }
 
-// TODO(https://crbug.com/1243074): Disabled for brokenness.
+// TODO(crbug.com/40787070): Disabled for brokenness.
 IN_PROC_BROWSER_TEST_F(IncognitoSSLHostStateDelegateTest,
                        DISABLED_PRE_AfterRestartHttp) {
-  auto* tab = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* tab = browser()->GetTabStripModel()->GetActiveWebContents();
   auto* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   auto* state = profile->GetSSLHostStateDelegate();
 
@@ -627,10 +497,10 @@ IN_PROC_BROWSER_TEST_F(IncognitoSSLHostStateDelegateTest,
 
 // AfterRestartHttp ensures that any HTTP decisions made in an incognito profile
 // are forgetten after a session restart.
-// TODO(https://crbug.com/1243074): Disabled for brokenness.
+// TODO(crbug.com/40787070): Disabled for brokenness.
 IN_PROC_BROWSER_TEST_F(IncognitoSSLHostStateDelegateTest,
                        DISABLED_AfterRestartHttp) {
-  auto* tab = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* tab = browser()->GetTabStripModel()->GetActiveWebContents();
   auto* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   auto* state = profile->GetSSLHostStateDelegate();
 
@@ -662,7 +532,7 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
                        PRE_AfterRestart) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
 
@@ -677,7 +547,7 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
 IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest, AfterRestart) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
   auto* storage_partition = tab->GetPrimaryMainFrame()->GetStoragePartition();
@@ -720,7 +590,7 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest, AfterRestart) {
 
 IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
                        PRE_AfterRestartHttp) {
-  auto* tab = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* tab = browser()->GetTabStripModel()->GetActiveWebContents();
   auto* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   auto* state = profile->GetSSLHostStateDelegate();
 
@@ -732,7 +602,7 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
 
 IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
                        AfterRestartHttp) {
-  auto* tab = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* tab = browser()->GetTabStripModel()->GetActiveWebContents();
   auto* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   auto* state = profile->GetSSLHostStateDelegate();
   auto* storage_partition = tab->GetPrimaryMainFrame()->GetStoragePartition();
@@ -758,10 +628,10 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
   // has not passed yet.
   EXPECT_TRUE(state->IsHttpAllowedForHost(kWWWGoogleHost, storage_partition));
 
-  // Now simulate the clock advancing by one week, which is past the expiration
-  // point.
+  // Now simulate the clock advancing by fifteen days, which is past the
+  // expiration point.
   clock_ptr->Advance(
-      base::Seconds(kDeltaOneWeekInSeconds - kDeltaOneDayInSeconds + 1));
+      base::Seconds(kDeltaFifteenDaysInSeconds - kDeltaOneDayInSeconds + 1));
 
   // HTTP should no longer be allowed because the specified delta has passed.
   EXPECT_FALSE(state->IsHttpAllowedForHost(kWWWGoogleHost, storage_partition));
@@ -775,7 +645,7 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
                        QueryPolicyExpired) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
   auto* storage_partition = tab->GetPrimaryMainFrame()->GetStoragePartition();
@@ -818,7 +688,7 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
 // restarting the browser.
 IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
                        HttpDecisionExpires) {
-  auto* tab = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* tab = browser()->GetTabStripModel()->GetActiveWebContents();
   auto* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   auto* state = profile->GetSSLHostStateDelegate();
   auto* storage_partition = tab->GetPrimaryMainFrame()->GetStoragePartition();
@@ -839,8 +709,8 @@ IN_PROC_BROWSER_TEST_F(DefaultMemorySSLHostStateDelegateTest,
   state->AllowHttpForHost(kWWWGoogleHost, storage_partition);
   EXPECT_TRUE(state->IsHttpAllowedForHost(kWWWGoogleHost, storage_partition));
 
-  // Simulate the clock advancing by one week, the default expiration time.
-  clock_ptr->Advance(base::Seconds(kDeltaOneWeekInSeconds + 1));
+  // Simulate the clock advancing by fifteen days, the default expiration time.
+  clock_ptr->Advance(base::Seconds(kDeltaFifteenDaysInSeconds + 1));
 
   // The decision expiration time has come, so this should now return false.
   EXPECT_FALSE(state->IsHttpAllowedForHost(kWWWGoogleHost, storage_partition));
@@ -870,7 +740,7 @@ IN_PROC_BROWSER_TEST_F(RemoveBrowsingHistorySSLHostStateDelegateTest,
                        DeleteHistory) {
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
 
@@ -887,7 +757,7 @@ IN_PROC_BROWSER_TEST_F(RemoveBrowsingHistorySSLHostStateDelegateTest,
 
 IN_PROC_BROWSER_TEST_F(RemoveBrowsingHistorySSLHostStateDelegateTest,
                        DeleteHistoryClearsHttpAllowlistDecision) {
-  auto* tab = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* tab = browser()->GetTabStripModel()->GetActiveWebContents();
   auto* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   auto* state = profile->GetSSLHostStateDelegate();
 
@@ -911,7 +781,7 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
   // Serve the Google cert for localhost to generate an error.
   scoped_refptr<net::X509Certificate> cert = GetOkCert();
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   content::SSLHostStateDelegate* state = profile->GetSSLHostStateDelegate();
 
@@ -926,12 +796,12 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateTest,
                          tab->GetPrimaryMainFrame()->GetStoragePartition()));
 }
 
+// TODO(crbug.com/507733133): Add tests for non-extension <webview> usage.
+#if BUILDFLAG(IS_CHROMEOS)
 class StatefulSSLHostStateDelegateExtensionTest
     : public extensions::ExtensionBrowserTest {
  public:
-  StatefulSSLHostStateDelegateExtensionTest() {
-    guest_view::GuestViewManager::set_factory_for_testing(&factory_);
-  }
+  StatefulSSLHostStateDelegateExtensionTest() = default;
 
  protected:
   void SetUpCommandLine(base::CommandLine* command_line) override {
@@ -946,14 +816,14 @@ class StatefulSSLHostStateDelegateExtensionTest
 
 // Tests that certificate decisions are isolated by storage partition. In
 // particular, clicking through a certificate error in a <webview> in a Chrome
-// App shouldn't affect normal browsing. See https://crbug.com/639173.
+// App shouldn't affect normal browsing. See https://crbug.com/40085151.
 IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateExtensionTest,
                        StoragePartitionIsolation) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
   // Launch a Chrome app and store a certificate exception.
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   extensions::ChromeTestExtensionLoader loader(profile);
   const extensions::Extension* app =
@@ -1012,7 +882,7 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateExtensionTest,
 
   // Launch a Chrome app.
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   Profile* profile = Profile::FromBrowserContext(tab->GetBrowserContext());
   extensions::ChromeTestExtensionLoader loader(profile);
   const extensions::Extension* app =
@@ -1053,3 +923,4 @@ IN_PROC_BROWSER_TEST_F(StatefulSSLHostStateDelegateExtensionTest,
   EXPECT_FALSE(state->HasAllowException(
       kWWWGoogleHost, tab->GetPrimaryMainFrame()->GetStoragePartition()));
 }
+#endif  // BUILDFLAG(IS_CHROMEOS)

@@ -4,9 +4,16 @@
 
 #include "components/autofill/core/browser/logging/log_manager.h"
 
+#include <memory>
+#include <optional>
 #include <utility>
+#include <vector>
 
+#include "base/check.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
+#include "base/types/pass_key.h"
+#include "components/autofill/core/browser/logging/log_buffer_submitter.h"
 #include "components/autofill/core/browser/logging/log_router.h"
 
 namespace autofill {
@@ -29,7 +36,7 @@ class RoutingLogManagerImpl : public RoutingLogManager {
   // LogManager
   bool IsLoggingActive() const override;
   LogBufferSubmitter Log() override;
-  void ProcessLog(base::Value::Dict node,
+  void ProcessLog(base::DictValue node,
                   base::PassKey<LogBufferSubmitter>) override;
 
  private:
@@ -90,7 +97,7 @@ LogBufferSubmitter RoutingLogManagerImpl::Log() {
   return LogBufferSubmitter(this);
 }
 
-void RoutingLogManagerImpl::ProcessLog(base::Value::Dict node,
+void RoutingLogManagerImpl::ProcessLog(base::DictValue node,
                                        base::PassKey<LogBufferSubmitter>) {
   log_router_->ProcessLog(std::move(node));
 }
@@ -109,12 +116,12 @@ class BufferingLogManagerImpl : public BufferingLogManager {
   // LogManager
   bool IsLoggingActive() const override;
   LogBufferSubmitter Log() override;
-  void ProcessLog(base::Value::Dict node,
+  void ProcessLog(base::DictValue node,
                   base::PassKey<LogBufferSubmitter>) override;
 
  private:
-  std::vector<base::Value::Dict> nodes_;
-  absl::optional<base::PassKey<LogBufferSubmitter>> pass_key_;
+  std::vector<base::DictValue> nodes_;
+  std::optional<base::PassKey<LogBufferSubmitter>> pass_key_;
 };
 
 void BufferingLogManagerImpl::Flush(LogManager& destination) {
@@ -132,7 +139,7 @@ LogBufferSubmitter BufferingLogManagerImpl::Log() {
 }
 
 void BufferingLogManagerImpl::ProcessLog(
-    base::Value::Dict node,
+    base::DictValue node,
     base::PassKey<LogBufferSubmitter> pass_key) {
   nodes_.push_back(std::move(node));
   pass_key_ = pass_key;

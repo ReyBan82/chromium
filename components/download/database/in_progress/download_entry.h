@@ -27,9 +27,7 @@ struct DownloadEntry {
       int64_t ukm_id);
   ~DownloadEntry();
 
-  bool operator==(const DownloadEntry& other) const;
-
-  bool operator!=(const DownloadEntry& other) const;
+  friend bool operator==(const DownloadEntry&, const DownloadEntry&) = default;
 
   // A unique GUID that represents this download.
   std::string guid;
@@ -50,6 +48,9 @@ struct DownloadEntry {
   // If the entity body of unsuccessful HTTP response, like HTTP 404, will be
   // downloaded.
   bool fetch_error_body = false;
+
+  // True if a Service Worker fetch handler produced the original response.
+  bool fetched_via_service_worker = false;
 
   // Request header key/value pairs that will be added to the download HTTP
   // request.

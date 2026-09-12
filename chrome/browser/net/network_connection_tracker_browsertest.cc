@@ -12,12 +12,11 @@
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/network_service_instance.h"
+#include "content/public/browser/network_service_util.h"
 #include "content/public/browser/storage_partition.h"
-#include "content/public/common/network_service_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -37,7 +36,8 @@ class TestNetworkConnectionObserver
       : num_notifications_(0),
         tracker_(tracker),
         run_loop_(std::make_unique<base::RunLoop>()),
-        connection_type_(network::mojom::ConnectionType::CONNECTION_UNKNOWN) {
+        connection_type_(
+            net::NetworkChangeNotifier::ConnectionType::CONNECTION_UNKNOWN) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     tracker_->AddNetworkConnectionObserver(this);
   }
@@ -51,12 +51,13 @@ class TestNetworkConnectionObserver
   }
 
   // NetworkConnectionObserver implementation:
-  void OnConnectionChanged(network::mojom::ConnectionType type) override {
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    network::mojom::ConnectionType queried_type;
+    net::NetworkChangeNotifier::ConnectionType queried_type;
     bool sync = tracker_->GetConnectionType(
         &queried_type,
-        base::BindOnce([](network::mojom::ConnectionType type) {}));
+        base::BindOnce([](net::NetworkChangeNotifier::ConnectionType type) {}));
     EXPECT_TRUE(sync);
     EXPECT_EQ(type, queried_type);
 
@@ -71,7 +72,7 @@ class TestNetworkConnectionObserver
   }
 
   size_t num_notifications() const { return num_notifications_; }
-  network::mojom::ConnectionType connection_type() const {
+  net::NetworkChangeNotifier::ConnectionType connection_type() const {
     return connection_type_;
   }
 
@@ -79,7 +80,7 @@ class TestNetworkConnectionObserver
   size_t num_notifications_;
   raw_ptr<network::NetworkConnectionTracker> tracker_;
   std::unique_ptr<base::RunLoop> run_loop_;
-  network::mojom::ConnectionType connection_type_;
+  net::NetworkChangeNotifier::ConnectionType connection_type_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 };
@@ -88,11 +89,11 @@ class TestNetworkConnectionObserver
 
 class NetworkConnectionTrackerBrowserTest : public InProcessBrowserTest {
  public:
-  NetworkConnectionTrackerBrowserTest() {}
-  ~NetworkConnectionTrackerBrowserTest() override {}
+  NetworkConnectionTrackerBrowserTest() = default;
+  ~NetworkConnectionTrackerBrowserTest() override = default;
 
   // Simulates a network connection change.
-  void SimulateNetworkChange(network::mojom::ConnectionType type) {
+  void SimulateNetworkChange(net::NetworkChangeNotifier::ConnectionType type) {
     if (!content::IsInProcessNetworkService()) {
       mojo::Remote<network::mojom::NetworkServiceTest> network_service_test;
       content::GetNetworkService()->BindTestInterfaceForTesting(
@@ -118,7 +119,7 @@ IN_PROC_BROWSER_TEST_F(NetworkConnectionTrackerBrowserTest,
   // NetworkService on ChromeOS doesn't yet have a NetworkChangeManager
   // implementation. OSX uses a separate binary for service processes and
   // browser test fixture doesn't have NetworkServiceTest mojo code.
-#if !BUILDFLAG(IS_CHROMEOS_ASH) && !BUILDFLAG(IS_MAC)
+#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_MAC)
   network::NetworkConnectionTracker* tracker =
       content::GetNetworkConnectionTracker();
   EXPECT_NE(nullptr, tracker);
@@ -126,20 +127,21 @@ IN_PROC_BROWSER_TEST_F(NetworkConnectionTrackerBrowserTest,
   // started up. This way, NetworkService will receive the broadcast when
   // SimulateNetworkChange() is called.
   base::RunLoop run_loop;
-  network::mojom::ConnectionType ignored_type;
+  net::NetworkChangeNotifier::ConnectionType ignored_type;
   bool sync = tracker->GetConnectionType(
-      &ignored_type,
-      base::BindOnce(
-          [](base::RunLoop* run_loop, network::mojom::ConnectionType type) {
-            run_loop->Quit();
-          },
-          base::Unretained(&run_loop)));
+      &ignored_type, base::BindOnce(
+                         [](base::RunLoop* run_loop,
+                            net::NetworkChangeNotifier::ConnectionType type) {
+                           run_loop->Quit();
+                         },
+                         base::Unretained(&run_loop)));
   if (!sync)
     run_loop.Run();
   TestNetworkConnectionObserver network_connection_observer(tracker);
-  SimulateNetworkChange(network::mojom::ConnectionType::CONNECTION_3G);
+  SimulateNetworkChange(
+      net::NetworkChangeNotifier::ConnectionType::CONNECTION_3G);
   network_connection_observer.WaitForNotification();
-  EXPECT_EQ(network::mojom::ConnectionType::CONNECTION_3G,
+  EXPECT_EQ(net::NetworkChangeNotifier::ConnectionType::CONNECTION_3G,
             network_connection_observer.connection_type());
   base::RunLoop().RunUntilIdle();
   EXPECT_EQ(1u, network_connection_observer.num_notifications());
@@ -150,6 +152,10 @@ IN_PROC_BROWSER_TEST_F(NetworkConnectionTrackerBrowserTest,
 // binds to the restarted network service.
 IN_PROC_BROWSER_TEST_F(NetworkConnectionTrackerBrowserTest,
                        SimulateNetworkServiceCrash) {
+  // NetworkService on ChromeOS doesn't yet have a NetworkChangeManager
+  // implementation. OSX uses a separate binary for service processes and
+  // browser test fixture doesn't have NetworkServiceTest mojo code.
+#if !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_MAC)
   // Out-of-process network service is not enabled, so network service's crash
   // and restart aren't applicable.
   if (!content::IsOutOfProcessNetworkService())
@@ -164,23 +170,24 @@ IN_PROC_BROWSER_TEST_F(NetworkConnectionTrackerBrowserTest,
   // SimulateNetworkChange() is called.
   {
     base::RunLoop run_loop;
-    network::mojom::ConnectionType ignored_type;
+    net::NetworkChangeNotifier::ConnectionType ignored_type;
     bool sync = tracker->GetConnectionType(
-        &ignored_type,
-        base::BindOnce(
-            [](base::RunLoop* run_loop, network::mojom::ConnectionType type) {
-              run_loop->Quit();
-            },
-            base::Unretained(&run_loop)));
+        &ignored_type, base::BindOnce(
+                           [](base::RunLoop* run_loop,
+                              net::NetworkChangeNotifier::ConnectionType type) {
+                             run_loop->Quit();
+                           },
+                           base::Unretained(&run_loop)));
     if (!sync)
       run_loop.Run();
   }
 
   TestNetworkConnectionObserver network_connection_observer(tracker);
-  SimulateNetworkChange(network::mojom::ConnectionType::CONNECTION_3G);
+  SimulateNetworkChange(
+      net::NetworkChangeNotifier::ConnectionType::CONNECTION_3G);
 
   network_connection_observer.WaitForNotification();
-  EXPECT_EQ(network::mojom::ConnectionType::CONNECTION_3G,
+  EXPECT_EQ(net::NetworkChangeNotifier::ConnectionType::CONNECTION_3G,
             network_connection_observer.connection_type());
   // Wait a bit longer to make sure only 1 notification is received and that
   // there is no duplicate notification.
@@ -194,25 +201,27 @@ IN_PROC_BROWSER_TEST_F(NetworkConnectionTrackerBrowserTest,
   // SimulateNetworkChange() is called.
   {
     base::RunLoop run_loop;
-    network::mojom::ConnectionType ignored_type;
+    net::NetworkChangeNotifier::ConnectionType ignored_type;
     bool sync = tracker->GetConnectionType(
-        &ignored_type,
-        base::BindOnce(
-            [](base::RunLoop* run_loop, network::mojom::ConnectionType type) {
-              run_loop->Quit();
-            },
-            base::Unretained(&run_loop)));
+        &ignored_type, base::BindOnce(
+                           [](base::RunLoop* run_loop,
+                              net::NetworkChangeNotifier::ConnectionType type) {
+                             run_loop->Quit();
+                           },
+                           base::Unretained(&run_loop)));
     if (!sync)
       run_loop.Run();
   }
 
-  SimulateNetworkChange(network::mojom::ConnectionType::CONNECTION_2G);
+  SimulateNetworkChange(
+      net::NetworkChangeNotifier::ConnectionType::CONNECTION_2G);
   network_connection_observer.WaitForNotification();
-  EXPECT_EQ(network::mojom::ConnectionType::CONNECTION_2G,
+  EXPECT_EQ(net::NetworkChangeNotifier::ConnectionType::CONNECTION_2G,
             network_connection_observer.connection_type());
 
   // Wait a bit longer to make sure only 2 notifications are received.
   base::RunLoop().RunUntilIdle();
 
   EXPECT_EQ(2u, network_connection_observer.num_notifications());
+#endif
 }

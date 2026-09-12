@@ -2,7 +2,6 @@
 # Copyright 2019 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-
 """Runs a python script under an isolate
 
 This script attempts to emulate the contract of gtest-style tests
@@ -20,11 +19,13 @@ import json
 import os
 import sys
 
-# Add src/testing/ into sys.path for importing xvfb and common.
+import common
+
 sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+  os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir))
+)
+# //testing imports.
 import xvfb
-from scripts import common
 
 # pylint: disable=super-with-arguments
 
@@ -32,17 +33,29 @@ from scripts import common
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument('--isolated-script-test-output', type=str)
+  parser.add_argument('--platform', type=str, default=sys.platform)
+  parser.add_argument('--device-spec', type=str)
+  parser.add_argument('--product', type=str)
   args, _ = parser.parse_known_args()
 
-  if sys.platform == 'win32':
+  if args.platform == 'fuchsia':
+    exe = os.path.join('.', 'bin', 'run_flatbuffers_unittests')
+  elif sys.platform == 'win32':
     exe = os.path.join('.', 'flatbuffers_unittests.exe')
   else:
     exe = os.path.join('.', 'flatbuffers_unittests')
 
   env = os.environ.copy()
   failures = []
+  cmd = [exe]
+  if args.platform == 'fuchsia':
+    cmd.append('--no-xvfb')
+    if args.device_spec:
+      cmd.extend(['--device-spec', args.device_spec])
+    if args.product:
+      cmd.extend(['--product', args.product])
   with common.temporary_file() as tempfile_path:
-    rc = xvfb.run_executable([exe], env, stdoutfile=tempfile_path)
+    rc = xvfb.run_executable(cmd, env, stdoutfile=tempfile_path)
 
     # The flatbuffer tests do not really conform to anything parsable, except
     # that they will succeed with "ALL TESTS PASSED". We cannot test for
@@ -52,12 +65,12 @@ def main():
     # a non positive number).
     with open(tempfile_path) as f:
       output = f.read()
-      if "ALL TESTS PASSED\n" not in output:
+      if 'ALL TESTS PASSED\n' not in output:
         failures = [output]
 
   if args.isolated_script_test_output:
     with open(args.isolated_script_test_output, 'w') as fp:
-      json.dump({'valid': True,'failures': failures}, fp)
+      json.dump({'valid': True, 'failures': failures}, fp)
 
   return rc
 

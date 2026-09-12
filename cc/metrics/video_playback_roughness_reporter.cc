@@ -7,9 +7,8 @@
 #include <algorithm>
 
 #include "base/containers/adapters.h"
-#include "base/cxx17_backports.h"
 #include "base/functional/callback_helpers.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/numerics/safe_conversions.h"
 #include "components/viz/common/quads/compositor_frame_metadata.h"
 
@@ -22,6 +21,17 @@ constexpr int max_worst_windows_size() {
   static_assert(size > 1, "worst_windows_ is too small");
   static_assert(size < 25, "worst_windows_ is too big");
   return size;
+}
+
+void RecordUmaVideoFrameSubmitter(bool is_media_stream,
+                                  base::TimeDelta time_since_decode) {
+  if (is_media_stream) {
+    base::UmaHistogramTimes("Media.VideoFrameSubmitter.Rtc.PresentationDelay",
+                            time_since_decode);
+  } else {
+    base::UmaHistogramTimes("Media.VideoFrameSubmitter.Video.PresentationDelay",
+                            time_since_decode);
+  }
 }
 
 }  // namespace
@@ -53,7 +63,7 @@ void VideoPlaybackRoughnessReporter::FrameSubmitted(
     TokenType token,
     const media::VideoFrame& frame,
     base::TimeDelta render_interval) {
-  if (!frames_.empty() && viz::FrameTokenGT(frames_.back().token, token)) {
+  if (!frames_.empty() && frames_.back().token > token) {
     DCHECK(false) << "Frames submitted out of order.";
     return;
   }
@@ -76,7 +86,7 @@ void VideoPlaybackRoughnessReporter::FrameSubmitted(
     // Adjust frame window size to fit about 1 second of playback
     const int win_size =
         base::ClampRound(info.intended_duration.value().ToHz());
-    frames_window_size_ = base::clamp(win_size, kMinWindowSize, kMaxWindowSize);
+    frames_window_size_ = std::clamp(win_size, kMinWindowSize, kMaxWindowSize);
   }
 
   frames_.push_back(info);
@@ -89,15 +99,16 @@ void VideoPlaybackRoughnessReporter::FramePresented(TokenType token,
     if (token == frame.token) {
       if (frame.decode_time.has_value()) {
         auto time_since_decode = timestamp - frame.decode_time.value();
-        UMA_HISTOGRAM_TIMES("Media.VideoFrameSubmitter", time_since_decode);
+        RecordUmaVideoFrameSubmitter(is_media_stream_, time_since_decode);
       }
 
       if (reliable_timestamp)
         frame.presentation_time = timestamp;
       break;
     }
-    if (viz::FrameTokenGT(token, frame.token))
+    if (token > frame.token) {
       break;
+    }
   }
 }
 
@@ -116,14 +127,14 @@ void VideoPlaybackRoughnessReporter::SubmitPlaybackRoughness() {
   measurement.frames = it->size;
   measurement.duration = it->intended_duration;
   measurement.roughness = it->roughness();
-  measurement.freezing = max_single_frame_error_;
+  measurement.freezing_ratio = max_freezing_ratio_;
   measurement.refresh_rate_hz = it->refresh_rate_hz;
   measurement.frame_size = it->frame_size;
   reporting_cb_.Run(measurement);
 
   worst_windows_.clear();
   windows_seen_ = 0;
-  max_single_frame_error_ = base::TimeDelta();
+  max_freezing_ratio_ = 0.0;
 }
 
 void VideoPlaybackRoughnessReporter::ReportWindow(
@@ -192,12 +203,17 @@ void VideoPlaybackRoughnessReporter::ProcessFrameWindow() {
 
       if (frame.actual_duration.has_value() &&
           frame.intended_duration.has_value()) {
-        error = frame.actual_duration.value() - frame.intended_duration.value();
-        win.intended_duration += frame.intended_duration.value();
+        error = *frame.actual_duration - *frame.intended_duration;
+        win.intended_duration += *frame.intended_duration;
+        if (frame.intended_duration->is_positive()) {
+          base::TimeDelta excess_duration = error;
+          double frame_freezing_ratio = excess_duration.InSecondsF() /
+                                        frame.intended_duration->InSecondsF();
+          max_freezing_ratio_ =
+              std::max(max_freezing_ratio_, frame_freezing_ratio);
+        }
       }
       total_error += error;
-      max_single_frame_error_ =
-          std::max(max_single_frame_error_, error.magnitude());
       mean_square_error_ms2 +=
           total_error.InMillisecondsF() * total_error.InMillisecondsF();
     }
@@ -215,7 +231,7 @@ void VideoPlaybackRoughnessReporter::ProcessFrameWindow() {
       } else {
         worst_windows_.clear();
         windows_seen_ = 0;
-        max_single_frame_error_ = base::TimeDelta();
+        max_freezing_ratio_ = 0.0;
       }
     } else {
       ReportWindow(win);
@@ -241,7 +257,7 @@ void VideoPlaybackRoughnessReporter::Reset() {
   frames_.clear();
   worst_windows_.clear();
   windows_seen_ = 0;
-  max_single_frame_error_ = base::TimeDelta();
+  max_freezing_ratio_ = 0.0;
 }
 
 }  // namespace cc

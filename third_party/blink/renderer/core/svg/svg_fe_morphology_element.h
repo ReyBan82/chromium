@@ -38,6 +38,9 @@ class SVGFEMorphologyElement final
 
  public:
   explicit SVGFEMorphologyElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEMorphologyElement;
+  }
 
   SVGAnimatedNumber* radiusX();
   SVGAnimatedNumber* radiusY();
@@ -53,6 +56,10 @@ class SVGFEMorphologyElement final
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override { return false; }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumberOptionalNumber> radius_;
   Member<SVGAnimatedString> in1_;

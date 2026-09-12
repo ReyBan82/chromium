@@ -29,6 +29,8 @@
 #include <limits>
 
 #include "build/build_config.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_automation_rate.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_oscillator_type.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_output.h"
 #include "third_party/blink/renderer/modules/webaudio/periodic_wave.h"
@@ -54,28 +56,27 @@ OscillatorNode::OscillatorNode(BaseAudioContext& context,
                                PeriodicWave* wave_table)
     : AudioScheduledSourceNode(context),
       // Use musical pitch standard A440 as a default.
-      frequency_(
-          AudioParam::Create(context,
-                             Uuid(),
-                             AudioParamHandler::kParamTypeOscillatorFrequency,
-                             kDefaultFrequencyValue,
-                             AudioParamHandler::AutomationRate::kAudio,
-                             AudioParamHandler::AutomationRateMode::kVariable,
-                             /*min_value=*/-context.sampleRate() / 2,
-                             /*max_value=*/context.sampleRate() / 2)),
+      frequency_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypeOscillatorFrequency,
+          kDefaultFrequencyValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable,
+          /*min_value=*/-context.sampleRate() / 2,
+          /*max_value=*/context.sampleRate() / 2)),
       // Default to no detuning.
       detune_(AudioParam::Create(
           context,
           Uuid(),
-          AudioParamHandler::kParamTypeOscillatorDetune,
+          AudioParamHandler::AudioParamType::kParamTypeOscillatorDetune,
           kDefaultDetuneValue,
-          AudioParamHandler::AutomationRate::kAudio,
+          V8AutomationRate::Enum::kARate,
           AudioParamHandler::AutomationRateMode::kVariable,
           /*min_value=*/-1200 * log2f(std::numeric_limits<float>::max()),
           /*max_value=*/1200 * log2f(std::numeric_limits<float>::max()))) {
   SetHandler(
-      OscillatorHandler::Create(*this, context.sampleRate(), oscillator_type,
-                                wave_table ? wave_table->impl() : nullptr,
+      OscillatorHandler::Create(*this, context.sampleRate(),
                                 frequency_->Handler(), detune_->Handler()));
 }
 
@@ -85,14 +86,27 @@ OscillatorNode* OscillatorNode::Create(BaseAudioContext& context,
                                        ExceptionState& exception_state) {
   DCHECK(IsMainThread());
 
-  return MakeGarbageCollected<OscillatorNode>(context, oscillator_type,
-                                              wave_table);
+  auto* node = MakeGarbageCollected<OscillatorNode>(context,
+                                                    oscillator_type,
+                                                    wave_table);
+  if (wave_table) {
+    node->GetOscillatorHandler().SetInitialPeriodicWave(wave_table->impl());
+  } else {
+    if (!node->GetOscillatorHandler().SetInitialType(oscillator_type)) {
+      exception_state.ThrowDOMException(
+          DOMExceptionCode::kNotSupportedError,
+          "Failed to initialize oscillator due to insufficient memory.");
+      return nullptr;
+    }
+  }
+  return node;
 }
 
 OscillatorNode* OscillatorNode::Create(BaseAudioContext* context,
                                        const OscillatorOptions* options,
                                        ExceptionState& exception_state) {
-  if (options->type() == "custom" && !options->hasPeriodicWave()) {
+  if (options->type() == V8OscillatorType::Enum::kCustom &&
+      !options->hasPeriodicWave()) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kInvalidStateError,
         "A PeriodicWave must be specified if the type is set to \"custom\"");
@@ -101,7 +115,7 @@ OscillatorNode* OscillatorNode::Create(BaseAudioContext* context,
 
   // TODO(crbug.com/1070871): Use periodicWaveOr(nullptr).
   OscillatorNode* node =
-      Create(*context, IDLEnumAsString(options->type()),
+      Create(*context, options->type().AsString(),
              options->hasPeriodicWave() ? options->periodicWave() : nullptr,
              exception_state);
 
@@ -127,21 +141,21 @@ OscillatorHandler& OscillatorNode::GetOscillatorHandler() const {
   return static_cast<OscillatorHandler&>(Handler());
 }
 
-String OscillatorNode::type() const {
-  return GetOscillatorHandler().GetType();
+V8OscillatorType OscillatorNode::type() const {
+  return V8OscillatorType(GetOscillatorHandler().GetType());
 }
 
-void OscillatorNode::setType(const String& type,
+void OscillatorNode::setType(const V8OscillatorType& type,
                              ExceptionState& exception_state) {
-  GetOscillatorHandler().SetType(type, exception_state);
+  GetOscillatorHandler().SetType(type.AsEnum(), exception_state);
 }
 
 AudioParam* OscillatorNode::frequency() {
-  return frequency_;
+  return frequency_.Get();
 }
 
 AudioParam* OscillatorNode::detune() {
-  return detune_;
+  return detune_.Get();
 }
 
 void OscillatorNode::setPeriodicWave(PeriodicWave* wave) {

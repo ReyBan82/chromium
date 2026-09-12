@@ -6,17 +6,23 @@
 
 #include <windows.h>
 
+#include <commctrl.h>
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <vector>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/no_destructor.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/run_until.h"
 #include "base/test/test_timeouts.h"
+#include "base/threading/platform_thread.h"
 #include "base/threading/thread_checker.h"
 #include "base/win/win_util.h"
 #include "ui/base/win/event_creation_utils.h"
@@ -26,6 +32,10 @@
 #include "ui/gfx/geometry/point.h"
 
 namespace {
+
+bool IsKeyEvent(WPARAM message_type) {
+  return message_type == WM_KEYDOWN || message_type == WM_KEYUP;
+}
 
 // InputDispatcher ------------------------------------------------------------
 
@@ -40,10 +50,11 @@ class InputDispatcher {
   static void CreateForMouseEvent(base::OnceClosure callback,
                                   WPARAM message_type);
 
-  // Special case of CreateForMessage() for WM_KEYUP (can await multiple events
-  // when modifiers are involved).
-  static void CreateForKeyUp(base::OnceClosure callback,
-                             int num_keyups_awaited);
+  // Constructs an InputDispatcher that will invoke `callback` after
+  // `num_key_events_awaited` events of type `wait_for` have been received.
+  static void CreateForKeyEvent(base::OnceClosure callback,
+                                ui_controls::KeyEventType wait_for,
+                                int num_key_events_awaited);
 
   // Special case of CreateForMessage() for WM_MOUSEMOVE. Upon receipt, an error
   // message is logged if the destination of the move is not |screen_point|.
@@ -62,11 +73,11 @@ class InputDispatcher {
                   WPARAM message_waiting_for,
                   UINT system_queue_flag);
 
-  // WM_KEYUP
+  // WM_KEYDOWN or WM_KEYUP
   InputDispatcher(base::OnceClosure callback,
                   WPARAM message_waiting_for,
                   UINT system_queue_flag,
-                  int num_keyups_awaited);
+                  int num_key_events_awaited);
 
   // WM_MOUSEMOVE
   InputDispatcher(base::OnceClosure callback,
@@ -108,24 +119,23 @@ class InputDispatcher {
   static InputDispatcher* current_dispatcher_;
 
   // Return value from SetWindowsHookEx.
-  static HHOOK next_hook_;
+  static HHOOK hook_;
 
   THREAD_CHECKER(thread_checker_);
 
   // The callback to run when the desired message is received.
   base::OnceClosure callback_;
 
-  // The message on which the instance is waiting -- unused for WM_KEYUP
-  // messages.
+  // The message on which the instance is waiting.
   const WPARAM message_waiting_for_;
 
   // The system queue flag (ref. ::GetQueueStatus) which the awaited event is
   // reflected in.
   const UINT system_queue_flag_;
 
-  // The number of WM_KEYUP messages to receive before dispatching |callback_|.
-  // Only relevant when |message_waiting_for_| is WM_KEYUP.
-  int num_keyups_awaited_ = 0;
+  // The number of messages to receive before dispatching `callback_`. Only
+  // relevant when `message_waiting_for_` is WM_KEYDOWN or WM_KEYUP.
+  int num_key_events_awaited_ = 0;
 
   // The desired mouse position for a mouse move event.
   const gfx::Point expected_mouse_location_;
@@ -141,7 +151,7 @@ class InputDispatcher {
 InputDispatcher* InputDispatcher::current_dispatcher_ = nullptr;
 
 // static
-HHOOK InputDispatcher::next_hook_ = nullptr;
+HHOOK InputDispatcher::hook_ = nullptr;
 
 // static
 void InputDispatcher::CreateForMouseEvent(base::OnceClosure callback,
@@ -156,11 +166,16 @@ void InputDispatcher::CreateForMouseEvent(base::OnceClosure callback,
 }
 
 // static
-void InputDispatcher::CreateForKeyUp(base::OnceClosure callback,
-                                     int num_keyups_awaited) {
+void InputDispatcher::CreateForKeyEvent(base::OnceClosure callback,
+                                        ui_controls::KeyEventType wait_for,
+                                        int num_key_events_awaited) {
+  CHECK(wait_for == ui_controls::KeyEventType::kKeyPress ||
+        wait_for == ui_controls::KeyEventType::kKeyRelease);
   // Owns self.
-  new InputDispatcher(std::move(callback), WM_KEYUP, QS_KEY,
-                      num_keyups_awaited);
+  new InputDispatcher(
+      std::move(callback),
+      wait_for == ui_controls::KeyEventType::kKeyPress ? WM_KEYDOWN : WM_KEYUP,
+      QS_KEY, num_key_events_awaited);
 }
 
 // static
@@ -183,12 +198,12 @@ InputDispatcher::InputDispatcher(base::OnceClosure callback,
 InputDispatcher::InputDispatcher(base::OnceClosure callback,
                                  WPARAM message_waiting_for,
                                  UINT system_queue_flag,
-                                 int num_keyups_awaited)
+                                 int num_key_events_awaited)
     : callback_(std::move(callback)),
       message_waiting_for_(message_waiting_for),
       system_queue_flag_(system_queue_flag),
-      num_keyups_awaited_(num_keyups_awaited) {
-  DCHECK_EQ(message_waiting_for_, static_cast<WPARAM>(WM_KEYUP));
+      num_key_events_awaited_(num_key_events_awaited) {
+  CHECK(IsKeyEvent(message_waiting_for_));
   InstallHook();
 }
 
@@ -200,7 +215,7 @@ InputDispatcher::InputDispatcher(base::OnceClosure callback,
       message_waiting_for_(message_waiting_for),
       system_queue_flag_(system_queue_flag),
       expected_mouse_location_(screen_point) {
-  DCHECK_EQ(message_waiting_for_, static_cast<WPARAM>(WM_MOUSEMOVE));
+  CHECK_EQ(message_waiting_for_, static_cast<WPARAM>(WM_MOUSEMOVE));
   InstallHook();
 }
 
@@ -208,8 +223,8 @@ InputDispatcher::~InputDispatcher() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   DCHECK_EQ(current_dispatcher_, this);
   current_dispatcher_ = nullptr;
-  UnhookWindowsHookEx(next_hook_);
-  next_hook_ = nullptr;
+  UnhookWindowsHookEx(hook_);
+  hook_ = nullptr;
 }
 
 void InputDispatcher::InstallHook() {
@@ -220,7 +235,7 @@ void InputDispatcher::InstallHook() {
 
   int hook_type;
   HOOKPROC hook_function;
-  if (message_waiting_for_ == WM_KEYUP) {
+  if (IsKeyEvent(message_waiting_for_)) {
     hook_type = WH_KEYBOARD;
     hook_function = &KeyHook;
   } else {
@@ -237,37 +252,41 @@ void InputDispatcher::InstallHook() {
           TestTimeouts::action_timeout());
     }
   }
-  next_hook_ =
+  hook_ =
       SetWindowsHookEx(hook_type, hook_function, nullptr, GetCurrentThreadId());
-  DPCHECK(next_hook_);
+  DPCHECK(hook_);
 }
 
 // static
 LRESULT CALLBACK InputDispatcher::MouseHook(int n_code,
                                             WPARAM w_param,
                                             LPARAM l_param) {
-  HHOOK next_hook = next_hook_;
+  HHOOK hook = hook_;
   if (n_code == HC_ACTION) {
     DCHECK(current_dispatcher_);
     current_dispatcher_->DispatchedMessage(
         static_cast<UINT>(w_param),
         reinterpret_cast<MOUSEHOOKSTRUCT*>(l_param));
   }
-  return CallNextHookEx(next_hook, n_code, w_param, l_param);
+  return CallNextHookEx(hook, n_code, w_param, l_param);
 }
 
 // static
 LRESULT CALLBACK InputDispatcher::KeyHook(int n_code,
                                           WPARAM w_param,
                                           LPARAM l_param) {
-  if ((n_code == HC_ACTION) && (HIWORD(l_param) & KF_UP)) {
-    DCHECK(current_dispatcher_);
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE,
-        base::BindOnce(&InputDispatcher::MatchingMessageProcessed,
-                       current_dispatcher_->weak_factory_.GetWeakPtr(), false));
+  if (n_code == HC_ACTION) {
+    const WPARAM type = (HIWORD(l_param) & KF_UP) ? WM_KEYUP : WM_KEYDOWN;
+    CHECK(current_dispatcher_);
+    if (type == current_dispatcher_->message_waiting_for_) {
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE,
+          base::BindOnce(&InputDispatcher::MatchingMessageProcessed,
+                         current_dispatcher_->weak_factory_.GetWeakPtr(),
+                         false));
+    }
   }
-  return CallNextHookEx(next_hook_, n_code, w_param, l_param);
+  return CallNextHookEx(hook_, n_code, w_param, l_param);
 }
 
 void InputDispatcher::DispatchedMessage(
@@ -318,8 +337,12 @@ void InputDispatcher::MatchingMessageProcessed(bool definitively_done) {
   if (flushing_messages_)
     return;
 
-  if (message_waiting_for_ == WM_KEYUP && --num_keyups_awaited_ != 0)
-    return;
+  if (IsKeyEvent(message_waiting_for_)) {
+    --num_key_events_awaited_;
+    if (num_key_events_awaited_ != 0) {
+      return;
+    }
+  }
 
   // Unless specified otherwise by |definitively_done| : resume on the last
   // event of its type only (instead of the first one) to prevent flakes when
@@ -354,6 +377,127 @@ void InputDispatcher::OnTimeout() {
   LOG(ERROR) << "Timed out waiting for mouse move event. The test will now "
                 "continue, but may fail.";
 
+  auto callback = std::move(callback_);
+  delete this;
+  std::move(callback).Run();
+}
+
+// WindowMessageObserver is used to listen for a message sent to a target
+// window using a window subclass. The callback is run when the message matches.
+class WindowMessageObserver {
+ public:
+  static void Create(base::OnceClosure callback,
+                     HWND target_hwnd,
+                     WPARAM message_type);
+
+  ~WindowMessageObserver();
+
+  WindowMessageObserver(const WindowMessageObserver&) = delete;
+  WindowMessageObserver& operator=(const WindowMessageObserver&) = delete;
+
+ private:
+  WindowMessageObserver(base::OnceClosure callback,
+                        HWND target_hwnd,
+                        WPARAM message_type);
+
+  void RegisterObserver();
+
+  static LRESULT CALLBACK SubclassProc(HWND hwnd,
+                                       UINT msg,
+                                       WPARAM w_param,
+                                       LPARAM l_param,
+                                       UINT_PTR id,
+                                       DWORD_PTR ref_data);
+
+  void ProcessMessage(HWND hwnd, UINT msg, UINT_PTR id);
+
+  void MatchingMessageProcessed();
+
+  THREAD_CHECKER(thread_checker_);
+
+  base::OnceClosure callback_;
+  const HWND expected_hwnd_;
+  const WPARAM message_waiting_for_;
+
+  base::WeakPtrFactory<WindowMessageObserver> weak_factory_{this};
+};
+
+// WindowMessageObserver ------------------------------------------------------
+
+// static
+void WindowMessageObserver::Create(base::OnceClosure callback,
+                                   HWND target_hwnd,
+                                   WPARAM message_type) {
+  // Owns self.
+  new WindowMessageObserver(std::move(callback), target_hwnd, message_type);
+}
+
+WindowMessageObserver::WindowMessageObserver(base::OnceClosure callback,
+                                             HWND target_hwnd,
+                                             WPARAM message_type)
+    : callback_(std::move(callback)),
+      expected_hwnd_(target_hwnd),
+      message_waiting_for_(message_type) {
+  RegisterObserver();
+}
+
+WindowMessageObserver::~WindowMessageObserver() {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  ::RemoveWindowSubclass(expected_hwnd_, &SubclassProc,
+                         reinterpret_cast<UINT_PTR>(this));
+}
+
+void WindowMessageObserver::RegisterObserver() {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  ::SetWindowSubclass(expected_hwnd_, &SubclassProc,
+                      reinterpret_cast<UINT_PTR>(this),
+                      reinterpret_cast<DWORD_PTR>(this));
+}
+
+void WindowMessageObserver::ProcessMessage(HWND hwnd,
+                                           UINT msg,
+                                           UINT_PTR id) {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+
+  if (msg == message_waiting_for_) {
+    ::RemoveWindowSubclass(hwnd, &SubclassProc, id);
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&WindowMessageObserver::MatchingMessageProcessed,
+                       weak_factory_.GetWeakPtr()));
+  } else if (msg == WM_NCDESTROY) {
+    ::RemoveWindowSubclass(hwnd, &SubclassProc, id);
+    // Since the window is being destroyed and we never matched the message,
+    // we should delete ourselves to prevent a leak.
+    //
+    // We must delete asynchronously (via DeleteSoon) rather than immediately:
+    // 1. To allow the current subclass message dispatch stack to completely
+    //    unwind before the C++ controller object is destroyed. Deleting
+    //    immediately inside the window procedure callback could result in
+    //    use-after-free bugs if subsequent message handlers on the call stack
+    //    attempt to inspect the window subclass state.
+    // 2. To prevent redundant and nested calls to RemoveWindowSubclass
+    //    while the subclass proc is currently executing on the stack frame.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
+                                                                  this);
+  }
+}
+
+// static
+LRESULT CALLBACK WindowMessageObserver::SubclassProc(HWND hwnd,
+                                                     UINT msg,
+                                                     WPARAM w_param,
+                                                     LPARAM l_param,
+                                                     UINT_PTR id,
+                                                     DWORD_PTR ref_data) {
+  auto* observer = reinterpret_cast<WindowMessageObserver*>(ref_data);
+  CHECK(observer);
+  observer->ProcessMessage(hwnd, msg, id);
+  return ::DefSubclassProc(hwnd, msg, w_param, l_param);
+}
+
+void WindowMessageObserver::MatchingMessageProcessed() {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   auto callback = std::move(callback_);
   delete this;
   std::move(callback).Run();
@@ -448,15 +592,96 @@ void AppendAcceleratorInputs(int accelerator_state,
   }
 }
 
+// Helper to find the deepest descendant window at a specified screen point.
+// We loop using ::ChildWindowFromPointEx because the standard Windows API
+// ::ChildWindowFromPointEx is non-recursive (it only searches immediate first-
+// level children of the parent window).
+// We cannot use ::WindowFromPoint here because when Chrome is occluded by an
+// external process window, ::WindowFromPoint returns the occluding window.
+HWND FindDeepestChildAtPoint(HWND parent, const POINT& screen_pt) {
+  HWND current = parent;
+  while (current) {
+    POINT client_pt = screen_pt;
+    ::ScreenToClient(current, &client_pt);
+    HWND child = ::ChildWindowFromPointEx(current, client_pt,
+                                          CWP_SKIPINVISIBLE | CWP_SKIPDISABLED);
+    if (!child || child == current) {
+      break;
+    }
+    current = child;
+  }
+  return current;
+}
+
+HWND FindChromeWindowAtPoint(const POINT& pt) {
+  const DWORD chrome_pid = ::GetCurrentProcessId();
+  HWND hwnd = ::GetTopWindow(nullptr);
+  while (hwnd) {
+    DWORD pid;
+    ::GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == chrome_pid && ::IsWindowVisible(hwnd)) {
+      RECT rect;
+      ::GetWindowRect(hwnd, &rect);
+      if (::PtInRect(&rect, pt)) {
+        return FindDeepestChildAtPoint(hwnd, pt);
+      }
+    }
+    hwnd = ::GetWindow(hwnd, GW_HWNDNEXT);
+  }
+  return NULL;
+}
+
+// Posts a mouse event message directly to a Chrome window and monitors
+// its delivery.
+void SendMouseEventByPostMessage(HWND chrome_hwnd,
+                                 HWND hwnd_under_mouse,
+                                 DWORD pid,
+                                 const gfx::Point& screen_point,
+                                 WPARAM message_type,
+                                 base::OnceClosure task) {
+  wchar_t class_name[256];
+  ::GetClassName(hwnd_under_mouse, class_name, std::size(class_name));
+
+  wchar_t title[256];
+  ::GetWindowText(hwnd_under_mouse, title, std::size(title));
+
+  RECT rect;
+  ::GetWindowRect(hwnd_under_mouse, &rect);
+
+  VLOG(1) << "Occluding window detected details:"
+          << "\n  HWND: " << hwnd_under_mouse << "\n  Class: " << class_name
+          << "\n  Title: " << title << "\n  Bounds: (" << rect.left << ", "
+          << rect.top << ") - (" << rect.right << ", " << rect.bottom << ")";
+
+  // Update the cursor for WM_MOUSEMOVE. This is needed so that GetCursorPos()
+  // returns the correct cursor position.
+  if (message_type == WM_MOUSEMOVE) {
+    ui::SendMouseEvent(screen_point,
+                       MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK);
+  }
+
+  POINT client_pt = {screen_point.x(), screen_point.y()};
+  ::ScreenToClient(chrome_hwnd, &client_pt);
+  ::PostMessage(chrome_hwnd, message_type, 0,
+                MAKELPARAM(client_pt.x, client_pt.y));
+
+  // Subclass the target window. Call the completion callback when the subclass
+  // proc receives the message.
+  if (task) {
+    WindowMessageObserver::Create(std::move(task), chrome_hwnd, message_type);
+  }
+}
+
 }  // namespace
 
 namespace ui_controls {
 namespace internal {
 
-bool SendKeyPressImpl(HWND window,
-                      ui::KeyboardCode key,
-                      int accelerator_state,
-                      base::OnceClosure task) {
+bool SendKeyPressReleaseImpl(HWND window,
+                             ui::KeyboardCode key,
+                             int accelerator_state,
+                             KeyEventType wait_for,
+                             base::OnceClosure task) {
   // SendInput only works as we expect it if one of our windows is the
   // foreground window already.
   HWND target_window = (::GetActiveWindow() &&
@@ -477,7 +702,7 @@ bool SendKeyPressImpl(HWND window,
     ::SendMessage(popup_menu, WM_KEYUP, w_param, l_param);
 
     if (task)
-      InputDispatcher::CreateForKeyUp(std::move(task), 1);
+      InputDispatcher::CreateForKeyEvent(std::move(task), wait_for, 1);
     return true;
   }
 
@@ -497,26 +722,53 @@ bool SendKeyPressImpl(HWND window,
   }
 
   if (task)
-    InputDispatcher::CreateForKeyUp(std::move(task), input.size() / 2);
+    InputDispatcher::CreateForKeyEvent(std::move(task), wait_for,
+                                       input.size() / 2);
   return true;
 }
 
 bool SendMouseMoveImpl(int screen_x, int screen_y, base::OnceClosure task) {
   gfx::Point screen_point =
-      display::win::ScreenWin::DIPToScreenPoint({screen_x, screen_y});
+      display::win::GetScreenWin()->DIPToScreenPoint({screen_x, screen_y});
 
   // Check if the mouse is already there.
   POINT current_pos;
   ::GetCursorPos(&current_pos);
   if (screen_point.x() == current_pos.x && screen_point.y() == current_pos.y) {
-    if (task)
-      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-          FROM_HERE, std::move(task));
-    return true;
+    // Windows does not dispatch a WM_MOUSEMOVE message if the cursor is already
+    // at the target coordinates. To force Windows to dispatch the event, offset
+    // the target x-coordinate by 1 DIP.
+    LOG(WARNING) << "ui_controls: Cursor is already at the target position. "
+                    "Offsetting move target by 1 DIP for x to force dispatch.";
+    screen_point = display::win::GetScreenWin()->DIPToScreenPoint(
+        {screen_x + 1, screen_y});
+  }
+
+  POINT pt = {screen_point.x(), screen_point.y()};
+  HWND hwnd_under_mouse = ::WindowFromPoint(pt);
+  DWORD pid = 0;
+  ::GetWindowThreadProcessId(hwnd_under_mouse, &pid);
+  const bool other_process_window_under_mouse =
+      pid != ::GetCurrentProcessId() && hwnd_under_mouse != NULL;
+
+  // The mouse is over a window owned by another process. On bots we see
+  // HWNDs owned by text_input_host.exe or explorer.exe occluding Chrome's
+  // window. WM_MOUSEMOVE will be sent to them, not Chrome. They are not also
+  // responsive to SetWindowPos or SendInput calls from Chrome.
+  // Subtle: only post a WM_MOUSEMOVE if occluded by another process. If we
+  // always post a WM_MOUSEMOVE, Chrome will receive 2 WM_MOUSEMOVEs, one
+  // from SendInput (required for cursor update) and the other from PostMessage.
+  if (other_process_window_under_mouse) {
+    HWND chrome_hwnd = FindChromeWindowAtPoint(pt);
+    if (chrome_hwnd) {
+      SendMouseEventByPostMessage(chrome_hwnd, hwnd_under_mouse, pid,
+                                  screen_point, WM_MOUSEMOVE, std::move(task));
+      return true;
+    }
   }
 
   if (!ui::SendMouseEvent(screen_point,
-                          MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE)) {
+                          MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK)) {
     return false;
   }
 
@@ -530,8 +782,8 @@ bool SendMouseEventsImpl(MouseButton type,
                          int button_state,
                          base::OnceClosure task,
                          int accelerator_state) {
-  DWORD down_flags = MOUSEEVENTF_ABSOLUTE;
-  DWORD up_flags = MOUSEEVENTF_ABSOLUTE;
+  DWORD down_flags = 0;
+  DWORD up_flags = 0;
   UINT last_event;
 
   switch (type) {
@@ -555,7 +807,6 @@ bool SendMouseEventsImpl(MouseButton type,
 
     default:
       NOTREACHED();
-      return false;
   }
 
   std::vector<INPUT> input;
@@ -603,8 +854,8 @@ bool SendTouchEventsImpl(int action, int num, int x, int y) {
 
   POINTER_TOUCH_INFO pointer_touch_info[kTouchesLengthCap];
   for (int i = 0; i < num; i++) {
-    POINTER_TOUCH_INFO& contact = pointer_touch_info[i];
-    memset(&contact, 0, sizeof(POINTER_TOUCH_INFO));
+    POINTER_TOUCH_INFO& contact = UNSAFE_TODO(pointer_touch_info[i]);
+    UNSAFE_TODO(memset(&contact, 0, sizeof(POINTER_TOUCH_INFO)));
     contact.pointerInfo.pointerType = PT_TOUCH;
     contact.pointerInfo.pointerId = i;
     contact.pointerInfo.ptPixelLocation.y = y;
@@ -630,9 +881,9 @@ bool SendTouchEventsImpl(int action, int num, int x, int y) {
     return false;
 
   // Injecting the touch move on screen
-  if (action & MOVE) {
+  if (action & kTouchMove) {
     for (int i = 0; i < num; i++) {
-      POINTER_TOUCH_INFO& contact = pointer_touch_info[i];
+      POINTER_TOUCH_INFO& contact = UNSAFE_TODO(pointer_touch_info[i]);
       contact.pointerInfo.ptPixelLocation.y = y + 10;
       contact.pointerInfo.ptPixelLocation.x = x + 10 * i + 30;
       contact.pointerInfo.pointerFlags =
@@ -643,9 +894,9 @@ bool SendTouchEventsImpl(int action, int num, int x, int y) {
   }
 
   // Injecting the touch up on screen
-  if (action & RELEASE) {
+  if (action & kTouchRelease) {
     for (int i = 0; i < num; i++) {
-      POINTER_TOUCH_INFO& contact = pointer_touch_info[i];
+      POINTER_TOUCH_INFO& contact = UNSAFE_TODO(pointer_touch_info[i]);
       contact.pointerInfo.ptPixelLocation.y = y + 10;
       contact.pointerInfo.ptPixelLocation.x = x + 10 * i + 30;
       contact.pointerInfo.pointerFlags = POINTER_FLAG_UP | POINTER_FLAG_INRANGE;

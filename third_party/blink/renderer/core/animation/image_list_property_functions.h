@@ -13,7 +13,7 @@
 
 namespace blink {
 
-using StyleImageList = HeapVector<Member<StyleImage>, 1>;
+using StyleImageList = GCedHeapVector<Member<StyleImage>, 1>;
 
 class ImageListPropertyFunctions {
  public:
@@ -29,18 +29,21 @@ class ImageListPropertyFunctions {
       case CSSPropertyID::kBackgroundImage:
         fill_layer = &style.BackgroundLayers();
         break;
-      case CSSPropertyID::kWebkitMaskImage:
+      case CSSPropertyID::kMaskImage:
         fill_layer = &style.MaskLayers();
         break;
       default:
         NOTREACHED();
-        return;
     }
 
     result->clear();
-    while (fill_layer) {
+    // Interpolation is defined on computed values, so this walks the layers the
+    // computed value reports - see FillLayer::NextForComputedValue().
+    while (fill_layer &&
+           fill_layer->IsPropertySet(FillLayer::Property::kImage)) {
       result->push_back(fill_layer->GetImage());
-      fill_layer = fill_layer->Next();
+      fill_layer =
+          fill_layer->NextForComputedValue(FillLayer::Property::kImage);
     }
   }
 
@@ -52,12 +55,11 @@ class ImageListPropertyFunctions {
       case CSSPropertyID::kBackgroundImage:
         fill_layer = &builder.AccessBackgroundLayers();
         break;
-      case CSSPropertyID::kWebkitMaskImage:
+      case CSSPropertyID::kMaskImage:
         fill_layer = &builder.AccessMaskLayers();
         break;
       default:
         NOTREACHED();
-        return;
     }
 
     FillLayer* prev = nullptr;

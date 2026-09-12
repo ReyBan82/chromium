@@ -36,10 +36,27 @@ class TestPermissionsClient : public PermissionsClient {
   ObjectPermissionContextBase* GetChooserContext(
       content::BrowserContext* browser_context,
       ContentSettingsType type) override;
-  void GetUkmSourceId(content::BrowserContext* browser_context,
-                      content::WebContents* web_contents,
+  void GetUkmSourceId(ContentSettingsType permission_type,
+                      content::BrowserContext* browser_context,
+                      content::RenderFrameHost* render_frame_host,
                       const GURL& requesting_origin,
                       GetUkmSourceIdCallback callback) override;
+
+  // Device (OS-level) simulated permissions
+  bool HasDevicePermission(ContentSettingsType type) const override;
+  bool CanRequestDevicePermission(ContentSettingsType type) const override;
+  void SetHasDevicePermission(bool has_device_permission);
+  void SetCanRequestDevicePermission(bool can_request_device_permission);
+
+  bool IsPrivilegedInternalWebUI(content::WebContents* web_contents,
+                                 const GURL& requester,
+                                 bool already_overrode_requester) override;
+  void SetIsPrivilegedInternalWebUI(bool is_privileged_internal_web_ui);
+
+#if BUILDFLAG(IS_ANDROID)
+  // Gets the name of the embedder.
+  const std::u16string GetClientApplicationName() const override;
+#endif
 
  private:
   TestPermissionsClient(const TestPermissionsClient&) = delete;
@@ -50,6 +67,9 @@ class TestPermissionsClient : public PermissionsClient {
   PermissionDecisionAutoBlocker autoblocker_;
   PermissionActionsHistory permission_actions_history_;
   OriginKeyedPermissionActionService origin_keyed_permission_action_service_;
+  bool has_device_permission_ = true;
+  bool can_request_device_permission_ = false;
+  bool is_privileged_internal_web_ui_ = false;
 };
 
 }  // namespace permissions

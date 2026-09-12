@@ -7,7 +7,6 @@
 
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/ui/webui/settings/settings_page_ui_handler.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "ui/shell_dialogs/select_file_dialog.h"
@@ -38,28 +37,26 @@ class DownloadsHandler : public SettingsPageUIHandler,
 
   // Callback for the "initializeDownloads" message. This starts observers and
   // retrieves the current browser state.
-  void HandleInitialize(const base::Value::List& args);
+  void HandleInitialize(const base::ListValue& args);
 
   void SendAutoOpenDownloadsToJavascript();
 
   // Resets the list of filetypes that are auto-opened after download.
-  void HandleResetAutoOpenFileTypes(const base::Value::List& args);
+  void HandleResetAutoOpenFileTypes(const base::ListValue& args);
 
   // Callback for the "selectDownloadLocation" message. This will prompt the
   // user for a destination folder using platform-specific APIs.
-  void HandleSelectDownloadLocation(const base::Value::List& args);
+  void HandleSelectDownloadLocation(const base::ListValue& args);
 
   // SelectFileDialog::Listener implementation.
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override;
-  void FileSelectionCanceled(void* params) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
+  void FileSelectionCanceled() override;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Callback for the "getDownloadLocationText" message.  Converts actual
   // paths in chromeos to values suitable to display to users.
-  // E.g. /home/chronos/u-<hash>/Downloads => "Downloads".
-  void HandleGetDownloadLocationText(const base::Value::List& args);
+  // E.g. /home/chronos/u-<hash>/MyFiles/Downloads => "My Files > Downloads".
+  void HandleGetDownloadLocationText(const base::ListValue& args);
 #endif
 
   raw_ptr<Profile> profile_;

@@ -7,55 +7,70 @@
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/callback_list.h"
+#include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece.h"
-#include "components/user_education/common/help_bubble_params.h"
-#include "components/user_education/webui/tracked_element_webui.h"
+#include "components/user_education/common/help_bubble/help_bubble.h"
+#include "components/user_education/common/help_bubble/help_bubble_params.h"
 #include "content/public/browser/web_ui_controller.h"
 #include "mojo/public/cpp/bindings/receiver.h"
-#include "mojo/public/cpp/bindings/remote.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/rect_f.h"
 #include "ui/webui/resources/cr_components/help_bubble/help_bubble.mojom.h"
+#include "ui/webui/resources/js/tracked_element/tracked_element.mojom-forward.h"
+#include "ui/webui/resources/js/tracked_element/tracked_element.mojom.h"
 
 namespace content {
 class WebContents;
 }  // namespace content
 
+namespace ui {
+class TrackedElementHandler;
+class TrackedElementWebUI;
+}  // namespace ui
+
 namespace user_education {
 
-class HelpBubble;
 class HelpBubbleWebUI;
 
 // Base class abstracting away IPC so that handler functionality can be tested
 // entirely with mocks.
 class HelpBubbleHandlerBase : public help_bubble::mojom::HelpBubbleHandler {
  public:
+  // Returns the WebContents associated with the HelpBubbleHandle. The return
+  // value must never be null.
+  using GetWebContentsCallback =
+      base::RepeatingCallback<content::WebContents*()>;
+
   HelpBubbleHandlerBase(const HelpBubbleHandlerBase&) = delete;
   HelpBubbleHandlerBase(const std::vector<ui::ElementIdentifier>& identifiers,
                         ui::ElementContext context);
+  HelpBubbleHandlerBase& operator=(const HelpBubbleHandlerBase&) = delete;
   ~HelpBubbleHandlerBase() override;
-  void operator=(const HelpBubbleHandlerBase&) = delete;
 
-  // Returns the context. Currently this is tied to the WebUIController and not
-  // the browser that holds it, as (at least for tab contents) the owning
-  // browser can change during the handler's lifespan.
-  ui::ElementContext context() const { return context_; }
+  // Returns the context. In the common case, currently this is tied to the
+  // WebUIController and not the browser that holds it, as (at least for tab
+  // contents) the owning browser can change during the handler's lifespan.
+  // For special cases without a WebUIController, the HelpBubbleHandle creator
+  // must provide a unique context of their own choosing.
+  ui::ElementContext context() const;
 
-  // Returns the associated `WebUIController`. This should not change over the
-  // lifetime of the handler.
-  virtual content::WebUIController* GetController() = 0;
-
-  // Returns the WebContents associated with the controller. This is a
-  // convenience method. A contents should be associated with the controller but
-  // it is probably good to check for null.
+  // See `GetWebContentsCallback` above.
   content::WebContents* GetWebContents();
+
+  // Returns whether a help bubble is showing for a given element.
+  bool IsHelpBubbleShowingForTesting(ui::ElementIdentifier id) const;
+
+  base::WeakPtr<HelpBubbleHandlerBase> GetWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
 
  protected:
   // Provides reliable access to a HelpBubbleClient. Derived classes should
@@ -66,23 +81,23 @@ class HelpBubbleHandlerBase : public help_bubble::mojom::HelpBubbleHandler {
   class ClientProvider {
    public:
     ClientProvider() = default;
-    ClientProvider(const ClientProvider& other) = delete;
+    ClientProvider(const ClientProvider&) = delete;
+    ClientProvider& operator=(const ClientProvider&) = delete;
     virtual ~ClientProvider() = default;
-    void operator=(const ClientProvider& other) = delete;
 
     // Returns the client. Should always return a valid value.
     virtual help_bubble::mojom::HelpBubbleClient* GetClient() = 0;
   };
 
-  HelpBubbleHandlerBase(std::unique_ptr<ClientProvider> client_provider,
-                        const std::vector<ui::ElementIdentifier>& identifiers,
-                        ui::ElementContext context);
+  HelpBubbleHandlerBase(
+      std::unique_ptr<ClientProvider> client_provider,
+      base::WeakPtr<ui::TrackedElementHandler> tracked_element_handler);
 
   help_bubble::mojom::HelpBubbleClient* GetClient();
   ClientProvider* client_provider() { return client_provider_.get(); }
 
   // Override to use mojo error handling; defaults to NOTREACHED().
-  virtual void ReportBadMessage(base::StringPiece error);
+  virtual void ReportBadMessage(std::string_view error);
 
  private:
   friend class FloatingWebUIHelpBubbleFactory;
@@ -93,35 +108,44 @@ class HelpBubbleHandlerBase : public help_bubble::mojom::HelpBubbleHandler {
   struct ElementData;
 
   std::unique_ptr<HelpBubbleWebUI> CreateHelpBubble(
-      ui::ElementIdentifier target,
+      ui::TrackedElementWebUI* element,
       HelpBubbleParams params);
-  void OnHelpBubbleClosing(ui::ElementIdentifier anchor_id);
-  bool ToggleHelpBubbleFocusForAccessibility(ui::ElementIdentifier anchor_id);
-  gfx::Rect GetHelpBubbleBoundsInScreen(ui::ElementIdentifier anchor_id) const;
-  void OnFloatingHelpBubbleCreated(ui::ElementIdentifier anchor_id,
+  void OnHelpBubbleClosing(ui::ElementIdentifier anchor_id,
+                           const std::string& secondary_id);
+  bool ToggleHelpBubbleFocusForAccessibility(ui::ElementIdentifier anchor_id,
+                                             const std::string& secondary_id);
+  gfx::Rect GetHelpBubbleBoundsInScreen(ui::ElementIdentifier anchor_id,
+                                        const std::string& secondary_id) const;
+  void OnFloatingHelpBubbleCreated(ui::TrackedElementWebUI* anchor_id,
                                    HelpBubble* help_bubble);
   void OnFloatingHelpBubbleClosed(ui::ElementIdentifier anchor_id,
-                                  HelpBubble* help_bubble);
+                                  const std::string& secondary_id,
+                                  const HelpBubble* help_bubble,
+                                  HelpBubble::CloseReason);
 
   // mojom::HelpBubbleHandler:
-  void HelpBubbleAnchorVisibilityChanged(const std::string& identifier_name,
-                                         bool visible,
-                                         const gfx::RectF& rect) final;
-  void HelpBubbleAnchorActivated(const std::string& identifier_name) final;
-  void HelpBubbleAnchorCustomEvent(const std::string& identifier_name,
-                                   const std::string& event_name) final;
-  void HelpBubbleButtonPressed(const std::string& identifier_name,
-                               uint8_t button) final;
+  void HelpBubbleButtonPressed(
+      tracked_element::mojom::TrackedElementIdentifierPtr id,
+      uint8_t button) final;
   void HelpBubbleClosed(
-      const std::string& identifier_name,
+      tracked_element::mojom::TrackedElementIdentifierPtr id,
       help_bubble::mojom::HelpBubbleClosedReason reason) final;
 
-  ElementData* GetDataByName(const std::string& identifier_name,
-                             ui::ElementIdentifier* found_identifier = nullptr);
+  ElementData* GetDataByName(
+      const tracked_element::mojom::TrackedElementIdentifierPtr& id,
+      std::string_view error_prefix,
+      ui::ElementIdentifier* found_identifier = nullptr);
 
-  std::unique_ptr<ClientProvider> client_provider_;
-  const ui::ElementContext context_;
-  std::map<ui::ElementIdentifier, ElementData> element_data_;
+  ElementData* GetDataById(ui::ElementIdentifier id,
+                           const std::string& secondary_id);
+  const ElementData* GetDataById(ui::ElementIdentifier id,
+                                 const std::string& secondary_id) const;
+
+  const std::unique_ptr<ClientProvider> client_provider_;
+  base::WeakPtr<ui::TrackedElementHandler> tracked_element_handler_;
+  std::map<ui::ElementIdentifier, std::map<std::string, ElementData>>
+      element_data_;
+
   base::WeakPtrFactory<HelpBubbleHandlerBase> weak_ptr_factory_{this};
 };
 
@@ -156,31 +180,16 @@ class HelpBubbleHandler : public HelpBubbleHandlerBase {
       mojo::PendingReceiver<help_bubble::mojom::HelpBubbleHandler>
           pending_handler,
       mojo::PendingRemote<help_bubble::mojom::HelpBubbleClient> pending_client,
-      content::WebUIController* controller,
-      const std::vector<ui::ElementIdentifier>& identifiers);
+      base::WeakPtr<ui::TrackedElementHandler> tracked_element_handler);
+
   ~HelpBubbleHandler() override;
 
-  // HelpBubbleHandlerBase:
-  content::WebUIController* GetController() override;
-
  private:
-  class ClientProvider : public HelpBubbleHandlerBase::ClientProvider {
-   public:
-    explicit ClientProvider(
-        mojo::PendingRemote<help_bubble::mojom::HelpBubbleClient>
-            pending_client);
-    ~ClientProvider() override;
+  class ClientProvider;
 
-    help_bubble::mojom::HelpBubbleClient* GetClient() override;
-
-   private:
-    mojo::Remote<help_bubble::mojom::HelpBubbleClient> remote_client_;
-  };
-
-  void ReportBadMessage(base::StringPiece error) override;
+  void ReportBadMessage(std::string_view error) override;
 
   mojo::Receiver<help_bubble::mojom::HelpBubbleHandler> receiver_;
-  const base::raw_ptr<content::WebUIController> controller_;
 };
 
 }  // namespace user_education

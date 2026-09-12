@@ -6,41 +6,46 @@
 #define COMPONENTS_SUPERVISED_USER_CORE_COMMON_FEATURES_H_
 
 #include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
+#include "build/android_buildflags.h"
+#include "build/build_config.h"
+#include "extensions/buildflags/buildflags.h"
 
 namespace supervised_user {
 
-BASE_DECLARE_FEATURE(kWebFilterInterstitialRefresh);
-
 BASE_DECLARE_FEATURE(kLocalWebApprovals);
-extern const char kLocalWebApprovalsPreferredButtonLocal[];
-extern const char kLocalWebApprovalsPreferredButtonRemote[];
 
-BASE_DECLARE_FEATURE(kAllowHistoryDeletionForChildAccounts);
-BASE_DECLARE_FEATURE(kSynchronousSignInChecking);
+// Whether supervised user can request local web approval from a blocked
+// subframe.
+BASE_DECLARE_FEATURE(kAllowSubframeLocalWebApprovals);
 
-BASE_DECLARE_FEATURE(kFilterWebsitesForSupervisedUsersOnThirdParty);
+#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_WIN)
+extern const base::FeatureParam<int> kLocalWebApprovalBottomSheetLoadTimeoutMs;
+#endif  // BUILDFLAG(IS_IOS) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) ||
+        // BUILDFLAG(IS_WIN)
 
-// Returns whether refreshed version of the website filter interstitial is
-// enabled.
-bool IsWebFilterInterstitialRefreshEnabled();
+#if BUILDFLAG(IS_ANDROID)
+// Enables the supervised user verification interstitial and best-effort URL
+// classification on Android when in pending auth state.
+BASE_DECLARE_FEATURE(kSupervisedUserVerificationPageOnAndroid);
+#endif
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+// Uses supervised user strings on the signout dialog.
+BASE_DECLARE_FEATURE(kEnableSupervisedUserVersionSignOutDialog);
+#endif
+
+// Whether the Pacp widget can process a url payload as part of the local
+// approval request.
+BASE_DECLARE_FEATURE(kLocalWebApprovalsWidgetSupportsUrlPayload);
 
 // Returns whether local parent approvals on Family Link user's device are
 // enabled.
-// Local web approvals are only available when refreshed version of web
-// filter interstitial is enabled.
 bool IsLocalWebApprovalsEnabled();
 
-// Returns whether the local parent approval should be displayed as the
-// preferred option.
-// This should only be called if IsLocalWebApprovalsEnabled() returns true.
-bool IsLocalWebApprovalThePreferredButton();
-
-// Returns whether to use the new Api for fetching.
-bool IsKidsManagementServiceEnabled();
-
-// Returns whether the First Run Experience will rely on checking the sign-in
-// status synchronously - http://b/264382308.
-bool IsSynchronousSignInCheckingEnabled();
+// Returns whether local parent approvals are enabled for subframe navigation.
+bool IsLocalWebApprovalsEnabledForSubframes();
 
 }  // namespace supervised_user
 

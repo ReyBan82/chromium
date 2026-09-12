@@ -6,17 +6,18 @@
 
 #include <memory>
 
-#include "base/command_line.h"
+#include "base/check_op.h"
 #include "base/lazy_instance.h"
+#include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
-#include "chrome/common/chrome_switches.h"
 #include "chrome/common/extensions/extension_constants.h"
 #include "chrome/common/url_constants.h"
 #include "components/app_constants/constants.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/manifest_constants.h"
+#include "extensions/common/manifest_handlers/chrome_url_overrides_handler.h"
 
 namespace extensions {
 
@@ -54,22 +55,18 @@ static base::LazyInstance<AppLaunchInfo>::DestructorAtExit
     g_empty_app_launch_info = LAZY_INSTANCE_INITIALIZER;
 
 const AppLaunchInfo& GetAppLaunchInfo(const Extension* extension) {
-  AppLaunchInfo* info = static_cast<AppLaunchInfo*>(
-      extension->GetManifestData(keys::kLaunch));
+  const AppLaunchInfo* info = extension->GetManifestData<AppLaunchInfo>();
   return info ? *info : g_empty_app_launch_info.Get();
 }
 
 }  // namespace
 
+// static
+const char* AppLaunchInfo::kManifestDataKey = keys::kLaunch;
+
 AppLaunchInfo::AppLaunchInfo() = default;
 
 AppLaunchInfo::~AppLaunchInfo() = default;
-
-// static
-const std::string& AppLaunchInfo::GetLaunchLocalPath(
-    const Extension* extension) {
-  return GetAppLaunchInfo(extension).launch_local_path_;
-}
 
 // static
 const GURL& AppLaunchInfo::GetLaunchWebURL(const Extension* extension) {
@@ -95,11 +92,8 @@ int AppLaunchInfo::GetLaunchHeight(const Extension* extension) {
 // static
 GURL AppLaunchInfo::GetFullLaunchURL(const Extension* extension) {
   const AppLaunchInfo& info = GetAppLaunchInfo(extension);
-  if (info.launch_local_path_.empty()) {
-    return info.launch_web_url_;
-  } else {
-    return extension->url().Resolve(info.launch_local_path_);
-  }
+  return info.launch_local_url_.is_valid() ? info.launch_local_url_
+                                           : info.launch_web_url_;
 }
 
 bool AppLaunchInfo::Parse(Extension* extension, std::u16string* error) {
@@ -131,21 +125,17 @@ bool AppLaunchInfo::LoadLaunchURL(Extension* extension, std::u16string* error) {
           keys::kLaunchLocalPath);
       return false;
     }
-    const std::string launch_path = temp->GetString();
 
-    // Ensure the launch path is a valid relative URL.
-    GURL resolved = extension->url().Resolve(launch_path);
-    if (!resolved.is_valid() ||
-        resolved.DeprecatedGetOriginAsURL() != extension->url()) {
+    launch_local_url_ = extension->GetResourceURL(temp->GetString());
+    if (!launch_local_url_.is_valid()) {
       *error = ErrorUtils::FormatErrorMessageUTF16(
           errors::kInvalidLaunchValue,
           keys::kLaunchLocalPath);
       return false;
     }
-
-    launch_local_path_ = launch_path;
   } else if (temp = extension->manifest()->FindPath(keys::kLaunchWebURL);
              temp) {
+    DCHECK(extension->is_hosted_app());
     if (!temp->is_string()) {
       *error = ErrorUtils::FormatErrorMessageUTF16(
           errors::kInvalidLaunchValue,
@@ -165,7 +155,7 @@ bool AppLaunchInfo::LoadLaunchURL(Extension* extension, std::u16string* error) {
     }
 
     URLPattern pattern(Extension::kValidWebExtentSchemes);
-    if (!pattern.IsValidScheme(url.scheme())) {
+    if (!pattern.IsValidScheme(url.GetScheme())) {
       set_launch_web_url_error();
       return false;
     }
@@ -178,12 +168,18 @@ bool AppLaunchInfo::LoadLaunchURL(Extension* extension, std::u16string* error) {
 
   // For the Chrome component app, override launch url to new tab.
   if (extension->id() == app_constants::kChromeAppId) {
-    launch_web_url_ = GURL(chrome::kChromeUINewTabURL);
+    launch_web_url_ = chrome::ChromeUINewTabURLAsGURL();
     return true;
   }
 
   // If there is no extent, we default the extent based on the launch URL.
   if (extension->web_extent().is_empty() && !launch_web_url_.is_empty()) {
+    // If `launch_web_url_` is not empty, then it was set in `kLaunchWebURL`
+    // path above.
+    DCHECK(extension->is_hosted_app());
+    // Ensure consistency of `extension->web_extent().is_empty()` with actual
+    // `Extension` origins.
+    DCHECK(URLOverrides::GetChromeURLOverrides(extension).empty());
     URLPattern pattern(Extension::kValidWebExtentSchemes);
     if (!pattern.SetScheme("*")) {
       *error = ErrorUtils::FormatErrorMessageUTF16(
@@ -191,24 +187,9 @@ bool AppLaunchInfo::LoadLaunchURL(Extension* extension, std::u16string* error) {
           keys::kLaunchWebURL);
       return false;
     }
-    pattern.SetHost(launch_web_url_.host());
+    pattern.SetHost(launch_web_url_.GetHost());
     pattern.SetPath("/*");
     extension->AddWebExtentPattern(pattern);
-  }
-
-  // In order for the --apps-gallery-url switch to work with the gallery
-  // process isolation, we must insert any provided value into the component
-  // app's launch url and web extent.
-  if (extension->id() == extensions::kWebStoreAppId) {
-    std::string gallery_url_str =
-        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
-            switches::kAppsGalleryURL);
-
-    // Empty string means option was not used.
-    if (!gallery_url_str.empty()) {
-      GURL gallery_url(gallery_url_str);
-      OverrideLaunchURL(extension, gallery_url);
-    }
   }
 
   return true;
@@ -264,30 +245,6 @@ bool AppLaunchInfo::LoadLaunchContainer(Extension* extension,
   return true;
 }
 
-void AppLaunchInfo::OverrideLaunchURL(Extension* extension,
-                                      GURL override_url) {
-  if (!override_url.is_valid()) {
-    DLOG(WARNING) << "Invalid override url given for " << extension->name();
-    return;
-  }
-  if (override_url.has_port()) {
-    DLOG(WARNING) << "Override URL passed for " << extension->name()
-                  << " should not contain a port.  Removing it.";
-
-    GURL::Replacements remove_port;
-    remove_port.ClearPort();
-    override_url = override_url.ReplaceComponents(remove_port);
-  }
-
-  launch_web_url_ = override_url;
-
-  URLPattern pattern(Extension::kValidWebExtentSchemes);
-  URLPattern::ParseResult result = pattern.Parse(override_url.spec());
-  DCHECK_EQ(result, URLPattern::ParseResult::kSuccess);
-  pattern.SetPath(pattern.path() + '*');
-  extension->AddWebExtentPattern(pattern);
-}
-
 AppLaunchManifestHandler::AppLaunchManifestHandler() = default;
 
 AppLaunchManifestHandler::~AppLaunchManifestHandler() = default;
@@ -297,12 +254,12 @@ bool AppLaunchManifestHandler::Parse(Extension* extension,
   std::unique_ptr<AppLaunchInfo> info(new AppLaunchInfo);
   if (!info->Parse(extension, error))
     return false;
-  extension->SetManifestData(keys::kLaunch, std::move(info));
+  extension->SetManifestData(std::move(info));
   return true;
 }
 
 bool AppLaunchManifestHandler::AlwaysParseForType(Manifest::Type type) const {
-  return type == Manifest::TYPE_LEGACY_PACKAGED_APP;
+  return type == Manifest::Type::kLegacyPackagedApp;
 }
 
 base::span<const char* const> AppLaunchManifestHandler::Keys() const {
@@ -310,6 +267,19 @@ base::span<const char* const> AppLaunchManifestHandler::Keys() const {
       keys::kLaunchLocalPath, keys::kLaunchWebURL, keys::kLaunchContainer,
       keys::kLaunchHeight, keys::kLaunchWidth};
   return kKeys;
+}
+
+// AppLaunchManifestHandler::Parse() calls extension->web_extent().is_empty()
+// and we need it to reflect information from "app.urls" (to be parsed in
+// advance). Note that URLOverrides::Parse() also modifies
+// extension->web_extent() by calling Extension::AddWebExtentPattern(), but this
+// call does not affect AppLaunchManifestHandler::Parse().
+// AppLaunchManifestHandler::Parse() calls extension->web_extent().is_empty()
+// only for Hosted Apps while URLOverrides::Parse() calls
+// Extension::AddWebExtentPattern() only for Legacy Packaged Apps.
+const std::vector<std::string> AppLaunchManifestHandler::PrerequisiteKeys()
+    const {
+  return SingleKey(keys::kWebURLs);
 }
 
 }  // namespace extensions

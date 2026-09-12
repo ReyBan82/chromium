@@ -4,22 +4,22 @@
 
 #include "media/gpu/v4l2/test/vp8_decoder.h"
 
-// ChromeOS specific header; does not exist upstream
-#if BUILDFLAG(IS_CHROMEOS)
-#include <linux/media/vp8-ctrls-upstream.h>
-#endif
-
 #include <linux/v4l2-controls.h>
+#include <linux/videodev2.h>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/memory/ptr_util.h"
 #include "base/notreached.h"
 #include "media/base/video_types.h"
-#include "media/filters/ivf_parser.h"
 #include "media/gpu/macros.h"
 #include "media/gpu/v4l2/test/v4l2_ioctl_shim.h"
+#include "media/parsers/ivf_parser.h"
 #include "media/parsers/vp8_parser.h"
 
 namespace {
+constexpr uint32_t kDriverCodecFourcc = V4L2_PIX_FMT_VP8_FRAME;
+
 constexpr size_t kVp8FrameLast = 0;
 constexpr size_t kVp8FrameGolden = 1;
 constexpr size_t kVp8FrameAltref = 2;
@@ -46,15 +46,14 @@ const gfx::Size GetResolutionFromBitstream(
   media::IvfParser ivf_parser{};
   media::IvfFileHeader ivf_file_header{};
 
-  if (!ivf_parser.Initialize(stream.data(), stream.length(),
-                             &ivf_file_header)) {
+  if (!ivf_parser.Initialize(stream.bytes(), &ivf_file_header)) {
     LOG(FATAL) << "Couldn't initialize IVF parser.";
   }
 
   media::IvfFrameHeader ivf_frame_header{};
-  const uint8_t* ivf_frame_data;
-
-  if (!ivf_parser.ParseNextFrame(&ivf_frame_header, &ivf_frame_data)) {
+  base::span<const uint8_t> ivf_frame_data =
+      ivf_parser.ParseNextFrame(&ivf_frame_header);
+  if (ivf_frame_data.empty()) {
     LOG(FATAL) << "Failed to parse the first frame with IVF parser.";
   }
 
@@ -63,8 +62,7 @@ const gfx::Size GetResolutionFromBitstream(
 
   media::Vp8Parser vp8_parser;
   media::Vp8FrameHeader vp8_frame_header;
-  vp8_parser.ParseFrame(ivf_frame_data, ivf_frame_header.frame_size,
-                        &vp8_frame_header);
+  vp8_parser.ParseFrame(ivf_frame_data, &vp8_frame_header);
 
   return gfx::Size(vp8_frame_header.width, vp8_frame_header.height);
 }
@@ -139,11 +137,12 @@ struct v4l2_vp8_entropy FillV4L2VP8EntropyHeader(
       std::size(decltype(v4l2_entr.mv_probs){}) == media::kNumMVContexts,
       "Invalid size of mv_probs");
 
-  media::SafeArrayMemcpy(v4l2_entr.coeff_probs, vp8_entropy_hdr.coeff_probs);
-  media::SafeArrayMemcpy(v4l2_entr.y_mode_probs, vp8_entropy_hdr.y_mode_probs);
-  media::SafeArrayMemcpy(v4l2_entr.uv_mode_probs,
-                         vp8_entropy_hdr.uv_mode_probs);
-  media::SafeArrayMemcpy(v4l2_entr.mv_probs, vp8_entropy_hdr.mv_probs);
+  base::as_writable_byte_span(v4l2_entr.coeff_probs)
+      .copy_from(base::as_byte_span(vp8_entropy_hdr.coeff_probs));
+  base::span(v4l2_entr.y_mode_probs).copy_from(vp8_entropy_hdr.y_mode_probs);
+  base::span(v4l2_entr.uv_mode_probs).copy_from(vp8_entropy_hdr.uv_mode_probs);
+  base::as_writable_byte_span(v4l2_entr.mv_probs)
+      .copy_from(base::as_byte_span(vp8_entropy_hdr.mv_probs));
   return v4l2_entr;
 }
 
@@ -189,7 +188,7 @@ struct v4l2_vp8_segment FillV4L2VP8SegmentationHeader(
 // frames
 bool IsBufferSlotInUse(
     const media::Vp8FrameHeader& frame_hdr,
-    const std::array<scoped_refptr<media::v4l2_test::MmapedBuffer>,
+    const std::array<scoped_refptr<media::v4l2_test::MmappedBuffer>,
                      media::kNumVp8ReferenceBuffers>& ref_frames,
     size_t curr_ref_frame_index) {
   for (size_t i = 0; i < media::kNumVp8ReferenceBuffers; i++) {
@@ -230,37 +229,22 @@ bool IsBufferSlotInUse(
 namespace media {
 namespace v4l2_test {
 
-// TODO(b/256252128): Find optimal number of CAPTURE buffers
 constexpr uint32_t kNumberOfBuffersInCaptureQueue = 6;
-constexpr uint32_t kNumberOfBuffersInOutputQueue = 1;
-
-constexpr uint32_t kNumberOfPlanesInOutputQueue = 1;
 
 static_assert(kNumberOfBuffersInCaptureQueue <= 16,
               "Too many CAPTURE buffers are used. The number of CAPTURE "
               "buffers is currently assumed to be no larger than 16.");
 
-static_assert(kNumberOfBuffersInOutputQueue == 1,
-              "Too many buffers in OUTPUT queue. It is currently designed to "
-              "support only 1 request at a time.");
-
-static_assert(kNumberOfPlanesInOutputQueue == 1,
-              "Number of planes is expected to be 1 for OUTPUT queue.");
-
 Vp8Decoder::Vp8Decoder(std::unique_ptr<IvfParser> ivf_parser,
                        std::unique_ptr<V4L2IoctlShim> v4l2_ioctl,
-                       std::unique_ptr<V4L2Queue> OUTPUT_queue,
-                       std::unique_ptr<V4L2Queue> CAPTURE_queue)
-    : VideoDecoder::VideoDecoder(std::move(v4l2_ioctl),
-                                 std::move(OUTPUT_queue),
-                                 std::move(CAPTURE_queue)),
+                       gfx::Size display_resolution)
+    : VideoDecoder::VideoDecoder(std::move(v4l2_ioctl), display_resolution),
       ivf_parser_(std::move(ivf_parser)),
       vp8_parser_(std::make_unique<Vp8Parser>()) {
   DCHECK(v4l2_ioctl_);
   DCHECK(v4l2_ioctl_->QueryCtrl(V4L2_CID_STATELESS_VP8_FRAME));
 
   std::fill(ref_frames_.begin(), ref_frames_.end(), nullptr);
-  number_of_buffers_in_capture_queue_ = kNumberOfBuffersInCaptureQueue;
 }
 
 Vp8Decoder::~Vp8Decoder() = default;
@@ -268,8 +252,6 @@ Vp8Decoder::~Vp8Decoder() = default;
 // static
 std::unique_ptr<Vp8Decoder> Vp8Decoder::Create(
     const base::MemoryMappedFile& stream) {
-  constexpr uint32_t kDriverCodecFourcc = V4L2_PIX_FMT_VP8_FRAME;
-
   VLOG(2) << "Attempting to create decoder with codec "
           << media::FourccToString(kDriverCodecFourcc);
 
@@ -277,7 +259,7 @@ std::unique_ptr<Vp8Decoder> Vp8Decoder::Create(
   auto ivf_parser = std::make_unique<media::IvfParser>();
   media::IvfFileHeader file_header{};
 
-  if (!ivf_parser->Initialize(stream.data(), stream.length(), &file_header)) {
+  if (!ivf_parser->Initialize(stream.bytes(), &file_header)) {
     LOG(ERROR) << "Couldn't initialize IVF parser";
     return nullptr;
   }
@@ -293,48 +275,13 @@ std::unique_ptr<Vp8Decoder> Vp8Decoder::Create(
   }
 
   auto v4l2_ioctl = std::make_unique<V4L2IoctlShim>(kDriverCodecFourcc);
-  uint32_t uncompressed_fourcc = V4L2_PIX_FMT_NV12;
-  int num_planes = 1;
-
-  if (!v4l2_ioctl->VerifyCapabilities(kDriverCodecFourcc,
-                                      uncompressed_fourcc)) {
-    // Fall back to MM21 for MediaTek platforms
-    uncompressed_fourcc = v4l2_fourcc('M', 'M', '2', '1');
-    num_planes = 2;
-
-    if (!v4l2_ioctl->VerifyCapabilities(kDriverCodecFourcc,
-                                        uncompressed_fourcc)) {
-      LOG(ERROR) << "Device doesn't support the provided FourCCs.";
-      return nullptr;
-    }
-  }
-
-  LOG(INFO) << "Ivf file header: " << file_header.width << " x "
-            << file_header.height;
 
   const gfx::Size bitstream_coded_size = GetResolutionFromBitstream(stream);
+  LOG(INFO) << "Ivf file header: "
+            << gfx::Size(file_header.width, file_header.height).ToString();
 
-  // TODO(b/256251694): might need to consider using more than 1 file descriptor
-  // (fd) & buffer with the output queue for 4K60 requirement.
-  // https://buganizer.corp.google.com/issues/202214561#comment31
-  auto OUTPUT_queue = std::make_unique<V4L2Queue>(
-      V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, kDriverCodecFourcc,
-      bitstream_coded_size, /*num_planes=*/1, V4L2_MEMORY_MMAP,
-      /*num_buffers=*/kNumberOfBuffersInOutputQueue);
-  OUTPUT_queue->set_coded_size(bitstream_coded_size);
-
-  // TODO(b/256543928): enable V4L2_MEMORY_DMABUF memory for CAPTURE queue.
-  // |num_planes| represents separate memory buffers, not planes for Y, U, V.
-  // https://www.kernel.org/doc/html/v5.10/userspace-api/media/v4l/pixfmt-v4l2-mplane.html#c.V4L.v4l2_plane_pix_format
-  auto CAPTURE_queue = std::make_unique<V4L2Queue>(
-      V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, uncompressed_fourcc,
-      bitstream_coded_size,
-      /*num_planes=*/num_planes, V4L2_MEMORY_MMAP,
-      /*num_buffers=*/kNumberOfBuffersInCaptureQueue);
-
-  return base::WrapUnique(
-      new Vp8Decoder(std::move(ivf_parser), std::move(v4l2_ioctl),
-                     std::move(OUTPUT_queue), std::move(CAPTURE_queue)));
+  return base::WrapUnique(new Vp8Decoder(
+      std::move(ivf_parser), std::move(v4l2_ioctl), bitstream_coded_size));
 }
 
 struct v4l2_ctrl_vp8_frame Vp8Decoder::SetupFrameHeaders(
@@ -387,8 +334,8 @@ struct v4l2_ctrl_vp8_frame Vp8Decoder::SetupFrameHeaders(
   for (size_t i = 0; i < frame_hdr.num_of_dct_partitions &&
                      i < std::size(v4l2_frame_headers.dct_part_sizes);
        ++i) {
-    v4l2_frame_headers.dct_part_sizes[i] =
-        static_cast<size_t>(frame_hdr.dct_partition_sizes[i]);
+    UNSAFE_TODO(v4l2_frame_headers.dct_part_sizes[i]) =
+        static_cast<size_t>(UNSAFE_TODO(frame_hdr.dct_partition_sizes[i]));
   }
 
   v4l2_frame_headers.entropy = FillV4L2VP8EntropyHeader(frame_hdr.entropy_hdr);
@@ -460,8 +407,8 @@ void Vp8Decoder::UpdateReusableReferenceBufferSlots(
 
 std::set<int> Vp8Decoder::RefreshReferenceSlots(
     const Vp8FrameHeader& frame_hdr,
-    MmapedBuffer* buffer,
-    std::set<uint32_t> queued_buffer_indexes) {
+    MmappedBuffer* buffer,
+    std::set<uint32_t> queued_buffer_ids) {
   std::set<int> reusable_buffer_slots = {};
 
   if (frame_hdr.IsKeyframe()) {
@@ -469,8 +416,9 @@ std::set<int> Vp8Decoder::RefreshReferenceSlots(
     // current reconstructed frame. Then all CAPTURE buffers can be reused
     // except the CAPTURE buffer holding the key frame.
     for (size_t i = 0; i < kNumberOfBuffersInCaptureQueue; i++) {
-      if (!queued_buffer_indexes.count(i))
+      if (!queued_buffer_ids.count(i)) {
         reusable_buffer_slots.insert(i);
+      }
     }
     reusable_buffer_slots.erase(buffer->buffer_id());
 
@@ -546,21 +494,24 @@ std::set<int> Vp8Decoder::RefreshReferenceSlots(
 Vp8Decoder::ParseResult Vp8Decoder::ReadNextFrame(
     Vp8FrameHeader& vp8_frame_header) {
   IvfFrameHeader ivf_frame_header{};
-  const uint8_t* ivf_frame_data;
-  if (!ivf_parser_->ParseNextFrame(&ivf_frame_header, &ivf_frame_data))
+  base::span<const uint8_t> ivf_frame_data =
+      ivf_parser_->ParseNextFrame(&ivf_frame_header);
+  if (ivf_frame_data.empty()) {
     return kEOStream;
+  }
 
-  const bool result = vp8_parser_->ParseFrame(
-      ivf_frame_data, ivf_frame_header.frame_size, &vp8_frame_header);
+  const bool result =
+      vp8_parser_->ParseFrame(ivf_frame_data, &vp8_frame_header);
 
   return result ? Vp8Decoder::kOk : Vp8Decoder::kError;
 }
 
-VideoDecoder::Result Vp8Decoder::DecodeNextFrame(std::vector<char>& y_plane,
-                                                 std::vector<char>& u_plane,
-                                                 std::vector<char>& v_plane,
+VideoDecoder::Result Vp8Decoder::DecodeNextFrame(const int frame_number,
+                                                 std::vector<uint8_t>& y_plane,
+                                                 std::vector<uint8_t>& u_plane,
+                                                 std::vector<uint8_t>& v_plane,
                                                  gfx::Size& size,
-                                                 const int frame_number) {
+                                                 BitDepth& bit_depth) {
   Vp8FrameHeader frame_hdr{};
 
   Vp8Decoder::ParseResult parser_res = ReadNextFrame(frame_hdr);
@@ -573,36 +524,40 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame(std::vector<char>& y_plane,
       break;
   }
 
-  if (frame_hdr.IsKeyframe()) {
-    is_resolution_changed_ =
-        frame_hdr.width != OUTPUT_queue_->coded_size().width() ||
-        frame_hdr.height != OUTPUT_queue_->coded_size().height();
-  } else {
-    frame_hdr.width = OUTPUT_queue_->coded_size().width();
-    frame_hdr.height = OUTPUT_queue_->coded_size().height();
+  const bool is_OUTPUT_queue_new = !OUTPUT_queue_;
+  if (!OUTPUT_queue_) {
+    CreateOUTPUTQueue(kDriverCodecFourcc);
   }
 
-  if (IsResolutionChanged()) {
+  const bool resolution_changed =
+      frame_hdr.width != OUTPUT_queue_->resolution().width() ||
+      frame_hdr.height != OUTPUT_queue_->resolution().height();
+  if (frame_hdr.IsKeyframe() && resolution_changed) {
     const gfx::Size new_resolution(frame_hdr.width, frame_hdr.height);
     LOG_ASSERT(!new_resolution.IsEmpty())
         << "New key frame resolution is empty.";
 
     HandleDynamicResolutionChange(new_resolution);
+  } else {
+    frame_hdr.width = OUTPUT_queue_->resolution().width();
+    frame_hdr.height = OUTPUT_queue_->resolution().height();
   }
 
   VLOG_IF(2, !frame_hdr.show_frame) << "Not displaying frame";
   last_decoded_frame_visible_ = frame_hdr.show_frame;
 
-  uint32_t OUTPUT_index = 0;
+  uint32_t buffer_id = 0;
   // Copies the frame data into the V4L2 buffer of OUTPUT |queue|.
-  scoped_refptr<MmapedBuffer> OUTPUT_queue_buffer =
-      OUTPUT_queue_->GetBuffer(OUTPUT_index);
-  OUTPUT_queue_buffer->mmaped_planes()[0].CopyIn(frame_hdr.data,
-                                                 frame_hdr.frame_size);
+  scoped_refptr<MmappedBuffer> OUTPUT_queue_buffer =
+      OUTPUT_queue_->GetBuffer(buffer_id);
+  // SAFETY: frame_hdr is guaranteed to have correct values by `ReadNextFrame`.
+  OUTPUT_queue_buffer->mmapped_planes()[0].CopyIn(
+      UNSAFE_BUFFERS(base::span(frame_hdr.data.get(), frame_hdr.frame_size)));
   OUTPUT_queue_buffer->set_frame_number(frame_number);
 
-  if (!v4l2_ioctl_->QBuf(OUTPUT_queue_, OUTPUT_index))
+  if (!v4l2_ioctl_->QBuf(OUTPUT_queue_, buffer_id)) {
     LOG(FATAL) << "VIDIOC_QBUF failed for OUTPUT queue.";
+  }
 
   struct v4l2_ctrl_vp8_frame v4l2_frame_headers = SetupFrameHeaders(frame_hdr);
 
@@ -613,43 +568,32 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame(std::vector<char>& y_plane,
 
   struct v4l2_ext_controls ext_ctrls = {.count = 1, .controls = &ext_ctrl};
 
-  if (!v4l2_ioctl_->SetExtCtrls(OUTPUT_queue_, &ext_ctrls))
-    LOG(FATAL) << "VIDIOC_S_EXT_CTRLS failed.";
+  // Before the CAPTURE queue is set up the first frame must be parsed by the
+  // driver. This is done so that when VIDIOC_G_FMT is called the frame
+  // dimensions and format will be ready. Specifying V4L2_CTRL_WHICH_CUR_VAL
+  // when VIDIOC_S_EXT_CTRLS processes the request immediately so that the frame
+  // is parsed by the driver and the state is readied.
+  v4l2_ioctl_->SetExtCtrls(OUTPUT_queue_, &ext_ctrls, is_OUTPUT_queue_new);
+  v4l2_ioctl_->MediaRequestIocQueue(OUTPUT_queue_);
 
-  if (!v4l2_ioctl_->MediaRequestIocQueue(OUTPUT_queue_))
-    LOG(FATAL) << "MEDIA_REQUEST_IOC_QUEUE failed.";
-
-  uint32_t CAPTURE_index;
-
-  if (v4l2_ioctl_->DQBuf(CAPTURE_queue_, &CAPTURE_index))
-    CAPTURE_queue_->DequeueBufferIndex(CAPTURE_index);
-  else
-    LOG(FATAL) << "VIDIOC_DQBUF failed for CAPTURE queue.";
-
-  scoped_refptr<MmapedBuffer> buffer = CAPTURE_queue_->GetBuffer(CAPTURE_index);
-  size = CAPTURE_queue_->display_size();
-  if (CAPTURE_queue_->fourcc() == V4L2_PIX_FMT_NV12) {
-    CHECK_EQ(buffer->mmaped_planes().size(), 1u)
-        << "NV12 should have exactly 1 plane but CAPTURE queue does not.";
-
-    ConvertNV12ToYUV(y_plane, u_plane, v_plane, size,
-                     static_cast<char*>(buffer->mmaped_planes()[0].start_addr),
-                     CAPTURE_queue_->coded_size());
-  } else if (CAPTURE_queue_->fourcc() == v4l2_fourcc('M', 'M', '2', '1')) {
-    CHECK_EQ(buffer->mmaped_planes().size(), 2u)
-        << "MM21 should have exactly 2 planes but CAPTURE queue does not.";
-
-    ConvertMM21ToYUV(y_plane, u_plane, v_plane, size,
-                     static_cast<char*>(buffer->mmaped_planes()[0].start_addr),
-                     static_cast<char*>(buffer->mmaped_planes()[1].start_addr),
-                     CAPTURE_queue_->coded_size());
-  } else {
-    LOG(FATAL) << "Unsupported CAPTURE queue format";
+  if (!CAPTURE_queue_) {
+    CreateCAPTUREQueue(kNumberOfBuffersInCaptureQueue);
   }
 
+  v4l2_ioctl_->WaitForRequestCompletion(OUTPUT_queue_);
+
+  v4l2_ioctl_->DQBuf(CAPTURE_queue_, &buffer_id);
+  CAPTURE_queue_->DequeueBufferId(buffer_id);
+
+  scoped_refptr<MmappedBuffer> buffer = CAPTURE_queue_->GetBuffer(buffer_id);
+  bit_depth =
+      ConvertToYUV(y_plane, u_plane, v_plane, OUTPUT_queue_->resolution(),
+                   buffer->mmapped_planes(), CAPTURE_queue_->resolution(),
+                   CAPTURE_queue_->fourcc());
+
   const std::set<int> reusable_buffer_slots = RefreshReferenceSlots(
-      frame_hdr, CAPTURE_queue_->GetBuffer(CAPTURE_index).get(),
-      CAPTURE_queue_->queued_buffer_indexes());
+      frame_hdr, CAPTURE_queue_->GetBuffer(buffer_id).get(),
+      CAPTURE_queue_->queued_buffer_ids());
 
   for (const auto reusable_buffer_slot : reusable_buffer_slots) {
     if (v4l2_ioctl_->QBuf(CAPTURE_queue_, reusable_buffer_slot)) {
@@ -658,20 +602,18 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame(std::vector<char>& y_plane,
       // queuing the CAPTURE buffer slots that are already queued from the
       // previous key frame. So we need to keep track of which buffers are
       // queued for all frames.
-      CAPTURE_queue_->QueueBufferIndex(reusable_buffer_slot);
+      CAPTURE_queue_->QueueBufferId(reusable_buffer_slot);
     } else {
       LOG(ERROR) << "VIDIOC_QBUF failed for CAPTURE queue.";
     }
   }
 
-  if (!v4l2_ioctl_->DQBuf(OUTPUT_queue_, &OUTPUT_index))
-    LOG(FATAL) << "VIDIOC_DQBUF failed for OUTPUT queue.";
+  v4l2_ioctl_->DQBuf(OUTPUT_queue_, &buffer_id);
 
-  CHECK_EQ(OUTPUT_index, uint32_t(0))
-      << "Index for OUTPUT queue greater than size";
+  CHECK_EQ(buffer_id, uint32_t(0))
+      << "Buffer ID of the buffer in OUTPUT queue is greater than size";
 
-  if (!v4l2_ioctl_->MediaRequestIocReinit(OUTPUT_queue_))
-    LOG(FATAL) << "MEDIA_REQUEST_IOC_REINIT failed.";
+  v4l2_ioctl_->MediaRequestIocReinit(OUTPUT_queue_);
 
   return VideoDecoder::kOk;
 }

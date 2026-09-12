@@ -8,12 +8,12 @@
 
 #include <memory>
 
-#include "base/containers/contains.h"
 #include "base/memory/raw_ptr.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/extensions/warning_badge_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/global_error/global_error.h"
 #include "chrome/browser/ui/global_error/global_error_service.h"
 #include "chrome/browser/ui/global_error/global_error_service_factory.h"
@@ -38,11 +38,11 @@ class ErrorBadge : public GlobalError {
   bool HasMenuItem() override;
   int MenuItemCommandID() override;
   std::u16string MenuItemLabel() override;
-  void ExecuteMenuItem(Browser* browser) override;
+  void ExecuteMenuItem(BrowserWindowInterface* browser) override;
 
   bool HasBubbleView() override;
   bool HasShownBubbleView() override;
-  void ShowBubbleView(Browser* browser) override;
+  void ShowBubbleView(BrowserWindowInterface* browser) override;
   GlobalErrorBubbleViewBase* GetBubbleView() override;
 
   static int GetMenuItemCommandID();
@@ -55,8 +55,7 @@ ErrorBadge::ErrorBadge(WarningBadgeService* badge_service)
     : badge_service_(badge_service) {
 }
 
-ErrorBadge::~ErrorBadge() {
-}
+ErrorBadge::~ErrorBadge() = default;
 
 bool ErrorBadge::HasMenuItem() {
   return true;
@@ -70,7 +69,7 @@ std::u16string ErrorBadge::MenuItemLabel() {
   return l10n_util::GetStringUTF16(IDS_EXTENSION_WARNINGS_WRENCH_MENU_ITEM);
 }
 
-void ErrorBadge::ExecuteMenuItem(Browser* browser) {
+void ErrorBadge::ExecuteMenuItem(BrowserWindowInterface* browser) {
   // Suppress all current warnings in the extension service from triggering
   // a badge on the wrench menu in the future of this session.
   badge_service_->SuppressCurrentWarnings();
@@ -86,7 +85,7 @@ bool ErrorBadge::HasShownBubbleView() {
   return false;
 }
 
-void ErrorBadge::ShowBubbleView(Browser* browser) {
+void ErrorBadge::ShowBubbleView(BrowserWindowInterface* browser) {
   NOTREACHED();
 }
 
@@ -141,7 +140,7 @@ void WarningBadgeService::UpdateBadgeStatus() {
   const std::set<Warning>& warnings = GetCurrentWarnings();
   bool non_suppressed_warnings_exist = false;
   for (auto i = warnings.begin(); i != warnings.end(); ++i) {
-    if (!base::Contains(suppressed_warnings_, *i)) {
+    if (!suppressed_warnings_.contains(*i)) {
       non_suppressed_warnings_exist = true;
       break;
     }

@@ -2,7 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <iostream>
+#include <string_view>
+
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "components/subresource_filter/tools/ruleset_converter/ruleset_converter.h"
 
 namespace {
@@ -18,7 +22,7 @@ const char kSwitchOutputFormat[] = "output_format";
 
 const char kSwitchChromeVersion[] = "chrome_version";
 
-const char kHelpMsg[] = R"(
+constexpr std::string_view kHelpMsg = R"(
   ruleset_converter [--input_format=<format>] --output_format=<format>
   --input_files=<path1>[:<path2>...]
   (--output_file=<path> | [--output_file_url=<path>] [--output_file_css=<path>)
@@ -51,7 +55,7 @@ const char kHelpMsg[] = R"(
 )";
 
 void PrintHelp() {
-  printf("%s\n\n", kHelpMsg);
+  std::cout << kHelpMsg << "\n\n";
 }
 
 }  // namespace
@@ -111,7 +115,8 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  if (!converter.Convert())
+  if (!converter.Convert()) {
     return 1;
+  }
   return 0;
 }

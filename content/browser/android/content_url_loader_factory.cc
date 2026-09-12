@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "base/android/content_uri_utils.h"
+#include "base/byte_size.h"
 #include "base/command_line.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
@@ -27,6 +28,7 @@
 #include "mojo/public/cpp/system/data_pipe.h"
 #include "mojo/public/cpp/system/data_pipe_producer.h"
 #include "mojo/public/cpp/system/file_data_source.h"
+#include "mojo/public/cpp/system/file_stream_data_source.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_byte_range.h"
 #include "net/http/http_util.h"
@@ -56,12 +58,12 @@ bool GetRequestedByteRange(const network::ResourceRequest& request,
   *first_byte_to_send = 0;
   *total_bytes_to_send = content_size;
 
-  std::string range_header;
+  std::optional<std::string> range_header =
+      request.headers.GetHeader(net::HttpRequestHeaders::kRange);
   std::vector<net::HttpByteRange> ranges;
 
-  if (!request.headers.GetHeader(net::HttpRequestHeaders::kRange,
-                                 &range_header) ||
-      !net::HttpUtil::ParseRangeHeader(range_header, &ranges)) {
+  if (!range_header ||
+      !net::HttpUtil::ParseRangeHeader(*range_header, &ranges)) {
     return true;
   }
 
@@ -85,11 +87,13 @@ void GetMimeType(const network::ResourceRequest& request,
                  std::string* out_mime_type) {
   out_mime_type->clear();
 
-  std::string intent_type_header;
-  if ((request.resource_type ==
-       static_cast<int>(blink::mojom::ResourceType::kMainFrame)) &&
-      request.headers.GetHeader("X-Chrome-intent-type", &intent_type_header)) {
-    *out_mime_type = intent_type_header;
+  if (request.resource_type ==
+      static_cast<int>(blink::mojom::ResourceType::kMainFrame)) {
+    std::optional<std::string> intent_type_header =
+        request.headers.GetHeader("X-Chrome-intent-type");
+    if (intent_type_header) {
+      *out_mime_type = std::move(intent_type_header).value();
+    }
   }
 
   if (out_mime_type->empty())
@@ -115,14 +119,10 @@ class ContentURLLoader : public network::mojom::URLLoader {
 
   // network::mojom::URLLoader:
   void FollowRedirect(
-      const std::vector<std::string>& removed_headers,
-      const net::HttpRequestHeaders& modified_headers,
-      const net::HttpRequestHeaders& modified_cors_exempt_headers,
-      const absl::optional<GURL>& new_url) override {}
+      network::HttpRequestHeadersUpdateParams headers_update_params,
+      const std::optional<GURL>& new_url) override {}
   void SetPriority(net::RequestPriority priority,
                    int32_t intra_priority_value) override {}
-  void PauseReadingBodyFromNet() override {}
-  void ResumeReadingBodyFromNet() override {}
 
  private:
   ContentURLLoader() = default;
@@ -161,7 +161,7 @@ class ContentURLLoader : public network::mojom::URLLoader {
     mojo::Remote<network::mojom::URLLoaderClient> client(
         std::move(client_remote));
 
-    DCHECK(request.url.SchemeIs("content"));
+    CHECK(request.url.SchemeIs("content"), base::NotFatalUntil::M159);
     base::FilePath path = base::FilePath(request.url.spec());
 
     // Get the file length.
@@ -186,7 +186,7 @@ class ContentURLLoader : public network::mojom::URLLoader {
       return CompleteWithFailure(std::move(client), net::ERR_FAILED);
     }
 
-    base::File file = base::OpenContentUriForRead(path);
+    base::File file(path, base::File::FLAG_OPEN | base::File::FLAG_READ);
     if (!file.IsValid()) {
       return CompleteWithFailure(
           std::move(client), net::FileErrorToNetError(file.error_details()));
@@ -205,7 +205,7 @@ class ContentURLLoader : public network::mojom::URLLoader {
     }
 
     client->OnReceiveResponse(std::move(head), std::move(consumer_handle),
-                              absl::nullopt);
+                              std::nullopt);
     client_ = std::move(client);
 
     if (total_bytes_to_send == 0) {
@@ -214,12 +214,20 @@ class ContentURLLoader : public network::mojom::URLLoader {
       return;
     }
 
-    // In case of a range request, seek to the appropriate position before
-    // sending the remaining bytes asynchronously. Under normal conditions
-    // (i.e., no range request) this Seek is effectively a no-op.
-    auto data_source = std::make_unique<mojo::FileDataSource>(std::move(file));
-    data_source->SetRange(first_byte_to_send,
-                          first_byte_to_send + total_bytes_to_send);
+    // Content-URIs backed by local files usually support range requests using
+    // seek(), but not all do, so we prefer to use FileStreamDataSource.
+    std::unique_ptr<mojo::DataPipeProducer::DataSource> data_source;
+    if (first_byte_to_send == 0 &&
+        total_bytes_to_send == static_cast<uint64_t>(info.size)) {
+      data_source = std::make_unique<mojo::FileStreamDataSource>(
+          std::move(file), info.size);
+    } else {
+      auto file_data_source =
+          std::make_unique<mojo::FileDataSource>(std::move(file));
+      file_data_source->SetRange(first_byte_to_send,
+                                 first_byte_to_send + total_bytes_to_send);
+      data_source = std::move(file_data_source);
+    }
 
     data_producer_ =
         std::make_unique<mojo::DataPipeProducer>(std::move(producer_handle));
@@ -251,9 +259,9 @@ class ContentURLLoader : public network::mojom::URLLoader {
 
     if (result == MOJO_RESULT_OK) {
       network::URLLoaderCompletionStatus status(net::OK);
-      status.encoded_data_length = total_bytes_written_;
-      status.encoded_body_length = total_bytes_written_;
-      status.decoded_body_length = total_bytes_written_;
+      status.encoded_data_length = base::ByteSize(total_bytes_written_);
+      status.encoded_body_length = base::ByteSize(total_bytes_written_);
+      status.decoded_body_length = base::ByteSize(total_bytes_written_);
       client_->OnComplete(status);
     } else {
       client_->OnComplete(network::URLLoaderCompletionStatus(net::ERR_FAILED));
@@ -276,8 +284,9 @@ class ContentURLLoader : public network::mojom::URLLoader {
 
 ContentURLLoaderFactory::ContentURLLoaderFactory(
     scoped_refptr<base::SequencedTaskRunner> task_runner,
-    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver)
-    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver)),
+    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver,
+    base::SelfDeletingPassKey key)
+    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver), key),
       task_runner_(std::move(task_runner)) {}
 
 ContentURLLoaderFactory::~ContentURLLoaderFactory() = default;
@@ -302,7 +311,7 @@ ContentURLLoaderFactory::Create() {
   // The ContentURLLoaderFactory will delete itself when there are no more
   // receivers - see the network::SelfDeletingURLLoaderFactory::OnDisconnect
   // method.
-  new ContentURLLoaderFactory(
+  base::MakeSelfDeleting<ContentURLLoaderFactory>(
       base::ThreadPool::CreateSequencedTaskRunner(
           {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
            base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN}),

@@ -10,6 +10,7 @@
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/viz_common_export.h"
 #include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/geometry/rrect_f.h"
 #include "ui/gfx/geometry/transform.h"
 
 namespace viz {
@@ -19,7 +20,7 @@ namespace viz {
 enum HitTestRegionFlags : uint32_t {
   // Region maps to this surface (me).
   kHitTestMine = 0x01,
-  // Region ignored for hit testing (transparent backgrounds & hover:none).
+  // Region ignored for hit testing (e.g. pointer-events:none).
   kHitTestIgnore = 0x02,
   // Region maps to child surface (OOPIF).
   kHitTestChildSurface = 0x04,
@@ -50,15 +51,8 @@ enum AsyncHitTestReasons : uint32_t {
   kIrregularClip = 1 << 1,
   // The |HitTestRegion|'s surface has not been activated yet.
   kRegionNotActive = 1 << 2,
-  // Synchronous event targeting aborts at the present of perspective transform.
-  kPerspectiveTransform = 1 << 3,
-  // The |HitTestRegion| is marked as |kHitTestAsk| because it comes from draw
-  // quad. This is a reason specifically for slow path |hit-test| with draw quad
-  // variant.
-  kUseDrawQuadData = 1 << 4,
-
   // The maximum number of flags in this enum excluding itself.
-  kAsyncHitTestReasonCount = 5,
+  kAsyncHitTestReasonCount = 3,
 };
 
 struct HitTestRegion {
@@ -71,8 +65,8 @@ struct HitTestRegion {
   // FrameSinkId of this region.
   FrameSinkId frame_sink_id;
 
-  // The rect of the region in the coordinate space of the embedder.
-  gfx::Rect rect;
+  // The rounded rect of the region in the coordinate space of the embedder.
+  gfx::RRectF rect;
 
   // The transform of the region.  The transform applied to the rect
   // defines the space occupied by this region in the coordinate space of

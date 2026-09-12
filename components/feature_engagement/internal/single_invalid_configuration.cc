@@ -4,6 +4,7 @@
 
 #include "components/feature_engagement/internal/single_invalid_configuration.h"
 
+#include "build/build_config.h"
 #include "components/feature_engagement/public/configuration.h"
 
 namespace feature_engagement {
@@ -16,6 +17,11 @@ SingleInvalidConfiguration::SingleInvalidConfiguration() {
 }
 
 SingleInvalidConfiguration::~SingleInvalidConfiguration() = default;
+
+bool SingleInvalidConfiguration::HasFeatureConfig(
+    const base::Feature& feature) const {
+  return true;
+}
 
 const FeatureConfig& SingleInvalidConfiguration::GetFeatureConfig(
     const base::Feature& feature) const {
@@ -41,17 +47,31 @@ const GroupConfig& SingleInvalidConfiguration::GetGroupConfig(
     const base::Feature& group) const {
   return invalid_group_config_;
 }
+
 const GroupConfig& SingleInvalidConfiguration::GetGroupConfigByName(
     const std::string& group_name) const {
   return invalid_group_config_;
 }
+
 const Configuration::GroupConfigMap&
 SingleInvalidConfiguration::GetRegisteredGroupConfigs() const {
   return group_configs_;
 }
+
 const std::vector<std::string> SingleInvalidConfiguration::GetRegisteredGroups()
     const {
   return {};
 }
+
+#if BUILDFLAG(IS_CHROMEOS)
+void SingleInvalidConfiguration::UpdateConfig(
+    const base::Feature& feature,
+    const ConfigurationProvider* provider) {}
+
+const Configuration::EventPrefixSet&
+SingleInvalidConfiguration::GetRegisteredAllowedEventPrefixes() const {
+  return event_prefixes_;
+}
+#endif
 
 }  // namespace feature_engagement

@@ -5,7 +5,11 @@
 #ifndef SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_BEGIN_FRAME_ARGS_MOJOM_TRAITS_H_
 #define SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_BEGIN_FRAME_ARGS_MOJOM_TRAITS_H_
 
+#include <optional>
+
+#include "base/types/expected.h"
 #include "components/viz/common/frame_sinks/begin_frame_args.h"
+#include "mojo/public/cpp/bindings/deserialization_error.h"
 #include "services/viz/public/mojom/compositing/begin_frame_args.mojom-shared.h"
 
 namespace mojo {
@@ -16,8 +20,23 @@ struct EnumTraits<viz::mojom::BeginFrameArgsType,
   static viz::mojom::BeginFrameArgsType ToMojom(
       viz::BeginFrameArgs::BeginFrameArgsType type);
 
-  static bool FromMojom(viz::mojom::BeginFrameArgsType input,
-                        viz::BeginFrameArgs::BeginFrameArgsType* out);
+  static viz::BeginFrameArgs::BeginFrameArgsType FromMojom(
+      viz::mojom::BeginFrameArgsType input);
+};
+
+template <>
+struct StructTraits<viz::mojom::BeginFrameIdDataView, viz::BeginFrameId> {
+  static uint64_t source_id(const viz::BeginFrameId& frame_id) {
+    return frame_id.source_id;
+  }
+
+  static uint64_t sequence_number(const viz::BeginFrameId& frame_id) {
+    return frame_id.sequence_number;
+  }
+
+  static base::expected<void, DeserializationError> Read(
+      viz::mojom::BeginFrameIdDataView data,
+      viz::BeginFrameId* out);
 };
 
 template <>
@@ -34,12 +53,22 @@ struct StructTraits<viz::mojom::BeginFrameArgsDataView, viz::BeginFrameArgs> {
     return args.interval;
   }
 
-  static uint64_t sequence_number(const viz::BeginFrameArgs& args) {
-    return args.frame_id.sequence_number;
+  static std::optional<base::TimeDelta> unthrottled_interval(
+      const viz::BeginFrameArgs& args) {
+    if (args.unthrottled_interval == args.interval ||
+        !args.unthrottled_interval.is_positive()) {
+      return std::nullopt;
+    }
+    return args.unthrottled_interval;
   }
 
-  static uint64_t source_id(const viz::BeginFrameArgs& args) {
-    return args.frame_id.source_id;
+  static std::optional<base::TimeDelta> deadline_derived_interval(
+      const viz::BeginFrameArgs& args) {
+    return args.deadline_derived_interval;
+  }
+
+  static viz::BeginFrameId frame_id(const viz::BeginFrameArgs& args) {
+    return args.frame_id;
   }
 
   static uint64_t frames_throttled_since_last(const viz::BeginFrameArgs& args) {
@@ -48,6 +77,14 @@ struct StructTraits<viz::mojom::BeginFrameArgsDataView, viz::BeginFrameArgs> {
 
   static int64_t trace_id(const viz::BeginFrameArgs& args) {
     return args.trace_id;
+  }
+
+  static base::TimeTicks dispatch_time(const viz::BeginFrameArgs& args) {
+    return args.dispatch_time;
+  }
+
+  static base::TimeTicks client_arrival_time(const viz::BeginFrameArgs& args) {
+    return args.client_arrival_time;
   }
 
   static viz::BeginFrameArgs::BeginFrameArgsType type(
@@ -63,8 +100,9 @@ struct StructTraits<viz::mojom::BeginFrameArgsDataView, viz::BeginFrameArgs> {
     return args.animate_only;
   }
 
-  static bool Read(viz::mojom::BeginFrameArgsDataView data,
-                   viz::BeginFrameArgs* out);
+  static base::expected<void, DeserializationError> Read(
+      viz::mojom::BeginFrameArgsDataView data,
+      viz::BeginFrameArgs* out);
 };
 
 template <>
@@ -85,9 +123,42 @@ struct StructTraits<viz::mojom::BeginFrameAckDataView, viz::BeginFrameAck> {
     return ack.has_damage;
   }
 
-  static bool Read(viz::mojom::BeginFrameAckDataView data,
-                   viz::BeginFrameAck* out);
+  static base::expected<void, DeserializationError> Read(
+      viz::mojom::BeginFrameAckDataView data,
+      viz::BeginFrameAck* out);
 };
+
+#if BUILDFLAG(IS_MAC)
+template <>
+struct StructTraits<viz::mojom::CADisplayLinkParamsDataView,
+                    viz::CADisplayLinkParams> {
+  static int64_t display_id(const viz::CADisplayLinkParams& params) {
+    return params.display_id;
+  }
+
+  static base::TimeTicks timestamp(const viz::CADisplayLinkParams& params) {
+    return params.timestamp;
+  }
+
+  static base::TimeTicks target_timestamp(
+      const viz::CADisplayLinkParams& params) {
+    return params.target_timestamp;
+  }
+
+  static base::TimeDelta interval(const viz::CADisplayLinkParams& params) {
+    return params.interval;
+  }
+
+  static base::TimeTicks ipc_begin_timestamp(
+      const viz::CADisplayLinkParams& params) {
+    return params.ipc_begin_timestamp;
+  }
+
+  static base::expected<void, DeserializationError> Read(
+      viz::mojom::CADisplayLinkParamsDataView data,
+      viz::CADisplayLinkParams* out);
+};
+#endif
 
 }  // namespace mojo
 

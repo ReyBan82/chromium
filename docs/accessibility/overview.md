@@ -221,6 +221,20 @@ Windows, Mac or Linux.
   - macOS: Accessibility Inspector
   - Windows: Inspect, AViewer, accProbe (and many others)
 
+### Command Line Options
+
+Accessibility features in Chrome are off by default and enabled automatically
+on-demand. When running Chrome from the command line, certain options can be
+used to impact the behavior of the Chrome accessibility engine at launch.
+
+* `--force-renderer-accessibility=[basic|form-controls|complete]`: Force
+  accessibility to be enabled, with optional parameter to force the AXMode
+  to one of the predefined bundles during the entire execution. If the optional
+  parameter is invalid, then the default AXMode will be `complete`. If the
+  optional parameter is missing, then the AXMode will initially default to
+  `complete` but allow changes to the mode during execution.
+* `--disable-renderer-accessibility`: Disable accessibility
+
 ### Supported Platforms and APIs
 
 * Windows: IAccessible (also known as Microsoft Active Accessibility or MSAA),
@@ -490,8 +504,7 @@ usually forwarded to [BrowserAccessibilityManager] which is responsible for:
    BrowserAccessibilityManager, in a method named `NotifyAccessibilityEvent`.
 3. Dispatching incoming accessibility actions to the appropriate recipient, via
    [AXPlatformTreeManagerDelegate]. For messages destined for a renderer,
-   [RenderFrameHostImpl], which is a WebAXPlatformTreeManagerDelegate, is
-   responsible for calling the remote method
+   [RenderFrameHostImpl] is responsible for calling the remote method
    [ax.mojom.RenderAccessibility.PerformAction()], implemented by the renderer,
    with the appropriate payload (of type [ax.mojom.AXActionData]). This IPC call
    will be received by [RenderAccessibilityManager], which will then relay on
@@ -521,7 +534,7 @@ The accessibility tree is also exposed via the [chrome.automation API], which
 gives extension JavaScript access to the accessibility tree, events, and
 actions. This API is implemented in C++ by [AutomationInternalCustomBindings],
 which is renderer-side code, and in JavaScript by the [automation API]. The API
-is defined by [automation.idl], which must be kept synchronized with
+is defined by [automation.webidl], which must be kept synchronized with
 [ax_enums.mojom].
 
 ## Further reading
@@ -541,10 +554,9 @@ For more detail on Chrome OS accessibility, read [How Chrome OS Accessibility Wo
 [AXObjectCacheImpl]: https://cs.chromium.org/chromium/src/third_party/blink/renderer/modules/accessibility/ax_object_cache_impl.h
 [AXPlatformNode]: https://cs.chromium.org/chromium/src/ui/accessibility/platform/ax_platform_node.h
 [AXTreeSerializer]: https://cs.chromium.org/chromium/src/ui/accessibility/ax_tree_serializer.h
-[BlinkAXTreeSource]: https://cs.chromium.org/chromium/src/content/renderer/accessibility/blink_ax_tree_source.h
-[BrowserAccessibility]: https://cs.chromium.org/chromium/src/content/browser/accessibility/browser_accessibility.h
-[BrowserAccessibilityManager]: https://cs.chromium.org/chromium/src/content/browser/accessibility/browser_accessibility_manager.h
-[WebAXPlatformTreeManagerDelegate]: https://cs.chromium.org/chromium/src/content/browser/accessibility/web_ax_platform_tree_manager_delegate.h
+[BlinkAXTreeSource]: https://cs.chromium.org/chromium/src/third_party/blink/renderer/modules/accessibility/blink_ax_tree_source.h
+[BrowserAccessibility]: https://cs.chromium.org/chromium/src/ui/accessibility/platform/browser_accessibility.h
+[BrowserAccessibilityManager]: https://cs.chromium.org/chromium/src/ui/accessibility/platform/browser_accessibility_manager.h
 [LayoutObject]: https://cs.chromium.org/chromium/src/third_party/blink/renderer/core/layout/layout_object.h
 [AXPlatformTreeManagerDelegate]: https://cs.chromium.org/chromium/src/ui/accessibility/platform/ax_platform_tree_manager_delegate.h
 [ViewAccessibility]: https://cs.chromium.org/chromium/src/ui/views/accessibility/view_accessibility.h
@@ -555,7 +567,7 @@ For more detail on Chrome OS accessibility, read [How Chrome OS Accessibility Wo
 [ui::AXNodeData]: https://cs.chromium.org/chromium/src/ui/accessibility/ax_node_data.h
 [WebAXObject]: https://cs.chromium.org/chromium/src/third_party/blink/public/web/web_ax_object.h
 [automation API]: https://cs.chromium.org/chromium/src/chrome/renderer/resources/extensions/automation
-[automation.idl]: https://cs.chromium.org/chromium/src/extensions/common/api/automation.idl
+[automation.webidl]: https://cs.chromium.org/chromium/src/extensions/common/api/automation.webidl
 [ax_enums.mojom]: https://cs.chromium.org/chromium/src/ui/accessibility/ax_enums.mojom
 [chrome.automation API]: https://developer.chrome.com/extensions/automation
 [webui-js]: https://cs.chromium.org/chromium/src/ui/webui/resources/js/cr/ui/

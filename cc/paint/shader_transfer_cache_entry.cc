@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/notreached.h"
 
 namespace cc {
@@ -24,10 +25,10 @@ size_t ServiceShaderTransferCacheEntry::CachedSize() const {
 
 bool ServiceShaderTransferCacheEntry::Deserialize(
     GrDirectContext* context,
+    skgpu::graphite::Recorder* graphite_recorder,
     base::span<const uint8_t> data) {
   // These entries must be created directly via CreateLocalEntry.
   NOTREACHED();
-  return false;
 }
 
 }  // namespace cc

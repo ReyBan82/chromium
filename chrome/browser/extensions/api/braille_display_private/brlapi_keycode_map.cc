@@ -34,12 +34,15 @@ const brlapi_keyCode_t kMaxFunctionKey = BRLAPI_KEY_SYM_FUNCTION + 23;
 // Maps the keyboard modifier flags to their corresponding flags in a
 // |KeyEvent|.
 void MapModifierFlags(brlapi_keyCode_t code, KeyEvent* event) {
-  if (code & BRLAPI_KEY_FLG_CONTROL)
+  if (code & BRLAPI_KEY_FLG_CONTROL) {
     event->ctrl_key = true;
-  if (code & BRLAPI_KEY_FLG_META)
+  }
+  if (code & BRLAPI_KEY_FLG_META) {
     event->alt_key = true;
-  if (code & BRLAPI_KEY_FLG_SHIFT)
+  }
+  if (code & BRLAPI_KEY_FLG_SHIFT) {
     event->shift_key = true;
+  }
 }
 
 // Maps a brlapi keysym, which is similar to an X keysym into the
@@ -51,8 +54,9 @@ void MapKeySym(brlapi_keyCode_t code, KeyEvent* event) {
   if (key_sym < kMaxLatin1KeySym ||
       (key_sym & BRLAPI_KEY_SYM_UNICODE) != 0) {
     base_icu::UChar32 code_point = key_sym & ~BRLAPI_KEY_SYM_UNICODE;
-    if (!base::IsValidCharacter(code_point))
+    if (!base::IsValidCharacter(code_point)) {
       return;
+    }
     event->standard_key_char.emplace();
     base::WriteUnicodeCharacter(code_point, &*event->standard_key_char);
   } else if (key_sym >= kMinFunctionKey && key_sym <= kMaxFunctionKey) {
@@ -112,34 +116,34 @@ void MapKeySym(brlapi_keyCode_t code, KeyEvent* event) {
     event->standard_key_code = code_string;
   }
   MapModifierFlags(code, event);
-  event->command = KEY_COMMAND_STANDARD_KEY;
+  event->command = KeyCommand::kStandardKey;
 }
 
 void MapCommand(brlapi_keyCode_t code, KeyEvent* event) {
   brlapi_keyCode_t argument = code & BRLAPI_KEY_CMD_ARG_MASK;
   switch (code & BRLAPI_KEY_CODE_MASK) {
     case BRLAPI_KEY_CMD_LNUP:
-      event->command = KEY_COMMAND_LINE_UP;
+      event->command = KeyCommand::kLineUp;
       break;
     case BRLAPI_KEY_CMD_LNDN:
-      event->command = KEY_COMMAND_LINE_DOWN;
+      event->command = KeyCommand::kLineDown;
       break;
     case BRLAPI_KEY_CMD_FWINLT:
-      event->command = KEY_COMMAND_PAN_LEFT;
+      event->command = KeyCommand::kPanLeft;
       break;
     case BRLAPI_KEY_CMD_FWINRT:
-      event->command = KEY_COMMAND_PAN_RIGHT;
+      event->command = KeyCommand::kPanRight;
       break;
     case BRLAPI_KEY_CMD_TOP:
-      event->command = KEY_COMMAND_TOP;
+      event->command = KeyCommand::kTop;
       break;
     case BRLAPI_KEY_CMD_BOT:
-      event->command = KEY_COMMAND_BOTTOM;
+      event->command = KeyCommand::kBottom;
       break;
     default:
       switch (code & BRLAPI_KEY_CMD_BLK_MASK) {
         case BRLAPI_KEY_CMD_ROUTE:
-          event->command = KEY_COMMAND_ROUTING;
+          event->command = KeyCommand::kRouting;
           event->display_position = argument;
           break;
         case BRLAPI_KEY_CMD_PASSDOTS:
@@ -147,10 +151,11 @@ void MapCommand(brlapi_keyCode_t code, KeyEvent* event) {
           event->braille_dots = dots;
 
           // BRLAPI_DOTC represents when the braille space key is pressed.
-          if (dots && (argument & BRLAPI_DOTC))
-            event->command = KEY_COMMAND_CHORD;
-          else
-            event->command = KEY_COMMAND_DOTS;
+          if (dots && (argument & BRLAPI_DOTC)) {
+            event->command = KeyCommand::kChord;
+          } else {
+            event->command = KeyCommand::kDots;
+          }
           MapModifierFlags(code, event);
           break;
       }
@@ -161,7 +166,7 @@ void MapCommand(brlapi_keyCode_t code, KeyEvent* event) {
 
 std::unique_ptr<KeyEvent> BrlapiKeyCodeToEvent(brlapi_keyCode_t code) {
   std::unique_ptr<KeyEvent> result(new KeyEvent);
-  result->command = KEY_COMMAND_NONE;
+  result->command = KeyCommand::kNone;
   switch (code & BRLAPI_KEY_TYPE_MASK) {
     case BRLAPI_KEY_TYPE_SYM:
       MapKeySym(code, result.get());
@@ -170,8 +175,9 @@ std::unique_ptr<KeyEvent> BrlapiKeyCodeToEvent(brlapi_keyCode_t code) {
       MapCommand(code, result.get());
       break;
   }
-  if (result->command == KEY_COMMAND_NONE)
+  if (result->command == KeyCommand::kNone) {
     result.reset();
+  }
   return result;
 }
 

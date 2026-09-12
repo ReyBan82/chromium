@@ -76,7 +76,7 @@ BatterySet::BatterySet(const BatterySet&) = default;
 BatterySet::~BatterySet() = default;
 
 const char FlossBatteryManagerClient::kExportedCallbacksPath[] =
-    "/org/chromium/bluetooth/batterymanagerclient";
+    "/org/chromium/bluetooth/battery_manager/callback";
 
 void FlossBatteryManagerClient::AddObserver(
     FlossBatteryManagerClient::FlossBatteryManagerClientObserver* observer) {
@@ -94,6 +94,13 @@ std::unique_ptr<FlossBatteryManagerClient> FlossBatteryManagerClient::Create() {
 
 FlossBatteryManagerClient::FlossBatteryManagerClient() = default;
 FlossBatteryManagerClient::~FlossBatteryManagerClient() {
+  if (battery_manager_callback_id_) {
+    CallBatteryManagerMethod<bool>(
+        base::BindOnce(&FlossBatteryManagerClient::BatteryCallbackUnregistered,
+                       weak_ptr_factory_.GetWeakPtr()),
+        battery_manager::kUnregisterBatteryCallback,
+        battery_manager_callback_id_.value());
+  }
   if (bus_) {
     exported_callback_manager_.UnexportCallback(
         dbus::ObjectPath(kExportedCallbacksPath));
@@ -101,19 +108,22 @@ FlossBatteryManagerClient::~FlossBatteryManagerClient() {
 }
 
 void FlossBatteryManagerClient::GetBatteryInformation(
-    ResponseCallback<absl::optional<BatterySet>> callback,
+    ResponseCallback<std::optional<BatterySet>> callback,
     const FlossDeviceId& device) {
-  CallBatteryManagerMethod<absl::optional<BatterySet>>(
+  CallBatteryManagerMethod<std::optional<BatterySet>>(
       std::move(callback), battery_manager::kGetBatteryInformation,
       device.address);
 }
 
 void FlossBatteryManagerClient::Init(dbus::Bus* bus,
                                      const std::string& service_name,
-                                     const int adapter_index) {
+                                     const int adapter_index,
+                                     base::Version version,
+                                     base::OnceClosure on_ready) {
   bus_ = bus;
   service_name_ = service_name;
   battery_manager_adapter_path_ = GenerateBatteryManagerPath(adapter_index);
+  version_ = version;
 
   dbus::ObjectProxy* object_proxy =
       bus_->GetObjectProxy(service_name_, battery_manager_adapter_path_);
@@ -137,6 +147,8 @@ void FlossBatteryManagerClient::Init(dbus::Bus* bus,
         << "Unable to successfully export FlossBatteryManagerClientObserver.";
     return;
   }
+
+  on_ready_ = std::move(on_ready);
 }
 
 void FlossBatteryManagerClient::OnMethodsExported() {
@@ -162,6 +174,20 @@ void FlossBatteryManagerClient::BatteryCallbackRegistered(
   }
 
   battery_manager_callback_id_ = result.value();
+  CompleteInit();
+}
+
+void FlossBatteryManagerClient::BatteryCallbackUnregistered(
+    DBusResult<bool> result) {
+  if (!result.has_value() || *result == false) {
+    LOG(WARNING) << __func__ << ": Failed to unregister callback";
+  }
+}
+
+void FlossBatteryManagerClient::CompleteInit() {
+  if (on_ready_) {
+    std::move(on_ready_).Run();
+  }
 }
 
 }  // namespace floss

@@ -11,7 +11,7 @@
 #include "ui/base/ui_base_features.h"
 #include "ui/gfx/font_list.h"
 #include "ui/views/controls/focus_ring.h"
-#include "ui/views/style/typography.h"
+#include "ui/views/style/typography_provider.h"
 #include "ui/views/views_delegate.h"
 
 namespace views {
@@ -27,8 +27,9 @@ LayoutProvider::LayoutProvider() {
 }
 
 LayoutProvider::~LayoutProvider() {
-  if (this == g_layout_delegate)
+  if (this == g_layout_delegate) {
     g_layout_delegate = nullptr;
+  }
 }
 
 // static
@@ -40,7 +41,8 @@ LayoutProvider* LayoutProvider::Get() {
 int LayoutProvider::GetControlHeightForFont(int context,
                                             int style,
                                             const gfx::FontList& font) {
-  return std::max(style::GetLineHeight(context, style), font.GetHeight()) +
+  return std::max(TypographyProvider::Get().GetLineHeight(context, style),
+                  font.GetHeight()) +
          Get()->GetDistanceMetric(DISTANCE_CONTROL_VERTICAL_TEXT_PADDING) * 2;
 }
 
@@ -50,6 +52,7 @@ gfx::Insets LayoutProvider::GetInsetsMetric(int metric) const {
   switch (metric) {
     case InsetsMetric::INSETS_DIALOG:
     case InsetsMetric::INSETS_DIALOG_SUBSECTION:
+    case InsetsMetric::INSETS_DIALOG_FOOTNOTE:
       return gfx::Insets(13);
     case InsetsMetric::INSETS_DIALOG_BUTTON_ROW: {
       const gfx::Insets dialog_insets = GetInsetsMetric(INSETS_DIALOG);
@@ -69,8 +72,10 @@ gfx::Insets LayoutProvider::GetInsetsMetric(int metric) const {
       return gfx::Insets(4);
     case InsetsMetric::INSETS_LABEL_BUTTON:
       return gfx::Insets::VH(5, 6);
+    case InsetsMetric::INSETS_ICON_BUTTON:
+      return gfx::Insets(2);
   }
-  NOTREACHED_NORETURN();
+  NOTREACHED();
 }
 
 int LayoutProvider::GetDistanceMetric(int metric) const {
@@ -78,6 +83,8 @@ int LayoutProvider::GetDistanceMetric(int metric) const {
   DCHECK_LT(metric, VIEWS_DISTANCE_END);
 
   switch (static_cast<DistanceMetric>(metric)) {
+    case DISTANCE_BUBBLE_HEADER_VECTOR_ICON_SIZE:
+      return 20;
     case DISTANCE_BUBBLE_PREFERRED_WIDTH:
       return kSmallDialogWidth;
     case DISTANCE_BUTTON_HORIZONTAL_PADDING:
@@ -85,9 +92,13 @@ int LayoutProvider::GetDistanceMetric(int metric) const {
     case DISTANCE_BUTTON_MAX_LINKABLE_WIDTH:
       return 112;
     case DISTANCE_CLOSE_BUTTON_MARGIN:
-      return 4;
+      return 20;
+    case DISTANCE_CONTROL_LIST_VERTICAL:
+      return 12;
     case DISTANCE_CONTROL_VERTICAL_TEXT_PADDING:
-      return features::IsChromeRefresh2023() ? 10 : 8;
+      return 10;
+    case DISTANCE_TABLE_VERTICAL_TEXT_PADDING:
+      return 6;
     case DISTANCE_DIALOG_BUTTON_MINIMUM_WIDTH:
       // Minimum label size plus padding.
       return 32 + 2 * GetDistanceMetric(DISTANCE_BUTTON_HORIZONTAL_PADDING);
@@ -103,8 +114,16 @@ int LayoutProvider::GetDistanceMetric(int metric) const {
     case DISTANCE_DIALOG_CONTENT_MARGIN_TOP_TEXT:
       // See the comment in DISTANCE_DIALOG_CONTENT_MARGIN_BOTTOM_TEXT above.
       return GetDistanceMetric(DISTANCE_DIALOG_CONTENT_MARGIN_TOP_CONTROL) - 8;
+    case DISTANCE_DROPDOWN_BUTTON_LABEL_ARROW_SPACING:
+      return 8;
+    case DISTANCE_DROPDOWN_BUTTON_RIGHT_MARGIN:
+      return 12;
+    case DISTANCE_DROPDOWN_BUTTON_LEFT_MARGIN:
+      return 16;
     case DISTANCE_MODAL_DIALOG_PREFERRED_WIDTH:
       return kMediumDialogWidth;
+    case DISTANCE_LARGE_MODAL_DIALOG_PREFERRED_WIDTH:
+      return kLargeDialogWidth;
     case DISTANCE_RELATED_BUTTON_HORIZONTAL:
       return 8;
     case DISTANCE_RELATED_CONTROL_HORIZONTAL:
@@ -115,17 +134,25 @@ int LayoutProvider::GetDistanceMetric(int metric) const {
       return 12;
     case DISTANCE_DIALOG_SCROLLABLE_AREA_MAX_HEIGHT:
       return 192;
+    case DISTANCE_MODAL_DIALOG_SCROLLABLE_AREA_MAX_HEIGHT:
+      return 448;
     case DISTANCE_TABLE_CELL_HORIZONTAL_MARGIN:
       return 12;
     case DISTANCE_TEXTFIELD_HORIZONTAL_TEXT_PADDING:
-      return features::IsChromeRefresh2023() ? 10 : 8;
+      return 10;
+    case DISTANCE_UNRELATED_CONTROL_HORIZONTAL:
+      return 16;
+    case DISTANCE_UNRELATED_INFOBAR_CONTAINER_HORIZONTAL:
+      return 20;
     case DISTANCE_UNRELATED_CONTROL_VERTICAL:
       return 16;
+    case DISTANCE_VECTOR_ICON_PADDING:
+      return 4;
     case VIEWS_DISTANCE_END:
     case VIEWS_DISTANCE_MAX:
-      NOTREACHED_NORETURN();
+      NOTREACHED();
   }
-  NOTREACHED_NORETURN();
+  NOTREACHED();
 }
 
 const TypographyProvider& LayoutProvider::GetTypographyProvider() const {
@@ -179,28 +206,26 @@ int LayoutProvider::GetCornerRadiusMetric(Emphasis emphasis,
 ShapeSysTokens GetShapeSysToken(ShapeContextTokens id) {
   static constexpr auto shape_token_map =
       base::MakeFixedFlatMap<ShapeContextTokens, ShapeSysTokens>({
+          {ShapeContextTokens::kBadgeRadius, ShapeSysTokens::kXSmall},
           {ShapeContextTokens::kButtonRadius, ShapeSysTokens::kFull},
-          {ShapeContextTokens::kTextfieldRadius, ShapeSysTokens::kSmall},
           {ShapeContextTokens::kComboboxRadius, ShapeSysTokens::kSmall},
+          {ShapeContextTokens::kDialogRadius, ShapeSysTokens::kMediumSmall},
+          {ShapeContextTokens::kExtensionsMenuButtonRadius,
+           ShapeSysTokens::kXSmall},
+          {ShapeContextTokens::kFindBarViewRadius, ShapeSysTokens::kSmall},
+          {ShapeContextTokens::kMenuRadius, ShapeSysTokens::kMediumSmall},
+          {ShapeContextTokens::kMenuAuxRadius, ShapeSysTokens::kMediumSmall},
+          {ShapeContextTokens::kMenuTouchRadius, ShapeSysTokens::kMediumSmall},
+          {ShapeContextTokens::kOmniboxExpandedRadius, ShapeSysTokens::kMedium},
+          {ShapeContextTokens::kTextfieldRadius, ShapeSysTokens::kSmall},
+          {ShapeContextTokens::kContentSeparatorRadius, ShapeSysTokens::kSmall},
       });
-  const auto* it = shape_token_map.find(id);
+  const auto it = shape_token_map.find(id);
   return it == shape_token_map.end() ? ShapeSysTokens::kDefault : it->second;
 }
 
 int LayoutProvider::GetCornerRadiusMetric(ShapeContextTokens id,
                                           const gfx::Size& size) const {
-  if (!features::IsChromeRefresh2023()) {
-    switch (id) {
-      case ShapeContextTokens::kButtonRadius:
-        return 4;
-      case ShapeContextTokens::kComboboxRadius:
-      case ShapeContextTokens::kTextfieldRadius:
-        return FocusRing::kDefaultCornerRadiusDp;
-      default:
-        return 0;
-    }
-  }
-
   ShapeSysTokens token = GetShapeSysToken(id);
   DCHECK_NE(token, ShapeSysTokens::kDefault)
       << "kDefault token means there is a missing mapping between shape tokens";
@@ -209,6 +234,8 @@ int LayoutProvider::GetCornerRadiusMetric(ShapeContextTokens id,
       return 4;
     case ShapeSysTokens::kSmall:
       return 8;
+    case ShapeSysTokens::kMediumSmall:
+      return 12;
     case ShapeSysTokens::kMedium:
       return 16;
     case ShapeSysTokens::kLarge:

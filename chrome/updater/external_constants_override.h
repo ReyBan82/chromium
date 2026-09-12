@@ -5,24 +5,23 @@
 #ifndef CHROME_UPDATER_EXTERNAL_CONSTANTS_OVERRIDE_H_
 #define CHROME_UPDATER_EXTERNAL_CONSTANTS_OVERRIDE_H_
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/containers/flat_map.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "chrome/updater/external_constants.h"
 #include "chrome/updater/updater_scope.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class GURL;
 
 namespace base {
 class FilePath;
 class TimeDelta;
-class Value;
 }  // namespace base
 
 namespace crx_file {
@@ -31,11 +30,13 @@ enum class VerifierFormat;
 
 namespace updater {
 
-absl::optional<base::FilePath> GetOverrideFilePath(UpdaterScope scope);
+struct EventLoggingPermissionProvider;
+
+std::optional<base::FilePath> GetOverrideFilePath(UpdaterScope scope);
 
 class ExternalConstantsOverrider : public ExternalConstants {
  public:
-  ExternalConstantsOverrider(base::Value::Dict override_values,
+  ExternalConstantsOverrider(base::DictValue override_values,
                              scoped_refptr<ExternalConstants> next_provider);
 
   // Loads a dictionary from overrides.json in the local application data
@@ -48,15 +49,25 @@ class ExternalConstantsOverrider : public ExternalConstants {
 
   // Overrides of ExternalConstants:
   std::vector<GURL> UpdateURL() const override;
+  GURL CrashUploadURL() const override;
+  GURL AppLogoURL() const override;
+  GURL EventLoggingURL() const override;
   bool UseCUP() const override;
   base::TimeDelta InitialDelay() const override;
   base::TimeDelta ServerKeepAliveTime() const override;
   crx_file::VerifierFormat CrxVerifierFormat() const override;
-  base::Value::Dict GroupPolicies() const override;
+  std::optional<std::vector<uint8_t>> CrxPublicKeyHash() const override;
+  base::TimeDelta MinimumEventLoggingCooldown() const override;
+  std::optional<EventLoggingPermissionProvider>
+  GetEventLoggingPermissionProvider() const override;
+  base::DictValue DictPolicies() const override;
   base::TimeDelta OverinstallTimeout() const override;
+  base::TimeDelta IdleCheckPeriod() const override;
+  std::optional<bool> IsMachineManaged() const override;
+  base::TimeDelta CecaConnectionTimeout() const override;
 
  private:
-  const base::Value::Dict override_values_;
+  const base::DictValue override_values_;
   ~ExternalConstantsOverrider() override;
 };
 

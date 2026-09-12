@@ -2,35 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/command_line.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_element_identifiers.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/view_ids.h"
 #include "chrome/browser/ui/views/accessibility/uia_accessibility_event_waiter.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "chrome/test/interaction/interactive_browser_test.h"
 #include "content/public/test/browser_test.h"
-#include "ui/accessibility/accessibility_switches.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/test/ui_controls.h"
 #include "ui/gfx/geometry/point.h"
 
-class TooltipAuraUiaTest : public InProcessBrowserTest {
- public:
-  TooltipAuraUiaTest() {}
+class TooltipAuraUiaTest : public InteractiveBrowserTest {};
 
- protected:
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    command_line->AppendSwitch(switches::kEnableExperimentalUIAutomation);
-  }
-};
-
-// Flakily tests: http://crbug.com/990214
+// Flakily tests: http://crbug.com/41474224
 IN_PROC_BROWSER_TEST_F(TooltipAuraUiaTest, DISABLED_TooltipUiaEvents) {
   // Setup accessibility waiter
   HWND window_handle = GetDesktopWindow();
@@ -40,12 +32,10 @@ IN_PROC_BROWSER_TEST_F(TooltipAuraUiaTest, DISABLED_TooltipUiaEvents) {
   UiaAccessibilityEventWaiter opened_waiter(opened_info);
 
   // Move mouse to Refresh button
-  views::View* refresh_view =
-      BrowserView::GetBrowserViewForBrowser(browser())->GetViewByID(
-          VIEW_ID_RELOAD_BUTTON);
-  gfx::Point center_refresh =
-      ui_test_utils::GetCenterInScreenCoordinates(refresh_view);
-  ui_controls::SendMouseMove(center_refresh.x(), center_refresh.y());
+  ASSERT_TRUE(RunTestSequence(MoveMouseTo(
+      kReloadButtonElementId, base::BindOnce([](ui::TrackedElement* el) {
+        return el->GetScreenBounds().CenterPoint();
+      }))));
 
   // Wait for accessibility event
   opened_waiter.Wait();

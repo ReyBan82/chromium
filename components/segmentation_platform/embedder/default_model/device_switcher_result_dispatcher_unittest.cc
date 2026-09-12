@@ -3,19 +3,22 @@
 // found in the LICENSE file.
 
 #include "components/segmentation_platform/embedder/default_model/device_switcher_result_dispatcher.h"
+
 #include <memory>
+#include <string_view>
 
 #include "base/run_loop.h"
-#include "base/strings/string_piece_forward.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/gmock_move_support.h"
-#include "base/test/metrics/histogram_tester.h"
 #include "base/test/task_environment.h"
 #include "components/prefs/testing_pref_service.h"
 #include "components/segmentation_platform/embedder/default_model/device_switcher_model.h"
 #include "components/segmentation_platform/public/result.h"
 #include "components/segmentation_platform/public/testing/mock_segmentation_platform_service.h"
-#include "components/sync/test/test_sync_service.h"
+#include "components/sync_device_info/device_info.h"
+#include "components/sync_device_info/device_info_util.h"
+#include "components/sync_device_info/fake_device_info_tracker.h"
+#include "components/sync_device_info/test_device_info_builder.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace segmentation_platform {
@@ -23,17 +26,22 @@ namespace segmentation_platform {
 namespace {
 
 using base::test::RunOnceCallback;
+using syncer::DeviceInfo;
 using testing::_;
 using testing::NiceMock;
+using OsType = syncer::DeviceInfo::OsType;
+using DeviceCountByOsTypeMap = std::map<OsType, int>;
+using syncer::FakeDeviceInfoTracker;
+
+const DeviceInfo::OsType kLocalDeviceOS = DeviceInfo::OsType::kLinux;
 
 class MockFieldTrialRegister : public FieldTrialRegister {
  public:
   MOCK_METHOD2(RegisterFieldTrial,
-               void(base::StringPiece trial_name,
-                    base::StringPiece group_name));
+               void(std::string_view trial_name, std::string_view group_name));
 
   MOCK_METHOD3(RegisterSubsegmentFieldTrialIfNeeded,
-               void(base::StringPiece trial_name,
+               void(std::string_view trial_name,
                     proto::SegmentId segment_id,
                     int subsegment_rank));
 };
@@ -48,15 +56,17 @@ class DeviceSwitcherResultDispatcherTest : public testing::Test {
     Test::SetUp();
     prefs_ = std::make_unique<TestingPrefServiceSimple>();
     DeviceSwitcherResultDispatcher::RegisterProfilePrefs(prefs_->registry());
-    sync_service_ = std::make_unique<syncer::TestSyncService>();
-    histogram_tester_ = std::make_unique<base::HistogramTester>();
+    device_info_tracker_ = std::make_unique<FakeDeviceInfoTracker>();
   }
 
   void TearDown() override {
     Test::TearDown();
-    histogram_tester_.reset();
     prefs_.reset();
-    sync_service_.reset();
+    if (local_device_info_) {
+      device_info_tracker_->Remove(local_device_info_.get());
+      local_device_info_.reset();
+    }
+    device_info_tracker_.reset();
   }
 
   void OnGetClassificationResult(base::RepeatingClosure closure,
@@ -67,13 +77,22 @@ class DeviceSwitcherResultDispatcherTest : public testing::Test {
     std::move(closure).Run();
   }
 
+  void MakeDeviceInfoAvailable() {
+    ASSERT_FALSE(local_device_info_);
+    local_device_info_ = syncer::TestDeviceInfoBuilder(kLocalDeviceOS)
+                             .WithGuid("local_device")
+                             .Build();
+    device_info_tracker_->Add(local_device_info_.get());
+  }
+
  protected:
-  base::test::TaskEnvironment task_environment_;
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
   NiceMock<MockSegmentationPlatformService> segmentation_platform_service_;
   std::unique_ptr<TestingPrefServiceSimple> prefs_;
   NiceMock<MockFieldTrialRegister> field_trial_register_;
-  std::unique_ptr<syncer::TestSyncService> sync_service_;
-  std::unique_ptr<base::HistogramTester> histogram_tester_;
+  std::unique_ptr<syncer::FakeDeviceInfoTracker> device_info_tracker_;
+  std::unique_ptr<DeviceInfo> local_device_info_;
 };
 
 TEST_F(DeviceSwitcherResultDispatcherTest, SegmentationFailed) {
@@ -84,48 +103,50 @@ TEST_F(DeviceSwitcherResultDispatcherTest, SegmentationFailed) {
       .WillOnce(RunOnceCallback<3>(result));
 
   EXPECT_CALL(field_trial_register_,
-              RegisterFieldTrial(_, base::StringPiece("Unselected")));
+              RegisterFieldTrial(_, std::string_view("Unselected")));
 
   // The DeviceSwitcherResultDispatcher will find the result returned by the
   // segmentation platform service.
   DeviceSwitcherResultDispatcher device_switcher_result_dispatcher(
-      &segmentation_platform_service_, sync_service_.get(), prefs_.get(),
+      &segmentation_platform_service_, device_info_tracker_.get(), prefs_.get(),
       &field_trial_register_);
 
   base::RunLoop loop;
-  device_switcher_result_dispatcher.GetClassificationResult(base::BindOnce(
-      &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
-      base::Unretained(this), loop.QuitClosure(), result));
+  device_switcher_result_dispatcher.WaitForClassificationResult(
+      base::Seconds(5),
+      base::BindOnce(
+          &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
+          base::Unretained(this), loop.QuitClosure(), result));
   loop.Run();
 }
 
-TEST_F(DeviceSwitcherResultDispatcherTest, TestGetClassificationResult) {
+TEST_F(DeviceSwitcherResultDispatcherTest, TestWaitForClassificationResult) {
   // Create a classification result.
   ClassificationResult result(PredictionStatus::kSucceeded);
   result.ordered_labels.emplace_back("test_label1");
-  sync_service_->SetHasSyncConsent(true);
+
+  MakeDeviceInfoAvailable();
 
   EXPECT_CALL(segmentation_platform_service_,
               GetClassificationResult(_, _, _, _))
       .WillOnce(RunOnceCallback<3>(result));
 
   EXPECT_CALL(field_trial_register_,
-              RegisterFieldTrial(_, base::StringPiece("test_label1")));
+              RegisterFieldTrial(_, std::string_view("test_label1")));
 
   // The DeviceSwitcherResultDispatcher will find the result returned by the
   // segmentation platform service.
   DeviceSwitcherResultDispatcher device_switcher_result_dispatcher(
-      &segmentation_platform_service_, sync_service_.get(), prefs_.get(),
+      &segmentation_platform_service_, device_info_tracker_.get(), prefs_.get(),
       &field_trial_register_);
 
   base::RunLoop loop;
-  device_switcher_result_dispatcher.GetClassificationResult(base::BindOnce(
-      &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
-      base::Unretained(this), loop.QuitClosure(), result));
+  device_switcher_result_dispatcher.WaitForClassificationResult(
+      base::Seconds(5),
+      base::BindOnce(
+          &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
+          base::Unretained(this), loop.QuitClosure(), result));
   loop.Run();
-
-  histogram_tester_->ExpectTotalCount(
-      "SegmentationPlatform.DeviceSwicther.TimeFromStartupToResult", 1);
 }
 
 TEST_F(DeviceSwitcherResultDispatcherTest, ResultRefreshedOnSyncConsent) {
@@ -141,30 +162,61 @@ TEST_F(DeviceSwitcherResultDispatcherTest, ResultRefreshedOnSyncConsent) {
 
   EXPECT_CALL(field_trial_register_,
               RegisterFieldTrial(
-                  _, base::StringPiece(DeviceSwitcherModel::kNotSyncedLabel)));
+                  _, std::string_view(DeviceSwitcherModel::kNotSyncedLabel)));
   EXPECT_CALL(
       field_trial_register_,
       RegisterFieldTrial(
-          _, base::StringPiece(DeviceSwitcherModel::kAndroidPhoneLabel)));
-
-  sync_service_->SetHasSyncConsent(false);
+          _, std::string_view(DeviceSwitcherModel::kAndroidPhoneLabel)));
 
   // The DeviceSwitcherResultDispatcher will find the result returned by the
   // segmentation platform service.
   DeviceSwitcherResultDispatcher device_switcher_result_dispatcher(
-      &segmentation_platform_service_, sync_service_.get(), prefs_.get(),
+      &segmentation_platform_service_, device_info_tracker_.get(), prefs_.get(),
       &field_trial_register_);
   base::RunLoop().RunUntilIdle();
 
-  sync_service_->SetHasSyncConsent(true);
-  sync_service_->FireStateChanged();
+  MakeDeviceInfoAvailable();
+
   base::RunLoop().RunUntilIdle();
 
   base::RunLoop loop;
-  device_switcher_result_dispatcher.GetClassificationResult(base::BindOnce(
-      &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
-      base::Unretained(this), loop.QuitClosure(), result2));
+  device_switcher_result_dispatcher.WaitForClassificationResult(
+      base::Seconds(5),
+      base::BindOnce(
+          &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
+          base::Unretained(this), loop.QuitClosure(), result2));
   loop.Run();
+}
+
+TEST_F(DeviceSwitcherResultDispatcherTest, TestGetCachedClassificationResult) {
+  // Create initial and updated classification results.
+  ClassificationResult expected_initial_result(PredictionStatus::kSucceeded);
+  expected_initial_result.ordered_labels.emplace_back(
+      DeviceSwitcherModel::kNotSyncedLabel);
+  ClassificationResult expected_updated_result(PredictionStatus::kSucceeded);
+  expected_updated_result.ordered_labels.emplace_back("test_label1");
+
+  EXPECT_CALL(segmentation_platform_service_,
+              GetClassificationResult(_, _, _, _))
+      .WillOnce(RunOnceCallback<3>(expected_initial_result))
+      .WillOnce(RunOnceCallback<3>(expected_updated_result));
+
+  // Setup DeviceSwitcherResultDispatcher; sync consent will be updated during
+  // test execution to verify cached result update.
+  DeviceSwitcherResultDispatcher device_switcher_result_dispatcher(
+      &segmentation_platform_service_, device_info_tracker_.get(), prefs_.get(),
+      &field_trial_register_);
+
+  ClassificationResult actual_initial_result =
+      device_switcher_result_dispatcher.GetCachedClassificationResult();
+  ASSERT_EQ(actual_initial_result.ordered_labels[0],
+            DeviceSwitcherModel::kNotSyncedLabel);
+  MakeDeviceInfoAvailable();
+  ClassificationResult actual_updated_result =
+      device_switcher_result_dispatcher.GetCachedClassificationResult();
+  EXPECT_EQ(actual_updated_result.status, PredictionStatus::kSucceeded);
+  ASSERT_EQ(actual_updated_result.ordered_labels.size(), 1U);
+  EXPECT_EQ(actual_updated_result.ordered_labels[0], "test_label1");
 }
 
 TEST_F(DeviceSwitcherResultDispatcherTest,
@@ -172,7 +224,6 @@ TEST_F(DeviceSwitcherResultDispatcherTest,
   // Create a classification result.
   ClassificationResult result(PredictionStatus::kSucceeded);
   result.ordered_labels.emplace_back("test_label1");
-  sync_service_->SetHasSyncConsent(false);
 
   // Save the callback to simulate a delayed result.
   ClassificationResultCallback callback;
@@ -181,25 +232,52 @@ TEST_F(DeviceSwitcherResultDispatcherTest,
       .WillRepeatedly(MoveArg<3>(&callback));
 
   EXPECT_CALL(field_trial_register_,
-              RegisterFieldTrial(_, base::StringPiece("test_label1")));
+              RegisterFieldTrial(_, std::string_view("test_label1")));
 
   // The DeviceSwitcherResultDispatcher will wait for the result returned by the
   // segmentation platform service.
   DeviceSwitcherResultDispatcher device_switcher_result_dispatcher(
-      &segmentation_platform_service_, sync_service_.get(), prefs_.get(),
+      &segmentation_platform_service_, device_info_tracker_.get(), prefs_.get(),
       &field_trial_register_);
 
   base::RunLoop loop;
-  device_switcher_result_dispatcher.GetClassificationResult(base::BindOnce(
-      &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
-      base::Unretained(this), loop.QuitClosure(), result));
-  sync_service_->SetHasSyncConsent(true);
-  sync_service_->FireStateChanged();
+  device_switcher_result_dispatcher.WaitForClassificationResult(
+      base::Seconds(5),
+      base::BindOnce(
+          &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
+          base::Unretained(this), loop.QuitClosure(), result));
+
+  MakeDeviceInfoAvailable();
   std::move(callback).Run(result);
   loop.Run();
+}
 
-  histogram_tester_->ExpectTotalCount(
-      "SegmentationPlatform.DeviceSwicther.TimeFromConsentToResult", 1);
+TEST_F(DeviceSwitcherResultDispatcherTest,
+       TestGetClassificationResultWaitTimeout) {
+  // Create a classification result.
+  ClassificationResult result(PredictionStatus::kNotReady);
+
+  // Save the callback to simulate a delayed result.
+  ClassificationResultCallback callback;
+  EXPECT_CALL(segmentation_platform_service_,
+              GetClassificationResult(_, _, _, _))
+      .WillRepeatedly(MoveArg<3>(&callback));
+
+  // The DeviceSwitcherResultDispatcher will wait for the result returned by the
+  // segmentation platform service.
+  DeviceSwitcherResultDispatcher device_switcher_result_dispatcher(
+      &segmentation_platform_service_, device_info_tracker_.get(), prefs_.get(),
+      &field_trial_register_);
+
+  base::RunLoop loop;
+  device_switcher_result_dispatcher.WaitForClassificationResult(
+      base::Seconds(5),
+      base::BindOnce(
+          &DeviceSwitcherResultDispatcherTest::OnGetClassificationResult,
+          base::Unretained(this), loop.QuitClosure(), result));
+
+  task_environment_.FastForwardBy(base::Seconds(5));
+  loop.Run();
 }
 
 }  // namespace segmentation_platform

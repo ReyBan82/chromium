@@ -11,6 +11,7 @@
 #include "base/memory/ref_counted_delete_on_sequence.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
+#include "chrome/services/file_util/public/cpp/temporary_file_getter.h"
 #include "chrome/services/file_util/public/mojom/file_util_service.mojom.h"
 #include "chrome/services/file_util/public/mojom/safe_archive_analyzer.mojom.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
@@ -28,6 +29,7 @@ class SandboxedSevenZipAnalyzer {
  public:
   using ResultCallback =
       base::OnceCallback<void(const safe_browsing::ArchiveAnalyzerResults&)>;
+  using WrappedFilePtr = std::unique_ptr<base::File, base::OnTaskRunnerDeleter>;
 
   // Factory function for creating SandboxedSevenZipAnalyzers with the
   // appropriate deleter.
@@ -55,7 +57,7 @@ class SandboxedSevenZipAnalyzer {
   void ReportFileFailure(safe_browsing::ArchiveAnalysisResult reason);
 
   // Starts the utility process and sends it a file analyze request.
-  void AnalyzeFile(base::File file, base::File temp, base::File temp2);
+  void AnalyzeFile(WrappedFilePtr file);
 
   // The response containing the file analyze results.
   void AnalyzeFileDone(const safe_browsing::ArchiveAnalyzerResults& results);
@@ -72,6 +74,10 @@ class SandboxedSevenZipAnalyzer {
   // Remote interfaces to the file util service. Only used from the UI thread.
   mojo::Remote<chrome::mojom::FileUtilService> service_;
   mojo::Remote<chrome::mojom::SafeArchiveAnalyzer> remote_analyzer_;
+  TemporaryFileGetter temp_file_getter_;
+
+  // Task runner for blocking file operations
+  const scoped_refptr<base::SequencedTaskRunner> file_task_runner_;
 
   base::WeakPtrFactory<SandboxedSevenZipAnalyzer> weak_ptr_factory_{this};
 };

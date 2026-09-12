@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_EXCEPTION_METADATA_H_
-#define THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_EXCEPTION_METADATA_H_
-
 #include "third_party/blink/renderer/core/inspector/exception_metadata.h"
 
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
@@ -15,10 +12,9 @@
 
 namespace blink {
 
-void MaybeAssociateExceptionMetaData(ExceptionState& state,
+void MaybeAssociateExceptionMetaData(v8::Local<v8::Value> exception,
                                      const String& key,
                                      const String& value) {
-  v8::Local<v8::Value> exception = state.GetException();
   if (exception.IsEmpty()) {
     // Should only happen in tests.
     return;
@@ -27,8 +23,8 @@ void MaybeAssociateExceptionMetaData(ExceptionState& state,
   if (!exception->IsObject()) {
     return;
   }
-  v8::Local<v8::Object> object = exception.As<v8::Object>();
-  v8::Isolate* isolate = object->GetIsolate();
+
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
   ThreadDebugger* debugger = ThreadDebugger::From(isolate);
   debugger->GetV8Inspector()->associateExceptionData(
       v8::Local<v8::Context>(), exception, V8String(isolate, key),
@@ -36,5 +32,3 @@ void MaybeAssociateExceptionMetaData(ExceptionState& state,
 }
 
 }  // namespace blink
-
-#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_EXCEPTION_METADATA_H_

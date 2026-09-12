@@ -8,7 +8,7 @@
 #include "ui/display/display.h"
 #include "ui/display/display_export.h"
 #include "ui/display/screen_info.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace display {
 
@@ -21,6 +21,10 @@ class DISPLAY_EXPORT DisplayUtil {
                                       gfx::NativeView native_view);
 
   static void GetDefaultScreenInfo(display::ScreenInfo* screen_info);
+
+  // Disables HDR and high bit depth color spaces on the given ScreenInfo,
+  // falling back to sRGB and default bit depth.
+  static void DisableHdrAndHighBitDepth(display::ScreenInfo* screen_info);
 
   // Compute the orientation type of the display assuming it is a mobile device.
   static display::mojom::ScreenOrientation GetOrientationTypeForMobile(

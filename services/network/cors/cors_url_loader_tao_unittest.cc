@@ -2,13 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "services/network/cors/cors_url_loader.h"
-
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/functional/callback_helpers.h"
-#include "base/strings/string_piece.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "mojo/public/cpp/bindings/message.h"
 #include "mojo/public/cpp/system/functions.h"
@@ -17,6 +15,7 @@
 #include "net/log/test_net_log_util.h"
 #include "net/test/gtest_util.h"
 #include "net/url_request/referrer_policy.h"
+#include "services/network/cors/cors_url_loader.h"
 #include "services/network/cors/cors_url_loader_test_util.h"
 #include "services/network/public/mojom/cors.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
@@ -26,7 +25,6 @@
 #include "services/network/url_loader.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 // Test that Timing-Allow-Origin check passes when a same-origin redirect
 // occurs. The redirect is as follows: [Origin] A -> A -> A.
@@ -36,10 +34,22 @@ namespace {
 class CorsURLLoaderTAOTest : public CorsURLLoaderTestBase {
  protected:
   void CreateLoaderAndStartNavigation(const GURL& origin, const GURL& url) {
-    ResetFactory(absl::nullopt /* initiator */, mojom::kBrowserProcessId);
-    CreateLoaderAndStart(origin, url, mojom::RequestMode::kNavigate,
-                         mojom::RedirectMode::kManual,
-                         mojom::CredentialsMode::kInclude);
+    ResetFactoryParams params;
+    params.is_trusted = true;
+    ResetFactory(std::nullopt /* initiator */, OriginatingProcessId::browser(),
+                 params);
+
+    ResourceRequest request;
+    request.mode = mojom::RequestMode::kNavigate;
+    request.redirect_mode = mojom::RedirectMode::kManual;
+    request.credentials_mode = mojom::CredentialsMode::kInclude;
+    request.method = net::HttpRequestHeaders::kGetMethod;
+    request.url = url;
+    request.navigation_redirect_chain.push_back(url);
+    request.request_initiator = url::Origin::Create(origin);
+    request.devtools_request_id = "devtools";
+    request.trusted_params = ResourceRequest::TrustedParams();
+    CreateLoaderAndStart(request);
   }
 };
 

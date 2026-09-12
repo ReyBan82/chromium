@@ -6,12 +6,14 @@
 #define MOJO_PUBLIC_CPP_BINDINGS_SELF_OWNED_RECEIVER_H_
 
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
+#include "mojo/public/cpp/bindings/runtime_features.h"
 
 namespace mojo {
 
@@ -38,6 +40,9 @@ class SelfOwnedReceiver {
       std::unique_ptr<Interface> impl,
       PendingReceiver<Interface> receiver,
       scoped_refptr<base::SequencedTaskRunner> task_runner = nullptr) {
+    if (!internal::GetRuntimeFeature_ExpectEnabled<Interface>()) {
+      return nullptr;
+    }
     SelfOwnedReceiver* self_owned = new SelfOwnedReceiver(
         std::move(impl), std::move(receiver), std::move(task_runner));
     return self_owned->weak_factory_.GetWeakPtr();
@@ -86,6 +91,13 @@ class SelfOwnedReceiver {
   // verify that no message was sent on a message pipe in response to some
   // stimulus.
   void FlushForTesting() { receiver_.FlushForTesting(); }
+
+  // Reports the currently dispatching message as bad. This destroys the
+  // SelfOwnedReceiver instance.
+  void ReportBadMessage(std::string_view error) {
+    receiver_.ReportBadMessage(error);
+    Close();
+  }
 
  private:
   SelfOwnedReceiver(std::unique_ptr<Interface> impl,

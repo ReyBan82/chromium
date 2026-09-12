@@ -15,10 +15,6 @@ BurnInController::BurnInController(BurnInPeriodElapsedCallback callback)
     : burn_in_period_elapsed_callback_(std::move(callback)),
       burn_in_period_(kBurnInPeriod) {}
 
-bool BurnInController::is_post_burn_in() {
-  return base::Time::Now() - session_start_ > burn_in_period_;
-}
-
 void BurnInController::Start() {
   burn_in_timer_.Start(FROM_HERE, burn_in_period_,
                        burn_in_period_elapsed_callback_);
@@ -28,25 +24,27 @@ void BurnInController::Start() {
   ids_to_burn_in_iteration_.clear();
 }
 
-BurnInController::~BurnInController() {}
+BurnInController::~BurnInController() = default;
 
 void BurnInController::Stop() {
   burn_in_timer_.Stop();
 }
 
-void BurnInController::UpdateResults(ResultsMap& results,
+bool BurnInController::UpdateResults(ResultsMap& results,
                                      CategoriesList& categories,
                                      ash::AppListSearchResultType result_type) {
-  if (is_post_burn_in()) {
+  // True if the burn-in period has elapsed.
+  const bool is_post_burn_in =
+      base::Time::Now() - session_start_ > burn_in_period_;
+  if (is_post_burn_in) {
     ++burn_in_iteration_counter_;
   }
 
   // Record the burn-in iteration number for categories we are seeing for the
   // first time in this search.
-  base::flat_set<Category> updated_categories;
-  for (const auto& result : results[result_type]) {
-    updated_categories.insert(result->category());
-  }
+  auto updated_categories = base::MakeFlatSet<Category>(
+      results[result_type], /*comp=*/{},
+      [&](const auto& result) { return result->category(); });
   for (auto& category : categories) {
     const auto it = updated_categories.find(category.category);
     if (it != updated_categories.end() && category.burn_in_iteration == -1) {
@@ -71,6 +69,8 @@ void BurnInController::UpdateResults(ResultsMap& results,
       ids_to_burn_in_iteration_[result_id] = burn_in_iteration_counter_;
     }
   }
+
+  return is_post_burn_in;
 }
 
 }  // namespace app_list

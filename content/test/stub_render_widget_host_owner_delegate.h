@@ -16,12 +16,13 @@ class StubRenderWidgetHostOwnerDelegate : public RenderWidgetHostOwnerDelegate {
   void RenderWidgetDidForwardMouseEvent(
       const blink::WebMouseEvent& mouse_event) override {}
   bool MayRenderWidgetForwardKeyboardEvent(
-      const NativeWebKeyboardEvent& key_event) override;
-  bool ShouldContributePriorityToProcess() override;
+      const input::NativeWebKeyboardEvent& key_event) override;
   void SetBackgroundOpaque(bool opaque) override {}
   bool IsMainFrameActive() override;
-  bool IsNeverComposited() override;
   blink::web_pref::WebPreferences GetWebkitPreferencesForWidget() override;
+  void ZoomToFindInPageRect(const gfx::Rect& rect_to_zoom) override {}
+  void AnimateDoubleTapZoom(const gfx::Point& point,
+                            const gfx::Rect& rect) override {}
 };
 
 }  // namespace content

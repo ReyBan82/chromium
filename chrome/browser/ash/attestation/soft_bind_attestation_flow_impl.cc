@@ -4,29 +4,32 @@
 
 #include "chrome/browser/ash/attestation/soft_bind_attestation_flow_impl.h"
 
+#include <optional>
+
 #include "base/containers/span.h"
+#include "base/debug/dump_without_crashing.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/strings/string_view_util.h"
 #include "base/timer/timer.h"
 #include "chrome/browser/ash/attestation/attestation_ca_client.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
+#include "chromeos/ash/components/attestation/attestation_flow_adaptive.h"
 #include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
 #include "chromeos/ash/components/dbus/attestation/attestation_client.h"
 #include "chromeos/ash/components/dbus/constants/attestation_constants.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
 #include "content/public/browser/browser_thread.h"
 #include "crypto/openssl_util.h"
 #include "crypto/random.h"
-#include "crypto/rsa_private_key.h"
 #include "net/cert/asn1_util.h"
-#include "net/cert/pem.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cert/x509_util.h"
-#include "net/der/tag.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/boringssl/src/include/openssl/bn.h"
+#include "third_party/boringssl/src/include/openssl/bytestring.h"
 #include "third_party/boringssl/src/include/openssl/ec.h"
 #include "third_party/boringssl/src/include/openssl/err.h"
 #include "third_party/boringssl/src/include/openssl/mem.h"
+#include "third_party/boringssl/src/pki/pem.h"
 #include "third_party/securemessage/proto/securemessage.pb.h"
 
 namespace ash {
@@ -138,8 +141,10 @@ const std::string& SoftBindAttestationFlowImpl::Session::GetUserKey() const {
 
 void SoftBindAttestationFlowImpl::Session::ReportFailure(
     const std::string& error_message) {
+  LOG(WARNING) << "Attestation session failure: " << error_message;
   if (!callback_) {
-    LOG(ERROR) << "Attestation session failure callback in null.";
+    LOG(WARNING) << "Callback is null";
+    base::debug::DumpWithoutCrashing();
     return;
   }
   std::move(callback_).Run(std::vector<std::string>{"INVALID:" + error_message},
@@ -148,14 +153,19 @@ void SoftBindAttestationFlowImpl::Session::ReportFailure(
 
 void SoftBindAttestationFlowImpl::Session::ReportSuccess(
     const std::vector<std::string>& certificate_chain) {
+  if (!callback_) {
+    LOG(WARNING) << "Attestation session success but callback is null";
+    base::debug::DumpWithoutCrashing();
+    return;
+  }
   std::move(callback_).Run(certificate_chain, /*valid=*/true);
 }
 
 SoftBindAttestationFlowImpl::SoftBindAttestationFlowImpl()
     : attestation_client_(AttestationClient::Get()) {
   std::unique_ptr<ServerProxy> attestation_ca_client(new AttestationCAClient());
-  attestation_flow_ =
-      std::make_unique<AttestationFlow>(std::move(attestation_ca_client));
+  attestation_flow_ = std::make_unique<AttestationFlowAdaptive>(
+      std::move(attestation_ca_client));
 }
 
 SoftBindAttestationFlowImpl::~SoftBindAttestationFlowImpl() = default;
@@ -194,7 +204,7 @@ void SoftBindAttestationFlowImpl::GetCertificateInternal(
       /*request_origin=*/std::string(),
       /*force_new_key=*/force_new_key,
       /*key_crypto_type=*/::attestation::KEY_TYPE_RSA,
-      /*key_name=*/kSoftBindKey, /*profile_specific_data=*/absl::nullopt,
+      /*key_name=*/kSoftBindKey, /*profile_specific_data=*/std::nullopt,
       /*callback=*/std::move(certificate_callback));
 }
 
@@ -301,8 +311,6 @@ void SoftBindAttestationFlowImpl::OnCertificateSigned(
 
   bssl::ScopedCBB cbb;
   CBB signed_cert, signature, alg, alg_oid, alg_null;
-  uint8_t* signed_cert_bytes;
-  size_t signed_cert_len;
   if (!CBB_init(cbb.get(), 64) ||
       !CBB_add_asn1(cbb.get(), &signed_cert, CBS_ASN1_SEQUENCE) ||
       !CBB_add_bytes(&signed_cert,
@@ -317,23 +325,18 @@ void SoftBindAttestationFlowImpl::OnCertificateSigned(
       !CBB_add_bytes(&signature,
                      reinterpret_cast<const uint8_t*>(reply.signature().data()),
                      reply.signature().size()) ||
-      !CBB_flush(&signature) || !CBB_flush(&signed_cert) ||
-      !CBB_finish(cbb.get(), &signed_cert_bytes, &signed_cert_len)) {
+      !CBB_flush(cbb.get())) {
     LOG(ERROR) << "Could not sign attestation certificate";
     session->ReportFailure("couldNotSignCertCbb");
     return;
   }
-  std::string der_encoded_cert;
-  der_encoded_cert.assign(reinterpret_cast<char*>(signed_cert_bytes),
-                          signed_cert_len);
-  bssl::UniquePtr<uint8_t> delete_signed_cert_bytes(signed_cert_bytes);
   std::string pem_encoded_cert;
-  net::X509Certificate::GetPEMEncodedFromDER(der_encoded_cert,
-                                             &pem_encoded_cert);
+  net::X509Certificate::GetPEMEncodedFromDER(
+      base::as_string_view(crypto::CbbAsSpan(cbb.get())), &pem_encoded_cert);
 
   std::vector<std::string> cert_chain_with_leaf = {pem_encoded_cert};
 
-  net::PEMTokenizer pem_tokenizer(certificate_chain, {"CERTIFICATE"});
+  bssl::PEMTokenizer pem_tokenizer(certificate_chain, {"CERTIFICATE"});
   while (pem_tokenizer.GetNext()) {
     std::string pem_encoded_intermediate_cert;
     net::X509Certificate::GetPEMEncodedFromDER(pem_tokenizer.data(),
@@ -345,8 +348,7 @@ void SoftBindAttestationFlowImpl::OnCertificateSigned(
 
   // If certificate is close to expiry, send a new request to ensure
   // uninterrupted continuity.
-  if (should_renew && renewals_in_progress_.count(certificate_chain) == 0) {
-    renewals_in_progress_.insert(certificate_chain);
+  if (should_renew && renewals_in_progress_.insert(certificate_chain).second) {
     AttestationFlow::CertificateCallback renew_callback = base::BindOnce(
         &SoftBindAttestationFlowImpl::RenewCertificateCallback,
         weak_ptr_factory_.GetWeakPtr(), std::move(certificate_chain));
@@ -355,7 +357,7 @@ void SoftBindAttestationFlowImpl::OnCertificateSigned(
         /*account_id=*/session->GetAccountId(),
         /*request_origin=*/std::string(), /*force_new_key=*/true,
         /*key_crypto_type=*/::attestation::KEY_TYPE_RSA,
-        /*key_name=*/kSoftBindKey, /*profile_specific_data=*/absl::nullopt,
+        /*key_name=*/kSoftBindKey, /*profile_specific_data=*/std::nullopt,
         /*callback=*/std::move(renew_callback));
   }
 }
@@ -379,12 +381,12 @@ bool SoftBindAttestationFlowImpl::IsAttestationAllowedByPolicy() const {
 CertificateExpiryStatus SoftBindAttestationFlowImpl::CheckExpiry(
     const std::string& certificate_chain) {
   int num_certificates = 0;
-  net::PEMTokenizer pem_tokenizer(certificate_chain, {"CERTIFICATE"});
+  bssl::PEMTokenizer pem_tokenizer(certificate_chain, {"CERTIFICATE"});
   while (pem_tokenizer.GetNext()) {
     ++num_certificates;
     scoped_refptr<net::X509Certificate> x509 =
         net::X509Certificate::CreateFromBytes(
-            base::as_bytes(base::make_span(pem_tokenizer.data())));
+            base::as_byte_span(pem_tokenizer.data()));
     if (!x509.get() || x509->valid_expiry().is_null()) {
       // This logic intentionally fails open. In theory this should not happen
       // but in practice parsing X.509 can be brittle and there are a lot of
@@ -427,15 +429,12 @@ bool SoftBindAttestationFlowImpl::GenerateLeafCert(
     base::Time not_valid_before,
     base::Time not_valid_after,
     std::string* der_encoded_cert) {
-  crypto::EnsureOpenSSLInit();
   crypto::OpenSSLErrStackTracer err_tracer(FROM_HERE);
 
   bssl::ScopedCBB cbb;
   CBB cert, version, validity, alg, alg_oid, alg_null;
-  uint8_t* cert_bytes;
-  size_t cert_len;
   uint64_t serial_number;
-  crypto::RandBytes(&serial_number, sizeof(serial_number));
+  crypto::RandBytes(base::byte_span_from_ref(serial_number));
   if (!CBB_init(cbb.get(), 64) ||
       !CBB_add_asn1(cbb.get(), &cert, CBS_ASN1_SEQUENCE) ||
       !CBB_add_asn1(&cert, &version,
@@ -469,17 +468,11 @@ bool SoftBindAttestationFlowImpl::GenerateLeafCert(
     return false;
   }
 
-  if (!CBB_flush(&cert)) {
+  if (!CBB_flush(cbb.get())) {
     return false;
   }
 
-  if (!CBB_finish(cbb.get(), &cert_bytes, &cert_len)) {
-    return false;
-  }
-
-  der_encoded_cert->assign(reinterpret_cast<char*>(cert_bytes), cert_len);
-  bssl::UniquePtr<uint8_t> delete_cert_bytes(cert_bytes);
-
+  der_encoded_cert->assign(base::as_string_view(crypto::CbbAsSpan(cbb.get())));
   return true;
 }
 

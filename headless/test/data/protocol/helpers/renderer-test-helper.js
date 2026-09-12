@@ -9,7 +9,7 @@
   /**
    * @param {!TestRunner} testRunner Host TestRunner instance.
    * @param {!Proxy} dp DevTools session protocol instance.
-   * @param {!Page} page TestRunner.Page instance.
+   * @param {!Page} page Page instance.
    */
   constructor(testRunner, dp, page) {
     this.testRunner_ = testRunner;
@@ -26,8 +26,8 @@
   async init() {
     await this.dp_.Page.enable();
 
-    let HttpInterceptor = await this.testRunner_.loadScript(
-        '../helpers/http-interceptor.js');
+    let HttpInterceptor = await this.testRunner_.loadScriptAbsolute(
+        '../resources/http-interceptor.js');
     let httpInterceptor =
         await (new HttpInterceptor(this.testRunner_, this.dp_))
         .init();
@@ -52,5 +52,4 @@
 
     return {httpInterceptor, frameNavigationHelper, virtualTimeController};
   }
-
 });

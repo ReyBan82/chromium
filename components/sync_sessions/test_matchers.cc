@@ -12,8 +12,11 @@
 namespace sync_sessions {
 namespace {
 
+using testing::_;
 using testing::ContainerEq;
 using testing::ElementsAreArray;
+using testing::Eq;
+using testing::MakeMatcher;
 using testing::Matcher;
 using testing::MatcherInterface;
 using testing::MatchResultListener;
@@ -23,9 +26,13 @@ class MatchesHeaderMatcher
     : public MatcherInterface<const sync_pb::SessionSpecifics&> {
  public:
   MatchesHeaderMatcher(Matcher<std::string> session_tag,
+                       Matcher<base::Time> session_start_time,
                        Matcher<std::vector<int>> window_ids,
                        Matcher<std::vector<int>> tab_ids)
-      : session_tag_(session_tag), window_ids_(window_ids), tab_ids_(tab_ids) {}
+      : session_tag_(session_tag),
+        session_start_time_(session_start_time),
+        window_ids_(window_ids),
+        tab_ids_(tab_ids) {}
 
   bool MatchAndExplain(const sync_pb::SessionSpecifics& actual,
                        MatchResultListener* listener) const override {
@@ -40,6 +47,13 @@ class MatchesHeaderMatcher
     if (!session_tag_.MatchAndExplain(actual.session_tag(), listener)) {
       *listener << " which contains an unexpected session tag: "
                 << actual.session_tag();
+      return false;
+    }
+    base::Time actual_start_time = base::Time::FromMillisecondsSinceUnixEpoch(
+        actual.header().session_start_time_unix_epoch_millis());
+    if (!session_start_time_.MatchAndExplain(actual_start_time, listener)) {
+      *listener << " which contains an unexpected start time: "
+                << actual_start_time;
       return false;
     }
     std::vector<int> actual_window_ids;
@@ -72,6 +86,7 @@ class MatchesHeaderMatcher
 
  private:
   Matcher<std::string> session_tag_;
+  Matcher<base::Time> session_start_time_;
   Matcher<std::vector<int>> window_ids_;
   Matcher<std::vector<int>> tab_ids_;
 };
@@ -148,8 +163,11 @@ class MatchesSyncedSessionMatcher
  public:
   MatchesSyncedSessionMatcher(
       Matcher<std::string> session_tag,
+      Matcher<std::string> session_name,
       Matcher<std::map<int, std::vector<int>>> window_id_to_tabs)
-      : session_tag_(session_tag), window_id_to_tabs_(window_id_to_tabs) {}
+      : session_tag_(session_tag),
+        session_name_(session_name),
+        window_id_to_tabs_(window_id_to_tabs) {}
 
   bool MatchAndExplain(const SyncedSession* actual,
                        MatchResultListener* listener) const override {
@@ -160,6 +178,11 @@ class MatchesSyncedSessionMatcher
     if (!session_tag_.MatchAndExplain(actual->GetSessionTag(), listener)) {
       *listener << " which contains an unexpected session tag: "
                 << actual->GetSessionTag();
+      return false;
+    }
+    if (!session_name_.MatchAndExplain(actual->GetSessionName(), listener)) {
+      *listener << " which contains an unexpected session name: "
+                << actual->GetSessionName();
       return false;
     }
 
@@ -194,17 +217,35 @@ class MatchesSyncedSessionMatcher
 
  private:
   Matcher<std::string> session_tag_;
+  Matcher<std::string> session_name_;
   Matcher<std::map<int, std::vector<int>>> window_id_to_tabs_;
 };
 
 }  // namespace
 
+testing::Matcher<const sync_pb::SessionSpecifics&> MatchesHeader(
+    testing::Matcher<std::string> session_tag,
+    testing::Matcher<base::Time> session_start_time,
+    testing::Matcher<std::vector<int>> window_ids,
+    testing::Matcher<std::vector<int>> tab_ids) {
+  return testing::MakeMatcher(new MatchesHeaderMatcher(
+      session_tag, session_start_time, window_ids, tab_ids));
+}
+
 Matcher<const sync_pb::SessionSpecifics&> MatchesHeader(
     Matcher<std::string> session_tag,
     Matcher<std::vector<int>> window_ids,
     Matcher<std::vector<int>> tab_ids) {
-  return testing::MakeMatcher(
-      new MatchesHeaderMatcher(session_tag, window_ids, tab_ids));
+  return MatchesHeader(session_tag, _, window_ids, tab_ids);
+}
+
+testing::Matcher<const sync_pb::SessionSpecifics&> MatchesHeader(
+    testing::Matcher<std::string> session_tag,
+    base::Time session_start_time,
+    const std::vector<int>& window_ids,
+    const std::vector<int>& tab_ids) {
+  return MatchesHeader(session_tag, Eq(session_start_time),
+                       ElementsAreArray(window_ids), ElementsAreArray(tab_ids));
 }
 
 Matcher<const sync_pb::SessionSpecifics&> MatchesHeader(
@@ -221,7 +262,7 @@ Matcher<const sync_pb::SessionSpecifics&> MatchesTab(
     Matcher<int> tab_id,
     Matcher<int> tab_node_id,
     Matcher<std::vector<std::string>> urls) {
-  return testing::MakeMatcher(
+  return MakeMatcher(
       new MatchesTabMatcher(session_tag, window_id, tab_id, tab_node_id, urls));
 }
 
@@ -235,17 +276,29 @@ Matcher<const sync_pb::SessionSpecifics&> MatchesTab(
                     ElementsAreArray(urls));
 }
 
-Matcher<const SyncedSession*> MatchesSyncedSession(
-    Matcher<std::string> session_tag,
-    Matcher<std::map<int, std::vector<int>>> window_id_to_tabs) {
-  return testing::MakeMatcher(
-      new MatchesSyncedSessionMatcher(session_tag, window_id_to_tabs));
-}
+
 
 Matcher<const SyncedSession*> MatchesSyncedSession(
     Matcher<std::string> session_tag,
     const std::map<int, std::vector<int>>& window_id_to_tabs) {
-  return MatchesSyncedSession(session_tag, ContainerEq(window_id_to_tabs));
+  return MatchesSyncedSession(session_tag, _,
+                              ContainerEq(window_id_to_tabs));
+}
+
+Matcher<const SyncedSession*> MatchesSyncedSession(
+    Matcher<std::string> session_tag,
+    Matcher<std::string> session_name,
+    Matcher<std::map<int, std::vector<int>>> window_id_to_tabs) {
+  return MakeMatcher(new MatchesSyncedSessionMatcher(
+      session_tag, session_name, window_id_to_tabs));
+}
+
+Matcher<const SyncedSession*> MatchesSyncedSession(
+    Matcher<std::string> session_tag,
+    Matcher<std::string> session_name,
+    const std::map<int, std::vector<int>>& window_id_to_tabs) {
+  return MatchesSyncedSession(session_tag, session_name,
+                              ContainerEq(window_id_to_tabs));
 }
 
 }  // namespace sync_sessions

@@ -5,64 +5,84 @@
 #ifndef CONTENT_PUBLIC_BROWSER_SMART_CARD_DELEGATE_H_
 #define CONTENT_PUBLIC_BROWSER_SMART_CARD_DELEGATE_H_
 
-#include "base/functional/callback_forward.h"
-#include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "content/common/content_export.h"
-#include "third_party/blink/public/mojom/smart_card/smart_card.mojom-forward.h"
+#include "content/public/browser/global_routing_id.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "services/device/public/mojom/smart_card.mojom-forward.h"
+#include "url/origin.h"
 
 namespace content {
+class RenderFrameHost;
 
 // Interface provided by the content embedder to support the Web Smart Card
 // API.
 class CONTENT_EXPORT SmartCardDelegate {
  public:
-  using GetReadersCallback =
-      base::OnceCallback<void(blink::mojom::SmartCardGetReadersResultPtr)>;
-
-  // Observer class for changes to smart card readers.
-  //
-  // SmartCardDelegate implementations are expected to call the observer
-  // methods appropriately when a smart card reader is added, removed or
-  // changed. The SmartCardDelegate the base class just takes care of
-  // maintaining the observer_list_.
-  class Observer : public base::CheckedObserver {
+  class PermissionObserver : public base::CheckedObserver {
    public:
-    // Called when a smart card reader is added to the system.
-    // Depends on SupportsReaderAddedRemovedNotifications()
-    // being true.
-    virtual void OnReaderAdded(
-        const blink::mojom::SmartCardReaderInfo& reader_info) = 0;
-
-    // Called when a smart card reader is removed from the system.
-    // Depends on SupportsReaderAddedRemovedNotifications()
-    // being true.
-    virtual void OnReaderRemoved(
-        const blink::mojom::SmartCardReaderInfo& reader_info) = 0;
-
-    // Called when the attributes (state and/or atr) of a smart card reader
-    // changes.
-    virtual void OnReaderChanged(
-        const blink::mojom::SmartCardReaderInfo& reader_info) = 0;
+    // Event forwarded from
+    // permissions::ObjectPermissionContextBase::PermissionObserver:
+    virtual void OnPermissionRevoked(const url::Origin& origin) = 0;
   };
+  // Callback type to report whether the user allowed the connection request.
+  using RequestReaderPermissionCallback = base::OnceCallback<void(bool)>;
 
-  SmartCardDelegate();
+  SmartCardDelegate() = default;
   SmartCardDelegate(SmartCardDelegate&) = delete;
   SmartCardDelegate& operator=(SmartCardDelegate&) = delete;
-  virtual ~SmartCardDelegate();
+  virtual ~SmartCardDelegate() = default;
 
-  // Returns the list of smart card readers currently connected to the system.
-  virtual void GetReaders(GetReadersCallback) = 0;
+  virtual mojo::PendingRemote<device::mojom::SmartCardContextFactory>
+  GetSmartCardContextFactory(content::RenderFrameHost& render_frame_host) = 0;
 
-  // Whether the implementation supports notifying when a smart card
-  // reader device is added or removed from the system.
-  // Platform dependent.
-  virtual bool SupportsReaderAddedRemovedNotifications() const = 0;
+  // Returns whether the origin is blocked from connecting to smart card
+  // readers.
+  virtual bool IsPermissionBlocked(RenderFrameHost& render_frame_host) = 0;
 
-  void AddObserver(Observer* observer);
-  void RemoveObserver(Observer* observer);
+  // Returns whether `origin` has permission to connect to the smart card reader
+  // names `reader_name`.
+  //
+  // Will always return false if the frame's origin IsPermissionBlocked().
+  virtual bool HasReaderPermission(RenderFrameHost& render_frame_host,
+                                   const std::string& reader_name) = 0;
 
- protected:
-  base::ObserverList<Observer> observer_list_;
+  virtual void NotifyConnectionUsed(RenderFrameHost& render_frame_host) = 0;
+  virtual void NotifyLastConnectionLost(RenderFrameHost& render_frame_host) = 0;
+
+  virtual void AddObserver(RenderFrameHost& render_frame_host,
+                           PermissionObserver* observer) = 0;
+  virtual void RemoveObserver(RenderFrameHost& render_frame_host,
+                              PermissionObserver* observer) = 0;
+
+  // Shows a prompt to the user requesting permission to connect to the smart
+  // card reader named `reader_name`.
+  //
+  // If the frame's origin IsPermissionBlocked(), `callback` will immediately
+  // receive false.
+  virtual void RequestReaderPermission(
+      RenderFrameHost& render_frame_host,
+      const std::string& reader_name,
+      RequestReaderPermissionCallback callback) = 0;
+
+  // Registers a callback to retrieve a Smart Card emulation factory for the
+  // specified RenderFrameHost.
+  //
+  // This is used by DevTools to intercept and handle PCSC calls from the
+  // renderer when Smart Card emulation is enabled. The |factory_getter|
+  // will be invoked whenever the renderer requests a new
+  // SmartCardContextFactory.
+  virtual void SetEmulationFactory(
+      content::GlobalRenderFrameHostId frame_id,
+      base::RepeatingCallback<
+          mojo::PendingRemote<device::mojom::SmartCardContextFactory>()>
+          factory_getter) = 0;
+
+  // Removes the emulation factory override for the specified RenderFrameHost.
+  // This restores the default behavior where Smart Card requests are routed
+  // to the real system PCSC service.
+  virtual void ClearEmulationFactory(
+      content::GlobalRenderFrameHostId frame_id) = 0;
 };
 
 }  // namespace content

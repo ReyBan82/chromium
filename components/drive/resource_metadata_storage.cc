@@ -7,22 +7,20 @@
 #include <stddef.h>
 
 #include <map>
-#include <set>
-#include <unordered_map>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/metrics/histogram.h"
-#include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "components/drive/drive.pb.h"
 #include "components/drive/drive_api_util.h"
 #include "components/drive/file_system_core_util.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "third_party/leveldatabase/env_chromium.h"
 #include "third_party/leveldatabase/leveldb_chrome.h"
 #include "third_party/leveldatabase/src/include/leveldb/db.h"
@@ -40,25 +38,6 @@ enum DBInitStatus {
   DB_INIT_CORRUPTION,
   DB_INIT_IO_ERROR,
   DB_INIT_FAILED,
-  DB_INIT_INCOMPATIBLE,
-  DB_INIT_BROKEN,
-  DB_INIT_OPENED_EXISTING_DB,
-  DB_INIT_CREATED_NEW_DB,
-  DB_INIT_REPLACED_EXISTING_DB_WITH_NEW_DB,
-  DB_INIT_MAX_VALUE,
-};
-
-// Enum to describe DB validity check failure reason.
-enum CheckValidityFailureReason {
-  CHECK_VALIDITY_FAILURE_INVALID_HEADER,
-  CHECK_VALIDITY_FAILURE_BROKEN_ID_ENTRY,
-  CHECK_VALIDITY_FAILURE_BROKEN_ENTRY,
-  CHECK_VALIDITY_FAILURE_INVALID_LOCAL_ID,
-  CHECK_VALIDITY_FAILURE_INVALID_PARENT_ID,
-  CHECK_VALIDITY_FAILURE_BROKEN_CHILD_MAP,
-  CHECK_VALIDITY_FAILURE_CHILD_ENTRY_COUNT_MISMATCH,
-  CHECK_VALIDITY_FAILURE_ITERATOR_ERROR,
-  CHECK_VALIDITY_FAILURE_MAX_VALUE,
 };
 
 // The name of the DB which stores the metadata.
@@ -74,7 +53,7 @@ const base::FilePath::CharType kTrashedResourceMapDBName[] =
     FILE_PATH_LITERAL("resource_metadata_trashed_resource_map.db");
 
 // Meant to be a character which never happen to be in real IDs.
-const char kDBKeyDelimeter = '\0';
+const char kDBKeyDelimiter = '\0';
 
 // String used as a suffix of a key for a cache entry.
 const char kCacheEntryKeySuffix[] = "CACHE";
@@ -85,34 +64,35 @@ const char kIdEntryKeyPrefix[] = "ID";
 // Returns a string to be used as the key for the header.
 std::string GetHeaderDBKey() {
   std::string key;
-  key.push_back(kDBKeyDelimeter);
+  key.push_back(kDBKeyDelimiter);
   key.append("HEADER");
   return key;
 }
 
 // Returns true if |key| is a key for a child entry.
 bool IsChildEntryKey(const leveldb::Slice& key) {
-  return !key.empty() && key[key.size() - 1] == kDBKeyDelimeter;
+  return !key.empty() && key[key.size() - 1] == kDBKeyDelimiter;
 }
 
 // Returns true if |key| is a key for a cache entry.
 bool IsCacheEntryKey(const leveldb::Slice& key) {
-  // A cache entry key should end with |kDBKeyDelimeter + kCacheEntryKeySuffix|.
+  // A cache entry key should end with |kDBKeyDelimiter + kCacheEntryKeySuffix|.
   const leveldb::Slice expected_suffix(kCacheEntryKeySuffix,
                                        std::size(kCacheEntryKeySuffix) - 1);
   if (key.size() < 1 + expected_suffix.size() ||
-      key[key.size() - expected_suffix.size() - 1] != kDBKeyDelimeter)
+      key[key.size() - expected_suffix.size() - 1] != kDBKeyDelimiter) {
     return false;
+  }
 
-  const leveldb::Slice key_substring(
-      key.data() + key.size() - expected_suffix.size(), expected_suffix.size());
+  leveldb::Slice key_substring = key;
+  key_substring.remove_prefix(key.size() - expected_suffix.size());
   return key_substring.compare(expected_suffix) == 0;
 }
 
 // Returns ID extracted from a cache entry key.
 std::string GetIdFromCacheEntryKey(const leveldb::Slice& key) {
   DCHECK(IsCacheEntryKey(key));
-  // Drop the suffix |kDBKeyDelimeter + kCacheEntryKeySuffix| from the key.
+  // Drop the suffix |kDBKeyDelimiter + kCacheEntryKeySuffix| from the key.
   const size_t kSuffixLength = std::size(kCacheEntryKeySuffix) - 1;
   const int id_length = key.size() - 1 - kSuffixLength;
   return std::string(key.data(), id_length);
@@ -121,9 +101,9 @@ std::string GetIdFromCacheEntryKey(const leveldb::Slice& key) {
 // Returns a string to be used as a key for a resource-ID-to-local-ID entry.
 std::string GetIdEntryKey(const std::string& resource_id) {
   std::string key;
-  key.push_back(kDBKeyDelimeter);
+  key.push_back(kDBKeyDelimiter);
   key.append(kIdEntryKeyPrefix);
-  key.push_back(kDBKeyDelimeter);
+  key.push_back(kDBKeyDelimiter);
   key.append(resource_id);
   return key;
 }
@@ -131,25 +111,29 @@ std::string GetIdEntryKey(const std::string& resource_id) {
 // Returns true if |key| is a key for a resource-ID-to-local-ID entry.
 bool IsIdEntryKey(const leveldb::Slice& key) {
   // A resource-ID-to-local-ID entry key should start with
-  // |kDBKeyDelimeter + kIdEntryKeyPrefix + kDBKeyDelimeter|.
-  const leveldb::Slice expected_prefix(kIdEntryKeyPrefix,
-                                       std::size(kIdEntryKeyPrefix) - 1);
-  if (key.size() < 2 + expected_prefix.size())
+  // |kDBKeyDelimiter + kIdEntryKeyPrefix + kDBKeyDelimiter|.
+  leveldb::Slice prefix(kIdEntryKeyPrefix, std::size(kIdEntryKeyPrefix) - 1);
+  if (key.size() < 2 + prefix.size()) {
     return false;
-  const leveldb::Slice key_substring(key.data() + 1, expected_prefix.size());
-  return key[0] == kDBKeyDelimeter &&
-      key_substring.compare(expected_prefix) == 0 &&
-      key[expected_prefix.size() + 1] == kDBKeyDelimeter;
+  }
+
+  leveldb::Slice key_substring = key;
+  key_substring.remove_prefix(1);
+
+  return key[0] == kDBKeyDelimiter && key_substring.starts_with(prefix) &&
+         key[prefix.size() + 1] == kDBKeyDelimiter;
 }
 
 // Returns the resource ID extracted from a resource-ID-to-local-ID entry key.
 std::string GetResourceIdFromIdEntryKey(const leveldb::Slice& key) {
   DCHECK(IsIdEntryKey(key));
-  // Drop the prefix |kDBKeyDelimeter + kIdEntryKeyPrefix + kDBKeyDelimeter|
+  // Drop the prefix |kDBKeyDelimiter + kIdEntryKeyPrefix + kDBKeyDelimiter|
   // from the key.
   const size_t kPrefixLength = std::size(kIdEntryKeyPrefix) - 1;
   const int offset = kPrefixLength + 2;
-  return std::string(key.data() + offset, key.size() - offset);
+  leveldb::Slice resource_id = key;
+  resource_id.remove_prefix(offset);
+  return resource_id.ToString();
 }
 
 // Converts leveldb::Status to DBInitStatus.
@@ -184,12 +168,6 @@ ResourceMetadataHeader GetDefaultHeaderEntry() {
 
 bool MoveIfPossible(const base::FilePath& from, const base::FilePath& to) {
   return !base::PathExists(from) || base::Move(from, to);
-}
-
-void RecordCheckValidityFailure(CheckValidityFailureReason reason) {
-  UMA_HISTOGRAM_ENUMERATION("Drive.MetadataDBValidityCheckFailureReason",
-                            reason,
-                            CHECK_VALIDITY_FAILURE_MAX_VALUE);
 }
 
 bool UpgradeOldDBVersions6To10(leveldb::DB* resource_map) {
@@ -254,7 +232,7 @@ bool UpgradeOldDBVersion11(leveldb::DB* resource_map) {
   std::unique_ptr<leveldb::Iterator> it(resource_map->NewIterator(options));
 
   // First, get the set of local IDs associated with cache entries.
-  std::set<std::string> cached_entry_ids;
+  absl::flat_hash_set<std::string> cached_entry_ids;
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
     if (IsCacheEntryKey(it->key()))
       cached_entry_ids.insert(GetIdFromCacheEntryKey(it->key()));
@@ -267,7 +245,7 @@ bool UpgradeOldDBVersion11(leveldb::DB* resource_map) {
   std::map<std::string, std::string> local_id_to_resource_id;
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
     const bool is_used_id = IsIdEntryKey(it->key()) &&
-                            cached_entry_ids.count(it->value().ToString());
+                            cached_entry_ids.contains(it->value().ToString());
     if (is_used_id) {
       local_id_to_resource_id[it->value().ToString()] =
           GetResourceIdFromIdEntryKey(it->key());
@@ -394,7 +372,7 @@ bool UpgradeOldDBVersion12(leveldb::DB* resource_map) {
 bool UpgradeOldDBVersion13(leveldb::DB* resource_map) {
   // Before r272134, UpgradeOldDB() was not deleting unused ID entries.
   // Delete unused ID entries to fix crbug.com/374648.
-  std::set<std::string> used_ids;
+  absl::flat_hash_set<std::string> used_ids;
 
   std::unique_ptr<leveldb::Iterator> it(
       resource_map->NewIterator(leveldb::ReadOptions()));
@@ -411,8 +389,9 @@ bool UpgradeOldDBVersion13(leveldb::DB* resource_map) {
 
   leveldb::WriteBatch batch;
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
-    if (IsIdEntryKey(it->key()) && !used_ids.count(it->value().ToString()))
+    if (IsIdEntryKey(it->key()) && !used_ids.contains(it->value().ToString())) {
       batch.Delete(it->key());
+    }
   }
   if (!it->status().ok())
     return false;
@@ -519,7 +498,7 @@ ResourceMetadataStorage::Iterator::Iterator(
 
   // Skip the header entry.
   // Note: The header entry comes before all other entries because its key
-  // starts with kDBKeyDelimeter. (i.e. '\0')
+  // starts with kDBKeyDelimiter. (i.e. '\0')
   it_->Seek(leveldb::Slice(GetHeaderDBKey()));
 
   Advance();
@@ -614,8 +593,6 @@ bool ResourceMetadataStorage::UpgradeOldDB(
                          &serialized_header).ok() ||
       !header.ParseFromString(serialized_header))
     return false;
-  base::UmaHistogramSparse("Drive.MetadataDBVersionBeforeUpgradeCheck",
-                           header.version());
 
   switch (header.version()) {
     case 1:
@@ -705,10 +682,8 @@ bool ResourceMetadataStorage::Initialize() {
 
     bool should_discard_db = true;
     if (db_version != kDBVersion) {
-      open_existing_result = DB_INIT_INCOMPATIBLE;
       DVLOG(1) << "Reject incompatible DB.";
     } else if (!CheckValidity()) {
-      open_existing_result = DB_INIT_BROKEN;
       LOG(ERROR) << "Reject invalid DB.";
     } else {
       should_discard_db = false;
@@ -719,12 +694,6 @@ bool ResourceMetadataStorage::Initialize() {
     else
       cache_file_scan_is_needed_ = false;
   }
-
-  UMA_HISTOGRAM_ENUMERATION("Drive.MetadataDBOpenExistingResult",
-                            open_existing_result,
-                            DB_INIT_MAX_VALUE);
-
-  DBInitStatus init_result = DB_INIT_OPENED_EXISTING_DB;
 
   // Failed to open the existing DB, create new DB.
   if (!resource_map_) {
@@ -743,24 +712,15 @@ bool ResourceMetadataStorage::Initialize() {
                                  &resource_map_);
     if (status.ok()) {
       // Set up header and trash the old DB.
-      if (PutHeader(GetDefaultHeaderEntry()) == FILE_ERROR_OK &&
-          MoveIfPossible(preserved_resource_map_path,
-                         trashed_resource_map_path)) {
-        init_result = open_existing_result == DB_INIT_NOT_FOUND ?
-            DB_INIT_CREATED_NEW_DB : DB_INIT_REPLACED_EXISTING_DB_WITH_NEW_DB;
-      } else {
-        init_result = DB_INIT_FAILED;
+      if (PutHeader(GetDefaultHeaderEntry()) != FILE_ERROR_OK ||
+          !MoveIfPossible(preserved_resource_map_path,
+                          trashed_resource_map_path)) {
         resource_map_.reset();
       }
     } else {
       LOG(ERROR) << "Failed to create resource map DB: " << status.ToString();
-      init_result = LevelDBStatusToDBInitStatus(status);
     }
   }
-
-  UMA_HISTOGRAM_ENUMERATION("Drive.MetadataDBInitResult",
-                            init_result,
-                            DB_INIT_MAX_VALUE);
   return !!resource_map_;
 }
 
@@ -1068,9 +1028,9 @@ std::string ResourceMetadataStorage::GetChildEntryKey(
   DCHECK(!child_name.empty());
 
   std::string key = parent_id;
-  key.push_back(kDBKeyDelimeter);
+  key.push_back(kDBKeyDelimiter);
   key.append(child_name);
-  key.push_back(kDBKeyDelimeter);
+  key.push_back(kDBKeyDelimiter);
   return key;
 }
 
@@ -1141,15 +1101,14 @@ bool ResourceMetadataStorage::CheckValidity() {
       !header.ParseFromArray(it->value().data(), it->value().size()) ||
       header.version() != kDBVersion) {
     DLOG(ERROR) << "Invalid header detected. version = " << header.version();
-    RecordCheckValidityFailure(CHECK_VALIDITY_FAILURE_INVALID_HEADER);
     return false;
   }
 
   // First scan. Remember relationships between IDs.
-  typedef std::unordered_map<std::string, std::string> KeyToIdMapping;
+  typedef absl::flat_hash_map<std::string, std::string> KeyToIdMapping;
   KeyToIdMapping local_id_to_resource_id_map;
   KeyToIdMapping child_key_to_local_id_map;
-  std::set<std::string> resource_entries;
+  absl::flat_hash_set<std::string> resource_entries;
   std::string first_resource_entry_key;
   for (it->Next(); it->Valid(); it->Next()) {
     if (IsChildEntryKey(it->key())) {
@@ -1164,7 +1123,6 @@ bool ResourceMetadataStorage::CheckValidity() {
       // Check that no local ID is associated with more than one resource ID.
       if (!result.second) {
         DLOG(ERROR) << "Broken ID entry.";
-        RecordCheckValidityFailure(CHECK_VALIDITY_FAILURE_BROKEN_ID_ENTRY);
         return false;
       }
       continue;
@@ -1187,7 +1145,6 @@ bool ResourceMetadataStorage::CheckValidity() {
 
     if (!entry.ParseFromArray(it->value().data(), it->value().size())) {
       DLOG(ERROR) << "Broken entry detected.";
-      RecordCheckValidityFailure(CHECK_VALIDITY_FAILURE_BROKEN_ENTRY);
       return false;
     }
 
@@ -1198,18 +1155,14 @@ bool ResourceMetadataStorage::CheckValidity() {
     if (mapping_it != local_id_to_resource_id_map.end() &&
         entry.resource_id() != mapping_it->second) {
       DLOG(ERROR) << "Broken ID entry.";
-      RecordCheckValidityFailure(CHECK_VALIDITY_FAILURE_BROKEN_ID_ENTRY);
       return false;
     }
 
     // If the parent is referenced, then confirm that it exists and check the
     // parent-child relationships.
     if (!entry.parent_local_id().empty()) {
-      const auto parent_mapping_it =
-          resource_entries.find(entry.parent_local_id());
-      if (parent_mapping_it == resource_entries.end()) {
+      if (!resource_entries.contains(entry.parent_local_id())) {
         DLOG(ERROR) << "Parent entry not found.";
-        RecordCheckValidityFailure(CHECK_VALIDITY_FAILURE_INVALID_PARENT_ID);
         return false;
       }
 
@@ -1219,7 +1172,6 @@ bool ResourceMetadataStorage::CheckValidity() {
       if (child_mapping_it == child_key_to_local_id_map.end() ||
           leveldb::Slice(child_mapping_it->second) != it->key()) {
         DLOG(ERROR) << "Child map is broken.";
-        RecordCheckValidityFailure(CHECK_VALIDITY_FAILURE_BROKEN_CHILD_MAP);
         return false;
       }
       ++num_entries_with_parent;
@@ -1229,14 +1181,11 @@ bool ResourceMetadataStorage::CheckValidity() {
   if (!it->status().ok()) {
     DLOG(ERROR) << "Error during checking resource map. status = "
                 << it->status().ToString();
-    RecordCheckValidityFailure(CHECK_VALIDITY_FAILURE_ITERATOR_ERROR);
     return false;
   }
 
   if (child_key_to_local_id_map.size() != num_entries_with_parent) {
     DLOG(ERROR) << "Child entry count mismatch.";
-    RecordCheckValidityFailure(
-        CHECK_VALIDITY_FAILURE_CHILD_ENTRY_COUNT_MISMATCH);
     return false;
   }
 

@@ -12,37 +12,82 @@ import android.view.ViewGroup.MarginLayoutParams;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import androidx.core.text.BidiFormatter;
+
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.R;
+import org.chromium.ui.listmenu.ListMenuItemProperties;
 import org.chromium.ui.modelutil.PropertyKey;
 import org.chromium.ui.modelutil.PropertyModel;
 
+@NullMarked
 class ContextMenuHeaderViewBinder {
     public static void bind(PropertyModel model, View view, PropertyKey propertyKey) {
-        if (propertyKey == ContextMenuHeaderProperties.TITLE) {
-            TextView titleText = view.findViewById(R.id.menu_header_title);
-            titleText.setText(model.get(ContextMenuHeaderProperties.TITLE));
-            titleText.setVisibility(TextUtils.isEmpty(model.get(ContextMenuHeaderProperties.TITLE))
+        if (propertyKey == ListMenuItemProperties.TITLE) {
+            TextView altText = view.findViewById(R.id.menu_header_alt_text);
+            altText.setText(model.get(ListMenuItemProperties.TITLE));
+            altText.setVisibility(
+                    TextUtils.isEmpty(model.get(ListMenuItemProperties.TITLE))
                             ? View.GONE
                             : View.VISIBLE);
-        } else if (propertyKey == ContextMenuHeaderProperties.TITLE_MAX_LINES) {
-            final int maxLines = model.get(ContextMenuHeaderProperties.TITLE_MAX_LINES);
-            final TextView titleText = view.findViewById(R.id.menu_header_title);
-            titleText.setMaxLines(maxLines);
+        } else if (propertyKey == ContextMenuHeaderProperties.ALT_TEXT_MAX_LINES) {
+            final int maxLines = model.get(ContextMenuHeaderProperties.ALT_TEXT_MAX_LINES);
+            final TextView altText = view.findViewById(R.id.menu_header_alt_text);
+            altText.setMaxLines(maxLines);
             if (maxLines == Integer.MAX_VALUE) {
-                titleText.setEllipsize(null);
+                altText.setEllipsize(null);
             } else {
-                titleText.setEllipsize(TextUtils.TruncateAt.END);
+                altText.setEllipsize(TextUtils.TruncateAt.END);
+            }
+        } else if (propertyKey == ContextMenuHeaderProperties.PAGE_TITLE) {
+            final TextView pageTitleText = view.findViewById(R.id.menu_header_page_title);
+            pageTitleText.setText(model.get(ContextMenuHeaderProperties.PAGE_TITLE));
+            pageTitleText.setVisibility(
+                    TextUtils.isEmpty(model.get(ContextMenuHeaderProperties.PAGE_TITLE))
+                            ? View.GONE
+                            : View.VISIBLE);
+
+        } else if (propertyKey == ContextMenuHeaderProperties.PAGE_TITLE_MAX_LINES) {
+            final int maxLines = model.get(ContextMenuHeaderProperties.PAGE_TITLE_MAX_LINES);
+            final TextView pageTitle = view.findViewById(R.id.menu_header_page_title);
+            pageTitle.setMaxLines(maxLines);
+            if (maxLines == Integer.MAX_VALUE) {
+                pageTitle.setEllipsize(null);
+            } else {
+                pageTitle.setEllipsize(TextUtils.TruncateAt.END);
             }
         } else if (propertyKey == ContextMenuHeaderProperties.URL) {
             TextView urlText = view.findViewById(R.id.menu_header_url);
-            urlText.setText(model.get(ContextMenuHeaderProperties.URL));
-            urlText.setVisibility(TextUtils.isEmpty(model.get(ContextMenuHeaderProperties.URL))
-                            ? View.GONE
-                            : View.VISIBLE);
+            CharSequence url = model.get(ContextMenuHeaderProperties.URL);
+            urlText.setText(url == null ? null : BidiFormatter.getInstance().unicodeWrap(url));
+            urlText.setVisibility(TextUtils.isEmpty(url) ? View.GONE : View.VISIBLE);
+        } else if (propertyKey == ContextMenuHeaderProperties.SECONDARY_URL) {
+            TextView secondaryUrlText = view.findViewById(R.id.menu_header_secondary_url);
+            CharSequence secondaryUrl = model.get(ContextMenuHeaderProperties.SECONDARY_URL);
+            secondaryUrlText.setText(
+                    secondaryUrl == null
+                            ? null
+                            : BidiFormatter.getInstance().unicodeWrap(secondaryUrl));
+            secondaryUrlText.setVisibility(
+                    TextUtils.isEmpty(secondaryUrl) ? View.GONE : View.VISIBLE);
+        } else if (propertyKey == ContextMenuHeaderProperties.TERTIARY_URL) {
+            TextView tertiaryUrlText = view.findViewById(R.id.menu_header_tertiary_url);
+            CharSequence tertiaryUrl = model.get(ContextMenuHeaderProperties.TERTIARY_URL);
+            tertiaryUrlText.setText(
+                    tertiaryUrl == null
+                            ? null
+                            : BidiFormatter.getInstance().unicodeWrap(tertiaryUrl));
+            tertiaryUrlText.setVisibility(
+                    TextUtils.isEmpty(tertiaryUrl) ? View.GONE : View.VISIBLE);
         } else if (propertyKey == ContextMenuHeaderProperties.TITLE_AND_URL_CLICK_LISTENER) {
-            view.findViewById(R.id.title_and_url)
-                    .setOnClickListener(
-                            model.get(ContextMenuHeaderProperties.TITLE_AND_URL_CLICK_LISTENER));
+            final View.OnClickListener listener =
+                    model.get(ContextMenuHeaderProperties.TITLE_AND_URL_CLICK_LISTENER);
+            final ContextMenuHeaderTextView header = view.findViewById(R.id.title_and_url);
+            header.setOnClickListener(listener);
+        } else if (propertyKey == ContextMenuHeaderProperties.IS_EXPANDED) {
+            final boolean isExpanded = model.get(ContextMenuHeaderProperties.IS_EXPANDED);
+            final ContextMenuHeaderTextView header = view.findViewById(R.id.title_and_url);
+            header.setIsExpanded(isExpanded);
         } else if (propertyKey == ContextMenuHeaderProperties.URL_MAX_LINES) {
             final int maxLines = model.get(ContextMenuHeaderProperties.URL_MAX_LINES);
             final TextView urlText = view.findViewById(R.id.menu_header_url);
@@ -51,6 +96,24 @@ class ContextMenuHeaderViewBinder {
                 urlText.setEllipsize(null);
             } else {
                 urlText.setEllipsize(TextUtils.TruncateAt.END);
+            }
+        } else if (propertyKey == ContextMenuHeaderProperties.SECONDARY_URL_MAX_LINES) {
+            final int maxLines = model.get(ContextMenuHeaderProperties.SECONDARY_URL_MAX_LINES);
+            final TextView secondaryUrlText = view.findViewById(R.id.menu_header_secondary_url);
+            secondaryUrlText.setMaxLines(maxLines);
+            if (maxLines == Integer.MAX_VALUE) {
+                secondaryUrlText.setEllipsize(null);
+            } else {
+                secondaryUrlText.setEllipsize(TextUtils.TruncateAt.END);
+            }
+        } else if (propertyKey == ContextMenuHeaderProperties.TERTIARY_URL_MAX_LINES) {
+            final int maxLines = model.get(ContextMenuHeaderProperties.TERTIARY_URL_MAX_LINES);
+            final TextView tertiaryUrlText = view.findViewById(R.id.menu_header_tertiary_url);
+            tertiaryUrlText.setMaxLines(maxLines);
+            if (maxLines == Integer.MAX_VALUE) {
+                tertiaryUrlText.setEllipsize(null);
+            } else {
+                tertiaryUrlText.setEllipsize(TextUtils.TruncateAt.END);
             }
         } else if (propertyKey == ContextMenuHeaderProperties.IMAGE) {
             Bitmap bitmap = model.get(ContextMenuHeaderProperties.IMAGE);

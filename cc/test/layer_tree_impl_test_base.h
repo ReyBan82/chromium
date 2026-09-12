@@ -12,7 +12,7 @@
 
 #include "cc/animation/animation_timeline.h"
 #include "cc/test/fake_layer_tree_host.h"
-#include "cc/test/fake_layer_tree_host_client.h"
+#include "cc/test/fake_layer_tree_host_delegate.h"
 #include "cc/test/layer_test_common.h"
 #include "cc/test/property_tree_test_utils.h"
 #include "cc/test/test_task_graph_runner.h"
@@ -39,7 +39,7 @@ class LayerTreeImplTestBase {
   ~LayerTreeImplTestBase();
 
   template <typename T, typename... Args>
-  T* AddLayer(Args&&... args) {
+  T* AddLayerInActiveTree(Args&&... args) {
     return AddLayerInternal<T>(host_impl()->active_tree(),
                                std::forward<Args>(args)...);
   }
@@ -53,6 +53,7 @@ class LayerTreeImplTestBase {
   }
 
   void CalcDrawProps(const gfx::Size& viewport_size);
+  void AppendQuads(LayerImpl* layer_impl);
   void AppendQuadsWithOcclusion(LayerImpl* layer_impl,
                                 const gfx::Rect& occluded);
   void AppendQuadsForPassWithOcclusion(
@@ -98,7 +99,7 @@ class LayerTreeImplTestBase {
   void UpdatePendingTreeDrawProperties(float device_scale_factor = 1.0f);
 
   bool UpdateLayerImplListContains(int id) const {
-    for (const auto* layer : update_layer_impl_list_) {
+    for (const LayerImpl* layer : update_layer_impl_list_) {
       if (layer->id() == id)
         return true;
     }
@@ -119,7 +120,7 @@ class LayerTreeImplTestBase {
     return ptr;
   }
 
-  FakeLayerTreeHostClient client_;
+  FakeLayerTreeHostDelegate client_;
   TestTaskGraphRunner task_graph_runner_;
   std::unique_ptr<LayerTreeFrameSink> layer_tree_frame_sink_;
   std::unique_ptr<AnimationHost> animation_host_;

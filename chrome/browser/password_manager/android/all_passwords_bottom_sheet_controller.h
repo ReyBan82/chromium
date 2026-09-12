@@ -5,27 +5,40 @@
 #ifndef CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_ALL_PASSWORDS_BOTTOM_SHEET_CONTROLLER_H_
 #define CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_ALL_PASSWORDS_BOTTOM_SHEET_CONTROLLER_H_
 
+#include <vector>
+
+#include "base/barrier_callback.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "base/types/pass_key.h"
 #include "base/types/strong_alias.h"
 #include "components/autofill/core/common/mojom/autofill_types.mojom-forward.h"
-#include "components/device_reauth/biometric_authenticator.h"
-#include "components/password_manager/core/browser/password_store_consumer.h"
-#include "ui/gfx/native_widget_types.h"
+#include "components/device_reauth/device_authenticator.h"
+#include "components/password_manager/core/browser/password_manager_metrics_util.h"
+#include "components/password_manager/core/browser/password_store/password_store_backend_error.h"
+#include "components/password_manager/core/browser/password_store/password_store_consumer.h"
+#include "components/password_manager/core/browser/password_store/stored_credential.h"
+#include "ui/gfx/native_ui_types.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 namespace password_manager {
 class PasswordManagerClient;
 class PasswordManagerDriver;
 }  // namespace password_manager
 
+namespace safe_browsing {
+class PasswordReuseDetectionManagerClient;
+}
+
 namespace content {
 class WebContents;
 }  // namespace content
 
 class AllPasswordsBottomSheetView;
+class Profile;
 
 // This class gets credentials and creates AllPasswordsBottomSheetView.
 class AllPasswordsBottomSheetController
@@ -33,19 +46,25 @@ class AllPasswordsBottomSheetController
  public:
   using RequestsToFillPassword =
       base::StrongAlias<struct RequestsToFillPasswordTag, bool>;
+
   // No-op constructor for tests.
   AllPasswordsBottomSheetController(
       base::PassKey<class AllPasswordsBottomSheetControllerTest>,
+      content::WebContents* web_contents,
       std::unique_ptr<AllPasswordsBottomSheetView> view,
       base::WeakPtr<password_manager::PasswordManagerDriver> driver,
-      password_manager::PasswordStoreInterface* store,
+      password_manager::PasswordStoreInterface* profile_store,
+      password_manager::PasswordStoreInterface* account_store,
       base::OnceCallback<void()> dismissal_callback,
       autofill::mojom::FocusedFieldType focused_field_type,
-      password_manager::PasswordManagerClient* client);
+      password_manager::PasswordManagerClient* client,
+      safe_browsing::PasswordReuseDetectionManagerClient*
+          password_reuse_detection_manager_client);
 
   AllPasswordsBottomSheetController(
       content::WebContents* web_contents,
-      password_manager::PasswordStoreInterface* store,
+      password_manager::PasswordStoreInterface* profile_store,
+      password_manager::PasswordStoreInterface* account_store,
       base::OnceCallback<void()> dismissal_callback,
       autofill::mojom::FocusedFieldType focused_field_type);
   ~AllPasswordsBottomSheetController() override;
@@ -55,9 +74,11 @@ class AllPasswordsBottomSheetController
       const AllPasswordsBottomSheetController&) = delete;
 
   // PasswordStoreConsumer:
-  void OnGetPasswordStoreResults(
-      std::vector<std::unique_ptr<password_manager::PasswordForm>> results)
-      override;
+  void OnGetPasswordStoreResultsOrErrorFrom(
+      password_manager::PasswordStoreInterface* store,
+      base::expected<std::vector<password_manager::StoredCredential>,
+                     password_manager::PasswordStoreBackendError>
+          results_or_error) override;
 
   // Instructs AllPasswordsBottomSheetView to show the credentials to the user.
   void Show();
@@ -67,6 +88,9 @@ class AllPasswordsBottomSheetController
                             const std::u16string password,
                             RequestsToFillPassword requests_to_fill_password);
 
+  // The Profile associated with the displayed web contents.
+  Profile* GetProfile();
+
   // The web page view containing the focused field.
   gfx::NativeView GetNativeView();
 
@@ -74,8 +98,8 @@ class AllPasswordsBottomSheetController
   // consumes |dismissal_callback|.
   void OnDismiss();
 
-  // Returns the last committed URL of the frame from |driver_|.
-  const GURL& GetFrameUrl();
+  // Returns the URL of `frame_origin_`.
+  GURL GetFrameOriginUrl();
 
  private:
   // Called when the biometric re-auth completes. |password| is the password
@@ -84,6 +108,9 @@ class AllPasswordsBottomSheetController
 
   // Fills the password into the focused field.
   void FillPassword(const std::u16string& password);
+
+  void OnResultFromAllStoresReceived(
+      std::vector<std::vector<password_manager::PasswordForm>> results);
 
   // The controller takes |view_| ownership.
   std::unique_ptr<AllPasswordsBottomSheetView> view_;
@@ -94,7 +121,12 @@ class AllPasswordsBottomSheetController
   raw_ptr<content::WebContents> web_contents_ = nullptr;
 
   // The controller doesn't take |store_| ownership.
-  raw_ptr<password_manager::PasswordStoreInterface> store_;
+  raw_ptr<password_manager::PasswordStoreInterface> profile_store_;
+  raw_ptr<password_manager::PasswordStoreInterface> account_store_;
+
+  // Allows to aggregate GetAllLogins results from multiple stores.
+  base::RepeatingCallback<void(std::vector<password_manager::PasswordForm>)>
+      on_password_forms_received_barrier_callback_;
 
   // A callback method will be consumed when the user dismisses the BottomSheet.
   base::OnceCallback<void()> dismissal_callback_;
@@ -104,15 +136,23 @@ class AllPasswordsBottomSheetController
   base::WeakPtr<password_manager::PasswordManagerDriver> driver_;
 
   // Authenticator used to trigger a biometric re-auth before password filling.
-  scoped_refptr<device_reauth::BiometricAuthenticator> authenticator_;
+  std::unique_ptr<device_reauth::DeviceAuthenticator> authenticator_;
 
   // The type of field on which the user is focused, e.g. PASSWORD.
   autofill::mojom::FocusedFieldType focused_field_type_;
 
   // The PasswordManagerClient associated with the current |web_contents_|.
-  // Used to tell `PasswordReuseDetectionManager` that a password has been
-  // reused.
+  // Used to get a pointer to a BiometricAuthenticator.
   raw_ptr<password_manager::PasswordManagerClient> client_ = nullptr;
+
+  // The passwordReuseDetectionManagerClient associated with the current
+  // |web_contents_|. Used to tell `PasswordReuseDetectionManager` that a
+  // password has been reused.
+  raw_ptr<safe_browsing::PasswordReuseDetectionManagerClient>
+      password_reuse_detection_manager_client_ = nullptr;
+
+  // The origin of the frame at the time this controller was created.
+  url::Origin frame_origin_;
 
   base::WeakPtrFactory<AllPasswordsBottomSheetController> weak_ptr_factory_{
       this};

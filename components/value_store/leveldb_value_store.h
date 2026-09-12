@@ -45,6 +45,7 @@ class LeveldbValueStore : public ValueStore,
   size_t GetBytesInUse(const std::string& key) override;
   size_t GetBytesInUse(const std::vector<std::string>& keys) override;
   size_t GetBytesInUse() override;
+  ReadResult GetKeys() override;
   ReadResult Get(const std::string& key) override;
   ReadResult Get(const std::vector<std::string>& keys) override;
   ReadResult Get() override;
@@ -52,7 +53,7 @@ class LeveldbValueStore : public ValueStore,
                   const std::string& key,
                   const base::Value& value) override;
   WriteResult Set(ValueStore::WriteOptions options,
-                  const base::Value::Dict& values) override;
+                  const base::DictValue& values) override;
   WriteResult Remove(const std::string& key) override;
   WriteResult Remove(const std::vector<std::string>& keys) override;
   WriteResult Clear() override;

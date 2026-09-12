@@ -5,7 +5,7 @@
 #ifndef CONTENT_BROWSER_MEDIA_MEDIA_INTERNALS_HANDLER_H_
 #define CONTENT_BROWSER_MEDIA_MEDIA_INTERNALS_HANDLER_H_
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/values.h"
 #include "content/public/browser/web_ui_message_handler.h"
 
@@ -28,7 +28,7 @@ class MediaInternalsMessageHandler : public WebUIMessageHandler {
   void RegisterMessages() override;
 
   // Javascript message handlers.
-  void OnGetEverything(const base::Value::List& list);
+  void OnGetEverything(const base::ListValue& list);
 
   // MediaInternals message handlers.
   void OnUpdate(const std::u16string& update);

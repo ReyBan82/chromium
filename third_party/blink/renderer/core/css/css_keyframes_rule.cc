@@ -29,9 +29,11 @@
 
 #include "third_party/blink/renderer/core/css/cascade_layer.h"
 #include "third_party/blink/renderer/core/css/css_keyframe_rule.h"
+#include "third_party/blink/renderer/core/css/css_markup.h"
 #include "third_party/blink/renderer/core/css/css_rule_list.h"
 #include "third_party/blink/renderer/core/css/css_style_sheet.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser.h"
+#include "third_party/blink/renderer/core/css/style_sheet_contents.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
@@ -45,6 +47,17 @@ StyleRuleKeyframes::StyleRuleKeyframes()
     : StyleRuleBase(kKeyframes), version_(0) {}
 
 StyleRuleKeyframes::StyleRuleKeyframes(const StyleRuleKeyframes& o) = default;
+
+StyleRuleKeyframes::StyleRuleKeyframes(
+    HeapVector<Member<StyleRuleKeyframe>>&& keyframes,
+    const AtomicString& name,
+    unsigned version,
+    bool is_vendor_prefixed)
+    : StyleRuleBase(kKeyframes),
+      keyframes_(std::move(keyframes)),
+      name_(name),
+      version_(version),
+      is_prefixed_(is_vendor_prefixed) {}
 
 StyleRuleKeyframes::~StyleRuleKeyframes() = default;
 
@@ -81,7 +94,6 @@ int StyleRuleKeyframes::FindKeyframeIndex(const CSSParserContext* context,
 }
 
 void StyleRuleKeyframes::TraceAfterDispatch(blink::Visitor* visitor) const {
-  visitor->Trace(layer_);
   visitor->Trace(keyframes_);
   StyleRuleBase::TraceAfterDispatch(visitor);
 }
@@ -97,6 +109,9 @@ CSSKeyframesRule::~CSSKeyframesRule() = default;
 
 void CSSKeyframesRule::setName(const String& name) {
   CSSStyleSheet::RuleMutationScope mutation_scope(this);
+  if (parentStyleSheet()) {
+    parentStyleSheet()->Contents()->NotifyDiffUnrepresentable();
+  }
 
   keyframes_rule_->SetName(name);
 }
@@ -116,6 +131,9 @@ void CSSKeyframesRule::appendRule(const ExecutionContext* execution_context,
   }
 
   CSSStyleSheet::RuleMutationScope mutation_scope(this);
+  if (parentStyleSheet()) {
+    parentStyleSheet()->Contents()->NotifyDiffUnrepresentable();
+  }
 
   keyframes_rule_->WrapperAppendKeyframe(keyframe);
 
@@ -136,6 +154,9 @@ void CSSKeyframesRule::deleteRule(const ExecutionContext* execution_context,
   }
 
   CSSStyleSheet::RuleMutationScope mutation_scope(this);
+  if (parentStyleSheet()) {
+    parentStyleSheet()->Contents()->NotifyDiffUnrepresentable();
+  }
 
   keyframes_rule_->WrapperRemoveKeyframe(i);
 
@@ -162,7 +183,7 @@ String CSSKeyframesRule::cssText() const {
   } else {
     result.Append("@keyframes ");
   }
-  result.Append(name());
+  SerializeIdentifier(name(), result);
   result.Append(" { \n");
 
   unsigned size = length();
@@ -179,7 +200,8 @@ unsigned CSSKeyframesRule::length() const {
   return keyframes_rule_->Keyframes().size();
 }
 
-CSSKeyframeRule* CSSKeyframesRule::Item(unsigned index) const {
+CSSKeyframeRule* CSSKeyframesRule::Item(unsigned index,
+                                        bool trigger_use_counters) const {
   if (index >= length()) {
     return nullptr;
   }
@@ -219,6 +241,14 @@ CSSRuleList* CSSKeyframesRule::cssRules() const {
 void CSSKeyframesRule::Reattach(StyleRuleBase* rule) {
   DCHECK(rule);
   keyframes_rule_ = To<StyleRuleKeyframes>(rule);
+  CHECK_EQ(child_rule_cssom_wrappers_.size(),
+           keyframes_rule_->Keyframes().size());
+  for (unsigned i = 0; i < child_rule_cssom_wrappers_.size(); ++i) {
+    if (child_rule_cssom_wrappers_[i]) {
+      child_rule_cssom_wrappers_[i]->Reattach(
+          keyframes_rule_->Keyframes()[i].Get());
+    }
+  }
 }
 
 void CSSKeyframesRule::Trace(Visitor* visitor) const {

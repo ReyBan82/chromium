@@ -4,15 +4,21 @@
 
 #include "media/test/pipeline_integration_test_base.h"
 
+#include <ios>
 #include <memory>
 #include <utility>
 
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/threading/sequence_bound.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "media/base/media_log.h"
@@ -22,6 +28,7 @@
 #include "media/filters/file_data_source.h"
 #include "media/filters/memory_data_source.h"
 #include "media/media_buildflags.h"
+#include "media/mojo/services/gpu_mojo_media_client_test_util.h"
 #include "media/renderers/audio_renderer_impl.h"
 #include "media/renderers/renderer_impl.h"
 #include "media/test/fake_encrypted_media.h"
@@ -30,6 +37,8 @@
 #if BUILDFLAG(ENABLE_DAV1D_DECODER)
 #include "media/filters/dav1d_video_decoder.h"
 #endif
+
+#include "media/filters/opus_audio_decoder.h"
 
 #if BUILDFLAG(ENABLE_FFMPEG)
 #include "media/filters/ffmpeg_audio_decoder.h"
@@ -44,19 +53,145 @@
 #include "media/filters/vpx_video_decoder.h"
 #endif
 
+#if BUILDFLAG(ENABLE_HLS_DEMUXER)
+#include "media/filters/hls_data_source_provider_impl.h"
+#include "media/filters/hls_manifest_demuxer_engine.h"
+#include "media/filters/manifest_demuxer.h"
+#endif  // BUILDFLAG(ENABLE_HLS_DEMUXER)
+
+#if BUILDFLAG(ENABLE_SYMPHONIA)
+#include "media/filters/symphonia_audio_decoder.h"
+#endif
+
+#if BUILDFLAG(ENABLE_IAMF_TOOLS)
+#include "media/filters/iamf_audio_decoder.h"
+#endif
+
 using ::testing::_;
 using ::testing::AnyNumber;
 using ::testing::AtLeast;
 using ::testing::AtMost;
+using ::testing::InSequence;
 using ::testing::Invoke;
 using ::testing::InvokeWithoutArgs;
-using ::testing::InSequence;
 using ::testing::Return;
 using ::testing::SaveArg;
 
 namespace media {
 
-static std::vector<std::unique_ptr<VideoDecoder>> CreateVideoDecodersForTest(
+namespace {
+
+// In order to avoid fuzzing bot timeouts, we set a maximum canvas size of
+// roughly half of our actual limit since the fuzzer bots may run with as little
+// as 2GB of memory.
+static const constexpr uint64_t kMaxFuzzerCanvas = (1 << 28) - 1;
+
+#if BUILDFLAG(ENABLE_HLS_DEMUXER)
+
+class CrossOriginFileDataSourceWrapper : public CrossOriginDataSource {
+ public:
+  CrossOriginFileDataSourceWrapper() = default;
+  ~CrossOriginFileDataSourceWrapper() override = default;
+
+  // CrossOriginDataSource implementation.
+  const std::string& GetMimeType() const override {
+    static const std::string kEmptyMimeType;
+    return kEmptyMimeType;
+  }
+  void Initialize(base::OnceCallback<void(bool)> init_cb) override {
+    std::move(init_cb).Run(true);
+  }
+
+  // DataSource implementation.
+  void Read(int64_t position,
+            base::span<uint8_t> data,
+            DataSource::ReadCB read_cb) override {
+    file_data_source_.Read(position, data, std::move(read_cb));
+  }
+  void Stop() override { file_data_source_.Stop(); }
+  void Abort() override { file_data_source_.Abort(); }
+  bool GetSize(int64_t* size_out) override {
+    return file_data_source_.GetSize(size_out);
+  }
+  void SetBitrate(int bitrate) override {
+    file_data_source_.SetBitrate(bitrate);
+  }
+  bool PassedTimingAllowOriginCheck() override {
+    return file_data_source_.PassedTimingAllowOriginCheck();
+  }
+  bool AssumeFullyBuffered() const override {
+    return file_data_source_.AssumeFullyBuffered();
+  }
+  int64_t GetMemoryUsage() override {
+    return file_data_source_.GetMemoryUsage();
+  }
+  void SetPreload(media::DataSource::Preload preload) override {
+    file_data_source_.SetPreload(preload);
+  }
+  bool DidRedirect() const override { return file_data_source_.DidRedirect(); }
+  GURL GetUrlAfterRedirects() const override { return url_; }
+  void StopPreloading() override { file_data_source_.StopPreloading(); }
+  void OnMediaPlaybackRateChanged(double playback_rate) override {
+    file_data_source_.OnMediaPlaybackRateChanged(playback_rate);
+  }
+  void OnMediaIsPlaying() override { file_data_source_.OnMediaIsPlaying(); }
+
+  // DataSourceInfo implementation.
+  bool WouldTaintOrigin() const override {
+    return file_data_source_.WouldTaintOrigin();
+  }
+  bool IsStreaming() const override { return file_data_source_.IsStreaming(); }
+
+  // FileDataSource-like initialization.
+  bool Initialize(const base::FilePath& file_path) {
+    std::string path_utf8 = file_path.AsUTF8Unsafe();
+    std::string url_str = "file://";
+#if BUILDFLAG(IS_WIN)
+    std::replace(path_utf8.begin(), path_utf8.end(), '\\', '/');
+    if (path_utf8.size() > 0 && path_utf8[0] != '/') {
+      url_str += "/";
+    }
+    url_str += path_utf8;
+#else
+    url_str += path_utf8;
+#endif
+    url_ = GURL(url_str);
+    return file_data_source_.Initialize(file_path);
+  }
+
+ private:
+  GURL url_;
+  FileDataSource file_data_source_;
+};
+
+class TestDataSourceFactory : public CrossOriginDataSource::Factory {
+ public:
+  ~TestDataSourceFactory() override = default;
+  void Create(const GURL& uri,
+              DataSource::CacheMode,
+              DataSource::EncodingMode,
+              base::OnceCallback<void(std::unique_ptr<CrossOriginDataSource>)>
+                  callback) override {
+    auto file_data_source =
+        std::make_unique<CrossOriginFileDataSourceWrapper>();
+    base::FilePath file_path(
+#if BUILDFLAG(IS_WIN)
+        // Windows file paths can't start with '/' the way unix file paths can,
+        // So we have to strip the leading one which comes from GetContent().
+        base::UTF8ToWide(uri.GetContent().erase(0, 1))
+#else
+        uri.GetContent()
+#endif
+    );
+    CHECK(file_data_source->Initialize(file_path))
+        << "Is " << file_path.value() << " missing?";
+    std::move(callback).Run(std::move(file_data_source));
+  }
+};
+
+#endif  // BUILDFLAG(ENABLE_HLS_DEMUXER)
+
+std::vector<std::unique_ptr<VideoDecoder>> CreateVideoDecodersForTest(
     MediaLog* media_log,
     CreateVideoDecodersCB prepend_video_decoders_cb) {
   std::vector<std::unique_ptr<VideoDecoder>> video_decoders;
@@ -72,16 +207,17 @@ static std::vector<std::unique_ptr<VideoDecoder>> CreateVideoDecodersForTest(
 
 #if BUILDFLAG(ENABLE_DAV1D_DECODER)
   video_decoders.push_back(
-      std::make_unique<OffloadingDav1dVideoDecoder>(media_log));
+      std::make_unique<OffloadingDav1dVideoDecoder>(media_log->Clone()));
 #endif
 
 #if BUILDFLAG(ENABLE_FFMPEG_VIDEO_DECODERS)
-  video_decoders.push_back(std::make_unique<FFmpegVideoDecoder>(media_log));
+  video_decoders.push_back(
+      std::make_unique<FFmpegVideoDecoder>(media_log->Clone()));
 #endif
   return video_decoders;
 }
 
-static std::vector<std::unique_ptr<AudioDecoder>> CreateAudioDecodersForTest(
+std::vector<std::unique_ptr<AudioDecoder>> CreateAudioDecodersForTest(
     MediaLog* media_log,
     const scoped_refptr<base::SingleThreadTaskRunner>& media_task_runner,
     CreateAudioDecodersCB prepend_audio_decoders_cb) {
@@ -92,6 +228,23 @@ static std::vector<std::unique_ptr<AudioDecoder>> CreateAudioDecodersForTest(
     DCHECK(!audio_decoders.empty());
   }
 
+  if (base::FeatureList::IsEnabled(kDirectOpusAudioDecoding)) {
+    audio_decoders.push_back(
+        std::make_unique<OpusAudioDecoder>(media_task_runner));
+  }
+
+#if BUILDFLAG(ENABLE_IAMF_TOOLS)
+  if (base::FeatureList::IsEnabled(kIamfAudioDecoding)) {
+    audio_decoders.push_back(
+        std::make_unique<IamfAudioDecoder>(media_task_runner, media_log));
+  }
+#endif
+
+#if BUILDFLAG(ENABLE_SYMPHONIA)
+  audio_decoders.push_back(
+      std::make_unique<SymphoniaAudioDecoder>(media_task_runner, media_log));
+#endif
+
 #if BUILDFLAG(ENABLE_FFMPEG)
   audio_decoders.push_back(
       std::make_unique<FFmpegAudioDecoder>(media_task_runner, media_log));
@@ -99,26 +252,16 @@ static std::vector<std::unique_ptr<AudioDecoder>> CreateAudioDecodersForTest(
   return audio_decoders;
 }
 
-const char kNullVideoHash[] = "d41d8cd98f00b204e9800998ecf8427e";
+}  // namespace
+
+const char kNullVideoHash[] =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const char kNullAudioHash[] = "0.00,0.00,0.00,0.00,0.00,0.00,";
 
-PipelineIntegrationTestBase::PipelineIntegrationTestBase()
-    :
-// Use a UI type message loop on macOS, because it doesn't seem to schedule
-// callbacks with enough precision to drive our fake audio output. See
-// https://crbug.com/1014646 for more details.
-#if BUILDFLAG(IS_MAC)
-      task_environment_(base::test::TaskEnvironment::MainThreadType::UI),
-#endif
-      hashing_enabled_(false),
-      clockless_playback_(false),
-      webaudio_attached_(false),
-      mono_output_(false),
-      fuzzing_(false),
-      ended_(false),
-      pipeline_status_(PIPELINE_OK),
-      last_video_frame_format_(PIXEL_FORMAT_UNKNOWN),
-      current_duration_(kInfiniteDuration) {
+PipelineIntegrationTestBase::PipelineIntegrationTestBase() {
+  hash_context_.emplace(crypto::hash::kSha256);
+  AddSupplementalCodecsForTesting();
+
   pipeline_ = std::make_unique<PipelineImpl>(
       task_environment_.GetMainThreadTaskRunner(),
       task_environment_.GetMainThreadTaskRunner(),
@@ -131,8 +274,9 @@ PipelineIntegrationTestBase::PipelineIntegrationTestBase()
 }
 
 PipelineIntegrationTestBase::~PipelineIntegrationTestBase() {
-  if (pipeline_->IsRunning())
+  if (pipeline_ && pipeline_->IsRunning()) {
     Stop();
+  }
 
   demuxer_.reset();
   pipeline_.reset();
@@ -152,12 +296,18 @@ void PipelineIntegrationTestBase::ParseTestTypeFlags(uint8_t flags) {
 void PipelineIntegrationTestBase::OnSeeked(base::TimeDelta seek_time,
                                            PipelineStatus status) {
   // When fuzzing, sometimes a seek to 0 results in an actual media time > 0.
-  if (fuzzing_)
+  if (fuzzing_) {
     EXPECT_LE(seek_time, pipeline_->GetMediaTime());
-  else
+  } else {
     EXPECT_EQ(seek_time, pipeline_->GetMediaTime());
+  }
 
   pipeline_status_ = status;
+
+  // If the seek failed, then stop immediately.
+  if (!pipeline_status_.is_ok() && on_error_closure_) {
+    std::move(on_error_closure_).Run();
+  }
 }
 
 void PipelineIntegrationTestBase::OnStatusCallback(
@@ -165,8 +315,9 @@ void PipelineIntegrationTestBase::OnStatusCallback(
     PipelineStatus status) {
   pipeline_status_ = status;
 
-  if (pipeline_status_ != PIPELINE_OK && pipeline_->IsRunning())
+  if (pipeline_status_ != PIPELINE_OK && pipeline_->IsRunning()) {
     pipeline_->Stop();
+  }
 
   quit_run_loop_closure.Run();
 }
@@ -187,8 +338,8 @@ void PipelineIntegrationTestBase::DemuxerMediaTracksUpdatedCB(
   // Verify that track ids are unique.
   std::set<MediaTrack::Id> track_ids;
   for (const auto& track : tracks->tracks()) {
-    EXPECT_EQ(track_ids.end(), track_ids.find(track->id()));
-    track_ids.insert(track->id());
+    EXPECT_EQ(track_ids.end(), track_ids.find(track->track_id()));
+    track_ids.insert(track->track_id());
   }
 }
 
@@ -196,8 +347,9 @@ void PipelineIntegrationTestBase::OnEnded() {
   DCHECK(!ended_);
   ended_ = true;
   pipeline_status_ = PIPELINE_OK;
-  if (on_ended_closure_)
+  if (on_ended_closure_) {
     std::move(on_ended_closure_).Run();
+  }
 }
 
 bool PipelineIntegrationTestBase::WaitUntilOnEnded() {
@@ -222,8 +374,9 @@ void PipelineIntegrationTestBase::OnError(PipelineStatus status) {
   DCHECK(status != PIPELINE_OK);
   pipeline_status_ = status;
   pipeline_->Stop();
-  if (on_error_closure_)
+  if (on_error_closure_) {
     std::move(on_error_closure_).Run();
+  }
 }
 
 void PipelineIntegrationTestBase::OnFallback(PipelineStatus status) {
@@ -234,6 +387,45 @@ void PipelineIntegrationTestBase::SetCreateRendererCB(
     CreateRendererCB create_renderer_cb) {
   create_renderer_cb_ = std::move(create_renderer_cb);
 }
+
+#if BUILDFLAG(ENABLE_HLS_DEMUXER)
+PipelineStatus PipelineIntegrationTestBase::StartPipelineWithHlsManifest(
+    const std::string& filename) {
+  hashing_enabled_ = true;
+
+  auto full_path = GetTestDataFilePath(filename);
+  std::string file_url = "file://" + full_path.MaybeAsASCII();
+  GURL manifest_root{file_url};
+
+  auto multibuffer_factory = std::make_unique<TestDataSourceFactory>();
+  // HlsManifestDemuxerEngine requires a SequenceBound data source provider,
+  // regardless of which sequence it's actually bound to.
+  auto hls_dsp = base::SequenceBound<HlsDataSourceProviderImpl>(
+      task_environment_.GetMainThreadTaskRunner(),
+      std::move(multibuffer_factory));
+
+  auto engine = std::make_unique<HlsManifestDemuxerEngine>(
+      std::move(hls_dsp), task_environment_.GetMainThreadTaskRunner(),
+      std::make_unique<ForwardingTrackManager>(
+          base::DoNothing(), base::DoNothing(), base::DoNothing()),
+      /*name=*/false, url::Origin::Create(manifest_root), manifest_root,
+      &media_log_);
+  demuxer_ = std::make_unique<ManifestDemuxer>(
+      task_environment_.GetMainThreadTaskRunner(), base::DoNothing(),
+      std::move(engine), &media_log_);
+  EXPECT_CALL(*this, OnMetadata(_))
+      .Times(AtMost(1))
+      .WillRepeatedly(SaveArg<0>(&metadata_));
+
+  base::RunLoop run_loop;
+  pipeline_->Start(
+      Pipeline::StartType::kNormal, demuxer_.get(), this,
+      base::BindOnce(&PipelineIntegrationTestBase::OnStatusCallback,
+                     base::Unretained(this), run_loop.QuitClosure()));
+  RunUntilQuitOrEndedOrError(&run_loop);
+  return pipeline_status_;
+}
+#endif  // BUILDFLAG(ENABLE_HLS_DEMUXER)
 
 PipelineStatus PipelineIntegrationTestBase::StartInternal(
     std::unique_ptr<DataSource> data_source,
@@ -266,7 +458,10 @@ PipelineStatus PipelineIntegrationTestBase::StartInternal(
         .WillRepeatedly(
             Invoke(this, &PipelineIntegrationTestBase::CheckDuration));
   }
-  EXPECT_CALL(*this, OnVideoNaturalSizeChange(_)).Times(AnyNumber());
+  EXPECT_CALL(*this, OnVideoNaturalSizeChange(_))
+      .Times(AnyNumber())
+      .WillRepeatedly(Invoke(
+          this, &PipelineIntegrationTestBase::EnforceMaxCanvasSizeForFuzzing));
   EXPECT_CALL(*this, OnVideoOpacityChange(_)).WillRepeatedly(Return());
   EXPECT_CALL(*this, OnVideoFrameRateChange(_)).Times(AnyNumber());
   EXPECT_CALL(*this, OnAudioPipelineInfoChange(_)).Times(AnyNumber());
@@ -289,7 +484,9 @@ PipelineStatus PipelineIntegrationTestBase::StartInternal(
   // In practice, this doesn't happen for FFmpegDemuxer, but it's allowed for
   // SRC= demuxers in general.
   EXPECT_CALL(*this, OnAudioConfigChange(_)).Times(AnyNumber());
-  EXPECT_CALL(*this, OnVideoConfigChange(_)).Times(AnyNumber());
+  EXPECT_CALL(*this, OnVideoConfigChange(_))
+      .Times(AnyNumber())
+      .WillRepeatedly(Invoke(this, &PipelineIntegrationTestBase::CheckConfig));
 
   base::RunLoop run_loop;
   pipeline_->Start(
@@ -308,8 +505,8 @@ PipelineStatus PipelineIntegrationTestBase::StartWithFile(
     CreateAudioDecodersCB prepend_audio_decoders_cb) {
   std::unique_ptr<FileDataSource> file_data_source(new FileDataSource());
   base::FilePath file_path(GetTestDataFilePath(filename));
-  CHECK(file_data_source->Initialize(file_path)) << "Is " << file_path.value()
-                                                 << " missing?";
+  CHECK(file_data_source->Initialize(file_path))
+      << "Is " << file_path.value() << " missing?";
   return StartInternal(std::move(file_data_source), cdm_context, test_type,
                        prepend_video_decoders_cb, prepend_audio_decoders_cb);
 }
@@ -332,10 +529,10 @@ PipelineStatus PipelineIntegrationTestBase::Start(
                        prepend_audio_decoders_cb);
 }
 
-PipelineStatus PipelineIntegrationTestBase::Start(const uint8_t* data,
-                                                  size_t size,
-                                                  uint8_t test_type) {
-  return StartInternal(std::make_unique<MemoryDataSource>(data, size), nullptr,
+PipelineStatus PipelineIntegrationTestBase::Start(
+    base::span<const uint8_t> data,
+    uint8_t test_type) {
+  return StartInternal(std::make_unique<MemoryDataSource>(data), nullptr,
                        test_type);
 }
 
@@ -347,6 +544,23 @@ void PipelineIntegrationTestBase::Pause() {
   pipeline_->SetPlaybackRate(0);
 }
 
+void PipelineIntegrationTestBase::OnBufferingStateChangeForSeek(
+    BufferingState state,
+    BufferingStateChangeReason reason) {
+  // Record the first buffering state we get.
+  if (!buffering_state_) {
+    buffering_state_ = state;
+
+    // The first call must be HAVE_ENOUGH.
+    EXPECT_EQ(state, BUFFERING_HAVE_ENOUGH);
+  }
+
+  // Once we have HAVE_ENOUGH, we've had enough.
+  if (on_ended_closure_) {
+    std::move(on_ended_closure_).Run();
+  }
+}
+
 bool PipelineIntegrationTestBase::Seek(base::TimeDelta seek_time) {
   // Enforce that BUFFERING_HAVE_ENOUGH is the first call below.
   ::testing::InSequence dummy;
@@ -354,18 +568,37 @@ bool PipelineIntegrationTestBase::Seek(base::TimeDelta seek_time) {
   ended_ = false;
   base::RunLoop run_loop;
 
-  // Should always transition to HAVE_ENOUGH once the seek completes.
-  EXPECT_CALL(*this, OnBufferingStateChange(BUFFERING_HAVE_ENOUGH, _))
-      .WillOnce(InvokeWithoutArgs(&run_loop, &base::RunLoop::Quit));
+  pipeline_status_ = PIPELINE_OK;
+  buffering_state_.reset();
 
+  // Should always transition to HAVE_ENOUGH once the seek completes
+  // successfully.  On error, it shouldn't be called at all.
   // After initial HAVE_ENOUGH, any buffering state change is allowed as
   // playback may cause any number of underflow/preroll events.
-  EXPECT_CALL(*this, OnBufferingStateChange(_, _)).Times(AnyNumber());
+  EXPECT_CALL(*this, OnBufferingStateChange(_, _))
+      .Times(AnyNumber())
+      .WillRepeatedly(Invoke(
+          this, &PipelineIntegrationTestBase::OnBufferingStateChangeForSeek));
 
+  bool did_call_on_seeked = false;
   pipeline_->Seek(seek_time,
-                  base::BindOnce(&PipelineIntegrationTestBase::OnSeeked,
-                                 base::Unretained(this), seek_time));
-  RunUntilQuitOrError(&run_loop);
+                  base::BindOnce(
+                      [](PipelineIntegrationTestBase* thiz, bool* flag,
+                         base::TimeDelta seek_time, PipelineStatus status) {
+                        *flag = true;
+                        thiz->OnSeeked(seek_time, status);
+                      },
+                      base::Unretained(this), &did_call_on_seeked, seek_time));
+  RunUntilQuitOrEndedOrError(&run_loop);
+
+  // We must get at least one `OnSeeked()` status call.
+  EXPECT_TRUE(did_call_on_seeked);
+  // If the seek succeeded, then we must get to HAVE_ENOUGH
+  if (pipeline_status_ == PIPELINE_OK) {
+    EXPECT_TRUE(buffering_state_);
+    EXPECT_EQ(*buffering_state_, BUFFERING_HAVE_ENOUGH);
+  }  // else we don't care about buffering state.
+
   return (pipeline_status_ == PIPELINE_OK);
 }
 
@@ -455,15 +688,16 @@ void PipelineIntegrationTestBase::CreateDemuxer(
 }
 
 std::unique_ptr<Renderer> PipelineIntegrationTestBase::CreateRenderer(
-    absl::optional<RendererType> renderer_type) {
-  if (create_renderer_cb_)
+    std::optional<RendererType> renderer_type) {
+  if (create_renderer_cb_) {
     return create_renderer_cb_.Run(renderer_type);
+  }
 
   return CreateRendererImpl(renderer_type);
 }
 
 std::unique_ptr<Renderer> PipelineIntegrationTestBase::CreateRendererImpl(
-    absl::optional<RendererType> renderer_type) {
+    std::optional<RendererType> renderer_type) {
   if (renderer_type && *renderer_type != RendererType::kRendererImpl) {
     DVLOG(1) << __func__ << ": renderer_type not supported";
     return nullptr;
@@ -481,19 +715,19 @@ std::unique_ptr<Renderer> PipelineIntegrationTestBase::CreateRendererImpl(
       task_environment_.GetMainThreadTaskRunner(), video_sink_.get(),
       base::BindRepeating(&CreateVideoDecodersForTest, &media_log_,
                           prepend_video_decoders_cb_),
-      false, &media_log_, nullptr, 0);
+      false, &media_log_, nullptr, MediaPlayerLoggingID(0));
 
   if (!clockless_playback_) {
     DCHECK(!mono_output_) << " NullAudioSink doesn't specify output parameters";
 
-    audio_sink_ =
-        new NullAudioSink(task_environment_.GetMainThreadTaskRunner());
+    audio_sink_ = base::MakeRefCounted<NullAudioSink>(
+        task_environment_.GetMainThreadTaskRunner());
   } else {
     ChannelLayoutConfig output_layout_config =
         mono_output_ ? ChannelLayoutConfig::Mono()
                      : ChannelLayoutConfig::Stereo();
 
-    clockless_audio_sink_ = new ClocklessAudioSink(
+    clockless_audio_sink_ = base::MakeRefCounted<ClocklessAudioSink>(
         OutputDeviceInfo("", OUTPUT_DEVICE_STATUS_OK,
                          AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
                                          output_layout_config, 44100, 512)));
@@ -515,12 +749,13 @@ std::unique_ptr<Renderer> PipelineIntegrationTestBase::CreateRendererImpl(
       base::BindRepeating(&CreateAudioDecodersForTest, &media_log_,
                           task_environment_.GetMainThreadTaskRunner(),
                           prepend_audio_decoders_cb_),
-      &media_log_, 0, nullptr);
+      &media_log_, MediaPlayerLoggingID(0), nullptr);
   if (hashing_enabled_) {
-    if (clockless_playback_)
+    if (clockless_playback_) {
       clockless_audio_sink_->StartAudioHashForTesting();
-    else
+    } else {
       audio_sink_->StartAudioHashForTesting();
+    }
   }
 
   static_cast<AudioRendererImpl*>(audio_renderer.get())
@@ -534,8 +769,9 @@ std::unique_ptr<Renderer> PipelineIntegrationTestBase::CreateRendererImpl(
   // machine, valgrind).
   renderer_impl->DisableUnderflowForTesting();
 
-  if (clockless_playback_)
+  if (clockless_playback_) {
     renderer_impl->EnableClocklessVideoPlaybackForTesting();
+  }
 
   return renderer_impl;
 }
@@ -544,10 +780,11 @@ void PipelineIntegrationTestBase::OnVideoFramePaint(
     scoped_refptr<VideoFrame> frame) {
   last_video_frame_format_ = frame->format();
   last_video_frame_color_space_ = frame->ColorSpace();
-  if (!hashing_enabled_ || last_frame_ == frame)
+  if (!hashing_enabled_ || last_frame_ == frame) {
     return;
+  }
   DVLOG(3) << __func__ << " pts=" << frame->timestamp().InSecondsF();
-  VideoFrame::HashFrameForTesting(&md5_context_, *frame);
+  VideoFrame::UpdateHashWithFrameForTesting(*hash_context_, *frame);
   last_frame_ = std::move(frame);
 }
 
@@ -565,21 +802,22 @@ base::TimeDelta PipelineIntegrationTestBase::GetStartTime() {
 
 void PipelineIntegrationTestBase::ResetVideoHash() {
   DVLOG(1) << __func__;
-  base::MD5Init(&md5_context_);
+  hash_context_.emplace(crypto::hash::kSha256);
 }
 
 std::string PipelineIntegrationTestBase::GetVideoHash() {
   DCHECK(hashing_enabled_);
-  base::MD5Digest digest;
-  base::MD5Final(&digest, &md5_context_);
-  return base::MD5DigestToBase16(digest);
+  std::array<uint8_t, crypto::hash::kSha256Size> digest;
+  hash_context_->Finish(digest);
+  return base::HexEncodeLower(digest);
 }
 
-std::string PipelineIntegrationTestBase::GetAudioHash() {
+const AudioHash& PipelineIntegrationTestBase::GetAudioHash() const {
   DCHECK(hashing_enabled_);
 
-  if (clockless_playback_)
+  if (clockless_playback_) {
     return clockless_audio_sink_->GetAudioHashForTesting();
+  }
   return audio_sink_->GetAudioHashForTesting();
 }
 
@@ -625,7 +863,10 @@ PipelineStatus PipelineIntegrationTestBase::StartPipelineWithMediaSource(
       .WillRepeatedly(SaveArg<0>(&metadata_));
   EXPECT_CALL(*this, OnBufferingStateChange(_, _)).Times(AnyNumber());
   EXPECT_CALL(*this, OnDurationChange()).Times(AnyNumber());
-  EXPECT_CALL(*this, OnVideoNaturalSizeChange(_)).Times(AnyNumber());
+  EXPECT_CALL(*this, OnVideoNaturalSizeChange(_))
+      .Times(AnyNumber())
+      .WillRepeatedly(Invoke(
+          this, &PipelineIntegrationTestBase::EnforceMaxCanvasSizeForFuzzing));
   EXPECT_CALL(*this, OnVideoOpacityChange(_)).Times(AtMost(1));
   EXPECT_CALL(*this, OnVideoFrameRateChange(_)).Times(AnyNumber());
   EXPECT_CALL(*this, OnAudioPipelineInfoChange(_)).Times(AnyNumber());
@@ -642,7 +883,9 @@ PipelineStatus PipelineIntegrationTestBase::StartPipelineWithMediaSource(
   // Config change tests should set more specific expectations about the number
   // of calls.
   EXPECT_CALL(*this, OnAudioConfigChange(_)).Times(AnyNumber());
-  EXPECT_CALL(*this, OnVideoConfigChange(_)).Times(AnyNumber());
+  EXPECT_CALL(*this, OnVideoConfigChange(_))
+      .Times(AnyNumber())
+      .WillRepeatedly(Invoke(this, &PipelineIntegrationTestBase::CheckConfig));
 
   if (encrypted_media) {
     EXPECT_CALL(*this, DecryptorAttached(true));
@@ -690,7 +933,7 @@ PipelineStatus PipelineIntegrationTestBase::StartPipelineWithMediaSource(
 
   RunUntilQuitOrEndedOrError(&run_loop);
 
-  for (auto* stream : demuxer_->GetAllStreams()) {
+  for (media::DemuxerStream* stream : demuxer_->GetAllStreams()) {
     EXPECT_TRUE(stream->SupportsConfigChanges());
   }
 
@@ -716,4 +959,18 @@ void PipelineIntegrationTestBase::RunUntilQuitOrEndedOrError(
   RunUntilQuitOrError(run_loop);
 }
 
+void PipelineIntegrationTestBase::CheckConfig(
+    const VideoDecoderConfig& config) {
+  EnforceMaxCanvasSizeForFuzzing(config.coded_size());
+}
+
+void PipelineIntegrationTestBase::EnforceMaxCanvasSizeForFuzzing(
+    const gfx::Size& size) {
+  if (fuzzing_ && size.Area64() > kMaxFuzzerCanvas) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(&PipelineIntegrationTestBase::FailTest,
+                                  base::Unretained(this),
+                                  PIPELINE_ERROR_INITIALIZATION_FAILED));
+  }
+}
 }  // namespace media

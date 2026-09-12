@@ -3,26 +3,33 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import print_function
-
 import copy
-import sys
 import typing
 from typing import Dict, List
 import unittest
+from unittest import mock
 
-if sys.version_info[0] == 2:
-  import mock
-else:
-  import unittest.mock as mock
-
+# //testing imports.
 from unexpected_passes_common import constants
 from unexpected_passes_common import data_types
 from unexpected_passes_common import unittest_utils as uu
 
-GENERIC_EXPECTATION = data_types.Expectation('test', ['tag1', 'tag2'], ['Pass'])
-GENERIC_RESULT = data_types.Result('test', ['tag1', 'tag2'], 'Pass',
-                                   'pixel_tests', 'build_id')
+# Protected access is allowed for unittests.
+# pylint: disable=protected-access
+
+# Disabled instead of fixing to avoid a large amount of churn.
+# pylint: disable=no-self-use
+
+NON_WILDCARD = data_types.WildcardType.NON_WILDCARD
+SIMPLE_WILDCARD = data_types.WildcardType.SIMPLE_WILDCARD
+FULL_WILDCARD = data_types.WildcardType.FULL_WILDCARD
+
+GENERIC_EXPECTATION = data_types.Expectation(
+  'test', ['tag1', 'tag2'], ['Pass'], NON_WILDCARD
+)
+GENERIC_RESULT = data_types.Result(
+  'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+)
 
 
 class CustomImplementationUnittest(unittest.TestCase):
@@ -31,7 +38,9 @@ class CustomImplementationUnittest(unittest.TestCase):
       pass
 
     data_types.SetExpectationImplementation(CustomExpectation)
-    expectation = data_types.Expectation('test', ['tag1', 'tag2'], 'Pass')
+    expectation = data_types.Expectation(
+      'test', ['tag1', 'tag2'], 'Pass', NON_WILDCARD
+    )
     self.assertIsInstance(expectation, CustomExpectation)
 
   def testCustomResult(self) -> None:
@@ -39,8 +48,9 @@ class CustomImplementationUnittest(unittest.TestCase):
       pass
 
     data_types.SetResultImplementation(CustomResult)
-    result = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                               'build_id')
+    result = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
     self.assertIsInstance(result, CustomResult)
 
   def testCustomBuildStats(self) -> None:
@@ -63,18 +73,31 @@ class CustomImplementationUnittest(unittest.TestCase):
 class ExpectationUnittest(unittest.TestCase):
   def testEquality(self) -> None:
     e = GENERIC_EXPECTATION
-    other = data_types.Expectation('test', ['tag1', 'tag2'], 'Pass')
+    other = data_types.Expectation(
+      'test', ['tag1', 'tag2'], 'Pass', NON_WILDCARD
+    )
     self.assertEqual(e, other)
-    other = data_types.Expectation('test2', ['tag1', 'tag2'], 'Pass')
+    other = data_types.Expectation(
+      'test2', ['tag1', 'tag2'], 'Pass', NON_WILDCARD
+    )
     self.assertNotEqual(e, other)
-    other = data_types.Expectation('test', ['tag1'], 'Pass')
+    other = data_types.Expectation('test', ['tag1'], 'Pass', NON_WILDCARD)
     self.assertNotEqual(e, other)
-    other = data_types.Expectation('test', ['tag1', 'tag2'], 'Failure')
+    other = data_types.Expectation(
+      'test', ['tag1', 'tag2'], 'Failure', NON_WILDCARD
+    )
     self.assertNotEqual(e, other)
-    other = data_types.Expectation('test', ['tag1', 'tag2'], 'Pass', 'bug')
+    other = data_types.Expectation(
+      'test', ['tag1', 'tag2'], 'Pass', NON_WILDCARD, 'bug'
+    )
     self.assertNotEqual(e, other)
-    other = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                              'build_id')
+    other = data_types.Expectation(
+      'test', ['tag1', 'tag2'], 'Pass', SIMPLE_WILDCARD
+    )
+    self.assertNotEqual(e, other)
+    other = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
     self.assertNotEqual(e, other)
 
   def testHashability(self) -> None:
@@ -87,93 +110,190 @@ class ExpectationUnittest(unittest.TestCase):
       e.AppliesToResult(typing.cast(data_types.Result, e))
 
   def testAppliesToResultApplies(self) -> None:
-    r = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                          'build_id')
+    r = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
     # Exact name match, exact tag match.
     e = GENERIC_EXPECTATION
     self.assertTrue(e.AppliesToResult(r))
+
     # Glob name match, exact tag match.
-    e = data_types.Expectation('te*', ['tag1', 'tag2'], 'Pass')
+    e = data_types.Expectation('te*', ['tag1', 'tag2'], 'Pass', SIMPLE_WILDCARD)
     self.assertTrue(e.AppliesToResult(r))
+    e = data_types.Expectation(
+      'test*', ['tag1', 'tag2'], 'Pass', SIMPLE_WILDCARD
+    )
+
+    # Full wildcard match, exact tag match.
+    e = data_types.Expectation('te*', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD)
+    self.assertTrue(e.AppliesToResult(r))
+    e = data_types.Expectation('*st', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD)
+    self.assertTrue(e.AppliesToResult(r))
+    e = data_types.Expectation('t*st', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD)
+    self.assertTrue(e.AppliesToResult(r))
+    e = data_types.Expectation(
+      't*e*s*t', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD
+    )
+    self.assertTrue(e.AppliesToResult(r))
+
     # Exact name match, tag subset match.
-    e = data_types.Expectation('test', ['tag1'], 'Pass')
+    e = data_types.Expectation('test', ['tag1'], 'Pass', NON_WILDCARD)
     self.assertTrue(e.AppliesToResult(r))
+
     # Expected result subset match.
-    r = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                          'build_id')
+    r = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
     e = GENERIC_EXPECTATION
     self.assertTrue(e.AppliesToResult(r))
-    e = data_types.Expectation('test', ['tag1', 'tag2'], ['RetryOnFailure'])
+    e = data_types.Expectation(
+      'test', ['tag1', 'tag2'], ['RetryOnFailure'], NON_WILDCARD
+    )
     self.assertTrue(e.AppliesToResult(r))
 
   def testAppliesToResultDoesNotApply(self) -> None:
-    r = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                          'build_id')
+    r = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
     # Exact name mismatch.
-    e = data_types.Expectation('te', ['tag1', 'tag2'], 'Pass')
+    e = data_types.Expectation('te', ['tag1', 'tag2'], 'Pass', NON_WILDCARD)
     self.assertFalse(e.AppliesToResult(r))
+
     # Glob name mismatch.
-    e = data_types.Expectation('ta*', ['tag1', 'tag2'], 'Pass')
+    e = data_types.Expectation('ta*', ['tag1', 'tag2'], 'Pass', SIMPLE_WILDCARD)
     self.assertFalse(e.AppliesToResult(r))
+
+    # Full wildcard mismatch.
+    e = data_types.Expectation('ta*', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD)
+    self.assertFalse(e.AppliesToResult(r))
+
     # Tags subset mismatch.
-    e = data_types.Expectation('test', ['tag3'], 'Pass')
+    e = data_types.Expectation('test', ['tag3'], 'Pass', NON_WILDCARD)
     self.assertFalse(e.AppliesToResult(r))
 
   def testAppliesToResultResultHasAsterisk(self) -> None:
-    r = data_types.Result('foo.html?include=*', ['tag1', 'tag2'], 'Pass',
-                          'pixel_tests', 'build_id')
-    e = data_types.Expectation('*', ['tag1', 'tag2'], 'Pass')
+    r = data_types.Result(
+      'foo.html?include=*', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
+
+    # Simple wildcard.
+    e = data_types.Expectation('*', ['tag1', 'tag2'], 'Pass', SIMPLE_WILDCARD)
     self.assertTrue(e.AppliesToResult(r))
-    e = data_types.Expectation('foo.html?include=*', ['tag1', 'tag2'], 'Pass')
+    e = data_types.Expectation(
+      'foo.html?include=*', ['tag1', 'tag2'], 'Pass', SIMPLE_WILDCARD
+    )
     self.assertTrue(e.AppliesToResult(r))
-    e = data_types.Expectation('foo.html?include=bar*', ['tag1', 'tag2'],
-                               'Pass')
+    e = data_types.Expectation(
+      'foo.html?include=bar*', ['tag1', 'tag2'], 'Pass', SIMPLE_WILDCARD
+    )
+    self.assertFalse(e.AppliesToResult(r))
+
+    # Full wildcard.
+    e = data_types.Expectation('*', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD)
+    self.assertTrue(e.AppliesToResult(r))
+    e = data_types.Expectation(
+      'foo.html?include=\\*', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD
+    )
+    self.assertTrue(e.AppliesToResult(r))
+    e = data_types.Expectation(
+      'foo.html?include=*', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD
+    )
+    self.assertTrue(e.AppliesToResult(r))
+    e = data_types.Expectation(
+      'foo.html?\\*', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD
+    )
+    self.assertFalse(e.AppliesToResult(r))
+    e = data_types.Expectation(
+      'foo.html?include=bar*', ['tag1', 'tag2'], 'Pass', FULL_WILDCARD
+    )
     self.assertFalse(e.AppliesToResult(r))
 
   def testAsExpectationFileString(self) -> None:
-    e = data_types.Expectation('foo/test', ['tag2', 'tag1'], 'Failure')
-    self.assertEqual(e.AsExpectationFileString(),
-                     '[ tag1 tag2 ] foo/test [ Failure ]')
-    e = data_types.Expectation('foo/test', ['tag2', 'tag1'], 'Failure', 'bug')
-    self.assertEqual(e.AsExpectationFileString(),
-                     'bug [ tag1 tag2 ] foo/test [ Failure ]')
-    e = data_types.Expectation('foo/*', ['tag2', 'tag1'], 'Failure', 'bug')
-    self.assertEqual(e.AsExpectationFileString(),
-                     'bug [ tag1 tag2 ] foo/* [ Failure ]')
+    e = data_types.Expectation(
+      'foo/test', ['tag2', 'tag1'], 'Failure', NON_WILDCARD
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(), '[ tag1 tag2 ] foo/test [ Failure ]'
+    )
+    e = data_types.Expectation(
+      'foo/test', ['tag2', 'tag1'], 'Failure', NON_WILDCARD, 'bug'
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(), 'bug [ tag1 tag2 ] foo/test [ Failure ]'
+    )
+    e = data_types.Expectation(
+      'foo/*', ['tag2', 'tag1'], 'Failure', SIMPLE_WILDCARD, 'bug'
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(), 'bug [ tag1 tag2 ] foo/* [ Failure ]'
+    )
+    e = data_types.Expectation(
+      'foo*/*', ['tag2', 'tag1'], 'Failure', SIMPLE_WILDCARD, 'bug'
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(), 'bug [ tag1 tag2 ] foo\\*/* [ Failure ]'
+    )
+    e = data_types.Expectation(
+      'foo*/*', ['tag2', 'tag1'], 'Failure', FULL_WILDCARD, 'bug'
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(), 'bug [ tag1 tag2 ] foo*/* [ Failure ]'
+    )
+    e = data_types.Expectation(
+      'foo\\*/*', ['tag2', 'tag1'], 'Failure', FULL_WILDCARD, 'bug'
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(), 'bug [ tag1 tag2 ] foo\\*/* [ Failure ]'
+    )
 
-  def testWildcard(self) -> None:
-    e = data_types.Expectation('foo/test', ['tag1'], 'Failure')
-    self.assertFalse(e._IsWildcard())
-    e = data_types.Expectation('foo/\\*', ['tag1'], 'Failure')
-    self.assertFalse(e._IsWildcard())
-    e = data_types.Expectation('foo/*', ['tag1'], 'Failure')
-    self.assertTrue(e._IsWildcard())
-    e = data_types.Expectation('foo/\\*bar/*', ['tag1'], 'Failure')
-    self.assertTrue(e._IsWildcard())
+  def testAsExpectationFileStringWithTrailingComment(self):
+    e = data_types.Expectation(
+      'foo/test', ['tag2', 'tag1'], 'Failure', NON_WILDCARD
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(),
+      e.AsExpectationFileStringWithTrailingComment(None),
+    )
+    self.assertEqual(
+      e.AsExpectationFileString(),
+      e.AsExpectationFileStringWithTrailingComment(''),
+    )
+    self.assertEqual(
+      e.AsExpectationFileStringWithTrailingComment(' # comment'),
+      '[ tag1 tag2 ] foo/test [ Failure ] # comment',
+    )
 
 
 class ResultUnittest(unittest.TestCase):
   def testEquality(self) -> None:
     r = GENERIC_RESULT
-    other = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                              'build_id')
+    other = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
     self.assertEqual(r, other)
-    other = data_types.Result('test2', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                              'build_id')
+    other = data_types.Result(
+      'test2', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'build_id'
+    )
     self.assertNotEqual(r, other)
-    other = data_types.Result('test', ['tag1'], 'Pass', 'pixel_tests',
-                              'build_id')
+    other = data_types.Result(
+      'test', ['tag1'], 'Pass', 'pixel_tests', 'build_id'
+    )
     self.assertNotEqual(r, other)
-    other = data_types.Result('test', ['tag1', 'tag2'], 'Failure',
-                              'pixel_tests', 'build_id')
+    other = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Failure', 'pixel_tests', 'build_id'
+    )
     self.assertNotEqual(r, other)
-    other = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'webgl_tests',
-                              'build_id')
+    other = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'webgl_tests', 'build_id'
+    )
     self.assertNotEqual(r, other)
-    other = data_types.Result('test', ['tag1', 'tag2'], 'Pass', 'pixel_tests',
-                              'other_build_id')
+    other = data_types.Result(
+      'test', ['tag1', 'tag2'], 'Pass', 'pixel_tests', 'other_build_id'
+    )
     self.assertNotEqual(r, other)
-    other = data_types.Expectation('test', ['tag1', 'tag2'], 'Pass')
+    other = data_types.Expectation(
+      'test', ['tag1', 'tag2'], 'Pass', NON_WILDCARD
+    )
     self.assertNotEqual(r, other)
 
   def testHashability(self) -> None:
@@ -271,8 +391,8 @@ class MapTypeUnittest(unittest.TestCase):
       m['1'] = 2
     m['1'] = value_type()
     self.assertEqual(m, {'1': value_type()})
-    m[u'2'] = value_type()
-    self.assertEqual(m, {'1': value_type(), u'2': value_type()})
+    m['2'] = value_type()
+    self.assertEqual(m, {'1': value_type(), '2': value_type()})
 
   def testStepBuildStatsMap(self) -> None:
     """Tests StepBuildStats' type enforcement."""
@@ -280,16 +400,18 @@ class MapTypeUnittest(unittest.TestCase):
 
   def testBuilderStepMap(self) -> None:
     """Tests BuilderStepMap's type enforcement."""
-    self._StringToMapHelper(data_types.BuilderStepMap,
-                            data_types.StepBuildStatsMap)
+    self._StringToMapHelper(
+      data_types.BuilderStepMap, data_types.StepBuildStatsMap
+    )
 
   def testExpectationBuilderMap(self) -> None:
     """Tests ExpectationBuilderMap's type enforcement."""
     m = data_types.ExpectationBuilderMap()
-    e = data_types.Expectation('test', ['tag'], 'Failure')
+    e = data_types.Expectation('test', ['tag'], 'Failure', NON_WILDCARD)
     with self.assertRaises(AssertionError):
-      m[typing.cast(data_types.BaseExpectation,
-                    1)] = data_types.BuilderStepMap()
+      m[typing.cast(data_types.BaseExpectation, 1)] = (
+        data_types.BuilderStepMap()
+      )
     with self.assertRaises(AssertionError):
       m[e] = typing.cast(data_types.BuilderStepMap, 2)
     m[e] = data_types.BuilderStepMap()
@@ -297,8 +419,9 @@ class MapTypeUnittest(unittest.TestCase):
 
   def testTestExpectationMap(self) -> None:
     """Tests TestExpectationMap's type enforcement."""
-    self._StringToMapHelper(data_types.TestExpectationMap,
-                            data_types.ExpectationBuilderMap)
+    self._StringToMapHelper(
+      data_types.TestExpectationMap, data_types.ExpectationBuilderMap
+    )
 
   def _GetSampleBuildStats(self) -> List[data_types.BuildStats]:
     build_stats = []
@@ -311,37 +434,50 @@ class MapTypeUnittest(unittest.TestCase):
 
   def _GetSampleTestExpectationMap(self) -> data_types.TestExpectationMap:
     build_stats = self._GetSampleBuildStats()
-    return data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['tag'], ['Failure']):
-            data_types.BuilderStepMap({
-                'builder1':
-                data_types.StepBuildStatsMap({
+    return data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['tag'], ['Failure'], NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder1': data_types.StepBuildStatsMap(
+                  {
                     'step1': build_stats[0],
                     'step2': build_stats[1],
-                }),
-                'builder2':
-                data_types.StepBuildStatsMap({
+                  }
+                ),
+                'builder2': data_types.StepBuildStatsMap(
+                  {
                     'step3': build_stats[2],
                     'step4': build_stats[3],
-                }),
-            }),
-            data_types.Expectation('foo', ['tag2'], ['Failure']):
-            data_types.BuilderStepMap({
-                'builder3':
-                data_types.StepBuildStatsMap({
+                  }
+                ),
+              }
+            ),
+            data_types.Expectation(
+              'foo', ['tag2'], ['Failure'], NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder3': data_types.StepBuildStatsMap(
+                  {
                     'step5': build_stats[4],
                     'step6': build_stats[5],
-                }),
-                'builder4':
-                data_types.StepBuildStatsMap({
+                  }
+                ),
+                'builder4': data_types.StepBuildStatsMap(
+                  {
                     'step7': build_stats[6],
                     'step8': build_stats[7],
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
 
   def testIterBuilderStepMaps(self) -> None:
     """Tests that iterating to BuilderStepMap works as expected."""
@@ -351,8 +487,11 @@ class MapTypeUnittest(unittest.TestCase):
       for expectation, builder_map in expectation_map.items():
         expected_values.append((expectation_file, expectation, builder_map))
     returned_values = []
-    for (expectation_file, expectation,
-         builder_map) in test_expectation_map.IterBuilderStepMaps():
+    for (
+      expectation_file,
+      expectation,
+      builder_map,
+    ) in test_expectation_map.IterBuilderStepMaps():
       returned_values.append((expectation_file, expectation, builder_map))
     self.assertEqual(len(returned_values), len(expected_values))
     for rv in returned_values:
@@ -381,18 +520,25 @@ class TypedMapMergeUnittest(unittest.TestCase):
   def testEmptyBaseMap(self) -> None:
     """Tests that a merge with an empty base map copies the merge map."""
     base_map = data_types.TestExpectationMap()
-    merge_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    merge_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     original_merge_map = copy.deepcopy(merge_map)
     base_map.Merge(merge_map)
     self.assertEqual(base_map, merge_map)
@@ -400,18 +546,25 @@ class TypedMapMergeUnittest(unittest.TestCase):
 
   def testEmptyMergeMap(self) -> None:
     """Tests that a merge with an empty merge map is a no-op."""
-    base_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    base_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     merge_map = data_types.TestExpectationMap()
     original_base_map = copy.deepcopy(base_map)
     base_map.Merge(merge_map)
@@ -420,149 +573,201 @@ class TypedMapMergeUnittest(unittest.TestCase):
 
   def testMissingKeys(self) -> None:
     """Tests that missing keys are properly copied to the base map."""
-    base_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    base_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                }),
-            }),
-        }),
-    })
-    merge_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
+    merge_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step2': data_types.BuildStats(),
-                }),
-                'builder2':
-                data_types.StepBuildStatsMap({
+                  }
+                ),
+                'builder2': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                }),
-            }),
-            data_types.Expectation('foo', ['mac'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+                  }
+                ),
+              }
+            ),
+            data_types.Expectation(
+              'foo', ['mac'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                })
-            })
-        }),
-        'bar':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('bar', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+                  }
+                )
+              }
+            ),
+          }
+        ),
+        'bar': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'bar', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     expected_base_map = {
-        'foo': {
-            data_types.Expectation('foo', ['win'], 'Failure'): {
-                'builder': {
-                    'step': data_types.BuildStats(),
-                    'step2': data_types.BuildStats(),
-                },
-                'builder2': {
-                    'step': data_types.BuildStats(),
-                },
-            },
-            data_types.Expectation('foo', ['mac'], 'Failure'): {
-                'builder': {
-                    'step': data_types.BuildStats(),
-                }
-            }
+      'foo': {
+        data_types.Expectation('foo', ['win'], 'Failure', NON_WILDCARD): {
+          'builder': {
+            'step': data_types.BuildStats(),
+            'step2': data_types.BuildStats(),
+          },
+          'builder2': {
+            'step': data_types.BuildStats(),
+          },
         },
-        'bar': {
-            data_types.Expectation('bar', ['win'], 'Failure'): {
-                'builder': {
-                    'step': data_types.BuildStats(),
-                },
-            },
+        data_types.Expectation('foo', ['mac'], 'Failure', NON_WILDCARD): {
+          'builder': {
+            'step': data_types.BuildStats(),
+          }
         },
+      },
+      'bar': {
+        data_types.Expectation('bar', ['win'], 'Failure', NON_WILDCARD): {
+          'builder': {
+            'step': data_types.BuildStats(),
+          },
+        },
+      },
     }
     base_map.Merge(merge_map)
     self.assertEqual(base_map, expected_base_map)
 
   def testMergeBuildStats(self) -> None:
     """Tests that BuildStats for the same step are merged properly."""
-    base_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    base_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     merge_stats = data_types.BuildStats()
     merge_stats.AddFailedBuild('1', frozenset())
-    merge_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    merge_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': merge_stats,
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     expected_stats = data_types.BuildStats()
     expected_stats.AddFailedBuild('1', frozenset())
     expected_base_map = {
-        'foo': {
-            data_types.Expectation('foo', ['win'], 'Failure'): {
-                'builder': {
-                    'step': expected_stats,
-                },
-            },
+      'foo': {
+        data_types.Expectation('foo', ['win'], 'Failure', NON_WILDCARD): {
+          'builder': {
+            'step': expected_stats,
+          },
         },
+      },
     }
     base_map.Merge(merge_map)
     self.assertEqual(base_map, expected_base_map)
 
   def testInvalidMerge(self) -> None:
     """Tests that updating a BuildStats instance twice is an error."""
-    base_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    base_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': data_types.BuildStats(),
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     merge_stats = data_types.BuildStats()
     merge_stats.AddFailedBuild('1', frozenset())
-    merge_map = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], 'Failure'):
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    merge_map = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], 'Failure', NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'step': merge_stats,
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     original_base_map = copy.deepcopy(base_map)
     base_map.Merge(merge_map, original_base_map)
     with self.assertRaises(AssertionError):
@@ -571,406 +776,510 @@ class TypedMapMergeUnittest(unittest.TestCase):
 
 class TestExpectationMapAddResultListUnittest(unittest.TestCase):
   def GetGenericRetryExpectation(self) -> data_types.Expectation:
-    return data_types.Expectation('foo/test', ['win10'], 'RetryOnFailure')
+    return data_types.Expectation(
+      'foo/test', ['win10'], 'RetryOnFailure', NON_WILDCARD
+    )
 
   def GetGenericFailureExpectation(self) -> data_types.Expectation:
-    return data_types.Expectation('foo/test', ['win10'], 'Failure')
+    return data_types.Expectation(
+      'foo/test', ['win10'], 'Failure', NON_WILDCARD
+    )
 
-  def GetEmptyMapForGenericRetryExpectation(self
-                                            ) -> data_types.TestExpectationMap:
+  def GetEmptyMapForGenericRetryExpectation(
+    self,
+  ) -> data_types.TestExpectationMap:
     foo_expectation = self.GetGenericRetryExpectation()
-    return data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
-            foo_expectation:
-            data_types.BuilderStepMap(),
-        }),
-    })
+    return data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
+            foo_expectation: data_types.BuilderStepMap(),
+          }
+        ),
+      }
+    )
 
   def GetEmptyMapForGenericFailureExpectation(
-      self) -> data_types.TestExpectationMap:
+    self,
+  ) -> data_types.TestExpectationMap:
     foo_expectation = self.GetGenericFailureExpectation()
-    return data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
-            foo_expectation:
-            data_types.BuilderStepMap(),
-        }),
-    })
+    return data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
+            foo_expectation: data_types.BuilderStepMap(),
+          }
+        ),
+      }
+    )
 
-  def GetPassedMapForExpectation(self, expectation: data_types.Expectation
-                                 ) -> data_types.TestExpectationMap:
+  def GetPassedMapForExpectation(
+    self, expectation: data_types.Expectation
+  ) -> data_types.TestExpectationMap:
     stats = data_types.BuildStats()
     stats.AddPassedBuild(expectation.tags)
     return self.GetMapForExpectationAndStats(expectation, stats)
 
-  def GetFailedMapForExpectation(self, expectation: data_types.Expectation
-                                 ) -> data_types.TestExpectationMap:
+  def GetFailedMapForExpectation(
+    self, expectation: data_types.Expectation
+  ) -> data_types.TestExpectationMap:
     stats = data_types.BuildStats()
     stats.AddFailedBuild('build_id', expectation.tags)
     return self.GetMapForExpectationAndStats(expectation, stats)
 
-  def GetMapForExpectationAndStats(self, expectation: data_types.Expectation,
-                                   stats: data_types.BuildStats
-                                   ) -> data_types.TestExpectationMap:
-    return data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
-            expectation:
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+  def GetMapForExpectationAndStats(
+    self, expectation: data_types.Expectation, stats: data_types.BuildStats
+  ) -> data_types.TestExpectationMap:
+    return data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
+            expectation: data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'pixel_tests': stats,
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
 
   def testRetryOnlyPassMatching(self) -> None:
     """Tests when the only tests are retry expectations that pass and match."""
-    foo_result = data_types.Result('foo/test', ['win10'], 'Pass', 'pixel_tests',
-                                   'build_id')
+    foo_result = data_types.Result(
+      'foo/test', ['win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
     expectation_map = self.GetEmptyMapForGenericRetryExpectation()
     unmatched_results = expectation_map.AddResultList('builder', [foo_result])
     self.assertEqual(unmatched_results, [])
 
     expected_expectation_map = self.GetPassedMapForExpectation(
-        self.GetGenericRetryExpectation())
+      self.GetGenericRetryExpectation()
+    )
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testRetryOnlyFailMatching(self) -> None:
     """Tests when the only tests are retry expectations that fail and match."""
-    foo_result = data_types.Result('foo/test', ['win10'], 'Failure',
-                                   'pixel_tests', 'build_id')
+    foo_result = data_types.Result(
+      'foo/test', ['win10'], 'Failure', 'pixel_tests', 'build_id'
+    )
     expectation_map = self.GetEmptyMapForGenericRetryExpectation()
     unmatched_results = expectation_map.AddResultList('builder', [foo_result])
     self.assertEqual(unmatched_results, [])
 
     expected_expectation_map = self.GetFailedMapForExpectation(
-        self.GetGenericRetryExpectation())
+      self.GetGenericRetryExpectation()
+    )
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testRetryFailThenPassMatching(self) -> None:
     """Tests when there are pass and fail results for retry expectations."""
-    foo_fail_result = data_types.Result('foo/test', ['win10'], 'Failure',
-                                        'pixel_tests', 'build_id')
-    foo_pass_result = data_types.Result('foo/test', ['win10'], 'Pass',
-                                        'pixel_tests', 'build_id')
+    foo_fail_result = data_types.Result(
+      'foo/test', ['win10'], 'Failure', 'pixel_tests', 'build_id'
+    )
+    foo_pass_result = data_types.Result(
+      'foo/test', ['win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
     expectation_map = self.GetEmptyMapForGenericRetryExpectation()
     unmatched_results = expectation_map.AddResultList(
-        'builder', [foo_fail_result, foo_pass_result])
+      'builder', [foo_fail_result, foo_pass_result]
+    )
     self.assertEqual(unmatched_results, [])
 
     expected_expectation_map = self.GetFailedMapForExpectation(
-        self.GetGenericRetryExpectation())
+      self.GetGenericRetryExpectation()
+    )
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testFailurePassMatching(self) -> None:
     """Tests when there are pass results for failure expectations."""
-    foo_result = data_types.Result('foo/test', ['win10'], 'Pass', 'pixel_tests',
-                                   'build_id')
+    foo_result = data_types.Result(
+      'foo/test', ['win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
     expectation_map = self.GetEmptyMapForGenericFailureExpectation()
     unmatched_results = expectation_map.AddResultList('builder', [foo_result])
     self.assertEqual(unmatched_results, [])
 
     expected_expectation_map = self.GetPassedMapForExpectation(
-        self.GetGenericFailureExpectation())
+      self.GetGenericFailureExpectation()
+    )
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testFailureFailureMatching(self) -> None:
     """Tests when there are failure results for failure expectations."""
-    foo_result = data_types.Result('foo/test', ['win10'], 'Failure',
-                                   'pixel_tests', 'build_id')
+    foo_result = data_types.Result(
+      'foo/test', ['win10'], 'Failure', 'pixel_tests', 'build_id'
+    )
     expectation_map = self.GetEmptyMapForGenericFailureExpectation()
     unmatched_results = expectation_map.AddResultList('builder', [foo_result])
     self.assertEqual(unmatched_results, [])
 
     expected_expectation_map = self.GetFailedMapForExpectation(
-        self.GetGenericFailureExpectation())
+      self.GetGenericFailureExpectation()
+    )
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testMismatches(self) -> None:
     """Tests that unmatched results get returned."""
-    foo_match_result = data_types.Result('foo/test', ['win10'], 'Pass',
-                                         'pixel_tests', 'build_id')
-    foo_mismatch_result = data_types.Result('foo/not_a_test', ['win10'],
-                                            'Failure', 'pixel_tests',
-                                            'build_id')
-    bar_result = data_types.Result('bar/test', ['win10'], 'Pass', 'pixel_tests',
-                                   'build_id')
+    foo_match_result = data_types.Result(
+      'foo/test', ['win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    foo_mismatch_result = data_types.Result(
+      'foo/not_a_test', ['win10'], 'Failure', 'pixel_tests', 'build_id'
+    )
+    bar_result = data_types.Result(
+      'bar/test', ['win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
     expectation_map = self.GetEmptyMapForGenericFailureExpectation()
     unmatched_results = expectation_map.AddResultList(
-        'builder', [foo_match_result, foo_mismatch_result, bar_result])
+      'builder', [foo_match_result, foo_mismatch_result, bar_result]
+    )
     self.assertEqual(len(set(unmatched_results)), 2)
-    self.assertEqual(set(unmatched_results),
-                     set([foo_mismatch_result, bar_result]))
+    self.assertEqual(
+      set(unmatched_results), set([foo_mismatch_result, bar_result])
+    )
 
     expected_expectation_map = self.GetPassedMapForExpectation(
-        self.GetGenericFailureExpectation())
+      self.GetGenericFailureExpectation()
+    )
     self.assertEqual(expectation_map, expected_expectation_map)
 
 
 class TestExpectationMapAddGroupedResultsUnittest(unittest.TestCase):
   def testResultMatchPassingNew(self) -> None:
     """Test adding a passing result when no results for a builder exist."""
-    r = data_types.Result('some/test/case', ['win', 'win10'], 'Pass',
-                          'pixel_tests', 'build_id')
-    e = data_types.Expectation('some/test/*', ['win10'], 'Failure')
-    expectation_map = data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
+    r = data_types.Result(
+      'some/test/case', ['win', 'win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    e = data_types.Expectation(
+      'some/test/*', ['win10'], 'Failure', SIMPLE_WILDCARD
+    )
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
             e: data_types.BuilderStepMap(),
-        }),
-    })
+          }
+        ),
+      }
+    )
     grouped_results = {
-        'some/test/case': [r],
+      'some/test/case': [r],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', None)
+      grouped_results, 'builder', None
+    )
     self.assertEqual(matched_results, set([r]))
     stats = data_types.BuildStats()
     stats.AddPassedBuild(frozenset(['win', 'win10']))
     expected_expectation_map = {
-        'expectation_file': {
-            e: {
-                'builder': {
-                    'pixel_tests': stats,
-                },
-            },
+      'expectation_file': {
+        e: {
+          'builder': {
+            'pixel_tests': stats,
+          },
         },
+      },
     }
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testResultMatchFailingNew(self) -> None:
     """Test adding a failing result when no results for a builder exist."""
-    r = data_types.Result('some/test/case', ['win', 'win10'], 'Failure',
-                          'pixel_tests', 'build_id')
-    e = data_types.Expectation('some/test/*', ['win10'], 'Failure')
-    expectation_map = data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
+    r = data_types.Result(
+      'some/test/case', ['win', 'win10'], 'Failure', 'pixel_tests', 'build_id'
+    )
+    e = data_types.Expectation(
+      'some/test/*', ['win10'], 'Failure', SIMPLE_WILDCARD
+    )
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
             e: data_types.BuilderStepMap(),
-        }),
-    })
+          }
+        ),
+      }
+    )
     grouped_results = {
-        'some/test/case': [r],
+      'some/test/case': [r],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', None)
+      grouped_results, 'builder', None
+    )
     self.assertEqual(matched_results, set([r]))
     stats = data_types.BuildStats()
     stats.AddFailedBuild('build_id', frozenset(['win', 'win10']))
     expected_expectation_map = {
-        'expectation_file': {
-            e: {
-                'builder': {
-                    'pixel_tests': stats,
-                },
-            }
+      'expectation_file': {
+        e: {
+          'builder': {
+            'pixel_tests': stats,
+          },
         }
+      }
     }
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testResultMatchPassingExisting(self) -> None:
     """Test adding a passing result when results for a builder exist."""
-    r = data_types.Result('some/test/case', ['win', 'win10'], 'Pass',
-                          'pixel_tests', 'build_id')
-    e = data_types.Expectation('some/test/*', ['win10'], 'Failure')
+    r = data_types.Result(
+      'some/test/case', ['win', 'win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    e = data_types.Expectation(
+      'some/test/*', ['win10'], 'Failure', SIMPLE_WILDCARD
+    )
     stats = data_types.BuildStats()
     stats.AddFailedBuild('build_id', frozenset(['win', 'win10']))
-    expectation_map = data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
-            e:
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
+            e: data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'pixel_tests': stats,
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     grouped_results = {
-        'some/test/case': [r],
+      'some/test/case': [r],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', None)
+      grouped_results, 'builder', None
+    )
     self.assertEqual(matched_results, set([r]))
     stats = data_types.BuildStats()
     stats.AddFailedBuild('build_id', frozenset(['win', 'win10']))
     stats.AddPassedBuild(frozenset(['win', 'win10']))
     expected_expectation_map = {
-        'expectation_file': {
-            e: {
-                'builder': {
-                    'pixel_tests': stats,
-                },
-            },
+      'expectation_file': {
+        e: {
+          'builder': {
+            'pixel_tests': stats,
+          },
         },
+      },
     }
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testResultMatchFailingExisting(self) -> None:
     """Test adding a failing result when results for a builder exist."""
-    r = data_types.Result('some/test/case', ['win', 'win10'], 'Failure',
-                          'pixel_tests', 'build_id')
-    e = data_types.Expectation('some/test/*', ['win10'], 'Failure')
+    r = data_types.Result(
+      'some/test/case', ['win', 'win10'], 'Failure', 'pixel_tests', 'build_id'
+    )
+    e = data_types.Expectation(
+      'some/test/*', ['win10'], 'Failure', SIMPLE_WILDCARD
+    )
     stats = data_types.BuildStats()
     stats.AddPassedBuild(frozenset(['win', 'win10']))
-    expectation_map = data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
-            e:
-            data_types.BuilderStepMap({
-                'builder':
-                data_types.StepBuildStatsMap({
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
+            e: data_types.BuilderStepMap(
+              {
+                'builder': data_types.StepBuildStatsMap(
+                  {
                     'pixel_tests': stats,
-                }),
-            }),
-        }),
-    })
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
     grouped_results = {
-        'some/test/case': [r],
+      'some/test/case': [r],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', None)
+      grouped_results, 'builder', None
+    )
     self.assertEqual(matched_results, set([r]))
     stats = data_types.BuildStats()
     stats.AddFailedBuild('build_id', frozenset(['win', 'win10']))
     stats.AddPassedBuild(frozenset(['win', 'win10']))
     expected_expectation_map = {
-        'expectation_file': {
-            e: {
-                'builder': {
-                    'pixel_tests': stats,
-                },
-            },
+      'expectation_file': {
+        e: {
+          'builder': {
+            'pixel_tests': stats,
+          },
         },
+      },
     }
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testResultMatchMultiMatch(self) -> None:
     """Test adding a passing result when multiple expectations match."""
-    r = data_types.Result('some/test/case', ['win', 'win10'], 'Pass',
-                          'pixel_tests', 'build_id')
-    e = data_types.Expectation('some/test/*', ['win10'], 'Failure')
-    e2 = data_types.Expectation('some/test/case', ['win10'], 'Failure')
-    expectation_map = data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
+    r = data_types.Result(
+      'some/test/case', ['win', 'win10'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    e = data_types.Expectation(
+      'some/test/*', ['win10'], 'Failure', SIMPLE_WILDCARD
+    )
+    e2 = data_types.Expectation(
+      'some/test/case', ['win10'], 'Failure', NON_WILDCARD
+    )
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
             e: data_types.BuilderStepMap(),
             e2: data_types.BuilderStepMap(),
-        }),
-    })
+          }
+        ),
+      }
+    )
     grouped_results = {
-        'some/test/case': [r],
+      'some/test/case': [r],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', None)
+      grouped_results, 'builder', None
+    )
     self.assertEqual(matched_results, set([r]))
     stats = data_types.BuildStats()
     stats.AddPassedBuild(frozenset(['win', 'win10']))
     expected_expectation_map = {
-        'expectation_file': {
-            e: {
-                'builder': {
-                    'pixel_tests': stats,
-                },
-            },
-            e2: {
-                'builder': {
-                    'pixel_tests': stats,
-                },
-            }
-        }
+      'expectation_file': {
+        e: {
+          'builder': {
+            'pixel_tests': stats,
+          },
+        },
+        e2: {
+          'builder': {
+            'pixel_tests': stats,
+          },
+        },
+      }
     }
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testResultNoMatch(self) -> None:
     """Tests that a result is not added if no match is found."""
-    r = data_types.Result('some/test/case', ['win', 'win10'], 'Failure',
-                          'pixel_tests', 'build_id')
-    e = data_types.Expectation('some/test/*', ['win10', 'foo'], 'Failure')
-    expectation_map = data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
+    r = data_types.Result(
+      'some/test/case', ['win', 'win10'], 'Failure', 'pixel_tests', 'build_id'
+    )
+    e = data_types.Expectation(
+      'some/test/*', ['win10', 'foo'], 'Failure', SIMPLE_WILDCARD
+    )
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
             e: data_types.BuilderStepMap(),
-        })
-    })
+          }
+        )
+      }
+    )
     grouped_results = {
-        'some/test/case': [r],
+      'some/test/case': [r],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', None)
+      grouped_results, 'builder', None
+    )
     self.assertEqual(matched_results, set())
     expected_expectation_map = {'expectation_file': {e: {}}}
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testResultMatchSpecificExpectationFiles(self) -> None:
     """Tests that a match can be found when specifying expectation files."""
-    r = data_types.Result('some/test/case', ['win'], 'Pass', 'pixel_tests',
-                          'build_id')
-    e = data_types.Expectation('some/test/case', ['win'], 'Failure')
-    expectation_map = data_types.TestExpectationMap({
-        'foo_expectations':
-        data_types.ExpectationBuilderMap({e: data_types.BuilderStepMap()}),
-        'bar_expectations':
-        data_types.ExpectationBuilderMap({e: data_types.BuilderStepMap()}),
-    })
+    r = data_types.Result(
+      'some/test/case', ['win'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    e = data_types.Expectation(
+      'some/test/case', ['win'], 'Failure', NON_WILDCARD
+    )
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'foo_expectations': data_types.ExpectationBuilderMap(
+          {e: data_types.BuilderStepMap()}
+        ),
+        'bar_expectations': data_types.ExpectationBuilderMap(
+          {e: data_types.BuilderStepMap()}
+        ),
+      }
+    )
     grouped_results = {
-        'some/test/case': [r],
+      'some/test/case': [r],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', ['bar_expectations'])
+      grouped_results, 'builder', ['bar_expectations']
+    )
     self.assertEqual(matched_results, set([r]))
     stats = data_types.BuildStats()
     stats.AddPassedBuild(frozenset(['win']))
     expected_expectation_map = {
-        'foo_expectations': {
-            e: {},
-        },
-        'bar_expectations': {
-            e: {
-                'builder': {
-                    'pixel_tests': stats,
-                }
-            }
+      'foo_expectations': {
+        e: {},
+      },
+      'bar_expectations': {
+        e: {
+          'builder': {
+            'pixel_tests': stats,
+          }
         }
+      },
     }
     self.assertEqual(expectation_map, expected_expectation_map)
 
   def testMultipleResults(self) -> None:
     """Tests that behavior is as expected when multiple results are given."""
-    r1 = data_types.Result('some/test/case', ['win'], 'Pass', 'pixel_tests',
-                           'build_id')
-    r2 = data_types.Result('some/test/case', ['linux'], 'Pass', 'pixel_tests',
-                           'build_id')
-    r3 = data_types.Result('some/other/test', ['win'], 'Pass', 'pixel_tests',
-                           'build_id')
-    r4 = data_types.Result('some/other/test', ['linux'], 'Pass', 'pixel_tests',
-                           'build_id')
-    r5 = data_types.Result('some/other/other/test', ['win'], 'Pass',
-                           'pixel_tests', 'build_id')
-    r6 = data_types.Result('some/other/other/test', ['linux'], 'Pass',
-                           'pixel_tests', 'build_id')
-    e1 = data_types.Expectation('some/test/case', [], 'Failure')
-    e2 = data_types.Expectation('some/other/test', ['win'], 'Failure')
-    e3 = data_types.Expectation('some/other/other/test', ['mac'], 'Failure')
-    expectation_map = data_types.TestExpectationMap({
-        'expectation_file':
-        data_types.ExpectationBuilderMap({
+    r1 = data_types.Result(
+      'some/test/case', ['win'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    r2 = data_types.Result(
+      'some/test/case', ['linux'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    r3 = data_types.Result(
+      'some/other/test', ['win'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    r4 = data_types.Result(
+      'some/other/test', ['linux'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    r5 = data_types.Result(
+      'some/other/other/test', ['win'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    r6 = data_types.Result(
+      'some/other/other/test', ['linux'], 'Pass', 'pixel_tests', 'build_id'
+    )
+    e1 = data_types.Expectation('some/test/case', [], 'Failure', NON_WILDCARD)
+    e2 = data_types.Expectation(
+      'some/other/test', ['win'], 'Failure', NON_WILDCARD
+    )
+    e3 = data_types.Expectation(
+      'some/other/other/test', ['mac'], 'Failure', NON_WILDCARD
+    )
+    expectation_map = data_types.TestExpectationMap(
+      {
+        'expectation_file': data_types.ExpectationBuilderMap(
+          {
             e1: data_types.BuilderStepMap(),
             e2: data_types.BuilderStepMap(),
             e3: data_types.BuilderStepMap(),
-        })
-    })
+          }
+        )
+      }
+    )
     grouped_results = {
-        'some/test/case': [r1, r2],
-        'some/other/test': [r3, r4],
-        'some/other/other/test': [r5, r6],
+      'some/test/case': [r1, r2],
+      'some/other/test': [r3, r4],
+      'some/other/other/test': [r5, r6],
     }
     matched_results = expectation_map._AddGroupedResults(
-        grouped_results, 'builder', None)
+      grouped_results, 'builder', None
+    )
     self.assertEqual(matched_results, set([r1, r2, r3]))
     stats1 = data_types.BuildStats()
     stats1.AddPassedBuild(frozenset(['win']))
@@ -978,19 +1287,19 @@ class TestExpectationMapAddGroupedResultsUnittest(unittest.TestCase):
     stats2 = data_types.BuildStats()
     stats2.AddPassedBuild(frozenset(['win']))
     expected_expectation_map = {
-        'expectation_file': {
-            e1: {
-                'builder': {
-                    'pixel_tests': stats1,
-                },
-            },
-            e2: {
-                'builder': {
-                    'pixel_tests': stats2,
-                },
-            },
-            e3: {},
-        }
+      'expectation_file': {
+        e1: {
+          'builder': {
+            'pixel_tests': stats1,
+          },
+        },
+        e2: {
+          'builder': {
+            'pixel_tests': stats2,
+          },
+        },
+        e3: {},
+      }
     }
     self.assertEqual(expectation_map, expected_expectation_map)
 
@@ -998,8 +1307,9 @@ class TestExpectationMapAddGroupedResultsUnittest(unittest.TestCase):
 class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
   def testEmptyInput(self) -> None:
     """Tests that nothing blows up with empty input."""
-    stale_dict, semi_stale_dict, active_dict =\
-        data_types.TestExpectationMap().SplitByStaleness()
+    stale_dict, semi_stale_dict, active_dict = (
+      data_types.TestExpectationMap().SplitByStaleness()
+    )
     self.assertEqual(stale_dict, {})
     self.assertEqual(semi_stale_dict, {})
     self.assertEqual(active_dict, {})
@@ -1009,10 +1319,11 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
 
   def testStaleExpectations(self) -> None:
     """Tests output when only stale expectations are provided."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'foo':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], ['Failure']):
+            data_types.Expectation('foo', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1029,7 +1340,8 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
                     uu.CreateStatsWithPassFails(4, 0)
                 }),
             }),
-            data_types.Expectation('foo', ['linux'], ['RetryOnFailure']):
+            data_types.Expectation(
+                'foo', ['linux'], ['RetryOnFailure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1042,7 +1354,7 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
         }),
         'bar':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('bar', ['win'], ['Failure']):
+            data_types.Expectation('bar', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1052,19 +1364,22 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
             }),
         }),
     })
+    # yapf: enable
     expected_stale_dict = copy.deepcopy(expectation_map)
-    stale_dict, semi_stale_dict, active_dict =\
-        expectation_map.SplitByStaleness()
+    stale_dict, semi_stale_dict, active_dict = (
+      expectation_map.SplitByStaleness()
+    )
     self.assertEqual(stale_dict, expected_stale_dict)
     self.assertEqual(semi_stale_dict, {})
     self.assertEqual(active_dict, {})
 
   def testActiveExpectations(self) -> None:
     """Tests output when only active expectations are provided."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'foo':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], ['Failure']):
+            data_types.Expectation('foo', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1081,7 +1396,8 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
                     uu.CreateStatsWithPassFails(0, 4)
                 }),
             }),
-            data_types.Expectation('foo', ['linux'], ['RetryOnFailure']):
+            data_types.Expectation(
+                'foo', ['linux'], ['RetryOnFailure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1094,7 +1410,7 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
         }),
         'bar':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('bar', ['win'], ['Failure']):
+            data_types.Expectation('bar', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1104,19 +1420,22 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
             }),
         }),
     })
+    # yapf: enable
     expected_active_dict = copy.deepcopy(expectation_map)
-    stale_dict, semi_stale_dict, active_dict =\
-        expectation_map.SplitByStaleness()
+    stale_dict, semi_stale_dict, active_dict = (
+      expectation_map.SplitByStaleness()
+    )
     self.assertEqual(stale_dict, {})
     self.assertEqual(semi_stale_dict, {})
     self.assertEqual(active_dict, expected_active_dict)
 
   def testSemiStaleExpectations(self) -> None:
     """Tests output when only semi-stale expectations are provided."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'foo':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], ['Failure']):
+            data_types.Expectation('foo', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1133,7 +1452,8 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
                     uu.CreateStatsWithPassFails(0, 4)
                 }),
             }),
-            data_types.Expectation('foo', ['linux'], ['RetryOnFailure']):
+            data_types.Expectation(
+                'foo', ['linux'], ['RetryOnFailure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1146,7 +1466,7 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
         }),
         'bar':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('bar', ['win'], ['Failure']):
+            data_types.Expectation('bar', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1161,19 +1481,22 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
             }),
         }),
     })
+    # yapf: enable
     expected_semi_stale_dict = copy.deepcopy(expectation_map)
-    stale_dict, semi_stale_dict, active_dict =\
-        expectation_map.SplitByStaleness()
+    stale_dict, semi_stale_dict, active_dict = (
+      expectation_map.SplitByStaleness()
+    )
     self.assertEqual(stale_dict, {})
     self.assertEqual(semi_stale_dict, expected_semi_stale_dict)
     self.assertEqual(active_dict, {})
 
   def testSemiStaleTreatedAsActive(self) -> None:
     """Tests output when semi-stale expectations are considered active."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'foo':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], ['Failure']):
+            data_types.Expectation('foo', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1190,7 +1513,8 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
                     uu.CreateStatsWithPassFails(0, 4)
                 }),
             }),
-            data_types.Expectation('foo', ['linux'], ['RetryOnFailure']):
+            data_types.Expectation(
+                'foo', ['linux'], ['RetryOnFailure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1203,7 +1527,7 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
         }),
         'bar':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('bar', ['win'], ['Failure']):
+            data_types.Expectation('bar', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1218,11 +1542,14 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
             }),
         }),
     })
+    # yapf: enable
 
+    # yapf: disable
     expected_semi_stale_dict = data_types.TestExpectationMap({
         'foo':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['linux'], ['RetryOnFailure']):
+            data_types.Expectation(
+                'foo', ['linux'], ['RetryOnFailure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1235,7 +1562,7 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
         }),
         'bar':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('bar', ['win'], ['Failure']):
+            data_types.Expectation('bar', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1250,49 +1577,57 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
             }),
         }),
     })
+    # yapf: enable
 
-    expected_active_dict = data_types.TestExpectationMap({
-        'foo':
-        data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['win'], ['Failure']):
-            data_types.BuilderStepMap({
-                'foo_builder':
-                data_types.StepBuildStatsMap({
-                    'step1':
-                    uu.CreateStatsWithPassFails(1, 0),
-                    'step2':
-                    uu.CreateStatsWithPassFails(2, 2),
-                }),
-                'bar_builder':
-                data_types.StepBuildStatsMap({
-                    'step1':
-                    uu.CreateStatsWithPassFails(3, 0),
-                    'step2':
-                    uu.CreateStatsWithPassFails(0, 4)
-                }),
-            }),
-        }),
-    })
+    expected_active_dict = data_types.TestExpectationMap(
+      {
+        'foo': data_types.ExpectationBuilderMap(
+          {
+            data_types.Expectation(
+              'foo', ['win'], ['Failure'], NON_WILDCARD
+            ): data_types.BuilderStepMap(
+              {
+                'foo_builder': data_types.StepBuildStatsMap(
+                  {
+                    'step1': uu.CreateStatsWithPassFails(1, 0),
+                    'step2': uu.CreateStatsWithPassFails(2, 2),
+                  }
+                ),
+                'bar_builder': data_types.StepBuildStatsMap(
+                  {
+                    'step1': uu.CreateStatsWithPassFails(3, 0),
+                    'step2': uu.CreateStatsWithPassFails(0, 4),
+                  }
+                ),
+              }
+            ),
+          }
+        ),
+      }
+    )
 
     def SideEffect(pass_map: Dict[int, data_types.BuilderStepMap]) -> bool:
       return pass_map[data_types.FULL_PASS]['foo_builder'][
-          'step1'] == uu.CreateStatsWithPassFails(1, 0)
+        'step1'
+      ] == uu.CreateStatsWithPassFails(1, 0)
 
-    with mock.patch.object(expectation_map,
-                           '_ShouldTreatSemiStaleAsActive',
-                           side_effect=SideEffect):
-      stale_dict, semi_stale_dict, active_dict =\
-          expectation_map.SplitByStaleness()
+    with mock.patch.object(
+      expectation_map, '_ShouldTreatSemiStaleAsActive', side_effect=SideEffect
+    ):
+      stale_dict, semi_stale_dict, active_dict = (
+        expectation_map.SplitByStaleness()
+      )
     self.assertEqual(stale_dict, {})
     self.assertEqual(semi_stale_dict, expected_semi_stale_dict)
     self.assertEqual(active_dict, expected_active_dict)
 
   def testAllExpectations(self) -> None:
     """Tests output when all three types of expectations are provided."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'foo':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo', ['stale'], 'Failure'):
+            data_types.Expectation('foo', ['stale'], 'Failure', NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1309,7 +1644,8 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
                     uu.CreateStatsWithPassFails(4, 0)
                 }),
             }),
-            data_types.Expectation('foo', ['semistale'], 'Failure'):
+            data_types.Expectation(
+                'foo', ['semistale'], 'Failure', NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1326,7 +1662,7 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
                     uu.CreateStatsWithPassFails(0, 4)
                 }),
             }),
-            data_types.Expectation('foo', ['active'], 'Failure'):
+            data_types.Expectation('foo', ['active'], 'Failure', NON_WILDCARD):
             data_types.BuilderStepMap({
                 'foo_builder':
                 data_types.StepBuildStatsMap({
@@ -1345,23 +1681,27 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
             }),
         }),
     })
+    # yapf: enable
     expected_stale = {
-        'foo': {
-            data_types.Expectation('foo', ['stale'], 'Failure'): {
-                'foo_builder': {
-                    'step1': uu.CreateStatsWithPassFails(1, 0),
-                    'step2': uu.CreateStatsWithPassFails(2, 0),
-                },
-                'bar_builder': {
-                    'step1': uu.CreateStatsWithPassFails(3, 0),
-                    'step2': uu.CreateStatsWithPassFails(4, 0)
-                },
-            },
+      'foo': {
+        data_types.Expectation('foo', ['stale'], 'Failure', NON_WILDCARD): {
+          'foo_builder': {
+            'step1': uu.CreateStatsWithPassFails(1, 0),
+            'step2': uu.CreateStatsWithPassFails(2, 0),
+          },
+          'bar_builder': {
+            'step1': uu.CreateStatsWithPassFails(3, 0),
+            'step2': uu.CreateStatsWithPassFails(4, 0),
+          },
         },
+      },
     }
+    # yapf: disable
     expected_semi_stale = {
         'foo': {
-            data_types.Expectation('foo', ['semistale'], 'Failure'): {
+            data_types.Expectation(
+                'foo', ['semistale'], 'Failure', NON_WILDCARD):
+            {
                 'foo_builder': {
                     'step1': uu.CreateStatsWithPassFails(1, 0),
                     'step2': uu.CreateStatsWithPassFails(2, 2),
@@ -1373,23 +1713,25 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
             },
         },
     }
+    # yapf: enable
     expected_active = {
-        'foo': {
-            data_types.Expectation('foo', ['active'], 'Failure'): {
-                'foo_builder': {
-                    'step1': uu.CreateStatsWithPassFails(1, 1),
-                    'step2': uu.CreateStatsWithPassFails(2, 2),
-                },
-                'bar_builder': {
-                    'step1': uu.CreateStatsWithPassFails(3, 3),
-                    'step2': uu.CreateStatsWithPassFails(0, 4)
-                },
-            },
+      'foo': {
+        data_types.Expectation('foo', ['active'], 'Failure', NON_WILDCARD): {
+          'foo_builder': {
+            'step1': uu.CreateStatsWithPassFails(1, 1),
+            'step2': uu.CreateStatsWithPassFails(2, 2),
+          },
+          'bar_builder': {
+            'step1': uu.CreateStatsWithPassFails(3, 3),
+            'step2': uu.CreateStatsWithPassFails(0, 4),
+          },
         },
+      },
     }
 
-    stale_dict, semi_stale_dict, active_dict =\
-        expectation_map.SplitByStaleness()
+    stale_dict, semi_stale_dict, active_dict = (
+      expectation_map.SplitByStaleness()
+    )
     self.assertEqual(stale_dict, expected_stale)
     self.assertEqual(semi_stale_dict, expected_semi_stale)
     self.assertEqual(active_dict, expected_active)
@@ -1398,16 +1740,19 @@ class TestExpectationMapSplitByStalenessUnittest(unittest.TestCase):
 class TestExpectationMapFilterOutUnusedExpectationsUnittest(unittest.TestCase):
   def testNoUnused(self) -> None:
     """Tests that filtering is a no-op if there are no unused expectations."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'expectation_file':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo/test', ['win'], ['Failure']):
+            data_types.Expectation(
+                'foo/test', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'SomeBuilder':
                 data_types.StepBuildStatsMap(),
             }),
         })
     })
+    # yapf: enable
     expected_expectation_map = copy.deepcopy(expectation_map)
     unused_expectations = expectation_map.FilterOutUnusedExpectations()
     self.assertEqual(len(unused_expectations), 0)
@@ -1415,31 +1760,39 @@ class TestExpectationMapFilterOutUnusedExpectationsUnittest(unittest.TestCase):
 
   def testUnusedButNotEmpty(self) -> None:
     """Tests filtering if there is an unused expectation but no empty tests."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'expectation_file':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo/test', ['win'], ['Failure']):
+            data_types.Expectation(
+                'foo/test', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'SomeBuilder':
                 data_types.StepBuildStatsMap(),
             }),
-            data_types.Expectation('foo/test', ['linux'], ['Failure']):
+            data_types.Expectation(
+                'foo/test', ['linux'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap(),
         })
     })
+    # yapf: enable
+    # yapf: disable
     expected_expectation_map = data_types.TestExpectationMap({
         'expectation_file':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo/test', ['win'], ['Failure']):
+            data_types.Expectation(
+                'foo/test', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap({
                 'SomeBuilder':
                 data_types.StepBuildStatsMap(),
             }),
         }),
     })
+    # yapf: enable
     expected_unused = {
-        'expectation_file':
-        [data_types.Expectation('foo/test', ['linux'], ['Failure'])]
+      'expectation_file': [
+        data_types.Expectation('foo/test', ['linux'], ['Failure'], NON_WILDCARD)
+      ]
     }
     unused_expectations = expectation_map.FilterOutUnusedExpectations()
     self.assertEqual(unused_expectations, expected_unused)
@@ -1447,16 +1800,20 @@ class TestExpectationMapFilterOutUnusedExpectationsUnittest(unittest.TestCase):
 
   def testUnusedAndEmpty(self) -> None:
     """Tests filtering if there is an expectation that causes an empty test."""
+    # yapf: disable
     expectation_map = data_types.TestExpectationMap({
         'expectation_file':
         data_types.ExpectationBuilderMap({
-            data_types.Expectation('foo/test', ['win'], ['Failure']):
+            data_types.Expectation(
+                'foo/test', ['win'], ['Failure'], NON_WILDCARD):
             data_types.BuilderStepMap(),
         }),
     })
+    # yapf: enable
     expected_unused = {
-        'expectation_file':
-        [data_types.Expectation('foo/test', ['win'], ['Failure'])]
+      'expectation_file': [
+        data_types.Expectation('foo/test', ['win'], ['Failure'], NON_WILDCARD)
+      ]
     }
     unused_expectations = expectation_map.FilterOutUnusedExpectations()
     self.assertEqual(unused_expectations, expected_unused)
@@ -1476,13 +1833,15 @@ class BuilderEntryUnittest(unittest.TestCase):
     be = data_types.BuilderEntry('builder', constants.BuilderTypes.CI, False)
     other = data_types.BuilderEntry('builder', constants.BuilderTypes.CI, False)
     self.assertEqual(be, other)
-    other = data_types.BuilderEntry('builder', constants.BuilderTypes.TRY,
-                                    False)
+    other = data_types.BuilderEntry(
+      'builder', constants.BuilderTypes.TRY, False
+    )
     self.assertNotEqual(be, other)
     other = data_types.BuilderEntry('builder', constants.BuilderTypes.CI, True)
     self.assertNotEqual(be, other)
-    other = data_types.BuilderEntry('not_builder', constants.BuilderTypes.CI,
-                                    False)
+    other = data_types.BuilderEntry(
+      'not_builder', constants.BuilderTypes.CI, False
+    )
     self.assertNotEqual(be, other)
     self.assertNotEqual(be, 'builder')
 
@@ -1492,13 +1851,15 @@ class BuilderEntryUnittest(unittest.TestCase):
     _ = {be}
     other = data_types.BuilderEntry('builder', constants.BuilderTypes.CI, False)
     self.assertEqual(be.__hash__(), other.__hash__())
-    other = data_types.BuilderEntry('builder', constants.BuilderTypes.TRY,
-                                    False)
+    other = data_types.BuilderEntry(
+      'builder', constants.BuilderTypes.TRY, False
+    )
     self.assertNotEqual(be.__hash__(), other.__hash__())
     other = data_types.BuilderEntry('builder', constants.BuilderTypes.CI, True)
     self.assertNotEqual(be.__hash__(), other.__hash__())
-    other = data_types.BuilderEntry('not_builder', constants.BuilderTypes.CI,
-                                    False)
+    other = data_types.BuilderEntry(
+      'not_builder', constants.BuilderTypes.CI, False
+    )
     self.assertNotEqual(be.__hash__(), other.__hash__())
 
 

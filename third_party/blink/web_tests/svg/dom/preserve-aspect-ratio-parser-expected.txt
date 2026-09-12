@@ -26,6 +26,7 @@ CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumer
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "defer xMidYMax s…".
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "defer xMaxYMax s…".
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "slice".
+CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unexpected end of attribute. Unrecognized enumerated value, "".
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "defer".
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "meet".
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "slice".
@@ -33,7 +34,7 @@ CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumer
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "refer xMinYMin s…".
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Trailing garbage, "xMinYMin defer".
 CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Unrecognized enumerated value, "slice xMinYMin".
-CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Trailing garbage, "xMinYMin\u00A0".
+CONSOLE ERROR: Error: <image> attribute preserveAspectRatio: Trailing garbage, "xMinYMin ".
 This tests the parser for preserve aspect ratio attribute values.
 
 On success, you will see a series of "PASS" messages, followed by "TEST COMPLETE".

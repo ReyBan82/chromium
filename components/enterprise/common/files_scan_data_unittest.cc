@@ -12,6 +12,7 @@
 #include "base/threading/thread_restrictions.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace enterprise_connectors {
 
@@ -83,7 +84,8 @@ TEST_F(FilesScanDataTest, FlatFileList) {
     files_scan_data.ExpandPaths(run_loop.QuitClosure());
     run_loop.Run();
 
-    std::set<size_t> blocked_indexes = files_scan_data.IndexesToBlock(results);
+    absl::flat_hash_set<size_t> blocked_indexes =
+        files_scan_data.IndexesToBlock(results);
 
     ASSERT_EQ(results.size(), files_scan_data.expanded_paths().size());
 
@@ -126,7 +128,7 @@ TEST_F(FilesScanDataTest, Directories) {
   ASSERT_EQ(expand.at(path_2_2), 1u);
 
   // No failure means no top directory gets blocked.
-  std::set<size_t> blocked_indexes =
+  absl::flat_hash_set<size_t> blocked_indexes =
       files_scan_data.IndexesToBlock({true, true, true, true});
   ASSERT_TRUE(blocked_indexes.empty());
 
@@ -159,6 +161,84 @@ TEST_F(FilesScanDataTest, Directories) {
   blocked_indexes = files_scan_data.IndexesToBlock({true, true, false, false});
   ASSERT_EQ(blocked_indexes.size(), 1u);
   ASSERT_TRUE(blocked_indexes.count(1));
+}
+
+// Test case for crbug.com/501437361.
+// Verifies that ChromeOS virtual paths are not dropped during expansion,
+// ensuring they reach the scanner and are properly evaluated (and reported).
+TEST_F(FilesScanDataTest, VirtualPathNoDrop) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+
+  // Simulate the ChromeOS virtual_path.
+  base::FilePath virtual_path(
+      FILE_PATH_LITERAL("Downloads-deadbeef0123456789/confidential_ssn.pdf"));
+  ASSERT_FALSE(virtual_path.IsAbsolute());
+
+  base::FilePath real_path =
+      AddFile(base::FilePath(FILE_PATH_LITERAL("benign.txt")));
+
+  std::vector<base::FilePath> base_paths = {virtual_path, real_path};
+  FilesScanData files_scan_data(base_paths);
+
+  base::RunLoop run_loop;
+  files_scan_data.ExpandPaths(run_loop.QuitClosure());
+  run_loop.Run();
+
+  // The virtual path is NOT dropped anymore. Both files survive expansion.
+  ASSERT_EQ(files_scan_data.expanded_paths().size(), 2u);
+  EXPECT_EQ(files_scan_data.expanded_paths()[0], virtual_path);
+  EXPECT_EQ(files_scan_data.expanded_paths()[1], real_path);
+  EXPECT_TRUE(files_scan_data.expanded_paths_indexes().contains(virtual_path));
+  EXPECT_TRUE(files_scan_data.expanded_paths_indexes().contains(real_path));
+
+  // base_paths() is round-tripped intact.
+  ASSERT_EQ(files_scan_data.base_paths().size(), 2u);
+
+  // Reconciler simulation.
+  // Case A: Scanner blocks the virtual file (index 0) and allows the real file
+  // (index 1).
+  {
+    std::vector<bool> scan_verdicts = {false, true};
+    absl::flat_hash_set<size_t> blocked =
+        files_scan_data.IndexesToBlock(scan_verdicts);
+    EXPECT_TRUE(blocked.contains(0u));
+    EXPECT_FALSE(blocked.contains(1u));
+  }
+
+  // Case B: Scanner allows the virtual file (index 0) and blocks the real file
+  // (index 1).
+  {
+    std::vector<bool> scan_verdicts = {true, false};
+    absl::flat_hash_set<size_t> blocked =
+        files_scan_data.IndexesToBlock(scan_verdicts);
+    EXPECT_FALSE(blocked.contains(0u));
+    EXPECT_TRUE(blocked.contains(1u));
+  }
+}
+
+TEST_F(FilesScanDataTest, BasePaths) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
+
+  std::vector<base::FilePath> paths = {
+      AddFile(base::FilePath(FILE_PATH_LITERAL("a.txt"))),
+      AddFile(base::FilePath(FILE_PATH_LITERAL("b.txt"))),
+      AddFile(base::FilePath(FILE_PATH_LITERAL("c.txt"))),
+  };
+
+  FilesScanData files_scan_data(paths);
+  ASSERT_EQ(files_scan_data.base_paths(), paths);
+
+  base::RunLoop run_loop;
+  files_scan_data.ExpandPaths(run_loop.QuitClosure());
+  ASSERT_EQ(files_scan_data.base_paths().size(), 0u);
+  run_loop.Run();
+
+  ASSERT_EQ(files_scan_data.base_paths(), paths);
+  ASSERT_EQ(files_scan_data.take_base_paths(), paths);
+
+  // Base paths is empty after a take.
+  ASSERT_EQ(files_scan_data.base_paths().size(), 0u);
+  ASSERT_EQ(files_scan_data.take_base_paths().size(), 0u);
 }
 
 }  // namespace enterprise_connectors

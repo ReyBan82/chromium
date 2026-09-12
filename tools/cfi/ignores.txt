@@ -1,7 +1,37 @@
+#!special-case-list-v2
+
 # This file defines which warnings should be ignored while running clang's
 # control flow integrity sanitizer, as run by the cfi_flags build target.
 
-[cfi-unrelated-cast|cfi-derived-cast]
+# ***If you think you need to add an entry here, read this comment first.***
+#
+# Generally prefer to add an attribute to whichever function needs it, instead
+# of adding entries to this file. This can be done in the Chromium codebase
+# using the NO_SANITIZE macro, e.g.
+#
+# NO_SANITIZE("cfi-unrelated-cast")
+#
+# or outside of Chromium using the no_sanitize attribute directly (potentially
+# with guards against non-Clang compilers; see the definition of NO_SANITIZE in
+# Chromium), e.g.
+#
+# [[clang::no_sanitize("cfi-unrelated-cast")]]
+#
+# However, an ignorelist entry IS the right approach when:
+# - The indirect call (cfi-icall) happens inside a third-party header function
+#   declared static inline. The compiler may emit a non-inlined copy, placing
+#   the indirect call outside any caller's NO_SANITIZE scope.
+#
+# - The code calls through function pointers obtained via dlopen()/dlsym()
+#   into shared libraries that are not built with CFI. This is common for
+#   system libraries loaded at runtime (e.g. PipeWire, PulseAudio, VA-API,
+#   Vulkan, EGL/GL). In these cases the target function has no CFI type
+#   information, so the check will always fail.
+#
+# - Auto-generated stub files (from generate_stubs.py, generate_bindings.py,
+#   etc.) where adding per-function attributes is impractical.
+
+[cfi-{unrelated,derived}-cast]
 
 # e.g. RolloverProtectedTickClock
 fun:*MutableInstance*
@@ -23,6 +53,10 @@ type:*SkBlockComRef*
 type:*RemoveIUnknown*
 src:*atlcomcli.h
 
+# TODO(crbug.com/504680934): Remove once we rolled in
+# https://github.com/llvm/llvm-project/pull/220296
+fun:*__assume_aligned*
+
 # src/base/win/event_trace_provider_unittest.cc
 type:*EtwTraceProvider*
 
@@ -32,8 +66,14 @@ fun:*internal_default_instance*
 # CAtlArray<T> casts to uninitialized T*.
 src:*atlcoll.h
 
+# Temporarily disable CFI unrelated/derived cast in std::shared_ptr
+# until upstream restores _LIBCPP_NO_CFI on __get_elem, see
+# https://github.com/llvm/llvm-project/pull/200401#pullrequestreview-5155315035
+src:*third_party/libc*/*shared_ptr.h
+
 # https://github.com/grpc/grpc/issues/19375
 src:*third_party/grpc/src/src/core/lib/gprpp/inlined_vector.h
+src:*third_party/grpc/source/src/core/lib/gprpp/inlined_vector.h
 
 # https://crbug.com/994752
 src:*third_party/spirv-cross/spirv-cross/spirv_cross_containers.hpp
@@ -116,7 +156,7 @@ fun:*traceImpl*
 #############################################################################
 # Cross-DSO vcalls
 
-[cfi-vcall|cfi-unrelated-cast|cfi-derived-cast]
+[cfi-{vcall,unrelated-cast,derived-cast}]
 
 # These classes are used to communicate between chrome.exe and
 # chrome_child.dll (see src/sandbox/win/src/sandbox.h,
@@ -132,6 +172,9 @@ type:sandbox::TargetServices
 
 ######### Cross-DSO icalls using dynamically resolved symbols crbug.com/771365
 
+# Dawn wire client calling dynamically loaded GPU accelerator callbacks
+src:*third_party/dawn/src/dawn/wire/client/Buffer.cpp
+
 # ANGLE
 src:*third_party/angle/src/common/vulkan/vulkan_icd.cpp
 src:*third_party/angle/src/libANGLE/*
@@ -143,8 +186,22 @@ fun:*GetPCIDevicesWithLibPCI*
 fun:*GetTraceCategoryEnabledFlag*
 fun:*AddTraceEvent*
 
+# dav1d, calls to dav1d shared library from crabbyavif (Rust library). cfi-icall
+# does not work when the callback is a Rust function and the parameters are
+# fixed width integer types (or pointers to fixed width integer types).
+# TODO(crbug.com/40266913): Remove this entry once Rust CFI is built with
+# -fsanitize-cfi-icall-experimental-normalize-integers and
+# -Zsanitizer-cfi-normalize-integers.
+src:*third_party/dav1d/libdav1d/src/ref.c
+
 # Dawn, calls to OpenGL and Vulkan function pointers from shared library.
 src:*third_party/dawn/src/dawn/native/*
+
+# Dawn uses std::function for callbacks from the main binary to
+# liboptimization_guide_internal.so.
+# TODO(crbug.com/41483637): See if we can avoid disabling CFI for std::function.
+src:*third_party/libc*/invoke.h
+src:*third_party/libc*/function.h
 
 # PPAPI
 src:*ppapi/*
@@ -160,8 +217,6 @@ src:*media/gpu/vaapi/va_stubs.cc
 
 # Calls to auto-generated stubs by generate_library_loader.py
 src:*content/browser/speech/tts_linux.cc
-src:*device/udev_linux/udev0_loader.cc
-src:*device/udev_linux/udev1_loader.cc
 
 # Calls to auto-generated stubs by ui/gl/generate_bindings.py
 src:*ui/gl/gl_bindings_autogen_*
@@ -169,13 +224,43 @@ src:*ui/gl/gl_bindings_autogen_*
 # Calls to vulkan function pointers from shared library.
 src:*third_party/vulkan_memory_allocator/include/vk_mem_alloc.h
 src:*third_party/angle/third_party/vulkan-loader/src/loader*
-src:*third_party/vulkan-deps/vulkan-loader/src/loader*
-src:*third_party/vulkan-deps/vulkan-validation-layers/src/layers/*
+src:*third_party/vulkan-loader/src/loader*
+src:*third_party/vulkan-validation-layers/src/layers/*
 src:*third_party/angle/src/common/vulkan/vulkan_icd.cpp
 
-src:*components/os_crypt/*
+# The OpenXR loader and Chromium's OpenXR code call into the dlopen'd OpenXR
+# runtime through function pointers, like the vulkan loader above: the loader
+# and its generated dispatch table, and the Chromium files that call extension
+# entry points resolved with xrGetInstanceProcAddr (directly, through the
+# destroy function an OpenXrExtensionHandle/ScopedOpenXrObject stores, or as a
+# PFN parameter in openxr_spatial_utils.cc). The unittests' mock runtime and
+# its trampoline dispatch through the same kind of pointers, and the mock's
+# xrCreateVulkanInstanceKHR side calls through vkGetInstanceProcAddr.
+src:*third_party/openxr/src/src/*
+src:*device/vr/openxr/linux/openxr_vulkan_context.cc
+src:*device/vr/openxr/msft/openxr_anchor_manager_msft.cc
+src:*device/vr/openxr/msft/openxr_scene_msft.cc
+src:*device/vr/openxr/msft/openxr_scene_observer_msft.cc
+src:*device/vr/openxr/openxr_api_wrapper.cc
+src:*device/vr/openxr/openxr_extension_handle.h
+src:*device/vr/openxr/openxr_hand_tracker.cc
+src:*device/vr/openxr/openxr_spatial_anchor_manager.cc
+src:*device/vr/openxr/openxr_spatial_framework_manager.cc
+src:*device/vr/openxr/openxr_spatial_hit_test_manager.cc
+src:*device/vr/openxr/openxr_spatial_plane_manager.cc
+src:*device/vr/openxr/openxr_spatial_utils.cc
+src:*device/vr/openxr/openxr_visibility_mask_handler.cc
+src:*device/vr/openxr/scoped_openxr_object.h
+src:*device/vr/openxr/test/fake_openxr_impl_api.cc
+src:*device/vr/openxr/test/openxr_mock_helper.cc
 
-src:*content/browser/accessibility/browser_accessibility_auralinux.cc
+# Calls to TFLiteDelegate functions in a shared library.
+src:*services/webnn/tflite/graph_impl_tflite.cc
+src:*third_party/tflite/src/tensorflow/lite/c/common_internal.cc
+src:*third_party/tflite/src/tensorflow/lite/core/subgraph.cc
+src:*third_party/tflite/src/tensorflow/lite/delegates/utils.cc
+
+src:*ui/accessibility/platform/browser_accessibility_auralinux.cc
 src:*ui/accessibility/platform/ax_platform_node_auralinux.cc
 src:*ui/accessibility/platform/ax_platform_atk_hyperlink.cc
 src:*ui/accessibility/platform/ax_platform_node_auralinux_unittest.cc
@@ -219,6 +304,19 @@ src:*third_party/breakpad/breakpad/src/common/linux/libcurl_wrapper.cc
 src:*third_party/crashpad/crashpad/snapshot/crashpad_info_client_options_test.cc
 src:*third_party/skia/src/ports/SkFontHost_FreeType.cpp
 
+# WebRTC / PipeWire
+fun:*pw_core_add_listener*
+fun:*pw_core_get_registry*
+fun:*pw_core_sync*
+fun:*pw_node_add_listener*
+fun:*pw_node_enum_params*
+fun:*pw_loop_add_event*
+fun:*pw_loop_signal_event*
+fun:*pw_registry_add_listener*
+fun:*pw_registry_bind*
+fun:*spa_hook_remove*
+fun:*spa_loop_utils*
+
 ######### Function pointers cast to incorrect type signatures
 
 # libicu is currently compiled such that in libicu the 'UChar' type is a
@@ -242,9 +340,17 @@ fun:*GlobalHandles*PostGarbageCollectionProcessing*
 
 fun:*InvokeAccessorGetterCallback*
 
-# False-positives in fontconfig.  May be removed after this MR is merged:
-# https://gitlab.freedesktop.org/fontconfig/fontconfig/-/merge_requests/261
-src:*/third_party/fontconfig/src/src/fchash.c
+# XNNPACK casts incorrect function signature to pthreadpool task type.
+src:*third_party/pthreadpool/src/src/fastpath.c
+src:*third_party/pthreadpool/src/src/portable-api.c
+
+# Destructor of std::unique_ptr<TfLiteDelegate> calls deleter in dynamically
+# loaded shared library.
+fun:*unique_ptr*TfLiteDelegate*
+
+# LiteRT: Indirect calls to dynamically loaded LiteRT runtime and accelerators.
+src:*third_party/litert/*
+src:*services/webnn/tflite/*
 
 ######### Uncategorized
 

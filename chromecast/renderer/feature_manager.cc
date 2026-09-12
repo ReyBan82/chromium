@@ -14,7 +14,6 @@
 #include "base/values.h"
 #include "chromecast/base/cast_features.h"
 #include "chromecast/common/feature_constants.h"
-#include "chromecast/renderer/assistant_bindings.h"
 #include "chromecast/renderer/cast_demo_bindings.h"
 #include "chromecast/renderer/cast_window_manager_bindings.h"
 #include "chromecast/renderer/settings_ui_bindings.h"
@@ -34,7 +33,7 @@ FeatureManager::FeatureManager(content::RenderFrame* render_frame)
     : content::RenderFrameObserver(render_frame),
       configured_(false),
       can_install_bindings_(false),
-      dev_origin_(GURL::EmptyGURL()),
+      dev_origin_(GURL()),
       secure_origin_set_(false) {
   registry_.AddInterface(base::BindRepeating(
       &FeatureManager::OnFeatureManagerRequest, base::Unretained(this)));
@@ -80,13 +79,14 @@ void FeatureManager::ConfigureFeatures(
 
 void FeatureManager::ConfigureFeaturesInternal() {
   if (FeatureEnabled(feature::kEnableDevMode)) {
-    const base::Value::Dict& dev_mode_config =
+    const base::DictValue& dev_mode_config =
         (features_map_.find(feature::kEnableDevMode)->second)->config;
     const std::string* dev_mode_origin =
         dev_mode_config.FindString(feature::kDevModeOrigin);
-    DCHECK(dev_mode_origin);
-    dev_origin_ = GURL(*dev_mode_origin);
-    DCHECK(dev_origin_.is_valid());
+    if (dev_mode_origin) {
+      dev_origin_ = GURL(*dev_mode_origin);
+      DCHECK(dev_origin_.is_valid());
+    }
   }
 
   if (FeatureEnabled(feature::kDisableBackgroundSuspend)) {
@@ -114,12 +114,6 @@ void FeatureManager::ConfigureFeaturesInternal() {
   if (FeatureEnabled(feature::kEnableDemoStandaloneMode)) {
     v8_bindings_.insert(new shell::CastDemoBindings(render_frame()));
   }
-
-  if (FeatureEnabled(feature::kEnableAssistantMessagePipe)) {
-    auto& feature = GetFeature(feature::kEnableAssistantMessagePipe);
-    v8_bindings_.insert(
-        new shell::AssistantBindings(render_frame(), feature->config));
-  }
 }
 
 void FeatureManager::EnableBindings() {
@@ -135,13 +129,13 @@ void FeatureManager::OnFeatureManagerRequest(
 }
 
 bool FeatureManager::FeatureEnabled(const std::string& feature) const {
-  return features_map_.find(feature) != features_map_.end();
+  return features_map_.contains(feature);
 }
 
 const chromecast::shell::mojom::FeaturePtr& FeatureManager::GetFeature(
     const std::string& feature) const {
   auto itor = features_map_.find(feature);
-  DCHECK(itor != features_map_.end());
+  CHECK(itor != features_map_.end());
   return itor->second;
 }
 
@@ -162,7 +156,7 @@ void FeatureManager::SetupAdditionalSecureOrigin() {
   LOG(INFO) << "Treat origin " << dev_origin_ << " as secure origin";
 
   blink::WebSecurityPolicy::AddSchemeToSecureContextSafelist(
-      blink::WebString::FromASCII(dev_origin_.scheme()));
+      blink::WebString::FromAscii(dev_origin_.scheme()));
 
   network::SecureOriginAllowlist::GetInstance().SetAuxiliaryAllowlist(
       dev_origin_.spec(), nullptr);

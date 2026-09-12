@@ -4,6 +4,7 @@
 
 #include "components/cloud_devices/common/cloud_device_description.h"
 
+#include <string_view>
 #include <utility>
 
 #include "base/json/json_reader.h"
@@ -15,7 +16,7 @@ namespace cloud_devices {
 
 namespace {
 
-bool IsValidTicket(const base::Value::Dict& value) {
+bool IsValidTicket(const base::DictValue& value) {
   const std::string* version = value.FindString(json::kVersion);
   return version && *version == json::kVersion10;
 }
@@ -29,17 +30,17 @@ CloudDeviceDescription::CloudDeviceDescription() {
 CloudDeviceDescription::~CloudDeviceDescription() = default;
 
 bool CloudDeviceDescription::InitFromString(const std::string& json) {
-  absl::optional<base::Value> value = base::JSONReader::Read(json);
-  if (!value)
+  std::optional<base::DictValue> value =
+      base::JSONReader::ReadDict(json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (!value) {
     return false;
+  }
 
   return InitFromValue(std::move(*value));
 }
 
-bool CloudDeviceDescription::InitFromValue(base::Value ticket) {
-  if (!ticket.is_dict())
-    return false;
-  root_ = std::move(ticket).TakeDict();
+bool CloudDeviceDescription::InitFromValue(base::DictValue ticket) {
+  root_ = std::move(ticket);
   return IsValidTicket(root_);
 }
 
@@ -54,26 +55,24 @@ base::Value CloudDeviceDescription::ToValue() && {
   return base::Value(std::move(root_));
 }
 
-const base::Value::Dict* CloudDeviceDescription::GetDictItem(
-    base::StringPiece path) const {
+const base::DictValue* CloudDeviceDescription::GetDictItem(
+    std::string_view path) const {
   return root_.FindDictByDottedPath(path);
 }
 
-const base::Value::List* CloudDeviceDescription::GetListItem(
-    base::StringPiece path) const {
+const base::ListValue* CloudDeviceDescription::GetListItem(
+    std::string_view path) const {
   return root_.FindListByDottedPath(path);
 }
 
-base::Value::Dict* CloudDeviceDescription::CreateDictItem(
-    base::StringPiece path) {
-  base::Value* result = root_.SetByDottedPath(path, base::Value::Dict());
-  return result ? &result->GetDict() : nullptr;
+bool CloudDeviceDescription::SetDictItem(std::string_view path,
+                                         base::DictValue dict) {
+  return root_.SetByDottedPath(path, std::move(dict));
 }
 
-base::Value::List* CloudDeviceDescription::CreateListItem(
-    base::StringPiece path) {
-  base::Value* result = root_.SetByDottedPath(path, base::Value::List());
-  return result ? &result->GetList() : nullptr;
+bool CloudDeviceDescription::SetListItem(std::string_view path,
+                                         base::ListValue list) {
+  return root_.SetByDottedPath(path, std::move(list));
 }
 
 }  // namespace cloud_devices

@@ -6,16 +6,21 @@
 #define CHROME_BROWSER_MEDIA_ANDROID_CDM_MEDIA_DRM_ORIGIN_ID_MANAGER_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/containers/queue.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/threading/thread_checker.h"
+#include "base/types/pass_key.h"
 #include "base/unguessable_token.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "media/base/media_drm_storage.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+namespace base {
+class TickClock;
+}
 
 class MediaDrmOriginIdManagerFactory;
 class PrefRegistrySimple;
@@ -50,6 +55,11 @@ class MediaDrmOriginIdManager : public KeyedService {
 
   static void RegisterProfilePrefs(PrefRegistrySimple* registry);
 
+  // MediaDrmOriginIdManager should only be created by
+  // MediaDrmOriginIdManagerFactory.
+  explicit MediaDrmOriginIdManager(
+      PrefService* pref_service,
+      base::PassKey<MediaDrmOriginIdManagerFactory>);
   // Destructor must be public as it's used in std::unique_ptr<>.
   ~MediaDrmOriginIdManager() override;
 
@@ -59,8 +69,6 @@ class MediaDrmOriginIdManager : public KeyedService {
   // Asynchronously returns a preprovisioned origin ID using |callback|, if one
   // is available. If none are available, an un-provisioned origin ID is
   // returned.
-  // TODO(crbug.com/917527): Return an empty origin ID once callers
-  // can handle it.
   void GetOriginId(ProvisionedOriginIdCB callback);
 
   // When testing, use the provided |cb| instead of calling MediaDrm.
@@ -68,17 +76,16 @@ class MediaDrmOriginIdManager : public KeyedService {
     provisioning_result_cb_for_testing_ = cb;
   }
 
+  // Overrides the clock used by `backoff_entry_` for testing purposes, allowing
+  // unit tests to simulate advancing mock time under time-based backoff.
+  void SetTickClockForTesting(const base::TickClock* clock);  // IN-TEST
+
  private:
   class NetworkObserver;
   friend class MediaDrmOriginIdManagerFactory;
 
-  // MediaDrmOriginIdManager should only be created by
-  // MediaDrmOriginIdManagerFactory.
-  explicit MediaDrmOriginIdManager(PrefService* pref_service);
-
   // Complete the pre-provisioning steps.
-  void ResumePreProvisionIfNecessary(
-      bool is_per_application_provisioning_supported);
+  void ResumePreProvisionIfNecessary();
 
   // Asynchronously call StartProvisioning() on a sequence using different
   // priorities, depending on |run_in_background|.
@@ -87,10 +94,6 @@ class MediaDrmOriginIdManager : public KeyedService {
   // Called when provisioning of |origin_id| is done. The provisioning of
   // |origin_id| was successful if |origin_id| is not nullopt.
   void OriginIdProvisioned(const MediaDrmOriginId& origin_id);
-
-  // Check if per application provisioning is supported or not. Uses
-  // `is_per_application_provisioning_supported_`, and if not set, sets it.
-  bool IsPerApplicationProvisioningSupported();
 
   // If called, record the current number of pre-provisioned origin IDs to UMA.
   void RecordCountOfPreprovisionedOriginIds();
@@ -104,17 +107,14 @@ class MediaDrmOriginIdManager : public KeyedService {
   // false otherwise.
   bool is_provisioning_ = false;
 
-  // True if per-application provisioning is supported. If nullopt, then
-  // support has not yet been determined.
-  absl::optional<bool> is_per_application_provisioning_supported_;
-
   // When testing don't call MediaDrm to provision the origin ID, just call
   // this CB and use the value returned to indicate if provisioning succeeded or
   // failed so that tests can verify that the preference is used correctly.
   ProvisioningResultCB provisioning_result_cb_for_testing_;
 
-  // When set, watch for network changes and call PreProvisionIfNecessary()
-  // when connected to a network.
+  // When set, watches for network changes to attempt pre-provisioning when
+  // connected, managing exponential backoff and scheduled retries if attempts
+  // fail.
   std::unique_ptr<NetworkObserver> network_observer_;
 
   THREAD_CHECKER(thread_checker_);

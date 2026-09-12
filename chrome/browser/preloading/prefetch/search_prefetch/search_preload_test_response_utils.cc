@@ -144,7 +144,7 @@ void SearchPreloadResponseController::AddDelayedResponseTask(
 
 void SearchPreloadResponseController::DispatchDelayedResponseTask() {
   ASSERT_TRUE(content::BrowserThread::CurrentlyOn(content::BrowserThread::UI));
-  absl::optional<DelayedResponseTask> delayed_task;
+  std::optional<DelayedResponseTask> delayed_task;
   {
     base::AutoLock auto_lock(response_queue_lock_);
     if (!delayed_response_tasks_.empty()) {
@@ -174,4 +174,13 @@ SearchPreloadResponseController::CreateDeferrableResponse(
       std::make_unique<SearchPreloadDeferrableResponse>(
           this, service_deferral_type_, code, headers, response_body);
   return res;
+}
+
+void SearchPreloadResponseController::
+    InitializeAutocompleteControllerWithExtendedTimer(
+        AutocompleteController* autocomplete_controller,
+        const AutocompleteInput& input) {
+  // Prevent the stop timer from killing the hints fetch early.
+  autocomplete_controller->config_.stop_timer_duration = base::Seconds(10);
+  autocomplete_controller->Start(input);
 }

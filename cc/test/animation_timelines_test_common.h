@@ -14,7 +14,7 @@
 #include "cc/animation/animation_host.h"
 #include "cc/animation/keyframe_model.h"
 #include "cc/paint/filter_operations.h"
-#include "cc/trees/mutator_host_client.h"
+#include "cc/trees/mutator_host_delegate.h"
 #include "cc/trees/property_tree.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/animation/keyframe/target_property.h"
@@ -108,10 +108,10 @@ class TestLayer {
   float maximum_animation_scale_ = kInvalidScale;
 };
 
-class TestHostClient : public MutatorHostClient {
+class TestHostDelegate : public MutatorHostDelegate {
  public:
-  explicit TestHostClient(ThreadInstance thread_instance);
-  ~TestHostClient() override;
+  explicit TestHostDelegate(ThreadInstance thread_instance);
+  ~TestHostDelegate() override;
 
   void ClearMutatedProperties();
 
@@ -150,7 +150,7 @@ class TestHostClient : public MutatorHostClient {
                            ElementListType list_type,
                            float maximum_scale) override;
 
-  void ScrollOffsetAnimationFinished() override {}
+  void ScrollOffsetAnimationFinished(ElementId element_id) override {}
 
   void SetScrollOffsetForAnimation(const gfx::PointF& scroll_offset,
                                    ElementId element_id);
@@ -258,7 +258,7 @@ class TestAnimationDelegate : public AnimationDelegate {
       base::TimeTicks animation_start_time,
       std::unique_ptr<gfx::AnimationCurve> curve) override;
   void NotifyLocalTimeUpdated(
-      absl::optional<base::TimeDelta> local_time) override;
+      std::optional<base::TimeDelta> local_time) override;
 
   bool started() { return started_; }
 
@@ -311,8 +311,8 @@ class AnimationTimelinesTest : public testing::Test {
 
   void PushProperties();
 
-  TestHostClient client_;
-  TestHostClient client_impl_;
+  TestHostDelegate delegate_;
+  TestHostDelegate delegate_impl_;
 
   raw_ptr<AnimationHost> host_;
   raw_ptr<AnimationHost> host_impl_;

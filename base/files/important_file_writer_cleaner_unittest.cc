@@ -4,6 +4,8 @@
 
 #include "base/files/important_file_writer_cleaner.h"
 
+#include <optional>
+
 #include "base/check.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
@@ -16,11 +18,17 @@
 #include "base/time/time.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using ::testing::ElementsAre;
 
 namespace base {
+
+namespace {
+
+constexpr FilePath::StringViewType kTempFilePrefix =
+    FILE_PATH_LITERAL("LocalState");
+
+}  // namespace
 
 class ImportantFileWriterCleanerTest : public ::testing::Test {
  public:
@@ -52,10 +60,22 @@ class ImportantFileWriterCleanerTest : public ::testing::Test {
   const FilePath& dir_1() const { return dir_1_; }
   const FilePath& dir_1_file_new() const { return dir_1_file_new_; }
   const FilePath& dir_1_file_old() const { return dir_1_file_old_; }
+  const FilePath& dir_1_file_with_prefix_new() const {
+    return dir_1_file_with_prefix_new_;
+  }
+  const FilePath& dir_1_file_with_prefix_old() const {
+    return dir_1_file_with_prefix_old_;
+  }
   const FilePath& dir_1_file_other() const { return dir_1_file_other_; }
   const FilePath& dir_2() const { return dir_2_; }
   const FilePath& dir_2_file_new() const { return dir_2_file_new_; }
   const FilePath& dir_2_file_old() const { return dir_2_file_old_; }
+  const FilePath& dir_2_file_with_prefix_new() const {
+    return dir_2_file_with_prefix_new_;
+  }
+  const FilePath& dir_2_file_with_prefix_old() const {
+    return dir_2_file_with_prefix_old_;
+  }
   const FilePath& dir_2_file_other() const { return dir_2_file_other_; }
 
   void StartCleaner() {
@@ -79,6 +99,19 @@ class ImportantFileWriterCleanerTest : public ::testing::Test {
     ASSERT_TRUE(file.SetTimes(Time::Now(), old_file_time_));
   }
 
+  void CreateNewFileInDirWithPrefix(const FilePath& dir, FilePath& path) {
+    File file = CreateAndOpenTemporaryFileInDir(
+        dir, &path, /*additional_flags=*/0, kTempFilePrefix);
+    ASSERT_TRUE(file.IsValid());
+  }
+
+  void CreateOldFileInDirWithPrefix(const FilePath& dir, FilePath& path) {
+    File file = CreateAndOpenTemporaryFileInDir(
+        dir, &path, /*additional_flags=*/0, kTempFilePrefix);
+    ASSERT_TRUE(file.IsValid());
+    ASSERT_TRUE(file.SetTimes(Time::Now(), old_file_time_));
+  }
+
   void CreateOldFile(const FilePath& path) {
     File file(path, File::FLAG_CREATE | File::FLAG_WRITE);
     ASSERT_TRUE(file.IsValid());
@@ -94,11 +127,15 @@ class ImportantFileWriterCleanerTest : public ::testing::Test {
   FilePath dir_2_;
   FilePath dir_1_file_new_;
   FilePath dir_1_file_old_;
+  FilePath dir_1_file_with_prefix_new_;
+  FilePath dir_1_file_with_prefix_old_;
   FilePath dir_1_file_other_;
   FilePath dir_2_file_new_;
   FilePath dir_2_file_old_;
+  FilePath dir_2_file_with_prefix_new_;
+  FilePath dir_2_file_with_prefix_old_;
   FilePath dir_2_file_other_;
-  absl::optional<ScopedCleanerLifetime> cleaner_lifetime_;
+  std::optional<ScopedCleanerLifetime> cleaner_lifetime_;
 };
 
 void ImportantFileWriterCleanerTest::SetUp() {
@@ -115,12 +152,24 @@ void ImportantFileWriterCleanerTest::SetUp() {
 
   ASSERT_NO_FATAL_FAILURE(CreateOldFileInDir(dir_1_, dir_1_file_old_));
 
+  ASSERT_NO_FATAL_FAILURE(
+      CreateNewFileInDirWithPrefix(dir_1_, dir_1_file_with_prefix_new_));
+
+  ASSERT_NO_FATAL_FAILURE(
+      CreateOldFileInDirWithPrefix(dir_1_, dir_1_file_with_prefix_old_));
+
   dir_1_file_other_ = dir_1_.Append(FILE_PATH_LITERAL("other.nottmp"));
   ASSERT_NO_FATAL_FAILURE(CreateOldFile(dir_1_file_other_));
 
   ASSERT_NO_FATAL_FAILURE(CreateNewFileInDir(dir_2_, dir_2_file_new_));
 
   ASSERT_NO_FATAL_FAILURE(CreateOldFileInDir(dir_2_, dir_2_file_old_));
+
+  ASSERT_NO_FATAL_FAILURE(
+      CreateNewFileInDirWithPrefix(dir_2_, dir_2_file_with_prefix_new_));
+
+  ASSERT_NO_FATAL_FAILURE(
+      CreateOldFileInDirWithPrefix(dir_2_, dir_2_file_with_prefix_old_));
 
   dir_2_file_other_ = dir_2_.Append(FILE_PATH_LITERAL("other.nottmp"));
   ASSERT_NO_FATAL_FAILURE(CreateOldFile(dir_2_file_other_));
@@ -139,9 +188,13 @@ TEST_F(ImportantFileWriterCleanerTest, NotInitializedNoOpAdd) {
   task_environment_.RunUntilIdle();
   EXPECT_TRUE(PathExists(dir_1_file_new()));
   EXPECT_TRUE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_new()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_1_file_other()));
   EXPECT_TRUE(PathExists(dir_2_file_new()));
   EXPECT_TRUE(PathExists(dir_2_file_old()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_new()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_2_file_other()));
 }
 
@@ -152,9 +205,13 @@ TEST_F(ImportantFileWriterCleanerTest, NotStartedNoOpAdd) {
   task_environment_.RunUntilIdle();
   EXPECT_TRUE(PathExists(dir_1_file_new()));
   EXPECT_TRUE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_new()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_1_file_other()));
   EXPECT_TRUE(PathExists(dir_2_file_new()));
   EXPECT_TRUE(PathExists(dir_2_file_old()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_new()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_2_file_other()));
 }
 
@@ -174,9 +231,13 @@ TEST_F(ImportantFileWriterCleanerTest, AddStart) {
   // The old file should have been cleaned from the added dir.
   EXPECT_TRUE(PathExists(dir_1_file_new()));
   EXPECT_FALSE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_new()));
+  EXPECT_FALSE(PathExists(dir_1_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_1_file_other()));
   EXPECT_TRUE(PathExists(dir_2_file_new()));
   EXPECT_TRUE(PathExists(dir_2_file_old()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_new()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_2_file_other()));
 }
 
@@ -191,9 +252,13 @@ TEST_F(ImportantFileWriterCleanerTest, AddAddStart) {
   // The old file should have been cleaned from both added dirs.
   EXPECT_TRUE(PathExists(dir_1_file_new()));
   EXPECT_FALSE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_new()));
+  EXPECT_FALSE(PathExists(dir_1_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_1_file_other()));
   EXPECT_TRUE(PathExists(dir_2_file_new()));
   EXPECT_FALSE(PathExists(dir_2_file_old()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_new()));
+  EXPECT_FALSE(PathExists(dir_2_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_2_file_other()));
 }
 
@@ -206,9 +271,13 @@ TEST_F(ImportantFileWriterCleanerTest, StartAdd) {
   // The old file should have been cleaned from the added dir.
   EXPECT_TRUE(PathExists(dir_1_file_new()));
   EXPECT_FALSE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_new()));
+  EXPECT_FALSE(PathExists(dir_1_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_1_file_other()));
   EXPECT_TRUE(PathExists(dir_2_file_new()));
   EXPECT_TRUE(PathExists(dir_2_file_old()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_new()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_2_file_other()));
 }
 
@@ -220,12 +289,14 @@ TEST_F(ImportantFileWriterCleanerTest, StartTwice) {
 
   // Recreate the old file that was just cleaned.
   ASSERT_NO_FATAL_FAILURE(CreateOldFile(dir_1_file_old()));
+  ASSERT_NO_FATAL_FAILURE(CreateOldFile(dir_1_file_with_prefix_old()));
 
   // Start again and make sure it wasn't cleaned again.
   ImportantFileWriterCleaner::GetInstance().Start();
   task_environment_.RunUntilIdle();
 
   EXPECT_TRUE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_old()));
 }
 
 // Tests that adding a dir twice doesn't cause it to clean twice.
@@ -236,12 +307,14 @@ TEST_F(ImportantFileWriterCleanerTest, AddTwice) {
 
   // Recreate the old file that was just cleaned.
   ASSERT_NO_FATAL_FAILURE(CreateOldFile(dir_1_file_old()));
+  ASSERT_NO_FATAL_FAILURE(CreateOldFile(dir_1_file_with_prefix_old()));
 
   // Add the directory again and make sure nothing else is cleaned.
   ImportantFileWriterCleaner::AddDirectory(dir_1());
   task_environment_.RunUntilIdle();
 
   EXPECT_TRUE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_old()));
 }
 
 // Tests that AddDirectory called from another thread properly bounces back to
@@ -251,7 +324,7 @@ TEST_F(ImportantFileWriterCleanerTest, StartAddFromOtherThread) {
 
   // Add from the ThreadPool and wait for it to finish.
   TestWaitableEvent waitable_event;
-  ThreadPool::PostTask(FROM_HERE, BindLambdaForTesting([&]() {
+  ThreadPool::PostTask(FROM_HERE, BindLambdaForTesting([&] {
                          ImportantFileWriterCleaner::AddDirectory(dir_1());
                          waitable_event.Signal();
                        }));
@@ -263,9 +336,13 @@ TEST_F(ImportantFileWriterCleanerTest, StartAddFromOtherThread) {
   // The old file should have been cleaned from the added dir.
   EXPECT_TRUE(PathExists(dir_1_file_new()));
   EXPECT_FALSE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_new()));
+  EXPECT_FALSE(PathExists(dir_1_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_1_file_other()));
   EXPECT_TRUE(PathExists(dir_2_file_new()));
   EXPECT_TRUE(PathExists(dir_2_file_old()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_new()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_2_file_other()));
 }
 
@@ -281,9 +358,13 @@ TEST_F(ImportantFileWriterCleanerTest, AddStartAdd) {
   // The old file should have been cleaned from both added dirs.
   EXPECT_TRUE(PathExists(dir_1_file_new()));
   EXPECT_FALSE(PathExists(dir_1_file_old()));
+  EXPECT_TRUE(PathExists(dir_1_file_with_prefix_new()));
+  EXPECT_FALSE(PathExists(dir_1_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_1_file_other()));
   EXPECT_TRUE(PathExists(dir_2_file_new()));
   EXPECT_FALSE(PathExists(dir_2_file_old()));
+  EXPECT_TRUE(PathExists(dir_2_file_with_prefix_new()));
+  EXPECT_FALSE(PathExists(dir_2_file_with_prefix_old()));
   EXPECT_TRUE(PathExists(dir_2_file_other()));
 }
 
@@ -305,6 +386,117 @@ TEST_F(ImportantFileWriterCleanerTest, StopWhileRunning) {
   // then. Either case is a success.
   StopCleaner();
   task_environment_.RunUntilIdle();
+}
+
+// Tests that when the target file identified by a temp file's name prefix is
+// missing, the most recent matching temp file is preserved as a recovery
+// candidate while older matching temp files are still cleaned.
+TEST_F(ImportantFileWriterCleanerTest,
+       PreservesLatestPrefixedTempFileWhenTargetMissing) {
+  const FilePath dir =
+      temp_dir_.GetPath().Append(FILE_PATH_LITERAL("recover_missing"));
+  ASSERT_TRUE(CreateDirectory(dir));
+
+  const Time upper_bound =
+      ImportantFileWriterCleaner::GetInstance().GetUpperBoundTimeForTest();
+
+  auto create_prefixed_temp = [&](Time mtime, FilePath* out_path) {
+    File file = CreateAndOpenTemporaryFileInDir(dir, out_path,
+                                                /*additional_flags=*/0,
+                                                kTempFilePrefix);
+    ASSERT_TRUE(file.IsValid());
+    ASSERT_TRUE(file.SetTimes(Time::Now(), mtime));
+  };
+
+  FilePath old_older;
+  FilePath old_newer;
+  // Both files are older than the cleaner's upper bound, but `old_newer` has a
+  // strictly larger mtime than `old_older`.
+  ASSERT_NO_FATAL_FAILURE(
+      create_prefixed_temp(upper_bound - Seconds(1), &old_older));
+  ASSERT_NO_FATAL_FAILURE(
+      create_prefixed_temp(upper_bound - Milliseconds(1), &old_newer));
+
+  ImportantFileWriterCleaner::GetInstance().Initialize();
+  ImportantFileWriterCleaner::AddDirectory(dir);
+  StartCleaner();
+  task_environment_.RunUntilIdle();
+
+  EXPECT_TRUE(PathExists(old_newer));
+  EXPECT_FALSE(PathExists(old_older));
+}
+
+// Tests that when the target file identified by a temp file's name prefix
+// exists, all matching temp files are cleaned (no preservation happens).
+TEST_F(ImportantFileWriterCleanerTest,
+       DoesNotPreservePrefixedTempFilesWhenTargetExists) {
+  const FilePath dir =
+      temp_dir_.GetPath().Append(FILE_PATH_LITERAL("recover_present"));
+  ASSERT_TRUE(CreateDirectory(dir));
+
+  // Create the target file so that no recovery candidate needs to be kept.
+  const FilePath target = dir.Append(kTempFilePrefix);
+  ASSERT_NO_FATAL_FAILURE(CreateOldFile(target));
+
+  FilePath old_1;
+  FilePath old_2;
+  ASSERT_NO_FATAL_FAILURE(CreateOldFileInDirWithPrefix(dir, old_1));
+  ASSERT_NO_FATAL_FAILURE(CreateOldFileInDirWithPrefix(dir, old_2));
+
+  ImportantFileWriterCleaner::GetInstance().Initialize();
+  ImportantFileWriterCleaner::AddDirectory(dir);
+  StartCleaner();
+  task_environment_.RunUntilIdle();
+
+  EXPECT_TRUE(PathExists(target));
+  EXPECT_FALSE(PathExists(old_1));
+  EXPECT_FALSE(PathExists(old_2));
+}
+
+// Tests that preservation is done independently per name prefix: each distinct
+// prefix keeps its own latest matching temp file when its target is missing.
+TEST_F(ImportantFileWriterCleanerTest,
+       PreservesLatestPrefixedTempFilePerPrefix) {
+  static constexpr FilePath::StringViewType kPrefixA = kTempFilePrefix;
+  static constexpr FilePath::StringViewType kPrefixB =
+      FILE_PATH_LITERAL("Preferences");
+
+  const FilePath dir =
+      temp_dir_.GetPath().Append(FILE_PATH_LITERAL("recover_multi"));
+  ASSERT_TRUE(CreateDirectory(dir));
+
+  auto create_old = [&](FilePath::StringViewType prefix, Time mtime,
+                        FilePath* out_path) {
+    File file = CreateAndOpenTemporaryFileInDir(dir, out_path,
+                                                /*additional_flags=*/0, prefix);
+    ASSERT_TRUE(file.IsValid());
+    ASSERT_TRUE(file.SetTimes(Time::Now(), mtime));
+  };
+
+  const Time upper_bound =
+      ImportantFileWriterCleaner::GetInstance().GetUpperBoundTimeForTest();
+  const Time t_older = upper_bound - Seconds(1);
+  const Time t_newer = upper_bound - Milliseconds(1);
+
+  FilePath a_older;
+  FilePath a_newer;
+  FilePath b_older;
+  FilePath b_newer;
+  ASSERT_NO_FATAL_FAILURE(create_old(kPrefixA, t_older, &a_older));
+  ASSERT_NO_FATAL_FAILURE(create_old(kPrefixA, t_newer, &a_newer));
+  ASSERT_NO_FATAL_FAILURE(create_old(kPrefixB, t_older, &b_older));
+  ASSERT_NO_FATAL_FAILURE(create_old(kPrefixB, t_newer, &b_newer));
+
+  ImportantFileWriterCleaner::GetInstance().Initialize();
+  ImportantFileWriterCleaner::AddDirectory(dir);
+  StartCleaner();
+  task_environment_.RunUntilIdle();
+
+  // Each prefix retains its own latest candidate; older ones are cleaned.
+  EXPECT_FALSE(PathExists(a_older));
+  EXPECT_TRUE(PathExists(a_newer));
+  EXPECT_FALSE(PathExists(b_older));
+  EXPECT_TRUE(PathExists(b_newer));
 }
 
 }  // namespace base

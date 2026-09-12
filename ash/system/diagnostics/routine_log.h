@@ -41,17 +41,23 @@ class ASH_EXPORT RoutineLog {
   void LogRoutineStarted(mojom::RoutineType type);
   void LogRoutineCompleted(mojom::RoutineType type,
                            mojom::StandardRoutineResult result);
+  // Logs routine completion with additional detail text appended after the
+  // result line. If `details` is empty, behaves identically to the 2-arg
+  // overload.
+  void LogRoutineCompleted(mojom::RoutineType type,
+                           mojom::StandardRoutineResult result,
+                           const std::string& details);
   void LogRoutineCancelled(mojom::RoutineType type);
 
   // Returns the current RoutineLog as a string.
   std::string GetContentsForCategory(const RoutineCategory category) const;
 
+  // Returns the absolute path to the log file for the given `category`.
+  base::FilePath GetLogFilePath(const RoutineCategory category) const;
+
  private:
   // Append `text` to the category corresponding to `type`.
   void Append(mojom::RoutineType type, const std::string& text);
-
-  // Get the path to the log file for `category`.
-  base::FilePath GetCategoryLogFilePath(const RoutineCategory category);
 
   // The base directory for storing logs.
   const base::FilePath log_base_path_;

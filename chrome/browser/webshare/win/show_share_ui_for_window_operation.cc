@@ -12,7 +12,6 @@
 #include <utility>
 
 #include "base/functional/callback.h"
-#include "base/strings/string_piece.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/win/core_winrt_util.h"
 #include "base/win/scoped_hstring.h"
@@ -40,12 +39,6 @@ HRESULT GetDataTransferManagerHandles(
     HWND hwnd,
     IDataTransferManagerInterop** data_transfer_manager_interop,
     IDataTransferManager** data_transfer_manager) {
-  // If the required WinRT functionality is not available, fail the operation.
-  if (!base::win::ResolveCoreWinRTDelayload() ||
-      !base::win::ScopedHString::ResolveCoreWinRTStringDelayload()) {
-    return E_FAIL;
-  }
-
   // IDataTransferManagerInterop is semi-hidden behind a CloakedIid
   // structure on the DataTransferManager, excluding it from things
   // used by RoGetActivationFactory like GetIids(). Because of this,

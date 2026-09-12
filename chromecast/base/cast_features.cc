@@ -8,8 +8,8 @@
 #include <utility>
 
 #include "base/command_line.h"
-#include "base/containers/contains.h"
 #include "base/feature_list.h"
+#include "base/logging.h"
 #include "base/metrics/field_trial.h"
 #include "base/metrics/field_trial_param_associator.h"
 #include "base/metrics/field_trial_params.h"
@@ -38,7 +38,7 @@ std::vector<const base::Feature*>& GetTestFeatures() {
   return *features_for_test;
 }
 
-void SetExperimentIds(const base::Value::List& list) {
+void SetExperimentIds(const base::ListValue& list) {
   DCHECK(!g_experiment_ids_initialized);
   std::unordered_set<int32_t> ids;
   for (const auto& it : list) {
@@ -69,7 +69,7 @@ void SetExperimentIds(const base::Value::List& list) {
 //    the value that the feature will hold until overriden by the server or the
 //    command line. Here's an exmaple:
 //
-//      BASE_FEATURE(kSuperSecretSauce, "SuperSecretSauce",
+//      BASE_FEATURE(kSuperSecretSauce ,
 //                   base::FEATURE_DISABLED_BY_DEFAULT);
 //
 //    IMPORTANT NOTE:
@@ -141,19 +141,6 @@ BASE_FEATURE(kTripleBuffer720,
 BASE_FEATURE(kSingleBuffer,
              "enable_single_buffer",
              base::FEATURE_DISABLED_BY_DEFAULT);
-// Disable idle sockets closing on memory pressure. See
-// chromecast/browser/cast_network_contexts.cc for usage.
-BASE_FEATURE(kDisableIdleSocketsCloseOnMemoryPressure,
-             "disable_idle_sockets_close_on_memory_pressure",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kEnableGeneralAudienceBrowsing,
-             "enable_general_audience_browsing",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kEnableSideGesturePassThrough,
-             "enable_side_gesture_pass_through",
-             base::FEATURE_DISABLED_BY_DEFAULT);
 
 // Uses AudioManagerAndroid, instead of CastAudioManagerAndroid. This will
 // disable lots of Cast features, so it should only be used for development and
@@ -168,17 +155,37 @@ BASE_FEATURE(kEnableCastAudioOutputDevice,
              "enable_cast_audio_output_device",
              base::FEATURE_DISABLED_BY_DEFAULT);
 
+// If true, codec/profile/level support will be checked against starboard via
+// SbMediaCanPlayMimeAndKeySystem.
+BASE_FEATURE(kEnableStarboardMimeChecks,
+             "enable_starboard_mime_checks",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// If true, AV1 support will be checked against starboard via
+// SbMediaCanPlayMimeAndKeySystem.
+//
+// If this is false, this device will always return "false" when apps check for
+// AV1 support.
+BASE_FEATURE(kEnableStarboardAv1Checks,
+             "enable_starboard_av1_checks",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+// If true, StarboardRenderer will be used instead of CastRenderer.
+BASE_FEATURE(kEnableStarboardRenderer,
+             "enable_starboard_renderer",
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
 // End Chromecast Feature definitions.
 const base::Feature* kFeatures[] = {
     &kAllowUserMediaAccess,
     &kEnableQuic,
     &kTripleBuffer720,
     &kSingleBuffer,
-    &kDisableIdleSocketsCloseOnMemoryPressure,
-    &kEnableGeneralAudienceBrowsing,
-    &kEnableSideGesturePassThrough,
     &kEnableChromeAudioManagerAndroid,
     &kEnableCastAudioOutputDevice,
+    &kEnableStarboardMimeChecks,
+    &kEnableStarboardAv1Checks,
+    &kEnableStarboardRenderer,
 };
 
 std::vector<const base::Feature*> GetInternalFeatures();
@@ -198,8 +205,8 @@ const std::vector<const base::Feature*>& GetFeatures() {
   return *features;
 }
 
-void InitializeFeatureList(const base::Value::Dict& dcs_features,
-                           const base::Value::List& dcs_experiment_ids,
+void InitializeFeatureList(const base::DictValue& dcs_features,
+                           const base::ListValue& dcs_experiment_ids,
                            const std::string& cmd_line_enable_features,
                            const std::string& cmd_line_disable_features,
                            const std::string& extra_enable_features,
@@ -216,8 +223,7 @@ void InitializeFeatureList(const base::Value::Dict& dcs_features,
 
   // Initialize the FeatureList from the command line.
   auto feature_list = std::make_unique<base::FeatureList>();
-  feature_list->InitializeFromCommandLine(all_enable_features,
-                                          all_disable_features);
+  feature_list->InitFromCommandLine(all_enable_features, all_disable_features);
 
   // Override defaults from the DCS config.
   for (const auto kv : dcs_features) {
@@ -268,7 +274,7 @@ void InitializeFeatureList(const base::Value::Dict& dcs_features,
         // Build a map of the FieldTrial parameters and associate it to the
         // FieldTrial.
         base::FieldTrialParams params;
-        for (const auto params_kv : kv.second.DictItems()) {
+        for (const auto params_kv : kv.second.GetDict()) {
           if (params_kv.second.is_string()) {
             params[params_kv.first] = params_kv.second.GetString();
           } else {
@@ -279,7 +285,7 @@ void InitializeFeatureList(const base::Value::Dict& dcs_features,
 
         // Register the params, so that they can be queried by client code.
         bool success = base::AssociateFieldTrialParams(
-            feature_name, kDefaultDCSFeaturesGroup, params);
+            feature_name, kDefaultDCSFeaturesGroup, std::move(params));
         DCHECK(success);
       }
       continue;
@@ -294,13 +300,13 @@ void InitializeFeatureList(const base::Value::Dict& dcs_features,
 }
 
 bool IsFeatureEnabled(const base::Feature& feature) {
-  DCHECK(base::Contains(GetFeatures(), &feature)) << feature.name;
+  DCHECK(std::ranges::contains(GetFeatures(), &feature)) << feature.name;
   return base::FeatureList::IsEnabled(feature);
 }
 
-base::Value::Dict GetOverriddenFeaturesForStorage(
-    const base::Value::Dict& features) {
-  base::Value::Dict persistent_dict;
+base::DictValue GetOverriddenFeaturesForStorage(
+    const base::DictValue& features) {
+  base::DictValue persistent_dict;
 
   // |features| maps feature names to either a boolean or a dict of params.
   for (const auto feature : features) {
@@ -311,7 +317,7 @@ base::Value::Dict GetOverriddenFeaturesForStorage(
 
     if (feature.second.is_dict()) {
       const base::Value* params_dict = &feature.second;
-      base::Value::Dict params;
+      base::DictValue params;
 
       for (const auto [param_key, param_val] : params_dict->GetDict()) {
         if (param_val.is_bool()) {

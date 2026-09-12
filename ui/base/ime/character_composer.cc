@@ -4,13 +4,15 @@
 
 #include "ui/base/ime/character_composer.h"
 
-#include <algorithm>
-#include <iterator>
+#include <optional>
 #include <string>
 
 #include "base/check.h"
+#include "base/containers/span.h"
+#include "base/logging.h"
 #include "base/notreached.h"
 #include "base/strings/string_util.h"
+#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversion_utils.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/third_party/icu/icu_utf.h"
@@ -40,9 +42,7 @@ bool UTF32CharacterToUTF16(uint32_t character, std::u16string* output) {
   if (!CBU_IS_UNICODE_CHAR(character))
     return false;
   if (character) {
-    output->resize(CBU16_LENGTH(character));
-    size_t i = 0;
-    CBU16_APPEND_UNSAFE(&(*output)[0], i, character);
+    base::WriteUnicodeCharacter(character, output);
   }
   return true;
 }
@@ -57,13 +57,50 @@ int KeycodeToHexDigit(unsigned int keycode) {
   return -1;  // |keycode| cannot be a hexadecimal digit.
 }
 
+// `ui::DomKey` only offers `ToDeadKeyCombiningCharacter()`, but we need the
+// non-combining character for the dead key for the preedit string. If we use
+// the combining character, it may combine with the character preceding the
+// preedit string, which is unwanted and confusing.
+std::optional<char16_t> DeadKeyToNonCombiningCharacter(ui::DomKey dom_key) {
+  CHECK(dom_key.IsDeadKey());
+  uint32_t combining_char = dom_key.ToDeadKeyCombiningCharacter();
+
+  // Unicode's list of "Combining Diacritical Marks"
+  // (https://www.unicode.org/charts/PDF/U0300.pdf) is much longer, but these
+  // should be the most commonly used ones.
+  switch (combining_char) {
+    // Combining grave.
+    case 0x300:
+      return u'`';
+    // Combining acute.
+    case 0x301:
+      return u'´';
+    // Combining circumflex.
+    case 0x302:
+      return u'^';
+    // Combining tilde.
+    case 0x303:
+      return u'~';
+    // Combining diaeresis.
+    case 0x308:
+      return u'¨';
+    // Unknown combining character.
+    default:
+      LOG(WARNING) << "Unable to convert unknown dead key combining character "
+                      "to non-combining variant: U+"
+                   << base::StringPrintf("%04d", combining_char);
+      return std::nullopt;
+  }
+}
+
 }  // namespace
 
 namespace ui {
 
-CharacterComposer::CharacterComposer() : composition_mode_(KEY_SEQUENCE_MODE) {}
+CharacterComposer::CharacterComposer(PreeditStringMode mode)
+    : preedit_string_mode_(mode) {}
 
-CharacterComposer::~CharacterComposer() {}
+CharacterComposer::~CharacterComposer() = default;
 
 void CharacterComposer::Reset() {
   compose_buffer_.clear();
@@ -74,8 +111,10 @@ void CharacterComposer::Reset() {
 }
 
 bool CharacterComposer::FilterKeyPress(const ui::KeyEvent& event) {
-  if (event.type() != ET_KEY_PRESSED && event.type() != ET_KEY_RELEASED)
+  if (event.type() != EventType::kKeyPressed &&
+      event.type() != EventType::kKeyReleased) {
     return false;
+  }
 
   // We don't care about modifier key presses.
   if (KeycodeConverter::IsDomKeyForModifier(event.GetDomKey()))
@@ -106,7 +145,6 @@ bool CharacterComposer::FilterKeyPress(const ui::KeyEvent& event) {
       return FilterKeyPressHexMode(event);
     default:
       NOTREACHED();
-      return false;
   }
 }
 
@@ -123,6 +161,11 @@ bool CharacterComposer::FilterKeyPressSequenceMode(const KeyEvent& event) {
       compose_buffer_.clear();
       UTF32CharacterToUTF16(composed_character_utf32, &composed_character_);
     }
+
+    if (preedit_string_mode_ == PreeditStringMode::kAlwaysEnabled) {
+      UpdatePreeditStringSequenceMode();
+    }
+
     return true;
   }
   // Key press is not a part of composition.
@@ -149,9 +192,31 @@ bool CharacterComposer::FilterKeyPressSequenceMode(const KeyEvent& event) {
       }
     }
     compose_buffer_.clear();
+
+    if (preedit_string_mode_ == PreeditStringMode::kAlwaysEnabled) {
+      UpdatePreeditStringSequenceMode();
+    }
+
     return true;
   }
   return false;
+}
+
+void CharacterComposer::UpdatePreeditStringSequenceMode() {
+  CHECK_EQ(preedit_string_mode_, PreeditStringMode::kAlwaysEnabled);
+  for (auto key : compose_buffer_) {
+    if (key.IsCharacter()) {
+      base::WriteUnicodeCharacter(key.ToCharacter(), &preedit_string_);
+    } else if (key.IsDeadKey()) {
+      if (std::optional<char16_t> non_combining_character =
+              DeadKeyToNonCombiningCharacter(key)) {
+        base::WriteUnicodeCharacter(*non_combining_character, &preedit_string_);
+      }
+    } else if (key.IsComposeKey() && (compose_buffer_.size() == 1)) {
+      base::WriteUnicodeCharacter(kPreeditStringComposeKeySymbol,
+                                  &preedit_string_);
+    }
+  }
 }
 
 bool CharacterComposer::FilterKeyPressHexMode(const KeyEvent& event) {
@@ -232,7 +297,7 @@ ComposeChecker::CheckSequenceResult TreeComposeChecker::CheckSequence(
 
   uint16_t tree_index = 0;
   for (const auto& keystroke : sequence) {
-    DCHECK(tree_index < data_->tree_entries);
+    DCHECK(tree_index < data_->tree.size());
 
     // If we are looking up a dead key or the Compose key, skip over the
     // character tables.
@@ -285,8 +350,8 @@ bool TreeComposeChecker::Find(uint16_t index,
     }
   };
   const TableEntry* a =
-      reinterpret_cast<const TableEntry*>(&data_->tree[index]);
-  const TableEntry* z = a + size;
+      reinterpret_cast<const TableEntry*>(&UNSAFE_TODO(data_->tree[index]));
+  const TableEntry* z = UNSAFE_TODO(a + size);
   const TableEntry target = {key, 0};
   const TableEntry* it = std::lower_bound(a, z, target);
   if ((it != z) && (it->key == key)) {

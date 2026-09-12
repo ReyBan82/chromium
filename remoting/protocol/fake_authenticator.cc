@@ -15,83 +15,10 @@
 #include "net/base/net_errors.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "remoting/base/constants.h"
-#include "remoting/protocol/p2p_stream_socket.h"
+#include "remoting/protocol/authenticator.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
 
 namespace remoting::protocol {
-
-FakeChannelAuthenticator::FakeChannelAuthenticator(bool accept, bool async)
-    : result_(accept ? net::OK : net::ERR_FAILED), async_(async) {}
-
-FakeChannelAuthenticator::~FakeChannelAuthenticator() = default;
-
-void FakeChannelAuthenticator::SecureAndAuthenticate(
-    std::unique_ptr<P2PStreamSocket> socket,
-    DoneCallback done_callback) {
-  socket_ = std::move(socket);
-
-  done_callback_ = std::move(done_callback);
-
-  if (async_) {
-    if (result_ != net::OK) {
-      // Don't write anything if we are going to reject auth to make test
-      // ordering deterministic.
-      did_write_bytes_ = true;
-    } else {
-      scoped_refptr<net::IOBuffer> write_buf =
-          base::MakeRefCounted<net::IOBuffer>(1);
-      write_buf->data()[0] = 0;
-      int result = socket_->Write(
-          write_buf.get(), 1,
-          base::BindOnce(&FakeChannelAuthenticator::OnAuthBytesWritten,
-                         weak_factory_.GetWeakPtr()),
-          TRAFFIC_ANNOTATION_FOR_TESTS);
-      if (result != net::ERR_IO_PENDING) {
-        // This will not call the callback because |did_read_bytes_| is
-        // still set to false.
-        OnAuthBytesWritten(result);
-      }
-    }
-
-    scoped_refptr<net::IOBuffer> read_buf =
-        base::MakeRefCounted<net::IOBuffer>(1);
-    int result =
-        socket_->Read(read_buf.get(), 1,
-                      base::BindOnce(&FakeChannelAuthenticator::OnAuthBytesRead,
-                                     weak_factory_.GetWeakPtr()));
-    if (result != net::ERR_IO_PENDING) {
-      OnAuthBytesRead(result);
-    }
-  } else {
-    CallDoneCallback();
-  }
-}
-
-void FakeChannelAuthenticator::OnAuthBytesWritten(int result) {
-  EXPECT_EQ(1, result);
-  EXPECT_FALSE(did_write_bytes_);
-  did_write_bytes_ = true;
-  if (did_read_bytes_) {
-    CallDoneCallback();
-  }
-}
-
-void FakeChannelAuthenticator::OnAuthBytesRead(int result) {
-  EXPECT_EQ(1, result);
-  EXPECT_FALSE(did_read_bytes_);
-  did_read_bytes_ = true;
-  if (did_write_bytes_) {
-    CallDoneCallback();
-  }
-}
-
-void FakeChannelAuthenticator::CallDoneCallback() {
-  if (result_ != net::OK) {
-    socket_.reset();
-  }
-  std::move(done_callback_).Run(result_, std::move(socket_));
-}
 
 FakeAuthenticator::Config::Config() = default;
 FakeAuthenticator::Config::Config(Action action) : action(action) {}
@@ -121,6 +48,14 @@ void FakeAuthenticator::set_messages_till_started(int messages) {
 
 void FakeAuthenticator::Resume() {
   std::move(resume_closure_).Run();
+}
+
+CredentialsType FakeAuthenticator::credentials_type() const {
+  return config_.credentials_type;
+}
+
+const Authenticator& FakeAuthenticator::implementing_authenticator() const {
+  return *this;
 }
 
 Authenticator::State FakeAuthenticator::state() const {
@@ -163,27 +98,33 @@ Authenticator::RejectionReason FakeAuthenticator::rejection_reason() const {
   return RejectionReason::INVALID_CREDENTIALS;
 }
 
-void FakeAuthenticator::ProcessMessage(const jingle_xmpp::XmlElement* message,
+Authenticator::RejectionDetails FakeAuthenticator::rejection_details() const {
+  EXPECT_EQ(REJECTED, state());
+  return {};
+}
+
+void FakeAuthenticator::ProcessMessage(const JingleAuthentication& message,
                                        base::OnceClosure resume_callback) {
   EXPECT_EQ(WAITING_MESSAGE, state());
-  std::string id =
-      message->TextNamed(jingle_xmpp::QName(kChromotingXmlNamespace, "id"));
-  EXPECT_EQ(id, base::NumberToString(messages_));
+  // |test_id| is used for sequence tracking in FakeAuthenticator to avoid
+  // conflicting with the |id| field which may be used for JIDs or other
+  // purposes by authenticators which wrap this one.
+  EXPECT_EQ(message.test_id, base::NumberToString(messages_));
 
   // On the client receive the key in the last message.
   if (type_ == CLIENT && messages_ == config_.round_trips * 2 - 1) {
-    std::string key_base64 =
-        message->TextNamed(jingle_xmpp::QName(kChromotingXmlNamespace, "key"));
-    EXPECT_TRUE(!key_base64.empty());
-    EXPECT_TRUE(base::Base64Decode(key_base64, &auth_key_));
+    EXPECT_FALSE(message.test_key.empty());
+    auth_key_.assign(reinterpret_cast<const char*>(message.test_key.data()),
+                     message.test_key.size());
   }
 
   // Receive peer's id.
   if (messages_ < 2) {
-    EXPECT_EQ(remote_id_, message->Attr(jingle_xmpp::QName("", "id")));
+    EXPECT_EQ(remote_id_, message.id);
   }
 
   ++messages_;
+  SubscribeRejectedAfterAcceptedIfNecessary();
   if (messages_ == pause_message_index_) {
     resume_closure_ = std::move(resume_callback);
     return;
@@ -191,33 +132,25 @@ void FakeAuthenticator::ProcessMessage(const jingle_xmpp::XmlElement* message,
   std::move(resume_callback).Run();
 }
 
-std::unique_ptr<jingle_xmpp::XmlElement> FakeAuthenticator::GetNextMessage() {
+JingleAuthentication FakeAuthenticator::GetNextMessage() {
   EXPECT_EQ(MESSAGE_READY, state());
 
-  std::unique_ptr<jingle_xmpp::XmlElement> result(new jingle_xmpp::XmlElement(
-      jingle_xmpp::QName(kChromotingXmlNamespace, "authentication")));
-  jingle_xmpp::XmlElement* id = new jingle_xmpp::XmlElement(
-      jingle_xmpp::QName(kChromotingXmlNamespace, "id"));
-  id->AddText(base::NumberToString(messages_));
-  result->AddElement(id);
+  JingleAuthentication result;
+  result.test_id = base::NumberToString(messages_);
 
   // Send local id in the first outgoing message.
   if (messages_ < 2) {
-    result->AddAttr(jingle_xmpp::QName("", "id"), local_id_);
+    result.id = local_id_;
   }
 
   // Add authentication key in the last message sent from host to client.
   if (type_ == HOST && messages_ == config_.round_trips * 2 - 1) {
     auth_key_ = base::RandBytesAsString(16);
-    jingle_xmpp::XmlElement* key = new jingle_xmpp::XmlElement(
-        jingle_xmpp::QName(kChromotingXmlNamespace, "key"));
-    std::string key_base64;
-    base::Base64Encode(auth_key_, &key_base64);
-    key->AddText(key_base64);
-    result->AddElement(key);
+    result.test_key.assign(auth_key_.begin(), auth_key_.end());
   }
 
   ++messages_;
+  SubscribeRejectedAfterAcceptedIfNecessary();
   return result;
 }
 
@@ -227,11 +160,21 @@ const std::string& FakeAuthenticator::GetAuthKey() const {
   return auth_key_;
 }
 
-std::unique_ptr<ChannelAuthenticator>
-FakeAuthenticator::CreateChannelAuthenticator() const {
+const SessionPolicies* FakeAuthenticator::GetSessionPolicies() const {
   EXPECT_EQ(ACCEPTED, state());
-  return std::make_unique<FakeChannelAuthenticator>(
-      config_.action != REJECT_CHANNEL, config_.async);
+  return nullptr;
+}
+
+void FakeAuthenticator::SubscribeRejectedAfterAcceptedIfNecessary() {
+  if (state() == ACCEPTED && config_.reject_after_accepted) {
+    reject_after_accepted_subscription_ =
+        config_.reject_after_accepted->Add(base::BindRepeating(
+            [](FakeAuthenticator* self) {
+              self->config_.action = REJECT;
+              self->NotifyStateChangeAfterAccepted();
+            },
+            base::Unretained(this)));
+  }
 }
 
 FakeHostAuthenticatorFactory::FakeHostAuthenticatorFactory(
@@ -248,6 +191,12 @@ FakeHostAuthenticatorFactory::CreateAuthenticator(
       FakeAuthenticator::HOST, config_, local_jid, remote_jid));
   authenticator->set_messages_till_started(messages_till_started_);
   return std::move(authenticator);
+}
+
+std::unique_ptr<AuthenticatorFactory> FakeHostAuthenticatorFactory::Clone()
+    const {
+  return std::make_unique<FakeHostAuthenticatorFactory>(messages_till_started_,
+                                                        config_);
 }
 
 }  // namespace remoting::protocol

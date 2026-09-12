@@ -36,7 +36,7 @@ namespace blink {
 class Node;
 class TreeScope;
 
-enum class PositionAnchorType : unsigned {
+enum class PositionAnchorType : uint8_t {
   kOffsetInAnchor,
   kBeforeAnchor,
   kAfterAnchor,
@@ -56,18 +56,18 @@ class PositionTemplate {
       const PositionTemplate<Strategy>&,
       const PositionTemplate<Strategy>& b);
   static PositionTemplate<Strategy> EditingPositionOf(const Node* anchor_node,
-                                                      int offset);
+                                                      wtf_size_t offset);
 
   // For creating before/after positions:
   PositionTemplate(const Node* anchor_node, PositionAnchorType);
 
   // For creating offset positions:
-  PositionTemplate(const Node& anchor_node, int offset);
+  PositionTemplate(const Node& anchor_node, wtf_size_t offset);
   // TODO(editing-dev): We should not pass |nullptr| as |anchor_node| for
   // |Position| constructor.
   // TODO(editing-dev): This constructor should eventually go away. See bug
   // http://wkb.ug/63040.
-  PositionTemplate(const Node* anchor_node, int offset);
+  PositionTemplate(const Node* anchor_node, wtf_size_t offset);
 
   PositionTemplate(const PositionTemplate&);
   PositionTemplate& operator=(const PositionTemplate&);
@@ -77,13 +77,13 @@ class PositionTemplate {
   // selection for merging text typing.
   static PositionTemplate<Strategy> CreateWithoutValidation(
       const Node& container,
-      int offset);
+      wtf_size_t offset);
 
   // TODO(editing-dev): Once we get a reason to use out of bound position,
   // we should change caller to use |CreateWithoutValidation()|.
   static PositionTemplate<Strategy> CreateWithoutValidationDeprecated(
       const Node& container,
-      int offset);
+      wtf_size_t offset);
 
   explicit operator bool() const { return IsNotNull(); }
 
@@ -111,7 +111,7 @@ class PositionTemplate {
 
   // O(n) for before/after-anchored positions, O(1) for parent-anchored
   // positions
-  int ComputeOffsetInContainerNode() const;
+  wtf_size_t ComputeOffsetInContainerNode() const;
 
   // Convenience method for DOM positions that also fixes up some positions for
   // editing
@@ -124,7 +124,7 @@ class PositionTemplate {
   PositionTemplate<Strategy> ToOffsetInAnchor() const;
 
   // Inline O(1) access for Positions which callers know to be parent-anchored
-  int OffsetInContainerNode() const {
+  wtf_size_t OffsetInContainerNode() const {
     DCHECK(IsOffsetInAnchor());
     return offset_;
   }
@@ -137,7 +137,7 @@ class PositionTemplate {
   //   - kAfterAnchor     last editing offset in anchor node
   // Editing operations will change in anchor node rather than nodes around
   // anchor node.
-  int ComputeEditingOffset() const;
+  wtf_size_t ComputeEditingOffset() const;
 
   // These are convenience methods which are smart about whether the position is
   // neighbor anchored or parent anchored
@@ -145,7 +145,7 @@ class PositionTemplate {
   Node* ComputeNodeAfterPosition() const;
 
   // Returns node as |Range::firstNode()|. This position must be a
-  // |PositionAnchorType::OffsetInAhcor| to behave as |Range| boundary point.
+  // |PositionAnchorType::OffsetInAnchor| to behave as |Range| boundary point.
   Node* NodeAsRangeFirstNode() const;
 
   // Similar to |nodeAsRangeLastNode()|, but returns a node in a range.
@@ -153,7 +153,7 @@ class PositionTemplate {
 
   // Returns a node as past last as same as |Range::pastLastNode()|. This
   // function is supposed to used in HTML serialization and plain text
-  // iterator. This position must be a |PositionAnchorType::OffsetInAhcor| to
+  // iterator. This position must be a |PositionAnchorType::OffsetInAnchor| to
   // behave as |Range| boundary point.
   Node* NodeAsRangePastLastNode() const;
 
@@ -174,7 +174,7 @@ class PositionTemplate {
   bool IsValidFor(const Document&) const;
 
   bool IsNull() const { return !anchor_node_; }
-  bool IsNotNull() const { return anchor_node_; }
+  bool IsNotNull() const { return anchor_node_ != nullptr; }
   bool IsOrphan() const { return anchor_node_ && !IsConnected(); }
 
   // Note: Comparison of positions require both parameters are non-null. You
@@ -201,7 +201,7 @@ class PositionTemplate {
   static PositionTemplate<Strategy> AfterNode(const Node& anchor_node);
   static PositionTemplate<Strategy> InParentBeforeNode(const Node& anchor_node);
   static PositionTemplate<Strategy> InParentAfterNode(const Node& anchor_node);
-  static int LastOffsetInNode(const Node& anchor_node);
+  static wtf_size_t LastOffsetInNode(const Node& anchor_node);
   static PositionTemplate<Strategy> FirstPositionInNode(
       const Node& anchor_node);
   static PositionTemplate<Strategy> LastPositionInNode(const Node& anchor_node);
@@ -230,7 +230,7 @@ class PositionTemplate {
   // EditingIgnoresContent(anchor_node_) returns true, then other places in
   // editing will treat offset_ == 0 as "before the anchor" and offset_ > 0 as
   // "after the anchor node".  See ParentAnchoredEquivalent for more info.
-  int offset_ = 0;
+  wtf_size_t offset_ = 0;
   PositionAnchorType anchor_type_ = PositionAnchorType::kOffsetInAnchor;
 };
 
@@ -262,28 +262,22 @@ bool operator==(const PositionTemplate<Strategy>& a,
   return a.OffsetInContainerNode() == b.OffsetInContainerNode();
 }
 
-template <typename Strategy>
-bool operator!=(const PositionTemplate<Strategy>& a,
-                const PositionTemplate<Strategy>& b) {
-  return !(a == b);
-}
-
 CORE_EXPORT PositionInFlatTree ToPositionInFlatTree(const Position&);
 CORE_EXPORT PositionInFlatTree ToPositionInFlatTree(const PositionInFlatTree&);
-CORE_EXPORT Position ToPositionInDOMTree(const Position&);
-CORE_EXPORT Position ToPositionInDOMTree(const PositionInFlatTree&);
+CORE_EXPORT Position ToPositionInDomTree(const Position&);
+CORE_EXPORT Position ToPositionInDomTree(const PositionInFlatTree&);
 
 template <typename Strategy>
-PositionTemplate<Strategy> FromPositionInDOMTree(const Position&);
+PositionTemplate<Strategy> FromPositionInDomTree(const Position&);
 
 template <>
-inline Position FromPositionInDOMTree<EditingStrategy>(
+inline Position FromPositionInDomTree<EditingStrategy>(
     const Position& position) {
   return position;
 }
 
 template <>
-inline PositionInFlatTree FromPositionInDOMTree<EditingInFlatTreeStrategy>(
+inline PositionInFlatTree FromPositionInDomTree<EditingInFlatTreeStrategy>(
     const Position& position) {
   return ToPositionInFlatTree(position);
 }

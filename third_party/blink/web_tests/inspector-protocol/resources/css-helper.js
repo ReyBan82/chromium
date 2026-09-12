@@ -50,6 +50,12 @@
     await this._logMessage(message, expectError, styleSheetId);
   }
 
+  async setContainerQueryConditionText(styleSheetId, expectError, options) {
+    options.styleSheetId = styleSheetId;
+    var message = await this._dp.CSS.setContainerQueryConditionText(options);
+    await this._logMessage(message, expectError, styleSheetId);
+  }
+
   async setSupportsText(styleSheetId, expectError, options) {
     options.styleSheetId = styleSheetId;
     var message = await this._dp.CSS.setSupportsText(options);
@@ -59,6 +65,12 @@
   async setScopeText(styleSheetId, expectError, options) {
     options.styleSheetId = styleSheetId;
     var message = await this._dp.CSS.setScopeText(options);
+    await this._logMessage(message, expectError, styleSheetId);
+  }
+
+  async setNavigationText(styleSheetId, expectError, options) {
+    options.styleSheetId = styleSheetId;
+    var message = await this._dp.CSS.setNavigationText(options);
     await this._logMessage(message, expectError, styleSheetId);
   }
 
@@ -124,6 +136,12 @@
       baseIndent += 4;
     }
 
+    const startingStyles = rule.startingStyles || [];
+    if (startingStyles.length) {
+      this._indentLog(baseIndent, '@starting-style');
+      baseIndent += 4;
+    }
+
     var selectorLine = '';
     var selectors = rule.selectorList.selectors;
     for (var i = 0; i < selectors.length; ++i) {
@@ -184,6 +202,19 @@
         this.dumpRuleMatch(ruleMatch);
       }
     }
+  }
+
+  async loadAndDumpCSSPositionTryForNode(nodeId) {
+    const {result} =
+        await this._dp.CSS.getMatchedStylesForNode({'nodeId': nodeId});
+    this._testRunner.log('Dumping CSS position-try rules: ');
+    for (const cssPositionTryRule of result.cssPositionTryRules) {
+      const status = Boolean(cssPositionTryRule.active) ? 'active' : 'inactive';
+      this._testRunner.log(`@position-try ${cssPositionTryRule.name.text} (${status}) {`);
+      this.dumpStyle(cssPositionTryRule.style, 0);
+      this._testRunner.log('}');
+    }
+    this._testRunner.log('index of active position-try-fallback: ' + result.activePositionFallbackIndex);
   }
 
   async loadAndDumpCSSAnimationsForNode(nodeId) {

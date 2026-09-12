@@ -5,6 +5,7 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEAK_WRAPPER_RESOURCE_LOAD_INFO_NOTIFIER_H_
 #define THIRD_PARTY_BLINK_PUBLIC_PLATFORM_WEAK_WRAPPER_RESOURCE_LOAD_INFO_NOTIFIER_H_
 
+#include "base/byte_size.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/threading/thread_checker.h"
@@ -37,9 +38,11 @@ class BLINK_PLATFORM_EXPORT WeakWrapperResourceLoadInfoNotifier
       int64_t request_id,
       const url::SchemeHostPort& final_response_url,
       network::mojom::URLResponseHeadPtr response_head,
-      network::mojom::RequestDestination request_destination) override;
-  void NotifyResourceTransferSizeUpdated(int64_t request_id,
-                                         int32_t transfer_size_diff) override;
+      network::mojom::RequestDestination request_destination,
+      bool is_ad_resource) override;
+  void NotifyResourceTransferSizeUpdated(
+      int64_t request_id,
+      base::ByteSize transfer_size_diff) override;
   void NotifyResourceLoadCompleted(
       blink::mojom::ResourceLoadInfoPtr resource_load_info,
       const network::URLLoaderCompletionStatus& status) override;

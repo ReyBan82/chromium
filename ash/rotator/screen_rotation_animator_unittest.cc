@@ -19,20 +19,21 @@
 #include "ash/test/ash_test_base.h"
 #include "ash/test/ash_test_helper.h"
 #include "ash/wallpaper/wallpaper_controller_impl.h"
-#include "ash/wm/tablet_mode/tablet_mode_controller.h"
+#include "ash/wm/tablet_mode/tablet_mode_controller_test_api.h"
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
+#include "base/test/bind.h"
 #include "components/viz/common/frame_sinks/copy_output_request.h"
 #include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "ui/compositor/layer_animator.h"
 #include "ui/compositor/layer_tree_owner.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
 #include "ui/display/display.h"
 #include "ui/display/manager/display_manager.h"
 #include "ui/display/screen.h"
 #include "ui/display/test/display_manager_test_api.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 #include "ui/wm/core/window_util.h"
 
 namespace ash {
@@ -162,6 +163,7 @@ class ScreenRotationAnimatorSlowAnimationTest : public AshTestBase {
 
   // AshTestBase:
   void SetUp() override;
+  void TearDown() override;
 
  protected:
   int64_t display_id() const { return display_.id(); }
@@ -177,7 +179,8 @@ class ScreenRotationAnimatorSlowAnimationTest : public AshTestBase {
 
   std::unique_ptr<ScreenRotationAnimatorTestApi> test_api_;
 
-  std::unique_ptr<ui::ScopedAnimationDurationScaleMode> non_zero_duration_mode_;
+  std::unique_ptr<gfx::ScopedAnimationDurationScaleMode>
+      non_zero_duration_mode_;
 };
 
 void ScreenRotationAnimatorSlowAnimationTest::SetUp() {
@@ -186,14 +189,19 @@ void ScreenRotationAnimatorSlowAnimationTest::SetUp() {
   Shell::Get()->wallpaper_controller()->set_bypass_decode_for_testing();
   Shell::Get()->wallpaper_controller()->ShowDefaultWallpaperForTesting();
 
-  display_ = display::Screen::GetScreen()->GetPrimaryDisplay();
+  display_ = display::Screen::Get()->GetPrimaryDisplay();
   animator_ = std::make_unique<ScreenRotationAnimator>(
       Shell::GetRootWindowForDisplayId(display_.id()));
   test_api_ = std::make_unique<ScreenRotationAnimatorTestApi>(animator_.get());
   test_api()->DisableAnimationTimers();
   non_zero_duration_mode_ =
-      std::make_unique<ui::ScopedAnimationDurationScaleMode>(
-          ui::ScopedAnimationDurationScaleMode::SLOW_DURATION);
+      std::make_unique<gfx::ScopedAnimationDurationScaleMode>(
+          gfx::ScopedAnimationDurationScaleMode::SLOW_DURATION);
+}
+
+void ScreenRotationAnimatorSlowAnimationTest::TearDown() {
+  animator_.reset();
+  AshTestBase::TearDown();
 }
 
 class ScreenRotationAnimatorSmoothAnimationTest
@@ -211,6 +219,7 @@ class ScreenRotationAnimatorSmoothAnimationTest
 
   // AshTestBase:
   void SetUp() override;
+  void TearDown() override;
 
   void RemoveSecondaryDisplay(const std::string& specs);
   void QuitWaitForCopyCallback();
@@ -224,7 +233,7 @@ class ScreenRotationAnimatorSmoothAnimationTest
   }
 
   void UpdateDisplayWithParam() {
-    auto current = display::Screen::GetScreen()->GetPrimaryDisplay();
+    auto current = display::Screen::Get()->GetPrimaryDisplay();
     UpdateDisplay(
         GetDisplaySpec(current.size().width(), current.size().height()));
   }
@@ -248,7 +257,8 @@ class ScreenRotationAnimatorSmoothAnimationTest
 
   std::unique_ptr<ScreenRotationAnimatorTestApi> test_api_;
 
-  std::unique_ptr<ui::ScopedAnimationDurationScaleMode> non_zero_duration_mode_;
+  std::unique_ptr<gfx::ScopedAnimationDurationScaleMode>
+      non_zero_duration_mode_;
 };
 
 void ScreenRotationAnimatorSmoothAnimationTest::RemoveSecondaryDisplay(
@@ -267,14 +277,19 @@ void ScreenRotationAnimatorSmoothAnimationTest::SetUp() {
   Shell::Get()->wallpaper_controller()->set_bypass_decode_for_testing();
   Shell::Get()->wallpaper_controller()->ShowDefaultWallpaperForTesting();
 
-  display_ = display::Screen::GetScreen()->GetPrimaryDisplay();
+  display_ = display::Screen::Get()->GetPrimaryDisplay();
   run_loop_ = std::make_unique<base::RunLoop>();
   SetScreenRotationAnimator(Shell::GetRootWindowForDisplayId(display_.id()),
                             run_loop_->QuitWhenIdleClosure(),
                             run_loop_->QuitWhenIdleClosure());
   non_zero_duration_mode_ =
-      std::make_unique<ui::ScopedAnimationDurationScaleMode>(
-          ui::ScopedAnimationDurationScaleMode::SLOW_DURATION);
+      std::make_unique<gfx::ScopedAnimationDurationScaleMode>(
+          gfx::ScopedAnimationDurationScaleMode::SLOW_DURATION);
+}
+
+void ScreenRotationAnimatorSmoothAnimationTest::TearDown() {
+  animator_.reset();
+  AshTestBase::TearDown();
 }
 
 void ScreenRotationAnimatorSmoothAnimationTest::SetScreenRotationAnimator(
@@ -410,17 +425,17 @@ TEST_F(ScreenRotationAnimatorSlowAnimationTest, ShouldCompleteAnimations) {
 // The OverviewButton should be hidden.
 TEST_F(ScreenRotationAnimatorSlowAnimationTest,
        OverviewButtonTrayHideAnimationAlwaysCompletes) {
-  Shell::Get()->tablet_mode_controller()->SetEnabledForTest(true);
+  ash::TabletModeControllerTestApi().EnterTabletMode();
 
   // Long duration for hide animation, to allow it to be interrupted.
-  ui::ScopedAnimationDurationScaleMode hide_duration(
-      ui::ScopedAnimationDurationScaleMode::SLOW_DURATION);
+  gfx::ScopedAnimationDurationScaleMode hide_duration(
+      gfx::ScopedAnimationDurationScaleMode::SLOW_DURATION);
   GetTray()->SetVisiblePreferred(false);
 
   // ScreenRotationAnimator copies the current layers, and deletes them upon
   // completion. Allow its animation to complete first.
-  ui::ScopedAnimationDurationScaleMode rotate_duration(
-      ui::ScopedAnimationDurationScaleMode::ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode rotate_duration(
+      gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION);
   SetDisplayRotation(display_id(), display::Display::ROTATE_0);
   animator()->Rotate(display::Display::ROTATE_90,
                      display::Display::RotationSource::USER,
@@ -567,8 +582,8 @@ TEST_P(ScreenRotationAnimatorSmoothAnimationTest,
        RemoveExternalSecondaryDisplayBeforeSecondCopyCallback) {
   {
     // Disable wallpaper animation on a secondary display.
-    ui::ScopedAnimationDurationScaleMode disable(
-        ui::ScopedAnimationDurationScaleMode::ZERO_DURATION);
+    gfx::ScopedAnimationDurationScaleMode disable(
+        gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION);
     UpdateDisplay("640x480," + GetDisplaySpec(800, 600));
   }
   EXPECT_EQ(2U, display_manager()->GetNumDisplays());
@@ -649,16 +664,16 @@ TEST_P(ScreenRotationAnimatorSmoothAnimationTest,
 TEST_P(ScreenRotationAnimatorSmoothAnimationTest,
        OverviewButtonTrayHideAnimationAlwaysCompletes) {
   UpdateDisplayWithParam();
-  Shell::Get()->tablet_mode_controller()->SetEnabledForTest(true);
+  ash::TabletModeControllerTestApi().EnterTabletMode();
 
   // Long duration for hide animation, to allow it to be interrupted.
-  ui::ScopedAnimationDurationScaleMode hide_duration(
-      ui::ScopedAnimationDurationScaleMode::SLOW_DURATION);
+  gfx::ScopedAnimationDurationScaleMode hide_duration(
+      gfx::ScopedAnimationDurationScaleMode::SLOW_DURATION);
   GetTray()->SetVisiblePreferred(false);
 
   // Allow ScreenRotationAnimator animation to complete first.
-  ui::ScopedAnimationDurationScaleMode rotate_duration(
-      ui::ScopedAnimationDurationScaleMode::ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode rotate_duration(
+      gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION);
   int64_t display_id = display_manager()->GetDisplayAt(0).id();
   SetScreenRotationAnimator(
       Shell::GetRootWindowForDisplayId(display_id),
@@ -721,7 +736,7 @@ TEST_P(ScreenRotationAnimatorSmoothAnimationTest, DisplayChangeDuringCopy) {
   const int64_t internal_display_id =
       display::test::DisplayManagerTestApi(display_manager())
           .SetFirstDisplayAsInternalDisplay();
-  Shell::Get()->tablet_mode_controller()->SetEnabledForTest(true);
+  ash::TabletModeControllerTestApi().EnterTabletMode();
 
   aura::Window* root_window =
       Shell::GetRootWindowForDisplayId(internal_display_id);
@@ -745,7 +760,7 @@ TEST_P(ScreenRotationAnimatorSmoothAnimationTest, DisplayChangeDuringCopy) {
 
   EXPECT_TRUE(animator->IsRotating());
   display_manager()->UpdateDisplays();
-  Shell::Get()->tablet_mode_controller()->SetEnabledForTest(false);
+  ash::TabletModeControllerTestApi().LeaveTabletMode();
   EXPECT_FALSE(animator->IsRotating());
 
   WaitForCopyCallback();
@@ -808,6 +823,83 @@ TEST_P(ScreenRotationAnimatorSmoothAnimationTest, NewRequestShouldNotCancel) {
   test_api()->CompleteAnimations();
   EXPECT_FALSE(test_api()->HasActiveAnimations());
   EXPECT_EQ(display::Display::ROTATE_0, GetDisplayRotation(display_id));
+}
+
+TEST_P(ScreenRotationAnimatorSmoothAnimationTest,
+       MultiDisplayConcurrentRotation) {
+  // Set up two displays.
+  UpdateDisplay("640x480,640x480");
+  const display::DisplayIdList ids =
+      display_manager()->GetConnectedDisplayIdList();
+  ASSERT_EQ(2u, ids.size());
+  const int64_t id1 = ids[0];
+  const int64_t id2 = ids[1];
+
+  aura::Window* const root1 = Shell::GetRootWindowForDisplayId(id1);
+  aura::Window* const root2 = Shell::GetRootWindowForDisplayId(id2);
+
+  DisplayConfigurationController* const controller =
+      Shell::Get()->display_configuration_controller();
+  DisplayConfigurationControllerTestApi(controller).SetDisplayAnimator(true);
+
+  base::RunLoop run_loop_a_after;
+  base::RunLoop run_loop_b_after;
+
+  auto animator1_owner = std::make_unique<TestScreenRotationAnimator>(
+      root1, base::BindLambdaForTesting([&]() {
+        // Trigger Display 2's rotation when Display 1 finishes before-copy.
+        // At this point, Display 1's disable scope is active.
+        controller->SetDisplayRotation(
+            id2, display::Display::ROTATE_90,
+            display::Display::RotationSource::USER,
+            DisplayConfigurationController::ANIMATION_ASYNC);
+      }),
+      base::BindLambdaForTesting([&]() { run_loop_a_after.Quit(); }));
+  TestScreenRotationAnimator* const animator1 = animator1_owner.get();
+  RootWindowController::ForWindow(root1)->SetScreenRotationAnimatorForTest(
+      std::move(animator1_owner));
+
+  auto animator2_owner = std::make_unique<TestScreenRotationAnimator>(
+      root2, base::DoNothing(),
+      base::BindLambdaForTesting([&]() { run_loop_b_after.Quit(); }));
+  TestScreenRotationAnimator* const animator2 = animator2_owner.get();
+  RootWindowController::ForWindow(root2)->SetScreenRotationAnimatorForTest(
+      std::move(animator2_owner));
+
+  ScreenRotationAnimatorTestApi test_api1(animator1);
+  test_api1.DisableAnimationTimers();
+  ScreenRotationAnimatorTestApi test_api2(animator2);
+  test_api2.DisableAnimationTimers();
+
+  // Reset the fixture's animator_ helper so it does not interfere.
+  animator_.reset();
+
+  // Start Display 1's rotation (ASYNC).
+  controller->SetDisplayRotation(
+      id1, display::Display::ROTATE_90, display::Display::RotationSource::USER,
+      DisplayConfigurationController::ANIMATION_ASYNC);
+
+  // Wait for both after-copy callbacks to complete.
+  run_loop_a_after.Run();
+  run_loop_b_after.Run();
+
+  // Complete any active rotation animations.
+  if (test_api1.HasActiveAnimations()) {
+    test_api1.CompleteAnimations();
+  }
+  if (test_api2.HasActiveAnimations()) {
+    test_api2.CompleteAnimations();
+  }
+  EXPECT_FALSE(test_api1.HasActiveAnimations());
+  EXPECT_FALSE(test_api2.HasActiveAnimations());
+
+  EXPECT_EQ(display::Display::ROTATE_90, GetDisplayRotation(id1));
+  EXPECT_EQ(display::Display::ROTATE_90, GetDisplayRotation(id2));
+
+  // Verify the global multiplier was restored back to SLOW_DURATION (set by the
+  // fixture).
+  EXPECT_EQ(gfx::ScopedAnimationDurationScaleMode::SLOW_DURATION,
+            gfx::ScopedAnimationDurationScaleMode::duration_multiplier());
 }
 
 INSTANTIATE_TEST_SUITE_P(All,

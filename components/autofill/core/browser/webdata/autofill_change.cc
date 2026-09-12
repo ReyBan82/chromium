@@ -4,14 +4,13 @@
 
 #include "components/autofill/core/browser/webdata/autofill_change.h"
 
+#include "components/autofill/core/browser/webdata/autocomplete/autocomplete_entry.h"
 
 namespace autofill {
 
-AutofillChange::AutofillChange(Type type, const AutofillKey& key)
-    : GenericAutofillChange<AutofillKey>(type, key) {
-}
+AutocompleteChange::AutocompleteChange(Type type, const AutocompleteKey& key)
+    : type_(type), key_(key) {}
 
-AutofillChange::~AutofillChange() {
-}
+AutocompleteChange::~AutocompleteChange() = default;
 
 }  // namespace autofill

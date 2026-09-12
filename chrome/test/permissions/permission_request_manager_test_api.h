@@ -10,7 +10,7 @@
 #include "components/permissions/permission_request_manager.h"
 #include "components/permissions/request_type.h"
 
-class Browser;
+class BrowserWindowInterface;
 
 namespace content {
 class RenderFrameHost;
@@ -28,7 +28,7 @@ class PermissionRequestManagerTestApi {
       permissions::PermissionRequestManager* manager);
 
   // Wraps the PermissionRequestManager for the active tab in |browser|.
-  explicit PermissionRequestManagerTestApi(Browser* browser);
+  explicit PermissionRequestManagerTestApi(BrowserWindowInterface* browser);
 
   PermissionRequestManagerTestApi(const PermissionRequestManagerTestApi&) =
       delete;
@@ -43,6 +43,8 @@ class PermissionRequestManagerTestApi {
   void AddSimpleRequest(content::RenderFrameHost* source_frame,
                         permissions::RequestType type);
 
+  void SetOrigin(const GURL& permission_request_origin);
+
   // Return the Widget for the permission prompt bubble, or nullptr if
   // there is no prompt currently showing.
   views::Widget* GetPromptWindow();
@@ -50,7 +52,9 @@ class PermissionRequestManagerTestApi {
   void SimulateWebContentsDestroyed();
 
  private:
-  raw_ptr<permissions::PermissionRequestManager, DanglingUntriaged> manager_;
+  raw_ptr<permissions::PermissionRequestManager, AcrossTasksDanglingUntriaged>
+      manager_;
+  GURL permission_request_origin_ = GURL("https://example.com");
 };
 
 }  // namespace test

@@ -7,12 +7,17 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "base/memory/shared_memory_mapping.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
+#include "base/types/optional_ref.h"
 #include "cc/cc_export.h"
+#include "cc/input/browser_controls_offset_tag_modifications.h"
 #include "cc/input/browser_controls_state.h"
-#include "cc/trees/paint_holding_commit_trigger.h"
+#include "cc/metrics/begin_main_frame_metrics.h"
+#include "cc/paint/draw_image.h"
 #include "cc/trees/paint_holding_reason.h"
 #include "cc/trees/task_runner_provider.h"
 #include "components/viz/common/frame_sinks/begin_frame_source.h"
@@ -43,13 +48,24 @@ class CC_EXPORT Proxy {
   virtual void ReleaseLayerTreeFrameSink() = 0;
 
   virtual void SetVisible(bool visible) = 0;
+  virtual void SetShouldWarmUp() = 0;
 
-  virtual void SetNeedsAnimate() = 0;
+  virtual void SetNeedsAnimate(BeginMainFrameReason reason, bool urgent) = 0;
+  void SetNeedsAnimate(bool urgent = false) {
+    SetNeedsAnimate(BeginMainFrameReason::kOther, urgent);
+  }
+  void SetNeedsAnimate(BeginMainFrameReason reason) {
+    SetNeedsAnimate(reason, false);
+  }
   virtual void SetNeedsUpdateLayers() = 0;
-  virtual void SetNeedsCommit() = 0;
+  virtual void SetNeedsCommit(bool urgent = false) = 0;
   virtual void SetNeedsRedraw(const gfx::Rect& damage_rect) = 0;
   virtual void SetTargetLocalSurfaceId(
       const viz::LocalSurfaceId& target_local_surface_id) = 0;
+
+  // Detaches the InputDelegateForCompositor (InputHandler) bound on the
+  // compositor thread.
+  virtual void DetachInputDelegateAndRenderFrameObserver() = 0;
 
   // Returns true if an animate or commit has been requested, and hasn't
   // completed yet.
@@ -60,7 +76,12 @@ class CC_EXPORT Proxy {
   virtual void SetDeferMainFrameUpdate(bool defer_main_frame_update) = 0;
 
   // Pauses all main and impl-side rendering.
-  virtual void SetPauseRendering(bool pause_rendering) = 0;
+  virtual void SetPauseRendering(bool pause_rendering,
+                                 bool delay_until_visibility_change) = 0;
+
+  // Indicates that the next main frame will contain the result of running an
+  // event handler for an input event.
+  virtual void SetInputResponsePending() = 0;
 
   // Defers commits until at most the given |timeout| period has passed,
   // but continues to update the document lifecycle in
@@ -70,25 +91,33 @@ class CC_EXPORT Proxy {
                                      PaintHoldingReason reason) = 0;
 
   // Immediately stop deferring commits.
-  virtual void StopDeferringCommits(PaintHoldingCommitTrigger) = 0;
+  virtual void StopDeferringCommits() = 0;
 
   virtual bool IsDeferringCommits() const = 0;
 
   virtual bool CommitRequested() const = 0;
+
+  virtual void SetRequestHighFramerate(bool flag) {}
 
   // Must be called before using the proxy.
   virtual void Start() = 0;
   // Must be called before deleting the proxy.
   virtual void Stop() = 0;
 
+  virtual void QueueImageDecode(int request_id,
+                                const DrawImage& image,
+                                bool speculative) = 0;
   virtual void SetMutator(std::unique_ptr<LayerTreeMutator> mutator) = 0;
 
   virtual void SetPaintWorkletLayerPainter(
       std::unique_ptr<PaintWorkletLayerPainter> painter) = 0;
 
-  virtual void UpdateBrowserControlsState(BrowserControlsState constraints,
-                                          BrowserControlsState current,
-                                          bool animate) = 0;
+  virtual void UpdateBrowserControlsState(
+      BrowserControlsState constraints,
+      BrowserControlsState current,
+      bool animate,
+      base::optional_ref<const BrowserControlsOffsetTagModifications>
+          offset_tag_modifications) = 0;
 
   virtual void RequestBeginMainFrameNotExpected(bool new_state) = 0;
 
@@ -97,9 +126,6 @@ class CC_EXPORT Proxy {
 
   virtual void SetSourceURL(ukm::SourceId source_id, const GURL& url) = 0;
 
-  virtual void SetUkmSmoothnessDestination(
-      base::WritableSharedMemoryMapping ukm_smoothness_data) = 0;
-
   virtual void SetRenderFrameObserver(
       std::unique_ptr<RenderFrameMetadataObserver> observer) = 0;
 
@@ -107,9 +133,34 @@ class CC_EXPORT Proxy {
                                            bool raster,
                                            base::OnceClosure callback) = 0;
 
-  // Returns a percentage of dropped frames of the last second.
+  // Returns the average throughput as measured by the FrameSorter.
   // Only implemenented for single threaded proxy.
-  virtual double GetPercentDroppedFrames() const = 0;
+  virtual double GetAverageThroughput() const = 0;
+
+  // Returns true if we have requested to have rendering paused.
+  virtual bool IsRenderingPaused() const = 0;
+
+  // If rendering is paused, then this can be called to notify that we have a
+  // pending local surface id change which will take effect when resume frame
+  // production.
+  virtual void NotifyNewLocalSurfaceIdExpectedWhilePaused() = 0;
+
+  // Optional experimental feature implementation for crbug.com/496610055.
+  // This function will send an early final BeginMainFrame when in the last
+  // frame of a renderer and inside a cross-document view transition.
+  // Only implemented for the proxy_main.
+  virtual void SendImmediateBeginMainFrame() {}
+
+  // Callbacks for unbounded element frames.
+  virtual void SetUnboundedFrameSink(
+      std::unique_ptr<LayerTreeFrameSink> unbounded_frame_sink,
+      const viz::LocalSurfaceId& local_surface_id) {}
+  virtual void SetUnboundedFrameSinkId(
+      const viz::FrameSinkId& frame_sink_id,
+      const viz::LocalSurfaceId& local_surface_id) {}
+  virtual void DismissUnboundedFrameSink() {}
+  virtual void SetUnboundedLocalSurfaceId(
+      const viz::LocalSurfaceId& local_surface_id) {}
 };
 
 }  // namespace cc

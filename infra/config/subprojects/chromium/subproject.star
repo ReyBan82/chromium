@@ -2,18 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//lib/consoles.star", "consoles")
-load("//console-header.star", "HEADER")
+load("@chromium-luci//consoles.star", "consoles")
+load("//console-header.star", "get_header")
 load("//project.star", "settings")
 
 consoles.defaults.set(
     repo = "https://chromium.googlesource.com/chromium/src",
     refs = [settings.ref],
-    header = HEADER,
+    header = get_header(),
 )
 
 exec("./ci.star")
 exec("./try.star")
+exec("./trusted-robots.star")
 
 # TODO(gbeaty) Move the builders in these files into the per-builder group
 # files, this can't be done during the freeze because it changes the grace

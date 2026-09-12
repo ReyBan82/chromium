@@ -7,7 +7,9 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/time/default_clock.h"
 #include "base/timer/timer.h"
 #include "chromeos/ash/components/multidevice/remote_device_ref.h"
@@ -99,12 +101,19 @@ class HostVerifierImpl : public HostVerifier,
   void OnNotifyDevicesFinished(device_sync::mojom::NetworkRequestResult result);
   void OnSyncTimerFired();
 
-  HostBackendDelegate* host_backend_delegate_;
-  device_sync::DeviceSyncClient* device_sync_client_;
-  PrefService* pref_service_;
-  base::Clock* clock_;
+  raw_ptr<HostBackendDelegate> host_backend_delegate_;
+  raw_ptr<device_sync::DeviceSyncClient> device_sync_client_;
+  raw_ptr<PrefService> pref_service_;
+  raw_ptr<base::Clock> clock_;
   std::unique_ptr<base::OneShotTimer> retry_timer_;
   std::unique_ptr<base::OneShotTimer> sync_timer_;
+
+  base::ScopedObservation<HostBackendDelegate, HostBackendDelegate::Observer>
+      host_backend_delegate_observation_{this};
+  base::ScopedObservation<device_sync::DeviceSyncClient,
+                          device_sync::DeviceSyncClient::Observer>
+      device_sync_observation_{this};
+
   base::WeakPtrFactory<HostVerifierImpl> weak_ptr_factory_{this};
 };
 

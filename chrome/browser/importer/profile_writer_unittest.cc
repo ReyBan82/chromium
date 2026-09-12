@@ -12,12 +12,12 @@
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
+#include "base/test/test_future.h"
 #include "base/time/time.h"
 #include "chrome/browser/bookmarks/bookmark_model_factory.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/password_manager/password_manager_test_util.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
-#include "chrome/common/importer/imported_bookmark_entry.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/bookmarks/browser/bookmark_model.h"
 #include "components/bookmarks/browser/bookmark_utils.h"
@@ -27,10 +27,13 @@
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/history_types.h"
 #include "components/password_manager/core/browser/password_manager_test_utils.h"
-#include "components/password_manager/core/browser/test_password_store.h"
+#include "components/password_manager/core/browser/password_store/test_password_store.h"
+#include "components/password_manager/core/browser/password_string.h"
 #include "components/password_manager/core/common/password_manager_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/query_parser/query_parser.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "components/user_data_importer/common/imported_bookmark_entry.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -39,6 +42,7 @@ using bookmarks::BookmarkModel;
 using bookmarks::TitledUrlMatch;
 using bookmarks::UrlAndTitle;
 using password_manager::PasswordForm;
+using password_manager::PasswordString;
 using password_manager::TestPasswordStore;
 
 PasswordForm MakePasswordForm() {
@@ -46,7 +50,7 @@ PasswordForm MakePasswordForm() {
   form.url = GURL("https://example.com/");
   form.signon_realm = form.url.DeprecatedGetOriginAsURL().spec();
   form.username_value = u"user@gmail.com";
-  form.password_value = u"s3cre3t";
+  form.password_value = PasswordString(u"s3cre3t");
   form.in_store = PasswordForm::Store::kProfileStore;
   return form;
 }
@@ -57,17 +61,17 @@ class TestProfileWriter : public ProfileWriter {
  public:
   explicit TestProfileWriter(Profile* profile) : ProfileWriter(profile) {}
  protected:
-  ~TestProfileWriter() override {}
+  ~TestProfileWriter() override = default;
 };
 
 class ProfileWriterTest : public testing::Test {
  public:
-  ProfileWriterTest() {}
+  ProfileWriterTest() = default;
 
   ProfileWriterTest(const ProfileWriterTest&) = delete;
   ProfileWriterTest& operator=(const ProfileWriterTest&) = delete;
 
-  ~ProfileWriterTest() override {}
+  ~ProfileWriterTest() override = default;
 
   void SetUp() override {
     TestingProfile::Builder profile_builder;
@@ -143,15 +147,11 @@ class ProfileWriterTest : public testing::Test {
             profile, ServiceAccessType::EXPLICIT_ACCESS);
     history::QueryOptions options;
     base::CancelableTaskTracker history_task_tracker;
-    base::RunLoop loop;
-    history_service->QueryHistory(
-        std::u16string(), options,
-        base::BindLambdaForTesting([&](history::QueryResults results) {
-          history_count_ = results.size();
-          loop.Quit();
-        }),
-        &history_task_tracker);
-    loop.Run();
+    base::test::TestFuture<history::QueryResults> query_results_future;
+    history_service->QueryHistory(std::u16string(), options,
+                                  query_results_future.GetCallback(),
+                                  &history_task_tracker);
+    history_count_ = query_results_future.Get().size();
   }
 
   // Creates a TemplateURL from the provided data.
@@ -160,14 +160,14 @@ class ProfileWriterTest : public testing::Test {
                                                  const std::string& short_name);
 
  protected:
-  std::vector<ImportedBookmarkEntry> bookmarks_;
+  std::vector<user_data_importer::ImportedBookmarkEntry> bookmarks_;
   history::URLRows pages_;
   size_t history_count_;
 
  private:
   void AddImportedBookmarkEntry(const GURL& url, const std::u16string& title) {
     base::Time date;
-    ImportedBookmarkEntry entry;
+    user_data_importer::ImportedBookmarkEntry entry;
     entry.creation_time = date;
     entry.url = url;
     entry.title = title;
@@ -177,7 +177,8 @@ class ProfileWriterTest : public testing::Test {
   }
 
   content::BrowserTaskEnvironment task_environment_;
-
+  base::test::ScopedFeatureList scoped_feature_list_{
+      switches::kSyncEnableBookmarksInTransportMode};
   std::unique_ptr<TestingProfile> profile_;
   std::unique_ptr<TestingProfile> second_profile_;
 };
@@ -199,12 +200,10 @@ TEST_F(ProfileWriterTest, CheckBookmarksWithMultiProfile) {
       new TestProfileWriter(profile()));
   profile_writer->AddBookmarks(bookmarks_, u"Imported from Firefox");
 
-  std::vector<UrlAndTitle> url_record1;
-  bookmark_model1->GetBookmarks(&url_record1);
+  std::vector<UrlAndTitle> url_record1 = bookmark_model1->GetUniqueUrls();
   EXPECT_EQ(2u, url_record1.size());
 
-  std::vector<UrlAndTitle> url_record2;
-  bookmark_model2->GetBookmarks(&url_record2);
+  std::vector<UrlAndTitle> url_record2 = bookmark_model2->GetUniqueUrls();
   EXPECT_EQ(1u, url_record2.size());
 }
 
@@ -218,8 +217,7 @@ TEST_F(ProfileWriterTest, CheckBookmarksAfterWritingDataTwice) {
   scoped_refptr<TestProfileWriter> profile_writer(
       new TestProfileWriter(profile()));
   profile_writer->AddBookmarks(bookmarks_, u"Imported from Firefox");
-  std::vector<UrlAndTitle> bookmarks_record;
-  bookmark_model->GetBookmarks(&bookmarks_record);
+  std::vector<UrlAndTitle> bookmarks_record = bookmark_model->GetUniqueUrls();
   EXPECT_EQ(2u, bookmarks_record.size());
 
   VerifyBookmarksCount(bookmarks_record, bookmark_model, 1);
@@ -227,6 +225,22 @@ TEST_F(ProfileWriterTest, CheckBookmarksAfterWritingDataTwice) {
   profile_writer->AddBookmarks(bookmarks_, u"Imported from Firefox");
   // Verify that duplicate bookmarks exist.
   VerifyBookmarksCount(bookmarks_record, bookmark_model, 2);
+}
+
+TEST_F(ProfileWriterTest, CheckBookmarksWrittenToAccountStorageIfPresent) {
+  CreateImportedBookmarksEntries();
+  BookmarkModel* bookmark_model =
+      BookmarkModelFactory::GetForBrowserContext(profile());
+  bookmarks::test::WaitForBookmarkModelToLoad(bookmark_model);
+  bookmark_model->CreateAccountPermanentFolders();
+
+  scoped_refptr<TestProfileWriter> profile_writer(
+      new TestProfileWriter(profile()));
+  profile_writer->AddBookmarks(bookmarks_, u"Imported from Firefox");
+
+  // Check that bookmarks have been imported only to account storage.
+  EXPECT_EQ(bookmark_model->bookmark_bar_node()->children().size(), 0u);
+  EXPECT_EQ(bookmark_model->account_bookmark_bar_node()->children().size(), 2u);
 }
 
 std::unique_ptr<TemplateURL> ProfileWriterTest::CreateTemplateURL(
@@ -240,7 +254,7 @@ std::unique_ptr<TemplateURL> ProfileWriterTest::CreateTemplateURL(
   return std::make_unique<TemplateURL>(data);
 }
 
-// Verify that history entires are not duplicated when added twice.
+// Verify that history entries are not duplicated when added twice.
 TEST_F(ProfileWriterTest, CheckHistoryAfterWritingDataTwice) {
   profile()->BlockUntilHistoryProcessesPendingRequests();
 
@@ -268,8 +282,6 @@ TEST_F(ProfileWriterTest, AddKeywords) {
   // keyword.
   keywords.push_back(CreateTemplateURL("key1", "http://key1_1.com", "n1_1"));
   keywords.push_back(CreateTemplateURL("key2", "http://key2.com", "n2"));
-  // This entry will not be added since the keyword contains spaces.
-  keywords.push_back(CreateTemplateURL("key 3", "http://key3.com", "n3"));
 
   auto profile_writer = base::MakeRefCounted<TestProfileWriter>(profile());
   profile_writer->AddKeywords(std::move(keywords), false);
@@ -297,7 +309,7 @@ TEST_F(ProfileWriterTest, AddPassword) {
   profile_writer->AddPasswordForm(form);
 
   base::RunLoop().RunUntilIdle();
-  EXPECT_THAT(store->stored_passwords().at(form.signon_realm),
+  EXPECT_THAT(GetAllLoginsSync(store.get()).at(form.signon_realm),
               testing::ElementsAre(form));
 }
 
@@ -312,5 +324,5 @@ TEST_F(ProfileWriterTest, AddPasswordDisabled) {
   profile_writer->AddPasswordForm(form);
 
   base::RunLoop().RunUntilIdle();
-  EXPECT_THAT(store->stored_passwords(), testing::IsEmpty());
+  EXPECT_THAT(GetAllLoginsSync(store.get()), testing::IsEmpty());
 }

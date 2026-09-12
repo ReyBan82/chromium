@@ -7,33 +7,18 @@
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/profiles/profile_android.h"
-#include "chrome/browser/ui/android/omnibox/jni_headers/GeolocationHeader_jni.h"
-#include "url/android/gurl_android.h"
+#include "third_party/jni_zero/default_conversions.h"
 #include "url/gurl.h"
 
-bool HasGeolocationPermission() {
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/browser/ui/android/omnibox/jni_headers/GeolocationHeader_jni.h"
+
+std::optional<std::string> GetGeolocationHeaderIfAllowed(const GURL& url,
+                                                         Profile* profile) {
   JNIEnv* env = base::android::AttachCurrentThread();
-  return Java_GeolocationHeader_hasGeolocationPermission(env);
+
+  return Java_GeolocationHeader_getGeoHeader(
+      env, url.spec(), profile ? profile->GetJavaObject() : nullptr);
 }
 
-absl::optional<std::string> GetGeolocationHeaderIfAllowed(const GURL& url,
-                                                          Profile* profile) {
-  JNIEnv* env = base::android::AttachCurrentThread();
-  ProfileAndroid* profile_android = ProfileAndroid::FromProfile(profile);
-  DCHECK(profile_android);
-
-  base::android::ScopedJavaLocalRef<jobject> j_profile_android =
-      profile_android->GetJavaObject();
-  DCHECK(!j_profile_android.is_null());
-
-  base::android::ScopedJavaLocalRef<jstring> geo_header =
-      Java_GeolocationHeader_getGeoHeader(
-          env, base::android::ConvertUTF8ToJavaString(env, url.spec()),
-          j_profile_android);
-
-  if (!geo_header)
-    return absl::nullopt;
-
-  return base::android::ConvertJavaStringToUTF8(env, geo_header);
-}
+DEFINE_JNI(GeolocationHeader)

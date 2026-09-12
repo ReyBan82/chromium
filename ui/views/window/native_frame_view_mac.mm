@@ -6,9 +6,12 @@
 
 #import <Cocoa/Cocoa.h>
 
+#include <optional>
+
 #include "ui/base/metadata/metadata_impl_macros.h"
 #import "ui/gfx/mac/coordinate_conversion.h"
 #include "ui/views/widget/widget.h"
+#include "ui/views/window/native_frame_view.h"
 
 namespace views {
 
@@ -24,12 +27,13 @@ gfx::Rect NativeFrameViewMac::GetWindowBoundsForClientBounds(
       frameRectForContentRect:gfx::ScreenRectToNSRect(client_bounds)]);
   // Enforce minimum size (1, 1) in case that |client_bounds| is passed with
   // empty size.
-  if (window_bounds.IsEmpty())
+  if (window_bounds.IsEmpty()) {
     window_bounds.set_size(gfx::Size(1, 1));
+  }
   return window_bounds;
 }
 
-BEGIN_METADATA(NativeFrameViewMac, NativeFrameView)
+BEGIN_METADATA(NativeFrameViewMac)
 END_METADATA
 
 }  // namespace views

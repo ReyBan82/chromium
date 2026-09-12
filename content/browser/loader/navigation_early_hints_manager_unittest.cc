@@ -5,11 +5,13 @@
 #include "content/browser/loader/navigation_early_hints_manager.h"
 
 #include <memory>
+#include <optional>
 
+#include "base/byte_size.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
-#include "base/test/metrics/histogram_tester.h"
+#include "base/unguessable_token.h"
 #include "content/browser/renderer_host/frame_tree_node.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_browser_context.h"
@@ -18,6 +20,7 @@
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/http/http_request_headers.h"
 #include "services/network/public/cpp/constants.h"
+#include "services/network/public/cpp/content_security_policy/content_security_policy.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/mojom/early_hints.mojom.h"
@@ -25,6 +28,7 @@
 #include "services/network/public/mojom/parsed_headers.mojom.h"
 #include "services/network/test/test_network_context.h"
 #include "services/network/test/test_url_loader_factory.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace content {
@@ -59,10 +63,18 @@ class FakeNetworkContext : public network::TestNetworkContext {
   void PreconnectSockets(
       uint32_t num_streams,
       const GURL& url,
-      bool allow_credentials,
-      const net::NetworkAnonymizationKey& network_anonymization_key) override {
-    preconnect_requests_.emplace_back(url, allow_credentials,
-                                      network_anonymization_key);
+      network::mojom::CredentialsMode credentials_mode,
+      const net::NetworkAnonymizationKey& network_anonymization_key,
+      const base::UnguessableToken& network_restrictions_id,
+      const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
+      const std::optional<net::ConnectionKeepAliveConfig>& keepalive_config,
+      mojo::PendingRemote<network::mojom::ConnectionChangeObserverClient>
+          observer_client) override {
+    preconnect_requests_.emplace_back(
+        url,
+        credentials_mode == network::mojom::CredentialsMode::kInclude ? true
+                                                                      : false,
+        network_anonymization_key);
   }
 
   std::vector<PreconnectRequest>& preconnect_requests() {
@@ -87,8 +99,7 @@ class NavigationEarlyHintsManagerTest : public testing::Test {
     mojo::Remote<network::mojom::URLLoaderFactory> remote;
     loader_factory_.Clone(remote.BindNewPipeAndPassReceiver());
     early_hints_manager_ = std::make_unique<NavigationEarlyHintsManager>(
-        browser_context_, storage_partition_,
-        FrameTreeNode::kFrameTreeNodeInvalidId,
+        browser_context_, storage_partition_, FrameTreeNodeId(),
         NavigationEarlyHintsManagerParams(origin, std::move(isolation_info),
                                           std::move(remote)));
   }
@@ -128,7 +139,7 @@ class NavigationEarlyHintsManagerTest : public testing::Test {
         network::mojom::LinkAsAttribute::kScript,
         network::mojom::CrossOriginAttribute::kUnspecified,
         network::mojom::FetchPriorityAttribute::kAuto,
-        /*mime_type=*/absl::nullopt);
+        /*mime_type=*/std::nullopt);
     auto hints = network::mojom::EarlyHints::New();
     hints->headers = network::mojom::ParsedHeaders::New();
     hints->headers->link_headers.push_back(std::move(link_header));
@@ -160,7 +171,7 @@ class NavigationEarlyHintsManagerTest : public testing::Test {
     return network::mojom::LinkHeader::New(
         GURL(kPreloadPath), network::mojom::LinkRelAttribute::kPreload, as,
         network::mojom::CrossOriginAttribute::kUnspecified, fetch_priority,
-        /*mime_type=*/absl::nullopt);
+        /*mime_type=*/std::nullopt);
   }
 
  private:
@@ -174,22 +185,21 @@ class NavigationEarlyHintsManagerTest : public testing::Test {
 };
 
 TEST_F(NavigationEarlyHintsManagerTest, SimpleResponse) {
-  base::HistogramTester histograms;
-
   // Set up a response which simulates coming from network.
   network::mojom::URLResponseHeadPtr head = CreatePreloadResponseHead();
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = kPreloadBody.size();
+  status.decoded_body_length = base::ByteSize(kPreloadBody.size());
   status.error_code = net::OK;
   loader_factory().AddResponse(GURL(kPreloadPath), std::move(head),
                                kPreloadBody, status);
 
   loader_factory().SetInterceptor(base::BindLambdaForTesting(
       [&](const network::ResourceRequest& resource_request) {
-        std::string accept_value;
-        ASSERT_TRUE(resource_request.headers.GetHeader(
-            net::HttpRequestHeaders::kAccept, &accept_value));
-        EXPECT_EQ(accept_value, network::kDefaultAcceptHeaderValue);
+        EXPECT_TRUE(resource_request.is_outermost_main_frame);
+        EXPECT_THAT(
+            resource_request.headers.GetHeader(
+                net::HttpRequestHeaders::kAccept),
+            testing::Optional(std::string(network::kDefaultAcceptHeaderValue)));
       }));
 
   early_hints_manager().HandleEarlyHints(CreateEarlyHintWithPreload(),
@@ -202,17 +212,13 @@ TEST_F(NavigationEarlyHintsManagerTest, SimpleResponse) {
   ASSERT_TRUE(it->second.error_code.has_value());
   EXPECT_EQ(it->second.error_code.value(), net::OK);
   EXPECT_FALSE(it->second.was_canceled);
-
-  histograms.ExpectUniqueSample(
-      kEarlyHintsPreloadRequestDestinationHistogramName,
-      network::mojom::RequestDestination::kScript, 1);
 }
 
 TEST_F(NavigationEarlyHintsManagerTest, EmptyBody) {
   // Set up an empty response which simulates coming from network.
   network::mojom::URLResponseHeadPtr head = CreatePreloadResponseHead();
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = 0;
+  status.decoded_body_length = base::ByteSize(0);
   status.error_code = net::OK;
   loader_factory().AddResponse(GURL(kPreloadPath), std::move(head), "", status);
 
@@ -229,13 +235,11 @@ TEST_F(NavigationEarlyHintsManagerTest, EmptyBody) {
 }
 
 TEST_F(NavigationEarlyHintsManagerTest, ResponseExistsInDiskCache) {
-  base::HistogramTester histograms;
-
   // Set up a response which simulates coming from disk cache.
   network::mojom::URLResponseHeadPtr head = CreatePreloadResponseHead();
   head->was_fetched_via_cache = true;
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = kPreloadBody.size();
+  status.decoded_body_length = base::ByteSize(kPreloadBody.size());
   status.error_code = net::OK;
   loader_factory().AddResponse(GURL(kPreloadPath), std::move(head),
                                kPreloadBody, status);
@@ -248,11 +252,6 @@ TEST_F(NavigationEarlyHintsManagerTest, ResponseExistsInDiskCache) {
   auto it = preloads.find(GURL(kPreloadPath));
   ASSERT_TRUE(it != preloads.end());
   EXPECT_TRUE(it->second.was_canceled);
-
-  // The request destination histogram for a preload should not be recorded when
-  // the preload is canceled.
-  histograms.ExpectTotalCount(kEarlyHintsPreloadRequestDestinationHistogramName,
-                              0);
 }
 
 TEST_F(NavigationEarlyHintsManagerTest, PreloadSchemeIsUnsupported) {
@@ -261,7 +260,7 @@ TEST_F(NavigationEarlyHintsManagerTest, PreloadSchemeIsUnsupported) {
       network::mojom::LinkAsAttribute::kUnspecified,
       network::mojom::CrossOriginAttribute::kUnspecified,
       network::mojom::FetchPriorityAttribute::kAuto,
-      /*mime_type=*/absl::nullopt);
+      /*mime_type=*/std::nullopt);
   auto hints = network::mojom::EarlyHints::New();
   hints->headers = network::mojom::ParsedHeaders::New();
   hints->headers->link_headers.push_back(std::move(link_header));
@@ -273,6 +272,23 @@ TEST_F(NavigationEarlyHintsManagerTest, PreloadSchemeIsUnsupported) {
   EXPECT_FALSE(early_hints_manager().HasInflightPreloads());
 }
 
+TEST_F(NavigationEarlyHintsManagerTest, NonHttpNavigationUrlIgnored) {
+  for (const char* url_str :
+       {"blob:https://a.test/1234", "filesystem:https://a.test/temporary/1234",
+        "data:text/html,sample_data", "file:///test/path", "about:blank"}) {
+    network::ResourceRequest request;
+    request.is_outermost_main_frame = true;
+    request.url = GURL(url_str);
+
+    early_hints_manager().HandleEarlyHints(CreateEarlyHintWithPreload(),
+                                           request);
+
+    EXPECT_FALSE(early_hints_manager().WasResourceHintsReceived());
+    EXPECT_FALSE(early_hints_manager().HasInflightPreloads());
+    EXPECT_TRUE(fake_network_context().preconnect_requests().empty());
+  }
+}
+
 TEST_F(NavigationEarlyHintsManagerTest, SinglePreconnect) {
   auto preconnect_url = GURL("https://b.test");
   auto link_header = network::mojom::LinkHeader::New(
@@ -280,7 +296,7 @@ TEST_F(NavigationEarlyHintsManagerTest, SinglePreconnect) {
       network::mojom::LinkAsAttribute::kUnspecified,
       network::mojom::CrossOriginAttribute::kUnspecified,
       network::mojom::FetchPriorityAttribute::kAuto,
-      /*mime_type=*/absl::nullopt);
+      /*mime_type=*/std::nullopt);
   auto hints = network::mojom::EarlyHints::New();
   hints->headers = network::mojom::ParsedHeaders::New();
   hints->headers->link_headers.push_back(std::move(link_header));
@@ -311,25 +327,25 @@ TEST_F(NavigationEarlyHintsManagerTest, MultiplePreconnects) {
       network::mojom::LinkAsAttribute::kUnspecified,
       network::mojom::CrossOriginAttribute::kUnspecified,
       network::mojom::FetchPriorityAttribute::kAuto,
-      /*mime_type=*/absl::nullopt));
+      /*mime_type=*/std::nullopt));
   hints->headers->link_headers.push_back(network::mojom::LinkHeader::New(
       preconnect_url1, network::mojom::LinkRelAttribute::kPreconnect,
       network::mojom::LinkAsAttribute::kUnspecified,
       network::mojom::CrossOriginAttribute::kUnspecified,
       network::mojom::FetchPriorityAttribute::kAuto,
-      /*mime_type=*/absl::nullopt));
+      /*mime_type=*/std::nullopt));
   hints->headers->link_headers.push_back(network::mojom::LinkHeader::New(
       preconnect_url1, network::mojom::LinkRelAttribute::kPreconnect,
       network::mojom::LinkAsAttribute::kUnspecified,
       network::mojom::CrossOriginAttribute::kAnonymous,
       network::mojom::FetchPriorityAttribute::kAuto,
-      /*mime_type=*/absl::nullopt));
+      /*mime_type=*/std::nullopt));
   hints->headers->link_headers.push_back(network::mojom::LinkHeader::New(
       preconnect_url2, network::mojom::LinkRelAttribute::kPreconnect,
       network::mojom::LinkAsAttribute::kUnspecified,
       network::mojom::CrossOriginAttribute::kAnonymous,
       network::mojom::FetchPriorityAttribute::kAuto,
-      /*mime_type=*/absl::nullopt));
+      /*mime_type=*/std::nullopt));
 
   early_hints_manager().HandleEarlyHints(std::move(hints),
                                          CreateNavigationResourceRequest());
@@ -358,7 +374,7 @@ TEST_F(NavigationEarlyHintsManagerTest, InvalidPreconnectLink) {
       network::mojom::LinkAsAttribute::kUnspecified,
       network::mojom::CrossOriginAttribute::kUnspecified,
       network::mojom::FetchPriorityAttribute::kAuto,
-      /*mime_type=*/absl::nullopt);
+      /*mime_type=*/std::nullopt);
   auto hints = network::mojom::EarlyHints::New();
   hints->headers = network::mojom::ParsedHeaders::New();
   hints->headers->link_headers.push_back(std::move(link_header));
@@ -419,6 +435,59 @@ TEST_F(NavigationEarlyHintsManagerTest, PreloadPriority) {
                 CreateLinkHeader(network::mojom::LinkAsAttribute::kFont,
                                  network::mojom::FetchPriorityAttribute::kLow)),
             net::LOWEST);
+}
+
+TEST_F(NavigationEarlyHintsManagerTest, CSPForModulePreloadAsEmpty) {
+  // link: <https://a.test/script.js>; rel=modulepreload
+  // Without 'as' attribute.
+  auto link_header = network::mojom::LinkHeader::New(
+      GURL(kPreloadPath), network::mojom::LinkRelAttribute::kModulePreload,
+      network::mojom::LinkAsAttribute::kUnspecified,
+      network::mojom::CrossOriginAttribute::kUnspecified,
+      network::mojom::FetchPriorityAttribute::kAuto,
+      /*mime_type=*/std::nullopt);
+
+  auto hints = network::mojom::EarlyHints::New();
+  hints->headers = network::mojom::ParsedHeaders::New();
+  hints->headers->link_headers.push_back(std::move(link_header));
+  hints->headers->content_security_policy =
+      network::ParseContentSecurityPolicies(
+          "script-src 'none'",
+          network::mojom::ContentSecurityPolicyType::kEnforce,
+          network::mojom::ContentSecurityPolicySource::kHTTP,
+          GURL(kNavigationPath));
+
+  early_hints_manager().HandleEarlyHints(std::move(hints),
+                                         CreateNavigationResourceRequest());
+
+  // CSP should block the preload:
+  EXPECT_FALSE(early_hints_manager().HasInflightPreloads());
+}
+
+TEST_F(NavigationEarlyHintsManagerTest, CSPForModulePreloadAsScript) {
+  // link: <https://a.test/script.js>; rel=modulepreload; as=script
+  auto link_header = network::mojom::LinkHeader::New(
+      GURL(kPreloadPath), network::mojom::LinkRelAttribute::kModulePreload,
+      network::mojom::LinkAsAttribute::kScript,
+      network::mojom::CrossOriginAttribute::kUnspecified,
+      network::mojom::FetchPriorityAttribute::kAuto,
+      /*mime_type=*/std::nullopt);
+
+  auto hints = network::mojom::EarlyHints::New();
+  hints->headers = network::mojom::ParsedHeaders::New();
+  hints->headers->link_headers.push_back(std::move(link_header));
+  hints->headers->content_security_policy =
+      network::ParseContentSecurityPolicies(
+          "script-src 'none'",
+          network::mojom::ContentSecurityPolicyType::kEnforce,
+          network::mojom::ContentSecurityPolicySource::kHTTP,
+          GURL(kNavigationPath));
+
+  early_hints_manager().HandleEarlyHints(std::move(hints),
+                                         CreateNavigationResourceRequest());
+
+  // CSP should block the preload:
+  EXPECT_FALSE(early_hints_manager().HasInflightPreloads());
 }
 
 }  // namespace content

@@ -5,7 +5,8 @@
 #ifndef CHROME_BROWSER_POLICY_CHROME_POLICY_CONVERSIONS_CLIENT_H_
 #define CHROME_BROWSER_POLICY_CHROME_POLICY_CONVERSIONS_CLIENT_H_
 
-#include "build/chromeos_buildflags.h"
+#include "base/memory/raw_ptr.h"
+#include "build/build_config.h"
 #include "components/policy/core/browser/policy_conversions_client.h"
 
 namespace content {
@@ -35,14 +36,14 @@ class ChromePolicyConversionsClient : public PolicyConversionsClient {
   SchemaRegistry* GetPolicySchemaRegistry() const override;
   const ConfigurationPolicyHandlerList* GetHandlerList() const override;
   bool HasUserPolicies() const override;
-  base::Value::List GetExtensionPolicies(PolicyDomain policy_domain) override;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  base::Value::List GetDeviceLocalAccountPolicies() override;
-  base::Value::Dict GetIdentityFields() override;
+  base::ListValue GetExtensionPolicies(PolicyDomain policy_domain) override;
+#if BUILDFLAG(IS_CHROMEOS)
+  base::ListValue GetDeviceLocalAccountPolicies() override;
+  base::DictValue GetIdentityFields() override;
 #endif
 
  private:
-  Profile* profile_;
+  raw_ptr<Profile> profile_;
 };
 
 }  // namespace policy

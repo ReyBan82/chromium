@@ -7,19 +7,24 @@
 #include <tuple>
 
 #include "base/functional/callback_helpers.h"
+#include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "chrome/browser/browsing_data/navigation_entry_remover.h"
+#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
 #include "chrome/browser/sessions/tab_restore_service_factory.h"
 #include "chrome/common/buildflags.h"
+#include "components/content_settings/core/browser/host_content_settings_map.h"
+#include "components/safe_browsing/core/browser/suspicious_site_warning_allowlist.h"
 #include "components/search_engines/template_url_service.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/commerce/merchant_viewer/merchant_viewer_data_manager.h"
 #include "chrome/browser/commerce/merchant_viewer/merchant_viewer_data_manager_factory.h"
 #include "chrome/browser/commerce/shopping_service_factory.h"
+#include "components/commerce/core/feature_utils.h"
 #include "components/commerce/core/shopping_service.h"
 #endif
 
@@ -61,7 +66,7 @@ void DeleteTemplateUrlsForTimeRange(TemplateURLService* keywords_model,
                                     base::Time delete_begin,
                                     base::Time delete_end) {
   if (!keywords_model->loaded()) {
-    // TODO(https://crbug.com/1288724): Ignoring the return value here is
+    // TODO(crbug.com/40211652): Ignoring the return value here is
     // probably a bug.
     std::ignore = keywords_model->RegisterOnLoadedCallback(
         base::BindOnce(&DeleteTemplateUrlsForTimeRange, keywords_model,
@@ -76,7 +81,7 @@ void DeleteTemplateUrlsForTimeRange(TemplateURLService* keywords_model,
 void DeleteTemplateUrlsForDeletedOrigins(TemplateURLService* keywords_model,
                                          base::flat_set<GURL> deleted_origins) {
   if (!keywords_model->loaded()) {
-    // TODO(https://crbug.com/1288724): Ignoring the return value here is
+    // TODO(crbug.com/40211652): Ignoring the return value here is
     // probably a bug.
     std::ignore = keywords_model->RegisterOnLoadedCallback(
         base::BindOnce(&DeleteTemplateUrlsForDeletedOrigins, keywords_model,
@@ -121,9 +126,14 @@ BrowsingDataHistoryObserverService::BrowsingDataHistoryObserverService(
     history_observation_.Observe(history_service);
 }
 
-BrowsingDataHistoryObserverService::~BrowsingDataHistoryObserverService() {}
+BrowsingDataHistoryObserverService::~BrowsingDataHistoryObserverService() =
+    default;
 
-void BrowsingDataHistoryObserverService::OnURLsDeleted(
+void BrowsingDataHistoryObserverService::Shutdown() {
+  history_observation_.Reset();
+}
+
+void BrowsingDataHistoryObserverService::OnHistoryDeletions(
     history::HistoryService* history_service,
     const history::DeletionInfo& deletion_info) {
   if (!deletion_info.is_from_expiration())
@@ -152,10 +162,51 @@ void BrowsingDataHistoryObserverService::OnURLsDeleted(
     }
   }
 
+  HostContentSettingsMap* host_content_settings_map =
+      HostContentSettingsMapFactory::GetForProfile(profile_);
+  if (host_content_settings_map) {
+    safe_browsing::SuspiciousSiteWarningAllowlist allowlist(
+        host_content_settings_map);
+    if (deletion_info.IsAllHistory()) {
+      allowlist.Clear(base::Time(), base::Time::Max());
+    } else {
+      ContentSettingsForOneType allowlist_entries =
+          host_content_settings_map->GetSettingsForOneType(
+              ContentSettingsType::SUSPICIOUS_SITE_WARNING_DATA);
+      for (const auto& entry : allowlist_entries) {
+        if (entry.IsExpired() || !entry.setting_value.is_dict()) {
+          continue;
+        }
+        const std::string& host = entry.primary_pattern.GetHost();
+        if (host.empty()) {
+          continue;
+        }
+
+        bool host_was_deleted = false;
+        bool has_remaining_visits = false;
+        for (const auto& [origin_gurl, count_and_time] :
+             deletion_info.deleted_urls_origin_map()) {
+          if (origin_gurl.host() == host) {
+            host_was_deleted = true;
+            if (count_and_time.first > 0) {
+              has_remaining_visits = true;
+              break;
+            }
+          }
+        }
+
+        if (host_was_deleted && !has_remaining_visits) {
+          allowlist.RevokeUserAllowException(host);
+        }
+      }
+    }
+  }
+
 #if BUILDFLAG(IS_ANDROID)
   commerce::ShoppingService* shopping_service =
       commerce::ShoppingServiceFactory::GetForBrowserContext(profile_);
-  if (shopping_service && shopping_service->IsMerchantViewerEnabled()) {
+  if (shopping_service && commerce::IsMerchantViewerEnabled(
+                              shopping_service->GetAccountChecker())) {
     ClearCommerceData(profile_, deletion_info);
   }
 #endif
@@ -164,15 +215,22 @@ void BrowsingDataHistoryObserverService::OnURLsDeleted(
 // static
 BrowsingDataHistoryObserverService::Factory*
 BrowsingDataHistoryObserverService::Factory::GetInstance() {
-  return base::Singleton<BrowsingDataHistoryObserverService::Factory>::get();
+  static base::NoDestructor<BrowsingDataHistoryObserverService::Factory>
+      instance;
+  return instance.get();
 }
 
 BrowsingDataHistoryObserverService::Factory::Factory()
-    : ProfileKeyedServiceFactory("BrowsingDataHistoryObserverService",
-                                 ProfileSelections::Builder()
-                                     .WithGuest(ProfileSelection::kNone)
-                                     .Build()) {
+    : ProfileKeyedServiceFactory(
+          "BrowsingDataHistoryObserverService",
+          ProfileSelections::Builder()
+              .WithGuest(ProfileSelection::kNone)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOriginalOnly)
+              .Build()) {
   DependsOn(HistoryServiceFactory::GetInstance());
+  DependsOn(HostContentSettingsMapFactory::GetInstance());
   DependsOn(TabRestoreServiceFactory::GetInstance());
 #if BUILDFLAG(ENABLE_SESSION_SERVICE)
   DependsOn(SessionServiceFactory::GetInstance());
@@ -184,11 +242,11 @@ BrowsingDataHistoryObserverService::Factory::Factory()
 #endif
 }
 
-KeyedService*
-BrowsingDataHistoryObserverService::Factory::BuildServiceInstanceFor(
-    content::BrowserContext* context) const {
+std::unique_ptr<KeyedService> BrowsingDataHistoryObserverService::Factory::
+    BuildServiceInstanceForBrowserContext(
+        content::BrowserContext* context) const {
   Profile* profile = Profile::FromBrowserContext(context);
-  return new BrowsingDataHistoryObserverService(profile);
+  return std::make_unique<BrowsingDataHistoryObserverService>(profile);
 }
 
 bool BrowsingDataHistoryObserverService::Factory::

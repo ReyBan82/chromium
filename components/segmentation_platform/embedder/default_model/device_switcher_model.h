@@ -14,7 +14,7 @@ namespace segmentation_platform {
 struct Config;
 
 // Model to predict if a user switched devices.
-class DeviceSwitcherModel : public ModelProvider {
+class DeviceSwitcherModel : public DefaultModelProvider {
  public:
   // Any updates to these strings need to also update the field trials allowlist
   // in go/segmentation-field-trials-map.
@@ -27,6 +27,32 @@ class DeviceSwitcherModel : public ModelProvider {
   static constexpr char kSyncedAndFirstDeviceLabel[] = "SyncedAndFirstDevice";
   static constexpr char kNotSyncedLabel[] = "NotSynced";
 
+  enum Label {
+    kLabelAndroidPhone,
+    kLabelIosPhoneChrome,
+    kLabelAndroidTablet,
+    kLabelIosTablet,
+    kLabelDesktop,
+    kLabelOther,
+    kLabelSyncedAndFirstDevice,
+    kLabelNotSynced,
+    kLabelCount,
+  };
+
+  enum Feature {
+    kFeatureSyncSuccess,
+    kFeatureAndroidPhoneCount,
+    kFeatureAndroidTabletCount,
+    kFeatureIosPhoneCount,
+    kFeatureIosTabletCount,
+    kFeatureLinuxCount,
+    kFeatureMacCount,
+    kFeatureWindowsCount,
+    kFeatureChromeOsCount,
+    kFeatureOtherCount,
+    kFeatureCount,
+  };
+
   DeviceSwitcherModel();
   ~DeviceSwitcherModel() override = default;
 
@@ -36,11 +62,10 @@ class DeviceSwitcherModel : public ModelProvider {
   static std::unique_ptr<Config> GetConfig();
 
   // ModelProvider implementation.
-  void InitAndFetchModel(
-      const ModelUpdatedCallback& model_updated_callback) override;
+  std::unique_ptr<ModelConfig> GetModelConfig() override;
+
   void ExecuteModelWithInput(const ModelProvider::Request& inputs,
                              ExecutionCallback callback) override;
-  bool ModelAvailable() override;
 };
 
 }  // namespace segmentation_platform

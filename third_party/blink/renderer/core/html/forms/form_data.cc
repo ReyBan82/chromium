@@ -43,11 +43,29 @@
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/network/form_data_encoder.h"
 #include "third_party/blink/renderer/platform/wtf/text/line_ending.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
 namespace {
+
+File* CreateFileFromBlob(Blob* blob, const String& filename) {
+  if (!blob) {
+    return nullptr;
+  }
+
+  if (auto* file = DynamicTo<File>(blob)) {
+    if (filename.IsNull()) {
+      return file;
+    }
+    return file->Clone(filename);
+  }
+
+  return MakeGarbageCollected<File>(filename.IsNull() ? "blob" : filename,
+                                    base::Time::Now(),
+                                    blob->GetBlobDataHandle());
+}
 
 class FormDataIterationSource final
     : public PairSyncIterable<FormData>::IterationSource {
@@ -57,8 +75,7 @@ class FormDataIterationSource final
 
   bool FetchNextItem(ScriptState* script_state,
                      String& name,
-                     V8FormDataEntryValue*& value,
-                     ExceptionState& exception_state) override {
+                     V8FormDataEntryValue*& value) override {
     if (current_ >= form_data_->size())
       return false;
 
@@ -85,14 +102,14 @@ class FormDataIterationSource final
 
 }  // namespace
 
-FormData::FormData(const WTF::TextEncoding& encoding) : encoding_(encoding) {}
+FormData::FormData(const TextEncoding& encoding) : encoding_(encoding) {}
 
 FormData::FormData(const FormData& form_data)
     : encoding_(form_data.encoding_),
       entries_(form_data.entries_),
       contains_password_data_(form_data.contains_password_data_) {}
 
-FormData::FormData() : encoding_(UTF8Encoding()) {}
+FormData::FormData() : encoding_(Utf8Encoding()) {}
 
 FormData* FormData::Create(HTMLFormElement* form,
                            ExceptionState& exception_state) {
@@ -128,7 +145,7 @@ FormData* FormData::Create(HTMLFormElement* form,
   }
   // 1.2. Let list be the result of constructing the entry list for form and
   // submitter.
-  FormData* form_data = form->ConstructEntryList(control, UTF8Encoding());
+  FormData* form_data = form->ConstructEntryList(control, Utf8Encoding());
   // 1.3. If list is null, then throw an "InvalidStateError" DOMException.
   if (!form_data) {
     exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
@@ -259,7 +276,7 @@ void FormData::AppendFromElement(const String& name, const String& value) {
 }
 
 std::string FormData::Encode(const String& string) const {
-  return encoding_.Encode(string, WTF::kEntitiesForUnencodables);
+  return encoding_.Encode(string, UnencodableHandling::kXmlCharRef);
 }
 
 scoped_refptr<EncodedFormData> FormData::EncodeFormData(
@@ -274,40 +291,32 @@ scoped_refptr<EncodedFormData> FormData::EncodeFormData(
             : Encode(entry->Value()),
         encoding_type);
   }
-  form_data->AppendData(encoded_data.data(), encoded_data.size());
+  form_data->AppendData(encoded_data);
   return form_data;
 }
 
 scoped_refptr<EncodedFormData> FormData::EncodeMultiPartFormData() {
   scoped_refptr<EncodedFormData> form_data = EncodedFormData::Create();
   form_data->SetBoundary(FormDataEncoder::GenerateUniqueBoundaryString());
-  Vector<char> encoded_data;
   for (const auto& entry : Entries()) {
     Vector<char> header;
-    FormDataEncoder::BeginMultiPartHeader(header, form_data->Boundary().data(),
+    FormDataEncoder::BeginMultiPartHeader(header, form_data->Boundary(),
                                           Encode(entry->name()));
 
-    // If the current type is blob, then we also need to include the
-    // filename.
-    if (entry->GetBlob()) {
-      String name;
-      if (auto* file = DynamicTo<File>(entry->GetBlob())) {
-        // For file blob, use the filename (or relative path if it is
-        // present) as the name.
-        name = file->webkitRelativePath().empty() ? file->name()
-                                                  : file->webkitRelativePath();
+    File* file = entry->isFile() ? entry->GetFile() : nullptr;
 
-        // If a filename is passed in FormData.append(), use it instead
-        // of the file blob's name.
-        if (!entry->Filename().IsNull())
-          name = entry->Filename();
-      } else {
-        // For non-file blob, use the filename if it is passed in
-        // FormData.append().
-        if (!entry->Filename().IsNull())
-          name = entry->Filename();
-        else
-          name = "blob";
+    // If the current type is file, then we also need to include the
+    // filename.
+    if (file) {
+      // Use the filename (or relative path if it is present) as the name.
+      String name = file->webkitRelativePath().empty()
+                        ? file->name()
+                        : file->webkitRelativePath();
+
+      // If a filename is passed in FormData.append(), use it instead of the
+      // file's name.
+      if (!entry->Filename().IsNull()) {
+        name = entry->Filename();
       }
 
       // We have to include the filename=".." part in the header, even if
@@ -317,45 +326,43 @@ scoped_refptr<EncodedFormData> FormData::EncodeMultiPartFormData() {
       // Add the content type if available, or "application/octet-stream"
       // otherwise (RFC 1867).
       String content_type;
-      if (entry->GetBlob()->type().empty())
+      if (file->type().empty()) {
         content_type = "application/octet-stream";
-      else
-        content_type = entry->GetBlob()->type();
+      } else {
+        content_type = file->type();
+      }
       FormDataEncoder::AddContentTypeToMultiPartHeader(header, content_type);
     }
 
     FormDataEncoder::FinishMultiPartHeader(header);
 
     // Append body
-    form_data->AppendData(header.data(), header.size());
-    if (entry->GetBlob()) {
-      if (entry->GetBlob()->HasBackingFile()) {
-        auto* file = To<File>(entry->GetBlob());
+    form_data->AppendData(header);
+    if (file) {
+      if (file->HasBackingFile()) {
         // Do not add the file if the path is empty.
         if (!file->GetPath().empty())
           form_data->AppendFile(file->GetPath(), file->LastModifiedTime());
       } else {
-        form_data->AppendBlob(entry->GetBlob()->Uuid(),
-                              entry->GetBlob()->GetBlobDataHandle());
+        form_data->AppendBlob(file->GetBlobDataHandle());
       }
     } else {
       std::string encoded_value =
-          Encode(NormalizeLineEndingsToCRLF(entry->Value()));
-      form_data->AppendData(
-          encoded_value.c_str(),
-          base::checked_cast<wtf_size_t>(encoded_value.length()));
+          Encode(NormalizeLineEndingsToCrLf(entry->Value()));
+      form_data->AppendData(encoded_value);
     }
-    form_data->AppendData("\r\n", 2);
+    form_data->AppendData(base::span_from_cstring("\r\n"));
   }
+
+  Vector<char> encoded_data;
   FormDataEncoder::AddBoundaryToMultiPartHeader(
-      encoded_data, form_data->Boundary().data(), true);
-  form_data->AppendData(encoded_data.data(), encoded_data.size());
+      encoded_data, form_data->Boundary(), /*is_last_boundary=*/true);
+  form_data->AppendData(encoded_data);
   return form_data;
 }
 
 PairSyncIterable<FormData>::IterationSource* FormData::CreateIterationSource(
-    ScriptState*,
-    ExceptionState&) {
+    ScriptState*) {
   return MakeGarbageCollected<FormDataIterationSource>(this);
 }
 
@@ -370,33 +377,24 @@ FormData::Entry::Entry(const String& name, const String& value)
 }
 
 FormData::Entry::Entry(const String& name, Blob* blob, const String& filename)
-    : name_(name), blob_(blob), filename_(filename) {
+    : name_(name),
+      file_(CreateFileFromBlob(blob, filename)),
+      filename_(filename) {
   DCHECK_EQ(name, ReplaceUnmatchedSurrogates(name))
       << "'name' should be a USVString.";
 }
 
 void FormData::Entry::Trace(Visitor* visitor) const {
-  visitor->Trace(blob_);
+  visitor->Trace(file_);
+}
+
+Blob* FormData::Entry::GetBlob() const {
+  return file_.Get();
 }
 
 File* FormData::Entry::GetFile() const {
-  DCHECK(GetBlob());
-  // The spec uses the passed filename when inserting entries into the list.
-  // Here, we apply the filename (if present) as an override when extracting
-  // entries.
-  // FIXME: Consider applying the name during insertion.
-
-  if (auto* file = DynamicTo<File>(GetBlob())) {
-    if (Filename().IsNull())
-      return file;
-    return file->Clone(Filename());
-  }
-
-  String filename = filename_;
-  if (filename.IsNull())
-    filename = "blob";
-  return MakeGarbageCollected<File>(filename, base::Time::Now(),
-                                    GetBlob()->GetBlobDataHandle());
+  DCHECK(file_);
+  return file_.Get();
 }
 
 void FormData::AppendToControlState(FormControlState& state) const {
@@ -413,25 +411,28 @@ void FormData::AppendToControlState(FormControlState& state) const {
   }
 }
 
-FormData* FormData::CreateFromControlState(const FormControlState& state,
+FormData* FormData::CreateFromControlState(ExecutionContext& execution_context,
+                                           const FormControlState& state,
                                            wtf_size_t& index) {
-  bool ok = false;
-  uint64_t length = state[index].ToUInt64Strict(&ok);
-  if (!ok)
+  auto length = StringToUint64(state[index], NumberParsingOptions::Strict());
+  if (!length) {
     return nullptr;
+  }
   auto* form_data = MakeGarbageCollected<FormData>();
   ++index;
-  for (uint64_t j = 0; j < length; ++j) {
+  for (uint64_t j = 0; j < *length; ++j) {
     // Need at least three items.
     if (index + 2 >= state.ValueSize())
       return nullptr;
     const String& name = state[index++];
     const String& entry_type = state[index++];
     if (entry_type == "File") {
-      if (auto* file = File::CreateFromControlState(state, index))
+      if (auto* file =
+              File::CreateFromControlState(&execution_context, state, index)) {
         form_data->append(name, file);
-      else
+      } else {
         return nullptr;
+      }
     } else if (entry_type == "USVString") {
       form_data->append(name, state[index++]);
     } else {

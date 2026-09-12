@@ -10,77 +10,92 @@
 #include "components/services/storage/dom_storage/dom_storage_constants.h"
 
 namespace storage {
+namespace {
+
+StorageAreaImpl::Options GetOptions() {
+  // Delay for a moment after a value is set in anticipation
+  // of other values being set, so changes are batched.
+  constexpr base::TimeDelta kCommitDefaultDelaySecs = base::Seconds(5);
+
+  // To avoid excessive IO we apply limits to the amount of data being
+  // written and the frequency of writes.
+  StorageAreaImpl::Options options;
+  options.max_size = kPerStorageAreaQuota + kPerStorageAreaOverQuotaAllowance;
+  options.default_commit_delay = kCommitDefaultDelaySecs;
+  options.max_bytes_per_hour = kPerStorageAreaQuota;
+  options.max_commits_per_hour = 60;
+  options.cache_mode = StorageAreaImpl::CacheMode::KEYS_ONLY_WHEN_POSSIBLE;
+  return options;
+}
+
+}  // namespace
 
 // static
 scoped_refptr<SessionStorageDataMap> SessionStorageDataMap::CreateFromDisk(
     Listener* listener,
-    scoped_refptr<SessionStorageMetadata::MapData> map_data,
+    scoped_refptr<DomStorageDatabase::SharedMapLocator> map_locator,
     AsyncDomStorageDatabase* database) {
   return base::WrapRefCounted(new SessionStorageDataMap(
-      listener, std::move(map_data), database, false));
+      listener, std::move(map_locator), database, false));
 }
 
 // static
 scoped_refptr<SessionStorageDataMap> SessionStorageDataMap::CreateEmpty(
     Listener* listener,
-    scoped_refptr<SessionStorageMetadata::MapData> map_data,
+    scoped_refptr<DomStorageDatabase::SharedMapLocator> map_locator,
     AsyncDomStorageDatabase* database) {
-  return base::WrapRefCounted(
-      new SessionStorageDataMap(listener, std::move(map_data), database, true));
+  return base::WrapRefCounted(new SessionStorageDataMap(
+      listener, std::move(map_locator), database, true));
 }
 
 // static
 scoped_refptr<SessionStorageDataMap> SessionStorageDataMap::CreateClone(
     Listener* listener,
-    scoped_refptr<SessionStorageMetadata::MapData> map_data,
+    scoped_refptr<DomStorageDatabase::SharedMapLocator> map_locator,
     scoped_refptr<SessionStorageDataMap> clone_from) {
   return base::WrapRefCounted(new SessionStorageDataMap(
-      listener, std::move(map_data), std::move(clone_from)));
+      listener, std::move(map_locator), std::move(clone_from)));
 }
 
-void SessionStorageDataMap::DidCommit(leveldb::Status status) {
+void SessionStorageDataMap::DidCommit(DbStatus status) {
   listener_->OnCommitResult(status);
 }
 
 SessionStorageDataMap::SessionStorageDataMap(
     Listener* listener,
-    scoped_refptr<SessionStorageMetadata::MapData> map_data,
+    scoped_refptr<DomStorageDatabase::SharedMapLocator> map_locator,
     AsyncDomStorageDatabase* database,
     bool is_empty)
     : listener_(listener),
-      map_data_(std::move(map_data)),
-      storage_area_impl_(
-          std::make_unique<StorageAreaImpl>(database,
-                                            map_data_->KeyPrefix(),
-                                            this,
-                                            GetOptions())),
+      map_locator_(std::move(map_locator)),
+      storage_area_impl_(std::make_unique<StorageAreaImpl>(
+          database,
+          map_locator_,
+          this,
+          GetOptions())),
       storage_area_ptr_(storage_area_impl_.get()) {
   if (is_empty)
     storage_area_impl_->InitializeAsEmpty();
   DCHECK(listener_);
-  DCHECK(map_data_);
-  listener_->OnDataMapCreation(map_data_->MapNumberAsBytes(), this);
+  listener_->OnDataMapCreation(map_locator_->map_id().value(), this);
 }
 
 SessionStorageDataMap::SessionStorageDataMap(
     Listener* listener,
-    scoped_refptr<SessionStorageMetadata::MapData> map_data,
+    scoped_refptr<DomStorageDatabase::SharedMapLocator> map_locator,
     scoped_refptr<SessionStorageDataMap> forking_from)
     : listener_(listener),
       clone_from_data_map_(std::move(forking_from)),
-      map_data_(std::move(map_data)),
-      storage_area_impl_(clone_from_data_map_->storage_area()->ForkToNewPrefix(
-          map_data_->KeyPrefix(),
-          this,
-          GetOptions())),
+      map_locator_(std::move(map_locator)),
+      storage_area_impl_(clone_from_data_map_->storage_area()
+                             ->ForkToNewMap(map_locator_, this, GetOptions())),
       storage_area_ptr_(storage_area_impl_.get()) {
   DCHECK(listener_);
-  DCHECK(map_data_);
-  listener_->OnDataMapCreation(map_data_->MapNumberAsBytes(), this);
+  listener_->OnDataMapCreation(map_locator_->map_id().value(), this);
 }
 
 SessionStorageDataMap::~SessionStorageDataMap() {
-  listener_->OnDataMapDestruction(map_data_->MapNumberAsBytes());
+  listener_->OnDataMapDestruction(map_locator_->map_id().value());
 }
 
 void SessionStorageDataMap::RemoveBindingReference() {
@@ -94,25 +109,8 @@ void SessionStorageDataMap::RemoveBindingReference() {
   storage_area()->ScheduleImmediateCommit();
 }
 
-void SessionStorageDataMap::OnMapLoaded(leveldb::Status) {
+void SessionStorageDataMap::OnMapLoaded() {
   clone_from_data_map_.reset();
-}
-
-// static
-StorageAreaImpl::Options SessionStorageDataMap::GetOptions() {
-  // Delay for a moment after a value is set in anticipation
-  // of other values being set, so changes are batched.
-  constexpr const base::TimeDelta kCommitDefaultDelaySecs = base::Seconds(5);
-
-  // To avoid excessive IO we apply limits to the amount of data being
-  // written and the frequency of writes.
-  StorageAreaImpl::Options options;
-  options.max_size = kPerStorageAreaQuota + kPerStorageAreaOverQuotaAllowance;
-  options.default_commit_delay = kCommitDefaultDelaySecs;
-  options.max_bytes_per_hour = kPerStorageAreaQuota;
-  options.max_commits_per_hour = 60;
-  options.cache_mode = StorageAreaImpl::CacheMode::KEYS_ONLY_WHEN_POSSIBLE;
-  return options;
 }
 
 }  // namespace storage

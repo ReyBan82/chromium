@@ -4,6 +4,9 @@
 
 #include "remoting/host/ftl_echo_message_listener.h"
 
+#include <string>
+#include <string_view>
+
 #include "base/logging.h"
 #include "remoting/base/logging.h"
 #include "remoting/proto/ftl/v1/chromoting_message.pb.h"
@@ -16,51 +19,49 @@ constexpr int kMaxEchoMessageLength = 16;
 
 namespace remoting {
 
-FtlEchoMessageListener::FtlEchoMessageListener(std::string host_owner,
-                                               SignalStrategy* signal_strategy)
-    : host_owner_(host_owner), signal_strategy_(signal_strategy) {
-  DCHECK(signal_strategy_);
-  signal_strategy_->AddListener(this);
+FtlEchoMessageListener::FtlEchoMessageListener(
+    CheckAccessPermissionCallback check_access_permission_callback,
+    FtlSignalStrategy* ftl_signal_strategy)
+    : check_access_permission_callback_(check_access_permission_callback),
+      ftl_signal_strategy_(ftl_signal_strategy) {
+  DCHECK(ftl_signal_strategy_);
+  ftl_signal_strategy_->AddFtlListener(this);
 }
 
 FtlEchoMessageListener::~FtlEchoMessageListener() {
-  signal_strategy_->RemoveListener(this);
+  ftl_signal_strategy_->RemoveFtlListener(this);
 }
 
-void FtlEchoMessageListener::OnSignalStrategyStateChange(
-    SignalStrategy::State state) {}
+bool FtlEchoMessageListener::OnIncomingFtlMessage(
+    const SignalingAddress& sender_address,
+    const ftl::ChromotingMessage& message) {
+  if (!message.has_echo() || !message.echo().has_message()) {
+    return false;
+  }
 
-bool FtlEchoMessageListener::OnSignalStrategyIncomingStanza(
-    const jingle_xmpp::XmlElement* stanza) {
-  return false;
-}
-
-bool FtlEchoMessageListener::OnSignalStrategyIncomingMessage(
-    const ftl::Id& sender_id,
-    const std::string& sender_registration_id,
-    const ftl::ChromotingMessage& request_message) {
-  if (!request_message.has_echo() || !request_message.echo().has_message()) {
+  std::string sender_email;
+  if (!sender_address.GetFtlSenderEmail(&sender_email)) {
+    LOG(WARNING) << "Dropping echo message from non-FTL address "
+                 << sender_address.id();
     return false;
   }
 
   // Only respond to echo messages from the machine owner.
-  if (sender_id.type() != ftl::IdType_Type_EMAIL ||
-      sender_id.id() != host_owner_) {
-    LOG(WARNING) << "Dropping echo message from " << sender_id.id();
+  if (!check_access_permission_callback_.Run(sender_email)) {
+    LOG(WARNING) << "Dropping echo message from " << sender_email;
     return false;
   }
 
-  std::string request_message_payload(request_message.echo().message());
+  std::string_view request_message_payload = message.echo().message();
   HOST_LOG << "Handling echo message: '" << request_message_payload << "'";
 
-  std::string response_message_payload =
+  std::string_view response_message_payload =
       request_message_payload.substr(0, kMaxEchoMessageLength);
   ftl::ChromotingMessage response_message;
   response_message.mutable_echo()->set_message(response_message_payload);
 
-  signal_strategy_->SendMessage(SignalingAddress::CreateFtlSignalingAddress(
-                                    sender_id.id(), sender_registration_id),
-                                response_message);
+  ftl_signal_strategy_->SendFtlMessage(sender_address,
+                                       std::move(response_message));
 
   return true;
 }

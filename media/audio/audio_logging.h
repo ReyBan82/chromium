@@ -16,7 +16,7 @@ class AudioParameters;
 // AudioLog logs state information about an active audio component.
 class AudioLog {
  public:
-  virtual ~AudioLog() {}
+  virtual ~AudioLog() = default;
 
   // Called when an audio component is created.  |params| are the parameters of
   // the created stream.  |device_id| is the id of the audio device opened by
@@ -54,15 +54,15 @@ class AudioLog {
 // behavior.
 class AudioLogFactory {
  public:
-  enum AudioComponent {
+  enum class AudioComponent {
     // Input controllers have a 1:1 mapping with streams, so there's no need to
     // track both controllers and streams.
-    AUDIO_INPUT_CONTROLLER,
+    kAudioInputController,
     // Output controllers may or may not be backed by an active stream, so we
     // need to track both controllers and streams.
-    AUDIO_OUTPUT_CONTROLLER,
-    AUDIO_OUTPUT_STREAM,
-    AUDIO_COMPONENT_MAX
+    kAudioOuputController,
+    kAudioOutputStream,
+    kAudiocomponentMax,
   };
 
   // Create a new AudioLog object for tracking the behavior for one instance of
@@ -72,7 +72,7 @@ class AudioLogFactory {
                                                    int component_id) = 0;
 
  protected:
-  virtual ~AudioLogFactory() {}
+  virtual ~AudioLogFactory() = default;
 };
 
 }  // namespace media

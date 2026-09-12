@@ -13,7 +13,9 @@
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/color/color_id.h"
+#include "ui/color/color_variant.h"
 #include "ui/gfx/image/image_unittest_util.h"
 #include "ui/views/test/views_test_base.h"
 #include "ui/views/widget/widget.h"
@@ -24,20 +26,13 @@ namespace {
 
 constexpr int kImageSize = 16;
 
-gfx::ImageSkia CreateTestImage(SkColor color) {
-  SkBitmap bitmap;
-  bitmap.allocN32Pixels(kImageSize, kImageSize);
-  bitmap.eraseColor(color);
-  return gfx::ImageSkia::CreateFrom1xBitmap(bitmap);
-}
-
 }  // namespace
 
 class ThemeTrackingImageViewTest : public ViewsTestBase {
  public:
   void SetUp() override {
     ViewsTestBase::SetUp();
-    widget_ = CreateTestWidget();
+    widget_ = CreateTestWidget(Widget::InitParams::CLIENT_OWNS_WIDGET);
   }
 
   void TearDown() override {
@@ -45,7 +40,7 @@ class ThemeTrackingImageViewTest : public ViewsTestBase {
     ViewsTestBase::TearDown();
   }
 
-  SkColor GetSimulatedBackgroundColor() const {
+  ui::ColorVariant GetSimulatedBackgroundColor() const {
     return is_dark_ ? SK_ColorBLACK : SK_ColorWHITE;
   }
 
@@ -53,28 +48,32 @@ class ThemeTrackingImageViewTest : public ViewsTestBase {
   bool IsDarkMode() const { return is_dark_; }
   void SetIsDarkMode(bool is_dark) {
     is_dark_ = is_dark;
-    if (view_)
-      view_->OnThemeChanged();
+    if (view()) {
+      view()->OnThemeChanged();
+    }
   }
 
   void SetView(std::unique_ptr<ThemeTrackingImageView> view) {
-    view_ = widget_->SetContentsView(std::move(view));
-    view_->SetBounds(0, 0, kImageSize, kImageSize);
+    widget_->SetContentsView(std::move(view))
+        ->SetBounds(0, 0, kImageSize, kImageSize);
   }
 
-  ThemeTrackingImageView* view() { return view_; }
+  ThemeTrackingImageView* view() {
+    return static_cast<ThemeTrackingImageView*>(widget_->GetContentsView());
+  }
   Widget* widget() { return widget_.get(); }
 
  private:
   std::unique_ptr<Widget> widget_;
-  raw_ptr<ThemeTrackingImageView> view_ = nullptr;
 
   bool is_dark_ = false;
 };
 
 TEST_F(ThemeTrackingImageViewTest, CreateWithImageSkia) {
-  gfx::ImageSkia light_image{CreateTestImage(SK_ColorRED)};
-  gfx::ImageSkia dark_image{CreateTestImage(SK_ColorBLUE)};
+  gfx::ImageSkia light_image =
+      gfx::test::CreateImageSkia(kImageSize, SK_ColorRED);
+  gfx::ImageSkia dark_image =
+      gfx::test::CreateImageSkia(kImageSize, SK_ColorBLUE);
 
   SetView(std::make_unique<ThemeTrackingImageView>(
       light_image, dark_image,
@@ -95,9 +94,13 @@ TEST_F(ThemeTrackingImageViewTest, CreateWithImageSkia) {
 
 TEST_F(ThemeTrackingImageViewTest, CreateWithImageModel) {
   ui::ImageModel light_model{ui::ImageModel::FromVectorIcon(
-      vector_icons::kSyncIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kSyncIcon
+                                        : vector_icons::kSyncOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
   ui::ImageModel dark_model{ui::ImageModel::FromVectorIcon(
-      vector_icons::kCallIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kCallFilledIcon
+                                        : vector_icons::kCallOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
 
   SetView(std::make_unique<ThemeTrackingImageView>(
       light_model, dark_model,
@@ -115,11 +118,17 @@ TEST_F(ThemeTrackingImageViewTest, CreateWithImageModel) {
 
 TEST_F(ThemeTrackingImageViewTest, SetLightImage) {
   ui::ImageModel light_model1{ui::ImageModel::FromVectorIcon(
-      vector_icons::kSyncIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kSyncIcon
+                                        : vector_icons::kSyncOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
   ui::ImageModel light_model2{ui::ImageModel::FromVectorIcon(
-      vector_icons::kUsbIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kUsbIcon
+                                        : vector_icons::kUsbOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
   ui::ImageModel dark_model{ui::ImageModel::FromVectorIcon(
-      vector_icons::kCallIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kCallFilledIcon
+                                        : vector_icons::kCallOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
 
   SetView(std::make_unique<ThemeTrackingImageView>(
       light_model1, dark_model,
@@ -146,11 +155,17 @@ TEST_F(ThemeTrackingImageViewTest, SetLightImage) {
 
 TEST_F(ThemeTrackingImageViewTest, SetDarkImage) {
   ui::ImageModel light_model{ui::ImageModel::FromVectorIcon(
-      vector_icons::kSyncIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kSyncIcon
+                                        : vector_icons::kSyncOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
   ui::ImageModel dark_model1{ui::ImageModel::FromVectorIcon(
-      vector_icons::kUsbIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kUsbIcon
+                                        : vector_icons::kUsbOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
   ui::ImageModel dark_model2{ui::ImageModel::FromVectorIcon(
-      vector_icons::kCallIcon, ui::kColorMenuIcon, kImageSize)};
+      features::IsRoundedIconsEnabled() ? vector_icons::kCallFilledIcon
+                                        : vector_icons::kCallOldIcon,
+      ui::kColorMenuIcon, kImageSize)};
 
   SetView(std::make_unique<ThemeTrackingImageView>(
       light_model, dark_model1,

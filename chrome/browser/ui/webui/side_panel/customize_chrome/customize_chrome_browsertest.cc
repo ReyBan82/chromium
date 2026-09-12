@@ -2,122 +2,152 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/feature_list.h"
-#include "base/test/scoped_feature_list.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_tabstrip.h"
-#include "chrome/browser/ui/side_panel/customize_chrome/customize_chrome_tab_helper.h"
+#include "chrome/browser/search/background/ntp_custom_background_service_factory.h"
+#include "chrome/browser/tab_list/tab_list_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/customize_chrome/side_panel_controller.h"
+#include "chrome/browser/ui/side_panel/side_panel_registry.h"
+#include "chrome/browser/ui/side_panel/side_panel_ui.h"
 #include "chrome/browser/ui/webui/side_panel/customize_chrome/customize_chrome_section.h"
 #include "chrome/common/webui_url_constants.h"
-#include "chrome/test/base/in_process_browser_test.h"
+#include "chrome/test/base/platform_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "components/search/ntp_features.h"
-#include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 
-class CustomizeChromeSidePanelBrowserTest : public InProcessBrowserTest {
+class CustomizeChromeSidePanelBrowserTest : public PlatformBrowserTest {
  protected:
-  // InProcessBrowserTest:
-  void SetUp() override {
-    scoped_feature_list_.InitWithFeatures(
-        {ntp_features::kCustomizeChromeSidePanel}, {});
-    InProcessBrowserTest::SetUp();
-  }
   // Activates the browser tab at `index`.
-  void ActivateTabAt(Browser* browser, int index);
+  void ActivateTabAt(int index) {
+    TabListInterface* tab_list = GetTabListInterface();
+    tab_list->ActivateTab(tab_list->GetTab(index)->GetHandle());
+  }
 
   // Appends a new tab with `url` to the end of the tabstrip.
-  void AppendTab(Browser* browser, const GURL& url);
+  void AppendTab(const GURL& url) {
+    GetTabListInterface()->OpenTab(url, -1, true);
+  }
 
-  // Returns the CustomizeChromeTabHelper associated with the tab
-  CustomizeChromeTabHelper* GetTabHelper(Browser* browser);
-
- private:
-  base::test::ScopedFeatureList scoped_feature_list_;
+  // Returns the Customize Chrome side panel controller for the active tab.
+  customize_chrome::SidePanelController* GetSidePanelController() {
+    return customize_chrome::SidePanelController::Get(
+        GetTabListInterface()->GetActiveTab()->GetUnownedUserDataHost());
+  }
 };
 
-void CustomizeChromeSidePanelBrowserTest::ActivateTabAt(Browser* browser,
-                                                        int index) {
-  browser->tab_strip_model()->ActivateTabAt(index);
-}
-
-void CustomizeChromeSidePanelBrowserTest::AppendTab(Browser* browser,
-                                                    const GURL& url) {
-  chrome::AddTabAt(browser, url, -1, true);
-}
-
-CustomizeChromeTabHelper* CustomizeChromeSidePanelBrowserTest::GetTabHelper(
-    Browser* browser) {
-  auto* web_contents = browser->tab_strip_model()->GetActiveWebContents();
-  return CustomizeChromeTabHelper::FromWebContents(web_contents);
-}
+class UnsupportedCustomizeChromeSidePanelBrowserTest
+    : public CustomizeChromeSidePanelBrowserTest {
+ protected:
+  void SetUpBrowserContextKeyedServices(
+      content::BrowserContext* context) override {
+    PlatformBrowserTest::SetUpBrowserContextKeyedServices(context);
+    NtpCustomBackgroundServiceFactory::GetInstance()->SetTestingFactory(context,
+                                                                        {});
+  }
+};
 
 IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
                        RegisterCustomizeChromeSidePanel) {
-  auto* customize_chrome_tab_helper = GetTabHelper(browser());
+  auto* customize_chrome_side_panel_controller = GetSidePanelController();
 
   // When navigating to the New Tab Page, the Customize Chrome entry should be
   // available
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
-                                           GURL(chrome::kChromeUINewTabURL)));
-  EXPECT_TRUE(customize_chrome_tab_helper->IsCustomizeChromeEntryAvailable());
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
+                                           chrome::ChromeUINewTabURLAsGURL()));
+  EXPECT_TRUE(customize_chrome_side_panel_controller
+                  ->IsCustomizeChromeEntryAvailable());
 
   // After calling show, the customize chrome entry should be shown in the side
   // panel
-  customize_chrome_tab_helper->SetCustomizeChromeSidePanelVisible(
-      true, CustomizeChromeSection::kAppearance);
-  EXPECT_TRUE(customize_chrome_tab_helper->IsCustomizeChromeEntryShowing());
+  customize_chrome_side_panel_controller->OpenSidePanel(
+      SidePanelOpenTrigger::kAppMenu, CustomizeChromeSection::kAppearance);
+  EXPECT_TRUE(
+      customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
 }
 
 IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
-                       DeregisterCustomizeChromeSidePanel) {
-  // If the Customize Chrome side panel is open and you navigate away from the
-  // NTP the side panel entry should not be in the tabs' registry and the side
-  // panel should not show the customize chrome entry
-  auto* customize_chrome_tab_helper = GetTabHelper(browser());
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
-                                           GURL(chrome::kChromeUINewTabURL)));
-  customize_chrome_tab_helper->SetCustomizeChromeSidePanelVisible(
-      true, CustomizeChromeSection::kAppearance);
-  EXPECT_TRUE(customize_chrome_tab_helper->IsCustomizeChromeEntryShowing());
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
+                       CustomizeChromeSidePanelRemainsOpenAfterNavigation) {
+  // Toolbar pinning keeps an open Customize Chrome side panel registered and
+  // visible after navigating away from the NTP.
+  auto* customize_chrome_side_panel_controller = GetSidePanelController();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
+                                           chrome::ChromeUINewTabURLAsGURL()));
+  customize_chrome_side_panel_controller->OpenSidePanel(
+      SidePanelOpenTrigger::kAppMenu, CustomizeChromeSection::kAppearance);
+  EXPECT_TRUE(
+      customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
                                            GURL(chrome::kChromeUISettingsURL)));
-  EXPECT_FALSE(customize_chrome_tab_helper->IsCustomizeChromeEntryAvailable());
-  EXPECT_FALSE(customize_chrome_tab_helper->IsCustomizeChromeEntryShowing());
+
+  EXPECT_TRUE(customize_chrome_side_panel_controller
+                  ->IsCustomizeChromeEntryAvailable());
+  EXPECT_TRUE(
+      customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
 }
 
 IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
                        ContextualCustomizeChromeSidePanel) {
+  SidePanelUI::From(GetBrowserWindowInterface())->DisableAnimationsForTesting();
   // The Customize Chrome side panel should be contextual, opening on one tab
   // should not open it on other tabs.
-  AppendTab(browser(), GURL(chrome::kChromeUINewTabURL));
-  AppendTab(browser(), GURL(chrome::kChromeUINewTabURL));
-  ActivateTabAt(browser(), 1);
+  AppendTab(chrome::ChromeUINewTabURLAsGURL());
+  AppendTab(chrome::ChromeUINewTabURLAsGURL());
+  ActivateTabAt(1);
   // Navigate to URL to allow WebUI to load, if not then callback that is set
   // in the New Tab Page constructor and run when
-  // SetCustomizeChromeSidePanelVisible() is called will not be set.
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
-                                           GURL(chrome::kChromeUINewTabURL)));
-  auto* customize_chrome_tab_helper1 = GetTabHelper(browser());
-  EXPECT_FALSE(customize_chrome_tab_helper1->IsCustomizeChromeEntryShowing());
-  customize_chrome_tab_helper1->SetCustomizeChromeSidePanelVisible(
-      true, CustomizeChromeSection::kAppearance);
-  ActivateTabAt(browser(), 2);
-  auto* customize_chrome_tab_helper2 = GetTabHelper(browser());
-  EXPECT_FALSE(customize_chrome_tab_helper2->IsCustomizeChromeEntryShowing());
+  // OpenSidePanel() is called will not be set.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
+                                           chrome::ChromeUINewTabURLAsGURL()));
+  auto* customize_chrome_side_panel_controller1 = GetSidePanelController();
+  EXPECT_FALSE(
+      customize_chrome_side_panel_controller1->IsCustomizeChromeEntryShowing());
+  customize_chrome_side_panel_controller1->OpenSidePanel(
+      SidePanelOpenTrigger::kAppMenu, CustomizeChromeSection::kAppearance);
+  ActivateTabAt(2);
+  auto* customize_chrome_side_panel_controller2 = GetSidePanelController();
+  EXPECT_FALSE(
+      customize_chrome_side_panel_controller2->IsCustomizeChromeEntryShowing());
 }
 
 IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
                        HideCustomizeChromeSidePanel) {
-  auto* customize_chrome_tab_helper = GetTabHelper(browser());
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
-                                           GURL(chrome::kChromeUINewTabURL)));
-  customize_chrome_tab_helper->SetCustomizeChromeSidePanelVisible(
-      true, CustomizeChromeSection::kAppearance);
-  EXPECT_TRUE(customize_chrome_tab_helper->IsCustomizeChromeEntryShowing());
+  SidePanelUI::From(GetBrowserWindowInterface())->DisableAnimationsForTesting();
+  auto* customize_chrome_side_panel_controller = GetSidePanelController();
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
+                                           chrome::ChromeUINewTabURLAsGURL()));
+  customize_chrome_side_panel_controller->OpenSidePanel(
+      SidePanelOpenTrigger::kAppMenu, CustomizeChromeSection::kAppearance);
+  EXPECT_TRUE(
+      customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
   // After calling hide, the customize chrome entry should be hidden in the side
   // panel
-  customize_chrome_tab_helper->SetCustomizeChromeSidePanelVisible(
-      false, CustomizeChromeSection::kAppearance);
-  EXPECT_FALSE(customize_chrome_tab_helper->IsCustomizeChromeEntryShowing());
+  customize_chrome_side_panel_controller->CloseSidePanel();
+  EXPECT_FALSE(
+      customize_chrome_side_panel_controller->IsCustomizeChromeEntryShowing());
+}
+
+IN_PROC_BROWSER_TEST_F(UnsupportedCustomizeChromeSidePanelBrowserTest,
+                       DoesNotRegisterCustomizeChromeEntryWhenUnsupported) {
+  auto* customize_chrome_side_panel_controller = GetSidePanelController();
+
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
+                                           GURL("about:blank")));
+  EXPECT_FALSE(customize_chrome_side_panel_controller
+                   ->IsCustomizeChromeEntryAvailable());
+}
+
+IN_PROC_BROWSER_TEST_F(CustomizeChromeSidePanelBrowserTest,
+                       RepeatedNavigationsDoNotReregisterCustomizeChromeEntry) {
+  // Repeated navigations keep the original entry instead of replacing it.
+  auto* registry =
+      SidePanelRegistry::From(GetTabListInterface()->GetActiveTab());
+
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
+                                           chrome::ChromeUINewTabURLAsGURL()));
+  SidePanelEntry* entry = registry->GetEntryForKey(
+      SidePanelEntry::Key(SidePanelEntry::Id::kCustomizeChrome));
+  ASSERT_NE(entry, nullptr);
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(GetBrowserWindowInterface(),
+                                           GURL(chrome::kChromeUISettingsURL)));
+  EXPECT_EQ(entry, registry->GetEntryForKey(SidePanelEntry::Key(
+                       SidePanelEntry::Id::kCustomizeChrome)));
 }

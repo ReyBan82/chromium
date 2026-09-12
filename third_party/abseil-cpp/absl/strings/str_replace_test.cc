@@ -16,11 +16,15 @@
 
 #include <list>
 #include <map>
+#include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 #include "gtest/gtest.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/string_view.h"
 
 TEST(StrReplaceAll, OneReplacement) {
   std::string s;
@@ -152,6 +156,14 @@ TEST(StrReplaceAll, ManyReplacementsInMap) {
   EXPECT_EQ("Bob bought 5 Apples. Thanks Bob!", s);
 }
 
+TEST(StrReplaceAll, ManyReplacementsInArray) {
+  std::pair<std::string, std::string> replacements[] = {
+      {"$who", "Bob"}, {"$count", "5"}, {"#Noun", "Apples"}};
+  std::string s = absl::StrReplaceAll("$who bought $count #Noun. Thanks $who!",
+                                      replacements);
+  EXPECT_EQ("Bob bought 5 Apples. Thanks Bob!", s);
+}
+
 TEST(StrReplaceAll, ReplacementsInPlace) {
   std::string s = std::string("$who bought $count #Noun. Thanks $who!");
   int count;
@@ -174,8 +186,18 @@ TEST(StrReplaceAll, ReplacementsInPlaceInMap) {
   EXPECT_EQ("Bob bought 5 Apples. Thanks Bob!", s);
 }
 
+TEST(StrReplaceAll, ReplacementsInPlaceInArray) {
+  std::string s = std::string("$who bought $count #Noun. Thanks $who!");
+  std::pair<std::string, std::string> replacements[] = {
+      {"$who", "Bob"}, {"$count", "5"}, {"#Noun", "Apples"}};
+  int count;
+  count = absl::StrReplaceAll(replacements, &s);
+  EXPECT_EQ(count, 4);
+  EXPECT_EQ("Bob bought 5 Apples. Thanks Bob!", s);
+}
+
 struct Cont {
-  Cont() {}
+  Cont() = default;
   explicit Cont(absl::string_view src) : data(src) {}
 
   absl::string_view data;

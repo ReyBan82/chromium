@@ -9,7 +9,7 @@
 #include <string>
 
 #include "base/functional/callback_forward.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/test/task_environment.h"
 #include "base/values.h"
 #include "build/build_config.h"
@@ -51,6 +51,9 @@ class PolicyTestBase : public testing::Test {
   bool RegisterSchema(const PolicyNamespace& ns,
                       const std::string& schema);
 
+  // Register the actual Chrome schema containing supported policies.
+  void RegisterChromeSchema(const PolicyNamespace& ns);
+
   // Needs to be the first member
   base::test::TaskEnvironment task_environment_;
   SchemaRegistry schema_registry_;
@@ -74,6 +77,9 @@ class PolicyProviderTestHarness {
   // Actions to run at gtest SetUp() time.
   virtual void SetUp() = 0;
 
+  // Actions to run at gtest TearDown() time.
+  virtual void TearDown() {}
+
   // Create a new policy provider.
   virtual ConfigurationPolicyProvider* CreateProvider(
       SchemaRegistry* registry,
@@ -92,16 +98,14 @@ class PolicyProviderTestHarness {
                                     int policy_value) = 0;
   virtual void InstallBooleanPolicy(const std::string& policy_name,
                                     bool policy_value) = 0;
-  virtual void InstallStringListPolicy(
-      const std::string& policy_name,
-      const base::Value::List& policy_value) = 0;
-  virtual void InstallDictionaryPolicy(
-      const std::string& policy_name,
-      const base::Value::Dict& policy_value) = 0;
+  virtual void InstallStringListPolicy(const std::string& policy_name,
+                                       const base::ListValue& policy_value) = 0;
+  virtual void InstallDictionaryPolicy(const std::string& policy_name,
+                                       const base::DictValue& policy_value) = 0;
 
   // Not every provider supports installing 3rd party policy. Those who do
   // should override this method; the default just makes the test fail.
-  virtual void Install3rdPartyPolicy(const base::Value::Dict& policies);
+  virtual void Install3rdPartyPolicy(const base::DictValue& policies);
 
  private:
   PolicyLevel level_;

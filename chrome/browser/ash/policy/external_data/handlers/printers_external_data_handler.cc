@@ -6,44 +6,38 @@
 
 #include <utility>
 
+#include "base/check_deref.h"
 #include "base/memory/weak_ptr.h"
-#include "chrome/browser/ash/printing/bulk_printers_calculator.h"
-#include "chrome/browser/ash/printing/bulk_printers_calculator_factory.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
-#include "components/policy/policy_constants.h"
+#include "chrome/browser/ash/printing/enterprise/bulk_printers_calculator.h"
+#include "chrome/browser/ash/printing/enterprise/bulk_printers_calculator_factory.h"
 
 namespace policy {
 
 namespace {
 
 base::WeakPtr<ash::BulkPrintersCalculator> GetBulkPrintersCalculator(
+    PrefService& local_state,
     const std::string& user_id) {
   auto* factory = ash::BulkPrintersCalculatorFactory::Get();
   if (!factory) {
     return nullptr;
   }
   return factory->GetForAccountId(
-      CloudExternalDataPolicyHandler::GetAccountId(user_id));
+      CloudExternalDataPolicyObserver::GetAccountId(local_state, user_id));
 }
 
 }  // namespace
 
 PrintersExternalDataHandler::PrintersExternalDataHandler(
-    ash::CrosSettings* cros_settings,
-    DeviceLocalAccountPolicyService* policy_service)
-    : printers_observer_(cros_settings,
-                         policy_service,
-                         key::kPrintersBulkConfiguration,
-                         this) {
-  printers_observer_.Init();
-}
+    PrefService* local_state)
+    : local_state_(CHECK_DEREF(local_state)) {}
 
 PrintersExternalDataHandler::~PrintersExternalDataHandler() = default;
 
 void PrintersExternalDataHandler::OnExternalDataSet(
     const std::string& policy,
     const std::string& user_id) {
-  auto calculator = GetBulkPrintersCalculator(user_id);
+  auto calculator = GetBulkPrintersCalculator(local_state_.get(), user_id);
   if (calculator) {
     calculator->ClearData();
   }
@@ -52,7 +46,7 @@ void PrintersExternalDataHandler::OnExternalDataSet(
 void PrintersExternalDataHandler::OnExternalDataCleared(
     const std::string& policy,
     const std::string& user_id) {
-  auto calculator = GetBulkPrintersCalculator(user_id);
+  auto calculator = GetBulkPrintersCalculator(local_state_.get(), user_id);
   if (calculator) {
     calculator->ClearData();
   }
@@ -63,20 +57,18 @@ void PrintersExternalDataHandler::OnExternalDataFetched(
     const std::string& user_id,
     std::unique_ptr<std::string> data,
     const base::FilePath& file_path) {
-  auto calculator = GetBulkPrintersCalculator(user_id);
+  auto calculator = GetBulkPrintersCalculator(local_state_.get(), user_id);
   if (calculator) {
     calculator->SetData(std::move(data));
   }
 }
 
 void PrintersExternalDataHandler::RemoveForAccountId(
-    const AccountId& account_id,
-    base::OnceClosure on_removed) {
+    const AccountId& account_id) {
   auto* factory = ash::BulkPrintersCalculatorFactory::Get();
   if (factory) {
     factory->RemoveForUserId(account_id);
   }
-  std::move(on_removed).Run();
 }
 
 }  // namespace policy

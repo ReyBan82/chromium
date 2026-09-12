@@ -9,30 +9,33 @@
 #include "base/check.h"
 #include "base/values.h"
 #include "chrome/common/extensions/api/file_manager_private.h"
-#include "chrome/services/media_gallery_util/public/mojom/media_parser.mojom.h"
+#include "components/media_gallery_util/public/mojom/media_parser.mojom.h"
 #include "net/base/mime_util.h"
 
 namespace {
 
 template <class T>
-void SetValueOptional(T value, absl::optional<T>* destination) {
+void SetValueOptional(T value, std::optional<T>* destination) {
   DCHECK(destination);
-  if (value >= 0)
+  if (value >= 0) {
     *destination = value;
+  }
 }
 
 template <>
 void SetValueOptional(std::string value,
-                      absl::optional<std::string>* destination) {
+                      std::optional<std::string>* destination) {
   DCHECK(destination);
-  if (!value.empty())
+  if (!value.empty()) {
     *destination = std::move(value);
+  }
 }
 
 void ChangeAudioMimePrefixToVideo(std::string* mime_type) {
   const std::string audio_type("audio/*");
-  if (net::MatchesMimeType(audio_type, *mime_type))
+  if (net::MatchesMimeType(audio_type, *mime_type)) {
     mime_type->replace(0, audio_type.length() - 1, "video/");
+  }
 }
 
 }  // namespace
@@ -43,7 +46,7 @@ namespace api {
 
 namespace file_manager_private {
 
-base::Value::Dict MojoMediaMetadataToValue(
+base::DictValue MojoMediaMetadataToValue(
     chrome::mojom::MediaMetadataPtr metadata) {
   DCHECK(metadata);
 

@@ -13,42 +13,41 @@
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/utf_ostream_operators.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/threading/thread_restrictions.h"
+#include "base/version.h"
 #include "components/crx_file/id_util.h"
 #include "extensions/browser/api/declarative_net_request/constants.h"
 #include "extensions/browser/api/declarative_net_request/file_backed_ruleset_source.h"
 #include "extensions/browser/api/declarative_net_request/parse_info.h"
-#include "extensions/browser/api/declarative_net_request/rules_count_pair.h"
+#include "extensions/browser/api/declarative_net_request/rule_counts.h"
 #include "extensions/browser/api/declarative_net_request/test_utils.h"
 #include "extensions/browser/api/declarative_net_request/utils.h"
 #include "extensions/browser/extension_file_task_runner.h"
 #include "extensions/browser/extensions_test.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/api/declarative_net_request.h"
 #include "extensions/common/api/declarative_net_request/constants.h"
 #include "extensions/common/api/declarative_net_request/test_utils.h"
-#include "services/data_decoder/public/cpp/test_support/in_process_data_decoder.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace extensions {
-namespace declarative_net_request {
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+namespace extensions::declarative_net_request {
 namespace {
 
 api::declarative_net_request::Rule GetAPIRule(const TestRule& rule) {
-  base::Value value(rule.ToValue());
-  api::declarative_net_request::Rule result;
   std::u16string error;
-  EXPECT_TRUE(
-      api::declarative_net_request::Rule::Populate(value, &result, &error))
-      << error;
-  EXPECT_TRUE(error.empty()) << error;
-  return result;
+  auto result = api::declarative_net_request::Rule::FromValue(rule.ToValue());
+  EXPECT_TRUE(result.has_value()) << result.error();
+  return std::move(result).value_or(api::declarative_net_request::Rule());
 }
 
 struct TestLoadRulesetInfo {
   bool has_new_checksum = false;
-  absl::optional<bool> indexing_successful;
-  absl::optional<LoadRulesetResult> load_result;
+  std::optional<LoadRulesetResult> load_result;
 };
 
 struct TestCase {
@@ -86,13 +85,13 @@ class FileSequenceHelperTest : public ExtensionsTest {
       std::vector<api::declarative_net_request::Rule> rules_to_add,
       ReadJSONRulesResult::Status expected_read_status,
       UpdateDynamicRulesStatus expected_update_status,
-      absl::optional<std::string> expected_error,
+      std::optional<std::string> expected_error,
       bool expected_did_load_successfully) {
     base::RunLoop run_loop;
     auto add_rules_callback = base::BindOnce(
         [](base::RunLoop* run_loop, bool expected_did_load_successfully,
-           absl::optional<std::string> expected_error, LoadRequestData data,
-           absl::optional<std::string> error) {
+           std::optional<std::string> expected_error, LoadRequestData data,
+           std::optional<std::string> error) {
           EXPECT_EQ(1u, data.rulesets.size());
           EXPECT_EQ(expected_error, error) << error.value_or("no actual error");
           EXPECT_EQ(expected_did_load_successfully,
@@ -102,7 +101,8 @@ class FileSequenceHelperTest : public ExtensionsTest {
         &run_loop, expected_did_load_successfully, expected_error);
 
     ExtensionId extension_id = crx_file::id_util::GenerateId("dummy_extension");
-    LoadRequestData data(extension_id);
+    LoadRequestData data(extension_id, base::Version("1.0"),
+                         LoadRulesetRequestSource::kUpdateDynamicRules);
     data.rulesets.emplace_back(std::move(source));
 
     // Unretained is safe because |helper_| outlives the |add_rules_task|.
@@ -110,7 +110,8 @@ class FileSequenceHelperTest : public ExtensionsTest {
         &FileSequenceHelper::UpdateDynamicRules,
         base::Unretained(helper_.get()), std::move(data),
         /* rule_ids_to_remove */ std::vector<int>(), std::move(rules_to_add),
-        RulesCountPair(GetDynamicAndSessionRuleLimit(), GetRegexRuleLimit()),
+        RuleCounts(GetDynamicRuleLimit(), GetUnsafeDynamicRuleLimit(),
+                   GetRegexRuleLimit()),
         std::move(add_rules_callback));
 
     base::HistogramTester tester;
@@ -124,7 +125,8 @@ class FileSequenceHelperTest : public ExtensionsTest {
   }
 
   void TestLoadRulesets(const std::vector<TestCase>& test_cases) {
-    LoadRequestData data(GenerateDummyExtensionID());
+    LoadRequestData data(GenerateDummyExtensionID(), base::Version("1.0"),
+                         LoadRulesetRequestSource::kOnExtensionLoad);
     for (const auto& test_case : test_cases) {
       data.rulesets.emplace_back(test_case.source.Clone());
       data.rulesets.back().set_expected_checksum(test_case.checksum);
@@ -145,8 +147,6 @@ class FileSequenceHelperTest : public ExtensionsTest {
 
             EXPECT_EQ(expected_result.has_new_checksum,
                       ruleset.new_checksum().has_value());
-            EXPECT_EQ(expected_result.indexing_successful,
-                      ruleset.indexing_successful());
             ASSERT_TRUE(ruleset.load_ruleset_result());
             EXPECT_EQ(expected_result.load_result,
                       ruleset.load_ruleset_result())
@@ -167,7 +167,8 @@ class FileSequenceHelperTest : public ExtensionsTest {
   }
 
   void TestNoRulesetsToLoad() {
-    LoadRequestData data(GenerateDummyExtensionID());
+    LoadRequestData data(GenerateDummyExtensionID(), base::Version("1.0"),
+                         LoadRulesetRequestSource::kOnExtensionLoad);
 
     base::RunLoop run_loop;
     auto load_ruleset_callback = base::BindOnce(
@@ -205,9 +206,6 @@ class FileSequenceHelperTest : public ExtensionsTest {
 
  private:
   std::unique_ptr<FileSequenceHelper> helper_;
-
-  // Required to use DataDecoder's JSON parsing for re-indexing.
-  data_decoder::test::InProcessDataDecoder in_process_data_decoder_;
 };
 
 TEST_F(FileSequenceHelperTest, NoRulesetsToLoad) {
@@ -215,7 +213,7 @@ TEST_F(FileSequenceHelperTest, NoRulesetsToLoad) {
 }
 
 TEST_F(FileSequenceHelperTest, IndexedRulesetDeleted) {
-  const size_t kNumRulesets = 3;
+  constexpr size_t kNumRulesets = 3;
   std::vector<TestCase> test_cases = InitializeRulesets(kNumRulesets);
 
   TestLoadRulesets(test_cases);
@@ -224,8 +222,6 @@ TEST_F(FileSequenceHelperTest, IndexedRulesetDeleted) {
   // re-index.
   base::DeleteFile(test_cases[0].source.indexed_path());
   base::DeleteFile(test_cases[2].source.indexed_path());
-  test_cases[0].expected_result.indexing_successful = true;
-  test_cases[2].expected_result.indexing_successful = true;
 
   TestLoadRulesets(test_cases);
 
@@ -235,27 +231,35 @@ TEST_F(FileSequenceHelperTest, IndexedRulesetDeleted) {
 }
 
 TEST_F(FileSequenceHelperTest, ChecksumMismatch) {
-  const size_t kNumRulesets = 4;
+  constexpr size_t kNumRulesets = 4;
   std::vector<TestCase> test_cases = InitializeRulesets(kNumRulesets);
 
   TestLoadRulesets(test_cases);
 
-  // Change the expected checksum for rulesets 2 and 3. Loading both of the
-  // rulesets should now fail due to a checksum mismatch.
+  // Change the expected checksum for rulesets 2 and 3 to simulate a checksum
+  // mismatch.
   test_cases[1].checksum--;
   test_cases[2].checksum--;
-  test_cases[1].expected_result.load_result =
-      LoadRulesetResult::kErrorChecksumMismatch;
-  test_cases[2].expected_result.load_result =
-      LoadRulesetResult::kErrorChecksumMismatch;
-  test_cases[1].expected_result.indexing_successful = false;
-  test_cases[2].expected_result.indexing_successful = false;
+
+  // When loading the rulesets, the mismatch is detected which will trigger a
+  // re-index and an update of the expected checksum to the one obtained from
+  // re-indexing.
+  test_cases[1].expected_result.has_new_checksum = true;
+  test_cases[2].expected_result.has_new_checksum = true;
+
+  // The ruleset load should succeed since the checksum obtained through
+  // re-indexing is used as the new "source of truth".
+  test_cases[1].expected_result.load_result = LoadRulesetResult::kSuccess;
+  test_cases[2].expected_result.load_result = LoadRulesetResult::kSuccess;
 
   TestLoadRulesets(test_cases);
+
+  // TODO(crbug.com/380434972): Wait for a mock content verification job to be
+  // started.
 }
 
 TEST_F(FileSequenceHelperTest, RulesetFormatVersionMismatch) {
-  const size_t kNumRulesets = 4;
+  constexpr size_t kNumRulesets = 4;
   std::vector<TestCase> test_cases = InitializeRulesets(kNumRulesets);
 
   TestLoadRulesets(test_cases);
@@ -266,7 +270,6 @@ TEST_F(FileSequenceHelperTest, RulesetFormatVersionMismatch) {
 
   // Version mismatch will cause re-indexing and updated checksums.
   for (auto& test_case : test_cases) {
-    test_case.expected_result.indexing_successful = true;
     test_case.expected_result.has_new_checksum = true;
     test_case.expected_result.load_result = LoadRulesetResult::kSuccess;
   }
@@ -275,7 +278,7 @@ TEST_F(FileSequenceHelperTest, RulesetFormatVersionMismatch) {
 }
 
 TEST_F(FileSequenceHelperTest, JSONAndIndexedRulesetDeleted) {
-  const size_t kNumRulesets = 3;
+  constexpr size_t kNumRulesets = 3;
   std::vector<TestCase> test_cases = InitializeRulesets(kNumRulesets);
 
   TestLoadRulesets(test_cases);
@@ -286,9 +289,6 @@ TEST_F(FileSequenceHelperTest, JSONAndIndexedRulesetDeleted) {
   base::DeleteFile(test_cases[1].source.indexed_path());
 
   // Re-indexing will fail since the JSON ruleset is now deleted.
-  test_cases[0].expected_result.indexing_successful = false;
-  test_cases[1].expected_result.indexing_successful = false;
-
   test_cases[0].expected_result.load_result =
       LoadRulesetResult::kErrorInvalidPath;
   test_cases[1].expected_result.load_result =
@@ -314,7 +314,7 @@ TEST_F(FileSequenceHelperTest, UpdateDynamicRules) {
     TestAddDynamicRules(source.Clone(), std::move(api_rules),
                         ReadJSONRulesResult::Status::kFileDoesNotExist,
                         UpdateDynamicRulesStatus::kSuccess,
-                        absl::nullopt /* expected_error */,
+                        std::nullopt /* expected_error */,
                         true /* expected_did_load_successfully*/);
   }
 
@@ -343,8 +343,7 @@ TEST_F(FileSequenceHelperTest, UpdateDynamicRules) {
   {
     base::ScopedAllowBlockingForTesting allow_blocking_for_testing;
     std::string data = "Invalid JSON";
-    ASSERT_EQ(data.size(), static_cast<size_t>(base::WriteFile(
-                               source.json_path(), data.c_str(), data.size())));
+    ASSERT_TRUE(base::WriteFile(source.json_path(), data));
   }
 
   {
@@ -356,11 +355,75 @@ TEST_F(FileSequenceHelperTest, UpdateDynamicRules) {
     TestAddDynamicRules(source.Clone(), std::move(api_rules),
                         ReadJSONRulesResult::Status::kJSONParseError,
                         UpdateDynamicRulesStatus::kSuccess,
-                        absl::nullopt /* expected_error */,
+                        std::nullopt /* expected_error */,
                         true /* expected_did_load_successfully*/);
   }
 }
 
+// Test that attempting to load a static ruleset file larger than a maximum size
+// fails cleanly. Regression for crbug.com/515443146.
+TEST_F(FileSequenceHelperTest, MaxRulesetSizeStatic) {
+  constexpr size_t kNumRulesets = 1;
+  std::vector<TestCase> test_cases = InitializeRulesets(kNumRulesets);
+
+  // 1. Set a low but valid limit (12 KB). The ruleset should load successfully.
+  base::AutoReset<size_t> limit_override =
+      CreateScopedMaxRulesetSizeOverrideForTesting(12 * 1024);
+  TestLoadRulesets(test_cases);
+
+  // 2. Set the limit to 1 byte. Loading the ruleset should now fail because
+  // the indexed ruleset file on disk is larger than 1 byte.
+  base::AutoReset<size_t> limit_override_2 =
+      CreateScopedMaxRulesetSizeOverrideForTesting(1);
+
+  // Since we loaded successfully in step 1, the indexed file now exists.
+  // When we try to load it again with the new file size limit:
+  // - CreateVerifiedMatcher will fail to read the indexed file as its size
+  //   exceeds the limit.
+  // - Chrome will try to re-index from JSON. This fails as the JSON file size
+  //   also exceeds the limit.
+  // - Loading fails with kErrorRulesetFileSizeLimitExceeded.
+  test_cases[0].expected_result.load_result =
+      LoadRulesetResult::kErrorRulesetFileSizeLimitExceeded;
+
+  TestLoadRulesets(test_cases);
+}
+
+// Test that attempting to update dynamic rules when the existing ruleset file
+// is larger than a maximum size fails cleanly. Regression for
+// crbug.com/515443146.
+TEST_F(FileSequenceHelperTest, MaxRulesetSizeDynamic) {
+  // Simulate adding rules for the first time i.e. with no JSON and indexed
+  // ruleset files.
+  FileBackedRulesetSource source = CreateTemporarySource();
+  base::DeleteFile(source.json_path());
+  base::DeleteFile(source.indexed_path());
+
+  // Write a rule first so the file exists.
+  std::vector<api::declarative_net_request::Rule> api_rules;
+  api_rules.push_back(GetAPIRule(CreateGenericRule()));
+  TestAddDynamicRules(source.Clone(), std::move(api_rules),
+                      ReadJSONRulesResult::Status::kFileDoesNotExist,
+                      UpdateDynamicRulesStatus::kSuccess,
+                      /*expected_error=*/std::nullopt,
+                      /*expected_did_load_successfully=*/true);
+
+  // Set a very small limit so any subsequent write will cause the rules file to
+  // exceed the maximum size.
+  base::AutoReset<size_t> limit_override =
+      CreateScopedMaxRulesetSizeOverrideForTesting(1);
+
+  // Attempting to add another rule should fail because reading the dynamic rule
+  // file fails due to it exceeding the maximum size.
+  api_rules.clear();
+  api_rules.push_back(GetAPIRule(CreateGenericRule()));
+  TestAddDynamicRules(
+      source.Clone(), std::move(api_rules),
+      ReadJSONRulesResult::Status::kRulesetFileSizeLimitExceeded,
+      UpdateDynamicRulesStatus::kErrorReadJSONRules,
+      kInternalErrorUpdatingDynamicRules,
+      /*expected_did_load_successfully=*/false);
+}
+
 }  // namespace
-}  // namespace declarative_net_request
-}  // namespace extensions
+}  // namespace extensions::declarative_net_request

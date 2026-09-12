@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ui/webui/settings/settings_manage_profile_handler.h"
 
+#include <cstdint>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -22,12 +23,10 @@
 #include "chrome/browser/profiles/profile_shortcut_manager.h"
 #include "chrome/browser/profiles/profile_window.h"
 #include "chrome/browser/profiles/profiles_state.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/signin/profile_colors_util.h"
+#include "chrome/browser/ui/profiles/profile_colors_util.h"
 #include "chrome/browser/ui/webui/theme_source.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "content/public/browser/browser_thread.h"
@@ -50,7 +49,7 @@ const char kProfileShortcutNotFound[] = "profileShortcutNotFound";
 ManageProfileHandler::ManageProfileHandler(Profile* profile)
     : profile_(profile) {}
 
-ManageProfileHandler::~ManageProfileHandler() {}
+ManageProfileHandler::~ManageProfileHandler() = default;
 
 void ManageProfileHandler::RegisterMessages() {
   web_ui()->RegisterMessageCallback(
@@ -99,8 +98,9 @@ void ManageProfileHandler::OnJavascriptDisallowed() {
 
 void ManageProfileHandler::OnProfileHighResAvatarLoaded(
     const base::FilePath& profile_path) {
-  if (profile_path != profile_->GetPath())
+  if (profile_path != profile_->GetPath()) {
     return;
+  }
 
   // GAIA image is loaded asynchronously.
   FireWebUIListener(
@@ -110,8 +110,9 @@ void ManageProfileHandler::OnProfileHighResAvatarLoaded(
 
 void ManageProfileHandler::OnProfileAvatarChanged(
     const base::FilePath& profile_path) {
-  if (profile_path != profile_->GetPath())
+  if (profile_path != profile_->GetPath()) {
     return;
+  }
 
   // This is necessary to send the potentially updated GAIA photo.
   FireWebUIListener(
@@ -126,7 +127,7 @@ void ManageProfileHandler::OnProfileThemeColorsChanged(
 }
 
 void ManageProfileHandler::HandleGetAvailableIcons(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
 
   profiles::UpdateGaiaProfileInfoIfNeeded(profile_);
@@ -140,7 +141,7 @@ void ManageProfileHandler::HandleGetAvailableIcons(
 }
 
 void ManageProfileHandler::HandleSetProfileIconToGaiaAvatar(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   PrefService* pref_service = profile_->GetPrefs();
@@ -153,23 +154,21 @@ void ManageProfileHandler::HandleSetProfileIconToGaiaAvatar(
     // Only log if they changed to the GAIA photo.
     // Selection of GAIA photo as avatar is logged as part of the function
     // below.
-    ProfileMetrics::LogProfileSwitchGaia(ProfileMetrics::GAIA_OPT_IN);
+    ProfileMetrics::LogProfileAvatarSelection(SIZE_MAX);
   }
-
-  ProfileMetrics::LogProfileUpdate(profile_->GetPath());
 }
 
 void ManageProfileHandler::HandleSetProfileIconToDefaultAvatar(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   CHECK_EQ(1u, args.size());
   CHECK(args[0].is_int());
 
-  size_t avatar_icon_index = args[0].GetInt();
-  profiles::SetDefaultProfileAvatarIndex(profile_, avatar_icon_index);
+  profiles::SetDefaultProfileAvatarIndex(
+      profile_, profiles::GetSanitizedAvatarIndex(args[0].GetInt()));
 }
 
-void ManageProfileHandler::HandleSetProfileName(const base::Value::List& args) {
+void ManageProfileHandler::HandleSetProfileName(const base::ListValue& args) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   CHECK_EQ(1u, args.size());
 
@@ -178,12 +177,10 @@ void ManageProfileHandler::HandleSetProfileName(const base::Value::List& args) {
   base::TrimWhitespace(new_profile_name, base::TRIM_ALL, &new_profile_name);
   CHECK(!new_profile_name.empty());
   profiles::UpdateProfileName(profile_, new_profile_name);
-
-  ProfileMetrics::LogProfileUpdate(profile_->GetPath());
 }
 
 void ManageProfileHandler::HandleRequestProfileShortcutStatus(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   DCHECK(ProfileShortcutManager::IsFeatureEnabled());
@@ -209,8 +206,8 @@ void ManageProfileHandler::HandleRequestProfileShortcutStatus(
                      weak_factory_.GetWeakPtr(), callback_id));
 }
 
-void ManageProfileHandler::OnHasProfileShortcuts(
-    const std::string& callback_id, bool has_shortcuts) {
+void ManageProfileHandler::OnHasProfileShortcuts(const std::string& callback_id,
+                                                 bool has_shortcuts) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   ResolveJavascriptCallback(
       base::Value(callback_id),
@@ -219,7 +216,7 @@ void ManageProfileHandler::OnHasProfileShortcuts(
 }
 
 void ManageProfileHandler::HandleAddProfileShortcut(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   DCHECK(ProfileShortcutManager::IsFeatureEnabled());
   ProfileShortcutManager* shortcut_manager =
       g_browser_process->profile_manager()->profile_shortcut_manager();
@@ -229,10 +226,10 @@ void ManageProfileHandler::HandleAddProfileShortcut(
 }
 
 void ManageProfileHandler::HandleRemoveProfileShortcut(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   DCHECK(ProfileShortcutManager::IsFeatureEnabled());
   ProfileShortcutManager* shortcut_manager =
-    g_browser_process->profile_manager()->profile_shortcut_manager();
+      g_browser_process->profile_manager()->profile_shortcut_manager();
   DCHECK(shortcut_manager);
 
   shortcut_manager->RemoveProfileShortcuts(profile_->GetPath());

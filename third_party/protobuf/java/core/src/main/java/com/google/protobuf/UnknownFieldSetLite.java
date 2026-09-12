@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -46,7 +23,7 @@ import java.util.Arrays;
 public final class UnknownFieldSetLite {
 
   // Arbitrarily chosen.
-  // TODO(dweis): Tune this number?
+  // TODO: Tune this number?
   private static final int MIN_CAPACITY = 8;
 
   private static final UnknownFieldSetLite DEFAULT_INSTANCE =
@@ -113,7 +90,9 @@ public final class UnknownFieldSetLite {
    * <p>Future calls to methods that attempt to modify this object will throw.
    */
   public void makeImmutable() {
-    this.isMutable = false;
+    if (this.isMutable) {
+      this.isMutable = false;
+    }
   }
 
   /** Throws an {@link UnsupportedOperationException} if immutable. */
@@ -169,41 +148,28 @@ public final class UnknownFieldSetLite {
   }
 
   /** Serializes the set and writes it to {@code writer} using {@code MessageSet} wire format. */
-  void writeAsMessageSetTo(Writer writer) throws IOException {
-    if (writer.fieldOrder() == Writer.FieldOrder.DESCENDING) {
-      // Write fields in descending order.
-      for (int i = count - 1; i >= 0; i--) {
-        int fieldNumber = WireFormat.getTagFieldNumber(tags[i]);
-        writer.writeMessageSetItem(fieldNumber, objects[i]);
-      }
-    } else {
-      // Write fields in ascending order.
-      for (int i = 0; i < count; i++) {
-        int fieldNumber = WireFormat.getTagFieldNumber(tags[i]);
-        writer.writeMessageSetItem(fieldNumber, objects[i]);
-      }
+  void writeAsMessageSetTo(CodedOutputStreamWriter writer) throws IOException {
+    // Write fields in ascending order.
+    for (int i = 0; i < count; i++) {
+      int fieldNumber = WireFormat.getTagFieldNumber(tags[i]);
+      writer.writeMessageSetItem(fieldNumber, objects[i]);
     }
   }
 
   /** Serializes the set and writes it to {@code writer}. */
-  public void writeTo(Writer writer) throws IOException {
+  public void writeTo(CodedOutputStreamWriter writer) throws IOException {
     if (count == 0) {
       return;
     }
 
     // TODO: tags are not sorted, so there's no write order guarantees
-    if (writer.fieldOrder() == Writer.FieldOrder.ASCENDING) {
-      for (int i = 0; i < count; ++i) {
-        writeField(tags[i], objects[i], writer);
-      }
-    } else {
-      for (int i = count - 1; i >= 0; --i) {
-        writeField(tags[i], objects[i], writer);
-      }
+    for (int i = 0; i < count; ++i) {
+      writeField(tags[i], objects[i], writer);
     }
   }
 
-  private static void writeField(int tag, Object object, Writer writer) throws IOException {
+  private static void writeField(int tag, Object object, CodedOutputStreamWriter writer)
+      throws IOException {
     int fieldNumber = WireFormat.getTagFieldNumber(tag);
     switch (WireFormat.getTagWireType(tag)) {
       case WireFormat.WIRETYPE_VARINT:
@@ -219,18 +185,12 @@ public final class UnknownFieldSetLite {
         writer.writeBytes(fieldNumber, (ByteString) object);
         break;
       case WireFormat.WIRETYPE_START_GROUP:
-        if (writer.fieldOrder() == Writer.FieldOrder.ASCENDING) {
-          writer.writeStartGroup(fieldNumber);
-          ((UnknownFieldSetLite) object).writeTo(writer);
-          writer.writeEndGroup(fieldNumber);
-        } else {
-          writer.writeEndGroup(fieldNumber);
-          ((UnknownFieldSetLite) object).writeTo(writer);
-          writer.writeStartGroup(fieldNumber);
-        }
+        writer.writeStartGroup(fieldNumber);
+        ((UnknownFieldSetLite) object).writeTo(writer);
+        writer.writeEndGroup(fieldNumber);
         break;
       default:
-        // TODO(liujisi): Change writeTo to throw IOException?
+        // TODO: Change writeTo to throw IOException?
         throw new RuntimeException(InvalidProtocolBufferException.invalidWireType());
     }
   }
@@ -320,7 +280,8 @@ public final class UnknownFieldSetLite {
   }
 
   @Override
-  public boolean equals(Object obj) {
+  public boolean equals(
+          Object obj) {
     if (this == obj) {
       return true;
     }
@@ -441,12 +402,16 @@ public final class UnknownFieldSetLite {
         storeField(tag, input.readBytes());
         return true;
       case WireFormat.WIRETYPE_START_GROUP:
+        input.checkRecursionLimit();
+        input.groupDepth++;
         final UnknownFieldSetLite subFieldSet = new UnknownFieldSetLite();
         subFieldSet.mergeFrom(input);
+        input.groupDepth--;
         input.checkLastTagWas(WireFormat.makeTag(fieldNumber, WireFormat.WIRETYPE_END_GROUP));
         storeField(tag, subFieldSet);
         return true;
       case WireFormat.WIRETYPE_END_GROUP:
+        input.checkValidEndTag();
         return false;
       default:
         throw InvalidProtocolBufferException.invalidWireType();

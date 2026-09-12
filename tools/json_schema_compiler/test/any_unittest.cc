@@ -2,57 +2,65 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "tools/json_schema_compiler/test/any.h"
+
 #include <utility>
 #include <vector>
 
 #include "base/values.h"
+#include "extensions/buildflags/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "tools/json_schema_compiler/test/any.h"
 
-TEST(JsonSchemaCompilerAnyTest, AnyTypePopulate) {
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+TEST(JsonSchemaCompilerAnyTest, PopulateAndClone) {
   {
-    test::api::any::AnyType any_type;
-    base::Value::Dict any_type_dict;
+    base::DictValue any_type_dict;
     any_type_dict.Set("any", "value");
-    base::Value any_type_value(std::move(any_type_dict));
-    EXPECT_TRUE(test::api::any::AnyType::Populate(any_type_value, &any_type));
-    base::Value::Dict any_type_to_value(any_type.ToValue());
-    EXPECT_EQ(any_type_value, any_type_to_value);
+    auto any_type = test::api::any::AnyType::FromValue(any_type_dict);
+    ASSERT_TRUE(any_type);
+    base::DictValue any_type_to_value(any_type->ToValue());
+    EXPECT_EQ(any_type_dict, any_type_to_value);
+
+    test::api::any::AnyType any_type_copy = any_type->Clone();
+    EXPECT_EQ(any_type_dict, any_type_copy.ToValue());
   }
   {
-    test::api::any::AnyType any_type;
-    base::Value::Dict any_type_dict;
+    base::DictValue any_type_dict;
     any_type_dict.Set("any", 5);
-    base::Value any_type_value(std::move(any_type_dict));
-    EXPECT_TRUE(test::api::any::AnyType::Populate(any_type_value, &any_type));
-    base::Value::Dict any_type_to_value(any_type.ToValue());
-    EXPECT_EQ(any_type_value, any_type_to_value);
+    auto any_type = test::api::any::AnyType::FromValue(any_type_dict);
+    ASSERT_TRUE(any_type);
+    base::DictValue any_type_to_value(any_type->ToValue());
+    EXPECT_EQ(any_type_dict, any_type_to_value);
+
+    test::api::any::AnyType any_type_copy = any_type->Clone();
+    EXPECT_EQ(any_type_dict, any_type_copy.ToValue());
   }
 }
 
 TEST(JsonSchemaCompilerAnyTest, OptionalAnyParamsCreate) {
   {
-    base::Value::List params_value;
-    std::unique_ptr<test::api::any::OptionalAny::Params> params(
+    base::ListValue params_value;
+    std::optional<test::api::any::OptionalAny::Params> params(
         test::api::any::OptionalAny::Params::Create(params_value));
-    EXPECT_TRUE(params.get());
+    EXPECT_TRUE(params.has_value());
     EXPECT_FALSE(params->any_name);
   }
   {
-    base::Value::List params_value;
+    base::ListValue params_value;
     base::Value param("asdf");
     params_value.Append(param.Clone());
-    std::unique_ptr<test::api::any::OptionalAny::Params> params(
+    std::optional<test::api::any::OptionalAny::Params> params(
         test::api::any::OptionalAny::Params::Create(params_value));
     ASSERT_TRUE(params);
     ASSERT_TRUE(params->any_name);
     EXPECT_EQ(*params->any_name, param);
   }
   {
-    base::Value::List params_value;
+    base::ListValue params_value;
     base::Value param(true);
     params_value.Append(param.Clone());
-    std::unique_ptr<test::api::any::OptionalAny::Params> params(
+    std::optional<test::api::any::OptionalAny::Params> params(
         test::api::any::OptionalAny::Params::Create(params_value));
     ASSERT_TRUE(params);
     ASSERT_TRUE(params->any_name);

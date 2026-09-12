@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "components/download/public/common/all_download_event_notifier.h"
 #include "components/download/public/common/download_item.h"
@@ -16,17 +17,13 @@ namespace download {
 
 SimpleDownloadManagerCoordinator::SimpleDownloadManagerCoordinator(
     const DownloadWhenFullManagerStartsCallBack&
-        download_when_full_manager_starts_cb,
-    bool record_full_download_manager_delay)
+        download_when_full_manager_starts_cb)
     : simple_download_manager_(nullptr),
       has_all_history_downloads_(false),
       current_manager_has_all_history_downloads_(false),
       initialized_(false),
       download_when_full_manager_starts_cb_(
-          download_when_full_manager_starts_cb),
-      creation_time_ticks_(record_full_download_manager_delay
-                               ? base::TimeTicks::Now()
-                               : base::TimeTicks()) {}
+          download_when_full_manager_starts_cb) {}
 
 SimpleDownloadManagerCoordinator::~SimpleDownloadManagerCoordinator() {
   if (simple_download_manager_)
@@ -48,10 +45,11 @@ void SimpleDownloadManagerCoordinator::SetSimpleDownloadManager(
   current_manager_has_all_history_downloads_ = manages_all_history_downloads;
   simple_download_manager_ = simple_download_manager;
   simple_download_manager_->AddObserver(this);
-
-  if (manages_all_history_downloads && !creation_time_ticks_.is_null()) {
-    RecordDownloadManagerCreationTimeSinceStartup(base::TimeTicks::Now() -
-                                                  creation_time_ticks_);
+  std::vector<base::OnceClosure> callbacks =
+      std::move(active_downloads_callbacks_);
+  for (auto& callback : callbacks) {
+    simple_download_manager_->WaitForActiveDownloadsInitialization(
+        std::move(callback));
   }
 }
 
@@ -68,9 +66,8 @@ void SimpleDownloadManagerCoordinator::RemoveObserver(Observer* observer) {
 
 void SimpleDownloadManagerCoordinator::DownloadUrl(
     std::unique_ptr<DownloadUrlParameters> parameters) {
-  bool result = simple_download_manager_
-                    ? simple_download_manager_->CanDownload(parameters.get())
-                    : false;
+  bool result = simple_download_manager_ &&
+                simple_download_manager_->CanDownload(parameters.get());
   if (result) {
     simple_download_manager_->DownloadUrl(std::move(parameters));
     return;
@@ -81,7 +78,7 @@ void SimpleDownloadManagerCoordinator::DownloadUrl(
 }
 
 void SimpleDownloadManagerCoordinator::GetAllDownloads(
-    std::vector<DownloadItem*>* downloads) {
+    std::vector<raw_ptr<DownloadItem, VectorExperimental>>* downloads) {
   if (simple_download_manager_) {
     simple_download_manager_->GetAllDownloads(downloads);
     simple_download_manager_->GetUninitializedActiveDownloadsIfAny(downloads);
@@ -119,6 +116,19 @@ AllDownloadEventNotifier* SimpleDownloadManagerCoordinator::GetNotifier() {
 
 void SimpleDownloadManagerCoordinator::CheckForExternallyRemovedDownloads() {
   simple_download_manager_->CheckForHistoryFilesRemoval();
+}
+
+void SimpleDownloadManagerCoordinator::WaitForActiveDownloadsInitialization(
+    base::OnceClosure callback) {
+  if (callback.is_null()) {
+    return;
+  }
+  if (simple_download_manager_) {
+    simple_download_manager_->WaitForActiveDownloadsInitialization(
+        std::move(callback));
+  } else {
+    active_downloads_callbacks_.push_back(std::move(callback));
+  }
 }
 
 }  // namespace download

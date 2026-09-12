@@ -5,7 +5,6 @@
 #ifndef CHROME_BROWSER_NOTIFICATIONS_SCHEDULER_PUBLIC_NOTIFICATION_SCHEDULER_CLIENT_H_
 #define CHROME_BROWSER_NOTIFICATIONS_SCHEDULER_PUBLIC_NOTIFICATION_SCHEDULER_CLIENT_H_
 
-#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -39,6 +38,11 @@ class NotificationSchedulerClient {
   virtual void BeforeShowNotification(
       std::unique_ptr<NotificationData> notification_data,
       NotificationDataCallback callback) = 0;
+
+  // Called after a notification is shown to the user. The client will have
+  // access to the final |notification_data| used to show the notification.
+  virtual void OnShowNotification(
+      std::unique_ptr<NotificationData> notification_data) {}
 
   // Called when scheduler is initialized, number of notification scheduled for
   // this type is reported if initialization succeeded.

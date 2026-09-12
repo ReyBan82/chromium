@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "base/byte_size.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -16,7 +17,6 @@
 #include "net/spdy/spdy_buffer.h"
 #include "net/spdy/spdy_http_utils.h"
 #include "net/spdy/spdy_stream.h"
-#include "net/third_party/quiche/src/quiche/spdy/core/http2_header_block.h"
 
 namespace net {
 
@@ -89,7 +89,15 @@ int BidirectionalStreamSpdyImpl::ReadData(IOBuffer* buf, int buf_len) {
 
   // If there is data buffered, complete the IO immediately.
   if (!read_data_queue_.IsEmpty()) {
-    return read_data_queue_.Dequeue(buf->data(), buf_len);
+    // Dequeueing can fire consume callbacks that trigger session
+    // teardown and destroy `this`.
+    base::WeakPtr<BidirectionalStreamSpdyImpl> self =
+        weak_factory_.GetWeakPtr();
+    int rv = read_data_queue_.Dequeue(buf->first(buf_len));
+    if (!self) {
+      return ERR_CONNECTION_CLOSED;
+    }
+    return rv;
   } else if (stream_closed_) {
     return closed_stream_status_;
   }
@@ -129,13 +137,13 @@ void BidirectionalStreamSpdyImpl::SendvData(
   if (buffers.size() == 1) {
     pending_combined_buffer_ = buffers[0];
   } else {
-    pending_combined_buffer_ = base::MakeRefCounted<net::IOBuffer>(total_len);
-    int len = 0;
+    pending_combined_buffer_ =
+        base::MakeRefCounted<net::IOBufferWithSize>(total_len);
+    auto out_span = pending_combined_buffer_->span();
     // TODO(xunjieli): Get rid of extra copy. Coalesce headers and data frames.
     for (size_t i = 0; i < buffers.size(); ++i) {
-      memcpy(pending_combined_buffer_->data() + len, buffers[i]->data(),
-             lengths[i]);
-      len += lengths[i];
+      size_t sz_len = lengths[i];
+      out_span.take_first(sz_len).copy_from(buffers[i]->first(sz_len));
     }
   }
   stream_->SendData(pending_combined_buffer_.get(), total_len,
@@ -153,7 +161,7 @@ int64_t BidirectionalStreamSpdyImpl::GetTotalReceivedBytes() const {
   if (!stream_)
     return 0;
 
-  return stream_->raw_received_bytes();
+  return stream_->raw_received_bytes().InBytes();
 }
 
 int64_t BidirectionalStreamSpdyImpl::GetTotalSentBytes() const {
@@ -163,7 +171,7 @@ int64_t BidirectionalStreamSpdyImpl::GetTotalSentBytes() const {
   if (!stream_)
     return 0;
 
-  return stream_->raw_sent_bytes();
+  return stream_->raw_sent_bytes().InBytes();
 }
 
 bool BidirectionalStreamSpdyImpl::GetLoadTimingInfo(
@@ -189,20 +197,19 @@ void BidirectionalStreamSpdyImpl::PopulateNetErrorDetails(
 void BidirectionalStreamSpdyImpl::OnHeadersSent() {
   DCHECK(stream_);
 
-  negotiated_protocol_ = kProtoHTTP2;
+  negotiated_protocol_ = NextProto::kProtoHTTP2;
   if (delegate_)
     delegate_->OnStreamReady(/*request_headers_sent=*/true);
 }
 
 void BidirectionalStreamSpdyImpl::OnEarlyHintsReceived(
-    const spdy::Http2HeaderBlock& headers) {
+    const quiche::HttpHeaderBlock& headers) {
   DCHECK(stream_);
-  // TODO(crbug.com/671310): Plumb Early Hints to `delegate_` if needed.
+  // TODO(crbug.com/40496584): Plumb Early Hints to `delegate_` if needed.
 }
 
 void BidirectionalStreamSpdyImpl::OnHeadersReceived(
-    const spdy::Http2HeaderBlock& response_headers,
-    const spdy::Http2HeaderBlock* pushed_request_headers) {
+    const quiche::HttpHeaderBlock& response_headers) {
   DCHECK(stream_);
 
   if (delegate_)
@@ -240,7 +247,7 @@ void BidirectionalStreamSpdyImpl::OnDataSent() {
 }
 
 void BidirectionalStreamSpdyImpl::OnTrailers(
-    const spdy::Http2HeaderBlock& trailers) {
+    const quiche::HttpHeaderBlock& trailers) {
   DCHECK(stream_);
   DCHECK(!stream_closed_);
 
@@ -253,8 +260,8 @@ void BidirectionalStreamSpdyImpl::OnClose(int status) {
 
   stream_closed_ = true;
   closed_stream_status_ = status;
-  closed_stream_received_bytes_ = stream_->raw_received_bytes();
-  closed_stream_sent_bytes_ = stream_->raw_sent_bytes();
+  closed_stream_received_bytes_ = stream_->raw_received_bytes().InBytes();
+  closed_stream_sent_bytes_ = stream_->raw_sent_bytes().InBytes();
   closed_has_load_timing_info_ =
       stream_->GetLoadTimingInfo(&closed_load_timing_info_);
 
@@ -285,13 +292,13 @@ NetLogSource BidirectionalStreamSpdyImpl::source_dependency() const {
 }
 
 int BidirectionalStreamSpdyImpl::SendRequestHeadersHelper() {
-  spdy::Http2HeaderBlock headers;
+  quiche::HttpHeaderBlock headers;
   HttpRequestInfo http_request_info;
   http_request_info.url = request_info_->url;
   http_request_info.method = request_info_->method;
   http_request_info.extra_headers = request_info_->extra_headers;
 
-  CreateSpdyHeadersFromHttpRequest(http_request_info,
+  CreateSpdyHeadersFromHttpRequest(http_request_info, std::nullopt,
                                    http_request_info.extra_headers, &headers);
   written_end_of_stream_ = request_info_->end_stream_on_headers;
   return stream_->SendRequestHeaders(std::move(headers),
@@ -371,12 +378,20 @@ void BidirectionalStreamSpdyImpl::DoBufferedRead() {
 
   int rv = 0;
   if (read_buffer_) {
+    // ReadData() can fire consume callbacks that trigger session
+    // teardown and destroy `this`.
+    base::WeakPtr<BidirectionalStreamSpdyImpl> self =
+        weak_factory_.GetWeakPtr();
     rv = ReadData(read_buffer_.get(), read_buffer_len_);
+    if (!self) {
+      return;
+    }
     DCHECK_NE(ERR_IO_PENDING, rv);
     read_buffer_ = nullptr;
     read_buffer_len_ = 0;
-    if (delegate_)
+    if (delegate_) {
       delegate_->OnDataRead(rv);
+    }
   }
 }
 

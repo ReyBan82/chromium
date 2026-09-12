@@ -4,9 +4,9 @@
 
 #include "chrome/browser/ash/system_web_apps/test_support/system_web_app_browsertest_base.h"
 
-#include "base/ranges/algorithm.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/apps/app_service/app_launch_params.h"
+#include <algorithm>
+
+#include "base/check_deref.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/apps/app_service/browser_app_launcher.h"
@@ -14,15 +14,21 @@
 #include "chrome/browser/ash/system_web_apps/test_support/test_system_web_app_installation.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/browser/web_applications/web_app_provider.h"
 #include "chrome/browser/web_applications/web_app_registrar.h"
 #include "chrome/browser/web_applications/web_app_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chrome/test/base/ui_test_utils.h"
+#include "chromeos/ash/components/browser_delegate/browser_controller.h"
+#include "chromeos/ash/components/browser_delegate/browser_delegate.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "components/services/app_service/public/cpp/types_util.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/window_open_disposition.h"
 #include "url/gurl.h"
 
 namespace ash {
@@ -31,20 +37,20 @@ SystemWebAppBrowserTestBase::SystemWebAppBrowserTestBase() = default;
 SystemWebAppBrowserTestBase::~SystemWebAppBrowserTestBase() = default;
 
 SystemWebAppManager& SystemWebAppBrowserTestBase::GetManager() {
-  auto* swa_manager = SystemWebAppManager::Get(browser()->profile());
+  auto* swa_manager = SystemWebAppManager::Get(browser()->GetProfile());
   DCHECK(swa_manager);
   return *swa_manager;
 }
 
-SystemWebAppType SystemWebAppBrowserTestBase::GetMockAppType() {
-  CHECK(maybe_installation_);
-  return maybe_installation_->GetType();
+SystemWebAppType SystemWebAppBrowserTestBase::GetAppType() {
+  CHECK(installation_);
+  return installation_->GetType();
 }
 
 void SystemWebAppBrowserTestBase::WaitForTestSystemAppInstall() {
   // Wait for the System Web Apps to install.
-  if (maybe_installation_) {
-    maybe_installation_->WaitForAppInstall();
+  if (installation_) {
+    installation_->WaitForAppInstall();
   } else {
     GetManager().InstallSystemAppsForTesting();
   }
@@ -52,7 +58,7 @@ void SystemWebAppBrowserTestBase::WaitForTestSystemAppInstall() {
 
 apps::AppLaunchParams SystemWebAppBrowserTestBase::LaunchParamsForApp(
     SystemWebAppType system_app_type) {
-  absl::optional<web_app::AppId> app_id =
+  std::optional<webapps::AppId> app_id =
       GetManager().GetAppIdForSystemApp(system_app_type);
 
   CHECK(app_id.has_value());
@@ -64,27 +70,27 @@ apps::AppLaunchParams SystemWebAppBrowserTestBase::LaunchParamsForApp(
 content::WebContents* SystemWebAppBrowserTestBase::LaunchApp(
     apps::AppLaunchParams&& params,
     bool wait_for_load,
-    Browser** out_browser) {
+    BrowserWindowInterface** out_browser) {
   content::TestNavigationObserver navigation_observer(GetStartUrl(params));
   navigation_observer.StartWatchingNewWebContents();
 
   // AppServiceProxyFactory will DCHECK when called with wrong profile. In
   // normal scenarios, no code path should trigger this.
   DCHECK(apps::AppServiceProxyFactory::IsAppServiceAvailableForProfile(
-      browser()->profile()));
+      browser()->GetProfile()));
 
   if (!params.launch_files.empty()) {
     // SWA browser tests bypass the code in `WebAppPublisherHelper` that fills
     // in `override_url`, so fill it in here, assuming the file handler action
     // URL matches the start URL.
-    params.override_url =
-        web_app::WebAppProvider::GetForLocalAppsUnchecked(browser()->profile())
-            ->registrar_unsafe()
-            .GetAppStartUrl(params.app_id);
+    params.override_url = web_app::WebAppProvider::GetForLocalAppsUnchecked(
+                              browser()->GetProfile())
+                              ->registrar_unsafe()
+                              .GetAppStartUrl(params.app_id);
   }
 
   content::WebContents* web_contents =
-      apps::AppServiceProxyFactory::GetForProfile(browser()->profile())
+      apps::AppServiceProxyFactory::GetForProfile(browser()->GetProfile())
           ->BrowserAppLauncher()
           ->LaunchAppWithParamsForTesting(std::move(params));
 
@@ -94,9 +100,11 @@ content::WebContents* SystemWebAppBrowserTestBase::LaunchApp(
   }
 
   if (out_browser) {
-    *out_browser = web_contents
-                       ? chrome::FindBrowserWithWebContents(web_contents)
-                       : nullptr;
+    *out_browser =
+        web_contents
+            ? GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+                  web_contents)
+            : nullptr;
   }
 
   return web_contents;
@@ -104,25 +112,25 @@ content::WebContents* SystemWebAppBrowserTestBase::LaunchApp(
 
 content::WebContents* SystemWebAppBrowserTestBase::LaunchApp(
     apps::AppLaunchParams&& params,
-    Browser** browser) {
-  return LaunchApp(std::move(params), /* wait_for_load */ true, browser);
+    BrowserWindowInterface** browser) {
+  return LaunchApp(std::move(params), /*wait_for_load=*/true, browser);
 }
 
 content::WebContents* SystemWebAppBrowserTestBase::LaunchApp(
     SystemWebAppType type,
-    Browser** browser) {
+    BrowserWindowInterface** browser) {
   return LaunchApp(LaunchParamsForApp(type), browser);
 }
 
 content::WebContents* SystemWebAppBrowserTestBase::LaunchAppWithoutWaiting(
     apps::AppLaunchParams&& params,
-    Browser** browser) {
-  return LaunchApp(std::move(params), /* wait_for_load */ false, browser);
+    BrowserWindowInterface** browser) {
+  return LaunchApp(std::move(params), /*wait_for_load=*/false, browser);
 }
 
 content::WebContents* SystemWebAppBrowserTestBase::LaunchAppWithoutWaiting(
     SystemWebAppType type,
-    Browser** browser) {
+    BrowserWindowInterface** browser) {
   return LaunchAppWithoutWaiting(LaunchParamsForApp(type), browser);
 }
 
@@ -131,7 +139,7 @@ GURL SystemWebAppBrowserTestBase::GetStartUrl(
   return params.override_url.is_valid()
              ? params.override_url
              : web_app::WebAppProvider::GetForLocalAppsUnchecked(
-                   browser()->profile())
+                   browser()->GetProfile())
                    ->registrar_unsafe()
                    .GetAppStartUrl(params.app_id);
 }
@@ -141,23 +149,30 @@ GURL SystemWebAppBrowserTestBase::GetStartUrl(SystemWebAppType type) {
 }
 
 GURL SystemWebAppBrowserTestBase::GetStartUrl() {
-  return GetStartUrl(LaunchParamsForApp(GetMockAppType()));
+  return GetStartUrl(LaunchParamsForApp(GetAppType()));
 }
 
 size_t SystemWebAppBrowserTestBase::GetSystemWebAppBrowserCount(
     SystemWebAppType type) {
-  auto* browser_list = BrowserList::GetInstance();
-  return base::ranges::count_if(*browser_list, [&](Browser* browser) {
-    return ash::IsBrowserForSystemWebApp(browser, type);
-  });
+  auto browsers = ui_test_utils::FindMatchingBrowsers(
+      [type](BrowserWindowInterface* browser) {
+        return ash::IsBrowserForSystemWebApp(
+            CHECK_DEREF(
+                ash::BrowserController::GetInstance()->GetDelegate(browser)),
+            type);
+      });
+  return browsers.size();
 }
 
-SystemWebAppManagerBrowserTest::SystemWebAppManagerBrowserTest(
-    bool install_mock) {
-  if (install_mock) {
-    maybe_installation_ =
-        TestSystemWebAppInstallation::SetUpStandaloneSingleWindowApp();
-  }
+void SystemWebAppBrowserTestBase::SetSystemWebAppInstallation(
+    std::unique_ptr<TestSystemWebAppInstallation> installation) {
+  CHECK(!installation_);
+  installation_ = std::move(installation);
+}
+
+SystemWebAppManagerBrowserTest::SystemWebAppManagerBrowserTest() {
+  SetSystemWebAppInstallation(
+      TestSystemWebAppInstallation::SetUpStandaloneSingleWindowApp());
 }
 
 }  // namespace ash

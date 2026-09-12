@@ -30,36 +30,31 @@ class ScopedDisableBrowserSpellCheckerForTesting {
   const bool previous_value_;
 };
 
-// If the kWinDelaySpellcheckServiceInit feature flag is enabled, don't
-// initialize the spellcheck dictionaries when the SpellcheckService is
-// instantiated. With this flag set: (1) Completing the initialization of the
-// spellcheck service is on-demand, invoked by calling
-// SpellcheckService::InitializeDictionaries with a callback to indicate when
-// the operation completes. (2) The call to create the spellcheck service in
-// ChromeBrowserMainParts::PreMainMessageLoopRunImpl will be skipped. Chromium
-// will still by default instantiate the spellcheck service on startup for
-// custom dictionary synchronization, but will not load Windows spellcheck
-// dictionaries. The command line for launching the browser with Windows hybrid
-// spellchecking enabled but no initialization of the spellcheck service is:
-//    chrome
-//    --enable-features=WinDelaySpellcheckServiceInit
-// and if instantiation of the spellcheck service needs to be completely
-// disabled:
-//     chrome
-//    --enable-features=WinDelaySpellcheckServiceInit
-//    --disable-sync-types="Dictionary"
-BASE_DECLARE_FEATURE(kWinDelaySpellcheckServiceInit);
-
-// When set, do not perform the expensive operation of retrieving suggestions
-// for all misspelled words while performing a text check. Instead retrieve
-// suggestions on demand when the context menu is brought up with a misspelled
-// word selected.
-BASE_DECLARE_FEATURE(kWinRetrieveSuggestionsOnlyOnDemand);
 #endif  // BUILDFLAG(IS_WIN)
 
 #if BUILDFLAG(IS_ANDROID)
 bool IsAndroidSpellCheckFeatureEnabled();
+
+BASE_DECLARE_FEATURE(kAndroidGrammarCheck);
 #endif  // BUILDFLAG(IS_ANDROID)
+
+// When enabled, the spellcheck service will use a regionalized endpoint based
+// on the user's data region setting.
+BASE_DECLARE_FEATURE(kEnableSpellcheckRegionalSignal);
+
+// When enabled, spellcheck character attributes and break iterator rule sets
+// are initialized lazily on first spellcheck use rather than at renderer
+// launch.
+BASE_DECLARE_FEATURE(kLazyInitializeSpellcheckCharAttribute);
+
+// When enabled, the renderer custom dictionary is built asynchronously on
+// a background worker thread rather than blocking the main thread.
+BASE_DECLARE_FEATURE(kAsyncSpellcheckCustomDictionaryInit);
+
+// When enabled, spellcheck initialization is completely pull-based (on-demand)
+// across all platforms: the browser process does not push dictionaries to new
+// renderer processes at startup, and renderers request them lazily when needed.
+BASE_DECLARE_FEATURE(kOnDemandSpellcheckInitialization);
 
 #endif  // BUILDFLAG(ENABLE_SPELLCHECK)
 

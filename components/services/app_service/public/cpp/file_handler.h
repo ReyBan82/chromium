@@ -12,7 +12,6 @@
 
 #include "base/containers/flat_set.h"
 #include "base/values.h"
-#include "components/services/app_service/public/cpp/icon_info.h"
 #include "url/gurl.h"
 
 namespace apps {
@@ -28,6 +27,8 @@ struct FileHandler {
     AcceptEntry();
     ~AcceptEntry();
     AcceptEntry(const AcceptEntry& accept_entry);
+
+    friend bool operator==(const AcceptEntry&, const AcceptEntry&) = default;
 
     base::Value AsDebugValue() const;
 
@@ -53,11 +54,6 @@ struct FileHandler {
   // will match on.
   using Accept = std::vector<AcceptEntry>;
   Accept accept;
-
-  // The icons defined for this file handler, to be used as file type
-  // association icons in OS surfaces. The sizes in `downloaded_icons`, when
-  // present, represent the actual size of a bitmap that was downloaded.
-  std::vector<IconInfo> downloaded_icons;
 
   // How the app should be launched in the case where there are multiple files
   // being opened.
@@ -87,14 +83,7 @@ std::set<std::string> GetFileExtensionsFromFileHandlers(
 std::set<std::string> GetFileExtensionsFromFileHandler(
     const FileHandler& file_handler);
 
-bool operator==(const FileHandler::AcceptEntry& accept_entry1,
-                const FileHandler::AcceptEntry& accept_entry2);
 bool operator==(const FileHandler& file_handler1,
-                const FileHandler& file_handler2);
-
-bool operator!=(const FileHandler::AcceptEntry& accept_entry1,
-                const FileHandler::AcceptEntry& accept_entry2);
-bool operator!=(const FileHandler& file_handler1,
                 const FileHandler& file_handler2);
 
 }  // namespace apps

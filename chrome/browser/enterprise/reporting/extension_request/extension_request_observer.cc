@@ -4,12 +4,17 @@
 
 #include "chrome/browser/enterprise/reporting/extension_request/extension_request_observer.h"
 
+#include <algorithm>
+
+#include "base/functional/callback_helpers.h"
 #include "base/metrics/histogram_functions.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
+#include "components/enterprise/browser/reporting/common_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
+#include "extensions/browser/managed_installation_mode.h"
 #include "extensions/common/extension_urls.h"
 
 namespace enterprise_reporting {
@@ -27,12 +32,16 @@ enum class PendlingListUpdateMetricEvent {
 
 ExtensionRequestObserver::ExtensionRequestObserver(Profile* profile)
     : profile_(profile) {
+  previous_pending_requests_ =
+      profile_->GetPrefs()
+          ->GetDict(enterprise_reporting::kCloudExtensionRequestIds)
+          .Clone();
   extensions::ExtensionManagementFactory::GetForBrowserContext(profile_)
       ->AddObserver(this);
   OnExtensionManagementSettingsChanged();
   pref_change_registrar_.Init(profile_->GetPrefs());
   pref_change_registrar_.Add(
-      prefs::kCloudExtensionRequestIds,
+      enterprise_reporting::kCloudExtensionRequestIds,
       base::BindRepeating(&ExtensionRequestObserver::OnPendingListChanged,
                           weak_factory_.GetWeakPtr()));
 }
@@ -67,24 +76,35 @@ void ExtensionRequestObserver::OnPendingListChanged() {
   if (report_trigger_)
     report_trigger_.Run(profile_.get());
 
-  // The pending list is updated when user confirm the notification and requests
-  // are removed from the list. There is no need to show new notification at
-  // this point.
-  if (closing_notification_and_deleting_requests_) {
-    // Record id removed event.
+  const base::DictValue& current_requests = profile_->GetPrefs()->GetDict(
+      enterprise_reporting::kCloudExtensionRequestIds);
+
+  bool has_added =
+      std::ranges::any_of(current_requests, [this](const auto& entry) {
+        return !previous_pending_requests_.contains(entry.first);
+      });
+
+  bool has_removed = std::ranges::any_of(
+      previous_pending_requests_, [&current_requests](const auto& entry) {
+        return !current_requests.contains(entry.first);
+      });
+
+  if (has_removed) {
     base::UmaHistogramEnumeration(kPendingListUpdateMetricsName,
                                   PendlingListUpdateMetricEvent::kRemoved);
-    closing_notification_and_deleting_requests_ = false;
-    return;
   }
-  // Record new id added event.
-  base::UmaHistogramEnumeration(kPendingListUpdateMetricsName,
-                                PendlingListUpdateMetricEvent::kAdded);
-  ShowAllNotifications();
+  if (has_added) {
+    base::UmaHistogramEnumeration(kPendingListUpdateMetricsName,
+                                  PendlingListUpdateMetricEvent::kAdded);
+    ShowAllNotifications();
+  }
+
+  previous_pending_requests_ = current_requests.Clone();
 }
 
 void ExtensionRequestObserver::ShowAllNotifications() {
-  if (!profile_->GetPrefs()->GetBoolean(prefs::kCloudExtensionRequestEnabled)) {
+  if (!profile_->GetPrefs()->GetBoolean(
+          enterprise_reporting::kCloudExtensionRequestEnabled)) {
     CloseAllNotifications();
     return;
   }
@@ -96,8 +116,8 @@ void ExtensionRequestObserver::ShowAllNotifications() {
 
 void ExtensionRequestObserver::ShowNotification(
     ExtensionRequestNotification::NotifyType type) {
-  const base::Value::Dict& pending_requests =
-      profile_->GetPrefs()->GetDict(prefs::kCloudExtensionRequestIds);
+  const base::DictValue& pending_requests = profile_->GetPrefs()->GetDict(
+      enterprise_reporting::kCloudExtensionRequestIds);
 
   ExtensionRequestNotification::ExtensionIds filtered_extension_ids;
   extensions::ExtensionManagement* extension_management =
@@ -107,13 +127,13 @@ void ExtensionRequestObserver::ShowNotification(
 
   for (auto request : pending_requests) {
     const std::string& id = request.first;
-    extensions::ExtensionManagement::InstallationMode mode =
+    extensions::ManagedInstallationMode mode =
         extension_management->GetInstallationMode(id, web_store_update_url);
     if ((type == ExtensionRequestNotification::kApproved &&
-         mode == extensions::ExtensionManagement::INSTALLATION_ALLOWED) ||
+         mode == extensions::ManagedInstallationMode::kAllowed) ||
         (type == ExtensionRequestNotification::kForceInstalled &&
-         (mode == extensions::ExtensionManagement::INSTALLATION_FORCED ||
-          mode == extensions::ExtensionManagement::INSTALLATION_RECOMMENDED)) ||
+         (mode == extensions::ManagedInstallationMode::kForced ||
+          mode == extensions::ManagedInstallationMode::kRecommended)) ||
         (type == ExtensionRequestNotification::kRejected &&
          extension_management->IsInstallationExplicitlyBlocked(id))) {
       filtered_extension_ids.push_back(id);
@@ -133,9 +153,13 @@ void ExtensionRequestObserver::ShowNotification(
   // exists.
   notifications_[type] = std::make_unique<ExtensionRequestNotification>(
       profile_, type, filtered_extension_ids);
+#if BUILDFLAG(IS_ANDROID)
+  notifications_[type]->Show(base::DoNothing());
+#else
   notifications_[type]->Show(base::BindOnce(
       &ExtensionRequestObserver::OnNotificationClosed,
       weak_factory_.GetWeakPtr(), std::move(filtered_extension_ids)));
+#endif
 }
 
 void ExtensionRequestObserver::CloseAllNotifications() {
@@ -147,24 +171,26 @@ void ExtensionRequestObserver::CloseAllNotifications() {
   }
 }
 
+#if !BUILDFLAG(IS_ANDROID)
 void ExtensionRequestObserver::OnNotificationClosed(
     std::vector<std::string>&& extension_ids,
     bool by_user) {
   if (!by_user)
     return;
 
-  RemoveExtensionsFromPendingList(extension_ids);
+  RemoveExtensionsFromPendingList(profile_, extension_ids);
 }
+#endif
 
+// static
 void ExtensionRequestObserver::RemoveExtensionsFromPendingList(
+    Profile* profile,
     const std::vector<std::string>& extension_ids) {
   ScopedDictPrefUpdate pending_requests_update(
-      Profile::FromBrowserContext(profile_)->GetPrefs(),
-      prefs::kCloudExtensionRequestIds);
-  for (auto& id : extension_ids)
+      profile->GetPrefs(), enterprise_reporting::kCloudExtensionRequestIds);
+  for (const auto& id : extension_ids) {
     pending_requests_update->Remove(id);
-
-  closing_notification_and_deleting_requests_ = true;
+  }
 }
 
 }  // namespace enterprise_reporting

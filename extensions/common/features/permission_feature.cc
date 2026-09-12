@@ -4,33 +4,41 @@
 
 #include "extensions/common/features/permission_feature.h"
 
+#include "extensions/common/mojom/context_type.mojom.h"
 #include "extensions/common/permissions/permission_set.h"
 #include "extensions/common/permissions/permissions_data.h"
 
 namespace extensions {
 
-PermissionFeature::PermissionFeature() {
-}
+PermissionFeature::PermissionFeature(StaticFeatureData<SimpleFeatureData> data)
+    : SimpleFeature(data) {}
 
-PermissionFeature::~PermissionFeature() {
-}
+PermissionFeature::PermissionFeature(const SimpleFeatureData* data)
+    : SimpleFeature(data) {}
+
+PermissionFeature::~PermissionFeature() = default;
 
 Feature::Availability PermissionFeature::IsAvailableToContextImpl(
     const Extension* extension,
-    Feature::Context context,
+    mojom::ContextType context,
     const GURL& url,
     Feature::Platform platform,
     int context_id,
-    bool check_developer_mode) const {
+    bool check_developer_mode,
+    const ContextData& context_data,
+    DelegatedAvailabilityCheckHandler delegated_handler) const {
   Availability availability = SimpleFeature::IsAvailableToContextImpl(
-      extension, context, url, platform, context_id, check_developer_mode);
+      extension, context, url, platform, context_id, check_developer_mode,
+      context_data, delegated_handler);
   if (!availability.is_available())
     return availability;
 
-  if (extension && !extension->permissions_data()->HasAPIPermission(name()))
-    return CreateAvailability(NOT_PRESENT, extension->GetType());
+  if (extension && !extension->permissions_data()->HasAPIPermission(name())) {
+    return CreateAvailability(AvailabilityResult::kNotPresent,
+                              extension->GetType());
+  }
 
-  return CreateAvailability(IS_AVAILABLE);
+  return CreateAvailability(AvailabilityResult::kIsAvailable);
 }
 
 }  // namespace extensions

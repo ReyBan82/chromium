@@ -9,6 +9,12 @@
 namespace relaunch_notification {
 
 base::TimeDelta ComputeDeadlineDelta(base::TimeDelta deadline_offset) {
+  // If the deadline is in the past or right now, clamp it to a zero delta so
+  // the dialog doesn't display negative time remaining.
+  if (deadline_offset <= base::TimeDelta()) {
+    return base::TimeDelta();
+  }
+
   // Round deadline_offset to the nearest second for the computations below.
   deadline_offset = base::Seconds(std::round(deadline_offset.InSecondsF()));
 
@@ -48,21 +54,22 @@ base::TimeDelta ComputeNextRefreshDelta(base::TimeDelta deadline_offset) {
   // N-1 of the same units (e.g., # of days) or from one form of units to the
   // next granular form of units (e.g., 2 days to 47 hours).
   // TODO(grt): Find a way to reduce duplication with the constants in
-  // ComputeDeadlineDelta once https://crbug.com/761570 is resolved.
+  // ComputeDeadlineDelta once https://crbug.com/40538317 is resolved.
   static constexpr base::TimeDelta kMinDays = base::Days(2);
   static constexpr base::TimeDelta kMinHours = base::Hours(1);
   static constexpr base::TimeDelta kMinMinutes = base::Minutes(1);
   static constexpr base::TimeDelta kMinSeconds = base::Seconds(1);
 
   base::TimeDelta delta;
-  if (rounded_offset > kMinDays)
+  if (rounded_offset > kMinDays) {
     delta = base::Days(rounded_offset.InDays() - 1);
-  else if (rounded_offset > kMinHours)
+  } else if (rounded_offset > kMinHours) {
     delta = base::Hours(rounded_offset.InHours() - 1);
-  else if (rounded_offset > kMinMinutes)
+  } else if (rounded_offset > kMinMinutes) {
     delta = base::Minutes(rounded_offset.InMinutes() - 1);
-  else if (rounded_offset > kMinSeconds)
+  } else if (rounded_offset > kMinSeconds) {
     delta = base::Seconds(rounded_offset.InSeconds() - 1);
+  }
 
   return deadline_offset - delta;
 }

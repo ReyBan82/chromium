@@ -9,8 +9,6 @@
 
 namespace web {
 
-class BrowserState;
-
 // Returns an autoreleased string containing the JavaScript loaded from a
 // bundled resource file with the given name (excluding extension).
 NSString* GetPageScript(NSString* script_file_name);
@@ -29,13 +27,9 @@ NSString* GetPageScript(NSString* script_file_name);
 NSString* MakeScriptInjectableOnce(NSString* script_identifier,
                                    NSString* script);
 
-// Returns an autoreleased string containing the JavaScript to be injected into
-// the main frame of the web view as early as possible.
-NSString* GetDocumentStartScriptForMainFrame(BrowserState* browser_state);
-
-// Returns an autoreleased string containing the JavaScript to be injected into
-// all frames of the web view as early as possible.
-NSString* GetDocumentStartScriptForAllFrames(BrowserState* browser_state);
+// Make sure that script is a no-op when injected on a domain that have a
+// origin that is not in `filter`.
+NSString* MakeScriptPrivate(NSArray<NSString*>* filter, NSString* script);
 
 }  // namespace web
 

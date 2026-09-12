@@ -6,109 +6,138 @@
 #define CHROME_BROWSER_WEB_APPLICATIONS_TEST_WEB_APP_TEST_UTILS_H_
 
 #include <stdint.h>
-#include <memory>
-#include <string>
 
-#include "base/strings/string_piece_forward.h"
-#include "build/chromeos_buildflags.h"
+#include <memory>
+#include <optional>  // for optional, nullopt
+#include <string_view>
+
+#include "chrome/browser/web_applications/os_integration/os_integration_sub_manager.h"
 #include "chrome/browser/web_applications/web_app_constants.h"
-#include "chrome/browser/web_applications/web_app_id.h"
 #include "chrome/browser/web_applications/web_app_install_params.h"
-#include "chrome/browser/web_applications/web_app_sync_bridge.h"
-#include "components/prefs/pref_service.h"
-#include "content/public/browser/service_worker_context.h"
-#include "testing/gtest/include/gtest/gtest.h"
+#include "chrome/browser/web_applications/web_app_management_type.h"
+#include "components/sync/protocol/web_app_specifics.pb.h"
+#include "components/web_package/signed_web_bundles/signed_web_bundle_signature_stack_entry.h"
+#include "components/webapps/common/web_app_id.h"
 #include "url/gurl.h"
 
-class Browser;
+class BrowserWindowInterface;
+class PrefService;
 class Profile;
-struct WebAppInstallInfo;
+
+namespace gfx {
+class Image;
+}  // namespace gfx
+
+namespace base {
+class FilePath;
+}  // namespace base
 
 namespace content {
 class StoragePartition;
 class WebContents;
+enum class ServiceWorkerCapability;
 }  // namespace content
 
 namespace web_app {
 
 class WebApp;
-
-// Intended to be used for parameterizing tests that involve OS integration.
-enum class OsIntegrationSubManagersState {
-  kSaveStateToDB = 0,
-  kSaveStateAndExecute = 1,
-  kDisabled = 2,
-  kMaxValue = kDisabled
-};
+class WebAppSyncBridge;
+struct WebAppInstallInfo;
 
 namespace test {
-
-enum class ExternalPrefMigrationTestCases {
-  kDisableMigrationReadPref,
-  kDisableMigrationReadDB,
-  kEnableMigrationReadPref,
-  kEnableMigrationReadDB,
-};
-
-std::string GetExternalPrefMigrationTestName(
-    const ::testing::TestParamInfo<ExternalPrefMigrationTestCases>& info);
-
-std::string GetOsIntegrationSubManagersTestName(
-    const ::testing::TestParamInfo<OsIntegrationSubManagersState>& info);
 
 // Do not use this for installation! Instead, use the utilities in
 // web_app_install_test_util.h.
 std::unique_ptr<WebApp> CreateWebApp(
     const GURL& start_url = GURL("https://example.com/path"),
-    WebAppManagement::Type source_type = WebAppManagement::kSync);
+    WebAppManagement::Type source_type = WebAppManagement::kSync,
+    const GURL& scope = GURL());
+
+// Same as above, but for creating a web app out of a sync_proto. Follow the
+// same warning as `CreateWebApp()` and don't use this directly for
+// installation. Instead, use the utilities in web_app_install_test_util.h. Only
+// sets the fields that need to be specified in the sync_proto to be valid,
+// which is `start_url`, `manifest_id` and `scope` if set. All other fields need
+// to be explicitly set by calling `Set<Field>()` on a web app.
+// By default, the `kSync` source is already set on this web app.
+// Will check fail if the sync proto does not have the start_url and
+// relative_manifest_id unset.
+std::unique_ptr<WebApp> CreateWebAppFromSyncProto(
+    sync_pb::WebAppSpecifics& sync_proto);
 
 // Do not use this for installation! Instead, use the utilities in
 // web_app_install_test_util.h.
-std::unique_ptr<WebApp> CreateRandomWebApp(const GURL& base_url,
-                                           uint32_t seed,
-                                           bool allow_system_source = true);
+struct CreateRandomWebAppParams {
+  CreateRandomWebAppParams();
+  CreateRandomWebAppParams(const CreateRandomWebAppParams& other);
+  CreateRandomWebAppParams& operator=(const CreateRandomWebAppParams& other);
+  ~CreateRandomWebAppParams();
+
+  GURL base_url{"https://example.com/path"};
+  int seed = 0;
+  bool non_zero = false;
+  bool allow_system_source = true;
+  // External management types and migration fields are often managed by
+  // systems that synchronize or process installed apps at startup. If a test is
+  // writing apps and then starting the system, these managers will touch &
+  // modify apps. Setting this to 'true' will prevent generated apps from
+  // including these fields, thus avoiding side effects during test startup.
+  bool exclude_fields_with_side_effects = false;
+  // When randomly generating an app, if it is randomly a sub-app, then this
+  // manifest id is used for the parent id. Set this to an empty url to not
+  // generate sub-apps.
+  std::optional<webapps::ManifestId> parent_manifest_id{GURL("https://www.appparent.com/")};
+};
+std::unique_ptr<WebApp> CreateRandomWebApp(
+    const CreateRandomWebAppParams& params);
 
 void TestAcceptDialogCallback(
+    base::WeakPtr<WebAppScreenshotFetcher>,
     content::WebContents* initiator_web_contents,
     std::unique_ptr<WebAppInstallInfo> web_app_info,
     WebAppInstallationAcceptanceCallback acceptance_callback);
 
 void TestDeclineDialogCallback(
+    base::WeakPtr<WebAppScreenshotFetcher>,
     content::WebContents* initiator_web_contents,
     std::unique_ptr<WebAppInstallInfo> web_app_info,
     WebAppInstallationAcceptanceCallback acceptance_callback);
 
-AppId InstallPwaForCurrentUrl(Browser* browser);
+webapps::AppId InstallPwaForCurrentUrl(BrowserWindowInterface* browser);
 
 void CheckServiceWorkerStatus(const GURL& url,
                               content::StoragePartition* storage_partition,
                               content::ServiceWorkerCapability status);
 
-void SetWebAppSettingsListPref(Profile* profile, base::StringPiece pref);
+void SetWebAppSettingsListPref(Profile* profile, std::string_view pref);
 
 void AddInstallUrlData(PrefService* pref_service,
                        WebAppSyncBridge* sync_bridge,
-                       const AppId& app_id,
+                       const webapps::AppId& app_id,
                        const GURL& url,
                        const ExternalInstallSource& source);
 
 void AddInstallUrlAndPlaceholderData(PrefService* pref_service,
                                      WebAppSyncBridge* sync_bridge,
-                                     const AppId& app_id,
+                                     const webapps::AppId& app_id,
                                      const GURL& url,
                                      const ExternalInstallSource& source,
                                      bool is_placeholder);
 
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-class ScopedSkipMainProfileCheck {
- public:
-  ScopedSkipMainProfileCheck();
-  ScopedSkipMainProfileCheck(const ScopedSkipMainProfileCheck&) = delete;
-  ScopedSkipMainProfileCheck& operator=(const ScopedSkipMainProfileCheck&) =
-      delete;
-  ~ScopedSkipMainProfileCheck();
-};
-#endif
+void SynchronizeOsIntegration(
+    Profile* profile,
+    const webapps::AppId& app_id,
+    std::optional<SynchronizeOsOptions> options = std::nullopt);
+
+// Creates a few well-formed integrity block signatures.
+std::vector<web_package::SignedWebBundleSignatureInfo> CreateSignatures();
+
+// Loads a gfx::Image from a png file on the disk. Will CHECK-fail if the png
+// data reading fails. If `read_from_test_dir` is true (which is the case for
+// most use-cases), the file_path should be an absolute path, otherwise
+// `base::FilePath::Append()` with DCHECK-fail.
+gfx::Image LoadTestImageFromDisk(const base::FilePath& file_path,
+                                 bool read_from_test_dir = true);
 
 }  // namespace test
 }  // namespace web_app

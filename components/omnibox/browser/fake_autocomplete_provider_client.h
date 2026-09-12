@@ -12,11 +12,17 @@
 #include "base/memory/raw_ptr.h"
 #include "components/bookmarks/browser/bookmark_model.h"
 #include "components/history/core/browser/top_sites.h"
+#include "components/history_embeddings/core/history_embeddings_search.h"
+#include "components/omnibox/browser/fake_autocomplete_scoring_model_service.h"
+#include "components/omnibox/browser/fake_on_device_tail_model_service.h"
 #include "components/omnibox/browser/fake_tab_matcher.h"
 #include "components/omnibox/browser/in_memory_url_index.h"
+#include "components/omnibox/browser/mock_aim_eligibility_service.h"
 #include "components/omnibox/browser/mock_autocomplete_provider_client.h"
 #include "components/omnibox/browser/shortcuts_backend.h"
 #include "components/omnibox/browser/test_scheme_classifier.h"
+#include "components/saved_tab_groups/test_support/fake_tab_group_sync_service.h"
+#include "components/search_engines/search_engines_test_environment.h"
 
 namespace bookmarks {
 class BookmarkModel;
@@ -26,9 +32,12 @@ namespace history {
 class HistoryService;
 }  // namespace history
 
+namespace history_clusters {
+class HistoryClustersService;
+}
+
 class InMemoryURLIndex;
 class PrefService;
-class TestingPrefServiceSimple;
 
 // Fully operational AutocompleteProviderClient for usage in tests.
 // Note: The history index rebuild task is created from main thread, usually
@@ -56,13 +65,31 @@ class FakeAutocompleteProviderClient : public MockAutocompleteProviderClient {
   history::HistoryService* GetHistoryService() override;
   history_clusters::HistoryClustersService* GetHistoryClustersService()
       override;
+  history_embeddings::HistoryEmbeddingsSearch* GetHistoryEmbeddingsSearch()
+      override;
   bookmarks::BookmarkModel* GetBookmarkModel() override;
   InMemoryURLIndex* GetInMemoryURLIndex() override;
+  DocumentSuggestionsService* GetDocumentSuggestionsService() const override;
   scoped_refptr<ShortcutsBackend> GetShortcutsBackend() override;
   scoped_refptr<ShortcutsBackend> GetShortcutsBackendIfExists() override;
-  query_tiles::TileService* GetQueryTileService() const override;
+  tab_groups::TabGroupSyncService* GetTabGroupSyncService() const override;
   const TabMatcher& GetTabMatcher() const override;
   scoped_refptr<history::TopSites> GetTopSites() override;
+  std::string ProfileUserName() const override;
+  AimEligibilityService* GetAimEligibilityService() const override;
+
+  OnDeviceTailModelService* GetOnDeviceTailModelService() const override;
+  FakeAutocompleteScoringModelService* GetAutocompleteScoringModelService()
+      const override;
+
+  void ResetGeolocationPermissionToAsk(const GURL& url) const override;
+
+  GURL last_reset_geolocation_url() const {
+    return last_reset_geolocation_url_;
+  }
+  int reset_geolocation_call_count() const {
+    return reset_geolocation_call_count_;
+  }
 
   // Test-only setters
   void set_bookmark_model(std::unique_ptr<bookmarks::BookmarkModel> model) {
@@ -76,6 +103,11 @@ class FakeAutocompleteProviderClient : public MockAutocompleteProviderClient {
   void set_history_clusters_service(
       history_clusters::HistoryClustersService* service) {
     history_clusters_service_ = service;
+  }
+
+  void set_history_embeddings_search(
+      std::unique_ptr<history_embeddings::HistoryEmbeddingsSearch> search) {
+    history_embeddings_search_ = std::move(search);
   }
 
   // There should be no reason to set this unless the tested provider actually
@@ -94,6 +126,8 @@ class FakeAutocompleteProviderClient : public MockAutocompleteProviderClient {
   }
 
  private:
+  search_engines::SearchEnginesTestEnvironment search_engines_test_enviroment_;
+  std::unique_ptr<DocumentSuggestionsService> document_suggestions_service_;
   base::ScopedTempDir history_dir_;
   std::unique_ptr<bookmarks::BookmarkModel> bookmark_model_;
   TestSchemeClassifier scheme_classifier_;
@@ -101,12 +135,20 @@ class FakeAutocompleteProviderClient : public MockAutocompleteProviderClient {
   std::unique_ptr<history::HistoryService> history_service_;
   raw_ptr<history_clusters::HistoryClustersService> history_clusters_service_ =
       nullptr;
-  std::unique_ptr<TestingPrefServiceSimple> local_state_;
-  std::unique_ptr<TestingPrefServiceSimple> pref_service_;
+  std::unique_ptr<history_embeddings::HistoryEmbeddingsSearch>
+      history_embeddings_search_;
   scoped_refptr<ShortcutsBackend> shortcuts_backend_;
-  std::unique_ptr<query_tiles::TileService> tile_service_;
   FakeTabMatcher fake_tab_matcher_;
-  scoped_refptr<history::TopSites> top_sites_{};
+  scoped_refptr<history::TopSites> top_sites_;
+  std::unique_ptr<tab_groups::FakeTabGroupSyncService>
+      fake_tab_group_sync_service_;
+  std::unique_ptr<MockAimEligibilityService> mock_aim_eligibility_service_;
+
+  std::unique_ptr<FakeOnDeviceTailModelService> on_device_tail_model_service_;
+  std::unique_ptr<FakeAutocompleteScoringModelService> scoring_model_service_;
+
+  mutable GURL last_reset_geolocation_url_;
+  mutable int reset_geolocation_call_count_ = 0;
 };
 
 #endif  // COMPONENTS_OMNIBOX_BROWSER_FAKE_AUTOCOMPLETE_PROVIDER_CLIENT_H_

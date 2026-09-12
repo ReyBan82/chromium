@@ -36,6 +36,8 @@ class LogBuffer;
     "Abort parsing form: Form has no text field.")                             \
   T(FunnelMetrics, "Funnel Metrics")                                           \
   T(KeyMetrics, "Key Metrics")                                                 \
+  T(ImportAddressProfileComplementedCountryCode,                               \
+    "Country code inferred for profile import: ")                              \
   T(ImportAddressProfileFromForm,                                              \
     "FormDataImporter::ImportAddressProfiles for form:  ")                     \
   T(ImportAddressProfileFromFormFailed,                                        \
@@ -43,13 +45,13 @@ class LogBuffer;
   T(ImportAddressProfileFromFormNumberOfImports,                               \
     "Number of imported address profiles: ")                                   \
   T(ImportAddressProfileFromFormSection, "ImportAddressProfileForSection: ")   \
-  T(ImportAddressProfileFromFormCountrySource,                                 \
-    "Source of country for address requirements: ")                            \
   T(ImportAddressProfileFromFormAddressRequirements,                           \
     "Requirements for the address import: ")                                   \
   T(ImportAddressProfileFromFormRemoveInvalidValue,                            \
     "Removing value because validation failed: ")                              \
   T(FormSubmissionDetected, "Form submission detected: ")                      \
+  T(FormSubmissionDetectedButIgnoredDueToActorTask,                            \
+    "Form submission detected but ignored (active actor task):")               \
   T(SendFillingData, "Sending data to fill to renderer: ")                     \
   T(CreditCardUploadEnabled, "Credit card upload is enabled.")                 \
   T(CreditCardUploadDisabled, "Credit card upload is disabled. Reason: ")      \
@@ -61,7 +63,11 @@ class LogBuffer;
   T(JavaScriptChangedAutofilledValue,                                          \
     "JavaScript set value of autofilled "                                      \
     "field: ")                                                                 \
-  T(FastCheckout, "Fast Checkout: ")
+  T(TouchToFill, "Touch To Fill: ")                                            \
+  T(AutofillAi, "Autofill with AI: ")                                          \
+  T(AtMemory, "AtMemory: ")                                                    \
+  T(TriggeringClientsideModelFor,                                              \
+    "Triggered clientside classification model for : ")
 
 // Log messages for chrome://autofill-internals.
 

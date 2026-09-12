@@ -7,18 +7,18 @@ package org.chromium.chrome.browser.gesturenav;
 import android.content.Context;
 import android.view.View;
 
-import org.chromium.base.supplier.Supplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
 import org.chromium.content_public.browser.NavigationHistory;
 
-/**
- * Interface that defines the methods for controlling Navigation sheet.
- */
+import java.util.function.Supplier;
+
+/** Interface that defines the methods for controlling Navigation sheet. */
+@NullMarked
 public interface NavigationSheet {
-    /**
-     * Delegate performing navigation-related operations/providing the required info.
-     */
+    /** Delegate performing navigation-related operations/providing the required info. */
     interface Delegate {
         /**
          * @param forward {@code true} if the requested history is of forward navigation.
@@ -27,22 +27,24 @@ public interface NavigationSheet {
          */
         NavigationHistory getHistory(boolean forward, boolean isOffTheRecord);
 
-        /**
-         * Navigates to the page associated with the given index.
-         */
+        /** Navigates to the page associated with the given index. */
         void navigateToIndex(int index);
     }
 
     /**
      * Create {@link NavigationSheet} object.
-     * @param rootView Root view whose dimension is used for the sheet.
+     *
+     * @param parentView Parent view whose dimension is used for the sheet.
      * @param context {@link Context} used to retrieve resources.
      * @param bottomSheetController {@link BottomSheetController} object.
      * @return NavigationSheet object.
      */
-    public static NavigationSheet create(View rootView, Context context,
-            Supplier<BottomSheetController> bottomSheetController, Profile profile) {
-        return new NavigationSheetCoordinator(rootView, context, bottomSheetController, profile);
+    static NavigationSheet create(
+            View parentView,
+            Context context,
+            Supplier<@Nullable BottomSheetController> bottomSheetController,
+            Profile profile) {
+        return new NavigationSheetCoordinator(parentView, context, bottomSheetController, profile);
     }
 
     /**
@@ -55,49 +57,15 @@ public interface NavigationSheet {
     /**
      * @return {@code true} if another instance of NavigationSheet is already showing.
      */
-    public static boolean isInstanceShowing(BottomSheetController controller) {
+    static boolean isInstanceShowing(BottomSheetController controller) {
         if (controller == null) return false;
         return (controller.getCurrentSheetContent() instanceof NavigationSheetCoordinator)
                 && controller.isSheetOpen();
     }
 
     /**
-     * Dummy object that does nothing. Saves lots of null checks.
-     */
-    static final NavigationSheet DUMMY = new NavigationSheet() {
-        @Override
-        public void setDelegate(Delegate delegate) {}
-
-        @Override
-        public void start(boolean forward, boolean showCloseIndicator) {}
-
-        @Override
-        public boolean startAndExpand(boolean forward, boolean animate) {
-            return false;
-        }
-
-        @Override
-        public void close(boolean animate) {}
-
-        @Override
-        public void onScroll(float delta, float overscroll, boolean willNavigate) {}
-
-        @Override
-        public void release() {}
-
-        @Override
-        public boolean isHidden() {
-            return true;
-        }
-
-        @Override
-        public boolean isExpanded() {
-            return false;
-        }
-    };
-
-    /**
      * Set a new {@link Delegate} object whenever the dependency is updated.
+     *
      * @param delegate Delegate used by navigation sheet to perform actions.
      */
     void setDelegate(Delegate delegate);
@@ -126,24 +94,19 @@ public interface NavigationSheet {
 
     /**
      * Process swipe gesture and update the navigation sheet state.
+     *
      * @param delta Scroll delta from the previous scroll.
      * @param overscroll Total amount of scroll since the dragging started.
-     * @param willNavigate {@code true} if navgation will be triggered upon release.
+     * @param willNavigate {@code true} if navigation will be triggered upon release.
      */
     void onScroll(float delta, float overscroll, boolean willNavigate);
 
-    /**
-     * Process release events.
-     */
+    /** Process release events. */
     void release();
 
-    /**
-     * @param {@code true} if navigation sheet is in hidden state.
-     */
+    /** Returns whether navigation sheet is in hidden state. */
     boolean isHidden();
 
-    /**
-     * @param {@code true} if navigation sheet is in expanded (half/full) state.
-     */
+    /** Returns whether navigation sheet is in expanded (half/full) state. */
     boolean isExpanded();
 }

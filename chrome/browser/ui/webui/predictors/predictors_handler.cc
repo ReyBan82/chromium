@@ -29,7 +29,7 @@ PredictorsHandler::PredictorsHandler(Profile* profile) {
       predictors::LoadingPredictorFactory::GetForProfile(profile);
 }
 
-PredictorsHandler::~PredictorsHandler() { }
+PredictorsHandler::~PredictorsHandler() = default;
 
 void PredictorsHandler::RegisterMessages() {
   web_ui()->RegisterMessageCallback(
@@ -45,26 +45,23 @@ void PredictorsHandler::RegisterMessages() {
 }
 
 void PredictorsHandler::RequestAutocompleteActionPredictorDb(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
   const bool enabled = !!autocomplete_action_predictor_;
-  base::Value::Dict dict;
-  dict.Set("enabled", enabled);
+  auto dict = base::DictValue().Set("enabled", enabled);
   if (enabled) {
-    base::Value::List db;
+    base::ListValue db;
     for (AutocompleteActionPredictor::DBCacheMap::const_iterator it =
              autocomplete_action_predictor_->db_cache_.begin();
-         it != autocomplete_action_predictor_->db_cache_.end();
-         ++it) {
-      base::Value::Dict entry;
-      entry.Set("user_text", it->first.user_text);
-      entry.Set("url", it->first.url.spec());
-      entry.Set("hit_count", it->second.number_of_hits);
-      entry.Set("miss_count", it->second.number_of_misses);
-      entry.Set(
-          "confidence",
-          autocomplete_action_predictor_->CalculateConfidenceForDbEntry(it));
-      db.Append(std::move(entry));
+         it != autocomplete_action_predictor_->db_cache_.end(); ++it) {
+      db.Append(
+          base::DictValue()
+              .Set("user_text", it->first.user_text)
+              .Set("url", it->first.url.spec())
+              .Set("hit_count", it->second.number_of_hits)
+              .Set("miss_count", it->second.number_of_misses)
+              .Set("confidence", autocomplete_action_predictor_
+                                     ->CalculateConfidenceForDbEntry(it)));
     }
     dict.Set("db", std::move(db));
   }
@@ -73,11 +70,10 @@ void PredictorsHandler::RequestAutocompleteActionPredictorDb(
 }
 
 void PredictorsHandler::RequestResourcePrefetchPredictorDb(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
   const bool enabled = (loading_predictor_ != nullptr);
-  base::Value::Dict dict;
-  dict.Set("enabled", enabled);
+  auto dict = base::DictValue().Set("enabled", enabled);
 
   if (enabled) {
     auto* resource_prefetch_predictor =
@@ -90,7 +86,7 @@ void PredictorsHandler::RequestResourcePrefetchPredictorDb(
       // TODO(alexilin): Add redirects table.
 
       // Origin table cache.
-      base::Value::List db;
+      base::ListValue db;
       AddOriginDataMapToListValue(
           resource_prefetch_predictor->origin_data_->GetAllCached(), &db);
       dict.Set("origin_db", std::move(db));
@@ -102,24 +98,23 @@ void PredictorsHandler::RequestResourcePrefetchPredictorDb(
 
 void PredictorsHandler::AddOriginDataMapToListValue(
     const std::map<std::string, predictors::OriginData>& data_map,
-    base::Value::List* db) const {
+    base::ListValue* db) const {
   for (const auto& p : data_map) {
-    base::Value::Dict main;
-    main.Set("main_frame_host", p.first);
-    base::Value::List origins;
+    auto main = base::DictValue().Set("main_frame_host", p.first);
+    base::ListValue origins;
     for (const predictors::OriginStat& o : p.second.origins()) {
-      base::Value::Dict origin;
-      origin.Set("origin", o.origin());
-      origin.Set("number_of_hits", static_cast<int>(o.number_of_hits()));
-      origin.Set("number_of_misses", static_cast<int>(o.number_of_misses()));
-      origin.Set("consecutive_misses",
-                 static_cast<int>(o.consecutive_misses()));
-      origin.Set("position", o.average_position());
-      origin.Set("always_access_network", o.always_access_network());
-      origin.Set("accessed_network", o.accessed_network());
-      origin.Set("score",
-                 ResourcePrefetchPredictorTables::ComputeOriginScore(o));
-      origins.Append(std::move(origin));
+      origins.Append(
+          base::DictValue()
+              .Set("origin", o.origin())
+              .Set("number_of_hits", static_cast<int>(o.number_of_hits()))
+              .Set("number_of_misses", static_cast<int>(o.number_of_misses()))
+              .Set("consecutive_misses",
+                   static_cast<int>(o.consecutive_misses()))
+              .Set("position", o.average_position())
+              .Set("always_access_network", o.always_access_network())
+              .Set("accessed_network", o.accessed_network())
+              .Set("score",
+                   ResourcePrefetchPredictorTables::ComputeOriginScore(o)));
     }
     main.Set("origins", std::move(origins));
     db->Append(std::move(main));

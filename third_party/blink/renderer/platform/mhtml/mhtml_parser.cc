@@ -31,6 +31,7 @@
 #include "third_party/blink/renderer/platform/mhtml/mhtml_parser.h"
 
 #include <stddef.h>
+
 #include <utility>
 
 #include "base/logging.h"
@@ -41,6 +42,7 @@
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
 #include "third_party/blink/renderer/platform/wtf/text/ascii_ctype.h"
 #include "third_party/blink/renderer/platform/wtf/text/base64.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_concatenate.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
@@ -51,21 +53,20 @@ namespace blink {
 
 namespace {
 
-void QuotedPrintableDecode(const char* data,
-                           size_t data_length,
-                           Vector<char>& out) {
+void QuotedPrintableDecode(base::span<const char> data, Vector<uint8_t>& out) {
   out.clear();
-  if (!data_length)
+  if (data.empty()) {
     return;
+  }
 
-  for (size_t i = 0; i < data_length; ++i) {
+  for (size_t i = 0; i < data.size(); ++i) {
     char current_character = data[i];
     if (current_character != '=') {
       out.push_back(current_character);
       continue;
     }
     // We are dealing with a '=xx' sequence.
-    if (data_length - i < 3) {
+    if (data.size() - i < 3) {
       // Unfinished = sequence, append as is.
       out.push_back(current_character);
       continue;
@@ -75,8 +76,8 @@ void QuotedPrintableDecode(const char* data,
     if (upper_character == '\r' && lower_character == '\n')
       continue;
 
-    if (!IsASCIIHexDigit(upper_character) ||
-        !IsASCIIHexDigit(lower_character)) {
+    if (!IsAsciiHexDigit(upper_character) ||
+        !IsAsciiHexDigit(lower_character)) {
       // Invalid sequence, = followed by non hex digits, just insert the
       // characters as is.
       out.push_back('=');
@@ -85,7 +86,7 @@ void QuotedPrintableDecode(const char* data,
       continue;
     }
     out.push_back(
-        static_cast<char>(ToASCIIHexValue(upper_character, lower_character)));
+        static_cast<char>(ToAsciiHexValue(upper_character, lower_character)));
   }
 }
 
@@ -109,7 +110,7 @@ class MIMEHeader final : public GarbageCollected<MIMEHeader> {
   static MIMEHeader* ParseHeader(SharedBufferChunkReader* cr_lf_line_reader);
 
   bool IsMultipart() const {
-    return content_type_.StartsWithIgnoringASCIICase("multipart/");
+    return content_type_.StartsWithIgnoringAsciiCase("multipart/");
   }
 
   String ContentType() const { return content_type_; }
@@ -149,20 +150,21 @@ static KeyValueMap RetrieveKeyValuePairs(SharedBufferChunkReader* buffer) {
   String line;
   String key;
   StringBuilder value;
-  while (!(line = buffer->NextChunkAsUTF8StringWithLatin1Fallback()).IsNull()) {
+  while (!(line = buffer->NextChunkAsUtf8StringWithLatin1Fallback()).IsNull()) {
     if (line.empty())
       break;  // Empty line means end of key/value section.
     // RFC822 continuation: A line that starts with LWSP is a continuation of
     // the prior line.
     if ((line[0] == '\t') || (line[0] == ' ')) {
-      value.Append(line.Substring(1));
+      value.Append(line.subview(1));
       continue;
     }
     // New key/value, store the previous one if any.
     if (!key.empty()) {
-      if (key_value_pairs.find(key) != key_value_pairs.end())
+      if (key_value_pairs.Contains(key)) {
         DVLOG(1) << "Key duplicate found in MIME header. Key is '" << key
                  << "', previous value replaced.";
+      }
       key_value_pairs.insert(key, value.ToString().StripWhiteSpace());
       key = String();
       value.Clear();
@@ -172,9 +174,11 @@ static KeyValueMap RetrieveKeyValuePairs(SharedBufferChunkReader* buffer) {
       // This is not a key value pair, ignore.
       continue;
     }
-    key =
-        line.Substring(0, semi_colon_index).DeprecatedLower().StripWhiteSpace();
-    value.Append(line.Substring(semi_colon_index + 1));
+    key = line.subview(0, semi_colon_index)
+              .StripWhiteSpace()
+              .ToString()
+              .ToAsciiLower();
+    value.Append(line.subview(semi_colon_index + 1));
   }
   // Store the last property if there is one.
   if (!key.empty())
@@ -201,11 +205,11 @@ MIMEHeader* MIMEHeader::ParseHeader(SharedBufferChunkReader* buffer) {
         DVLOG(1) << "No boundary found in multipart MIME header.";
         return nullptr;
       }
-      mime_header->end_of_part_boundary_ = "--" + boundary;
+      mime_header->end_of_part_boundary_ = StrCat({"--", boundary});
       mime_header->end_of_document_boundary_ =
           mime_header->end_of_part_boundary_;
       mime_header->end_of_document_boundary_ =
-          mime_header->end_of_document_boundary_ + "--";
+          StrCat({mime_header->end_of_document_boundary_, "--"});
     }
   }
 
@@ -238,7 +242,7 @@ MIMEHeader* MIMEHeader::ParseHeader(SharedBufferChunkReader* buffer) {
 
 MIMEHeader::Encoding MIMEHeader::ParseContentTransferEncoding(
     const String& text) {
-  String encoding = text.StripWhiteSpace().LowerASCII();
+  String encoding = text.StripWhiteSpace().ToAsciiLower();
   if (encoding == "base64")
     return Encoding::kBase64;
   if (encoding == "quoted-printable")
@@ -258,7 +262,7 @@ MIMEHeader::MIMEHeader() : content_transfer_encoding_(Encoding::kUnknown) {}
 static bool SkipLinesUntilBoundaryFound(SharedBufferChunkReader& line_reader,
                                         const String& boundary) {
   String line;
-  while (!(line = line_reader.NextChunkAsUTF8StringWithLatin1Fallback())
+  while (!(line = line_reader.NextChunkAsUtf8StringWithLatin1Fallback())
               .IsNull()) {
     if (line == boundary)
       return true;
@@ -367,7 +371,7 @@ ArchiveResource* MHTMLParser::ParseNextPart(
     // read the part content till reaching the boundary without CRLF. So the
     // part content may contain CRLF at the end, which will be stripped off
     // later.
-    line_reader_.SetSeparator(end_of_part_boundary.Utf8().c_str());
+    line_reader_.SetSeparator(end_of_part_boundary.Utf8());
     if (!line_reader_.NextChunk(content)) {
       DVLOG(1) << "Binary contents requires end of part";
       return nullptr;
@@ -398,7 +402,7 @@ ArchiveResource* MHTMLParser::ParseNextPart(
     DCHECK(next_chars.size() == 2);
     end_of_archive_reached = (next_chars[0] == '-' && next_chars[1] == '-');
     if (!end_of_archive_reached) {
-      String line = line_reader_.NextChunkAsUTF8StringWithLatin1Fallback();
+      String line = line_reader_.NextChunkAsUtf8StringWithLatin1Fallback();
       if (!line.empty()) {
         DVLOG(1) << "No CRLF at end of binary section.";
         return nullptr;
@@ -406,7 +410,7 @@ ArchiveResource* MHTMLParser::ParseNextPart(
     }
   } else {
     String line;
-    while (!(line = line_reader_.NextChunkAsUTF8StringWithLatin1Fallback())
+    while (!(line = line_reader_.NextChunkAsUtf8StringWithLatin1Fallback())
                 .IsNull()) {
       end_of_archive_reached = (line == end_of_document_boundary);
       if (check_boundary &&
@@ -416,12 +420,12 @@ ArchiveResource* MHTMLParser::ParseNextPart(
       }
       // Note that we use line.utf8() and not line.ascii() as ascii turns
       // special characters (such as tab, line-feed...) into '?'.
-      content.Append(line.Utf8().c_str(), line.length());
+      content.append_range(line.Utf8());
       if (content_transfer_encoding == MIMEHeader::Encoding::kQuotedPrintable) {
         // The line reader removes the \r\n, but we need them for the content in
         // this case as the QuotedPrintable decoder expects CR-LF terminated
         // lines.
-        content.Append("\r\n", 2u);
+        content.append_range(base::span_from_cstring("\r\n"));
       }
     }
   }
@@ -430,32 +434,33 @@ ArchiveResource* MHTMLParser::ParseNextPart(
     return nullptr;
   }
 
-  Vector<char> data;
+  Vector<uint8_t> data;
   switch (content_transfer_encoding) {
     case MIMEHeader::Encoding::kBase64:
-      if (!Base64Decode(StringView(content.data(), content.size()), data)) {
+      if (!Base64Decode(StringView(base::as_byte_span(content)), data)) {
         DVLOG(1) << "Invalid base64 content for MHTML part.";
         return nullptr;
       }
       break;
     case MIMEHeader::Encoding::kQuotedPrintable:
-      QuotedPrintableDecode(content.data(), content.size(), data);
+      QuotedPrintableDecode(content, data);
       break;
     case MIMEHeader::Encoding::kEightBit:
     case MIMEHeader::Encoding::kSevenBit:
     case MIMEHeader::Encoding::kBinary:
-      data.Append(content.data(), content.size());
+      data.append_range(content);
       break;
     default:
       DVLOG(1) << "Invalid encoding for MHTML part.";
       return nullptr;
   }
-  scoped_refptr<SharedBuffer> content_buffer = SharedBuffer::AdoptVector(data);
+  scoped_refptr<SharedBuffer> content_buffer =
+      SharedBuffer::Create(std::move(data));
   // FIXME: the URL in the MIME header could be relative, we should resolve it
   // if it is.  The specs mentions 5 ways to resolve a URL:
   // http://tools.ietf.org/html/rfc2557#section-5
   // IE and Firefox (UNMht) seem to generate only absolute URLs.
-  KURL location = KURL(NullURL(), mime_header.ContentLocation());
+  KURL location = KURL(NullUrl(), mime_header.ContentLocation());
   return MakeGarbageCollected<ArchiveResource>(
       content_buffer, location, mime_header.ContentID(),
       AtomicString(mime_header.ContentType()),
@@ -475,13 +480,14 @@ KURL MHTMLParser::ConvertContentIDToURI(const String& content_id) {
   if (content_id.length() <= 2)
     return KURL();
 
-  if (!content_id.StartsWith('<') || !content_id.EndsWith('>'))
+  if (!content_id.starts_with('<') || !content_id.ends_with('>')) {
     return KURL();
+  }
 
   StringBuilder uri_builder;
   uri_builder.Append("cid:");
   uri_builder.Append(content_id, 1, content_id.length() - 2);
-  return KURL(NullURL(), uri_builder.ToString());
+  return KURL(NullUrl(), uri_builder.ToString());
 }
 
 }  // namespace blink

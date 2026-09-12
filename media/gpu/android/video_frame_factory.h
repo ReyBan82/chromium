@@ -63,12 +63,18 @@ class MEDIA_GPU_EXPORT VideoFrameFactory {
       std::unique_ptr<CodecOutputBuffer> output_buffer,
       base::TimeDelta timestamp,
       gfx::Size natural_size,
+      const gfx::ColorSpace& color_space,
+      const gfx::HDRMetadata& hdr_metadata,
       PromotionHintAggregator::NotifyPromotionHintCB promotion_hint_cb,
       OnceOutputCB output_cb) = 0;
 
   // Runs |closure| on the calling sequence after all previous
   // CreateVideoFrame() calls have completed.
   virtual void RunAfterPendingVideoFrames(base::OnceClosure closure) = 0;
+
+  // Returns true if the VideoFrameFactory can't currently produce any more
+  // frames.
+  virtual bool IsStalled() const = 0;
 };
 
 }  // namespace media

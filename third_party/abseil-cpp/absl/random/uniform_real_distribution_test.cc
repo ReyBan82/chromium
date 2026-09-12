@@ -16,8 +16,10 @@
 
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -26,7 +28,7 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/base/internal/raw_logging.h"
+#include "absl/log/log.h"
 #include "absl/numeric/internal/representation.h"
 #include "absl/random/internal/chi_square.h"
 #include "absl/random/internal/distribution_test_util.h"
@@ -64,9 +66,9 @@ class UniformRealDistributionTest : public ::testing::Test {};
 // https://bugs.llvm.org/show_bug.cgi?id=49132. Don't bother running these tests
 // with double doubles until compiler support is better.
 using RealTypes =
-    std::conditional<absl::numeric_internal::IsDoubleDouble(),
-                     ::testing::Types<float, double>,
-                     ::testing::Types<float, double, long double>>::type;
+    std::conditional_t<absl::numeric_internal::IsDoubleDouble(),
+                       ::testing::Types<float, double>,
+                       ::testing::Types<float, double, long double>>;
 
 TYPED_TEST_SUITE(UniformRealDistributionTest, RealTypes);
 
@@ -180,18 +182,17 @@ TYPED_TEST(UniformRealDistributionTest, ParamSerializeTest) {
       }
     }
 
-    if (!std::is_same<real_type, long double>::value) {
+    if (!std::is_same_v<real_type, long double>) {
       // static_cast<double>(long double) can overflow.
-      std::string msg = absl::StrCat("Range: ", static_cast<double>(sample_min),
-                                     ", ", static_cast<double>(sample_max));
-      ABSL_RAW_LOG(INFO, "%s", msg.c_str());
+      LOG(INFO) << "Range: " << static_cast<double>(sample_min) << ", "
+                << static_cast<double>(sample_max);
     }
   }
 }
 
 #ifdef _MSC_VER
 #pragma warning(push)
-#pragma warning(disable:4756)  // Constant arithmetic overflow.
+#pragma warning(disable : 4756)  // Constant arithmetic overflow.
 #endif
 TYPED_TEST(UniformRealDistributionTest, ViolatesPreconditionsDeathTest) {
   using DistributionType = absl::uniform_real_distribution<TypeParam>;
@@ -324,7 +325,7 @@ TYPED_TEST(UniformRealDistributionTest, ChiSquaredTest50) {
       absl::StrAppend(&msg, kChiSquared, " p-value ", p_value, "\n");
       absl::StrAppend(&msg, "High ", kChiSquared, " value: ", chi_square, " > ",
                       kThreshold);
-      ABSL_RAW_LOG(INFO, "%s", msg.c_str());
+      LOG(INFO) << msg;
       FAIL() << msg;
     }
   }

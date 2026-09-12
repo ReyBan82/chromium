@@ -23,7 +23,8 @@ LazyBackgroundTaskQueue* LazyBackgroundTaskQueueFactory::GetForBrowserContext(
 
 // static
 LazyBackgroundTaskQueueFactory* LazyBackgroundTaskQueueFactory::GetInstance() {
-  return base::Singleton<LazyBackgroundTaskQueueFactory>::get();
+  static base::NoDestructor<LazyBackgroundTaskQueueFactory> instance;
+  return instance.get();
 }
 
 LazyBackgroundTaskQueueFactory::LazyBackgroundTaskQueueFactory()
@@ -34,18 +35,19 @@ LazyBackgroundTaskQueueFactory::LazyBackgroundTaskQueueFactory()
   DependsOn(ExtensionHostRegistry::GetFactory());
 }
 
-LazyBackgroundTaskQueueFactory::~LazyBackgroundTaskQueueFactory() {
-}
+LazyBackgroundTaskQueueFactory::~LazyBackgroundTaskQueueFactory() = default;
 
-KeyedService* LazyBackgroundTaskQueueFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+LazyBackgroundTaskQueueFactory::BuildServiceInstanceForBrowserContext(
     BrowserContext* context) const {
-  return new LazyBackgroundTaskQueue(context);
+  return std::make_unique<LazyBackgroundTaskQueue>(context);
 }
 
 BrowserContext* LazyBackgroundTaskQueueFactory::GetBrowserContextToUse(
     BrowserContext* context) const {
   // Redirected in incognito.
-  return ExtensionsBrowserClient::Get()->GetOriginalContext(context);
+  return ExtensionsBrowserClient::Get()->GetContextRedirectedToOriginal(
+      context);
 }
 
 }  // namespace extensions

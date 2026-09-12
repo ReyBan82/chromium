@@ -5,9 +5,9 @@
 #define CONTENT_BROWSER_ISOLATED_ORIGIN_UTIL_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/gtest_prod_util.h"
-#include "base/strings/string_util.h"
 #include "content/common/content_export.h"
 #include "url/origin.h"
 
@@ -20,7 +20,7 @@ namespace content {
 // https://bar.com.
 class CONTENT_EXPORT IsolatedOriginPattern {
  public:
-  explicit IsolatedOriginPattern(base::StringPiece pattern);
+  explicit IsolatedOriginPattern(std::string_view pattern);
   explicit IsolatedOriginPattern(const url::Origin& origin);
   ~IsolatedOriginPattern();
 
@@ -52,7 +52,7 @@ class CONTENT_EXPORT IsolatedOriginPattern {
   bool isolate_all_subdomains() const { return isolate_all_subdomains_; }
 
   // Return the original pattern used to construct this instance.
-  const base::StringPiece pattern() const { return pattern_; }
+  const std::string_view pattern() const { return pattern_; }
 
   // Return if this origin is valid for isolation purposes.
   bool is_valid() const { return is_valid_; }
@@ -65,7 +65,7 @@ class CONTENT_EXPORT IsolatedOriginPattern {
   // Checks if |pattern| is a wildcard pattern, checks the scheme is one of
   // {http, https} and constructs a url::Origin() that can be retrieved if
   // parsing is successful. Returns true on successful parsing.
-  bool Parse(const base::StringPiece& pattern);
+  bool Parse(const std::string_view& pattern);
 
   std::string pattern_;
   url::Origin origin_;
@@ -96,21 +96,39 @@ class CONTENT_EXPORT IsolatedOriginUtil {
   // allowed.
   static bool IsValidIsolatedOrigin(const url::Origin& origin);
 
-  // Check if |origin| is a valid origin for opt-in origin isolation. Invalid
-  // origins for this purpose include opaque origins, origins that don't have a
-  // HTTP or HTTPS scheme, and origins that are not secure contexts.
-  static bool IsValidOriginForOptInIsolation(const url::Origin& origin);
+  // Check if |origin| is a valid origin for Origin-Agent-Cluster opt-in.
+  // Invalid origins for this purpose include opaque origins, origins that don't
+  // have a HTTP or HTTPS scheme, and origins that are not secure contexts.
+  static bool IsValidOriginForOriginAgentClusterOptIn(
+      const url::Origin& origin);
 
-  // Check if |origin| is a valid origin for opting out of origin isolation.
+  // Check if |origin| is a valid origin for Origin-Agent-Cluster opt-out.
   // Invalid origins for this purpose include opaque origins, and origins that
   // don't have a HTTP or HTTPS scheme.
-  static bool IsValidOriginForOptOutIsolation(const url::Origin& origin);
+  static bool IsValidOriginForOriginAgentClusterOptOut(
+      const url::Origin& origin);
+
+  // Helper to remove the trailing dot from the provided URL's host, if present.
+  // Used when looking for matching legacy isolated origins.
+  static std::optional<GURL> RemoveTrailingDotFromUrlIfNecessary(
+      const GURL& url);
+
+  // Reconstructs the given origin with its default port if it currently has a
+  // non-default port. Used for resolving matches for legacy isolated origins
+  // where isolate_all_subdomains is true. Legacy isolated origins don't support
+  // ports, so the port needs to be cleared when returning an origin that
+  // matched a wildcard.
+  static url::Origin CreateOriginWithDefaultPortIfNecessary(
+      const url::Origin& origin);
 
  private:
   // Used to implement both IsValidIsolatedOrigin and
-  // IsValidOriginForOptInIsolation.
+  // IsValidOriginForOptInIsolation. The legacy isolated origin case performs
+  // some additional checks that don't apply to the opt-in case: it verifies the
+  // origin has a registry domain (for subdomain matching) and disallows
+  // trailing dots in the domain.
   static bool IsValidIsolatedOriginImpl(const url::Origin& origin,
-                                        bool check_has_registry_domain);
+                                        bool is_legacy_isolated_origin_check);
 };
 
 }  // namespace content

@@ -13,8 +13,10 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
+#include "content/browser/media/media_devices_util.h"
 #include "content/browser/renderer_host/media/media_stream_manager.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/global_routing_id.h"
 #include "media/audio/audio_device_description.h"
 #include "media/base/audio_parameters.h"
 #include "media/base/output_device_info.h"
@@ -29,7 +31,7 @@ namespace content {
 // request from the renderer. It checks which device to use (in case of using
 // |session_id| to select device), verifies that the renderer is authorized to
 // use the device, and gets the default device parameters for the selected audio
-// device.
+// device. Each instance is bound to one RenderFrameHost for its lifetime.
 class CONTENT_EXPORT AudioOutputAuthorizationHandler {
  public:
   // Convention: Something named |device_id| is hashed and something named
@@ -47,23 +49,25 @@ class CONTENT_EXPORT AudioOutputAuthorizationHandler {
 
   AudioOutputAuthorizationHandler(media::AudioSystem* audio_system,
                                   MediaStreamManager* media_stream_manager,
-                                  int render_process_id_);
+                                  GlobalRenderFrameHostId render_frame_host_id);
 
   AudioOutputAuthorizationHandler(const AudioOutputAuthorizationHandler&) =
       delete;
   AudioOutputAuthorizationHandler& operator=(
       const AudioOutputAuthorizationHandler&) = delete;
 
-  ~AudioOutputAuthorizationHandler();
+  // Make it virtual for testing purpose.
+  virtual ~AudioOutputAuthorizationHandler();
 
   // Checks authorization of the device with the hashed id |device_id| for the
-  // given render frame id, or uses |session_id| for authorization. Looks up
-  // device id (if |session_id| is used for device selection) and default
-  // device parameters. This function will always call |cb|.
-  void RequestDeviceAuthorization(int render_frame_id,
-                                  const base::UnguessableToken& session_id,
-                                  const std::string& device_id,
-                                  AuthorizationCompletedCallback cb) const;
+  // frame bound at construction, or uses |session_id| for authorization. Looks
+  // up the device id (if |session_id| is used for device selection) and default
+  // device parameters. This function will always call |cb|. Make it virtual for
+  // testing purpose.
+  virtual void RequestDeviceAuthorization(
+      const base::UnguessableToken& session_id,
+      const std::string& device_id,
+      AuthorizationCompletedCallback cb) const;
 
   // Calling this method will make the checks for permission from the user
   // always return |override_value|.
@@ -91,15 +95,13 @@ class CONTENT_EXPORT AudioOutputAuthorizationHandler {
   void AccessChecked(std::unique_ptr<TraceScope> trace_scope,
                      AuthorizationCompletedCallback cb,
                      const std::string& device_id,
-                     std::string salt,
-                     url::Origin security_origin,
+                     MediaDeviceSaltAndOrigin salt_and_origin,
                      bool has_access) const;
 
   void TranslateDeviceID(std::unique_ptr<TraceScope> trace_scope,
                          AuthorizationCompletedCallback cb,
                          const std::string& device_id,
-                         const std::string& salt,
-                         const url::Origin& security_origin,
+                         const MediaDeviceSaltAndOrigin& salt_and_origin,
                          const MediaDeviceEnumeration& enumeration) const;
 
   void GetDeviceParameters(std::unique_ptr<TraceScope> trace_scope,
@@ -111,11 +113,11 @@ class CONTENT_EXPORT AudioOutputAuthorizationHandler {
       AuthorizationCompletedCallback cb,
       const std::string& device_id_for_renderer,
       const std::string& raw_device_id,
-      const absl::optional<media::AudioParameters>& params) const;
+      const std::optional<media::AudioParameters>& params) const;
 
   const raw_ptr<media::AudioSystem> audio_system_;
   const raw_ptr<MediaStreamManager> media_stream_manager_;
-  const int render_process_id_;
+  const GlobalRenderFrameHostId render_frame_host_id_;
   bool override_permissions_ = false;
   bool permissions_override_value_ = false;
   std::string hashed_device_id_for_global_media_controls_;

@@ -5,9 +5,12 @@
 #ifndef CHROME_BROWSER_EXTENSIONS_API_IDENTITY_WEB_AUTH_FLOW_INFO_BAR_DELEGATE_H_
 #define CHROME_BROWSER_EXTENSIONS_API_IDENTITY_WEB_AUTH_FLOW_INFO_BAR_DELEGATE_H_
 
-#include "components/infobars/core/confirm_infobar_delegate.h"
-
+#include "base/gtest_prod_util.h"
 #include "base/memory/weak_ptr.h"
+#include "components/infobars/core/confirm_infobar_delegate.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace content {
 class WebContents;
@@ -15,13 +18,12 @@ class WebContents;
 
 namespace extensions {
 
-// Infobar used by extension auth flows when authentication is done through a
-// Browser Tab. A browser tab is opened when needing action from the user in
-// those flows.
-// This infobar displays information to the user to clarify why this tab was
-// opened, mentioning the extension name as part of the text.
-// Auth flows should take care of managing when to close the bar if not manually
-// closed by the user, otherwise it should live as long as the flow is alive.
+// Infobar used by extension auth flow `chrome.identity.launchWebAuthFlow()`.
+// A browser window is opened when needing action from the user in this flow.
+// This infobar displays information to the user to clarify why this window was
+// opened, mentioning the extension name as part of the text. Auth flows should
+// take care of managing when to close the bar if not manually closed by the
+// user, otherwise it should live as long as the flow is alive.
 class WebAuthFlowInfoBarDelegate : public ConfirmInfoBarDelegate {
  public:
   static base::WeakPtr<WebAuthFlowInfoBarDelegate> Create(
@@ -43,6 +45,12 @@ class WebAuthFlowInfoBarDelegate : public ConfirmInfoBarDelegate {
 
  private:
   explicit WebAuthFlowInfoBarDelegate(const std::string& extension_name);
+
+  // The Create() method needs a valid browser window because it shows the
+  // infobar in addition to creating the delegate. Unit tests construct the
+  // delegate directly from the private constructor. This way, they can avoid
+  // setting up the environment needed by the Create() method.
+  FRIEND_TEST_ALL_PREFIXES(WebAuthFlowInfoBarDelegateTest, LongExtensionName);
 
   const std::string extension_name_;
 

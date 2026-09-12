@@ -85,8 +85,8 @@ void ExpectVirtualPathRoundtrip(
   base::FilePath virtual_path(virtual_path_string);
   GURL result = VirtualPathToExternalFileURL(virtual_path);
   EXPECT_TRUE(result.is_valid());
-  EXPECT_EQ(content::kExternalFileScheme, result.scheme());
-  EXPECT_EQ(expected_url, result.path());
+  EXPECT_EQ(content::kExternalFileScheme, result.GetScheme());
+  EXPECT_EQ(expected_url, result.GetPath());
   EXPECT_EQ(virtual_path.value(), ExternalFileURLToVirtualPath(result).value());
 }
 
@@ -106,7 +106,7 @@ TEST_F(ExternalFileURLUtilTest, VirtualPathToExternalFileURL) {
   // potentially used for URL spoofing. Those are blocklisted from unescaping
   // when a URL is displayed, but this should not prevent it from being
   // unescaped when converting a URL to a virtual file path. See
-  // crbug.com/585422 for detail.
+  // crbug.com/40456191 for detail.
   ExpectVirtualPathRoundtrip(FILE_PATH_LITERAL("foo/bar/space\u3000lock🔒.zip"),
                              "foo/bar/space%E3%80%80lock%F0%9F%94%92.zip");
 }

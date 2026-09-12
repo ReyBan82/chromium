@@ -6,6 +6,8 @@
 #define CHROME_BROWSER_SSL_KNOWN_INTERCEPTION_DISCLOSURE_INFOBAR_DELEGATE_H_
 
 #include <algorithm>
+#include <memory>
+
 #include "base/memory/raw_ptr.h"
 #include "base/memory/singleton.h"
 #include "base/time/default_clock.h"
@@ -80,6 +82,7 @@ class KnownInterceptionDisclosureInfoBarDelegate
 
   // ConfirmInfoBarDelegate:
   infobars::InfoBarDelegate::InfoBarIdentifier GetIdentifier() const override;
+  infobars::InfoBarDelegate::InfobarPriority GetPriority() const override;
   std::u16string GetLinkText() const override;
   GURL GetLinkURL() const override;
   bool ShouldExpire(const NavigationDetails& details) const override;
@@ -89,13 +92,6 @@ class KnownInterceptionDisclosureInfoBarDelegate
   bool Accept() override;
 
 #if BUILDFLAG(IS_ANDROID)
-  int GetIconId() const override;
-  std::u16string GetButtonLabel(InfoBarButton button) const override;
-
-  // This function is the equivalent of GetMessageText(), but for the portion of
-  // the infobar below the 'message' title for the Android infobar.
-  std::u16string GetDescriptionText() const;
-
   static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
 #endif
 

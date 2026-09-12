@@ -5,6 +5,7 @@
 package org.chromium.components.browser_ui.widget;
 
 import android.content.Context;
+import android.content.res.TypedArray;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -13,12 +14,17 @@ import android.widget.ScrollView;
 
 import androidx.annotation.IntDef;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.ui.base.DeviceFormFactor;
+import org.chromium.ui.base.DeviceInput;
+
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
-/**
- * An extension of the ScrollView that supports edge boundaries coming in.
- */
+/** An extension of the ScrollView that supports edge boundaries coming in. */
+@NullMarked
 public class FadingEdgeScrollView extends ScrollView {
     @IntDef({EdgeType.NONE, EdgeType.FADING, EdgeType.HARD})
     @Retention(RetentionPolicy.SOURCE)
@@ -40,16 +46,16 @@ public class FadingEdgeScrollView extends ScrollView {
     private final int mSeparatorColor;
     private final int mSeparatorHeight;
 
-    @EdgeType
-    private int mDrawTopEdge = EdgeType.FADING;
-    @EdgeType
-    private int mDrawBottomEdge = EdgeType.FADING;
+    @EdgeType private int mDrawTopEdge = EdgeType.FADING;
+    @EdgeType private int mDrawBottomEdge = EdgeType.FADING;
 
-    public FadingEdgeScrollView(Context context, AttributeSet attrs) {
+    public FadingEdgeScrollView(Context context, @Nullable AttributeSet attrs) {
         super(context, attrs);
 
         mSeparatorColor = getContext().getColor(R.color.toolbar_shadow_color);
         mSeparatorHeight = getResources().getDimensionPixelSize(R.dimen.divider_height);
+
+        if (attrs != null) parseAttributes(attrs);
     }
 
     @Override
@@ -76,14 +82,27 @@ public class FadingEdgeScrollView extends ScrollView {
     }
 
     /**
+     * Disables the vertical scrollbar on tablet if precision pointer is supported and the feature
+     * is enabled.
+     */
+    public void disableScrollbarOnTablet() {
+        if (DeviceInput.supportsPrecisionPointer()
+                && DeviceFormFactor.isNonMultiDisplayContextOnTablet(getContext())
+                && ChromeFeatureList.isEnabled(
+                        ChromeFeatureList.DISABLE_SCROLLBAR_OF_FADING_EDGE_SCROLLVIEW)) {
+            setVerticalScrollBarEnabled(false);
+        }
+    }
+
+    /**
      * Draws a line at the top or bottom of the view. This should be called from dispatchDraw() so
      * it gets drawn on top of the View's children.
      *
-     * @param canvas       The canvas on which to draw.
-     * @param position     Where to draw the line: either POSITION_TOP or POSITION_BOTTOM.
-     * @param edgeStrength A value between 0 and 1 indicating the relative size of the line. 0
-     *                     means no line at all. 1 means a fully opaque line.
-     * @param edgeType     How to draw the line.
+     * @param canvas The canvas on which to draw.
+     * @param position Where to draw the line: either POSITION_TOP or POSITION_BOTTOM.
+     * @param edgeStrength A value between 0 and 1 indicating the relative size of the line. 0 means
+     *     no line at all. 1 means a fully opaque line.
+     * @param edgeType How to draw the line.
      */
     private void drawBoundaryLine(
             Canvas canvas, int position, float edgeStrength, @EdgeType int edgeType) {
@@ -112,5 +131,20 @@ public class FadingEdgeScrollView extends ScrollView {
             int top = getScrollY();
             canvas.drawRect(left, top, right, top + mSeparatorHeight, mSeparatorPaint);
         }
+    }
+
+    private void parseAttributes(AttributeSet attrs) {
+        TypedArray a = getContext().obtainStyledAttributes(attrs, R.styleable.FadingEdgeScrollView);
+
+        if (a.hasValue(R.styleable.FadingEdgeScrollView_topEdgeVisibility)) {
+            mDrawTopEdge =
+                    a.getInt(R.styleable.FadingEdgeScrollView_topEdgeVisibility, EdgeType.FADING);
+        }
+        if (a.hasValue(R.styleable.FadingEdgeScrollView_bottomEdgeVisibility)) {
+            mDrawBottomEdge =
+                    a.getInt(
+                            R.styleable.FadingEdgeScrollView_bottomEdgeVisibility, EdgeType.FADING);
+        }
+        a.recycle();
     }
 }

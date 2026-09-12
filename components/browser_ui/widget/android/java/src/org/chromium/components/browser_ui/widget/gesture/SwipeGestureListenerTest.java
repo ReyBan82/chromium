@@ -4,6 +4,7 @@
 
 package org.chromium.components.browser_ui.widget.gesture;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 
 import android.view.MotionEvent;
@@ -12,13 +13,14 @@ import androidx.test.filters.SmallTest;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.components.browser_ui.widget.gesture.SwipeGestureListener.ScrollDirection;
@@ -27,20 +29,16 @@ import org.chromium.components.browser_ui.widget.gesture.SwipeGestureListener.Sw
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * The Unittest of {@link SwipeGestureListener}.
- */
+/** The Unittest of {@link SwipeGestureListener}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class SwipeGestureListenerTest {
     private SwipeGestureListener mListener;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Mock
-    private SwipeHandler mHandler;
+    @Mock private SwipeHandler mHandler;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mListener = new SwipeGestureListener(null, mHandler, 1, 1);
     }
 
@@ -73,13 +71,13 @@ public class SwipeGestureListenerTest {
     }
 
     private void testSwipeByGivenDirection(int expectedDirection, List<MotionEvent> eventStream) {
-        Mockito.when(mHandler.isSwipeEnabled(anyInt())).thenReturn(true);
+        Mockito.when(mHandler.isSwipeEnabled(anyInt(), any())).thenReturn(true);
         for (MotionEvent event : eventStream) {
             mListener.onTouchEvent(event);
         }
         ArgumentCaptor<MotionEvent> argumentCaptor = ArgumentCaptor.forClass(MotionEvent.class);
-        Mockito.verify(mHandler).onSwipeStarted(
-                Mockito.eq(expectedDirection), argumentCaptor.capture());
+        Mockito.verify(mHandler)
+                .onSwipeStarted(Mockito.eq(expectedDirection), argumentCaptor.capture());
         boolean found = false;
         for (MotionEvent event : eventStream) {
             if (Math.abs(event.getRawX() - argumentCaptor.getValue().getRawX()) < 0.1) {
@@ -95,11 +93,23 @@ public class SwipeGestureListenerTest {
         List<MotionEvent> list = new ArrayList<>();
         list.add(MotionEvent.obtain(0, 0, MotionEvent.ACTION_DOWN, startX, startY, 0));
         for (int i = 1; i < count - 1; i++) {
-            list.add(MotionEvent.obtain(
-                    0, 0, MotionEvent.ACTION_MOVE, startX + i * offsetX, startY + i * offSetY, 0));
+            list.add(
+                    MotionEvent.obtain(
+                            0,
+                            0,
+                            MotionEvent.ACTION_MOVE,
+                            startX + i * offsetX,
+                            startY + i * offSetY,
+                            0));
         }
-        list.add(MotionEvent.obtain(0, 0, MotionEvent.ACTION_UP, startX + (count - 1) * offsetX,
-                startY + (count - 1) * offSetY, 0));
+        list.add(
+                MotionEvent.obtain(
+                        0,
+                        0,
+                        MotionEvent.ACTION_UP,
+                        startX + (count - 1) * offsetX,
+                        startY + (count - 1) * offSetY,
+                        0));
         return list;
     }
 }

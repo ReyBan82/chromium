@@ -33,25 +33,17 @@
 
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_impl.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
-namespace WTF {
+namespace blink {
 
 namespace {
-
-void ExpectBuilderContent(const String& expected,
-                          const StringBuilder& builder) {
-  // Not using builder.toString() because it changes internal state of builder.
-  if (builder.Is8Bit())
-    EXPECT_EQ(expected, String(builder.Characters8(), builder.length()));
-  else
-    EXPECT_EQ(expected, String(builder.Characters16(), builder.length()));
-}
 
 void ExpectEmpty(const StringBuilder& builder) {
   EXPECT_EQ(0U, builder.length());
   EXPECT_TRUE(builder.empty());
-  EXPECT_EQ(nullptr, builder.Characters8());
+  EXPECT_EQ(nullptr, builder.Span8().data());
 }
 
 }  // namespace
@@ -64,35 +56,36 @@ TEST(StringBuilderTest, DefaultConstructor) {
 TEST(StringBuilderTest, Append) {
   StringBuilder builder;
   builder.Append(String("0123456789"));
-  ExpectBuilderContent("0123456789", builder);
+  EXPECT_EQ(String("0123456789"), StringView(builder));
   builder.Append("abcd");
-  ExpectBuilderContent("0123456789abcd", builder);
-  builder.Append("efgh", 3);
-  ExpectBuilderContent("0123456789abcdefg", builder);
+  EXPECT_EQ(String("0123456789abcd"), StringView(builder));
+  builder.Append(base::byte_span_from_cstring("efgh").first(3u));
+  EXPECT_EQ(String("0123456789abcdefg"), StringView(builder));
   builder.Append("");
-  ExpectBuilderContent("0123456789abcdefg", builder);
+  EXPECT_EQ(String("0123456789abcdefg"), StringView(builder));
   builder.Append('#');
-  ExpectBuilderContent("0123456789abcdefg#", builder);
+  EXPECT_EQ(String("0123456789abcdefg#"), StringView(builder));
 
   builder.ToString();  // Test after reifyString().
   StringBuilder builder1;
-  builder.Append("", 0);
-  ExpectBuilderContent("0123456789abcdefg#", builder);
-  builder1.Append(builder.Characters8(), builder.length());
+  builder.Append("");
+  EXPECT_EQ(String("0123456789abcdefg#"), StringView(builder));
+  builder1.Append(builder.Span8());
   builder1.Append("XYZ");
-  builder.Append(builder1.Characters8(), builder1.length());
-  ExpectBuilderContent("0123456789abcdefg#0123456789abcdefg#XYZ", builder);
+  builder.Append(builder1.Span8());
+  EXPECT_EQ(String("0123456789abcdefg#0123456789abcdefg#XYZ"),
+            StringView(builder));
 
   StringBuilder builder2;
   builder2.ReserveCapacity(100);
   builder2.Append("xyz");
-  const LChar* characters = builder2.Characters8();
+  base::span<const LChar> characters = builder2.Span8();
   builder2.Append("0123456789");
-  EXPECT_EQ(characters, builder2.Characters8());
+  EXPECT_EQ(characters.data(), builder2.Span8().data());
 
   StringBuilder builder3;
   builder3.Append("xyz", 1, 2);
-  ExpectBuilderContent("yz", builder3);
+  EXPECT_EQ(String("yz"), StringView(builder3));
 
   StringBuilder builder4;
   builder4.Append("abc", 5, 3);
@@ -100,13 +93,13 @@ TEST(StringBuilderTest, Append) {
 
   StringBuilder builder5;
   builder5.Append(StringView(StringView("def"), 1, 1));
-  ExpectBuilderContent("e", builder5);
+  EXPECT_EQ(String("e"), StringView(builder5));
 
   // append() has special code paths for String backed StringView instead of
   // just char* backed ones.
   StringBuilder builder6;
   builder6.Append(String("ghi"), 1, 2);
-  ExpectBuilderContent("hi", builder6);
+  EXPECT_EQ(String("hi"), StringView(builder6));
 
   // Test appending UChar32 characters to StringBuilder.
   StringBuilder builder_for_u_char32_append;
@@ -119,8 +112,38 @@ TEST(StringBuilderTest, Append) {
   EXPECT_EQ(3U, builder_for_u_char32_append.length());
   const UChar result_array[] = {U16_LEAD(fraktur_a_char),
                                 U16_TRAIL(fraktur_a_char), 'A'};
-  ExpectBuilderContent(String(result_array, std::size(result_array)),
-                       builder_for_u_char32_append);
+  EXPECT_EQ(StringView(base::span(result_array)),
+            StringView(builder_for_u_char32_append));
+}
+
+TEST(StringBuilderTest, AppendSpan) {
+  StringBuilder builder;
+
+  // Append an empty span
+  builder.Append(base::as_byte_span(base::span_from_cstring("")));
+  EXPECT_EQ(0u, builder.length());
+  builder.Append(base::span_from_cstring(u""));
+  EXPECT_EQ(0u, builder.length());
+
+  // Append to an 8-bit builder.
+  builder.Append("a");
+  builder.Append(base::as_byte_span(base::span_from_cstring("b")));
+  EXPECT_TRUE(builder.Is8Bit());
+  EXPECT_EQ(2u, builder.length());
+  builder.Append(base::span_from_cstring(u"U"));
+  EXPECT_TRUE(builder.Is8Bit());
+  EXPECT_EQ(3u, builder.length());
+  builder.Append(base::span_from_cstring(u"VV"));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(5u, builder.length());
+
+  // Append to a 16-bit builder.
+  builder.Append(base::as_byte_span(base::span_from_cstring("c")));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(6u, builder.length());
+  builder.Append(base::span_from_cstring(u"W"));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(7u, builder.length());
 }
 
 TEST(StringBuilderTest, AppendSharingImpl) {
@@ -134,6 +157,230 @@ TEST(StringBuilderTest, AppendSharingImpl) {
   builder2.Append(string, 0, string.length());
   EXPECT_EQ(string.Impl(), builder2.ToString().Impl());
   EXPECT_EQ(string.Impl(), builder2.ToAtomicString().Impl());
+}
+
+TEST(StringBuilderTest, ExtendSharedViewAcrossAppends) {
+  String source("Hello, World!");
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 5));  // "Hello"
+  builder.Append(StringView(source, 5, 8));  // ", World!"
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+TEST(StringBuilderTest, ExtendSharedViewWithMatchingSeparateString) {
+  String source("Hello, World!");
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 5));  // "Hello"
+  builder.Append(String(", World!"));        // distinct impl, matching bytes
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+TEST(StringBuilderTest, ExtendSharedViewWithChar) {
+  String source("ab");
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 1));  // "a"
+  builder.Append('b');                       // matches source[1]
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+TEST(StringBuilderTest, SharedViewNotExtendedOnMismatch) {
+  String source("ab");
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 1));  // "a"
+  builder.Append('c');                       // source[1] is 'b', not 'c'
+  EXPECT_EQ(String("ac"), builder.ToString());
+  EXPECT_NE(source.Impl(), builder.ToString().Impl());
+}
+
+// A view that does not start at the beginning of the source impl is not
+// retained (only prefixes are); it is materialized via the buffer path, and
+// still reads back as the correct content.
+TEST(StringBuilderTest, SharedViewPartialOffset) {
+  String source("Hello, World!");
+  StringBuilder builder;
+  builder.Append(StringView(source, 7, 6));  // "World!"
+  EXPECT_EQ(String("World!"), builder.ToString());
+  EXPECT_EQ(6u, builder.length());
+}
+
+// A view that starts at offset 0 but is shorter than the source impl must be
+// normalized to its logical content by ToString(); otherwise the whole source
+// impl would leak out. This pins the `length_ != string_.length()` term of
+// HasSharedSubview() (a zero-offset view is not necessarily a whole view).
+TEST(StringBuilderTest, SharedViewZeroOffsetPrefixToString) {
+  String source("abcdef");
+  StringBuilder builder;
+  builder.Append(
+      StringView(source, 0, 3));  // "abc": offset 0, but length 3 < 6
+  String result = builder.ToString();
+  EXPECT_EQ(String("abc"), result);
+  EXPECT_EQ(3u, result.length());
+}
+
+// The same zero-offset-but-truncated state reached via Resize(): the whole impl
+// is retained, then shrunk in place. ToString() must still return the prefix.
+TEST(StringBuilderTest, SharedViewResizedPrefixToString) {
+  String source("abcdef");
+  StringBuilder builder;
+  builder.Append(source);  // Whole-impl view: offset 0, length 6.
+  builder.Resize(3);       // Offset 0, length 3, but string_ is still length 6.
+  String result = builder.ToString();
+  EXPECT_EQ(String("abc"), result);
+  EXPECT_EQ(3u, result.length());
+}
+
+// Two adjacent non-prefix sub-ranges of the same source: the first is not
+// retained (not a prefix), so both go through the buffer path and produce the
+// correct concatenated content.
+TEST(StringBuilderTest, ExtendSharedViewWithPartialOffset) {
+  String source("Hello, World!");
+  StringBuilder builder;
+  builder.Append(StringView(source, 7, 3));   // "Wor" at offset 7
+  builder.Append(StringView(source, 10, 3));  // "ld!"
+  EXPECT_EQ(String("World!"), builder.ToString());
+  EXPECT_EQ(6u, builder.length());
+}
+
+// A view is reconstructed across many single-character appends, each extending
+// it (this mirrors the inline collection path, where characters such as the
+// forced-break '\n' are appended one at a time).
+TEST(StringBuilderTest, ExtendSharedViewCharByChar) {
+  String source("abcdefghij");
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 1));  // "a"
+  for (unsigned i = 1; i < source.length(); ++i) {
+    builder.Append(static_cast<LChar>(source[i]));
+  }
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+// A 16-bit source is retained and extended via a multi-character span append
+// (exercises the UChar overload of TryExtendSharedView).
+TEST(StringBuilderTest, ExtendSharedView16Bit) {
+  String source(u"ab\uFF21cd");  // 16-bit because of U+FF21.
+  ASSERT_FALSE(source.Is8Bit());
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 2));  // "ab"
+  builder.Append(StringView(source, 2, 3));  // U+FF21 "cd"
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+// A 16-bit source is extended by a single non-Latin-1 character (exercises the
+// 16-bit branch of TryExtendSharedViewWithChar).
+TEST(StringBuilderTest, ExtendSharedView16BitWithWideChar) {
+  String source(u"ab\uFF21");
+  ASSERT_FALSE(source.Is8Bit());
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 2));  // "ab"
+  builder.Append(static_cast<UChar>(0xFF21));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+// A Latin-1 character extends a 16-bit shared view when the next source code
+// unit has the same value (the comparison is by code-unit value, across the
+// 8-bit/16-bit width boundary).
+TEST(StringBuilderTest, ExtendSharedView16BitWithLatin1Char) {
+  String source(u"a\uFF21b");  // 'a', U+FF21, 'b'; 16-bit.
+  ASSERT_FALSE(source.Is8Bit());
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 2));  // "a" U+FF21
+  builder.Append('b');                       // matches source[2]
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+// A mismatching append against a 16-bit source materializes a copy with the
+// correct content.
+TEST(StringBuilderTest, SharedView16BitNotExtendedOnMismatch) {
+  String source(u"ab\uFF21");
+  ASSERT_FALSE(source.Is8Bit());
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 2));    // "ab"
+  builder.Append(static_cast<UChar>(0xFF22));  // source[2] is U+FF21
+  EXPECT_EQ(String(u"ab\uFF22"), builder.ToString());
+  EXPECT_NE(source.Impl(), builder.ToString().Impl());
+}
+
+// Appending a non-Latin-1 character to an 8-bit shared view cannot extend it
+// (the 8-bit source can't contain the character); the view is materialized and
+// widened to 16-bit with the correct content.
+TEST(StringBuilderTest, Shared8BitViewForcedTo16Bit) {
+  String source("abc");
+  ASSERT_TRUE(source.Is8Bit());
+  StringBuilder builder;
+  builder.Append(StringView(source, 0, 2));  // "ab", 8-bit view
+  EXPECT_TRUE(builder.Is8Bit());
+  builder.Append(static_cast<UChar>(0x1234));
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(String(u"ab\u1234"), builder.ToString());
+}
+
+// Resize shrinks a shared view without copying and keeps the source, so a
+// subsequent matching append can re-extend the view back over the source.
+TEST(StringBuilderTest, SharedViewResizeThenReextend) {
+  String source("abcdef");
+  StringBuilder builder;
+  builder.Append(source);  // Retain the whole impl.
+  builder.Resize(3);       // Logical content "abc"; source still retained.
+  EXPECT_EQ(String("abc"), StringView(builder));
+  builder.Append(StringView(source, 3, 3));  // "def" matches source[3, 6)
+  EXPECT_EQ(source, builder.ToString());
+  EXPECT_EQ(source.Impl(), builder.ToString().Impl());
+}
+
+// Substring()/SubstringView() honor the shared view's offset and clamp an
+// over-long length to the view's logical end (not the end of the source impl).
+TEST(StringBuilderTest, SharedViewSubstringClamped) {
+  String source("Hello, World!");
+  StringBuilder builder;
+  builder.Append(StringView(source, 7, 6));  // "World!"
+  EXPECT_EQ(String("orl"), builder.Substring(1, 3));
+  EXPECT_EQ("orl", builder.SubstringView(1, 3));
+  // The over-long length must stop at the logical end ("World!"), and must not
+  // read into the rest of `source` past the view.
+  EXPECT_EQ(String("orld!"), builder.Substring(1, 1000));
+  EXPECT_EQ("orld!", builder.SubstringView(1, 1000));
+}
+
+// Append(StringBuilder) from a source builder holding a non-prefix sub-range
+// (which is materialized, not retained) reproduces the correct content.
+TEST(StringBuilderTest, AppendBuilderSharesPartialView) {
+  String source("Hello, World!");
+  StringBuilder src;
+  src.Append(StringView(source, 7, 6));  // "World!" at offset 7
+  StringBuilder dst;
+  dst.Append(src);
+  EXPECT_EQ(String("World!"), dst.ToString());
+  EXPECT_EQ(6u, dst.length());
+}
+
+// Append(StringBuilder) of a whole-impl view shares the same impl.
+TEST(StringBuilderTest, AppendBuilderSharesWholeView) {
+  String source("abcdef");
+  StringBuilder src;
+  src.Append(source);
+  StringBuilder dst;
+  dst.Append(src);
+  EXPECT_EQ(source.Impl(), dst.ToString().Impl());
+}
+
+// Ensure16Bit() on a retained 8-bit view materializes it as 16-bit content.
+TEST(StringBuilderTest, Ensure16BitOnSharedView) {
+  String source("abc");
+  StringBuilder builder;
+  builder.Append(source);  // Retain 8-bit whole impl.
+  builder.Ensure16Bit();
+  EXPECT_FALSE(builder.Is8Bit());
+  EXPECT_EQ(String("abc"), builder.ToString());
 }
 
 TEST(StringBuilderTest, ToString) {
@@ -226,15 +473,15 @@ TEST(StringBuilderTest, Resize) {
   builder.Append("0123456789");
   builder.Resize(10);
   EXPECT_EQ(10U, builder.length());
-  ExpectBuilderContent("0123456789", builder);
+  EXPECT_EQ("0123456789", StringView(builder));
   builder.Resize(8);
   EXPECT_EQ(8U, builder.length());
-  ExpectBuilderContent("01234567", builder);
+  EXPECT_EQ("01234567", StringView(builder));
 
   builder.ToString();
   builder.Resize(7);
   EXPECT_EQ(7U, builder.length());
-  ExpectBuilderContent("0123456", builder);
+  EXPECT_EQ("0123456", StringView(builder));
   builder.Resize(0);
   ExpectEmpty(builder);
 }
@@ -244,10 +491,10 @@ TEST(StringBuilderTest, Erase) {
   builder.Append(String("01234"));
   // Erase from String.
   builder.erase(3);
-  ExpectBuilderContent("0124", builder);
+  EXPECT_EQ("0124", StringView(builder));
   // Erase from buffer.
   builder.erase(1);
-  ExpectBuilderContent("024", builder);
+  EXPECT_EQ("024", StringView(builder));
 }
 
 TEST(StringBuilderTest, Erase16) {
@@ -255,24 +502,23 @@ TEST(StringBuilderTest, Erase16) {
   builder.Append(String(u"\uFF10\uFF11\uFF12\uFF13\uFF14"));
   // Erase from String.
   builder.erase(3);
-  ExpectBuilderContent(u"\uFF10\uFF11\uFF12\uFF14", builder);
+  EXPECT_EQ(u"\uFF10\uFF11\uFF12\uFF14", StringView(builder));
   // Erase from buffer.
   builder.erase(1);
-  ExpectBuilderContent(u"\uFF10\uFF12\uFF14", builder);
+  EXPECT_EQ(u"\uFF10\uFF12\uFF14", StringView(builder));
 }
 
 TEST(StringBuilderTest, EraseLast) {
   StringBuilder builder;
   builder.Append("01234");
   builder.erase(4);
-  ExpectBuilderContent("0123", builder);
+  EXPECT_EQ("0123", StringView(builder));
 }
 
 TEST(StringBuilderTest, Equal) {
   StringBuilder builder1;
   StringBuilder builder2;
   EXPECT_TRUE(builder1 == builder2);
-  EXPECT_TRUE(Equal(builder1, static_cast<LChar*>(nullptr), 0));
   EXPECT_TRUE(builder1 == String());
   EXPECT_TRUE(String() == builder1);
   EXPECT_TRUE(builder1 != String("abc"));
@@ -357,7 +603,7 @@ TEST(StringBuilderTest, ToAtomicStringOnEmpty) {
   }
   {  // AtomicString constructed from an empty char* string.
     StringBuilder builder;
-    builder.Append("", 0);
+    builder.Append("");
     AtomicString atomic_string = builder.ToAtomicString();
     EXPECT_EQ(g_empty_atom, atomic_string);
   }
@@ -388,10 +634,10 @@ TEST(StringBuilderTest, Substring) {
 TEST(StringBuilderTest, AppendNumberDoubleUChar) {
   const double kSomeNumber = 1.2345;
   StringBuilder reference;
-  reference.Append(kReplacementCharacter);  // Make it UTF-16.
+  reference.Append(blink::uchar::kReplacementCharacter);  // Make it UTF-16.
   reference.Append(String::Number(kSomeNumber));
   StringBuilder test;
-  test.Append(kReplacementCharacter);
+  test.Append(blink::uchar::kReplacementCharacter);
   test.AppendNumber(kSomeNumber);
   EXPECT_EQ(reference, test);
 }
@@ -441,4 +687,64 @@ TEST(StringBuilderTest, ReserveCapacityTwice16) {
   EXPECT_LE(400u, builder.Capacity());
 }
 
-}  // namespace WTF
+TEST(StringBuilderTest, DoesAppendCauseOverflow) {
+  constexpr wtf_size_t kOneGiB = static_cast<wtf_size_t>(1) << 30;
+
+  {
+    StringBuilder builder;
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(0));
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(1));
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(kStringMaxUCharLength));
+    EXPECT_TRUE(builder.DoesAppendCauseOverflow(kStringMaxUCharLength + 1));
+    EXPECT_TRUE(builder.DoesAppendCauseOverflow(kOneGiB));
+  }
+
+  {
+    StringBuilder builder;
+    builder.Ensure16Bit();
+    EXPECT_FALSE(builder.DoesAppendCauseOverflow(kStringMaxUCharLength));
+    EXPECT_TRUE(builder.DoesAppendCauseOverflow(kStringMaxUCharLength + 1));
+    EXPECT_TRUE(builder.DoesAppendCauseOverflow(kOneGiB));
+  }
+}
+
+TEST(StringBuilderTest, AppendRange) {
+  Vector<StringView> str_vector{"1", "2", "3"};
+  {
+    StringBuilder builder;
+    builder.AppendRange(str_vector, ", ");
+    EXPECT_EQ("1, 2, 3", builder.ReleaseString());
+  }
+  Vector<int> int_vector{1, 2, 3};
+  {
+    StringBuilder builder;
+    builder.AppendRange(int_vector, ";", [](const auto& val, StringBuilder& b) {
+      b.AppendNumber(val * 10);
+    });
+    EXPECT_EQ("10;20;30", builder.ReleaseString());
+  }
+  Vector<int> empty_vector;
+  {
+    StringBuilder builder;
+    builder.AppendRange(empty_vector, ", ",
+                        [](const auto&, StringBuilder& b) { b.Append("foo"); });
+    EXPECT_TRUE(builder.empty());
+  }
+}
+
+TEST(StringBuilderTest, Utf8) {
+  {
+    StringBuilder builder;
+    builder.Append("Hello, world!");
+    EXPECT_EQ("Hello, world!", builder.Utf8());
+  }
+  {
+    StringBuilder builder;
+    builder.Append(String(u"Hello, \u3053\u3093\u306b\u3061\u306f!"));
+    EXPECT_EQ(
+        "Hello, \xe3\x81\x93\xe3\x82\x93\xe3\x81\xab\xe3\x81\xa1\xe3\x81\xaf!",
+        builder.Utf8());
+  }
+}
+
+}  // namespace blink

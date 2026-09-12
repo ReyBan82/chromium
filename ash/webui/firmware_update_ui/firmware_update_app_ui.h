@@ -38,6 +38,9 @@ class FirmwareUpdateAppUI : public ui::MojoWebDialogUI {
   void BindInterface(
       mojo::PendingReceiver<firmware_update::mojom::UpdateProvider> receiver);
 
+  void BindInterface(
+      mojo::PendingReceiver<firmware_update::mojom::SystemUtils> receiver);
+
  private:
   WEB_UI_CONTROLLER_TYPE_DECL();
 };

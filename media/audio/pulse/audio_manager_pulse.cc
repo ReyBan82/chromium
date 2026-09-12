@@ -8,12 +8,14 @@
 #include <utility>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/environment.h"
 #include "base/logging.h"
 #include "base/nix/xdg_util.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "media/audio/audio_device_description.h"
 #include "media/audio/pulse/pulse_input.h"
+#include "media/audio/pulse/pulse_loopback_manager.h"
 #include "media/audio/pulse/pulse_output.h"
 #include "media/audio/pulse/pulse_util.h"
 #include "media/base/audio_parameters.h"
@@ -32,8 +34,6 @@ constexpr int kMaximumOutputBufferSize = 8192;
 constexpr int kDefaultInputBufferSize = 1024;
 constexpr int kDefaultSampleRate = 48000;
 constexpr int kDefaultChannelCount = 2;
-constexpr int kMinChannelCount = 1;
-constexpr int kMaxChannelCount = PA_CHANNELS_MAX;
 
 AudioManagerPulse::AudioManagerPulse(std::unique_ptr<AudioThread> audio_thread,
                                      AudioLogFactory* audio_log_factory,
@@ -45,8 +45,7 @@ AudioManagerPulse::AudioManagerPulse(std::unique_ptr<AudioThread> audio_thread,
       devices_(nullptr),
       native_input_sample_rate_(kDefaultSampleRate),
       native_channel_count_(kDefaultChannelCount),
-      output_sample_rate_(kDefaultSampleRate),
-      output_channel_count_(kDefaultChannelCount) {
+      default_source_is_monitor_(false) {
   DCHECK(input_mainloop_);
   DCHECK(input_context_);
   SetMaxOutputStreamsAllowed(kMaxOutputStreams);
@@ -74,8 +73,9 @@ bool AudioManagerPulse::HasAudioInputDevices() {
   return !devices.empty();
 }
 
-void AudioManagerPulse::GetAudioDeviceNames(
-    bool input, media::AudioDeviceNames* device_names) {
+bool AudioManagerPulse::GetAudioDeviceNames(
+    bool input,
+    media::AudioDeviceNames* device_names) {
   DCHECK(device_names->empty());
   DCHECK(input_mainloop_);
   DCHECK(input_context_);
@@ -89,21 +89,24 @@ void AudioManagerPulse::GetAudioDeviceNames(
     operation = pa_context_get_sink_info_list(
         input_context_, OutputDevicesInfoCallback, this);
   }
-  WaitForOperationCompletion(input_mainloop_, operation, input_context_);
+  bool success =
+      WaitForOperationCompletion(input_mainloop_, operation, input_context_);
 
   // Prepend the default device if the list is not empty.
   if (!device_names->empty())
     device_names->push_front(AudioDeviceName::CreateDefault());
+
+  return success;
 }
 
-void AudioManagerPulse::GetAudioInputDeviceNames(
+bool AudioManagerPulse::GetAudioInputDeviceNames(
     AudioDeviceNames* device_names) {
-  GetAudioDeviceNames(true, device_names);
+  return GetAudioDeviceNames(true, device_names);
 }
 
-void AudioManagerPulse::GetAudioOutputDeviceNames(
+bool AudioManagerPulse::GetAudioOutputDeviceNames(
     AudioDeviceNames* device_names) {
-  GetAudioDeviceNames(false, device_names);
+  return GetAudioDeviceNames(false, device_names);
 }
 
 AudioParameters AudioManagerPulse::GetInputStreamParameters(
@@ -136,7 +139,7 @@ AudioParameters AudioManagerPulse::GetInputStreamParameters(
                          buffer_size);
 }
 
-const char* AudioManagerPulse::GetName() {
+const std::string_view AudioManagerPulse::GetName() {
   return "PulseAudio";
 }
 
@@ -193,7 +196,7 @@ std::string AudioManagerPulse::GetDefaultOutputDeviceID() {
 
 std::string AudioManagerPulse::GetAssociatedOutputDeviceID(
     const std::string& input_device_id) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   return AudioManagerBase::GetAssociatedOutputDeviceID(input_device_id);
 #else
   DCHECK(AudioManager::Get()->GetTaskRunner()->BelongsToCurrentThread());
@@ -214,40 +217,19 @@ std::string AudioManagerPulse::GetAssociatedOutputDeviceID(
 AudioParameters AudioManagerPulse::GetPreferredOutputStreamParameters(
     const std::string& output_device_id,
     const AudioParameters& input_params) {
+  // TODO(tommi): Support |output_device_id|.
+  VLOG_IF(0, !output_device_id.empty()) << "Not implemented!";
+
   int buffer_size = kMinimumOutputBufferSize;
 
   // Query native parameters where applicable; Pulse does not require these to
   // be respected though, so prefer the input parameters for channel count.
   UpdateNativeAudioHardwareInfo();
-  output_sample_rate_ = native_input_sample_rate_ ? native_input_sample_rate_
-                                                  : kDefaultSampleRate;
-  output_channel_count_ =
-      native_channel_count_ ? native_channel_count_ : kDefaultChannelCount;
-  {
-    AutoPulseLock auto_lock(input_mainloop_);
-    auto* operation = pa_context_get_sink_info_by_name(
-        input_context_,
-        (output_device_id.empty() ? default_sink_name_ : output_device_id)
-            .c_str(),
-        UpdateOutputInfoCallback, this);
-    WaitForOperationCompletion(input_mainloop_, operation, input_context_);
-  }
+  int sample_rate = native_input_sample_rate_ ? native_input_sample_rate_
+                                              : kDefaultSampleRate;
+  ChannelLayoutConfig channel_layout_config = ChannelLayoutConfig::Guess(
+      native_channel_count_ ? native_channel_count_ : 2);
 
-  if ((output_channel_count_ < kMinChannelCount) ||
-      (output_channel_count_ > kMaxChannelCount)) {
-    DLOG(WARNING) << "output_channel_count_ (" << output_channel_count_
-                  << ") is outside the valid range of [" << kMinChannelCount
-                  << "," << kMaxChannelCount << "], setting to default ("
-                  << kDefaultChannelCount << ").";
-    output_channel_count_ = kDefaultChannelCount;
-  }
-
-  auto channel_layout_config =
-      ChannelLayoutConfig::Guess(output_channel_count_);
-  if (channel_layout_config.channel_layout() == CHANNEL_LAYOUT_UNSUPPORTED) {
-    channel_layout_config =
-        ChannelLayoutConfig(CHANNEL_LAYOUT_DISCRETE, output_channel_count_);
-  }
   if (input_params.IsValid()) {
     // Use the system's output channel count for the DISCRETE layout. This is to
     // avoid a crash due to the lack of support on the multi-channel beyond 8 in
@@ -265,8 +247,7 @@ AudioParameters AudioManagerPulse::GetPreferredOutputStreamParameters(
     buffer_size = user_buffer_size;
 
   return AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
-                         channel_layout_config, output_sample_rate_,
-                         buffer_size);
+                         channel_layout_config, sample_rate, buffer_size);
 }
 
 AudioOutputStream* AudioManagerPulse::MakeOutputStream(
@@ -282,6 +263,26 @@ AudioInputStream* AudioManagerPulse::MakeInputStream(
     const AudioParameters& params,
     const std::string& device_id,
     LogCallback log_callback) {
+  if (AudioDeviceDescription::IsLoopbackDevice(device_id)) {
+    // We need a loopback manager if we are opening a loopback device.
+    if (!loopback_manager_) {
+      // Unretained is safe as `this` outlives `loopback_manager_` and all
+      // streams. See ~AudioManagerBase.
+      loopback_manager_ = PulseLoopbackManager::Create(
+          base::BindRepeating(&AudioManagerBase::ReleaseInputStream,
+                              base::Unretained(this)),
+          input_context_, input_mainloop_);
+    }
+    bool should_mute_system_audio =
+        (device_id == AudioDeviceDescription::kLoopbackWithMuteDeviceId);
+    if (loopback_manager_) {
+      return loopback_manager_->MakeLoopbackStream(
+          params, std::move(log_callback), should_mute_system_audio);
+    }
+
+    return nullptr;
+  }
+
   return new PulseAudioInputStream(this, device_id, params, input_mainloop_,
                                    input_context_, std::move(log_callback));
 }
@@ -317,16 +318,21 @@ void AudioManagerPulse::InputDevicesInfoCallback(pa_context* context,
 
   // If the device has ports, but none of them are available, skip it.
   if (info->n_ports > 0) {
-    uint32_t port = 0;
-    for (; port != info->n_ports; ++port) {
-      if (info->ports[port]->available != PA_PORT_AVAILABLE_NO)
-        break;
-    }
-    if (port == info->n_ports)
+    // SAFETY:
+    // https://freedesktop.org/software/pulseaudio/doxygen/structpa__source__info.html#a97efff6db2851bc811a31384981a1b0b
+    // The documentation says that `info->ports` represents an array of
+    // available ports. The number is stored in `info->n_ports`.
+    UNSAFE_BUFFERS(
+        base::span<pa_source_port_info*> ports(info->ports, info->n_ports));
+    bool no_ports_available = std::ranges::all_of(ports, [](auto* port) {
+      return port->available == PA_PORT_AVAILABLE_NO;
+    });
+    if (no_ports_available) {
       return;
+    }
   }
 
-  manager->devices_->push_back(AudioDeviceName(info->description, info->name));
+  manager->devices_->emplace_back(info->description, info->name);
 }
 
 void AudioManagerPulse::OutputDevicesInfoCallback(pa_context* context,
@@ -344,22 +350,6 @@ void AudioManagerPulse::OutputDevicesInfoCallback(pa_context* context,
   manager->devices_->push_back(AudioDeviceName(info->description, info->name));
 }
 
-void AudioManagerPulse::UpdateOutputInfoCallback(pa_context* context,
-                                                 const pa_sink_info* info,
-                                                 int eol,
-                                                 void* user_data) {
-  AudioManagerPulse* manager = reinterpret_cast<AudioManagerPulse*>(user_data);
-
-  if (eol) {
-    // Signal the pulse object that it is done.
-    pa_threaded_mainloop_signal(manager->input_mainloop_, 0);
-    return;
-  }
-
-  manager->output_sample_rate_ = info->sample_spec.rate;
-  manager->output_channel_count_ = info->sample_spec.channels;
-}
-
 void AudioManagerPulse::AudioHardwareInfoCallback(pa_context* context,
                                                   const pa_server_info* info,
                                                   void* user_data) {
@@ -369,9 +359,6 @@ void AudioManagerPulse::AudioHardwareInfoCallback(pa_context* context,
   manager->native_channel_count_ = info->sample_spec.channels;
   if (info->default_source_name)
     manager->default_source_name_ = info->default_source_name;
-  if (info->default_sink_name) {
-    manager->default_sink_name_ = info->default_sink_name;
-  }
   pa_threaded_mainloop_signal(manager->input_mainloop_, 0);
 }
 

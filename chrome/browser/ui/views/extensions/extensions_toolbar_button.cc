@@ -7,12 +7,16 @@
 #include "base/feature_list.h"
 #include "base/metrics/user_metrics.h"
 #include "base/metrics/user_metrics_action.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_element_identifiers.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/layout_constants.h"
+#include "chrome/browser/ui/view_ids.h"
 #include "chrome/browser/ui/views/extensions/extensions_menu_coordinator.h"
 #include "chrome/browser/ui/views/extensions/extensions_menu_view.h"
-#include "chrome/browser/ui/views/extensions/extensions_toolbar_container.h"
+#include "chrome/browser/ui/views/extensions/extensions_request_access_button.h"
+#include "chrome/browser/ui/views/extensions/extensions_toolbar_desktop.h"
+#include "chrome/browser/ui/web_applications/app_browser_controller.h"
 #include "chrome/grit/generated_resources.h"
-#include "components/vector_icons/vector_icons.h"
 #include "extensions/common/extension_features.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
@@ -20,19 +24,13 @@
 #include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/controls/button/button_controller.h"
 
-namespace {
-
-const gfx::VectorIcon& kExtensionIcon = vector_icons::kExtensionIcon;
-
-}  // namespace
-
 ExtensionsToolbarButton::ExtensionsToolbarButton(
-    Browser* browser,
-    ExtensionsToolbarContainer* extensions_container,
+    BrowserWindowInterface* browser,
+    ExtensionsToolbarDesktop* extensions_container,
     ExtensionsMenuCoordinator* extensions_menu_coordinator)
-    : ToolbarButton(PressedCallback()),
+    : ToolbarChipButton(PressedCallback()),
       browser_(browser),
-      extensions_container_(extensions_container),
+      extensions_toolbar_(extensions_container),
       extensions_menu_coordinator_(extensions_menu_coordinator) {
   std::unique_ptr<views::MenuButtonController> menu_button_controller =
       std::make_unique<views::MenuButtonController>(
@@ -46,18 +44,50 @@ ExtensionsToolbarButton::ExtensionsToolbarButton(
   button_controller()->set_notify_action(
       views::ButtonController::NotifyAction::kOnPress);
 
-  SetTooltipText(l10n_util::GetStringUTF16(IDS_TOOLTIP_EXTENSIONS_BUTTON));
-  SetVectorIcon(kExtensionIcon);
+  SetVectorIcon(ExtensionsToolbarViewModel::GetToolbarButtonIcon(
+      ExtensionsToolbarViewModel::ExtensionsToolbarButtonState::kDefault));
 
-  GetViewAccessibility().OverrideHasPopup(ax::mojom::HasPopup::kMenu);
+  GetViewAccessibility().SetHasPopup(ax::mojom::HasPopup::kMenu);
+
+  // Do not flip the Extensions icon in RTL.
+  SetFlipCanvasOnPaintForRTLUI(false);
+  SetID(VIEW_ID_EXTENSIONS_MENU_BUTTON);
+
+  // Set button for IPH.
+  SetProperty(views::kElementIdentifierKey, kExtensionsMenuButtonElementId);
+
+  if (base::FeatureList::IsEnabled(
+          extensions_features::kExtensionsMenuAccessControl)) {
+    GetViewAccessibility().SetName(
+        ExtensionsToolbarViewModel::GetToolbarButtonAccessibleText(
+            ExtensionsToolbarViewModel::ExtensionsToolbarButtonState::
+                kDefault));
+    // By default, the button's accessible description is set to the button's
+    // tooltip text. This is the accepted workaround to ensure only accessible
+    // name is announced by a screenreader rather than tooltip text and
+    // accessible name.
+    GetViewAccessibility().SetDescription(
+        std::u16string(),
+        ax::mojom::DescriptionFrom::kAttributeExplicitlyEmpty);
+  } else {
+    // We need to set the tooltip at construction when it's used by the
+    // accessibility mode.
+    SetTooltipText(l10n_util::GetStringUTF16(IDS_TOOLTIP_EXTENSIONS_BUTTON));
+  }
+
+  UpdateCachedTooltipText(
+      ExtensionsToolbarViewModel::ExtensionsToolbarButtonState::kDefault);
 }
 
 ExtensionsToolbarButton::~ExtensionsToolbarButton() {
-  CHECK(!IsInObserverList());
+  if (extensions_menu_widget_) {
+    extensions_menu_widget_->CloseNow();
+  }
 }
 
-gfx::Size ExtensionsToolbarButton::CalculatePreferredSize() const {
-  return extensions_container_->GetToolbarActionSize();
+gfx::Size ExtensionsToolbarButton::CalculatePreferredSize(
+    const views::SizeBounds& available_size) const {
+  return extensions_toolbar_->GetToolbarActionSize();
 }
 
 gfx::Size ExtensionsToolbarButton::GetMinimumSize() const {
@@ -75,8 +105,9 @@ void ExtensionsToolbarButton::OnBoundsChanged(
   // size and the preferred button size.
 
   const gfx::Size current_size = size();
-  if (current_size.IsEmpty())
+  if (current_size.IsEmpty()) {
     return;
+  }
   const int icon_size = GetIconSize();
   gfx::Insets new_insets;
   if (icon_size < current_size.width()) {
@@ -92,24 +123,28 @@ void ExtensionsToolbarButton::OnBoundsChanged(
   SetLayoutInsets(new_insets);
 }
 
-void ExtensionsToolbarButton::UpdateIcon() {
-  if (browser_->app_controller()) {
-    // TODO(pbos): Remove this once PWAs have ThemeProvider color support for it
-    // and ToolbarButton can pick up icon sizes outside of a static lookup.
-    SetImageModel(views::Button::STATE_NORMAL,
-                  ui::ImageModel::FromVectorIcon(
-                      kExtensionIcon, extensions_container_->GetIconColor(),
-                      GetIconSize()));
-    return;
-  }
+void ExtensionsToolbarButton::UpdateState(
+    ExtensionsToolbarViewModel::ExtensionsToolbarButtonState state) {
+  // this check can probably be removed since UpdateState() is called from
+  // ExtensionsToolbarDesktop::UpdateExtensionsButton() which already does
+  // this check
+  CHECK(base::FeatureList::IsEnabled(
+      extensions_features::kExtensionsMenuAccessControl));
 
-  ToolbarButton::UpdateIcon();
+  SetVectorIcon(ExtensionsToolbarViewModel::GetToolbarButtonIcon(state));
+  GetViewAccessibility().SetName(
+      ExtensionsToolbarViewModel::GetToolbarButtonAccessibleText(state));
+  UpdateCachedTooltipText(state);
 }
 
 void ExtensionsToolbarButton::OnWidgetDestroying(views::Widget* widget) {
-  widget->RemoveObserver(this);
+  extension_menu_observation_.Reset();
   pressed_lock_.reset();
-  extensions_container_->OnMenuClosed();
+  extensions_toolbar_->OnMenuClosed();
+}
+
+bool ExtensionsToolbarButton::ShouldShowInkdropAfterIphInteraction() {
+  return false;
 }
 
 void ExtensionsToolbarButton::ToggleExtensionsMenu() {
@@ -123,18 +158,28 @@ void ExtensionsToolbarButton::ToggleExtensionsMenu() {
   }
 
   pressed_lock_ = menu_button_controller_->TakeLock();
-  extensions_container_->OnMenuOpening();
+  extensions_toolbar_->OnMenuOpening();
   base::RecordAction(base::UserMetricsAction("Extensions.Toolbar.MenuOpened"));
   views::Widget* menu;
   if (base::FeatureList::IsEnabled(
           extensions_features::kExtensionsMenuAccessControl)) {
-    extensions_menu_coordinator_->Show(this, extensions_container_);
+    if (extensions_toolbar_->GetRequestAccessButton()->GetVisible()) {
+      base::RecordAction(base::UserMetricsAction(
+          "Extensions.Toolbar.MenuOpenedWhenExtensionsAreRequestingAccess"));
+    }
+    extensions_menu_coordinator_->Show(views::BubbleAnchor(this),
+                                       extensions_toolbar_);
     menu = extensions_menu_coordinator_->GetExtensionsMenuWidget();
   } else {
-    menu =
-        ExtensionsMenuView::ShowBubble(this, browser_, extensions_container_);
+    // Desktop Android will use the
+    // extensions_features::kExtensionsMenuAccessControl menu, therefore we can
+    // use Browser for the other menu until the feature is rolled out.
+    menu = ExtensionsMenuView::ShowBubble(
+        views::BubbleAnchor(this), browser_,
+        extensions_toolbar_->GetToolbarViewModel(), extensions_toolbar_);
   }
-  menu->AddObserver(this);
+  extensions_menu_widget_ = menu->GetWeakPtr();
+  extension_menu_observation_.Observe(menu);
 }
 
 bool ExtensionsToolbarButton::GetExtensionsMenuShowing() const {
@@ -143,11 +188,20 @@ bool ExtensionsToolbarButton::GetExtensionsMenuShowing() const {
 
 int ExtensionsToolbarButton::GetIconSize() const {
   const bool touch_ui = ui::TouchUiController::Get()->touch_ui();
-  return (touch_ui && !browser_->app_controller()) ? kDefaultTouchableIconSize
-                                                   : kDefaultIconSize;
+  if (touch_ui && !web_app::AppBrowserController::IsWebApp(browser_)) {
+    return kDefaultTouchableIconSize;
+  }
+
+  return kDefaultIconSizeChromeRefresh;
 }
 
-BEGIN_METADATA(ExtensionsToolbarButton, ToolbarButton)
+void ExtensionsToolbarButton::UpdateCachedTooltipText(
+    ExtensionsToolbarViewModel::ExtensionsToolbarButtonState state) {
+  SetTooltipText(
+      ExtensionsToolbarViewModel::GetToolbarButtonTooltipText(state));
+}
+
+BEGIN_METADATA(ExtensionsToolbarButton)
 ADD_READONLY_PROPERTY_METADATA(bool, ExtensionsMenuShowing)
 ADD_READONLY_PROPERTY_METADATA(int, IconSize)
 END_METADATA

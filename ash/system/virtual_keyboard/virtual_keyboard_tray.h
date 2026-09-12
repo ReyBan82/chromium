@@ -10,23 +10,20 @@
 #include "ash/public/cpp/keyboard/keyboard_controller_observer.h"
 #include "ash/public/cpp/session/session_observer.h"
 #include "ash/shell_observer.h"
-#include "ash/system/tray/tray_background_view.h"
+#include "ash/system/tray/imaged_tray_icon.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/base/metadata/metadata_header_macros.h"
-
-namespace views {
-class ImageView;
-}
 
 namespace ash {
 
 // TODO(sky): make this visible on non-chromeos platforms.
-class VirtualKeyboardTray : public TrayBackgroundView,
+class VirtualKeyboardTray : public ImagedTrayIcon,
                             public AccessibilityObserver,
                             public KeyboardControllerObserver,
                             public ShellObserver {
- public:
-  METADATA_HEADER(VirtualKeyboardTray);
+  METADATA_HEADER(VirtualKeyboardTray, ImagedTrayIcon)
 
+ public:
   VirtualKeyboardTray(Shelf* shelf, TrayBackgroundViewCatalogName catalog_name);
   VirtualKeyboardTray(const VirtualKeyboardTray&) = delete;
   VirtualKeyboardTray& operator=(const VirtualKeyboardTray&) = delete;
@@ -37,23 +34,16 @@ class VirtualKeyboardTray : public TrayBackgroundView,
 
   // TrayBackgroundView:
   void Initialize() override;
-  std::u16string GetAccessibleNameForTray() override;
-  void HandleLocaleChange() override;
   void HideBubbleWithView(const TrayBubbleView* bubble_view) override;
-  void ClickedOutsideBubble() override;
+  void ClickedOutsideBubble(const ui::LocatedEvent& event) override;
+  void UpdateTrayItemColor(bool is_active) override;
+  void HideBubble(const TrayBubbleView* bubble_view) override;
 
   // AccessibilityObserver:
   void OnAccessibilityStatusChanged() override;
 
   // KeyboardControllerObserver:
   void OnKeyboardVisibilityChanged(bool is_visible) override;
-
- private:
-  // Owned by the views hierarchy.
-  views::ImageView* icon_ = nullptr;
-
-  // Unowned.
-  Shelf* const shelf_;
 };
 
 }  // namespace ash

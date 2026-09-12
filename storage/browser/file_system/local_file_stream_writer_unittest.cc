@@ -16,6 +16,10 @@
 #include "storage/browser/file_system/file_stream_writer.h"
 #include "storage/browser/file_system/file_stream_writer_test.h"
 
+#if BUILDFLAG(IS_ANDROID)
+#include "base/test/android/content_uri_test_utils.h"
+#endif
+
 namespace storage {
 
 class LocalFileStreamWriterTest : public FileStreamWriterTest {
@@ -74,5 +78,50 @@ class LocalFileStreamWriterTest : public FileStreamWriterTest {
 INSTANTIATE_TYPED_TEST_SUITE_P(Local,
                                FileStreamWriterTypedTest,
                                LocalFileStreamWriterTest);
+
+#if BUILDFLAG(IS_ANDROID)
+class ContentUriLocalFileStreamWriterTest : public LocalFileStreamWriterTest {};
+
+TEST_F(ContentUriLocalFileStreamWriterTest, WriteAlwaysTruncates) {
+  EXPECT_TRUE(
+      this->CreateFileWithContent(std::string(this->kTestFileName), "foobar"));
+
+  base::FilePath content_uri =
+      *base::test::android::GetContentUriFromCacheDirFilePath(
+          Path(std::string(this->kTestFileName)));
+
+  auto writer = FileStreamWriter::CreateForLocalFile(
+      file_task_runner(), content_uri, 0, FileStreamWriter::OPEN_EXISTING_FILE);
+
+  EXPECT_EQ(net::OK, WriteStringToWriter(writer.get(), "foo"));
+
+  EXPECT_TRUE(this->FilePathExists(std::string(this->kTestFileName)));
+  EXPECT_EQ("foo", this->GetFileContent(std::string(this->kTestFileName)));
+}
+
+TEST_F(ContentUriLocalFileStreamWriterTest,
+       VirtualDocumentPathWriteAlwaysTruncates) {
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  base::FilePath dir_vp =
+      *base::test::android::GetVirtualDocumentPathFromCacheDirDirectory(
+          temp_dir.GetPath());
+  base::FilePath file_vp = dir_vp.Append("test_file");
+  ASSERT_TRUE(file_vp.IsVirtualDocumentPath());
+
+  base::FilePath file_path = temp_dir.GetPath().AppendASCII("test_file");
+  ASSERT_TRUE(base::WriteFile(file_path, "foobar"));
+
+  auto writer = FileStreamWriter::CreateForLocalFile(
+      file_task_runner(), file_vp, 0, FileStreamWriter::OPEN_EXISTING_FILE);
+
+  EXPECT_EQ(net::OK, WriteStringToWriter(writer.get(), "foo"));
+
+  EXPECT_TRUE(base::PathExists(file_path));
+  std::string content;
+  ASSERT_TRUE(base::ReadFileToString(file_path, &content));
+  EXPECT_EQ("foo", content);
+}
+#endif
 
 }  // namespace storage

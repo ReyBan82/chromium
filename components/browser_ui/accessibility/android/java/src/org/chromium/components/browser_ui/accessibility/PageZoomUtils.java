@@ -5,16 +5,25 @@
 package org.chromium.components.browser_ui.accessibility;
 
 import static org.chromium.content_public.browser.HostZoomMap.AVAILABLE_ZOOM_FACTORS;
-import static org.chromium.content_public.browser.HostZoomMap.SYSTEM_FONT_SCALE;
 import static org.chromium.content_public.browser.HostZoomMap.TEXT_SIZE_MULTIPLIER_RATIO;
+import static org.chromium.content_public.browser.HostZoomMap.getSystemFontScale;
+
+import android.content.Context;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.MathUtils;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.base.TriState;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.content_public.browser.BrowserContextHandle;
 import org.chromium.content_public.browser.ContentFeatureList;
+import org.chromium.content_public.browser.ContentFeatureMap;
 import org.chromium.content_public.browser.HostZoomMap;
+import org.chromium.ui.base.DeviceFormFactor;
 
 import java.util.Arrays;
+import java.util.Locale;
 
 /**
  * General purpose utils class for page zoom feature. This is for methods that are shared by both
@@ -30,53 +39,53 @@ import java.util.Arrays;
  * "zoom factor" = the internal number used by HostZoomMap, acts as the exponent. (double)
  * "zoom level" = the percentage for the zoom that is presented externally to the user. (double)
  * "zoom string" = the string that is actually presented to the user for zoom percentage. (String)
- * "zoom seek value" = an arbitrary int to map the factor to an integer value for a SeekBar. (int)
+ * "zoom bar value" = an arbitrary int to map the factor to an integer value for the bar. (int)
  *
  * For example, some common zoom values are:
  *
- *        string        factor      level      seek value
+ *        string        factor      level      bar value
  *          50%     |   -3.8    |   0.50    |      0      |
  *         100%     |    0.0    |   1.00    |     50      |
  *         250%     |   5.03    |   2.50    |    200      |
  *         300%     |   6.03    |   3.00    |    250      |
  *
  */
+@NullMarked
 public class PageZoomUtils {
-    // The default value for zoom that user can change in the accessibility settings page.
-    public static final int PAGE_ZOOM_DEFAULT_SEEK_VALUE = convertZoomFactorToSeekBarValue(0.0);
+    // The max value for the bar to help with rounding effects (not shown to user).
+    public static final int PAGE_ZOOM_MAXIMUM_BAR_VALUE = 250;
 
-    // The max value for the seek bar to help with rounding effects (not shown to user).
-    public static final int PAGE_ZOOM_MAXIMUM_SEEKBAR_VALUE = 250;
+  // The max value for the text size contrast bar, used in Smart Zoom feature.
+    public static final int TEXT_SIZE_CONTRAST_MAX_LEVEL = 100;
 
-    // The minimum and maximum zoom values as a percentage (e.g. 50% = 0.50, 300% = 3.0)
+    // The minimum and maximum zoom values as a percentage (e.g. 50% = 0.50, 300% = 3.0).
     protected static final float PAGE_ZOOM_MINIMUM_ZOOM_LEVEL = 0.50f;
     protected static final float PAGE_ZOOM_MAXIMUM_ZOOM_LEVEL = 3.00f;
 
     // The timeout for when to dismiss the slider from the last user interaction
     protected static final long LAST_INTERACTION_DISMISSAL = 5000; // 5 seconds = 5 * 1000
 
-    /**
-     * Returns whether the Accessibility Settings page should include the 'Zoom' UI. The page
-     * should always display the UI if the feature is enabled.
-     * @return boolean
-     */
-    public static boolean shouldShowSettingsUI() {
-        return ContentFeatureList.isEnabled(ContentFeatureList.ACCESSIBILITY_PAGE_ZOOM);
-    }
+    // The range of user-readable zoom values at which the bar should snap to the
+    // default zoom value, (e.g. 0.03 = range of +/- 3%).
+    private static final double DEFAULT_ZOOM_LEVEL_SNAP_RANGE = 0.03;
+
+    private static @TriState int sShouldShowMenuItemForTesting;
 
     /**
-     * Seekbars have values 0 to 100 by default. For simplicity, we will keep these values and
-     * convert to the correct zoom factor under-the-hood. See comment at top of class.
+     * Bars have values 0 to 100 by default. For simplicity, we will keep these values and convert
+     * to the correct zoom factor under-the-hood. See comment at top of class.
      *
-     * @param newValue  int value of the seekbar.
+     * @param newValue int value of the bar.
      * @return double
      */
-    public static double convertSeekBarValueToZoomFactor(int newValue) {
+    public static double convertBarValueToZoomFactor(int newValue) {
         // Zoom levels are from |PAGE_ZOOM_MINIMUM_ZOOM_LEVEL| to |PAGE_ZOOM_MAXIMUM_ZOOM_LEVEL|,
-        // and these should map linearly to the seekbar's 0 - 100 range.
-        float seekbarPercent = (float) newValue / PAGE_ZOOM_MAXIMUM_SEEKBAR_VALUE;
-        float chosenZoomLevel = PAGE_ZOOM_MINIMUM_ZOOM_LEVEL
-                + ((PAGE_ZOOM_MAXIMUM_ZOOM_LEVEL - PAGE_ZOOM_MINIMUM_ZOOM_LEVEL) * seekbarPercent);
+        // and these should map linearly to the bar's 0 - 100 range.
+        float barPercent = (float) newValue / PAGE_ZOOM_MAXIMUM_BAR_VALUE;
+        float chosenZoomLevel =
+                PAGE_ZOOM_MINIMUM_ZOOM_LEVEL
+                        + ((PAGE_ZOOM_MAXIMUM_ZOOM_LEVEL - PAGE_ZOOM_MINIMUM_ZOOM_LEVEL)
+                                * barPercent);
 
         // The zoom level maps internally to a zoom factor, which is the exponent that
         // |kTextSizeMultiplierRatio| = 1.2 is raised to. For example, 1.2^-3.8 = 0.50, or
@@ -89,65 +98,126 @@ public class PageZoomUtils {
     }
 
     /**
-     * This method does the reverse of the above method.
-     * Seekbars have values 0 to 100 by default. For simplicity, we will keep these values and
-     * convert to the correct zoom factor under-the-hood.
+     * This method does the reverse of the above method. Bars have values 0 to 100 by default. For
+     * simplicity, we will keep these values and convert to the correct zoom factor under-the-hood.
      *
-     * @param zoomFactor    zoom factor to get seek bar value for.
+     * @param zoomFactor zoom factor to get bar value for.
      * @return int
      */
-    public static int convertZoomFactorToSeekBarValue(double zoomFactor) {
-        // To get to a seekbar value from an index, raise the base (1.2) to the given |zoomFactor|
+    public static int convertZoomFactorToBarValue(double zoomFactor) {
+        // To get to a bar value from an index, raise the base (1.2) to the given |zoomFactor|
         // exponent to get the zoom level. Find where this level sits proportionately between the
-        // min and max level, and use that percentage as the corresponding seek value.
-        double zoomLevel = Math.pow(TEXT_SIZE_MULTIPLIER_RATIO, zoomFactor);
-        double zoomLevelPercent = (double) (zoomLevel - PAGE_ZOOM_MINIMUM_ZOOM_LEVEL)
-                / (PAGE_ZOOM_MAXIMUM_ZOOM_LEVEL - PAGE_ZOOM_MINIMUM_ZOOM_LEVEL);
+        // min and max level, and use that percentage as the corresponding bar value.
+        double zoomLevel = convertZoomFactorToZoomLevel(zoomFactor);
+        double zoomLevelPercent =
+                (double) (zoomLevel - PAGE_ZOOM_MINIMUM_ZOOM_LEVEL)
+                        / (PAGE_ZOOM_MAXIMUM_ZOOM_LEVEL - PAGE_ZOOM_MINIMUM_ZOOM_LEVEL);
 
-        return (int) Math.round(PAGE_ZOOM_MAXIMUM_SEEKBAR_VALUE * zoomLevelPercent);
+        return (int) Math.round(PAGE_ZOOM_MAXIMUM_BAR_VALUE * zoomLevelPercent);
     }
 
     /**
-     * This method converts the seekbar value to a zoom level so that the level can be displayed
-     * to the user in a human-readable format.
-     * @param newValue      seek bar value to convert to zoom level
+     * This method converts the bar value to a zoom level so that the level can be displayed to the
+     * user in a human-readable format, e.g. 1.0, 1.50.
+     *
+     * @param newValue bar value to convert to zoom level
      * @return double
      */
-    public static double convertSeekBarValueToZoomLevel(int newValue) {
+    public static double convertBarValueToZoomLevel(int newValue) {
         return PAGE_ZOOM_MINIMUM_ZOOM_LEVEL
                 + ((PAGE_ZOOM_MAXIMUM_ZOOM_LEVEL - PAGE_ZOOM_MINIMUM_ZOOM_LEVEL)
-                        * ((float) newValue / PAGE_ZOOM_MAXIMUM_SEEKBAR_VALUE));
+                        * ((float) newValue / PAGE_ZOOM_MAXIMUM_BAR_VALUE));
     }
 
     /**
-     * Set a new user choice for default zoom level given a SeekBar value.
-     * This is part of the Profile and is set in Desktop through Settings > Appearance.
-     * @param newValue int      The new zoom by seek bar value
+     * This method converts the zoom factor to a zoom level in a human-readable format,
+     * e.g. 1.0, 1.50.
+     *
+     * @param zoomFactor    zoom factor to get zoom level for.
+     * @return double
      */
-    public static void setDefaultZoomBySeekBarValue(BrowserContextHandle context, int newValue) {
-        setDefaultZoomLevel(context, convertSeekBarValueToZoomFactor(newValue));
+    public static double convertZoomFactorToZoomLevel(double zoomFactor) {
+        // To get the zoom level from the zoom factor, raise the base (1.2) to the given
+        // |zoomFactor| exponent to get the zoom level.
+        return Math.pow(TEXT_SIZE_MULTIPLIER_RATIO, zoomFactor);
     }
 
     /**
-     * Returns the current user choice for default zoom level as a seek bar value.
-     * This is part of the Profile and is set in Desktop through Settings > Appearance.
+     * Returns true if the given bar value falls within the range at which the bar should be snapped
+     * to the default global zoom level. Returns false otherwise.
+     *
+     * @param barValue the bar value.
+     * @param defaultZoomFactor the default zoom factor to compare against.
+     * @return boolean
+     */
+    public static boolean shouldSnapBarValueToDefaultZoom(int barValue, double defaultZoomFactor) {
+        double currentZoomLevel = convertBarValueToZoomLevel(barValue);
+        double defaultZoomLevel = convertZoomFactorToZoomLevel(defaultZoomFactor);
+        return MathUtils.roundTwoDecimalPlaces(Math.abs(currentZoomLevel - defaultZoomLevel))
+                <= PageZoomUtils.DEFAULT_ZOOM_LEVEL_SNAP_RANGE;
+    }
+
+    /**
+     * Set a new user choice for default zoom level given a Bar value. This is part of the Profile
+     * and is set in Desktop through Settings > Appearance.
+     *
+     * @param newValue int The new zoom by bar value
+     */
+    public static void setDefaultZoomByBarValue(BrowserContextHandle context, int newValue) {
+        setDefaultZoomLevel(context, convertBarValueToZoomFactor(newValue));
+    }
+
+    /**
+     * Returns the current user choice for default zoom level as a bar value. This is part of the
+     * Profile and is set in Desktop through Settings > Appearance.
+     *
      * @return int
      */
-    public static int getDefaultZoomAsSeekBarValue(BrowserContextHandle context) {
-        return convertZoomFactorToSeekBarValue(getDefaultZoomLevel(context));
+    public static int getDefaultZoomAsBarValue(BrowserContextHandle context) {
+        return convertZoomFactorToBarValue(getDefaultZoomLevel(context));
+    }
+
+    /**
+     * Returns the current user choice for default zoom level as a zoom factor.
+     * This is part of the Profile and is set in Desktop through Settings > Appearance.
+     * @return double
+     */
+    public static double getDefaultZoomLevelAsZoomFactor(BrowserContextHandle context) {
+        return getDefaultZoomLevel(context);
+    }
+
+    /**
+     * Records UMA histogram for a measure of the Page Zoom feature usage by checking if the user
+     * has any saved zoom levels or a default zoom setting, considering either as a user that has
+     * interacted with the feature. Recorded during post-native initialization.
+     *
+     * @param BrowserContextHandle The profile to check feature usage against
+     */
+    public static void recordFeatureUsage(BrowserContextHandle lastUsedRegularProfile) {
+        boolean hasAnySavedZoomLevels =
+                !HostZoomMap.getAllHostZoomLevels(lastUsedRegularProfile).isEmpty();
+
+        // The default (unset) zoom level is 0.0 (which maps to 100% by 1.2^0 = 1, see comment at
+        // top of file). We will fetch the current profile's default zoom level, and any non-zero
+        // value will be considered a user choice (non-default).
+        boolean hasDefaultZoomLevel =
+                Math.abs(getDefaultZoomLevel(lastUsedRegularProfile)) > MathUtils.EPSILON;
+
+        PageZoomUma.logFeatureUsageHistogram(hasAnySavedZoomLevels, hasDefaultZoomLevel);
     }
 
     // Methods to interact with SharedPreferences. These do not use SharedPreferencesManager so
     // that they can be used in //components.
 
     /**
-     * Returns true if the user has set a choice for always showing the Zoom AppMenu
-     * item (set in Accessibility Settings). This setting is Chrome Android specific.
+     * Returns true if the user has set a choice for always showing the Zoom AppMenu item (set in
+     * Accessibility Settings). This setting is Chrome Android specific.
+     *
      * @return boolean
      */
     public static boolean hasUserSetShouldAlwaysShowZoomMenuItemOption() {
-        return ContextUtils.getAppSharedPreferences().contains(
-                AccessibilityConstants.PAGE_ZOOM_ALWAYS_SHOW_MENU_ITEM);
+        return ContextUtils.getAppSharedPreferences()
+                .contains(AccessibilityConstants.PAGE_ZOOM_ALWAYS_SHOW_MENU_ITEM);
     }
 
     /**
@@ -157,26 +227,51 @@ public class PageZoomUtils {
      * @return boolean
      */
     public static boolean shouldAlwaysShowZoomMenuItem() {
-        return ContextUtils.getAppSharedPreferences().getBoolean(
-                AccessibilityConstants.PAGE_ZOOM_ALWAYS_SHOW_MENU_ITEM, false);
+        return ContextUtils.getAppSharedPreferences()
+                .getBoolean(AccessibilityConstants.PAGE_ZOOM_ALWAYS_SHOW_MENU_ITEM, false);
     }
 
     /**
      * Returns true if the Zoom AppMenu item should be shown, false otherwise.
      *
-     * - If there is a current user choice set in Accessibility Settings, respect and return the
-     * user setting.
-     * - Otherwise, if there is an OS level font size set, return true.
-     * - Otherwise, return false.
+     * <p>If there is a current user choice set in Accessibility Settings, respect and return the
+     * user setting. Otherwise, return true if there is an OS level font size set.
      *
-     * This setting is Chrome Android specific.
      * @return boolean
      */
     public static boolean shouldShowZoomMenuItem() {
-        if (!shouldShowSettingsUI()) {
-            return false;
-        }
+        return shouldShowZoomMenuItem(null, null);
+    }
 
+    /**
+     * Returns true if the Zoom AppMenu item should be shown, false otherwise.
+     *
+     * <p>If there is a current user choice set in Accessibility Settings, respect and return the
+     * user setting. Otherwise, return true if there is an OS level font size set.
+     *
+     * @param context Context to check form factor.
+     * @return boolean
+     */
+    public static boolean shouldShowZoomMenuItem(@Nullable Context context) {
+        return shouldShowZoomMenuItem(context, null);
+    }
+
+    /**
+     * Returns true if the Zoom AppMenu item should be shown, false otherwise.
+     *
+     * <p>If there is a current user choice set in Accessibility Settings, respect and return the
+     * user setting. Otherwise, return true if there is an OS level font size set or if the user has
+     * ever set a custom zoom level for any site.
+     *
+     * @param context Context to check form factor.
+     * @param browserContextHandle BrowserContextHandle to check for custom zoom levels.
+     * @return boolean
+     */
+    public static boolean shouldShowZoomMenuItem(
+            @Nullable Context context, @Nullable BrowserContextHandle browserContextHandle) {
+        if (sShouldShowMenuItemForTesting != TriState.NOT_SET) {
+            return sShouldShowMenuItemForTesting == TriState.TRUE;
+        }
         // Always respect the user's choice if the user has set this in Accessibility Settings.
         if (hasUserSetShouldAlwaysShowZoomMenuItemOption()) {
             if (shouldAlwaysShowZoomMenuItem()) {
@@ -191,11 +286,31 @@ public class PageZoomUtils {
         }
 
         // The default (float) |fontScale| is 1, the default page zoom is 1.
-        // If the user has a system font scale other than the default, always show the menu item.
-        boolean isUsingDefaultSystemFontScale = MathUtils.areFloatsEqual(SYSTEM_FONT_SCALE, 1f);
+        boolean isUsingDefaultSystemFontScale = MathUtils.areFloatsEqual(getSystemFontScale(), 1f);
+
+        // If the user has a system font scale other than the default, we will show the menu item.
         if (!isUsingDefaultSystemFontScale) {
             PageZoomUma.logAppMenuEnabledStateHistogram(
                     PageZoomUma.AccessibilityPageZoomAppMenuEnabledState.OS_ENABLED);
+            return true;
+        }
+
+        // If the user has ever set a custom zoom level, show the menu item.
+        // This is restricted to LFF (Tablets) as UX has not approved this for mobile/phones.
+        Context displayContext = context != null ? context : ContextUtils.getApplicationContext();
+        if (DeviceFormFactor.isNonMultiDisplayContextOnTablet(displayContext)
+                && browserContextHandle != null
+                && !HostZoomMap.getAllHostZoomLevels(browserContextHandle).isEmpty()) {
+            PageZoomUma.logAppMenuEnabledStateHistogram(
+                    PageZoomUma.AccessibilityPageZoomAppMenuEnabledState.USER_HAS_CUSTOM_ZOOM);
+            return true;
+        }
+
+        if (DeviceFormFactor.isNonMultiDisplayContextOnTablet(
+                ContextUtils.getApplicationContext())) {
+            // Default to true for Lff
+            PageZoomUma.logAppMenuEnabledStateHistogram(
+                    PageZoomUma.AccessibilityPageZoomAppMenuEnabledState.FORM_FACTOR_ENABLED);
             return true;
         }
 
@@ -217,26 +332,61 @@ public class PageZoomUtils {
     }
 
     /**
+     * Returns true is the user has set a choice for whether OS adjustment should be made in zoom
+     * calculation. This setting is Chrome Android specific.
+     *
+     * @return boolean
+     */
+    public static boolean hasUserSetIncludeOSAdjustmentOption() {
+        assert ContentFeatureMap.isEnabled(ContentFeatureList.ACCESSIBILITY_PAGE_ZOOM_V2)
+                : "hasUserSetIncludeOSAdjustmentOption should only be called if the flag is"
+                        + " enabled.";
+        return ContextUtils.getAppSharedPreferences()
+                .contains(AccessibilityConstants.PAGE_ZOOM_INCLUDE_OS_ADJUSTMENT);
+    }
+
+    /**
+     * Returns true is Page Zoom should include an OS level adjustment to zoom level. If no value
+     * has been set by the user, return the current value of the feature param.
+     *
+     * @return boolean
+     */
+    public static boolean shouldIncludeOSAdjustment() {
+        assert ContentFeatureMap.isEnabled(ContentFeatureList.ACCESSIBILITY_PAGE_ZOOM_V2)
+                : "shouldIncludeOSAdjustment should only be called if the flag is enabled.";
+        return ContextUtils.getAppSharedPreferences()
+                .getBoolean(
+                        AccessibilityConstants.PAGE_ZOOM_INCLUDE_OS_ADJUSTMENT,
+                        HostZoomMap.shouldAdjustForOSLevel());
+    }
+
+    /**
+     * Set a new user choice for including an OS level adjustment in zoom level calculation.
+     *
+     * @param newValue boolean
+     */
+    public static void setShouldIncludeOSAdjustment(boolean newValue) {
+        assert ContentFeatureMap.isEnabled(ContentFeatureList.ACCESSIBILITY_PAGE_ZOOM_V2)
+                : "setShouldIncludeOSAdjustment should only be called if the flag is enabled.";
+        ContextUtils.getAppSharedPreferences()
+                .edit()
+                .putBoolean(AccessibilityConstants.PAGE_ZOOM_INCLUDE_OS_ADJUSTMENT, newValue)
+                .apply();
+    }
+
+    /**
      * Get the index of the next closest zoom factor in the cached available values in the given
-     * direction from the current zoom factor.
-     * Current zoom factor must be within range of possible zoom factors.
-     * @param decrease boolean      True if the next index should be decreasing from the current,
-     *         false otherwise
-     * @param currentZoomFactor double      The current zoom factor for which to search
-     * @throws IllegalArgumentException if current zoom factor is <= the smallest cached zoom factor
-     *         or >= the largest cached zoom factor
-     * @return int      The index of the next closest zoom factor
+     * direction from the current zoom factor. Current zoom factor must be within range of possible
+     * zoom factors.
+     *
+     * @param decrease boolean True if the next index should be decreasing from the current, false
+     *     otherwise
+     * @param currentZoomFactor double The current zoom factor for which to search
+     * @return int The index of the next closest zoom factor
      */
     public static int getNextIndex(boolean decrease, double currentZoomFactor) {
-        // Assert valid current zoom factor
-        if (decrease && currentZoomFactor <= AVAILABLE_ZOOM_FACTORS[0]) {
-            throw new IllegalArgumentException(
-                    "currentZoomFactor should be greater than " + AVAILABLE_ZOOM_FACTORS[0]);
-        } else if (!decrease
-                && currentZoomFactor >= AVAILABLE_ZOOM_FACTORS[AVAILABLE_ZOOM_FACTORS.length - 1]) {
-            throw new IllegalArgumentException("currentZoomFactor should be less than "
-                    + AVAILABLE_ZOOM_FACTORS[AVAILABLE_ZOOM_FACTORS.length - 1]);
-        }
+        // Round to match the precision of AVAILABLE_ZOOM_FACTORS to avoid precision issues.
+        currentZoomFactor = MathUtils.roundTwoDecimalPlaces(currentZoomFactor);
 
         // BinarySearch will return the index of the first value equal to the given value.
         // Otherwise it will return (-(insertion point) - 1).
@@ -261,6 +411,10 @@ public class PageZoomUtils {
             if (decrease) --index;
         }
 
+        // Clamp values to the available zoom factors
+        if (index < 0) index = 0;
+        if (index >= AVAILABLE_ZOOM_FACTORS.length) index = AVAILABLE_ZOOM_FACTORS.length - 1;
+
         return index;
     }
 
@@ -273,5 +427,52 @@ public class PageZoomUtils {
 
     private static double getDefaultZoomLevel(BrowserContextHandle context) {
         return HostZoomMap.getDefaultZoomLevel(context);
+    }
+
+    // Test-only methods.
+
+    /**
+     * Used for testing only, allows a mocked value for the {@link shouldShowMenuItem} method.
+     *
+     * @param isEnabled Should show the menu item or not.
+     */
+    public static void setShouldShowMenuItemForTesting(@TriState int isEnabled) {
+        sShouldShowMenuItemForTesting = isEnabled;
+        ResettersForTesting.register(() -> sShouldShowMenuItemForTesting = TriState.NOT_SET);
+    }
+
+    public static long getReadableZoomLevel(double zoomFactor) {
+        return Math.round(100 * convertZoomFactorToZoomLevel(zoomFactor));
+    }
+
+    /**
+     * Returns true if the zoom level can be decreased from the current zoom factor.
+     *
+     * @param zoomFactor The current zoom factor.
+     * @return boolean
+     */
+    public static boolean canDecreaseZoom(double zoomFactor) {
+        return MathUtils.roundTwoDecimalPlaces(zoomFactor) > AVAILABLE_ZOOM_FACTORS[0];
+    }
+
+    /**
+     * Returns true if the zoom level can be increased from the current zoom factor.
+     *
+     * @param zoomFactor The current zoom factor.
+     * @return boolean
+     */
+    public static boolean canIncreaseZoom(double zoomFactor) {
+        return MathUtils.roundTwoDecimalPlaces(zoomFactor)
+                < AVAILABLE_ZOOM_FACTORS[AVAILABLE_ZOOM_FACTORS.length - 1];
+    }
+
+    /**
+     * Formats the zoom factor as a percentage string (e.g. "100%").
+     *
+     * @param zoomFactor The zoom factor to format.
+     * @return String The formatted percentage string.
+     */
+    public static String formatZoomPercentage(double zoomFactor) {
+        return String.format(Locale.US, "%d%%", getReadableZoomLevel(zoomFactor));
     }
 }

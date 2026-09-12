@@ -25,7 +25,6 @@ namespace video_capture {
 
 using testing::_;
 using testing::Exactly;
-using testing::Invoke;
 using testing::InvokeWithoutArgs;
 
 // Test fixture that creates a video_capture::ServiceImpl and sets up a
@@ -47,7 +46,8 @@ class VideoCaptureServiceLifecycleTest : public ::testing::Test {
         switches::kUseFakeDeviceForMediaStream);
     service_impl_ = std::make_unique<VideoCaptureServiceImpl>(
         service_remote_.BindNewPipeAndPassReceiver(),
-        task_environment_.GetMainThreadTaskRunner());
+        task_environment_.GetMainThreadTaskRunner(),
+        /*create_system_monitor=*/true);
     service_remote_.set_idle_handler(
         base::TimeDelta(),
         base::BindRepeating(&VideoCaptureServiceLifecycleTest::OnServiceIdle,
@@ -58,7 +58,7 @@ class VideoCaptureServiceLifecycleTest : public ::testing::Test {
   base::test::TaskEnvironment task_environment_;
   std::unique_ptr<VideoCaptureServiceImpl> service_impl_;
   mojo::Remote<mojom::VideoCaptureService> service_remote_;
-  base::MockCallback<DeviceFactory::GetDeviceInfosCallback>
+  base::MockCallback<mojom::VideoSourceProvider::GetSourceInfosCallback>
       device_info_receiver_;
   base::RunLoop service_idle_wait_loop_;
 
@@ -86,12 +86,8 @@ TEST_F(VideoCaptureServiceLifecycleTest, ServiceQuitsAfterEnumeratingDevices) {
       source_provider.BindNewPipeAndPassReceiver());
 
   base::RunLoop wait_loop;
-  EXPECT_CALL(device_info_receiver_, Run(_))
-      .WillOnce(
-          Invoke([&wait_loop](
-                     const std::vector<media::VideoCaptureDeviceInfo>& infos) {
-            wait_loop.Quit();
-          }));
+  EXPECT_CALL(device_info_receiver_, Run)
+      .WillOnce(InvokeWithoutArgs([&wait_loop]() { wait_loop.Quit(); }));
   source_provider->GetSourceInfos(device_info_receiver_.Get());
   wait_loop.Run();
 
@@ -124,12 +120,8 @@ TEST_F(VideoCaptureServiceLifecycleTest, EnumerateDevicesAfterReconnect) {
 
   // Enumerate devices.
   base::RunLoop wait_loop;
-  EXPECT_CALL(device_info_receiver_, Run(_))
-      .WillOnce(
-          Invoke([&wait_loop](
-                     const std::vector<media::VideoCaptureDeviceInfo>& infos) {
-            wait_loop.Quit();
-          }));
+  EXPECT_CALL(device_info_receiver_, Run)
+      .WillOnce(InvokeWithoutArgs([&wait_loop]() { wait_loop.Quit(); }));
   source_provider->GetSourceInfos(device_info_receiver_.Get());
   wait_loop.Run();
 

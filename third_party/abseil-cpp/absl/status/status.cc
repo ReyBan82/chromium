@@ -15,24 +15,36 @@
 
 #include <errno.h>
 
-#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <type_traits>
 #include <utility>
 
-#include "absl/base/internal/raw_logging.h"
+#include "absl/base/config.h"
 #include "absl/base/internal/strerror.h"
-#include "absl/base/macros.h"
-#include "absl/debugging/stacktrace.h"
-#include "absl/debugging/symbolize.h"
-#include "absl/status/status_payload_printer.h"
-#include "absl/strings/escaping.h"
+#include "absl/base/no_destructor.h"
+#include "absl/base/nullability.h"
+#include "absl/status/internal/status_internal.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_format.h"
-#include "absl/strings/str_split.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/source_location.h"
+#include "absl/types/span.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
 
+static_assert(
+    alignof(status_internal::StatusRep) >= 4,
+    "absl::Status assumes it can use the bottom 2 bits of a StatusRep*.");
+
 std::string StatusCodeToString(StatusCode code) {
+  return std::string(absl::StatusCodeToStringView(code));
+}
+
+absl::string_view StatusCodeToStringView(StatusCode code) {
   switch (code) {
     case StatusCode::kOk:
       return "OK";
@@ -77,249 +89,91 @@ std::ostream& operator<<(std::ostream& os, StatusCode code) {
   return os << StatusCodeToString(code);
 }
 
-namespace status_internal {
-
-static absl::optional<size_t> FindPayloadIndexByUrl(
-    const Payloads* payloads,
-    absl::string_view type_url) {
-  if (payloads == nullptr)
-    return absl::nullopt;
-
-  for (size_t i = 0; i < payloads->size(); ++i) {
-    if ((*payloads)[i].type_url == type_url) return i;
-  }
-
-  return absl::nullopt;
+const std::string* absl_nonnull Status::EmptyString() {
+  static const absl::NoDestructor<std::string> kEmpty;
+  return kEmpty.get();
 }
 
-// Convert canonical code to a value known to this binary.
-absl::StatusCode MapToLocalCode(int value) {
-  absl::StatusCode code = static_cast<absl::StatusCode>(value);
-  switch (code) {
-    case absl::StatusCode::kOk:
-    case absl::StatusCode::kCancelled:
-    case absl::StatusCode::kUnknown:
-    case absl::StatusCode::kInvalidArgument:
-    case absl::StatusCode::kDeadlineExceeded:
-    case absl::StatusCode::kNotFound:
-    case absl::StatusCode::kAlreadyExists:
-    case absl::StatusCode::kPermissionDenied:
-    case absl::StatusCode::kResourceExhausted:
-    case absl::StatusCode::kFailedPrecondition:
-    case absl::StatusCode::kAborted:
-    case absl::StatusCode::kOutOfRange:
-    case absl::StatusCode::kUnimplemented:
-    case absl::StatusCode::kInternal:
-    case absl::StatusCode::kUnavailable:
-    case absl::StatusCode::kDataLoss:
-    case absl::StatusCode::kUnauthenticated:
-      return code;
-    default:
-      return absl::StatusCode::kUnknown;
-  }
-}
-}  // namespace status_internal
-
-absl::optional<absl::Cord> Status::GetPayload(
-    absl::string_view type_url) const {
-  const auto* payloads = GetPayloads();
-  absl::optional<size_t> index =
-      status_internal::FindPayloadIndexByUrl(payloads, type_url);
-  if (index.has_value())
-    return (*payloads)[index.value()].payload;
-
-  return absl::nullopt;
+const std::string* absl_nonnull Status::MovedFromString() {
+  static const absl::NoDestructor<std::string> kMovedFrom(kMovedFromString);
+  return kMovedFrom.get();
 }
 
-void Status::SetPayload(absl::string_view type_url, absl::Cord payload) {
-  if (ok()) return;
-
-  PrepareToModify();
-
-  status_internal::StatusRep* rep = RepToPointer(rep_);
-  if (!rep->payloads) {
-    rep->payloads = absl::make_unique<status_internal::Payloads>();
-  }
-
-  absl::optional<size_t> index =
-      status_internal::FindPayloadIndexByUrl(rep->payloads.get(), type_url);
-  if (index.has_value()) {
-    (*rep->payloads)[index.value()].payload = std::move(payload);
-    return;
-  }
-
-  rep->payloads->push_back({std::string(type_url), std::move(payload)});
+absl::Status absl::Status::MakeNonOkStatusWithOkCode(
+    absl::string_view message) {
+  return absl::Status(
+      absl::Status::PointerToRep(new absl::status_internal::StatusRep(
+          absl::StatusCode::kOk, message, nullptr)));
 }
 
-bool Status::ErasePayload(absl::string_view type_url) {
-  absl::optional<size_t> index =
-      status_internal::FindPayloadIndexByUrl(GetPayloads(), type_url);
-  if (index.has_value()) {
-    PrepareToModify();
-    GetPayloads()->erase(GetPayloads()->begin() + index.value());
-    if (GetPayloads()->empty() && message().empty()) {
-      // Special case: If this can be represented inlined, it MUST be
-      // inlined (EqualsSlow depends on this behavior).
-      StatusCode c = static_cast<StatusCode>(raw_code());
-      Unref(rep_);
-      rep_ = CodeToInlinedRep(c);
-    }
-    return true;
+template <typename StringOrView>
+uintptr_t MakeStatusRepImpl(uintptr_t inlined_rep, StringOrView msg,
+                            absl::SourceLocation loc) {
+  static_assert(std::is_same_v<StringOrView, absl::string_view> ||
+                std::is_same_v<StringOrView, std::string&&>);
+  bool ok = inlined_rep == Status::CodeToInlinedRep(absl::StatusCode::kOk);
+  if (ok) return inlined_rep;
+  if (msg.empty()
+  ) {
+    return inlined_rep;
   }
-
-  return false;
+  auto* rep =
+      new status_internal::StatusRep(Status::InlinedRepToCode(inlined_rep),
+                                     std::forward<StringOrView>(msg), nullptr);
+  if (loc.file_name()[0] != '\0') {
+    rep->AddSourceLocation(loc);
+  }
+  return Status::PointerToRep(rep);
 }
 
-void Status::ForEachPayload(
-    absl::FunctionRef<void(absl::string_view, const absl::Cord&)> visitor)
-    const {
-  if (auto* payloads = GetPayloads()) {
-    bool in_reverse =
-        payloads->size() > 1 && reinterpret_cast<uintptr_t>(payloads) % 13 > 6;
-
-    for (size_t index = 0; index < payloads->size(); ++index) {
-      const auto& elem =
-          (*payloads)[in_reverse ? payloads->size() - 1 - index : index];
-
-#ifdef NDEBUG
-      visitor(elem.type_url, elem.payload);
-#else
-      // In debug mode invalidate the type url to prevent users from relying on
-      // this string lifetime.
-
-      // NOLINTNEXTLINE intentional extra conversion to force temporary.
-      visitor(std::string(elem.type_url), elem.payload);
-#endif  // NDEBUG
-    }
-  }
+uintptr_t Status::MakeRepFromStringView(uintptr_t inlined_rep,
+                                        absl::string_view msg,
+                                        absl::SourceLocation loc) {
+  return MakeStatusRepImpl<absl::string_view>(inlined_rep, msg, loc);
 }
 
-const std::string* Status::EmptyString() {
-  static union EmptyString {
-    std::string str;
-    ~EmptyString() {}
-  } empty = {{}};
-  return &empty.str;
+#ifndef SWIG
+uintptr_t Status::MakeRepFromStringRvalue(uintptr_t inlined_rep,
+                                          std::string&& msg,
+                                          absl::SourceLocation loc) {
+  return MakeStatusRepImpl<std::string&&>(inlined_rep, std::move(msg), loc);
+}
+#endif  // SWIG
+
+uintptr_t Status::AddSourceLocationImpl(uintptr_t rep,
+                                        absl::SourceLocation loc) {
+  if (IsInlined(rep)) return rep;
+  if (loc.file_name()[0] == '\0') return rep;
+  status_internal::StatusRep* rep_ptr = PrepareToModify(rep);
+  rep_ptr->AddSourceLocation(loc);
+  return PointerToRep(rep_ptr);
 }
 
-#ifdef ABSL_INTERNAL_NEED_REDUNDANT_CONSTEXPR_DECL
-constexpr const char Status::kMovedFromString[];
-#endif
-
-const std::string* Status::MovedFromString() {
-  static std::string* moved_from_string = new std::string(kMovedFromString);
-  return moved_from_string;
+uintptr_t Status::WithContextImpl(uintptr_t rep, absl::string_view context) {
+  if (context.empty()) return rep;
+  status_internal::StatusRep* rep_ptr = PrepareToModify(rep);
+  if (rep_ptr->message_.empty()) {
+    rep_ptr->message_ = std::string(context);
+  } else {
+    absl::StrAppend(&rep_ptr->message_, "; ", context);
+  }
+  return PointerToRep(rep_ptr);
 }
 
-void Status::UnrefNonInlined(uintptr_t rep) {
-  status_internal::StatusRep* r = RepToPointer(rep);
-  // Fast path: if ref==1, there is no need for a RefCountDec (since
-  // this is the only reference and therefore no other thread is
-  // allowed to be mucking with r).
-  if (r->ref.load(std::memory_order_acquire) == 1 ||
-      r->ref.fetch_sub(1, std::memory_order_acq_rel) - 1 == 0) {
-    delete r;
+status_internal::StatusRep* absl_nonnull Status::PrepareToModify(
+    uintptr_t rep) {
+  if (IsInlined(rep)) {
+    return new status_internal::StatusRep(InlinedRepToCode(rep),
+                                          absl::string_view(), nullptr);
   }
+  return RepToPointer(rep)->CloneAndUnref();
 }
 
-Status::Status(absl::StatusCode code, absl::string_view msg)
-    : rep_(CodeToInlinedRep(code)) {
-  if (code != absl::StatusCode::kOk && !msg.empty()) {
-    rep_ = PointerToRep(new status_internal::StatusRep(code, msg, nullptr));
+std::string Status::ToStringSlow(uintptr_t rep, StatusToStringMode mode) {
+  if (IsInlined(rep)) {
+    return absl::StrCat(absl::StatusCodeToString(InlinedRepToCode(rep)), ": ");
   }
-}
-
-int Status::raw_code() const {
-  if (IsInlined(rep_)) {
-    return static_cast<int>(InlinedRepToCode(rep_));
-  }
-  status_internal::StatusRep* rep = RepToPointer(rep_);
-  return static_cast<int>(rep->code);
-}
-
-absl::StatusCode Status::code() const {
-  return status_internal::MapToLocalCode(raw_code());
-}
-
-void Status::PrepareToModify() {
-  ABSL_RAW_CHECK(!ok(), "PrepareToModify shouldn't be called on OK status.");
-  if (IsInlined(rep_)) {
-    rep_ = PointerToRep(new status_internal::StatusRep(
-        static_cast<absl::StatusCode>(raw_code()), absl::string_view(),
-        nullptr));
-    return;
-  }
-
-  uintptr_t rep_i = rep_;
-  status_internal::StatusRep* rep = RepToPointer(rep_);
-  if (rep->ref.load(std::memory_order_acquire) != 1) {
-    std::unique_ptr<status_internal::Payloads> payloads;
-    if (rep->payloads) {
-      payloads = absl::make_unique<status_internal::Payloads>(*rep->payloads);
-    }
-    status_internal::StatusRep* const new_rep = new status_internal::StatusRep(
-        rep->code, message(), std::move(payloads));
-    rep_ = PointerToRep(new_rep);
-    UnrefNonInlined(rep_i);
-  }
-}
-
-bool Status::EqualsSlow(const absl::Status& a, const absl::Status& b) {
-  if (IsInlined(a.rep_) != IsInlined(b.rep_)) return false;
-  if (a.message() != b.message()) return false;
-  if (a.raw_code() != b.raw_code()) return false;
-  if (a.GetPayloads() == b.GetPayloads()) return true;
-
-  const status_internal::Payloads no_payloads;
-  const status_internal::Payloads* larger_payloads =
-      a.GetPayloads() ? a.GetPayloads() : &no_payloads;
-  const status_internal::Payloads* smaller_payloads =
-      b.GetPayloads() ? b.GetPayloads() : &no_payloads;
-  if (larger_payloads->size() < smaller_payloads->size()) {
-    std::swap(larger_payloads, smaller_payloads);
-  }
-  if ((larger_payloads->size() - smaller_payloads->size()) > 1) return false;
-  // Payloads can be ordered differently, so we can't just compare payload
-  // vectors.
-  for (const auto& payload : *larger_payloads) {
-
-    bool found = false;
-    for (const auto& other_payload : *smaller_payloads) {
-      if (payload.type_url == other_payload.type_url) {
-        if (payload.payload != other_payload.payload) {
-          return false;
-        }
-        found = true;
-        break;
-      }
-    }
-    if (!found) return false;
-  }
-  return true;
-}
-
-std::string Status::ToStringSlow(StatusToStringMode mode) const {
-  std::string text;
-  absl::StrAppend(&text, absl::StatusCodeToString(code()), ": ", message());
-
-  const bool with_payload = (mode & StatusToStringMode::kWithPayload) ==
-                      StatusToStringMode::kWithPayload;
-
-  if (with_payload) {
-    status_internal::StatusPayloadPrinter printer =
-        status_internal::GetStatusPayloadPrinter();
-    this->ForEachPayload([&](absl::string_view type_url,
-                             const absl::Cord& payload) {
-      absl::optional<std::string> result;
-      if (printer) result = printer(type_url, payload);
-      absl::StrAppend(
-          &text, " [", type_url, "='",
-          result.has_value() ? *result : absl::CHexEscape(std::string(payload)),
-          "']");
-    });
-  }
-
-  return text;
+  return RepToPointer(rep)->ToString(mode);
 }
 
 std::ostream& operator<<(std::ostream& os, const Status& x) {
@@ -327,69 +181,65 @@ std::ostream& operator<<(std::ostream& os, const Status& x) {
   return os;
 }
 
-Status AbortedError(absl::string_view message) {
-  return Status(absl::StatusCode::kAborted, message);
+namespace status_internal {
+// We use an int in the template parameter to shorten mangled names.
+template <int error_code>
+Status MakeErrorStringViewImpl(string_view message, SourceLocation loc) {
+  return Status(static_cast<StatusCode>(error_code), message, loc);
 }
 
-Status AlreadyExistsError(absl::string_view message) {
-  return Status(absl::StatusCode::kAlreadyExists, message);
+// Explicit instantiation for all the error codes.
+// If we add more error code, we need to add their values on this list.
+// Using ints here instead of static_cast<int>(StatusCode::kFoo) makes it easier
+// to see that the list is complete.
+template Status MakeErrorStringViewImpl<1>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<2>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<3>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<4>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<5>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<6>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<7>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<8>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<9>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<10>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<11>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<12>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<13>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<14>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<15>(string_view, SourceLocation);
+template Status MakeErrorStringViewImpl<16>(string_view, SourceLocation);
+
+// Same as above, but for rvalue strings.
+#ifndef SWIG
+// We use an int in the template parameter to shorten mangled names.
+template <int error_code>
+Status MakeErrorStringRvalueImpl(std::string&& message, SourceLocation loc) {
+  return Status(static_cast<StatusCode>(error_code), std::move(message), loc);
 }
 
-Status CancelledError(absl::string_view message) {
-  return Status(absl::StatusCode::kCancelled, message);
-}
+// Explicit instantiation for all the error codes.
+// If we add more error code, we need to add their values on this list.
+// Using ints here instead of static_cast<int>(StatusCode::kFoo) makes it easier
+// to see that the list is complete.
+template Status MakeErrorStringRvalueImpl<1>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<2>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<3>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<4>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<5>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<6>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<7>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<8>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<9>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<10>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<11>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<12>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<13>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<14>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<15>(std::string&&, SourceLocation);
+template Status MakeErrorStringRvalueImpl<16>(std::string&&, SourceLocation);
+#endif  // SWIG
 
-Status DataLossError(absl::string_view message) {
-  return Status(absl::StatusCode::kDataLoss, message);
-}
-
-Status DeadlineExceededError(absl::string_view message) {
-  return Status(absl::StatusCode::kDeadlineExceeded, message);
-}
-
-Status FailedPreconditionError(absl::string_view message) {
-  return Status(absl::StatusCode::kFailedPrecondition, message);
-}
-
-Status InternalError(absl::string_view message) {
-  return Status(absl::StatusCode::kInternal, message);
-}
-
-Status InvalidArgumentError(absl::string_view message) {
-  return Status(absl::StatusCode::kInvalidArgument, message);
-}
-
-Status NotFoundError(absl::string_view message) {
-  return Status(absl::StatusCode::kNotFound, message);
-}
-
-Status OutOfRangeError(absl::string_view message) {
-  return Status(absl::StatusCode::kOutOfRange, message);
-}
-
-Status PermissionDeniedError(absl::string_view message) {
-  return Status(absl::StatusCode::kPermissionDenied, message);
-}
-
-Status ResourceExhaustedError(absl::string_view message) {
-  return Status(absl::StatusCode::kResourceExhausted, message);
-}
-
-Status UnauthenticatedError(absl::string_view message) {
-  return Status(absl::StatusCode::kUnauthenticated, message);
-}
-
-Status UnavailableError(absl::string_view message) {
-  return Status(absl::StatusCode::kUnavailable, message);
-}
-
-Status UnimplementedError(absl::string_view message) {
-  return Status(absl::StatusCode::kUnimplemented, message);
-}
-
-Status UnknownError(absl::string_view message) {
-  return Status(absl::StatusCode::kUnknown, message);
-}
+}  // namespace status_internal
 
 bool IsAborted(const Status& status) {
   return status.code() == absl::StatusCode::kAborted;
@@ -467,14 +317,12 @@ StatusCode ErrnoToStatusCode(int error_number) {
     case EFAULT:        // Bad address
     case EILSEQ:        // Illegal byte sequence
     case ENOPROTOOPT:   // Protocol not available
-    case ENOSTR:        // Not a STREAM
     case ENOTSOCK:      // Not a socket
     case ENOTTY:        // Inappropriate I/O control operation
     case EPROTOTYPE:    // Protocol wrong type for socket
     case ESPIPE:        // Invalid seek
       return StatusCode::kInvalidArgument;
     case ETIMEDOUT:  // Connection timed out
-    case ETIME:      // Timer expired
       return StatusCode::kDeadlineExceeded;
     case ENODEV:  // No such device
     case ENOENT:  // No such file or directory
@@ -533,9 +381,7 @@ StatusCode ErrnoToStatusCode(int error_number) {
     case EMLINK:   // Too many links
     case ENFILE:   // Too many open files in system
     case ENOBUFS:  // No buffer space available
-    case ENODATA:  // No message is available on the STREAM read queue
     case ENOMEM:   // Not enough space
-    case ENOSR:    // No STREAM resources
 #ifdef EUSERS
     case EUSERS:  // Too many users
 #endif
@@ -603,21 +449,18 @@ std::string MessageForErrnoToStatus(int error_number,
 }
 }  // namespace
 
-Status ErrnoToStatus(int error_number, absl::string_view message) {
+Status ErrnoToStatus(int error_number, absl::string_view message,
+                     absl::SourceLocation loc) {
   return Status(ErrnoToStatusCode(error_number),
-                MessageForErrnoToStatus(error_number, message));
+                MessageForErrnoToStatus(error_number, message), loc);
 }
 
-namespace status_internal {
-
-std::string* MakeCheckFailString(const absl::Status* status,
-                                 const char* prefix) {
-  return new std::string(
-      absl::StrCat(prefix, " (",
-                   status->ToString(StatusToStringMode::kWithEverything), ")"));
+const char* absl_nonnull StatusMessageAsCStr(const Status& status) {
+  // As an internal implementation detail, we guarantee that if status.message()
+  // is non-empty, then the resulting string_view is null terminated.
+  auto sv_message = status.message();
+  return sv_message.empty() ? "" : sv_message.data();
 }
-
-}  // namespace status_internal
 
 ABSL_NAMESPACE_END
 }  // namespace absl

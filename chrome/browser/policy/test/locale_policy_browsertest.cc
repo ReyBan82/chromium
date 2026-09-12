@@ -25,8 +25,8 @@ namespace policy {
 // Sets the locale policy before the browser is started.
 class LocalePolicyTest : public PolicyTest {
  public:
-  LocalePolicyTest() {}
-  ~LocalePolicyTest() override {}
+  LocalePolicyTest() = default;
+  ~LocalePolicyTest() override = default;
 
   void SetUpInProcessBrowserTestFixture() override {
     PolicyTest::SetUpInProcessBrowserTestFixture();
@@ -46,7 +46,7 @@ IN_PROC_BROWSER_TEST_F(LocalePolicyTest, ApplicationLocaleValue) {
   // Verifies that the default locale can be overridden with policy.
   EXPECT_EQ("fr", g_browser_process->GetApplicationLocale());
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
-                                           GURL(chrome::kChromeUINewTabURL)));
+                                           chrome::ChromeUINewTabURLAsGURL()));
   std::u16string french_title = l10n_util::GetStringUTF16(IDS_NEW_TAB_TITLE);
   std::u16string title;
   EXPECT_TRUE(ui_test_utils::GetCurrentTabTitle(browser(), &title));

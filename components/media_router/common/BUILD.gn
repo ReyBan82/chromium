@@ -2,16 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-static_library("common") {
-  public_deps = [
-    "//base",
-    "//base:i18n",
-    "//media",
-    "//net",
-    "//third_party/icu",
-    "//url",
-  ]
+import("//extensions/buildflags/buildflags.gni")
 
+static_library("common") {
   sources = [
     # media_sink_internal needs to be included with Android due to typemapping.
     # Ideally, Android shouldn't be the case since it does not use Mojo for
@@ -32,13 +25,25 @@ static_library("common") {
     "route_request_result.h",
   ]
 
+  public_deps = [
+    "//base",
+    "//base:i18n",
+    "//media",
+    "//net",
+    "//third_party/icu",
+    "//url",
+  ]
+
   deps = [
     "mojom:media_route_provider_id",
     "mojom:route_request_result_code",
+    "//components/media_router/common/providers/cast/channel:capability",
     "//third_party/blink/public:blink_headers",
   ]
 
-  if (!is_android) {
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
+  if (!is_android || enable_extensions_core) {
     sources += [
       "discovery/media_sink_service_base.cc",
       "discovery/media_sink_service_base.h",
@@ -59,6 +64,12 @@ static_library("common") {
 
 static_library("test_support") {
   testonly = true
+  sources = [
+    "test/mock_logger.cc",
+    "test/mock_logger.h",
+    "test/test_helper.cc",
+    "test/test_helper.h",
+  ]
   deps = [
     "//base",
     "//base/test:test_support",
@@ -66,12 +77,6 @@ static_library("test_support") {
     "//components/media_router/common/mojom:media_route_provider_id",
   ]
   public_deps = [ ":common" ]
-  sources = [
-    "test/mock_logger.cc",
-    "test/mock_logger.h",
-    "test/test_helper.cc",
-    "test/test_helper.h",
-  ]
 }
 
 source_set("unit_tests") {

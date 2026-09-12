@@ -11,8 +11,9 @@
 namespace content {
 
 AboutURLLoaderFactory::AboutURLLoaderFactory(
-    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver)
-    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver)) {}
+    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver,
+    base::SelfDeletingPassKey key)
+    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver), key) {}
 
 AboutURLLoaderFactory::~AboutURLLoaderFactory() = default;
 
@@ -39,7 +40,7 @@ void AboutURLLoaderFactory::CreateLoaderAndStart(
   }
 
   client_remote->OnReceiveResponse(std::move(response_head),
-                                   std::move(consumer), absl::nullopt);
+                                   std::move(consumer), std::nullopt);
   client_remote->OnComplete(network::URLLoaderCompletionStatus(net::OK));
 }
 
@@ -51,7 +52,8 @@ AboutURLLoaderFactory::Create() {
   // The AboutURLLoaderFactory will delete itself when there are no more
   // receivers - see the network::SelfDeletingURLLoaderFactory::OnDisconnect
   // method.
-  new AboutURLLoaderFactory(pending_remote.InitWithNewPipeAndPassReceiver());
+  base::MakeSelfDeleting<AboutURLLoaderFactory>(
+      pending_remote.InitWithNewPipeAndPassReceiver());
 
   return pending_remote;
 }

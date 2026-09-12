@@ -7,11 +7,11 @@
 
 #import <Foundation/Foundation.h>
 
-#include "components/autofill/core/common/unique_ids.h"
+#import "components/autofill/core/common/unique_ids.h"
+#import "components/autofill/ios/form_util/form_activity_params.h"
 
-namespace {
-NSString* const kPasswordFieldType = @"password";
-}  // namespace
+using ActivityType = autofill::FormActivityParams::ActivityType;
+using FieldType = autofill::FormActivityParams::FieldType;
 
 // A class containing the data necessary for FormSuggestionProvider to
 // find and retrieve user-selectable suggestions for an input field of
@@ -19,25 +19,25 @@ NSString* const kPasswordFieldType = @"password";
 @interface FormSuggestionProviderQuery : NSObject
 
 // Form HTML 'name' attribute. If missing, its 'id' attribute. If also
-// missing, a name assigned by Chrome in __gCrWeb.form.getFormIdentifier.
+// missing, a name assigned by Chrome in getFormIdentifier form utility function.
 @property(readonly, nonatomic, copy) NSString* formName;
 
-// Number ID, unique for a tab and stable within navigations.
-@property(readonly, nonatomic) autofill::FormRendererId uniqueFormID;
+// Number ID, unique for a frame.
+@property(readonly, nonatomic) autofill::FormRendererId formRendererID;
 
 // Field HTML 'id' attribute. If missing, its 'name' attribute. If also
-// missing, a unique string path assigned in __gCrWeb.form.getFieldIdentifier.
+// missing, a unique string path assigned in getFieldIdentifier utility
+// function defined in form.ts.
 @property(readonly, nonatomic, copy) NSString* fieldIdentifier;
 
-// Number ID, unique for a tab and stable within navigations.
-@property(readonly, nonatomic) autofill::FieldRendererId uniqueFieldID;
+// Number ID, unique for a frame.
+@property(readonly, nonatomic) autofill::FieldRendererId fieldRendererID;
 
 // HTML input field type (i.e. 'text', 'password').
-@property(readonly, nonatomic, copy) NSString* fieldType;
+@property(readonly, nonatomic, assign) FieldType fieldType;
 
-// Type of form activity that initiates the query (i.e. 'focus', 'blur',
-// 'form_changed').
-@property(readonly, nonatomic, copy) NSString* type;
+// Type of form activity that initiates the query.
+@property(readonly, nonatomic, assign) ActivityType type;
 
 // The value contained in a field.
 @property(readonly, nonatomic, copy) NSString* typedValue;
@@ -45,19 +45,21 @@ NSString* const kPasswordFieldType = @"password";
 // ID of a frame containing the form.
 @property(readonly, nonatomic, copy) NSString* frameID;
 
+// YES if only passwords should be returned as suggestions (e.g. no password
+// generation suggestion).
+@property(readonly, nonatomic, assign) BOOL onlyPassword;
+
 - (instancetype)initWithFormName:(NSString*)formName
-                    uniqueFormID:(autofill::FormRendererId)uniqueFormID
+                  formRendererID:(autofill::FormRendererId)formRendererID
                  fieldIdentifier:(NSString*)fieldIdentifier
-                   uniqueFieldID:(autofill::FieldRendererId)uniqueFieldID
-                       fieldType:(NSString*)fieldType
-                            type:(NSString*)type
+                 fieldRendererID:(autofill::FieldRendererId)fieldRendererID
+                       fieldType:(FieldType)fieldType
+                            type:(ActivityType)type
                       typedValue:(NSString*)typedValue
-                         frameID:(NSString*)frameID NS_DESIGNATED_INITIALIZER;
+                         frameID:(NSString*)frameID
+                    onlyPassword:(BOOL)onlyPassword NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)init NS_UNAVAILABLE;
-
-// Returns true if a query comes from a password field.
-- (BOOL)isOnPasswordField;
 
 // Returns true if a query comes from a focus on a field.
 - (BOOL)hasFocusType;

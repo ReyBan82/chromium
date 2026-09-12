@@ -5,35 +5,63 @@
 #include "content/browser/renderer_host/render_widget_host_view_aura.h"
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/bind.h"
+#include "base/test/run_until.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/test/test_future.h"
 #include "base/test/test_timeouts.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
+#include "components/input/native_web_keyboard_event.h"
 #include "content/browser/devtools/protocol/devtools_protocol_test_support.h"
 #include "content/browser/renderer_host/delegated_frame_host.h"
 #include "content/browser/renderer_host/frame_tree_node.h"
+#include "content/browser/renderer_host/input/mouse_wheel_phase_handler.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
+#include "content/browser/renderer_host/render_widget_host_view_event_handler.h"
 #include "content/browser/web_contents/web_contents_impl.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_delegate.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
+#include "content/public/test/hit_test_region_observer.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/common/shell_switches.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/common/switches.h"
+#include "ui/aura/client/focus_change_observer.h"
+#include "ui/aura/window.h"
+#include "ui/aura/window_observer.h"
+#include "ui/aura/window_tree_host.h"
+#include "ui/display/screen.h"
+#include "ui/events/event_handler.h"
 #include "ui/events/event_utils.h"
 #include "ui/events/test/event_generator.h"
+#include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/geometry/size.h"
+#include "ui/gfx/geometry/vector2d.h"
+
+#if BUILDFLAG(IS_WIN)
+#include "content/browser/renderer_host/legacy_render_widget_host_win.h"
+#include "ui/aura/client/cursor_client.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/events/keycodes/keyboard_codes.h"
+#include "ui/wm/core/cursor_manager.h"
+#endif
 
 namespace content {
 namespace {
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 const char kMinimalPageDataURL[] =
     "data:text/html,<html><head></head><body>Hello, world</body></html>";
 
@@ -45,7 +73,7 @@ void GiveItSomeTime() {
       FROM_HERE, run_loop.QuitClosure(), base::Milliseconds(250));
   run_loop.Run();
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 class FakeWebContentsDelegate : public WebContentsDelegate {
  public:
@@ -84,6 +112,10 @@ class RenderWidgetHostViewAuraBrowserTest : public ContentBrowserTest {
         GetRenderViewHost()->GetWidget()->GetView());
   }
 
+  RenderWidgetHost* GetRenderWidgetHost() const {
+    return GetRenderWidgetHostView()->GetRenderWidgetHost();
+  }
+
   DelegatedFrameHost* GetDelegatedFrameHost() const {
     return GetRenderWidgetHostView()->delegated_frame_host_.get();
   }
@@ -91,12 +123,31 @@ class RenderWidgetHostViewAuraBrowserTest : public ContentBrowserTest {
   bool HasChildPopup() const {
     return GetRenderWidgetHostView()->popup_child_host_view_;
   }
+
+#if BUILDFLAG(IS_WIN)
+  LegacyRenderWidgetHostHWND* GetLegacyRenderWidgetHostHWND() const {
+    return GetRenderWidgetHostView()->legacy_render_widget_host_HWND_;
+  }
+#endif  // BUILDFLAG(IS_WIN)
 };
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_WIN)
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest, AuraWindowLookup) {
+  EXPECT_TRUE(NavigateToURL(shell(), GURL("about:blank")));
+  aura::Window* window = GetRenderWidgetHostView()->GetNativeView();
+  ASSERT_TRUE(GetLegacyRenderWidgetHostHWND());
+  HWND hwnd = GetLegacyRenderWidgetHostHWND()->hwnd();
+  EXPECT_TRUE(hwnd);
+  auto* window_tree_host = aura::WindowTreeHost::GetForAcceleratedWidget(hwnd);
+  EXPECT_TRUE(window_tree_host);
+  EXPECT_EQ(window->GetHost(), window_tree_host);
+}
+#endif  // BUILDFLAG(IS_WIN)
+
+#if BUILDFLAG(IS_CHROMEOS)
 IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
-                       // TODO(crbug.com/1377184): Re-enable this test
-                       // TODO(crbug.com/1376643): Re-enable this test
+                       // TODO(crbug.com/40874148): Re-enable this test
+                       // TODO(crbug.com/40873813): Re-enable this test
                        DISABLED_StaleFrameContentOnEvictionNormal) {
   EXPECT_TRUE(NavigateToURL(shell(), GURL(kMinimalPageDataURL)));
 
@@ -111,30 +162,33 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
 
   // Initially there should be no stale content set.
   EXPECT_FALSE(
-      GetDelegatedFrameHost()->stale_content_layer_->has_external_content());
+      GetDelegatedFrameHost()->stale_content_layer_->HasTransferableResource());
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kNotStarted);
 
   // Hide the view and evict the frame. This should trigger a copy of the stale
   // frame content.
-  GetRenderWidgetHostView()->Hide();
-  static_cast<viz::FrameEvictorClient*>(GetDelegatedFrameHost())
-      ->EvictDelegatedFrame();
+  shell()->web_contents()->WasHidden();
+  auto* dfh = GetDelegatedFrameHost();
+  static_cast<viz::FrameEvictorClient*>(dfh)->EvictDelegatedFrame(
+      dfh->GetFrameEvictorForTesting()->CollectSurfaceIdsForEviction());
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kPendingEvictionRequests);
 
   // Wait until the stale frame content is copied and set onto the layer.
-  while (!GetDelegatedFrameHost()->stale_content_layer_->has_external_content())
+  while (!GetDelegatedFrameHost()
+              ->stale_content_layer_->HasTransferableResource()) {
     GiveItSomeTime();
+  }
 
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kNotStarted);
 
   // Unhidding the view should reset the stale content layer to show the new
   // frame content.
-  GetRenderWidgetHostView()->Show();
+  shell()->web_contents()->WasShown();
   EXPECT_FALSE(
-      GetDelegatedFrameHost()->stale_content_layer_->has_external_content());
+      GetDelegatedFrameHost()->stale_content_layer_->HasTransferableResource());
 }
 
 IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
@@ -151,19 +205,20 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
 
   // Initially there should be no stale content set.
   EXPECT_FALSE(
-      GetDelegatedFrameHost()->stale_content_layer_->has_external_content());
+      GetDelegatedFrameHost()->stale_content_layer_->HasTransferableResource());
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kNotStarted);
 
   // Hide the view and evict the frame. This should trigger a copy of the stale
   // frame content.
-  GetRenderWidgetHostView()->Hide();
-  static_cast<viz::FrameEvictorClient*>(GetDelegatedFrameHost())
-      ->EvictDelegatedFrame();
+  shell()->web_contents()->WasHidden();
+  auto* dfh = GetDelegatedFrameHost();
+  static_cast<viz::FrameEvictorClient*>(dfh)->EvictDelegatedFrame(
+      dfh->GetFrameEvictorForTesting()->CollectSurfaceIdsForEviction());
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kPendingEvictionRequests);
 
-  GetRenderWidgetHostView()->Show();
+  shell()->web_contents()->WasShown();
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kNotStarted);
 
@@ -174,7 +229,7 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
   // This should however not set the stale content as the view is visible and
   // new frames are being submitted.
   EXPECT_FALSE(
-      GetDelegatedFrameHost()->stale_content_layer_->has_external_content());
+      GetDelegatedFrameHost()->stale_content_layer_->HasTransferableResource());
 }
 
 IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
@@ -191,15 +246,16 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
 
   // Initially there should be no stale content set.
   EXPECT_FALSE(
-      GetDelegatedFrameHost()->stale_content_layer_->has_external_content());
+      GetDelegatedFrameHost()->stale_content_layer_->HasTransferableResource());
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kNotStarted);
 
   // Hide the view and evict the frame. This should not trigger a copy of the
   // stale frame content as the WebContentDelegate returns false.
-  GetRenderWidgetHostView()->Hide();
-  static_cast<viz::FrameEvictorClient*>(GetDelegatedFrameHost())
-      ->EvictDelegatedFrame();
+  shell()->web_contents()->WasHidden();
+  auto* dfh = GetDelegatedFrameHost();
+  static_cast<viz::FrameEvictorClient*>(dfh)->EvictDelegatedFrame(
+      dfh->GetFrameEvictorForTesting()->CollectSurfaceIdsForEviction());
 
   EXPECT_EQ(GetDelegatedFrameHost()->frame_eviction_state_,
             DelegatedFrameHost::FrameEvictionState::kNotStarted);
@@ -208,23 +264,12 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
   // completed. There shouldnt be any requests sent however.
   GiveItSomeTime();
   EXPECT_FALSE(
-      GetDelegatedFrameHost()->stale_content_layer_->has_external_content());
+      GetDelegatedFrameHost()->stale_content_layer_->HasTransferableResource());
 }
-#endif  // #if BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // #if BUILDFLAG(IS_CHROMEOS)
 
-// TODO(1126339): fix the way how exo creates accelerated widgets. At the
-// moment, they are created only after the client attaches a buffer to a
-// surface, which is incorrect and results in the "[destroyed object]: error 1:
-// popup parent not constructed" error.
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#define MAYBE_SetKeyboardFocusOnTapAfterDismissingPopup \
-  DISABLED_SetKeyboardFocusOnTapAfterDismissingPopup
-#else
-#define MAYBE_SetKeyboardFocusOnTapAfterDismissingPopup \
-  SetKeyboardFocusOnTapAfterDismissingPopup
-#endif
 IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
-                       MAYBE_SetKeyboardFocusOnTapAfterDismissingPopup) {
+                       SetKeyboardFocusOnTapAfterDismissingPopup) {
   GURL page(
       "data:text/html;charset=utf-8,"
       "<!DOCTYPE html>"
@@ -244,17 +289,14 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
       "</body>"
       "</html>");
   EXPECT_TRUE(NavigateToURL(shell(), page));
+  SimulateEndOfPaintHoldingOnPrimaryMainFrame(shell()->web_contents());
 
   auto* wc = shell()->web_contents();
   ASSERT_TRUE(ExecJs(wc, "focusSelectMenu();"));
-  SimulateKeyPress(wc, ui::DomKey::FromCharacter(' '), ui::DomCode::SPACE,
-                   ui::VKEY_SPACE, false, false, false, false);
+  SimulateCharTyped(wc, ' ');
 
   // Wait until popup is opened.
-  while (!HasChildPopup()) {
-    base::RunLoop().RunUntilIdle();
-    base::PlatformThread::Sleep(TestTimeouts::tiny_timeout());
-  }
+  EXPECT_TRUE(base::test::RunUntil([&]() { return HasChildPopup(); }));
 
   // Page is focused to begin with.
   ASSERT_TRUE(IsRenderWidgetHostFocused(GetRenderViewHost()->GetWidget()));
@@ -275,6 +317,127 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
 
   // Page should stay focused after the tap.
   EXPECT_TRUE(IsRenderWidgetHostFocused(GetRenderViewHost()->GetWidget()));
+}
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
+                       UpdatesCaretBoundsAfterFrameScroll) {
+  GURL page(
+      "data:text/html;charset=utf-8,"
+      "<!DOCTYPE html>"
+      "<html>"
+      "<body>"
+      "<style>"
+      "  %23scrollableDiv {"
+      "  height: 10000px;"
+      "  }"
+      "  %23textfield {"
+      "  margin-top: 100px;"
+      "  }"
+      "</style>"
+      "<div id=\"scrollableDiv\">"
+      "  <input id=\"textfield\" type=\"text\" value=\"Some editable text\">"
+      "</div>"
+      "<script type=\"text/javascript\">"
+      "  function focusTextfield() {"
+      "    document.getElementById('textfield').focus({'preventScroll': true});"
+      "  }"
+      "</script>"
+      "</body>"
+      "</html>");
+  EXPECT_TRUE(NavigateToURL(shell(), page));
+  GetRenderWidgetHostView()->SetSize(gfx::Size(600, 500));
+
+  // Focus the textfield and wait for initial caret bounds.
+  auto* web_contents = shell()->web_contents();
+  {
+    // The caret bounds can have briefly have an invalid zero size value when
+    // the textfield initially focuses, so wait for non-zero caret size rather
+    // than waiting for the first caret bounds update.
+    NonZeroCaretSizeWaiter initial_caret_bounds_waiter(web_contents);
+    ASSERT_TRUE(ExecJs(web_contents, "focusTextfield();"));
+    initial_caret_bounds_waiter.Wait();
+  }
+
+  const gfx::Rect initial_caret_bounds =
+      GetRenderWidgetHostView()->GetCaretBounds();
+  EXPECT_NE(initial_caret_bounds, gfx::Rect());
+
+  // Scroll and wait for caret bounds to update.
+  {
+    CaretBoundsUpdateWaiter caret_bounds_update_waiter(web_contents);
+    ASSERT_TRUE(ExecJs(web_contents, "window.scrollBy(0, 50);"));
+    caret_bounds_update_waiter.Wait();
+  }
+
+  EXPECT_EQ(GetRenderWidgetHostView()->GetCaretBounds().x(),
+            initial_caret_bounds.x());
+  EXPECT_LT(GetRenderWidgetHostView()->GetCaretBounds().y(),
+            initial_caret_bounds.y());
+}
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
+                       UpdatesCaretBoundsAfterOverflowScroll) {
+  GURL page(
+      "data:text/html;charset=utf-8,"
+      "<!DOCTYPE html>"
+      "<html>"
+      "<body>"
+      "<style>"
+      "  %23container {"
+      "  height: 200px;"
+      "  overflow: scroll;"
+      "  }"
+      "  %23scrollableDiv {"
+      "  height: 1000px;"
+      "  }"
+      "  %23textfield {"
+      "  margin-top: 100px;"
+      "  }"
+      "</style>"
+      "<div id=\"container\">"
+      "  <div id=\"scrollableDiv\">"
+      "    <input id=\"textfield\" type=\"text\" value=\"Some editable text\">"
+      "  </div>"
+      "</div>"
+      "<script type=\"text/javascript\">"
+      "  function focusTextfield() {"
+      "    document.getElementById('textfield').focus({'preventScroll': true});"
+      "  }"
+      "  function scrollContainerTopBy(dy) {"
+      "    document.getElementById('container').scrollTop += dy;"
+      "  }"
+      "</script>"
+      "</body>"
+      "</html>");
+  EXPECT_TRUE(NavigateToURL(shell(), page));
+  GetRenderWidgetHostView()->SetSize(gfx::Size(600, 500));
+
+  // Focus the textfield and wait for initial caret bounds.
+  auto* web_contents = shell()->web_contents();
+  {
+    // The caret bounds can have briefly have an invalid zero size value when
+    // the textfield initially focuses, so wait for non-zero caret size rather
+    // than waiting for the first caret bounds update.
+    NonZeroCaretSizeWaiter initial_caret_bounds_waiter(web_contents);
+    ASSERT_TRUE(ExecJs(web_contents, "focusTextfield();"));
+    initial_caret_bounds_waiter.Wait();
+  }
+
+  const gfx::Rect initial_caret_bounds =
+      GetRenderWidgetHostView()->GetCaretBounds();
+  EXPECT_NE(initial_caret_bounds, gfx::Rect());
+
+  // Scroll and wait for caret bounds to update.
+  {
+    CaretBoundsUpdateWaiter caret_bounds_update_waiter(web_contents);
+    ASSERT_TRUE(ExecJs(web_contents, "scrollContainerTopBy(50);"));
+    caret_bounds_update_waiter.Wait();
+  }
+
+  EXPECT_EQ(GetRenderWidgetHostView()->GetCaretBounds().x(),
+            initial_caret_bounds.x());
+  EXPECT_LT(GetRenderWidgetHostView()->GetCaretBounds().y(),
+            initial_caret_bounds.y());
 }
 
 class RenderWidgetHostViewAuraDevtoolsBrowserTest
@@ -326,33 +489,31 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraDevtoolsBrowserTest,
       "</html>");
 
   EXPECT_TRUE(NavigateToURL(shell(), page));
+  SimulateEndOfPaintHoldingOnPrimaryMainFrame(shell()->web_contents());
+
   auto* wc = shell()->web_contents();
   Attach();
   SendCommandSync("Debugger.enable");
 
   ASSERT_TRUE(ExecJs(wc, "focusSelectMenu();"));
-  SimulateKeyPress(wc, ui::DomKey::FromCharacter(' '), ui::DomCode::SPACE,
-                   ui::VKEY_SPACE, false, false, false, false);
+  SimulateCharTyped(wc, ' ');
 
   // Wait until popup is opened.
-  while (!HasChildPopup()) {
-    base::RunLoop().RunUntilIdle();
-    base::PlatformThread::Sleep(TestTimeouts::tiny_timeout());
-  }
+  EXPECT_TRUE(base::test::RunUntil([&]() { return HasChildPopup(); }));
 
   // Send down and enter to select next item and cause change listener to fire.
   // The event listener causes devtools to break (and enter a nested event
   // loop).
-  ui::KeyEvent press_down(ui::ET_KEY_PRESSED, ui::VKEY_DOWN,
+  ui::KeyEvent press_down(ui::EventType::kKeyPressed, ui::VKEY_DOWN,
                           ui::DomCode::ARROW_DOWN, ui::EF_NONE,
                           ui::DomKey::ARROW_DOWN, ui::EventTimeForNow());
-  ui::KeyEvent release_down(ui::ET_KEY_RELEASED, ui::VKEY_DOWN,
+  ui::KeyEvent release_down(ui::EventType::kKeyReleased, ui::VKEY_DOWN,
                             ui::DomCode::ARROW_DOWN, ui::EF_NONE,
                             ui::DomKey::ARROW_DOWN, ui::EventTimeForNow());
-  ui::KeyEvent press_enter(ui::ET_KEY_PRESSED, ui::VKEY_RETURN,
+  ui::KeyEvent press_enter(ui::EventType::kKeyPressed, ui::VKEY_RETURN,
                            ui::DomCode::ENTER, ui::EF_NONE, ui::DomKey::ENTER,
                            ui::EventTimeForNow());
-  ui::KeyEvent release_enter(ui::ET_KEY_RELEASED, ui::VKEY_RETURN,
+  ui::KeyEvent release_enter(ui::EventType::kKeyReleased, ui::VKEY_RETURN,
                              ui::DomCode::ENTER, ui::EF_NONE, ui::DomKey::ENTER,
                              ui::EventTimeForNow());
   auto* host_view_aura = static_cast<content::RenderWidgetHostViewAura*>(
@@ -432,14 +593,16 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraDSFBrowserTest,
 
   // Calculate the DIP size from the bounds in pixel. Follow exactly what is
   // done in `WebFrameWidgetImpl`.
-  const base::Value eval_result =
-      EvalJs(wc, "getSelectionBounds();").ExtractList();
-  const int x = floor(eval_result.GetList()[0].GetDouble());
-  const int right = ceil(eval_result.GetList()[1].GetDouble());
-  const int y = floor(eval_result.GetList()[2].GetDouble());
-  const int bottom = ceil(eval_result.GetList()[3].GetDouble());
-  const int expected_dip_width = floor(right / scale()) - ceil(x / scale());
-  const int expected_dip_height = floor(bottom / scale()) - ceil(y / scale());
+  const base::ListValue eval_result =
+      EvalJs(wc, "getSelectionBounds();").TakeValue().TakeList();
+  const double x = eval_result[0].GetDouble();
+  const double right = eval_result[1].GetDouble();
+  const double y = eval_result[2].GetDouble();
+  const double bottom = eval_result[3].GetDouble();
+  const int expected_dip_width = floor(ceil(right * scale()) / scale()) -
+                                 ceil(floor(x * scale()) / scale());
+  const int expected_dip_height = floor(ceil(bottom * scale()) / scale()) -
+                                  ceil(floor(y * scale()) / scale());
 
   // Verify the DIP size of the bounding box.
   const gfx::Rect selection_bounds =
@@ -466,20 +629,11 @@ class RenderWidgetHostViewAuraActiveWidgetTest : public ContentBrowserTest {
 
   // Helper function to check |isActivated| for a given frame.
   bool FrameIsActivated(content::RenderFrameHost* rfh) {
-    bool active = false;
-    EXPECT_TRUE(ExecuteScriptAndExtractBool(
-        rfh,
-        "window.domAutomationController.send(window.internals.isActivated())",
-        &active));
-    return active;
+    return EvalJs(rfh, "window.internals.isActivated()").ExtractBool();
   }
 
   bool FrameIsFocused(content::RenderFrameHost* rfh) {
-    bool is_focused = false;
-    EXPECT_TRUE(ExecuteScriptAndExtractBool(
-        rfh, "window.domAutomationController.send(document.hasFocus())",
-        &is_focused));
-    return is_focused;
+    return EvalJs(rfh, "document.hasFocus()").ExtractBool();
   }
 
   RenderViewHost* GetRenderViewHost() const {
@@ -496,7 +650,6 @@ class RenderWidgetHostViewAuraActiveWidgetTest : public ContentBrowserTest {
 
  protected:
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    ContentBrowserTest::SetUpCommandLine(command_line);
     command_line->AppendSwitch(switches::kExposeInternalsForTesting);
   }
 
@@ -562,7 +715,7 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraActiveWidgetTest,
   EXPECT_FALSE(FrameIsFocused(iframe));
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 // Verifies that getting active input control accounts for iframe positioning.
 // Flaky: crbug.com/1293700
 IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraActiveWidgetTest,
@@ -576,17 +729,15 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraActiveWidgetTest,
 
   // Ensure both the main page and the iframe are loaded.
   ASSERT_EQ("OUTER_LOADED",
-            EvalJs(root->current_frame_host(), "notifyWhenLoaded()",
-                   content::EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+            EvalJs(root->current_frame_host(), "notifyWhenLoaded()"));
   ASSERT_EQ("LOADED", EvalJs(root->current_frame_host(),
                              "document.querySelector(\"iframe\").contentWindow."
-                             "notifyWhenLoaded();",
-                             content::EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+                             "notifyWhenLoaded();"));
   // TODO(b/204006085): Remove this sleep call and replace with polling.
   GiveItSomeTime();
 
-  absl::optional<gfx::Rect> control_bounds;
-  absl::optional<gfx::Rect> selection_bounds;
+  std::optional<gfx::Rect> control_bounds;
+  std::optional<gfx::Rect> selection_bounds;
   GetRenderWidgetHostView()->GetActiveTextInputControlLayoutBounds(
       &control_bounds, &selection_bounds);
 
@@ -596,5 +747,441 @@ IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraActiveWidgetTest,
   ASSERT_EQ(4200, control_bounds->origin().y());
 }
 #endif
+
+// Make sure that scroll sequence produces kGestureScrollEnd event even if
+// it starts with FlingCancel but never received FlingStart, which can
+// happen with a track point device.
+namespace {
+class InputEventWaiter : public RenderWidgetHost::InputEventObserver {
+ public:
+  explicit InputEventWaiter(RenderWidgetHost* host) {
+    observation_.Observe(host);
+  }
+  InputEventWaiter(const InputEventWaiter&) = delete;
+  InputEventWaiter& operator=(const InputEventWaiter&) = delete;
+  ~InputEventWaiter() override = default;
+
+  // RenderWidgetHost::InputEventObserver:
+  void OnInputEvent(const RenderWidgetHost& host,
+                    const blink::WebInputEvent& event,
+                    InputEventSource source) override {
+    if (event.GetType() == target_state_) {
+      future_->SetValue(event.GetType());
+    }
+  }
+
+  void Wait(blink::WebInputEvent::Type target_state) {
+    target_state_ = target_state;
+    future_ =
+        std::make_unique<base::test::TestFuture<blink::WebInputEvent::Type>>();
+    CHECK(future_->Wait());
+    future_.reset();
+    target_state_ = blink::WebInputEvent::Type::kUndefined;
+  }
+
+ private:
+  blink::WebInputEvent::Type target_state_ =
+      blink::WebInputEvent::Type::kUndefined;
+  std::unique_ptr<base::test::TestFuture<blink::WebInputEvent::Type>> future_;
+  base::ScopedObservation<RenderWidgetHost,
+                          RenderWidgetHost::InputEventObserver>
+      observation_{this};
+};
+
+}  // namespace
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
+                       TrackPointResetsFlingState) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  // Load a page that draws new frames infinitely.
+  EXPECT_TRUE(
+      NavigateToURL(shell(), embedded_test_server()->GetURL("/title1.html")));
+
+  auto* web_contents = static_cast<WebContentsImpl*>(shell()->web_contents());
+  SimulateEndOfPaintHoldingOnPrimaryMainFrame(web_contents);
+  auto* root = web_contents->GetNativeView()->GetRootWindow();
+
+  ui::test::EventGenerator generator(root, web_contents->GetNativeView());
+  gfx::Point location = generator.current_screen_location();
+
+  constexpr int kTouchpadDeviceId = 1;
+  constexpr int kTrackpointDeviceId = 2;
+
+  auto* rwhv = GetRenderWidgetHostView();
+  auto& mouse_wheel_phase_handler =
+      rwhv->event_handler()->mouse_wheel_phase_handler();
+
+  InputEventWaiter waiter(GetRenderWidgetHost());
+  // Starting scroll with Track Point may touch touch pad, which generates fling
+  // cancel event. Emulate that sequence, by generating FlingCancel with
+  // Touchpad's ID first.
+  generator.set_mouse_source_device_id(kTouchpadDeviceId);
+  generator.ScrollSequence(
+      location, base::Milliseconds(16), /*x_offset=*/0, /*y_offset=*/5,
+      /*steps=*/0, /*num_fingers=*/1,
+      ui::test::EventGenerator::ScrollSequenceType::StartAndScroll);
+
+  EXPECT_EQ(content::TouchpadScrollPhaseState::TOUCHPAD_SCROLL_MAY_BEGIN,
+            mouse_wheel_phase_handler.touchpad_scroll_phase_state_for_test());
+
+  // Then generate scroll events using TrackPoint's ID.
+  generator.set_mouse_source_device_id(kTrackpointDeviceId);
+  generator.ScrollSequence(
+      location, base::Milliseconds(16), /*x_offset=*/0, /*y_offset=*/5,
+      /*steps=*/10, /*num_fingers=*/2,
+      ui::test::EventGenerator::ScrollSequenceType::ScrollOnly);
+
+  EXPECT_EQ(content::TouchpadScrollPhaseState::TOUCHPAD_SCROLL_STATE_UNKNOWN,
+            mouse_wheel_phase_handler.touchpad_scroll_phase_state_for_test());
+  waiter.Wait(blink::WebInputEvent::Type::kGestureScrollBegin);
+  waiter.Wait(blink::WebInputEvent::Type::kGestureScrollEnd);
+
+  EXPECT_EQ(content::TouchpadScrollPhaseState::TOUCHPAD_SCROLL_STATE_UNKNOWN,
+            mouse_wheel_phase_handler.touchpad_scroll_phase_state_for_test());
+}
+
+namespace {
+class ViewDestroyingPreTargetHandler : public ui::EventHandler {
+ public:
+  explicit ViewDestroyingPreTargetHandler(aura::Window* root_window,
+                                          RenderWidgetHostViewAura* view)
+      : root_window_(root_window), view_(view) {
+    root_window_->AddPreTargetHandler(this);
+  }
+
+  ~ViewDestroyingPreTargetHandler() override {
+    if (root_window_) {
+      root_window_->RemovePreTargetHandler(this);
+    }
+  }
+
+  void OnGestureEvent(ui::GestureEvent* event) override {
+    if (event->type() == ui::EventType::kGestureTapDown && view_) {
+      RenderWidgetHostViewAura* view_to_destroy = view_;
+      view_ = nullptr;
+      view_to_destroy->Destroy();
+      gesture_tap_down_seen_ = true;
+      root_window_->RemovePreTargetHandler(this);
+      root_window_ = nullptr;
+    }
+  }
+
+  bool gesture_tap_down_seen() const { return gesture_tap_down_seen_; }
+
+ private:
+  raw_ptr<aura::Window> root_window_;
+  raw_ptr<RenderWidgetHostViewAura> view_;
+  bool gesture_tap_down_seen_ = false;
+};
+}  // namespace
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraBrowserTest,
+                       ProcessAckedTouchEventUseAfterFree) {
+  GURL page(
+      "data:text/html;charset=utf-8,"
+      "<!DOCTYPE html>"
+      "<html>"
+      "<body style='width: 100vw; height: 100vh;'>"
+      "</body>"
+      "</html>");
+  EXPECT_TRUE(NavigateToURL(shell(), page));
+
+  auto* web_contents = shell()->web_contents();
+  SimulateEndOfPaintHoldingOnPrimaryMainFrame(web_contents);
+  WaitForHitTestData(web_contents->GetPrimaryMainFrame());
+
+  auto* rwhva = GetRenderWidgetHostView();
+  ASSERT_TRUE(rwhva);
+  auto* root_window = rwhva->GetNativeView()->GetRootWindow();
+  ASSERT_TRUE(root_window);
+
+  ViewDestroyingPreTargetHandler handler(root_window, rwhva);
+
+  ui::test::EventGenerator generator(root_window, rwhva->GetNativeView());
+  generator.MoveTouch(rwhva->GetNativeView()->bounds().CenterPoint());
+  generator.PressTouch();
+
+  EXPECT_TRUE(
+      base::test::RunUntil([&]() { return handler.gesture_tap_down_seen(); }));
+}
+
+#if BUILDFLAG(IS_WIN)
+namespace {
+
+class RenderWidgetHostViewAuraHideCursorOnTypingBrowserTest
+    : public RenderWidgetHostViewAuraBrowserTest {
+ public:
+  RenderWidgetHostViewAuraHideCursorOnTypingBrowserTest() {
+    scoped_feature_list_.InitAndEnableFeature(features::kHideCursorWhileTyping);
+  }
+
+ protected:
+  // Loads a page with a focused text field and returns the cursor client (a
+  // wm::CursorManager) for the widget's root window, with the simulated "Hide
+  // pointer while typing" Windows setting set to |mouse_vanish_enabled| and the
+  // cursor made visible.
+  wm::CursorManager* SetUpFocusedTextFieldAndCursorManager(
+      bool mouse_vanish_enabled = true) {
+    const GURL page(
+        "data:text/html;charset=utf-8,"
+        "<!DOCTYPE html><html><body>"
+        "<textarea id=\"textfield\" value=\"editable\"></textarea>"
+        "<script type=\"text/javascript\">"
+        "  function focusTextfield() {"
+        "    document.getElementById('textfield').focus("
+        "        {'preventScroll': true});"
+        "  }"
+        "</script>"
+        "</body></html>");
+    if (!NavigateToURL(shell(), page)) {
+      return nullptr;
+    }
+    GetRenderWidgetHostView()->SetSize(gfx::Size(600, 500));
+
+    // Focus the text field so the active TextInputClient reports an editable
+    // input type. Waiting for non-zero caret size ensures the renderer has
+    // propagated the text input state to the browser.
+    auto* web_contents = shell()->web_contents();
+    NonZeroCaretSizeWaiter caret_waiter(web_contents);
+    if (!ExecJs(web_contents, "focusTextfield();")) {
+      return nullptr;
+    }
+    caret_waiter.Wait();
+
+    aura::Window* root_window =
+        GetRenderWidgetHostView()->GetNativeView()->GetRootWindow();
+    if (!root_window) {
+      return nullptr;
+    }
+    auto* cursor_manager = static_cast<wm::CursorManager*>(
+        aura::client::GetCursorClient(root_window));
+    if (cursor_manager) {
+      cursor_manager->SetMouseVanishEnabledForTesting(mouse_vanish_enabled);
+      cursor_manager->ShowCursor();
+    }
+    return cursor_manager;
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+}  // namespace
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraHideCursorOnTypingBrowserTest,
+                       HidesCursorWhileTypingAndRestoresOnMouseMove) {
+  wm::CursorManager* cursor_manager = SetUpFocusedTextFieldAndCursorManager();
+  ASSERT_TRUE(cursor_manager);
+  ASSERT_TRUE(cursor_manager->IsCursorVisible());
+
+  auto* rwhva = GetRenderWidgetHostView();
+  aura::Window* native_view = rwhva->GetNativeView();
+  // Supplying the target view centers the pointer over it, ensuring generated
+  // mouse events are delivered to the renderer.
+  ui::test::EventGenerator generator(native_view->GetRootWindow(), native_view);
+
+  // Typing a character hides the cursor.
+  generator.PressAndReleaseKey(ui::VKEY_A, ui::EF_NONE);
+  EXPECT_FALSE(cursor_manager->IsCursorVisible());
+
+  // Moving the mouse restores the cursor.
+  generator.MoveMouseBy(1, 0);
+  EXPECT_TRUE(cursor_manager->IsCursorVisible());
+}
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraHideCursorOnTypingBrowserTest,
+                       DoesNotHideCursorOnKeyboardShortcut) {
+  wm::CursorManager* cursor_manager = SetUpFocusedTextFieldAndCursorManager();
+  ASSERT_TRUE(cursor_manager);
+  ASSERT_TRUE(cursor_manager->IsCursorVisible());
+
+  auto* rwhva = GetRenderWidgetHostView();
+  ui::test::EventGenerator generator(rwhva->GetNativeView()->GetRootWindow());
+
+  // Ctrl+A is a shortcut, so the cursor stays visible.
+  generator.PressAndReleaseKey(ui::VKEY_A, ui::EF_CONTROL_DOWN);
+  EXPECT_TRUE(cursor_manager->IsCursorVisible());
+}
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraHideCursorOnTypingBrowserTest,
+                       DoesNotHideCursorWhenSystemSettingDisabled) {
+  wm::CursorManager* cursor_manager =
+      SetUpFocusedTextFieldAndCursorManager(/*mouse_vanish_enabled=*/false);
+  ASSERT_TRUE(cursor_manager);
+  ASSERT_TRUE(cursor_manager->IsCursorVisible());
+
+  auto* rwhva = GetRenderWidgetHostView();
+  ui::test::EventGenerator generator(rwhva->GetNativeView()->GetRootWindow());
+
+  // Typing a character does not hide the cursor because the OS setting is off.
+  generator.PressAndReleaseKey(ui::VKEY_A, ui::EF_NONE);
+  EXPECT_TRUE(cursor_manager->IsCursorVisible());
+}
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraHideCursorOnTypingBrowserTest,
+                       RestoresCursorOnMouseClick) {
+  wm::CursorManager* cursor_manager = SetUpFocusedTextFieldAndCursorManager();
+  ASSERT_TRUE(cursor_manager);
+  ASSERT_TRUE(cursor_manager->IsCursorVisible());
+
+  auto* rwhva = GetRenderWidgetHostView();
+  aura::Window* native_view = rwhva->GetNativeView();
+  // Supplying the target view centers the pointer over it, ensuring generated
+  // mouse events are delivered to the renderer.
+  ui::test::EventGenerator generator(native_view->GetRootWindow(), native_view);
+
+  // Type to hide the cursor.
+  generator.PressAndReleaseKey(ui::VKEY_A, ui::EF_NONE);
+  ASSERT_FALSE(cursor_manager->IsCursorVisible());
+
+  // A click restores it.
+  generator.ClickLeftButton();
+  EXPECT_TRUE(cursor_manager->IsCursorVisible());
+}
+
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraHideCursorOnTypingBrowserTest,
+                       RestoresCursorOnMouseWheel) {
+  wm::CursorManager* cursor_manager = SetUpFocusedTextFieldAndCursorManager();
+  ASSERT_TRUE(cursor_manager);
+  ASSERT_TRUE(cursor_manager->IsCursorVisible());
+
+  auto* rwhva = GetRenderWidgetHostView();
+  aura::Window* native_view = rwhva->GetNativeView();
+  // Supplying the target view centers the pointer over it, ensuring generated
+  // mouse events are delivered to the renderer.
+  ui::test::EventGenerator generator(native_view->GetRootWindow(), native_view);
+
+  // Type to hide the cursor.
+  generator.PressAndReleaseKey(ui::VKEY_A, ui::EF_NONE);
+  ASSERT_FALSE(cursor_manager->IsCursorVisible());
+
+  // A wheel scroll restores it.
+  generator.MoveMouseWheel(0, -5);
+  EXPECT_TRUE(cursor_manager->IsCursorVisible());
+}
+#endif  // BUILDFLAG(IS_WIN)
+
+namespace {
+
+// Observes `window` and synchronously runs `on_destroyed_` from within
+// OnWindowDestroyed(), after the delegate's OnWindowDestroyed() has run
+// (i.e. after ~RenderWidgetHostViewAura()) but before ClearProperties().
+class ScopedWindowDestroyedObserver : public aura::WindowObserver {
+ public:
+  ScopedWindowDestroyedObserver(aura::Window* window,
+                                base::OnceClosure on_destroyed)
+      : window_(window), on_destroyed_(std::move(on_destroyed)) {
+    window_->AddObserver(this);
+  }
+  ~ScopedWindowDestroyedObserver() override {
+    if (window_) {
+      window_->RemoveObserver(this);
+    }
+  }
+
+  void OnWindowDestroyed(aura::Window* window) override {
+    std::move(on_destroyed_).Run();
+    window_ = nullptr;
+  }
+
+ private:
+  raw_ptr<aura::Window> window_;
+  base::OnceClosure on_destroyed_;
+};
+
+}  // namespace
+
+class RenderWidgetHostViewAuraTeardownEventTest : public ContentBrowserTest {
+ public:
+  RenderWidgetHostViewAuraTeardownEventTest() = default;
+  ~RenderWidgetHostViewAuraTeardownEventTest() override = default;
+
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    // Slow bots are flaky due to slower loading interacting with
+    // deferred commits.
+    command_line->AppendSwitch(blink::switches::kAllowPreCommitInput);
+  }
+
+  void SetUpOnMainThread() override {
+    host_resolver()->AddRule("*", "127.0.0.1");
+    ASSERT_TRUE(embedded_test_server()->Start());
+  }
+
+  // Navigates to a page with a <select> element, opens its popup by
+  // focusing it and sending a space key, and returns the popup's
+  // RenderWidgetHostViewAura.
+  RenderWidgetHostViewAura* OpenSelectPopupAndGetAuraView() {
+    const GURL main_url(embedded_test_server()->GetURL(
+        "a.com", "/site_isolation/page-with-select.html"));
+    EXPECT_TRUE(NavigateToURL(shell(), main_url));
+    SimulateEndOfPaintHoldingOnPrimaryMainFrame(shell()->web_contents());
+
+    auto* const contents =
+        static_cast<WebContentsImpl*>(shell()->web_contents());
+    FrameTreeNode* const root = contents->GetPrimaryFrameTree().root();
+    RenderFrameHostImpl* const root_frame_host = root->current_frame_host();
+    RenderProcessHost* const process = root_frame_host->GetProcess();
+
+    // Open the <select> menu by focusing it and sending a space key
+    // at the focused node. This creates a popup widget.
+    input::NativeWebKeyboardEvent event(
+        blink::WebKeyboardEvent::Type::kChar,
+        blink::WebInputEvent::kNoModifiers,
+        blink::WebInputEvent::GetStaticTimeStampForTests());
+    event.text[0] = ' ';
+
+    // This focuses and opens the select box, creating a popup RenderWidget.
+    // We wait for the RenderWidgetHost to be shown.
+    ShowPopupWidgetWaiter filter(contents, root_frame_host);
+    EXPECT_TRUE(ExecJs(root_frame_host, "focusSelectMenu();"));
+    root_frame_host->GetRenderWidgetHost()->ForwardKeyboardEvent(event);
+    filter.Wait();
+
+    // The popup RenderWidget will get its own routing id.
+    const int popup_routing_id = filter.last_routing_id();
+    if (!popup_routing_id) {
+      ADD_FAILURE() << "Popup routing id was not set.";
+      return nullptr;
+    }
+
+    // Grab a pointer to the popup RenderWidget.
+    RenderWidgetHost* const popup_widget_host =
+        RenderWidgetHost::FromID(process->GetDeprecatedID(), popup_routing_id);
+    if (!popup_widget_host ||
+        popup_widget_host == root_frame_host->GetRenderWidgetHost()) {
+      ADD_FAILURE() << "Popup RenderWidgetHost was not created.";
+      return nullptr;
+    }
+
+    return static_cast<RenderWidgetHostViewAura*>(popup_widget_host->GetView());
+  }
+};
+
+// When `RenderWidgetHostViewAura` is destroyed while `window_` is still alive
+// (e.g. owned by its parent in the renderer-exit path), the FocusChangeObserver
+// property on `window_` must be cleared so FocusController cannot reach the
+// freed view via a subsequent focus change (e.g. from Widget::Hide()).
+IN_PROC_BROWSER_TEST_F(RenderWidgetHostViewAuraTeardownEventTest,
+                       HandleFocusLossWhileTearDown) {
+  RenderWidgetHostViewAura* const aura_view = OpenSelectPopupAndGetAuraView();
+  ASSERT_TRUE(aura_view);
+
+  aura::Window* const window = aura_view->GetNativeView();
+  ASSERT_TRUE(window);
+  ASSERT_EQ(aura::client::GetFocusChangeObserver(window), aura_view);
+
+  // The delegate's OnWindowDestroyed fires before WindowObserver callbacks,
+  // so by the time our observer runs, ~RenderWidgetHostViewAura() has already
+  // executed and the property must be null.
+  bool focus_observer_cleared = false;
+  ScopedWindowDestroyedObserver check(
+      window, base::BindLambdaForTesting([&]() {
+        focus_observer_cleared =
+            (aura::client::GetFocusChangeObserver(window) == nullptr);
+      }));
+
+  aura_view->Shutdown();
+  EXPECT_TRUE(focus_observer_cleared);
+}
 
 }  // namespace content

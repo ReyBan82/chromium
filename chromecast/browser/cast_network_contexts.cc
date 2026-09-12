@@ -20,13 +20,14 @@
 #include "components/proxy_config/pref_proxy_config_tracker_impl.h"
 #include "components/variations/net/variations_http_headers.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/network_service_instance.h"
 #include "content/public/browser/storage_partition.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom.h"
 #include "services/network/network_context.h"
+#include "services/network/public/cpp/cookie_encryption_provider_impl.h"
 #include "services/network/public/cpp/cross_thread_pending_shared_url_loader_factory.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
@@ -46,7 +47,8 @@ ContentSettingPatternSource CreateContentSetting(
   return ContentSettingPatternSource(
       ContentSettingsPattern::FromString(primary_pattern),
       ContentSettingsPattern::FromString(secondary_pattern),
-      base::Value(setting), std::string(), /*incognito=*/false);
+      base::Value(setting), content_settings::ProviderType::kNone,
+      /*incognito=*/false);
 }
 
 }  // namespace
@@ -107,8 +109,11 @@ class CastNetworkContexts::URLLoaderFactoryForSystem
 };
 
 CastNetworkContexts::CastNetworkContexts(
-    std::vector<std::string> cors_exempt_headers_list)
+    std::vector<std::string> cors_exempt_headers_list,
+    os_crypt_async::OSCryptAsync* os_crypt_async)
     : cors_exempt_headers_list_(std::move(cors_exempt_headers_list)),
+      cookie_encryption_provider_(
+          std::make_unique<CookieEncryptionProviderImpl>(os_crypt_async)),
       system_shared_url_loader_factory_(
           base::MakeRefCounted<URLLoaderFactoryForSystem>(this)) {}
 
@@ -146,8 +151,8 @@ CastNetworkContexts::GetSystemURLLoaderFactory() {
 
   network::mojom::URLLoaderFactoryParamsPtr params =
       network::mojom::URLLoaderFactoryParams::New();
-  params->process_id = network::mojom::kBrowserProcessId;
-  params->is_corb_enabled = false;
+  params->process_id = network::OriginatingProcessId::browser();
+  params->is_orb_enabled = false;
   params->is_trusted = true;
   GetSystemContext()->CreateURLLoaderFactory(
       system_url_loader_factory_.BindNewPipeAndPassReceiver(),
@@ -234,15 +239,8 @@ void CastNetworkContexts::ConfigureDefaultNetworkContextParams(
   network_context_params->restore_old_session_cookies = false;
   network_context_params->persist_session_cookies = true;
   network_context_params->cookie_manager_params = CreateCookieManagerParams();
-
-  // Disable idle sockets close on memory pressure, if instructed by DCS. On
-  // memory constrained devices:
-  // 1. if idle sockets are closed when memory pressure happens, cast_shell will
-  // close and re-open lots of connections to server.
-  // 2. if idle sockets are kept alive when memory pressure happens, this may
-  // cause JS engine gc frequently, leading to JS suspending.
-  network_context_params->disable_idle_sockets_close_on_memory_pressure =
-      IsFeatureEnabled(kDisableIdleSocketsCloseOnMemoryPressure);
+  network_context_params->cookie_encryption_provider =
+      cookie_encryption_provider_->BindNewRemote();
 
   AddProxyToNetworkContextParams(network_context_params);
 
@@ -286,8 +284,8 @@ CastNetworkContexts::CreateCookieManagerParams() {
     settings_for_storage_access.push_back(
         std::move(allow_storage_access_setting));
 
-    // TODO(crbug.com/1385156): Consolidate this with the regular STORAGE_ACCESS
-    // setting as usage becomes better-defined.
+    // TODO(crbug.com/40246640): Consolidate this with the regular
+    // STORAGE_ACCESS setting as usage becomes better-defined.
     auto allow_top_level_storage_access_setting = CreateContentSetting(
         /*primary_pattern=*/base::StrCat({"[*.]", domain}),
         /*secondary_pattern=*/"*", ContentSetting::CONTENT_SETTING_ALLOW);
@@ -308,9 +306,10 @@ CastNetworkContexts::CreateCookieManagerParams() {
   settings_for_top_level_storage_access.push_back(CreateContentSetting(
       /*primary_pattern=*/"*",
       /*secondary_pattern=*/"*", ContentSetting::CONTENT_SETTING_BLOCK));
-  params->settings = std::move(settings);
-  params->settings_for_storage_access = std::move(settings_for_storage_access);
-  params->settings_for_top_level_storage_access =
+  params->content_settings[ContentSettingsType::COOKIES] = std::move(settings);
+  params->content_settings[ContentSettingsType::STORAGE_ACCESS] =
+      std::move(settings_for_storage_access);
+  params->content_settings[ContentSettingsType::TOP_LEVEL_STORAGE_ACCESS] =
       std::move(settings_for_top_level_storage_access);
 
   return params;
@@ -321,7 +320,9 @@ void CastNetworkContexts::AddProxyToNetworkContextParams(
   if (!proxy_config_service_) {
     pref_proxy_config_tracker_impl_ =
         std::make_unique<PrefProxyConfigTrackerImpl>(
-            CastBrowserProcess::GetInstance()->pref_service(), nullptr);
+            CastBrowserProcess::GetInstance()->pref_service(),
+            /*proxy_config_service_task_runner=*/nullptr,
+            /*policy_service=*/nullptr);
     proxy_config_service_ =
         pref_proxy_config_tracker_impl_->CreateTrackingProxyConfigService(
             nullptr);
@@ -359,7 +360,6 @@ void CastNetworkContexts::OnProxyConfigChanged(
         break;
       case net::ProxyConfigService::CONFIG_PENDING:
         NOTREACHED();
-        break;
     }
   }
 }

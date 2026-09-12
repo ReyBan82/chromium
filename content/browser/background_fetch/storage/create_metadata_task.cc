@@ -27,13 +27,14 @@
 #include "third_party/blink/public/common/service_worker/service_worker_status_code.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 
 namespace content {
 namespace background_fetch {
 
 namespace {
 
-// TODO(crbug.com/889401): Consider making this configurable by finch.
+// TODO(crbug.com/40595478): Consider making this configurable by finch.
 constexpr size_t kRegistrationLimitPerStorageKey = 5u;
 
 // Finds the number of active registrations associated with the provided storage
@@ -179,7 +180,8 @@ void CreateMetadataTask::DidGetCanCreateRegistration(
     return;
   }
 
-  DCHECK_EQ(error, blink::mojom::BackgroundFetchError::NONE);
+  CHECK_EQ(error, blink::mojom::BackgroundFetchError::NONE,
+           base::NotFatalUntil::M158);
   if (!can_create) {
     FinishWithError(
         blink::mojom::BackgroundFetchError::REGISTRATION_LIMIT_EXCEEDED);
@@ -297,7 +299,7 @@ void CreateMetadataTask::DidSerializeIcon(std::string serialized_icon) {
 }
 
 void CreateMetadataTask::StoreMetadata() {
-  DCHECK(metadata_proto_);
+  CHECK(metadata_proto_, base::NotFatalUntil::M158);
   std::vector<std::pair<std::string, std::string>> entries;
   // - One BackgroundFetchPendingRequest per request
   // - DeveloperId -> UniqueID
@@ -360,9 +362,8 @@ void CreateMetadataTask::StoreMetadata() {
 void CreateMetadataTask::DidStoreMetadata(
     blink::ServiceWorkerStatusCode status) {
   int64_t trace_id = blink::cache_storage::CreateTraceId();
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageMigrationTask::DidStoreMetadata",
-                         TRACE_ID_GLOBAL(trace_id), TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageMigrationTask::DidStoreMetadata",
+              perfetto::Flow::Global(trace_id));
 
   switch (ToDatabaseStatus(status)) {
     case DatabaseStatus::kOk:
@@ -382,10 +383,8 @@ void CreateMetadataTask::DidStoreMetadata(
 
 void CreateMetadataTask::DidOpenCache(int64_t trace_id,
                                       blink::mojom::CacheStorageError error) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageMigrationTask::DidReopenCache",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageMigrationTask::DidReopenCache",
+              perfetto::Flow::Global(trace_id));
 
   if (error != blink::mojom::CacheStorageError::kSuccess) {
     SetStorageErrorAndFinish(BackgroundFetchStorageError::kCacheStorageError);
@@ -436,7 +435,7 @@ void CreateMetadataTask::FinishWithError(
   auto registration_data = blink::mojom::BackgroundFetchRegistrationData::New();
 
   if (error == blink::mojom::BackgroundFetchError::NONE) {
-    DCHECK(metadata_proto_);
+    CHECK(metadata_proto_, base::NotFatalUntil::M158);
 
     bool converted = ToBackgroundFetchRegistration(*metadata_proto_,
                                                    registration_data.get());
@@ -454,14 +453,8 @@ void CreateMetadataTask::FinishWithError(
     }
   }
 
-  ReportStorageError();
-
   std::move(callback_).Run(error, std::move(registration_data));
   Finished();  // Destroys |this|.
-}
-
-std::string CreateMetadataTask::HistogramName() const {
-  return "CreateMetadataTask";
 }
 
 }  // namespace background_fetch

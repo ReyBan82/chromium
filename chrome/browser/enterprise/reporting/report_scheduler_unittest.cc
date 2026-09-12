@@ -4,36 +4,40 @@
 
 #include "components/enterprise/browser/reporting/report_scheduler.h"
 
+#include <memory>
 #include <utility>
 
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
+#include "base/strings/strcat.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/mock_callback.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/test/test_future.h"
 #include "base/time/time.h"
+#include "base/values.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/enterprise/reporting/extension_request/extension_request_report_generator.h"
 #include "chrome/browser/enterprise/reporting/prefs.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/upgrade_detector/build_state.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/pref_names.h"
-#include "chrome/test/base/scoped_testing_local_state.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile_manager.h"
+#include "components/device_signals/core/common/signals_features.h"
 #include "components/enterprise/browser/controller/fake_browser_dm_token_storage.h"
 #include "components/enterprise/browser/reporting/chrome_profile_request_generator.h"
 #include "components/enterprise/browser/reporting/common_pref_names.h"
-#include "components/enterprise/browser/reporting/real_time_report_generator.h"
-#include "components/enterprise/browser/reporting/real_time_uploader.h"
+#include "components/enterprise/browser/reporting/report_generation_config.h"
 #include "components/enterprise/browser/reporting/report_generator.h"
 #include "components/enterprise/browser/reporting/report_request.h"
-#include "components/enterprise/common/proto/extensions_workflow_events.pb.h"
+#include "components/enterprise/browser/reporting/reporting_features.h"
 #include "components/policy/core/common/cloud/mock_cloud_policy_client.h"
+#include "components/prefs/pref_service.h"
+#include "components/prefs/testing_pref_service.h"
 #include "components/reporting/client/report_queue_provider.h"
 #include "components/reporting/proto/synced/record_constants.pb.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
@@ -71,13 +75,16 @@ constexpr base::TimeDelta kNewUploadFrequency = base::Hours(10);
 
 constexpr char kUploadTriggerMetricName[] =
     "Enterprise.CloudReportingUploadTrigger";
+constexpr char kSignalsReportingModeMetricName[] =
+    "Enterprise.SecurityReport.User.Mode";
 
 }  // namespace
 
 ACTION_P(ScheduleGeneratorCallback, request_number) {
   ReportRequestQueue requests;
   for (int i = 0; i < request_number; i++)
-    requests.push(std::make_unique<ReportRequest>(ReportType::kFull));
+    requests.push(std::make_unique<ReportRequest>(ReportType::kBrowser));
+
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(std::move(arg0), std::move(requests)));
 }
@@ -85,8 +92,17 @@ ACTION_P(ScheduleGeneratorCallback, request_number) {
 ACTION(ScheduleProfileRequestGeneratorCallback) {
   ReportRequestQueue requests;
   requests.push(std::make_unique<ReportRequest>(ReportType::kProfileReport));
+
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(std::move(arg0), std::move(requests)));
+}
+
+ACTION(ScheduleProfileRequestGeneratorEmptyReportCallback) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(
+          std::move(arg0),
+          base::unexpected(ReportGenerationError::kProfileEmptyReport)));
 }
 
 class MockReportGenerator : public ReportGenerator {
@@ -103,9 +119,11 @@ class MockReportGenerator : public ReportGenerator {
   void Generate(ReportType report_type, ReportCallback callback) override {
     OnGenerate(report_type, callback);
   }
-  MOCK_METHOD2(OnGenerate,
-               void(ReportType report_type, ReportCallback& callback));
-  MOCK_METHOD0(GenerateBasic, ReportRequestQueue());
+  MOCK_METHOD(void,
+              OnGenerate,
+              (ReportType report_type, ReportCallback& callback),
+              ());
+  MOCK_METHOD(ReportRequestQueue, GenerateBasic, (), ());
 };
 
 class MockReportUploader : public ReportUploader {
@@ -116,40 +134,12 @@ class MockReportUploader : public ReportUploader {
   MockReportUploader& operator=(const MockReportUploader&) = delete;
 
   ~MockReportUploader() override = default;
-  MOCK_METHOD3(SetRequestAndUpload,
-               void(ReportType, ReportRequestQueue, ReportCallback));
-};
-
-class MockRealTimeReportGenerator : public RealTimeReportGenerator {
- public:
-#if BUILDFLAG(IS_ANDROID)
-  explicit MockRealTimeReportGenerator(
-      ReportingDelegateFactoryAndroid* delegate_factory)
-      : RealTimeReportGenerator(delegate_factory) {}
-#else
-  explicit MockRealTimeReportGenerator(
-      ReportingDelegateFactoryDesktop* delegate_factory)
-      : RealTimeReportGenerator(delegate_factory) {}
-#endif  // BUILDFLAG(IS_ANDROID)
-
-  MOCK_METHOD2(Generate,
-               std::vector<std::unique_ptr<google::protobuf::MessageLite>>(
-                   ReportType type,
-                   const RealTimeReportGenerator::Data& data));
-};
-
-class MockRealTimeUploader : public RealTimeUploader {
- public:
-  MockRealTimeUploader() : RealTimeUploader(reporting::Priority::FAST_BATCH) {}
-
-  void Upload(std::unique_ptr<google::protobuf::MessageLite> report,
-              EnqueueCallback callback) override {
-    OnUpload(report.get(), callback);
-  }
-
-  MOCK_METHOD2(OnUpload,
-               void(google::protobuf::MessageLite* report,
-                    EnqueueCallback& callback));
+  MOCK_METHOD(void,
+              SetRequestAndUpload,
+              (const ReportGenerationConfig&,
+               ReportRequestQueue,
+               ReportCallback),
+              (override));
 };
 
 class MockChromeProfileRequestGenerator : public ChromeProfileRequestGenerator {
@@ -162,26 +152,31 @@ class MockChromeProfileRequestGenerator : public ChromeProfileRequestGenerator {
       ReportingDelegateFactoryDesktop* delegate_factory)
 #endif  // BUILDFLAG(IS_ANDROID)
       : ChromeProfileRequestGenerator(/*profile_path=*/base::FilePath(),
-                                      /*profile_name*/ std::string(),
                                       delegate_factory) {
   }
-  void Generate(ReportCallback callback) override { OnGenerate(callback); }
-  MOCK_METHOD1(OnGenerate, void(ReportCallback& callback));
+  void Generate(ReportGenerationConfig generation_config,
+                ReportCallback callback) override {
+    OnGenerate(callback);
+  }
+  MOCK_METHOD(void, OnGenerate, (ReportCallback&), ());
 };
 
 class ReportSchedulerTest : public ::testing::Test {
  public:
-  ReportSchedulerTest()
-      : task_environment_(base::test::TaskEnvironment::TimeSource::MOCK_TIME),
-        local_state_(TestingBrowserProcess::GetGlobal()),
-        profile_manager_(TestingBrowserProcess::GetGlobal(), &local_state_) {}
-
   ReportSchedulerTest(const ReportSchedulerTest&) = delete;
   ReportSchedulerTest& operator=(const ReportSchedulerTest&) = delete;
+
+ protected:
+  ReportSchedulerTest() = default;
 
   ~ReportSchedulerTest() override = default;
 
   void SetUp() override {
+    scoped_feature_list_.InitWithFeatureStates(
+        {{enterprise_signals::features::kProfileSignalsReportingEnabled,
+          profile_security_signals_enabled()},
+         {kUploadReportOnProfileOpen,
+          upload_report_on_profile_open_enabled()}});
     ASSERT_TRUE(profile_manager_.SetUp());
     client_ptr_ = std::make_unique<policy::MockCloudPolicyClient>();
     client_ = client_ptr_.get();
@@ -191,18 +186,12 @@ class ReportSchedulerTest : public ::testing::Test {
     uploader_ptr_ = std::make_unique<MockReportUploader>();
     uploader_ = uploader_ptr_.get();
 
-    real_time_generator_ptr_ = std::make_unique<MockRealTimeReportGenerator>(
-        &report_delegate_factory_);
-    real_time_generator_ = real_time_generator_ptr_.get();
-    extension_request_uploader_ptr_ = std::make_unique<MockRealTimeUploader>();
-    extension_request_uploader_ = extension_request_uploader_ptr_.get();
-
     profile_request_generator_ptr_ =
         std::make_unique<MockChromeProfileRequestGenerator>(
             &report_delegate_factory_);
     profile_request_generator_ = profile_request_generator_ptr_.get();
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
     SetLastUploadVersion(chrome::kChromeVersion);
 #endif
     Init(true, kDMToken, kClientId);
@@ -212,7 +201,7 @@ class ReportSchedulerTest : public ::testing::Test {
             const std::string& dm_token,
             const std::string& client_id) {
     ToggleCloudReport(policy_enabled);
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
     storage_.SetDMToken(dm_token);
     storage_.SetClientId(client_id);
 #endif
@@ -223,14 +212,11 @@ class ReportSchedulerTest : public ::testing::Test {
     params.client = client_;
     params.delegate = report_delegate_factory_.GetReportSchedulerDelegate();
     params.report_generator = std::move(generator_ptr_);
-    params.real_time_report_generator = std::move(real_time_generator_ptr_);
     scheduler_ = std::make_unique<ReportScheduler>(std::move(params));
-    scheduler_->SetReportUploaderForTesting(std::move(uploader_ptr_));
-    scheduler_->SetExtensionRequestUploaderForTesting(
-        std::move(extension_request_uploader_ptr_));
+    scheduler_->QueueReportUploaderForTesting(std::move(uploader_ptr_));
   }
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   void CreateSchedulerForProfileReporting(Profile* profile) {
     ReportScheduler::CreateParams params;
     params.client = client_;
@@ -239,46 +225,64 @@ class ReportSchedulerTest : public ::testing::Test {
 #if BUILDFLAG(IS_ANDROID)
         std::make_unique<ReportSchedulerAndroid>(profile);
 #else
-        std::make_unique<ReportSchedulerDesktop>(profile,
-                                                 /*profile_reporting=*/true);
+        std::make_unique<ReportSchedulerDesktop>(profile);
 #endif  // BUILDFLAG(IS_ANDROID)
+    if (params.delegate->GetPrefService()
+            ->GetTime(kLastUploadTimestamp)
+            .is_null()) {
+      SetLastUploadInHour(base::Seconds(0), profile);
+    }
     params.profile_request_generator =
         std::move(profile_request_generator_ptr_);
     scheduler_ = std::make_unique<ReportScheduler>(std::move(params));
-    scheduler_->SetReportUploaderForTesting(std::move(uploader_ptr_));
+    scheduler_->QueueReportUploaderForTesting(std::move(uploader_ptr_));
   }
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
-  void SetLastUploadInHour(base::TimeDelta gap) {
+  void SetLastUploadInHour(base::TimeDelta gap, Profile* profile = nullptr) {
     previous_set_last_upload_timestamp_ = base::Time::Now() - gap;
-    local_state_.Get()->SetTime(kLastUploadTimestamp,
-                                previous_set_last_upload_timestamp_);
+
+    auto* pref_service =
+        profile ? profile->GetPrefs()
+                : TestingBrowserProcess::GetGlobal()->local_state();
+    pref_service->SetTime(kLastUploadTimestamp,
+                          previous_set_last_upload_timestamp_);
   }
 
-  void SetReportFrequency(base::TimeDelta frequency) {
-    local_state_.Get()->SetTimeDelta(kCloudReportingUploadFrequency, frequency);
+  void SetReportFrequency(base::TimeDelta frequency,
+                          Profile* profile = nullptr) {
+    TestingBrowserProcess::GetGlobal()->local_state()->SetTimeDelta(
+        kCloudReportingUploadFrequency, frequency);
+    if (profile) {
+      profile->GetPrefs()->SetTimeDelta(kCloudReportingUploadFrequency,
+                                        frequency);
+    }
   }
 
   void ToggleCloudReport(bool enabled) {
-    local_state_.Get()->SetManagedPref(kCloudReportingEnabled,
-                                       std::make_unique<base::Value>(enabled));
+    TestingBrowserProcess::GetGlobal()->GetTestingLocalState()->SetManagedPref(
+        kCloudReportingEnabled, std::make_unique<base::Value>(enabled));
   }
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   void SetLastUploadVersion(const std::string& version) {
-    local_state_.Get()->SetString(kLastUploadVersion, version);
+    TestingBrowserProcess::GetGlobal()->local_state()->SetString(
+        kLastUploadVersion, version);
   }
 
   void ExpectLastUploadVersion(const std::string& version) {
-    EXPECT_EQ(local_state_.Get()->GetString(kLastUploadVersion), version);
+    EXPECT_EQ(TestingBrowserProcess::GetGlobal()->local_state()->GetString(
+                  kLastUploadVersion),
+              version);
   }
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
   // If lastUploadTimestamp is updated recently, it should be updated as Now().
   // Otherwise, it should be same as previous set timestamp.
   void ExpectLastUploadTimestampUpdated(bool is_updated) {
     auto current_last_upload_timestamp =
-        local_state_.Get()->GetTime(kLastUploadTimestamp);
+        TestingBrowserProcess::GetGlobal()->local_state()->GetTime(
+            kLastUploadTimestamp);
     if (is_updated) {
       EXPECT_EQ(base::Time::Now(), current_last_upload_timestamp);
     } else {
@@ -290,21 +294,13 @@ class ReportSchedulerTest : public ::testing::Test {
   ReportRequestQueue CreateRequests(int number) {
     ReportRequestQueue requests;
     for (int i = 0; i < number; i++)
-      requests.push(std::make_unique<ReportRequest>(ReportType::kFull));
+      requests.push(std::make_unique<ReportRequest>(ReportType::kBrowser));
     return requests;
   }
 
   // Chrome OS needn't setup registration.
   void EXPECT_CALL_SetupRegistration() {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-    EXPECT_CALL(*client_, SetupRegistration(_, _, _)).Times(0);
-#else
-    EXPECT_CALL(*client_, SetupRegistration(kDMToken, kClientId, _));
-#endif
-  }
-
-  void EXPECT_CALL_SetupRegistrationWithSetDMToken() {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     EXPECT_CALL(*client_, SetupRegistration(_, _, _)).Times(0);
 #else
     EXPECT_CALL(*client_, SetupRegistration(kDMToken, kClientId, _))
@@ -313,43 +309,39 @@ class ReportSchedulerTest : public ::testing::Test {
 #endif
   }
 
-#if !BUILDFLAG(IS_ANDROID)
-  void TriggerExtensionRequestReport(Profile* profile) {
-    static_cast<ReportSchedulerDesktop*>(scheduler_->GetDelegateForTesting())
-        ->TriggerExtensionRequest(profile);
-  }
-#endif  // !BUILDFLAG(IS_ANDROID)
+  // This function is virtual to allow derived classes to override it and test
+  // the behavior with the feature enabled/disabled.
+  virtual bool profile_security_signals_enabled() { return false; }
+  virtual bool upload_report_on_profile_open_enabled() { return false; }
 
-  content::BrowserTaskEnvironment task_environment_;
-  ScopedTestingLocalState local_state_;
-  TestingProfileManager profile_manager_;
+  content::BrowserTaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+  TestingProfileManager profile_manager_{TestingBrowserProcess::GetGlobal()};
 
 #if BUILDFLAG(IS_ANDROID)
   ReportingDelegateFactoryAndroid report_delegate_factory_;
 #else
   ReportingDelegateFactoryDesktop report_delegate_factory_;
 #endif  // BUILDFLAG(IS_ANDROID)
+  std::unique_ptr<policy::MockCloudPolicyClient> client_ptr_;
+  std::unique_ptr<MockReportGenerator> generator_ptr_;
+  std::unique_ptr<MockReportUploader> uploader_ptr_;
+  std::unique_ptr<MockChromeProfileRequestGenerator>
+      profile_request_generator_ptr_;
   std::unique_ptr<ReportScheduler> scheduler_;
-  raw_ptr<policy::MockCloudPolicyClient> client_;
-  raw_ptr<MockReportGenerator> generator_;
-  raw_ptr<MockReportUploader> uploader_;
-  raw_ptr<MockRealTimeReportGenerator> real_time_generator_;
-  raw_ptr<MockRealTimeUploader> extension_request_uploader_;
-  raw_ptr<MockChromeProfileRequestGenerator> profile_request_generator_;
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+
+  raw_ptr<policy::MockCloudPolicyClient> client_ = nullptr;
+  raw_ptr<MockReportGenerator> generator_ = nullptr;
+  raw_ptr<MockReportUploader, DanglingUntriaged> uploader_ = nullptr;
+  raw_ptr<MockChromeProfileRequestGenerator> profile_request_generator_ =
+      nullptr;
+
+#if !BUILDFLAG(IS_CHROMEOS)
   policy::FakeBrowserDMTokenStorage storage_;
 #endif
   base::Time previous_set_last_upload_timestamp_;
   base::HistogramTester histogram_tester_;
-
- private:
-  std::unique_ptr<policy::MockCloudPolicyClient> client_ptr_;
-  std::unique_ptr<MockReportGenerator> generator_ptr_;
-  std::unique_ptr<MockReportUploader> uploader_ptr_;
-  std::unique_ptr<MockRealTimeReportGenerator> real_time_generator_ptr_;
-  std::unique_ptr<MockRealTimeUploader> extension_request_uploader_ptr_;
-  std::unique_ptr<MockChromeProfileRequestGenerator>
-      profile_request_generator_ptr_;
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 TEST_F(ReportSchedulerTest, NoReportWithoutPolicy) {
@@ -359,7 +351,7 @@ TEST_F(ReportSchedulerTest, NoReportWithoutPolicy) {
 }
 
 // Chrome OS needn't set dm token and client id in the report scheduler.
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 TEST_F(ReportSchedulerTest, NoReportWithoutDMToken) {
   Init(true, "", kClientId);
   CreateScheduler();
@@ -375,9 +367,15 @@ TEST_F(ReportSchedulerTest, NoReportWithoutClientId) {
 
 TEST_F(ReportSchedulerTest, UploadReportSucceeded) {
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -394,39 +392,19 @@ TEST_F(ReportSchedulerTest, UploadReportSucceeded) {
   ::testing::Mock::VerifyAndClearExpectations(generator_);
 }
 
-// Profile reporting does not support ash.
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-TEST_F(ReportSchedulerTest, UploadReportSucceededForProfileReporting) {
-  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
-      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kProfileReport, _, _))
-      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
-  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
-  profile->GetTestingPrefService()->SetManagedPref(
-      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
-  CreateSchedulerForProfileReporting(profile);
-  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
-
-  // Run pending task.
-  task_environment_.FastForwardBy(base::TimeDelta());
-
-  // Next report is scheduled.
-  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
-  auto current_last_upload_timestamp =
-      profile->GetPrefs()->GetTime(kLastUploadTimestamp);
-  EXPECT_EQ(base::Time::Now(), current_last_upload_timestamp);
-
-  ::testing::Mock::VerifyAndClearExpectations(client_);
-  ::testing::Mock::VerifyAndClearExpectations(profile_request_generator_);
-}
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
 
 TEST_F(ReportSchedulerTest, UploadReportTransientError) {
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kTransientError));
 
   CreateScheduler();
@@ -444,10 +422,16 @@ TEST_F(ReportSchedulerTest, UploadReportTransientError) {
 }
 
 TEST_F(ReportSchedulerTest, UploadReportPersistentError) {
-  EXPECT_CALL_SetupRegistrationWithSetDMToken();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL_SetupRegistration();
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kPersistentError));
 
   CreateScheduler();
@@ -470,8 +454,8 @@ TEST_F(ReportSchedulerTest, UploadReportPersistentError) {
 }
 
 TEST_F(ReportSchedulerTest, NoReportGenerate) {
-  EXPECT_CALL_SetupRegistrationWithSetDMToken();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL_SetupRegistration();
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(0)));
   EXPECT_CALL(*uploader_, SetRequestAndUpload(_, _, _)).Times(0);
 
@@ -500,9 +484,15 @@ TEST_F(ReportSchedulerTest, TimerDelayWithLastUploadTimestamp) {
   SetReportFrequency(kUploadFrequency);
 
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -520,9 +510,15 @@ TEST_F(ReportSchedulerTest, TimerDelayWithLastUploadTimestamp) {
 
 TEST_F(ReportSchedulerTest, TimerDelayWithoutLastUploadTimestamp) {
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -541,9 +537,15 @@ TEST_F(ReportSchedulerTest, TimerDelayUpdate) {
   SetReportFrequency(kUploadFrequency);
 
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -607,9 +609,15 @@ TEST_F(ReportSchedulerTest,
 
 TEST_F(ReportSchedulerTest, ReportingIsDisabledWhileNewReportIsPosted) {
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -631,33 +639,84 @@ TEST_F(ReportSchedulerTest, ReportingIsDisabledWhileNewReportIsPosted) {
   ::testing::Mock::VerifyAndClearExpectations(generator_);
 }
 
+TEST_F(ReportSchedulerTest,
+       ReportingIsDisabledWhileReportGenerationInProgress) {
+  EXPECT_CALL_SetupRegistration();
+  ReportGenerator::ReportCallback generator_callback;
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
+      .WillOnce([&generator_callback](
+                    ReportType, ReportGenerator::ReportCallback& callback) {
+        generator_callback = std::move(callback);
+      });
+  EXPECT_CALL(*uploader_, SetRequestAndUpload(_, _, _)).Times(0);
+
+  CreateScheduler();
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Run pending task to trigger report generation.
+  task_environment_.FastForwardBy(base::TimeDelta());
+  EXPECT_TRUE(generator_callback);
+
+  // Disable reporting while report generation is in progress.
+  ToggleCloudReport(false);
+
+  // Next report is not scheduled.
+  EXPECT_FALSE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Report generation finishes after reporting is disabled.
+  ReportRequestQueue requests;
+  requests.push(std::make_unique<ReportRequest>(ReportType::kBrowser));
+  std::move(generator_callback).Run(std::move(requests));
+
+  // No report upload should be performed and no crash should occur.
+  EXPECT_FALSE(scheduler_->IsNextReportScheduledForTesting());
+  ExpectLastUploadTimestampUpdated(false);
+
+  ::testing::Mock::VerifyAndClearExpectations(client_);
+  ::testing::Mock::VerifyAndClearExpectations(generator_);
+  ::testing::Mock::VerifyAndClearExpectations(uploader_);
+}
+
 TEST_F(ReportSchedulerTest, ManualReport) {
   SetLastUploadInHour(base::Hours(1));
   EXPECT_CALL_SetupRegistration();
 
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerManual,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
 
   base::MockOnceClosure callback;
   EXPECT_CALL(callback, Run()).Times(1);
-  scheduler_->UploadFullReport(callback.Get());
+  scheduler_->UploadReport(callback.Get());
   task_environment_.RunUntilIdle();
 
   ExpectLastUploadTimestampUpdated(true);
   histogram_tester_.ExpectUniqueSample(kUploadTriggerMetricName, 6, 1);
+  histogram_tester_.ExpectTotalCount(kSignalsReportingModeMetricName, 0);
   ::testing::Mock::VerifyAndClearExpectations(generator_);
   ::testing::Mock::VerifyAndClearExpectations(uploader_);
 }
 
 TEST_F(ReportSchedulerTest, ScheduledReportAfterManualReport) {
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerManual,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -667,7 +726,7 @@ TEST_F(ReportSchedulerTest, ScheduledReportAfterManualReport) {
 
   // Trigger manual report first and then move forward time to trigger timer
   // report.
-  scheduler_->UploadFullReport(callback.Get());
+  scheduler_->UploadReport(callback.Get());
   task_environment_.RunUntilIdle();
 
   ExpectLastUploadTimestampUpdated(true);
@@ -678,14 +737,20 @@ TEST_F(ReportSchedulerTest, ScheduledReportAfterManualReport) {
 
 TEST_F(ReportSchedulerTest, ManualReportWithRegularOneOngoing) {
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
 
-  // Callback for timer report will be hold.
+  // Callback for timer report will be held.
   ReportUploader::ReportCallback saved_timer_callback;
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce([&saved_timer_callback](
-                    ReportType report_type, ReportRequestQueue requests,
+                    ReportGenerationConfig config, ReportRequestQueue requests,
                     ReportUploader::ReportCallback callback) {
         saved_timer_callback = std::move(callback);
       });
@@ -697,7 +762,7 @@ TEST_F(ReportSchedulerTest, ManualReportWithRegularOneOngoing) {
   EXPECT_CALL(callback, Run()).Times(1);
 
   // Trigger manual report and then release timer report callback.
-  scheduler_->UploadFullReport(callback.Get());
+  scheduler_->UploadReport(callback.Get());
   std::move(saved_timer_callback).Run(ReportUploader::kSuccess);
   task_environment_.RunUntilIdle();
 
@@ -707,10 +772,8 @@ TEST_F(ReportSchedulerTest, ManualReportWithRegularOneOngoing) {
   ::testing::Mock::VerifyAndClearExpectations(uploader_);
 }
 
-// Android does not support version updates nor extensions
-#if !BUILDFLAG(IS_ANDROID)
-
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+// Android does not support version updates
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS)
 
 // Tests that a basic report is generated and uploaded when a browser update is
 // detected.
@@ -722,13 +785,19 @@ TEST_F(ReportSchedulerTest, OnUpdate) {
   EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowserVersion, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
   EXPECT_CALL(*uploader_,
-              SetRequestAndUpload(ReportType::kBrowserVersion, _, _))
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerUpdate,
+                                         ReportType::kBrowserVersion,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
   g_browser_process->GetBuildState()->SetUpdate(
       BuildState::UpdateType::kNormalUpdate,
-      base::Version("1" + version_info::GetVersionNumber()), absl::nullopt);
+      base::Version(base::StrCat({"1", version_info::GetVersionNumber()})),
+      std::nullopt);
   task_environment_.RunUntilIdle();
 
   // The timestamp should not have been updated, since a periodic report was not
@@ -746,13 +815,19 @@ TEST_F(ReportSchedulerTest, OnUpdateAndPersistentError) {
   EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowserVersion, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
   EXPECT_CALL(*uploader_,
-              SetRequestAndUpload(ReportType::kBrowserVersion, _, _))
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerUpdate,
+                                         ReportType::kBrowserVersion,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kPersistentError));
 
   CreateScheduler();
   g_browser_process->GetBuildState()->SetUpdate(
       BuildState::UpdateType::kNormalUpdate,
-      base::Version("1" + version_info::GetVersionNumber()), absl::nullopt);
+      base::Version(base::StrCat({"1", version_info::GetVersionNumber()})),
+      std::nullopt);
   task_environment_.RunUntilIdle();
 
   // The timestamp should not have been updated, since a periodic report was not
@@ -764,12 +839,13 @@ TEST_F(ReportSchedulerTest, OnUpdateAndPersistentError) {
   // The report should be stopped in case of persistent error.
   g_browser_process->GetBuildState()->SetUpdate(
       BuildState::UpdateType::kNormalUpdate,
-      base::Version("2" + version_info::GetVersionNumber()), absl::nullopt);
+      base::Version(base::StrCat({"2", version_info::GetVersionNumber()})),
+      std::nullopt);
   histogram_tester_.ExpectUniqueSample(kUploadTriggerMetricName, 2, 1);
 }
 
-// Tests that a full report is generated and uploaded following a basic report
-// if the timer fires while the basic report is being uploaded.
+// Tests that a browser report is generated and uploaded following a browser
+// version report if the timer fires while the basic report is being uploaded.
 TEST_F(ReportSchedulerTest, DeferredTimer) {
   EXPECT_CALL_SetupRegistration();
   CreateScheduler();
@@ -781,8 +857,13 @@ TEST_F(ReportSchedulerTest, DeferredTimer) {
   // Hang on to the uploader's ReportCallback.
   ReportUploader::ReportCallback saved_callback;
   EXPECT_CALL(*uploader_,
-              SetRequestAndUpload(ReportType::kBrowserVersion, _, _))
-      .WillOnce([&saved_callback](ReportType report_type,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerUpdate,
+                                         ReportType::kBrowserVersion,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce([&saved_callback](ReportGenerationConfig config,
                                   ReportRequestQueue requests,
                                   ReportUploader::ReportCallback callback) {
         saved_callback = std::move(callback);
@@ -790,7 +871,8 @@ TEST_F(ReportSchedulerTest, DeferredTimer) {
 
   g_browser_process->GetBuildState()->SetUpdate(
       BuildState::UpdateType::kNormalUpdate,
-      base::Version("1" + version_info::GetVersionNumber()), absl::nullopt);
+      base::Version(base::StrCat({"1", version_info::GetVersionNumber()})),
+      std::nullopt);
   task_environment_.RunUntilIdle();
   ::testing::Mock::VerifyAndClearExpectations(generator_);
   ::testing::Mock::VerifyAndClearExpectations(uploader_);
@@ -802,17 +884,23 @@ TEST_F(ReportSchedulerTest, DeferredTimer) {
 
   // Once the previous upload completes, a new report should be generated
   // forthwith.
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
   auto new_uploader = std::make_unique<MockReportUploader>();
-  EXPECT_CALL(*new_uploader, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*new_uploader,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
   std::move(saved_callback).Run(ReportUploader::kSuccess);
   ExpectLastUploadTimestampUpdated(false);
   ::testing::Mock::VerifyAndClearExpectations(generator_);
 
   this->uploader_ = new_uploader.get();
-  this->scheduler_->SetReportUploaderForTesting(std::move(new_uploader));
+  this->scheduler_->QueueReportUploaderForTesting(std::move(new_uploader));
 
   task_environment_.RunUntilIdle();
   ::testing::Mock::VerifyAndClearExpectations(uploader_);
@@ -836,7 +924,12 @@ TEST_F(ReportSchedulerTest, OnNewVersion) {
   EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowserVersion, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
   EXPECT_CALL(*uploader_,
-              SetRequestAndUpload(ReportType::kBrowserVersion, _, _))
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerNewVersion,
+                                         ReportType::kBrowserVersion,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -853,7 +946,7 @@ TEST_F(ReportSchedulerTest, OnNewVersion) {
   histogram_tester_.ExpectUniqueSample(kUploadTriggerMetricName, 3, 1);
 }
 
-// Tests that a full report is generated and uploaded during startup when a
+// Tests that a browser report is generated and uploaded during startup when a
 // new version is being run and the last periodic upload was more than a day
 // ago.
 TEST_F(ReportSchedulerTest, OnNewVersionRegularReport) {
@@ -864,9 +957,15 @@ TEST_F(ReportSchedulerTest, OnNewVersionRegularReport) {
   SetLastUploadInHour(base::Hours(25));
 
   EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(ReportType::kFull, _))
+  EXPECT_CALL(*generator_, OnGenerate(ReportType::kBrowser, _))
       .WillOnce(WithArgs<1>(ScheduleGeneratorCallback(1)));
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(ReportType::kFull, _, _))
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kBrowser,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
       .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
   CreateScheduler();
@@ -883,41 +982,914 @@ TEST_F(ReportSchedulerTest, OnNewVersionRegularReport) {
   histogram_tester_.ExpectUniqueSample(kUploadTriggerMetricName, 1, 1);
 }
 
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+TEST_F(ReportSchedulerTest, UploadReportSucceededForProfileReporting) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerTimer,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
 
-TEST_F(ReportSchedulerTest, ExtensionRequestWithRealTimePipeline) {
-  EXPECT_CALL_SetupRegistration();
-  EXPECT_CALL(*generator_, OnGenerate(_, _)).Times(0);
-  EXPECT_CALL(*uploader_, SetRequestAndUpload(_, _, _)).Times(0);
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetLastUploadInHour(base::Hours(25), profile);
+  CreateSchedulerForProfileReporting(profile);
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
 
-  Profile* profile = profile_manager_.CreateTestingProfile("profile");
+  // Run pending task.
+  task_environment_.FastForwardBy(base::TimeDelta());
 
-  std::vector<std::unique_ptr<google::protobuf::MessageLite>> reports;
-  reports.push_back(std::make_unique<ExtensionsWorkflowEvent>());
-  reports.push_back(std::make_unique<ExtensionsWorkflowEvent>());
+  // Next report is scheduled.
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+  auto current_last_upload_timestamp =
+      profile->GetPrefs()->GetTime(kLastUploadTimestamp);
+  EXPECT_EQ(base::Time::Now(), current_last_upload_timestamp);
 
-  EXPECT_CALL(
-      *real_time_generator_,
-      Generate(RealTimeReportGenerator::ReportType::kExtensionRequest, _))
-      .WillOnce(DoAll(
-          WithArgs<1>(
-              Invoke([profile](const MockRealTimeReportGenerator::Data& data) {
-                EXPECT_EQ(profile,
-                          static_cast<const ExtensionRequestReportGenerator::
-                                          ExtensionRequestData&>(data)
-                              .profile);
-              })),
-          Return(ByMove(std::move(reports)))));
-  EXPECT_CALL(*extension_request_uploader_, OnUpload(_, _)).Times(2);
-  CreateScheduler();
+  // Verify that no security signals mode was recorded, since security signals
+  // are disabled.
+  histogram_tester_.ExpectTotalCount(kSignalsReportingModeMetricName, 0);
 
-  TriggerExtensionRequestReport(profile);
+  ::testing::Mock::VerifyAndClearExpectations(client_);
+  ::testing::Mock::VerifyAndClearExpectations(profile_request_generator_);
+}
+#endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_CHROMEOS)
 
-  ExpectLastUploadTimestampUpdated(false);
+#if !BUILDFLAG(IS_CHROMEOS)
+// Profile security signals are not supported on ChromeOS.
+class EnabledProfileSecuritySignalsReportSchedulerTest
+    : public ReportSchedulerTest {
+ protected:
+  bool profile_security_signals_enabled() override { return true; }
+  bool upload_report_on_profile_open_enabled() override { return true; }
 
-  histogram_tester_.ExpectUniqueSample(kUploadTriggerMetricName, 5, 1);
+  void SetCloudProfileReportingPolicy(TestingProfile* profile, bool enabled) {
+    profile->GetTestingPrefService()->SetManagedPref(
+        kCloudProfileReportingEnabled, base::Value(enabled));
+  }
+
+  void SetUserSecuritySignalsPolicy(
+      TestingProfile* profile,
+      bool enabled,
+      std::optional<bool> use_cookies = std::nullopt) {
+    profile->GetTestingPrefService()->SetManagedPref(
+        kUserSecuritySignalsReporting, base::Value(enabled));
+    if (use_cookies) {
+      profile->GetTestingPrefService()->SetManagedPref(
+          kUserSecurityAuthenticatedReporting, base::Value(*use_cookies));
+    }
+  }
+};
+
+class UploadReportOnProfileOpenReportSchedulerTest
+    : public ReportSchedulerTest {
+ protected:
+  bool upload_report_on_profile_open_enabled() override { return true; }
+};
+
+// Profile reporting does not support ChromeOS.
+TEST_F(UploadReportOnProfileOpenReportSchedulerTest,
+       UploadReportSucceededForProfileReporting) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerProfileOpened,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, base::Value(true));
+  CreateSchedulerForProfileReporting(profile);
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Run pending task.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Next report is scheduled.
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+  auto current_last_upload_timestamp =
+      profile->GetPrefs()->GetTime(kLastUploadTimestamp);
+  EXPECT_EQ(base::Time::Now(), current_last_upload_timestamp);
+
+  // Verify that no security signals mode was recorded, since security signals
+  // are disabled.
+  histogram_tester_.ExpectTotalCount(kSignalsReportingModeMetricName, 0);
+
+  ::testing::Mock::VerifyAndClearExpectations(client_);
+  ::testing::Mock::VerifyAndClearExpectations(profile_request_generator_);
 }
 
-#endif  // !BUILDFLAG(IS_ANDROID)
+// Tests that cookies will be used as part of the upload when both the security
+// signals policy is disabled but kUserSecurityAuthenticatedReporting is
+// enabled.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       ProfileReportingDisabled_UserSecuritySignalsPolicyEnabled_WithCookies) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerProfileOpened,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kSignalsOnly,
+                                         /*use_cookies=*/true),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetCloudProfileReportingPolicy(profile, false);
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true, /*use_cookies=*/true);
+  CreateSchedulerForProfileReporting(profile);
+
+  // Fast forward to let the startup report complete.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  histogram_tester_.ExpectUniqueSample(kSignalsReportingModeMetricName, 2, 1);
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       ProfileReportingDisabledWhileReportGenerationInProgress) {
+  ReportGenerator::ReportCallback generator_callback;
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(
+          [&generator_callback](ReportGenerator::ReportCallback& callback) {
+            generator_callback = std::move(callback);
+          });
+  EXPECT_CALL(*uploader_, SetRequestAndUpload(_, _, _)).Times(0);
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetCloudProfileReportingPolicy(profile, true);
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+  CreateSchedulerForProfileReporting(profile);
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Fast forward to trigger the startup report generation.
+  task_environment_.FastForwardBy(base::TimeDelta());
+  EXPECT_TRUE(generator_callback);
+
+  // Disable profile reporting while generation is in progress.
+  SetCloudProfileReportingPolicy(profile, false);
+  EXPECT_FALSE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Report generation finishes after reporting is disabled.
+  ReportRequestQueue requests;
+  requests.push(std::make_unique<ReportRequest>(ReportType::kProfileReport));
+  std::move(generator_callback).Run(std::move(requests));
+
+  // No upload should be performed and no crash should occur.
+  EXPECT_FALSE(scheduler_->IsNextReportScheduledForTesting());
+
+  ::testing::Mock::VerifyAndClearExpectations(client_);
+  ::testing::Mock::VerifyAndClearExpectations(profile_request_generator_);
+  ::testing::Mock::VerifyAndClearExpectations(uploader_);
+}
+
+// Edge case where:
+// - Security signals reporting is disabled, but reporting is turned on
+// - Before status report finishes, security signals reporting is enabled, so a
+// signals-only report is scheduled
+// - We need to make sure that the first report does not affect signals
+// reporting timer/trigger, and the signals-only report is generated/uploaded
+// afterwards
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       SignalsReportingRaceConditionPrevented) {
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .Times(2)
+      .WillRepeatedly(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerProfileOpened,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce([&](const ReportGenerationConfig&, ReportRequestQueue,
+                    ReportUploader::ReportCallback callback) {
+        // Trigger a signals-only report before the no-signals status report
+        // finishes generating. This trigger will be added to pending triggers.
+        SetUserSecuritySignalsPolicy(profile, /*enabled=*/true,
+                                     /*use_cookies=*/true);
+        std::move(callback).Run(ReportUploader::kSuccess);
+      });
+
+  SetCloudProfileReportingPolicy(profile, true);
+
+  auto second_uploader = std::make_unique<MockReportUploader>();
+  EXPECT_CALL(*second_uploader,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerSecurity,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kSignalsOnly,
+                                         /*use_cookies=*/true),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  CreateSchedulerForProfileReporting(profile);
+  scheduler_->QueueReportUploaderForTesting(std::move(second_uploader));
+
+  // Trigger a status report without signals, which will then trigger a
+  // signals-only report before it finishes.
+  task_environment_.FastForwardBy(base::TimeDelta());
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+}
+
+// Tests the use-case where a report is being requested manually when profile
+// reporting is not enabled, but security signals are.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       UploadManualReportSucceededForProfileReporting_OnlySecurity) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .Times(::testing::AtLeast(2))
+      .WillRepeatedly(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerSecurity,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kSignalsOnly,
+                                         /*use_cookies=*/true),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetCloudProfileReportingPolicy(profile, false);
+  CreateSchedulerForProfileReporting(profile);
+
+  // Fast forward to let the startup report complete.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Queue uploader for the security signals report.
+  auto uploader_security = std::make_unique<MockReportUploader>();
+  EXPECT_CALL(*uploader_security,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerSecurity,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kSignalsOnly,
+                                         /*use_cookies=*/true),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+  scheduler_->QueueReportUploaderForTesting(std::move(uploader_security));
+
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true, /*use_cookies=*/true);
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  scheduler_->UploadReport(base::DoNothing());
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // All 2 reports are signals-only (kSignalsOnly).
+  histogram_tester_.ExpectBucketCount(kSignalsReportingModeMetricName, 2, 2);
+}
+
+// Tests the use-case where a report is being requested manually when neither
+// profile reporting nor security signals are enabled.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       UploadManualReportForProfileReporting_PoliciesDisabled) {
+  // First set of expectations is for the timed security upload.
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetCloudProfileReportingPolicy(profile, false);
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+
+  CreateSchedulerForProfileReporting(profile);
+  EXPECT_FALSE(scheduler_->IsNextReportScheduledForTesting());
+
+  scheduler_->UploadReport(base::DoNothing());
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  histogram_tester_.ExpectTotalCount(kSignalsReportingModeMetricName, 0);
+}
+
+// Tests that no cookies will be used as part of the upload when the security
+// signals policy is disabled.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       ProfileReportingEnabled_UserSecuritySignalsPolicyDisabled) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerProfileOpened,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+  SetCloudProfileReportingPolicy(profile, true);
+  CreateSchedulerForProfileReporting(profile);
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Run pending task.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Verify that the timer is restarted.
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+  histogram_tester_.ExpectTotalCount(kSignalsReportingModeMetricName, 0);
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       StartupReportTriggerFlagResetOnCompletion) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerProfileOpened,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+  SetCloudProfileReportingPolicy(profile, true);
+
+  CreateSchedulerForProfileReporting(profile);
+
+  // Wait for startup report to complete.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Flip-flop the preference.
+  SetCloudProfileReportingPolicy(profile, false);
+  SetCloudProfileReportingPolicy(profile, true);
+
+  // Verify that timer is started.
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+}
+
+// Tests the use-case where a report is being requested manually when profile
+// reporting is enabled but not security signals.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       UploadManualReportSucceededForProfileReporting_NoSecurity) {
+  // First expect the automatic startup report.
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .Times(2)
+      .WillRepeatedly(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerProfileOpened,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+  SetCloudProfileReportingPolicy(profile, true);
+
+  SetLastUploadInHour(base::Hours(1), profile);
+
+  CreateSchedulerForProfileReporting(profile);
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Fast forward to let the startup report complete.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Now expect the manual report.
+  auto second_uploader = std::make_unique<MockReportUploader>();
+  EXPECT_CALL(*second_uploader,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerManual,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kNoSignals,
+                                         /*use_cookies=*/false),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+  scheduler_->QueueReportUploaderForTesting(std::move(second_uploader));
+
+  scheduler_->UploadReport(base::DoNothing());
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  histogram_tester_.ExpectTotalCount(kSignalsReportingModeMetricName, 0);
+}
+
+// Tests the use-case where a report is being requested manually when both
+// profile reporting and security signals are enabled.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       UploadManualReportSucceededForProfileReporting_Both) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .Times(::testing::AtLeast(2))
+      .WillRepeatedly(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  EXPECT_CALL(*uploader_, SetRequestAndUpload(
+                              ReportGenerationConfig(
+                                  ReportTrigger::kTriggerProfileOpened,
+                                  ReportType::kProfileReport,
+                                  SecuritySignalsMode::kSignalsAttached, true),
+                              _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetCloudProfileReportingPolicy(profile, true);
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true, /*use_cookies=*/true);
+  SetLastUploadInHour(base::Hours(1), profile);
+
+  CreateSchedulerForProfileReporting(profile);
+
+  // Queue uploader for the security signals report.
+  auto uploader_manual = std::make_unique<MockReportUploader>();
+  EXPECT_CALL(*uploader_manual,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(ReportTrigger::kTriggerManual,
+                                         ReportType::kProfileReport,
+                                         SecuritySignalsMode::kSignalsAttached,
+                                         /*use_cookies=*/true),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+  scheduler_->QueueReportUploaderForTesting(std::move(uploader_manual));
+
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  scheduler_->UploadReport(base::DoNothing());
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // 2 status reports with signals (kTriggerProfileOpened and kTriggerManual).
+  histogram_tester_.ExpectBucketCount(kSignalsReportingModeMetricName, 1, 2);
+  histogram_tester_.ExpectBucketCount(kSignalsReportingModeMetricName, 2, 0);
+}
+
+// Tests that an error during base profile report generation (e.g.,
+// the profile was not fully loaded yet) resets the timer for the next cycle.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       UploadReportTransientError_ProfileEmpty) {
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(
+          WithArgs<0>(ScheduleProfileRequestGeneratorEmptyReportCallback()));
+  EXPECT_CALL(*uploader_, SetRequestAndUpload(_, _, _)).Times(0);
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+  SetCloudProfileReportingPolicy(profile, true);
+
+  SetLastUploadInHour(base::Hours(25), profile);
+
+  CreateSchedulerForProfileReporting(profile);
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+  auto current_last_upload_timestamp =
+      profile->GetPrefs()->GetTime(kLastUploadTimestamp);
+  EXPECT_EQ(base::Time::Now(), current_last_upload_timestamp);
+  histogram_tester_.ExpectUniqueSample(
+      "Enterprise.CloudReportingReportGenerationError",
+      ReportGenerationError::kProfileEmptyReport, 1);
+  ::testing::Mock::VerifyAndClearExpectations(client_);
+  ::testing::Mock::VerifyAndClearExpectations(profile_request_generator_);
+  ::testing::Mock::VerifyAndClearExpectations(uploader_);
+}
+
+// Verify that a security report trigger is aborted and not active if security
+// signals reporting is disabled.
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       SecurityTriggerGatedWhenSignalsReportingDisabled) {
+  // Expect no generation or upload calls.
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_)).Times(0);
+  EXPECT_CALL(*uploader_, SetRequestAndUpload(_, _, _)).Times(0);
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+  SetCloudProfileReportingPolicy(profile, false);
+
+  CreateSchedulerForProfileReporting(profile);
+
+  // Trigger security report via delegate callback.
+  auto* delegate = scheduler_->GetDelegateForTesting();
+#if BUILDFLAG(IS_ANDROID)
+  static_cast<ReportSchedulerAndroid*>(delegate)->OnReportEventTriggered(
+      SecurityReportTrigger::kTimer);
+#else
+  static_cast<ReportSchedulerDesktop*>(delegate)->OnReportEventTriggered(
+      SecurityReportTrigger::kTimer);
+#endif
+
+  EXPECT_NE(scheduler_->GetActiveTriggerForTesting(),
+            ReportTrigger::kTriggerSecurity);
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       ChallengeFetchedWhenPolicySet) {
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+
+  // Enable reporting and security signals
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true);
+  SetLastUploadInHour(base::Hours(1), profile);
+  profile->GetTestingPrefService()->SetString(kLastUploadVersion,
+                                              chrome::kChromeVersion);
+
+  // Set certificates selectors policy to non-empty
+  base::ListValue policy_value;
+  base::DictValue selector;
+  base::DictValue issuer;
+  issuer.Set("CN", "IssuerCN");
+  selector.Set("ISSUER", std::move(issuer));
+  policy_value.Append(std::move(selector));
+  profile->GetTestingPrefService()->SetManagedPref(
+      kSecuritySignalsClientCertificatesSelectors,
+      base::Value(policy_value.Clone()));
+
+  // Expect challenge fetch
+  em::GenerateChromeProfileChallengeResponse challenge_response;
+  challenge_response.set_challenge("test_challenge");
+
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_))
+      .WillOnce(
+          RunOnceCallback<0>(policy::DM_STATUS_SUCCESS, challenge_response));
+
+  // Expect report generation and upload with the challenge
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  ReportTrigger expected_trigger = upload_report_on_profile_open_enabled()
+                                       ? ReportTrigger::kTriggerProfileOpened
+                                       : ReportTrigger::kTriggerSecurity;
+  SecuritySignalsMode expected_mode =
+      upload_report_on_profile_open_enabled()
+          ? SecuritySignalsMode::kSignalsAttached
+          : SecuritySignalsMode::kSignalsOnly;
+
+  EXPECT_CALL(
+      *uploader_,
+      SetRequestAndUpload(
+          ReportGenerationConfig(
+              expected_trigger, ReportType::kProfileReport, expected_mode,
+              /*use_cookies=*/false, "test_challenge", policy_value.Clone()),
+          _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  CreateSchedulerForProfileReporting(profile);
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Run pending task to trigger report.
+  task_environment_.FastForwardBy(base::TimeDelta());
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       ChallengeNotFetchedWhenPolicyNotSet) {
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+
+  // Enable reporting and security signals
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true);
+  SetLastUploadInHour(base::Hours(1), profile);
+  profile->GetTestingPrefService()->SetString(kLastUploadVersion,
+                                              chrome::kChromeVersion);
+
+  // Policy kSecuritySignalsClientCertificatesSelectors is NOT set.
+
+  // Expect NO challenge fetch
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_)).Times(0);
+
+  // Expect report generation and upload with EMPTY challenge
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  ReportTrigger expected_trigger = upload_report_on_profile_open_enabled()
+                                       ? ReportTrigger::kTriggerProfileOpened
+                                       : ReportTrigger::kTriggerSecurity;
+  SecuritySignalsMode expected_mode =
+      upload_report_on_profile_open_enabled()
+          ? SecuritySignalsMode::kSignalsAttached
+          : SecuritySignalsMode::kSignalsOnly;
+
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(ReportGenerationConfig(
+                                      expected_trigger,
+                                      ReportType::kProfileReport, expected_mode,
+                                      /*use_cookies=*/false, std::nullopt),
+                                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  CreateSchedulerForProfileReporting(profile);
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Run pending task to trigger report.
+  task_environment_.FastForwardBy(base::TimeDelta());
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       ReportGenerationProceedsWhenChallengeFetchFails) {
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+
+  // Enable reporting and security signals
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true);
+  SetLastUploadInHour(base::Hours(1), profile);
+  profile->GetTestingPrefService()->SetString(kLastUploadVersion,
+                                              chrome::kChromeVersion);
+
+  // Set certificates selectors policy to non-empty
+  base::ListValue policy_value;
+  base::DictValue selector;
+  base::DictValue issuer;
+  issuer.Set("CN", "IssuerCN");
+  selector.Set("ISSUER", std::move(issuer));
+  policy_value.Append(std::move(selector));
+  profile->GetTestingPrefService()->SetManagedPref(
+      kSecuritySignalsClientCertificatesSelectors,
+      base::Value(policy_value.Clone()));
+
+  // Expect challenge fetch to FAIL
+  em::GenerateChromeProfileChallengeResponse challenge_response;
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_))
+      .WillOnce(RunOnceCallback<0>(policy::DM_STATUS_REQUEST_FAILED,
+                                   challenge_response));
+
+  // Expect report generation and upload with EMPTY challenge
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  ReportTrigger expected_trigger = upload_report_on_profile_open_enabled()
+                                       ? ReportTrigger::kTriggerProfileOpened
+                                       : ReportTrigger::kTriggerSecurity;
+  SecuritySignalsMode expected_mode =
+      upload_report_on_profile_open_enabled()
+          ? SecuritySignalsMode::kSignalsAttached
+          : SecuritySignalsMode::kSignalsOnly;
+
+  EXPECT_CALL(
+      *uploader_,
+      SetRequestAndUpload(
+          ReportGenerationConfig(
+              expected_trigger, ReportType::kProfileReport, expected_mode,
+              /*use_cookies=*/false, std::nullopt, policy_value.Clone()),
+          _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  CreateSchedulerForProfileReporting(profile);
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Run pending task to trigger report.
+  task_environment_.FastForwardBy(base::TimeDelta());
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       TransientErrorWithCertificates_TriggersBackoffRetry) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      enterprise_signals::features::kCertificateCollectionEnabled);
+
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true);
+
+  // Set certificates selectors policy to non-empty
+  base::ListValue policy_value;
+  base::DictValue selector;
+  base::DictValue issuer;
+  issuer.Set("CN", "IssuerCN");
+  selector.Set("ISSUER", std::move(issuer));
+  policy_value.Append(std::move(selector));
+  profile->GetTestingPrefService()->SetManagedPref(
+      kSecuritySignalsClientCertificatesSelectors,
+      base::Value(policy_value.Clone()));
+
+  em::GenerateChromeProfileChallengeResponse challenge_response;
+  challenge_response.set_challenge("test_challenge");
+
+  ReportTrigger expected_trigger = upload_report_on_profile_open_enabled()
+                                       ? ReportTrigger::kTriggerProfileOpened
+                                       : ReportTrigger::kTriggerSecurity;
+  SecuritySignalsMode expected_mode =
+      upload_report_on_profile_open_enabled()
+          ? SecuritySignalsMode::kSignalsAttached
+          : SecuritySignalsMode::kSignalsOnly;
+
+  // Initial attempt: challenge succeeds, upload returns transient error
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_))
+      .WillOnce(
+          RunOnceCallback<0>(policy::DM_STATUS_SUCCESS, challenge_response));
+
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  EXPECT_CALL(
+      *uploader_,
+      SetRequestAndUpload(
+          ReportGenerationConfig(
+              expected_trigger, ReportType::kProfileReport, expected_mode,
+              /*use_cookies=*/false, "test_challenge", policy_value.Clone()),
+          _, _));
+
+  CreateSchedulerForProfileReporting(profile);
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Run pending task to trigger initial report generation and upload attempt.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Second attempt: generate a NEW fresh challenge for the retry.
+  em::GenerateChromeProfileChallengeResponse retry_challenge_response;
+  retry_challenge_response.set_challenge("new_challenge_for_retry");
+
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_))
+      .WillOnce(RunOnceCallback<0>(policy::DM_STATUS_SUCCESS,
+                                   retry_challenge_response));
+
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  EXPECT_CALL(
+      *uploader_,
+      SetRequestAndUpload(
+          ReportGenerationConfig(
+              expected_trigger, ReportType::kProfileReport, expected_mode,
+              /*use_cookies=*/false, "new_challenge_for_retry",
+              policy_value.Clone(), /*is_retrying=*/true),
+          _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  // Simulate ReportUploader's retry backoff timer firing and notifying
+  // listener.
+  uploader_->NotifyReportWillRetry(ReportGenerationConfig(
+      expected_trigger, ReportType::kProfileReport, expected_mode,
+      /*use_cookies=*/false, "test_challenge", policy_value.Clone()));
+
+  // Run pending tasks to execute generator callback and complete retry upload.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // After success on retry, next report cycle should be scheduled normally
+  // if profile-open reporting is enabled.
+  EXPECT_EQ(upload_report_on_profile_open_enabled(),
+            scheduler_->IsNextReportScheduledForTesting());
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       TriggerWhileRetryingIsQueuedAndHandled) {
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true);
+
+  base::ListValue policy_value;
+  base::DictValue selector;
+  base::DictValue issuer;
+  issuer.Set("CN", "IssuerCN");
+  selector.Set("ISSUER", std::move(issuer));
+  policy_value.Append(std::move(selector));
+  profile->GetTestingPrefService()->SetManagedPref(
+      kSecuritySignalsClientCertificatesSelectors,
+      base::Value(policy_value.Clone()));
+
+  em::GenerateChromeProfileChallengeResponse challenge_response;
+  challenge_response.set_challenge("test_challenge");
+
+  em::GenerateChromeProfileChallengeResponse retry_challenge_response;
+  retry_challenge_response.set_challenge("new_challenge_for_retry");
+
+  ReportTrigger expected_trigger = upload_report_on_profile_open_enabled()
+                                       ? ReportTrigger::kTriggerProfileOpened
+                                       : ReportTrigger::kTriggerSecurity;
+  SecuritySignalsMode expected_mode =
+      upload_report_on_profile_open_enabled()
+          ? SecuritySignalsMode::kSignalsAttached
+          : SecuritySignalsMode::kSignalsOnly;
+
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_))
+      .WillOnce(
+          RunOnceCallback<0>(policy::DM_STATUS_SUCCESS, challenge_response));
+
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  // Initial upload attempt.
+  EXPECT_CALL(
+      *uploader_,
+      SetRequestAndUpload(
+          ReportGenerationConfig(
+              expected_trigger, ReportType::kProfileReport, expected_mode,
+              /*use_cookies=*/false, "test_challenge", policy_value.Clone()),
+          _, _));
+
+  CreateSchedulerForProfileReporting(profile);
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // ReportUploader informs scheduler of retry.
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_))
+      .WillOnce(RunOnceCallback<0>(policy::DM_STATUS_SUCCESS,
+                                   retry_challenge_response));
+
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  EXPECT_CALL(
+      *uploader_,
+      SetRequestAndUpload(
+          ReportGenerationConfig(
+              expected_trigger, ReportType::kProfileReport, expected_mode,
+              /*use_cookies=*/false, "new_challenge_for_retry",
+              policy_value.Clone(), /*is_retrying=*/true),
+          _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kSuccess));
+
+  uploader_->NotifyReportWillRetry(ReportGenerationConfig(
+      expected_trigger, ReportType::kProfileReport, expected_mode,
+      /*use_cookies=*/false, "test_challenge", policy_value.Clone()));
+
+  // While retry is in progress (generator task is queued), a new trigger
+  // arrives (e.g. manual report).
+  base::test::TestFuture<void> manual_report_future;
+  scheduler_->UploadReport(manual_report_future.GetCallback());
+  EXPECT_FALSE(manual_report_future.IsReady());
+
+  // Run pending tasks to execute generator callback and complete retry upload.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Manual report callback was resolved upon retry completion.
+  EXPECT_TRUE(manual_report_future.IsReady());
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       TransientErrorWithoutCertificates_SchedulesNextCycle) {
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/true);
+
+  // Policy kSecuritySignalsClientCertificatesSelectors is NOT set, so no
+  // certificates.
+
+  EXPECT_CALL(*client_, GenerateChromeProfileChallenge(_)).Times(0);
+
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  ReportTrigger expected_trigger = upload_report_on_profile_open_enabled()
+                                       ? ReportTrigger::kTriggerProfileOpened
+                                       : ReportTrigger::kTriggerSecurity;
+  SecuritySignalsMode expected_mode =
+      upload_report_on_profile_open_enabled()
+          ? SecuritySignalsMode::kSignalsAttached
+          : SecuritySignalsMode::kSignalsOnly;
+
+  EXPECT_CALL(*uploader_,
+              SetRequestAndUpload(
+                  ReportGenerationConfig(
+                      expected_trigger, ReportType::kProfileReport,
+                      expected_mode, /*use_cookies=*/false, std::nullopt),
+                  _, _))
+      .WillOnce(RunOnceCallback<2>(ReportUploader::kTransientError));
+
+  CreateSchedulerForProfileReporting(profile);
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  // Trigger report upload which fails with transient error.
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Without certificate collection, transient error schedules next report 24h
+  // later instead of backoff.
+  EXPECT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+}
+
+TEST_F(EnabledProfileSecuritySignalsReportSchedulerTest,
+       NoSecuritySignals_DoesNotListenToReportUploader) {
+  TestingProfile* profile = profile_manager_.CreateTestingProfile("profile");
+
+  profile->GetTestingPrefService()->SetManagedPref(
+      kCloudProfileReportingEnabled, std::make_unique<base::Value>(true));
+  SetUserSecuritySignalsPolicy(profile, /*enabled=*/false);
+
+  EXPECT_CALL(*profile_request_generator_, OnGenerate(_))
+      .WillOnce(WithArgs<0>(ScheduleProfileRequestGeneratorCallback()));
+
+  EXPECT_CALL(
+      *uploader_,
+      SetRequestAndUpload(
+          ReportGenerationConfig(
+              ReportTrigger::kTriggerProfileOpened, ReportType::kProfileReport,
+              SecuritySignalsMode::kNoSignals, /*use_cookies=*/false),
+          _, _));
+
+  CreateSchedulerForProfileReporting(profile);
+  ASSERT_TRUE(scheduler_->IsNextReportScheduledForTesting());
+
+  task_environment_.FastForwardBy(base::TimeDelta());
+
+  // Verify scheduler is NOT listening to uploader when no security signals
+  EXPECT_FALSE(uploader_->HasListener(scheduler_.get()));
+}
+
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace enterprise_reporting

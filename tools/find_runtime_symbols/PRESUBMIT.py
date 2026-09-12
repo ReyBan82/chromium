@@ -10,8 +10,6 @@ for more details on the presubmit API built into depot_tools.
 
 import sys
 
-USE_PYTHON3 = True
-
 
 def CommonChecks(input_api, output_api):
   def join(*args):
@@ -23,19 +21,36 @@ def CommonChecks(input_api, output_api):
     sys.path = [
       join('..', 'find_runtime_symbols'),
     ] + sys.path
+    disabled_warnings = [
+      'anomalous-backslash-in-string',
+      'bad-indentation',
+      'deprecated-method',
+      'deprecated-module',
+      'logging-not-lazy',
+      'missing-module-docstring',
+      'superfluous-parens',
+      'undefined-variable',
+      'unspecified-encoding',
+    ]
     output.extend(
-        input_api.canned_checks.RunPylint(input_api, output_api, version='2.7'))
+      input_api.canned_checks.RunPylint(
+        input_api,
+        output_api,
+        disabled_warnings=disabled_warnings,
+        version='3.2',
+      )
+    )
   finally:
     sys.path = sys_path_backup
 
   output.extend(
-      input_api.canned_checks.RunUnitTestsInDirectory(
-          input_api,
-          output_api,
-          input_api.os_path.join(input_api.PresubmitLocalPath(), 'tests'),
-          files_to_check=[r'.+_test\.py$'],
-          run_on_python2=False,
-          skip_shebang_check=True))
+    input_api.canned_checks.RunUnitTestsInDirectory(
+      input_api,
+      output_api,
+      input_api.os_path.join(input_api.PresubmitLocalPath(), 'tests'),
+      files_to_check=[r'.+_test\.py$'],
+    )
+  )
   return output
 
 

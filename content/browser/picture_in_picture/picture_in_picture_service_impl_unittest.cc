@@ -5,6 +5,8 @@
 #include "content/browser/picture_in_picture/picture_in_picture_service_impl.h"
 
 #include <memory>
+#include <optional>
+#include <tuple>
 #include <utility>
 
 #include "base/memory/raw_ptr.h"
@@ -14,17 +16,24 @@
 #include "content/public/browser/overlay_window.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/common/content_client.h"
-#include "content/test/test_content_browser_client.h"
+#include "content/public/test/test_content_browser_client.h"
 #include "content/test/test_render_frame_host.h"
 #include "content/test/test_render_view_host.h"
 #include "content/test/test_web_contents.h"
+#include "media/base/picture_in_picture_events_info.h"
+#include "media/base/video_spatial_format.h"
 #include "media/mojo/mojom/media_player.mojom.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "mojo/public/cpp/bindings/pending_associated_remote.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "mojo/public/cpp/test_support/fake_message_dispatch_context.h"
+#include "mojo/public/cpp/test_support/test_utils.h"
 #include "testing/gmock/include/gmock/gmock.h"
+#include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
+#include "third_party/blink/public/mojom/picture_in_picture/picture_in_picture.mojom.h"
+#include "ui/gfx/geometry/size.h"
 
 using testing::_;
 
@@ -54,7 +63,34 @@ class PictureInPictureDelegate : public WebContentsDelegate {
   PictureInPictureDelegate(const PictureInPictureDelegate&) = delete;
   PictureInPictureDelegate& operator=(const PictureInPictureDelegate&) = delete;
 
-  MOCK_METHOD1(EnterPictureInPicture, PictureInPictureResult(WebContents*));
+  MOCK_METHOD(PictureInPictureResult,
+              EnterPictureInPicture,
+              (WebContents*),
+              (override));
+  MOCK_METHOD(bool, IsPictureInPictureEnabled, (), (const, override));
+  MOCK_METHOD(bool, IsImmersivePlaybackEnabled, (), (const, override));
+  MOCK_METHOD(void,
+              RequestImmersivePlaybackConfirmation,
+              (const ImmersiveOptions&,
+               base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>),
+              (override));
+
+  void EnterFullscreenModeForTab(
+      RenderFrameHost* requesting_frame,
+      const blink::mojom::FullscreenOptions& options) override {
+    is_fullscreen_ = true;
+  }
+
+  void ExitFullscreenModeForTab(WebContents* web_contents) override {
+    is_fullscreen_ = false;
+  }
+
+  bool IsFullscreenForTabOrPending(const WebContents* web_contents) override {
+    return is_fullscreen_;
+  }
+
+ private:
+  bool is_fullscreen_ = false;
 };
 
 class TestOverlayWindow : public VideoOverlayWindow {
@@ -68,7 +104,8 @@ class TestOverlayWindow : public VideoOverlayWindow {
 
   static std::unique_ptr<VideoOverlayWindow> Create(
       VideoPictureInPictureWindowController* controller) {
-    return std::unique_ptr<VideoOverlayWindow>(new TestOverlayWindow());
+    return std::unique_ptr<VideoOverlayWindow>(
+        new testing::NiceMock<TestOverlayWindow>());
   }
 
   bool IsActive() const override { return false; }
@@ -85,14 +122,25 @@ class TestOverlayWindow : public VideoOverlayWindow {
   void SetSkipAdButtonVisibility(bool is_visible) override {}
   void SetNextTrackButtonVisibility(bool is_visible) override {}
   void SetPreviousTrackButtonVisibility(bool is_visible) override {}
+  void SetHidePictureInPictureButtonVisibility(bool is_visible) override {}
   void SetMicrophoneMuted(bool muted) override {}
   void SetCameraState(bool turned_on) override {}
+  void SetMediaMuted(bool muted) override {}
   void SetToggleMicrophoneButtonVisibility(bool is_visible) override {}
   void SetToggleCameraButtonVisibility(bool is_visible) override {}
   void SetHangUpButtonVisibility(bool is_visible) override {}
   void SetNextSlideButtonVisibility(bool is_visible) override {}
   void SetPreviousSlideButtonVisibility(bool is_visible) override {}
+  void SetMediaPosition(const media_session::MediaPosition&) override {}
+  void SetSourceTitle(const std::u16string& source_title) override {}
+  void SetFaviconImages(
+      const std::vector<media_session::MediaImage>& images) override {}
   void SetSurfaceId(const viz::SurfaceId& surface_id) override {}
+  void SetPlaybackControlsVisibility(bool is_visible) override {}
+  MOCK_METHOD(void,
+              SetImmersiveVideoOptions,
+              (const ImmersiveOptions& options),
+              (override));
 
  private:
   gfx::Size size_;
@@ -126,13 +174,13 @@ class PictureInPictureMediaPlayerReceiver : public media::mojom::MediaPlayer {
   }
 
   // media::mojom::MediaPlayer implementation.
-  void RequestPlay() override {}
+  void RequestPlay(bool triggered_by_user) override {}
   void RequestPause(bool triggered_by_user) override {}
   void RequestSeekForward(base::TimeDelta seek_time) override {}
   void RequestSeekBackward(base::TimeDelta seek_time) override {}
   void RequestSeekTo(base::TimeDelta seek_time) override {}
-  void RequestEnterPictureInPicture() override {}
-  void RequestExitPictureInPicture() override {}
+  void RequestEnterPictureInPicture(
+      const std::optional<gfx::Size>& min_size) override {}
   void RequestMute(bool mute) override {}
   void SetVolumeMultiplier(double multiplier) override {}
   void SetPersistentState(bool persistent) override {}
@@ -140,6 +188,12 @@ class PictureInPictureMediaPlayerReceiver : public media::mojom::MediaPlayer {
   void SetAudioSinkId(const std::string& sink_id) override {}
   void SuspendForFrameClosed() override {}
   void RequestMediaRemoting() override {}
+  void RequestSaveVideoFrame() override {}
+  void RequestVisibility(
+      RequestVisibilityCallback request_visibility_callback) override {}
+  void RecordAutoPictureInPictureInfo(
+      const media::PictureInPictureEventsInfo::AutoPipInfo&
+          auto_picture_in_picture_info) override {}
 
  private:
   mojo::AssociatedReceiver<media::mojom::MediaPlayer> receiver_{this};
@@ -160,15 +214,43 @@ class PictureInPictureServiceImplTest : public RenderViewHostImplTestHarness {
     mojo::Remote<blink::mojom::PictureInPictureService> service_remote;
     service_impl_ = PictureInPictureServiceImpl::CreateForTesting(
         render_frame_host, service_remote.BindNewPipeAndPassReceiver());
+
+    surface_id_ = viz::SurfaceId(
+        viz::FrameSinkId(1, 1),
+        viz::LocalSurfaceId(
+            11, base::UnguessableToken::CreateForTesting(0x111111, 0)));
+
+    source_bounds_ = gfx::Rect(1, 2, 3, 4);
+    window_size_ = gfx::Size(42, 42);
+    show_play_pause_button_ = true;
+    player_id_ = 30;
+
+    default_immersive_options_.stereo_mode = ImmersiveStereoMode::kMono;
+    default_immersive_options_.projection_type = ImmersiveProjectionType::kQuad;
   }
 
   void TearDown() override {
+    service_impl_ = nullptr;
     RenderViewHostImplTestHarness::TearDown();
   }
 
   PictureInPictureServiceImpl& service() { return *service_impl_; }
 
   PictureInPictureDelegate& delegate() { return delegate_; }
+
+  const viz::SurfaceId& surface_id() const { return surface_id_; }
+
+  const gfx::Rect& source_bounds() const { return source_bounds_; }
+
+  const gfx::Size& window_size() const { return window_size_; }
+
+  bool show_play_pause_button() const { return show_play_pause_button_; }
+
+  int player_id() const { return player_id_; }
+
+  const ImmersiveOptions& default_immersive_options() const {
+    return default_immersive_options_;
+  }
 
   mojo::PendingAssociatedRemote<media::mojom::MediaPlayer>
   BindMediaPlayerReceiverAndPassRemote() {
@@ -177,6 +259,98 @@ class PictureInPictureServiceImplTest : public RenderViewHostImplTestHarness {
 
   void ResetMediaPlayerReceiver() { media_player_receiver_.receiver().reset(); }
 
+  void SetVideoSpatialFormat(const media::VideoSpatialFormat& spatial_format) {
+    spatial_format_ = spatial_format;
+  }
+  const media::VideoSpatialFormat& spatial_format() const {
+    return spatial_format_;
+  }
+
+  PictureInPictureServiceImpl::StartSessionCallback BindSession(
+      mojo::Remote<blink::mojom::PictureInPictureSession>& session_remote_out,
+      gfx::Size& window_size_out) {
+    return base::BindLambdaForTesting(
+        [&session_remote_out, &window_size_out](
+            mojo::PendingRemote<blink::mojom::PictureInPictureSession> remote,
+            const gfx::Size& b) {
+          if (remote.is_valid()) {
+            session_remote_out.Bind(std::move(remote));
+          }
+          window_size_out = b;
+        });
+  }
+
+  void EnterFullscreen() {
+    // Simulate fullscreen being entered.
+    std::ignore = main_test_rfh()->frame_tree_node()->UpdateUserActivationState(
+        blink::mojom::UserActivationUpdateType::kNotifyActivation,
+        blink::mojom::UserActivationNotificationType::kTest);
+    main_test_rfh()->EnterFullscreen(blink::mojom::FullscreenOptions::New(),
+                                     base::DoNothing());
+    ASSERT_TRUE(contents()->IsFullscreen());
+  }
+
+  VideoPictureInPictureWindowControllerImpl* GetController() {
+    auto* controller =
+        VideoPictureInPictureWindowControllerImpl::GetOrCreateForWebContents(
+            contents());
+    CHECK(controller);
+    return controller;
+  }
+
+  void TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      const media::VideoSpatialFormat& format,
+      const ImmersiveOptions& expected_options) {
+    DummyPictureInPictureSessionObserver observer;
+    mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+        observer_receiver(&observer);
+    mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+        observer_remote;
+    observer_receiver.Bind(observer_remote.InitWithNewPipeAndPassReceiver());
+
+    EnterFullscreen();
+
+    EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+        .WillRepeatedly(testing::Return(true));
+    EXPECT_CALL(delegate(), EnterPictureInPicture(contents()))
+        .WillRepeatedly(testing::Return(PictureInPictureResult::kSuccess));
+
+    SetVideoSpatialFormat(format);
+
+    EXPECT_CALL(
+        delegate(),
+        RequestImmersivePlaybackConfirmation(
+            testing::AllOf(testing::Field(&ImmersiveOptions::stereo_mode,
+                                          expected_options.stereo_mode),
+                           testing::Field(&ImmersiveOptions::projection_type,
+                                          expected_options.projection_type)),
+            _))
+        .WillOnce(
+            [](const ImmersiveOptions& options,
+               base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+                   callback) {
+              ImmersivePlaybackConfirmationResult result;
+              result.status = ImmersivePlaybackConfirmationStatus::kConfirmed;
+              result.options = options;
+              std::move(callback).Run(std::move(result));
+            });
+
+    mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+    gfx::Size window_size_out;
+
+    service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                           surface_id(), window_size(),
+                           show_play_pause_button(), std::move(observer_remote),
+                           source_bounds(),
+                           /*request_immersive=*/true, spatial_format(),
+                           BindSession(session_remote_out, window_size_out));
+
+    auto* controller = GetController();
+    EXPECT_TRUE(session_remote_out);
+    EXPECT_TRUE(controller->active_session_for_testing());
+    EXPECT_TRUE(controller->IsImmersive());
+  }
+
  private:
   PictureInPictureTestBrowserClient browser_client_;
   PictureInPictureDelegate delegate_;
@@ -184,22 +358,17 @@ class PictureInPictureServiceImplTest : public RenderViewHostImplTestHarness {
   raw_ptr<PictureInPictureServiceImpl> service_impl_;
   // Required to pass a valid PendingRemote to StartSession() in the tests.
   PictureInPictureMediaPlayerReceiver media_player_receiver_;
+  viz::SurfaceId surface_id_;
+  media::VideoSpatialFormat spatial_format_;
+  ImmersiveOptions default_immersive_options_;
+  gfx::Rect source_bounds_;
+  gfx::Size window_size_;
+  bool show_play_pause_button_;
+  int player_id_;
 };
 
-// Flaky on Android. https://crbug.com/970866
-#if BUILDFLAG(IS_ANDROID)
-#define MAYBE_EnterPictureInPicture DISABLED_EnterPictureInPicture
-#else
-#define MAYBE_EnterPictureInPicture EnterPictureInPicture
-#endif
-
-TEST_F(PictureInPictureServiceImplTest, MAYBE_EnterPictureInPicture) {
-  const int kPlayerVideoOnlyId = 30;
-  const VideoPictureInPictureWindowControllerImpl* controller =
-      VideoPictureInPictureWindowControllerImpl::GetOrCreateForWebContents(
-          contents());
-
-  ASSERT_TRUE(controller);
+TEST_F(PictureInPictureServiceImplTest, EnterPictureInPicture) {
+  auto* controller = GetController();
 
   DummyPictureInPictureSessionObserver observer;
   mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
@@ -211,33 +380,23 @@ TEST_F(PictureInPictureServiceImplTest, MAYBE_EnterPictureInPicture) {
   // If Picture-in-Picture there shouldn't be an active session.
   EXPECT_FALSE(controller->active_session_for_testing());
 
-  viz::SurfaceId surface_id = viz::SurfaceId(
-      viz::FrameSinkId(1, 1),
-      viz::LocalSurfaceId(
-          11, base::UnguessableToken::CreateForTesting(0x111111, 0)));
-
+  EXPECT_CALL(delegate(), IsPictureInPictureEnabled())
+      .WillRepeatedly(testing::Return(true));
   EXPECT_CALL(delegate(), EnterPictureInPicture(contents()))
       .WillRepeatedly(testing::Return(PictureInPictureResult::kSuccess));
 
-  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote;
-  gfx::Size window_size;
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
 
-  const gfx::Rect source_bounds(1, 2, 3, 4);
-  service().StartSession(
-      kPlayerVideoOnlyId, BindMediaPlayerReceiverAndPassRemote(), surface_id,
-      gfx::Size(42, 42), true /* show_play_pause_button */,
-      std::move(observer_remote), source_bounds,
-      base::BindLambdaForTesting(
-          [&](mojo::PendingRemote<blink::mojom::PictureInPictureSession> remote,
-              const gfx::Size& b) {
-            if (remote.is_valid())
-              session_remote.Bind(std::move(remote));
-            window_size = b;
-          }));
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/false, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
 
-  EXPECT_TRUE(session_remote);
-  EXPECT_EQ(gfx::Size(42, 42), window_size);
-  EXPECT_EQ(source_bounds, controller->GetSourceBounds());
+  EXPECT_TRUE(session_remote_out);
+  EXPECT_EQ(window_size(), window_size_out);
+  EXPECT_EQ(source_bounds(), controller->GetSourceBounds());
 
   // Picture-in-Picture media player id should not be reset when the media is
   // destroyed (e.g. video stops playing). This allows the Picture-in-Picture
@@ -247,47 +406,580 @@ TEST_F(PictureInPictureServiceImplTest, MAYBE_EnterPictureInPicture) {
 }
 
 TEST_F(PictureInPictureServiceImplTest, EnterPictureInPicture_NotSupported) {
-  const int kPlayerVideoOnlyId = 30;
-  const VideoPictureInPictureWindowControllerImpl* controller =
-      VideoPictureInPictureWindowControllerImpl::GetOrCreateForWebContents(
-          contents());
-
-  ASSERT_TRUE(controller);
-  EXPECT_FALSE(controller->active_session_for_testing());
-
-  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
-      observer_remote;
-  viz::SurfaceId surface_id = viz::SurfaceId(
-      viz::FrameSinkId(1, 1),
-      viz::LocalSurfaceId(
-          11, base::UnguessableToken::CreateForTesting(0x111111, 0)));
-
+  EXPECT_CALL(delegate(), IsPictureInPictureEnabled())
+      .WillRepeatedly(testing::Return(true));
   EXPECT_CALL(delegate(), EnterPictureInPicture(contents()))
       .WillRepeatedly(testing::Return(PictureInPictureResult::kNotSupported));
 
-  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote;
-  gfx::Size window_size;
-  const gfx::Rect source_bounds(1, 2, 3, 4);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/false, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
 
+  EXPECT_FALSE(GetController()->active_session_for_testing());
+
+  // The |session_remote_out| won't be bound because the |remote| received in
+  // the StartSessionCallback will be invalid due to PictureInPictureSession not
+  // ever being created (meaning the the receiver won't be bound either).
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_EQ(gfx::Size(), window_size_out);
+}
+
+TEST_F(PictureInPictureServiceImplTest, EnterImmersivePlayback) {
+  DummyPictureInPictureSessionObserver observer;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver(&observer);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  observer_receiver.Bind(observer_remote.InitWithNewPipeAndPassReceiver());
+
+  EnterFullscreen();
+
+  EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+      .WillRepeatedly(testing::Return(true));
+  EXPECT_CALL(delegate(), EnterPictureInPicture(contents()))
+      .WillRepeatedly(testing::Return(PictureInPictureResult::kSuccess));
+
+  // Expect the delegate to confirm immersive playback with default options.
+  EXPECT_CALL(delegate(), RequestImmersivePlaybackConfirmation(_, _))
+      .WillOnce([](const ImmersiveOptions& default_options,
+                   base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+                       callback) {
+        ImmersivePlaybackConfirmationResult result;
+        result.status = ImmersivePlaybackConfirmationStatus::kConfirmed;
+        ImmersiveOptions options;
+        options.stereo_mode = ImmersiveStereoMode::kMono;
+        options.projection_type = ImmersiveProjectionType::kQuad;
+        result.options = options;
+        std::move(callback).Run(std::move(result));
+      });
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/true, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  auto* controller = GetController();
+  EXPECT_TRUE(session_remote_out);
+  EXPECT_TRUE(controller->active_session_for_testing());
+  EXPECT_TRUE(controller->IsImmersive());
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_HemisphereMono) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kEquirect180,
+          media::VideoStereoMode::kMono,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kMono,
+          ImmersiveProjectionType::kHemisphere,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_HemisphereSideBySide) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kEquirect180,
+          media::VideoStereoMode::kSideBySideLeftFirst,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kSideBySide,
+          ImmersiveProjectionType::kHemisphere,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_HemisphereTopBottom) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kEquirect180,
+          media::VideoStereoMode::kTopBottomLeftFirst,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kTopBottom,
+          ImmersiveProjectionType::kHemisphere,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_QuadMono) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kNone,
+          media::VideoStereoMode::kMono,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kMono,
+          ImmersiveProjectionType::kQuad,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_QuadSideBySide) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kNone,
+          media::VideoStereoMode::kSideBySideLeftFirst,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kSideBySide,
+          ImmersiveProjectionType::kQuad,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_QuadTopBottom) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kNone,
+          media::VideoStereoMode::kTopBottomLeftFirst,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kTopBottom,
+          ImmersiveProjectionType::kQuad,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_SphereMono) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kEquirect360,
+          media::VideoStereoMode::kMono,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kMono,
+          ImmersiveProjectionType::kSphere,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_SphereSideBySide) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kEquirect360,
+          media::VideoStereoMode::kSideBySideLeftFirst,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kSideBySide,
+          ImmersiveProjectionType::kSphere,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_CustomSpatialFormat_SphereTopBottom) {
+  TestEnterImmersivePlaybackWithCustomSpatialFormat(
+      media::VideoSpatialFormat{
+          media::VideoProjectionType::kEquirect360,
+          media::VideoStereoMode::kTopBottomLeftFirst,
+      },
+      ImmersiveOptions{
+          ImmersiveStereoMode::kTopBottom,
+          ImmersiveProjectionType::kSphere,
+      });
+}
+
+TEST_F(PictureInPictureServiceImplTest, EnterImmersivePlayback_NotSupported) {
+  DummyPictureInPictureSessionObserver observer;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver(&observer);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  observer_receiver.Bind(observer_remote.InitWithNewPipeAndPassReceiver());
+
+  EnterFullscreen();
+
+  EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+      .WillRepeatedly(testing::Return(true));
+  EXPECT_CALL(delegate(), EnterPictureInPicture(contents()))
+      .WillRepeatedly(testing::Return(PictureInPictureResult::kNotSupported));
+
+  EXPECT_CALL(delegate(), RequestImmersivePlaybackConfirmation(_, _))
+      .WillOnce([](const ImmersiveOptions& default_options,
+                   base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+                       callback) {
+        ImmersivePlaybackConfirmationResult result;
+        result.status = ImmersivePlaybackConfirmationStatus::kConfirmed;
+        ImmersiveOptions options;
+        options.stereo_mode = ImmersiveStereoMode::kMono;
+        options.projection_type = ImmersiveProjectionType::kQuad;
+        result.options = options;
+        std::move(callback).Run(std::move(result));
+      });
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/true, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  auto* controller = GetController();
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_FALSE(controller->active_session_for_testing());
+  EXPECT_FALSE(controller->IsImmersive());
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_NoFullscreenFails) {
+  // Page is not in fullscreen.
+  ASSERT_FALSE(contents()->IsFullscreen());
+
+  DummyPictureInPictureSessionObserver observer;
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/true, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  auto* controller = GetController();
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_FALSE(controller->active_session_for_testing());
+  EXPECT_FALSE(controller->IsImmersive());
+}
+
+TEST_F(PictureInPictureServiceImplTest, EnterImmersivePlayback_DeclinedFails) {
+  DummyPictureInPictureSessionObserver observer;
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+
+  EnterFullscreen();
+
+  EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+      .WillRepeatedly(testing::Return(true));
+
+  EXPECT_CALL(delegate(), RequestImmersivePlaybackConfirmation(_, _))
+      .WillOnce([](const ImmersiveOptions& default_options,
+                   base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+                       callback) {
+        ImmersivePlaybackConfirmationResult result;
+        result.status = ImmersivePlaybackConfirmationStatus::kDeclined;
+        std::move(callback).Run(std::move(result));
+      });
+
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/true, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  auto* controller = GetController();
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_FALSE(controller->active_session_for_testing());
+  EXPECT_FALSE(controller->IsImmersive());
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       EnterImmersivePlayback_SubsequentSessionCancelsFirst) {
+  auto* controller = GetController();
+
+  EnterFullscreen();
+
+  EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+      .WillRepeatedly(testing::Return(true));
+
+  // Capture the first confirmation callback.
+  base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+      first_confirm_callback;
+  EXPECT_CALL(delegate(), RequestImmersivePlaybackConfirmation(_, _))
+      .WillOnce(
+          [&first_confirm_callback](
+              const ImmersiveOptions& options,
+              base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+                  callback) { first_confirm_callback = std::move(callback); });
+
+  DummyPictureInPictureSessionObserver observer;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver(&observer);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  observer_receiver.Bind(observer_remote.InitWithNewPipeAndPassReceiver());
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> first_session_remote;
+  gfx::Size first_window_size;
+  bool first_callback_called = false;
+  bool first_callback_remote_is_valid = false;
+
+  // Start the first immersive session.
   service().StartSession(
-      kPlayerVideoOnlyId, BindMediaPlayerReceiverAndPassRemote(), surface_id,
-      gfx::Size(42, 42), true /* show_play_pause_button */,
-      std::move(observer_remote), source_bounds,
+      player_id(), BindMediaPlayerReceiverAndPassRemote(), surface_id(),
+      window_size(), show_play_pause_button(), std::move(observer_remote),
+      source_bounds(),
+      /*request_immersive=*/true, spatial_format(),
       base::BindLambdaForTesting(
-          [&](mojo::PendingRemote<blink::mojom::PictureInPictureSession> remote,
+          [&first_session_remote, &first_window_size, &first_callback_called,
+           &first_callback_remote_is_valid](
+              mojo::PendingRemote<blink::mojom::PictureInPictureSession> remote,
               const gfx::Size& b) {
-            if (remote.is_valid())
-              session_remote.Bind(std::move(remote));
-            window_size = b;
+            first_callback_called = true;
+            first_callback_remote_is_valid = remote.is_valid();
+            if (remote.is_valid()) {
+              first_session_remote.Bind(std::move(remote));
+            }
+            first_window_size = b;
           }));
 
+  // The first session is pending confirmation.
+  ASSERT_TRUE(first_confirm_callback);
   EXPECT_FALSE(controller->active_session_for_testing());
+  EXPECT_FALSE(first_callback_called);
 
-  // The |session_remote| won't be bound because the |remote| received in the
-  // StartSessionCallback will be invalid due to PictureInPictureSession not
-  // ever being created (meaning the the receiver won't be bound either).
-  EXPECT_FALSE(session_remote);
-  EXPECT_EQ(gfx::Size(), window_size);
+  // Now start a second session.
+  // Starting a non-immersive session should immediately succeed and invalidate
+  // the first one.
+  EXPECT_CALL(delegate(), IsPictureInPictureEnabled())
+      .WillRepeatedly(testing::Return(true));
+  EXPECT_CALL(delegate(), EnterPictureInPicture(contents()))
+      .WillRepeatedly(testing::Return(PictureInPictureResult::kSuccess));
+
+  DummyPictureInPictureSessionObserver observer2;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver2(&observer2);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote2;
+  observer_receiver2.Bind(observer_remote2.InitWithNewPipeAndPassReceiver());
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> second_session_remote;
+  gfx::Size second_window_size;
+
+  service().StartSession(
+      player_id(), BindMediaPlayerReceiverAndPassRemote(), surface_id(),
+      window_size(), show_play_pause_button(), std::move(observer_remote2),
+      source_bounds(),
+      /*request_immersive=*/false, spatial_format(),
+      BindSession(second_session_remote, second_window_size));
+
+  // Second session should immediately succeed.
+  EXPECT_TRUE(second_session_remote);
+  EXPECT_TRUE(controller->active_session_for_testing());
+
+  // The first session callback is not called yet because the captured
+  // callback (which owns the PendingSession) is still alive in the test scope.
+  EXPECT_FALSE(first_callback_called);
+
+  // Now, attempt to run the first session's confirmation callback.
+  ImmersivePlaybackConfirmationResult result;
+  result.status = ImmersivePlaybackConfirmationStatus::kConfirmed;
+  result.options = default_immersive_options();
+
+  std::move(first_confirm_callback).Run(std::move(result));
+
+  // The first session should be destroyed, which runs its callback with null.
+  EXPECT_TRUE(first_callback_called);
+  EXPECT_FALSE(first_callback_remote_is_valid);
+  EXPECT_FALSE(first_session_remote);
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       StartSession_InactiveFrameRunningUnloadHandlers) {
+  main_test_rfh()->SetLifecycleState(
+      RenderFrameHostLifecycleStateImpl::kRunningUnloadHandlers);
+  ASSERT_FALSE(main_test_rfh()->IsActive());
+
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/false, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  EXPECT_FALSE(GetController()->active_session_for_testing());
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_EQ(gfx::Size(), window_size_out);
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       StartSession_InactiveFrameInBackForwardCache) {
+  main_test_rfh()->SetLifecycleState(
+      RenderFrameHostLifecycleStateImpl::kInBackForwardCache);
+  ASSERT_FALSE(main_test_rfh()->IsActive());
+
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/false, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  EXPECT_FALSE(GetController()->active_session_for_testing());
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_EQ(gfx::Size(), window_size_out);
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       StartSessionImmersive_InactiveFrameFails) {
+  EnterFullscreen();
+
+  EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+      .WillRepeatedly(testing::Return(true));
+
+  main_test_rfh()->SetLifecycleState(
+      RenderFrameHostLifecycleStateImpl::kRunningUnloadHandlers);
+  ASSERT_FALSE(main_test_rfh()->IsActive());
+
+  // Delegate confirmation should never be requested for an inactive frame.
+  EXPECT_CALL(delegate(), RequestImmersivePlaybackConfirmation(_, _)).Times(0);
+
+  DummyPictureInPictureSessionObserver observer;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver(&observer);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  observer_receiver.Bind(observer_remote.InitWithNewPipeAndPassReceiver());
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/true, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  EXPECT_FALSE(GetController()->active_session_for_testing());
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_EQ(gfx::Size(), window_size_out);
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       StartSessionImmersive_BecomesInactiveDuringConfirmationFails) {
+  EnterFullscreen();
+
+  EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+      .WillRepeatedly(testing::Return(true));
+
+  base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+      confirm_callback;
+  EXPECT_CALL(delegate(), RequestImmersivePlaybackConfirmation(_, _))
+      .WillOnce(
+          [&confirm_callback](
+              const ImmersiveOptions& options,
+              base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+                  callback) { confirm_callback = std::move(callback); });
+
+  DummyPictureInPictureSessionObserver observer;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver(&observer);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  observer_receiver.Bind(observer_remote.InitWithNewPipeAndPassReceiver());
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/true, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  ASSERT_TRUE(confirm_callback);
+  EXPECT_FALSE(GetController()->active_session_for_testing());
+
+  // Frame becomes inactive before user confirmation finishes.
+  main_test_rfh()->SetLifecycleState(
+      RenderFrameHostLifecycleStateImpl::kRunningUnloadHandlers);
+  ASSERT_FALSE(main_test_rfh()->IsActive());
+
+  ImmersivePlaybackConfirmationResult result;
+  result.status = ImmersivePlaybackConfirmationStatus::kConfirmed;
+  result.options = default_immersive_options();
+
+  std::move(confirm_callback).Run(std::move(result));
+
+  EXPECT_FALSE(GetController()->active_session_for_testing());
+  EXPECT_FALSE(session_remote_out);
+  EXPECT_EQ(gfx::Size(), window_size_out);
+}
+
+TEST_F(PictureInPictureServiceImplTest,
+       StartSession_InactiveFrameInvalidatesPendingImmersiveConfirmation) {
+  EnterFullscreen();
+
+  EXPECT_CALL(delegate(), IsImmersivePlaybackEnabled())
+      .WillRepeatedly(testing::Return(true));
+
+  base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+      confirm_callback;
+  EXPECT_CALL(delegate(), RequestImmersivePlaybackConfirmation(_, _))
+      .WillOnce(
+          [&confirm_callback](
+              const ImmersiveOptions& options,
+              base::OnceCallback<void(ImmersivePlaybackConfirmationResult)>
+                  callback) { confirm_callback = std::move(callback); });
+
+  DummyPictureInPictureSessionObserver observer;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver(&observer);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote;
+  observer_receiver.Bind(observer_remote.InitWithNewPipeAndPassReceiver());
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out;
+  gfx::Size window_size_out;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote), source_bounds(),
+                         /*request_immersive=*/true, spatial_format(),
+                         BindSession(session_remote_out, window_size_out));
+
+  ASSERT_TRUE(confirm_callback);
+
+  // Now frame becomes inactive and sends another StartSession call.
+  main_test_rfh()->SetLifecycleState(
+      RenderFrameHostLifecycleStateImpl::kRunningUnloadHandlers);
+  ASSERT_FALSE(main_test_rfh()->IsActive());
+
+  DummyPictureInPictureSessionObserver observer2;
+  mojo::Receiver<blink::mojom::PictureInPictureSessionObserver>
+      observer_receiver2(&observer2);
+  mojo::PendingRemote<blink::mojom::PictureInPictureSessionObserver>
+      observer_remote2;
+  observer_receiver2.Bind(observer_remote2.InitWithNewPipeAndPassReceiver());
+
+  mojo::Remote<blink::mojom::PictureInPictureSession> session_remote_out2;
+  gfx::Size window_size_out2;
+  service().StartSession(player_id(), BindMediaPlayerReceiverAndPassRemote(),
+                         surface_id(), window_size(), show_play_pause_button(),
+                         std::move(observer_remote2), source_bounds(),
+                         /*request_immersive=*/false, spatial_format(),
+                         BindSession(session_remote_out2, window_size_out2));
+
+  EXPECT_FALSE(session_remote_out2);
+
+  // Later, the first confirmation runs, but its weak ptr was invalidated by
+  // the StartSession call.
+  ImmersivePlaybackConfirmationResult result;
+  result.status = ImmersivePlaybackConfirmationStatus::kConfirmed;
+  result.options = default_immersive_options();
+  std::move(confirm_callback).Run(std::move(result));
+
+  EXPECT_FALSE(GetController()->active_session_for_testing());
+  EXPECT_FALSE(session_remote_out);
 }
 
 }  // namespace content

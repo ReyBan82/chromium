@@ -5,7 +5,6 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_PAUSABLE_SCRIPT_EXECUTOR_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_PAUSABLE_SCRIPT_EXECUTOR_H_
 
-#include "base/memory/scoped_refptr.h"
 #include "third_party/blink/public/mojom/script/script_evaluation_params.mojom-blink.h"
 #include "third_party/blink/public/web/web_script_execution_callback.h"
 #include "third_party/blink/public/web/web_script_source.h"
@@ -48,13 +47,14 @@ class CORE_EXPORT PausableScriptExecutor final
                            mojom::blink::LoadEventBlockingOption,
                            mojom::blink::WantResultOption,
                            mojom::blink::PromiseResultOption,
-                           WebScriptExecutionCallback);
+                           WebScriptExecutionCallback,
+                           const String& script_injector_id);
 
   class Executor : public GarbageCollected<Executor> {
    public:
     virtual ~Executor() = default;
 
-    virtual Vector<v8::Local<v8::Value>> Execute(ScriptState*) = 0;
+    virtual v8::LocalVector<v8::Value> Execute(ScriptState*) = 0;
 
     virtual void Trace(Visitor* visitor) const {}
   };
@@ -65,7 +65,8 @@ class CORE_EXPORT PausableScriptExecutor final
                          mojom::blink::WantResultOption,
                          mojom::blink::PromiseResultOption,
                          WebScriptExecutionCallback,
-                         Executor*);
+                         Executor*,
+                         const String& script_injector_id);
   ~PausableScriptExecutor() override;
 
   void ContextDestroyed() override;
@@ -79,7 +80,7 @@ class CORE_EXPORT PausableScriptExecutor final
   void ExecuteAndDestroySelf();
   void Dispose();
 
-  void HandleResults(const Vector<v8::Local<v8::Value>>& results);
+  void HandleResults(const v8::LocalVector<v8::Value>& results);
 
   Member<ScriptState> script_state_;
   WebScriptExecutionCallback callback_;
@@ -90,13 +91,14 @@ class CORE_EXPORT PausableScriptExecutor final
   // Whether to wait for a promise to resolve, if the executed script evaluates
   // to a promise.
   const mojom::blink::PromiseResultOption wait_for_promise_;
+  const String script_injector_id_;
 
   TaskHandle task_handle_;
 
   Member<Executor> executor_;
 
   // A keepalive used when waiting on promises to settle.
-  SelfKeepAlive<PausableScriptExecutor> keep_alive_;
+  SelfKeepAlive<PausableScriptExecutor> keep_alive_{{}};
 };
 
 }  // namespace blink

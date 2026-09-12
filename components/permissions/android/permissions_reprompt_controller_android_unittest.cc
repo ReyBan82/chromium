@@ -11,6 +11,9 @@
 #include "base/run_loop.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/test/mock_callback.h"
+#include "base/test/with_feature_override.h"
+#include "components/content_settings/core/common/content_settings_utils.h"
+#include "components/content_settings/core/common/features.h"
 #include "components/permissions/test/test_permissions_client.h"
 #include "content/public/test/test_renderer_host.h"
 
@@ -32,8 +35,10 @@ class PermissionsRepromptControllerAndroidTest
 
   void RepromtMissingLocation(base::OnceCallback<void(bool)> callback) {
     controller_->RepromptPermissionRequestInternal(
-        {ContentSettingsType::GEOLOCATION}, {ContentSettingsType::GEOLOCATION},
-        ContentSettingsType::GEOLOCATION, std::move(callback));
+        {content_settings::GeolocationContentSettingsType()},
+        {content_settings::GeolocationContentSettingsType()},
+        content_settings::GeolocationContentSettingsType(),
+        std::move(callback));
   }
 
   void RepromtMissingCameraMediaStream(
@@ -49,6 +54,14 @@ class PermissionsRepromptControllerAndroidTest
         {ContentSettingsType::MEDIASTREAM_CAMERA},
         {ContentSettingsType::MEDIASTREAM_CAMERA}, ContentSettingsType::AR,
         std::move(callback));
+  }
+
+  void RepromptMissingLocalNetworkAccess(
+      base::OnceCallback<void(bool)> callback) {
+    controller_->RepromptPermissionRequestInternal(
+        {ContentSettingsType::LOCAL_NETWORK_ACCESS},
+        {ContentSettingsType::LOCAL_NETWORK_ACCESS},
+        ContentSettingsType::LOCAL_NETWORK_ACCESS, std::move(callback));
   }
 
   size_t GetPendingCallbackCount() const {
@@ -119,21 +132,14 @@ class PermissionsRepromptControllerAndroidTest
   std::unique_ptr<RepromptTestPermissionsClient> client_;
 };
 
-// Duplicated requests from same contexts. Callback from same context will be
-// ignored and no new prompt will be shown
-TEST_F(PermissionsRepromptControllerAndroidTest, DuplicatedRequestSameContext) {
-  base::MockOnceCallback<void(bool)> mock_callback1;
-  base::MockOnceCallback<void(bool)> mock_callback2;
-  RepromtMissingLocation(mock_callback1.Get());
-  EXPECT_EQ(1u, GetPendingCallbackCount());
-  RepromtMissingLocation(mock_callback2.Get());
-  EXPECT_EQ(1u, GetPendingCallbackCount());
-  EXPECT_CALL(mock_callback1, Run(false));
-  EXPECT_CALL(mock_callback2, Run).Times(0);
-  WaitForNextReprompting();
-  EXPECT_EQ(1u, GetRepromptCount());
-  EXPECT_EQ(0u, GetPendingCallbackCount());
-}
+class PermissionsRepromptControllerAndroidWithApproximateLocationTest
+    : public base::test::WithFeatureOverride,
+      public PermissionsRepromptControllerAndroidTest {
+ public:
+  PermissionsRepromptControllerAndroidWithApproximateLocationTest()
+      : base::test::WithFeatureOverride(
+            content_settings::features::kApproximateGeolocationPermission) {}
+};
 
 // Duplicated requests from different contexts. All callbacks are expected to be
 // called but only 1 prompt should be shown.
@@ -153,9 +159,48 @@ TEST_F(PermissionsRepromptControllerAndroidTest,
   EXPECT_EQ(0u, GetPendingCallbackCount());
 }
 
+INSTANTIATE_FEATURE_OVERRIDE_TEST_SUITE(
+    PermissionsRepromptControllerAndroidWithApproximateLocationTest);
+
+// Duplicated requests from same contexts. Callback from same context will be
+// ignored and no new prompt will be shown
+TEST_P(PermissionsRepromptControllerAndroidWithApproximateLocationTest,
+       DuplicatedRequestSameContext) {
+  base::MockOnceCallback<void(bool)> mock_callback1;
+  base::MockOnceCallback<void(bool)> mock_callback2;
+  RepromtMissingLocation(mock_callback1.Get());
+  EXPECT_EQ(1u, GetPendingCallbackCount());
+  RepromtMissingLocation(mock_callback2.Get());
+  EXPECT_EQ(1u, GetPendingCallbackCount());
+  EXPECT_CALL(mock_callback1, Run(false));
+  EXPECT_CALL(mock_callback2, Run).Times(0);
+  WaitForNextReprompting();
+  EXPECT_EQ(1u, GetRepromptCount());
+  EXPECT_EQ(0u, GetPendingCallbackCount());
+}
+
+// Duplicated requests for LOCAL_NETWORK_ACCESS context. All callbacks must be
+// preserved and called when the prompt completes to avoid dropping Mojo
+// callbacks.
+TEST_F(PermissionsRepromptControllerAndroidTest,
+       DuplicatedRequestSameContext_LocalNetworkAccess) {
+  base::MockOnceCallback<void(bool)> mock_callback1;
+  base::MockOnceCallback<void(bool)> mock_callback2;
+  RepromptMissingLocalNetworkAccess(mock_callback1.Get());
+  EXPECT_EQ(1u, GetPendingCallbackCount());
+  RepromptMissingLocalNetworkAccess(mock_callback2.Get());
+  EXPECT_EQ(2u, GetPendingCallbackCount());
+  EXPECT_CALL(mock_callback1, Run(false));
+  EXPECT_CALL(mock_callback2, Run(false));
+  WaitForNextReprompting();
+  EXPECT_EQ(1u, GetRepromptCount());
+  EXPECT_EQ(0u, GetPendingCallbackCount());
+}
+
 // Different requests, all callbacks are expected to be called, and new prompt
 // should be shown
-TEST_F(PermissionsRepromptControllerAndroidTest, DifferentRequests) {
+TEST_P(PermissionsRepromptControllerAndroidWithApproximateLocationTest,
+       DifferentRequests) {
   base::MockOnceCallback<void(bool)> mock_callback1;
   base::MockOnceCallback<void(bool)> mock_callback2;
   RepromtMissingLocation(mock_callback1.Get());
@@ -171,7 +216,8 @@ TEST_F(PermissionsRepromptControllerAndroidTest, DifferentRequests) {
 }
 
 // Mixed requests including both duplicated and different request.
-TEST_F(PermissionsRepromptControllerAndroidTest, MixedRequests) {
+TEST_P(PermissionsRepromptControllerAndroidWithApproximateLocationTest,
+       MixedRequests) {
   base::MockOnceCallback<void(bool)> mock_callback1;
   base::MockOnceCallback<void(bool)> mock_callback2;
   base::MockOnceCallback<void(bool)> mock_callback3;
@@ -195,7 +241,8 @@ TEST_F(PermissionsRepromptControllerAndroidTest, MixedRequests) {
 }
 
 // Reprompt missing permission again after finished the last ones.
-TEST_F(PermissionsRepromptControllerAndroidTest, OnRepromptPermissionDone) {
+TEST_P(PermissionsRepromptControllerAndroidWithApproximateLocationTest,
+       OnRepromptPermissionDone) {
   base::MockOnceCallback<void(bool)> mock_callback1;
   base::MockOnceCallback<void(bool)> mock_callback2;
   base::MockOnceCallback<void(bool)> mock_callback3;

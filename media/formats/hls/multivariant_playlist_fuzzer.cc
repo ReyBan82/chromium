@@ -2,16 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "media/formats/hls/multivariant_playlist.h"
+
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
+#include <variant>
 
 #include "base/at_exit.h"
 #include "base/check.h"
 #include "base/i18n/icu_util.h"
-#include "base/strings/string_piece.h"
-#include "media/formats/hls/multivariant_playlist.h"
+#include "base/no_destructor.h"
 #include "media/formats/hls/playlist.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "url/gurl.h"
 
 struct IcuEnvironment {
@@ -20,12 +22,11 @@ struct IcuEnvironment {
   base::AtExitManager at_exit_manager;
 };
 
-IcuEnvironment* env = new IcuEnvironment();
 
-// Attempts to determine playlist version from the given source (excercising
+// Attempts to determine playlist version from the given source (exercising
 // `Playlist::IdentifyPlaylist`). Since we don't necessarily want to exit early
 // on a failure here, return `kDefaultVersion` on error.
-media::hls::types::DecimalInteger GetPlaylistVersion(base::StringPiece source) {
+media::hls::types::DecimalInteger GetPlaylistVersion(std::string_view source) {
   auto ident_result = media::hls::Playlist::IdentifyPlaylist(source);
   if (!ident_result.has_value()) {
     return media::hls::Playlist::kDefaultVersion;
@@ -35,15 +36,17 @@ media::hls::types::DecimalInteger GetPlaylistVersion(base::StringPiece source) {
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  // Create a StringPiece from the given input
-  const base::StringPiece source(reinterpret_cast<const char*>(data), size);
+  static const base::NoDestructor<IcuEnvironment> env;
+  // Create a string_view from the given input
+  const std::string_view source(reinterpret_cast<const char*>(data), size);
 
   // Determine playlist version (ignoring type mismatch)
   const auto version = GetPlaylistVersion(source);
+  const auto playlist_uri = GURL("http://localhost/playlist.m3u8");
 
   // Try to parse it as a multivariant playlist
   media::hls::MultivariantPlaylist::Parse(
-      source, GURL("http://localhost/playlist.m3u8"), version);
+      source, playlist_uri, url::Origin::Create(playlist_uri), version);
 
   return 0;
 }

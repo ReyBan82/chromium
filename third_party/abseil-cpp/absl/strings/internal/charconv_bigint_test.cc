@@ -14,9 +14,12 @@
 
 #include "absl/strings/internal/charconv_bigint.h"
 
+#include <cstdint>
+#include <limits>
 #include <string>
 
 #include "gtest/gtest.h"
+#include "absl/base/config.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -176,7 +179,7 @@ TEST(BigUnsigned, MultiplyByBigUnsigned) {
 
 TEST(BigUnsigned, MultiplyByOverflow) {
   {
-    // Check that multiplcation overflow predictably truncates.
+    // Check that multiplication overflow predictably truncates.
 
     // A big int with all bits on.
     BigUnsigned<4> all_bits_on("340282366920938463463374607431768211455");

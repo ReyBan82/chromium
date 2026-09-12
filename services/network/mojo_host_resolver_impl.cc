@@ -16,6 +16,7 @@
 #include "net/base/ip_address.h"
 #include "net/base/net_errors.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/dns/host_resolver.h"
 #include "net/dns/public/dns_query_type.h"
 
@@ -104,9 +105,12 @@ MojoHostResolverImpl::Job::Job(
   net::HostResolver::ResolveHostParameters parameters;
   if (!is_ex)
     parameters.dns_query_type = net::DnsQueryType::A;
-  request_ =
-      resolver->CreateRequest(net::HostPortPair(hostname_, 0),
-                              network_anonymization_key, net_log, parameters);
+  request_ = resolver->CreateRequest(
+      net::HostPortPair(hostname_, 0), network_anonymization_key,
+      // There is currently no use case for targeting a specific network when
+      // ProxyResolvingClientSocket is used. Expose this capability once (if)
+      // there is a need. Until then, we always use kInvalidNetworkHandle.
+      net::handles::kInvalidNetworkHandle, net_log, parameters);
 }
 
 void MojoHostResolverImpl::Job::Start() {
@@ -127,10 +131,8 @@ void MojoHostResolverImpl::Job::OnResolveDone(int result) {
   DCHECK(thread_checker_.CalledOnValidThread());
 
   std::vector<net::IPAddress> result_addresses;
-  if (request_->GetAddressResults()) {
-    for (const auto& endpoint : request_->GetAddressResults()->endpoints()) {
-      result_addresses.push_back(endpoint.address());
-    }
+  for (const auto& endpoint : request_->GetAddressResults().endpoints()) {
+    result_addresses.push_back(endpoint.address());
   }
 
   request_.reset();

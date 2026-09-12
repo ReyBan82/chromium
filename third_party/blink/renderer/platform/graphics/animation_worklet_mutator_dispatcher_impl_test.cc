@@ -4,10 +4,9 @@
 
 #include "third_party/blink/renderer/platform/graphics/animation_worklet_mutator_dispatcher_impl.h"
 
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/test/metrics/histogram_tester.h"
-#include "base/test/simple_test_tick_clock.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/scheduler/test/renderer_scheduler_test_support.h"
@@ -18,6 +17,7 @@
 #include "third_party/blink/renderer/platform/scheduler/public/non_main_thread.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
 #include "third_party/blink/renderer/platform/scheduler/public/thread_type.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 
@@ -61,13 +61,12 @@ class MockAnimationWorkletMutator
   // signaled. This blocking ensures that tests of async mutations do not
   // encounter race conditions when validating queuing strategies.
   void BlockWorkletThread() {
-    PostCrossThreadTask(
-        *expected_runner_, FROM_HERE,
-        CrossThreadBindOnce(
-            [](base::WaitableEvent* start_processing_event) {
-              start_processing_event->Wait();
-            },
-            WTF::CrossThreadUnretained(&start_processing_event_)));
+    PostCrossThreadTask(*expected_runner_, FROM_HERE,
+                        CrossThreadBindOnce(
+                            [](base::WaitableEvent* start_processing_event) {
+                              start_processing_event->Wait();
+                            },
+                            CrossThreadUnretained(&start_processing_event_)));
   }
 
   void UnblockWorkletThread() { start_processing_event_.Signal(); }
@@ -109,8 +108,9 @@ class AnimationWorkletMutatorDispatcherImplTest : public ::testing::Test {
 
   void TearDown() override { mutator_ = nullptr; }
 
+  test::TaskEnvironment task_environment_;
   std::unique_ptr<::testing::StrictMock<MockCompositorMutatorClient>> client_;
-  AnimationWorkletMutatorDispatcherImpl* mutator_;
+  raw_ptr<AnimationWorkletMutatorDispatcherImpl> mutator_;
 };
 
 std::unique_ptr<AnimationWorkletDispatcherInput> CreateTestMutatorInput() {
@@ -763,67 +763,6 @@ TEST_F(AnimationWorkletMutatorDispatcherImplAsyncTest,
   first_mutator->UnblockWorkletThread();
 
   WaitForTestCompletion();
-}
-
-TEST_F(AnimationWorkletMutatorDispatcherImplAsyncTest, HistogramTester) {
-  const char* histogram_name =
-      "Animation.AnimationWorklet.Dispatcher.AsynchronousMutateDuration";
-  base::HistogramTester histogram_tester;
-
-  std::unique_ptr<base::TickClock> mock_clock =
-      std::make_unique<base::SimpleTestTickClock>();
-  base::SimpleTestTickClock* mock_clock_ptr =
-      static_cast<base::SimpleTestTickClock*>(mock_clock.get());
-  mutator_->SetClockForTesting(std::move(mock_clock));
-
-  std::unique_ptr<NonMainThread> thread = CreateThread("MyThread");
-  MockAnimationWorkletMutator* mutator =
-      MakeGarbageCollected<MockAnimationWorkletMutator>(
-          thread->GetTaskRunner());
-  mutator_->RegisterAnimationWorkletMutator(WrapCrossThreadPersistent(mutator),
-                                            thread->GetTaskRunner());
-
-  EXPECT_CALL(*mutator, GetWorkletId())
-      .Times(AtLeast(2))
-      .WillRepeatedly(Return(11));
-  EXPECT_CALL(*mutator, MutateRef(_))
-      .Times(2)
-      .WillOnce(Return(new AnimationWorkletOutput()))
-      .WillOnce(Return(new AnimationWorkletOutput()));
-  EXPECT_CALL(*client_, SetMutationUpdateRef(_)).Times(2);
-
-  // Block Responses until all requests have been queued.
-  mutator->BlockWorkletThread();
-
-  base::TimeDelta time_delta = base::Milliseconds(10);
-
-  // Expected Elapsed time is the sum of all clock advancements until unblocked,
-  // which totals to 30 ms.
-  EXPECT_TRUE(mutator_->MutateAsynchronously(
-      CreateTestMutatorInput(), kHighPriority,
-      CreateIntermediateResultCallback(MutateStatus::kCompletedWithUpdate)));
-  mock_clock_ptr->Advance(time_delta);
-
-  // This request will get stomped by the next request, but the start time is
-  // preserved.
-  EXPECT_TRUE(mutator_->MutateAsynchronously(
-      CreateTestMutatorInput(), kNormalPriority,
-      CreateIntermediateResultCallback(MutateStatus::kCanceled)));
-  mock_clock_ptr->Advance(time_delta);
-
-  // Replaces previous request. Since 10 ms has elapsed prior to replacing the
-  // previous request, the expected elapsed time is 20 ms.
-  EXPECT_TRUE(mutator_->MutateAsynchronously(
-      CreateTestMutatorInput(), kNormalPriority, CreateTestCompleteCallback()));
-  mock_clock_ptr->Advance(time_delta);
-
-  mutator->UnblockWorkletThread();
-  WaitForTestCompletion();
-
-  histogram_tester.ExpectTotalCount(histogram_name, 2);
-  // Times are in microseconds.
-  histogram_tester.ExpectBucketCount(histogram_name, 20000, 1);
-  histogram_tester.ExpectBucketCount(histogram_name, 30000, 1);
 }
 
 }  // namespace

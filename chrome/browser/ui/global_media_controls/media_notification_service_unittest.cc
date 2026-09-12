@@ -7,7 +7,6 @@
 #include <memory>
 #include <utility>
 
-#include "base/functional/callback_forward.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
@@ -16,18 +15,21 @@
 #include "base/unguessable_token.h"
 #include "build/build_config.h"
 #include "chrome/browser/media/router/chrome_media_router_factory.h"
-#include "chrome/browser/media/router/media_router_feature.h"
+#include "chrome/browser/ui/global_media_controls/cast_device_list_host.h"
 #include "chrome/browser/ui/global_media_controls/cast_media_notification_producer.h"
 #include "chrome/browser/ui/global_media_controls/test_helper.h"
-#include "chrome/browser/ui/media_router/cast_dialog_controller.h"
+#include "chrome/browser/ui/media_router/cast_dialog_model.h"
 #include "chrome/browser/ui/media_router/media_route_starter.h"
 #include "chrome/browser/ui/media_router/query_result_manager.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
+#include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
+#include "chrome/test/base/testing_profile_manager.h"
 #include "components/global_media_controls/public/media_item_manager.h"
 #include "components/global_media_controls/public/media_session_item_producer.h"
 #include "components/global_media_controls/public/media_session_notification_item.h"
 #include "components/global_media_controls/public/mojom/device_service.mojom.h"
+#include "components/global_media_controls/public/test/mock_device_service.h"
 #include "components/global_media_controls/public/test/mock_media_dialog_delegate.h"
 #include "components/media_message_center/media_notification_item.h"
 #include "components/media_message_center/media_notification_util.h"
@@ -48,6 +50,7 @@ using global_media_controls::mojom::DeviceListHost;
 using global_media_controls::mojom::DevicePtr;
 }  // namespace mojom
 
+using global_media_controls::test::MockDeviceListClient;
 using media_router::MediaRoute;
 using media_router::StartPresentationContext;
 using media_session::mojom::AudioFocusRequestState;
@@ -60,21 +63,7 @@ using testing::Expectation;
 using testing::NiceMock;
 using testing::Return;
 
-namespace {
-
-class MockDeviceListClient : public mojom::DeviceListClient {
- public:
-  MockDeviceListClient() : receiver_(this) {}
-
-  MOCK_METHOD(void, OnDevicesUpdated, (std::vector<mojom::DevicePtr> devices));
-
-  mojo::Receiver<mojom::DeviceListClient>& receiver() { return receiver_; }
-
- private:
-  mojo::Receiver<mojom::DeviceListClient> receiver_;
-};
-
-}  // namespace
+namespace {}  // namespace
 
 class MediaNotificationServiceTest : public ChromeRenderViewHostTestHarness {
  public:
@@ -110,6 +99,7 @@ class MediaNotificationServiceTest : public ChromeRenderViewHostTestHarness {
     content::MediaSession::Get(contents);
     auto id = content::MediaSession::GetRequestIdFromWebContents(contents);
     SimulatePlayingControllableMedia(id);
+    base::RunLoop().RunUntilIdle();
     return id;
   }
 
@@ -155,10 +145,12 @@ class MediaNotificationServiceTest : public ChromeRenderViewHostTestHarness {
   void SimulateDialogOpened(
       global_media_controls::test::MockMediaDialogDelegate* delegate) {
     service_->media_item_manager()->SetDialogDelegate(delegate);
+    base::RunLoop().RunUntilIdle();
   }
 
   void SimulateCloseDialog() {
     service_->media_item_manager()->SetDialogDelegate(nullptr);
+    base::RunLoop().RunUntilIdle();
   }
 
   void SimulateDialogOpenedForPresentationRequest(
@@ -192,9 +184,6 @@ class MediaNotificationServiceTest : public ChromeRenderViewHostTestHarness {
 class MediaNotificationServiceCastTest : public MediaNotificationServiceTest {
  public:
   void SetUp() override {
-    feature_list_.InitAndEnableFeature(
-        media_router::kGlobalMediaControlsCastStartStop);
-
     presentation_manager_ =
         std::make_unique<NiceMock<MockWebContentsPresentationManager>>();
     media_router::WebContentsPresentationManager::SetTestInstance(
@@ -209,9 +198,9 @@ class MediaNotificationServiceCastTest : public MediaNotificationServiceTest {
 
   media_router::MediaRoute CreateMediaRoute(
       media_router::MediaRoute::Id route_id) {
-    media_router::MediaRoute media_route(route_id,
-                                         media_router::MediaSource("source_id"),
-                                         "sink_id", "description", true);
+    media_router::MediaRoute media_route(
+        route_id, media_router::MediaSource("cast:123456"), "sink_id",
+        "description", true);
     media_route.set_controller_type(
         media_router::RouteControllerType::kGeneric);
     return media_route;
@@ -221,6 +210,10 @@ class MediaNotificationServiceCastTest : public MediaNotificationServiceTest {
     return content::PresentationRequest(main_rfh()->GetGlobalId(),
                                         {GURL(), GURL()},
                                         url::Origin::Create(GURL()));
+  }
+
+  bool HasPresentationContextForSession(const std::string& session_id) {
+    return service()->HasPresentationContextForSession(session_id);
   }
 
   std::unique_ptr<StartPresentationContext> CreateStartPresentationContext(
@@ -237,18 +230,21 @@ class MediaNotificationServiceCastTest : public MediaNotificationServiceTest {
   std::string SimulateSupplementalNotification() {
     auto presentation_request = CreatePresentationRequest();
 
-    // Create a PresentationRequestNotificationItem.
+    // Create a SupplementalDevicePickerItem.
     service()->OnStartPresentationContextCreated(
         CreateStartPresentationContext(presentation_request));
-    auto notification_id = GetSupplementalNotification()->id();
+    base::RunLoop().RunUntilIdle();
+    auto notification_id =
+        service()
+            ->supplemental_device_picker_producer_
+            ->GetOrCreateNotificationItem(base::UnguessableToken::Create())
+            .id();
     EXPECT_FALSE(notification_id.empty());
-    auto item =
-        service()->presentation_request_notification_producer_->GetMediaItem(
-            notification_id);
+    auto item = service()
+                    ->presentation_request_notification_producer_
+                    ->GetNotificationItem();
     EXPECT_TRUE(item);
-    auto* pr_item =
-        static_cast<PresentationRequestNotificationItem*>(item.get());
-    EXPECT_EQ(pr_item->request(), presentation_request);
+    EXPECT_EQ(item->request(), presentation_request);
     return notification_id;
   }
 
@@ -308,13 +304,22 @@ class MediaNotificationServiceCastTest : public MediaNotificationServiceTest {
     return TakeReceiver(remote, /*expected_disconnect_count=*/0);
   }
 
+  bool HasPresentationContext() { return service()->context_ != nullptr; }
+
+  std::unique_ptr<media_router::CastDialogController>
+  CreateCastDialogControllerForSession(const std::string& id) {
+    return service()->CreateCastDialogControllerForSession(id);
+  }
+
  private:
   std::unique_ptr<MockWebContentsPresentationManager> presentation_manager_;
-  base::test::ScopedFeatureList feature_list_;
   base::MockCallback<base::OnceClosure> remote_disconnect_handler_;
   base::MockCallback<base::OnceClosure> receiver_disconnect_handler_;
 };
 
+// CastMediaNotificationProducer is owned by
+// CastMediaNotificationProducerKeyedService in Ash.
+#if !BUILDFLAG(IS_CHROMEOS)
 TEST_F(MediaNotificationServiceCastTest,
        ShowCastSessionsForPresentationRequest) {
   NiceMock<global_media_controls::test::MockMediaDialogDelegate>
@@ -353,6 +358,7 @@ TEST_F(MediaNotificationServiceCastTest,
   testing::Mock::VerifyAndClearExpectations(&dialog_delegate);
   SimulateCloseDialog();
 }
+#endif
 
 TEST_F(MediaNotificationServiceCastTest, ShowMediaItemsForPresentationRequest) {
   std::unique_ptr<content::WebContents> web_contents_1(
@@ -385,6 +391,9 @@ TEST_F(MediaNotificationServiceCastTest, ShowMediaItemsForPresentationRequest) {
   SimulateCloseDialog();
 }
 
+// SupplementalDevicePickerProducer is not owned by MediaNotificationService
+// on Chrome OS.
+#if !BUILDFLAG(IS_CHROMEOS)
 TEST_F(MediaNotificationServiceCastTest, ShowSupplementalNotifications) {
   NiceMock<global_media_controls::test::MockMediaDialogDelegate>
       dialog_delegate;
@@ -396,7 +405,7 @@ TEST_F(MediaNotificationServiceCastTest, ShowSupplementalNotifications) {
   testing::Mock::VerifyAndClearExpectations(&dialog_delegate);
   SimulateCloseDialog();
 
-  // Create a PresentationRequestNotificationItem.
+  // Create a SupplementalDevicePickerItem.
   auto supplemental_notification_id = SimulateSupplementalNotification();
 
   // Open the dialog and a supplemental notification should show up.
@@ -405,6 +414,8 @@ TEST_F(MediaNotificationServiceCastTest, ShowSupplementalNotifications) {
   testing::Mock::VerifyAndClearExpectations(&dialog_delegate);
   SimulateCloseDialog();
 
+  // Closing the dialog has deleted the notification. Create another one.
+  supplemental_notification_id = SimulateSupplementalNotification();
   EXPECT_CALL(dialog_delegate, ShowMediaItem(supplemental_notification_id, _));
   SimulateDialogOpenedForPresentationRequest(&dialog_delegate, web_contents());
   testing::Mock::VerifyAndClearExpectations(&dialog_delegate);
@@ -416,6 +427,7 @@ TEST_F(MediaNotificationServiceCastTest, ShowSupplementalNotifications) {
       content::RenderViewHostTestHarness::CreateTestWebContents());
   auto media_session_id =
       SimulatePlayingControllableMediaForWebContents(test_web_contents.get());
+  supplemental_notification_id = SimulateSupplementalNotification();
   // Create a cast session not associated with any WebContents.
   const std::string route_id = "route_id";
   SimulateMediaRoutesUpdate({CreateMediaRoute(route_id)});
@@ -464,13 +476,14 @@ TEST_F(MediaNotificationServiceCastTest, HideSupplementalNotifications) {
 TEST_F(MediaNotificationServiceCastTest,
        OnStartPresentationContextCreated_ForPresentationRequestNotifications) {
   // If there does not exist an active notification, pass the
-  // StartPresentationContext to PresentationRequestNotificationProducer.
+  // StartPresentationContext to SupplementalDevicePickerProducer.
   service()->OnStartPresentationContextCreated(
       CreateStartPresentationContext(CreatePresentationRequest()));
   auto supplemental_notification = GetSupplementalNotification();
   EXPECT_TRUE(supplemental_notification);
   EXPECT_FALSE(supplemental_notification->is_default_presentation_request());
 }
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 TEST_F(MediaNotificationServiceCastTest,
        OnStartPresentationContextCreated_ForMediaSessionNotifications) {
@@ -526,7 +539,8 @@ TEST_F(MediaNotificationServiceCastTest, GetDeviceListHostForSession) {
   service()->GetDeviceListHostForSession(
       id.ToString(), TakeReceiverAndExpectNoDisconnect(host_remote),
       TakeRemoteAndExpectNoDisconnect(client.receiver()));
-  base::RunLoop().RunUntilIdle();
+  host_remote.FlushForTesting();
+  client.receiver().FlushForTesting();
 }
 
 TEST_F(MediaNotificationServiceCastTest,
@@ -536,7 +550,8 @@ TEST_F(MediaNotificationServiceCastTest,
   service()->GetDeviceListHostForSession(
       "invalid_id", TakeReceiverAndExpectDisconnect(host_remote),
       TakeRemoteAndExpectDisconnect(client.receiver()));
-  base::RunLoop().RunUntilIdle();
+  host_remote.FlushForTesting();
+  client.receiver().FlushForTesting();
 }
 
 TEST_F(MediaNotificationServiceCastTest, GetDeviceListHostForPresentation) {
@@ -547,7 +562,8 @@ TEST_F(MediaNotificationServiceCastTest, GetDeviceListHostForPresentation) {
   service()->GetDeviceListHostForPresentation(
       TakeReceiverAndExpectNoDisconnect(host_remote),
       TakeRemoteAndExpectNoDisconnect(client.receiver()));
-  base::RunLoop().RunUntilIdle();
+  host_remote.FlushForTesting();
+  client.receiver().FlushForTesting();
 }
 
 TEST_F(MediaNotificationServiceCastTest,
@@ -557,7 +573,23 @@ TEST_F(MediaNotificationServiceCastTest,
   service()->GetDeviceListHostForPresentation(
       TakeReceiverAndExpectDisconnect(host_remote),
       TakeRemoteAndExpectDisconnect(client.receiver()));
-  base::RunLoop().RunUntilIdle();
+  host_remote.FlushForTesting();
+  client.receiver().FlushForTesting();
+}
+
+TEST_F(MediaNotificationServiceCastTest, DeleteDeviceListHostOnShutdown) {
+  mojo::Remote<mojom::DeviceListHost> host_remote;
+  MockDeviceListClient client;
+  auto id = SimulatePlayingControllableMediaForWebContents(web_contents());
+  service()->GetDeviceListHostForSession(
+      id.ToString(), TakeReceiverAndExpectDisconnect(host_remote),
+      TakeRemoteAndExpectDisconnect(client.receiver()));
+
+  // Shutdown() should cause a disconnect, fulfilling the expectations in
+  // TakeReceiver...() and TakeRemote...() above.
+  service()->Shutdown();
+  host_remote.FlushForTesting();
+  client.receiver().FlushForTesting();
 }
 
 TEST_F(MediaNotificationServiceCastTest,
@@ -572,7 +604,7 @@ TEST_F(MediaNotificationServiceCastTest,
   // At this point `session_item` has no RemotePlaybackMetadata and there's no
   // default MediaSource.
   std::unique_ptr<media_router::CastDialogController> controller_presentation =
-      service()->CreateCastDialogControllerForSession(id.ToString());
+      CreateCastDialogControllerForSession(id.ToString());
   std::unique_ptr<media_router::MediaRouteStarter> starter =
       controller_presentation->TakeMediaRouteStarter();
   const auto* query_result_manager = starter->GetQueryResultManagerForTesting();
@@ -588,12 +620,126 @@ TEST_F(MediaNotificationServiceCastTest,
 
   std::unique_ptr<media_router::CastDialogController>
       controller_remote_playback =
-          service()->CreateCastDialogControllerForSession(id.ToString());
+          CreateCastDialogControllerForSession(id.ToString());
   starter = controller_remote_playback->TakeMediaRouteStarter();
   query_result_manager = starter->GetQueryResultManagerForTesting();
   const media_router::CastModeSet mode = {
       media_router::MediaCastMode::REMOTE_PLAYBACK};
   EXPECT_EQ(mode, query_result_manager->GetSupportedCastModes());
+}
+
+TEST_F(MediaNotificationServiceCastTest,
+       CreateCastDialogControllerWithMultipleSessions) {
+  // Set up the first WebContents and session.
+  std::unique_ptr<content::WebContents> first_contents(
+      content::RenderViewHostTestHarness::CreateTestWebContents());
+  auto first_id =
+      SimulatePlayingControllableMediaForWebContents(first_contents.get());
+
+  // Set up the second WebContents and session.
+  std::unique_ptr<content::WebContents> second_contents(
+      content::RenderViewHostTestHarness::CreateTestWebContents());
+  auto second_id =
+      SimulatePlayingControllableMediaForWebContents(second_contents.get());
+
+  // The second session initiates a cast request.
+  auto second_request = content::PresentationRequest(
+      second_contents->GetPrimaryMainFrame()->GetGlobalId(), {GURL(), GURL()},
+      url::Origin::Create(GURL()));
+  auto context = CreateStartPresentationContext(second_request);
+
+  // Pass the second session's context to the service.
+  service()->OnStartPresentationContextCreated(std::move(context));
+  EXPECT_TRUE(HasPresentationContext());
+
+  // Try to create a CastDialogController for the first session.
+  // It should NOT consume the context because of origin mismatch.
+  std::unique_ptr<media_router::CastDialogController> controller_first =
+      CreateCastDialogControllerForSession(first_id.ToString());
+  EXPECT_TRUE(HasPresentationContext());
+
+  // Creating it for the second session SHOULD consume the context.
+  std::unique_ptr<media_router::CastDialogController> controller_second =
+      CreateCastDialogControllerForSession(second_id.ToString());
+  EXPECT_FALSE(HasPresentationContext());
+}
+
+TEST_F(MediaNotificationServiceCastTest,
+       GetDeviceListHostForSessionWithMultipleSessions) {
+  // Set up the first WebContents and session.
+  std::unique_ptr<content::WebContents> first_contents(
+      content::RenderViewHostTestHarness::CreateTestWebContents());
+  auto first_id =
+      SimulatePlayingControllableMediaForWebContents(first_contents.get());
+
+  // Set up the second WebContents and session.
+  std::unique_ptr<content::WebContents> second_contents(
+      content::RenderViewHostTestHarness::CreateTestWebContents());
+  auto second_id =
+      SimulatePlayingControllableMediaForWebContents(second_contents.get());
+
+  // The second session initiates a cast request.
+  auto second_request = content::PresentationRequest(
+      second_contents->GetPrimaryMainFrame()->GetGlobalId(), {GURL(), GURL()},
+      url::Origin::Create(GURL()));
+  auto context = CreateStartPresentationContext(second_request);
+
+  // Pass the second session's context to the service.
+  service()->OnStartPresentationContextCreated(std::move(context));
+  EXPECT_TRUE(HasPresentationContext());
+
+  // Get DeviceListHost for the first session (mismatched presentation context).
+  // It should NOT consume the context.
+  mojo::Remote<mojom::DeviceListHost> host_remote_1;
+  MockDeviceListClient client_1;
+  service()->GetDeviceListHostForSession(
+      first_id.ToString(), TakeReceiverAndExpectNoDisconnect(host_remote_1),
+      TakeRemoteAndExpectNoDisconnect(client_1.receiver()));
+  host_remote_1.FlushForTesting();
+  client_1.receiver().FlushForTesting();
+  EXPECT_TRUE(HasPresentationContext());
+
+  // Get DeviceListHost for the second session (matched presentation context).
+  // It should consume the context.
+  mojo::Remote<mojom::DeviceListHost> host_remote_2;
+  MockDeviceListClient client_2;
+  service()->GetDeviceListHostForSession(
+      second_id.ToString(), TakeReceiverAndExpectNoDisconnect(host_remote_2),
+      TakeRemoteAndExpectNoDisconnect(client_2.receiver()));
+  host_remote_2.FlushForTesting();
+  client_2.receiver().FlushForTesting();
+  EXPECT_FALSE(HasPresentationContext());
+}
+
+TEST_F(MediaNotificationServiceCastTest,
+       OrphanedPresentationContextIsCleanedUp) {
+  std::unique_ptr<content::WebContents> contents(
+      content::RenderViewHostTestHarness::CreateTestWebContents());
+  auto id = SimulatePlayingControllableMediaForWebContents(contents.get());
+
+  auto request = content::PresentationRequest(
+      contents->GetPrimaryMainFrame()->GetGlobalId(), {GURL(), GURL()},
+      url::Origin::Create(GURL()));
+  auto context = CreateStartPresentationContext(request);
+
+  // Pass the context to the service.
+  service()->OnStartPresentationContextCreated(std::move(context));
+  EXPECT_TRUE(HasPresentationContext());
+
+  // Delete the WebContents. This destroys the RenderFrameHost as well.
+  contents.reset();
+
+  // Get DeviceListHost for the session. Since the initiator_rfh is now null
+  // (orphaned), calling GetDeviceListHostForSession should reset the context.
+  mojo::Remote<mojom::DeviceListHost> host_remote;
+  MockDeviceListClient client;
+  service()->GetDeviceListHostForSession(
+      id.ToString(), TakeReceiverAndExpectDisconnect(host_remote),
+      TakeRemoteAndExpectDisconnect(client.receiver()));
+  host_remote.FlushForTesting();
+  client.receiver().FlushForTesting();
+
+  EXPECT_FALSE(HasPresentationContext());
 }
 
 TEST_F(MediaNotificationServiceCastTest, RequestMediaRemoting) {
@@ -602,4 +748,157 @@ TEST_F(MediaNotificationServiceCastTest, RequestMediaRemoting) {
   SimulatePlayingControllableMedia(id);
   // TODO(takumif): Confirm that this calls the MediaNotificationItem.
   service()->OnMediaRemotingRequested(id.ToString());
+}
+
+TEST_F(MediaNotificationServiceCastTest, OnSinksDiscoveredForLocalMedia) {
+  // Playing the media.
+  auto id = SimulatePlayingControllableMediaForWebContents(web_contents());
+
+  NiceMock<global_media_controls::test::MockMediaDialogDelegate>
+      dialog_delegate;
+
+  // Opening the dialog.
+  SimulateDialogOpened(&dialog_delegate);
+
+  service()->OnSinksDiscovered(id.ToString());
+  EXPECT_FALSE(service()->should_show_cast_local_media_iph());
+
+  // Navigating to a page with local media.
+  NavigateAndCommit(GURL("file:///example.mp4"));
+
+  service()->OnSinksDiscovered(id.ToString());
+  EXPECT_TRUE(service()->should_show_cast_local_media_iph());
+}
+
+TEST_F(MediaNotificationServiceCastTest, PresentationRequestOriginLifecycle) {
+  auto id = SimulatePlayingControllableMediaForWebContents(web_contents());
+  auto* item = GetNotificationSessionItem(id);
+  ASSERT_TRUE(item);
+  EXPECT_FALSE(item->optional_presentation_request_origin().has_value());
+
+  content::PresentationRequest presentation_request(
+      main_rfh()->GetGlobalId(),
+      {GURL("https://example.com"), GURL("https://example.com")},
+      url::Origin::Create(GURL("https://example.com")));
+  auto context = CreateStartPresentationContext(presentation_request);
+  auto origin = context->presentation_request().frame_origin;
+  service()->OnStartPresentationContextCreated(std::move(context));
+
+  // The origin override is set and the context is alive.
+  EXPECT_EQ(item->optional_presentation_request_origin(), origin);
+  EXPECT_TRUE(HasPresentationContextForSession(id.ToString()));
+
+  // Creating the cast dialog controller consumes the context, so the origin
+  // override is reset.
+  auto dialog_controller = CreateCastDialogControllerForSession(id.ToString());
+  EXPECT_FALSE(item->optional_presentation_request_origin().has_value());
+}
+
+TEST_F(MediaNotificationServiceCastTest,
+       PresentationRequestOriginNotResetByNewDummyRequest) {
+  auto id = SimulatePlayingControllableMediaForWebContents(web_contents());
+  auto* item = GetNotificationSessionItem(id);
+  ASSERT_TRUE(item);
+  EXPECT_FALSE(item->optional_presentation_request_origin().has_value());
+
+  content::PresentationRequest presentation_request1(
+      main_rfh()->GetGlobalId(),
+      {GURL("https://example.com"), GURL("https://example.com")},
+      url::Origin::Create(GURL("https://example.com")));
+  auto context1 = CreateStartPresentationContext(presentation_request1);
+  auto origin1 = context1->presentation_request().frame_origin;
+  service()->OnStartPresentationContextCreated(std::move(context1));
+
+  // The origin override is set and the context is alive.
+  EXPECT_EQ(item->optional_presentation_request_origin(), origin1);
+  EXPECT_TRUE(HasPresentationContextForSession(id.ToString()));
+
+  // Create a second WebContents and a second presentation request for it.
+  // There is no controllable media on this second WebContents.
+  std::unique_ptr<content::WebContents> web_contents2(CreateTestWebContents());
+  content::PresentationRequest presentation_request2(
+      web_contents2->GetPrimaryMainFrame()->GetGlobalId(),
+      {GURL("https://example2.com"), GURL("https://example2.com")},
+      url::Origin::Create(GURL("https://example2.com")));
+  auto context2 = CreateStartPresentationContext(presentation_request2);
+
+  // When we send the second request, since it doesn't have an active
+  // controllable session on web_contents2, it should go to
+  // presentation_request_notification_producer_ and we expect the previous
+  // presentation context for web_contents1 to remain intact.
+  service()->OnStartPresentationContextCreated(std::move(context2));
+
+  // The origin override on the first item should remain unchanged.
+  EXPECT_EQ(item->optional_presentation_request_origin(), origin1);
+  EXPECT_TRUE(HasPresentationContextForSession(id.ToString()));
+}
+
+TEST_F(MediaNotificationServiceCastTest,
+       HasPresentationContextForSessionWithInactiveFrame) {
+  auto id = SimulatePlayingControllableMediaForWebContents(web_contents());
+  auto* item = GetNotificationSessionItem(id);
+  ASSERT_TRUE(item);
+  EXPECT_FALSE(item->optional_presentation_request_origin().has_value());
+
+  content::PresentationRequest presentation_request(
+      main_rfh()->GetGlobalId(),
+      {GURL("https://example.com"), GURL("https://example.com")},
+      url::Origin::Create(GURL("https://example.com")));
+  auto context = CreateStartPresentationContext(presentation_request);
+  auto origin = context->presentation_request().frame_origin;
+  service()->OnStartPresentationContextCreated(std::move(context));
+
+  // The origin override is set and the context is alive.
+  EXPECT_EQ(item->optional_presentation_request_origin(), origin);
+  EXPECT_TRUE(HasPresentationContextForSession(id.ToString()));
+
+  // Simulate the WebContents being deleted.
+  DeleteContents();
+
+  // The session no longer has a presentation context because the initiating
+  // frame is deleted.
+  EXPECT_FALSE(HasPresentationContextForSession(id.ToString()));
+}
+
+TEST_F(MediaNotificationServiceTest, SaveVideoFrameIphTimer) {
+  auto id = SimulatePlayingControllableMediaForWebContents(web_contents());
+  std::string id_str = id.ToString();
+
+  media_session::mojom::MediaSessionInfoPtr session_info =
+      media_session::mojom::MediaSessionInfo::New();
+  session_info->playback_state =
+      media_session::mojom::MediaPlaybackState::kPlaying;
+
+  std::vector<media_session::mojom::MediaSessionAction> actions = {
+      media_session::mojom::MediaSessionAction::kSaveVideoFrame};
+
+  media_session::MediaPosition position(
+      /*playback_rate=*/1.0, /*duration=*/base::Seconds(600),
+      /*position=*/base::Seconds(5), /*end_of_media=*/false);
+
+  service()->OnMediaSessionInfoChanged(id_str, session_info->Clone());
+  service()->OnMediaSessionActionsChanged(id_str, actions);
+  service()->OnMediaSessionPositionChanged(id_str, position);
+
+  // Advance time by 5 seconds (timer is 10 seconds).
+  task_environment()->FastForwardBy(base::Seconds(5));
+
+  // If playback pauses before 10 seconds, the timer should stop.
+  session_info->playback_state =
+      media_session::mojom::MediaPlaybackState::kPaused;
+  service()->OnMediaSessionInfoChanged(id_str, session_info->Clone());
+
+  // Resume playback.
+  session_info->playback_state =
+      media_session::mojom::MediaPlaybackState::kPlaying;
+  service()->OnMediaSessionInfoChanged(id_str, session_info->Clone());
+
+  // Advance time by 10 seconds; timer completes.
+  task_environment()->FastForwardBy(base::Seconds(10));
+
+  // Pausing after 10 seconds of uninterrupted playback should evaluate/show IPH
+  // without crashing.
+  session_info->playback_state =
+      media_session::mojom::MediaPlaybackState::kPaused;
+  service()->OnMediaSessionInfoChanged(id_str, session_info->Clone());
 }

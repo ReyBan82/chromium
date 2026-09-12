@@ -4,282 +4,292 @@
 
 #include "chrome/browser/ui/views/passwords/password_save_update_view.h"
 
-#include <algorithm>
 #include <memory>
 #include <utility>
-#include <vector>
 
-#include "base/containers/cxx20_erase.h"
-#include "base/feature_list.h"
-#include "base/metrics/field_trial_params.h"
-#include "build/build_config.h"
-#include "chrome/app/vector_icons/vector_icons.h"
-#include "chrome/browser/feature_engagement/tracker_factory.h"
+#include "base/functional/callback_helpers.h"
+#include "base/i18n/rtl.h"
+#include "base/notreached.h"
+#include "base/scoped_observation.h"
+#include "base/strings/string_util.h"
+#include "chrome/browser/password_manager/factories/password_store_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser_element_identifiers.h"
+#include "chrome/browser/signin/identity_manager_factory.h"
+#include "chrome/browser/signin/signin_promo_util.h"
+#include "chrome/browser/signin/signin_ui_util.h"
 #include "chrome/browser/ui/hats/hats_service.h"
 #include "chrome/browser/ui/hats/hats_service_factory.h"
 #include "chrome/browser/ui/passwords/password_dialog_prompts.h"
-#include "chrome/browser/ui/passwords/passwords_model_delegate.h"
 #include "chrome/browser/ui/passwords/ui_utils.h"
+#include "chrome/browser/ui/signin/promos/bubble_signin_promo_view.h"
+#include "chrome/browser/ui/ui_features.h"
+#include "chrome/browser/ui/user_education/browser_user_education_interface.h"
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
-#include "chrome/browser/ui/views/chrome_typography.h"
 #include "chrome/browser/ui/views/passwords/credentials_item_view.h"
-#include "chrome/browser/ui/views/passwords/password_items_view.h"
 #include "chrome/browser/ui/views/passwords/views_utils.h"
-#include "chrome/browser/ui/views/user_education/browser_feature_promo_controller.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
+#include "chrome/grit/browser_resources.h"
 #include "chrome/grit/generated_resources.h"
-#include "chrome/grit/theme_resources.h"
 #include "components/feature_engagement/public/feature_constants.h"
-#include "components/feature_engagement/public/tracker.h"
-#include "components/user_education/common/feature_promo_specification.h"
-#include "components/user_education/common/help_bubble_params.h"
-#include "content/public/browser/storage_partition.h"
+#include "components/password_manager/core/browser/features/password_features.h"
+#include "components/password_manager/core/browser/password_string.h"
+#include "components/strings/grit/components_strings.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
-#include "ui/base/interaction/element_identifier.h"
-#include "ui/base/interaction/element_tracker.h"
 #include "ui/base/l10n/l10n_util.h"
-#include "ui/base/models/combobox_model.h"
-#include "ui/base/models/combobox_model_observer.h"
-#include "ui/base/models/image_model.h"
-#include "ui/base/models/simple_combobox_model.h"
-#include "ui/base/resource/resource_bundle.h"
-#include "ui/color/color_id.h"
-#include "ui/color/color_provider.h"
-#include "ui/gfx/color_palette.h"
-#include "ui/gfx/color_utils.h"
-#include "ui/gfx/vector_icon_utils.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/events/keycodes/keyboard_codes.h"
 #include "ui/views/accessibility/view_accessibility.h"
-#include "ui/views/bubble/bubble_frame_view.h"
+#include "ui/views/controls/button/button.h"
 #include "ui/views/controls/button/md_text_button.h"
-#include "ui/views/controls/combobox/combobox.h"
 #include "ui/views/controls/editable_combobox/editable_combobox.h"
 #include "ui/views/controls/editable_combobox/editable_password_combobox.h"
+#include "ui/views/controls/menu/menu_runner.h"
+#include "ui/views/controls/menu/menu_types.h"
 #include "ui/views/controls/styled_label.h"
-#include "ui/views/controls/textfield/textfield.h"
-#include "ui/views/interaction/element_tracker_views.h"
-#include "ui/views/layout/animating_layout_manager.h"
 #include "ui/views/layout/fill_layout.h"
 #include "ui/views/layout/flex_layout.h"
-#include "ui/views/layout/layout_provider.h"
-#include "ui/views/style/typography.h"
-#include "ui/views/view.h"
+#include "ui/views/vector_icons.h"
 #include "ui/views/view_class_properties.h"
+#include "ui/views/view_utils.h"
 
 namespace {
 
-int ComboboxIconSize() {
-  // Use the line height of the body small text. This allows the icons to adapt
-  // if the user changes the font size.
-  return views::style::GetLineHeight(views::style::CONTEXT_MENU,
-                                     views::style::STYLE_PRIMARY);
-}
+// This Split Button is a composite UI control consisting of two clickable
+// zones:
+// 1. A primary action button (here, the "Not now" button) triggering the
+// default action.
+// 2. A smaller secondary arrow/caret button that opens an associated dropdown
+//    menu exposing alternative contextual options (e.g., "Never for this
+//    site").
+//
+// This class implements the Split Button for cancellation operations when the
+// dropdown menu experiment is enabled.
+class CancelSplitButton : public views::View,
+                          public ui::SimpleMenuModel::Delegate,
+                          public views::FocusChangeListener {
+  METADATA_HEADER(CancelSplitButton, views::View)
 
-std::unique_ptr<views::View> CreateRow() {
-  auto row = std::make_unique<views::View>();
-  views::FlexLayout* row_layout =
-      row->SetLayoutManager(std::make_unique<views::FlexLayout>());
-  row_layout->SetOrientation(views::LayoutOrientation::kHorizontal)
-      .SetIgnoreDefaultMainAxisMargins(true)
-      .SetCollapseMargins(true)
-      .SetDefault(
-          views::kMarginsKey,
-          gfx::Insets::VH(0, ChromeLayoutProvider::Get()->GetDistanceMetric(
-                                 views::DISTANCE_RELATED_CONTROL_HORIZONTAL)));
-  return row;
-}
+ public:
+  enum class CommandId {
+    kNeverForThisSite = 1,
+  };
 
-// Builds a credential row, adds the given elements to the layout.
-// |destination_field| is nullptr if the destination field shouldn't be shown.
-void BuildCredentialRows(views::View* parent_view,
-                         std::unique_ptr<views::View> destination_field,
-                         std::unique_ptr<views::View> username_field,
-                         std::unique_ptr<views::View> password_field) {
-  std::unique_ptr<views::Label> username_label(new views::Label(
-      l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_USERNAME_LABEL),
-      views::style::CONTEXT_LABEL, views::style::STYLE_PRIMARY));
-  username_label->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
+  ui::SimpleMenuModel* menu_model() const { return menu_model_.get(); }
 
-  std::unique_ptr<views::Label> password_label(new views::Label(
-      l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_PASSWORD_LABEL),
-      views::style::CONTEXT_LABEL, views::style::STYLE_PRIMARY));
-  password_label->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
+  CancelSplitButton(base::RepeatingClosure no_thanks_callback,
+                    base::RepeatingClosure never_callback)
+      : no_thanks_callback_(std::move(no_thanks_callback)),
+        never_callback_(std::move(never_callback)) {
+    // create layout manager
+    auto* layout = SetLayoutManager(std::make_unique<views::BoxLayout>(
+        views::BoxLayout::Orientation::kHorizontal, gfx::Insets(), 1));
+    layout->set_cross_axis_alignment(
+        views::BoxLayout::CrossAxisAlignment::kStretch);
+    // create "no thanks" button
+    not_now_button_ = AddChildView(std::make_unique<views::MdTextButton>(
+        base::BindRepeating(&CancelSplitButton::OnNoThanksClicked,
+                            base::Unretained(this)),
+        l10n_util::GetStringUTF16(IDS_NOT_NOW)));
+    not_now_button_->SetStyle(ui::ButtonStyle::kTonal);
+    not_now_button_->SetID(PasswordSaveUpdateView::kNotNowButton);
+    not_now_button_->SetProperty(
+        views::kElementIdentifierKey,
+        PasswordSaveUpdateView::kNotNowButtonElementId);
+    // create caret button that opens menu with "never" option
+    caret_button_ = AddChildView(std::make_unique<views::MdTextButton>(
+        base::BindRepeating(&CancelSplitButton::OnCaretClicked,
+                            base::Unretained(this)),
+        std::u16string()));
+    caret_button_->SetID(PasswordSaveUpdateView::kCaretButton);
+    caret_button_->SetProperty(views::kElementIdentifierKey,
+                               PasswordSaveUpdateView::kCaretButtonElementId);
+    caret_button_->GetViewAccessibility().SetName(
+        l10n_util::GetStringUTF16(IDS_TAB_GROUP_MORE_OPTIONS));
+    caret_button_->SetImageModel(views::Button::STATE_NORMAL,
+                                 GetCaretImageModel(/*pointing_up=*/false));
+    caret_button_->SetImageModel(views::Button::STATE_PRESSED,
+                                 GetCaretImageModel(/*pointing_up=*/true));
+    caret_button_->SetStyle(ui::ButtonStyle::kTonal);
+    caret_button_->SetMinSize(gfx::Size(0, 0));
+    caret_button_->SetBorder(views::CreateEmptyBorder(kCaretButtonBorders));
 
-  int labels_width = std::max({username_label->GetPreferredSize().width(),
-                               password_label->GetPreferredSize().width()});
-  int fields_height = std::max({username_field->GetPreferredSize().height(),
-                                password_field->GetPreferredSize().height()});
+    not_now_button_->SetCornerRadii(GetNotNowButtonRadii());
+    caret_button_->SetCornerRadii(GetCaretButtonRadii());
 
-  username_label->SetPreferredSize(gfx::Size(labels_width, fields_height));
-  password_label->SetPreferredSize(gfx::Size(labels_width, fields_height));
-
-  // Destination row.
-  if (destination_field) {
-    std::unique_ptr<views::View> destination_row = CreateRow();
-
-    destination_field->SetProperty(
-        views::kFlexBehaviorKey,
-        views::FlexSpecification(views::MinimumFlexSizeRule::kScaleToZero,
-                                 views::MaximumFlexSizeRule::kUnbounded));
-    destination_row->AddChildView(std::move(destination_field));
-
-    parent_view->AddChildView(std::move(destination_row));
+    menu_model_ = std::make_unique<ui::SimpleMenuModel>(this);
+    menu_model_->AddItemWithStringId(
+        static_cast<int>(CommandId::kNeverForThisSite),
+        IDS_PASSWORD_MANAGER_TOOLTIP_BLOCKED);
+    menu_model_->SetElementIdentifierAt(
+        0, PasswordSaveUpdateView::kNeverMenuItemElementId);
   }
 
-  // Username row.
-  std::unique_ptr<views::View> username_row = CreateRow();
-  username_row->AddChildView(std::move(username_label));
-  username_field->SetProperty(
-      views::kFlexBehaviorKey,
-      views::FlexSpecification(views::MinimumFlexSizeRule::kPreferred,
-                               views::MaximumFlexSizeRule::kUnbounded));
-  username_row->AddChildView(std::move(username_field));
-
-  parent_view->AddChildView(std::move(username_row));
-
-  // Password row.
-  std::unique_ptr<views::View> password_row = CreateRow();
-  password_row->AddChildView(std::move(password_label));
-  password_field->SetProperty(
-      views::kFlexBehaviorKey,
-      views::FlexSpecification(views::MinimumFlexSizeRule::kPreferred,
-                               views::MaximumFlexSizeRule::kUnbounded));
-  password_row->AddChildView(std::move(password_field));
-
-  parent_view->AddChildView(std::move(password_row));
-}
-
-// Create a vector which contains only the values in |items| and no elements.
-std::vector<std::u16string> ToValues(
-    const password_manager::ValueElementVector& items) {
-  std::vector<std::u16string> passwords;
-  passwords.reserve(items.size());
-  for (auto& pair : items)
-    passwords.push_back(pair.first);
-  return passwords;
-}
-
-// Creates an EditableCombobox from |PasswordForm.all_possible_usernames| or
-// even just |PasswordForm.username_value|.
-std::unique_ptr<views::EditableCombobox> CreateUsernameEditableCombobox(
-    const password_manager::PasswordForm& form) {
-  std::vector<std::u16string> usernames = {form.username_value};
-  for (const password_manager::ValueElementPair& other_possible_username_pair :
-       form.all_possible_usernames) {
-    if (other_possible_username_pair.first != form.username_value)
-      usernames.push_back(other_possible_username_pair.first);
+  void ExecuteCommand(int command_id, int event_flags) override {
+    if (command_id == static_cast<int>(CommandId::kNeverForThisSite)) {
+      if (never_callback_) {
+        never_callback_.Run();
+      }
+    } else {
+      NOTREACHED();
+    }
   }
-  base::EraseIf(usernames, [](const std::u16string& username) {
-    return username.empty();
-  });
-  bool display_arrow = !usernames.empty();
-  auto combobox = std::make_unique<views::EditableCombobox>(
-      std::make_unique<ui::SimpleComboboxModel>(
-          std::vector<ui::SimpleComboboxModel::Item>(usernames.begin(),
-                                                     usernames.end())),
-      /*filter_on_edit=*/false, /*show_on_empty=*/true,
-      views::style::CONTEXT_BUTTON, views::style::STYLE_PRIMARY, display_arrow);
-  combobox->SetText(form.username_value);
-  combobox->SetAccessibleName(
-      l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_USERNAME_LABEL));
-  // In case of long username, ensure that the beginning of value is visible.
-  combobox->SelectRange(gfx::Range(0));
-  return combobox;
-}
 
-// Creates an EditablePasswordCombobox from
-// `PasswordForm.all_possible_passwords` or even just
-// `PasswordForm.password_value`.
-std::unique_ptr<views::EditablePasswordCombobox> CreateEditablePasswordCombobox(
-    const password_manager::PasswordForm& form,
-    bool are_passwords_revealed,
-    views::EditablePasswordCombobox::IsPasswordRevealPermittedCheck
-        reveal_permitted_check) {
-  DCHECK(!form.IsFederatedCredential());
-  std::vector<std::u16string> passwords =
-      form.all_possible_passwords.empty()
-          ? std::vector<std::u16string>(/*n=*/1, form.password_value)
-          : ToValues(form.all_possible_passwords);
-  base::EraseIf(passwords, [](const std::u16string& password) {
-    return password.empty();
-  });
-  bool display_arrow = !passwords.empty();
-  auto combobox = std::make_unique<views::EditablePasswordCombobox>(
-      std::make_unique<ui::SimpleComboboxModel>(
-          std::vector<ui::SimpleComboboxModel::Item>(passwords.begin(),
-                                                     passwords.end())),
-      views::style::CONTEXT_BUTTON, STYLE_PRIMARY_MONOSPACED, display_arrow);
-  combobox->SetText(form.password_value);
-  combobox->SetPasswordIconTooltips(
-      l10n_util::GetStringUTF16(IDS_MANAGE_PASSWORDS_SHOW_PASSWORD),
-      l10n_util::GetStringUTF16(IDS_MANAGE_PASSWORDS_HIDE_PASSWORD));
-  combobox->SetIsPasswordRevealPermittedCheck(std::move(reveal_permitted_check));
-  combobox->RevealPasswords(are_passwords_revealed);
-  combobox->SetAccessibleName(
-      l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_PASSWORD_LABEL));
-  return combobox;
-}
+ private:
+  static constexpr int kCaretIconSize = 26;
+  static constexpr auto kCaretButtonBorders{gfx::Insets::TLBR(0, 4, 0, 8)};
 
-std::unique_ptr<views::Combobox> CreateDestinationCombobox(
-    std::u16string primary_account_email,
-    ui::ImageModel primary_account_avatar,
-    bool is_using_account_store) {
-  ui::ImageModel computer_image = ui::ImageModel::FromVectorIcon(
-      kComputerWithCircleBackgroundIcon, ui::kColorIcon, ComboboxIconSize());
+  static ui::ImageModel GetCaretImageModel(bool pointing_up) {
+    return ui::ImageModel::FromVectorIcon(
+        pointing_up ? views::kArrowDropUpIcon : views::kArrowDropDownIcon,
+        ui::kColorIcon, kCaretIconSize);
+  }
 
-  ui::SimpleComboboxModel::Item account_destination(
-      /*text=*/l10n_util::GetStringUTF16(
-          IDS_PASSWORD_MANAGER_DESTINATION_DROPDOWN_SAVE_TO_ACCOUNT),
-      /*dropdown_secondary_text=*/primary_account_email,
-      /*icon=*/primary_account_avatar);
+  void OnNoThanksClicked() {
+    if (no_thanks_callback_) {
+      no_thanks_callback_.Run();
+    }
+  }
 
-  ui::SimpleComboboxModel::Item device_destination(
-      /*text=*/l10n_util::GetStringUTF16(
-          IDS_PASSWORD_MANAGER_DESTINATION_DROPDOWN_SAVE_TO_DEVICE),
-      /*dropdown_secondary_text=*/std::u16string(),
-      /*icon=*/computer_image);
+  void OnCaretClicked() {
+    if (menu_runner_ && menu_runner_->IsRunning()) {
+      menu_runner_->Cancel();
+      return;
+    }
 
-  auto combobox = std::make_unique<views::Combobox>(
-      std::make_unique<ui::SimpleComboboxModel>(
-          std::vector<ui::SimpleComboboxModel::Item>{
-              std::move(account_destination), std::move(device_destination)}));
-  if (is_using_account_store)
-    combobox->SetSelectedRow(0);
-  else
-    combobox->SetSelectedRow(1);
+    caret_button_->SetImageModel(views::Button::STATE_NORMAL,
+                                 GetCaretImageModel(/*pointing_up=*/true));
+    caret_button_->SetBorder(views::CreateEmptyBorder(kCaretButtonBorders));
 
-  combobox->SetAccessibleName(l10n_util::GetStringUTF16(
-      IDS_PASSWORD_MANAGER_DESTINATION_DROPDOWN_ACCESSIBLE_NAME));
-  combobox->SetProperty(views::kElementIdentifierKey,
-                        kSavePasswordComboboxElementId);
-  return combobox;
-}
+    if (auto* focus_manager = GetWidget()->GetFocusManager()) {
+      focus_observation_.Observe(focus_manager);
+    }
+
+    menu_runner_ = std::make_unique<views::MenuRunner>(
+        menu_model_.get(), views::MenuRunner::HAS_MNEMONICS,
+        base::BindRepeating(&CancelSplitButton::OnMenuClosed,
+                            base::Unretained(this)));
+
+    gfx::Rect anchor_bounds = caret_button_->GetBoundsInScreen();
+    menu_runner_->RunMenuAt(caret_button_->GetWidget(), nullptr, anchor_bounds,
+                            views::MenuAnchorPosition::kTopRight,
+                            ui::mojom::MenuSourceType::kNone);
+  }
+
+  void OnMenuClosed() {
+    caret_button_->SetImageModel(views::Button::STATE_NORMAL,
+                                 GetCaretImageModel(/*pointing_up=*/false));
+    caret_button_->SetBorder(views::CreateEmptyBorder(kCaretButtonBorders));
+
+    focus_observation_.Reset();
+  }
+
+  void OnWillChangeFocus(views::View* focused_before,
+                         views::View* focused_now) override {
+    if (menu_runner_ && menu_runner_->IsRunning()) {
+      menu_runner_->Cancel();
+    }
+  }
+
+  int GetOuterRadius() const {
+    return views::LayoutProvider::Get()->GetCornerRadiusMetric(
+        views::ShapeContextTokens::kButtonRadius,
+        not_now_button_->GetPreferredSize());
+  }
+
+  gfx::RoundedCornersF GetNotNowButtonRadii() const {
+    int outer = GetOuterRadius();
+    return base::i18n::IsRTL() ? gfx::RoundedCornersF(0, outer, outer, 0)
+                               : gfx::RoundedCornersF(outer, 0, 0, outer);
+  }
+
+  gfx::RoundedCornersF GetCaretButtonRadii() const {
+    int outer = GetOuterRadius();
+    return base::i18n::IsRTL() ? gfx::RoundedCornersF(outer, 0, 0, outer)
+                               : gfx::RoundedCornersF(0, outer, outer, 0);
+  }
+
+  base::RepeatingClosure no_thanks_callback_;
+  base::RepeatingClosure never_callback_;
+
+  raw_ptr<views::MdTextButton> not_now_button_ = nullptr;
+  raw_ptr<views::MdTextButton> caret_button_ = nullptr;
+
+  base::ScopedObservation<views::FocusManager, views::FocusChangeListener>
+      focus_observation_{this};
+  std::unique_ptr<ui::SimpleMenuModel> menu_model_;
+  std::unique_ptr<views::MenuRunner> menu_runner_;
+};
+
+BEGIN_METADATA(CancelSplitButton)
+END_METADATA
 
 }  // namespace
 
-// TODO(crbug.com/1077706): come up with a more general solution for this.
-// This layout auto-resizes the host view to always adapt to changes in the size
-// of the child views.
-class PasswordSaveUpdateView::AutoResizingLayout : public views::FillLayout {
+// A custom horizontal button row used when the save password bubble dropdown
+// experiment is enabled. This row contains:
+// - An OK button (e.g., "Save" or "Update").
+// - A standard Cancel button (used when the dialog is in an "Update" state).
+// - A `CancelSplitButton` (used when the dialog is in a "Save" state, offering
+//   both a primary "Not now" option and a dropdown menu with "Never for this
+//   site").
+class PasswordSaveUpdateExperimentButtonRow : public views::BoxLayoutView {
+  METADATA_HEADER(PasswordSaveUpdateExperimentButtonRow, views::BoxLayoutView)
+
  public:
-  AutoResizingLayout() = default;
+  PasswordSaveUpdateExperimentButtonRow(base::RepeatingClosure accept_callback,
+                                        base::RepeatingClosure cancel_callback,
+                                        base::RepeatingClosure never_callback) {
+    SetOrientation(views::BoxLayout::Orientation::kHorizontal);
+    SetMainAxisAlignment(views::BoxLayout::MainAxisAlignment::kEnd);
+    SetBetweenChildSpacing(ChromeLayoutProvider::Get()->GetDistanceMetric(
+        views::DISTANCE_RELATED_BUTTON_HORIZONTAL));
+
+    cancel_button_ = AddChildView(std::make_unique<views::MdTextButton>(
+        cancel_callback,
+        l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_CANCEL_BUTTON)));
+    cancel_button_->SetStyle(ui::ButtonStyle::kTonal);
+    cancel_button_->SetID(PasswordSaveUpdateView::kDismissUpdateButton);
+    cancel_button_->SetVisible(false);
+
+    split_button_ = AddChildView(
+        std::make_unique<CancelSplitButton>(cancel_callback, never_callback));
+    split_button_->SetID(PasswordSaveUpdateView::kSplitButton);
+    split_button_->SetVisible(false);
+
+    ok_button_ = AddChildView(std::make_unique<views::MdTextButton>(
+        accept_callback, std::u16string()));
+    ok_button_->SetStyle(ui::ButtonStyle::kProminent);
+    ok_button_->SetID(PasswordSaveUpdateView::kOkButton);
+  }
+
+  void UpdateState(bool is_update,
+                   const std::u16string& ok_button_text,
+                   bool ok_button_enabled) {
+    ok_button_->SetText(ok_button_text);
+    ok_button_->SetEnabled(ok_button_enabled);
+
+    cancel_button_->SetVisible(is_update);
+    split_button_->SetVisible(!is_update);
+  }
+
+  views::MdTextButton* ok_button() const { return ok_button_; }
+  views::MdTextButton* cancel_button() const { return cancel_button_; }
+  views::View* split_button() const { return split_button_; }
 
  private:
-  PasswordSaveUpdateView* bubble_view() {
-    return static_cast<PasswordSaveUpdateView*>(host_view());
-  }
-
-  void OnLayoutChanged() override {
-    FillLayout::OnLayoutChanged();
-    if (bubble_view()->GetWidget())
-      bubble_view()->SizeToContents();
-  }
+  raw_ptr<views::MdTextButton> ok_button_ = nullptr;
+  raw_ptr<views::MdTextButton> cancel_button_ = nullptr;
+  raw_ptr<CancelSplitButton> split_button_ = nullptr;
 };
+
+BEGIN_METADATA(PasswordSaveUpdateExperimentButtonRow)
+END_METADATA
 
 PasswordSaveUpdateView::PasswordSaveUpdateView(
     content::WebContents* web_contents,
-    views::View* anchor_view,
+    views::BubbleAnchor anchor_view,
     DisplayReason reason)
     : PasswordBubbleViewBase(web_contents,
                              anchor_view,
@@ -294,19 +304,12 @@ PasswordSaveUpdateView::PasswordSaveUpdateView(
   DCHECK(controller_.state() == password_manager::ui::PENDING_PASSWORD_STATE ||
          controller_.state() ==
              password_manager::ui::PENDING_PASSWORD_UPDATE_STATE);
-  std::unique_ptr<views::Combobox> destination_dropdown;
-  if (controller_.ShouldShowPasswordStorePicker()) {
-    destination_dropdown = CreateDestinationCombobox(
-        controller_.GetPrimaryAccountEmail(),
-        controller_.GetPrimaryAccountAvatar(ComboboxIconSize()),
-        controller_.IsUsingAccountStore());
-    destination_dropdown->SetCallback(base::BindRepeating(
-        &PasswordSaveUpdateView::DestinationChanged, base::Unretained(this)));
-    destination_dropdown_ = destination_dropdown.get();
-  }
+
   const password_manager::PasswordForm& password_form =
       controller_.pending_password();
+  views::View* root_view = nullptr;
   if (password_form.IsFederatedCredential()) {
+    root_view = this;
     // The credential to be saved doesn't contain password but just the identity
     // provider (e.g. "Sign in with Google"). Thus, the layout is different.
     views::FlexLayout* flex_layout =
@@ -318,11 +321,8 @@ PasswordSaveUpdateView::PasswordSaveUpdateView(
         .SetDefault(
             views::kMarginsKey,
             gfx::Insets::VH(ChromeLayoutProvider::Get()->GetDistanceMetric(
-                                DISTANCE_CONTROL_LIST_VERTICAL),
+                                views::DISTANCE_CONTROL_LIST_VERTICAL),
                             0));
-
-    if (destination_dropdown)
-      AddChildView(std::move(destination_dropdown));
 
     const auto titles = GetCredentialLabelsForAccountChooser(password_form);
     AddChildView(
@@ -339,12 +339,13 @@ PasswordSaveUpdateView::PasswordSaveUpdateView(
     std::unique_ptr<views::EditablePasswordCombobox> password_dropdown =
         CreateEditablePasswordCombobox(
             password_form,
-            controller_.are_passwords_revealed_when_bubble_is_opened(),
-            base::BindRepeating(&SaveUpdateBubbleController::RevealPasswords,
-                                base::Unretained(&controller_)));
+            base::BindRepeating(&PasswordSaveUpdateView::TogglePasswordRevealed,
+                                base::Unretained(this)));
+    password_dropdown->SetCallback(base::BindRepeating(
+        &PasswordSaveUpdateView::OnContentChanged, base::Unretained(this)));
     // Set up layout:
-    SetLayoutManager(std::make_unique<AutoResizingLayout>());
-    views::View* root_view = AddChildView(std::make_unique<views::View>());
+    SetLayoutManager(std::make_unique<views::FillLayout>());
+    root_view = AddChildView(std::make_unique<views::View>());
     views::AnimatingLayoutManager* animating_layout =
         root_view->SetLayoutManager(
             std::make_unique<views::AnimatingLayoutManager>());
@@ -361,35 +362,20 @@ PasswordSaveUpdateView::PasswordSaveUpdateView(
         .SetDefault(
             views::kMarginsKey,
             gfx::Insets::VH(ChromeLayoutProvider::Get()->GetDistanceMetric(
-                                DISTANCE_CONTROL_LIST_VERTICAL),
+                                views::DISTANCE_CONTROL_LIST_VERTICAL),
                             0));
 
     username_dropdown_ = username_dropdown.get();
     password_dropdown_ = password_dropdown.get();
-    BuildCredentialRows(root_view, std::move(destination_dropdown),
-                        std::move(username_dropdown),
+    BuildCredentialRows(root_view, std::move(username_dropdown),
                         std::move(password_dropdown));
-
-    // The |username_dropdown_| should observe the animating layout manager to
-    // close the dropdown menu when the animation starts.
-    animating_layout_for_username_dropdown_observation_ = std::make_unique<
-        base::ScopedObservation<views::AnimatingLayoutManager,
-                                views::AnimatingLayoutManager::Observer>>(
-        username_dropdown_);
-    animating_layout_for_username_dropdown_observation_->Observe(
-        animating_layout);
-    animating_layout_for_iph_observation_.Observe(animating_layout);
-
-    // The account picker is only visible in Save bubbble, not Update bubble.
-    if (destination_dropdown_)
-      destination_dropdown_->SetVisible(!controller_.IsCurrentStateUpdate());
 
     // Only non-federated credentials bubble has a username field and can
     // change states between Save and Update. Therefore, we need to have the
-    // `accessibility_alert_` to inform screen readers about thatchange.
+    // `accessibility_alert_` to inform screen readers about that change.
     accessibility_alert_ =
         root_view->AddChildView(std::make_unique<views::View>());
-    AddChildView(accessibility_alert_.get());
+    AddChildViewRaw(accessibility_alert_.get());
   }
 
   {
@@ -401,16 +387,88 @@ PasswordSaveUpdateView::PasswordSaveUpdateView(
       (dialog->controller_.*func)();
     };
 
-    SetAcceptCallback(base::BindOnce(button_clicked, base::Unretained(this),
-                                     &Controller::OnSaveClicked));
-    SetCancelCallback(base::BindOnce(
-        button_clicked, base::Unretained(this),
-        is_update_bubble_ ? &Controller::OnNopeUpdateClicked
-                          : &Controller::OnNeverForThisSiteClicked));
+    if (IsTrustedVaultErrorResolutionEnabled() &&
+        controller_.IsSavingBlockedByTrustedVaultError()) {
+      SetAcceptCallbackWithClose(
+          base::BindRepeating(button_clicked, base::Unretained(this),
+                              &Controller::OnTrustedVaultUnlockClicked)
+              .Then(base::BindRepeating([]() {
+                // Closing the bubble after opening a trusted vault unlock page:
+                return true;
+              })));
+    } else {
+      SetAcceptCallbackWithClose(
+          base::BindRepeating(button_clicked, base::Unretained(this),
+                              &Controller::OnSaveClicked)
+              .Then(base::BindRepeating(
+                  &PasswordSaveUpdateView::CloseOrReplaceWithPromo,
+                  base::Unretained(this))));
+    }
+
+    if (is_update_bubble_) {
+      SetCancelCallback(base::BindOnce(button_clicked, base::Unretained(this),
+                                       &Controller::OnNoThanksClicked));
+    } else if (IsSaveBubbleDropdownExperimentEnabled()) {
+      if (controller_.IsMaxDismissalCountReached()) {
+        SetCancelCallback(
+            base::BindOnce(button_clicked, base::Unretained(this),
+                           &Controller::OnNeverForThisSiteClicked));
+      } else {
+        SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
+
+        auto accept_callback = base::BindRepeating(
+            [](PasswordSaveUpdateView* dialog) { dialog->AcceptDialog(); },
+            base::Unretained(this));
+
+        auto cancel_callback = base::BindRepeating(
+            [](PasswordSaveUpdateView* dialog) { dialog->CancelDialog(); },
+            base::Unretained(this));
+
+        auto never_callback = base::BindRepeating(
+            [](PasswordSaveUpdateView* dialog) {
+              dialog->UpdateUsernameAndPasswordInModel();
+              dialog->controller_.OnNeverForThisSiteClicked();
+              dialog->GetWidget()->Close();
+            },
+            base::Unretained(this));
+
+        auto button_row =
+            std::make_unique<PasswordSaveUpdateExperimentButtonRow>(
+                accept_callback, cancel_callback, never_callback);
+        button_row->SetID(PasswordSaveUpdateView::kCustomButtonRow);
+        custom_button_row_ = root_view->AddChildView(std::move(button_row));
+
+        SetCancelCallback(base::BindOnce(button_clicked, base::Unretained(this),
+                                         &Controller::OnNotNowClicked));
+      }
+    } else if (base::FeatureList::IsEnabled(
+                   features::kThreeButtonPasswordSaveDialog)) {
+      SetCancelCallback(base::BindOnce(button_clicked, base::Unretained(this),
+                                       &Controller::OnNotNowClicked));
+
+      // Use "Medium" dialog width, per UX preference for wider dialogs.
+      set_fixed_width(views::LayoutProvider::Get()->GetDistanceMetric(
+          views::DISTANCE_MODAL_DIALOG_PREFERRED_WIDTH));
+      // 3-button save dialog variant.
+      extra_view_ = SetExtraView(std::make_unique<views::MdTextButton>());
+      extra_view_->SetProperty(views::kElementIdentifierKey,
+                               kExtraButtonElementId);
+      extra_view_->SetCallback(
+          base::BindOnce(button_clicked, base::Unretained(this),
+                         &Controller::OnNeverForThisSiteClicked));
+      extra_view_->SetStyle(
+          GetDialogButtonStyle(ui::mojom::DialogButton::kCancel));
+    } else {
+      // 2-button save dialog variant.
+      SetCancelCallback(base::BindOnce(button_clicked, base::Unretained(this),
+                                       &Controller::OnNeverForThisSiteClicked));
+    }
   }
 
   SetShowIcon(true);
   SetFootnoteView(CreateFooterView());
+
+  AddAccelerator(ui::Accelerator(ui::VKEY_RETURN, ui::EF_NONE));
 
   UpdateBubbleUIElements();
 
@@ -423,8 +481,28 @@ PasswordSaveUpdateView::PasswordSaveUpdateView(
       kHatsSurveyTriggerAutofillPassword, web_contents, 10000);
 }
 
-PasswordSaveUpdateView::~PasswordSaveUpdateView() {
-  CloseIPHBubbleIfOpen();
+PasswordSaveUpdateView::~PasswordSaveUpdateView() = default;
+
+bool PasswordSaveUpdateView::AcceleratorPressed(
+    const ui::Accelerator& accelerator) {
+  if (accelerator.key_code() == ui::VKEY_RETURN) {
+    if (IsDialogButtonEnabled(ui::mojom::DialogButton::kOk)) {
+      AcceptDialog();
+      return true;
+    }
+  }
+  return views::BubbleDialogDelegateView::AcceleratorPressed(accelerator);
+}
+
+bool PasswordSaveUpdateView::IsSaveBubbleDropdownExperimentEnabled() const {
+  return !is_update_bubble_ &&
+         base::FeatureList::IsEnabled(
+             features::kPasswordSaveUpdateDropdownMenuExperiment);
+}
+
+bool PasswordSaveUpdateView::IsTrustedVaultErrorResolutionEnabled() const {
+  return base::FeatureList::IsEnabled(
+      password_manager::features::kPasswordSaveInContextErrorResolution);
 }
 
 PasswordBubbleControllerBase* PasswordSaveUpdateView::GetController() {
@@ -436,32 +514,74 @@ const PasswordBubbleControllerBase* PasswordSaveUpdateView::GetController()
   return &controller_;
 }
 
-void PasswordSaveUpdateView::DestinationChanged() {
-  bool is_account_store_selected =
-      destination_dropdown_->GetSelectedIndex() == 0u;
-  controller_.OnToggleAccountStore(is_account_store_selected);
-  // Saving in account and local stores have action button text for non-opted-in
-  // users (Next vs. Save).
-  UpdateBubbleUIElements();
-  // If the user explicitly switched to "save on this device only",
-  // record this with the IPH tracker (so it can decide not to show the
-  // IPH again). It may be null in tests, so handle that case.
-  auto* const promo_controller =
-      BrowserFeaturePromoController::GetForView(GetAnchorView());
-  if (!is_account_store_selected && promo_controller) {
-    promo_controller->feature_engagement_tracker()->NotifyEvent(
-        "passwords_account_storage_unselected");
+bool PasswordSaveUpdateView::CloseOrReplaceWithPromo() {
+  // hide extra button if it exists when closing or replacing dialog with promo
+  if (custom_button_row_) {
+    custom_button_row_->SetVisible(false);
+    custom_button_row_ = nullptr;
   }
-  // The IPH shown upon failure in reauth is used to informs the user that the
-  // password will be stored on device. This is why it's important to close it
-  // if the user changes the destination to account.
-  if (failed_reauth_promo_bubble_)
-    CloseIPHBubbleIfOpen();
+
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  // Close the bubble if the sign in promo should not be shown.
+  if (!signin::ShouldShowPasswordSignInPromo(*controller_.GetProfile())) {
+    return true;
+  }
+
+  // Remove current elements.
+  reveal_password_pin_ = nullptr;
+  username_dropdown_ = nullptr;
+  password_dropdown_ = nullptr;
+  accessibility_alert_ = nullptr;
+  custom_button_row_ = nullptr;
+  RemoveAllChildViews();
+  SetShowIcon(false);
+  SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
+  GetBubbleFrameView()->SetFootnoteView(nullptr);
+  // SetExtraView is not designed to be called multiple times, so hide the
+  // extra button if it exists. Note that we're intentionally keeping the width
+  // of the previous dialog, even if it's the wider 3-button width.
+  if (extra_view_) {
+    extra_view_->SetVisible(false);
+  }
+
+  SetLayoutManager(std::make_unique<views::FillLayout>());
+  set_margins(BubbleSignInPromoView::GetBubbleSigninPromoMargins());
+
+  SetTitle(IDS_AUTOFILL_SIGNIN_PROMO_TITLE_PASSWORD);
+  SetSubtitle(std::u16string());
+
+  // Add the accessibility alert view first so that it does not overlap with
+  // any other child view. Also make the view invisible.
+  auto accessibility_view = std::make_unique<views::View>();
+  accessibility_view->SetVisible(false);
+  accessibility_alert_ = AddChildView(std::move(accessibility_view));
+
+  // Show the sign in promo.
+  auto sign_in_promo = std::make_unique<BubbleSignInPromoView>(
+      controller_.GetWebContents(),
+      signin_metrics::AccessPoint::kPasswordBubble,
+      PasswordFormUniqueKey(controller_.pending_password()));
+  AddChildView(std::move(sign_in_promo));
+  // TODO(crbug.com/41493925) remove this SizeToContents() when the subsequent
+  // code no longer depends on the sync auto-size here.
+  SizeToContents();
+
+  // Notify the screen reader that the bubble changed.
+  AnnounceBubbleChange();
+
+  GetBubbleFrameView()->SetProperty(views::kElementIdentifierKey,
+                                    kPasswordBubbleElementId);
+
+  return false;
+#else
+  return true;
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
 }
 
 views::View* PasswordSaveUpdateView::GetInitiallyFocusedView() {
-  if (username_dropdown_ && username_dropdown_->GetText().empty())
+  if (username_dropdown_ && username_dropdown_->GetText().empty()) {
     return username_dropdown_;
+  }
   View* initial_view = PasswordBubbleViewBase::GetInitiallyFocusedView();
   // |initial_view| will normally be the 'Save' button, but in case it's not
   // focusable, we return nullptr so the Widget doesn't give focus to the next
@@ -472,8 +592,8 @@ views::View* PasswordSaveUpdateView::GetInitiallyFocusedView() {
 }
 
 bool PasswordSaveUpdateView::IsDialogButtonEnabled(
-    ui::DialogButton button) const {
-  return button != ui::DIALOG_BUTTON_OK ||
+    ui::mojom::DialogButton button) const {
+  return button != ui::mojom::DialogButton::kOk ||
          controller_.pending_password().IsFederatedCredential() ||
          !controller_.pending_password().password_value.empty();
 }
@@ -486,87 +606,147 @@ ui::ImageModel PasswordSaveUpdateView::GetWindowIcon() {
 void PasswordSaveUpdateView::AddedToWidget() {
   static_cast<views::Label*>(GetBubbleFrameView()->title())
       ->SetAllowCharacterBreak(true);
-  SetBubbleHeader(IDR_SAVE_PASSWORD, IDR_SAVE_PASSWORD_DARK);
-  if (ShouldShowFailedReauthIPH())
-    MaybeShowIPH(IPHType::kFailedReauth);
-  else
-    MaybeShowIPH(IPHType::kRegular);
-}
-
-void PasswordSaveUpdateView::OnLayoutIsAnimatingChanged(
-    views::AnimatingLayoutManager* source,
-    bool is_animating) {
-  if (!is_animating)
-    MaybeShowIPH(IPHType::kRegular);
+  SetBubbleHeaderLottie(IDR_AUTOFILL_SAVE_PASSWORD_LOTTIE);
+  GetBubbleFrameView()->SetProperty(views::kElementIdentifierKey,
+                                    kPasswordBubbleElementId);
+  if (BrowserUserEducationInterface* user_ed =
+          BrowserUserEducationInterface::MaybeGetForWebContentsInTab(
+              controller_.GetWebContents())) {
+    if (user_ed->IsFeaturePromoActive(
+            feature_engagement::kIPHPasswordsSaveRecoveryPromoFeature)) {
+      user_ed->NotifyFeaturePromoFeatureUsed(
+          feature_engagement::kIPHPasswordsSaveRecoveryPromoFeature,
+          FeaturePromoFeatureUsedAction::kClosePromoIfPresent);
+    }
+  }
+  UpdateBubbleUIElements();
 }
 
 void PasswordSaveUpdateView::UpdateUsernameAndPasswordInModel() {
-  if (!username_dropdown_ && !password_dropdown_)
+  if (!username_dropdown_ && !password_dropdown_) {
     return;
+  }
   std::u16string new_username = controller_.pending_password().username_value;
-  std::u16string new_password = controller_.pending_password().password_value;
   if (username_dropdown_) {
     new_username = username_dropdown_->GetText();
     base::TrimString(new_username, u" ", &new_username);
   }
-  if (password_dropdown_)
-    new_password = password_dropdown_->GetText();
+  password_manager::PasswordString new_password =
+      password_dropdown_ ? password_manager::PasswordString(
+                               std::u16string(password_dropdown_->GetText()))
+                         : controller_.pending_password().password_value;
+
   controller_.OnCredentialEdited(std::move(new_username),
                                  std::move(new_password));
 }
 
 void PasswordSaveUpdateView::UpdateBubbleUIElements() {
-  SetButtons((ui::DIALOG_BUTTON_OK | ui::DIALOG_BUTTON_CANCEL));
-  std::u16string ok_button_text;
-  if (controller_.IsAccountStorageOptInRequiredBeforeSave()) {
-    ok_button_text = l10n_util::GetStringUTF16(
-        IDS_PASSWORD_MANAGER_SAVE_BUBBLE_OPT_IN_BUTTON);
-  } else {
-    ok_button_text = l10n_util::GetStringUTF16(
-        controller_.IsCurrentStateUpdate() ? IDS_PASSWORD_MANAGER_UPDATE_BUTTON
-                                           : IDS_PASSWORD_MANAGER_SAVE_BUTTON);
+  SetButtons(static_cast<int>(ui::mojom::DialogButton::kOk) |
+             static_cast<int>(ui::mojom::DialogButton::kCancel));
+  std::u16string ok_button_text = l10n_util::GetStringUTF16(
+      controller_.IsCurrentStateUpdate() ? IDS_PASSWORD_MANAGER_UPDATE_BUTTON
+                                         : IDS_PASSWORD_MANAGER_SAVE_BUTTON);
+  if (IsTrustedVaultErrorResolutionEnabled() &&
+      controller_.IsSavingBlockedByTrustedVaultError()) {
+    ok_button_text = l10n_util::GetStringUTF16(IDS_CONTINUE);
   }
-  SetButtonLabel(ui::DIALOG_BUTTON_OK, ok_button_text);
-  SetButtonLabel(
-      ui::DIALOG_BUTTON_CANCEL,
-      l10n_util::GetStringUTF16(
-          is_update_bubble_ ? IDS_PASSWORD_MANAGER_CANCEL_BUTTON
-                            : IDS_PASSWORD_MANAGER_BUBBLE_BLOCKLIST_BUTTON));
+  SetButtonLabel(ui::mojom::DialogButton::kOk, ok_button_text);
+  if (is_update_bubble_) {
+    SetButtonLabel(
+        ui::mojom::DialogButton::kCancel,
+        l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_CANCEL_BUTTON));
+  } else if (IsSaveBubbleDropdownExperimentEnabled()) {
+    if (controller_.IsMaxDismissalCountReached()) {
+      SetButtonLabel(ui::mojom::DialogButton::kCancel,
+                     l10n_util::GetStringUTF16(
+                         IDS_PASSWORD_MANAGER_BUBBLE_BLOCKLIST_BUTTON));
+    } else {
+      SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
+
+      bool is_update = controller_.IsCurrentStateUpdate();
+      std::u16string ok_text;
+      if (IsTrustedVaultErrorResolutionEnabled() &&
+          controller_.IsSavingBlockedByTrustedVaultError()) {
+        ok_text = l10n_util::GetStringUTF16(IDS_CONTINUE);
+      } else {
+        ok_text = l10n_util::GetStringUTF16(
+            is_update ? IDS_PASSWORD_MANAGER_SHORT_UPDATE_BUTTON
+                      : IDS_PASSWORD_MANAGER_SAVE_BUTTON);
+      }
+      bool ok_enabled = IsDialogButtonEnabled(ui::mojom::DialogButton::kOk);
+
+      if (custom_button_row_) {
+        custom_button_row_->UpdateState(is_update, ok_text, ok_enabled);
+      }
+    }
+  } else if (extra_view_) {
+    // 3-button save dialog variant.
+    SetButtonLabel(
+        ui::mojom::DialogButton::kCancel,
+        l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_CANCEL_BUTTON));
+
+    extra_view_->SetText(l10n_util::GetStringUTF16(
+        IDS_PASSWORD_MANAGER_BUBBLE_BLOCKLIST_BUTTON));
+  } else {
+    // 2-button save dialog variant.
+    SetButtonLabel(ui::mojom::DialogButton::kCancel,
+                   l10n_util::GetStringUTF16(
+                       IDS_PASSWORD_MANAGER_BUBBLE_BLOCKLIST_BUTTON));
+  }
+
+  std::u16string title = controller_.GetTitle();
+  if (IsSaveBubbleDropdownExperimentEnabled()) {
+    if (controller_.GetDomainForSubhead()) {
+      title = l10n_util::GetStringUTF16(controller_.IsCurrentStateUpdate()
+                                            ? IDS_UPDATE_PASSWORD
+                                            : IDS_SAVE_PASSWORD);
+    }
+  }
+
   // If the title is going to change, we should announce it to the screen
   // readers.
-  bool should_announce_save_update_change =
-      GetWindowTitle() != controller_.GetTitle();
-
-  SetTitle(controller_.GetTitle());
-
+  bool should_announce_save_update_change = GetWindowTitle() != title;
+  SetTitle(title);
+  if (IsTrustedVaultErrorResolutionEnabled() &&
+      controller_.IsSavingBlockedByTrustedVaultError()) {
+    SetSubtitle(l10n_util::GetStringUTF16(
+        IDS_PASSWORD_BUBBLES_SUBTITLE_TRUSTED_VAULT_ERROR));
+  } else if (IsSaveBubbleDropdownExperimentEnabled()) {
+    std::optional<std::u16string> domain_subhead =
+        controller_.GetDomainForSubhead();
+    SetSubtitle(domain_subhead.value_or(std::u16string()));
+  } else {
+    // In other cases the subtitle is absent.
+    SetSubtitle(std::u16string());
+  }
   // Nothing to do if the bubble isn't visible yet.
-  if (!GetWidget())
+  if (!GetWidget()) {
     return;
+  }
 
   UpdateFootnote();
 
-  if (should_announce_save_update_change)
-    AnnounceSaveUpdateChange();
-
-  // Nothing else to do if the account picker hasn't been created.
-  if (!destination_dropdown_)
-    return;
-
-  // If it's not a save bubble anymore, close the IPH because the account picker
-  // will disappear. If it has become a save bubble, the IPH will get triggered
-  // after the animation finishes.
-  if (controller_.IsCurrentStateUpdate())
-    CloseIPHBubbleIfOpen();
-
-  destination_dropdown_->SetVisible(!controller_.IsCurrentStateUpdate());
+  if (should_announce_save_update_change) {
+    AnnounceBubbleChange();
+  }
 }
 
 std::unique_ptr<views::View> PasswordSaveUpdateView::CreateFooterView() {
   base::RepeatingClosure open_password_manager_closure = base::BindRepeating(
       [](PasswordSaveUpdateView* dialog) {
-        dialog->controller_.OnGooglePasswordManagerLinkClicked();
+        dialog->controller_.OnGooglePasswordManagerLinkClicked(
+            password_manager::ManagePasswordsReferrer::kSaveUpdateBubble);
       },
       base::Unretained(this));
+  if (IsTrustedVaultErrorResolutionEnabled() &&
+      controller_.IsSavingBlockedByTrustedVaultError()) {
+    return CreateGooglePasswordManagerLabel(
+        /*text_message_id=*/
+        IDS_PASSWORD_BUBBLES_FOOTER_TRUSTED_VAULT_ERROR,
+        /*link_message_id=*/
+        IDS_PASSWORD_BUBBLES_PASSWORD_MANAGER_LINK_TEXT_SYNCED_TO_ACCOUNT,
+        controller_.GetPrimaryAccountEmail(), open_password_manager_closure);
+  }
   if (controller_.IsCurrentStateAffectingPasswordsStoredInTheGoogleAccount()) {
     return CreateGooglePasswordManagerLabel(
         /*text_message_id=*/
@@ -579,107 +759,34 @@ std::unique_ptr<views::View> PasswordSaveUpdateView::CreateFooterView() {
       /*text_message_id=*/
       IDS_PASSWORD_BUBBLES_FOOTER_SAVING_ON_DEVICE,
       /*link_message_id=*/
-      IDS_PASSWORD_BUBBLES_PASSWORD_MANAGER_LINK_TEXT_SAVING_ON_DEVICE,
-      open_password_manager_closure);
+      IDS_PASSWORD_MANAGER_BRAND_NAME, open_password_manager_closure);
 }
 
-bool PasswordSaveUpdateView::ShouldShowFailedReauthIPH() {
-  // If the reauth failed, we should have automatically switched to local mdoe,
-  // and we should show the reauth failed IPH unconditionally as long as the
-  // user didn't change the save location.
-  return controller_.DidAuthForAccountStoreOptInFail() &&
-         !controller_.IsUsingAccountStore();
-}
-
-void PasswordSaveUpdateView::MaybeShowIPH(IPHType type) {
-  // IPH is shown only where the destination dropdown is shown (i.e. only for
-  // Save bubble).
-  if (!destination_dropdown_ || controller_.IsCurrentStateUpdate())
-    return;
-
-  // The promo controller may not exist in tests.
-  auto* const promo_controller =
-      BrowserFeaturePromoController::GetForView(GetAnchorView());
-  if (!promo_controller)
-    return;
-
-  switch (type) {
-    case IPHType::kRegular:
-      if (promo_controller->MaybeShowPromo(
-              feature_engagement::kIPHPasswordsAccountStorageFeature)) {
-        // If the regular promo was shown, the failed reauth promo is
-        // definitely finished. If not, we can't be confident it hasn't
-        // finished.
-        failed_reauth_promo_bubble_.reset();
-      }
-      break;
-    case IPHType::kFailedReauth: {
-      auto promo_spec =
-          user_education::FeaturePromoSpecification::CreateForLegacyPromo(
-              /* feature =*/nullptr, ui::ElementIdentifier(),
-              IDS_PASSWORD_MANAGER_IPH_BODY_SAVE_REAUTH_FAIL);
-      promo_spec.SetBubbleArrow(user_education::HelpBubbleArrow::kRightCenter);
-
-      auto* const anchor_element =
-          views::ElementTrackerViews::GetInstance()->GetElementForView(
-              destination_dropdown_, true);
-      // If the destination dropdown isn't currently visible, there will be no
-      // matching element, and we cannot show the bubble (there wouldn't be
-      // anything to anchor it to). This check avoids crbug.com/1291194.
-      if (anchor_element) {
-        failed_reauth_promo_bubble_ =
-            promo_controller->ShowCriticalPromo(promo_spec, anchor_element);
-      }
-      break;
-    }
-  }
-}
-
-void PasswordSaveUpdateView::CloseIPHBubbleIfOpen() {
-  failed_reauth_promo_bubble_.reset();
-
-  // The promo controller may not exist in tests.
-  auto* const promo_controller =
-      BrowserFeaturePromoController::GetForView(GetAnchorView());
-  if (!promo_controller)
-    return;
-
-  promo_controller->EndPromo(
-      feature_engagement::kIPHPasswordsAccountStorageFeature);
-}
-
-void PasswordSaveUpdateView::AnnounceSaveUpdateChange() {
+void PasswordSaveUpdateView::AnnounceBubbleChange() {
   // Federated credentials bubbles don't change the state between Update and
   // Save, and hence they don't have an `accessibility_alert_` view created.
-  if (!accessibility_alert_)
+  if (!accessibility_alert_) {
     return;
-
-  std::u16string accessibility_alert_text = GetWindowTitle();
-  if (destination_dropdown_ && !controller_.IsCurrentStateUpdate()) {
-    // For Save bubbles, if the `destination_dropdown_` exists (for account
-    // store users), we use the labels in the `destination_dropdown_` instead.
-    accessibility_alert_text = destination_dropdown_->GetTextForRow(
-        destination_dropdown_->GetSelectedIndex().value());
   }
 
   views::ViewAccessibility& ax = accessibility_alert_->GetViewAccessibility();
-  ax.OverrideRole(ax::mojom::Role::kAlert);
-  ax.OverrideName(accessibility_alert_text);
-  accessibility_alert_->NotifyAccessibilityEvent(ax::mojom::Event::kAlert,
-                                                 true);
+  ax.SetRole(ax::mojom::Role::kAlert);
+  ax.SetName(GetWindowTitle(), ax::mojom::NameFrom::kAttribute);
+  accessibility_alert_->NotifyAccessibilityEventDeprecated(
+      ax::mojom::Event::kAlert, true);
 }
 
 void PasswordSaveUpdateView::OnContentChanged() {
   bool is_update_state_before = controller_.IsCurrentStateUpdate();
   bool is_ok_button_enabled_before =
-      IsDialogButtonEnabled(ui::DIALOG_BUTTON_OK);
+      IsDialogButtonEnabled(ui::mojom::DialogButton::kOk);
   bool changes_synced_to_account_before =
       controller_.IsCurrentStateAffectingPasswordsStoredInTheGoogleAccount();
   UpdateUsernameAndPasswordInModel();
   // Maybe the buttons should be updated.
   if (is_update_state_before != controller_.IsCurrentStateUpdate() ||
       is_ok_button_enabled_before !=
-          IsDialogButtonEnabled(ui::DIALOG_BUTTON_OK)) {
+          IsDialogButtonEnabled(ui::mojom::DialogButton::kOk)) {
     UpdateBubbleUIElements();
     DialogModelChanged();
   } else if (changes_synced_to_account_before !=
@@ -694,8 +801,75 @@ void PasswordSaveUpdateView::OnContentChanged() {
 void PasswordSaveUpdateView::UpdateFootnote() {
   DCHECK(GetBubbleFrameView());
   GetBubbleFrameView()->SetFootnoteView(CreateFooterView());
-
-  // The footnote size could have changed since it depends on whether it
-  // affects the account store, and hence resize.
-  SizeToContents();
 }
+
+void PasswordSaveUpdateView::TogglePasswordRevealed() {
+  if (password_dropdown_->ArePasswordsRevealed()) {
+    password_dropdown_->RevealPasswords(false);
+    return;
+  }
+  // User authentication might be required, query the controller to determine
+  // whether the user is allowed to unmask the password.
+
+  // Prevent the bubble from closing for the duration of the lifetime of the
+  // `pin`. This is to keep it open while the user authentication is in action.
+  // Store pin as a class member so it can be destroyed early if needed.
+  reveal_password_pin_ = PreventCloseOnDeactivate();
+  controller_.ShouldRevealPasswords(base::BindOnce(
+      [](PasswordSaveUpdateView* view, bool reveal) {
+        auto pin = std::exchange(view->reveal_password_pin_, nullptr);
+        if (!view->password_dropdown_) {
+          return;
+        }
+        view->password_dropdown_->RevealPasswords(reveal);
+        // This is necessary on Windows since the bubble isn't activated
+        // again after the conlusion of the auth flow.
+        view->GetWidget()->Activate();
+        // Delay the destruction of `pin` for 1 sec to make sure the
+        // bubble remains open till the OS closes the authentication
+        // dialog and reactivates the bubble.
+        base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
+            FROM_HERE, base::DoNothingWithBoundArgs(std::move(pin)),
+            base::Seconds(1));
+      },
+      base::Unretained(this)));
+}
+
+views::MdTextButton* PasswordSaveUpdateView::GetOkButtonForTesting() const {
+  if (IsSaveBubbleDropdownExperimentEnabled() && custom_button_row_) {
+    return custom_button_row_->ok_button();
+  }
+  return views::BubbleDialogDelegateView::GetOkButton();
+}
+
+views::MdTextButton* PasswordSaveUpdateView::GetCancelButtonForTesting() const {
+  if (IsSaveBubbleDropdownExperimentEnabled() && custom_button_row_) {
+    return custom_button_row_->cancel_button()->GetVisible()
+               ? custom_button_row_->cancel_button()
+               : nullptr;
+  }
+  return views::BubbleDialogDelegateView::GetCancelButton();
+}
+
+ui::SimpleMenuModel* PasswordSaveUpdateView::MenuModelForTesting() const {
+  if (!custom_button_row_ || !custom_button_row_->split_button()) {
+    return nullptr;
+  }
+  return views::AsViewClass<CancelSplitButton>(
+             custom_button_row_->split_button())
+      ->menu_model();
+}
+
+BEGIN_METADATA(PasswordSaveUpdateView)
+END_METADATA
+
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(PasswordSaveUpdateView,
+                                      kPasswordBubbleElementId);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(PasswordSaveUpdateView,
+                                      kExtraButtonElementId);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(PasswordSaveUpdateView,
+                                      kNotNowButtonElementId);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(PasswordSaveUpdateView,
+                                      kCaretButtonElementId);
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(PasswordSaveUpdateView,
+                                      kNeverMenuItemElementId);

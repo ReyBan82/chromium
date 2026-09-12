@@ -4,6 +4,7 @@
 
 #include "chrome/browser/usb/usb_policy_allowed_devices.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,7 +16,6 @@
 #include "components/prefs/pref_service.h"
 #include "services/device/public/mojom/usb_device.mojom.h"
 #include "services/device/public/mojom/usb_manager.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace {
@@ -41,7 +41,7 @@ UsbPolicyAllowedDevices::UsbPolicyAllowedDevices(PrefService* pref_service) {
   CreateOrUpdateMap();
 }
 
-UsbPolicyAllowedDevices::~UsbPolicyAllowedDevices() {}
+UsbPolicyAllowedDevices::~UsbPolicyAllowedDevices() = default;
 
 bool UsbPolicyAllowedDevices::IsDeviceAllowed(
     const url::Origin& origin,
@@ -74,15 +74,15 @@ bool UsbPolicyAllowedDevices::IsDeviceAllowed(
 }
 
 void UsbPolicyAllowedDevices::CreateOrUpdateMap() {
-  const base::Value::List& pref_list = pref_change_registrar_.prefs()->GetList(
+  const base::ListValue& pref_list = pref_change_registrar_.prefs()->GetList(
       prefs::kManagedWebUsbAllowDevicesForUrls);
   usb_device_ids_to_urls_.clear();
 
   // The pref value has already been validated by the policy handler, so it is
   // safe to assume that |pref_list| follows the policy template.
   for (const base::Value& item_val : pref_list) {
-    const base::Value::Dict& item = item_val.GetDict();
-    const base::Value::List* urls_list = item.FindList(kPrefUrlsKey);
+    const base::DictValue& item = item_val.GetDict();
+    const base::ListValue* urls_list = item.FindList(kPrefUrlsKey);
     std::set<url::Origin> parsed_set;
 
     // A urls item can contain a pair of URLs that are delimited by a comma. If
@@ -98,7 +98,7 @@ void UsbPolicyAllowedDevices::CreateOrUpdateMap() {
         continue;
 
       auto requesting_origin = url::Origin::Create(GURL(urls[0]));
-      absl::optional<url::Origin> embedding_origin;
+      std::optional<url::Origin> embedding_origin;
       if (urls.size() == 2 && !urls[1].empty())
         embedding_origin = url::Origin::Create(GURL(urls[1]));
 
@@ -119,14 +119,14 @@ void UsbPolicyAllowedDevices::CreateOrUpdateMap() {
 
     // For each device entry in the map, create or update its respective URL
     // set.
-    const base::Value::List* devices = item.FindList(kPrefDevicesKey);
+    const base::ListValue* devices = item.FindList(kPrefDevicesKey);
     for (const base::Value& device_val : CHECK_DEREF(devices)) {
-      const base::Value::Dict& device = device_val.GetDict();
+      const base::DictValue& device = device_val.GetDict();
       // A missing ID signifies a wildcard for that ID, so a sentinel value of
       // -1 is assigned.
-      const absl::optional<int> vendor_id_optional =
+      const std::optional<int> vendor_id_optional =
           device.FindInt(kPrefVendorIdKey);
-      const absl::optional<int> product_id_optional =
+      const std::optional<int> product_id_optional =
           device.FindInt(kPrefProductIdKey);
       int vendor_id = vendor_id_optional.value_or(-1);
       int product_id = product_id_optional.value_or(-1);

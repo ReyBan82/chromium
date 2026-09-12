@@ -7,6 +7,7 @@ import time
 from absl import app, flags
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.common.by import By
 from pywinauto.application import Application
 from pywinauto.findwindows import ElementNotFoundError
 
@@ -17,11 +18,12 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('url', None, 'The url to open in Chrome.')
 flags.mark_flag_as_required('url')
 
+
 def main(argv):
   chrome_options = webdriver.ChromeOptions()
   chrome_options.add_argument("--force-renderer-accessibility")
-  #Always set useAutomationExtension as false to avoid failing launch Chrome
-  #https://bugs.chromium.org/p/chromedriver/issues/detail?id=2930
+  # Always set useAutomationExtension as false to avoid failing launch Chrome
+  # https://bugs.chromium.org/p/chromedriver/issues/detail?id=2930
   chrome_options.add_experimental_option("useAutomationExtension", False)
   driver = create_chrome_webdriver(chrome_options=chrome_options)
   app = Application(backend="uia")
@@ -30,15 +32,14 @@ def main(argv):
   time.sleep(5)
 
   try:
-    driver.find_element_by_xpath(
-        "//div[@aria-label='Blocked by admin']").click()
-    app.top_window() \
-       .child_window(title_re='.*Your admin has blocked', control_type="TitleBar") \
-       .print_control_identifiers()
+    driver.find_element(
+      By.XPATH, "//div[contains(., 'Your admin has blocked this item')]"
+    )
+    print("blocked")
   except NoSuchElementException:
-    print("Not blocked")
+    print("Ok")
   except ElementNotFoundError:
-    print("Not blocked")
+    print("Ok")
   finally:
     driver.quit()
 

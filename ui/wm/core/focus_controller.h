@@ -6,13 +6,14 @@
 #define UI_WM_CORE_FOCUS_CONTROLLER_H_
 
 #include <memory>
+#include <optional>
+#include <string_view>
 
 #include "base/component_export.h"
+#include "base/memory/advanced_memory_safety_checks.h"
 #include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/scoped_multi_source_observation.h"
-#include "base/strings/string_piece.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/aura/client/focus_client.h"
 #include "ui/aura/window_observer.h"
 #include "ui/events/event_handler.h"
@@ -46,6 +47,10 @@ class COMPONENT_EXPORT(UI_WM) FocusController : public ActivationClient,
     ,
                                                 public ui::EventHandler,
                                                 public aura::WindowObserver {
+  // TODO(crbug.com/497548800): This macro mitigates the issue. after fixing
+  // the issue, remove the marco.
+  ADVANCED_MEMORY_SAFETY_CHECKS();
+
  public:
   // |rules| cannot be NULL.
   explicit FocusController(FocusRules* rules);
@@ -54,6 +59,8 @@ class COMPONENT_EXPORT(UI_WM) FocusController : public ActivationClient,
   FocusController& operator=(const FocusController&) = delete;
 
   ~FocusController() override;
+
+  void SetFocusRules(std::unique_ptr<FocusRules> new_rules);
 
   // Overridden from ActivationClient:
   void AddObserver(ActivationChangeObserver* observer) override;
@@ -80,7 +87,7 @@ class COMPONENT_EXPORT(UI_WM) FocusController : public ActivationClient,
   void OnScrollEvent(ui::ScrollEvent* event) override;
   void OnTouchEvent(ui::TouchEvent* event) override;
   void OnGestureEvent(ui::GestureEvent* event) override;
-  base::StringPiece GetLogContext() const override;
+  std::string_view GetLogContext() const override;
 
   // Overridden from aura::WindowObserver:
   void OnWindowVisibilityChanged(aura::Window* window, bool visible) override;
@@ -137,11 +144,12 @@ class COMPONENT_EXPORT(UI_WM) FocusController : public ActivationClient,
 
   // An optional value. It is set to the window being activated and is unset
   // after it is activated.
-  absl::optional<aura::Window*> pending_activation_;
+  std::optional<aura::Window*> pending_activation_;
 
   std::unique_ptr<FocusRules> rules_;
 
-  base::ObserverList<ActivationChangeObserver> activation_observers_;
+  // Activation change may change the focused window, so allow reentrancy.
+  base::ReentrantObserverList<ActivationChangeObserver> activation_observers_;
   base::ObserverList<aura::client::FocusChangeObserver> focus_observers_;
 
   base::ScopedMultiSourceObservation<aura::Window, aura::WindowObserver>

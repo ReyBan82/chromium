@@ -15,9 +15,13 @@ class BuildPropsCodeSignConfig(CodeSignConfig):
     def is_chrome_branded():
         return @IS_CHROME_BRANDED@
 
-    @staticmethod
-    def enable_updater():
+    @property
+    def enable_updater(self):
         return @ENABLE_UPDATER@
+
+    @property
+    def use_static_angle(self):
+        return @USE_STATIC_ANGLE@
 
     @property
     def app_product(self):
@@ -35,7 +39,3 @@ class BuildPropsCodeSignConfig(CodeSignConfig):
     def base_bundle_id(self):
         return '@MAC_BUNDLE_ID@'
 
-    @property
-    def notary_team_id(self):
-        return super(BuildPropsCodeSignConfig,
-                     self).notary_team_id or '@MAC_TEAM_ID@'

@@ -23,9 +23,9 @@ namespace blink {
 
 namespace {
 
-static WebVector<media::EmeInitDataType> ConvertInitDataTypes(
+static std::vector<media::EmeInitDataType> ConvertInitDataTypes(
     const Vector<String>& init_data_types) {
-  WebVector<media::EmeInitDataType> result(init_data_types.size());
+  std::vector<media::EmeInitDataType> result(init_data_types.size());
   for (wtf_size_t i = 0; i < init_data_types.size(); ++i)
     result[i] = EncryptedMediaUtils::ConvertToInitDataType(init_data_types[i]);
   return result;
@@ -44,9 +44,9 @@ ConvertEncryptionScheme(const String& encryption_scheme) {
   return WebMediaKeySystemMediaCapability::EncryptionScheme::kUnrecognized;
 }
 
-static WebVector<WebMediaKeySystemMediaCapability> ConvertCapabilities(
+static std::vector<WebMediaKeySystemMediaCapability> ConvertCapabilities(
     const HeapVector<Member<MediaKeySystemMediaCapability>>& capabilities) {
-  WebVector<WebMediaKeySystemMediaCapability> result(capabilities.size());
+  std::vector<WebMediaKeySystemMediaCapability> result(capabilities.size());
   for (wtf_size_t i = 0; i < capabilities.size(); ++i) {
     const WebString& content_type = capabilities[i]->contentType();
     result[i].content_type = content_type;
@@ -74,9 +74,9 @@ static WebVector<WebMediaKeySystemMediaCapability> ConvertCapabilities(
   return result;
 }
 
-static WebVector<WebEncryptedMediaSessionType> ConvertSessionTypes(
+static std::vector<WebEncryptedMediaSessionType> ConvertSessionTypes(
     const Vector<String>& session_types) {
-  WebVector<WebEncryptedMediaSessionType> result(session_types.size());
+  std::vector<WebEncryptedMediaSessionType> result(session_types.size());
   for (wtf_size_t i = 0; i < session_types.size(); ++i)
     result[i] = EncryptedMediaUtils::ConvertToSessionType(session_types[i]);
   return result;
@@ -85,14 +85,17 @@ static WebVector<WebEncryptedMediaSessionType> ConvertSessionTypes(
 }  // namespace
 
 MediaKeySystemAccessInitializerBase::MediaKeySystemAccessInitializerBase(
-    ScriptState* script_state,
+    ExecutionContext* context,
+    ScriptPromiseResolverBase* resolver,
     const String& key_system,
     const HeapVector<Member<MediaKeySystemConfiguration>>&
-        supported_configurations)
-    : ExecutionContextClient(ExecutionContext::From((script_state))),
-      resolver_(MakeGarbageCollected<ScriptPromiseResolver>(script_state)),
+        supported_configurations,
+    bool is_from_media_capabilities)
+    : ExecutionContextClient(context),
+      resolver_(resolver),
       key_system_(key_system),
-      supported_configurations_(supported_configurations.size()) {
+      supported_configurations_(supported_configurations.size()),
+      is_from_media_capabilities_(is_from_media_capabilities) {
   for (wtf_size_t i = 0; i < supported_configurations.size(); ++i) {
     const MediaKeySystemConfiguration* config = supported_configurations[i];
     WebMediaKeySystemConfiguration web_config;
@@ -111,12 +114,12 @@ MediaKeySystemAccessInitializerBase::MediaKeySystemAccessInitializerBase(
     DCHECK(config->hasDistinctiveIdentifier());
     web_config.distinctive_identifier =
         EncryptedMediaUtils::ConvertToMediaKeysRequirement(
-            config->distinctiveIdentifier());
+            config->distinctiveIdentifier().AsEnum());
 
     DCHECK(config->hasPersistentState());
     web_config.persistent_state =
         EncryptedMediaUtils::ConvertToMediaKeysRequirement(
-            config->persistentState());
+            config->persistentState().AsEnum());
 
     if (config->hasSessionTypes()) {
       web_config.session_types = ConvertSessionTypes(config->sessionTypes());
@@ -126,7 +129,7 @@ MediaKeySystemAccessInitializerBase::MediaKeySystemAccessInitializerBase(
       // If this member is not present when the dictionary is passed to
       // requestMediaKeySystemAccess(), the dictionary will be treated
       // as if this member is set to [ "temporary" ].
-      WebVector<WebEncryptedMediaSessionType> session_types(
+      std::vector<WebEncryptedMediaSessionType> session_types(
           static_cast<size_t>(1));
       session_types[0] = WebEncryptedMediaSessionType::kTemporary;
       web_config.session_types = session_types;
@@ -144,10 +147,6 @@ const SecurityOrigin* MediaKeySystemAccessInitializerBase::GetSecurityOrigin()
     const {
   return IsExecutionContextValid() ? GetExecutionContext()->GetSecurityOrigin()
                                    : nullptr;
-}
-
-ScriptPromise MediaKeySystemAccessInitializerBase::Promise() {
-  return resolver_->Promise();
 }
 
 void MediaKeySystemAccessInitializerBase::Trace(Visitor* visitor) const {
@@ -169,9 +168,34 @@ void MediaKeySystemAccessInitializerBase::GenerateWarningAndReportMetrics()
   const char kWidevineKeySystem[] = "com.widevine.alpha";
   const char kWidevineHwSecureAllRobustness[] = "HW_SECURE_ALL";
 
-  // Only check for widevine key system for now.
-  if (KeySystem() != kWidevineKeySystem)
+#if BUILDFLAG(IS_WIN)
+  const char kPlayReadyKeySystem[] = "com.microsoft.playready.recommendation";
+  const char kPlayReadyHwSecureKeySystem[] =
+      "com.microsoft.playready.recommendation.3000";
+  if (KeySystem() == kPlayReadyKeySystem ||
+      KeySystem() == kPlayReadyHwSecureKeySystem) {
+    // TODO(crbug.com/457832865): Add a public best practice doc for PlayReady
+    // on Windows and link it in this message once it's available.
+    GetExecutionContext()->AddConsoleMessage(MakeGarbageCollected<
+                                             ConsoleMessage>(
+        mojom::blink::ConsoleMessageSource::kJavaScript,
+        mojom::blink::ConsoleMessageLevel::kWarning,
+        std::string(
+            KeySystem().Ascii() +
+            ": Internal testing is highly recommended prior to enabling "
+            "PlayReady playback on Windows. Failure to do so may cause "
+            "application instability or playback errors.\n\nBefore generating "
+            "a request, setServerCertificate() must be called with a valid "
+            "server certificate. Otherwise, generateRequest() could fail.")
+            .c_str()));
     return;
+  }
+#endif  // BUILDFLAG(IS_WIN)
+
+  // Only check for widevine key system for now.
+  if (KeySystem() != kWidevineKeySystem) {
+    return;
+  }
 
   bool has_video_capabilities = false;
   bool has_empty_robustness = false;
@@ -229,6 +253,8 @@ void MediaKeySystemAccessInitializerBase::GenerateWarningAndReportMetrics()
       static_cast<int>(has_empty_robustness));
   builder.SetVideoCapabilities_HasHwSecureAllRobustness(
       static_cast<int>(has_hw_secure_all));
+  builder.SetIsFromMediaCapabilities(
+      static_cast<int>(is_from_media_capabilities_));
   builder.Record(DomWindow()->UkmRecorder());
 }
 

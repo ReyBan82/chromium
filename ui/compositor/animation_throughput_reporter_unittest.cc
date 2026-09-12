@@ -10,25 +10,25 @@
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "cc/metrics/frame_sequence_metrics.h"
-#include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animation_sequence.h"
 #include "ui/compositor/layer_animator.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
-#include "ui/compositor/test/animation_throughput_reporter_test_base.h"
-#include "ui/compositor/test/throughput_report_checker.h"
+#include "ui/compositor/test/compositor_metrics_report_checker.h"
+#include "ui/compositor/test/compositor_metrics_reporter_test_base.h"
 #include "ui/gfx/geometry/rect.h"
 
 namespace ui {
 
-using AnimationThroughputReporterTest = AnimationThroughputReporterTestBase;
+using AnimationThroughputReporterTest = CompositorMetricsReporterTestBase;
 
 // Tests animation throughput collection with implicit animation scenario.
 TEST_F(AnimationThroughputReporterTest, ImplicitAnimation) {
-  Layer layer;
+  LayerTextured layer;
   layer.SetOpacity(0.5f);
   root_layer()->Add(&layer);
 
-  ThroughputReportChecker checker(this);
+  CompositorMetricsReportChecker checker(this);
   {
     LayerAnimator* animator = layer.GetAnimator();
     AnimationThroughputReporter reporter(animator,
@@ -45,10 +45,10 @@ TEST_F(AnimationThroughputReporterTest, ImplicitAnimation) {
 // Tests animation throughput collection with implicit animation setup before
 // Layer is attached to a compositor.
 TEST_F(AnimationThroughputReporterTest, ImplicitAnimationLateAttach) {
-  Layer layer;
+  LayerTextured layer;
   layer.SetOpacity(0.5f);
 
-  ThroughputReportChecker checker(this);
+  CompositorMetricsReportChecker checker(this);
   {
     LayerAnimator* animator = layer.GetAnimator();
     AnimationThroughputReporter reporter(animator,
@@ -67,11 +67,11 @@ TEST_F(AnimationThroughputReporterTest, ImplicitAnimationLateAttach) {
 // Tests animation throughput collection with explicitly created animation
 // sequence scenario.
 TEST_F(AnimationThroughputReporterTest, ExplicitAnimation) {
-  Layer layer;
+  LayerTextured layer;
   layer.SetOpacity(0.5f);
   root_layer()->Add(&layer);
 
-  ThroughputReportChecker checker(this);
+  CompositorMetricsReportChecker checker(this);
   LayerAnimator* animator = layer.GetAnimator();
   AnimationThroughputReporter reporter(animator, checker.repeating_callback());
 
@@ -84,7 +84,7 @@ TEST_F(AnimationThroughputReporterTest, ExplicitAnimation) {
 
 // Tests animation throughput collection for a persisted animator of a Layer.
 TEST_F(AnimationThroughputReporterTest, PersistedAnimation) {
-  auto layer = std::make_unique<Layer>();
+  auto layer = std::make_unique<LayerTextured>();
   layer->SetOpacity(0.5f);
   root_layer()->Add(layer.get());
 
@@ -93,7 +93,7 @@ TEST_F(AnimationThroughputReporterTest, PersistedAnimation) {
   layer->SetAnimator(animator);
 
   // |reporter| keeps reporting as long as it is alive.
-  ThroughputReportChecker checker(this);
+  CompositorMetricsReportChecker checker(this);
   AnimationThroughputReporter reporter(animator, checker.repeating_callback());
 
   // Report data for animation of opacity goes to 1.
@@ -108,11 +108,11 @@ TEST_F(AnimationThroughputReporterTest, PersistedAnimation) {
 
 // Tests animation throughput not reported when animation is aborted.
 TEST_F(AnimationThroughputReporterTest, AbortedAnimation) {
-  auto layer = std::make_unique<Layer>();
+  auto layer = std::make_unique<LayerTextured>();
   layer->SetOpacity(0.5f);
   root_layer()->Add(layer.get());
 
-  ThroughputReportChecker checker(this, /*fail_if_reported=*/true);
+  CompositorMetricsReportChecker checker(this, /*fail_if_reported=*/true);
 
   // Reporter started monitoring animation, then deleted, which should be
   // reported when the animation ends.
@@ -132,17 +132,17 @@ TEST_F(AnimationThroughputReporterTest, AbortedAnimation) {
   // Wait a bit to ensure that report does not happen.
   Advance(base::Milliseconds(100));
 
-  // TODO(crbug.com/1158510): Test the scenario where the report exists when the
-  // layer is removed.
+  // TODO(crbug.com/40161328): Test the scenario where the report exists when
+  // the layer is removed.
 }
 
 // Tests no report and no leak when underlying layer is gone before reporter.
 TEST_F(AnimationThroughputReporterTest, LayerDestroyedBeforeReporter) {
-  auto layer = std::make_unique<Layer>();
+  auto layer = std::make_unique<LayerTextured>();
   layer->SetOpacity(0.5f);
   root_layer()->Add(layer.get());
 
-  ThroughputReportChecker checker(this, /*fail_if_reported=*/true);
+  CompositorMetricsReportChecker checker(this, /*fail_if_reported=*/true);
   LayerAnimator* animator = layer->GetAnimator();
   AnimationThroughputReporter reporter(animator, checker.repeating_callback());
   {
@@ -160,11 +160,11 @@ TEST_F(AnimationThroughputReporterTest, LayerDestroyedBeforeReporter) {
 
 // Tests animation throughput not reported when detached from timeline.
 TEST_F(AnimationThroughputReporterTest, NoReportOnDetach) {
-  auto layer = std::make_unique<Layer>();
+  auto layer = std::make_unique<LayerTextured>();
   layer->SetOpacity(0.5f);
   root_layer()->Add(layer.get());
 
-  ThroughputReportChecker checker(this, /*fail_if_reported=*/true);
+  CompositorMetricsReportChecker checker(this, /*fail_if_reported=*/true);
   {
     LayerAnimator* animator = layer->GetAnimator();
     AnimationThroughputReporter reporter(animator,
@@ -185,10 +185,10 @@ TEST_F(AnimationThroughputReporterTest, NoReportOnDetach) {
 // Tests animation throughput not reported and no leak when animation is stopped
 // without being attached to a root.
 TEST_F(AnimationThroughputReporterTest, EndDetachedNoReportNoLeak) {
-  auto layer = std::make_unique<Layer>();
+  auto layer = std::make_unique<LayerTextured>();
   layer->SetOpacity(0.5f);
 
-  ThroughputReportChecker checker(this, /*fail_if_reported=*/true);
+  CompositorMetricsReportChecker checker(this, /*fail_if_reported=*/true);
   LayerAnimator* animator = layer->GetAnimator();
   // Schedule an animation without being attached to a root.
   {
@@ -211,12 +211,12 @@ TEST_F(AnimationThroughputReporterTest, EndDetachedNoReportNoLeak) {
 // Tests animation throughput are reported if there was a previous animation
 // preempted under IMMEDIATELY_ANIMATE_TO_NEW_TARGET strategy.
 TEST_F(AnimationThroughputReporterTest, ReportForAnimateToNewTarget) {
-  auto layer = std::make_unique<Layer>();
+  auto layer = std::make_unique<LayerTextured>();
   layer->SetOpacity(0.f);
   layer->SetBounds(gfx::Rect(0, 0, 1, 2));
   root_layer()->Add(layer.get());
 
-  ThroughputReportChecker checker(this, /*fail_if_reported=*/true);
+  CompositorMetricsReportChecker checker(this, /*fail_if_reported=*/true);
   LayerAnimator* animator = layer->GetAnimator();
   // Schedule an animation that will be preempted. No report should happen.
   {
@@ -229,7 +229,7 @@ TEST_F(AnimationThroughputReporterTest, ReportForAnimateToNewTarget) {
   }
 
   // Animate to new target. Report should happen.
-  ThroughputReportChecker checker2(this);
+  CompositorMetricsReportChecker checker2(this);
   {
     AnimationThroughputReporter reporter(animator,
                                          checker2.repeating_callback());
@@ -247,7 +247,7 @@ TEST_F(AnimationThroughputReporterTest, ReportForAnimateToNewTarget) {
 // there are existing animations but no new animation sequence starts after it
 // is created.
 TEST_F(AnimationThroughputReporterTest, NoLeakWithNoAnimationStart) {
-  auto layer = std::make_unique<Layer>();
+  auto layer = std::make_unique<LayerTextured>();
   layer->SetOpacity(0.5f);
   root_layer()->Add(layer.get());
 
@@ -261,7 +261,7 @@ TEST_F(AnimationThroughputReporterTest, NoLeakWithNoAnimationStart) {
   }
 
   // Create the reporter with the existing animation.
-  ThroughputReportChecker checker(this, /*fail_if_reported=*/true);
+  CompositorMetricsReportChecker checker(this, /*fail_if_reported=*/true);
   {
     AnimationThroughputReporter reporter(animator,
                                          checker.repeating_callback());
@@ -269,6 +269,32 @@ TEST_F(AnimationThroughputReporterTest, NoLeakWithNoAnimationStart) {
 
   // Wait a bit to ensure to let the existing animation finish.
   // There should be no report and no leak.
+  Advance(base::Milliseconds(100));
+}
+
+// Tests smoothness is not reported if the animation will not run.
+TEST_F(AnimationThroughputReporterTest, NoReportForNoRunAnimations) {
+  auto layer = std::make_unique<LayerTextured>();
+  root_layer()->Add(layer.get());
+
+  CompositorMetricsReportChecker checker(this, /*fail_if_reported=*/true);
+  {
+    LayerAnimator* animator = layer->GetAnimator();
+    AnimationThroughputReporter reporter(animator,
+                                         checker.repeating_callback());
+
+    // Simulate views::AnimationBuilder to create an animation that will not
+    // run.
+    ScopedLayerAnimationSettings settings(animator);
+    settings.SetPreemptionStrategy(
+        ui::LayerAnimator::IMMEDIATELY_ANIMATE_TO_NEW_TARGET);
+    std::vector<ui::LayerAnimationSequence*> sequences;
+    sequences.push_back(new LayerAnimationSequence(
+        LayerAnimationElement::CreateOpacityElement(1.0f, base::TimeDelta())));
+    animator->StartTogether(std::move(sequences));
+  }
+
+  // Wait a bit to ensure that report does not happen.
   Advance(base::Milliseconds(100));
 }
 

@@ -4,9 +4,11 @@
 
 #include "components/sync_device_info/fake_local_device_info_provider.h"
 
+#include <optional>
+
+#include "base/notimplemented.h"
 #include "base/time/time.h"
-#include "components/sync/base/model_type.h"
-#include "components/sync/protocol/sync_enums.pb.h"
+#include "components/sync/base/data_type.h"
 #include "components/sync_device_info/device_info.h"
 #include "components/sync_device_info/device_info_util.h"
 
@@ -17,20 +19,35 @@ FakeLocalDeviceInfoProvider::FakeLocalDeviceInfoProvider()
                    "name",
                    "chrome_version",
                    "user_agent",
-                   sync_pb::SyncEnums_DeviceType_TYPE_LINUX,
+                   DeviceInfo::DeviceType::kLinux,
                    DeviceInfo::OsType::kLinux,
                    DeviceInfo::FormFactor::kDesktop,
                    "device_id",
                    "fake_manufacturer",
                    "fake_model",
+                   /*server_determined_model_name=*/std::nullopt,
                    "fake_full_hardware_class",
                    /*last_updated_timestamp=*/base::Time::Now(),
                    DeviceInfoUtil::GetPulseInterval(),
-                   /*send_tab_to_self_receiving_enabled=*/false,
-                   /*sharing_info=*/absl::nullopt,
-                   /*paask_info=*/absl::nullopt,
+                   /*send_tab_to_self_receiving_enabled=*/
+                   false,
+                   /*send_tab_to_self_receiving_type=*/
+                   DeviceInfo::SendTabReceivingType::kChromeOrUnspecified,
+                   /*sharing_info=*/std::nullopt,
+                   /*paask_info=*/std::nullopt,
                    /*fcm_registration_token=*/std::string(),
-                   /*interested_data_types=*/ModelTypeSet()) {}
+                   /*interested_data_types=*/DataTypeSet(),
+                   /*auto_sign_out_last_signin_timestamp=*/
+                   std::nullopt,
+                   /*desktop_to_ios_promo_receiving_enabled=*/false,
+                   /*desktop_to_ios_promo_receiving_types=*/
+                   MobilePromoOnDesktopPromoTypeSet{},
+                   /*glic_experimental_triggering_state=*/
+                   DeviceInfo::GlicExperimentalTriggeringState::kUnavailable,
+                   /*glic_experimental_triggering_version=*/
+                   std::nullopt,
+                   /*android_os_build_fingerprint_prefix=*/std::nullopt,
+                   /*personal_context_info=*/std::nullopt) {}
 
 FakeLocalDeviceInfoProvider::~FakeLocalDeviceInfoProvider() = default;
 
@@ -47,6 +64,26 @@ base::CallbackListSubscription
 FakeLocalDeviceInfoProvider::RegisterOnInitializedCallback(
     const base::RepeatingClosure& callback) {
   return closure_list_.Add(callback);
+}
+
+void FakeLocalDeviceInfoProvider::Initialize(
+    const std::string& cache_guid,
+    const std::string& client_name,
+    const std::string& manufacturer_name,
+    const std::string& model_name,
+    const std::string& full_hardware_class,
+    std::optional<std::string> android_os_build_fingerprint_prefix,
+    const DeviceInfo* device_info_restored_from_store) {}
+
+void FakeLocalDeviceInfoProvider::Clear() {}
+
+void FakeLocalDeviceInfoProvider::UpdateClientName(
+    const std::string& client_name) {
+  device_info_.set_client_name(client_name);
+}
+
+void FakeLocalDeviceInfoProvider::UpdateRecentSignInTime(base::Time time) {
+  device_info_.set_auto_sign_out_last_signin_timestamp(time);
 }
 
 void FakeLocalDeviceInfoProvider::SetReady(bool ready) {

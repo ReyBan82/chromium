@@ -2,36 +2,46 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ash/shell.h"
 #include "chrome/browser/ash/accessibility/accessibility_manager.h"
 
+#include <optional>
+
+#include "ash/constants/ash_extension_constants.h"
 #include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
+#include "ash/constants/ash_switches.h"
+#include "ash/public/cpp/shell_window_ids.h"
 #include "ash/public/cpp/test/accessibility_controller_test_api.h"
+#include "ash/shell.h"
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
 #include "base/strings/string_util.h"
+#include "base/strings/stringprintf.h"
+#include "base/test/bind.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "chrome/browser/ash/accessibility/accessibility_test_utils.h"
+#include "chrome/browser/ash/accessibility/dictation_test_utils.h"
 #include "chrome/browser/ash/accessibility/magnification_manager.h"
 #include "chrome/browser/ash/login/session/user_session_manager.h"
 #include "chrome/browser/ash/login/test/guest_session_mixin.h"
 #include "chrome/browser/ash/login/test/logged_in_user_mixin.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
-#include "chrome/browser/ash/preferences.h"
+#include "chrome/browser/ash/preferences/preferences.h"
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/browser_process_platform_part.h"
 #include "chrome/browser/extensions/api/braille_display_private/mock_braille_controller.h"
 #include "chrome/browser/extensions/component_loader.h"
-#include "chrome/browser/extensions/extension_service.h"
-#include "chrome/browser/prefs/pref_service_syncable_util.h"
+#include "chrome/browser/global_features.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/profiles/profile_test_util.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/common/chrome_switches.h"
-#include "chrome/common/extensions/extension_constants.h"
+#include "chrome/browser/speech/speech_recognition_constants.h"
+#include "chrome/browser/speech/speech_recognition_test_helper.h"
+#include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/mixin_based_in_process_browser_test.h"
+#include "chrome/test/base/ui_test_utils.h"
 #include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "components/account_id/account_id.h"
 #include "components/live_caption/pref_names.h"
@@ -40,20 +50,29 @@
 #include "components/prefs/scoped_user_pref_update.h"
 #include "components/session_manager/core/session_manager.h"
 #include "components/supervised_user/core/common/supervised_user_constants.h"
+#include "components/sync_preferences/pref_service_syncable.h"
+#include "components/user_manager/test_helper.h"
+#include "components/user_manager/user_manager.h"
 #include "components/user_manager/user_names.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/test_navigation_observer.h"
 #include "extensions/browser/extension_host_test_helper.h"
+#include "extensions/common/constants.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/accessibility/accessibility_features.h"
+#include "ui/accessibility/accessibility_switches.h"
 #include "ui/base/ime/ash/component_extension_ime_manager.h"
 #include "ui/base/ime/ash/extension_ime_util.h"
 #include "ui/base/ime/ash/input_method_manager.h"
+#include "ui/base/page_transition_types.h"
 #include "ui/base/ui_base_switches.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
 #include "ui/display/test/display_manager_test_api.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 #include "ui/message_center/message_center.h"
+#include "ui/views/controls/webview/webview.h"
 #include "ui/views/widget/widget_utils.h"
 
 namespace ash {
@@ -69,7 +88,8 @@ using ::testing::WithParamInterface;
 
 // Use a real domain to avoid policy loading problems.
 constexpr char kTestUserName[] = "owner@gmail.com";
-constexpr char kTestUserGaiaId[] = "9876543210";
+constexpr GaiaId::Literal kTestUserGaiaId("9876543210");
+constexpr char kSodaUnsupportedLocale[] = "af-ZA";
 
 // Dictation notification titles and descriptions. '*'s are used as placeholders
 // for languages, which are substituted in at a later time.
@@ -113,7 +133,7 @@ class MockAccessibilityObserver {
 
   bool observed() const { return observed_; }
   bool observed_enabled() const { return observed_enabled_; }
-  absl::optional<AccessibilityNotificationType> observed_type() const {
+  std::optional<AccessibilityNotificationType> observed_type() const {
     return observed_type_;
   }
 
@@ -132,7 +152,7 @@ class MockAccessibilityObserver {
 
   bool observed_ = false;
   bool observed_enabled_ = false;
-  absl::optional<AccessibilityNotificationType> observed_type_;
+  std::optional<AccessibilityNotificationType> observed_type_;
 
   base::CallbackListSubscription accessibility_subscription_;
 };
@@ -200,6 +220,33 @@ int GetAutoclickDelay() {
       prefs::kAccessibilityAutoclickDelayMs);
 }
 
+void SetReducedAnimationsEnabled(bool enabled) {
+  AccessibilityManager::Get()->EnableReducedAnimations(enabled);
+}
+
+bool IsReducedAnimationsEnabled() {
+  return AccessibilityManager::Get()->IsReducedAnimationsEnabled();
+}
+
+bool IsAlwaysShowScrollbarsEnabled() {
+  return AccessibilityManager::Get()->IsAlwaysShowScrollbarsEnabled();
+}
+
+void SetAlwaysShowScrollbarsEnabled(bool enabled) {
+  AccessibilityManager::Get()->EnableAlwaysShowScrollbars(enabled);
+}
+
+void SetMouseKeysEnabled(bool enabled) {
+  GetActiveUserPrefs()->SetBoolean(prefs::kAccessibilityMouseKeysEnabled,
+                                   enabled);
+  GetActiveUserPrefs()->CommitPendingWrite();
+}
+
+bool IsMouseKeysEnabled() {
+  return GetActiveUserPrefs()->GetBoolean(
+      prefs::kAccessibilityMouseKeysEnabled);
+}
+
 void SetVirtualKeyboardEnabled(bool enabled) {
   AccessibilityManager::Get()->EnableVirtualKeyboard(enabled);
 }
@@ -216,20 +263,22 @@ bool IsMonoAudioEnabled() {
   return AccessibilityManager::Get()->IsMonoAudioEnabled();
 }
 
+bool IsColorCorrectionEnabled() {
+  return GetActiveUserPrefs()->GetBoolean(
+      prefs::kAccessibilityColorCorrectionEnabled);
+}
+
+void SetColorCorrectionEnabled(bool enabled) {
+  GetActiveUserPrefs()->SetBoolean(prefs::kAccessibilityColorCorrectionEnabled,
+                                   enabled);
+}
+
 void SetSelectToSpeakEnabled(bool enabled) {
   AccessibilityManager::Get()->SetSelectToSpeakEnabled(enabled);
 }
 
 bool IsSelectToSpeakEnabled() {
   return AccessibilityManager::Get()->IsSelectToSpeakEnabled();
-}
-
-void SetSwitchAccessEnabled(bool enabled) {
-  AccessibilityManager::Get()->SetSwitchAccessEnabled(enabled);
-}
-
-void SetMagnifierEnabled(bool enabled) {
-  MagnificationManager::Get()->SetMagnifierEnabled(enabled);
 }
 
 void SetDictationEnabled(bool enabled) {
@@ -279,6 +328,21 @@ void SetSpokenFeedbackEnabledPref(bool enabled) {
 
 void SetAutoclickEnabledPref(bool enabled) {
   GetActiveUserPrefs()->SetBoolean(prefs::kAccessibilityAutoclickEnabled,
+                                   enabled);
+}
+
+void SetReducedAnimationsEnabledPref(bool enabled) {
+  GetActiveUserPrefs()->SetBoolean(
+      prefs::kAccessibilityReducedAnimationsEnabled, enabled);
+}
+
+void SetAlwaysShowScrollbarsEnabledPref(bool enabled) {
+  GetActiveUserPrefs()->SetBoolean(
+      prefs::kAccessibilityAlwaysShowScrollbarsEnabled, enabled);
+}
+
+void SetMouseKeysEnabledPref(bool enabled) {
+  GetActiveUserPrefs()->SetBoolean(prefs::kAccessibilityMouseKeysEnabled,
                                    enabled);
 }
 
@@ -334,8 +398,8 @@ void ClearDictationOfflineNudgePref(const std::string& locale) {
   update->RemoveByDottedPath(locale);
 }
 
-absl::optional<bool> GetDictationOfflineNudgePref(const std::string& locale) {
-  const base::Value::Dict& offline_nudges = GetActiveUserPrefs()->GetDict(
+std::optional<bool> GetDictationOfflineNudgePref(const std::string& locale) {
+  const base::DictValue& offline_nudges = GetActiveUserPrefs()->GetDict(
       prefs::kAccessibilityDictationLocaleOfflineNudge);
   return offline_nudges.FindBool(locale);
 }
@@ -412,7 +476,7 @@ class AccessibilityManagerTest : public MixinBasedInProcessBrowserTest {
  protected:
   AccessibilityManagerTest()
       : disable_animations_(
-            ui::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
+            gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
 
   AccessibilityManagerTest(const AccessibilityManagerTest&) = delete;
   AccessibilityManagerTest& operator=(const AccessibilityManagerTest&) = delete;
@@ -432,7 +496,9 @@ class AccessibilityManagerTest : public MixinBasedInProcessBrowserTest {
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
     scoped_feature_list_.InitWithFeatures(
-        {features::kOnDeviceSpeechRecognition}, {});
+        {features::kOnDeviceSpeechRecognition,
+         ::features::kAccessibilityMouseKeys},
+        {});
     MixinBasedInProcessBrowserTest::SetUpCommandLine(command_line);
   }
 
@@ -483,15 +549,13 @@ class AccessibilityManagerTest : public MixinBasedInProcessBrowserTest {
     return AccessibilityManager::Get()->chromevox_panel_;
   }
 
-  base::FilePath TtsDlcTypeToPath(DlcType dlc) {
-    return AccessibilityManager::Get()->TtsDlcTypeToPath(dlc);
-  }
+  base::HistogramTester histogram_tester_;
 
  protected:
   base::test::ScopedFeatureList scoped_feature_list_;
 
  private:
-  ui::ScopedAnimationDurationScaleMode disable_animations_;
+  gfx::ScopedAnimationDurationScaleMode disable_animations_;
 };
 
 // Test that a new user's application locale is mapped to a supported Dictation
@@ -533,6 +597,9 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest, TypePref) {
   EXPECT_FALSE(IsSpokenFeedbackEnabled());
   EXPECT_FALSE(IsHighContrastEnabled());
   EXPECT_FALSE(IsAutoclickEnabled());
+  EXPECT_FALSE(IsReducedAnimationsEnabled());
+  EXPECT_FALSE(IsAlwaysShowScrollbarsEnabled());
+  EXPECT_FALSE(IsMouseKeysEnabled());
   EXPECT_EQ(default_autoclick_delay_, GetAutoclickDelay());
   EXPECT_FALSE(IsVirtualKeyboardEnabled());
   EXPECT_FALSE(IsMonoAudioEnabled());
@@ -553,6 +620,15 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest, TypePref) {
 
   SetAutoclickEnabledPref(true);
   EXPECT_TRUE(IsAutoclickEnabled());
+
+  SetReducedAnimationsEnabledPref(true);
+  EXPECT_TRUE(IsReducedAnimationsEnabled());
+
+  SetAlwaysShowScrollbarsEnabledPref(true);
+  EXPECT_TRUE(IsAlwaysShowScrollbarsEnabled());
+
+  SetMouseKeysEnabledPref(true);
+  EXPECT_TRUE(IsMouseKeysEnabled());
 
   SetAutoclickDelayPref(kTestAutoclickDelayMs);
   EXPECT_EQ(kTestAutoclickDelayMs, GetAutoclickDelay());
@@ -583,6 +659,15 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest, TypePref) {
 
   SetAutoclickEnabledPref(false);
   EXPECT_FALSE(IsAutoclickEnabled());
+
+  SetReducedAnimationsEnabledPref(false);
+  EXPECT_FALSE(IsReducedAnimationsEnabled());
+
+  SetAlwaysShowScrollbarsEnabledPref(false);
+  EXPECT_FALSE(IsAlwaysShowScrollbarsEnabled());
+
+  SetMouseKeysEnabledPref(false);
+  EXPECT_FALSE(IsMouseKeysEnabled());
 
   SetVirtualKeyboardEnabledPref(false);
   EXPECT_FALSE(IsVirtualKeyboardEnabled());
@@ -771,9 +856,10 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest, AccessibilityMenuVisibility) {
   EXPECT_FALSE(IsSpokenFeedbackEnabled());
   EXPECT_FALSE(IsHighContrastEnabled());
   EXPECT_FALSE(IsAutoclickEnabled());
-  EXPECT_FALSE(ShouldShowAccessibilityMenu());
   EXPECT_FALSE(IsVirtualKeyboardEnabled());
   EXPECT_FALSE(IsMonoAudioEnabled());
+  EXPECT_FALSE(IsColorCorrectionEnabled());
+  EXPECT_FALSE(ShouldShowAccessibilityMenu());
 
   EXPECT_FALSE(ShouldShowAccessibilityMenu());
   SetAlwaysShowMenuEnabledPref(true);
@@ -820,14 +906,20 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest, AccessibilityMenuVisibility) {
   EXPECT_TRUE(ShouldShowAccessibilityMenu());
   SetSelectToSpeakEnabled(false);
   EXPECT_FALSE(ShouldShowAccessibilityMenu());
+
+  SetColorCorrectionEnabled(true);
+  EXPECT_TRUE(ShouldShowAccessibilityMenu());
+  SetColorCorrectionEnabled(false);
+  EXPECT_FALSE(ShouldShowAccessibilityMenu());
 }
 
-IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest,
-                       EnhancedNetworkVoicesExtensionLoadedWhenNeeded) {
-  extensions::ComponentLoader* component_loader =
-      extensions::ExtensionSystem::Get(browser()->profile())
-          ->extension_service()
-          ->component_loader();
+// TODO (crbug.com/535989327): Re-enable this test after migrating to new speech
+// backend.
+IN_PROC_BROWSER_TEST_F(
+    AccessibilityManagerTest,
+    DISABLED_EnhancedNetworkVoicesExtensionLoadedWhenNeeded) {
+  auto* component_loader =
+      extensions::ComponentLoader::Get(browser()->GetProfile());
 
   // Not loaded yet.
   EXPECT_FALSE(
@@ -849,20 +941,20 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest,
   // Pretend the dialog was shown but the user didn't accept it by changing the
   // pref that the dialog was shown but not the pref to enable the voices.
   SetSelectToSpeakEnabled(true);
-  browser()->profile()->GetPrefs()->SetBoolean(
+  browser()->GetProfile()->GetPrefs()->SetBoolean(
       prefs::kAccessibilitySelectToSpeakEnhancedVoicesDialogShown, true);
   EXPECT_FALSE(
       component_loader->Exists(extension_misc::kEnhancedNetworkTtsExtensionId));
 
   // Pretend the user turned on the network voices setting.
-  browser()->profile()->GetPrefs()->SetBoolean(
+  browser()->GetProfile()->GetPrefs()->SetBoolean(
       prefs::kAccessibilitySelectToSpeakEnhancedNetworkVoices, true);
   WaitForEnhancedNetworkTtsLoad();
   EXPECT_TRUE(
       component_loader->Exists(extension_misc::kEnhancedNetworkTtsExtensionId));
 
   // Now the admin disallows network voices by policy.
-  browser()->profile()->GetPrefs()->SetBoolean(
+  browser()->GetProfile()->GetPrefs()->SetBoolean(
       prefs::kAccessibilityEnhancedNetworkVoicesInSelectToSpeakAllowed, false);
   EXPECT_FALSE(
       component_loader->Exists(extension_misc::kEnhancedNetworkTtsExtensionId));
@@ -898,7 +990,7 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest,
                        ChromeVoxPanelMultipleDisplays) {
   // Start with two displays, the non-primary one is active for new windows.
   display::test::DisplayManagerTestApi(ash::Shell::Get()->display_manager())
-      .UpdateDisplay("600x600,800x800");
+      .UpdateDisplay("600x550,800x750");
   auto root_windows = ash::Shell::GetAllRootWindows();
   ASSERT_EQ(2u, root_windows.size());
   ASSERT_EQ(ash::Shell::GetPrimaryRootWindow(), root_windows[0]);
@@ -925,47 +1017,104 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest,
       panel->GetWidget()->GetWindowBoundsInScreen()));
 }
 
-IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest, TtsDlcTypeToPath) {
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-de-de/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSDEDE));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-en-us/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSENUS));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-es-es/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSESES));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-es-us/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSESUS));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-fr-fr/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSFRFR));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-hi-in/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSHIIN));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-it-it/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSITIT));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-ja-jp/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSJAJP));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-nl-nl/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSNLNL));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-pt-br/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSPTBR));
-  EXPECT_EQ(
-      base::FilePath("/run/imageloader/tts-sv-se/package/root/voice.zvoice"),
-      TtsDlcTypeToPath(DlcType::DLC_TYPE_TTSSVSE));
+// POC: ChromeVoxPanelWebContentsObserver::DidFinishNavigation() dispatches
+// EnterFullscreen()/Focus() purely on GetLastCommittedURL().GetRef() with no
+// origin check, and AccessibilityPanel (the WebContentsDelegate) does not
+// contain renderer-initiated cross-process navigations. Once arbitrary web
+// content commits in the panel WebContents, '#fullscreen' grants it a
+// fullscreen, activatable, keyboard-focused surface in
+// kShellWindowId_AccessibilityPanelContainer — z-ordered above the ChromeOS
+// lock screen and system modals.
+IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest,
+                       ChromeVoxPanelFragmentNoOriginCheck) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  // 1) Enable ChromeVox so the panel is created.
+  extensions::ExtensionHostTestHelper host_helper(
+      AccessibilityManager::Get()->profile(),
+      extension_misc::kChromeVoxExtensionId);
+  SetSpokenFeedbackEnabled(true);
+  host_helper.WaitForHostCompletedFirstLoad();
+  ChromeVoxPanel* panel = GetChromeVoxPanel();
+  ASSERT_NE(nullptr, panel);
+
+  // Grab the panel WebContents (a bare views::WebView; not an ExtensionHost).
+  auto* web_view = static_cast<views::WebView*>(panel->GetContentsView());
+  content::WebContents* panel_wc = web_view->GetWebContents();
+  ASSERT_NE(nullptr, panel_wc);
+  ASSERT_TRUE(content::WaitForLoadStop(panel_wc));
+
+  aura::Window* root = ash::Shell::GetPrimaryRootWindow();
+  // Precondition: panel starts as a thin FULL_WIDTH strip, not activatable.
+  EXPECT_LT(panel->GetWidget()->GetWindowBoundsInScreen().height(),
+            root->bounds().height());
+  EXPECT_FALSE(panel->GetWidget()->widget_delegate()->CanActivate());
+
+  // 2) Simulate a compromised panel renderer: renderer-initiated top-level
+  //    navigation to web content. This should be BLOCKED.
+  const GURL attacker_url = embedded_test_server()->GetURL("/title1.html");
+  const GURL original_url = panel_wc->GetLastCommittedURL();
+  {
+    content::TestNavigationObserver nav(panel_wc);
+    content::ExecuteScriptAsync(
+        panel_wc, "window.location = '" + attacker_url.spec() + "';");
+    nav.Wait();
+  }
+  // The navigation should NOT have committed.
+  EXPECT_EQ(original_url, panel_wc->GetLastCommittedURL());
+  EXPECT_NE(attacker_url, panel_wc->GetLastCommittedURL());
+
+  // 3) Test defense-in-depth: browser-initiated navigation to cross-origin URL.
+  //    This is allowed, but the fragment check should still block the
+  //    fullscreen/focus.
+  {
+    content::TestNavigationObserver nav(panel_wc);
+    panel_wc->GetController().LoadURL(attacker_url, content::Referrer(),
+                                      ui::PAGE_TRANSITION_TYPED, std::string());
+    nav.Wait();
+  }
+  EXPECT_EQ(attacker_url, panel_wc->GetLastCommittedURL());
+
+  // 4) Attacker page sets location.hash = 'fullscreen'.
+  {
+    content::TestNavigationObserver nav(panel_wc);
+    content::ExecuteScriptAsync(panel_wc, "location.hash = 'fullscreen';");
+    nav.Wait();
+  }
+
+  // The panel should NOT have entered fullscreen or become active because
+  // the origin is not ChromeVox.
+  EXPECT_LT(panel->GetWidget()->GetWindowBoundsInScreen().height(),
+            root->bounds().height());
+  EXPECT_FALSE(panel->GetWidget()->widget_delegate()->CanActivate());
+  EXPECT_FALSE(panel->GetWidget()->IsActive());
+
+  // 5) '#focus' should also be ignored.
+  {
+    content::TestNavigationObserver nav(panel_wc);
+    content::ExecuteScriptAsync(panel_wc, "location.hash = 'focus';");
+    nav.Wait();
+  }
+  EXPECT_FALSE(panel->GetWidget()->IsActive());
+}
+
+IN_PROC_BROWSER_TEST_F(AccessibilityManagerTest,
+                       FaceGazeSettingsPageOpensWhenFeatureIsEnabled) {
+  GetActiveUserPrefs()->SetBoolean(
+      prefs::kAccessibilityFaceGazeAcceleratorDialogHasBeenAccepted, true);
+  base::RunLoop waiter;
+  AccessibilityManager::Get()->SetOpenSettingsSubpageObserverForTest(
+      base::BindLambdaForTesting([&waiter]() { waiter.Quit(); }));
+  // Enable FaceGaze and wait for settings page to open.
+  AccessibilityManager::Get()->EnableFaceGaze(true);
+  waiter.Run();
 }
 
 class AccessibilityManagerDlcTest : public AccessibilityManagerTest {
  public:
   AccessibilityManagerDlcTest()
       : disable_animations_(
-            ui::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
+            gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
   ~AccessibilityManagerDlcTest() override = default;
   AccessibilityManagerDlcTest(const AccessibilityManagerDlcTest&) = delete;
   AccessibilityManagerDlcTest& operator=(const AccessibilityManagerDlcTest&) =
@@ -973,11 +1122,11 @@ class AccessibilityManagerDlcTest : public AccessibilityManagerTest {
 
  protected:
   void SetUpOnMainThread() override {
+    AccessibilityManagerTest::SetUpOnMainThread();
     UninstallSodaForTesting();
     EnsureSodaObservation();
     ClearMessageCenter();
     AssertMessageCenterEmpty();
-    AccessibilityManagerTest::SetUpOnMainThread();
   }
 
   void TearDownOnMainThread() override {
@@ -1003,7 +1152,30 @@ class AccessibilityManagerDlcTest : public AccessibilityManagerTest {
     // We require `install_pumpkin_callback_` to be set before `OnPumpkinError`
     // can be called.
     manager->install_pumpkin_callback_ = base::DoNothing();
-    AccessibilityManager::Get()->OnPumpkinError("Error");
+    manager->OnPumpkinError("Error");
+  }
+
+  void OnPumpkinInstalled(bool success, const std::string& root_path) {
+    AccessibilityManager::Get()->OnPumpkinInstalled(success, root_path);
+  }
+
+  void OnPumpkinDataCreated(
+      std::optional<extensions::api::accessibility_private::PumpkinData> data) {
+    AccessibilityManager::Get()->OnPumpkinDataCreated(std::move(data));
+  }
+
+  void InstallFaceGazeAssetsAndWait() {
+    base::RunLoop loop;
+    AccessibilityManager::Get()->InstallFaceGazeAssets(base::DoNothing());
+    loop.RunUntilIdle();
+  }
+
+  void OnFaceGazeAssetsFailed() {
+    AccessibilityManager* manager = AccessibilityManager::Get();
+    // We require `install_facegaze_assets_callback_` to be set before
+    // `OnFaceGazeAssetsFailed` can be called.
+    manager->install_facegaze_assets_callback_ = base::DoNothing();
+    manager->OnFaceGazeAssetsFailed("Error");
   }
 
   speech::SodaInstaller* soda_installer() {
@@ -1018,8 +1190,7 @@ class AccessibilityManagerDlcTest : public AccessibilityManagerTest {
   }
 
  private:
-  ui::ScopedAnimationDurationScaleMode disable_animations_;
-  base::test::ScopedFeatureList scoped_feature_list_;
+  gfx::ScopedAnimationDurationScaleMode disable_animations_;
 };
 
 // Tests that SODA download is initiated when Dictation is enabled.
@@ -1122,13 +1293,13 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest,
                        SodaDownloadTriggeredByLocaleChange) {
   EXPECT_FALSE(IsSodaDownloading());
 
-  // it-IT is not supported by SODA, so download shouldn't trigger.
-  SetDictationLocale("it-IT");
+  // af-ZA is not supported by SODA, so download shouldn't trigger.
+  SetDictationLocale(kSodaUnsupportedLocale);
   SetDictationEnabled(true);
   EXPECT_FALSE(IsSodaDownloading());
   // The nudge should not be requested to be shown because this is not an
   // offline language.
-  EXPECT_FALSE(GetDictationOfflineNudgePref("it-IT"));
+  EXPECT_FALSE(GetDictationOfflineNudgePref(kSodaUnsupportedLocale));
 
   // Change the locale to one supported by SODA without changing Dictation
   // enabled. This mocks selecting a new locale from settings.
@@ -1269,8 +1440,8 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest, SodaWrongLanguage) {
 
 IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest,
                        SodaNotificationShownOnDictationLocaleChange) {
-  // it-IT is not supported by SODA.
-  SetDictationLocale("it-IT");
+  // af-ZA is not supported by SODA.
+  SetDictationLocale(kSodaUnsupportedLocale);
   EnableDictationTriggeredByUser(/*soda_uninstalled_first=*/false);
   AssertMessageCenterEmpty();
 
@@ -1485,6 +1656,61 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest,
   AssertMessageCenterEmpty();
 }
 
+// Ensures that AccessibilityManager can handle when OnPumpkinInstalled is
+// called multiple times, which can happen in production.
+IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest,
+                       OnPumpkinInstalledMultiple) {
+  SetDictationLocale("en-US");
+  SetDictationEnabled(true);
+  InstallPumpkinAndWait();
+  OnPumpkinInstalled(true, "fake/pumpkin/root/path");
+}
+
+// Ensures that AccessibilityManager can handle when OnPumpkinDataCreated is
+// called multiple times, which can happen in production.
+IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest,
+                       OnPumpkinDataCreatedMultiple) {
+  SetDictationLocale("en-US");
+  SetDictationEnabled(true);
+  InstallPumpkinAndWait();
+  OnPumpkinDataCreated(std::nullopt);
+}
+
+// Ensures that the correct notification is shown when the facegaze-assets DLC
+// is successfully downloaded.
+IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest, FaceGazeAssetsSucceeded) {
+  AccessibilityManager::Get()->EnableFaceGaze(true);
+  // Turning on FaceGaze will add a pinned notification to the message center,
+  // so clear it for the purposes of this test.
+  ClearMessageCenter();
+  InstallFaceGazeAssetsAndWait();
+
+  message_center::NotificationList::Notifications notifications =
+      message_center::MessageCenter::Get()->GetVisibleNotifications();
+  ASSERT_EQ(1u, notifications.size());
+  ASSERT_EQ(u"Face control files downloaded",
+            (*notifications.begin())->title());
+  ASSERT_EQ(u"Face control will be available to other users on the device",
+            (*notifications.begin())->message());
+}
+
+// Ensures that the correct notification is shown when the facegaze-assets DLC
+// fails to download.
+IN_PROC_BROWSER_TEST_F(AccessibilityManagerDlcTest, FaceGazeAssetsFailed) {
+  AccessibilityManager::Get()->EnableFaceGaze(true);
+  // Turning on FaceGaze will add a pinned notification to the message center,
+  // so clear it for the purposes of this test.
+  ClearMessageCenter();
+  OnFaceGazeAssetsFailed();
+
+  message_center::NotificationList::Notifications notifications =
+      message_center::MessageCenter::Get()->GetVisibleNotifications();
+  ASSERT_EQ(1u, notifications.size());
+  ASSERT_EQ(u"Couldn't download face control files",
+            (*notifications.begin())->title());
+  ASSERT_EQ(u"Try again later", (*notifications.begin())->message());
+}
+
 enum DictationDialogTestVariant {
   kOfflineEnabledAndAvailable,
   kOfflineEnabledAndUnavailable,
@@ -1497,7 +1723,7 @@ class AccessibilityManagerDictationDialogTest
  protected:
   AccessibilityManagerDictationDialogTest()
       : disable_animations_(
-            ui::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
+            gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
   ~AccessibilityManagerDictationDialogTest() override = default;
   AccessibilityManagerDictationDialogTest(
       const AccessibilityManagerDictationDialogTest&) = delete;
@@ -1515,7 +1741,7 @@ class AccessibilityManagerDictationDialogTest
     // Set the device language to one that is not supported by SODA on Chrome
     // OS. This will force Dictation to show the confirmation dialog when
     // enabled.
-    locale_ = "it-IT";
+    locale_ = kSodaUnsupportedLocale;
     command_line->AppendSwitchASCII(::switches::kLang, locale_);
 
     std::vector<base::test::FeatureRef> enabled_features;
@@ -1549,7 +1775,7 @@ class AccessibilityManagerDictationDialogTest
 
  private:
   std::string locale_;
-  ui::ScopedAnimationDurationScaleMode disable_animations_;
+  gfx::ScopedAnimationDurationScaleMode disable_animations_;
 };
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1569,8 +1795,7 @@ IN_PROC_BROWSER_TEST_P(AccessibilityManagerDictationDialogTest,
     EXPECT_TRUE(ShouldShowNetworkDictationDialog("en-US"));
   }
   EXPECT_TRUE(ShouldShowNetworkDictationDialog(""));
-  EXPECT_TRUE(ShouldShowNetworkDictationDialog("fr-FR"));
-  EXPECT_TRUE(ShouldShowNetworkDictationDialog("ja-JP"));
+  EXPECT_TRUE(ShouldShowNetworkDictationDialog(kSodaUnsupportedLocale));
 
   PrefService* prefs = GetActiveUserPrefs();
   prefs->SetBoolean(prefs::kDictationAcceleratorDialogHasBeenAccepted, true);
@@ -1601,7 +1826,8 @@ IN_PROC_BROWSER_TEST_P(AccessibilityManagerDictationDialogTest, AcceptDialog) {
   PrefService* prefs = GetActiveUserPrefs();
   EXPECT_FALSE(
       prefs->GetBoolean(prefs::kDictationAcceleratorDialogHasBeenAccepted));
-  EXPECT_TRUE(ShouldShowNetworkDictationDialog(locale()));
+  EXPECT_TRUE(ShouldShowNetworkDictationDialog(locale()))
+      << " locale " << locale();
 
   SetDictationEnabled(true);
   EXPECT_TRUE(IsDictationEnabled());
@@ -1642,7 +1868,10 @@ class AccessibilityManagerLoginTest : public OobeBaseTest {
  protected:
   AccessibilityManagerLoginTest()
       : disable_animations_(
-            ui::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
+            gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION) {
+    scoped_feature_list_.InitWithFeatures(
+        {::features::kAccessibilityMouseKeys}, {});
+  }
 
   AccessibilityManagerLoginTest(const AccessibilityManagerLoginTest&) = delete;
   AccessibilityManagerLoginTest& operator=(
@@ -1664,9 +1893,16 @@ class AccessibilityManagerLoginTest : public OobeBaseTest {
   }
 
   void CreateSession(const AccountId& account_id) {
+    ASSERT_TRUE(user_manager::TestHelper(user_manager::UserManager::Get())
+                    .AddRegularUser(account_id));
+
     auto* session_manager = session_manager::SessionManager::Get();
-    session_manager->CreateSession(account_id, account_id.GetUserEmail(),
-                                   false);
+    session_manager->CreateSession(
+        account_id,
+        // TODO(crbug.com/278643115): Use fake username hash.
+        account_id.GetUserEmail(),
+        /*new_user=*/false,
+        /*has_active_session=*/false);
   }
 
   void StartUserSession(const AccountId& account_id) {
@@ -1696,7 +1932,8 @@ class AccessibilityManagerLoginTest : public OobeBaseTest {
       AccountId::FromUserEmailGaiaId(kTestUserName, kTestUserGaiaId);
 
  private:
-  ui::ScopedAnimationDurationScaleMode disable_animations_;
+  gfx::ScopedAnimationDurationScaleMode disable_animations_;
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(AccessibilityManagerLoginTest, BrailleOnLoginScreen) {
@@ -1708,58 +1945,76 @@ IN_PROC_BROWSER_TEST_F(AccessibilityManagerLoginTest, BrailleOnLoginScreen) {
   EXPECT_TRUE(IsSpokenFeedbackEnabled());
 }
 
-IN_PROC_BROWSER_TEST_F(AccessibilityManagerLoginTest, DISABLED_Login) {
+IN_PROC_BROWSER_TEST_F(AccessibilityManagerLoginTest, Login) {
   WaitForSigninScreen();
-  EXPECT_FALSE(IsLargeCursorEnabled());
-  EXPECT_FALSE(IsSpokenFeedbackEnabled());
-  EXPECT_FALSE(IsHighContrastEnabled());
   EXPECT_FALSE(IsAutoclickEnabled());
-  EXPECT_FALSE(IsVirtualKeyboardEnabled());
+  EXPECT_FALSE(IsHighContrastEnabled());
+  EXPECT_FALSE(IsLargeCursorEnabled());
   EXPECT_FALSE(IsMonoAudioEnabled());
+  EXPECT_FALSE(IsMouseKeysEnabled());
+  EXPECT_FALSE(IsAlwaysShowScrollbarsEnabled());
+  EXPECT_FALSE(IsReducedAnimationsEnabled());
+  EXPECT_FALSE(IsSpokenFeedbackEnabled());
+  EXPECT_FALSE(IsVirtualKeyboardEnabled());
   EXPECT_EQ(default_autoclick_delay_, GetAutoclickDelay());
 
   CreateSession(test_account_id_);
 
   // Confirms that the features are still disabled just after login.
-  EXPECT_FALSE(IsLargeCursorEnabled());
-  EXPECT_FALSE(IsSpokenFeedbackEnabled());
-  EXPECT_FALSE(IsHighContrastEnabled());
   EXPECT_FALSE(IsAutoclickEnabled());
-  EXPECT_FALSE(IsVirtualKeyboardEnabled());
+  EXPECT_FALSE(IsHighContrastEnabled());
+  EXPECT_FALSE(IsLargeCursorEnabled());
   EXPECT_FALSE(IsMonoAudioEnabled());
+  EXPECT_FALSE(IsMouseKeysEnabled());
+  EXPECT_FALSE(IsAlwaysShowScrollbarsEnabled());
+  EXPECT_FALSE(IsReducedAnimationsEnabled());
+  EXPECT_FALSE(IsSpokenFeedbackEnabled());
+  EXPECT_FALSE(IsVirtualKeyboardEnabled());
   EXPECT_EQ(default_autoclick_delay_, GetAutoclickDelay());
 
   StartUserSession(test_account_id_);
 
   // Confirms that the features are still disabled after session starts.
-  EXPECT_FALSE(IsLargeCursorEnabled());
-  EXPECT_FALSE(IsSpokenFeedbackEnabled());
-  EXPECT_FALSE(IsHighContrastEnabled());
   EXPECT_FALSE(IsAutoclickEnabled());
-  EXPECT_FALSE(IsVirtualKeyboardEnabled());
+  EXPECT_FALSE(IsHighContrastEnabled());
+  EXPECT_FALSE(IsLargeCursorEnabled());
   EXPECT_FALSE(IsMonoAudioEnabled());
+  EXPECT_FALSE(IsMouseKeysEnabled());
+  EXPECT_FALSE(IsAlwaysShowScrollbarsEnabled());
+  EXPECT_FALSE(IsReducedAnimationsEnabled());
+  EXPECT_FALSE(IsSpokenFeedbackEnabled());
+  EXPECT_FALSE(IsVirtualKeyboardEnabled());
   EXPECT_EQ(default_autoclick_delay_, GetAutoclickDelay());
-
-  SetLargeCursorEnabled(true);
-  EXPECT_TRUE(IsLargeCursorEnabled());
-
-  SetSpokenFeedbackEnabled(true);
-  EXPECT_TRUE(IsSpokenFeedbackEnabled());
-
-  SetHighContrastEnabled(true);
-  EXPECT_TRUE(IsHighContrastEnabled());
-
-  SetAutoclickEnabled(true);
-  EXPECT_TRUE(IsAutoclickEnabled());
 
   SetAutoclickDelay(kTestAutoclickDelayMs);
   EXPECT_EQ(kTestAutoclickDelayMs, GetAutoclickDelay());
 
-  SetVirtualKeyboardEnabled(true);
-  EXPECT_TRUE(IsVirtualKeyboardEnabled());
+  SetAutoclickEnabled(true);
+  EXPECT_TRUE(IsAutoclickEnabled());
+
+  SetHighContrastEnabled(true);
+  EXPECT_TRUE(IsHighContrastEnabled());
+
+  SetLargeCursorEnabled(true);
+  EXPECT_TRUE(IsLargeCursorEnabled());
 
   SetMonoAudioEnabled(true);
   EXPECT_TRUE(IsMonoAudioEnabled());
+
+  SetMouseKeysEnabled(true);
+  EXPECT_TRUE(IsMouseKeysEnabled());
+
+  SetAlwaysShowScrollbarsEnabled(true);
+  EXPECT_TRUE(IsAlwaysShowScrollbarsEnabled());
+
+  SetReducedAnimationsEnabled(true);
+  EXPECT_TRUE(IsReducedAnimationsEnabled());
+
+  SetSpokenFeedbackEnabled(true);
+  EXPECT_TRUE(IsSpokenFeedbackEnabled());
+
+  SetVirtualKeyboardEnabled(true);
+  EXPECT_TRUE(IsVirtualKeyboardEnabled());
 }
 
 // Tests that ash and browser process has the same states after sign-in.
@@ -1790,12 +2045,12 @@ class AccessibilityManagerUserTypeTest
       public WithParamInterface<user_manager::UserType> {
  protected:
   AccessibilityManagerUserTypeTest() {
-    if (GetParam() == user_manager::USER_TYPE_GUEST) {
+    if (GetParam() == user_manager::UserType::kGuest) {
       guest_session_ = std::make_unique<GuestSessionMixin>(&mixin_host_);
-    } else if (GetParam() == user_manager::USER_TYPE_CHILD) {
+    } else if (GetParam() == user_manager::UserType::kChild) {
       logged_in_user_mixin_ = std::make_unique<LoggedInUserMixin>(
-          &mixin_host_, LoggedInUserMixin::LogInType::kChild,
-          embedded_test_server(), this);
+          &mixin_host_, /*test_base=*/this, embedded_test_server(),
+          LoggedInUserMixin::LogInType::kChild);
     }
   }
 
@@ -1831,19 +2086,40 @@ class AccessibilityManagerUserTypeTest
 
 INSTANTIATE_TEST_SUITE_P(UserTypeInstantiation,
                          AccessibilityManagerUserTypeTest,
-                         ::testing::Values(user_manager::USER_TYPE_REGULAR,
-                                           user_manager::USER_TYPE_GUEST,
-                                           user_manager::USER_TYPE_CHILD));
+                         ::testing::Values(user_manager::UserType::kRegular,
+                                           user_manager::UserType::kGuest,
+                                           user_manager::UserType::kChild));
 
 IN_PROC_BROWSER_TEST_P(AccessibilityManagerUserTypeTest, BrailleWhenLoggedIn) {
-  if (GetParam() == user_manager::USER_TYPE_CHILD)
+  if (GetParam() == user_manager::UserType::kChild) {
     logged_in_user_mixin_->LogInUser();
+    histogram_tester_.ExpectBucketCount("Accessibility.CrosSpokenFeedback",
+                                        /*sample=*/false, 2);
+  } else {
+    histogram_tester_.ExpectBucketCount("Accessibility.CrosSpokenFeedback",
+                                        /*sample=*/false, 1);
+  }
+
+  histogram_tester_.ExpectBucketCount("Accessibility.CrosSpokenFeedback",
+                                      /*sample=*/true, 0);
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/true, 0);
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/false, 0);
 
   // This object watches for IME preference changes and reflects those in
   // the IME framework state.
-  Preferences prefs;
+  Preferences prefs(
+      g_browser_process->local_state(),
+      g_browser_process->GetFeatures()->application_locale_storage(),
+      g_browser_process->platform_part()->GetTimezoneResolverManager());
   prefs.InitUserPrefsForTesting(
-      PrefServiceSyncableFromProfile(GetActiveUserProfile()),
+      static_cast<sync_preferences::PrefServiceSyncable*>(
+          GetActiveUserProfile()->GetPrefs()),
       user_manager::UserManager::Get()->GetActiveUser(),
       UserSessionManager::GetInstance()->GetDefaultIMEState(
           GetActiveUserProfile()));
@@ -1859,10 +2135,25 @@ IN_PROC_BROWSER_TEST_P(AccessibilityManagerUserTypeTest, BrailleWhenLoggedIn) {
   EXPECT_TRUE(IsSpokenFeedbackEnabled());
   EXPECT_TRUE(IsBrailleImeEnabled());
 
+  // A metric should have been logged for braille display connected but not
+  // disconnect or duration.
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/true, 1);
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/false, 0);
+  histogram_tester_.ExpectTotalCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionDuration",
+      0);
+
   // Send a braille dots key event and make sure that the braille IME is
   // activated.
   KeyEvent event;
-  event.command = extensions::api::braille_display_private::KEY_COMMAND_DOTS;
+  event.command = extensions::api::braille_display_private::KeyCommand::kDots;
   event.braille_dots = 0;
   braille_controller_.GetObserver()->OnBrailleKeyEvent(event);
   EXPECT_TRUE(IsBrailleImeCurrent());
@@ -1874,48 +2165,169 @@ IN_PROC_BROWSER_TEST_P(AccessibilityManagerUserTypeTest, BrailleWhenLoggedIn) {
   EXPECT_FALSE(IsBrailleImeEnabled());
   EXPECT_FALSE(IsBrailleImeCurrent());
 
+  // Check metrics.
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/true, 1);
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/false, 1);
+  histogram_tester_.ExpectTotalCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionDuration",
+      1);
+
   // Plugging in a display while spoken feedback is enabled should enable
   // the Braille IME.
   SetBrailleDisplayAvailability(true);
   EXPECT_TRUE(IsSpokenFeedbackEnabled());
   EXPECT_TRUE(IsBrailleImeEnabled());
+
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/true, 2);
+  histogram_tester_.ExpectBucketCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionChanged",
+      /*sample=*/false, 1);
+  histogram_tester_.ExpectTotalCount(
+      "Accessibility.CrosSpokenFeedback.BrailleDisplayConnected."
+      "ConnectionDuration",
+      1);
 }
 
-class AccessibilityManagerWithAccessibilityServiceTest
-    : public AccessibilityManagerTest {
+enum class DictationKeyboardShortcutType { kKey, kKeyboardCombo };
+
+class AccessibilityManagerDictationKeyboardImprovementsTest
+    : public AccessibilityManagerTest,
+      public ::testing::WithParamInterface<DictationKeyboardShortcutType> {
  public:
-  AccessibilityManagerWithAccessibilityServiceTest() = default;
-  AccessibilityManagerWithAccessibilityServiceTest(
-      const AccessibilityManagerWithAccessibilityServiceTest&) = delete;
-  AccessibilityManagerWithAccessibilityServiceTest& operator=(
-      const AccessibilityManagerWithAccessibilityServiceTest&) = delete;
-  ~AccessibilityManagerWithAccessibilityServiceTest() override = default;
+  AccessibilityManagerDictationKeyboardImprovementsTest() = default;
+  ~AccessibilityManagerDictationKeyboardImprovementsTest() override = default;
+  AccessibilityManagerDictationKeyboardImprovementsTest(
+      const AccessibilityManagerDictationKeyboardImprovementsTest&) = delete;
+  AccessibilityManagerDictationKeyboardImprovementsTest& operator=(
+      const AccessibilityManagerDictationKeyboardImprovementsTest&) = delete;
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    scoped_feature_list_.InitAndEnableFeature(
-        ::features::kAccessibilityService);
-    MixinBasedInProcessBrowserTest::SetUpCommandLine(command_line);
+    // Set the device language to one that is not supported by SODA on ChromeOS.
+    // This will force Dictation to show the confirmation dialog when enabled.
+    command_line->AppendSwitchASCII(::switches::kLang, kSodaUnsupportedLocale);
+    AccessibilityManagerTest::SetUpCommandLine(command_line);
   }
+
+  void SetUpOnMainThread() override {
+    test_api_ = AccessibilityControllerTestApi::Create();
+    AccessibilityManagerTest::SetUpOnMainThread();
+  }
+
+  // Invokes Dictation via the keyboard. The keys that are pressed depend on the
+  // parameter that is passed at test construction.
+  void PressKeys() {
+    switch (GetParam()) {
+      case DictationKeyboardShortcutType::kKey:
+        ASSERT_NO_FATAL_FAILURE(
+            ASSERT_TRUE(ui_test_utils::SendKeyPressToWindowSync(
+                /*window=*/nullptr, /*key=*/ui::KeyboardCode::VKEY_DICTATE,
+                /*control=*/false, /*shift=*/false, /*alt=*/false,
+                /*command=*/false)));
+        return;
+      case DictationKeyboardShortcutType::kKeyboardCombo:
+        ASSERT_NO_FATAL_FAILURE(
+            ASSERT_TRUE(ui_test_utils::SendKeyPressToWindowSync(
+                /*window=*/nullptr, /*key=*/ui::KeyboardCode::VKEY_D,
+                /*control=*/false, /*shift=*/false, /*alt=*/false,
+                /*command=*/true)));
+        return;
+    }
+  }
+
+  AccessibilityControllerTestApi* test_api() { return test_api_.get(); }
+
+ private:
+  std::unique_ptr<AccessibilityControllerTestApi> test_api_;
 };
 
-IN_PROC_BROWSER_TEST_F(AccessibilityManagerWithAccessibilityServiceTest,
-                       Constructs) {
-  // The service will be constructed and start receiving accessibility events
-  // when a subset of features are enabled. This simple test ensures that there
-  // are no crashes when setting up the service and toggling features.
-  SetSpokenFeedbackEnabled(true);
-  SetSelectToSpeakEnabled(true);
-  SetSwitchAccessEnabled(true);
-  SetAutoclickEnabled(true);
-  SetDictationEnabled(true);
-  SetMagnifierEnabled(true);
+INSTANTIATE_TEST_SUITE_P(
+    DictationKey,
+    AccessibilityManagerDictationKeyboardImprovementsTest,
+    ::testing::Values(DictationKeyboardShortcutType::kKey));
 
-  SetSpokenFeedbackEnabled(false);
-  SetSelectToSpeakEnabled(false);
-  SetSwitchAccessEnabled(false);
-  SetAutoclickEnabled(false);
-  SetDictationEnabled(false);
-  SetMagnifierEnabled(false);
+INSTANTIATE_TEST_SUITE_P(
+    DictationKeyboardCombo,
+    AccessibilityManagerDictationKeyboardImprovementsTest,
+    ::testing::Values(DictationKeyboardShortcutType::kKeyboardCombo));
+
+IN_PROC_BROWSER_TEST_P(AccessibilityManagerDictationKeyboardImprovementsTest,
+                       DictationDisabledShowDialogDismiss) {
+  AccessibilityManager* manager = AccessibilityManager::Get();
+  PrefService* prefs = GetActiveUserPrefs();
+  prefs->SetBoolean(prefs::kDictationAcceleratorDialogHasBeenAccepted, false);
+  manager->SetDictationEnabled(false);
+
+  PressKeys();
+  // If the dialog hasn't been accepted yet, then pressing the Dictation key
+  // should show a dialog.
+  ASSERT_FALSE(manager->IsDictationEnabled());
+  ASSERT_TRUE(test_api()->IsDictationKeboardDialogShowing());
+  test_api()->DismissDictationKeyboardDialog();
+  ASSERT_FALSE(manager->IsDictationEnabled());
+  ASSERT_FALSE(test_api()->IsDictationKeboardDialogShowing());
+}
+
+IN_PROC_BROWSER_TEST_P(AccessibilityManagerDictationKeyboardImprovementsTest,
+                       DictationDisabledShowDialogAccept) {
+  AccessibilityManager* manager = AccessibilityManager::Get();
+  PrefService* prefs = GetActiveUserPrefs();
+  prefs->SetBoolean(prefs::kDictationAcceleratorDialogHasBeenAccepted, false);
+  manager->SetDictationEnabled(false);
+
+  PressKeys();
+  ASSERT_FALSE(manager->IsDictationEnabled());
+  ASSERT_TRUE(test_api()->IsDictationKeboardDialogShowing());
+  // Accepting the dialog should enable the Dictation feature.
+  test_api()->AcceptDictationKeyboardDialog();
+  ASSERT_TRUE(manager->IsDictationEnabled());
+  ASSERT_FALSE(test_api()->IsDictationKeboardDialogShowing());
+}
+
+IN_PROC_BROWSER_TEST_P(AccessibilityManagerDictationKeyboardImprovementsTest,
+                       DictationDisabledNoShowDialog) {
+  AccessibilityManager* manager = AccessibilityManager::Get();
+  PrefService* prefs = GetActiveUserPrefs();
+  prefs->SetBoolean(prefs::kDictationAcceleratorDialogHasBeenAccepted, true);
+  manager->SetDictationEnabled(false);
+
+  PressKeys();
+  // If the dialog has already been accepted yet, then pressing the Dictation
+  // key should enable Dictation.
+  ASSERT_TRUE(manager->IsDictationEnabled());
+  ASSERT_FALSE(test_api()->IsDictationKeboardDialogShowing());
+}
+
+IN_PROC_BROWSER_TEST_P(AccessibilityManagerDictationKeyboardImprovementsTest,
+                       DictationEnabled) {
+  // Setup and enable Dictation.
+  DictationTestUtils utils =
+      DictationTestUtils(speech::SpeechRecognitionType::kNetwork,
+                         DictationTestUtils::EditableType::kInput);
+  utils.EnableDictation(
+      /*profile=*/AccessibilityManager::Get()->profile(),
+      /*navigate_to_url=*/base::BindLambdaForTesting([this](const GURL& url) {
+        ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+      }));
+
+  // If Dictation is already enabled, then pressing the Dictation key should
+  // toggle Dictation on/off normally.
+  PressKeys();
+  ASSERT_TRUE(AccessibilityManager::Get()->IsDictationEnabled());
+  utils.WaitForRecognitionStarted();
+  PressKeys();
+  ASSERT_TRUE(AccessibilityManager::Get()->IsDictationEnabled());
+  utils.WaitForRecognitionStopped();
 }
 
 }  // namespace ash

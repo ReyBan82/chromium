@@ -8,7 +8,6 @@
 #include <memory>
 #include <utility>
 
-#include "ash/constants/app_types.h"
 #include "base/functional/bind.h"
 #include "base/no_destructor.h"
 #include "base/task/single_thread_task_runner.h"
@@ -34,7 +33,6 @@ namespace {
 //  apps.
 constexpr base::TimeDelta kFullRestoreEstimateDuration = base::Seconds(5);
 constexpr base::TimeDelta kFullRestoreARCEstimateDuration = base::Minutes(3);
-constexpr base::TimeDelta kFullRestoreLacrosEstimateDuration = base::Minutes(1);
 
 }  // namespace
 
@@ -50,6 +48,10 @@ FullRestoreReadHandler::FullRestoreReadHandler() {
 }
 
 FullRestoreReadHandler::~FullRestoreReadHandler() = default;
+
+void FullRestoreReadHandler::OnWillDestroyEnv() {
+  env_observer_.Reset();
+}
 
 void FullRestoreReadHandler::OnWindowInitialized(aura::Window* window) {
   int32_t window_id = window->GetProperty(app_restore::kRestoreWindowIdKey);
@@ -70,10 +72,6 @@ void FullRestoreReadHandler::OnWindowInitialized(aura::Window* window) {
       arc_read_handler_->AddArcWindowCandidate(window);
       app_restore::AppRestoreInfo::GetInstance()->OnWindowInitialized(window);
     }
-    return;
-  }
-
-  if (app_restore::IsLacrosWindow(window)) {
     return;
   }
 
@@ -229,7 +227,7 @@ bool FullRestoreReadHandler::HasBrowser(const base::FilePath& profile_path) {
 
 bool FullRestoreReadHandler::HasWindowInfo(int32_t restore_window_id) {
   if (!SessionID::IsValidValue(restore_window_id) ||
-      !base::Contains(should_check_restore_data_, active_profile_path_)) {
+      !should_check_restore_data_.contains(active_profile_path_)) {
     return false;
   }
 
@@ -260,7 +258,7 @@ std::unique_ptr<app_restore::WindowInfo> FullRestoreReadHandler::GetWindowInfo(
 std::unique_ptr<app_restore::WindowInfo>
 FullRestoreReadHandler::GetWindowInfoForActiveProfile(
     int32_t restore_window_id) {
-  if (!base::Contains(should_check_restore_data_, active_profile_path_))
+  if (!should_check_restore_data_.contains(active_profile_path_))
     return nullptr;
   return GetWindowInfo(restore_window_id);
 }
@@ -298,12 +296,6 @@ int32_t FullRestoreReadHandler::GetArcRestoreWindowIdForSessionId(
   return arc_read_handler_->GetArcRestoreWindowIdForSessionId(session_id);
 }
 
-int32_t FullRestoreReadHandler::GetLacrosRestoreWindowId(
-    const std::string& lacros_window_id) const {
-  return full_restore::FullRestoreReadHandler::GetInstance()
-      ->FetchRestoreWindowId(lacros_window_id);
-}
-
 void FullRestoreReadHandler::SetArcSessionIdForWindowId(int32_t arc_session_id,
                                                         int32_t window_id) {
   if (arc_read_handler_)
@@ -320,8 +312,9 @@ bool FullRestoreReadHandler::IsFullRestoreRunning() const {
   if (it == profile_path_to_start_time_data_.end())
     return false;
 
-  if (IsArcRestoreRunning() || IsLacrosRestoreRunning())
+  if (IsArcRestoreRunning()) {
     return true;
+  }
 
   // We estimate that full restore is still running if it has been less than
   // five seconds since it started.
@@ -333,7 +326,7 @@ void FullRestoreReadHandler::AddChromeBrowserLaunchInfoForTesting(
   auto session_id = SessionID::NewUnique();
   auto app_launch_info = std::make_unique<app_restore::AppLaunchInfo>(
       app_constants::kChromeAppId, session_id.id());
-  app_launch_info->app_type_browser = true;
+  app_launch_info->browser_extra_info.app_type_browser = true;
 
   if (profile_path_to_restore_data_.find(profile_path) ==
       profile_path_to_restore_data_.end()) {
@@ -373,20 +366,6 @@ bool FullRestoreReadHandler::IsArcRestoreRunning() const {
   // been less than five minutes since it started, when there is at least one
   // ARC app, since it might take long time to boot ARC.
   return base::TimeTicks::Now() - it->second < kFullRestoreARCEstimateDuration;
-}
-
-bool FullRestoreReadHandler::IsLacrosRestoreRunning() const {
-  if (active_profile_path_ != primary_profile_path_)
-    return false;
-
-  auto it = profile_path_to_start_time_data_.find(primary_profile_path_);
-  if (it == profile_path_to_start_time_data_.end())
-    return false;
-
-  // We estimate that full restore is still running if it has been less than
-  // one minute since it started, when Lacros is available.
-  return base::TimeTicks::Now() - it->second <
-         kFullRestoreLacrosEstimateDuration;
 }
 
 void FullRestoreReadHandler::OnGetRestoreData(

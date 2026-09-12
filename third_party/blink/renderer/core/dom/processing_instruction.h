@@ -24,8 +24,12 @@
 
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/character_data.h"
+#include "third_party/blink/renderer/core/dom/qualified_name.h"
+#include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_client.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
+#include "third_party/blink/renderer/platform/wtf/key_value_pair.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 
 namespace blink {
 
@@ -46,9 +50,10 @@ class CORE_EXPORT ProcessingInstruction final : public CharacterData,
   StyleSheet* sheet() const { return sheet_.Get(); }
 
   bool IsCSS() const { return is_css_; }
-  bool IsXSL() const { return is_xsl_; }
+  bool IsXSL() const;
+  void UpdateStylesheetIfNeeded();
 
-  void DidAttributeChanged();
+  void DidChangeData();
   bool IsLoading() const;
 
   // For XSLT
@@ -68,16 +73,54 @@ class CORE_EXPORT ProcessingInstruction final : public CharacterData,
   EventListener* EventListenerForXSLT();
   void ClearEventListenerForXSLT();
 
+  const AtomicString& getAttribute(const AtomicString& name) {
+    return GetAttributeValue(name);
+  }
+
+  bool hasAttribute(const AtomicString& name);
+  void setAttribute(const AtomicString& name,
+                    const AtomicString& value,
+                    ExceptionState& exception_state) {
+    if (ValidateAttributeName(name, exception_state)) {
+      SetAttribute(name, value);
+    }
+  }
+  void removeAttribute(const AtomicString& name);
+  void toggleAttribute(const AtomicString& name,
+                       ExceptionState& exception_state) {
+    ToggleAttribute(name, std::nullopt, exception_state);
+  }
+  void toggleAttribute(const AtomicString& name,
+                       bool force,
+                       ExceptionState& exception_state) {
+    ToggleAttribute(name, force, exception_state);
+  }
+  bool hasAttributes();
+  Vector<AtomicString> getAttributeNames();
+
+  const AtomicString& GetAttributeValue(
+      const AtomicString& name,
+      const AtomicString& default_value = g_null_atom);
+
  private:
   String nodeName() const override;
-  Node* Clone(Document&, CloneChildrenFlag) const override;
+  CharacterData* CloneWithData(Document&, const String&) const override;
+
+  bool ValidateAttributeName(const AtomicString&, ExceptionState&) const;
+  void SetAttribute(const AtomicString&, const AtomicString&);
+  void ToggleAttribute(const AtomicString&,
+                       std::optional<bool> force,
+                       ExceptionState&);
 
   InsertionNotificationRequest InsertedInto(ContainerNode&) override;
+  void DidNotifySubtreeInsertionsToDocument() override;
   void RemovedFrom(ContainerNode&) override;
   void DetachLayoutTree(bool performing_reattach) final {}
 
+  void ProcessAttributesIfNeeded();
   bool CheckStyleSheet(String& href, String& charset);
-  void Process(const String& href, const String& charset);
+  void ProcessStylesheet(const String& href, const String& charset);
+  void UpdateDataFromAttributes();
 
   void NotifyFinished(Resource*) override;
 
@@ -86,6 +129,7 @@ class CORE_EXPORT ProcessingInstruction final : public CharacterData,
   void ParseStyleSheet(const String& sheet);
   void ClearSheet();
   void RemovePendingSheet();
+  bool IsXMLStylesheet() const;
 
   String DebugName() const override { return "ProcessingInstruction"; }
 
@@ -100,6 +144,8 @@ class CORE_EXPORT ProcessingInstruction final : public CharacterData,
   bool is_xsl_;
 
   Member<DetachableEventListener> listener_for_xslt_;
+  Vector<KeyValuePair<AtomicString, AtomicString>> attributes_;
+  bool attributes_dirty_ = true;
 };
 
 template <>

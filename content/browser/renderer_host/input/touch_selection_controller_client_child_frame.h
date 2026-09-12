@@ -6,6 +6,7 @@
 #define CONTENT_BROWSER_RENDERER_HOST_INPUT_TOUCH_SELECTION_CONTROLLER_CLIENT_CHILD_FRAME_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
 #include "components/viz/common/quads/selection.h"
@@ -39,6 +40,9 @@ class TouchSelectionControllerClientChildFrame
   ~TouchSelectionControllerClientChildFrame() override;
 
   void DidStopFlinging();
+  void OnSwipeToMoveCursorBegin();
+  void OnSwipeToMoveCursorEnd();
+  void OnHitTestRegionUpdated();
   void UpdateSelectionBoundsIfNeeded(
       const viz::Selection<gfx::SelectionBound>& selection,
       float device_scale_factor);
@@ -61,13 +65,13 @@ class TouchSelectionControllerClientChildFrame
   void DidScroll() override;
 
   // ui::TouchSelectionMenuClient:
-  bool IsCommandIdEnabled(int command_id) const override;
+  bool IsCommandIdEnabled(int command_id, bool can_paste) const override;
   void ExecuteCommand(int command_id, int event_flags) override;
   void RunContextMenu() override;
-  bool ShouldShowQuickMenu() override;
+  bool ShouldShowQuickMenu(bool can_paste) override;
   std::u16string GetSelectedText() override;
 
-  gfx::Point ConvertFromRoot(const gfx::PointF& point) const;
+  std::optional<gfx::Point> ConvertFromRoot(const gfx::PointF& point) const;
 
   // Not owned, non-null for the lifetime of this object.
   raw_ptr<RenderWidgetHostViewChildFrame> rwhv_;

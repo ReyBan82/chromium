@@ -4,7 +4,9 @@
 
 #include "media/audio/audio_device_description.h"
 
+#include "media/audio/application_loopback_device_helper.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
 namespace media {
 
 TEST(AudioDeviceDescriptionTest, LocalizedGenericLabelLeftUnchanged) {
@@ -40,6 +42,123 @@ TEST(AudioDeviceDescriptionTest, LocalizedUserNameInDefaultDeviceIsSanitized) {
   EXPECT_EQ(device_descriptions[3].device_name, "AirPods Stereo");
 }
 
+TEST(AudioDeviceDescriptionTest,
+     LocalizedUserNameWithFormFactorAndConnectionIsSanitized) {
+  std::vector<AudioDeviceDescription> device_descriptions{
+      // Simulates Windows native device naming formatting, which often includes
+      // form factor prefixes and connection type suffixes.
+      AudioDeviceDescription("Headphones (User's AirPods) (Bluetooth)",
+                             "uniqueId", "groupId"),
+      AudioDeviceDescription("Headset (User's AirPods) (Bluetooth)", "uniqueId",
+                             "groupId"),
+      AudioDeviceDescription("Headphones (User's AirPods Stereo) (Bluetooth)",
+                             "uniqueId", "groupId"),
+      AudioDeviceDescription(
+          "Headset (User's AirPods Hands-Free AG Audio) (Bluetooth)",
+          "uniqueId", "groupId"),
+      AudioDeviceDescription("Headset (User's AirPods Hands-Free) (Bluetooth)",
+                             "uniqueId", "groupId"),
+  };
+
+  AudioDeviceDescription::LocalizeDeviceDescriptions(&device_descriptions);
+
+  // Verify that the form factor prefix, parentheses structure, and connection
+  // suffix are preserved while the user name is redacted.
+  EXPECT_EQ(device_descriptions[0].device_name,
+            "Headphones (AirPods) (Bluetooth)");
+  EXPECT_EQ(device_descriptions[1].device_name,
+            "Headset (AirPods) (Bluetooth)");
+  EXPECT_EQ(device_descriptions[2].device_name,
+            "Headphones (AirPods Stereo) (Bluetooth)");
+  EXPECT_EQ(device_descriptions[3].device_name,
+            "Headset (AirPods Hands-Free AG Audio) (Bluetooth)");
+  EXPECT_EQ(device_descriptions[4].device_name,
+            "Headset (AirPods Hands-Free) (Bluetooth)");
+}
+
+TEST(AudioDeviceDescriptionTest,
+     LocalizedUserNameWithUnknownFormattingIsSanitized) {
+  std::vector<AudioDeviceDescription> device_descriptions{
+      // Unknown form factor (Spanish "Auriculares" means "Headphones"),
+      // known connection.
+      AudioDeviceDescription("Auriculares (User's AirPods) (Bluetooth)",
+                             "uniqueId", "groupId"),
+      // Unknown profile (French "mains libres" means "Hands-free"),
+      // no connection suffix.
+      AudioDeviceDescription("User's AirPods (mains libres)", "uniqueId",
+                             "groupId"),
+      // Unknown form factor (French "Casque" means "Headset" or "Headphones"),
+      // known profile, known connection.
+      AudioDeviceDescription("Casque (User's AirPods Stereo) (Bluetooth)",
+                             "uniqueId", "groupId"),
+      // Pure gibberish around the name.
+      AudioDeviceDescription("Some Random Prefix User's AirPods With Suffix",
+                             "uniqueId", "groupId"),
+  };
+
+  AudioDeviceDescription::LocalizeDeviceDescriptions(&device_descriptions);
+
+  // Verify that the user name is safely redacted even if the surrounding
+  // formatting is not recognized. Recognized components like "(Bluetooth)"
+  // and "Stereo" should still be preserved without the parentheses structure.
+  EXPECT_EQ(device_descriptions[0].device_name, "AirPods (Bluetooth)");
+  EXPECT_EQ(device_descriptions[1].device_name, "AirPods");
+  EXPECT_EQ(device_descriptions[2].device_name, "AirPods Stereo (Bluetooth)");
+  EXPECT_EQ(device_descriptions[3].device_name, "AirPods");
+}
+
+TEST(AudioDeviceDescriptionTest, GetDefaultDeviceName) {
+  auto default_name = AudioDeviceDescription::GetDefaultDeviceName();
+
+  // Passing an empty string should return `default_name`.
+  EXPECT_EQ(AudioDeviceDescription::GetDefaultDeviceName(std::string()),
+            default_name);
+  EXPECT_EQ(AudioDeviceDescription::GetDefaultDeviceName(""), default_name);
+
+  std::string real_device_name = "Real Device Name";
+
+  // `real_device_name` should be appended.
+  EXPECT_EQ(AudioDeviceDescription::GetDefaultDeviceName(real_device_name),
+            default_name + " - " + real_device_name);
+
+  // This should contain "Real Device", without a null-terminator.
+  std::string_view non_null_terminated_name =
+      std::string_view(real_device_name).substr(0, 11);
+
+  // Verify we properly handle a non-null terminated string_view.
+  EXPECT_EQ(
+      AudioDeviceDescription::GetDefaultDeviceName(non_null_terminated_name),
+      default_name + " - " + std::string(non_null_terminated_name));
+}
+
+#if BUILDFLAG(IS_WIN)
+TEST(AudioDeviceDescriptionTest, GetCommunicationsDeviceName) {
+  auto communication_name =
+      AudioDeviceDescription::GetCommunicationsDeviceName();
+
+  // Passing an empty string should return `communication_name`.
+  EXPECT_EQ(AudioDeviceDescription::GetCommunicationsDeviceName(std::string()),
+            communication_name);
+  EXPECT_EQ(AudioDeviceDescription::GetCommunicationsDeviceName(""),
+            communication_name);
+
+  std::string real_device_name = "Real Device Name";
+
+  // `real_device_name` should be appended.
+  EXPECT_EQ(
+      AudioDeviceDescription::GetCommunicationsDeviceName(real_device_name),
+      communication_name + " - " + real_device_name);
+
+  std::string_view non_null_terminated_name =
+      std::string_view(real_device_name).substr(0, 11);
+
+  // Verify we properly handle a non-null terminated string_view.
+  EXPECT_EQ(AudioDeviceDescription::GetCommunicationsDeviceName(
+                non_null_terminated_name),
+            communication_name + " - " + std::string(non_null_terminated_name));
+}
+#endif
+
 TEST(AudioDeviceDescriptionTest, IsLoopbackDevice) {
   EXPECT_TRUE(AudioDeviceDescription::IsLoopbackDevice(
       AudioDeviceDescription::kLoopbackInputDeviceId));
@@ -47,7 +166,37 @@ TEST(AudioDeviceDescriptionTest, IsLoopbackDevice) {
       AudioDeviceDescription::kLoopbackWithMuteDeviceId));
   EXPECT_TRUE(AudioDeviceDescription::IsLoopbackDevice(
       AudioDeviceDescription::kLoopbackWithoutChromeId));
+  EXPECT_TRUE(AudioDeviceDescription::IsLoopbackDevice(
+      AudioDeviceDescription::kApplicationLoopbackDeviceId));
+  EXPECT_TRUE(AudioDeviceDescription::IsLoopbackDevice(
+      AudioDeviceDescription::kLoopbackAllDevicesId));
   EXPECT_FALSE(AudioDeviceDescription::IsLoopbackDevice(
+      AudioDeviceDescription::kDefaultDeviceId));
+}
+
+TEST(AudioDeviceDescriptionTest, IsApplicationLoopbackDevice) {
+  EXPECT_TRUE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      AudioDeviceDescription::kApplicationLoopbackDeviceId));
+#if BUILDFLAG(IS_WIN)
+  EXPECT_TRUE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      CreateApplicationLoopbackDeviceId(12345)));
+  EXPECT_TRUE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      CreateRestrictOwnAudioBrowserLoopbackDeviceId()));
+#elif BUILDFLAG(IS_MAC)
+  EXPECT_TRUE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      CreateApplicationLoopbackDeviceId("org.chromium.Chromium",
+                                        std::nullopt)));
+  EXPECT_TRUE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      CreateRestrictOwnAudioBrowserLoopbackDeviceId("org.chromium.Chromium",
+                                                    12345)));
+#endif
+  EXPECT_FALSE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      AudioDeviceDescription::kLoopbackInputDeviceId));
+  EXPECT_FALSE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      AudioDeviceDescription::kLoopbackWithMuteDeviceId));
+  EXPECT_FALSE(AudioDeviceDescription::IsApplicationLoopbackDevice(
+      AudioDeviceDescription::kLoopbackWithoutChromeId));
+  EXPECT_FALSE(AudioDeviceDescription::IsApplicationLoopbackDevice(
       AudioDeviceDescription::kDefaultDeviceId));
 }
 

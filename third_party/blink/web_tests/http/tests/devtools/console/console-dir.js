@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
 (async function() {
   TestRunner.addResult(`Tests that console logging dumps proper messages.\n`);
 
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   await TestRunner.evaluateInPagePromise(`
@@ -51,8 +53,7 @@
   ConsoleTestRunner.expandConsoleMessages(step1, expandTreeElementFilter);
 
   function expandTreeElementFilter(treeElement) {
-    var name = treeElement.nameElement && treeElement.nameElement.textContent;
-    return name === 'foo' || treeElement.title === '<function scope>';
+    return treeElement.property?.name === 'foo' || treeElement.title === '<function scope>';
   }
 
   function step1() {

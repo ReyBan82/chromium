@@ -9,9 +9,10 @@
 #ifndef CHROME_INSTALL_STATIC_INSTALL_CONSTANTS_H_
 #define CHROME_INSTALL_STATIC_INSTALL_CONSTANTS_H_
 
+#include <guiddef.h>
 #include <stdint.h>
-#include <windows.h>
 
+#include "base/containers/span.h"
 #include "chrome/install_static/buildflags.h"
 
 namespace install_static {
@@ -92,20 +93,28 @@ struct InstallConstants {
   // The prefix for the browser's ProgID. This prefix may be no more than 11
   // characters long; see ShellUtil::GetBrowserProgId and
   // https://msdn.microsoft.com/library/windows/desktop/dd542719.aspx.
-  const wchar_t* prog_id_prefix;
+  const wchar_t* browser_prog_id_prefix;
 
   // A human-readable description of the browser, used when registering with
   // Windows.
-  const wchar_t* prog_id_description;
+  const wchar_t* browser_prog_id_description;
+
+  // The URL scheme for direct launches.
+  const char* direct_launch_url_scheme;
+
+  // The prefix for the browser pdf viewer's ProgID.  This prefix may be no more
+  // than 11 characters long; see ShellUtil::GetBrowserProgId and
+  // https://msdn.microsoft.com/library/windows/desktop/dd542719.aspx.
+  const wchar_t* pdf_prog_id_prefix;
+
+  // A human-readable description of the pdf viewer, used when registering with
+  // Windows.
+  const wchar_t* pdf_prog_id_description;
 
   // The GUID to be used when registering this install mode for Active Setup.
   // Active Setup is used to perform certain operations in a user's context for
   // system-level installs.
   const wchar_t* active_setup_guid;
-
-  // The legacy CommandExecuteImpl CLSID, or an empty string if this install
-  // mode never included a DelegateExecute verb handler.
-  const wchar_t* legacy_command_execute_clsid;
 
   // The CLSID of the COM object registered with the Widnows OS. This is for app
   // activation via user interaction with a toast notification in the Action
@@ -116,8 +125,27 @@ struct InstallConstants {
   CLSID elevator_clsid;
 
   // The IID and the TypeLib of the IElevator interface that provides silent
-  // elevation functionality.
+  // elevation functionality. When changing this value for a mode, one must add
+  // the old value to the end of the mode's `old_elevator_iids` list; see below.
   IID elevator_iid;
+
+  // Previous IIDs of the IElevator interface. Items added to this list
+  // following a change to `elevator_iid` may be removed after two years.
+  base::span<const IID> old_elevator_iids;
+
+  // The CLSID of the COM server that provides ETW tracing functionality.
+  CLSID tracing_service_clsid;
+
+  // The IID and the TypeLib of the ISystemTraceSession interface that provides
+  // ETW tracing functionality. When changing this value for a mode, one must
+  // add the old value to the end of the mode's `old_tracing_service_iids` list;
+  // see below.
+  IID tracing_service_iid;
+
+  // Previous IIDs of the ISystemTraceSession interface. Items added to this
+  // list following a change to `tracing_service_iid` may be removed after two
+  // years.
+  base::span<const IID> old_tracing_service_iids;
 
   // The default name for this mode's update channel.
   const wchar_t* default_channel_name;
@@ -134,15 +162,17 @@ struct InstallConstants {
   // in chrome://settings are hidden when this is false.
   bool supports_set_as_default_browser;
 
-  // True if this mode supports user retention experiments run by the installer
-  // following updates.
-  bool supports_retention_experiments;
-
   // The index of this mode's main application icon in the main executable.
   int app_icon_resource_index;
 
   // The resource id of this mode's main application icon.
   int16_t app_icon_resource_id;
+
+  //  The index of this mode's html doc icon in the main executable.
+  int html_doc_icon_resource_index;
+
+  // The index of this mode's pdf doc icon in the main executable.
+  int pdf_doc_icon_resource_index;
 
   // The app container sid prefix for sandbox.
   const wchar_t* sandbox_sid_prefix;

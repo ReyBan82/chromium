@@ -6,8 +6,10 @@
 #define NET_SOCKET_TRANSPORT_CONNECT_JOB_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "base/containers/flat_set.h"
@@ -19,14 +21,14 @@
 #include "net/base/host_port_pair.h"
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/dns/host_resolver.h"
 #include "net/dns/public/host_resolver_results.h"
+#include "net/dns/public/resolution_details.h"
 #include "net/dns/public/resolve_error_info.h"
 #include "net/dns/public/secure_dns_policy.h"
 #include "net/socket/connect_job.h"
 #include "net/socket/connection_attempts.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "url/scheme_host_port.h"
 
 namespace net {
@@ -42,18 +44,19 @@ class NET_EXPORT_PRIVATE TransportSocketParams
   // socket/connection. Unlike ConnectJobFactory::Endpoint, this does not have a
   // `using_ssl` field for schemeless endpoints because that has no meaning for
   // transport parameters.
-  using Endpoint = absl::variant<url::SchemeHostPort, HostPortPair>;
+  using Endpoint = std::variant<url::SchemeHostPort, HostPortPair>;
 
-  // |host_resolution_callback| will be invoked after the the hostname is
-  // resolved. |network_anonymization_key| is passed to the HostResolver to
-  // prevent cross-NIK leaks. If |host_resolution_callback| does not return OK,
-  // then the connection will be aborted with that value. |supported_alpns|
+  // `host_resolution_callback` will be invoked after the the hostname is
+  // resolved. `network_anonymization_key` is passed to the HostResolver to
+  // prevent cross-NAK leaks. If `host_resolution_callback` does not return OK,
+  // then the connection will be aborted with that value. `supported_alpns`
   // specifies ALPN protocols for selecting HTTPS/SVCB records. If empty,
   // addresses from HTTPS/SVCB records will be ignored and only A/AAAA will be
   // used.
   TransportSocketParams(Endpoint destination,
                         NetworkAnonymizationKey network_anonymization_key,
                         SecureDnsPolicy secure_dns_policy,
+                        handles::NetworkHandle target_network,
                         OnHostResolutionCallback host_resolution_callback,
                         base::flat_set<std::string> supported_alpns);
 
@@ -65,6 +68,7 @@ class NET_EXPORT_PRIVATE TransportSocketParams
     return network_anonymization_key_;
   }
   SecureDnsPolicy secure_dns_policy() const { return secure_dns_policy_; }
+  handles::NetworkHandle target_network() const { return target_network_; }
   const OnHostResolutionCallback& host_resolution_callback() const {
     return host_resolution_callback_;
   }
@@ -79,6 +83,7 @@ class NET_EXPORT_PRIVATE TransportSocketParams
   const Endpoint destination_;
   const NetworkAnonymizationKey network_anonymization_key_;
   const SecureDnsPolicy secure_dns_policy_;
+  const handles::NetworkHandle target_network_;
   const OnHostResolutionCallback host_resolution_callback_;
   const base::flat_set<std::string> supported_alpns_;
 };
@@ -93,12 +98,27 @@ class NET_EXPORT_PRIVATE TransportSocketParams
 // a headstart) and return the one that completes first to the socket pool.
 class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
  public:
+  // May return TcpConnectJobs instead of TransportConnectJobs, based on enabled
+  // features.
+  //
+  // TODO(crbug.com/484073410): Once TcpConnectJob ships and TransportConnectJob
+  // is removed, move this into TcpConnectJob.
   class NET_EXPORT_PRIVATE Factory {
    public:
     Factory() = default;
     virtual ~Factory() = default;
 
-    virtual std::unique_ptr<TransportConnectJob> Create(
+    virtual std::unique_ptr<ConnectJob> Create(
+        RequestPriority priority,
+        const SocketTag& socket_tag,
+        const CommonConnectJobParams* common_connect_job_params,
+        const scoped_refptr<TransportSocketParams>& params,
+        Delegate* delegate,
+        const NetLogWithSource* net_log);
+
+    // Same as Create(), but without an associated factory. Will create a
+    // TcpConnectJob or TransportConnectJob, based on enabled features.
+    static std::unique_ptr<ConnectJob> CreateJob(
         RequestPriority priority,
         const SocketTag& socket_tag,
         const CommonConnectJobParams* common_connect_job_params,
@@ -110,10 +130,6 @@ class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
   // In cases where both IPv6 and IPv4 addresses were returned from DNS,
   // TransportConnectJobs will start a second connection attempt to just the
   // IPv4 addresses after this much time. (This is "Happy Eyeballs".)
-  //
-  // TODO(willchan): Base this off RTT instead of statically setting it. Note we
-  // choose a timeout that is different from the backup connect job timer so
-  // they don't synchronize.
   static constexpr base::TimeDelta kIPv6FallbackTime = base::Milliseconds(300);
 
   struct NET_EXPORT_PRIVATE EndpointResultOverride {
@@ -135,8 +151,8 @@ class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
                       const scoped_refptr<TransportSocketParams>& params,
                       Delegate* delegate,
                       const NetLogWithSource* net_log,
-                      absl::optional<EndpointResultOverride>
-                          endpoint_result_override = absl::nullopt);
+                      std::optional<EndpointResultOverride>
+                          endpoint_result_override = std::nullopt);
 
   TransportConnectJob(const TransportConnectJob&) = delete;
   TransportConnectJob& operator=(const TransportConnectJob&) = delete;
@@ -148,8 +164,9 @@ class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
   bool HasEstablishedConnection() const override;
   ConnectionAttempts GetConnectionAttempts() const override;
   ResolveErrorInfo GetResolveErrorInfo() const override;
-  absl::optional<HostResolverEndpointResult> GetHostResolverEndpointResult()
+  std::optional<HostResolverEndpointResult> GetHostResolverEndpointResult()
       const override;
+  std::optional<ResolutionDetails> GetResolutionDetails() const override;
 
   static base::TimeDelta ConnectionTimeout();
 
@@ -231,6 +248,7 @@ class NET_EXPORT_PRIVATE TransportConnectJob : public ConnectJob {
   base::OneShotTimer fallback_timer_;
 
   ResolveErrorInfo resolve_error_info_;
+  std::optional<ResolutionDetails> resolution_details_;
   ConnectionAttempts connection_attempts_;
 
   base::WeakPtrFactory<TransportConnectJob> weak_ptr_factory_{this};

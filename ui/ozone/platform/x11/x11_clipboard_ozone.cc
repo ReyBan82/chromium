@@ -10,8 +10,15 @@
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "build/build_config.h"
 #include "ui/base/clipboard/clipboard_constants.h"
 #include "ui/base/x/x11_clipboard_helper.h"
+
+#if BUILDFLAG(IS_LINUX)
+#include "base/strings/string_view_util.h"
+#include "ui/base/clipboard/clipboard_util_linux.h"
+#include "ui/gfx/x/atom_cache.h"
+#endif
 
 namespace ui {
 
@@ -26,14 +33,19 @@ X11ClipboardOzone::~X11ClipboardOzone() = default;
 
 void X11ClipboardOzone::OfferClipboardData(
     ClipboardBuffer buffer,
-    const PlatformClipboard::DataMap& data_map,
-    PlatformClipboard::OfferDataClosure callback) {
-  DCHECK(!callback.is_null());
+    const PlatformClipboard::DataMap& data_map) {
   helper_->CreateNewClipboardData();
   for (const auto& item : data_map)
     helper_->InsertMapping(item.first, item.second);
+
   helper_->TakeOwnershipOfSelection(buffer);
-  std::move(callback).Run();
+
+  // On X11, taking ownership of a selection updates the clipboard content
+  // synchronously, but the corresponding SelectionChanged event telling us
+  // to bump the sequence number will be received asynchronously.
+  // So we update the sequence number here synchronously to ensure there's
+  // no window where a stale sequence number could be observed.
+  OnSelectionChanged(buffer);
 }
 
 void X11ClipboardOzone::RequestClipboardData(
@@ -41,33 +53,78 @@ void X11ClipboardOzone::RequestClipboardData(
     const std::string& mime_type,
     PlatformClipboard::RequestDataClosure callback) {
   DCHECK(!callback.is_null());
-  auto atoms =
-      mime_type == kMimeTypeText
-          ? helper_->GetTextAtoms()
-          : helper_->GetAtomsForFormat(ClipboardFormatType::GetType(mime_type));
-  auto selection_data = helper_->Read(buffer, atoms);
-  std::move(callback).Run(selection_data.TakeBytes());
+
+#if BUILDFLAG(IS_LINUX)
+  if (mime_type == kMimeTypeUriList) {
+    auto uri_list_atoms = helper_->GetAtomsForFormat(
+        ClipboardFormatType::CustomPlatformType(kMimeTypeUriList));
+    std::vector<x11::Atom> portal_atoms = {
+        x11::GetAtom(kMimeTypePortalFileTransfer),
+        x11::GetAtom(kMimeTypePortalFiles)};
+
+    helper_->GetAvailableMimeTypesAsync(
+        buffer,
+        base::BindOnce(&X11ClipboardOzone::OnGetAvailableMimeTypesForPortal,
+                       weak_factory_.GetWeakPtr(), buffer,
+                       std::move(uri_list_atoms), std::move(portal_atoms),
+                       std::move(callback)));
+    return;
+  }
+#endif
+
+  auto atoms = mime_type == kMimeTypePlainText
+                   ? helper_->GetTextAtoms()
+                   : helper_->GetAtomsForFormat(
+                         ClipboardFormatType::CustomPlatformType(mime_type));
+  helper_->ReadAsync(buffer, atoms,
+                     base::BindOnce(
+                         [](PlatformClipboard::RequestDataClosure callback,
+                            SelectionData selection_data) {
+                           std::move(callback).Run(selection_data.TakeBytes());
+                         },
+                         std::move(callback)));
 }
+
+#if BUILDFLAG(IS_LINUX)
+void X11ClipboardOzone::OnPortalKeyRead(
+    PlatformClipboard::RequestDataClosure callback,
+    SelectionData selection_data) {
+  auto bytes = selection_data.TakeBytes();
+  if (!bytes) {
+    std::move(callback).Run(nullptr);
+    return;
+  }
+
+  ui::clipboard_util::ExtractPathsFromPortalKey(
+      base::as_byte_span(*bytes),
+      base::BindOnce(&X11ClipboardOzone::OnPathsExtracted,
+                     weak_factory_.GetWeakPtr(), std::move(callback)));
+}
+
+void X11ClipboardOzone::OnPathsExtracted(
+    PlatformClipboard::RequestDataClosure callback,
+    std::vector<std::string> paths) {
+  if (paths.empty()) {
+    std::move(callback).Run(nullptr);
+    return;
+  }
+
+  std::string uri_list = ui::clipboard_util::GetUriListFromPaths(paths);
+  std::move(callback).Run(base::MakeRefCounted<base::RefCountedBytes>(
+      base::as_byte_span(uri_list)));
+}
+#endif
 
 void X11ClipboardOzone::GetAvailableMimeTypes(
     ClipboardBuffer buffer,
     PlatformClipboard::GetMimeTypesClosure callback) {
   DCHECK(!callback.is_null());
-  // This is the only function clients may use to request available formats, so
-  // include both standard and platform-specific (atom names) values.
-  // TODO(crbug.com/1165466): Consider adding a way of filtering mime types and
-  // querying availability of specific formats, so implementations can optimize
-  // it, if possible. E.g: Avoid multiple roundtrips to check if a given format
-  // is available. See ClipboardX11::IsFormatAvailable for example.
-  auto types = helper_->GetAvailableTypes(buffer);
-  auto atoms = helper_->GetAvailableAtomNames(buffer);
-  std::set<std::string> uniq(types.begin(), types.end());
-  uniq.insert(atoms.begin(), atoms.end());
-  std::move(callback).Run({uniq.begin(), uniq.end()});
+  helper_->GetAvailableMimeTypesAsync(buffer, std::move(callback));
 }
 
-bool X11ClipboardOzone::IsSelectionOwner(ClipboardBuffer buffer) {
-  return helper_->IsSelectionOwner(buffer);
+void X11ClipboardOzone::IsSelectionOwner(ClipboardBuffer buffer,
+                                         IsSelectionOwnerClosure callback) {
+  helper_->IsSelectionOwnerAsync(buffer, std::move(callback));
 }
 
 void X11ClipboardOzone::SetClipboardDataChangedCallback(
@@ -79,9 +136,45 @@ bool X11ClipboardOzone::IsSelectionBufferAvailable() const {
   return true;
 }
 
+x11::Window X11ClipboardOzone::GetSelectionOwnerWindowForTesting() const {
+  return helper_->GetSelectionOwnerWindowForTesting();  // IN-TEST
+}
+
 void X11ClipboardOzone::OnSelectionChanged(ClipboardBuffer buffer) {
   if (clipboard_changed_callback_)
     clipboard_changed_callback_.Run(buffer);
 }
+
+#if BUILDFLAG(IS_LINUX)
+void X11ClipboardOzone::OnGetAvailableMimeTypesForPortal(
+    ClipboardBuffer buffer,
+    std::vector<x11::Atom> uri_list_atoms,
+    std::vector<x11::Atom> portal_atoms,
+    PlatformClipboard::RequestDataClosure callback,
+    const std::vector<std::string>& mime_types) {
+  bool has_portal = false;
+  for (const auto& mt : mime_types) {
+    if (mt == kMimeTypePortalFileTransfer || mt == kMimeTypePortalFiles) {
+      has_portal = true;
+    }
+  }
+
+  if (has_portal) {
+    helper_->ReadAsync(
+        buffer, portal_atoms,
+        base::BindOnce(&X11ClipboardOzone::OnPortalKeyRead,
+                       weak_factory_.GetWeakPtr(), std::move(callback)));
+  } else {
+    helper_->ReadAsync(
+        buffer, uri_list_atoms,
+        base::BindOnce(
+            [](PlatformClipboard::RequestDataClosure callback,
+               SelectionData selection_data) {
+              std::move(callback).Run(selection_data.TakeBytes());
+            },
+            std::move(callback)));
+  }
+}
+#endif
 
 }  // namespace ui

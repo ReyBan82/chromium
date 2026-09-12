@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/manifest_handler.h"
 #include "extensions/common/url_pattern.h"
 #include "extensions/common/url_pattern_set.h"
@@ -29,7 +30,7 @@ class FileBrowserHandler {
   ~FileBrowserHandler();
 
   // extension id
-  std::string extension_id() const { return extension_id_; }
+  extensions::ExtensionId extension_id() const { return extension_id_; }
   void set_extension_id(const std::string& extension_id) {
     extension_id_ = extension_id;
   }
@@ -72,7 +73,7 @@ class FileBrowserHandler {
   bool HasCreateAccessPermission() const;
 
   // Returns the file browser handlers associated with the |extension|.
-  static List* GetHandlers(const extensions::Extension* extension);
+  static const List* GetHandlers(const extensions::Extension* extension);
 
   // Returns file browser handler in |extension| matching |action_id|, or
   // nullptr if not found.
@@ -83,7 +84,7 @@ class FileBrowserHandler {
  private:
   // The id for the extension this action belongs to (as defined in the
   // extension manifest).
-  std::string extension_id_;
+  extensions::ExtensionId extension_id_;
   std::string title_;
   std::string default_icon_path_;
   // The id for the FileBrowserHandler, for example: "PdfFileAction".

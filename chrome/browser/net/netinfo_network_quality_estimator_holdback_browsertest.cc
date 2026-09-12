@@ -4,10 +4,9 @@
 
 #include <string>
 
-#include "base/metrics/field_trial_param_associator.h"
-
 #include "base/check.h"
 #include "base/functional/bind.h"
+#include "base/metrics/field_trial_param_associator.h"
 #include "base/notreached.h"
 #include "base/run_loop.h"
 #include "base/test/scoped_feature_list.h"
@@ -15,11 +14,12 @@
 #include "chrome/browser/browser_process_impl.h"
 #include "chrome/browser/chrome_content_browser_client.h"
 #include "chrome/browser/net/system_network_context_manager.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/network_service_instance.h"
 #include "content/public/common/content_features.h"
@@ -154,19 +154,19 @@ class NetInfoNetworkQualityEstimatorHoldbackBrowserTest
 
   std::string RunScriptExtractString(const std::string& script) {
     return content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(),
-                           script, content::EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                           script)
         .ExtractString();
   }
 
   double RunScriptExtractDouble(const std::string& script) {
     return content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(),
-                           script, content::EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                           script)
         .ExtractDouble();
   }
 
   int RunScriptExtractInt(const std::string& script) {
     return content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(),
-                           script, content::EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                           script)
         .ExtractInt();
   }
 

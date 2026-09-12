@@ -53,10 +53,13 @@ template("compile_ts") {
   ts_library(target_name) {
     forward_variables_from(invoker,
                            [
-                             "allow_js",
                              "deps",
                              "testonly",
                            ])
+
+    if (defined(invoker.tsconfig_base)) {
+      tsconfig_base = invoker.tsconfig_base
+    }
 
     composite = true
 

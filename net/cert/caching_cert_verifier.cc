@@ -4,11 +4,15 @@
 
 #include "net/cert/caching_cert_verifier.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/time/time.h"
+#include "net/base/features.h"
 #include "net/base/net_errors.h"
+#include "net/base/url_util.h"
 
 namespace net {
 
@@ -17,18 +21,17 @@ namespace {
 // The maximum number of cache entries to use for the ExpiringCache.
 const unsigned kMaxCacheEntries = 256;
 
-// The number of seconds to cache entries.
-const unsigned kTTLSecs = 1800;  // 30 minutes.
-
 }  // namespace
 
 CachingCertVerifier::CachingCertVerifier(std::unique_ptr<CertVerifier> verifier)
     : verifier_(std::move(verifier)), cache_(kMaxCacheEntries) {
+  verifier_->AddObserver(this);
   CertDatabase::GetInstance()->AddObserver(this);
 }
 
 CachingCertVerifier::~CachingCertVerifier() {
   CertDatabase::GetInstance()->RemoveObserver(this);
+  verifier_->RemoveObserver(this);
 }
 
 int CachingCertVerifier::Verify(const CertVerifier::RequestParams& params,
@@ -42,30 +45,83 @@ int CachingCertVerifier::Verify(const CertVerifier::RequestParams& params,
 
   const CertVerificationCache::value_type* cached_entry =
       cache_.Get(params, CacheValidityPeriod(base::Time::Now()));
+  UMA_HISTOGRAM_BOOLEAN("Net.CachingCertVerifier.CacheHit",
+                        cached_entry != nullptr);
+  if (IsGoogleHost(params.hostname())) {
+    if (IsGoogleHostWithAlpnH3(params.hostname())) {
+      UMA_HISTOGRAM_BOOLEAN("Net.CachingCertVerifier.CacheHit.GoogleWithAlpnH3",
+                            cached_entry != nullptr);
+    }
+    UMA_HISTOGRAM_BOOLEAN("Net.CachingCertVerifier.CacheHit.Google",
+                          cached_entry != nullptr);
+  }
   if (cached_entry) {
     ++cache_hits_;
     *verify_result = cached_entry->result;
     return cached_entry->error;
   }
 
+  // Use base::TimeTicks to measure duration of verification for metrics, as it
+  // is monotonic time, whereas base::Time is used to measure cache expiry as
+  // wall-clock time.
   base::Time start_time = base::Time::Now();
-  CompletionOnceCallback caching_callback = base::BindOnce(
-      &CachingCertVerifier::OnRequestFinished, base::Unretained(this),
-      config_id_, params, start_time, std::move(callback), verify_result);
+  base::TimeTicks start_time_ticks = base::TimeTicks::Now();
+  // Unretained is safe here as `verifier_` is owned by `this`. If `this` is
+  // deleted, `verifier_' will also be deleted and guarantees that any
+  // outstanding callbacks won't be called. (See CertVerifier::Verify comments.)
+  CompletionOnceCallback caching_callback =
+      base::BindOnce(&CachingCertVerifier::OnRequestFinished,
+                     base::Unretained(this), config_id_, params, start_time,
+                     start_time_ticks, std::move(callback), verify_result);
   int result = verifier_->Verify(params, verify_result,
                                  std::move(caching_callback), out_req, net_log);
   if (result != ERR_IO_PENDING) {
     // Synchronous completion; add directly to cache.
+    base::TimeDelta verify_time = base::TimeTicks::Now() - start_time_ticks;
+    UMA_HISTOGRAM_CUSTOM_TIMES(
+        "Net.CachingCertVerifier.Sync.UncachedVerifyTime", verify_time,
+        base::Milliseconds(1), base::Minutes(10), 100);
+    if (IsGoogleHost(params.hostname())) {
+      if (IsGoogleHostWithAlpnH3(params.hostname())) {
+        UMA_HISTOGRAM_CUSTOM_TIMES(
+            "Net.CachingCertVerifier.Sync.UncachedVerifyTime.GoogleWithAlpnH3",
+            verify_time, base::Milliseconds(1), base::Minutes(10), 100);
+      }
+      UMA_HISTOGRAM_CUSTOM_TIMES(
+          "Net.CachingCertVerifier.Sync.UncachedVerifyTime.Google", verify_time,
+          base::Milliseconds(1), base::Minutes(10), 100);
+    }
     AddResultToCache(config_id_, params, start_time, *verify_result, result);
   }
 
   return result;
 }
 
+void CachingCertVerifier::Verify2QwacBinding(
+    const std::string& binding,
+    const std::string& hostname,
+    const scoped_refptr<X509Certificate>& tls_cert,
+    base::OnceCallback<void(const scoped_refptr<X509Certificate>&)> callback,
+    const NetLogWithSource& net_log) {
+  // 2-QWAC binding verification isn't cached.  This isn't performance
+  // critical and if we wanted to cache, it would make more sense to do at
+  // the 2-QWAC link header processing layer.
+  verifier_->Verify2QwacBinding(binding, hostname, tls_cert,
+                                std::move(callback), net_log);
+}
+
 void CachingCertVerifier::SetConfig(const CertVerifier::Config& config) {
   verifier_->SetConfig(config);
   config_id_++;
   ClearCache();
+}
+
+void CachingCertVerifier::AddObserver(CertVerifier::Observer* observer) {
+  verifier_->AddObserver(observer);
+}
+
+void CachingCertVerifier::RemoveObserver(CertVerifier::Observer* observer) {
+  verifier_->RemoveObserver(observer);
 }
 
 CachingCertVerifier::CachedResult::CachedResult() = default;
@@ -118,9 +174,24 @@ bool CachingCertVerifier::CacheExpirationFunctor::operator()(
 void CachingCertVerifier::OnRequestFinished(uint32_t config_id,
                                             const RequestParams& params,
                                             base::Time start_time,
+                                            base::TimeTicks start_time_ticks,
                                             CompletionOnceCallback callback,
                                             CertVerifyResult* verify_result,
                                             int error) {
+  base::TimeDelta verify_time = base::TimeTicks::Now() - start_time_ticks;
+  UMA_HISTOGRAM_CUSTOM_TIMES("Net.CachingCertVerifier.Async.UncachedVerifyTime",
+                             verify_time, base::Milliseconds(1),
+                             base::Minutes(10), 100);
+  if (IsGoogleHost(params.hostname())) {
+    if (IsGoogleHostWithAlpnH3(params.hostname())) {
+      UMA_HISTOGRAM_CUSTOM_TIMES(
+          "Net.CachingCertVerifier.Async.UncachedVerifyTime.GoogleWithAlpnH3",
+          verify_time, base::Milliseconds(1), base::Minutes(10), 100);
+    }
+    UMA_HISTOGRAM_CUSTOM_TIMES(
+        "Net.CachingCertVerifier.Async.UncachedVerifyTime.Google", verify_time,
+        base::Milliseconds(1), base::Minutes(10), 100);
+  }
   AddResultToCache(config_id, params, start_time, *verify_result, error);
 
   // Now chain to the user's callback, which may delete |this|.
@@ -133,6 +204,10 @@ void CachingCertVerifier::AddResultToCache(
     base::Time start_time,
     const CertVerifyResult& verify_result,
     int error) {
+  if (!base::FeatureList::IsEnabled(net::features::kCacheCertVerification)) {
+    return;
+  }
+
   // If the configuration has changed since this verification was started,
   // don't add it to the cache.
   if (config_id != config_id_)
@@ -164,12 +239,19 @@ void CachingCertVerifier::AddResultToCache(
   CachedResult cached_result;
   cached_result.error = error;
   cached_result.result = verify_result;
-  cache_.Put(
-      params, cached_result, CacheValidityPeriod(start_time),
-      CacheValidityPeriod(start_time, start_time + base::Seconds(kTTLSecs)));
+  base::TimeDelta ttl =
+      std::clamp(base::Seconds(features::kCacheCertVerificationTtlSecs.Get()),
+                 base::Seconds(0), base::Minutes(30));
+  cache_.Put(params, cached_result, CacheValidityPeriod(start_time),
+             CacheValidityPeriod(start_time, start_time + ttl));
 }
 
-void CachingCertVerifier::OnCertDBChanged() {
+void CachingCertVerifier::OnCertVerifierChanged() {
+  config_id_++;
+  ClearCache();
+}
+
+void CachingCertVerifier::OnTrustStoreChanged() {
   config_id_++;
   ClearCache();
 }

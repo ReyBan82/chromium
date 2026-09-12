@@ -5,6 +5,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_PEERCONNECTION_STATS_COLLECTING_DECODER_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_PEERCONNECTION_STATS_COLLECTING_DECODER_H_
 
+#include "base/memory/raw_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/thread_annotations.h"
 #include "base/time/time.h"
 #include "third_party/blink/renderer/platform/peerconnection/stats_collector.h"
@@ -27,13 +29,12 @@ namespace blink {
 //
 // It's assumed that Configure(), Decode(), and RegisterDecodeCompleteCallback()
 // are called on the decode sequence. Decoded() may be called on either the
-// decode sequecene or the media sequence depending on if the underlying decoder
-// is a HW or SW decoder. However, the calls to Decoded() on these sequences are
-// mutual exclusive. Release() may be called on any sequence as long as the
-// decoding sequence has stopped.
+// decode sequence or the media sequence depending on if the underlying decoder
+// is a HW or SW decoder. During a fallback from HW to SW decoding, Decoded()
+// callbacks can arrive concurrently on both sequences. Release() may be called
+// on any sequence as long as the decoding sequence has stopped.
 class PLATFORM_EXPORT StatsCollectingDecoder
-    : private StatsCollector,
-      public webrtc::VideoDecoder,
+    : public webrtc::VideoDecoder,
       private webrtc::DecodedImageCallback {
  public:
   // Creates a StatsCollectingDecoder object for the specified `format`.
@@ -42,9 +43,10 @@ class PLATFORM_EXPORT StatsCollectingDecoder
   // `decoder`. The provided `stats_callback` will be called periodically to
   // push the performance data that has been collected. The lifetime of
   // `stats_callback` must outlive the lifetime of the StatsCollectingDecoder.
-  explicit StatsCollectingDecoder(const webrtc::SdpVideoFormat& format,
-                                  std::unique_ptr<webrtc::VideoDecoder> decoder,
-                                  StoreProcessingStatsCB stats_callback);
+  explicit StatsCollectingDecoder(
+      const webrtc::SdpVideoFormat& format,
+      std::unique_ptr<webrtc::VideoDecoder> decoder,
+      StatsCollector::StoreProcessingStatsCB stats_callback);
 
   ~StatsCollectingDecoder() override;
 
@@ -59,26 +61,32 @@ class PLATFORM_EXPORT StatsCollectingDecoder
   DecoderInfo GetDecoderInfo() const override;
 
  private:
+  void ReportStats(const StatsCollector::Stats& stats) const
+      LOCKS_EXCLUDED(lock_);
+
   // Implementation of webrtc::DecodedImageCallback.
   int32_t Decoded(webrtc::VideoFrame& decodedImage) override;
   void Decoded(webrtc::VideoFrame& decodedImage,
-               absl::optional<int32_t> decode_time_ms,
-               absl::optional<uint8_t> qp) override;
+               std::optional<int32_t> decode_time_ms,
+               std::optional<uint8_t> qp) override;
 
   const std::unique_ptr<webrtc::VideoDecoder> decoder_;
-  webrtc::DecodedImageCallback* decoded_callback_{nullptr};
+  const StatsCollector::StoreProcessingStatsCB stats_callback_;
+  raw_ptr<webrtc::DecodedImageCallback> decoded_callback_{nullptr};
 
   // Lock for variables that are accessed in both Decode() and Decoded(). This
   // is needed because Decode() and Decoded() may be called simultaneously on
   // the decode sequence and the media sequence.
   base::Lock lock_;
 
-  bool first_frame_decoded_{false};
+  bool first_frame_decoded_ GUARDED_BY(lock_) = false;
   // `number_of_new_keyframes_` is used to count the number of processed key
   // frames, which is only known in Decode(). The value of this counter is
   // continuously read out in the Decoded() callback.
   size_t number_of_new_keyframes_ GUARDED_BY(lock_){0};
-  base::TimeTicks last_check_for_simultaneous_decoders_;
+  base::TimeTicks last_check_for_simultaneous_decoders_ GUARDED_BY(lock_);
+
+  StatsCollector stats_collector_ GUARDED_BY(lock_);
 
   SEQUENCE_CHECKER(decoding_sequence_checker_);
 };

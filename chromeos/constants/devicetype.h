@@ -5,6 +5,8 @@
 #ifndef CHROMEOS_CONSTANTS_DEVICETYPE_H_
 #define CHROMEOS_CONSTANTS_DEVICETYPE_H_
 
+#include <string>
+
 #include "base/component_export.h"
 
 namespace chromeos {
@@ -18,8 +20,18 @@ enum class DeviceType {
   kUnknown,  // Unknown fallback device.
 };
 
+namespace form_factor {
+inline constexpr std::string_view kClamshell = "CLAMSHELL";
+}  // namespace form_factor
+
+// Returns the value of form factor, e.g. CONVERTIBLE, CLAMSHELL.
+COMPONENT_EXPORT(CHROMEOS_CONSTANTS) std::string GetFormFactor();
+
 // Returns the current device type, e.g. Chromebook, Chromebox.
 COMPONENT_EXPORT(CHROMEOS_CONSTANTS) DeviceType GetDeviceType();
+
+// Returns true if the device supports subpixel font rendering.
+COMPONENT_EXPORT(CHROMEOS_CONSTANTS) bool DeviceSupportsSubpixelFontRendering();
 
 }  // namespace chromeos
 

@@ -22,7 +22,7 @@ class WebUIDataSourceImplWithPublicData : public WebUIDataSourceImpl {
   WebUIDataSourceImplWithPublicData& operator=(
       const WebUIDataSourceImplWithPublicData&) = delete;
 
-  using WebUIDataSourceImpl::GetLocalizedStrings;
+  using WebUIDataSourceImpl::GetLocalizedStringsForTesting;
   using WebUIDataSourceImpl::URLToIdrOrDefault;
 
  protected:
@@ -41,12 +41,12 @@ class TestWebUIDataSourceImpl : public TestWebUIDataSource {
 
   ~TestWebUIDataSourceImpl() override {}
 
-  const base::Value::Dict* GetLocalizedStrings() override {
-    return source_->GetLocalizedStrings();
+  const base::DictValue& GetLocalizedStrings() override {
+    return source_->GetLocalizedStringsForTesting();
   }
 
   const ui::TemplateReplacements* GetReplacements() override {
-    return source_->source()->GetReplacements();
+    return source_->GetReplacements();
   }
 
   int URLToIdrOrDefault(const GURL& url) override {
@@ -54,6 +54,10 @@ class TestWebUIDataSourceImpl : public TestWebUIDataSource {
   }
 
   WebUIDataSource* GetWebUIDataSource() override { return source_.get(); }
+
+  void AddDataSourceForBrowserContext(BrowserContext* context) override {
+    URLDataManager::AddWebUIDataSource(context, GetWebUIDataSource());
+  }
 
  private:
   scoped_refptr<WebUIDataSourceImplWithPublicData> source_;

@@ -10,14 +10,16 @@ import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.Space;
 
+import androidx.annotation.Px;
+
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.omnibox.R;
 import org.chromium.ui.base.ViewUtils;
 
-/**
- * StatusIconView is a custom view displaying the status icon in the location bar.
- */
+/** StatusIconView is a custom view displaying the status icon in the location bar. */
+@NullMarked
 public class StatusIconView extends LinearLayout {
-    private View mIconViewFrame;
+    private View mIconView;
     private Space mStatusIconHoldingSpace;
 
     public StatusIconView(Context context, AttributeSet attributes) {
@@ -28,8 +30,23 @@ public class StatusIconView extends LinearLayout {
     protected void onFinishInflate() {
         super.onFinishInflate();
 
-        mIconViewFrame = findViewById(R.id.location_bar_status_icon_frame);
+        mIconView = findViewById(R.id.location_bar_status_icon);
         mStatusIconHoldingSpace = findViewById(R.id.location_bar_status_icon_holding_space);
+    }
+
+    /**
+     * Sets the size of the status icon and minimum width of the container.
+     *
+     * @param size The size in pixels.
+     */
+    void setIconSize(@Px int size) {
+        setMinimumWidth(size);
+        var params = mIconView.getLayoutParams();
+        if (params != null) {
+            params.width = size;
+            params.height = size;
+            mIconView.setLayoutParams(params);
+        }
     }
 
     @Override
@@ -37,15 +54,17 @@ public class StatusIconView extends LinearLayout {
         int iconViewFrameVisibility = getIconVisibility();
         if (iconViewFrameVisibility != visibility) {
             boolean wasLayoutPreviouslyRequested = isLayoutRequested();
-            mIconViewFrame.setVisibility(visibility);
+            mIconView.setVisibility(visibility);
             ViewUtils.requestLayout(this, "StatusIconView setVisibility");
             // If the icon's visibility changes while layout is pending, we can end up in a bad
             // state due to a stale measurement cache. Post a task to request layout to force this
-            // visibility change (https://crbug.com/1345552, https://crbug.com/1399457).
+            // visibility change (https://crbug.com/40853631, https://crbug.com/40883150).
             if (wasLayoutPreviouslyRequested && getHandler() != null) {
-                getHandler().post(()
-                                          -> ViewUtils.requestLayout(
-                                                  this, "StatusIconView.setVisibility Runnable"));
+                getHandler()
+                        .post(
+                                () ->
+                                        ViewUtils.requestLayout(
+                                                this, "StatusIconView.setVisibility Runnable"));
             }
         }
         // The holding space should be only be VISIBLE if the icon is GONE. The size should be (the
@@ -53,10 +72,8 @@ public class StatusIconView extends LinearLayout {
         mStatusIconHoldingSpace.setVisibility(visibility == View.GONE ? View.VISIBLE : View.GONE);
     }
 
-    /**
-     * return the status icon's visibility.
-     */
+    /** return the status icon's visibility. */
     int getIconVisibility() {
-        return mIconViewFrame.getVisibility();
+        return mIconView.getVisibility();
     }
 }

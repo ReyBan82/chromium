@@ -9,10 +9,10 @@
 #include <memory>
 
 #include "base/compiler_specific.h"
-#include "base/containers/cxx20_erase_list.h"
 #include "base/functional/bind.h"
-#include "base/lazy_instance.h"
 #include "base/location.h"
+#include "base/no_destructor.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
@@ -26,8 +26,11 @@ namespace net {
 namespace {
 
 typedef std::list<URLRequestTestJob*> URLRequestJobList;
-base::LazyInstance<URLRequestJobList>::Leaky
-    g_pending_jobs = LAZY_INSTANCE_INITIALIZER;
+
+URLRequestJobList& GetPendingJobs() {
+  static base::NoDestructor<URLRequestJobList> pending_jobs;
+  return *pending_jobs;
+}
 
 }  // namespace
 
@@ -127,9 +130,7 @@ std::string URLRequestTestJob::test_error_headers() {
 }
 
 URLRequestTestJob::URLRequestTestJob(URLRequest* request, bool auto_advance)
-    : URLRequestJob(request),
-      auto_advance_(auto_advance),
-      response_headers_length_(0) {}
+    : URLRequestJob(request), auto_advance_(auto_advance) {}
 
 URLRequestTestJob::URLRequestTestJob(URLRequest* request,
                                      const std::string& response_headers,
@@ -143,7 +144,7 @@ URLRequestTestJob::URLRequestTestJob(URLRequest* request,
       response_headers_length_(response_headers.size()) {}
 
 URLRequestTestJob::~URLRequestTestJob() {
-  base::Erase(g_pending_jobs.Get(), this);
+  std::erase(GetPendingJobs(), this);
 }
 
 bool URLRequestTestJob::GetMimeType(std::string* mime_type) const {
@@ -203,20 +204,22 @@ void URLRequestTestJob::SetResponseHeaders(
     const std::string& response_headers) {
   response_headers_ = base::MakeRefCounted<HttpResponseHeaders>(
       net::HttpUtil::AssembleRawHeaders(response_headers));
-  response_headers_length_ = response_headers.size();
+  response_headers_length_ = base::ByteSize(response_headers.size());
 }
 
 int URLRequestTestJob::CopyDataForRead(IOBuffer* buf, int buf_size) {
-  int bytes_read = 0;
-  if (offset_ < static_cast<int>(response_data_.length())) {
-    bytes_read = buf_size;
-    if (bytes_read + offset_ > static_cast<int>(response_data_.length()))
-      bytes_read = static_cast<int>(response_data_.length()) - offset_;
+  size_t bytes_read = 0;
+  if (offset_ < response_data_.length()) {
+    bytes_read = base::checked_cast<size_t>(buf_size);
+    if (bytes_read + offset_ > response_data_.length()) {
+      bytes_read = response_data_.length() - offset_;
+    }
 
-    memcpy(buf->data(), &response_data_.c_str()[offset_], bytes_read);
+    buf->span().copy_prefix_from(
+        base::as_byte_span(response_data_).subspan(offset_, bytes_read));
     offset_ += bytes_read;
   }
-  return bytes_read;
+  return base::checked_cast<int>(bytes_read);
 }
 
 int URLRequestTestJob::ReadRawData(IOBuffer* buf, int buf_size) {
@@ -251,8 +254,8 @@ void URLRequestTestJob::GetLoadTimingInfo(
   load_timing_info->request_start_time = request_start_time;
 }
 
-int64_t URLRequestTestJob::GetTotalReceivedBytes() const {
-  return response_headers_length_ + offset_;
+base::ByteSize URLRequestTestJob::GetTotalReceivedBytes() const {
+  return response_headers_length_ + base::ByteSize(offset_);
 }
 
 bool URLRequestTestJob::IsRedirectResponse(GURL* location,
@@ -275,7 +278,7 @@ void URLRequestTestJob::Kill() {
   stage_ = DONE;
   URLRequestJob::Kill();
   weak_factory_.InvalidateWeakPtrs();
-  base::Erase(g_pending_jobs.Get(), this);
+  std::erase(GetPendingJobs(), this);
 }
 
 void URLRequestTestJob::ProcessNextOperation() {
@@ -287,9 +290,10 @@ void URLRequestTestJob::ProcessNextOperation() {
       stage_ = DATA_AVAILABLE;
       // OK if ReadRawData wasn't called yet.
       if (async_buf_) {
-        int result = CopyDataForRead(async_buf_, async_buf_size_);
-        if (result < 0)
+        int result = CopyDataForRead(async_buf_.get(), async_buf_size_);
+        if (result < 0) {
           NOTREACHED() << "Reads should not fail in DATA_AVAILABLE.";
+        }
         if (NextReadAsync()) {
           // Make all future reads return io pending until the next
           // ProcessNextOperation().
@@ -309,7 +313,6 @@ void URLRequestTestJob::ProcessNextOperation() {
       return;
     default:
       NOTREACHED() << "Invalid stage";
-      return;
   }
 }
 
@@ -324,16 +327,17 @@ void URLRequestTestJob::AdvanceJob() {
                                   weak_factory_.GetWeakPtr()));
     return;
   }
-  g_pending_jobs.Get().push_back(this);
+  GetPendingJobs().push_back(this);
 }
 
 // static
 bool URLRequestTestJob::ProcessOnePendingMessage() {
-  if (g_pending_jobs.Get().empty())
+  if (GetPendingJobs().empty()) {
     return false;
+  }
 
-  URLRequestTestJob* next_job(g_pending_jobs.Get().front());
-  g_pending_jobs.Get().pop_front();
+  URLRequestTestJob* next_job(GetPendingJobs().front());
+  GetPendingJobs().pop_front();
 
   DCHECK(!next_job->auto_advance());  // auto_advance jobs should be in this q
   next_job->ProcessNextOperation();

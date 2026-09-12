@@ -12,5 +12,7 @@ const char kEnterpriseUserKey[] = "attest-ent-user";
 const char kContentProtectionKeyPrefix[] = "attest-cp-";
 const char kSoftBindKey[] = "attest-soft-bind-rsa";
 const char kDeviceSetupKey[] = "attest-device-setup";
+const char kDeviceTrustConnectorKeyPrefix[] = "attest-dtc-";
+const char kBeamDeviceKey[] = "attest-beam-device";
 
 }  // namespace ash::attestation

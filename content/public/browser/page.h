@@ -5,14 +5,21 @@
 #ifndef CONTENT_PUBLIC_BROWSER_PAGE_H_
 #define CONTENT_PUBLIC_BROWSER_PAGE_H_
 
+#include <optional>
+
 #include "base/functional/callback.h"
+#include "base/memory/safe_ref.h"
 #include "base/supports_user_data.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/render_frame_host.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/mojom/manifest/manifest.mojom-forward.h"
+#include "third_party/blink/public/mojom/media/capture_handle_config.mojom.h"
 #include "third_party/perfetto/include/perfetto/tracing/traced_value_forward.h"
 #include "url/gurl.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/scoped_java_ref.h"
+#endif
 
 namespace content {
 
@@ -63,25 +70,29 @@ class CONTENT_EXPORT Page : public base::SupportsUserData {
 
   // The GURL for the page's web application manifest.
   // See https://w3c.github.io/manifest/#web-application-manifest
-  virtual const absl::optional<GURL>& GetManifestUrl() const = 0;
+  virtual const std::optional<GURL>& GetManifestUrl() const = 0;
 
   // The callback invoked when the renderer responds to a request for the main
   // frame document's manifest. The url will be empty if the document specifies
   // no manifest, and the manifest will be empty if any other failures occurred.
   using GetManifestCallback =
-      base::OnceCallback<void(const GURL&, blink::mojom::ManifestPtr)>;
+      base::OnceCallback<void(blink::mojom::ManifestRequestResult,
+                              const GURL&,
+                              blink::mojom::ManifestPtr)>;
 
   // Requests the manifest URL and the Manifest of the main frame's document.
   // |callback| may be called after the WebContents has been destroyed.
   // This must be invoked on the UI thread, |callback| will be invoked on the UI
   // thread.
+  // TODO(https://crbug.com/452053908): Replace usage with PageManifestManager
+  // with PrimaryPageChanged, and eventually remove this GetManifest and
+  // WebContentsObserver::DidUpdateWebManifestURL.
   virtual void GetManifest(GetManifestCallback callback) = 0;
 
   // Returns true iff this Page is primary for the associated `WebContents`
   // (i.e. web_contents->GetPrimaryPage() == this_page). Non-primary pages
-  // include pages in bfcache, portal, prerendering, fenced frames, pending
-  // commit and pending deletion pages. See WebContents::GetPrimaryPage for more
-  // details.
+  // include pages in bfcache, prerendering, fenced frames, pending commit and
+  // pending deletion pages. See WebContents::GetPrimaryPage for more details.
   virtual bool IsPrimary() const = 0;
 
   // Returns the main RenderFrameHost associated with this Page.
@@ -92,9 +103,27 @@ class CONTENT_EXPORT Page : public base::SupportsUserData {
 
   virtual base::WeakPtr<Page> GetWeakPtr() = 0;
 
+  // Returns a SafeRef to this Page.
+  virtual base::SafeRef<Page> GetSafeRef() = 0;
+
   // Whether the most recent page scale factor sent by the main frame's renderer
   // is 1 (i.e. no magnification).
   virtual bool IsPageScaleFactorOne() = 0;
+
+  // Returns the MIME type bound to the Page contents after a navigation.
+  virtual const std::string& GetContentsMimeType() const = 0;
+
+  // Returns the capture handle configuration for this page.
+  virtual const blink::mojom::CaptureHandleConfig& GetCaptureHandleConfig() = 0;
+
+  // Sets the capture handle configuration for this page.
+  virtual void SetCaptureHandleConfig(
+      blink::mojom::CaptureHandleConfigPtr config) = 0;
+
+#if BUILDFLAG(IS_ANDROID)
+  // Returns a reference to Page Java counterpart.
+  virtual base::android::ScopedJavaLocalRef<jobject> GetJavaPage() = 0;
+#endif
 
  private:
   // This method is needed to ensure that PageImpl can both implement a Page's

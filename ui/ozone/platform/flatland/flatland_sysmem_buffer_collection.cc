@@ -7,16 +7,18 @@
 #include <fuchsia/sysmem/cpp/fidl.h>
 #include <lib/zx/eventpair.h>
 
+#include <bit>
 #include <tuple>
 
-#include "base/bits.h"
+#include "base/containers/flat_set.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/fuchsia/koid.h"
+#include "base/numerics/checked_math.h"
 #include "base/task/current_thread.h"
 #include "build/build_config.h"
+#include "flatland_sysmem_buffer_collection.h"
 #include "gpu/vulkan/vulkan_device_queue.h"
 #include "gpu/vulkan/vulkan_function_pointers.h"
-#include "ui/gfx/buffer_format_util.h"
 #include "ui/ozone/platform/flatland/flatland_surface_factory.h"
 #include "ui/ozone/platform/flatland/flatland_sysmem_native_pixmap.h"
 
@@ -24,58 +26,108 @@ namespace ui {
 
 namespace {
 
-size_t RoundUp(size_t value, size_t alignment) {
-  return ((value + alignment - 1) / alignment) * alignment;
-}
 
-VkFormat VkFormatForBufferFormat(gfx::BufferFormat buffer_format) {
-  switch (buffer_format) {
-    case gfx::BufferFormat::YVU_420:
-      return VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
-
-    case gfx::BufferFormat::YUV_420_BIPLANAR:
-      return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-
-    case gfx::BufferFormat::R_8:
-      return VK_FORMAT_R8_UNORM;
-
-    case gfx::BufferFormat::RG_88:
-      return VK_FORMAT_R8G8_UNORM;
-
-    case gfx::BufferFormat::BGRA_8888:
-    case gfx::BufferFormat::BGRX_8888:
-      return VK_FORMAT_B8G8R8A8_UNORM;
-
-    case gfx::BufferFormat::RGBA_8888:
-    case gfx::BufferFormat::RGBX_8888:
-      return VK_FORMAT_R8G8B8A8_UNORM;
-
-    default:
-      NOTREACHED();
-      return VK_FORMAT_UNDEFINED;
+VkFormat ToTextureVkFormat(viz::SharedImageFormat format) {
+  if (format == viz::MultiPlaneFormat::kYV12) {
+    return VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+  } else if (format == viz::MultiPlaneFormat::kNV12) {
+    return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+  } else if (format == viz::SinglePlaneFormat::kR_8) {
+    return VK_FORMAT_R8_UNORM;
+  } else if (format == viz::SinglePlaneFormat::kRG_88) {
+    return VK_FORMAT_R8G8_UNORM;
+  } else if (format == viz::SinglePlaneFormat::kBGRA_8888 ||
+             format == viz::SinglePlaneFormat::kBGRX_8888) {
+    return VK_FORMAT_B8G8R8A8_UNORM;
+  } else if (format == viz::SinglePlaneFormat::kRGBA_8888 ||
+             format == viz::SinglePlaneFormat::kRGBX_8888) {
+    return VK_FORMAT_R8G8B8A8_UNORM;
+  } else {
+    NOTREACHED();
   }
 }
 
-size_t GetBytesPerPixel(gfx::BufferFormat buffer_format) {
-  switch (buffer_format) {
-    case gfx::BufferFormat::YVU_420:
-    case gfx::BufferFormat::YUV_420_BIPLANAR:
-    case gfx::BufferFormat::R_8:
-      return 1U;
-
-    case gfx::BufferFormat::RG_88:
-      return 2U;
-
-    case gfx::BufferFormat::BGRA_8888:
-    case gfx::BufferFormat::BGRX_8888:
-    case gfx::BufferFormat::RGBA_8888:
-    case gfx::BufferFormat::RGBX_8888:
-      return 4U;
-
-    default:
-      NOTREACHED();
-      return 1;
+size_t GetBytesPerPixel(viz::SharedImageFormat format) {
+  if (format.is_multi_plane()) {
+    CHECK(format == viz::MultiPlaneFormat::kNV12 ||
+          format == viz::MultiPlaneFormat::kYV12);
+    return 1U;
   }
+  return format.BytesPerPixel();
+}
+struct BufferLayout {
+  size_t stride = 0;
+  size_t plane_offset = 0;
+  size_t plane_size = 0;
+
+  // uv_plane_offset and uv_plane_size are only calculated and used for NV12
+  // (2-plane YUV).
+  size_t uv_plane_offset = 0;
+  size_t uv_plane_size = 0;
+};
+
+std::optional<BufferLayout> CalculateBufferLayout(
+    const fuchsia::sysmem2::ImageFormatConstraints& constraints,
+    gfx::Size size,
+    viz::SharedImageFormat format,
+    size_t vmo_usable_start,
+    size_t buffer_size) {
+  if (constraints.has_max_size()) {
+    const fuchsia::math::SizeU& max_size = constraints.max_size();
+    if (static_cast<uint32_t>(size.width()) > max_size.width ||
+        static_cast<uint32_t>(size.height()) > max_size.height) {
+      return std::nullopt;
+    }
+  }
+
+  base::CheckedNumeric<size_t> checked_stride = size.width();
+  checked_stride *= GetBytesPerPixel(format);
+  checked_stride =
+      checked_stride.Max(static_cast<size_t>(constraints.min_bytes_per_row()));
+
+  size_t divisor = constraints.bytes_per_row_divisor();
+  if (divisor > 0) {
+    checked_stride = ((checked_stride + divisor - 1) / divisor) * divisor;
+  }
+
+  base::CheckedNumeric<size_t> checked_plane_size =
+      checked_stride * size.height();
+  base::CheckedNumeric<size_t> checked_plane_end =
+      checked_plane_size + vmo_usable_start;
+
+  // Checking validity of `checked_plane_end` also implicitly validates
+  // `checked_plane_size` and `checked_stride`, because they are chained
+  // together.
+  if (!checked_plane_end.IsValid() ||
+      checked_plane_end.ValueOrDie() > buffer_size) {
+    return std::nullopt;
+  }
+
+  BufferLayout layout;
+  layout.stride = checked_stride.ValueOrDie();
+  layout.plane_offset = vmo_usable_start;
+  layout.plane_size = checked_plane_size.ValueOrDie();
+
+  if (format == viz::MultiPlaneFormat::kNV12) {
+    base::CheckedNumeric<size_t> checked_uv_plane_offset = checked_plane_end;
+    base::CheckedNumeric<size_t> checked_uv_plane_size =
+        checked_stride * ((static_cast<size_t>(size.height()) + 1) / 2);
+    base::CheckedNumeric<size_t> checked_uv_plane_end =
+        checked_uv_plane_offset + checked_uv_plane_size;
+
+    // Checking validity of `checked_uv_plane_end` also implicitly validates
+    // `checked_uv_plane_size` and `checked_uv_plane_offset` because they are
+    // chained together.
+    if (!checked_uv_plane_end.IsValid() ||
+        checked_uv_plane_end.ValueOrDie() > buffer_size) {
+      return std::nullopt;
+    }
+
+    layout.uv_plane_offset = checked_uv_plane_offset.ValueOrDie();
+    layout.uv_plane_size = checked_uv_plane_size.ValueOrDie();
+  }
+
+  return layout;
 }
 
 bool IsYuvVkFormat(VkFormat format) {
@@ -90,7 +142,6 @@ bool IsYuvVkFormat(VkFormat format) {
       return false;
     default:
       NOTREACHED();
-      return false;
   }
 }
 
@@ -124,21 +175,21 @@ VkImageFormatConstraintsInfoFUCHSIA GetDefaultImageFormatConstraintsInfo(
 
   static const VkSysmemColorSpaceFUCHSIA kSrgbColorSpace = {
       VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
-      static_cast<uint32_t>(fuchsia::sysmem::ColorSpaceType::SRGB)};
+      static_cast<uint32_t>(fuchsia::images2::ColorSpace::SRGB)};
 
   static const VkSysmemColorSpaceFUCHSIA kYuvDefaultColorSpaces[] = {
       {VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
-       static_cast<uint32_t>(fuchsia::sysmem::ColorSpaceType::REC709)},
+       static_cast<uint32_t>(fuchsia::images2::ColorSpace::REC709)},
       {VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
-       static_cast<uint32_t>(fuchsia::sysmem::ColorSpaceType::REC601_NTSC)},
-      {VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
-       static_cast<uint32_t>(
-           fuchsia::sysmem::ColorSpaceType::REC601_NTSC_FULL_RANGE)},
-      {VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
-       static_cast<uint32_t>(fuchsia::sysmem::ColorSpaceType::REC601_PAL)},
+       static_cast<uint32_t>(fuchsia::images2::ColorSpace::REC601_NTSC)},
       {VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
        static_cast<uint32_t>(
-           fuchsia::sysmem::ColorSpaceType::REC601_PAL_FULL_RANGE)},
+           fuchsia::images2::ColorSpace::REC601_NTSC_FULL_RANGE)},
+      {VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
+       static_cast<uint32_t>(fuchsia::images2::ColorSpace::REC601_PAL)},
+      {VK_STRUCTURE_TYPE_SYSMEM_COLOR_SPACE_FUCHSIA, nullptr,
+       static_cast<uint32_t>(
+           fuchsia::images2::ColorSpace::REC601_PAL_FULL_RANGE)},
   };
 
   bool is_yuv = IsYuvVkFormat(create_info.format);
@@ -210,26 +261,20 @@ std::unique_ptr<ImageConstraintsInfo> InitializeImageConstraintsInfo(
 
 // static
 bool FlatlandSysmemBufferCollection::IsNativePixmapConfigSupported(
-    gfx::BufferFormat format,
+    viz::SharedImageFormat format,
     gfx::BufferUsage usage) {
-  switch (format) {
-    case gfx::BufferFormat::YUV_420_BIPLANAR:
-    case gfx::BufferFormat::R_8:
-    case gfx::BufferFormat::RG_88:
-    case gfx::BufferFormat::RGBA_8888:
-    case gfx::BufferFormat::RGBX_8888:
-    case gfx::BufferFormat::BGRA_8888:
-    case gfx::BufferFormat::BGRX_8888:
-      break;
-
-    default:
-      return false;
+  auto kSupportedFormats = base::flat_set<viz::SharedImageFormat>(
+      {viz::SinglePlaneFormat::kR_8, viz::SinglePlaneFormat::kRG_88,
+       viz::SinglePlaneFormat::kRGBA_8888, viz::SinglePlaneFormat::kBGRA_8888,
+       viz::SinglePlaneFormat::kRGBX_8888, viz::SinglePlaneFormat::kBGRX_8888,
+       viz::MultiPlaneFormat::kNV12});
+  if (!kSupportedFormats.contains(format)) {
+    return false;
   }
+
   switch (usage) {
     case gfx::BufferUsage::SCANOUT:
     case gfx::BufferUsage::GPU_READ:
-      break;
-
     case gfx::BufferUsage::SCANOUT_CPU_READ_WRITE:
     case gfx::BufferUsage::GPU_READ_CPU_READ_WRITE:
       break;
@@ -240,23 +285,49 @@ bool FlatlandSysmemBufferCollection::IsNativePixmapConfigSupported(
   return true;
 }
 
-FlatlandSysmemBufferCollection::FlatlandSysmemBufferCollection() = default;
+// static
+bool FlatlandSysmemBufferCollection::IsNativePixmapConfigSupported(
+    viz::SharedImageFormat format,
+    NativePixmapUsageSet usage) {
+  auto kSupportedFormats = base::flat_set<viz::SharedImageFormat>(
+      {viz::SinglePlaneFormat::kR_8, viz::SinglePlaneFormat::kRG_88,
+       viz::SinglePlaneFormat::kRGBA_8888, viz::SinglePlaneFormat::kBGRA_8888,
+       viz::SinglePlaneFormat::kRGBX_8888, viz::SinglePlaneFormat::kBGRX_8888,
+       viz::MultiPlaneFormat::kNV12});
+  if (!kSupportedFormats.contains(format)) {
+    return false;
+  }
+  // Only supported native pixmap usages.
+  if (usage == NativePixmapBufferUsage::kScanout ||
+      usage == NativePixmapBufferUsage::kGpuRead ||
+      usage == NativePixmapBufferUsage::kScanoutCpuReadWrite ||
+      usage == NativePixmapBufferUsage::kGpuReadCpuReadWrite) {
+    return true;
+  }
+  return false;
+}
+
+FlatlandSysmemBufferCollection::FlatlandSysmemBufferCollection()
+    : base::RefCountedDeleteOnSequence<FlatlandSysmemBufferCollection>(
+          base::SequencedTaskRunner::GetCurrentDefault()) {}
 
 bool FlatlandSysmemBufferCollection::Initialize(
-    fuchsia::sysmem::Allocator_Sync* sysmem_allocator,
-    fuchsia::ui::composition::Allocator* flatland_allocator,
+    fuchsia::sysmem2::Allocator_Sync* sysmem_allocator,
+    RegisterBufferCollectionCallback register_buffer_collection,
     FlatlandSurfaceFactory* flatland_surface_factory,
     zx::eventpair handle,
     zx::channel sysmem_token,
     gfx::Size size,
-    gfx::BufferFormat format,
-    gfx::BufferUsage usage,
+    viz::SharedImageFormat format,
+    NativePixmapUsageSet usage,
     VkDevice vk_device,
-    size_t min_buffer_count,
-    bool register_with_flatland_allocator) {
-  DCHECK(IsNativePixmapConfigSupported(format, usage));
-  DCHECK(!collection_);
-  DCHECK(!vk_buffer_collection_);
+    size_t min_buffer_count) {
+  if (!IsNativePixmapConfigSupported(format, usage)) {
+    LOG(ERROR) << "Unsupported format/usage: " << format.ToString();
+    return false;
+  }
+  CHECK(!collection_);
+  CHECK(!vk_buffer_collection_);
 
   handle_ = std::move(handle);
   auto koid = base::GetKoid(handle_);
@@ -272,7 +343,10 @@ bool FlatlandSysmemBufferCollection::Initialize(
   if (size.IsEmpty()) {
     // Buffer collection that doesn't have explicit size is expected to be
     // shared with other participants, who will determine the actual image size.
-    DCHECK(sysmem_token);
+    if (!sysmem_token) {
+      LOG(ERROR) << "Sysmem token is required for empty size.";
+      return false;
+    }
 
     // Set nominal size of 1x1, which will be used only for
     // vkSetBufferCollectionConstraintsFUCHSIA(). The actual size of the
@@ -281,6 +355,10 @@ bool FlatlandSysmemBufferCollection::Initialize(
     // by the values passed to CreateVkImage().
     min_size_ = gfx::Size(1, 1);
   } else {
+    if (!size.GetCheckedArea().IsValid() || !format.VerifySizeInBytes(size)) {
+      LOG(ERROR) << "Invalid size: " << size.ToString();
+      return false;
+    }
     min_size_ = size;
   }
 
@@ -289,12 +367,13 @@ bool FlatlandSysmemBufferCollection::Initialize(
   vk_device_ = vk_device;
   is_protected_ = false;
 
-  fuchsia::sysmem::BufferCollectionTokenSyncPtr collection_token;
+  fuchsia::sysmem2::BufferCollectionTokenSyncPtr collection_token;
   if (sysmem_token) {
     collection_token.Bind(std::move(sysmem_token));
   } else {
     zx_status_t status = sysmem_allocator->AllocateSharedCollection(
-        collection_token.NewRequest());
+        std::move(fuchsia::sysmem2::AllocatorAllocateSharedCollectionRequest{}
+                      .set_token_request(collection_token.NewRequest())));
     if (status != ZX_OK) {
       ZX_DLOG(ERROR, status)
           << "fuchsia.sysmem.Allocator.AllocateSharedCollection()";
@@ -302,18 +381,18 @@ bool FlatlandSysmemBufferCollection::Initialize(
     }
   }
 
-  return InitializeInternal(sysmem_allocator, flatland_allocator,
-                            std::move(collection_token),
-                            register_with_flatland_allocator, min_buffer_count);
+  return InitializeInternal(sysmem_allocator,
+                            std::move(register_buffer_collection),
+                            std::move(collection_token), min_buffer_count);
 }
 
 void FlatlandSysmemBufferCollection::InitializeForTesting(
     zx::eventpair handle,
-    gfx::BufferUsage usage) {
+    NativePixmapUsageSet usage) {
   handle_ = std::move(handle);
   id_ = base::GetKoid(handle_).value();
 
-  if (usage == gfx::BufferUsage::SCANOUT) {
+  if (usage == NativePixmapBufferUsage::kScanout) {
     // Scanout buffers need to be registered with flatland.
     fuchsia::ui::composition::BufferCollectionExportToken export_token;
     zx::eventpair::create(0, &export_token.value,
@@ -321,60 +400,79 @@ void FlatlandSysmemBufferCollection::InitializeForTesting(
   }
 }
 
+void FlatlandSysmemBufferCollection::InitializeForTesting(  // IN-TEST
+    zx::eventpair handle,
+    NativePixmapUsageSet usage,
+    viz::SharedImageFormat format,
+    fuchsia::sysmem2::BufferCollectionInfo buffers_info,
+    VkDevice vk_device) {
+  InitializeForTesting(std::move(handle), usage);  // IN-TEST
+  usage_ = usage;
+  format_ = format;
+  vk_device_ = vk_device;
+  buffers_info_ = std::move(buffers_info);
+  buffer_size_ = buffers_info_.settings().buffer_settings().size_bytes();
+}
+
 scoped_refptr<gfx::NativePixmap>
 FlatlandSysmemBufferCollection::CreateNativePixmap(
     gfx::NativePixmapHandle handle,
     gfx::Size size) {
+  if (size.IsEmpty() || !size.GetCheckedArea().IsValid() ||
+      !format_.VerifySizeInBytes(size)) {
+    LOG(ERROR) << "Invalid size: " << size.ToString();
+    return nullptr;
+  }
+
   CHECK_LT(handle.buffer_index, num_buffers());
 
+  auto layout = CalculateBufferLayout(
+      buffers_info_.settings().image_format_constraints(), size, format_,
+      buffers_info_.buffers()[handle.buffer_index].vmo_usable_start(),
+      buffer_size_);
+  if (!layout) {
+    LOG(ERROR) << "Requested NativePixmap size " << size.ToString()
+               << " exceeds the allocated sysmem buffer size or has invalid "
+                  "layout.";
+    return nullptr;
+  }
+
   DCHECK_EQ(base::GetRelatedKoid(handle.buffer_collection_handle).value(), id_);
+  // sysmem always fills out settings(), buffer_settings(), coherency_domain()
   handle.ram_coherency =
-      buffers_info_.settings.buffer_settings.coherency_domain ==
-      fuchsia::sysmem::CoherencyDomain::RAM;
+      buffers_info_.settings().buffer_settings().coherency_domain() ==
+      fuchsia::sysmem2::CoherencyDomain::RAM;
 
   // `handle.planes` need to be filled in only for mappable buffers.
   if (!is_mappable())
     return new FlatlandSysmemNativePixmap(this, std::move(handle), size);
 
   zx::vmo main_plane_vmo;
-  DCHECK(buffers_info_.buffers[handle.buffer_index].vmo.is_valid());
-  zx_status_t status = buffers_info_.buffers[handle.buffer_index].vmo.duplicate(
-      ZX_RIGHT_SAME_RIGHTS, &main_plane_vmo);
+  DCHECK(buffers_info_.buffers()[handle.buffer_index].vmo().is_valid());
+  zx_status_t status =
+      buffers_info_.buffers()[handle.buffer_index].vmo().duplicate(
+          ZX_RIGHT_SAME_RIGHTS, &main_plane_vmo);
   if (status != ZX_OK) {
     ZX_DLOG(ERROR, status) << "zx_handle_duplicate";
     return nullptr;
   }
 
-  const fuchsia::sysmem::ImageFormatConstraints& format =
-      buffers_info_.settings.image_format_constraints;
-
-  // The logic should match LogicalBufferCollection::Allocate().
-  size_t stride =
-      RoundUp(std::max(static_cast<size_t>(format.min_bytes_per_row),
-                       size.width() * GetBytesPerPixel(format_)),
-              format.bytes_per_row_divisor);
-  size_t plane_offset =
-      buffers_info_.buffers[handle.buffer_index].vmo_usable_start;
-  size_t plane_size = stride * size.height();
-  handle.planes.emplace_back(stride, plane_offset, plane_size,
-                             std::move(main_plane_vmo));
-
   // For YUV images add a second plane.
-  if (format_ == gfx::BufferFormat::YUV_420_BIPLANAR) {
-    size_t uv_plane_offset = plane_offset + plane_size;
-    size_t uv_plane_size = plane_size / 2;
-
+  if (format_ == viz::MultiPlaneFormat::kNV12) {
     zx::vmo uv_plane_vmo;
-    status =
-        handle.planes[0].vmo.duplicate(ZX_RIGHT_SAME_RIGHTS, &uv_plane_vmo);
+    status = main_plane_vmo.duplicate(ZX_RIGHT_SAME_RIGHTS, &uv_plane_vmo);
     if (status != ZX_OK) {
       ZX_DLOG(ERROR, status) << "zx_handle_duplicate";
       return nullptr;
     }
 
-    handle.planes.emplace_back(stride, uv_plane_offset, uv_plane_size,
-                               std::move(uv_plane_vmo));
-    DCHECK_LE(uv_plane_offset + uv_plane_size, buffer_size_);
+    handle.planes.emplace_back(layout->stride, layout->plane_offset,
+                               layout->plane_size, std::move(main_plane_vmo));
+    handle.planes.emplace_back(layout->stride, layout->uv_plane_offset,
+                               layout->uv_plane_size, std::move(uv_plane_vmo));
+  } else {
+    handle.planes.emplace_back(layout->stride, layout->plane_offset,
+                               layout->plane_size, std::move(main_plane_vmo));
   }
 
   return new FlatlandSysmemNativePixmap(this, std::move(handle), size);
@@ -389,6 +487,28 @@ bool FlatlandSysmemBufferCollection::CreateVkImage(
     VkDeviceMemory* vk_device_memory,
     VkDeviceSize* mem_allocation_size) {
   DCHECK_CALLED_ON_VALID_THREAD(vulkan_thread_checker_);
+
+  if (size.IsEmpty() || !size.GetCheckedArea().IsValid() ||
+      !format_.VerifySizeInBytes(size)) {
+    LOG(ERROR) << "Invalid size: " << size.ToString();
+    return false;
+  }
+
+  // Verify that the image size and layout fit within the allocated buffer.
+  if (!CalculateBufferLayout(
+          buffers_info_.settings().image_format_constraints(), size, format_,
+          buffers_info_.buffers()[buffer_index].vmo_usable_start(),
+          buffer_size_)) {
+    LOG(ERROR) << "Requested VkImage size " << size.ToString()
+               << " exceeds the allocated sysmem buffer size.";
+    return false;
+  }
+
+  if (buffer_index >= num_buffers()) {
+    DLOG(ERROR) << "Invalid buffer_index=" << buffer_index
+                << " (num_buffers=" << num_buffers() << ")";
+    return false;
+  }
 
   if (vk_device_ != vk_device) {
     DLOG(FATAL) << "Tried to import NativePixmap that was created for a "
@@ -424,9 +544,21 @@ bool FlatlandSysmemBufferCollection::CreateVkImage(
   VkMemoryRequirements requirements;
   vkGetImageMemoryRequirements(vk_device, *vk_image, &requirements);
 
+  if (requirements.size > buffer_size_) {
+    LOG(WARNING) << "VkImage memory requirements (" << requirements.size
+                 << ") exceed the allocated sysmem buffer size ("
+                 << buffer_size_ << "). This is a known negotiation issue.";
+  }
+
   uint32_t viable_memory_types =
       properties.memoryTypeBits & requirements.memoryTypeBits;
-  uint32_t memory_type = base::bits::CountTrailingZeroBits(viable_memory_types);
+  if (viable_memory_types == 0) {
+    DLOG(ERROR) << "No viable memory types found.";
+    vkDestroyImage(vk_device_, *vk_image, nullptr);
+    *vk_image = VK_NULL_HANDLE;
+    return false;
+  }
+  uint32_t memory_type = std::countr_zero(viable_memory_types);
 
   VkMemoryDedicatedAllocateInfoKHR dedicated_allocate = {
       VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR};
@@ -494,58 +626,64 @@ FlatlandSysmemBufferCollection::~FlatlandSysmemBufferCollection() {
   }
 
   if (collection_)
-    collection_->Close();
+    collection_->Release();
 }
 
 bool FlatlandSysmemBufferCollection::InitializeInternal(
-    fuchsia::sysmem::Allocator_Sync* sysmem_allocator,
-    fuchsia::ui::composition::Allocator* flatland_allocator,
-    fuchsia::sysmem::BufferCollectionTokenSyncPtr collection_token,
-    bool register_with_flatland_allocator,
+    fuchsia::sysmem2::Allocator_Sync* sysmem_allocator,
+    RegisterBufferCollectionCallback register_buffer_collection,
+    fuchsia::sysmem2::BufferCollectionTokenSyncPtr collection_token,
     size_t min_buffer_count) {
-  fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>
+  fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
       collection_token_for_vulkan;
-  collection_token->Duplicate(ZX_RIGHT_SAME_RIGHTS,
-                              collection_token_for_vulkan.NewRequest());
+  collection_token->Duplicate(std::move(
+      fuchsia::sysmem2::BufferCollectionTokenDuplicateRequest{}
+          .set_rights_attenuation_mask(ZX_RIGHT_SAME_RIGHTS)
+          .set_token_request(collection_token_for_vulkan.NewRequest())));
 
-  fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>
+  fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>
       collection_token_for_flatland;
-  if (register_with_flatland_allocator) {
-    collection_token->Duplicate(ZX_RIGHT_SAME_RIGHTS,
-                                collection_token_for_flatland.NewRequest());
+  if (register_buffer_collection) {
+    collection_token->Duplicate(std::move(
+        fuchsia::sysmem2::BufferCollectionTokenDuplicateRequest{}
+            .set_rights_attenuation_mask(ZX_RIGHT_SAME_RIGHTS)
+            .set_token_request(collection_token_for_flatland.NewRequest())));
   }
 
-  zx_status_t status = collection_token->Sync();
+  fuchsia::sysmem2::Node_Sync_Result sync_result;
+  zx_status_t status = collection_token->Sync(&sync_result);
   if (status != ZX_OK) {
     ZX_DLOG(ERROR, status) << "fuchsia.sysmem.BufferCollectionToken.Sync()";
     return false;
   }
 
-  status = sysmem_allocator->BindSharedCollection(std::move(collection_token),
-                                                  collection_.NewRequest());
+  status = sysmem_allocator->BindSharedCollection(
+      std::move(fuchsia::sysmem2::AllocatorBindSharedCollectionRequest{}
+                    .set_token(std::move(collection_token))
+                    .set_buffer_collection_request(collection_.NewRequest())));
   if (status != ZX_OK) {
     ZX_DLOG(ERROR, status) << "fuchsia.sysmem.Allocator.BindSharedCollection()";
     return false;
   }
 
   // Set |min_buffer_count| constraints.
-  fuchsia::sysmem::BufferCollectionConstraints constraints;
+  fuchsia::sysmem2::BufferCollectionConstraints constraints;
   if (is_mappable()) {
-    constraints.usage.cpu =
-        fuchsia::sysmem::cpuUsageRead | fuchsia::sysmem::cpuUsageWrite;
+    constraints.mutable_usage()->set_cpu(fuchsia::sysmem2::CPU_USAGE_READ |
+                                         fuchsia::sysmem2::CPU_USAGE_WRITE);
 
-    constraints.has_buffer_memory_constraints = true;
-    constraints.buffer_memory_constraints.ram_domain_supported = true;
-    constraints.buffer_memory_constraints.cpu_domain_supported = true;
+    auto& memory_constraints = *constraints.mutable_buffer_memory_constraints();
+    memory_constraints.set_ram_domain_supported(true);
+    memory_constraints.set_cpu_domain_supported(true);
   } else {
-    constraints.usage.none = fuchsia::sysmem::noneUsage;
+    constraints.mutable_usage()->set_none(fuchsia::sysmem2::NONE_USAGE);
   }
 
-  constraints.min_buffer_count = min_buffer_count;
-  constraints.image_format_constraints_count = 0;
+  constraints.set_min_buffer_count(min_buffer_count);
 
-  status = collection_->SetConstraints(/*has_constraints=*/true,
-                                       std::move(constraints));
+  status = collection_->SetConstraints(std::move(
+      fuchsia::sysmem2::BufferCollectionSetConstraintsRequest{}.set_constraints(
+          std::move(constraints))));
   if (status != ZX_OK) {
     ZX_DLOG(ERROR, status)
         << "fuchsia.sysmem.BufferCollection.SetConstraints()";
@@ -553,25 +691,17 @@ bool FlatlandSysmemBufferCollection::InitializeInternal(
   }
 
   // Set Flatland allocator constraints.
-  if (register_with_flatland_allocator) {
-    DCHECK(flatland_allocator);
+  if (register_buffer_collection) {
     fuchsia::ui::composition::BufferCollectionExportToken export_token;
     status = zx::eventpair::create(0, &export_token.value,
                                    &flatland_import_token_.value);
 
     fuchsia::ui::composition::RegisterBufferCollectionArgs args;
     args.set_export_token(std::move(export_token));
-    args.set_buffer_collection_token(std::move(collection_token_for_flatland));
+    args.set_buffer_collection_token2(std::move(collection_token_for_flatland));
     args.set_usage(
         fuchsia::ui::composition::RegisterBufferCollectionUsage::DEFAULT);
-    flatland_allocator->RegisterBufferCollection(
-        std::move(args),
-        [](fuchsia::ui::composition::Allocator_RegisterBufferCollection_Result
-               result) {
-          if (result.is_err()) {
-            LOG(FATAL) << "RegisterBufferCollection failed";
-          }
-        });
+    std::move(register_buffer_collection).Run(std::move(args));
   }
 
   // Set Vulkan constraints.
@@ -593,7 +723,7 @@ bool FlatlandSysmemBufferCollection::InitializeInternal(
   VkImageCreateInfo image_create_info;
   InitializeImageCreateInfo(&image_create_info, min_size_);
 
-  // TODO(crbug.com/1289315): Instead of always allowing protected memory,
+  // TODO(crbug.com/42050415): Instead of always allowing protected memory,
   // Chrome should query if the Vulkan physical device supports protected
   // memory and only set the flag if it is supported.
   auto image_constraints_info = InitializeImageConstraintsInfo(
@@ -608,24 +738,34 @@ bool FlatlandSysmemBufferCollection::InitializeInternal(
     return false;
   }
 
-  zx_status_t wait_status;
-  status = collection_->WaitForBuffersAllocated(&wait_status, &buffers_info_);
+  fuchsia::sysmem2::BufferCollection_WaitForAllBuffersAllocated_Result
+      wait_result;
+  status = collection_->WaitForAllBuffersAllocated(&wait_result);
   if (status != ZX_OK) {
     ZX_DLOG(ERROR, status) << "fuchsia.sysmem.BufferCollection failed";
     return false;
   }
-
-  if (wait_status != ZX_OK) {
-    ZX_DLOG(ERROR, status) << "fuchsia.sysmem.BufferCollection::"
-                              "WaitForBuffersAllocated() failed.";
+  if (!wait_result.is_response()) {
+    if (wait_result.is_framework_err()) {
+      LOG(ERROR) << "fuchsia.sysmem.BufferCollection::WaitForBuffersAllocated()"
+          " failed (framework_err): "
+          << fidl::ToUnderlying(wait_result.framework_err());
+    } else {
+      LOG(ERROR) << "fuchsia.sysmem.BufferCollection::WaitForBuffersAllocated()"
+          " failed (err): " << static_cast<uint32_t>(wait_result.err());
+    }
     return false;
   }
+  buffers_info_ =
+      std::move(*wait_result.response().mutable_buffer_collection_info());
 
-  DCHECK_GE(buffers_info_.buffer_count, min_buffer_count);
-  DCHECK(buffers_info_.settings.has_image_format_constraints);
+  // sysmem always fills out buffers(), settings(), image_format_constraints(),
+  // size_bytes(), is_secure()
+  DCHECK_GE(buffers_info_.buffers().size(), min_buffer_count);
+  DCHECK(buffers_info_.settings().has_image_format_constraints());
 
-  buffer_size_ = buffers_info_.settings.buffer_settings.size_bytes;
-  is_protected_ = buffers_info_.settings.buffer_settings.is_secure;
+  buffer_size_ = buffers_info_.settings().buffer_settings().size_bytes();
+  is_protected_ = buffers_info_.settings().buffer_settings().is_secure();
 
   handle_watch_ =
       std::make_unique<base::MessagePumpForIO::ZxHandleWatchController>(
@@ -652,7 +792,7 @@ void FlatlandSysmemBufferCollection::InitializeImageCreateInfo(
   *vk_image_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   vk_image_info->flags = is_protected_ ? VK_IMAGE_CREATE_PROTECTED_BIT : 0u;
   vk_image_info->imageType = VK_IMAGE_TYPE_2D;
-  vk_image_info->format = VkFormatForBufferFormat(format_);
+  vk_image_info->format = ToTextureVkFormat(format_);
   vk_image_info->extent = VkExtent3D{static_cast<uint32_t>(size.width()),
                                      static_cast<uint32_t>(size.height()), 1};
   vk_image_info->mipLevels = 1;
@@ -664,7 +804,7 @@ void FlatlandSysmemBufferCollection::InitializeImageCreateInfo(
   vk_image_info->usage = VK_IMAGE_USAGE_SAMPLED_BIT |
                          VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-  if (usage_ == gfx::BufferUsage::SCANOUT) {
+  if (usage_.Has(NativePixmapUsage::kRendering)) {
     vk_image_info->usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
   }
 
@@ -677,14 +817,12 @@ void FlatlandSysmemBufferCollection::OnZxHandleSignalled(zx_handle_t handle,
   DCHECK_EQ(handle, handle_.get());
   DCHECK_EQ(signals, ZX_EVENTPAIR_PEER_CLOSED);
 
-  // Keep a reference to `this` to ensure it's not destroyed while calling the
-  // callbacks.
-  scoped_refptr<FlatlandSysmemBufferCollection> self(this);
-
-  for (auto& callback : on_released_) {
+  // Move the callbacks to the stack since running them may release the last
+  // reference to `this`.
+  std::vector<base::OnceClosure> callbacks = std::move(on_released_);
+  for (auto& callback : callbacks) {
     std::move(callback).Run();
   }
-  on_released_.clear();
 }
 
 }  // namespace ui

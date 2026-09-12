@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <string>
+#include <string_view>
 
 #include "sandbox/win/src/crosscall_server.h"
 #include "sandbox/win/src/nt_internals.h"
@@ -24,8 +25,8 @@ class FileSystemPolicy {
   // 'name' is the file or directory name.
   // 'semantics' is the desired semantics for the open or create.
   // 'policy' is the policy generator to which the rules are going to be added.
-  static bool GenerateRules(const wchar_t* name,
-                            Semantics semantics,
+  static bool GenerateRules(std::wstring_view name,
+                            FileSemantics semantics,
                             LowLevelPolicy* policy);
 
   // Performs the desired policy action on a create request with an
@@ -92,10 +93,6 @@ class FileSystemPolicy {
                                        IO_STATUS_BLOCK* io_block,
                                        NTSTATUS* nt_status);
 };
-
-// Expands the path and check if it's a reparse point. Returns false if the path
-// cannot be trusted.
-bool PreProcessName(std::wstring* path);
 
 // Corrects global paths to have a correctly escaped NT prefix at the
 // beginning. If the name has no NT prefix (either normal or escaped)

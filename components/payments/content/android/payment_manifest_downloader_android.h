@@ -6,12 +6,19 @@
 #define COMPONENTS_PAYMENTS_CONTENT_ANDROID_PAYMENT_MANIFEST_DOWNLOADER_ANDROID_H_
 
 #include <jni.h>
+
 #include <memory>
 
 #include "base/android/jni_android.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "components/payments/core/payment_manifest_downloader.h"
+#include "components/payments/content/payment_manifest_downloader.h"
+#include "mojo/public/cpp/bindings/remote.h"
+#include "services/network/public/mojom/url_loader_factory.mojom.h"
+
+namespace content {
+class WeakDocumentPtr;
+}  // namespace content
 
 namespace network {
 class SharedURLLoaderFactory;
@@ -28,7 +35,9 @@ class PaymentManifestDownloaderAndroid {
   PaymentManifestDownloaderAndroid(
       std::unique_ptr<ErrorLogger> log,
       base::WeakPtr<CSPChecker> csp_checker,
-      scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory);
+      scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
+      mojo::Remote<network::mojom::URLLoaderFactory> url_loader_factory_rfh,
+      content::WeakDocumentPtr initiator_document);
 
   PaymentManifestDownloaderAndroid(const PaymentManifestDownloaderAndroid&) =
       delete;
@@ -39,22 +48,18 @@ class PaymentManifestDownloaderAndroid {
 
   void DownloadPaymentMethodManifest(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& jcaller,
-      const base::android::JavaParamRef<jobject>& jmerchant_origin,
-      const base::android::JavaParamRef<jobject>& jurl,
-      const base::android::JavaParamRef<jobject>& jcallback);
+      const base::android::JavaRef<jobject>& jmerchant_origin,
+      const base::android::JavaRef<jobject>& jurl,
+      const base::android::JavaRef<jobject>& jcallback);
 
   void DownloadWebAppManifest(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& jcaller,
-      const base::android::JavaParamRef<jobject>&
-          jpayment_method_manifest_origin,
-      const base::android::JavaParamRef<jobject>& jurl,
-      const base::android::JavaParamRef<jobject>& jcallback);
+      const base::android::JavaRef<jobject>& jpayment_method_manifest_origin,
+      const base::android::JavaRef<jobject>& jurl,
+      const base::android::JavaRef<jobject>& jcallback);
 
   // Deletes this object.
-  void Destroy(JNIEnv* env,
-               const base::android::JavaParamRef<jobject>& jcaller);
+  void Destroy(JNIEnv* env);
 
  private:
   PaymentManifestDownloader downloader_;

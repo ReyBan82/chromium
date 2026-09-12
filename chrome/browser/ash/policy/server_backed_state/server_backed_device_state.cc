@@ -6,11 +6,9 @@
 
 #include <string>
 
+#include "ash/constants/ash_policy_pref_names.h"
 #include "base/notreached.h"
 #include "base/values.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/browser_process_platform_part.h"
-#include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 
 namespace policy {
@@ -18,6 +16,8 @@ namespace policy {
 const char kDeviceStateManagementDomain[] = "management_domain";
 const char kDeviceStateMode[] = "device_mode";
 const char kDeviceStateDisabledMessage[] = "disabled_message";
+const char kDeviceStateLocationTrackingEnabled[] =
+    "location_tracking_enabled";
 const char kDeviceStatePackagedLicense[] = "packaged_license";
 const char kDeviceStateLicenseType[] = "license_type";
 const char kDeviceStateAssignedUpgradeType[] = "assigned_upgrade_type";
@@ -26,6 +26,7 @@ const char kDeviceStateAssignedUpgradeType[] = "assigned_upgrade_type";
 const char kDeviceStateInitialModeEnrollmentEnforced[] = "enrollment-enforced";
 const char kDeviceStateInitialModeEnrollmentZeroTouch[] =
     "enrollment-zero-touch";
+const char kDeviceStateInitialModeTokenEnrollment[] = "token-enrollment";
 // Modes for a device after secondary state determination (FRE).
 const char kDeviceStateRestoreModeReEnrollmentRequested[] =
     "re-enrollment-requested";
@@ -45,10 +46,9 @@ const char kDeviceStateAssignedUpgradeTypeChromeEnterprise[] =
     "enterprise";
 const char kDeviceStateAssignedUpgradeTypeKiosk[] = "kiosk";
 
-DeviceStateMode GetDeviceStateMode() {
+DeviceStateMode GetDeviceStateMode(const PrefService& local_state) {
   const std::string* device_state_mode =
-      g_browser_process->local_state()
-          ->GetDict(prefs::kServerBackedDeviceState)
+      local_state.GetDict(ash::prefs::kServerBackedDeviceState)
           .FindString(kDeviceStateMode);
   if (!device_state_mode || device_state_mode->empty())
     return RESTORE_MODE_NONE;
@@ -64,9 +64,11 @@ DeviceStateMode GetDeviceStateMode() {
     return INITIAL_MODE_ENROLLMENT_ENFORCED;
   if (*device_state_mode == kDeviceStateInitialModeEnrollmentZeroTouch)
     return INITIAL_MODE_ENROLLMENT_ZERO_TOUCH;
+  if (*device_state_mode == kDeviceStateInitialModeTokenEnrollment) {
+    return INITIAL_MODE_ENROLLMENT_TOKEN_ENROLLMENT;
+  }
 
   NOTREACHED();
-  return RESTORE_MODE_NONE;
 }
 
 }  // namespace policy

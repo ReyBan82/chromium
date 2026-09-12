@@ -1,4 +1,6 @@
-sauski@google.com
+rainhard@chromium.org
+sideyilmaz@chromium.org
+tommasin@chromium.org
 
-per-file cookies_page*=rainhard@chromium.org
-per-file privacy_guide_promo*=rainhard@chromium.org
+# Happiness Tracking Surveys (HaTS)
+per-file hats_browser_proxy.ts=file://chrome/browser/ui/hats/OWNERS

@@ -5,25 +5,31 @@
 #ifndef CHROME_BROWSER_EXTENSIONS_API_PASSWORDS_PRIVATE_PASSWORDS_PRIVATE_DELEGATE_H_
 #define CHROME_BROWSER_EXTENSIONS_API_PASSWORDS_PRIVATE_PASSWORDS_PRIVATE_DELEGATE_H_
 
-#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/functional/callback.h"
+#include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece_forward.h"
+#include "base/observer_list_types.h"
 #include "chrome/common/extensions/api/passwords_private.h"
-#include "components/password_manager/core/browser/bulk_leak_check_service.h"
-#include "components/password_manager/core/browser/ui/export_progress_status.h"
-#include "components/password_manager/core/browser/ui/import_results.h"
+#include "components/password_manager/core/browser/export/export_progress_status.h"
+#include "components/password_manager/core/browser/import/import_results.h"
+#include "components/password_manager/core/browser/leak_detection/bulk_leak_check_service.h"
+#include "components/password_manager/core/browser/password_store/actionable_error.h"
 #include "components/password_manager/core/browser/ui/insecure_credentials_manager.h"
+#include "components/password_manager/core/browser/ui/saved_passwords_presenter.h"
 #include "extensions/browser/extension_function.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace content {
 class WebContents;
+}
+
+namespace password_manager {
+struct CredentialUIEntry;
 }
 
 namespace extensions {
@@ -31,18 +37,46 @@ namespace extensions {
 // Delegate used by the chrome.passwordsPrivate API to facilitate working with
 // saved passwords and password exceptions (reading, adding, changing, removing,
 // import/export) and to notify listeners when these values have changed.
+//
+// It also acts as the shared context for modern WebUI Mojo interfaces within a
+// Profile. Because it orchestrates memory-intensive domain services (e.g.,
+// SavedPasswordsPresenter), it is ref-counted; a single instance is shared as
+// the source of truth across all concurrent WebUI tabs, and it is automatically
+// destroyed when the last tab is closed.
+//
+// Observers registered here will receive global state broadcasts (e.g.,
+// Export Progress) guaranteeing consistent UI state across all open tabs.
 class PasswordsPrivateDelegate
-    : public base::SupportsWeakPtr<PasswordsPrivateDelegate>,
-      public base::RefCounted<PasswordsPrivateDelegate> {
+    : public base::RefCounted<PasswordsPrivateDelegate> {
  public:
+  class Observer : public base::CheckedObserver {
+   public:
+    virtual void OnPasswordsExportProgress(
+        password_manager::ExportProgressStatus status,
+        const std::string& folder_name) {}
+  };
+
+  virtual void AddObserver(Observer* observer) = 0;
+  virtual void RemoveObserver(Observer* observer) = 0;
+
   using ImportResultsCallback =
       base::OnceCallback<void(const api::passwords_private::ImportResults&)>;
 
+  using FetchFamilyResultsCallback = base::OnceCallback<void(
+      const api::passwords_private::FamilyFetchResults&)>;
+
+  using ShareRecipients = std::vector<api::passwords_private::RecipientInfo>;
+
   using PlaintextPasswordCallback =
-      base::OnceCallback<void(absl::optional<std::u16string>)>;
+      base::OnceCallback<void(std::optional<std::u16string>)>;
 
   using StartPasswordCheckCallback =
       base::OnceCallback<void(password_manager::BulkLeakCheckService::State)>;
+
+  using AuthenticationCallback = base::OnceCallback<void(bool)>;
+
+  virtual password_manager::SavedPasswordsPresenter*
+  GetSavedPasswordsPresenter() = 0;
 
   // Gets the saved passwords list.
   using UiEntries = std::vector<api::passwords_private::PasswordUiEntry>;
@@ -61,20 +95,15 @@ class PasswordsPrivateDelegate
 
   // Checks whether the given |url| meets the requirements to save a password
   // for it (e.g. valid, has proper scheme etc.) and returns the corresponding
-  // UrlCollection on success and absl::nullopt otherwise.
-  virtual absl::optional<api::passwords_private::UrlCollection>
-  GetUrlCollection(const std::string& url) = 0;
-
-  // Returns whether the account store is a default location for saving
-  // passwords. False means the device store is a default one. Must be called
-  // when the current user has already opted-in for account storage.
-  virtual bool IsAccountStoreDefault(content::WebContents* web_contents) = 0;
+  // UrlCollection on success and std::nullopt otherwise.
+  virtual std::optional<api::passwords_private::UrlCollection> GetUrlCollection(
+      const std::string& url) = 0;
 
   // Adds the |username| and |password| corresponding to the |url| to the
   // specified store and returns true if the operation succeeded. Fails and
   // returns false if the data is invalid or an entry with such origin and
   // username already exists. Updates the default store to the used one on
-  // success if the user has opted-in for account storage.
+  // success if account storage is enabled.
   // |url|: The url of the password entry, must be a valid http(s) ip/web
   //        address as is or after adding http(s) scheme.
   // |username|: The username to save, can be empty.
@@ -84,23 +113,26 @@ class PasswordsPrivateDelegate
                            const std::u16string& username,
                            const std::u16string& password,
                            const std::u16string& note,
-                           bool use_account_store,
-                           content::WebContents* web_contents) = 0;
+                           bool use_account_store) = 0;
 
-  // Changes the username and password corresponding to |ids|.
-  // |ids|: The ids for the password entries being updated.
-  // |params|: The struct which holds the new username, password and note.
-  // Returns the ids if the change was successful (can be the same ids if the
-  // username and the password didn't change), nullopt otherwise.
-  virtual absl::optional<int> ChangeSavedPassword(
-      int id,
-      const api::passwords_private::ChangeSavedPasswordParams& params) = 0;
+  // Updates a credential. Not all attributes can be updated.
+  // |credential|: The credential to be updated. Matched to an existing
+  // credential by id.
+  // Returns std::nullopt if the credential could not be found or updated.
+  // Otherwise, returns the newly updated credential. Note that the new
+  // credential may have a different ID, so it should replace the old one.
+  virtual bool ChangeCredential(
+      const api::passwords_private::PasswordUiEntry& credential) = 0;
 
-  // Removes the saved password entry corresponding to the |id| in the
-  // specified |from_stores|. Any invalid id will be ignored.
-  virtual void RemoveSavedPassword(
+  // Removes the credential entry corresponding to the |id| in the specified
+  // |from_stores|. Any invalid id will be ignored.
+  virtual void RemoveCredential(
       int id,
       api::passwords_private::PasswordStoreSet from_stores) = 0;
+
+  // Removes the credential entry corresponding to the |id|. Any invalid id will
+  // be ignored.
+  virtual void RemoveBackupPassword(int id) = 0;
 
   // Removes the password exception entry corresponding to |id|. Any invalid id
   // will be ignored.
@@ -114,22 +146,28 @@ class PasswordsPrivateDelegate
   // |id| the id created when going over the list of saved passwords.
   // |reason| The reason why the plaintext password is requested.
   // |callback| The callback that gets invoked with the saved password if it
-  // could be obtained successfully, or absl::nullopt otherwise.
-  // |web_contents| The web content object used as the UI; will be used to show
-  //     an OS-level authentication dialog if necessary.
+  // could be obtained successfully, or std::nullopt otherwise.
   virtual void RequestPlaintextPassword(
       int id,
       api::passwords_private::PlaintextReason reason,
-      PlaintextPasswordCallback callback,
-      content::WebContents* web_contents) = 0;
+      PlaintextPasswordCallback callback) = 0;
+
+  // Copies the plain text backup password for entry corresponding to the |id|
+  // generated for each entry of the password list.
+  // |id| the id created when going over the list of saved passwords.
+  // |callback| The callback that gets invoked with true if the copy was
+  // successful, or false otherwise.
+  virtual void CopyPlaintextBackupPassword(
+      int id,
+      base::OnceCallback<void(bool)> callback) = 0;
 
   // Requests the full PasswordUiEntry (with filled password) with the given id.
-  // Returns the full PasswordUiEntry with |callback|. Returns |absl::nullopt|
+  // Returns the full PasswordUiEntry with |callback|. Returns |std::nullopt|
   // if no matching credential with |id| is found.
   // |id| the id created when going over the list of saved passwords.
   // |reason| The reason why the full PasswordUiEntry is requested.
   // |callback| The callback that gets invoked with the PasswordUiEntry if it
-  // could be obtained successfully, or absl::nullopt otherwise.
+  // could be obtained successfully, or std::nullopt otherwise.
   // |web_contents| The web content object used as the UI; will be used to show
   //     an OS-level authentication dialog if necessary.
   virtual void RequestCredentialsDetails(
@@ -142,8 +180,16 @@ class PasswordsPrivateDelegate
   // no-op if any of these is true: |id| is invalid; |id| corresponds to a
   // password already stored in the account; or the user is not using the
   // account-scoped password storage.
-  virtual void MovePasswordsToAccount(const std::vector<int>& ids,
-                                      content::WebContents* web_contents) = 0;
+  virtual void MovePasswordsToAccount(const std::vector<int>& ids) = 0;
+
+  // Fetches family members of the current user for the password sharing flow.
+  // |callback|: Used to communicate the status of a request to fetch family
+  //  members, as well as the data returned in the response.
+  virtual void FetchFamilyMembers(FetchFamilyResultsCallback callback) = 0;
+
+  // Sends sharing invitations for a credential with given |id| to the
+  // |recipients|.
+  virtual void SharePassword(int id, const ShareRecipients& recipients) = 0;
 
   // Trigger the password import procedure, allowing the user to select a file
   // containing passwords to import.
@@ -155,30 +201,41 @@ class PasswordsPrivateDelegate
       ImportResultsCallback results_callback,
       content::WebContents* web_contents) = 0;
 
-  // Trigger the password export procedure, allowing the user to save a file
-  // containing their passwords. |callback| will be called with an error
-  // message if the request is rejected, because another export is in progress.
-  virtual void ExportPasswords(
-      base::OnceCallback<void(const std::string&)> callback,
-      content::WebContents* web_contents) = 0;
+  // Resumes the password import process when user has selected which passwords
+  // to replace.
+  // |selected_ids|: The ids of passwords that need to be replaced.
+  // |results_callback|: Used to communicate the status and summary of the
+  // import process.
+  virtual void ContinueImport(const std::vector<int>& selected_ids,
+                              ImportResultsCallback results_callback) = 0;
 
-  // Cancel any ongoing export.
-  virtual void CancelExportPasswords() = 0;
+  // Resets the PasswordImporter if it is in the CONFLICTS/FINISHED state and
+  // the user closes the dialog. Only when the PasswordImporter is in FINISHED
+  // state, |deleteFile| option is taken into account.
+  // |delete_file|: whether to trigger deletion of the last imported file.
+  virtual void ResetImporter(bool delete_file) = 0;
+
+  enum class ExportPasswordsResult {
+    kSuccess,
+    kInProgress,
+    kReauthFailed,
+  };
+
+  // Trigger the password export procedure, allowing the user to save a file
+  // containing their passwords. |accepted_callback| will be called to notify
+  // whether the operation is accepted.
+  virtual void ExportPasswords(
+      base::OnceCallback<void(ExportPasswordsResult)> accepted_callback,
+      content::WebContents* web_contents) = 0;
 
   // Get the most recent progress status.
   virtual api::passwords_private::ExportProgressStatus
   GetExportProgressStatus() = 0;
 
   // Whether the current signed-in user (aka unconsented primary account) has
-  // opted in to use the Google account storage for passwords (as opposed to
+  // the Google account storage for passwords is enabled (as opposed to
   // local/profile storage).
-  virtual bool IsOptedInForAccountStorage() = 0;
-
-  // Sets whether the user is opted in to use the Google account storage for
-  // passwords. If |opt_in| is true and the user is not currently opted in,
-  // will trigger a reauth flow.
-  virtual void SetAccountStorageOptIn(bool opt_in,
-                                      content::WebContents* web_contents) = 0;
+  virtual bool IsAccountStorageActive() = 0;
 
   // Obtains information about insecure credentials. This includes the last
   // time a check was run, as well as all insecure credentials that are present
@@ -201,15 +258,9 @@ class PasswordsPrivateDelegate
   virtual bool UnmuteInsecureCredential(
       const api::passwords_private::PasswordUiEntry& credential) = 0;
 
-  // Records that a change password flow was started for |credential|.
-  virtual void RecordChangePasswordFlowStarted(
-      const api::passwords_private::PasswordUiEntry& credential) = 0;
-
   // Requests to start a check for insecure passwords. Invokes |callback|
   // once a check is running or the request was stopped via StopPasswordCheck().
   virtual void StartPasswordCheck(StartPasswordCheckCallback callback) = 0;
-  // Stops a check for insecure passwords.
-  virtual void StopPasswordCheck() = 0;
 
   // Returns the current status of the password check.
   virtual api::passwords_private::PasswordCheckStatus
@@ -222,19 +273,49 @@ class PasswordsPrivateDelegate
   GetInsecureCredentialsManager() = 0;
 
   // Restarts the authentication timer if it is running.
-  virtual void ExtendAuthValidity() = 0;
+  virtual void RestartAuthTimer() = 0;
 
   // Switches Biometric authentication before filling state after
-  // successful authentication.
+  // successful authentication.  Invokes `callback` with true if the
+  // authentication was successful, with false otherwise.
   virtual void SwitchBiometricAuthBeforeFillingState(
-      content::WebContents* web_contents) = 0;
+      AuthenticationCallback callback) = 0;
 
   // Triggers a dialog for installing the shortcut for PasswordManager page.
   virtual void ShowAddShortcutDialog(content::WebContents* web_contents) = 0;
 
   // Shows the file with the exported passwords in OS shell.
-  virtual void ShowExportedFileInShell(content::WebContents* web_contents,
-                                       std::string file_path) = 0;
+  virtual void ShowLastExportedFileInShell(
+      content::WebContents* web_contents) = 0;
+
+  // Starts the flow for changing the password manager PIN.
+  virtual void ChangePasswordManagerPin(
+      content::WebContents* web_contents,
+      base::OnceCallback<void(bool)> success_callback) = 0;
+
+  // Replies true if it's allowed to change the password manager PIN, if it
+  // exists.
+  virtual void IsPasswordManagerPinAvailable(
+      content::WebContents* web_contents,
+      base::OnceCallback<void(bool)> pin_available_callback) = 0;
+
+  // Starts the flow for disconnecting a Desktop Chrome client from the cloud
+  // authenticator.
+  virtual void DisconnectCloudAuthenticator(
+      base::OnceCallback<void(bool)> success_callback) = 0;
+
+  virtual bool IsConnectedToCloudAuthenticator() = 0;
+
+  // Returns the current actionable error.
+  virtual password_manager::ActionableError GetActionableError() = 0;
+
+  virtual void DeleteAllPasswordManagerData(
+      base::OnceCallback<void(bool)> success_callback) = 0;
+
+  virtual std::optional<password_manager::CredentialUIEntry>
+  GetCredentialFromId(int credential_id) = 0;
+
+  virtual base::WeakPtr<PasswordsPrivateDelegate> AsWeakPtr() = 0;
 
  protected:
   virtual ~PasswordsPrivateDelegate() = default;

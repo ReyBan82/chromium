@@ -9,11 +9,8 @@
 
 #include <vector>
 
-#include "base/android/jni_android.h"
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/ui/passwords/manage_passwords_state.h"
-#include "components/device_reauth/biometric_authenticator.h"
-#include "components/password_manager/core/browser/password_manager_metrics_util.h"
 #include "content/public/browser/web_contents_observer.h"
 
 namespace content {
@@ -42,21 +39,14 @@ class AccountChooserDialogAndroid : public content::WebContentsObserver {
 
   // Closes the dialog and propagates that no credentials was chosen.
   // Destroys |this|.
-  void CancelDialog(JNIEnv* env,
-                    const base::android::JavaParamRef<jobject>& obj);
+  void CancelDialog(JNIEnv* env);
 
   // Propagates the credentials chosen by the user.
   // Results in |this| being destroyed only when the credential handling
   // finishes.
   void OnCredentialClicked(JNIEnv* env,
-                           const base::android::JavaParamRef<jobject>& obj,
-                           jint credential_item,
-                           jboolean sign_button_clicked);
-
-  // Opens new tab with page which explains the Smart Lock branding.
-  // Destroys |this|.
-  void OnLinkClicked(JNIEnv* env,
-                     const base::android::JavaParamRef<jobject>& obj);
+                           int32_t credential_item,
+                           bool sign_button_clicked);
 
   // content::WebContentsObserver overrides:
   void WebContentsDestroyed() override;
@@ -73,24 +63,10 @@ class AccountChooserDialogAndroid : public content::WebContentsObserver {
   // required, the handling is not considered done until that finishes.
   bool HandleCredentialChosen(size_t index, bool sign_button_clicked);
 
-  // Called when the biometric re-auth finished. |index| is the index
-  // of the chosen credential and |auth_succeeded| is the result of the
-  // re-authentication. Destroys |this|.
-  void OnReauthCompleted(size_t index, bool auth_succeded);
-
-  // Logs |action| depending on how many credentials are displayed in the
-  // dialog.
-  void LogAction(
-      password_manager::metrics_util::AccountChooserUserAction action);
-
   raw_ptr<content::WebContents> web_contents_ = nullptr;
 
   // Client used to retrieve the biometric authenticator.
   raw_ptr<password_manager::PasswordManagerClient> client_ = nullptr;
-
-  // Authenticator used to trigger a biometric re-auth before passing the
-  // credential to the site.
-  scoped_refptr<device_reauth::BiometricAuthenticator> authenticator_;
 
   ManagePasswordsState passwords_data_;
   url::Origin origin_;

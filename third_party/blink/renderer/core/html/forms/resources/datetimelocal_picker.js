@@ -29,7 +29,9 @@ class DateTimeLocalPicker extends HTMLElement {
 
     this.className = DateTimeLocalPicker.ClassName;
 
-    this.datePicker_ = new CalendarPicker(config.mode, config);
+    // We own the popup size; tell the inner calendar not to resize it.
+    this.datePicker_ =
+        new CalendarPicker(config.mode, {...config, skipWindowResize: true});
     this.timePicker_ = new TimePicker(config);
     this.append(this.datePicker_.element, this.timePicker_);
 
@@ -41,7 +43,7 @@ class DateTimeLocalPicker extends HTMLElement {
     this.addEventListener('keydown', this.onKeyDown_);
     this.addEventListener('click', this.onClick_);
 
-    window.addEventListener('resize', this.onWindowResize_, {once: true});
+    runOnceWhenLaidOut((event) => this.onWindowResize_(event));
   };
 
   onKeyDown_ = (event) => {
@@ -53,7 +55,7 @@ class DateTimeLocalPicker extends HTMLElement {
         if (!event.target.matches(
                 '.calendar-navigation-button, .month-popup-button, .year-list-view')) {
           window.pagePopupController.setValueAndClosePopup(
-              0, this.selectedValue);
+              0, this.selectedValue, /* is_keyboard_event= */ true);
         } else if (event.target.matches(
                        '.calendar-navigation-button, .year-list-view')) {
           // Navigating with the previous/next arrows may change selection,

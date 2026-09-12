@@ -10,6 +10,7 @@
 #include "ash/quick_pair/message_stream/fake_bluetooth_socket.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/test/metrics/histogram_tester.h"
@@ -25,21 +26,21 @@
 
 namespace {
 
-const std::vector<uint8_t> kModelIdBytes = {/*mesage_group=*/0x03,
-                                            /*mesage_code=*/0x01,
-                                            /*additional_data_length=*/0x00,
-                                            0x03,
-                                            /*additional_data=*/0xAA,
-                                            0xBB,
-                                            0xCC};
-const std::vector<uint8_t> kInvalidBytes = {/*mesage_group=*/0x03,
-                                            /*mesage_code=*/0x09,
-                                            /*additional_data_length=*/0x00,
-                                            0x03,
-                                            /*additional_data=*/0xAA,
-                                            0xBB,
-                                            0xCC};
-const std::vector<uint8_t> kModelIdBleAddressBytes = {
+constexpr uint8_t kModelIdBytes[] = {/*mesage_group=*/0x03,
+                                     /*mesage_code=*/0x01,
+                                     /*additional_data_length=*/0x00,
+                                     0x03,
+                                     /*additional_data=*/0xAA,
+                                     0xBB,
+                                     0xCC};
+constexpr uint8_t kInvalidBytes[] = {/*mesage_group=*/0x03,
+                                     /*mesage_code=*/0x09,
+                                     /*additional_data_length=*/0x00,
+                                     0x03,
+                                     /*additional_data=*/0xAA,
+                                     0xBB,
+                                     0xCC};
+constexpr uint8_t kModelIdBleAddressBytes[] = {
     /*mesage_group=*/0x03,
     /*mesage_code=*/0x01,
     /*additional_data_length=*/0x00,
@@ -57,34 +58,34 @@ const std::vector<uint8_t> kModelIdBleAddressBytes = {
     0xDD,
     0xEE,
     0xFF};
-const std::vector<uint8_t> kNakBytes = {/*mesage_group=*/0xFF,
-                                        /*mesage_code=*/0x02,
+constexpr uint8_t kNakBytes[] = {/*mesage_group=*/0xFF,
+                                 /*mesage_code=*/0x02,
+                                 /*additional_data_length=*/0x00,
+                                 0x03,
+                                 /*additional_data=*/0x00,
+                                 0x04,
+                                 0x01};
+constexpr uint8_t kRingDeviceBytes[] = {/*mesage_group=*/0x04,
+                                        /*mesage_code=*/0x01,
                                         /*additional_data_length=*/0x00,
-                                        0x03,
-                                        /*additional_data=*/0x00,
-                                        0x04,
-                                        0x01};
-const std::vector<uint8_t> kRingDeviceBytes = {/*mesage_group=*/0x04,
-                                               /*mesage_code=*/0x01,
-                                               /*additional_data_length=*/0x00,
-                                               0x02,
-                                               /*additional_data=*/0x01,
-                                               0x3C};
-const std::vector<uint8_t> kPlatformBytes = {/*mesage_group=*/0x03,
-                                             /*mesage_code=*/0x08,
-                                             /*additional_data_length=*/0x00,
-                                             0x02,
-                                             /*additional_data=*/0x01,
-                                             0x1C};
-const std::vector<uint8_t> kActiveComponentBytes = {
+                                        0x02,
+                                        /*additional_data=*/0x01,
+                                        0x3C};
+constexpr uint8_t kPlatformBytes[] = {/*mesage_group=*/0x03,
+                                      /*mesage_code=*/0x08,
+                                      /*additional_data_length=*/0x00,
+                                      0x02,
+                                      /*additional_data=*/0x01,
+                                      0x1C};
+constexpr uint8_t kActiveComponentBytes[] = {
     /*mesage_group=*/0x03, /*mesage_code=*/0x06,
     /*additional_data_length=*/0x00, 0x01,
     /*additional_data=*/0x03};
-const std::vector<uint8_t> kRemainingBatteryTimeBytes = {
+constexpr uint8_t kRemainingBatteryTimeBytes[] = {
     /*mesage_group=*/0x03,           /*mesage_code=*/0x04,
     /*additional_data_length=*/0x00, 0x02,
     /*additional_data=*/0x01,        0x0F};
-const std::vector<uint8_t> kBatteryUpdateBytes = {
+constexpr uint8_t kBatteryUpdateBytes[] = {
     /*mesage_group=*/0x03,
     /*mesage_code=*/0x03,
     /*additional_data_length=*/0x00,
@@ -92,24 +93,24 @@ const std::vector<uint8_t> kBatteryUpdateBytes = {
     /*additional_data=*/0x57,
     0x41,
     0x7F};
-const std::vector<uint8_t> kEnableSilenceModeBytes = {
+constexpr uint8_t kEnableSilenceModeBytes[] = {
     /*mesage_group=*/0x01,
     /*mesage_code=*/0x01,
     /*additional_data_length=*/0x00, 0x00};
-const std::vector<uint8_t> kCompanionAppLogBufferFullBytes = {
+constexpr uint8_t kCompanionAppLogBufferFullBytes[] = {
     /*mesage_group=*/0x02,
     /*mesage_code=*/0x01,
     /*additional_data_length=*/0x00, 0x00};
-const std::string kModelIdString = "AABBCC";
-const std::string kBleAddressString = "AA:BB:CC:DD:EE:FF";
+constexpr char kModelIdString[] = "AABBCC";
+constexpr char kBleAddressString[] = "AA:BB:CC:DD:EE:FF";
 
 constexpr int kMaxRetryCount = 10;
 constexpr int kMessageStorageCapacity = 1000;
 constexpr char kTestDeviceAddress[] = "11:12:13:14:15:16";
 
-const char kMessageStreamReceiveResultMetric[] =
+constexpr char kMessageStreamReceiveResultMetric[] =
     "Bluetooth.ChromeOS.FastPair.MessageStream.Receive.Result";
-const char kMessageStreamReceiveErrorMetric[] =
+constexpr char kMessageStreamReceiveErrorMetric[] =
     "Bluetooth.ChromeOS.FastPair.MessageStream.Receive.ErrorReason";
 
 class FakeQuickPairProcessManager
@@ -153,7 +154,7 @@ class FakeQuickPairProcessManager
   mojo::PendingRemote<ash::quick_pair::mojom::FastPairDataParser>
       fast_pair_data_parser_;
   std::unique_ptr<ash::quick_pair::FastPairDataParser> data_parser_;
-  base::test::SingleThreadTaskEnvironment* task_enviornment_;
+  raw_ptr<base::test::SingleThreadTaskEnvironment> task_enviornment_;
   ProcessStoppedCallback on_process_stopped_callback_;
 };
 
@@ -181,8 +182,9 @@ class MessageStreamTest : public testing::Test, public MessageStream::Observer {
     return static_cast<MockQuickPairProcessManager*>(process_manager_.get());
   }
 
-  void SetSuccessMessageStreamMessage(const std::vector<uint8_t>& bytes) {
-    fake_socket_->SetIOBufferFromBytes(bytes);
+  void SetSuccessMessageStreamMessage(base::span<const uint8_t> bytes) {
+    fake_socket_->SetIOBufferFromBytes(
+        std::vector<uint8_t>(bytes.begin(), bytes.end()));
   }
 
   void TriggerReceiveSuccessCallback() {
@@ -272,7 +274,7 @@ class MessageStreamTest : public testing::Test, public MessageStream::Observer {
   mojo::SharedRemote<mojom::FastPairDataParser> data_parser_remote_;
   mojo::PendingRemote<mojom::FastPairDataParser> fast_pair_data_parser_;
   std::unique_ptr<FastPairDataParser> data_parser_;
-  FakeQuickPairProcessManager* fake_process_manager_;
+  raw_ptr<FakeQuickPairProcessManager> fake_process_manager_;
   bool battery_update_ = false;
   uint16_t remaining_battery_time_ = 0;
   bool enable_silence_mode_ = false;

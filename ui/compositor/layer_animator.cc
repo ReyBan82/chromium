@@ -7,9 +7,9 @@
 #include <stddef.h>
 
 #include <memory>
+#include <vector>
 
 #include "base/check_op.h"
-#include "base/containers/cxx20_erase.h"
 #include "base/observer_list.h"
 #include "base/trace_event/trace_event.h"
 #include "cc/animation/animation.h"
@@ -53,9 +53,10 @@ LayerAnimator::LayerAnimator(base::TimeDelta transition_duration)
 }
 
 LayerAnimator::~LayerAnimator() {
-  for (size_t i = 0; i < running_animations_.size(); ++i) {
-    if (running_animations_[i].is_sequence_alive())
-      running_animations_[i].sequence()->OnAnimatorDestroyed();
+  for (const auto& running_animation : running_animations_) {
+    if (running_animation.is_sequence_alive()) {
+      running_animation.sequence()->OnAnimatorDestroyed();
+    }
   }
   ClearAnimationsInternal();
   delegate_ = nullptr;
@@ -63,13 +64,13 @@ LayerAnimator::~LayerAnimator() {
 }
 
 // static
-LayerAnimator* LayerAnimator::CreateDefaultAnimator() {
-  return new LayerAnimator(base::Milliseconds(0));
+scoped_refptr<LayerAnimator> LayerAnimator::CreateDefaultAnimator() {
+  return base::MakeRefCounted<LayerAnimator>(base::Milliseconds(0));
 }
 
 // static
-LayerAnimator* LayerAnimator::CreateImplicitAnimator() {
-  return new LayerAnimator(
+scoped_refptr<LayerAnimator> LayerAnimator::CreateImplicitAnimator() {
+  return base::MakeRefCounted<LayerAnimator>(
       base::Milliseconds(kLayerAnimatorDefaultTransitionDurationMs));
 }
 
@@ -115,7 +116,7 @@ ANIMATED_PROPERTY(float, OPACITY, Opacity, float, opacity)
 ANIMATED_PROPERTY(bool, VISIBILITY, Visibility, bool, visibility)
 ANIMATED_PROPERTY(float, BRIGHTNESS, Brightness, float, brightness)
 ANIMATED_PROPERTY(float, GRAYSCALE, Grayscale, float, grayscale)
-ANIMATED_PROPERTY(SkColor, COLOR, Color, SkColor, color)
+ANIMATED_PROPERTY(SkColor4f, COLOR, Color, SkColor4f, color)
 ANIMATED_PROPERTY(const gfx::Rect&, CLIP, ClipRect, gfx::Rect, clip_rect)
 ANIMATED_PROPERTY(const gfx::RoundedCornersF&,
                   ROUNDED_CORNERS,
@@ -399,10 +400,11 @@ void LayerAnimator::AddOwnedObserver(
 
 void LayerAnimator::RemoveAndDestroyOwnedObserver(
     ImplicitAnimationObserver* animation_observer) {
-  base::EraseIf(owned_observer_list_,[animation_observer](
-      const std::unique_ptr<ImplicitAnimationObserver>& other) {
-    return other.get() == animation_observer;
-  });
+  std::erase_if(owned_observer_list_,
+                [animation_observer](
+                    const std::unique_ptr<ImplicitAnimationObserver>& other) {
+                  return other.get() == animation_observer;
+                });
 }
 
 base::CallbackListSubscription LayerAnimator::AddSequenceScheduledCallback(
@@ -509,14 +511,15 @@ void LayerAnimator::Step(base::TimeTicks now) {
   // and finishing them may indirectly affect the collection of running
   // animations.
   RunningAnimations running_animations_copy = running_animations_;
-  for (size_t i = 0; i < running_animations_copy.size(); ++i) {
-    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animations_copy[i]))
+  for (const auto& running_animation_copy : running_animations_copy) {
+    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animation_copy)) {
       continue;
+    }
 
-    if (running_animations_copy[i].sequence()->IsFinished(now)) {
-      SAFE_INVOKE_VOID(FinishAnimation, running_animations_copy[i], false);
+    if (running_animation_copy.sequence()->IsFinished(now)) {
+      SAFE_INVOKE_VOID(FinishAnimation, running_animation_copy, false);
     } else {
-      SAFE_INVOKE_VOID(ProgressAnimation, running_animations_copy[i], now);
+      SAFE_INVOKE_VOID(ProgressAnimation, running_animation_copy, now);
     }
   }
 }
@@ -589,7 +592,7 @@ LayerAnimationSequence* LayerAnimator::RemoveAnimation(
 
   // Do not continue and attempt to start other sequences if the delegate is
   // nullptr.
-  // TODO(crbug.com/1247769): Guard other uses of delegate_ in this class.
+  // TODO(crbug.com/40790139): Guard other uses of delegate_ in this class.
   if (!delegate())
     return to_return.release();
 
@@ -648,15 +651,16 @@ void LayerAnimator::FinishAnyAnimationWithZeroDuration() {
   // and get rid of it. We need to make a copy because Progress may indirectly
   // cause new animations to start running.
   RunningAnimations running_animations_copy = running_animations_;
-  for (size_t i = 0; i < running_animations_copy.size(); ++i) {
-    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animations_copy[i]))
+  for (const auto& running_animation_copy : running_animations_copy) {
+    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animation_copy)) {
       continue;
+    }
 
-    if (running_animations_copy[i].sequence()->IsFinished(
-          running_animations_copy[i].sequence()->start_time())) {
-      SAFE_INVOKE_VOID(ProgressAnimationToEnd, running_animations_copy[i]);
+    if (running_animation_copy.sequence()->IsFinished(
+            running_animation_copy.sequence()->start_time())) {
+      SAFE_INVOKE_VOID(ProgressAnimationToEnd, running_animation_copy);
       std::unique_ptr<LayerAnimationSequence> removed(
-          SAFE_INVOKE_PTR(RemoveAnimation, running_animations_copy[i]));
+          SAFE_INVOKE_PTR(RemoveAnimation, running_animation_copy));
     }
   }
   ProcessQueue();
@@ -703,18 +707,19 @@ void LayerAnimator::RemoveAllAnimationsWithACommonProperty(
   // animations may affect the collection of running animations, so we need to
   // operate on a copy.
   RunningAnimations running_animations_copy = running_animations_;
-  for (size_t i = 0; i < running_animations_copy.size(); ++i) {
-    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animations_copy[i]))
+  for (const auto& running_animation_copy : running_animations_copy) {
+    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animation_copy)) {
       continue;
+    }
 
-    if (running_animations_copy[i].sequence()->HasConflictingProperty(
+    if (running_animation_copy.sequence()->HasConflictingProperty(
             sequence->properties())) {
       std::unique_ptr<LayerAnimationSequence> removed(
-          SAFE_INVOKE_PTR(RemoveAnimation, running_animations_copy[i]));
+          SAFE_INVOKE_PTR(RemoveAnimation, running_animation_copy));
       if (abort)
-        running_animations_copy[i].sequence()->Abort(delegate());
+        running_animation_copy.sequence()->Abort(delegate());
       else
-        SAFE_INVOKE_VOID(ProgressAnimationToEnd, running_animations_copy[i]);
+        SAFE_INVOKE_VOID(ProgressAnimationToEnd, running_animation_copy);
     }
   }
 
@@ -941,12 +946,13 @@ void LayerAnimator::ClearAnimationsInternal() {
   // Abort should never affect the set of running animations, but just in case
   // clients are badly behaved, we will use a copy of the running animations.
   RunningAnimations running_animations_copy = running_animations_;
-  for (size_t i = 0; i < running_animations_copy.size(); ++i) {
-    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animations_copy[i]))
+  for (const auto& running_animation_copy : running_animations_copy) {
+    if (!SAFE_INVOKE_BOOL(HasAnimation, running_animation_copy)) {
       continue;
+    }
 
     std::unique_ptr<LayerAnimationSequence> removed(
-        RemoveAnimation(running_animations_copy[i].sequence()));
+        RemoveAnimation(running_animation_copy.sequence()));
     if (removed.get())
       removed->Abort(delegate());
   }

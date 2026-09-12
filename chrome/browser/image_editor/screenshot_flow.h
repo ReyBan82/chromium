@@ -14,8 +14,8 @@
 #include "build/build_config.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
-#include "ui/compositor/layer.h"
 #include "ui/compositor/layer_delegate.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/events/event.h"
 #include "ui/events/event_handler.h"
 #include "ui/gfx/geometry/rect.h"
@@ -38,7 +38,6 @@ class Canvas;
 
 namespace ui {
 class EventTarget;
-class Layer;
 }  // namespace ui
 
 namespace image_editor {
@@ -84,6 +83,18 @@ struct ScreenshotCaptureResult {
 typedef base::OnceCallback<void(const ScreenshotCaptureResult&)>
     ScreenshotCaptureCallback;
 
+// Structure containing region selection data.
+struct RegionSelectionResult {
+  // The result code of the capture describing why the user exited.
+  ScreenshotCaptureResultCode result_code;
+  // The bounds of the selected region. Empty on failure.
+  gfx::Rect selected_rect;
+};
+
+// Callback for obtaining region selection data.
+typedef base::OnceCallback<void(const RegionSelectionResult&)>
+    RegionSelectionCallback;
+
 // ScreenshotFlow allows the user to enter a capture mode where they may drag
 // a capture rectangle over a WebContents. The class calls a OnceCallback with
 // the screenshot data contained in the region of interest.
@@ -114,6 +125,10 @@ class ScreenshotFlow : public content::WebContentsObserver,
   // Runs the screen capture flow, capturing the entire viewport rather than
   // a region selected by the user.
   void StartFullscreenCapture(ScreenshotCaptureCallback flow_callback);
+
+  // Runs the screen capture flow, allowing the user to select a region, but
+  // does not capture a screenshot, only returns the selected rect.
+  void StartForRegionSelection(RegionSelectionCallback flow_callback);
 
   // Exits capture mode without running any callbacks.
   void CancelCapture();
@@ -173,6 +188,11 @@ class ScreenshotFlow : public content::WebContentsObserver,
                                      gfx::Rect bounds,
                                      gfx::Image image);
 
+  // Completes the region selection process and runs the
+  // |region_selection_callback_|.
+  void CompleteRegionSelection(ScreenshotCaptureResultCode result_code,
+                               const gfx::Rect& region);
+
   // Paints the screenshot selection layer. The user's selection is left
   // unpainted to be hollowed out. |invalidation_region| specifies an optional
   // region to clip to for performance; if empty, paints the entire window.
@@ -205,6 +225,9 @@ class ScreenshotFlow : public content::WebContentsObserver,
   // Callback provided to Start().
   ScreenshotCaptureCallback flow_callback_;
 
+  // Callback provided to StartForRegionSelection().
+  RegionSelectionCallback region_selection_callback_;
+
   // Mac-specific
 #if BUILDFLAG(IS_MAC)
   std::unique_ptr<EventCaptureMac> event_capture_mac_;
@@ -225,7 +248,7 @@ class ScreenshotFlow : public content::WebContentsObserver,
 
   // Our top-level layer that is superimposed over the browser window's root
   // layer while screen capture mode is active.
-  std::unique_ptr<ui::Layer> screen_capture_layer_;
+  std::unique_ptr<ui::LayerTextured> screen_capture_layer_;
 
   base::WeakPtrFactory<ScreenshotFlow> weak_factory_{this};
 };

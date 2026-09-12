@@ -18,7 +18,7 @@ std::string NormalizeOutput(std::string output) {
   base::ReplaceSubstringsAfterOffset(&output, 0, "\r\n", "\n");
   base::ReplaceSubstringsAfterOffset(&output, 0, "\r", "\n");
   // Windows (evilly) use \r\n to replace \n, so we will end up with two \n.
-  while (output.find("\n\n") != std::string::npos) {
+  while (output.contains("\n\n")) {
     base::ReplaceSubstringsAfterOffset(&output, 0, "\n\n", "\n");
   }
   return output;
@@ -35,16 +35,15 @@ TEST(EvaluateCapabilityTest, DISABLED_ShouldReturnCrashResult) {
 TEST(EvaluateCapabilityTest, ShouldReturnExitCodeAndOutput) {
   std::string output;
   ASSERT_EQ(EvaluateCapability("test", &output), 234);
-  ASSERT_EQ(
-      "In EvaluateTest(): Line 1\n"
-      "In EvaluateTest(): Line 2",
-      NormalizeOutput(output));
+  ASSERT_EQ(NormalizeOutput(output),
+            "In EvaluateTest(): Line 1\n"
+            "In EvaluateTest(): Line 2");
 }
 
 TEST(EvaluateCapabilityTest, ShouldReturnSuccessAndOutput) {
   std::string output;
   ASSERT_EQ(EvaluateCapability("success", &output), 0);
-  ASSERT_EQ("Success\n", NormalizeOutput(output));
+  ASSERT_EQ(NormalizeOutput(output), "Success\n");
 }
 
 }  // namespace remoting

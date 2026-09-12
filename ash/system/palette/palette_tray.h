@@ -7,17 +7,21 @@
 
 #include <memory>
 
+#include "ash/annotator/annotator_controller.h"
 #include "ash/ash_export.h"
-#include "ash/display/window_tree_host_manager.h"
 #include "ash/public/cpp/projector/projector_session.h"
 #include "ash/public/cpp/session/session_observer.h"
 #include "ash/shelf/shelf_observer.h"
 #include "ash/shell_observer.h"
 #include "ash/system/palette/palette_tool_manager.h"
 #include "ash/system/palette/stylus_battery_delegate.h"
+#include "ash/system/tray/imaged_tray_icon.h"
 #include "ash/system/tray/tray_background_view.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/display/manager/display_manager_observer.h"
 #include "ui/events/devices/input_device_event_observer.h"
 
 class PrefChangeRegistrar;
@@ -35,7 +39,6 @@ class TouchEvent;
 }  // namespace ui
 
 namespace views {
-class ImageView;
 class Widget;
 }  // namespace views
 
@@ -52,14 +55,17 @@ class TrayBubbleWrapper;
 // class also controls the lifetime for all of the tools available in the
 // palette. PaletteTray has one instance per-display. It is only made visible if
 // the display has stylus hardware.
-class ASH_EXPORT PaletteTray : public TrayBackgroundView,
+class ASH_EXPORT PaletteTray : public AnnotatorController::AnnotatorObserver,
+                               public display::DisplayManagerObserver,
+                               public PaletteToolManager::Delegate,
+                               public ProjectorSessionObserver,
                                public SessionObserver,
                                public ShelfObserver,
                                public ShellObserver,
-                               public WindowTreeHostManager::Observer,
-                               public PaletteToolManager::Delegate,
-                               public ui::InputDeviceEventObserver,
-                               public ProjectorSessionObserver {
+                               public ImagedTrayIcon,
+                               public ui::InputDeviceEventObserver {
+  METADATA_HEADER(PaletteTray, ImagedTrayIcon)
+
  public:
   explicit PaletteTray(Shelf* shelf);
 
@@ -90,36 +96,35 @@ class ASH_EXPORT PaletteTray : public TrayBackgroundView,
   // ShellObserver:
   void OnLockStateChanged(bool locked) override;
   void OnShellInitialized() override;
+  void OnShellDestroying() override;
 
-  // WindowTreeHostManager::Observer:
-  void OnDisplayConfigurationChanged() override;
+  // display::DisplayManagerObserver:
+  void OnDidApplyDisplayChanges() override;
 
-  // TrayBackgroundView:
-  void ClickedOutsideBubble() override;
-  void OnThemeChanged() override;
-  std::u16string GetAccessibleNameForTray() override;
-  void HandleLocaleChange() override;
+  // ImagedTrayIcon:
+  void ClickedOutsideBubble(const ui::LocatedEvent& event) override;
+  void UpdateTrayItemColor(bool is_active) override;
   void HideBubbleWithView(const TrayBubbleView* bubble_view) override;
   void AnchorUpdated() override;
   void Initialize() override;
-  void CloseBubble() override;
+  void CloseBubbleInternal() override;
   void ShowBubble() override;
   TrayBubbleView* GetBubbleView() override;
   views::Widget* GetBubbleWidget() const override;
-  const char* GetClassName() const override;
 
   // PaletteToolManager::Delegate:
   void HidePalette() override;
   void HidePaletteImmediately() override;
-  void RecordPaletteOptionsUsage(PaletteTrayOptions option,
-                                 PaletteInvocationMethod method) override;
-  void RecordPaletteModeCancellation(PaletteModeCancelType type) override;
 
   // ProjectorSessionObserver:
   void OnProjectorSessionActiveStateChanged(bool active) override;
 
+  // AnnotatorObserver:
+  void OnAnnotatorStateChanged(bool enabled) override;
+
  private:
   friend class PaletteTrayTestApi;
+  friend class StatusAreaInternalsHandler;
 
   // ui::InputDeviceObserver:
   void OnInputDeviceConfigurationChanged(uint8_t input_device_types) override;
@@ -182,13 +187,10 @@ class ASH_EXPORT PaletteTray : public TrayBackgroundView,
   // A Shell pre-target handler that notifies PaletteTray of stylus events.
   std::unique_ptr<ui::EventHandler> stylus_event_handler_;
 
-  PrefService* local_state_ = nullptr;               // Not owned.
-  PrefService* active_user_pref_service_ = nullptr;  // Not owned.
+  raw_ptr<PrefService> local_state_ = nullptr;               // Not owned.
+  raw_ptr<PrefService> active_user_pref_service_ = nullptr;  // Not owned.
   std::unique_ptr<PrefChangeRegistrar> pref_change_registrar_local_;
   std::unique_ptr<PrefChangeRegistrar> pref_change_registrar_user_;
-
-  // Weak pointer, will be parented by TrayContainer for its lifetime.
-  views::ImageView* icon_ = nullptr;
 
   // Cached palette pref value.
   bool is_palette_enabled_ = true;
@@ -209,6 +211,8 @@ class ASH_EXPORT PaletteTray : public TrayBackgroundView,
 
   base::ScopedObservation<ProjectorSession, ProjectorSessionObserver>
       projector_session_observation_{this};
+  base::ScopedObservation<AnnotatorController, AnnotatorObserver>
+      annotator_controller_observation_{this};
 
   ScopedSessionObserver scoped_session_observer_;
 

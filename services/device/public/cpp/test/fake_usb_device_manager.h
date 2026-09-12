@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "base/functional/callback_forward.h"
 #include "base/memory/scoped_refptr.h"
 #include "build/build_config.h"
 #include "mojo/public/cpp/bindings/pending_associated_remote.h"
@@ -65,6 +66,8 @@ class FakeUsbDeviceManager : public mojom::UsbDeviceManager {
 
   const device::mojom::UsbDeviceInfo* GetDeviceInfo(const std::string& guid);
 
+  void SetOnClientSetClosure(base::OnceClosure closure);
+
   // mojom::UsbDeviceManager implementation:
   void EnumerateDevicesAndSetClient(
       mojo::PendingAssociatedRemote<mojom::UsbDeviceManagerClient> client,
@@ -72,6 +75,11 @@ class FakeUsbDeviceManager : public mojom::UsbDeviceManager {
   void GetDevices(mojom::UsbEnumerationOptionsPtr options,
                   GetDevicesCallback callback) override;
   void GetDevice(
+      const std::string& guid,
+      const std::vector<uint8_t>& blocked_interface_classes,
+      mojo::PendingReceiver<device::mojom::UsbDevice> device_receiver,
+      mojo::PendingRemote<mojom::UsbDeviceClient> device_client) override;
+  void GetUnrestrictedDevice(
       const std::string& guid,
       const std::vector<uint8_t>& blocked_interface_classes,
       mojo::PendingReceiver<device::mojom::UsbDevice> device_receiver,
@@ -106,6 +114,8 @@ class FakeUsbDeviceManager : public mojom::UsbDeviceManager {
   mojo::AssociatedRemoteSet<mojom::UsbDeviceManagerClient> clients_;
 
   DeviceMap devices_;
+
+  base::OnceClosure on_client_set_;
 
   base::WeakPtrFactory<FakeUsbDeviceManager> weak_factory_{this};
 };

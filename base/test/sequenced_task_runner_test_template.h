@@ -216,9 +216,9 @@ TYPED_TEST_P(SequencedTaskRunnerTest, NonNestablePostFromNonNestableTask) {
 
   this->delegate_.StopTaskRunner();
 
-  EXPECT_TRUE(CheckNonNestableInvariants(
-      this->task_tracker_->GetTaskEvents(),
-      kParentCount * (kChildrenPerParent + 1)));
+  EXPECT_TRUE(
+      CheckNonNestableInvariants(this->task_tracker_->GetTaskEvents(),
+                                 kParentCount * (kChildrenPerParent + 1)));
 }
 
 // This test posts two tasks with the same delay, and checks that the tasks are
@@ -292,7 +292,7 @@ TYPED_TEST_P(SequencedTaskRunnerTest, DelayedTaskAfterManyLongTasks) {
                                          kTaskCount));
 }
 
-// TODO(francoisk777@gmail.com) Add a test, similiar to the above, which runs
+// TODO(francoisk777@gmail.com) Add a test, similar to the above, which runs
 // some tasked nestedly (which should be implemented in the test
 // delegate). Also add, to the test delegate, a predicate which checks
 // whether the implementation supports nested tasks.

@@ -7,19 +7,18 @@
 
 #include "base/functional/callback.h"
 #include "base/sequence_checker.h"
+#include "media/base/frame_buffer_pool.h"
 #include "media/base/supported_video_decoder_config.h"
 #include "media/base/video_decoder.h"
 #include "media/base/video_decoder_config.h"
 #include "media/base/video_frame.h"
 #include "media/base/video_frame_pool.h"
-#include "media/filters/frame_buffer_pool.h"
 #include "media/filters/offloading_video_decoder.h"
 
 struct vpx_codec_ctx;
 struct vpx_image;
 
 namespace media {
-class FrameBufferPool;
 
 // Libvpx video decoder wrapper.
 // Note: VpxVideoDecoder accepts only YV12A VP8 content or VP9 content. This is
@@ -30,8 +29,6 @@ class FrameBufferPool;
 // [1] http://wiki.webmproject.org/alpha-channel
 class MEDIA_EXPORT VpxVideoDecoder : public OffloadableVideoDecoder {
  public:
-  static SupportedVideoDecoderConfigs SupportedConfigs();
-
   explicit VpxVideoDecoder(OffloadState offload_state = OffloadState::kNormal);
 
   VpxVideoDecoder(const VpxVideoDecoder&) = delete;
@@ -65,7 +62,7 @@ class MEDIA_EXPORT VpxVideoDecoder : public OffloadableVideoDecoder {
     kAlphaPlaneProcessed,  // Alpha plane (if found) was decoded successfully.
     kNoAlphaPlaneData,  // Alpha plane was found, but decoder did not return any
                         // data.
-    kAlphaPlaneError  // Fatal error occured when trying to decode alpha plane.
+    kAlphaPlaneError  // Fatal error occurred when trying to decode alpha plane.
   };
 
   // Handles (re-)initializing the decoder with a (new) config.
@@ -105,10 +102,13 @@ class MEDIA_EXPORT VpxVideoDecoder : public OffloadableVideoDecoder {
   std::unique_ptr<vpx_codec_ctx> vpx_codec_;
   std::unique_ptr<vpx_codec_ctx> vpx_codec_alpha_;
 
-  // |memory_pool_| is a single-threaded memory pool used for VP9 decoding
-  // with no alpha. |frame_pool_| is used for all other cases.
+  // |memory_pool_| is a thread-safe memory pool used for zero-copy VP9 decoding
+  // (both with and without alpha). |frame_pool_| is used for VP8.
   scoped_refptr<FrameBufferPool> memory_pool_;
   VideoFramePool frame_pool_;
+
+  // More specific error code to surface after an error occurs during decoding.
+  DecoderStatus::Codes error_status_ = DecoderStatus::Codes::kFailed;
 };
 
 // Helper class for creating a VpxVideoDecoder which will offload > 720p VP9

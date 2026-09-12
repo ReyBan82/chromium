@@ -32,13 +32,14 @@ SVGNumberList::SVGNumberList() = default;
 SVGNumberList::~SVGNumberList() = default;
 
 template <typename CharType>
-SVGParsingError SVGNumberList::Parse(const CharType*& ptr,
-                                     const CharType* end) {
-  const CharType* list_start = ptr;
-  while (ptr < end) {
+SVGParsingError SVGNumberList::Parse(base::span<const CharType> span) {
+  const size_t list_start_size = span.size();
+  while (!span.empty()) {
     float number = 0;
-    if (!ParseNumber(ptr, end, number))
-      return SVGParsingError(SVGParseStatus::kExpectedNumber, ptr - list_start);
+    if (!ParseNumber(span, number)) {
+      return SVGParsingError(SVGParseStatus::kExpectedNumber,
+                             list_start_size - span.size());
+    }
     Append(MakeGarbageCollected<SVGNumber>(number));
   }
   return SVGParseStatus::kNoError;
@@ -50,21 +51,22 @@ SVGParsingError SVGNumberList::SetValueAsString(const String& value) {
   if (value.empty())
     return SVGParseStatus::kNoError;
 
-  // Don't call |clear()| if an error is encountered. SVG policy is to use
-  // valid items before error.
-  // Spec: http://www.w3.org/TR/SVG/single-page.html#implnote-ErrorProcessing
-  return WTF::VisitCharacters(value, [&](const auto* chars, unsigned length) {
-    return Parse(chars, chars + length);
-  });
+  SVGParsingError status =
+      VisitCharacters(value, [&](auto chars) { return Parse(chars); });
+  if (status != SVGParseStatus::kNoError) {
+    Clear();
+  }
+  return status;
 }
 
-void SVGNumberList::Add(const SVGPropertyBase* other,
+bool SVGNumberList::Add(const SVGPropertyBase* other,
                         const SVGElement* context_element) {
   auto* other_list = To<SVGNumberList>(other);
   if (length() != other_list->length())
-    return;
+    return true;
   for (uint32_t i = 0; i < length(); ++i)
     at(i)->Add(other_list->at(i), context_element);
+  return true;
 }
 
 void SVGNumberList::CalculateAnimatedValue(

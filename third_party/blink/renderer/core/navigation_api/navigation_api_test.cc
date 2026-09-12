@@ -6,10 +6,10 @@
 
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/mojom/commit_result/commit_result.mojom-blink.h"
-#include "third_party/blink/public/platform/web_runtime_features.h"
 #include "third_party/blink/renderer/core/frame/frame_test_helpers.h"
 #include "third_party/blink/renderer/core/loader/document_loader.h"
 #include "third_party/blink/renderer/core/loader/frame_load_request.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
 
@@ -31,6 +31,7 @@ class NavigationApiTest : public testing::Test {
   void TearDown() override {
     url_test_helpers::UnregisterAllURLsAndClearMemoryCache();
   }
+  test::TaskEnvironment task_environment_;
 };
 
 class BeginNavigationClient : public frame_test_helpers::TestWebFrameClient {
@@ -60,7 +61,7 @@ TEST_F(NavigationApiTest, NavigateEventCtrlClick) {
   ASSERT_FALSE(client.BeginNavigationCalled());
 
   // Emulate a navigation as started by a ctrl+click.
-  FrameLoadRequest request(nullptr, ResourceRequest(BlankURL()));
+  FrameLoadRequest request(nullptr, ResourceRequest(BlankUrl()));
   request.SetNavigationPolicy(kNavigationPolicyNewBackgroundTab);
   web_view_helper.LocalMainFrame()->GetFrame()->Loader().StartNavigation(
       request);
@@ -92,9 +93,10 @@ TEST_F(NavigationApiTest, BrowserInitiatedSameDocumentBackForward) {
       url, WebFrameLoadType::kBackForward, MakeHistoryItemFor(url, key),
       ClientRedirectPolicy::kNotClientRedirect,
       false /* has_transient_user_activation */, nullptr /* initiator_origin */,
-      false /* is_synchronously_committed */,
+      false /* is_synchronously_committed */, /*source_element=*/nullptr,
       mojom::blink::TriggeringEventInfo::kNotFromEvent,
-      true /* is_browser_initiated */, absl::nullopt);
+      true /* is_browser_initiated */, /*has_ua_visual_transition,=*/false,
+      std::nullopt, false /* should_skip_screenshot */);
   EXPECT_EQ(result1, mojom::blink::CommitResult::Ok);
 
   // Now that there's been a user activation, the onnavigate handler should be
@@ -105,9 +107,10 @@ TEST_F(NavigationApiTest, BrowserInitiatedSameDocumentBackForward) {
       url, WebFrameLoadType::kBackForward, MakeHistoryItemFor(url, key),
       ClientRedirectPolicy::kNotClientRedirect,
       false /* has_transient_user_activation */, nullptr /* initiator_origin */,
-      false /* is_synchronously_committed */,
+      false /* is_synchronously_committed */, /*source_element=*/nullptr,
       mojom::blink::TriggeringEventInfo::kNotFromEvent,
-      true /* is_browser_initiated */, absl::nullopt);
+      true /* is_browser_initiated */, /*has_ua_visual_transition,=*/false,
+      std::nullopt, false /* should_skip_screenshot */);
   EXPECT_EQ(result2, mojom::blink::CommitResult::Aborted);
 
   // Having consumed the user activation, the onnavigate handler should not be
@@ -116,48 +119,65 @@ TEST_F(NavigationApiTest, BrowserInitiatedSameDocumentBackForward) {
       url, WebFrameLoadType::kBackForward, MakeHistoryItemFor(url, key),
       ClientRedirectPolicy::kNotClientRedirect,
       false /* has_transient_user_activation */, nullptr /* initiator_origin */,
-      false /* is_synchronously_committed */,
+      false /* is_synchronously_committed */, /*source_element=*/nullptr,
       mojom::blink::TriggeringEventInfo::kNotFromEvent,
-      true /* is_browser_initiated */, absl::nullopt);
+      true /* is_browser_initiated */, /*has_ua_visual_transition,=*/false,
+      std::nullopt, false /* should_skip_screenshot */);
   EXPECT_EQ(result3, mojom::blink::CommitResult::Ok);
 }
 
-TEST_F(NavigationApiTest, BrowserInitiatedSameDocumentBackForwardUncancelable) {
-  // Disable the feature that allows navigate events to cancel traversals, and
-  // ensure that the cancellation fails.
-  WebRuntimeFeatures::EnableFeatureFromString(
-      "NavigateEventCancelableTraversals", false);
-
+TEST_F(NavigationApiTest, BrowserInitiatedSameDocumentBackForwardWindowStop) {
   url_test_helpers::RegisterMockedURLLoad(
       url_test_helpers::ToKURL(
-          "https://example.com/navigation-api/onnavigate-preventDefault.html"),
-      test::CoreTestDataPath("navigation-api/onnavigate-preventDefault.html"));
+          "https://example.com/navigation-api/onnavigate-window-stop.html"),
+      test::CoreTestDataPath("navigation-api/onnavigate-window-stop.html"));
 
   frame_test_helpers::WebViewHelper web_view_helper;
   web_view_helper.InitializeAndLoad(
-      "https://example.com/navigation-api/onnavigate-preventDefault.html");
+      "https://example.com/navigation-api/onnavigate-window-stop.html");
 
   LocalFrame* frame = web_view_helper.LocalMainFrame()->GetFrame();
   DocumentLoader* document_loader = frame->Loader().GetDocumentLoader();
   const KURL& url = document_loader->Url();
   const String& key = document_loader->GetHistoryItem()->GetNavigationApiKey();
 
-  // Emulate a same-document back-forward navigation initiated by browser UI and
-  // with user activation. The navigate event would be cancelable if
-  // kNavigateEventCancelableTraversals were enabled, but since we disabled it,
-  // the cancel should fail and the navigation should proceed.
-  LocalFrame::NotifyUserActivation(
-      frame, mojom::UserActivationNotificationType::kTest);
-  auto result = document_loader->CommitSameDocumentNavigation(
+  // Emulate a same-document back-forward navigation initiated by browser UI.
+  // It should be uncancelable, even though the onnavigate handler will try.
+  auto result1 = document_loader->CommitSameDocumentNavigation(
       url, WebFrameLoadType::kBackForward, MakeHistoryItemFor(url, key),
       ClientRedirectPolicy::kNotClientRedirect,
-      /*has_transient_user_activation=*/false, /*initiator_origin=*/nullptr,
-      /*is_synchronously_committed=*/false,
+      false /* has_transient_user_activation */, nullptr /* initiator_origin */,
+      false /* is_synchronously_committed */, /*source_element=*/nullptr,
       mojom::blink::TriggeringEventInfo::kNotFromEvent,
-      /*is_browser_initiated=*/true,
-      /*soft_navigation_heuristics_task_id=*/absl::nullopt);
+      true /* is_browser_initiated */, /*has_ua_visual_transition,=*/false,
+      std::nullopt, false /* should_skip_screenshot */);
+  EXPECT_EQ(result1, mojom::blink::CommitResult::Ok);
 
-  EXPECT_EQ(result, mojom::blink::CommitResult::Ok);
+  // Now that there's been a user activation, the onnavigate handler should be
+  // able to cancel the navigation (which will consume the user activation).
+  LocalFrame::NotifyUserActivation(
+      frame, mojom::UserActivationNotificationType::kTest);
+  auto result2 = document_loader->CommitSameDocumentNavigation(
+      url, WebFrameLoadType::kBackForward, MakeHistoryItemFor(url, key),
+      ClientRedirectPolicy::kNotClientRedirect,
+      false /* has_transient_user_activation */, nullptr /* initiator_origin */,
+      false /* is_synchronously_committed */, /*source_element=*/nullptr,
+      mojom::blink::TriggeringEventInfo::kNotFromEvent,
+      true /* is_browser_initiated */, /*has_ua_visual_transition,=*/false,
+      std::nullopt, false /* should_skip_screenshot */);
+  EXPECT_EQ(result2, mojom::blink::CommitResult::Aborted);
+
+  // Having consumed the user activation, the onnavigate handler should not be
+  // able to cancel the next navigation.
+  auto result3 = document_loader->CommitSameDocumentNavigation(
+      url, WebFrameLoadType::kBackForward, MakeHistoryItemFor(url, key),
+      ClientRedirectPolicy::kNotClientRedirect,
+      false /* has_transient_user_activation */, nullptr /* initiator_origin */,
+      false /* is_synchronously_committed */, /*source_element=*/nullptr,
+      mojom::blink::TriggeringEventInfo::kNotFromEvent,
+      true /* is_browser_initiated */, /*has_ua_visual_transition,=*/false,
+      std::nullopt, false /* should_skip_screenshot */);
+  EXPECT_EQ(result3, mojom::blink::CommitResult::Ok);
 }
 
 TEST_F(NavigationApiTest, DispatchNavigateEventAfterPurgeMemory) {

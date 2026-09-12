@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//third_party/fuchsia-sdk/sdk/build/fidl_library.gni")
+import("//third_party/fuchsia-gn-sdk/src/fidl_library.gni")
 
 # Only allow use by targets in this directory unless explicitly specified.
 visibility = [ ":*" ]
@@ -23,6 +23,7 @@ fidl_library("fidl") {
   public_deps = [
     "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.media.sessions2",
     "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.ui.gfx",
+    "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.url",
     "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.web",
   ]
 
@@ -30,7 +31,8 @@ fidl_library("fidl") {
     "//chromecast/bindings:*",
     "//chromecast/internal/*",
     "//fuchsia_web/runners:cast_runner_core",
-    "//fuchsia_web/runners:cast_runner_test_core",
+    "//fuchsia_web/runners:cast_runner_unittests__exec",
     "//fuchsia_web/runners/cast/test:integration",
+    "//fuchsia_web/runners/cast/test:test_support",
   ]
 }

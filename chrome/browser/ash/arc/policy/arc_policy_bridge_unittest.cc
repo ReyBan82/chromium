@@ -8,38 +8,43 @@
 #include <string>
 #include <utility>
 
-#include "ash/components/arc/arc_features.h"
-#include "ash/components/arc/arc_prefs.h"
-#include "ash/components/arc/enterprise/arc_data_snapshotd_manager.h"
-#include "ash/components/arc/session/arc_bridge_service.h"
-#include "ash/components/arc/session/arc_session_runner.h"
-#include "ash/components/arc/test/arc_util_test_support.h"
-#include "ash/components/arc/test/connection_holder_util.h"
-#include "ash/components/arc/test/fake_arc_session.h"
-#include "ash/components/arc/test/fake_policy_instance.h"
 #include "ash/constants/ash_switches.h"
+#include "ash/constants/chrome_pref_names.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_reader.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/test/scoped_command_line.h"
 #include "base/values.h"
-#include "chrome/browser/ash/arc/enterprise/arc_data_snapshotd_delegate.h"
 #include "chrome/browser/ash/arc/enterprise/cert_store/cert_store_service.h"
+#include "chrome/browser/ash/arc/enterprise/cert_store/cert_store_service_factory.h"
 #include "chrome/browser/ash/arc/session/arc_session_manager.h"
+#include "chrome/browser/ash/arc/session/arc_session_manager_observer.h"
 #include "chrome/browser/ash/arc/test/test_arc_session_manager.h"
-#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
+#include "chrome/browser/ash/login/users/scoped_account_id_annotator.h"
+#include "chrome/browser/ash/policy/core/device_attributes_fake.h"
 #include "chrome/browser/policy/developer_tools_policy_handler.h"
 #include "chrome/browser/signin/identity_test_environment_profile_adaptor.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
+#include "chromeos/ash/components/dbus/dlcservice/dlcservice_client.h"
 #include "chromeos/ash/components/dbus/upstart/fake_upstart_client.h"
 #include "chromeos/ash/components/system/fake_statistics_provider.h"
+#include "chromeos/ash/experiences/arc/arc_features.h"
+#include "chromeos/ash/experiences/arc/arc_prefs.h"
+#include "chromeos/ash/experiences/arc/dlc_installer/arc_dlc_installer.h"
+#include "chromeos/ash/experiences/arc/session/arc_bridge_service.h"
+#include "chromeos/ash/experiences/arc/session/arc_service_manager.h"
+#include "chromeos/ash/experiences/arc/session/arc_session_runner.h"
+#include "chromeos/ash/experiences/arc/test/arc_util_test_support.h"
+#include "chromeos/ash/experiences/arc/test/connection_holder_util.h"
+#include "chromeos/ash/experiences/arc/test/fake_arc_session.h"
+#include "chromeos/ash/experiences/arc/test/fake_policy_instance.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/policy/core/common/mock_policy_service.h"
@@ -48,12 +53,12 @@
 #include "components/policy/core/common/policy_types.h"
 #include "components/policy/core/common/remote_commands/remote_commands_queue.h"
 #include "components/policy/policy_constants.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "components/signin/public/identity_manager/identity_test_environment.h"
 #include "components/supervised_user/core/common/supervised_user_constants.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
-#include "components/user_manager/scoped_user_manager.h"
 #include "content/public/test/browser_task_environment.h"
-#include "services/data_decoder/public/cpp/test_support/in_process_data_decoder.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -116,10 +121,10 @@ constexpr char kTestUserEmail[] = "user@gmail.com";
 constexpr char kChromeAppId[] = "chromeappid";
 constexpr char kAndroidAppId[] = "android.app.id";
 
-void AddKeyPermissionForAppId(base::Value::Dict& key_permissions,
+void AddKeyPermissionForAppId(base::DictValue& key_permissions,
                               const std::string& app_id,
                               bool allowed) {
-  base::Value::Dict cert_key_permission;
+  base::DictValue cert_key_permission;
   cert_key_permission.Set("allowCorporateKeyUsage", base::Value(allowed));
   key_permissions.Set(app_id, std::move(cert_key_permission));
 }
@@ -148,7 +153,7 @@ class MockArcPolicyBridgeObserver : public ArcPolicyBridge::Observer {
 // |true| before destruction.
 class CheckedBoolean {
  public:
-  CheckedBoolean() {}
+  CheckedBoolean() = default;
 
   CheckedBoolean(const CheckedBoolean&) = delete;
   CheckedBoolean& operator=(const CheckedBoolean&) = delete;
@@ -206,8 +211,9 @@ class ArcPolicyBridgeTestBase {
     // Set up fake StatisticsProvider.
     ash::system::StatisticsProvider::SetTestProvider(&statistics_provider_);
 
-    // Set up ArcBridgeService.
-    bridge_service_ = std::make_unique<ArcBridgeService>();
+    // Set up ArcServiceManager and ArcBridgeService.
+    arc_service_manager_ = std::make_unique<ArcServiceManager>();
+    bridge_service_ = arc_service_manager_->arc_bridge_service();
     EXPECT_CALL(policy_service_,
                 GetPolicies(policy::PolicyNamespace(
                     policy::POLICY_DOMAIN_CHROME, std::string())))
@@ -219,16 +225,23 @@ class ArcPolicyBridgeTestBase {
         .Times(1);
 
     // Set up user profile for ReportCompliance() tests.
-    auto* const fake_user_manager = new ash::FakeChromeUserManager();
-    user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
-        base::WrapUnique(fake_user_manager));
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            TestingBrowserProcess::GetGlobal()->local_state());
     const AccountId account_id(
-        AccountId::FromUserEmailGaiaId(kTestUserEmail, "1111111111"));
-    fake_user_manager->AddUserWithAffiliation(account_id, is_affiliated);
-    fake_user_manager->LoginUser(account_id);
+        AccountId::FromUserEmailGaiaId(kTestUserEmail, GaiaId("1111111111")));
+    ASSERT_TRUE(user_session_test_environment_->AddRegularUser(account_id));
+
     testing_profile_manager_ = std::make_unique<TestingProfileManager>(
         TestingBrowserProcess::GetGlobal());
     ASSERT_TRUE(testing_profile_manager_->SetUp());
+    user_session_test_environment_->LogIn(account_id);
+    user_manager::UserManager::Get()->SetUserPolicyStatus(
+        account_id, /*is_managed=*/is_affiliated,
+        /*is_affiliated=*/is_affiliated);
+
+    ash::ScopedAccountIdAnnotator annotator(
+        testing_profile_manager_->profile_manager(), account_id);
     profile_ = testing_profile_manager_->CreateTestingProfile(
         kTestUserEmail, IdentityTestEnvironmentProfileAdaptor::
                             GetIdentityTestEnvironmentFactories());
@@ -244,15 +257,20 @@ class ArcPolicyBridgeTestBase {
 
     // Init ArcSessionManager for testing.
     ash::ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
-    arc_session_manager_ =
-        CreateTestArcSessionManager(std::make_unique<ArcSessionRunner>(
-            base::BindRepeating(FakeArcSession::Create)));
+    ash::DlcserviceClient::InitializeFake();
+    arc_dlc_installer_ = std::make_unique<ArcDlcInstaller>();
+    arc_session_manager_ = CreateTestArcSessionManager(
+        std::make_unique<ArcSessionRunner>(
+            base::BindRepeating(FakeArcSession::Create)),
+        arc_dlc_installer_.get());
+    ArcSessionManager::EnableCheckAndroidManagementForTesting(false);
     arc_session_manager()->SetProfile(profile());
     arc_session_manager()->Initialize();
 
     // TODO(hidehiko): Use Singleton instance tied to BrowserContext.
     policy_bridge_ = std::make_unique<ArcPolicyBridge>(
-        profile_, bridge_service_.get(), &policy_service_);
+        profile_, bridge_service_.get(), &policy_service_,
+        std::make_unique<policy::FakeDeviceAttributes>());
     policy_bridge_->OverrideIsManagedForTesting(true);
     policy_bridge_->AddObserver(&observer_);
     instance_guid_ = policy_bridge_->GetInstanceGuidForTesting();
@@ -269,8 +287,15 @@ class ArcPolicyBridgeTestBase {
     policy_bridge_.reset();
     arc_session_manager()->Shutdown();
     arc_session_manager_.reset();
+    arc_dlc_installer_.reset();
+    // Reset the raw_ptr as the service manager will release the underlying ptr.
+    bridge_service_ = nullptr;
+    arc_service_manager_.reset();
+    ash::DlcserviceClient::Shutdown();
     ash::ConciergeClient::Shutdown();
+    profile_ = nullptr;
     testing_profile_manager_.reset();
+    user_session_test_environment_.reset();
   }
 
  protected:
@@ -296,8 +321,8 @@ class ArcPolicyBridgeTestBase {
   void ReportComplianceAndVerifyObserverCallback(
       const std::string& compliance_report) {
     Mock::VerifyAndClearExpectations(&observer_);
-    absl::optional<base::Value> compliance_report_value =
-        base::JSONReader::Read(compliance_report);
+    std::optional<base::Value> compliance_report_value = base::JSONReader::Read(
+        compliance_report, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
     if (compliance_report_value && compliance_report_value->is_dict()) {
       EXPECT_CALL(observer_, OnComplianceReportReceived(
                                  ValueEquals(&*compliance_report_value)));
@@ -310,9 +335,10 @@ class ArcPolicyBridgeTestBase {
     Mock::VerifyAndClearExpectations(&observer_);
 
     if (compliance_report_value) {
-      absl::optional<base::Value> saved_compliance_report_value =
+      std::optional<base::Value> saved_compliance_report_value =
           base::JSONReader::Read(
-              policy_bridge()->get_arc_policy_compliance_report());
+              policy_bridge()->get_arc_policy_compliance_report(),
+              base::JSON_PARSE_CHROMIUM_EXTENSIONS);
       ASSERT_TRUE(saved_compliance_report_value);
       EXPECT_EQ(*compliance_report_value, *saved_compliance_report_value);
     } else {
@@ -325,7 +351,7 @@ class ArcPolicyBridgeTestBase {
   // Override if the test wants to use a real cert store service.
   virtual CertStoreService* GetCertStoreService() {
     return static_cast<CertStoreService*>(
-        CertStoreService::GetFactory()->SetTestingFactoryAndUse(
+        CertStoreServiceFactory::GetInstance()->SetTestingFactoryAndUse(
             profile(),
             base::BindRepeating(
                 [](content::BrowserContext* profile)
@@ -347,21 +373,24 @@ class ArcPolicyBridgeTestBase {
 
  private:
   content::BrowserTaskEnvironment task_environment_;
-  data_decoder::test::InProcessDataDecoder in_process_data_decoder_;
-  std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
   std::unique_ptr<TestingProfileManager> testing_profile_manager_;
   base::RunLoop run_loop_;
-  TestingProfile* profile_;
-  std::unique_ptr<ArcBridgeService> bridge_service_;
-  CertStoreService* cert_store_service_;  // Not owned.
+  raw_ptr<TestingProfile, DanglingUntriaged> profile_;
+  raw_ptr<ArcBridgeService> bridge_service_;
+  raw_ptr<CertStoreService, DanglingUntriaged>
+      cert_store_service_;  // Not owned.
 
+  std::unique_ptr<ArcServiceManager> arc_service_manager_;
+  std::unique_ptr<ArcDlcInstaller> arc_dlc_installer_;
   std::unique_ptr<ArcSessionManager> arc_session_manager_;
   std::unique_ptr<ArcPolicyBridge> policy_bridge_;
   std::string instance_guid_;
   MockArcPolicyBridgeObserver observer_;
-  // Always keep policy_instance_ below bridge_service_, so that
-  // policy_instance_ is destructed first. It needs to remove itself as
-  // observer.
+  // Always keep policy_instance_ below bridge_service_(which is allocated with
+  // arc_service_manager_), so that policy_instance_ is destructed first. It
+  // needs to remove itself as observer.
   std::unique_ptr<FakePolicyInstance> policy_instance_;
   policy::PolicyMap policy_map_;
   policy::MockPolicyService policy_service_;
@@ -400,7 +429,7 @@ class ArcPolicyBridgeCertStoreTest : public ArcPolicyBridgeTest {
  protected:
   CertStoreService* GetCertStoreService() override {
     return static_cast<CertStoreService*>(
-        CertStoreService::GetFactory()->SetTestingFactoryAndUse(
+        CertStoreServiceFactory::GetInstance()->SetTestingFactoryAndUse(
             profile(),
             base::BindRepeating([](content::BrowserContext* profile)
                                     -> std::unique_ptr<KeyedService> {
@@ -421,7 +450,7 @@ TEST_F(ArcPolicyBridgeTest, EmptyPolicyTest) {
                              kMountPhysicalMediaDisabledPolicySetting + "}");
 }
 
-TEST_F(ArcPolicyBridgeTest, DISABLED_ArcPolicyTest) {
+TEST_F(ArcPolicyBridgeTest, ArcPolicyTest) {
   policy_map().Set(
       policy::key::kArcPolicy, policy::POLICY_LEVEL_MANDATORY,
       policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_CLOUD,
@@ -435,8 +464,8 @@ TEST_F(ArcPolicyBridgeTest, DISABLED_ArcPolicyTest) {
                   "}"),
       nullptr);
   GetPoliciesAndVerifyResult(
-      "\"apkCacheEnabled\":true,"
-      "{\"applications\":"
+      "{\"apkCacheEnabled\":true,"
+      "\"applications\":"
       "[{\"installType\":\"REQUIRED\","
       "\"lockTaskAllowed\":false,"
       "\"packageName\":\"com.google.android.apps.youtube.kids\","
@@ -532,7 +561,7 @@ TEST_F(ArcPolicyBridgeTest, ExternalStorageDisabledTest) {
 }
 
 TEST_F(ArcPolicyBridgeTest, WallpaperImageSetTest) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("url", "https://example.com/wallpaper.jpg");
   dict.Set("hash", "somehash");
   policy_map().Set(policy::key::kWallpaperImage, policy::POLICY_LEVEL_MANDATORY,
@@ -545,7 +574,7 @@ TEST_F(ArcPolicyBridgeTest, WallpaperImageSetTest) {
 }
 
 TEST_F(ArcPolicyBridgeTest, WallpaperImageSet_NotCompletePolicyTest) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("url", "https://example.com/wallpaper.jpg");
   // "hash" attribute is missing, so the policy shouldn't be set
   policy_map().Set(policy::key::kWallpaperImage, policy::POLICY_LEVEL_MANDATORY,
@@ -591,9 +620,9 @@ TEST_F(ArcPolicyBridgeTest, CaCertificateTest) {
 
 TEST_F(ArcPolicyBridgeTest, DeveloperToolsPolicyAllowedTest) {
   profile()->GetTestingPrefService()->SetManagedPref(
-      ::prefs::kDevToolsAvailability,
+      ash::chrome_prefs::kDevToolsAvailability,
       std::make_unique<base::Value>(static_cast<int>(
-          policy::DeveloperToolsPolicyHandler::Availability::kAllowed)));
+          policy::DeveloperToolsAvailability::kAllowed)));
   GetPoliciesAndVerifyResult(
       "{\"apkCacheEnabled\":true,\"debuggingFeaturesDisabled\":false,"
       "\"guid\":\"" +
@@ -603,9 +632,9 @@ TEST_F(ArcPolicyBridgeTest, DeveloperToolsPolicyAllowedTest) {
 TEST_F(ArcPolicyBridgeTest,
        DeveloperToolsPolicyDisallowedForForceInstalledExtensionsTest) {
   profile()->GetTestingPrefService()->SetManagedPref(
-      ::prefs::kDevToolsAvailability,
+      ash::chrome_prefs::kDevToolsAvailability,
       std::make_unique<base::Value>(
-          static_cast<int>(policy::DeveloperToolsPolicyHandler::Availability::
+          static_cast<int>(policy::DeveloperToolsAvailability::
                                kDisallowedForForceInstalledExtensions)));
   GetPoliciesAndVerifyResult(
       "{\"apkCacheEnabled\":true,\"debuggingFeaturesDisabled\":false,"
@@ -615,9 +644,9 @@ TEST_F(ArcPolicyBridgeTest,
 
 TEST_F(ArcPolicyBridgeTest, DeveloperToolsPolicyDisallowedTest) {
   profile()->GetTestingPrefService()->SetManagedPref(
-      ::prefs::kDevToolsAvailability,
+      ash::chrome_prefs::kDevToolsAvailability,
       std::make_unique<base::Value>(static_cast<int>(
-          policy::DeveloperToolsPolicyHandler::Availability::kDisallowed)));
+          policy::DeveloperToolsAvailability::kDisallowed)));
   GetPoliciesAndVerifyResult(
       "{\"apkCacheEnabled\":true,\"debuggingFeaturesDisabled\":true,"
       "\"guid\":\"" +
@@ -626,9 +655,9 @@ TEST_F(ArcPolicyBridgeTest, DeveloperToolsPolicyDisallowedTest) {
 
 TEST_F(ArcPolicyBridgeTest, ForceDevToolsAvailabilityTest) {
   profile()->GetTestingPrefService()->SetManagedPref(
-      ::prefs::kDevToolsAvailability,
+      ash::chrome_prefs::kDevToolsAvailability,
       std::make_unique<base::Value>(static_cast<int>(
-          policy::DeveloperToolsPolicyHandler::Availability::kDisallowed)));
+          policy::DeveloperToolsAvailability::kDisallowed)));
   base::test::ScopedCommandLine command_line;
   command_line.GetProcessCommandLine()->AppendSwitch(
       ash::switches::kForceDevToolsAvailable);
@@ -742,6 +771,29 @@ TEST_F(ArcPolicyBridgeTest, ReportDPCVersionTest) {
   ReportDPCVersionAndVerifyObserverCallback("100");
 }
 
+TEST_F(ArcPolicyBridgeTest, OnArcStartDelayedReentrancyCrash) {
+  // Setup conditions for ARC on demand to delay activation.
+  policy_bridge()->OverrideIsManagedForTesting(true);
+  base::CommandLine::ForCurrentProcess()->AppendSwitch(
+      ash::switches::kEnableArcVm);
+  PrefService* const prefs = profile()->GetPrefs();
+  prefs->SetBoolean(arc::prefs::kArcTermsAccepted, true);
+  prefs->SetBoolean(arc::prefs::kArcSignedIn, true);
+  prefs->SetBoolean(arc::prefs::kArcPackagesIsUpToDate, true);
+
+  policy_map().Set(
+      policy::key::kArcPolicy, policy::POLICY_LEVEL_MANDATORY,
+      policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_CLOUD,
+      base::Value("{\"applications\":"
+                  "[{\"packageName\":\"com.google.android.apps.youtube.kids\","
+                  "\"installType\":\"FORCE_INSTALLED\"}]}"),
+      nullptr);
+
+  arc_session_manager()->RequestEnable();
+  base::RunLoop().RunUntilIdle();
+  EXPECT_EQ(ArcSessionManager::State::ACTIVE, arc_session_manager()->state());
+}
+
 // This and the following test send the policies through a mojo connection
 // between a PolicyInstance and the PolicyBridge.
 TEST_F(ArcPolicyBridgeTest, PolicyInstanceUnmanagedTest) {
@@ -781,61 +833,45 @@ TEST_F(ArcPolicyBridgeTest, ManualChildUserPoliciesSet) {
                     kSupervisedUserPlayStoreModePolicySetting, "}"}));
 }
 
-// Test that required and force-installed apps get disabled during ARC data
-// snapshot update.
-TEST_F(ArcPolicyBridgeTest, DisableAppsInSnapshot) {
-  constexpr char kDisabledApplicationsPolicyFormat[] =
-      "\"applications\":["
-      "{"
-      "\"disabled\":%s,"
-      "\"installType\":\"REQUIRED\","
-      "\"packageName\":\"com.android.vending\""
-      "},"
-      "{"
-      "\"disabled\":%s,"
-      "\"installType\":\"FORCE_INSTALLED\","
-      "\"packageName\":\"com.force.installed\""
-      "},"
-      "{"
-      "\"disabled\":%s,"
-      "\"installType\":\"OPTIONAL\","
-      "\"packageName\":\"com.optional\""
-      "}],"
-      "\"defaultPermissionPolicy\":\"GRANT\"";
+TEST_F(ArcPolicyBridgeTest,
+       ActivateArcIfRequiredByPolicy_NoForceInstalledApps) {
+  profile()->GetPrefs()->SetBoolean(prefs::kArcSignedIn, true);
+  profile()->GetPrefs()->SetBoolean(prefs::kArcTermsAccepted, true);
+  profile()->GetPrefs()->SetBoolean(prefs::kArcPackagesIsUpToDate, true);
+  arc_session_manager()->RequestEnable();
+  base::RunLoop().RunUntilIdle();
+  ASSERT_EQ(ArcSessionManager::State::READY, arc_session_manager()->state());
 
-  constexpr char kFalse[] = "false";
-  constexpr char kTrue[] = "true";
-
-  auto upstart_client = std::make_unique<ash::FakeUpstartClient>();
-  arc::prefs::RegisterLocalStatePrefs(
-      profile()->GetTestingPrefService()->registry());
-
-  auto manager = std::make_unique<arc::data_snapshotd::ArcDataSnapshotdManager>(
-      profile()->GetTestingPrefService(),
-      std::make_unique<arc::data_snapshotd::ArcDataSnapshotdDelegate>(),
-      base::DoNothing());
-  EXPECT_TRUE(arc::data_snapshotd::ArcDataSnapshotdManager::Get());
-  manager->set_state_for_testing(
-      arc::data_snapshotd::ArcDataSnapshotdManager::State::kMgsLaunched);
-  EXPECT_TRUE(manager->IsSnapshotInProgress());
   policy_map().Set(policy::key::kArcPolicy, policy::POLICY_LEVEL_MANDATORY,
                    policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_CLOUD,
-                   base::Value(base::StrCat(
-                       {"{",
-                        base::StringPrintf(kDisabledApplicationsPolicyFormat,
-                                           kFalse, kFalse, kFalse),
-                        "}"})),
+                   base::Value("{\"applications\":"
+                               "[{\"packageName\":\"com.example.app\","
+                               "\"installType\":\"REQUIRED\""
+                               "}]}"),
                    nullptr);
-  GetPoliciesAndVerifyResult(
-      base::StrCat({"{\"apkCacheEnabled\":true,",
-                    base::StringPrintf(kDisabledApplicationsPolicyFormat, kTrue,
-                                       kTrue, kFalse),
-                    ",\"guid\":\"", instance_guid(), "\",",
-                    kMountPhysicalMediaDisabledPolicySetting, ",",
-                    "\"resetAndroidIdEnabled\":true}"}));
+  policy_bridge()->OnArcStartDelayed();
+  EXPECT_EQ(ArcSessionManager::State::READY, arc_session_manager()->state());
+}
 
-  manager.reset();
-  upstart_client.reset();
+TEST_F(ArcPolicyBridgeTest, ActivateArcIfRequiredByPolicy_ForceInstalledApps) {
+  profile()->GetPrefs()->SetBoolean(prefs::kArcSignedIn, true);
+  profile()->GetPrefs()->SetBoolean(prefs::kArcTermsAccepted, true);
+  profile()->GetPrefs()->SetBoolean(prefs::kArcPackagesIsUpToDate, true);
+  arc_session_manager()->RequestEnable();
+  base::RunLoop().RunUntilIdle();
+  ASSERT_EQ(ArcSessionManager::State::READY, arc_session_manager()->state());
+
+  policy_map().Set(
+      policy::key::kArcPolicy, policy::POLICY_LEVEL_MANDATORY,
+      policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_CLOUD,
+      base::Value("{\"applications\":"
+                  "[{\"packageName\":\"com.example.force_installed_app\","
+                  "\"installType\":\"FORCE_INSTALLED\""
+                  "}]}"),
+      nullptr);
+  policy_bridge()->OnArcStartDelayed();
+  base::RunLoop().RunUntilIdle();
+  EXPECT_EQ(ArcSessionManager::State::ACTIVE, arc_session_manager()->state());
 }
 
 TEST_P(ArcPolicyBridgeAffiliatedTest, ApkCacheEnabledTest) {
@@ -909,7 +945,7 @@ TEST_F(ArcPolicyBridgeCertStoreTest, KeyPermissionsBasicTest) {
   // One certificate is required to be installed.
   cert_store_service()->set_required_cert_names_for_testing({kFakeCertName});
 
-  base::Value::Dict key_permissions;
+  base::DictValue key_permissions;
   AddKeyPermissionForAppId(key_permissions, kAndroidAppId, true /* allowed */);
   AddKeyPermissionForAppId(key_permissions, kChromeAppId, true /* allowed */);
 
@@ -930,7 +966,7 @@ TEST_F(ArcPolicyBridgeCertStoreTest, KeyPermissionsBasicTest) {
 // Tests that if cert store service is non-null, corporate usage key exists and
 // not to any ARC apps, ChoosePrivateKeyRules policy is not set.
 TEST_F(ArcPolicyBridgeCertStoreTest, KeyPermissionsEmptyTest) {
-  base::Value::Dict key_permissions;
+  base::DictValue key_permissions;
   AddKeyPermissionForAppId(key_permissions, kAndroidAppId, false /* allowed */);
   AddKeyPermissionForAppId(key_permissions, kChromeAppId, true /* allowed */);
 
@@ -951,7 +987,7 @@ TEST_F(ArcPolicyBridgeCertStoreTest, KeyPermissionsEmptyTest) {
 // exist, but in theory are available to ARC apps, ChoosePrivateKeyRules policy
 // is not set.
 TEST_F(ArcPolicyBridgeCertStoreTest, KeyPermissionsNoCertsTest) {
-  base::Value::Dict key_permissions;
+  base::DictValue key_permissions;
   AddKeyPermissionForAppId(key_permissions, kAndroidAppId, true /* allowed */);
   AddKeyPermissionForAppId(key_permissions, kChromeAppId, true /* allowed */);
 
@@ -965,6 +1001,42 @@ TEST_F(ArcPolicyBridgeCertStoreTest, KeyPermissionsNoCertsTest) {
       base::StrCat({"{\"apkCacheEnabled\":true,\"guid\":\"", instance_guid(),
                     "\",", kMountPhysicalMediaDisabledPolicySetting, ",",
                     kRequiredKeyPairsEmpty, "}"}));
+}
+
+TEST_F(ArcPolicyBridgeTest, ConfigureRevenPoliciesTest) {
+  base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
+  command_line.AppendSwitch(ash::switches::kRevenBranding);
+
+  policy_map().Set(
+      policy::key::kArcPolicy, policy::POLICY_LEVEL_MANDATORY,
+      policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_CLOUD,
+      base::Value("{\"applications\":"
+                  "["
+                  "{\"packageName\":\"com.google.android.apps.youtube.kids\","
+                  "\"installType\":\"REQUIRED\","
+                  "\"lockTaskAllowed\":false,"
+                  "\"permissionGrants\":[]"
+                  "},"
+                  "{\"packageName\":\"com.zimperium.zips\","
+                  "\"installType\":\"REQUIRED\","
+                  "\"lockTaskAllowed\":false,"
+                  "\"permissionGrants\":[]"
+                  "}"
+                  "],"
+                  "\"defaultPermissionPolicy\":\"GRANT\"}"),
+      nullptr);
+
+  GetPoliciesAndVerifyResult(
+      "{\"apkCacheEnabled\":true,\"applications\":"
+      "[{\"installType\":\"REQUIRED\","
+      "\"lockTaskAllowed\":false,"
+      "\"packageName\":\"com.zimperium.zips\","
+      "\"permissionGrants\":[]"
+      "}],"
+      "\"defaultPermissionPolicy\":\"GRANT\","
+      "\"guid\":\"" +
+      instance_guid() + "\"," + kMountPhysicalMediaDisabledPolicySetting + "," +
+      "\"playStoreMode\":\"WHITELIST\"" + "}"); // nocheck
 }
 
 }  // namespace arc

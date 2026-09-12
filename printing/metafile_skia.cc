@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/functional/bind.h"
@@ -29,13 +29,11 @@
 #include "third_party/skia/include/core/SkPicture.h"
 #include "third_party/skia/include/core/SkSerialProcs.h"
 #include "third_party/skia/include/core/SkStream.h"
-// Note that headers in third_party/skia/src are fragile.  This is
-// an experimental, fragile, and diagnostic-only document type.
-#include "third_party/skia/src/utils/SkMultiPictureDocument.h"
+#include "third_party/skia/include/docs/SkMultiPictureDocument.h"
 #include "ui/gfx/geometry/size_conversions.h"
 #include "ui/gfx/geometry/skia_conversions.h"
 
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
 #include "printing/pdf_metafile_cg_mac.h"
 #endif
 
@@ -53,11 +51,15 @@ namespace {
 // which would then operate upon that.
 constexpr bool kInitFromDataCopyData = true;
 
-bool WriteAssetToBuffer(const SkStreamAsset* asset, void* buffer, size_t size) {
+bool WriteAssetToBuffer(const SkStreamAsset* asset,
+                        base::span<uint8_t> buffer) {
   // Calling duplicate() keeps original asset state unchanged.
   std::unique_ptr<SkStreamAsset> assetCopy(asset->duplicate());
   size_t length = assetCopy->getLength();
-  return length <= size && length == assetCopy->read(buffer, length);
+  if (length > buffer.size()) {
+    return false;
+  }
+  return length == assetCopy->read(buffer.data(), length);
 }
 
 }  // namespace
@@ -79,6 +81,7 @@ struct MetafileSkiaData {
   std::map<uint32_t, sk_sp<SkPicture>> subframe_pics;
   int document_cookie = 0;
   raw_ptr<ContentProxySet> typeface_content_info = nullptr;
+  raw_ptr<ContentProxySet> image_content_info = nullptr;
 
   // The scale factor is used because Blink occasionally calls
   // PaintCanvas::getTotalMatrix() even though the total matrix is not as
@@ -87,7 +90,7 @@ struct MetafileSkiaData {
   SkSize size;
   mojom::SkiaDocumentType type;
 
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
   PdfMetafileCg pdf_cg;
 #endif
 };
@@ -111,6 +114,10 @@ bool MetafileSkia::Init() {
 void MetafileSkia::UtilizeTypefaceContext(
     ContentProxySet* typeface_content_info) {
   data_->typeface_content_info = typeface_content_info;
+}
+
+void MetafileSkia::UtilizeImageContext(ContentProxySet* image_content_info) {
+  data_->image_content_info = image_content_info;
 }
 
 // TODO(halcanary): Create a Metafile class that only stores data.
@@ -186,7 +193,7 @@ bool MetafileSkia::FinishPage() {
     canvas->drawPicture(std::move(pic));
     pic = recorder.finishRecordingAsPicture();
   }
-  data_->pages.emplace_back(data_->size, std::move(pic));
+  AppendPage(data_->size, std::move(pic));
   return true;
 }
 
@@ -200,15 +207,17 @@ bool MetafileSkia::FinishDocument() {
 
   SkDynamicMemoryWStream stream;
   sk_sp<SkDocument> doc;
-  cc::PlaybackParams::CustomDataRasterCallback custom_callback;
+  cc::PlaybackCallbacks::CustomDataRasterCallback custom_callback;
   switch (data_->type) {
     case mojom::SkiaDocumentType::kPDF:
-      doc = MakePdfDocument(printing::GetAgent(), accessibility_tree_, &stream);
+      doc = MakePdfDocument(printing::GetAgent(), title_, accessibility_tree_,
+                            generate_document_outline_, &stream);
       break;
     case mojom::SkiaDocumentType::kMSKP:
       SkSerialProcs procs = SerializationProcs(&data_->subframe_content_info,
-                                               data_->typeface_content_info);
-      doc = SkMakeMultiPictureDocument(&stream, &procs);
+                                               data_->typeface_content_info,
+                                               data_->image_content_info);
+      doc = SkMultiPictureDocument::Make(&stream, &procs);
       // It is safe to use base::Unretained(this) because the callback
       // is only used by `canvas` in the following loop which has shorter
       // lifetime than `this`.
@@ -237,13 +246,14 @@ void MetafileSkia::FinishFrameContent() {
   DCHECK_EQ(data_->type, mojom::SkiaDocumentType::kMSKP);
   DCHECK(!data_->data_stream);
 
-  cc::PlaybackParams::CustomDataRasterCallback custom_callback =
-      base::BindRepeating(&MetafileSkia::CustomDataToSkPictureCallback,
-                          base::Unretained(this));
+  cc::PlaybackCallbacks callbacks;
+  callbacks.custom_callback = base::BindRepeating(
+      &MetafileSkia::CustomDataToSkPictureCallback, base::Unretained(this));
   sk_sp<SkPicture> pic = data_->pages[0].content.ToSkPicture(
-      SkRect::MakeSize(data_->pages[0].size), nullptr, custom_callback);
+      SkRect::MakeSize(data_->pages[0].size), nullptr, callbacks);
   SkSerialProcs procs = SerializationProcs(&data_->subframe_content_info,
-                                           data_->typeface_content_info);
+                                           data_->typeface_content_info,
+                                           data_->image_content_info);
   SkDynamicMemoryWStream stream;
   pic->serialize(&stream, &procs);
   data_->data_stream = stream.detachAsStream();
@@ -256,10 +266,15 @@ uint32_t MetafileSkia::GetDataSize() const {
 }
 
 bool MetafileSkia::GetData(void* dst_buffer, uint32_t dst_buffer_size) const {
-  if (!data_->data_stream)
+  if (!data_->data_stream) {
     return false;
-  return WriteAssetToBuffer(data_->data_stream.get(), dst_buffer,
-                            base::checked_cast<size_t>(dst_buffer_size));
+  }
+  // SAFETY: Caller guarantees `dst_buffer` points to at least `dst_buffer_size`
+  // bytes.
+  auto buffer =
+      UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(dst_buffer),
+                                base::checked_cast<size_t>(dst_buffer_size)));
+  return WriteAssetToBuffer(data_->data_stream.get(), buffer);
 }
 
 bool MetafileSkia::ShouldCopySharedMemoryRegionData() const {
@@ -272,8 +287,8 @@ mojom::MetafileDataType MetafileSkia::GetDataType() const {
 }
 
 gfx::Rect MetafileSkia::GetPageBounds(unsigned int page_number) const {
-  if (page_number < data_->pages.size()) {
-    SkSize size = data_->pages[page_number].size;
+  if (page_number > 0 && page_number - 1 < data_->pages.size()) {
+    SkSize size = data_->pages[page_number - 1].size;
     return gfx::Rect(base::ClampRound(size.width()),
                      base::ClampRound(size.height()));
   }
@@ -286,22 +301,19 @@ unsigned int MetafileSkia::GetPageCount() const {
 
 printing::NativeDrawingContext MetafileSkia::context() const {
   NOTREACHED();
-  return nullptr;
 }
 
 #if BUILDFLAG(IS_WIN)
 bool MetafileSkia::Playback(printing::NativeDrawingContext hdc,
                             const RECT* rect) const {
   NOTREACHED();
-  return false;
 }
 
 bool MetafileSkia::SafePlayback(printing::NativeDrawingContext hdc) const {
   NOTREACHED();
-  return false;
 }
 
-#elif BUILDFLAG(IS_MAC)
+#elif BUILDFLAG(IS_APPLE)
 /* TODO(caryclark): The set up of PluginInstance::PrintPDFOutput may result in
    rasterized output.  Even if that flow uses PdfMetafileCg::RenderPage,
    the drawing of the PDF into the canvas may result in a rasterized output.
@@ -318,10 +330,8 @@ bool MetafileSkia::RenderPage(unsigned int page_number,
   if (data_->pdf_cg.GetDataSize() == 0) {
     if (GetDataSize() == 0)
       return false;
-    size_t length = data_->data_stream->getLength();
-    std::vector<uint8_t> buffer(length);
-    std::ignore =
-        WriteAssetToBuffer(data_->data_stream.get(), &buffer[0], length);
+    std::vector<uint8_t> buffer(data_->data_stream->getLength());
+    std::ignore = WriteAssetToBuffer(data_->data_stream.get(), buffer);
     data_->pdf_cg.InitFromData(buffer);
   }
   return data_->pdf_cg.RenderPage(page_number, context, rect, autorotate,
@@ -339,14 +349,19 @@ bool MetafileSkia::SaveToFileDescriptor(int fd) const {
   static constexpr size_t kMaximumBufferSize = 1024 * 1024;
   std::vector<uint8_t> buffer(std::min(kMaximumBufferSize, asset->getLength()));
   do {
-    size_t read_size = asset->read(&buffer[0], buffer.size());
-    if (read_size == 0u)
+    size_t read_size = asset->read(buffer.data(), buffer.size());
+    bool is_at_end = read_size < buffer.size();
+    if (read_size == 0u) {
       break;
+    }
     DCHECK_GE(buffer.size(), read_size);
     buffer.resize(read_size);
-    if (!base::WriteFileDescriptor(fd, buffer))
+    if (!base::WriteFileDescriptor(fd, buffer)) {
       return false;
-  } while (!asset->isAtEnd());
+    } else if (is_at_end) {
+      break;
+    }
+  } while (true);
 
   return true;
 }
@@ -360,16 +375,21 @@ bool MetafileSkia::SaveTo(base::File* file) const {
 
   static constexpr size_t kMaximumBufferSize = 1024 * 1024;
   std::vector<uint8_t> buffer(std::min(kMaximumBufferSize, asset->getLength()));
+  base::span<uint8_t> buffer_span(buffer);
   do {
-    size_t read_size = asset->read(&buffer[0], buffer.size());
-    if (read_size == 0)
+    size_t read_size = asset->read(buffer_span.data(), buffer_span.size());
+    bool is_at_end = read_size < buffer_span.size();
+    if (read_size == 0) {
       break;
-    DCHECK_GE(buffer.size(), read_size);
-    if (!file->WriteAtCurrentPosAndCheck(
-            base::make_span(&buffer[0], read_size))) {
+    }
+    DCHECK_GE(buffer_span.size(), read_size);
+    if (!file->WriteAtCurrentPosAndCheck(buffer_span.first(read_size))) {
       return false;
     }
-  } while (!asset->isAtEnd());
+    if (is_at_end) {
+      break;
+    }
+  } while (true);
 
   return true;
 }
@@ -390,6 +410,7 @@ std::unique_ptr<MetafileSkia> MetafileSkia::GetMetafileForCurrentPage(
   metafile->data_->subframe_content_info = data_->subframe_content_info;
   metafile->data_->subframe_pics = data_->subframe_pics;
   metafile->data_->typeface_content_info = data_->typeface_content_info;
+  metafile->data_->image_content_info = data_->image_content_info;
 
   if (!metafile->FinishDocument())  // Generate PDF.
     metafile.reset();
@@ -404,13 +425,11 @@ uint32_t MetafileSkia::CreateContentForRemoteFrame(
   sk_sp<SkPicture> pic = SkPicture::MakePlaceholder(
       SkRect::MakeXYWH(rect.x(), rect.y(), rect.width(), rect.height()));
 
-  // Store the map between content id and the proxy id.
-  uint32_t content_id = pic->uniqueID();
-  DCHECK(!base::Contains(data_->subframe_content_info, content_id));
-  data_->subframe_content_info[content_id] = render_proxy_token;
-
-  // Store the picture content.
-  data_->subframe_pics[content_id] = pic;
+  // Store the map between content id and the proxy id and store the picture
+  // content.
+  const uint32_t content_id = pic->uniqueID();
+  DCHECK(!data_->subframe_content_info.contains(content_id));
+  AppendSubframeInfo(content_id, render_proxy_token, std::move(pic));
   return content_id;
 }
 
@@ -440,11 +459,11 @@ SkStreamAsset* MetafileSkia::GetPdfData() const {
 void MetafileSkia::CustomDataToSkPictureCallback(SkCanvas* canvas,
                                                  uint32_t content_id) {
   // Check whether this is the one we need to handle.
-  if (!base::Contains(data_->subframe_content_info, content_id))
+  if (!data_->subframe_content_info.contains(content_id))
     return;
 
   auto it = data_->subframe_pics.find(content_id);
-  DCHECK(it != data_->subframe_pics.end());
+  CHECK(it != data_->subframe_pics.end());
 
   // Found the picture, draw it on canvas.
   sk_sp<SkPicture> pic = it->second;

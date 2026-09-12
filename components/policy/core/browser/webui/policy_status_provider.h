@@ -14,6 +14,9 @@
 #include "base/time/time.h"
 #include "base/values.h"
 #include "components/policy/policy_export.h"
+#include "components/policy/resources/webui/mojom/policy.mojom-forward.h"
+
+class PrefService;
 
 namespace base {
 class Time;
@@ -26,21 +29,23 @@ class PolicyData;
 namespace policy {
 class CloudPolicyClient;
 class CloudPolicyCore;
+class CloudPolicyRefreshScheduler;
 class CloudPolicyStore;
 
-POLICY_EXPORT extern const char kPolicyDescriptionKey[];
-POLICY_EXPORT extern const char kFlexOrgWarningKey[];
+inline constexpr char kPolicyDescriptionKey[] = "policyDescriptionKey";
+inline constexpr char kFlexOrgWarningKey[] = "flexOrgWarning";
 
 // The following constants identify top-level keys in the dictionary returned by
 // PolicyStatusProvider.
-POLICY_EXPORT extern const char kAssetIdKey[];
-POLICY_EXPORT extern const char kLocationKey[];
-POLICY_EXPORT extern const char kDirectoryApiIdKey[];
-POLICY_EXPORT extern const char kGaiaIdKey[];
-POLICY_EXPORT extern const char kClientIdKey[];
-POLICY_EXPORT extern const char kUsernameKey[];
-POLICY_EXPORT extern const char kEnterpriseDomainManagerKey[];
-POLICY_EXPORT extern const char kDomainKey[];
+inline constexpr char kAssetIdKey[] = "assetId";
+inline constexpr char kLocationKey[] = "location";
+inline constexpr char kDirectoryApiIdKey[] = "directoryApiId";
+inline constexpr char kGaiaIdKey[] = "gaiaId";
+inline constexpr char kClientIdKey[] = "clientId";
+inline constexpr char kUsernameKey[] = "username";
+inline constexpr char kEnterpriseDomainManagerKey[] = "enterpriseDomainManager";
+inline constexpr char kDomainKey[] = "domain";
+inline constexpr char kEnrollmentTokenKey[] = "enrollmentToken";
 
 // An interface for querying the status of a policy provider.  It surfaces
 // things like last fetch time or status of the backing store, but not the
@@ -58,11 +63,25 @@ class POLICY_EXPORT PolicyStatusProvider {
   virtual ~PolicyStatusProvider();
 
   // Returns a dictionary with metadata about policies.
-  virtual base::Value::Dict GetStatus();
+  virtual base::DictValue GetStatus();
+  // TODO: crbug.com/40897784 - once all providers implement `GetStatusMojo`
+  // remove `GetStatus` and `SupportsMojoStatus`.
+  virtual policy::mojom::StatusPtr GetStatusMojo();
 
-  static base::Value::Dict GetStatusFromCore(const CloudPolicyCore* core);
-  static base::Value::Dict GetStatusFromPolicyData(
+  // Returns a dictionary with metadata about policies from a
+  // CloudPolicyCore instance. If |is_extension_install_policy| is true, the
+  // dictionary will be for extension install policies.
+  static base::DictValue GetStatusFromCore(
+      const CloudPolicyCore* core,
+      bool is_extension_install_policy = false);
+  static void PopulateStatusFromCore(const CloudPolicyCore* core,
+                                     bool is_extension_install_policy,
+                                     policy::mojom::StatusPtr& status);
+  static base::DictValue GetStatusFromPolicyData(
       const enterprise_management::PolicyData* policy);
+  static void PopulateStatusFromPolicyData(
+      const enterprise_management::PolicyData* policy,
+      policy::mojom::StatusPtr& status);
 
   // Overrides clock in tests. Returned closure removes the override when
   // destroyed.
@@ -77,6 +96,30 @@ class POLICY_EXPORT PolicyStatusProvider {
   static std::u16string GetPolicyStatusFromStore(const CloudPolicyStore*,
                                                  const CloudPolicyClient*);
   static std::u16string GetTimeSinceLastActionString(base::Time);
+
+  // TODO: crbug.com/40897784 - remove once all status providers implement the
+  // mojo version of `GetStatus()`.
+  static policy::mojom::StatusPtr DictStatusToMojo(const base::DictValue& dict);
+
+  // Add policy push information along with conditional refresh interval into
+  // policy `status` dictionary.
+  static void SetPolicyPushAndRefreshStatus(
+      base::DictValue& status,
+      const CloudPolicyRefreshScheduler* refresh_scheduler);
+  static void SetPolicyPushAndRefreshStatus(
+      policy::mojom::StatusPtr& status,
+      const CloudPolicyRefreshScheduler* refresh_scheduler);
+
+  // Add last report uploaded timestamp into policy `status` dictionary from
+  // `prefs`.
+  static void UpdateLastReportTimestamp(
+      base::DictValue& status,
+      PrefService* prefs,
+      const std::string& report_timestamp_pref_path);
+  static void UpdateLastReportTimestamp(
+      policy::mojom::StatusPtr& status,
+      PrefService* prefs,
+      const std::string& report_timestamp_pref_path);
 
  private:
   base::ObserverList<Observer, /*check_empty=*/true> observers_;

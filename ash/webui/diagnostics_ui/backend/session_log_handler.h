@@ -10,6 +10,7 @@
 
 #include "ash/webui/diagnostics_ui/backend/session_log_async_helper.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
@@ -60,13 +61,10 @@ class SessionLogHandler : public content::WebUIMessageHandler,
   void RegisterMessages() override;
 
   // SelectFileDialog::Listener:
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
+  void FileSelectionCanceled() override;
 
   void OnSessionLogCreated(const base::FilePath& path, bool success);
-
-  void FileSelectionCanceled(void* params) override;
 
   SessionLogHandler(const SessionLogHandler&) = delete;
   SessionLogHandler& operator=(const SessionLogHandler&) = delete;
@@ -83,16 +81,16 @@ class SessionLogHandler : public content::WebUIMessageHandler,
 
  private:
   // Opens the select dialog.
-  void HandleSaveSessionLogRequest(const base::Value::List& args);
+  void HandleSaveSessionLogRequest(const base::ListValue& args);
 
   // Initializes Javascript.
-  void HandleInitialize(const base::Value::List& args);
+  void HandleInitialize(const base::ListValue& args);
 
   SelectFilePolicyCreator select_file_policy_creator_;
   std::unique_ptr<TelemetryLog> telemetry_log_;
   std::unique_ptr<RoutineLog> routine_log_;
   std::unique_ptr<NetworkingLog> networking_log_;
-  ash::HoldingSpaceClient* const holding_space_client_;
+  const raw_ptr<ash::HoldingSpaceClient> holding_space_client_;
   std::string save_session_log_callback_id_;
   scoped_refptr<ui::SelectFileDialog> select_file_dialog_;
   base::OnceClosure log_created_closure_;

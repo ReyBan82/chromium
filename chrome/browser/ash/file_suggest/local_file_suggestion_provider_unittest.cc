@@ -7,7 +7,9 @@
 #include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/bind.h"
+#include "base/test/run_until.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/file_manager/file_tasks_observer.h"
 #include "chrome/browser/ash/file_manager/path_util.h"
@@ -15,6 +17,7 @@
 #include "chrome/browser/ash/file_suggest/file_suggest_util.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile_manager.h"
+#include "components/prefs/pref_service.h"
 #include "content/public/test/browser_task_environment.h"
 #include "storage/browser/file_system/external_mount_points.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -52,21 +55,17 @@ class LocalFileSuggestionProviderTest : public testing::Test {
   void WriteFile(const base::FilePath& path) {
     CHECK(base::WriteFile(path, "abcd"));
     CHECK(base::PathExists(path));
-    Wait();
   }
 
-  void Wait() { task_environment_.RunUntilIdle(); }
-
   void WaitForProviderToBeInitialized() {
-    while (!provider_->IsInitialized()) {
-      Wait();
-    }
+    ASSERT_TRUE(
+        base::test::RunUntil([&] { return provider_->IsInitialized(); }));
   }
 
   void UpdateResults() {
     base::RunLoop run_loop;
     auto cb = base::BindLambdaForTesting(
-        [&](const absl::optional<std::vector<FileSuggestData>>& data) {
+        [&](const std::optional<std::vector<FileSuggestData>>& data) {
           results_ = data;
           run_loop.Quit();
         });
@@ -74,7 +73,7 @@ class LocalFileSuggestionProviderTest : public testing::Test {
     run_loop.Run();
   }
 
-  absl::optional<std::vector<FileSuggestData>>& Results() { return results_; }
+  std::optional<std::vector<FileSuggestData>>& Results() { return results_; }
 
   LocalFileSuggestionProvider* GetProvider() { return provider_.get(); }
 
@@ -86,20 +85,21 @@ class LocalFileSuggestionProviderTest : public testing::Test {
     profile_ = testing_profile_manager_->CreateTestingProfile(
         "primary_profile@test", {});
     provider_ = std::make_unique<LocalFileSuggestionProvider>(
-        profile_, base::BindRepeating(
-                      &LocalFileSuggestionProviderTest::OnSuggestionsUpdated,
-                      base::Unretained(this)));
+        TestingBrowserProcess::GetGlobal()->local_state(), profile_,
+        base::BindRepeating(
+            &LocalFileSuggestionProviderTest::OnSuggestionsUpdated,
+            base::Unretained(this)));
     UpdateResults();
     WaitForProviderToBeInitialized();
   }
 
-  TestingProfile* profile_;
+  raw_ptr<TestingProfile, DanglingUntriaged> profile_;
 
  private:
   content::BrowserTaskEnvironment task_environment_;
   std::unique_ptr<TestingProfileManager> testing_profile_manager_;
   std::unique_ptr<LocalFileSuggestionProvider> provider_;
-  absl::optional<std::vector<FileSuggestData>> results_;
+  std::optional<std::vector<FileSuggestData>> results_;
 };
 
 TEST_F(LocalFileSuggestionProviderTest, ResultsEmptyOnInitialization) {
@@ -134,11 +134,7 @@ TEST_F(LocalFileSuggestionProviderTest, OldFilesNotReturned) {
   WriteFile(Path("new.txt"));
   WriteFile(Path("old.png"));
   auto now = base::Time::Now();
-  base::TouchFile(
-      Path("old.png"), now,
-      now -
-          base::Days(
-              LocalFileSuggestionProvider::kDefaultMaxLastModifiedTimeInDays));
+  base::TouchFile(Path("old.png"), now, now - GetMaxFileSuggestionRecency());
 
   GetProvider()->OnFilesOpened(
       {OpenEvent(Path("new.txt")), OpenEvent(Path("old.png"))});
@@ -153,11 +149,7 @@ TEST_F(LocalFileSuggestionProviderTest, OldFilesNotReturned) {
 class LocalFileSuggestionProviderTrashTest
     : public LocalFileSuggestionProviderTest {
  public:
-  LocalFileSuggestionProviderTrashTest() {
-    std::vector<base::test::FeatureRef> enabled_features;
-    enabled_features.push_back(ash::features::kFilesTrash);
-    scoped_feature_list_.InitWithFeatures(enabled_features, {});
-  }
+  LocalFileSuggestionProviderTrashTest() = default;
 
   LocalFileSuggestionProviderTrashTest(
       const LocalFileSuggestionProviderTrashTest&) = delete;
@@ -171,7 +163,7 @@ class LocalFileSuggestionProviderTrashTest
         profile_->GetPath().Append(file_manager::trash::kTrashFolderName);
     ASSERT_TRUE(base::CreateDirectory(trash_folder_));
 
-    // Ensure the My files and Downloads mount points are appropriately mocked
+    // Ensure the MyFiles and Downloads mount points are appropriately mocked
     // to allow the trash locations to be parented at the test directory.
     storage::ExternalMountPoints::GetSystemInstance()->RegisterFileSystem(
         file_manager::util::GetDownloadsMountPointName(profile_),
@@ -190,7 +182,6 @@ class LocalFileSuggestionProviderTrashTest
 
  private:
   base::FilePath trash_folder_;
-  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 TEST_F(LocalFileSuggestionProviderTrashTest,

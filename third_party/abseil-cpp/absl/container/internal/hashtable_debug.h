@@ -30,11 +30,12 @@
 #ifndef ABSL_CONTAINER_INTERNAL_HASHTABLE_DEBUG_H_
 #define ABSL_CONTAINER_INTERNAL_HASHTABLE_DEBUG_H_
 
-#include <cstddef>
 #include <algorithm>
+#include <cstddef>
 #include <type_traits>
 #include <vector>
 
+#include "absl/base/config.h"
 #include "absl/container/internal/hashtable_debug_hooks.h"
 
 namespace absl {
@@ -93,14 +94,6 @@ template <typename C>
 size_t AllocatedByteSize(const C& c) {
   return absl::container_internal::hashtable_debug_internal::
       HashtableDebugAccess<C>::AllocatedByteSize(c);
-}
-
-// Returns a tight lower bound for AllocatedByteSize(c) where `c` is of type `C`
-// and `c.size()` is equal to `num_elements`.
-template <typename C>
-size_t LowerBoundAllocatedByteSize(size_t num_elements) {
-  return absl::container_internal::hashtable_debug_internal::
-      HashtableDebugAccess<C>::LowerBoundAllocatedByteSize(num_elements);
 }
 
 }  // namespace container_internal

@@ -7,11 +7,12 @@
 #include <memory>
 #include <utility>
 
-#include "chrome/browser/apps/app_service/app_service_proxy.h"
-#include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
-#include "chrome/browser/apps/app_service/launch_utils.h"
-#include "chrome/browser/profiles/profile.h"
+#include "base/check_deref.h"
+#include "base/functional/callback_helpers.h"
+#include "chromeos/ash/components/browser_context_helper/annotated_account_id.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
+#include "components/services/app_service/public/cpp/app_service.h"
+#include "components/services/app_service/public/cpp/app_service_registry.h"
 #include "ui/events/event_constants.h"
 
 ArcAppLauncher::ArcAppLauncher(content::BrowserContext* context,
@@ -31,21 +32,18 @@ ArcAppLauncher::ArcAppLauncher(content::BrowserContext* context,
 
   std::unique_ptr<ArcAppListPrefs::AppInfo> app_info = prefs->GetApp(app_id_);
   if (!app_info ||
-      !MaybeLaunchApp(app_id, *app_info, apps::Readiness::kUnknown))
-    prefs->AddObserver(this);
+      !MaybeLaunchApp(app_id, *app_info, apps::Readiness::kUnknown)) {
+    arc_app_list_prefs_observer_.Observe(prefs);
+  }
 
-  auto* profile = Profile::FromBrowserContext(context_);
-  DCHECK(
-      apps::AppServiceProxyFactory::IsAppServiceAvailableForProfile(profile));
-  Observe(&apps::AppServiceProxyFactory::GetForProfile(profile)
-               ->AppRegistryCache());
+  const auto& account_id = CHECK_DEREF(ash::AnnotatedAccountId::Get(context));
+  auto& app_service =
+      CHECK_DEREF(apps::AppServiceRegistry::Get()->Find(account_id));
+  app_registry_cache_observer_.Observe(&app_service.AppRegistryCache());
 }
 
 ArcAppLauncher::~ArcAppLauncher() {
   if (!app_launched_) {
-    ArcAppListPrefs* prefs = ArcAppListPrefs::Get(context_);
-    if (prefs)
-      prefs->RemoveObserver(this);
     VLOG(2) << "App " << app_id_ << "was not launched.";
   }
 }
@@ -60,6 +58,10 @@ void ArcAppLauncher::OnAppStatesChanged(
     const std::string& app_id,
     const ArcAppListPrefs::AppInfo& app_info) {
   MaybeLaunchApp(app_id, app_info, apps::Readiness::kUnknown);
+}
+
+void ArcAppLauncher::OnArcAppListPrefsDestroyed() {
+  arc_app_list_prefs_observer_.Reset();
 }
 
 void ArcAppLauncher::OnAppUpdate(const apps::AppUpdate& update) {
@@ -81,7 +83,7 @@ void ArcAppLauncher::OnAppUpdate(const apps::AppUpdate& update) {
 
 void ArcAppLauncher::OnAppRegistryCacheWillBeDestroyed(
     apps::AppRegistryCache* cache) {
-  Observe(nullptr);
+  app_registry_cache_observer_.Reset();
 }
 
 bool ArcAppLauncher::MaybeLaunchApp(const std::string& app_id,
@@ -95,37 +97,51 @@ bool ArcAppLauncher::MaybeLaunchApp(const std::string& app_id,
     return false;
   }
 
-  auto* profile = Profile::FromBrowserContext(context_);
-  DCHECK(
-      apps::AppServiceProxyFactory::IsAppServiceAvailableForProfile(profile));
-  auto* proxy = apps::AppServiceProxyFactory::GetForProfile(profile);
+  const auto& account_id = CHECK_DEREF(ash::AnnotatedAccountId::Get(context_));
+  auto& app_service =
+      CHECK_DEREF(apps::AppServiceRegistry::Get()->Find(account_id));
+
   if (readiness == apps::Readiness::kUnknown) {
-    if (proxy->AppRegistryCache().GetAppType(app_id) ==
+    if (app_service.AppRegistryCache().GetAppType(app_id) ==
         apps::AppType::kUnknown) {
       return false;
     }
 
-    proxy->AppRegistryCache().ForOneApp(
+    app_service.AppRegistryCache().ForOneApp(
         app_id, [&readiness](const apps::AppUpdate& update) {
           readiness = update.Readiness();
         });
   }
-  if (readiness != apps::Readiness::kReady) {
+  // Launch requests disabled by local settings should go through to App service
+  // This is to ensure that the blocked app dialog is shown.
+  if (readiness != apps::Readiness::kReady &&
+      readiness != apps::Readiness::kDisabledByLocalSettings) {
     return false;
   }
 
   ArcAppListPrefs* prefs = ArcAppListPrefs::Get(context_);
   DCHECK(prefs && prefs->GetApp(app_id_));
-  prefs->RemoveObserver(this);
-  Observe(nullptr);
+  app_registry_cache_observer_.Reset();
+  arc_app_list_prefs_observer_.Reset();
 
+  // app_service.Launch / app_service.LaunchAppWithIntent can synchronously call
+  // ShelfModel::ReplaceShelfItemDelegate (e.g. via the ARC deferred-launch
+  // spinner path), which can destroy the
+  // ArcPlaystoreShortcutShelfItemController that owns |this|. Guard the
+  // trailing member write with a weak pointer.
+  auto weak_this = weak_ptr_factory_.GetWeakPtr();
   if (launch_intent_) {
-    proxy->LaunchAppWithIntent(
+    app_service.LaunchAppWithIntent(
         app_id_, ui::EF_NONE, std::move(launch_intent_), launch_source_,
         std::make_unique<apps::WindowInfo>(display_id_), base::DoNothing());
   } else {
-    proxy->Launch(app_id_, ui::EF_NONE, launch_source_,
-                  std::make_unique<apps::WindowInfo>(display_id_));
+    app_service.Launch(app_id_, ui::EF_NONE, launch_source_,
+                       std::make_unique<apps::WindowInfo>(display_id_));
+  }
+
+  if (!weak_this) {
+    // |this| was destroyed during the synchronous launch chain.
+    return true;
   }
 
   app_launched_ = true;

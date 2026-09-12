@@ -9,10 +9,17 @@
 
 #include "base/lazy_instance.h"
 #include "chrome/app/chrome_command_ids.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 namespace {
+
+constexpr int kMaxExtensionInstallErrors = 101;
+constexpr int IDC_EXTENSION_INSTALL_ERROR_LAST =
+    IDC_EXTENSION_INSTALL_ERROR_FIRST + kMaxExtensionInstallErrors - 1;
 
 base::LazyInstance<std::bitset<IDC_EXTENSION_INSTALL_ERROR_LAST -
                                IDC_EXTENSION_INSTALL_ERROR_FIRST +

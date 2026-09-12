@@ -8,17 +8,22 @@
 #include <stdint.h>
 
 #include <algorithm>
-#include <sstream>
+#include <string>
+#include <string_view>
 
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/notreached.h"
+#include "base/numerics/byte_conversions.h"
 #include "base/numerics/ostream_operators.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/numerics/safe_math.h"
 #include "base/strings/strcat.h"
-#include "base/strings/string_util.h"
-#include "base/sys_byteorder.h"
-#include "crypto/hkdf.h"
-#include "third_party/boringssl/src/include/openssl/aead.h"
+#include "base/strings/string_view_util.h"
+#include "crypto/aead.h"
+#include "crypto/kdf.h"
 
 namespace gcm {
 
@@ -34,12 +39,17 @@ const size_t kDefaultRecordSize = 4096;
 // Key size, in bytes, of a valid AEAD_AES_128_GCM key.
 const size_t kContentEncryptionKeySize = 16;
 
-// The BoringSSL functions used to seal (encrypt) and open (decrypt) a payload
-// follow the same prototype, declared as follows.
-using EVP_AEAD_CTX_TransformFunction =
-    int(const EVP_AEAD_CTX *ctx, uint8_t *out, size_t *out_len,
-        size_t max_out_len, const uint8_t *nonce, size_t nonce_len,
-        const uint8_t *in, size_t in_len, const uint8_t *ad, size_t ad_len);
+// Convenience wrapper for crypto/kdf that adapts strings to/from byte spans.
+std::string HkdfSha256(std::string_view secret,
+                       std::string_view salt,
+                       std::string_view info,
+                       size_t size) {
+  std::string result(size, 0);
+  crypto::kdf::Hkdf(crypto::hash::kSha256, base::as_byte_span(secret),
+                    base::as_byte_span(salt), base::as_byte_span(info),
+                    base::as_writable_byte_span(result));
+  return result;
+}
 
 // Implementation of draft 03 of the Web Push Encryption standard:
 // https://tools.ietf.org/html/draft-ietf-webpush-encryption-03
@@ -55,17 +65,16 @@ class WebPushEncryptionDraft03
   ~WebPushEncryptionDraft03() override = default;
 
   // GCMMessageCryptographer::EncryptionScheme implementation.
-  std::string DerivePseudoRandomKey(
-      const base::StringPiece& /* recipient_public_key */,
-      const base::StringPiece& /* sender_public_key */,
-      const base::StringPiece& ecdh_shared_secret,
-      const base::StringPiece& auth_secret) override {
+  std::string DerivePseudoRandomKey(std::string_view /* recipient_public_key */,
+                                    std::string_view /* sender_public_key */,
+                                    std::string_view ecdh_shared_secret,
+                                    std::string_view auth_secret) override {
     const char kInfo[] = "Content-Encoding: auth";
 
     // This deliberately copies over the NUL terminus.
-    base::StringPiece info(kInfo, sizeof(kInfo));
+    std::string_view info(kInfo, sizeof(kInfo));
 
-    return crypto::HkdfSha256(ecdh_shared_secret, auth_secret, info, 32);
+    return HkdfSha256(ecdh_shared_secret, auth_secret, info, 32);
   }
 
   // Creates the info parameter for an HKDF value for the given
@@ -82,33 +91,33 @@ class WebPushEncryptionDraft03
   // integer in network byte order (big endian).
   std::string GenerateInfoForContentEncoding(
       EncodingType type,
-      const base::StringPiece& recipient_public_key,
-      const base::StringPiece& sender_public_key) override {
-    std::stringstream info_stream;
-    info_stream << "Content-Encoding: ";
+      std::string_view recipient_public_key,
+      std::string_view sender_public_key) override {
+    std::string info;
+    info += "Content-Encoding: ";
 
     switch (type) {
       case EncodingType::CONTENT_ENCRYPTION_KEY:
-        info_stream << "aesgcm";
+        info += "aesgcm";
         break;
       case EncodingType::NONCE:
-        info_stream << "nonce";
+        info += "nonce";
         break;
     }
 
-    info_stream << '\x00' << "P-256" << '\x00';
+    info += '\x00';
+    info += "P-256";
+    info += '\x00';
 
-    uint16_t local_len =
-        base::HostToNet16(static_cast<uint16_t>(recipient_public_key.size()));
-    info_stream.write(reinterpret_cast<char*>(&local_len), sizeof(local_len));
-    info_stream << recipient_public_key;
+    info += base::as_string_view(base::U16ToBigEndian(
+        base::checked_cast<uint16_t>(recipient_public_key.size())));
+    info += recipient_public_key;
 
-    uint16_t peer_len =
-        base::HostToNet16(static_cast<uint16_t>(sender_public_key.size()));
-    info_stream.write(reinterpret_cast<char*>(&peer_len), sizeof(peer_len));
-    info_stream << sender_public_key;
+    info += base::as_string_view(base::U16ToBigEndian(
+        base::checked_cast<uint16_t>(sender_public_key.size())));
+    info += sender_public_key;
 
-    return info_stream.str();
+    return info;
   }
 
   // draft-ietf-webpush-encryption-03 defines that the padding is included at
@@ -118,11 +127,11 @@ class WebPushEncryptionDraft03
   //
   // TODO(peter): Add support for message padding if the GCMMessageCryptographer
   // starts encrypting payloads for reasons other than testing.
-  std::string CreateRecord(const base::StringPiece& plaintext) override {
+  std::string CreateRecord(std::string_view plaintext) override {
     std::string record;
     record.reserve(sizeof(uint16_t) + plaintext.size());
     record.append(sizeof(uint16_t), '\x00');
-    record.append(plaintext.data(), plaintext.size());
+    record.append(plaintext);
     return record;
   }
 
@@ -142,7 +151,7 @@ class WebPushEncryptionDraft03
   // The record padding in draft-ietf-webpush-encryption-03 is included at the
   // beginning of the record. The first two bytes indicate the length of the
   // padding. All padding bytes immediately follow, and must be set to zero.
-  bool ValidateAndRemovePadding(base::StringPiece& record) override {
+  bool ValidateAndRemovePadding(std::string_view& record) override {
     // Records must be at least two octets in size (to hold the padding).
     // Records that are smaller, i.e. a single octet, are invalid.
     if (record.size() < sizeof(uint16_t))
@@ -184,21 +193,20 @@ class WebPushEncryptionDraft08
   ~WebPushEncryptionDraft08() override = default;
 
   // GCMMessageCryptographer::EncryptionScheme implementation.
-  std::string DerivePseudoRandomKey(
-      const base::StringPiece& recipient_public_key,
-      const base::StringPiece& sender_public_key,
-      const base::StringPiece& ecdh_shared_secret,
-      const base::StringPiece& auth_secret) override {
+  std::string DerivePseudoRandomKey(std::string_view recipient_public_key,
+                                    std::string_view sender_public_key,
+                                    std::string_view ecdh_shared_secret,
+                                    std::string_view auth_secret) override {
     DCHECK_EQ(recipient_public_key.size(), 65u);
     DCHECK_EQ(sender_public_key.size(), 65u);
 
     const char kInfo[] = "WebPush: info";
 
     // This deliberately copies over the NUL terminus.
-    std::string info = base::StrCat({base::StringPiece(kInfo, sizeof(kInfo)),
+    std::string info = base::StrCat({std::string_view(kInfo, sizeof(kInfo)),
                                      recipient_public_key, sender_public_key});
 
-    return crypto::HkdfSha256(ecdh_shared_secret, auth_secret, info, 32);
+    return HkdfSha256(ecdh_shared_secret, auth_secret, info, 32);
   }
 
   // The info string used for generating the content encryption key and the
@@ -206,22 +214,22 @@ class WebPushEncryptionDraft08
   // public keys of both the recipient and the sender are now in the PRK.
   std::string GenerateInfoForContentEncoding(
       EncodingType type,
-      const base::StringPiece& /* recipient_public_key */,
-      const base::StringPiece& /* sender_public_key */) override {
-    std::stringstream info_stream;
-    info_stream << "Content-Encoding: ";
+      std::string_view /* recipient_public_key */,
+      std::string_view /* sender_public_key */) override {
+    std::string info;
+    info += "Content-Encoding: ";
 
     switch (type) {
       case EncodingType::CONTENT_ENCRYPTION_KEY:
-        info_stream << "aes128gcm";
+        info += "aes128gcm";
         break;
       case EncodingType::NONCE:
-        info_stream << "nonce";
+        info += "nonce";
         break;
     }
 
-    info_stream << '\x00';
-    return info_stream.str();
+    info += '\x00';
+    return info;
   }
 
   // draft-ietf-webpush-encryption-08 defines that the padding follows the
@@ -230,10 +238,10 @@ class WebPushEncryptionDraft08
   //
   // TODO(peter): Add support for message padding if the GCMMessageCryptographer
   // starts encrypting payloads for reasons other than testing.
-  std::string CreateRecord(const base::StringPiece& plaintext) override {
+  std::string CreateRecord(std::string_view plaintext) override {
     std::string record;
     record.reserve(plaintext.size() + sizeof(uint8_t));
-    record.append(plaintext.data(), plaintext.size());
+    record.append(plaintext);
     record.append(sizeof(uint8_t), '\x02');
     return record;
   }
@@ -254,7 +262,7 @@ class WebPushEncryptionDraft08
   // The record padding in draft-ietf-webpush-encryption-08 is included at the
   // end of the record. The length is not defined, but all padding bytes must be
   // zero until the delimiter (0x02) is found.
-  bool ValidateAndRemovePadding(base::StringPiece& record) override {
+  bool ValidateAndRemovePadding(std::string_view& record) override {
     DCHECK_GE(record.size(), 1u);
 
     size_t padding_length = 1;
@@ -266,6 +274,11 @@ class WebPushEncryptionDraft08
 
       if (record[offset] != 0x00 /* valid padding byte */)
         return false;
+    }
+
+    // The record is invalid if no padding delimiter (0x02) was found.
+    if (padding_length > record.size()) {
+      return false;
     }
 
     record.remove_suffix(padding_length);
@@ -293,15 +306,14 @@ GCMMessageCryptographer::GCMMessageCryptographer(Version version) {
 
 GCMMessageCryptographer::~GCMMessageCryptographer() = default;
 
-bool GCMMessageCryptographer::Encrypt(
-    const base::StringPiece& recipient_public_key,
-    const base::StringPiece& sender_public_key,
-    const base::StringPiece& ecdh_shared_secret,
-    const base::StringPiece& auth_secret,
-    const base::StringPiece& salt,
-    const base::StringPiece& plaintext,
-    size_t* record_size,
-    std::string* ciphertext) const {
+bool GCMMessageCryptographer::Encrypt(std::string_view recipient_public_key,
+                                      std::string_view sender_public_key,
+                                      std::string_view ecdh_shared_secret,
+                                      std::string_view auth_secret,
+                                      std::string_view salt,
+                                      std::string_view plaintext,
+                                      size_t* record_size,
+                                      std::string* ciphertext) const {
   DCHECK_EQ(recipient_public_key.size(), 65u);
   DCHECK_EQ(sender_public_key.size(), 65u);
   DCHECK_EQ(ecdh_shared_secret.size(), 32u);
@@ -334,15 +346,14 @@ bool GCMMessageCryptographer::Encrypt(
   return true;
 }
 
-bool GCMMessageCryptographer::Decrypt(
-    const base::StringPiece& recipient_public_key,
-    const base::StringPiece& sender_public_key,
-    const base::StringPiece& ecdh_shared_secret,
-    const base::StringPiece& auth_secret,
-    const base::StringPiece& salt,
-    const base::StringPiece& ciphertext,
-    size_t record_size,
-    std::string* plaintext) const {
+bool GCMMessageCryptographer::Decrypt(std::string_view recipient_public_key,
+                                      std::string_view sender_public_key,
+                                      std::string_view ecdh_shared_secret,
+                                      std::string_view auth_secret,
+                                      std::string_view salt,
+                                      std::string_view ciphertext,
+                                      size_t record_size,
+                                      std::string* plaintext) const {
   DCHECK_EQ(recipient_public_key.size(), 65u);
   DCHECK_EQ(sender_public_key.size(), 65u);
   DCHECK_EQ(ecdh_shared_secret.size(), 32u);
@@ -379,89 +390,61 @@ bool GCMMessageCryptographer::Decrypt(
 
   DCHECK(!decrypted_record_string.empty());
 
-  base::StringPiece decrypted_record(decrypted_record_string);
+  std::string_view decrypted_record(decrypted_record_string);
   if (!encryption_scheme_->ValidateAndRemovePadding(decrypted_record)) {
     LOG(ERROR) << "Padding could not be validated or removed.";
     return false;
   }
 
-  plaintext->assign(decrypted_record.data(), decrypted_record.size());
+  *plaintext = decrypted_record;
   return true;
 }
 
 bool GCMMessageCryptographer::TransformRecord(Direction direction,
-                                              const base::StringPiece& input,
-                                              const base::StringPiece& key,
-                                              const base::StringPiece& nonce,
-                                              std::string* output) const {
-  DCHECK(output);
+                                              std::string_view input_str,
+                                              std::string_view key_str,
+                                              std::string_view nonce_str,
+                                              std::string* output_str) const {
+  constexpr auto kAlgorithm = crypto::aead::AES_128_GCM;
+  const auto input = base::as_byte_span(input_str);
+  const auto key = base::as_byte_span(key_str);
+  const auto nonce = base::as_byte_span(nonce_str);
+  constexpr base::span<const uint8_t> kNoAssociatedData{};
 
-  const EVP_AEAD* aead = EVP_aead_aes_128_gcm();
-
-  EVP_AEAD_CTX context;
-  if (!EVP_AEAD_CTX_init(&context, aead,
-                         reinterpret_cast<const uint8_t*>(key.data()),
-                         key.size(), EVP_AEAD_DEFAULT_TAG_LENGTH, nullptr)) {
-    return false;
+  if (direction == Direction::ENCRYPT) {
+    std::vector<uint8_t> ciphertext =
+        crypto::aead::Seal(kAlgorithm, key, input, nonce, kNoAssociatedData);
+    output_str->assign(base::as_string_view(ciphertext));
+    return true;
+  } else {
+    std::optional<std::vector<uint8_t>> plaintext =
+        crypto::aead::Open(kAlgorithm, key, input, nonce, kNoAssociatedData);
+    if (plaintext.has_value()) {
+      output_str->assign(base::as_string_view(*plaintext));
+    }
+    return plaintext.has_value();
   }
-
-  base::CheckedNumeric<size_t> maximum_output_length(input.size());
-  if (direction == Direction::ENCRYPT)
-    maximum_output_length += kAuthenticationTagBytes;
-
-  // WriteInto requires the buffer to finish with a NULL-byte.
-  maximum_output_length += 1;
-
-  size_t output_length = 0;
-  uint8_t* raw_output = reinterpret_cast<uint8_t*>(
-      base::WriteInto(output, maximum_output_length.ValueOrDie()));
-
-  EVP_AEAD_CTX_TransformFunction* transform_function =
-      direction == Direction::ENCRYPT ? EVP_AEAD_CTX_seal : EVP_AEAD_CTX_open;
-
-  if (!transform_function(
-          &context, raw_output, &output_length, output->size(),
-          reinterpret_cast<const uint8_t*>(nonce.data()), nonce.size(),
-          reinterpret_cast<const uint8_t*>(input.data()), input.size(),
-          nullptr, 0)) {
-    EVP_AEAD_CTX_cleanup(&context);
-    return false;
-  }
-
-  EVP_AEAD_CTX_cleanup(&context);
-
-  base::CheckedNumeric<size_t> expected_output_length(input.size());
-  if (direction == Direction::ENCRYPT)
-    expected_output_length += kAuthenticationTagBytes;
-  else
-    expected_output_length -= kAuthenticationTagBytes;
-
-  DCHECK_EQ(expected_output_length.ValueOrDie(), output_length);
-
-  output->resize(output_length);
-  return true;
 }
 
 std::string GCMMessageCryptographer::DeriveContentEncryptionKey(
-    const base::StringPiece& recipient_public_key,
-    const base::StringPiece& sender_public_key,
-    const base::StringPiece& ecdh_shared_secret,
-    const base::StringPiece& salt) const {
+    std::string_view recipient_public_key,
+    std::string_view sender_public_key,
+    std::string_view ecdh_shared_secret,
+    std::string_view salt) const {
   std::string content_encryption_key_info =
       encryption_scheme_->GenerateInfoForContentEncoding(
           EncryptionScheme::EncodingType::CONTENT_ENCRYPTION_KEY,
           recipient_public_key, sender_public_key);
 
-  return crypto::HkdfSha256(ecdh_shared_secret, salt,
-                            content_encryption_key_info,
-                            kContentEncryptionKeySize);
+  return HkdfSha256(ecdh_shared_secret, salt, content_encryption_key_info,
+                    kContentEncryptionKeySize);
 }
 
 std::string GCMMessageCryptographer::DeriveNonce(
-    const base::StringPiece& recipient_public_key,
-    const base::StringPiece& sender_public_key,
-    const base::StringPiece& ecdh_shared_secret,
-    const base::StringPiece& salt) const {
+    std::string_view recipient_public_key,
+    std::string_view sender_public_key,
+    std::string_view ecdh_shared_secret,
+    std::string_view salt) const {
   std::string nonce_info = encryption_scheme_->GenerateInfoForContentEncoding(
       EncryptionScheme::EncodingType::NONCE, recipient_public_key,
       sender_public_key);
@@ -471,7 +454,7 @@ std::string GCMMessageCryptographer::DeriveNonce(
   // however, Web Push encryption is limited to a single record per
   // https://tools.ietf.org/html/draft-ietf-webpush-encryption-03.
 
-  return crypto::HkdfSha256(ecdh_shared_secret, salt, nonce_info, kNonceSize);
+  return HkdfSha256(ecdh_shared_secret, salt, nonce_info, kNonceSize);
 }
 
 }  // namespace gcm

@@ -1,6 +1,6 @@
-import {SpeechAudioErrorDetails} from '/gen/third_party/blink/public/mojom/speech/speech_recognition_error.mojom.m.js';
-import {SpeechRecognitionErrorCode} from '/gen/third_party/blink/public/mojom/speech/speech_recognition_error_code.mojom.m.js';
-import {SpeechRecognitionSessionReceiver, SpeechRecognizer, SpeechRecognizerReceiver} from '/gen/third_party/blink/public/mojom/speech/speech_recognizer.mojom.m.js';
+import {SpeechAudioErrorDetails} from '/gen/media/mojo/mojom/speech_recognition_error.mojom.m.js';
+import {SpeechRecognitionErrorCode} from '/gen/media/mojo/mojom/speech_recognition_error_code.mojom.m.js';
+import {SpeechRecognitionSessionReceiver, SpeechRecognizer, SpeechRecognizerReceiver} from '/gen/media/mojo/mojom/speech_recognizer.mojom.m.js';
 
 // MockSpeechRecognizer is a mock implementation of blink.mojom.SpeechRecognizer
 // and the browser speech recognition service. Mock results can be set using
@@ -14,6 +14,7 @@ export class MockSpeechRecognizer {
     this.session_client_ = null;
     this.error_ = null;
     this.lastSetTimeout_ = null;
+    this.startParams_ = null;
 
     this.task_queue_ = [];
 
@@ -31,6 +32,7 @@ export class MockSpeechRecognizer {
     this.session_ = null;
     this.session_client_ = null;
     this.error_ = null;
+    this.startParams_ = null;
   }
 
   addMockSpeechRecognitionResult(transcript, confidence) {
@@ -78,6 +80,7 @@ export class MockSpeechRecognizer {
   }
 
   start(params) {
+    this.startParams_ = params;
     this.session_ = new MockSpeechRecognitionSession(params.sessionReceiver, this);
     this.session_client_ = params.client;
 
@@ -88,6 +91,18 @@ export class MockSpeechRecognizer {
     }
 
     this.dispatchResult();
+  }
+
+  startParams() {
+    return this.startParams_;
+  }
+
+  onDeviceWebSpeechAvailable(lang) {
+    return Promise.resolve("available");
+  }
+
+  installOnDeviceSpeechRecognition(lang) {
+    return Promise.resolve(false);
   }
 }
 
@@ -100,4 +115,5 @@ class MockSpeechRecognitionSession {
 
   abort() {}
   stopCapture() {}
+  updateRecognitionContext(params) {}
 }

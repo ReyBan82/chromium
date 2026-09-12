@@ -7,7 +7,18 @@
     export: "CORE_EXPORT",
   },
 
-  // If you add any tag names here, remember to update html_tree_builder_test.cc.
+  // Note that if an element is associated with a feature flag that has an
+  // origin trial, you must:
+  // * set runtimeFlagHasOriginTrial to true below, which disables the checks
+  //   that ensure that the tokenizer produces HTMLTag::kUnknown when the
+  //   feature flag is disabled.
+  // * make sure that any uses of HTMLTag::kYourElement treat it as
+  //   HTMLTag::kUnknown if the feature flag is disabled.  The member is
+  //   renamed to HTMLTag::kYourElementOrUnknown to remind you of this.
+  // * have a virtual suite testing the feature flag being disabled that
+  //   checks that any relevant behaviors (parsing or otherwise) are
+  //   unaffected when the feature is disabled.
+  // See https://crbug.com/1512345
   data: [
     {
       name: "a",
@@ -82,6 +93,12 @@
       interfaceHeaderDir: "third_party/blink/renderer/core/html/forms",
     },
     {
+      name: "camera",
+      interfaceName: "HTMLCameraElement",
+      runtimeEnabled: "CameraAndMicrophoneElements",
+      noTypeHelpers: true,
+    },
+    {
       name: "canvas",
       interfaceHeaderDir: "third_party/blink/renderer/core/html/canvas",
     },
@@ -109,9 +126,16 @@
       name: "colgroup",
       interfaceName: "HTMLTableColElement",
     },
+    // TODO(crbug.com/491158089): This should be removed in M150, once the
+    // HTMLCommandElementRemoval flag was removed.
     {
       name: "command",
       interfaceName: "HTMLUnknownElement",
+    },
+    {
+      name: "credential",
+      interfaceName: "HTMLCredentialElement",
+      runtimeEnabled: "LoginElement",
     },
     {
       name: "data",
@@ -162,6 +186,10 @@
       interfaceName: "HTMLFencedFrameElement",
       interfaceHeaderDir: "third_party/blink/renderer/core/html/fenced_frame",
       runtimeEnabled: "FencedFrames",
+      // Set runtimeFlagHasOriginTrial to disable feature flag checks in
+      // the tokenizer (which doesn't necessarily have access to the
+      // document)
+      runtimeFlagHasOriginTrial: true,
       // This element could be enabled in some documents but not others (due to
       // origin trials), so we need custom type helpers.
       noTypeHelpers: true,
@@ -192,6 +220,11 @@
     {
       name: "frameset",
       interfaceName: "HTMLFrameSetElement",
+    },
+    {
+      name: "geolocation",
+      interfaceName: "HTMLGeolocationElement",
+      runtimeEnabled: "GeolocationElement",
     },
     {
       name: "h1",
@@ -258,6 +291,15 @@
       interfaceName: "HTMLModElement",
     },
     {
+      name: "install",
+      interfaceName: "HTMLInstallElement",
+      runtimeEnabled: "InstallElement",
+      runtimeFlagHasOriginTrial: true,
+      // This element could be enabled in some documents but not others (due to
+      // origin trials), so we need custom type helpers.
+      noTypeHelpers: true,
+    },
+    {
       name: "kbd",
       interfaceName: "HTMLElement",
     },
@@ -282,6 +324,11 @@
       interfaceName: "HTMLLIElement",
     },
     {
+      name: "login",
+      interfaceName: "HTMLLoginElement",
+      runtimeEnabled: "LoginElement",
+    },
+    {
       name: "link",
       constructorNeedsCreateElementFlags: true,
     },
@@ -301,12 +348,33 @@
     "marquee",
     "menu",
     {
+      name: "menubar",
+      interfaceName: "HTMLMenuBarElement",
+      runtimeEnabled: "MenuElements",
+    },
+    {
+      name: "menuitem",
+      interfaceName: "HTMLMenuItemElement",
+      runtimeEnabled: "MenuElements",
+    },
+    {
+      name: "menulist",
+      interfaceName: "HTMLMenuListElement",
+      runtimeEnabled: "MenuElements",
+    },
+    {
       name: "meta",
       constructorNeedsCreateElementFlags: true,
     },
     {
       name: "meter",
       interfaceName: "HTMLMeterElement",
+    },
+    {
+      name: "microphone",
+      interfaceName: "HTMLMicrophoneElement",
+      runtimeEnabled: "CameraAndMicrophoneElements",
+      noTypeHelpers: true,
     },
     {
       name: "nav",
@@ -332,6 +400,7 @@
     {
       name: "object",
       constructorNeedsCreateElementFlags: true,
+      noTypeHelpers: true,
     },
     {
       name: "ol",
@@ -363,15 +432,6 @@
       name: "plaintext",
       interfaceName: "HTMLElement",
     },
-    {
-      name: "portal",
-      interfaceName: "HTMLPortalElement",
-      interfaceHeaderDir: "third_party/blink/renderer/core/html/portal",
-      runtimeEnabled: "Portals",
-      // Portals could be enabled in some documents but not others (due to
-      // origin trials), so we need custom type helpers.
-      noTypeHelpers: true,
-    },
     "pre",
     {
       name: "progress",
@@ -391,8 +451,7 @@
     },
     {
       name: "rt",
-      JSInterfaceName: "HTMLElement",
-      interfaceName: "HTMLRTElement",
+      interfaceName: "HTMLElement",
     },
     {
       name: "rtc",
@@ -400,8 +459,7 @@
     },
     {
       name: "ruby",
-      JSInterfaceName: "HTMLElement",
-      interfaceName: "HTMLRubyElement",
+      interfaceName: "HTMLElement",
     },
     {
       name: "s",
@@ -416,6 +474,10 @@
       constructorNeedsCreateElementFlags: true,
     },
     {
+      name: "search",
+      interfaceName: "HTMLSearchElement",
+    },
+    {
       name: "section",
       interfaceName: "HTMLElement",
     },
@@ -424,9 +486,8 @@
       interfaceHeaderDir: "third_party/blink/renderer/core/html/forms",
     },
     {
-      name: "selectmenu",
-      interfaceName: "HTMLSelectMenuElement",
-      runtimeEnabled: "HTMLSelectMenuElement",
+      name: "selectedcontent",
+      interfaceName: "HTMLSelectedContentElement",
       interfaceHeaderDir: "third_party/blink/renderer/core/html/forms",
     },
     {
@@ -454,6 +515,11 @@
     {
       name: "sub",
       interfaceName: "HTMLElement",
+    },
+    {
+      name: "submenu",
+      interfaceName: "HTMLSubMenuElement",
+      runtimeEnabled: "MenuElements",
     },
     {
       name: "summary",
@@ -515,6 +581,13 @@
     {
       name: "ul",
       interfaceName: "HTMLUListElement",
+    },
+    {
+      name: "usermedia",
+      interfaceName: "HTMLUserMediaElement",
+      runtimeEnabled: "UserMediaElement",
+      runtimeFlagHasOriginTrial: true,
+      noTypeHelpers: true,
     },
     {
       name: "var",

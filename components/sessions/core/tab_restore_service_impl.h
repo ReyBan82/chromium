@@ -6,20 +6,25 @@
 #define COMPONENTS_SESSIONS_CORE_TAB_RESTORE_SERVICE_IMPL_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/compiler_specific.h"
+#include "base/gtest_prod_util.h"
+#include "components/os_crypt/async/browser/os_crypt_async.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/sessions/core/sessions_export.h"
 #include "components/sessions/core/tab_restore_service.h"
 #include "components/sessions/core/tab_restore_service_client.h"
 #include "components/sessions/core/tab_restore_service_helper.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/split_tabs/split_tab_id.h"
 
 class PrefService;
 class TabRestoreServiceImplTest;
 
 namespace sessions {
+
+class CommandStorageManager;
 
 // Tab restore service that persists data on disk.
 class SESSIONS_EXPORT TabRestoreServiceImpl : public TabRestoreService {
@@ -27,7 +32,8 @@ class SESSIONS_EXPORT TabRestoreServiceImpl : public TabRestoreService {
   // Does not take ownership of |time_factory|.
   TabRestoreServiceImpl(std::unique_ptr<TabRestoreServiceClient> client,
                         PrefService* pref_service,
-                        TimeFactory* time_factory);
+                        tab_restore::TimeFactory* time_factory,
+                        os_crypt_async::OSCryptAsync* os_crypt_async);
 
   TabRestoreServiceImpl(const TabRestoreServiceImpl&) = delete;
   TabRestoreServiceImpl& operator=(const TabRestoreServiceImpl&) = delete;
@@ -37,21 +43,26 @@ class SESSIONS_EXPORT TabRestoreServiceImpl : public TabRestoreService {
   // TabRestoreService:
   void AddObserver(TabRestoreServiceObserver* observer) override;
   void RemoveObserver(TabRestoreServiceObserver* observer) override;
-  absl::optional<SessionID> CreateHistoricalTab(LiveTab* live_tab,
-                                                int index) override;
+  std::optional<SessionID> CreateHistoricalTab(LiveTab* live_tab,
+                                               int index) override;
   void BrowserClosing(LiveTabContext* context) override;
   void BrowserClosed(LiveTabContext* context) override;
   void CreateHistoricalGroup(LiveTabContext* context,
                              const tab_groups::TabGroupId& id) override;
+  void CreateHistoricalSplit(LiveTabContext* context,
+                             const split_tabs::SplitTabId& id) override;
   void GroupClosed(const tab_groups::TabGroupId& group) override;
   void GroupCloseStopped(const tab_groups::TabGroupId& group) override;
+  void SplitClosed(const split_tabs::SplitTabId& id) override;
+  void SplitCloseStopped(const split_tabs::SplitTabId& id) override;
   void ClearEntries() override;
   void DeleteNavigationEntries(const DeletionPredicate& predicate) override;
   const Entries& entries() const override;
   std::vector<LiveTab*> RestoreMostRecentEntry(
       LiveTabContext* context) override;
-  void RemoveTabEntryById(SessionID id) override;
-  std::vector<LiveTab*> RestoreEntryById(
+  void RemoveEntryById(SessionID id) override;
+  void RemoveLeastRecentlyUsedEntries(int num_to_remove) override;
+  std::optional<std::vector<LiveTab*>> RestoreEntryById(
       LiveTabContext* context,
       SessionID id,
       WindowOpenDisposition disposition) override;
@@ -63,11 +74,15 @@ class SESSIONS_EXPORT TabRestoreServiceImpl : public TabRestoreService {
 
   void CreateRestoredEntryCommandForTest(SessionID id);
 
+  CommandStorageManager* command_storage_manager_for_testing();
+
  private:
   friend class ::TabRestoreServiceImplTest;
+  FRIEND_TEST_ALL_PREFIXES(TabRestoreTest,
+                           RestoreGroupInBrowserThatDoesNotSupportGroups);
 
   class PersistenceDelegate;
-  void UpdatePersistenceDelegate();
+  void UpdatePersistenceDelegate(os_crypt_async::OSCryptAsync* os_crypt_async);
 
   // Exposed for testing.
   Entries* mutable_entries();

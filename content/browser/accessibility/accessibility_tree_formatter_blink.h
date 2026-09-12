@@ -11,9 +11,11 @@
 #include "content/common/content_export.h"
 #include "ui/accessibility/platform/inspect/ax_tree_formatter_base.h"
 
-namespace content {
-
+namespace ui {
 class BrowserAccessibility;
+}
+
+namespace content {
 
 class CONTENT_EXPORT AccessibilityTreeFormatterBlink
     : public ui::AXTreeFormatterBase {
@@ -21,10 +23,10 @@ class CONTENT_EXPORT AccessibilityTreeFormatterBlink
   explicit AccessibilityTreeFormatterBlink();
   ~AccessibilityTreeFormatterBlink() override;
 
-  base::Value::Dict BuildTree(ui::AXPlatformNodeDelegate* root) const override;
-  base::Value::Dict BuildTreeForSelector(
+  base::DictValue BuildTree(ui::AXPlatformNodeDelegate* root) const override;
+  base::DictValue BuildTreeForSelector(
       const AXTreeSelector& selector) const override;
-  base::Value::Dict BuildTreeForNode(ui::AXNode* node) const override;
+  base::DictValue BuildTreeForNode(ui::AXNode* node) const override;
   std::string DumpInternalAccessibilityTree(
       ui::AXTreeID tree_id,
       const std::vector<AXPropertyFilter>& property_filters) override;
@@ -34,21 +36,19 @@ class CONTENT_EXPORT AccessibilityTreeFormatterBlink
       std::vector<AXPropertyFilter>* property_filters) override;
 
  private:
-  void RecursiveBuildTree(const BrowserAccessibility& node,
-                          base::Value::Dict* dict) const;
+  void RecursiveBuildTree(const ui::BrowserAccessibility& node,
+                          base::DictValue* dict) const;
 
-  void RecursiveBuildTree(const ui::AXNode& node,
-                          base::Value::Dict* dict) const;
+  void RecursiveBuildTree(const ui::AXNode& node, base::DictValue* dict) const;
 
-  base::Value::Dict BuildNode(ui::AXPlatformNodeDelegate* node) const override;
+  base::DictValue BuildNode(ui::AXPlatformNodeDelegate* node) const override;
 
-  void AddProperties(const BrowserAccessibility& node,
-                     base::Value::Dict* dict) const;
+  void AddProperties(const ui::BrowserAccessibility& node,
+                     base::DictValue* dict) const;
 
-  void AddProperties(const ui::AXNode& node, base::Value::Dict* dict) const;
+  void AddProperties(const ui::AXNode& node, base::DictValue* dict) const;
 
-  std::string ProcessTreeForOutput(
-      const base::Value::Dict& node) const override;
+  std::string ProcessTreeForOutput(const base::DictValue& node) const override;
 };
 
 }  // namespace content

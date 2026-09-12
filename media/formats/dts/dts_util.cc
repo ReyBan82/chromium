@@ -4,19 +4,90 @@
 
 #include "media/formats/dts/dts_util.h"
 
+#include <algorithm>
+#include <optional>
+
 #include "base/logging.h"
-#include "base/sys_byteorder.h"
+#include "base/notimplemented.h"
 #include "media/base/audio_parameters.h"
 #include "media/base/bit_reader.h"
-#include "media/formats/dts/dts_stream_parser.h"
 
 namespace media {
 
 namespace dts {
 
 namespace {
+
+constexpr uint32_t kDTSCoreSyncWord = 0x7ffe8001;
+constexpr size_t kDTSCoreHeaderSizeInBytes = 15;
+
+struct Header {
+  size_t frame_size = 0;
+  int sample_count = 0;
+};
+
+std::optional<Header> ParseHeader(base::span<const uint8_t> data) {
+  if (data.empty() || data.size() < kDTSCoreHeaderSizeInBytes) {
+    return std::nullopt;
+  }
+
+  BitReader reader(data);
+
+  // Read and validate Sync word.
+  uint32_t sync_word = 0;
+  if (!reader.ReadBits(32, &sync_word) || sync_word != kDTSCoreSyncWord) {
+    return std::nullopt;
+  }
+
+  uint16_t fsize = 0;
+  uint8_t ext_audio = 0, ext_audio_id = 0, nblks = 0, sfreq = 0;
+
+  // Skip ftype(1-bit) + DeficitSample Count(5-bits) + CRC Present Flag(1-bit)
+  const bool success =
+      reader.SkipBits(7) && reader.ReadBits(7, &nblks) &&
+      reader.ReadBits(14, &fsize) && reader.SkipBits(6) &&  // Skip AMODE
+      reader.ReadBits(4, &sfreq) &&
+      reader.SkipBits(10) &&  // Skip: RATE, FixedBit, DNYF, TIMEF, AUSX, HDCD
+      reader.ReadBits(3, &ext_audio_id) && reader.ReadBits(1, &ext_audio);
+  if (!success) {
+    return std::nullopt;
+  }
+
+  constexpr auto kSampleRateCore =
+      std::to_array<size_t>({0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100,
+                             0, 0, 12000, 24000, 48000, 0, 0});
+
+  if (fsize < 95) {  // Invalid values of FSIZE is 0-94.
+    return std::nullopt;
+  }
+
+  if (nblks < 5 || nblks > 127) {  // Valid values of nblks is 5-127.
+    return std::nullopt;
+  }
+
+  if (kSampleRateCore[sfreq] == 0) {  // Table value of 0 indicates invalid
+    return std::nullopt;
+  }
+
+  // extended audio may modify sample count and rate
+  const bool is_core_x96 = ext_audio && ext_audio_id == 2;
+
+  Header header;
+  header.frame_size = fsize + 1;  // Framesize is FSIZE + 1.
+
+  // Use nblks to compute frame duration, a.k.a number of PCM samples per
+  // channel in the current DTS frames in the buffer.
+  int sample_count = (nblks + 1) * 32;  // Num of PCM samples in current frame
+  if (is_core_x96) {
+    sample_count <<= 1;
+  }
+  header.sample_count = sample_count;
+
+  return header;
+}
+
 // Match a 32-bit sync word with the content in the buffer.
-bool MatchSyncWord(const uint8_t* data, uint32_t sync_word) {
+bool MatchSyncWord(base::span<const uint8_t> data, uint32_t sync_word) {
   return data[0] == static_cast<uint8_t>(sync_word >> 24) &&
          data[1] == static_cast<uint8_t>(sync_word >> 16) &&
          data[2] == static_cast<uint8_t>(sync_word >> 8) &&
@@ -24,30 +95,34 @@ bool MatchSyncWord(const uint8_t* data, uint32_t sync_word) {
 }
 
 // Search for the next sync word 0x7ffe8001.
-const uint8_t* FindNextSyncWord(const uint8_t* begin,
-                                const uint8_t* end,
-                                uint32_t sync_word) {
-  DCHECK(begin);
-  DCHECK(end);
-  DCHECK_LE(begin, end);
-
-  const int sync_word_len_less_one = 3;
-  const uint8_t* current = begin;
-  const uint8_t first_sync_byte = static_cast<uint8_t>(sync_word >> 24);
-
-  while (current && (current < end - sync_word_len_less_one)) {
-    if (MatchSyncWord(current, sync_word)) {
-      if (current != begin)
-        DVLOG(2) << __func__ << " skip " << current - begin << " bytes.";
-      return current;
-    }
-
-    ++current;
-    current = static_cast<const uint8_t*>(
-        memchr(current, first_sync_byte, end - current));
+base::span<const uint8_t> FindNextSyncWord(base::span<const uint8_t> buffer,
+                                           uint32_t sync_word) {
+  if (buffer.size() < 4) {
+    return {};
   }
 
-  return nullptr;
+  const uint8_t first_sync_byte = static_cast<uint8_t>(sync_word >> 24);
+  size_t i = 0;
+
+  while (i <= buffer.size() - 4) {
+    if (buffer[i] == first_sync_byte &&
+        MatchSyncWord(buffer.subspan(i, 4u), sync_word)) {
+      if (i != 0) {
+        DVLOG(2) << __func__ << " skip " << i << " bytes.";
+      }
+      return buffer.subspan(i);
+    }
+
+    const base::span<const uint8_t> search_span = buffer.subspan(i + 1);
+    auto it =
+        std::find(search_span.begin(), search_span.end(), first_sync_byte);
+    if (it == search_span.end()) {
+      break;
+    }
+    i = (it - search_span.begin()) + (i + 1);
+  }
+
+  return {};
 }
 
 }  // namespace
@@ -56,11 +131,11 @@ const uint8_t* FindNextSyncWord(const uint8_t* begin,
 // which could contain several complete DTS sync frames.
 // The parameter AudioCodec is for future samplecount support for DTSHD and
 // DTSX bitstreams.
-int ParseTotalSampleCount(const uint8_t* data,
-                          size_t size,
+int ParseTotalSampleCount(base::span<const uint8_t> buffer_span,
                           AudioCodec dts_codec_type) {
-  if (!data)
+  if (buffer_span.empty()) {
     return 0;
+  }
 
   uint32_t sync_word = 0;
   uint32_t header_size = 0;
@@ -69,46 +144,45 @@ int ParseTotalSampleCount(const uint8_t* data,
   // other DTS audio types
   switch (dts_codec_type) {
     case AudioCodec::kDTS:
-      sync_word = DTSStreamParser::kDTSCoreSyncWord;
-      header_size = DTSStreamParser::kDTSCoreHeaderSizeInBytes;
+      sync_word = kDTSCoreSyncWord;
+      header_size = kDTSCoreHeaderSizeInBytes;
       break;
     default:
       sync_word = 0;
       header_size = 0;
   }
 
-  if (size < header_size)
+  if (buffer_span.size() < header_size) {
     return 0;
+  }
 
-  DTSStreamParser parser;
-  const uint8_t* dend = data + size;
-  const uint8_t* current = FindNextSyncWord(data, dend, sync_word);
   int total_sample_count = 0;
 
-  while (current && (dend > current + header_size)) {
-    int frame_size;
-    int sample_count;
-    int bytes_processed =
-        parser.ParseFrameHeader(current, dend - current, &frame_size, nullptr,
-                                nullptr, &sample_count, nullptr, nullptr);
+  while (buffer_span.size() > header_size) {
+    base::span<const uint8_t> sync_span =
+        FindNextSyncWord(buffer_span, sync_word);
+    if (sync_span.empty() || sync_span.size() < header_size) {
+      break;
+    }
+    buffer_span = sync_span;
 
-    if ((bytes_processed > 0) && (frame_size > 0) && (sample_count > 0)) {
-      current += frame_size;
-      if (current > dend) {
-        DVLOG(2) << __func__ << " Incomplete frame, missing " << current - dend
-                 << " bytes.";
+    const auto header = ParseHeader(buffer_span);
+
+    if (header && header->frame_size > 0 && header->sample_count > 0) {
+      if (header->frame_size > buffer_span.size()) {
+        DVLOG(2) << __func__ << " Incomplete frame, missing "
+                 << header->frame_size - buffer_span.size() << " bytes.";
         break;
       }
 
-      total_sample_count += sample_count;
+      total_sample_count += header->sample_count;
+      buffer_span = buffer_span.subspan(header->frame_size);
     } else {
       DVLOG(2)
           << __func__
           << " Invalid frame, skip 1 byte to find next synchronization word.";
-      current++;
+      buffer_span = buffer_span.subspan(1u);
     }
-
-    current = FindNextSyncWord(current, dend, sync_word);
   }
 
   return total_sample_count;
@@ -121,8 +195,8 @@ constexpr size_t kDTSXP2SamplesPerFrame = 1024;
 
 }  // namespace
 
-int WrapDTSWithIEC61937(base::span<const uint8_t> input_data_s,
-                        base::span<uint8_t> output_data_s,
+int WrapDTSWithIEC61937(base::span<const uint8_t> input,
+                        base::span<uint8_t> output,
                         AudioCodec dts_codec_type) {
   if (dts_codec_type == AudioCodec::kDTS) {
     // IEC 61937 frame for DTS-CA (IEC 61937-5) is defined as
@@ -131,35 +205,36 @@ int WrapDTSWithIEC61937(base::span<const uint8_t> input_data_s,
     static constexpr uint8_t kDTSCAHeader[] = {0x72, 0xF8, 0x1F, 0x4E,
                                                0x0B, 0x00, 0x00, 0x20};
 
-    // Output bytes: header + data + optional 2-byte alignment
-    size_t output_bytes = sizeof(kDTSCAHeader) + input_data_s.size();
+    // Output bytes: header + data + optional 2-byte alignment.
+    size_t output_bytes = sizeof(kDTSCAHeader) + input.size();
     if (output_bytes & 1)
       output_bytes++;
 
-    // Header + input data must fit in output buffer, limited to one DTS frame
-    if (input_data_s.size() > kDTSFrameSize - sizeof(kDTSCAHeader) ||
-        output_bytes > output_data_s.size()) {
+    // Header + input data must fit in output buffer, limited to one DTS frame.
+    if (input.size() > kDTSFrameSize - sizeof(kDTSCAHeader) ||
+        output_bytes > output.size()) {
       return 0;
     }
 
-    // Copy header to output buffer
-    memcpy(output_data_s.data(), kDTSCAHeader, sizeof(kDTSCAHeader));
+    // Copy header to output buffer.
+    auto [output_header, output_rem] = output.split_at<sizeof(kDTSCAHeader)>();
+    output_header.copy_from(kDTSCAHeader);
 
-    // Use 16-bit span for 16-bit byte swap
-    base::span<const uint16_t> input_16(
-        reinterpret_cast<const uint16_t*>(input_data_s.data()),
-        input_data_s.size() / 2);
-    output_data_s = output_data_s.subspan(sizeof(kDTSCAHeader));
-    base::span<uint16_t> output_16(
-        reinterpret_cast<uint16_t*>(output_data_s.data()),
-        output_data_s.size() / 2);
+    // Perform 16-bit byte swap while copying from input to output. If the input
+    // buffer is not even-sized, we drop the last byte.
+    //
+    // NOTE: This was historically done with a cast to `uint16_t*` however the
+    // input is not correctly aligned for that, so the dereference of the
+    // pointer would cause UB.
+    const size_t byte_pairs = input.size() / 2u;
+    auto [output_data, output_padding] = output_rem.split_at(byte_pairs * 2u);
+    for (size_t i = 0u; i < byte_pairs; ++i) {
+      output_data[2u * i] = input[2u * i + 1u];
+      output_data[2u * i + 1u] = input[2u * i];
+    }
 
-    auto output_16_iterator = base::ranges::transform(
-        input_16.begin(), input_16.end(), output_16.begin(),
-        [](uint16_t n) -> uint16_t { return base::ByteSwap(n); });
-
-    // Zero fill the remaining output buffer
-    std::fill(output_16_iterator, output_16.end(), 0);
+    // Zero fill the remaining output buffer.
+    std::ranges::fill(output_padding, uint8_t{0});
 
     return kDTSFrameSize;
   }

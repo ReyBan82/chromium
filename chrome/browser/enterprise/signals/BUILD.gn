@@ -1,26 +1,57 @@
-# Copyright 2021 The Chromium Authors
+# Copyright 2026 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-source_set("utils") {
-  public = [ "signals_utils.h" ]
+source_set("unit_tests") {
+  testonly = true
 
-  sources = [ "signals_utils.cc" ]
-
-  public_deps = [
-    "//components/safe_browsing/core/common",
-    "//third_party/abseil-cpp:absl",
-  ]
+  sources = [ "user_delegate_impl_unittest.cc" ]
 
   deps = [
-    "//chrome/browser/enterprise/identifiers",
-    "//chrome/common:constants",
-    "//components/component_updater",
-    "//components/enterprise/browser/identifiers",
-    "//components/policy/content",
-    "//components/policy/core/browser",
-    "//components/policy/core/common",
-    "//components/prefs",
-    "//components/safe_browsing/core/common:safe_browsing_prefs",
+    "//base",
+    "//chrome/browser/enterprise:impl",
+    "//chrome/test:test_support",
+    "//components/enterprise/device_trust/core:test_support",
+    "//testing/gtest",
   ]
+
+  if (!is_android) {
+    sources += [ "client_certificate_fetcher_unittest.cc" ]
+    deps += [ "//chrome/browser/content_settings:content_settings_factory" ]
+  }
+}
+
+if (!is_android) {
+  source_set("browser_tests") {
+    testonly = true
+    defines = [ "HAS_OUT_OF_PROC_TEST_RUNNER" ]
+
+    sources = [ "profile_signals_collector_browsertest.cc" ]
+
+    deps = [
+      "//base",
+      "//chrome/browser/enterprise:impl",
+      "//chrome/test:test_support",
+      "//chrome/test:test_support_ui",
+      "//content/test:test_support",
+      "//testing/gmock",
+    ]
+  }
+}
+
+if (is_android) {
+  source_set("android_browsertests") {
+    testonly = true
+    defines = [ "HAS_OUT_OF_PROC_TEST_RUNNER" ]
+
+    sources = [ "profile_signals_collector_browsertest.cc" ]
+
+    deps = [
+      "//base",
+      "//chrome/browser/enterprise:impl",
+      "//chrome/test:test_support",
+      "//content/test:test_support",
+      "//testing/gmock",
+    ]
+  }
 }

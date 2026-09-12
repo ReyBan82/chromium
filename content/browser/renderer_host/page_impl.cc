@@ -9,43 +9,59 @@
 #include "base/i18n/character_encoding.h"
 #include "base/trace_event/optional_trace_event.h"
 #include "cc/base/features.h"
+#include "cc/input/browser_controls_offset_tag_modifications.h"
 #include "content/browser/manifest/manifest_manager_host.h"
+#include "content/browser/preloading/prerender/prerender_features.h"
+#include "content/browser/preloading/prerender/prerender_host.h"
 #include "content/browser/renderer_host/frame_tree_node.h"
+#include "content/browser/renderer_host/navigation_request.h"
 #include "content/browser/renderer_host/page_delegate.h"
 #include "content/browser/renderer_host/render_frame_host_delegate.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/renderer_host/render_frame_proxy_host.h"
 #include "content/browser/renderer_host/render_view_host_delegate.h"
 #include "content/browser/renderer_host/render_view_host_impl.h"
+#include "content/public/browser/content_browser_client.h"
+#include "content/public/browser/peak_gpu_memory_tracker_factory.h"
 #include "content/public/browser/render_view_host.h"
+#include "content/public/common/content_client.h"
+#include "services/viz/public/mojom/compositing/offset_tag.mojom.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/loader/loader_constants.h"
 #include "third_party/blink/public/mojom/manifest/manifest.mojom.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom.h"
 #include "third_party/perfetto/include/perfetto/tracing/traced_value.h"
 
 namespace content {
 
 PageImpl::PageImpl(RenderFrameHostImpl& rfh, PageDelegate& delegate)
-    : main_document_(rfh),
-      delegate_(delegate),
-      text_autosizer_page_info_({0, 0, 1.f}) {
-  if (base::FeatureList::IsEnabled(
-          blink::features::kSharedStorageReportEventLimit)) {
-    select_url_report_event_budget_ = static_cast<double>(
-        blink::features::kSharedStorageReportEventBitBudgetPerPageLoad.Get());
-  }
+    : main_document_(rfh), delegate_(delegate) {
+
+#if BUILDFLAG(IS_ANDROID)
+  page_proxy_ = std::make_unique<PageProxy>(this);
+#endif
 }
 
 PageImpl::~PageImpl() {
+#if BUILDFLAG(IS_ANDROID)
+  page_proxy_->WillDeletePage(GetMainDocument().IsInLifecycleState(
+      RenderFrameHost::LifecycleState::kPrerendering));
+#endif
+
   // As SupportsUserData is a base class of PageImpl, Page members will be
   // destroyed before running ~SupportsUserData, which would delete the
   // associated PageUserData objects. Avoid this by calling ClearAllUserData
   // explicitly here to ensure that the PageUserData destructors can access
   // associated Page object.
   ClearAllUserData();
+
+  // If we still have a PeakGpuMemoryTracker, then the loading it was observing
+  // never completed. Cancel its callback so that we don't report partial
+  // loads to UMA.
+  CancelLoadingMemoryTracker();
 }
 
-const absl::optional<GURL>& PageImpl::GetManifestUrl() const {
+const std::optional<GURL>& PageImpl::GetManifestUrl() const {
   return manifest_url_;
 }
 
@@ -56,12 +72,22 @@ void PageImpl::GetManifest(GetManifestCallback callback) {
 }
 
 bool PageImpl::IsPrimary() const {
-  // TODO(1244137): Check for portals as well, once they are migrated to MPArch.
-  if (main_document_->IsFencedFrameRoot())
-    return false;
+  return main_document_->IsInPrimaryMainFrame();
+}
 
-  return main_document_->lifecycle_state() ==
-         RenderFrameHostImpl::LifecycleStateImpl::kActive;
+const blink::mojom::CaptureHandleConfig& PageImpl::GetCaptureHandleConfig() {
+  return capture_handle_config_;
+}
+
+void PageImpl::SetCaptureHandleConfig(
+    blink::mojom::CaptureHandleConfigPtr config) {
+  if (capture_handle_config_ == *config) {
+    return;
+  }
+  capture_handle_config_ = std::move(*config);
+
+  // Notify the tab-level observers via the delegate bridge.
+  main_document_->delegate()->OnCaptureHandleConfigUpdate(*this);
 }
 
 void PageImpl::UpdateManifestUrl(const GURL& manifest_url) {
@@ -69,8 +95,9 @@ void PageImpl::UpdateManifestUrl(const GURL& manifest_url) {
 
   // If |main_document_| is not active, the notification is sent on the page
   // activation.
-  if (!main_document_->IsActive())
+  if (!main_document_->IsActive()) {
     return;
+  }
 
   main_document_->delegate()->OnManifestUrlChanged(*this);
 }
@@ -84,6 +111,10 @@ base::WeakPtr<Page> PageImpl::GetWeakPtr() {
   return weak_factory_.GetWeakPtr();
 }
 
+base::SafeRef<Page> PageImpl::GetSafeRef() {
+  return weak_factory_.GetSafeRef();
+}
+
 base::WeakPtr<PageImpl> PageImpl::GetWeakPtrImpl() {
   return weak_factory_.GetWeakPtr();
 }
@@ -92,19 +123,30 @@ bool PageImpl::IsPageScaleFactorOne() {
   return GetPageScaleFactor() == 1.f;
 }
 
+const std::string& PageImpl::GetContentsMimeType() const {
+  return contents_mime_type_;
+}
+
+#if BUILDFLAG(IS_ANDROID)
+base::android::ScopedJavaLocalRef<jobject> PageImpl::GetJavaPage() {
+  return page_proxy_->GetJavaPage();
+}
+#endif
+
 void PageImpl::OnFirstVisuallyNonEmptyPaint() {
   did_first_visually_non_empty_paint_ = true;
   delegate_->OnFirstVisuallyNonEmptyPaint(*this);
 }
 
-void PageImpl::OnThemeColorChanged(const absl::optional<SkColor>& theme_color) {
+void PageImpl::OnThemeColorChanged(const std::optional<SkColor>& theme_color) {
   main_document_theme_color_ = theme_color;
   delegate_->OnThemeColorChanged(*this);
 }
 
-void PageImpl::DidChangeBackgroundColor(SkColor background_color,
+void PageImpl::DidChangeBackgroundColor(SkColor4f background_color,
                                         bool color_adjust) {
-  main_document_background_color_ = background_color;
+  // TODO(aaronhk): This should remain an SkColor4f
+  main_document_background_color_ = background_color.toSkColor();
   delegate_->OnBackgroundColorChanged(*this);
   if (color_adjust) {
     // <meta name="color-scheme" content="dark"> may pass the dark canvas
@@ -115,7 +157,7 @@ void PageImpl::DidChangeBackgroundColor(SkColor background_color,
     // process navigations we would paint the default background (typically
     // white) while the rendering is blocked.
     main_document_->GetRenderWidgetHost()->GetView()->SetContentBackgroundColor(
-        background_color);
+        background_color.toSkColor());
   }
 }
 
@@ -126,8 +168,9 @@ void PageImpl::DidInferColorScheme(
 }
 
 void PageImpl::NotifyPageBecameCurrent() {
-  if (!IsPrimary())
+  if (!IsPrimary()) {
     return;
+  }
   delegate_->NotifyPageBecamePrimary(*this);
 }
 
@@ -135,118 +178,127 @@ void PageImpl::SetContentsMimeType(std::string mime_type) {
   contents_mime_type_ = std::move(mime_type);
 }
 
-void PageImpl::OnTextAutosizerPageInfoChanged(
-    blink::mojom::TextAutosizerPageInfoPtr page_info) {
-  OPTIONAL_TRACE_EVENT0("content", "PageImpl::OnTextAutosizerPageInfoChanged");
-
-  // Keep a copy of `page_info` in case we create a new `blink::WebView` before
-  // the next update, so that the PageImpl can tell the newly created
-  // `blink::WebView` about the autosizer info.
-  text_autosizer_page_info_.main_frame_width = page_info->main_frame_width;
-  text_autosizer_page_info_.main_frame_layout_width =
-      page_info->main_frame_layout_width;
-  text_autosizer_page_info_.device_scale_adjustment =
-      page_info->device_scale_adjustment;
-
-  auto remote_frames_broadcast_callback = base::BindRepeating(
-      [](const blink::mojom::TextAutosizerPageInfo& page_info,
-         RenderFrameProxyHost* proxy_host) {
-        DCHECK(proxy_host);
-        proxy_host->GetAssociatedRemoteMainFrame()->UpdateTextAutosizerPageInfo(
-            page_info.Clone());
-      },
-      text_autosizer_page_info_);
-
-  main_document_->frame_tree()
-      ->root()
-      ->render_manager()
-      ->ExecuteRemoteFramesBroadcastMethod(
-          std::move(remote_frames_broadcast_callback),
-          main_document_->GetSiteInstance());
-}
-
 void PageImpl::SetActivationStartTime(base::TimeTicks activation_start) {
-  DCHECK(!activation_start_time_for_prerendering_);
-  activation_start_time_for_prerendering_ = activation_start;
+  CHECK(!activation_start_time_);
+  activation_start_time_ = activation_start;
 }
 
-void PageImpl::ActivateForPrerendering(
-    StoredPage::RenderViewHostImplSafeRefSet& render_view_hosts) {
-  base::OnceClosure did_activate_render_views =
-      base::BindOnce(&PageImpl::DidActivateAllRenderViewsForPrerendering,
-                     weak_factory_.GetWeakPtr());
+void PageImpl::NotifyCrossOriginSubframePrerenderIsAllowed() {
+  is_cross_origin_subframe_prerender_allowed_ = true;
+}
+
+void PageImpl::Activate(
+    StoredPage::RenderViewHostImplSafeRefSet& render_view_hosts,
+    std::optional<blink::ViewTransitionState> view_transition_state,
+    base::OnceCallback<void(base::TimeTicks)> completion_callback) {
+  TRACE_EVENT0("navigation", "PageImpl::Activate");
+
+  // SetActivationStartTime() should be called first as the value is used in
+  // the callback below.
+  CHECK(activation_start_time_.has_value());
+
+  base::OnceClosure did_activate_render_views = base::BindOnce(
+      &PageImpl::DidActivateAllRenderViewsForPrerendering,
+      weak_factory_.GetWeakPtr(), std::move(completion_callback));
 
   base::RepeatingClosure barrier = base::BarrierClosure(
       render_view_hosts.size(), std::move(did_activate_render_views));
+  bool view_transition_state_consumed = false;
   for (const auto& rvh : render_view_hosts) {
-    base::TimeTicks navigation_start_to_send;
-    // Only send navigation_start to the RenderViewHost for the main frame to
-    // avoid sending the info cross-origin. Only this RenderViewHost needs the
-    // info, as we expect the other RenderViewHosts are made for cross-origin
-    // iframes which have not yet loaded their document. To the renderer, it
-    // just looks like an ongoing navigation is happening in the frame and has
-    // not yet committed. These RenderViews still need to know about activation
-    // so their documents are created in the non-prerendered state once their
-    // navigation is committed.
-    if (main_document_->GetRenderViewHost() == &*rvh)
-      navigation_start_to_send = *activation_start_time_for_prerendering_;
-
     auto params = blink::mojom::PrerenderPageActivationParams::New();
+
+    const bool is_main_document = main_document_->GetRenderViewHost() == &*rvh;
+    if (is_main_document) {
+      // These RenderViews still need to know about activation so their
+      // documents are created in the non-prerendered state once their
+      // navigation is committed.
+      // Note that there cannot be a use-after-move since the if condition
+      // should be true at most once.
+      CHECK(!view_transition_state_consumed);
+      params->view_transition_state = std::move(view_transition_state);
+      view_transition_state_consumed = true;
+    }
+
+    // For prerendering activation, send activation_start only to the
+    // RenderViewHost for the main frame to avoid sending the info
+    // cross-origin. Only this RenderViewHost needs the info, as we expect
+    // the other RenderViewHosts are made for cross-origin iframes which
+    // have not yet loaded their document. To the renderer, it just looks
+    // like an ongoing navigation is happening in the frame and has not yet
+    // committed.
+    //
+    // Even cross-origin, we allow if the main document has the special
+    // header. See PrerenderHost::AllowCrossOriginSubframeNavigation() for
+    // detail.
+    const bool should_send_activation_start =
+        is_main_document || is_cross_origin_subframe_prerender_allowed_;
+    if (should_send_activation_start) {
+      params->activation_start = *activation_start_time_;
+    }
+
     params->was_user_activated =
         main_document_->frame_tree_node()
                 ->has_received_user_gesture_before_nav()
             ? blink::mojom::WasActivatedOption::kYes
             : blink::mojom::WasActivatedOption::kNo;
-    params->activation_start = navigation_start_to_send;
     rvh->ActivatePrerenderedPage(std::move(params), barrier);
   }
 
   // Prepare each RenderFrameHostImpl in this Page for activation.
-  // TODO(https://crbug.com/1232528): Currently we check GetPage() below because
-  // RenderFrameHostImpls may be in a different Page, if, e.g., they are in an
-  // inner WebContents. These are in a different FrameTree which might not know
-  // it is being prerendered. We should teach these FrameTrees that they are
-  // being prerendered, or ban inner FrameTrees in a prerendering page.
-  main_document_->ForEachRenderFrameHostIncludingSpeculative(
-      [this](RenderFrameHostImpl* rfh) {
-        if (&rfh->GetPage() != this)
-          return;
+  main_document_->ForEachRenderFrameHostImplIncludingSpeculative(
+      [](RenderFrameHostImpl* rfh) {
         rfh->RendererWillActivateForPrerendering();
       });
 }
 
 void PageImpl::MaybeDispatchLoadEventsOnPrerenderActivation() {
-  DCHECK(IsPrimary());
+  CHECK(IsPrimary(), base::NotFatalUntil::M154);
 
   // Dispatch LoadProgressChanged notification on activation with the
   // prerender last load progress value if the value is not equal to
   // blink::kFinalLoadProgress, whose notification is dispatched during call
   // to DidStopLoading.
-  if (load_progress() != blink::kFinalLoadProgress)
+  if (load_progress() != blink::kFinalLoadProgress) {
     main_document_->DidChangeLoadProgress(load_progress());
+  }
 
   // Dispatch PrimaryMainDocumentElementAvailable before dispatching following
   // load complete events.
-  if (is_main_document_element_available())
+  if (is_main_document_element_available()) {
     main_document_->MainDocumentElementAvailable(uses_temporary_zoom_level());
+  }
 
-  main_document_->ForEachRenderFrameHost(
+  main_document_->ForEachRenderFrameHostImpl(
       &RenderFrameHostImpl::MaybeDispatchDOMContentLoadedOnPrerenderActivation);
 
-  if (is_on_load_completed_in_main_document())
+  if (is_on_load_completed_in_main_document()) {
     main_document_->DocumentOnLoadCompleted();
+  }
 
-  main_document_->ForEachRenderFrameHost(
+  if (first_contentful_paint_in_main_document_time_) {
+    main_document_->NotifyFirstContentfulPaint(
+        *first_contentful_paint_in_main_document_time_);
+  }
+
+  main_document_->ForEachRenderFrameHostImpl(
       &RenderFrameHostImpl::MaybeDispatchDidFinishLoadOnPrerenderActivation);
 }
 
-void PageImpl::DidActivateAllRenderViewsForPrerendering() {
+void PageImpl::DidActivateAllRenderViewsForPrerendering(
+    base::OnceCallback<void(base::TimeTicks)> completion_callback) {
+  TRACE_EVENT0("navigation",
+               "PageImpl::DidActivateAllRenderViewsForPrerendering");
+
   // Tell each RenderFrameHostImpl in this Page that activation finished.
-  main_document_->ForEachRenderFrameHost([this](RenderFrameHostImpl* rfh) {
-    if (&rfh->GetPage() != this)
-      return;
-    rfh->RendererDidActivateForPrerendering();
-  });
+  main_document_->ForEachRenderFrameHostImplIncludingSpeculative(
+      [this](RenderFrameHostImpl* rfh) {
+        if (&rfh->GetPage() != this) {
+          return;
+        }
+        rfh->RendererDidActivateForPrerendering();
+      });
+  CHECK(activation_start_time_.has_value());
+  std::move(completion_callback).Run(*activation_start_time_);
 }
 
 RenderFrameHost& PageImpl::GetMainDocumentHelper() {
@@ -257,22 +309,20 @@ RenderFrameHostImpl& PageImpl::GetMainDocument() const {
   return *main_document_;
 }
 
-void PageImpl::UpdateBrowserControlsState(cc::BrowserControlsState constraints,
-                                          cc::BrowserControlsState current,
-                                          bool animate) {
-  // TODO(https://crbug.com/1154852): Asking for the LocalMainFrame interface
+void PageImpl::UpdateBrowserControlsState(
+    cc::BrowserControlsState constraints,
+    cc::BrowserControlsState current,
+    bool animate,
+    const std::optional<cc::BrowserControlsOffsetTagModifications>&
+        offset_tag_modifications) {
+  // TODO(crbug.com/40159655): Asking for the LocalMainFrame interface
   // before the RenderFrame is created is racy.
-  if (!GetMainDocument().IsRenderFrameLive())
+  if (!GetMainDocument().IsRenderFrameLive()) {
     return;
-
-  if (base::FeatureList::IsEnabled(
-          features::kUpdateBrowserControlsWithoutProxy)) {
-    GetMainDocument().GetRenderWidgetHost()->UpdateBrowserControlsState(
-        constraints, current, animate);
-  } else {
-    GetMainDocument().GetAssociatedLocalMainFrame()->UpdateBrowserControlsState(
-        constraints, current, animate);
   }
+
+  GetMainDocument().GetRenderWidgetHost()->UpdateBrowserControlsState(
+      constraints, current, animate, offset_tag_modifications);
 }
 
 float PageImpl::GetPageScaleFactor() const {
@@ -280,8 +330,9 @@ float PageImpl::GetPageScaleFactor() const {
 }
 
 void PageImpl::UpdateEncoding(const std::string& encoding_name) {
-  if (encoding_name == last_reported_encoding_)
+  if (encoding_name == last_reported_encoding_) {
     return;
+  }
   last_reported_encoding_ = encoding_name;
 
   canonical_encoding_ =
@@ -290,17 +341,23 @@ void PageImpl::UpdateEncoding(const std::string& encoding_name) {
 
 void PageImpl::NotifyVirtualKeyboardOverlayRect(
     const gfx::Rect& keyboard_rect) {
-  // TODO(https://crbug.com/1317002): send notification to outer frames if
+  // TODO(crbug.com/40222405): send notification to outer frames if
   // needed.
-  DCHECK_EQ(virtual_keyboard_mode(),
-            ui::mojom::VirtualKeyboardMode::kOverlaysContent);
+  CHECK_EQ(virtual_keyboard_mode(),
+           ui::mojom::VirtualKeyboardMode::kOverlaysContent,
+           base::NotFatalUntil::M154);
   GetMainDocument().GetAssociatedLocalFrame()->NotifyVirtualKeyboardOverlayRect(
       keyboard_rect);
 }
 
+void PageImpl::ShowInterestInElement(int nodeID) {
+  GetMainDocument().GetAssociatedLocalFrame()->ShowInterestInElement(nodeID);
+}
+
 void PageImpl::SetVirtualKeyboardMode(ui::mojom::VirtualKeyboardMode mode) {
-  if (virtual_keyboard_mode_ == mode)
+  if (virtual_keyboard_mode_ == mode) {
     return;
+  }
 
   virtual_keyboard_mode_ = mode;
 
@@ -311,64 +368,34 @@ base::flat_map<std::string, std::string> PageImpl::GetKeyboardLayoutMap() {
   return GetMainDocument().GetRenderWidgetHost()->GetKeyboardLayoutMap();
 }
 
-bool PageImpl::IsSelectURLAllowed(const url::Origin& origin) {
-  if (!base::FeatureList::IsEnabled(
-          blink::features::kSharedStorageSelectURLLimit)) {
-    return true;
-  }
-
-  int& count = select_url_count_[origin];
-  if (count >=
-      blink::features::
-          kSharedStorageMaxAllowedSelectURLCallsPerOriginPerPageLoad.Get()) {
-    return false;
-  }
-
-  ++count;
-  return true;
+void PageImpl::TakeLoadingMemoryTracker(NavigationRequest* request) {
+  CHECK(IsPrimary());
+  loading_memory_tracker_ = request->TakePeakGpuMemoryTracker();
 }
 
-bool PageImpl::CheckAndMaybeDebitReportEventForSelectURLBudget(
-    RenderFrameHost& rfh) {
-  if (!select_url_report_event_budget_.has_value()) {
-    // `blink::features::kSharedStorageReportEventLimit` is disabled.
-    return true;
+void PageImpl::ResetLoadingMemoryTracker() {
+  CHECK(IsPrimary());
+  if (loading_memory_tracker_) {
+    loading_memory_tracker_.reset();
   }
+}
 
-  std::vector<const SharedStorageBudgetMetadata*> metadata_vector =
-      static_cast<RenderFrameHostImpl&>(rfh)
-          .frame_tree_node()
-          ->FindSharedStorageBudgetMetadata();
-
-  // Get the total charge.
-  double total_to_charge = 0;
-  for (const auto* metadata : metadata_vector) {
-    if (metadata->report_event_called) {
-      // The bits have already been charged for this URN.
-      continue;
-    }
-
-    total_to_charge += metadata->budget_to_charge;
+void PageImpl::CancelLoadingMemoryTracker() {
+  if (loading_memory_tracker_) {
+    loading_memory_tracker_->Cancel();
+    loading_memory_tracker_.reset();
   }
+}
 
-  if (total_to_charge > select_url_report_event_budget_.value()) {
-    // There is insufficient budget remaining.
-    return false;
-  }
+void PageImpl::SetLastCommitParams(
+    mojom::DidCommitProvisionalLoadParamsPtr commit_params) {
+  CHECK(GetMainDocument().IsOutermostMainFrame());
+  last_commit_params_ = std::move(commit_params);
+}
 
-  // Set flag(s) that `reportEvent()` has now been called.
-  for (const auto* metadata : metadata_vector) {
-    if (metadata->report_event_called) {
-      // The bits have already been charged for this URN.
-      continue;
-    }
-
-    metadata->report_event_called = true;
-  }
-
-  // There is sufficient budget, so charge the total now.
-  select_url_report_event_budget_.value() -= total_to_charge;
-  return true;
+mojom::DidCommitProvisionalLoadParamsPtr PageImpl::TakeLastCommitParams() {
+  CHECK(GetMainDocument().IsOutermostMainFrame());
+  return std::move(last_commit_params_);
 }
 
 }  // namespace content

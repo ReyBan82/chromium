@@ -7,12 +7,16 @@
 
 #include <memory>
 
-#include "components/user_education/common/help_bubble.h"
-#include "components/user_education/common/help_bubble_factory.h"
-#include "components/user_education/common/help_bubble_params.h"
+#include "components/user_education/common/help_bubble/help_bubble.h"
+#include "components/user_education/common/help_bubble/help_bubble_factory.h"
+#include "components/user_education/common/help_bubble/help_bubble_params.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/interaction/element_tracker.h"
-#include "ui/base/interaction/framework_specific_implementation.h"
+#include "ui/base/interaction/safe_castable.h"
+
+namespace content {
+class WebContents;
+}
 
 namespace user_education {
 
@@ -24,24 +28,30 @@ class HelpBubbleWebUI : public HelpBubble {
  public:
   ~HelpBubbleWebUI() override;
 
+  // Retrieves the `WebContents` that hosts this help bubble, if any, or null if
+  // none. Will return null if the bubble is closed.
+  content::WebContents* GetWebContents();
+
   // HelpBubble:
   bool ToggleFocusForAccessibility() override;
   gfx::Rect GetBoundsInScreen() const override;
   ui::ElementContext GetContext() const override;
 
-  DECLARE_FRAMEWORK_SPECIFIC_METADATA()
+  DECLARE_SAFE_CAST_TARGET()
 
  private:
   friend class HelpBubbleHandlerBase;
 
   HelpBubbleWebUI(HelpBubbleHandlerBase* handler,
-                  ui::ElementIdentifier anchor_id);
+                  ui::ElementIdentifier anchor_id,
+                  const std::string& secondary_id);
 
   // HelpBubble:
-  void CloseBubbleImpl() override;
+  bool Close(CloseReason reason) override;
 
-  const base::raw_ptr<HelpBubbleHandlerBase, DanglingUntriaged> handler_;
+  const raw_ptr<HelpBubbleHandlerBase> handler_;
   const ui::ElementIdentifier anchor_id_;
+  const std::string secondary_id_;
 };
 
 // This factory uses HelpBubbleHandler to show a help bubble and create a
@@ -51,7 +61,7 @@ class HelpBubbleFactoryWebUI : public HelpBubbleFactory {
   HelpBubbleFactoryWebUI();
   ~HelpBubbleFactoryWebUI() override;
 
-  DECLARE_FRAMEWORK_SPECIFIC_METADATA()
+  DECLARE_SAFE_CAST_TARGET()
 
   // HelpBubbleFactory:
   std::unique_ptr<HelpBubble> CreateBubble(ui::TrackedElement* element,

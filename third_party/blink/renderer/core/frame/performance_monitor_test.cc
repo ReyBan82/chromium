@@ -10,6 +10,7 @@
 #include "third_party/blink/renderer/core/frame/location.h"
 #include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "v8/include/v8.h"
 
 #include <memory>
@@ -46,7 +47,7 @@ class PerformanceMonitorTest : public testing::Test {
   }
 
   void DidProcessTask(base::TimeTicks start_time, base::TimeTicks end_time) {
-    monitor_->DidProcessTask(start_time, end_time);
+    monitor_->DidProcessTask(start_time, end_time, base::TimeTicks());
   }
   void UpdateTaskAttribution(ExecutionContext* execution_context) {
     monitor_->UpdateTaskAttribution(execution_context);
@@ -70,6 +71,7 @@ class PerformanceMonitorTest : public testing::Test {
     return base::TimeTicks() + base::Seconds(seconds);
   }
 
+  test::TaskEnvironment task_environment_;
   Persistent<PerformanceMonitor> monitor_;
   std::unique_ptr<DummyPageHolder> page_holder_;
   std::unique_ptr<DummyPageHolder> another_page_holder_;

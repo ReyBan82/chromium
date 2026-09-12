@@ -8,9 +8,10 @@
 #include <vector>
 
 #include "base/base64.h"
-#include "chrome/browser/ssl/security_state_tab_helper.h"
+#include "chrome/browser/ssl/chrome_security_state_util.h"
 #include "components/security_state/content/content_utils.h"
 #include "content/public/browser/web_contents.h"
+#include "net/base/net_errors.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cert/x509_util.h"
 #include "net/ssl/ssl_cipher_suite_names.h"
@@ -43,18 +44,15 @@ std::string SecurityLevelToProtocolSecurityState(
       return protocol::Security::SecurityStateEnum::Neutral;
     case security_state::WARNING:
       return protocol::Security::SecurityStateEnum::Insecure;
-    case security_state::SECURE_WITH_POLICY_INSTALLED_CERT:
     case security_state::SECURE:
       return protocol::Security::SecurityStateEnum::Secure;
     case security_state::DANGEROUS:
       return protocol::Security::SecurityStateEnum::InsecureBroken;
     case security_state::SECURITY_LEVEL_COUNT:
       NOTREACHED();
-      return protocol::Security::SecurityStateEnum::Neutral;
   }
 
   NOTREACHED();
-  return protocol::Security::SecurityStateEnum::Neutral;
 }
 
 std::unique_ptr<protocol::Security::CertificateSecurityState>
@@ -62,14 +60,9 @@ CreateCertificateSecurityState(
     const security_state::VisibleSecurityState& state) {
   auto certificate = std::make_unique<protocol::Array<protocol::String>>();
   if (state.certificate) {
-    certificate->emplace_back();
-    base::Base64Encode(net::x509_util::CryptoBufferAsStringPiece(
-                           state.certificate->cert_buffer()),
-                       &certificate->back());
-    for (const auto& cert : state.certificate->intermediate_buffers()) {
-      certificate->emplace_back();
-      base::Base64Encode(net::x509_util::CryptoBufferAsStringPiece(cert.get()),
-                         &certificate->back());
+    for (const auto& cert : state.certificate->cert_buffers()) {
+      certificate->push_back(base::Base64Encode(
+          net::x509_util::CryptoBufferAsStringPiece(cert.get())));
     }
   }
 
@@ -87,8 +80,9 @@ CreateCertificateSecurityState(
   net::SSLCipherSuiteToStrings(&key_exchange_str, &cipher, &mac, &is_aead,
                                &is_tls13, cipher_suite);
   std::string key_exchange;
-  if (key_exchange_str)
+  if (key_exchange_str) {
     key_exchange = key_exchange_str;
+  }
 
   const char* key_exchange_group = SSL_get_curve_name(state.key_exchange_group);
 
@@ -99,8 +93,8 @@ CreateCertificateSecurityState(
   if (state.certificate) {
     subject_name = state.certificate->subject().common_name;
     issuer_name = state.certificate->issuer().common_name;
-    valid_from = state.certificate->valid_start().ToDoubleT();
-    valid_to = state.certificate->valid_expiry().ToDoubleT();
+    valid_from = state.certificate->valid_start().InSecondsFSinceUnixEpoch();
+    valid_to = state.certificate->valid_expiry().InSecondsFSinceUnixEpoch();
   }
 
   bool certificate_has_weak_signature =
@@ -141,10 +135,12 @@ CreateCertificateSecurityState(
     certificate_security_state->SetCertificateNetworkError(
         net::ErrorToString(net::MapCertStatusToNetError(state.cert_status)));
   }
-  if (key_exchange_group)
+  if (key_exchange_group) {
     certificate_security_state->SetKeyExchangeGroup(key_exchange_group);
-  if (mac)
+  }
+  if (mac) {
     certificate_security_state->SetMac(mac);
+  }
 
   return certificate_security_state;
 }
@@ -168,12 +164,10 @@ std::unique_ptr<protocol::Security::SafetyTipInfo> CreateSafetyTipInfo(
 
 std::unique_ptr<protocol::Security::VisibleSecurityState>
 CreateVisibleSecurityState(content::WebContents* web_contents) {
-  SecurityStateTabHelper* helper =
-      SecurityStateTabHelper::FromWebContents(web_contents);
-  DCHECK(helper);
-  auto state = helper->GetVisibleSecurityState();
-  std::string security_state =
-      SecurityLevelToProtocolSecurityState(helper->GetSecurityLevel());
+  DCHECK(web_contents);
+  auto state = chrome_security_state::GetVisibleSecurityState(web_contents);
+  std::string security_state = SecurityLevelToProtocolSecurityState(
+      chrome_security_state::GetSecurityLevel(web_contents));
 
   bool scheme_is_cryptographic =
       security_state::IsSchemeCryptographic(state->url);
@@ -181,40 +175,52 @@ CreateVisibleSecurityState(content::WebContents* web_contents) {
                            security_state::MALICIOUS_CONTENT_STATUS_NONE;
 
   bool secure_origin = scheme_is_cryptographic;
-  if (!scheme_is_cryptographic)
+  if (!scheme_is_cryptographic) {
     secure_origin = network::IsUrlPotentiallyTrustworthy(state->url);
+  }
 
   bool cert_missing_subject_alt_name =
       state->certificate &&
       !state->certificate->GetSubjectAltName(nullptr, nullptr);
 
   std::vector<std::string> security_state_issue_ids;
-  if (!secure_origin)
+  if (!secure_origin) {
     security_state_issue_ids.push_back(kInsecureOriginSecurityStateIssueId);
-  if (!scheme_is_cryptographic)
+  }
+  if (!scheme_is_cryptographic) {
     security_state_issue_ids.push_back(
         kSchemeIsNotCryptographicSecurityStateIssueId);
-  if (malicious_content)
+  }
+  if (malicious_content) {
     security_state_issue_ids.push_back(kMalicousContentSecurityStateIssueId);
-  if (state->displayed_mixed_content)
+  }
+  if (state->displayed_mixed_content) {
     security_state_issue_ids.push_back(
         kDisplayedMixedContentSecurityStateIssueId);
-  if (state->contained_mixed_form)
+  }
+  if (state->contained_mixed_form) {
     security_state_issue_ids.push_back(kContainedMixedFormSecurityStateIssueId);
-  if (state->ran_mixed_content)
+  }
+  if (state->ran_mixed_content) {
     security_state_issue_ids.push_back(kRanMixedContentSecurityStateIssueId);
-  if (state->displayed_content_with_cert_errors)
+  }
+  if (state->displayed_content_with_cert_errors) {
     security_state_issue_ids.push_back(
         kDisplayedContentWithCertErrorsSecurityStateIssueId);
-  if (state->ran_content_with_cert_errors)
+  }
+  if (state->ran_content_with_cert_errors) {
     security_state_issue_ids.push_back(
         kRanContentWithCertErrorSecurityStateIssueId);
-  if (state->pkp_bypassed)
+  }
+  if (state->pkp_bypassed) {
     security_state_issue_ids.push_back(kPkpBypassedSecurityStateIssueId);
-  if (state->is_error_page)
+  }
+  if (state->is_error_page) {
     security_state_issue_ids.push_back(kIsErrorPageSecurityStateIssueId);
-  if (cert_missing_subject_alt_name)
+  }
+  if (cert_missing_subject_alt_name) {
     security_state_issue_ids.push_back(kCertMissingSubjectAltName);
+  }
 
   auto visible_security_state =
       protocol::Security::VisibleSecurityState::Create()
@@ -231,8 +237,9 @@ CreateVisibleSecurityState(content::WebContents* web_contents) {
   }
 
   auto safety_tip_info = CreateSafetyTipInfo(state->safety_tip_info);
-  if (safety_tip_info)
+  if (safety_tip_info) {
     visible_security_state->SetSafetyTipInfo(std::move(safety_tip_info));
+  }
 
   return visible_security_state;
 }
@@ -248,11 +255,12 @@ SecurityHandler::SecurityHandler(content::WebContents* web_contents,
   protocol::Security::Dispatcher::wire(dispatcher, this);
 }
 
-SecurityHandler::~SecurityHandler() {}
+SecurityHandler::~SecurityHandler() = default;
 
 protocol::Response SecurityHandler::Enable() {
-  if (enabled_)
+  if (enabled_) {
     return protocol::Response::FallThrough();
+  }
   enabled_ = true;
   DidChangeVisibleSecurityState();
   // Do not mark the command as handled. Let it fall through instead, so that
@@ -268,8 +276,13 @@ protocol::Response SecurityHandler::Disable() {
 }
 
 void SecurityHandler::DidChangeVisibleSecurityState() {
-  if (!enabled_)
+  if (!enabled_) {
     return;
+  }
+
+  if (!web_contents()) {
+    return;
+  }
 
   auto visible_security_state = CreateVisibleSecurityState(web_contents());
   frontend_->VisibleSecurityStateChanged(std::move(visible_security_state));

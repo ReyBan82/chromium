@@ -6,6 +6,9 @@ import("//media/media_options.gni")
 import("//third_party/webrtc/webrtc.gni")
 
 component("webrtc") {
+  _configs = configs
+  configs = []
+  configs = [ "//third_party/tflite:tflite_shim_config" ] + _configs
   output_name = "media_webrtc"
 
   sources = [
@@ -13,9 +16,11 @@ component("webrtc") {
     "audio_delay_stats_reporter.h",
     "audio_processor.cc",
     "audio_processor.h",
+    "constants.cc",
     "constants.h",
     "helpers.cc",
     "helpers.h",
+    "ml_model_handle.h",
     "webrtc_features.cc",
     "webrtc_features.h",
   ]
@@ -25,11 +30,19 @@ component("webrtc") {
   deps = [
     "//base",
     "//build:chromecast_buildflags",
-    "//build:chromeos_buildflags",
     "//media",
-    "//media:shared_memory_support",
     "//third_party/webrtc_overrides:webrtc_component",
   ]
+
+  if (!is_fuchsia) {
+    deps += [ "//components/optimization_guide/core/inference:op_resolver" ]
+  }
+
+  public_deps = [ "//third_party/tflite" ]
+
+  if (chrome_wide_echo_cancellation_supported) {
+    public_deps += [ "//media/webrtc/voice_isolation" ]
+  }
 }
 
 source_set("unit_tests") {
@@ -44,8 +57,11 @@ source_set("unit_tests") {
     "//testing/gtest",
     "//third_party/webrtc_overrides:webrtc_component",
   ]
+  if (chrome_wide_echo_cancellation_supported) {
+    deps += [ "//media/webrtc/voice_isolation:unit_tests" ]
+  }
   sources = [
     "audio_processor_test.cc",
-    "helpers_unittests.cc",
+    "helpers_unittest.cc",
   ]
 }

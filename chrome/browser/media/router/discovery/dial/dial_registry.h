@@ -112,7 +112,8 @@ class DialRegistry
 
  private:
   using DeviceByIdMap = std::map<std::string, std::unique_ptr<DialDeviceData>>;
-  using DeviceByLabelMap = std::map<std::string, DialDeviceData*>;
+  using DeviceByLabelMap =
+      std::map<std::string, raw_ptr<DialDeviceData, CtnExperimental>>;
 
   friend class MockDialRegistry;
   friend class TestDialRegistry;
@@ -127,7 +128,8 @@ class DialRegistry
   void OnError(DialService::DialServiceErrorCode code) override;
 
   // network::NetworkConnectionTracker::NetworkConnectionObserver:
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   // Check whether we are in a state ready to discover and dispatch error
   // notifications if not.

@@ -7,6 +7,7 @@
 #include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "chrome/browser/accessibility/live_caption/live_caption_controller_factory.h"
+#include "chrome/browser/optimization_guide/optimization_guide_keyed_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/speech/speech_recognition_client_browser_interface.h"
 
@@ -32,19 +33,27 @@ SpeechRecognitionClientBrowserInterfaceFactory::
           "SpeechRecognitionClientBrowserInterface",
           // Incognito profiles should use their own instance of the browser
           // context.
-          ProfileSelections::BuildForRegularAndIncognito()) {
-#if !BUILDFLAG(IS_CHROMEOS_LACROS)
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOwnInstance)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOwnInstance)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOwnInstance)
+              .Build()) {
   DependsOn(::captions::LiveCaptionControllerFactory::GetInstance());
-#endif  // !BUILDFLAG(IS_CHROMEOS_LACROS)
+  DependsOn(OptimizationGuideKeyedServiceFactory::GetInstance());
 }
 
 SpeechRecognitionClientBrowserInterfaceFactory::
     ~SpeechRecognitionClientBrowserInterfaceFactory() = default;
 
-KeyedService*
-SpeechRecognitionClientBrowserInterfaceFactory::BuildServiceInstanceFor(
-    content::BrowserContext* context) const {
-  return new speech::SpeechRecognitionClientBrowserInterface(context);
+std::unique_ptr<KeyedService> SpeechRecognitionClientBrowserInterfaceFactory::
+    BuildServiceInstanceForBrowserContext(
+        content::BrowserContext* context) const {
+  return std::make_unique<speech::SpeechRecognitionClientBrowserInterface>(
+      context);
 }
 
 // static

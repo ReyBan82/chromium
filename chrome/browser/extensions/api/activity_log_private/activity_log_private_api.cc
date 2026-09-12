@@ -12,16 +12,19 @@
 
 #include "base/functional/bind.h"
 #include "base/lazy_instance.h"
+#include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/extensions/event_router_forwarder.h"
-#include "chrome/browser/extensions/extension_service.h"
 #include "chrome/common/extensions/api/activity_log_private.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_context.h"
 #include "extensions/browser/extension_system_provider.h"
 #include "extensions/browser/extensions_browser_client.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -72,8 +75,9 @@ void ActivityLogAPI::Shutdown() {
 }
 
 void ActivityLogAPI::OnListenerAdded(const EventListenerInfo& details) {
-  if (activity_log_->has_listeners())
+  if (activity_log_->has_listeners()) {
     return;
+  }
   StartOrStopListeningForExtensionActivities();
 }
 
@@ -88,7 +92,7 @@ void ActivityLogAPI::StartOrStopListeningForExtensionActivities() {
 }
 
 void ActivityLogAPI::OnExtensionActivity(scoped_refptr<Action> activity) {
-  base::Value::List value;
+  base::ListValue value;
   ExtensionActivity activity_arg = activity->ConvertToExtensionActivity();
   value.Append(activity_arg.ToValue());
   auto event = std::make_unique<Event>(
@@ -100,33 +104,33 @@ void ActivityLogAPI::OnExtensionActivity(scoped_refptr<Action> activity) {
 
 ExtensionFunction::ResponseAction
 ActivityLogPrivateGetExtensionActivitiesFunction::Run() {
-  std::unique_ptr<activity_log_private::GetExtensionActivities::Params> params(
-      activity_log_private::GetExtensionActivities::Params::Create(args()));
+  std::optional<activity_log_private::GetExtensionActivities::Params> params =
+      activity_log_private::GetExtensionActivities::Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
   // Get the arguments in the right format.
   Filter filter = std::move(params->filter);
   Action::ActionType action_type = Action::ACTION_API_CALL;
   switch (filter.activity_type) {
-    case activity_log_private::EXTENSION_ACTIVITY_FILTER_API_CALL:
+    case activity_log_private::ExtensionActivityFilter::kApiCall:
       action_type = Action::ACTION_API_CALL;
       break;
-    case activity_log_private::EXTENSION_ACTIVITY_FILTER_API_EVENT:
+    case activity_log_private::ExtensionActivityFilter::kApiEvent:
       action_type = Action::ACTION_API_EVENT;
       break;
-    case activity_log_private::EXTENSION_ACTIVITY_FILTER_CONTENT_SCRIPT:
+    case activity_log_private::ExtensionActivityFilter::kContentScript:
       action_type = Action::ACTION_CONTENT_SCRIPT;
       break;
-    case activity_log_private::EXTENSION_ACTIVITY_FILTER_DOM_ACCESS:
+    case activity_log_private::ExtensionActivityFilter::kDomAccess:
       action_type = Action::ACTION_DOM_ACCESS;
       break;
-    case activity_log_private::EXTENSION_ACTIVITY_FILTER_DOM_EVENT:
+    case activity_log_private::ExtensionActivityFilter::kDomEvent:
       action_type = Action::ACTION_DOM_EVENT;
       break;
-    case activity_log_private::EXTENSION_ACTIVITY_FILTER_WEB_REQUEST:
+    case activity_log_private::ExtensionActivityFilter::kWebRequest:
       action_type = Action::ACTION_WEB_REQUEST;
       break;
-    case activity_log_private::EXTENSION_ACTIVITY_FILTER_ANY:
+    case activity_log_private::ExtensionActivityFilter::kAny:
     default:
       action_type = Action::ACTION_ANY;
   }
@@ -136,8 +140,9 @@ ActivityLogPrivateGetExtensionActivitiesFunction::Run() {
   std::string page_url = filter.page_url ? *filter.page_url : std::string();
   std::string arg_url = filter.arg_url ? *filter.arg_url : std::string();
   int days_ago = -1;
-  if (filter.days_ago)
+  if (filter.days_ago) {
     days_ago = *filter.days_ago;
+  }
 
   // Call the ActivityLog.
   ActivityLog* activity_log = ActivityLog::GetInstance(browser_context());
@@ -155,8 +160,9 @@ void ActivityLogPrivateGetExtensionActivitiesFunction::OnLookupCompleted(
     std::unique_ptr<std::vector<scoped_refptr<Action>>> activities) {
   // Convert Actions to ExtensionActivities.
   std::vector<ExtensionActivity> result_arr;
-  for (const auto& activity : *activities)
+  for (const auto& activity : *activities) {
     result_arr.push_back(activity->ConvertToExtensionActivity());
+  }
 
   // Populate the return object.
   ActivityResultSet result_set;
@@ -168,16 +174,17 @@ void ActivityLogPrivateGetExtensionActivitiesFunction::OnLookupCompleted(
 
 ExtensionFunction::ResponseAction
 ActivityLogPrivateDeleteActivitiesFunction::Run() {
-  std::unique_ptr<activity_log_private::DeleteActivities::Params> params(
-      activity_log_private::DeleteActivities::Params::Create(args()));
+  std::optional<activity_log_private::DeleteActivities::Params> params =
+      activity_log_private::DeleteActivities::Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
   // Put the arguments in the right format.
   std::vector<int64_t> action_ids;
   int64_t value;
   for (const auto& activity_id : params->activity_ids) {
-    if (base::StringToInt64(activity_id, &value))
+    if (base::StringToInt64(activity_id, &value)) {
       action_ids.push_back(value);
+    }
   }
 
   ActivityLog* activity_log = ActivityLog::GetInstance(browser_context());
@@ -188,9 +195,10 @@ ActivityLogPrivateDeleteActivitiesFunction::Run() {
 
 ExtensionFunction::ResponseAction
 ActivityLogPrivateDeleteActivitiesByExtensionFunction::Run() {
-  std::unique_ptr<activity_log_private::DeleteActivitiesByExtension::Params>
-      params(activity_log_private::DeleteActivitiesByExtension::Params::Create(
-          args()));
+  std::optional<activity_log_private::DeleteActivitiesByExtension::Params>
+      params =
+          activity_log_private::DeleteActivitiesByExtension::Params::Create(
+              args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
   ActivityLog* activity_log = ActivityLog::GetInstance(browser_context());
@@ -208,16 +216,17 @@ ActivityLogPrivateDeleteDatabaseFunction::Run() {
 }
 
 ExtensionFunction::ResponseAction ActivityLogPrivateDeleteUrlsFunction::Run() {
-  std::unique_ptr<activity_log_private::DeleteUrls::Params> params(
-      activity_log_private::DeleteUrls::Params::Create(args()));
+  std::optional<activity_log_private::DeleteUrls::Params> params =
+      activity_log_private::DeleteUrls::Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
   // Put the arguments in the right format.
   std::vector<GURL> gurls;
   const std::vector<std::string>& urls = params->urls;
   gurls.reserve(urls.size());
-  for (const std::string& url : urls)
+  for (const std::string& url : urls) {
     gurls.push_back(GURL(url));
+  }
 
   ActivityLog* activity_log = ActivityLog::GetInstance(browser_context());
   DCHECK(activity_log);

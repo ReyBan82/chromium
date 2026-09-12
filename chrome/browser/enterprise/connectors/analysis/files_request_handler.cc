@@ -4,17 +4,35 @@
 
 #include "chrome/browser/enterprise/connectors/analysis/files_request_handler.h"
 
+#include <algorithm>
+
 #include "base/check_op.h"
 #include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/files/scoped_file.h"
+#include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
-#include "base/ranges/algorithm.h"
+#include "base/notreached.h"
+#include "base/task/thread_pool.h"
+#include "base/threading/thread_restrictions.h"
 #include "chrome/browser/enterprise/connectors/common.h"
-#include "chrome/browser/extensions/api/safe_browsing_private/safe_browsing_private_event_router.h"
-#include "chrome/browser/safe_browsing/cloud_content_scanning/binary_upload_service.h"
+#include "chrome/browser/enterprise/connectors/reporting/reporting_event_router_factory.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/safe_browsing/cloud_content_scanning/deep_scanning_utils.h"
-#include "chrome/browser/safe_browsing/cloud_content_scanning/file_opening_job.h"
-#include "components/safe_browsing/content/browser/web_ui/safe_browsing_ui.h"
+#include "chrome/browser/safe_browsing/cloud_content_scanning/file_analysis_request.h"
+#include "components/enterprise/common/proto/connectors.pb.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/binary_upload_service.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/deep_scanning_utils.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/file_opening_job.h"
+#include "components/enterprise/connectors/core/features.h"
+#include "components/enterprise/connectors/core/reporting_constants.h"
+#include "components/file_access/scoped_file_access.h"
+#include "components/file_access/scoped_file_access_delegate.h"
+#include "components/safe_browsing/content/browser/web_ui/web_ui_content_info_singleton.h"
+#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 
 namespace enterprise_connectors {
 
@@ -27,96 +45,98 @@ FilesRequestHandler::Factory* GetFactoryStorage() {
   return factory.get();
 }
 
-AnalysisConnector AccessPointToEnterpriseConnector(
-    safe_browsing::DeepScanAccessPoint access_point) {
-  switch (access_point) {
-    case safe_browsing::DeepScanAccessPoint::FILE_TRANSFER:
-      return enterprise_connectors::FILE_TRANSFER;
-    case safe_browsing::DeepScanAccessPoint::UPLOAD:
-    case safe_browsing::DeepScanAccessPoint::DRAG_AND_DROP:
-    case safe_browsing::DeepScanAccessPoint::PASTE:
-      // A file can be uploaded to a website by either a normal file picker, a
-      // dragNdrop event or using copy+paste.
-      return enterprise_connectors::FILE_ATTACHED;
-    case safe_browsing::DeepScanAccessPoint::DOWNLOAD:
-    case safe_browsing::DeepScanAccessPoint::PRINT:
-      NOTREACHED();
+struct UnreportedFileInfo {
+  base::FilePath path;
+  FilesRequestHandlerBase::FileInfo file_info;
+};
+
+void ReportCancellationsOnUIThread(
+    base::WeakPtr<Profile> profile_weak,
+    std::string source,
+    std::string destination,
+    std::string access_point_trigger,
+    std::string content_transfer_method,
+    GURL url,
+    GURL tab_url,
+    safe_browsing::ReferrerChain referrer_chain,
+    std::vector<UnreportedFileInfo> unreported_files) {
+  Profile* profile = profile_weak.get();
+  if (!profile) {
+    return;
   }
-  return enterprise_connectors::FILE_ATTACHED;
+
+  auto* router = ReportingEventRouterFactory::GetForBrowserContext(profile);
+  if (!router) {
+    return;
+  }
+
+  for (const auto& unreported : unreported_files) {
+    router->OnUnscannedFileEvent(
+        url, tab_url, source, destination, unreported.path.AsUTF8Unsafe(),
+        unreported.file_info.sha256_or_cb, unreported.file_info.mime_type,
+        access_point_trigger, /*scan_id=*/"",
+        enterprise_connectors::kUserCancelledUnscannedReason,
+        content_transfer_method, unreported.file_info.size, referrer_chain,
+        EventResult::CANCELLED);
+  }
 }
 
-std::string AccessPointToTriggerString(
-    safe_browsing::DeepScanAccessPoint access_point) {
-  switch (access_point) {
-    case safe_browsing::DeepScanAccessPoint::FILE_TRANSFER:
-      return extensions::SafeBrowsingPrivateEventRouter::kTriggerFileTransfer;
-    case safe_browsing::DeepScanAccessPoint::UPLOAD:
-    case safe_browsing::DeepScanAccessPoint::DRAG_AND_DROP:
-    case safe_browsing::DeepScanAccessPoint::PASTE:
-      // A file can be uploaded to a website by either a normal file picker, a
-      // dragNdrop event or using copy+paste.
-      return extensions::SafeBrowsingPrivateEventRouter::kTriggerFileUpload;
-    case safe_browsing::DeepScanAccessPoint::DOWNLOAD:
-    case safe_browsing::DeepScanAccessPoint::PRINT:
-      NOTREACHED();
+std::vector<UnreportedFileInfo> FetchFileSizes(
+    std::vector<UnreportedFileInfo> unreported_files) {
+  for (auto& unreported : unreported_files) {
+    if (unreported.file_info.size == 0) {
+      int64_t file_size = base::GetFileSize(unreported.path).value_or(0);
+      unreported.file_info.size = file_size;
+    }
   }
-  return "";
+  return unreported_files;
 }
 
 }  // namespace
 
-FilesRequestHandler::FileInfo::FileInfo() = default;
-FilesRequestHandler::FileInfo::FileInfo(FileInfo&& other) = default;
-FilesRequestHandler::FileInfo::~FileInfo() = default;
-
 FilesRequestHandler::FilesRequestHandler(
-    safe_browsing::BinaryUploadService* upload_service,
     Profile* profile,
-    const enterprise_connectors::AnalysisSettings& analysis_settings,
-    GURL url,
     const std::string& source,
     const std::string& destination,
-    const std::string& user_action_id,
-    safe_browsing::DeepScanAccessPoint access_point,
     const std::vector<base::FilePath>& paths,
     CompletionCallback callback)
-    : RequestHandlerBase(upload_service,
-                         profile,
-                         analysis_settings,
-                         url,
-                         source,
-                         destination,
-                         user_action_id,
-                         paths.size(),
-                         access_point),
+    : profile_(profile),
       paths_(paths),
+      source_(source),
+      destination_(destination),
       callback_(std::move(callback)) {
   results_.resize(paths_.size());
   file_info_.resize(paths_.size());
   start_times_.resize(paths_.size(), base::TimeTicks::Min());
+  for (size_t i = 0; i < paths_.size(); ++i) {
+    unreported_files_.insert(i);
+  }
 }
 
 // static
-std::unique_ptr<FilesRequestHandler> FilesRequestHandler::Create(
-    safe_browsing::BinaryUploadService* upload_service,
+std::unique_ptr<FilesRequestHandlerBase> FilesRequestHandler::Create(
+    ContentAnalysisInfo* content_analysis_info,
+    BinaryUploadService* upload_service,
     Profile* profile,
-    const enterprise_connectors::AnalysisSettings& analysis_settings,
     GURL url,
     const std::string& source,
     const std::string& destination,
-    const std::string& user_action_id,
-    safe_browsing::DeepScanAccessPoint access_point,
+    const std::string& content_transfer_method,
+    DeepScanAccessPoint access_point,
     const std::vector<base::FilePath>& paths,
     CompletionCallback callback) {
   if (GetFactoryStorage()->is_null()) {
-    return base::WrapUnique(new FilesRequestHandler(
-        upload_service, profile, analysis_settings, url, source, destination,
-        user_action_id, access_point, paths, std::move(callback)));
+    return std::make_unique<FilesRequestHandlerBase>(
+        content_analysis_info, upload_service, url, content_transfer_method,
+        access_point,
+        std::make_unique<FilesRequestHandler>(profile, source, destination,
+                                              paths, std::move(callback)));
   } else {
     // Use the factory to create a fake FilesRequestHandler.
-    return GetFactoryStorage()->Run(upload_service, profile, analysis_settings,
-                                    url, source, destination, user_action_id,
-                                    access_point, paths, std::move(callback));
+    return GetFactoryStorage()->Run(content_analysis_info, upload_service,
+                                    profile, url, source, destination,
+                                    content_transfer_method, access_point,
+                                    paths, std::move(callback));
   }
 }
 
@@ -127,51 +147,88 @@ void FilesRequestHandler::SetFactoryForTesting(Factory factory) {
 
 // static
 void FilesRequestHandler::ResetFactoryForTesting() {
-  if (GetFactoryStorage())
+  if (GetFactoryStorage()) {
     GetFactoryStorage()->Reset();
+  }
 }
 
-FilesRequestHandler::~FilesRequestHandler() = default;
+FilesRequestHandler::~FilesRequestHandler() {
+  MaybeCancelAndReport();
+}
+
+void FilesRequestHandler::MaybeCancelAndReport() {
+  // If all files have been reported, then we can return early without
+  // reporting a cancellation / cancelling the file opening job.
+  // We must return without cancelling the file opening job, as it may still be
+  // computing hash async for reporting.
+  if (unreported_files_.empty() ||
+      handler_->file_result_count() >= paths_.size()) {
+    return;
+  }
+
+  // Actively cancel the file opening job to ensure that all file access is
+  // released as soon as possible and to avoid memory leaks. It makes sense to
+  // only call this if the handler was interrupted by user. This will allow to
+  // track user cancellation metrics.
+  if (file_opening_job_) {
+    file_opening_job_->Cancel();
+  }
+
+  if (!base::FeatureList::IsEnabled(
+          enterprise_connectors::kEnableCancelUploadOnContentAnalysis)) {
+    return;
+  }
+
+  std::vector<UnreportedFileInfo> unreported_files;
+  unreported_files.reserve(unreported_files_.size());
+  for (size_t index : unreported_files_) {
+    unreported_files.push_back(
+        {std::move(paths_[index]), std::move(file_info_[index])});
+  }
+  unreported_files_.clear();
+
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
+      base::BindOnce(&FetchFileSizes, std::move(unreported_files)),
+      base::BindOnce(&ReportCancellationsOnUIThread, profile_->GetWeakPtr(),
+                     source_, destination_, handler_->access_point_string(),
+                     handler_->content_transfer_method(),
+                     GURL(handler_->content_analysis_info()->url()),
+                     handler_->content_analysis_info()->tab_url(),
+                     handler_->content_analysis_info()->referrer_chain()));
+}
 
 void FilesRequestHandler::ReportWarningBypass(
-    absl::optional<std::u16string> user_justification) {
+    std::optional<std::u16string> user_justification,
+    const ContentAnalysisInfoBase& info,
+    const std::string& trigger,
+    const std::string& content_transfer_method) {
   // Report a warning bypass for each previously warned file.
   for (const auto& warning : file_warnings_) {
     size_t index = warning.first;
 
     ReportAnalysisConnectorWarningBypass(
-        profile_, url_, source_, destination_, paths_[index].AsUTF8Unsafe(),
-        file_info_[index].sha256, file_info_[index].mime_type,
-        AccessPointToTriggerString(access_point_), access_point_,
-        file_info_[index].size, warning.second, user_justification);
+        ReportingEventRouterFactory::GetForBrowserContext(profile_), &info,
+        source_, destination_, paths_[index].AsUTF8Unsafe(),
+        file_info_[index].sha256_or_cb, file_info_[index].mime_type, trigger,
+        content_transfer_method, file_info_[index].size, warning.second,
+        user_justification);
   }
 }
 
-void FilesRequestHandler::FileRequestCallbackForTesting(
-    base::FilePath path,
-    safe_browsing::BinaryUploadService::Result result,
-    enterprise_connectors::ContentAnalysisResponse response) {
-  auto it = base::ranges::find(paths_, path);
-  DCHECK(it != paths_.end());
-  size_t index = std::distance(paths_.begin(), it);
-  FileRequestCallback(index, result, response);
-}
-
 bool FilesRequestHandler::UploadDataImpl() {
-  safe_browsing::IncrementCrashKey(
-      safe_browsing::ScanningCrashKey::PENDING_FILE_UPLOADS, paths_.size());
-
   if (!paths_.empty()) {
-    safe_browsing::IncrementCrashKey(
-        safe_browsing::ScanningCrashKey::TOTAL_FILE_UPLOADS, paths_.size());
-
     std::vector<safe_browsing::FileOpeningJob::FileOpeningTask> tasks(
         paths_.size());
-    for (size_t i = 0; i < paths_.size(); ++i)
-      tasks[i].request = PrepareFileRequest(i);
+    for (size_t i = 0; i < paths_.size(); ++i) {
+      tasks[i].request = handler_->PrepareFileRequest(i);
+    }
 
-    file_opening_job_ =
-        std::make_unique<safe_browsing::FileOpeningJob>(std::move(tasks));
+    file_access::RequestFilesAccessForSystem(
+        paths_,
+        base::BindOnce(&FilesRequestHandler::CreateFileOpeningJob,
+                       weak_ptr_factory_.GetWeakPtr(), std::move(tasks)));
+
     return true;
   }
 
@@ -181,148 +238,104 @@ bool FilesRequestHandler::UploadDataImpl() {
   return false;
 }
 
-safe_browsing::FileAnalysisRequest* FilesRequestHandler::PrepareFileRequest(
-    size_t index) {
+std::unique_ptr<FileAnalysisRequestBase> FilesRequestHandler::CreateFileRequest(
+    size_t index,
+    const AnalysisSettings& settings,
+    base::OnceCallback<void(ScanRequestUploadResult, ContentAnalysisResponse)>
+        callback,
+    base::OnceCallback<void(const BinaryUploadRequest&)>
+        request_start_callback) {
   DCHECK_LT(index, paths_.size());
   base::FilePath path = paths_[index];
-  auto request = std::make_unique<safe_browsing::FileAnalysisRequest>(
-      *analysis_settings_, path, path.BaseName(), /*mime_type*/ "",
-      /* delay_opening_file */ true,
-      base::BindOnce(&FilesRequestHandler::FileRequestCallback,
-                     weak_ptr_factory_.GetWeakPtr(), index),
-      base::BindOnce(&FilesRequestHandler::FileRequestStartCallback,
-                     weak_ptr_factory_.GetWeakPtr(), index));
-  safe_browsing::FileAnalysisRequest* request_raw = request.get();
-  PrepareRequest(AccessPointToEnterpriseConnector(access_point_), request_raw);
-  request_raw->GetRequestData(base::BindOnce(
-      &FilesRequestHandler::OnGotFileInfo, weak_ptr_factory_.GetWeakPtr(),
-      std::move(request), index));
-
-  return request_raw;
+  return std::make_unique<safe_browsing::FileAnalysisRequest>(
+      settings, path, path.BaseName(),
+      /*mime_type*/ "",
+      /* delay_opening_file */ true, std::move(callback),
+      std::move(request_start_callback),
+      /* is_obfuscated */ false,
+      /* force_sync_hash_computation */ false);
 }
 
-void FilesRequestHandler::OnGotFileInfo(
-    std::unique_ptr<safe_browsing::BinaryUploadService::Request> request,
+void FilesRequestHandler::UpdateRequestHandlerResult(
     size_t index,
-    safe_browsing::BinaryUploadService::Result result,
-    safe_browsing::BinaryUploadService::Request::Data data) {
+    RequestHandlerResult result,
+    ContentAnalysisResponse response) {
   DCHECK_LT(index, paths_.size());
-  DCHECK_EQ(paths_.size(), file_info_.size());
-
-  file_info_[index].sha256 = data.hash;
-  file_info_[index].size = data.size;
-  file_info_[index].mime_type = data.mime_type;
-
-  bool failed = analysis_settings_->cloud_or_local_settings.is_cloud_analysis()
-                    ? CloudResultIsFailure(result)
-                    : LocalResultIsFailure(result);
-  if (failed) {
-    FinishRequestEarly(std::move(request), result);
-    return;
+  results_[index] = result;
+  if (result.final_result == FinalContentAnalysisResult::WARNING) {
+    file_warnings_[index] = response;
   }
-
-  // If |throttled_| is true, then the file shouldn't be upload since the server
-  // is receiving too many requests.
-  if (throttled_) {
-    FinishRequestEarly(
-        std::move(request),
-        safe_browsing::BinaryUploadService::Result::TOO_MANY_REQUESTS);
-    return;
-  }
-
-  UploadFileForDeepScanning(result, paths_[index], std::move(request));
 }
 
-void FilesRequestHandler::FinishRequestEarly(
-    std::unique_ptr<safe_browsing::BinaryUploadService::Request> request,
-    safe_browsing::BinaryUploadService::Result result) {
-  // We add the request here in case we never actually uploaded anything, so it
-  // wasn't added in OnGetRequestData
-  safe_browsing::WebUIInfoSingleton::GetInstance()->AddToDeepScanRequests(
-      request->per_profile_request(), request->content_analysis_request());
-  safe_browsing::WebUIInfoSingleton::GetInstance()->AddToDeepScanResponses(
-      /*token=*/"", safe_browsing::BinaryUploadService::ResultToString(result),
-      enterprise_connectors::ContentAnalysisResponse());
-
-  request->FinishRequest(result,
-                         enterprise_connectors::ContentAnalysisResponse());
+const base::FilePath& FilesRequestHandler::GetPath(size_t index) const {
+  DCHECK_LT(index, paths_.size());
+  return paths_[index];
 }
 
-void FilesRequestHandler::UploadFileForDeepScanning(
-    safe_browsing::BinaryUploadService::Result result,
-    const base::FilePath& path,
-    std::unique_ptr<safe_browsing::BinaryUploadService::Request> request) {
-  safe_browsing::BinaryUploadService* upload_service = GetBinaryUploadService();
-  if (upload_service)
-    upload_service->MaybeUploadForDeepScanning(std::move(request));
+const FilesRequestHandlerBase::FileInfo& FilesRequestHandler::GetFileInfo(
+    size_t index) {
+  DCHECK_LT(index, paths_.size());
+  return file_info_[index];
 }
 
-void FilesRequestHandler::FileRequestStartCallback(
-    size_t index,
-    const safe_browsing::BinaryUploadService::Request& request) {
+FilesRequestHandlerBase::FileInfo& FilesRequestHandler::GetMutableFileInfo(
+    size_t index) {
+  DCHECK_LT(index, paths_.size());
+  return file_info_[index];
+}
+
+size_t FilesRequestHandler::GetFileCount() const {
+  return paths_.size();
+}
+
+void FilesRequestHandler::SetFileScanStartTime(size_t index) {
+  DCHECK_LT(index, paths_.size());
   start_times_[index] = base::TimeTicks::Now();
 }
 
-void FilesRequestHandler::FileRequestCallback(
-    size_t index,
-    safe_browsing::BinaryUploadService::Result upload_result,
-    enterprise_connectors::ContentAnalysisResponse response) {
-  // Remember to send an ack for this response.
-  if (upload_result == safe_browsing::BinaryUploadService::Result::SUCCESS) {
-    request_tokens_to_ack_final_actions_[response.request_token()] =
-        GetAckFinalAction(response);
-  }
-
-  DCHECK_EQ(results_.size(), paths_.size());
-  if (upload_result ==
-      safe_browsing::BinaryUploadService::Result::TOO_MANY_REQUESTS) {
-    throttled_ = true;
-  }
-
-  // Find the path in the set of files that are being scanned.
+const base::TimeTicks FilesRequestHandler::GetFileScanStartTime(size_t index) {
   DCHECK_LT(index, paths_.size());
-  const base::FilePath& path = paths_[index];
+  return start_times_[index];
+}
 
-  const auto start_timestamp = (start_times_[index] != base::TimeTicks::Min())
-                                   ? start_times_[index]
-                                   : upload_start_time_;
-
-  RecordDeepScanMetrics(
-      analysis_settings_->cloud_or_local_settings.is_cloud_analysis(),
-      access_point_, base::TimeTicks::Now() - start_timestamp,
-      file_info_[index].size, upload_result, response);
-
-  RequestHandlerResult request_handler_result = CalculateRequestHandlerResult(
-      *analysis_settings_, upload_result, response);
-  results_[index] = request_handler_result;
-  ++file_result_count_;
-
-  bool result_is_warning = request_handler_result.final_result ==
-                           FinalContentAnalysisResult::WARNING;
-  if (result_is_warning) {
-    file_warnings_[index] = response;
-  }
-
-  MaybeReportDeepScanningVerdict(
-      profile_, url_, source_, destination_, path.AsUTF8Unsafe(),
-      file_info_[index].sha256, file_info_[index].mime_type,
-      AccessPointToTriggerString(access_point_), access_point_,
-      file_info_[index].size, upload_result, response,
-      CalculateEventResult(*analysis_settings_, request_handler_result.complies,
-                           result_is_warning));
-
-  safe_browsing::DecrementCrashKey(
-      safe_browsing::ScanningCrashKey::PENDING_FILE_UPLOADS);
-
-  MaybeCompleteScanRequest();
+ReportingEventRouter* FilesRequestHandler::GetReportingEventRouter() {
+  return ReportingEventRouterFactory::GetForBrowserContext(profile_);
 }
 
 void FilesRequestHandler::MaybeCompleteScanRequest() {
-  if (file_result_count_ < paths_.size()) {
+  if (handler_->file_result_count() < paths_.size()) {
     return;
   }
+  scoped_file_access_.reset();
   DCHECK(!callback_.is_null());
   std::move(callback_).Run(std::move(results_));
+}
+
+std::string FilesRequestHandler::GetSource() {
+  return source_;
+}
+
+std::string FilesRequestHandler::GetDestination() {
+  return destination_;
+}
+
+void FilesRequestHandler::SetHandler(FilesRequestHandlerBase* handler) {
+  handler_ = handler;
+}
+
+void FilesRequestHandler::MarkFileAsReported(size_t index) {
+  unreported_files_.erase(index);
+}
+
+void FilesRequestHandler::CreateFileOpeningJob(
+    std::vector<safe_browsing::FileOpeningJob::FileOpeningTask> tasks,
+    file_access::ScopedFileAccess file_access) {
+  scoped_file_access_ =
+      std::make_unique<file_access::ScopedFileAccess>(std::move(file_access));
+  // Keep a reference to `file_opening_job` in each task to ensure
+  // its lifetime will be longer than the request.
+  file_opening_job_ =
+      base::MakeRefCounted<safe_browsing::FileOpeningJob>(std::move(tasks));
 }
 
 }  // namespace enterprise_connectors

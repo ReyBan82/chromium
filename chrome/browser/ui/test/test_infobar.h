@@ -5,14 +5,19 @@
 #ifndef CHROME_BROWSER_UI_TEST_TEST_INFOBAR_H_
 #define CHROME_BROWSER_UI_TEST_TEST_INFOBAR_H_
 
+#include <optional>
+
 #include "chrome/browser/ui/test/test_browser_ui.h"
 #include "components/infobars/core/infobar_delegate.h"
 #include "components/infobars/core/infobar_manager.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace content {
 class WebContents;
 }  // namespace content
+
+namespace tabs {
+class TabInterface;
+}
 
 namespace infobars {
 class ContentInfoBarManager;
@@ -38,6 +43,8 @@ class TestInfoBar : public UiBrowserTest {
   // Returns the active tab.
   content::WebContents* GetWebContents();
   const content::WebContents* GetWebContents() const;
+  tabs::TabInterface* GetTab();
+  const tabs::TabInterface* GetTab() const;
 
   // Returns the infobars::ContentInfoBarManager associated with the active tab.
   infobars::ContentInfoBarManager* GetInfoBarManager();
@@ -49,7 +56,7 @@ class TestInfoBar : public UiBrowserTest {
   // Returns the current infobars that are not already in |starting_infobars_|.
   // Fails (i.e. returns nullopt) if the current set of infobars does not begin
   // with |starting_infobars_|.
-  absl::optional<InfoBars> GetNewInfoBars() const;
+  std::optional<InfoBars> GetNewInfoBars() const;
 
   InfoBars starting_infobars_;
   std::vector<InfoBarDelegateIdentifier> expected_identifiers_;

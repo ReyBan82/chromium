@@ -119,12 +119,11 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict PolicyReferenceToReadableDictionary(
+base::DictValue PolicyReferenceToReadableDictionary(
     const PolicyReference& policy) {
-  base::Value::Dict dict;
-  dict.Set("Name", policy.name());
-  dict.Set("Version", static_cast<int>(policy.version()));
-  return dict;
+  return base::DictValue()
+      .Set("Name", policy.name())
+      .Set("Version", static_cast<int>(policy.version()));
 }
 
 std::ostream& operator<<(std::ostream& stream, const PolicyReference& policy) {
@@ -132,12 +131,10 @@ std::ostream& operator<<(std::ostream& stream, const PolicyReference& policy) {
   return stream;
 }
 
-base::Value::Dict InvokeNextToReadableDictionary(
-    const InvokeNext& invoke_next) {
-  base::Value::Dict dict;
-  dict.Set("Target service", TargetServiceToString(invoke_next.service()));
-  dict.Set("Key name", invoke_next.key_name());
-  return dict;
+base::DictValue InvokeNextToReadableDictionary(const InvokeNext& invoke_next) {
+  return base::DictValue()
+      .Set("Target service", TargetServiceToString(invoke_next.service()))
+      .Set("Key name", invoke_next.key_name());
 }
 
 std::ostream& operator<<(std::ostream& stream, const InvokeNext& invoke_next) {
@@ -145,9 +142,9 @@ std::ostream& operator<<(std::ostream& stream, const InvokeNext& invoke_next) {
   return stream;
 }
 
-base::Value::Dict ClientDirectiveToReadableDictionary(
+base::DictValue ClientDirectiveToReadableDictionary(
     const ClientDirective& directive) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("Policy reference",
            PolicyReferenceToReadableDictionary(directive.policy_reference()));
 
@@ -182,9 +179,10 @@ base::Value::Dict ClientDirectiveToReadableDictionary(
 
   dict.Set("Directive creation time",
            base::TimeFormatShortDateAndTimeWithTimeZone(
-               base::Time::FromJavaTime(directive.create_time_millis())));
+               base::Time::FromMillisecondsSinceUnixEpoch(
+                   directive.create_time_millis())));
 
-  base::Value::List invoke_next_list;
+  base::ListValue invoke_next_list;
   for (const auto& invoke_next : directive.invoke_next()) {
     invoke_next_list.Append(InvokeNextToReadableDictionary(invoke_next));
   }
@@ -199,9 +197,9 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict DeviceMetadataPacketToReadableDictionary(
+base::DictValue DeviceMetadataPacketToReadableDictionary(
     const DeviceMetadataPacket& packet) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("Instance ID", packet.device_id());
   dict.Set("Encrypted metadata",
            (packet.encrypted_metadata().empty()
@@ -220,18 +218,17 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict EncryptedGroupPrivateKeyToReadableDictionary(
+base::DictValue EncryptedGroupPrivateKeyToReadableDictionary(
     const EncryptedGroupPrivateKey& key) {
-  base::Value::Dict dict;
-  dict.Set("Recipient Instance ID", key.recipient_device_id());
-  dict.Set("Sender Instance ID", key.sender_device_id());
-  dict.Set("Encrypted group private key",
+  return base::DictValue()
+      .Set("Recipient Instance ID", key.recipient_device_id())
+      .Set("Sender Instance ID", key.sender_device_id())
+      .Set("Encrypted group private key",
            (key.encrypted_private_key().empty()
                 ? "[Empty]"
-                : TruncateStringForLogs(Encode(key.encrypted_private_key()))));
-  dict.Set("Group public key hash",
+                : TruncateStringForLogs(Encode(key.encrypted_private_key()))))
+      .Set("Group public key hash",
            base::NumberToString(key.group_public_key_hash()));
-  return dict;
 }
 
 std::ostream& operator<<(std::ostream& stream,
@@ -240,18 +237,20 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict SyncMetadataResponseToReadableDictionary(
+base::DictValue SyncMetadataResponseToReadableDictionary(
     const SyncMetadataResponse& response) {
-  base::Value::Dict dict;
-
-  base::Value::List metadata_list;
+  base::ListValue metadata_list;
   for (const auto& metadata : response.encrypted_metadata()) {
     metadata_list.Append(DeviceMetadataPacketToReadableDictionary(metadata));
   }
-  dict.Set("Device metadata packets", std::move(metadata_list));
+  auto dict =
+      base::DictValue()
+          .Set("Device metadata packets", std::move(metadata_list))
+          .Set("Group public key",
+               TruncateStringForLogs(Encode(response.group_public_key())))
+          .Set("Freshness token",
+               TruncateStringForLogs(Encode(response.freshness_token())));
 
-  dict.Set("Group public key",
-           TruncateStringForLogs(Encode(response.group_public_key())));
   if (response.has_encrypted_group_private_key()) {
     dict.Set("Encrypted group private key",
              EncryptedGroupPrivateKeyToReadableDictionary(
@@ -259,8 +258,7 @@ base::Value::Dict SyncMetadataResponseToReadableDictionary(
   } else {
     dict.Set("Encrypted group private key", "[Not sent]");
   }
-  dict.Set("Freshness token",
-           TruncateStringForLogs(Encode(response.freshness_token())));
+
   if (response.has_client_directive()) {
     dict.Set("Client directive",
              ClientDirectiveToReadableDictionary(response.client_directive()));
@@ -277,16 +275,16 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict FeatureStatusToReadableDictionary(
+base::DictValue FeatureStatusToReadableDictionary(
     const DeviceFeatureStatus::FeatureStatus& status) {
-  base::Value::Dict dict;
-  dict.Set("Feature type", status.feature_type());
-  dict.Set("Enabled?", status.enabled());
-  dict.Set("Last modified time (BatchGet* only)",
+  return base::DictValue()
+      .Set("Feature type", status.feature_type())
+      .Set("Enabled?", status.enabled())
+      .Set("Last modified time (BatchGet* only)",
            base::TimeFormatShortDateAndTimeWithTimeZone(
-               base::Time::FromJavaTime(status.last_modified_time_millis())));
-  dict.Set("Enable exclusively (BatchSet* only)?", status.enable_exclusively());
-  return dict;
+               base::Time::FromMillisecondsSinceUnixEpoch(
+                   status.last_modified_time_millis())))
+      .Set("Enable exclusively (BatchSet* only)?", status.enable_exclusively());
 }
 
 std::ostream& operator<<(std::ostream& stream,
@@ -295,19 +293,17 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict DeviceFeatureStatusToReadableDictionary(
+base::DictValue DeviceFeatureStatusToReadableDictionary(
     const DeviceFeatureStatus& status) {
-  base::Value::Dict dict;
-  dict.Set("Instance ID", status.device_id());
-
-  base::Value::List feature_status_list;
+  base::ListValue feature_status_list;
   for (const auto& feature_status : status.feature_statuses()) {
     feature_status_list.Append(
         FeatureStatusToReadableDictionary(feature_status));
   }
-  dict.Set("Feature statuses", std::move(feature_status_list));
 
-  return dict;
+  return base::DictValue()
+      .Set("Instance ID", status.device_id())
+      .Set("Feature statuses", std::move(feature_status_list));
 }
 
 std::ostream& operator<<(std::ostream& stream,
@@ -316,11 +312,11 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict BatchGetFeatureStatusesResponseToReadableDictionary(
+base::DictValue BatchGetFeatureStatusesResponseToReadableDictionary(
     const BatchGetFeatureStatusesResponse& response) {
-  base::Value::Dict dict;
+  base::DictValue dict;
 
-  base::Value::List device_statuses_list;
+  base::ListValue device_statuses_list;
   for (const auto& device_statuses : response.device_feature_statuses()) {
     device_statuses_list.Append(
         DeviceFeatureStatusToReadableDictionary(device_statuses));
@@ -336,21 +332,19 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict DeviceActivityStatusToReadableDictionary(
+base::DictValue DeviceActivityStatusToReadableDictionary(
     const DeviceActivityStatus& status) {
-  base::Value::Dict dict;
-  dict.Set("Instance ID", status.device_id());
-  dict.Set("Last activity time",
+  return base::DictValue()
+      .Set("Instance ID", status.device_id())
+      .Set("Last activity time",
            base::TimeFormatShortDateAndTimeWithTimeZone(
-               base::Time::FromTimeT(status.last_activity_time_sec())));
-  dict.Set("Connectivity status",
-           ConnectivityStatusToString(status.connectivity_status()));
-  dict.Set("Last update time",
+               base::Time::FromTimeT(status.last_activity_time_sec())))
+      .Set("Connectivity status",
+           ConnectivityStatusToString(status.connectivity_status()))
+      .Set("Last update time",
            base::TimeFormatShortDateAndTimeWithTimeZone(
                base::Time::FromTimeT(status.last_update_time().seconds()) +
                base::Nanoseconds(status.last_update_time().nanos())));
-
-  return dict;
 }
 
 std::ostream& operator<<(std::ostream& stream,
@@ -359,17 +353,14 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict GetDevicesActivityStatusResponseToReadableDictionary(
+base::DictValue GetDevicesActivityStatusResponseToReadableDictionary(
     const GetDevicesActivityStatusResponse& response) {
-  base::Value::Dict dict;
-
-  base::Value::List status_list;
+  base::ListValue status_list;
   for (const auto& status : response.device_activity_statuses()) {
     status_list.Append(DeviceActivityStatusToReadableDictionary(status));
   }
-  dict.Set("Device activity statuses", std::move(status_list));
-
-  return dict;
+  return base::DictValue().Set("Device activity statuses",
+                               std::move(status_list));
 }
 
 std::ostream& operator<<(std::ostream& stream,
@@ -378,15 +369,15 @@ std::ostream& operator<<(std::ostream& stream,
   return stream;
 }
 
-base::Value::Dict BeaconSeedToReadableDictionary(const BeaconSeed& seed) {
-  base::Value::Dict dict;
-  dict.Set("Data", TruncateStringForLogs(Encode(seed.data())));
-  dict.Set("Start time",
-           base::TimeFormatShortDateAndTimeWithTimeZone(
-               base::Time::FromJavaTime(seed.start_time_millis())));
-  dict.Set("End time", base::TimeFormatShortDateAndTimeWithTimeZone(
-                           base::Time::FromJavaTime(seed.end_time_millis())));
-  return dict;
+base::DictValue BeaconSeedToReadableDictionary(const BeaconSeed& seed) {
+  return base::DictValue()
+      .Set("Data", TruncateStringForLogs(Encode(seed.data())))
+      .Set("Start time", base::TimeFormatShortDateAndTimeWithTimeZone(
+                             base::Time::FromMillisecondsSinceUnixEpoch(
+                                 seed.start_time_millis())))
+      .Set("End time", base::TimeFormatShortDateAndTimeWithTimeZone(
+                           base::Time::FromMillisecondsSinceUnixEpoch(
+                               seed.end_time_millis())));
 }
 
 std::ostream& operator<<(std::ostream& stream, const BeaconSeed& seed) {
@@ -394,20 +385,18 @@ std::ostream& operator<<(std::ostream& stream, const BeaconSeed& seed) {
   return stream;
 }
 
-base::Value::Dict BetterTogetherDeviceMetadataToReadableDictionary(
+base::DictValue BetterTogetherDeviceMetadataToReadableDictionary(
     const BetterTogetherDeviceMetadata& metadata) {
-  base::Value::Dict dict;
-  dict.Set("Public key", TruncateStringForLogs(Encode(metadata.public_key())));
-  dict.Set("PII-free device name", metadata.no_pii_device_name());
-  dict.Set("Bluetooth MAC address", metadata.bluetooth_public_address());
-
-  base::Value::List beacon_seed_list;
+  base::ListValue beacon_seed_list;
   for (const auto& seed : metadata.beacon_seeds()) {
     beacon_seed_list.Append(BeaconSeedToReadableDictionary(seed));
   }
-  dict.Set("Beacon seeds", std::move(beacon_seed_list));
 
-  return dict;
+  return base::DictValue()
+      .Set("Public key", TruncateStringForLogs(Encode(metadata.public_key())))
+      .Set("PII-free device name", metadata.no_pii_device_name())
+      .Set("Bluetooth MAC address", metadata.bluetooth_public_address())
+      .Set("Beacon seeds", std::move(beacon_seed_list));
 }
 
 std::ostream& operator<<(std::ostream& stream,

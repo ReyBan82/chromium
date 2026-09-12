@@ -26,6 +26,13 @@ body {
     margin: 0
 }
 
+.source-container {
+    /* Purely a DOM grouping for the source table, see
+       HTMLViewSourceDocument::CreateContainingTable(). It must not generate a
+       box of its own. */
+    display: contents;
+}
+
 table {
     width: max-content;
     min-width: 100vw;
@@ -39,7 +46,7 @@ table {
 
 .line-wrap {
     width: 100%;
-    white-space: pre-wrap !important;
+    white-space: pre-wrap;
     word-break: normal;
     overflow-wrap: anywhere;
 }
@@ -49,7 +56,7 @@ table {
     font-size: initial;
     font-family: monospace;
     user-select: none;
-    background-color: -internal-light-dark(rgb(240, 240, 240), rgb(60, 60, 60));
+    background-color: light-dark(rgb(240, 240, 240), rgb(60, 60, 60));
     border-bottom: 1px solid rgb(187, 187, 187);
     display: flex;
     justify-content: flex-start;
@@ -61,17 +68,17 @@ table {
 }
 
 td {
-    padding: 0 !important;
+    padding: 0;
     vertical-align: baseline
 }
 
 .line-gutter-backdrop, .line-number {
     /* Keep this in sync with inspector.css (.webkit-line-gutter-backdrop) */
     box-sizing: border-box;
-    padding: 0 4px !important;
+    padding: 0 4px;
     width: 31px;
-    background-color: -internal-light-dark(rgb(240, 240, 240), rgb(60, 60, 60));
-    border-right: 1px solid rgb(187, 187, 187) !important;
+    background-color: light-dark(rgb(240, 240, 240), rgb(60, 60, 60));
+    border-right: 1px solid rgb(187, 187, 187);
     user-select: none;
 }
 
@@ -86,7 +93,7 @@ td {
 
 .line-number {
     text-align: right;
-    color: -internal-light-dark(rgb(148, 132, 132), rgb(128, 128, 128));
+    color: light-dark(rgb(148, 132, 132), rgb(128, 128, 128));
     word-break: normal;
     white-space: nowrap;
     font-size: 9px;
@@ -103,27 +110,27 @@ tbody:last-child .line-content:empty:before {
 }
 
 .line-content {
-    padding: 0 5px !important;
+    padding: 0 5px;
 }
 
 .html-tag {
     /* Keep this in sync with inspectorSyntaxHighlight.css (.webkit-html-tag) */
-    color: -internal-light-dark(rgb(136, 18, 128), rgb(93, 176, 215));
+    color: light-dark(rgb(136, 18, 128), rgb(93, 176, 215));
 }
 
 .html-attribute-name {
     /* Keep this in sync with inspectorSyntaxHighlight.css (.webkit-html-attribute-name) */
-    color: -internal-light-dark(rgb(153, 69, 0), rgb(155 187 220));
+    color: light-dark(rgb(153, 69, 0), rgb(155 187 220));
 }
 
 .html-attribute-value {
     /* Keep this in sync with inspectorSyntaxHighlight.css (.webkit-html-attribute-value) */
-    color: -internal-light-dark(rgb(26, 26, 166), rgb(242, 151, 102));
+    color: light-dark(rgb(26, 26, 166), rgb(242, 151, 102));
 }
 
 .html-external-link, .html-resource-link {
     /* Keep this in sync with inspectorSyntaxHighlight.css (.webkit-html-external-link, .webkit-html-resource-link) */
-    color: -internal-light-dark(#00e, rgb(159, 180, 214));
+    color: light-dark(#00e, rgb(159, 180, 214));
 }
 
 .html-external-link {
@@ -139,6 +146,10 @@ tbody:last-child .line-content:empty:before {
 .html-comment {
     /* Keep this in sync with inspectorSyntaxHighlight.css (.webkit-html-comment) */
     color: rgb(35, 110, 37);
+}
+
+.html-processing-instruction {
+    color: light-dark(rgb(0, 96, 96), rgb(100, 200, 200));
 }
 
 .html-doctype {

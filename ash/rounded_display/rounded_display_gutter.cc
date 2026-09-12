@@ -9,14 +9,12 @@
 #include <utility>
 #include <vector>
 
-#include "ash/frame_sink/ui_resource.h"
-#include "cc/paint/paint_flags.h"
 #include "third_party/skia/include/core/SkColor.h"
-#include "third_party/skia/include/core/SkPath.h"
-#include "third_party/skia/include/core/SkScalar.h"
+#include "third_party/skia/include/core/SkRRect.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
+#include "ui/gfx/geometry/skia_conversions.h"
 #include "ui/gfx/geometry/vector2d.h"
 
 namespace ash {
@@ -48,76 +46,34 @@ void RoundedDisplayGutter::RoundedCorner::Paint(gfx::Canvas* canvas) const {
     return;
   }
 
-  PaintCornerHelper(canvas);
-}
+  // To draw a rounded corner, we draw a black square of size 2 * radius and
+  // subtract out a circle of radius r to get the corner shape.
 
-void RoundedDisplayGutter::RoundedCorner::PaintCornerHelper(
-    gfx::Canvas* canvas) const {
-  SkPath path;
-  SkScalar startAngle = 0.0, sweepAngle = 0.0;
-  SkScalar dx = 0.0, dy = 0.0;
-  int translate_dx = 0.0, translate_dy = 0.0;
-
-  switch (position_) {
-    case RoundedCornerPosition::kUpperLeft:
-      startAngle = -90;
-      sweepAngle = -90;
-      dx = radius_;
-      dy = -radius_;
-      translate_dx = 0;
-      translate_dy = 0;
-      break;
-    case RoundedCornerPosition::kLowerLeft:
-      startAngle = 90;
-      sweepAngle = 90;
-      dx = radius_;
-      dy = radius_;
-      translate_dx = 0;
-      translate_dy = -radius_;
-      break;
-    case RoundedCornerPosition::kUpperRight:
-      startAngle = 0;
-      sweepAngle = -90;
-      dx = radius_;
-      dy = radius_;
-      translate_dx = -radius_;
-      translate_dy = 0;
-      break;
-    case RoundedCornerPosition::kLowerRight:
-      startAngle = 0;
-      sweepAngle = 90;
-      dx = radius_;
-      dy = -radius_;
-      translate_dx = -radius_;
-      translate_dy = -radius_;
-      break;
-  }
-
-  const SkScalar oval_radius = radius_ * 2;
-  SkRect oval{0, 0, oval_radius, oval_radius};
-
-  path.addArc(oval, startAngle, sweepAngle);
-
-  if (position_ == RoundedCornerPosition::kUpperLeft ||
-      position_ == RoundedCornerPosition::kLowerLeft) {
-    path.rLineTo(0, dy);
-    path.rLineTo(dx, 0);
-  }
-
-  if (position_ == RoundedCornerPosition::kUpperRight ||
-      position_ == RoundedCornerPosition::kLowerRight) {
-    path.rLineTo(dx, 0);
-    path.rLineTo(0, dy);
-  }
-
-  cc::PaintFlags flags;
-  flags.setStyle(cc::PaintFlags::Style::kFill_Style);
-  flags.setAntiAlias(true);
-  flags.setColor(SK_ColorBLACK);
+  // We translate the canvas such that the top-left of the drawn square
+  // is at the origin of the canvas. This simplifies the drawing logic.
+  const int translate_dx = (position_ == RoundedCornerPosition::kUpperRight ||
+                            position_ == RoundedCornerPosition::kLowerRight)
+                               ? -radius_
+                               : 0;
+  const int translate_dy = (position_ == RoundedCornerPosition::kLowerLeft ||
+                            position_ == RoundedCornerPosition::kLowerRight)
+                               ? -radius_
+                               : 0;
 
   canvas->Save();
   canvas->Translate({translate_dx, translate_dy});
-  canvas->DrawPath(path, flags);
+
+  // We clip the canvas to the region that should contain the corner. This
+  // ensures we only draw the one corner we want and don't draw the other three
+  // corners of the rounded rect.
+  canvas->ClipRect(gfx::Rect(-translate_dx, -translate_dy, radius_, radius_));
+
+  gfx::Rect square_rect(0, 0, 2 * radius_, 2 * radius_);
+  SkRRect r_rect =
+      SkRRect::MakeRectXY(gfx::RectToSkRect(square_rect), radius_, radius_);
+  canvas->sk_canvas()->clipRRect(r_rect, SkClipOp::kDifference, true);
+  canvas->FillRect(square_rect, SK_ColorBLACK);
+
   canvas->Restore();
 }
 
@@ -137,34 +93,17 @@ RoundedDisplayGutter::RoundedDisplayGutter(std::vector<RoundedCorner>&& corners,
   // A gutter must paint at least one rounded corner and at most four corners.
   DCHECK(corners_.size() > 0 && corners_.size() <= 4);
 
-  // Since the corners of the gutter cannot be changed, both gutter bounds and
-  // ui_source_id do not change either.
+  // Since the corners of the gutter cannot be changed, gutter bounds do not
+  // change either.
   bounds_in_pixels_ = CalculateGutterBounds();
-  ui_source_id_ = CalculateUiSourceId();
-  DCHECK(ui_source_id_ != kInvalidUiSourceId);
 }
 
 RoundedDisplayGutter::~RoundedDisplayGutter() = default;
 
-uint32_t RoundedDisplayGutter::ui_source_id() const {
-  return ui_source_id_;
-}
-
-int32_t RoundedDisplayGutter::CalculateUiSourceId() const {
-  uint32_t ui_source_id = 0;
-  // Value of the position mask of the gutter will give a unique value for any
-  // combination of RoundedDisplayCorners.
-  for (auto& corner : corners_) {
-    ui_source_id |= corner.position();
-  }
-
-  return ui_source_id;
-}
-
 gfx::Rect RoundedDisplayGutter::CalculateGutterBounds() const {
   gfx::Rect gutter_bounds;
 
-  for (auto& corner : corners_) {
+  for (const auto& corner : corners_) {
     gutter_bounds.Union(corner.bounds());
   }
 
@@ -176,7 +115,7 @@ const gfx::Rect& RoundedDisplayGutter::bounds() const {
 }
 
 void RoundedDisplayGutter::Paint(gfx::Canvas* canvas) const {
-  for (auto& corner : corners_) {
+  for (const auto& corner : corners_) {
     canvas->Save();
     const gfx::Vector2d offset =
         corner.bounds().OffsetFromOrigin() - bounds().OffsetFromOrigin();

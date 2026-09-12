@@ -12,7 +12,7 @@
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/metrics/https_engagement_metrics_provider.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -23,6 +23,7 @@
 #include "net/ssl/client_cert_store.h"
 #include "net/ssl/ssl_server_config.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "ui/base/window_open_disposition.h"
 #include "url/gurl.h"
 
 class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
@@ -35,7 +36,7 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
   HttpsEngagementPageLoadMetricsBrowserTest& operator=(
       const HttpsEngagementPageLoadMetricsBrowserTest&) = delete;
 
-  ~HttpsEngagementPageLoadMetricsBrowserTest() override {}
+  ~HttpsEngagementPageLoadMetricsBrowserTest() override = default;
 
   void StartHttpsServer(bool cert_error) {
     https_test_server_ = std::make_unique<net::EmbeddedTestServer>(
@@ -60,7 +61,7 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
     base::TimeTicks start = base::TimeTicks::Now();
     EXPECT_TRUE(ui_test_utils::NavigateToURL(browser(), target_url));
 
-    TabStripModel* tab_strip_model = browser()->tab_strip_model();
+    TabStripModel* tab_strip_model = browser()->GetTabStripModel();
     content::WebContentsDestroyedWatcher destroyed_watcher(
         tab_strip_model->GetActiveWebContents());
     tab_strip_model->CloseAllTabs();
@@ -73,7 +74,7 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
     ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), first_url));
     ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), second_url));
 
-    TabStripModel* tab_strip_model = browser()->tab_strip_model();
+    TabStripModel* tab_strip_model = browser()->GetTabStripModel();
     EXPECT_EQ(1, tab_strip_model->count());
     content::WebContentsDestroyedWatcher destroyed_watcher(
         tab_strip_model->GetActiveWebContents());
@@ -94,7 +95,7 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
     base::TimeDelta upper_bound_delta = base::TimeTicks::Now() - start;
 
     // Make sure the correct tab is in the foreground.
-    TabStripModel* tab_strip_model = browser()->tab_strip_model();
+    TabStripModel* tab_strip_model = browser()->GetTabStripModel();
     EXPECT_EQ(2, tab_strip_model->count());
     EXPECT_EQ(url, tab_strip_model->GetWebContentsAt(0)->GetLastCommittedURL());
     EXPECT_NE(url,
@@ -102,7 +103,9 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
 
     content::WebContentsDestroyedWatcher destroyed_watcher(
         tab_strip_model->GetWebContentsAt(0));
-    EXPECT_TRUE(tab_strip_model->CloseWebContentsAt(0, 0));
+    int previous_tab_count = tab_strip_model->count();
+    tab_strip_model->CloseWebContentsAt(0, 0);
+    EXPECT_EQ(previous_tab_count - 1, tab_strip_model->count());
     destroyed_watcher.Wait();
     EXPECT_EQ(1, tab_strip_model->count());
 
@@ -118,7 +121,7 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
         ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
 
     // Make sure the correct tab is in the foreground.
-    TabStripModel* tab_strip_model = browser()->tab_strip_model();
+    TabStripModel* tab_strip_model = browser()->GetTabStripModel();
     EXPECT_EQ(2, tab_strip_model->count());
     EXPECT_EQ(url, tab_strip_model->GetWebContentsAt(1)->GetLastCommittedURL());
     EXPECT_NE(url,
@@ -126,7 +129,9 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
 
     content::WebContentsDestroyedWatcher destroyed_watcher(
         tab_strip_model->GetWebContentsAt(1));
-    EXPECT_TRUE(tab_strip_model->CloseWebContentsAt(1, 0));
+    int previous_tab_count = tab_strip_model->count();
+    tab_strip_model->CloseWebContentsAt(1, 0);
+    EXPECT_EQ(previous_tab_count - 1, tab_strip_model->count());
     destroyed_watcher.Wait();
     EXPECT_EQ(1, tab_strip_model->count());
   }
@@ -141,7 +146,7 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
         ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
 
     // Make sure the correct tab is in the foreground.
-    TabStripModel* tab_strip_model = browser()->tab_strip_model();
+    TabStripModel* tab_strip_model = browser()->GetTabStripModel();
     EXPECT_EQ(2, tab_strip_model->count());
     EXPECT_EQ(url, tab_strip_model->GetWebContentsAt(1)->GetLastCommittedURL());
     EXPECT_NE(url,
@@ -151,7 +156,9 @@ class HttpsEngagementPageLoadMetricsBrowserTest : public InProcessBrowserTest {
     base::TimeTicks start = base::TimeTicks::Now();
     content::WebContentsDestroyedWatcher destroyed_watcher(
         tab_strip_model->GetWebContentsAt(0));
-    EXPECT_TRUE(tab_strip_model->CloseWebContentsAt(0, 0));
+    int previous_tab_count = tab_strip_model->count();
+    tab_strip_model->CloseWebContentsAt(0, 0);
+    EXPECT_EQ(previous_tab_count - 1, tab_strip_model->count());
     destroyed_watcher.Wait();
 
     // Now the background tab should have moved to the foreground.
@@ -283,13 +290,14 @@ IN_PROC_BROWSER_TEST_F(HttpsEngagementPageLoadMetricsBrowserTest,
 IN_PROC_BROWSER_TEST_F(HttpsEngagementPageLoadMetricsBrowserTest,
                        UncommittedLoadWithError) {
   StartHttpsServer(true);
-  TabStripModel* tab_strip_model = browser()->tab_strip_model();
+  TabStripModel* tab_strip_model = browser()->GetTabStripModel();
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), https_test_server_->GetURL("/simple.html")));
   content::WebContentsDestroyedWatcher destroyed_watcher(
       tab_strip_model->GetActiveWebContents());
-  EXPECT_TRUE(
-      tab_strip_model->CloseWebContentsAt(tab_strip_model->active_index(), 0));
+  int previous_tab_count = tab_strip_model->count();
+  tab_strip_model->CloseWebContentsAt(tab_strip_model->active_index(), 0);
+  EXPECT_EQ(previous_tab_count - 1, tab_strip_model->count());
   destroyed_watcher.Wait();
   histogram_tester_.ExpectTotalCount(internal::kHttpEngagementHistogram, 0);
   histogram_tester_.ExpectTotalCount(internal::kHttpsEngagementHistogram, 0);
@@ -476,8 +484,7 @@ IN_PROC_BROWSER_TEST_F(HttpsEngagementPageLoadMetricsBrowserTest,
   EXPECT_EQ(0, ratio_bucket);
 }
 
-
-// Flaky on linux-chromeos-rel. crbug/1215539
+// Flaky on linux-chromeos-rel. crbug.com/40769988
 #if defined(NDEBUG) && BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_AlwaysInBackground DISABLED_AlwaysInBackground
 #else

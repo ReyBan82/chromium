@@ -50,6 +50,11 @@ MEDIA_EXPORT CdmKeyInformation::KeyStatus ToMediaKeyStatus(
     cdm::KeyStatus status);
 MEDIA_EXPORT cdm::KeyStatus ToCdmKeyStatus(CdmKeyInformation::KeyStatus status);
 
+MEDIA_EXPORT CdmKeyInformation::KeyStatus ToMediaKeyStatus(
+    cdm::KeyStatus_2 status);
+MEDIA_EXPORT cdm::KeyStatus_2 ToCdmKeyStatus_2(
+    CdmKeyInformation::KeyStatus status);
+
 MEDIA_EXPORT cdm::EncryptionScheme ToCdmEncryptionScheme(
     EncryptionScheme scheme);
 
@@ -103,6 +108,18 @@ MEDIA_EXPORT cdm::VideoDecoderConfig_3 ToCdmVideoDecoderConfig(
 MEDIA_EXPORT void ToCdmInputBuffer(const DecoderBuffer& encrypted_buffer,
                                    std::vector<cdm::SubsampleEntry>* subsamples,
                                    cdm::InputBuffer_2* input_buffer);
+
+// Utility functions for converting various structures to spans.
+MEDIA_EXPORT base::span<uint8_t> AsSpan(cdm::Buffer* buffer);
+
+MEDIA_EXPORT base::span<const uint8_t> AsSpan(
+    const cdm::InputBuffer_2* input_buffer);
+
+MEDIA_EXPORT base::span<const cdm::SubsampleEntry> SubsamplesFrom(
+    const cdm::InputBuffer_2* input_buffer);
+
+MEDIA_EXPORT base::span<const uint8_t> KeyIdFrom(
+    const cdm::InputBuffer_2* input_buffer);
 
 }  // namespace media
 

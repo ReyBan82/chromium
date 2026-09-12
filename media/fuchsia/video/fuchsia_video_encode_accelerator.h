@@ -9,12 +9,15 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "base/containers/queue.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/sequence_checker.h"
 #include "media/base/bitstream_buffer.h"
+#include "media/base/encoder_status.h"
 #include "media/base/media_export.h"
 #include "media/base/media_log.h"
 #include "media/fuchsia/common/stream_processor_helper.h"
@@ -25,6 +28,7 @@
 namespace media {
 
 class VideoFrame;
+class VideoFrameWriterQueue;
 
 class MEDIA_EXPORT FuchsiaVideoEncodeAccelerator final
     : public VideoEncodeAccelerator,
@@ -38,13 +42,18 @@ class MEDIA_EXPORT FuchsiaVideoEncodeAccelerator final
 
   // VideoEncodeAccelerator implementation.
   SupportedProfiles GetSupportedProfiles() override;
-  bool Initialize(const Config& config,
-                  VideoEncodeAccelerator::Client* client,
-                  std::unique_ptr<MediaLog> media_log) override;
+  // Initializes the encoder. Returning a failure status will abort
+  // initialization, preventing the encoder stream from starting, and return
+  // an error to the JavaScript layer.
+  EncoderStatus Initialize(const Config& config,
+                           VideoEncodeAccelerator::Client* client,
+                           std::unique_ptr<MediaLog> media_log) override;
   void Encode(scoped_refptr<VideoFrame> frame, bool force_keyframe) override;
   void UseOutputBitstreamBuffer(BitstreamBuffer buffer) override;
-  void RequestEncodingParametersChange(const Bitrate& bitrate,
-                                       uint32_t framerate) override;
+  void RequestEncodingParametersChange(
+      const Bitrate& bitrate,
+      uint32_t framerate,
+      const std::optional<gfx::Size>& size) override;
   void Destroy() override;
   bool IsFlushSupported() override;
   bool IsGpuFrameResizeSupported() override;
@@ -53,7 +62,6 @@ class MEDIA_EXPORT FuchsiaVideoEncodeAccelerator final
   ~FuchsiaVideoEncodeAccelerator() override;
 
  private:
-  class VideoFrameWriterQueue;
   class OutputPacketsQueue;
 
   // StreamProcessorHelper::Client implementation.
@@ -72,14 +80,13 @@ class MEDIA_EXPORT FuchsiaVideoEncodeAccelerator final
   void OnStreamProcessorError() override;
 
   void ReleaseEncoder();
-  void OnError(VideoEncodeAccelerator::Error error_type,
-               const std::string& error_message);
+  void OnError(EncoderStatus status);
   void OnInputBuffersAcquired(
       std::vector<VmoBuffer> buffers,
-      const fuchsia::sysmem::SingleBufferSettings& buffer_settings);
+      const fuchsia::sysmem2::SingleBufferSettings& buffer_settings);
   void OnOutputBuffersAcquired(
       std::vector<VmoBuffer> buffers,
-      const fuchsia::sysmem::SingleBufferSettings& buffer_settings);
+      const fuchsia::sysmem2::SingleBufferSettings& buffer_settings);
   fuchsia::media::FormatDetails CreateFormatDetails(
       VideoEncodeAccelerator::Config& config);
 

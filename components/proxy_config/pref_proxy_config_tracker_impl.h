@@ -7,15 +7,23 @@
 
 #include <memory>
 
+#include "base/feature_list.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/threading/thread_checker.h"
+#include "components/enterprise/buildflags/buildflags.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/proxy_config/pref_proxy_config_tracker.h"
 #include "components/proxy_config/proxy_config_dictionary.h"
 #include "net/proxy_resolution/proxy_config_service.h"
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
+
+#if BUILDFLAG(ENTERPRISE_PROXY)
+#include "base/scoped_observation.h"
+#include "components/enterprise/net/core/enterprise_proxy_service.h"
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
 
 class PrefService;
 class PrefRegistrySimple;
@@ -23,6 +31,17 @@ class PrefRegistrySimple;
 namespace base {
 class SingleThreadTaskRunner;
 }
+
+namespace policy {
+class PolicyService;
+}
+
+// Killswitch for the rules set by the "ProxyOverrideRules" policy.
+PROXY_CONFIG_EXPORT BASE_DECLARE_FEATURE(kEnableProxyOverrideRules);
+
+// Killswitch for preserving explicit proxy rules when system proxy is unset.
+PROXY_CONFIG_EXPORT BASE_DECLARE_FEATURE(
+    kProxyOverrideRulesFixUnsetSystemProxy);
 
 // A net::ProxyConfigService implementation that applies preference proxy
 // settings (pushed from PrefProxyConfigTrackerImpl) as overrides to the proxy
@@ -47,11 +66,14 @@ class ProxyConfigServiceImpl : public net::ProxyConfigService,
   ConfigAvailability GetLatestProxyConfig(
       net::ProxyConfigWithAnnotation* config) override;
   void OnLazyPoll() override;
+  bool UsesPolling() override;
 
   // Method on IO thread that receives the preference proxy settings pushed from
   // PrefProxyConfigTrackerImpl.
   void UpdateProxyConfig(ProxyPrefs::ConfigState config_state,
                          const net::ProxyConfigWithAnnotation& config);
+
+  base::WeakPtr<ProxyConfigServiceImpl> AsWeakPtr();
 
  private:
   // ProxyConfigService::Observer implementation:
@@ -76,19 +98,38 @@ class ProxyConfigServiceImpl : public net::ProxyConfigService,
   bool registered_observer_;
 
   base::ThreadChecker thread_checker_;
+
+  base::WeakPtrFactory<ProxyConfigServiceImpl> weak_ptr_factory_{this};
 };
 
 // A class that tracks proxy preferences. It translates the configuration
 // to net::ProxyConfig and pushes the result over to
 // ProxyConfigServiceImpl::UpdateProxyConfig.
 class PROXY_CONFIG_EXPORT PrefProxyConfigTrackerImpl
-    : public PrefProxyConfigTracker {
+    : public PrefProxyConfigTracker
+#if BUILDFLAG(ENTERPRISE_PROXY)
+    ,
+      public enterprise_net::EnterpriseProxyService::Observer
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
+{
  public:
   // |proxy_config_service_task_runner| is the thread the ProxyConfigService
   // will live on. Use nullptr if it lives on the current thread.
+  // |policy_service| is required to check the affiliation over the user, but
+  // can be null if its usage is not applicable to the caller.
   PrefProxyConfigTrackerImpl(PrefService* pref_service,
                              scoped_refptr<base::SingleThreadTaskRunner>
-                                 proxy_config_service_task_runner);
+                                 proxy_config_service_task_runner,
+                             policy::PolicyService* policy_service = nullptr);
+
+#if BUILDFLAG(ENTERPRISE_PROXY)
+  PrefProxyConfigTrackerImpl(
+      PrefService* pref_service,
+      scoped_refptr<base::SingleThreadTaskRunner>
+          proxy_config_service_task_runner,
+      policy::PolicyService* policy_service,
+      enterprise_net::EnterpriseProxyService* enterprise_proxy_service);
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
 
   PrefProxyConfigTrackerImpl(const PrefProxyConfigTrackerImpl&) = delete;
   PrefProxyConfigTrackerImpl& operator=(const PrefProxyConfigTrackerImpl&) =
@@ -137,10 +178,19 @@ class PROXY_CONFIG_EXPORT PrefProxyConfigTrackerImpl
 
   // Creates a proxy configuration from proxy-related preferences of
   // |pref_service|. Configuration is stored in |config|, return value indicates
-  // whether the configuration is valid.
+  // whether the configuration is valid. |policy_service| is required to check
+  // the affiliation over the user, but can be null if its usage is not
+  // applicable to the caller.
   static ProxyPrefs::ConfigState ReadPrefConfig(
       const PrefService* pref_service,
-      net::ProxyConfigWithAnnotation* config);
+      net::ProxyConfigWithAnnotation* config,
+      policy::PolicyService* policy_service);
+
+#if BUILDFLAG(ENTERPRISE_PROXY)
+  // enterprise_net::EnterpriseProxyService::Observer implementation:
+  void OnDynamicProxyConfigsStatusChanged() override;
+  void OnEnterpriseProxyServiceDestroyed() override;
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
 
  protected:
   // Get the proxy configuration currently defined by preferences.
@@ -171,7 +221,8 @@ class PROXY_CONFIG_EXPORT PrefProxyConfigTrackerImpl
   net::ProxyConfigWithAnnotation pref_config_;
 
   raw_ptr<PrefService> pref_service_;
-  raw_ptr<ProxyConfigServiceImpl> proxy_config_service_impl_;  // Weak ptr.
+  raw_ptr<policy::PolicyService> policy_service_ = nullptr;
+  base::WeakPtr<ProxyConfigServiceImpl> proxy_config_service_impl_;
   PrefChangeRegistrar proxy_prefs_;
 
   // State of |active_config_|.  |active_config_| is only valid if
@@ -184,6 +235,15 @@ class PROXY_CONFIG_EXPORT PrefProxyConfigTrackerImpl
   scoped_refptr<base::SingleThreadTaskRunner> proxy_config_service_task_runner_;
 
   base::ThreadChecker thread_checker_;
+
+#if BUILDFLAG(ENTERPRISE_PROXY)
+  base::ScopedObservation<enterprise_net::EnterpriseProxyService,
+                          enterprise_net::EnterpriseProxyService::Observer>
+      enterprise_proxy_observation_{this};
+#endif  // BUILDFLAG(ENTERPRISE_PROXY)
+  // Caches the active PvD dynamic routing rules so that dynamic routing updates
+  // persist across preference changes.
+  net::ProxyConfig::DynamicRoutingConfig active_dynamic_routing_config_;
 };
 
 #endif  // COMPONENTS_PROXY_CONFIG_PREF_PROXY_CONFIG_TRACKER_IMPL_H_

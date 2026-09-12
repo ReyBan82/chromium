@@ -7,11 +7,16 @@
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/types/expected.h"
+#include "third_party/blink/public/common/manifest/manifest_util.h"
+#include "third_party/blink/public/mojom/manifest/manifest.mojom-blink.h"
+#include "third_party/blink/public/mojom/manifest/manifest_manager.mojom-blink.h"
 #include "third_party/blink/public/platform/interface_registry.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/frame_console.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame_client.h"
+#include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
 #include "third_party/blink/renderer/core/html/html_link_element.h"
@@ -21,8 +26,30 @@
 #include "third_party/blink/renderer/modules/manifest/manifest_parser.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_response.h"
+#include "third_party/blink/renderer/platform/weborigin/kurl.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
+
+ManifestManager::Result::Result(mojom::blink::ManifestRequestResult result,
+                                KURL manifest_url,
+                                mojom::blink::ManifestPtr manifest)
+    : result_(result),
+      manifest_url_(manifest_url),
+      manifest_(manifest ? std::move(manifest) : mojom::blink::Manifest::New()),
+      debug_info_(mojom::blink::ManifestDebugInfo::New()) {
+  // The default constructor for ManifestDebugInfo does not initialize
+  // `raw_manifest` with a valid value, so do so here instead.
+  debug_info_->raw_manifest = "";
+}
+
+ManifestManager::Result::Result(Result&&) = default;
+ManifestManager::Result& ManifestManager::Result::operator=(Result&&) = default;
+
+void ManifestManager::Result::SetManifest(mojom::blink::ManifestPtr manifest) {
+  CHECK(manifest);
+  manifest_ = std::move(manifest);
+}
 
 // static
 const char ManifestManager::kSupplementName[] = "ManifestManager";
@@ -48,13 +75,11 @@ ManifestManager* ManifestManager::From(LocalDOMWindow& window) {
 ManifestManager::ManifestManager(LocalDOMWindow& window)
     : Supplement<LocalDOMWindow>(window),
       ExecutionContextLifecycleObserver(&window),
-      may_have_manifest_(false),
-      manifest_dirty_(true),
       receivers_(this, GetExecutionContext()) {
   if (window.GetFrame()->IsMainFrame()) {
     manifest_change_notifier_ =
         MakeGarbageCollected<ManifestChangeNotifier>(window);
-    window.GetFrame()->GetInterfaceRegistry()->AddInterface(WTF::BindRepeating(
+    window.GetFrame()->GetInterfaceRegistry()->AddInterface(BindRepeating(
         &ManifestManager::BindReceiver, WrapWeakPersistent(this)));
   }
 }
@@ -62,28 +87,44 @@ ManifestManager::ManifestManager(LocalDOMWindow& window)
 ManifestManager::~ManifestManager() = default;
 
 void ManifestManager::RequestManifest(RequestManifestCallback callback) {
-  RequestManifestImpl(WTF::BindOnce(
-      [](RequestManifestCallback callback, const KURL& manifest_url,
-         const mojom::blink::ManifestPtr& manifest,
-         const mojom::blink::ManifestDebugInfo* debug_info) {
-        std::move(callback).Run(
-            manifest_url, manifest.is_null() ? mojom::blink::Manifest::New()
-                                             : manifest->Clone());
+  RequestManifestImpl(blink::BindOnce(
+      [](RequestManifestCallback callback, const Result& result) {
+        std::move(callback).Run(result.result(), result.manifest_url(),
+                                result.manifest().Clone());
+      },
+      std::move(callback)));
+}
+
+void ManifestManager::RequestManifestAndErrors(
+    RequestManifestAndErrorsCallback callback) {
+  RequestManifestImpl(blink::BindOnce(
+      [](RequestManifestAndErrorsCallback callback, const Result& result) {
+        switch (result.result()) {
+          case mojom::blink::ManifestRequestResult::kManifestFailedToFetch:
+          case mojom::blink::ManifestRequestResult::kManifestFailedToParse:
+          case mojom::blink::ManifestRequestResult::kUnexpectedFailure:
+          case mojom::blink::ManifestRequestResult::kNoManifestAllowed:
+            std::move(callback).Run(
+                base::unexpected(mojom::blink::RequestManifestError::New(
+                    result.result(),
+                    std::move(result.debug_info().Clone()->errors))));
+            return;
+          case mojom::blink::ManifestRequestResult::kNoManifestSpecified:
+          case mojom::blink::ManifestRequestResult::kSuccess:
+            std::move(callback).Run(result.manifest().Clone());
+            return;
+        }
       },
       std::move(callback)));
 }
 
 void ManifestManager::RequestManifestDebugInfo(
     RequestManifestDebugInfoCallback callback) {
-  RequestManifestImpl(WTF::BindOnce(
-      [](RequestManifestDebugInfoCallback callback, const KURL& manifest_url,
-         const mojom::blink::ManifestPtr& manifest,
-         const mojom::blink::ManifestDebugInfo* debug_info) {
-        std::move(callback).Run(manifest_url,
-                                manifest.is_null()
-                                    ? mojom::blink::Manifest::New()
-                                    : manifest->Clone(),
-                                debug_info ? debug_info->Clone() : nullptr);
+  RequestManifestImpl(blink::BindOnce(
+      [](RequestManifestDebugInfoCallback callback, const Result& result) {
+        std::move(callback).Run(result.manifest_url(),
+                                result.manifest().Clone(),
+                                result.debug_info().Clone());
       },
       std::move(callback)));
 }
@@ -107,90 +148,132 @@ void ManifestManager::ParseManifestFromString(
 
 void ManifestManager::RequestManifestForTesting(
     WebManifestManager::Callback callback) {
-  RequestManifestImpl(WTF::BindOnce(
-      [](WebManifestManager::Callback callback, const KURL& manifest_url,
-         const mojom::blink::ManifestPtr& manifest,
-         const mojom::blink::ManifestDebugInfo* debug_info) {
-        std::move(callback).Run(manifest_url);
+  RequestManifestImpl(blink::BindOnce(
+      [](WebManifestManager::Callback callback, const Result& result) {
+        std::move(callback).Run(result.manifest_url());
       },
       std::move(callback)));
 }
 
 bool ManifestManager::CanFetchManifest() {
-  // Do not fetch the manifest if we are on an opaque origin.
-  return !GetSupplementable()->GetSecurityOrigin()->IsOpaque();
+  // Do not fetch the manifest if we are on an opaque origin, or if the document
+  // url is an about: url.
+  return !GetSupplementable()->GetSecurityOrigin()->IsOpaque() &&
+         GetSupplementable()->Url().IsValid() &&
+         !GetSupplementable()->Url().ProtocolIsAbout();
 }
 
 void ManifestManager::RequestManifestImpl(
     InternalRequestManifestCallback callback) {
   if (!GetSupplementable()->GetFrame()) {
-    std::move(callback).Run(KURL(), mojom::blink::ManifestPtr(), nullptr);
+    std::move(callback).Run(
+        Result(mojom::blink::ManifestRequestResult::kUnexpectedFailure));
     return;
   }
 
-  if (!may_have_manifest_) {
-    std::move(callback).Run(KURL(), mojom::blink::ManifestPtr(), nullptr);
-    return;
-  }
-
-  if (!manifest_dirty_) {
-    std::move(callback).Run(manifest_url_, manifest_,
-                            manifest_debug_info_.get());
+  if (cached_result_) {
+    std::move(callback).Run(*cached_result_);
     return;
   }
 
   pending_callbacks_.push_back(std::move(callback));
-
-  // Just wait for the running call to be done if there are other callbacks.
-  if (pending_callbacks_.size() > 1)
-    return;
-
   FetchManifest();
 }
 
 void ManifestManager::DidChangeManifest() {
-  may_have_manifest_ = true;
-  manifest_dirty_ = true;
-  manifest_url_ = KURL();
-  manifest_debug_info_ = nullptr;
-  if (manifest_change_notifier_)
+  cached_result_.reset();
+  if (manifest_change_notifier_) {
     manifest_change_notifier_->DidChangeManifest();
+  }
 }
 
 void ManifestManager::FetchManifest() {
   if (!CanFetchManifest()) {
-    ResolveCallbacks(ResolveState::kFailure);
-    return;
-  }
-
-  manifest_url_ = ManifestURL();
-  if (manifest_url_.IsEmpty()) {
-    ResolveCallbacks(ResolveState::kFailure);
+    ResolveCallbacks(
+        Result(mojom::blink::ManifestRequestResult::kNoManifestAllowed,
+               ManifestURL()));
     return;
   }
 
   LocalDOMWindow& window = *GetSupplementable();
-  ResourceFetcher* document_fetcher = window.document()->Fetcher();
-  fetcher_ = MakeGarbageCollected<ManifestFetcher>(manifest_url_);
-  fetcher_->Start(window, ManifestUseCredentials(), document_fetcher,
-                  WTF::BindOnce(&ManifestManager::OnManifestFetchComplete,
-                                WrapWeakPersistent(this), window.Url()));
-}
-
-void ManifestManager::OnManifestFetchComplete(const KURL& document_url,
-                                              const ResourceResponse& response,
-                                              const String& data) {
-  fetcher_ = nullptr;
-  if (response.IsNull() && data.empty()) {
-    manifest_debug_info_ = nullptr;
-    ResolveCallbacks(ResolveState::kFailure);
+  KURL manifest_url = ManifestURL();
+  if (manifest_url.IsEmpty()) {
+    ResolveCallbacks(
+        Result(mojom::blink::ManifestRequestResult::kNoManifestSpecified,
+               NullUrl(), DefaultManifest()));
     return;
   }
 
+  // Do not trigger a new fetch if an existing fetch is happening for the same
+  // `manifest_url`.
+  if (current_fetching_manifest_url_ == manifest_url) {
+    return;
+  }
+
+  current_fetching_manifest_url_ = manifest_url;
+  ResourceFetcher* document_fetcher = window.document()->Fetcher();
+  fetcher_ = MakeGarbageCollected<ManifestFetcher>(manifest_url);
+  fetcher_->Start(window, ManifestUseCredentials(), document_fetcher,
+                  BindOnce(&ManifestManager::OnManifestFetchComplete,
+                           WrapWeakPersistent(this), window.Url(),
+                           *current_fetching_manifest_url_));
+}
+
+void ManifestManager::OnManifestFetchComplete(
+    const KURL& document_url,
+    const KURL& manifest_url_for_fetch,
+    const ResourceResponse& response,
+    const String& data) {
+  // Exit early if the manifest fetch is happening for a request belonging to a
+  // stale manifest url.
+  if (current_fetching_manifest_url_ != manifest_url_for_fetch) {
+    return;
+  }
+
+  current_fetching_manifest_url_.reset();
+  fetcher_ = nullptr;
+  if (response.IsNull() && data.empty()) {
+    // The only time we don't produce the default manifest is when there is a
+    // resource fetching problem of the manifest link. This allows callers to
+    // catch this error appropriately as a network issue instead of using a
+    // 'default' manifest that wasn't intended by the developer.
+    ResolveCallbacks(
+        Result(mojom::blink::ManifestRequestResult::kManifestFailedToFetch,
+               response.CurrentRequestUrl(), DefaultManifest()));
+    return;
+  }
+
+  // 3** range, redirects, should not be considered as failure, load still can
+  // be successful. Test to see this:
+  // PwaInstallViewBrowserTest.ListedRelatedChromeAppInstalled
+  if (response.HttpStatusCode() >= 200 && response.HttpStatusCode() < 400) {
+    ParseManifestFromPage(document_url, response.CurrentRequestUrl(), data);
+  } else {
+    const String message = StrCat(
+        {"Manifest fetch from ", response.CurrentRequestUrl().GetString(),
+         " failed, code ", String::Number(response.HttpStatusCode())});
+
+    GetSupplementable()->AddConsoleMessage(MakeGarbageCollected<ConsoleMessage>(
+        mojom::blink::ConsoleMessageSource::kOther,
+        mojom::blink::ConsoleMessageLevel::kError, message,
+        CaptureSourceLocation()));
+
+    ResolveCallbacks(
+        Result(mojom::blink::ManifestRequestResult::kManifestFailedToFetch,
+               response.CurrentRequestUrl(), DefaultManifest()));
+  }
+}
+
+void ManifestManager::ParseManifestFromPage(const KURL& document_url,
+                                            std::optional<KURL> manifest_url,
+                                            const String& data) {
+  CHECK(document_url.IsValid());
   // We are using the document as our FeatureContext for checking origin trials.
   // Note that any origin trials delivered in the manifest HTTP headers will be
   // ignored, only ones associated with the page will be used.
-  ManifestParser parser(data, response.CurrentRequestUrl(), document_url,
+  // For default manifests, the manifest_url is `std::nullopt`, so use the
+  // document_url instead for the parsing algorithm.
+  ManifestParser parser(data, manifest_url.value_or(document_url), document_url,
                         GetExecutionContext());
 
   // Monitoring whether the manifest has comments is temporary. Once
@@ -202,99 +285,96 @@ void ManifestManager::OnManifestFetchComplete(const KURL& document_url,
                       WebFeature::kWebAppManifestHasComments);
   }
 
-  manifest_debug_info_ = mojom::blink::ManifestDebugInfo::New();
-  manifest_debug_info_->raw_manifest = data.IsNull() ? "" : data;
-  parser.TakeErrors(&manifest_debug_info_->errors);
+  const bool failed = parser.failed();
+  Result result(
+      failed ? mojom::blink::ManifestRequestResult::kManifestFailedToParse
+             : mojom::blink::ManifestRequestResult::kSuccess,
+      manifest_url.value_or(KURL()));
 
-  for (const auto& error : manifest_debug_info_->errors) {
-    auto location = std::make_unique<SourceLocation>(ManifestURL().GetString(),
-                                                     String(), error->line,
-                                                     error->column, nullptr, 0);
+  result.debug_info().raw_manifest = data.IsNull() ? "" : data;
+  parser.TakeErrors(&result.debug_info().errors);
+
+  for (const auto& error : result.debug_info().errors) {
+    auto* location = MakeGarbageCollected<SourceLocation>(
+        ManifestURL().GetString(), String(), error->line, error->column,
+        nullptr, 0);
 
     GetSupplementable()->AddConsoleMessage(MakeGarbageCollected<ConsoleMessage>(
         mojom::blink::ConsoleMessageSource::kOther,
         error->critical ? mojom::blink::ConsoleMessageLevel::kError
                         : mojom::blink::ConsoleMessageLevel::kWarning,
-        "Manifest: " + error->message, std::move(location)));
+        StrCat({"Manifest: ", error->message}), std::move(location)));
   }
 
   // Having errors while parsing the manifest doesn't mean the manifest parsing
   // failed. Some properties might have been ignored but some others kept.
-  if (parser.failed()) {
-    ResolveCallbacks(ResolveState::kFailure);
+  if (failed) {
+    result.SetManifest(DefaultManifest());
+    ResolveCallbacks(std::move(result));
     return;
   }
 
-  manifest_url_ = response.CurrentRequestUrl();
-  manifest_ = parser.TakeManifest();
-  RecordMetrics(*manifest_);
-  ResolveCallbacks(ResolveState::kSuccess);
+  result.SetManifest(parser.TakeManifest());
+
+  // We should always have a start_url, manifest_id, and scope, as any errors
+  // still have fallbacks back to the document_url.
+  CHECK(!result.manifest().start_url.IsEmpty() &&
+        result.manifest().start_url.IsValid());
+  CHECK(!result.manifest().id.IsEmpty() && result.manifest().id.IsValid());
+  CHECK(!result.manifest().scope.IsEmpty() &&
+        result.manifest().scope.IsValid());
+
+  // At this point, the manifest is validly parsed, and is not the default one.
+  UseCounter::CountWebDXFeature(GetSupplementable(), WebDXFeature::kManifest);
+  ResolveCallbacks(std::move(result));
 }
 
-void ManifestManager::RecordMetrics(const mojom::blink::Manifest& manifest) {
-  if (manifest.capture_links != mojom::blink::CaptureLinks::kUndefined) {
-    UseCounter::Count(GetSupplementable(),
-                      WebFeature::kWebAppManifestCaptureLinks);
-  }
-
-  if (!manifest.launch_handler.is_null()) {
-    UseCounter::Count(GetSupplementable(),
-                      WebFeature::kWebAppManifestLaunchHandler);
-  }
-
-  if (!manifest.url_handlers.empty()) {
-    UseCounter::Count(GetSupplementable(),
-                      WebFeature::kWebAppManifestUrlHandlers);
-  }
-
-  if (!manifest.protocol_handlers.empty()) {
-    UseCounter::Count(GetSupplementable(),
-                      WebFeature::kWebAppManifestProtocolHandlers);
-  }
-
-  for (const mojom::blink::DisplayMode& display_override :
-       manifest.display_override) {
-    if (display_override == mojom::blink::DisplayMode::kWindowControlsOverlay) {
-      UseCounter::Count(GetSupplementable(),
-                        WebFeature::kWebAppWindowControlsOverlay);
-    } else if (display_override == mojom::blink::DisplayMode::kBorderless) {
-      UseCounter::Count(GetSupplementable(), WebFeature::kWebAppBorderless);
-    }
-  }
-
-  if (manifest.has_dark_theme_color || manifest.has_dark_background_color) {
-    UseCounter::Count(GetSupplementable(),
-                      WebFeature::kWebAppManifestUserPreferences);
-  }
-}
-
-void ManifestManager::ResolveCallbacks(ResolveState state) {
-  // Do not reset |manifest_url_| on failure here. If manifest_url_ is
-  // non-empty, that means the link 404s, we failed to fetch it, or it was
-  // unparseable. However, the site still tried to specify a manifest, so
-  // preserve that information in the URL for the callbacks.
-  // |manifest_url| will be reset on navigation or if we receive a didchange
-  // event.
-  if (state == ResolveState::kFailure)
-    manifest_ = mojom::blink::ManifestPtr();
-
-  manifest_dirty_ = state != ResolveState::kSuccess;
-
+void ManifestManager::ResolveCallbacks(Result result) {
   Vector<InternalRequestManifestCallback> callbacks;
   callbacks.swap(pending_callbacks_);
 
+  // URLs that are too long are silently truncated by the mojo serialization.
+  // Since that might violate invariants the manifest is expected to have, check
+  // if any URLs would be too long and return an error instead if that is the
+  // case.
+  const bool has_overlong_urls =
+      result.manifest().manifest_url.GetString().length() > url::kMaxURLChars ||
+      result.manifest().id.GetString().length() > url::kMaxURLChars ||
+      result.manifest().start_url.GetString().length() > url::kMaxURLChars ||
+      result.manifest().scope.GetString().length() > url::kMaxURLChars;
+  if (has_overlong_urls) {
+    result = Result(mojom::blink::ManifestRequestResult::kUnexpectedFailure);
+  }
+
+  const Result* result_ptr = nullptr;
+  if (result.result() == mojom::blink::ManifestRequestResult::kSuccess) {
+    cached_result_ = std::move(result);
+    result_ptr = &cached_result_.value();
+  } else {
+    result_ptr = &result;
+  }
+
   for (auto& callback : callbacks) {
-    std::move(callback).Run(manifest_url_, manifest_,
-                            manifest_debug_info_.get());
+    std::move(callback).Run(*result_ptr);
   }
 }
 
 KURL ManifestManager::ManifestURL() const {
-  HTMLLinkElement* link_element =
-      GetSupplementable()->document()->LinkManifest();
-  if (!link_element)
-    return KURL();
-  return link_element->Href();
+  if (HTMLLinkElement* link_element =
+          GetSupplementable()->document()->LinkManifest()) {
+    return link_element->Href();
+  }
+
+  LocalDOMWindow* window = GetSupplementable();
+  if (window->GetFrame() && window->GetFrame()->GetSettings()) {
+    if (const String& custom_manifest_url =
+            window->GetFrame()->GetSettings()->GetWebAppCustomManifestUrl();
+        !custom_manifest_url.empty()) {
+      return KURL(custom_manifest_url);
+    }
+  }
+
+  return KURL();
 }
 
 bool ManifestManager::ManifestUseCredentials() const {
@@ -302,7 +382,7 @@ bool ManifestManager::ManifestUseCredentials() const {
       GetSupplementable()->document()->LinkManifest();
   if (!link_element)
     return false;
-  return EqualIgnoringASCIICase(
+  return EqualIgnoringAsciiCase(
       link_element->FastGetAttribute(html_names::kCrossoriginAttr),
       "use-credentials");
 }
@@ -313,6 +393,21 @@ void ManifestManager::BindReceiver(
                  GetSupplementable()->GetTaskRunner(TaskType::kNetworking));
 }
 
+mojom::blink::ManifestPtr ManifestManager::DefaultManifest() {
+  // Generate the default manifest for failures, and use the current window url
+  // as the manifest_url for resolving resources in the default manifest.
+  LocalDOMWindow& window = *GetSupplementable();
+  ManifestParser parser(/*data=*/"{ }", /*manifest_url=*/window.Url(),
+                        /*document_url=*/window.Url(), GetExecutionContext());
+  parser.Parse();
+  CHECK(!parser.failed());
+  auto result = parser.TakeManifest();
+  // Reset manifest_url in the parsed manifest, as the window url isn't really
+  // the url for this manifest.
+  result->manifest_url = KURL();
+  return result;
+}
+
 void ManifestManager::ContextDestroyed() {
   if (fetcher_)
     fetcher_->Cancel();
@@ -320,7 +415,8 @@ void ManifestManager::ContextDestroyed() {
   // Consumers in the browser process will not receive this message but they
   // will be aware of the RenderFrame dying and should act on that. Consumers
   // in the renderer process should be correctly notified.
-  ResolveCallbacks(ResolveState::kFailure);
+  ResolveCallbacks(
+      Result(mojom::blink::ManifestRequestResult::kUnexpectedFailure));
 }
 
 void ManifestManager::Trace(Visitor* visitor) const {

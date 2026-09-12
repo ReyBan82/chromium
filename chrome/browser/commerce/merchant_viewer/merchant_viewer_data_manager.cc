@@ -38,7 +38,7 @@ void MerchantViewerDataManager::OnLoadAllEntriesForTimeRangeCallback(
   int deleted_items_count = 0;
   for (const auto& item : data) {
     MerchantSignalProto proto = std::move(item.second);
-    base::Time time_created = base::Time::FromDoubleT(
+    base::Time time_created = base::Time::FromSecondsSinceUnixEpoch(
         proto.trust_signals_message_displayed_timestamp());
     if (time_created >= begin && time_created <= end) {
       proto_db_->DeleteOneEntry(proto.key(), base::BindOnce(&OnUpdateCallback));
@@ -99,7 +99,7 @@ void MerchantViewerDataManager::DeleteMerchantViewerDataForOrigins(
         "MerchantViewer.DataManager.ForceClearMerchantsForOrigins", true);
   } else {
     auto deleted_hostnames =
-        base::MakeFlatSet<std::string>(deleted_origins, {}, &GURL::host);
+        base::MakeFlatSet<std::string>(deleted_origins, {}, &GURL::GetHost);
     LOG(ERROR) << "Clearing " << deleted_hostnames.size() << " merchants.";
     proto_db_->LoadAllEntries(base::BindOnce(
         &MerchantViewerDataManager::OnLoadAllEntriesForOriginsCallback,

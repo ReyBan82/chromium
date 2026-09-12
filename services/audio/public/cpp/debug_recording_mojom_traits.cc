@@ -4,6 +4,8 @@
 
 #include "services/audio/public/cpp/debug_recording_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 audio::mojom::DebugRecordingStreamType
@@ -15,25 +17,25 @@ EnumTraits<audio::mojom::DebugRecordingStreamType,
       return audio::mojom::DebugRecordingStreamType::kInput;
     case media::AudioDebugRecordingStreamType::kOutput:
       return audio::mojom::DebugRecordingStreamType::kOutput;
+    case media::AudioDebugRecordingStreamType::kLoopback:
+      return audio::mojom::DebugRecordingStreamType::kLoopback;
   }
   NOTREACHED();
-  return audio::mojom::DebugRecordingStreamType::kInput;
 }
 
-bool EnumTraits<audio::mojom::DebugRecordingStreamType,
-                media::AudioDebugRecordingStreamType>::
-    FromMojom(audio::mojom::DebugRecordingStreamType stream_type,
-              media::AudioDebugRecordingStreamType* out) {
+media::AudioDebugRecordingStreamType
+EnumTraits<audio::mojom::DebugRecordingStreamType,
+           media::AudioDebugRecordingStreamType>::
+    FromMojom(audio::mojom::DebugRecordingStreamType stream_type) {
   switch (stream_type) {
     case audio::mojom::DebugRecordingStreamType::kInput:
-      *out = media::AudioDebugRecordingStreamType::kInput;
-      return true;
+      return media::AudioDebugRecordingStreamType::kInput;
     case audio::mojom::DebugRecordingStreamType::kOutput:
-      *out = media::AudioDebugRecordingStreamType::kOutput;
-      return true;
+      return media::AudioDebugRecordingStreamType::kOutput;
+    case audio::mojom::DebugRecordingStreamType::kLoopback:
+      return media::AudioDebugRecordingStreamType::kLoopback;
   }
   NOTREACHED();
-  return false;
 }
 
 }  // namespace mojo

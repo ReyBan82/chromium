@@ -4,19 +4,18 @@
 
 #import "ios/chrome/common/credential_provider/archivable_credential_store.h"
 
+#import "base/apple/backup_util.h"
+#import "base/apple/foundation_util.h"
+#import "base/files/file_path.h"
 #import "base/test/ios/wait_util.h"
 #import "ios/chrome/common/credential_provider/archivable_credential.h"
 #import "testing/gtest_mac.h"
 #import "testing/platform_test.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace {
 
-using base::test::ios::WaitUntilConditionOrTimeout;
 using base::test::ios::kWaitForFileOperationTimeout;
+using base::test::ios::WaitUntilConditionOrTimeout;
 
 NSURL* testStorageFileURL() {
   NSURL* temporaryDirectory = [NSURL fileURLWithPath:NSTemporaryDirectory()];
@@ -40,13 +39,16 @@ class ArchivableCredentialStoreTest : public PlatformTest {
 
 ArchivableCredential* TestCredential() {
   return [[ArchivableCredential alloc] initWithFavicon:@"favicon"
-                                    keychainIdentifier:@"keychainIdentifier"
+                                                  gaia:nil
+                                              password:@"qwerty123"
                                                   rank:5
                                       recordIdentifier:@"recordIdentifier"
                                      serviceIdentifier:@"serviceIdentifier"
                                            serviceName:@"serviceName"
-                                                  user:@"user"
-                                  validationIdentifier:@"validationIdentifier"];
+                              registryControlledDomain:@"example.com"
+                                              username:@"user"
+                                                  note:@"note"
+                                          lastUsedTime:0];
 }
 
 // Tests that an ArchivableCredentialStore can be created.
@@ -75,15 +77,18 @@ TEST_F(ArchivableCredentialStoreTest, update) {
   [credentialStore addCredential:credential];
   EXPECT_EQ(1u, credentialStore.credentials.count);
 
-  ArchivableCredential* updatedCredential = [[ArchivableCredential alloc]
-           initWithFavicon:@"other_favicon"
-        keychainIdentifier:@"other_keychainIdentifier"
-                      rank:credential.rank + 10
-          recordIdentifier:@"recordIdentifier"
-         serviceIdentifier:@"other_serviceIdentifier"
-               serviceName:@"other_serviceName"
-                      user:@"other_user"
-      validationIdentifier:@"other_validationIdentifier"];
+  ArchivableCredential* updatedCredential =
+      [[ArchivableCredential alloc] initWithFavicon:@"other_favicon"
+                                               gaia:nil
+                                           password:@"Qwerty123!"
+                                               rank:credential.rank + 10
+                                   recordIdentifier:@"recordIdentifier"
+                                  serviceIdentifier:@"other_serviceIdentifier"
+                                        serviceName:@"other_serviceName"
+                           registryControlledDomain:@"otherexample.com"
+                                           username:@"other_user"
+                                               note:@"other_note"
+                                       lastUsedTime:0];
 
   [credentialStore updateCredential:updatedCredential];
   EXPECT_EQ(1u, credentialStore.credentials.count);
@@ -156,5 +161,9 @@ TEST_F(ArchivableCredentialStoreTest, createFolder) {
   NSError* error = nil;
   [deepFolderURL checkResourceIsReachableAndReturnError:&error];
   EXPECT_FALSE(error);
+  EXPECT_TRUE(base::apple::GetBackupExclusion(
+      base::apple::NSURLToFilePath(deepFolderURL)));
+  EXPECT_TRUE(base::apple::GetBackupExclusion(base::apple::NSURLToFilePath(
+      deepFolderURL.URLByDeletingLastPathComponent)));
 }
-}
+}  // namespace

@@ -33,16 +33,17 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterBase
   bool ShouldDumpChildren(const AXPlatformNodeDelegate& node) const;
 
   // Build an accessibility tree for the current Chrome app.
-  virtual base::Value::Dict BuildTree(AXPlatformNodeDelegate* root) const = 0;
+  virtual base::DictValue BuildTree(AXPlatformNodeDelegate* root) const = 0;
 
   // AXTreeFormatter overrides.
   std::string Format(AXPlatformNodeDelegate* root) const override;
+  std::string Format(const AXTreeSelector&) const override;
   std::string FormatNode(AXPlatformNodeDelegate* node) const override;
-  std::string FormatTree(const base::Value::Dict& tree_node) const override;
-  base::Value::Dict BuildTreeForNode(ui::AXNode* root) const override;
-  std::string EvaluateScript(
-      const AXTreeSelector& selector,
-      const ui::AXInspectScenario& scenario) const override;
+  std::string FormatNode(const AXTreeSelector&) const override;
+  std::string FormatTree(const base::DictValue& tree_node) const override;
+  base::DictValue BuildTreeForNode(AXNode* root) const override;
+  std::string EvaluateScript(const AXTreeSelector& selector,
+                             const AXInspectScenario& scenario) const override;
   std::string EvaluateScript(
       AXPlatformNodeDelegate* root,
       const std::vector<AXScriptInstruction>& instructions,
@@ -51,9 +52,10 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterBase
   void SetPropertyFilters(const std::vector<AXPropertyFilter>& property_filters,
                           PropertyFilterSet default_filters_set) override;
   void SetNodeFilters(const std::vector<AXNodeFilter>& node_filters) override;
+  void SetSubtreePattern(const std::string& pattern) override;
   void set_show_ids(bool show_ids) override;
   std::string DumpInternalAccessibilityTree(
-      ui::AXTreeID tree_id,
+      AXTreeID tree_id,
       const std::vector<AXPropertyFilter>& property_filters) override;
 
  protected:
@@ -73,7 +75,7 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterBase
       const std::string& line_index) const;
 
   // Returns a list of script property nodes.
-  std::vector<ui::AXPropertyNode> ScriptPropertyNodes() const;
+  std::vector<AXPropertyNode> ScriptPropertyNodes() const;
 
   // Return true if match-all filter is present.
   bool HasMatchAllPropertyFilter() const;
@@ -86,18 +88,18 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterBase
   // - Provides a filtered version of the dictionary in an out param,
   //   (only if the out param is provided).
   virtual std::string ProcessTreeForOutput(
-      const base::Value::Dict& node) const = 0;
+      const base::DictValue& node) const = 0;
 
   //
   // Utility functions to be used by each platform.
   //
 
-  std::string FormatCoordinates(const base::Value::Dict& dict,
+  std::string FormatCoordinates(const base::DictValue& dict,
                                 const std::string& name,
                                 const std::string& x_name,
                                 const std::string& y_name) const;
 
-  std::string FormatRectangle(const base::Value::Dict& dict,
+  std::string FormatRectangle(const base::DictValue& dict,
                               const std::string& name,
                               const std::string& left_name,
                               const std::string& top_name,
@@ -115,16 +117,19 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterBase
                          AXPropertyFilter::Type type = AXPropertyFilter::ALLOW);
   bool show_ids() const { return show_ids_; }
 
-  base::Value::Dict BuildNode(ui::AXPlatformNodeDelegate* node) const override;
+  base::DictValue BuildNode(AXPlatformNodeDelegate* node) const override;
+  base::DictValue BuildNodeForSelector(const AXTreeSelector&) const override;
 
  private:
-  void RecursiveFormatTree(const base::Value::Dict& tree_node,
+  void RecursiveFormatTree(const base::DictValue& tree_node,
                            std::string* contents,
-                           int depth = 0) const;
+                           int depth = 0,
+                           bool* found_subtree = nullptr,
+                           int* subtree_depth = nullptr) const;
 
   bool MatchesPropertyFilters(const std::string& text,
                               bool default_result) const;
-  bool MatchesNodeFilters(const base::Value::Dict& dict) const;
+  bool MatchesNodeFilters(const base::DictValue& dict) const;
 
   // Property filters used when formatting the accessibility tree as text.
   // Any property which matches a property filter will be skipped.
@@ -134,6 +139,10 @@ class COMPONENT_EXPORT(AX_PLATFORM) AXTreeFormatterBase
   // Any node which matches a node wilder will be skipped, along with all its
   // children.
   std::vector<AXNodeFilter> node_filters_;
+
+  // Pattern to match for dumping only a subtree. When set, only the subtree
+  // starting from the first node matching this pattern will be dumped.
+  std::string subtree_pattern_;
 
   // Whether or not node ids should be included in the dump.
   bool show_ids_ = false;

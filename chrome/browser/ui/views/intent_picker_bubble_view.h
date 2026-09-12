@@ -6,19 +6,19 @@
 #define CHROME_BROWSER_UI_VIEWS_INTENT_PICKER_BUBBLE_VIEW_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/auto_reset.h"
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
-#include "chrome/browser/apps/intent_helper/apps_navigation_types.h"
-#include "chrome/browser/ui/browser_dialogs.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_bubble_delegate_view.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/apps/link_capturing/intent_picker_info.h"
 #include "ui/base/accelerators/accelerator.h"
-#include "ui/gfx/image/image.h"
+#include "ui/base/interaction/element_identifier.h"
 #include "ui/views/animation/ink_drop_state.h"
+#include "ui/views/bubble/bubble_anchor.h"
 #include "ui/views/controls/scroll_view.h"
 #include "url/origin.h"
 
@@ -26,8 +26,11 @@ namespace content {
 class WebContents;
 }  // namespace content
 
+namespace ui {
+class Event;
+}  // namespace ui
+
 namespace views {
-class Button;
 class Checkbox;
 class Widget;
 }  // namespace views
@@ -55,9 +58,9 @@ class Widget;
 //   +--------------------------------+
 
 class IntentPickerBubbleView : public LocationBarBubbleDelegateView {
- public:
-  METADATA_HEADER(IntentPickerBubbleView);
+  METADATA_HEADER(IntentPickerBubbleView, LocationBarBubbleDelegateView)
 
+ public:
   using AppInfo = apps::IntentPickerAppInfo;
   using BubbleType = apps::IntentPickerBubbleType;
 
@@ -69,14 +72,14 @@ class IntentPickerBubbleView : public LocationBarBubbleDelegateView {
     kRememberCheckbox,
   };
 
-  IntentPickerBubbleView(views::View* anchor_view,
+  IntentPickerBubbleView(views::BubbleAnchor bubble_anchor,
                          BubbleType bubble_type,
                          std::vector<AppInfo> app_info,
                          IntentPickerResponse intent_picker_cb,
                          content::WebContents* web_contents,
                          bool show_stay_in_chrome,
                          bool show_remember_selection,
-                         const absl::optional<url::Origin>& initiating_origin);
+                         const std::optional<url::Origin>& initiating_origin);
 
   IntentPickerBubbleView(const IntentPickerBubbleView&) = delete;
   IntentPickerBubbleView& operator=(const IntentPickerBubbleView&) = delete;
@@ -84,20 +87,22 @@ class IntentPickerBubbleView : public LocationBarBubbleDelegateView {
   ~IntentPickerBubbleView() override;
 
   static views::Widget* ShowBubble(
-      views::View* anchor_view,
-      views::Button* highlighted_button,
+      views::BubbleAnchor bubble_anchor,
+      std::optional<ui::ElementIdentifier> highlighted_element,
       BubbleType bubble_type,
       content::WebContents* web_contents,
       std::vector<AppInfo> app_info,
       bool show_stay_in_chrome,
       bool show_remember_selection,
-      const absl::optional<url::Origin>& initiating_origin,
+      const std::optional<url::Origin>& initiating_origin,
       IntentPickerResponse intent_picker_cb);
   static IntentPickerBubbleView* intent_picker_bubble() {
     return intent_picker_bubble_;
   }
 
   static base::AutoReset<bool> SetAutoAcceptIntentPickerBubbleForTesting();
+
+  static base::AutoReset<bool> SetAutoCancelIntentPickerBubbleForTesting();
 
   static void CloseCurrentBubble();
 
@@ -112,19 +117,20 @@ class IntentPickerBubbleView : public LocationBarBubbleDelegateView {
 
   // Returns the index of the currently selected item. May return nullopt to
   // indicate no selection.
-  absl::optional<size_t> GetSelectedIndex() const;
+  std::optional<size_t> GetSelectedIndex() const;
 
   // A ScrollView which contains a list of apps. This view manages the selection
   // state for the dialog.
   class IntentPickerAppsView : public views::ScrollView {
+    METADATA_HEADER(IntentPickerAppsView, views::ScrollView)
+
    public:
-    virtual void SetSelectedIndex(absl::optional<size_t> index) = 0;
-    virtual absl::optional<size_t> GetSelectedIndex() const = 0;
+    virtual void SetSelectedIndex(std::optional<size_t> index) = 0;
+    virtual std::optional<size_t> GetSelectedIndex() const = 0;
   };
 
   const std::vector<AppInfo>& app_info_for_testing() const { return app_info_; }
 
- protected:
   // LocationBarBubbleDelegateView overrides:
   std::u16string GetWindowTitle() const override;
   void CloseBubble() override;
@@ -134,12 +140,15 @@ class IntentPickerBubbleView : public LocationBarBubbleDelegateView {
 
   // views::BubbleDialogDelegateView overrides:
   void OnWidgetDestroying(views::Widget* widget) override;
+  bool ShouldAllowKeyEventsDuringInputProtection() const override;
 
   // Called when the app at |index| is selected in the app list. If
   // |accepted| is true, the dialog should be immediately accepted with that app
   // selected. If |index| is nullopt, no app is selected, and the Accept button
   // will be disabled
-  void OnAppSelected(absl::optional<size_t> index, bool accepted);
+  void OnAppSelected(std::optional<size_t> index,
+                     bool accepted,
+                     const ui::Event* event);
 
   void Initialize();
 
@@ -190,7 +199,7 @@ class IntentPickerBubbleView : public LocationBarBubbleDelegateView {
   const BubbleType bubble_type_;
 
   // The origin initiating this picker.
-  const absl::optional<url::Origin> initiating_origin_;
+  const std::optional<url::Origin> initiating_origin_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_INTENT_PICKER_BUBBLE_VIEW_H_

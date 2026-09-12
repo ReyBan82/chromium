@@ -12,6 +12,7 @@
 #include "content/browser/service_worker/service_worker_version.h"
 #include "net/base/ip_endpoint.h"
 #include "net/cert/cert_status_flags.h"
+#include "net/http/http_response_headers.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "third_party/blink/public/common/mime_util/mime_util.h"
 
@@ -26,7 +27,7 @@ ServiceWorkerInstalledScriptLoader::ServiceWorkerInstalledScriptLoader(
     scoped_refptr<ServiceWorkerVersion>
         version_for_main_script_http_response_info,
     const GURL& request_url)
-    : client_(std::move(client)), request_start_(base::TimeTicks::Now()) {
+    : client_(std::move(client)), request_start_time_(base::TimeTicks::Now()) {
   // Normally, the main script info is set by ServiceWorkerNewScriptLoader for
   // new service workers and ServiceWorkerInstalledScriptsSender for installed
   // service workes. But some embedders might preinstall scripts to the
@@ -51,12 +52,12 @@ ServiceWorkerInstalledScriptLoader::~ServiceWorkerInstalledScriptLoader() =
 
 void ServiceWorkerInstalledScriptLoader::OnStarted(
     network::mojom::URLResponseHeadPtr response_head,
-    absl::optional<mojo_base::BigBuffer> metadata,
+    std::optional<mojo_base::BigBuffer> metadata,
     mojo::ScopedDataPipeConsumerHandle body_handle,
     mojo::ScopedDataPipeConsumerHandle metadata_handle) {
-  DCHECK(response_head);
-  DCHECK(response_head->headers);
-  DCHECK(encoding_.empty());
+  CHECK(response_head, base::NotFatalUntil::M159);
+  CHECK(response_head->headers, base::NotFatalUntil::M159);
+  CHECK(encoding_.empty(), base::NotFatalUntil::M159);
   response_head->headers->GetCharset(&encoding_);
   body_size_ = response_head->content_length;
 
@@ -97,16 +98,13 @@ void ServiceWorkerInstalledScriptLoader::OnFinished(FinishedReason reason) {
       break;
     case FinishedReason::kNotFinished:
       NOTREACHED();
-      break;
   }
   client_->OnComplete(network::URLLoaderCompletionStatus(net_error));
 }
 
 void ServiceWorkerInstalledScriptLoader::FollowRedirect(
-    const std::vector<std::string>& removed_headers,
-    const net::HttpRequestHeaders& modified_headers,
-    const net::HttpRequestHeaders& modified_cors_exempt_headers,
-    const absl::optional<GURL>& new_url) {
+    network::HttpRequestHeadersUpdateParams headers_update_params,
+    const std::optional<GURL>& new_url) {
   // This class never returns a redirect response to its client, so should never
   // be asked to follow one.
   NOTREACHED();
@@ -116,14 +114,6 @@ void ServiceWorkerInstalledScriptLoader::SetPriority(
     net::RequestPriority priority,
     int32_t intra_priority_value) {
   // Ignore: this class doesn't have a concept of priority.
-}
-
-void ServiceWorkerInstalledScriptLoader::PauseReadingBodyFromNet() {
-  // Ignore: this class doesn't read from network.
-}
-
-void ServiceWorkerInstalledScriptLoader::ResumeReadingBodyFromNet() {
-  // Ignore: this class doesn't read from network.
 }
 
 }  // namespace content

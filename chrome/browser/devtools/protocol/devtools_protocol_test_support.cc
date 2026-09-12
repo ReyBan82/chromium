@@ -4,7 +4,12 @@
 
 #include "chrome/browser/devtools/protocol/devtools_protocol_test_support.h"
 
-#include "chrome/browser/ui/browser.h"
+#include "chrome/test/base/chrome_test_utils.h"
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 DevToolsProtocolTestBase::DevToolsProtocolTestBase() = default;
 DevToolsProtocolTestBase::~DevToolsProtocolTestBase() = default;
@@ -18,5 +23,9 @@ void DevToolsProtocolTestBase::TearDownOnMainThread() {
 }
 
 content::WebContents* DevToolsProtocolTestBase::web_contents() {
-  return browser()->tab_strip_model()->GetWebContentsAt(0);
+#if BUILDFLAG(IS_ANDROID)
+  return chrome_test_utils::GetActiveWebContents(this);
+#else
+  return browser()->GetTabStripModel()->GetWebContentsAt(0);
+#endif  // BUILDFLAG(IS_ANDROID)
 }

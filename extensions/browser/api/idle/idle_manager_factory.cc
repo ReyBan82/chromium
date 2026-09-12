@@ -20,7 +20,8 @@ IdleManager* IdleManagerFactory::GetForBrowserContext(
 
 // static
 IdleManagerFactory* IdleManagerFactory::GetInstance() {
-  return base::Singleton<IdleManagerFactory>::get();
+  static base::NoDestructor<IdleManagerFactory> instance;
+  return instance.get();
 }
 
 IdleManagerFactory::IdleManagerFactory()
@@ -30,20 +31,21 @@ IdleManagerFactory::IdleManagerFactory()
   DependsOn(ExtensionsBrowserClient::Get()->GetExtensionSystemFactory());
 }
 
-IdleManagerFactory::~IdleManagerFactory() {
-}
+IdleManagerFactory::~IdleManagerFactory() = default;
 
-KeyedService* IdleManagerFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+IdleManagerFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  IdleManager* idle_manager = new IdleManager(context);
+  std::unique_ptr<IdleManager> idle_manager =
+      std::make_unique<IdleManager>(context);
   idle_manager->Init();
   return idle_manager;
 }
 
 content::BrowserContext* IdleManagerFactory::GetBrowserContextToUse(
     content::BrowserContext* context) const {
-  return ExtensionsBrowserClient::Get()->GetRedirectedContextInIncognito(
-      context, /*force_guest_profile=*/true, /*force_system_profile=*/false);
+  return ExtensionsBrowserClient::Get()->GetContextRedirectedToOriginal(
+      context);
 }
 
 bool IdleManagerFactory::ServiceIsCreatedWithBrowserContext() const {

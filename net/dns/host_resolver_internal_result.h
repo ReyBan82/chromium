@@ -7,19 +7,22 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
 
+#include "base/containers/flat_set.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "net/base/connection_endpoint_metadata.h"
 #include "net/base/host_port_pair.h"
+#include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_export.h"
 #include "net/dns/https_record_rdata.h"
 #include "net/dns/public/dns_query_type.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 
 namespace net {
 
@@ -44,39 +47,40 @@ class NET_EXPORT_PRIVATE HostResolverInternalResult {
   DnsQueryType query_type() const { return query_type_; }
   Type type() const { return type_; }
   Source source() const { return source_; }
-  absl::optional<base::TimeTicks> expiration() const { return expiration_; }
-  absl::optional<base::Time> timed_expiration() const {
+  std::optional<base::TimeTicks> expiration() const { return expiration_; }
+  std::optional<base::Time> timed_expiration() const {
     return timed_expiration_;
   }
 
   const HostResolverInternalDataResult& AsData() const;
+  HostResolverInternalDataResult& AsData();
   const HostResolverInternalMetadataResult& AsMetadata() const;
+  HostResolverInternalMetadataResult& AsMetadata();
   const HostResolverInternalErrorResult& AsError() const;
+  HostResolverInternalErrorResult& AsError();
   const HostResolverInternalAliasResult& AsAlias() const;
+  HostResolverInternalAliasResult& AsAlias();
+
+  virtual std::unique_ptr<HostResolverInternalResult> Clone() const = 0;
 
   virtual base::Value ToValue() const = 0;
+
+  bool operator==(const HostResolverInternalResult& other) const = default;
 
  protected:
   HostResolverInternalResult(std::string domain_name,
                              DnsQueryType query_type,
-                             absl::optional<base::TimeTicks> expiration,
-                             absl::optional<base::Time> timed_expiration,
+                             std::optional<base::TimeTicks> expiration,
+                             std::optional<base::Time> timed_expiration,
                              Type type,
                              Source source);
   // Expect to only be called with a `dict` well-formed for deserialization. Can
   // be checked via ValidateValueBaseDict().
-  explicit HostResolverInternalResult(const base::Value::Dict& dict);
+  explicit HostResolverInternalResult(const base::DictValue& dict);
 
-  bool operator==(const HostResolverInternalResult& other) const {
-    return std::tie(domain_name_, query_type_, type_, source_, expiration_,
-                    timed_expiration_) ==
-           std::tie(other.domain_name_, other.query_type_, other.type_,
-                    other.source_, other.expiration_, other.timed_expiration_);
-  }
-
-  static bool ValidateValueBaseDict(const base::Value::Dict& dict,
+  static bool ValidateValueBaseDict(const base::DictValue& dict,
                                     bool require_timed_expiration);
-  base::Value::Dict ToValueBaseDict() const;
+  base::DictValue ToValueBaseDict() const;
 
  private:
   const std::string domain_name_;
@@ -87,8 +91,8 @@ class NET_EXPORT_PRIVATE HostResolverInternalResult {
   // Expiration logic should prefer to be based on `expiration_` for correctness
   // through system time changes. But if result has been serialized to disk, it
   // may be that only `timed_expiration_` is available.
-  const absl::optional<base::TimeTicks> expiration_;
-  const absl::optional<base::Time> timed_expiration_;
+  const std::optional<base::TimeTicks> expiration_;
+  const std::optional<base::Time> timed_expiration_;
 };
 
 // Parsed and extracted result containing result data.
@@ -101,7 +105,7 @@ class NET_EXPORT_PRIVATE HostResolverInternalDataResult final
   // `domain_name` is dotted form.
   HostResolverInternalDataResult(std::string domain_name,
                                  DnsQueryType query_type,
-                                 absl::optional<base::TimeTicks> expiration,
+                                 std::optional<base::TimeTicks> expiration,
                                  base::Time timed_expiration,
                                  Source source,
                                  std::vector<IPEndPoint> endpoints,
@@ -121,26 +125,35 @@ class NET_EXPORT_PRIVATE HostResolverInternalDataResult final
   }
 
   const std::vector<IPEndPoint>& endpoints() const { return endpoints_; }
+  void set_endpoints(std::vector<IPEndPoint> endpoints) {
+    endpoints_ = std::move(endpoints);
+  }
   const std::vector<std::string>& strings() const { return strings_; }
+  void set_strings(std::vector<std::string> strings) {
+    strings_ = std::move(strings);
+  }
   const std::vector<HostPortPair>& hosts() const { return hosts_; }
+  void set_hosts(std::vector<HostPortPair> hosts) { hosts_ = std::move(hosts); }
+
+  std::unique_ptr<HostResolverInternalResult> Clone() const override;
 
   base::Value ToValue() const override;
 
  private:
-  HostResolverInternalDataResult(const base::Value::Dict& dict,
+  HostResolverInternalDataResult(const base::DictValue& dict,
                                  std::vector<IPEndPoint> endpoints,
                                  std::vector<std::string> strings,
                                  std::vector<HostPortPair> hosts);
 
   // Corresponds to the `HostResolverEndpointResult::ip_endpoints` portion of
   // `HostResolver::ResolveHostRequest::GetEndpointResults()`.
-  const std::vector<IPEndPoint> endpoints_;
+  std::vector<IPEndPoint> endpoints_;
 
   // Corresponds to `HostResolver::ResolveHostRequest::GetTextResults()`.
-  const std::vector<std::string> strings_;
+  std::vector<std::string> strings_;
 
   // Corresponds to `HostResolver::ResolveHostRequest::GetHostnameResults()`.
-  const std::vector<HostPortPair> hosts_;
+  std::vector<HostPortPair> hosts_;
 };
 
 // Parsed and extracted connection metadata, but not usable on its own without
@@ -151,6 +164,21 @@ class NET_EXPORT_PRIVATE HostResolverInternalDataResult final
 class NET_EXPORT_PRIVATE HostResolverInternalMetadataResult final
     : public HostResolverInternalResult {
  public:
+  // Address hints from an HTTPS record.
+  struct AddressHints {
+    static std::optional<AddressHints> FromValue(const base::Value& value);
+
+    bool operator==(const AddressHints&) const = default;
+
+    base::Value ToValue() const;
+
+    base::flat_set<IPAddress> ipv4_hints;
+    base::flat_set<IPAddress> ipv6_hints;
+  };
+
+  // Keyed by canonicalized target name.
+  using AddressHintsMap = absl::flat_hash_map<std::string, AddressHints>;
+
   static std::unique_ptr<HostResolverInternalMetadataResult> FromValue(
       const base::Value& value);
 
@@ -158,10 +186,11 @@ class NET_EXPORT_PRIVATE HostResolverInternalMetadataResult final
   HostResolverInternalMetadataResult(
       std::string domain_name,
       DnsQueryType query_type,
-      absl::optional<base::TimeTicks> expiration,
+      std::optional<base::TimeTicks> expiration,
       base::Time timed_expiration,
       Source source,
-      std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata> metadatas);
+      std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata> metadatas,
+      AddressHintsMap address_hints);
   ~HostResolverInternalMetadataResult() override;
 
   HostResolverInternalMetadataResult(
@@ -169,24 +198,27 @@ class NET_EXPORT_PRIVATE HostResolverInternalMetadataResult final
   HostResolverInternalMetadataResult& operator=(
       const HostResolverInternalMetadataResult&) = delete;
 
-  bool operator==(const HostResolverInternalMetadataResult& other) const {
-    return HostResolverInternalResult::operator==(other) &&
-           metadatas_ == other.metadatas_;
-  }
+  bool operator==(const HostResolverInternalMetadataResult&) const = default;
 
   const std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata>&
   metadatas() const {
     return metadatas_;
   }
 
+  const AddressHintsMap& address_hints() const { return address_hints_; }
+
+  std::unique_ptr<HostResolverInternalResult> Clone() const override;
+
   base::Value ToValue() const override;
 
  private:
   HostResolverInternalMetadataResult(
-      const base::Value::Dict& dict,
-      std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata> metadatas);
+      const base::DictValue& dict,
+      std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata> metadatas,
+      AddressHintsMap address_hints);
 
   std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata> metadatas_;
+  AddressHintsMap address_hints_;
 };
 
 // Parsed and extracted error.
@@ -200,8 +232,8 @@ class NET_EXPORT_PRIVATE HostResolverInternalErrorResult final
   // non-cacheable errors.
   HostResolverInternalErrorResult(std::string domain_name,
                                   DnsQueryType query_type,
-                                  absl::optional<base::TimeTicks> expiration,
-                                  absl::optional<base::Time> timed_expiration,
+                                  std::optional<base::TimeTicks> expiration,
+                                  std::optional<base::Time> timed_expiration,
                                   Source source,
                                   int error);
   ~HostResolverInternalErrorResult() override = default;
@@ -218,10 +250,12 @@ class NET_EXPORT_PRIVATE HostResolverInternalErrorResult final
 
   int error() const { return error_; }
 
+  std::unique_ptr<HostResolverInternalResult> Clone() const override;
+
   base::Value ToValue() const override;
 
  private:
-  HostResolverInternalErrorResult(const base::Value::Dict& dict, int error);
+  HostResolverInternalErrorResult(const base::DictValue& dict, int error);
 
   const int error_;
 };
@@ -236,7 +270,7 @@ class NET_EXPORT_PRIVATE HostResolverInternalAliasResult final
   // `domain_name` and `alias_target` are dotted form domain names.
   HostResolverInternalAliasResult(std::string domain_name,
                                   DnsQueryType query_type,
-                                  absl::optional<base::TimeTicks> expiration,
+                                  std::optional<base::TimeTicks> expiration,
                                   base::Time timed_expiration,
                                   Source source,
                                   std::string alias_target);
@@ -254,10 +288,12 @@ class NET_EXPORT_PRIVATE HostResolverInternalAliasResult final
 
   const std::string& alias_target() const { return alias_target_; }
 
+  std::unique_ptr<HostResolverInternalResult> Clone() const override;
+
   base::Value ToValue() const override;
 
  private:
-  HostResolverInternalAliasResult(const base::Value::Dict& dict,
+  HostResolverInternalAliasResult(const base::DictValue& dict,
                                   std::string alias_target);
 
   const std::string alias_target_;

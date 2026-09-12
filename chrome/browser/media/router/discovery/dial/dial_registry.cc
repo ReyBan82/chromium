@@ -63,8 +63,9 @@ void DialRegistry::SetNetworkConnectionTracker(
 
 void DialRegistry::SetNetLog(net::NetLog* net_log) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!net_log_)
+  if (!net_log_) {
     net_log_ = net_log;
+  }
 }
 
 void DialRegistry::Start() {
@@ -87,8 +88,9 @@ void DialRegistry::ClearDialService() {
 
 GURL DialRegistry::GetDeviceDescriptionURL(const std::string& label) const {
   const auto device_it = device_by_label_map_.find(label);
-  if (device_it != device_by_label_map_.end())
+  if (device_it != device_by_label_map_.end()) {
     return device_it->second->device_description_url();
+  }
 
   return GURL();
 }
@@ -107,7 +109,7 @@ void DialRegistry::SetClockForTest(base::Clock* clock) {
 }
 
 bool DialRegistry::ReadyToDiscover() {
-  network::mojom::ConnectionType type;
+  net::NetworkChangeNotifier::ConnectionType type;
   // base::Unretained() is safe here because DialRegistry is (indirectly) owned
   // by a singleton and is never freed.
   if (!network_connection_tracker_ ||
@@ -119,7 +121,7 @@ bool DialRegistry::ReadyToDiscover() {
     client_->OnDialError(DIAL_UNKNOWN);
     return false;
   }
-  if (type == network::mojom::ConnectionType::CONNECTION_NONE) {
+  if (type == net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE) {
     client_->OnDialError(DIAL_NETWORK_DISCONNECTED);
     return false;
   }
@@ -132,8 +134,9 @@ bool DialRegistry::ReadyToDiscover() {
 
 bool DialRegistry::DiscoverNow() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!ReadyToDiscover())
+  if (!ReadyToDiscover()) {
     return false;
+  }
 
   if (!dial_) {
     client_->OnDialError(DIAL_UNKNOWN);
@@ -143,16 +146,18 @@ bool DialRegistry::DiscoverNow() {
   // Force increment |registry_generation_| to ensure the list is sent even if
   // it has not changed.
   bool started = dial_->Discover();
-  if (started)
+  if (started) {
     ++registry_generation_;
+  }
 
   return started;
 }
 
 void DialRegistry::StartPeriodicDiscovery() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!ReadyToDiscover() || dial_)
+  if (!ReadyToDiscover() || dial_) {
     return;
+  }
 
   dial_ = CreateDialService();
   DoDiscovery();
@@ -172,8 +177,9 @@ void DialRegistry::DoDiscovery() {
 
 void DialRegistry::StopPeriodicDiscovery() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!dial_)
+  if (!dial_) {
     return;
+  }
 
   repeating_timer_->Stop();
   repeating_timer_.reset();
@@ -185,7 +191,7 @@ bool DialRegistry::PruneExpiredDevices() {
   bool pruned_device = false;
   auto it = device_by_label_map_.begin();
   while (it != device_by_label_map_.end()) {
-    auto* device = it->second;
+    auto* device = it->second.get();
     if (IsDeviceExpired(*device)) {
       // Make a copy of the device ID here since |device| will be destroyed
       // during erase().
@@ -206,15 +212,17 @@ bool DialRegistry::IsDeviceExpired(const DialDeviceData& device) const {
 
   // Check against our default expiration timeout.
   Time default_expiration_time = device.response_time() + expiration_delta_;
-  if (now > default_expiration_time)
+  if (now > default_expiration_time) {
     return true;
+  }
 
   // Check against the device's cache-control header, if set.
   if (device.has_max_age()) {
     Time max_age_expiration_time =
         device.response_time() + base::Seconds(device.max_age());
-    if (now > max_age_expiration_time)
+    if (now > max_age_expiration_time) {
       return true;
+    }
   }
   return false;
 }
@@ -230,8 +238,9 @@ void DialRegistry::MaybeSendDeviceList() {
   // Send the device list to the client if it has changed since the last list
   // was sent.
   bool needs_event = last_event_registry_generation_ < registry_generation_;
-  if (!needs_event)
+  if (!needs_event) {
     return;
+  }
 
   DeviceList device_list;
   for (DeviceByLabelMap::const_iterator it = device_by_label_map_.begin();
@@ -275,8 +284,9 @@ void DialRegistry::OnDeviceDiscovered(const DialDeviceData& device) {
     did_modify_list = MaybeAddDevice(std::move(device_data));
   }
 
-  if (did_modify_list)
+  if (did_modify_list) {
     registry_generation_++;
+  }
 }
 
 bool DialRegistry::MaybeAddDevice(std::unique_ptr<DialDeviceData> device_data) {
@@ -293,8 +303,9 @@ bool DialRegistry::MaybeAddDevice(std::unique_ptr<DialDeviceData> device_data) {
 
 void DialRegistry::OnDiscoveryFinished() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (PruneExpiredDevices())
+  if (PruneExpiredDevices()) {
     registry_generation_++;
+  }
   MaybeSendDeviceList();
 }
 
@@ -309,14 +320,13 @@ void DialRegistry::OnError(DialService::DialServiceErrorCode code) {
       break;
     default:
       NOTREACHED();
-      client_->OnDialError(DIAL_UNKNOWN);
-      break;
   }
 }
 
-void DialRegistry::OnConnectionChanged(network::mojom::ConnectionType type) {
+void DialRegistry::OnConnectionChanged(
+    net::NetworkChangeNotifier::ConnectionType type) {
   switch (type) {
-    case network::mojom::ConnectionType::CONNECTION_NONE:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE:
       if (dial_) {
         client_->OnDialError(DIAL_NETWORK_DISCONNECTED);
         StopPeriodicDiscovery();
@@ -324,14 +334,14 @@ void DialRegistry::OnConnectionChanged(network::mojom::ConnectionType type) {
         MaybeSendDeviceList();
       }
       break;
-    case network::mojom::ConnectionType::CONNECTION_2G:
-    case network::mojom::ConnectionType::CONNECTION_3G:
-    case network::mojom::ConnectionType::CONNECTION_4G:
-    case network::mojom::ConnectionType::CONNECTION_5G:
-    case network::mojom::ConnectionType::CONNECTION_ETHERNET:
-    case network::mojom::ConnectionType::CONNECTION_WIFI:
-    case network::mojom::ConnectionType::CONNECTION_UNKNOWN:
-    case network::mojom::ConnectionType::CONNECTION_BLUETOOTH:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_2G:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_3G:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_4G:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_5G:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_ETHERNET:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_WIFI:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_UNKNOWN:
+    case net::NetworkChangeNotifier::ConnectionType::CONNECTION_BLUETOOTH:
       if (!dial_) {
         StartPeriodicDiscovery();
       }

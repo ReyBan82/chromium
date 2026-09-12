@@ -74,7 +74,6 @@ MultiDeviceNotificationPresenter::GetMetricValueForNotification(
       return NotificationType::kExistingUserNewChromebookAdded;
     case Status::kNoNotificationVisible:
       NOTREACHED();
-      return NotificationType::kErrorUnknown;
   }
 }
 
@@ -97,8 +96,9 @@ MultiDeviceNotificationPresenter::~MultiDeviceNotificationPresenter() {
 }
 
 void MultiDeviceNotificationPresenter::OnPotentialHostExistsForNewUser() {
-  std::u16string title = l10n_util::GetStringUTF16(
-      IDS_ASH_MULTI_DEVICE_SETUP_NEW_USER_POTENTIAL_HOST_EXISTS_TITLE);
+  int title_message_id =
+      IDS_ASH_MULTI_DEVICE_SETUP_NEW_USER_POTENTIAL_HOST_EXISTS_TITLE;
+  std::u16string title = l10n_util::GetStringUTF16(title_message_id);
   std::u16string message = l10n_util::GetStringFUTF16(
       IDS_ASH_MULTI_DEVICE_SETUP_NEW_USER_POTENTIAL_HOST_EXISTS_MESSAGE,
       ui::GetChromeOSDeviceName());
@@ -167,6 +167,11 @@ void MultiDeviceNotificationPresenter::RemoveMultiDeviceSetupNotification() {
                                       /* by_user */ false);
 }
 
+void MultiDeviceNotificationPresenter::UpdateIsSetupNotificationInteracted(
+    bool is_setup_notification_interacted) {
+  is_setup_notification_interacted_ = is_setup_notification_interacted;
+}
+
 void MultiDeviceNotificationPresenter::OnUserSessionAdded(
     const AccountId& account_id) {
   ObserveMultiDeviceSetupIfPossible();
@@ -198,8 +203,8 @@ void MultiDeviceNotificationPresenter::OnNotificationRemoved(
 
 void MultiDeviceNotificationPresenter::OnNotificationClicked(
     const std::string& notification_id,
-    const absl::optional<int>& button_index,
-    const absl::optional<std::u16string>& reply) {
+    const std::optional<int>& button_index,
+    const std::optional<std::u16string>& reply) {
   if (notification_id == kWifiSyncNotificationId) {
     message_center_->RemoveNotification(kWifiSyncNotificationId,
                                         /* by_user */ false);
@@ -210,7 +215,7 @@ void MultiDeviceNotificationPresenter::OnNotificationClicked(
           PA_LOG(INFO) << "Enabling Wi-Fi Sync.";
           multidevice_setup_remote_->SetFeatureEnabledState(
               multidevice_setup::mojom::Feature::kWifiSync,
-              /*enabled=*/true, /*auth_token=*/absl::nullopt,
+              /*enabled=*/true, /*auth_token=*/std::nullopt,
               /*callback=*/base::DoNothing());
           break;
         case 1:  // "Cancel" button
@@ -240,6 +245,16 @@ void MultiDeviceNotificationPresenter::OnNotificationClicked(
   switch (notification_status_) {
     case Status::kNewUserNotificationVisible:
       Shell::Get()->system_tray_model()->client()->ShowMultiDeviceSetup();
+      // If user has not interacted with Phone Hub icon when the notification is
+      // visible, log MultiDeviceSetup.NotificationInteracted event when
+      // notification is clicked.
+      if (!is_setup_notification_interacted_) {
+        base::UmaHistogramCounts100("MultiDeviceSetup.NotificationInteracted",
+                                    1);
+      } else {
+        // Restore the value when the notification is clicked.
+        UpdateIsSetupNotificationInteracted(false);
+      }
       break;
     case Status::kExistingUserHostSwitchedNotificationVisible:
       // Clicks on the 'host switched' and 'Chromebook added' notifications have
@@ -314,7 +329,6 @@ void MultiDeviceNotificationPresenter::ShowNotification(
       CreateSystemNotificationPtr(
           message_center::NotificationType::NOTIFICATION_TYPE_SIMPLE, id, title,
           message, std::u16string() /* display_source */,
-          GURL() /* origin_url */,
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kNotifierMultiDevice, NotificationCatalogName::kMultiDevice),

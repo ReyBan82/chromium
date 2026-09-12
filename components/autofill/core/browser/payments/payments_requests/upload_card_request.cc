@@ -4,13 +4,31 @@
 
 #include "components/autofill/core/browser/payments/payments_requests/upload_card_request.h"
 
-#include <string>
+#include <stdint.h>
 
-#include "base/feature_list.h"
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include "base/functional/callback.h"
 #include "base/json/json_writer.h"
+#include "base/logging.h"
 #include "base/strings/escape.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "components/autofill/core/common/autofill_payments_features.h"
+#include "base/time/time.h"
+#include "base/values.h"
+#include "components/autofill/core/browser/data_model/addresses/autofill_profile.h"
+#include "components/autofill/core/browser/data_model/payments/credit_card.h"
+#include "components/autofill/core/browser/field_types.h"
+#include "components/autofill/core/browser/payments/legal_message_line.h"
+#include "components/autofill/core/browser/payments/payments_autofill_client.h"
+#include "components/autofill/core/browser/payments/payments_request_details.h"
+#include "components/autofill/core/browser/payments/payments_requests/payments_request.h"
+#include "components/autofill/core/browser/payments/payments_requests/payments_request_constants.h"
+#include "url/gurl.h"
 
 namespace autofill::payments {
 
@@ -20,18 +38,17 @@ const char kUploadCardRequestPath[] =
     "?s7e_suffix=chromewallet";
 const char kUploadCardRequestFormat[] =
     "requestContentType=application/json; charset=utf-8&request=%s"
-    "&s7e_1_pan=%s&s7e_13_cvc=%s";
+    "&s7e_21_pan=%s&s7e_13_cvc=%s";
 const char kUploadCardRequestFormatWithoutCvc[] =
     "requestContentType=application/json; charset=utf-8&request=%s"
-    "&s7e_1_pan=%s";
+    "&s7e_21_pan=%s";
 }  // namespace
 
 UploadCardRequest::UploadCardRequest(
-    const PaymentsClient::UploadRequestDetails& request_details,
+    const UploadCardRequestDetails& request_details,
     const bool full_sync_enabled,
-    base::OnceCallback<void(AutofillClient::PaymentsRpcResult,
-                            const PaymentsClient::UploadCardResponseDetails&)>
-        callback)
+    base::OnceCallback<void(PaymentsAutofillClient::PaymentsRpcResult,
+                            const UploadCardResponseDetails&)> callback)
     : request_details_(request_details),
       full_sync_enabled_(full_sync_enabled),
       callback_(std::move(callback)) {}
@@ -47,17 +64,17 @@ std::string UploadCardRequest::GetRequestContentType() {
 }
 
 std::string UploadCardRequest::GetRequestContent() {
-  base::Value::Dict request_dict;
-  request_dict.Set("encrypted_pan", "__param:s7e_1_pan");
+  base::DictValue request_dict;
+  request_dict.Set("pan", "__param:s7e_21_pan");
   if (!request_details_.cvc.empty())
     request_dict.Set("encrypted_cvc", "__param:s7e_13_cvc");
   request_dict.Set("risk_data_encoded",
                    BuildRiskDictionary(request_details_.risk_data));
 
   const std::string& app_locale = request_details_.app_locale;
-  base::Value::Dict context;
+  base::DictValue context;
   context.Set("language_code", app_locale);
-  context.Set("billable_service", kUploadCardBillableServiceNumber);
+  context.Set("billable_service", kUploadPaymentMethodBillableServiceNumber);
   if (request_details_.billing_customer_number != 0) {
     context.Set("customer_context",
                 BuildCustomerContextDictionary(
@@ -65,14 +82,14 @@ std::string UploadCardRequest::GetRequestContent() {
   }
   request_dict.Set("context", std::move(context));
 
-  base::Value::Dict chrome_user_context;
-  chrome_user_context.Set("full_sync_enabled", full_sync_enabled_);
-  request_dict.Set("chrome_user_context", std::move(chrome_user_context));
-
+  request_dict.Set(
+      "chrome_user_context",
+      BuildChromeUserContext(request_details_.client_behavior_signals,
+                             full_sync_enabled_));
   SetStringIfNotEmpty(request_details_.card, CREDIT_CARD_NAME_FULL, app_locale,
                       "cardholder_name", request_dict);
 
-  base::Value::List addresses;
+  base::ListValue addresses;
   for (const AutofillProfile& profile : request_details_.profiles) {
     addresses.Append(BuildAddressDictionary(profile, app_locale, true));
   }
@@ -81,10 +98,10 @@ std::string UploadCardRequest::GetRequestContent() {
   request_dict.Set("context_token", request_details_.context_token);
 
   int value = 0;
-  const std::u16string exp_month = request_details_.card.GetInfo(
-      AutofillType(CREDIT_CARD_EXP_MONTH), app_locale);
-  const std::u16string exp_year = request_details_.card.GetInfo(
-      AutofillType(CREDIT_CARD_EXP_4_DIGIT_YEAR), app_locale);
+  const std::u16string exp_month =
+      request_details_.card.GetInfo(CREDIT_CARD_EXP_MONTH, app_locale);
+  const std::u16string exp_year =
+      request_details_.card.GetInfo(CREDIT_CARD_EXP_4_DIGIT_YEAR, app_locale);
   if (base::StringToInt(exp_month, &value))
     request_dict.Set("expiration_month", value);
   if (base::StringToInt(exp_year, &value))
@@ -94,37 +111,33 @@ std::string UploadCardRequest::GetRequestContent() {
     request_dict.Set("nickname", request_details_.card.nickname());
   }
 
-  SetActiveExperiments(request_details_.active_experiments, request_dict);
-
-  const std::u16string pan = request_details_.card.GetInfo(
-      AutofillType(CREDIT_CARD_NUMBER), app_locale);
-  std::string json_request;
-  base::JSONWriter::Write(request_dict, &json_request);
+  const std::u16string pan =
+      request_details_.card.GetInfo(CREDIT_CARD_NUMBER, app_locale);
+  std::string json_request = base::WriteJson(request_dict).value_or("");
   std::string request_content;
   if (request_details_.cvc.empty()) {
     request_content = base::StringPrintf(
         kUploadCardRequestFormatWithoutCvc,
-        base::EscapeUrlEncodedData(json_request, true).c_str(),
-        base::EscapeUrlEncodedData(base::UTF16ToASCII(pan), true).c_str());
+        base::EscapeUrlEncodedData(json_request, true),
+        base::EscapeUrlEncodedData(base::UTF16ToASCII(pan), true));
   } else {
     request_content = base::StringPrintf(
         kUploadCardRequestFormat,
-        base::EscapeUrlEncodedData(json_request, true).c_str(),
-        base::EscapeUrlEncodedData(base::UTF16ToASCII(pan), true).c_str(),
+        base::EscapeUrlEncodedData(json_request, true),
+        base::EscapeUrlEncodedData(base::UTF16ToASCII(pan), true),
         base::EscapeUrlEncodedData(base::UTF16ToASCII(request_details_.cvc),
-                                   true)
-            .c_str());
+                                   true));
   }
-  VLOG(3) << "savecard request body: " << request_content;
+  DVLOG(3) << "savecard request body: " << request_content;
   return request_content;
 }
 
-void UploadCardRequest::ParseResponse(const base::Value::Dict& response) {
+void UploadCardRequest::ParseResponse(const base::DictValue& response) {
   const std::string* response_instrument_id =
       response.FindString("instrument_id");
   if (response_instrument_id) {
     int64_t instrument_id;
-    if (base::StringToInt64(base::StringPiece(*response_instrument_id),
+    if (base::StringToInt64(std::string_view(*response_instrument_id),
                             &instrument_id)) {
       upload_card_response_details_.instrument_id = instrument_id;
     }
@@ -142,24 +155,24 @@ void UploadCardRequest::ParseResponse(const base::Value::Dict& response) {
     if (virtual_card_enrollment_status) {
       if (*virtual_card_enrollment_status == "ENROLLED") {
         upload_card_response_details_.virtual_card_enrollment_state =
-            CreditCard::VirtualCardEnrollmentState::ENROLLED;
+            CreditCard::VirtualCardEnrollmentState::kEnrolled;
       } else if (*virtual_card_enrollment_status == "ENROLLMENT_ELIGIBLE") {
         upload_card_response_details_.virtual_card_enrollment_state =
-            CreditCard::VirtualCardEnrollmentState::UNENROLLED_AND_ELIGIBLE;
+            CreditCard::VirtualCardEnrollmentState::kUnenrolledAndEligible;
       } else {
         upload_card_response_details_.virtual_card_enrollment_state =
-            CreditCard::VirtualCardEnrollmentState::UNENROLLED_AND_NOT_ELIGIBLE;
+            CreditCard::VirtualCardEnrollmentState::kUnenrolledAndNotEligible;
       }
     }
 
     if (upload_card_response_details_.virtual_card_enrollment_state ==
-        CreditCard::VirtualCardEnrollmentState::UNENROLLED_AND_ELIGIBLE) {
+        CreditCard::VirtualCardEnrollmentState::kUnenrolledAndEligible) {
       const auto* virtual_card_enrollment_data =
           virtual_card_metadata->FindDict("virtual_card_enrollment_data");
       if (virtual_card_enrollment_data) {
-        PaymentsClient::GetDetailsForEnrollmentResponseDetails
+        GetDetailsForEnrollmentResponseDetails
             get_details_for_enrollment_response_details;
-        const base::Value::Dict* google_legal_message =
+        const base::DictValue* google_legal_message =
             virtual_card_enrollment_data->FindDict("google_legal_message");
         if (google_legal_message) {
           LegalMessageLine::Parse(
@@ -168,7 +181,7 @@ void UploadCardRequest::ParseResponse(const base::Value::Dict& response) {
               /*escape_apostrophes=*/true);
         }
 
-        const base::Value::Dict* external_legal_message =
+        const base::DictValue* external_legal_message =
             virtual_card_enrollment_data->FindDict("external_legal_message");
         if (external_legal_message) {
           LegalMessageLine::Parse(
@@ -195,8 +208,16 @@ bool UploadCardRequest::IsResponseComplete() {
 }
 
 void UploadCardRequest::RespondToDelegate(
-    AutofillClient::PaymentsRpcResult result) {
+    PaymentsAutofillClient::PaymentsRpcResult result) {
   std::move(callback_).Run(result, upload_card_response_details_);
+}
+
+std::string UploadCardRequest::GetHistogramName() const {
+  return "UploadCardRequest";
+}
+
+std::optional<base::TimeDelta> UploadCardRequest::GetTimeout() const {
+  return kUploadCardRequestTimeout;
 }
 
 }  // namespace autofill::payments

@@ -6,12 +6,11 @@
 
 #include <inttypes.h>
 
-#include <algorithm>
 #include <sstream>
-#include <utility>
 
-#include "base/notreached.h"
+#include "base/logging.h"
 #include "base/strings/stringprintf.h"
+#include "components/viz/common/resources/shared_image_format_utils.h"
 
 namespace display {
 
@@ -36,29 +35,6 @@ std::string ModeListString(
   return stream.str();
 }
 
-std::string DisplayConnectionTypeString(DisplayConnectionType type) {
-  switch (type) {
-    case DISPLAY_CONNECTION_TYPE_NONE:
-      return "none";
-    case DISPLAY_CONNECTION_TYPE_UNKNOWN:
-      return "unknown";
-    case DISPLAY_CONNECTION_TYPE_INTERNAL:
-      return "internal";
-    case DISPLAY_CONNECTION_TYPE_VGA:
-      return "vga";
-    case DISPLAY_CONNECTION_TYPE_HDMI:
-      return "hdmi";
-    case DISPLAY_CONNECTION_TYPE_DVI:
-      return "dvi";
-    case DISPLAY_CONNECTION_TYPE_DISPLAYPORT:
-      return "dp";
-    case DISPLAY_CONNECTION_TYPE_NETWORK:
-      return "network";
-  }
-  NOTREACHED();
-  return "";
-}
-
 }  // namespace
 
 DisplaySnapshot::DisplaySnapshot(
@@ -75,11 +51,7 @@ DisplaySnapshot::DisplaySnapshot(
     bool has_overscan,
     PrivacyScreenState privacy_screen_state,
     bool has_content_protection_key,
-    bool has_color_correction_matrix,
-    bool color_correction_in_linear_space,
-    const gfx::ColorSpace& color_space,
-    uint32_t bits_per_channel,
-    const absl::optional<gfx::HDRStaticMetadata>& hdr_static_metadata,
+    const ColorInfo& color_info,
     std::string display_name,
     const base::FilePath& sys_path,
     DisplayModeList modes,
@@ -91,7 +63,6 @@ DisplaySnapshot::DisplaySnapshot(
     int32_t year_of_manufacture,
     const gfx::Size& maximum_cursor_size,
     VariableRefreshRateState variable_refresh_rate_state,
-    const absl::optional<gfx::Range>& vertical_display_range_limits,
     const DrmFormatsAndModifiers& drm_formats_and_modifiers)
     : display_id_(display_id),
       port_display_id_(port_display_id),
@@ -106,11 +77,7 @@ DisplaySnapshot::DisplaySnapshot(
       has_overscan_(has_overscan),
       privacy_screen_state_(privacy_screen_state),
       has_content_protection_key_(has_content_protection_key),
-      has_color_correction_matrix_(has_color_correction_matrix),
-      color_correction_in_linear_space_(color_correction_in_linear_space),
-      color_space_(color_space),
-      bits_per_channel_(bits_per_channel),
-      hdr_static_metadata_(hdr_static_metadata),
+      color_info_(color_info),
       display_name_(display_name),
       sys_path_(sys_path),
       modes_(std::move(modes)),
@@ -122,7 +89,6 @@ DisplaySnapshot::DisplaySnapshot(
       year_of_manufacture_(year_of_manufacture),
       maximum_cursor_size_(maximum_cursor_size),
       variable_refresh_rate_state_(variable_refresh_rate_state),
-      vertical_display_range_limits_(vertical_display_range_limits),
       drm_formats_and_modifiers_(drm_formats_and_modifiers) {
   // We must explicitly clear out the bytes that represent the serial number.
   const size_t end = std::min(
@@ -132,9 +98,9 @@ DisplaySnapshot::DisplaySnapshot(
   }
 }
 
-DisplaySnapshot::~DisplaySnapshot() {}
+DisplaySnapshot::~DisplaySnapshot() = default;
 
-std::unique_ptr<DisplaySnapshot> DisplaySnapshot::Clone() {
+std::unique_ptr<DisplaySnapshot> DisplaySnapshot::Clone() const {
   DisplayModeList clone_modes;
   const DisplayMode* cloned_current_mode = nullptr;
   const DisplayMode* cloned_native_mode = nullptr;
@@ -149,17 +115,20 @@ std::unique_ptr<DisplaySnapshot> DisplaySnapshot::Clone() {
       cloned_native_mode = clone_modes.back().get();
   }
 
-  return std::make_unique<DisplaySnapshot>(
+  auto clone = std::make_unique<DisplaySnapshot>(
       display_id_, port_display_id_, edid_display_id_, connector_index_,
       origin_, physical_size_, type_, base_connector_id_, path_topology_,
       is_aspect_preserving_scaling_, has_overscan_, privacy_screen_state_,
-      has_content_protection_key_, has_color_correction_matrix_,
-      color_correction_in_linear_space_, color_space_, bits_per_channel_,
-      hdr_static_metadata_, display_name_, sys_path_, std::move(clone_modes),
-      panel_orientation_, edid_, cloned_current_mode, cloned_native_mode,
-      product_code_, year_of_manufacture_, maximum_cursor_size_,
-      variable_refresh_rate_state_, vertical_display_range_limits_,
+      has_content_protection_key_, color_info_, display_name_, sys_path_,
+      std::move(clone_modes), panel_orientation_, edid_, cloned_current_mode,
+      cloned_native_mode, product_code_, year_of_manufacture_,
+      maximum_cursor_size_, variable_refresh_rate_state_,
       drm_formats_and_modifiers_);
+  // Set current mode in case it is non-native (because non-native modes are not
+  // cloned).
+  clone->set_current_mode(current_mode_);
+
+  return clone;
 }
 
 std::string DisplaySnapshot::ToString() const {
@@ -187,8 +156,8 @@ std::string DisplaySnapshot::ToString() const {
 }
 
 // static
-gfx::BufferFormat DisplaySnapshot::PrimaryFormat() {
-  return gfx::BufferFormat::BGRA_8888;
+viz::SharedImageFormat DisplaySnapshot::PrimaryFormat() {
+  return viz::SinglePlaneFormat::kBGRA_8888;
 }
 
 void DisplaySnapshot::AddIndexToDisplayId() {
@@ -197,13 +166,47 @@ void DisplaySnapshot::AddIndexToDisplayId() {
 }
 
 bool DisplaySnapshot::IsVrrCapable() const {
-  // TODO(b/221220344): Add check that vertical limits are valid.
-  return variable_refresh_rate_state_ != display::kVrrNotCapable &&
-         vertical_display_range_limits_.has_value();
+  return variable_refresh_rate_state_ !=
+         VariableRefreshRateState::kVrrNotCapable;
 }
 
 bool DisplaySnapshot::IsVrrEnabled() const {
-  return variable_refresh_rate_state_ == display::kVrrEnabled;
+  return variable_refresh_rate_state_ == VariableRefreshRateState::kVrrEnabled;
+}
+
+void DisplaySnapshot::set_current_mode(const DisplayMode* mode) {
+  if (current_mode_ == mode ||
+      (current_mode_ && mode && *current_mode_ == *mode)) {
+    return;
+  }
+
+  if (!mode) {
+    current_mode_ = nullptr;
+    return;
+  }
+
+  for (const auto& owned_mode : modes_) {
+    if (*owned_mode == *mode) {
+      current_mode_ = owned_mode.get();
+      return;
+    }
+  }
+
+  for (const auto& owned_mode : nonnative_modes_) {
+    if (*owned_mode == *mode) {
+      current_mode_ = owned_mode.get();
+      return;
+    }
+  }
+
+  // Unowned modes can occur due to panel fitting or virtual modes.
+  VLOG(3) << "Encountered mode which does not natively belong to display: "
+          << mode->ToString();
+  // The clone will persist as an owned non-native mode until the snapshot is
+  // destructed. Do not attempt to delete it earlier in case it has been
+  // accessed elsewhere.
+  nonnative_modes_.push_back(mode->Clone());
+  current_mode_ = nonnative_modes_.back().get();
 }
 
 }  // namespace display

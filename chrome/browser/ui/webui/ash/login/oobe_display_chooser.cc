@@ -6,16 +6,16 @@
 
 #include <stdint.h>
 
-#include "ash/public/ash_interfaces.h"
-#include "base/containers/contains.h"
+#include <algorithm>
+
+#include "ash/display/cros_display_config.h"
+#include "base/check_deref.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_helpers.h"
-#include "base/strings/string_number_conversions.h"
-#include "chrome/browser/ui/ash/ash_util.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
+#include "ui/display/types/display_constants.h"
 #include "ui/events/devices/touchscreen_device.h"
 
 using content::BrowserThread;
@@ -28,34 +28,34 @@ bool TouchSupportAvailable(const display::Display& display) {
   return display.touch_support() == display::Display::TouchSupport::AVAILABLE;
 }
 
-// TODO(felixe): More context at crbug.com/738885
+// TODO(felixe): More context at crbug.com/40528488
 const uint16_t kDeviceIds[] = {0x0457, 0x266e, 0x222a};
 
 // Returns true if `vendor_id` is a valid vendor id that may be made the primary
 // display.
 bool IsAllowListedVendorId(uint16_t vendor_id) {
-  return base::Contains(kDeviceIds, vendor_id);
+  return std::ranges::contains(kDeviceIds, vendor_id);
 }
 
 }  // namespace
 
-OobeDisplayChooser::OobeDisplayChooser() {
-  BindCrosDisplayConfigController(
-      cros_display_config_.BindNewPipeAndPassReceiver());
-}
+OobeDisplayChooser::OobeDisplayChooser(
+    ash::CrosDisplayConfig* cros_display_config)
+    : cros_display_config_(CHECK_DEREF(cros_display_config)) {}
 
-OobeDisplayChooser::~OobeDisplayChooser() {}
+OobeDisplayChooser::~OobeDisplayChooser() = default;
 
 void OobeDisplayChooser::TryToPlaceUiOnTouchDisplay() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   // Don't (potentially) queue a second task to run MoveToTouchDisplay if one
   // already is queued.
-  if (weak_ptr_factory_.HasWeakPtrs())
+  if (weak_ptr_factory_.HasWeakPtrs()) {
     return;
+  }
 
   display::Display primary_display =
-      display::Screen::GetScreen()->GetPrimaryDisplay();
+      display::Screen::Get()->GetPrimaryDisplay();
 
   if (primary_display.is_valid() && !TouchSupportAvailable(primary_display)) {
     content::GetUIThreadTaskRunner({})->PostTask(
@@ -88,12 +88,11 @@ void OobeDisplayChooser::MoveToTouchDisplay() {
        device_data_manager->GetTouchscreenDevices()) {
     if (IsAllowListedVendorId(device.vendor_id) &&
         device.target_display_id != display::kInvalidDisplayId) {
-      auto config_properties = crosapi::mojom::DisplayConfigProperties::New();
-      config_properties->set_primary = true;
-      cros_display_config_->SetDisplayProperties(
-          base::NumberToString(device.target_display_id),
-          std::move(config_properties),
-          crosapi::mojom::DisplayConfigSource::kUser, base::DoNothing());
+      DisplayConfigProperties config_properties;
+      config_properties.set_primary = true;
+      cros_display_config_->SetDisplayProperties(device.target_display_id,
+                                                 config_properties,
+                                                 DisplayConfigSource::kUser);
       break;
     }
   }

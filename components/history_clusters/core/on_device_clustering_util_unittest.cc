@@ -175,22 +175,22 @@ TEST_F(OnDeviceClusteringUtilTest, IsNoisyVisitSearchLowEngagementVisit) {
 
 TEST_F(OnDeviceClusteringUtilTest, AppendClusterVisits) {
   history::Cluster cluster1 = history::Cluster(
-      0,
+      history::ClusterId(0),
       {
           testing::CreateClusterVisit(
               testing::CreateDefaultAnnotatedVisit(1, GURL("https://two.com/"),
                                                    base::Time::FromTimeT(10)),
-              absl::nullopt, 0.1),
+              std::nullopt, 0.1),
       },
       {});
 
   history::Cluster cluster2 = history::Cluster(
-      0,
+      history::ClusterId(0),
       {
           testing::CreateClusterVisit(
               testing::CreateDefaultAnnotatedVisit(2, GURL("https://two.com/"),
                                                    base::Time::FromTimeT(10)),
-              absl::nullopt, 0.1),
+              std::nullopt, 0.1),
       },
       {});
 
@@ -206,16 +206,16 @@ TEST_F(OnDeviceClusteringUtilTest, AppendClusterVisits) {
 TEST_F(OnDeviceClusteringUtilTest, RemoveEmptyClusters) {
   std::vector<history::Cluster> clusters;
   clusters.push_back(history::Cluster(
-      0,
+      history::ClusterId(0),
       {
           testing::CreateClusterVisit(
               testing::CreateDefaultAnnotatedVisit(2, GURL("https://two.com/"),
                                                    base::Time::FromTimeT(10)),
-              absl::nullopt, 0.1),
+              std::nullopt, 0.1),
       },
       {}));
 
-  clusters.push_back(history::Cluster(0, {}, {}));
+  clusters.push_back(history::Cluster(history::ClusterId(0), {}, {}));
 
   RemoveEmptyClusters(&clusters);
 

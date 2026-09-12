@@ -4,8 +4,8 @@
 
 #include "media/gpu/windows/d3d11_video_processor_proxy.h"
 
+#include "base/check_op.h"
 #include "media/base/media_serializers.h"
-#include "ui/gfx/color_space_win.h"
 
 namespace media {
 namespace {
@@ -16,11 +16,11 @@ namespace {
 void AddDebugMessages(D3D11Status* error, ComD3D11Device device) {
   // MSDN says that this needs to be casted twice, then GetMessage should
   // be called with a malloc.
-  Microsoft::WRL::ComPtr<ID3D11Debug> debug_layer;
+  ComD3D11Debug debug_layer;
   if (!SUCCEEDED(device.As(&debug_layer)))
     return;
 
-  Microsoft::WRL::ComPtr<ID3D11InfoQueue> message_layer;
+  ComD3D11InfoQueue message_layer;
   if (!SUCCEEDED(debug_layer.As(&message_layer)))
     return;
 
@@ -61,9 +61,10 @@ D3D11Status DebugStatus(D3D11Status&& status, ComD3D11Device device) {
 VideoProcessorProxy::~VideoProcessorProxy() {}
 
 VideoProcessorProxy::VideoProcessorProxy(
-    ComD3D11VideoDevice video_device,
+    ComD3D11VideoDevice1 video_device,
     ComD3D11DeviceContext d3d11_device_context)
-    : video_device_(video_device), device_context_(d3d11_device_context) {}
+    : video_device_(std::move(video_device)),
+      device_context_(std::move(d3d11_device_context)) {}
 
 D3D11Status VideoProcessorProxy::Init(uint32_t width, uint32_t height) {
   processor_enumerator_.Reset();
@@ -99,11 +100,12 @@ D3D11Status VideoProcessorProxy::Init(uint32_t width, uint32_t height) {
                        device);
   }
 
-  hr = device_context_.As(&video_context_);
-  if (!SUCCEEDED(hr)) {
-    return DebugStatus({D3D11Status::Codes::kQueryVideoContextFailed, hr},
-                       device);
-  }
+  CHECK_EQ(device_context_.As(&video_context_), S_OK);
+
+  // Turn off auto stream processing (the default) that will hurt power
+  // consumption.
+  video_context_->VideoProcessorSetStreamAutoProcessingMode(
+      video_processor_.Get(), 0, FALSE);
 
   return D3D11Status::Codes::kOk;
 }
@@ -127,61 +129,15 @@ HRESULT VideoProcessorProxy::CreateVideoProcessorInputView(
 }
 
 void VideoProcessorProxy::SetStreamColorSpace(
-    const gfx::ColorSpace& color_space) {
-  ComD3D11VideoContext1 video_context1;
-
-  // Try to use the 11.1 interface if possible, else use 11.0.
-  if (FAILED(video_context_.As(&video_context1))) {
-    // Note that if we have an HDR context but no 11.1 device, then this will
-    // likely not work.
-    auto d3d11_color_space =
-        gfx::ColorSpaceWin::GetD3D11ColorSpace(color_space);
-    video_context_->VideoProcessorSetStreamColorSpace(video_processor_.Get(), 0,
-                                                      &d3d11_color_space);
-  } else {
-    video_context1->VideoProcessorSetStreamColorSpace1(
-        video_processor_.Get(), 0,
-        gfx::ColorSpaceWin::GetDXGIColorSpace(color_space));
-  }
+    DXGI_COLOR_SPACE_TYPE color_space) {
+  video_context_->VideoProcessorSetStreamColorSpace1(video_processor_.Get(), 0,
+                                                     color_space);
 }
 
 void VideoProcessorProxy::SetOutputColorSpace(
-    const gfx::ColorSpace& color_space) {
-  ComD3D11VideoContext1 video_context1;
-  if (FAILED(video_context_.As(&video_context1))) {
-    // Hopefully, |color_space| is supported, but that's not our problem.
-    auto d3d11_color_space =
-        gfx::ColorSpaceWin::GetD3D11ColorSpace(color_space);
-    video_context_->VideoProcessorSetOutputColorSpace(video_processor_.Get(),
-                                                      &d3d11_color_space);
-  } else {
-    video_context1->VideoProcessorSetOutputColorSpace1(
-        video_processor_.Get(),
-        gfx::ColorSpaceWin::GetDXGIColorSpace(color_space));
-  }
-}
-
-void VideoProcessorProxy::SetStreamHDRMetadata(
-    const DXGI_HDR_METADATA_HDR10& stream_metadata) {
-  ComD3D11VideoContext2 video_context2;
-  if (FAILED(video_context_.As(&video_context2)))
-    return;
-
-  // TODO: we shouldn't do this unless we also set the display metadata.
-  video_context2->VideoProcessorSetStreamHDRMetaData(
-      video_processor_.Get(), 0, DXGI_HDR_METADATA_TYPE_HDR10,
-      sizeof(stream_metadata), &stream_metadata);
-}
-
-void VideoProcessorProxy::SetDisplayHDRMetadata(
-    const DXGI_HDR_METADATA_HDR10& display_metadata) {
-  ComD3D11VideoContext2 video_context2;
-  if (FAILED(video_context_.As(&video_context2)))
-    return;
-
-  video_context2->VideoProcessorSetOutputHDRMetaData(
-      video_processor_.Get(), DXGI_HDR_METADATA_TYPE_HDR10,
-      sizeof(display_metadata), &display_metadata);
+    DXGI_COLOR_SPACE_TYPE color_space) {
+  video_context_->VideoProcessorSetOutputColorSpace1(video_processor_.Get(),
+                                                     color_space);
 }
 
 HRESULT VideoProcessorProxy::VideoProcessorBlt(

@@ -23,27 +23,33 @@ def SysPath(path, position=None):
 
 
 def GetChromiumSrcDir():
-  return os.path.abspath(os.path.join(
-      os.path.dirname(__file__), '..', '..', '..'))
+  return os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', '..', '..')
+  )
 
 
-def GetDeviceInteractionDir():
+def GetAndroidDeviceInteractionToPath():
   return os.path.join(GetChromiumSrcDir(), 'third_party', 'catapult', 'devil')
+
+
+def GetBuildUtilDir():
+  return os.path.join(GetChromiumSrcDir(), 'build', 'util')
 
 
 def GetTelemetryDir():
   return os.path.join(
-      GetChromiumSrcDir(), 'third_party', 'catapult', 'telemetry')
+    GetChromiumSrcDir(), 'third_party', 'catapult', 'telemetry'
+  )
 
 
 def GetTracingDir():
-  return os.path.join(
-      GetChromiumSrcDir(), 'third_party', 'catapult', 'tracing')
+  return os.path.join(GetChromiumSrcDir(), 'third_party', 'catapult', 'tracing')
 
 
 def GetPyUtilsDir():
   return os.path.join(
-      GetChromiumSrcDir(), 'third_party', 'catapult', 'common', 'py_utils')
+    GetChromiumSrcDir(), 'third_party', 'catapult', 'common', 'py_utils'
+  )
 
 
 def GetCrossBenchDir():
@@ -74,10 +80,22 @@ def GetVariationsDir():
   return os.path.join(GetChromiumSrcDir(), 'tools', 'variations')
 
 
-def AddDeviceInteractionToPath():
-  device_interaction_path = GetDeviceInteractionDir()
+def GetDashboardDir():
+  return os.path.join(
+    GetChromiumSrcDir(), 'third_party', 'catapult', 'dashboard'
+  )
+
+
+def AddAndroidDeviceInteractionToPath():
+  device_interaction_path = GetAndroidDeviceInteractionToPath()
   if device_interaction_path not in sys.path:
     sys.path.insert(1, device_interaction_path)
+
+
+def AddBuildUtilToPath():
+  build_util_path = GetBuildUtilDir()
+  if build_util_path not in sys.path:
+    sys.path.insert(1, build_util_path)
 
 
 def AddTelemetryToPath():
@@ -104,10 +122,10 @@ def AddAndroidPylibToPath():
     sys.path.insert(1, android_pylib_path)
 
 
-def AddCrossBenchToPath():
-  crossbench_path = GetCrossBenchDir()
-  if crossbench_path not in sys.path:
-    sys.path.insert(1, crossbench_path)
+def AddDashboardToPath():
+  dashboard_path = GetDashboardDir()
+  if dashboard_path not in sys.path:
+    sys.path.insert(1, dashboard_path)
 
 
 def GetExpectationsPath():

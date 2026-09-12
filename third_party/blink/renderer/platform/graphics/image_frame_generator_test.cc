@@ -26,8 +26,11 @@
 #include "third_party/blink/renderer/platform/graphics/image_frame_generator.h"
 
 #include <memory>
+
+#include "base/features.h"
 #include "base/location.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/graphics/image_decoding_store.h"
@@ -35,9 +38,12 @@
 #include "third_party/blink/renderer/platform/image-decoders/segment_reader.h"
 #include "third_party/blink/renderer/platform/scheduler/public/non_main_thread.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
+#include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 #include "third_party/blink/renderer/platform/wtf/shared_buffer.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
 namespace blink {
@@ -61,8 +67,8 @@ class ImageFrameGeneratorTest : public testing::Test,
  public:
   void SetUp() override {
     ImageDecodingStore::Instance().SetCacheLimitInBytes(1024 * 1024);
-    generator_ = ImageFrameGenerator::Create(FullSize(), false,
-                                             ColorBehavior::Ignore(), {});
+    generator_ = ImageFrameGenerator::Create(
+        FullSize(), false, ColorBehavior::kIgnore, cc::AuxImage::kDefault, {});
     data_ = SharedBuffer::Create();
     segment_reader_ = SegmentReader::CreateFromSharedBuffer(data_);
     UseMockImageDecoderFactory();
@@ -104,7 +110,7 @@ class ImageFrameGeneratorTest : public testing::Test,
         MockImageDecoderFactory::Create(this, FullSize()));
   }
 
-  void AddNewData() { data_->Append("g", 1u); }
+  void AddNewData() { data_->Append(base::span_from_cstring("g")); }
 
   void SetFrameStatus(ImageFrame::Status status) {
     status_ = next_frame_status_ = status;
@@ -116,18 +122,20 @@ class ImageFrameGeneratorTest : public testing::Test,
     frame_count_ = count;
     if (count > 1) {
       generator_ = nullptr;
-      generator_ = ImageFrameGenerator::Create(FullSize(), true,
-                                               ColorBehavior::Ignore(), {});
+      generator_ = ImageFrameGenerator::Create(
+          FullSize(), true, ColorBehavior::kIgnore, cc::AuxImage::kDefault, {});
       UseMockImageDecoderFactory();
     }
   }
   void SetSupportedSizes(Vector<SkISize> sizes) {
     generator_ = nullptr;
-    generator_ = ImageFrameGenerator::Create(
-        FullSize(), true, ColorBehavior::Ignore(), std::move(sizes));
+    generator_ =
+        ImageFrameGenerator::Create(FullSize(), true, ColorBehavior::kIgnore,
+                                    cc::AuxImage::kDefault, std::move(sizes));
     UseMockImageDecoderFactory();
   }
 
+  test::TaskEnvironment task_environment_;
   scoped_refptr<SharedBuffer> data_;
   scoped_refptr<SegmentReader> segment_reader_;
   scoped_refptr<ImageFrameGenerator> generator_;
@@ -198,6 +206,14 @@ TEST_F(ImageFrameGeneratorTest, GetSupportedSizes) {
 }
 
 TEST_F(ImageFrameGeneratorTest, incompleteDecode) {
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
+  base::test::ScopedFeatureList feature_list;
+  // Since PartialLowEndModeOnMidRangeDevices is enabled, image decoders
+  // are destroyed because of the incomplete decode for saving memory.
+  feature_list.InitAndDisableFeature(
+      base::features::kPartialLowEndModeOnMidRangeDevices);
+#endif  // BUILDFLAG(IS_ANDROID)
+
   SetFrameStatus(ImageFrame::kFramePartial);
 
   char buffer[100 * 100 * 4];
@@ -245,6 +261,14 @@ TEST_F(ImageFrameGeneratorTest, LowEndDeviceDestroysDecoderOnPartialDecode) {
 }
 
 TEST_F(ImageFrameGeneratorTest, incompleteDecodeBecomesComplete) {
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
+  base::test::ScopedFeatureList feature_list;
+  // Since PartialLowEndModeOnMidRangeDevices is enabled, image decoders
+  // are destroyed because of the incomplete decode for saving memory.
+  feature_list.InitAndDisableFeature(
+      base::features::kPartialLowEndModeOnMidRangeDevices);
+#endif  // BUILDFLAG(IS_ANDROID)
+
   SetFrameStatus(ImageFrame::kFramePartial);
 
   char buffer[100 * 100 * 4];
@@ -305,8 +329,8 @@ TEST_F(ImageFrameGeneratorTest,
                                       .SetThreadNameForTest("DecodeThread"));
   PostCrossThreadTask(
       *thread->GetTaskRunner(), FROM_HERE,
-      CrossThreadBindOnce(&DecodeThreadMain, WTF::RetainedRef(generator_),
-                          WTF::RetainedRef(segment_reader_)));
+      CrossThreadBindOnce(&DecodeThreadMain, blink::RetainedRef(generator_),
+                          blink::RetainedRef(segment_reader_)));
   thread.reset();
   EXPECT_EQ(2, decode_request_count_);
   EXPECT_EQ(1, decoders_destroyed_);
@@ -323,6 +347,16 @@ TEST_F(ImageFrameGeneratorTest,
 }
 
 TEST_F(ImageFrameGeneratorTest, frameHasAlpha) {
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
+  base::test::ScopedFeatureList feature_list;
+  // Since PartialLowEndModeOnMidRangeDevices is enabled, image decoders
+  // are not cached because it makes ShouldDecodeToExternalMemory()
+  // return true. The value will be provided for ImageDecoderWrapper::
+  // ShouldRemoveDecoder() and ShouldRemoveDecoder() will return true.
+  feature_list.InitAndDisableFeature(
+      base::features::kPartialLowEndModeOnMidRangeDevices);
+#endif
+
   SetFrameStatus(ImageFrame::kFramePartial);
 
   char buffer[100 * 100 * 4];
@@ -380,6 +414,67 @@ TEST_F(ImageFrameGeneratorTest, clearMultiFrameDecoder) {
   EXPECT_EQ(3, decode_request_count_);
   EXPECT_EQ(0, decoders_destroyed_);
   EXPECT_EQ(kNotFound, requested_clear_except_frame_);
+}
+
+// This is a regression test for https://crbug.com/496282147.
+//
+// This is a more realistic, product-like, almost-end-to-end version of the
+// `AnimatedPNGTests.ClearingPartiallyDecodedFrame` unit test.
+TEST_F(ImageFrameGeneratorTest, ClearingPartiallyDecodedFrame) {
+  StringBuilder file_path;
+  file_path.Append(test::BlinkWebTestsDir());
+  file_path.Append(
+      "/images/resources/png-animated-three-independent-frames.png");
+  std::optional<Vector<char>> full_data_vec =
+      test::ReadFromFile(file_path.ToString());
+  ASSERT_TRUE(full_data_vec);
+  base::span<const uint8_t> full_data = base::as_byte_span(*full_data_vec);
+  SkISize size(50, 50);
+
+  // Can't reuse `generator_` from `SetUp`, because it sets `is_multi_frame` to
+  // `false`.  Can't use `SetFrameCount`, because this test needs to use a real
+  // `SkiaImageDecoderBase` decoder, rather than `UseMockImageDecoderFactory`.
+  constexpr bool kIsMultiframe = true;
+  const Vector<SkISize> kSupportedSizes = {};
+  generator_ =
+      ImageFrameGenerator::Create(size, kIsMultiframe, ColorBehavior::kTag,
+                                  cc::AuxImage::kDefault, kSupportedSizes);
+
+  // Partially decode frame 1.
+  //
+  // `fcTL` chunk starts at offset 180.  `fdAT` at 218.
+  // Let's provide 240 bytes - in the middle of `fdAT` chunk.
+  //
+  // After this step `SkiaImageDecoderBase::already_started_frame_` is `1`.
+  SkBitmap bitmap;
+  bitmap.allocN32Pixels(size.width(), size.height());
+  cc::PaintImage::GeneratorClientId client_id =
+      cc::PaintImage::GetNextGeneratorClientId();
+  auto partial_data = SharedBuffer::Create(full_data.first(240u));
+  auto segment_reader = SegmentReader::CreateFromSharedBuffer(partial_data);
+  bool success = generator_->DecodeAndScale(segment_reader.get(),
+                                            /*all_data_received=*/false, 1,
+                                            bitmap.pixmap(), client_id);
+  EXPECT_TRUE(success);
+
+  // Decode an out-of-bounds frame to clear the cache and transitively call
+  // `ImageFrame::ClearPixelData`.
+  success = generator_->DecodeAndScale(segment_reader.get(),
+                                       /*all_data_received=*/false, 1000,
+                                       bitmap.pixmap(), client_id);
+  EXPECT_FALSE(success);
+
+  // Resume decoding of frame 1.  Despite starting with
+  // `SkiaImageDecoderBase::already_started_frame_` set to `1` this operation
+  // needs to call `SkCodec::startIncrementalDecode` because the old buffer has
+  // been freed in the previous step.
+  auto full_shared_buffer = SharedBuffer::Create(full_data);
+  auto full_segment_reader =
+      SegmentReader::CreateFromSharedBuffer(full_shared_buffer);
+  success = generator_->DecodeAndScale(full_segment_reader.get(),
+                                       /*all_data_received=*/true, 1,
+                                       bitmap.pixmap(), client_id);
+  EXPECT_TRUE(success);
 }
 
 }  // namespace blink

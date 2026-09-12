@@ -7,12 +7,14 @@
 
 #include <memory>
 #include <string>
-#include <vector>
+#include <string_view>
 
+#include "base/containers/span.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
 #include "base/sequence_checker.h"
+#include "base/strings/cstring_view.h"
 #include "base/task/single_thread_task_runner.h"
 #include "net/http/http_status_code.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
@@ -47,14 +49,14 @@ class ControllableHttpResponse {
 
   // 2) Send raw response data in response to a request.
   //    May be called several time.
-  void Send(const std::string& bytes);
+  void Send(std::string_view bytes);
 
   // Same as 2) but with more specific parameters.
   void Send(net::HttpStatusCode http_status,
-            const std::string& content_type = std::string("text/html"),
-            const std::string& content = std::string(),
-            const std::vector<std::string>& cookies = {},
-            const std::vector<std::string>& extra_headers = {});
+            base::cstring_view content_type = "text/html",
+            std::string_view content = std::string_view(),
+            base::span<const std::string> cookies = {},
+            base::span<const std::string> extra_headers = {});
 
   // 3) Notify there are no more data to be sent and close the socket.
   void Done();
@@ -66,20 +68,25 @@ class ControllableHttpResponse {
   bool has_received_request();
 
  private:
-  class Interceptor;
+  friend class ControllableHttpResponseManager;
 
   enum class State { WAITING_FOR_REQUEST, READY_TO_SEND_DATA, DONE };
 
-  void OnRequest(scoped_refptr<base::SingleThreadTaskRunner>
+  ControllableHttpResponse(scoped_refptr<base::SingleThreadTaskRunner>
+                               embedded_test_server_task_runner,
+                           base::WeakPtr<HttpResponseDelegate> delegate,
+                           std::unique_ptr<HttpRequest> http_request);
+
+  void OnRequest(std::unique_ptr<HttpRequest> http_request,
+                 scoped_refptr<base::SingleThreadTaskRunner>
                      embedded_test_server_task_runner,
-                 base::WeakPtr<HttpResponseDelegate> delegate,
-                 std::unique_ptr<HttpRequest> http_request);
+                 base::WeakPtr<HttpResponseDelegate> delegate);
 
   static std::unique_ptr<HttpResponse> RequestHandler(
       base::WeakPtr<ControllableHttpResponse> controller,
       scoped_refptr<base::SingleThreadTaskRunner> controller_task_runner,
       bool* available,
-      const std::string& relative_url,
+      std::string_view relative_url,
       bool relative_url_is_prefix,
       const HttpRequest& request);
 
@@ -94,6 +101,57 @@ class ControllableHttpResponse {
   base::WeakPtrFactory<ControllableHttpResponse> weak_ptr_factory_{this};
 };
 
+// Utility class enabling multiple ControllableHttpResponse call on same path.
+// Usage:
+// void SetUpOnMainThread() override {
+//   slow_response_manager_ =
+//   std::make_unique<net::test_server::ControllableHttpResponseManager>(
+//    embedded_test_server(), "/image_slow.png");
+//   ASSERT_TRUE(embedded_test_server()->Start());
+// }
+// IN_PROC_BROWSER_TEST_F(Foo, Bar) {
+//   for(int i=0;i < 2; i++) {
+//     auto slow_response = slow_response_manager_->WaitForRequest();
+//     slow_response->Send(net::HTTP_OK, "image/png", "image_body");
+//     slow_response->Done();
+//   }
+// }
+class ControllableHttpResponseManager {
+ public:
+  ControllableHttpResponseManager(EmbeddedTestServer* embedded_test_server,
+                                  const std::string& relative_url,
+                                  bool relative_url_is_prefix = false);
+
+  ControllableHttpResponseManager(const ControllableHttpResponseManager&) =
+      delete;
+  ControllableHttpResponseManager& operator=(
+      const ControllableHttpResponseManager&) = delete;
+
+  ~ControllableHttpResponseManager();
+
+  std::unique_ptr<ControllableHttpResponse> WaitForRequest();
+
+ private:
+  static std::unique_ptr<HttpResponse> RequestHandler(
+      base::WeakPtr<ControllableHttpResponseManager> controller,
+      scoped_refptr<base::SingleThreadTaskRunner> controller_task_runner,
+      std::string_view relative_url,
+      bool relative_url_is_prefix,
+      const HttpRequest& request);
+
+  void OnRequest(std::unique_ptr<HttpRequest> http_request,
+                 scoped_refptr<base::SingleThreadTaskRunner>
+                     embedded_test_server_task_runner,
+                 base::WeakPtr<HttpResponseDelegate> delegate);
+
+  std::unique_ptr<ControllableHttpResponse> current_response_;
+  std::unique_ptr<base::RunLoop> loop_;
+
+  SEQUENCE_CHECKER(sequence_checker_);
+
+  base::WeakPtrFactory<ControllableHttpResponseManager> weak_ptr_factory_{this};
+};
+
 }  // namespace net::test_server
 
-#endif  //  NET_TEST_EMBEDDED_TEST_SERVER_CONTROLLABLE_HTTP_RESPONSE_H_
+#endif  // NET_TEST_EMBEDDED_TEST_SERVER_CONTROLLABLE_HTTP_RESPONSE_H_

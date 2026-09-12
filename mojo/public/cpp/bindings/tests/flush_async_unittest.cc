@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -25,7 +26,6 @@
 #include "mojo/public/cpp/bindings/tests/bindings_test_base.h"
 #include "mojo/public/cpp/bindings/tests/flush_async_unittest.test-mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace mojo {
 namespace test {
@@ -117,8 +117,9 @@ class KeyValueStoreImpl : public base::RefCountedThreadSafe<KeyValueStoreImpl>,
 
     // Shutdown all WriterImpls too.
     auto shutdown = base::BarrierClosure(writers_.size(), std::move(callback));
-    for (auto& writer : writers_)
+    for (auto& writer : writers_) {
       writer->ShutDown(base::BindOnce(shutdown));
+    }
   }
 
   // mojom::KeyValueStore implementation:
@@ -262,7 +263,7 @@ TEST_P(FlushAsyncTest, DroppedFlusherCompletesPendingFlush) {
   // corresponding AsyncFlusher. The call should eventually execute.
   base::RunLoop loop;
   base::flat_map<std::string, std::string> snapshot;
-  absl::optional<AsyncFlusher> flusher(absl::in_place);
+  std::optional<AsyncFlusher> flusher(std::in_place);
   key_value_store().PauseReceiverUntilFlushCompletes(
       PendingFlush(&flusher.value()));
   key_value_store()->GetSnapshot(base::BindLambdaForTesting(
@@ -300,7 +301,7 @@ TEST_P(FlushAsyncTest, PausedInterfaceDoesNotAutoResumeOnFlush) {
   Remote<mojom::Pinger> pinger;
   PingerImpl impl(pinger.BindNewPipeAndPassReceiver());
 
-  absl::optional<AsyncFlusher> flusher(absl::in_place);
+  std::optional<AsyncFlusher> flusher(std::in_place);
   PendingFlush flush(&flusher.value());
   pinger.PauseReceiverUntilFlushCompletes(std::move(flush));
 
@@ -344,7 +345,7 @@ TEST_P(FlushAsyncTest, ResumeDoesNotInterruptWaitingOnFlush) {
   Remote<mojom::Pinger> pinger;
   PingerImpl impl(pinger.BindNewPipeAndPassReceiver());
 
-  absl::optional<AsyncFlusher> flusher(absl::in_place);
+  std::optional<AsyncFlusher> flusher(std::in_place);
   PendingFlush flush(&flusher.value());
   pinger.PauseReceiverUntilFlushCompletes(std::move(flush));
 
@@ -389,8 +390,9 @@ class KeyValueStoreClientImpl : public mojom::KeyValueStoreClient {
 
   // mojom::KeyValueStoreClient implementation:
   void OnSnapshotTaken() override {
-    if (snapshot_taken_callback_)
+    if (snapshot_taken_callback_) {
       snapshot_taken_callback_.Run();
+    }
   }
 
  private:

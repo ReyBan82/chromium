@@ -16,14 +16,16 @@
 
 #include <algorithm>
 #include <bitset>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <random>
 #include <sstream>
+#include <type_traits>
 
-#include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/base/internal/raw_logging.h"
+#include "absl/log/log.h"
 #include "absl/random/internal/explicit_seed_seq.h"
-#include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 
 #define UPDATE_GOLDEN 0
@@ -167,19 +169,19 @@ TYPED_TEST(RandenEngineTypedTest, RandomNumberEngineInterface) {
   using E = randen;
   using T = typename E::result_type;
 
-  static_assert(std::is_copy_constructible<E>::value,
+  static_assert(std::is_copy_constructible_v<E>,
                 "randen_engine must be copy constructible");
 
-  static_assert(absl::is_copy_assignable<E>::value,
+  static_assert(std::is_copy_assignable_v<E>,
                 "randen_engine must be copy assignable");
 
-  static_assert(std::is_move_constructible<E>::value,
+  static_assert(std::is_move_constructible_v<E>,
                 "randen_engine must be move constructible");
 
-  static_assert(absl::is_move_assignable<E>::value,
+  static_assert(std::is_move_assignable_v<E>,
                 "randen_engine must be move assignable");
 
-  static_assert(std::is_same<decltype(std::declval<E>()()), T>::value,
+  static_assert(std::is_same_v<decltype(std::declval<E>()()), T>,
                 "return type of operator() must be result_type");
 
   // Names after definition of [rand.req.urbg] in C++ standard.
@@ -225,10 +227,10 @@ TYPED_TEST(RandenEngineTypedTest, RandomNumberEngineInterface) {
 
   e.discard(z);
 
-  static_assert(std::is_same<decltype(x == y), bool>::value,
+  static_assert(std::is_same_v<decltype(x == y), bool>,
                 "return type of operator== must be bool");
 
-  static_assert(std::is_same<decltype(x != y), bool>::value,
+  static_assert(std::is_same_v<decltype(x != y), bool>,
                 "return type of operator== must be bool");
 }
 
@@ -632,7 +634,6 @@ TEST(RandenTest, IsFastOrSlow) {
   //
   // linux, optimized ~5ns
   // ppc, optimized ~7ns
-  // nacl (slow), ~1100ns
   //
   // `kCount` is chosen below so that, in debug builds and without hardware
   // acceleration, the test (assuming ~1us per call) should finish in ~0.1s
@@ -645,9 +646,8 @@ TEST(RandenTest, IsFastOrSlow) {
   }
   auto duration = absl::GetCurrentTimeNanos() - start;
 
-  ABSL_INTERNAL_LOG(INFO, absl::StrCat(static_cast<double>(duration) /
-                                           static_cast<double>(kCount),
-                                       "ns"));
+  LOG(INFO) << static_cast<double>(duration) / static_cast<double>(kCount)
+            << "ns";
 
   EXPECT_GT(sum, 0);
   EXPECT_GE(duration, kCount);  // Should be slower than 1ns per call.

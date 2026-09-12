@@ -7,10 +7,12 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 
 #include "ash/public/cpp/shelf_model_observer.h"
 #include "ash/public/cpp/test/test_shelf_item_delegate.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace ash {
@@ -29,11 +31,11 @@ class TestShelfModelObserver : public ShelfModelObserver {
   // was last invoked. Resets state to initial state.
   std::string StateStringAndClear() {
     std::string result;
-    AddToResult("added=%d", added_count_, &result);
-    AddToResult("removed=%d", removed_count_, &result);
-    AddToResult("changed=%d", changed_count_, &result);
-    AddToResult("moved=%d", moved_count_, &result);
-    AddToResult("delegate_changed=%d", delegate_changed_count_, &result);
+    AddToResult("added", added_count_, &result);
+    AddToResult("removed", removed_count_, &result);
+    AddToResult("changed", changed_count_, &result);
+    AddToResult("moved", moved_count_, &result);
+    AddToResult("delegate_changed", delegate_changed_count_, &result);
     added_count_ = removed_count_ = changed_count_ = moved_count_ =
         delegate_changed_count_ = 0;
     return result;
@@ -51,12 +53,12 @@ class TestShelfModelObserver : public ShelfModelObserver {
   }
 
  private:
-  void AddToResult(const std::string& format, int count, std::string* result) {
+  void AddToResult(std::string_view type, int count, std::string* result) {
     if (!count)
       return;
     if (!result->empty())
       *result += " ";
-    *result += base::StringPrintf(format.c_str(), count);
+    *result += base::StrCat({type, "=", base::NumberToString(count)});
   }
 
   int added_count_ = 0;
@@ -236,13 +238,6 @@ TEST_F(ShelfModelTest, AddIndices) {
   EXPECT_EQ(6, platform_app_index4);
 
   EXPECT_EQ(TYPE_BROWSER_SHORTCUT, model_->items()[2].type);
-
-  // TYPE_UNPINNED_BROWSER_SHORTCUT icons should behave similar to
-  // unpinned apps.
-  item.type = TYPE_UNPINNED_BROWSER_SHORTCUT;
-  item.id = ShelfID("unpinned_browser");
-  int unpinned_browser_index = AddAt(2, item);
-  EXPECT_EQ(6, unpinned_browser_index);
 }
 
 // Test that the indexes for the running applications are properly determined.
@@ -269,11 +264,6 @@ TEST_F(ShelfModelTest, FirstRunningAppIndex) {
   EXPECT_EQ(2, model_->FirstRunningAppIndex());
   item.id = ShelfID("app2");
   EXPECT_EQ(3, Add(item));
-  EXPECT_EQ(2, model_->FirstRunningAppIndex());
-
-  item.type = TYPE_UNPINNED_BROWSER_SHORTCUT;
-  item.id = ShelfID("unpinned browser");
-  EXPECT_EQ(4, Add(item));
   EXPECT_EQ(2, model_->FirstRunningAppIndex());
 }
 

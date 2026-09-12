@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // TODO(dkrahn): Clean up this private API once all clients have been migrated
-// to use the public API. crbug.com/588339.
+// to use the public API. b/309464153.
 
 #ifndef CHROME_BROWSER_EXTENSIONS_API_ENTERPRISE_PLATFORM_KEYS_PRIVATE_ENTERPRISE_PLATFORM_KEYS_PRIVATE_API_H__
 #define CHROME_BROWSER_EXTENSIONS_API_ENTERPRISE_PLATFORM_KEYS_PRIVATE_ENTERPRISE_PLATFORM_KEYS_PRIVATE_API_H__
@@ -12,6 +12,7 @@
 #include <string>
 
 #include "chrome/browser/ash/attestation/tpm_challenge_key.h"
+#include "chromeos/ash/components/dbus/attestation/attestation_ca.pb.h"
 #include "chromeos/ash/components/dbus/constants/attestation_constants.h"
 #include "extensions/browser/extension_function.h"
 #include "extensions/common/extension.h"
@@ -35,7 +36,7 @@ class EPKPChallengeKey {
 
   // Asynchronously run the flow to challenge a key in the |caller|
   // context.
-  void Run(ash::attestation::AttestationKeyType type,
+  void Run(::attestation::VerifiedAccessFlow type,
            scoped_refptr<ExtensionFunction> caller,
            ash::attestation::TpmChallengeKeyCallback callback,
            const std::string& challenge,

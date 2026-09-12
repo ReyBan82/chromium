@@ -12,29 +12,15 @@
 #include "components/history/core/browser/history_database.h"
 #include "components/history/core/browser/history_db_task.h"
 #include "components/history/core/browser/history_service.h"
+#include "components/visitedlink/browser/partitioned_visitedlink_writer.h"
 #include "components/visitedlink/browser/visitedlink_writer.h"
+#include "components/visitedlink/core/visited_link.h"
+#include "net/base/schemeful_site.h"
+#include "third_party/blink/public/common/features.h"
 #include "url/gurl.h"
 
 namespace history {
 namespace {
-
-// URLIterator from std::vector<GURL>
-class URLIteratorFromURLs : public visitedlink::VisitedLinkWriter::URLIterator {
- public:
-  explicit URLIteratorFromURLs(const std::vector<GURL>& urls)
-      : itr_(urls.begin()), end_(urls.end()) {}
-
-  URLIteratorFromURLs(const URLIteratorFromURLs&) = delete;
-  URLIteratorFromURLs& operator=(const URLIteratorFromURLs&) = delete;
-
-  // visitedlink::VisitedLinkWriter::URLIterator implementation.
-  const GURL& NextURL() override { return *(itr_++); }
-  bool HasNextURL() const override { return itr_ != end_; }
-
- private:
-  std::vector<GURL>::const_iterator itr_;
-  std::vector<GURL>::const_iterator end_;
-};
 
 // IterateUrlsDBTask bridge HistoryBackend::URLEnumerator to
 // visitedlink::VisitedLinkDelegate::URLEnumerator.
@@ -83,13 +69,80 @@ bool IterateUrlsDBTask::RunOnDBThread(HistoryBackend* backend,
 void IterateUrlsDBTask::DoneRunOnMainThread() {
 }
 
+// IterateVisitedLinkDBTask bridges HistoryBackend::VisitedLinkEnumerator to
+// VisitedLinkDelegate::VisitedLinkEnumerator.
+class IterateVisitedLinkDBTask : public HistoryDBTask {
+ public:
+  explicit IterateVisitedLinkDBTask(
+      const scoped_refptr<
+          visitedlink::VisitedLinkDelegate::VisitedLinkEnumerator>& enumerator);
+
+  IterateVisitedLinkDBTask(const IterateVisitedLinkDBTask&) = delete;
+  IterateVisitedLinkDBTask& operator=(const IterateVisitedLinkDBTask&) = delete;
+
+  ~IterateVisitedLinkDBTask() override;
+
+ private:
+  // Implementation of HistoryDBTask.
+  bool RunOnDBThread(HistoryBackend* backend, HistoryDatabase* db) override;
+  void DoneRunOnMainThread() override;
+
+  scoped_refptr<visitedlink::VisitedLinkDelegate::VisitedLinkEnumerator>
+      enumerator_;
+};
+
+IterateVisitedLinkDBTask::IterateVisitedLinkDBTask(
+    const scoped_refptr<
+        visitedlink::VisitedLinkDelegate::VisitedLinkEnumerator>& enumerator)
+    : enumerator_(enumerator) {}
+
+IterateVisitedLinkDBTask::~IterateVisitedLinkDBTask() = default;
+
+bool IterateVisitedLinkDBTask::RunOnDBThread(HistoryBackend* backend,
+                                             HistoryDatabase* db) {
+  // Begin iterating through the VisitedLinkDatabase.
+  bool success = false;
+  if (db) {
+    // Use the joined enumerator to fetch visited link rows together with their
+    // link URLs in a single query, rather than issuing a separate URL lookup
+    // per row.
+    HistoryDatabase::VisitedLinkWithUrlEnumerator iter;
+    if (db->InitVisitedLinkWithUrlEnumeratorForEverything(iter)) {
+      VisitedLinkRow row;
+      GURL link_url;
+      while (iter.GetNextVisitedLink(row, link_url)) {
+        net::SchemefulSite top_level_site(row.top_level_url);
+        url::Origin frame_origin = url::Origin::Create(row.frame_url);
+        enumerator_->OnVisitedLink(link_url, top_level_site, frame_origin);
+      }
+      success = true;
+    }
+  }
+  enumerator_->OnVisitedLinkComplete(success);
+  return true;
+}
+
+void IterateVisitedLinkDBTask::DoneRunOnMainThread() {}
+
 }  // namespace
 
 ContentVisitDelegate::ContentVisitDelegate(
     content::BrowserContext* browser_context)
-    : history_service_(nullptr),
-      visitedlink_writer_(
-          new visitedlink::VisitedLinkWriter(browser_context, this, true)) {}
+    : history_service_(nullptr) {
+  // To keep the partitioned visited links experiments performant, we will only
+  // construct and initialize one writer (partitioned or unpartitioned) at a
+  // time. Callers of either `partitioned_writer_` or `visitedlink_writer_`
+  // should ensure the pointer is not null before use.
+  if (base::FeatureList::IsEnabled(
+          blink::features::kPartitionVisitedLinkDatabaseWithSelfLinks)) {
+    partitioned_writer_ =
+        std::make_unique<visitedlink::PartitionedVisitedLinkWriter>(
+            browser_context, this);
+  } else {
+    visitedlink_writer_ = std::make_unique<visitedlink::VisitedLinkWriter>(
+        browser_context, this, true);
+  }
+}
 
 ContentVisitDelegate::~ContentVisitDelegate() {
 }
@@ -97,30 +150,98 @@ ContentVisitDelegate::~ContentVisitDelegate() {
 bool ContentVisitDelegate::Init(HistoryService* history_service) {
   DCHECK(history_service);
   history_service_ = history_service;
+  // To keep the partitioned visited links experiments performant, we will only
+  // construct and initialize one writer (partitioned or unpartitioned) at a
+  // time. Callers of either `partitioned_writer_` or `visitedlink_writer_`
+  // should ensure the pointer is not null before use.
+  if (base::FeatureList::IsEnabled(
+          blink::features::kPartitionVisitedLinkDatabaseWithSelfLinks)) {
+    DCHECK(partitioned_writer_);
+    return partitioned_writer_->Init();
+  }
+  DCHECK(visitedlink_writer_);
   return visitedlink_writer_->Init();
 }
 
 void ContentVisitDelegate::AddURL(const GURL& url) {
-  visitedlink_writer_->AddURL(url);
+  // Not all callers of AddURL will have partitioning disabled. We should
+  // only add URLs when the unpartitioned table is available.
+  if (visitedlink_writer_) {
+    visitedlink_writer_->AddURL(url);
+  }
 }
 
 void ContentVisitDelegate::AddURLs(const std::vector<GURL>& urls) {
-  visitedlink_writer_->AddURLs(urls);
+  // Not all callers of AddURLs will have partitioning disabled. We should
+  // only add URLs when the unpartitioned table is available.
+  if (visitedlink_writer_) {
+    visitedlink_writer_->AddURLs(urls);
+  }
 }
 
 void ContentVisitDelegate::DeleteURLs(const std::vector<GURL>& urls) {
-  URLIteratorFromURLs iterator(urls);
-  visitedlink_writer_->DeleteURLs(&iterator);
+  // Not all callers of DeleteURLs will have partitioning disabled. We should
+  // only delete URLs when the unpartitioned table is available.
+  if (visitedlink_writer_) {
+    visitedlink_writer_->DeleteURLs(urls);
+  }
 }
 
 void ContentVisitDelegate::DeleteAllURLs() {
-  visitedlink_writer_->DeleteAllURLs();
+  // Not all callers of DeleteAllURLs will have partitioning disabled. We should
+  // only delete URLs when the unpartitioned table is available.
+  if (visitedlink_writer_) {
+    visitedlink_writer_->DeleteAllURLs();
+  }
+}
+
+void ContentVisitDelegate::AddVisitedLink(const VisitedLink& link) {
+  // Not all callers of AddVisitedLink will have partitioning enabled. We should
+  // only add visited links when the partitioned table is available.
+  if (partitioned_writer_) {
+    partitioned_writer_->AddVisitedLink(link);
+  }
+}
+
+void ContentVisitDelegate::DeleteVisitedLinks(
+    const std::vector<VisitedLink>& links) {
+  // Not all callers of DeleteVisitedLinks will have partitioning enabled. We
+  // should only delete visited links when the partitioned table is available.
+  if (partitioned_writer_) {
+    partitioned_writer_->DeleteVisitedLinks(links);
+  }
+}
+
+void ContentVisitDelegate::DeleteAllVisitedLinks() {
+  // Not all callers of DeleteAllVisitedLinks will have partitioning enabled. We
+  // should only delete visited links when the partitioned table is available.
+  if (partitioned_writer_) {
+    partitioned_writer_->DeleteAllVisitedLinks();
+  }
+}
+
+std::optional<uint64_t> ContentVisitDelegate::GetOrAddOriginSalt(
+    const url::Origin& origin) {
+  // This function should only be called when
+  // `kPartitionVisitedLinkDatabaseWithSelfLinks` is enabled, meaning
+  // partitioned_writer_ should be constructed and init.
+  if (partitioned_writer_) {
+    return partitioned_writer_->GetOrAddOriginSalt(origin);
+  }
+  return std::nullopt;
 }
 
 void ContentVisitDelegate::RebuildTable(
     const scoped_refptr<URLEnumerator>& enumerator) {
   DCHECK(history_service_);
   std::unique_ptr<HistoryDBTask> task(new IterateUrlsDBTask(enumerator));
+  history_service_->ScheduleDBTask(FROM_HERE, std::move(task), &task_tracker_);
+}
+
+void ContentVisitDelegate::BuildVisitedLinkTable(
+    const scoped_refptr<VisitedLinkEnumerator>& enumerator) {
+  DCHECK(history_service_);
+  std::unique_ptr<HistoryDBTask> task(new IterateVisitedLinkDBTask(enumerator));
   history_service_->ScheduleDBTask(FROM_HERE, std::move(task), &task_tracker_);
 }
 

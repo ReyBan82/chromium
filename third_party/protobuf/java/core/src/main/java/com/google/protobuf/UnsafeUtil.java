@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -40,6 +17,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /** Utility class for working with unsafe operations. */
+@SuppressWarnings("removal")
 final class UnsafeUtil {
   private static final sun.misc.Unsafe UNSAFE = getUnsafe();
   private static final Class<?> MEMORY_CLASS = Android.getMemoryClass();
@@ -89,10 +67,6 @@ final class UnsafeUtil {
 
   static boolean hasUnsafeByteBufferOperations() {
     return HAS_UNSAFE_BYTEBUFFER_OPERATIONS;
-  }
-
-  static boolean isAndroid64() {
-    return IS_ANDROID_64;
   }
 
   @SuppressWarnings("unchecked") // safe by method contract
@@ -286,6 +260,7 @@ final class UnsafeUtil {
   /**
    * Gets the {@code sun.misc.Unsafe} instance, or {@code null} if not available on this platform.
    */
+  @SuppressWarnings("removal") // We gracefully fall back when Unsafe is not available.
   static sun.misc.Unsafe getUnsafe() {
     sun.misc.Unsafe unsafe = null;
     try {
@@ -311,7 +286,30 @@ final class UnsafeUtil {
       // Catching Throwable here due to the fact that Google AppEngine raises NoClassDefFoundError
       // for Unsafe.
     }
-    return unsafe;
+
+    if (unsafe == null) {
+      return null;
+    }
+
+    // Unsafe is terminally deprecated and will be removed in a future version. Our runtime is
+    // anyway compatible with environments where Unsafe is not available, but as part of the removal
+    // some environments will have Unsafe available but throw on use, which would break us. To check
+    // if the JDK is in this state, simply try using a method and see if it does throw.
+    try {
+      int unused = unsafe.arrayBaseOffset(byte[].class);
+      return unsafe;
+    } catch (Exception unused) {
+      Logger.getLogger(UnsafeUtil.class.getName())
+          .log(
+              Level.WARNING,
+              "As part of the planned removal, sun.misc.Unsafe is available in the current"
+                  + " environment but configured to throw on use. Protobuf will continue without"
+                  + " using it, but with slightly reduced performance."
+                  + " --sun-misc-unsafe-memory-access=allow is likely available to opt back in if"
+                  + " desired. A later Protobuf version release will stop using sun.misc.Unsafe"
+                  + " entirely.");
+      return null;
+    }
   }
 
   /** Get a {@link MemoryAccessor} appropriate for the platform, or null if not supported. */

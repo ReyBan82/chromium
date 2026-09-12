@@ -30,7 +30,7 @@ base::Value CreateKilobyte() {
 
 // Creates a megabyte of data.
 base::Value CreateMegabyte() {
-  base::Value::List megabyte;
+  base::ListValue megabyte;
   for (int i = 0; i < 1000; ++i) {
     megabyte.Append(CreateKilobyte());
   }
@@ -72,23 +72,23 @@ scoped_refptr<const Extension> AddExtensionWithIdAndPermissions(
     const std::string& id,
     Manifest::Type type,
     const std::set<std::string>& permissions_set) {
-  base::Value::Dict manifest;
-  manifest.Set("name", std::string("Test extension ") + id);
+  auto manifest =
+      base::DictValue().Set("name", std::string("Test extension ") + id);
   manifest.Set("version", "1.0");
   manifest.Set("manifest_version", 2);
 
-  base::Value::List permissions;
+  base::ListValue permissions;
   for (const auto& perm : permissions_set)
     permissions.Append(perm);
   manifest.Set("permissions", std::move(permissions));
 
   switch (type) {
-    case Manifest::TYPE_EXTENSION:
+    case Manifest::Type::kExtension:
       break;
 
-    case Manifest::TYPE_LEGACY_PACKAGED_APP: {
-      base::Value::Dict app;
-      base::Value::Dict app_launch;
+    case Manifest::Type::kLegacyPackagedApp: {
+      base::DictValue app;
+      base::DictValue app_launch;
       app_launch.Set("local_path", "fake.html");
       app.Set("launch", std::move(app_launch));
       manifest.Set("app", std::move(app));
@@ -99,7 +99,7 @@ scoped_refptr<const Extension> AddExtensionWithIdAndPermissions(
       NOTREACHED();
   }
 
-  std::string error;
+  std::u16string error;
   scoped_refptr<const Extension> extension(
       Extension::Create(base::FilePath(), mojom::ManifestLocation::kInternal,
                         manifest, Extension::NO_FLAGS, id, &error));

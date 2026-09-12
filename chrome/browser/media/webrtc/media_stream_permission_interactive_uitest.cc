@@ -3,16 +3,13 @@
 // found in the LICENSE file.
 
 #include "base/command_line.h"
-#include "base/files/file_util.h"
 #include "base/run_loop.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/media/webrtc/webrtc_browsertest_base.h"
 #include "chrome/browser/media/webrtc/webrtc_browsertest_common.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -20,7 +17,6 @@
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
 #include "components/content_settings/core/common/content_settings_types.h"
-#include "content/public/browser/notification_service.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -35,13 +31,13 @@
 
 class MediaStreamPermissionTest : public WebRtcTestBase {
  public:
-  MediaStreamPermissionTest() {}
+  MediaStreamPermissionTest() = default;
 
   MediaStreamPermissionTest(const MediaStreamPermissionTest&) = delete;
   MediaStreamPermissionTest& operator=(const MediaStreamPermissionTest&) =
       delete;
 
-  ~MediaStreamPermissionTest() override {}
+  ~MediaStreamPermissionTest() override = default;
 
   // InProcessBrowserTest:
   void SetUp() override {
@@ -67,11 +63,11 @@ class MediaStreamPermissionTest : public WebRtcTestBase {
                                           ContentSettingsType setting_to_clear,
                                           bool should_video_stop) {
     HostContentSettingsMap* settings_map =
-        HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+        HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
 
     content::WebContents* tab_contents = LoadTestPageInTab();
     ASSERT_EQ(tab_contents,
-              browser()->tab_strip_model()->GetActiveWebContents());
+              browser()->GetTabStripModel()->GetActiveWebContents());
 
     EXPECT_TRUE(GetUserMediaWithSpecificConstraintsAndAcceptIfPrompted(
         tab_contents, constraints));
@@ -110,7 +106,7 @@ class MediaStreamPermissionTest : public WebRtcTestBase {
   }
 
  private:
-  content::WebContents* LoadTestPageInBrowser(Browser* browser) {
+  content::WebContents* LoadTestPageInBrowser(BrowserWindowInterface* browser) {
     if (!embedded_test_server()->Started()) {
       EXPECT_TRUE(embedded_test_server()->Start());
     }
@@ -121,7 +117,7 @@ class MediaStreamPermissionTest : public WebRtcTestBase {
     EXPECT_TRUE(network::IsUrlPotentiallyTrustworthy(url));
 
     EXPECT_TRUE(ui_test_utils::NavigateToURL(browser, url));
-    return browser->tab_strip_model()->GetActiveWebContents();
+    return browser->GetTabStripModel()->GetActiveWebContents();
   }
 };
 
@@ -129,17 +125,19 @@ class MediaStreamPermissionTest : public WebRtcTestBase {
 
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest, TestAllowingUserMedia) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
   EXPECT_TRUE(GetUserMediaAndAccept(tab_contents));
 }
 
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest, TestDenyingUserMedia) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
   GetUserMediaAndDeny(tab_contents);
 }
 
-// Disabled: https://crbug.com/1263442
+// Disabled: https://crbug.com/40800207
 #if defined(THREAD_SANITIZER)
 #define MAYBE_TestDismissingRequest DISABLED_TestDismissingRequest
 #else
@@ -147,7 +145,8 @@ IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest, TestDenyingUserMedia) {
 #endif
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest, MAYBE_TestDismissingRequest) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
   GetUserMediaAndDismiss(tab_contents);
 }
 
@@ -160,7 +159,8 @@ IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
                        TestSecureOriginDenyIsSticky) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
   EXPECT_TRUE(network::IsUrlPotentiallyTrustworthy(
       tab_contents->GetLastCommittedURL()));
 
@@ -173,7 +173,8 @@ IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
   content::WebContents* tab_contents = LoadTestPageInTab();
   EXPECT_TRUE(network::IsUrlPotentiallyTrustworthy(
       tab_contents->GetLastCommittedURL()));
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
 
   EXPECT_TRUE(GetUserMediaAndAccept(tab_contents));
   GetUserMediaAndExpectAutoAcceptWithoutPrompt(tab_contents);
@@ -181,7 +182,8 @@ IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
 
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest, TestDismissIsNotSticky) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
 
   GetUserMediaAndDismiss(tab_contents);
   GetUserMediaAndDismiss(tab_contents);
@@ -190,26 +192,29 @@ IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest, TestDismissIsNotSticky) {
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
                        TestDenyingThenClearingStickyException) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
 
   GetUserMediaAndDeny(tab_contents);
   GetUserMediaAndExpectAutoDenyWithoutPrompt(tab_contents);
 
   HostContentSettingsMap* settings_map =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
 
   settings_map->ClearSettingsForOneType(ContentSettingsType::MEDIASTREAM_MIC);
   settings_map->ClearSettingsForOneType(
       ContentSettingsType::MEDIASTREAM_CAMERA);
 
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
   GetUserMediaAndDeny(tab_contents);
 }
 
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
                        DenyingMicDoesNotCauseStickyDenyForCameras) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
 
   GetUserMediaWithSpecificConstraintsAndDeny(tab_contents,
                                              kAudioOnlyCallConstraints);
@@ -220,7 +225,8 @@ IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
 IN_PROC_BROWSER_TEST_F(MediaStreamPermissionTest,
                        DenyingCameraDoesNotCauseStickyDenyForMics) {
   content::WebContents* tab_contents = LoadTestPageInTab();
-  ASSERT_EQ(tab_contents, browser()->tab_strip_model()->GetActiveWebContents());
+  ASSERT_EQ(tab_contents,
+            browser()->GetTabStripModel()->GetActiveWebContents());
 
   GetUserMediaWithSpecificConstraintsAndDeny(tab_contents,
                                              kVideoOnlyCallConstraints);

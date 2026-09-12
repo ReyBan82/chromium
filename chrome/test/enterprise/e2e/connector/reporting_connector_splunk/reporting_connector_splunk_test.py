@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import logging
 from datetime import datetime
 
 from chrome_ent_test.infra.core import before_all
@@ -10,6 +11,7 @@ from chrome_ent_test.infra.core import environment
 from chrome_ent_test.infra.core import test
 from .. import ChromeReportingConnectorTestCase, VerifyContent
 from .splunk_server import SplunkApiService
+
 
 @category("chrome_only")
 @environment(file="../connector_test.asset.textpb")
@@ -29,11 +31,14 @@ class ReportingConnectorwithSplunkTest(ChromeReportingConnectorTestCase):
     testStartTime = datetime.utcnow()
 
     # trigger malware event & get device id from browser
-    deviceId = self.TriggerUnsafeBrowsingEvent()
+    deviceId, histogram = self.TriggerUnsafeBrowsingEvent()
+    logging.info('Histogram: %s', histogram)
 
     # read service account private key from gs-bucket & write into local
     apiService = SplunkApiService(
-        self.GetFileFromGCSBucket('secrets/splunkInstances.json'))
+      self.GetFileFromGCSBucket('secrets/splunkInstances.json')
+    )
     self.TryVerifyUntilTimeout(
-        verifyClass=apiService,
-        content=VerifyContent(deviceId=deviceId, timestamp=testStartTime))
+      verifyClass=apiService,
+      content=VerifyContent(deviceId=deviceId, timestamp=testStartTime),
+    )

@@ -3,21 +3,21 @@
 # found in the LICENSE file.
 """Helper methods for GPU unittests."""
 
-from __future__ import print_function
-
 import typing
+
+from unexpected_passes_common import unittest_utils as uu
 
 from unexpected_passes import gpu_expectations
 from unexpected_passes import gpu_queries
-from unexpected_passes_common import unittest_utils as uu
 
 
 def CreateGenericGpuQuerier(*args, **kwargs) -> gpu_queries.GpuBigQueryQuerier:
   return typing.cast(
-      gpu_queries.GpuBigQueryQuerier,
-      uu.CreateGenericQuerier(cls=gpu_queries.GpuBigQueryQuerier,
-                              *args,
-                              **kwargs))
+    gpu_queries.GpuBigQueryQuerier,
+    uu.CreateGenericQuerier(
+      cls=gpu_queries.GpuBigQueryQuerier, *args, **kwargs
+    ),
+  )
 
 
 class GenericGpuExpectations(gpu_expectations.GpuExpectations):
@@ -28,6 +28,5 @@ class GenericGpuExpectations(gpu_expectations.GpuExpectations):
     return """\
 # tags: [ linux mac win ]
 # tags: [ amd intel nvidia ]
-# tags: [ webgl-version-1]
 # results: [ Failure RetryOnFailure Skip Pass ]
 """

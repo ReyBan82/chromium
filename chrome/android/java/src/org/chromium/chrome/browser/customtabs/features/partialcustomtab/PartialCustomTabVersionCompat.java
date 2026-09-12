@@ -5,28 +5,34 @@
 package org.chromium.chrome.browser.customtabs.features.partialcustomtab;
 
 import android.app.Activity;
+import android.graphics.Insets;
 import android.graphics.Point;
+import android.graphics.Rect;
 import android.os.Build;
 import android.util.DisplayMetrics;
 import android.view.Display;
+import android.view.DisplayCutout;
+import android.view.Surface;
 import android.view.View;
+import android.view.View.OnLayoutChangeListener;
 import android.view.WindowInsets;
 import android.view.WindowInsetsAnimation;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.annotation.Px;
 import androidx.annotation.RequiresApi;
 
 import org.chromium.base.Callback;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.customtabs.features.CustomTabDimensionUtils;
 import org.chromium.chrome.browser.multiwindow.MultiWindowUtils;
 import org.chromium.ui.KeyboardVisibilityDelegate;
+import org.chromium.ui.base.DeviceFormFactor;
 
 import java.util.List;
 
-/**
- * Collection of methods that differ in the implementation per OS build version.
- */
+/** Collection of methods that differ in the implementation per OS build version. */
+@NullMarked
 abstract class PartialCustomTabVersionCompat {
     protected final Activity mActivity;
     protected final Runnable mPositionUpdater;
@@ -50,11 +56,17 @@ abstract class PartialCustomTabVersionCompat {
     /** Returns display width in dp */
     abstract int getDisplayWidthDp();
 
+    /** Returns screen width including system UI area. */
+    abstract @Px int getScreenWidth();
+
     /** Returns the status bar height */
-    abstract @Px int getStatusbarHeight();
+    abstract @Px int getStatusBarHeight();
 
     /** Returns the bottom navigation bar height */
     abstract @Px int getNavbarHeight();
+
+    /** Offset of x with respect to the origin, where the content area begins. */
+    abstract @Px int getXOffset();
 
     /**
      * Sets the callback to invoke when IME (soft keyboard) visible state is updated.
@@ -67,7 +79,7 @@ abstract class PartialCustomTabVersionCompat {
     /** Implementation that supports R+ */
     @RequiresApi(Build.VERSION_CODES.R)
     private static class PartialCustomTabVersionCompatR extends PartialCustomTabVersionCompat {
-        private WindowInsetsAnimation.Callback mAnimCallback;
+        private WindowInsetsAnimation.@Nullable Callback mAnimCallback;
 
         private PartialCustomTabVersionCompatR(Activity activity, Runnable positionUpdater) {
             super(activity, positionUpdater);
@@ -81,13 +93,23 @@ abstract class PartialCustomTabVersionCompat {
         @Override
         @Px
         int getDisplayHeight() {
-            return mActivity.getWindowManager().getCurrentWindowMetrics().getBounds().height();
+            return windowBounds().height();
         }
 
         @Override
         @Px
         int getDisplayWidth() {
-            return mActivity.getWindowManager().getCurrentWindowMetrics().getBounds().width();
+            return CustomTabDimensionUtils.getDisplayWidthR(mActivity);
+        }
+
+        @Override
+        @Px
+        int getScreenWidth() {
+            return windowBounds().width();
+        }
+
+        private Rect windowBounds() {
+            return mActivity.getWindowManager().getCurrentWindowMetrics().getBounds();
         }
 
         @Override
@@ -97,8 +119,9 @@ abstract class PartialCustomTabVersionCompat {
 
         @Override
         @Px
-        int getStatusbarHeight() {
-            return mActivity.getWindowManager()
+        int getStatusBarHeight() {
+            return mActivity
+                    .getWindowManager()
                     .getCurrentWindowMetrics()
                     .getWindowInsets()
                     .getInsets(WindowInsets.Type.statusBars())
@@ -108,35 +131,49 @@ abstract class PartialCustomTabVersionCompat {
         @Override
         @Px
         int getNavbarHeight() {
-            return mActivity.getWindowManager()
-                    .getCurrentWindowMetrics()
-                    .getWindowInsets()
-                    .getInsets(WindowInsets.Type.navigationBars())
-                    .bottom;
+            return navigationBarInsets().bottom;
         }
 
         @Override
-        boolean setImeStateCallback(Callback<Boolean> callback) {
+        @Px
+        int getXOffset() {
+            return navigationBarInsets().left;
+        }
+
+        private Insets navigationBarInsets() {
+            return mActivity
+                    .getWindowManager()
+                    .getCurrentWindowMetrics()
+                    .getWindowInsets()
+                    .getInsets(WindowInsets.Type.navigationBars());
+        }
+
+        @Override
+        boolean setImeStateCallback(@Nullable Callback<Boolean> callback) {
             boolean update = (callback == null) ^ (mAnimCallback == null);
             if (callback == null && mAnimCallback != null) {
                 mAnimCallback = null;
             } else if (callback != null && mAnimCallback == null) {
-                mAnimCallback = new WindowInsetsAnimation.Callback(
-                        WindowInsetsAnimation.Callback.DISPATCH_MODE_STOP) {
-                    @Override
-                    public WindowInsets onProgress(@NonNull WindowInsets insets,
-                            @NonNull List<WindowInsetsAnimation> runningAnimations) {
-                        return insets;
-                    }
+                mAnimCallback =
+                        new WindowInsetsAnimation.Callback(
+                                WindowInsetsAnimation.Callback.DISPATCH_MODE_STOP) {
+                            @Override
+                            public WindowInsets onProgress(
+                                    WindowInsets insets,
+                                    List<WindowInsetsAnimation> runningAnimations) {
+                                return insets;
+                            }
 
-                    @Override
-                    public void onEnd(@NonNull WindowInsetsAnimation animation) {
-                        WindowInsets insets = mActivity.getWindowManager()
-                                                      .getCurrentWindowMetrics()
-                                                      .getWindowInsets();
-                        callback.onResult(insets.isVisible(WindowInsets.Type.ime()));
-                    }
-                };
+                            @Override
+                            public void onEnd(WindowInsetsAnimation animation) {
+                                WindowInsets insets =
+                                        mActivity
+                                                .getWindowManager()
+                                                .getCurrentWindowMetrics()
+                                                .getWindowInsets();
+                                callback.onResult(insets.isVisible(WindowInsets.Type.ime()));
+                            }
+                        };
             }
             if (update) {
                 View view = mActivity.getWindow().getDecorView();
@@ -153,7 +190,7 @@ abstract class PartialCustomTabVersionCompat {
 
     /** Implementation that supports version below R */
     private static class PartialCustomTabVersionCompatLegacy extends PartialCustomTabVersionCompat {
-        private View.OnLayoutChangeListener mLayoutListener;
+        private @Nullable OnLayoutChangeListener mLayoutListener;
 
         private PartialCustomTabVersionCompatLegacy(Activity activity, Runnable positionUpdater) {
             super(activity, positionUpdater);
@@ -169,14 +206,23 @@ abstract class PartialCustomTabVersionCompat {
             // attempted later again by |onPostInflationStartUp|.
             if (contentFrame == null) return;
 
-            contentFrame.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
-                @Override
-                public void onLayoutChange(View v, int left, int top, int right, int bottom,
-                        int oldLeft, int oldTop, int oldRight, int oldBottom) {
-                    contentFrame.removeOnLayoutChangeListener(this);
-                    mPositionUpdater.run();
-                }
-            });
+            contentFrame.addOnLayoutChangeListener(
+                    new OnLayoutChangeListener() {
+                        @Override
+                        public void onLayoutChange(
+                                View v,
+                                int left,
+                                int top,
+                                int right,
+                                int bottom,
+                                int oldLeft,
+                                int oldTop,
+                                int oldRight,
+                                int oldBottom) {
+                            contentFrame.removeOnLayoutChangeListener(this);
+                            mPositionUpdater.run();
+                        }
+                    });
         }
 
         // TODO(jinsukkim): Explore the way to use androidx.window.WindowManager or
@@ -193,8 +239,13 @@ abstract class PartialCustomTabVersionCompat {
         @Override
         @Px
         int getDisplayWidth() {
-            DisplayMetrics displayMetrics = getDisplayMetrics();
-            return displayMetrics.widthPixels;
+            return CustomTabDimensionUtils.getDisplayWidth(mActivity);
+        }
+
+        @Override
+        @Px
+        int getScreenWidth() {
+            return getDisplayMetrics().widthPixels;
         }
 
         @Override
@@ -206,7 +257,7 @@ abstract class PartialCustomTabVersionCompat {
         @Override
         @SuppressWarnings("DiscouragedApi")
         @Px
-        int getStatusbarHeight() {
+        int getStatusBarHeight() {
             int statusBarHeight = 0;
             final int statusBarHeightResourceId =
                     mActivity.getResources().getIdentifier("status_bar_height", "dimen", "android");
@@ -230,7 +281,8 @@ abstract class PartialCustomTabVersionCompat {
             // On some devices, only one returns the right height, the other returning a height
             // bigger that the actual value. Heuristically we choose the smaller of the two.
             return getDisplayHeight()
-                    - Math.max(getAppUsableScreenHeightFromContent(),
+                    - Math.max(
+                            getAppUsableScreenHeightFromContent(),
                             getAppUsableScreenHeightFromDisplay());
         }
 
@@ -240,7 +292,7 @@ abstract class PartialCustomTabVersionCompat {
             // matter) doesn't have the top action bar. So getting the height of |content| is
             // enough.
             View contentFrame = mActivity.findViewById(android.R.id.content);
-            return contentFrame.getHeight() + getStatusbarHeight();
+            return contentFrame.getHeight() + getStatusBarHeight();
         }
 
         private int getAppUsableScreenHeightFromDisplay() {
@@ -251,7 +303,27 @@ abstract class PartialCustomTabVersionCompat {
         }
 
         @Override
-        boolean setImeStateCallback(Callback<Boolean> callback) {
+        @Px
+        int getXOffset() {
+            Display display = mActivity.getWindowManager().getDefaultDisplay();
+            if (!DeviceFormFactor.isNonMultiDisplayContextOnTablet(mActivity)
+                    && display.getRotation() == Surface.ROTATION_270) {
+                // On the phone in reverse-landscape mode, navigation bar is located on the left
+                // side of the screen. The origin of x should be offset as much.
+                // |getDisplayWidth()| already takes into account the display cutout insets on
+                // both sides. Subtract the right inset since it doesn't affect the offset.
+                return getScreenWidth() - getDisplayWidth() - getDisplayCutoutRightInset(display);
+            }
+            return 0;
+        }
+
+        private static int getDisplayCutoutRightInset(Display display) {
+            DisplayCutout cutout = display.getCutout();
+            return cutout != null ? cutout.getSafeInsetRight() : 0;
+        }
+
+        @Override
+        boolean setImeStateCallback(@Nullable Callback<Boolean> callback) {
             View contentFrame = mActivity.findViewById(android.R.id.content);
             if (callback == null && mLayoutListener != null) {
                 contentFrame.removeOnLayoutChangeListener(mLayoutListener);
@@ -261,16 +333,18 @@ abstract class PartialCustomTabVersionCompat {
                 // Ignores the callback if already added.
                 mLayoutListener =
                         (view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
-                    if (oldBottom - oldTop >= bottom - top) return;
+                            if (oldBottom - oldTop >= bottom - top) return;
 
-                    // Note that keyboard visibility might not always be correct - i.e. can be false
-                    // when it is visible. In worst case, tab is back to initial height and remains
-                    // hidden by the keyboard. Users either have to dismiss the keyboard, or expand
-                    // the tab (in non-fixed-height mode) to use it again.
-                    boolean imeVisible = KeyboardVisibilityDelegate.getInstance().isKeyboardShowing(
-                            mActivity, view);
-                    callback.onResult(imeVisible);
-                };
+                            // Note that keyboard visibility might not always be correct - i.e. can
+                            // be false when it is visible. In worst case, tab is back to initial
+                            // height and remains hidden by the keyboard. Users either have to
+                            // dismiss the keyboard, or expand the tab (in non-fixed-height mode)
+                            // to use it again.
+                            boolean imeVisible =
+                                    KeyboardVisibilityDelegate.getInstance()
+                                            .isKeyboardShowing(view);
+                            callback.onResult(imeVisible);
+                        };
                 contentFrame.addOnLayoutChangeListener(mLayoutListener);
                 return true;
             }

@@ -10,7 +10,8 @@
 #include "base/component_export.h"
 #include "base/containers/flat_set.h"
 #include "base/time/time.h"
-#include "chromeos/crosapi/mojom/local_printer.mojom.h"
+#include "base/values.h"
+#include "printing/cups_printer_status_reason_ash.h"
 
 namespace chromeos {
 
@@ -19,6 +20,11 @@ struct PrinterAuthenticationInfo {
   // URI of OAuth2 Authorization Server and scope. Empty strings if not set.
   std::string oauth_server;
   std::string oauth_scope;
+
+  bool operator==(const PrinterAuthenticationInfo& other) const {
+    return oauth_server == other.oauth_server &&
+           oauth_scope == other.oauth_scope;
+  }
 };
 
 // A container for the results of a printer status query. A printer status query
@@ -31,8 +37,8 @@ class COMPONENT_EXPORT(CHROMEOS_PRINTING) CupsPrinterStatus {
   // severity, which is the level of seriousness of that state.
   class COMPONENT_EXPORT(CHROMEOS_PRINTING) CupsPrinterStatusReason {
    public:
-    using Reason = crosapi::mojom::StatusReason::Reason;
-    using Severity = crosapi::mojom::StatusReason::Severity;
+    using Reason = ::printing::CupsPrinterStatusReason;
+    using Severity = ::printing::CupsPrinterStatusSeverity;
 
     CupsPrinterStatusReason(const Reason& reason, const Severity& severity);
     ~CupsPrinterStatusReason();
@@ -66,6 +72,11 @@ class COMPONENT_EXPORT(CHROMEOS_PRINTING) CupsPrinterStatus {
 
   ~CupsPrinterStatus();
 
+  bool operator==(const CupsPrinterStatus& other) const {
+    return status_reasons_ == other.status_reasons_ &&
+           auth_info_ == other.auth_info_;
+  }
+
   const std::string& GetPrinterId() const;
 
   // Returns set of status reasons. Each reason describing status of the
@@ -83,6 +94,8 @@ class COMPONENT_EXPORT(CHROMEOS_PRINTING) CupsPrinterStatus {
                        const CupsPrinterStatusReason::Severity& severity);
 
   void SetAuthenticationInfo(const PrinterAuthenticationInfo& auth_info);
+
+  base::DictValue ConvertToValue() const;
 
  private:
   std::string printer_id_;

@@ -32,16 +32,16 @@ bool CSSPropertyName::operator==(const CSSPropertyName& other) const {
   return custom_property_name_ == other.custom_property_name_;
 }
 
-AtomicString CSSPropertyName::ToAtomicString() const {
+const AtomicString& CSSPropertyName::ToAtomicString() const {
   if (IsCustomProperty()) {
     return custom_property_name_;
   }
   return CSSProperty::Get(Id()).GetPropertyNameAtomicString();
 }
 
-unsigned CSSPropertyName::GetHash() const {
+uint32_t CSSPropertyName::GetHash() const {
   if (IsCustomProperty()) {
-    return WTF::GetHash(custom_property_name_);
+    return blink::GetHash(custom_property_name_);
   }
   return value_;
 }

@@ -5,9 +5,10 @@
 #include "chrome/browser/ui/thumbnails/background_thumbnail_video_capturer.h"
 
 #include <stdint.h>
+
 #include <utility>
 
-#include "base/metrics/histogram_macros.h"
+#include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/trace_id_helper.h"
 #include "content/public/browser/render_frame_host.h"
@@ -16,6 +17,8 @@
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 #include "third_party/skia/include/core/SkColorSpace.h"
 #include "ui/gfx/geometry/skia_conversions.h"
 
@@ -28,24 +31,27 @@ BackgroundThumbnailVideoCapturer::BackgroundThumbnailVideoCapturer(
 }
 
 BackgroundThumbnailVideoCapturer::~BackgroundThumbnailVideoCapturer() {
-  if (video_capturer_)
+  if (video_capturer_) {
     Stop();
+  }
 }
 
 void BackgroundThumbnailVideoCapturer::Start(
     const ThumbnailCaptureInfo& capture_info) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (video_capturer_)
+  if (video_capturer_) {
     return;
+  }
 
   content::RenderWidgetHostView* const source_view =
       contents_->GetPrimaryMainFrame()
           ->GetRenderViewHost()
           ->GetWidget()
           ->GetView();
-  if (!source_view)
+  if (!source_view) {
     return;
+  }
 
   capture_info_ = capture_info;
 
@@ -55,8 +61,8 @@ void BackgroundThumbnailVideoCapturer::Start(
     // safe since this is only invoked from the UI thread.
     static uint64_t capture_num GUARDED_BY_CONTEXT(sequence_checker_) = 0;
     cur_capture_num_ = ++capture_num;
-    TRACE_EVENT_NESTABLE_ASYNC_BEGIN0("ui", "Tab.Preview.VideoCapture",
-                                      TRACE_ID_LOCAL(cur_capture_num_));
+    TRACE_EVENT_BEGIN("ui", "Tab.Preview.VideoCapture",
+                      perfetto::Track(cur_capture_num_));
   }
 
   start_time_ = base::TimeTicks::Now();
@@ -76,14 +82,14 @@ void BackgroundThumbnailVideoCapturer::Start(
 void BackgroundThumbnailVideoCapturer::Stop() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!video_capturer_)
+  if (!video_capturer_) {
     return;
+  }
 
   video_capturer_->Stop();
   video_capturer_.reset();
 
-  TRACE_EVENT_NESTABLE_ASYNC_END0("ui", "Tab.Preview.VideoCapture",
-                                  TRACE_ID_LOCAL(cur_capture_num_));
+  TRACE_EVENT_END("ui", perfetto::Track(cur_capture_num_));
   start_time_ = base::TimeTicks();
   cur_capture_num_ = 0;
 }
@@ -97,7 +103,6 @@ void BackgroundThumbnailVideoCapturer::OnFrameCaptured(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   CHECK(video_capturer_);
-  const base::TimeTicks time_of_call = base::TimeTicks::Now();
 
   mojo::Remote<::viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
       callbacks_remote(std::move(callbacks));
@@ -124,22 +129,14 @@ void BackgroundThumbnailVideoCapturer::OnFrameCaptured(
     DLOG(ERROR) << "Shared memory size was less than expected.";
     return;
   }
-  if (!info->color_space) {
-    DLOG(ERROR) << "Missing mandatory color space info.";
-    return;
-  }
 
-  if (num_received_frames_ == 0)
-    UMA_HISTOGRAM_TIMES("Tab.Preview.TimeToFirstUsableFrameAfterStartCapture",
-                        time_of_call - start_time_);
-  TRACE_EVENT_INSTANT1("ui", "Tab.Preview.VideoCaptureFrameReceived",
-                       TRACE_EVENT_SCOPE_THREAD, "frame_number",
-                       num_received_frames_);
+  TRACE_EVENT_INSTANT("ui", "Tab.Preview.VideoCaptureFrameReceived",
+                      "frame_number", num_received_frames_);
   ++num_received_frames_;
 
   uint64_t frame_id = base::trace_event::GetNextGlobalTraceId();
-  TRACE_EVENT_WITH_FLOW0("ui", "Tab.Preview.ProcessVideoCaptureFrame", frame_id,
-                         TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ui", "Tab.Preview.ProcessVideoCaptureFrame",
+              perfetto::Flow::ProcessScoped(frame_id));
 
   // The SkBitmap's pixels will be marked as immutable, but the installPixels()
   // API requires a non-const pointer. So, cast away the const.
@@ -170,14 +167,16 @@ void BackgroundThumbnailVideoCapturer::OnFrameCaptured(
   effective_content_rect.Inset(scroll_insets);
 
   const gfx::Size bitmap_size(content_rect.right(), content_rect.bottom());
+  const SkImageInfo image_info = SkImageInfo::MakeN32(
+      bitmap_size.width(), bitmap_size.height(), kPremul_SkAlphaType,
+      info->color_space.ToSkColorSpace());
+  const size_t row_bytes =
+      media::VideoFrame::RowBytes(media::VideoFrame::Plane::kARGB,
+                                  info->pixel_format, info->coded_size.width());
+  CHECK_GE(mapping.size(), image_info.computeByteSize(row_bytes));
   SkBitmap frame;
   frame.installPixels(
-      SkImageInfo::MakeN32(bitmap_size.width(), bitmap_size.height(),
-                           kPremul_SkAlphaType,
-                           info->color_space->ToSkColorSpace()),
-      pixels,
-      media::VideoFrame::RowBytes(media::VideoFrame::kARGBPlane,
-                                  info->pixel_format, info->coded_size.width()),
+      image_info, pixels, row_bytes,
       [](void* addr, void* context) {
         delete static_cast<FramePinner*>(context);
       },
@@ -193,8 +192,8 @@ void BackgroundThumbnailVideoCapturer::OnFrameCaptured(
   got_frame_callback_.Run(cropped_frame, frame_id);
 }
 
-void BackgroundThumbnailVideoCapturer::OnNewCropVersion(uint32_t crop_version) {
-}
+void BackgroundThumbnailVideoCapturer::OnNewCaptureVersion(
+    const media::CaptureVersion& capture_version) {}
 
 void BackgroundThumbnailVideoCapturer::OnFrameWithEmptyRegionCapture() {}
 

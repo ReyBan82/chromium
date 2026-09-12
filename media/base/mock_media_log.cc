@@ -7,7 +7,10 @@
 
 namespace media {
 
-MockMediaLog::MockMediaLog() = default;
+MockMediaLog::MockMediaLog() {
+  // Disable console logging since the mock log is used in spammy tests.
+  set_should_log_to_debug_console(false);
+}
 
 MockMediaLog::~MockMediaLog() = default;
 
@@ -30,9 +33,7 @@ std::string MockMediaLog::MediaEventToLogString(const MediaLogRecord& event) {
     }
   }
 
-  std::string params_json;
-  base::JSONWriter::Write(event.params, &params_json);
-  return params_json;
+  return base::WriteJson(event.params).value_or("");
 }
 
 }  // namespace media

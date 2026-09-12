@@ -4,6 +4,7 @@
 
 #include "components/site_engagement/content/site_engagement_score.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/test/simple_test_clock.h"
@@ -11,7 +12,6 @@
 #include "base/values.h"
 #include "components/site_engagement/core/mojom/site_engagement_details.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace site_engagement {
 
@@ -27,19 +27,13 @@ const int kMorePeriodsThanNeededToDecayMaxScore = 40;
 const double kMaxRoundingDeviation = 0.0001;
 
 base::Time GetReferenceTime() {
-  base::Time::Exploded exploded_reference_time;
-  exploded_reference_time.year = 2015;
-  exploded_reference_time.month = 1;
-  exploded_reference_time.day_of_month = 30;
-  exploded_reference_time.day_of_week = 5;
-  exploded_reference_time.hour = 11;
-  exploded_reference_time.minute = 0;
-  exploded_reference_time.second = 0;
-  exploded_reference_time.millisecond = 0;
-
+  static constexpr base::Time::Exploded kReferenceTime = {.year = 2015,
+                                                          .month = 1,
+                                                          .day_of_week = 5,
+                                                          .day_of_month = 30,
+                                                          .hour = 11};
   base::Time out_time;
-  EXPECT_TRUE(
-      base::Time::FromLocalExploded(exploded_reference_time, &out_time));
+  EXPECT_TRUE(base::Time::FromLocalExploded(kReferenceTime, &out_time));
   return out_time;
 }
 
@@ -74,11 +68,11 @@ class SiteEngagementScoreTest : public testing::Test {
   }
 
   void TestScoreInitializesAndUpdates(
-      base::Value::Dict score_dict,
+      base::DictValue score_dict,
       double expected_raw_score,
       double expected_points_added_today,
       base::Time expected_last_engagement_time) {
-    base::Value::Dict copy(score_dict.Clone());
+    base::DictValue copy(score_dict.Clone());
 
     SiteEngagementScore initial_score(&test_clock_, GURL(),
                                       std::move(score_dict));
@@ -300,13 +294,13 @@ TEST_F(SiteEngagementScoreTest, GoBackInTime) {
 // Test that scores are read / written correctly from / to empty score
 // dictionaries.
 TEST_F(SiteEngagementScoreTest, EmptyDictionary) {
-  TestScoreInitializesAndUpdates(base::Value::Dict(), 0, 0, base::Time());
+  TestScoreInitializesAndUpdates(base::DictValue(), 0, 0, base::Time());
 }
 
 // Test that scores are read / written correctly from / to partially empty
 // score dictionaries.
 TEST_F(SiteEngagementScoreTest, PartiallyEmptyDictionary) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set(SiteEngagementScore::kPointsAddedTodayKey, 2.);
 
   TestScoreInitializesAndUpdates(std::move(dict), 0, 2, base::Time());
@@ -315,7 +309,7 @@ TEST_F(SiteEngagementScoreTest, PartiallyEmptyDictionary) {
 // Test that scores are read / written correctly from / to populated score
 // dictionaries.
 TEST_F(SiteEngagementScoreTest, PopulatedDictionary) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set(SiteEngagementScore::kRawScoreKey, 1.);
   dict.Set(SiteEngagementScore::kPointsAddedTodayKey, 2.);
   dict.Set(SiteEngagementScore::kLastEngagementTimeKey,
@@ -329,9 +323,9 @@ TEST_F(SiteEngagementScoreTest, FirstDailyEngagementBonus) {
   SetParamValue(SiteEngagementScore::FIRST_DAILY_ENGAGEMENT, 0.5);
 
   SiteEngagementScore score1(&test_clock_, GURL(),
-                             /*score_dict=*/absl::nullopt);
+                             /*score_dict=*/std::nullopt);
   SiteEngagementScore score2(&test_clock_, GURL(),
-                             /*score_dict=*/absl::nullopt);
+                             /*score_dict=*/std::nullopt);
   base::Time current_day = GetReferenceTime();
 
   test_clock_.SetNow(current_day);

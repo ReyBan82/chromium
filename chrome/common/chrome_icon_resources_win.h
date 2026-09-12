@@ -38,12 +38,37 @@ enum {
 
   // The Chrome Beta application icon.
   kBetaApplicationIndex = 9,
+
+  // The Chrome html doc icon.
+  kHtmlDocIndex = 10,
+
+  // The Chrome PDF doc icon.
+  kPDFDocIndex = 11,
+
+  // The Chrome Isolated Mode icon.
+  kIsolatedIndex = 12,
+
+  // The Omnibox Everywhere icon.
+  kOmniboxEverywhereIndex = 13,
+
 #else   // BUILDFLAG(GOOGLE_CHROME_BRANDING)
   // The Chromium App Launcher icon.
   kAppLauncherIndex = 1,
 
   // The Chromium incognito icon.
   kIncognitoIndex = 2,
+
+  // The Chromium html doc icon.
+  kHtmlDocIndex = 3,
+
+  // The Chromium PDF doc icon.
+  kPDFDocIndex = 4,
+
+  // The Chromium Isolated Mode icon.
+  kIsolatedIndex = 5,
+
+  // The Chromium Omnibox Everywhere icon.
+  kOmniboxEverywhereIndex = 6,
 #endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
 };
 

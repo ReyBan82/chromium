@@ -7,54 +7,96 @@ package org.chromium.chrome.browser.history;
 import android.app.Activity;
 import android.net.Uri;
 
-import androidx.annotation.VisibleForTesting;
-
-import org.chromium.base.supplier.Supplier;
+import org.chromium.base.supplier.SupplierUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.history_clusters.HistoryClustersConstants;
+import org.chromium.chrome.browser.back_press.BackPressManager;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.chrome.browser.ui.native_page.BasicNativePage;
 import org.chromium.chrome.browser.ui.native_page.NativePageHost;
+import org.chromium.components.browser_ui.bottomsheet.BottomSheetController;
 import org.chromium.components.embedder_support.util.UrlConstants;
+import org.chromium.ui.base.ActivityResultTracker;
+import org.chromium.ui.base.WindowAndroid;
+import org.chromium.ui.modaldialog.ModalDialogManager;
 
-/**
- * Native page for managing browsing history.
- */
+import java.util.function.Supplier;
+
+/** Native page for managing browsing history. */
+@NullMarked
 public class HistoryPage extends BasicNativePage {
+    private static final String QUERY_PARAM_QUERY = "q";
+
     private HistoryManager mHistoryManager;
-    private String mTitle;
+    private final String mTitle;
 
     /**
      * Create a new instance of the history page.
-     * @param activity The {@link Activity} used to get context and instantiate the
-     *                 {@link HistoryManager}.
+     *
+     * @param profile The Profile of the current tab.
+     * @param windowAndroid The current {@link WindowAndroid} showing the history UI.
+     * @param activity The {@link Activity} used to get context and instantiate the {@link
+     *     HistoryManager}.
      * @param host A NativePageHost to load URLs.
      * @param snackbarManager The {@link SnackbarManager} used to display snackbars.
-     * @param isIncognito Whether the incognito tab model is currently selected.
+     * @param bottomSheetController {@link BottomSheetController} object.
+     * @param modalDialogManagerSupplier Supplies the {@link ModalDialogManager}.
+     * @param activityResultTracker Tracker of activity results.
      * @param tabSupplier Supplies the current tab, null if the history UI will be shown in a
-     *                    separate activity.
+     *     separate activity.
      * @param url The URL used to address the HistoryPage.
      */
-    public HistoryPage(Activity activity, NativePageHost host, SnackbarManager snackbarManager,
-            boolean isIncognito, Supplier<Tab> tabSupplier, String url) {
+    public HistoryPage(
+            Profile profile,
+            WindowAndroid windowAndroid,
+            Activity activity,
+            NativePageHost host,
+            SnackbarManager snackbarManager,
+            BottomSheetController bottomSheetController,
+            Supplier<ModalDialogManager> modalDialogManagerSupplier,
+            ActivityResultTracker activityResultTracker,
+            Supplier<@Nullable Tab> tabSupplier,
+            String url,
+            BackPressManager backPressManager) {
         super(host);
 
         Uri uri = Uri.parse(url);
-        assert uri.getHost().equals(UrlConstants.HISTORY_HOST);
+        assert UrlConstants.HISTORY_HOST.equals(uri.getHost());
 
-        boolean showHistoryClustersImmediately =
-                uri.getPath().contains(HistoryClustersConstants.JOURNEYS_PATH);
-        String historyClustersQuery =
-                uri.getQueryParameter(HistoryClustersConstants.HISTORY_CLUSTERS_QUERY_KEY);
+        mHistoryManager =
+                new HistoryManager(
+                        profile,
+                        windowAndroid,
+                        activity,
+                        /* isSeparateActivity= */ false,
+                        snackbarManager,
+                        SupplierUtils.of(bottomSheetController),
+                        modalDialogManagerSupplier,
+                        activityResultTracker,
+                        tabSupplier,
+                        new BrowsingHistoryBridge(profile.getOriginalProfile()),
+                        new HistoryUmaRecorder(),
+                        null,
+                        /* shouldShowClearData= */ true,
+                        /* launchedForApp= */ false,
+                        /* showAppFilter= */ true,
+                        ChromeFeatureList.isEnabled(ChromeFeatureList.ANDROID_HISTORY_CLUSTERING),
+                        /* openHistoryItemCallback= */ null,
+                        host::createEdgeToEdgePadAdjuster);
+        mTitle = host.getContext().getString(R.string.menu_history);
 
-        mHistoryManager = new HistoryManager(activity, false, snackbarManager, isIncognito,
-                tabSupplier, showHistoryClustersImmediately, historyClustersQuery,
-                new BrowsingHistoryBridge(Profile.getLastUsedRegularProfile()));
-        mTitle = host.getContext().getResources().getString(R.string.menu_history);
+        String query = uri.getQueryParameter(QUERY_PARAM_QUERY);
+        if (query != null) {
+            mHistoryManager.setQuery(query);
+        }
 
         initWithView(mHistoryManager.getView());
+
+        setBackPressHandler(mHistoryManager, backPressManager);
     }
 
     @Override
@@ -68,14 +110,31 @@ public class HistoryPage extends BasicNativePage {
     }
 
     @Override
+    public void updateForUrl(String url) {
+        super.updateForUrl(url);
+        Uri uri = Uri.parse(url);
+        String query = uri.getQueryParameter(QUERY_PARAM_QUERY);
+        if (query != null) {
+            mHistoryManager.setQuery(query);
+        }
+    }
+
+    @SuppressWarnings("NullAway")
+    @Override
     public void destroy() {
         mHistoryManager.onDestroyed();
         mHistoryManager = null;
         super.destroy();
     }
 
-    @VisibleForTesting
-    public HistoryManager getHistoryManagerForTesting() {
+    @Override
+    public void reload() {
+        if (mHistoryManager != null) {
+            mHistoryManager.reload();
+        }
+    }
+
+    public @Nullable HistoryManager getHistoryManagerForTesting() {
         return mHistoryManager;
     }
 }

@@ -17,7 +17,6 @@
 #include "extensions/common/features/feature_provider.h"
 #include "extensions/common/manifest_constants.h"
 #include "extensions/strings/grit/extensions_strings.h"
-#include "ipc/ipc_message.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace extensions {
@@ -64,10 +63,11 @@ BluetoothManifestPermission::~BluetoothManifestPermission() = default;
 std::unique_ptr<BluetoothManifestPermission>
 BluetoothManifestPermission::FromValue(const base::Value& value,
                                        std::u16string* error) {
-  std::unique_ptr<api::extensions_manifest_types::Bluetooth> bluetooth =
-      api::extensions_manifest_types::Bluetooth::FromValue(value, error);
-  if (!bluetooth)
+  auto bluetooth = api::extensions_manifest_types::Bluetooth::FromValue(value);
+  if (!bluetooth.has_value()) {
+    *error = std::move(bluetooth).error();
     return nullptr;
+  }
 
   std::unique_ptr<BluetoothManifestPermission> result(
       new BluetoothManifestPermission());
@@ -128,6 +128,15 @@ PermissionIDSet BluetoothManifestPermission::GetPermissions() const {
   if (!uuids_.empty()) {
     permissions.insert(mojom::APIPermissionID::kBluetoothDevices);
   }
+  if (socket_) {
+    permissions.insert(mojom::APIPermissionID::kBluetoothSocket);
+  }
+  if (low_energy_) {
+    permissions.insert(mojom::APIPermissionID::kBluetoothLowEnergy);
+  }
+  if (peripheral_) {
+    permissions.insert(mojom::APIPermissionID::kBluetoothPeripheral);
+  }
   return permissions;
 }
 
@@ -142,12 +151,26 @@ bool BluetoothManifestPermission::FromValue(const base::Value* value) {
     return false;
 
   uuids_ = manifest_permission->uuids_;
+  socket_ = manifest_permission->socket_;
+  low_energy_ = manifest_permission->low_energy_;
+  peripheral_ = manifest_permission->peripheral_;
   return true;
 }
 
 std::unique_ptr<base::Value> BluetoothManifestPermission::ToValue() const {
   api::extensions_manifest_types::Bluetooth bluetooth;
-  bluetooth.uuids.emplace(uuids_.begin(), uuids_.end());
+  if (!uuids_.empty()) {
+    bluetooth.uuids.emplace(uuids_.begin(), uuids_.end());
+  }
+  if (socket_) {
+    bluetooth.socket = socket_;
+  }
+  if (low_energy_) {
+    bluetooth.low_energy = low_energy_;
+  }
+  if (peripheral_) {
+    bluetooth.peripheral = peripheral_;
+  }
   return std::make_unique<base::Value>(bluetooth.ToValue());
 }
 
@@ -159,6 +182,9 @@ std::unique_ptr<ManifestPermission> BluetoothManifestPermission::Diff(
   auto result = std::make_unique<BluetoothManifestPermission>();
   result->uuids_ = base::STLSetDifference<BluetoothUuidSet>(
       uuids_, other->uuids_);
+  result->socket_ = socket_ && !other->socket_;
+  result->low_energy_ = low_energy_ && !other->low_energy_;
+  result->peripheral_ = peripheral_ && !other->peripheral_;
   return result;
 }
 
@@ -170,6 +196,9 @@ std::unique_ptr<ManifestPermission> BluetoothManifestPermission::Union(
   auto result = std::make_unique<BluetoothManifestPermission>();
   result->uuids_ = base::STLSetUnion<BluetoothUuidSet>(
       uuids_, other->uuids_);
+  result->socket_ = socket_ || other->socket_;
+  result->low_energy_ = low_energy_ || other->low_energy_;
+  result->peripheral_ = peripheral_ || other->peripheral_;
   return result;
 }
 
@@ -181,6 +210,9 @@ std::unique_ptr<ManifestPermission> BluetoothManifestPermission::Intersect(
   auto result = std::make_unique<BluetoothManifestPermission>();
   result->uuids_ = base::STLSetIntersection<BluetoothUuidSet>(
       uuids_, other->uuids_);
+  result->socket_ = socket_ && other->socket_;
+  result->low_energy_ = low_energy_ && other->low_energy_;
+  result->peripheral_ = peripheral_ && other->peripheral_;
   return result;
 }
 

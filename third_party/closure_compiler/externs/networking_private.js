@@ -1,4 +1,4 @@
-// Copyright 2021 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -87,6 +87,25 @@ chrome.networkingPrivate.ProxySettingsType = {
   MANUAL: 'Manual',
   PAC: 'PAC',
   WPAD: 'WPAD',
+};
+
+/**
+ * @enum {string}
+ */
+chrome.networkingPrivate.ApnType = {
+  DEFAULT: 'Default',
+  ATTACH: 'Attach',
+  TETHER: 'Tether',
+};
+
+/**
+ * @enum {string}
+ */
+chrome.networkingPrivate.ApnSource = {
+  MODEM: 'Modem',
+  MODB: 'Modb',
+  UI: 'Ui',
+  ADMIN: 'Admin',
 };
 
 /**
@@ -181,7 +200,9 @@ chrome.networkingPrivate.ManagedProxySettingsType;
  *   LocalizedName: (string|undefined),
  *   Name: (string|undefined),
  *   Password: (string|undefined),
- *   Username: (string|undefined)
+ *   Username: (string|undefined),
+ *   ApnTypes: (!Array<!chrome.networkingPrivate.ApnType>|undefined),
+ *   Source: (!chrome.networkingPrivate.ApnSource|undefined)
  * }}
  */
 chrome.networkingPrivate.APNProperties;
@@ -385,7 +406,9 @@ chrome.networkingPrivate.ManagedXAUTHProperties;
  *   EAP: (!chrome.networkingPrivate.EAPProperties|undefined),
  *   Group: (string|undefined),
  *   IKEVersion: (number|undefined),
+ *   LocalIdentity: (string|undefined),
  *   PSK: (string|undefined),
+ *   RemoteIdentity: (string|undefined),
  *   SaveCredentials: (boolean|undefined),
  *   ServerCAPEMs: (!Array<string>|undefined),
  *   ServerCARefs: (!Array<string>|undefined),
@@ -879,6 +902,7 @@ chrome.networkingPrivate.NetworkConfigProperties;
  *   SavedIPConfig: (!chrome.networkingPrivate.IPConfigProperties|undefined),
  *   Source: (string|undefined),
  *   Tether: (!chrome.networkingPrivate.TetherProperties|undefined),
+ *   TrafficCounterResetTime: (number|undefined),
  *   Type: !chrome.networkingPrivate.NetworkType,
  *   VPN: (!chrome.networkingPrivate.VPNProperties|undefined),
  *   WiFi: (!chrome.networkingPrivate.WiFiProperties|undefined)
@@ -907,6 +931,7 @@ chrome.networkingPrivate.NetworkProperties;
  *   SavedIPConfig: (!chrome.networkingPrivate.IPConfigProperties|undefined),
  *   Source: (string|undefined),
  *   Tether: (!chrome.networkingPrivate.TetherProperties|undefined),
+ *   TrafficCounterResetTime: (number|undefined),
  *   Type: !chrome.networkingPrivate.NetworkType,
  *   VPN: (!chrome.networkingPrivate.ManagedVPNProperties|undefined),
  *   WiFi: (!chrome.networkingPrivate.ManagedWiFiProperties|undefined)
@@ -990,8 +1015,8 @@ chrome.networkingPrivate.CertificateLists;
  * Gets all the properties of the network with id networkGuid. Includes all
  * properties of the network (read-only and read/write values).
  * @param {string} networkGuid The GUID of the network to get properties for.
- * @param {function(!chrome.networkingPrivate.NetworkProperties): void} callback
- *     Called with the network properties when received.
+ * @param {function(!chrome.networkingPrivate.NetworkProperties): void=}
+ *     callback Called with the network properties when received.
  */
 chrome.networkingPrivate.getProperties = function(networkGuid, callback) {};
 
@@ -1000,8 +1025,8 @@ chrome.networkingPrivate.getProperties = function(networkGuid, callback) {};
  * sources: User settings, shared settings, user policy, device policy and the
  * currently active settings.
  * @param {string} networkGuid The GUID of the network to get properties for.
- * @param {function(!chrome.networkingPrivate.ManagedProperties): void} callback
- *     Called with the managed network properties when received.
+ * @param {function(!chrome.networkingPrivate.ManagedProperties): void=}
+ *     callback Called with the managed network properties when received.
  */
 chrome.networkingPrivate.getManagedProperties = function(networkGuid, callback) {};
 
@@ -1014,7 +1039,7 @@ chrome.networkingPrivate.getManagedProperties = function(networkGuid, callback) 
  * ErrorState, WiFi.SignalStrength, Cellular.NetworkTechnology,
  * Cellular.ActivationState, Cellular.RoamingState.
  * @param {string} networkGuid The GUID of the network to get properties for.
- * @param {function(!chrome.networkingPrivate.NetworkStateProperties): void}
+ * @param {function(!chrome.networkingPrivate.NetworkStateProperties): void=}
  *     callback Called immediately with the network state properties.
  */
 chrome.networkingPrivate.getState = function(networkGuid, callback) {};
@@ -1061,7 +1086,7 @@ chrome.networkingPrivate.forgetNetwork = function(networkGuid, callback) {};
  * networks listed first.
  * @param {!chrome.networkingPrivate.NetworkFilter} filter Describes which
  *     networks to return.
- * @param {function(!Array<!chrome.networkingPrivate.NetworkStateProperties>): void}
+ * @param {function(!Array<!chrome.networkingPrivate.NetworkStateProperties>): void=}
  *     callback Called with a dictionary of networks and their state
  *     properties when received.
  */
@@ -1071,7 +1096,7 @@ chrome.networkingPrivate.getNetworks = function(filter, callback) {};
  * Deprecated. Please use $(ref:networkingPrivate.getNetworks) with
  * filter.visible = true instead.
  * @param {!chrome.networkingPrivate.NetworkType} networkType
- * @param {function(!Array<!chrome.networkingPrivate.NetworkStateProperties>): void}
+ * @param {function(!Array<!chrome.networkingPrivate.NetworkStateProperties>): void=}
  *     callback
  * @deprecated Use getNetworks.
  */
@@ -1079,7 +1104,7 @@ chrome.networkingPrivate.getVisibleNetworks = function(networkType, callback) {}
 
 /**
  * Deprecated. Please use $(ref:networkingPrivate.getDeviceStates) instead.
- * @param {function(!Array<!chrome.networkingPrivate.NetworkType>): void}
+ * @param {function(!Array<!chrome.networkingPrivate.NetworkType>): void=}
  *     callback
  * @deprecated Use getDeviceStates.
  */
@@ -1087,7 +1112,7 @@ chrome.networkingPrivate.getEnabledNetworkTypes = function(callback) {};
 
 /**
  * Returns a list of $(ref:networkingPrivate.DeviceStateProperties) objects.
- * @param {function(!Array<!chrome.networkingPrivate.DeviceStateProperties>): void}
+ * @param {function(!Array<!chrome.networkingPrivate.DeviceStateProperties>): void=}
  *     callback Called with a list of devices and their state.
  */
 chrome.networkingPrivate.getDeviceStates = function(callback) {};
@@ -1155,7 +1180,7 @@ chrome.networkingPrivate.startActivate = function(networkGuid, carrier, callback
  * Returns captive portal status for the network matching 'networkGuid'.
  * @param {string} networkGuid The GUID of the network to get captive portal
  *     status for.
- * @param {function(!chrome.networkingPrivate.CaptivePortalStatus): void}
+ * @param {function(!chrome.networkingPrivate.CaptivePortalStatus): void=}
  *     callback A callback function that returns the results of the query for
  *     network captive portal status.
  */
@@ -1205,13 +1230,13 @@ chrome.networkingPrivate.selectCellularMobileNetwork = function(networkGuid, net
 /**
  * Gets the global policy properties. These properties are not expected to
  * change during a session.
- * @param {function(!chrome.networkingPrivate.GlobalPolicy): void} callback
+ * @param {function(!chrome.networkingPrivate.GlobalPolicy): void=} callback
  */
 chrome.networkingPrivate.getGlobalPolicy = function(callback) {};
 
 /**
  * Gets the lists of certificates available for network configuration.
- * @param {function(!chrome.networkingPrivate.CertificateLists): void} callback
+ * @param {function(!chrome.networkingPrivate.CertificateLists): void=} callback
  */
 chrome.networkingPrivate.getCertificateLists = function(callback) {};
 

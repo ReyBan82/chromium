@@ -41,7 +41,7 @@ TEST(CreateUrlCollectionFromFormTest, UrlsFromFederatedForm) {
   federated_form.signon_realm = "federation://example.com/google.com";
   federated_form.url = GURL("https://example.com/");
   federated_form.federation_origin =
-      url::Origin::Create(GURL("https://google.com/"));
+      url::SchemeHostPort(GURL("https://google.com/"));
 
   api::passwords_private::UrlCollection federated_urls =
       CreateUrlCollectionFromCredential(CredentialUIEntry(federated_form));
@@ -132,6 +132,33 @@ TEST_F(IdGeneratorTest, DifferentIdsForDifferentKeys) {
 
   EXPECT_THAT(id_generator().TryGetKey(bar_id), Pointee(Eq(credential1)));
   EXPECT_THAT(id_generator().TryGetKey(baz_id), Pointee(Eq(credential2)));
+}
+
+TEST_F(IdGeneratorTest, DifferentIdsForDifferentPasswordsInSameBucket) {
+  password_manager::PasswordForm form;
+  form.url = GURL("http://foo.com/LoginAuth");
+  form.signon_realm = "http://foo.com/";
+  form.username_value = u"username";
+  form.password_value =
+      password_manager::PasswordString(std::u16string(u"password1"));
+  CredentialUIEntry credential1(form);
+
+  form.password_value =
+      password_manager::PasswordString(std::u16string(u"password2"));
+  CredentialUIEntry credential2(form);
+
+  int id1 = id_generator().GenerateId(credential1);
+  int id2 = id_generator().GenerateId(credential2);
+
+  EXPECT_NE(id1, id2);
+  EXPECT_THAT(id_generator().TryGetKey(id1), Pointee(Eq(credential1)));
+  EXPECT_THAT(id_generator().TryGetKey(id2), Pointee(Eq(credential2)));
+
+  CredentialUIEntry refreshed_credential2(credential2);
+  refreshed_credential2.note = u"new note";
+  EXPECT_EQ(id2, id_generator().GenerateId(refreshed_credential2));
+  EXPECT_THAT(id_generator().TryGetKey(id2),
+              Pointee(Eq(refreshed_credential2)));
 }
 
 TEST_F(IdGeneratorTest, UpdatedCacheWithNewGenerateId) {

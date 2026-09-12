@@ -8,7 +8,6 @@
 
 #include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
-#include "ash/public/cpp/tablet_mode.h"
 #include "base/feature_list.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
@@ -22,6 +21,9 @@ namespace ash {
 
 const char kShelfAutoHideBehaviorAlways[] = "Always";
 const char kShelfAutoHideBehaviorNever[] = "Never";
+
+const char kDeskButtonInShelfShown[] = "Shown";
+const char kDeskButtonInShelfHidden[] = "Hidden";
 
 // If any of the following ShelfAlignment values changed, the ShelfAlignment
 // policy should be updated.
@@ -58,9 +60,9 @@ std::string GetPerDisplayPref(PrefService* prefs,
   std::string pref_key = base::NumberToString(display_id);
   bool has_per_display_prefs = false;
   if (!pref_key.empty()) {
-    const base::Value::Dict& shelf_prefs =
+    const base::DictValue& shelf_prefs =
         prefs->GetDict(prefs::kShelfPreferences);
-    const base::Value::Dict* display_pref = shelf_prefs.FindDict(pref_key);
+    const base::DictValue* display_pref = shelf_prefs.FindDict(pref_key);
     if (display_pref) {
       const std::string* per_display_value =
           display_pref->FindStringByDottedPath(path);
@@ -72,7 +74,8 @@ std::string GetPerDisplayPref(PrefService* prefs,
     // and check if the prefs for other display is already specified.
     std::string unused_value;
     for (const auto iter : shelf_prefs) {
-      if (iter.second.is_dict() && iter.second.FindStringPath(path)) {
+      if (iter.second.is_dict() &&
+          iter.second.GetDict().FindStringByDottedPath(path)) {
         has_per_display_prefs = true;
         break;
       }
@@ -110,7 +113,6 @@ const char* AlignmentToPref(ShelfAlignment alignment) {
       return nullptr;
   }
   NOTREACHED();
-  return nullptr;
 }
 
 ShelfAutoHideBehavior AutoHideBehaviorFromPref(const std::string& value) {
@@ -136,7 +138,6 @@ const char* AutoHideBehaviorToPref(ShelfAutoHideBehavior behavior) {
       return nullptr;
   }
   NOTREACHED();
-  return nullptr;
 }
 
 }  // namespace
@@ -149,10 +150,10 @@ void SetPerDisplayShelfPref(PrefService* prefs,
     return;
 
   // Avoid ScopedDictPrefUpdate's notifications for read but unmodified prefs.
-  const base::Value::Dict& current_shelf_prefs =
+  const base::DictValue& current_shelf_prefs =
       prefs->GetDict(prefs::kShelfPreferences);
   std::string display_key = base::NumberToString(display_id);
-  const base::Value::Dict* current_display_prefs =
+  const base::DictValue* current_display_prefs =
       current_shelf_prefs.FindDict(display_key);
   if (current_display_prefs) {
     const std::string* current_value =
@@ -162,8 +163,8 @@ void SetPerDisplayShelfPref(PrefService* prefs,
   }
 
   ScopedDictPrefUpdate update(prefs, prefs::kShelfPreferences);
-  base::Value::Dict& shelf_prefs = update.Get();
-  base::Value::Dict* display_prefs_weak = shelf_prefs.EnsureDict(display_key);
+  base::DictValue& shelf_prefs = update.Get();
+  base::DictValue* display_prefs_weak = shelf_prefs.EnsureDict(display_key);
   display_prefs_weak->Set(pref_key, value);
 }
 
@@ -178,7 +179,7 @@ ShelfAutoHideBehavior GetShelfAutoHideBehaviorPref(PrefService* prefs,
                           prefs::kShelfAutoHideBehavior));
   }
 
-  const bool is_in_tablet_mode = TabletMode::Get()->InTabletMode();
+  const bool is_in_tablet_mode = display::Screen::Get()->InTabletMode();
   // See comment in |kShelfAlignment| as to why we consider two prefs.
   return AutoHideBehaviorFromPref(GetPerDisplayPref(
       prefs, display_id,
@@ -200,7 +201,7 @@ void SetShelfAutoHideBehaviorPref(PrefService* prefs,
   if (!base::FeatureList::IsEnabled(features::kShelfAutoHideSeparation)) {
     SetPerDisplayShelfPref(prefs, display_id, prefs::kShelfAutoHideBehavior,
                            value);
-    if (display_id == display::Screen::GetScreen()->GetPrimaryDisplay().id()) {
+    if (display_id == display::Screen::Get()->GetPrimaryDisplay().id()) {
       // See comment in |kShelfAlignment| about why we have two prefs here.
       prefs->SetString(prefs::kShelfAutoHideBehaviorLocal, value);
       prefs->SetString(prefs::kShelfAutoHideBehavior, value);
@@ -208,13 +209,13 @@ void SetShelfAutoHideBehaviorPref(PrefService* prefs,
     return;
   }
 
-  const bool is_in_tablet_mode = TabletMode::Get()->InTabletMode();
+  const bool is_in_tablet_mode = display::Screen::Get()->InTabletMode();
   SetPerDisplayShelfPref(prefs, display_id,
                          is_in_tablet_mode
                              ? prefs::kShelfAutoHideTabletModeBehavior
                              : prefs::kShelfAutoHideBehavior,
                          value);
-  if (display_id == display::Screen::GetScreen()->GetPrimaryDisplay().id()) {
+  if (display_id == display::Screen::Get()->GetPrimaryDisplay().id()) {
     // See comment in |kShelfAlignment| about why we have two prefs here.
     prefs->SetString(is_in_tablet_mode
                          ? prefs::kShelfAutoHideTabletModeBehaviorLocal
@@ -244,11 +245,29 @@ void SetShelfAlignmentPref(PrefService* prefs,
     return;
 
   SetPerDisplayShelfPref(prefs, display_id, prefs::kShelfAlignment, value);
-  if (display_id == display::Screen::GetScreen()->GetPrimaryDisplay().id()) {
+  if (display_id == display::Screen::Get()->GetPrimaryDisplay().id()) {
     // See comment in |kShelfAlignment| as to why we consider two prefs.
     prefs->SetString(prefs::kShelfAlignmentLocal, value);
     prefs->SetString(prefs::kShelfAlignment, value);
   }
+}
+
+bool GetDeskButtonVisibility(PrefService* prefs) {
+  const std::string visibility =
+      prefs->GetString(prefs::kShowDeskButtonInShelf);
+  if (!visibility.empty()) {
+    return visibility == kDeskButtonInShelfShown;
+  }
+  return prefs->GetBoolean(prefs::kDeviceUsesDesks);
+}
+
+void SetShowDeskButtonInShelfPref(PrefService* prefs, bool show) {
+  prefs->SetString(prefs::kShowDeskButtonInShelf,
+                   show ? kDeskButtonInShelfShown : kDeskButtonInShelfHidden);
+}
+
+void SetDeviceUsesDesksPref(PrefService* prefs, bool uses_desks) {
+  prefs->SetBoolean(prefs::kDeviceUsesDesks, uses_desks);
 }
 
 }  // namespace ash

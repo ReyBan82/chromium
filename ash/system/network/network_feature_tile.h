@@ -7,6 +7,7 @@
 
 #include "ash/ash_export.h"
 #include "ash/system/unified/feature_tile.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 
 namespace ash {
@@ -15,9 +16,9 @@ class Button;
 
 // This class is used to notify the view's theme changes to its delegates.
 class ASH_EXPORT NetworkFeatureTile : public FeatureTile {
- public:
-  METADATA_HEADER(NetworkFeatureTile);
+  METADATA_HEADER(NetworkFeatureTile, FeatureTile)
 
+ public:
   class Delegate {
    public:
     virtual void OnFeatureTileThemeChanged() = 0;
@@ -33,7 +34,7 @@ class ASH_EXPORT NetworkFeatureTile : public FeatureTile {
   // views::Button:
   void OnThemeChanged() override;
 
-  Delegate* const delegate_;
+  const raw_ptr<Delegate, DanglingUntriaged> delegate_;
 };
 
 }  // namespace ash

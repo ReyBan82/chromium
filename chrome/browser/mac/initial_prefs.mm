@@ -4,8 +4,8 @@
 
 #include "chrome/browser/mac/initial_prefs.h"
 
+#include "base/apple/foundation_util.h"
 #include "base/files/file_util.h"
-#include "base/mac/foundation_util.h"
 #include "build/branding_buildflags.h"
 #include "chrome/common/channel_info.h"
 #include "chrome/common/chrome_paths_internal.h"
@@ -21,7 +21,7 @@ const NSSearchPathDirectory kSearchPath = NSLibraryDirectory;
 // migration of the rest of this code to more inclusive language. Unfortunately
 // the file with this filename is the documented way to set initial preferences,
 // so changing this filename will require some care.
-// See https://crbug.com/1097204 for details.
+// See https://crbug.com/40701168 for details.
 const char kInitialPreferencesDirectory[] = "Google";
 const char kInitialPreferencesFileName[] = "Google Chrome Initial Preferences";
 const char kLegacyInitialPreferencesFileName[] =
@@ -67,8 +67,9 @@ base::FilePath InitialPrefsPath() {
   // On chromium builds, try
   // /Library/Application Support/Chromium/Chromium Master Preferences
   base::FilePath search_path;
-  if (!base::mac::GetLocalDirectory(kSearchPath, &search_path))
+  if (!base::apple::GetLocalDirectory(kSearchPath, &search_path)) {
     return base::FilePath();
+  }
 
   base::FilePath new_path = search_path.Append(kInitialPreferencesDirectory)
                                 .Append(kInitialPreferencesFileName);

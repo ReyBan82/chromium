@@ -8,8 +8,11 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "base/functional/callback.h"
+#include "ui/base/metadata/base_type_conversion.h"
 #include "ui/views/layout/layout_types.h"
 #include "ui/views/views_export.h"
 
@@ -46,6 +49,46 @@ enum class FlexAllocationOrder { kNormal, kReverse };
 using FlexRule =
     base::RepeatingCallback<gfx::Size(const View*, const SizeBounds&)>;
 
+// Callback evaluated at the start of layout to determine whether a flex rule
+// should be applied, or should be passed over in favor of the next rule.
+// Returning true means the rule should be applied.
+using RuleEnabledPredicate = base::RepeatingCallback<bool(const SizeBounds&)>;
+
+// Pairs a priority order and FlexRule with an optional RuleEnabledPredicate.
+// This is used to create multi-stage flex specifications where a view
+// transitions between different sizing behaviors and layout priorities
+// depending on available space. e.g., one View may handle buttons and a text
+// field, with another element having a priority level between those of the
+// buttons and the text field.
+//
+// How RuleEnabledPredicate works:
+// When evaluating flex space under a given SizeBounds, the sequence of
+// RuleAndPredicate stages is checked in FIFO order:
+//  - If `rule_enabled_predicate` returns true for the current bounds, this
+//    stage is selected and its `order` and `rule` and are applied.
+//  - If `rule_enabled_predicate` returns false, the stage is not applied and
+//    the layout manager moves on to test the next stage in the sequence.
+//  - The last rule must be the only rule with a null `rule_enabled_predicate`,
+//    and is used if no `rule_enabled_predicate` for any previous rule returned
+//    true.
+//
+// This is intended as a temporary API, to help with the migration to using a
+// WebUI toolbar. Once that ships, this will no longer be needed.
+struct VIEWS_EXPORT RuleAndPredicate {
+  RuleAndPredicate(int order,
+                   FlexRule rule,
+                   RuleEnabledPredicate rule_enabled_predicate);
+  RuleAndPredicate(const RuleAndPredicate&);
+  RuleAndPredicate& operator=(const RuleAndPredicate&);
+  RuleAndPredicate(RuleAndPredicate&&) noexcept;
+  RuleAndPredicate& operator=(RuleAndPredicate&&) noexcept;
+  ~RuleAndPredicate();
+
+  int order;
+  FlexRule rule;
+  RuleEnabledPredicate rule_enabled_predicate;
+};
+
 // Describes a simple rule for how a child view should shrink in a layout when
 // the available size for that view decreases.
 enum class MinimumFlexSizeRule {
@@ -61,7 +104,7 @@ enum class MinimumFlexSizeRule {
 // there is extra size available for that view to occupy.
 enum class MaximumFlexSizeRule {
   kPreferred,       // Don't resize above preferred size.
-  kScaleToMaximum,  // Allow resize up to the maximum size.
+  kScaleToMaximum,  // Allow resize up to the child view's `GetMaximumSize()`.
   kUnbounded        // Allow resize to arbitrary size.
 };
 
@@ -132,6 +175,15 @@ class VIEWS_EXPORT FlexSpecification {
   // or mutations of this specification will also inherit the rule.
   explicit FlexSpecification(FlexRule rule);
 
+  // Creates a flex specification with multi-stage flex rules and predicates to
+  // determine which rule to apply. See RuleAndPredicate above for usage
+  // details. `rules_and_predicates` must be non-empty.
+  //
+  // This is intended as a temporary API, to help with the migration to using a
+  // WebUI toolbar. Once that ships, this will no longer be needed.
+  explicit FlexSpecification(
+      std::vector<RuleAndPredicate> rules_and_predicates);
+
   // Creates a flex specification using the specififed minimum size and size
   // bounds rules. If |adjust_height_for_width| is specified, extra calculations
   // will be done to ensure that the view can become taller if it is made
@@ -165,7 +217,8 @@ class VIEWS_EXPORT FlexSpecification {
 
   ~FlexSpecification();
 
-  // Makes a copy of this specification with a different order.
+  // Makes a copy of this specification with a different order. Should not be
+  // called for FlexSpecifications created with RuleAndPredicates.
   FlexSpecification WithOrder(int order) const;
 
   // Makes a copy of this specification with a different weight.
@@ -180,6 +233,9 @@ class VIEWS_EXPORT FlexSpecification {
   // the center, leading, or trailing edge of the allocated space.
   FlexSpecification WithAlignment(LayoutAlignment alignment) const;
 
+  std::pair<FlexRule, int> GetRuleAndOrderForBounds(
+      const SizeBounds& bounds) const;
+
   const FlexRule& rule() const { return rule_; }
   int weight() const { return weight_; }
   int order() const { return order_; }
@@ -190,6 +246,7 @@ class VIEWS_EXPORT FlexSpecification {
   int order_ = 1;
   int weight_ = 0;
   LayoutAlignment alignment_ = LayoutAlignment::kStretch;
+  std::vector<RuleAndPredicate> rules_and_predicates_;
 };
 
 // Represents insets in a single dimension.
@@ -212,9 +269,8 @@ class VIEWS_EXPORT Inset1D {
   void Expand(int delta_leading, int delta_trailing);
 
   constexpr bool is_empty() const { return leading_ == 0 && trailing_ == 0; }
-  bool operator==(const Inset1D& other) const;
-  bool operator!=(const Inset1D& other) const;
-  bool operator<(const Inset1D& other) const;
+  friend bool operator==(const Inset1D&, const Inset1D&) = default;
+  friend auto operator<=>(const Inset1D&, const Inset1D&) = default;
 
   std::string ToString() const;
 
@@ -260,9 +316,9 @@ class VIEWS_EXPORT Span {
              const Inset1D& margins = Inset1D());
 
   constexpr bool is_empty() const { return length_ == 0; }
-  bool operator==(const Span& other) const;
-  bool operator!=(const Span& other) const;
-  bool operator<(const Span& other) const;
+
+  friend bool operator==(const Span&, const Span&) = default;
+  friend auto operator<=>(const Span&, const Span&) = default;
 
   std::string ToString() const;
 
@@ -278,5 +334,7 @@ void PrintTo(MinimumFlexSizeRule minimum_flex_size_rule, ::std::ostream* os);
 void PrintTo(MaximumFlexSizeRule maximum_flex_size_rule, ::std::ostream* os);
 
 }  // namespace views
+
+EXPORT_ENUM_CONVERTERS(views::FlexAllocationOrder, VIEWS_EXPORT)
 
 #endif  // UI_VIEWS_LAYOUT_FLEX_LAYOUT_TYPES_H_

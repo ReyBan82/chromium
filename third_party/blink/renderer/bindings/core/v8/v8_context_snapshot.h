@@ -26,7 +26,6 @@ class CORE_EXPORT V8ContextSnapshot {
   static v8::Local<v8::Context> CreateContextFromSnapshot(
       v8::Isolate* isolate,
       const DOMWrapperWorld& world,
-      v8::ExtensionConfiguration* extension_config,
       v8::Local<v8::Object> global_proxy,
       Document* document);
 
@@ -34,14 +33,13 @@ class CORE_EXPORT V8ContextSnapshot {
 
   static void EnsureInterfaceTemplates(v8::Isolate* isolate);
 
-  static v8::StartupData TakeSnapshot();
+  static v8::StartupData TakeSnapshot(v8::Isolate* isolate);
 
   static const intptr_t* GetReferenceTable();
 
   using CreateContextFromSnapshotFuncType =
       v8::Local<v8::Context> (*)(v8::Isolate*,
                                  const DOMWrapperWorld&,
-                                 v8::ExtensionConfiguration*,
                                  v8::Local<v8::Object>,
                                  Document*);
   static void SetCreateContextFromSnapshotFunc(
@@ -52,7 +50,7 @@ class CORE_EXPORT V8ContextSnapshot {
   using EnsureInterfaceTemplatesFuncType = void (*)(v8::Isolate*);
   static void SetEnsureInterfaceTemplatesFunc(
       EnsureInterfaceTemplatesFuncType func);
-  using TakeSnapshotFuncType = v8::StartupData (*)();
+  using TakeSnapshotFuncType = v8::StartupData (*)(v8::Isolate*);
   static void SetTakeSnapshotFunc(TakeSnapshotFuncType func);
   using GetReferenceTableFuncType = const intptr_t* (*)();
   static void SetGetReferenceTableFunc(GetReferenceTableFuncType func);

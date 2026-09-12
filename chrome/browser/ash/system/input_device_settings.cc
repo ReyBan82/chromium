@@ -17,8 +17,7 @@ namespace {
 // |to_set|. This differs from *to_set = other; in so far as nothing is changed
 // if |other| has no value. Returns true if |to_set| was updated.
 template <typename T>
-bool UpdateIfHasValue(const absl::optional<T>& other,
-                      absl::optional<T>* to_set) {
+bool UpdateIfHasValue(const std::optional<T>& other, std::optional<T>* to_set) {
   if (!other.has_value() || other == *to_set)
     return false;
   *to_set = other;
@@ -191,7 +190,7 @@ bool TouchpadSettings::Update(const TouchpadSettings& settings) {
   }
   UpdateIfHasValue(settings.natural_scroll_, &natural_scroll_);
   // Always send natural scrolling to the shell command, as a workaround.
-  // See crbug.com/406480
+  // See crbug.com/41127558
   if (natural_scroll_.has_value())
     updated = true;
   return updated;
@@ -465,9 +464,11 @@ void PointingStickSettings::Apply(
 }
 
 // static
-bool InputDeviceSettings::ForceKeyboardDrivenUINavigation() {
-  if (policy::EnrollmentRequisitionManager::IsRemoraRequisition() ||
-      policy::EnrollmentRequisitionManager::IsSharkRequisition()) {
+bool InputDeviceSettings::ForceKeyboardDrivenUINavigation(
+    const PrefService& local_state) {
+  if (policy::EnrollmentRequisitionManager::IsMeetDevice(local_state) ||
+      policy::EnrollmentRequisitionManager::IsSharkRequisition(local_state) ||
+      policy::EnrollmentRequisitionManager::IsSquidDevice()) {
     return true;
   }
 

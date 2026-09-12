@@ -6,16 +6,19 @@
 #define COMPONENTS_CRONET_URL_REQUEST_CONTEXT_CONFIG_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "base/feature_list.h"
 #include "base/time/time.h"
 #include "base/values.h"
+#include "components/cronet/cronet_context.h"
+#include "components/cronet/proto/request_context_config.pb.h"
 #include "net/base/hash_value.h"
 #include "net/base/network_handle.h"
 #include "net/cert/cert_verifier.h"
 #include "net/nqe/effective_connection_type.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/origin.h"
 
 namespace net {
@@ -104,13 +107,12 @@ struct URLRequestContextConfig {
   // Configures |context_builder| based on |this|.
   void ConfigureURLRequestContextBuilder(
       net::URLRequestContextBuilder* context_builder,
+      CronetContext::NetworkTasks* network_tasks,
       net::handles::NetworkHandle bound_network =
           net::handles::kInvalidNetworkHandle);
 
   // Enable QUIC.
   const bool enable_quic;
-  // QUIC User Agent ID.
-  const std::string quic_user_agent_id;
   // Enable SPDY.
   const bool enable_spdy;
   // Enable Brotli.
@@ -152,12 +154,12 @@ struct URLRequestContextConfig {
   int host_cache_persistence_delay_ms = 60000;
 
   // Experimental options that are recognized by the config parser.
-  base::Value::Dict effective_experimental_options;
-  base::Value::Dict experimental_options;
+  base::DictValue effective_experimental_options;
+  base::DictValue experimental_options;
 
   // If set, forces NQE to return the set value as the effective connection
   // type.
-  absl::optional<net::EffectiveConnectionType>
+  std::optional<net::EffectiveConnectionType>
       nqe_forced_effective_connection_type;
 
   // Preloaded Report-To headers, to preconfigure the Reporting API.
@@ -168,8 +170,7 @@ struct URLRequestContextConfig {
 
   // Optional network thread priority.
   // On Android, corresponds to android.os.Process.setThreadPriority() values.
-  // On iOS, corresponds to NSThread::setThreadPriority values.
-  const absl::optional<double> network_thread_priority;
+  const std::optional<int> network_thread_priority;
 
   // Whether the connection status of active bidirectional streams should be
   // monitored.
@@ -178,8 +179,7 @@ struct URLRequestContextConfig {
   // period of the heartbeat signal.
   base::TimeDelta heartbeat_interval;
 
-  // Whether Cronet Telemetry should be enabled or not.
-  bool enable_telemetry;
+  const std::optional<cronet::proto::ProxyOptions> proxy_options;
 
   static bool ExperimentalOptionsParsingIsAllowedToFail() {
     return DCHECK_IS_ON();
@@ -188,8 +188,6 @@ struct URLRequestContextConfig {
   static std::unique_ptr<URLRequestContextConfig> CreateURLRequestContextConfig(
       // Enable QUIC.
       bool enable_quic,
-      // QUIC User Agent ID.
-      const std::string& quic_user_agent_id,
       // Enable SPDY.
       bool enable_spdy,
       // Enable Brotli.
@@ -217,16 +215,14 @@ struct URLRequestContextConfig {
       bool bypass_public_key_pinning_for_local_trust_anchors,
       // Optional network thread priority.
       // On Android, corresponds to android.os.Process.setThreadPriority()
-      // values. On iOS, corresponds to NSThread::setThreadPriority values. Do
-      // not specify for other targets.
-      absl::optional<double> network_thread_priority);
+      // values. Do not specify for other targets.
+      std::optional<int> network_thread_priority,
+      std::optional<cronet::proto::ProxyOptions> proxy_options);
 
  private:
   URLRequestContextConfig(
       // Enable QUIC.
       bool enable_quic,
-      // QUIC User Agent ID.
-      const std::string& quic_user_agent_id,
       // Enable SPDY.
       bool enable_spdy,
       // Enable Brotli.
@@ -245,7 +241,7 @@ struct URLRequestContextConfig {
       // User-Agent request header field.
       const std::string& user_agent,
       // Parsed experimental options.
-      base::Value::Dict experimental_options,
+      base::DictValue experimental_options,
       // MockCertVerifier to use for testing purposes.
       std::unique_ptr<net::CertVerifier> mock_cert_verifier,
       // Enable network quality estimator.
@@ -254,14 +250,14 @@ struct URLRequestContextConfig {
       bool bypass_public_key_pinning_for_local_trust_anchors,
       // Optional network thread priority.
       // On Android, corresponds to android.os.Process.setThreadPriority()
-      // values. On iOS, corresponds to NSThread::setThreadPriority values. Do
-      // not specify for other targets.
-      absl::optional<double> network_thread_priority);
+      // values. Do not specify for other targets.
+      std::optional<int> network_thread_priority,
+      std::optional<cronet::proto::ProxyOptions> proxy_options);
 
   // Parses experimental options from their JSON format to the format used
   // internally.
   // Returns an empty optional if the operation was unsuccessful.
-  static absl::optional<base::Value::Dict> ParseExperimentalOptions(
+  static std::optional<base::DictValue> ParseExperimentalOptions(
       std::string unparsed_experimental_options);
 
   // Makes appropriate changes to settings in |this|.
@@ -295,8 +291,6 @@ struct URLRequestContextConfigBuilder {
 
   // Enable QUIC.
   bool enable_quic = true;
-  // QUIC User Agent ID.
-  std::string quic_user_agent_id = "";
   // Enable SPDY.
   bool enable_spdy = true;
   // Enable Brotli.
@@ -334,10 +328,13 @@ struct URLRequestContextConfigBuilder {
 
   // Optional network thread priority.
   // On Android, corresponds to android.os.Process.setThreadPriority() values.
-  // On iOS, corresponds to NSThread::setThreadPriority values.
   // Do not specify for other targets.
-  absl::optional<double> network_thread_priority;
+  std::optional<int> network_thread_priority;
 };
+
+BASE_DECLARE_FEATURE(
+    kCronetMigrateSessionsEarlyV2EnableRetryOnAlternateNetworkBeforeHandshake);
+BASE_DECLARE_FEATURE(kCronetInitialDelayForBrokenAlternativeService);
 
 }  // namespace cronet
 

@@ -1,9 +1,5 @@
-include_rules = [
-  "+chrome/browser/chrome_for_testing/buildflags.h",
-]
-
 specific_include_rules = {
-  ".*_unittest\.cc": [
+  ".*_unittest\\.cc": [
     "+chrome/install_static",
   ],
 }

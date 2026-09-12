@@ -22,11 +22,10 @@ V8ContextSnapshot::GetReferenceTableFuncType g_get_reference_table_func;
 v8::Local<v8::Context> V8ContextSnapshot::CreateContextFromSnapshot(
     v8::Isolate* isolate,
     const DOMWrapperWorld& world,
-    v8::ExtensionConfiguration* extension_config,
     v8::Local<v8::Object> global_proxy,
     Document* document) {
-  return g_create_context_from_snapshot_func(isolate, world, extension_config,
-                                             global_proxy, document);
+  return g_create_context_from_snapshot_func(isolate, world, global_proxy,
+                                             document);
 }
 
 void V8ContextSnapshot::InstallContextIndependentProps(
@@ -38,8 +37,8 @@ void V8ContextSnapshot::EnsureInterfaceTemplates(v8::Isolate* isolate) {
   return g_ensure_interface_templates_func(isolate);
 }
 
-v8::StartupData V8ContextSnapshot::TakeSnapshot() {
-  return g_take_snapshot_func();
+v8::StartupData V8ContextSnapshot::TakeSnapshot(v8::Isolate* isolate) {
+  return g_take_snapshot_func(isolate);
 }
 
 const intptr_t* V8ContextSnapshot::GetReferenceTable() {

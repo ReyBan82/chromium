@@ -10,21 +10,24 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.BaseSwitches;
 import org.chromium.base.metrics.RecordHistogram;
 import org.chromium.base.test.BaseJUnit4ClassRunner;
 import org.chromium.base.test.util.Batch;
+import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.base.test.util.HistogramWatcher;
 
 /**
  * Tests the {@link HistogramWatcher} test util before native load.
  *
- * Contains exclusive tests that aren't run in all scenarios.
+ * <p>Contains exclusive tests that aren't run in all scenarios.
  *
- * Both histogram snapshots are taken through CachingUmaRecorder, so the deltas are calculated
+ * <p>Both histogram snapshots are taken through CachingUmaRecorder, so the deltas are calculated
  * across buckets of a single value, since CachingUmaRecorder stores the raw values.
  */
 @RunWith(BaseJUnit4ClassRunner.class)
 @Batch(Batch.PER_CLASS)
+@CommandLineFlags.Add(BaseSwitches.DISABLE_NATIVE_INITIALIZATION)
 public class HistogramWatcherWithoutNativeTest extends HistogramWatcherTestBase {
     @Test
     @MediumTest
@@ -54,6 +57,18 @@ public class HistogramWatcherWithoutNativeTest extends HistogramWatcherTestBase 
     @MediumTest
     public void testExtraRecordAllowed_failure() {
         doTestExtraRecordAllowed_failure(TestScenario.WITHOUT_NATIVE);
+    }
+
+    @Test
+    @MediumTest
+    public void testExtraRecordAllowedAny_success() {
+        doTestExtraRecordAllowedAny_success(TestScenario.WITHOUT_NATIVE);
+    }
+
+    @Test
+    @MediumTest
+    public void testExtraRecordAllowedAny_failure() {
+        doTestExtraRecordAllowedAny_failure(TestScenario.WITHOUT_NATIVE);
     }
 
     @Test
@@ -96,6 +111,18 @@ public class HistogramWatcherWithoutNativeTest extends HistogramWatcherTestBase 
     @MediumTest
     public void testMultipleHistograms_failure() {
         doTestMultipleHistograms_failure(TestScenario.WITHOUT_NATIVE);
+    }
+
+    @Test
+    @MediumTest
+    public void testExpectIntRecords_success() {
+        doTestExpectIntRecords_success(TestScenario.WITHOUT_NATIVE);
+    }
+
+    @Test
+    @MediumTest
+    public void testExpectIntRecords_failure() {
+        doTestExpectIntRecords_failure(TestScenario.WITHOUT_NATIVE);
     }
 
     @Test
@@ -145,11 +172,12 @@ public class HistogramWatcherWithoutNativeTest extends HistogramWatcherTestBase 
     @MediumTest
     public void testOutOfOrderExpectations_success() {
         // Arrange
-        mWatcher = HistogramWatcher.newBuilder()
-                           .expectIntRecord(TIMES_HISTOGRAM_1, 8000)
-                           .expectIntRecord(TIMES_HISTOGRAM_1, 6000)
-                           .expectIntRecord(TIMES_HISTOGRAM_1, 7000)
-                           .build();
+        mWatcher =
+                HistogramWatcher.newBuilder()
+                        .expectIntRecord(TIMES_HISTOGRAM_1, 8000)
+                        .expectIntRecord(TIMES_HISTOGRAM_1, 6000)
+                        .expectIntRecord(TIMES_HISTOGRAM_1, 7000)
+                        .build();
 
         // Act
         RecordHistogram.recordTimesHistogram(TIMES_HISTOGRAM_1, 6000);
@@ -164,11 +192,12 @@ public class HistogramWatcherWithoutNativeTest extends HistogramWatcherTestBase 
     @MediumTest
     public void testOutOfOrderExpectations_failure() {
         // Arrange
-        mWatcher = HistogramWatcher.newBuilder()
-                           .expectIntRecord(TIMES_HISTOGRAM_1, 8000)
-                           .expectIntRecord(TIMES_HISTOGRAM_1, 6000)
-                           .expectIntRecord(TIMES_HISTOGRAM_1, 7000)
-                           .build();
+        mWatcher =
+                HistogramWatcher.newBuilder()
+                        .expectIntRecord(TIMES_HISTOGRAM_1, 8000)
+                        .expectIntRecord(TIMES_HISTOGRAM_1, 6000)
+                        .expectIntRecord(TIMES_HISTOGRAM_1, 7000)
+                        .build();
 
         // Act
         RecordHistogram.recordTimesHistogram(TIMES_HISTOGRAM_1, 7000);
@@ -188,22 +217,12 @@ public class HistogramWatcherWithoutNativeTest extends HistogramWatcherTestBase 
 
     @Test
     @MediumTest
-    public void testNegativeValueExpectations_failure() {
-        try {
-            mWatcher = HistogramWatcher.newBuilder().expectIntRecord(TIMES_HISTOGRAM_1, -1).build();
-        } catch (IllegalArgumentException e) {
-            assertContains("negative", e.getMessage());
-            return;
-        }
-        Assert.fail("Expected IllegalArgumentException");
-    }
-
-    @Test
-    @MediumTest
     public void testZeroCountExpectations_failure() {
         try {
             mWatcher =
-                    HistogramWatcher.newBuilder().expectIntRecords(TIMES_HISTOGRAM_1, 1, 0).build();
+                    HistogramWatcher.newBuilder()
+                            .expectIntRecordTimes(TIMES_HISTOGRAM_1, 1, 0)
+                            .build();
         } catch (IllegalArgumentException e) {
             assertContains("zero", e.getMessage());
             return;
@@ -215,13 +234,33 @@ public class HistogramWatcherWithoutNativeTest extends HistogramWatcherTestBase 
     @MediumTest
     public void testNegativeCountExpectations_failure() {
         try {
-            mWatcher = HistogramWatcher.newBuilder()
-                               .expectIntRecords(TIMES_HISTOGRAM_1, 1, -1)
-                               .build();
+            mWatcher =
+                    HistogramWatcher.newBuilder()
+                            .expectIntRecordTimes(TIMES_HISTOGRAM_1, 1, -1)
+                            .build();
         } catch (IllegalArgumentException e) {
             assertContains("negative", e.getMessage());
             return;
         }
         Assert.fail("Expected IllegalArgumentException");
+    }
+
+    @Test
+    @MediumTest
+    public void testTryWithResources_success() {
+        try (HistogramWatcher ignored = HistogramWatcher.newSingleRecordWatcher(ENUM_HISTOGRAM)) {
+            RecordHistogram.recordEnumeratedHistogram(ENUM_HISTOGRAM, 0, 10);
+        }
+    }
+
+    @Test
+    @MediumTest
+    public void testTryWithResources_failure() {
+        try (HistogramWatcher ignored = HistogramWatcher.newSingleRecordWatcher(ENUM_HISTOGRAM)) {
+        } catch (AssertionError e) {
+            assertContains(ENUM_HISTOGRAM, e.getMessage());
+            return;
+        }
+        Assert.fail("Expected AssertionError");
     }
 }

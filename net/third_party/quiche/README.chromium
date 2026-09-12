@@ -1,9 +1,12 @@
 Name: QUICHE
 URL: https://quiche.googlesource.com/quiche
+Revision: efdf29da0168bc8277df5d94419c8cc04876581b
 Version: git
-License: BSD
+Update Mechanism: Manual
+License: BSD-3-Clause
 License File: src/LICENSE
 Security Critical: yes
+Shipped: yes
 
 Description:
 This is QUICHE, Google's implementation of QUIC, HTTP/2 and SPDY protocols.

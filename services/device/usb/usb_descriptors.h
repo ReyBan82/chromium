@@ -12,8 +12,9 @@
 #include <string>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/functional/callback_forward.h"
-#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "services/device/public/mojom/usb_device.mojom.h"
 
@@ -28,12 +29,8 @@ struct CombinedInterfaceInfo {
 
   bool IsValid() const;
 
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #constexpr-ctor-field-initializer
-  RAW_PTR_EXCLUSION const mojom::UsbInterfaceInfo* interface = nullptr;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #constexpr-ctor-field-initializer
-  RAW_PTR_EXCLUSION const mojom::UsbAlternateInterfaceInfo* alternate = nullptr;
+  raw_ptr<const mojom::UsbInterfaceInfo> interface = nullptr;
+  raw_ptr<const mojom::UsbAlternateInterfaceInfo> alternate = nullptr;
 };
 
 struct UsbDeviceDescriptor {
@@ -59,7 +56,7 @@ void ReadUsbDescriptors(
     scoped_refptr<UsbDeviceHandle> device_handle,
     base::OnceCallback<void(std::unique_ptr<UsbDeviceDescriptor>)> callback);
 
-bool ParseUsbStringDescriptor(const std::vector<uint8_t>& descriptor,
+bool ParseUsbStringDescriptor(base::span<const uint8_t> descriptor,
                               std::u16string* output);
 
 void ReadUsbStringDescriptors(
@@ -68,14 +65,16 @@ void ReadUsbStringDescriptors(
     base::OnceCallback<void(std::unique_ptr<std::map<uint8_t, std::u16string>>)>
         callback);
 
-mojom::UsbEndpointInfoPtr BuildUsbEndpointInfoPtr(const uint8_t* data);
+mojom::UsbEndpointInfoPtr BuildUsbEndpointInfoPtr(
+    base::span<const uint8_t> data);
 
 mojom::UsbEndpointInfoPtr BuildUsbEndpointInfoPtr(uint8_t address,
                                                   uint8_t attributes,
                                                   uint16_t maximum_packet_size,
                                                   uint8_t polling_interval);
 
-mojom::UsbInterfaceInfoPtr BuildUsbInterfaceInfoPtr(const uint8_t* data);
+mojom::UsbInterfaceInfoPtr BuildUsbInterfaceInfoPtr(
+    base::span<const uint8_t> data);
 
 mojom::UsbInterfaceInfoPtr BuildUsbInterfaceInfoPtr(uint8_t interface_number,
                                                     uint8_t alternate_setting,
@@ -91,7 +90,7 @@ CombinedInterfaceInfo FindInterfaceInfoFromConfig(
     uint8_t alternate_setting);
 
 mojom::UsbConfigurationInfoPtr BuildUsbConfigurationInfoPtr(
-    const uint8_t* data);
+    base::span<const uint8_t> data);
 
 mojom::UsbConfigurationInfoPtr BuildUsbConfigurationInfoPtr(
     uint8_t configuration_value,

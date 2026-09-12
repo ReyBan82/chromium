@@ -45,7 +45,7 @@ class CORE_EXPORT TextSuggestionController final
   void OnSuggestionMenuClosed();
   void SuggestionMenuTimeoutCallback(size_t max_number_of_suggestions);
 
-  virtual void Trace(Visitor*) const;
+  void Trace(Visitor*) const;
 
  private:
   friend class TextSuggestionControllerTest;
@@ -72,7 +72,7 @@ class CORE_EXPORT TextSuggestionController final
   void ReplaceActiveSuggestionRange(const String&);
   void ReplaceRangeWithText(const EphemeralRange&, const String& replacement);
 
-  bool is_suggestion_menu_open_;
+  bool is_suggestion_menu_open_ = false;
   const Member<LocalDOMWindow> window_;
   HeapMojoRemote<mojom::blink::TextSuggestionHost> text_suggestion_host_;
 };

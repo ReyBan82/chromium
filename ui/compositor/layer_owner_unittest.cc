@@ -16,10 +16,11 @@
 #include "ui/compositor/layer_animation_observer.h"
 #include "ui/compositor/layer_animator.h"
 #include "ui/compositor/layer_delegate.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/compositor/scoped_layer_animation_settings.h"
 #include "ui/compositor/test/test_context_factories.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 
 namespace ui {
 namespace {
@@ -101,10 +102,12 @@ void LayerOwnerTestWithCompositor::TearDown() {
   context_factories_.reset();
 }
 
+using LayerOwnerDeathTest = testing::Test;
+
 }  // namespace
 
 TEST_F(LayerOwnerTestWithCompositor, RecreateRootLayerWithCompositor) {
-  LayerOwnerForTesting owner(std::make_unique<Layer>());
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
   Layer* layer = owner.layer();
   compositor()->SetRootLayer(layer);
 
@@ -119,11 +122,11 @@ TEST_F(LayerOwnerTestWithCompositor, RecreateRootLayerWithCompositor) {
 // properly updates the compositor. So that compositor is not null for observers
 // of animations being cancelled.
 TEST_F(LayerOwnerTestWithCompositor, RecreateRootLayerDuringAnimation) {
-  LayerOwnerForTesting owner(std::make_unique<Layer>());
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
   Layer* layer = owner.layer();
   compositor()->SetRootLayer(layer);
 
-  std::unique_ptr<Layer> child(new Layer);
+  std::unique_ptr<Layer> child(std::make_unique<LayerTextured>());
   child->SetBounds(gfx::Rect(0, 0, 100, 100));
   layer->Add(child.get());
 
@@ -131,9 +134,9 @@ TEST_F(LayerOwnerTestWithCompositor, RecreateRootLayerDuringAnimation) {
   // animation completion.
   std::unique_ptr<TestLayerAnimationObserver> observer(
       new TestLayerAnimationObserver(child.get()));
-  std::unique_ptr<ui::ScopedAnimationDurationScaleMode> long_duration_animation(
-      new ui::ScopedAnimationDurationScaleMode(
-          ui::ScopedAnimationDurationScaleMode::SLOW_DURATION));
+  auto long_duration_animation =
+      std::make_unique<gfx::ScopedAnimationDurationScaleMode>(
+          gfx::ScopedAnimationDurationScaleMode::SLOW_DURATION);
   {
     ui::ScopedLayerAnimationSettings animation(child->GetAnimator());
     animation.SetTransitionDuration(base::Milliseconds(1000));
@@ -150,14 +153,14 @@ TEST_F(LayerOwnerTestWithCompositor, RecreateRootLayerDuringAnimation) {
 // animating, properly updates the compositor. So that compositor is not null
 // for observers of animations being cancelled.
 TEST_F(LayerOwnerTestWithCompositor, RecreateNonRootLayerDuringAnimation) {
-  std::unique_ptr<Layer> root_layer(new Layer);
+  std::unique_ptr<Layer> root_layer(std::make_unique<LayerTextured>());
   compositor()->SetRootLayer(root_layer.get());
 
-  LayerOwnerForTesting owner(std::make_unique<Layer>());
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
   Layer* layer = owner.layer();
   root_layer->Add(layer);
 
-  std::unique_ptr<Layer> child(new Layer);
+  std::unique_ptr<Layer> child(std::make_unique<LayerTextured>());
   child->SetBounds(gfx::Rect(0, 0, 100, 100));
   layer->Add(child.get());
 
@@ -165,9 +168,9 @@ TEST_F(LayerOwnerTestWithCompositor, RecreateNonRootLayerDuringAnimation) {
   // animation completion.
   std::unique_ptr<TestLayerAnimationObserver> observer(
       new TestLayerAnimationObserver(child.get()));
-  std::unique_ptr<ui::ScopedAnimationDurationScaleMode> long_duration_animation(
-      new ui::ScopedAnimationDurationScaleMode(
-          ui::ScopedAnimationDurationScaleMode::SLOW_DURATION));
+  auto long_duration_animation =
+      std::make_unique<gfx::ScopedAnimationDurationScaleMode>(
+          gfx::ScopedAnimationDurationScaleMode::SLOW_DURATION);
   {
     ui::ScopedLayerAnimationSettings animation(child->GetAnimator());
     animation.SetTransitionDuration(base::Milliseconds(1000));
@@ -183,10 +186,10 @@ TEST_F(LayerOwnerTestWithCompositor, RecreateNonRootLayerDuringAnimation) {
 // Tests that if LayerOwner-derived class destroys layer, then
 // LayerAnimator's animation becomes detached from compositor timeline.
 TEST_F(LayerOwnerTestWithCompositor, DetachTimelineOnAnimatorDeletion) {
-  std::unique_ptr<Layer> root_layer(new Layer);
+  std::unique_ptr<Layer> root_layer(std::make_unique<LayerTextured>());
   compositor()->SetRootLayer(root_layer.get());
 
-  LayerOwnerForTesting owner(std::make_unique<Layer>());
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
   Layer* layer = owner.layer();
   layer->SetOpacity(0.5f);
   root_layer->Add(layer);
@@ -205,10 +208,10 @@ TEST_F(LayerOwnerTestWithCompositor, DetachTimelineOnAnimatorDeletion) {
 // then LayerAnimator's animation becomes attached to timeline.
 TEST_F(LayerOwnerTestWithCompositor,
        AttachTimelineIfAnimatorCreatedAfterSetCompositor) {
-  std::unique_ptr<Layer> root_layer(new Layer);
+  std::unique_ptr<Layer> root_layer(std::make_unique<LayerTextured>());
   compositor()->SetRootLayer(root_layer.get());
 
-  LayerOwnerForTesting owner(std::make_unique<Layer>());
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
   Layer* layer = owner.layer();
   root_layer->Add(layer);
 
@@ -242,12 +245,60 @@ class TestLayerDelegate : public LayerDelegate {
   raw_ptr<ui::LayerOwner> owner_;
 };
 
+class DeleteOwnerOnRecreated : public LayerOwner::Observer {
+ public:
+  explicit DeleteOwnerOnRecreated(LayerOwner* owner) : owner_(owner) {
+    owner_->AddObserver(this);
+  }
+  ~DeleteOwnerOnRecreated() override {
+    if (owner_) {
+      owner_->RemoveObserver(this);
+    }
+  }
+
+  void OnLayerRecreated(ui::Layer* old_layer) override {
+    LayerOwner* doomed = owner_;
+    owner_ = nullptr;
+    delete doomed;
+  }
+
+ private:
+  raw_ptr<LayerOwner> owner_;
+};
+
+class RecreateNestedOwner : public LayerOwner::Observer {
+ public:
+  explicit RecreateNestedOwner(LayerOwner* owner) : owner_(owner) {
+    owner_->AddObserver(this);
+  }
+  ~RecreateNestedOwner() override { owner_->RemoveObserver(this); }
+
+  void OnLayerRecreated(ui::Layer* old_layer) override {
+    owner_->RecreateLayer();
+  }
+
+ private:
+  raw_ptr<LayerOwner> owner_;
+};
+
 }  // namespace
+
+TEST_F(LayerOwnerDeathTest, DeleteInOnLayerRecreated) {
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
+  DeleteOwnerOnRecreated observer(&owner);
+  EXPECT_DEATH_IF_SUPPORTED(owner.RecreateLayer(), "");
+}
+
+TEST_F(LayerOwnerDeathTest, RecreateNested) {
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
+  RecreateNestedOwner observer(&owner);
+  EXPECT_DEATH_IF_SUPPORTED(owner.RecreateLayer(), "");
+}
 
 // Test if recreating a layer in OnLayerBoundsChanged will not
 // cause a use-after-free.
 TEST_F(LayerOwnerTestWithCompositor, DeleteOnLayerBoundsChanged) {
-  LayerOwnerForTesting owner(std::make_unique<Layer>());
+  LayerOwnerForTesting owner(std::make_unique<LayerTextured>());
   TestLayerDelegate delegate(&owner);
   owner.layer()->set_delegate(&delegate);
   owner.layer()->SetBounds(gfx::Rect(100, 100));

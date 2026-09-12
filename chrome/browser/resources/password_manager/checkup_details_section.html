@@ -35,11 +35,6 @@
     margin-top: 12px;
   }
 
-  #backButton {
-    --cr-icon-button-margin-end: 6px;
-    --cr-icon-button-margin-start: 0px;
-  }
-
   #insecureCredentials {
     margin-top: 24px;
   }
@@ -49,24 +44,21 @@
     margin-top: 24px;
   }
 
-  iron-icon.policy-disabled {
+  cr-icon.policy-disabled {
     margin-inline-start: var(--cr-controlled-by-spacing);
   }
 </style>
 <div id="header">
-  <cr-icon-button class="icon-arrow-back" id="backButton"
-      on-click="navigateBack_">
+  <cr-icon-button class="icon-arrow-back back-button" id="backButton"
+      on-click="navigateBack_" aria-label="$i18n{backToCheckup}">
   </cr-icon-button>
   <h2 id="title" class="page-title">[[pageTitle_]]</h2>
 </div>
 <div id="body">
-    <div id="subtitle" class="label">
-      [[getSubTitle_(insecurityType_)]]
-    </div>
-    <div id="description" class="cr-secondary-text label">
-      [[getDescription_(insecurityType_)]]
-    </div>
-  </template>
+  <div id="subtitle" class="label"> [[pageSubtitle_]] </div>
+  <div id="description" class="cr-secondary-text label">
+    [[getDescription_(insecurityType_)]]
+  </div>
 </div>
 <template is="dom-if" if="[[!isReusedType(insecurityType_)]]">
   <template id="insecureCredentials" is="dom-repeat"
@@ -75,7 +67,9 @@
         group="[[getCurrentGroup_(item.id, groups_)]]"
         show-details="[[isCompromisedType(insecurityType_)]]"
         show-already-changed=
-            "[[clickedChangePassword_(item, clickedChangePasswordIds_.size)]]"
+          "[[clickedChangePassword_(item, clickedChangePasswordIds_.size)]]"
+        password-change-state=
+          "[[getPasswordChangeStateFor_(item.id, passwordChangeStates_.*)]]"
         on-more-actions-click="onMoreActionsClick_"
         on-change-password-clicked="onChangePasswordClick_">
     </checkup-list-item>
@@ -86,19 +80,21 @@
         expanded="{{mutedLeakedCredentialsExpanded_}}">
       $i18n{mutedCompromisedCredentials}
     </cr-expand-button>
-    <iron-collapse id="mutedCredentialsList"
+    <cr-collapse id="mutedCredentialsList"
         opened="[[mutedLeakedCredentialsExpanded_]]">
       <template is="dom-repeat" items="[[mutedCompromisedCredentials_]]">
         <checkup-list-item item="[[item]]" first="[[!index]]"
             group="[[getCurrentGroup_(item.id, groups_)]]"
             show-details="[[isCompromisedType(insecurityType_)]]"
             show-already-changed=
-            "[[clickedChangePassword_(item, clickedChangePasswordIds_.size)]]"
+              "[[clickedChangePassword_(item, clickedChangePasswordIds_.size)]]"
+            password-change-state=
+              "[[getPasswordChangeStateFor_(item.id, passwordChangeStates_.*)]]"
             on-more-actions-click="onMoreActionsClick_"
             on-change-password-clicked="onChangePasswordClick_">
         </checkup-list-item>
       </template>
-    </iron-collapse>
+    </cr-collapse>
   </template>
 </template>
 <template is="dom-if" if="[[isReusedType(insecurityType_)]]" restamp>
@@ -112,6 +108,8 @@
           group="[[getCurrentGroup_(item.id, groups_)]]"
           show-already-changed=
             "[[clickedChangePassword_(item, clickedChangePasswordIds_.size)]]"
+          password-change-state=
+            "[[getPasswordChangeStateFor_(item.id, passwordChangeStates_.*)]]"
           on-more-actions-click="onMoreActionsClick_"
           on-change-password-clicked="onChangePasswordClick_">
       </checkup-list-item>
@@ -134,12 +132,11 @@
   </button>
   <template is="dom-if" if="[[isCompromisedType(insecurityType_)]]">
     <button id="menuMuteUnmuteButton" class="dropdown-item"
-        on-click="onMenuMuteUnmuteClick_"
-        disabled="[[isMutingDisabledByPrefs_(pref)]]">
+        on-click="onMenuMuteUnmuteClick_" disabled="[[isMutingDisabled_]]">
       [[getMuteUnmuteLabel_(activeListItem_)]]
-      <template is="dom-if" if="[[isMutingDisabledByPrefs_(pref)]]" restamp>
-        <iron-icon icon="cr20:domain" class="policy-disabled">
-        </iron-icon>
+      <template is="dom-if" if="[[isMutingDisabled_]]" restamp>
+        <cr-icon icon="cr20:domain" class="policy-disabled">
+        </cr-icon>
       </template>
     </button>
   </template>

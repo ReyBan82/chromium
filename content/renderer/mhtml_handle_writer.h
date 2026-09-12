@@ -23,12 +23,12 @@ class WebThreadSafeData;
 }
 
 namespace mojo {
-class SimpleWatcher;
+class DataPipeProducer;
 }
 
 namespace content {
 
-// TODO(https://crbug.com/915966): This class needs unit tests.
+// TODO(crbug.com/40606905): This class needs unit tests.
 
 // Handle wrapper for MHTML serialization to abstract the handle which data
 // is written to. This is instantiated on the heap and is responsible for
@@ -47,23 +47,25 @@ class MHTMLHandleWriter {
 
   virtual ~MHTMLHandleWriter();
 
-  void WriteContents(std::vector<blink::WebThreadSafeData> mhtml_contents);
+  void WriteContents(std::unique_ptr<MHTMLHandleWriter> self,
+                     std::vector<blink::WebThreadSafeData> mhtml_contents);
 
   // Finalizes the writing operation, recording the UMA, closing the handle,
   // and deleting itself.
-  void Finish(mojom::MhtmlSaveStatus save_status);
+  void Finish(std::unique_ptr<MHTMLHandleWriter> self,
+              mojom::MhtmlSaveStatus save_status);
 
  protected:
   virtual void WriteContentsImpl(
+      std::unique_ptr<MHTMLHandleWriter> self,
       std::vector<blink::WebThreadSafeData> mhtml_contents) = 0;
 
   virtual void Close() = 0;
 
  private:
-  base::TimeTicks mhtml_write_start_time_;
-
   scoped_refptr<base::TaskRunner> main_thread_task_runner_;
   MHTMLWriteCompleteCallback callback_;
+  bool is_writing_ = false;
 };
 
 // Wraps a base::File target to write MHTML contents to.
@@ -84,6 +86,7 @@ class MHTMLFileHandleWriter : public MHTMLHandleWriter {
   // Writes the serialized and encoded MHTML data from WebThreadSafeData
   // instances directly to the file handle passed from the Browser.
   void WriteContentsImpl(
+      std::unique_ptr<MHTMLHandleWriter> self,
       std::vector<blink::WebThreadSafeData> mhtml_contents) override;
 
   void Close() override;
@@ -112,25 +115,18 @@ class MHTMLProducerHandleWriter : public MHTMLHandleWriter {
  protected:
   // Creates a new SequencedTaskRunner to dispatch |watcher_| invocations on.
   void WriteContentsImpl(
+      std::unique_ptr<MHTMLHandleWriter> self,
       std::vector<blink::WebThreadSafeData> mhtml_contents) override;
 
   void Close() override;
 
  private:
-  void BeginWatchingHandle();
+  void BeginWriting(std::unique_ptr<MHTMLHandleWriter> self,
+                    std::vector<blink::WebThreadSafeData> mhtml_contents);
+  void OnWriteComplete(std::unique_ptr<MHTMLHandleWriter> self,
+                       MojoResult result);
 
-  // Writes the serialized and encoded MHTML data from WebThreadSafeData
-  // instances to producer while possible.
-  void TryWritingContents(MojoResult result,
-                          const mojo::HandleSignalsState& state);
-
-  mojo::ScopedDataPipeProducerHandle producer_;
-
-  std::vector<blink::WebThreadSafeData> mhtml_contents_;
-  std::unique_ptr<mojo::SimpleWatcher> watcher_;
-
-  size_t current_block_;
-  size_t write_position_;
+  std::unique_ptr<mojo::DataPipeProducer> producer_;
 };
 
 }  // namespace content

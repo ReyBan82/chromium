@@ -6,15 +6,19 @@
 #define CHROME_BROWSER_MEDIA_WEBRTC_DESKTOP_MEDIA_PICKER_CONTROLLER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "chrome/browser/media/webrtc/desktop_media_list.h"
 #include "chrome/browser/media/webrtc/desktop_media_picker.h"
 #include "content/public/browser/desktop_media_id.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
 #include "ui/base/ui_base_types.h"
 
 class DesktopMediaList;
@@ -24,8 +28,8 @@ class DesktopMediaPickerFactory;
 // user to select a desktop or an application window whose content will be made
 // available as a video stream.
 //
-// TODO(crbug.com/987001): Rename this class.  Consider merging with
-// DesktopMediaPickerViews and naming the merged class just DesktopMediaPicker.
+// TODO(crbug.com/40637301): Rename this class.  Consider merging with
+// DesktopMediaPickerImpl and naming the merged class just DesktopMediaPicker.
 class DesktopMediaPickerController : private content::WebContentsObserver {
  public:
   using Params = DesktopMediaPicker::Params;
@@ -48,6 +52,13 @@ class DesktopMediaPickerController : private content::WebContentsObserver {
       delete;
   ~DesktopMediaPickerController() override;
 
+  // Checks if system audio capture is supported on the current platform.
+  static bool IsSystemAudioCaptureSupported(
+      Params::RequestSource request_source);
+
+  static void SetSystemAudioCaptureSupportedForTesting(
+      std::optional<bool> is_supported);
+
   // Show the desktop picker dialog using the parameters specified by |params|,
   // with the possible selections restricted to those included in |sources|.  If
   // an error is detected synchronously, it is reported by returning an error
@@ -64,17 +75,13 @@ class DesktopMediaPickerController : private content::WebContentsObserver {
   // user for accidentally sharing their screen and gives them the option to
   // prevent their screen from being shared.
   //
-  // |includable_web_contents_filter| is used to restrict any
-  // DesktopMediaList::Type::kWebContents sources. It should return true if a
-  // given WebContents is a valid target, or false if it should be excluded.
-  //
   // Note that |done_callback| is called only if the dialog completes normally.
   // If an instance of this class is destroyed while the dialog is visible, the
   // dialog will be cleaned up, but |done_callback| will not be invoked.
   void Show(const Params& params,
             const std::vector<DesktopMediaList::Type>& sources,
-            DesktopMediaList::WebContentsFilter includable_web_contents_filter,
-            DoneCallback done_callback);
+            DoneCallback done_callback,
+            base::OnceClosure on_show_picker = base::OnceClosure());
 
   // content::WebContentsObserver overrides.
   void WebContentsDestroyed() override;
@@ -85,11 +92,14 @@ class DesktopMediaPickerController : private content::WebContentsObserver {
   // This function is responsible to call |done_callback_| and after running the
   // callback |this| might be destroyed. Do **not** access fields after calling
   // this function.
-  void OnPickerDialogResults(const std::string& err,
-                             content::DesktopMediaID source);
+  void OnPickerDialogResults(
+      const std::string& err,
+      base::expected<content::DesktopMediaID,
+                     blink::mojom::MediaStreamRequestResult> result);
 
   Params params_;
   DoneCallback done_callback_;
+  base::OnceClosure on_show_picker_;
   std::vector<std::unique_ptr<DesktopMediaList>> source_lists_;
   std::unique_ptr<DesktopMediaPicker> picker_;
   raw_ptr<DesktopMediaPickerFactory> picker_factory_;

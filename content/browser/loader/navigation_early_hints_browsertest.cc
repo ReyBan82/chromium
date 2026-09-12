@@ -5,14 +5,17 @@
 #include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
+#include "base/strings/string_split.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/bind.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/threading/thread_restrictions.h"
 #include "components/network_session_configurator/common/network_switches.h"
+#include "content/browser/devtools/protocol/devtools_protocol_test_support.h"
 #include "content/browser/loader/navigation_early_hints_manager.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/web_contents/web_contents_impl.h"
@@ -27,6 +30,7 @@
 #include "content/shell/browser/shell.h"
 #include "content/test/content_browser_test_utils_internal.h"
 #include "net/base/features.h"
+#include "net/base/net_errors.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/http/http_status_code.h"
 #include "net/test/cert_test_util.h"
@@ -36,6 +40,8 @@
 #include "net/test/embedded_test_server/http_response.h"
 #include "net/test/quic_simple_test_server.h"
 #include "net/test/test_data_directory.h"
+#include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
+#include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/network_switches.h"
 #include "services/network/public/mojom/early_hints.mojom.h"
 #include "services/network/public/mojom/link_header.mojom.h"
@@ -62,16 +68,16 @@ struct ResponseEntry {
   }
 
   void AddEarlyHints(const std::vector<HeaderField>& header_fields) {
-    spdy::Http2HeaderBlock hints_headers;
+    quiche::HttpHeaderBlock hints_headers;
     for (const auto& header : header_fields)
       hints_headers.AppendValueOrAddHeader(header.name, header.value);
     early_hints.push_back(std::move(hints_headers));
   }
 
   std::string path;
-  spdy::Http2HeaderBlock headers;
+  quiche::HttpHeaderBlock headers;
   std::string body;
-  std::vector<spdy::Http2HeaderBlock> early_hints;
+  std::vector<quiche::HttpHeaderBlock> early_hints;
 };
 
 const char kPageWithHintedScriptPath[] = "/page_with_hinted_js.html";
@@ -146,17 +152,19 @@ class PreconnectListener
 
 // Most tests use EmbeddedTestServer but this uses QuicSimpleTestServer because
 // Early Hints are only plumbed over HTTP/2 or HTTP/3 (QUIC).
-class NavigationEarlyHintsTest : public ContentBrowserTest {
+class NavigationEarlyHintsTest : public DevToolsProtocolTest {
  public:
   NavigationEarlyHintsTest() {
     feature_list_.InitWithFeatures(
-        {net::features::kSplitCacheByNetworkIsolationKey},
-        {net::features::kForceIsolationInfoFrameOriginToTopLevelFrame});
+        std::vector<base::test::FeatureRef>{
+            net::features::kSplitCacheByNetworkIsolationKey},
+        std::vector<base::test::FeatureRef>{
+            net::features::kMigrateSessionsOnNetworkChangeV2});
   }
   ~NavigationEarlyHintsTest() override = default;
 
   void SetUpOnMainThread() override {
-    ContentBrowserTest::SetUpOnMainThread();
+    DevToolsProtocolTest::SetUpOnMainThread();
     ConfigureMockCertVerifier();
     host_resolver()->AddRule("*", "127.0.0.1");
 
@@ -174,17 +182,48 @@ class NavigationEarlyHintsTest : public ContentBrowserTest {
 
     ASSERT_TRUE(net::QuicSimpleTestServer::Start());
 
-    ContentBrowserTest::SetUpCommandLine(command_line);
+    DevToolsProtocolTest::SetUpCommandLine(command_line);
   }
 
   void TearDown() override {
     base::ScopedAllowBaseSyncPrimitivesForTesting allow_wait;
     net::QuicSimpleTestServer::Shutdown();
-    ContentBrowserTest::TearDown();
+    DevToolsProtocolTest::TearDown();
   }
 
   net::test_server::EmbeddedTestServer& cross_origin_server() {
     return cross_origin_server_;
+  }
+
+  std::string WaitForHintedScriptDevtoolsRequestId() {
+    base::DictValue result;
+    while (true) {
+      result = WaitForNotification("Network.requestWillBeSent", true);
+      const base::Value* request_url = result.FindByDottedPath("request.url");
+      if (request_url->GetString() ==
+          net::QuicSimpleTestServer::GetFileURL(kHintedScriptPath).spec()) {
+        return *result.FindString("requestId");
+      }
+    }
+  }
+
+  base::DictValue WaitForDevtoolsEarlyHints() {
+    base::DictValue result;
+    while (true) {
+      result = WaitForNotification("Network.responseReceivedEarlyHints", true);
+      return result;
+    }
+  }
+
+  base::DictValue WaitForResponseReceived(const std::string& request_id) {
+    base::DictValue result;
+    while (true) {
+      result = WaitForNotification("Network.responseReceived", true);
+      const std::string* received_id = result.FindString("requestId");
+      if (received_id && *received_id == request_id) {
+        return result;
+      }
+    }
   }
 
  protected:
@@ -314,8 +353,9 @@ class NavigationEarlyHintsTest : public ContentBrowserTest {
                                               const std::string& title) {
     std::u16string title16 = base::ASCIIToUTF16(title);
     TitleWatcher title_watcher(shell()->web_contents(), title16);
-    if (!NavigateToURL(shell(), url, expected_commit_url))
+    if (!NavigateToURL(shell(), url, expected_commit_url)) {
       return false;
+    }
     return title16 == title_watcher.WaitAndGetTitle();
   }
 
@@ -331,8 +371,9 @@ class NavigationEarlyHintsTest : public ContentBrowserTest {
   PreloadedResources WaitForPreloadedResources(RenderFrameHostImpl* rfh) {
     base::RunLoop loop;
     PreloadedResources result;
-    if (!GetEarlyHintsManager(rfh))
+    if (!GetEarlyHintsManager(rfh)) {
       return result;
+    }
 
     GetEarlyHintsManager(rfh)->WaitForPreloadsFinishedForTesting(
         base::BindLambdaForTesting([&](PreloadedResources preloaded_resources) {
@@ -367,7 +408,7 @@ class NavigationEarlyHintsTest : public ContentBrowserTest {
       const net::test_server::HttpRequest& request) {
     GURL relative_url = request.base_url.Resolve(request.relative_url);
 
-    if (relative_url.path() == kEmptyPagePath) {
+    if (relative_url.GetPath() == kEmptyPagePath) {
       auto response = std::make_unique<net::test_server::BasicHttpResponse>();
       response->set_code(net::HTTP_OK);
       response->set_content_type("text/html");
@@ -375,7 +416,7 @@ class NavigationEarlyHintsTest : public ContentBrowserTest {
       return std::move(response);
     }
 
-    if (relative_url.path() == kRedirectedPagePath) {
+    if (relative_url.GetPath() == kRedirectedPagePath) {
       auto response = std::make_unique<net::test_server::BasicHttpResponse>();
       response->set_code(net::HTTP_OK);
       response->set_content_type("text/html");
@@ -383,15 +424,16 @@ class NavigationEarlyHintsTest : public ContentBrowserTest {
       return std::move(response);
     }
 
-    if (relative_url.path() != kHintedScriptPath)
+    if (relative_url.GetPath() != kHintedScriptPath) {
       return nullptr;
+    }
 
     auto response = std::make_unique<net::test_server::BasicHttpResponse>();
     response->set_code(net::HTTP_OK);
     response->set_content_type("application/javascript");
     response->set_content(kHintedScriptBody);
 
-    std::string query = relative_url.query();
+    std::string query = relative_url.GetQuery();
     if (query == "corp-cross-origin") {
       response->AddCustomHeader("Cross-Origin-Resource-Policy", "cross-origin");
     } else if (query == "corp-same-origin") {
@@ -411,6 +453,8 @@ class NavigationEarlyHintsTest : public ContentBrowserTest {
 };
 
 IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, Basic) {
+  base::HistogramTester histograms;
+
   ResponseEntry entry = CreatePageEntryWithHintedScript(net::HTTP_OK);
   RegisterResponse(entry);
 
@@ -426,6 +470,11 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, Basic) {
   ASSERT_FALSE(it->second.was_canceled);
   ASSERT_TRUE(it->second.error_code.has_value());
   EXPECT_EQ(it->second.error_code.value(), net::OK);
+
+  histograms.ExpectTotalCount(
+      "Navigation.EarlyHints.WillStartRequestToEarlyHintsTime", 1);
+  histograms.ExpectTotalCount(
+      "Navigation.EarlyHints.EarlyHintsToResponseStartTime", 1);
 }
 
 IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, CorsAttribute) {
@@ -702,15 +751,16 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, NetworkAnonymizationKey) {
   ResponseEntry entry = CreateEmptyPageEntryWithHintedScript();
   RegisterResponse(entry);
 
-  absl::optional<bool> is_cached;
+  std::optional<bool> is_cached;
   URLLoaderInterceptor interceptor(
       base::BindLambdaForTesting(
           [&](URLLoaderInterceptor::RequestParams* params) { return false; }),
       base::BindLambdaForTesting(
           [&](const GURL& request_url,
               const network::URLLoaderCompletionStatus& status) {
-            if (request_url != kHintedScriptUrl)
+            if (request_url != kHintedScriptUrl) {
               return;
+            }
             is_cached = status.exists_in_cache;
           }),
       base::NullCallback());
@@ -726,7 +776,7 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, NetworkAnonymizationKey) {
   ASSERT_EQ(it->second.error_code.value(), net::OK);
 
   ASSERT_FALSE(is_cached.value());
-  is_cached = absl::nullopt;
+  is_cached = std::nullopt;
 
   // Fetch the hinted resource from the main frame. It should come from the
   // cache.
@@ -734,7 +784,7 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, NetworkAnonymizationKey) {
   ASSERT_TRUE(is_cached.value());
 
   // Reset `is_cached` to make sure it is set true or false.
-  is_cached = absl::nullopt;
+  is_cached = std::nullopt;
 
   // Create an iframe with a different origin and fetch the hinted resource from
   // the iframe. It should not come from the cache.
@@ -777,6 +827,42 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, InvalidHeader_NewLine) {
       NavigateToURL(shell(), net::QuicSimpleTestServer::GetFileURL(kPath)));
 }
 
+IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsTest, DevtoolsEventsForEarlyHint) {
+  ResponseEntry entry = CreatePageEntryWithHintedScript(net::HTTP_OK);
+  RegisterResponse(entry);
+  shell()->LoadURL(GURL("about:blank"));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  Attach();
+  // Send this synchronously, otherwise it might not be sent yet when the
+  // navigation start and the message sending gets suspended.
+  SendCommandSync("Network.enable");
+  GURL target_url =
+      net::QuicSimpleTestServer::GetFileURL(kPageWithHintedScriptPath);
+  EXPECT_TRUE(NavigateToURL(shell(), target_url, target_url));
+
+  std::string hinted_id = WaitForHintedScriptDevtoolsRequestId();
+
+  {
+    base::DictValue early_hints_event = WaitForDevtoolsEarlyHints();
+    base::DictValue* early_hints_headers =
+        early_hints_event.FindDict("headers");
+    ASSERT_TRUE(early_hints_headers);
+    HeaderField link_header = CreatePreloadLinkForScript();
+    EXPECT_EQ(*early_hints_headers->FindString(link_header.name),
+              link_header.value);
+  }
+
+  {
+    base::DictValue result = WaitForResponseReceived(hinted_id);
+    base::Value* from_early_hints_value =
+        result.FindByDottedPath("response.fromEarlyHints");
+    ASSERT_TRUE(from_early_hints_value);
+    EXPECT_TRUE(from_early_hints_value->is_bool());
+    EXPECT_TRUE(from_early_hints_value->GetBool());
+  }
+}
+
 class NavigationEarlyHintsAddressSpaceTest : public NavigationEarlyHintsTest {
  public:
   NavigationEarlyHintsAddressSpaceTest() = default;
@@ -785,8 +871,8 @@ class NavigationEarlyHintsAddressSpaceTest : public NavigationEarlyHintsTest {
   void SetUpCommandLine(base::CommandLine* command_line) override {
     NavigationEarlyHintsTest::SetUpCommandLine(command_line);
 
-    private_server_.AddDefaultHandlers(GetTestDataFilePath());
-    ASSERT_TRUE(private_server_.Start());
+    local_server_.AddDefaultHandlers(GetTestDataFilePath());
+    ASSERT_TRUE(local_server_.Start());
 
     // Treat the main test server as public for IPAddressSpace tests.
     command_line->AppendSwitchASCII(
@@ -795,24 +881,22 @@ class NavigationEarlyHintsAddressSpaceTest : public NavigationEarlyHintsTest {
                            net::QuicSimpleTestServer::GetPort()));
   }
 
-  net::test_server::EmbeddedTestServer& private_server() {
-    return private_server_;
-  }
+  net::test_server::EmbeddedTestServer& local_server() { return local_server_; }
 
  private:
-  // For tests that trigger private network requests.
-  net::EmbeddedTestServer private_server_;
+  // For tests that trigger local network requests.
+  net::EmbeddedTestServer local_server_;
 };
 
 // Tests that Early Hints preload is blocked when hints comes from the public
-// network but a hinted resource is located in a private network.
+// network but a hinted resource is located in a local network.
 IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsAddressSpaceTest,
-                       PublicToPrivateRequestBlocked) {
-  const GURL kPrivateResourceUrl = private_server().GetURL("/blank.jpg");
+                       PublicToLocalRequestBlocked) {
+  const GURL kLocalResourceUrl = local_server().GetURL("/blank.jpg");
   ResponseEntry page_entry(kEmptyPagePath, net::HTTP_OK);
-  HeaderField link_header = HeaderField(
-      "link", base::StringPrintf("<%s>; rel=preload; as=image",
-                                 kPrivateResourceUrl.spec().c_str()));
+  HeaderField link_header =
+      HeaderField("link", base::StringPrintf("<%s>; rel=preload; as=image",
+                                             kLocalResourceUrl.spec().c_str()));
   page_entry.AddEarlyHints({std::move(link_header)});
   RegisterResponse(page_entry);
 
@@ -823,13 +907,14 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsAddressSpaceTest,
   PreloadedResources preloads = WaitForPreloadedResources();
   EXPECT_EQ(preloads.size(), 1UL);
 
-  auto it = preloads.find(kPrivateResourceUrl);
+  auto it = preloads.find(kLocalResourceUrl);
   ASSERT_TRUE(it != preloads.end());
   ASSERT_FALSE(it->second.was_canceled);
   ASSERT_TRUE(it->second.error_code.has_value());
-  EXPECT_EQ(it->second.error_code.value(), net::ERR_FAILED);
+  EXPECT_EQ(it->second.error_code.value(),
+            net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS);
   EXPECT_EQ(it->second.cors_error_status->cors_error,
-            network::mojom::CorsError::kInsecurePrivateNetwork);
+            network::mojom::CorsError::kInsecureLocalNetwork);
 }
 
 class NavigationEarlyHintsPrerenderTest : public NavigationEarlyHintsTest {
@@ -856,7 +941,7 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsPrerenderTest,
   RegisterResponse(entry);
 
   // Loads a page in the prerender.
-  int host_id = prerender_helper()->AddPrerender(
+  PrerenderHostId host_id = prerender_helper()->AddPrerender(
       net::QuicSimpleTestServer::GetFileURL(kPageWithHintedScriptPath));
   RenderFrameHostImpl* prerender_rfh = static_cast<RenderFrameHostImpl*>(
       prerender_helper()->GetPrerenderedMainFrameHost(host_id));
@@ -915,52 +1000,316 @@ IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsFencedFrameTest,
   EXPECT_EQ(fenced_frame_host->early_hints_manager(), nullptr);
 }
 
-class NavigationEarlyHintsPortalTest : public NavigationEarlyHintsTest {
+namespace {
+
+const char kHttp1EarlyHintsPath[] = "/early-hints";
+
+class Http1EarlyHintsResponse : public net::test_server::HttpResponse {
  public:
-  NavigationEarlyHintsPortalTest() {
-    scoped_feature_list_.InitWithFeatures(
-        /*enabled_features=*/{blink::features::kPortals,
-                              blink::features::kPortalsCrossOrigin},
-        /*disabled_features=*/{});
+  Http1EarlyHintsResponse() = default;
+  ~Http1EarlyHintsResponse() override = default;
+
+  void SendResponse(
+      base::WeakPtr<net::test_server::HttpResponseDelegate> delegate) override {
+    base::StringPairs early_hints_headers = {
+        {"Link", "</cacheable.js>; rel=preload; as=script"}};
+    delegate->SendResponseHeaders(net::HTTP_EARLY_HINTS, "Early Hints",
+                                  early_hints_headers);
+
+    base::StringPairs final_response_headers = {
+        {"Content-Type", "text/html"},
+        {"Link", "</cacheable.js>; rel=preload; as=script"}};
+    delegate->SendResponseHeaders(net::HTTP_OK, "OK", final_response_headers);
+
+    delegate->SendContentsAndFinish("<script src=\"cacheable.js\"></script>");
   }
+};
+
+std::unique_ptr<net::test_server::HttpResponse> HandleHttpEarlyHintsRequest(
+    const net::test_server::HttpRequest& request) {
+  const GURL relative_url = request.base_url.Resolve(request.relative_url);
+  if (relative_url.GetPath() == kHttp1EarlyHintsPath) {
+    return std::make_unique<Http1EarlyHintsResponse>();
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+class NavigationEarlyHintsHttp1Test : public ContentBrowserTest,
+                                      public testing::WithParamInterface<bool> {
+ public:
+  NavigationEarlyHintsHttp1Test() {
+    if (EnableEarlyHintsForHttp1()) {
+      scoped_feature_list_.InitAndEnableFeature(
+          net::features::kEnableEarlyHintsOnHttp11);
+    } else {
+      scoped_feature_list_.InitAndDisableFeature(
+          net::features::kEnableEarlyHintsOnHttp11);
+    }
+  }
+
+  void SetUpOnMainThread() override {
+    ContentBrowserTest::SetUpOnMainThread();
+    host_resolver()->AddRule("*", "127.0.0.1");
+    embedded_test_server()->AddDefaultHandlers();
+    embedded_test_server()->RegisterRequestHandler(
+        base::BindRepeating(&HandleHttpEarlyHintsRequest));
+    ASSERT_TRUE(embedded_test_server()->Start());
+  }
+
+  bool EnableEarlyHintsForHttp1() { return GetParam(); }
 
  private:
   base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsPortalTest,
-                       DisallowPreloadInPortal) {
-  EXPECT_TRUE(NavigateToURL(
-      shell(), net::QuicSimpleTestServer::GetFileURL("/title1.html")));
+INSTANTIATE_TEST_SUITE_P(All, NavigationEarlyHintsHttp1Test, testing::Bool());
 
-  ResponseEntry entry = CreatePageEntryWithHintedScript(net::HTTP_OK);
-  RegisterResponse(entry);
+// Tests that Early Hints are allowed or disallowed on HTTP/1.1 based on a
+// feature flag.
+IN_PROC_BROWSER_TEST_P(NavigationEarlyHintsHttp1Test, AllowEarlyHints) {
+  const GURL url = embedded_test_server()->GetURL(kHttp1EarlyHintsPath);
+  ASSERT_TRUE(NavigateToURL(shell(), url));
 
-  GURL portal_url(
-      net::QuicSimpleTestServer::GetFileURL(kPageWithHintedScriptPath));
-  WebContentsAddedObserver contents_observer;
-  TestNavigationObserver portal_nav_observer(portal_url);
-  portal_nav_observer.StartWatchingNewWebContents();
+  NavigationEarlyHintsManager* early_hints_manager =
+      static_cast<RenderFrameHostImpl*>(
+          shell()->web_contents()->GetPrimaryMainFrame())
+          ->early_hints_manager();
+  if (EnableEarlyHintsForHttp1()) {
+    ASSERT_TRUE(early_hints_manager->WasResourceHintsReceived());
+  } else {
+    ASSERT_TRUE(early_hints_manager == nullptr);
+  }
+}
 
-  // Create a portal.
-  EXPECT_TRUE(
-      ExecJs(shell()->web_contents()->GetPrimaryMainFrame(),
-             JsReplace("{"
-                       "  let portal = document.createElement('portal');"
-                       "  portal.src = $1;"
-                       "  document.body.appendChild(portal);"
-                       "}",
-                       portal_url),
-             EXECUTE_SCRIPT_NO_USER_GESTURE));
+class NavigationEarlyHintsConnectionAllowlistTest
+    : public NavigationEarlyHintsTest {
+ public:
+  NavigationEarlyHintsConnectionAllowlistTest() {
+    scoped_feature_list_.InitAndEnableFeatureWithParameters(
+        network::features::kConnectionAllowlists, {});
+  }
 
-  WebContents* portal_web_contents = contents_observer.GetWebContents();
-  EXPECT_NE(portal_web_contents, nullptr);
-  portal_nav_observer.WaitForNavigationFinished();
+  ~NavigationEarlyHintsConnectionAllowlistTest() override = default;
 
-  EXPECT_EQ(static_cast<RenderFrameHostImpl*>(
-                portal_web_contents->GetPrimaryMainFrame())
-                ->early_hints_manager(),
-            nullptr);
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsConnectionAllowlistTest,
+                       PreloadAllowed) {
+  const GURL kCrossOriginScriptUrl =
+      cross_origin_server().GetURL("/hinted.js?corp-cross-origin");
+
+  ResponseEntry page_entry(kPageWithCrossOriginScriptPage, net::HTTP_OK);
+  HeaderField link_header = HeaderField(
+      "link", base::StringPrintf("<%s>; rel=preload; as=script",
+                                 kCrossOriginScriptUrl.spec().c_str()));
+
+  // The connection allowlist allows the preload URL.
+  HeaderField allowlist_header("connection-allowlist",
+                               R"((response-origin "*://*:*/hinted.js?*"))");
+
+  page_entry.AddEarlyHints(
+      {std::move(link_header), std::move(allowlist_header)});
+  RegisterResponse(page_entry);
+
+  EXPECT_TRUE(NavigateToURL(shell(), net::QuicSimpleTestServer::GetFileURL(
+                                         kPageWithCrossOriginScriptPage)));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  // The resource hints should be received.
+  RenderFrameHostImpl* rfh = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_NE(GetEarlyHintsManager(rfh), nullptr);
+  EXPECT_TRUE(GetEarlyHintsManager(rfh)->WasResourceHintsReceived());
+
+  // The preload request is allowed.
+  PreloadedResources preloads = WaitForPreloadedResources();
+  EXPECT_EQ(preloads.size(), 1UL);
+
+  auto it = preloads.find(kCrossOriginScriptUrl);
+  ASSERT_TRUE(it != preloads.end());
+  ASSERT_FALSE(it->second.was_canceled);
+  ASSERT_TRUE(it->second.error_code.has_value());
+  EXPECT_EQ(it->second.error_code.value(), net::OK);
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsConnectionAllowlistTest,
+                       PreloadBlocked) {
+  const GURL kCrossOriginScriptUrl =
+      cross_origin_server().GetURL("/hinted.js?corp-cross-origin");
+
+  ResponseEntry page_entry(kPageWithCrossOriginScriptPage, net::HTTP_OK);
+  HeaderField link_header = HeaderField(
+      "link", base::StringPrintf("<%s>; rel=preload; as=script",
+                                 kCrossOriginScriptUrl.spec().c_str()));
+
+  // The connection allowlist does not allow the preload URL.
+  HeaderField allowlist_header("connection-allowlist", "(response-origin)");
+
+  page_entry.AddEarlyHints(
+      {std::move(link_header), std::move(allowlist_header)});
+  RegisterResponse(page_entry);
+
+  EXPECT_TRUE(NavigateToURL(shell(), net::QuicSimpleTestServer::GetFileURL(
+                                         kPageWithCrossOriginScriptPage)));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  // The resource hints should be received regardless of whether the request is
+  // blocked.
+  RenderFrameHostImpl* rfh = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_NE(GetEarlyHintsManager(rfh), nullptr);
+  EXPECT_TRUE(GetEarlyHintsManager(rfh)->WasResourceHintsReceived());
+
+  // The preload request is blocked.
+  PreloadedResources preloads = WaitForPreloadedResources();
+  EXPECT_TRUE(preloads.empty());
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsConnectionAllowlistTest,
+                       PreconnectAllowed) {
+  const char kPageWithPreconnect[] = "/page_with_preconnect.html";
+  const GURL kPreconnectUrl =
+      cross_origin_server().GetURL("/hinted.js?corp-cross-origin");
+
+  ResponseEntry page_entry(kPageWithPreconnect, net::HTTP_OK);
+  HeaderField link_header =
+      HeaderField("link", base::StringPrintf("<%s>; rel=preconnect",
+                                             kPreconnectUrl.spec().c_str()));
+
+  // The connection allowlist allows the preconnect URL.
+  HeaderField allowlist_header("connection-allowlist",
+                               R"((response-origin "*://*:*/hinted.js?*"))");
+
+  page_entry.AddEarlyHints(
+      {std::move(link_header), std::move(allowlist_header)});
+  RegisterResponse(page_entry);
+
+  ASSERT_TRUE(NavigateToURL(
+      shell(), net::QuicSimpleTestServer::GetFileURL(kPageWithPreconnect)));
+  ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  // The resource hints should be received.
+  RenderFrameHostImpl* rfh = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_NE(GetEarlyHintsManager(rfh), nullptr);
+  EXPECT_TRUE(GetEarlyHintsManager(rfh)->WasResourceHintsReceived());
+
+  // The preconnect is allowed.
+  EXPECT_EQ(preconnect_listener().num_accepted_sockets(), 1UL);
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsConnectionAllowlistTest,
+                       PreconnectBlocked) {
+  const char kPageWithPreconnect[] = "/page_with_preconnect.html";
+  const GURL kPreconnectUrl =
+      cross_origin_server().GetURL("/hinted.js?corp-cross-origin");
+
+  ResponseEntry page_entry(kPageWithPreconnect, net::HTTP_OK);
+  HeaderField link_header =
+      HeaderField("link", base::StringPrintf("<%s>; rel=preconnect",
+                                             kPreconnectUrl.spec().c_str()));
+
+  // The connection allowlist does not allow the preconnect URL.
+  HeaderField allowlist_header("connection-allowlist", "(response-origin)");
+
+  page_entry.AddEarlyHints(
+      {std::move(link_header), std::move(allowlist_header)});
+  RegisterResponse(page_entry);
+
+  ASSERT_TRUE(NavigateToURL(
+      shell(), net::QuicSimpleTestServer::GetFileURL(kPageWithPreconnect)));
+  ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  // The resource hints should be received regardless of whether the request is
+  // blocked.
+  RenderFrameHostImpl* rfh = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_NE(GetEarlyHintsManager(rfh), nullptr);
+  EXPECT_TRUE(GetEarlyHintsManager(rfh)->WasResourceHintsReceived());
+
+  // The preconnect is blocked.
+  EXPECT_EQ(preconnect_listener().num_accepted_sockets(), 0UL);
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsConnectionAllowlistTest,
+                       ModulePreloadAllowed) {
+  // Module preload requests are always fetched using CORS mode. Use the Quic
+  // server to make the request same origin with the document. Otherwise the
+  // request will fail because the test server does not respond with
+  // `Access-Control-Allow-Origin` header.
+  const GURL kSameOriginScriptUrl =
+      net::QuicSimpleTestServer::GetFileURL(kHintedScriptPath);
+
+  ResponseEntry page_entry(kPageWithCrossOriginScriptPage, net::HTTP_OK);
+  HeaderField link_header = HeaderField(
+      "link", base::StringPrintf("<%s>; rel=modulepreload",
+                                 kSameOriginScriptUrl.spec().c_str()));
+
+  // The connection allowlist allows the module preload URL.
+  HeaderField allowlist_header("connection-allowlist", "(response-origin)");
+
+  RegisterHintedScriptResource();
+  page_entry.AddEarlyHints(
+      {std::move(link_header), std::move(allowlist_header)});
+  RegisterResponse(page_entry);
+
+  EXPECT_TRUE(NavigateToURL(shell(), net::QuicSimpleTestServer::GetFileURL(
+                                         kPageWithCrossOriginScriptPage)));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  PreloadedResources preloads = WaitForPreloadedResources();
+  EXPECT_EQ(preloads.size(), 1UL);
+
+  // The resource hints should be received.
+  RenderFrameHostImpl* rfh = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_NE(GetEarlyHintsManager(rfh), nullptr);
+  EXPECT_TRUE(GetEarlyHintsManager(rfh)->WasResourceHintsReceived());
+
+  // The module preload request is allowed.
+  auto it = preloads.find(kSameOriginScriptUrl);
+  ASSERT_TRUE(it != preloads.end());
+  ASSERT_FALSE(it->second.was_canceled);
+  ASSERT_TRUE(it->second.error_code.has_value());
+  EXPECT_EQ(it->second.error_code.value(), net::OK);
+}
+
+IN_PROC_BROWSER_TEST_F(NavigationEarlyHintsConnectionAllowlistTest,
+                       ModulePreloadBlocked) {
+  const GURL kSameOriginScriptUrl =
+      net::QuicSimpleTestServer::GetFileURL(kHintedScriptPath);
+
+  ResponseEntry page_entry(kPageWithCrossOriginScriptPage, net::HTTP_OK);
+  HeaderField link_header = HeaderField(
+      "link", base::StringPrintf("<%s>; rel=modulepreload",
+                                 kSameOriginScriptUrl.spec().c_str()));
+
+  // The connection allowlist does not allow the module preload URL.
+  HeaderField allowlist_header("connection-allowlist", "()");
+
+  RegisterHintedScriptResource();
+  page_entry.AddEarlyHints(
+      {std::move(link_header), std::move(allowlist_header)});
+  RegisterResponse(page_entry);
+
+  EXPECT_TRUE(NavigateToURL(shell(), net::QuicSimpleTestServer::GetFileURL(
+                                         kPageWithCrossOriginScriptPage)));
+  EXPECT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  // The resource hints should be received regardless of whether the request is
+  // blocked.
+  RenderFrameHostImpl* rfh = static_cast<RenderFrameHostImpl*>(
+      shell()->web_contents()->GetPrimaryMainFrame());
+  EXPECT_NE(GetEarlyHintsManager(rfh), nullptr);
+  EXPECT_TRUE(GetEarlyHintsManager(rfh)->WasResourceHintsReceived());
+
+  // The module preload request is blocked.
+  PreloadedResources preloads = WaitForPreloadedResources();
+  EXPECT_TRUE(preloads.empty());
 }
 
 }  // namespace content

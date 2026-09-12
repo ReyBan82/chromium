@@ -11,11 +11,12 @@
 #define TRACELINE_SYM_RESOLVER_H_
 
 #include <windows.h>
+
 #include <dbghelp.h>
 
-#include <vector>
-#include <string>
 #include <map>
+#include <string>
+#include <vector>
 
 static BOOL CALLBACK SymEnumer(PCSTR name, DWORD64 base, PVOID context) {
   reinterpret_cast<std::vector<DWORD64>*>(context)->push_back(base);
@@ -124,8 +125,8 @@ class SymResolver {
     int addr = static_cast<int>(info.info.Address);
     int base = static_cast<int>(info.info.ModBase);
 
-    if (dlls_.count(base) == 1) {
-      name.append(dlls_[base]);
+    if (auto it = dlls_.find(base); it != dlls_.end()) {
+      name.append(it->second);
     } else {
       name.append("unknown_mod");
     }

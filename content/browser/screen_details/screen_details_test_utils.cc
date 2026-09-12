@@ -4,25 +4,26 @@
 
 #include "content/browser/screen_details/screen_details_test_utils.h"
 
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 
 namespace content::test {
 
-base::Value::List GetExpectedScreenDetails() {
-  base::Value::List expected_screens;
-  auto* screen = display::Screen::GetScreen();
+base::ListValue GetExpectedScreenDetails() {
+  base::ListValue expected_screens;
+  auto* screen = display::Screen::Get();
   std::vector<display::Display> displays = screen->GetAllDisplays();
 
   // Sort the displays by position; x first and then y, to match the API.
-  base::ranges::stable_sort(displays, [](auto& a, auto& b) {
+  std::ranges::stable_sort(displays, [](auto& a, auto& b) {
     if (a.bounds().x() != b.bounds().x())
       return a.bounds().x() < b.bounds().x();
     return a.bounds().y() < b.bounds().y();
   });
   for (const auto& display : displays) {
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set("availHeight", display.work_area().height());
     dict.Set("availLeft", display.work_area().x());
     dict.Set("availTop", display.work_area().y());

@@ -9,7 +9,6 @@
 #include "base/functional/bind.h"
 #include "base/strings/utf_string_conversions.h"
 #include "components/permissions/android/bluetooth_chooser_android_delegate.h"
-#include "components/permissions/android/jni_headers/BluetoothChooserDialog_jni.h"
 #include "components/permissions/constants.h"
 #include "components/permissions/permission_util.h"
 #include "components/url_formatter/elide_url.h"
@@ -18,8 +17,11 @@
 #include "url/gurl.h"
 #include "url/origin.h"
 
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "components/permissions/android/jni_headers/BluetoothChooserDialog_jni.h"
+
 using base::android::AttachCurrentThread;
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 using base::android::ScopedJavaLocalRef;
 
 namespace permissions {
@@ -53,14 +55,12 @@ BluetoothChooserAndroid::BluetoothChooserAndroid(
 
   // Create (and show) the BluetoothChooser dialog.
   JNIEnv* env = AttachCurrentThread();
-  ScopedJavaLocalRef<jstring> origin_string =
-      base::android::ConvertUTF16ToJavaString(
-          env, url_formatter::FormatOriginForSecurityDisplay(origin));
-  java_dialog_.Reset(std::move(create_java_dialog_callback)
-                         .Run(env, window_android, origin_string,
-                              delegate_->GetSecurityLevel(web_contents_),
-                              delegate_->GetJavaObject(),
-                              reinterpret_cast<intptr_t>(this)));
+  java_dialog_.Reset(
+      std::move(create_java_dialog_callback)
+          .Run(env, window_android,
+               url_formatter::FormatOriginForSecurityDisplay(origin),
+               delegate_->GetSecurityLevel(web_contents_),
+               delegate_->GetJavaObject(), reinterpret_cast<intptr_t>(this)));
 }
 
 BluetoothChooserAndroid::BluetoothChooserAndroid(
@@ -87,10 +87,18 @@ bool BluetoothChooserAndroid::CanAskForScanningPermission() {
 
 void BluetoothChooserAndroid::SetAdapterPresence(AdapterPresence presence) {
   JNIEnv* env = AttachCurrentThread();
-  if (presence != AdapterPresence::POWERED_ON) {
-    Java_BluetoothChooserDialog_notifyAdapterTurnedOff(env, java_dialog_);
-  } else {
-    Java_BluetoothChooserDialog_notifyAdapterTurnedOn(env, java_dialog_);
+  switch (presence) {
+    case AdapterPresence::POWERED_OFF:
+      Java_BluetoothChooserDialog_notifyAdapterTurnedOff(env, java_dialog_);
+      break;
+    case AdapterPresence::POWERED_ON:
+      Java_BluetoothChooserDialog_notifyAdapterTurnedOn(env, java_dialog_);
+      break;
+    case AdapterPresence::UNAUTHORIZED:
+      Java_BluetoothChooserDialog_notifyAdapterUnauthorized(env, java_dialog_);
+      break;
+    default:
+      NOTREACHED();
   }
 }
 
@@ -119,35 +127,25 @@ void BluetoothChooserAndroid::AddOrUpdateDevice(
     bool is_gatt_connected,
     bool is_paired,
     int signal_strength_level) {
-  JNIEnv* env = AttachCurrentThread();
-  ScopedJavaLocalRef<jstring> java_device_id =
-      base::android::ConvertUTF8ToJavaString(env, device_id);
-  ScopedJavaLocalRef<jstring> java_device_name =
-      base::android::ConvertUTF16ToJavaString(env, device_name);
   Java_BluetoothChooserDialog_addOrUpdateDevice(
-      env, java_dialog_, java_device_id, java_device_name, is_gatt_connected,
-      signal_strength_level);
+      AttachCurrentThread(), java_dialog_, device_id, device_name,
+      is_gatt_connected, signal_strength_level);
 }
 
 void BluetoothChooserAndroid::OnDialogFinished(
-    JNIEnv* env,
-    jint event_type,
-    const JavaParamRef<jstring>& device_id) {
-  // Values are defined in BluetoothChooserDialog as DIALOG_FINISHED constants.
-  switch (event_type) {
-    case 0:
-      event_handler_.Run(content::BluetoothChooserEvent::DENIED_PERMISSION, "");
+    content::BluetoothChooserEvent event,
+    const std::string& device_id) {
+  switch (event) {
+    case content::BluetoothChooserEvent::DENIED_PERMISSION:
+    case content::BluetoothChooserEvent::CANCELLED:
+      event_handler_.Run(event, "");
       return;
-    case 1:
-      event_handler_.Run(content::BluetoothChooserEvent::CANCELLED, "");
+    case content::BluetoothChooserEvent::SELECTED:
+      event_handler_.Run(event, device_id);
       return;
-    case 2:
-      event_handler_.Run(
-          content::BluetoothChooserEvent::SELECTED,
-          base::android::ConvertJavaStringToUTF8(env, device_id));
-      return;
+    default:
+      NOTREACHED();
   }
-  NOTREACHED();
 }
 
 void BluetoothChooserAndroid::RestartSearch() {
@@ -158,26 +156,43 @@ void BluetoothChooserAndroid::RestartSearch(JNIEnv*) {
   RestartSearch();
 }
 
-void BluetoothChooserAndroid::ShowBluetoothOverviewLink(JNIEnv* env) {
+void BluetoothChooserAndroid::ShowBluetoothOverviewLink() {
   OpenURL(kChooserBluetoothOverviewURL);
   event_handler_.Run(content::BluetoothChooserEvent::SHOW_OVERVIEW_HELP, "");
 }
 
-void BluetoothChooserAndroid::ShowBluetoothAdapterOffLink(JNIEnv* env) {
+void BluetoothChooserAndroid::ShowBluetoothAdapterOffLink() {
   OpenURL(kChooserBluetoothOverviewURL);
   event_handler_.Run(content::BluetoothChooserEvent::SHOW_ADAPTER_OFF_HELP, "");
 }
 
-void BluetoothChooserAndroid::ShowNeedLocationPermissionLink(JNIEnv* env) {
+void BluetoothChooserAndroid::ShowNeedLocationPermissionLink() {
   OpenURL(kChooserBluetoothOverviewURL);
   event_handler_.Run(content::BluetoothChooserEvent::SHOW_NEED_LOCATION_HELP,
                      "");
 }
 
+// static
+std::unique_ptr<BluetoothChooserAndroid>
+BluetoothChooserAndroid::CreateForTesting(
+    content::RenderFrameHost* frame,
+    const EventHandler& event_handler,
+    std::unique_ptr<BluetoothChooserAndroidDelegate> delegate,
+    CreateJavaDialogCallback create_java_dialog_callback) {
+  // Using `new` to access a non-public constructor.
+  return base::WrapUnique(
+      new BluetoothChooserAndroid(frame, event_handler, std::move(delegate),
+                                  std::move(create_java_dialog_callback)));
+}
+
 void BluetoothChooserAndroid::OpenURL(const char* url) {
-  web_contents_->OpenURL(content::OpenURLParams(
-      GURL(url), content::Referrer(), WindowOpenDisposition::NEW_FOREGROUND_TAB,
-      ui::PAGE_TRANSITION_AUTO_TOPLEVEL, false /* is_renderer_initiated */));
+  web_contents_->OpenURL(
+      content::OpenURLParams::CreateBrowserInitiated(
+          GURL(url), WindowOpenDisposition::NEW_FOREGROUND_TAB,
+          ui::PAGE_TRANSITION_AUTO_TOPLEVEL),
+      /*navigation_handle_callback=*/{});
 }
 
 }  // namespace permissions
+
+DEFINE_JNI(BluetoothChooserDialog)

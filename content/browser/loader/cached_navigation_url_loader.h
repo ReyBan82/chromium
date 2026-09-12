@@ -33,10 +33,9 @@ class CachedNavigationURLLoader : public NavigationURLLoader {
   // NavigationURLLoader implementation.
   void Start() override;
   void FollowRedirect(
-      const std::vector<std::string>& removed_headers,
-      const net::HttpRequestHeaders& modified_headers,
-      const net::HttpRequestHeaders& modified_cors_exempt_headers) override;
+      network::HttpRequestHeadersUpdateParams headers_update_params) override;
   bool SetNavigationTimeout(base::TimeDelta timeout) override;
+  void CancelNavigationTimeout() override;
 
  private:
   void OnResponseStarted();

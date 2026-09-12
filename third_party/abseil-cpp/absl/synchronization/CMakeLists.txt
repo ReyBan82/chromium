@@ -44,7 +44,9 @@ absl_cc_library(
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
+    absl::base
     absl::config
+    absl::core_headers
     absl::raw_logging_internal
     absl::time
 )
@@ -57,8 +59,9 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::kernel_timeout_internal
     absl::config
+    absl::kernel_timeout_internal
+    absl::random_random
     absl::time
     GTest::gmock_main
 )
@@ -71,34 +74,49 @@ absl_cc_library(
     "blocking_counter.h"
     "internal/create_thread_identity.h"
     "internal/futex.h"
+    "internal/futex_waiter.h"
     "internal/per_thread_sem.h"
+    "internal/pthread_waiter.h"
+    "internal/sem_waiter.h"
+    "internal/stdcpp_waiter.h"
     "internal/waiter.h"
+    "internal/waiter_base.h"
+    "internal/win32_waiter.h"
     "mutex.h"
     "notification.h"
   SRCS
     "barrier.cc"
     "blocking_counter.cc"
     "internal/create_thread_identity.cc"
+    "internal/futex_waiter.cc"
     "internal/per_thread_sem.cc"
-    "internal/waiter.cc"
+    "internal/pthread_waiter.cc"
+    "internal/sem_waiter.cc"
+    "internal/stdcpp_waiter.cc"
+    "internal/waiter_base.cc"
+    "internal/win32_waiter.cc"
     "notification.cc"
     "mutex.cc"
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
-    absl::graphcycles_internal
-    absl::kernel_timeout_internal
     absl::atomic_hook
     absl::base
     absl::base_internal
     absl::config
     absl::core_headers
     absl::dynamic_annotations
+    absl::graphcycles_internal
+    absl::kernel_timeout_internal
     absl::malloc_internal
+    absl::meta
+    absl::nullability
     absl::raw_logging_internal
     absl::stacktrace
+    absl::string_view
     absl::symbolize
     absl::time
+    absl::tracing_internal
     Threads::Threads
   PUBLIC
 )
@@ -126,6 +144,7 @@ absl_cc_test(
   DEPS
     absl::synchronization
     absl::time
+    absl::tracing_internal
     GTest::gmock_main
 )
 
@@ -137,9 +156,11 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::graphcycles_internal
+    absl::check
     absl::core_headers
-    absl::raw_logging_internal
+    absl::flat_hash_map
+    absl::graphcycles_internal
+    absl::log
     GTest::gmock_main
 )
 
@@ -166,13 +187,15 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::synchronization
-    absl::thread_pool
     absl::base
+    absl::check
     absl::config
     absl::core_headers
+    absl::log
     absl::memory
-    absl::raw_logging_internal
+    absl::random_random
+    absl::synchronization
+    absl::thread_pool
     absl::time
     GTest::gmock_main
 )
@@ -199,8 +222,12 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
+    absl::base
+    absl::config
+    absl::core_headers
     absl::synchronization
     absl::time
+    absl::tracing_internal
     GTest::gmock_main
 )
 
@@ -213,10 +240,10 @@ absl_cc_library(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::synchronization
     absl::base
     absl::config
     absl::strings
+    absl::synchronization
     absl::time
     GTest::gmock
   TESTONLY
@@ -232,7 +259,23 @@ absl_cc_test(
   DEPS
     absl::per_thread_sem_test_common
     absl::synchronization
-    absl::strings
+    absl::time
+    GTest::gmock_main
+)
+
+absl_cc_test(
+  NAME
+    waiter_test
+  SRCS
+    "internal/waiter_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::config
+    absl::kernel_timeout_internal
+    absl::random_random
+    absl::synchronization
+    absl::thread_pool
     absl::time
     GTest::gmock_main
 )
@@ -245,7 +288,7 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::synchronization
+    absl::check
     absl::core_headers
-    absl::raw_logging_internal
+    absl::synchronization
 )

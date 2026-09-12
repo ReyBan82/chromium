@@ -5,7 +5,7 @@
 """Output formatter for HistogramSet Results Format.
 
 Format specification:
-https://github.com/catapult-project/catapult/blob/master/docs/histogram-set-json-format.md
+https://chromium.googlesource.com/catapult/+/refs/heads/main/docs/histogram-set-json-format.md
 """
 
 import json
@@ -26,7 +26,8 @@ def ProcessHistogramDicts(histogram_dicts, options):
         histogram_dicts += json.load(input_stream)
       except ValueError:
         logging.warning(
-            'Found existing histograms json but failed to parse it.')
+          'Found existing histograms json but failed to parse it.'
+        )
 
   with open(output_file, 'w') as output_stream:
     json.dump(histogram_dicts, output_stream)

@@ -3,48 +3,40 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/modules/peerconnection/rtc_encoded_audio_underlying_source.h"
+
 #include <memory>
 
 #include "base/test/mock_callback.h"
+#include "base/test/scoped_feature_list.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_tester.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_readable_stream_read_result.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_encoded_audio_frame.h"
 #include "third_party/blink/renderer/core/streams/readable_stream.h"
 #include "third_party/blink/renderer/core/streams/readable_stream_default_controller_with_script_scope.h"
 #include "third_party/blink/renderer/modules/peerconnection/rtc_encoded_audio_frame.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 #include "third_party/webrtc/api/frame_transformer_interface.h"
+#include "third_party/webrtc/api/test/mock_transformable_audio_frame.h"
 
 namespace blink {
 
-namespace {
-class FakeTransformableFrame : public webrtc::TransformableFrameInterface {
- public:
-  FakeTransformableFrame() = default;
-  ~FakeTransformableFrame() override = default;
-
-  rtc::ArrayView<const uint8_t> GetData() const override { return nullptr; }
-  void SetData(rtc::ArrayView<const uint8_t> data) override {}
-  uint32_t GetTimestamp() const override { return 0; }
-  uint32_t GetSsrc() const override { return 0; }
-  // 255 is not a valid payload type (which can be in the range [0..127]).
-  uint8_t GetPayloadType() const override { return 255; }
-};
-}  // namespace
+using ::testing::NiceMock;
 
 class RTCEncodedAudioUnderlyingSourceTest : public testing::Test {
  public:
-  RTCEncodedAudioUnderlyingSource* CreateSource(ScriptState* script_state,
-                                                bool is_receiver = false) {
+  RTCEncodedAudioUnderlyingSource* CreateSource(ScriptState* script_state) {
     return MakeGarbageCollected<RTCEncodedAudioUnderlyingSource>(
-        script_state, WTF::CrossThreadBindOnce(disconnect_callback_.Get()),
-        is_receiver);
+        script_state, CrossThreadBindOnce(disconnect_callback_.Get()));
   }
 
  protected:
+  test::TaskEnvironment task_environment_;
   base::MockOnceClosure disconnect_callback_;
 };
 
@@ -63,7 +55,8 @@ TEST_F(RTCEncodedAudioUnderlyingSourceTest,
   ScriptPromiseTester read_tester(script_state,
                                   reader->read(script_state, exception_state));
   EXPECT_FALSE(read_tester.IsFulfilled());
-  source->OnFrameFromSource(std::make_unique<FakeTransformableFrame>());
+  source->OnFrameFromSource(
+      std::make_unique<NiceMock<webrtc::MockTransformableAudioFrame>>());
   read_tester.WaitUntilSettled();
   EXPECT_TRUE(read_tester.IsFulfilled());
 
@@ -93,17 +86,76 @@ TEST_F(RTCEncodedAudioUnderlyingSourceTest,
   for (int i = 0; i > RTCEncodedAudioUnderlyingSource::kMinQueueDesiredSize;
        --i) {
     EXPECT_EQ(source->Controller()->DesiredSize(), i);
-    source->OnFrameFromSource(std::make_unique<FakeTransformableFrame>());
+    source->OnFrameFromSource(
+        std::make_unique<NiceMock<webrtc::MockTransformableAudioFrame>>());
   }
   EXPECT_EQ(source->Controller()->DesiredSize(),
             RTCEncodedAudioUnderlyingSource::kMinQueueDesiredSize);
 
-  source->OnFrameFromSource(std::make_unique<FakeTransformableFrame>());
+  source->OnFrameFromSource(
+      std::make_unique<NiceMock<webrtc::MockTransformableAudioFrame>>());
   EXPECT_EQ(source->Controller()->DesiredSize(),
             RTCEncodedAudioUnderlyingSource::kMinQueueDesiredSize);
 
   EXPECT_CALL(disconnect_callback_, Run());
   source->Close();
+}
+
+TEST_F(RTCEncodedAudioUnderlyingSourceTest, AvoidsLeaseOnMainThread) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kWebRtcUseMediaThreadTypes);
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  auto* source = CreateSource(script_state);
+  ReadableStream::CreateWithCountQueueingStrategy(script_state, source, 0);
+
+  source->OnFrameFromSource(
+      std::make_unique<NiceMock<webrtc::MockTransformableAudioFrame>>());
+  EXPECT_FALSE(source->GetRealmThreadTypeLeasedForTesting().has_value());
+}
+
+TEST_F(RTCEncodedAudioUnderlyingSourceTest,
+       AvoidsLeaseOnMainThreadWithFeatureDisabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(features::kWebRtcUseMediaThreadTypes);
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  auto* source = CreateSource(script_state);
+  ReadableStream::CreateWithCountQueueingStrategy(script_state, source, 0);
+
+  source->OnFrameFromSource(
+      std::make_unique<NiceMock<webrtc::MockTransformableAudioFrame>>());
+  EXPECT_FALSE(source->GetRealmThreadTypeLeasedForTesting().has_value());
+}
+
+TEST_F(RTCEncodedAudioUnderlyingSourceTest, LeasesOnWorker) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(features::kWebRtcUseMediaThreadTypes);
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  auto* source = CreateSource(script_state);
+  source->SetRealmIsBoostableContextForTesting(true);
+  ReadableStream::CreateWithCountQueueingStrategy(script_state, source, 0);
+
+  source->OnFrameFromSource(
+      std::make_unique<NiceMock<webrtc::MockTransformableAudioFrame>>());
+  ASSERT_EQ(source->GetRealmThreadTypeLeasedForTesting(),
+            base::ThreadType::kAudioProcessing);
+}
+
+TEST_F(RTCEncodedAudioUnderlyingSourceTest,
+       AvoidsLeaseOnWorkerWithFeatureDisabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(features::kWebRtcUseMediaThreadTypes);
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  auto* source = CreateSource(script_state);
+  source->SetRealmIsBoostableContextForTesting(true);
+  ReadableStream::CreateWithCountQueueingStrategy(script_state, source, 0);
+
+  source->OnFrameFromSource(
+      std::make_unique<NiceMock<webrtc::MockTransformableAudioFrame>>());
+  EXPECT_FALSE(source->GetRealmThreadTypeLeasedForTesting().has_value());
 }
 
 }  // namespace blink

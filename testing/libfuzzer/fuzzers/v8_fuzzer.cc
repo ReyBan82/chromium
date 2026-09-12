@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "v8/include/v8.h"
+
 #include <chrono>
 #include <functional>
 #include <iostream>
@@ -9,9 +11,14 @@
 #include <thread>
 #include <tuple>
 
+#include "base/check.h"
 #include "base/compiler_specific.h"
+#include "base/files/file_path.h"
+#include "base/memory/raw_ptr.h"
+#include "base/path_service.h"
+#include "build/build_config.h"
+#include "testing/libfuzzer/libfuzzer_exports.h"
 #include "v8/include/libplatform/libplatform.h"
-#include "v8/include/v8.h"
 
 using v8::MaybeLocal;
 using std::ref;
@@ -112,7 +119,7 @@ struct Environment {
   std::unique_ptr<MockArrayBufferAllocator> mock_arraybuffer_allocator;
   mutex mtx;
   std::thread terminator_thread;
-  v8::Isolate* isolate;
+  raw_ptr<v8::Isolate> isolate;
   std::unique_ptr<v8::Platform> platform_;
   time_point<steady_clock> start_time;
   bool is_running = true;
@@ -123,8 +130,18 @@ struct Environment {
 // by fuzz target. LibFuzzer runtime uses dlsym() to resolve that function.
 extern "C" __attribute__((used)) __attribute__((visibility("default"))) int
 LLVMFuzzerInitialize(int* argc, char*** argv) {
+// TODO(crbug.com/515765355): Consider centralizing this fallback logic in V8
+// code.
+#if BUILDFLAG(IS_ANDROID)
+  base::FilePath assets_dir;
+  CHECK(base::PathService::Get(base::DIR_ASSETS, &assets_dir));
+  v8::V8::InitializeICUDefaultLocation(assets_dir.value().c_str());
+  base::FilePath snapshot_path = assets_dir.Append("snapshot_blob.bin");
+  v8::V8::InitializeExternalStartupDataFromFile(snapshot_path.value().c_str());
+#else
   v8::V8::InitializeICUDefaultLocation((*argv)[0]);
   v8::V8::InitializeExternalStartupData((*argv)[0]);
+#endif  // BUILDFLAG(IS_ANDROID)
   v8::V8::SetFlagsFromCommandLine(argc, *argv, true);
   return 0;
 }

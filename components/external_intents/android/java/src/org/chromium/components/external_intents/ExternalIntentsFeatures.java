@@ -4,52 +4,43 @@
 
 package org.chromium.components.external_intents;
 
+import org.jni_zero.JNINamespace;
+import org.jni_zero.NativeMethods;
+
 import org.chromium.base.Features;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.build.annotations.NullMarked;
 
 /**
  * Java accessor for base/feature_list.h state.
  *
- * This class provides methods to access values of feature flags registered in
+ * <p>This class provides methods to access values of feature flags registered in
  * |kFeaturesExposedToJava| in components/external_intents/android/external_intents_features.cc.
- *
  */
 @JNINamespace("external_intents")
-public class ExternalIntentsFeatures extends Features {
+@NullMarked
+public class ExternalIntentsFeatures {
     public static final String EXTERNAL_NAVIGATION_DEBUG_LOGS_NAME = "ExternalNavigationDebugLogs";
-    public static final String EXTERNAL_NAVIGATION_SUBFRAME_REDIRECTS_NAME =
-            "ExternalNavigationSubframeRedirects";
-    public static final String BLOCK_SUBFRAME_INTENT_TO_SELF_NAME = "BlockSubframeIntentToSelf";
-    public static final String BLOCK_FRAME_RENAVIGATIONS_NAME = "BlockFrameRenavigations";
-    public static final String DO_NOT_REQUIRE_SPECIALIZED_CCT_HANDLER_NAME =
-            "DoNotRequireSpecializedCCTHandler";
+    public static final String DONT_CLOBBER_TABS_WITH_CHROME_APP_ID_NAME =
+            "DontClobberTabsWithChromeAppId";
 
-    public static final ExternalIntentsFeatures EXTERNAL_NAVIGATION_DEBUG_LOGS =
-            new ExternalIntentsFeatures(0, EXTERNAL_NAVIGATION_DEBUG_LOGS_NAME);
+    public static final ExternalIntentsFeature EXTERNAL_NAVIGATION_DEBUG_LOGS =
+            new ExternalIntentsFeature(0, EXTERNAL_NAVIGATION_DEBUG_LOGS_NAME);
 
-    public static final ExternalIntentsFeatures EXTERNAL_NAVIGATION_SUBFRAME_REDIRECTS =
-            new ExternalIntentsFeatures(1, EXTERNAL_NAVIGATION_SUBFRAME_REDIRECTS_NAME);
+    public static final ExternalIntentsFeature DONT_CLOBBER_TABS_WITH_CHROME_APP_ID =
+            new ExternalIntentsFeature(1, DONT_CLOBBER_TABS_WITH_CHROME_APP_ID_NAME);
 
-    public static final ExternalIntentsFeatures BLOCK_SUBFRAME_INTENT_TO_SELF =
-            new ExternalIntentsFeatures(2, BLOCK_SUBFRAME_INTENT_TO_SELF_NAME);
+    public static class ExternalIntentsFeature extends Features {
+        private final int mOrdinal;
 
-    public static final ExternalIntentsFeatures BLOCK_FRAME_RENAVIGATIONS =
-            new ExternalIntentsFeatures(3, BLOCK_FRAME_RENAVIGATIONS_NAME);
+        private ExternalIntentsFeature(int ordinal, String name) {
+            super(name);
+            mOrdinal = ordinal;
+        }
 
-    public static final ExternalIntentsFeatures DO_NOT_REQUIRE_SPECIALIZED_CCT_HANDLER =
-            new ExternalIntentsFeatures(4, DO_NOT_REQUIRE_SPECIALIZED_CCT_HANDLER_NAME);
-
-    private final int mOrdinal;
-
-    private ExternalIntentsFeatures(int ordinal, String name) {
-        super(name);
-        mOrdinal = ordinal;
-    }
-
-    @Override
-    protected long getFeaturePointer() {
-        return ExternalIntentsFeaturesJni.get().getFeature(mOrdinal);
+        @Override
+        protected long getFeaturePointer() {
+            return ExternalIntentsFeaturesJni.get().getFeature(mOrdinal);
+        }
     }
 
     @NativeMethods

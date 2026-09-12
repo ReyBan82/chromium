@@ -13,7 +13,6 @@
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 #include "url/scheme_host_port.h"
@@ -54,14 +53,14 @@ TEST(HttpAuthPreferencesTest, AuthAndroidNegotiateAccountType) {
 }
 #endif  // BUILDFLAG(IS_ANDROID)
 
-#if BUILDFLAG(IS_CHROMEOS)
+#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
 TEST(HttpAuthPreferencesTest, AllowGssapiLibraryLoad) {
   HttpAuthPreferences http_auth_preferences;
   EXPECT_TRUE(http_auth_preferences.AllowGssapiLibraryLoad());
   http_auth_preferences.set_allow_gssapi_library_load(false);
   EXPECT_FALSE(http_auth_preferences.AllowGssapiLibraryLoad());
 }
-#endif  // BUILDFLAG(IS_CHROMEOS)
+#endif  // BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
 
 TEST(HttpAuthPreferencesTest, AuthServerAllowlist) {
   HttpAuthPreferences http_auth_preferences;
@@ -105,6 +104,23 @@ TEST(HttpAuthPreferencesTest, HttpAuthSchemesFilter) {
       url::SchemeHostPort(GURL("https://www.google.com"))));
   EXPECT_FALSE(http_auth_preferences.IsAllowedToUseAllHttpAuthSchemes(
       url::SchemeHostPort(GURL("https://www.example.com"))));
+}
+
+TEST(HttpAuthPreferencesTest, SetAllowedSchemes) {
+  HttpAuthPreferences http_auth_preferences;
+  EXPECT_FALSE(http_auth_preferences.allowed_schemes().has_value());
+
+  base::flat_set<std::string> schemes{"Basic", "NTLM", "negotiate"};
+  http_auth_preferences.SetAllowedSchemes(schemes);
+
+  ASSERT_TRUE(http_auth_preferences.allowed_schemes().has_value());
+  const auto& allowed_schemes = http_auth_preferences.allowed_schemes().value();
+  EXPECT_EQ(3u, allowed_schemes.size());
+  EXPECT_TRUE(allowed_schemes.contains("basic"));
+  EXPECT_TRUE(allowed_schemes.contains("ntlm"));
+  EXPECT_TRUE(allowed_schemes.contains("negotiate"));
+  EXPECT_FALSE(allowed_schemes.contains("Basic"));
+  EXPECT_FALSE(allowed_schemes.contains("NTLM"));
 }
 
 }  // namespace net

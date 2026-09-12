@@ -23,12 +23,13 @@
 
 #include "third_party/blink/renderer/core/html/html_frame_element.h"
 
-#include "third_party/blink/public/mojom/permissions_policy/permissions_policy.mojom-blink.h"
+#include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 #include "third_party/blink/public/mojom/permissions_policy/policy_value.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/html/frame_edge_info.h"
 #include "third_party/blink/renderer/core/html/html_frame_set_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/layout/layout_frame.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 
 namespace blink {
 
@@ -42,11 +43,10 @@ bool HTMLFrameElement::LayoutObjectIsNeeded(const DisplayStyle&) const {
   return ContentFrame();
 }
 
-LayoutObject* HTMLFrameElement::CreateLayoutObject(const ComputedStyle& style,
-                                                   LegacyLayout legacy) {
+LayoutObject* HTMLFrameElement::CreateLayoutObject(const ComputedStyle& style) {
   if (IsA<HTMLFrameSetElement>(parentNode()))
     return MakeGarbageCollected<LayoutFrame>(this);
-  return LayoutObject::CreateObject(this, style, legacy);
+  return LayoutObject::CreateObject(this, style);
 }
 
 bool HTMLFrameElement::HasFrameBorder() const {
@@ -68,7 +68,7 @@ FrameEdgeInfo HTMLFrameElement::EdgeInfo() const {
 void HTMLFrameElement::ParseAttribute(
     const AttributeModificationParams& params) {
   if (params.name == html_names::kFrameborderAttr) {
-    frame_border_ = params.new_value.ToInt();
+    frame_border_ = StringToIntLoose(params.new_value).value_or(0);
     frame_border_set_ = !params.new_value.IsNull();
     if (auto* frame_set = DynamicTo<HTMLFrameSetElement>(parentNode()))
       frame_set->DirtyEdgeInfoAndFullPaintInvalidation();
@@ -80,16 +80,9 @@ void HTMLFrameElement::ParseAttribute(
   }
 }
 
-ParsedPermissionsPolicy HTMLFrameElement::ConstructContainerPolicy() const {
-  // Frame elements are not allowed to enable the fullscreen feature. Add an
-  // empty allowlist for the fullscreen feature so that the framed content is
-  // unable to use the API, regardless of origin.
-  // https://fullscreen.spec.whatwg.org/#model
-  ParsedPermissionsPolicy container_policy;
-  ParsedPermissionsPolicyDeclaration allowlist(
-      mojom::blink::PermissionsPolicyFeature::kFullscreen);
-  container_policy.push_back(allowlist);
-  return container_policy;
+network::ParsedPermissionsPolicy HTMLFrameElement::ConstructContainerPolicy()
+    const {
+  return GetLegacyFramePolicies();
 }
 
 }  // namespace blink

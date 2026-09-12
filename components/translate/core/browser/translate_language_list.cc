@@ -6,226 +6,271 @@
 
 #include <stddef.h>
 
+#include <algorithm>
 #include <iterator>
+#include <optional>
+#include <string_view>
 
 #include "base/check.h"
+#include "base/containers/fixed_flat_set.h"
+#include "base/containers/flat_set.h"
 #include "base/functional/bind.h"
+#include "base/i18n/language_tag.h"
+#include "base/i18n/tag_converters.h"
 #include "base/json/json_reader.h"
 #include "base/lazy_instance.h"
-#include "base/notreached.h"
-#include "base/ranges/algorithm.h"
+#include "base/logging.h"
+#include "base/no_destructor.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
+#include "components/language/core/browser/accept_languages_service.h"
 #include "components/language/core/common/locale_util.h"
 #include "components/translate/core/browser/translate_browser_metrics.h"
 #include "components/translate/core/browser/translate_download_manager.h"
 #include "components/translate/core/browser/translate_event_details.h"
 #include "components/translate/core/browser/translate_url_fetcher.h"
 #include "components/translate/core/browser/translate_url_util.h"
+#include "components/translate/core/common/translate_language_matcher.h"
 #include "components/translate/core/common/translate_util.h"
 #include "net/base/url_util.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "url/gurl.h"
 
 namespace translate {
-
 namespace {
 
-// The default list of languages the Google translation server supports.
-// We use this list until we receive the list that the server exposes.
+using ::base::i18n::GetKnownLanguageTag;
+using ::base::i18n::GetLanguageTagFromString;
+using ::base::i18n::LanguageTag;
+
+// The default list of languages the Partial Translation service supports.
 // This list must be sorted in alphabetical order and contain no duplicates.
-const char* const kDefaultSupportedLanguages[] = {
-    "af",     // Afrikaans
-    "ak",     // Twi
-    "am",     // Amharic
-    "ar",     // Arabic
-    "az",     // Azerbaijani
-    "be",     // Belarusian
-    "bg",     // Bulgarian
-    "bn",     // Bengali
-    "bs",     // Bosnian
-    "ca",     // Catalan
-    "ceb",    // Cebuano
-    "ckb",    // Kurdish (Sorani)
-    "co",     // Corsican
-    "cs",     // Czech
-    "cy",     // Welsh
-    "da",     // Danish
-    "de",     // German
-    "ee",     // Ewe
-    "el",     // Greek
-    "en",     // English
-    "eo",     // Esperanto
-    "es",     // Spanish
-    "et",     // Estonian
-    "eu",     // Basque
-    "fa",     // Persian
-    "fi",     // Finnish
-    "fr",     // French
-    "fy",     // Frisian
-    "ga",     // Irish
-    "gd",     // Scots Gaelic
-    "gl",     // Galician
-    "gom",    // Konkani
-    "gu",     // Gujarati
-    "ha",     // Hausa
-    "haw",    // Hawaiian
-    "hi",     // Hindi
-    "hmn",    // Hmong
-    "hr",     // Croatian
-    "ht",     // Haitian Creole
-    "hu",     // Hungarian
-    "hy",     // Armenian
-    "id",     // Indonesian
-    "ig",     // Igbo
-    "is",     // Icelandic
-    "it",     // Italian
-    "iw",     // Hebrew - Chrome uses "he"
-    "ja",     // Japanese
-    "jw",     // Javanese - Chrome uses "jv"
-    "ka",     // Georgian
-    "kk",     // Kazakh
-    "km",     // Khmer
-    "kn",     // Kannada
-    "ko",     // Korean
-    "kri",    // Krio
-    "ku",     // Kurdish
-    "ky",     // Kyrgyz
-    "la",     // Latin
-    "lb",     // Luxembourgish
-    "lg",     // Luganda
-    "ln",     // Lingala
-    "lo",     // Lao
-    "lt",     // Lithuanian
-    "lv",     // Latvian
-    "mg",     // Malagasy
-    "mi",     // Maori
-    "mk",     // Macedonian
-    "ml",     // Malayalam
-    "mn",     // Mongolian
-    "mr",     // Marathi
-    "ms",     // Malay
-    "mt",     // Maltese
-    "my",     // Burmese
-    "ne",     // Nepali
-    "nl",     // Dutch
-    "no",     // Norwegian - Chrome uses "nb"
-    "nso",    // Sepedi
-    "ny",     // Nyanja
-    "om",     // Oromo
-    "or",     // Odia (Oriya)
-    "pa",     // Punjabi
-    "pl",     // Polish
-    "ps",     // Pashto
-    "pt",     // Portuguese
-    "qu",     // Quechua
-    "ro",     // Romanian
-    "ru",     // Russian
-    "rw",     // Kinyarwanda
-    "sd",     // Sindhi
-    "si",     // Sinhala
-    "sk",     // Slovak
-    "sl",     // Slovenian
-    "sm",     // Samoan
-    "sn",     // Shona
-    "so",     // Somali
-    "sq",     // Albanian
-    "sr",     // Serbian
-    "st",     // Southern Sotho
-    "su",     // Sundanese
-    "sv",     // Swedish
-    "sw",     // Swahili
-    "ta",     // Tamil
-    "te",     // Telugu
-    "tg",     // Tajik
-    "th",     // Thai
-    "ti",     // Tigrinya
-    "tk",     // Turkmen
-    "tl",     // Tagalog - Chrome uses "fil"
-    "tr",     // Turkish
-    "tt",     // Tatar
-    "ug",     // Uyghur
-    "uk",     // Ukrainian
-    "ur",     // Urdu
-    "uz",     // Uzbek
-    "vi",     // Vietnamese
-    "xh",     // Xhosa
-    "yi",     // Yiddish
-    "yo",     // Yoruba
-    "zh-CN",  // Chinese (Simplified)
-    "zh-TW",  // Chinese (Traditional)
-    "zu",     // Zulu
-};
+// This list is identical to above except that it excludes
+// {ilo lus mni-Mtei gom doi bm ckb}.
+constexpr auto kDefaultSupportedPartialTranslateLanguages =
+    base::MakeFixedFlatSet<LanguageTag>({
+        GetKnownLanguageTag("af"),     // Afrikaans
+        GetKnownLanguageTag("ak"),     // Akan
+        GetKnownLanguageTag("am"),     // Amharic
+        GetKnownLanguageTag("ar"),     // Arabic
+        GetKnownLanguageTag("as"),     // Assamese
+        GetKnownLanguageTag("ay"),     // Aymara
+        GetKnownLanguageTag("az"),     // Azerbaijani
+        GetKnownLanguageTag("be"),     // Belarusian
+        GetKnownLanguageTag("bg"),     // Bulgarian
+        GetKnownLanguageTag("bho"),    // Bhojpuri
+        GetKnownLanguageTag("bn"),     // Bengali
+        GetKnownLanguageTag("bs"),     // Bosnian
+        GetKnownLanguageTag("ca"),     // Catalan
+        GetKnownLanguageTag("ceb"),    // Cebuano
+        GetKnownLanguageTag("co"),     // Corsican
+        GetKnownLanguageTag("cs"),     // Czech
+        GetKnownLanguageTag("cy"),     // Welsh
+        GetKnownLanguageTag("da"),     // Danish
+        GetKnownLanguageTag("de"),     // German
+        GetKnownLanguageTag("dv"),     // Dhivehi
+        GetKnownLanguageTag("ee"),     // Ewe
+        GetKnownLanguageTag("el"),     // Greek
+        GetKnownLanguageTag("en"),     // English
+        GetKnownLanguageTag("eo"),     // Esperanto
+        GetKnownLanguageTag("es"),     // Spanish
+        GetKnownLanguageTag("et"),     // Estonian
+        GetKnownLanguageTag("eu"),     // Basque
+        GetKnownLanguageTag("fa"),     // Persian
+        GetKnownLanguageTag("fi"),     // Finnish
+        GetKnownLanguageTag("fil"),    // Filipino
+        GetKnownLanguageTag("fr"),     // French
+        GetKnownLanguageTag("fy"),     // Frisian
+        GetKnownLanguageTag("ga"),     // Irish
+        GetKnownLanguageTag("gd"),     // Scots Gaelic
+        GetKnownLanguageTag("gl"),     // Galician
+        GetKnownLanguageTag("gu"),     // Gujarati
+        GetKnownLanguageTag("ha"),     // Hausa
+        GetKnownLanguageTag("haw"),    // Hawaiian
+        GetKnownLanguageTag("he"),     // Hebrew
+        GetKnownLanguageTag("hi"),     // Hindi
+        GetKnownLanguageTag("hmn"),    // Hmong
+        GetKnownLanguageTag("hr"),     // Croatian
+        GetKnownLanguageTag("ht"),     // Haitian Creole
+        GetKnownLanguageTag("hu"),     // Hungarian
+        GetKnownLanguageTag("hy"),     // Armenian
+        GetKnownLanguageTag("id"),     // Indonesian
+        GetKnownLanguageTag("ig"),     // Igbo
+        GetKnownLanguageTag("is"),     // Icelandic
+        GetKnownLanguageTag("it"),     // Italian
+        GetKnownLanguageTag("ja"),     // Japanese
+        GetKnownLanguageTag("jv"),     // Javanese
+        GetKnownLanguageTag("ka"),     // Georgian
+        GetKnownLanguageTag("kk"),     // Kazakh
+        GetKnownLanguageTag("km"),     // Khmer
+        GetKnownLanguageTag("kn"),     // Kannada
+        GetKnownLanguageTag("ko"),     // Korean
+        GetKnownLanguageTag("kri"),    // Krio
+        GetKnownLanguageTag("ku"),     // Kurdish (Kurmanji)
+        GetKnownLanguageTag("ky"),     // Kyrgyz
+        GetKnownLanguageTag("la"),     // Latin
+        GetKnownLanguageTag("lb"),     // Luxembourgish
+        GetKnownLanguageTag("lg"),     // Luganda
+        GetKnownLanguageTag("ln"),     // Lingala
+        GetKnownLanguageTag("lo"),     // Lao
+        GetKnownLanguageTag("lt"),     // Lithuanian
+        GetKnownLanguageTag("lv"),     // Latvian
+        GetKnownLanguageTag("mai"),    // Maithili
+        GetKnownLanguageTag("mg"),     // Malagasy
+        GetKnownLanguageTag("mi"),     // Maori
+        GetKnownLanguageTag("mk"),     // Macedonian
+        GetKnownLanguageTag("ml"),     // Malayalam
+        GetKnownLanguageTag("mn"),     // Mongolian
+        GetKnownLanguageTag("mr"),     // Marathi
+        GetKnownLanguageTag("ms"),     // Malay
+        GetKnownLanguageTag("mt"),     // Maltese
+        GetKnownLanguageTag("my"),     // Myanmar (Burmese)
+        GetKnownLanguageTag("ne"),     // Nepali
+        GetKnownLanguageTag("nl"),     // Dutch
+        GetKnownLanguageTag("no"),     // Norwegian
+        GetKnownLanguageTag("nso"),    // Sepedi
+        GetKnownLanguageTag("ny"),     // Chichewa
+        GetKnownLanguageTag("om"),     // Oromo
+        GetKnownLanguageTag("or"),     // Odia (Oriya)
+        GetKnownLanguageTag("pa"),     // Punjabi
+        GetKnownLanguageTag("pl"),     // Polish
+        GetKnownLanguageTag("ps"),     // Pashto
+        GetKnownLanguageTag("pt"),     // Portuguese
+        GetKnownLanguageTag("qu"),     // Quechua
+        GetKnownLanguageTag("ro"),     // Romanian
+        GetKnownLanguageTag("ru"),     // Russian
+        GetKnownLanguageTag("rw"),     // Kinyarwanda
+        GetKnownLanguageTag("sa"),     // Sanskrit
+        GetKnownLanguageTag("sd"),     // Sindhi
+        GetKnownLanguageTag("si"),     // Sinhala
+        GetKnownLanguageTag("sk"),     // Slovak
+        GetKnownLanguageTag("sl"),     // Slovenian
+        GetKnownLanguageTag("sm"),     // Samoan
+        GetKnownLanguageTag("sn"),     // Shona
+        GetKnownLanguageTag("so"),     // Somali
+        GetKnownLanguageTag("sq"),     // Albanian
+        GetKnownLanguageTag("sr"),     // Serbian
+        GetKnownLanguageTag("st"),     // Sesotho
+        GetKnownLanguageTag("su"),     // Sundanese
+        GetKnownLanguageTag("sv"),     // Swedish
+        GetKnownLanguageTag("sw"),     // Swahili
+        GetKnownLanguageTag("ta"),     // Tamil
+        GetKnownLanguageTag("te"),     // Telugu
+        GetKnownLanguageTag("tg"),     // Tajik
+        GetKnownLanguageTag("th"),     // Thai
+        GetKnownLanguageTag("ti"),     // Tigrinya
+        GetKnownLanguageTag("tk"),     // Turkmen
+        GetKnownLanguageTag("tr"),     // Turkish
+        GetKnownLanguageTag("ts"),     // Tsonga
+        GetKnownLanguageTag("tt"),     // Tatar
+        GetKnownLanguageTag("ug"),     // Uyghur
+        GetKnownLanguageTag("uk"),     // Ukrainian
+        GetKnownLanguageTag("ur"),     // Urdu
+        GetKnownLanguageTag("uz"),     // Uzbek
+        GetKnownLanguageTag("vi"),     // Vietnamese
+        GetKnownLanguageTag("xh"),     // Xhosa
+        GetKnownLanguageTag("yi"),     // Yiddish
+        GetKnownLanguageTag("yo"),     // Yoruba
+        GetKnownLanguageTag("zh-CN"),  // Chinese (Simplified)
+        GetKnownLanguageTag("zh-TW"),  // Chinese (Traditional)
+        GetKnownLanguageTag("zu"),     // Zulu
+    });
 
 // Constant URL string to fetch server supporting language list.
-const char kLanguageListFetchPath[] = "translate_a/l?client=chrome";
-
-// Represent if the language list updater is disabled.
-bool update_is_disabled = false;
+constexpr std::string_view kLanguageListFetchPath =
+    "translate_a/l?client=chrome";
 
 // Retry parameter for fetching.
-const int kMaxRetryOn5xx = 5;
+constexpr int kMaxRetryOn5xx = 5;
+
+void SortAndUnique(std::vector<LanguageTag>& languages) {
+  std::sort(languages.begin(), languages.end());
+  languages.erase(std::unique(languages.begin(), languages.end()),
+                  languages.end());
+}
 
 }  // namespace
 
 const char TranslateLanguageList::kTargetLanguagesKey[] = "tl";
 
 TranslateLanguageList::TranslateLanguageList()
+    : TranslateLanguageList(
+          std::make_unique<TranslateURLFetcherImpl>(kMaxRetryOn5xx)) {}
+
+TranslateLanguageList::TranslateLanguageList(
+    std::unique_ptr<TranslateUrlFetcher> fetcher)
     : resource_requests_allowed_(false),
       request_pending_(false),
       // We default to our hard coded list of languages in
-      // |kDefaultSupportedLanguages|. This list will be overridden by a server
-      // providing supported languages list.
-      supported_languages_(std::begin(kDefaultSupportedLanguages),
-                           std::end(kDefaultSupportedLanguages)) {
-  // |kDefaultSupportedLanguages| should be sorted alphabetically and contain no
-  // duplicates.
-  DCHECK(
-      std::is_sorted(supported_languages_.begin(), supported_languages_.end()));
-  DCHECK(supported_languages_.end() ==
-         base::ranges::adjacent_find(supported_languages_));
+      // |translate::GetDefaultSupportedLanguages()|. This list will be
+      // overridden by a server providing supported languages list.
+      supported_languages_(std::from_range,
+                           translate::GetDefaultSupportedLanguages()),
+      language_list_fetcher_(std::move(fetcher)) {}
 
-  if (update_is_disabled)
-    return;
-
-  language_list_fetcher_ = std::make_unique<TranslateURLFetcher>();
-  language_list_fetcher_->set_max_retry_on_5xx(kMaxRetryOn5xx);
-}
-
-TranslateLanguageList::~TranslateLanguageList() {}
+TranslateLanguageList::~TranslateLanguageList() = default;
 
 void TranslateLanguageList::GetSupportedLanguages(
     bool translate_allowed,
     std::vector<std::string>* languages) {
   DCHECK(languages && languages->empty());
-  *languages = supported_languages_;
+  for (const LanguageTag& tag : supported_languages_) {
+    languages->emplace_back(tag.tag_string());
+  }
 
   // Update language lists if they are not updated after Chrome was launched
   // for later requests.
-  if (translate_allowed && !update_is_disabled && language_list_fetcher_.get())
+  if (translate_allowed && language_list_fetcher_.get()) {
     RequestLanguageList();
+  }
 }
 
-std::string TranslateLanguageList::GetLanguageCode(base::StringPiece language) {
+// static
+void TranslateLanguageList::GetSupportedPartialTranslateLanguages(
+    std::vector<std::string>* languages) {
+  DCHECK(languages && languages->empty());
+
+  for (const LanguageTag& tag : kDefaultSupportedPartialTranslateLanguages) {
+    languages->emplace_back(tag.tag_string());
+  }
+}
+
+std::string TranslateLanguageList::GetLanguageCode(std::string_view language) {
   // Only remove the country code for country specific languages we don't
   // support specifically yet.
-  if (IsSupportedLanguage(language))
+  if (IsSupportedLanguage(language)) {
     return std::string(language);
-  return std::string(language::ExtractBaseLanguage(language));
+  }
+  std::optional<LanguageTag> parsed = GetLanguageTagFromString(language);
+  if (parsed) {
+    return std::string(parsed->language_subtag());
+  }
+  return std::string(language);
 }
 
-bool TranslateLanguageList::IsSupportedLanguage(base::StringPiece language) {
-  return std::binary_search(supported_languages_.begin(),
-                            supported_languages_.end(), language);
+bool TranslateLanguageList::IsSupportedLanguage(std::string_view language) {
+  std::optional<LanguageTag> tag = GetLanguageTagFromString(language);
+  if (!tag) {
+    return false;
+  }
+  return supported_languages_.contains(*tag);
+}
+
+// static
+bool TranslateLanguageList::IsSupportedPartialTranslateLanguage(
+    std::string_view language) {
+  std::optional<LanguageTag> tag = GetLanguageTagFromString(language);
+  if (!tag) {
+    return false;
+  }
+  return kDefaultSupportedPartialTranslateLanguages.contains(*tag);
 }
 
 // static
 GURL TranslateLanguageList::TranslateLanguageUrl() {
-  std::string url =
-      translate::GetTranslateSecurityOrigin().spec() + kLanguageListFetchPath;
-  return GURL(url);
+  return GURL(base::StrCat({translate::GetTranslateSecurityOrigin().spec(),
+                            kLanguageListFetchPath}));
 }
 
 void TranslateLanguageList::RequestLanguageList() {
@@ -238,8 +283,8 @@ void TranslateLanguageList::RequestLanguageList() {
   request_pending_ = false;
 
   if (language_list_fetcher_.get() &&
-      (language_list_fetcher_->state() == TranslateURLFetcher::IDLE ||
-       language_list_fetcher_->state() == TranslateURLFetcher::FAILED)) {
+      (language_list_fetcher_->state() == TranslateUrlFetcher::IDLE ||
+       language_list_fetcher_->state() == TranslateUrlFetcher::FAILED)) {
     GURL url = TranslateLanguageUrl();
     url = AddHostLocaleToUrl(url);
     url = AddApiKeyToUrl(url);
@@ -255,8 +300,9 @@ void TranslateLanguageList::RequestLanguageList() {
         // Use the strictest mode for request headers, since incognito state is
         // not known.
         /*is_incognito=*/true);
-    if (!result)
+    if (!result) {
       NotifyEvent(__LINE__, "Request is omitted due to retry limit");
+    }
   }
 }
 
@@ -274,16 +320,11 @@ base::CallbackListSubscription TranslateLanguageList::RegisterEventCallback(
 }
 
 bool TranslateLanguageList::HasOngoingLanguageListLoadingForTesting() {
-  return language_list_fetcher_->state() == TranslateURLFetcher::REQUESTING;
+  return language_list_fetcher_->state() == TranslateUrlFetcher::REQUESTING;
 }
 
 GURL TranslateLanguageList::LanguageFetchURLForTesting() {
   return AddApiKeyToUrl(AddHostLocaleToUrl(TranslateLanguageUrl()));
-}
-
-// static
-void TranslateLanguageList::DisableUpdate() {
-  update_is_disabled = true;
 }
 
 void TranslateLanguageList::OnLanguageListFetchComplete(
@@ -305,8 +346,9 @@ void TranslateLanguageList::OnLanguageListFetchComplete(
   bool parsed_correctly = SetSupportedLanguages(data);
   language_list_fetcher_.reset();
 
-  if (parsed_correctly)
+  if (parsed_correctly) {
     last_updated_ = base::Time::Now();
+  }
 }
 
 void TranslateLanguageList::NotifyEvent(int line, std::string message) {
@@ -315,55 +357,56 @@ void TranslateLanguageList::NotifyEvent(int line, std::string message) {
 }
 
 bool TranslateLanguageList::SetSupportedLanguages(
-    base::StringPiece language_list) {
+    std::string_view language_list) {
   // The format is in JSON as:
   // {
   //   "sl": {"XX": "LanguageName", ...},
   //   "tl": {"XX": "LanguageName", ...}
   // }
   // Where "tl" is set in kTargetLanguagesKey.
-  absl::optional<base::Value> json_value =
-      base::JSONReader::Read(language_list, base::JSON_ALLOW_TRAILING_COMMAS);
+  std::optional<base::DictValue> json_value = base::JSONReader::ReadDict(
+      language_list, base::JSON_ALLOW_TRAILING_COMMAS);
 
-  if (!json_value || !json_value->is_dict()) {
-    NotifyEvent(__LINE__, "Language list is invalid");
-    NOTREACHED();
+  if (!json_value) {
+    LOG(ERROR) << "Failed to parse language list.";
+    // TODO(bug:478219404): Find better way to report this issue.
     return false;
   }
   // The first level dictionary contains two sub-dicts, first for source
   // languages and second for target languages. We want to use the target
   // languages.
-  base::Value* target_languages =
-      json_value->FindDictPath(TranslateLanguageList::kTargetLanguagesKey);
+  const base::DictValue* target_languages =
+      json_value->FindDict(TranslateLanguageList::kTargetLanguagesKey);
   if (!target_languages) {
-    NotifyEvent(__LINE__, "Target languages are not found in the response");
-    NOTREACHED();
+    LOG(ERROR) << "Target languages not found in translate language list.";
+    // TODO(bug:478219404): Find better way to report this issue.
     return false;
   }
 
-  const std::string& locale =
-      TranslateDownloadManager::GetInstance()->application_locale();
-
-  // Now we can clear language list.
-  supported_languages_.clear();
+  std::vector<LanguageTag> supported_languages_from_service;
   // ... and replace it with the values we just fetched from the server.
-  for (auto kv_pair : target_languages->DictItems()) {
-    const std::string& lang = kv_pair.first;
-    if (!l10n_util::IsLocaleNameTranslated(lang.c_str(), locale)) {
-      // Don't include languages not displayable in current UI language.
+  for (auto [lang, language_name] : *target_languages) {
+    if (!language::AcceptLanguagesService::CanBeAcceptLanguage(lang.c_str())) {
+      // Don't include languages that can not be Accept-Languages
       continue;
     }
-    supported_languages_.push_back(lang);
+    if (std::optional<LanguageTag> language_tag =
+            GetLanguageTagFromString(lang);
+        language_tag) {
+      supported_languages_from_service.emplace_back(*language_tag);
+    }
   }
 
-  // Since the DictionaryValue was sorted by key, |supported_languages_| should
-  // already be sorted and have no duplicate values.
-  DCHECK(
-      std::is_sorted(supported_languages_.begin(), supported_languages_.end()));
-  DCHECK(supported_languages_.end() ==
-         base::ranges::adjacent_find(supported_languages_));
+  SortAndUnique(supported_languages_from_service);
+  supported_languages_ = base::flat_set<LanguageTag>(
+      base::sorted_unique, std::move(supported_languages_from_service));
 
-  NotifyEvent(__LINE__, base::JoinString(supported_languages_, ", "));
+  std::vector<std::string_view> languages_as_strings;
+  std::ranges::transform(supported_languages_,
+                         std::back_inserter(languages_as_strings),
+                         &LanguageTag::tag_string);
+
+  NotifyEvent(__LINE__, base::JoinString(languages_as_strings, ", "));
   return true;
 }
 

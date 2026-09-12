@@ -11,7 +11,6 @@
 #include "base/logging.h"
 #include "base/system/sys_info.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "gpu/config/gpu_info.h"
 #include "gpu/config/gpu_info_collector.h"
 #include "gpu/config/gpu_test_expectations_parser.h"
@@ -26,10 +25,9 @@ namespace gpu {
 namespace {
 
 GPUTestConfig::OS GetCurrentOS() {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   return GPUTestConfig::kOsChromeOS;
-#elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS)) || \
-    BUILDFLAG(IS_OPENBSD)
+#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_OPENBSD)
   return GPUTestConfig::kOsLinux;
 #elif BUILDFLAG(IS_WIN)
   int32_t major_version = 0;
@@ -49,10 +47,6 @@ GPUTestConfig::OS GetCurrentOS() {
   switch (major_version) {
     case 10:
       switch (minor_version) {
-        case 5:
-          return GPUTestConfig::kOsMacLeopard;
-        case 6:
-          return GPUTestConfig::kOsMacSnowLeopard;
         case 7:
           return GPUTestConfig::kOsMacLion;
         case 8:
@@ -79,6 +73,12 @@ GPUTestConfig::OS GetCurrentOS() {
       return GPUTestConfig::kOsMacMonterey;
     case 13:
       return GPUTestConfig::kOsMacVentura;
+    case 14:
+      return GPUTestConfig::kOsMacSonoma;
+    case 15:
+      return GPUTestConfig::kOsMacSequoia;
+    case 26:
+      return GPUTestConfig::kOsMacTahoe;
   }
   return GPUTestConfig::kOsUnknown;
 #elif BUILDFLAG(IS_ANDROID)
@@ -209,8 +209,6 @@ bool GPUTestBotConfig::SetGPUInfo(const GPUInfo& gpu_info) {
 bool GPUTestBotConfig::IsValid() const {
   switch (os()) {
     case kOsWin10:
-    case kOsMacLeopard:
-    case kOsMacSnowLeopard:
     case kOsMacLion:
     case kOsMacMountainLion:
     case kOsMacMavericks:
@@ -223,6 +221,9 @@ bool GPUTestBotConfig::IsValid() const {
     case kOsMacBigSur:
     case kOsMacMonterey:
     case kOsMacVentura:
+    case kOsMacSonoma:
+    case kOsMacSequoia:
+    case kOsMacTahoe:
     case kOsLinux:
     case kOsChromeOS:
     case kOsAndroid:

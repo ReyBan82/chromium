@@ -4,7 +4,7 @@
 
 #include "chrome/browser/ui/webui/ash/login/enable_adb_sideloading_screen_handler.h"
 
-#include "chrome/grit/generated_resources.h"
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "components/login/localized_values_builder.h"
 
 namespace ash {
@@ -21,6 +21,11 @@ void EnableAdbSideloadingScreenHandler::Show() {
 
 void EnableAdbSideloadingScreenHandler::SetScreenState(UIState value) {
   CallExternalAPI("setScreenState", static_cast<int>(value));
+}
+
+base::WeakPtr<EnableAdbSideloadingScreenView>
+EnableAdbSideloadingScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 void EnableAdbSideloadingScreenHandler::DeclareLocalizedValues(

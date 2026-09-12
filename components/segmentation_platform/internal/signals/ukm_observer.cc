@@ -6,7 +6,6 @@
 
 #include <cstdint>
 
-#include "base/containers/cxx20_erase.h"
 #include "components/segmentation_platform/internal/constants.h"
 #include "components/segmentation_platform/internal/signals/ukm_config.h"
 #include "components/segmentation_platform/internal/ukm_data_manager_impl.h"
@@ -81,9 +80,17 @@ void UkmObserver::PauseOrResumeObservation(bool pause) {
 }
 
 void UkmObserver::OnUkmAllowedStateChanged(ukm::UkmConsentState state) {
+  InitalizeUkmAllowedState(state.Has(ukm::MSBB));
+}
+
+void UkmObserver::OnUkmAllowedStateChanged(bool ukm_allowed) {
+  InitalizeUkmAllowedState(ukm_allowed);
+}
+
+void UkmObserver::InitalizeUkmAllowedState(bool is_ukm_allowed) {
   base::Time most_recent_allowed = LocalStateHelper::GetInstance().GetPrefTime(
       kSegmentationUkmMostRecentAllowedTimeKey);
-  if (!state.Has(ukm::MSBB)) {
+  if (!is_ukm_allowed) {
     if (most_recent_allowed != base::Time::Max()) {
       LocalStateHelper::GetInstance().SetPrefTime(
           kSegmentationUkmMostRecentAllowedTimeKey, base::Time::Max());

@@ -5,21 +5,22 @@
 #include "content/browser/media/media_internals_cdm_helper.h"
 
 #include <memory>
+#include <string_view>
 
 #include "base/values.h"
 #include "content/browser/media/media_internals.h"
 #include "content/public/browser/web_ui.h"
 #include "media/base/audio_codecs.h"
+#include "media/base/cdm_capability.h"
 #include "media/base/content_decryption_module.h"
 #include "media/base/encryption_scheme.h"
 #include "media/base/video_codecs.h"
-#include "media/cdm/cdm_capability.h"
 
 namespace content {
 
 namespace {
 
-std::string GetCdmInfoCapabilityStatusName(CdmInfo::Status status) {
+std::string_view GetCdmInfoCapabilityStatusName(CdmInfo::Status status) {
   switch (status) {
     case CdmInfo::Status::kUninitialized:
       return "Uninitialized";
@@ -39,10 +40,12 @@ std::string GetCdmInfoCapabilityStatusName(CdmInfo::Status status) {
       return "Disabled due to previous errors (stored in Local State)";
     case CdmInfo::Status::kDisabledOnError:
       return "Disabled after errors or crashes";
+    case CdmInfo::Status::kDisabledBySoftwareEmulatedGpu:
+      return "Disabled because software emulated GPU is enabled";
   }
 }
 
-std::string GetCdmSessionTypeName(media::CdmSessionType session_type) {
+std::string_view GetCdmSessionTypeName(media::CdmSessionType session_type) {
   switch (session_type) {
     case media::CdmSessionType::kTemporary:
       return "temporary";
@@ -51,24 +54,26 @@ std::string GetCdmSessionTypeName(media::CdmSessionType session_type) {
   }
 }
 
-base::Value::List VideoCodecInfoToList(
+base::ListValue VideoCodecInfoToList(
     const media::VideoCodecInfo& video_codec_info) {
   auto& profiles = video_codec_info.supported_profiles;
 
-  base::Value::List list;
-  for (const auto& profile : profiles)
+  base::ListValue list;
+  for (const auto& profile : profiles) {
     list.Append(media::GetProfileName(profile));
+  }
 
   return list;
 }
 
-base::Value::Dict CdmCapabilityToDict(
+base::DictValue CdmCapabilityToDict(
     const media::CdmCapability& cdm_capability) {
-  base::Value::Dict dict;
+  base::DictValue dict;
 
-  base::Value::List audio_codec_list;
-  for (const auto& audio_codec : cdm_capability.audio_codecs)
+  base::ListValue audio_codec_list;
+  for (const auto& audio_codec : cdm_capability.audio_codecs) {
     audio_codec_list.Append(media::GetCodecName(audio_codec));
+  }
   dict.Set("Audio Codecs", std::move(audio_codec_list));
 
   auto* video_codec_dict = dict.EnsureDict("Video Codecs");
@@ -76,48 +81,63 @@ base::Value::Dict CdmCapabilityToDict(
        cdm_capability.video_codecs) {
     auto codec_name = media::GetCodecName(video_codec);
     // Codecs marked with "*" signals clear lead not supported.
-    if (!video_codec_info.supports_clear_lead)
+    if (!video_codec_info.supports_clear_lead) {
       codec_name += "*";
+    }
     video_codec_dict->Set(codec_name, VideoCodecInfoToList(video_codec_info));
   }
 
-  base::Value::List encryption_scheme_list;
+  base::ListValue encryption_scheme_list;
   for (const auto& encryption_scheme : cdm_capability.encryption_schemes) {
     encryption_scheme_list.Append(
         media::GetEncryptionSchemeName(encryption_scheme));
   }
   dict.Set("Encryption Schemes", std::move(encryption_scheme_list));
 
-  base::Value::List session_type_list;
-  for (const auto& session_type : cdm_capability.session_types)
+  base::ListValue session_type_list;
+  for (const auto& session_type : cdm_capability.session_types) {
     session_type_list.Append(GetCdmSessionTypeName(session_type));
+  }
   dict.Set("Session Types", std::move(session_type_list));
 
   return dict;
 }
 
-base::Value::Dict CdmInfoToDict(const CdmInfo& cdm_info) {
-  base::Value::Dict dict;
+base::DictValue CdmInfoToDict(const CdmInfo& cdm_info) {
+  base::DictValue dict;
   dict.Set("key_system", cdm_info.key_system);
   dict.Set("robustness", GetCdmInfoRobustnessName(cdm_info.robustness));
   dict.Set("name", cdm_info.name);
-  dict.Set("version", cdm_info.version.GetString());
-  dict.Set("path", cdm_info.path.AsUTF8Unsafe());
+  dict.Set("version",
+           cdm_info.version.IsValid() ? cdm_info.version.GetString() : "N/A");
+  dict.Set("path",
+           cdm_info.path.empty() ? "N/A" : cdm_info.path.AsUTF8Unsafe());
   dict.Set("status", GetCdmInfoCapabilityStatusName(cdm_info.status));
 
   if (cdm_info.capability) {
-    dict.Set("capability", CdmCapabilityToDict(cdm_info.capability.value()));
+    auto capability = cdm_info.capability.value();
+    dict.Set("capability", CdmCapabilityToDict(capability));
+    if (capability.version.IsValid()) {
+      // If version is specified, it overrides what may have been set in
+      // `cdm_info.version`.
+      dict.Set("version", capability.version.GetString());
+    }
   } else {
     // This could happen if hardware secure capabilities are overridden or
     // hardware video decode is disabled from command line.
-    dict.Set("capability", "No Capability");
+    std::string message = "No Capability";
+    if (cdm_info.capability_query_status.has_value()) {
+      message += ": " + media::CdmCapabilityQueryStatusToString(
+                            cdm_info.capability_query_status.value());
+    }
+    dict.Set("capability", message);
   }
 
   return dict;
 }
 
-std::u16string SerializeUpdate(base::StringPiece function,
-                               const base::Value::List& value) {
+std::u16string SerializeUpdate(std::string_view function,
+                               const base::ListValue& value) {
   base::ValueView args[] = {value};
   return content::WebUI::GetJavascriptCall(function, args);
 }
@@ -129,10 +149,14 @@ MediaInternalsCdmHelper::MediaInternalsCdmHelper() = default;
 MediaInternalsCdmHelper::~MediaInternalsCdmHelper() = default;
 
 void MediaInternalsCdmHelper::GetRegisteredCdms() {
-  CdmRegistryImpl::GetInstance()->ObserveKeySystemCapabilities(
-      base::BindRepeating(
-          &MediaInternalsCdmHelper::OnKeySystemCapabilitiesUpdated,
-          weak_factory_.GetWeakPtr()));
+  // Ok to trigger hw secure capability check since this page is for debugging
+  // only and not part of the normal user flow.
+  cb_subscription_ =
+      CdmRegistryImpl::GetInstance()->ObserveKeySystemCapabilities(
+          /*allow_hw_secure_capability_check=*/true,
+          base::BindRepeating(
+              &MediaInternalsCdmHelper::OnKeySystemCapabilitiesUpdated,
+              weak_factory_.GetWeakPtr()));
 }
 
 // Ignore results since we'll get them from CdmRegistryImpl directly.
@@ -140,7 +164,7 @@ void MediaInternalsCdmHelper::OnKeySystemCapabilitiesUpdated(
     KeySystemCapabilities /*capabilities*/) {
   auto cdms = CdmRegistryImpl::GetInstance()->GetRegisteredCdms();
 
-  base::Value::List cdm_list;
+  base::ListValue cdm_list;
   for (const auto& cdm_info : cdms) {
     DCHECK(cdm_info.status != CdmInfo::Status::kUninitialized);
     cdm_list.Append(CdmInfoToDict(cdm_info));

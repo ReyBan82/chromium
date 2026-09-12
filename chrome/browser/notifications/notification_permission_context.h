@@ -5,9 +5,11 @@
 #ifndef CHROME_BROWSER_NOTIFICATIONS_NOTIFICATION_PERMISSION_CONTEXT_H_
 #define CHROME_BROWSER_NOTIFICATIONS_NOTIFICATION_PERMISSION_CONTEXT_H_
 
+#include <memory>
+
 #include "base/gtest_prod_util.h"
 #include "components/content_settings/core/common/content_settings.h"
-#include "components/permissions/permission_context_base.h"
+#include "components/permissions/content_setting_permission_context_base.h"
 #include "extensions/buildflags/buildflags.h"
 
 class GURL;
@@ -83,7 +85,7 @@ class GURL;
 // Extensions that do not declare the "notifications" permission in their
 // manifest will be treated as regular websites.
 class NotificationPermissionContext
-    : public permissions::PermissionContextBase {
+    : public permissions::ContentSettingPermissionContextBase {
  public:
   // Helper method for updating the permission state of |origin| to |setting|.
   static void UpdatePermission(content::BrowserContext* browser_context,
@@ -95,7 +97,7 @@ class NotificationPermissionContext
   ~NotificationPermissionContext() override;
 
   // PermissionContextBase implementation.
-  ContentSetting GetPermissionStatusInternal(
+  ContentSetting GetContentSettingStatusInternal(
       content::RenderFrameHost* render_frame_host,
       const GURL& requesting_origin,
       const GURL& embedding_origin) const override;
@@ -105,20 +107,19 @@ class NotificationPermissionContext
                            WebNotificationsTopLevelOriginOnly);
   friend class NotificationPermissionContextTest;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   // Returns the notification permission status for |origin| if it describes an
   // extension. CONTENT_SETTING_ASK will be returned when it's not an extension
   // that has the "notifications" permission declared in their manifest.
   ContentSetting GetPermissionStatusForExtension(const GURL& origin) const;
 #endif
 
-  // PermissionContextBase implementation.
+  // ContentSettingPermissionContextBase implementation.
   void DecidePermission(
-      const permissions::PermissionRequestID& id,
-      const GURL& requesting_origin,
-      const GURL& embedding_origin,
-      bool user_gesture,
+      std::unique_ptr<permissions::PermissionRequestData> request_data,
       permissions::BrowserPermissionCallback callback) override;
+  void UpdateTabContext(const permissions::PermissionRequestData& request_data,
+                        bool allowed) override;
 
   base::WeakPtrFactory<NotificationPermissionContext> weak_factory_ui_thread_{
       this};

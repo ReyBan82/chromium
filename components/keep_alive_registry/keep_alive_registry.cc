@@ -4,16 +4,15 @@
 
 #include "components/keep_alive_registry/keep_alive_registry.h"
 
+#include <sstream>
+
+#include "base/auto_reset.h"
 #include "base/logging.h"
+#include "base/memory/singleton.h"
 #include "base/observer_list.h"
-#include "build/build_config.h"
+#include "components/crash/core/common/crash_key.h"
 #include "components/keep_alive_registry/keep_alive_state_observer.h"
 #include "components/keep_alive_registry/keep_alive_types.h"
-
-#if BUILDFLAG(IS_WIN)
-#include "components/browser_watcher/activity_data_names.h"
-#include "components/browser_watcher/extended_crash_reporting.h"
-#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 // Public methods
@@ -93,15 +92,30 @@ bool KeepAliveRegistry::IsRestarting() const {
   return is_restarting_;
 }
 
-void KeepAliveRegistry::SetRestarting() {
-  bool old_keeping_alive = IsKeepingAlive();
-  is_restarting_ = true;
-  bool new_keeping_alive = IsKeepingAlive();
+base::AutoReset<bool> KeepAliveRegistry::SetRestartingScopedForTesting() {
+  const bool old_keeping_alive = IsKeepingAlive();
+  base::AutoReset<bool> scoped_reset(&is_restarting_, true);
+  const bool new_keeping_alive = IsKeepingAlive();
 
-  // keep alive state can be updated by |is_restarting_| change.
+  // Keep alive state can be updated by |is_restarting_| change.
   // If that happens, notify observers.
-  if (old_keeping_alive != new_keeping_alive)
+  if (old_keeping_alive != new_keeping_alive) {
     OnKeepAliveStateChanged(new_keeping_alive);
+  }
+
+  return scoped_reset;
+}
+
+void KeepAliveRegistry::SetRestarting() {
+  const bool old_keeping_alive = IsKeepingAlive();
+  is_restarting_ = true;
+  const bool new_keeping_alive = IsKeepingAlive();
+
+  // Keep alive state can be updated by |is_restarting_| change.
+  // If that happens, notify observers.
+  if (old_keeping_alive != new_keeping_alive) {
+    OnKeepAliveStateChanged(new_keeping_alive);
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -141,6 +155,7 @@ void KeepAliveRegistry::Register(KeepAliveOrigin origin,
     OnRestartAllowedChanged(new_restart_allowed);
 
   DVLOG(1) << "New state of the KeepAliveRegistry: " << *this;
+  UpdateCrashKey();
 }
 
 void KeepAliveRegistry::Unregister(KeepAliveOrigin origin,
@@ -169,15 +184,12 @@ void KeepAliveRegistry::Unregister(KeepAliveOrigin origin,
     OnRestartAllowedChanged(new_restart_allowed);
 
   DVLOG(1) << "New state of the KeepAliveRegistry:" << *this;
+  UpdateCrashKey();
 }
 
 void KeepAliveRegistry::OnKeepAliveStateChanged(bool new_keeping_alive) {
   DVLOG(1) << "Notifying KeepAliveStateObservers: KeepingAlive changed to: "
            << new_keeping_alive;
-#if BUILDFLAG(IS_WIN)
-  browser_watcher::ExtendedCrashReporting::SetDataBool(
-      browser_watcher::kActivityKeepAlive, new_keeping_alive);
-#endif
   for (KeepAliveStateObserver& observer : observers_)
     observer.OnKeepAliveStateChanged(new_keeping_alive);
 }
@@ -185,10 +197,6 @@ void KeepAliveRegistry::OnKeepAliveStateChanged(bool new_keeping_alive) {
 void KeepAliveRegistry::OnRestartAllowedChanged(bool new_restart_allowed) {
   DVLOG(1) << "Notifying KeepAliveStateObservers: Restart changed to: "
            << new_restart_allowed;
-#if BUILDFLAG(IS_WIN)
-  browser_watcher::ExtendedCrashReporting::SetDataBool(
-      browser_watcher::kActivityRestartAllowed, new_restart_allowed);
-#endif
   for (KeepAliveStateObserver& observer : observers_)
     observer.OnKeepAliveRestartStateChanged(new_restart_allowed);
 }
@@ -213,4 +221,18 @@ std::ostream& operator<<(std::ostream& out, const KeepAliveRegistry& registry) {
   }
   out << "]}";
   return out;
+}
+
+void KeepAliveRegistry::UpdateCrashKey() {
+  // 512 fits roughly 18 origins; the map is enum-ordered rather than
+  // blame-ordered, so generous headroom keeps truncation from hiding the
+  // origin that is actually blocking shutdown.
+  static crash_reporter::CrashKeyString<512> crash_key("keep_alive_registry");
+  if (registered_count_ == 0) {
+    crash_key.Clear();
+    return;
+  }
+  std::ostringstream os;
+  os << *this;
+  crash_key.Set(os.str());
 }

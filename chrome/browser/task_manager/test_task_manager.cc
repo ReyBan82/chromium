@@ -4,7 +4,10 @@
 
 #include "chrome/browser/task_manager/test_task_manager.h"
 
+#include <optional>
+
 #include "base/timer/mock_timer.h"
+#include "components/sessions/core/session_id.h"
 
 namespace task_manager {
 
@@ -14,8 +17,7 @@ TestTaskManager::TestTaskManager()
   set_timer_for_testing(std::make_unique<base::MockRepeatingTimer>());
 }
 
-TestTaskManager::~TestTaskManager() {
-}
+TestTaskManager::~TestTaskManager() = default;
 
 void TestTaskManager::ActivateTask(TaskId task_id) {
 }
@@ -24,7 +26,8 @@ bool TestTaskManager::IsTaskKillable(TaskId task_id) {
   return true;
 }
 
-void TestTaskManager::KillTask(TaskId task_id) {
+bool TestTaskManager::KillTask(TaskId task_id) {
+  return true;
 }
 
 double TestTaskManager::GetPlatformIndependentCPUUsage(TaskId task_id) const {
@@ -39,17 +42,20 @@ base::TimeDelta TestTaskManager::GetCpuTime(TaskId task_id) const {
   return base::TimeDelta();
 }
 
-int64_t TestTaskManager::GetMemoryFootprintUsage(TaskId task_id) const {
-  return -1;
+std::optional<base::ByteSize> TestTaskManager::GetMemoryFootprintUsage(
+    TaskId task_id) const {
+  return std::nullopt;
 }
 
-int64_t TestTaskManager::GetSwappedMemoryUsage(TaskId task_id) const {
-  return -1;
+std::optional<base::ByteSize> TestTaskManager::GetSwappedMemoryUsage(
+    TaskId task_id) const {
+  return std::nullopt;
 }
 
-int64_t TestTaskManager::GetGpuMemoryUsage(TaskId task_id,
-                                           bool* has_duplicates) const {
-  return -1;
+std::optional<base::ByteSize> TestTaskManager::GetGpuMemoryUsage(
+    TaskId task_id,
+    bool* has_duplicates) const {
+  return std::nullopt;
 }
 
 int TestTaskManager::GetIdleWakeupsPerSecond(TaskId task_id) const {
@@ -57,10 +63,6 @@ int TestTaskManager::GetIdleWakeupsPerSecond(TaskId task_id) const {
 }
 
 int TestTaskManager::GetHardFaultsPerSecond(TaskId task_id) const {
-  return -1;
-}
-
-int TestTaskManager::GetNaClDebugStubPort(TaskId task_id) const {
   return -1;
 }
 
@@ -92,6 +94,10 @@ const gfx::ImageSkia& TestTaskManager::GetIcon(TaskId task_id) const {
   return icon_;
 }
 
+bool TestTaskManager::ShouldThemifyIcon(TaskId task_id) const {
+  return should_themify_icon_;
+}
+
 const base::ProcessHandle& TestTaskManager::GetProcessHandle(
     TaskId task_id) const {
   return handle_;
@@ -101,8 +107,16 @@ const base::ProcessId& TestTaskManager::GetProcessId(TaskId task_id) const {
   return pid_;
 }
 
+TaskId TestTaskManager::GetRootTaskId(TaskId task_id) const {
+  return 0;
+}
+
 Task::Type TestTaskManager::GetType(TaskId task_id) const {
   return Task::UNKNOWN;
+}
+
+Task::SubType TestTaskManager::GetSubType(TaskId task_id) const {
+  return Task::SubType::kNoSubType;
 }
 
 SessionID TestTaskManager::GetTabId(TaskId task_id) const {
@@ -123,30 +137,34 @@ void TestTaskManager::GetTerminationStatus(TaskId task_id,
   *out_error_code = 0;
 }
 
-int64_t TestTaskManager::GetNetworkUsage(TaskId task_id) const {
-  return 0;
+base::ByteSize TestTaskManager::GetNetworkUsage(TaskId task_id) const {
+  return base::ByteSize(0);
 }
 
-int64_t TestTaskManager::GetProcessTotalNetworkUsage(TaskId task_id) const {
-  return -1;
-}
-
-int64_t TestTaskManager::GetCumulativeNetworkUsage(TaskId task_id) const {
-  return 0;
-}
-
-int64_t TestTaskManager::GetCumulativeProcessTotalNetworkUsage(
+std::optional<base::ByteSize> TestTaskManager::GetProcessTotalNetworkUsage(
     TaskId task_id) const {
-  return 0;
+  return std::nullopt;
 }
 
-int64_t TestTaskManager::GetSqliteMemoryUsed(TaskId task_id) const {
-  return -1;
+base::ByteSize TestTaskManager::GetCumulativeNetworkUsage(
+    TaskId task_id) const {
+  return base::ByteSize(0);
+}
+
+std::optional<base::ByteSize> TestTaskManager::GetSqliteMemoryUsed(
+    TaskId task_id) const {
+  return std::nullopt;
 }
 
 bool TestTaskManager::GetV8Memory(TaskId task_id,
-                                  int64_t* allocated,
-                                  int64_t* used) const {
+                                  base::ByteSize* allocated,
+                                  base::ByteSize* used) const {
+  return false;
+}
+
+bool TestTaskManager::GetCppGCMemory(TaskId task_id,
+                                     base::ByteSize* allocated,
+                                     base::ByteSize* used) const {
   return false;
 }
 
@@ -182,6 +200,10 @@ bool TestTaskManager::IsRunningInVM(TaskId task_id) const {
 TaskId TestTaskManager::GetTaskIdForWebContents(
     content::WebContents* web_contents) const {
   return -1;
+}
+
+bool TestTaskManager::IsTaskValid(TaskId task_id) const {
+  return true;
 }
 
 base::TimeDelta TestTaskManager::GetRefreshTime() {

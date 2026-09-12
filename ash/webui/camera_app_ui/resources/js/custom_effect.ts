@@ -3,12 +3,11 @@
 // found in the LICENSE file.
 
 import * as animation from './animation.js';
-import {assertExists, assertNotReached} from './assert.js';
+import {assertEnumVariant, assertExists, assertNotReached} from './assert.js';
 import * as dom from './dom.js';
 import {I18nString} from './i18n_string.js';
+import {SvgWrapper} from './lit/components/svg-wrapper.js';
 import * as loadTimeData from './models/load_time_data.js';
-import {ChromeHelper} from './mojo/chrome_helper.js';
-import {speakMessage} from './spoken_msg.js';
 import * as state from './state.js';
 import * as util from './util.js';
 
@@ -65,7 +64,7 @@ class RippleEffect {
     this.parent.appendChild(template);
     // We don't care about waiting for the single ripple animation to end
     // before returning.
-    void animation.play(ripple).then(() => {
+    void animation.play(ripple).result.then(() => {
       ripple.remove();
     });
   }
@@ -104,9 +103,7 @@ type PositionInfos = Array<{
 }>;
 
 export enum IndicatorType {
-  DOC_SCAN_AVAILABLE = 'doc_scan_available',
-  DOC_MODE_MULTI_PAGE_AVAILABLE = 'doc_mode_multi_scan_available',
-  DOWNLOAD_DOCUMENT_SCANNER = 'download_document_scanner',
+  // NEW_FEATURE = 'new_feature',
 }
 
 /**
@@ -114,16 +111,6 @@ export enum IndicatorType {
  * modes/cameras.
  */
 export function setup(): void {
-  state.addObserver(state.State.CAMERA_SWITCHING, (val) => {
-    if (val) {
-      hide();
-    }
-  });
-  state.addObserver(state.State.MODE_SWITCHING, (val) => {
-    if (val) {
-      hide();
-    }
-  });
   state.addObserver(state.State.STREAMING, (val) => {
     if (!val) {
       hide();
@@ -133,12 +120,6 @@ export function setup(): void {
 
 function getIndicatorI18nStringId(indicatorType: IndicatorType): I18nString {
   switch (indicatorType) {
-    case IndicatorType.DOWNLOAD_DOCUMENT_SCANNER:
-      return I18nString.DOWNLOADING_DOCUMENT_SCANNING_FEATURE;
-    case IndicatorType.DOC_SCAN_AVAILABLE:
-      return I18nString.NEW_DOCUMENT_SCAN_TOAST;
-    case IndicatorType.DOC_MODE_MULTI_PAGE_AVAILABLE:
-      return I18nString.DOCUMENT_MODE_MULTI_PAGE_TOAST;
     default:
       assertNotReached();
   }
@@ -146,13 +127,8 @@ function getIndicatorI18nStringId(indicatorType: IndicatorType): I18nString {
 
 function getIndicatorIcon(indicatorType: IndicatorType): string|null {
   switch (indicatorType) {
-    case IndicatorType.DOWNLOAD_DOCUMENT_SCANNER:
-      return '/images/download_dlc_toast_icon.svg';
-    case IndicatorType.DOC_SCAN_AVAILABLE:
-    case IndicatorType.DOC_MODE_MULTI_PAGE_AVAILABLE:
-      return '/images/new_feature_toast_icon.svg';
     default:
-      return null;
+      return 'new_feature_toast_icon.svg';
   }
 }
 
@@ -163,7 +139,7 @@ function getOffsetProperties(
 
   function getPositionProperty(key: string) {
     const property = assertExists(style.get(key)).toString();
-    return util.assertEnumVariant(PositionProperty, property);
+    return assertEnumVariant(PositionProperty, property);
   }
 
   for (const dir of ['x', 'y']) {
@@ -201,6 +177,12 @@ function updatePosition(
       value = rect[elProperty] + offset;
     }
 
+    if (toastProperty === PositionProperty.CENTER) {
+      const targetElementRect = targetElement.getBoundingClientRect();
+      value -= targetElementRect.width / 2;
+      style.set(PositionProperty.LEFT, CSS.px(value));
+      continue;
+    }
     if (toastProperty === PositionProperty.RIGHT) {
       value = window.innerWidth - value;
     } else if (toastProperty === PositionProperty.BOTTOM) {
@@ -226,12 +208,11 @@ class Toast {
     this.cancelHandle = setInterval(() => {
       updatePositions(anchor, positionInfos);
     }, TOAST_POSITION_UPDATE_MS);
-    updatePositions(anchor, positionInfos);
   }
 
   show(): void {
     this.parent.appendChild(this.template);
-    speakMessage(this.message);
+    updatePositions(this.anchor, this.positionInfos);
   }
 
   focus(): void {
@@ -253,15 +234,12 @@ class NewFeatureToast extends Toast {
     const template = util.instantiateTemplate('#new-feature-toast-template');
     const toast = dom.getFrom(template, '#new-feature-toast', HTMLDivElement);
 
-    const i18nId = util.assertEnumVariant(
-        I18nString, anchor.getAttribute('i18n-new-feature'));
+    const i18nId =
+        assertEnumVariant(I18nString, anchor.getAttribute('i18n-new-feature'));
     const textElement =
         dom.getFrom(template, '.custom-toast-text', HTMLSpanElement);
     const text = loadTimeData.getI18nMessage(i18nId);
     textElement.textContent = text;
-    const ariaLabel =
-        loadTimeData.getI18nMessage(I18nString.NEW_CONTROL_NAVIGATION, text);
-    toast.setAttribute('aria-label', ariaLabel);
 
     super(
         anchor, template, toast, text, [{
@@ -286,12 +264,11 @@ class IndicatorToast extends Toast {
     toast.setAttribute('aria-label', text);
 
     const icon = getIndicatorIcon(indicatorType);
-    const iconElement =
-        dom.getFrom(template, '#indicator-icon', HTMLImageElement);
+    const iconElement = dom.getFrom(template, '#indicator-icon', SvgWrapper);
     if (icon === null) {
       iconElement.hidden = true;
     } else {
-      iconElement.src = icon;
+      iconElement.name = icon;
       iconElement.hidden = false;
     }
 
@@ -353,7 +330,7 @@ function stopEffect(effectPayload: EffectPayload) {
 /**
  * Timeout for effects.
  */
-const EFFECT_TIMEOUT_MS = 10000;
+const EFFECT_TIMEOUT_MS = 6000;
 
 /**
  * Shows the new feature toast message and ripple around the `anchor` element.
@@ -417,32 +394,10 @@ export function focus(): void {
 }
 
 /**
- * Shows feature visual effect for PTZ options entry.
+ * Show the new feature toast for preview OCR scanning.
  */
-export function showPtzToast(parent: HTMLElement): void {
-  const ptzPanelEntry = dom.get('#open-ptz-panel', HTMLButtonElement);
-  const {hide, focusToast} = showNewFeature(ptzPanelEntry, parent);
-  focusToast();
-  ptzPanelEntry.addEventListener('click', hide, {once: true});
-}
-
-/**
- * Shows document scan feature is available indicator on the scan mode button.
- */
-export function showDocScanAvailableIndicator(parent: HTMLElement): void {
-  const scanModeButton = dom.get('input[data-mode="scan"]', HTMLInputElement);
-  showIndicator(scanModeButton, IndicatorType.DOC_SCAN_AVAILABLE, parent);
-}
-
-/**
- * Shows loading indicator toast for document mode when it's supported but not
- * yet ready.
- */
-export async function showDownloadingDocScanIndicator(parent: HTMLElement):
-    Promise<void> {
-  const docModeButton = dom.get('#scan-document-option', HTMLDivElement);
-  const {hide} = showIndicator(
-      docModeButton, IndicatorType.DOWNLOAD_DOCUMENT_SCANNER, parent);
-  await ChromeHelper.getInstance().checkDocumentModeReadiness();
-  hide();
+export function showPreviewOCRToast(parent: HTMLElement): void {
+  const modeSelector = dom.get(
+      'mode-selector[i18n-new-feature=new_preview_ocr_toast]', HTMLElement);
+  showNewFeature(modeSelector, parent);
 }

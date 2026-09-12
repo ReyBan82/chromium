@@ -9,14 +9,21 @@
 #include <memory>
 #include <utility>
 
+#include "base/byte_size.h"
 #include "base/check_op.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/task/bind_post_task.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_runner.h"
+#include "base/types/expected.h"
+#include "base/types/expected_macros.h"
 #include "base/types/pass_key.h"
+#include "components/file_access/scoped_file_access.h"
 #include "components/file_access/scoped_file_access_delegate.h"
 #include "net/base/file_stream.h"
 #include "net/base/io_buffer.h"
@@ -46,10 +53,13 @@ std::unique_ptr<FileStreamReader> FileStreamReader::CreateForLocalFile(
     scoped_refptr<base::TaskRunner> task_runner,
     const base::FilePath& file_path,
     int64_t initial_offset,
-    const base::Time& expected_modification_time) {
+    const base::Time& expected_modification_time,
+    file_access::ScopedFileAccessDelegate::RequestFilesAccessIOCallback
+        file_access) {
   return std::make_unique<LocalFileStreamReader>(
       std::move(task_runner), file_path, initial_offset,
-      expected_modification_time, base::PassKey<FileStreamReader>());
+      expected_modification_time, base::PassKey<FileStreamReader>(),
+      std::move(file_access));
 }
 
 LocalFileStreamReader::~LocalFileStreamReader() = default;
@@ -59,8 +69,20 @@ int LocalFileStreamReader::Read(net::IOBuffer* buf,
                                 net::CompletionOnceCallback callback) {
   DCHECK(!has_pending_open_);
 
-  if (stream_impl_)
-    return stream_impl_->Read(buf, buf_len, std::move(callback));
+  if (stream_impl_) {
+    callback_ = std::move(callback);
+    const auto result =
+        stream_impl_->Read(buf, buf_len,
+                           base::BindOnce(&LocalFileStreamReader::OnRead,
+                                          weak_factory_.GetWeakPtr()));
+    const int read_result = result.has_value()
+                                ? base::checked_cast<int>(result->InBytes())
+                                : result.error();
+    if (read_result != net::ERR_IO_PENDING) {
+      std::move(callback_).Run(read_result);
+    }
+    return read_result;
+  }
 
   Open(base::BindOnce(&LocalFileStreamReader::DidOpenForRead,
                       weak_factory_.GetWeakPtr(), base::RetainedRef(buf),
@@ -69,8 +91,7 @@ int LocalFileStreamReader::Read(net::IOBuffer* buf,
   return net::ERR_IO_PENDING;
 }
 
-int64_t LocalFileStreamReader::GetLength(
-    net::Int64CompletionOnceCallback callback) {
+int64_t LocalFileStreamReader::GetLength(GetLengthCallback callback) {
   bool posted = task_runner_->PostTaskAndReplyWithResult(
       FROM_HERE, base::BindOnce(&DoGetFileInfo, file_path_),
       base::BindOnce(&LocalFileStreamReader::DidGetFileInfoForGetLength,
@@ -84,11 +105,14 @@ LocalFileStreamReader::LocalFileStreamReader(
     const base::FilePath& file_path,
     int64_t initial_offset,
     const base::Time& expected_modification_time,
-    base::PassKey<FileStreamReader> /*pass_key*/)
+    base::PassKey<FileStreamReader> /*pass_key*/,
+    file_access::ScopedFileAccessDelegate::RequestFilesAccessIOCallback
+        file_access)
     : task_runner_(std::move(task_runner)),
       file_path_(file_path),
       initial_offset_(initial_offset),
-      expected_modification_time_(expected_modification_time) {}
+      expected_modification_time_(expected_modification_time),
+      file_access_(std::move(file_access)) {}
 
 void LocalFileStreamReader::Open(net::CompletionOnceCallback callback) {
   DCHECK(!has_pending_open_);
@@ -98,10 +122,12 @@ void LocalFileStreamReader::Open(net::CompletionOnceCallback callback) {
   base::OnceCallback<void(file_access::ScopedFileAccess)> open_cb =
       base::BindOnce(&LocalFileStreamReader::OnScopedFileAccessRequested,
                      weak_factory_.GetWeakPtr(), std::move(callback));
+  if (file_access_) {
+    file_access_.Run({file_path_}, std::move(open_cb));
+    return;
+  }
 
-  // TODO(b/262199707 b/265908846): Replace with getting access through a
-  // callback.
-  file_access::ScopedFileAccessDelegate::RequestFilesAccessForSystemIO(
+  file_access::ScopedFileAccessDelegate::RequestDefaultFilesAccessIO(
       {file_path_}, std::move(open_cb));
 }
 
@@ -122,9 +148,9 @@ void LocalFileStreamReader::OnScopedFileAccessRequested(
 void LocalFileStreamReader::DidVerifyForOpen(
     net::CompletionOnceCallback callback,
     file_access::ScopedFileAccess scoped_file_access,
-    int64_t get_length_result) {
-  if (get_length_result < 0) {
-    std::move(callback).Run(static_cast<int>(get_length_result));
+    base::expected<int64_t, net::Error> get_length_result) {
+  if (!get_length_result.has_value()) {
+    std::move(callback).Run(get_length_result.error());
     return;
   }
 
@@ -141,25 +167,31 @@ void LocalFileStreamReader::DidVerifyForOpen(
 
 void LocalFileStreamReader::DidOpenFileStream(
     file_access::ScopedFileAccess /*scoped_file_access*/,
-    int result) {
+    net::Error result) {
   if (result != net::OK) {
     std::move(callback_).Run(result);
     return;
   }
-  result = stream_impl_->Seek(
+  // Avoid seek if possible since it fails on android for virtual content-uris.
+  if (initial_offset_ == 0) {
+    std::move(callback_).Run(net::OK);
+    return;
+  }
+  const int seek_rv = stream_impl_->Seek(
       initial_offset_, base::BindOnce(&LocalFileStreamReader::DidSeekFileStream,
                                       weak_factory_.GetWeakPtr()));
-  if (result != net::ERR_IO_PENDING) {
-    std::move(callback_).Run(result);
+  if (seek_rv != net::ERR_IO_PENDING) {
+    std::move(callback_).Run(seek_rv);
   }
 }
 
-void LocalFileStreamReader::DidSeekFileStream(int64_t seek_result) {
-  if (seek_result < 0) {
-    std::move(callback_).Run(static_cast<int>(seek_result));
+void LocalFileStreamReader::DidSeekFileStream(
+    base::expected<int64_t, net::Error> seek_result) {
+  if (!seek_result.has_value()) {
+    std::move(callback_).Run(seek_result.error());
     return;
   }
-  if (seek_result != initial_offset_) {
+  if (seek_result.value() != initial_offset_) {
     std::move(callback_).Run(net::ERR_REQUEST_RANGE_NOT_SATISFIABLE);
     return;
   }
@@ -180,35 +212,42 @@ void LocalFileStreamReader::DidOpenForRead(net::IOBuffer* buf,
   DCHECK(stream_impl_.get());
 
   callback_ = std::move(callback);
-  const int read_result =
+  const auto result =
       stream_impl_->Read(buf, buf_len,
                          base::BindOnce(&LocalFileStreamReader::OnRead,
                                         weak_factory_.GetWeakPtr()));
+  const int read_result = result.has_value()
+                              ? base::checked_cast<int>(result->InBytes())
+                              : result.error();
   if (read_result != net::ERR_IO_PENDING)
     std::move(callback_).Run(read_result);
 }
 
 void LocalFileStreamReader::DidGetFileInfoForGetLength(
-    net::Int64CompletionOnceCallback callback,
+    GetLengthCallback callback,
     base::FileErrorOr<base::File::Info> result) {
   if (!result.has_value()) {
-    std::move(callback).Run(net::FileErrorToNetError(result.error()));
+    std::move(callback).Run(
+        base::unexpected(net::FileErrorToNetError(result.error())));
     return;
   }
   const auto& file_info = result.value();
   if (file_info.is_directory) {
-    std::move(callback).Run(net::ERR_FILE_NOT_FOUND);
+    std::move(callback).Run(base::unexpected(net::ERR_FILE_NOT_FOUND));
     return;
   }
   if (!VerifySnapshotTime(expected_modification_time_, file_info)) {
-    std::move(callback).Run(net::ERR_UPLOAD_FILE_CHANGED);
+    std::move(callback).Run(base::unexpected(net::ERR_UPLOAD_FILE_CHANGED));
     return;
   }
   std::move(callback).Run(file_info.size);
 }
 
-void LocalFileStreamReader::OnRead(int read_result) {
-  std::move(callback_).Run(read_result);
+void LocalFileStreamReader::OnRead(
+    base::expected<base::ByteSize, net::Error> read_result) {
+  std::move(callback_).Run(read_result.has_value()
+                               ? base::checked_cast<int>(read_result->InBytes())
+                               : read_result.error());
 }
 
 }  // namespace storage

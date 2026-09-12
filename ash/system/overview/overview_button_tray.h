@@ -10,8 +10,10 @@
 #include "ash/public/cpp/shelf_config.h"
 #include "ash/public/cpp/tablet_mode_observer.h"
 #include "ash/shelf/shelf.h"
+#include "ash/system/tray/imaged_tray_icon.h"
 #include "ash/system/tray/tray_background_view.h"
 #include "ash/wm/overview/overview_observer.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/events/event_constants.h"
@@ -21,10 +23,6 @@ class Event;
 class GestureEvent;
 }  // namespace ui
 
-namespace views {
-class ImageView;
-}
-
 namespace ash {
 
 // Status area tray for showing a toggle for Overview Mode. Overview Mode
@@ -32,18 +30,17 @@ namespace ash {
 // This hosts a ShellObserver that listens for the activation of Maximize Mode
 // This tray will only be visible while in this state. This tray does not
 // provide any bubble view windows.
-class ASH_EXPORT OverviewButtonTray : public TrayBackgroundView,
-                                      public SessionObserver,
+class ASH_EXPORT OverviewButtonTray : public ImagedTrayIcon,
                                       public OverviewObserver,
                                       public TabletModeObserver,
                                       public ShelfConfig::Observer {
- public:
-  METADATA_HEADER(OverviewButtonTray);
+  METADATA_HEADER(OverviewButtonTray, ImagedTrayIcon)
 
+ public:
   // Second taps within this time will be counted as double taps. Use this
   // instead of ui::Event's click_count and tap_count as those have a minimum
   // time bewtween events before the second tap counts as a double tap.
-  // TODO(crbug.com/817883): We should the gesture detector double tap time or
+  // TODO(crbug.com/40565331): We should the gesture detector double tap time or
   // overview enter animation time, once ux decides which one to match (both are
   // 300ms currently).
   static constexpr base::TimeDelta kDoubleTapThresholdMs =
@@ -60,13 +57,6 @@ class ASH_EXPORT OverviewButtonTray : public TrayBackgroundView,
   // views::Button:
   void OnGestureEvent(ui::GestureEvent* event) override;
 
-  // ActionableView:
-  void HandlePerformActionResult(bool action_performed,
-                                 const ui::Event& event) override;
-
-  // SessionObserver:
-  void OnSessionStateChanged(session_manager::SessionState state) override;
-
   // OverviewObserver:
   void OnOverviewModeStarting() override;
   void OnOverviewModeEnded() override;
@@ -77,12 +67,9 @@ class ASH_EXPORT OverviewButtonTray : public TrayBackgroundView,
   // ShelfConfigObserver:
   void OnShelfConfigUpdated() override;
 
-  // TrayBackgroundView:
+  // ImagedTrayIcon:
   void UpdateAfterLoginStatusChange() override;
-  void ClickedOutsideBubble() override;
-  std::u16string GetAccessibleNameForTray() override;
-  void HandleLocaleChange() override;
-  void HideBubbleWithView(const TrayBubbleView* bubble_view) override;
+  void UpdateTrayItemColor(bool is_active) override;
   void OnThemeChanged() override;
 
  private:
@@ -94,14 +81,11 @@ class ASH_EXPORT OverviewButtonTray : public TrayBackgroundView,
 
   void UpdateIconVisibility();
 
-  // Weak pointer, will be parented by TrayContainer for its lifetime.
-  views::ImageView* icon_;
-
-  ScopedSessionObserver scoped_session_observer_;
+  gfx::ImageSkia GetIconImage();
 
   // Stores the timestamp of the last tap event time that happened while not
   // in overview mode. Used to check for double taps, which invoke quick switch.
-  absl::optional<base::TimeTicks> last_press_event_time_;
+  std::optional<base::TimeTicks> last_press_event_time_;
 };
 
 }  // namespace ash

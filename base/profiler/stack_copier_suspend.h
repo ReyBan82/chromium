@@ -30,6 +30,11 @@ class BASE_EXPORT StackCopierSuspend : public StackCopier {
                  RegisterContext* thread_context,
                  Delegate* delegate) override;
 
+ protected:
+  std::vector<uintptr_t> GetRegisters(RegisterContext* thread_context) override;
+  void SetRegisters(RegisterContext* thread_context,
+                    const std::vector<uintptr_t>& registers) override;
+
  private:
   std::unique_ptr<SuspendableThreadDelegate> thread_delegate_;
 };

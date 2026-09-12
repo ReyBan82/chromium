@@ -16,13 +16,13 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.library_loader.LibraryLoader;
 import org.chromium.base.library_loader.LibraryProcessType;
 import org.chromium.base.test.BaseJUnit4ClassRunner;
 import org.chromium.base.test.util.Batch;
-import org.chromium.base.test.util.JniMocker;
 import org.chromium.content_public.browser.BrowserContextHandle;
 import org.chromium.url.GURL;
 
@@ -31,20 +31,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Tests for WebsiteGroup.
- */
+/** Tests for WebsiteGroup. */
 @RunWith(BaseJUnit4ClassRunner.class)
 @Batch(Batch.PER_CLASS)
 public class WebsiteGroupTest {
-    @Rule
-    public JniMocker mJniMocker = new JniMocker();
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Mock
-    private WebsitePreferenceBridge.Natives mBridgeMock;
+    @Mock private WebsitePreferenceBridge.Natives mBridgeMock;
 
-    @Mock
-    private BrowserContextHandle mContextHandleMock;
+    @Mock private BrowserContextHandle mContextHandleMock;
 
     private WebsiteEntry getEntryWithTitle(List<WebsiteEntry> entries, String title) {
         for (WebsiteEntry entry : entries) {
@@ -61,8 +56,7 @@ public class WebsiteGroupTest {
 
     @Before
     public void setupTest() {
-        MockitoAnnotations.initMocks(this);
-        mJniMocker.mock(WebsitePreferenceBridgeJni.TEST_HOOKS, mBridgeMock);
+        WebsitePreferenceBridgeJni.setInstanceForTesting(mBridgeMock);
     }
 
     @Test
@@ -80,7 +74,7 @@ public class WebsiteGroupTest {
 
     @Test
     @SmallTest
-    public void testIPAddress() {
+    public void testIpAddress() {
         Website origin = new Website(WebsiteAddress.create("https://1.1.1.1"), null);
         WebsiteGroup group =
                 new WebsiteGroup(origin.getAddress().getDomainAndRegistry(), Arrays.asList(origin));
@@ -96,8 +90,10 @@ public class WebsiteGroupTest {
     public void testMultipleOrigins() {
         Website origin1 = new Website(WebsiteAddress.create("https://one.google.com"), null);
         Website origin2 = new Website(WebsiteAddress.create("https://two.google.com"), null);
-        WebsiteGroup group = new WebsiteGroup(
-                origin1.getAddress().getDomainAndRegistry(), Arrays.asList(origin1, origin2));
+        WebsiteGroup group =
+                new WebsiteGroup(
+                        origin1.getAddress().getDomainAndRegistry(),
+                        Arrays.asList(origin1, origin2));
         Assert.assertEquals("google.com", group.getDomainAndRegistry());
         Assert.assertEquals("google.com", group.getTitleForPreferenceRow());
         Assert.assertEquals(new GURL("https://google.com"), group.getFaviconUrl());
@@ -111,7 +107,8 @@ public class WebsiteGroupTest {
     @SmallTest
     public void testGroupWebsites() {
         List<Website> websites =
-                Arrays.asList(new Website(WebsiteAddress.create("https://one.google.com"), null),
+                Arrays.asList(
+                        new Website(WebsiteAddress.create("https://one.google.com"), null),
                         new Website(WebsiteAddress.create("http://two.google.com"), null),
                         new Website(WebsiteAddress.create("https://test.com"), null),
                         new Website(WebsiteAddress.create("localhost"), null),
@@ -139,16 +136,24 @@ public class WebsiteGroupTest {
 
     @Test
     @SmallTest
-    public void testFPSInfo() {
-        var fpsInfo = new FPSCookieInfo("google.com", 5);
+    public void testRwsInfo() {
+        var rwsInfo =
+                new RwsCookieInfo(
+                        "google.com",
+                        Arrays.asList(
+                                new Website(WebsiteAddress.create("maps.google.com"), null),
+                                new Website(WebsiteAddress.create("mail.google.com"), null),
+                                new Website(WebsiteAddress.create("docs.google.com"), null)));
         Website origin1 = new Website(WebsiteAddress.create("maps.google.com"), null);
         Website origin2 = new Website(WebsiteAddress.create("mail.google.com"), null);
         Website origin3 = new Website(WebsiteAddress.create("docs.google.com"), null);
-        origin2.setFPSCookieInfo(fpsInfo);
-        WebsiteGroup group = new WebsiteGroup(origin2.getAddress().getDomainAndRegistry(),
-                Arrays.asList(origin1, origin2, origin3));
+        origin2.setRwsCookieInfo(rwsInfo);
+        WebsiteGroup group =
+                new WebsiteGroup(
+                        origin2.getAddress().getDomainAndRegistry(),
+                        Arrays.asList(origin1, origin2, origin3));
 
-        Assert.assertEquals(fpsInfo, group.getFPSInfo());
+        Assert.assertEquals(rwsInfo, group.getRwsInfo());
     }
 
     @Test
@@ -174,8 +179,9 @@ public class WebsiteGroupTest {
                 new WebsiteGroup(site2.getAddress().getDomainAndRegistry(), Arrays.asList(site2));
         Assert.assertTrue(group2.isCookieDeletionDisabled(mContextHandleMock));
         // This one has at least one, for which deletion is possible.
-        WebsiteGroup group3 = new WebsiteGroup(
-                site1.getAddress().getDomainAndRegistry(), Arrays.asList(site1, site2));
+        WebsiteGroup group3 =
+                new WebsiteGroup(
+                        site1.getAddress().getDomainAndRegistry(), Arrays.asList(site1, site2));
         Assert.assertFalse(group3.isCookieDeletionDisabled(mContextHandleMock));
     }
 
@@ -186,8 +192,9 @@ public class WebsiteGroupTest {
         String origin2 = "http://maps.google.com";
         Website site1 = new Website(WebsiteAddress.create(origin1), null);
         Website site2 = new Website(WebsiteAddress.create(origin2), null);
-        WebsiteGroup group = new WebsiteGroup(
-                site1.getAddress().getDomainAndRegistry(), Arrays.asList(site1, site2));
+        WebsiteGroup group =
+                new WebsiteGroup(
+                        site1.getAddress().getDomainAndRegistry(), Arrays.asList(site1, site2));
 
         Set<String> apps1 = new HashSet<>(Arrays.asList("http://example.com"));
         Assert.assertFalse(group.hasInstalledApp(apps1));

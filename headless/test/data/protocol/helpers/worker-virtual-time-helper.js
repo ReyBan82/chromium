@@ -19,7 +19,7 @@
     // is in a discovery-only mode, so re-attach.
     const { result: { sessionId } } =
         await this.testRunner_.browserP().Target.attachToBrowserTarget({});
-    const { protocol: bp } = new TestRunner.Session(testRunner, sessionId);
+    const {protocol: bp} = this.testRunner_.createSessionFor(sessionId);
     const fetcher = new FetchHelper(this.testRunner_, bp);
     await fetcher.enable();
     return {fetcher, FetchHelper};
@@ -49,7 +49,7 @@
     await this.dp_.Emulation.setVirtualTimePolicy({
         policy: 'pauseIfNetworkFetchesPending',
         budget: 1000});
-    await this.dp_.Target.setAutoAttach({
+    this.dp_.Target.setAutoAttach({
       autoAttach: true, waitForDebuggerOnStart: true, flatten: true});
     const attached = (await this.dp_.Target.onceAttachedToTarget()).params;
     const wp = this.session_.createChild(attached.sessionId).protocol;

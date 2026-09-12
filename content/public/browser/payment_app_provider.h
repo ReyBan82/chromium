@@ -8,6 +8,7 @@
 #include "base/functional/callback_forward.h"
 #include "content/common/content_export.h"
 #include "third_party/blink/public/mojom/payments/payment_app.mojom.h"
+#include "third_party/blink/public/mojom/payments/payment_app_events.mojom.h"
 
 class SkBitmap;
 
@@ -18,6 +19,7 @@ class Origin;
 namespace content {
 
 class WebContents;
+struct GlobalRenderFrameHostId;
 struct SupportedDelegations;
 
 // This is providing the service worker based payment app related APIs to
@@ -41,7 +43,7 @@ class CONTENT_EXPORT PaymentAppProvider {
   using CanMakePaymentCallback =
       base::OnceCallback<void(payments::mojom::CanMakePaymentResponsePtr)>;
   using AbortCallback = base::OnceCallback<void(bool)>;
-  using UpdatePaymentAppIconCallback =
+  using UpdatePaymentAppMetadataCallback =
       base::OnceCallback<void(payments::mojom::PaymentHandlerStatus status)>;
 
   // Should be accessed only on the UI thread.
@@ -51,6 +53,7 @@ class CONTENT_EXPORT PaymentAppProvider {
       payments::mojom::PaymentRequestEventDataPtr event_data,
       InvokePaymentAppCallback callback) = 0;
   virtual void InstallAndInvokePaymentApp(
+      GlobalRenderFrameHostId requesting_frame_id,
       payments::mojom::PaymentRequestEventDataPtr event_data,
       const std::string& app_name,
       const SkBitmap& app_icon,
@@ -61,14 +64,14 @@ class CONTENT_EXPORT PaymentAppProvider {
       const SupportedDelegations& supported_delegations,
       RegistrationIdCallback registration_id_callback,
       InvokePaymentAppCallback callback) = 0;
-  virtual void UpdatePaymentAppIcon(
+  virtual void UpdatePaymentAppMetadata(
       int64_t registration_id,
       const std::string& instrument_key,
       const std::string& name,
       const std::string& string_encoded_icon,
       const std::string& method_name,
       const SupportedDelegations& supported_delegations,
-      UpdatePaymentAppIconCallback callback) = 0;
+      UpdatePaymentAppMetadataCallback callback) = 0;
   virtual void CanMakePayment(
       int64_t registration_id,
       const url::Origin& sw_origin,
@@ -92,6 +95,14 @@ class CONTENT_EXPORT PaymentAppProvider {
   virtual void OnClosingOpenedWindow(
       payments::mojom::PaymentEventResponseType reason) = 0;
 
+  // Sets the service worker registration ID for the payment handler. Used by
+  // OnPaymentHandlerDisconnected() to notify the service worker when the
+  // payment handler window's renderer crashes or becomes unresponsive.
+  virtual void SetRegistrationId(int64_t registration_id) = 0;
+
+  // Notify the payment handler is disconnected.
+  virtual void OnPaymentHandlerDisconnected() = 0;
+
   // A test-only method for installing a service worker based payment app.
   // Invokes the `callback` when done.
   virtual void InstallPaymentAppForTesting(
@@ -99,6 +110,7 @@ class CONTENT_EXPORT PaymentAppProvider {
       const GURL& service_worker_javascript_file_url,
       const GURL& service_worker_scope,
       const std::string& payment_method_identifier,
+      GlobalRenderFrameHostId requesting_frame_id,
       base::OnceCallback<void(bool success)> callback) = 0;
 
  protected:

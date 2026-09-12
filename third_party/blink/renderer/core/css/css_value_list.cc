@@ -20,6 +20,7 @@
 
 #include "third_party/blink/renderer/core/css/css_value_list.h"
 
+#include "third_party/blink/renderer/core/css/css_property_name.h"
 #include "third_party/blink/renderer/platform/wtf/size_assertions.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
@@ -38,6 +39,24 @@ CSSValueList::CSSValueList(ClassType class_type,
 
 CSSValueList::CSSValueList(ValueListSeparator list_separator)
     : CSSValue(kValueListClass) {
+  value_list_separator_ = list_separator;
+}
+
+CSSValueList::CSSValueList(ValueListSeparator list_separator,
+                           bool needs_tree_scope_population)
+    : CSSValue(kValueListClass) {
+  value_list_separator_ = list_separator;
+  needs_tree_scope_population_ = needs_tree_scope_population;
+}
+
+CSSValueList::CSSValueList(ValueListSeparator list_separator,
+                           HeapVector<Member<const CSSValue>, 4> values)
+    : CSSValueList(kValueListClass, list_separator, std::move(values)) {}
+
+CSSValueList::CSSValueList(ClassType class_type,
+                           ValueListSeparator list_separator,
+                           HeapVector<Member<const CSSValue>, 4> values)
+    : CSSValue(class_type), values_(std::move(values)) {
   value_list_separator_ = list_separator;
 }
 
@@ -169,6 +188,14 @@ bool CSSValueList::Equals(const CSSValueList& other) const {
          CompareCSSValueVector(values_, other.values_);
 }
 
+uint32_t CSSValueList::CustomHash() const {
+  uint32_t hash = value_list_separator_;
+  for (const CSSValue* value : values_) {
+    AddIntToHash(hash, value->Hash());
+  }
+  return hash;
+}
+
 bool CSSValueList::HasFailedOrCanceledSubresources() const {
   for (const auto& value : values_) {
     if (value->HasFailedOrCanceledSubresources()) {
@@ -191,6 +218,15 @@ void CSSValueList::ReResolveUrl(const Document& document) const {
   for (const auto& value : values_) {
     value->ReResolveUrl(document);
   }
+}
+
+bool CSSValueList::HasRandomFunctions() const {
+  for (const auto& value : values_) {
+    if (value->HasRandomFunctions()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void CSSValueList::TraceAfterDispatch(blink::Visitor* visitor) const {

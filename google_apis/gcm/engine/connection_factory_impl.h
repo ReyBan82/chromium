@@ -60,7 +60,8 @@ class GCM_EXPORT ConnectionFactoryImpl
   void SetConnectionListener(ConnectionListener* listener) override;
 
   // NetworkConnectionTracker implementation.
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   // Returns the server to which the factory is currently connected, or if
   // a connection is currently pending, the server to which the next connection
@@ -68,9 +69,10 @@ class GCM_EXPORT ConnectionFactoryImpl
   GURL GetCurrentEndpoint() const;
 
  protected:
-  // Initiate the connection to the GCM server.
+  // Initiate the connection to the GCM server. When `ignore_connection_failure`
+  // is true, backoff delay won't be changed in case of failure.
   // Virtual for testing.
-  virtual void StartConnection();
+  virtual void StartConnection(bool ignore_connection_failure);
 
   // Helper method for initalizing the connection hander.
   // Virtual for testing.
@@ -94,10 +96,13 @@ class GCM_EXPORT ConnectionFactoryImpl
   // Virtual for testing.
   virtual base::TimeTicks NowTicks();
 
-  // Callback for Socket connection completion. This is public for testing.
-  void OnConnectDone(int result,
-                     const absl::optional<net::IPEndPoint>& local_addr,
-                     const absl::optional<net::IPEndPoint>& peer_addr,
+  // Callback for Socket connection completion. When `ignore_connection_failure`
+  // is true, backoff delay won't be changed in case of failure.
+  // This is public for testing.
+  void OnConnectDone(bool ignore_connection_failure,
+                     int result,
+                     const std::optional<net::IPEndPoint>& local_addr,
+                     const std::optional<net::IPEndPoint>& peer_addr,
                      mojo::ScopedDataPipeConsumerHandle receive_stream,
                      mojo::ScopedDataPipeProducerHandle send_stream);
 
@@ -114,8 +119,10 @@ class GCM_EXPORT ConnectionFactoryImpl
   void ConnectWithBackoff();
 
   // Implementation of Connect(..). If not in backoff attempts a connection and
-  // handshake. On connection/handshake failure, goes into backoff.
-  void ConnectImpl();
+  // handshake. On connection/handshake failure, goes into backoff. When
+  // `ignore_connection_failure` is true, backoff delay won't be changed in case
+  // of failure.
+  void ConnectImpl(bool ignore_connection_failure);
 
   // Closes the local socket if one is present, and resets connection handler.
   void CloseSocket();

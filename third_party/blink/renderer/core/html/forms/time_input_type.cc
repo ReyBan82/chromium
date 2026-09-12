@@ -42,7 +42,9 @@
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
 #include "third_party/blink/renderer/platform/wtf/date_math.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "ui/strings/grit/ax_strings.h"
 
 namespace blink {
 
@@ -55,10 +57,6 @@ TimeInputType::TimeInputType(HTMLInputElement& element)
 
 void TimeInputType::CountUsage() {
   CountUsageIfVisible(WebFeature::kInputTypeTime);
-}
-
-const AtomicString& TimeInputType::FormControlType() const {
-  return input_type_names::kTime;
 }
 
 Decimal TimeInputType::DefaultValueForStepUp() const {
@@ -99,7 +97,7 @@ bool TimeInputType::SetMillisecondToDateComponents(double value,
 void TimeInputType::WarnIfValueIsInvalid(const String& value) const {
   if (value != GetElement().SanitizeValue(value)) {
     AddWarningToConsole(
-        "The specified value %s does not conform to the required format.  The "
+        "The specified value {} does not conform to the required format.  The "
         "format is \"HH:mm\", \"HH:mm:ss\" or \"HH:mm:ss.SSS\" where HH is "
         "00-23, mm is 00-59, ss is 00-59, and SSS is 000-999.",
         value);
@@ -125,20 +123,20 @@ String TimeInputType::FormatDateTimeFieldsState(
       !date_time_fields_state.HasMinute() || !date_time_fields_state.HasAMPM())
     return g_empty_string;
   if (date_time_fields_state.HasMillisecond()) {
-    return String::Format(
-        "%02u:%02u:%02u.%03u", date_time_fields_state.Hour24(),
-        date_time_fields_state.Minute(),
-        date_time_fields_state.HasSecond() ? date_time_fields_state.Second()
-                                           : 0,
-        date_time_fields_state.Millisecond());
+    return Format("{:02}:{:02}:{:02}.{:03}", date_time_fields_state.Hour24(),
+                  date_time_fields_state.Minute(),
+                  date_time_fields_state.HasSecond()
+                      ? date_time_fields_state.Second()
+                      : 0,
+                  date_time_fields_state.Millisecond());
   }
   if (date_time_fields_state.HasSecond()) {
-    return String::Format("%02u:%02u:%02u", date_time_fields_state.Hour24(),
-                          date_time_fields_state.Minute(),
-                          date_time_fields_state.Second());
+    return Format("{:02}:{:02}:{:02}", date_time_fields_state.Hour24(),
+                  date_time_fields_state.Minute(),
+                  date_time_fields_state.Second());
   }
-  return String::Format("%02u:%02u", date_time_fields_state.Hour24(),
-                        date_time_fields_state.Minute());
+  return Format("{:02}:{:02}", date_time_fields_state.Hour24(),
+                date_time_fields_state.Minute());
 }
 
 void TimeInputType::SetupLayoutParameters(

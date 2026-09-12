@@ -177,26 +177,28 @@ function promiseDeleteThenOpenDb(dbName, upgradeCallback) {
   });
 }
 
-function promiseOpenDb(dbName, optionalUpgradeCallback) {
+function promiseOpenDb(
+    dbName, optionalUpgradeCallback, optionalVersion = undefined) {
   return new Promise((resolve, reject) => {
-    const openRequest = indexedDB.open(dbName);
-    openRequest.onerror = () => {
-      const e = new Error('Error opening database ${dbName}');
-      unexepectedErrorCallback(e);
+    const openRequest = optionalVersion !== undefined ?
+        indexedDB.open(dbName, optionalVersion) :
+        indexedDB.open(dbName);
+    openRequest.onerror = (e) => {
+      unexpectedErrorCallback(e);
       reject(e);
     };
-    openRequest.onblocked = () => {
-      const e = new Error('Opening database ${dbName}');
+    openRequest.onblocked = (e) => {
       unexpectedBlockedCallback(e);
       reject(e);
     };
     if (optionalUpgradeCallback) {
       openRequest.onupgradeneeded = (event) => {
         const db = event.target.result;
-        optionalUpgradeCallback(db);
+        const txn = event.target.transaction;
+        optionalUpgradeCallback(db, txn);
       };
     }
-    openRequest.onsuccess = () => {
+    openRequest.onsuccess = (event) => {
       db = event.target.result;
       resolve(db);
     };
@@ -226,4 +228,13 @@ if (typeof String.prototype.startsWith !== 'function') {
   String.prototype.startsWith = function (str) {
     return this.indexOf(str) === 0;
   };
+}
+
+// Generates a pseudorandom string of the given length.
+function generateRandomString(sizeInKb) {
+  let output = '';
+  for (let i = 0; i < sizeInKb * 1024 / 8 + 1; i++) {
+    output += Math.random().toString(36).slice(2, 10);
+  }
+  return output;
 }

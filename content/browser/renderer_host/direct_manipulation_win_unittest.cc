@@ -2,10 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "content/browser/renderer_host/direct_manipulation_helper_win.h"
-
 #include <objbase.h>
 
+#include <utility>
+
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/time/time.h"
+#include "content/browser/renderer_host/direct_manipulation_helper_win.h"
 #include "content/browser/renderer_host/direct_manipulation_test_helper_win.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/ui_base_features.h"
@@ -15,24 +19,49 @@ namespace content {
 
 namespace {
 
+template <typename Interface>
+using ComPtr = Microsoft::WRL::ComPtr<Interface>;
+
+template <typename Interface>
+using RuntimeFtmBaseClass = Microsoft::WRL::RuntimeClass<
+    Microsoft::WRL::RuntimeClassFlags<
+        Microsoft::WRL::RuntimeClassType::ClassicCom>,
+    Microsoft::WRL::Implements<
+        Microsoft::WRL::RuntimeClassFlags<
+            Microsoft::WRL::RuntimeClassType::ClassicCom>,
+        Microsoft::WRL::FtmBase,
+        Interface>>;
+
 class MockDirectManipulationViewport
-    : public Microsoft::WRL::RuntimeClass<
-          Microsoft::WRL::RuntimeClassFlags<
-              Microsoft::WRL::RuntimeClassType::ClassicCom>,
-          Microsoft::WRL::Implements<
-              Microsoft::WRL::RuntimeClassFlags<
-                  Microsoft::WRL::RuntimeClassType::ClassicCom>,
-              Microsoft::WRL::FtmBase,
-              IDirectManipulationViewport>> {
+    : public RuntimeFtmBaseClass<IDirectManipulationViewport> {
  public:
-  MockDirectManipulationViewport() {}
+  MockDirectManipulationViewport() = default;
 
   MockDirectManipulationViewport(const MockDirectManipulationViewport&) =
       delete;
   MockDirectManipulationViewport& operator=(
       const MockDirectManipulationViewport&) = delete;
 
-  ~MockDirectManipulationViewport() override {}
+  ~MockDirectManipulationViewport() override = default;
+
+  void set_stop_callback(base::OnceClosure callback) {
+    stop_callback_ = std::move(callback);
+  }
+  void set_add_event_handler_callback(base::OnceClosure callback) {
+    add_event_handler_callback_ = std::move(callback);
+  }
+  void set_remove_event_handler_callback(base::OnceClosure callback) {
+    remove_event_handler_callback_ = std::move(callback);
+  }
+  void set_set_contact_callback(base::OnceClosure callback) {
+    set_contact_callback_ = std::move(callback);
+  }
+  void set_abandon_callback(base::OnceClosure callback) {
+    abandon_callback_ = std::move(callback);
+  }
+  void set_zoom_to_rect_callback(base::OnceClosure callback) {
+    zoom_to_rect_callback_ = std::move(callback);
+  }
 
   bool WasZoomToRectCalled() {
     bool called = zoom_to_rect_called_;
@@ -45,6 +74,9 @@ class MockDirectManipulationViewport
   HRESULT STDMETHODCALLTYPE Disable() override { return S_OK; }
 
   HRESULT STDMETHODCALLTYPE SetContact(_In_ UINT32 pointerId) override {
+    if (set_contact_callback_) {
+      std::move(set_contact_callback_).Run();
+    }
     return S_OK;
   }
 
@@ -85,6 +117,9 @@ class MockDirectManipulationViewport
                                        _In_ const float bottom,
                                        _In_ BOOL animate) override {
     zoom_to_rect_called_ = true;
+    if (zoom_to_rect_callback_) {
+      std::move(zoom_to_rect_callback_).Run();
+    }
     return S_OK;
   }
 
@@ -149,10 +184,16 @@ class MockDirectManipulationViewport
   AddEventHandler(_In_opt_ HWND window,
                   _In_ IDirectManipulationViewportEventHandler* eventHandler,
                   _Out_ DWORD* cookie) override {
+    if (add_event_handler_callback_) {
+      std::move(add_event_handler_callback_).Run();
+    }
     return S_OK;
   }
 
   HRESULT STDMETHODCALLTYPE RemoveEventHandler(_In_ DWORD cookie) override {
+    if (remove_event_handler_callback_) {
+      std::move(remove_event_handler_callback_).Run();
+    }
     return S_OK;
   }
 
@@ -166,12 +207,124 @@ class MockDirectManipulationViewport
     return S_OK;
   }
 
-  HRESULT STDMETHODCALLTYPE Stop() override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE Stop() override {
+    if (stop_callback_) {
+      std::move(stop_callback_).Run();
+    }
+    return S_OK;
+  }
 
-  HRESULT STDMETHODCALLTYPE Abandon() override { return S_OK; }
+  HRESULT STDMETHODCALLTYPE Abandon() override {
+    if (abandon_callback_) {
+      std::move(abandon_callback_).Run();
+    }
+    return S_OK;
+  }
 
  private:
   bool zoom_to_rect_called_ = false;
+  base::OnceClosure stop_callback_;
+  base::OnceClosure add_event_handler_callback_;
+  base::OnceClosure remove_event_handler_callback_;
+  base::OnceClosure set_contact_callback_;
+  base::OnceClosure abandon_callback_;
+  base::OnceClosure zoom_to_rect_callback_;
+};
+
+class MockDirectManipulationUpdateManager
+    : public RuntimeFtmBaseClass<IDirectManipulationUpdateManager> {
+ public:
+  MockDirectManipulationUpdateManager() = default;
+
+  MockDirectManipulationUpdateManager(
+      const MockDirectManipulationUpdateManager&) = delete;
+  MockDirectManipulationUpdateManager& operator=(
+      const MockDirectManipulationUpdateManager&) = delete;
+
+  ~MockDirectManipulationUpdateManager() override = default;
+
+  void set_update_callback(base::OnceClosure callback) {
+    update_callback_ = std::move(callback);
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  RegisterWaitHandleCallback(HANDLE,
+                             IDirectManipulationUpdateHandler*,
+                             DWORD* cookie) override {
+    *cookie = 123;
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE UnregisterWaitHandleCallback(DWORD) override {
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  Update(IDirectManipulationFrameInfoProvider*) override {
+    if (update_callback_) {
+      std::move(update_callback_).Run();
+    }
+    return S_OK;
+  }
+
+ private:
+  base::OnceClosure update_callback_;
+};
+
+class MockDirectManipulationManager
+    : public RuntimeFtmBaseClass<IDirectManipulationManager> {
+ public:
+  explicit MockDirectManipulationManager(
+      ComPtr<MockDirectManipulationViewport> viewport)
+      : viewport_(std::move(viewport)) {}
+
+  MockDirectManipulationManager(const MockDirectManipulationManager&) = delete;
+  MockDirectManipulationManager& operator=(
+      const MockDirectManipulationManager&) = delete;
+
+  ~MockDirectManipulationManager() override = default;
+
+  HRESULT STDMETHODCALLTYPE Activate(HWND) override { return S_OK; }
+
+  HRESULT STDMETHODCALLTYPE CreateContent(IDirectManipulationFrameInfoProvider*,
+                                          REFCLSID,
+                                          REFIID,
+                                          void**) override {
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  CreateViewport(IDirectManipulationFrameInfoProvider*,
+                 HWND,
+                 REFIID riid,
+                 void** object) override {
+    return viewport_.CopyTo(riid, object);
+  }
+
+  HRESULT STDMETHODCALLTYPE Deactivate(HWND) override { return S_OK; }
+
+  HRESULT STDMETHODCALLTYPE GetUpdateManager(REFIID riid,
+                                             void** object) override {
+    return update_manager_.CopyTo(riid, object);
+  }
+
+  HRESULT STDMETHODCALLTYPE ProcessInput(const MSG*, BOOL*) override {
+    return S_OK;
+  }
+
+  HRESULT STDMETHODCALLTYPE
+  RegisterHitTestTarget(HWND, HWND, DIRECTMANIPULATION_HITTEST_TYPE) override {
+    return S_OK;
+  }
+
+  ComPtr<MockDirectManipulationUpdateManager> mock_update_manager() {
+    return update_manager_;
+  }
+
+ private:
+  ComPtr<MockDirectManipulationViewport> viewport_;
+  ComPtr<MockDirectManipulationUpdateManager> update_manager_ =
+      Microsoft::WRL::Make<MockDirectManipulationUpdateManager>();
 };
 
 enum class EventGesture {
@@ -301,8 +454,6 @@ class MockWindowEventTarget : public ui::WindowEventTarget {
     return S_OK;
   }
 
-  void HandleParentChanged() override {}
-
  private:
   std::vector<Event> events_;
 };
@@ -311,22 +462,44 @@ class MockWindowEventTarget : public ui::WindowEventTarget {
 
 class DirectManipulationUnitTest : public testing::Test {
  public:
-  DirectManipulationUnitTest() {
-    viewport_ = Microsoft::WRL::Make<MockDirectManipulationViewport>();
-    content_ = Microsoft::WRL::Make<MockDirectManipulationContent>();
-    direct_manipulation_helper_ =
-        DirectManipulationHelper::CreateInstanceForTesting(&event_target_,
-                                                           viewport_);
-  }
+  DirectManipulationUnitTest() = default;
 
   DirectManipulationUnitTest(const DirectManipulationUnitTest&) = delete;
   DirectManipulationUnitTest& operator=(const DirectManipulationUnitTest&) =
       delete;
 
-  ~DirectManipulationUnitTest() override {}
+  ~DirectManipulationUnitTest() override = default;
+
+  void SetUp() override {
+    testing::Test::SetUp();
+    viewport_ = Microsoft::WRL::Make<MockDirectManipulationViewport>();
+    ASSERT_TRUE(viewport_);
+    manager_ = Microsoft::WRL::Make<MockDirectManipulationManager>(viewport_);
+    ASSERT_TRUE(manager_);
+    direct_manipulation_helper_ =
+        DirectManipulationHelper::CreateInstanceForTesting(manager_);
+    ASSERT_TRUE(direct_manipulation_helper_);
+    direct_manipulation_helper_->UpdateEventHandler(nullptr, &event_target_);
+    content_ = Microsoft::WRL::Make<MockDirectManipulationContent>();
+    ASSERT_TRUE(content_);
+  }
 
   DirectManipulationHelper* GetDirectManipulationHelper() {
     return direct_manipulation_helper_.get();
+  }
+
+  base::OnceClosure ResetDirectManipulationHelperCallback() {
+    return base::BindOnce(
+        &DirectManipulationUnitTest::ResetDirectManipulationHelper,
+        base::Unretained(this));
+  }
+
+  void RecreateDirectManipulationHelper() {
+    ASSERT_FALSE(direct_manipulation_helper_);
+    ASSERT_TRUE(manager_);
+    direct_manipulation_helper_ =
+        DirectManipulationHelper::CreateInstanceForTesting(manager_);
+    ASSERT_TRUE(direct_manipulation_helper_);
   }
 
   std::vector<Event> GetEvents() { return event_target_.GetEvents(); }
@@ -349,11 +522,16 @@ class DirectManipulationUnitTest : public testing::Test {
     direct_manipulation_helper_->SetDeviceScaleFactorForTesting(factor);
   }
 
- private:
-  std::unique_ptr<DirectManipulationHelper> direct_manipulation_helper_;
-  Microsoft::WRL::ComPtr<MockDirectManipulationViewport> viewport_;
-  Microsoft::WRL::ComPtr<MockDirectManipulationContent> content_;
+ protected:
+  ComPtr<MockDirectManipulationViewport> viewport_;
+  ComPtr<MockDirectManipulationManager> manager_;
+  ComPtr<MockDirectManipulationContent> content_;
   MockWindowEventTarget event_target_;
+
+ private:
+  void ResetDirectManipulationHelper() { direct_manipulation_helper_.reset(); }
+
+  std::unique_ptr<DirectManipulationHelper> direct_manipulation_helper_;
 };
 
 TEST_F(DirectManipulationUnitTest, ReceiveSimplePanTransform) {
@@ -364,7 +542,7 @@ TEST_F(DirectManipulationUnitTest, ReceiveSimplePanTransform) {
   ContentUpdated(1, 10, 0);
 
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
   EXPECT_EQ(10, events[0].scroll_x_);
   EXPECT_EQ(0, events[0].scroll_y_);
@@ -373,7 +551,7 @@ TEST_F(DirectManipulationUnitTest, ReceiveSimplePanTransform) {
   ContentUpdated(1, 15, 0);
 
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScroll, events[0].gesture_);
   EXPECT_EQ(5, events[0].scroll_x_);
   EXPECT_EQ(0, events[0].scroll_y_);
@@ -381,7 +559,7 @@ TEST_F(DirectManipulationUnitTest, ReceiveSimplePanTransform) {
   ViewportStatusChanged(DIRECTMANIPULATION_READY, DIRECTMANIPULATION_RUNNING);
 
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollEnd, events[0].gesture_);
 }
 
@@ -393,7 +571,7 @@ TEST_F(DirectManipulationUnitTest, ReceivePanFling) {
   ContentUpdated(1, 10, 0);
 
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
   EXPECT_EQ(10, events[0].scroll_x_);
   EXPECT_EQ(0, events[0].scroll_y_);
@@ -402,7 +580,7 @@ TEST_F(DirectManipulationUnitTest, ReceivePanFling) {
   ContentUpdated(1, 15, 0);
 
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScroll, events[0].gesture_);
   EXPECT_EQ(5, events[0].scroll_x_);
   EXPECT_EQ(0, events[0].scroll_y_);
@@ -411,20 +589,20 @@ TEST_F(DirectManipulationUnitTest, ReceivePanFling) {
   ViewportStatusChanged(DIRECTMANIPULATION_INERTIA, DIRECTMANIPULATION_RUNNING);
 
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFlingBegin, events[0].gesture_);
 
   ContentUpdated(1, 20, 0);
 
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFling, events[0].gesture_);
   EXPECT_EQ(5, events[0].scroll_x_);
   EXPECT_EQ(0, events[0].scroll_y_);
 
   ViewportStatusChanged(DIRECTMANIPULATION_READY, DIRECTMANIPULATION_INERTIA);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFlingEnd, events[0].gesture_);
 }
 
@@ -435,7 +613,7 @@ TEST_F(DirectManipulationUnitTest, ReceiveSimpleScaleTransform) {
   ViewportStatusChanged(DIRECTMANIPULATION_RUNNING, DIRECTMANIPULATION_READY);
   ContentUpdated(1.1f, 0, 0);
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(2u, events.size());
+  ASSERT_EQ(2u, events.size());
   EXPECT_EQ(EventGesture::kScaleBegin, events[0].gesture_);
   EXPECT_EQ(EventGesture::kScale, events[1].gesture_);
   EXPECT_EQ(1.1f, events[1].scale_);
@@ -443,13 +621,13 @@ TEST_F(DirectManipulationUnitTest, ReceiveSimpleScaleTransform) {
   // For next update, should only apply the difference.
   ContentUpdated(1.21f, 0, 0);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScale, events[0].gesture_);
   EXPECT_EQ(1.1f, events[0].scale_);
 
   ViewportStatusChanged(DIRECTMANIPULATION_READY, DIRECTMANIPULATION_RUNNING);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScaleEnd, events[0].gesture_);
 }
 
@@ -471,7 +649,7 @@ TEST_F(DirectManipulationUnitTest, ReceiveScrollTransformLessThanOne) {
   // Scroll offset more than 1, should only apply integer part.
   ContentUpdated(1, 1.2f, 0);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
   EXPECT_EQ(1, events[0].scroll_x_);
   EXPECT_EQ(0, events[0].scroll_y_);
@@ -484,7 +662,7 @@ TEST_F(DirectManipulationUnitTest, ReceiveScrollTransformLessThanOne) {
   // Scroll offset difference more than 1, should only apply integer part.
   ContentUpdated(1, 3.0f, 0);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScroll, events[0].gesture_);
   EXPECT_EQ(2, events[0].scroll_x_);
   EXPECT_EQ(0, events[0].scroll_y_);
@@ -504,7 +682,7 @@ TEST_F(DirectManipulationUnitTest,
   // Scale factor more than float point error, apply.
   ContentUpdated(1.00001f, 0, 0);
   events = GetEvents();
-  EXPECT_EQ(2u, events.size());
+  ASSERT_EQ(2u, events.size());
   EXPECT_EQ(EventGesture::kScaleBegin, events[0].gesture_);
   EXPECT_EQ(EventGesture::kScale, events[1].gesture_);
   EXPECT_EQ(1.00001f, events[1].scale_);
@@ -517,13 +695,13 @@ TEST_F(DirectManipulationUnitTest,
   // Scale factor difference more than float point error, apply.
   ContentUpdated(1.000021f, 0, 0);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScale, events[0].gesture_);
   EXPECT_EQ(1.000021f / 1.00001f, events[0].scale_);
 
   ViewportStatusChanged(DIRECTMANIPULATION_READY, DIRECTMANIPULATION_RUNNING);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScaleEnd, events[0].gesture_);
 }
 
@@ -537,13 +715,13 @@ TEST_F(DirectManipulationUnitTest, InSameSequenceReceiveBothScrollAndScale) {
   // First event is a scroll event.
   ContentUpdated(1.0f, 5, 0);
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
 
   // Second event comes with scale factor. Now the scroll offset only noise.
   ContentUpdated(1.00001f, 5, 0);
   events = GetEvents();
-  EXPECT_EQ(3u, events.size());
+  ASSERT_EQ(3u, events.size());
   EXPECT_EQ(EventGesture::kScrollEnd, events[0].gesture_);
   EXPECT_EQ(EventGesture::kScaleBegin, events[1].gesture_);
   EXPECT_EQ(EventGesture::kScale, events[2].gesture_);
@@ -559,29 +737,29 @@ TEST_F(DirectManipulationUnitTest, InSameSequenceReceiveScaleAfterFling) {
   // First event is a scroll event.
   ContentUpdated(1.0f, 5, 0);
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
 
   // Fling Begin.
   ViewportStatusChanged(DIRECTMANIPULATION_INERTIA, DIRECTMANIPULATION_RUNNING);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFlingBegin, events[0].gesture_);
 
   ContentUpdated(1, 10, 0);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFling, events[0].gesture_);
 
   // Event comes with scale factor. Now the scroll offset only noise.
   ViewportStatusChanged(DIRECTMANIPULATION_RUNNING, DIRECTMANIPULATION_INERTIA);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFlingEnd, events[0].gesture_);
 
   ContentUpdated(1.00001f, 10, 0);
   events = GetEvents();
-  EXPECT_EQ(2u, events.size());
+  ASSERT_EQ(2u, events.size());
   EXPECT_EQ(EventGesture::kScaleBegin, events[0].gesture_);
   EXPECT_EQ(EventGesture::kScale, events[1].gesture_);
 }
@@ -596,25 +774,25 @@ TEST_F(DirectManipulationUnitTest, InSameSequenceReceiveScrollAfterFling) {
   // First event is a scroll event.
   ContentUpdated(1.0f, 5, 0);
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
 
   // Fling Begin.
   ViewportStatusChanged(DIRECTMANIPULATION_INERTIA, DIRECTMANIPULATION_RUNNING);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFlingBegin, events[0].gesture_);
 
   ContentUpdated(1, 10, 0);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFling, events[0].gesture_);
 
   // Fling back to Scroll.
   ViewportStatusChanged(DIRECTMANIPULATION_RUNNING, DIRECTMANIPULATION_INERTIA);
   ContentUpdated(1, 15, 0);
   events = GetEvents();
-  EXPECT_EQ(2u, events.size());
+  ASSERT_EQ(2u, events.size());
   EXPECT_EQ(EventGesture::kFlingEnd, events[0].gesture_);
   EXPECT_EQ(EventGesture::kScrollBegin, events[1].gesture_);
 }
@@ -628,24 +806,24 @@ TEST_F(DirectManipulationUnitTest,
 
   ContentUpdated(1.0f, 5, 0);
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
 
   // Fling Begin.
   ViewportStatusChanged(DIRECTMANIPULATION_INERTIA, DIRECTMANIPULATION_RUNNING);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFlingBegin, events[0].gesture_);
 
   ContentUpdated(1, 10, 0);
   events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kFling, events[0].gesture_);
 
   // Event comes with scale factor. But no ViewportStatusChanged.
   ContentUpdated(1.00001f, 10, 0);
   events = GetEvents();
-  EXPECT_EQ(3u, events.size());
+  ASSERT_EQ(3u, events.size());
   EXPECT_EQ(EventGesture::kFlingEnd, events[0].gesture_);
   EXPECT_EQ(EventGesture::kScaleBegin, events[1].gesture_);
   EXPECT_EQ(EventGesture::kScale, events[2].gesture_);
@@ -674,9 +852,82 @@ TEST_F(DirectManipulationUnitTest, HiDPIScroll) {
   SetDeviceScaleFactor(10.0);
   ContentUpdated(1.0f, 50, 0);
   std::vector<Event> events = GetEvents();
-  EXPECT_EQ(1u, events.size());
+  ASSERT_EQ(1u, events.size());
   EXPECT_EQ(EventGesture::kScrollBegin, events[0].gesture_);
   EXPECT_EQ(5, events[0].scroll_x_);
+}
+
+// DirectManipulation COM calls on the UI thread can enter a nested message loop
+// while they block on an internal delegate thread. The nested message loop can
+// process WM_DESTROY messages that can invalidate pointers on the stack. To
+// simulate this, these tests delete the DirectManipulationHelper from a mock
+// COM call in each method that makes COM calls. If the methods don't guard
+// their stack objects this will cause ASAN errors. Not all of these functions
+// will enter a nested message loop in practice, but better safe than sorry.
+
+TEST_F(DirectManipulationUnitTest, DestroyDuringOnAnimationStep) {
+  manager_->mock_update_manager()->set_update_callback(
+      ResetDirectManipulationHelperCallback());
+  GetDirectManipulationHelper()->OnAnimationStep(base::TimeTicks::Now());
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
+}
+
+TEST_F(DirectManipulationUnitTest, DestroyDuringUpdateEventHandler) {
+  ASSERT_TRUE(GetDirectManipulationHelper()->HasEventHandlerForTesting());
+  viewport_->set_remove_event_handler_callback(
+      ResetDirectManipulationHelperCallback());
+  GetDirectManipulationHelper()->UpdateEventHandler(nullptr, nullptr);
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
+
+  RecreateDirectManipulationHelper();
+  ASSERT_FALSE(GetDirectManipulationHelper()->HasEventHandlerForTesting());
+  viewport_->set_add_event_handler_callback(
+      ResetDirectManipulationHelperCallback());
+  GetDirectManipulationHelper()->UpdateEventHandler(nullptr, &event_target_);
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
+}
+
+TEST_F(DirectManipulationUnitTest, DestroyDuringSetSizeInPixels) {
+  viewport_->set_stop_callback(ResetDirectManipulationHelperCallback());
+  GetDirectManipulationHelper()->SetSizeInPixels(gfx::Size(2000, 2000));
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
+}
+
+TEST_F(DirectManipulationUnitTest, DestroyDuringOnPointerHitTest) {
+  ASSERT_TRUE(GetDirectManipulationHelper()->HasEventHandlerForTesting());
+  viewport_->set_set_contact_callback(ResetDirectManipulationHelperCallback());
+  GetDirectManipulationHelper()->OnPointerHitTest(0, PT_TOUCHPAD);
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
+}
+
+TEST_F(DirectManipulationUnitTest, DestroyDuringDestroy) {
+  // OnCompositingShuttingDown can call Destroy(), which makes COM calls that
+  // could enter a nested event loop. Those could process WM_DESTROY messages
+  // that delete the DirectManipulationHelper, causing the destructor to
+  // re-enter Destroy().
+  viewport_->set_abandon_callback(ResetDirectManipulationHelperCallback());
+  GetDirectManipulationHelper()->OnCompositingShuttingDown(
+      GetDirectManipulationHelper()->compositor());
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
+}
+
+TEST_F(DirectManipulationUnitTest, DestroyDuringZoomToRect) {
+  // ZoomToRect is triggered from
+  // DirectManipulationEventHandler::OnViewportStatusChanged when there's a
+  // content transform.
+  ContentUpdated(1.1f, 0, 0);
+  viewport_->set_zoom_to_rect_callback(ResetDirectManipulationHelperCallback());
+  ViewportStatusChanged(DIRECTMANIPULATION_READY, DIRECTMANIPULATION_RUNNING);
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
+}
+
+TEST_F(DirectManipulationUnitTest, DestroyDuringGetContentTransform) {
+  // GetContentTransform is triggered from
+  // DirectManipulationEventHandler::OnContentUpdated.
+  content_->set_get_content_transform_callback(
+      ResetDirectManipulationHelperCallback());
+  ContentUpdated(1.1f, 0, 0);
+  EXPECT_EQ(GetDirectManipulationHelper(), nullptr);
 }
 
 }  //  namespace content

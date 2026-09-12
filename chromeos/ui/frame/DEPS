@@ -1,6 +1,8 @@
 include_rules = [
   "+chromeos/strings/grit/chromeos_strings.h",
+  "+components/user_manager",
   "+third_party/skia",
+  "+chromeos/ui",
   "+ui/aura",
   "+ui/base",
   "+ui/chromeos",
@@ -9,8 +11,9 @@ include_rules = [
   "+ui/display",
   "+ui/events",
   "+ui/gfx",
-  "+ui/platform_window",
+  "+ui/menus",
   "+ui/strings/grit/ui_strings.h",
   "+ui/views",
   "+ui/wm/public",
 ]
+

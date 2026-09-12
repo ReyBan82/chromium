@@ -9,6 +9,7 @@
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_view_host.h"
+#include "content/public/common/content_features.h"
 #include "content/public/common/referrer.h"
 
 namespace prerender {
@@ -37,7 +38,7 @@ void NoStatePrefetchProcessorImpl::Create(
     std::unique_ptr<NoStatePrefetchProcessorImplDelegate> delegate) {
   // NoStatePrefetchProcessorImpl is a self-owned object. This deletes itself on
   // the mojo disconnect handler.
-  new NoStatePrefetchProcessorImpl(frame_host->GetProcess()->GetID(),
+  new NoStatePrefetchProcessorImpl(frame_host->GetProcess()->GetDeprecatedID(),
                                    frame_host->GetRoutingID(),
                                    frame_host->GetLastCommittedOrigin(),
                                    std::move(receiver), std::move(delegate));
@@ -45,10 +46,22 @@ void NoStatePrefetchProcessorImpl::Create(
 
 void NoStatePrefetchProcessorImpl::Start(
     blink::mojom::PrerenderAttributesPtr attributes) {
-  if (!initiator_origin_.opaque() &&
-      !content::ChildProcessSecurityPolicy::GetInstance()
-           ->CanAccessDataForOrigin(render_process_id_, initiator_origin_)) {
+  if (!content::ChildProcessSecurityPolicy::GetInstance()->HostsOrigin(
+          render_process_id_, initiator_origin_)) {
     receiver_.ReportBadMessage("NSPPI_INVALID_INITIATOR_ORIGIN");
+    // The above ReportBadMessage() closes |receiver_| but does not trigger its
+    // disconnect handler, so we need to call the handler explicitly
+    // here to do some necessary work.
+    Abandon();
+    return;
+  }
+
+  // The referrer is supplied by the renderer and is forwarded to the prefetch
+  // navigation, so it must be same-origin with the initiator that bound this
+  // receiver.
+  if (!attributes->referrer->url.is_empty() &&
+      !initiator_origin_.IsSameOriginWith(attributes->referrer->url)) {
+    receiver_.ReportBadMessage("NSPPI_INVALID_REFERRER_ORIGIN");
     // The above ReportBadMessage() closes |receiver_| but does not trigger its
     // disconnect handler, so we need to call the handler explicitly
     // here to do some necessary work.
@@ -68,12 +81,29 @@ void NoStatePrefetchProcessorImpl::Start(
 
   auto* render_frame_host =
       content::RenderFrameHost::FromID(render_process_id_, render_frame_id_);
-  if (!render_frame_host)
+  if (!render_frame_host) {
     return;
+  }
+
+  // NoStatePrefetch is not yet compatible with Connection-Allowlist: the
+  // prefetch is driven by a separate NoStatePrefetchContents that does not
+  // carry the initiating document's allowlist, so its requests would escape
+  // enforcement. Until PrerenderUntilScript
+  // (https://chromestatus.com/feature/6324676351623168) replaces
+  // NoStatePrefetch and is made allowlist-aware, do not start it when the
+  // initiating document enforces a Connection-Allowlist. A report-only
+  // allowlist does not block, matching report-only semantics. (An enforced
+  // allowlist is only ever committed when the kConnectionAllowlists feature is
+  // enabled, so no explicit feature check is needed here -- which keeps this
+  // component free of network-service deps.)
+  if (render_frame_host->GetConnectionAllowlists().enforced.has_value()) {
+    return;
+  }
 
   auto* link_manager = GetNoStatePrefetchLinkManager();
-  if (!link_manager)
+  if (!link_manager) {
     return;
+  }
 
   DCHECK(!link_trigger_id_);
   link_trigger_id_ = link_manager->OnStartLinkTrigger(
@@ -83,18 +113,21 @@ void NoStatePrefetchProcessorImpl::Start(
 }
 
 void NoStatePrefetchProcessorImpl::Cancel() {
-  if (!link_trigger_id_)
+  if (!link_trigger_id_) {
     return;
+  }
   auto* link_manager = GetNoStatePrefetchLinkManager();
-  if (link_manager)
+  if (link_manager) {
     link_manager->OnCancelLinkTrigger(*link_trigger_id_);
+  }
 }
 
 void NoStatePrefetchProcessorImpl::Abandon() {
   if (link_trigger_id_) {
     auto* link_manager = GetNoStatePrefetchLinkManager();
-    if (link_manager)
+    if (link_manager) {
       link_manager->OnAbandonLinkTrigger(*link_trigger_id_);
+    }
   }
   delete this;
 }
@@ -103,8 +136,9 @@ NoStatePrefetchLinkManager*
 NoStatePrefetchProcessorImpl::GetNoStatePrefetchLinkManager() {
   auto* render_frame_host =
       content::RenderFrameHost::FromID(render_process_id_, render_frame_id_);
-  if (!render_frame_host)
+  if (!render_frame_host) {
     return nullptr;
+  }
   return delegate_->GetNoStatePrefetchLinkManager(
       render_frame_host->GetProcess()->GetBrowserContext());
 }

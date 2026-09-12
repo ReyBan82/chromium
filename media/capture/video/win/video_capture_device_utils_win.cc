@@ -8,6 +8,7 @@
 #include <iostream>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/win/win_util.h"
 
 namespace media {
@@ -87,7 +88,7 @@ int GetCameraRotation(VideoFacingMode facing) {
   }
 
   // When display is only on external monitors, the auto-rotation state still
-  // may be ENALBED on the target device. In that case, we shouldn't query the
+  // may be ENABLED on the target device. In that case, we shouldn't query the
   // display orientation and the built-in camera will be treated as an external
   // one.
   DISPLAY_DEVICE internal_display_device;
@@ -100,7 +101,7 @@ int GetCameraRotation(VideoFacingMode facing) {
   DCHECK_NE(facing, VideoFacingMode::MEDIA_VIDEO_FACING_NONE);
 
   DEVMODE mode;
-  ::ZeroMemory(&mode, sizeof(mode));
+  UNSAFE_TODO(::ZeroMemory(&mode, sizeof(mode)));
   mode.dmSize = sizeof(mode);
   mode.dmDriverExtra = 0;
   if (::EnumDisplaySettings(internal_display_device.DeviceName,
@@ -159,7 +160,7 @@ bool IsAutoRotationEnabled() {
 
   if (get_rotation_state) {
     AR_STATE auto_rotation_state;
-    ::ZeroMemory(&auto_rotation_state, sizeof(AR_STATE));
+    UNSAFE_TODO(::ZeroMemory(&auto_rotation_state, sizeof(AR_STATE)));
 
     if (get_rotation_state(&auto_rotation_state)) {
       // AR_ENABLED is defined as '0x0', while AR_STATE enumeration is defined
@@ -251,15 +252,17 @@ HRESULT CheckPathInfoForInternal(const PCWSTR device_name) {
       source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
       source_name.header.size = sizeof(source_name);
       source_name.header.adapterId =
-          path_info_array[path_index].sourceInfo.adapterId;
-      source_name.header.id = path_info_array[path_index].sourceInfo.id;
+          UNSAFE_TODO(path_info_array[path_index]).sourceInfo.adapterId;
+      source_name.header.id =
+          UNSAFE_TODO(path_info_array[path_index]).sourceInfo.id;
 
       hr =
           HRESULT_FROM_WIN32(::DisplayConfigGetDeviceInfo(&source_name.header));
       if (SUCCEEDED(hr)) {
-        if (wcscmp(device_name, source_name.viewGdiDeviceName) == 0 &&
-            IsInternalVideoOutput(
-                path_info_array[path_index].targetInfo.outputTechnology)) {
+        if (UNSAFE_TODO(wcscmp(device_name, source_name.viewGdiDeviceName)) ==
+                0 &&
+            IsInternalVideoOutput(UNSAFE_TODO(path_info_array[path_index])
+                                      .targetInfo.outputTechnology)) {
           desired_path_index = path_index;
           break;
         }

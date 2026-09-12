@@ -7,28 +7,28 @@
 
 #include <ostream>
 #include <string>
+#include <string_view>
 
 namespace extensions {
 
 // A struct to describe a non-fatal issue discovered in the installation of an
 // extension.
 struct InstallWarning {
-  explicit InstallWarning(const std::string& message);
-  InstallWarning(const std::string& message,
-                 const std::string& key);
-  InstallWarning(const std::string& message,
-                 const std::string& key,
-                 const std::string& specific);
+  explicit InstallWarning(std::string_view message);
+  InstallWarning(std::string_view message, std::string_view key);
+  InstallWarning(std::string_view message,
+                 std::string_view key,
+                 std::string_view specific);
   InstallWarning(const InstallWarning&) = delete;
   InstallWarning(InstallWarning&& other);
   InstallWarning& operator=(InstallWarning&& other);
   ~InstallWarning();
 
   bool operator==(const InstallWarning& other) const {
-    // We don't have to look at |key| or |specific| here, because they are each
+    // We don't have to look at `key` or `specific` here, because they are each
     // used in the the message itself.
     // For example, a full message would be "Permission 'foo' is unknown or URL
-    // pattern is malformed." |key| here is "permissions", and |specific| is
+    // pattern is malformed." `key` here is "permissions", and `specific` is
     // "foo", but these are redundant with the message.
     return message == other.message;
   }

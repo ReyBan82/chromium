@@ -5,24 +5,31 @@
 #ifndef NET_WEBSOCKETS_WEBSOCKET_CHANNEL_H_
 #define NET_WEBSOCKETS_WEBSOCKET_CHANNEL_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/containers/queue.h"
+#include "base/containers/span.h"
 #include "base/functional/callback.h"
 #include "base/i18n/streaming_utf8_validator.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
+#include "base/values.h"
 #include "net/base/net_export.h"
+#include "net/base/network_handle.h"
+#include "net/log/net_log_capture_mode.h"
+#include "net/log/net_log_with_source.h"
+#include "net/storage_access_api/status.h"
 #include "net/websockets/websocket_event_interface.h"
 #include "net/websockets/websocket_frame.h"
 #include "net/websockets/websocket_stream.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace url {
@@ -31,17 +38,20 @@ class Origin;
 
 namespace net {
 
+class AuthChallengeInfo;
+class AuthCredentials;
 class HttpRequestHeaders;
+class HttpResponseHeaders;
 class IOBuffer;
 class IPEndPoint;
-class NetLogWithSource;
 class IsolationInfo;
-class SiteForCookies;
+class NetLogWithSource;
+class SSLInfo;
 class URLRequest;
 class URLRequestContext;
+struct NetworkTrafficAnnotationTag;
 struct WebSocketHandshakeRequestInfo;
 struct WebSocketHandshakeResponseInfo;
-struct NetworkTrafficAnnotationTag;
 
 // Transport-independent implementation of WebSockets. Implements protocol
 // semantics that do not depend on the underlying transport. Provides the
@@ -56,13 +66,15 @@ class NET_EXPORT WebSocketChannel {
       const GURL&,
       const std::vector<std::string>&,
       const url::Origin&,
-      const SiteForCookies&,
+      StorageAccessApiStatus,
       const IsolationInfo&,
       const HttpRequestHeaders&,
       URLRequestContext*,
       const NetLogWithSource&,
+      WebSocketPriorityHint,
       NetworkTrafficAnnotationTag,
-      std::unique_ptr<WebSocketStream::ConnectDelegate>)>
+      std::unique_ptr<WebSocketStream::ConnectDelegate>,
+      handles::NetworkHandle)>
       WebSocketStreamRequestCreationCallback;
 
   // Methods which return a value of type ChannelState may delete |this|. If the
@@ -86,22 +98,22 @@ class NET_EXPORT WebSocketChannel {
       const GURL& socket_url,
       const std::vector<std::string>& requested_protocols,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
+      StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
-      NetworkTrafficAnnotationTag traffic_annotation);
+      WebSocketPriorityHint priority_hint,
+      NetworkTrafficAnnotationTag traffic_annotation,
+      handles::NetworkHandle target_network);
 
-  // Sends a data frame to the remote side. It is the responsibility of the
-  // caller to ensure that they have sufficient send quota to send this data,
-  // otherwise the connection will be closed without sending. |fin| indicates
-  // the last frame in a message, equivalent to "FIN" as specified in section
-  // 5.2 of RFC6455. |buffer->data()| is the "Payload Data". If |op_code| is
-  // kOpCodeText, or it is kOpCodeContinuation and the type the message is
-  // Text, then |buffer->data()| must be a chunk of a valid UTF-8 message,
-  // however there is no requirement for |buffer->data()| to be split on
-  // character boundaries. Calling SendFrame may result in synchronous calls to
-  // |event_interface_| which may result in this object being deleted. In that
-  // case, the return value will be CHANNEL_DELETED.
+  // Sends a data frame to the remote side. |fin| indicates the last frame in a
+  // message, equivalent to "FIN" as specified in section 5.2 of RFC6455.
+  // |buffer->data()| is the "Payload Data". If |op_code| is kOpCodeText, or it
+  // is kOpCodeContinuation and the type the message is Text, then
+  // |buffer->data()| must be a chunk of a valid UTF-8 message, however there is
+  // no requirement for |buffer->data()| to be split on character boundaries.
+  // Calling SendFrame may result in synchronous calls to |event_interface_|
+  // which may result in this object being deleted. In that case, the return
+  // value will be CHANNEL_DELETED.
   [[nodiscard]] ChannelState SendFrame(bool fin,
                                        WebSocketFrameHeader::OpCode op_code,
                                        scoped_refptr<IOBuffer> buffer,
@@ -130,18 +142,20 @@ class NET_EXPORT WebSocketChannel {
       const GURL& socket_url,
       const std::vector<std::string>& requested_protocols,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
+      StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
+      WebSocketPriorityHint priority_hint,
       NetworkTrafficAnnotationTag traffic_annotation,
-      WebSocketStreamRequestCreationCallback callback);
+      WebSocketStreamRequestCreationCallback callback,
+      handles::NetworkHandle target_network);
 
-  // The default timout for the closing handshake is a sensible value (see
+  // The default timeout for the closing handshake is a sensible value (see
   // kClosingHandshakeTimeoutSeconds in websocket_channel.cc). However, we can
   // set it to a very small value for testing purposes.
   void SetClosingHandshakeTimeoutForTesting(base::TimeDelta delay);
 
-  // The default timout for the underlying connection close is a sensible value
+  // The default timeout for the underlying connection close is a sensible value
   // (see kUnderlyingConnectionCloseTimeoutSeconds in websocket_channel.cc).
   // However, we can set it to a very small value for testing purposes.
   void SetUnderlyingConnectionCloseTimeoutForTesting(base::TimeDelta delay);
@@ -150,6 +164,24 @@ class NET_EXPORT WebSocketChannel {
   // This method is public for testing.
   void OnStartOpeningHandshake(
       std::unique_ptr<WebSocketHandshakeRequestInfo> request);
+
+  // Returns the creation time of this channel (for NetLog tracking).
+  // Note: This timestamp is captured when the WebSocketChannel is constructed,
+  // which occurs after any throttling delay imposed by WebSocket::AddChannel().
+  // Therefore, it reflects when the channel was actually created, not when the
+  // connection was first requested by the renderer.
+  base::TimeTicks creation_time() const { return creation_time_; }
+
+  // Returns the WebSocket URL (for NetLog tracking).
+  const GURL& GetURL() const { return socket_url_; }
+
+  // Returns the channel's NetLog source (for NetLog tracking).
+  const NetLogWithSource& net_log() const { return net_log_; }
+
+  // Returns a partial representation of the channel's state as a value,
+  // for debugging. Modeled after URLRequest::GetStateAsValue().
+  [[nodiscard]] base::DictValue GetStateAsValue(
+      NetLogCaptureMode capture_mode) const;
 
  private:
   // The object passes through a linear progression of states from
@@ -162,12 +194,15 @@ class NET_EXPORT WebSocketChannel {
     SEND_CLOSED,  // A Close frame has been sent but not received.
     RECV_CLOSED,  // Used briefly between receiving a Close frame and sending
                   // the response. Once the response is sent, the state changes
-                  // to CLOSED.
+                  // to CLOSE_WAIT.
     CLOSE_WAIT,   // The Closing Handshake has completed, but the remote server
                   // has not yet closed the connection.
     CLOSED,       // The Closing Handshake has completed and the connection
                   // has been closed; or the connection is failed.
   };
+
+  // Returns the name of the given state for NetLog reporting.
+  [[nodiscard]] static const char* StateToString(State state);
 
   // Implementation of WebSocketStream::ConnectDelegate for
   // WebSocketChannel. WebSocketChannel does not inherit from
@@ -183,14 +218,22 @@ class NET_EXPORT WebSocketChannel {
       const GURL& socket_url,
       const std::vector<std::string>& requested_protocols,
       const url::Origin& origin,
-      const SiteForCookies& site_for_cookies,
+      StorageAccessApiStatus storage_access_api_status,
       const IsolationInfo& isolation_info,
       const HttpRequestHeaders& additional_headers,
+      WebSocketPriorityHint priority_hint,
       NetworkTrafficAnnotationTag traffic_annotation,
-      WebSocketStreamRequestCreationCallback callback);
+      WebSocketStreamRequestCreationCallback callback,
+      handles::NetworkHandle target_network);
 
   // Called when a URLRequest is created for handshaking.
   void OnCreateURLRequest(URLRequest* request);
+
+  // Called when a URLRequest's OnConnected is called. Forwards the call to the
+  // |event_interface_|
+  int OnURLRequestConnected(URLRequest* request,
+                            const TransportInfo& info,
+                            CompletionOnceCallback callback);
 
   // Success callback from WebSocketStream::CreateAndConnectStream(). Reports
   // success to the event interface. May delete |this|.
@@ -202,7 +245,7 @@ class NET_EXPORT WebSocketChannel {
   // failure to the event interface. May delete |this|.
   void OnConnectFailure(const std::string& message,
                         int net_error,
-                        absl::optional<int> response_code);
+                        std::optional<int> response_code);
 
   // SSL certificate error callback from
   // WebSocketStream::CreateAndConnectStream(). Forwards the request to the
@@ -220,9 +263,10 @@ class NET_EXPORT WebSocketChannel {
                      scoped_refptr<HttpResponseHeaders> response_headers,
                      const IPEndPoint& remote_endpoint,
                      base::OnceCallback<void(const AuthCredentials*)> callback,
-                     absl::optional<AuthCredentials>* credentials);
+                     std::optional<AuthCredentials>* credentials);
 
-  // Sets |state_| to |new_state| and updates UMA if necessary.
+  // Sets |state_| to |new_state| and logs a WEBSOCKET_STATE_CHANGED NetLog
+  // event for the transition.
   void SetState(State new_state);
 
   // Returns true if state_ is SEND_CLOSED, CLOSE_WAIT or CLOSED.
@@ -260,9 +304,10 @@ class NET_EXPORT WebSocketChannel {
       bool final,
       base::span<const char> payload);
 
-  // Forwards a received data frame to the renderer, if connected. If
-  // |expecting_continuation| is not equal to |expecting_to_read_continuation_|,
-  // will fail the channel. Also checks the UTF-8 validity of text frames.
+  // Forwards a received data frame to the event interface, if connected.
+  // Fails the channel if continuation frame state is inconsistent with
+  // |expecting_to_handle_continuation_|. Also checks the UTF-8 validity of
+  // text frames.
   [[nodiscard]] ChannelState HandleDataFrame(
       WebSocketFrameHeader::OpCode opcode,
       bool final,
@@ -287,13 +332,10 @@ class NET_EXPORT WebSocketChannel {
       uint64_t buffer_size);
 
   // Performs the "Fail the WebSocket Connection" operation as defined in
-  // RFC6455. A NotifyFailure message is sent to the renderer with |message|.
-  // The renderer will log the message to the console but not expose it to
-  // Javascript. Javascript will see a Close code of AbnormalClosure (1006) with
-  // an empty reason string. If state_ is CONNECTED then a Close message is sent
-  // to the remote host containing the supplied |code| and |reason|. If the
-  // stream is open, closes it and sets state_ to CLOSED. This function deletes
-  // |this|.
+  // RFC6455. Fails the channel and notifies the event interface with |message|.
+  // If state_ is CONNECTED then a Close frame may be sent to the remote host
+  // containing the supplied |code| and |reason|. If the stream is open, closes
+  // it and sets state_ to CLOSED. This function deletes |this|.
   void FailChannel(const std::string& message,
                    uint16_t code,
                    const std::string& reason);
@@ -306,11 +348,11 @@ class NET_EXPORT WebSocketChannel {
                                        const std::string& reason);
 
   // Parses a Close frame payload. If no status code is supplied, then |code| is
-  // set to 1005 (No status code) with empty |reason|. If the reason text is not
-  // valid UTF-8, then |reason| is set to an empty string. If the payload size
-  // is 1, or the supplied code is not permitted to be sent over the network,
-  // then false is returned and |message| is set to an appropriate console
-  // message.
+  // set to 1005 (kWebSocketErrorNoStatusReceived) with empty |reason|. If the
+  // reason text is not valid UTF-8, or the payload size is 1, or the supplied
+  // code is not permitted to be sent over the network, then false is returned,
+  // |code| is set to kWebSocketErrorProtocolError, and |message| is set to an
+  // appropriate console message.
   bool ParseClose(base::span<const char> payload,
                   uint16_t* code,
                   std::string* reason,
@@ -340,6 +382,7 @@ class NET_EXPORT WebSocketChannel {
   // A data structure containing a vector of frames to be sent and the total
   // number of bytes contained in the vector.
   class SendBuffer;
+
   // Data that is currently pending write, or NULL if no write is pending.
   std::unique_ptr<SendBuffer> data_being_sent_;
   // Data that is queued up to write after the current write completes.
@@ -381,6 +424,19 @@ class NET_EXPORT WebSocketChannel {
   // UTF-8 validator for incoming Text messages.
   base::StreamingUtf8Validator incoming_utf8_validator_;
   bool receiving_text_message_ = false;
+
+  // Timestamp when this channel was created (for NetLog tracking).
+  // This is captured at WebSocketChannel construction time, which occurs after
+  // any throttling delay (see WebSocket::AddChannel()). Thus, it represents
+  // when the channel was de-throttled and actually created, not when the
+  // initial connection request was made.
+  base::TimeTicks creation_time_;
+
+  // NetLog source for this channel. Emits WEBSOCKET_ALIVE BEGIN on
+  // construction and END on destruction, and WEBSOCKET_STATE_CHANGED events
+  // during state transitions. Synthetic WEBSOCKET_ALIVE events are also
+  // replayed for pre-existing connections when NetLog capture starts.
+  NetLogWithSource net_log_;
 
   // True if we are in the middle of receiving a message.
   bool expecting_to_handle_continuation_ = false;

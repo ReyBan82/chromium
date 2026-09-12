@@ -19,6 +19,7 @@
 
 #include "gtest/gtest.h"
 #include "absl/base/attributes.h"
+#include "absl/base/config.h"
 #include "absl/base/const_init.h"
 #include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
@@ -39,25 +40,25 @@ bool done_blocking ABSL_GUARDED_BY(counters_mu) = false;
 
 // Function to be called from absl::call_once.  Waits for a notification.
 void WaitAndIncrement() {
-  counters_mu.Lock();
+  counters_mu.lock();
   ++call_once_invoke_count;
-  counters_mu.Unlock();
+  counters_mu.unlock();
 
   counters_mu.LockWhen(Condition(&done_blocking));
   ++call_once_finished_count;
-  counters_mu.Unlock();
+  counters_mu.unlock();
 }
 
 void ThreadBody() {
-  counters_mu.Lock();
+  counters_mu.lock();
   ++running_thread_count;
-  counters_mu.Unlock();
+  counters_mu.unlock();
 
   absl::call_once(once, WaitAndIncrement);
 
-  counters_mu.Lock();
+  counters_mu.lock();
   ++call_once_return_count;
-  counters_mu.Unlock();
+  counters_mu.unlock();
 }
 
 // Returns true if all threads are set up for the test.
@@ -89,17 +90,17 @@ TEST(CallOnceTest, ExecutionCount) {
   // Allow WaitAndIncrement to finish executing.  Once it does, the other
   // call_once waiters will be unblocked.
   done_blocking = true;
-  counters_mu.Unlock();
+  counters_mu.unlock();
 
   for (std::thread& thread : threads) {
     thread.join();
   }
 
-  counters_mu.Lock();
+  counters_mu.lock();
   EXPECT_EQ(call_once_invoke_count, 1);
   EXPECT_EQ(call_once_finished_count, 1);
   EXPECT_EQ(call_once_return_count, 10);
-  counters_mu.Unlock();
+  counters_mu.unlock();
 }
 
 }  // namespace

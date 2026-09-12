@@ -26,7 +26,6 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_HTML_FORMATTING_ELEMENT_LIST_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_PARSER_HTML_FORMATTING_ELEMENT_LIST_H_
 
-#include "base/memory/scoped_refptr.h"
 #include "third_party/blink/renderer/core/html/parser/html_stack_item.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -60,7 +59,7 @@ class HTMLFormattingElementList {
 
     bool IsMarker() const { return !item_; }
 
-    HTMLStackItem* StackItem() const { return item_; }
+    HTMLStackItem* StackItem() const { return item_.Get(); }
     Element* GetElement() const {
       // The fact that !item_ == IsMarker() is an implementation detail callers
       // should check IsMarker() before calling GetElement().
@@ -69,12 +68,9 @@ class HTMLFormattingElementList {
     }
     void ReplaceElement(HTMLStackItem* item) { item_ = item; }
 
-    // Needed for use with Vector.  These are super-hot and must be inline.
+    // Needed for use with Vector.  This is super-hot and must be inline.
     bool operator==(Element* element) const {
       return !item_ ? !element : item_->GetElement() == element;
-    }
-    bool operator!=(Element* element) const {
-      return !item_ ? !!element : item_->GetElement() != element;
     }
 
     void Trace(Visitor* visitor) const { visitor->Trace(item_); }
@@ -87,19 +83,19 @@ class HTMLFormattingElementList {
     STACK_ALLOCATED();
 
    public:
-    explicit Bookmark(Entry* entry) : has_been_moved_(false), mark_(entry) {}
+    explicit Bookmark(Element* element) : mark_(element) {}
 
-    void MoveToAfter(Entry* before) {
+    void MoveToAfter(Element* before) {
       has_been_moved_ = true;
       mark_ = before;
     }
 
     bool HasBeenMoved() const { return has_been_moved_; }
-    Entry* Mark() const { return mark_; }
+    Element* Mark() const { return mark_; }
 
    private:
-    bool has_been_moved_;
-    Entry* mark_;
+    bool has_been_moved_ = false;
+    Element* mark_ = nullptr;
   };
 
   bool IsEmpty() const { return !size(); }
@@ -129,8 +125,6 @@ class HTMLFormattingElementList {
 #endif
 
  private:
-  Entry* First() { return &at(0); }
-
   // http://www.whatwg.org/specs/web-apps/current-work/multipage/parsing.html#list-of-active-formatting-elements
   // These functions enforce the "Noah's Ark" condition, which removes redundant
   // mis-nested elements.

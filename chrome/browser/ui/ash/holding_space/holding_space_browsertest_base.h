@@ -6,7 +6,6 @@
 #define CHROME_BROWSER_UI_ASH_HOLDING_SPACE_HOLDING_SPACE_BROWSERTEST_BASE_H_
 
 #include <memory>
-#include <vector>
 
 #include "ash/public/cpp/holding_space/holding_space_item.h"
 #include "ash/public/cpp/holding_space/holding_space_progress.h"
@@ -34,6 +33,8 @@ class HoldingSpaceBrowserTestBase : public SystemWebAppBrowserTestBase {
   // InProcessBrowserTest:
   void SetUpInProcessBrowserTestFixture() override;
   void SetUpOnMainThread() override;
+
+  void TearDownOnMainThread() override;
 
   // Returns the root window that newly created windows should be added to.
   static aura::Window* GetRootWindowForNewWindows();
@@ -71,10 +72,7 @@ class HoldingSpaceBrowserTestBase : public SystemWebAppBrowserTestBase {
   // extension. If extension is omitted, the created file will have an extension
   // of `.txt`. Returns the file path of the created file.
   base::FilePath CreateFile(
-      const absl::optional<std::string>& extension = absl::nullopt);
-
-  // Requests lock screen, waiting to return until session state is locked.
-  void RequestAndAwaitLockScreen();
+      const std::optional<std::string>& extension = std::nullopt);
 
   // Returns the holding space test API.
   HoldingSpaceTestApi& test_api() { return *test_api_; }
@@ -82,6 +80,15 @@ class HoldingSpaceBrowserTestBase : public SystemWebAppBrowserTestBase {
  private:
   base::test::ScopedFeatureList scoped_feature_list_;
   std::unique_ptr<HoldingSpaceTestApi> test_api_;
+};
+
+// HoldingSpaceUiBrowserTestBase -----------------------------------------------
+
+// Base class for holding space UI browser tests.
+class HoldingSpaceUiBrowserTestBase : public HoldingSpaceBrowserTestBase {
+ protected:
+  // HoldingSpaceBrowserTestBase:
+  void SetUpOnMainThread() override;
 };
 
 }  // namespace ash

@@ -12,3 +12,5 @@ isolated world error event listener: Uncaught Error: Error in isolated world loa
 Error object present!
 isolated world window.onerror: Uncaught Error: Error in isolated world setTimeout callback. at window-onerror-isolatedworld-02.html, Line: 36, Column: 21
 Error object present!
+isolated world error event listener: Uncaught Error: Error in isolated world setTimeout callback. at window-onerror-isolatedworld-02.html:, Line: 36
+Error object present!

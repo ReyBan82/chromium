@@ -14,9 +14,9 @@
 #include <string>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/memory/raw_ptr.h"
 #include "base/test/task_environment.h"
-#include "components/viz/common/resources/resource_format.h"
 #include "gpu/command_buffer/client/client_test_helper.h"
 #include "gpu/command_buffer/common/raster_cmd_format.h"
 #include "gpu/command_buffer/service/decoder_client.h"
@@ -50,7 +50,6 @@ class RasterDecoderTestBase : public ::testing::TestWithParam<bool>,
   void OnFenceSyncRelease(uint64_t release) override;
   void OnDescheduleUntilFinished() override;
   void OnRescheduleAfterFinished() override;
-  void OnSwapBuffers(uint64_t swap_id, uint32_t flags) override;
   void ScheduleGrContextCleanup() override {}
   void HandleReturnData(base::span<const uint8_t> data) override {}
 
@@ -74,7 +73,8 @@ class RasterDecoderTestBase : public ::testing::TestWithParam<bool>,
   }
 
   void ClearSharedMemory() {
-    memset(shared_memory_base_, kInitialMemoryValue, kSharedBufferSize);
+    UNSAFE_TODO(
+        memset(shared_memory_base_, kInitialMemoryValue, kSharedBufferSize));
   }
 
   void SetUp() override;
@@ -118,10 +118,10 @@ class RasterDecoderTestBase : public ::testing::TestWithParam<bool>,
     InitState();
     ~InitState();
 
-    std::vector<std::string> extensions = {"GL_ARB_sync"};
+    std::vector<std::string> extensions = {};
     bool lose_context_when_out_of_memory = false;
     gpu::GpuDriverBugWorkarounds workarounds;
-    std::string gl_version = "2.1";
+    std::string gl_version = "OpenGL ES 3.0";
     ContextType context_type = CONTEXT_TYPE_OPENGLES2;
   };
 

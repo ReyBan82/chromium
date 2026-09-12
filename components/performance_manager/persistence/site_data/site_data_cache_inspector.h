@@ -7,11 +7,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/functional/callback.h"
 #include "components/performance_manager/persistence/site_data/site_data.pb.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/origin.h"
 
 namespace performance_manager {
@@ -34,11 +35,11 @@ class SiteDataCacheInspector {
   // the |on_have_data| callback once the data has been collected, or once it's
   // determined that the data can't be retrieved.
   // On callback |num_rows| is the number of rows in the database, or -1 if
-  // the number can't be determined. |on_disk_size_kb| is the on-disk size of
-  // the database, or -1 if the on-disk size can't be determined.
+  // the number can't be determined. |on_disk_size| is the on-disk size of
+  // the database, or nullopt if the on-disk size can't be determined.
   using DataStoreSizeCallback =
-      base::OnceCallback<void(absl::optional<int64_t> num_rows,
-                              absl::optional<int64_t> on_disk_size_kb)>;
+      base::OnceCallback<void(std::optional<int64_t> num_rows,
+                              std::optional<base::ByteSize> on_disk_size)>;
   virtual void GetDataStoreSize(DataStoreSizeCallback on_have_data) = 0;
 
   // Retrieves the in-memory data for a given origin.

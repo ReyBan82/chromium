@@ -16,7 +16,7 @@
 #include "base/compiler_specific.h"
 #include "base/observer_list.h"
 #include "chromeos/ash/components/dbus/debug_daemon/debug_daemon_client.h"
-#include "chromeos/dbus/common/dbus_method_call_status.h"
+#include "chromeos/dbus/common/dbus_callback.h"
 
 namespace ash {
 
@@ -40,25 +40,6 @@ class COMPONENT_EXPORT(DEBUG_DAEMON) FakeDebugDaemonClient
                     chromeos::VoidDBusMethodCallback callback) override;
   std::string GetTracingAgentName() override;
   std::string GetTraceEventLabel() override;
-  void SetSwapParameter(
-      const std::string& parameter,
-      int32_t value,
-      chromeos::DBusMethodCallback<std::string> callback) override;
-  void SwapZramEnableWriteback(
-      uint32_t size_mb,
-      chromeos::DBusMethodCallback<std::string> callback) override;
-
-  void SwapZramSetWritebackLimit(
-      uint32_t limit_pages,
-      chromeos::DBusMethodCallback<std::string> callback) override;
-
-  void SwapZramMarkIdle(
-      uint32_t age_seconds,
-      chromeos::DBusMethodCallback<std::string> callback) override;
-
-  void InitiateSwapZramWriteback(
-      debugd::ZramWritebackMode mode,
-      chromeos::DBusMethodCallback<std::string> callback) override;
   void StartAgentTracing(const base::trace_event::TraceConfig& trace_config,
                          StartAgentTracingCallback callback) override;
   void StopAgentTracing(StopAgentTracingCallback callback) override;
@@ -80,14 +61,15 @@ class COMPONENT_EXPORT(DEBUG_DAEMON) FakeDebugDaemonClient
                      chromeos::DBusMethodCallback<uint64_t> callback) override;
   void StopPerf(uint64_t session_id,
                 chromeos::VoidDBusMethodCallback callback) override;
-  void GetFeedbackLogsV2(
+  void GetFeedbackLogs(
       const cryptohome::AccountIdentifier& id,
       const std::vector<debugd::FeedbackLogType>& requested_logs,
       GetLogsCallback callback) override;
-  void GetFeedbackLogsV3(
+  void GetFeedbackBinaryLogs(
       const cryptohome::AccountIdentifier& id,
-      const std::vector<debugd::FeedbackLogType>& requested_logs,
-      GetLogsCallback callback) override;
+      const std::map<debugd::FeedbackBinaryLogType, base::ScopedFD>&
+          log_type_fds,
+      chromeos::VoidDBusMethodCallback callback) override;
   void BackupArcBugReport(const cryptohome::AccountIdentifier& id,
                           chromeos::VoidDBusMethodCallback callback) override;
   void GetAllLogs(GetLogsCallback callback) override;
@@ -107,24 +89,6 @@ class COMPONENT_EXPORT(DEBUG_DAEMON) FakeDebugDaemonClient
       chromeos::WaitForServiceToBeAvailableCallback callback) override;
   void SetOomScoreAdj(const std::map<pid_t, int32_t>& pid_to_oom_score_adj,
                       SetOomScoreAdjCallback callback) override;
-  void CupsAddManuallyConfiguredPrinter(
-      const std::string& name,
-      const std::string& uri,
-      const std::string& ppd_contents,
-      CupsAddPrinterCallback callback) override;
-  void CupsAddAutoConfiguredPrinter(const std::string& name,
-                                    const std::string& uri,
-                                    CupsAddPrinterCallback callback) override;
-  void CupsRemovePrinter(const std::string& name,
-                         CupsRemovePrinterCallback callback,
-                         base::OnceClosure error_callback) override;
-  void CupsRetrievePrinterPpd(const std::string& name,
-                              CupsRetrievePrinterPpdCallback callback,
-                              base::OnceClosure error_callback) override;
-  void StartPluginVmDispatcher(const std::string& owner_id,
-                               const std::string& lang,
-                               PluginVmDispatcherCallback callback) override;
-  void StopPluginVmDispatcher(PluginVmDispatcherCallback callback) override;
   void SetRlzPingSent(SetRlzPingSentCallback callback) override;
   void SetSchedulerConfigurationV2(
       const std::string& config_name,
@@ -142,6 +106,9 @@ class COMPONENT_EXPORT(DEBUG_DAEMON) FakeDebugDaemonClient
   void PacketCaptureStopSignalReceived(dbus::Signal* signal) override;
   void StopPacketCapture(const std::string& handle) override;
 
+  void BluetoothStartBtsnoop(BluetoothBtsnoopCallback callback) override;
+  void BluetoothStopBtsnoop(int fd, BluetoothBtsnoopCallback callback) override;
+
   // Sets debugging features mask for testing.
   virtual void SetDebuggingFeaturesStatus(int features_mask);
 
@@ -152,8 +119,8 @@ class COMPONENT_EXPORT(DEBUG_DAEMON) FakeDebugDaemonClient
   // Sets routes that will be returned by GetRoutes() for testing.
   void SetRoutesForTesting(std::vector<std::string> routes);
 
-  // Sets PPD data that will be returned by CupsRetrievePrinterPpd for testing.
-  void SetPpdDataForTesting(const std::vector<uint8_t>& data);
+  // Configures logs to be returned from GetLog()/GetAllLogs().
+  void SetLog(std::string_view log_name, std::optional<std::string> log_data);
 
   const std::string& scheduler_configuration_name() const {
     return scheduler_configuration_name_;
@@ -167,12 +134,13 @@ class COMPONENT_EXPORT(DEBUG_DAEMON) FakeDebugDaemonClient
   bool service_is_available_;
   std::vector<chromeos::WaitForServiceToBeAvailableCallback>
       pending_wait_for_service_to_be_available_callbacks_;
-  std::set<std::string> printers_;
+  // Stores printer's name as a key and PPD content as a value.
+  std::map<std::string, std::string> printers_;
+  std::map<std::string, std::string, std::less<>> logs_;
   std::vector<std::string> routes_;
   std::string scheduler_configuration_name_;
   std::set<std::string> u2f_flags_;
   base::ObserverList<Observer> observers_;
-  std::vector<uint8_t> ppd_data_;
 };
 
 }  // namespace ash

@@ -10,7 +10,6 @@
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/test/browser_test.h"
@@ -20,10 +19,11 @@
 class SpellCheckHostChromeImplMacBrowserTest : public InProcessBrowserTest {
  public:
   void SetUpOnMainThread() override {
-    content::BrowserContext* context = browser()->profile();
+    content::BrowserContext* context = browser()->GetProfile();
     renderer_ = std::make_unique<content::MockRenderProcessHost>(context);
     SpellCheckHostChromeImpl::Create(
-        renderer_->GetID(), spell_check_host_.BindNewPipeAndPassReceiver());
+        renderer_->GetDeprecatedID(),
+        spell_check_host_.BindNewPipeAndPassReceiver());
   }
 
   void TearDownOnMainThread() override { renderer_.reset(); }
@@ -56,7 +56,7 @@ class SpellCheckHostChromeImplMacBrowserTest : public InProcessBrowserTest {
 IN_PROC_BROWSER_TEST_F(SpellCheckHostChromeImplMacBrowserTest,
                        SpellCheckReturnMessage) {
   spell_check_host_->RequestTextCheck(
-      u"zz.", 123,
+      u"zz.", /*spelling_markers=*/{},
       base::BindOnce(&SpellCheckHostChromeImplMacBrowserTest::LogResult,
                      base::Unretained(this)));
   RunUntilResultReceived();
@@ -64,5 +64,5 @@ IN_PROC_BROWSER_TEST_F(SpellCheckHostChromeImplMacBrowserTest,
   ASSERT_EQ(1U, result_.size());
   EXPECT_EQ(result_[0].location, 0);
   EXPECT_EQ(result_[0].length, 2);
-  EXPECT_EQ(result_[0].decoration, SpellCheckResult::SPELLING);
+  EXPECT_EQ(result_[0].decoration, spellcheck::Decoration::SPELLING);
 }

@@ -5,6 +5,7 @@
 #include "third_party/blink/renderer/modules/media_controls/elements/media_control_elements_helper.h"
 
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/html/media/html_media_element.h"
 #include "third_party/blink/renderer/core/html/media/html_video_element.h"
@@ -36,7 +37,7 @@ TEST_F(MediaControlElementsHelperTest, DipSizeUnaffectedByPageZoom) {
   gfx::Size test_size(123, 456);
   EXPECT_EQ(test_size, MediaControlElementsHelper::GetSizeOrDefault(
                            GetElement(), test_size));
-  GetDocument().GetFrame()->SetPageZoomFactor(2.f);
+  GetDocument().GetFrame()->SetLayoutZoomFactor(2.f);
   EXPECT_EQ(test_size, MediaControlElementsHelper::GetSizeOrDefault(
                            GetElement(), test_size));
 }
@@ -50,7 +51,7 @@ TEST_F(MediaControlElementsHelperTest, LayoutSizeAffectedByPageZoom) {
   gfx::Size real_size =
       MediaControlElementsHelper::GetSizeOrDefault(GetElement(), test_size);
   EXPECT_NE(real_size, test_size);
-  GetDocument().GetFrame()->SetPageZoomFactor(2.f);
+  GetDocument().GetFrame()->SetLayoutZoomFactor(2.f);
   gfx::Size zoom_size =
       MediaControlElementsHelper::GetSizeOrDefault(GetElement(), test_size);
   EXPECT_LT(zoom_size.width(), real_size.width());

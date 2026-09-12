@@ -26,12 +26,23 @@
 
 #include "third_party/blink/renderer/core/dom/flat_tree_traversal.h"
 
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/flat_tree_node_data.h"
 #include "third_party/blink/renderer/core/dom/slot_assignment.h"
 #include "third_party/blink/renderer/core/html/html_slot_element.h"
 
 namespace blink {
+
+static_assert(std::forward_iterator<
+              TraversalIterator<TraversalParent<FlatTreeTraversal>>>);
+static_assert(std::forward_iterator<
+              TraversalDescendantIterator<TraversalParent<FlatTreeTraversal>>>);
+static_assert(std::forward_iterator<TraversalDescendantWithFilterIterator<
+                  TraversalParent<FlatTreeTraversal>,
+                  Element::TinyBloomFilter>>);
+static_assert(std::forward_iterator<TraversalInclusiveDescendantIterator<
+                  TraversalParent<FlatTreeTraversal>>>);
 
 #if DCHECK_IS_ON()
 void FlatTreeTraversal::AssertFlatTreeNodeDataUpdated(
@@ -151,7 +162,7 @@ ContainerNode* FlatTreeTraversal::TraverseParent(const Node& node) {
   // This code is called extensively, so it minimizes repetitive work (such
   // as avoiding multiple calls to parentElement()).
 
-  // TODO(hayato): Stop this hack for a pseudo element because a pseudo element
+  // TODO(hayato): Stop this hack for a pseudo-element because a pseudo-element
   // is not a child of its parentOrShadowHostNode() in a flat tree.
   if (node.IsPseudoElement())
     return node.ParentOrShadowHostNode();
@@ -325,6 +336,33 @@ Node& FlatTreeTraversal::LastWithinOrSelf(const Node& node) {
   Node& result = last_descendant ? *last_descendant : const_cast<Node&>(node);
   AssertPostcondition(&result);
   return result;
+}
+
+const Element* FlatTreeTraversal::InclusiveParentElement(const Node& node) {
+  AssertPrecondition(node);
+  const Element* inclusive_parent = DynamicTo<Element>(node);
+  if (!inclusive_parent) {
+    inclusive_parent = ParentElement(node);
+  }
+  AssertPostcondition(inclusive_parent);
+  return inclusive_parent;
+}
+
+// static
+void FlatTreeTraversal::AssertPrecondition(const Node& node) {
+  DCHECK(!node.GetDocument().IsFlatTreeTraversalForbidden());
+  DCHECK(!node.IsShadowRoot())
+      << "Shadow roots don't have layout objects. Their host has one, and "
+         "their children have them, and those two are connected.";
+}
+
+// static
+void FlatTreeTraversal::AssertPostcondition(const Node* node) {
+#if DCHECK_IS_ON()
+  if (node) {
+    AssertPrecondition(*node);
+  }
+#endif
 }
 
 }  // namespace blink

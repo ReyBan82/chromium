@@ -43,7 +43,7 @@ enum ProxyMode {
 
 // State of proxy configuration.
 enum ConfigState {
-  // Configuration is from policy.
+  // Configuration is from the ProxySettings policy.
   CONFIG_POLICY,
   // Configuration is from extension.
   CONFIG_EXTENSION,
@@ -55,6 +55,19 @@ enum ConfigState {
   CONFIG_FALLBACK,
   // Configuration is known to be not set.
   CONFIG_UNSET,
+  // Configuration includes rules from the ProxyOverrideRules preference.
+  // This can be set by policy, or an extension when it's not set by a policy.
+  // These rules are evaluated first for any network request. If no
+  // override rule applies to a specific URL, the proxy resolution will
+  // fall back to the underlying configuration source (e.g., CONFIG_SYSTEM,
+  // CONFIG_POLICY). This state indicates that the override layer is active.
+  CONFIG_POLICY_OVERRIDE,
+  CONFIG_EXTENSION_OVERRIDE,
+  // Configuration includes dynamic routing rules from the
+  // ProxyProvisioningDomains policy preference. These rules are evaluated
+  // first for matching URLs. If no dynamic routing rule matches, proxy
+  // resolution falls back to DIRECT or the underlying OS system proxy.
+  CONFIG_POLICY_DYNAMIC_ROUTING,
 };
 
 // Constants for string values used to specify the proxy mode through externally

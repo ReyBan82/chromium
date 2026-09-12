@@ -9,6 +9,7 @@
 
 #include "ash/ash_export.h"
 #include "ash/system/video_conference/effects/video_conference_tray_effects_delegate.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "ui/views/controls/button/button.h"
 
@@ -19,6 +20,7 @@ struct VectorIcon;
 namespace ash {
 
 class FakeVideoConferenceTrayController;
+enum class VcEffectId;
 
 namespace fake_video_conference {
 
@@ -31,8 +33,8 @@ class SimpleToggleEffect : public VcEffectsDelegate {
   // Allows setting `icon` and `accessible_name_id` if desired, for unit tests
   // or the emulator.
   SimpleToggleEffect(const std::u16string& label_text,
-                     absl::optional<const gfx::VectorIcon*> icon,
-                     absl::optional<int> accessible_name_id);
+                     std::optional<const gfx::VectorIcon*> icon,
+                     std::optional<int> accessible_name_id);
 
   SimpleToggleEffect(const SimpleToggleEffect&) = delete;
   SimpleToggleEffect& operator=(const SimpleToggleEffect&) = delete;
@@ -40,9 +42,9 @@ class SimpleToggleEffect : public VcEffectsDelegate {
   ~SimpleToggleEffect() override;
 
   // VcEffectsDelegate:
-  absl::optional<int> GetEffectState(int effect_id) override;
-  void OnEffectControlActivated(absl::optional<int> effect_id,
-                                absl::optional<int> state) override;
+  std::optional<int> GetEffectState(VcEffectId effect_id) override;
+  void OnEffectControlActivated(VcEffectId effect_id,
+                                std::optional<int> state) override;
 
   int num_activations_for_testing() { return num_activations_for_testing_; }
 
@@ -116,14 +118,17 @@ class ASH_EXPORT StylishKitchenEffect : public SimpleToggleEffect {
   ~StylishKitchenEffect() override = default;
 };
 
-class ASH_EXPORT GreenhouseEffect : public SimpleToggleEffect {
+// A fake toggle effect with long text label (used to text multi-line label in
+// the toggle effect button).
+class ASH_EXPORT FakeLongTextLabelToggleEffect : public SimpleToggleEffect {
  public:
-  GreenhouseEffect();
+  FakeLongTextLabelToggleEffect();
 
-  GreenhouseEffect(const GreenhouseEffect&) = delete;
-  GreenhouseEffect& operator=(const GreenhouseEffect&) = delete;
+  FakeLongTextLabelToggleEffect(const FakeLongTextLabelToggleEffect&) = delete;
+  FakeLongTextLabelToggleEffect& operator=(
+      const FakeLongTextLabelToggleEffect&) = delete;
 
-  ~GreenhouseEffect() override = default;
+  ~FakeLongTextLabelToggleEffect() override = default;
 };
 
 // Delegate that hosts a set-value effect.
@@ -145,12 +150,13 @@ class ASH_EXPORT ShaggyFurEffect : public VcEffectsDelegate {
   ~ShaggyFurEffect() override;
 
   // VcEffectsDelegate:
-  absl::optional<int> GetEffectState(int effect_id) override;
-  void OnEffectControlActivated(absl::optional<int> effect_id,
-                                absl::optional<int> state) override;
+  std::optional<int> GetEffectState(VcEffectId effect_id) override;
+  void OnEffectControlActivated(VcEffectId effect_id,
+                                std::optional<int> state) override;
 
-  // Returns the number of times the button for `state` has been activated.
-  int GetNumActivationsForTesting(int state);
+  // Returns the number of times the button for `state_value` has been
+  // activated.
+  int GetNumActivationsForTesting(int state_value);
 
  private:
   // Adds a `std::unique_ptr<VcEffectState>` to `effect`.
@@ -182,9 +188,9 @@ class ASH_EXPORT SuperCutnessEffect : public VcEffectsDelegate {
   ~SuperCutnessEffect() override;
 
   // VcEffectsDelegate:
-  absl::optional<int> GetEffectState(int effect_id) override;
-  void OnEffectControlActivated(absl::optional<int> effect_id,
-                                absl::optional<int> state) override;
+  std::optional<int> GetEffectState(VcEffectId effect_id) override;
+  void OnEffectControlActivated(VcEffectId effect_id,
+                                std::optional<int> state) override;
 
   // Returns the number of times the button for `state` has been activated.
   int GetNumActivationsForTesting(int state);
@@ -226,14 +232,14 @@ class EffectRepository {
   ~EffectRepository();
 
  private:
-  FakeVideoConferenceTrayController* controller_;
+  raw_ptr<FakeVideoConferenceTrayController> controller_;
   std::unique_ptr<CatEarsEffect> cat_ears_;
   std::unique_ptr<DogFurEffect> dog_fur_;
   std::unique_ptr<SpaceshipEffect> spaceship_;
   std::unique_ptr<OfficeBunnyEffect> office_bunny_;
   std::unique_ptr<CalmForestEffect> calm_forest_;
   std::unique_ptr<StylishKitchenEffect> stylish_kitchen_;
-  std::unique_ptr<GreenhouseEffect> greenhouse_;
+  std::unique_ptr<FakeLongTextLabelToggleEffect> long_text_label_effect_;
   std::unique_ptr<ShaggyFurEffect> shaggy_fur_;
   std::unique_ptr<SuperCutnessEffect> super_cuteness_;
 };

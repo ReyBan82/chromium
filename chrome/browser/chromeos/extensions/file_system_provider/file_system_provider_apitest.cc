@@ -7,8 +7,11 @@
 
 #include "base/files/file.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
+#include "build/build_config.h"
+#include "chrome/browser/apps/app_service/chrome_app_deprecation/chrome_app_deprecation.h"
 #include "chrome/browser/ash/file_system_provider/observer.h"
 #include "chrome/browser/ash/file_system_provider/operation_request_manager.h"
 #include "chrome/browser/ash/file_system_provider/provided_file_system_info.h"
@@ -19,16 +22,16 @@
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/extensions/extension_apitest.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
 #include "content/public/test/browser_test.h"
-#include "ui/message_center/public/cpp/notification.h"
-#include "ui/message_center/public/cpp/notification_delegate.h"
+#include "google_apis/gaia/gaia_id.h"
+#include "ui/message_center/message_center.h"
 
 namespace extensions {
 namespace {
 
 using ash::file_system_provider::MountContext;
 using ash::file_system_provider::Observer;
+using ash::file_system_provider::OperationCompletion;
 using ash::file_system_provider::ProvidedFileSystemInfo;
 using ash::file_system_provider::ProvidedFileSystemInterface;
 using ash::file_system_provider::RequestManager;
@@ -48,11 +51,12 @@ class NotificationButtonClicker : public RequestManager::Observer {
   NotificationButtonClicker& operator=(const NotificationButtonClicker&) =
       delete;
 
-  ~NotificationButtonClicker() override {}
+  ~NotificationButtonClicker() override = default;
 
   // RequestManager::Observer overrides.
   void OnRequestCreated(int request_id, RequestType type) override {}
-  void OnRequestDestroyed(int request_id) override {}
+  void OnRequestDestroyed(int request_id,
+                          OperationCompletion completion) override {}
   void OnRequestExecuted(int request_id) override {}
   void OnRequestFulfilled(int request_id,
                           const RequestValue& result,
@@ -60,7 +64,7 @@ class NotificationButtonClicker : public RequestManager::Observer {
   void OnRequestRejected(int request_id,
                          const RequestValue& result,
                          base::File::Error error) override {}
-  void OnRequestTimeouted(int request_id) override {
+  void OnRequestTimedOut(int request_id) override {
     // Call asynchronously so the notification is setup is completed.
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&NotificationButtonClicker::ClickButton,
@@ -69,11 +73,8 @@ class NotificationButtonClicker : public RequestManager::Observer {
 
  private:
   void ClickButton() {
-    absl::optional<message_center::Notification> notification =
-        NotificationDisplayServiceTester::Get()->GetNotification(
-            file_system_info_.mount_path().value());
-    if (notification)
-      notification->delegate()->Click(0, absl::nullopt);
+    message_center::MessageCenter::Get()->ClickOnNotificationButton(
+        file_system_info_.mount_path().value(), /*button_index=*/0);
   }
 
   ProvidedFileSystemInfo file_system_info_;
@@ -121,7 +122,7 @@ class AbortOnUnresponsivePerformer : public Observer {
       base::File::Error error) override {}
 
  private:
-  Service* service_;  // Not owned.
+  raw_ptr<Service> service_;  // Not owned.
   std::vector<std::unique_ptr<NotificationButtonClicker>> clickers_;
 };
 
@@ -129,27 +130,18 @@ class AbortOnUnresponsivePerformer : public Observer {
 
 class FileSystemProviderApiTest : public ExtensionApiTest {
  public:
-  FileSystemProviderApiTest() {}
+  FileSystemProviderApiTest() = default;
 
   FileSystemProviderApiTest(const FileSystemProviderApiTest&) = delete;
   FileSystemProviderApiTest& operator=(const FileSystemProviderApiTest&) =
       delete;
 
-  // Loads a helper testing extension.
   void SetUpOnMainThread() override {
     ExtensionApiTest::SetUpOnMainThread();
-    const extensions::Extension* extension = LoadExtension(
-        test_data_dir_.AppendASCII("file_system_provider/test_util"),
-        {.allow_in_incognito = true});
-    ASSERT_TRUE(extension);
 
-    display_service_ = std::make_unique<NotificationDisplayServiceTester>(
-        browser()->profile());
-
-    user_manager_.AddUser(AccountId::FromUserEmailGaiaId("test@test", "12345"));
+    user_manager_.AddUser(
+        AccountId::FromUserEmailGaiaId("test@test", GaiaId("12345")));
   }
-
-  std::unique_ptr<NotificationDisplayServiceTester> display_service_;
 
  private:
   ash::FakeChromeUserManager user_manager_;
@@ -324,15 +316,17 @@ IN_PROC_BROWSER_TEST_F(FileSystemProviderApiTest, ExecuteAction) {
       << message_;
 }
 
-IN_PROC_BROWSER_TEST_F(FileSystemProviderApiTest, Unresponsive_Extension) {
-  AbortOnUnresponsivePerformer performer(browser()->profile());
+// TODO(b/255698656): Flaky test.
+IN_PROC_BROWSER_TEST_F(FileSystemProviderApiTest,
+                       DISABLED_Unresponsive_Extension) {
+  AbortOnUnresponsivePerformer performer(browser()->GetProfile());
   ASSERT_TRUE(RunExtensionTest("file_system_provider/unresponsive_extension",
                                {}, {.load_as_component = true}))
       << message_;
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemProviderApiTest, Unresponsive_App) {
-  AbortOnUnresponsivePerformer performer(browser()->profile());
+  AbortOnUnresponsivePerformer performer(browser()->GetProfile());
   ASSERT_TRUE(RunExtensionTest("file_system_provider/unresponsive_app",
                                {.launch_as_platform_app = true},
                                {.load_as_component = true}))
@@ -419,9 +413,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemProviderServiceWorkerApiTest, GetMetadata) {
 
 IN_PROC_BROWSER_TEST_F(FileSystemProviderServiceWorkerApiTest, MimeType) {
   // Install a Chrome app that handles our custom MIME type.
-  LoadExtension(test_data_dir_.AppendASCII(
-                    "file_system_provider/service_worker/mime_type/app"),
-                {.allow_in_incognito = true});
+  auto* extension =
+      LoadExtension(test_data_dir_.AppendASCII(
+                        "file_system_provider/service_worker/mime_type/app"),
+                    {.allow_in_incognito = true});
+
+  apps::chrome_app_deprecation::ScopedAddAppToAllowlistForTesting allowlist(
+      extension->id());
 
   ASSERT_TRUE(RunExtensionTest("file_system_provider/service_worker/mime_type",
                                {.extension_url = "test.html"},
@@ -493,8 +491,8 @@ IN_PROC_BROWSER_TEST_F(FileSystemProviderServiceWorkerApiTest, Unmount) {
 }
 
 IN_PROC_BROWSER_TEST_F(FileSystemProviderServiceWorkerApiTest,
-                       Unresponsive_Extension) {
-  AbortOnUnresponsivePerformer performer(browser()->profile());
+                       DISABLED_Unresponsive_Extension) {
+  AbortOnUnresponsivePerformer performer(browser()->GetProfile());
   ASSERT_TRUE(LoadExtension(test_data_dir_.AppendASCII(
       "file_system_provider/service_worker/unresponsive_extension/provider")));
   ASSERT_TRUE(RunExtensionTest(

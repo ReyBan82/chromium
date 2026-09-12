@@ -36,13 +36,15 @@
 #include "third_party/blink/renderer/core/editing/visible_position.h"
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
 #include "third_party/blink/renderer/core/html/forms/text_control_element.h"
 #include "third_party/blink/renderer/core/html/html_br_element.h"
-#include "third_party/blink/renderer/core/html/html_element.h"
+#include "third_party/blink/renderer/core/html/html_hr_element.h"
+#include "third_party/blink/renderer/core/html/html_table_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
-#include "third_party/blink/renderer/core/layout/layout_text.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -60,8 +62,15 @@ bool InsertLineBreakCommand::ShouldUseBreakElement(
   // the input element, and in that case we need to check the input element's
   // parent's layoutObject.
   Position p(insertion_pos.ParentAnchoredEquivalent());
+  if (auto* text_control = EnclosingTextControl(p)) {
+    return IsA<HTMLTextAreaElement>(text_control);
+  }
+  // Use <br> for <pre> elements to align with other browsers
+  if (EnclosingElementWithTag(p, html_names::kPreTag)) {
+    return true;
+  }
   return IsRichlyEditablePosition(p) && p.AnchorNode()->GetLayoutObject() &&
-         !p.AnchorNode()->GetLayoutObject()->Style()->PreserveNewline();
+         p.AnchorNode()->GetLayoutObject()->StyleRef().ShouldCollapseBreaks();
 }
 
 void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
@@ -70,21 +79,34 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
 
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
 
-  VisibleSelection selection = EndingVisibleSelection();
-  if (selection.IsNone() || selection.Start().IsOrphan() ||
-      selection.End().IsOrphan())
-    return;
-
-  // TODO(editing-dev): Stop storing VisiblePositions through mutations.
-  // See crbug.com/648949 for details.
-  VisiblePosition caret(selection.VisibleStart());
-  // FIXME: If the node is hidden, we should still be able to insert text. For
-  // now, we return to avoid a crash.
-  // https://bugs.webkit.org/show_bug.cgi?id=40342
-  if (caret.IsNull())
-    return;
-
-  Position pos(caret.DeepEquivalent());
+  Position pos;
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    SelectionForUndoStep selection = EndingSelection();
+    if (selection.IsNone() || selection.Start().IsOrphan() ||
+        selection.End().IsOrphan()) {
+      return;
+    }
+    pos = selection.Start();
+    if (pos.IsNull()) {
+      return;
+    }
+  } else {
+    VisibleSelection selection = EndingVisibleSelection();
+    if (selection.IsNone() || selection.Start().IsOrphan() ||
+        selection.End().IsOrphan()) {
+      return;
+    }
+    // TODO(editing-dev): Stop storing VisiblePositions through mutations.
+    // See crbug.com/648949 for details.
+    VisiblePosition caret(selection.VisibleStart());
+    // FIXME: If the node is hidden, we should still be able to insert text.
+    // For now, we return to avoid a crash.
+    // https://bugs.webkit.org/show_bug.cgi?id=40342
+    if (caret.IsNull()) {
+      return;
+    }
+    pos = caret.DeepEquivalent();
+  }
 
   pos = PositionAvoidingSpecialElementBoundary(pos, editing_state);
   if (editing_state->IsAborted())
@@ -102,8 +124,24 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
 
   // FIXME: Need to merge text nodes when inserting just after or before text.
 
-  if (IsEndOfParagraph(CreateVisiblePosition(caret.ToPositionWithAffinity())) &&
-      !LineBreakExistsAtVisiblePosition(caret)) {
+  bool is_end_of_paragraph_and_no_line_break;
+  if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+    // LineBreakExistsAtPosition only inspects the exact position. Use
+    // MostForwardCaretPosition to advance past empty/zero-width content and
+    // across sibling boundaries to the visually-equivalent next position, so
+    // cases like "foo[]<br>" detect the adjacent <br>.
+    is_end_of_paragraph_and_no_line_break =
+        IsEndOfParagraph(pos) &&
+        !LineBreakExistsAtPosition(MostForwardCaretPosition(pos));
+  } else {
+    VisiblePosition caret = CreateVisiblePosition(pos);
+    is_end_of_paragraph_and_no_line_break =
+        IsEndOfParagraph(
+            CreateVisiblePosition(caret.ToPositionWithAffinity())) &&
+        !LineBreakExistsAtVisiblePosition(caret);
+  }
+
+  if (is_end_of_paragraph_and_no_line_break) {
     bool need_extra_line_break = !IsA<HTMLHRElement>(*pos.AnchorNode()) &&
                                  !IsA<HTMLTableElement>(*pos.AnchorNode());
 
@@ -130,9 +168,15 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
     }
 
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
+        SelectionInDomTree::Builder()
             .Collapse(Position::BeforeNode(*node_to_insert))
             .Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder()
+              .Collapse(Position::BeforeNode(*node_to_insert))
+              .Build()));
+    }
   } else if (pos.ComputeEditingOffset() <= CaretMinOffset(pos.AnchorNode())) {
     InsertNodeAt(node_to_insert, pos, editing_state);
     if (editing_state->IsAborted())
@@ -140,7 +184,18 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
     GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
 
     // Insert an extra br or '\n' if the just inserted one collapsed.
-    if (!IsStartOfParagraph(VisiblePosition::BeforeNode(*node_to_insert))) {
+    bool is_start;
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      // Use `Position(node_to_insert, 0)` (not `Position::BeforeNode`) so
+      // `StartOfParagraphAlgorithm` starts at the BR/'\n' itself, mirroring
+      // the VP path's canonicalized `BeforeNode` without re-anchoring to
+      // the parent.
+      is_start = IsStartOfParagraph(Position(node_to_insert, 0));
+    } else {
+      is_start =
+          IsStartOfParagraph(VisiblePosition::BeforeNode(*node_to_insert));
+    }
+    if (!is_start) {
       InsertNodeBefore(node_to_insert->cloneNode(false), node_to_insert,
                        editing_state);
       if (editing_state->IsAborted())
@@ -148,9 +203,15 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
     }
 
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
+        SelectionInDomTree::Builder()
             .Collapse(Position::InParentAfterNode(*node_to_insert))
             .Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder()
+              .Collapse(Position::InParentAfterNode(*node_to_insert))
+              .Build()));
+    }
     // If we're inserting after all of the rendered text in a text node, or into
     // a non-text node, a simple insertion is sufficient.
   } else if (!pos.AnchorNode()->IsTextNode() ||
@@ -160,9 +221,15 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
     if (editing_state->IsAborted())
       return;
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
+        SelectionInDomTree::Builder()
             .Collapse(Position::InParentAfterNode(*node_to_insert))
             .Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder()
+              .Collapse(Position::InParentAfterNode(*node_to_insert))
+              .Build()));
+    }
   } else if (auto* text_node = DynamicTo<Text>(pos.AnchorNode())) {
     // Split a text node
     SplitTextNode(text_node, pos.ComputeOffsetInContainerNode());
@@ -181,7 +248,8 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
       // Deleting insignificant whitespace will remove textNode if it contains
       // nothing but insignificant whitespace.
       if (text_node->isConnected()) {
-        InsertTextIntoNode(text_node, 0, NonBreakingSpaceString());
+        InsertTextIntoNode(text_node, 0, NonBreakingSpaceString(),
+                           PasswordEchoBehavior::kDoNotEcho);
       } else {
         Text* nbsp_node =
             GetDocument().createTextNode(NonBreakingSpaceString());
@@ -193,9 +261,11 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
     }
 
     SetEndingSelection(SelectionForUndoStep::From(
-        SelectionInDOMTree::Builder()
-            .Collapse(ending_position)
-            .Build()));
+        SelectionInDomTree::Builder().Collapse(ending_position).Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder().Collapse(ending_position).Build()));
+    }
   }
 
   // Handle the case where there is a typing style.
@@ -223,10 +293,18 @@ void InsertLineBreakCommand::DoApply(EditingState* editing_state) {
     // So, this next call sets the endingSelection() to a caret just after the
     // line break that we inserted, or just before it if it's at the end of a
     // block.
-    SetEndingSelection(
-        SelectionForUndoStep::From(SelectionInDOMTree::Builder()
-                                       .Collapse(EndingVisibleSelection().End())
-                                       .Build()));
+    Position end_pos;
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      end_pos = EndingSelection().End();
+    } else {
+      end_pos = EndingVisibleSelection().End();
+    }
+    SetEndingSelection(SelectionForUndoStep::From(
+        SelectionInDomTree::Builder().Collapse(end_pos).Build()));
+    if (RuntimeEnabledFeatures::EditingUseDomPositionApiEnabled()) {
+      SetEndingDomSelection(SelectionForUndoStep::From(
+          SelectionInDomTree::Builder().Collapse(end_pos).Build()));
+    }
   }
 
   RebalanceWhitespace();

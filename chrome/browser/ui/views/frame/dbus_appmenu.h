@@ -9,13 +9,14 @@
 #include <string>
 
 #include "base/containers/flat_set.h"
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "chrome/browser/command_observer.h"
 #include "chrome/browser/profiles/avatar_menu.h"
 #include "chrome/browser/profiles/avatar_menu_observer.h"
-#include "chrome/browser/ui/browser_list_observer.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
 #include "components/dbus/menu/menu.h"
 #include "components/history/core/browser/history_types.h"
 #include "components/history/core/browser/top_sites.h"
@@ -24,16 +25,18 @@
 #include "components/sessions/core/tab_restore_service.h"
 #include "components/sessions/core/tab_restore_service_observer.h"
 #include "ui/aura/window_tree_host.h"
-#include "ui/base/models/simple_menu_model.h"
+#include "ui/menus/simple_menu_model.h"
 
 namespace ui {
 class Accelerator;
-}
+class PlatformWindow;
+}  // namespace ui
 
-class Browser;
+class GlobalBrowserCollection;
 class BrowserView;
 struct DbusAppmenuCommand;
 class Profile;
+class BrowserWindowInterface;
 
 // Controls the Mac style menu bar on Linux desktop environments.
 //
@@ -42,13 +45,15 @@ class Profile;
 // survived and is usually referred to as DBus AppMenu.  There is support for it
 // in KDE Plasma in form of a widget that can be inserted into a panel.
 class DbusAppmenu : public AvatarMenuObserver,
-                    public BrowserListObserver,
+                    public BrowserCollectionObserver,
                     public CommandObserver,
                     public history::TopSitesObserver,
                     public sessions::TabRestoreServiceObserver,
                     public ui::SimpleMenuModel::Delegate {
  public:
-  DbusAppmenu(BrowserView* browser_view, uint32_t browser_frame_id);
+  DbusAppmenu(BrowserView* browser_view,
+              ui::PlatformWindow* platform_window,
+              uint32_t browser_frame_id);
 
   DbusAppmenu(const DbusAppmenu&) = delete;
   DbusAppmenu& operator=(const DbusAppmenu&) = delete;
@@ -61,18 +66,20 @@ class DbusAppmenu : public AvatarMenuObserver,
   std::string GetPath() const;
 
   uint32_t browser_frame_id() const { return browser_frame_id_; }
+  ui::PlatformWindow* platform_window() const { return platform_window_; }
 
  private:
   struct HistoryItem;
 
   // Creates a whole menu defined with |commands| and titled with the string
   // |string_id|. Then appends it to |root_menu_|.
-  ui::SimpleMenuModel* BuildStaticMenu(int string_id,
-                                       const DbusAppmenuCommand* commands);
+  ui::SimpleMenuModel* BuildStaticMenu(
+      int string_id,
+      base::span<const DbusAppmenuCommand> commands);
 
   // Creates a HistoryItem from the data in |entry|.
   std::unique_ptr<HistoryItem> HistoryItemForTab(
-      const sessions::TabRestoreService::Tab& entry);
+      const sessions::tab_restore::Tab& entry);
 
   // Creates a menu item form |item| and inserts it in |menu| at |index|.
   void AddHistoryItemToMenu(std::unique_ptr<HistoryItem> item,
@@ -86,8 +93,8 @@ class DbusAppmenu : public AvatarMenuObserver,
       SessionID id,
       std::u16string title,
       int index,
-      const std::vector<std::unique_ptr<sessions::TabRestoreService::Tab>>&
-          tabs);
+      const std::vector<std::unique_ptr<sessions::tab_restore::Tab>>& tabs,
+      int restore_string_id);
 
   // Sends a message off to History for data.
   void GetTopSitesData();
@@ -115,8 +122,8 @@ class DbusAppmenu : public AvatarMenuObserver,
   // AvatarMenuObserver:
   void OnAvatarMenuChanged(AvatarMenu* avatar_menu) override;
 
-  // BrowserListObserver:
-  void OnBrowserSetLastActive(Browser* browser) override;
+  // BrowserCollectionObserver:
+  void OnBrowserActivated(BrowserWindowInterface* browser) override;
 
   // CommandObserver:
   void EnabledStateChangedForCommand(int id, bool enabled) override;
@@ -140,9 +147,10 @@ class DbusAppmenu : public AvatarMenuObserver,
                                   ui::Accelerator* accelerator) const override;
 
   // State for the browser window we're tracking.
-  const raw_ptr<Browser> browser_;
+  const raw_ptr<BrowserWindowInterface> browser_;
   raw_ptr<Profile> profile_;
   raw_ptr<BrowserView> browser_view_;
+  raw_ptr<ui::PlatformWindow> platform_window_;
   // XID of the browser's frame window that owns this menu.  Deliberately stored
   // as plain int (and not as x11::Window) because it is never used for any
   // calls to the X server, but it is always used for building string paths and
@@ -152,9 +160,6 @@ class DbusAppmenu : public AvatarMenuObserver,
 
   // Has Initialize() been called?
   bool initialized_ = false;
-
-  // The DBus menu service.
-  std::unique_ptr<DbusMenu> menu_service_;
 
   // Menu models.  Menus don't own their children, so we must own them.
   // |toplevel_menus_| are children of |root_menu_|.
@@ -166,6 +171,11 @@ class DbusAppmenu : public AvatarMenuObserver,
       recently_closed_window_menus_;
   raw_ptr<ui::SimpleMenuModel> history_menu_ = nullptr;
   raw_ptr<ui::SimpleMenuModel> profiles_menu_ = nullptr;
+
+  // The DBus menu service.
+  // Should be destroyed prior to ui::MenuModels because DBusMenu::MenuItem
+  // holds a raw_ptr to a ui::ModelModel.
+  std::unique_ptr<DbusMenu> menu_service_;
 
   // Tracks value of the kShowBookmarkBar preference.
   PrefChangeRegistrar pref_change_registrar_;
@@ -190,6 +200,9 @@ class DbusAppmenu : public AvatarMenuObserver,
   base::flat_set<int> observed_commands_;
 
   int last_command_id_;
+
+  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
+      browser_collection_observation_{this};
 
   // For callbacks may be run after destruction.
   base::WeakPtrFactory<DbusAppmenu> weak_ptr_factory_{this};

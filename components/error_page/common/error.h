@@ -22,6 +22,7 @@ class Error {
   static const char kHttpErrorDomain[];
   // For DNS probe errors.
   static const char kDnsProbeErrorDomain[];
+  // For Link Preview errors.
 
   // Returns a kNetErrorDomain error.
   static Error NetError(const GURL& url,

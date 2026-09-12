@@ -7,10 +7,10 @@
 
 #include <CoreMIDI/MIDIServices.h>
 #include <stdint.h>
+
 #include <vector>
 
 #include "base/compiler_specific.h"
-#include "base/functional/callback.h"
 #include "base/synchronization/lock.h"
 #include "base/thread_annotations.h"
 #include "base/threading/thread.h"
@@ -53,12 +53,16 @@ class MIDI_EXPORT MidiManagerMac final : public MidiManager {
                                         void* refcon);
   void ReceiveMidiNotify(const MIDINotification* message);
 
-  // CoreMIDI callback for MIDI data.
-  // Each callback can contain multiple packets, each of which can contain
-  // multiple MIDI messages.
+  // CoreMIDI callback for legacy MIDI data.
   static void ReadMidiDispatch(const MIDIPacketList* packet_list,
                                void* read_proc_refcon,
                                void* src_conn_refcon);
+
+  // CoreMIDI callback for MIDI data.
+  // Each callback can contain multiple packets, each of which can contain
+  // multiple MIDI messages.
+  void ReceiveMidiEventList(uint32_t port_index,
+                            const MIDIEventList* event_list);
 
   // An internal callback that runs on MidiSendThread.
   void SendMidiData(MidiManagerClient* client,

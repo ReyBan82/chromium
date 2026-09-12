@@ -11,12 +11,13 @@
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
-#include "ash/system/message_center/message_center_constants.h"
-#include "ash/system/message_center/message_center_utils.h"
+#include "ash/system/notification_center/message_center_constants.h"
+#include "ash/system/notification_center/message_center_utils.h"
 #include "base/observer_list_types.h"
 #include "components/session_manager/session_manager_types.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_types.h"
@@ -40,19 +41,20 @@ std::unique_ptr<message_center::Notification>
 LockScreenNotificationController::CreateNotification() {
   message_center::RichNotificationData optional_fields;
   optional_fields.pinned = true;
-  optional_fields.priority =
-      message_center::NotificationPriority::SYSTEM_PRIORITY;
+  optional_fields.priority = message_center::NotificationPriority::MIN_PRIORITY;
   return ash::CreateSystemNotificationPtr(
       message_center::NotificationType::NOTIFICATION_TYPE_SIMPLE,
       kLockScreenNotificationId,
       l10n_util::GetStringUTF16(IDS_ASH_LOCKSCREEN_NOTIFICATION_TITLE),
       l10n_util::GetStringUTF16(IDS_ASH_LOCKSCREEN_NOTIFICATION_DESCRIPTION),
-      /*display_source=*/std::u16string(), /*origin_url=*/GURL(),
+      /*display_source=*/std::u16string(),
       message_center::NotifierId(message_center::NotifierType::SYSTEM_COMPONENT,
                                  kLockScreenNotifierId,
                                  NotificationCatalogName::kLockScreen),
       optional_fields,
-      /*delegate=*/nullptr, vector_icons::kLockIcon,
+      /*delegate=*/nullptr,
+      ::features::IsRoundedIconsEnabled() ? vector_icons::kLockFilledIcon
+                                          : vector_icons::kLockOldIcon,
       message_center::SystemNotificationWarningLevel::NORMAL);
 }
 

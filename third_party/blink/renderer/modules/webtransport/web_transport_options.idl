@@ -6,4 +6,10 @@
 
 dictionary WebTransportOptions {
   [RuntimeEnabled=WebTransportCustomCertificates] sequence<WebTransportHash> serverCertificateHashes;
+  [RuntimeEnabled=WebTransportApplicationProtocol] sequence<DOMString> protocols;
+  [RuntimeEnabled=WebTransportCongestionControl] WebTransportCongestionControl congestionControl = "default";
+  [RuntimeEnabled=WebTransportAnticipatedConcurrentIncomingStreams, EnforceRange] unsigned short? anticipatedConcurrentIncomingUnidirectionalStreams = null;
+  [RuntimeEnabled=WebTransportAnticipatedConcurrentIncomingStreams, EnforceRange] unsigned short? anticipatedConcurrentIncomingBidirectionalStreams = null;
+  [RuntimeEnabled=WebTransportHeaders] HeadersInit headers;
+  [RuntimeEnabled=WebTransportDatagramsReadableType] ReadableStreamType datagramsReadableType;
 };

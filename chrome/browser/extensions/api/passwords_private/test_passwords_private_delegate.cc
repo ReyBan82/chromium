@@ -4,15 +4,15 @@
 
 #include "chrome/browser/extensions/api/passwords_private/test_passwords_private_delegate.h"
 
+#include <algorithm>
+#include <optional>
 #include <string>
 
-#include "base/containers/contains.h"
-#include "base/containers/cxx20_erase.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/extensions/api/passwords_private/passwords_private_event_router.h"
 #include "chrome/browser/extensions/api/passwords_private/passwords_private_event_router_factory.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/password_manager/core/browser/ui/saved_passwords_presenter.h"
 #include "ui/base/l10n/time_format.h"
 #include "url/gurl.h"
 
@@ -26,12 +26,16 @@ constexpr size_t kNumMocks = 3;
 
 api::passwords_private::PasswordUiEntry CreateEntry(int id) {
   api::passwords_private::PasswordUiEntry entry;
-  entry.urls.shown = "test" + base::NumberToString(id) + ".com";
-  entry.urls.signon_realm = "http://" + entry.urls.shown + "/login";
-  entry.urls.link = entry.urls.signon_realm;
+  entry.affiliated_domains.emplace_back();
+  entry.affiliated_domains.back().name =
+      "test" + base::NumberToString(id) + ".com";
+  entry.affiliated_domains.back().signon_realm =
+      "http://" + entry.affiliated_domains.back().name + "/login";
+  entry.affiliated_domains.back().url =
+      entry.affiliated_domains.back().signon_realm;
   entry.username = "testName" + base::NumberToString(id);
   entry.id = id;
-  entry.stored_in = api::passwords_private::PASSWORD_STORE_SET_DEVICE;
+  entry.stored_in = api::passwords_private::PasswordStoreSet::kDevice;
   return entry;
 }
 
@@ -52,8 +56,28 @@ TestPasswordsPrivateDelegate::TestPasswordsPrivateDelegate()
     current_entries_.push_back(CreateEntry(i));
     current_exceptions_.push_back(CreateException(i));
   }
+  api::passwords_private::PasswordUiEntry passkey = CreateEntry(kNumMocks);
+  passkey.is_passkey = true;
+  passkey.display_name = "displayName";
+  passkey.creation_time = 1000;
+  current_entries_.push_back(std::move(passkey));
 }
 TestPasswordsPrivateDelegate::~TestPasswordsPrivateDelegate() = default;
+
+void TestPasswordsPrivateDelegate::AddObserver(
+    PasswordsPrivateDelegate::Observer* observer) {
+  observers_.AddObserver(observer);
+}
+
+void TestPasswordsPrivateDelegate::RemoveObserver(
+    PasswordsPrivateDelegate::Observer* observer) {
+  observers_.RemoveObserver(observer);
+}
+
+password_manager::SavedPasswordsPresenter*
+TestPasswordsPrivateDelegate::GetSavedPasswordsPresenter() {
+  return saved_passwords_presenter_.get();
+}
 
 void TestPasswordsPrivateDelegate::GetSavedPasswordsList(
     UiEntriesCallback callback) {
@@ -65,8 +89,8 @@ TestPasswordsPrivateDelegate::GetCredentialGroups() {
   std::vector<api::passwords_private::CredentialGroup> groups;
   api::passwords_private::CredentialGroup group_api;
   group_api.name = "test.com";
-  for (size_t i = 0; i < kNumMocks; i++) {
-    group_api.entries.push_back(CreateEntry(i));
+  for (const auto& entry : current_entries_) {
+    group_api.entries.push_back(entry.Clone());
   }
   groups.push_back(std::move(group_api));
   return groups;
@@ -77,61 +101,65 @@ void TestPasswordsPrivateDelegate::GetPasswordExceptionsList(
   std::move(callback).Run(current_exceptions_);
 }
 
-absl::optional<api::passwords_private::UrlCollection>
+std::optional<api::passwords_private::UrlCollection>
 TestPasswordsPrivateDelegate::GetUrlCollection(const std::string& url) {
   if (url.empty()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
-  return absl::optional<api::passwords_private::UrlCollection>(
+  return std::optional<api::passwords_private::UrlCollection>(
       api::passwords_private::UrlCollection());
 }
 
-bool TestPasswordsPrivateDelegate::IsAccountStoreDefault(
-    content::WebContents* web_contents) {
-  return is_account_store_default_;
-}
-
-bool TestPasswordsPrivateDelegate::AddPassword(
-    const std::string& url,
-    const std::u16string& username,
-    const std::u16string& password,
-    const std::u16string& note,
-    bool use_account_store,
-    content::WebContents* web_contents) {
+bool TestPasswordsPrivateDelegate::AddPassword(const std::string& url,
+                                               const std::u16string& username,
+                                               const std::u16string& password,
+                                               const std::u16string& note,
+                                               bool use_account_store) {
   return !url.empty() && !password.empty();
 }
 
-absl::optional<int> TestPasswordsPrivateDelegate::ChangeSavedPassword(
-    const int id,
-    const api::passwords_private::ChangeSavedPasswordParams& params) {
-  if (static_cast<size_t>(id) >= current_entries_.size()) {
-    return absl::nullopt;
+bool TestPasswordsPrivateDelegate::ChangeCredential(
+    const api::passwords_private::PasswordUiEntry& credential) {
+  const auto existing =
+      std::ranges::find(current_entries_, credential.id,
+                        &api::passwords_private::PasswordUiEntry::id);
+  if (existing == current_entries_.end()) {
+    return false;
   }
-
-  if (params.password.empty())
-    return absl::nullopt;
-
-  return id;
+  existing->username = credential.username;
+  if (credential.password) {
+    existing->password = credential.password;
+  }
+  if (credential.display_name) {
+    existing->display_name = credential.display_name;
+  }
+  if (credential.note) {
+    existing->note = credential.note;
+  }
+  return true;
 }
 
-void TestPasswordsPrivateDelegate::RemoveSavedPassword(
+void TestPasswordsPrivateDelegate::RemoveCredential(
     int id,
     api::passwords_private::PasswordStoreSet from_stores) {
-  if (current_entries_.empty())
-    return;
-
-  // Since this is just mock data, remove the first element regardless of the
-  // data contained. One case where this logic is especially false is when the
-  // password is stored in both stores and |store| only specifies one of them
-  // (in that case the number of entries shouldn't change).
-  last_deleted_entry_ = std::move(current_entries_[0]);
-  current_entries_.erase(current_entries_.begin());
+  const auto to_remove = std::ranges::remove(
+      current_entries_, id, &api::passwords_private::PasswordUiEntry::id);
+  if (!to_remove.empty()) {
+    CHECK_EQ(1u, to_remove.size());
+    last_deleted_entry_ = std::move(*to_remove.begin());
+    current_entries_.erase(to_remove.begin(), to_remove.end());
+  }
   SendSavedPasswordsList();
 }
 
+void TestPasswordsPrivateDelegate::RemoveBackupPassword(int id) {
+  remove_backup_password_ = true;
+}
+
 void TestPasswordsPrivateDelegate::RemovePasswordException(int id) {
-  if (current_exceptions_.empty())
+  if (current_exceptions_.empty()) {
     return;
+  }
 
   // Since this is just mock data, remove the first element regardless of the
   // data contained.
@@ -142,15 +170,16 @@ void TestPasswordsPrivateDelegate::RemovePasswordException(int id) {
 
 // Simplified version of undo logic, only use for testing.
 void TestPasswordsPrivateDelegate::UndoRemoveSavedPasswordOrException() {
+  undo_remove_saved_password_or_exception_called_ = true;
   if (last_deleted_entry_.has_value()) {
     current_entries_.insert(current_entries_.begin(),
                             std::move(last_deleted_entry_.value()));
-    last_deleted_entry_ = absl::nullopt;
+    last_deleted_entry_ = std::nullopt;
     SendSavedPasswordsList();
   } else if (last_deleted_exception_.has_value()) {
     current_exceptions_.insert(current_exceptions_.begin(),
                                std::move(last_deleted_exception_.value()));
-    last_deleted_exception_ = absl::nullopt;
+    last_deleted_exception_ = std::nullopt;
     SendPasswordExceptionsList();
   }
 }
@@ -158,10 +187,16 @@ void TestPasswordsPrivateDelegate::UndoRemoveSavedPasswordOrException() {
 void TestPasswordsPrivateDelegate::RequestPlaintextPassword(
     int id,
     api::passwords_private::PlaintextReason reason,
-    PlaintextPasswordCallback callback,
-    content::WebContents* web_contents) {
+    PlaintextPasswordCallback callback) {
   // Return a mocked password value.
   std::move(callback).Run(plaintext_password_);
+}
+
+void TestPasswordsPrivateDelegate::CopyPlaintextBackupPassword(
+    int id,
+    base::OnceCallback<void(bool)> callback) {
+  copy_plaintext_backup_password_ = true;
+  std::move(callback).Run(true);
 }
 
 void TestPasswordsPrivateDelegate::RequestCredentialsDetails(
@@ -180,8 +215,7 @@ void TestPasswordsPrivateDelegate::RequestCredentialsDetails(
 }
 
 void TestPasswordsPrivateDelegate::MovePasswordsToAccount(
-    const std::vector<int>& ids,
-    content::WebContents* web_contents) {
+    const std::vector<int>& ids) {
   last_moved_passwords_ = ids;
 }
 
@@ -191,52 +225,73 @@ void TestPasswordsPrivateDelegate::ImportPasswords(
     content::WebContents* web_contents) {
   import_passwords_triggered_ = true;
 
-  import_results_.status = api::passwords_private::ImportResultsStatus::
-      IMPORT_RESULTS_STATUS_SUCCESS;
+  import_results_.status =
+      api::passwords_private::ImportResultsStatus::kSuccess;
   import_results_.file_name = "test.csv";
   import_results_.number_imported = 42;
   std::move(results_callback).Run(import_results_);
 }
 
+void TestPasswordsPrivateDelegate::ContinueImport(
+    const std::vector<int>& selected_ids,
+    ImportResultsCallback results_callback) {
+  continue_import_triggered_ = true;
+
+  import_results_.status =
+      api::passwords_private::ImportResultsStatus::kSuccess;
+  import_results_.file_name = "test.csv";
+  import_results_.number_imported = 42;
+  std::move(results_callback).Run(import_results_);
+}
+
+void TestPasswordsPrivateDelegate::FetchFamilyMembers(
+    FetchFamilyResultsCallback callback) {
+  fetch_family_members_triggered_ = true;
+
+  family_fetch_results_.status =
+      api::passwords_private::FamilyFetchStatus::kSuccess;
+  std::move(callback).Run(family_fetch_results_);
+}
+
+void TestPasswordsPrivateDelegate::SharePassword(
+    int id,
+    const ShareRecipients& recipients) {
+  share_password_triggered_ = true;
+}
+
+void TestPasswordsPrivateDelegate::ResetImporter(bool delete_file) {
+  reset_importer_triggered_ = true;
+}
+
 void TestPasswordsPrivateDelegate::ExportPasswords(
-    base::OnceCallback<void(const std::string&)> callback,
+    base::OnceCallback<void(ExportPasswordsResult)> callback,
     content::WebContents* web_contents) {
   // The testing of password exporting itself should be handled via
   // |PasswordManagerPorter|.
   export_passwords_triggered_ = true;
-  std::move(callback).Run(std::string());
-}
-
-void TestPasswordsPrivateDelegate::CancelExportPasswords() {
-  cancel_export_passwords_triggered_ = true;
+  std::move(callback).Run(ExportPasswordsResult::kSuccess);
 }
 
 api::passwords_private::ExportProgressStatus
 TestPasswordsPrivateDelegate::GetExportProgressStatus() {
   // The testing of password exporting itself should be handled via
   // |PasswordManagerPorter|.
-  return api::passwords_private::ExportProgressStatus::
-      EXPORT_PROGRESS_STATUS_IN_PROGRESS;
+  return api::passwords_private::ExportProgressStatus::kInProgress;
 }
 
-bool TestPasswordsPrivateDelegate::IsOptedInForAccountStorage() {
-  return is_opted_in_for_account_storage_;
-}
-
-void TestPasswordsPrivateDelegate::SetAccountStorageOptIn(
-    bool opt_in,
-    content::WebContents* web_contents) {
-  is_opted_in_for_account_storage_ = opt_in;
+bool TestPasswordsPrivateDelegate::IsAccountStorageActive() {
+  return false;
 }
 
 std::vector<api::passwords_private::PasswordUiEntry>
 TestPasswordsPrivateDelegate::GetInsecureCredentials() {
   api::passwords_private::PasswordUiEntry leaked_credential;
   leaked_credential.username = "alice";
-  leaked_credential.urls.shown = "example.com";
-  leaked_credential.urls.link = "https://example.com";
-  leaked_credential.urls.signon_realm = "https://example.com";
-  leaked_credential.is_android_credential = false;
+  leaked_credential.affiliated_domains.emplace_back();
+  leaked_credential.affiliated_domains.back().name = "example.com";
+  leaked_credential.affiliated_domains.back().url = "https://example.com";
+  leaked_credential.affiliated_domains.back().signon_realm =
+      "https://example.com";
   leaked_credential.change_password_url = "https://example.com/change-password";
   leaked_credential.compromised_info.emplace();
   // Mar 03 2020 12:00:00 UTC
@@ -245,20 +300,20 @@ TestPasswordsPrivateDelegate::GetInsecureCredentials() {
       base::UTF16ToUTF8(TimeFormat::Simple(
           TimeFormat::FORMAT_ELAPSED, TimeFormat::LENGTH_LONG, base::Days(3)));
   leaked_credential.compromised_info->compromise_types = {
-      api::passwords_private::COMPROMISE_TYPE_LEAKED};
+      api::passwords_private::CompromiseType::kLeaked};
   leaked_credential.stored_in =
-      api::passwords_private::PASSWORD_STORE_SET_DEVICE;
+      api::passwords_private::PasswordStoreSet::kDevice;
 
   api::passwords_private::PasswordUiEntry weak_credential;
   weak_credential.username = "bob";
-  weak_credential.urls.shown = "example.com";
-  weak_credential.urls.link = "https://example.com";
-  weak_credential.is_android_credential = false;
+  weak_credential.affiliated_domains.emplace_back();
+  weak_credential.affiliated_domains.back().name = "example.com";
+  weak_credential.affiliated_domains.back().url = "https://example.com";
   weak_credential.change_password_url = "https://example.com/change-password";
-  weak_credential.stored_in = api::passwords_private::PASSWORD_STORE_SET_DEVICE;
+  weak_credential.stored_in = api::passwords_private::PasswordStoreSet::kDevice;
   weak_credential.compromised_info.emplace();
   weak_credential.compromised_info->compromise_types = {
-      api::passwords_private::COMPROMISE_TYPE_WEAK};
+      api::passwords_private::CompromiseType::kWeak};
 
   std::vector<api::passwords_private::PasswordUiEntry> credentials;
   credentials.push_back(std::move(leaked_credential));
@@ -272,24 +327,24 @@ TestPasswordsPrivateDelegate::GetCredentialsWithReusedPassword() {
 
   api::passwords_private::PasswordUiEntry credential_1;
   credential_1.username = "bob";
-  credential_1.urls.shown = "example.com";
-  credential_1.urls.link = "https://example.com";
-  credential_1.is_android_credential = false;
+  credential_1.affiliated_domains.emplace_back();
+  credential_1.affiliated_domains.back().name = "example.com";
+  credential_1.affiliated_domains.back().url = "https://example.com";
   credential_1.change_password_url = "https://example.com/change-password";
-  credential_1.stored_in = api::passwords_private::PASSWORD_STORE_SET_DEVICE;
+  credential_1.stored_in = api::passwords_private::PasswordStoreSet::kDevice;
   credential_1.compromised_info.emplace();
   credential_1.compromised_info->compromise_types = {
-      api::passwords_private::COMPROMISE_TYPE_REUSED};
+      api::passwords_private::CompromiseType::kReused};
 
   api::passwords_private::PasswordUiEntry credential_2;
   credential_2.username = "angela";
-  credential_2.urls.shown = "test.com";
-  credential_2.urls.link = "https://test.com";
-  credential_2.is_android_credential = false;
-  credential_2.stored_in = api::passwords_private::PASSWORD_STORE_SET_DEVICE;
+  credential_2.affiliated_domains.emplace_back();
+  credential_2.affiliated_domains.back().name = "test.com";
+  credential_2.affiliated_domains.back().url = "https://test.com";
+  credential_2.stored_in = api::passwords_private::PasswordStoreSet::kDevice;
   credential_2.compromised_info.emplace();
   credential_2.compromised_info->compromise_types = {
-      api::passwords_private::COMPROMISE_TYPE_REUSED};
+      api::passwords_private::CompromiseType::kReused};
 
   result.emplace_back();
   result[0].entries.push_back(std::move(credential_1));
@@ -312,26 +367,16 @@ bool TestPasswordsPrivateDelegate::UnmuteInsecureCredential(
   return IsCredentialPresentInInsecureCredentialsList(credential);
 }
 
-void TestPasswordsPrivateDelegate::RecordChangePasswordFlowStarted(
-    const api::passwords_private::PasswordUiEntry& credential) {
-  last_change_flow_url_ =
-      credential.change_password_url ? *credential.change_password_url : "";
-}
-
 void TestPasswordsPrivateDelegate::StartPasswordCheck(
     StartPasswordCheckCallback callback) {
   start_password_check_triggered_ = true;
   std::move(callback).Run(start_password_check_state_);
 }
 
-void TestPasswordsPrivateDelegate::StopPasswordCheck() {
-  stop_password_check_triggered_ = true;
-}
-
 api::passwords_private::PasswordCheckStatus
 TestPasswordsPrivateDelegate::GetPasswordCheckStatus() {
   api::passwords_private::PasswordCheckStatus status;
-  status.state = api::passwords_private::PASSWORD_CHECK_STATE_RUNNING;
+  status.state = api::passwords_private::PasswordCheckState::kRunning;
   status.already_processed = 5;
   status.remaining_in_queue = 10;
   status.elapsed_time_since_last_check = base::UTF16ToUTF8(TimeFormat::Simple(
@@ -344,20 +389,12 @@ TestPasswordsPrivateDelegate::GetInsecureCredentialsManager() {
   return nullptr;
 }
 
-void TestPasswordsPrivateDelegate::ExtendAuthValidity() {
+void TestPasswordsPrivateDelegate::RestartAuthTimer() {
   authenticator_interacted_ = true;
 }
 
 void TestPasswordsPrivateDelegate::SetProfile(Profile* profile) {
   profile_ = profile;
-}
-
-void TestPasswordsPrivateDelegate::SetOptedInForAccountStorage(bool opted_in) {
-  is_opted_in_for_account_storage_ = opted_in;
-}
-
-void TestPasswordsPrivateDelegate::SetIsAccountStoreDefault(bool is_default) {
-  is_account_store_default_ = is_default;
 }
 
 void TestPasswordsPrivateDelegate::AddCompromisedCredential(int id) {
@@ -366,29 +403,37 @@ void TestPasswordsPrivateDelegate::AddCompromisedCredential(int id) {
   insecure_credentials_.push_back(std::move(cred));
 }
 
+void TestPasswordsPrivateDelegate::SetSavedPasswordsPresenter(
+    std::unique_ptr<password_manager::SavedPasswordsPresenter> presenter) {
+  saved_passwords_presenter_ = std::move(presenter);
+}
+
 void TestPasswordsPrivateDelegate::SendSavedPasswordsList() {
   PasswordsPrivateEventRouter* router =
       PasswordsPrivateEventRouterFactory::GetForProfile(profile_);
-  if (router)
+  if (router) {
     router->OnSavedPasswordsListChanged(current_entries_);
+  }
 }
 
 void TestPasswordsPrivateDelegate::SendPasswordExceptionsList() {
   PasswordsPrivateEventRouter* router =
       PasswordsPrivateEventRouterFactory::GetForProfile(profile_);
-  if (router)
+  if (router) {
     router->OnPasswordExceptionsListChanged(current_exceptions_);
+  }
 }
 
 bool TestPasswordsPrivateDelegate::IsCredentialPresentInInsecureCredentialsList(
     const api::passwords_private::PasswordUiEntry& credential) {
-  return base::Contains(insecure_credentials_, credential.id,
-                        &api::passwords_private::PasswordUiEntry::id);
+  return std::ranges::contains(insecure_credentials_, credential.id,
+                               &api::passwords_private::PasswordUiEntry::id);
 }
 
 void TestPasswordsPrivateDelegate::SwitchBiometricAuthBeforeFillingState(
-    content::WebContents* web_contents) {
+    AuthenticationCallback callback) {
   authenticator_interacted_ = true;
+  std::move(callback).Run(true);
 }
 
 void TestPasswordsPrivateDelegate::ShowAddShortcutDialog(
@@ -396,10 +441,62 @@ void TestPasswordsPrivateDelegate::ShowAddShortcutDialog(
   add_shortcut_dialog_shown_ = true;
 }
 
-void TestPasswordsPrivateDelegate::ShowExportedFileInShell(
-    content::WebContents* web_contents,
-    std::string file_path) {
+void TestPasswordsPrivateDelegate::ShowLastExportedFileInShell(
+    content::WebContents* web_contents) {
   exported_file_shown_in_shell_ = true;
+}
+
+void TestPasswordsPrivateDelegate::ChangePasswordManagerPin(
+    content::WebContents* web_contents,
+    base::OnceCallback<void(bool)> success_callback) {
+  change_password_manager_pin_called_ = true;
+  std::move(success_callback).Run(false);
+}
+
+void TestPasswordsPrivateDelegate::DeleteAllPasswordManagerData(
+    base::OnceCallback<void(bool)> success_callback) {
+  delete_all_password_manager_data_called_ = true;
+  std::move(success_callback).Run(true);
+}
+
+std::optional<password_manager::CredentialUIEntry>
+TestPasswordsPrivateDelegate::GetCredentialFromId(int credential_id) {
+  auto it = credentials_from_id_.find(credential_id);
+  if (it != credentials_from_id_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void TestPasswordsPrivateDelegate::IsPasswordManagerPinAvailable(
+    content::WebContents* web_contents,
+    base::OnceCallback<void(bool)> pin_available_callback) {
+  std::move(pin_available_callback).Run(false);
+}
+
+void TestPasswordsPrivateDelegate::DisconnectCloudAuthenticator(
+    base::OnceCallback<void(bool)> success_callback) {
+  disconnect_cloud_authenticator_called_ = true;
+  std::move(success_callback).Run(false);
+}
+
+bool TestPasswordsPrivateDelegate::IsConnectedToCloudAuthenticator() {
+  return false;
+}
+
+password_manager::ActionableError
+TestPasswordsPrivateDelegate::GetActionableError() {
+  return actionable_error_;
+}
+
+void TestPasswordsPrivateDelegate::SetActionableError(
+    password_manager::ActionableError error) {
+  actionable_error_ = error;
+}
+
+base::WeakPtr<PasswordsPrivateDelegate>
+TestPasswordsPrivateDelegate::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace extensions

@@ -63,12 +63,13 @@ EffectNode& CreateEffectNode(PropertyTrees*,
 // This creates a scroll node that looks like a scroller that wasn't composited
 // (isn't connected to a Layer). This function will also create a matching
 // transform node that is a child of the parent's transform node.
-ScrollNode& CreateScrollNodeForUncompositedScroller(
+ScrollNode& CreateScrollNodeForNonCompositedScroller(
     PropertyTrees* property_trees,
     int parent_id,
     ElementId element_id,
     const gfx::Size& bounds,
-    const gfx::Size& scroll_container_bounds);
+    const gfx::Size& scroll_container_bounds,
+    const gfx::Point& scroll_container_origin = gfx::Point());
 
 void SetupMaskProperties(LayerImpl* masked_layer, PictureLayerImpl* mask_layer);
 void SetupMaskProperties(Layer* masked_layer, PictureLayer* mask_layer);
@@ -80,42 +81,70 @@ const PropertyTrees* GetPropertyTrees(const LayerImpl* layer);
 
 template <typename LayerType>
 TransformNode* GetTransformNode(LayerType* layer) {
-  return GetPropertyTrees(layer)->transform_tree_mutable().Node(
-      layer->transform_tree_index());
+  int index = layer->transform_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->transform_tree_mutable().MutableNode(index);
 }
+
+// TODO(zork): Make this and similar functions return a reference instead of a
+// pointer.
 template <typename LayerType>
 const TransformNode* GetTransformNode(const LayerType* layer) {
-  return GetPropertyTrees(layer)->transform_tree().Node(
-      layer->transform_tree_index());
+  int index = layer->transform_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->transform_tree().Node(index);
 }
 template <typename LayerType>
 ClipNode* GetClipNode(LayerType* layer) {
-  return GetPropertyTrees(layer)->clip_tree_mutable().Node(
-      layer->clip_tree_index());
+  int index = layer->clip_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->clip_tree_mutable().MutableNode(index);
 }
 template <typename LayerType>
 const ClipNode* GetClipNode(const LayerType* layer) {
-  return GetPropertyTrees(layer)->clip_tree().Node(layer->clip_tree_index());
+  int index = layer->clip_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->clip_tree().Node(index);
 }
 template <typename LayerType>
 EffectNode* GetEffectNode(LayerType* layer) {
-  return GetPropertyTrees(layer)->effect_tree_mutable().Node(
-      layer->effect_tree_index());
+  int index = layer->effect_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->effect_tree_mutable().MutableNode(index);
 }
 template <typename LayerType>
 const EffectNode* GetEffectNode(const LayerType* layer) {
-  return GetPropertyTrees(layer)->effect_tree().Node(
-      layer->effect_tree_index());
+  int index = layer->effect_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->effect_tree().Node(index);
 }
 template <typename LayerType>
 ScrollNode* GetScrollNode(LayerType* layer) {
-  return GetPropertyTrees(layer)->scroll_tree_mutable().Node(
-      layer->scroll_tree_index());
+  int index = layer->scroll_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->scroll_tree_mutable().MutableNode(index);
 }
 template <typename LayerType>
 const ScrollNode* GetScrollNode(const LayerType* layer) {
-  return GetPropertyTrees(layer)->scroll_tree().Node(
-      layer->scroll_tree_index());
+  int index = layer->scroll_tree_index();
+  if (index == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  return &GetPropertyTrees(layer)->scroll_tree().Node(index);
 }
 
 void SetScrollOffset(Layer*, const gfx::PointF&);
@@ -129,22 +158,24 @@ void SetLocalTransformChanged(LayerType* layer) {
   DCHECK(layer->has_transform_node());
   auto* transform_node = GetTransformNode(layer);
   transform_node->needs_local_transform_update = true;
-  transform_node->transform_changed = true;
+  transform_node->SetTransformChanged(DamageReason::kUntracked);
   GetPropertyTrees(layer)->transform_tree_mutable().set_needs_update(true);
 }
 
 template <typename LayerType>
 void SetWillChangeTransform(LayerType* layer, bool will_change_transform) {
-  DCHECK(layer->has_transform_node());
+  CHECK(layer->has_transform_node());
   auto* transform_node = GetTransformNode(layer);
+  CHECK(transform_node);
   transform_node->will_change_transform = will_change_transform;
   transform_node->node_or_ancestors_will_change_transform =
       will_change_transform;
-  transform_node->transform_changed = true;
+  transform_node->SetTransformChanged(DamageReason::kUntracked);
   TransformTree& transform_tree =
       GetPropertyTrees(layer)->transform_tree_mutable();
-  transform_tree.UpdateNodeOrAncestorsWillChangeTransform(
-      transform_node, transform_tree.parent(transform_node));
+  auto& parent_node = transform_tree.parent(*transform_node);
+  transform_tree.UpdateNodeOrAncestorsWillChangeTransform(transform_node,
+                                                          parent_node);
   transform_tree.set_needs_update(true);
 }
 
@@ -208,7 +239,7 @@ template <typename LayerType>
 void SetClipRect(LayerType* layer, const gfx::RectF& clip) {
   auto* clip_node = GetClipNode(layer);
   clip_node->clip = clip;
-  GetPropertyTrees(layer)->clip_tree.set_needs_update(true);
+  GetPropertyTrees(layer)->clip_tree_mutable().set_needs_update(true);
 }
 
 // Creates viewport layers and (in layer list mode) paint properties.

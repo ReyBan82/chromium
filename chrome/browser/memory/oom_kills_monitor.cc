@@ -84,7 +84,6 @@ void OOMKillsMonitor::Initialize(PrefService* pref_service) {
 
   if (monitoring_started_) {
     NOTREACHED() << "OOM kiils monitor should only be initialized once";
-    return;
   }
 
   monitoring_started_ = true;
@@ -116,6 +115,23 @@ void OOMKillsMonitor::Initialize(PrefService* pref_service) {
   daily_event_timer_.Start(FROM_HERE, kDailyEventIntervalTimeDelta,
                            daily_event_.get(),
                            &::metrics::DailyEvent::CheckInterval);
+}
+
+void OOMKillsMonitor::Shutdown() {
+  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+  DCHECK(!is_shutdown_);
+
+  if (!monitoring_started_) {
+    return;
+  }
+  is_shutdown_ = true;
+
+  checking_timer_.Stop();
+  daily_event_timer_.Stop();
+
+  daily_event_.reset();
+
+  pref_service_ = nullptr;
 }
 
 // Both host and guest(ARCVM) oom kills are logged to the same histogram
@@ -169,6 +185,9 @@ void OOMKillsMonitor::CheckOOMKillImpl(unsigned long current_oom_kills) {
 }
 
 void OOMKillsMonitor::ReportOOMKills(unsigned long oom_kills_delta) {
+  if (is_shutdown_) {
+    return;
+  }
   for (size_t i = 0; i < oom_kills_delta; ++i) {
     ++oom_kills_count_;
 

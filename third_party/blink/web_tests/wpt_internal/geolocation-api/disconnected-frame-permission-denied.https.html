@@ -7,7 +7,7 @@
 </head>
 <body>
 <script type="module">
-import {GeolocationMock} from './resources/geolocation-mock.js';
+import {GeolocationMock, GeolocationPermissionStatus} from './resources/geolocation-mock.js';
 
 description("Tests that when a request is made on a Geolocation object, permission is denied and its Frame is disconnected before a callback is made, no callbacks are made.");
 
@@ -28,7 +28,7 @@ window.onIframeLoaded = function() {
     });
 }
 
-window.onIframeUnloaded = function() {
+window.onIframePageHidden = function() {
     // Make another request, with permission already denied.
     iframeGeolocation.getCurrentPosition(function () {
         testFailed('Success callback invoked unexpectedly');
@@ -47,7 +47,7 @@ window.onIframeUnloaded = function() {
 // Prime the Geolocation instance by denying permission. This makes sure that we execute the
 // same code path for both preemptive and non-preemptive permissions policies.
 const mock = new GeolocationMock();
-mock.setGeolocationPermission(false);
+mock.setGeolocationPermission(GeolocationPermissionStatus.DENIED);
 mock.setGeolocationPosition(51.478, -0.166, 100);
 
 iframe.src = 'resources/disconnected-frame-inner.html';

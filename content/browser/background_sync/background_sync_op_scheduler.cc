@@ -11,7 +11,6 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/metrics/field_trial_params.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/task/sequenced_task_runner.h"
 #include "build/build_config.h"
 
@@ -57,7 +56,7 @@ void BackgroundSyncOpScheduler::ScheduleOperation(base::OnceClosure closure) {
 
 void BackgroundSyncOpScheduler::CompleteOperationAndRunNext() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(running_operation_);
+  CHECK(running_operation_, base::NotFatalUntil::M159);
   running_operation_ = nullptr;
 
   MaybeRunOperation();

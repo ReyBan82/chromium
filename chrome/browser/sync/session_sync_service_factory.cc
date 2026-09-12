@@ -5,14 +5,15 @@
 #include "chrome/browser/sync/session_sync_service_factory.h"
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/singleton.h"
+#include "base/memory/weak_ptr.h"
+#include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "chrome/browser/favicon/favicon_service_factory.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/sync/data_type_store_service_factory.h"
 #include "chrome/browser/sync/device_info_sync_service_factory.h"
 #include "chrome/browser/sync/glue/sync_start_util.h"
-#include "chrome/browser/sync/model_type_store_service_factory.h"
 #include "chrome/browser/sync/sessions/sync_sessions_web_contents_router.h"
 #include "chrome/browser/sync/sessions/sync_sessions_web_contents_router_factory.h"
 #include "chrome/browser/ui/sync/browser_synced_window_delegates_getter.h"
@@ -20,9 +21,11 @@
 #include "chrome/common/url_constants.h"
 #include "components/dom_distiller/core/url_constants.h"
 #include "components/history/core/browser/history_service.h"
-#include "components/sync/model/model_type_store_service.h"
+#include "components/sync/model/data_type_store_service.h"
+#include "components/sync_device_info/device_info.h"
 #include "components/sync_device_info/device_info_sync_service.h"
 #include "components/sync_device_info/device_info_tracker.h"
+#include "components/sync_device_info/device_name_util.h"
 #include "components/sync_sessions/session_sync_prefs.h"
 #include "components/sync_sessions/session_sync_service_impl.h"
 #include "components/sync_sessions/sync_sessions_client.h"
@@ -41,7 +44,7 @@ bool ShouldSyncURLImpl(const GURL& url) {
 }
 
 // Chrome implementation of SyncSessionsClient.
-class SyncSessionsClientImpl : public sync_sessions::SyncSessionsClient {
+class SyncSessionsClientImpl final : public sync_sessions::SyncSessionsClient {
  public:
   explicit SyncSessionsClientImpl(Profile* profile)
       : profile_(profile), session_sync_prefs_(profile->GetPrefs()) {
@@ -61,13 +64,30 @@ class SyncSessionsClientImpl : public sync_sessions::SyncSessionsClient {
 
   ~SyncSessionsClientImpl() override = default;
 
+  std::optional<std::string> GetSessionDisplayNameFromDeviceInfo(
+      const std::string& session_tag) const override {
+    syncer::DeviceInfoSyncService* service =
+        DeviceInfoSyncServiceFactory::GetForProfile(profile_);
+    CHECK(service);
+
+    const syncer::DeviceInfoTracker* tracker = service->GetDeviceInfoTracker();
+    CHECK(tracker);
+
+    const syncer::DeviceInfo* device_info = tracker->GetDeviceInfo(session_tag);
+    if (!device_info) {
+      return std::nullopt;
+    }
+    return syncer::GetDisplayNameCandidates(device_info)
+        .preferred_name_if_unique;
+  }
+
   // SyncSessionsClient implementation.
   sync_sessions::SessionSyncPrefs* GetSessionSyncPrefs() override {
     return &session_sync_prefs_;
   }
 
-  syncer::RepeatingModelTypeStoreFactory GetStoreFactory() override {
-    return ModelTypeStoreServiceFactory::GetForProfile(profile_)
+  syncer::RepeatingDataTypeStoreFactory GetStoreFactory() override {
+    return DataTypeStoreServiceFactory::GetForProfile(profile_)
         ->GetStoreFactory();
   }
 
@@ -110,11 +130,16 @@ class SyncSessionsClientImpl : public sync_sessions::SyncSessionsClient {
     return router;
   }
 
+  base::WeakPtr<SyncSessionsClient> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
  private:
   const raw_ptr<Profile> profile_;
   std::unique_ptr<sync_sessions::SyncedWindowDelegatesGetter>
       window_delegates_getter_;
   sync_sessions::SessionSyncPrefs session_sync_prefs_;
+  base::WeakPtrFactory<SyncSessionsClientImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace
@@ -128,28 +153,36 @@ sync_sessions::SessionSyncService* SessionSyncServiceFactory::GetForProfile(
 
 // static
 SessionSyncServiceFactory* SessionSyncServiceFactory::GetInstance() {
-  return base::Singleton<SessionSyncServiceFactory>::get();
+  static base::NoDestructor<SessionSyncServiceFactory> instance;
+  return instance.get();
 }
 
 // static
-bool SessionSyncServiceFactory::ShouldSyncURLForTesting(const GURL& url) {
+bool SessionSyncServiceFactory::ShouldSyncURL(const GURL& url) {
   return ShouldSyncURLImpl(url);
 }
 
 SessionSyncServiceFactory::SessionSyncServiceFactory()
-    : ProfileKeyedServiceFactory("SessionSyncService") {
+    : ProfileKeyedServiceFactory(
+          "SessionSyncService",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              .WithGuest(ProfileSelection::kNone)
+              .WithAshInternals(ProfileSelection::kNone)
+              .Build()) {
+  DependsOn(DataTypeStoreServiceFactory::GetInstance());
   DependsOn(DeviceInfoSyncServiceFactory::GetInstance());
   DependsOn(FaviconServiceFactory::GetInstance());
   DependsOn(HistoryServiceFactory::GetInstance());
-  DependsOn(ModelTypeStoreServiceFactory::GetInstance());
   DependsOn(sync_sessions::SyncSessionsWebContentsRouterFactory::GetInstance());
 }
 
 SessionSyncServiceFactory::~SessionSyncServiceFactory() = default;
 
-KeyedService* SessionSyncServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+SessionSyncServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   Profile* profile = Profile::FromBrowserContext(context);
-  return new sync_sessions::SessionSyncServiceImpl(
+  return std::make_unique<sync_sessions::SessionSyncServiceImpl>(
       chrome::GetChannel(), std::make_unique<SyncSessionsClientImpl>(profile));
 }

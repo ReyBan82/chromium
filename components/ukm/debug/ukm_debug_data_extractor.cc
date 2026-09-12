@@ -7,17 +7,26 @@
 #include <inttypes.h>
 
 #include <map>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "base/format_macros.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/to_string.h"
+#include "build/blink_buildflags.h"
+#include "build/build_config.h"
 #include "services/metrics/public/cpp/ukm_decode.h"
 #include "services/metrics/public/cpp/ukm_source.h"
 #include "services/metrics/public/cpp/ukm_source_id.h"
 #include "services/metrics/public/mojom/ukm_interface.mojom.h"
 #include "url/gurl.h"
+
+#if BUILDFLAG(USE_BLINK)
+#include "third_party/blink/public/mojom/use_counter/metrics/webdx_feature.mojom-shared.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/webdx_feature.mojom.h"
+#endif
 
 namespace ukm {
 namespace debug {
@@ -28,7 +37,10 @@ static const uint64_t BIT_FILTER_LAST32 = 0xffffffffULL;
 
 struct SourceData {
   raw_ptr<UkmSource> source;
-  std::vector<mojom::UkmEntry*> entries;
+  std::vector<raw_ptr<mojom::UkmEntry, VectorExperimental>> entries;
+#if BUILDFLAG(USE_BLINK)
+  raw_ptr<const BitSet> webdx_features;
+#endif
 };
 
 std::string GetName(const ukm::builders::EntryDecoder& decoder, uint64_t hash) {
@@ -38,9 +50,9 @@ std::string GetName(const ukm::builders::EntryDecoder& decoder, uint64_t hash) {
   return it->second;
 }
 
-base::Value::Dict ConvertEntryToDict(const ukm::builders::DecodeMap& decode_map,
-                                     const mojom::UkmEntry& entry) {
-  base::Value::Dict entry_dict;
+base::DictValue ConvertEntryToDict(const ukm::builders::DecodeMap& decode_map,
+                                   const mojom::UkmEntry& entry) {
+  base::DictValue entry_dict;
 
   const auto it = decode_map.find(entry.event_hash);
   if (it == decode_map.end()) {
@@ -49,9 +61,9 @@ base::Value::Dict ConvertEntryToDict(const ukm::builders::DecodeMap& decode_map,
   } else {
     entry_dict.Set("name", it->second.name);
 
-    base::Value::List metrics_list;
+    base::ListValue metrics_list;
     for (const auto& metric : entry.metrics) {
-      base::Value::Dict metric_dict;
+      base::DictValue metric_dict;
       metric_dict.Set("name", GetName(it->second, metric.first));
       metric_dict.Set("value",
                       UkmDebugDataExtractor::UInt64AsPairOfInt(metric.second));
@@ -72,7 +84,7 @@ UkmDebugDataExtractor::~UkmDebugDataExtractor() = default;
 base::Value UkmDebugDataExtractor::UInt64AsPairOfInt(uint64_t v) {
   // Convert int64_t to pair of int. Passing int64_t in base::Value is not
   // supported. The pair of int will be passed as a List.
-  base::Value::List int_pair;
+  base::ListValue int_pair;
   int_pair.Append(static_cast<int>((v >> 32) & BIT_FILTER_LAST32));
   int_pair.Append(static_cast<int>(v & BIT_FILTER_LAST32));
   return base::Value(std::move(int_pair));
@@ -84,7 +96,7 @@ base::Value UkmDebugDataExtractor::GetStructuredData(
   if (!ukm_service)
     return {};
 
-  base::Value::Dict ukm_data;
+  base::DictValue ukm_data;
 
   ukm_data.Set("state", ukm_service->recording_enabled_);
   ukm_data.Set("msbb_state", ukm_service->recording_enabled(MSBB));
@@ -106,27 +118,58 @@ base::Value UkmDebugDataExtractor::GetStructuredData(
     source_data[v->source_id].entries.push_back(v.get());
   }
 
-  base::Value::List sources_list;
+#if BUILDFLAG(USE_BLINK)
+  for (const auto& kv : ukm_service->recordings_.webdx_features) {
+    source_data[kv.first].webdx_features = &kv.second;
+  }
+#endif
+
+  base::ListValue sources_list;
   for (const auto& kv : source_data) {
     const auto* src = kv.second.source.get();
 
-    base::Value::Dict source_dict;
+    base::DictValue source_dict;
     if (src) {
       source_dict.Set("id",
                       UkmDebugDataExtractor::UInt64AsPairOfInt(src->id()));
-      source_dict.Set("url", base::Value(src->url().spec()));
       source_dict.Set("type", GetSourceIdTypeDebugString(src->id()));
+      source_dict.Set("url", base::Value(src->url().spec()));
+      if (src->urls().size() > 1) {
+        auto redirects_list =
+            base::ListValue::with_capacity(src->urls().size());
+        for (const auto& url : src->urls()) {
+          redirects_list.Append(url.spec());
+        }
+        source_dict.Set("redirects", std::move(redirects_list));
+      }
     } else {
       source_dict.Set("id", UkmDebugDataExtractor::UInt64AsPairOfInt(kv.first));
       source_dict.Set("type", GetSourceIdTypeDebugString(kv.first));
     }
 
-    base::Value::List entries_list;
-    for (auto* entry : kv.second.entries) {
-      entries_list.Append(ConvertEntryToDict(ukm_service->decode_map_, *entry));
+    base::ListValue entries_list;
+    for (ukm::mojom::UkmEntry* entry : kv.second.entries) {
+      entries_list.Append(
+          ConvertEntryToDict(ukm_service->GetDecodeMap(), *entry));
     }
 
     source_dict.Set("events", std::move(entries_list));
+
+#if BUILDFLAG(USE_BLINK)
+    if (kv.second.webdx_features) {
+      base::ListValue webdx_features_list;
+      for (size_t i = 0; i < kv.second.webdx_features->set_size(); ++i) {
+        if (kv.second.webdx_features->Contains(i)) {
+          // WebDX feature enum names are prefixed with "k" -- omit them.
+          std::string feature_name =
+              base::ToString(static_cast<blink::mojom::WebDXFeature>(i))
+                  .substr(1);
+          webdx_features_list.Append(base::Value(std::move(feature_name)));
+        }
+      }
+      source_dict.Set("webdx_features", std::move(webdx_features_list));
+    }
+#endif
 
     sources_list.Append(std::move(source_dict));
   }

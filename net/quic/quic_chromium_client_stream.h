@@ -10,11 +10,14 @@
 #include <stddef.h>
 
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #include "base/containers/circular_deque.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/idempotency.h"
@@ -25,19 +28,17 @@
 #include "net/http/http_response_info.h"
 #include "net/http/http_stream.h"
 #include "net/log/net_log_with_source.h"
-#include "net/third_party/quiche/src/quiche/quic/core/http/quic_spdy_stream.h"
-#include "net/third_party/quiche/src/quiche/spdy/core/http2_header_block.h"
+#include "net/quic/quic_chromium_client_stream_base.h"
+#include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
+#include "net/third_party/quiche/src/quiche/quic/core/quic_server_id.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 
-namespace quic {
-class QuicSpdyClientSessionBase;
-}  // namespace quic
 namespace net {
 
 // A client-initiated ReliableQuicStream.  Instances of this class
 // are owned by the QuicClientSession which created them.
 class NET_EXPORT_PRIVATE QuicChromiumClientStream
-    : public quic::QuicSpdyStream {
+    : public QuicChromiumClientStreamBase {
  public:
   // Wrapper for interacting with the session in a restricted fashion.
   class NET_EXPORT_PRIVATE Handle {
@@ -56,7 +57,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     // asynchronously when the headers arrive.
     // TODO(rch): Invoke |callback| when there is a stream or connection error
     // instead of calling OnClose() or OnError().
-    int ReadInitialHeaders(spdy::Http2HeaderBlock* header_block,
+    int ReadInitialHeaders(quiche::HttpHeaderBlock* header_block,
                            CompletionOnceCallback callback);
 
     // Reads at most |buffer_len| bytes of body into |buffer| and returns the
@@ -74,7 +75,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     // the headers arrive.
     // TODO(rch): Invoke |callback| when there is a stream or connection error
     // instead of calling OnClose() or OnError().
-    int ReadTrailingHeaders(spdy::Http2HeaderBlock* header_block,
+    int ReadTrailingHeaders(quiche::HttpHeaderBlock* header_block,
                             CompletionOnceCallback callback);
 
     // Writes |header_block| to the peer. Closes the write side if |fin| is
@@ -83,7 +84,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     // an error writing the headers, or the number of bytes written on
     // success. Will not return ERR_IO_PENDING.
     int WriteHeaders(
-        spdy::Http2HeaderBlock header_block,
+        quiche::HttpHeaderBlock header_block,
         bool fin,
         quiche::QuicheReferenceCountedPointer<quic::QuicAckListenerInterface>
             ack_notifier_delegate);
@@ -91,7 +92,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     // Writes |data| to the peer. Closes the write side if |fin| is true.
     // If the data could not be written immediately, returns ERR_IO_PENDING
     // and invokes |callback| asynchronously when the write completes.
-    int WriteStreamData(base::StringPiece data,
+    int WriteStreamData(std::string_view data,
                         bool fin,
                         CompletionOnceCallback callback);
 
@@ -101,6 +102,10 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
                          const std::vector<int>& lengths,
                          bool fin,
                          CompletionOnceCallback callback);
+
+    // Writes |packet| to server by constructing a UDP payload from
+    // packet and sending the datagram on the stream.
+    int WriteConnectUdpPayload(std::string_view packet);
 
     // Reads at most |buf_len| bytes into |buf|. Returns the number of bytes
     // read.
@@ -119,9 +124,17 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     // Sends a RST_STREAM frame to the peer and closes the streams.
     void Reset(quic::QuicRstStreamErrorCode error_code);
 
+    // Registers |visitor| to receive HTTP/3 datagrams on the stream.
+    void RegisterHttp3DatagramVisitor(Http3DatagramVisitor* visitor);
+
+    // Unregisters an HTTP/3 datagram visitor.
+    void UnregisterHttp3DatagramVisitor();
+
     quic::QuicStreamId id() const;
     quic::QuicErrorCode connection_error() const;
     quic::QuicRstStreamErrorCode stream_error() const;
+    uint64_t connection_wire_error() const;
+    uint64_t ietf_application_error() const;
     bool fin_sent() const;
     bool fin_received() const;
     uint64_t stream_bytes_read() const;
@@ -139,10 +152,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
       return headers_received_start_time_;
     }
 
-    // TODO(rch): Move these test-only methods to a peer, or else remove.
-    void OnPromiseHeaderList(quic::QuicStreamId promised_id,
-                             size_t frame_len,
-                             const quic::QuicHeaderList& header_list);
+    // TODO(rch): Move this test-only method to a peer, or else remove.
     bool can_migrate_to_cellular_network();
 
     const NetLogWithSource& net_log() const;
@@ -152,11 +162,25 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     // Returns the idempotency of the request.
     Idempotency GetRequestIdempotency() const;
 
+    // Returns the largest payload that will fit into a single MESSAGE frame at
+    // any point during the connection.  This assumes the version and
+    // connection ID lengths do not change. Returns zero if the stream or
+    // session are closed.
+    quic::QuicPacketLength GetGuaranteedLargestMessagePayload() const;
+
+    bool SupportsH3Datagram() const {
+      return stream_ && stream_->SupportsH3Datagram();
+    }
+
+    // Getter for the time the stream request spent waiting.
+    base::TimeDelta max_stream_limit_pending_delay() const;
+
    private:
     friend class QuicChromiumClientStream;
 
     // Constucts a new Handle for |stream|.
-    explicit Handle(QuicChromiumClientStream* stream);
+    Handle(QuicChromiumClientStream* stream,
+           base::TimeDelta max_stream_limit_pending_delay);
 
     // Methods invoked by the stream.
     void OnEarlyHintsAvailable();
@@ -187,11 +211,11 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     // Callback to be invoked when ReadInitialHeaders completes asynchronously.
     CompletionOnceCallback read_headers_callback_;
     // Provided by the owner of this handle when ReadInitialHeaders is called.
-    raw_ptr<spdy::Http2HeaderBlock> read_headers_buffer_ = nullptr;
+    raw_ptr<quiche::HttpHeaderBlock> read_headers_buffer_ = nullptr;
 
     // Callback to be invoked when ReadBody completes asynchronously.
     CompletionOnceCallback read_body_callback_;
-    raw_ptr<IOBuffer> read_body_buffer_;
+    scoped_refptr<IOBuffer> read_body_buffer_;
     int read_body_buffer_len_ = 0;
 
     // Callback to be invoked when WriteStreamData or WritevStreamData completes
@@ -201,8 +225,12 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
     quic::QuicStreamId id_;
     quic::QuicErrorCode connection_error_;
     quic::QuicRstStreamErrorCode stream_error_;
+    uint64_t connection_wire_error_ = 0;
+    uint64_t ietf_application_error_ = 0;
     bool fin_sent_;
     bool fin_received_;
+    // Visitor on stream is registered to receive HTTP/3 datagrams.
+    bool datagram_visitor_registered_ = false;
     uint64_t stream_bytes_read_;
     uint64_t stream_bytes_written_;
     bool is_done_reading_;
@@ -219,20 +247,19 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
 
     base::TimeTicks headers_received_start_time_;
 
+    base::TimeDelta max_stream_limit_pending_delay_;
+
     base::WeakPtrFactory<Handle> weak_factory_{this};
   };
 
   QuicChromiumClientStream(
       quic::QuicStreamId id,
       quic::QuicSpdyClientSessionBase* session,
+      quic::QuicServerId server_id,
       quic::StreamType type,
       const NetLogWithSource& net_log,
-      const NetworkTrafficAnnotationTag& traffic_annotation);
-  QuicChromiumClientStream(
-      quic::PendingStream* pending,
-      quic::QuicSpdyClientSessionBase* session,
-      const NetLogWithSource& net_log,
-      const NetworkTrafficAnnotationTag& traffic_annotation);
+      const NetworkTrafficAnnotationTag& traffic_annotation,
+      std::optional<base::TimeDelta> max_stream_limit_pending_delay);
 
   QuicChromiumClientStream(const QuicChromiumClientStream&) = delete;
   QuicChromiumClientStream& operator=(const QuicChromiumClientStream&) = delete;
@@ -248,17 +275,15 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
       bool fin,
       size_t frame_len,
       const quic::QuicHeaderList& header_list) override;
-  void OnPromiseHeaderList(quic::QuicStreamId promised_id,
-                           size_t frame_len,
-                           const quic::QuicHeaderList& header_list) override;
   void OnBodyAvailable() override;
   void OnClose() override;
   void OnCanWrite() override;
   size_t WriteHeaders(
-      spdy::Http2HeaderBlock header_block,
+      quiche::HttpHeaderBlock header_block,
       bool fin,
       quiche::QuicheReferenceCountedPointer<quic::QuicAckListenerInterface>
           ack_listener) override;
+  void OnError(int error) override;
 
   // While the server's set_priority shouldn't be called externally, the creator
   // of client-side streams should be able to set the priority.
@@ -267,7 +292,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
   // Writes |data| to the peer and closes the write side if |fin| is true.
   // Returns true if the data have been fully written. If the data was not fully
   // written, returns false and OnCanWrite() will be invoked later.
-  bool WriteStreamData(absl::string_view data, bool fin);
+  bool WriteStreamData(std::string_view data, bool fin);
   // Same as WriteStreamData except it writes data from a vector of IOBuffers,
   // with the length of each buffer at the corresponding index in |lengths|.
   bool WritevStreamData(const std::vector<scoped_refptr<IOBuffer>>& buffers,
@@ -280,9 +305,6 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
   // Clears |handle_| from this stream.
   void ClearHandle();
 
-  // Notifies the stream handle of error, but doesn't close the stream.
-  void OnError(int error);
-
   // Reads at most |buf_len| bytes into |buf|. Returns the number of bytes read.
   int Read(IOBuffer* buf, int buf_len);
 
@@ -292,19 +314,28 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
   // when connection migrates to a cellular network.
   void DisableConnectionMigrationToCellularNetwork();
 
-  bool can_migrate_to_cellular_network() {
-    return can_migrate_to_cellular_network_;
-  }
+  // True if the underlying QUIC session supports HTTP/3 Datagrams.
+  bool SupportsH3Datagram() const;
+
+  // Returns the largest payload that will fit into a single MESSAGE frame at
+  // any point during the connection.  This assumes the version and
+  // connection ID lengths do not change. Returns zero if the stream or
+  // session are closed.
+  quic::QuicPacketLength GetGuaranteedLargestMessagePayload() const;
 
   // True if this stream is the first data stream created on this session.
   bool IsFirstStream();
 
-  int DeliverEarlyHints(spdy::Http2HeaderBlock* header_block);
+  int DeliverEarlyHints(quiche::HttpHeaderBlock* header_block);
 
-  int DeliverInitialHeaders(spdy::Http2HeaderBlock* header_block);
+  int DeliverInitialHeaders(quiche::HttpHeaderBlock* header_block);
 
-  bool DeliverTrailingHeaders(spdy::Http2HeaderBlock* header_block,
+  bool DeliverTrailingHeaders(quiche::HttpHeaderBlock* header_block,
                               int* frame_len);
+
+  static constexpr char kHttp3DatagramDroppedHistogram[] =
+      "Net.QuicChromiumClientStream."
+      "Http3DatagramDroppedOnWriteConnectUdpPayload";
 
   using quic::QuicSpdyStream::HasBufferedData;
   using quic::QuicStream::sequencer;
@@ -324,11 +355,8 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
   bool initial_headers_sent_ = false;
 
   raw_ptr<quic::QuicSpdyClientSessionBase> session_;
+  const quic::QuicServerId server_id_;
   quic::QuicTransportVersion quic_version_;
-
-  // Set to false if this stream should not be migrated to a cellular network
-  // during connection migration.
-  bool can_migrate_to_cellular_network_ = true;
 
   // True if non-informational (non-1xx) initial headers have arrived.
   bool initial_headers_arrived_ = false;
@@ -336,7 +364,7 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
   // the handle.
   bool headers_delivered_ = false;
   // Stores the initial header until they are delivered to the handle.
-  spdy::Http2HeaderBlock initial_headers_;
+  quiche::HttpHeaderBlock initial_headers_;
   // Length of the HEADERS frame containing initial headers.
   size_t initial_headers_frame_len_ = 0;
 
@@ -344,17 +372,20 @@ class NET_EXPORT_PRIVATE QuicChromiumClientStream
   size_t trailing_headers_frame_len_ = 0;
 
   struct EarlyHints {
-    EarlyHints(spdy::Http2HeaderBlock headers, size_t frame_len)
+    EarlyHints(quiche::HttpHeaderBlock headers, size_t frame_len)
         : headers(std::move(headers)), frame_len(frame_len) {}
     EarlyHints(EarlyHints&& other) = default;
     EarlyHints& operator=(EarlyHints&& other) = default;
     EarlyHints(const EarlyHints& other) = delete;
     EarlyHints& operator=(const EarlyHints& other) = delete;
 
-    spdy::Http2HeaderBlock headers;
+    quiche::HttpHeaderBlock headers;
     size_t frame_len = 0;
   };
   base::circular_deque<EarlyHints> early_hints_;
+
+  // Only set when this is an outgoing stream.
+  std::optional<base::TimeDelta> max_stream_limit_pending_delay_;
 
   base::WeakPtrFactory<QuicChromiumClientStream> weak_factory_{this};
 };

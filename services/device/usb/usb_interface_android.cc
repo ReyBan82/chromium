@@ -4,8 +4,10 @@
 
 #include "services/device/usb/usb_interface_android.h"
 
-#include "services/device/usb/jni_headers/ChromeUsbInterface_jni.h"
 #include "services/device/usb/usb_endpoint_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "services/device/usb/jni_headers/ChromeUsbInterface_jni.h"
 
 using base::android::ScopedJavaLocalRef;
 
@@ -28,8 +30,9 @@ mojom::UsbInterfaceInfoPtr UsbInterfaceAndroid::Convert(
       Java_ChromeUsbInterface_getInterfaceSubclass(env, wrapper),
       Java_ChromeUsbInterface_getInterfaceProtocol(env, wrapper));
 
-  base::android::JavaObjectArrayReader<jobject> endpoints(
-      Java_ChromeUsbInterface_getEndpoints(env, wrapper));
+  ScopedJavaLocalRef<jobjectArray> endpoints_array =
+      Java_ChromeUsbInterface_getEndpoints(env, wrapper);
+  jni_zero::JArrayView<jobject> endpoints = endpoints_array.CreateView(env);
   interface->alternates[0]->endpoints.reserve(endpoints.size());
   for (auto endpoint : endpoints) {
     interface->alternates[0]->endpoints.push_back(
@@ -40,3 +43,5 @@ mojom::UsbInterfaceInfoPtr UsbInterfaceAndroid::Convert(
 }
 
 }  // namespace device
+
+DEFINE_JNI(ChromeUsbInterface)

@@ -6,11 +6,13 @@ package org.chromium.ui.widget;
 
 import android.graphics.Rect;
 
-/**
- * Provides a {@link Rect} object that represents a position in screen space.
- */
+import org.chromium.base.ObserverList;
+import org.chromium.build.annotations.NullMarked;
+
+/** Provides a {@link Rect} object that represents a position in screen space. */
+@NullMarked
 public class RectProvider {
-    /** An observer to be notified of changes to the {@Rect} position. */
+    /** An observer to be notified of changes to the {@link Rect} position. */
     public interface Observer {
         /**
          * Called when the {@link Rect} location has changed. The new {@link Rect} can be retrieved
@@ -23,12 +25,12 @@ public class RectProvider {
     }
 
     /**
-     * The {@link Rect} provided by this provider. This is the Rect that will be passed to
-     * observers and returned from {@link #getRect()}.
+     * The {@link Rect} provided by this provider. This is the Rect that will be passed to observers
+     * and returned from {@link #getRect()}.
      */
     protected final Rect mRect = new Rect();
 
-    private Observer mObserver;
+    private final ObserverList<Observer> mObservers = new ObserverList<>();
 
     /** Creates an instance of a {@link RectProvider}. */
     public RectProvider() {}
@@ -53,19 +55,25 @@ public class RectProvider {
     /**
      * Start observing changes to the {@link Rect}'s position in the window. This does not guarantee
      * an immediate call to observer methods. Use {@link #getRect()} to retrieve the {@link Rect}.
+     *
      * @param observer The {@link Observer} to be notified of changes.
      */
     public void startObserving(Observer observer) {
-        assert mObserver == null || mObserver == observer;
-
-        mObserver = observer;
+        mObservers.addObserver(observer);
     }
 
     /**
      * Stop observing changes to the {@link Rect}'s position in the window.
+     *
+     * @param observer The {@link Observer} to remove.
      */
+    public void stopObserving(Observer observer) {
+        mObservers.removeObserver(observer);
+    }
+
+    /** Stop observing changes to the {@link Rect}'s position in the window. */
     public void stopObserving() {
-        mObserver = null;
+        mObservers.clear();
     }
 
     /** @return The {@link Rect} that this provider represents. */
@@ -75,11 +83,15 @@ public class RectProvider {
 
     /** Notify the observer that the {@link Rect} changed. */
     protected void notifyRectChanged() {
-        if (mObserver != null) mObserver.onRectChanged();
+        for (Observer observer : mObservers) {
+            observer.onRectChanged();
+        }
     }
 
     /** Notify the observer that the {@link Rect} is hidden. */
     protected void notifyRectHidden() {
-        if (mObserver != null) mObserver.onRectHidden();
+        for (Observer observer : mObservers) {
+            observer.onRectHidden();
+        }
     }
 }

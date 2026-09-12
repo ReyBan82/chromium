@@ -13,7 +13,28 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class CWVAutofillForm;
 @class CWVAutofillSuggestion;
+@class CWVCreditCard;
 @protocol CWVAutofillControllerDelegate;
+
+// The error domain for autofill errors.
+FOUNDATION_EXPORT CWV_EXPORT NSErrorDomain const CWVAutofillErrorDomain;
+
+// A block that takes a full credit card and an optional error.
+// Nullability annotations are used here because either argument can be nil
+// depending on the success of the operation.
+typedef void (^CWVFetchFullCardDetailsCompletionHandler)(
+    CWVCreditCard* _Nullable fullCard,
+    NSError* _Nullable error);
+
+// Possible error codes for autofill.
+typedef NS_ENUM(NSInteger, CWVAutofillError) {
+  // An unknown error occurred.
+  CWVAutofillErrorUnknown = -1,
+  // The web frame no longer exists.
+  CWVAutofillErrorNoWebFrame = -2,
+  // The autofill driver no longer exists.
+  CWVAutofillErrorNoAutofillDriver = -3,
+};
 
 // Exposes features that allow autofilling html forms. May include autofilling
 // of single fields, address forms, credit card forms, or password forms.
@@ -25,32 +46,20 @@ CWV_EXPORT
 
 - (instancetype)init NS_UNAVAILABLE;
 
-// Clears the fields that belong to the same autofill section as the field
-// identified by |fieldIdentifier| in the form named |formName| in frame
-// |frameID|.
-// No-op if no such form can be found in the current page. If the field
-// identified by |fieldIdentifier| cannot be found the entire form gets cleared.
-// |fieldIdentifier| identifies the field that had focus. It is passed to
-// CWVAutofillControllerDelegate and forwarded to this method.
-// |completionHandler| will only be called on success.
-- (void)clearFormWithName:(NSString*)formName
-          fieldIdentifier:(NSString*)fieldIdentifier
-                  frameID:(NSString*)frameID
-        completionHandler:(nullable void (^)(void))completionHandler;
-
 // For the field identified by |fieldIdentifier|, with type |fieldType| in the
 // form named |formName|, fetches suggestions that can be used to autofill.
 // No-op if no such form and field can be found in the current page.
 // |fieldIdentifier| identifies the field that had focus. It is passed to
 // CWVAutofillControllerDelegate and forwarded to this method.
-// |fieldType| is the 'type' attribute of the html field.
+// |fieldType| is the 'type' attribute of the html field. Its integer value maps
+// to the autofill::FormActivityParams::FieldType enum.
 // |frameID| is the ID of the web frame containing the form.
 // |completionHandler| will only be called on success.
 // Note: It will return password suggestions over profile/credit card
 // suggestions.
 - (void)fetchSuggestionsForFormWithName:(NSString*)formName
                         fieldIdentifier:(NSString*)fieldIdentifier
-                              fieldType:(NSString*)fieldType
+                              fieldType:(NSInteger)fieldType
                                 frameID:(NSString*)frameID
                       completionHandler:
                           (void (^)(NSArray<CWVAutofillSuggestion*>*))
@@ -60,10 +69,27 @@ CWV_EXPORT
 // |fieldIdentifier| property and executes the appropriate action.
 // If |suggestion| is a form suggestion, the form will be autofilled.
 // Else, the |suggestions|'s action will be taken.
-// No-op if no such form and field can be found in the current page.
+// No-op if no such form and field can be found in the current page. |index|
+// indicates the position of |suggestion| among the available suggestions.
 // |completionHandler| will only be called on success.
 - (void)acceptSuggestion:(CWVAutofillSuggestion*)suggestion
+                 atIndex:(NSInteger)index
        completionHandler:(nullable void (^)(void))completionHandler;
+
+// Takes the |creditCard| and creates a suggestion for it. It then finds the
+// form matching it's |formName| and |fieldIdentifier| property and executes the
+// appropriate action. This function operates similarly to
+// acceptSuggestion:atIndex:completionHandler.
+- (void)acceptCreditCardAsSuggestion:(CWVCreditCard*)creditCard
+                             atIndex:(NSInteger)index
+                   completionHandler:(nullable void (^)(void))completionHandler;
+
+// Fetches the full details of |creditCard|.
+// This may trigger a verification UI (e.g. CVC prompt) if the card is masked.
+// The resulting |fullCard| will contain the full card number and CVC.
+- (void)fetchFullCardDetailsForCard:(CWVCreditCard*)creditCard
+                  completionHandler:(CWVFetchFullCardDetailsCompletionHandler)
+                                        completionHandler;
 
 // Changes focus to the previous sibling of the currently focused field.
 // No-op if no field is currently focused or if previous field is not available.

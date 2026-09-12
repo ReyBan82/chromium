@@ -4,14 +4,15 @@
 
 #include "media/gpu/vaapi/vaapi_utils.h"
 
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 
-#include "base/cxx17_backports.h"
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/synchronization/lock.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "media/gpu/vaapi/vaapi_common.h"
 #include "media/gpu/vaapi/vaapi_wrapper.h"
 #include "media/gpu/vp8_picture.h"
@@ -20,56 +21,45 @@
 
 namespace media {
 
-namespace {
-
-template <typename To, typename From>
-void CheckedMemcpy(To& to, From& from) {
-  static_assert(std::is_array<To>::value, "First parameter must be an array");
-  static_assert(std::is_array<From>::value,
-                "Second parameter must be an array");
-  static_assert(sizeof(to) == sizeof(from), "arrays must be of same size");
-  memcpy(&to, &from, sizeof(to));
-}
-
-}  // namespace
-
-ScopedVABufferMapping::ScopedVABufferMapping(
+// static
+std::unique_ptr<ScopedVABufferMapping> ScopedVABufferMapping::Create(
     const base::Lock* lock,
     VADisplay va_display,
-    VABufferID buffer_id,
-    base::OnceCallback<void(VABufferID)> release_callback)
-    : lock_(lock), va_display_(va_display), buffer_id_(buffer_id) {
-  MAYBE_ASSERT_ACQUIRED(lock_);
+    VABufferID buffer_id) {
+  DCHECK(va_display);
   DCHECK_NE(buffer_id, VA_INVALID_ID);
+  MAYBE_ASSERT_ACQUIRED(lock);
 
-  const VAStatus result =
-      vaMapBuffer(va_display_, buffer_id_, &va_buffer_data_);
-  const bool success = result == VA_STATUS_SUCCESS;
-  LOG_IF(ERROR, !success) << "vaMapBuffer failed: " << vaErrorStr(result);
-  DCHECK(success == (va_buffer_data_ != nullptr))
-      << "|va_buffer_data| should be null if vaMapBuffer() fails";
+  void* va_buffer_data;
+  const VAStatus result = vaMapBuffer(va_display, buffer_id, &va_buffer_data);
+  if (result != VA_STATUS_SUCCESS) {
+    LOG(ERROR) << "vaMapBuffer failed: " << vaErrorStr(result);
+    return nullptr;
+  }
+  CHECK(va_buffer_data)
+      << "va_buffer_data must not be null if vaMapBuffer() succeeds";
 
-  if (!success && release_callback)
-    std::move(release_callback).Run(buffer_id_);
+  return base::WrapUnique(
+      new ScopedVABufferMapping(lock, va_display, buffer_id, va_buffer_data));
 }
+
+ScopedVABufferMapping::ScopedVABufferMapping(const base::Lock* lock,
+                                             VADisplay va_display,
+                                             VABufferID buffer_id,
+                                             void* va_buffer_data)
+    : lock_(lock),
+      va_display_(va_display),
+      buffer_id_(buffer_id),
+      va_buffer_data_(va_buffer_data) {}
 
 ScopedVABufferMapping::~ScopedVABufferMapping() {
   CHECK(sequence_checker_.CalledOnValidSequence());
-  if (va_buffer_data_) {
-    MAYBE_ASSERT_ACQUIRED(lock_);
-    Unmap();
-  }
-}
-
-VAStatus ScopedVABufferMapping::Unmap() {
-  CHECK(sequence_checker_.CalledOnValidSequence());
+  CHECK(va_buffer_data_);
   MAYBE_ASSERT_ACQUIRED(lock_);
-  const VAStatus result = vaUnmapBuffer(va_display_, buffer_id_);
-  if (result == VA_STATUS_SUCCESS)
-    va_buffer_data_ = nullptr;
-  else
+  if (VAStatus result = vaUnmapBuffer(va_display_, buffer_id_);
+      result != VA_STATUS_SUCCESS) {
     LOG(ERROR) << "vaUnmapBuffer failed: " << vaErrorStr(result);
-  return result;
+  }
 }
 
 // static
@@ -133,42 +123,77 @@ ScopedVABuffer::~ScopedVABuffer() {
       << "Failed to destroy a VA buffer: " << vaErrorStr(va_res);
 }
 
-ScopedVAImage::ScopedVAImage(base::Lock* lock,
-                             VADisplay va_display,
-                             VASurfaceID va_surface_id,
-                             VAImageFormat* format,
-                             const gfx::Size& size)
-    : lock_(lock), va_display_(va_display), image_(new VAImage{}) {
-  MAYBE_ASSERT_ACQUIRED(lock_);
-  VAStatus result = vaCreateImage(va_display_, format, size.width(),
-                                  size.height(), image_.get());
-  if (result != VA_STATUS_SUCCESS) {
-    DCHECK_EQ(image_->image_id, VA_INVALID_ID);
-    LOG(ERROR) << "vaCreateImage failed: " << vaErrorStr(result);
-    return;
-  }
-  DCHECK_NE(image_->image_id, VA_INVALID_ID);
+// static
+std::unique_ptr<ScopedVAImage> ScopedVAImage::Create(
+    base::Lock* lock,
+    VADisplay va_display,
+    VASurfaceID va_surface_id,
+    const VAImageFormat& format,
+    const gfx::Size& size) {
+  DCHECK(va_display);
+  DCHECK_NE(va_surface_id, VA_INVALID_ID);
+  DCHECK(!size.IsEmpty());
+  MAYBE_ASSERT_ACQUIRED(lock);
 
-  result = vaGetImage(va_display_, va_surface_id, 0, 0, size.width(),
-                      size.height(), image_->image_id);
+  VAImage image{};
+  VAImageFormat format_copy = format;
+  VAStatus result = vaCreateImage(va_display, &format_copy, size.width(),
+                                  size.height(), &image);
+  if (result != VA_STATUS_SUCCESS) {
+    DCHECK_EQ(image.image_id, VA_INVALID_ID);
+    LOG(ERROR) << "vaCreateImage failed: " << vaErrorStr(result);
+    return nullptr;
+  }
+  CHECK_EQ(format.fourcc, format_copy.fourcc);
+  CHECK_EQ(format.byte_order, format_copy.byte_order);
+  CHECK_EQ(format.bits_per_pixel, format_copy.bits_per_pixel);
+  CHECK_EQ(format.depth, format_copy.depth);
+  CHECK_EQ(format.red_mask, format_copy.red_mask);
+  CHECK_EQ(format.green_mask, format_copy.green_mask);
+  CHECK_EQ(format.blue_mask, format_copy.blue_mask);
+  CHECK_EQ(format.alpha_mask, format_copy.alpha_mask);
+
+  DCHECK_NE(image.image_id, VA_INVALID_ID);
+
+  result = vaGetImage(va_display, va_surface_id, 0, 0, size.width(),
+                      size.height(), image.image_id);
   if (result != VA_STATUS_SUCCESS) {
     LOG(ERROR) << "vaGetImage failed: " << vaErrorStr(result);
-    return;
+    result = vaDestroyImage(va_display, image.image_id);
+    LOG_IF(ERROR, result != VA_STATUS_SUCCESS)
+        << "vaDestroyImage failed: " << vaErrorStr(result);
+    return nullptr;
+  }
+  std::unique_ptr<ScopedVABufferMapping> va_buffer =
+      ScopedVABufferMapping::Create(lock, va_display, image.buf);
+  if (!va_buffer) {
+    result = vaDestroyImage(va_display, image.image_id);
+    LOG_IF(ERROR, result != VA_STATUS_SUCCESS)
+        << "vaDestroyImage failed: " << vaErrorStr(result);
+    return nullptr;
   }
 
-  va_buffer_ =
-      std::make_unique<ScopedVABufferMapping>(lock_, va_display, image_->buf);
+  return base::WrapUnique(
+      new ScopedVAImage(lock, va_display, image, std::move(va_buffer)));
 }
+
+ScopedVAImage::ScopedVAImage(base::Lock* lock,
+                             VADisplay va_display,
+                             const VAImage& image,
+                             std::unique_ptr<ScopedVABufferMapping> va_buffer)
+    : lock_(lock),
+      va_display_(va_display),
+      image_(image),
+      va_buffer_(std::move(va_buffer)) {}
 
 ScopedVAImage::~ScopedVAImage() {
   CHECK(sequence_checker_.CalledOnValidSequence());
-  if (image_->image_id != VA_INVALID_ID) {
-    base::AutoLockMaybe auto_lock(lock_.get());
+  CHECK_NE(image_.image_id, VA_INVALID_ID);
+  base::AutoLockMaybe auto_lock(lock_.get());
 
-    // |va_buffer_| has to be deleted before vaDestroyImage().
-    va_buffer_.reset();
-    vaDestroyImage(va_display_, image_->image_id);
-  }
+  // |va_buffer_| has to be deleted before vaDestroyImage().
+  va_buffer_.reset();
+  vaDestroyImage(va_display_, image_.image_id);
 }
 
 ScopedVASurface::ScopedVASurface(scoped_refptr<VaapiWrapper> vaapi_wrapper,
@@ -218,22 +243,24 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
       }
     }
 
-#define CLAMP_Q(q) base::clamp(q, 0, 127)
-    iq_matrix_buf->quantization_index[i][0] = CLAMP_Q(q);
-    iq_matrix_buf->quantization_index[i][1] = CLAMP_Q(q + quant_hdr.y_dc_delta);
-    iq_matrix_buf->quantization_index[i][2] =
-        CLAMP_Q(q + quant_hdr.y2_dc_delta);
-    iq_matrix_buf->quantization_index[i][3] =
-        CLAMP_Q(q + quant_hdr.y2_ac_delta);
-    iq_matrix_buf->quantization_index[i][4] =
-        CLAMP_Q(q + quant_hdr.uv_dc_delta);
-    iq_matrix_buf->quantization_index[i][5] =
-        CLAMP_Q(q + quant_hdr.uv_ac_delta);
+#define CLAMP_Q(q) std::clamp(q, 0, 127)
+    UNSAFE_TODO(iq_matrix_buf->quantization_index[i])[0] = CLAMP_Q(q);
+    UNSAFE_TODO(iq_matrix_buf->quantization_index[i])
+    [1] = CLAMP_Q(q + quant_hdr.y_dc_delta);
+    UNSAFE_TODO(iq_matrix_buf->quantization_index[i])
+    [2] = CLAMP_Q(q + quant_hdr.y2_dc_delta);
+    UNSAFE_TODO(iq_matrix_buf->quantization_index[i])
+    [3] = CLAMP_Q(q + quant_hdr.y2_ac_delta);
+    UNSAFE_TODO(iq_matrix_buf->quantization_index[i])
+    [4] = CLAMP_Q(q + quant_hdr.uv_dc_delta);
+    UNSAFE_TODO(iq_matrix_buf->quantization_index[i])
+    [5] = CLAMP_Q(q + quant_hdr.uv_ac_delta);
 #undef CLAMP_Q
   }
 
   const Vp8EntropyHeader& entr_hdr = frame_header.entropy_hdr;
-  CheckedMemcpy(prob_buf->dct_coeff_probs, entr_hdr.coeff_probs);
+  base::as_writable_byte_span(prob_buf->dct_coeff_probs)
+      .copy_from(base::as_byte_span(entr_hdr.coeff_probs));
 
   pic_param->frame_width = frame_header.width;
   pic_param->frame_height = frame_header.height;
@@ -241,7 +268,7 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
   const auto last_frame = reference_frames.GetFrame(Vp8RefType::VP8_FRAME_LAST);
   if (last_frame) {
     pic_param->last_ref_frame =
-        last_frame->AsVaapiVP8Picture()->GetVASurfaceID();
+        last_frame->AsVaapiVP8Picture()->va_surface_id();
   } else {
     pic_param->last_ref_frame = VA_INVALID_SURFACE;
   }
@@ -250,7 +277,7 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
       reference_frames.GetFrame(Vp8RefType::VP8_FRAME_GOLDEN);
   if (golden_frame) {
     pic_param->golden_ref_frame =
-        golden_frame->AsVaapiVP8Picture()->GetVASurfaceID();
+        golden_frame->AsVaapiVP8Picture()->va_surface_id();
   } else {
     pic_param->golden_ref_frame = VA_INVALID_SURFACE;
   }
@@ -258,7 +285,7 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
   const auto alt_frame =
       reference_frames.GetFrame(Vp8RefType::VP8_FRAME_ALTREF);
   if (alt_frame)
-    pic_param->alt_ref_frame = alt_frame->AsVaapiVP8Picture()->GetVASurfaceID();
+    pic_param->alt_ref_frame = alt_frame->AsVaapiVP8Picture()->va_surface_id();
   else
     pic_param->alt_ref_frame = VA_INVALID_SURFACE;
 
@@ -284,9 +311,10 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
   FHDR_TO_PP_PF(loop_filter_disable, lf_hdr.level == 0);
 #undef FHDR_TO_PP_PF
 
-  CheckedMemcpy(pic_param->mb_segment_tree_probs, sgmnt_hdr.segment_prob);
+  base::span(pic_param->mb_segment_tree_probs)
+      .copy_from(sgmnt_hdr.segment_prob);
 
-  static_assert(std::extent<decltype(sgmnt_hdr.lf_update_value)>() ==
+  static_assert(std::tuple_size_v<decltype(sgmnt_hdr.lf_update_value)> ==
                     std::extent<decltype(pic_param->loop_filter_level)>(),
                 "loop filter level arrays mismatch");
   for (size_t i = 0; i < std::size(sgmnt_hdr.lf_update_value); ++i) {
@@ -300,22 +328,24 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
       }
     }
 
-    pic_param->loop_filter_level[i] = base::clamp(lf_level, 0, 63);
+    UNSAFE_TODO(pic_param->loop_filter_level[i]) = std::clamp(lf_level, 0, 63);
   }
 
   static_assert(
-      std::extent<decltype(lf_hdr.ref_frame_delta)>() ==
+      std::tuple_size_v<decltype(lf_hdr.ref_frame_delta)> ==
           std::extent<decltype(pic_param->loop_filter_deltas_ref_frame)>(),
       "loop filter deltas arrays size mismatch");
-  static_assert(std::extent<decltype(lf_hdr.mb_mode_delta)>() ==
+  static_assert(std::tuple_size_v<decltype(lf_hdr.mb_mode_delta)> ==
                     std::extent<decltype(pic_param->loop_filter_deltas_mode)>(),
                 "loop filter deltas arrays size mismatch");
-  static_assert(std::extent<decltype(lf_hdr.ref_frame_delta)>() ==
-                    std::extent<decltype(lf_hdr.mb_mode_delta)>(),
+  static_assert(std::tuple_size_v<decltype(lf_hdr.ref_frame_delta)> ==
+                    std::tuple_size_v<decltype(lf_hdr.mb_mode_delta)>,
                 "loop filter deltas arrays size mismatch");
   for (size_t i = 0; i < std::size(lf_hdr.ref_frame_delta); ++i) {
-    pic_param->loop_filter_deltas_ref_frame[i] = lf_hdr.ref_frame_delta[i];
-    pic_param->loop_filter_deltas_mode[i] = lf_hdr.mb_mode_delta[i];
+    UNSAFE_TODO(pic_param->loop_filter_deltas_ref_frame[i]) =
+        lf_hdr.ref_frame_delta[i];
+    UNSAFE_TODO(pic_param->loop_filter_deltas_mode[i]) =
+        lf_hdr.mb_mode_delta[i];
   }
 
 #define FHDR_TO_PP(a) pic_param->a = frame_header.a
@@ -325,9 +355,10 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
   FHDR_TO_PP(prob_gf);
 #undef FHDR_TO_PP
 
-  CheckedMemcpy(pic_param->y_mode_probs, entr_hdr.y_mode_probs);
-  CheckedMemcpy(pic_param->uv_mode_probs, entr_hdr.uv_mode_probs);
-  CheckedMemcpy(pic_param->mv_probs, entr_hdr.mv_probs);
+  base::span(pic_param->y_mode_probs).copy_from(entr_hdr.y_mode_probs);
+  base::span(pic_param->uv_mode_probs).copy_from(entr_hdr.uv_mode_probs);
+  base::as_writable_byte_span(pic_param->mv_probs)
+      .copy_from(base::as_byte_span(entr_hdr.mv_probs));
 
   pic_param->bool_coder_ctx.range = frame_header.bool_dec_range;
   pic_param->bool_coder_ctx.value = frame_header.bool_dec_value;
@@ -347,16 +378,17 @@ void FillVP8DataStructures(const Vp8FrameHeader& frame_header,
       ((frame_header.macroblock_bit_offset + 7) / 8);
 
   for (size_t i = 0; i < frame_header.num_of_dct_partitions; ++i)
-    slice_param->partition_size[i + 1] = frame_header.dct_partition_sizes[i];
+    UNSAFE_TODO(slice_param->partition_size[i + 1]) =
+        frame_header.dct_partition_sizes[i];
 }
 
 bool IsValidVABufferType(VABufferType type) {
   return type < VABufferTypeMax ||
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
          // TODO(jkardatzke): Remove this once we update to libva 2.0.10 in
          // ChromeOS.
          type == VAEncryptionParameterBufferType ||
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
          type == VACencStatusParameterBufferType;
 }
 

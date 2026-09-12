@@ -12,6 +12,7 @@
 #include "ash/app_list/app_list_model_provider.h"
 #include "ash/app_list/views/search_result_container_view.h"
 #include "ash/ash_export.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "ui/base/metadata/metadata_header_macros.h"
@@ -23,16 +24,16 @@ class AppListViewDelegate;
 class ResultSelectionController;
 class SearchBoxView;
 class SearchResultPageDialogController;
+class SearchResultImageListView;
 
-// The search results view for productivity launcher. Contains a scrolling list
-// of search results. Does not include the search box, which is owned by a
-// parent view.
+// Contains a scrolling list of search results. Does not include the search box,
+// which is owned by a parent view.
 class ASH_EXPORT AppListSearchView : public views::View,
                                      public SearchResultContainerView::Delegate,
                                      public AppListModelProvider::Observer {
- public:
-  METADATA_HEADER(AppListSearchView);
+  METADATA_HEADER(AppListSearchView, views::View)
 
+ public:
   AppListSearchView(AppListViewDelegate* view_delegate,
                     SearchResultPageDialogController* dialog_controller,
                     SearchBoxView* search_box_view);
@@ -45,7 +46,6 @@ class ASH_EXPORT AppListSearchView : public views::View,
   void OnSearchResultContainerResultsChanged() override;
 
   // views::View:
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override;
   void VisibilityChanged(View* starting_from, bool is_visible) override;
 
   // AppListModelProvider::Observer:
@@ -68,7 +68,8 @@ class ASH_EXPORT AppListSearchView : public views::View,
   // is an implementation detail.
   ui::Layer* GetPageAnimationLayer() const;
 
-  std::vector<SearchResultContainerView*> result_container_views_for_test() {
+  std::vector<raw_ptr<SearchResultContainerView, VectorExperimental>>
+  result_container_views_for_test() {
     return result_container_views_;
   }
 
@@ -76,7 +77,16 @@ class ASH_EXPORT AppListSearchView : public views::View,
     return result_selection_controller_.get();
   }
 
+  SearchBoxView* search_box_view() { return search_box_view_.get(); }
+
+  SearchResultImageListView* image_search_container() {
+    return image_search_container_;
+  }
+
  private:
+  // views::View:
+  void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
+
   // Passed to |result_selection_controller_| as a callback that gets called
   // when the currently selected result changes.
   // Scrolls the list view to the newly selected result.
@@ -109,12 +119,19 @@ class ASH_EXPORT AppListSearchView : public views::View,
   // result view unless overridden by |ignore_result_changes_for_a11y_|.
   void MaybeNotifySelectedResultChanged();
 
-  SearchResultPageDialogController* const dialog_controller_;
+  // A callback that is triggered when the toast button of the search notifier
+  // is pressed.
+  void OnSearchNotifierButtonPressed();
 
-  SearchBoxView* const search_box_view_;
+  void UpdateAccessibleValue();
+
+  const raw_ptr<SearchResultPageDialogController, DanglingUntriaged>
+      dialog_controller_;
+
+  const raw_ptr<SearchBoxView, DanglingUntriaged> search_box_view_;
 
   // The scroll view that contains all the result_container_views_.
-  views::ScrollView* scroll_view_ = nullptr;
+  raw_ptr<views::ScrollView> scroll_view_ = nullptr;
 
   // Whether changes in search result containers are hidden from the
   // accessibility framework.
@@ -122,7 +139,12 @@ class ASH_EXPORT AppListSearchView : public views::View,
 
   // Containers for search result views. The contained views are owned by the
   // views hierarchy. Used by result_selection_controller_.
-  std::vector<SearchResultContainerView*> result_container_views_;
+  std::vector<raw_ptr<SearchResultContainerView, VectorExperimental>>
+      result_container_views_;
+
+  // The container of the image search results. This is owned by the views
+  // hierarchy and is an element in result_container_views_;
+  raw_ptr<SearchResultImageListView> image_search_container_ = nullptr;
 
   // Cache of the last shown search results' animation metadata.
   std::vector<SearchResultContainerView::SearchResultAimationMetadata>
@@ -135,10 +157,12 @@ class ASH_EXPORT AppListSearchView : public views::View,
   base::OneShotTimer notify_a11y_results_changed_timer_;
 
   // Stores the last time fast search result update animations were used.
-  absl::optional<base::TimeTicks> search_result_fast_update_time_;
+  std::optional<base::TimeTicks> search_result_fast_update_time_;
 
   // The last reported number of search results shown by all containers.
   int last_search_result_count_ = 0;
+
+  base::WeakPtrFactory<AppListSearchView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

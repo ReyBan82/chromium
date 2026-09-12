@@ -4,6 +4,7 @@
 
 #include "chrome/browser/extensions/api/image_writer_private/image_writer_utility_client.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/files/file_path.h"
@@ -17,7 +18,6 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/service_process_host.h"
 #include "mojo/public/cpp/bindings/receiver.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace extensions {
@@ -60,7 +60,7 @@ class ImageWriterUtilityClient::RemovableStorageWriterClientImpl
     image_writer_utility_client_->OperationProgress(progress);
   }
 
-  void Complete(const absl::optional<std::string>& error) override {
+  void Complete(const std::optional<std::string>& error) override {
     if (error) {
       image_writer_utility_client_->OperationFailed(error.value());
     } else {
@@ -89,8 +89,9 @@ ImageWriterUtilityClient::~ImageWriterUtilityClient() {
 // static
 scoped_refptr<ImageWriterUtilityClient> ImageWriterUtilityClient::Create(
     const scoped_refptr<base::SequencedTaskRunner>& task_runner) {
-  if (g_factory_for_testing)
+  if (g_factory_for_testing) {
     return g_factory_for_testing->Run();
+  }
   return base::WrapRefCounted(new ImageWriterUtilityClient(task_runner));
 }
 
@@ -163,8 +164,9 @@ void ImageWriterUtilityClient::Shutdown() {
 void ImageWriterUtilityClient::BindServiceIfNeeded() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (removable_storage_writer_)
+  if (removable_storage_writer_) {
     return;
+  }
 
   content::ServiceProcessHost::Launch(
       removable_storage_writer_.BindNewPipeAndPassReceiver(),
@@ -184,22 +186,25 @@ void ImageWriterUtilityClient::OnConnectionError() {
 }
 
 void ImageWriterUtilityClient::OperationProgress(int64_t progress) {
-  if (progress_callback_)
+  if (progress_callback_) {
     progress_callback_.Run(progress);
+  }
 }
 
 void ImageWriterUtilityClient::OperationSucceeded() {
   SuccessCallback success_callback = std::move(success_callback_);
   ResetRequest();
-  if (success_callback)
+  if (success_callback) {
     std::move(success_callback).Run();
+  }
 }
 
 void ImageWriterUtilityClient::OperationFailed(const std::string& error) {
   ErrorCallback error_callback = std::move(error_callback_);
   ResetRequest();
-  if (error_callback)
+  if (error_callback) {
     std::move(error_callback).Run(error);
+  }
 }
 
 void ImageWriterUtilityClient::ResetRequest() {

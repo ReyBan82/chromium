@@ -15,6 +15,7 @@
 #ifndef ABSL_STRINGS_INTERNAL_STRING_CONSTANT_H_
 #define ABSL_STRINGS_INTERNAL_STRING_CONSTANT_H_
 
+#include "absl/base/config.h"
 #include "absl/meta/type_traits.h"
 #include "absl/strings/string_view.h"
 
@@ -49,11 +50,6 @@ struct StringConstant {
   static_assert(TryConstexprEval(value),
                 "The input string_view must point to constant data.");
 };
-
-#ifdef ABSL_INTERNAL_NEED_REDUNDANT_CONSTEXPR_DECL
-template <typename T>
-constexpr absl::string_view StringConstant<T>::value;
-#endif
 
 // Factory function for `StringConstant` instances.
 // It supports callables that have a constexpr default constructor and a

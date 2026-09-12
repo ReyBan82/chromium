@@ -7,20 +7,23 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <set>
 
 #include "base/containers/queue.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
-#include "chrome/browser/extensions/crx_installer.h"
 #include "components/keyed_service/core/keyed_service.h"
+#include "extensions/browser/crx_installer.h"
+
+class Profile;
 
 namespace extensions {
 
 // InstallLimiter defers big app installs after all small app installs and then
 // runs big app installs one by one. This improves first-time login experience.
-// See http://crbug.com/166296
+// See http://crbug.com/40957781
 class InstallLimiter : public KeyedService {
  public:
   static InstallLimiter* Get(Profile* profile);
@@ -65,7 +68,7 @@ class InstallLimiter : public KeyedService {
   // Otherwise, it just runs the installer.
   void AddWithSize(const scoped_refptr<CrxInstaller>& installer,
                    const CRXFileInfo& file_info,
-                   int64_t size);
+                   std::optional<int64_t> size);
 
   // Checks and runs deferred big app installs when appropriate.
   void CheckAndRunDeferrredInstalls();
@@ -76,7 +79,7 @@ class InstallLimiter : public KeyedService {
                   const CRXFileInfo& file_info);
 
   // Called when CrxInstaller::InstallCrx() finishes.
-  void OnInstallerDone(const absl::optional<CrxInstallError>& error);
+  void OnInstallerDone(const std::optional<CrxInstallError>& error);
 
   // Checks that OnAllExternalProvidersReady() has been called and all file
   // sizes for added installations are determined. If this method returns true,

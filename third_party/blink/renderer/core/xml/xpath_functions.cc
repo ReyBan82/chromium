@@ -27,7 +27,8 @@
 
 #include "third_party/blink/renderer/core/xml/xpath_functions.h"
 
-#include "base/cxx17_backports.h"
+#include <algorithm>
+
 #include "third_party/blink/renderer/core/dom/attr.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/processing_instruction.h"
@@ -309,16 +310,22 @@ inline bool Interval::Contains(int value) const {
   return value >= min_ && value <= max_;
 }
 
-void Function::SetArguments(HeapVector<Member<Expression>>& args) {
+void Function::SetArguments(GCedHeapVector<Member<Expression>>* args) {
   DCHECK(!SubExprCount());
+
+  if (!args) {
+    return;
+  }
 
   // Some functions use context node as implicit argument, so when explicit
   // arguments are added, they may no longer be context node sensitive.
-  if (name_ != "lang" && !args.empty())
+  if (name_ != "lang" && !args->empty()) {
     SetIsContextNodeSensitive(false);
+  }
 
-  for (Expression* arg : args)
+  for (Expression* arg : *args) {
     AddSubExpression(arg);
+  }
 }
 
 Value FunLast::Evaluate(EvaluationContext& context) const {
@@ -417,7 +424,7 @@ static inline String ExpandedName(Node* node) {
   }
 
   return prefix.empty() ? ExpandedNameLocalPart(node)
-                        : prefix + ":" + ExpandedNameLocalPart(node);
+                        : StrCat({prefix, ":", ExpandedNameLocalPart(node)});
 }
 
 Value FunLocalName::Evaluate(EvaluationContext& context) const {
@@ -492,7 +499,7 @@ Value FunStartsWith::Evaluate(EvaluationContext& context) const {
   if (s2.empty())
     return true;
 
-  return s1.StartsWith(s2);
+  return s1.starts_with(s2);
 }
 
 Value FunContains::Evaluate(EvaluationContext& context) const {
@@ -503,7 +510,7 @@ Value FunContains::Evaluate(EvaluationContext& context) const {
   if (s2.empty())
     return true;
 
-  return s1.Contains(s2) != 0;
+  return s1.contains(s2) != 0;
 }
 
 Value FunSubstringBefore::Evaluate(EvaluationContext& context) const {
@@ -514,12 +521,12 @@ Value FunSubstringBefore::Evaluate(EvaluationContext& context) const {
   if (s2.empty())
     return "";
 
-  wtf_size_t i = s1.Find(s2);
+  wtf_size_t i = s1.find(s2);
 
   if (i == kNotFound)
     return "";
 
-  return s1.Left(i);
+  return s1.substr(0, i);
 }
 
 Value FunSubstringAfter::Evaluate(EvaluationContext& context) const {
@@ -527,11 +534,11 @@ Value FunSubstringAfter::Evaluate(EvaluationContext& context) const {
   String s1 = Arg(0)->Evaluate(context).ToString();
   String s2 = Arg(1)->Evaluate(cloned_context).ToString();
 
-  wtf_size_t i = s1.Find(s2);
+  wtf_size_t i = s1.find(s2);
   if (i == kNotFound)
     return "";
 
-  return s1.Substring(i + s2.length());
+  return s1.substr(i + s2.length());
 }
 
 // Computes the 1-based start and end (exclusive) string indices for
@@ -545,8 +552,8 @@ static std::pair<unsigned, unsigned> ComputeSubstringStartEnd(double start,
   if (std::isnan(start) || std::isnan(end))
     return std::make_pair(1, 1);
   // Neither start nor end are NaN, but may still be +/- Inf
-  const double clamped_start = base::clamp<double>(start, 1, max_len + 1);
-  const double clamped_end = base::clamp(end, clamped_start, max_len + 1);
+  const double clamped_start = std::clamp<double>(start, 1, max_len + 1);
+  const double clamped_end = std::clamp(end, clamped_start, max_len + 1);
   return std::make_pair(static_cast<unsigned>(clamped_start),
                         static_cast<unsigned>(clamped_end));
 }
@@ -572,8 +579,7 @@ Value FunSubstring::Evaluate(EvaluationContext& context) const {
       ComputeSubstringStartEnd(pos, len, source_string.length());
   if (bounds.second <= bounds.first)
     return "";
-  return source_string.Substring(bounds.first - 1,
-                                 bounds.second - bounds.first);
+  return source_string.substr(bounds.first - 1, bounds.second - bounds.first);
 }
 
 Value FunStringLength::Evaluate(EvaluationContext& context) const {
@@ -640,18 +646,9 @@ Value FunLang::Evaluate(EvaluationContext& context) const {
     return false;
 
   String lang_value = language_attribute->Value();
-  while (true) {
-    if (DeprecatedEqualIgnoringCase(lang_value, lang))
-      return true;
-
-    // Remove suffixes one by one.
-    wtf_size_t index = lang_value.ReverseFind('-');
-    if (index == kNotFound)
-      break;
-    lang_value = lang_value.Left(index);
-  }
-
-  return false;
+  return lang_value.StartsWithIgnoringAsciiCase(lang) &&
+         (lang.length() == lang_value.length() ||
+          lang_value[lang.length()] == '-');
 }
 
 Value FunFalse::Evaluate(EvaluationContext&) const {
@@ -746,12 +743,11 @@ static void CreateFunctionMap() {
 }
 
 Function* CreateFunction(const String& name) {
-  HeapVector<Member<Expression>> args;
-  return CreateFunction(name, args);
+  return CreateFunction(name, nullptr);
 }
 
 Function* CreateFunction(const String& name,
-                         HeapVector<Member<Expression>>& args) {
+                         GCedHeapVector<Member<Expression>>* args) {
   if (!g_function_map)
     CreateFunctionMap();
 
@@ -760,8 +756,10 @@ Function* CreateFunction(const String& name,
   FunctionRec* function_rec = nullptr;
 
   if (function_map_iter == g_function_map->end() ||
-      !(function_rec = &function_map_iter->value)->args.Contains(args.size()))
+      !(function_rec = &function_map_iter->value)
+           ->args.Contains(args ? args->size() : 0)) {
     return nullptr;
+  }
 
   Function* function = function_rec->factory_fn();
   function->SetArguments(args);

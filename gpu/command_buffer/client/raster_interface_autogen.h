@@ -19,16 +19,13 @@ virtual GLenum GetError() = 0;
 virtual void OrderingBarrierCHROMIUM() = 0;
 virtual void GenQueriesEXT(GLsizei n, GLuint* queries) = 0;
 virtual void DeleteQueriesEXT(GLsizei n, const GLuint* queries) = 0;
-virtual void QueryCounterEXT(GLuint id, GLenum target) = 0;
 virtual void BeginQueryEXT(GLenum target, GLuint id) = 0;
 virtual void EndQueryEXT(GLenum target) = 0;
 virtual void GetQueryObjectuivEXT(GLuint id, GLenum pname, GLuint* params) = 0;
-virtual void GetQueryObjectui64vEXT(GLuint id,
-                                    GLenum pname,
-                                    GLuint64* params) = 0;
 virtual void LoseContextCHROMIUM(GLenum current, GLenum other) = 0;
 virtual GLenum GetGraphicsResetStatusKHR() = 0;
 virtual void EndRasterCHROMIUM() = 0;
+virtual void FlushTileRasterGraphiteCommandsCHROMIUM() = 0;
 virtual void TraceBeginCHROMIUM(const char* category_name,
                                 const char* trace_name) = 0;
 virtual void TraceEndCHROMIUM() = 0;

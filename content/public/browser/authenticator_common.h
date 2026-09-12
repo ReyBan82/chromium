@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,7 +6,10 @@
 #define CONTENT_PUBLIC_BROWSER_AUTHENTICATOR_COMMON_H_
 
 #include <memory>
+#include <string_view>
+#include <vector>
 
+#include "base/containers/span.h"
 #include "content/common/content_export.h"
 #include "third_party/blink/public/mojom/webauthn/authenticator.mojom.h"
 
@@ -29,22 +32,33 @@ class CONTENT_EXPORT AuthenticatorCommon {
   // MakeCredential attempts to create a new WebAuthn credential on behalf of
   // `caller_origin` using the supplied `options` and invokes `callback` with
   // the result.
+  //
+  // The optional `payment_options` is inserted into the asserted
+  // `clientDataJson` when payment data has been set by the internal
+  // authenticator for clients such as Secure Payment Confirmation. Only the
+  // browser bound public key is included.
   virtual void MakeCredential(
       url::Origin caller_origin,
       blink::mojom::PublicKeyCredentialCreationOptionsPtr options,
+      blink::mojom::PaymentOptionsPtr payment_options,
       blink::mojom::Authenticator::MakeCredentialCallback callback) = 0;
 
-  // GetAssertion attempts to generate a WebAuthn assertion on behalf of
+  // GetCredential attempts to generate a WebAuthn assertion on behalf of
   // `caller_origin` using the supplied `options` and invokes `callback` with
   // the result.
   //
-  // The optional `payment` is inserted into the asserted `clientDataJson` after
-  // the browser displays the Secure Payment Confirmation dialog to the user.
-  virtual void GetAssertion(
+  // The optional `payment_options` is inserted into the asserted
+  // `clientDataJson` after the browser displays the Secure Payment Confirmation
+  // dialog to the user.
+  //
+  // Depending on the `options.password`, the callback may be called with a
+  // `CredentialInfo`. For WebAuthn assertions the `callback` will be called
+  // with a `GetAssertionResponse`.
+  virtual void GetCredential(
       url::Origin caller_origin,
-      blink::mojom::PublicKeyCredentialRequestOptionsPtr options,
-      blink::mojom::PaymentOptionsPtr payment,
-      blink::mojom::Authenticator::GetAssertionCallback callback) = 0;
+      blink::mojom::GetCredentialOptionsPtr options,
+      blink::mojom::PaymentOptionsPtr payment_options,
+      blink::mojom::Authenticator::GetCredentialCallback callback) = 0;
 
   // Invokes `callback` with a boolean indicating whether a user-verifying
   // platform authenticator is available for WebAuthn requests on
@@ -76,6 +90,9 @@ class CONTENT_EXPORT AuthenticatorCommon {
   // Disable UI
   virtual void DisableUI() = 0;
 
+  // Disable the TLS security level check for the tab hosting this request.
+  virtual void DisableTLSCheck() = 0;
+
   // GetRenderFrameHost returns a pointer to the RenderFrameHost that was given
   // to the constructor. Use this rather than keeping a copy of the
   // RenderFrameHost* that was passed in.
@@ -90,6 +107,19 @@ class CONTENT_EXPORT AuthenticatorCommon {
   // called, remote desktop Chrome extensions may choose to act as a request
   // proxy for all requests sent to this instance.
   virtual void EnableRequestProxyExtensionsAPISupport() = 0;
+
+  // Returns true if the underlying platform authenticator supports querying
+  // matching credential IDs.
+  virtual bool IsGetMatchingCredentialIdsSupported() = 0;
+
+  // Queries the underlying platform authenticator for matching credential IDs
+  // for the given `relying_party_id` which are also in the input
+  // `credential_ids` list.
+  virtual void GetMatchingCredentialIds(
+      std::string_view relying_party_id,
+      base::span<const std::vector<uint8_t>> credential_ids,
+      bool require_third_party_payment_bit,
+      base::OnceCallback<void(std::vector<std::vector<uint8_t>>)> callback) = 0;
 };
 
 }  // namespace content

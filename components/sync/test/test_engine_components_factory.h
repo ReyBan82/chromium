@@ -32,12 +32,13 @@ class TestEngineComponentsFactory : public EngineComponentsFactory {
       ExtensionsActivity* monitor,
       const std::vector<SyncEngineEventListener*>& listeners,
       DebugInfoGetter* debug_info_getter,
-      ModelTypeRegistry* model_type_registry,
-      const std::string& invalidator_client_id,
+      DataTypeRegistry* data_type_registry,
       const std::string& cache_guid,
       const std::string& store_birthday,
       const std::string& bag_of_chips,
-      base::TimeDelta poll_interval) override;
+      base::TimeDelta poll_interval,
+      const std::string& account_email,
+      SyncAccessTokenFetcher* sync_access_token_fetcher) override;
 };
 
 }  // namespace syncer

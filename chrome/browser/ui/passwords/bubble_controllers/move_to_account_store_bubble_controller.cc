@@ -3,16 +3,16 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/passwords/bubble_controllers/move_to_account_store_bubble_controller.h"
+
+#include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/favicon/favicon_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_avatar_icon_util.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
-#include "chrome/browser/sync/sync_service_factory.h"
 #include "chrome/browser/ui/passwords/passwords_model_delegate.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/favicon/core/favicon_util.h"
 #include "components/password_manager/core/browser/password_feature_manager.h"
-#include "components/password_manager/core/browser/password_manager_features_util.h"
 #include "components/password_manager/core/common/password_manager_ui.h"
 #include "components/signin/public/base/consent_level.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
@@ -55,54 +55,63 @@ void MoveToAccountStoreBubbleController::OnFaviconReady(
 }
 
 std::u16string MoveToAccountStoreBubbleController::GetTitle() const {
-  return l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_MOVE_TITLE);
+  return l10n_util::GetStringUTF16(
+      IDS_PASSWORD_MANAGER_SAVE_IN_ACCOUNT_BUBBLE_TITLE);
 }
 
 void MoveToAccountStoreBubbleController::AcceptMove() {
   dismissal_reason_ = metrics_util::CLICKED_ACCEPT;
-  if (delegate_->GetPasswordFeatureManager()->IsOptedInForAccountStorage()) {
-    // User has already opted in to the account store. Move without reauth.
-    return delegate_->MovePasswordToAccountStore();
+  if (!delegate_->GetPasswordFeatureManager()->IsAccountStorageActive()) {
+    // Account storage became inactive since the bubble was shown. This should
+    // be rare and ultimately harmless, just do nothing.
+    return;
   }
-  // Otherwise, we should invoke the reauth flow before saving.
-  return delegate_->AuthenticateUserForAccountStoreOptInAndMovePassword();
+  return delegate_->MovePasswordToAccountStore();
 }
 
 void MoveToAccountStoreBubbleController::RejectMove() {
-  dismissal_reason_ = metrics_util::CLICKED_NEVER;
-  return delegate_->BlockMovingPasswordToAccountStore();
+  if (delegate_->GetState() ==
+      password_manager::ui::MOVE_CREDENTIAL_AFTER_LOG_IN_STATE) {
+    dismissal_reason_ = metrics_util::CLICKED_NEVER;
+    return delegate_->BlockMovingPasswordToAccountStore();
+  }
+  dismissal_reason_ = metrics_util::CLICKED_CANCEL;
 }
 
 gfx::Image MoveToAccountStoreBubbleController::GetProfileIcon(int size) {
-  if (!GetProfile())
+  if (!GetProfile()) {
     return gfx::Image();
+  }
   signin::IdentityManager* identity_manager =
       IdentityManagerFactory::GetForProfile(GetProfile());
-  if (!identity_manager)
+  if (!identity_manager) {
     return gfx::Image();
+  }
   AccountInfo primary_account_info = identity_manager->FindExtendedAccountInfo(
       identity_manager->GetPrimaryAccountInfo(signin::ConsentLevel::kSignin));
   DCHECK(!primary_account_info.IsEmpty());
 
-  gfx::Image account_icon = primary_account_info.account_image;
-  if (account_icon.IsEmpty()) {
-    account_icon = ui::ResourceBundle::GetSharedInstance().GetImageNamed(
-        profiles::GetPlaceholderAvatarIconResourceID());
-  }
+  gfx::Image account_icon = primary_account_info.GetAvatarImage().value_or(
+      ui::ResourceBundle::GetSharedInstance().GetImageNamed(
+          profiles::GetPlaceholderAvatarIconResourceID()));
   return profiles::GetSizedAvatarIcon(account_icon,
                                       /*width=*/size, /*height=*/size,
                                       profiles::SHAPE_CIRCLE);
 }
 
-void MoveToAccountStoreBubbleController::ReportInteractions() {
-  Profile* profile = GetProfile();
-  if (!profile)
-    return;
+std::u16string MoveToAccountStoreBubbleController::GetProfileEmail() const {
+  if (!GetProfile()) {
+    return std::u16string();
+  }
+  signin::IdentityManager* identity_manager =
+      IdentityManagerFactory::GetForProfile(GetProfile());
+  if (!identity_manager) {
+    return std::u16string();
+  }
 
-  metrics_util::LogMoveUIDismissalReason(
-      dismissal_reason_,
-      password_manager::features_util::ComputePasswordAccountStorageUserState(
-          profile->GetPrefs(), SyncServiceFactory::GetForProfile(profile)));
-  // TODO(crbug.com/1063852): Consider recording UKM here, via:
-  // metrics_recorder_->RecordUIDismissalReason(dismissal_reason_)
+  return base::UTF8ToUTF16(
+      identity_manager->GetPrimaryAccountInfo(signin::ConsentLevel::kSignin)
+          .email);
 }
+
+void MoveToAccountStoreBubbleController::ReportInteractions() {}

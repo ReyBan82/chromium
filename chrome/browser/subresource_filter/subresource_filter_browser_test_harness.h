@@ -6,12 +6,16 @@
 #define CHROME_BROWSER_SUBRESOURCE_FILTER_SUBRESOURCE_FILTER_BROWSER_TEST_HARNESS_H_
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "base/containers/flat_set.h"
 #include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
+#include "chrome/test/base/platform_browser_test.h"
 #include "components/infobars/content/content_infobar_manager.h"
 #include "components/infobars/core/confirm_infobar_delegate.h"
 #include "components/infobars/core/infobar.h"
@@ -27,12 +31,6 @@
 #include "content/public/test/prerender_test_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "url/gurl.h"
-
-#if BUILDFLAG(IS_ANDROID)
-#include "chrome/test/base/android/android_browser_test.h"
-#else
-#include "chrome/test/base/in_process_browser_test.h"
-#endif
 
 namespace proto = url_pattern_index::proto;
 
@@ -83,7 +81,42 @@ MATCHER(HasActivationLevelEnabled, "") {
   return arg.activation_level == mojom::ActivationLevel::kEnabled;
 }
 
-class SubresourceFilterBrowserTest : public PlatformBrowserTest {
+// Class for shared test harness functionality to be used for both safe browsing
+// and fingerprinting protection browser tests.
+class SubresourceFilterSharedBrowserTest : public PlatformBrowserTest {
+ public:
+  SubresourceFilterSharedBrowserTest();
+
+  SubresourceFilterSharedBrowserTest(
+      const SubresourceFilterSharedBrowserTest&) = delete;
+  SubresourceFilterSharedBrowserTest& operator=(
+      const SubresourceFilterSharedBrowserTest&) = delete;
+
+  ~SubresourceFilterSharedBrowserTest() override;
+
+ protected:
+  // InProcessBrowserTest:
+  void SetUpOnMainThread() override;
+
+  virtual GURL GetTestUrl(const std::string& relative_url) const;
+
+  content::WebContents* web_contents();
+
+  content::RenderFrameHost* FindFrameByName(const std::string& name);
+
+  bool WasParsedScriptElementLoaded(content::RenderFrameHost* rfh);
+
+  void ExpectParsedScriptElementLoadedStatusInFrames(
+      const std::vector<const char*>& frame_names,
+      const std::vector<bool>& expect_loaded);
+
+  void ExpectFramesIncludedInLayout(const std::vector<const char*>& frame_names,
+                                    const std::vector<bool>& expect_displayed);
+
+  void NavigateFrame(const char* frame_name, const GURL& url);
+};
+
+class SubresourceFilterBrowserTest : public SubresourceFilterSharedBrowserTest {
  public:
   SubresourceFilterBrowserTest();
 
@@ -93,9 +126,11 @@ class SubresourceFilterBrowserTest : public PlatformBrowserTest {
 
   ~SubresourceFilterBrowserTest() override;
 
+  // Returns whether SafeBrowsingLocalListsUseSBv5 should be explicitly
+  // enabled or disabled. If std::nullopt, the feature is not overridden.
+  virtual std::optional<bool> UseV5() const;
+
   // Names of DocumentLoad histograms.
-  static constexpr const char kDocumentLoadActivationLevel[] =
-      "SubresourceFilter.DocumentLoad.ActivationState";
 
   static constexpr const char kSubresourceLoadsTotalForPage[] =
       "SubresourceFilter.PageLoad.NumSubresourceLoads.Total";
@@ -140,19 +175,22 @@ class SubresourceFilterBrowserTest : public PlatformBrowserTest {
   void TearDown() override;
   void SetUpOnMainThread() override;
 
-  virtual std::unique_ptr<TestSafeBrowsingDatabaseHelper> CreateTestDatabase();
+  virtual base::flat_set<base::test::FeatureRef>
+  GetSubresourceFilterEnabledFeatures() const;
+  virtual base::flat_set<base::test::FeatureRef>
+  GetSubresourceFilterDisabledFeatures() const;
 
-  GURL GetTestUrl(const std::string& relative_url) const;
+  virtual std::unique_ptr<TestSafeBrowsingDatabaseHelper> CreateTestDatabase();
 
   void ConfigureAsPhishingURL(const GURL& url);
 
-  void ConfigureAsSubresourceFilterOnlyURL(const GURL& url);
-
   void ConfigureURLWithWarning(
       const GURL& url,
-      std::vector<safe_browsing::SubresourceFilterType> filter_types);
+      safe_browsing::SubresourceFilterType filter_type);
 
-  content::WebContents* web_contents();
+  void ConfigureURLWithEnforcement(
+      const GURL& url,
+      safe_browsing::SubresourceFilterType filter_type);
 
   SubresourceFilterContentSettingsManager* settings_manager() const {
     return profile_context_->settings_manager();
@@ -162,29 +200,16 @@ class SubresourceFilterBrowserTest : public PlatformBrowserTest {
     return profile_context_->ads_intervention_manager();
   }
 
-  content::RenderFrameHost* FindFrameByName(const std::string& name);
-
-  bool WasParsedScriptElementLoaded(content::RenderFrameHost* rfh);
-
-  void ExpectParsedScriptElementLoadedStatusInFrames(
-      const std::vector<const char*>& frame_names,
-      const std::vector<bool>& expect_loaded);
-
-  void ExpectFramesIncludedInLayout(const std::vector<const char*>& frame_names,
-                                    const std::vector<bool>& expect_displayed);
-
   bool IsDynamicScriptElementLoaded(content::RenderFrameHost* rfh);
 
   void InsertDynamicFrameWithScript();
 
   void NavigateFromRendererSide(const GURL& url);
 
-  void NavigateFrame(const char* frame_name, const GURL& url);
-
   void SetRulesetToDisallowURLsWithPathSuffix(const std::string& suffix);
 
   void SetRulesetToDisallowURLsWithSubstrings(
-      std::vector<base::StringPiece> substrings);
+      std::vector<std::string_view> substrings);
 
   void SetRulesetWithRules(const std::vector<proto::UrlRule>& rules);
 
@@ -211,21 +236,40 @@ class SubresourceFilterBrowserTest : public PlatformBrowserTest {
   std::unique_ptr<TestSafeBrowsingDatabaseHelper> database_helper_;
 
   // Owned by the profile.
-  raw_ptr<SubresourceFilterProfileContext, DanglingUntriaged> profile_context_;
+  raw_ptr<SubresourceFilterProfileContext, AcrossTasksDanglingUntriaged>
+      profile_context_;
+};
+
+class SubresourceFilterBrowserTestWithV4V5Param
+    : public SubresourceFilterBrowserTest,
+      public ::testing::WithParamInterface<bool> {
+ public:
+  std::optional<bool> UseV5() const override;
 };
 
 // This class automatically syncs the SubresourceFilter SafeBrowsing list
 // without needing a chrome branded build.
 class SubresourceFilterListInsertingBrowserTest
     : public SubresourceFilterBrowserTest {
+ public:
   std::unique_ptr<TestSafeBrowsingDatabaseHelper> CreateTestDatabase() override;
 };
 
+class SubresourceFilterListInsertingBrowserTestWithV4V5Param
+    : public SubresourceFilterListInsertingBrowserTest,
+      public ::testing::WithParamInterface<bool> {
+ public:
+  std::optional<bool> UseV5() const override;
+};
+
 class SubresourceFilterPrerenderingBrowserTest
-    : public SubresourceFilterListInsertingBrowserTest {
+    : public SubresourceFilterListInsertingBrowserTest,
+      public ::testing::WithParamInterface<bool> {
  public:
   SubresourceFilterPrerenderingBrowserTest();
   ~SubresourceFilterPrerenderingBrowserTest() override;
+
+  std::optional<bool> UseV5() const override;
 
   void SetUp() override;
 
@@ -234,10 +278,13 @@ class SubresourceFilterPrerenderingBrowserTest
 };
 
 class SubresourceFilterFencedFrameBrowserTest
-    : public SubresourceFilterListInsertingBrowserTest {
+    : public SubresourceFilterListInsertingBrowserTest,
+      public ::testing::WithParamInterface<bool> {
  public:
-  SubresourceFilterFencedFrameBrowserTest() = default;
-  ~SubresourceFilterFencedFrameBrowserTest() override = default;
+  SubresourceFilterFencedFrameBrowserTest();
+  ~SubresourceFilterFencedFrameBrowserTest() override;
+
+  std::optional<bool> UseV5() const override;
 
   content::test::FencedFrameTestHelper& fenced_frame_test_helper() {
     return fenced_frame_test_helper_;

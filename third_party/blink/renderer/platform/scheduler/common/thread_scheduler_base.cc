@@ -6,6 +6,7 @@
 
 #include "base/trace_event/trace_event.h"
 #include "third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.h"
+#include "third_party/blink/renderer/platform/scheduler/public/task_attribution_tracker.h"
 
 namespace blink {
 namespace scheduler {
@@ -17,7 +18,9 @@ void ThreadSchedulerBase::ExecuteAfterCurrentTask(
 
 void ThreadSchedulerBase::Shutdown() {
   GetHelper().ResetTimeDomain();
-  virtual_time_domain_.reset();
+  if (virtual_time_domain_) {
+    virtual_time_domain_->ShutDown();
+  }
 }
 
 base::TimeTicks ThreadSchedulerBase::EnableVirtualTime(
@@ -89,7 +92,7 @@ void ThreadSchedulerBase::SetMaxVirtualTimeTaskStarvationCount(
 
 WebScopedVirtualTimePauser
 ThreadSchedulerBase::CreateWebScopedVirtualTimePauser(
-    const WTF::String& name,
+    const String& name,
     WebScopedVirtualTimePauser::VirtualTaskDuration duration) {
   return WebScopedVirtualTimePauser(this, duration, name);
 }
@@ -201,13 +204,25 @@ void ThreadSchedulerBase::ApplyVirtualTimePolicy() {
 }
 
 void ThreadSchedulerBase::OnBeginNestedRunLoop() {
-  if (IsVirtualTimeEnabled())
+  if (IsVirtualTimeEnabled()) {
     ApplyVirtualTimePolicy();
+  }
+  if (isolate()) {
+    if (auto* tracker = TaskAttributionTracker::From(isolate())) {
+      tracker->OnBeginNestedRunLoop();
+    }
+  }
 }
 
 void ThreadSchedulerBase::OnExitNestedRunLoop() {
-  if (IsVirtualTimeEnabled())
+  if (IsVirtualTimeEnabled()) {
     ApplyVirtualTimePolicy();
+  }
+  if (isolate()) {
+    if (auto* tracker = TaskAttributionTracker::From(isolate())) {
+      tracker->OnExitNestedRunLoop();
+    }
+  }
 }
 
 }  // namespace scheduler

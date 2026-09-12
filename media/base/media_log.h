@@ -27,7 +27,10 @@
 #include "media/base/media_log_properties.h"
 #include "media/base/media_log_record.h"
 #include "media/base/pipeline_status.h"
-#include "url/gurl.h"
+
+#if BUILDFLAG(IS_APPLE)
+#include "base/apple/osstatus_logging.h"
+#endif  // BUILDFLAG(IS_APPLE)
 
 namespace media {
 
@@ -97,8 +100,11 @@ class MEDIA_EXPORT MediaLog {
     DCHECK(!status.is_ok());
     std::unique_ptr<MediaLogRecord> record =
         CreateRecord(MediaLogRecord::Type::kMediaStatus);
-    base::Value serialized = MediaSerialize(status);
+    base::Value serialized = MediaSerialize(status.data_);
     DCHECK(serialized.is_dict());
+    if (ShouldLogToDebugConsole()) {
+      status.data_->RenderToLogWriter(true);
+    }
     record->params.Merge(std::move(serialized.GetDict()));
     AddLogRecord(std::move(record));
   }
@@ -127,13 +133,24 @@ class MEDIA_EXPORT MediaLog {
   // even if this occurs, in the "won't crash" sense.
   virtual std::unique_ptr<MediaLog> Clone();
 
+  // Clone `media_log` if it is not null, otherwise return nullptr.
+  static std::unique_ptr<MediaLog> CloneSafely(MediaLog* media_log) {
+    return media_log ? media_log->Clone() : nullptr;
+  }
+
   // Can be used for stopping a MediaLog during a garbage-collected destruction
   // sequence.
   virtual void Stop();
 
+  bool ShouldLogToDebugConsole() const;
+
  protected:
   // Ensures only subclasses and factories (e.g. Clone()) can create MediaLog.
   MediaLog();
+
+  void set_should_log_to_debug_console(bool should_log) {
+    should_log_to_debug_console_ = should_log;
+  }
 
   // Methods that may be overridden by inheritors.  All calls may arrive on any
   // thread, but will be synchronized with respect to any other *Locked calls on
@@ -169,6 +186,8 @@ class MEDIA_EXPORT MediaLog {
   void InvalidateLog();
 
   struct ParentLogRecord : base::RefCountedThreadSafe<ParentLogRecord> {
+    REQUIRE_ADOPTION_FOR_REFCOUNTED_TYPE();
+
     explicit ParentLogRecord(MediaLog* log);
 
     ParentLogRecord(const ParentLogRecord&) = delete;
@@ -192,36 +211,73 @@ class MEDIA_EXPORT MediaLog {
   FRIEND_TEST_ALL_PREFIXES(MediaLogTest, EventsAreNotForwardedAfterInvalidate);
 
   // Use |parent_log_record| instead of making a new one.
-  explicit MediaLog(scoped_refptr<ParentLogRecord> parent_log_record);
+  MediaLog(scoped_refptr<ParentLogRecord> parent_log_record,
+           bool should_log_to_debug_console);
 
   // Helper methods to create events and their parameters.
   std::unique_ptr<MediaLogRecord> CreateRecord(MediaLogRecord::Type type);
 
   // The underlying media log.
   scoped_refptr<ParentLogRecord> parent_log_record_;
+
+  bool should_log_to_debug_console_ = true;
 };
 
 // Helper class to make it easier to use MediaLog like DVLOG().
 class MEDIA_EXPORT LogHelper {
  public:
-  LogHelper(MediaLogMessageLevel level, MediaLog* media_log);
   LogHelper(MediaLogMessageLevel level,
-            const std::unique_ptr<MediaLog>& media_log);
+            MediaLog* media_log,
+            const char* file,
+            int line,
+            std::optional<logging::SystemErrorCode> code = std::nullopt);
+  LogHelper(MediaLogMessageLevel level,
+            const std::unique_ptr<MediaLog>& media_log,
+            const char* file,
+            int line,
+            std::optional<logging::SystemErrorCode> code = std::nullopt);
   ~LogHelper();
 
   std::ostream& stream() { return stream_; }
 
  private:
+  const char* file_;
+  const int line_;
   const MediaLogMessageLevel level_;
   const raw_ptr<MediaLog> media_log_;
+  const std::optional<logging::SystemErrorCode> code_;
   std::stringstream stream_;
 };
 
 // Provides a stringstream to collect a log entry to pass to the provided
 // MediaLog at the requested level.
-#define MEDIA_LOG(level, media_log)                                      \
-  media::LogHelper((media::MediaLogMessageLevel::k##level), (media_log)) \
+#if DCHECK_IS_ON()
+#define MEDIA_PLOG(level, code, media_log)                               \
+  media::LogHelper((media::MediaLogMessageLevel::k##level), (media_log), \
+                   __FILE__, __LINE__, code)                             \
       .stream()
+#define MEDIA_LOG(level, media_log)                                      \
+  media::LogHelper((media::MediaLogMessageLevel::k##level), (media_log), \
+                   __FILE__, __LINE__)                                   \
+      .stream()
+#else
+#define MEDIA_LOG(level, media_log)                                      \
+  media::LogHelper((media::MediaLogMessageLevel::k##level), (media_log), \
+                   nullptr, 0)                                           \
+      .stream()
+#define MEDIA_PLOG(level, code, media_log)                               \
+  media::LogHelper((media::MediaLogMessageLevel::k##level), (media_log), \
+                   nullptr, 0, code)                                     \
+      .stream()
+#endif
+
+#if BUILDFLAG(IS_APPLE)
+// Prepends a description of an OSStatus to the log entry produced with
+// `MEDIA_LOG`.
+#define OSSTATUS_MEDIA_LOG(level, status, media_log) \
+  MEDIA_LOG(level, media_log)                        \
+      << logging::DescriptionFromOSStatus(status) << " (" << (status) << "): "
+#endif  // BUILDFLAG(IS_APPLE)
 
 // Logs only while |count| < |max|, increments |count| for each log, and warns
 // in the log if |count| has just reached |max|.

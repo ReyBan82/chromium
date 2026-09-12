@@ -8,6 +8,7 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <concepts>
 #include <iterator>
 #include <limits>
 #include <ostream>
@@ -20,7 +21,6 @@
 #include "base/dcheck_is_on.h"
 #include "base/notreached.h"
 #include "base/observer_list_internal.h"
-#include "base/ranges/algorithm.h"
 #include "base/sequence_checker.h"
 #include "build/build_config.h"
 
@@ -55,22 +55,25 @@
 //       virtual void OnBar(MyWidget* w, int x, int y) = 0;
 //     };
 //
-//     void AddObserver(Observer* obs) {
-//       observers_.AddObserver(obs);
+//     void AddObserver(Observer* observer) {
+//       observers_.AddObserver(observer);
 //     }
 //
-//     void RemoveObserver(Observer* obs) {
-//       observers_.RemoveObserver(obs);
+//     void RemoveObserver(Observer* observer) {
+//       observers_.RemoveObserver(observer);
 //     }
 //
 //     void NotifyFoo() {
-//       for (Observer& obs : observers_)
-//         obs.OnFoo(this);
+//       observers_.Notify(&Observer::OnFoo, this);
 //     }
 //
 //     void NotifyBar(int x, int y) {
-//       for (Observer& obs : observers_)
-//         obs.OnBar(this, x, y);
+//       // Use manual iteration when Notify() is not suitable, e.g.
+//       // if passing different args to different observers is needed.
+//       for (Observer& observer : observers_) {
+//         gfx::Point local_point = GetLocalPoint(observer, x, y);
+//         observer.OnBar(this, local_point.x(), local_point.y());
+//       }
 //     }
 //
 //    private:
@@ -93,18 +96,33 @@ enum class ObserverListPolicy {
   EXISTING_ONLY,
 };
 
-// When check_empty is true, assert that the list is empty on destruction.
-// When allow_reentrancy is false, iterating throught the list while already in
-// the iteration loop will result in DCHECK failure.
-// TODO(oshima): Change the default to non reentrant. https://crbug.com/812109
+// Enumeration of reentrancy policy for ObserverList.
+enum class ObserverListReentrancyPolicy {
+  // Specifies that iterating through the list while already in the iteration
+  // loop is prohibited and results in a check failure.
+  kDisallowReentrancy,
+
+  // Specifies that iterating through the list while already in the iteration
+  // loop is allowed.
+  kAllowReentrancy,
+
+  // Specifies that iterating through the list while already in the iteration
+  // loop is allowed, but this is untriaged.
+  kAllowReentrancyUntriaged,
+};
+
+// When `check_empty` is true, assert that the list is empty on destruction.
+// When `reentrancy` is kDisallowReentrancy, iterating through the list while
+// already in the iteration loop will result in DCHECK failure.
 template <class ObserverType,
           bool check_empty = false,
-          bool allow_reentrancy = true,
+          ObserverListReentrancyPolicy reentrancy =
+              ObserverListReentrancyPolicy::kDisallowReentrancy,
           class ObserverStorageType = internal::CheckedObserverAdapter>
 class ObserverList {
  public:
   // Allow declaring an ObserverList<...>::Unchecked that replaces the default
-  // ObserverStorageType to use raw pointers. This is required to support legacy
+  // ObserverStorageType to use `raw_ptr<T>`. This is required to support legacy
   // observers that do not inherit from CheckedObserver. The majority of new
   // code should not use this, but it may be suited for performance-critical
   // situations to avoid overheads of a CHECK(). Note the type can't be chosen
@@ -112,10 +130,32 @@ class ObserverList {
   // in headers using a forward-declare of ObserverType.
   using Unchecked = ObserverList<ObserverType,
                                  check_empty,
-                                 allow_reentrancy,
-                                 internal::UncheckedObserverAdapter>;
+                                 reentrancy,
+                                 internal::UncheckedObserverAdapter<>>;
+  // Allow declaring an ObserverList<...>::UncheckedAndDanglingUntriaged that
+  // replaces the default ObserverStorageType to use
+  // `raw_ptr<T, DanglingUntriaged>`. New use of this alias is strongly
+  // discouraged.
+  // TODO(crbug.com/40212619): Triage existing dangling observer pointers and
+  // remove this alias.
+  using UncheckedAndDanglingUntriaged =
+      ObserverList<ObserverType,
+                   check_empty,
+                   reentrancy,
+                   internal::UncheckedObserverAdapter<DanglingUntriaged>>;
+
+  // Allow declaring an ObserverList<...>::UncheckedAndRawPtrExcluded that
+  // holds raw pointers without raw_ptr<>. This is used to avoid performance
+  // regressions caused by ObserverList<T>::Unchecked's raw_ptr<> operations.
+  // Use of this alias is managed by chrome-memory-safety@google.com.
+  using UncheckedAndRawPtrExcluded = ObserverList<
+      ObserverType,
+      check_empty,
+      reentrancy,
+      internal::UncheckedObserverAdapter<RawPtrTraits::kEmpty, true>>;
 
   // An iterator class that can be used to access the list of observers.
+  template <bool check_reentrancy = true>
   class Iter {
    public:
     using iterator_category = std::forward_iterator_tag;
@@ -133,33 +173,43 @@ class ObserverList {
                          ? std::numeric_limits<size_t>::max()
                          : list->observers_.size()) {
       DCHECK(list);
-      DCHECK(allow_reentrancy || list_.IsOnlyRemainingNode());
+      // TODO(crbug.com/40063488): Turn into CHECK once very prevalent failures
+      // are weeded out.
+      DUMP_WILL_BE_CHECK(
+          !check_reentrancy ||
+          reentrancy != ObserverListReentrancyPolicy::kDisallowReentrancy ||
+          list_.IsOnlyRemainingNode());
       // Bind to this sequence when creating the first iterator.
       DCHECK_CALLED_ON_VALID_SEQUENCE(list_->iteration_sequence_checker_);
       EnsureValidIndex();
     }
 
     ~Iter() {
-      if (list_.IsOnlyRemainingNode())
+      if (list_.IsOnlyRemainingNode()) {
         list_->Compact();
+      }
     }
 
     Iter(const Iter& other)
         : index_(other.index_), max_index_(other.max_index_) {
-      if (other.list_)
+      if (other.list_) {
         list_.SetList(other.list_.get());
+      }
     }
 
     Iter& operator=(const Iter& other) {
-      if (&other == this)
+      if (&other == this) {
         return *this;
+      }
 
-      if (list_.IsOnlyRemainingNode())
+      if (list_.IsOnlyRemainingNode()) {
         list_->Compact();
+      }
 
       list_.Invalidate();
-      if (other.list_)
+      if (other.list_) {
         list_.SetList(other.list_.get());
+      }
 
       index_ = other.index_;
       max_index_ = other.max_index_;
@@ -170,8 +220,6 @@ class ObserverList {
       return (is_end() && other.is_end()) ||
              (list_.get() == other.list_.get() && index_ == other.index_);
     }
-
-    bool operator!=(const Iter& other) const { return !(*this == other); }
 
     Iter& operator++() {
       if (list_) {
@@ -234,13 +282,14 @@ class ObserverList {
     size_t max_index_;
   };
 
-  using iterator = Iter;
-  using const_iterator = Iter;
+  using iterator = Iter<>;
+  using const_iterator = Iter<>;
   using value_type = ObserverType;
 
   const_iterator begin() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(iteration_sequence_checker_);
     // An optimization: do not involve weak pointers for empty list.
-    return observers_.empty() ? const_iterator() : const_iterator(this);
+    return empty() ? const_iterator() : const_iterator(this);
   }
 
   const_iterator end() const { return const_iterator(); }
@@ -254,39 +303,82 @@ class ObserverList {
   ObserverList& operator=(const ObserverList&) = delete;
   ~ObserverList() {
     // If there are live iterators, ensure destruction is thread-safe.
-    if (!live_iterators_.empty())
+    if (!live_iterators_.empty()) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(iteration_sequence_checker_);
-
-    while (!live_iterators_.empty())
-      live_iterators_.head()->value()->Invalidate();
-    if (check_empty) {
-      Compact();
-      DCHECK(observers_.empty()) << "\n" << GetObserversCreationStackString();
     }
+
+    while (!live_iterators_.empty()) {
+      live_iterators_.head()->value()->Invalidate();
+    }
+    if constexpr (check_empty) {
+      Compact();
+      // Note that observer stack traces are only available for DCHECK-enabled
+      // builds (use dcheck_always_on=true).
+      // TODO(crbug.com/40063488): Turn into a CHECK once very prevalent
+      // failures are weeded out.
+      DUMP_WILL_BE_CHECK(observers_.empty())
+#if DCHECK_IS_ON()
+          << GetObserversCreationStackString()
+#endif
+          ;
+    }
+  }
+
+  // A nested struct to act as the range
+  struct ReentrantRange {
+    ObserverList::Iter<false> begin_;
+    ObserverList::Iter<false> end_;
+
+    auto begin() { return begin_; }
+    auto end() { return end_; }
+  };
+
+  // Method to return the reentrant range adapter. Use this if it's safe to
+  // iterate observers even if the observer list itself should be non-reentrant
+  // The observer should be non reentrant.
+  // TODO(40562847): Add static_assert to ensure the reentrancy is
+  // kDisallowReentrancy.
+  ReentrantRange GetReentrantRange() {
+    // An optimization: do not involve weak pointers for empty list.
+    if (empty()) {
+      return {};
+    }
+    return ReentrantRange{Iter</*check_reentrancy=*/false>(this),
+                          Iter</*check_reentrancy=*/false>()};
   }
 
   // Add an observer to this list. An observer should not be added to the same
   // list more than once.
   //
-  // Precondition: obs != nullptr
-  // Precondition: !HasObserver(obs)
-  void AddObserver(ObserverType* obs) {
-    DCHECK(obs);
-    CHECK(!HasObserver(obs)) << "Observers can only be added once!";
-    observers_count_++;
-    observers_.emplace_back(ObserverStorageType(obs));
+  // Precondition: observer != nullptr
+  // Precondition: !HasObserver(observer)
+  void AddObserver(ObserverType* observer) {
+    DCHECK(observer);
+    // TODO(crbug.com/40063488): Turn this into a CHECK once very prevalent
+    // failures are weeded out.
+    if (HasObserver(observer)) {
+      DUMP_WILL_BE_NOTREACHED() << "Observers can only be added once!";
+      return;
+    }
+    if (!live_iterators_.empty()) {
+      DCHECK_CALLED_ON_VALID_SEQUENCE(iteration_sequence_checker_);
+    }
+    ++observers_count_;
+    observers_.emplace_back(ObserverStorageType(observer));
   }
 
   // Removes the given observer from this list. Does nothing if this observer is
   // not in this list.
-  void RemoveObserver(const ObserverType* obs) {
-    DCHECK(obs);
-    const auto it = ranges::find_if(
-        observers_, [obs](const auto& o) { return o.IsEqual(obs); });
-    if (it == observers_.end())
+  void RemoveObserver(const ObserverType* observer) {
+    DCHECK(observer);
+    const auto it = std::ranges::find_if(
+        observers_, [observer](const auto& o) { return o.IsEqual(observer); });
+    if (it == observers_.end()) {
       return;
-    if (!it->IsMarkedForRemoval())
-      observers_count_--;
+    }
+    if (!it->IsMarkedForRemoval()) {
+      --observers_count_;
+    }
     if (live_iterators_.empty()) {
       observers_.erase(it);
     } else {
@@ -296,14 +388,15 @@ class ObserverList {
   }
 
   // Determine whether a particular observer is in the list.
-  bool HasObserver(const ObserverType* obs) const {
+  bool HasObserver(const ObserverType* observer) const {
     // Client code passing null could be confused by the treatment of observers
-    // removed mid-iteration. TODO(https://crbug.com/876588): This should
+    // removed mid-iteration. TODO(crbug.com/40590447): This should
     // probably DCHECK, but some client code currently does pass null.
-    if (obs == nullptr)
+    if (observer == nullptr) {
       return false;
-    return ranges::find_if(observers_, [obs](const auto& o) {
-             return o.IsEqual(obs);
+    }
+    return std::ranges::find_if(observers_, [observer](const auto& o) {
+             return o.IsEqual(observer);
            }) != observers_.end();
   }
 
@@ -313,13 +406,66 @@ class ObserverList {
       observers_.clear();
     } else {
       DCHECK_CALLED_ON_VALID_SEQUENCE(iteration_sequence_checker_);
-      for (auto& observer : observers_)
+      for (auto& observer : observers_) {
         observer.MarkForRemoval();
+      }
     }
     observers_count_ = 0;
   }
 
   bool empty() const { return !observers_count_; }
+
+  // Notifies all observers. It is safe to add and remove observers from within
+  // the notification method.
+  //
+  // Example:
+  //   // Instead of:
+  //   for (auto& observer : observers_) {
+  //     observer->OnFooChanged(x, y);
+  //   }
+  //   // You can use:
+  //   observers_.Notify(&Observer::OnFooChanged, x, y);
+  //
+  // Requirements:
+  //  - The observer method's arguments cannot be rvalue (T&&) or non-const
+  //    reference (T&).
+  //
+  // TODO(crbug.com/40727208): Consider handling return values from observer
+  // methods, which are currently ignored.
+  //
+  // TODO(crbug.com/40727208): Consider adding an overload that supports
+  // move-only arguments by requiring `args` to be callable objects that
+  // returns a value of the desired type.
+  template <typename Method, typename... Args>
+    requires std::invocable<Method, ObserverType*, const Args&...>
+  void Notify(Method method, const Args&... args) {
+    for (auto& observer : *this) {
+      std::invoke(method, observer, args...);
+    }
+  }
+
+  // Same as `Notify` but doesn't check reentrancy. Use this if it's safe to
+  // call the method reentrantly even if the observer list itself should be
+  // non-reentrant. The observer should be non reentrant.
+  // TODO(40562847): Add static_assert to ensure the reentrancy is
+  // kDisallowReentrancy.
+  template <typename Method, typename... Args>
+    requires std::invocable<Method, ObserverType*, const Args&...>
+  void NotifyAllowReentrancy(Method method, const Args&... args) {
+    for (auto& observer : GetReentrantRange()) {
+      std::invoke(method, observer, args...);
+    }
+  }
+
+  // Same as `NotifyReentrantly` but the reentrancy of the observer method is
+  // not trigaged and needs investigation.
+  // TODO(40562847(): Add static_assert to ensure the reentrancy is
+  // kDisallowReentrancy.
+  template <typename Method, typename... Args>
+    requires std::invocable<Method, ObserverType*, const Args&...>
+  void NotifyAllowReentrancyUntriaged(Method method, const Args&... args) {
+    NotifyAllowReentrancy(method, args...);
+  }
 
  private:
   friend class internal::WeakLinkNode<ObserverList>;
@@ -330,15 +476,15 @@ class ObserverList {
     // Compact() is only ever called when the last iterator is destroyed.
     DETACH_FROM_SEQUENCE(iteration_sequence_checker_);
 
-    observers_.erase(
-        std::remove_if(observers_.begin(), observers_.end(),
-                       [](const auto& o) { return o.IsMarkedForRemoval(); }),
-        observers_.end());
+    std::erase_if(observers_,
+                  [](const auto& o) { return o.IsMarkedForRemoval(); });
   }
 
-  std::string GetObserversCreationStackString() const {
 #if DCHECK_IS_ON()
-    std::string result;
+  std::string GetObserversCreationStackString() const
+    requires check_empty
+  {
+    std::string result("\n");
 #if BUILDFLAG(IS_IOS)
     result += "Use go/observer-list-empty to interpret.\n";
 #endif
@@ -347,10 +493,8 @@ class ObserverList {
       result += "\n";
     }
     return result;
-#else
-    return "For observer stack traces, build with `dcheck_always_on=true`.";
-#endif  // DCHECK_IS_ON()
   }
+#endif  // DCHECK_IS_ON()
 
   std::vector<ObserverStorageType> observers_;
 
@@ -364,7 +508,10 @@ class ObserverList {
 };
 
 template <class ObserverType, bool check_empty = false>
-using ReentrantObserverList = ObserverList<ObserverType, check_empty, true>;
+using ReentrantObserverList =
+    ObserverList<ObserverType,
+                 check_empty,
+                 ObserverListReentrancyPolicy::kAllowReentrancy>;
 
 }  // namespace base
 

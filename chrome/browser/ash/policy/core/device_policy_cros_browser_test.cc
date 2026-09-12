@@ -9,9 +9,9 @@
 #include <string>
 
 #include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
-#include "chrome/browser/ash/policy/core/device_policy_builder.h"
 #include "chrome/browser/browser_process.h"
 #include "chromeos/ash/components/dbus/session_manager/fake_session_manager_client.h"
+#include "chromeos/ash/components/policy/device_policy/device_policy_builder.h"
 #include "components/prefs/pref_service.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -52,7 +52,7 @@ LocalStateValueWaiter::LocalStateValueWaiter(const std::string& pref,
   pref_change_registrar_.Init(g_browser_process->local_state());
 }
 
-LocalStateValueWaiter::~LocalStateValueWaiter() {}
+LocalStateValueWaiter::~LocalStateValueWaiter() = default;
 
 bool LocalStateValueWaiter::ExpectedValueFound() {
   const base::Value& pref_value =
@@ -84,17 +84,17 @@ DictionaryLocalStateValueWaiter::DictionaryLocalStateValueWaiter(
     const std::string& key)
     : LocalStateValueWaiter(pref, base::Value(expected_value)), key_(key) {}
 
-DictionaryLocalStateValueWaiter::~DictionaryLocalStateValueWaiter() {}
+DictionaryLocalStateValueWaiter::~DictionaryLocalStateValueWaiter() = default;
 
 bool DictionaryLocalStateValueWaiter::ExpectedValueFound() {
-  const base::Value::Dict& pref =
+  const base::DictValue& pref =
       pref_change_registrar_.prefs()->GetDict(pref_.c_str());
 
   const std::string* actual_value = pref.FindString(key_);
   return actual_value && *actual_value == expected_value_.GetString();
 }
 
-DevicePolicyCrosBrowserTest::DevicePolicyCrosBrowserTest() {}
+DevicePolicyCrosBrowserTest::DevicePolicyCrosBrowserTest() = default;
 
 DevicePolicyCrosBrowserTest::~DevicePolicyCrosBrowserTest() = default;
 

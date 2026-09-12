@@ -111,9 +111,6 @@ class PumpableTaskRunner : public base::SingleThreadTaskRunner {
   scoped_refptr<base::SingleThreadTaskRunner> target_task_runner_;
 };
 
-base::LazyInstance<WindowResizeHelperMac>::Leaky g_window_resize_helper =
-    LAZY_INSTANCE_INITIALIZER;
-
 ////////////////////////////////////////////////////////////////////////////////
 // WrappedTask
 
@@ -138,7 +135,6 @@ bool WrappedTask::ShouldRunBefore(const WrappedTask& other) {
     return false;
   // Sequence numbers are unique, so this should never happen.
   NOTREACHED();
-  return false;
 }
 
 void WrappedTask::Run() {
@@ -205,10 +201,7 @@ bool PumpableTaskRunner::WaitForSingleWrappedTaskToRun(
     {
       base::AutoLock lock(task_queue_lock_);
 
-      for (WrappedTaskQueue::iterator it = task_queue_.begin();
-           it != task_queue_.end(); ++it) {
-        WrappedTask* potential_task = *it;
-
+      for (WrappedTask* potential_task : task_queue_) {
         // If this task is scheduled for the future, take it into account when
         // deciding how long to sleep, and continue on to the next task.
         if (potential_task->can_run_time() > current_time) {
@@ -275,7 +268,6 @@ bool PumpableTaskRunner::PostNonNestableDelayedTask(
   // The correctness of non-nestable events hasn't been proven for this
   // structure.
   NOTREACHED();
-  return false;
 }
 
 bool PumpableTaskRunner::RunsTasksInCurrentSequence() const {
@@ -294,7 +286,8 @@ scoped_refptr<base::SingleThreadTaskRunner> WindowResizeHelperMac::task_runner()
 
 // static
 WindowResizeHelperMac* WindowResizeHelperMac::Get() {
-  return g_window_resize_helper.Pointer();
+  static base::NoDestructor<WindowResizeHelperMac> instance;
+  return instance.get();
 }
 
 void WindowResizeHelperMac::Init(
@@ -318,8 +311,8 @@ bool WindowResizeHelperMac::WaitForSingleTaskToRun(
   return pumpable_task_runner->WaitForSingleWrappedTaskToRun(max_delay);
 }
 
-WindowResizeHelperMac::WindowResizeHelperMac() {}
-WindowResizeHelperMac::~WindowResizeHelperMac() {}
+WindowResizeHelperMac::WindowResizeHelperMac() = default;
+WindowResizeHelperMac::~WindowResizeHelperMac() = default;
 
 void WindowResizeHelperMac::EventTimedWait(base::WaitableEvent* event,
                                            base::TimeDelta delay) {

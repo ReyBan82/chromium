@@ -4,8 +4,12 @@
 
 #include "net/test/url_request/url_request_mock_http_job.h"
 
+#include <string_view>
+
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/numerics/safe_conversions.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -57,7 +61,7 @@ class MockJobInterceptor : public URLRequestInterceptor {
     // So first we convert base FilePath to a URL, then append the URL
     // path to that, and convert the final URL back to a FilePath.
     GURL file_url(FilePathToFileURL(base_path_));
-    std::string url = file_url.spec() + request->url().path();
+    std::string url = file_url.spec() + request->url().GetPath();
     base::FilePath file_path;
     FileURLToFilePath(GURL(url), &file_path);
     return file_path;
@@ -84,7 +88,7 @@ std::string DoFileIO(const base::FilePath& file_path) {
 // For a given file |path| and |scheme|, return the URL served by the
 // URlRequestMockHTTPJob.
 GURL GetMockUrlForScheme(const std::string& path, const std::string& scheme) {
-  return GURL(scheme + "://" + kMockHostname + "/" + path);
+  return GURL(base::StrCat({scheme, "://", kMockHostname, "/", path}));
 }
 
 }  // namespace
@@ -148,8 +152,9 @@ bool URLRequestMockHTTPJob::IsRedirectResponse(
 }
 
 void URLRequestMockHTTPJob::OnReadComplete(net::IOBuffer* buffer, int result) {
-  if (result >= 0)
-    total_received_bytes_ += result;
+  if (result >= 0) {
+    total_received_bytes_ += base::ByteSize(base::as_unsigned(result));
+  }
 }
 
 // Public virtual version.
@@ -165,9 +170,9 @@ void URLRequestMockHTTPJob::SetHeadersAndStart(const std::string& raw_headers) {
   // Handle CRLF line-endings.
   base::ReplaceSubstringsAfterOffset(&raw_headers_, 0, "\r\n", "\n");
   // ParseRawHeaders expects \0 to end each header line.
-  base::ReplaceSubstringsAfterOffset(
-      &raw_headers_, 0, "\n", base::StringPiece("\0", 1));
-  total_received_bytes_ += raw_headers_.size();
+  base::ReplaceSubstringsAfterOffset(&raw_headers_, 0, "\n",
+                                     std::string_view("\0", 1));
+  total_received_bytes_ += base::ByteSize(raw_headers_.size());
   URLRequestTestJobBackedByFile::Start();
 }
 
@@ -176,7 +181,7 @@ void URLRequestMockHTTPJob::GetResponseInfoConst(HttpResponseInfo* info) const {
   info->headers = base::MakeRefCounted<HttpResponseHeaders>(raw_headers_);
 }
 
-int64_t URLRequestMockHTTPJob::GetTotalReceivedBytes() const {
+base::ByteSize URLRequestMockHTTPJob::GetTotalReceivedBytes() const {
   return total_received_bytes_;
 }
 

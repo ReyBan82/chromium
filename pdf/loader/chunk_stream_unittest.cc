@@ -4,18 +4,33 @@
 
 #include "pdf/loader/chunk_stream.h"
 
+#include <stdint.h>
+
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <utility>
 
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace chrome_pdf {
 namespace {
-typedef ChunkStream<10> TestChunkStream;
+using TestChunkStream = ChunkStream<10>;
 
 std::unique_ptr<TestChunkStream::ChunkData> CreateChunkData() {
   return std::make_unique<TestChunkStream::ChunkData>();
+}
+
+// Creates a chunk and populates it with incrementing values starting from
+// `start_value`.
+std::unique_ptr<TestChunkStream::ChunkData> CreateAndFillChunkData(
+    uint8_t start_value) {
+  std::unique_ptr<TestChunkStream::ChunkData> chunk = CreateChunkData();
+  for (uint8_t& byte : *chunk) {
+    byte = start_value++;
+  }
+  return chunk;
 }
 }  // namespace
 
@@ -67,33 +82,45 @@ TEST(ChunkStreamTest, FillGap) {
   EXPECT_TRUE(stream.IsComplete());
 }
 
+TEST(ChunkStreamTest, ReadWithInsufficientBuffer) {
+  TestChunkStream stream;
+  stream.set_eof_pos(25);
+  stream.SetChunkData(0, CreateChunkData());
+
+  // Buffer is smaller than the requested range.
+  std::array<uint8_t, 5> small_buffer;
+  std::ranges::fill(small_buffer, 0xFF);
+  EXPECT_FALSE(stream.ReadData(gfx::Range(0, 10), small_buffer));
+  // Verify buffer wasn't modified.
+  EXPECT_THAT(small_buffer, testing::Each(testing::Eq(0xFF)));
+}
+
+TEST(ChunkStreamTest, ReadEmptyRange) {
+  TestChunkStream stream;
+  std::array<uint8_t, 10> buffer;
+  std::ranges::fill(buffer, 0xFF);
+  // Empty range should succeed without requiring data.
+  EXPECT_TRUE(stream.ReadData(gfx::Range(0, 0), buffer));
+  // Verify buffer wasn't modified.
+  EXPECT_THAT(buffer, testing::Each(testing::Eq(0xFF)));
+}
+
 TEST(ChunkStreamTest, Read) {
   TestChunkStream stream;
   stream.set_eof_pos(25);
-  constexpr unsigned char start_value = 33;
-  unsigned char value = start_value;
-  auto chunk_0 = CreateChunkData();
-  for (auto& it : *chunk_0) {
-    it = ++value;
-  }
-  auto chunk_1 = CreateChunkData();
-  for (auto& it : *chunk_1) {
-    it = ++value;
-  }
-  auto chunk_2 = CreateChunkData();
-  for (auto& it : *chunk_2) {
-    it = ++value;
-  }
-  stream.SetChunkData(0, std::move(chunk_0));
-  stream.SetChunkData(2, std::move(chunk_2));
-  stream.SetChunkData(1, std::move(chunk_1));
+  constexpr uint8_t kStartValue = 34;
+  stream.SetChunkData(0, CreateAndFillChunkData(kStartValue));
+  stream.SetChunkData(
+      2, CreateAndFillChunkData(kStartValue + 2 * TestChunkStream::kChunkSize));
+  stream.SetChunkData(
+      1, CreateAndFillChunkData(kStartValue + TestChunkStream::kChunkSize));
 
-  std::array<unsigned char, 25> result_data;
-  EXPECT_TRUE(stream.ReadData(gfx::Range(0, 25), result_data.data()));
+  std::array<uint8_t, 25> result_data;
+  EXPECT_TRUE(stream.ReadData(gfx::Range(0, 25), result_data));
 
-  value = start_value;
-  for (const auto& it : result_data) {
-    EXPECT_EQ(++value, it);
+  uint8_t value = kStartValue;
+  for (uint8_t byte : result_data) {
+    EXPECT_EQ(value++, byte);
   }
 }
 }  // namespace chrome_pdf

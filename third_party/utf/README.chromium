@@ -2,10 +2,13 @@ Name: libutf
 Short Name: libutf
 URL: https://github.com/cls/libutf
 Version: ee5074db68f498a5c802dc9f1645f396c219938a
-Date: 2021/01/05
-License: MIT License
+Revision: ee5074db68f498a5c802dc9f1645f396c219938a
+Update Mechanism: Static.HardFork (https://crbug.com/538356713)
+Date: 2021-01-05
+License: Unicode-DFS-2015, MIT
 License File: LICENSE
 Security Critical: Yes
+Shipped: yes
 CPEPrefix: unknown
 
 Description:
@@ -18,6 +21,7 @@ Modifications:
 - Add CJK ideographs to the range set for isalpharune. See crbug/1184370 for details (patches/0001-adding-CJK-ideograph-to-isalpha.patch)
 - Add Korean characters to the isalpharune ranges (patches/0001-adding-korean-characters-to-ranges.patch)
  (patched for korean characters)
+- Fix const-correctness of utfrune/utfrrune/utfutf exposed by glibc 2.43 (patches/0001-fix-const-correctness-glibc-2.43.patch)
 
 Update Process:
 1) Clone the libutf github repo at the desired commit into src/

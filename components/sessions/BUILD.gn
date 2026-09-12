@@ -2,6 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/config/apple/mobile_config.gni")
+import("//build/config/features.gni")
+
 if (is_android) {
   import("//build/config/android/config.gni")
 }
@@ -10,7 +13,7 @@ config("implementation") {
   defines = [ "SESSIONS_IMPLEMENTATION" ]
 }
 
-if (!is_ios) {
+if (use_blink && !(is_ios && target_platform == "iphoneos")) {
   component("sessions") {
     sources = [
       "content/content_live_tab.cc",
@@ -40,7 +43,6 @@ if (!is_ios) {
 
     deps = [
       "//base",
-      "//base/third_party/dynamic_annotations",
       "//content/public/common",
       "//ui/base",
       "//url",
@@ -48,7 +50,6 @@ if (!is_ios) {
   }
 } else {
   source_set("sessions") {
-    configs += [ "//build/config/compiler:enable_arc" ]
     sources = [
       "ios/ios_live_tab.h",
       "ios/ios_live_tab.mm",
@@ -64,13 +65,15 @@ if (!is_ios) {
 
     public_deps = [
       ":shared",
-      "//ios/web",
+      "//ios/web/public",
+      "//ios/web/public/session/proto",
     ]
 
     deps = [
       "//base",
       "//ios/web/common",
       "//ios/web/public/session",
+      "//ios/web/public/session/proto:proto_util",
     ]
   }
 }
@@ -81,6 +84,7 @@ component("session_id") {
     "core/session_id.h",
     "core/session_id_generator.cc",
     "core/session_id_generator.h",
+    "core/sessions_export.h",
   ]
 
   configs += [ ":implementation" ]
@@ -100,6 +104,8 @@ source_set("shared") {
     "core/base_session_service_commands.h",
     "core/command_storage_backend.cc",
     "core/command_storage_backend.h",
+    "core/command_storage_features.cc",
+    "core/command_storage_features.h",
     "core/command_storage_manager.cc",
     "core/command_storage_manager.h",
     "core/command_storage_manager_delegate.h",
@@ -119,7 +125,6 @@ source_set("shared") {
     "core/session_service_commands.h",
     "core/session_types.cc",
     "core/session_types.h",
-    "core/tab_restore_service.cc",
     "core/tab_restore_service.h",
     "core/tab_restore_service_client.cc",
     "core/tab_restore_service_client.h",
@@ -128,14 +133,16 @@ source_set("shared") {
     "core/tab_restore_service_impl.cc",
     "core/tab_restore_service_impl.h",
     "core/tab_restore_service_observer.h",
+    "core/tab_restore_types.cc",
+    "core/tab_restore_types.h",
   ]
 
   configs += [ ":implementation" ]
 
   public_deps = [
     ":session_id",
-    "//build:chromeos_buildflags",
     "//components/keyed_service/core",
+    "//components/os_crypt/common",
     "//skia",
   ]
 
@@ -144,10 +151,11 @@ source_set("shared") {
     "//components/dom_distiller/core",
     "//components/history/core/common",
     "//components/keyed_service/core",
+    "//components/os_crypt/browser",
     "//components/prefs",
+    "//components/split_tabs",
     "//components/tab_groups",
     "//components/variations",
-    "//crypto",
     "//skia",
     "//ui/base",
     "//ui/gfx",
@@ -160,6 +168,8 @@ static_library("test_support") {
   sources = [
     "core/command_storage_manager_test_helper.cc",
     "core/command_storage_manager_test_helper.h",
+    "core/mock_tab_restore_service.cc",
+    "core/mock_tab_restore_service.h",
     "core/serialized_navigation_entry_test_helper.cc",
     "core/serialized_navigation_entry_test_helper.h",
   ]
@@ -174,7 +184,7 @@ static_library("test_support") {
     "//url",
   ]
 
-  if (!is_ios) {
+  if (use_blink && !(is_ios && target_platform == "iphoneos")) {
     sources += [
       "content/content_test_helper.cc",
       "content/content_test_helper.h",
@@ -184,6 +194,10 @@ static_library("test_support") {
       "//content/public/common",
     ]
   }
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 source_set("unit_tests") {
@@ -192,10 +206,12 @@ source_set("unit_tests") {
     "core/command_storage_backend_unittest.cc",
     "core/command_storage_manager_unittest.cc",
     "core/serialized_navigation_entry_unittest.cc",
+    "core/session_command_unittest.cc",
     "core/session_id_generator_unittest.cc",
+    "core/tab_restore_service_helper_unittest.cc",
   ]
 
-  if (!is_ios) {
+  if (use_blink && !(is_ios && target_platform == "iphoneos")) {
     sources += [
       "content/content_serialized_navigation_builder_unittest.cc",
       "content/content_serialized_navigation_driver_unittest.cc",
@@ -206,7 +222,6 @@ source_set("unit_tests") {
       "ios/ios_serialized_navigation_builder_unittest.mm",
       "ios/ios_serialized_navigation_driver_unittest.cc",
     ]
-    configs += [ "//build/config/compiler:enable_arc" ]
   }
 
   public_deps = [ ":sessions" ]
@@ -215,6 +230,7 @@ source_set("unit_tests") {
     ":test_support",
     ":unit_tests_bundle_data",
     "//base/test:test_support",
+    "//components/os_crypt/browser:test_support",
     "//components/prefs:test_support",
     "//testing/gmock",
     "//testing/gtest",
@@ -222,7 +238,7 @@ source_set("unit_tests") {
     "//url",
   ]
 
-  if (!is_ios) {
+  if (use_blink && !(is_ios && target_platform == "iphoneos")) {
     deps += [
       "//content/public/common",
       "//content/test:test_support",
@@ -238,7 +254,16 @@ source_set("unit_tests") {
 bundle_data("unit_tests_bundle_data") {
   visibility = [ ":unit_tests" ]
   testonly = true
-  sources = [ "//components/test/data/sessions/last_session" ]
+  sources = [
+    "//components/test/data/sessions/OSCryptKey-k1",
+    "//components/test/data/sessions/Session-v1NoMarker",
+    "//components/test/data/sessions/Session-v2NoMarkerEncrypted",
+    "//components/test/data/sessions/Session-v3With2Appends",
+    "//components/test/data/sessions/Session-v3WithMarker",
+    "//components/test/data/sessions/Session-v4WithMarkerEncrypted",
+    "//components/test/data/sessions/Session-v5",
+    "//components/test/data/sessions/Session-v5With2Appends",
+  ]
   outputs = [ "{{bundle_resources_dir}}/" +
               "{{source_root_relative_dir}}/{{source_file_part}}" ]
 }

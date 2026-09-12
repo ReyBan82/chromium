@@ -5,6 +5,7 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_AUDIO_WORKLET_GLOBAL_SCOPE_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_AUDIO_WORKLET_GLOBAL_SCOPE_H_
 
+#include "base/memory/raw_ptr.h"
 #include "third_party/blink/public/common/messaging/message_port_channel.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_param_descriptor.h"
@@ -23,6 +24,7 @@ class AudioWorkletProcessor;
 class AudioWorkletProcessorDefinition;
 class CrossThreadAudioWorkletProcessorInfo;
 class ExceptionState;
+class MessagePort;
 class MessagePortChannel;
 class SerializedScriptValue;
 class V8BlinkAudioWorkletProcessorConstructor;
@@ -78,9 +80,9 @@ class MODULES_EXPORT AudioWorkletGlobalScope final : public WorkletGlobalScope {
       MessagePortChannel,
       scoped_refptr<SerializedScriptValue> node_options);
 
-  AudioWorkletProcessorDefinition* FindDefinition(const String& name);
+  AudioWorkletProcessorDefinition* FindDefinition(const String& name) const;
 
-  unsigned NumberOfRegisteredDefinitions();
+  unsigned NumberOfRegisteredDefinitions() const;
 
   std::unique_ptr<Vector<CrossThreadAudioWorkletProcessorInfo>>
   WorkletProcessorInfoListForSynchronization();
@@ -91,11 +93,16 @@ class MODULES_EXPORT AudioWorkletGlobalScope final : public WorkletGlobalScope {
 
   void SetCurrentFrame(size_t current_frame);
   void SetSampleRate(float sample_rate);
+  void SetRenderQuantumSize(uint32_t render_quantum_size);
 
   // IDL
   uint64_t currentFrame() const { return current_frame_; }
   double currentTime() const;
+  MessagePort* port() const { return port_.Get(); }
   float sampleRate() const { return sample_rate_; }
+  uint32_t renderQuantumSize() const { return render_quantum_size_; }
+
+  void SetPort(MessagePort*);
 
   void Trace(Visitor*) const override;
 
@@ -109,9 +116,8 @@ class MODULES_EXPORT AudioWorkletGlobalScope final : public WorkletGlobalScope {
   void SetObjectProxy(AudioWorkletObjectProxy&);
 
  private:
-  typedef HeapHashMap<String, Member<AudioWorkletProcessorDefinition>>
-      ProcessorDefinitionMap;
-  typedef HeapVector<Member<AudioWorkletProcessor>> ProcessorInstances;
+  using ProcessorDefinitionMap =
+      HeapHashMap<String, Member<AudioWorkletProcessorDefinition>>;
 
   network::mojom::RequestDestination GetDestination() const override {
     return network::mojom::RequestDestination::kAudioWorklet;
@@ -120,7 +126,6 @@ class MODULES_EXPORT AudioWorkletGlobalScope final : public WorkletGlobalScope {
   bool is_closing_ = false;
 
   ProcessorDefinitionMap processor_definition_map_;
-  ProcessorInstances processor_instances_;
 
   // Gets set when the processor construction is invoked, and cleared out after
   // the construction. See the comment in `CreateProcessor()` method for the
@@ -128,7 +133,9 @@ class MODULES_EXPORT AudioWorkletGlobalScope final : public WorkletGlobalScope {
   std::unique_ptr<ProcessorCreationParams> processor_creation_params_;
 
   size_t current_frame_ = 0;
+  Member<MessagePort> port_;
   float sample_rate_ = 0.0f;
+  uint32_t render_quantum_size_ = 128;
 
   // Default initialized to generate a distinct token for this worklet.
   const AudioWorkletToken token_;
@@ -136,7 +143,7 @@ class MODULES_EXPORT AudioWorkletGlobalScope final : public WorkletGlobalScope {
   // AudioWorkletObjectProxy manages the cross-thread messaging to
   // AudioWorkletMessagingProxy on the main thread. AudioWorkletObjectProxy
   // outlives AudioWorkletGlobalScope, this raw pointer is safe.
-  AudioWorkletObjectProxy* object_proxy_ = nullptr;
+  raw_ptr<AudioWorkletObjectProxy> object_proxy_ = nullptr;
 };
 
 template <>

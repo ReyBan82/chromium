@@ -2,13 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "content/browser/background_fetch/mock_background_fetch_delegate.h"
+
 #include <utility>
 #include <vector>
 
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
-#include "content/browser/background_fetch/mock_background_fetch_delegate.h"
 #include "content/public/browser/background_fetch_description.h"
 #include "content/public/browser/background_fetch_response.h"
 #include "content/public/browser/browser_thread.h"
@@ -26,7 +28,7 @@ MockBackgroundFetchDelegate::TestResponseBuilder::TestResponseBuilder(
     : response_(std::make_unique<TestResponse>()) {
   response_->succeeded = network::IsSuccessfulStatus(response_code);
   response_->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
-      "HTTP/1.1 " + std::to_string(response_code));
+      "HTTP/1.1 " + base::NumberToString(response_code));
 }
 
 MockBackgroundFetchDelegate::TestResponseBuilder::~TestResponseBuilder() =
@@ -36,7 +38,7 @@ MockBackgroundFetchDelegate::TestResponseBuilder&
 MockBackgroundFetchDelegate::TestResponseBuilder::AddResponseHeader(
     const std::string& name,
     const std::string& value) {
-  DCHECK(response_);
+  CHECK(response_, base::NotFatalUntil::M158);
   response_->headers->AddHeader(name, value);
   return *this;
 }
@@ -44,7 +46,7 @@ MockBackgroundFetchDelegate::TestResponseBuilder::AddResponseHeader(
 MockBackgroundFetchDelegate::TestResponseBuilder&
 MockBackgroundFetchDelegate::TestResponseBuilder::SetResponseData(
     std::string data) {
-  DCHECK(response_);
+  CHECK(response_, base::NotFatalUntil::M158);
   response_->data.swap(data);
   return *this;
 }
@@ -81,10 +83,12 @@ void MockBackgroundFetchDelegate::DownloadUrl(
     ::network::mojom::CredentialsMode credentials_mode,
     const net::NetworkTrafficAnnotationTag& traffic_annotation,
     const net::HttpRequestHeaders& headers,
-    bool has_request_body) {
-  DCHECK(!seen_guids_.count(guid));
+    bool has_request_body,
+    scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory) {
+  CHECK(!seen_guids_.count(guid), base::NotFatalUntil::M158);
 
   download_guid_to_job_id_map_[guid] = job_unique_id;
+  url_loader_factories_[job_unique_id] = std::move(url_loader_factory);
 
   auto url_iter = url_responses_.find(url);
   if (url_iter == url_responses_.end()) {
@@ -147,9 +151,7 @@ void MockBackgroundFetchDelegate::DownloadUrl(
     CHECK(base::CreateTemporaryFileInDir(temp_directory_.GetPath(),
                                          &response_path));
 
-    CHECK_NE(/* error= */ -1,
-             base::WriteFile(response_path, test_response->data.c_str(),
-                             test_response->data.size()));
+    CHECK(base::WriteFile(response_path, test_response->data));
 
     PostAbortCheckingTask(
         job_unique_id,
@@ -160,7 +162,7 @@ void MockBackgroundFetchDelegate::DownloadUrl(
                 std::make_unique<BackgroundFetchResponse>(
                     std::vector<GURL>({url}), test_response->headers),
                 base::Time::Now(), response_path,
-                /* blob_handle= */ absl::nullopt, test_response->data.size())));
+                /* blob_handle= */ std::nullopt, test_response->data.size())));
   } else {
     auto response = std::make_unique<BackgroundFetchResponse>(
         std::vector<GURL>({url}), test_response->headers);
@@ -188,15 +190,15 @@ void MockBackgroundFetchDelegate::MarkJobComplete(
 
 void MockBackgroundFetchDelegate::UpdateUI(
     const std::string& job_unique_id,
-    const absl::optional<std::string>& title,
-    const absl::optional<SkBitmap>& icon) {
+    const std::optional<std::string>& title,
+    const std::optional<SkBitmap>& icon) {
   job_id_to_client_map_[job_unique_id]->OnUIUpdated(job_unique_id);
 }
 
 void MockBackgroundFetchDelegate::RegisterResponse(
     const GURL& url,
     std::unique_ptr<TestResponse> response) {
-  DCHECK_EQ(0u, url_responses_.count(url));
+  CHECK_EQ(0u, url_responses_.count(url), base::NotFatalUntil::M158);
   url_responses_[url] = std::move(response);
 }
 

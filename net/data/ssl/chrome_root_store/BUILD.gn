@@ -8,6 +8,7 @@ compiled_action("gen_root_store_inc") {
   tool = "//net/tools/root_store_tool:root_store_tool"
 
   inputs = [
+    "additional.certs",
     "root_store.certs",
     "root_store.textproto",
   ]
@@ -18,6 +19,7 @@ compiled_action("gen_root_store_inc") {
   args = [
     "--root-store=" + rebase_path("root_store.textproto", root_build_dir),
     "--certs=" + rebase_path("root_store.certs", root_build_dir),
+    "--additional-certs=" + rebase_path("additional.certs", root_build_dir),
     "--write-cpp-root-store=" +
         rebase_path("${target_gen_dir}/chrome-root-store-inc.cc",
                     root_build_dir),
@@ -30,6 +32,7 @@ compiled_action("gen_root_store_test_inc") {
   tool = "//net/tools/root_store_tool:root_store_tool"
 
   inputs = [
+    "test_additional.certs",
     "test_store.certs",
     "test_store.textproto",
   ]
@@ -37,8 +40,26 @@ compiled_action("gen_root_store_test_inc") {
   args = [
     "--root-store=" + rebase_path("test_store.textproto", root_build_dir),
     "--certs=" + rebase_path("test_store.certs", root_build_dir),
+    "--additional-certs=" +
+        rebase_path("test_additional.certs", root_build_dir),
     "--write-cpp-root-store=" +
         rebase_path("${target_gen_dir}/chrome-root-store-test-data-inc.cc",
                     root_build_dir),
+  ]
+}
+
+compiled_action("gen_signer_set_inc") {
+  tool = "//net/tools/signer_set_tool:signer_set_tool"
+
+  inputs = [
+    "signer_keys.pem",
+    "signer_set.textproto",
+  ]
+  outputs = [ "${target_gen_dir}/signer-set-inc.cc" ]
+  args = [
+    "--signer-set=" + rebase_path("signer_set.textproto", root_build_dir),
+    "--keys=" + rebase_path("signer_keys.pem", root_build_dir),
+    "--write-cpp=" +
+        rebase_path("${target_gen_dir}/signer-set-inc.cc", root_build_dir),
   ]
 }

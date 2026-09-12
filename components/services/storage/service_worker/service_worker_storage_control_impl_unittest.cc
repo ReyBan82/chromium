@@ -8,16 +8,22 @@
 #include <string>
 #include <vector>
 
+#include "base/byte_size.h"
+#include "base/compiler_specific.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/span.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/bind.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
+#include "components/services/storage/service_worker/service_worker_database.pb.h"
 #include "components/services/storage/service_worker/service_worker_storage_test_utils.h"
+#include "crypto/hash.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/system/data_pipe_utils.h"
+#include "net/base/hash_value.h"
 #include "net/disk_cache/disk_cache.h"
 #include "net/http/http_util.h"
 #include "net/test/cert_test_util.h"
@@ -45,7 +51,7 @@ struct FindRegistrationResult {
 struct ReadResponseHeadResult {
   int status;
   network::mojom::URLResponseHeadPtr response_head;
-  absl::optional<mojo_base::BigBuffer> metadata;
+  std::optional<mojo_base::BigBuffer> metadata;
 };
 
 struct ReadDataResult {
@@ -99,7 +105,7 @@ ReadResponseHeadResult ReadResponseHead(
   base::RunLoop loop;
   reader->ReadResponseHead(base::BindLambdaForTesting(
       [&](int status, network::mojom::URLResponseHeadPtr response_head,
-          absl::optional<mojo_base::BigBuffer> metadata) {
+          std::optional<mojo_base::BigBuffer> metadata) {
         result.status = status;
         result.response_head = std::move(response_head);
         result.metadata = std::move(metadata);
@@ -187,16 +193,17 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
   void TearDown() override { DestroyStorage(); }
 
   void SetUpStorage() {
+    storage_shared_buffer_ =
+        base::MakeRefCounted<ServiceWorkerStorage::StorageSharedBuffer>();
     storage_impl_ = std::make_unique<ServiceWorkerStorageControlImpl>(
-        user_data_directory_.GetPath(),
-        /*database_task_runner=*/
-        base::SingleThreadTaskRunner::GetCurrentDefault(),
+        user_data_directory_.GetPath(), storage_shared_buffer_,
         remote_.BindNewPipeAndPassReceiver());
   }
 
   void DestroyStorage() {
     remote_.reset();
     storage_impl_.reset();
+    storage_shared_buffer_ = nullptr;
     disk_cache::FlushCacheThreadForTesting();
     task_environment().RunUntilIdle();
   }
@@ -213,6 +220,18 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
 
   void LazyInitializeForTest() { storage_impl_->LazyInitializeForTest(); }
 
+  std::vector<blink::StorageKey> GetRegisteredStorageKeys() {
+    std::vector<blink::StorageKey> return_value;
+    base::RunLoop loop;
+    storage()->GetRegisteredStorageKeys(base::BindLambdaForTesting(
+        [&](const std::vector<blink::StorageKey>& storage_keys) {
+          return_value = storage_keys;
+          loop.Quit();
+        }));
+    loop.Run();
+    return return_value;
+  }
+
   FindRegistrationResult FindRegistrationForClientUrl(
       const GURL& client_url,
       const blink::StorageKey& key) {
@@ -223,7 +242,7 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
         base::BindLambdaForTesting(
             [&](DatabaseStatus status,
                 mojom::ServiceWorkerFindRegistrationResultPtr entry,
-                const absl::optional<std::vector<GURL>>& scopes) {
+                const std::optional<std::vector<GURL>>& scopes) {
               return_value.status = status;
               return_value.entry = std::move(entry);
               loop.Quit();
@@ -252,7 +271,7 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
 
   FindRegistrationResult FindRegistrationForId(
       int64_t registration_id,
-      const absl::optional<blink::StorageKey>& key) {
+      const std::optional<blink::StorageKey>& key) {
     FindRegistrationResult return_value;
     base::RunLoop loop;
     storage()->FindRegistrationForId(
@@ -614,6 +633,10 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
     return return_value;
   }
 
+  void PerformStorageCleanup(base::OnceClosure callback) {
+    storage()->PerformStorageCleanup(std::move(callback));
+  }
+
   GetUsageForStorageKeyResult GetUsageForStorageKey(
       const blink::StorageKey& key) {
     GetUsageForStorageKeyResult result;
@@ -646,11 +669,11 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
     data->navigation_preload_state =
         blink::mojom::NavigationPreloadState::New();
 
-    int64_t resources_total_size_bytes = 0;
+    base::ByteSize resources_total_size;
     for (auto& resource : resources) {
-      resources_total_size_bytes += resource->size_bytes;
+      resources_total_size += resource->size.value();
     }
-    data->resources_total_size_bytes = resources_total_size_bytes;
+    data->resources_total_size = resources_total_size;
 
     return data;
   }
@@ -662,11 +685,11 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
                                             const GURL& scope,
                                             const blink::StorageKey& key,
                                             const GURL& script_url,
-                                            int64_t script_size) {
+                                            base::ByteSize script_size) {
     std::vector<mojom::ServiceWorkerResourceRecordPtr> resources;
     resources.push_back(mojom::ServiceWorkerResourceRecord::New(
         resource_id, script_url, script_size,
-        /*sha256_checksum=*/absl::nullopt));
+        /*sha256_checksum=*/std::nullopt));
 
     RegistrationData data = CreateRegistrationData(
         registration_id, version_id, scope, key, script_url, resources);
@@ -690,21 +713,23 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
     if (result < 0)
       return result;
 
-    mojo_base::BigBuffer buffer(base::as_bytes(base::make_span(data)));
+    mojo_base::BigBuffer buffer(base::as_byte_span(data));
     result = WriteResponseData(writer.get(), std::move(buffer));
     return result;
   }
 
-  ReadDataResult ReadResource(int64_t resource_id, int data_size) {
+  ReadDataResult ReadResource(int64_t resource_id, base::ByteSize data_size) {
     mojo::Remote<mojom::ServiceWorkerResourceReader> reader =
         CreateResourceReader(resource_id);
-    return ReadResponseData(reader.get(), data_size);
+    return ReadResponseData(reader.get(), data_size.InBytes());
   }
 
   mojo::Remote<mojom::ServiceWorkerResourceReader> CreateResourceReader(
-      int64_t resource_id) {
+      int64_t resource_id,
+      const std::optional<net::SHA256HashValue>& sha256_checksum =
+          std::nullopt) {
     mojo::Remote<mojom::ServiceWorkerResourceReader> reader;
-    storage()->CreateResourceReader(resource_id,
+    storage()->CreateResourceReader(resource_id, sha256_checksum,
                                     reader.BindNewPipeAndPassReceiver());
     return reader;
   }
@@ -739,10 +764,17 @@ class ServiceWorkerStorageControlImplTest : public testing::Test {
     return result;
   }
 
+  ServiceWorkerStorage::StorageSharedBuffer& storage_shared_buffer() {
+    // storage_shared_buffer_  always exists.
+    return *storage_shared_buffer_;
+  }
+
  private:
   base::ScopedTempDir user_data_directory_;
   base::test::TaskEnvironment task_environment_;
   std::unique_ptr<ServiceWorkerStorageControlImpl> storage_impl_;
+  scoped_refptr<ServiceWorkerStorage::StorageSharedBuffer>
+      storage_shared_buffer_;
   mojo::Remote<mojom::ServiceWorkerStorageControl> remote_;
 };
 
@@ -757,10 +789,30 @@ TEST_F(ServiceWorkerStorageControlImplTest, FindRegistration_NoRegistration) {
 
   LazyInitializeForTest();
 
+  // Obtains all StorageKeys. This operation should succeed.
+  {
+    std::vector<blink::StorageKey> storage_keys = GetRegisteredStorageKeys();
+    EXPECT_EQ(storage_keys.size(), 0UL);
+    EXPECT_EQ(storage_shared_buffer().TakeRegisteredKeys()->size(), 0UL);
+    // The 2nd call of TakeRegisteredKeys() returns std::nullopt.
+    EXPECT_FALSE(storage_shared_buffer().TakeRegisteredKeys().has_value());
+  }
+
   {
     FindRegistrationResult result =
         FindRegistrationForClientUrl(kClientUrl, kKey);
     EXPECT_EQ(result.status, DatabaseStatus::kErrorNotFound);
+    std::map<blink::StorageKey, std::vector<GURL>> registration_scopes =
+        storage_shared_buffer().TakeRegistrationScopes();
+    EXPECT_EQ(registration_scopes.size(), 1UL);
+    EXPECT_TRUE(registration_scopes.contains(kKey));
+    EXPECT_TRUE(registration_scopes[kKey].empty());
+    // The 2nd call of TakeRegistrationScopes() returns an empty map.
+    EXPECT_TRUE(storage_shared_buffer().TakeRegistrationScopes().empty());
+    // TakeFindRegistrationResult() returns null if there are no registrations.
+    EXPECT_TRUE(storage_shared_buffer()
+                    .TakeFindRegistrationResult(kClientUrl, kKey)
+                    .is_null());
   }
 
   {
@@ -776,7 +828,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, FindRegistration_NoRegistration) {
 
   {
     FindRegistrationResult result =
-        FindRegistrationForId(kRegistrationId, absl::nullopt);
+        FindRegistrationForId(kRegistrationId, std::nullopt);
     EXPECT_EQ(result.status, DatabaseStatus::kErrorNotFound);
   }
 }
@@ -788,7 +840,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndDeleteRegistration) {
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
   const GURL kScriptUrl("https://www.example.com/scope/sw.js");
   const GURL kClientUrl("https://www.example.com/scope/document.html");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -799,7 +851,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndDeleteRegistration) {
   std::vector<mojom::ServiceWorkerResourceRecordPtr> resources;
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
       kRegistrationId, kScriptUrl, kScriptSize,
-      /*sha256_checksum=*/absl::nullopt));
+      /*sha256_checksum=*/std::nullopt));
 
   auto data = mojom::ServiceWorkerRegistrationData::New();
   data->registration_id = kRegistrationId;
@@ -809,17 +861,28 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndDeleteRegistration) {
   data->version_id = kVersionId;
   data->navigation_preload_state = blink::mojom::NavigationPreloadState::New();
 
-  int64_t resources_total_size_bytes = 0;
+  base::ByteSize resources_total_size;
   for (auto& resource : resources) {
-    resources_total_size_bytes += resource->size_bytes;
+    resources_total_size += resource->size.value();
   }
-  data->resources_total_size_bytes = resources_total_size_bytes;
+  data->resources_total_size = resources_total_size;
 
   // Store the registration data.
   {
     DatabaseStatus status =
         StoreRegistration(std::move(data), std::move(resources));
     ASSERT_EQ(status, DatabaseStatus::kOk);
+  }
+
+  // Obtains all StorageKeys. This operation should succeed.
+  {
+    std::vector<blink::StorageKey> storage_keys = GetRegisteredStorageKeys();
+    ASSERT_EQ(storage_keys.size(), 1UL);
+    EXPECT_EQ(storage_keys[0], kKey);
+    // The obtained keys must be the same as the keys from TakeRegisteredKeys().
+    EXPECT_EQ(storage_keys, storage_shared_buffer().TakeRegisteredKeys());
+    // The 2nd call of TakeRegisteredKeys() returns std::nullopt.
+    EXPECT_FALSE(storage_shared_buffer().TakeRegisteredKeys().has_value());
   }
 
   // Find the registration. Find operations should succeed.
@@ -832,16 +895,40 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndDeleteRegistration) {
     EXPECT_EQ(result.entry->registration->key, kKey);
     EXPECT_EQ(result.entry->registration->script, kScriptUrl);
     EXPECT_EQ(result.entry->registration->version_id, kVersionId);
-    EXPECT_EQ(result.entry->registration->resources_total_size_bytes,
-              resources_total_size_bytes);
+    EXPECT_EQ(result.entry->registration->resources_total_size,
+              resources_total_size);
     EXPECT_EQ(result.entry->resources.size(), 1UL);
 
     result = FindRegistrationForScope(kScope, kKey);
     EXPECT_EQ(result.status, DatabaseStatus::kOk);
     result = FindRegistrationForId(kRegistrationId, kKey);
     EXPECT_EQ(result.status, DatabaseStatus::kOk);
-    result = FindRegistrationForId(kRegistrationId, absl::nullopt);
+    result = FindRegistrationForId(kRegistrationId, std::nullopt);
     EXPECT_EQ(result.status, DatabaseStatus::kOk);
+
+    std::map<blink::StorageKey, std::vector<GURL>> registration_scopes =
+        storage_shared_buffer().TakeRegistrationScopes();
+    EXPECT_EQ(registration_scopes.size(), 1UL);
+    ASSERT_TRUE(registration_scopes.contains(kKey));
+    EXPECT_EQ(registration_scopes[kKey], std::vector<GURL>({kScope}));
+    // The 2nd call of TakeRegistrationScopes() returns an empty map.
+    EXPECT_TRUE(storage_shared_buffer().TakeRegistrationScopes().empty());
+
+    mojom::ServiceWorkerFindRegistrationResultPtr find_registration_result =
+        storage_shared_buffer().TakeFindRegistrationResult(kClientUrl, kKey);
+    EXPECT_EQ(find_registration_result->registration->registration_id,
+              kRegistrationId);
+    EXPECT_EQ(find_registration_result->registration->scope, kScope);
+    EXPECT_EQ(find_registration_result->registration->key, kKey);
+    EXPECT_EQ(find_registration_result->registration->script, kScriptUrl);
+    EXPECT_EQ(find_registration_result->registration->version_id, kVersionId);
+    EXPECT_EQ(find_registration_result->registration->resources_total_size,
+              resources_total_size);
+    EXPECT_EQ(find_registration_result->resources.size(), 1UL);
+    // The 2nd call of TakeFindRegistrationResult() returns null.
+    EXPECT_TRUE(storage_shared_buffer()
+                    .TakeFindRegistrationResult(kClientUrl, kKey)
+                    .is_null());
   }
 
   // Delete the registration.
@@ -862,6 +949,18 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndDeleteRegistration) {
     EXPECT_EQ(result.status, DatabaseStatus::kErrorNotFound);
     result = FindRegistrationForId(kRegistrationId, kKey);
     EXPECT_EQ(result.status, DatabaseStatus::kErrorNotFound);
+
+    std::map<blink::StorageKey, std::vector<GURL>> registration_scopes =
+        storage_shared_buffer().TakeRegistrationScopes();
+    EXPECT_EQ(registration_scopes.size(), 1UL);
+    ASSERT_TRUE(registration_scopes.contains(kKey));
+    EXPECT_TRUE(registration_scopes[kKey].empty());
+    // The 2nd call of TakeRegistrationScopes() returns an empty map.
+    EXPECT_TRUE(storage_shared_buffer().TakeRegistrationScopes().empty());
+    // The 2nd call of TakeFindRegistrationResult() returns null.
+    EXPECT_TRUE(storage_shared_buffer()
+                    .TakeFindRegistrationResult(kClientUrl, kKey)
+                    .is_null());
   }
 }
 
@@ -870,7 +969,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, UpdateToActiveState) {
   const blink::StorageKey kKey =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
   const GURL kScriptUrl("https://www.example.com/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -909,7 +1008,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, UpdateLastUpdateCheckTime) {
   const blink::StorageKey kKey =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
   const GURL kScriptUrl("https://www.example.com/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -949,7 +1048,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, UpdateFetchHandlerType) {
   const blink::StorageKey kKey =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
   const GURL kScriptUrl("https://www.example.com/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -1003,14 +1102,14 @@ TEST_F(ServiceWorkerStorageControlImplTest, UpdateResourceSha256Checksums) {
   const int64_t resource_id1 = GetNewResourceId();
   const std::string resource_data1 = "main script data";
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id1, kScriptUrl, resource_data1.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id1, kScriptUrl, base::ByteSize(resource_data1.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   const int64_t resource_id2 = GetNewResourceId();
   const std::string resource_data2 = "imported script data";
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id2, kImportedScriptUrl, resource_data2.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id2, kImportedScriptUrl, base::ByteSize(resource_data2.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   // Preparation: Create a registration with two resources.
   const int64_t registration_id = GetNewRegistrationId();
@@ -1024,6 +1123,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, UpdateResourceSha256Checksums) {
   // Resources written in the storage don't have |sha256_checksum|
   FindRegistrationResult result = FindRegistrationForId(registration_id, kKey);
   ASSERT_EQ(result.status, DatabaseStatus::kOk);
+  ASSERT_EQ(result.entry->resources.size(), 2UL);
   ASSERT_FALSE(result.entry->resources[0]->sha256_checksum.has_value());
   ASSERT_FALSE(result.entry->resources[1]->sha256_checksum.has_value());
 
@@ -1049,7 +1149,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, Update) {
   const blink::StorageKey kKey =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
   const GURL kScriptUrl("https://www.example.com/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -1100,7 +1200,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, GetRegistrationsForStorageKey) {
   const blink::StorageKey kKey2 =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope2));
   const GURL kScriptUrl2("https://www.example.com/bar/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -1134,8 +1234,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, GetRegistrationsForStorageKey) {
     for (auto& registration : result.registrations) {
       EXPECT_EQ(registration->registration->scope.DeprecatedGetOriginAsURL(),
                 origin.GetURL());
-      EXPECT_EQ(registration->registration->resources_total_size_bytes,
-                kScriptSize);
+      EXPECT_EQ(registration->registration->resources_total_size, kScriptSize);
       EXPECT_TRUE(registration->version_reference);
     }
   }
@@ -1184,11 +1283,11 @@ TEST_F(ServiceWorkerStorageControlImplTest, WriteAndReadResource) {
   }
 
   const std::string kData("/* script body */");
-  int data_size = kData.size();
+  base::ByteSize data_size(kData.size());
 
   // Write content.
   {
-    mojo_base::BigBuffer data(base::as_bytes(base::make_span(kData)));
+    mojo_base::BigBuffer data(base::as_byte_span(kData));
     int bytes_size = data.size();
 
     int result = WriteResponseData(writer.get(), std::move(data));
@@ -1204,18 +1303,20 @@ TEST_F(ServiceWorkerStorageControlImplTest, WriteAndReadResource) {
     ASSERT_GT(result.status, 0);
 
     EXPECT_EQ(result.response_head->mime_type, "application/javascript");
-    EXPECT_EQ(result.response_head->content_length, data_size);
+    EXPECT_EQ(result.response_head->content_length,
+              static_cast<int64_t>(data_size.InBytes()));
     EXPECT_TRUE(result.response_head->ssl_info->is_valid());
     EXPECT_EQ(result.response_head->ssl_info->cert->serial_number(),
               ssl_info.cert->serial_number());
-    EXPECT_EQ(result.metadata, absl::nullopt);
+    EXPECT_EQ(result.metadata, std::nullopt);
 
-    ReadDataResult data_result = ReadResponseData(reader.get(), data_size);
-    ASSERT_EQ(data_result.status, data_size);
+    ReadDataResult data_result =
+        ReadResponseData(reader.get(), data_size.InBytes());
+    ASSERT_EQ(data_result.status, static_cast<int64_t>(data_size.InBytes()));
     EXPECT_EQ(data_result.data, kData);
   }
 
-  const auto kMetadata = base::as_bytes(base::make_span("metadata"));
+  const auto kMetadata = base::as_byte_span("metadata");
   int metadata_size = kMetadata.size();
 
   // Write metadata.
@@ -1233,8 +1334,9 @@ TEST_F(ServiceWorkerStorageControlImplTest, WriteAndReadResource) {
     ASSERT_GT(result.status, 0);
     ASSERT_TRUE(result.metadata.has_value());
     EXPECT_EQ(result.metadata->size(), kMetadata.size());
-    EXPECT_EQ(
-        memcmp(result.metadata->data(), kMetadata.data(), kMetadata.size()), 0);
+    UNSAFE_TODO(EXPECT_EQ(
+        memcmp(result.metadata->data(), kMetadata.data(), kMetadata.size()),
+        0));
   }
 }
 
@@ -1255,14 +1357,14 @@ TEST_F(ServiceWorkerStorageControlImplTest, UncommittedResources) {
   const int64_t resource_id1 = GetNewResourceId();
   const std::string resource_data1 = "main script data";
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id1, kScriptUrl, resource_data1.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id1, kScriptUrl, base::ByteSize(resource_data1.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   const int64_t resource_id2 = GetNewResourceId();
   const std::string resource_data2 = "imported script data";
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id2, kImportedScriptUrl, resource_data2.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id2, kImportedScriptUrl, base::ByteSize(resource_data2.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   const int64_t registration_id = GetNewRegistrationId();
   const int64_t version_id = GetNewVersionId().version_id;
@@ -1325,7 +1427,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndGetUserData) {
   const blink::StorageKey kKey =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
   const GURL kScriptUrl("https://www.example.com/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -1354,7 +1456,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndGetUserData) {
     std::vector<std::string> keys = {"key1", "key2"};
     GetUserDataResult result = GetUserData(registration_id, keys);
     ASSERT_EQ(result.status, DatabaseStatus::kOk);
-    EXPECT_EQ(result.values.size(), 2UL);
+    ASSERT_EQ(result.values.size(), 2UL);
     EXPECT_EQ("value1", result.values[0]);
     EXPECT_EQ("value2", result.values[1]);
   }
@@ -1382,7 +1484,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndGetUserData) {
     std::vector<std::string> keys = {"key2"};
     GetUserDataResult result = GetUserData(registration_id, keys);
     ASSERT_EQ(result.status, DatabaseStatus::kOk);
-    EXPECT_EQ(result.values.size(), 1UL);
+    ASSERT_EQ(result.values.size(), 1UL);
     EXPECT_EQ("value2", result.values[0]);
   }
 
@@ -1416,7 +1518,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndGetUserDataByKeyPrefix) {
   const blink::StorageKey kKey =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
   const GURL kScriptUrl("https://www.example.com/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -1445,7 +1547,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, StoreAndGetUserDataByKeyPrefix) {
     GetUserDataByKeyPrefixResult result =
         GetUserDataByKeyPrefix(registration_id, "prefix");
     ASSERT_EQ(result.status, DatabaseStatus::kOk);
-    EXPECT_EQ(result.values.size(), 4UL);
+    ASSERT_EQ(result.values.size(), 4UL);
     EXPECT_EQ(result.values[0], "value1");
     EXPECT_EQ(result.values[1], "value2");
     EXPECT_EQ(result.values[2], "value3");
@@ -1495,7 +1597,7 @@ TEST_F(ServiceWorkerStorageControlImplTest,
   const blink::StorageKey kKey2 =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope2));
   const GURL kScriptUrl2("https://www.example.com/bar/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -1622,14 +1724,14 @@ TEST_F(ServiceWorkerStorageControlImplTest, GetUsageForStorageKey) {
   const int64_t resource_id1 = GetNewResourceId();
   const std::string resource_data1 = "main script data";
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id1, kScriptUrl, resource_data1.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id1, kScriptUrl, base::ByteSize(resource_data1.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   const int64_t resource_id2 = GetNewResourceId();
   const std::string resource_data2 = "imported script data";
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id2, kImportedScriptUrl, resource_data2.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id2, kImportedScriptUrl, base::ByteSize(resource_data2.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   const int64_t registration_id = GetNewRegistrationId();
   const int64_t version_id = GetNewVersionId().version_id;
@@ -1687,6 +1789,43 @@ TEST_F(ServiceWorkerStorageControlImplTest, GetUsageForStorageKey) {
   }
 }
 
+TEST_F(ServiceWorkerStorageControlImplTest, PerformStorageCleanup) {
+  const GURL kScope("https://www.example.com/scope/");
+  const blink::StorageKey kKey =
+      blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
+  const GURL kScriptUrl("https://www.example.com/scope/sw.js");
+  const GURL kClientUrl("https://www.example.com/scope/document.html");
+  const base::ByteSize kScriptSize = base::ByteSize(10);
+
+  LazyInitializeForTest();
+
+  const int64_t kResourceId = GetNewResourceId();
+  const int64_t kVersionId = GetNewVersionId().version_id;
+  const int64_t kRegistrationId = GetNewRegistrationId();
+
+  // Create and store a registration, and a resource.
+  DatabaseStatus status =
+      CreateAndStoreRegistration(kRegistrationId, kVersionId, kResourceId,
+                                  kScope, kKey, kScriptUrl, kScriptSize);
+  ASSERT_EQ(status, DatabaseStatus::kOk);
+
+  // Delete the registration. This should make the resource purgeable.
+  DeleteRegistrationResult delete_result =
+      DeleteRegistration(kRegistrationId, kKey);
+  ASSERT_EQ(delete_result.status, DatabaseStatus::kOk);
+
+  // Call PerformStorageCleanup. This is async.
+  base::RunLoop loop;
+  PerformStorageCleanup(loop.QuitClosure());
+  loop.Run();
+
+  // The resource should be purged.
+  ReadDataResult read_resource_result =
+      ReadResource(kResourceId, kScriptSize);
+  ASSERT_EQ(read_resource_result.status, net::ERR_CACHE_MISS);
+  ASSERT_EQ(read_resource_result.data, "");
+}
+
 // Tests that apply policy updates work.
 TEST_F(ServiceWorkerStorageControlImplTest, ApplyPolicyUpdates) {
   const GURL kScope1("https://foo.example.com/");
@@ -1697,7 +1836,7 @@ TEST_F(ServiceWorkerStorageControlImplTest, ApplyPolicyUpdates) {
   const blink::StorageKey kKey2 =
       blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope2));
   const GURL kScriptUrl2("https://bar.example.com/sw.js");
-  const int64_t kScriptSize = 10;
+  const base::ByteSize kScriptSize = base::ByteSize(10);
 
   LazyInitializeForTest();
 
@@ -1763,16 +1902,16 @@ TEST_F(ServiceWorkerStorageControlImplTest, TrackRunningVersion) {
   result = WriteResource(resource_id1, resource_data1);
   ASSERT_GT(result, 0);
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id1, kScriptUrl, resource_data1.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id1, kScriptUrl, base::ByteSize(resource_data1.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   const int64_t resource_id2 = GetNewResourceId();
   const std::string resource_data2 = "imported script data";
   result = WriteResource(resource_id2, resource_data2);
   ASSERT_GT(result, 0);
   resources.push_back(mojom::ServiceWorkerResourceRecord::New(
-      resource_id2, kImportedScriptUrl, resource_data2.size(),
-      /*sha256_checksum=*/absl::nullopt));
+      resource_id2, kImportedScriptUrl, base::ByteSize(resource_data2.size()),
+      /*sha256_checksum=*/std::nullopt));
 
   const int64_t registration_id = GetNewRegistrationId();
   GetNewVersionIdResult new_version_id_result = GetNewVersionId();
@@ -1825,12 +1964,12 @@ TEST_F(ServiceWorkerStorageControlImplTest, TrackRunningVersion) {
   // Resources shouldn't be purged because there are two active references.
   {
     ReadDataResult read_resource_result1 =
-        ReadResource(resource_id1, resource_data1.size());
+        ReadResource(resource_id1, base::ByteSize(resource_data1.size()));
     ASSERT_EQ(read_resource_result1.status,
               static_cast<int32_t>(resource_data1.size()));
     EXPECT_EQ(read_resource_result1.data, resource_data1);
     ReadDataResult read_resource_result2 =
-        ReadResource(resource_id2, resource_data2.size());
+        ReadResource(resource_id2, base::ByteSize(resource_data2.size()));
     ASSERT_EQ(read_resource_result2.status,
               static_cast<int32_t>(resource_data2.size()));
     EXPECT_EQ(read_resource_result2.data, resource_data2);
@@ -1843,12 +1982,12 @@ TEST_F(ServiceWorkerStorageControlImplTest, TrackRunningVersion) {
   // Resources shouldn't be purged because there is an active reference yet.
   {
     ReadDataResult read_resource_result1 =
-        ReadResource(resource_id1, resource_data1.size());
+        ReadResource(resource_id1, base::ByteSize(resource_data1.size()));
     ASSERT_EQ(read_resource_result1.status,
               static_cast<int32_t>(resource_data1.size()));
     EXPECT_EQ(read_resource_result1.data, resource_data1);
     ReadDataResult read_resource_result2 =
-        ReadResource(resource_id2, resource_data2.size());
+        ReadResource(resource_id2, base::ByteSize(resource_data2.size()));
     ASSERT_EQ(read_resource_result2.status,
               static_cast<int32_t>(resource_data2.size()));
     EXPECT_EQ(read_resource_result2.data, resource_data2);
@@ -1861,13 +2000,84 @@ TEST_F(ServiceWorkerStorageControlImplTest, TrackRunningVersion) {
   // Resources should have been purged.
   {
     ReadDataResult read_resource_result1 =
-        ReadResource(resource_id1, resource_data1.size());
+        ReadResource(resource_id1, base::ByteSize(resource_data1.size()));
     ASSERT_EQ(read_resource_result1.status, net::ERR_CACHE_MISS);
     EXPECT_EQ(read_resource_result1.data, "");
     ReadDataResult read_resource_result2 =
-        ReadResource(resource_id2, resource_data2.size());
+        ReadResource(resource_id2, base::ByteSize(resource_data2.size()));
     ASSERT_EQ(read_resource_result2.status, net::ERR_CACHE_MISS);
     EXPECT_EQ(read_resource_result2.data, "");
+  }
+}
+
+TEST_F(ServiceWorkerStorageControlImplTest, Checksum) {
+  const GURL kScope("https://www.example.com/");
+  const blink::StorageKey kKey =
+      blink::StorageKey::CreateFirstParty(url::Origin::Create(kScope));
+  const GURL kScriptUrl("https://www.example.com/sw.js");
+  const std::string kTestData = "Here is some data.";
+  const net::SHA256HashValue kChecksum =
+      net::SHA256HashValue(crypto::hash::Sha256(kTestData));
+  const int64_t kRegistrationId = GetNewRegistrationId();
+  const int64_t kVersionId = GetNewVersionId().version_id;
+  const int64_t kResourceId = GetNewResourceId();
+
+  // 1. Store a registration.
+  ASSERT_EQ(CreateAndStoreRegistration(kRegistrationId, kVersionId, kResourceId,
+                                       kScope, kKey, kScriptUrl,
+                                       base::ByteSize(kTestData.size())),
+            DatabaseStatus::kOk);
+
+  // 2. Write the resource.
+  ASSERT_GT(WriteResource(kResourceId, kTestData), 0);
+
+  // 3. Read the resource with the correct checksum.
+  {
+    base::HistogramTester histogram_tester;
+    mojo::Remote<mojom::ServiceWorkerResourceReader> reader =
+        CreateResourceReader(kResourceId, kChecksum);
+
+    ReadResponseHeadResult head_result = ReadResponseHead(reader.get());
+    ASSERT_GT(head_result.status, 0);
+    ReadDataResult result = ReadResponseData(reader.get(), kTestData.size());
+    ASSERT_EQ(result.status, static_cast<int>(kTestData.size()));
+    EXPECT_EQ(result.data, kTestData);
+
+    histogram_tester.ExpectUniqueSample("ServiceWorker.ResourceChecksumMatch",
+                                        true, 1);
+  }
+
+  // 4. Read the resource with an incorrect checksum.
+  {
+    base::HistogramTester histogram_tester;
+    net::SHA256HashValue wrong_checksum = kChecksum;
+    wrong_checksum.data()[0] ^= 0xff;
+    mojo::Remote<mojom::ServiceWorkerResourceReader> reader =
+        CreateResourceReader(kResourceId, wrong_checksum);
+
+    ReadResponseHeadResult head_result = ReadResponseHead(reader.get());
+    ASSERT_GT(head_result.status, 0);
+    ReadDataResult result = ReadResponseData(reader.get(), kTestData.size());
+    ASSERT_EQ(result.status, static_cast<int>(kTestData.size()));
+    EXPECT_EQ(result.data, kTestData);
+
+    histogram_tester.ExpectUniqueSample("ServiceWorker.ResourceChecksumMatch",
+                                        false, 1);
+  }
+
+  // 5. Read the resource without a checksum.
+  {
+    base::HistogramTester histogram_tester;
+    mojo::Remote<mojom::ServiceWorkerResourceReader> reader =
+        CreateResourceReader(kResourceId, std::nullopt);
+
+    ReadResponseHeadResult head_result = ReadResponseHead(reader.get());
+    ASSERT_GT(head_result.status, 0);
+    ReadDataResult result = ReadResponseData(reader.get(), kTestData.size());
+    ASSERT_EQ(result.status, static_cast<int>(kTestData.size()));
+    EXPECT_EQ(result.data, kTestData);
+
+    histogram_tester.ExpectTotalCount("ServiceWorker.ResourceChecksumMatch", 0);
   }
 }
 

@@ -10,66 +10,69 @@ instructions for your target platform up to and including running hooks.
 
 ## Building Cronet for development and debugging
 
-To build Cronet for development and debugging purposes:
+*Note: These instructions are for standard CLI environments. If you are using a
+managed environment (e.g., Cider-V), please follow the platform-specific build
+workflows instead of running these commands directly.*
 
-First, `gn` is used to create ninja files targeting the intended platform, then
-`ninja` executes the ninja files to run the build.
+Similarly to Chromium, to build Cronet for development and debugging purposes:
 
-### Android / iOS builds
+1. Use `gn` to create ninja files targeting the intended platform
+1. Use `ninja` to execute the ninja files to run the build
 
-```shell
-$ ./components/cronet/tools/cr_cronet.py gn --out_dir=out/Cronet
-```
+The two main difference from a Chromium build are:
 
-If the build host is Linux, Android binaries will be built. If the build host is
-macOS, iOS binaries will be built.
+1. Cronet only builds a subset of Chromium
+1. Cronet uses a different set of gn args to build
 
-Note: these commands clobber output of previously executed gn commands in
-`out/Cronet`. If `--out_dir` is left out, the output directory defaults to
-`out/Debug` for debug builds and `out/Release` for release builds (see below).
+### Using gn
 
-If `--x86` option is specified, then a native library is built for Intel x86
-architecture, and the output directory defaults to `out/Debug-x86` if
-unspecified. This can be useful for running on mobile emulators.
-
-### Desktop builds (targets the current OS)
-
-TODO(caraitto): Specify how to target Chrome OS and Fuchsia.
+TODO(crbug.com/40287068): This might change in the future.
+Remembering the set of gn args to be used for a Cronet build is complicated.
+So, we rely on `//components/cronet/tools/cr_cronet.py` to do that for us.
 
 ```shell
-gn gen out/Cronet
+$ ./components/cronet/tools/cr_cronet.py gn
 ```
 
-### Running the ninja files
-
-Now, use the generated ninja files to execute the build against the
-`cronet_package` build target:
+By default, this generates the build configuration in `out/Debug-arm64`.
+To better understand how this works, and the configuration parameters
+it supports (e.g., `--release`, `--x64`, `--asan`),
+refer to `cr_cronet.py`'s source code and:
 
 ```shell
-$ ninja -C out/Cronet cronet_package
+$ ./components/cronet/tools/cr_cronet.py --help
 ```
+
+### Using ninja
+
+The previous steps generated the files needed to compile Cronet. All that
+remains now is to find a target to build. This can be done through this command:
+
+```shell
+$ autoninja -C <out_dir> <target>
+```
+
+Where `<out_dir>` is what was set through `cr_cronet.py` (e.g.,
+`out/Debug-arm64`) and `<target>` is one of of Cronet's target within some
+`BUILD.gn` file:
+
+- **`cronet_package`**: The complete Cronet library for Android. Artifacts land
+  in `<out_dir>/cronet/` (native libraries under `libs/`).
+- **`cronet_sample_apk`**: The demonstration app. APK at
+  `<out_dir>/apks/CronetSample.apk`.
+- **`cronet_test_instrumentation_apk`**: The Android test suite. APK at
+  `<out_dir>/apks/CronetTestInstrumentation.apk`.
+- **`net_unittests`**: Core Chromium network stack C++ unit tests. Native
+  executable at `<out_dir>/net_unittests`.
 
 ## Building Cronet mobile for releases
 
 To build Cronet with optimizations and with debug information stripped out:
 
 ```shell
+$ gn clean <out_dir>
 $ ./components/cronet/tools/cr_cronet.py gn --release
-$ ninja -C out/Release cronet_package
+$ autoninja -C <out_dir> cronet_package
 ```
 
-Note: these commands clobber output of previously executed gn commands in
-`out/Release`.
-
-## Building for other architectures
-
-By default ARMv7 32-bit executables are generated. To generate executables
-targeting other architectures modify [cr_cronet.py](tools/cr_cronet.py)'s
-`gn_args` variable to include:
-
-*   For ARMv8 64-bit: `target_cpu="arm64"`
-*   For x86 32-bit: `target_cpu="x86"`
-*   For x86 64-bit: `target_cpu="x64"`
-
-Alternatively you can run `gn args {out_dir}` and modify arguments in the editor
-that comes up. This has advantage of not changing `cr_cronet.py`.
+Default release output directory is `out/Release-arm64`.

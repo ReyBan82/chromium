@@ -4,7 +4,8 @@
 
 package org.chromium.chrome.browser.sync.ui;
 
-import android.app.Activity;
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.app.Dialog;
 import android.os.Bundle;
 import android.text.SpannableString;
@@ -16,49 +17,57 @@ import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.TextView;
-import android.widget.TextView.OnEditorActionListener;
 
 import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.DialogFragment;
 
+import org.chromium.base.metrics.RecordUserAction;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.chrome.browser.feedback.HelpAndFeedbackLauncherImpl;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.chrome.browser.settings.ProfileDependentSetting;
+import org.chromium.chrome.browser.settings.SettingsCustomTabLauncherImpl;
+import org.chromium.chrome.browser.sync.SyncSettingsUtils;
 import org.chromium.ui.text.SpanApplier;
 import org.chromium.ui.text.SpanApplier.SpanInfo;
 
-/**
- * Dialog to ask the user to enter a new custom passphrase.
- */
-public class PassphraseCreationDialogFragment extends DialogFragment {
+/** Dialog to ask the user to enter a new custom passphrase. */
+@NullMarked
+public class PassphraseCreationDialogFragment extends DialogFragment
+        implements ProfileDependentSetting {
     public interface Listener {
         void onPassphraseCreated(String passphrase);
     }
 
+    private @Nullable Profile mProfile;
     private EditText mEnterPassphrase;
     private EditText mConfirmPassphrase;
 
     @Override
-    public Dialog onCreateDialog(Bundle savedInstanceState) {
+    public void setProfile(Profile profile) {
+        mProfile = profile;
+    }
+
+    @Initializer
+    @Override
+    public Dialog onCreateDialog(@Nullable Bundle savedInstanceState) {
         super.onCreateDialog(savedInstanceState);
         LayoutInflater inflater = getActivity().getLayoutInflater();
         View view = inflater.inflate(R.layout.sync_custom_passphrase, null);
-        mEnterPassphrase = (EditText) view.findViewById(R.id.passphrase);
-        mConfirmPassphrase = (EditText) view.findViewById(R.id.confirm_passphrase);
+        mEnterPassphrase = view.findViewById(R.id.passphrase);
+        mConfirmPassphrase = view.findViewById(R.id.confirm_passphrase);
 
-        mConfirmPassphrase.setOnEditorActionListener(new OnEditorActionListener() {
-            @Override
-            public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
-                if (actionId == EditorInfo.IME_ACTION_DONE) {
-                    tryToSubmitPassphrase();
-                }
-                return false;
-            }
-        });
+        mConfirmPassphrase.setOnEditorActionListener(
+                (TextView _, int actionId, KeyEvent _) -> {
+                    if (actionId == EditorInfo.IME_ACTION_DONE) {
+                        tryToSubmitPassphrase();
+                    }
+                    return false;
+                });
 
-        TextView instructionsView =
-                (TextView) view.findViewById(R.id.custom_passphrase_instructions);
+        TextView instructionsView = view.findViewById(R.id.custom_passphrase_instructions);
         instructionsView.setMovementMethod(LinkMovementMethod.getInstance());
         instructionsView.setText(getInstructionsText());
 
@@ -74,20 +83,19 @@ public class PassphraseCreationDialogFragment extends DialogFragment {
     }
 
     private SpannableString getInstructionsText() {
-        final Activity activity = getActivity();
+        assert mProfile != null : "Profile should be non-null.";
         return SpanApplier.applySpans(
-                activity.getString(
-                        ChromeFeatureList.isEnabled(ChromeFeatureList.SYNC_ENABLE_HISTORY_DATA_TYPE)
-                                ? R.string.new_sync_custom_passphrase
-                                : R.string.sync_custom_passphrase),
-                new SpanInfo("<learnmore>", "</learnmore>", new ClickableSpan() {
-                    @Override
-                    public void onClick(View view) {
-                        HelpAndFeedbackLauncherImpl.getInstance().show(activity,
-                                activity.getString(R.string.help_context_change_sync_passphrase),
-                                Profile.getLastUsedRegularProfile(), null);
-                    }
-                }));
+                getString(R.string.sync_encryption_create_passphrase),
+                new SpanInfo(
+                        "BEGIN_LINK",
+                        "END_LINK",
+                        new ClickableSpan() {
+                            @Override
+                            public void onClick(View view) {
+                                SyncSettingsUtils.openSyncDashboard(
+                                        getContext(), new SettingsCustomTabLauncherImpl());
+                            }
+                        }));
     }
 
     @Override
@@ -99,16 +107,13 @@ public class PassphraseCreationDialogFragment extends DialogFragment {
             // onCreate, when it is shown (in super.onStart()), so we have to do this here.
             // Otherwise the dialog will close when the button is clicked regardless of what else we
             // do.
-            d.getButton(Dialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    tryToSubmitPassphrase();
-                }
-            });
+            d.getButton(Dialog.BUTTON_POSITIVE).setOnClickListener(_ -> tryToSubmitPassphrase());
         }
     }
 
     private void tryToSubmitPassphrase() {
+        RecordUserAction.record("Sync_SaveNewPassphraseClicked");
+
         String passphrase = mEnterPassphrase.getText().toString();
         String confirmPassphrase = mConfirmPassphrase.getText().toString();
 
@@ -125,7 +130,7 @@ public class PassphraseCreationDialogFragment extends DialogFragment {
         }
 
         // The passphrase is not empty and matches.
-        ((Listener) getTargetFragment()).onPassphraseCreated(passphrase);
-        getDialog().dismiss();
+        assumeNonNull((Listener) getTargetFragment()).onPassphraseCreated(passphrase);
+        assumeNonNull(getDialog()).dismiss();
     }
 }

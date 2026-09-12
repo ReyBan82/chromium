@@ -32,7 +32,7 @@ TEST(RegistryDictTest, SetAndGetValue) {
   EXPECT_EQ(int_value, *test_dict.GetValue("one"));
   EXPECT_EQ(string_value, *test_dict.GetValue("two"));
 
-  absl::optional<base::Value> one(test_dict.RemoveValue("one"));
+  std::optional<base::Value> one(test_dict.RemoveValue("one"));
   ASSERT_TRUE(one.has_value());
   EXPECT_EQ(1u, test_dict.values().size());
   EXPECT_EQ(int_value, one.value());
@@ -63,7 +63,7 @@ TEST(RegistryDictTest, CaseInsensitiveButPreservingValueNames) {
   EXPECT_EQ(1u, test_dict.values().size());
   EXPECT_EQ(string_value, *test_dict.GetValue("one"));
 
-  absl::optional<base::Value> removed_value(test_dict.RemoveValue("onE"));
+  std::optional<base::Value> removed_value(test_dict.RemoveValue("onE"));
   ASSERT_TRUE(removed_value.has_value());
   EXPECT_EQ(string_value, removed_value.value());
   EXPECT_TRUE(test_dict.values().empty());
@@ -206,8 +206,7 @@ TEST(RegistryDictTest, ConvertToJSON) {
   test_dict.SetValue("string-to-int", string_zero.Clone());
   test_dict.SetValue("string-to-dict", string_dict.Clone());
 
-  std::string error;
-  Schema schema = Schema::Parse(
+  const auto schema = Schema::Parse(
       "{"
       "  \"type\": \"object\","
       "  \"properties\": {"
@@ -222,19 +221,18 @@ TEST(RegistryDictTest, ConvertToJSON) {
       "    \"string-to-int\": { \"type\": \"integer\" },"
       "    \"string-to-dict\": { \"type\": \"object\" }"
       "  }"
-      "}",
-      &error);
-  ASSERT_TRUE(schema.valid()) << error;
+      "}");
+  ASSERT_TRUE(schema.has_value()) << schema.error();
 
-  absl::optional<base::Value> actual(test_dict.ConvertToJSON(schema));
+  std::optional<base::Value> actual(test_dict.ConvertToJSON(*schema));
   ASSERT_TRUE(actual);
 
-  base::Value::Dict expected;
+  base::DictValue expected;
   expected.Set("one", int_value.Clone());
-  base::Value::Dict expected_subdict1;
+  base::DictValue expected_subdict1;
   expected_subdict1.Set("two", string_value.Clone());
   expected.Set("three", std::move(expected_subdict1));
-  base::Value::List expected_list1;
+  base::ListValue expected_list1;
   expected_list1.Append(string_value.Clone());
   expected.Set("dict-to-list", std::move(expected_list1));
   expected.Set("int-to-bool", true);
@@ -242,9 +240,9 @@ TEST(RegistryDictTest, ConvertToJSON) {
   expected.Set("string-to-bool", false);
   expected.Set("string-to-double", 0.0);
   expected.Set("string-to-int", static_cast<int>(0));
-  base::Value::List expected_list2;
+  base::ListValue expected_list2;
   expected_list2.Append("value");
-  base::Value::Dict expected_subdict2;
+  base::DictValue expected_subdict2;
   expected_subdict2.Set("key", std::move(expected_list2));
   expected.Set("string-to-dict", std::move(expected_subdict2));
 
@@ -261,8 +259,7 @@ TEST(RegistryDictTest, NonSequentialConvertToJSON) {
   list->SetValue("4", base::Value("4").Clone());
   test_dict.SetKey("dict-to-list", std::move(list));
 
-  std::string error;
-  Schema schema = Schema::Parse(
+  const auto schema = Schema::Parse(
       "{"
       "  \"type\": \"object\","
       "  \"properties\": {"
@@ -271,15 +268,14 @@ TEST(RegistryDictTest, NonSequentialConvertToJSON) {
       "      \"items\": { \"type\": \"string\" }"
       "    }"
       "  }"
-      "}",
-      &error);
-  ASSERT_TRUE(schema.valid()) << error;
+      "}");
+  ASSERT_TRUE(schema.has_value()) << schema.error();
 
-  absl::optional<base::Value> actual(test_dict.ConvertToJSON(schema));
+  std::optional<base::Value> actual(test_dict.ConvertToJSON(*schema));
   ASSERT_TRUE(actual);
 
-  base::Value::Dict expected;
-  base::Value::List expected_list;
+  base::DictValue expected;
+  base::ListValue expected_list;
   expected_list.Append("1");
   expected_list.Append("2");
   expected_list.Append("4");
@@ -307,8 +303,7 @@ TEST(RegistryDictTest, PatternPropertySchema) {
   policy_dict->SetValue("invalid_key", string_dict.Clone());
   test_dict.SetKey("ExtensionSettings", std::move(policy_dict));
 
-  std::string error;
-  Schema schema = Schema::Parse(
+  const auto schema = Schema::Parse(
       "{"
       "  \"type\": \"object\","
       "  \"properties\": {"
@@ -337,18 +332,17 @@ TEST(RegistryDictTest, PatternPropertySchema) {
       "      },"
       "    },"
       "  },"
-      "}",
-      &error);
-  ASSERT_TRUE(schema.valid()) << error;
+      "}");
+  ASSERT_TRUE(schema.has_value()) << schema.error();
 
-  absl::optional<base::Value> actual(test_dict.ConvertToJSON(schema));
+  std::optional<base::Value> actual(test_dict.ConvertToJSON(*schema));
   ASSERT_TRUE(actual);
 
-  base::Value::Dict expected;
-  base::Value::Dict expected_extension_settings;
-  base::Value::List list_value;
+  base::DictValue expected;
+  base::DictValue expected_extension_settings;
+  base::ListValue list_value;
   list_value.Append("*://*.google.com");
-  base::Value::Dict restrictions_properties;
+  base::DictValue restrictions_properties;
   restrictions_properties.Set("runtime_blocked_hosts", list_value.Clone());
   restrictions_properties.Set("runtime_allowed_hosts", list_value.Clone());
   restrictions_properties.Set("minimum_version_required",
@@ -357,6 +351,49 @@ TEST(RegistryDictTest, PatternPropertySchema) {
                                   std::move(restrictions_properties));
   expected_extension_settings.Set("invalid_key", std::move(string_dict));
   expected.Set("ExtensionSettings", std::move(expected_extension_settings));
+
+  EXPECT_EQ(base::Value(std::move(expected)), *actual);
+}
+
+TEST(RegistryDictTest, CaseInsensitiveWithAdditionalProperties) {
+  RegistryDict test_dict;
+
+  base::Value string_value("fortytwo");
+  base::Value other_value("other");
+
+  std::unique_ptr<RegistryDict> policy_dict(new RegistryDict());
+  // This will be converted to lower-case string-policy.
+  policy_dict->SetValue("STRING-POLICY", string_value.Clone());
+  // This is unknown and should be kept as-is and caught by
+  // additionalProperties.
+  policy_dict->SetValue("UNKNOWN-KEY", other_value.Clone());
+  test_dict.SetKey("policy-dict", std::move(policy_dict));
+
+  const auto schema = Schema::Parse(
+      "{"
+      "  \"type\": \"object\","
+      "  \"properties\": {"
+      "    \"policy-dict\": {"
+      "      \"type\": \"object\","
+      "      \"properties\": {"
+      "        \"string-policy\": {"
+      "          \"type\": \"string\""
+      "        }"
+      "      },"
+      "      \"additionalProperties\": { \"type\": \"string\" }"
+      "    }"
+      "  }"
+      "}");
+  ASSERT_TRUE(schema.has_value()) << schema.error();
+
+  std::optional<base::Value> actual(test_dict.ConvertToJSON(*schema));
+  ASSERT_TRUE(actual);
+
+  base::DictValue expected;
+  base::DictValue expected_policy_dict;
+  expected_policy_dict.Set("string-policy", "fortytwo");
+  expected_policy_dict.Set("UNKNOWN-KEY", "other");
+  expected.Set("policy-dict", std::move(expected_policy_dict));
 
   EXPECT_EQ(base::Value(std::move(expected)), *actual);
 }

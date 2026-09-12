@@ -9,7 +9,8 @@
 #include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/trace_event.h"
 #include "third_party/skia/include/core/SkColor.h"
-#include "third_party/skia/include/core/SkTypes.h"
+#include "third_party/skia/include/core/SkPath.h"
+#include "third_party/skia/include/core/SkPathBuilder.h"
 #include "ui/aura/window.h"
 #include "ui/events/base_event_utils.h"
 #include "ui/gfx/canvas.h"
@@ -60,7 +61,8 @@ float LinearInterpolate(float initial_value,
 // tail(D), zero or more regular segments(C), one head(B) and a circle at the
 // end(A). They are meant to fit perfectly with the previous and next segments,
 // so that no whitespace/overlap is shown.
-// A more detailed version of this is located at https://goo.gl/qixdux.
+// A more detailed version of this is located at:
+// https://docs.google.com/document/d/1wqws7g5ra7MCFDaDdMPbTFj7hJ-eq6MLd0podA2y_i0/edit
 class LaserSegment {
  public:
   LaserSegment(const std::vector<gfx::PointF>& previous_points,
@@ -128,18 +130,23 @@ class LaserSegment {
     //       *--------*
     //      3          0
     DCHECK_EQ(4u, ordered_points.size());
-    path_.moveTo(ordered_points[0].x(), ordered_points[0].y());
+
+    SkPathBuilder path_builder;
+    path_builder.moveTo(ordered_points[0].x(), ordered_points[0].y());
     if (!is_first_segment) {
-      path_.arcTo(start_radius, start_radius, 180.0f, SkPath::kSmall_ArcSize,
-                  SkPathDirection::kCW, ordered_points[1].x(),
-                  ordered_points[1].y());
+      path_builder.arcTo({start_radius, start_radius}, 180.0f,
+                         SkPathBuilder::kSmall_ArcSize, SkPathDirection::kCW,
+                         {ordered_points[1].x(), ordered_points[1].y()});
     }
 
-    path_.lineTo(ordered_points[2].x(), ordered_points[2].y());
-    path_.arcTo(end_radius, end_radius, 180.0f, SkPath::kSmall_ArcSize,
-                is_last_segment ? SkPathDirection::kCW : SkPathDirection::kCCW,
-                ordered_points[3].x(), ordered_points[3].y());
-    path_.lineTo(ordered_points[0].x(), ordered_points[0].y());
+    path_builder.lineTo(ordered_points[2].x(), ordered_points[2].y());
+    path_builder.arcTo(
+        {end_radius, end_radius}, 180.0f, SkPathBuilder::kSmall_ArcSize,
+        is_last_segment ? SkPathDirection::kCW : SkPathDirection::kCCW,
+        {ordered_points[3].x(), ordered_points[3].y()});
+    path_builder.lineTo(ordered_points[0].x(), ordered_points[0].y());
+
+    path_ = path_builder.detach();
 
     // Store data to be used by the next segment.
     path_points_.push_back(ordered_points[2]);
@@ -177,7 +184,7 @@ views::UniqueWidgetPtr LaserPointerView::Create(
     base::TimeDelta presentation_delay,
     base::TimeDelta stationary_point_delay,
     aura::Window* container) {
-  return fast_ink::FastInkView::CreateWidgetWithContents(
+  return FastInkView::CreateWidgetWithContents(
       base::WrapUnique(new LaserPointerView(life_duration, presentation_delay,
                                             stationary_point_delay)),
       container);
@@ -193,6 +200,8 @@ void LaserPointerView::AddNewPoint(const gfx::PointF& new_point,
                                    predicted_laser_points_.GetOldest().location)
                                       .Length())
                      : 0);
+
+  is_fading_out_ = false;
   AddPoint(new_point, new_time);
   stationary_point_location_ = new_point;
   stationary_timer_.Reset();
@@ -200,6 +209,16 @@ void LaserPointerView::AddNewPoint(const gfx::PointF& new_point,
 
 void LaserPointerView::FadeOut(base::OnceClosure done) {
   fadeout_done_ = std::move(done);
+  is_fading_out_ = true;
+}
+
+void LaserPointerView::Reset() {
+  laser_points_.Clear();
+  predicted_laser_points_.Clear();
+  is_fading_out_ = false;
+  fadeout_done_.Reset();
+  stationary_timer_.Stop();
+  ScheduleUpdateBuffer();
 }
 
 void LaserPointerView::AddPoint(const gfx::PointF& point,
@@ -243,15 +262,15 @@ void LaserPointerView::UpdateBuffer() {
     TRACE_EVENT1("ui", "LaserPointerView::UpdateBuffer::Paint", "damage",
                  damage_rect.ToString());
 
-    ScopedPaint paint(this, damage_rect);
-    Draw(paint.canvas());
+    auto paint = GetScopedPaint(damage_rect);
+    Draw(paint->canvas());
   }
 
   UpdateSurface(laser_content_rect_, damage_rect, /*auto_refresh=*/true);
 }
 
 void LaserPointerView::UpdateTime() {
-  if (fadeout_done_.is_null()) {
+  if (!is_fading_out_) {
     // Pointer still active but stationary, repeat the most recent position.
     AddPoint(stationary_point_location_, ui::EventTimeForNow());
     return;
@@ -259,7 +278,10 @@ void LaserPointerView::UpdateTime() {
 
   if (laser_points_.IsEmpty() && predicted_laser_points_.IsEmpty()) {
     // No points left to show, complete the fadeout.
-    std::move(fadeout_done_).Run();  // This will delete the LaserPointerView.
+    if (!fadeout_done_.is_null()) {
+      // This will schedule deletion of the LaserPointerView.
+      std::move(fadeout_done_).Run();
+    }
     return;
   }
 

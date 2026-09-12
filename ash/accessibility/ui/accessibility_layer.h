@@ -7,17 +7,15 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "ui/compositor/layer_delegate.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/gfx/geometry/rect.h"
 
 namespace aura {
 class Window;
-}
-
-namespace ui {
-class Layer;
-}  // namespace ui
+}  // namespace aura
 
 namespace ash {
 
@@ -58,7 +56,7 @@ class AccessibilityLayer : public ui::LayerDelegate {
   // the bounding box to provide space for any margins or padding.
   virtual int GetInset() const = 0;
 
-  ui::Layer* layer() { return layer_.get(); }
+  ui::LayerTextured* layer() { return layer_.get(); }
   aura::Window* root_window() { return root_window_; }
 
  protected:
@@ -71,10 +69,10 @@ class AccessibilityLayer : public ui::LayerDelegate {
                            bool stack_at_top);
 
   // The current root window containing the focused object.
-  aura::Window* root_window_ = nullptr;
+  raw_ptr<aura::Window, DanglingUntriaged> root_window_ = nullptr;
 
   // The current layer.
-  std::unique_ptr<ui::Layer> layer_;
+  std::unique_ptr<ui::LayerTextured> layer_;
 
   // The bounding rectangle of the focused object, in |root_window_|
   // coordinates.
@@ -86,7 +84,7 @@ class AccessibilityLayer : public ui::LayerDelegate {
                                   float new_device_scale_factor) override;
 
   // The object that owns this layer.
-  AccessibilityLayerDelegate* delegate_;
+  raw_ptr<AccessibilityLayerDelegate> delegate_;
 };
 
 }  // namespace ash

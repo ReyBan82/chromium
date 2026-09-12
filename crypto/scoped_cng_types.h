@@ -7,8 +7,9 @@
 
 #include <windows.h>
 
+#include <wincrypt.h>
+
 #include "base/scoped_generic.h"
-#include "base/win/wincrypt_shim.h"
 
 namespace crypto {
 

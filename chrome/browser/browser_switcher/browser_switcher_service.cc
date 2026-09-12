@@ -4,18 +4,21 @@
 
 #include "chrome/browser/browser_switcher/browser_switcher_service.h"
 
+#include <algorithm>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "base/functional/bind.h"
 #include "base/metrics/histogram_macros.h"
-#include "base/ranges/algorithm.h"
+#include "base/strings/string_util.h"
 #include "base/syslog_logging.h"
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/browser_switcher/alternative_browser_driver.h"
 #include "chrome/browser/browser_switcher/browser_switcher_prefs.h"
 #include "chrome/browser/browser_switcher/browser_switcher_sitelist.h"
 #include "chrome/browser/browser_switcher/ieem_sitelist_parser.h"
+#include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/profiles/profile.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_context.h"
@@ -26,7 +29,7 @@
 #include "net/base/load_flags.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/cpp/resource_request.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 
 namespace browser_switcher {
 
@@ -97,21 +100,21 @@ RulesetSource::RulesetSource(RulesetSource&&) = default;
 
 RulesetSource::~RulesetSource() = default;
 
-XmlDownloader::XmlDownloader(Profile* profile,
-                             BrowserSwitcherService* service,
-                             base::TimeDelta first_fetch_delay,
-                             base::RepeatingCallback<void()> all_done_callback)
+XmlDownloader::XmlDownloader(
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+    BrowserSwitcherService* service,
+    base::TimeDelta first_fetch_delay,
+    base::RepeatingCallback<void()> all_done_callback)
     : service_(service), all_done_callback_(std::move(all_done_callback)) {
   file_url_factory_.Bind(
       content::CreateFileURLLoaderFactory(base::FilePath(), nullptr));
-  other_url_factory_ = profile->GetDefaultStoragePartition()
-                           ->GetURLLoaderFactoryForBrowserProcess();
+  other_url_factory_ = std::move(shared_url_loader_factory);
 
   sources_ = service_->GetRulesetSources();
 
   for (auto& source : sources_) {
     if (!source.url.is_valid())
-      DoneParsing(&source, ParsedXml({}, {}, absl::nullopt));
+      DoneParsing(&source, ParsedXml({}, {}, std::nullopt));
   }
 
   // Fetch in 1 minute.
@@ -121,7 +124,7 @@ XmlDownloader::XmlDownloader(Profile* profile,
 XmlDownloader::~XmlDownloader() = default;
 
 bool XmlDownloader::HasValidSources() const {
-  return base::ranges::any_of(sources_, [](const RulesetSource& source) {
+  return std::ranges::any_of(sources_, [](const RulesetSource& source) {
     return source.url.is_valid();
   });
 }
@@ -143,6 +146,7 @@ void XmlDownloader::FetchXml() {
 
     auto request = std::make_unique<network::ResourceRequest>();
     request->url = source.url;
+    request->site_for_cookies = net::SiteForCookies::FromUrl(source.url);
     request->load_flags = net::LOAD_BYPASS_CACHE | net::LOAD_DISABLE_CACHE;
     request->credentials_mode = network::mojom::CredentialsMode::kInclude;
     request->priority = net::IDLE;
@@ -166,7 +170,7 @@ network::mojom::URLLoaderFactory* XmlDownloader::GetURLLoaderFactoryForURL(
 }
 
 void XmlDownloader::ParseXml(RulesetSource* source,
-                             std::unique_ptr<std::string> bytes) {
+                             std::optional<std::string> bytes) {
   if (!bytes) {
     DoneParsing(source, ParsedXml({}, {}, "could not fetch XML"));
     return;
@@ -235,7 +239,8 @@ void XmlDownloader::Refresh() {
 
 BrowserSwitcherService::BrowserSwitcherService(Profile* profile)
     : profile_(profile),
-      prefs_(profile),
+      prefs_(profile->GetPrefs(),
+             profile->GetProfilePolicyConnector()->policy_service()),
       driver_(new AlternativeBrowserDriverImpl(&prefs_)),
       sitelist_(new BrowserSwitcherSitelistImpl(&prefs_)) {
   prefs_subscription_ =
@@ -265,7 +270,9 @@ void BrowserSwitcherService::StartDownload(base::TimeDelta delay) {
   // This destroys the previous XmlDownloader, which cancels any scheduled
   // refresh operations.
   sitelist_downloader_ = std::make_unique<XmlDownloader>(
-      profile_, this, delay,
+      profile_->GetDefaultStoragePartition()
+          ->GetURLLoaderFactoryForBrowserProcess(),
+      this, delay,
       base::BindRepeating(&BrowserSwitcherService::OnAllRulesetsParsed,
                           base::Unretained(this)));
 }
@@ -355,7 +362,7 @@ void BrowserSwitcherService::OnBrowserSwitcherPrefsChanged(
   // Record |BrowserSwitcher.AlternativeBrowser| when the
   // |BrowserSwitcherEnabled| or |AlternativeBrowserPath| policies change.
   bool should_record_metrics =
-      base::ranges::any_of(changed_prefs, [](const std::string& pref) {
+      std::ranges::any_of(changed_prefs, [](const std::string& pref) {
         return pref == prefs::kEnabled ||
                pref == prefs::kAlternativeBrowserPath;
       });
@@ -368,14 +375,14 @@ void BrowserSwitcherService::OnBrowserSwitcherPrefsChanged(
 
   // Re-download if one of the URLs or the ParsingMode changed. O(n^2), but n<=3
   // so it's fast.
-  auto it = base::ranges::find(changed_prefs, prefs::kParsingMode);
+  auto it = std::ranges::find(changed_prefs, prefs::kParsingMode);
   bool parsing_mode_changed = it != changed_prefs.end();
   bool should_redownload =
       parsing_mode_changed ||
-      base::ranges::any_of(
+      std::ranges::any_of(
           sources,
           [&changed_prefs](const std::string& pref_name) {
-            auto it = base::ranges::find(changed_prefs, pref_name);
+            auto it = std::ranges::find(changed_prefs, pref_name);
             return it != changed_prefs.end();
           },
           &RulesetSource::pref_name);

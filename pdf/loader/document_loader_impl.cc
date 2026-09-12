@@ -11,12 +11,14 @@
 #include <utility>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/numerics/safe_math.h"
 #include "base/strings/string_util.h"
+#include "net/http/http_content_disposition.h"
 #include "pdf/loader/result_codes.h"
 #include "pdf/loader/url_loader_wrapper.h"
 #include "pdf/pdf_features.h"
@@ -64,9 +66,61 @@ DocumentLoaderImpl::Chunk::Chunk() = default;
 DocumentLoaderImpl::Chunk::~Chunk() = default;
 
 void DocumentLoaderImpl::Chunk::Clear() {
-  chunk_index = 0;
-  data_size = 0;
-  chunk_data.reset();
+  chunk_index_ = 0;
+  data_size_ = 0;
+  chunk_data_.reset();
+}
+
+void DocumentLoaderImpl::Chunk::SetIndex(uint32_t index) {
+  DCHECK(IsEmpty());
+  chunk_index_ = index;
+}
+
+void DocumentLoaderImpl::Chunk::EnsureDataAllocated() {
+  if (!chunk_data_) {
+    DCHECK_EQ(data_size_, 0U);
+    chunk_data_ = std::make_unique<DataStream::ChunkData>();
+  }
+}
+
+size_t DocumentLoaderImpl::Chunk::AppendData(base::span<const uint8_t> input) {
+  if (input.empty()) {
+    return 0;
+  }
+  EnsureDataAllocated();
+
+  auto remaining = base::span(*chunk_data_).subspan(data_size_);
+  const size_t bytes_to_copy = std::min(remaining.size(), input.size());
+  remaining.copy_prefix_from(input.first(bytes_to_copy));
+  data_size_ += bytes_to_copy;
+  DCHECK_LE(data_size_, DataStream::kChunkSize);
+
+  return bytes_to_copy;
+}
+
+bool DocumentLoaderImpl::Chunk::IsFull() const {
+  return data_size_ == DataStream::kChunkSize;
+}
+
+bool DocumentLoaderImpl::Chunk::IsEmpty() const {
+  return data_size_ == 0;
+}
+
+size_t DocumentLoaderImpl::Chunk::EndPosition() const {
+  base::CheckedNumeric<size_t> end = chunk_index_;
+  end *= DataStream::kChunkSize;
+  end += data_size_;
+  return end.ValueOrDie();
+}
+
+std::unique_ptr<DocumentLoaderImpl::DataStream::ChunkData>
+DocumentLoaderImpl::Chunk::TakeDataAndAdvance() {
+  DCHECK(!IsEmpty());
+  DCHECK(chunk_data_);
+  auto data = std::move(chunk_data_);
+  data_size_ = 0;
+  ++chunk_index_;
+  return data;
 }
 
 DocumentLoaderImpl::DocumentLoaderImpl(Client* client)
@@ -97,12 +151,18 @@ bool DocumentLoaderImpl::Init(std::unique_ptr<URLLoaderWrapper> loader,
       type = "application/pdf";
     }
   }
-  if (!type.empty() && !IsValidContentType(type))
+  if (!type.empty() && !IsValidContentType(type)) {
     return false;
+  }
 
-  if (base::StartsWith(loader->GetContentDisposition(), "attachment",
-                       base::CompareCase::INSENSITIVE_ASCII))
-    return false;
+  if (!loader->GetContentDisposition().empty()) {
+    net::HttpContentDisposition content_disposition(
+        loader->GetContentDisposition(), /*referrer_charset=*/std::string());
+    if (content_disposition.is_attachment()) {
+      return false;
+    }
+    content_disposition_file_name_ = content_disposition.filename();
+  }
 
   url_ = url;
   loader_ = std::move(loader);
@@ -136,13 +196,17 @@ void DocumentLoaderImpl::ClearPendingRequests() {
   pending_requests_.Clear();
 }
 
+std::string DocumentLoaderImpl::GetFileNameFromContentDisposition() const {
+  return content_disposition_file_name_;
+}
+
 bool DocumentLoaderImpl::GetBlock(uint32_t position,
-                                  uint32_t size,
-                                  void* buf) const {
+                                  base::span<uint8_t> buf) const {
   base::CheckedNumeric<uint32_t> addition_result = position;
-  addition_result += size;
-  if (!addition_result.IsValid())
+  addition_result += buf.size();
+  if (!addition_result.IsValid()) {
     return false;
+  }
   return chunk_stream_.ReadData(
       gfx::Range(position, addition_result.ValueOrDie()), buf);
 }
@@ -205,12 +269,12 @@ bool DocumentLoaderImpl::ShouldCancelLoading() const {
 
   if (pending_requests_.IsEmpty()) {
     // Cancel loading if this is unepected data from server.
-    return !chunk_stream_.IsValidChunkIndex(chunk_.chunk_index) ||
-           chunk_stream_.IsChunkAvailable(chunk_.chunk_index);
+    return !chunk_stream_.IsValidChunkIndex(chunk_.index()) ||
+           chunk_stream_.IsChunkAvailable(chunk_.index());
   }
 
-  const gfx::Range current_range(chunk_.chunk_index,
-                                 chunk_.chunk_index + kChunkCloseDistance);
+  const gfx::Range current_range(chunk_.index(),
+                                 chunk_.index() + kChunkCloseDistance);
   return !pending_requests_.Intersects(current_range);
 }
 
@@ -259,12 +323,14 @@ void DocumentLoaderImpl::ContinueDownload() {
                                     weak_factory_.GetWeakPtr()));
 }
 
-void DocumentLoaderImpl::DidOpenPartial(int32_t result) {
-  if (result != Result::kSuccess)
+void DocumentLoaderImpl::DidOpenPartial(bool success) {
+  if (!success) {
     return ReadComplete();
+  }
 
-  if (!ResponseStatusSuccess(loader_.get()))
+  if (!ResponseStatusSuccess(loader_.get())) {
     return ReadComplete();
+  }
 
   // Leave position untouched for multiparted responce for now, when we read the
   // data we'll get it.
@@ -280,11 +346,12 @@ void DocumentLoaderImpl::DidOpenPartial(int32_t result) {
   // http://www.act.org/compass/sample/pdf/geometry.pdf
   int start_pos = 0;
   if (loader_->GetByteRangeStart(&start_pos)) {
-    if (start_pos % DataStream::kChunkSize != 0)
+    if (start_pos % DataStream::kChunkSize != 0) {
       return ReadComplete();
+    }
 
-    DCHECK(!chunk_.chunk_data);
-    chunk_.chunk_index = chunk_stream_.GetChunkIndex(start_pos);
+    DCHECK(chunk_.IsEmpty());
+    chunk_.SetIndex(chunk_stream_.GetChunkIndex(start_pos));
   } else {
     SetPartialLoadingEnabled(false);
   }
@@ -315,8 +382,8 @@ void DocumentLoaderImpl::DidRead(int32_t result) {
     if (!loader_->GetByteRangeStart(&start_pos))
       return ReadComplete();
 
-    DCHECK(!chunk_.chunk_data);
-    chunk_.chunk_index = chunk_stream_.GetChunkIndex(start_pos);
+    DCHECK(chunk_.IsEmpty());
+    chunk_.SetIndex(chunk_stream_.GetChunkIndex(start_pos));
   }
   if (!SaveBuffer(result)) {
     return ReadMore();
@@ -330,26 +397,19 @@ bool DocumentLoaderImpl::SaveBuffer(uint32_t input_size) {
   const uint32_t document_size = GetDocumentSize();
   bytes_received_ += input_size;
   bool chunk_saved = false;
-  bool loading_pending_request = pending_requests_.Contains(chunk_.chunk_index);
-  auto input = base::make_span(buffer_).first(input_size);
+  bool loading_pending_request = pending_requests_.Contains(chunk_.index());
+  auto input = base::span(buffer_).first(input_size);
   while (!input.empty()) {
-    if (chunk_.data_size == 0)
-      chunk_.chunk_data = std::make_unique<DataStream::ChunkData>();
-
-    const size_t new_chunk_data_len =
-        std::min(DataStream::kChunkSize - chunk_.data_size, input.size());
-    memcpy(chunk_.chunk_data->data() + chunk_.data_size, input.data(),
-           new_chunk_data_len);
-    chunk_.data_size += new_chunk_data_len;
-    if (chunk_.data_size == DataStream::kChunkSize ||
-        (document_size > 0 && document_size <= EndOfCurrentChunk())) {
+    size_t bytes_copied = chunk_.AppendData(input);
+    if (chunk_.IsFull() ||
+        (document_size > 0 && document_size <= chunk_.EndPosition())) {
       pending_requests_.Subtract(
-          gfx::Range(chunk_.chunk_index, chunk_.chunk_index + 1));
+          gfx::Range(chunk_.index(), chunk_.index() + 1));
       SaveChunkData();
       chunk_saved = true;
     }
 
-    input = input.subspan(new_chunk_data_len);
+    input = input.subspan(bytes_copied);
   }
 
   client_->OnNewDataReceived();
@@ -360,39 +420,36 @@ bool DocumentLoaderImpl::SaveBuffer(uint32_t input_size) {
   if (!chunk_saved)
     return false;
 
-  if (loading_pending_request &&
-      !pending_requests_.Contains(chunk_.chunk_index)) {
+  if (loading_pending_request && !pending_requests_.Contains(chunk_.index())) {
     client_->OnPendingRequestComplete();
   }
   return true;
 }
 
 void DocumentLoaderImpl::SaveChunkData() {
-  chunk_stream_.SetChunkData(chunk_.chunk_index, std::move(chunk_.chunk_data));
-  chunk_.data_size = 0;
-  ++chunk_.chunk_index;
-}
-
-uint32_t DocumentLoaderImpl::EndOfCurrentChunk() const {
-  return chunk_.chunk_index * DataStream::kChunkSize + chunk_.data_size;
+  DCHECK(!chunk_.IsEmpty());
+  const uint32_t index = chunk_.index();
+  chunk_stream_.SetChunkData(index, chunk_.TakeDataAndAdvance());
 }
 
 void DocumentLoaderImpl::ReadComplete() {
   if (GetDocumentSize() != 0) {
     // If there is remaining data in `chunk_`, then save whatever can be saved.
     // e.g. In the underrun case.
-    if (chunk_.data_size != 0)
+    if (!chunk_.IsEmpty()) {
       SaveChunkData();
+    }
   } else {
-    size_t eof = EndOfCurrentChunk();
+    size_t eof = chunk_.EndPosition();
     if (!chunk_stream_.filled_chunks().IsEmpty()) {
       eof = std::max(
           chunk_stream_.filled_chunks().Last().end() * DataStream::kChunkSize,
           eof);
     }
     chunk_stream_.set_eof_pos(eof);
-    if (eof == EndOfCurrentChunk())
+    if (eof == chunk_.EndPosition() && !chunk_.IsEmpty()) {
       SaveChunkData();
+    }
   }
   loader_.reset();
   if (IsDocumentComplete()) {

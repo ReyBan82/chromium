@@ -5,7 +5,7 @@
 #include "third_party/blink/renderer/platform/fonts/shaping/shape_result_test_info.h"
 
 #include "third_party/blink/renderer/platform/fonts/font.h"
-#include "third_party/blink/renderer/platform/fonts/shaping/shape_result_inline_headers.h"
+#include "third_party/blink/renderer/platform/fonts/shaping/shape_result_run.h"
 
 namespace blink {
 
@@ -13,7 +13,7 @@ unsigned ShapeResultTestInfo::NumberOfRunsForTesting() const {
   return runs_.size();
 }
 
-ShapeResult::RunInfo& ShapeResultTestInfo::RunInfoForTesting(
+ShapeResultRun& ShapeResultTestInfo::RunInfoForTesting(
     unsigned run_index) const {
   return *runs_[run_index];
 }
@@ -26,7 +26,7 @@ bool ShapeResultTestInfo::RunInfoForTesting(unsigned run_index,
   if (run_index < runs_.size() && runs_[run_index]) {
     start_index = runs_[run_index]->start_index_;
     num_characters = runs_[run_index]->num_characters_;
-    num_glyphs = runs_[run_index]->glyph_data_.size();
+    num_glyphs = runs_[run_index]->NumGlyphs();
     script = runs_[run_index]->script_;
     return true;
   }
@@ -54,15 +54,14 @@ float ShapeResultTestInfo::AdvanceForTesting(unsigned run_index,
 
 SimpleFontData* ShapeResultTestInfo::FontDataForTesting(
     unsigned run_index) const {
-  return runs_[run_index]->font_data_.get();
+  return runs_[run_index]->font_data_.Get();
 }
 
 Vector<unsigned> ShapeResultTestInfo::CharacterIndexesForTesting() const {
   Vector<unsigned> character_indexes;
   for (const auto& run : runs_) {
-    for (const auto& glyph_data : run->glyph_data_) {
-      character_indexes.push_back(run->start_index_ +
-                                  glyph_data.character_index);
+    for (unsigned i = 0; i < run->NumGlyphs(); ++i) {
+      character_indexes.push_back(run->GlyphToCharacterIndex(i));
     }
   }
   return character_indexes;

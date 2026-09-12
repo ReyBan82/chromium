@@ -4,42 +4,42 @@
 
 #include "net/dns/public/dns_over_https_server_config.h"
 
+#include <optional>
 #include <set>
 #include <string>
-#include <unordered_map>
+#include <string_view>
 
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
-#include "base/strings/string_piece.h"
 #include "base/values.h"
 #include "net/third_party/uri_template/uri_template.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 #include "url/url_canon.h"
 #include "url/url_canon_stdstring.h"
 #include "url/url_constants.h"
 
 namespace {
 
-absl::optional<std::string> GetHttpsHost(const std::string& url) {
+std::optional<std::string> GetHttpsHost(const std::string& url) {
   // This code is used to compute a static initializer, so it runs before GURL's
   // scheme registry is initialized.  Since GURL is not ready yet, we need to
   // duplicate some of its functionality here.
-  url::Parsed parsed;
-  url::ParseStandardURL(url.data(), url.size(), &parsed);
   std::string canonical;
   url::StdStringCanonOutput output(&canonical);
   url::Parsed canonical_parsed;
   bool is_valid =
-      url::CanonicalizeStandardURL(url.data(), url.size(), parsed,
+      url::CanonicalizeStandardUrl(url, url::ParseStandardUrl(url),
                                    url::SchemeType::SCHEME_WITH_HOST_AND_PORT,
                                    nullptr, &output, &canonical_parsed);
-  if (!is_valid)
-    return absl::nullopt;
+  if (!is_valid) {
+    return std::nullopt;
+  }
   const url::Component& scheme_range = canonical_parsed.scheme;
-  base::StringPiece scheme =
-      base::StringPiece(canonical).substr(scheme_range.begin, scheme_range.len);
-  if (scheme != url::kHttpsScheme)
-    return absl::nullopt;
+  std::string_view scheme =
+      std::string_view(canonical).substr(scheme_range.begin, scheme_range.len);
+  if (scheme != url::kHttpsScheme) {
+    return std::nullopt;
+  }
   const url::Component& host_range = canonical_parsed.host;
   return canonical.substr(host_range.begin, host_range.len);
 }
@@ -47,7 +47,7 @@ absl::optional<std::string> GetHttpsHost(const std::string& url) {
 bool IsValidDohTemplate(const std::string& server_template, bool* use_post) {
   std::string url_string;
   std::string test_query = "this_is_a_test_query";
-  std::unordered_map<std::string, std::string> template_params(
+  absl::flat_hash_map<std::string, std::string> template_params(
       {{"dns", test_query}});
   std::set<std::string> vars_found;
   bool valid_template = uri_template::Expand(server_template, template_params,
@@ -56,7 +56,7 @@ bool IsValidDohTemplate(const std::string& server_template, bool* use_post) {
     // The URI template is malformed.
     return false;
   }
-  absl::optional<std::string> host = GetHttpsHost(url_string);
+  std::optional<std::string> host = GetHttpsHost(url_string);
   if (!host) {
     // The expanded template must be a valid HTTPS URL.
     return false;
@@ -66,13 +66,13 @@ bool IsValidDohTemplate(const std::string& server_template, bool* use_post) {
     return false;
   }
   // If the template contains a dns variable, use GET, otherwise use POST.
-  *use_post = vars_found.find("dns") == vars_found.end();
+  *use_post = !vars_found.contains("dns");
   return true;
 }
 
-constexpr base::StringPiece kJsonKeyTemplate("template");
-constexpr base::StringPiece kJsonKeyEndpoints("endpoints");
-constexpr base::StringPiece kJsonKeyIps("ips");
+constexpr std::string_view kJsonKeyTemplate("template");
+constexpr std::string_view kJsonKeyEndpoints("endpoints");
+constexpr std::string_view kJsonKeyIps("ips");
 
 }  // namespace
 
@@ -97,12 +97,13 @@ DnsOverHttpsServerConfig& DnsOverHttpsServerConfig::operator=(
 
 DnsOverHttpsServerConfig::~DnsOverHttpsServerConfig() = default;
 
-absl::optional<DnsOverHttpsServerConfig> DnsOverHttpsServerConfig::FromString(
+std::optional<DnsOverHttpsServerConfig> DnsOverHttpsServerConfig::FromString(
     std::string doh_template,
     Endpoints bindings) {
   bool use_post;
-  if (!IsValidDohTemplate(doh_template, &use_post))
-    return absl::nullopt;
+  if (!IsValidDohTemplate(doh_template, &use_post)) {
+    return std::nullopt;
+  }
   return DnsOverHttpsServerConfig(std::move(doh_template), use_post,
                                   std::move(bindings));
 }
@@ -124,7 +125,7 @@ const std::string& DnsOverHttpsServerConfig::server_template() const {
   return server_template_;
 }
 
-base::StringPiece DnsOverHttpsServerConfig::server_template_piece() const {
+std::string_view DnsOverHttpsServerConfig::server_template_piece() const {
   return server_template_;
 }
 
@@ -141,15 +142,15 @@ bool DnsOverHttpsServerConfig::IsSimple() const {
   return endpoints_.empty();
 }
 
-base::Value::Dict DnsOverHttpsServerConfig::ToValue() const {
-  base::Value::Dict value;
+base::DictValue DnsOverHttpsServerConfig::ToValue() const {
+  base::DictValue value;
   value.Set(kJsonKeyTemplate, server_template());
   if (!endpoints_.empty()) {
-    base::Value::List bindings;
+    base::ListValue bindings;
     bindings.reserve(endpoints_.size());
     for (const IPAddressList& ip_list : endpoints_) {
-      base::Value::Dict binding;
-      base::Value::List ips;
+      base::DictValue binding;
+      base::ListValue ips;
       ips.reserve(ip_list.size());
       for (const IPAddress& ip : ip_list) {
         ips.Append(ip.ToString());
@@ -163,39 +164,46 @@ base::Value::Dict DnsOverHttpsServerConfig::ToValue() const {
 }
 
 // static
-absl::optional<DnsOverHttpsServerConfig> DnsOverHttpsServerConfig::FromValue(
-    base::Value::Dict value) {
+std::optional<DnsOverHttpsServerConfig> DnsOverHttpsServerConfig::FromValue(
+    base::DictValue value) {
   std::string* server_template = value.FindString(kJsonKeyTemplate);
-  if (!server_template)
-    return absl::nullopt;
+  if (!server_template) {
+    return std::nullopt;
+  }
   bool use_post;
-  if (!IsValidDohTemplate(*server_template, &use_post))
-    return absl::nullopt;
+  if (!IsValidDohTemplate(*server_template, &use_post)) {
+    return std::nullopt;
+  }
   Endpoints endpoints;
   const base::Value* endpoints_json = value.Find(kJsonKeyEndpoints);
   if (endpoints_json) {
-    if (!endpoints_json->is_list())
-      return absl::nullopt;
-    const base::Value::List& json_list = endpoints_json->GetList();
+    if (!endpoints_json->is_list()) {
+      return std::nullopt;
+    }
+    const base::ListValue& json_list = endpoints_json->GetList();
     endpoints.reserve(json_list.size());
     for (const base::Value& endpoint : json_list) {
-      const base::Value::Dict* dict = endpoint.GetIfDict();
-      if (!dict)
-        return absl::nullopt;
+      const base::DictValue* dict = endpoint.GetIfDict();
+      if (!dict) {
+        return std::nullopt;
+      }
       IPAddressList parsed_ips;
       const base::Value* ips = dict->Find(kJsonKeyIps);
       if (ips) {
-        const base::Value::List* ip_list = ips->GetIfList();
-        if (!ip_list)
-          return absl::nullopt;
+        const base::ListValue* ip_list = ips->GetIfList();
+        if (!ip_list) {
+          return std::nullopt;
+        }
         parsed_ips.reserve(ip_list->size());
         for (const base::Value& ip : *ip_list) {
           const std::string* ip_str = ip.GetIfString();
-          if (!ip_str)
-            return absl::nullopt;
+          if (!ip_str) {
+            return std::nullopt;
+          }
           IPAddress parsed;
-          if (!parsed.AssignFromIPLiteral(*ip_str))
-            return absl::nullopt;
+          if (!parsed.AssignFromIPLiteral(*ip_str)) {
+            return std::nullopt;
+          }
           parsed_ips.push_back(std::move(parsed));
         }
       }

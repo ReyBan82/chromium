@@ -5,14 +5,14 @@
 #ifndef CONTENT_BROWSER_NETWORK_CONTEXT_CLIENT_BASE_IMPL_H_
 #define CONTENT_BROWSER_NETWORK_CONTEXT_CLIENT_BASE_IMPL_H_
 
-#include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/mojom/network_context_client.mojom.h"
 
 namespace content {
 
 // Helper method that NetworkContext::OnFileUploadRequested need to use for
 // their implementation.
 void NetworkContextOnFileUploadRequested(
-    int32_t process_id,
+    network::OriginatingProcessId process_id,
     bool async,
     const std::vector<base::FilePath>& file_paths,
     const GURL& destination_url,

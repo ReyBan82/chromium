@@ -4,32 +4,42 @@
 
 #include <stddef.h>
 
+#include <array>
+
+#include "base/containers/adapters.h"
 #include "base/files/file_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/threading/thread_restrictions.h"
+#include "chrome/browser/preloading/scoped_prewarm_feature_list.h"
 #include "chrome/browser/task_manager/mock_web_contents_task_manager.h"
 #include "chrome/browser/task_manager/providers/web_contents/web_contents_tags_manager.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_enums.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_paths.h"
+#include "chrome/common/webui_url_constants.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/favicon/content/content_favicon_driver.h"
 #include "components/favicon/core/favicon_driver.h"
 #include "components/favicon/core/favicon_driver_observer.h"
+#include "components/sessions/content/session_tab_helper.h"
 #include "content/public/browser/back_forward_cache.h"
 #include "content/public/browser/favicon_status.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
+#include "content/public/browser/security_principal.h"
 #include "content/public/browser/site_instance.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/fenced_frame_test_util.h"
 #include "content/public/test/test_utils.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "testing/gmock/include/gmock/gmock.h"
+#include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/page_transition_types.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -54,26 +64,13 @@ struct TestPageData {
 // The below test files are available in src/chrome/test/data/
 // TODO(afakhry): Add more test pages here as needed (e.g. pages that are hosted
 // in the tabs as apps or extensions).
-const TestPageData kTestPages[] = {
-    {
-        "/title1.html",
-        "",
-        Task::RENDERER,
-        IDS_TASK_MANAGER_TAB_PREFIX
-    },
-    {
-        "/title2.html",
-        "Title Of Awesomeness",
-        Task::RENDERER,
-        IDS_TASK_MANAGER_TAB_PREFIX
-    },
-    {
-        "/title3.html",
-        "Title Of More Awesomeness",
-        Task::RENDERER,
-        IDS_TASK_MANAGER_TAB_PREFIX
-    },
-};
+constexpr auto kTestPages = std::to_array<TestPageData>({
+    {"/title1.html", "", Task::RENDERER, IDS_TASK_MANAGER_TAB_PREFIX},
+    {"/title2.html", "Title Of Awesomeness", Task::RENDERER,
+     IDS_TASK_MANAGER_TAB_PREFIX},
+    {"/title3.html", "Title Of More Awesomeness", Task::RENDERER,
+     IDS_TASK_MANAGER_TAB_PREFIX},
+});
 
 const size_t kTestPagesLength = std::size(kTestPages);
 
@@ -100,6 +97,17 @@ class FaviconWaiter : public favicon::FaviconDriverObserver {
     run_loop.Run();
   }
 
+  void WaitForValidFavicon() {
+    if (driver_->FaviconIsValid()) {
+      driver_->RemoveObserver(this);
+      return;
+    }
+    wait_for_valid_favicon_ = true;
+    base::RunLoop run_loop;
+    quit_closure_ = run_loop.QuitClosure();
+    run_loop.Run();
+  }
+
  private:
   GURL GetCurrentFaviconURL() {
     content::NavigationController& controller =
@@ -114,7 +122,8 @@ class FaviconWaiter : public favicon::FaviconDriverObserver {
                         bool icon_url_changed,
                         const gfx::Image& image) override {
     if (notification_icon_type == NON_TOUCH_16_DIP &&
-        icon_url == target_favicon_url_) {
+        (wait_for_valid_favicon_ ? driver_->FaviconIsValid()
+                                 : icon_url == target_favicon_url_)) {
       driver_->RemoveObserver(this);
 
       if (!quit_closure_.is_null())
@@ -124,6 +133,7 @@ class FaviconWaiter : public favicon::FaviconDriverObserver {
 
   raw_ptr<favicon::ContentFaviconDriver> driver_;
   GURL target_favicon_url_;
+  bool wait_for_valid_favicon_ = false;
   base::RepeatingClosure quit_closure_;
 };
 
@@ -151,8 +161,8 @@ class TabContentsTagTest : public InProcessBrowserTest {
   }
 
   void CloseTabAt(int index) {
-    browser()->tab_strip_model()->CloseWebContentsAt(index,
-                                                     TabCloseTypes::CLOSE_NONE);
+    browser()->GetTabStripModel()->CloseWebContentsAt(
+        index, TabCloseTypes::CLOSE_NONE);
   }
 
   std::u16string GetTestPageExpectedTitle(const TestPageData& page_data) const {
@@ -169,7 +179,7 @@ class TabContentsTagTest : public InProcessBrowserTest {
   // title (e.g. via the <title> tag).
   std::u16string GetDefaultTitleForUrl(const GURL& url) const {
     std::u16string title =
-        base::UTF8ToUTF16(url.host() + ":" + url.port() + url.path());
+        base::UTF8ToUTF16(url.GetHost() + ":" + url.GetPort() + url.GetPath());
     return l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_TAB_PREFIX, title);
   }
 
@@ -178,15 +188,40 @@ class TabContentsTagTest : public InProcessBrowserTest {
                                       u"about:blank");
   }
 
-  int tabs_count() const { return browser()->tab_strip_model()->count(); }
-
-  const std::vector<WebContentsTag*>& tracked_tags() const {
-    return WebContentsTagsManager::GetInstance()->tracked_tags();
-  }
+  int tabs_count() const { return browser()->GetTabStripModel()->count(); }
 
   GURL GetUrlOfFile(const char* test_page_file) const {
     return embedded_test_server()->GetURL(test_page_file);
   }
+
+  content::WebContents* active_web_contents() const {
+    return browser()->GetTabStripModel()->GetActiveWebContents();
+  }
+
+  const Task* GetActiveTabTask(const MockWebContentsTaskManager& task_manager) {
+    const SessionID tab_id =
+        sessions::SessionTabHelper::IdForTab(active_web_contents());
+    const std::u16string tab_prefix =
+        l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_TAB_PREFIX, u"");
+    for (const Task* task : base::Reversed(task_manager.tasks())) {
+      if (task->GetTabId() == tab_id && task->title().starts_with(tab_prefix)) {
+        return task;
+      }
+    }
+    return nullptr;
+  }
+
+  void WaitForActiveTabFavicon() {
+    FaviconWaiter waiter(
+        favicon::ContentFaviconDriver::FromWebContents(active_web_contents()));
+    waiter.WaitForValidFavicon();
+  }
+
+ private:
+  // TODO(https://crbug.com/423465927): Explore a better approach to make the
+  // existing tests run with the prewarm feature enabled.
+  test::ScopedPrewarmFeatureList prewarm_feature_list_{
+      test::ScopedPrewarmFeatureList::PrewarmState::kDisabled};
 };
 
 // Tests that TabContentsTags are being recorded correctly by the
@@ -194,28 +229,37 @@ class TabContentsTagTest : public InProcessBrowserTest {
 IN_PROC_BROWSER_TEST_F(TabContentsTagTest, BasicTagsTracking) {
   // Browser tests start with a single tab.
   EXPECT_EQ(1, tabs_count());
-  EXPECT_EQ(1U, tracked_tags().size());
+  EXPECT_THAT(ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+              testing::ElementsAre("about:blank"));
 
   // Add a bunch of tabs and make sure we're tracking them.
   AddNewTestTabAt(0, kTestPages[0].page_file);
   EXPECT_EQ(2, tabs_count());
-  EXPECT_EQ(2U, tracked_tags().size());
+  EXPECT_THAT(
+      ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+      testing::ElementsAre("about:blank", testing::HasSubstr("title1.html")));
 
   AddNewTestTabAt(1, kTestPages[1].page_file);
   EXPECT_EQ(3, tabs_count());
-  EXPECT_EQ(3U, tracked_tags().size());
+  EXPECT_THAT(
+      ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+      testing::ElementsAre("about:blank", testing::HasSubstr("title1.html"),
+                           "Title Of Awesomeness"));
 
   // Navigating the selected tab doesn't change the number of tabs nor the
   // number of tags.
   NavigateToUrl(kTestPages[2].page_file);
   EXPECT_EQ(3, tabs_count());
-  EXPECT_EQ(3U, tracked_tags().size());
-
+  EXPECT_THAT(
+      ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+      testing::ElementsAre("about:blank", testing::HasSubstr("title1.html"),
+                           "Title Of More Awesomeness"));
   // Close a bunch of tabs and make sure we can notice that.
   CloseTabAt(0);
   CloseTabAt(0);
   EXPECT_EQ(1, tabs_count());
-  EXPECT_EQ(1U, tracked_tags().size());
+  EXPECT_THAT(ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+              testing::ElementsAre("about:blank"));
 }
 
 // Tests that the pre-task-manager-existing tabs are given to the task manager
@@ -223,21 +267,27 @@ IN_PROC_BROWSER_TEST_F(TabContentsTagTest, BasicTagsTracking) {
 IN_PROC_BROWSER_TEST_F(TabContentsTagTest, PreExistingTaskProviding) {
   // We start with the "about:blank" tab.
   EXPECT_EQ(1, tabs_count());
-  EXPECT_EQ(1U, tracked_tags().size());
+  EXPECT_THAT(ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+              testing::ElementsAre("about:blank"));
 
   // Add a bunch of tabs and make sure when the task manager is created and
   // starts observing sees those pre-existing tabs.
   AddNewTestTabAt(0, kTestPages[0].page_file);
   EXPECT_EQ(2, tabs_count());
-  EXPECT_EQ(2U, tracked_tags().size());
+  EXPECT_THAT(
+      ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+      testing::ElementsAre("about:blank", testing::HasSubstr("title1.html")));
   AddNewTestTabAt(1, kTestPages[1].page_file);
   EXPECT_EQ(3, tabs_count());
-  EXPECT_EQ(3U, tracked_tags().size());
+  EXPECT_THAT(
+      ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+      testing::ElementsAre("about:blank", testing::HasSubstr("title1.html"),
+                           "Title Of Awesomeness"));
 
   MockWebContentsTaskManager task_manager;
   EXPECT_TRUE(task_manager.tasks().empty());
   task_manager.StartObserving();
-  EXPECT_EQ(3U, task_manager.tasks().size());
+  EXPECT_EQ(task_manager.NonToolTasks().size(), 3u);
 }
 
 // Tests that the task manager sees the correct tabs with their correct
@@ -245,14 +295,15 @@ IN_PROC_BROWSER_TEST_F(TabContentsTagTest, PreExistingTaskProviding) {
 IN_PROC_BROWSER_TEST_F(TabContentsTagTest, PostExistingTaskProviding) {
   // We start with the "about:blank" tab.
   EXPECT_EQ(1, tabs_count());
-  EXPECT_EQ(1U, tracked_tags().size());
+  EXPECT_THAT(ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+              testing::ElementsAre("about:blank"));
 
   MockWebContentsTaskManager task_manager;
   EXPECT_TRUE(task_manager.tasks().empty());
   task_manager.StartObserving();
-  ASSERT_EQ(1U, task_manager.tasks().size());
+  ASSERT_EQ(task_manager.NonToolTasks().size(), 1u);
 
-  const Task* first_tab_task = task_manager.tasks().front();
+  const Task* first_tab_task = task_manager.NonToolTasks().front();
   EXPECT_EQ(Task::RENDERER, first_tab_task->GetType());
   EXPECT_EQ(GetAboutBlankExpectedTitle(), first_tab_task->title());
 
@@ -260,65 +311,65 @@ IN_PROC_BROWSER_TEST_F(TabContentsTagTest, PostExistingTaskProviding) {
   for (const auto& test_page_data : kTestPages) {
     AddNewTestTabAt(0, test_page_data.page_file);
 
-    const Task* task = task_manager.tasks().back();
+    const Task* task = task_manager.NonToolTasks().back();
     EXPECT_EQ(test_page_data.task_type, task->GetType());
     EXPECT_EQ(GetTestPageExpectedTitle(test_page_data), task->title());
   }
 
-  EXPECT_EQ(1 + kTestPagesLength, task_manager.tasks().size());
+  EXPECT_EQ(task_manager.NonToolTasks().size(), 1 + kTestPagesLength);
 
   // Close the last tab that was added. Make sure it doesn't show up in the
   // task manager.
   CloseTabAt(0);
-  EXPECT_EQ(kTestPagesLength, task_manager.tasks().size());
+  EXPECT_EQ(task_manager.NonToolTasks().size(), kTestPagesLength);
   const std::u16string closed_tab_title =
       GetTestPageExpectedTitle(kTestPages[kTestPagesLength - 1]);
-  for (const auto* task : task_manager.tasks())
+  for (const task_manager::Task* task : task_manager.NonToolTasks()) {
     EXPECT_NE(closed_tab_title, task->title());
+  }
 }
 
 // Test that the default favicon is shown in the task manager after navigating
-// from a page with a favicon to a page without a favicon. crbug.com/528924
+// from a page with a favicon to a page without a favicon. crbug.com/40434621
 IN_PROC_BROWSER_TEST_F(TabContentsTagTest, NavigateToPageNoFavicon) {
   // We start with the "about:blank" tab.
   MockWebContentsTaskManager task_manager;
   task_manager.StartObserving();
   ASSERT_EQ(1, tabs_count());
-  ASSERT_EQ(1U, tracked_tags().size());
+  EXPECT_THAT(ui_test_utils::GetAllTrackedTagWebContentTitles(true),
+              testing::ElementsAre("about:blank"));
 
   // Navigate to a page with a favicon.
   GURL favicon_page_url = GetUrlOfFile("/favicon/page_with_favicon.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), favicon_page_url));
-  ASSERT_GE(1U, task_manager.tasks().size());
+  ASSERT_GE(task_manager.NonToolTasks().size(), 1u);
   Task* task = task_manager.tasks().back();
   ASSERT_EQ(GetDefaultTitleForUrl(favicon_page_url), task->title());
 
   // Wait for the browser to download the favicon.
   favicon::ContentFaviconDriver* favicon_driver =
       favicon::ContentFaviconDriver::FromWebContents(
-          browser()->tab_strip_model()->GetActiveWebContents());
+          browser()->GetTabStripModel()->GetActiveWebContents());
   FaviconWaiter waiter(favicon_driver);
   waiter.WaitForFaviconWithURL(GetUrlOfFile("/favicon/icon.png"));
   const auto favicon_url = browser()
-                               ->tab_strip_model()
+                               ->GetTabStripModel()
                                ->GetActiveWebContents()
                                ->GetSiteInstance()
-                               ->GetSiteURL();
+                               ->GetSecurityPrincipal()
+                               .GetDeprecatedSiteURL();
 
   // Check that the task manager uses the specified favicon for the page.
   base::FilePath test_dir;
   base::PathService::Get(chrome::DIR_TEST_DATA, &test_dir);
-  std::string favicon_string;
+  std::optional<std::vector<uint8_t>> favicon_data;
   {
     base::ScopedAllowBlockingForTesting allow_blocking;
-    base::ReadFileToString(
-        test_dir.AppendASCII("favicon").AppendASCII("icon.png"),
-        &favicon_string);
+    favicon_data = base::ReadFileToBytes(
+        test_dir.AppendASCII("favicon").AppendASCII("icon.png"));
   }
-  SkBitmap favicon_bitmap;
-  gfx::PNGCodec::Decode(
-      reinterpret_cast<const unsigned char*>(favicon_string.data()),
-      favicon_string.length(), &favicon_bitmap);
+  SkBitmap favicon_bitmap = gfx::PNGCodec::Decode(favicon_data.value());
+  ASSERT_FALSE(favicon_bitmap.isNull());
   ASSERT_TRUE(
       gfx::test::AreBitmapsEqual(favicon_bitmap, *task->icon().bitmap()));
 
@@ -332,17 +383,17 @@ IN_PROC_BROWSER_TEST_F(TabContentsTagTest, NavigateToPageNoFavicon) {
     // changing RenderFrameHosts. Note that the previous page's task might still
     // be around if the previous page is saved in the back/forward cache.
     if (content::BackForwardCache::IsBackForwardCacheFeatureEnabled()) {
-      ASSERT_EQ(2U, task_manager.tasks().size());
+      ASSERT_EQ(task_manager.NonToolTasks().size(), 2u);
       ASSERT_EQ(
           l10n_util::GetStringFUTF16(IDS_TASK_MANAGER_BACK_FORWARD_CACHE_PREFIX,
                                      base::UTF8ToUTF16(favicon_url.spec())),
-          task_manager.tasks().front()->title());
+          task_manager.NonToolTasks().front()->title());
     } else {
-      ASSERT_EQ(1U, task_manager.tasks().size());
+      ASSERT_EQ(task_manager.NonToolTasks().size(), 1u);
     }
   }
 
-  task = task_manager.tasks().back();
+  task = task_manager.NonToolTasks().back();
   ASSERT_EQ(GetDefaultTitleForUrl(no_favicon_page_url), task->title());
 
   // Check that the task manager uses the default favicon for the page.
@@ -358,13 +409,55 @@ IN_PROC_BROWSER_TEST_F(TabContentsTagTest, NavigateToPageNoFavicon) {
                                         gfx::Image(task->icon())));
 }
 
+IN_PROC_BROWSER_TEST_F(TabContentsTagTest, ThemifiesDefaultAndChromeFavicons) {
+  MockWebContentsTaskManager task_manager;
+  task_manager.StartObserving();
+  ASSERT_EQ(1, tabs_count());
+  // "about:blank" has no favicon of its own, so the task shows the default
+  // favicon, which needs theming.
+  const Task* task = GetActiveTabTask(task_manager);
+  ASSERT_TRUE(task);
+  EXPECT_EQ(GetAboutBlankExpectedTitle(), task->title());
+  EXPECT_TRUE(task->should_themify_icon());
+  // A page with a favicon of its own: no theming once it has loaded.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GetUrlOfFile("/favicon/page_with_favicon.html")));
+  {
+    FaviconWaiter waiter(
+        favicon::ContentFaviconDriver::FromWebContents(active_web_contents()));
+    waiter.WaitForFaviconWithURL(GetUrlOfFile("/favicon/icon.png"));
+  }
+  task = GetActiveTabTask(task_manager);
+  ASSERT_TRUE(task);
+  EXPECT_FALSE(task->should_themify_icon());
+  // chrome://version has a favicon of its own too, and is one of the chrome://
+  // pages excluded from theming.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
+                                           GURL(chrome::kChromeUIVersionURL)));
+  ASSERT_NO_FATAL_FAILURE(WaitForActiveTabFavicon());
+  task = GetActiveTabTask(task_manager);
+  ASSERT_TRUE(task);
+  EXPECT_FALSE(task->should_themify_icon());
+  // The NTP's own favicon is monochrome and needs theming, valid or not.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL(chrome::kChromeUINewTabPageURL)));
+  task = GetActiveTabTask(task_manager);
+  ASSERT_TRUE(task);
+  EXPECT_TRUE(task->should_themify_icon());
+  ASSERT_NO_FATAL_FAILURE(WaitForActiveTabFavicon());
+  task = GetActiveTabTask(task_manager);
+  ASSERT_TRUE(task);
+  EXPECT_TRUE(task->should_themify_icon());
+  EXPECT_FALSE(task->icon().isNull());
+}
+
 class TabContentsTagFencedFrameTest : public TabContentsTagTest {
  public:
   TabContentsTagFencedFrameTest() = default;
   ~TabContentsTagFencedFrameTest() override = default;
 
   content::WebContents* GetWebContents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
   content::test::FencedFrameTestHelper& fenced_frame_test_helper() {
@@ -382,11 +475,11 @@ IN_PROC_BROWSER_TEST_F(TabContentsTagFencedFrameTest,
   MockWebContentsTaskManager task_manager;
   EXPECT_TRUE(task_manager.tasks().empty());
   task_manager.StartObserving();
-  ASSERT_EQ(1U, task_manager.tasks().size());
+  ASSERT_EQ(task_manager.NonToolTasks().size(), 1u);
 
   const GURL initial_url = embedded_test_server()->GetURL("/title3.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), initial_url));
-  const Task* primary_mainframe_task = task_manager.tasks().front();
+  const Task* primary_mainframe_task = task_manager.NonToolTasks().front();
   EXPECT_EQ(Task::RENDERER, primary_mainframe_task->GetType());
   EXPECT_EQ(primary_mainframe_task->title(), u"Tab: Title Of More Awesomeness");
 

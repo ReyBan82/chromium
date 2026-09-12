@@ -5,13 +5,6 @@
 GEN_INCLUDE(['dictation_test_base.js']);
 
 DictationFocusHandlerTest = class extends DictationE2ETestBase {
-  /** @override */
-  async setUpDeferred() {
-    await super.setUpDeferred();
-    await importModule(
-        'FocusHandler', '/accessibility_common/dictation/focus_handler.js');
-  }
-
   /** @return {!FocusHandler} */
   getFocusHandler() {
     return accessibilityCommon.dictation_.focusHandler_;
@@ -95,7 +88,7 @@ AX_TEST_F('DictationFocusHandlerTest', 'Activate', async function() {
   assertFalse(this.getFocusHandler().active_);
   assertEquals(null, this.getFocusHandler().editableNode_);
   input.focus();
-  this.toggleDictationOn();
+  await this.toggleDictationOn();
   await this.waitForFocusHandlerActive(true);
 });
 
@@ -124,15 +117,15 @@ AX_TEST_F('DictationFocusHandlerTest', 'OnFocusChanged', async function() {
 AX_TEST_F(
     'DictationFocusHandlerTest', 'ResetDeactivateTimeout', async function() {
       this.mockSetTimeoutMethod();
-      this.toggleDictationOn();
+      await this.toggleDictationOn();
       await this.waitForFocusHandlerActive(true);
       let callback =
           this.getCallbackWithDelay(FocusHandler.DEACTIVATE_TIMEOUT_MS_);
       assertNotNullNorUndefined(callback);
 
       this.clearSetTimeoutData();
-      this.toggleDictationOff();
-      this.toggleDictationOn();
+      await this.toggleDictationOff();
+      await this.toggleDictationOn();
       // Toggling Dictation on should set a new timeout to deactivate
       // FocusHandler.
       callback = this.getCallbackWithDelay(FocusHandler.DEACTIVATE_TIMEOUT_MS_);

@@ -4,24 +4,39 @@
 
 #include "chrome/browser/download/android/dangerous_download_dialog_bridge.h"
 
+#include <algorithm>
 #include <string>
 
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
-#include "base/containers/contains.h"
 #include "base/files/file_path.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/android/android_theme_resources.h"
 #include "chrome/browser/android/resource_mapper.h"
+#include "chrome/browser/download/android/download_controller.h"
 #include "chrome/browser/download/android/download_dialog_utils.h"
-#include "chrome/browser/download/android/jni_headers/DangerousDownloadDialogBridge_jni.h"
-#include "chrome/grit/generated_resources.h"
+#include "components/url_formatter/elide_url.h"
 #include "ui/android/window_android.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "url/gurl.h"
+#include "url/origin.h"
 
-using base::android::ConvertJavaStringToUTF8;
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/browser/download/android/jni_headers/DangerousDownloadDialogBridge_jni.h"
+
+namespace {
+// Gets the "download domain" string shown in the dialog. Currently, this is
+// derived from the download URL.
+std::u16string GetDownloadDomain(download::DownloadItem* item) {
+  const GURL& url = item->GetURL();
+  if (url::Origin::Create(url).opaque()) {
+    // Return empty string for downloads from opaque origins.
+    return std::u16string();
+  }
+  return url_formatter::FormatUrlForDisplayOmitSchemePathAndTrivialSubdomains(
+      url);
+}
+}  // namespace
 
 DangerousDownloadDialogBridge::DangerousDownloadDialogBridge() {
   JNIEnv* env = base::android::AttachCurrentThread();
@@ -30,20 +45,22 @@ DangerousDownloadDialogBridge::DangerousDownloadDialogBridge() {
 }
 
 DangerousDownloadDialogBridge::~DangerousDownloadDialogBridge() {
-  for (auto* download_item : download_items_)
+  for (download::DownloadItem* download_item : download_items_) {
     download_item->RemoveObserver(this);
+  }
   Java_DangerousDownloadDialogBridge_destroy(
       base::android::AttachCurrentThread(), java_object_);
 }
 
 void DangerousDownloadDialogBridge::Show(download::DownloadItem* download_item,
                                          ui::WindowAndroid* window_android) {
-  // Don't show dangerous download again if it is already showing.
-  if (base::Contains(download_items_, download_item)) {
+  // Don't show download again if it is already showing or done.
+  if (download_item->IsDone() ||
+      std::ranges::contains(download_items_, download_item)) {
     return;
   }
   if (!window_android) {
-    download_item->Remove();
+    DownloadController::ScheduleRemoveDownloadItem(download_item);
     return;
   }
   download_item->AddObserver(this);
@@ -53,35 +70,53 @@ void DangerousDownloadDialogBridge::Show(download::DownloadItem* download_item,
 
   Java_DangerousDownloadDialogBridge_showDialog(
       env, java_object_, window_android->GetJavaObject(),
-      base::android::ConvertUTF8ToJavaString(env, download_item->GetGuid()),
-      base::android::ConvertUTF16ToJavaString(
-          env,
-          base::UTF8ToUTF16(download_item->GetFileNameToReportUser().value())),
-      download_item->GetTotalBytes(),
-      ResourceMapper::MapToJavaDrawableId(IDR_ANDROID_INFOBAR_WARNING));
+      download_item->GetGuid(),
+      base::UTF8ToUTF16(download_item->GetFileNameToReportUser().value()),
+      download_item->GetTotalBytes(), GetDownloadDomain(download_item),
+      ResourceMapper::MapToJavaDrawableId(IDR_ANDROID_PERMISSION_WARNING),
+      download_item->IsDangerous());
 }
 
 void DangerousDownloadDialogBridge::OnDownloadDestroyed(
     download::DownloadItem* download_item) {
-  auto iter = base::ranges::find(download_items_, download_item);
-  if (iter != download_items_.end())
+  auto iter = std::ranges::find(download_items_, download_item);
+  if (iter != download_items_.end()) {
+    (*iter)->RemoveObserver(this);
     download_items_.erase(iter);
+  }
 }
 
-void DangerousDownloadDialogBridge::Accepted(
-    JNIEnv* env,
-    const JavaParamRef<jstring>& jdownload_guid) {
+void DangerousDownloadDialogBridge::Accepted(const std::string& download_guid) {
   download::DownloadItem* download = DownloadDialogUtils::FindAndRemoveDownload(
-      &download_items_, ConvertJavaStringToUTF8(env, jdownload_guid));
-  if (download)
-    download->ValidateDangerousDownload();
+      &download_items_, download_guid);
+  if (!download) {
+    return;
+  }
+
+  download->RemoveObserver(this);
+
+  if (!download->IsDone()) {
+    if (download->IsDangerous()) {
+      download->ValidateDangerousDownload();
+    } else {
+      download->ConfirmNonDangerousDownload();
+    }
+  }
 }
 
 void DangerousDownloadDialogBridge::Cancelled(
-    JNIEnv* env,
-    const JavaParamRef<jstring>& jdownload_guid) {
+    const std::string& download_guid) {
   download::DownloadItem* download = DownloadDialogUtils::FindAndRemoveDownload(
-      &download_items_, ConvertJavaStringToUTF8(env, jdownload_guid));
-  if (download)
-    download->Remove();
+      &download_items_, download_guid);
+  if (!download) {
+    return;
+  }
+
+  download->RemoveObserver(this);
+
+  if (!download->IsDone()) {
+    DownloadController::ScheduleRemoveDownloadItem(download);
+  }
 }
+
+DEFINE_JNI(DangerousDownloadDialogBridge)

@@ -9,6 +9,8 @@
 
 #include "base/i18n/time_formatting.h"
 #include "base/logging.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_split.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
@@ -84,6 +86,7 @@ RoutineLog::RoutineCategory GetRoutineCategory(mojom::RoutineType type) {
     case mojom::RoutineType::kArcHttp:
     case mojom::RoutineType::kArcPing:
     case mojom::RoutineType::kArcDnsResolution:
+    case mojom::RoutineType::kGoogleServicesConnectivity:
       return RoutineLog::RoutineCategory::kNetwork;
   };
 }
@@ -112,6 +115,20 @@ void RoutineLog::LogRoutineCompleted(mojom::RoutineType type,
   Append(type, log_line.str());
 }
 
+void RoutineLog::LogRoutineCompleted(mojom::RoutineType type,
+                                     mojom::StandardRoutineResult result,
+                                     const std::string& details) {
+  LogRoutineCompleted(type, result);
+  if (!details.empty()) {
+    std::string detail_block = "  Details:\n";
+    for (const auto& line : base::SplitStringPiece(
+             details, "\n", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL)) {
+      base::StrAppend(&detail_block, {"    ", line, "\n"});
+    }
+    Append(type, detail_block);
+  }
+}
+
 void RoutineLog::LogRoutineCancelled(mojom::RoutineType type) {
   std::stringstream log_line;
   log_line << GetCurrentDateTimeAsString() << kSeparator
@@ -133,7 +150,7 @@ void RoutineLog::Append(mojom::RoutineType type, const std::string& text) {
   RoutineCategory category = GetRoutineCategory(type);
 
   // Insert a new log if it doesn't exist then append to it.
-  base::FilePath log_path = GetCategoryLogFilePath(category);
+  base::FilePath log_path = GetLogFilePath(category);
   auto iter = logs_.find(category);
   if (iter == logs_.end()) {
     iter = logs_.emplace(category, std::make_unique<AsyncLog>(log_path)).first;
@@ -142,8 +159,8 @@ void RoutineLog::Append(mojom::RoutineType type, const std::string& text) {
   iter->second->Append(text);
 }
 
-base::FilePath RoutineLog::GetCategoryLogFilePath(
-    const RoutineCategory category) {
+base::FilePath RoutineLog::GetLogFilePath(
+    const RoutineCategory category) const {
   std::string name =
       "diagnostics_routines_" + GetRoutineLogCategoryString(category) + ".log";
   return log_base_path_.Append(name);

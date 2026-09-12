@@ -8,9 +8,12 @@
 #include "chrome/common/webui_url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/constrained_window/constrained_window_views.h"
+#include "components/web_modal/modal_dialog_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/test/browser_test.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
+#include "ui/gfx/geometry/rect.h"
 #include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/test/widget_test.h"
 #include "ui/views/view.h"
@@ -20,33 +23,60 @@
 namespace ash {
 namespace {
 
+constexpr int kResizeDelta = 50;
+
 // Subclass to access protected constructor and protected methods.
 class TestInlineLoginDialog : public InlineLoginDialog {
  public:
   TestInlineLoginDialog() = default;
   using SystemWebDialogDelegate::dialog_window;
+
+  void ShowSystemDialog(gfx::NativeWindow parent = gfx::NativeWindow()) {
+    SystemWebDialogDelegate::ShowSystemDialog(parent);
+    AttachWidgetObserver();
+  }
 };
+
+}  // namespace
 
 // A simulated modal dialog. Taking focus seems important to repro the crash,
 // but I'm not sure why.
 class ChildModalDialogDelegate : public views::DialogDelegateView {
  public:
   ChildModalDialogDelegate() {
-    // Our views::Widget will delete us.
-    DCHECK(owned_by_widget());
-    SetModalType(ui::MODAL_TYPE_CHILD);
+    SetModalType(ui::mojom::ModalType::kChild);
     SetFocusBehavior(FocusBehavior::ALWAYS);
     // Dialogs that take focus must have a name and role to pass accessibility
     // checks.
-    GetViewAccessibility().OverrideRole(ax::mojom::Role::kDialog);
-    GetViewAccessibility().OverrideName("Test dialog");
+    GetViewAccessibility().SetRole(ax::mojom::Role::kDialog);
+    GetViewAccessibility().SetName("Test dialog",
+                                   ax::mojom::NameFrom::kAttribute);
   }
   ChildModalDialogDelegate(const ChildModalDialogDelegate&) = delete;
   ChildModalDialogDelegate& operator=(const ChildModalDialogDelegate&) = delete;
   ~ChildModalDialogDelegate() override = default;
 };
 
-}  // namespace
+class MockModalDialogHostObserver : public web_modal::ModalDialogHostObserver {
+ public:
+  MockModalDialogHostObserver() = default;
+  ~MockModalDialogHostObserver() override = default;
+
+  void OnPositionRequiresUpdate() override {
+    position_requires_update_count_++;
+  }
+
+  void OnHostDestroying() override { host_destroying_count_++; }
+
+  int position_requires_update_count() const {
+    return position_requires_update_count_;
+  }
+  int host_destroying_count() const { return host_destroying_count_; }
+
+ private:
+  int position_requires_update_count_ = 0;
+  int host_destroying_count_ = 0;
+};
 
 using InlineLoginDialogTest = InProcessBrowserTest;
 
@@ -75,9 +105,38 @@ IN_PROC_BROWSER_TEST_F(InlineLoginDialogTest,
   // No crash.
 }
 
+IN_PROC_BROWSER_TEST_F(InlineLoginDialogTest,
+                       NotifiesObserverOnWidgetBoundsChanged) {
+  TestInlineLoginDialog* login_dialog = new TestInlineLoginDialog();
+  login_dialog->ShowSystemDialog();
+
+  MockModalDialogHostObserver observer;
+  login_dialog->AddObserver(&observer);
+
+  EXPECT_EQ(observer.position_requires_update_count(), 0);
+  EXPECT_EQ(observer.host_destroying_count(), 0);
+
+  views::Widget* login_widget =
+      views::Widget::GetWidgetForNativeWindow(login_dialog->dialog_window());
+  ASSERT_TRUE(login_widget);
+
+  gfx::Rect bounds = login_widget->GetWindowBoundsInScreen();
+  bounds.set_width(bounds.width() + kResizeDelta);
+  login_widget->SetBounds(bounds);
+
+  EXPECT_EQ(observer.position_requires_update_count(), 1);
+  EXPECT_EQ(observer.host_destroying_count(), 0);
+
+  views::test::WidgetDestroyedWaiter waiter(login_widget);
+  login_dialog->Close();
+  waiter.Wait();
+
+  EXPECT_EQ(observer.host_destroying_count(), 1);
+}
+
 IN_PROC_BROWSER_TEST_F(InlineLoginDialogTest, ReturnsEmptyDialogArgs) {
   auto* dialog = new InlineLoginDialog(
-      GURL(chrome::kChromeUIChromeSigninURL), /*options=*/absl::nullopt,
+      GURL(chrome::kChromeUIChromeSigninURL), /*options=*/std::nullopt,
       /*close_dialog_closure=*/base::DoNothing());
   EXPECT_TRUE(InlineLoginDialog::IsShown());
   EXPECT_EQ(dialog->GetDialogArgs(), "");
@@ -97,13 +156,13 @@ IN_PROC_BROWSER_TEST_F(InlineLoginDialogTest, ReturnsCorrectDialogArgs) {
                             /*close_dialog_closure=*/base::DoNothing());
   EXPECT_TRUE(InlineLoginDialog::IsShown());
 
-  absl::optional<base::Value> args =
-      base::JSONReader::Read(dialog->GetDialogArgs());
+  std::optional<base::Value> args = base::JSONReader::Read(
+      dialog->GetDialogArgs(), base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(args.has_value());
   EXPECT_TRUE(args.value().is_dict());
-  const base::Value::Dict& dict = args.value().GetDict();
-  absl::optional<bool> is_available_in_arc = dict.FindBool("isAvailableInArc");
-  absl::optional<bool> show_arc_availability_picker =
+  const base::DictValue& dict = args.value().GetDict();
+  std::optional<bool> is_available_in_arc = dict.FindBool("isAvailableInArc");
+  std::optional<bool> show_arc_availability_picker =
       dict.FindBool("showArcAvailabilityPicker");
   ASSERT_TRUE(is_available_in_arc.has_value());
   ASSERT_TRUE(show_arc_availability_picker.has_value());

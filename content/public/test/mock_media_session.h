@@ -11,10 +11,25 @@
 
 namespace content {
 
+class MediaSessionPlayerObserver;
+
 class MockMediaSession : public MediaSession {
  public:
   MockMediaSession();
   ~MockMediaSession() override;
+
+  MOCK_METHOD(bool,
+              AddPlayer,
+              (MediaSessionPlayerObserver * observer, int player_id),
+              (override));
+  MOCK_METHOD(void,
+              RemovePlayer,
+              (MediaSessionPlayerObserver * observer, int player_id),
+              (override));
+  MOCK_METHOD(void,
+              OnPlayerPaused,
+              (MediaSessionPlayerObserver * observer, int player_id),
+              (override));
 
   MOCK_METHOD(void,
               DidReceiveAction,
@@ -28,6 +43,23 @@ class MockMediaSession : public MediaSession {
               SetAudioFocusGroupId,
               (const base::UnguessableToken& group_id),
               (override));
+  MOCK_METHOD(content::RenderFrameHost*, GetRoutedFrame, (), (override));
+  MOCK_METHOD(media_session::mojom::MediaSessionInfoPtr,
+              GetMediaSessionInfoSync,
+              (),
+              (override));
+  MOCK_METHOD(std::optional<media_session::MediaPosition>,
+              GetMediaSessionPosition,
+              (),
+              (override));
+  MOCK_METHOD(const media_session::MediaMetadata&,
+              GetMediaSessionMetadata,
+              (),
+              (override));
+  MOCK_METHOD(std::vector<media_session::mojom::MediaSessionAction>,
+              GetMediaSessionActionsSync,
+              (),
+              (const, override));
   MOCK_METHOD(void, Suspend, (SuspendType suspend_type), (override));
   MOCK_METHOD(void, Resume, (SuspendType suspend_type), (override));
   MOCK_METHOD(void, StartDucking, (), (override));
@@ -54,13 +86,18 @@ class MockMediaSession : public MediaSession {
                int desired_size_px,
                GetMediaImageBitmapCallback callback),
               (override));
+  MOCK_METHOD(void, ReportAutoPictureInPictureInfoChanged, (), (override));
   MOCK_METHOD(void, SeekTo, (base::TimeDelta seek_time), (override));
   MOCK_METHOD(void, ScrubTo, (base::TimeDelta seek_time), (override));
   MOCK_METHOD(void, EnterPictureInPicture, (), (override));
   MOCK_METHOD(void, ExitPictureInPicture, (), (override));
   MOCK_METHOD(void,
+              GetVisibility,
+              (GetVisibilityCallback callback),
+              (override));
+  MOCK_METHOD(void,
               SetAudioSinkId,
-              (const absl::optional<std::string>& id),
+              (const std::optional<std::string>& id),
               (override));
   MOCK_METHOD(void, ToggleMicrophone, (), (override));
   MOCK_METHOD(void, ToggleCamera, (), (override));
@@ -70,8 +107,10 @@ class MockMediaSession : public MediaSession {
   MOCK_METHOD(void, RequestMediaRemoting, (), (override));
   MOCK_METHOD(void, PreviousSlide, (), (override));
   MOCK_METHOD(void, NextSlide, (), (override));
+  MOCK_METHOD(void, EnterAutoPictureInPicture, (), (override));
+  MOCK_METHOD(void, SaveVideoFrame, (), (override));
 };
 
 }  // namespace content
 
-#endif
+#endif  // CONTENT_PUBLIC_TEST_MOCK_MEDIA_SESSION_H_

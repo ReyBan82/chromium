@@ -4,8 +4,8 @@
 
 #include "chrome/browser/ui/global_media_controls/cast_device_list_host.h"
 
-#include "base/containers/contains.h"
 #include "base/strings/utf_string_conversions.h"
+#include "chrome/browser/media/router/media_router_feature.h"
 #include "chrome/browser/ui/global_media_controls/media_item_ui_metrics.h"
 #include "chrome/browser/ui/media_router/cast_dialog_model.h"
 #include "chrome/browser/ui/media_router/ui_media_sink.h"
@@ -39,19 +39,29 @@ IconType GetIcon(const media_router::UIMediaSink& sink) {
       return IconType::kInput;
     case media_router::SinkIconType::TOTAL_COUNT:
       NOTREACHED();
-      return IconType::kTv;
   }
 }
 
-absl::optional<media_router::MediaCastMode> GetPreferredCastMode(
-    media_router::CastModeSet cast_mode) {
-  if (base::Contains(cast_mode, media_router::MediaCastMode::PRESENTATION)) {
+bool SupportsTabAudioMirroring(media_router::CastModeSet cast_mode,
+                               media_router::SinkIconType icon_type) {
+  return base::FeatureList::IsEnabled(
+             media_router::kFallbackToAudioTabMirroring) &&
+         cast_mode.contains(media_router::MediaCastMode::TAB_MIRROR) &&
+         (icon_type == media_router::SinkIconType::CAST_AUDIO ||
+          icon_type == media_router::SinkIconType::CAST_AUDIO_GROUP);
+}
+
+std::optional<media_router::MediaCastMode> GetPreferredCastMode(
+    media_router::CastModeSet cast_mode,
+    media_router::SinkIconType icon_type) {
+  if (cast_mode.contains(media_router::MediaCastMode::PRESENTATION)) {
     return media_router::MediaCastMode::PRESENTATION;
-  } else if (base::Contains(cast_mode,
-                            media_router::MediaCastMode::REMOTE_PLAYBACK)) {
+  } else if (cast_mode.contains(media_router::MediaCastMode::REMOTE_PLAYBACK)) {
     return media_router::MediaCastMode::REMOTE_PLAYBACK;
+  } else if (SupportsTabAudioMirroring(cast_mode, icon_type)) {
+    return media_router::MediaCastMode::TAB_MIRROR;
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 global_media_controls::mojom::DevicePtr CreateDevice(
@@ -70,10 +80,16 @@ global_media_controls::mojom::DevicePtr CreateDevice(
 CastDeviceListHost::CastDeviceListHost(
     std::unique_ptr<media_router::CastDialogController> dialog_controller,
     mojo::PendingRemote<global_media_controls::mojom::DeviceListClient> client,
-    MediaRemotingCallback media_remoting_callback)
+    base::RepeatingClosure media_remoting_callback,
+    base::RepeatingClosure hide_dialog_callback,
+    base::RepeatingClosure on_sinks_discovered_callback)
     : cast_controller_(std::move(dialog_controller)),
       client_(std::move(client)),
-      media_remoting_callback_(std::move(media_remoting_callback)) {
+      media_remoting_callback_(std::move(media_remoting_callback)),
+      hide_dialog_callback_(std::move(hide_dialog_callback)),
+      on_sinks_discovered_callback_(std::move(on_sinks_discovered_callback)),
+      initialization_time_(base::Time::Now()),
+      id_(next_id_++) {
   cast_controller_->AddObserver(this);
   cast_controller_->RegisterDestructor(
       base::BindOnce(&CastDeviceListHost::DestroyCastController,
@@ -119,9 +135,10 @@ void CastDeviceListHost::SelectDevice(const std::string& device_id) {
   } else if (sink.state == media_router::UIMediaSinkState::CONNECTED) {
     // We record stopping casting here even if we are starting casting, because
     // the existing session is being stopped and replaced by a new session.
-    // TODO(crbug.com/1411139): Call RecordStopCastingMetrics() here.
     if (sink.provider == media_router::mojom::MediaRouteProviderId::DIAL) {
       DCHECK(sink.route);
+      MediaItemUIMetrics::RecordStopCastingMetrics(
+          media_router::MediaCastMode::PRESENTATION);
       cast_controller_->StopCasting(sink.route->media_route_id());
     } else {
       StartCasting(sink);
@@ -131,27 +148,59 @@ void CastDeviceListHost::SelectDevice(const std::string& device_id) {
 
 void CastDeviceListHost::OnModelUpdated(
     const media_router::CastDialogModel& model) {
+  if (base::FeatureList::IsEnabled(
+          media_router::kShowCastPermissionRejectedError) &&
+      model.is_permission_rejected()) {
+    client_->OnPermissionRejected();
+    return;
+  }
+
   sinks_ = model.media_sinks();
   std::vector<global_media_controls::mojom::DevicePtr> devices;
   for (const auto& sink : sinks_) {
-    devices.push_back(CreateDevice(sink));
+    if (GetPreferredCastMode(sink.cast_modes, sink.icon_type)) {
+      devices.push_back(CreateDevice(sink));
+    }
+  }
+
+  if (!devices.empty()) {
+    on_sinks_discovered_callback_.Run();
+    RecordSinkLoadTime();
   }
   client_->OnDevicesUpdated(std::move(devices));
 }
 
+void CastDeviceListHost::OnCastingStarted() {
+  hide_dialog_callback_.Run();
+}
+
 void CastDeviceListHost::StartCasting(const media_router::UIMediaSink& sink) {
-  auto cast_mode = GetPreferredCastMode(sink.cast_modes);
+  auto cast_mode = GetPreferredCastMode(sink.cast_modes, sink.icon_type);
   if (!cast_mode) {
-    NOTREACHED() << "Cast mode is not supported.";
+    // The UI calls this method asynchronously over Mojo, so by the time this
+    // gets called it's possible for the set of Cast modes to no longer be
+    // valid.
     return;
   }
   cast_controller_->StartCasting(sink.id, cast_mode.value());
   if (cast_mode.value() == media_router::MediaCastMode::REMOTE_PLAYBACK) {
-    media_remoting_callback_.Run(sink.id);
+    media_remoting_callback_.Run();
   }
-  // TODO(crbug.com/1411139): Call RecordStartCastingMetrics() here.
+  MediaItemUIMetrics::RecordStartCastingMetrics(sink.icon_type,
+                                                cast_mode.value());
 }
 
 void CastDeviceListHost::DestroyCastController() {
   cast_controller_.reset();
 }
+
+void CastDeviceListHost::RecordSinkLoadTime() {
+  if (!sinks_load_time_.is_null()) {
+    return;
+  }
+  sinks_load_time_ = base::Time::Now();
+  media_router::MediaRouterMetrics::RecordGmcDialogLoaded(sinks_load_time_ -
+                                                          initialization_time_);
+}
+
+int CastDeviceListHost::next_id_ = 0;

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var cs = chrome.contentSettings;
-var delegation;
+const cs = chrome.contentSettings;
+let delegation;
 
 chrome.test.runTests([
   function setup() {
@@ -15,27 +15,33 @@ chrome.test.runTests([
   function embeddedSettings() {
     // Cookies is not impacted by permission delegation and embedded patterns
     // are permitted even when it's enabled.
-    cs['cookies'].set({
-        primaryPattern: 'http://google.com/*',
-        secondaryPattern: 'http://example.com/*',
-        setting: 'allow'
-      }, chrome.test.callbackPass());
+    cs['cookies'].set(
+        {
+          primaryPattern: 'http://google.com/*',
+          secondaryPattern: 'http://example.com/*',
+          setting: 'allow',
+        },
+        chrome.test.callbackPass());
 
     // Geolocation embedded patterns are not permitted when permission
     // delegation is enabled.
-    if (delegation  == 'permission') {
-      cs['location'].set({
-        primaryPattern: 'http://google.com/*',
-        secondaryPattern: 'http://example.com/*',
-        setting: 'allow'
-      }, chrome.test.callbackFail(
-          'Embedded patterns are not supported for this setting.'));
+    if (delegation === 'permission') {
+      cs['location'].set(
+          {
+            primaryPattern: 'http://google.com/*',
+            secondaryPattern: 'http://example.com/*',
+            setting: 'allow',
+          },
+          chrome.test.callbackFail(
+              'Embedded patterns are not supported for this setting.'));
     } else {
-      cs['location'].set({
-        primaryPattern: 'http://google.com/*',
-        secondaryPattern: 'http://example.com/*',
-        setting: 'allow'
-      }, chrome.test.callbackPass());
+      cs['location'].set(
+          {
+            primaryPattern: 'http://google.com/*',
+            secondaryPattern: 'http://example.com/*',
+            setting: 'allow',
+          },
+          chrome.test.callbackPass());
     }
-  }
+  },
 ]);

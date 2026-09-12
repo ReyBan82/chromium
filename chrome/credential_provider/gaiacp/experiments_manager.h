@@ -13,7 +13,11 @@ namespace credential_provider {
 
 // List of experiments which must be kept in sync with the metadata for the
 // experiment below.
-enum Experiment { TEST_CLIENT_FLAG, TEST_CLIENT_FLAG2 };
+enum Experiment {
+  TEST_CLIENT_FLAG,
+  TEST_CLIENT_FLAG2,
+  ENABLE_SECURITY_KEY_LOGIN
+};
 
 class ExperimentsManager {
  public:
@@ -72,10 +76,11 @@ class ExperimentsManager {
 
   // Metadata for list of supported experiments.
   std::vector<ExperimentMetadata> experiments = {
-      // TODO(crbug.com/1147522): Clean up the test experiments when actual
+      // TODO(crbug.com/40156649): Clean up the test experiments when actual
       // experiments are introduced. These were added for e2e testing.
       {TEST_CLIENT_FLAG, "test_client_flag", "false"},
-      {TEST_CLIENT_FLAG2, "test_client_flag2", "false"}};
+      {TEST_CLIENT_FLAG2, "test_client_flag2", "false"},
+      {ENABLE_SECURITY_KEY_LOGIN, "enable_security_key_login", "false"}};
 };
 
 }  // namespace credential_provider

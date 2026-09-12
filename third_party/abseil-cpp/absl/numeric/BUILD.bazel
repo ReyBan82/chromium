@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load(
     "//absl:copts/configure_copts.bzl",
     "ABSL_DEFAULT_COPTS",
@@ -19,7 +22,14 @@ load(
     "ABSL_TEST_COPTS",
 )
 
-package(default_visibility = ["//visibility:public"])
+package(
+    default_visibility = ["//visibility:private"],
+    features = [
+        "header_modules",
+        "layering_check",
+        "parse_headers",
+    ],
+)
 
 licenses(["notice"])
 
@@ -31,15 +41,17 @@ cc_library(
     ],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = ["//visibility:public"],
     deps = [
         "//absl/base:config",
         "//absl/base:core_headers",
+        "//absl/base:endian",
     ],
 )
 
 cc_binary(
     name = "bits_benchmark",
-    testonly = 1,
+    testonly = True,
     srcs = ["bits_benchmark.cc"],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
@@ -47,7 +59,7 @@ cc_binary(
         ":bits",
         "//absl/base:core_headers",
         "//absl/random",
-        "@com_github_google_benchmark//:benchmark_main",
+        "@google_benchmark//:benchmark_main",
     ],
 )
 
@@ -61,8 +73,10 @@ cc_test(
     linkopts = ABSL_DEFAULT_LINKOPTS,
     deps = [
         ":bits",
+        "//absl/base:config",
         "//absl/random",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -76,10 +90,12 @@ cc_library(
     hdrs = ["int128.h"],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = ["//visibility:public"],
     deps = [
         ":bits",
         "//absl/base:config",
         "//absl/base:core_headers",
+        "//absl/types:compare",
     ],
 )
 
@@ -97,12 +113,16 @@ cc_test(
         "//absl/base",
         "//absl/hash:hash_testing",
         "//absl/meta:type_traits",
-        "@com_google_googletest//:gtest_main",
+        "//absl/strings",
+        "//absl/types:compare",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
-cc_test(
+cc_binary(
     name = "int128_benchmark",
+    testonly = True,
     srcs = ["int128_benchmark.cc"],
     copts = ABSL_TEST_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
@@ -110,7 +130,8 @@ cc_test(
     deps = [
         ":int128",
         "//absl/base:config",
-        "@com_github_google_benchmark//:benchmark_main",
+        "//absl/random",
+        "@google_benchmark//:benchmark_main",
     ],
 )
 
@@ -121,6 +142,7 @@ cc_library(
     ],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = ["//absl:__subpackages__"],
     deps = [
         "//absl/base:config",
     ],

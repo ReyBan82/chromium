@@ -15,14 +15,15 @@
 
 namespace content {
 
+class PaymentHandlerWebContentsObserver;
+struct GlobalRenderFrameHostId;
+
 // Lives on the UI thread.
 class CONTENT_EXPORT PaymentAppProviderImpl
     : public PaymentAppProvider,
       public WebContentsUserData<PaymentAppProviderImpl> {
  public:
   ~PaymentAppProviderImpl() override;
-  static PaymentAppProviderImpl* GetOrCreateForWebContents(
-      WebContents* payment_request_web_contents);
 
   // Disallow copy and assign.
   PaymentAppProviderImpl(const PaymentAppProviderImpl& other) = delete;
@@ -35,6 +36,7 @@ class CONTENT_EXPORT PaymentAppProviderImpl
                         payments::mojom::PaymentRequestEventDataPtr event_data,
                         InvokePaymentAppCallback callback) override;
   void InstallAndInvokePaymentApp(
+      GlobalRenderFrameHostId requesting_frame_id,
       payments::mojom::PaymentRequestEventDataPtr event_data,
       const std::string& app_name,
       const SkBitmap& app_icon,
@@ -45,13 +47,14 @@ class CONTENT_EXPORT PaymentAppProviderImpl
       const SupportedDelegations& supported_delegations,
       RegistrationIdCallback registration_id_callback,
       InvokePaymentAppCallback callback) override;
-  void UpdatePaymentAppIcon(int64_t registration_id,
-                            const std::string& instrument_key,
-                            const std::string& name,
-                            const std::string& string_encoded_icon,
-                            const std::string& method_name,
-                            const SupportedDelegations& supported_delegations,
-                            UpdatePaymentAppIconCallback callback) override;
+  void UpdatePaymentAppMetadata(
+      int64_t registration_id,
+      const std::string& instrument_key,
+      const std::string& name,
+      const std::string& string_encoded_icon,
+      const std::string& method_name,
+      const SupportedDelegations& supported_delegations,
+      UpdatePaymentAppMetadataCallback callback) override;
   void CanMakePayment(int64_t registration_id,
                       const url::Origin& sw_origin,
                       const std::string& payment_request_id,
@@ -65,21 +68,26 @@ class CONTENT_EXPORT PaymentAppProviderImpl
   void CloseOpenedWindow() override;
   void OnClosingOpenedWindow(
       payments::mojom::PaymentEventResponseType reason) override;
+  void SetRegistrationId(int64_t registration_id) override;
+  void OnPaymentHandlerDisconnected() override;
+
+  DevToolsBackgroundServicesContextImpl* GetDevTools(
+      const url::Origin& sw_origin);
 
   void InstallPaymentAppForTesting(
       const SkBitmap& app_icon,
       const GURL& sw_js_url,
       const GURL& sw_scope,
       const std::string& method,
+      GlobalRenderFrameHostId requesting_frame_id,
       base::OnceCallback<void(bool success)> callback) override;
 
  private:
   explicit PaymentAppProviderImpl(WebContents* payment_request_web_contents);
   friend class WebContentsUserData<PaymentAppProviderImpl>;
+  friend class PaymentAppProviderTest;
   WEB_CONTENTS_USER_DATA_KEY_DECL();
 
-  scoped_refptr<DevToolsBackgroundServicesContextImpl> GetDevTools(
-      const url::Origin& sw_origin);
   void StartServiceWorkerForDispatch(
       int64_t registration_id,
       PaymentEventDispatcher::ServiceWorkerStartCallback callback);
@@ -97,6 +105,14 @@ class CONTENT_EXPORT PaymentAppProviderImpl
   raw_ptr<WebContents> payment_request_web_contents_;
 
   std::unique_ptr<PaymentEventDispatcher> event_dispatcher_;
+
+  std::unique_ptr<PaymentHandlerWebContentsObserver>
+      payment_handler_web_contents_observer_;
+
+  int64_t registration_id_ = blink::mojom::kInvalidServiceWorkerRegistrationId;
+
+  // Used to verify that OnPaymentHandlerDisconnected() is called in tests.
+  bool payment_handler_disconnected_for_test_ = false;
 
   base::WeakPtrFactory<PaymentAppProviderImpl> weak_ptr_factory_{this};
 };

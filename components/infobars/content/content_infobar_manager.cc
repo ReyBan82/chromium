@@ -6,6 +6,7 @@
 
 #include "base/command_line.h"
 #include "components/infobars/core/infobar.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_details.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
@@ -34,8 +35,9 @@ ContentInfoBarManager::NavigationDetailsFromLoadCommittedDetails(
 // static
 content::WebContents* ContentInfoBarManager::WebContentsFromInfoBar(
     InfoBar* infobar) {
-  if (!infobar || !infobar->owner())
+  if (!infobar || !infobar->owner()) {
     return nullptr;
+  }
   ContentInfoBarManager* infobar_manager =
       static_cast<ContentInfoBarManager*>(infobar->owner());
   return infobar_manager->web_contents();
@@ -48,13 +50,12 @@ ContentInfoBarManager::ContentInfoBarManager(content::WebContents* web_contents)
   // Infobar animations cause viewport resizes. Disable them for automated
   // tests, since they could lead to flakiness.
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kEnableAutomation))
+          switches::kEnableAutomation)) {
     set_animations_enabled(false);
+  }
 }
 
-ContentInfoBarManager::~ContentInfoBarManager() {
-  ShutDown();
-}
+ContentInfoBarManager::~ContentInfoBarManager() = default;
 
 int ContentInfoBarManager::GetActiveEntryID() {
   content::NavigationEntry* active_entry =
@@ -84,34 +85,28 @@ void ContentInfoBarManager::NavigationEntryCommitted(
       ui::PageTransitionCoreTypeIs(load_details.entry->GetTransitionType(),
                                    ui::PAGE_TRANSITION_RELOAD);
   ignore_next_reload_ = false;
-  if (!ignore)
+  if (!ignore) {
     OnNavigation(NavigationDetailsFromLoadCommittedDetails(load_details));
-}
-
-void ContentInfoBarManager::WebContentsDestroyed() {
-  // The WebContents is going away; be aggressively paranoid and delete
-  // |this| lest other parts of the system attempt to add infobars or use
-  // this object otherwise during the destruction.
-  // TODO(blundell): This operation seems unnecessary as detailed in the
-  // conversation on
-  // https://chromium-review.googlesource.com/c/chromium/src/+/2859170/7 .
-  // Look at removing it.
-  web_contents()->RemoveUserData(UserDataKey());
-  // That was the equivalent of "delete this". This object is now destroyed;
-  // returning from this function is the only safe thing to do.
+  }
 }
 
 void ContentInfoBarManager::OpenURL(const GURL& url,
-                                    WindowOpenDisposition disposition) {
+                                    WindowOpenDisposition disposition,
+                                    const std::string& text_fragment) {
   // A normal user click on an infobar URL will result in a CURRENT_TAB
   // disposition; turn that into a NEW_FOREGROUND_TAB so that we don't end up
   // smashing the page the user is looking at.
-  web_contents()->OpenURL(
-      content::OpenURLParams(url, content::Referrer(),
-                             (disposition == WindowOpenDisposition::CURRENT_TAB)
-                                 ? WindowOpenDisposition::NEW_FOREGROUND_TAB
-                                 : disposition,
-                             ui::PAGE_TRANSITION_LINK, false));
+  content::OpenURLParams params =
+      content::OpenURLParams::CreateBrowserInitiated(
+          url,
+          (disposition == WindowOpenDisposition::CURRENT_TAB)
+              ? WindowOpenDisposition::NEW_FOREGROUND_TAB
+              : disposition,
+          ui::PAGE_TRANSITION_LINK);
+  if (!text_fragment.empty()) {
+    params.internal_scroll_to_text_fragment = text_fragment;
+  }
+  web_contents()->OpenURL(params, /*navigation_handle_callback=*/{});
 }
 
 WEB_CONTENTS_USER_DATA_KEY_IMPL(ContentInfoBarManager);

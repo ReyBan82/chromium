@@ -34,7 +34,7 @@ TEST(PersistentMetricsData, SerializesAndDeserializes) {
   data.did_report_good_visit = true;
   data.did_scroll_in_visit = true;
 
-  const base::Value::Dict serialized_dict = PersistentMetricsDataToDict(data);
+  const base::DictValue serialized_dict = PersistentMetricsDataToDict(data);
   const PersistentMetricsData deserialized_dict =
       PersistentMetricsDataFromDict(serialized_dict);
 
@@ -66,7 +66,7 @@ TEST(PersistentMetricsData, DefaultValuesForGoodVisits) {
   data.accumulated_time_spent_in_feed = base::Hours(2);
   data.current_day_start = base::Time::UnixEpoch();
 
-  const base::Value::Dict serialized_dict = PersistentMetricsDataToDict(data);
+  const base::DictValue serialized_dict = PersistentMetricsDataToDict(data);
   const PersistentMetricsData deserialized_dict =
       PersistentMetricsDataFromDict(serialized_dict);
 
@@ -92,11 +92,13 @@ TEST(PersistentMetricsData, DefaultValuesForGoodVisits) {
 }
 
 TEST(PersistentMetricsData, CanHandleMissingGoodVisitsState) {
-  absl::optional<base::Value> dict = base::JSONReader::Read(R"({
+  std::optional<base::Value> dict =
+      base::JSONReader::Read(R"({
    "day_start": "11644473600000000",
    "time_spent_in_feed": "7200000000"
 }
-)");
+)",
+                             base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(dict.has_value());
   ASSERT_TRUE(dict->is_dict());
   PersistentMetricsData data = PersistentMetricsDataFromDict(dict->GetDict());

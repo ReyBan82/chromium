@@ -9,7 +9,6 @@
 
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ui/webui/version/version_handler.h"
-#include "chromeos/version/version_loader.h"
 
 // VersionHandlerChromeOS is responsible for loading the Chrome OS
 // version.
@@ -24,16 +23,12 @@ class VersionHandlerChromeOS : public VersionHandler {
 
   // VersionHandler overrides:
   void OnJavascriptDisallowed() override;
-  void HandleRequestVersionInfo(const base::Value::List& args) override;
-  void RegisterMessages() override;
+  void HandleRequestVersionInfo(const base::ListValue& args) override;
 
   // Callbacks from chromeos::VersionLoader.
-  void OnVersion(const absl::optional<std::string>& version);
-  void OnOSFirmware(const std::string& version);
+  void OnPlatformVersion(const std::optional<std::string>& version);
+  void OnFirmwareVersion(const std::string& version);
   void OnArcAndArcAndroidSdkVersions(const std::string& version);
-
-  // Callback for the "crosUrlVersionRedirect" message.
-  void HandleCrosUrlVersionRedirect(const base::Value::List& args);
 
  private:
   base::WeakPtrFactory<VersionHandlerChromeOS> weak_factory_{this};

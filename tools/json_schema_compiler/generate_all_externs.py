@@ -2,7 +2,6 @@
 # Copyright 2022 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-
 """Helper for quickly generating all known JS externs."""
 
 import argparse
@@ -14,9 +13,9 @@ from compiler import GenerateSchema
 
 # APIs with generated externs.
 API_SOURCES = (
-    ('chrome', 'common', 'apps', 'platform_apps', 'api'),
-    ('chrome', 'common', 'extensions', 'api'),
-    ('extensions', 'common', 'api'),
+  ('chrome', 'common', 'apps', 'platform_apps', 'api'),
+  ('chrome', 'common', 'extensions', 'api'),
+  ('extensions', 'common', 'api'),
 )
 
 _EXTERNS_UPDATE_MESSAGE = """Please run one of:
@@ -31,6 +30,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(DIR))
 # Import the helper module.
 sys.path.insert(0, os.path.join(REPO_ROOT, 'extensions', 'common', 'api'))
 from externs_checker import ExternsChecker
+
 sys.path.pop(0)
 
 
@@ -87,16 +87,18 @@ def Generate(input_api, output_api, force=False, dryrun=False):
   for api_source in API_SOURCES:
     api_root = join(src_root, *api_source)
     api_pairs.update(
-        ExternsChecker.ParseApiFileList(input_api, api_root=api_root))
+      ExternsChecker.ParseApiFileList(input_api, api_root=api_root)
+    )
 
   # Unfortunately, our generator is still a bit buggy, so ignore externs that
   # are known to be hand edited after the fact.  We require people to add an
   # explicit TODO marker bound to a known bug.
   # TODO(vapier): Improve the toolchain enough to not require this.
   re_disabled = input_api.re.compile(
-      r'^// TODO\(crbug\.com/[0-9]+\): '
-      r'Disable automatic extern generation until fixed\.$',
-      flags=input_api.re.M)
+    r'^// TODO\(crbug\.com/[0-9]+\): '
+    r'Disable automatic extern generation until fixed\.$',
+    flags=input_api.re.M,
+  )
 
   # Make sure each one is up-to-date with our toolchain.
   ret = []
@@ -117,15 +119,18 @@ def Generate(input_api, output_api, force=False, dryrun=False):
     print(msg, end='')
     sys.stdout.flush()
     try:
-      new_data = GenerateSchema('externs', [source], src_root, None, '', '',
-                                None, []) + '\n'
+      new_data = (
+        GenerateSchema('externs', [source], src_root, None, '', '', None, [])
+        + '\n'
+      )
     except Exception as e:
       if not dryrun:
         print('\n%s: %s' % (source_relpath, e))
       ret.append(
-          output_api.PresubmitResult(
-              '%s: unable to generate' % (source_relpath,),
-              long_text=str(e)))
+        output_api.PresubmitResult(
+          '%s: unable to generate' % (source_relpath,), long_text=str(e)
+        )
+      )
       continue
 
     # Ignore the first line (copyright) to avoid yearly thrashing.
@@ -137,13 +142,15 @@ def Generate(input_api, output_api, force=False, dryrun=False):
 
     if old_data != new_data:
       settings = {
-          'source': source_relpath,
-          'externs': externs_relpath,
+        'source': source_relpath,
+        'externs': externs_relpath,
       }
       ret.append(
-          output_api.PresubmitResult(
-              '%(source)s: file needs to be regenerated' % settings,
-              long_text=_EXTERNS_UPDATE_MESSAGE % settings))
+        output_api.PresubmitResult(
+          '%(source)s: file needs to be regenerated' % settings,
+          long_text=_EXTERNS_UPDATE_MESSAGE % settings,
+        )
+      )
 
       if not dryrun:
         print('\r' + ' ' * msg_len, end='\r')
@@ -161,11 +168,19 @@ def Generate(input_api, output_api, force=False, dryrun=False):
 def get_parser():
   """Get CLI parser."""
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument('-n', '--dry-run', dest='dryrun', action='store_true',
-                      help="Don't make changes; only show changed files")
-  parser.add_argument('-f', '--force', action='store_true',
-                      help='Regenerate files even if they have a TODO '
-                           'disabling generation')
+  parser.add_argument(
+    '-n',
+    '--dry-run',
+    dest='dryrun',
+    action='store_true',
+    help="Don't make changes; only show changed files",
+  )
+  parser.add_argument(
+    '-f',
+    '--force',
+    action='store_true',
+    help='Regenerate files even if they have a TODO disabling generation',
+  )
   return parser
 
 
@@ -174,8 +189,9 @@ def main(argv):
   parser = get_parser()
   opts = parser.parse_args(argv)
 
-  results = Generate(FakeInputApi(), FakeOutputApi(), force=opts.force,
-                     dryrun=opts.dryrun)
+  results = Generate(
+    FakeInputApi(), FakeOutputApi(), force=opts.force, dryrun=opts.dryrun
+  )
   if opts.dryrun and results:
     for result in results:
       print(result.msg + '\n' + result.long_text)

@@ -7,35 +7,39 @@
 
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
 #include "base/gtest_prod_util.h"
-#include "base/memory/weak_ptr.h"
+#include "base/memory/raw_ptr.h"
+#include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "base/values.h"
 #include "components/translate/core/common/translate_errors.h"
-#import "ios/web/public/js_messaging/web_frames_manager.h"
 #import "ios/web/public/web_state.h"
-#include "ios/web/public/web_state_observer.h"
 #import "ios/web/public/web_state_user_data.h"
-#include "services/network/public/cpp/simple_url_loader.h"
 
-class JSTranslateWebFrameManagerFactory;
+namespace network {
+class SimpleURLLoader;
+}
+
+namespace url {
+class Origin;
+}
 
 namespace web {
-class NavigationContext;
-}  // namespace web
+class WebFrame;
+}
 
 namespace translate {
 
 // TranslateController controls the translation of the page, by injecting the
 // translate scripts and monitoring the status.
-class TranslateController : public web::WebFramesManager::Observer,
-                            public web::WebStateObserver,
-                            public web::WebStateUserData<TranslateController> {
+class TranslateController : public web::WebStateUserData<TranslateController> {
  public:
   // Observer class to monitor the progress of the translation.
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
     // Called when the translate script is ready.
     // |error_type| Indicates error code.
@@ -48,6 +52,11 @@ class TranslateController : public web::WebFramesManager::Observer,
     virtual void OnTranslateComplete(TranslateErrors error_type,
                                      const std::string& source_language,
                                      double translation_time) = 0;
+
+    // Called when the observed instance is being destroyed so that observers
+    // can call RemoveObserver on the instance.
+    virtual void TranslateControllerWasDestroyed(
+        TranslateController* translate_controller) = 0;
   };
 
   TranslateController(const TranslateController&) = delete;
@@ -55,8 +64,8 @@ class TranslateController : public web::WebFramesManager::Observer,
 
   ~TranslateController() override;
 
-  // Sets the observer.
-  void set_observer(Observer* observer) { observer_ = observer; }
+  void AddObserver(Observer* observer);
+  void RemoveObserver(Observer* observer);
 
   // Injects the translate script.
   void InjectTranslateScript(const std::string& translate_script);
@@ -70,80 +79,39 @@ class TranslateController : public web::WebFramesManager::Observer,
                         const std::string& target_language);
 
   // Called when a JavaScript command is received.
-  void OnJavascriptCommandReceived(const base::Value::Dict& payload);
-
-  // Changes the JSTranslateWebFrameManagerFactory used by this
-  // TranslateController. Only used for testing.
-  void SetJsTranslateWebFrameManagerFactoryForTesting(
-      JSTranslateWebFrameManagerFactory* manager);
+  void OnJavascriptCommandReceived(url::Origin security_origin,
+                                   const base::DictValue& payload);
 
  private:
-  TranslateController(web::WebState* web_state,
-                      JSTranslateWebFrameManagerFactory* js_manager_factory);
+  TranslateController(web::WebState* web_state);
   friend class web::WebStateUserData<TranslateController>;
-  WEB_STATE_USER_DATA_KEY_DECL();
-
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest,
-                           OnJavascriptCommandReceived);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest,
-                           OnIFrameJavascriptCommandReceived);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest,
-                           OnTranslateScriptReadyTimeoutCalled);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest,
-                           OnTranslateScriptReadyCalled);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest, TranslationSuccess);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest, TranslationFailure);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest, OnTranslateLoadJavascript);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest,
-                           OnTranslateSendRequestWithValidCommand);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest,
-                           OnTranslateSendRequestWithBadURL);
-  FRIEND_TEST_ALL_PREFIXES(TranslateControllerTest,
-                           OnTranslateSendRequestWithBadMethod);
+  friend class TranslateControllerTest;
 
   // Methods to handle specific JavaScript commands.
   // The command is ignored if `payload` format is unexpected.
-  void OnTranslateReady(const base::Value::Dict& payload);
-  void OnTranslateComplete(const base::Value::Dict& payload);
-  void OnTranslateLoadJavaScript(const base::Value::Dict& payload);
-  void OnTranslateSendRequest(const base::Value::Dict& payload);
+  void OnTranslateReady(const base::DictValue& payload);
+  void OnTranslateComplete(const base::DictValue& payload);
+  void OnLoadJavascript(url::Origin security_origin,
+                        const base::DictValue& payload);
 
-  // The callback when the script is fetched or a server error occurred.
-  void OnScriptFetchComplete(std::unique_ptr<std::string> response_body);
-  // The callback when translate requests have completed.
-  void OnRequestFetchComplete(
-      std::set<std::unique_ptr<network::SimpleURLLoader>>::iterator it,
-      std::string url,
-      int request_id,
-      std::unique_ptr<std::string> response_body);
+  // The main frame of `web_state_`, if any.
+  web::WebFrame* GetMainWebFrame();
 
-  // web::WebStateObserver implementation:
-  void WebStateDestroyed(web::WebState* web_state) override;
-  void DidStartNavigation(web::WebState* web_state,
-                          web::NavigationContext* navigation_context) override;
-  void WebStateRealized(web::WebState* web_state) override;
+  // The WebState this instance is observing.
+  raw_ptr<web::WebState> web_state_;
 
-  // web::WebFramesManager implementation:
-  void WebFrameBecameAvailable(web::WebFramesManager* web_frames_manager,
-                               web::WebFrame* web_frame) override;
-  void WebFrameBecameUnavailable(web::WebFramesManager* web_frames_manager,
-                                 const std::string frame_id) override;
+  base::ObserverList<Observer> observers_;
 
-  // The WebState this instance is observing. Will be null after
-  // WebStateDestroyed has been called.
-  web::WebState* web_state_ = nullptr;
+  // The WebFrame ID for the frame from `web_state_` which the translate script
+  // was last injected.
+  std::optional<std::string> translate_script_injected_frame_id_;
 
-  // The current main web frame of `web_state_`, if one exists.
-  web::WebFrame* main_web_frame_ = nullptr;
+  // Loader used to fetch the translate script.
+  std::unique_ptr<network::SimpleURLLoader> script_loader_;
 
-  // Used to fetch translate requests. There may be multiple requests in flight.
-  std::set<std::unique_ptr<network::SimpleURLLoader>> request_fetchers_;
-  // Used to fetch additional scripts needed for translate.
-  std::unique_ptr<network::SimpleURLLoader> script_fetcher_;
-
-  Observer* observer_;
-  JSTranslateWebFrameManagerFactory* js_manager_factory_;
-  base::WeakPtrFactory<TranslateController> weak_method_factory_;
+  // Called when the script is loaded.
+  void OnScriptLoaded(std::string frame_id,
+                      std::optional<std::string> response_body);
 };
 
 }  // namespace translate

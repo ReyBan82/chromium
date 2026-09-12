@@ -7,16 +7,41 @@
 #include <pulse/pulseaudio.h>
 #include <stdint.h>
 
+#include <algorithm>
+
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
+#include "base/trace_event/typed_macros.h"
 #include "media/audio/audio_device_description.h"
 #include "media/audio/audio_manager_base.h"
 #include "media/audio/pulse/pulse_util.h"
+#include "media/base/audio_bus.h"
 #include "media/base/audio_sample_types.h"
 
 namespace media {
+
+namespace {
+
+base::span<float> GetStreamBeginWriteSpan(pa_stream* stream,
+                                          void** pa_buffer,
+                                          size_t* pa_buffer_size) {
+  CHECK_GE(pa_stream_begin_write(stream, pa_buffer, pa_buffer_size), 0);
+  CHECK_EQ(*pa_buffer_size % sizeof(float), 0u);
+
+  // SAFETY:
+  // https://freedesktop.org/software/pulseaudio/doxygen/stream_8h.html#a6cf50cfc4ea8897391941184d74d7dfa
+  // The documentation of `pa_stream_begin_write` says that `pa_buffer`
+  // points to the write address. `pa_buffer_size` indicates the number of
+  // valid bytes.
+  return UNSAFE_BUFFERS(base::span(reinterpret_cast<float*>(*pa_buffer),
+                                   *pa_buffer_size / sizeof(float)));
+}
+
+}  // namespace
 
 using pulse::AutoPulseLock;
 using pulse::WaitForOperationCompletion;
@@ -48,7 +73,8 @@ PulseAudioOutputStream::PulseAudioOutputStream(
     const std::string& device_id,
     AudioManagerBase* manager,
     AudioManager::LogCallback log_callback)
-    : params_(AudioParameters(params.format(),
+    : id_(base::UnguessableToken::Create()),
+      params_(AudioParameters(params.format(),
                               params.channel_layout_config(),
                               params.sample_rate(),
                               params.frames_per_buffer())),
@@ -60,10 +86,16 @@ PulseAudioOutputStream::PulseAudioOutputStream(
       pa_stream_(nullptr),
       volume_(1.0f),
       source_callback_(nullptr),
-      buffer_size_(params_.GetBytesPerBuffer(kSampleFormatF32)) {
+      buffer_size_(params_.GetBytesPerBuffer(kSampleFormatF32)),
+      peak_detector_(base::BindRepeating(&AudioManager::TraceAmplitudePeak,
+                                         base::Unretained(manager_),
+                                         /*trace_start=*/false)) {
   CHECK(params_.IsValid());
-  SendLogMessage("%s({device_id=%s}, {params=[%s]})", __func__,
-                 device_id.c_str(), params.AsHumanReadableString().c_str());
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s({device_id=%s}, {params=[%s]})",
+                                      __func__, device_id.c_str(),
+                                      params.AsHumanReadableString().c_str()));
+  }
   audio_bus_ = AudioBus::Create(params_);
 }
 
@@ -77,13 +109,18 @@ PulseAudioOutputStream::~PulseAudioOutputStream() {
 
 bool PulseAudioOutputStream::Open() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  SendLogMessage("%s()", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
   bool result = pulse::CreateOutputStream(
       &pa_mainloop_, &pa_context_, &pa_stream_, params_, device_id_,
       AudioManager::GetGlobalAppName(), &StreamNotifyCallback,
       &StreamRequestCallback, this);
   if (!result) {
-    SendLogMessage("%s => (ERROR: failed to open PA stream)", __func__);
+    if (ShouldLog()) {
+      SendLogMessage(base::StringPrintf(
+          "%s => (ERROR: failed to open PA stream)", __func__));
+    }
   }
   return result;
 }
@@ -110,26 +147,28 @@ void PulseAudioOutputStream::Reset() {
       pa_stream_disconnect(pa_stream_);
       pa_stream_set_write_callback(pa_stream_, nullptr, nullptr);
       pa_stream_set_state_callback(pa_stream_, nullptr, nullptr);
-      pa_stream_unref(pa_stream_);
+      pa_stream_unref(pa_stream_.ExtractAsDangling());
       pa_stream_ = nullptr;
     }
 
     if (pa_context_) {
       pa_context_disconnect(pa_context_);
       pa_context_set_state_callback(pa_context_, nullptr, nullptr);
-      pa_context_unref(pa_context_);
+      pa_context_unref(pa_context_.ExtractAsDangling());
       pa_context_ = nullptr;
     }
   }
 
   pa_threaded_mainloop_stop(pa_mainloop_);
-  pa_threaded_mainloop_free(pa_mainloop_);
+  pa_threaded_mainloop_free(pa_mainloop_.ExtractAsDangling());
   pa_mainloop_ = nullptr;
 }
 
 void PulseAudioOutputStream::Close() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  SendLogMessage("%s()", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
 
   Reset();
 
@@ -142,35 +181,59 @@ void PulseAudioOutputStream::Close() {
 // sufficient to simply always flush upon Start().
 void PulseAudioOutputStream::Flush() {}
 
-void PulseAudioOutputStream::SendLogMessage(const char* format, ...) {
-  if (log_callback_.is_null())
+void PulseAudioOutputStream::SendLogMessage(const std::string& message) {
+  if (!ShouldLog()) {
     return;
-  va_list args;
-  va_start(args, format);
-  log_callback_.Run("PAOS::" + base::StringPrintV(format, args) +
-                    base::StringPrintf(" [this=%p]", this));
-  va_end(args);
+  }
+  log_callback_.Run("PAOS::" + message +
+                    base::StringPrintf(" [id=%s]", id_.ToString().c_str()));
 }
 
 void PulseAudioOutputStream::FulfillWriteRequest(size_t requested_bytes) {
-  int bytes_remaining = requested_bytes;
+  TRACE_EVENT("audio", "PulseAudioOutputStream::FulfillWriteRequest",
+              [&](perfetto::EventContext ctx) {
+                auto* event =
+                    ctx.event<perfetto::protos::pbzero::ChromeTrackEvent>();
+                auto* data = event->set_linux_pulse_output();
+                data->set_stream_request_bytes(requested_bytes);
+                data->set_sample_rate(params_.sample_rate());
+              });
+  // `requested_bytes` is the minimum needed to prevent underruns. We can write
+  // more (up to the space returned by `pa_stream_begin_write()`) because we must
+  // write the full chunk fetched from the source.
+  size_t bytes_remaining = requested_bytes;
   while (bytes_remaining > 0) {
     void* pa_buffer = nullptr;
     size_t pa_buffer_size = buffer_size_;
-    CHECK_GE(pa_stream_begin_write(pa_stream_, &pa_buffer, &pa_buffer_size), 0);
+
+    base::span<float> pa_span =
+        GetStreamBeginWriteSpan(pa_stream_, &pa_buffer, &pa_buffer_size);
 
     if (!source_callback_) {
-      memset(pa_buffer, 0, pa_buffer_size);
+      std::ranges::fill(pa_span, 0);
       pa_stream_write(pa_stream_, pa_buffer, pa_buffer_size, nullptr, 0LL,
                       PA_SEEK_RELATIVE);
-      bytes_remaining -= pa_buffer_size;
+
+      // Avoid underflows as `pa_buffer_size` can end up being bigger than the
+      // `bytes_remaining` request.
+      bytes_remaining -= std::min(bytes_remaining, pa_buffer_size);
       continue;
     }
 
     size_t unwritten_frames_in_bus = audio_bus_->frames();
+    const size_t frame_size = buffer_size_ / unwritten_frames_in_bus;
+    const base::TimeDelta delay = pulse::GetHardwareLatency(pa_stream_);
+    UMA_HISTOGRAM_COUNTS_1000("Media.Audio.Render.SystemDelay",
+                              delay.InMilliseconds());
+    TRACE_EVENT("audio", "source request", [&](perfetto::EventContext ctx) {
+      auto* event = ctx.event<perfetto::protos::pbzero::ChromeTrackEvent>();
+      auto* data = event->set_linux_pulse_output();
+      data->set_source_request_playout_delay_us(delay.InMicroseconds());
+      data->set_input_buffer_size_frames(params_.frames_per_buffer());
+      data->set_frame_size_bytes(frame_size);
+    });
     size_t frames_filled = source_callback_->OnMoreData(
-        pulse::GetHardwareLatency(pa_stream_), base::TimeTicks::Now(), {},
-        audio_bus_.get());
+        BoundedDelay(delay), base::TimeTicks::Now(), {}, audio_bus_.get());
 
     // Zero any unfilled data so it plays back as silence.
     if (frames_filled < unwritten_frames_in_bus) {
@@ -178,30 +241,43 @@ void PulseAudioOutputStream::FulfillWriteRequest(size_t requested_bytes) {
                                     unwritten_frames_in_bus - frames_filled);
     }
 
+    // TODO(tguilbert): Consider moving this before each of the individual
+    // `pa_stream_write()` calls in the loop below, to improve the accuracy of
+    // the latency measurements.
+    peak_detector_.FindPeak(audio_bus_.get());
+
     audio_bus_->Scale(volume_);
 
-    size_t frame_size = buffer_size_ / unwritten_frames_in_bus;
-    size_t frames_to_copy = pa_buffer_size / frame_size;
     size_t frame_offset_in_bus = 0;
-    do {
-      // Grab frames and get the count.
-      frames_to_copy =
-          std::min(audio_bus_->frames() - frame_offset_in_bus, frames_to_copy);
+    CHECK_GT(unwritten_frames_in_bus, 0u);
+    while (unwritten_frames_in_bus > 0) {
+      const size_t frames_to_copy = std::min(
+          unwritten_frames_in_bus, pa_span.size() / audio_bus_->channels());
+
+      auto interleave_dest =
+          pa_span.first(frames_to_copy * audio_bus_->channels());
 
       // We skip clipping since that occurs at the shared memory boundary.
       audio_bus_->ToInterleavedPartial<Float32SampleTypeTraitsNoClip>(
-          frame_offset_in_bus, frames_to_copy,
-          reinterpret_cast<float*>(pa_buffer));
-      frame_offset_in_bus += frames_to_copy;
-      unwritten_frames_in_bus -= frames_to_copy;
+          frame_offset_in_bus, interleave_dest);
 
-      if (pa_stream_write(pa_stream_, pa_buffer, pa_buffer_size, nullptr, 0LL,
+      const size_t bytes_written =
+          base::as_bytes(base::allow_nonunique_obj, interleave_dest).size();
+
+      // Only commit the `bytes_written`, not the full `pa_buffer_size`.
+      if (pa_stream_write(pa_stream_, pa_buffer, bytes_written, nullptr, 0LL,
                           PA_SEEK_RELATIVE) < 0) {
         source_callback_->OnError(AudioSourceCallback::ErrorType::kUnknown);
         return;
       }
-      bytes_remaining -= pa_buffer_size;
-      if (unwritten_frames_in_bus) {
+
+      // Avoid underflows as `bytes_written` can end up being bigger than the
+      // `bytes_remaining` request.
+      bytes_remaining -= std::min(bytes_remaining, bytes_written);
+      frame_offset_in_bus += frames_to_copy;
+      unwritten_frames_in_bus -= frames_to_copy;
+
+      if (unwritten_frames_in_bus > 0) {
         // Reset the buffer and the size:
         //   - If pa_buffer isn't nulled out, then it will get re-used, and
         //     there will be a race between PA reading and us writing.
@@ -211,11 +287,10 @@ void PulseAudioOutputStream::FulfillWriteRequest(size_t requested_bytes) {
         //     dont need to memset.
         pa_buffer = nullptr;
         pa_buffer_size = unwritten_frames_in_bus * frame_size;
-        CHECK_GE(pa_stream_begin_write(pa_stream_, &pa_buffer, &pa_buffer_size),
-                 0);
-        frames_to_copy = pa_buffer_size / frame_size;
+        pa_span =
+            GetStreamBeginWriteSpan(pa_stream_, &pa_buffer, &pa_buffer_size);
       }
-    } while (unwritten_frames_in_bus);
+    }
   }
 }
 
@@ -223,7 +298,9 @@ void PulseAudioOutputStream::Start(AudioSourceCallback* callback) {
   DCHECK(thread_checker_.CalledOnValidThread());
   CHECK(callback);
   CHECK(pa_stream_);
-  SendLogMessage("%s()", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
 
   AutoPulseLock auto_lock(pa_mainloop_);
 
@@ -247,7 +324,9 @@ void PulseAudioOutputStream::Start(AudioSourceCallback* callback) {
 
 void PulseAudioOutputStream::Stop() {
   DCHECK(thread_checker_.CalledOnValidThread());
-  SendLogMessage("%s()", __func__);
+  if (ShouldLog()) {
+    SendLogMessage(base::StringPrintf("%s()", __func__));
+  }
 
   // Cork (pause) the stream.  Waiting for the main loop lock will ensure
   // outstanding callbacks have completed.

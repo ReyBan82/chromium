@@ -5,11 +5,13 @@
 #ifndef COMPONENTS_PAYMENTS_CONTENT_SECURE_PAYMENT_CONFIRMATION_MODEL_H_
 #define COMPONENTS_PAYMENTS_CONTENT_SECURE_PAYMENT_CONFIRMATION_MODEL_H_
 
+#include <optional>
 #include <string>
 
+#include "base/containers/to_vector.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/payments/content/payment_app.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 
 namespace payments {
@@ -27,55 +29,56 @@ class SecurePaymentConfirmationModel {
   SecurePaymentConfirmationModel& operator=(
       const SecurePaymentConfirmationModel& other) = delete;
 
+  // Header logos.
+  const std::vector<PaymentApp::PaymentEntityLogo*> header_logos() const {
+    return base::ToVector<PaymentApp::PaymentEntityLogo*>(header_logos_);
+  }
+  void set_header_logos(
+      const std::vector<PaymentApp::PaymentEntityLogo*> header_logos) {
+    header_logos_ =
+        base::ToVector<raw_ptr<PaymentApp::PaymentEntityLogo>>(header_logos);
+  }
+
   // Title, e.g. "Use TouchID to verify and complete your purchase?"
   const std::u16string& title() const { return title_; }
   void set_title(const std::u16string& title) { title_ = title; }
 
-  // Label for the merchant row, e.g. "Store".
-  const std::u16string& merchant_label() const { return merchant_label_; }
-  void set_merchant_label(const std::u16string& merchant_label) {
-    merchant_label_ = merchant_label;
-  }
-
   // Label for the merchant name, e.g. "Merchant"
-  const absl::optional<std::u16string>& merchant_name() const {
+  const std::optional<std::u16string>& merchant_name() const {
     return merchant_name_;
   }
-  void set_merchant_name(const absl::optional<std::u16string>& merchant_name) {
+  void set_merchant_name(const std::optional<std::u16string>& merchant_name) {
     merchant_name_ = merchant_name;
   }
 
   // Label for the merchant origin, e.g. "merchant.com"
-  const absl::optional<std::u16string>& merchant_origin() const {
+  const std::optional<std::u16string>& merchant_origin() const {
     return merchant_origin_;
   }
   void set_merchant_origin(
-      const absl::optional<std::u16string>& merchant_origin) {
+      const std::optional<std::u16string>& merchant_origin) {
     merchant_origin_ = merchant_origin;
   }
 
-  // Label for the instrument row, e.g. "Payment".
-  const std::u16string& instrument_label() const { return instrument_label_; }
-  void set_instrument_label(const std::u16string& instrument_label) {
-    instrument_label_ = instrument_label;
-  }
-
-  // Label for the instrument row value, e.g. "Mastercard ****4444"
+  // Label for the instrument row value, e.g. "Chase Card"
   const std::u16string& instrument_value() const { return instrument_value_; }
   void set_instrument_value(const std::u16string& instrument_value) {
     instrument_value_ = instrument_value;
+  }
+
+  // Sub-label for the instrument row value, e.g. "****4444"
+  const std::u16string& instrument_details_value() const {
+    return instrument_details_value_;
+  }
+  void set_instrument_details_value(
+      const std::u16string& instrument_details_value) {
+    instrument_details_value_ = instrument_details_value;
   }
 
   // Instrument icon.
   const SkBitmap* instrument_icon() const { return instrument_icon_; }
   void set_instrument_icon(const SkBitmap* instrument_icon) {
     instrument_icon_ = instrument_icon;
-  }
-
-  // Label for the total row, e.g. "Total".
-  const std::u16string& total_label() const { return total_label_; }
-  void set_total_label(const std::u16string& total_label) {
-    total_label_ = total_label;
   }
 
   // Label for the total row value, e.g. "$20.00 USD"
@@ -130,7 +133,21 @@ class SecurePaymentConfirmationModel {
     cancel_button_visible_ = cancel_button_visible;
   }
 
-  // Opt Out text visibility and label.
+  // Footer text visibility and labels.
+  bool footer_visible() const { return footer_visible_; }
+  void set_footer_visible(const bool footer_visible) {
+    footer_visible_ = footer_visible;
+  }
+  const std::u16string& footer_label() const { return footer_label_; }
+  void set_footer_label(const std::u16string& footer_label) {
+    footer_label_ = footer_label;
+  }
+  const std::u16string& footer_link_label() const { return footer_link_label_; }
+  void set_footer_link_label(const std::u16string& footer_link_label) {
+    footer_link_label_ = footer_link_label;
+  }
+
+  // Opt Out text visibility and labels.
   bool opt_out_visible() const { return opt_out_visible_; }
   void set_opt_out_visible(const bool opt_out_visible) {
     opt_out_visible_ = opt_out_visible;
@@ -139,15 +156,18 @@ class SecurePaymentConfirmationModel {
   void set_opt_out_label(const std::u16string& opt_out_label) {
     opt_out_label_ = opt_out_label;
   }
+  const std::u16string& opt_out_authenticator_label() const {
+    return opt_out_authenticator_label_;
+  }
+  void set_opt_out_authenticator_label(
+      const std::u16string& opt_out_authenticator_label) {
+    opt_out_authenticator_label_ = opt_out_authenticator_label;
+  }
   const std::u16string& opt_out_link_label() const {
     return opt_out_link_label_;
   }
   void set_opt_out_link_label(const std::u16string& opt_out_link_label) {
     opt_out_link_label_ = opt_out_link_label;
-  }
-  bool opt_out_clicked() const { return opt_out_clicked_; }
-  void set_opt_out_clicked(const bool opt_out_clicked) {
-    opt_out_clicked_ = opt_out_clicked;
   }
 
   // Relying Party id (origin); used in the opt out dialog.
@@ -159,17 +179,18 @@ class SecurePaymentConfirmationModel {
   base::WeakPtr<SecurePaymentConfirmationModel> GetWeakPtr();
 
  private:
+  std::vector<raw_ptr<PaymentApp::PaymentEntityLogo>> header_logos_;
+
   std::u16string title_;
+  std::u16string description_;
 
-  std::u16string merchant_label_;
-  absl::optional<std::u16string> merchant_name_;
-  absl::optional<std::u16string> merchant_origin_;
+  std::optional<std::u16string> merchant_name_;
+  std::optional<std::u16string> merchant_origin_;
 
-  std::u16string instrument_label_;
   std::u16string instrument_value_;
-  raw_ptr<const SkBitmap, DanglingUntriaged> instrument_icon_ = nullptr;
+  std::u16string instrument_details_value_;
+  raw_ptr<const SkBitmap> instrument_icon_ = nullptr;
 
-  std::u16string total_label_;
   std::u16string total_value_;
 
   std::u16string verify_button_label_;
@@ -183,10 +204,14 @@ class SecurePaymentConfirmationModel {
   bool cancel_button_enabled_ = true;
   bool cancel_button_visible_ = true;
 
+  bool footer_visible_ = false;
+  std::u16string footer_label_;
+  std::u16string footer_link_label_;
+
   bool opt_out_visible_ = false;
   std::u16string opt_out_label_;
+  std::u16string opt_out_authenticator_label_;
   std::u16string opt_out_link_label_;
-  bool opt_out_clicked_ = false;
 
   std::u16string relying_party_id_;
 

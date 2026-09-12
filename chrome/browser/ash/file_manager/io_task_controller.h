@@ -9,7 +9,6 @@
 #include <memory>
 
 #include "base/containers/flat_map.h"
-#include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/sequence_checker.h"
@@ -47,6 +46,9 @@ class IOTaskController {
   // Queues an IOTask and returns its ID.
   IOTaskId Add(std::unique_ptr<IOTask> task);
 
+  // Pauses a task from the queue.
+  void Pause(IOTaskId task_id, PauseParams params);
+
   // Resumes a task from the queue.
   void Resume(IOTaskId task_id, ResumeParams params);
 
@@ -55,6 +57,12 @@ class IOTaskController {
 
   // Makes tasks in state::PAUSED emit (broadcast) their progress status.
   void ProgressPausedTasks();
+
+  // Aborts a task from the queue.
+  void CompleteWithError(IOTaskId task_id, PolicyError policy_error);
+
+  // The `ProgressStatus` of each task in the queue.
+  std::vector<std::reference_wrapper<const ProgressStatus>> TaskStatuses();
 
   // For tests only; returns the current wake lock counter. This counter is
   // incremented by 1 for every time we get a wake lock and decremented every
@@ -83,7 +91,13 @@ class IOTaskController {
 
   SEQUENCE_CHECKER(sequence_checker_);
 
-  base::ObserverList<Observer> observers_;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/false,
+      /*reentrancy=*/
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>
+      observers_;
 
   IOTaskId last_id_ = 0;
   std::map<IOTaskId, std::unique_ptr<IOTask>> tasks_;

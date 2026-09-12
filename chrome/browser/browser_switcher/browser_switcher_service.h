@@ -6,6 +6,7 @@
 #define CHROME_BROWSER_BROWSER_SWITCHER_BROWSER_SWITCHER_SERVICE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/callback_list.h"
@@ -57,10 +58,11 @@ class BrowserSwitcherService;
 
 class XmlDownloader {
  public:
-  XmlDownloader(Profile* profile,
-                BrowserSwitcherService* service,
-                base::TimeDelta first_fetch_delay,
-                base::RepeatingCallback<void()> all_done_callback);
+  XmlDownloader(
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      BrowserSwitcherService* service,
+      base::TimeDelta first_fetch_delay,
+      base::RepeatingCallback<void()> all_done_callback);
   virtual ~XmlDownloader();
 
   base::Time last_refresh_time() const;
@@ -77,7 +79,7 @@ class XmlDownloader {
 
   // Parses the XML for a source, and calls DoneParsing() on the UI thread when
   // done.
-  void ParseXml(RulesetSource* source, std::unique_ptr<std::string> bytes);
+  void ParseXml(RulesetSource* source, std::optional<std::string> bytes);
 
   // Runs hooks on the source, and runs |all_done_callback| and
   // ScheduleRefresh() if this is the last source.

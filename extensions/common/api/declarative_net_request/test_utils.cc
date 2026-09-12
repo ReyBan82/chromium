@@ -11,9 +11,9 @@
 #include "extensions/common/api/declarative_net_request.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/manifest_constants.h"
-#include "extensions/common/value_builder.h"
 
 namespace extensions {
+
 namespace keys = manifest_keys;
 namespace dnr_api = api::declarative_net_request;
 
@@ -45,17 +45,17 @@ base::Value ToValue(const TestRulesetInfo& info) {
 }
 
 template <typename T>
-base::Value::List ToValue(const std::vector<T>& vec) {
-  ListBuilder builder;
+base::ListValue ToValue(const std::vector<T>& vec) {
+  base::ListValue builder;
   for (const T& t : vec)
     builder.Append(ToValue(t));
-  return builder.Build();
+  return builder;
 }
 
 template <typename T>
-void SetValue(base::Value::Dict& dict,
+void SetValue(base::DictValue& dict,
               const char* key,
-              const absl::optional<T>& value) {
+              const std::optional<T>& value) {
   if (!value)
     return;
 
@@ -70,8 +70,8 @@ TestRuleCondition::TestRuleCondition(const TestRuleCondition&) = default;
 TestRuleCondition& TestRuleCondition::operator=(const TestRuleCondition&) =
     default;
 
-base::Value::Dict TestRuleCondition::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestRuleCondition::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kUrlFilterKey, url_filter);
   SetValue(dict, kRegexFilterKey, regex_filter);
   SetValue(dict, kIsUrlFilterCaseSensitiveKey, is_url_filter_case_sensitive);
@@ -81,6 +81,8 @@ base::Value::Dict TestRuleCondition::ToValue() const {
   SetValue(dict, kExcludedInitiatorDomainsKey, excluded_initiator_domains);
   SetValue(dict, kRequestDomainsKey, request_domains);
   SetValue(dict, kExcludedRequestDomainsKey, excluded_request_domains);
+  SetValue(dict, kTopDomainsKey, top_domains);
+  SetValue(dict, kExcludedTopDomainsKey, excluded_top_domains);
   SetValue(dict, kRequestMethodsKey, request_methods);
   SetValue(dict, kExcludedRequestMethodsKey, excluded_request_methods);
   SetValue(dict, kResourceTypesKey, resource_types);
@@ -88,6 +90,8 @@ base::Value::Dict TestRuleCondition::ToValue() const {
   SetValue(dict, kTabIdsKey, tab_ids);
   SetValue(dict, kExcludedTabIdsKey, excluded_tab_ids);
   SetValue(dict, kDomainTypeKey, domain_type);
+  SetValue(dict, kResponseHeadersKey, response_headers);
+  SetValue(dict, kExcludedResponseHeadersKey, excluded_response_headers);
 
   return dict;
 }
@@ -99,8 +103,8 @@ TestRuleQueryKeyValue::TestRuleQueryKeyValue(const TestRuleQueryKeyValue&) =
 TestRuleQueryKeyValue& TestRuleQueryKeyValue::operator=(
     const TestRuleQueryKeyValue&) = default;
 
-base::Value::Dict TestRuleQueryKeyValue::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestRuleQueryKeyValue::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kQueryKeyKey, key);
   SetValue(dict, kQueryValueKey, value);
   SetValue(dict, kQueryReplaceOnlyKey, replace_only);
@@ -114,8 +118,8 @@ TestRuleQueryTransform::TestRuleQueryTransform(const TestRuleQueryTransform&) =
 TestRuleQueryTransform& TestRuleQueryTransform::operator=(
     const TestRuleQueryTransform&) = default;
 
-base::Value::Dict TestRuleQueryTransform::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestRuleQueryTransform::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kQueryTransformRemoveParamsKey, remove_params);
   SetValue(dict, kQueryTransformAddReplaceParamsKey, add_or_replace_params);
   return dict;
@@ -127,8 +131,8 @@ TestRuleTransform::TestRuleTransform(const TestRuleTransform&) = default;
 TestRuleTransform& TestRuleTransform::operator=(const TestRuleTransform&) =
     default;
 
-base::Value::Dict TestRuleTransform::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestRuleTransform::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kTransformSchemeKey, scheme);
   SetValue(dict, kTransformHostKey, host);
   SetValue(dict, kTransformPortKey, port);
@@ -147,8 +151,8 @@ TestRuleRedirect::TestRuleRedirect(const TestRuleRedirect&) = default;
 TestRuleRedirect& TestRuleRedirect::operator=(const TestRuleRedirect&) =
     default;
 
-base::Value::Dict TestRuleRedirect::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestRuleRedirect::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kExtensionPathKey, extension_path);
   SetValue(dict, kTransformKey, transform);
   SetValue(dict, kRedirectUrlKey, url);
@@ -158,7 +162,7 @@ base::Value::Dict TestRuleRedirect::ToValue() const {
 
 TestHeaderInfo::TestHeaderInfo(std::string header,
                                std::string operation,
-                               absl::optional<std::string> value)
+                               std::optional<std::string> value)
     : header(std::move(header)),
       operation(std::move(operation)),
       value(std::move(value)) {}
@@ -166,11 +170,31 @@ TestHeaderInfo::~TestHeaderInfo() = default;
 TestHeaderInfo::TestHeaderInfo(const TestHeaderInfo&) = default;
 TestHeaderInfo& TestHeaderInfo::operator=(const TestHeaderInfo&) = default;
 
-base::Value::Dict TestHeaderInfo::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestHeaderInfo::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kHeaderNameKey, header);
   SetValue(dict, kHeaderOperationKey, operation);
   SetValue(dict, kHeaderValueKey, value);
+  return dict;
+}
+
+TestHeaderCondition::TestHeaderCondition(
+    std::string header,
+    std::vector<std::string> values,
+    std::vector<std::string> excluded_values)
+    : header(std::move(header)),
+      values(std::move(values)),
+      excluded_values(std::move(excluded_values)) {}
+TestHeaderCondition::~TestHeaderCondition() = default;
+TestHeaderCondition::TestHeaderCondition(const TestHeaderCondition&) = default;
+TestHeaderCondition& TestHeaderCondition::operator=(
+    const TestHeaderCondition&) = default;
+
+base::DictValue TestHeaderCondition::ToValue() const {
+  base::DictValue dict;
+  SetValue(dict, kHeaderNameKey, header);
+  SetValue(dict, kHeaderValuesKey, values);
+  SetValue(dict, kHeaderExcludedValuesKey, excluded_values);
   return dict;
 }
 
@@ -179,8 +203,8 @@ TestRuleAction::~TestRuleAction() = default;
 TestRuleAction::TestRuleAction(const TestRuleAction&) = default;
 TestRuleAction& TestRuleAction::operator=(const TestRuleAction&) = default;
 
-base::Value::Dict TestRuleAction::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestRuleAction::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kRuleActionTypeKey, type);
   SetValue(dict, kRequestHeadersKey, request_headers);
   SetValue(dict, kResponseHeadersKey, response_headers);
@@ -193,8 +217,8 @@ TestRule::~TestRule() = default;
 TestRule::TestRule(const TestRule&) = default;
 TestRule& TestRule::operator=(const TestRule&) = default;
 
-base::Value::Dict TestRule::ToValue() const {
-  base::Value::Dict dict;
+base::DictValue TestRule::ToValue() const {
+  base::DictValue dict;
   SetValue(dict, kIDKey, id);
   SetValue(dict, kPriorityKey, priority);
   SetValue(dict, kRuleConditionKey, condition);
@@ -223,7 +247,7 @@ TestRule CreateRegexRule(int id) {
 }
 
 TestRulesetInfo::TestRulesetInfo(const std::string& manifest_id_and_path,
-                                 base::Value::List rules_value,
+                                 base::ListValue rules_value,
                                  bool enabled)
     : TestRulesetInfo(manifest_id_and_path,
                       manifest_id_and_path,
@@ -232,7 +256,7 @@ TestRulesetInfo::TestRulesetInfo(const std::string& manifest_id_and_path,
 
 TestRulesetInfo::TestRulesetInfo(const std::string& manifest_id,
                                  const std::string& relative_file_path,
-                                 base::Value::List rules_value,
+                                 base::ListValue rules_value,
                                  bool enabled)
     : manifest_id(manifest_id),
       relative_file_path(relative_file_path),
@@ -254,7 +278,7 @@ TestRulesetInfo::TestRulesetInfo(const TestRulesetInfo& info)
                       info.rules_value.Clone(),
                       info.enabled) {}
 
-base::Value::Dict TestRulesetInfo::GetManifestValue() const {
+base::DictValue TestRulesetInfo::GetManifestValue() const {
   dnr_api::Ruleset ruleset;
   ruleset.id = manifest_id;
   ruleset.path = relative_file_path;
@@ -262,62 +286,103 @@ base::Value::Dict TestRulesetInfo::GetManifestValue() const {
   return ruleset.ToValue();
 }
 
-base::Value::Dict CreateManifest(
-    const std::vector<TestRulesetInfo>& ruleset_info,
-    const std::vector<std::string>& hosts,
-    unsigned flags,
-    const std::string& extension_name) {
-  std::vector<std::string> permissions = hosts;
+base::DictValue CreateManifest(const std::vector<TestRulesetInfo>& ruleset_info,
+                               const std::vector<std::string>& hosts,
+                               unsigned flags,
+                               const std::string& extension_name) {
+  base::DictValue manifest_builder;
 
-  if (!(flags & kConfig_OmitDeclarativeNetRequestPermission))
+  bool is_manifest_version_2 = flags & kConfig_DEPRECATED_ManifestVersion2;
+
+  // Set 'manifest_version' manifest entry.
+  if (is_manifest_version_2) {
+    manifest_builder.Set(keys::kManifestVersion, 2);
+  } else {
+    manifest_builder.Set(keys::kManifestVersion, 3);
+  }
+
+  // Set 'permissions' and 'host_permissions' manifest entries.
+  std::vector<std::string> permissions;
+  if (!hosts.empty()) {
+    if (is_manifest_version_2) {
+      permissions = hosts;
+    } else {
+      manifest_builder.Set(keys::kHostPermissions, ToValue(hosts));
+    }
+  }
+  if (flags & kConfig_DEPRECATED_HasWebRequestBlockingPermission) {
+    // 'webRequestBlocking' requires Manifest Version 2.
+    DCHECK(is_manifest_version_2);
+    permissions.push_back("webRequestBlocking");
+  }
+  if (flags & kConfig_HasWebRequestPermission) {
+    permissions.push_back("webRequest");
+  }
+  if (!(flags & kConfig_OmitDeclarativeNetRequestPermission)) {
     permissions.push_back(kDeclarativeNetRequestPermission);
-
-  // These permissions are needed for some tests. TODO(karandeepb): Add a
-  // ConfigFlag for these.
-  permissions.push_back("webRequest");
-  permissions.push_back("webRequestBlocking");
-
-  if (flags & kConfig_HasFeedbackPermission)
+  }
+  if (flags & kConfig_HasFeedbackPermission) {
     permissions.push_back(kFeedbackAPIPermission);
-
-  if (flags & kConfig_HasActiveTab)
+  }
+  if (flags & kConfig_HasActiveTab) {
     permissions.push_back("activeTab");
-
-  if (flags & kConfig_HasDelarativeNetRequestWithHostAccessPermission)
+  }
+  if (flags & kConfig_HasDelarativeNetRequestWithHostAccessPermission) {
     permissions.push_back("declarativeNetRequestWithHostAccess");
+  }
+  if (!permissions.empty()) {
+    manifest_builder.Set(keys::kPermissions, ToValue(std::move(permissions)));
+  }
 
-  std::vector<std::string> background_scripts;
-  if (flags & kConfig_HasBackgroundScript)
-    background_scripts.push_back("background.js");
+  // Set 'action' manifest key to empty object to activate chrome.action API.
+  if (flags & kConfig_HasAction) {
+    // Manifest Version 2 does not support 'action' manifest key.
+    DCHECK(!is_manifest_version_2);
+    manifest_builder.Set(keys::kAction, base::DictValue());
+  }
 
-  DictionaryBuilder manifest_builder;
+  // Set 'background' manifest entry.
+  if (flags & kConfig_HasBackgroundScript) {
+    if (is_manifest_version_2) {
+      // Set 'background.scripts' manifest entry on Manifest Version 2.
+      manifest_builder.SetByDottedPath(
+          keys::kBackgroundScripts,
+          ToValue(std::vector<std::string>({"background.js"})));
+    } else {
+      // Set 'background.service_worker' manifest entry on modern manifest
+      // version.
+      manifest_builder.SetByDottedPath(keys::kBackgroundServiceWorkerScript,
+                                       "background.js");
+    }
+  }
 
+  // Set 'declarative_net_request.rule_resources' manifest entry.
   if (flags & kConfig_OmitDeclarativeNetRequestKey) {
     DCHECK(ruleset_info.empty());
   } else {
-    manifest_builder.Set(
-        dnr_api::ManifestKeys::kDeclarativeNetRequest,
-        DictionaryBuilder()
-            .Set(dnr_api::DNRInfo::kRuleResources, ToValue(ruleset_info))
-            .Build());
+    manifest_builder.Set(dnr_api::ManifestKeys::kDeclarativeNetRequest,
+                         base::DictValue().Set(dnr_api::DNRInfo::kRuleResources,
+                                               ToValue(ruleset_info)));
   }
 
-  return manifest_builder.Set(keys::kName, extension_name)
-      .Set(keys::kPermissions, ToValue(permissions))
-      .Set(keys::kVersion, "1.0")
-      .Set(keys::kManifestVersion, 2)
-      .Set("background", DictionaryBuilder()
-                             .Set("scripts", ToValue(background_scripts))
-                             .Build())
-      .Set(keys::kBrowserAction, DictionaryBuilder().Build())
-      .Build();
+  // Set 'sandbox.pages' manifest entry.
+  if (flags & kConfig_HasManifestSandbox) {
+    manifest_builder.SetByDottedPath(
+        keys::kSandboxedPages,
+        base::ListValue().Append(kManifestSandboxPageFilepath));
+  }
+
+  // std::move() to trigger rvalue overloads.
+  return std::move(manifest_builder)
+      .Set(keys::kName, extension_name)
+      .Set(keys::kVersion, "1.0");
 }
 
-base::Value::List ToListValue(const std::vector<std::string>& vec) {
+base::ListValue ToListValue(const std::vector<std::string>& vec) {
   return ToValue(vec);
 }
 
-base::Value::List ToListValue(const std::vector<TestRule>& rules) {
+base::ListValue ToListValue(const std::vector<TestRule>& rules) {
   return ToValue(rules);
 }
 
@@ -332,12 +397,26 @@ void WriteManifestAndRulesets(const base::FilePath& extension_dir,
         .Serialize(info.rules_value);
   }
 
-  // Persists a background script if needed.
+  // Persist a background script if needed.
   if (flags & ConfigFlag::kConfig_HasBackgroundScript) {
-    std::string content = "chrome.test.sendMessage('ready');";
-    CHECK_EQ(static_cast<int>(content.length()),
-             base::WriteFile(extension_dir.Append(kBackgroundScriptFilepath),
-                             content.c_str(), content.length()));
+    static constexpr char kScriptWithOnUpdateAvailable[] =
+        "chrome.runtime.onUpdateAvailable.addListener(() => {});"
+        "chrome.test.sendMessage('ready');";
+
+    std::string content = flags & ConfigFlag::kConfig_ListenForOnUpdateAvailable
+                              ? kScriptWithOnUpdateAvailable
+                              : "chrome.test.sendMessage('ready');";
+    CHECK(base::WriteFile(extension_dir.Append(kBackgroundScriptFilepath),
+                          content));
+  }
+
+  // Persist a manifest sandbox page if needed.
+  if (flags & ConfigFlag::kConfig_HasManifestSandbox) {
+    static constexpr char kManifestSandboxPage[] = "<html></html>";
+
+    CHECK(
+        base::WriteFile(extension_dir.AppendASCII(kManifestSandboxPageFilepath),
+                        kManifestSandboxPage));
   }
 
   // Persist manifest file.

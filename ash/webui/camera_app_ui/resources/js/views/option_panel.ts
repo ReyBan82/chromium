@@ -10,7 +10,8 @@ import * as state from '../state.js';
 import {ViewName} from '../type.js';
 import * as util from '../util.js';
 
-import {EnterOptions, OptionPanelOptions, View} from './view.js';
+import type {EnterOptions} from './view.js';
+import {OptionPanelOptions, View} from './view.js';
 
 /**
  * View controller for options panel.
@@ -25,14 +26,21 @@ export class OptionPanel extends View {
   private readonly observers = new Map<state.State, state.StateObserver>();
 
   constructor() {
-    super(
-        ViewName.OPTION_PANEL,
-        {dismissByEsc: true, dismissByBackgroundClick: true});
+    super(ViewName.OPTION_PANEL, {
+      dismissByEsc: true,
+      dismissByBackgroundClick: true,
+      dismissOnStopStreaming: true,
+    });
   }
 
   override entering(options: EnterOptions): void {
-    const {triggerButton, titleLabel, stateOptions, onStateChanged} =
-        assertInstanceof(options, OptionPanelOptions);
+    const {
+      triggerButton,
+      titleLabel,
+      stateOptions,
+      onStateChanged,
+      ariaDescribedByElement,
+    } = assertInstanceof(options, OptionPanelOptions);
     const {bottom, right} = triggerButton.getBoundingClientRect();
     this.panel.style.bottom = `${window.innerHeight - bottom}px`;
     this.panel.style.left = `${right + 6}px`;
@@ -40,8 +48,12 @@ export class OptionPanel extends View {
     this.title.setAttribute('i18n-text', titleLabel);
 
     this.container.replaceChildren();
-    for (const {label, ariaLabel, state: targetState, isDisableOption} of
-             stateOptions) {
+    for (const {
+           label,
+           ariaLabel,
+           state: targetState,
+           isDisableOption = false,
+         } of stateOptions) {
       const item = util.instantiateTemplate('#state-option-template');
       const span = dom.getFrom(item, 'span', HTMLSpanElement);
 
@@ -55,8 +67,8 @@ export class OptionPanel extends View {
       input.checked = checked;
       input.addEventListener('change', () => {
         if (input.checked) {
-          triggerButton.setAttribute('i18n-aria', ariaLabel);
-          util.setupI18nElements(triggerButton);
+          ariaDescribedByElement.setAttribute('i18n-text', ariaLabel);
+          util.setupI18nElements(ariaDescribedByElement);
           speak(ariaLabel);
 
           onStateChanged(isDisableOption ? null : targetState);

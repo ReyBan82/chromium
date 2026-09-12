@@ -5,20 +5,17 @@
 #ifndef CHROME_BROWSER_UI_SEND_TAB_TO_SELF_SEND_TAB_TO_SELF_BUBBLE_H_
 #define CHROME_BROWSER_UI_SEND_TAB_TO_SELF_SEND_TAB_TO_SELF_BUBBLE_H_
 
+#include "components/send_tab_to_self/metrics_util.h"
+
 namespace content {
 class WebContents;
 }  // namespace content
 
-namespace user_prefs {
-class PrefRegistrySyncable;
-}  // namespace user_prefs
-
 namespace send_tab_to_self {
 
 void ShowBubble(content::WebContents* web_contents,
+                ShareEntryPoint entry_point,
                 bool show_back_button = false);
-
-void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* user_prefs);
 
 }  // namespace send_tab_to_self
 

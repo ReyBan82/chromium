@@ -5,10 +5,11 @@ include_rules = [
   "+net",
   "+services/network/public",
   "+third_party/blink/public/mojom/loader/resource_load_info.mojom-shared.h",
+  "+third_party/jni_zero",
 ]
 
 specific_include_rules = {
-  ".*_unittest\.cc": [
+  ".*_unittest\\.cc": [
     "+services/network/test",
     "+mojo/core/embedder/embedder.h",
   ],

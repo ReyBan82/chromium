@@ -15,7 +15,19 @@ namespace remoting {
 class PairingRegistryDelegateLinux
     : public protocol::PairingRegistry::Delegate {
  public:
+  // The pairing registry path relative to the configuration directory.
+  static const base::FilePath::CharType kRegistryDirectory[];
+
+  // Determines the registry path and whether unprivileged files should be used
+  // based on the current user.
   PairingRegistryDelegateLinux();
+
+  // Used by the native messaging host, which is not run as the network user,
+  // and PairingRegistryDelegateLinux() won't work.
+  // `.unprivileged.json` files which do not have the shared secret will only
+  // be created or read if `use_unprivileged_file` is true.
+  PairingRegistryDelegateLinux(const base::FilePath& registry_path,
+                               bool use_unprivileged_file);
 
   PairingRegistryDelegateLinux(const PairingRegistryDelegateLinux&) = delete;
   PairingRegistryDelegateLinux& operator=(const PairingRegistryDelegateLinux&) =
@@ -24,25 +36,28 @@ class PairingRegistryDelegateLinux
   ~PairingRegistryDelegateLinux() override;
 
   // PairingRegistry::Delegate interface
-  base::Value::List LoadAll() override;
+  base::ListValue LoadAll() override;
   bool DeleteAll() override;
   protocol::PairingRegistry::Pairing Load(
       const std::string& client_id) override;
   bool Save(const protocol::PairingRegistry::Pairing& pairing) override;
   bool Delete(const std::string& client_id) override;
 
+  // Returns the default path to the directory used for loading and saving
+  // paired clients.
+  static base::FilePath GetDefaultRegistryPath();
+
+  // Creates the pairing registry directory and sets the correct owner and
+  // permissions for the multi-process host.
+  // Must be run as root.
+  static bool SetupMultiProcessPairingRegistry();
+
  private:
   FRIEND_TEST_ALL_PREFIXES(PairingRegistryDelegateLinuxTest, SaveAndLoad);
   FRIEND_TEST_ALL_PREFIXES(PairingRegistryDelegateLinuxTest, Stateless);
 
-  // Return the path to the directory to use for loading and saving paired
-  // clients.
-  base::FilePath GetRegistryPath();
-
-  // For testing purposes, set the path returned by |GetRegistryPath()|.
-  void SetRegistryPathForTesting(const base::FilePath& registry_path);
-
-  base::FilePath registry_path_for_testing_;
+  const base::FilePath registry_path_;
+  const bool use_unprivileged_file_ = false;
 };
 
 }  // namespace remoting

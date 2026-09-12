@@ -1,5 +1,5 @@
-// Copyright 2017 The Chromium Authors. All rights reserved.  Use of
-// this source code is governed by a BSD-style license that can be
+// Copyright 2017 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/editing/markers/suggestion_marker_list_impl.h"
@@ -18,13 +18,14 @@ class SuggestionMarkerListImplTest : public testing::Test {
   SuggestionMarkerListImplTest()
       : marker_list_(MakeGarbageCollected<SuggestionMarkerListImpl>()) {}
 
-  SuggestionMarker* CreateMarker(unsigned start_offset, unsigned end_offset) {
+  SuggestionMarker* CreateMarker(wtf_size_t start_offset,
+                                 wtf_size_t end_offset) {
     return MakeGarbageCollected<SuggestionMarker>(start_offset, end_offset,
                                                   SuggestionMarkerProperties());
   }
 
-  SuggestionMarker* CreateMarker(unsigned start_offset,
-                                 unsigned end_offset,
+  SuggestionMarker* CreateMarker(wtf_size_t start_offset,
+                                 wtf_size_t end_offset,
                                  const SuggestionMarkerProperties& properties) {
     return MakeGarbageCollected<SuggestionMarker>(start_offset, end_offset,
                                                   properties);

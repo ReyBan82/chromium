@@ -15,13 +15,15 @@ WebMouseEvent::WebMouseEvent(WebInputEvent::Type type,
                              int modifiers,
                              base::TimeTicks time_stamp,
                              PointerId id_param)
-    : WebInputEvent(type, modifiers, time_stamp),
+    : WebInputEvent(type,
+                    WebInputEvent::Type::kMouseTypeFirst,
+                    WebInputEvent::Type::kMouseTypeLast,
+                    modifiers,
+                    time_stamp),
       WebPointerProperties(id_param,
                            WebPointerProperties::PointerType::kMouse,
                            button_param),
       click_count(click_count_param) {
-  DCHECK_GE(type, Type::kMouseTypeFirst);
-  DCHECK_LE(type, Type::kMouseTypeLast);
   SetPositionInWidget(gesture_event.PositionInWidget());
   SetPositionInScreen(gesture_event.PositionInScreen());
   SetFrameScale(gesture_event.FrameScale());
@@ -80,16 +82,58 @@ void WebMouseEvent::SetMenuSourceType(WebInputEvent::Type type) {
     case Type::kGestureTapDown:
     case Type::kGestureTap:
     case Type::kGestureDoubleTap:
-      menu_source_type = kMenuSourceTouch;
+      menu_source_type = ui::mojom::MenuSourceType::kTouch;
       break;
     case Type::kGestureLongPress:
-      menu_source_type = kMenuSourceLongPress;
+      menu_source_type = ui::mojom::MenuSourceType::kLongPress;
       break;
     case Type::kGestureLongTap:
-      menu_source_type = kMenuSourceLongTap;
+      menu_source_type = ui::mojom::MenuSourceType::kLongTap;
       break;
     default:
-      menu_source_type = kMenuSourceNone;
+      menu_source_type = ui::mojom::MenuSourceType::kNone;
+  }
+}
+
+void WebMouseEvent::UpdateEventModifiersToMatchButton() {
+  unsigned button_modifier_bit = WebInputEvent::kNoModifiers;
+
+  switch (button) {
+    case blink::WebPointerProperties::Button::kNoButton:
+      button_modifier_bit = WebInputEvent::kNoModifiers;
+      break;
+
+    case blink::WebPointerProperties::Button::kLeft:
+      button_modifier_bit = WebInputEvent::kLeftButtonDown;
+      break;
+
+    case blink::WebPointerProperties::Button::kMiddle:
+      button_modifier_bit = WebInputEvent::kMiddleButtonDown;
+      break;
+
+    case blink::WebPointerProperties::Button::kRight:
+      button_modifier_bit = WebInputEvent::kRightButtonDown;
+      break;
+
+    case blink::WebPointerProperties::Button::kBack:
+      button_modifier_bit = WebInputEvent::kBackButtonDown;
+      break;
+
+    case blink::WebPointerProperties::Button::kForward:
+      button_modifier_bit = WebInputEvent::kForwardButtonDown;
+      break;
+
+    case blink::WebPointerProperties::Button::kEraser:
+      // TODO(mustaq): WebInputEvent modifier needs to support stylus eraser
+      // buttons.
+      button_modifier_bit = WebInputEvent::kNoModifiers;
+      break;
+  }
+
+  if (GetType() == WebInputEvent::Type::kMouseDown) {
+    SetModifiers(GetModifiers() | button_modifier_bit);
+  } else if (GetType() == WebInputEvent::Type::kMouseUp) {
+    SetModifiers(GetModifiers() & ~button_modifier_bit);
   }
 }
 

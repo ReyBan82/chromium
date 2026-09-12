@@ -4,6 +4,8 @@
 
 #include "services/network/public/cpp/default_credentials_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 network::mojom::DefaultCredentials
@@ -17,22 +19,19 @@ EnumTraits<network::mojom::DefaultCredentials,
       return network::mojom::DefaultCredentials::DISALLOW_DEFAULT_CREDENTIALS;
   }
   NOTREACHED();
-  return network::mojom::DefaultCredentials::ALLOW_DEFAULT_CREDENTIALS;
 }
 
-bool EnumTraits<network::mojom::DefaultCredentials,
-                net::HttpAuthPreferences::DefaultCredentials>::
-    FromMojom(network::mojom::DefaultCredentials input,
-              net::HttpAuthPreferences::DefaultCredentials* output) {
+net::HttpAuthPreferences::DefaultCredentials
+EnumTraits<network::mojom::DefaultCredentials,
+           net::HttpAuthPreferences::DefaultCredentials>::
+    FromMojom(network::mojom::DefaultCredentials input) {
   switch (input) {
     case network::mojom::DefaultCredentials::ALLOW_DEFAULT_CREDENTIALS:
-      *output = net::HttpAuthPreferences::ALLOW_DEFAULT_CREDENTIALS;
-      return true;
+      return net::HttpAuthPreferences::ALLOW_DEFAULT_CREDENTIALS;
     case network::mojom::DefaultCredentials::DISALLOW_DEFAULT_CREDENTIALS:
-      *output = net::HttpAuthPreferences::DISALLOW_DEFAULT_CREDENTIALS;
-      return true;
+      return net::HttpAuthPreferences::DISALLOW_DEFAULT_CREDENTIALS;
   }
-  return false;
+  NOTREACHED();
 }
 
 }  // namespace mojo

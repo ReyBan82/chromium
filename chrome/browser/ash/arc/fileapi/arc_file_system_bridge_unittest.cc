@@ -7,17 +7,15 @@
 #include <utility>
 #include <vector>
 
-#include "ash/components/arc/mojom/file_system.mojom.h"
-#include "ash/components/arc/session/arc_bridge_service.h"
-#include "ash/components/arc/test/connection_holder_util.h"
-#include "ash/components/arc/test/fake_file_system_instance.h"
 #include "base/containers/flat_map.h"
 #include "base/files/file.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
+#include "base/test/test_future.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/arc/fileapi/chrome_content_provider_url_util.h"
 #include "chrome/browser/ash/file_manager/path_util.h"
@@ -26,13 +24,30 @@
 #include "chrome/browser/ash/file_system_provider/service_factory.h"
 #include "chrome/browser/ash/fileapi/external_file_url_util.h"
 #include "chrome/browser/ash/fileapi/file_system_backend.h"
+#include "chrome/browser/ash/fusebox/fusebox_moniker.h"
+#include "chrome/browser/ash/fusebox/fusebox_server.h"
+#include "chrome/browser/ash/guest_os/guest_id.h"
+#include "chrome/browser/ash/guest_os/guest_os_session_tracker.h"
+#include "chrome/browser/ash/guest_os/guest_os_session_tracker_factory.h"
+#include "chrome/browser/ash/guest_os/guest_os_share_path.h"
+#include "chrome/browser/ash/guest_os/guest_os_share_path_factory.h"
+#include "chrome/browser/ash/guest_os/public/types.h"
+#include "chrome/browser/ash/login/users/scoped_account_id_annotator.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile_manager.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
+#include "chromeos/ash/components/dbus/seneschal/seneschal_client.h"
 #include "chromeos/ash/components/dbus/virtual_file_provider/fake_virtual_file_provider_client.h"
 #include "chromeos/ash/components/dbus/virtual_file_provider/virtual_file_provider_client.h"
+#include "chromeos/ash/experiences/arc/arc_util.h"
+#include "chromeos/ash/experiences/arc/mojom/file_system.mojom.h"
+#include "chromeos/ash/experiences/arc/session/arc_bridge_service.h"
+#include "chromeos/ash/experiences/arc/test/connection_holder_util.h"
+#include "chromeos/ash/experiences/arc/test/fake_file_system_instance.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_utils.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "storage/browser/file_system/external_mount_points.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -41,10 +56,9 @@ namespace arc {
 
 namespace {
 
-constexpr char kTestingProfileName[] = "test-user";
+constexpr char kTestingProfileName[] = "test-user@gmail.com";
 
 // Values set by FakeProvidedFileSystem.
-constexpr char kTestUrl[] = "externalfile:abc:test-filesystem:/hello.txt";
 constexpr char kTestFileType[] = "text/plain";
 constexpr int64_t kTestFileSize = 55;
 constexpr char kTestFileLastModified[] = "Fri, 25 Apr 2014 01:47:53";
@@ -61,11 +75,25 @@ class ArcFileSystemBridgeTest : public testing::Test {
   void SetUp() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
     ash::ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
+    ash::SeneschalClient::InitializeFake();
     ash::VirtualFileProviderClient::InitializeFake();
+
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            TestingBrowserProcess::GetGlobal()->local_state());
+    const AccountId account_id(AccountId::FromUserEmailGaiaId(
+        kTestingProfileName, GaiaId("1234567890")));
+    ASSERT_TRUE(user_session_test_environment_->AddRegularUser(account_id));
+
     profile_manager_ = std::make_unique<TestingProfileManager>(
         TestingBrowserProcess::GetGlobal());
     ASSERT_TRUE(profile_manager_->SetUp());
+    user_session_test_environment_->LogIn(account_id);
+
+    ash::ScopedAccountIdAnnotator annotator(profile_manager_->profile_manager(),
+                                            account_id);
     profile_ = profile_manager_->CreateTestingProfile(kTestingProfileName);
+
     auto fake_provider =
         ash::file_system_provider::FakeExtensionProvider::Create(kExtensionId);
     const auto kProviderId = fake_provider->GetId();
@@ -74,6 +102,12 @@ class ArcFileSystemBridgeTest : public testing::Test {
     service->MountFileSystem(kProviderId,
                              ash::file_system_provider::MountOptions(
                                  kFileSystemId, "Test FileSystem"));
+
+    const ash::file_system_provider::ProvidedFileSystemInfo& file_system_info =
+        service->GetProvidedFileSystem(kProviderId, kFileSystemId)
+            ->GetFileSystemInfo();
+    mount_point_name_ = file_system_info.mount_path().BaseName().AsUTF8Unsafe();
+    test_url_ = GURL("externalfile:" + mount_point_name_ + "/hello.txt");
 
     arc_file_system_bridge_ =
         std::make_unique<ArcFileSystemBridge>(profile_, &arc_bridge_service_);
@@ -84,16 +118,42 @@ class ArcFileSystemBridgeTest : public testing::Test {
   void TearDown() override {
     arc_bridge_service_.file_system()->CloseInstance(&fake_file_system_);
     arc_file_system_bridge_.reset();
+    profile_ = nullptr;
     profile_manager_.reset();
+    user_session_test_environment_.reset();
     ash::VirtualFileProviderClient::Shutdown();
+    ash::SeneschalClient::Shutdown();
     ash::ConciergeClient::Shutdown();
   }
 
  protected:
+  bool CreateMoniker(fusebox::Moniker* moniker) {
+    base::test::TestFuture<const std::optional<fusebox::Moniker>&> future;
+    arc_file_system_bridge_->CreateMoniker(
+        EncodeToChromeContentProviderUrl(test_url_),
+        /*read_only=*/true, future.GetCallback());
+    if (!future.Get().has_value()) {
+      return false;
+    }
+    *moniker = future.Get().value();
+    return true;
+  }
+
+  bool DestroyMoniker(const fusebox::Moniker moniker) {
+    base::test::TestFuture<bool> future;
+    arc_file_system_bridge_->DestroyMoniker(moniker, future.GetCallback());
+    return future.Get();
+  }
+
   base::ScopedTempDir temp_dir_;
   content::BrowserTaskEnvironment task_environment_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
   std::unique_ptr<TestingProfileManager> profile_manager_;
-  Profile* profile_ = nullptr;
+  raw_ptr<Profile, DanglingUntriaged> profile_ = nullptr;
+
+  std::string mount_point_name_;
+  GURL test_url_;
 
   FakeFileSystemInstance fake_file_system_;
   ArcBridgeService arc_bridge_service_;
@@ -103,13 +163,12 @@ class ArcFileSystemBridgeTest : public testing::Test {
 TEST_F(ArcFileSystemBridgeTest, GetFileName) {
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetFileName(
-      EncodeToChromeContentProviderUrl(GURL(kTestUrl)).spec(),
-      base::BindLambdaForTesting(
-          [&](const absl::optional<std::string>& result) {
-            run_loop.Quit();
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ("hello.txt", result.value());
-          }));
+      EncodeToChromeContentProviderUrl(test_url_).spec(),
+      base::BindLambdaForTesting([&](const std::optional<std::string>& result) {
+        run_loop.Quit();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ("hello.txt", result.value());
+      }));
   run_loop.Run();
 }
 
@@ -118,56 +177,53 @@ TEST_F(ArcFileSystemBridgeTest, GetFileNameNonASCII) {
       0x307b,  // HIRAGANA_LETTER_HO
       0x3052,  // HIRAGANA_LETTER_GE
   }));
-  const GURL url("externalfile:abc:test-filesystem:/" + filename);
+  const GURL url("externalfile:" + mount_point_name_ + "/" + filename);
 
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetFileName(
       EncodeToChromeContentProviderUrl(url).spec(),
-      base::BindLambdaForTesting(
-          [&](const absl::optional<std::string>& result) {
-            run_loop.Quit();
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(filename, result.value());
-          }));
+      base::BindLambdaForTesting([&](const std::optional<std::string>& result) {
+        run_loop.Quit();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(filename, result.value());
+      }));
   run_loop.Run();
 }
 
 // base::UnescapeURLComponent() leaves UTF-8 lock icons escaped, but they're
 // valid file names, so shouldn't be left escaped here.
 TEST_F(ArcFileSystemBridgeTest, GetFileNameLockIcon) {
-  const GURL url("externalfile:abc:test-filesystem:/%F0%9F%94%92");
+  const GURL url("externalfile:" + mount_point_name_ + "/%F0%9F%94%92");
 
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetFileName(
       EncodeToChromeContentProviderUrl(url).spec(),
-      base::BindLambdaForTesting(
-          [&](const absl::optional<std::string>& result) {
-            run_loop.Quit();
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ("\xF0\x9F\x94\x92", result.value());
-          }));
+      base::BindLambdaForTesting([&](const std::optional<std::string>& result) {
+        run_loop.Quit();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ("\xF0\x9F\x94\x92", result.value());
+      }));
   run_loop.Run();
 }
 
 // An escaped path separator should cause GetFileName() to fail.
 TEST_F(ArcFileSystemBridgeTest, GetFileNameEscapedPathSeparator) {
-  const GURL url("externalfile:abc:test-filesystem:/foo%2F");
+  const GURL url("externalfile:" + mount_point_name_ + "/foo%2F");
 
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetFileName(
       EncodeToChromeContentProviderUrl(url).spec(),
-      base::BindLambdaForTesting(
-          [&](const absl::optional<std::string>& result) {
-            run_loop.Quit();
-            ASSERT_FALSE(result.has_value());
-          }));
+      base::BindLambdaForTesting([&](const std::optional<std::string>& result) {
+        run_loop.Quit();
+        ASSERT_FALSE(result.has_value());
+      }));
   run_loop.Run();
 }
 
 TEST_F(ArcFileSystemBridgeTest, GetFileSize) {
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetFileSize(
-      EncodeToChromeContentProviderUrl(GURL(kTestUrl)).spec(),
+      EncodeToChromeContentProviderUrl(test_url_).spec(),
       base::BindLambdaForTesting([&](int64_t result) {
         EXPECT_EQ(kTestFileSize, result);
         run_loop.Quit();
@@ -181,8 +237,8 @@ TEST_F(ArcFileSystemBridgeTest, GetLastModified) {
 
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetLastModified(
-      EncodeToChromeContentProviderUrl(GURL(kTestUrl)),
-      base::BindLambdaForTesting([&](const absl::optional<base::Time> result) {
+      EncodeToChromeContentProviderUrl(test_url_),
+      base::BindLambdaForTesting([&](const std::optional<base::Time> result) {
         ASSERT_TRUE(result.has_value());
         EXPECT_EQ(expected, result.value());
         run_loop.Quit();
@@ -193,13 +249,12 @@ TEST_F(ArcFileSystemBridgeTest, GetLastModified) {
 TEST_F(ArcFileSystemBridgeTest, GetFileType) {
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetFileType(
-      EncodeToChromeContentProviderUrl(GURL(kTestUrl)).spec(),
-      base::BindLambdaForTesting(
-          [&](const absl::optional<std::string>& result) {
-            ASSERT_TRUE(result.has_value());
-            EXPECT_EQ(kTestFileType, result.value());
-            run_loop.Quit();
-          }));
+      EncodeToChromeContentProviderUrl(test_url_).spec(),
+      base::BindLambdaForTesting([&](const std::optional<std::string>& result) {
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(kTestFileType, result.value());
+        run_loop.Quit();
+      }));
   run_loop.Run();
 }
 
@@ -214,9 +269,9 @@ TEST_F(ArcFileSystemBridgeTest, GetVirtualFileId) {
   // GetVirtualFileId().
   base::RunLoop run_loop;
   arc_file_system_bridge_->GetVirtualFileId(
-      EncodeToChromeContentProviderUrl(GURL(kTestUrl)).spec(),
-      base::BindLambdaForTesting([&](const absl::optional<std::string>& id) {
-        ASSERT_NE(absl::nullopt, id);
+      EncodeToChromeContentProviderUrl(test_url_).spec(),
+      base::BindLambdaForTesting([&](const std::optional<std::string>& id) {
+        ASSERT_NE(std::nullopt, id);
         EXPECT_EQ(kId, id.value());
         run_loop.Quit();
       }));
@@ -246,7 +301,7 @@ TEST_F(ArcFileSystemBridgeTest, OpenFileToRead) {
   // OpenFileToRead().
   base::RunLoop run_loop;
   arc_file_system_bridge_->OpenFileToRead(
-      EncodeToChromeContentProviderUrl(GURL(kTestUrl)).spec(),
+      EncodeToChromeContentProviderUrl(test_url_).spec(),
       base::BindLambdaForTesting([&](mojo::ScopedHandle result) {
         EXPECT_TRUE(result.is_valid());
         run_loop.Quit();
@@ -263,10 +318,81 @@ TEST_F(ArcFileSystemBridgeTest, OpenFileToRead) {
 
   // Requested number of bytes are written to the pipe.
   std::vector<char> buf(kTestFileSize);
-  ASSERT_TRUE(base::ReadFromFD(pipe_read_end.get(), buf.data(), buf.size()));
+  ASSERT_TRUE(base::ReadFromFD(pipe_read_end.get(), buf));
 
   // ID is released.
   EXPECT_TRUE(arc_file_system_bridge_->HandleIdReleased(kId));
+}
+
+TEST_F(ArcFileSystemBridgeTest, CreateAndDestroyMoniker) {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  command_line->InitFromArgv({"", "--enable-arcvm"});
+  EXPECT_TRUE(IsArcVmEnabled());
+
+  const guest_os::GuestId arcvm_id = guest_os::GuestId(
+      guest_os::VmType::ARCVM, kArcVmName, /*container_name=*/"");
+  guest_os::GuestOsSessionTrackerFactory::GetForProfile(profile_)
+      ->AddGuestForTesting(
+          arcvm_id,
+          guest_os::GuestInfo{arcvm_id, /*cid=*/32, /*username=*/"",
+                              /*homedir=*/base::FilePath(), /*ipv4_address=*/"",
+                              /*sftp_vsock_port=*/0});
+
+  fusebox::Server fusebox_server(/*delegate=*/nullptr);
+  fusebox::Moniker moniker;
+  EXPECT_TRUE(CreateMoniker(&moniker));
+  EXPECT_TRUE(
+      guest_os::GuestOsSharePathFactory::GetForProfile(profile_)->IsPathShared(
+          kArcVmName,
+          base::FilePath(fusebox::MonikerMap::GetFilename(moniker))));
+  EXPECT_TRUE(DestroyMoniker(moniker));
+}
+
+TEST_F(ArcFileSystemBridgeTest, MaxNumberOfSharedMonikers) {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  command_line->InitFromArgv({"", "--enable-arcvm"});
+  EXPECT_TRUE(IsArcVmEnabled());
+
+  const guest_os::GuestId arcvm_id = guest_os::GuestId(
+      guest_os::VmType::ARCVM, kArcVmName, /*container_name=*/"");
+  guest_os::GuestOsSessionTrackerFactory::GetForProfile(profile_)
+      ->AddGuestForTesting(
+          arcvm_id,
+          guest_os::GuestInfo{arcvm_id, /*cid=*/32, /*username=*/"",
+                              /*homedir=*/base::FilePath(), /*ipv4_address=*/"",
+                              /*sftp_vsock_port=*/0});
+
+  fusebox::Server fusebox_server(/*delegate=*/nullptr);
+  arc_file_system_bridge_->SetMaxNumberOfSharedMonikersForTesting(3);
+  fusebox::Moniker monikers[14] = {};          // []
+  EXPECT_TRUE(CreateMoniker(&monikers[0]));    // [0]
+  EXPECT_TRUE(CreateMoniker(&monikers[1]));    // [0, 1]
+  EXPECT_TRUE(CreateMoniker(&monikers[2]));    // [0, 1, 2]
+  EXPECT_TRUE(CreateMoniker(&monikers[3]));    // [1, 2, 3]
+  EXPECT_FALSE(DestroyMoniker(monikers[0]));   // [1, 2, 3]
+  EXPECT_TRUE(DestroyMoniker(monikers[1]));    // [2, 3]
+  EXPECT_TRUE(CreateMoniker(&monikers[4]));    // [2, 3, 4]
+  EXPECT_TRUE(CreateMoniker(&monikers[5]));    // [3, 4, 5]
+  EXPECT_FALSE(DestroyMoniker(monikers[2]));   // [3, 4, 5]
+  EXPECT_TRUE(DestroyMoniker(monikers[4]));    // [3, 5]
+  EXPECT_TRUE(CreateMoniker(&monikers[6]));    // [3, 5, 6]
+  EXPECT_TRUE(CreateMoniker(&monikers[7]));    // [5, 6, 7]
+  EXPECT_FALSE(DestroyMoniker(monikers[3]));   // [5, 6, 7]
+  EXPECT_TRUE(DestroyMoniker(monikers[7]));    // [5, 6]
+  EXPECT_TRUE(CreateMoniker(&monikers[8]));    // [5, 6, 8]
+  EXPECT_TRUE(CreateMoniker(&monikers[9]));    // [6, 8, 9]
+  EXPECT_FALSE(DestroyMoniker(monikers[5]));   // [6, 8, 9]
+  EXPECT_TRUE(DestroyMoniker(monikers[6]));    // [8, 9]
+  EXPECT_TRUE(DestroyMoniker(monikers[8]));    // [9]
+  EXPECT_TRUE(DestroyMoniker(monikers[9]));    // []
+  EXPECT_TRUE(CreateMoniker(&monikers[10]));   // [10]
+  EXPECT_TRUE(CreateMoniker(&monikers[11]));   // [10, 11]
+  EXPECT_TRUE(CreateMoniker(&monikers[12]));   // [10, 11, 12]
+  EXPECT_TRUE(CreateMoniker(&monikers[13]));   // [11, 12, 13]
+  EXPECT_FALSE(DestroyMoniker(monikers[10]));  // [11, 12, 13]
+  EXPECT_TRUE(DestroyMoniker(monikers[13]));   // [11, 12]
+  EXPECT_TRUE(DestroyMoniker(monikers[12]));   // [11]
+  EXPECT_TRUE(DestroyMoniker(monikers[11]));   // []
 }
 
 TEST_F(ArcFileSystemBridgeTest, GetLinuxVFSPathFromExternalFileURL) {
@@ -275,8 +401,8 @@ TEST_F(ArcFileSystemBridgeTest, GetLinuxVFSPathFromExternalFileURL) {
 
   // Check: FSPs aren't visible on the VFS so should yield no path.
   base::FilePath fsp_path =
-      arc_file_system_bridge_->GetLinuxVFSPathFromExternalFileURL(
-          profile_, GURL(kTestUrl));
+      arc_file_system_bridge_->GetLinuxVFSPathFromExternalFileURL(profile_,
+                                                                  test_url_);
   EXPECT_EQ(fsp_path, base::FilePath());
 
   // SmbFs is visible on the VFS, so should yield a path.
@@ -316,6 +442,15 @@ TEST_F(ArcFileSystemBridgeTest, GetLinuxVFSPathForPathOnFileSystemType) {
       arc_file_system_bridge_->GetLinuxVFSPathForPathOnFileSystemType(
           profile_, filesystem_path, storage::kFileSystemTypeSmbFs);
   EXPECT_EQ(smbfs_vfs_path, filesystem_path);
+
+  // Check: Fusebox paths are returned as passed in.
+  const base::FilePath fusebox_path =
+      base::FilePath(file_manager::util::kFuseBoxMediaPath)
+          .Append("path/to/file");
+  base::FilePath fusebox_vfs_path =
+      arc_file_system_bridge_->GetLinuxVFSPathForPathOnFileSystemType(
+          profile_, fusebox_path, storage::kFileSystemTypeFuseBox);
+  EXPECT_EQ(fusebox_vfs_path, fusebox_path);
 
   // Check: Crostini paths are returned as passed in.
   const base::FilePath crostini_path =
@@ -384,6 +519,97 @@ TEST_F(ArcFileSystemBridgeTest, PropagatesOnMediaStoreUriAddedEvents) {
 
   // Simulate an `OnMediaStoreUriAdded()` event from ARC.
   arc_file_system_bridge_->OnMediaStoreUriAdded(uri, mojo::Clone(metadata));
+}
+
+TEST_F(ArcFileSystemBridgeTest,
+       DropsOnMediaStoreUriAddedEventsForInvalidNames) {
+  class MockObserver : public ArcFileSystemBridge::Observer {
+   public:
+    MOCK_METHOD(void,
+                OnMediaStoreUriAdded,
+                (const GURL& uri, const mojom::MediaStoreMetadata& metadata),
+                (override));
+  };
+
+  // Register a mock observer.
+  testing::NiceMock<MockObserver> observer;
+  base::ScopedObservation<ArcFileSystemBridge, ArcFileSystemBridge::Observer>
+      observation{&observer};
+  observation.Observe(arc_file_system_bridge_.get());
+
+  // Expect observer never to be notified for any of the events below.
+  EXPECT_CALL(observer, OnMediaStoreUriAdded).Times(0);
+
+  // Display names which are not a single path component should be rejected.
+  for (const std::string display_name :
+       {"../foo.pdf", "..", "bar/foo.pdf", "/foo.pdf"}) {
+    auto metadata = mojom::MediaStoreMetadata::NewDownload(
+        mojom::MediaStoreDownloadMetadata::New(
+            display_name,
+            /*owner_package_name=*/"com.android.documentsui",
+            /*relative_path=*/base::FilePath("Download/")));
+
+    // Simulate an `OnMediaStoreUriAdded()` event from ARC.
+    arc_file_system_bridge_->OnMediaStoreUriAdded(GURL("uri"),
+                                                  std::move(metadata));
+  }
+}
+
+TEST_F(ArcFileSystemBridgeTest, OpenFileToReadOnArcVmRequiresSharedPath) {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  command_line->InitFromArgv({"", "--enable-arcvm"});
+  EXPECT_TRUE(IsArcVmEnabled());
+
+  const guest_os::GuestId arcvm_id = guest_os::GuestId(
+      guest_os::VmType::ARCVM, kArcVmName, /*container_name=*/"");
+  guest_os::GuestOsSessionTrackerFactory::GetForProfile(profile_)
+      ->AddGuestForTesting(
+          arcvm_id,
+          guest_os::GuestInfo{arcvm_id, /*cid=*/32, /*username=*/"",
+                              /*homedir=*/base::FilePath(), /*ipv4_address=*/"",
+                              /*sftp_vsock_port=*/0});
+
+  // Create a real file in temp directory that we will try to open.
+  base::FilePath temp_file_path;
+  ASSERT_TRUE(
+      base::CreateTemporaryFileInDir(temp_dir_.GetPath(), &temp_file_path));
+  ASSERT_TRUE(base::WriteFile(temp_file_path, "hello"));
+
+  // Register the temp directory as an SmbFs mount point.
+  storage::ExternalMountPoints* system_mount_points =
+      storage::ExternalMountPoints::GetSystemInstance();
+  constexpr char kSmbFsTestMountName[] = "test-smb";
+  EXPECT_TRUE(system_mount_points->RegisterFileSystem(
+      kSmbFsTestMountName, storage::FileSystemType::kFileSystemTypeSmbFs, {},
+      temp_dir_.GetPath()));
+
+  // Create the externalfile URL.
+  GURL smbfs_url =
+      ash::CreateExternalFileURLFromPath(profile_, temp_file_path, true);
+  GURL chrome_content_provider_url =
+      EncodeToChromeContentProviderUrl(smbfs_url);
+
+  // 1. Without sharing the path, OpenFileToRead should fail.
+  {
+    base::test::TestFuture<mojo::ScopedHandle> future;
+    arc_file_system_bridge_->OpenFileToRead(chrome_content_provider_url.spec(),
+                                            future.GetCallback());
+    EXPECT_FALSE(future.Get().is_valid());
+  }
+
+  // 2. Register the path as shared.
+  guest_os::GuestOsSharePathFactory::GetForProfile(profile_)
+      ->RegisterSharedPath(kArcVmName, temp_file_path);
+
+  // 3. With sharing the path, OpenFileToRead should succeed.
+  {
+    base::test::TestFuture<mojo::ScopedHandle> future;
+    arc_file_system_bridge_->OpenFileToRead(chrome_content_provider_url.spec(),
+                                            future.GetCallback());
+    EXPECT_TRUE(future.Get().is_valid());
+  }
+
+  system_mount_points->RevokeFileSystem(kSmbFsTestMountName);
 }
 
 }  // namespace arc

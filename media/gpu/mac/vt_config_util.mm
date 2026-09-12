@@ -6,9 +6,9 @@
 
 #import <Foundation/Foundation.h>
 
-#include "base/mac/foundation_util.h"
+#include "base/apple/bridging.h"
+#include "base/logging.h"
 #include "media/base/mac/color_space_util_mac.h"
-#include "ui/gfx/hdr_metadata_mac.h"
 
 namespace {
 
@@ -25,14 +25,15 @@ NSString* CMVideoCodecTypeToString(CMVideoCodecType code) {
 void SetDictionaryValue(NSMutableDictionary<NSString*, id>* dictionary,
                         CFStringRef key,
                         id value) {
-  if (value)
-    dictionary[base::mac::CFToNSCast(key)] = value;
+  if (value) {
+    dictionary[base::apple::CFToNSPtrCast(key)] = value;
+  }
 }
 
 void SetDictionaryValue(NSMutableDictionary<NSString*, id>* dictionary,
                         CFStringRef key,
                         CFStringRef value) {
-  SetDictionaryValue(dictionary, key, base::mac::CFToNSCast(value));
+  SetDictionaryValue(dictionary, key, base::apple::CFToNSPtrCast(value));
 }
 
 CFStringRef GetPrimaries(media::VideoColorSpace::PrimaryID primary_id) {
@@ -50,6 +51,10 @@ CFStringRef GetPrimaries(media::VideoColorSpace::PrimaryID primary_id) {
       return kCMFormatDescriptionColorPrimaries_SMPTE_C;
 
     case media::VideoColorSpace::PrimaryID::BT470BG:
+    case media::VideoColorSpace::PrimaryID::EBU_3213_E:
+      // Based on ITU H.273 8.1, there is a slight discrepancy between BT470 BG
+      // and EBU 3213 E, but a careful reading of E.B.U Tech 3213-E (1975) shows
+      // the primaries are identical.
       return kCMFormatDescriptionColorPrimaries_EBU_3213;
 
     case media::VideoColorSpace::PrimaryID::SMPTEST431_2:
@@ -68,11 +73,7 @@ CFStringRef GetTransferFunction(
     media::VideoColorSpace::TransferID transfer_id) {
   switch (transfer_id) {
     case media::VideoColorSpace::TransferID::LINEAR:
-      if (@available(macos 10.14, *))
-        return kCMFormatDescriptionTransferFunction_Linear;
-      DLOG(WARNING) << "kCMFormatDescriptionTransferFunction_Linear "
-                       "unsupported prior to 10.14";
-      return nil;
+      return kCMFormatDescriptionTransferFunction_Linear;
 
     case media::VideoColorSpace::TransferID::GAMMA22:
     case media::VideoColorSpace::TransferID::GAMMA28:
@@ -136,27 +137,9 @@ CFStringRef GetMatrix(media::VideoColorSpace::MatrixID matrix_id) {
   }
 }
 
-void SetContentLightLevelInfo(
-    const absl::optional<gfx::HDRMetadata>& hdr_metadata,
-    NSMutableDictionary<NSString*, id>* extensions) {
-  SetDictionaryValue(
-      extensions, kCMFormatDescriptionExtension_ContentLightLevelInfo,
-      base::mac::CFToNSCast(gfx::GenerateContentLightLevelInfo(hdr_metadata)));
-}
-
-void SetColorVolumeMetadata(
-    const absl::optional<gfx::HDRMetadata>& hdr_metadata,
-    NSMutableDictionary<NSString*, id>* extensions) {
-  SetDictionaryValue(
-      extensions, kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
-      base::mac::CFToNSCast(
-          gfx::GenerateMasteringDisplayColorVolume(hdr_metadata)));
-}
-
-void SetVp9CodecConfigurationBox(
-    media::VideoCodecProfile codec_profile,
-    const media::VideoColorSpace& color_space,
-    NSMutableDictionary<NSString*, id>* extensions) {
+void SetVp9CodecConfigurationBox(NSMutableDictionary<NSString*, id>* extensions,
+                                 media::VideoCodecProfile codec_profile,
+                                 const media::VideoColorSpace& color_space) {
   // Synthesize a 'vpcC' box. See
   // https://www.webmproject.org/vp9/mp4/#vp-codec-configuration-box.
   uint8_t version = 1;
@@ -169,9 +152,9 @@ void SetVp9CodecConfigurationBox(
   uint8_t matrix = 1;              // BT.709.
 
   if (color_space.IsSpecified()) {
-    primaries = static_cast<uint8_t>(color_space.primaries);
-    transfer = static_cast<uint8_t>(color_space.transfer);
-    matrix = static_cast<uint8_t>(color_space.matrix);
+    primaries = static_cast<uint8_t>(color_space.primaries());
+    transfer = static_cast<uint8_t>(color_space.transfer());
+    matrix = static_cast<uint8_t>(color_space.matrix());
   }
 
   if (codec_profile == media::VP9PROFILE_PROFILE2) {
@@ -185,6 +168,9 @@ void SetVp9CodecConfigurationBox(
   vpcc[5] = level;
   vpcc[6] |= bit_depth << 4;
   vpcc[6] |= chroma_subsampling << 1;
+  if (color_space.range() == gfx::ColorSpace::RangeID::FULL) {
+    vpcc[6] |= 1;
+  }
   vpcc[7] = primaries;
   vpcc[8] = transfer;
   vpcc[9] = matrix;
@@ -196,16 +182,29 @@ void SetVp9CodecConfigurationBox(
   SetDictionaryValue(extensions, CFSTR("BitsPerComponent"), @(bit_depth));
 }
 
+void SetAv1CodecConfigurationBox(NSMutableDictionary<NSString*, id>* extensions,
+                                 int bit_depth,
+                                 base::span<const uint8_t> av1c) {
+  SetDictionaryValue(
+      extensions, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms,
+      @{
+        @"av1C" : [NSData dataWithBytes:av1c.data() length:av1c.size()],
+      });
+  SetDictionaryValue(extensions, CFSTR("BitsPerComponent"), @(bit_depth));
+}
+
 }  // namespace
 
 namespace media {
 
-CFMutableDictionaryRef CreateFormatExtensions(
+base::apple::ScopedCFTypeRef<CFDictionaryRef> CreateFormatExtensions(
     CMVideoCodecType codec_type,
     VideoCodecProfile profile,
+    int bit_depth,
     const VideoColorSpace& color_space,
-    absl::optional<gfx::HDRMetadata> hdr_metadata) {
-  auto* extensions = [[NSMutableDictionary alloc] init];
+    std::optional<base::span<const uint8_t>> csd_box) {
+  NSMutableDictionary* extensions = [[NSMutableDictionary alloc] init];
+
   SetDictionaryValue(extensions, kCMFormatDescriptionExtension_FormatName,
                      CMVideoCodecTypeToString(codec_type));
 
@@ -215,37 +214,38 @@ CFMutableDictionaryRef CreateFormatExtensions(
 
   // Set primaries.
   SetDictionaryValue(extensions, kCMFormatDescriptionExtension_ColorPrimaries,
-                     GetPrimaries(color_space.primaries));
+                     GetPrimaries(color_space.primaries()));
 
   // Set transfer function.
   SetDictionaryValue(extensions, kCMFormatDescriptionExtension_TransferFunction,
-                     GetTransferFunction(color_space.transfer));
-  if (color_space.transfer == VideoColorSpace::TransferID::GAMMA22) {
+                     GetTransferFunction(color_space.transfer()));
+  if (color_space.transfer() == VideoColorSpace::TransferID::GAMMA22) {
     SetDictionaryValue(extensions, kCMFormatDescriptionExtension_GammaLevel,
                        @2.2);
-  } else if (color_space.transfer == VideoColorSpace::TransferID::GAMMA28) {
+  } else if (color_space.transfer() == VideoColorSpace::TransferID::GAMMA28) {
     SetDictionaryValue(extensions, kCMFormatDescriptionExtension_GammaLevel,
                        @2.8);
   }
 
   // Set matrix.
   SetDictionaryValue(extensions, kCMFormatDescriptionExtension_YCbCrMatrix,
-                     GetMatrix(color_space.matrix));
+                     GetMatrix(color_space.matrix()));
 
   // Set full range flag.
   SetDictionaryValue(extensions, kCMFormatDescriptionExtension_FullRangeVideo,
-                     @(color_space.range == gfx::ColorSpace::RangeID::FULL));
+                     @(color_space.range() == gfx::ColorSpace::RangeID::FULL));
 
-  // Set metadata for PQ signals.
-  if (color_space.transfer == VideoColorSpace::TransferID::SMPTEST2084) {
-    SetContentLightLevelInfo(hdr_metadata, extensions);
-    SetColorVolumeMetadata(hdr_metadata, extensions);
+  if (profile >= VP9PROFILE_MIN && profile <= VP9PROFILE_MAX) {
+    SetVp9CodecConfigurationBox(extensions, profile, color_space);
   }
 
-  if (profile >= VP9PROFILE_MIN && profile <= VP9PROFILE_MAX)
-    SetVp9CodecConfigurationBox(profile, color_space, extensions);
+  if (profile >= AV1PROFILE_MIN && profile <= AV1PROFILE_MAX) {
+    DCHECK(csd_box);
+    SetAv1CodecConfigurationBox(extensions, bit_depth, *csd_box);
+  }
 
-  return base::mac::NSToCFCast(extensions);
+  return base::apple::ScopedCFTypeRef<CFDictionaryRef>(
+      base::apple::NSToCFOwnershipCast(extensions));
 }
 
 }  // namespace media

@@ -6,6 +6,7 @@
 #define GPU_COMMAND_BUFFER_SERVICE_SHARED_IMAGE_VIDEO_IMAGE_READER_IMAGE_BACKING_H_
 
 #include <memory>
+#include <string>
 
 #include "base/memory/scoped_refptr.h"
 #include "base/task/single_thread_task_runner.h"
@@ -17,8 +18,6 @@
 #include "gpu/gpu_gles2_export.h"
 
 namespace gpu {
-class GLTextureImageRepresentation;
-class SkiaImageRepresentation;
 struct Mailbox;
 
 // Implementation of SharedImageBacking that renders MediaCodec buffers to a
@@ -29,10 +28,7 @@ class GPU_GLES2_EXPORT VideoImageReaderImageBacking
  public:
   VideoImageReaderImageBacking(
       const Mailbox& mailbox,
-      const gfx::Size& size,
-      const gfx::ColorSpace color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
+      const SharedImageInfo& si_info,
       scoped_refptr<StreamTextureSharedImageInterface> stream_texture_sii,
       scoped_refptr<SharedContextState> shared_context_state,
       scoped_refptr<RefCountedLock> drdc_lock);
@@ -44,9 +40,6 @@ class GPU_GLES2_EXPORT VideoImageReaderImageBacking
   VideoImageReaderImageBacking& operator=(const VideoImageReaderImageBacking&) =
       delete;
 
-  // SharedImageBacking implementation.
-  size_t GetEstimatedSizeForMemoryDump() const override;
-
  protected:
   std::unique_ptr<GLTextureImageRepresentation> ProduceGLTexture(
       SharedImageManager* manager,
@@ -56,10 +49,17 @@ class GPU_GLES2_EXPORT VideoImageReaderImageBacking
   ProduceGLTexturePassthrough(SharedImageManager* manager,
                               MemoryTypeTracker* tracker) override;
 
-  std::unique_ptr<SkiaImageRepresentation> ProduceSkia(
+  std::unique_ptr<SkiaGaneshImageRepresentation> ProduceSkiaGanesh(
       SharedImageManager* manager,
       MemoryTypeTracker* tracker,
       scoped_refptr<SharedContextState> context_state) override;
+
+#if BUILDFLAG(SKIA_USE_DAWN)
+  std::unique_ptr<SkiaGraphiteImageRepresentation> ProduceSkiaGraphite(
+      SharedImageManager* manager,
+      MemoryTypeTracker* tracker,
+      scoped_refptr<SharedContextState> context_state) override;
+#endif
 
   std::unique_ptr<gpu::OverlayImageRepresentation> ProduceOverlay(
       gpu::SharedImageManager* manager,
@@ -69,7 +69,16 @@ class GPU_GLES2_EXPORT VideoImageReaderImageBacking
       gpu::SharedImageManager* manager,
       gpu::MemoryTypeTracker* tracker) override;
 
+  std::unique_ptr<VideoImageRepresentation> ProduceVideo(
+      SharedImageManager* manager,
+      MemoryTypeTracker* tracker,
+      VideoDevice device) override;
+
  private:
+  template <typename T>
+  std::unique_ptr<T> ProduceGLTextureInternal(SharedImageManager* manager,
+                                              MemoryTypeTracker* tracker);
+
   // Helper class for observing SharedContext loss on gpu main thread and
   // cleaning up resources accordingly.
   class ContextLostObserverHelper
@@ -92,11 +101,14 @@ class GPU_GLES2_EXPORT VideoImageReaderImageBacking
     scoped_refptr<base::SingleThreadTaskRunner> gpu_main_task_runner_;
   };
 
+  class GLVideoImageRepresentationShared;
   class GLTextureVideoImageRepresentation;
   class GLTexturePassthroughVideoImageRepresentation;
+  class SkiaGraphiteDawnImageRepresentation;
   class SkiaVkVideoImageRepresentation;
   class OverlayVideoImageRepresentation;
   class LegacyOverlayVideoImageRepresentation;
+  class VideoRepresentation;
 
   std::unique_ptr<ContextLostObserverHelper> context_lost_helper_;
   scoped_refptr<StreamTextureSharedImageInterface> stream_texture_sii_;

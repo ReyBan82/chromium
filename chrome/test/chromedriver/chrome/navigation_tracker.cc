@@ -6,11 +6,11 @@
 
 #include <unordered_map>
 
-#include "base/guid.h"
+#include "base/logging.h"
+#include "base/sequence_checker_impl.h"
 #include "base/strings/string_util.h"
-#include "chrome/test/chromedriver/chrome/browser_info.h"
+#include "base/uuid.h"
 #include "chrome/test/chromedriver/chrome/devtools_client.h"
-#include "chrome/test/chromedriver/chrome/javascript_dialog_manager.h"
 #include "chrome/test/chromedriver/chrome/status.h"
 #include "chrome/test/chromedriver/net/timeout.h"
 
@@ -23,7 +23,10 @@ Status MakeNavigationCheckFailedStatus(Status command_status) {
   // Report specific errors to callers for proper handling
   if (command_status.code() == kUnexpectedAlertOpen ||
       command_status.code() == kTimeout ||
-      command_status.code() == kNoSuchExecutionContext) {
+      command_status.code() == kAbortedByNavigation ||
+      command_status.code() == kNoSuchExecutionContext ||
+      command_status.code() == kDisconnected ||
+      command_status.code() == kTabCrashed) {
     return command_status;
   }
 
@@ -57,10 +60,12 @@ bool IsNetworkError(const std::string& error_text) {
 class ObjectGroup {
  public:
   explicit ObjectGroup(DevToolsClient* client)
-      : client_(client), object_group_name_(base::GenerateGUID()) {}
+      : client_(client),
+        object_group_name_(base::Uuid::GenerateRandomV4().AsLowercaseString()) {
+  }
 
   ~ObjectGroup() {
-    base::Value::Dict params;
+    base::DictValue params;
     params.Set("objectGroup", object_group_name_);
     client_->SendCommandAndIgnoreResponse("Runtime.releaseObjectGroup", params);
   }
@@ -77,13 +82,10 @@ class ObjectGroup {
 NavigationTracker::NavigationTracker(
     DevToolsClient* client,
     WebView* web_view,
-    const BrowserInfo* browser_info,
-    const JavaScriptDialogManager* dialog_manager,
     const bool is_eager)
     : client_(client),
       web_view_(web_view),
       top_frame_id_(client->GetId()),
-      dialog_manager_(dialog_manager),
       is_eager_(is_eager),
       timed_out_(false),
       loading_state_(nullptr) {
@@ -95,13 +97,10 @@ NavigationTracker::NavigationTracker(
     DevToolsClient* client,
     LoadingState known_state,
     WebView* web_view,
-    const BrowserInfo* browser_info,
-    const JavaScriptDialogManager* dialog_manager,
     const bool is_eager)
     : client_(client),
       web_view_(web_view),
       top_frame_id_(client->GetId()),
-      dialog_manager_(dialog_manager),
       is_eager_(is_eager),
       timed_out_(false),
       loading_state_(nullptr) {
@@ -109,7 +108,7 @@ NavigationTracker::NavigationTracker(
   InitCurrentFrame(known_state);
 }
 
-NavigationTracker::~NavigationTracker() {}
+NavigationTracker::~NavigationTracker() = default;
 
 void NavigationTracker::SetFrame(const std::string& new_frame_id) {
   if (new_frame_id.empty())
@@ -125,7 +124,7 @@ void NavigationTracker::SetFrame(const std::string& new_frame_id) {
 
 Status NavigationTracker::IsPendingNavigation(const Timeout* timeout,
                                               bool* is_pending) {
-  if (dialog_manager_->IsDialogOpen()) {
+  if (client_->IsDialogOpen()) {
     // The render process is paused while modal dialogs are open, so
     // Runtime.evaluate will block and time out if we attempt to call it. In
     // this case we can consider the page to have loaded, so that we return
@@ -137,10 +136,10 @@ Status NavigationTracker::IsPendingNavigation(const Timeout* timeout,
   // browser process, and may cause the renderer process to start a new
   // navigation. We need to call Runtime.evaluate to force a roundtrip to the
   // renderer process, and make sure that we notice any pending navigations
-  // (see crbug.com/524079).
-  base::Value::Dict params;
+  // (see crbug.com/41196874).
+  base::DictValue params;
   params.Set("expression", "1");
-  base::Value::Dict result;
+  base::DictValue result;
   Status status = client_->SendCommandAndGetResultWithTimeout(
       "Runtime.evaluate", params, timeout, &result);
   if (status.code() == kDisconnected) {
@@ -148,7 +147,7 @@ Status NavigationTracker::IsPendingNavigation(const Timeout* timeout,
     // wait for pending navigations to complete, since we won't see any more
     // events from it until we reconnect.
     *is_pending = false;
-    return Status(kOk);
+    return status;
   }
   if (status.code() == kTargetDetached) {
     // If we receive a kTargetDetached status code from Runtime.evaluate, don't
@@ -184,7 +183,7 @@ Status NavigationTracker::IsPendingNavigation(const Timeout* timeout,
       // Scope for object_group
       ObjectGroup object_group(client_);
 
-      base::Value::Dict eval_params;
+      base::DictValue eval_params;
       eval_params.Set("expression", "document");
       eval_params.Set("objectGroup", object_group.name());
       status = client_->SendCommandAndGetResultWithTimeout(
@@ -197,7 +196,7 @@ Status NavigationTracker::IsPendingNavigation(const Timeout* timeout,
         return MakeNavigationCheckFailedStatus(status);
       }
 
-      base::Value::Dict describe_node_params;
+      base::DictValue describe_node_params;
       describe_node_params.Set("objectId", std::move(*object_id));
       status = client_->SendCommandAndGetResultWithTimeout(
           "DOM.describeNode", describe_node_params, timeout, &result);
@@ -218,17 +217,27 @@ Status NavigationTracker::IsPendingNavigation(const Timeout* timeout,
       return Status(kOk);
     }
 
-    if (*doc_url != "about:blank" && *base_url == "about:blank") {
-      *is_pending = true;
-      *loading_state_ = kLoading;
+    if (*base_url == "about:blank") {
+      // Special case for pages like "about:blank?test"
+      // These are created by the browser therefore the aforementioned heuristic
+      // does not apply to them.
+      if (doc_url->starts_with("about:blank")) {
+        *is_pending = false;
+        *loading_state_ = kNotLoading;
+      } else {
+        *is_pending = true;
+        *loading_state_ = kLoading;
+      }
       return Status(kOk);
     }
 
     status = UpdateCurrentLoadingState();
-    if (status.code() == kNoSuchExecutionContext)
+    if (status.code() == kNoSuchExecutionContext ||
+        status.code() == kAbortedByNavigation) {
       *loading_state_ = kLoading;
-    else if (status.IsError())
+    } else if (status.IsError()) {
       return MakeNavigationCheckFailedStatus(status);
+    }
   }
   *is_pending = GetLoadingState() == kLoading;
   return Status(kOk);
@@ -236,9 +245,9 @@ Status NavigationTracker::IsPendingNavigation(const Timeout* timeout,
 
 Status NavigationTracker::CheckFunctionExists(const Timeout* timeout,
                                               bool* exists) {
-  base::Value::Dict params;
+  base::DictValue params;
   params.Set("expression", "typeof(getWindowInfo)");
-  base::Value::Dict result;
+  base::DictValue result;
   Status status = client_->SendCommandAndGetResultWithTimeout(
       "Runtime.evaluate", params, timeout, &result);
   if (status.IsError())
@@ -261,14 +270,12 @@ bool NavigationTracker::IsNonBlocking() const {
 Status NavigationTracker::OnConnected(DevToolsClient* client) {
   ClearFrameStates();
   InitCurrentFrame(kUnknown);
-  // Enable page domain notifications to allow tracking navigation state.
-  base::Value::Dict empty_params;
-  return client_->SendCommand("Page.enable", empty_params);
+  return Status{kOk};
 }
 
 Status NavigationTracker::OnEvent(DevToolsClient* client,
                                   const std::string& method,
-                                  const base::Value::Dict& params) {
+                                  const base::DictValue& params) {
   if (client->IsMainPage() &&
       (method == "Page.loadEventFired" ||
        (is_eager_ && method == "Page.domContentEventFired"))) {
@@ -282,12 +289,13 @@ Status NavigationTracker::OnEvent(DevToolsClient* client,
     frame_to_state_map_[*frame_id] = kUnknown;
   } else if (method == "Page.frameDetached") {
     const std::string* frame_id = params.FindString("frameId");
-    if (!frame_id)
+    if (!frame_id) {
       return Status(kUnknownError, "missing or invalid 'frameId'");
-
-    frame_to_state_map_.erase(*frame_id);
-    if (*frame_id == current_frame_id_)
+    }
+    if (*frame_id == current_frame_id_) {
       SetCurrentFrameInvalid();
+    }
+    frame_to_state_map_.erase(*frame_id);
   } else if (method == "Page.frameStartedLoading") {
     // If frame that started loading is the current frame
     // set loading_state_ to loading. If it is another subframe
@@ -313,7 +321,7 @@ Status NavigationTracker::OnEvent(DevToolsClient* client,
 
 Status NavigationTracker::OnCommandSuccess(DevToolsClient* client,
                                            const std::string& method,
-                                           const base::Value::Dict* result,
+                                           const base::DictValue* result,
                                            const Timeout& command_timeout) {
   // Check if Page.navigate has any error from top frame
   if (method == "Page.navigate" && result) {
@@ -341,7 +349,7 @@ Status NavigationTracker::OnCommandSuccess(DevToolsClient* client,
     //   will not queue FrameMsg_Navigate until it is ready to unload the
     //   previous page (after running unload handlers and such).
     // TODO(nasko): Revisit case 3, since now unload handlers are run in the
-    // background. http://crbug.com/323528.
+    // background. http://crbug.com/41076967.
     //
     // To determine whether a load is expected, do a round trip to the
     // renderer to ask what the URL is.
@@ -354,9 +362,9 @@ Status NavigationTracker::OnCommandSuccess(DevToolsClient* client,
     // If case #3, the URL will be blank if the navigation hasn't been started
     // yet. In that case, expect a load to happen in the future.
     *loading_state_ = kUnknown;
-    base::Value::Dict params;
+    base::DictValue params;
     params.Set("expression", "document.URL");
-    base::Value::Dict result_dict;
+    base::DictValue result_dict;
     Status status(kOk);
     for (int attempt = 0; attempt < 3; attempt++) {
       status = client_->SendCommandAndGetResultWithTimeout(
@@ -436,6 +444,6 @@ void NavigationTracker::InitCurrentFrame(LoadingState state) {
 }
 
 void NavigationTracker::ClearFrameStates() {
-  frame_to_state_map_.clear();
   SetCurrentFrameInvalid();
+  frame_to_state_map_.clear();
 }

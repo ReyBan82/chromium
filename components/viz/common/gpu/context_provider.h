@@ -10,17 +10,15 @@
 
 #include <memory>
 
-#include "base/functional/callback.h"
-#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/stack_allocated.h"
 #include "base/synchronization/lock.h"
 #include "components/viz/common/gpu/context_cache_controller.h"
 #include "components/viz/common/gpu/context_lost_observer.h"
+#include "components/viz/common/resources/shared_image_format.h"
 #include "components/viz/common/viz_common_export.h"
 #include "gpu/command_buffer/common/capabilities.h"
 #include "gpu/command_buffer/common/context_result.h"
-
-class GrDirectContext;
 
 namespace base {
 class Lock;
@@ -42,6 +40,8 @@ namespace viz {
 class VIZ_COMMON_EXPORT ContextProvider {
  public:
   class VIZ_COMMON_EXPORT ScopedContextLock {
+    STACK_ALLOCATED();
+
    public:
     explicit ScopedContextLock(ContextProvider* context_provider);
     ~ScopedContextLock();
@@ -51,7 +51,7 @@ class VIZ_COMMON_EXPORT ContextProvider {
     }
 
    private:
-    const raw_ptr<ContextProvider> context_provider_;
+    ContextProvider* const context_provider_;
     base::AutoLock context_lock_;
     std::unique_ptr<ContextCacheController::ScopedBusy> busy_;
   };
@@ -77,6 +77,10 @@ class VIZ_COMMON_EXPORT ContextProvider {
   virtual void AddObserver(ContextLostObserver* obs) = 0;
   virtual void RemoveObserver(ContextLostObserver* obs) = 0;
 
+  // Returns true if the context has been lost. Can be called only after
+  // successful BindToCurrentSequence().
+  virtual bool IsLost() = 0;
+
   // Returns the lock that should be held if using this context from multiple
   // threads. This can be called on any thread.
   // NOTE: Helper method for ScopedContextLock. Use that instead of calling this
@@ -90,11 +94,6 @@ class VIZ_COMMON_EXPORT ContextProvider {
   // Get a ContextSupport interface to the 3d context.  The context provider
   // must have been successfully bound to a thread before calling this.
   virtual gpu::ContextSupport* ContextSupport() = 0;
-
-  // Get a Skia GPU raster interface to the 3d context.  The context provider
-  // must have been successfully bound to a thread before calling this.  Returns
-  // nullptr if a GrContext fails to initialize on this context.
-  virtual class GrDirectContext* GrContext() = 0;
 
   virtual gpu::SharedImageInterface* SharedImageInterface() = 0;
 

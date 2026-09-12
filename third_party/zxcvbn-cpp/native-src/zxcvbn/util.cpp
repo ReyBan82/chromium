@@ -1,16 +1,15 @@
 #include <zxcvbn/util.hpp>
 
 #include <algorithm>
-#include <codecvt>
-#include <locale>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <cassert>
 
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversion_utils.h"
+#include "base/strings/utf_string_conversions.h"
 
 namespace zxcvbn {
 
@@ -18,7 +17,7 @@ namespace util {
 
 bool utf8_valid(std::string::const_iterator start,
                 std::string::const_iterator end) {
-  return base::IsStringUTF8(base::MakeStringPiece(start, end));
+  return base::IsStringUTF8(std::string_view(start, end));
 }
 
 bool utf8_valid(const std::string & str) {
@@ -33,21 +32,19 @@ std::string reverse_string(const std::string & in) {
   if (!utf8_valid(in))
     return std::string(in.rbegin(), in.rend());
 
-  std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t> conv;
-  auto ret = conv.from_bytes(in);
+  std::wstring ret = base::UTF8ToWide(in);
   std::reverse(ret.begin(), ret.end());
-  return conv.to_bytes(ret);
+  return base::WideToUTF8(ret);
 }
 
 template<class It>
 std::pair<char32_t, It> _utf8_decode(It it, It end) {
   assert(it != end);
-  const char* src = &*it;
-  size_t src_len = static_cast<size_t>(std::distance(it, end));
   size_t char_index = 0;
   base_icu::UChar32 code_point_out;
 
-  base::ReadUnicodeCharacter(src, src_len, &char_index, &code_point_out);
+  base::ReadUnicodeCharacter(std::string_view(it, end), &char_index,
+                             &code_point_out);
   return {code_point_out, it + ++char_index};
 }
 

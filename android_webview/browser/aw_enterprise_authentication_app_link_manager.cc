@@ -4,12 +4,15 @@
 
 #include "android_webview/browser/aw_enterprise_authentication_app_link_manager.h"
 
+#include "components/prefs/pref_registry_simple.h"
 #include "components/url_matcher/url_util.h"
 
 namespace android_webview {
 
-namespace prefs {
-extern const char kEnterpriseAuthAppLinkPolicy[];
+// static
+void EnterpriseAuthenticationAppLinkManager::RegisterPrefs(
+    PrefRegistrySimple* registry) {
+  registry->RegisterListPref(prefs::kEnterpriseAuthAppLinkPolicy);
 }
 
 EnterpriseAuthenticationAppLinkManager::EnterpriseAuthenticationAppLinkManager(
@@ -30,12 +33,12 @@ EnterpriseAuthenticationAppLinkManager::
     ~EnterpriseAuthenticationAppLinkManager() = default;
 
 void EnterpriseAuthenticationAppLinkManager::OnPolicyUpdated() {
-  const base::Value::List& authentication_urls_policy =
+  const base::ListValue& authentication_urls_policy =
       pref_service_->GetList(prefs::kEnterpriseAuthAppLinkPolicy);
 
   url_matcher_ = std::make_unique<url_matcher::URLMatcher>();
-  url_matcher::util::AddAllowFilters(url_matcher_.get(),
-                                     authentication_urls_policy);
+  url_matcher::util::AddAllowFiltersWithLimit(url_matcher_.get(),
+                                              authentication_urls_policy);
 }
 
 bool EnterpriseAuthenticationAppLinkManager::IsEnterpriseAuthenticationUrl(

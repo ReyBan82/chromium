@@ -10,8 +10,6 @@ example_value: false
 features:
   dynamic_refresh: true
   per_profile: true
-future_on:
-- fuchsia
 items:
 - caption: Allow installation and updates for extensions hosted outside of Chrome
     Web Store
@@ -20,7 +18,7 @@ items:
     Web Store
   value: false
 owners:
-- waffles@chromium.org
+- sorin@chromium.org
 - rdevlin.cronin@chromium.org
 schema:
   type: boolean

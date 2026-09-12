@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "ui/android/resources/resource_manager_impl.h"
+
 #include <stddef.h>
 
 #include "base/memory/raw_ptr.h"
@@ -10,17 +12,15 @@
 #include "base/trace_event/process_memory_dump.h"
 #include "cc/resources/ui_resource_bitmap.h"
 #include "cc/resources/ui_resource_manager.h"
-#include "cc/test/stub_layer_tree_host_client.h"
+#include "cc/test/stub_layer_tree_host_delegate.h"
 #include "cc/test/test_task_graph_runner.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkCanvas.h"
-#include "ui/android/resources/resource_manager_impl.h"
 #include "ui/android/resources/system_ui_resource_type.h"
 #include "ui/android/window_android.h"
 #include "ui/gfx/android/java_bitmap.h"
-
 
 using ::testing::_;
 using ::testing::AtLeast;
@@ -53,7 +53,7 @@ class TestResourceManagerImpl : public ResourceManagerImpl {
     canvas.drawColor(SK_ColorWHITE);
     small_bitmap.setImmutable();
 
-    OnResourceReady(nullptr, nullptr, res_type, res_id,
+    OnResourceReady(nullptr, res_type, res_id,
                     gfx::ConvertToJavaBitmap(small_bitmap), 1, 1,
                     reinterpret_cast<intptr_t>(new Resource()));
   }
@@ -114,7 +114,7 @@ class ResourceManagerTest : public testing::Test {
  protected:
   MockUIResourceManager ui_resource_manager_;
   TestResourceManagerImpl resource_manager_;
-  cc::StubLayerTreeHostClient stub_client_;
+  cc::StubLayerTreeHostDelegate stub_client_;
 };
 
 TEST_F(ResourceManagerTest, GetResource) {
@@ -139,7 +139,7 @@ TEST_F(ResourceManagerTest, TestOnMemoryDumpEmitsData) {
   SetResourceAsLoaded(kTestResourceType);
 
   base::trace_event::MemoryDumpArgs dump_args = {
-      base::trace_event::MemoryDumpLevelOfDetail::DETAILED};
+      base::trace_event::MemoryDumpLevelOfDetail::kDetailed};
   std::unique_ptr<base::trace_event::ProcessMemoryDump> process_memory_dump =
       std::make_unique<base::trace_event::ProcessMemoryDump>(dump_args);
   resource_manager_.OnMemoryDump(dump_args, process_memory_dump.get());

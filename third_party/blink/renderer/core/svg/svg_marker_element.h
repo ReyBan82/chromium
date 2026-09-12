@@ -58,6 +58,9 @@ class SVGMarkerElement final : public SVGElement, public SVGFitToViewBox {
   };
 
   explicit SVGMarkerElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGMarkerElement;
+  }
 
   AffineTransform ViewBoxToViewTransform(const gfx::SizeF& viewport_size) const;
 
@@ -80,10 +83,14 @@ class SVGMarkerElement final : public SVGElement, public SVGFitToViewBox {
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   void ChildrenChanged(const ChildrenChange&) override;
 
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
   bool LayoutObjectIsNeeded(const DisplayStyle&) const override;
 
   bool SelfHasRelativeLengths() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedLength> ref_x_;
   Member<SVGAnimatedLength> ref_y_;

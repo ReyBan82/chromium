@@ -2,23 +2,33 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/custom_handlers/protocol_handler_registry.h"
+
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "base/scoped_observation.h"
+#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/gmock_expected_support.h"
+#include "base/time/time.h"
 #include "build/build_config.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/content_settings/page_specific_content_settings_delegate.h"
+#include "chrome/browser/custom_handlers/chrome_protocol_handler_registry_delegate.h"
 #include "chrome/browser/custom_handlers/protocol_handler_registry_factory.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/renderer_context_menu/render_view_context_menu_test_util.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/web_applications/test/isolated_web_app_test_utils.h"
+#include "chrome/browser/web_applications/isolated_web_apps/isolated_web_app_url_info.h"
+#include "chrome/browser/web_applications/isolated_web_apps/test/isolated_web_app_builder.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/custom_handlers/protocol_handler.h"
-#include "components/custom_handlers/protocol_handler_registry.h"
 #include "components/permissions/permission_request_manager.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
@@ -28,6 +38,7 @@
 #include "content/public/test/fenced_frame_test_util.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "third_party/blink/public/mojom/context_menu/context_menu.mojom.h"
+#include "url/url_util.h"
 
 #if BUILDFLAG(IS_MAC)
 #include "chrome/test/base/launchservices_utils_mac.h"
@@ -38,6 +49,20 @@ using custom_handlers::ProtocolHandler;
 using custom_handlers::ProtocolHandlerRegistry;
 
 namespace {
+
+// Test delegate that disables OS-level registration. The real delegate calls
+// `shell_integration::DefaultSchemeClientWorker::StartSetAsDefault`, which on
+// Mac fails because the test app_bundle is not valid; the failure callback
+// then deletes the handler when `ShouldRemoveHandlersNotInOS()` is true. We
+// avoid the round-trip entirely so tests behave the same on every platform.
+// This also avoids the issues in Windows 7 when trying to perform the OS
+// registration, which causes DCHECKs when running as admin.
+class TestProtocolHandlerRegistryDelegate
+    : public ChromeProtocolHandlerRegistryDelegate {
+  void RegisterWithOSAsDefaultClient(const std::string& protocol,
+                                     DefaultClientCallback callback) override {}
+  bool ShouldRemoveHandlersNotInOS() override { return false; }
+};
 
 class ProtocolHandlerChangeWaiter : public ProtocolHandlerRegistry::Observer {
  public:
@@ -75,6 +100,9 @@ class ChromeRegisterProtocolHandlerBrowserTest : public InProcessBrowserTest {
     // files will be shared via //componennts
     embedded_test_server()->ServeFilesFromSourceDirectory(
         "components/test/data/custom_handlers/");
+
+    GetRegistry()->SetDelegateForTesting(
+        std::make_unique<TestProtocolHandlerRegistryDelegate>());
   }
 
   TestRenderViewContextMenu* CreateContextMenu(GURL url) {
@@ -101,28 +129,27 @@ class ChromeRegisterProtocolHandlerBrowserTest : public InProcessBrowserTest {
     return menu;
   }
 
-  void AddProtocolHandler(const std::string& protocol, const GURL& url) {
+  ProtocolHandlerRegistry* GetRegistry(Profile* profile = nullptr) {
+    if (!profile) {
+      profile = browser()->GetProfile();
+    }
+    return ProtocolHandlerRegistryFactory::GetForBrowserContext(profile);
+  }
+
+  void AddProtocolHandler(const std::string& protocol,
+                          const GURL& url,
+                          Profile* profile = nullptr) {
     ProtocolHandler handler =
         ProtocolHandler::CreateProtocolHandler(protocol, url);
-    ProtocolHandlerRegistry* registry =
-        ProtocolHandlerRegistryFactory::GetForBrowserContext(
-            browser()->profile());
-    // Fake that this registration is happening on profile startup. Otherwise
-    // it'll try to register with the OS, which causes DCHECKs on Windows when
-    // running as admin on Windows 7.
-    registry->SetIsLoading(true);
+    ProtocolHandlerRegistry* registry = GetRegistry(profile);
     registry->OnAcceptRegisterProtocolHandler(handler);
-    registry->SetIsLoading(true);
     ASSERT_TRUE(registry->IsHandledProtocol(protocol));
   }
 
-  void RemoveProtocolHandler(const std::string& protocol,
-                             const GURL& url) {
+  void RemoveProtocolHandler(const std::string& protocol, const GURL& url) {
     ProtocolHandler handler =
         ProtocolHandler::CreateProtocolHandler(protocol, url);
-    ProtocolHandlerRegistry* registry =
-        ProtocolHandlerRegistryFactory::GetForBrowserContext(
-            browser()->profile());
+    ProtocolHandlerRegistry* registry = GetRegistry();
     registry->RemoveHandler(handler);
     ASSERT_FALSE(registry->IsHandledProtocol(protocol));
   }
@@ -145,10 +172,8 @@ IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerBrowserTest,
   AddProtocolHandler(std::string("web+search"),
                      GURL("https://www.google.com/%s"));
   GURL url("web+search:testing");
-  ProtocolHandlerRegistry* registry =
-      ProtocolHandlerRegistryFactory::GetForBrowserContext(
-          browser()->profile());
-  ASSERT_EQ(1u, registry->GetHandlersFor(url.scheme()).size());
+  ProtocolHandlerRegistry* registry = GetRegistry();
+  ASSERT_EQ(1u, registry->GetHandlersFor(url.GetScheme()).size());
   menu.reset(CreateContextMenu(url));
   ASSERT_TRUE(menu->IsItemPresent(IDC_CONTENT_CONTEXT_OPENLINKWITH));
 }
@@ -162,15 +187,13 @@ IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerBrowserTest,
   AddProtocolHandler(std::string("web+search"),
                      GURL("https://www.google.com/%s"));
   GURL url("web+search:testing");
-  ProtocolHandlerRegistry* registry =
-      ProtocolHandlerRegistryFactory::GetForBrowserContext(
-          browser()->profile());
-  ASSERT_EQ(1u, registry->GetHandlersFor(url.scheme()).size());
+  ProtocolHandlerRegistry* registry = GetRegistry();
+  ASSERT_EQ(1u, registry->GetHandlersFor(url.GetScheme()).size());
   menu.reset(CreateContextMenu(url));
   ASSERT_TRUE(menu->IsItemPresent(IDC_CONTENT_CONTEXT_OPENLINKWITH));
   RemoveProtocolHandler(std::string("web+search"),
                         GURL("https://www.google.com/%s"));
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
   menu.reset(CreateContextMenu(url));
   ASSERT_FALSE(menu->IsItemPresent(IDC_CONTENT_CONTEXT_OPENLINKWITH));
 }
@@ -208,27 +231,24 @@ IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerBrowserTest,
   WebContents* web_contents =
       browser()->tab_strip_model()->GetActiveWebContents();
   auto* content_settings =
-      chrome::PageSpecificContentSettingsDelegate::FromWebContents(
-          web_contents);
+      PageSpecificContentSettingsDelegate::FromWebContents(web_contents);
 
   // Ensure the registry is currently empty.
   GURL url("web+search:testing");
-  ProtocolHandlerRegistry* registry =
-      ProtocolHandlerRegistryFactory::GetForBrowserContext(
-          browser()->profile());
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ProtocolHandlerRegistry* registry = GetRegistry();
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
 
   // Ensure there is no registration pending.
   ASSERT_TRUE(content_settings->pending_protocol_handler().IsEmpty());
 
   // Attempt to add an entry.
-  ASSERT_TRUE(content::ExecuteScriptWithoutUserGesture(
-      web_contents,
-      "navigator.registerProtocolHandler('web+"
-      "search', 'test.html?%s', 'test');"));
+  ASSERT_TRUE(content::ExecJs(web_contents,
+                              "navigator.registerProtocolHandler('web+"
+                              "search', 'test.html?%s', 'test');",
+                              content::EXECUTE_SCRIPT_NO_USER_GESTURE));
 
   // Verify the registration is ignored if no user gesture involved.
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
 
   // Verify the handler registration is pending.
   ASSERT_TRUE(content_settings->pending_protocol_handler().IsValid());
@@ -252,24 +272,87 @@ IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerBrowserTest, FencedFrame) {
 
   // Ensure the registry is currently empty.
   GURL url("web+search:testing");
-  ProtocolHandlerRegistry* registry =
-      ProtocolHandlerRegistryFactory::GetForBrowserContext(
-          browser()->profile());
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ProtocolHandlerRegistry* registry = GetRegistry();
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
 
   // Attempt to add an entry.
   ProtocolHandlerChangeWaiter waiter(registry);
-  ASSERT_TRUE(content::ExecuteScript(fenced_frame_host,
-                                     "navigator.registerProtocolHandler('web+"
-                                     "search', 'test.html?%s', 'test');"));
+  ASSERT_TRUE(content::ExecJs(fenced_frame_host,
+                              "navigator.registerProtocolHandler('web+"
+                              "search', 'test.html?%s', 'test');"));
   waiter.Wait();
 
   // Ensure the registry is still empty.
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
 }
 
-using RegisterProtocolHandlerExtensionBrowserTest =
-    extensions::ExtensionBrowserTest;
+class RegisterProtocolHandlerExtensionBrowserTest
+    : public extensions::ExtensionBrowserTest {
+ public:
+  void SetUpOnMainThread() override {
+    extensions::ExtensionBrowserTest::SetUpOnMainThread();
+
+    // Disable OS-level registration, as
+    // ChromeRegisterProtocolHandlerBrowserTest does; see
+    // TestProtocolHandlerRegistryDelegate above. Without it these tests do a
+    // real OS round trip for every default they register, and its asynchronous
+    // reply clears the default handler again on the platforms where
+    // ShouldRemoveHandlersNotInOS() is true.
+    ProtocolHandlerRegistryFactory::GetForBrowserContext(
+        browser()->GetProfile())
+        ->SetDelegateForTesting(
+            std::make_unique<TestProtocolHandlerRegistryDelegate>());
+  }
+};
+
+// A handler registered from a privileged extension page via
+// navigator.registerProtocolHandler must be associated with the registering
+// extension and removed when that extension is uninstalled.
+IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerExtensionBrowserTest,
+                       HandlerRemovedOnExtensionUninstall) {
+#if BUILDFLAG(IS_MAC)
+  ASSERT_TRUE(test::RegisterAppWithLaunchServices());
+#endif
+  permissions::PermissionRequestManager::FromWebContents(
+      browser()->tab_strip_model()->GetActiveWebContents())
+      ->set_auto_response_for_test(
+          permissions::PermissionRequestManager::ACCEPT_ALL);
+
+  const extensions::Extension* extension =
+      LoadExtension(test_data_dir_.AppendASCII("protocol_handler"));
+  ASSERT_NE(nullptr, extension);
+  const std::string extension_id = extension->id();
+
+  ProtocolHandlerRegistry* registry =
+      ProtocolHandlerRegistryFactory::GetForBrowserContext(
+          browser()->GetProfile());
+
+  // Register a handler from the extension page via the JS API. The waiter must
+  // only cover the registration; see the comment in
+  // JsHandlerDoesNotOverrideNonExtensionDefault.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL("chrome-extension://" + extension_id + "/test.html")));
+  {
+    ProtocolHandlerChangeWaiter waiter(registry);
+    ASSERT_TRUE(content::ExecJs(
+        browser()->tab_strip_model()->GetActiveWebContents(),
+        "navigator.registerProtocolHandler('geo', 'test.html?%s', 'test');"));
+    waiter.Wait();
+  }
+  ASSERT_TRUE(registry->IsHandledProtocol("geo"));
+
+  // The handler must be associated with the registering extension so that it
+  // is visible to extension cleanup.
+  ProtocolHandlerRegistry::ProtocolHandlerList extension_handlers =
+      registry->GetExtensionProtocolHandlers(extension_id);
+  ASSERT_EQ(1u, extension_handlers.size());
+  EXPECT_EQ("geo", extension_handlers[0].protocol());
+
+  // Uninstalling the extension must remove the handler it registered.
+  UninstallExtension(extension_id);
+  EXPECT_FALSE(registry->IsHandledProtocol("geo"));
+  EXPECT_TRUE(registry->GetExtensionProtocolHandlers().empty());
+}
 
 IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerExtensionBrowserTest, Basic) {
 #if BUILDFLAG(IS_MAC)
@@ -287,14 +370,15 @@ IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerExtensionBrowserTest, Basic) {
   std::string handler_url =
       "chrome-extension://" + extension->id() + "/test.html";
 
-  // Register the handler.
+  // Register the handler. The waiter must only cover the registration; see the
+  // comment in JsHandlerDoesNotOverrideNonExtensionDefault.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL(handler_url)));
   {
     ProtocolHandlerRegistry* registry =
         ProtocolHandlerRegistryFactory::GetForBrowserContext(
-            browser()->profile());
+            browser()->GetProfile());
     ProtocolHandlerChangeWaiter waiter(registry);
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL(handler_url)));
-    ASSERT_TRUE(content::ExecuteScript(
+    ASSERT_TRUE(content::ExecJs(
         browser()->tab_strip_model()->GetActiveWebContents(),
         "navigator.registerProtocolHandler('geo', 'test.html?%s', 'test');"));
     waiter.Wait();
@@ -306,6 +390,108 @@ IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerExtensionBrowserTest, Basic) {
                                                    ->tab_strip_model()
                                                    ->GetActiveWebContents()
                                                    ->GetLastCommittedURL());
+}
+
+// A handler registered from an extension page via
+// navigator.registerProtocolHandler uses the elevated kExtension security
+// level, so it must not take the default away from a pre-existing
+// non-extension default handler.
+IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerExtensionBrowserTest,
+                       JsHandlerDoesNotOverrideNonExtensionDefault) {
+#if BUILDFLAG(IS_MAC)
+  ASSERT_TRUE(test::RegisterAppWithLaunchServices());
+#endif
+  permissions::PermissionRequestManager::FromWebContents(
+      browser()->tab_strip_model()->GetActiveWebContents())
+      ->set_auto_response_for_test(
+          permissions::PermissionRequestManager::ACCEPT_ALL);
+
+  ProtocolHandlerRegistry* registry =
+      ProtocolHandlerRegistryFactory::GetForBrowserContext(
+          browser()->GetProfile());
+
+  // A non-extension (e.g. WebAPI/PWA) handler is already the default for 'geo'.
+  ProtocolHandler non_extension_handler =
+      ProtocolHandler::CreateProtocolHandler(
+          "geo", GURL("https://non-extension.example/%s"));
+  registry->OnAcceptRegisterProtocolHandler(non_extension_handler);
+  ASSERT_TRUE(registry->IsDefault(non_extension_handler));
+
+  const extensions::Extension* extension =
+      LoadExtension(test_data_dir_.AppendASCII("protocol_handler"));
+  ASSERT_NE(nullptr, extension);
+
+  // Register a 'geo' handler from the extension page via the JS API. The waiter
+  // only covers the registration itself: it quits on the first registry change,
+  // so arming it before the navigation would let an unrelated change satisfy it
+  // and return before the handler is stored.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL("chrome-extension://" + extension->id() + "/test.html")));
+  {
+    ProtocolHandlerChangeWaiter waiter(registry);
+    ASSERT_TRUE(content::ExecJs(
+        browser()->tab_strip_model()->GetActiveWebContents(),
+        "navigator.registerProtocolHandler('geo', 'test.html?%s', 'test');"));
+    waiter.Wait();
+  }
+
+  // The extension handler is registered, but the non-extension handler must
+  // remain the default.
+  EXPECT_EQ(1u, registry->GetExtensionProtocolHandlers(extension->id()).size());
+  EXPECT_TRUE(registry->IsDefault(non_extension_handler));
+  EXPECT_FALSE(registry->GetHandlerFor("geo").IsExtensionHandler());
+}
+
+// When the pre-existing default is itself an extension handler, a handler
+// registered from an extension page via navigator.registerProtocolHandler may
+// become the default: the restriction is only against overriding a
+// non-extension handler.
+IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerExtensionBrowserTest,
+                       JsHandlerOverridesExtensionDefault) {
+#if BUILDFLAG(IS_MAC)
+  ASSERT_TRUE(test::RegisterAppWithLaunchServices());
+#endif
+  permissions::PermissionRequestManager::FromWebContents(
+      browser()->tab_strip_model()->GetActiveWebContents())
+      ->set_auto_response_for_test(
+          permissions::PermissionRequestManager::ACCEPT_ALL);
+
+  ProtocolHandlerRegistry* registry =
+      ProtocolHandlerRegistryFactory::GetForBrowserContext(
+          browser()->GetProfile());
+
+  // Another extension's handler is already the default for 'geo'.
+  ProtocolHandler other_extension_handler =
+      ProtocolHandler::CreateExtensionProtocolHandler(
+          "geo", GURL("https://other-extension.example/%s"),
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  other_extension_handler.Confirm();
+  registry->OnAcceptRegisterProtocolHandler(other_extension_handler);
+  ASSERT_TRUE(registry->IsDefault(other_extension_handler));
+
+  const extensions::Extension* extension =
+      LoadExtension(test_data_dir_.AppendASCII("protocol_handler"));
+  ASSERT_NE(nullptr, extension);
+
+  // Register a 'geo' handler from the extension page via the JS API. The waiter
+  // must only cover the registration; see the comment in
+  // JsHandlerDoesNotOverrideNonExtensionDefault.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL("chrome-extension://" + extension->id() + "/test.html")));
+  {
+    ProtocolHandlerChangeWaiter waiter(registry);
+    ASSERT_TRUE(content::ExecJs(
+        browser()->tab_strip_model()->GetActiveWebContents(),
+        "navigator.registerProtocolHandler('geo', 'test.html?%s', 'test');"));
+    waiter.Wait();
+  }
+
+  // The newly registered extension handler overrides the previous extension
+  // default.
+  EXPECT_FALSE(registry->IsDefault(other_extension_handler));
+  const ProtocolHandler& new_default = registry->GetHandlerFor("geo");
+  ASSERT_TRUE(new_default.extension_id().has_value());
+  EXPECT_EQ(extension->id(), *new_default.extension_id());
 }
 
 class ChromeRegisterProtocolHandlerAndServiceWorkerInterceptor
@@ -333,7 +519,7 @@ class ChromeRegisterProtocolHandlerAndServiceWorkerInterceptor
   }
 };
 
-// TODO(crbug.com/1204127): Fix flakiness.
+// TODO(crbug.com/40763886): Fix flakiness.
 IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerAndServiceWorkerInterceptor,
                        DISABLED_RegisterFetchListenerForHTMLHandler) {
   WebContents* web_contents =
@@ -347,7 +533,7 @@ IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerAndServiceWorkerInterceptor,
     // Register a HTML handler with a user gesture.
     ProtocolHandlerRegistry* registry =
         ProtocolHandlerRegistryFactory::GetForBrowserContext(
-            browser()->profile());
+            browser()->GetProfile());
     ProtocolHandlerChangeWaiter waiter(registry);
     ASSERT_TRUE(content::ExecJs(web_contents, "registerHTMLHandler();"));
     waiter.Wait();
@@ -358,4 +544,119 @@ IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerAndServiceWorkerInterceptor,
   EXPECT_EQ(true,
             content::EvalJs(web_contents,
                             "pageWithCustomSchemeHandledByServiceWorker();"));
+}
+
+class ProtocolHandlerRegistryOTRBrowserTest
+    : public ChromeRegisterProtocolHandlerBrowserTest {
+ public:
+  Profile* GetOTRProfile() {
+    Profile* otr_profile = browser()->GetProfile()->GetPrimaryOTRProfile(
+        /*create_if_needed=*/true);
+    // Install the test delegate on the OTR registry so it behaves the same on
+    // every platform; see TestProtocolHandlerRegistryDelegate above. Re-install
+    // unconditionally so a freshly recreated OTR profile (e.g. after
+    // DestroyOffTheRecordProfile) also gets the test delegate.
+    GetRegistry(otr_profile)
+        ->SetDelegateForTesting(
+            std::make_unique<TestProtocolHandlerRegistryDelegate>());
+    return otr_profile;
+  }
+};
+
+// Verify that a custom protocol handler can be registered directly in an
+// incognito browser, and that navigation in that browser resolves to it.
+IN_PROC_BROWSER_TEST_F(ProtocolHandlerRegistryOTRBrowserTest,
+                       CustomHandlerRegistrationInIncognito) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL handler_url = embedded_test_server()->GetURL("/custom_handler.html");
+
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser();
+  AddProtocolHandler("news", handler_url, incognito_browser->GetProfile());
+
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(incognito_browser, GURL("news:test")));
+  EXPECT_EQ(handler_url, incognito_browser->GetTabStripModel()
+                             ->GetActiveWebContents()
+                             ->GetLastCommittedURL());
+}
+
+// Verify that a handler registered in the OTR profile does not resolve when
+// navigating in the regular browser.
+IN_PROC_BROWSER_TEST_F(ProtocolHandlerRegistryOTRBrowserTest,
+                       OTRHandlerNavigationNotInRegularProfile) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL handler_url = embedded_test_server()->GetURL("/custom_handler.html");
+
+  AddProtocolHandler("news", handler_url, GetOTRProfile());
+
+  // The regular profile's registry should not have the handler.
+  ASSERT_FALSE(GetRegistry()->IsHandledProtocol("news"));
+
+  // Navigation should not work in the regular browser.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL("news:test")));
+  EXPECT_NE(handler_url, browser()
+                             ->tab_strip_model()
+                             ->GetActiveWebContents()
+                             ->GetLastCommittedURL());
+}
+
+// Verify that a handler registered in the regular profile does NOT resolve in
+// incognito. The OTR ProtocolHandlerRegistry is constructed with a null
+// PrefService and therefore does not inherit the parent's handlers.
+IN_PROC_BROWSER_TEST_F(ProtocolHandlerRegistryOTRBrowserTest,
+                       RegularHandlerNavigationDoesNotWorkInIncognito) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL handler_url = embedded_test_server()->GetURL("/custom_handler.html");
+  AddProtocolHandler("news", handler_url);
+
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL("news:test")));
+  EXPECT_EQ(handler_url, browser()
+                             ->tab_strip_model()
+                             ->GetActiveWebContents()
+                             ->GetLastCommittedURL());
+
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser();
+  EXPECT_FALSE(
+      GetRegistry(incognito_browser->GetProfile())->IsHandledProtocol("news"));
+  ASSERT_TRUE(
+      ui_test_utils::NavigateToURL(incognito_browser, GURL("news:test")));
+  EXPECT_NE(handler_url, incognito_browser->GetTabStripModel()
+                             ->GetActiveWebContents()
+                             ->GetLastCommittedURL());
+}
+
+using ChromeRegisterProtocolHandlerIsolatedWebAppsTest =
+    web_app::IsolatedWebAppBrowserTestHarness;
+
+IN_PROC_BROWSER_TEST_F(ChromeRegisterProtocolHandlerIsolatedWebAppsTest,
+                       NotAllowedFromIWA) {
+  std::unique_ptr<web_app::ScopedBundledIsolatedWebApp> app =
+      web_app::IsolatedWebAppBuilder(web_app::ManifestBuilder()).BuildBundle();
+  ASSERT_OK_AND_ASSIGN(web_app::IsolatedWebAppUrlInfo url_info,
+                       app->Install(profile()));
+
+  BrowserWindowInterface* browser =
+      LaunchWebAppBrowserAndWait(url_info.app_id());
+  content::WebContents* web_contents =
+      browser->GetTabStripModel()->GetActiveWebContents();
+
+  GURL protocol_url =
+      url_info.origin().GetURL().Resolve("/index.html?params=%s");
+  static constexpr std::string_view kRegisterProtocolScript = R"(
+    navigator.registerProtocolHandler("web+meow", "%s");
+  )";
+  ASSERT_THAT(EvalJs(web_contents, base::StringPrintf(kRegisterProtocolScript,
+                                                      protocol_url.spec())),
+              content::EvalJsResult::ErrorIs(
+                  testing::HasSubstr("Isolated Web Apps do not support "
+                                     "registering/unregistering protocol")));
+
+  static constexpr std::string_view kUnegisterProtocolScript = R"(
+    navigator.unregisterProtocolHandler("web+meow", "%s");
+  )";
+  ASSERT_THAT(EvalJs(web_contents, base::StringPrintf(kUnegisterProtocolScript,
+                                                      protocol_url.spec())),
+              content::EvalJsResult::ErrorIs(
+                  testing::HasSubstr("Isolated Web Apps do not support "
+                                     "registering/unregistering protocol")));
 }

@@ -4,6 +4,7 @@
 
 #include "net/proxy_resolution/pac_file_fetcher_impl.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,7 +24,6 @@
 #include "net/base/load_flags.h"
 #include "net/base/network_delegate_impl.h"
 #include "net/base/test_completion_callback.h"
-#include "net/cert/ct_policy_enforcer.h"
 #include "net/cert/mock_cert_verifier.h"
 #include "net/cert/multi_log_ct_verifier.h"
 #include "net/disk_cache/disk_cache.h"
@@ -44,13 +44,13 @@
 #include "net/test/gtest_util.h"
 #include "net/test/test_with_task_environment.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
+#include "net/url_request/device_bound_session_mode.h"
 #include "net/url_request/url_request_context_builder.h"
 #include "net/url_request/url_request_job_factory.h"
 #include "net/url_request/url_request_test_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/platform_test.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using net::test::IsError;
 using net::test::IsOk;
@@ -76,7 +76,7 @@ struct FetchResult {
 // Get a file:// url relative to net/data/proxy/pac_file_fetcher_unittest.
 GURL GetTestFileUrl(const std::string& relpath) {
   base::FilePath path;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &path);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
   path = path.AppendASCII("net");
   path = path.AppendASCII("data");
   path = path.AppendASCII("pac_file_fetcher_unittest");
@@ -102,6 +102,8 @@ class BasicNetworkDelegate : public NetworkDelegateImpl {
                          CompletionOnceCallback callback,
                          GURL* new_url) override {
     EXPECT_TRUE(request->load_flags() & LOAD_DISABLE_CERT_NETWORK_FETCHES);
+    EXPECT_EQ(request->device_bound_session_mode(),
+              DeviceBoundSessionMode::kDisabled);
     return OK;
   }
 };
@@ -241,12 +243,8 @@ TEST_F(PacFileFetcherImplTest, ContentDisposition) {
 // the DNS cache.
 TEST_F(PacFileFetcherImplTest, IsolationInfo) {
   base::test::ScopedFeatureList feature_list;
-  feature_list.InitWithFeatures(
-      // enabled_features
-      {features::kPartitionConnectionsByNetworkIsolationKey,
-       features::kSplitHostCacheByNetworkIsolationKey},
-      // disabled_features
-      {});
+  feature_list.InitAndEnableFeature(
+      features::kPartitionConnectionsByNetworkIsolationKey);
   const char kHost[] = "foo.test";
 
   ASSERT_TRUE(test_server_.Start());
@@ -269,7 +267,7 @@ TEST_F(PacFileFetcherImplTest, IsolationInfo) {
       context_->host_resolver()->CreateRequest(
           url::SchemeHostPort(url),
           pac_fetcher->isolation_info().network_anonymization_key(),
-          net::NetLogWithSource(), params);
+          handles::kInvalidNetworkHandle, net::NetLogWithSource(), params);
   net::TestCompletionCallback callback2;
   result = host_request->Start(callback2.callback());
   EXPECT_EQ(net::OK, callback2.GetResult(result));
@@ -282,7 +280,7 @@ TEST_F(PacFileFetcherImplTest, IsolationInfo) {
   // NetworkAnonymizationKey.
   host_request = context_->host_resolver()->CreateRequest(
       url::SchemeHostPort(url), NetworkAnonymizationKey(),
-      net::NetLogWithSource(), params);
+      handles::kInvalidNetworkHandle, net::NetLogWithSource(), params);
   net::TestCompletionCallback callback3;
   result = host_request->Start(callback3.callback());
   EXPECT_EQ(net::ERR_NAME_NOT_RESOLVED, callback3.GetResult(result));
@@ -505,7 +503,7 @@ TEST_F(PacFileFetcherImplTest, DataURLs) {
 TEST_F(PacFileFetcherImplTest, IgnoresLimits) {
   // Enough requests to exceed the per-group limit.
   int num_requests = 2 + ClientSocketPoolManager::max_sockets_per_group(
-                             HttpNetworkSession::NORMAL_SOCKET_POOL);
+                             HttpNetworkSession::SocketPoolType::kNormal);
 
   net::test_server::SimpleConnectionListener connection_listener(
       num_requests, net::test_server::SimpleConnectionListener::

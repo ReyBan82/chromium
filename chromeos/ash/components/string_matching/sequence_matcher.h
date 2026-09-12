@@ -6,6 +6,7 @@
 #define CHROMEOS_ASH_COMPONENTS_STRING_MATCHING_SEQUENCE_MATCHER_H_
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -46,8 +47,8 @@ class SequenceMatcher {
   // matching blocks. Value equal to 0 means no penalty. Values greater than 0
   // means heavier penalty will be applied to larger number of blocks.
   SequenceMatcher(
-      const std::u16string& first_string,
-      const std::u16string& second_string,
+      std::u16string_view first_string,
+      std::u16string_view second_string,
       double num_matching_blocks_penalty = kNumMatchingBlocksPenalty);
 
   SequenceMatcher(const SequenceMatcher&) = delete;
@@ -65,9 +66,9 @@ class SequenceMatcher {
   // agnosticism").
   //
   // Thus, We will trim the text length if it is too long and
-  // `use_text_length_agnosticism` is true, and it only works for the block
+  // `text_length_agnostic` is true, and it only works for the block
   // matching algorithm.
-  double Ratio(bool use_text_length_agnosticism = kUseTextLengthAgnosticism);
+  double Ratio(bool text_length_agnostic = kUseTextLengthAgnosticism);
   // Finds the longest common substring between
   // `first_string_[first_start:first_end]` and
   // `second_string_[second_start:second_end]`. Used by

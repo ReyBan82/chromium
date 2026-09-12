@@ -30,15 +30,14 @@
 #include "third_party/blink/renderer/core/html/track/text_track_container.h"
 
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/html/media/html_audio_element.h"
 #include "third_party/blink/renderer/core/html/media/html_video_element.h"
 #include "third_party/blink/renderer/core/html/track/cue_timeline.h"
 #include "third_party/blink/renderer/core/html/track/text_track.h"
 #include "third_party/blink/renderer/core/layout/layout_block_flow.h"
-#include "third_party/blink/renderer/core/layout/layout_object_factory.h"
 #include "third_party/blink/renderer/core/layout/layout_video.h"
 #include "third_party/blink/renderer/core/resize_observer/resize_observer.h"
 #include "third_party/blink/renderer/core/resize_observer/resize_observer_entry.h"
-#include "ui/accessibility/accessibility_features.h"
 
 namespace blink {
 
@@ -104,9 +103,9 @@ void TextTrackContainer::RemovedFrom(ContainerNode& insertion_point) {
   }
 }
 
-LayoutObject* TextTrackContainer::CreateLayoutObject(const ComputedStyle& style,
-                                                     LegacyLayout legacy) {
-  return LayoutObjectFactory::CreateBlockFlow(*this, style, legacy);
+LayoutObject* TextTrackContainer::CreateLayoutObject(
+    const ComputedStyle& style) {
+  return MakeGarbageCollected<LayoutBlockFlow>(this);
 }
 
 void TextTrackContainer::ObserveSizeChanges(Element& element) {
@@ -118,18 +117,20 @@ void TextTrackContainer::ObserveSizeChanges(Element& element) {
 
 void TextTrackContainer::UpdateDefaultFontSize(
     LayoutObject* media_layout_object) {
-  if (!media_layout_object || !IsA<LayoutVideo>(media_layout_object))
+  const LayoutVideo* video = DynamicTo<LayoutVideo>(media_layout_object);
+  if (!video) {
     return;
+  }
   // FIXME: The video size is used to calculate the font size (a workaround
   // for lack of per-spec vh/vw support) but the whole media element is used
   // for cue rendering. This is inconsistent. See also the somewhat related
   // spec bug: https://www.w3.org/Bugs/Public/show_bug.cgi?id=28105
-  LayoutSize video_size = To<LayoutBox>(media_layout_object)->ContentSize();
-  LayoutUnit smallest_dimension =
-      std::min(video_size.Height(), video_size.Width());
+  const PhysicalSize video_size = video->PhysicalContentBoxRect().size;
+  LayoutUnit smallest_dimension = std::min(video_size.height, video_size.width);
   float font_size = smallest_dimension * 0.05f;
-  if (media_layout_object->GetFrame())
-    font_size /= media_layout_object->GetFrame()->PageZoomFactor();
+  if (const LocalFrame* frame = video->GetFrame()) {
+    font_size /= frame->LayoutZoomFactor();
+  }
 
   // Avoid excessive FP precision issue.
   // C11 5.2.4.2.2:9 requires assignment and cast to remove extra precision, but
@@ -180,7 +181,10 @@ void TextTrackContainer::UpdateDisplay(HTMLMediaElement& media_element,
   // 5. If the last time these rules were run, the user agent was not exposing
   // a user interface for video, but now it is, optionally let reset be true.
   // Otherwise, let reset be false.
-  bool reset = exposing_controls == kDidStartExposingControls;
+  //
+  // We also reset when controls stop being exposed (kDidStopExposingControls)
+  // so that cue positions are recalculated to use the reclaimed space.
+  bool reset = exposing_controls != kDidNotStartExposingControls;
 
   // 6. Let tracks be the subset of video's list of text tracks that have as
   // their rules for updating the text track rendering these rules for
@@ -212,10 +216,7 @@ void TextTrackContainer::UpdateDisplay(HTMLMediaElement& media_element,
     if (!cue->track() || !cue->track()->IsRendered() || !cue->IsActive())
       continue;
 
-    if (!cue->track()->IsSpokenKind()) {
-      cue->UpdateDisplay(*this);
-    }
-
+    cue->UpdateDisplay(*this);
     cue->UpdatePastAndFutureNodes(movie_time);
   }
 

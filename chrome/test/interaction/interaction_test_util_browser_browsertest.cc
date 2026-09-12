@@ -4,23 +4,48 @@
 
 #include "chrome/test/interaction/interaction_test_util_browser.h"
 
+#include <memory>
+
 #include "base/functional/bind.h"
-#include "chrome/browser/ui/browser.h"
+#include "base/test/scoped_feature_list.h"
+#include "build/build_config.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser_element_identifiers.h"
-#include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/interaction/browser_elements.h"
+#include "chrome/browser/ui/tabs/features.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
+#include "chrome/browser/ui/toolbar/app_menu_model.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
+#include "chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h"
 #include "chrome/browser/ui/views/tabs/tab_strip.h"
+#include "chrome/common/pref_names.h"
+#include "chrome/test/interaction/feature_engagement_initialized_observer.h"
 #include "chrome/test/interaction/interactive_browser_test.h"
 #include "chrome/test/interaction/webcontents_interaction_test_util.h"
+#include "components/prefs/pref_service.h"
+#include "components/user_education/common/new_badge/new_badge_controller.h"
 #include "content/public/test/browser_test.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/interaction/interaction_test_util.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/gfx/geometry/size.h"
+#include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/interaction/element_tracker_views.h"
+#include "ui/views/interaction/interaction_test_util_views.h"
+#include "ui/views/layout/flex_layout.h"
+#include "ui/views/layout/layout_types.h"
+#include "ui/views/style/typography.h"
+#include "ui/views/view_class_properties.h"
+#include "ui/views/widget/widget.h"
+#include "ui/webui/tracked_element/tracked_element_handler.h"
 
 namespace {
 DEFINE_LOCAL_ELEMENT_IDENTIFIER_VALUE(kWebContentsElementId);
 constexpr char kDocumentWithTitle1URL[] = "/title1.html";
+constexpr char kScreenshotElementURL[] =
+    "/test_framework/screenshot_element.html";
 constexpr char kSkipPixelTestsReason[] = "Should only run in pixel_tests.";
 }
 
@@ -47,24 +72,131 @@ class InteractionTestUtilBrowserTest : public InteractiveBrowserTest {
 };
 
 IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest, GetBrowserFromContext) {
-  Browser* const other_browser = CreateBrowser(browser()->profile());
+  BrowserWindowInterface* const other_browser =
+      CreateBrowser(browser()->GetProfile());
   EXPECT_EQ(browser(), InteractionTestUtilBrowser::GetBrowserFromContext(
-                           browser()->window()->GetElementContext()));
-  EXPECT_EQ(other_browser, InteractionTestUtilBrowser::GetBrowserFromContext(
-                               other_browser->window()->GetElementContext()));
+                           BrowserElements::From(browser())->GetContext()));
+  EXPECT_EQ(other_browser,
+            InteractionTestUtilBrowser::GetBrowserFromContext(
+                BrowserElements::From(other_browser)->GetContext()));
 }
 
 IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest, CompareScreenshot_View) {
-  RunTestSequence(
-      SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
-                              kSkipPixelTestsReason),
-      // This adds a callback that calls
-      // InteractionTestUtilBrowser::CompareScreenshot().
-      Screenshot(kAppMenuButtonElementId, "AppMenuButton", "3924454"));
+  RunTestSequence(SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
+                                          kSkipPixelTestsReason),
+                  // This adds a callback that calls
+                  // InteractionTestUtilBrowser::CompareScreenshot().
+                  Screenshot(kToolbarAppMenuButtonElementId,
+                             /*screenshot_name=*/"AppMenuButton",
+                             /*baseline_cl=*/"3924454"));
 }
 
 IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
-                       CompareScreenshot_WebPage) {
+                       CompareScreenshot_ViewWithClipBounds) {
+  RunTestSequence(SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
+                                          kSkipPixelTestsReason),
+                  // This adds a callback that calls
+                  // InteractionTestUtilBrowser::CompareScreenshot().
+                  Screenshot(kToolbarAppMenuButtonElementId,
+                             /*screenshot_name=*/"AppMenuButton",
+                             /*baseline_cl=*/"6956367",
+                             []() { return gfx::Rect(4, 4, 20, 20); }));
+}
+
+IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
+                       CompareScreenshot_TrackedElementWebUI) {
+  DEFINE_LOCAL_ELEMENT_IDENTIFIER_VALUE(kTestWebUIElementId);
+  auto* const web_contents =
+      browser()->GetTabStripModel()->GetActiveWebContents();
+  auto handler = std::make_unique<ui::TrackedElementHandler>(
+      web_contents, BrowserElements::From(browser())->GetContext(),
+      std::vector<ui::ElementIdentifier>{kTestWebUIElementId});
+  handler->TrackedElementVisibilityChanged(
+      tracked_element::mojom::TrackedElementIdentifier::New(
+          kTestWebUIElementId.GetName(), "1"),
+      true, gfx::RectF(10, 10, 50, 20));
+
+  RunTestSequence(WaitForShow(kTestWebUIElementId),
+                  SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
+                                          kSkipPixelTestsReason),
+                  Screenshot(kTestWebUIElementId,
+                             /*screenshot_name=*/"WebUIElement",
+                             /*baseline_cl=*/"1234567"));
+}
+
+IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
+                       CompareScreenshot_TrackedElementWebUIWithClipBounds) {
+  DEFINE_LOCAL_ELEMENT_IDENTIFIER_VALUE(kTestWebUIElementId);
+  auto* const web_contents =
+      browser()->GetTabStripModel()->GetActiveWebContents();
+  auto handler = std::make_unique<ui::TrackedElementHandler>(
+      web_contents, BrowserElements::From(browser())->GetContext(),
+      std::vector<ui::ElementIdentifier>{kTestWebUIElementId});
+  handler->TrackedElementVisibilityChanged(
+      tracked_element::mojom::TrackedElementIdentifier::New(
+          kTestWebUIElementId.GetName(), "1"),
+      true, gfx::RectF(10, 10, 50, 20));
+
+  RunTestSequence(WaitForShow(kTestWebUIElementId),
+                  SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
+                                          kSkipPixelTestsReason),
+                  Screenshot(kTestWebUIElementId,
+                             /*screenshot_name=*/"WebUIElement",
+                             /*baseline_cl=*/"1234567",
+                             []() { return gfx::Rect(2, 2, 10, 10); }));
+}
+
+class ScreenshotSurfaceTestDialog : public views::BubbleDialogDelegateView {
+ public:
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kTitleElementId);
+
+  explicit ScreenshotSurfaceTestDialog(View* anchor_view)
+      : views::BubbleDialogDelegateView(anchor_view,
+                                        views::BubbleBorder::TOP_CENTER) {
+    auto* const layout =
+        SetLayoutManager(std::make_unique<views::FlexLayout>());
+    layout->SetOrientation(views::LayoutOrientation::kVertical);
+    auto* const label = AddChildView(std::make_unique<views::Label>(
+        u"The quick brown fox", views::style::CONTEXT_DIALOG_TITLE));
+    label->SetProperty(views::kElementIdentifierKey, kTitleElementId);
+    AddChildView(
+        std::make_unique<views::Label>(u"...jumped over the lazy dogs."));
+  }
+
+  ~ScreenshotSurfaceTestDialog() override = default;
+};
+
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(ScreenshotSurfaceTestDialog,
+                                      kTitleElementId);
+
+IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
+                       // TODO(crbug.com/422631121): Re-enable this test
+                       DISABLED_CompareScreenshot_Surface) {
+  views::Widget* widget = nullptr;
+
+  RunTestSequence(
+      WithView(kTopContainerElementId,
+               [&widget](views::View* anchor) {
+                 widget = views::BubbleDialogDelegate::CreateBubbleDeprecated(
+                     std::make_unique<ScreenshotSurfaceTestDialog>(anchor),
+                     views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET);
+                 widget->Show();
+               }),
+      WaitForShow(ScreenshotSurfaceTestDialog::kTitleElementId),
+      SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
+                              kSkipPixelTestsReason),
+      ScreenshotSurface(ScreenshotSurfaceTestDialog::kTitleElementId,
+                        /*screenshot_name=*/"TestDialog",
+                        /*baseline_cl=*/"5495023"));
+
+  if (widget) {
+    widget->CloseNow();
+  }
+}
+
+// TODO(crbug.com/455686746): This test is flaky on all platforms.
+IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
+                       DISABLED_CompareScreenshot_WebPage) {
   // Set the browser view to a consistent size.
   BrowserView* const browser_view =
       BrowserView::GetBrowserViewForBrowser(browser());
@@ -72,13 +204,35 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
 
   const GURL url = embedded_test_server()->GetURL(kDocumentWithTitle1URL);
 
+  RunTestSequence(
+      InstrumentTab(kWebContentsElementId),
+      SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
+                              kSkipPixelTestsReason),
+      NavigateWebContents(kWebContentsElementId, url),
+      // This adds a callback that calls
+      // InteractionTestUtilBrowser::CompareScreenshot().
+      Screenshot(kWebContentsElementId, /*screenshot_name=*/std::string(),
+                 /*baseline_cl=*/"3924454"));
+}
+
+// TODO(crbug.com/455686746): This test is flaky on all platforms.
+IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
+                       DISABLED_CompareScreenshot_WebPageElement) {
+  // Set the browser view to a consistent size.
+  BrowserView* const browser_view =
+      BrowserView::GetBrowserViewForBrowser(browser());
+  browser_view->GetWidget()->SetSize({400, 300});
+
+  const GURL url = embedded_test_server()->GetURL(kScreenshotElementURL);
+  const InteractiveBrowserTestApi::DeepQuery kElementPath = {"#target"};
+
   RunTestSequence(InstrumentTab(kWebContentsElementId),
                   SetOnIncompatibleAction(OnIncompatibleAction::kSkipTest,
                                           kSkipPixelTestsReason),
                   NavigateWebContents(kWebContentsElementId, url),
-                  // This adds a callback that calls
-                  // InteractionTestUtilBrowser::CompareScreenshot().
-                  Screenshot(kWebContentsElementId, std::string(), "3924454"));
+                  ScreenshotWebUi(kWebContentsElementId, kElementPath,
+                                  /*screenshot_name=*/std::string(),
+                                  /*baseline_cl=*/"6907123"));
 }
 
 IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest, ConfirmOmnibox) {
@@ -90,6 +244,12 @@ IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest, ConfirmOmnibox) {
       WaitForWebContentsNavigation(kWebContentsElementId, GURL(kNewUrl)));
 }
 
+IN_PROC_BROWSER_TEST_F(InteractionTestUtilBrowserTest,
+                       ObserveFeatureEngagementInitialized) {
+  RunTestSequence(ObserveState(kFeatureEngagementInitializedState, browser()),
+                  WaitForState(kFeatureEngagementInitializedState, true));
+}
+
 class InteractionTestUtilBrowserSelectTabTest
     : public InteractionTestUtilBrowserTest,
       public testing::WithParamInterface<
@@ -97,12 +257,20 @@ class InteractionTestUtilBrowserSelectTabTest
  public:
   InteractionTestUtilBrowserSelectTabTest() = default;
   ~InteractionTestUtilBrowserSelectTabTest() override = default;
+
+  void SetVerticalTabsEnabled(bool enabled) {
+    tabs::VerticalTabStripStateController::From(browser())
+        ->SetVerticalTabsEnabled(enabled);
+    RunScheduledLayouts();
+  }
 };
 
-IN_PROC_BROWSER_TEST_P(InteractionTestUtilBrowserSelectTabTest, SelectTab) {
+IN_PROC_BROWSER_TEST_P(InteractionTestUtilBrowserSelectTabTest,
+                       SelectTab_HorizontalTabstrip) {
+  SetVerticalTabsEnabled(false);
   BrowserView* const browser_view =
       BrowserView::GetBrowserViewForBrowser(browser());
-  TabStrip* const tab_strip = browser_view->tabstrip();
+  TabStrip* const tab_strip = browser_view->horizontal_tab_strip_for_testing();
   auto* const browser_el =
       views::ElementTrackerViews::GetInstance()->GetElementForView(browser_view,
                                                                    true);
@@ -116,7 +284,10 @@ IN_PROC_BROWSER_TEST_P(InteractionTestUtilBrowserSelectTabTest, SelectTab) {
   CHECK(AddTabAtIndex(-1, GURL("about:blank"), ui::PAGE_TRANSITION_LINK));
 
   // Select a few different tabs using both the browser and tabstrip as targets.
-  InteractionTestUtilBrowser test_util;
+  ui::test::InteractionTestUtil test_util;
+  test_util.AddSimulator(
+      std::make_unique<views::test::InteractionTestUtilSimulatorViews>());
+  InteractionTestUtilBrowser::PopulateSimulators(test_util);
   EXPECT_EQ(ui::test::ActionResult::kSucceeded,
             test_util.SelectTab(browser_el, 2));
   EXPECT_EQ(2, tab_strip->GetActiveIndex());
@@ -137,6 +308,55 @@ IN_PROC_BROWSER_TEST_P(InteractionTestUtilBrowserSelectTabTest, SelectTab) {
   EXPECT_EQ(ui::test::ActionResult::kSucceeded,
             test_util.SelectTab(browser_el, 3));
   EXPECT_EQ(3, tab_strip->GetActiveIndex());
+}
+
+IN_PROC_BROWSER_TEST_P(InteractionTestUtilBrowserSelectTabTest,
+                       SelectTab_VerticalTabstrip) {
+  SetVerticalTabsEnabled(true);
+  BrowserView* const browser_view =
+      BrowserView::GetBrowserViewForBrowser(browser());
+  auto* const tab_strip =
+      browser_view->vertical_tab_strip_region_view_for_testing();
+  CHECK(tab_strip);
+  CHECK_EQ(tab_strip, browser_view->tab_strip_view());
+  auto* const browser_el =
+      views::ElementTrackerViews::GetInstance()->GetElementForView(browser_view,
+                                                                   true);
+  auto* const tabstrip_el =
+      views::ElementTrackerViews::GetInstance()->GetElementForView(tab_strip,
+                                                                   true);
+  auto* const model = browser()->GetTabStripModel();
+
+  // Add up to a total of four tabs.
+  CHECK(AddTabAtIndex(-1, GURL("about:blank"), ui::PAGE_TRANSITION_LINK));
+  CHECK(AddTabAtIndex(-1, GURL("about:blank"), ui::PAGE_TRANSITION_LINK));
+  CHECK(AddTabAtIndex(-1, GURL("about:blank"), ui::PAGE_TRANSITION_LINK));
+
+  // Select a few different tabs using both the browser and tabstrip as targets.
+  ui::test::InteractionTestUtil test_util;
+  test_util.AddSimulator(
+      std::make_unique<views::test::InteractionTestUtilSimulatorViews>());
+  InteractionTestUtilBrowser::PopulateSimulators(test_util);
+  EXPECT_EQ(ui::test::ActionResult::kSucceeded,
+            test_util.SelectTab(browser_el, 2));
+  EXPECT_EQ(2, model->active_index());
+  EXPECT_EQ(ui::test::ActionResult::kSucceeded,
+            test_util.SelectTab(tabstrip_el, 1));
+  EXPECT_EQ(1, model->active_index());
+  EXPECT_EQ(ui::test::ActionResult::kSucceeded,
+            test_util.SelectTab(tabstrip_el, 0));
+  EXPECT_EQ(0, model->active_index());
+  EXPECT_EQ(ui::test::ActionResult::kSucceeded,
+            test_util.SelectTab(browser_el, 3));
+  EXPECT_EQ(3, model->active_index());
+
+  // Re-selecting the same tab shouldn't break anything.
+  EXPECT_EQ(ui::test::ActionResult::kSucceeded,
+            test_util.SelectTab(tabstrip_el, 3));
+  EXPECT_EQ(3, model->active_index());
+  EXPECT_EQ(ui::test::ActionResult::kSucceeded,
+            test_util.SelectTab(browser_el, 3));
+  EXPECT_EQ(3, model->active_index());
 }
 
 INSTANTIATE_TEST_SUITE_P(

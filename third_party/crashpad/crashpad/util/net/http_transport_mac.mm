@@ -15,10 +15,12 @@
 #include "util/net/http_transport.h"
 
 #import <Foundation/Foundation.h>
+#include <dispatch/dispatch.h>
 #include <sys/utsname.h>
 
-#include "base/mac/foundation_util.h"
-#import "base/mac/scoped_nsobject.h"
+#include "base/apple/bridging.h"
+#include "base/apple/foundation_util.h"
+#include "base/check.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
 #include "build/build_config.h"
@@ -33,7 +35,7 @@
 @interface CrashpadHTTPBodyStreamTransport : NSInputStream {
  @private
   NSStreamStatus _streamStatus;
-  id<NSStreamDelegate> _delegate;
+  id<NSStreamDelegate> __strong _delegate;
   crashpad::HTTPBodyStream* _bodyStream;  // weak
 }
 - (instancetype)initWithBodyStream:(crashpad::HTTPBodyStream*)bodyStream;
@@ -153,13 +155,14 @@ NSString* UserAgentString() {
 
   // Expected to be CFNetwork.
   NSBundle* nsurl_bundle = [NSBundle bundleForClass:[NSURLRequest class]];
-  NSString* bundle_name = base::mac::ObjCCast<NSString>([nsurl_bundle
-      objectForInfoDictionaryKey:base::mac::CFToNSCast(kCFBundleNameKey)]);
+  NSString* bundle_name = base::apple::ObjCCast<NSString>([nsurl_bundle
+      objectForInfoDictionaryKey:base::apple::CFToNSPtrCast(kCFBundleNameKey)]);
   if (bundle_name) {
     user_agent = AppendEscapedFormat(user_agent, @" %@", bundle_name);
 
-    NSString* bundle_version = base::mac::ObjCCast<NSString>([nsurl_bundle
-        objectForInfoDictionaryKey:base::mac::CFToNSCast(kCFBundleVersionKey)]);
+    NSString* bundle_version = base::apple::ObjCCast<NSString>(
+        [nsurl_bundle objectForInfoDictionaryKey:base::apple::CFToNSPtrCast(
+                                                     kCFBundleVersionKey)]);
     if (bundle_version) {
       user_agent = AppendEscapedFormat(user_agent, @"/%@", bundle_version);
     }
@@ -240,22 +243,32 @@ bool HTTPTransportMac::ExecuteSynchronously(std::string* response_body) {
           forHTTPHeaderField:base::SysUTF8ToNSString(pair.first)];
     }
 
-    base::scoped_nsobject<NSInputStream> input_stream(
-        [[CrashpadHTTPBodyStreamTransport alloc]
-            initWithBodyStream:body_stream()]);
-    [request setHTTPBodyStream:input_stream.get()];
+    NSInputStream* input_stream = [[CrashpadHTTPBodyStreamTransport alloc]
+        initWithBodyStream:body_stream()];
+    [request setHTTPBodyStream:input_stream];
 
-    NSURLResponse* response = nil;
-    NSError* error = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    // Deprecated in OS X 10.11. The suggested replacement, NSURLSession, is
-    // only available on 10.9 and later, and this needs to run on earlier
-    // releases.
-    NSData* body = [NSURLConnection sendSynchronousRequest:request
-                                         returningResponse:&response
-                                                     error:&error];
-#pragma clang diagnostic pop
+    __block NSData* body = nil;
+    __block NSURLResponse* response = nil;
+    __block NSError* error = nil;
+
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    CHECK(semaphore) << "dispatch_semaphore_create";
+    NSURLSession* session = [NSURLSession
+        sessionWithConfiguration:[NSURLSessionConfiguration
+                                     ephemeralSessionConfiguration]];
+    NSURLSessionDataTask* task =
+        [session dataTaskWithRequest:request
+                   completionHandler:^(NSData* task_data,
+                                       NSURLResponse* task_response,
+                                       NSError* task_error) {
+                     body = task_data;
+                     response = task_response;
+                     error = task_error;
+                     dispatch_semaphore_signal(semaphore);
+                   }];
+    [task resume];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    [session finishTasksAndInvalidate];
 
     if (error) {
       Metrics::CrashUploadErrorCode(error.code);
@@ -268,7 +281,7 @@ bool HTTPTransportMac::ExecuteSynchronously(std::string* response_body) {
       return false;
     }
     NSHTTPURLResponse* http_response =
-        base::mac::ObjCCast<NSHTTPURLResponse>(response);
+        base::apple::ObjCCast<NSHTTPURLResponse>(response);
     if (!http_response) {
       LOG(ERROR) << "no http_response";
       return false;

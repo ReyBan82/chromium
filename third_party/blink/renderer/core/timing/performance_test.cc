@@ -2,26 +2,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "third_party/blink/renderer/core/timing/window_performance.h"
+#include "third_party/blink/renderer/core/timing/performance.h"
 
 #include <algorithm>
 
-#include "base/ranges/algorithm.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_performance_observer_callback.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_performance_observer_init.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/performance_entry_names.h"
 #include "third_party/blink/renderer/core/testing/null_execution_context.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
 #include "third_party/blink/renderer/core/timing/back_forward_cache_restoration.h"
-#include "third_party/blink/renderer/core/timing/performance.h"
+#include "third_party/blink/renderer/core/timing/dom_window_performance.h"
 #include "third_party/blink/renderer/core/timing/performance_long_task_timing.h"
 #include "third_party/blink/renderer/core/timing/performance_observer.h"
+#include "third_party/blink/renderer/core/timing/window_performance.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_response.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
 namespace {
@@ -43,7 +46,8 @@ class TestPerformance : public Performance {
                     ExecutionContext::From(script_state)
                         ->CrossOriginIsolatedCapability(),
                     ExecutionContext::From(script_state)
-                        ->GetTaskRunner(TaskType::kPerformanceTimeline)),
+                        ->GetTaskRunner(TaskType::kPerformanceTimeline),
+                    ExecutionContext::From(script_state)),
         execution_context_(ExecutionContext::From(script_state)) {}
   ~TestPerformance() override = default;
 
@@ -60,6 +64,13 @@ class TestPerformance : public Performance {
     return HasObserverFor(entry_type);
   }
 
+  base::TimeTicks MsAfterTimeOrigin(uint32_t ms) {
+    LocalDOMWindow* window = DynamicTo<LocalDOMWindow>(GetExecutionContext());
+    DocumentLoader* loader = window->GetFrame()->Loader().GetDocumentLoader();
+    return loader->GetTiming().ReferenceMonotonicTime() +
+           base::Milliseconds(ms);
+  }
+
   void Trace(Visitor* visitor) const override {
     Performance::Trace(visitor);
     visitor->Trace(execution_context_);
@@ -70,6 +81,10 @@ class TestPerformance : public Performance {
 };
 
 class PerformanceTest : public PageTestBase {
+ public:
+  PerformanceTest()
+      : PageTestBase(base::test::TaskEnvironment::TimeSource::MOCK_TIME) {}
+
  protected:
   ~PerformanceTest() override { execution_context_->NotifyContextDestroyed(); }
 
@@ -98,17 +113,13 @@ class PerformanceTest : public PageTestBase {
   }
 
   void CheckBackForwardCacheRestoration(PerformanceEntryVector entries) {
-    // Expect there are 2 back forward cache restoration entries.
-    EXPECT_EQ(2, base::ranges::count(entries, "back-forward-cache-restoration",
-                                     &PerformanceEntry::entryType));
-
-    // Retain only back forward cache restoration entries.
-    entries.erase(std::remove_if(entries.begin(), entries.end(),
-                                 [](const PerformanceEntry* e) -> bool {
-                                   return e->entryType() !=
-                                          "back-forward-cache-restoration";
-                                 }),
-                  entries.end());
+    // Retain only back forward cache restoration entries. There should be two.
+    auto to_remove =
+        std::ranges::remove_if(entries, [](const PerformanceEntry* e) {
+          return e->entryType() != "back-forward-cache-restoration";
+        });
+    entries.erase(to_remove.begin(), to_remove.end());
+    EXPECT_EQ(2u, entries.size());
 
     BackForwardCacheRestoration* b1 =
         static_cast<BackForwardCacheRestoration*>(entries[0].Get());
@@ -171,8 +182,10 @@ TEST_F(PerformanceTest, AddLongTaskTiming) {
 
   // Add a long task entry, but no observer registered.
   base_->AddLongTaskTiming(base::TimeTicks() + base::Seconds(1234),
-                           base::TimeTicks() + base::Seconds(5678), "window",
-                           "same-origin", "www.foo.com/bar", "", "");
+                           base::TimeTicks() + base::Seconds(5678),
+                           AtomicString("window"), AtomicString("same-origin"),
+                           AtomicString("www.foo.com/bar"), g_empty_atom,
+                           g_empty_atom);
   EXPECT_FALSE(base_->HasPerformanceObserverFor(PerformanceEntry::kLongTask));
   EXPECT_EQ(0, NumPerformanceEntriesInObserver());  // has no effect
 
@@ -182,13 +195,15 @@ TEST_F(PerformanceTest, AddLongTaskTiming) {
   Vector<String> entry_type_vec;
   entry_type_vec.push_back("longtask");
   options->setEntryTypes(entry_type_vec);
-  observer_->observe(options, exception_state);
+  observer_->observe(scope.GetScriptState(), options, exception_state);
 
   EXPECT_TRUE(base_->HasPerformanceObserverFor(PerformanceEntry::kLongTask));
   // Add a long task entry
   base_->AddLongTaskTiming(base::TimeTicks() + base::Seconds(1234),
-                           base::TimeTicks() + base::Seconds(5678), "window",
-                           "same-origin", "www.foo.com/bar", "", "");
+                           base::TimeTicks() + base::Seconds(5678),
+                           AtomicString("window"), AtomicString("same-origin"),
+                           AtomicString("www.foo.com/bar"), g_empty_atom,
+                           g_empty_atom);
   EXPECT_EQ(1, NumPerformanceEntriesInObserver());  // added an entry
 }
 
@@ -202,7 +217,7 @@ TEST_F(PerformanceTest, BackForwardCacheRestoration) {
   Vector<String> entry_type_vec;
   entry_type_vec.push_back("back-forward-cache-restoration");
   options->setEntryTypes(entry_type_vec);
-  observer_->observe(options, exception_state);
+  observer_->observe(scope.GetScriptState(), options, exception_state);
 
   EXPECT_TRUE(base_->HasPerformanceObserverFor(
       PerformanceEntry::kBackForwardCacheRestoration));
@@ -223,7 +238,8 @@ TEST_F(PerformanceTest, BackForwardCacheRestoration) {
   entries = base_->getEntries();
   CheckBackForwardCacheRestoration(entries);
 
-  entries = base_->getEntriesByType("back-forward-cache-restoration");
+  entries = base_->getEntriesByType(
+      performance_entry_names::kBackForwardCacheRestoration);
   CheckBackForwardCacheRestoration(entries);
 }
 
@@ -234,12 +250,21 @@ TEST_F(PerformanceTest, InsertEntryOnEmptyBuffer) {
 
   PerformanceEntryVector test_buffer_;
 
-  PerformanceEventTiming* test_entry = PerformanceEventTiming::Create(
-      "event", 0.0, 0.0, 0.0, false, nullptr,
-      LocalDOMWindow::From(scope.GetScriptState()));
+  PerformanceEventTiming::EventTimingReportingInfo info{
+      .creation_time = base_->MsAfterTimeOrigin(0),
+      .processing_start_time = base_->MsAfterTimeOrigin(0),
+      .processing_end_time = base_->MsAfterTimeOrigin(0)};
 
-  base_->InsertEntryIntoSortedBuffer(test_buffer_, *test_entry,
-                                     Performance::kDoNotRecordSwaps);
+  auto* window = LocalDOMWindow::From(scope.GetScriptState());
+  ASSERT_TRUE(window);
+  auto* performance = DOMWindowPerformance::performance(*window);
+  ASSERT_TRUE(performance);
+
+  PerformanceEventTiming* test_entry = PerformanceEventTiming::Create(
+      AtomicString("event"), info, false, window,
+      performance->NavigationId().web_exposed_id);
+
+  base_->InsertEntryIntoSortedBuffer(test_buffer_, *test_entry);
 
   PerformanceEntryVector sorted_buffer_;
   sorted_buffer_.push_back(*test_entry);
@@ -251,27 +276,40 @@ TEST_F(PerformanceTest, InsertEntryOnEmptyBuffer) {
 TEST_F(PerformanceTest, InsertEntryOnExistingBuffer) {
   V8TestingScope scope;
   Initialize(scope.GetScriptState());
+  auto* window = LocalDOMWindow::From(scope.GetScriptState());
+  ASSERT_TRUE(window);
+  auto* performance = DOMWindowPerformance::performance(*window);
+  ASSERT_TRUE(performance);
 
   PerformanceEntryVector test_buffer_;
 
   // Insert 3 entries into the vector.
   for (int i = 0; i < 3; i++) {
     double tmp = 1.0;
+    PerformanceEventTiming::EventTimingReportingInfo info{
+        .creation_time = base_->MsAfterTimeOrigin(tmp * i),
+        .processing_start_time = base_->MsAfterTimeOrigin(0),
+        .processing_end_time = base_->MsAfterTimeOrigin(0)};
+
     PerformanceEventTiming* entry = PerformanceEventTiming::Create(
-        "event", tmp * i, 0.0, 0.0, false, nullptr,
-        LocalDOMWindow::From(scope.GetScriptState()));
+        AtomicString("event"), info, false, window,
+        performance->NavigationId().web_exposed_id);
     test_buffer_.push_back(*entry);
   }
 
+  PerformanceEventTiming::EventTimingReportingInfo info{
+      .creation_time = base_->MsAfterTimeOrigin(1),
+      .processing_start_time = base_->MsAfterTimeOrigin(0),
+      .processing_end_time = base_->MsAfterTimeOrigin(0)};
+
   PerformanceEventTiming* test_entry = PerformanceEventTiming::Create(
-      "event", 1.0, 0.0, 0.0, false, nullptr,
-      LocalDOMWindow::From(scope.GetScriptState()));
+      AtomicString("event"), info, false, window,
+      performance->NavigationId().web_exposed_id);
 
   // Create copy of the test_buffer_.
   PerformanceEntryVector sorted_buffer_ = test_buffer_;
 
-  base_->InsertEntryIntoSortedBuffer(test_buffer_, *test_entry,
-                                     Performance::kDoNotRecordSwaps);
+  base_->InsertEntryIntoSortedBuffer(test_buffer_, *test_entry);
 
   sorted_buffer_.push_back(*test_entry);
   std::sort(sorted_buffer_.begin(), sorted_buffer_.end(),
@@ -284,27 +322,41 @@ TEST_F(PerformanceTest, InsertEntryOnExistingBuffer) {
 TEST_F(PerformanceTest, InsertEntryToFrontOfBuffer) {
   V8TestingScope scope;
   Initialize(scope.GetScriptState());
+  auto* window = LocalDOMWindow::From(scope.GetScriptState());
+  ASSERT_TRUE(window);
+  auto* performance = DOMWindowPerformance::performance(*window);
+  ASSERT_TRUE(performance);
 
   PerformanceEntryVector test_buffer_;
 
   // Insert 3 entries into the vector.
   for (int i = 0; i < 3; i++) {
     double tmp = 1.0;
+
+    PerformanceEventTiming::EventTimingReportingInfo info{
+        .creation_time = base_->MsAfterTimeOrigin(tmp * i),
+        .processing_start_time = base_->MsAfterTimeOrigin(0),
+        .processing_end_time = base_->MsAfterTimeOrigin(0)};
+
     PerformanceEventTiming* entry = PerformanceEventTiming::Create(
-        "event", tmp * i, 0.0, 0.0, false, nullptr,
-        LocalDOMWindow::From(scope.GetScriptState()));
+        AtomicString("event"), info, false, window,
+        performance->NavigationId().web_exposed_id);
     test_buffer_.push_back(*entry);
   }
 
+  PerformanceEventTiming::EventTimingReportingInfo info{
+      .creation_time = base_->MsAfterTimeOrigin(0),
+      .processing_start_time = base_->MsAfterTimeOrigin(0),
+      .processing_end_time = base_->MsAfterTimeOrigin(0)};
+
   PerformanceEventTiming* test_entry = PerformanceEventTiming::Create(
-      "event", 0.0, 0.0, 0.0, false, nullptr,
-      LocalDOMWindow::From(scope.GetScriptState()));
+      AtomicString("event"), info, false, window,
+      performance->NavigationId().web_exposed_id);
 
   // Create copy of the test_buffer_.
   PerformanceEntryVector sorted_buffer_ = test_buffer_;
 
-  base_->InsertEntryIntoSortedBuffer(test_buffer_, *test_entry,
-                                     Performance::kDoNotRecordSwaps);
+  base_->InsertEntryIntoSortedBuffer(test_buffer_, *test_entry);
 
   sorted_buffer_.push_back(*test_entry);
   std::sort(sorted_buffer_.begin(), sorted_buffer_.end(),
@@ -316,6 +368,10 @@ TEST_F(PerformanceTest, InsertEntryToFrontOfBuffer) {
 TEST_F(PerformanceTest, MergePerformanceEntryVectorsTest) {
   V8TestingScope scope;
   Initialize(scope.GetScriptState());
+  auto* window = LocalDOMWindow::From(scope.GetScriptState());
+  ASSERT_TRUE(window);
+  auto* performance = DOMWindowPerformance::performance(*window);
+  ASSERT_TRUE(performance);
 
   PerformanceEntryVector first_vector;
   PerformanceEntryVector second_vector;
@@ -324,18 +380,30 @@ TEST_F(PerformanceTest, MergePerformanceEntryVectorsTest) {
 
   for (int i = 0; i < 6; i += 2) {
     double tmp = 1.0;
+
+    PerformanceEventTiming::EventTimingReportingInfo info{
+        .creation_time = base_->MsAfterTimeOrigin(tmp * i),
+        .processing_start_time = base_->MsAfterTimeOrigin(0),
+        .processing_end_time = base_->MsAfterTimeOrigin(0)};
+
     PerformanceEventTiming* entry = PerformanceEventTiming::Create(
-        "event", tmp * i, 0.0, 0.0, false, nullptr,
-        LocalDOMWindow::From(scope.GetScriptState()));
+        AtomicString("event"), info, false, window,
+        performance->NavigationId().web_exposed_id);
     first_vector.push_back(*entry);
     test_vector.push_back(*entry);
   }
 
   for (int i = 1; i < 6; i += 2) {
     double tmp = 1.0;
+
+    PerformanceEventTiming::EventTimingReportingInfo info{
+        .creation_time = base_->MsAfterTimeOrigin(tmp * i),
+        .processing_start_time = base_->MsAfterTimeOrigin(0),
+        .processing_end_time = base_->MsAfterTimeOrigin(0)};
+
     PerformanceEventTiming* entry = PerformanceEventTiming::Create(
-        "event", tmp * i, 0.0, 0.0, false, nullptr,
-        LocalDOMWindow::From(scope.GetScriptState()));
+        AtomicString("event"), info, false, window,
+        performance->NavigationId().web_exposed_id);
     second_vector.push_back(*entry);
     test_vector.push_back(*entry);
   }
@@ -350,6 +418,87 @@ TEST_F(PerformanceTest, MergePerformanceEntryVectorsTest) {
             PerformanceEntry::StartTimeCompareLessThan);
 
   EXPECT_EQ(all_entries, test_vector);
+}
+
+TEST_F(PerformanceTest, DeclarativePerformanceObserverOptimization) {
+  ScopedDeclarativePerformanceObserverForTest
+      enable_declarative_performance_observer(true);
+
+  V8TestingScope scope;
+  Initialize(scope.GetScriptState());
+
+  int bind_count = 0;
+  scope.GetFrame().GetBrowserInterfaceBroker().SetBinderForTesting(
+      mojom::blink::DeclarativePerformanceObserverHost::Name_,
+      BindRepeating(
+          [](int* count, mojo::ScopedMessagePipeHandle pipe) {
+            (*count)++;
+            // Drop pipe immediately (simulating non-opt-in page)
+          },
+          Unretained(&bind_count)));
+
+  // 1. Call performance.mark()
+  base_->mark(scope.GetScriptState(), AtomicString("mark_1"), nullptr,
+              scope.GetExceptionState());
+  EXPECT_FALSE(scope.GetExceptionState().HadException());
+
+  // Fast-forward to trigger FlushPerformanceEntries and cause the pipe to drop
+  FastForwardBy(Performance::kBufferTimerDelay);
+
+  // The binding attempt should have been made once
+  EXPECT_EQ(bind_count, 1);
+
+  // 2. Call performance.mark() a second time.
+  // Because it was disconnected, it should skip detail conversion & binding,
+  // so bind_count should NOT increase!
+  base_->mark(scope.GetScriptState(), AtomicString("mark_2"), nullptr,
+              scope.GetExceptionState());
+  EXPECT_FALSE(scope.GetExceptionState().HadException());
+
+  FastForwardBy(Performance::kBufferTimerDelay);
+
+  EXPECT_EQ(bind_count, 1);  // Remains 1!
+
+  // Clean up binder
+  scope.GetFrame().GetBrowserInterfaceBroker().SetBinderForTesting(
+      mojom::blink::DeclarativePerformanceObserverHost::Name_, {});
+}
+
+TEST_F(PerformanceTest, GetEntriesByTypeUseCounters) {
+  struct TestCase {
+    const char* entry_type;
+    std::vector<WebFeature> expected_features;
+  };
+
+  const TestCase kTestCases[] = {
+      {"resource", {WebFeature::kResourceTiming}},
+      {"navigation", {WebFeature::kNavigationTimingL2}},
+      {"paint", {WebFeature::kPaintTimingRequested}},
+      {"long-animation-frame", {WebFeature::kLongAnimationFrameRequested}},
+      {"first-input",
+       {WebFeature::kEventTimingExplicitlyRequested,
+        WebFeature::kEventTimingFirstInputExplicitlyRequested}},
+      {"soft-navigation",
+       {WebFeature::kSoftNavigationHeuristics,
+        WebFeature::kSoftNavigationExplicitlyRequested}},
+  };
+
+  for (const auto& test_case : kTestCases) {
+    SCOPED_TRACE(test_case.entry_type);
+    V8TestingScope scope;
+    auto* window = LocalDOMWindow::From(scope.GetScriptState());
+    auto* performance = DOMWindowPerformance::performance(*window);
+
+    for (WebFeature feature : test_case.expected_features) {
+      EXPECT_FALSE(scope.GetDocument().IsUseCounted(feature));
+    }
+
+    performance->getEntriesByType(AtomicString(test_case.entry_type));
+
+    for (WebFeature feature : test_case.expected_features) {
+      EXPECT_TRUE(scope.GetDocument().IsUseCounted(feature));
+    }
+  }
 }
 
 }  // namespace blink

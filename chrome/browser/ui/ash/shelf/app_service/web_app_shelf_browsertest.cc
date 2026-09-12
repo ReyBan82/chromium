@@ -10,55 +10,57 @@
 #include "ash/shelf/shelf_app_button.h"
 #include "ash/shelf/shelf_view.h"
 #include "ash/shell.h"
-#include "chrome/browser/apps/app_service/app_launch_params.h"
+#include "chrome/browser/apps/app_service/app_registry_cache_waiter.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/ui/ash/shelf/chrome_shelf_controller.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/web_applications/mojom/user_display_mode.mojom.h"
-#include "chrome/browser/web_applications/test/app_registry_cache_waiter.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
 #include "chrome/browser/web_applications/web_app_install_info.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/app_constants/constants.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "content/public/test/browser_test.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "ui/base/base_window.h"
+#include "ui/base/page_transition_types.h"
 #include "ui/base/window_open_disposition.h"
 #include "ui/display/screen.h"
 #include "url/gurl.h"
 
 class WebAppShelfBrowserTest : public InProcessBrowserTest {
  public:
-  web_app::AppId InstallTestWebApp(
+  webapps::AppId InstallTestWebApp(
       const GURL& start_url,
       web_app::mojom::UserDisplayMode user_display_mode) {
-    auto web_app_info = std::make_unique<WebAppInstallInfo>();
-    web_app_info->start_url = start_url;
+    auto web_app_info =
+        web_app::WebAppInstallInfo::CreateWithStartUrlForTesting(start_url);
     web_app_info->user_display_mode = user_display_mode;
-    const web_app::AppId app_id =
+    const webapps::AppId app_id =
         web_app::test::InstallWebApp(profile(), std::move(web_app_info));
-    web_app::AppReadinessWaiter(profile(), app_id).Await();
+    apps::AppReadinessWaiter(profile(), app_id).Await();
     return app_id;
   }
 
-  void PinToShelf(const web_app::AppId& app_id) {
-    ui_test_utils::BrowserChangeObserver observer(
-        nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  void PinToShelf(const webapps::AppId& app_id) {
+    ui_test_utils::BrowserCreatedObserver browser_created_observer;
     auto* const proxy = apps::AppServiceProxyFactory::GetForProfile(profile());
     proxy->LaunchAppWithParams(apps::AppLaunchParams(
         app_id, apps::LaunchContainer::kLaunchContainerWindow,
         WindowOpenDisposition::NEW_WINDOW, apps::LaunchSource::kFromOmnibox));
-    Browser* app_browser = observer.Wait();
+    BrowserWindowInterface* app_browser = browser_created_observer.Wait();
     ash::ShelfModel::Get()->PinExistingItemWithID(app_id);
-    app_browser->window()->Close();
+    app_browser->GetWindow()->Close();
   }
 
-  Profile* profile() { return browser()->profile(); }
+  Profile* profile() { return browser()->GetProfile(); }
 };
 
 IN_PROC_BROWSER_TEST_F(WebAppShelfBrowserTest, SwitchingBetweenApps) {
@@ -72,11 +74,11 @@ IN_PROC_BROWSER_TEST_F(WebAppShelfBrowserTest, SwitchingBetweenApps) {
   // Outside the scope of any web app:
   const GURL start_d = embedded_test_server()->GetURL("/simple.html");
 
-  const web_app::AppId app_a =
+  const webapps::AppId app_a =
       InstallTestWebApp(start_a, web_app::mojom::UserDisplayMode::kBrowser);
-  const web_app::AppId app_b =
+  const webapps::AppId app_b =
       InstallTestWebApp(start_b, web_app::mojom::UserDisplayMode::kBrowser);
-  const web_app::AppId app_c =
+  const webapps::AppId app_c =
       InstallTestWebApp(start_c, web_app::mojom::UserDisplayMode::kStandalone);
 
   auto* const proxy = apps::AppServiceProxyFactory::GetForProfile(profile());
@@ -92,7 +94,7 @@ IN_PROC_BROWSER_TEST_F(WebAppShelfBrowserTest, SwitchingBetweenApps) {
     proxy->Launch(app_a,
                   /*event_flags=*/0, apps::LaunchSource::kFromAppListGrid);
     waiter.Wait();
-    contents_a = browser()->tab_strip_model()->GetActiveWebContents();
+    contents_a = browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
   content::WebContents* contents_b;
@@ -101,18 +103,17 @@ IN_PROC_BROWSER_TEST_F(WebAppShelfBrowserTest, SwitchingBetweenApps) {
     proxy->Launch(app_b,
                   /*event_flags=*/0, apps::LaunchSource::kFromAppListGrid);
     waiter.Wait();
-    contents_b = browser()->tab_strip_model()->GetActiveWebContents();
+    contents_b = browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
-  Browser* browser_c;
+  BrowserWindowInterface* browser_c;
   content::WebContents* contents_c;
   {
-    ui_test_utils::BrowserChangeObserver observer(
-        nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+    ui_test_utils::BrowserCreatedObserver browser_created_observer;
     ui_test_utils::AllBrowserTabAddedWaiter waiter;
     proxy->Launch(app_c,
                   /*event_flags=*/0, apps::LaunchSource::kFromAppListGrid);
-    browser_c = observer.Wait();
+    browser_c = browser_created_observer.Wait();
     contents_c = waiter.Wait();
   }
 
@@ -123,7 +124,7 @@ IN_PROC_BROWSER_TEST_F(WebAppShelfBrowserTest, SwitchingBetweenApps) {
     params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
     ui_test_utils::NavigateToURL(&params);
     waiter.Wait();
-    contents_d = browser()->tab_strip_model()->GetActiveWebContents();
+    contents_d = browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
   // The Shelf model contains 3 web apps, and the Chrome browser.
@@ -135,7 +136,7 @@ IN_PROC_BROWSER_TEST_F(WebAppShelfBrowserTest, SwitchingBetweenApps) {
 
   ash::RootWindowController* const controller =
       ash::Shell::GetRootWindowControllerWithDisplayId(
-          display::Screen::GetScreen()->GetPrimaryDisplay().id());
+          display::Screen::Get()->GetPrimaryDisplay().id());
   ash::ShelfView* const shelf_view =
       controller->shelf()->GetShelfViewForTesting();
   const ash::ShelfAppButton* const button_a =
@@ -147,33 +148,33 @@ IN_PROC_BROWSER_TEST_F(WebAppShelfBrowserTest, SwitchingBetweenApps) {
   const ash::ShelfAppButton* const button_chrome =
       shelf_view->GetShelfAppButton(ash::ShelfID(app_constants::kChromeAppId));
 
-  browser()->ActivateContents(contents_a);
+  BrowserWebContentsDelegate::From(browser())->ActivateContents(contents_a);
   EXPECT_EQ(button_a->state(), ash::ShelfAppButton::STATE_ACTIVE);
   EXPECT_EQ(button_b->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_c->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_chrome->state(), ash::ShelfAppButton::STATE_RUNNING);
 
-  browser()->ActivateContents(contents_b);
+  BrowserWebContentsDelegate::From(browser())->ActivateContents(contents_b);
   EXPECT_EQ(button_a->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_b->state(), ash::ShelfAppButton::STATE_ACTIVE);
   EXPECT_EQ(button_c->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_chrome->state(), ash::ShelfAppButton::STATE_RUNNING);
 
-  browser_c->ActivateContents(contents_c);
+  BrowserWebContentsDelegate::From(browser_c)->ActivateContents(contents_c);
   EXPECT_EQ(button_a->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_b->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_c->state(), ash::ShelfAppButton::STATE_ACTIVE);
   EXPECT_EQ(button_chrome->state(), ash::ShelfAppButton::STATE_RUNNING);
 
-  browser()->ActivateContents(contents_d);
+  BrowserWebContentsDelegate::From(browser())->ActivateContents(contents_d);
   EXPECT_EQ(button_a->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_b->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_c->state(), ash::ShelfAppButton::STATE_RUNNING);
   EXPECT_EQ(button_chrome->state(), ash::ShelfAppButton::STATE_ACTIVE);
 
-  browser()->window()->Close();
+  browser()->GetWindow()->Close();
   EXPECT_EQ(button_a->state(), ash::ShelfAppButton::STATE_NORMAL);
   EXPECT_EQ(button_b->state(), ash::ShelfAppButton::STATE_NORMAL);
   EXPECT_EQ(button_c->state(), ash::ShelfAppButton::STATE_ACTIVE);
-  EXPECT_EQ(button_chrome->state(), ash::ShelfAppButton::STATE_RUNNING);
+  EXPECT_EQ(button_chrome->state(), ash::ShelfAppButton::STATE_NORMAL);
 }

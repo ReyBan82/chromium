@@ -11,7 +11,6 @@ from telemetry import story
 
 @benchmark.Info(emails=['chrometto-team@google.com'])
 class ContribPowerPerfProfile(PowerPerfBenchmarkBase):
-
   SUPPORTED_PLATFORMS = [story.expectations.ALL_ANDROID]
   SUPPORTED_PLATFORM_TAGS = [platforms.ANDROID]
 
@@ -56,14 +55,7 @@ class ContribPowerPerfProfile(PowerPerfBenchmarkBase):
       }}
       data_sources: {{
           config {{
-              name: "org.chromium.trace_metadata"
-              chrome_config {{
-                  trace_config: "{{
-                    \\"record_mode\\": \\"record-until-full\\",
-                    \\"excluded_categories\\": [ \\"*\\" ]
-                  }}"
-                  client_priority: USER_INITIATED
-              }}
+              name: "org.chromium.trace_metadata2"
           }}
       }}
       data_sources: {{

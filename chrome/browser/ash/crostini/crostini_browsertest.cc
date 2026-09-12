@@ -8,10 +8,10 @@
 #include "chrome/browser/ash/crostini/fake_crostini_features.h"
 #include "chrome/browser/ash/guest_os/guest_os_registry_service.h"
 #include "chrome/browser/ash/guest_os/guest_os_registry_service_factory.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chromeos/ash/components/dbus/vm_applications/apps.pb.h"
 #include "content/public/test/browser_test.h"
+#include "ui/display/types/display_constants.h"
 
 namespace crostini {
 
@@ -35,14 +35,16 @@ class CrostiniBrowserTest : public CrostiniBrowserTestBase {
     app_list.set_container_name(kCrostiniDefaultContainerName);
     *app_list.add_apps() = app;
 
-    guest_os::GuestOsRegistryServiceFactory::GetForProfile(browser()->profile())
+    guest_os::GuestOsRegistryServiceFactory::GetForProfile(
+        browser()->GetProfile())
         ->UpdateApplicationList(app_list);
   }
 
   void LaunchApp() {
     base::test::TestFuture<bool, const std::string&> result_future;
-    LaunchCrostiniApp(browser()->profile(), kAppId, display::kInvalidDisplayId,
-                      {}, result_future.GetCallback());
+    LaunchCrostiniApp(browser()->GetProfile(), kAppId,
+                      display::kInvalidDisplayId, {},
+                      result_future.GetCallback());
     EXPECT_TRUE(result_future.Get<0>()) << result_future.Get<1>();
   }
 

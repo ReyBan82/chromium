@@ -7,16 +7,19 @@
 #include <utility>
 
 #include "base/check_op.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/lazy_instance.h"
 #include "base/location.h"
+#include "base/metrics/histogram_base.h"
 #include "base/metrics/histogram_delta_serialization.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/no_destructor.h"
 #include "base/pickle.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread.h"
-#include "content/browser/metrics/histogram_controller.h"
+#include "base/time/time.h"
+#include "components/metrics/histogram_controller.h"
+#include "components/metrics/mapping/metrics_name_mapper.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/histogram_fetcher.h"
@@ -53,18 +56,18 @@ class HistogramSynchronizer::RequestContext {
   ~RequestContext() {}
 
   void SetReceivedProcessGroupCount(bool done) {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
     received_process_group_count_ = done;
   }
 
   // Methods for book keeping of processes_pending_.
   void AddProcessesPending(int processes_pending) {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
     processes_pending_ += processes_pending;
   }
 
   void DecrementProcessesPending() {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
     --processes_pending_;
   }
 
@@ -73,7 +76,7 @@ class HistogramSynchronizer::RequestContext {
   // |processes_pending_| are zero, then delete the current object by calling
   // Unregister.
   void DeleteIfAllDone() {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
     if (processes_pending_ <= 0 && received_process_group_count_)
       RequestContext::Unregister(sequence_number_);
@@ -82,24 +85,26 @@ class HistogramSynchronizer::RequestContext {
   // Register |callback| in |outstanding_requests_| map for the given
   // |sequence_number|.
   static void Register(base::OnceClosure callback, int sequence_number) {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
     RequestContext* request =
         new RequestContext(std::move(callback), sequence_number);
-    outstanding_requests_.Get()[sequence_number] = request;
+    GetOutstandingRequests()[sequence_number] = request;
   }
 
   // Find the |RequestContext| in |outstanding_requests_| map for the given
   // |sequence_number|.
   static RequestContext* GetRequestContext(int sequence_number) {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
-    auto it = outstanding_requests_.Get().find(sequence_number);
-    if (it == outstanding_requests_.Get().end())
+    auto it = GetOutstandingRequests().find(sequence_number);
+    if (it == GetOutstandingRequests().end()) {
       return nullptr;
+    }
 
     RequestContext* request = it->second;
-    DCHECK_EQ(sequence_number, request->sequence_number_);
+    CHECK_EQ(sequence_number, request->sequence_number_,
+             base::NotFatalUntil::M159);
     return request;
   }
 
@@ -107,28 +112,37 @@ class HistogramSynchronizer::RequestContext {
   // |outstanding_requests_| map. This method is called when all changes have
   // been acquired, or when the wait time expires (whichever is sooner).
   static void Unregister(int sequence_number) {
-    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
-    auto it = outstanding_requests_.Get().find(sequence_number);
-    if (it == outstanding_requests_.Get().end())
+    auto it = GetOutstandingRequests().find(sequence_number);
+    if (it == GetOutstandingRequests().end()) {
       return;
+    }
 
     RequestContext* request = it->second;
-    DCHECK_EQ(sequence_number, request->sequence_number_);
+    CHECK_EQ(sequence_number, request->sequence_number_,
+             base::NotFatalUntil::M159);
     std::move(request->callback_).Run();
 
     delete request;
-    outstanding_requests_.Get().erase(it);
+    GetOutstandingRequests().erase(it);
   }
 
   // Delete all the entries in |outstanding_requests_| map.
   static void OnShutdown() {
     // Just in case we have any pending tasks, clear them out.
-    while (!outstanding_requests_.Get().empty()) {
-      auto it = outstanding_requests_.Get().begin();
+    while (!GetOutstandingRequests().empty()) {
+      auto it = GetOutstandingRequests().begin();
       delete it->second;
-      outstanding_requests_.Get().erase(it);
+      GetOutstandingRequests().erase(it);
     }
+  }
+
+  // Map of all outstanding RequestContexts, from sequence_number_ to
+  // RequestContext.
+  static RequestContextMap& GetOutstandingRequests() {
+    static base::NoDestructor<RequestContextMap> outstanding_requests;
+    return *outstanding_requests;
   }
 
   // Requests are made to asynchronously send data to the |callback_|.
@@ -144,22 +158,14 @@ class HistogramSynchronizer::RequestContext {
   // The number of pending processes (all renderer processes and browser child
   // processes) that have not yet responded to requests.
   int processes_pending_;
-
-  // Map of all outstanding RequestContexts, from sequence_number_ to
-  // RequestContext.
-  static base::LazyInstance<RequestContextMap>::Leaky outstanding_requests_;
 };
-
-// static
-base::LazyInstance<HistogramSynchronizer::RequestContext::RequestContextMap>::
-    Leaky HistogramSynchronizer::RequestContext::outstanding_requests_ =
-        LAZY_INSTANCE_INITIALIZER;
 
 HistogramSynchronizer::HistogramSynchronizer()
     : lock_(),
       last_used_sequence_number_(kNeverUsableSequenceNumber),
       async_sequence_number_(kNeverUsableSequenceNumber) {
-  HistogramController::GetInstance()->Register(this);
+  webium_metrics_name_mapper_ = metrics::MetricsNameMapper::CreateInstance();
+  metrics::HistogramController::GetInstance()->Register(this);
 }
 
 HistogramSynchronizer::~HistogramSynchronizer() {
@@ -182,7 +188,7 @@ void HistogramSynchronizer::FetchHistograms() {
         FROM_HERE, base::BindOnce(&HistogramSynchronizer::FetchHistograms));
     return;
   }
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   HistogramSynchronizer* current_synchronizer =
       HistogramSynchronizer::GetInstance();
@@ -205,8 +211,8 @@ void HistogramSynchronizer::FetchHistogramsAsynchronously(
     scoped_refptr<base::TaskRunner> task_runner,
     base::OnceClosure callback,
     base::TimeDelta wait_time) {
-  DCHECK(task_runner);
-  DCHECK(callback);
+  CHECK(task_runner, base::NotFatalUntil::M159);
+  CHECK(callback, base::NotFatalUntil::M159);
 
   HistogramSynchronizer* current_synchronizer =
       HistogramSynchronizer::GetInstance();
@@ -220,7 +226,7 @@ void HistogramSynchronizer::FetchHistogramsAsynchronously(
 void HistogramSynchronizer::RegisterAndNotifyAllProcesses(
     ProcessHistogramRequester requester,
     base::TimeDelta wait_time) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   int sequence_number = GetNextAvailableSequenceNumber(requester);
 
@@ -231,7 +237,8 @@ void HistogramSynchronizer::RegisterAndNotifyAllProcesses(
   RequestContext::Register(std::move(callback), sequence_number);
 
   // Get histogram data from renderer and browser child processes.
-  HistogramController::GetInstance()->GetHistogramData(sequence_number);
+  metrics::HistogramController::GetInstance()->GetHistogramData(
+      sequence_number);
 
   // Post a task that would be called after waiting for wait_time.  This acts
   // as a watchdog, to cancel the requests for non-responsive processes.
@@ -243,7 +250,7 @@ void HistogramSynchronizer::RegisterAndNotifyAllProcesses(
 void HistogramSynchronizer::OnPendingProcesses(int sequence_number,
                                                int pending_processes,
                                                bool end) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   RequestContext* request = RequestContext::GetRequestContext(sequence_number);
   if (!request)
@@ -255,11 +262,27 @@ void HistogramSynchronizer::OnPendingProcesses(int sequence_number,
 
 void HistogramSynchronizer::OnHistogramDataCollected(
     int sequence_number,
+    bool is_webium_renderer,
     const std::vector<std::string>& pickled_histograms) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+
+  base::HistogramBase::NameMapper mapper;
+  if (is_webium_renderer && webium_metrics_name_mapper_) {
+    mapper = base::BindRepeating(
+        [](base::WeakPtr<metrics::MetricsNameMapper> mapper,
+           std::string_view name) -> std::string_view {
+          if (mapper) {
+            return mapper->GetMetricsNameIfAllowed(name);
+          }
+          // If the mapper was destroyed, drop the metric by returning empty
+          // string.
+          return std::string_view();
+        },
+        webium_metrics_name_mapper_->GetWeakPtr());
+  }
 
   base::HistogramDeltaSerialization::DeserializeAndAddSamples(
-      pickled_histograms);
+      pickled_histograms, std::move(mapper));
 
   RequestContext* request = RequestContext::GetRequestContext(sequence_number);
   if (!request)
@@ -322,8 +345,9 @@ int HistogramSynchronizer::GetNextAvailableSequenceNumber(
     last_used_sequence_number_ =
         kHistogramSynchronizerReservedSequenceNumber + 1;
   }
-  DCHECK_NE(last_used_sequence_number_,
-            kHistogramSynchronizerReservedSequenceNumber);
+  CHECK_NE(last_used_sequence_number_,
+           kHistogramSynchronizerReservedSequenceNumber,
+           base::NotFatalUntil::M159);
   if (requester == ASYNC_HISTOGRAMS)
     async_sequence_number_ = last_used_sequence_number_;
   return last_used_sequence_number_;

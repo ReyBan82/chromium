@@ -8,11 +8,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/allocator/partition_allocator/partition_alloc.h"
-#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/memory/shared_memory_mapper.h"
 #include "gin/converter.h"
 #include "gin/gin_export.h"
+#include "partition_alloc/partition_alloc.h"
 #include "v8/include/v8-array-buffer.h"
 #include "v8/include/v8-forward.h"
 
@@ -29,7 +29,8 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
  private:
   friend class V8Initializer;
 
-  void* AllocateInternal(size_t length, unsigned int flags);
+  template <partition_alloc::AllocFlags flags>
+  void* AllocateInternal(size_t length);
 
   // Initialize the PartitionAlloc partition from which instances of this class
   // allocate memory. This is called after initializing V8 since, when enabled,
@@ -41,23 +42,19 @@ class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
   // inside of it. For that, PA's ConfigurablePool is created inside the V8
   // sandbox during initialization of V8, and this partition is then placed
   // inside the configurable pool during InitializePartition().
-  static partition_alloc::ThreadSafePartitionRoot* partition_;
+  static partition_alloc::PartitionRoot* partition_;
 };
 
 class GIN_EXPORT ArrayBuffer {
  public:
   ArrayBuffer();
-  ArrayBuffer(v8::Isolate* isolate, v8::Local<v8::ArrayBuffer> buffer);
+  explicit ArrayBuffer(v8::Local<v8::ArrayBuffer> buffer);
   ArrayBuffer(const ArrayBuffer&) = delete;
   ~ArrayBuffer();
   ArrayBuffer& operator=(const ArrayBuffer& other);
 
-  void* bytes() const {
-    return backing_store_ ? backing_store_->Data() : nullptr;
-  }
-  size_t num_bytes() const {
-    return backing_store_ ? backing_store_->ByteLength() : 0;
-  }
+  base::span<uint8_t> span();
+  base::span<const uint8_t> span() const;
 
  private:
   std::shared_ptr<v8::BackingStore> backing_store_;
@@ -72,15 +69,13 @@ struct GIN_EXPORT Converter<ArrayBuffer> {
 class GIN_EXPORT ArrayBufferView {
  public:
   ArrayBufferView();
-  ArrayBufferView(v8::Isolate* isolate, v8::Local<v8::ArrayBufferView> view);
+  explicit ArrayBufferView(v8::Local<v8::ArrayBufferView> view);
   ArrayBufferView(const ArrayBufferView&) = delete;
   ~ArrayBufferView();
   ArrayBufferView& operator=(const ArrayBufferView& other);
 
-  void* bytes() const {
-    return static_cast<uint8_t*>(array_buffer_.bytes()) + offset_;
-  }
-  size_t num_bytes() const { return num_bytes_; }
+  base::span<uint8_t> span();
+  base::span<const uint8_t> span() const;
 
  private:
   ArrayBuffer array_buffer_;

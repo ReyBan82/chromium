@@ -8,20 +8,20 @@
 #include <memory>
 #include <string>
 
+#include "chrome/browser/ash/printing/enterprise/print_servers_provider_factory.h"
 #include "chrome/browser/ash/printing/print_server.h"
-#include "chrome/browser/ash/printing/print_servers_provider.h"
-#include "chrome/browser/ash/printing/print_servers_provider_factory.h"
-#include "chrome/test/base/scoped_testing_local_state.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/policy/proto/chrome_device_policy.pb.h"
 #include "components/user_manager/scoped_user_manager.h"
 #include "content/public/test/browser_task_environment.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/libipp/libipp/ipp.h"
+#include "third_party/libipp/libipp/builder.h"
+#include "third_party/libipp/libipp/frame.h"
 
 namespace ash {
 
@@ -33,20 +33,6 @@ using ::testing::AllOf;
 using ::testing::Property;
 using ::testing::ResultOf;
 using ::testing::UnorderedElementsAre;
-
-class TestingProfileWithURLLoaderFactory : public TestingProfile {
- public:
-  explicit TestingProfileWithURLLoaderFactory(
-      scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
-      : url_loader_factory_(url_loader_factory) {}
-  scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory()
-      override {
-    return url_loader_factory_;
-  }
-
- private:
-  scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
-};
 
 PrintServer PrintServer1() {
   GURL url("http://192.168.1.5/printer");
@@ -98,26 +84,31 @@ auto PrinterMatcher(Printer printer) {
 class ServerPrintersProviderTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    test_profile_ = std::make_unique<TestingProfileWithURLLoaderFactory>(
-        test_url_loader_factory_.GetSafeWeakWrapper());
+    test_profile_ = TestingProfile::Builder()
+                        .SetSharedURLLoaderFactory(
+                            test_url_loader_factory_.GetSafeWeakWrapper())
+                        .Build();
     ASSERT_TRUE(test_server_.Start());
     server_printers_provider_ =
         ServerPrintersProvider::Create(test_profile_.get());
   }
 
-  void TearDown() override { PrintServersProviderFactory::Get()->Shutdown(); }
+  void TearDown() override {
+    PrintServersProviderFactory::Get()->ShutdownForTesting();
+    server_printers_provider_.reset();
+    test_profile_.reset();
+  }
 
   std::string CreateResponse(const std::string& name,
                              const std::string& description) {
-    ipp::Response_CUPS_Get_Printers response;
-    response.printer_attributes[0].printer_name.Set(
-        ipp::StringWithLanguage(name, "us-EN"));
-    response.printer_attributes[0].printer_info.Set(
-        ipp::StringWithLanguage(description, "us-EN"));
-    ipp::Server server(ipp::Version::_1_1, 1);
-    server.BuildResponseFrom(&response);
-    std::vector<uint8_t> bin_data;
-    EXPECT_TRUE(server.WriteResponseFrameTo(&bin_data));
+    ipp::Frame response(ipp::Operation::CUPS_Get_Printers);
+    ipp::CollsView::iterator grp;
+    response.AddGroup(ipp::GroupTag::printer_attributes, grp);
+    grp->AddAttr("printer-name", ipp::ValueTag::nameWithLanguage,
+                 ipp::StringWithLanguage(name, "us-EN"));
+    grp->AddAttr("printer-info", ipp::ValueTag::textWithLanguage,
+                 ipp::StringWithLanguage(description, "us-EN"));
+    std::vector<uint8_t> bin_data = ipp::BuildBinaryFrame(response);
     std::string response_body(bin_data.begin(), bin_data.end());
     return response_body;
   }
@@ -136,7 +127,7 @@ class ServerPrintersProviderTest : public ::testing::Test {
 
   network::TestURLLoaderFactory test_url_loader_factory_;
 
-  std::unique_ptr<TestingProfileWithURLLoaderFactory> test_profile_;
+  std::unique_ptr<TestingProfile> test_profile_;
 
   net::test_server::EmbeddedTestServer test_server_;
 

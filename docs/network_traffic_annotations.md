@@ -38,6 +38,31 @@ cover the whole repository.
 
 ## Best Practices
 
+> ℹ️️ An AI agent (e.g., Antigravity) can help you write your traffic
+> annotation. Add the
+> [network-traffic-annotations](https://source.chromium.org/chromium/chromium/src/+/main:agents/skills/network-traffic-annotations/)
+> skill, then ask your agent to write the annotation.
+>
+> For Antigravity 2.0 and `agy`, put the following in
+> `chromium/src/.agents/skills.json`:
+>
+> ```json
+> {
+>   "entries": [
+>     {"path": "agents/skills/network-traffic-annotations"}
+>   ]
+> }
+> ```
+>
+> If you want to use an agent, we recommend this workflow:
+>
+> 1. Develop your feature using `MISSING_TRAFFIC_ANNOTATION` as a placeholder
+>    until your CL is ready for review.
+> 2. Add the `network-traffic-annotations` agent skill.
+> 3. Ask the agent: "write the traffic annotation in path/to/file.cc".
+> 4. Review and edit the generated annotation. Assume the agent **WILL** make
+>    mistakes; only use the generated doc as a starting point.
+
 ### Where to add annotation?
 All network requests are ultimately sending data through sockets or native API
 functions, but we should note that the concern is about the main intent of the
@@ -70,10 +95,12 @@ ensure that the request is annotated somewhere upstream.
 
 ## Coverage
 Network traffic annotations are currently enforced on all url requests and
-socket writes, except for the code which is not compiled on Windows or Linux.
-This effort may expand to ChromeOS in future and currently there is no plan to
-expand it to other platforms.
+socket writes, except for code which is not compiled on the following platforms:
 
+- Windows
+- Linux
+- ChromeOS
+- Android
 
 ## Network Traffic Annotation Tag
 
@@ -108,13 +135,13 @@ in the `NetworkTrafficAnnotation` message of
      well.
    * `trigger`: What user action triggered the network request. Use a textual
      description. This should be a human readable string.
-   * `user_data`: What nature of data is being sent, as enums. 
-      Any personally identifiable (PII) data, provided by user or generated 
-      by Google, should be pointed out. You can include multiple 
-      values, and you may want to supplement this with the data field. 
+   * `user_data`: What nature of data is being sent, as enums.
+      Any personally identifiable (PII) data, provided by user or generated
+      by Google, should be pointed out. You can include multiple
+      values, and you may want to supplement this with the data field.
       All available User data enums can be found [here](https://source.chromium.org/chromium/chromium/src/+/main:chrome/browser/privacy/traffic_annotation.proto?q=UserDataType).
-   * `data`: Textual description of data being sent, for things that aren't 
-      covered by user_data enum values. You can also use this field if 
+   * `data`: Textual description of data being sent, for things that aren't
+      covered by user_data enum values. You can also use this field if
       more context needs to be provided to describe user_data.
    * `destination`: Target of the network request. It can be either the website
      that user visits and interacts with, a Google service, a request that does
@@ -126,16 +153,17 @@ in the `NetworkTrafficAnnotation` message of
      ZeroSuggest), use  `GOOGLE_OWNED_SERVICE`. If the request can go to other
      domains and is perceived as a part of a website rather than a native
      browser feature, use `WEBSITE`. Use `LOCAL` if the request is processed
-     locally and doesn't go to network, otherwise use `OTHER`. If `OTHER` is
-     used, please add plain text description in `destination_other`
-     field.
+     locally and doesn't go to network. If the request goes to a third-party proxy
+     first and then is forwarded to a Google service, use `PROXIED_GOOGLE_OWNED_SERVICE`.
+     Otherwise use `OTHER`. If `OTHER` is used, please add plain text description in `destination_other` field.
    * `destination_other`: Human readable description in case the destination
      points to `OTHER`.
-   * `internal`: Data that is meant to be visible internally, example point of contacts, 
+   * `internal`: Data that is meant to be visible internally, example point of contacts,
       should be placed inside internal field. This field should not be used in any
       external reports.
-     * `contacts`: A person's or team's email address who are point-of-contact 
-        for questions, issues, or bugs related to this network request.
+     * `contacts`: A person's or team's email address who are point-of-contact
+        for questions, issues, or bugs related to this network request. An
+        OWNERS file may also be specified using the `owners` field.
    * `last_reviewed`: Date when this annotation was last reviewed in YYYY-MM-DD format.
 * `policy`: These set of fields specify the controls that a user may have
   on disabling or limiting the network request and its trace.
@@ -175,7 +203,7 @@ in the `NetworkTrafficAnnotation` message of
      this request, a justification can be presented here.
    * `deprecated_policies`: Policy names disabling or limiting this network request
       which are currently deprecated. These should be a subset of the policies in the
-      `chrome_policy` field. If a policy is removed from the `chrome_policy` field, 
+      `chrome_policy` field. If a policy is removed from the `chrome_policy` field,
       then it should be removed from this field also.
 * `comments`: If required, any human readable extra comments.
 

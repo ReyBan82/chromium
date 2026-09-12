@@ -7,6 +7,7 @@
 #include <memory>
 #include <utility>
 
+#include "base/json/json_writer.h"
 #include "content/browser/devtools/devtools_renderer_channel.h"
 #include "content/browser/devtools/devtools_session.h"
 #include "content/browser/devtools/protocol/fetch_handler.h"
@@ -15,10 +16,13 @@
 #include "content/browser/devtools/protocol/network_handler.h"
 #include "content/browser/devtools/protocol/protocol.h"
 #include "content/browser/devtools/protocol/schema_handler.h"
+#include "content/browser/devtools/protocol/storage_handler.h"
 #include "content/browser/devtools/protocol/target_handler.h"
 #include "content/browser/devtools/shared_worker_devtools_manager.h"
 #include "content/browser/worker_host/shared_worker_host.h"
 #include "content/browser/worker_host/shared_worker_service_impl.h"
+#include "content/common/features.h"
+#include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_process_host.h"
 #include "net/cookies/site_for_cookies.h"
@@ -42,7 +46,9 @@ SharedWorkerDevToolsAgentHost::SharedWorkerDevToolsAgentHost(
       state_(WORKER_NOT_READY),
       worker_host_(worker_host),
       devtools_worker_token_(devtools_worker_token),
-      instance_(worker_host->instance()) {
+      instance_(worker_host->instance()),
+      browser_context_token_(
+          worker_host->GetProcessHost()->GetBrowserContext()->UniqueToken()) {
   NotifyCreated();
 }
 
@@ -64,12 +70,22 @@ std::string SharedWorkerDevToolsAgentHost::GetTitle() {
   return instance_.name();
 }
 
+std::string SharedWorkerDevToolsAgentHost::GetDescription() {
+  if (!instance_.extended_lifetime()) {
+    return std::string();
+  }
+
+  base::DictValue description;
+  description.Set("extendedLifetime", true);
+  return base::WriteJson(description).value_or("");
+}
+
 GURL SharedWorkerDevToolsAgentHost::GetURL() {
   return instance_.url();
 }
 
 blink::StorageKey SharedWorkerDevToolsAgentHost::GetStorageKey() const {
-  return instance_.storage_key();
+  return instance_.worker_storage_key();
 }
 
 bool SharedWorkerDevToolsAgentHost::Activate() {
@@ -85,19 +101,20 @@ bool SharedWorkerDevToolsAgentHost::Close() {
   return true;
 }
 
-bool SharedWorkerDevToolsAgentHost::AttachSession(DevToolsSession* session,
-                                                  bool acquire_wake_lock) {
+bool SharedWorkerDevToolsAgentHost::AttachSession(DevToolsSession* session) {
   session->CreateAndAddHandler<protocol::IOHandler>(GetIOContext());
   session->CreateAndAddHandler<protocol::InspectorHandler>();
   session->CreateAndAddHandler<protocol::NetworkHandler>(
-      GetId(), devtools_worker_token_, GetIOContext(),
-      base::BindRepeating([] {}), session->GetClient()->MayReadLocalFiles());
-  // TODO(crbug.com/1143100): support pushing updated loader factories down to
+      GetId(), devtools_worker_token_, GetIOContext(), session,
+      GetProcessHost()->GetStoragePartition(), session->GetClient());
+  // TODO(crbug.com/40154954): support pushing updated loader factories down to
   // renderer.
   session->CreateAndAddHandler<protocol::FetchHandler>(
-      GetIOContext(),
+      GetIOContext(), session->GetRootSession()->GetClient(),
       base::BindRepeating([](base::OnceClosure cb) { std::move(cb).Run(); }));
   session->CreateAndAddHandler<protocol::SchemaHandler>();
+  session->CreateAndAddHandler<protocol::StorageHandler>(this,
+                                                         session->GetClient());
   session->CreateAndAddHandler<protocol::TargetHandler>(
       protocol::TargetHandler::AccessMode::kAutoAttachOnly, GetId(),
       auto_attacher_.get(), session);
@@ -109,53 +126,85 @@ void SharedWorkerDevToolsAgentHost::DetachSession(DevToolsSession* session) {
 }
 
 bool SharedWorkerDevToolsAgentHost::Matches(SharedWorkerHost* worker_host) {
-  return instance_.Matches(worker_host->instance().url(),
+  return browser_context_token_ == worker_host->GetProcessHost()
+                                       ->GetBrowserContext()
+                                       ->UniqueToken() &&
+         instance_.Matches(worker_host->instance().url(),
                            worker_host->instance().name(),
-                           worker_host->instance().storage_key());
+                           worker_host->instance().creator_storage_key(),
+                           worker_host->instance().same_site_cookies());
 }
 
 void SharedWorkerDevToolsAgentHost::WorkerReadyForInspection(
     mojo::PendingRemote<blink::mojom::DevToolsAgent> agent_remote,
     mojo::PendingReceiver<blink::mojom::DevToolsAgentHost>
         agent_host_receiver) {
-  DCHECK_EQ(WORKER_NOT_READY, state_);
-  DCHECK(worker_host_);
+  CHECK_EQ(WORKER_NOT_READY, state_, base::NotFatalUntil::M159);
+  CHECK(worker_host_, base::NotFatalUntil::M159);
   state_ = WORKER_READY;
-  GetRendererChannel()->SetRenderer(std::move(agent_remote),
-                                    std::move(agent_host_receiver),
-                                    worker_host_->GetProcessHost()->GetID());
+  pending_agent_remote_ = std::move(agent_remote);
+  pending_agent_host_receiver_ = std::move(agent_host_receiver);
+  UpdateRendererChannel(IsAttached() ||
+                        !base::FeatureList::IsEnabled(
+                            ::features::kSharedWorkerDevToolsWorkerReadyCheck));
   for (auto* inspector : protocol::InspectorHandler::ForAgentHost(this))
     inspector->TargetReloadedAfterCrash();
 }
 
 void SharedWorkerDevToolsAgentHost::WorkerRestarted(
     SharedWorkerHost* worker_host) {
-  DCHECK_EQ(WORKER_TERMINATED, state_);
-  DCHECK(!worker_host_);
+  CHECK_EQ(WORKER_TERMINATED, state_, base::NotFatalUntil::M159);
+  CHECK(!worker_host_, base::NotFatalUntil::M159);
   state_ = WORKER_NOT_READY;
   worker_host_ = worker_host;
 }
 
 void SharedWorkerDevToolsAgentHost::WorkerDestroyed() {
-  DCHECK_NE(WORKER_TERMINATED, state_);
-  DCHECK(worker_host_);
+  CHECK_NE(WORKER_TERMINATED, state_, base::NotFatalUntil::M159);
+  CHECK(worker_host_, base::NotFatalUntil::M159);
   state_ = WORKER_TERMINATED;
   for (auto* inspector : protocol::InspectorHandler::ForAgentHost(this))
     inspector->TargetCrashed();
   worker_host_ = nullptr;
+  pending_agent_remote_.reset();
+  pending_agent_host_receiver_.reset();
   GetRendererChannel()->SetRenderer(mojo::NullRemote(), mojo::NullReceiver(),
                                     ChildProcessHost::kInvalidUniqueID);
 }
 
+void SharedWorkerDevToolsAgentHost::UpdateRendererChannel(bool force) {
+  if (state_ != WORKER_READY) {
+    return;
+  }
+
+  // This function can be called multiple times for each DevTools attachment/
+  // detachment. We only want to bind the renderer-provided pipes during the
+  // very first attachment. Since the pipes are consumed (moved) during binding,
+  // we use `pending_agent_remote_.is_valid()` to detect if this is the first
+  // attachment. Subsequent calls will see an invalid remote and correctly skip
+  // this block.
+  if (force && pending_agent_remote_.is_valid()) {
+    // Both pipes are provided as a pair and we only bind them once.
+    CHECK(pending_agent_host_receiver_.is_valid());
+    GetRendererChannel()->SetRenderer(
+        std::move(pending_agent_remote_),
+        std::move(pending_agent_host_receiver_),
+        worker_host_->GetProcessHost()->GetDeprecatedID());
+  }
+}
+
 DevToolsAgentHostImpl::NetworkLoaderFactoryParamsAndInfo
 SharedWorkerDevToolsAgentHost::CreateNetworkFactoryParamsForDevTools() {
-  DCHECK(worker_host_);
-  return {GetStorageKey().origin(), net::SiteForCookies::FromUrl(GetURL()),
+  CHECK(worker_host_, base::NotFatalUntil::M159);
+  return {GetStorageKey().origin(),
+          instance_.DoesRequireCrossSiteRequestForCookies()
+              ? net::SiteForCookies()
+              : net::SiteForCookies::FromUrl(GetURL()),
           worker_host_->CreateNetworkFactoryParamsForSubresources()};
 }
 
 RenderProcessHost* SharedWorkerDevToolsAgentHost::GetProcessHost() {
-  DCHECK(worker_host_);
+  CHECK(worker_host_, base::NotFatalUntil::M159);
   return worker_host_->GetProcessHost();
 }
 

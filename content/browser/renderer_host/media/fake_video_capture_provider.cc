@@ -11,8 +11,13 @@
 
 namespace content {
 
+FakeVideoCaptureProvider::FakeVideoCaptureProvider(
+    std::unique_ptr<::media::VideoCaptureDeviceFactory> device_factory)
+    : system_(std::move(device_factory)) {}
+
 FakeVideoCaptureProvider::FakeVideoCaptureProvider()
-    : system_(std::make_unique<media::FakeVideoCaptureDeviceFactory>()) {}
+    : FakeVideoCaptureProvider(
+          std::make_unique<media::FakeVideoCaptureDeviceFactory>()) {}
 
 FakeVideoCaptureProvider::~FakeVideoCaptureProvider() = default;
 
@@ -28,4 +33,24 @@ FakeVideoCaptureProvider::CreateDeviceLauncher() {
   return std::make_unique<FakeVideoCaptureDeviceLauncher>(&system_);
 }
 
+void FakeVideoCaptureProvider::OpenNativeScreenCapturePicker(
+    DesktopMediaID::Type type,
+    base::OnceCallback<void(DesktopMediaID::Id)> created_callback,
+    base::OnceCallback<void(webrtc::DesktopCapturer::Source)> picker_callback,
+    base::OnceCallback<void()> cancel_callback,
+    base::OnceCallback<void()> error_callback,
+    base::OnceCallback<void(DesktopMediaID::Id)> stop_audio_callback) {}
+
+void FakeVideoCaptureProvider::CloseNativeScreenCapturePicker(
+    DesktopMediaID device_id) {}
+
+#if BUILDFLAG(IS_MAC)
+void FakeVideoCaptureProvider::GetApplicationAudioCaptureId(
+    DesktopMediaID::Id session_id,
+    base::OnceCallback<
+        void(const std::optional<desktop_capture::ApplicationAudioCaptureId>&)>
+        callback) {
+  std::move(callback).Run(std::nullopt);
+}
+#endif
 }  // namespace content

@@ -4,12 +4,12 @@
 
 #include "base/test/metrics/histogram_tester.h"
 #include "chrome/browser/ssl/cert_verifier_browser_test.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/omnibox/omnibox_next_features.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "components/network_session_configurator/common/network_switches.h"
 #include "components/page_load_metrics/browser/page_load_metrics_test_waiter.h"
 #include "components/ukm/test_ukm_recorder.h"
-#include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/signed_exchange_browser_test_helper.h"
@@ -22,7 +22,13 @@ class SignedExchangePageLoadMetricsBrowserTest
   SignedExchangePageLoadMetricsBrowserTest()
       : https_server_(net::EmbeddedTestServer::TYPE_HTTPS) {
     feature_list_.InitWithFeatures(
-        {ukm::kUkmFeature, features::kSignedHTTPExchange}, {});
+        /*enabled_features=*/
+        {ukm::kUkmFeature},
+        /*disabled_features=*/
+        // TODO(crbug.com/452061489): Fix tests that fail when the WebUI Omnibox
+        // is enabled and then remove these two Features.
+        {omnibox::internal::kWebUIOmniboxPopup,
+         omnibox::internal::kWebUIOmniboxAimPopup});
   }
 
   SignedExchangePageLoadMetricsBrowserTest(
@@ -30,7 +36,7 @@ class SignedExchangePageLoadMetricsBrowserTest
   SignedExchangePageLoadMetricsBrowserTest& operator=(
       const SignedExchangePageLoadMetricsBrowserTest&) = delete;
 
-  ~SignedExchangePageLoadMetricsBrowserTest() override {}
+  ~SignedExchangePageLoadMetricsBrowserTest() override = default;
 
  protected:
   void PreRunTestOnMainThread() override {
@@ -57,7 +63,7 @@ class SignedExchangePageLoadMetricsBrowserTest
   std::unique_ptr<page_load_metrics::PageLoadMetricsTestWaiter>
   CreatePageLoadMetricsTestWaiter() {
     content::WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        browser()->GetTabStripModel()->GetActiveWebContents();
     return std::make_unique<page_load_metrics::PageLoadMetricsTestWaiter>(
         web_contents);
   }
@@ -74,6 +80,8 @@ class SignedExchangePageLoadMetricsBrowserTest
     const GURL inner_url("https://test.example.org/test/");
     const GURL url =
         https_server_.GetURL(hostname, "/sxg/test.example.org_test.sxg");
+    InstallUrlInterceptor(url,
+                          "content/test/data/sxg/test.example.org_test.sxg");
 
     ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
@@ -103,13 +111,6 @@ class SignedExchangePageLoadMetricsBrowserTest
     sxg_test_helper_.SetUp();
 
     CertVerifierBrowserTest::SetUp();
-  }
-
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    // This is necessary to use https with arbitrary hostnames.
-    command_line->AppendSwitch(switches::kIgnoreCertificateErrors);
-
-    CertVerifierBrowserTest::SetUpCommandLine(command_line);
   }
 
   void SetUpOnMainThread() override {

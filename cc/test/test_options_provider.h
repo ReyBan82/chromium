@@ -20,11 +20,16 @@ namespace cc {
 
 class TestOptionsProvider : public ImageProvider,
                             public TransferCacheTestHelper {
+  STACK_ALLOCATED();
+
  public:
   TestOptionsProvider();
   ~TestOptionsProvider() override;
 
   const PaintOp::SerializeOptions& serialize_options() const {
+    return serialize_options_;
+  }
+  PaintOp::SerializeOptions& mutable_serialize_options() {
     return serialize_options_;
   }
   const PaintOp::DeserializeOptions& deserialize_options() const {

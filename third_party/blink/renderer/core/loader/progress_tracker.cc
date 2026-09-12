@@ -26,6 +26,7 @@
 #include "third_party/blink/renderer/core/loader/progress_tracker.h"
 
 #include "third_party/blink/public/common/loader/loader_constants.h"
+#include "third_party/blink/public/mojom/favicon/favicon_url.mojom-blink.h"
 #include "third_party/blink/public/mojom/frame/frame.mojom-blink.h"
 #include "third_party/blink/public/web/web_settings.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -101,9 +102,9 @@ void ProgressTracker::ProgressCompleted() {
   frame_->SetIsLoading(false);
   SendFinalProgress();
   Reset();
-  GetLocalFrameClient()->DidStopLoading();
-  frame_->UpdateFaviconURL();
   probe::FrameStoppedLoading(frame_);
+  GetLocalFrameClient()->DidStopLoading();
+  frame_->UpdateFaviconURL(mojom::blink::FaviconUpdateReason::kPageLoad);
 }
 
 void ProgressTracker::FinishedParsing() {
@@ -113,6 +114,10 @@ void ProgressTracker::FinishedParsing() {
 
 void ProgressTracker::DidFirstContentfulPaint() {
   did_first_contentful_paint_ = true;
+  MaybeSendProgress();
+}
+
+void ProgressTracker::DidNavigationApiIntercept() {
   MaybeSendProgress();
 }
 
@@ -207,7 +212,7 @@ void ProgressTracker::MaybeSendProgress() {
   if (progress_value_ < last_notified_progress_value_)
     return;
 
-  double now = base::Time::Now().ToDoubleT();
+  double now = base::Time::Now().InSecondsFSinceUnixEpoch();
   double notified_progress_time_delta = now - last_notified_progress_time_;
 
   double notification_progress_delta =

@@ -4,14 +4,15 @@
 
 #include "components/viz/service/display/display_resource_provider_skia.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
 #include "base/containers/flat_set.h"
 #include "build/build_config.h"
 #include "components/viz/service/display/resource_fence.h"
+#include "gpu/command_buffer/client/client_shared_image.h"
 #include "gpu/command_buffer/service/scheduler_sequence.h"
 #include "third_party/skia/include/core/SkColorSpace.h"
 
@@ -37,21 +38,24 @@ DisplayResourceProviderSkia::~DisplayResourceProviderSkia() {
   Destroy();
 }
 
-std::vector<ReturnedResource>
+std::vector<ReturnedResourceViz>
 DisplayResourceProviderSkia::DeleteAndReturnUnusedResourcesToChildImpl(
     Child& child_info,
     DeleteStyle style,
     const std::vector<ResourceId>& unused) {
-  std::vector<ReturnedResource> to_return;
+  std::vector<ReturnedResourceViz> to_return;
   std::vector<std::unique_ptr<ExternalUseClient::ImageContext>>
       image_contexts_to_return;
-  std::vector<ReturnedResource*> external_used_resources;
+  std::vector<ReturnedResourceViz*> external_used_resources;
+  std::vector<scoped_refptr<gpu::ClientSharedImage>>
+      client_shared_images_to_return;
 
   // Reserve enough space to avoid re-allocating, so we can keep item pointers
   // for later using.
   to_return.reserve(unused.size());
   image_contexts_to_return.reserve(unused.size());
   external_used_resources.reserve(unused.size());
+  client_shared_images_to_return.reserve(unused.size());
 
   DCHECK(external_use_client_);
   std::vector<ResourceId>* batch_return = nullptr;
@@ -103,6 +107,8 @@ DisplayResourceProviderSkia::DeleteAndReturnUnusedResourcesToChildImpl(
     if (resource.image_context) {
       image_contexts_to_return.emplace_back(std::move(resource.image_context));
       external_used_resources.push_back(&returned);
+      client_shared_images_to_return.push_back(
+          resource.transferable.shared_image());
     }
 
     child_info.child_to_parent_map.erase(child_id);
@@ -117,6 +123,11 @@ DisplayResourceProviderSkia::DeleteAndReturnUnusedResourcesToChildImpl(
     for (auto* resource : external_used_resources) {
       resource->sync_token = sync_token;
     }
+    for (auto& client_shared_image : client_shared_images_to_return) {
+      if (client_shared_image) {
+        client_shared_image->EndDisplayCompositorAccess(sync_token);
+      }
+    }
   }
 
   return to_return;
@@ -127,6 +138,7 @@ DisplayResourceProviderSkia::LockSetForExternalUse::LockSetForExternalUse(
     ExternalUseClient* client)
     : resource_provider_(resource_provider) {
   DCHECK(!resource_provider_->external_use_client_);
+  DCHECK(client);
   resource_provider_->external_use_client_ = client;
 }
 
@@ -138,41 +150,24 @@ ExternalUseClient::ImageContext*
 DisplayResourceProviderSkia::LockSetForExternalUse::LockResource(
     ResourceId id,
     bool maybe_concurrent_reads,
-    bool is_video_plane,
-    sk_sp<SkColorSpace> override_color_space,
     bool raw_draw_is_possible) {
   auto it = resource_provider_->resources_.find(id);
-  DCHECK(it != resource_provider_->resources_.end());
+  CHECK(it != resource_provider_->resources_.end());
 
   ChildResource& resource = it->second;
   DCHECK(resource.is_gpu_resource_type());
 
   if (!resource.locked_for_external_use) {
-    DCHECK(!base::Contains(resources_, std::make_pair(id, &resource)));
+    DCHECK(!std::ranges::contains(resources_, std::make_pair(id, &resource)));
     resources_.emplace_back(id, &resource);
 
     if (!resource.image_context) {
-      sk_sp<SkColorSpace> image_color_space;
-      if (!is_video_plane) {
-        // HDR video color conversion is handled externally in SkiaRenderer
-        // using a special color filter and |color_space| is set to destination
-        // color space so that Skia doesn't perform implicit color conversion.
-
-        // TODO(https://crbug.com/1271212): Skia doesn't support limited range
-        // color spaces, so we treat it as fullrange, resulting color difference
-        // is very subtle.
-        image_color_space =
-            override_color_space
-                ? override_color_space
-                : resource.transferable.color_space.GetAsFullRangeRGB()
-                      .ToSkColorSpace();
-      }
+      uint32_t client_id =
+          resource_provider_->GetSurfaceId(id).frame_sink_id().client_id();
       resource.image_context =
           resource_provider_->external_use_client_->CreateImageContext(
-              resource.transferable.mailbox_holder, resource.transferable.size,
-              resource.transferable.format, maybe_concurrent_reads,
-              resource.transferable.ycbcr_info, std::move(image_color_space),
-              raw_draw_is_possible);
+              resource.transferable, maybe_concurrent_reads,
+              raw_draw_is_possible, client_id);
     }
     resource.locked_for_external_use = true;
 
@@ -194,7 +189,7 @@ DisplayResourceProviderSkia::LockSetForExternalUse::LockResource(
     }
   }
 
-  DCHECK(base::Contains(resources_, std::make_pair(id, &resource)));
+  DCHECK(std::ranges::contains(resources_, std::make_pair(id, &resource)));
   return resource.image_context.get();
 }
 

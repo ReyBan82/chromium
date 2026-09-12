@@ -48,13 +48,11 @@ class CRLSetComponentInstallerTest : public PlatformTest {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
 
     policy_ = std::make_unique<CRLSetPolicy>();
-    policy_->SetNetworkServiceForTesting(network_service_.get());
   }
 
-  void SimulateCrash() {
+  void SimulateNetworkServiceCrash() {
     network_service_.reset();
     network_service_ = std::make_unique<network::NetworkService>(nullptr);
-    policy_->SetNetworkServiceForTesting(network_service_.get());
   }
 
   void LoadURL(const GURL& url) {
@@ -67,8 +65,8 @@ class CRLSetComponentInstallerTest : public PlatformTest {
     mojo::Remote<network::mojom::URLLoaderFactory> loader_factory;
     network::mojom::URLLoaderFactoryParamsPtr params =
         network::mojom::URLLoaderFactoryParams::New();
-    params->process_id = 0;
-    params->is_corb_enabled = false;
+    params->process_id = network::OriginatingProcessId::browser();
+    params->is_orb_enabled = false;
     network_context_->CreateURLLoaderFactory(
         loader_factory.BindNewPipeAndPassReceiver(), std::move(params));
     loader_.reset();
@@ -84,9 +82,9 @@ class CRLSetComponentInstallerTest : public PlatformTest {
   void InstallCRLSet(const base::FilePath& raw_crl_file) {
     base::CopyFile(raw_crl_file, temp_dir_.GetPath().AppendASCII("crl-set"));
     ASSERT_TRUE(
-        policy_->VerifyInstallation(base::Value::Dict(), temp_dir_.GetPath()));
+        policy_->VerifyInstallation(base::DictValue(), temp_dir_.GetPath()));
     policy_->ComponentReady(base::Version("1.0"), temp_dir_.GetPath(),
-                            base::Value::Dict());
+                            base::DictValue());
     task_environment_.RunUntilIdle();
   }
 
@@ -131,7 +129,11 @@ TEST_F(CRLSetComponentInstallerTest, ConfiguresOnInstall) {
               net::CERT_STATUS_KNOWN_INTERCEPTION_DETECTED);
 }
 
-TEST_F(CRLSetComponentInstallerTest, ReconfiguresAfterRestartWithCRLSet) {
+// CRLSet updates do not go through the NetworkService anymore, but I guess
+// it's still useful to test that after a network service restart the
+// configured CRLSet is still honored.
+TEST_F(CRLSetComponentInstallerTest,
+       StillConfiguredAfterNetworkServiceRestartWithCRLSet) {
   network_service_->CreateNetworkContext(
       network_context_.BindNewPipeAndPassReceiver(),
       CreateNetworkContextParams());
@@ -153,8 +155,7 @@ TEST_F(CRLSetComponentInstallerTest, ReconfiguresAfterRestartWithCRLSet) {
               net::CERT_STATUS_KNOWN_INTERCEPTION_DETECTED);
 
   // Simulate a Network Service crash
-  SimulateCrash();
-  CRLSetPolicy::ReconfigureAfterNetworkRestart();
+  SimulateNetworkServiceCrash();
   task_environment_.RunUntilIdle();
 
   network_context_.reset();
@@ -169,30 +170,6 @@ TEST_F(CRLSetComponentInstallerTest, ReconfiguresAfterRestartWithCRLSet) {
   ASSERT_TRUE(client_->ssl_info());
   EXPECT_TRUE(client_->ssl_info()->cert_status &
               net::CERT_STATUS_KNOWN_INTERCEPTION_DETECTED);
-}
-
-TEST_F(CRLSetComponentInstallerTest, ReconfiguresAfterRestartWithNoCRLSet) {
-  network_service_->CreateNetworkContext(
-      network_context_.BindNewPipeAndPassReceiver(),
-      CreateNetworkContextParams());
-
-  // Ensure the test server can load by default.
-  LoadURL(test_server_.GetURL("/empty.html"));
-  ASSERT_EQ(net::OK, client_->completion_status().error_code);
-
-  // Simulate a Network Service crash
-  SimulateCrash();
-  CRLSetPolicy::ReconfigureAfterNetworkRestart();
-  task_environment_.RunUntilIdle();
-
-  network_context_.reset();
-  network_service_->CreateNetworkContext(
-      network_context_.BindNewPipeAndPassReceiver(),
-      CreateNetworkContextParams());
-
-  // Ensure the test server can still load.
-  LoadURL(test_server_.GetURL("/empty.html"));
-  ASSERT_EQ(net::OK, client_->completion_status().error_code);
 }
 
 }  // namespace component_updater

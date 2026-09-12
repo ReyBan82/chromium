@@ -5,7 +5,6 @@
 #include "mojo/public/cpp/platform/named_platform_channel.h"
 
 #include "base/check.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 
@@ -13,6 +12,9 @@ namespace mojo {
 
 const char NamedPlatformChannel::kNamedHandleSwitch[] =
     "mojo-named-platform-channel-pipe";
+
+NamedPlatformChannel::Options::Options() = default;
+NamedPlatformChannel::Options::~Options() = default;
 
 NamedPlatformChannel::NamedPlatformChannel(const Options& options) {
   server_endpoint_ = PlatformChannelServerEndpoint(
@@ -22,14 +24,14 @@ NamedPlatformChannel::NamedPlatformChannel(const Options& options) {
 NamedPlatformChannel::NamedPlatformChannel(NamedPlatformChannel&& other) =
     default;
 
-NamedPlatformChannel::~NamedPlatformChannel() = default;
-
 NamedPlatformChannel& NamedPlatformChannel::operator=(
     NamedPlatformChannel&& other) = default;
 
+NamedPlatformChannel::~NamedPlatformChannel() = default;
+
 // static
 NamedPlatformChannel::ServerName NamedPlatformChannel::ServerNameFromUTF8(
-    base::StringPiece name) {
+    std::string_view name) {
 #if BUILDFLAG(IS_WIN)
   return base::UTF8ToWide(name);
 #else
@@ -46,7 +48,8 @@ void NamedPlatformChannel::PassServerNameOnCommandLine(
 PlatformChannelEndpoint NamedPlatformChannel::ConnectToServer(
     const ServerName& server_name) {
   DCHECK(!server_name.empty());
-  Options options = {.server_name = server_name};
+  Options options;
+  options.server_name = server_name;
   return CreateClientEndpoint(options);
 }
 
@@ -61,8 +64,9 @@ PlatformChannelEndpoint NamedPlatformChannel::ConnectToServer(
 PlatformChannelEndpoint NamedPlatformChannel::ConnectToServer(
     const base::CommandLine& command_line) {
   ServerName name = command_line.GetSwitchValueNative(kNamedHandleSwitch);
-  if (name.empty())
+  if (name.empty()) {
     return PlatformChannelEndpoint();
+  }
   return ConnectToServer(name);
 }
 

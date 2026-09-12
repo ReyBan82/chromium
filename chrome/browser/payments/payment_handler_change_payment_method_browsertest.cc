@@ -25,7 +25,12 @@ struct TestCase {
 
 class PaymentHandlerChangePaymentMethodTest
     : public PaymentRequestPlatformBrowserTestBase,
-      public testing::WithParamInterface<TestCase> {};
+      public testing::WithParamInterface<TestCase> {
+ protected:
+  PaymentHandlerChangePaymentMethodTest() {
+    SetBypassUserInteractionForTesting();
+  }
+};
 
 IN_PROC_BROWSER_TEST_P(PaymentHandlerChangePaymentMethodTest, Test) {
   NavigateTo("a.com", "/change_payment_method.html");
@@ -33,13 +38,13 @@ IN_PROC_BROWSER_TEST_P(PaymentHandlerChangePaymentMethodTest, Test) {
   std::string method_name;
   InstallPaymentApp("a.com", "/change_payment_method_app.js", &method_name);
 
-  ASSERT_TRUE(content::ExecuteScript(GetActiveWebContents(),
-                                     GetParam().init_test_code));
+  ASSERT_TRUE(
+      content::ExecJs(GetActiveWebContents(), GetParam().init_test_code));
 
-  std::string actual_output;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractString(
-      GetActiveWebContents(), "outputChangePaymentMethodReturnValue(request);",
-      &actual_output));
+  std::string actual_output =
+      content::EvalJs(GetActiveWebContents(),
+                      "outputChangePaymentMethodReturnValue(request);")
+          .ExtractString();
 
   // The test expectations are hard-coded, but the embedded test server changes
   // its port number in every test, e.g., https://a.com:34548.

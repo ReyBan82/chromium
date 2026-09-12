@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "v8/include/v8.h"
@@ -18,12 +19,9 @@ class ActivityLogConverterStrategyTest : public testing::Test {
       : isolate_(v8::Isolate::GetCurrent()),
         handle_scope_(isolate_),
         context_(isolate_, v8::Context::New(isolate_)),
-        context_scope_(context()) {}
-
- protected:
-  void SetUp() override {
-    converter_ = content::V8ValueConverter::Create();
-    strategy_ = std::make_unique<ActivityLogConverterStrategy>();
+        context_scope_(context()),
+        strategy_(std::make_unique<ActivityLogConverterStrategy>()),
+        converter_(content::V8ValueConverter::Create()) {
     converter_->SetFunctionAllowed(true);
     converter_->SetStrategy(strategy_.get());
   }
@@ -76,12 +74,12 @@ class ActivityLogConverterStrategyTest : public testing::Test {
     return v8::Local<v8::Context>::New(isolate_, context_);
   }
 
-  v8::Isolate* isolate_;
+  raw_ptr<v8::Isolate> isolate_;
   v8::HandleScope handle_scope_;
   v8::Global<v8::Context> context_;
   v8::Context::Scope context_scope_;
+  const std::unique_ptr<ActivityLogConverterStrategy> strategy_;
   std::unique_ptr<content::V8ValueConverter> converter_;
-  std::unique_ptr<ActivityLogConverterStrategy> strategy_;
 };
 
 TEST_F(ActivityLogConverterStrategyTest, ConversionTest) {
@@ -110,9 +108,9 @@ TEST_F(ActivityLogConverterStrategyTest, ConversionTest) {
       "};"
       "})();";
 
-  v8::MicrotasksScope microtasks(
-      isolate_, v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Local<v8::Context> context = context_.Get(isolate_);
+  v8::MicrotasksScope microtasks(context,
+                                 v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Local<v8::Script> script(
       v8::Script::Compile(
           context, v8::String::NewFromUtf8(isolate_, source,

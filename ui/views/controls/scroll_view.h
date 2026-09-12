@@ -6,17 +6,19 @@
 #define UI_VIEWS_CONTROLS_SCROLL_VIEW_H_
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "base/callback_list.h"
-#include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "ui/color/color_id.h"
+#include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
+#include "ui/color/color_variant.h"
 #include "ui/compositor/layer_type.h"
 #include "ui/views/controls/focus_ring.h"
 #include "ui/views/controls/scrollbar/scroll_bar.h"
 #include "ui/views/controls/separator.h"
+#include "ui/views/metadata/view_factory.h"
 
 namespace cc {
 struct ElementId;
@@ -25,7 +27,7 @@ struct ElementId;
 namespace gfx {
 class PointF;
 class RoundedCornersF;
-}
+}  // namespace gfx
 
 namespace views {
 namespace test {
@@ -49,14 +51,14 @@ enum class OverflowIndicatorAlignment { kLeft, kTop, kRight, kBottom };
 /////////////////////////////////////////////////////////////////////////////
 
 class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
- public:
-  METADATA_HEADER(ScrollView);
+  METADATA_HEADER(ScrollView, View)
 
+ public:
   // Indicates whether or not scroll view is initialized with layer-scrolling.
-  enum class ScrollWithLayers { kDisabled, kEnabled };
+  enum class ScrollWithLayers : bool { kDisabled, kEnabled };
 
   // Controls how a scroll bar appears and functions.
-  enum class ScrollBarMode {
+  enum class ScrollBarMode : uint8_t {
     // The scrollbar is hidden, and the pane will not respond to e.g. mousewheel
     // events even if the contents are larger than the viewport.
     kDisabled,
@@ -70,6 +72,25 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
 
   using ScrollViewCallbackList = base::RepeatingClosureList;
   using ScrollViewCallback = ScrollViewCallbackList::CallbackType;
+
+  // While held, the `ScrollView` will disable optimizations to prioritize the
+  // ability to synchronize other layout updates with scroll updates.
+  class VIEWS_EXPORT ScopedScrollSynchronizer : public ViewObserver {
+   public:
+    explicit ScopedScrollSynchronizer(base::PassKey<ScrollView>,
+                                      ScrollView& scroll_view);
+    ScopedScrollSynchronizer(const ScopedScrollSynchronizer&) = delete;
+    ScopedScrollSynchronizer& operator=(const ScopedScrollSynchronizer&) =
+        delete;
+    ~ScopedScrollSynchronizer() override;
+
+    // ViewObserver
+    void OnViewIsDeleting(View* observed_view) override;
+
+   private:
+    base::ScopedObservation<ScrollView, ViewObserver> scroll_view_observation_{
+        this};
+  };
 
   ScrollView();
 
@@ -127,26 +148,31 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   // rounded corners to the `contents_viewport_` layer. See `ScrollWithLayers`.
   void SetViewportRoundedCornerRadius(const gfx::RoundedCornersF& radii);
 
-  // The background color can be configured in two distinct ways:
-  // . By way of SetBackgroundThemeColorId(). This is the default and when
-  //   called the background color comes from the theme (and changes if the
-  //   theme changes).
-  // . By way of setting an explicit color, i.e. SetBackgroundColor(). Use
-  //   absl::nullopt if you don't want any color, but be warned this
+  // Specify the background color:
+  // . Set a ColorId. This is the default and when called the background color
+  //   comes from the theme (and changes if the theme changes).
+  // . Set an explicit color.
+  // . Use std::nullopt if you don't want any color, but be warned this
   //   produces awful results when layers are used with subpixel rendering.
-  absl::optional<SkColor> GetBackgroundColor() const;
-  void SetBackgroundColor(const absl::optional<SkColor>& color);
-
-  absl::optional<ui::ColorId> GetBackgroundThemeColorId() const;
-  void SetBackgroundThemeColorId(const absl::optional<ui::ColorId>& color_id);
+  std::optional<ui::ColorVariant> GetBackgroundColor() const;
+  void SetBackgroundColor(const std::optional<ui::ColorVariant>& color);
 
   // Returns the visible region of the content View.
   gfx::Rect GetVisibleRect() const;
 
+  // Returns the opaque visible region of the content view which excludes any
+  // gradient mask that is applied by the scroll view.
+  gfx::Rect GetOpaqueVisibleRect() const;
+
   // Scrolls the `contents_` by an offset.
   void ScrollByOffset(const gfx::PointF& offset);
 
-  bool GetUseColorId() const { return !!background_color_id_; }
+  // Scrolls the `contents_` to an offset.
+  void ScrollToOffset(const gfx::PointF& offset);
+
+  // Get the current scroll offset either from the ui::Layer or from the
+  // |contents_| origin offset.
+  gfx::PointF CurrentOffset() const;
 
   ScrollBarMode GetHorizontalScrollBarMode() const {
     return horizontal_scroll_bar_mode_;
@@ -174,6 +200,23 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
                                    int thickness,
                                    bool fills_opaquely);
 
+  // Direction of linear opacity gradient applied when overflow content exists.
+  enum class GradientDirection {
+    kNone = 0,
+    kHorizontal = 1,
+    kVertical = 2,
+    kHorizontalLeading = 3,
+    kHorizontalTrailing = 4,
+    kVerticalLeading = 5,
+    kVerticalTrailing = 6,
+  };
+
+  // Sets which direction a opacity gradient should be shown when content
+  // overflows. Gradient can only be applied to one direction at a time, so in
+  // cases where both horizontal and vertical scroll overflows, only one can
+  // have a opacity gradient.
+  void SetOverflowGradientMask(GradientDirection direction);
+
   // Turns this scroll view into a bounded scroll view, with a fixed height.
   // By default, a ScrollView will stretch to fill its outer container.
   void ClipHeightTo(int min_height, int max_height);
@@ -182,7 +225,8 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   bool is_bounded() const { return max_height_ >= 0 && min_height_ >= 0; }
 
   // Retrieves the width/height reserved for scrollbars. These return 0 if the
-  // scrollbar has not yet been created or in the case of overlay scrollbars.
+  // scrollbar has not yet been created, if the scrollbar is not visible, or in
+  // the case of overlay scrollbars.
   int GetScrollBarLayoutWidth() const;
   int GetScrollBarLayoutHeight() const;
 
@@ -200,38 +244,47 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   bool GetHasFocusIndicator() const { return draw_focus_indicator_; }
   void SetHasFocusIndicator(bool has_focus_indicator);
 
+  // Returns whether the content view is currently overflowing the viewport
+  // along the horizontal and vertical axes respectively.
+  bool IsHorizontalContentOverflowing() const;
+  bool IsVerticalContentOverflowing() const;
+
+  // Ensures that this will disabled optimizations to prioritize the ability
+  // to synchronize other layout updates with scrolling updates.
+  std::unique_ptr<ScopedScrollSynchronizer> EnableScrollSynchronization();
+
   // Called when |contents_| scrolled. This can be triggered by each single
   // event that is able to scroll the contents. KeyEvents like ui::VKEY_LEFT,
-  // ui::VKEY_RIGHT, or only ui::ET_MOUSEWHEEL will only trigger this function
-  // but not OnContentsScrollEnded below, since they do not belong to any
-  // events sequence. This function will also be triggered by each
-  // ui::ET_GESTURE_SCROLL_UPDATE event in the gesture scroll sequence or
-  // each ui::ET_MOUSEWHEEL event that associated with the ScrollEvent in the
-  // scroll events sequence while the OnContentsScrollEnded below will only be
-  // triggered once at the end of the events sequence.
+  // ui::VKEY_RIGHT, or only ui::EventType::kMousewheel will only trigger this
+  // function but not OnContentsScrollEnded below, since they do not belong to
+  // any events sequence. This function will also be triggered by each
+  // ui::EventType::kGestureScrollUpdate event in the gesture scroll sequence or
+  // each ui::EventType::kMousewheel event that associated with the ScrollEvent
+  // in the scroll events sequence while the OnContentsScrollEnded below will
+  // only be triggered once at the end of the events sequence.
   base::CallbackListSubscription AddContentsScrolledCallback(
       ScrollViewCallback callback);
 
   // Called at the end of a sequence of events that are generated to scroll
-  // the contents. The gesture scroll sequence {ui::ET_GESTURE_SCROLL_BEGIN,
-  // ui::ET_GESTURE_SCROLL_UPDATE, ..., ui::ET_GESTURE_SCROLL_UPDATE,
-  // ui::ET_GESTURE_SCROLL_END or ui::ET_SCROLL_FLING_START} or the scroll
-  // events sequence {ui::ET_SCROLL_FLING_CANCEL, ui::ET_SCROLL, ...,
-  // ui::ET_SCROLL, ui::ET_SCROLL_FLING_START} both will trigger this function
-  // on the events sequence end.
+  // the contents. The gesture scroll sequence
+  // {ui::EventType::kGestureScrollBegin, ui::EventType::kGestureScrollUpdate,
+  // ..., ui::EventType::kGestureScrollUpdate, ui::EventType::kGestureScrollEnd
+  // or ui::EventType::kScrollFlingStart} or the scroll events sequence
+  // {ui::EventType::kScrollFlingCancel, ui::EventType::kScroll, ...,
+  // ui::EventType::kScroll, ui::EventType::kScrollFlingStart} both will trigger
+  // this function on the events sequence end.
   base::CallbackListSubscription AddContentsScrollEndedCallback(
       ScrollViewCallback callback);
 
-  // View overrides:
-  gfx::Size CalculatePreferredSize() const override;
-  int GetHeightForWidth(int width) const override;
-  void Layout() override;
+  // View:
+  gfx::Size CalculatePreferredSize(
+      const SizeBounds& available_size) const override;
+  void Layout(PassKey) override;
   bool OnKeyPressed(const ui::KeyEvent& event) override;
   bool OnMouseWheel(const ui::MouseWheelEvent& e) override;
   void OnScrollEvent(ui::ScrollEvent* event) override;
   void OnGestureEvent(ui::GestureEvent* event) override;
   void OnThemeChanged() override;
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override;
   bool HandleAccessibleAction(const ui::AXActionData& action_data) override;
 
   // ScrollBarController overrides:
@@ -241,9 +294,29 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
                          bool is_positive) override;
   void OnScrollEnded() override;
 
+  // Registers a callback to be called after the layout is complete. This
+  // callback can be used e.g. to scroll the view to the appropriate position
+  // in the contents by explicitly calling `ScrollToOffset` or `ScrollByOffset`
+  // and to update the scrollbars to reflect the new position.
+  void RegisterPostLayoutCallback(
+      base::RepeatingCallback<void(ScrollView*)> post_layout_callback);
+
+  // Registers a callback that will be invoked after the compositor has
+  // submitted the next successful frame following the next layout pass. Waiting
+  // for the next frame post layout is necessary as a given layout pass will not
+  // be reflected on a content view's layer until a frame has been produced.
+  // Failing to wait for frame production will result in incorrect scroll
+  // behavior of APIs such as `ScrollToOffset()` and `ScrollByOffset()`.
+  // TODO(tluk): Remove this once remaining callsites have been migrated.
+  void RegisterNextSuccessfulFramePostLayoutCallback(
+      base::OnceClosure callback);
+
   bool is_scrolling() const {
     return horiz_sb_->is_scrolling() || vert_sb_->is_scrolling();
   }
+
+  bool GetUseContentsPreferredSize() const;
+  void SetUseContentsPreferredSize(bool use_contents_preferred_size);
 
  private:
   friend class test::ScrollViewTestApi;
@@ -267,12 +340,12 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   void SetContentsImpl(std::unique_ptr<View> a_view);
   void SetHeaderImpl(std::unique_ptr<View> a_header);
 
-  // Used internally by SetHeaderImpl() and SetContentsImpl() to reset the view.
-  // Sets |member| to |new_view|. If |new_view| is non-null it is added to
-  // |parent|.
-  void SetHeaderOrContents(View* parent,
-                           std::unique_ptr<View> new_view,
-                           View** member);
+  // Used internally by SetHeaderImpl() and SetContentsImpl() to replace a
+  // child. If `old_view` is non-null it is removed as a child and destroyed; if
+  // `new_view` is non-null it is added to a child. Returns `new_view`.
+  View* ReplaceChildView(View* parent,
+                         raw_ptr<View>::DanglingType old_view,
+                         std::unique_ptr<View> new_view);
 
   // Scrolls the minimum amount necessary to make the specified rectangle
   // visible, in the coordinates of the contents view. The specified rectangle
@@ -293,11 +366,6 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
 
   // Update the scrollbars positions given viewport and content sizes.
   void UpdateScrollBarPositions();
-
-  // Helpers to get and set the current scroll offset (either from the ui::Layer
-  // or from the |contents_| origin offset).
-  gfx::PointF CurrentOffset() const;
-  void ScrollToOffset(const gfx::PointF& offset);
 
   // Whether the ScrollView scrolls using ui::Layer APIs.
   bool ScrollsWithLayers() const;
@@ -323,37 +391,48 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   // scrolling content within the viewport.
   void UpdateOverflowIndicatorVisibility(const gfx::PointF& offset);
 
+  void OnScopedScrollSynchronizerDestroyed();
+  void UpdateMainSideScrollingEnabledState();
+
   View* GetContentsViewportForTest() const;
+
+  // Update gradient mask for a single direction - horizontal or vertical.
+  // Only one gradient at a time is allowed.
+  void UpdateGradientMask();
 
   // The current contents and its viewport. |contents_| is contained in
   // |contents_viewport_|.
-  View* contents_ = nullptr;
+  // Can dangle in practice during out-of-order view tree destruction.
+  // TODO(crbug.com/40280409): fix that.
+  raw_ptr<View, DisableDanglingPtrDetection> contents_ = nullptr;
   raw_ptr<Viewport> contents_viewport_ = nullptr;
 
   // The current header and its viewport. |header_| is contained in
   // |header_viewport_|.
-  View* header_ = nullptr;
+  // Can dangle in practice during out-of-order view tree destruction.
+  // TODO(crbug.com/40280409): fix that.
+  raw_ptr<View, DisableDanglingPtrDetection> header_ = nullptr;
   raw_ptr<Viewport> header_viewport_ = nullptr;
 
   // Horizontal scrollbar.
-  raw_ptr<ScrollBar, DanglingUntriaged> horiz_sb_;
+  raw_ptr<ScrollBar> horiz_sb_;
 
   // Vertical scrollbar.
-  raw_ptr<ScrollBar, DanglingUntriaged> vert_sb_;
+  raw_ptr<ScrollBar> vert_sb_;
 
   // Corner view.
-  std::unique_ptr<View> corner_view_;
+  raw_ptr<View> corner_view_;
 
   // Hidden content indicators
-  // TODO(https://crbug.com/1166949): Use preferred width/height instead of
+  // TODO(crbug.com/40742414): Use preferred width/height instead of
   // thickness members.
-  std::unique_ptr<View> more_content_left_ = std::make_unique<Separator>();
+  raw_ptr<View> more_content_left_;
   int more_content_left_thickness_ = Separator::kThickness;
-  std::unique_ptr<View> more_content_top_ = std::make_unique<Separator>();
+  raw_ptr<View> more_content_top_;
   int more_content_top_thickness_ = Separator::kThickness;
-  std::unique_ptr<View> more_content_right_ = std::make_unique<Separator>();
+  raw_ptr<View> more_content_right_;
   int more_content_right_thickness_ = Separator::kThickness;
-  std::unique_ptr<View> more_content_bottom_ = std::make_unique<Separator>();
+  raw_ptr<View> more_content_bottom_;
   int more_content_bottom_thickness_ = Separator::kThickness;
 
   // The min and max height for the bounded scroll view. These are negative
@@ -362,8 +441,8 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   int max_height_ = -1;
 
   // See description of SetBackgroundColor() for details.
-  absl::optional<SkColor> background_color_;
-  absl::optional<ui::ColorId> background_color_id_ = ui::kColorDialogBackground;
+  std::optional<ui::ColorVariant> background_color_ =
+      ui::kColorDialogBackground;
 
   // How to handle the case when the contents overflow the viewport.
   ScrollBarMode horizontal_scroll_bar_mode_ = ScrollBarMode::kEnabled;
@@ -391,6 +470,11 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   // Whether the left/right/up/down arrow keys attempt to scroll the view.
   bool allow_keyboard_scrolling_ = true;
 
+  // Uses the contents' preferred size when laying out if one exists. This
+  // should eventually be true for all cases but using this bool in the interim
+  // to prevent breaking any existing ScrollView uses.
+  bool use_contents_preferred_size_ = false;
+
   // The layer type used for content view when scroll by layers is enabled.
   ui::LayerType layer_type_ = ui::LAYER_TEXTURED;
 
@@ -399,6 +483,23 @@ class VIEWS_EXPORT ScrollView : public View, public ScrollBarController {
   // Scrolling callbacks.
   ScrollViewCallbackList on_contents_scrolled_;
   ScrollViewCallbackList on_contents_scroll_ended_;
+
+  // Post-layout callback.
+  base::RepeatingCallback<void(ScrollView*)> post_layout_callback_;
+
+  base::OnceClosure next_successful_frame_post_layout_callback_;
+
+  GradientDirection gradient_direction_ = GradientDirection::kNone;
+
+  // Track if the leading gradient is shown
+  bool is_leading_gradient_visible_ = false;
+
+  // Track if the trailing gradient is shown
+  bool is_trailing_gradient_visible_ = false;
+
+  int scroll_synchronizer_count_ = 0;
+
+  base::WeakPtrFactory<ScrollView> weak_ptr_factory_{this};
 };
 
 // When building with GCC this ensures that an instantiation of the
@@ -410,13 +511,12 @@ VIEW_BUILDER_VIEW_TYPE_PROPERTY(View, Contents)
 VIEW_BUILDER_PROPERTY(ui::LayerType, ContentsLayerType)
 VIEW_BUILDER_VIEW_TYPE_PROPERTY(View, Header)
 VIEW_BUILDER_PROPERTY(bool, AllowKeyboardScrolling)
-VIEW_BUILDER_PROPERTY(absl::optional<ui::ColorId>, BackgroundThemeColorId)
+VIEW_BUILDER_PROPERTY(std::optional<ui::ColorVariant>, BackgroundColor)
 VIEW_BUILDER_METHOD(ClipHeightTo, int, int)
 VIEW_BUILDER_PROPERTY(ScrollView::ScrollBarMode, HorizontalScrollBarMode)
 VIEW_BUILDER_PROPERTY(ScrollView::ScrollBarMode, VerticalScrollBarMode)
 VIEW_BUILDER_PROPERTY(bool, TreatAllScrollEventsAsHorizontal)
 VIEW_BUILDER_PROPERTY(bool, DrawOverflowIndicator)
-VIEW_BUILDER_PROPERTY(absl::optional<SkColor>, BackgroundColor)
 VIEW_BUILDER_VIEW_PROPERTY(ScrollBar, HorizontalScrollBar)
 VIEW_BUILDER_VIEW_PROPERTY(ScrollBar, VerticalScrollBar)
 VIEW_BUILDER_PROPERTY(bool, HasFocusIndicator)

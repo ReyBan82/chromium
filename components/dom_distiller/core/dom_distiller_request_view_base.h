@@ -40,9 +40,11 @@ class DomDistillerRequestViewBase : public ViewRequestDelegate,
 
  protected:
   // DistilledPagePrefs::Observer implementation:
-  void OnChangeTheme(mojom::Theme new_theme) override;
+  void OnChangeTheme(mojom::Theme new_theme,
+                     ThemeSettingsUpdateSource source) override;
   void OnChangeFontFamily(mojom::FontFamily new_font_family) override;
   void OnChangeFontScaling(float scaling) override;
+  void OnChangeLinksEnabled(bool enabled) override;
 
   // Sends JavaScript to the attached Viewer, buffering data if the viewer isn't
   // ready.

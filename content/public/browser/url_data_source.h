@@ -12,8 +12,6 @@
 #include "base/memory/ref_counted.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/web_contents.h"
-#include "content/public/browser/web_ui_data_source.h"
-#include "ui/base/template_expressions.h"
 
 class GURL;
 
@@ -99,7 +97,7 @@ class CONTENT_EXPORT URLDataSource {
       network::mojom::CSPDirectiveName directive);
 
   // By default, neither of these headers are set. Override to change this.
-  // TODO(https://crbug.com/1189194): Consider setting COOP:same-origin and
+  // TODO(crbug.com/40755309): Consider setting COOP:same-origin and
   // COEP:require-corp as the default instead.
   virtual std::string GetCrossOriginOpenerPolicy();
   virtual std::string GetCrossOriginEmbedderPolicy();
@@ -133,9 +131,6 @@ class CONTENT_EXPORT URLDataSource {
   // Default implementation returns an empty string.
   virtual std::string GetAccessControlAllowOriginForOrigin(
       const std::string& origin);
-
-  // Replacements for i18n or null if no replacements are desired.
-  virtual const ui::TemplateReplacements* GetReplacements();
 
   // Whether i18n template expression replacement should be allowed in HTML
   // templates within JS files.

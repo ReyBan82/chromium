@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -27,23 +28,17 @@
 #include "remoting/base/oauth_client.h"
 #include "remoting/base/rsa_key_pair.h"
 #include "remoting/host/chromoting_host_context.h"
+#include "remoting/host/elevated_native_messaging_host.h"
 #include "remoting/host/native_messaging/log_message_handler.h"
 #include "remoting/host/pin_hash.h"
 #include "remoting/protocol/pairing_registry.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-
-#if BUILDFLAG(IS_WIN)
-#include "remoting/host/win/elevated_native_messaging_host.h"
-#endif  // BUILDFLAG(IS_WIN)
 
 namespace {
 
-#if BUILDFLAG(IS_WIN)
 const int kElevatedHostTimeoutSeconds = 300;
-#endif  // BUILDFLAG(IS_WIN)
 
 // Features supported in addition to the base protocol.
-const char* kSupportedFeatures[] = {
+constexpr const char* kSupportedFeatures[] = {
     "pairingRegistry",
     "oauthClient",
     "getRefreshTokenFromAuthCode",
@@ -52,14 +47,14 @@ const char* kSupportedFeatures[] = {
 #endif  // BUILDFLAG(IS_APPLE)
 };
 
-// Helper to extract the "config" part of a message as a base::Value::Dict.
+// Helper to extract the "config" part of a message as a base::DictValue.
 // Returns nullptr on failure, and logs an error message.
-absl::optional<base::Value::Dict> ConfigDictionaryFromMessage(
-    base::Value::Dict message) {
-  if (base::Value::Dict* config_dict = message.FindDict("config")) {
+std::optional<base::DictValue> ConfigDictionaryFromMessage(
+    base::DictValue message) {
+  if (base::DictValue* config_dict = message.FindDict("config")) {
     return std::move(*config_dict);
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace
@@ -67,16 +62,12 @@ absl::optional<base::Value::Dict> ConfigDictionaryFromMessage(
 namespace remoting {
 
 Me2MeNativeMessagingHost::Me2MeNativeMessagingHost(
-    bool needs_elevation,
     intptr_t parent_window_handle,
     std::unique_ptr<ChromotingHostContext> host_context,
     scoped_refptr<DaemonController> daemon_controller,
     scoped_refptr<protocol::PairingRegistry> pairing_registry,
     std::unique_ptr<OAuthClient> oauth_client)
-    : needs_elevation_(needs_elevation),
-#if BUILDFLAG(IS_WIN)
-      parent_window_handle_(parent_window_handle),
-#endif
+    : parent_window_handle_(parent_window_handle),
       host_context_(std::move(host_context)),
       daemon_controller_(daemon_controller),
       pairing_registry_(pairing_registry),
@@ -91,22 +82,21 @@ Me2MeNativeMessagingHost::~Me2MeNativeMessagingHost() {
 void Me2MeNativeMessagingHost::OnMessage(const std::string& message) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
-  base::Value::Dict response;
-  absl::optional<base::Value> message_value = base::JSONReader::Read(message);
-  if (!message_value || !message_value->is_dict()) {
+  base::DictValue response;
+  std::optional<base::DictValue> message_dict =
+      base::JSONReader::ReadDict(message, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (!message_dict) {
     OnError("Received a message that's not a dictionary.");
     return;
   }
 
-  base::Value::Dict& message_dict = message_value->GetDict();
-
   // If the client supplies an ID, it will expect it in the response. This
   // might be a string or a number, so cope with both.
-  if (const base::Value* id = message_dict.Find("id")) {
+  if (const base::Value* id = message_dict->Find("id")) {
     response.Set("id", id->Clone());
   }
 
-  const std::string* type = message_dict.FindString("type");
+  const std::string* type = message_dict->FindString("type");
   if (!type) {
     OnError("'type' not found");
     return;
@@ -115,41 +105,41 @@ void Me2MeNativeMessagingHost::OnMessage(const std::string& message) {
   response.Set("type", *type + "Response");
 
   if (*type == "hello") {
-    ProcessHello(std::move(message_dict), std::move(response));
+    ProcessHello(std::move(*message_dict), std::move(response));
   } else if (*type == "clearPairedClients") {
-    ProcessClearPairedClients(std::move(message_dict), std::move(response));
+    ProcessClearPairedClients(std::move(*message_dict), std::move(response));
   } else if (*type == "deletePairedClient") {
-    ProcessDeletePairedClient(std::move(message_dict), std::move(response));
+    ProcessDeletePairedClient(std::move(*message_dict), std::move(response));
   } else if (*type == "getHostName") {
-    ProcessGetHostName(std::move(message_dict), std::move(response));
+    ProcessGetHostName(std::move(*message_dict), std::move(response));
   } else if (*type == "getPinHash") {
-    ProcessGetPinHash(std::move(message_dict), std::move(response));
+    ProcessGetPinHash(std::move(*message_dict), std::move(response));
   } else if (*type == "generateKeyPair") {
-    ProcessGenerateKeyPair(std::move(message_dict), std::move(response));
+    ProcessGenerateKeyPair(std::move(*message_dict), std::move(response));
   } else if (*type == "updateDaemonConfig") {
-    ProcessUpdateDaemonConfig(std::move(message_dict), std::move(response));
+    ProcessUpdateDaemonConfig(std::move(*message_dict), std::move(response));
   } else if (*type == "getDaemonConfig") {
-    ProcessGetDaemonConfig(std::move(message_dict), std::move(response));
+    ProcessGetDaemonConfig(std::move(*message_dict), std::move(response));
   } else if (*type == "getPairedClients") {
-    ProcessGetPairedClients(std::move(message_dict), std::move(response));
+    ProcessGetPairedClients(std::move(*message_dict), std::move(response));
   } else if (*type == "getUsageStatsConsent") {
-    ProcessGetUsageStatsConsent(std::move(message_dict), std::move(response));
+    ProcessGetUsageStatsConsent(std::move(*message_dict), std::move(response));
   } else if (*type == "startDaemon") {
-    ProcessStartDaemon(std::move(message_dict), std::move(response));
+    ProcessStartDaemon(std::move(*message_dict), std::move(response));
   } else if (*type == "stopDaemon") {
-    ProcessStopDaemon(std::move(message_dict), std::move(response));
+    ProcessStopDaemon(std::move(*message_dict), std::move(response));
   } else if (*type == "getDaemonState") {
-    ProcessGetDaemonState(std::move(message_dict), std::move(response));
+    ProcessGetDaemonState(std::move(*message_dict), std::move(response));
   } else if (*type == "getHostClientId") {
-    ProcessGetHostClientId(std::move(message_dict), std::move(response));
+    ProcessGetHostClientId(std::move(*message_dict), std::move(response));
   } else if (*type == "getCredentialsFromAuthCode") {
-    ProcessGetCredentialsFromAuthCode(std::move(message_dict),
+    ProcessGetCredentialsFromAuthCode(std::move(*message_dict),
                                       std::move(response), true);
   } else if (*type == "getRefreshTokenFromAuthCode") {
-    ProcessGetCredentialsFromAuthCode(std::move(message_dict),
+    ProcessGetCredentialsFromAuthCode(std::move(*message_dict),
                                       std::move(response), false);
   } else if (*type == "it2mePermissionCheck") {
-    ProcessIt2mePermissionCheck(std::move(message_dict), std::move(response));
+    ProcessIt2mePermissionCheck(std::move(*message_dict), std::move(response));
   } else {
     OnError("Unsupported request type: " + *type);
   }
@@ -168,12 +158,12 @@ Me2MeNativeMessagingHost::task_runner() const {
   return host_context_->ui_task_runner();
 }
 
-void Me2MeNativeMessagingHost::ProcessHello(base::Value::Dict message,
-                                            base::Value::Dict response) {
+void Me2MeNativeMessagingHost::ProcessHello(base::DictValue message,
+                                            base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   response.Set("version", STRINGIZE(VERSION));
-  base::Value::List supported_features_list;
+  base::ListValue supported_features_list;
   for (const char* feature : kSupportedFeatures) {
     supported_features_list.Append(feature);
   }
@@ -182,11 +172,11 @@ void Me2MeNativeMessagingHost::ProcessHello(base::Value::Dict message,
 }
 
 void Me2MeNativeMessagingHost::ProcessClearPairedClients(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
-  if (needs_elevation_) {
+  if (!daemon_controller_->is_privileged()) {
     if (DelegateToElevatedHost(std::move(message)) != DELEGATION_SUCCESS) {
       SendBooleanResult(std::move(response), false);
     }
@@ -203,11 +193,11 @@ void Me2MeNativeMessagingHost::ProcessClearPairedClients(
 }
 
 void Me2MeNativeMessagingHost::ProcessDeletePairedClient(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
-  if (needs_elevation_) {
+  if (!daemon_controller_->is_privileged()) {
     if (DelegateToElevatedHost(std::move(message)) != DELEGATION_SUCCESS) {
       SendBooleanResult(std::move(response), false);
     }
@@ -232,30 +222,26 @@ void Me2MeNativeMessagingHost::ProcessDeletePairedClient(
   }
 }
 
-void Me2MeNativeMessagingHost::ProcessGetHostName(base::Value::Dict message,
-                                                  base::Value::Dict response) {
+void Me2MeNativeMessagingHost::ProcessGetHostName(base::DictValue message,
+                                                  base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   response.Set("hostname", net::GetHostName());
   SendMessageToClient(std::move(response));
 }
 
-void Me2MeNativeMessagingHost::ProcessGetPinHash(base::Value::Dict message,
-                                                 base::Value::Dict response) {
+void Me2MeNativeMessagingHost::ProcessGetPinHash(base::DictValue message,
+                                                 base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   std::string* host_id = message.FindString("hostId");
   if (!host_id) {
-    std::string message_json;
-    base::JSONWriter::Write(message, &message_json);
-    OnError("'hostId' not found: " + message_json);
+    OnError("'hostId' not found: " + base::WriteJson(message).value_or(""));
     return;
   }
   std::string* pin = message.FindString("pin");
   if (!pin) {
-    std::string message_json;
-    base::JSONWriter::Write(message, &message_json);
-    OnError("'pin' not found: " + message_json);
+    OnError("'pin' not found: " + base::WriteJson(message).value_or(""));
     return;
   }
   response.Set("hash", MakeHostPinHash(std::move(*host_id), std::move(*pin)));
@@ -263,8 +249,8 @@ void Me2MeNativeMessagingHost::ProcessGetPinHash(base::Value::Dict message,
 }
 
 void Me2MeNativeMessagingHost::ProcessGenerateKeyPair(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   scoped_refptr<RsaKeyPair> key_pair = RsaKeyPair::Generate();
@@ -274,11 +260,11 @@ void Me2MeNativeMessagingHost::ProcessGenerateKeyPair(
 }
 
 void Me2MeNativeMessagingHost::ProcessUpdateDaemonConfig(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
-  if (needs_elevation_) {
+  if (!daemon_controller_->is_privileged()) {
     DelegationResult result = DelegateToElevatedHost(std::move(message));
     switch (result) {
       case DELEGATION_SUCCESS:
@@ -293,7 +279,7 @@ void Me2MeNativeMessagingHost::ProcessUpdateDaemonConfig(
     }
   }
 
-  absl::optional<base::Value::Dict> config_dict =
+  std::optional<base::DictValue> config_dict =
       ConfigDictionaryFromMessage(std::move(message));
   if (!config_dict) {
     OnError("'config' dictionary not found");
@@ -307,8 +293,8 @@ void Me2MeNativeMessagingHost::ProcessUpdateDaemonConfig(
 }
 
 void Me2MeNativeMessagingHost::ProcessGetDaemonConfig(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   daemon_controller_->GetConfig(
@@ -317,8 +303,8 @@ void Me2MeNativeMessagingHost::ProcessGetDaemonConfig(
 }
 
 void Me2MeNativeMessagingHost::ProcessGetPairedClients(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   if (pairing_registry_.get()) {
@@ -327,13 +313,13 @@ void Me2MeNativeMessagingHost::ProcessGetPairedClients(
                        weak_ptr_, std::move(response)));
   } else {
     SendPairedClientsResponse(std::move(response),
-                              /*pairings=*/base::Value::List());
+                              /*pairings=*/base::ListValue());
   }
 }
 
 void Me2MeNativeMessagingHost::ProcessGetUsageStatsConsent(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   daemon_controller_->GetUsageStatsConsent(
@@ -341,11 +327,18 @@ void Me2MeNativeMessagingHost::ProcessGetUsageStatsConsent(
                      weak_ptr_, std::move(response)));
 }
 
-void Me2MeNativeMessagingHost::ProcessStartDaemon(base::Value::Dict message,
-                                                  base::Value::Dict response) {
+void Me2MeNativeMessagingHost::ProcessStartDaemon(base::DictValue message,
+                                                  base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
-  if (needs_elevation_) {
+#if BUILDFLAG(IS_LINUX)
+  // See: b/215406223, crbug.com/514525547
+  // TODO: yuweih - consider re-enabling starting host via native messaging once
+  // the GDM-managed host becomes the default.
+  LOG(ERROR) << "Starting host is not supported on Linux.";
+  SendAsyncResult(std::move(response), DaemonController::RESULT_FAILED);
+#else
+  if (!daemon_controller_->is_privileged()) {
     DelegationResult result = DelegateToElevatedHost(std::move(message));
     switch (result) {
       case DELEGATION_SUCCESS:
@@ -360,13 +353,13 @@ void Me2MeNativeMessagingHost::ProcessStartDaemon(base::Value::Dict message,
     }
   }
 
-  absl::optional<bool> consent = message.FindBool("consent");
+  std::optional<bool> consent = message.FindBool("consent");
   if (!consent) {
     OnError("'consent' not found.");
     return;
   }
 
-  absl::optional<base::Value::Dict> config_dict =
+  std::optional<base::DictValue> config_dict =
       ConfigDictionaryFromMessage(std::move(message));
   if (!config_dict) {
     OnError("'config' dictionary not found");
@@ -377,13 +370,14 @@ void Me2MeNativeMessagingHost::ProcessStartDaemon(base::Value::Dict message,
       std::move(*config_dict), *consent,
       base::BindOnce(&Me2MeNativeMessagingHost::SendAsyncResult, weak_ptr_,
                      std::move(response)));
+#endif  // !BUILDFLAG(IS_LINUX)
 }
 
-void Me2MeNativeMessagingHost::ProcessStopDaemon(base::Value::Dict message,
-                                                 base::Value::Dict response) {
+void Me2MeNativeMessagingHost::ProcessStopDaemon(base::DictValue message,
+                                                 base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
-  if (needs_elevation_) {
+  if (!daemon_controller_->is_privileged()) {
     DelegationResult result = DelegateToElevatedHost(std::move(message));
     switch (result) {
       case DELEGATION_SUCCESS:
@@ -403,9 +397,8 @@ void Me2MeNativeMessagingHost::ProcessStopDaemon(base::Value::Dict message,
                      std::move(response)));
 }
 
-void Me2MeNativeMessagingHost::ProcessGetDaemonState(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+void Me2MeNativeMessagingHost::ProcessGetDaemonState(base::DictValue message,
+                                                     base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   DaemonController::State state = daemon_controller_->GetState();
@@ -433,8 +426,8 @@ void Me2MeNativeMessagingHost::ProcessGetDaemonState(
 }
 
 void Me2MeNativeMessagingHost::ProcessGetHostClientId(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   response.Set("clientId", google_apis::GetOAuth2ClientID(
@@ -443,8 +436,8 @@ void Me2MeNativeMessagingHost::ProcessGetHostClientId(
 }
 
 void Me2MeNativeMessagingHost::ProcessGetCredentialsFromAuthCode(
-    base::Value::Dict message,
-    base::Value::Dict response,
+    base::DictValue message,
+    base::DictValue response,
     bool need_user_email) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
@@ -469,8 +462,8 @@ void Me2MeNativeMessagingHost::ProcessGetCredentialsFromAuthCode(
 }
 
 void Me2MeNativeMessagingHost::ProcessIt2mePermissionCheck(
-    base::Value::Dict message,
-    base::Value::Dict response) {
+    base::DictValue message,
+    base::DictValue response) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   daemon_controller_->CheckPermission(
@@ -480,8 +473,8 @@ void Me2MeNativeMessagingHost::ProcessIt2mePermissionCheck(
 }
 
 void Me2MeNativeMessagingHost::SendConfigResponse(
-    base::Value::Dict response,
-    absl::optional<base::Value::Dict> config) {
+    base::DictValue response,
+    std::optional<base::DictValue> config) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   if (config) {
@@ -493,8 +486,8 @@ void Me2MeNativeMessagingHost::SendConfigResponse(
 }
 
 void Me2MeNativeMessagingHost::SendPairedClientsResponse(
-    base::Value::Dict response,
-    base::Value::List pairings) {
+    base::DictValue response,
+    base::ListValue pairings) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
   response.Set("pairedClients", std::move(pairings));
@@ -502,7 +495,7 @@ void Me2MeNativeMessagingHost::SendPairedClientsResponse(
 }
 
 void Me2MeNativeMessagingHost::SendUsageStatsConsentResponse(
-    base::Value::Dict response,
+    base::DictValue response,
     const DaemonController::UsageStatsConsent& consent) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
@@ -513,7 +506,7 @@ void Me2MeNativeMessagingHost::SendUsageStatsConsentResponse(
 }
 
 void Me2MeNativeMessagingHost::SendAsyncResult(
-    base::Value::Dict response,
+    base::DictValue response,
     DaemonController::AsyncResult result) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
@@ -531,7 +524,7 @@ void Me2MeNativeMessagingHost::SendAsyncResult(
   SendMessageToClient(std::move(response));
 }
 
-void Me2MeNativeMessagingHost::SendBooleanResult(base::Value::Dict response,
+void Me2MeNativeMessagingHost::SendBooleanResult(base::DictValue response,
                                                  bool result) {
   DCHECK(task_runner()->BelongsToCurrentThread());
 
@@ -540,7 +533,7 @@ void Me2MeNativeMessagingHost::SendBooleanResult(base::Value::Dict response,
 }
 
 void Me2MeNativeMessagingHost::SendCredentialsResponse(
-    base::Value::Dict response,
+    base::DictValue response,
     const std::string& user_email,
     const std::string& refresh_token) {
   DCHECK(task_runner()->BelongsToCurrentThread());
@@ -553,11 +546,9 @@ void Me2MeNativeMessagingHost::SendCredentialsResponse(
 }
 
 void Me2MeNativeMessagingHost::SendMessageToClient(
-    base::Value::Dict message) const {
+    base::DictValue message) const {
   DCHECK(task_runner()->BelongsToCurrentThread());
-  std::string message_json;
-  base::JSONWriter::Write(message, &message_json);
-  client_->PostMessageFromNativeHost(message_json);
+  client_->PostMessageFromNativeHost(base::WriteJson(message).value_or(""));
 }
 
 void Me2MeNativeMessagingHost::OnError(const std::string& error_message) {
@@ -571,12 +562,10 @@ void Me2MeNativeMessagingHost::OnError(const std::string& error_message) {
   client_->CloseChannel(std::string());
 }
 
-#if BUILDFLAG(IS_WIN)
-
 Me2MeNativeMessagingHost::DelegationResult
-Me2MeNativeMessagingHost::DelegateToElevatedHost(base::Value::Dict message) {
+Me2MeNativeMessagingHost::DelegateToElevatedHost(base::DictValue message) {
   DCHECK(task_runner()->BelongsToCurrentThread());
-  DCHECK(needs_elevation_);
+  DCHECK(!daemon_controller_->is_privileged());
 
   if (!elevated_host_) {
     elevated_host_ = std::make_unique<ElevatedNativeMessagingHost>(
@@ -588,8 +577,7 @@ Me2MeNativeMessagingHost::DelegateToElevatedHost(base::Value::Dict message) {
 
   ProcessLaunchResult result = elevated_host_->EnsureElevatedHostCreated();
   if (result == PROCESS_LAUNCH_RESULT_SUCCESS) {
-    elevated_host_->SendMessage(
-        base::Value::ToUniquePtrValue(base::Value(std::move(message))));
+    elevated_host_->SendMessage(message);
   }
 
   switch (result) {
@@ -601,15 +589,5 @@ Me2MeNativeMessagingHost::DelegateToElevatedHost(base::Value::Dict message) {
       return DELEGATION_FAILED;
   }
 }
-
-#else  // BUILDFLAG(IS_WIN)
-
-Me2MeNativeMessagingHost::DelegationResult
-Me2MeNativeMessagingHost::DelegateToElevatedHost(base::Value::Dict message) {
-  NOTREACHED();
-  return DELEGATION_FAILED;
-}
-
-#endif  // !BUILDFLAG(IS_WIN)
 
 }  // namespace remoting

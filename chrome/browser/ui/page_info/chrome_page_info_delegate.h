@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_UI_PAGE_INFO_CHROME_PAGE_INFO_DELEGATE_H_
 #define CHROME_BROWSER_UI_PAGE_INFO_CHROME_PAGE_INFO_DELEGATE_H_
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "components/page_info/page_info_delegate.h"
@@ -12,6 +13,7 @@
 #include "content/public/browser/web_contents_user_data.h"
 #include "url/gurl.h"
 
+class BrowserWindowInterface;
 class Profile;
 class StatefulSSLHostStateDelegate;
 class TrustSafetySentimentService;
@@ -23,6 +25,7 @@ class PageSpecificContentSettings;
 namespace permissions {
 class ObjectPermissionContextBase;
 class PermissionDecisionAutoBlocker;
+class PermissionActionsHistory;
 }  // namespace permissions
 
 namespace safe_browsing {
@@ -30,10 +33,33 @@ class PasswordProtectionService;
 class ChromePasswordProtectionService;
 }  // namespace safe_browsing
 
+#if !BUILDFLAG(IS_ANDROID)
+namespace infobars {
+class BrowserInfoBarManager;
+}
+#endif
+
 class ChromePageInfoDelegate : public PageInfoDelegate {
  public:
+  // Callback used to look up the BrowserWindowInterface for a WebContents.
+  using GetBrowserCallback =
+      base::RepeatingCallback<BrowserWindowInterface*(content::WebContents*)>;
+
+  // Returns the default callback for resolving BrowserWindowInterface from a
+  // WebContents.
+  static GetBrowserCallback DefaultGetBrowserCallback();
+
+#if !BUILDFLAG(IS_ANDROID)
+  // Registers the Page Info InfoBar specification in the centralized
+  // infobar framework.
+  static void RegisterPageInfoInfoBar(
+      infobars::BrowserInfoBarManager* infobar_manager);
+#endif
+
+  ChromePageInfoDelegate(content::WebContents* web_contents,
+                         GetBrowserCallback get_browser_callback);
   explicit ChromePageInfoDelegate(content::WebContents* web_contents);
-  ~ChromePageInfoDelegate() override = default;
+  ~ChromePageInfoDelegate() override;
 
   void SetSecurityStateForTests(
       security_state::SecurityLevel security_level,
@@ -48,46 +74,67 @@ class ChromePageInfoDelegate : public PageInfoDelegate {
   void OnUserActionOnPasswordUi(safe_browsing::WarningAction action) override;
   std::u16string GetWarningDetailText() override;
 #endif
-  permissions::PermissionResult GetPermissionResult(
+  content::PermissionResult GetPermissionResult(
       blink::PermissionType permission,
-      const url::Origin& origin) override;
+      const url::Origin& origin,
+      const std::optional<url::Origin>& requesting_origin) override;
 #if !BUILDFLAG(IS_ANDROID)
-  absl::optional<std::u16string> GetFpsOwner(const GURL& site_url) override;
-  bool IsFpsManaged() override;
+  std::optional<std::u16string> GetRwsOwner(const GURL& site_url) override;
+  bool IsRwsManaged(const GURL& site_url) override;
   bool CreateInfoBarDelegate() override;
   std::unique_ptr<content_settings::CookieControlsController>
   CreateCookieControlsController() override;
-  std::u16string GetWebAppShortName() override;
+  bool IsIsolatedWebApp() override;
+  bool IsSubApp() override;
+  bool HasSubApps() override;
   // In Chrome's case, this may show the site settings page or an app settings
   // page, depending on context.
   void ShowSiteSettings(const GURL& site_url) override;
   void ShowCookiesSettings() override;
-  void ShowAllSitesSettingsFilteredByFpsOwner(
-      const std::u16string& fps_owner) override;
+  void ShowAllSitesSettingsFilteredByRwsOwner(
+      const std::u16string& rws_owner) override;
+  void ShowSyncSettings() override;
   void OpenCookiesDialog() override;
   void OpenCertificateDialog(net::X509Certificate* certificate) override;
   void OpenConnectionHelpCenterPage(const ui::Event& event) override;
   void OpenSafetyTipHelpCenterPage() override;
   void OpenContentSettingsExceptions(
       ContentSettingsType content_settings_type) override;
-  void OnPageInfoActionOccurred(PageInfo::PageInfoAction action) override;
+  void OnPageInfoActionOccurred(page_info::PageInfoAction action) override;
   void OnUIClosing() override;
 #endif
 
+  void OpenSafeBrowsingHelpCenterPage(const ui::Event* event,
+                                      bool is_suspicious_site) override;
+
+  std::u16string GetSubjectName(const GURL& url) override;
   permissions::PermissionDecisionAutoBlocker* GetPermissionDecisionAutoblocker()
       override;
+  permissions::PermissionActionsHistory* GetPermissionActionsHistory() override;
   StatefulSSLHostStateDelegate* GetStatefulSSLHostStateDelegate() override;
   HostContentSettingsMap* GetContentSettings() override;
   bool IsSubresourceFilterActivated(const GURL& site_url) override;
+  bool HasAutoPictureInPictureBeenRegistered() override;
   bool IsContentDisplayedInVrHeadset() override;
   security_state::SecurityLevel GetSecurityLevel() override;
   security_state::VisibleSecurityState GetVisibleSecurityState() override;
+  void OnCookiesPageOpened() override;
   std::unique_ptr<content_settings::PageSpecificContentSettings::Delegate>
   GetPageSpecificContentSettingsDelegate() override;
 
 #if BUILDFLAG(IS_ANDROID)
   const std::u16string GetClientApplicationName() override;
 #endif
+
+  bool IsHttpsFirstModeEnabledForUrl(const GURL& url) override;
+  bool IsIncognitoProfile() override;
+
+#if BUILDFLAG(IS_CHROMEOS)
+  bool ShouldSyncCookiesForUrl(const GURL& url) override;
+#endif
+
+  void OnSuspiciousSiteBackToSafety() override;
+  void OnSuspiciousSiteMarkAsSafe() override;
 
  private:
   Profile* GetProfile() const;
@@ -107,7 +154,13 @@ class ChromePageInfoDelegate : public PageInfoDelegate {
   raw_ptr<TrustSafetySentimentService> sentiment_service_;
 #endif
 
-  raw_ptr<content::WebContents, DanglingUntriaged> web_contents_;
+  // Callback used to look up the BrowserWindowInterface for a WebContents.
+  //
+  // Defaults to searching via GlobalBrowserCollection::FindBrowserWithTab(),
+  // but can be overridden by callers for WebContents not directly hosted as
+  // browser tabs (e.g. payment handler dialogs or modal web dialogs).
+  GetBrowserCallback get_browser_callback_;
+  raw_ptr<content::WebContents, AcrossTasksDanglingUntriaged> web_contents_;
   security_state::SecurityLevel security_level_for_tests_;
   security_state::VisibleSecurityState visible_security_state_for_tests_;
   bool security_state_for_tests_set_ = false;

@@ -7,7 +7,9 @@
 #include <stddef.h>
 
 #include <memory>
+#include <string_view>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/run_loop.h"
@@ -164,7 +166,7 @@ TEST_F(UsbDeviceHandleTest, InterruptTransfer) {
       base::MakeRefCounted<base::RefCountedBytes>(in_buffer->size());
   TestCompletionCallback out_completion;
   for (size_t i = 0; i < out_buffer->size(); ++i) {
-    out_buffer->data()[i] = i;
+    out_buffer->as_vector()[i] = i;
   }
 
   handle->GenericTransfer(UsbTransferDirection::OUTBOUND, 0x01, out_buffer,
@@ -180,7 +182,7 @@ TEST_F(UsbDeviceHandleTest, InterruptTransfer) {
   EXPECT_EQ(static_cast<size_t>(in_buffer->size()),
             in_completion.transferred());
   for (size_t i = 0; i < in_completion.transferred(); ++i) {
-    EXPECT_EQ(out_buffer->front()[i], in_buffer->front()[i])
+    EXPECT_EQ(out_buffer->as_vector()[i], in_buffer->as_vector()[i])
         << "Mismatch at index " << i << ".";
   }
 
@@ -230,7 +232,7 @@ TEST_F(UsbDeviceHandleTest, BulkTransfer) {
       base::MakeRefCounted<base::RefCountedBytes>(in_buffer->size());
   TestCompletionCallback out_completion;
   for (size_t i = 0; i < out_buffer->size(); ++i) {
-    out_buffer->data()[i] = i;
+    out_buffer->as_vector()[i] = i;
   }
 
   handle->GenericTransfer(UsbTransferDirection::OUTBOUND, 0x02, out_buffer,
@@ -246,7 +248,7 @@ TEST_F(UsbDeviceHandleTest, BulkTransfer) {
   EXPECT_EQ(static_cast<size_t>(in_buffer->size()),
             in_completion.transferred());
   for (size_t i = 0; i < in_completion.transferred(); ++i) {
-    EXPECT_EQ(out_buffer->front()[i], in_buffer->front()[i])
+    EXPECT_EQ(out_buffer->as_vector()[i], in_buffer->as_vector()[i])
         << "Mismatch at index " << i << ".";
   }
 
@@ -278,10 +280,11 @@ TEST_F(UsbDeviceHandleTest, ControlTransfer) {
                           0x0409, buffer, 0, completion.GetCallback());
   completion.WaitForResult();
   ASSERT_EQ(UsbTransferStatus::COMPLETED, completion.status());
-  const char expected_str[] = "\x18\x03G\0o\0o\0g\0l\0e\0 \0I\0n\0c\0.\0";
-  EXPECT_EQ(sizeof(expected_str) - 1, completion.transferred());
+  std::string_view expected_view("\x18\x03G\0o\0o\0g\0l\0e\0 \0I\0n\0c\0.\0",
+                                 24);
+  EXPECT_EQ(expected_view.size(), completion.transferred());
   for (size_t i = 0; i < completion.transferred(); ++i) {
-    EXPECT_EQ(expected_str[i], buffer->front()[i])
+    EXPECT_EQ(static_cast<uint8_t>(expected_view[i]), buffer->as_vector()[i])
         << "Mismatch at index " << i << ".";
   }
 

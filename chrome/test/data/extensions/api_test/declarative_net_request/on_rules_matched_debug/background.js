@@ -5,7 +5,7 @@
 // Navigates to |url| and invokes |callback| when the navigation is complete.
 function navigateTab(url, expectedTabUrl, callback) {
   chrome.tabs.onUpdated.addListener(function updateCallback(_, info, tab) {
-    if (info.status == 'complete' && tab.url == expectedTabUrl) {
+    if (info.status === 'complete' && tab.url === expectedTabUrl) {
       chrome.tabs.onUpdated.removeListener(updateCallback);
       callback(tab);
     }
@@ -14,15 +14,16 @@ function navigateTab(url, expectedTabUrl, callback) {
   chrome.tabs.update({url: url});
 }
 
-var matchedRules = [];
-var onRuleMatchedDebugCallback = (rule) => {
+let matchedRules = [];
+const onRuleMatchedDebugCallback = (rule) => {
   matchedRules.push(rule);
 };
 
-var testServerPort;
+let testServerPort;
 function getServerURL(host) {
-  if (!testServerPort)
+  if (!testServerPort) {
     throw new Error('Called getServerURL outside of runTests.');
+  }
   return `http://${host}:${testServerPort}/`;
 }
 
@@ -55,12 +56,12 @@ function verifyExpectedRuleInfo(expectedRuleInfo) {
   chrome.test.assertEq(expectedRuleInfo, matchedRule);
 }
 
-var tests = [
+const tests = [
   function setup() {
     chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(
         onRuleMatchedDebugCallback);
 
-    // This test was known to flake as reported in crbug.com/1029233 due to a
+    // This test was known to flake as reported in crbug.com/40109499 due to a
     // race condition where a request was sent and a declarative rule was
     // matched before the onRuleMatchedDebug listener was properly added.
     // Sending the request after waiting for a round trip should fix the
@@ -74,7 +75,7 @@ var tests = [
     const rule = {
       id: 1,
       priority: 1,
-      condition: {urlFilter: 'def', 'resourceTypes': ['main_frame']},
+      condition: {urlFilter: 'def', resourceTypes: ['main_frame']},
       action: {type: 'block'},
     };
 
@@ -93,12 +94,12 @@ var tests = [
                 parentFrameId: -1,
                 tabId: tab.id,
                 type: 'main_frame',
-                url: url
+                url: url,
               },
               rule: {
                 ruleId: 1,
-                rulesetId: chrome.declarativeNetRequest.DYNAMIC_RULESET_ID
-              }
+                rulesetId: chrome.declarativeNetRequest.DYNAMIC_RULESET_ID,
+              },
             };
             verifyExpectedRuleInfo(expectedRuleInfo);
             chrome.test.succeed();
@@ -121,9 +122,9 @@ var tests = [
           parentFrameId: -1,
           tabId: tab.id,
           type: 'main_frame',
-          url: url
+          url: url,
         },
-        rule: {ruleId: 1, rulesetId: 'rules1'}
+        rule: {ruleId: 1, rulesetId: 'rules1'},
       };
       verifyExpectedRuleInfo(expectedRuleInfo);
       chrome.test.succeed();
@@ -134,7 +135,7 @@ var tests = [
   // the extension background page) trigger the listener.
   function testBackgroundPageRequest() {
     function listenOnce(target, callback) {
-      let innerCallback = function(info) {
+      const innerCallback = function(info) {
         target.removeListener(innerCallback);
         callback(info);
       };
@@ -144,17 +145,19 @@ var tests = [
     listenOnce(
         chrome.declarativeNetRequest.onRuleMatchedDebug,
         function(fetchPromise, info) {
-          fetchPromise.then(function(response) {
-            chrome.test.fail('Request should be blocked by rule with ID 1');
-          }).catch(function(error) {
-            chrome.test.assertEq(1, info.rule.ruleId);
-            chrome.test.assertEq('rules1', info.rule.rulesetId);
+          fetchPromise
+              .then(function(response) {
+                chrome.test.fail('Request should be blocked by rule with ID 1');
+              })
+              .catch(function(error) {
+                chrome.test.assertEq(1, info.rule.ruleId);
+                chrome.test.assertEq('rules1', info.rule.rulesetId);
 
-            // Tab ID should be -1 since this request was made from a background
-            // page.
-            chrome.test.assertEq(-1, info.request.tabId);
-            chrome.test.succeed();
-          });
+                // Tab ID should be -1 since this request was made from a
+                // background page.
+                chrome.test.assertEq(-1, info.request.tabId);
+                chrome.test.succeed();
+              });
         }.bind(null, fetch(getServerURL('abc.com'), {method: 'GET'})));
   },
 
@@ -192,8 +195,9 @@ var tests = [
       chrome.test.assertEq(3, matchedRules.length);
 
       const expectedMatches = [
-        {ruleId: 2, rulesetId: 'rules1'}, {ruleId: 3, rulesetId: 'rules2'},
-        {ruleId: 1, rulesetId: 'rules1'}
+        {ruleId: 2, rulesetId: 'rules1'},
+        {ruleId: 3, rulesetId: 'rules2'},
+        {ruleId: 1, rulesetId: 'rules1'},
       ];
       for (let i = 0; i < matchedRules.length; ++i) {
         chrome.test.assertEq(
@@ -211,11 +215,11 @@ var tests = [
     resetMatchedRules();
 
     const baseUrl = getServerURL('a.com') +
-          'extensions/api_test/declarative_net_request/on_rules_matched_debug/';
+        'extensions/api_test/declarative_net_request/on_rules_matched_debug/';
     const url = baseUrl + 'sandbox_container.html';
     const innerFrameUrl = baseUrl + 'blocked_frame.html';
 
-    // Initator inside sandbox is opaque.
+    // Initiator inside sandbox is opaque.
     const kOpaqueInitiator = 'null';
 
     navigateTab(url, url, (tab) => {
@@ -227,14 +231,14 @@ var tests = [
           method: 'GET',
           type: 'sub_frame',
           tabId: tab.id,
-          url: innerFrameUrl
+          url: innerFrameUrl,
         },
-        rule: {ruleId: 6, rulesetId: 'rules2'}
+        rule: {ruleId: 6, rulesetId: 'rules2'},
       };
       verifyExpectedRuleInfo(expectedRuleInfo);
       chrome.test.succeed();
     });
-  }
+  },
 ];
 
 chrome.test.getConfig(function(config) {

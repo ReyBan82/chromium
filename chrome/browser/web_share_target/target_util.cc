@@ -4,11 +4,11 @@
 
 #include "chrome/browser/web_share_target/target_util.h"
 
-#include <sstream>
 #include <utility>
 
 #include "base/files/file_path.h"
 #include "base/strings/escape.h"
+#include "base/strings/strcat.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "net/base/mime_util.h"
@@ -23,7 +23,6 @@ void AddFile(const std::string& value_name,
              const std::string& boundary,
              scoped_refptr<network::ResourceRequestBody> request_body) {
   const char delimiter[] = "\r\n";
-  const size_t delimiter_length = 2;
   std::string mime_header;
   // First line is the boundary.
   mime_header.append("--" + boundary + delimiter);
@@ -42,7 +41,7 @@ void AddFile(const std::string& value_name,
   // Leave an empty line before appending the file_uri.
   mime_header.append(delimiter);
 
-  request_body->AppendBytes(mime_header.c_str(), mime_header.length());
+  request_body->AppendCopyOfBytes(base::as_byte_span(mime_header));
 
   request_body->AppendFileRange(
 #if BUILDFLAG(IS_WIN)
@@ -52,7 +51,7 @@ void AddFile(const std::string& value_name,
 #endif
       0, -1, base::Time());
 
-  request_body->AppendBytes(delimiter, delimiter_length);
+  request_body->AppendCopyOfBytes(base::byte_span_from_cstring(delimiter));
 }
 
 void AddPlainText(const std::string& value_name,
@@ -69,7 +68,7 @@ void AddPlainText(const std::string& value_name,
     net::AddMultipartValueForUploadWithFileName(value_name, file_name, value,
                                                 boundary, content_type, &item);
   }
-  request_body->AppendBytes(item.c_str(), item.length());
+  request_body->AppendCopyOfBytes(base::as_byte_span(item));
 }
 
 }  // namespace
@@ -77,19 +76,20 @@ void AddPlainText(const std::string& value_name,
 namespace web_share_target {
 
 std::string PercentEscapeString(const std::string& unescaped_string) {
-  std::ostringstream escaped_oss;
+  std::string escaped;
+  escaped.reserve(unescaped_string.size());
   for (char c : unescaped_string) {
     if (c == '"') {
-      escaped_oss << "%22";
+      escaped += "%22";
     } else if (c == 0x0a) {
-      escaped_oss << "%0A";
+      escaped += "%0A";
     } else if (c == 0x0d) {
-      escaped_oss << "%0D";
+      escaped += "%0D";
     } else {
-      escaped_oss << c;
+      escaped += c;
     }
   }
-  return escaped_oss.str();
+  return escaped;
 }
 
 scoped_refptr<network::ResourceRequestBody> ComputeMultipartBody(
@@ -123,7 +123,7 @@ scoped_refptr<network::ResourceRequestBody> ComputeMultipartBody(
 
   std::string final_delimiter;
   net::AddMultipartFinalDelimiterForUpload(boundary, &final_delimiter);
-  request_body->AppendBytes(final_delimiter.c_str(), final_delimiter.length());
+  request_body->AppendCopyOfBytes(base::as_byte_span(final_delimiter));
 
   return request_body;
 }
@@ -132,14 +132,16 @@ std::string ComputeUrlEncodedBody(const std::vector<std::string>& names,
                                   const std::vector<std::string>& values) {
   if (names.size() != values.size() || names.size() == 0)
     return "";
-  std::ostringstream application_body_oss;
-  application_body_oss << base::EscapeUrlEncodedData(names[0], true) << "="
-                       << base::EscapeUrlEncodedData(values[0], true);
-  for (size_t i = 1; i < names.size(); i++)
-    application_body_oss << "&" << base::EscapeUrlEncodedData(names[i], true)
-                         << "=" << base::EscapeUrlEncodedData(values[i], true);
+  std::string application_body =
+      base::StrCat({base::EscapeUrlEncodedData(names[0], true), "=",
+                    base::EscapeUrlEncodedData(values[0], true)});
+  for (size_t i = 1; i < names.size(); i++) {
+    base::StrAppend(&application_body,
+                    {"&", base::EscapeUrlEncodedData(names[i], true), "=",
+                     base::EscapeUrlEncodedData(values[i], true)});
+  }
 
-  return application_body_oss.str();
+  return application_body;
 }
 
 }  // namespace web_share_target

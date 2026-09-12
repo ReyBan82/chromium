@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "ash/constants/ash_features.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/run_loop.h"
@@ -70,8 +71,13 @@ std::string CreateTestEid(int euicc_num) {
 }  // namespace
 
 class CellularConnectionHandlerTest : public testing::Test {
+ public:
+  CellularConnectionHandlerTest(const CellularConnectionHandlerTest&) = delete;
+  CellularConnectionHandlerTest& operator=(
+      const CellularConnectionHandlerTest&) = delete;
+
  protected:
-  CellularConnectionHandlerTest()
+  explicit CellularConnectionHandlerTest()
       : helper_(/*use_default_devices_and_services=*/false) {}
   ~CellularConnectionHandlerTest() override = default;
 
@@ -133,6 +139,13 @@ class CellularConnectionHandlerTest : public testing::Test {
         CreateTestServicePath(profile_num), shill::kConnectableProperty,
         base::Value(true));
     base::RunLoop().RunUntilIdle();
+  }
+
+  void SetSimLocked(int profile_num) {
+    helper_.device_test()->SetSimLocked(kTestCellularDevicePath, true);
+    helper_.device_test()->SetDeviceProperty(
+        kTestCellularDevicePath, shill::kIccidProperty,
+        base::Value(CreateTestIccid(1)), true);
   }
 
   void SetServiceEid(int profile_num, int euicc_num) {
@@ -468,6 +481,26 @@ TEST_F(CellularConnectionHandlerTest, Success_AlreadyEnabled) {
   ExpectServiceConnectable(/*profile_num=*/1);
   ExpectResult(
       CellularConnectionHandler::PrepareCellularConnectionResult::kSuccess);
+}
+
+TEST_F(CellularConnectionHandlerTest, Failed_SimLocked) {
+  AddCellularDevice();
+  AddEuicc(/*euicc_num=*/1);
+  AddProfile(/*profile_num=*/1,
+             /*euicc_num=*/1,
+             /*add_service=*/true);
+  SetServiceEid(/*profile_num=*/1, /*euicc_num=*/1);
+  SetServiceIccid(/*profile_num=*/1);
+
+  base::RunLoop run_loop;
+  ExpectFailure(CreateTestServicePath(/*profile_num=*/1),
+                NetworkConnectionHandler::kErrorSimPinPukLocked, &run_loop);
+  CallPrepareExistingCellularNetworkForConnection(/*profile_num=*/1);
+  SetSimLocked(/*profile_num=*/1);
+  run_loop.Run();
+
+  ExpectResult(
+      CellularConnectionHandler::PrepareCellularConnectionResult::kSimLocked);
 }
 
 TEST_F(CellularConnectionHandlerTest, ConnectToStub) {

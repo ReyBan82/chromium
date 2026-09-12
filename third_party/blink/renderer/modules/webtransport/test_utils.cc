@@ -5,12 +5,16 @@
 #include "third_party/blink/renderer/modules/webtransport/test_utils.h"
 
 #include "base/check.h"
+#include "base/memory/scoped_refptr.h"
+#include "net/http/http_response_headers.h"
+#include "net/http/http_version.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/bindings/core/v8/iterable.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_tester.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_readable_stream_read_result.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_web_transport_options.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/streams/readable_stream.h"
@@ -45,7 +49,7 @@ v8::Local<v8::Value> ReadValueFromStream(const V8TestingScope& scope,
   auto* reader =
       stream->GetDefaultReaderForTesting(script_state, ASSERT_NO_EXCEPTION);
 
-  ScriptPromise read_promise = reader->read(script_state, ASSERT_NO_EXCEPTION);
+  auto read_promise = reader->read(script_state, ASSERT_NO_EXCEPTION);
 
   ScriptPromiseTester read_tester(script_state, read_promise);
   read_tester.WaitUntilSettled();
@@ -70,8 +74,8 @@ void TestWebTransportCreator::Init(ScriptState* script_state,
   create_stub_ = std::move(create_stub);
   browser_interface_broker_->SetBinderForTesting(
       mojom::blink::WebTransportConnector::Name_,
-      WTF::BindRepeating(&TestWebTransportCreator::BindConnector,
-                         weak_ptr_factory_.GetWeakPtr()));
+      blink::BindRepeating(&TestWebTransportCreator::BindConnector,
+                           weak_ptr_factory_.GetWeakPtr()));
   web_transport_ = WebTransport::Create(
       script_state, "https://example.com/",
       MakeGarbageCollected<WebTransportOptions>(), ASSERT_NO_EXCEPTION);
@@ -88,6 +92,13 @@ TestWebTransportCreator::~TestWebTransportCreator() {
 void TestWebTransportCreator::Connect(
     const KURL&,
     Vector<network::mojom::blink::WebTransportCertificateFingerprintPtr>,
+    const Vector<String>&,
+    network::mojom::blink::WebTransportCongestionControl,
+    std::optional<uint16_t>
+    /*anticipated_concurrent_incoming_unidirectional_streams*/,
+    std::optional<uint16_t>
+    /*anticipated_concurrent_incoming_bidirectional_streams*/,
+    net::HttpRequestHeaders::HeaderVector,
     mojo::PendingRemote<network::mojom::blink::WebTransportHandshakeClient>
         pending_handshake_client) {
   mojo::Remote<network::mojom::blink::WebTransportHandshakeClient>
@@ -102,7 +113,10 @@ void TestWebTransportCreator::Connect(
   handshake_client->OnConnectionEstablished(
       std::move(web_transport_to_pass),
       client_remote.InitWithNewPipeAndPassReceiver(),
-      network::mojom::blink::HttpResponseHeaders::New());
+      net::HttpResponseHeaders::Builder(net::HttpVersion(1, 1), "200 OK")
+          .Build(),
+      String(), network::mojom::blink::WebTransportStats::New(),
+      /*max_datagram_size=*/1024);
   client_remote_.Bind(std::move(client_remote));
 }
 

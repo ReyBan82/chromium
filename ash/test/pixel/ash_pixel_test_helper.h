@@ -27,6 +27,20 @@ class AshPixelTestHelper : public WallpaperControllerObserver {
   // constant to avoid flakiness in pixel tests.
   void StabilizeUi();
 
+  bool IsSystemBlurEnabled() const {
+    return params_.system_blur_enabled.value_or(true);
+  }
+
+  std::string GenerateScreenshotName(const std::string& prefix) const {
+    std::string name(prefix);
+    if (params_.system_blur_enabled) {
+      name += (IsSystemBlurEnabled() ? "_with_system_blur"
+                                     : "_without_system_blur");
+    }
+
+    return name;
+  }
+
  private:
   // Ensures that the system UI is under the dark mode if the dark/light feature
   // is enabled.

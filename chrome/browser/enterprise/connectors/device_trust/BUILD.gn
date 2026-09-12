@@ -3,6 +3,8 @@
 # found in the LICENSE file.
 
 source_set("features") {
+  configs += [ "//components/enterprise:extra_warnings" ]
+
   sources = [ "device_trust_features.cc" ]
 
   public = [ "device_trust_features.h" ]
@@ -10,36 +12,35 @@ source_set("features") {
   public_deps = [ "//base" ]
 }
 
-source_set("prefs") {
-  sources = [ "prefs.cc" ]
-
-  public = [ "prefs.h" ]
-
-  deps = [ "//components/prefs" ]
-}
-
-source_set("test_support") {
+source_set("unit_tests") {
   testonly = true
-  sources = [
-    "fake_device_trust_connector_service.cc",
-    "mock_device_trust_service.cc",
-  ]
 
-  public = [
-    "fake_device_trust_connector_service.h",
-    "mock_device_trust_service.h",
-  ]
+  # Some of these tests declare file-scope objects with non-trivial
+  # destructors.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 
-  public_deps = [
-    "//base",
-    "//chrome/browser",
-    "//testing/gmock",
-  ]
+  sources = []
+  deps = []
 
-  deps = [
-    ":prefs",
-    "//components/pref_registry",
-    "//components/prefs:test_support",
-    "//components/sync_preferences:test_support",
-  ]
+  if (is_linux || is_chromeos || is_mac || is_win) {
+    sources += [
+      "device_trust_connector_service_factory_unittest.cc",
+      "navigation_throttle_unittest.cc",
+    ]
+    deps += [
+      "//base",
+      "//chrome/browser/enterprise:impl",
+      "//chrome/browser/enterprise/connectors/device_trust/signals:test_support",
+      "//chrome/browser/ui/views/device_signals_consent",
+      "//chrome/test:test_support",
+      "//components/device_signals/core/browser:test_support",
+      "//components/enterprise/device_trust/core:device_trust_connector_service",
+      "//components/enterprise/device_trust/core:device_trust_service",
+      "//components/enterprise/device_trust/core:metrics",
+      "//components/enterprise/device_trust/core:test_support",
+      "//components/enterprise/device_trust/core/attestation:test_support",
+      "//testing/gmock",
+      "//testing/gtest",
+    ]
+  }
 }

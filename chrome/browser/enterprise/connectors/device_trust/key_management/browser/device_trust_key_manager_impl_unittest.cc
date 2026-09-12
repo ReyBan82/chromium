@@ -5,10 +5,11 @@
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/device_trust_key_manager_impl.h"
 
 #include <array>
+#include <optional>
 
 #include "base/barrier_closure.h"
-#include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/run_loop.h"
 #include "base/task/bind_post_task.h"
 #include "base/task/sequenced_task_runner.h"
@@ -16,24 +17,27 @@
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
+#include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/key_loader.h"
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/key_rotation_launcher.h"
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/metrics_utils.h"
+#include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/mock_key_loader.h"
 #include "chrome/browser/enterprise/connectors/device_trust/key_management/browser/mock_key_rotation_launcher.h"
-#include "chrome/browser/enterprise/connectors/device_trust/key_management/core/persistence/key_persistence_delegate_factory.h"
-#include "chrome/browser/enterprise/connectors/device_trust/key_management/core/persistence/mock_key_persistence_delegate.h"
-#include "chrome/browser/enterprise/connectors/device_trust/key_management/core/persistence/scoped_key_persistence_delegate_factory.h"
+#include "chrome/browser/enterprise/connectors/device_trust/key_management/core/ec_signing_key.h"
+#include "chrome/browser/enterprise/connectors/device_trust/key_management/core/signing_key_pair.h"
+#include "crypto/sign.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 using testing::_;
-using testing::Invoke;
 using testing::Return;
 using testing::StrictMock;
 
 namespace enterprise_connectors {
 
+using test::MockKeyLoader;
 using test::MockKeyRotationLauncher;
+using BPKUR = enterprise_management::BrowserPublicKeyUploadRequest;
+using DTCLoadKeyResult = KeyLoader::DTCLoadKeyResult;
 using RotateKeyCallback = DeviceTrustKeyManagerImpl::RotateKeyCallback;
 using KeyRotationResult = DeviceTrustKeyManager::KeyRotationResult;
 using PermanentFailure = DeviceTrustKeyManager::PermanentFailure;
@@ -54,34 +58,52 @@ constexpr char kKeyCreationResultHistogram[] =
 constexpr char kKeyRotationResultHistogram[] =
     "Enterprise.DeviceTrust.Key.RotationResult";
 
+scoped_refptr<SigningKeyPair> CreateFakeHWKeyPair() {
+  ECSigningKeyProvider provider;
+  auto algorithm = {crypto::sign::ECDSA_SHA256};
+  auto signing_key = provider.GenerateSigningKeySlowly(algorithm);
+  DCHECK(signing_key);
+  return base::MakeRefCounted<SigningKeyPair>(std::move(signing_key),
+                                              BPKUR::CHROME_BROWSER_HW_KEY);
+}
+
 }  // namespace
 
 class DeviceTrustKeyManagerImplTest : public testing::Test {
  public:
-  void SetUp() override { ResetState(); }
-
-  void SetUpPersistedKey() {
-    // ScopedKeyPersistenceDelegateFactory creates mocked persistence delegates
-    // that already mimic the existence of a hardware key provider and stored
-    // key.
-    auto mock_persistence_delegate =
-        persistence_delegate_factory_.CreateMockedHardwareDelegate();
-    EXPECT_CALL(*mock_persistence_delegate, LoadKeyPair());
-
-    persistence_delegate_factory_.set_next_instance(
-        std::move(mock_persistence_delegate));
-
-    ExpectKeySynchronization();
+  void SetUp() override {
+    test_key_pair_ = CreateFakeHWKeyPair();
+    ResetState();
   }
 
-  void SetUpNoKey() {
-    auto mock_persistence_delegate =
-        std::make_unique<test::MockKeyPersistenceDelegate>();
-    EXPECT_CALL(*mock_persistence_delegate, LoadKeyPair())
-        .WillOnce(Invoke([]() { return nullptr; }));
+  scoped_refptr<SigningKeyPair> test_key_pair() { return test_key_pair_; }
 
-    persistence_delegate_factory_.set_next_instance(
-        std::move(mock_persistence_delegate));
+  void SetUpKeyLoadAndSyncWithSideEffect(base::RepeatingClosure& side_effect) {
+    EXPECT_CALL(*mock_loader_, LoadKey(_))
+        .WillRepeatedly(
+            [side_effect, this](KeyLoader::LoadKeyCallback callback) {
+              side_effect.Run();
+              std::move(callback).Run(
+                  DTCLoadKeyResult(kSuccessUploadCode, test_key_pair_));
+            });
+  }
+
+  void SetUpKeyLoadAndSyncWithSideEffect(
+      const DTCLoadKeyResult& load_key_result,
+      base::RepeatingClosure& side_effect) {
+    EXPECT_CALL(*mock_loader_, LoadKey(_))
+        .WillRepeatedly([side_effect,
+                         load_key_result](KeyLoader::LoadKeyCallback callback) {
+          side_effect.Run();
+          std::move(callback).Run(load_key_result);
+        });
+  }
+
+  void SetUpKeyLoadAndSync(const DTCLoadKeyResult& load_key_result) {
+    EXPECT_CALL(*mock_loader_, LoadKey(_))
+        .WillRepeatedly([load_key_result](KeyLoader::LoadKeyCallback callback) {
+          std::move(callback).Run(load_key_result);
+        });
   }
 
   void RunUntilIdle() { task_environment_.RunUntilIdle(); }
@@ -108,7 +130,7 @@ class DeviceTrustKeyManagerImplTest : public testing::Test {
   }
 
   void InitializeWithKey() {
-    SetUpPersistedKey();
+    SetUpKeyLoadAndSync(DTCLoadKeyResult(kSuccessUploadCode, test_key_pair_));
 
     key_manager_->StartInitialization();
 
@@ -124,7 +146,7 @@ class DeviceTrustKeyManagerImplTest : public testing::Test {
   void ExpectManagerHandlesRequests() {
     base::RunLoop run_loop;
     key_manager_->ExportPublicKeyAsync(base::BindLambdaForTesting(
-        [&run_loop](absl::optional<std::string> value) {
+        [&run_loop](std::optional<std::string> value) {
           EXPECT_TRUE(value);
           EXPECT_FALSE(value->empty());
           run_loop.Quit();
@@ -133,23 +155,16 @@ class DeviceTrustKeyManagerImplTest : public testing::Test {
     run_loop.Run();
   }
 
-  void ExpectKeySynchronization(
-      absl::optional<int> response = kSuccessUploadCode) {
-    EXPECT_CALL(*mock_launcher_, SynchronizePublicKey(_, _))
-        .WillOnce(Invoke(
-            [response](const SigningKeyPair& key_pair,
-                       KeyRotationLauncher::SynchronizationCallback callback) {
-              std::move(callback).Run(response);
-            }));
-  }
-
   void ResetState() {
     auto mock_launcher =
         std::make_unique<StrictMock<MockKeyRotationLauncher>>();
     mock_launcher_ = mock_launcher.get();
 
-    key_manager_ =
-        std::make_unique<DeviceTrustKeyManagerImpl>(std::move(mock_launcher));
+    auto mock_loader = std::make_unique<StrictMock<MockKeyLoader>>();
+    mock_loader_ = mock_loader.get();
+
+    key_manager_ = std::make_unique<DeviceTrustKeyManagerImpl>(
+        std::move(mock_launcher), std::move(mock_loader));
 
     histogram_tester_ = std::make_unique<base::HistogramTester>();
   }
@@ -160,15 +175,18 @@ class DeviceTrustKeyManagerImplTest : public testing::Test {
   }
 
   std::unique_ptr<base::HistogramTester> histogram_tester_;
-  test::ScopedKeyPersistenceDelegateFactory persistence_delegate_factory_;
 
  private:
   base::test::TaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 
+  std::unique_ptr<DeviceTrustKeyManagerImpl> key_manager_;
+
   raw_ptr<StrictMock<MockKeyRotationLauncher>> mock_launcher_;
 
-  std::unique_ptr<DeviceTrustKeyManagerImpl> key_manager_;
+  raw_ptr<StrictMock<MockKeyLoader>> mock_loader_;
+
+  scoped_refptr<SigningKeyPair> test_key_pair_;
 };
 
 // Tests that StartInitialization will load a key and not trigger key creation
@@ -186,38 +204,99 @@ TEST_F(DeviceTrustKeyManagerImplTest, Initialization_WithPersistedKey) {
   EXPECT_FALSE(key_manager()->HasPermanentFailure());
 }
 
+// Tests that StartInitialization will load a key and not trigger key creation
+// if key loading was successful.
+TEST_F(DeviceTrustKeyManagerImplTest, SignString_HardwareKey) {
+  InitializeWithKey();
+  EXPECT_FALSE(key_manager()->HasPermanentFailure());
+
+  base::test::TestFuture<std::optional<std::vector<uint8_t>>> sign_future;
+  key_manager()->SignStringAsync("test string", sign_future.GetCallback());
+
+  EXPECT_TRUE(sign_future.Get());
+
+  static constexpr char kSignatureHistogramHw[] =
+      "Enterprise.DeviceTrust.Key.Signing.Latency.Hardware";
+  histogram_tester_->ExpectTotalCount(kSignatureHistogramHw, 1);
+}
+
 // Tests that:
 // - StartInitialization will trigger key creation if key loading was not
-//   successful.
+//   successful due to a nullptr for the key pair being returned.
 // - Key creation succeeds and a key gets loaded successfully,
 // - Then a client request gets replied successfully.
 TEST_F(DeviceTrustKeyManagerImplTest,
-       Initialization_CreatesKey_LoadKeySuccess) {
-  SetUpNoKey();
-
+       Initialization_InitialNull_CreatesKey_LoadKeySuccess) {
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(LoadPersistedKeyResult::kNotFound));
   base::RunLoop create_key_loop;
   KeyRotationCommand::Callback key_rotation_callback;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             key_rotation_callback = std::move(callback);
             create_key_loop.Quit();
-          }));
+          });
 
   key_manager()->StartInitialization();
 
   create_key_loop.Run();
 
   // Mimic that the key is now loadable.
-  SetUpPersistedKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(kSuccessUploadCode, test_key_pair()));
   ASSERT_FALSE(key_rotation_callback.is_null());
   std::move(key_rotation_callback).Run(KeyRotationCommand::Status::SUCCEEDED);
 
   // The manager should now respond to the callback as soon as the key is
   // loaded.
   base::RunLoop run_loop;
-  key_manager()->ExportPublicKeyAsync(base::BindLambdaForTesting(
-      [&run_loop](absl::optional<std::string> value) {
+  key_manager()->ExportPublicKeyAsync(
+      base::BindLambdaForTesting([&run_loop](std::optional<std::string> value) {
+        ASSERT_TRUE(value);
+        EXPECT_FALSE(value->empty());
+        run_loop.Quit();
+      }));
+  run_loop.Run();
+
+  ExpectLoadedHardwareKeyMetrics();
+  ExpectKeyCreatedMetrics();
+  EXPECT_FALSE(key_manager()->HasPermanentFailure());
+}
+
+// Tests that:
+// - StartInitialization will trigger key creation if key loading was not
+//   successful due to an empty key pair being returned.
+// - Key creation succeeds and a key gets loaded successfully,
+// - Then a client request gets replied successfully.
+TEST_F(DeviceTrustKeyManagerImplTest,
+       Initialization_InitialKeyEmpty_CreatesKey_LoadKeySuccess) {
+  DTCLoadKeyResult load_key_result(LoadPersistedKeyResult::kNotFound);
+  load_key_result.key_pair = base::MakeRefCounted<SigningKeyPair>(
+      nullptr, BPKUR::KEY_TRUST_LEVEL_UNSPECIFIED);
+  SetUpKeyLoadAndSync(std::move(load_key_result));
+
+  base::RunLoop create_key_loop;
+  KeyRotationCommand::Callback key_rotation_callback;
+  EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
+      .WillOnce(
+          [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
+            key_rotation_callback = std::move(callback);
+            create_key_loop.Quit();
+          });
+
+  key_manager()->StartInitialization();
+
+  create_key_loop.Run();
+
+  // Mimic that the key is now loadable.
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(kSuccessUploadCode, test_key_pair()));
+  ASSERT_FALSE(key_rotation_callback.is_null());
+  std::move(key_rotation_callback).Run(KeyRotationCommand::Status::SUCCEEDED);
+
+  // The manager should now respond to the callback as soon as the key is
+  // loaded.
+  base::RunLoop run_loop;
+  key_manager()->ExportPublicKeyAsync(
+      base::BindLambdaForTesting([&run_loop](std::optional<std::string> value) {
         ASSERT_TRUE(value);
         EXPECT_FALSE(value->empty());
         run_loop.Quit();
@@ -238,24 +317,23 @@ TEST_F(DeviceTrustKeyManagerImplTest,
 // - Then a second client request makes the key load successfully.
 TEST_F(DeviceTrustKeyManagerImplTest,
        Initialization_CreatesKey_LoadKeyFail_Retry) {
-  SetUpNoKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(LoadPersistedKeyResult::kNotFound));
 
   KeyRotationCommand::Callback key_rotation_callback;
   base::RunLoop create_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             key_rotation_callback = std::move(callback);
             create_key_loop.Quit();
-          }));
+          });
 
   key_manager()->StartInitialization();
 
   create_key_loop.Run();
 
-  // Mimic that the key creation was successful, however set key loading mocks
-  // to mimic a loading failure.
-  SetUpNoKey();
+  // Mimic that the key creation was successful, however the key loading mocks
+  // still mimic a loading failure.
   ASSERT_FALSE(key_rotation_callback.is_null());
   std::move(key_rotation_callback).Run(KeyRotationCommand::Status::SUCCEEDED);
 
@@ -264,7 +342,7 @@ TEST_F(DeviceTrustKeyManagerImplTest,
   // client requests.
   base::RunLoop fail_loop;
   key_manager()->ExportPublicKeyAsync(base::BindLambdaForTesting(
-      [&fail_loop](absl::optional<std::string> value) {
+      [&fail_loop](std::optional<std::string> value) {
         EXPECT_FALSE(value);
         fail_loop.Quit();
       }));
@@ -272,11 +350,10 @@ TEST_F(DeviceTrustKeyManagerImplTest,
   fail_loop.Run();
 
   // Retry, but with a successful key loading this time.
-  SetUpPersistedKey();
-
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(kSuccessUploadCode, test_key_pair()));
   base::RunLoop success_loop;
   key_manager()->ExportPublicKeyAsync(base::BindLambdaForTesting(
-      [&success_loop](absl::optional<std::string> value) {
+      [&success_loop](std::optional<std::string> value) {
         ASSERT_TRUE(value);
         EXPECT_FALSE(value->empty());
         success_loop.Quit();
@@ -288,6 +365,57 @@ TEST_F(DeviceTrustKeyManagerImplTest,
   ExpectKeyCreatedMetrics();
 }
 
+struct LoadKeyResultTestCase {
+  LoadPersistedKeyResult result{};
+  bool triggers_creation{};
+};
+
+// Tests the various possible values of LoadPersistedKeyResult when no key was
+// loaded and how they affect triggering key creation.
+TEST_F(DeviceTrustKeyManagerImplTest, NoKey_LoadKeyResult_MayTriggerCreation) {
+  std::array<LoadKeyResultTestCase, 4> test_cases = {
+      LoadKeyResultTestCase{LoadPersistedKeyResult::kSuccess,
+                            /*triggers_creation=*/false},
+      LoadKeyResultTestCase{LoadPersistedKeyResult::kNotFound,
+                            /*triggers_creation=*/true},
+      LoadKeyResultTestCase{LoadPersistedKeyResult::kMalformedKey,
+                            /*triggers_creation=*/true},
+      LoadKeyResultTestCase{LoadPersistedKeyResult::kUnknown,
+                            /*triggers_creation=*/false}};
+
+  for (const auto& test_case : test_cases) {
+    DTCLoadKeyResult load_key_result(test_case.result);
+
+    base::RunLoop run_loop;
+    if (test_case.triggers_creation) {
+      SetUpKeyLoadAndSync(load_key_result);
+      EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
+          .WillOnce(
+              [&](const std::string& nonce,
+                  KeyRotationCommand::Callback callback) { run_loop.Quit(); });
+    } else {
+      base::RepeatingClosure side_effect =
+          base::BindLambdaForTesting([&run_loop, this]() {
+            key_manager()->ExportPublicKeyAsync(base::BindLambdaForTesting(
+                [&run_loop](std::optional<std::string> value) {
+                  EXPECT_FALSE(value);
+                  run_loop.Quit();
+                }));
+          });
+      SetUpKeyLoadAndSyncWithSideEffect(load_key_result, side_effect);
+
+      EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
+          .Times(0);
+    }
+
+    key_manager()->StartInitialization();
+
+    run_loop.Run();
+    RunUntilIdle();
+    ResetState();
+  }
+}
+
 // Tests that:
 // - StartInitialization will trigger key creation if key loading was not
 //   successful.
@@ -297,23 +425,22 @@ TEST_F(DeviceTrustKeyManagerImplTest,
 // - Key loading succeeds,
 // - The client request gets fulfilled.
 TEST_F(DeviceTrustKeyManagerImplTest, Initialization_CreateFails_Retry) {
-  SetUpNoKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(LoadPersistedKeyResult::kNotFound));
 
   KeyRotationCommand::Callback failed_rotation_callback;
   base::RunLoop create_key_fail_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             failed_rotation_callback = std::move(callback);
             create_key_fail_loop.Quit();
-          }));
+          });
 
   key_manager()->StartInitialization();
 
   create_key_fail_loop.Run();
 
   // Mimic that key creation failed.
-  SetUpNoKey();
   ASSERT_FALSE(failed_rotation_callback.is_null());
   std::move(failed_rotation_callback).Run(KeyRotationCommand::Status::FAILED);
   RunUntilIdle();
@@ -324,11 +451,11 @@ TEST_F(DeviceTrustKeyManagerImplTest, Initialization_CreateFails_Retry) {
   KeyRotationCommand::Callback success_rotation_callback;
   base::RunLoop create_key_success_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             success_rotation_callback = std::move(callback);
             create_key_success_loop.Quit();
-          }));
+          });
 
   // Should not be treated as a permanent failure.
   EXPECT_FALSE(key_manager()->HasPermanentFailure());
@@ -338,7 +465,7 @@ TEST_F(DeviceTrustKeyManagerImplTest, Initialization_CreateFails_Retry) {
   // by a successful key loading.
   base::RunLoop request_loop;
   key_manager()->ExportPublicKeyAsync(base::BindLambdaForTesting(
-      [&request_loop](absl::optional<std::string> value) {
+      [&request_loop](std::optional<std::string> value) {
         ASSERT_TRUE(value);
         EXPECT_FALSE(value->empty());
         request_loop.Quit();
@@ -348,7 +475,7 @@ TEST_F(DeviceTrustKeyManagerImplTest, Initialization_CreateFails_Retry) {
 
   // Make the key creation return a successful status and fake that a key is
   // loadable.
-  SetUpPersistedKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(kSuccessUploadCode, test_key_pair()));
   ASSERT_FALSE(success_rotation_callback.is_null());
   std::move(success_rotation_callback)
       .Run(KeyRotationCommand::Status::SUCCEEDED);
@@ -380,16 +507,16 @@ TEST_F(DeviceTrustKeyManagerImplTest, Initialization_CreateFails_Retry) {
 // SignStringAsync).
 TEST_F(DeviceTrustKeyManagerImplTest,
        Initialization_CreatesKey_SubsequentConcurrentCalls) {
-  SetUpNoKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(LoadPersistedKeyResult::kNotFound));
 
   KeyRotationCommand::Callback key_rotation_callback;
   base::RunLoop create_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             key_rotation_callback = std::move(callback);
             create_key_loop.Quit();
-          }));
+          });
 
   key_manager()->StartInitialization();
 
@@ -401,7 +528,7 @@ TEST_F(DeviceTrustKeyManagerImplTest,
   auto export_key_counter = 0;
   auto export_key_callback =
       base::BindLambdaForTesting([&export_key_counter, &barrier_closure](
-                                     absl::optional<std::string> value) {
+                                     std::optional<std::string> value) {
         ASSERT_TRUE(value);
         EXPECT_FALSE(value->empty());
         ++export_key_counter;
@@ -411,7 +538,7 @@ TEST_F(DeviceTrustKeyManagerImplTest,
   auto sign_string_counter = 0;
   auto sign_string_callback = base::BindLambdaForTesting(
       [&sign_string_counter,
-       &barrier_closure](absl::optional<std::vector<uint8_t>> value) {
+       &barrier_closure](std::optional<std::vector<uint8_t>> value) {
         ASSERT_TRUE(value);
         EXPECT_FALSE(value->empty());
         ++sign_string_counter;
@@ -434,7 +561,7 @@ TEST_F(DeviceTrustKeyManagerImplTest,
   key_manager()->SignStringAsync(kFakeData, sign_string_callback);
 
   // Prepare for another key load, but with a valid key this time.
-  SetUpPersistedKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(kSuccessUploadCode, test_key_pair()));
   ASSERT_FALSE(key_rotation_callback.is_null());
   std::move(key_rotation_callback).Run(KeyRotationCommand::Status::SUCCEEDED);
   RunUntilIdle();
@@ -459,13 +586,13 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Simple_Success) {
   KeyRotationCommand::Callback rotation_callback;
   base::RunLoop rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             rotation_callback = std::move(callback);
             rotate_key_loop.Quit();
-          }));
+          });
 
-  absl::optional<KeyRotationResult> captured_result;
+  std::optional<KeyRotationResult> captured_result;
   auto completion_callback =
       base::BindLambdaForTesting([&captured_result](KeyRotationResult result) {
         captured_result = result;
@@ -474,9 +601,7 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Simple_Success) {
 
   rotate_key_loop.Run();
 
-  // Make the key rotation return a successful status and fake that a key is
-  // loadable.
-  SetUpPersistedKey();
+  // Make the key rotation return a successful status.
   ASSERT_FALSE(rotation_callback.is_null());
   std::move(rotation_callback).Run(KeyRotationCommand::Status::SUCCEEDED);
   RunUntilIdle();
@@ -501,13 +626,13 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Simple_Failed) {
   KeyRotationCommand::Callback rotation_callback;
   base::RunLoop rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             rotation_callback = std::move(callback);
             rotate_key_loop.Quit();
-          }));
+          });
 
-  absl::optional<KeyRotationResult> captured_result;
+  std::optional<KeyRotationResult> captured_result;
   auto completion_callback =
       base::BindLambdaForTesting([&captured_result](KeyRotationResult result) {
         captured_result = result;
@@ -542,13 +667,13 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Simple_Failed_Key_Conflict) {
   KeyRotationCommand::Callback rotation_callback;
   base::RunLoop rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             rotation_callback = std::move(callback);
             rotate_key_loop.Quit();
-          }));
+          });
 
-  absl::optional<KeyRotationResult> captured_result;
+  std::optional<KeyRotationResult> captured_result;
   auto completion_callback =
       base::BindLambdaForTesting([&captured_result](KeyRotationResult result) {
         captured_result = result;
@@ -587,13 +712,13 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Simple_Failed_OS_Failure) {
   KeyRotationCommand::Callback rotation_callback;
   base::RunLoop rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             rotation_callback = std::move(callback);
             rotate_key_loop.Quit();
-          }));
+          });
 
-  absl::optional<KeyRotationResult> captured_result;
+  std::optional<KeyRotationResult> captured_result;
   auto completion_callback =
       base::BindLambdaForTesting([&captured_result](KeyRotationResult result) {
         captured_result = result;
@@ -629,24 +754,24 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Concurrent_Cancel_Success) {
   KeyRotationCommand::Callback first_rotation_callback;
   base::RunLoop first_rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             first_rotation_callback = std::move(callback);
             first_rotate_key_loop.Quit();
-          }));
+          });
 
   // Create callback parameters for all calls.
-  absl::optional<KeyRotationResult> first_captured_result;
+  std::optional<KeyRotationResult> first_captured_result;
   auto first_completion_callback = base::BindLambdaForTesting(
       [&first_captured_result](KeyRotationResult result) {
         first_captured_result = result;
       });
-  absl::optional<KeyRotationResult> second_captured_result;
+  std::optional<KeyRotationResult> second_captured_result;
   auto second_completion_callback = base::BindLambdaForTesting(
       [&second_captured_result](KeyRotationResult result) {
         second_captured_result = result;
       });
-  absl::optional<KeyRotationResult> third_captured_result;
+  std::optional<KeyRotationResult> third_captured_result;
   auto third_completion_callback = base::BindLambdaForTesting(
       [&third_captured_result](KeyRotationResult result) {
         third_captured_result = result;
@@ -664,15 +789,13 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Concurrent_Cancel_Success) {
   KeyRotationCommand::Callback second_rotation_callback;
   base::RunLoop second_rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kOtherFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             second_rotation_callback = std::move(callback);
             second_rotate_key_loop.Quit();
-          }));
+          });
 
-  // Make the key rotation return a successful status and fake that a
-  // key again loadable.
-  SetUpPersistedKey();
+  // Make the key rotation return a successful status.
   ASSERT_FALSE(first_rotation_callback.is_null());
   std::move(first_rotation_callback).Run(KeyRotationCommand::Status::SUCCEEDED);
 
@@ -680,9 +803,7 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Concurrent_Cancel_Success) {
 
   second_rotate_key_loop.Run();
 
-  // Make the second key rotation return a successful status and fake that a
-  // key again loadable.
-  SetUpPersistedKey();
+  // Make the second key rotation return a successful status.
   ASSERT_FALSE(second_rotation_callback.is_null());
   std::move(second_rotation_callback)
       .Run(KeyRotationCommand::Status::SUCCEEDED);
@@ -711,7 +832,7 @@ struct ConcurrentRotationFailureTestCase {
 // Tests that a properly initialized key manager handles concurrent rotate key
 // request properly when the second one fails.
 TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Concurrent_SuccessThenFail) {
-  const std::array<ConcurrentRotationFailureTestCase, 3> test_cases = {
+  const std::array<ConcurrentRotationFailureTestCase, 8> test_cases = {
       ConcurrentRotationFailureTestCase{KeyRotationCommand::Status::FAILED,
                                         DTKeyRotationResult::kFailed},
       ConcurrentRotationFailureTestCase{
@@ -719,7 +840,22 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Concurrent_SuccessThenFail) {
           DTKeyRotationResult::kFailedOSRestriction},
       ConcurrentRotationFailureTestCase{
           KeyRotationCommand::Status::FAILED_KEY_CONFLICT,
-          DTKeyRotationResult::kFailedKeyConflict}};
+          DTKeyRotationResult::kFailedKeyConflict},
+      ConcurrentRotationFailureTestCase{
+          KeyRotationCommand::Status::FAILED_INVALID_DMTOKEN_STORAGE,
+          DTKeyRotationResult::kFailedInvalidDmTokenStorage},
+      ConcurrentRotationFailureTestCase{
+          KeyRotationCommand::Status::FAILED_INVALID_DMTOKEN,
+          DTKeyRotationResult::kFailedInvalidDmToken},
+      ConcurrentRotationFailureTestCase{
+          KeyRotationCommand::Status::FAILED_INVALID_MANAGEMENT_SERVICE,
+          DTKeyRotationResult::kFailedInvalidManagementService},
+      ConcurrentRotationFailureTestCase{
+          KeyRotationCommand::Status::FAILED_INVALID_DMSERVER_URL,
+          DTKeyRotationResult::kFailedInvalidDmServerUrl},
+      ConcurrentRotationFailureTestCase{
+          KeyRotationCommand::Status::FAILED_INVALID_COMMAND,
+          DTKeyRotationResult::kFailedInvalidCommand}};
 
   for (const auto& test_case : test_cases) {
     // A key already exists and the manager already loaded it.
@@ -728,19 +864,19 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Concurrent_SuccessThenFail) {
     KeyRotationCommand::Callback first_rotation_callback;
     base::RunLoop first_rotate_key_loop;
     EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-        .WillOnce(Invoke([&](const std::string& nonce,
-                             KeyRotationCommand::Callback callback) {
+        .WillOnce([&](const std::string& nonce,
+                      KeyRotationCommand::Callback callback) {
           first_rotation_callback = std::move(callback);
           first_rotate_key_loop.Quit();
-        }));
+        });
 
     // Create callback parameters for all calls.
-    absl::optional<KeyRotationResult> first_captured_result;
+    std::optional<KeyRotationResult> first_captured_result;
     auto first_completion_callback = base::BindLambdaForTesting(
         [&first_captured_result](KeyRotationResult result) {
           first_captured_result = result;
         });
-    absl::optional<KeyRotationResult> second_captured_result;
+    std::optional<KeyRotationResult> second_captured_result;
     auto second_completion_callback = base::BindLambdaForTesting(
         [&second_captured_result](KeyRotationResult result) {
           second_captured_result = result;
@@ -756,15 +892,13 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_Concurrent_SuccessThenFail) {
     KeyRotationCommand::Callback second_rotation_callback;
     base::RunLoop second_rotate_key_loop;
     EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kOtherFakeNonce, _))
-        .WillOnce(Invoke([&](const std::string& nonce,
-                             KeyRotationCommand::Callback callback) {
+        .WillOnce([&](const std::string& nonce,
+                      KeyRotationCommand::Callback callback) {
           second_rotation_callback = std::move(callback);
           second_rotate_key_loop.Quit();
-        }));
+        });
 
-    // Make the key rotation return a successful status and fake that a key is
-    // loadable.
-    SetUpPersistedKey();
+    // Make the key rotation return a successful status.
     ASSERT_FALSE(first_rotation_callback.is_null());
     std::move(first_rotation_callback)
         .Run(KeyRotationCommand::Status::SUCCEEDED);
@@ -804,15 +938,15 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_AtLoadKey_Success) {
   KeyRotationCommand::Callback rotation_callback;
   base::RunLoop rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             rotation_callback = std::move(callback);
             rotate_key_loop.Quit();
-          }));
+          });
 
   // Binding the rotate request to the main thread, as the sequence checker will
   // be expecting that.
-  absl::optional<KeyRotationResult> captured_result;
+  std::optional<KeyRotationResult> captured_result;
   auto completion_callback =
       base::BindLambdaForTesting([&captured_result](KeyRotationResult result) {
         captured_result = result;
@@ -824,15 +958,7 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_AtLoadKey_Success) {
 
   // Setup so that a key is loadable, but a rotate request is received at the
   // same time as it is being loaded.
-  auto mock_persistence_delegate =
-      persistence_delegate_factory_
-          .CreateMockedHardwareDelegateWithLoadingSideEffect(start_rotate);
-  EXPECT_CALL(*mock_persistence_delegate, LoadKeyPair());
-
-  persistence_delegate_factory_.set_next_instance(
-      std::move(mock_persistence_delegate));
-
-  ExpectKeySynchronization();
+  SetUpKeyLoadAndSyncWithSideEffect(start_rotate);
 
   // Starting initialization will start loading the key.
   key_manager()->StartInitialization();
@@ -841,7 +967,7 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_AtLoadKey_Success) {
 
   // Make the key rotation return a successful status and fake that a key is
   // loadable.
-  SetUpPersistedKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(kSuccessUploadCode, test_key_pair()));
   ASSERT_FALSE(rotation_callback.is_null());
   std::move(rotation_callback).Run(KeyRotationCommand::Status::SUCCEEDED);
   RunUntilIdle();
@@ -863,15 +989,15 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_AtLoadKey_Fails) {
   KeyRotationCommand::Callback rotation_callback;
   base::RunLoop rotate_key_loop;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(kFakeNonce, _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             rotation_callback = std::move(callback);
             rotate_key_loop.Quit();
-          }));
+          });
 
   // Binding the rotate request to the main thread, as the sequence checker will
   // be expecting that.
-  absl::optional<KeyRotationResult> captured_result;
+  std::optional<KeyRotationResult> captured_result;
   auto completion_callback =
       base::BindLambdaForTesting([&captured_result](KeyRotationResult result) {
         captured_result = result;
@@ -883,15 +1009,7 @@ TEST_F(DeviceTrustKeyManagerImplTest, RotateKey_AtLoadKey_Fails) {
 
   // Setup so that a key is loadable, but a rotate request is received at the
   // same time as it is being loaded.
-  auto mock_persistence_delegate =
-      persistence_delegate_factory_
-          .CreateMockedHardwareDelegateWithLoadingSideEffect(start_rotate);
-  EXPECT_CALL(*mock_persistence_delegate, LoadKeyPair());
-
-  persistence_delegate_factory_.set_next_instance(
-      std::move(mock_persistence_delegate));
-
-  ExpectKeySynchronization();
+  SetUpKeyLoadAndSyncWithSideEffect(start_rotate);
 
   // Starting initialization will start loading the key.
   key_manager()->StartInitialization();
@@ -941,16 +1059,16 @@ TEST_F(DeviceTrustKeyManagerImplTest, CreateKey_PermanentFailures) {
           PermanentFailure::kInvalidInstallation}};
 
   for (const auto& test_case : test_cases) {
-    SetUpNoKey();
+    SetUpKeyLoadAndSync(DTCLoadKeyResult(LoadPersistedKeyResult::kNotFound));
 
     KeyRotationCommand::Callback failed_rotation_callback;
     base::RunLoop create_key_fail_loop;
     EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
-        .WillOnce(Invoke([&](const std::string& nonce,
-                             KeyRotationCommand::Callback callback) {
+        .WillOnce([&](const std::string& nonce,
+                      KeyRotationCommand::Callback callback) {
           failed_rotation_callback = std::move(callback);
           create_key_fail_loop.Quit();
-        }));
+        });
 
     key_manager()->StartInitialization();
 
@@ -981,11 +1099,11 @@ TEST_F(DeviceTrustKeyManagerImplTest, CreateKey_PermanentFailures) {
     key_manager()->RotateKey(kFakeNonce, rotate_future.GetCallback());
     EXPECT_EQ(rotate_future.Get(), KeyRotationResult::FAILURE);
 
-    base::test::TestFuture<absl::optional<std::string>> export_future;
+    base::test::TestFuture<std::optional<std::string>> export_future;
     key_manager()->ExportPublicKeyAsync(export_future.GetCallback());
     EXPECT_FALSE(export_future.Get());
 
-    base::test::TestFuture<absl::optional<std::vector<uint8_t>>> sign_future;
+    base::test::TestFuture<std::optional<std::vector<uint8_t>>> sign_future;
     key_manager()->SignStringAsync("test string", sign_future.GetCallback());
     EXPECT_FALSE(sign_future.Get());
 
@@ -997,16 +1115,16 @@ TEST_F(DeviceTrustKeyManagerImplTest, CreateKey_PermanentFailures) {
 // concurrent rotation request was received.
 TEST_F(DeviceTrustKeyManagerImplTest,
        CreateKeyPermanentFailure_ConcurrentRotate) {
-  SetUpNoKey();
+  SetUpKeyLoadAndSync(DTCLoadKeyResult(LoadPersistedKeyResult::kNotFound));
 
   base::RunLoop create_key_loop;
   KeyRotationCommand::Callback key_creation_callback;
   EXPECT_CALL(*mock_launcher(), LaunchKeyRotation(std::string(), _))
-      .WillOnce(Invoke(
+      .WillOnce(
           [&](const std::string& nonce, KeyRotationCommand::Callback callback) {
             key_creation_callback = std::move(callback);
             create_key_loop.Quit();
-          }));
+          });
 
   key_manager()->StartInitialization();
 
@@ -1020,7 +1138,6 @@ TEST_F(DeviceTrustKeyManagerImplTest,
   key_manager()->RotateKey(kFakeNonce, rotate_future.GetCallback());
 
   // Fake as if the creation failed with a permanent failure.
-  // SetUpNoKey();
   std::move(key_creation_callback)
       .Run(KeyRotationCommand::Status::FAILED_KEY_CONFLICT);
   RunUntilIdle();

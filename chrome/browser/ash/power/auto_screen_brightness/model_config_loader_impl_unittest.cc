@@ -2,17 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ash/power/auto_screen_brightness/model_config_loader_impl.h"
+
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "chrome/browser/ash/power/auto_screen_brightness/model_config_loader_impl.h"
-
 #include "ash/constants/ash_features.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/run_loop.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/test/scoped_feature_list.h"
@@ -29,7 +30,7 @@ namespace {
 
 class TestObserver : public ModelConfigLoader::Observer {
  public:
-  TestObserver() {}
+  TestObserver() = default;
 
   TestObserver(const TestObserver&) = delete;
   TestObserver& operator=(const TestObserver&) = delete;
@@ -37,19 +38,23 @@ class TestObserver : public ModelConfigLoader::Observer {
   ~TestObserver() override = default;
 
   // ModelConfigLoader::Observer overrides:
-  void OnModelConfigLoaded(absl::optional<ModelConfig> model_config) override {
+  void OnModelConfigLoaded(std::optional<ModelConfig> model_config) override {
     model_config_loader_initialized_ = true;
     model_config_ = model_config;
+    run_loop_.Quit();
   }
 
   bool model_config_loader_initialized() const {
     return model_config_loader_initialized_;
   }
-  absl::optional<ModelConfig> model_config() { return model_config_; }
+  std::optional<ModelConfig> model_config() { return model_config_; }
+
+  void Wait() { run_loop_.Run(); }
 
  private:
   bool model_config_loader_initialized_ = false;
-  absl::optional<ModelConfig> model_config_;
+  std::optional<ModelConfig> model_config_;
+  base::RunLoop run_loop_;
 };
 
 }  // namespace
@@ -84,7 +89,7 @@ class ModelConfigLoaderImplTest : public testing::Test {
 
     test_observer_ = std::make_unique<TestObserver>();
     model_config_loader_->AddObserver(test_observer_.get());
-    task_environment_.RunUntilIdle();
+    test_observer_->Wait();
   }
 
  protected:
@@ -93,12 +98,7 @@ class ModelConfigLoaderImplTest : public testing::Test {
       return;
 
     CHECK(!temp_params_path_.empty());
-
-    const int bytes_written =
-        base::WriteFile(temp_params_path_, params.data(), params.size());
-    ASSERT_EQ(bytes_written, static_cast<int>(params.size()))
-        << "Wrote " << bytes_written << " byte(s) instead of " << params.size()
-        << " to " << temp_params_path_;
+    ASSERT_TRUE(base::WriteFile(temp_params_path_, params));
   }
 
   content::BrowserTaskEnvironment task_environment_;

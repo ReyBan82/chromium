@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "base/memory/scoped_refptr.h"
+#include "services/network/public/mojom/ip_address_space.mojom-blink.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
@@ -25,15 +26,21 @@ class MockWebSocketChannel : public WebSocketChannel {
   MockWebSocketChannel();
   ~MockWebSocketChannel() override;
 
-  MOCK_METHOD2(Connect, bool(const KURL&, const String&));
+  MOCK_METHOD(bool,
+              Connect,
+              (const KURL&,
+               const String&,
+               network::mojom::blink::IPAddressSpace),
+              (override));
+  MOCK_METHOD(bool, Connect, (const KURL&, const String&));
   MOCK_METHOD2(Send,
-               WebSocketChannel::SendResult(const std::string&,
-                                            base::OnceClosure));
+               void(const std::string&,
+                    std::unique_ptr<SendCompletionWatcher>));
   MOCK_METHOD4(Send,
-               WebSocketChannel::SendResult(const DOMArrayBuffer&,
-                                            size_t,
-                                            size_t,
-                                            base::OnceClosure));
+               void(const DOMArrayBuffer&,
+                    size_t,
+                    size_t,
+                    std::unique_ptr<SendCompletionWatcher>));
   MOCK_METHOD1(SendMock, void(BlobDataHandle*));
   void Send(scoped_refptr<BlobDataHandle> handle) override {
     SendMock(handle.get());
@@ -46,8 +53,8 @@ class MockWebSocketChannel : public WebSocketChannel {
                     SourceLocation*));
   void Fail(const String& reason,
             mojom::ConsoleMessageLevel level,
-            std::unique_ptr<SourceLocation> location) override {
-    FailMock(reason, level, location.get());
+            SourceLocation* location) override {
+    FailMock(reason, level, location);
   }
   MOCK_METHOD0(Disconnect, void());
   MOCK_METHOD0(CancelHandshake, void());

@@ -9,20 +9,20 @@
 
 namespace blink {
 
-class GPUCommandBuffer : public DawnObject<WGPUCommandBuffer> {
+class GPUCommandBuffer : public DawnObject<wgpu::CommandBuffer> {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   explicit GPUCommandBuffer(GPUDevice* device,
-                            WGPUCommandBuffer command_buffer);
+                            wgpu::CommandBuffer command_buffer,
+                            const String& label);
 
   GPUCommandBuffer(const GPUCommandBuffer&) = delete;
   GPUCommandBuffer& operator=(const GPUCommandBuffer&) = delete;
 
  private:
-  void setLabelImpl(const String& value) override {
-    std::string utf8_label = value.Utf8();
-    GetProcs().commandBufferSetLabel(GetHandle(), utf8_label.c_str());
+  void SetLabelImpl(std::string_view value) override {
+    GetHandle().SetLabel(value);
   }
 };
 

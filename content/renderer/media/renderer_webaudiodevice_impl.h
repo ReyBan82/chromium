@@ -5,12 +5,14 @@
 #ifndef CONTENT_RENDERER_MEDIA_RENDERER_WEBAUDIODEVICE_IMPL_H_
 #define CONTENT_RENDERER_MEDIA_RENDERER_WEBAUDIODEVICE_IMPL_H_
 
-#include <stdint.h>
-
 #include <memory>
+#include <optional>
 #include <string>
 
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/threading/thread_checker.h"
 #include "content/common/content_export.h"
 #include "media/base/audio_parameters.h"
@@ -21,16 +23,18 @@
 #include "third_party/blink/public/platform/web_audio_sink_descriptor.h"
 
 namespace base {
+class SequencedTaskRunner;
 class SingleThreadTaskRunner;
 }
 
 namespace media {
 class SilentSinkSuspender;
+class SpeechRecognitionClient;
 }
 
 namespace content {
 
-// The actual implementation of Blink "WebAudioDevice" that handles the
+// The actual implementation of `blink::WebAudioDevice` that handles the
 // connection between Blink Web Audio API and the media renderer.
 class CONTENT_EXPORT RendererWebAudioDeviceImpl
     : public blink::WebAudioDevice,
@@ -44,10 +48,13 @@ class CONTENT_EXPORT RendererWebAudioDeviceImpl
 
   static std::unique_ptr<RendererWebAudioDeviceImpl> Create(
       const blink::WebAudioSinkDescriptor& sink_descriptor,
-      media::ChannelLayout layout,
       int number_of_output_channels,
       const blink::WebAudioLatencyHint& latency_hint,
+      std::optional<float> context_sample_rate,
       media::AudioRendererSink::RenderCallback* webaudio_callback);
+  static int GetOutputBufferSize(const blink::WebAudioLatencyHint& latency_hint,
+                                 int resolved_context_sample_rate,
+                                 const media::AudioParameters& hardware_params);
 
   // blink::WebAudioDevice implementation.
   void Start() override;
@@ -58,8 +65,8 @@ class CONTENT_EXPORT RendererWebAudioDeviceImpl
   int FramesPerBuffer() override;
   int MaxChannelCount() override;
 
-  // Sets the detect silence flag for SilentSinkSuspender. Invoked by Blink Web
-  // Audio.
+  // Sets the detect silence flag for `media::SilentSinkSuspender`. Invoked by
+  // Blink Web Audio.
   void SetDetectSilence(bool enable_silence_detection) override;
 
   // AudioRendererSink::RenderCallback implementation.
@@ -68,45 +75,66 @@ class CONTENT_EXPORT RendererWebAudioDeviceImpl
              const media::AudioGlitchInfo& glitch_info,
              media::AudioBus* dest) override;
 
+  // This callback method may be called in two different scenarios:
+  // 1) When the constructor's audio device activation fails. (main thread)
+  // 2) When the audio infra reports a device/render error. (audio thread)
   void OnRenderError() override;
 
-  void SetSilentSinkTaskRunnerForTesting(
-      scoped_refptr<base::SingleThreadTaskRunner> task_runner);
+  // Notifies the client (e.g. Blink WebAudio) of device/renderer-related
+  // errors. Intended to be executed via a task runner asynchronously.
+  void NotifyRenderError();
 
-  const media::AudioParameters& get_sink_params_for_testing() {
+  const media::AudioParameters& GetSinkParamsForTesting() const {
     return current_sink_params_;
   }
 
-  // Create and initialize an instance of AudioRendererSink.
-  void CreateAudioRendererSink();
+  scoped_refptr<media::AudioRendererSink> GetSinkForTesting() const {
+    return sink_;
+  }
 
-  // Creates a new sink and return its device status. If the status is OK,
-  // replace the existing sink with the new one.
-  media::OutputDeviceStatus CreateSinkAndGetDeviceStatus() override;
+  // Creates a new sink if one hasn't been created yet, and returns the sink
+  // status.
+  media::OutputDeviceStatus MaybeCreateSinkAndGetStatus() override;
+
+  const media::AudioParameters& GetOriginalSinkParamsForTesting() const {
+    return original_sink_params_;
+  }
 
  protected:
-  // Callback to get output device params (for tests).
-  using OutputDeviceParamsCallback = base::OnceCallback<media::AudioParameters(
-      const blink::LocalFrameToken& frame_token,
-      const std::string& device_id)>;
-
   using CreateSilentSinkCallback =
       base::RepeatingCallback<scoped_refptr<media::AudioRendererSink>(
           const scoped_refptr<base::SequencedTaskRunner>& task_runner)>;
 
   RendererWebAudioDeviceImpl(
       const blink::WebAudioSinkDescriptor& sink_descriptor,
-      media::ChannelLayout layout,
-      int number_of_output_channels,
+      media::ChannelLayoutConfig layout_config,
       const blink::WebAudioLatencyHint& latency_hint,
+      std::optional<float> context_sample_rate,
       media::AudioRendererSink::RenderCallback* webaudio_callback,
-      OutputDeviceParamsCallback device_params_cb,
-      CreateSilentSinkCallback create_silent_sink_cb);
+      scoped_refptr<base::SingleThreadTaskRunner> main_thread_task_runner,
+      CreateSilentSinkCallback create_silent_sink_cb,
+      scoped_refptr<base::SingleThreadTaskRunner> silent_sink_task_runner =
+          nullptr);
 
  private:
   scoped_refptr<base::SingleThreadTaskRunner> GetSilentSinkTaskRunner();
 
   void SendLogMessage(const std::string& message);
+
+  // Queries output device information for either silent or physical sink.
+  media::OutputDeviceInfo GetSinkOutputDeviceInfo();
+
+  // Create and initialize an instance of AudioRendererSink. Should only be
+  // called when `sink_` is nullptr.
+  void CreateAudioRendererSink();
+
+  // Evaluates device status, computes buffer sizes and sample rates,
+  // initializes the sink, and resets sink on error.
+  void HandleDeviceStatus(media::OutputDeviceInfo device_info);
+
+  // Initializes the underlying AudioRendererSink and configures the
+  // SilentSinkSuspender (for audible sinks) or direct callback routing.
+  void InitializeSink();
 
   // This is queried from the underlying sink device and then modified according
   // to the WebAudio renderer's needs.
@@ -121,24 +149,23 @@ class CONTENT_EXPORT RendererWebAudioDeviceImpl
   const blink::WebAudioLatencyHint latency_hint_;
 
   // The WebAudio renderer's callback; directs to `AudioDestination::Render()`.
-  media::AudioRendererSink::RenderCallback* const webaudio_callback_;
+  const raw_ptr<media::AudioRendererSink::RenderCallback> webaudio_callback_;
 
   // To avoid the need for locking, ensure the control methods of the
   // blink::WebAudioDevice implementation are called on the same thread.
   base::ThreadChecker thread_checker_;
 
-  // When non-NULL, we are started.  When NULL, we are stopped.
   scoped_refptr<media::AudioRendererSink> sink_;
 
-  // Used to suspend |sink_| usage when silence has been detected for too long.
+  // Used to suspend `sink_` usage when silence has been detected for too long.
   std::unique_ptr<media::SilentSinkSuspender> silent_sink_suspender_;
-
-  // Render frame token for the current context.
-  blink::LocalFrameToken frame_token_;
 
   // An alternative task runner for `silent_sink_suspender_` or a silent audio
   // sink.
   scoped_refptr<base::SingleThreadTaskRunner> silent_sink_task_runner_;
+
+  // Mainly to bubble up the OnRenderError to the Blink WebAudio module.
+  scoped_refptr<base::SingleThreadTaskRunner> main_thread_task_runner_;
 
   // Used to trigger one single textlog indicating that rendering started as
   // intended. Set to true once in the first call to the Render callback.
@@ -146,12 +173,17 @@ class CONTENT_EXPORT RendererWebAudioDeviceImpl
 
   CreateSilentSinkCallback create_silent_sink_cb_;
 
-  FRIEND_TEST_ALL_PREFIXES(RendererWebAudioDeviceImplTest,
-                           CreateSinkAndGetDeviceStatus_HealthyDevice);
-  FRIEND_TEST_ALL_PREFIXES(RendererWebAudioDeviceImplTest,
-                           CreateSinkAndGetDeviceStatus_ErrorDevice);
-  FRIEND_TEST_ALL_PREFIXES(RendererWebAudioDeviceImplTest,
-                           CreateSinkAndGetDeviceStatus_SilentSink);
+  bool is_stopped_ = true;
+
+  std::unique_ptr<media::SpeechRecognitionClient> speech_recognition_client_;
+
+  const media::ChannelLayoutConfig layout_config_;
+  const std::optional<float> context_sample_rate_;
+  bool is_sink_initialized_ = false;
+  bool is_detecting_silence_ = true;
+  base::RepeatingClosure render_error_callback_;
+
+  base::WeakPtrFactory<RendererWebAudioDeviceImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace content

@@ -6,20 +6,18 @@
 #define CONTENT_BROWSER_RENDERER_HOST_NAVIGATOR_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "content/browser/renderer_host/navigation_controller_impl.h"
-#include "content/browser/renderer_host/navigation_discard_reason.h"
 #include "content/common/content_export.h"
 #include "content/common/navigation_client.mojom.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/navigation_discard_reason.h"
 #include "mojo/public/cpp/bindings/pending_associated_remote.h"
-#include "mojo/public/cpp/bindings/pending_remote.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/blink/public/common/navigation/impression.h"
+#include "net/storage_access_api/status.h"
 #include "third_party/blink/public/mojom/frame/triggering_event_info.mojom-shared.h"
-#include "third_party/blink/public/mojom/navigation/navigation_initiator_activation_and_ad_status.mojom.h"
 #include "third_party/blink/public/mojom/navigation/navigation_params.mojom-forward.h"
 #include "ui/base/window_open_disposition.h"
 
@@ -42,6 +40,7 @@ class FrameTreeNode;
 class NavigationControllerDelegate;
 class NavigationEntryImpl;
 class NavigationRequest;
+class InitiatorNavigationState;
 class NavigatorDelegate;
 class PrefetchedSignedExchangeCache;
 class RenderFrameHostImpl;
@@ -97,7 +96,8 @@ class CONTENT_EXPORT Navigator {
   void DidNavigate(RenderFrameHostImpl* render_frame_host,
                    const mojom::DidCommitProvisionalLoadParams& params,
                    std::unique_ptr<NavigationRequest> navigation_request,
-                   bool was_within_same_document);
+                   bool was_within_same_document,
+                   bool caused_by_ad);
 
   // Called on a newly created subframe during a history navigation. The browser
   // process looks up the corresponding FrameNavigationEntry for the new frame
@@ -105,8 +105,11 @@ class CONTENT_EXPORT Navigator {
   // FrameNavigationEntry can't be found or the navigation fails.
   bool StartHistoryNavigationInNewSubframe(
       RenderFrameHostImpl* render_frame_host,
-      mojo::PendingAssociatedRemote<mojom::NavigationClient>*
-          navigation_client);
+      mojo::PendingAssociatedRemote<mojom::NavigationClient>* navigation_client,
+      blink::LocalFrameToken initiator_frame_token,
+      ChildProcessId initiator_process_id,
+      scoped_refptr<InitiatorNavigationState> initiator_navigation_state,
+      base::TimeTicks actual_navigation_start);
 
   // Navigation requests -------------------------------------------------------
 
@@ -124,8 +127,9 @@ class CONTENT_EXPORT Navigator {
       const GURL& url,
       const blink::LocalFrameToken* initiator_frame_token,
       int initiator_process_id,
-      const absl::optional<url::Origin>& initiator_origin,
-      const absl::optional<GURL>& initiator_base_url,
+      const std::optional<url::Origin>& initiator_origin,
+      const std::optional<GURL>& initiator_base_url,
+      scoped_refptr<InitiatorNavigationState> initiator_navigation_state,
       const scoped_refptr<network::ResourceRequestBody>& post_body,
       const std::string& extra_headers,
       const Referrer& referrer,
@@ -135,7 +139,8 @@ class CONTENT_EXPORT Navigator {
       blink::mojom::TriggeringEventInfo triggering_event_info,
       const std::string& href_translate,
       scoped_refptr<network::SharedURLLoaderFactory> blob_url_loader_factory,
-      const absl::optional<blink::Impression>& impression);
+      bool has_rel_opener,
+      bool started_by_ad);
 
   // Called when a document requests a navigation in another document through a
   // `blink::RemoteFrame`. If `method` is "POST", then `post_body` needs to
@@ -144,10 +149,10 @@ class CONTENT_EXPORT Navigator {
       RenderFrameHostImpl* render_frame_host,
       const GURL& url,
       const blink::LocalFrameToken* initiator_frame_token,
-      int initiator_process_id,
+      ChildProcessId initiator_process_id,
       const url::Origin& initiator_origin,
-      const GURL& initiator_base_url,
-      SiteInstance* source_site_instance,
+      const std::optional<GURL>& initiator_base_url,
+      scoped_refptr<InitiatorNavigationState> initiator_navigation_state,
       const Referrer& referrer,
       ui::PageTransition page_transition,
       bool should_replace_current_entry,
@@ -159,21 +164,26 @@ class CONTENT_EXPORT Navigator {
       network::mojom::SourceLocationPtr source_location,
       bool has_user_gesture,
       bool is_form_submission,
-      const absl::optional<blink::Impression>& impression,
-      blink::mojom::NavigationInitiatorActivationAndAdStatus
-          initiator_activation_and_ad_status,
+      bool started_by_ad,
+      base::TimeTicks actual_navigation_start_time,
       base::TimeTicks navigation_start_time,
       bool is_embedder_initiated_fenced_frame_navigation = false,
       bool is_unfenced_top_navigation = false,
-      bool force_new_browsing_instance = false);
+      bool force_new_browsing_instance = false,
+      bool is_container_initiated = false,
+      bool has_rel_opener = false);
 
   // Called after BeforeUnloadCompleted callback is invoked from the renderer.
-  // If |frame_tree_node| has a NavigationRequest waiting for the renderer
+  // If `frame_tree_node` has a NavigationRequest waiting for the renderer
   // response, then the request is either started or canceled, depending on the
-  // value of |proceed|.
+  // value of `proceed`. If `for_legacy` is true, then this beforeunload flow
+  // was only used to post a task and no beforeunload handlers were run. If
+  // `showed_dialog` is true, then a beforeunload dialog was displayed.
   void BeforeUnloadCompleted(FrameTreeNode* frame_tree_node,
                              bool proceed,
-                             const base::TimeTicks& proceed_time);
+                             const base::TimeTicks& proceed_time,
+                             bool for_legacy,
+                             bool showed_dialog);
 
   // Used to start a new renderer-initiated navigation, following a
   // BeginNavigation IPC from the renderer.
@@ -185,8 +195,16 @@ class CONTENT_EXPORT Navigator {
       mojo::PendingAssociatedRemote<mojom::NavigationClient> navigation_client,
       scoped_refptr<PrefetchedSignedExchangeCache>
           prefetched_signed_exchange_cache,
+      ChildProcessId initiator_process_id,
       mojo::PendingReceiver<mojom::NavigationRendererCancellationListener>
-          renderer_cancellation_listener);
+          renderer_cancellation_listener,
+      mojo::PendingReceiver<
+          mojom::NavigationRendererIgnoreDuplicateNavigationListener>
+          renderer_ignore_duplicate_navigation_listener,
+      mojo::PendingReceiver<
+          blink::mojom::NavigationResumeDeferredCommitListener>
+          deferred_commit_resume_listener,
+      scoped_refptr<InitiatorNavigationState> initiator_navigation_state);
 
   // Used to restart a navigation that was thought to be same-document in
   // cross-document mode.
@@ -214,6 +232,7 @@ class CONTENT_EXPORT Navigator {
 
   // Returns the NavigationController associated with this Navigator.
   NavigationControllerImpl& controller() { return controller_; }
+  const NavigationControllerImpl& controller() const { return controller_; }
 
  private:
   friend class NavigatorTestWithBrowserSideNavigation;

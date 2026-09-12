@@ -23,6 +23,9 @@ class COMPONENT_EXPORT(MOJO_CORE_EMBEDDER) ScopedIPCSupport {
   // ShutdownPolicy is a type for specifying the desired Mojo IPC support
   // shutdown behavior used during ScopedIPCSupport destruction.
   //
+  // It has no effect: it only influenced shutdown of the legacy (non-ipcz)
+  // Mojo Core, which is no longer supported.
+  //
   // What follows is a quick overview of why shutdown behavior is interesting
   // and how you might decide which behavior is right for your use case.
   //
@@ -110,9 +113,6 @@ class COMPONENT_EXPORT(MOJO_CORE_EMBEDDER) ScopedIPCSupport {
   ScopedIPCSupport& operator=(const ScopedIPCSupport&) = delete;
 
   ~ScopedIPCSupport();
-
- private:
-  const ShutdownPolicy shutdown_policy_;
 };
 
 }  // namespace core

@@ -15,6 +15,7 @@
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/url_constants.h"
 #include "content/public/browser/navigation_details.h"
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -55,14 +56,17 @@ void InstantController::OnTabStripModelChanged(
     TabStripModel* tab_strip_model,
     const TabStripModelChange& change,
     const TabStripSelectionChange& selection) {
-  if (tab_strip_model->empty() || !selection.active_tab_changed())
+  if (tab_strip_model->empty() || !selection.active_tab_changed()) {
     return;
+  }
 
-  if (selection.old_contents)
+  if (selection.old_contents) {
     StopWatchingTab(selection.old_contents);
+  }
 
-  if (selection.new_contents)
+  if (selection.new_contents) {
     StartWatchingTab(selection.new_contents);
+  }
 }
 
 void InstantController::StartWatchingTab(content::WebContents* web_contents) {

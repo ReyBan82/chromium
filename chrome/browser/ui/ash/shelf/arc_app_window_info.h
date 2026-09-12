@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "ash/public/cpp/shelf_types.h"
+#include "base/memory/raw_ptr.h"
 #include "base/scoped_observation.h"
 #include "chrome/browser/ui/ash/shelf/arc_app_shelf_id.h"
 #include "ui/aura/window.h"
@@ -72,10 +73,10 @@ class ArcAppWindowInfo : public aura::WindowObserver {
   // Keeps overridden window icon.
   gfx::ImageSkia icon_;
 
-  aura::Window* window_ = nullptr;
+  raw_ptr<aura::Window> window_ = nullptr;
 
   // Scoped list of observed windows (for removal on destruction)
-  // TODO(crbug.com/1323913, crbug.com/1316374): When the window is destroyed,
+  // TODO(crbug.com/40838950, crbug.com/40834075): When the window is destroyed,
   // it looks like that set_window is not set in AppServiceAppWindowArcTracker
   // for an unknown reason. So observe windows in ArcAppWindowInfo, to clear
   // window_, when the window is destroyed. When the root cause is figured out,

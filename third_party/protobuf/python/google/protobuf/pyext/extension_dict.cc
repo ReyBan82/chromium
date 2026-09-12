@@ -1,53 +1,31 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 // Author: anuraag@google.com (Anuraag Agrawal)
 // Author: tibell@google.com (Johan Tibell)
 
-#include <google/protobuf/pyext/extension_dict.h>
+#include "google/protobuf/pyext/extension_dict.h"
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
-#include <google/protobuf/stubs/logging.h>
-#include <google/protobuf/stubs/common.h>
-#include <google/protobuf/descriptor.pb.h>
-#include <google/protobuf/descriptor.h>
-#include <google/protobuf/dynamic_message.h>
-#include <google/protobuf/message.h>
-#include <google/protobuf/pyext/descriptor.h>
-#include <google/protobuf/pyext/message.h>
-#include <google/protobuf/pyext/message_factory.h>
-#include <google/protobuf/pyext/repeated_composite_container.h>
-#include <google/protobuf/pyext/repeated_scalar_container.h>
-#include <google/protobuf/pyext/scoped_pyobject_ptr.h>
+#include "google/protobuf/descriptor.pb.h"
+#include "absl/strings/string_view.h"
+#include "google/protobuf/descriptor.h"
+#include "google/protobuf/dynamic_message.h"
+#include "google/protobuf/message.h"
+#include "google/protobuf/pyext/descriptor.h"
+#include "google/protobuf/pyext/descriptor_pool.h"
+#include "google/protobuf/pyext/message.h"
+#include "google/protobuf/pyext/message_factory.h"
+#include "google/protobuf/pyext/repeated_composite_container.h"
+#include "google/protobuf/pyext/repeated_scalar_container.h"
+#include "google/protobuf/pyext/scoped_pyobject_ptr.h"
 
 #define PyString_AsStringAndSize(ob, charpp, sizep)              \
   (PyUnicode_Check(ob)                                           \
@@ -71,11 +49,12 @@ static Py_ssize_t len(ExtensionDict* self) {
 
   for (size_t i = 0; i < fields.size(); ++i) {
     if (fields[i]->is_extension()) {
-      // With C++ descriptors, the field can always be retrieved, but for
-      // unknown extensions which have not been imported in Python code, there
-      // is no message class and we cannot retrieve the value.
-      // ListFields() has the same behavior.
-      if (fields[i]->message_type() != nullptr &&
+      // When using the default descriptor pool, avoid exposing extensions that
+      // happened to be linked in from C++ but not imported via Python.  This is
+      // for consistency with the pure Python implementation.
+      if (fields[i]->file()->pool() ==
+              GetDefaultDescriptorPool()->pool->get() &&
+          fields[i]->message_type() != nullptr &&
           message_factory::GetMessageClass(
               cmessage::GetFactoryForMessage(self->parent),
               fields[i]->message_type()) == nullptr) {
@@ -89,8 +68,10 @@ static Py_ssize_t len(ExtensionDict* self) {
 }
 
 struct ExtensionIterator {
-  PyObject_HEAD;
+  // clang-format off
+  PyObject_HEAD
   Py_ssize_t index;
+  // clang-format on
   std::vector<const FieldDescriptor*> fields;
 
   // Owned reference, to keep the FieldDescriptors alive.
@@ -125,8 +106,9 @@ static void DeallocExtensionIterator(PyObject* _self) {
   ExtensionIterator* self = reinterpret_cast<ExtensionIterator*>(_self);
   self->fields.clear();
   Py_XDECREF(self->extension_dict);
+  freefunc tp_free = Py_TYPE(_self)->tp_free;
   self->~ExtensionIterator();
-  Py_TYPE(_self)->tp_free(_self);
+  (*tp_free)(_self);
 }
 
 PyObject* subscript(ExtensionDict* self, PyObject* key) {
@@ -138,31 +120,31 @@ PyObject* subscript(ExtensionDict* self, PyObject* key) {
     return nullptr;
   }
 
-  if (descriptor->label() != FieldDescriptor::LABEL_REPEATED &&
+  if (!descriptor->is_repeated() &&
       descriptor->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) {
     return cmessage::InternalGetScalar(self->parent->message, descriptor);
   }
 
-  CMessage::CompositeFieldsMap::iterator iterator =
-      self->parent->composite_fields->find(descriptor);
-  if (iterator != self->parent->composite_fields->end()) {
-    Py_INCREF(iterator->second);
-    return iterator->second->AsPyObject();
+  CMessage::CompositeFieldsMap* parent_fields =
+      self->parent->composite_fields.Get();
+  if (PyObject* value = parent_fields->Get(descriptor, nullptr)) {
+    return value;
   }
 
-  if (descriptor->label() != FieldDescriptor::LABEL_REPEATED &&
+  if (!descriptor->is_repeated() &&
       descriptor->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
-    // TODO(plabatut): consider building the class on the fly!
-    ContainerBase* sub_message = cmessage::InternalGetSubMessage(
-        self->parent, descriptor);
+    // TODO: consider building the class on the fly!
+    ContainerBase* sub_message =
+        cmessage::InternalGetSubMessage(self->parent, descriptor);
     if (sub_message == nullptr) {
       return nullptr;
     }
-    (*self->parent->composite_fields)[descriptor] = sub_message;
-    return sub_message->AsPyObject();
+    PyObject* value = sub_message->AsPyObject();
+    parent_fields->TrySet(descriptor, value);
+    return value;
   }
 
-  if (descriptor->label() == FieldDescriptor::LABEL_REPEATED) {
+  if (descriptor->is_repeated()) {
     if (descriptor->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       // On the fly message class creation is needed to support the following
       // situation:
@@ -178,7 +160,7 @@ PyObject* subscript(ExtensionDict* self, PyObject* key) {
           cmessage::GetFactoryForMessage(self->parent),
           descriptor->message_type());
       ScopedPyObjectPtr message_class_handler(
-        reinterpret_cast<PyObject*>(message_class));
+          reinterpret_cast<PyObject*>(message_class));
       if (message_class == nullptr) {
         return nullptr;
       }
@@ -187,16 +169,18 @@ PyObject* subscript(ExtensionDict* self, PyObject* key) {
       if (py_container == nullptr) {
         return nullptr;
       }
-      (*self->parent->composite_fields)[descriptor] = py_container;
-      return py_container->AsPyObject();
+      PyObject* value = py_container->AsPyObject();
+      parent_fields->TrySet(descriptor, value);
+      return value;
     } else {
-      ContainerBase* py_container = repeated_scalar_container::NewContainer(
-          self->parent, descriptor);
+      ContainerBase* py_container =
+          repeated_scalar_container::NewContainer(self->parent, descriptor);
       if (py_container == nullptr) {
         return nullptr;
       }
-      (*self->parent->composite_fields)[descriptor] = py_container;
-      return py_container->AsPyObject();
+      PyObject* value = py_container->AsPyObject();
+      parent_fields->TrySet(descriptor, value);
+      return value;
     }
   }
   PyErr_SetString(PyExc_ValueError, "control reached unexpected line");
@@ -216,17 +200,34 @@ int ass_subscript(ExtensionDict* self, PyObject* key, PyObject* value) {
     return cmessage::ClearFieldByDescriptor(self->parent, descriptor);
   }
 
-  if (descriptor->label() != FieldDescriptor::LABEL_OPTIONAL ||
+  if (cmessage::AssureWritable(self->parent) == nullptr) return -1;
+
+  if (descriptor->is_repeated() || descriptor->is_required() ||
       descriptor->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
-    PyErr_SetString(PyExc_TypeError, "Extension is repeated and/or composite "
+    PyErr_SetString(PyExc_TypeError,
+                    "Extension is repeated and/or composite "
                     "type");
     return -1;
   }
-  cmessage::AssureWritable(self->parent);
   if (cmessage::InternalSetScalar(self->parent, descriptor, value) < 0) {
     return -1;
   }
   return 0;
+}
+
+static const FieldDescriptor* FindMessageSetExtension(
+    const Descriptor* message_descriptor) {
+  for (int i = 0; i < message_descriptor->extension_count(); i++) {
+    const FieldDescriptor* extension = message_descriptor->extension(i);
+    if (extension->is_extension() &&
+        extension->containing_type()->options().message_set_wire_format() &&
+        extension->type() == FieldDescriptor::TYPE_MESSAGE &&
+        (!extension->is_repeated() && !extension->is_required()) &&
+        extension->message_type() == message_descriptor) {
+      return extension;
+    }
+  }
+  return nullptr;
 }
 
 PyObject* _FindExtensionByName(ExtensionDict* self, PyObject* arg) {
@@ -238,19 +239,15 @@ PyObject* _FindExtensionByName(ExtensionDict* self, PyObject* arg) {
 
   PyDescriptorPool* pool = cmessage::GetFactoryForMessage(self->parent)->pool;
   const FieldDescriptor* message_extension =
-      pool->pool->FindExtensionByName(StringParam(name, name_size));
+      pool->pool->get()->FindExtensionByName(
+          absl::string_view(name, name_size));
   if (message_extension == nullptr) {
     // Is is the name of a message set extension?
     const Descriptor* message_descriptor =
-        pool->pool->FindMessageTypeByName(StringParam(name, name_size));
-    if (message_descriptor && message_descriptor->extension_count() > 0) {
-      const FieldDescriptor* extension = message_descriptor->extension(0);
-      if (extension->is_extension() &&
-          extension->containing_type()->options().message_set_wire_format() &&
-          extension->type() == FieldDescriptor::TYPE_MESSAGE &&
-          extension->label() == FieldDescriptor::LABEL_OPTIONAL) {
-        message_extension = extension;
-      }
+        pool->pool->get()->FindMessageTypeByName(
+            absl::string_view(name, name_size));
+    if (message_descriptor) {
+      message_extension = FindMessageSetExtension(message_descriptor);
     }
   }
   if (message_extension == nullptr) {
@@ -267,8 +264,9 @@ PyObject* _FindExtensionByNumber(ExtensionDict* self, PyObject* arg) {
   }
 
   PyDescriptorPool* pool = cmessage::GetFactoryForMessage(self->parent)->pool;
-  const FieldDescriptor* message_extension = pool->pool->FindExtensionByNumber(
-      self->parent->message->GetDescriptor(), number);
+  const FieldDescriptor* message_extension =
+      pool->pool->get()->FindExtensionByNumber(
+          self->parent->message->GetDescriptor(), number);
   if (message_extension == nullptr) {
     Py_RETURN_NONE;
   }
@@ -286,7 +284,7 @@ static int Contains(PyObject* _self, PyObject* key) {
 
   if (!field_descriptor->is_extension()) {
     PyErr_Format(PyExc_KeyError, "%s is not an extension",
-                 field_descriptor->full_name().c_str());
+                 std::string(field_descriptor->full_name()).c_str());
     return -1;
   }
 
@@ -305,7 +303,7 @@ static int Contains(PyObject* _self, PyObject* key) {
   return 0;
 }
 
-ExtensionDict* NewExtensionDict(CMessage *parent) {
+ExtensionDict* NewExtensionDict(CMessage* parent) {
   ExtensionDict* self = reinterpret_cast<ExtensionDict*>(
       PyType_GenericAlloc(&ExtensionDict_Type, 0));
   if (self == nullptr) {
@@ -331,7 +329,7 @@ static PyObject* RichCompare(ExtensionDict* self, PyObject* other, int opid) {
   }
   bool equals = false;
   if (PyObject_TypeCheck(other, &ExtensionDict_Type)) {
-    equals = self->parent == reinterpret_cast<ExtensionDict*>(other)->parent;;
+    equals = self->parent == reinterpret_cast<ExtensionDict*>(other)->parent;
   }
   if (equals ^ (opid == Py_EQ)) {
     Py_RETURN_FALSE;
@@ -351,12 +349,12 @@ static PySequenceMethods SeqMethods = {
 };
 
 static PyMappingMethods MpMethods = {
-  (lenfunc)len,                /* mp_length */
-  (binaryfunc)subscript,       /* mp_subscript */
-  (objobjargproc)ass_subscript,/* mp_ass_subscript */
+    (lenfunc)len,                 /* mp_length */
+    (binaryfunc)subscript,        /* mp_subscript */
+    (objobjargproc)ass_subscript, /* mp_ass_subscript */
 };
 
-#define EDMETHOD(name, args, doc) { #name, (PyCFunction)name, args, doc }
+#define EDMETHOD(name, args, doc) {#name, (PyCFunction)name, args, doc}
 static PyMethodDef Methods[] = {
     EDMETHOD(_FindExtensionByName, METH_O, "Finds an extension by name."),
     EDMETHOD(_FindExtensionByNumber, METH_O,
@@ -418,11 +416,12 @@ PyObject* IterNext(PyObject* _self) {
     index = self->index;
     ++self->index;
     if (self->fields[index]->is_extension()) {
-      // With C++ descriptors, the field can always be retrieved, but for
-      // unknown extensions which have not been imported in Python code, there
-      // is no message class and we cannot retrieve the value.
-      // ListFields() has the same behavior.
-      if (self->fields[index]->message_type() != nullptr &&
+      // When using the default descriptor pool, avoid exposing extensions that
+      // happened to be linked in from C++ but not imported via Python.  This is
+      // for consistency with the pure Python implementation.
+      if (self->fields[index]->file()->pool() ==
+              GetDefaultDescriptorPool()->pool->get() &&
+          self->fields[index]->message_type() != nullptr &&
           message_factory::GetMessageClass(
               cmessage::GetFactoryForMessage(self->extension_dict->parent),
               self->fields[index]->message_type()) == nullptr) {

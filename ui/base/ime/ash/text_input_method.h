@@ -33,6 +33,9 @@ enum class KeyEventHandledState {
   kNotHandled = 0,
   kHandledByIME = 1,
   kHandledByAssistiveSuggester = 2,
+  // Same as kNotHandled, except that the autorepeat for this key should be
+  // suppressed.
+  kNotHandledSuppressAutoRepeat = 3,
 };
 }  // namespace ime
 }  // namespace ui
@@ -90,7 +93,6 @@ class COMPONENT_EXPORT(UI_BASE_IME_ASH) TextInputMethod {
     SpellcheckMode spellcheck_mode = SpellcheckMode::kUnspecified;
     AutocapitalizationMode autocapitalization_mode =
         AutocapitalizationMode::kUnspecified;
-    bool has_been_password = false;
     // How this input field was focused.
     ui::TextInputClient::FocusReason focus_reason =
         ui::TextInputClient::FOCUS_REASON_NONE;
@@ -107,9 +109,6 @@ class COMPONENT_EXPORT(UI_BASE_IME_ASH) TextInputMethod {
 
   // Informs the input method that focus has been lost.
   virtual void Blur() = 0;
-
-  // Called on touch inside an input field which already has focus.
-  virtual void OnTouch(ui::EventPointerType pointerType) = 0;
 
   // Called when the IME is enabled.
   virtual void Enable(const std::string& component_id) = 0;

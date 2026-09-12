@@ -14,6 +14,10 @@
 #include "chrome/install_static/install_details.h"
 #include "third_party/metrics_proto/system_profile.pb.h"
 
+#if BUILDFLAG(USE_GOOGLE_UPDATE_INTEGRATION)
+#include "chrome/installer/util/google_update_settings.h"
+#endif
+
 typedef metrics::SystemProfileProto::GoogleUpdate::ProductInfo ProductInfo;
 
 namespace {
@@ -42,12 +46,19 @@ void ProductDataToProto(const GoogleUpdateSettings::ProductData& product_data,
   }
 }
 
+uint32_t GetHashedCohortId() {
+#if BUILDFLAG(USE_GOOGLE_UPDATE_INTEGRATION)
+  return GoogleUpdateSettings::GetHashedCohortId().value_or(0);
+#else
+  return 0;
+#endif
+}
+
 }  // namespace
 
-GoogleUpdateMetricsProviderWin::GoogleUpdateMetricsProviderWin() {}
+GoogleUpdateMetricsProviderWin::GoogleUpdateMetricsProviderWin() = default;
 
-GoogleUpdateMetricsProviderWin::~GoogleUpdateMetricsProviderWin() {
-}
+GoogleUpdateMetricsProviderWin::~GoogleUpdateMetricsProviderWin() = default;
 
 void GoogleUpdateMetricsProviderWin::AsyncInit(
     base::OnceClosure done_callback) {
@@ -72,13 +83,7 @@ void GoogleUpdateMetricsProviderWin::ProvideSystemProfileMetrics(
   // Do nothing for chromium builds.
   if (!IsGoogleChromeBuild())
     return;
-  // Convert wstring to string.
-  std::string update_cohort_name = base::WideToUTF8(
-      install_static::InstallDetails::Get().update_cohort_name());
-  // TODO(nikunjb): Once update_cohort_name is added to system profile
-  // update the code here.
-  base::UmaHistogramSparse("GoogleUpdate.InstallDetails.UpdateCohort",
-                           base::HashMetricName(update_cohort_name));
+
   metrics::SystemProfileProto::GoogleUpdate* google_update =
       system_profile_proto->mutable_google_update();
 
@@ -104,14 +109,19 @@ void GoogleUpdateMetricsProviderWin::ProvideSystemProfileMetrics(
     ProductDataToProto(google_update_metrics_.product_data,
                        google_update->mutable_client_status());
   }
+
+  const uint32_t cohort_hash = GetHashedCohortId();
+  base::UmaHistogramSparse("GoogleUpdate.InstallDetails.UpdateCohortId",
+                           cohort_hash);
+  google_update->mutable_client_status()->set_cohort_hash(cohort_hash);
 }
 
 GoogleUpdateMetricsProviderWin::GoogleUpdateMetrics::GoogleUpdateMetrics()
     : is_system_install(false) {
 }
 
-GoogleUpdateMetricsProviderWin::GoogleUpdateMetrics::~GoogleUpdateMetrics() {
-}
+GoogleUpdateMetricsProviderWin::GoogleUpdateMetrics::~GoogleUpdateMetrics() =
+    default;
 
 // static
 GoogleUpdateMetricsProviderWin::GoogleUpdateMetrics

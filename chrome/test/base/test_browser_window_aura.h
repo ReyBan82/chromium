@@ -5,10 +5,10 @@
 #ifndef CHROME_TEST_BASE_TEST_BROWSER_WINDOW_AURA_H_
 #define CHROME_TEST_BASE_TEST_BROWSER_WINDOW_AURA_H_
 
+#include <memory>
+
 #include "base/memory/raw_ptr.h"
 #include "chrome/test/base/test_browser_window.h"
-
-#include <memory>
 
 namespace aura {
 class Window;
@@ -16,6 +16,8 @@ class Window;
 namespace views {
 class Widget;
 }
+
+struct BrowserWindowCreateParams;
 
 // A browser window proxy with an associated Aura native window.
 // TODO: replace this with TestBrowserWindowViews.
@@ -35,10 +37,11 @@ class TestBrowserWindowAura : public TestBrowserWindow {
   bool IsActive() const override;
   gfx::Rect GetBounds() const override;
 
-  std::unique_ptr<Browser> CreateBrowser(Browser::CreateParams* params);
+  std::unique_ptr<BrowserWindowInterface> CreateBrowser(
+      BrowserWindowCreateParams params);
 
  private:
-  raw_ptr<Browser> browser_;  // not owned
+  raw_ptr<BrowserWindowInterface> browser_;  // not owned
   std::unique_ptr<aura::Window> native_window_;
 };
 
@@ -58,10 +61,11 @@ class TestBrowserWindowViews : public TestBrowserWindow {
   bool IsActive() const override;
   gfx::Rect GetBounds() const override;
 
-  std::unique_ptr<Browser> CreateBrowser(const Browser::CreateParams& params);
+  std::unique_ptr<BrowserWindowInterface> CreateBrowser(
+      BrowserWindowCreateParams params);
 
  private:
-  raw_ptr<Browser> browser_;  // not owned
+  raw_ptr<BrowserWindowInterface> browser_;  // not owned
   std::unique_ptr<views::Widget> widget_;
 };
 
@@ -70,14 +74,14 @@ namespace chrome {
 // Helper that creates a browser with a native Aura |window|. If |window| is
 // nullptr, it will create an Aura window to associate with the browser. It also
 // handles the lifetime of TestBrowserWindowAura.
-std::unique_ptr<Browser> CreateBrowserWithAuraTestWindowForParams(
-    std::unique_ptr<aura::Window> window,
-    Browser::CreateParams* params);
+std::unique_ptr<BrowserWindowInterface>
+CreateBrowserWithAuraTestWindowForParams(std::unique_ptr<aura::Window> window,
+                                         BrowserWindowCreateParams params);
 
 // Helper that creates a browser with a Widget serving as the BrowserWindow.
-std::unique_ptr<Browser> CreateBrowserWithViewsTestWindowForParams(
-    const Browser::CreateParams& params,
-    aura::Window* parent = nullptr);
+std::unique_ptr<BrowserWindowInterface>
+CreateBrowserWithViewsTestWindowForParams(BrowserWindowCreateParams params,
+                                          aura::Window* parent = nullptr);
 
 }  // namespace chrome
 

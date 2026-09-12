@@ -15,13 +15,14 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/child_process_host.h"
+#include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/speech_recognition_event_listener.h"
 #include "content/public/browser/speech_recognition_manager.h"
 #include "content/public/browser/speech_recognition_session_config.h"
 #include "content/public/browser/speech_recognition_session_preamble.h"
+#include "media/mojo/mojom/speech_recognition_error.mojom.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
-#include "third_party/blink/public/mojom/speech/speech_recognition_error.mojom.h"
 
 // Invalid speech session.
 static const int kInvalidSessionId = -1;
@@ -42,7 +43,6 @@ class NetworkSpeechRecognizer::EventListener
   EventListener(const base::WeakPtr<SpeechRecognizerDelegate>& delegate,
                 std::unique_ptr<network::PendingSharedURLLoaderFactory>
                     pending_shared_url_loader_factory,
-                const std::string& accept_language,
                 const std::string& locale);
 
   EventListener(const EventListener&) = delete;
@@ -68,17 +68,16 @@ class NetworkSpeechRecognizer::EventListener
   void OnRecognitionEnd(int session_id) override;
   void OnRecognitionResults(
       int session_id,
-      const std::vector<blink::mojom::SpeechRecognitionResultPtr>& results)
+      const std::vector<media::mojom::WebSpeechRecognitionResultPtr>& results)
       override;
   void OnRecognitionError(
       int session_id,
-      const blink::mojom::SpeechRecognitionError& error) override;
+      const media::mojom::SpeechRecognitionError& error) override;
   void OnSoundStart(int session_id) override;
   void OnSoundEnd(int session_id) override;
   void OnAudioLevelsChange(int session_id,
                            float volume,
                            float noise_volume) override;
-  void OnEnvironmentEstimationComplete(int session_id) override;
   void OnAudioStart(int session_id) override;
   void OnAudioEnd(int session_id) override;
 
@@ -90,7 +89,6 @@ class NetworkSpeechRecognizer::EventListener
       pending_shared_url_loader_factory_;
   // Initialized from |pending_shared_url_loader_factory_| on first use.
   scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory_;
-  const std::string accept_language_;
   std::string locale_;
   int session_;
   std::u16string last_result_str_;
@@ -102,12 +100,10 @@ NetworkSpeechRecognizer::EventListener::EventListener(
     const base::WeakPtr<SpeechRecognizerDelegate>& delegate,
     std::unique_ptr<network::PendingSharedURLLoaderFactory>
         pending_shared_url_loader_factory,
-    const std::string& accept_language,
     const std::string& locale)
     : delegate_(delegate),
       pending_shared_url_loader_factory_(
           std::move(pending_shared_url_loader_factory)),
-      accept_language_(accept_language),
       locale_(locale),
       session_(kInvalidSessionId) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
@@ -144,7 +140,6 @@ void NetworkSpeechRecognizer::EventListener::StartOnIOThread(
   config.interim_results = true;
   config.max_hypotheses = 1;
   config.filter_profanities = filter_profanities;
-  config.accept_language = accept_language_;
   if (!shared_url_loader_factory_) {
     DCHECK(pending_shared_url_loader_factory_);
     shared_url_loader_factory_ = network::SharedURLLoaderFactory::Create(
@@ -152,10 +147,9 @@ void NetworkSpeechRecognizer::EventListener::StartOnIOThread(
   }
   config.shared_url_loader_factory = shared_url_loader_factory_;
   config.event_listener = weak_factory_.GetWeakPtr();
-  // kInvalidUniqueID is not a valid render process, so the speech permission
-  // check allows the request through.
-  config.initial_context.render_process_id =
-      content::ChildProcessHost::kInvalidUniqueID;
+  // This creates an invalid render process, so the speech permission check
+  // allows the request through.
+  config.initial_context.global_id = content::GlobalRenderFrameHostId();
   config.auth_scope = auth_scope;
   config.auth_token = auth_token;
   config.preamble = preamble;
@@ -201,7 +195,7 @@ void NetworkSpeechRecognizer::EventListener::OnRecognitionEnd(int session_id) {
 
 void NetworkSpeechRecognizer::EventListener::OnRecognitionResults(
     int session_id,
-    const std::vector<blink::mojom::SpeechRecognitionResultPtr>& results) {
+    const std::vector<media::mojom::WebSpeechRecognitionResultPtr>& results) {
   std::u16string result_str;
   size_t final_count = 0;
   // The number of results with |is_provisional| false. If |final_count| ==
@@ -212,21 +206,21 @@ void NetworkSpeechRecognizer::EventListener::OnRecognitionResults(
       final_count++;
     result_str += result->hypotheses[0]->utterance;
   }
-  // blink::mojom::SpeechRecognitionResult doesn't have word offsets.
+  // media::mojom::WebSpeechRecognitionResult doesn't have word offsets.
   content::GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE,
       base::BindOnce(&SpeechRecognizerDelegate::OnSpeechResult, delegate_,
                      result_str, final_count == results.size(),
-                     /* full_result = */ absl::nullopt));
+                     /* full_result = */ std::nullopt));
 
   last_result_str_ = result_str;
 }
 
 void NetworkSpeechRecognizer::EventListener::OnRecognitionError(
     int session_id,
-    const blink::mojom::SpeechRecognitionError& error) {
+    const media::mojom::SpeechRecognitionError& error) {
   StopOnIOThread();
-  if (error.code == blink::mojom::SpeechRecognitionErrorCode::kNetwork) {
+  if (error.code == media::mojom::SpeechRecognitionErrorCode::kNetwork) {
     NotifyRecognitionStateChanged(SPEECH_RECOGNIZER_ERROR);
   }
   NotifyRecognitionStateChanged(SPEECH_RECOGNIZER_READY);
@@ -259,9 +253,6 @@ void NetworkSpeechRecognizer::EventListener::OnAudioLevelsChange(
                      delegate_, sound_level));
 }
 
-void NetworkSpeechRecognizer::EventListener::OnEnvironmentEstimationComplete(
-    int session_id) {}
-
 void NetworkSpeechRecognizer::EventListener::OnAudioStart(int session_id) {}
 
 void NetworkSpeechRecognizer::EventListener::OnAudioEnd(int session_id) {}
@@ -270,13 +261,11 @@ NetworkSpeechRecognizer::NetworkSpeechRecognizer(
     const base::WeakPtr<SpeechRecognizerDelegate>& delegate,
     std::unique_ptr<network::PendingSharedURLLoaderFactory>
         pending_shared_url_loader_factory,
-    const std::string& accept_language,
     const std::string& locale)
     : SpeechRecognizer(delegate),
       speech_event_listener_(
           new EventListener(delegate,
                             std::move(pending_shared_url_loader_factory),
-                            accept_language,
                             locale)) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 }

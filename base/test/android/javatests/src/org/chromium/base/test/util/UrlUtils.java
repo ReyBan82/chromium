@@ -4,17 +4,17 @@
 
 package org.chromium.base.test.util;
 
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JniType;
 import org.junit.Assert;
 
 import org.chromium.base.PathUtils;
 import org.chromium.base.StrictModeContext;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.build.annotations.MainDex;
 
-/**
- * Collection of URL utilities.
- */
-@MainDex
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+
+/** Collection of URL utilities. */
 public class UrlUtils {
     private static final String DATA_DIR = "chrome/test/data/";
 
@@ -37,11 +37,9 @@ public class UrlUtils {
         return getIsolatedTestRoot() + "/" + path;
     }
 
-    /**
-     * Returns the root of the test data directory.
-     */
+    /** Returns the root of the test data directory. */
     @CalledByNative
-    public static String getIsolatedTestRoot() {
+    public static @JniType("std::string") String getIsolatedTestRoot() {
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
             return PathUtils.getExternalStorageDirectory() + "/chromium_tests_root";
         }
@@ -67,6 +65,7 @@ public class UrlUtils {
 
     /**
      * Construct a data:text/html URI for loading from an inline HTML.
+     *
      * @param html An unencoded HTML
      * @return String An URI that contains the given HTML
      */
@@ -75,11 +74,10 @@ public class UrlUtils {
             // URLEncoder encodes into application/x-www-form-encoded, so
             // ' '->'+' needs to be undone and replaced with ' '->'%20'
             // to match the Data URI requirements.
-            String encoded =
-                    "data:text/html;utf-8," + java.net.URLEncoder.encode(html, "UTF-8");
+            String encoded = "data:text/html;utf-8," + URLEncoder.encode(html, "UTF-8");
             encoded = encoded.replace("+", "%20");
             return encoded;
-        } catch (java.io.UnsupportedEncodingException e) {
+        } catch (UnsupportedEncodingException e) {
             Assert.fail("Unsupported encoding: " + e.getMessage());
             return null;
         }

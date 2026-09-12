@@ -11,3 +11,5 @@ Extensions:
   - ExtensionManifestV2Availability
   - ExtensionUnpublishedAvailability
   - ExtensionExtendedBackgroundLifetimeForPortConnectionsToUrls
+  - ExtensionDOMActivityLoggingEnabled
+  - ExtensionReviewPromptsEnabled

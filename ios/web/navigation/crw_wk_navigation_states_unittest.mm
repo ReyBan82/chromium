@@ -6,21 +6,22 @@
 
 #import <WebKit/WebKit.h>
 
+#import "base/test/task_environment.h"
+#import "base/test/tracing/test_trace_processor.h"
+#import "base/test/tracing/trace_test_utils.h"
+#import "base/trace_event/trace_event.h"
 #import "ios/web/navigation/navigation_context_impl.h"
 #import "ios/web/navigation/navigation_item_impl.h"
 #import "net/http/http_response_headers.h"
+#import "testing/gmock/include/gmock/gmock.h"
 #import "testing/gtest/include/gtest/gtest.h"
 #import "testing/platform_test.h"
 #import "url/gurl.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace {
 const char kTestUrl1[] = "https://test1.test/";
 const char kTestUrl2[] = "https://test2.test/";
-}
+}  // namespace
 
 namespace web {
 
@@ -158,11 +159,11 @@ TEST_F(CRWWKNavigationStatesTest, Context) {
   EXPECT_FALSE([states_ contextForNavigation:navigation3_]);
   ASSERT_TRUE([states_ contextForNavigation:navigation1_]);
   EXPECT_EQ(GURL(kTestUrl1),
-            [states_ contextForNavigation:navigation1_] -> GetUrl());
-  EXPECT_TRUE([states_ contextForNavigation:navigation1_] -> IsSameDocument());
-  EXPECT_FALSE([states_ contextForNavigation:navigation1_] -> GetError());
+            [states_ contextForNavigation:navigation1_]->GetUrl());
+  EXPECT_TRUE([states_ contextForNavigation:navigation1_]->IsSameDocument());
+  EXPECT_FALSE([states_ contextForNavigation:navigation1_]->GetError());
   EXPECT_FALSE(
-      [states_ contextForNavigation:navigation1_] -> IsRendererInitiated());
+      [states_ contextForNavigation:navigation1_]->IsRendererInitiated());
 
   // Replace existing context.
   std::unique_ptr<web::NavigationContextImpl> context2 =
@@ -177,11 +178,11 @@ TEST_F(CRWWKNavigationStatesTest, Context) {
   EXPECT_FALSE([states_ contextForNavigation:navigation3_]);
   ASSERT_TRUE([states_ contextForNavigation:navigation1_]);
   EXPECT_EQ(GURL(kTestUrl2),
-            [states_ contextForNavigation:navigation1_] -> GetUrl());
-  EXPECT_FALSE([states_ contextForNavigation:navigation1_] -> IsSameDocument());
-  EXPECT_EQ(error, [states_ contextForNavigation:navigation1_] -> GetError());
+            [states_ contextForNavigation:navigation1_]->GetUrl());
+  EXPECT_FALSE([states_ contextForNavigation:navigation1_]->IsSameDocument());
+  EXPECT_EQ(error, [states_ contextForNavigation:navigation1_]->GetError());
   EXPECT_TRUE(
-      [states_ contextForNavigation:navigation1_] -> IsRendererInitiated());
+      [states_ contextForNavigation:navigation1_]->IsRendererInitiated());
 
   // Extract existing context.
   std::unique_ptr<web::NavigationContextImpl> extractedContext =
@@ -255,8 +256,8 @@ TEST_F(CRWWKNavigationStatesTest, PendingNavigations) {
   ASSERT_EQ(WKNavigationState::PROVISIONALY_FAILED,
             [states_ stateForNavigation:nil]);
   ASSERT_EQ(3U, [states_ pendingNavigations].count);
+  EXPECT_TRUE([[states_ pendingNavigations] containsObject:navigation1_]);
   EXPECT_TRUE([[states_ pendingNavigations] containsObject:navigation2_]);
-  EXPECT_TRUE([[states_ pendingNavigations] containsObject:navigation3_]);
   EXPECT_TRUE([[states_ pendingNavigations] containsObject:navigation3_]);
 
   // Commit navigation_1.
@@ -287,6 +288,183 @@ TEST_F(CRWWKNavigationStatesTest, PendingNavigations) {
   ASSERT_EQ(WKNavigationState::FAILED,
             [states_ stateForNavigation:navigation3_]);
   ASSERT_EQ(0U, [states_ pendingNavigations].count);
+}
+
+TEST_F(CRWWKNavigationStatesTest, TracingTransitions) {
+  base::test::TracingEnvironment tracing_environment;
+  base::test::TaskEnvironment task_environment;
+  base::test::TestTraceProcessor test_trace_processor;
+
+  test_trace_processor.StartTrace("navigation");
+
+  {
+    [states_ setState:WKNavigationState::REQUESTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::STARTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::REDIRECTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::COMMITTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::FINISHED forNavigation:navigation1_];
+  }
+
+  auto status = test_trace_processor.StopAndParseTrace();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  auto result = test_trace_processor.RunQuery(R"(
+    SELECT
+      name,
+      EXTRACT_ARG(arg_set_id, 'debug.end_state') as end_state
+    FROM slice
+    WHERE category = 'navigation'
+    ORDER BY ts, name
+  )");
+
+  ASSERT_TRUE(result.has_value()) << result.error();
+
+  EXPECT_THAT(result.value(),
+              ::testing::ElementsAre(
+                  std::vector<std::string>{"name", "end_state"},
+                  std::vector<std::string>{"Requested", "Started"},
+                  std::vector<std::string>{"Started", "Redirected"},
+                  std::vector<std::string>{"Redirected", "Committed"},
+                  std::vector<std::string>{"Committed", "Finished"}));
+}
+
+TEST_F(CRWWKNavigationStatesTest, TracingTransitionsFailed) {
+  base::test::TracingEnvironment tracing_environment;
+  base::test::TaskEnvironment task_environment;
+  base::test::TestTraceProcessor test_trace_processor;
+
+  test_trace_processor.StartTrace("navigation");
+
+  {
+    [states_ setState:WKNavigationState::REQUESTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::STARTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::FAILED forNavigation:navigation1_];
+  }
+
+  auto status = test_trace_processor.StopAndParseTrace();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  auto result = test_trace_processor.RunQuery(R"(
+    SELECT
+      name,
+      EXTRACT_ARG(arg_set_id, 'debug.end_state') as end_state
+    FROM slice
+    WHERE category = 'navigation'
+    ORDER BY ts, name
+  )");
+  ASSERT_TRUE(result.has_value()) << result.error();
+
+  EXPECT_THAT(
+      result.value(),
+      ::testing::ElementsAre(std::vector<std::string>{"name", "end_state"},
+                             std::vector<std::string>{"Requested", "Started"},
+                             std::vector<std::string>{"Started", "Failed"}));
+}
+
+TEST_F(CRWWKNavigationStatesTest, TracingTransitionsProvisionalFailed) {
+  base::test::TracingEnvironment tracing_environment;
+  base::test::TaskEnvironment task_environment;
+  base::test::TestTraceProcessor test_trace_processor;
+
+  test_trace_processor.StartTrace("navigation");
+
+  {
+    [states_ setState:WKNavigationState::REQUESTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::STARTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::PROVISIONALY_FAILED
+        forNavigation:navigation1_];
+  }
+
+  auto status = test_trace_processor.StopAndParseTrace();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  auto result = test_trace_processor.RunQuery(R"(
+    SELECT
+      name,
+      EXTRACT_ARG(arg_set_id, 'debug.end_state') as end_state
+    FROM slice
+    WHERE category = 'navigation'
+    ORDER BY ts, name
+  )");
+  ASSERT_TRUE(result.has_value()) << result.error();
+
+  EXPECT_THAT(result.value(),
+              ::testing::ElementsAre(
+                  std::vector<std::string>{"name", "end_state"},
+                  std::vector<std::string>{"Requested", "Started"},
+                  std::vector<std::string>{"Started", "ProvisionalyFailed"}));
+}
+
+TEST_F(CRWWKNavigationStatesTest, TracingTransitionsRemoved) {
+  base::test::TracingEnvironment tracing_environment;
+  base::test::TaskEnvironment task_environment;
+  base::test::TestTraceProcessor test_trace_processor;
+
+  test_trace_processor.StartTrace("navigation");
+
+  {
+    [states_ setState:WKNavigationState::REQUESTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::STARTED forNavigation:navigation1_];
+    [states_ removeNavigation:navigation1_];
+  }
+
+  auto status = test_trace_processor.StopAndParseTrace();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  auto result = test_trace_processor.RunQuery(R"(
+    SELECT
+      name,
+      EXTRACT_ARG(arg_set_id, 'debug.end_state') as end_state
+    FROM slice
+    WHERE category = 'navigation'
+    ORDER BY ts, name
+  )");
+  ASSERT_TRUE(result.has_value()) << result.error();
+
+  EXPECT_THAT(
+      result.value(),
+      ::testing::ElementsAre(std::vector<std::string>{"name", "end_state"},
+                             std::vector<std::string>{"Requested", "Started"},
+                             std::vector<std::string>{"Started", "Cancelled"}));
+}
+
+TEST_F(CRWWKNavigationStatesTest, TracingTransitionsRemovedConsecutive) {
+  base::test::TracingEnvironment tracing_environment;
+  base::test::TaskEnvironment task_environment;
+  base::test::TestTraceProcessor test_trace_processor;
+
+  test_trace_processor.StartTrace("navigation");
+
+  {
+    [states_ setState:WKNavigationState::REQUESTED forNavigation:navigation1_];
+    [states_ setState:WKNavigationState::STARTED forNavigation:navigation1_];
+    [states_ removeNavigation:navigation1_];
+
+    [states_ setState:WKNavigationState::REQUESTED forNavigation:navigation2_];
+    [states_ setState:WKNavigationState::STARTED forNavigation:navigation2_];
+    [states_ setState:WKNavigationState::FINISHED forNavigation:navigation2_];
+  }
+
+  auto status = test_trace_processor.StopAndParseTrace();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  auto result = test_trace_processor.RunQuery(R"(
+    SELECT
+      name,
+      EXTRACT_ARG(arg_set_id, 'debug.end_state') as end_state
+    FROM slice
+    WHERE category = 'navigation'
+    ORDER BY ts, name
+  )");
+  ASSERT_TRUE(result.has_value()) << result.error();
+
+  EXPECT_THAT(
+      result.value(),
+      ::testing::ElementsAre(std::vector<std::string>{"name", "end_state"},
+                             std::vector<std::string>{"Requested", "Started"},
+                             std::vector<std::string>{"Started", "Cancelled"},
+                             std::vector<std::string>{"Requested", "Started"},
+                             std::vector<std::string>{"Started", "Finished"}));
 }
 
 }  // namespace web

@@ -11,6 +11,7 @@
 
 #include "base/check.h"
 #include "base/feature_list.h"
+#include "base/functional/callback_helpers.h"
 #include "chrome/common/chrome_features.h"
 #import "chrome/services/mac_notifications/mac_notification_service_ns.h"
 #import "chrome/services/mac_notifications/mac_notification_service_un.h"
@@ -30,19 +31,18 @@ void MacNotificationProviderImpl::BindNotificationService(
     mojo::PendingRemote<mojom::MacNotificationActionHandler> handler) {
   DCHECK(!service_);
 
-  // Use the UNNotification API if available and enabled.
-  if (@available(macOS 10.14, *)) {
-    if (base::FeatureList::IsEnabled(features::kNewMacNotificationAPI)) {
-      service_ = std::make_unique<MacNotificationServiceUN>(
-          std::move(service), std::move(handler),
-          [UNUserNotificationCenter currentNotificationCenter]);
-      return;
-    }
-  }
+// MacNotificationServiceNS implements the Chromium interface to the
+// NSUserNotificationCenter deprecated API. It is in the process of being
+// replaced by UNNotification, above, and warnings about its deprecation are not
+// helpful. https://crbug.com/40148499
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
   service_ = std::make_unique<MacNotificationServiceNS>(
       std::move(service), std::move(handler),
       [NSUserNotificationCenter defaultUserNotificationCenter]);
+
+#pragma clang diagnostic pop
 }
 
 }  // namespace mac_notifications

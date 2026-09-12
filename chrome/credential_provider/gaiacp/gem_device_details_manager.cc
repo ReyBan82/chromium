@@ -7,23 +7,20 @@
 #include <windows.h>
 #include <winternl.h>
 
-#include <lm.h>  // Needed for LSA_UNICODE_STRING
+#include <lm.h>
 #include <process.h>
 
-#define _NTDEF_  // Prevent redefition errors, must come after <winternl.h>
-#include <ntsecapi.h>  // For POLICY_ALL_ACCESS types
-
+#include <algorithm>
 #include <memory>
 
 #include "base/containers/span.h"
-#include "base/cxx17_backports.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/win/ntsecapi_shim.h"
 #include "chrome/credential_provider/common/gcp_strings.h"
 #include "chrome/credential_provider/gaiacp/gcp_utils.h"
 #include "chrome/credential_provider/gaiacp/gcpw_strings.h"
 #include "chrome/credential_provider/gaiacp/logging.h"
 #include "chrome/credential_provider/gaiacp/os_user_manager.h"
-#include "chrome/credential_provider/gaiacp/reg_utils.h"
 #include "chrome/credential_provider/gaiacp/win_http_url_fetcher.h"
 
 namespace credential_provider {
@@ -235,7 +232,7 @@ HRESULT GemDeviceDetailsManager::UploadDeviceDetailsInternal(
     hr = S_OK;
   }
 
-  base::Value::List mac_address_value_list;
+  base::ListValue mac_address_value_list;
   for (const std::string& mac_address : mac_addresses)
     mac_address_value_list.Append(mac_address);
 
@@ -248,7 +245,7 @@ HRESULT GemDeviceDetailsManager::UploadDeviceDetailsInternal(
     }
   }
 
-  request_dict_ = std::make_unique<base::Value::Dict>();
+  request_dict_ = std::make_unique<base::DictValue>();
   request_dict_->Set(kUploadDeviceDetailsRequestSerialNumberParameterName,
                      base::WideToUTF8(serial_number));
   request_dict_->Set(kUploadDeviceDetailsRequestMachineGuidParameterName,
@@ -289,7 +286,7 @@ HRESULT GemDeviceDetailsManager::UploadDeviceDetailsInternal(
                        base::WideToUTF8(known_resource_id));
   }
 
-  absl::optional<base::Value> request_result;
+  std::optional<base::DictValue> request_result;
 
   hr = WinHttpUrlFetcher::BuildRequestAndFetchResultFromHttpService(
       GemDeviceDetailsManager::Get()->GetGemServiceUploadDeviceDetailsUrl(),
@@ -302,7 +299,7 @@ HRESULT GemDeviceDetailsManager::UploadDeviceDetailsInternal(
     return E_FAIL;
   }
 
-  std::string* resource_id = request_result->FindStringKey(
+  auto* resource_id = request_result->FindString(
       kUploadDeviceDetailsResponseDeviceResourceIdParameterName);
   if (resource_id) {
     hr = SetUserProperty(sid, kRegUserDeviceResourceId,

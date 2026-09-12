@@ -7,17 +7,24 @@
 
 #include <memory>
 
-#include "base/memory/ref_counted.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/threading/thread.h"
 #include "base/time/time.h"
+#include "build/build_config.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/desktop_media_id.h"
 #include "media/capture/video/video_capture_device.h"
-#include "ui/gfx/native_widget_types.h"
+#include "third_party/webrtc/modules/desktop_capture/desktop_frame.h"
+#include "ui/gfx/native_ui_types.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/java_handler_thread.h"
+#else
+#include "base/threading/thread.h"
+#endif
 
 namespace base {
-class Thread;
 class TickClock;
 }  // namespace base
 
@@ -26,6 +33,14 @@ class DesktopCapturer;
 }  // namespace webrtc
 
 namespace content {
+
+media::VideoPixelFormat CONTENT_EXPORT
+FourCCToVideoPixelFormat(webrtc::FourCC fourcc);
+
+#if BUILDFLAG(IS_WIN)
+// Returns true if Windows Graphics Capture (WGC) is enabled for screen capture.
+bool CONTENT_EXPORT IsWgcEnabledForScreenCapture();
+#endif
 
 // DesktopCaptureDevice implements VideoCaptureDevice for screens and windows.
 // It's essentially an adapter between webrtc::DesktopCapturer and
@@ -40,7 +55,8 @@ class CONTENT_EXPORT DesktopCaptureDevice : public media::VideoCaptureDevice {
   // DesktopCaptureDevice for it. May return NULL in case of a failure (e.g. if
   // requested window was destroyed).
   static std::unique_ptr<media::VideoCaptureDevice> Create(
-      const DesktopMediaID& source);
+      const DesktopMediaID& source,
+      Client* device_client);
 
   DesktopCaptureDevice(const DesktopCaptureDevice&) = delete;
   DesktopCaptureDevice& operator=(const DesktopCaptureDevice&) = delete;
@@ -51,14 +67,25 @@ class CONTENT_EXPORT DesktopCaptureDevice : public media::VideoCaptureDevice {
   void AllocateAndStart(const media::VideoCaptureParams& params,
                         std::unique_ptr<Client> client) override;
   void StopAndDeAllocate() override;
+  // If currently stopped, starts the refresh frame timer to guarantee a frame
+  // representing the most up-to-date content will be sent to the consumer in
+  // the near future. This refresh operation will be canceled if a default
+  // capture event triggers a frame capture in the meantime, and will result in
+  // a frame sent to the consumer with a delay of up to one second.
   void RequestRefreshFrame() override;
 
+  void InvalidateBuffers() override;
   // Set the platform-dependent window id for the notification window.
   void SetNotificationWindowId(gfx::NativeViewId window_id);
 
  private:
+  FRIEND_TEST_ALL_PREFIXES(DesktopCaptureDeviceTest,
+                           RequestRefreshFrameBeforeStart);
+  FRIEND_TEST_ALL_PREFIXES(DesktopCaptureDeviceTest,
+                           RequestRefreshFrameAfterStop);
   friend class DesktopCaptureDeviceTest;
   friend class DesktopCaptureDeviceThrottledTest;
+  friend class DesktopCaptureDeviceRequestRefreshFrameTest;
   class Core;
 
   DesktopCaptureDevice(
@@ -79,7 +106,11 @@ class CONTENT_EXPORT DesktopCaptureDevice : public media::VideoCaptureDevice {
   // thread *should* be stopped by consumers with StopAndDeAllocate, some edge
   // cases may mean that there is either not a chance for it to be called, or it
   // may have been called but not yet scheduled to run.
+#if BUILDFLAG(IS_ANDROID)
+  base::android::JavaHandlerThread thread_;
+#else
   base::Thread thread_;
+#endif
 };
 
 }  // namespace content

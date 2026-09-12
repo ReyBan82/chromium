@@ -5,23 +5,29 @@
 #include "chrome/browser/ash/login/marketing_backend_connector.h"
 
 #include <cstddef>
+#include <optional>
+#include <string>
 
 #include "ash/constants/ash_switches.h"
+#include "base/check_deref.h"
 #include "base/command_line.h"
+#include "base/feature_list.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/signin/identity_manager_factory.h"
+#include "chromeos/ash/components/browser_context_helper/annotated_account_id.h"
+#include "chromeos/ash/components/signin/identity_manager_provider.h"
 #include "components/signin/public/base/consent_level.h"
 #include "components/signin/public/identity_manager/access_token_info.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
-#include "components/signin/public/identity_manager/scope_set.h"
+#include "components/sync/base/features.h"
 #include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
+#include "google_apis/credentials_mode.h"
 #include "net/base/load_flags.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_status_code.h"
@@ -29,10 +35,6 @@
 
 namespace ash {
 namespace {
-
-// The scope that will be used to access the ChromebookEmailService API.
-const char kChromebookOAuth2Scope[] =
-    "https://www.googleapis.com/auth/chromebook.email";
 
 // API Endpoint
 const char kAccessPointsApiEndpoint[] = "https://accesspoints.googleapis.com/";
@@ -65,7 +67,8 @@ std::unique_ptr<network::ResourceRequest> GetResourceRequest() {
   auto resource_request = std::make_unique<network::ResourceRequest>();
   resource_request->url = GetChromebookServiceEndpoint();
   resource_request->load_flags = net::LOAD_DISABLE_CACHE;
-  resource_request->credentials_mode = network::mojom::CredentialsMode::kOmit;
+  resource_request->credentials_mode =
+      google_apis::GetOmitCredentialsModeForGaiaRequests();
   resource_request->method = "POST";
   return resource_request;
 }
@@ -91,18 +94,23 @@ void MarketingBackendConnector::UpdateEmailPreferences(
   }
 
   // No requests without a Gaia account
-  if (profile->IsOffTheRecord())
+  if (profile->IsOffTheRecord()) {
     return;
+  }
 
+  auto* identity_manager = ash::IdentityManagerProvider::Get().Find(
+      CHECK_DEREF(ash::AnnotatedAccountId::Get(profile)));
   scoped_refptr<MarketingBackendConnector> ref =
-      new MarketingBackendConnector(profile);
+      new MarketingBackendConnector(profile, identity_manager);
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, base::BindOnce(&MarketingBackendConnector::PerformRequest, ref,
                                 country_code));
 }
 
-MarketingBackendConnector::MarketingBackendConnector(Profile* profile)
-    : profile_(profile) {}
+MarketingBackendConnector::MarketingBackendConnector(
+    Profile* profile,
+    signin::IdentityManager* identity_manager)
+    : profile_(profile), identity_manager_(CHECK_DEREF(identity_manager)) {}
 
 void MarketingBackendConnector::PerformRequest(
     const std::string& country_code) {
@@ -111,20 +119,15 @@ void MarketingBackendConnector::PerformRequest(
 }
 
 void MarketingBackendConnector::StartTokenFetch() {
-  signin::IdentityManager* identity_manager =
-      IdentityManagerFactory::GetForProfile(profile_);
-  if (!identity_manager) {
-    RecordUMAHistogram(BackendConnectorEvent::kErrorOther, country_code_);
-    return;
-  }
-
-  signin::ScopeSet chromebook_scope;
-  chromebook_scope.insert(kChromebookOAuth2Scope);
   token_fetcher_ = std::make_unique<signin::PrimaryAccountAccessTokenFetcher>(
-      "MarketingBackendConnector", identity_manager, chromebook_scope,
+      signin::OAuthConsumerId::kMarketingBackendConnector,
+      &identity_manager_.get(),
       base::BindOnce(&MarketingBackendConnector::OnAccessTokenRequestCompleted,
                      this),
-      signin::PrimaryAccountAccessTokenFetcher::Mode::kImmediate);
+      signin::PrimaryAccountAccessTokenFetcher::Mode::kImmediate,
+      base::FeatureList::IsEnabled(syncer::kReplaceSyncPromosWithSignInPromos)
+          ? signin::ConsentLevel::kSignin
+          : signin::ConsentLevel::kSync);
 }
 
 void MarketingBackendConnector::OnAccessTokenRequestCompleted(
@@ -188,7 +191,7 @@ void MarketingBackendConnector::SetTokenAndStartRequest() {
 }
 
 void MarketingBackendConnector::OnSimpleLoaderComplete(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   int response_code = -1;
   std::string raw_header;
   if (simple_url_loader_->ResponseInfo() &&
@@ -198,8 +201,9 @@ void MarketingBackendConnector::OnSimpleLoaderComplete(
   }
 
   std::string data;
-  if (response_body)
+  if (response_body) {
     data = std::move(*response_body);
+  }
 
   OnSimpleLoaderCompleteInternal(response_code, data);
 }
@@ -236,13 +240,11 @@ void MarketingBackendConnector::OnSimpleLoaderCompleteInternal(
 }
 
 std::string MarketingBackendConnector::GetRequestContent() {
-  base::Value::Dict request_dict;
+  base::DictValue request_dict;
   request_dict.Set("country_code", country_code_);
   request_dict.Set("language", "en");
 
-  std::string request_content;
-  base::JSONWriter::Write(request_dict, &request_content);
-  return request_content;
+  return base::WriteJson(request_dict).value_or("");
 }
 
 MarketingBackendConnector::~MarketingBackendConnector() = default;

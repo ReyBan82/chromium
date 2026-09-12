@@ -14,7 +14,8 @@ buildflag_header("buildflags") {
   _enable_elf = true
   _enable_win = true
 
-  # Disable ZTF (Zucchini Text Format) on official builds it is for testing only.
+  # Disable ZTF (Zucchini Text Format) on official builds it is for testing
+  # only.
   _enable_ztf = !is_official_build
   flags = [
     "ENABLE_DEX=$_enable_dex",
@@ -123,28 +124,65 @@ static_library("zucchini_io") {
     ":zucchini_lib",
     "//base",
   ]
-}
-
-executable("zucchini") {
-  sources = [
-    "main_utils.cc",
-    "main_utils.h",
-    "zucchini_commands.cc",
-    "zucchini_commands.h",
-    "zucchini_main.cc",
-  ]
-
-  deps = [
-    ":zucchini_io",
-    ":zucchini_lib",
-    "//base",
-  ]
 
   if (is_win) {
-    deps += [
-      ":zucchini_exe_version",
-      "//build/win:default_exe_manifest",
+    sources += [
+      "exception_filter_helper_win.cc",
+      "exception_filter_helper_win.h",
     ]
+  }
+}
+
+if (is_win && current_toolchain == default_toolchain) {
+  # Redirect the default 'zucchini' target to the one built with the system
+  # allocator.
+  _toolchain =
+      "//build/toolchain/win:win_clang_$target_cpu" + "_with_system_allocator"
+  _label = ":zucchini($_toolchain)"
+  _out_dir = get_label_info(_label, "root_out_dir")
+
+  copy("copy_zucchini_exe") {
+    sources = [ "$_out_dir/zucchini.exe" ]
+    outputs = [ "$root_out_dir/zucchini.exe" ]
+    deps = [ _label ]
+  }
+
+  copy("copy_zucchini_root_pdb") {
+    sources = [ "$_out_dir/zucchini.exe.pdb" ]
+    outputs = [ "$root_out_dir/zucchini.exe.pdb" ]
+    deps = [ _label ]
+  }
+
+  group("zucchini") {
+    public_deps = [
+      ":copy_zucchini_exe",
+      ":copy_zucchini_root_pdb",
+    ]
+  }
+}
+
+if (!is_win || current_toolchain != default_toolchain) {
+  executable("zucchini") {
+    sources = [
+      "main_utils.cc",
+      "main_utils.h",
+      "zucchini_commands.cc",
+      "zucchini_commands.h",
+      "zucchini_main.cc",
+    ]
+
+    deps = [
+      ":zucchini_io",
+      ":zucchini_lib",
+      "//base",
+    ]
+
+    if (is_win) {
+      deps += [
+        ":zucchini_exe_version",
+        "//build/win:default_exe_manifest",
+      ]
+    }
   }
 }
 
@@ -157,10 +195,12 @@ if (is_win) {
   if (current_cpu != "x64") {
     # For 32-bit, zucchini64 is built using the 64-bit toolchain, then copied
     # from the 64-bit toolchain outdir to the main outdir.
-    zucchini64_toolchain = "//build/toolchain/win:win_clang_x64"
+    zucchini64_toolchain =
+        "//build/toolchain/win:win_clang_x64_with_system_allocator"
     zucchini64_label = ":zucchini($zucchini64_toolchain)"
   } else {
-    zucchini64_label = ":zucchini"
+    zucchini64_label =
+        ":zucchini(//build/toolchain/win:win_clang_x64_with_system_allocator)"
   }
 
   zucchini64_out_dir = get_label_info(zucchini64_label, "root_out_dir")
@@ -231,6 +271,10 @@ test("zucchini_unittests") {
     "//base/test:test_support",
     "//testing/gtest",
   ]
+
+  if (is_win) {
+    sources += [ "exception_filter_helper_win_unittest.cc" ]
+  }
 }
 
 test("zucchini_integration_test") {
@@ -252,6 +296,7 @@ group("zucchini_fuzzers") {
   testonly = true
   deps = [
     "//components/zucchini/fuzzers:zucchini_disassembler_dex_fuzzer",
+    "//components/zucchini/fuzzers:zucchini_disassembler_elf_fuzzer",
     "//components/zucchini/fuzzers:zucchini_disassembler_win32_fuzzer",
     "//components/zucchini/fuzzers:zucchini_patch_fuzzer",
   ]

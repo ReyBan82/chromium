@@ -6,6 +6,8 @@
 
 #include <stddef.h>
 
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "base/command_line.h"
@@ -38,7 +40,6 @@
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "services/network/public/mojom/network_service.mojom.h"
 
-// TODO(crbug.com/181671): Write test to verify we handle the policy toggling.
 IntranetRedirectDetector::IntranetRedirectDetector()
     : redirect_origin_(g_browser_process->local_state()->GetString(
           prefs::kLastKnownIntranetRedirectOrigin)) {
@@ -75,7 +76,6 @@ void IntranetRedirectDetector::RegisterPrefs(PrefRegistrySimple* registry) {
   registry->RegisterStringPref(prefs::kLastKnownIntranetRedirectOrigin,
                                std::string());
   registry->RegisterBooleanPref(prefs::kDNSInterceptionChecksEnabled, true);
-  registry->RegisterIntegerPref(omnibox::kIntranetRedirectBehavior, 0);
 }
 
 void IntranetRedirectDetector::Restart() {
@@ -150,9 +150,9 @@ void IntranetRedirectDetector::FinishSleep() {
   for (size_t i = 0; i < 3; ++i) {
     std::string url_string("http://");
     // We generate a random hostname with between 7 and 15 characters.
-    const int num_chars = base::RandInt(7, 15);
+    const int num_chars = base::RandIntInclusive(7, 15);
     for (int j = 0; j < num_chars; ++j)
-      url_string += ('a' + base::RandInt(0, 'z' - 'a'));
+      url_string += ('a' + base::RandIntInclusive(0, 'z' - 'a'));
     GURL random_url(url_string + '/');
 
     auto resource_request = std::make_unique<network::ResourceRequest>();
@@ -179,10 +179,10 @@ void IntranetRedirectDetector::FinishSleep() {
 
 void IntranetRedirectDetector::OnSimpleLoaderComplete(
     network::SimpleURLLoader* source,
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   // Delete the loader on this function's exit.
   auto it = simple_loaders_.find(source);
-  DCHECK(it != simple_loaders_.end());
+  CHECK(it != simple_loaders_.end());
   std::unique_ptr<network::SimpleURLLoader> simple_loader =
       std::move(it->second);
   simple_loaders_.erase(it);
@@ -233,9 +233,10 @@ void IntranetRedirectDetector::OnSimpleLoaderComplete(
 }
 
 void IntranetRedirectDetector::OnConnectionChanged(
-    network::mojom::ConnectionType type) {
-  if (type != network::mojom::ConnectionType::CONNECTION_NONE)
+    net::NetworkChangeNotifier::ConnectionType type) {
+  if (type != net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE) {
     Restart();
+  }
 }
 
 void IntranetRedirectDetector::OnDnsConfigChanged() {

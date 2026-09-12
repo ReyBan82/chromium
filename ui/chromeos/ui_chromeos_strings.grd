@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <grit base_dir="." latest_public_release="0" current_release="1"
-      output_all_resource_defines="false" source_lang_id="en" enc_check="möl">
+      source_lang_id="en" enc_check="möl">
   <outputs>
     <output filename="grit/ui_chromeos_strings.h" type="rc_header">
       <emit emit_type='prepend'></emit>
@@ -180,7 +180,7 @@
   </translations>
   <release seq="1">
     <messages fallback_to_english="true">
-      <!-- Files app strings. It's shared with ARC++ (//ash/components/arc). -->
+      <!-- Files app strings. It's shared with ARC++ (//chromeos/ash/experiences/arc). -->
       <part file="file_manager_strings.grdp" />
 
       <!-- Default user profile images. -->
@@ -636,6 +636,9 @@
       <message name="IDS_CHROMEOS_IME_INFOLIST_WINDOW_TITLE" desc="The title of the infolist window where the meanings and the usages of words are displayed.">
         Information
       </message>
+      <message name="IDS_CHROMEOS_DIACRITIC_NUDGE_TEXT">
+      Want keys to repeat? Turn off accent marks in Keyboard Settings
+      </message>
       <message name="IDS_CHROMEOS_IME_CHINESE_QUICK_SETTINGS_CHINESE" desc="It is the description of whether the current input method is Chinese.">
         Input language is Chinese
       </message>
@@ -675,199 +678,199 @@
       <message name="IDS_LANGUAGES_MEDIUM_LEN_NAME_BRAILLE" desc="Medium length name for the input method for the hardware keyboard on a braille display. Shown after the text: Your input method has changed to...">
         Braille
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_JAPAN" desc="In the language menu button, this shows the input mode [Japanese keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_JAPAN" desc="In the language menu button, this shows the input mode [Japanese keyboard]." meaning="A keyboard language">
         Japanese
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SLOVENIA" desc="In the language menu button, this shows the input mode [Slovenian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SLOVENIA" desc="In the language menu button, this shows the input mode [Slovenian keyboard]." meaning="A keyboard language">
         Slovenian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_GERMANY" desc="In the language menu button, this shows the input mode [German keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_GERMANY" desc="In the language menu button, this shows the input mode [German keyboard]." meaning="A keyboard language">
         German
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_GERMANY_NEO2" desc="In the language menu button, this shows the input mode [German Neo 2 keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_GERMANY_NEO2" desc="In the language menu button, this shows the input mode [German Neo 2 keyboard]." meaning="A keyboard language">
         German Neo 2
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_ITALY" desc="In the language menu button, this shows the input mode [Italian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_ITALY" desc="In the language menu button, this shows the input mode [Italian keyboard]." meaning="A keyboard language">
         Italian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_ESTONIA" desc="In the language menu button, this shows the input mode [Estonian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_ESTONIA" desc="In the language menu button, this shows the input mode [Estonian keyboard]." meaning="A keyboard language">
         Estonian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_FAROESE" desc="In the language menu button, this shows the input mode [Faroese keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_FAROESE" desc="In the language menu button, this shows the input mode [Faroese keyboard]." meaning="A keyboard language">
         Faroese
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_HUNGARY" desc="In the language menu button, this shows the input mode [Hungarian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_HUNGARY" desc="In the language menu button, this shows the input mode [Hungarian keyboard]." meaning="A keyboard language">
         Hungarian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_HUNGARY_QWERTY" desc="In the language menu button, this shows the input mode [Hungarian QWERTY keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_HUNGARY_QWERTY" desc="In the language menu button, this shows the input mode [Hungarian QWERTY keyboard]." meaning="A keyboard language">
         Hungarian QWERTY
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_POLAND" desc="In the language menu button, this shows the input mode [Polish keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_POLAND" desc="In the language menu button, this shows the input mode [Polish keyboard]." meaning="A keyboard language">
         Polish
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_DENMARK" desc="In the language menu button, this shows the input mode [Danish keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_DENMARK" desc="In the language menu button, this shows the input mode [Danish keyboard]." meaning="A keyboard language">
         Danish
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_CROATIA" desc="In the language menu button, this shows the input mode [Croatian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_CROATIA" desc="In the language menu button, this shows the input mode [Croatian keyboard]." meaning="A keyboard language">
         Croatian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_BRAZIL" desc="In the language menu button, this shows the input mode [Brazilian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_BRAZIL" desc="In the language menu button, this shows the input mode [Brazilian keyboard]." meaning="A keyboard language">
         Brazilian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SERBIA" desc="In the language menu button, this shows the input mode [Serbian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SERBIA" desc="In the language menu button, this shows the input mode [Serbian keyboard]." meaning="A keyboard language">
         Serbian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_CZECHIA" desc="In the language menu button, this shows the input mode [Czech keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_CZECHIA" desc="In the language menu button, this shows the input mode [Czech keyboard]." meaning="A keyboard language">
         Czech
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_CZECHIA_QWERTY" desc="In the language menu button, this shows the input mode [Czech QWERTY keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_CZECHIA_QWERTY" desc="In the language menu button, this shows the input mode [Czech QWERTY keyboard]." meaning="A keyboard language">
         Czech QWERTY
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_DVORAK" desc="In the language menu button, this shows the input mode [US Dvorak keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_DVORAK" desc="In the language menu button, this shows the input mode [US Dvorak keyboard]." meaning="A keyboard language">
         US Dvorak
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_DVP" desc="In the language menu button, this shows the input mode [US Programmer Dvorak keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_DVP" desc="In the language menu button, this shows the input mode [US Programmer Dvorak keyboard]." meaning="A keyboard language">
         US Programmer Dvorak
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_COLEMAK" desc="In the language menu button, this shows the input mode [US Colemak keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_COLEMAK" desc="In the language menu button, this shows the input mode [US Colemak keyboard]." meaning="A keyboard language">
         US Colemak
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_ROMANIA" desc="In the language menu button, this shows the input mode [Romanian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_ROMANIA" desc="In the language menu button, this shows the input mode [Romanian keyboard]." meaning="A keyboard language">
         Romanian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA" desc="In the language menu button, this shows the input mode [US keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA" desc="In the language menu button, this shows the input mode [US keyboard]." meaning="A keyboard language">
         US
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_EXTENDED" desc="In the language menu button, this shows the input mode [US extended keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_EXTENDED" desc="In the language menu button, this shows the input mode [US extended keyboard]." meaning="A keyboard language">
         US extended
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_INTERNATIONAL" desc="In the language menu button, this shows the input mode [US international keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_INTERNATIONAL" desc="In the language menu button, this shows the input mode [US international keyboard]." meaning="A keyboard language">
         US international
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_INTERNATIONAL_PC" desc="In the language menu button, this shows the input mode [US international (PC) keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_INTERNATIONAL_PC" desc="In the language menu button, this shows the input mode [US international (PC) keyboard]." meaning="A keyboard language">
         US international (PC)
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_WORKMAN" desc="In the language menu button, this shows the input mode [US Workman keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_WORKMAN" desc="In the language menu button, this shows the input mode [US Workman keyboard]." meaning="A keyboard language">
         US Workman
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_USA_WORKMAN_INTERNATIONAL" desc="In the language menu button, this shows the input mode [US Workman international keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_USA_WORKMAN_INTERNATIONAL" desc="In the language menu button, this shows the input mode [US Workman international keyboard]." meaning="A keyboard language">
         US Workman international
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_LITHUANIA" desc="In the language menu button, this shows the input mode [Lithuanian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_LITHUANIA" desc="In the language menu button, this shows the input mode [Lithuanian keyboard]." meaning="A keyboard language">
         Lithuanian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_UNITED_KINGDOM" desc="In the language menu button, this shows the input mode [UK keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_UNITED_KINGDOM" desc="In the language menu button, this shows the input mode [UK keyboard]." meaning="A keyboard language">
         UK
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_UNITED_KINGDOM_DVORAK" desc="In the language menu button, this shows the input mode [UK Dvorak keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_UNITED_KINGDOM_DVORAK" desc="In the language menu button, this shows the input mode [UK Dvorak keyboard]." meaning="A keyboard language">
         UK Dvorak
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SLOVAKIA" desc="In the language menu button, this shows the input mode [Slovak keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SLOVAKIA" desc="In the language menu button, this shows the input mode [Slovak keyboard]." meaning="A keyboard language">
         Slovak
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_RUSSIA" desc="In the language menu button, this shows the input mode [Russian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_RUSSIA" desc="In the language menu button, this shows the input mode [Russian keyboard]." meaning="A keyboard language">
         Russian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_RUSSIA_PHONETIC" desc="In the language menu button, this shows the input mode [Russian phonetic keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_RUSSIA_PHONETIC" desc="In the language menu button, this shows the input mode [Russian phonetic keyboard]." meaning="A keyboard language">
         Russian phonetic
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_GREECE" desc="In the language menu button, this shows the input mode [Greek keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_GREECE" desc="In the language menu button, this shows the input mode [Greek keyboard]." meaning="A keyboard language">
         Greek
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_BELGIUM" desc="In the language menu button, this shows the input mode [Belgian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_BELGIUM" desc="In the language menu button, this shows the input mode [Belgian keyboard]." meaning="A keyboard language">
         Belgian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_BULGARIA" desc="In the language menu button, this shows the input mode [Bulgarian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_BULGARIA" desc="In the language menu button, this shows the input mode [Bulgarian keyboard]." meaning="A keyboard language">
         Bulgarian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_BULGARIA_PHONETIC" desc="In the language menu button, this shows the input mode [Bulgarian phonetic keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_BULGARIA_PHONETIC" desc="In the language menu button, this shows the input mode [Bulgarian phonetic keyboard]." meaning="A keyboard language">
         Bulgarian phonetic
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SWITZERLAND" desc="In the language menu button, this shows the input mode [Swiss keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SWITZERLAND" desc="In the language menu button, this shows the input mode [Swiss keyboard]." meaning="A keyboard language">
         Swiss
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SWITZERLAND_FRENCH" desc="In the language menu button, this shows the input mode [Swiss French keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SWITZERLAND_FRENCH" desc="In the language menu button, this shows the input mode [Swiss French keyboard]." meaning="A keyboard language">
         Swiss French
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_TURKEY" desc="In the language menu button, this shows the input mode [Turkish keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_TURKEY" desc="In the language menu button, this shows the input mode [Turkish keyboard]." meaning="A keyboard language">
         Turkish
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_TURKEY_F" desc="In the language menu button, this shows the input mode [Turkish-F keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_TURKEY_F" desc="In the language menu button, this shows the input mode [Turkish-F keyboard]." meaning="A keyboard language">
         Turkish-F
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_PORTUGAL" desc="In the language menu button, this shows the input mode [Portuguese keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_PORTUGAL" desc="In the language menu button, this shows the input mode [Portuguese keyboard]." meaning="A keyboard language">
         Portuguese
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SPAIN" desc="In the language menu button, this shows the input mode [Spanish keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SPAIN" desc="In the language menu button, this shows the input mode [Spanish keyboard]." meaning="A keyboard language">
         Spanish
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_FINLAND" desc="In the language menu button, this shows the input mode [Finnish keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_FINLAND" desc="In the language menu button, this shows the input mode [Finnish keyboard]." meaning="A keyboard language">
         Finnish
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_UKRAINE" desc="In the language menu button, this shows the input mode [Ukrainian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_UKRAINE" desc="In the language menu button, this shows the input mode [Ukrainian keyboard]." meaning="A keyboard language">
         Ukrainian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SPAIN_CATALAN" desc="In the language menu button, this shows the input mode [Catalan keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SPAIN_CATALAN" desc="In the language menu button, this shows the input mode [Catalan keyboard]." meaning="A keyboard language">
         Catalan
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_FRANCE_BEPO" desc="In the language menu button, this shows the input mode [French BÉPO keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_FRANCE_BEPO" desc="In the language menu button, this shows the input mode [French BÉPO keyboard]." meaning="A keyboard language">
         French BÉPO
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_FRANCE" desc="In the language menu button, this shows the input mode [French keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_FRANCE" desc="In the language menu button, this shows the input mode [French keyboard]." meaning="A keyboard language">
         French
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_NORWAY" desc="In the language menu button, this shows the input mode [Norwegian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_NORWAY" desc="In the language menu button, this shows the input mode [Norwegian keyboard]." meaning="A keyboard language">
         Norwegian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_SWEDEN" desc="In the language menu button, this shows the input mode [Swedish keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_SWEDEN" desc="In the language menu button, this shows the input mode [Swedish keyboard]." meaning="A keyboard language">
         Swedish
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_NETHERLANDS" desc="In the language menu button, this shows the input mode [Dutch keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_NETHERLANDS" desc="In the language menu button, this shows the input mode [Dutch keyboard]." meaning="A keyboard language">
         Dutch
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_LATIN_AMERICAN" desc="In the language menu button, this shows the input mode [Latin American keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_LATIN_AMERICAN" desc="In the language menu button, this shows the input mode [Latin American keyboard]." meaning="A keyboard language">
         Latin American
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_LATVIA" desc="In the language menu button, this shows the input mode [Latvian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_LATVIA" desc="In the language menu button, this shows the input mode [Latvian keyboard]." meaning="A keyboard language">
         Latvian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_CANADA" desc="In the language menu button, this shows the input mode [Canadian French keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_CANADA" desc="In the language menu button, this shows the input mode [Canadian French keyboard]." meaning="A keyboard language">
         Canadian French
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_CANADA_ENGLISH" desc="In the language menu button, this shows the input mode [Canadian English keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_CANADA_ENGLISH" desc="In the language menu button, this shows the input mode [Canadian English keyboard]." meaning="A keyboard language">
         Canadian English
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_ISRAEL" desc="In the language menu button, this shows the input mode [Hebrew keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_ISRAEL" desc="In the language menu button, this shows the input mode [Hebrew keyboard]." meaning="A keyboard language">
         Hebrew
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_KOREA_104" desc="In the language menu button, this shows the input mode [Korean keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_KOREA_104" desc="In the language menu button, this shows the input mode [Korean keyboard]." meaning="A keyboard language">
         Korean
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_ICELANDIC" desc="In the language menu button, this shows the input mode [Icelandic keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_ICELANDIC" desc="In the language menu button, this shows the input mode [Icelandic keyboard]." meaning="A keyboard language">
         Icelandic
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_CANADIAN_MULTILINGUAL" desc="In the language menu button, this shows the input mode [Canadian Multilingual keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_CANADIAN_MULTILINGUAL" desc="In the language menu button, this shows the input mode [Canadian Multilingual keyboard]." meaning="A keyboard language">
         Canadian Multilingual
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_GEORGIAN" desc="In the language menu button, this shows the input mode [Georgian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_GEORGIAN" desc="In the language menu button, this shows the input mode [Georgian keyboard]." meaning="A keyboard language">
         Georgian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_BELARUSIAN" desc="In the language menu button, this shows the input mode [Belarusian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_BELARUSIAN" desc="In the language menu button, this shows the input mode [Belarusian keyboard]." meaning="A keyboard language">
         Belarusian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_ARMENIAN_PHONETIC" desc="In the language menu button, this shows the input mode [Armenian Phonetic keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_ARMENIAN_PHONETIC" desc="In the language menu button, this shows the input mode [Armenian Phonetic keyboard]." meaning="A keyboard language">
         Armenian Phonetic
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_MONGOLIAN" desc="In the language menu button, this shows the input mode [Mongolian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_MONGOLIAN" desc="In the language menu button, this shows the input mode [Mongolian keyboard]." meaning="A keyboard language">
         Mongolian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_IRISH" desc="In the language menu button, this shows the input mode [Irish keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_IRISH" desc="In the language menu button, this shows the input mode [Irish keyboard]." meaning="A keyboard language">
         Irish
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_MACEDONIAN" desc="In the language menu button, this shows the input mode [Macedonian keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_MACEDONIAN" desc="In the language menu button, this shows the input mode [Macedonian keyboard]." meaning="A keyboard language">
         Macedonian
       </message>
-      <message name="IDS_STATUSBAR_LAYOUT_KAZAKH" desc="In the language menu button, this shows the input mode [Kazakh keyboard].">
+      <message name="IDS_STATUSBAR_LAYOUT_KAZAKH" desc="In the language menu button, this shows the input mode [Kazakh keyboard]." meaning="A keyboard language">
         Kazakh
       </message>
 
@@ -1319,6 +1322,11 @@
         Urdu
       </message>
 
+      <!-- Lobster Strings -->
+      <message name="IDS_CHROMEOS_LOBSTER_CONTAINS_PERSON_ERROR_RESPONSE" desc="The error message displayed when Lobster image candidates contain people and are filtered out.">
+        For now, results with people won't be shown. Try another prompt.
+      </message>
+
       <!-- Network error strings -->
       <message name="IDS_CHROMEOS_NETWORK_ERROR_UNKNOWN" desc="Network error details in notifications: UNKNOWN">
         Unknown network error
@@ -1394,9 +1402,21 @@
       </message>
       <message name="IDS_CHROMEOS_NETWORK_ERROR_NOT_REGISTERED" desc="Network error details in notifications: NOT_REGISTERED. Error when a connect attempt fails because the modem is not registered.">
         Modem not registered
+        </message>
+      <message name="IDS_CHROMEOS_NETWORK_ERROR_SUSPECT_INACTIVE_SIM" desc="Network error details in notifications: NOT_REGISTERED. Error when a connect attempt fails due to inactive SIM.">
+        Your SIM card or eSIM profile may be deactivated. Try replacing your SIM card or switching eSIM profiles.
+      </message>
+      <message name="IDS_CHROMEOS_NETWORK_ERROR_SUSPECT_SUBSCRIPTION_ERROR" desc="Network error details in notifications: NOT_REGISTERED. Error when a connect attempt fails due to subscription error.">
+        Your mobile data plan may be expired. Contact your carrier for support.
+      </message>
+      <message name="IDS_CHROMEOS_NETWORK_ERROR_SUSPECT_MODEM_DISALLOWED" desc="Network error details in notifications: NOT_REGISTERED. Error when a connect attempt fails because the modem is not allowed by carrier.">
+        Your modem isn’t allowed to connect by your carrier. Contact your carrier for more details.
       </message>
       <message name="IDS_CHROMEOS_NETWORK_ERROR_WRONG_STATE" desc="Network error details in notifications: NOT_REGISTERED. Error when a connect attempt fails because the modem is in a busy state.">
         Device is busy
+      </message>
+      <message name="IDS_CHROMEOS_NETWORK_ERROR_INVALID_APN" desc="Network error details in notifications: NOT_REGISTERED. Error when a connect attempt fails because of invalid APN.">
+        Check your APN configuration
       </message>
       <message name="IDS_CHROMEOS_NETWORK_ERROR_WEP_NOT_SUPPORTED" desc="Network error details in notifications: WEP_NOT_SUPPORTED. Error when a connect attempt fails because WEP networks are not supported.">
         WEP networks are not supported
@@ -1419,8 +1439,8 @@
       <message name="IDS_STATUSBAR_NETWORK_DEVICE_SIGNIN" desc="Settings > Network, text in network page when in captive portal state or proxy auth state.">
         Sign in to network
       </message>
-      <message name="IDS_STATUSBAR_NETWORK_DEVICE_CONNECTED_LIMITED" desc="The network device is connected but in a portal-suspected portal state. A portal is suspected but no redirect was found, therefore, there may be limited connectivity.">
-        Connected, limited connectivity
+      <message name="IDS_STATUSBAR_NETWORK_DEVICE_CELLULAR_SIGNIN" desc="Settings > Network, text in network page when in captive portal state or proxy auth state for cellular network.">
+        Sign in to your mobile network and confirm your mobile data plan is active
       </message>
       <message name="IDS_STATUSBAR_NETWORK_DEVICE_CONNECTED_NO_CONNECTIVITY" desc="The network device is connected but in a no-connectivity portal state, therefore, there is no connection to the internet.">
         Connected, no internet
@@ -1432,6 +1452,9 @@
       </message>
       <message name="IDS_NETWORK_LIST_UPDATED_CELLULAR_SIM_CARD_LOCKED" desc="Text in the network list element when a Cellular network's SIM card is locked. Used when updated cellular activation flag in on.">
         Locked
+      </message>
+      <message name="IDS_NETWORK_LIST_UPDATED_CELLULAR_SIM_CARD_CARRIER_LOCKED" desc="Text in the network list element when a Cellular network's SIM card is locked to a specific carrier. Used when updated cellular activation flag in on.">
+        Locked by another mobile provider
       </message>
       <message name="IDS_NETWORK_LIST_NOT_CONNECTED" desc="Text in the network list element when there is a network for the type, but it is not connected or connecting.">
         Not connected
@@ -1586,6 +1609,9 @@
       <message name="IDS_NETWORK_LIST_SIM_CARD_LOCKED" desc="Text in the network list element when a Cellular network's SIM card is locked.">
         Your SIM is locked
       </message>
+      <message name="IDS_NETWORK_LIST_SIM_CARD_CARRIER_LOCKED" desc="Text in the network list element when a Cellular network's SIM card is carrier locked.">
+        Mobile network provider is locked. Contact your provider for support.
+      </message>
       <message name="IDS_WIFI_NETWORK_STATUS_SECURED" desc="a11y label used when a Wi-Fi network is secured.">
         Secured
       </message>
@@ -1693,7 +1719,13 @@
         No networks
       </message>
       <message name="IDS_SETTINGS_INTERNET_NETWORK_PROXY_ENFORCED_POLICY" desc="Settings > Internet > Network details: Text to show when a network proxy is policy enforced.">
-        This proxy is enforced by your administrator
+        Your admin is enforcing the following proxy
+      </message>
+      <message name="IDS_SETTINGS_INTERNET_NETWORK_PROXY_OVERRIDE_ENFORCED_POLICY" desc="Settings > Internet > Network details: Text to show when a proxy routing override rules policy is enforced via an enterprise policy.">
+        Your admin set proxy override rules
+      </message>
+      <message name="IDS_SETTINGS_INTERNET_NETWORK_PROXY_ENFORCED_COMBINED_POLICIES" desc="Settings > Internet > Network details: Text to show when enterprise policies both enforce proxy routing override rules as well as a fallback network proxy.">
+        Your admin set proxy override rules in addition to enforcing the following proxy
       </message>
       <message name="IDS_SETTINGS_INTERNET_NETWORK_PROXY_ALLOW_SHARED" desc="Settings > Internet > Network details: Text next to the checkbox for allowing proxy settings for shared networks.">
         Allow proxies for shared networks
@@ -1770,9 +1802,12 @@
       <message name="IDS_SETTINGS_INTERNET_NETWORK_SETTING_MANAGED_BY_ADMIN_TOOLTIP" desc="Text displayed in the controlled settings bubble when a setting's value is managed by policy.">
         This setting is managed by your administrator.
       </message>
+      <message name="IDS_SUPPRESS_TEXT_MESSAGES" desc="Text displayed for a toggle button allowing user to show or hide text messages">
+        Show text messages
+      </message>
 
       <!-- Settings > Internet > SIM lock/unlock dialog -->
-      <message name="IDS_SETTINGS_INTERNET_NETWORK_SIM_CHANGE_PIN" desc="Settings > Internet > Network details > Lock/unlock SIM card: Label for buton to change the PIN.">
+      <message name="IDS_SETTINGS_INTERNET_NETWORK_SIM_CHANGE_PIN" desc="Settings > Internet > Network details > Lock/unlock SIM card: Label for button to change the PIN.">
         Change PIN
       </message>
       <message name="IDS_SETTINGS_INTERNET_NETWORK_SIM_CARD_MISSING" desc="Settings > Internet > Network details > Lock/unlock SIM card: Message when SIM card is missing.">
@@ -1817,6 +1852,9 @@
       <message name="IDS_SETTINGS_INTERNET_NETWORK_SIM_LOCK_POLICY_ADMIN_SUBTITLE" desc="Settings > Internet > Network details > Unlock SIM card: Title for unlocking SIM locked dialog when restrict SIM PIN lock policy is on.">
         Your administrator has requested you to turn off the "Lock SIM" setting
       </message>
+      <message name="IDS_SETTINGS_INTERNET_NETWORK_SIM_LOCKED_PIN_SUBTITLE" desc="Settings > Internet > Network details > Unlock SIM card: Subtitle for unlocking SIM locked SIM.">
+        Enter your SIM card PIN or the default PIN provided by your carrier. Contact your carrier for support.
+      </message>
       <message name="IDS_SETTINGS_INTERNET_NETWORK_SIM_LOCKED_PUK_SUBTITLE" desc="Settings > Internet > Network details > Lock/unlock SIM card: Title informing the user to enter a PIN provided by the carrier in order unlock network.">
         An incorrect PIN was entered too many times. To set up a new PIN, enter the 8-digit Personal Unblocking Key (PUK) provided by your carrier.
       </message>
@@ -1824,7 +1862,7 @@
         An incorrect PIN was entered too many times.
       </message>
       <message name="IDS_SETTINGS_INTERNET_NETWORK_MANAGED_SIM_LOCKED_PUK_WARNING_NO_FAILURES" desc="Settings > Internet > Network details > Lock/unlock SIM card: Warning shown to the user indicating that the network cannot be used until a new PIN is set up.">
-        To use this network, you need to enter the 8-digit Personal Unblocking Key (PUK) provided by the carrier. 
+        To use this network, you need to enter the 8-digit Personal Unblocking Key (PUK) provided by the carrier.
       </message>
       <message name="IDS_SETTINGS_INTERNET_NETWORK_SIM_LOCKED_PUK_WARNING_NO_FAILURES" desc="Settings > Internet > Network details > Lock/unlock SIM card: Warning shown to the user indicating that the network cannot be used until a new PIN is set up.">
         You won't be able to use this network until you set up a new PIN
@@ -1894,6 +1932,12 @@
       <message name="IDS_NETWORK_ERROR_PASSPHRASE_REQUIRED" desc="Network error message shown when a passphrase is required to connect to a network but was not supplied.">
         Passphrase required
       </message>
+      <message name="IDS_NETWORK_ERROR_BLOCKED_BY_POLICY" desc="Network error message shown when a network is blocked by enterprise policy.">
+        Network is blocked by policy
+      </message>
+      <message name="IDS_NETWORK_ERROR_WAITING_FOR_SCAN" desc="Network error message shown when a network can not be connected to until a scan, for example a wifi scan, has finished.">
+        Waiting for scan to finish, retry later
+      </message>
       <message name="IDS_NETWORK_ERROR_UNKNOWN" desc="Network error message shown for an unknown or unexpected network configuration error">
         Error configuring network
       </message>
@@ -1903,6 +1947,9 @@
       <message name="IDS_NETWORK_INVALID_SAN_ENTRY" desc="Network error message shown when the Subject Alternative Name Match list configured for an EAP network contains a malformed entry">
         Invalid subject alternative name match entry
       </message>
+      <message name="IDS_NETWORK_EAP_DEFAULT_SERVER_CA_WITHOUT_SUBJECT_VERIFICATION" desc="Network error message shown when the EAP configuration uses the default server CA cert without configuring subject alt name or domain matches to validate the servers identity">
+        Missing 'Subject alternative name match' or 'Domain suffix match' to validate the authentication server identity
+      </message>
 
       <!-- Settings strings -->
       <message name="IDS_SETTINGS_INTERNET_MOBILE_SEARCH" desc="Settings > Internet > Message in Mobile section when searching for mobile networks.">
@@ -1910,6 +1957,17 @@
       </message>
       <message name="IDS_SETTINGS_INTERNET_NETWORK_AUTO_CONNECT" desc="Settings > Internet > Network details: Label for the checkbox determining whether to automatically connect to the network.">
         Automatically connect to this network
+      </message>
+
+      <!-- Frozen Update  Notification Strings -->
+      <message name="IDS_FROZEN_UPDATE_NOTIFICATION_TITLE" desc="Notification title shown to inform the user that this device is no longer getting updates.">
+        Final update
+      </message>
+      <message name="IDS_FROZEN_UPDATE_NOTIFICATION_FROZEN_UPDATE" desc="Notification message shown to inform the user that this device will no longer receive latest software updates.">
+        Your ChromeOS Flex device will stop receiving updates soon. Consider upgrading to a ChromeOS device.
+      </message>
+      <message name="IDS_FROZEN_UPDATE_DISMISS_BUTTON" desc="A button label shown in the notification for frozen update status change to dismiss the notification.">
+        Don't remind me again
       </message>
     </messages>
   </release>

@@ -6,8 +6,10 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 
+#include "base/containers/span.h"
 #include "base/environment.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -27,24 +29,28 @@
 #include "media/audio/audio_manager.h"
 #include "media/audio/audio_unittest_util.h"
 #include "media/audio/test_audio_thread.h"
+#include "media/base/audio_bus.h"
+#include "media/base/audio_sample_types.h"
 #include "media/base/seekable_buffer.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace media {
 
+using Error = AudioInputStream::AudioInputCallback::Error;
+
 namespace {
 
 // Limits the number of delay measurements we can store in an array and
 // then write to file at end of the WASAPIAudioInputOutputFullDuplex test.
-static const size_t kMaxDelayMeasurements = 1000;
+static constexpr size_t kMaxDelayMeasurements = 1000;
 
 // Name of the output text file. The output file will be stored in the
 // directory containing media_unittests.exe.
 // Example: \src\build\Debug\audio_delay_values_ms.txt.
 // See comments for the WASAPIAudioInputOutputFullDuplex test for more details
 // about the file format.
-static const char kDelayValuesFileName[] = "audio_delay_values_ms.txt";
+constexpr char kDelayValuesFileName[] = "audio_delay_values_ms.txt";
 
 // Contains delay values which are reported during the full-duplex test.
 // Total delay = |buffer_delay_ms| + |input_delay_ms| + |output_delay_ms|.
@@ -126,7 +132,6 @@ class FullDuplexAudioSinkSource
         0, samples_per_packet_ * frame_size_);
 
     frames_to_ms_ = static_cast<double>(1000.0 / sample_rate_);
-    delay_states_ = std::make_unique<AudioDelayState[]>(kMaxDelayMeasurements);
   }
 
   ~FullDuplexAudioSinkSource() override {
@@ -144,7 +149,7 @@ class FullDuplexAudioSinkSource
     // audio delays values to a text file.
     size_t elements_written = 0;
     while (elements_written <
-        std::min(input_elements_to_write_, output_elements_to_write_)) {
+           std::min(input_elements_to_write_, output_elements_to_write_)) {
       const AudioDelayState state = delay_states_[elements_written];
       fprintf(text_file, "%d %d %d %d\n",
               state.delta_time_ms,
@@ -158,10 +163,11 @@ class FullDuplexAudioSinkSource
   }
 
   // AudioInputStream::AudioInputCallback.
-  void OnError() override {}
+  void OnError(Error error_code) override {}
   void OnData(const AudioBus* src,
               base::TimeTicks capture_time,
-              double volume) override {
+              double volume,
+              const AudioGlitchInfo& glitch_info) override {
     base::AutoLock lock(lock_);
 
     // Update three components in the AudioDelayState for this recorded
@@ -205,19 +211,19 @@ class FullDuplexAudioSinkSource
       ++output_elements_to_write_;
     }
 
-    int size;
-    const uint8_t* source;
     // Read the data from the seekable media buffer which contains
     // captured data at the same size and sample rate as the output side.
-    if (buffer_->GetCurrentChunk(&source, &size) && size > 0) {
+    const base::span<const uint8_t> source = buffer_->GetCurrentChunk();
+    if (!source.empty()) {
       EXPECT_EQ(channels_, dest->channels());
-      size = std::min(dest->frames() * frame_size_, size);
-      EXPECT_EQ(static_cast<size_t>(size) % sizeof(*dest->channel(0)), 0U);
+      const auto size =
+          std::min<size_t>(dest->frames() * frame_size_, source.size());
+      EXPECT_EQ(size % sizeof(float), 0U);
 
       // We should only have 16 bits per sample.
       DCHECK_EQ(frame_size_ / channels_, 2);
-      dest->FromInterleaved<SignedInt16SampleTypeTraits>(
-          reinterpret_cast<const int16_t*>(source), size / channels_);
+      dest->FromInterleavedBytes<SignedInt16SampleTypeTraits>(
+          source.first(size));
 
       buffer_->Seek(size);
       return size / frame_size_;
@@ -241,7 +247,7 @@ class FullDuplexAudioSinkSource
   int channels_;
   int frame_size_;
   double frames_to_ms_;
-  std::unique_ptr<AudioDelayState[]> delay_states_;
+  std::array<AudioDelayState, kMaxDelayMeasurements> delay_states_;
   size_t input_elements_to_write_;
   size_t output_elements_to_write_;
   base::TimeTicks previous_write_time_;
@@ -249,7 +255,7 @@ class FullDuplexAudioSinkSource
 
 class AudioInputStreamTraits {
  public:
-  typedef AudioInputStream StreamType;
+  using StreamType = AudioInputStream;
 
   static AudioParameters GetDefaultAudioStreamParameters(
       AudioManager* audio_manager) {
@@ -267,12 +273,15 @@ class AudioInputStreamTraits {
 
 class AudioOutputStreamTraits {
  public:
-  typedef AudioOutputStream StreamType;
+  using StreamType = AudioOutputStream;
 
   static AudioParameters GetDefaultAudioStreamParameters(
       AudioManager* audio_manager) {
+    std::string default_device_id =
+        AudioDeviceInfoAccessorForTests(audio_manager)
+            .GetDefaultOutputDeviceID();
     return AudioDeviceInfoAccessorForTests(audio_manager)
-        .GetDefaultOutputStreamParameters();
+        .GetOutputStreamParameters(default_device_id);
   }
 
   static StreamType* CreateStream(AudioManager* audio_manager,
@@ -287,7 +296,7 @@ class AudioOutputStreamTraits {
 template <typename StreamTraits>
 class StreamWrapper {
  public:
-  typedef typename StreamTraits::StreamType StreamType;
+  using StreamType = typename StreamTraits::StreamType;
 
   explicit StreamWrapper(AudioManager* audio_manager)
       : audio_manager_(audio_manager),
@@ -327,7 +336,7 @@ class StreamWrapper {
     StreamType* stream = StreamTraits::CreateStream(
         audio_manager_,
         AudioParameters(format_,
-                        ChannelLayoutConfig(channel_layout_, channels()),
+                        ChannelLayoutConfig::FromLayout(channel_layout_),
                         sample_rate_, samples_per_packet_));
     EXPECT_TRUE(stream);
     return stream;
@@ -340,8 +349,8 @@ class StreamWrapper {
   int samples_per_packet_;
 };
 
-typedef StreamWrapper<AudioInputStreamTraits> AudioInputStreamWrapper;
-typedef StreamWrapper<AudioOutputStreamTraits> AudioOutputStreamWrapper;
+using AudioInputStreamWrapper = StreamWrapper<AudioInputStreamTraits>;
+using AudioOutputStreamWrapper = StreamWrapper<AudioOutputStreamTraits>;
 
 // This test is intended for manual tests and should only be enabled
 // when it is required to make a real-time test of audio in full duplex and

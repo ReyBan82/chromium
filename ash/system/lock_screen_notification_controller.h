@@ -10,6 +10,7 @@
 
 #include "ash/ash_export.h"
 #include "ash/public/cpp/session/session_observer.h"
+#include "base/gtest_prod_util.h"
 #include "base/scoped_observation.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/message_center_observer.h"
@@ -20,8 +21,7 @@ class Notification;
 
 namespace ash {
 
-// Controller class to manage the "Lock screen" notification. This class only
-// exists when `IsQsRevampEnabled` is true.
+// Controller class to manage the "Lock screen" notification.
 class ASH_EXPORT LockScreenNotificationController
     : public message_center::MessageCenterObserver,
       public SessionObserver {
@@ -45,6 +45,9 @@ class ASH_EXPORT LockScreenNotificationController
   void OnSessionStateChanged(session_manager::SessionState state) override;
 
  private:
+  FRIEND_TEST_ALL_PREFIXES(SessionStateNotificationBlockerTest,
+                           LockScreenNotification);
+
   std::unique_ptr<message_center::Notification> CreateNotification();
 
   bool is_screen_locked_ = false;

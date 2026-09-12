@@ -12,19 +12,22 @@
 #include <utility>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/file_descriptor_posix.h"
 #include "base/files/file_util.h"
+#include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
-#include "base/guid.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/process/kill.h"
 #include "base/process/launch.h"
 #include "base/process/process.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool.h"
+#include "base/uuid.h"
 #include "third_party/cros_system_api/switches/chrome_switches.h"
 
 namespace {
@@ -160,13 +163,17 @@ void ProcessProxy::Write(const std::string& text,
     return std::move(callback).Run(false);
 
   // Use ThreadPool for write to avoid deadlock on registry TaskRunner.
+  base::ScopedFD dup_fd(HANDLE_EINTR(dup(pt_pair_[PT_MASTER_FD])));
+  if (!dup_fd.is_valid()) {
+    return std::move(callback).Run(false);
+  }
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, {base::TaskPriority::BEST_EFFORT, base::MayBlock()},
       base::BindOnce(
-          [](int fd, const std::string& text) {
-            return base::WriteFileDescriptor(fd, text);
+          [](base::ScopedFD fd, const std::string& text) {
+            return base::WriteFileDescriptor(fd.get(), text);
           },
-          pt_pair_[PT_MASTER_FD], text),
+          std::move(dup_fd), text),
       std::move(callback));
 }
 
@@ -191,13 +198,15 @@ bool ProcessProxy::CreatePseudoTerminalPair(int *pt_pair) {
   ClearFdPair(pt_pair);
 
   // Open Master.
-  pt_pair[PT_MASTER_FD] = HANDLE_EINTR(posix_openpt(O_RDWR | O_NOCTTY));
-  if (pt_pair[PT_MASTER_FD] == -1)
+  UNSAFE_TODO(pt_pair[PT_MASTER_FD]) =
+      HANDLE_EINTR(posix_openpt(O_RDWR | O_NOCTTY));
+  if (UNSAFE_TODO(pt_pair[PT_MASTER_FD]) == -1) {
     return false;
+  }
 
   if (grantpt(pt_pair_[PT_MASTER_FD]) != 0 ||
       unlockpt(pt_pair_[PT_MASTER_FD]) != 0) {
-    CloseFd(&pt_pair[PT_MASTER_FD]);
+    CloseFd(&UNSAFE_TODO(pt_pair[PT_MASTER_FD]));
     return false;
   }
   char* slave_name = NULL;
@@ -258,7 +267,8 @@ bool ProcessProxy::LaunchProcess(const base::CommandLine& cmdline,
     // We use the GUID API as it's trivial and works well enough.
     // We prepend the pid to avoid random number collisions.  It should be a
     // guaranteed unique id for the life of this Chrome session.
-    *id = std::to_string(process_.Pid()) + "-" + base::GenerateGUID();
+    *id = base::NumberToString(process_.Pid()) + "-" +
+          base::Uuid::GenerateRandomV4().AsLowercaseString();
   }
 
   // TODO(rvargas) crbug/417532: This is somewhat wrong but the interface of
@@ -268,8 +278,8 @@ bool ProcessProxy::LaunchProcess(const base::CommandLine& cmdline,
 }
 
 void ProcessProxy::CloseFdPair(int* pipe) {
-  CloseFd(&(pipe[PT_MASTER_FD]));
-  CloseFd(&(pipe[PT_SLAVE_FD]));
+  CloseFd(&(UNSAFE_TODO(pipe[PT_MASTER_FD])));
+  CloseFd(&(UNSAFE_TODO(pipe[PT_SLAVE_FD])));
 }
 
 void ProcessProxy::CloseFd(int* fd) {
@@ -281,8 +291,8 @@ void ProcessProxy::CloseFd(int* fd) {
 }
 
 void ProcessProxy::ClearFdPair(int* pipe) {
-  pipe[PT_MASTER_FD] = base::kInvalidFd;
-  pipe[PT_SLAVE_FD] = base::kInvalidFd;
+  UNSAFE_TODO(pipe[PT_MASTER_FD]) = base::kInvalidFd;
+  UNSAFE_TODO(pipe[PT_SLAVE_FD]) = base::kInvalidFd;
 }
 
 const base::Process* ProcessProxy::GetProcessForTesting() {

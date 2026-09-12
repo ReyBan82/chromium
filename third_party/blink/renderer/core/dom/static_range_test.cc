@@ -7,6 +7,7 @@
 #include "base/memory/scoped_refptr.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_static_range_init.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/node_list.h"
 #include "third_party/blink/renderer/core/dom/range.h"
@@ -18,6 +19,7 @@
 #include "third_party/blink/renderer/core/testing/null_execution_context.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 
 namespace blink {
@@ -29,6 +31,7 @@ class StaticRangeTest : public testing::Test {
   HTMLDocument& GetDocument() const;
 
  private:
+  test::TaskEnvironment task_environment_;
   ScopedNullExecutionContext execution_context_;
   Persistent<HTMLDocument> document_;
 };
@@ -47,17 +50,17 @@ HTMLDocument& StaticRangeTest::GetDocument() const {
 
 TEST_F(StaticRangeTest, SplitTextNodeRangeWithinText) {
   V8TestingScope scope;
-  GetDocument().body()->setInnerHTML("1234");
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes("1234");
   auto* old_text = To<Text>(GetDocument().body()->firstChild());
 
-  auto* static_range04 = MakeGarbageCollected<StaticRange>(
-      GetDocument(), old_text, 0u, old_text, 4u);
-  auto* static_range02 = MakeGarbageCollected<StaticRange>(
-      GetDocument(), old_text, 0u, old_text, 2u);
-  auto* static_range22 = MakeGarbageCollected<StaticRange>(
-      GetDocument(), old_text, 2u, old_text, 2u);
-  auto* static_range24 = MakeGarbageCollected<StaticRange>(
-      GetDocument(), old_text, 2u, old_text, 4u);
+  auto* static_range04 =
+      MakeGarbageCollected<StaticRange>(old_text, 0u, old_text, 4u);
+  auto* static_range02 =
+      MakeGarbageCollected<StaticRange>(old_text, 0u, old_text, 2u);
+  auto* static_range22 =
+      MakeGarbageCollected<StaticRange>(old_text, 2u, old_text, 2u);
+  auto* static_range24 =
+      MakeGarbageCollected<StaticRange>(old_text, 2u, old_text, 4u);
 
   Range* range04 = static_range04->toRange(ASSERT_NO_EXCEPTION);
   Range* range02 = static_range02->toRange(ASSERT_NO_EXCEPTION);
@@ -118,30 +121,30 @@ TEST_F(StaticRangeTest, SplitTextNodeRangeWithinText) {
 
 TEST_F(StaticRangeTest, SplitTextNodeRangeOutsideText) {
   V8TestingScope scope;
-  GetDocument().body()->setInnerHTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(
       "<span id=\"outer\">0<span id=\"inner-left\">1</span>SPLITME<span "
       "id=\"inner-right\">2</span>3</span>");
 
   Element* outer =
-      GetDocument().getElementById(AtomicString::FromUTF8("outer"));
+      GetDocument().getElementById(AtomicString::FromUtf8("outer"));
   Element* inner_left =
-      GetDocument().getElementById(AtomicString::FromUTF8("inner-left"));
+      GetDocument().getElementById(AtomicString::FromUtf8("inner-left"));
   Element* inner_right =
-      GetDocument().getElementById(AtomicString::FromUTF8("inner-right"));
+      GetDocument().getElementById(AtomicString::FromUtf8("inner-right"));
   auto* old_text = To<Text>(outer->childNodes()->item(2));
 
   auto* static_range_outer_outside =
-      MakeGarbageCollected<StaticRange>(GetDocument(), outer, 0u, outer, 5u);
+      MakeGarbageCollected<StaticRange>(outer, 0u, outer, 5u);
   auto* static_range_outer_inside =
-      MakeGarbageCollected<StaticRange>(GetDocument(), outer, 1u, outer, 4u);
+      MakeGarbageCollected<StaticRange>(outer, 1u, outer, 4u);
   auto* static_range_outer_surrounding_text =
-      MakeGarbageCollected<StaticRange>(GetDocument(), outer, 2u, outer, 3u);
-  auto* static_range_inner_left = MakeGarbageCollected<StaticRange>(
-      GetDocument(), inner_left, 0u, inner_left, 1u);
-  auto* static_range_inner_right = MakeGarbageCollected<StaticRange>(
-      GetDocument(), inner_right, 0u, inner_right, 1u);
+      MakeGarbageCollected<StaticRange>(outer, 2u, outer, 3u);
+  auto* static_range_inner_left =
+      MakeGarbageCollected<StaticRange>(inner_left, 0u, inner_left, 1u);
+  auto* static_range_inner_right =
+      MakeGarbageCollected<StaticRange>(inner_right, 0u, inner_right, 1u);
   auto* static_range_from_text_to_middle_of_element =
-      MakeGarbageCollected<StaticRange>(GetDocument(), old_text, 6u, outer, 3u);
+      MakeGarbageCollected<StaticRange>(old_text, 6u, outer, 3u);
 
   Range* range_outer_outside =
       static_range_outer_outside->toRange(ASSERT_NO_EXCEPTION);
@@ -233,11 +236,11 @@ TEST_F(StaticRangeTest, SplitTextNodeRangeOutsideText) {
 
 TEST_F(StaticRangeTest, InvalidToRange) {
   V8TestingScope scope;
-  GetDocument().body()->setInnerHTML("1234");
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes("1234");
   auto* old_text = To<Text>(GetDocument().body()->firstChild());
 
-  auto* static_range04 = MakeGarbageCollected<StaticRange>(
-      GetDocument(), old_text, 0u, old_text, 4u);
+  auto* static_range04 =
+      MakeGarbageCollected<StaticRange>(old_text, 0u, old_text, 4u);
 
   // Valid StaticRange.
   static_range04->toRange(ASSERT_NO_EXCEPTION);
@@ -253,6 +256,105 @@ TEST_F(StaticRangeTest, InvalidToRange) {
   DummyExceptionStateForTesting exception_state;
   static_range04->toRange(exception_state);
   EXPECT_TRUE(exception_state.HadException());
+}
+
+TEST_F(StaticRangeTest, OwnerDocumentMatchesStartContainerDocument) {
+  V8TestingScope scope;
+  // StaticRange has no specification-defined owner document. Blink derives
+  // OwnerDocument() from the current start container so cross-realm consumers
+  // such as |HighlightRegistry::ValidateHighlightMarkers| do not reject a
+  // range after its endpoints move to the document being painted.
+  // See https://issues.chromium.org/issues/407812149.
+  ScopedNullExecutionContext other_execution_context;
+  Persistent<HTMLDocument> other_document = HTMLDocument::CreateForTest(
+      other_execution_context.GetExecutionContext());
+  auto* other_html = MakeGarbageCollected<HTMLHtmlElement>(*other_document);
+  other_html->AppendChild(
+      MakeGarbageCollected<HTMLBodyElement>(*other_document));
+  other_document->AppendChild(other_html);
+  other_document->body()->SetInnerHTMLWithoutTrustedTypes("hello");
+  auto* other_text = To<Text>(other_document->body()->firstChild());
+
+  auto* init = MakeGarbageCollected<StaticRangeInit>();
+  init->setStartContainer(other_text);
+  init->setStartOffset(0u);
+  init->setEndContainer(other_text);
+  init->setEndOffset(5u);
+
+  auto* static_range = StaticRange::Create(init, ASSERT_NO_EXCEPTION);
+  ASSERT_TRUE(static_range);
+  EXPECT_EQ(&static_range->OwnerDocument(), other_document.Get())
+      << "StaticRange::OwnerDocument() must follow the start container's "
+         "document, not the document associated with the calling realm.";
+  EXPECT_TRUE(static_range->IsValid());
+
+  // Sanity: the start/end containers and offsets round-trip unchanged.
+  EXPECT_EQ(other_text, static_range->startContainer());
+  EXPECT_EQ(0u, static_range->startOffset());
+  EXPECT_EQ(other_text, static_range->endContainer());
+  EXPECT_EQ(5u, static_range->endOffset());
+}
+
+TEST_F(StaticRangeTest,
+       IsInvalidWhenStartAndEndContainersAreInDifferentDocuments) {
+  V8TestingScope scope;
+  // A StaticRange whose start and end containers live in different documents
+  // is constructible, but |IsValid()| must return false because the two
+  // containers have different roots. Downstream consumers such as
+  // |HighlightRegistry::ValidateHighlightMarkers| check |IsValid()| via
+  // |IsAbstractRangePaintable| and silently drop such ranges, so we lock the
+  // behavior in here.
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes("hello");
+  auto* main_text = To<Text>(GetDocument().body()->firstChild());
+
+  ScopedNullExecutionContext other_execution_context;
+  Persistent<HTMLDocument> other_document = HTMLDocument::CreateForTest(
+      other_execution_context.GetExecutionContext());
+  auto* other_html = MakeGarbageCollected<HTMLHtmlElement>(*other_document);
+  other_html->AppendChild(
+      MakeGarbageCollected<HTMLBodyElement>(*other_document));
+  other_document->AppendChild(other_html);
+  other_document->body()->SetInnerHTMLWithoutTrustedTypes("world");
+  auto* other_text = To<Text>(other_document->body()->firstChild());
+
+  auto* init = MakeGarbageCollected<StaticRangeInit>();
+  init->setStartContainer(main_text);
+  init->setStartOffset(0u);
+  init->setEndContainer(other_text);
+  init->setEndOffset(5u);
+
+  auto* static_range = StaticRange::Create(init, ASSERT_NO_EXCEPTION);
+  ASSERT_TRUE(static_range);
+  // The owner document follows the start container per the IDL contract.
+  EXPECT_EQ(&static_range->OwnerDocument(), &GetDocument());
+  EXPECT_FALSE(static_range->IsValid())
+      << "A StaticRange whose endpoints are in different documents must "
+         "report IsValid() == false.";
+}
+
+TEST_F(StaticRangeTest, RevalidatesAfterEndpointAdoptionAndMutation) {
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(
+      "<span id='span'>temporary</span>");
+  auto* span = GetDocument().getElementById(AtomicString("span"));
+  auto* text = To<Text>(span->firstChild());
+  auto* static_range = MakeGarbageCollected<StaticRange>(text, 0u, text, 9u);
+  ASSERT_TRUE(static_range->IsValid());
+
+  ScopedNullExecutionContext other_execution_context;
+  Persistent<HTMLDocument> other_document = HTMLDocument::CreateForTest(
+      other_execution_context.GetExecutionContext());
+  auto* other_html = MakeGarbageCollected<HTMLHtmlElement>(*other_document);
+  other_html->AppendChild(
+      MakeGarbageCollected<HTMLBodyElement>(*other_document));
+  other_document->AppendChild(other_html);
+  other_document->adoptNode(span, ASSERT_NO_EXCEPTION);
+  other_document->body()->AppendChild(span);
+
+  EXPECT_EQ(&static_range->OwnerDocument(), other_document.Get());
+  // Prime validity after adoption, when the original offsets are still valid.
+  ASSERT_TRUE(static_range->IsValid());
+  text->setData("x");
+  EXPECT_FALSE(static_range->IsValid());
 }
 
 }  // namespace blink

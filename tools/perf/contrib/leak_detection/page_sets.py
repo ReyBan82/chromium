@@ -7,6 +7,7 @@ from telemetry import story as story_module
 from telemetry.page import page as page_module
 from telemetry.page import shared_page_state
 
+
 class LeakDetectionSharedState(shared_page_state.SharedDesktopPageState):
   def ShouldReuseBrowserForAllStoryRuns(self):
     return True
@@ -15,8 +16,11 @@ class LeakDetectionSharedState(shared_page_state.SharedDesktopPageState):
 class LeakDetectionPage(page_module.Page):
   def __init__(self, url, page_set, name=''):
     super(LeakDetectionPage, self).__init__(
-      url=url, page_set=page_set, name=name,
-      shared_page_state_class=LeakDetectionSharedState)
+      url=url,
+      page_set=page_set,
+      name=name,
+      shared_page_state_class=LeakDetectionSharedState,
+    )
 
   def RunNavigateSteps(self, action_runner):
     tabs = action_runner.tab.browser.tabs
@@ -47,7 +51,8 @@ class LeakDetectionStorySet(story_module.StorySet):
   def __init__(self):
     super(LeakDetectionStorySet, self).__init__(
       archive_data_file='data/leak_detection.json',
-      cloud_storage_bucket=story_module.PARTNER_BUCKET)
+      cloud_storage_bucket=story_module.PARTNER_BUCKET,
+    )
     urls_list = [
       # Alexa top websites
       'https://www.google.com',
@@ -130,7 +135,7 @@ class LeakDetectionStorySet(story_module.StorySet):
       'https://archive.org/',
       'https://www.udemy.com/',
       'https://answers.yahoo.com/',
-      # TODO(crbug.com/985552): Memory dump fails flakily.
+      # TODO(crbug.com/41471571): Memory dump fails flakily.
       # 'https://www.goodreads.com/',
       'https://www.cricbuzz.com/',
       'http://www.goal.com/',
@@ -155,7 +160,7 @@ class LeakDetectionStorySet(story_module.StorySet):
       'https://www.hotstar.com/',
       'https://www.incometaxindiaefiling.gov.in/',
       'https://stackoverflow.com/',
-      # TODO(crbug.com/1005035) Memory dump fails flakily.
+      # TODO(crbug.com/40099304) Memory dump fails flakily.
       # 'https://www.irctc.co.in/nget/',
       'https://www.hdfcbank.com/',
       'https://www.whatsapp.com/',
@@ -166,8 +171,8 @@ class LeakDetectionStorySet(story_module.StorySet):
       'https://imgur.com/',
       'https://www.craigslist.org/',
       'https://www.chase.com/',
-      # TODO(892352): tumblr started timing out due to a catapult roll. See
-      # https://crbug.com/892352
+      # TODO(crbug.com/41419049): tumblr started timing out due to a catapult
+      # roll. See https://crbug.com/892352
       # 'https://www.tumblr.com/',
       'https://www.paypal.com/',
       # TODO(yuzus): espn.com is flaky. https://crbug.com/959796
@@ -198,7 +203,7 @@ class LeakDetectionStorySet(story_module.StorySet):
       'http://www.airbnb.ch',
       'http://www.livedoor.jp',
       'http://www.blu-ray.com',
-      # TODO(953195): Test times out.
+      # TODO(crbug.com/40623301): Test times out.
       # 'http://www.block.io',
       'http://www.hockeybuzz.com',
       'http://www.silverpop.com',

@@ -6,7 +6,6 @@
 
 #include "base/logging.h"
 #include "base/metrics/field_trial.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/strings/string_util.h"
 #include "base/win/registry.h"
 #include "build/branding_buildflags.h"
@@ -51,7 +50,6 @@ void TriggeredProfileResetter::Activate() {
   // System profiles don't contain user settings and bail out if we're not in
   // the field trial.
   if (!profile_ || profile_->IsSystemProfile() || IsDisabledByFieldTrial()) {
-    UMA_HISTOGRAM_BOOLEAN("Profile.TriggeredReset", false);
     return;
   }
 
@@ -62,7 +60,6 @@ void TriggeredProfileResetter::Activate() {
   if (!reset_reg_key.Valid() ||
       reset_reg_key.ReadInt64(kTriggeredResetTimestamp, &timestamp) !=
           ERROR_SUCCESS) {
-    UMA_HISTOGRAM_BOOLEAN("Profile.TriggeredReset", false);
     return;
   }
 
@@ -93,6 +90,4 @@ void TriggeredProfileResetter::Activate() {
 
     pref_service->SetInt64(prefs::kLastProfileResetTimestamp, timestamp);
   }
-
-  UMA_HISTOGRAM_BOOLEAN("Profile.TriggeredReset", has_reset_trigger_);
 }

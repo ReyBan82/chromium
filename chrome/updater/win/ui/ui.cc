@@ -4,16 +4,51 @@
 
 #include "chrome/updater/win/ui/ui.h"
 
-#include <stdint.h>
-#include <functional>
+#include <windows.h>
 
+#include <uxtheme.h>
+
+#include <cstdint>
+#include <string_view>
+#include <utility>
+
+#include "base/check_op.h"
 #include "base/logging.h"
+#include "base/sequence_checker.h"
 #include "chrome/updater/updater_scope.h"
 #include "chrome/updater/util/win_util.h"
 #include "chrome/updater/win/ui/ui_constants.h"
 #include "chrome/updater/win/ui/ui_util.h"
 
 namespace updater::ui {
+
+namespace {
+
+// Creates a font given a point size in tenths of a point at the system DPI.
+// Mirrors WTL's `CFont::CreatePointFont` helper.
+HFONT CreatePointFontW(int point_size_tenths,
+                       LPCWSTR face_name,
+                       int weight = FW_NORMAL) {
+  HDC screen_dc = ::GetDC(nullptr);
+  const int logical_pixels_y = ::GetDeviceCaps(screen_dc, LOGPIXELSY);
+  ::ReleaseDC(nullptr, screen_dc);
+  // Height in logical pixels: MulDiv(point_size_tenths, dpi, 720)
+  // (720 = 72 points/inch * 10 tenths).
+  const int height = ::MulDiv(point_size_tenths, logical_pixels_y, 720);
+  return ::CreateFontW(-height, 0, 0, 0, weight, FALSE, FALSE, 0,
+                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                       face_name);
+}
+
+void SetItemFont(HWND parent, int item_id, HFONT font) {
+  HWND ctl = ::GetDlgItem(parent, item_id);
+  if (ctl) {
+    ::SendMessageW(ctl, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+  }
+}
+
+}  // namespace
 
 const OmahaWnd::ControlAttributes OmahaWnd::kVisibleTextAttributes = {
     false, true, true, false, false};
@@ -29,52 +64,55 @@ const OmahaWnd::ControlAttributes OmahaWnd::kDisabledNonButtonAttributes = {
     false, false, false, false, false};
 
 void EnableFlatButtons(HWND hwnd_parent) {
-  struct Local {
-    static BOOL CALLBACK EnumProc(HWND hwnd, LPARAM) {
-      DCHECK(hwnd);
-      CWindow wnd(hwnd);
-      const DWORD style = wnd.GetStyle();
-      if (style & BS_FLAT) {
-        ::SetWindowTheme(wnd, _T(""), _T(""));
-      }
-      return true;
-    }
-  };
-
-  ::EnumChildWindows(hwnd_parent, &Local::EnumProc, 0);
+  ::EnumChildWindows(
+      hwnd_parent,
+      [](HWND hwnd, LPARAM) {
+        CHECK(hwnd);
+        const DWORD style =
+            static_cast<DWORD>(::GetWindowLongW(hwnd, GWL_STYLE));
+        if (style & BS_FLAT) {
+          ::SetWindowTheme(hwnd, L"", L"");
+        }
+        return TRUE;
+      },
+      0);
 }
 
 void HideWindowChildren(HWND hwnd_parent) {
-  struct Local {
-    static BOOL CALLBACK EnumProc(HWND hwnd, LPARAM) {
-      DCHECK(hwnd);
-      ShowWindow(hwnd, SW_HIDE);
-      return true;
-    }
-  };
-  ::EnumChildWindows(hwnd_parent, &Local::EnumProc, 0);
+  ::EnumChildWindows(
+      hwnd_parent,
+      [](HWND hwnd, LPARAM) {
+        CHECK(hwnd);
+        ::ShowWindow(hwnd, SW_HIDE);
+        return TRUE;
+      },
+      0);
 }
 
-OmahaWnd::OmahaWnd(int dialog_id, WTL::CMessageLoop* message_loop, HWND parent)
+OmahaWnd::OmahaWnd(int dialog_id,
+                   MessageLoop* message_loop,
+                   HWND parent,
+                   const std::wstring& lang)
     : IDD(dialog_id),
       message_loop_(message_loop),
       parent_(parent),
+      lang_(lang),
       is_complete_(false),
       is_close_enabled_(true),
       events_sink_(nullptr),
       scope_(UpdaterScope::kUser) {
-  DCHECK(message_loop);
+  CHECK(message_loop);
 }
 
 OmahaWnd::~OmahaWnd() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!IsWindow());
+  CHECK(!IsWindow());
 }
 
 HRESULT OmahaWnd::Initialize() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!Create(parent_)) {
+  if (!Create(IDD, parent_)) {
     VLOG(1) << "Failed to create the window";
     return E_FAIL;
   }
@@ -84,45 +122,95 @@ HRESULT OmahaWnd::Initialize() {
 }
 
 BOOL OmahaWnd::PreTranslateMessage(MSG* msg) {
-  return CWindow::IsDialogMessage(msg);
+  return ::IsDialogMessageW(hwnd(), msg);
 }
 
 void OmahaWnd::InitializeDialog() {
-  SetWindowText(GetInstallerDisplayName(bundle_name_).c_str());
+  ::SetWindowTextW(hwnd(),
+                   GetInstallerDisplayName(bundle_name(), lang()).c_str());
 
-  CenterWindow(nullptr);
-  ui::SetWindowIcon(m_hWnd, IDI_APP,
-                    base::win::ScopedGDIObject<HICON>::Receiver(hicon_).get());
+  CenterWindow(hwnd(), nullptr);
+  UpdateWindowIcon(nullptr);
 
-  // Disable the Maximize System Menu item.
-  HMENU menu = ::GetSystemMenu(*this, false);
-  DCHECK(menu);
-  ::EnableMenuItem(menu, SC_MAXIMIZE, MF_BYCOMMAND | MF_GRAYED);
+  // Disable the maximize system menu item.
+  HMENU menu = ::GetSystemMenu(hwnd(), FALSE);
+  VLOG_IF(2, !menu) << "Failed to find system menu";
+  if (menu) {
+    ::EnableMenuItem(menu, SC_MAXIMIZE, MF_BYCOMMAND | MF_GRAYED);
+  }
 
-  progress_bar_.SubclassWindow(GetDlgItem(IDC_PROGRESS));
+  progress_bar_.SubclassWindow(::GetDlgItem(hwnd(), IDC_PROGRESS));
 
-  default_font_.CreatePointFont(90, kDialogFont);
-  SendMessageToDescendants(
-      WM_SETFONT, reinterpret_cast<WPARAM>(static_cast<HFONT>(default_font_)),
-      0);
+  default_font_.reset(CreatePointFontW(100, kDialogFont, FW_NORMAL));
+  SendMessageToDescendants(hwnd(), WM_SETFONT,
+                           reinterpret_cast<WPARAM>(default_font_.get()), 0);
 
-  font_.CreatePointFont(150, kDialogFont);
-  GetDlgItem(IDC_INSTALLER_STATE_TEXT).SetFont(font_);
-  GetDlgItem(IDC_INFO_TEXT).SetFont(font_);
-  GetDlgItem(IDC_COMPLETE_TEXT).SetFont(font_);
+  header_font_.reset(CreatePointFontW(180, kDialogFont, FW_MEDIUM));
+  SetItemFont(hwnd(), IDC_INSTALLER_STATE_TEXT, header_font_.get());
 
-  error_font_.CreatePointFont(110, kDialogFont);
-  GetDlgItem(IDC_ERROR_TEXT).SetFont(error_font_);
+  font_.reset(CreatePointFontW(160, kDialogFont, FW_NORMAL));
+  SetItemFont(hwnd(), IDC_INFO_TEXT, font_.get());
+  SetItemFont(hwnd(), IDC_COMPLETE_TEXT, font_.get());
+  SetItemFont(hwnd(), IDC_ERROR_TEXT, font_.get());
 
-  CreateOwnerDrawTitleBar(m_hWnd, GetDlgItem(IDC_TITLE_BAR_SPACER), kBkColor);
+  CreateOwnerDrawTitleBar(hwnd(), ::GetDlgItem(hwnd(), IDC_TITLE_BAR_SPACER),
+                          kBkColor);
   SetCustomDlgColors(kTextColor, kBkColor);
 
-  EnableFlatButtons(m_hWnd);
+  EnableFlatButtons(hwnd());
 }
 
-LRESULT OmahaWnd::OnClose(UINT, WPARAM, LPARAM, BOOL& handled) {
+void OmahaWnd::ResetWindowIconCache() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // Clears cached logo and DPI state to prevent false cache hits if Windows GDI
+  // reallocates a new bitmap at the same handle address. Note that
+  // window_icons_ handles are intentionally not destroyed here so the window
+  // never holds dangling icon references before UpdateWindowIcon() dispatches
+  // new handles.
+  current_logo_ = nullptr;
+  current_dpi_ = 0;
+}
+
+void OmahaWnd::UpdateWindowIcon(HBITMAP bitmap, UINT dpi) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (!IsWindow()) {
+    return;
+  }
+  // Prefer the explicit DPI passed from ApplyDpiScaling during WM_DPICHANGED,
+  // as GetDpiForWindow() may not yet reflect the updated DPI before window
+  // bounds adjustment completes.
+  const UINT target_dpi = dpi ? dpi : ::GetDpiForWindow(hwnd());
+  if (bitmap == current_logo_ && target_dpi == current_dpi_ &&
+      window_icons_.icon_big.is_valid() &&
+      window_icons_.icon_small.is_valid()) {
+    return;
+  }
+  WindowIcons icons;
+  if (bitmap) {
+    const IconSizes sizes = GetIconSizesForDpi(target_dpi);
+    icons.icon_big = CreateIconFromHBitmap(bitmap, sizes.cx_big, sizes.cy_big);
+    icons.icon_small =
+        CreateIconFromHBitmap(bitmap, sizes.cx_small, sizes.cy_small);
+  }
+  // If custom icon creation fails for either size, reset both handles so
+  // that both big and small icons consistently fall back to the default
+  // application icon (IDI_APP) rather than leaving the window in a mixed
+  // state.
+  if (!icons.icon_big.is_valid() || !icons.icon_small.is_valid()) {
+    icons = LoadResourceIcons(IDI_APP, target_dpi);
+    // Fallback occurred: do not cache `bitmap` as active so future attempts
+    // can retry generating icons from it.
+    current_logo_ = nullptr;
+  } else {
+    current_logo_ = bitmap;
+  }
+  current_dpi_ = target_dpi;
+
+  SetWindowIcons(hwnd(), std::move(icons), window_icons_);
+}
+
+LRESULT OmahaWnd::OnClose(UINT, WPARAM, LPARAM) {
   MaybeCloseWindow();
-  handled = true;
   return 0;
 }
 
@@ -148,45 +236,137 @@ void OmahaWnd::RequestExitProcess() {
   }
 }
 
-LRESULT OmahaWnd::OnNCDestroy(UINT, WPARAM, LPARAM, BOOL& handled) {
+LRESULT OmahaWnd::OnNCDestroy(UINT, WPARAM, LPARAM) {
   message_loop_->RemoveMessageFilter(this);
   MaybeRequestExitProcess();
-  handled = false;  // Let ATL default processing handle the WM_NCDESTROY.
+  SetMsgHandled(FALSE);  // Let default processing handle the WM_NCDESTROY.
+  return 0;
+}
+
+LRESULT OmahaWnd::OnDpiChanged(UINT, WPARAM wparam, LPARAM lparam) {
+  // Resize window to the OS-suggested rect.
+  const RECT* new_rect = reinterpret_cast<RECT*>(lparam);
+  ::SetWindowPos(hwnd(), nullptr, new_rect->left, new_rect->top,
+                 new_rect->right - new_rect->left,
+                 new_rect->bottom - new_rect->top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+
+  // Re-render text/graphics for the new DPI.
+  ApplyDpiScaling(/*new_dpi=*/LOWORD(wparam));
+
+  // Resize the title bar.
+  RecalcLayout(hwnd(), ::GetDlgItem(hwnd(), IDC_TITLE_BAR_SPACER));
+
+  // Force a full redraw of everything.
+  ::RedrawWindow(hwnd(), nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+  return 0;
+}
+
+LRESULT OmahaWnd::OnSettingChange(UINT msg, WPARAM wparam, LPARAM lparam) {
+  SetMsgHandled(FALSE);
+  if (!lparam || std::wstring_view(reinterpret_cast<LPCWSTR>(lparam)) ==
+                     L"ImmersiveColorSet") {
+    UpdateThemeState();
+    SendMessageToDescendants(hwnd(), msg, wparam, lparam);
+    ::RedrawWindow(
+        hwnd(), nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+  }
+  return 0;
+}
+
+LRESULT OmahaWnd::OnThemeChanged(UINT msg, WPARAM wparam, LPARAM lparam) {
+  SetMsgHandled(FALSE);
+  UpdateThemeState();
+  if (msg != WM_THEMECHANGED) {
+    SendMessageToDescendants(hwnd(), msg, wparam, lparam);
+  }
+  ::RedrawWindow(hwnd(), nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+  return 0;
+}
+
+LRESULT OmahaWnd::OnSetCursor(UINT, WPARAM wparam, LPARAM lparam) {
+  if (MaybeSetArrowCursor(hwnd(), wparam, lparam)) {
+    return TRUE;
+  }
+  SetMsgHandled(FALSE);
   return 0;
 }
 
 // Called when ESC key is pressed.
-LRESULT OmahaWnd::OnCancel(WORD, WORD id, HWND, BOOL& handled) {
-  DCHECK_EQ(id, IDCANCEL);
+void OmahaWnd::OnCancel(UINT, int id, HWND) {
+  CHECK_EQ(id, IDCANCEL);
 
   if (!is_close_enabled_) {
-    return 0;
+    return;
   }
 
   MaybeCloseWindow();
-  handled = true;
-  return 0;
 }
 
 void OmahaWnd::Show() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (!IsWindow() || IsWindowVisible()) {
+  if (!IsWindow() || ::IsWindowVisible(hwnd())) {
     return;
   }
 
-  CenterWindow(nullptr);
+  CenterWindow(hwnd(), nullptr);
   SetVisible(true);
 
-  // To allow the progress UI to get foreground, the splash screen calls
-  // `::LockSetForegroundWindow(LSFW_LOCK)` before closing the splash screen to
-  // prevent other applications from making a foreground change in between. The
-  // following call completes the cycle with LSFW_UNLOCK.
-  ::LockSetForegroundWindow(LSFW_UNLOCK);
-
-  if (!::SetForegroundWindow(*this)) {
-    LOG(WARNING) << __func__
-                 << ": ::SetForegroundWindow failed: " << ::GetLastError();
+  if (!::SetForegroundWindow(hwnd())) {
+    PLOG(WARNING) << __func__ << ": ::SetForegroundWindow failed";
   }
+}
+
+void OmahaWnd::ApplyDpiScaling(UINT dpi) {
+  const UINT effective_dpi =
+      dpi ? dpi
+          : (IsWindow() ? ::GetDpiForWindow(hwnd()) : USER_DEFAULT_SCREEN_DPI);
+  // Calculate new font height: (DesiredPointSize * dpi) / 72. Use a negative
+  // number for height to request the character height in CreateFontW.
+  const int dpi_val = static_cast<int>(effective_dpi);
+  const int font_height = ::MulDiv(10, dpi_val, 72);
+
+  default_font_.reset(::CreateFontW(
+      -font_height,                 // nHeight
+      0,                            // nWidth
+      0,                            // nEscapement
+      0,                            // nOrientation
+      FW_NORMAL,                    // nWeight
+      FALSE,                        // bItalic
+      FALSE,                        // bUnderline
+      0,                            // cStrikeOut
+      DEFAULT_CHARSET,              // nCharSet
+      OUT_DEFAULT_PRECIS,           // nOutPrecision
+      CLIP_DEFAULT_PRECIS,          // nClipPrecision
+      CLEARTYPE_QUALITY,            // nQuality (Forces ClearType)
+      DEFAULT_PITCH | FF_DONTCARE,  // nPitchAndFamily
+      kDialogFont                   // lpszFacename
+      ));
+
+  // Tell all child controls to use the new font by default.
+  SendMessageToDescendants(hwnd(), WM_SETFONT,
+                           reinterpret_cast<WPARAM>(default_font_.get()), TRUE);
+
+  const int header_height = ::MulDiv(18, dpi_val, 72);
+  header_font_.reset(::CreateFontW(
+      -header_height, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, 0, DEFAULT_CHARSET,
+      OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+      DEFAULT_PITCH | FF_DONTCARE, kDialogFont));
+  SetItemFont(hwnd(), IDC_INSTALLER_STATE_TEXT, header_font_.get());
+
+  const int body_height = ::MulDiv(16, dpi_val, 72);
+  font_.reset(::CreateFontW(-body_height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, 0,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_DONTCARE, kDialogFont));
+  SetItemFont(hwnd(), IDC_INFO_TEXT, font_.get());
+  SetItemFont(hwnd(), IDC_COMPLETE_TEXT, font_.get());
+  SetItemFont(hwnd(), IDC_ERROR_TEXT, font_.get());
+
+  UpdateWindowIcon(current_logo_, effective_dpi);
 }
 
 bool OmahaWnd::OnComplete() {
@@ -208,18 +388,18 @@ void OmahaWnd::SetControlAttributes(int control_id,
     return;
   }
 
-  HWND hwnd = GetDlgItem(control_id);
-  DCHECK(hwnd);
-  ::ShowWindow(hwnd, attributes.is_visible ? SW_SHOW : SW_HIDE);
-  ::EnableWindow(hwnd, attributes.is_enabled ? true : false);
+  HWND ctl = ::GetDlgItem(hwnd(), control_id);
+  CHECK(ctl);
+  ::ShowWindow(ctl, attributes.is_visible ? SW_SHOW : SW_HIDE);
+  ::EnableWindow(ctl, attributes.is_enabled);
   if (attributes.is_button && attributes.is_default) {
-    // We ask the dialog manager to give the default push button the focus, to
-    // have the <Enter> key work as expected.
-    GotoDlgCtrl(hwnd);
-    LONG style = ::GetWindowLong(hwnd, GWL_STYLE);
+    // Ask the dialog manager to give the default push button the focus, so
+    // that the <Enter> key works as expected.
+    GotoDlgCtrl(hwnd(), ctl);
+    LONG style = ::GetWindowLong(ctl, GWL_STYLE);
     if (style) {
       style |= BS_DEFPUSHBUTTON;
-      ::SetWindowLong(hwnd, GWL_STYLE, style);
+      ::SetWindowLong(ctl, GWL_STYLE, style);
     }
   }
 }
@@ -230,18 +410,20 @@ HRESULT OmahaWnd::EnableClose(bool enable) {
 }
 
 HRESULT OmahaWnd::EnableSystemCloseButton(bool enable) {
-  HMENU menu = ::GetSystemMenu(*this, false);
-  DCHECK(menu);
-  uint32_t flags = MF_BYCOMMAND;
-  flags |= enable ? MF_ENABLED : MF_GRAYED;
-  ::EnableMenuItem(menu, SC_CLOSE, flags);
-  RecalcLayout();
+  HMENU menu = ::GetSystemMenu(hwnd(), FALSE);
+  VLOG_IF(2, !menu) << "Failed to find system menu";
+  if (!menu) {
+    return E_FAIL;
+  }
+  ::EnableMenuItem(menu, SC_CLOSE,
+                   MF_BYCOMMAND | (enable ? MF_ENABLED : MF_GRAYED));
+  RecalcLayout(hwnd(), ::GetDlgItem(hwnd(), IDC_TITLE_BAR_SPACER));
   return S_OK;
 }
 
 HRESULT InitializeCommonControls(DWORD control_classes) {
   INITCOMMONCONTROLSEX init_ctrls = {sizeof(INITCOMMONCONTROLSEX), 0};
-  DCHECK_EQ(init_ctrls.dwSize, sizeof(init_ctrls));
+  CHECK_EQ(init_ctrls.dwSize, sizeof(init_ctrls));
   init_ctrls.dwICC = control_classes;
   if (!::InitCommonControlsEx(&init_ctrls)) {
     const DWORD error = ::GetLastError();
@@ -249,7 +431,6 @@ HRESULT InitializeCommonControls(DWORD control_classes) {
       return HRESULT_FROM_WIN32(error);
     }
   }
-
   return S_OK;
 }
 

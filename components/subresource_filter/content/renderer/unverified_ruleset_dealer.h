@@ -5,7 +5,7 @@
 #ifndef COMPONENTS_SUBRESOURCE_FILTER_CONTENT_RENDERER_UNVERIFIED_RULESET_DEALER_H_
 #define COMPONENTS_SUBRESOURCE_FILTER_CONTENT_RENDERER_UNVERIFIED_RULESET_DEALER_H_
 
-#include "components/subresource_filter/content/common/ruleset_dealer.h"
+#include "components/subresource_filter/core/common/ruleset_dealer.h"
 #include "components/subresource_filter/core/mojom/subresource_filter.mojom.h"
 #include "content/public/renderer/render_thread_observer.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
@@ -48,6 +48,10 @@ class UnverifiedRulesetDealer : public RulesetDealer,
 
   mojo::AssociatedReceiver<mojom::SubresourceFilterRulesetObserver> receiver_{
       this};
+
+  // Intentional violation of the RulesetDealer weak-ptr based contract. Only
+  // used when the kSubresourceFilterPrewarm experiment is enabled.
+  scoped_refptr<const MemoryMappedRuleset> cached_ruleset_;
 };
 
 }  // namespace subresource_filter

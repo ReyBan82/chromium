@@ -6,14 +6,19 @@
 
 #include <string>
 
-#include "base/containers/contains.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/queue.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
-#include "chromeos/ash/components/login/login_state/login_state.h"
+#include "chrome/browser/browser_process.h"
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
+#include "components/session_manager/core/session.h"
+#include "components/session_manager/core/session_manager.h"
+#include "components/session_manager/test/user_session_test_environment.h"
+#include "components/user_manager/user_manager.h"
+#include "components/user_manager/user_manager_impl.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -36,20 +41,24 @@ class WifiSignalStrengthRssiFetcherTest : public ::testing::Test {
   ~WifiSignalStrengthRssiFetcherTest() override = default;
 
   void SetUp() override {
-    ash::LoginState::Initialize();
-    ash::LoginState::Get()->SetLoggedInStateAndPrimaryUser(
-        ash::LoginState::LOGGED_IN_ACTIVE,
-        ash::LoginState::LOGGED_IN_USER_REGULAR,
-        network_handler_test_helper_.UserHash());
+    const AccountId account_id =
+        AccountId::FromUserEmailGaiaId("test@test", GaiaId("fakegaia"));
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            g_browser_process->local_state());
+    ASSERT_TRUE(user_session_test_environment_->AddRegularUser(account_id));
+    user_session_test_environment_->LogIn(account_id);
 
     network_handler_test_helper_.AddDefaultProfiles();
     network_handler_test_helper_.ResetDevicesAndServices();
   }
 
-  void TearDown() override { ash::LoginState::Shutdown(); }
+  void TearDown() override { user_session_test_environment_.reset(); }
 
  protected:
   base::test::TaskEnvironment task_environment_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
 
   NetworkHandlerTestHelper network_handler_test_helper_;
 };
@@ -72,9 +81,9 @@ TEST_F(WifiSignalStrengthRssiFetcherTest, Default) {
         callback_called = true;
 
         EXPECT_THAT(result, SizeIs(2));
-        ASSERT_TRUE(base::Contains(result, service_path1));
+        ASSERT_TRUE(result.contains(service_path1));
         EXPECT_THAT(result.at(service_path1), Eq(-44));
-        ASSERT_TRUE(base::Contains(result, service_path3));
+        ASSERT_TRUE(result.contains(service_path3));
         EXPECT_THAT(result.at(service_path3), Eq(-70));
 
         run_loop.Quit();
@@ -102,9 +111,9 @@ TEST_F(WifiSignalStrengthRssiFetcherTest, OneServiceWithNoRssiValue) {
         callback_called = true;
 
         EXPECT_THAT(result, SizeIs(2));
-        ASSERT_TRUE(base::Contains(result, service_path1));
+        ASSERT_TRUE(result.contains(service_path1));
         EXPECT_THAT(result.at(service_path1), Eq(-44));
-        ASSERT_TRUE(base::Contains(result, service_path3));
+        ASSERT_TRUE(result.contains(service_path3));
         EXPECT_THAT(result.at(service_path3), Eq(-70));
 
         run_loop.Quit();

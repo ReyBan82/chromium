@@ -4,8 +4,8 @@
 
 #include "chrome/browser/page_load_metrics/observers/foreground_duration_ukm_observer.h"
 
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/webui_url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -36,14 +36,14 @@ class ForegroundDurationUKMObserverBrowserTest : public InProcessBrowserTest {
   ForegroundDurationUKMObserverBrowserTest& operator=(
       const ForegroundDurationUKMObserverBrowserTest&) = delete;
 
-  ~ForegroundDurationUKMObserverBrowserTest() override {}
+  ~ForegroundDurationUKMObserverBrowserTest() override = default;
 
   content::test::PrerenderTestHelper& prerender_helper() {
     return prerender_helper_;
   }
 
   void SetUp() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     InProcessBrowserTest::SetUp();
   }
 
@@ -53,7 +53,7 @@ class ForegroundDurationUKMObserverBrowserTest : public InProcessBrowserTest {
   }
 
   content::WebContents* web_contents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
  protected:
@@ -68,7 +68,7 @@ class ForegroundDurationUKMObserverBrowserTest : public InProcessBrowserTest {
                                const char* metric_name,
                                const int expected_count) {
     int count = 0;
-    for (auto* entry :
+    for (const ukm::mojom::UkmEntry* entry :
          test_ukm_recorder_->GetEntriesByName(UkmEntry::kEntryName)) {
       auto* source = test_ukm_recorder_->GetSourceForSourceId(entry->source_id);
       if (source && source->url() == url &&
@@ -80,7 +80,7 @@ class ForegroundDurationUKMObserverBrowserTest : public InProcessBrowserTest {
   }
 
   void CloseAllTabs() {
-    TabStripModel* tab_strip_model = browser()->tab_strip_model();
+    TabStripModel* tab_strip_model = browser()->GetTabStripModel();
     content::WebContentsDestroyedWatcher destroyed_watcher(
         tab_strip_model->GetActiveWebContents());
     tab_strip_model->CloseAllTabs();
@@ -103,29 +103,45 @@ IN_PROC_BROWSER_TEST_F(ForegroundDurationUKMObserverBrowserTest, RecordSimple) {
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   CloseAllTabs();
   ExpectMetricCountForUrl(url, "ForegroundDuration", 1);
-  ExpectMetricCountForUrl(url, "ForegroundNumInputEvents", 1);
-  ExpectMetricCountForUrl(url, "ForegroundTotalInputDelay", 1);
-  ExpectMetricCountForUrl(url, "ForegroundTotalAdjustedInputDelay", 1);
 }
 
 IN_PROC_BROWSER_TEST_F(ForegroundDurationUKMObserverBrowserTest,
-                       PrerenderSimple) {
+                       PrerenderActivationInForeground) {
   StartHttpsServer(net::EmbeddedTestServer::CERT_OK);
   GURL empty = https_test_server()->GetURL("/empty.html");
   GURL simple = https_test_server()->GetURL("/simple.html");
   prerender_helper().NavigatePrimaryPage(empty);
-  int host_id = prerender_helper().AddPrerender(simple);
+  content::PrerenderHostId host_id = prerender_helper().AddPrerender(simple);
   prerender_helper().WaitForPrerenderLoadCompletion(host_id);
+
   ExpectMetricCountForUrl(simple, "ForegroundDuration", 0);
-  ExpectMetricCountForUrl(simple, "ForegroundNumInputEvents", 0);
-  ExpectMetricCountForUrl(simple, "ForegroundTotalInputDelay", 0);
-  ExpectMetricCountForUrl(simple, "ForegroundTotalAdjustedInputDelay", 0);
   prerender_helper().NavigatePrimaryPage(simple);
   CloseAllTabs();
+
+  // The page was activated in foreground. The metrics should be recorded.
   ExpectMetricCountForUrl(simple, "ForegroundDuration", 1);
-  ExpectMetricCountForUrl(simple, "ForegroundNumInputEvents", 1);
-  ExpectMetricCountForUrl(simple, "ForegroundTotalInputDelay", 1);
-  ExpectMetricCountForUrl(simple, "ForegroundTotalAdjustedInputDelay", 1);
+}
+
+IN_PROC_BROWSER_TEST_F(ForegroundDurationUKMObserverBrowserTest,
+                       PrerenderActivationInBackground) {
+  StartHttpsServer(net::EmbeddedTestServer::CERT_OK);
+  GURL empty = https_test_server()->GetURL("/empty.html");
+  GURL simple = https_test_server()->GetURL("/simple.html");
+  prerender_helper().NavigatePrimaryPage(empty);
+  content::PrerenderHostId host_id = prerender_helper().AddPrerender(simple);
+  prerender_helper().WaitForPrerenderLoadCompletion(host_id);
+
+  // Make the initiator page occluded. This will be treated as a background
+  // page. Note that we cannot make the initiator page hidden here as a hidden
+  // page cannot activate a prerendered page.
+  web_contents()->WasOccluded();
+
+  ExpectMetricCountForUrl(simple, "ForegroundDuration", 0);
+  prerender_helper().NavigatePrimaryPage(simple);
+  CloseAllTabs();
+
+  // The page was activated in background. The metrics should not be recorded.
+  ExpectMetricCountForUrl(simple, "ForegroundDuration", 0);
 }
 
 IN_PROC_BROWSER_TEST_F(ForegroundDurationUKMObserverBrowserTest, TabSwitching) {
@@ -137,7 +153,7 @@ IN_PROC_BROWSER_TEST_F(ForegroundDurationUKMObserverBrowserTest, TabSwitching) {
       browser(), url2, WindowOpenDisposition::NEW_FOREGROUND_TAB,
       ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
 
-  TabStripModel* tab_strip_model = browser()->tab_strip_model();
+  TabStripModel* tab_strip_model = browser()->GetTabStripModel();
   EXPECT_EQ(2, tab_strip_model->count());
   EXPECT_EQ(url1, tab_strip_model->GetWebContentsAt(0)->GetLastCommittedURL());
   EXPECT_EQ(url2, tab_strip_model->GetWebContentsAt(1)->GetLastCommittedURL());
@@ -156,11 +172,5 @@ IN_PROC_BROWSER_TEST_F(ForegroundDurationUKMObserverBrowserTest, TabSwitching) {
              TabStripUserGestureDetails::GestureType::kOther));
   tab_strip_model->CloseAllTabs();
   ExpectMetricCountForUrl(url1, "ForegroundDuration", 3);
-  ExpectMetricCountForUrl(url1, "ForegroundNumInputEvents", 3);
-  ExpectMetricCountForUrl(url1, "ForegroundTotalInputDelay", 3);
-  ExpectMetricCountForUrl(url1, "ForegroundTotalAdjustedInputDelay", 3);
   ExpectMetricCountForUrl(url2, "ForegroundDuration", 3);
-  ExpectMetricCountForUrl(url2, "ForegroundNumInputEvents", 3);
-  ExpectMetricCountForUrl(url2, "ForegroundTotalInputDelay", 3);
-  ExpectMetricCountForUrl(url2, "ForegroundTotalAdjustedInputDelay", 3);
 }

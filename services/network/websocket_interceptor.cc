@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "services/network/websocket_interceptor.h"
 #include "base/functional/bind.h"
 #include "net/base/net_errors.h"
@@ -12,8 +13,10 @@ namespace network {
 
 WebSocketInterceptor::WebSocketInterceptor(
     uint32_t net_log_source_id,
-    const absl::optional<base::UnguessableToken>& throttling_profile_id)
+    const GURL& url,
+    const std::optional<base::UnguessableToken>& throttling_profile_id)
     : net_log_source_id_(net_log_source_id),
+      url_(url),
       throttling_token_(
           network::ScopedThrottlingToken::MaybeCreate(net_log_source_id_,
                                                       throttling_profile_id)) {
@@ -27,7 +30,7 @@ WebSocketInterceptor::WebSocketInterceptor(
 
 WebSocketInterceptor::~WebSocketInterceptor() {
   auto* throttling_interceptor =
-      ThrottlingController::GetInterceptor(net_log_source_id_);
+      ThrottlingController::GetInterceptor(net_log_source_id_, url_);
   if (throttling_interceptor) {
     throttling_interceptor->StopThrottle(throttle_callbacks_[kIncoming]);
     throttling_interceptor->StopThrottle(throttle_callbacks_[kOutgoing]);
@@ -41,7 +44,7 @@ WebSocketInterceptor::InterceptResult WebSocketInterceptor::Intercept(
   DCHECK(!pending_callbacks_[direction]);
 
   auto* throttling_interceptor =
-      ThrottlingController::GetInterceptor(net_log_source_id_);
+      ThrottlingController::GetInterceptor(net_log_source_id_, url_);
 
   if (!throttling_interceptor)
     return kContinue;

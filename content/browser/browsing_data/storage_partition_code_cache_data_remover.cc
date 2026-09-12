@@ -39,7 +39,7 @@ StoragePartitionCodeCacheDataRemover::Create(
     base::RepeatingCallback<bool(const GURL&)> url_predicate,
     base::Time begin_time,
     base::Time end_time) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   return new StoragePartitionCodeCacheDataRemover(
       storage_partition->GetGeneratedCodeCacheContext(),
       std::move(url_predicate), begin_time, end_time);
@@ -49,7 +49,7 @@ StoragePartitionCodeCacheDataRemover::~StoragePartitionCodeCacheDataRemover() {}
 
 void StoragePartitionCodeCacheDataRemover::Remove(
     base::OnceClosure done_callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   DCHECK(!done_callback.is_null())
       << __func__ << " called with a null callback";
   done_callback_ = std::move(done_callback);
@@ -61,7 +61,7 @@ void StoragePartitionCodeCacheDataRemover::Remove(
 }
 
 void StoragePartitionCodeCacheDataRemover::ClearedCodeCache() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   std::move(done_callback_).Run();
   base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
                                                                 this);
@@ -102,11 +102,16 @@ void StoragePartitionCodeCacheDataRemover::ClearCache(
 }
 
 void StoragePartitionCodeCacheDataRemover::ClearJSCodeCache() {
+  if (generated_code_cache_context_) {
+    // TODO(crbug.com/374930286): Add support for selective removal in
+    // PersistentCache.
+    generated_code_cache_context_->ClearAndDeletePersistentCacheCollection();
+  }
+
   if (generated_code_cache_context_ &&
       generated_code_cache_context_->generated_js_code_cache()) {
     generated_code_cache_context_->generated_js_code_cache()
         ->ClearInMemoryCache();
-
     net::CompletionOnceCallback callback = base::BindOnce(
         &StoragePartitionCodeCacheDataRemover::ClearWASMCodeCache,
         base::Unretained(this));

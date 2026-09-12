@@ -9,12 +9,13 @@
 #include "ash/constants/quick_settings_catalogs.h"
 #include "ash/public/cpp/style/color_mode_observer.h"
 #include "ash/system/unified/feature_pod_controller_base.h"
+#include "base/memory/raw_ptr.h"
 
 namespace ash {
 
 class UnifiedSystemTrayController;
 
-// Controller of a feature pod button that toggles dark mode for ash.
+// Controller of a feature tile that toggles dark mode for ash.
 class ASH_EXPORT DarkModeFeaturePodController : public FeaturePodControllerBase,
                                                 public ColorModeObserver {
  public:
@@ -27,7 +28,6 @@ class ASH_EXPORT DarkModeFeaturePodController : public FeaturePodControllerBase,
   ~DarkModeFeaturePodController() override;
 
   // FeaturePodControllerBase:
-  FeaturePodButton* CreateButton() override;
   std::unique_ptr<FeatureTile> CreateTile(bool compact = false) override;
   QsFeatureCatalogName GetCatalogName() override;
   void OnIconPressed() override;
@@ -37,14 +37,10 @@ class ASH_EXPORT DarkModeFeaturePodController : public FeaturePodControllerBase,
   void OnColorModeChanged(bool dark_mode_enabled) override;
 
  private:
-  void UpdateButton(bool dark_mode_enabled);
-
-  // For QsRevamp:
   void UpdateTile(bool dark_mode_enabled);
 
   // Owned by the views hierarchy.
-  FeaturePodButton* button_ = nullptr;
-  FeatureTile* tile_ = nullptr;
+  raw_ptr<FeatureTile, DanglingUntriaged> tile_ = nullptr;
 
   base::WeakPtrFactory<DarkModeFeaturePodController> weak_ptr_factory_{this};
 };

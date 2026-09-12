@@ -6,14 +6,13 @@
 
 #include <vector>
 
-#include "device/fido/authenticator_selection_criteria.h"
-#include "device/fido/cable/cable_discovery_data.h"
-#include "device/fido/fido_constants.h"
-#include "device/fido/fido_transport_protocol.h"
-#include "device/fido/public_key_credential_descriptor.h"
-#include "device/fido/public_key_credential_params.h"
-#include "device/fido/public_key_credential_rp_entity.h"
-#include "device/fido/public_key_credential_user_entity.h"
+#include "device/fido/public/authenticator_selection_criteria.h"
+#include "device/fido/public/fido_constants.h"
+#include "device/fido/public/fido_transport_protocol.h"
+#include "device/fido/public/public_key_credential_descriptor.h"
+#include "device/fido/public/public_key_credential_params.h"
+#include "device/fido/public/public_key_credential_rp_entity.h"
+#include "device/fido/public/public_key_credential_user_entity.h"
 #include "mojo/public/cpp/test_support/test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/mojom/webauthn/authenticator.mojom.h"
@@ -22,9 +21,6 @@ namespace mojo {
 
 using device::AuthenticatorAttachment;
 using device::AuthenticatorSelectionCriteria;
-using device::CableDiscoveryData;
-using device::CableEidArray;
-using device::CableSessionPreKeyArray;
 using device::CoseAlgorithmIdentifier;
 using device::CredentialType;
 using device::FidoTransportProtocol;
@@ -38,16 +34,6 @@ using device::UserVerificationRequirement;
 const std::vector<uint8_t> kDescriptorId = {'d', 'e', 's', 'c'};
 constexpr char kRpId[] = "google.com";
 constexpr char kRpName[] = "Google";
-constexpr CableEidArray kClientEid = {{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                                       0x07, 0x08, 0x09, 0x10, 0x11, 0x12, 0x13,
-                                       0x14, 0x15}};
-constexpr CableEidArray kAuthenticatorEid = {
-    {0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-     0x01, 0x01, 0x01, 0x01}};
-constexpr CableSessionPreKeyArray kSessionPreKey = {
-    {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
 
 namespace {
 
@@ -123,9 +109,9 @@ TEST(AuthenticatorMojomTraitsTest, SerializePublicKeyCredentialRpEntity) {
       PublicKeyCredentialRpEntity(std::string(kRpId)),
       PublicKeyCredentialRpEntity(std::string(kRpId))};
   // TODO(kenrb): There is a mismatch between the types, where
-  // device::PublicKeyCredentialRpEntity can have absl::nullopt for
+  // device::PublicKeyCredentialRpEntity can have std::nullopt for
   // the name but the mapped mojom type is not optional. This should
-  // be corrected at some point. We can't currently test absl::nullopt
+  // be corrected at some point. We can't currently test std::nullopt
   // because it won't serialize.
   success_cases[0].name = std::string(kRpName);
   success_cases[1].name = std::string(kRpName);
@@ -150,16 +136,6 @@ TEST(AuthenticatorMojomTraitsTest, SerializePublicKeyCredentialUserEntity) {
   AssertSerializeAndDeserializeSucceeds<
       blink::mojom::PublicKeyCredentialUserEntity,
       PublicKeyCredentialUserEntity>(success_cases);
-}
-
-// Verify serialization and deserialization of CableDiscoveryData.
-TEST(AuthenticatorMojomTraitsTest, SerializeCableDiscoveryData) {
-  std::vector<CableDiscoveryData> success_cases = {
-      CableDiscoveryData(CableDiscoveryData::Version::V1, kClientEid,
-                         kAuthenticatorEid, kSessionPreKey)};
-
-  AssertSerializeAndDeserializeSucceeds<blink::mojom::CableAuthentication,
-                                        CableDiscoveryData>(success_cases);
 }
 
 }  // namespace mojo

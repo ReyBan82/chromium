@@ -11,6 +11,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "content/public/browser/web_ui_message_handler.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "net/cookies/canonical_cookie.h"
 
 namespace signin_metrics {
@@ -51,12 +52,11 @@ class InlineLoginHandler : public content::WebUIMessageHandler {
 
     std::string email;
     std::string password;
-    std::string gaia_id;
+    GaiaId gaia_id;
     std::string auth_code;
     bool skip_for_now = false;
     bool trusted_value = false;
     bool trusted_found = false;
-    bool choose_what_to_sync = false;
     // Whether the account should be available in ARC after addition. Used only
     // on Chrome OS.
     bool is_available_in_arc = false;
@@ -69,33 +69,33 @@ class InlineLoginHandler : public content::WebUIMessageHandler {
 
  private:
   // JS callback to prepare for starting auth.
-  void HandleInitializeMessage(const base::Value::List& args);
+  void HandleInitializeMessage(const base::ListValue& args);
 
-  // Continue to initialize the gaia auth extension. It calls
+  // Continue to initialize the authenticator component. It calls
   // |SetExtraInitParams| to set extra init params.
   void ContinueHandleInitializeMessage();
 
-  // JS callback to handle tasks after auth extension loads.
-  virtual void HandleAuthExtensionReadyMessage(const base::Value::List& args) {}
+  // JS callback to handle tasks after authenticator component loads.
+  virtual void HandleAuthenticatorReadyMessage(const base::ListValue& args) {}
 
   // JS callback to complete login. It calls |CompleteLogin| to do the real
   // work.
-  void HandleCompleteLoginMessage(const base::Value::List& args);
+  void HandleCompleteLoginMessage(const base::ListValue& args);
 
   // Called by HandleCompleteLoginMessage after it gets the GAIA URL's cookies
   // from the CookieManager.
   void HandleCompleteLoginMessageWithCookies(
-      const base::Value::List& args,
+      const base::ListValue& args,
       const net::CookieAccessResultList& cookies,
       const net::CookieAccessResultList& excluded_cookies);
 
   // JS callback to switch the UI from a constrainted dialog to a full tab.
-  void HandleSwitchToFullTabMessage(const base::Value::List& args);
+  void HandleSwitchToFullTabMessage(const base::ListValue& args);
 
   // Handles the web ui message sent when the window is closed from javascript.
-  virtual void HandleDialogClose(const base::Value::List& args);
+  virtual void HandleDialogClose(const base::ListValue& args);
 
-  virtual void SetExtraInitParams(base::Value::Dict& params) {}
+  virtual void SetExtraInitParams(base::DictValue& params) {}
   virtual void CompleteLogin(const CompleteLoginParams& params) = 0;
 
   base::WeakPtrFactory<InlineLoginHandler> weak_ptr_factory_{this};

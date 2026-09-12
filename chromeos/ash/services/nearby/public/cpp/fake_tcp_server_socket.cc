@@ -6,14 +6,16 @@
 
 #include <memory>
 
+#include "base/task/sequenced_task_runner.h"
 #include "chromeos/ash/services/nearby/public/cpp/fake_tcp_connected_socket.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "net/base/net_errors.h"
 
-namespace ash {
-namespace nearby {
+namespace ash::nearby {
 
-FakeTcpServerSocket::FakeTcpServerSocket() = default;
+FakeTcpServerSocket::FakeTcpServerSocket(
+    scoped_refptr<base::SequencedTaskRunner> main_task_runner)
+    : main_task_runner_(std::move(main_task_runner)) {}
 
 FakeTcpServerSocket::~FakeTcpServerSocket() = default;
 
@@ -22,7 +24,8 @@ void FakeTcpServerSocket::SetAcceptCallExpectations(
     base::OnceClosure on_all_accept_calls_queued) {
   expected_num_accept_calls_ = expected_num_accept_calls;
   if (expected_num_accept_calls == 0) {
-    std::move(on_all_accept_calls_queued).Run();
+    main_task_runner_->PostTask(FROM_HERE,
+                                std::move(on_all_accept_calls_queued));
   } else {
     on_all_accept_calls_queued_ = std::move(on_all_accept_calls_queued);
   }
@@ -30,14 +33,14 @@ void FakeTcpServerSocket::SetAcceptCallExpectations(
 
 void FakeTcpServerSocket::FinishNextAccept(
     int32_t net_error,
-    const absl::optional<::net::IPEndPoint>& remote_addr) {
+    const std::optional<::net::IPEndPoint>& remote_addr) {
   DCHECK(!pending_accept_callbacks_.empty());
   AcceptCallback callback = std::move(pending_accept_callbacks_.front());
   pending_accept_callbacks_.pop_front();
 
   if (net_error != net::OK) {
     std::move(callback).Run(
-        net_error, /*remote_addr=*/absl::nullopt,
+        net_error, /*remote_addr=*/std::nullopt,
         /*connected_socket=*/mojo::NullRemote(),
         /*receive_stream=*/mojo::ScopedDataPipeConsumerHandle(),
         /*send_stream=*/mojo::ScopedDataPipeProducerHandle());
@@ -78,9 +81,9 @@ void FakeTcpServerSocket::Accept(
 
   if (pending_accept_callbacks_.size() == expected_num_accept_calls_) {
     DCHECK(on_all_accept_calls_queued_);
-    std::move(on_all_accept_calls_queued_).Run();
+    main_task_runner_->PostTask(FROM_HERE,
+                                std::move(on_all_accept_calls_queued_));
   }
 }
 
-}  // namespace nearby
-}  // namespace ash
+}  // namespace ash::nearby

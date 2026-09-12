@@ -11,18 +11,17 @@
 
 namespace extensions {
 
-using api_test_utils::ParseDictionary;
 using DeclarativeManifestTest = ManifestTest;
 
 TEST_F(DeclarativeManifestTest, Valid) {
   scoped_refptr<Extension> extension = LoadAndExpectSuccess("event_rules.json");
-  DeclarativeManifestData* manifest_data =
+  const DeclarativeManifestData* manifest_data =
       DeclarativeManifestData::Get(extension.get());
   ASSERT_TRUE(manifest_data);
   std::vector<DeclarativeManifestData::Rule> rules =
       manifest_data->RulesForEvent("foo");
   EXPECT_EQ(1u, rules.size());
-  absl::optional<base::Value::Dict> expected_rule = ParseDictionary(
+  base::DictValue expected_rule = base::test::ParseJsonDict(
       "{"
       "  \"actions\": [{"
       "    \"instanceType\": \"action_type\""
@@ -31,7 +30,7 @@ TEST_F(DeclarativeManifestTest, Valid) {
       "    \"instanceType\" : \"condition_type\""
       "  }]"
       "}");
-  EXPECT_EQ(*expected_rule, rules[0].ToValue());
+  EXPECT_EQ(expected_rule, rules[0].ToValue());
 }
 
 TEST_F(DeclarativeManifestTest, ConditionMissingType) {

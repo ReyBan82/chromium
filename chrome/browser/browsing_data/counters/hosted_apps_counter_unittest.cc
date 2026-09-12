@@ -6,12 +6,13 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/functional/bind.h"
-#include "base/guid.h"
 #include "base/memory/raw_ptr.h"
+#include "base/uuid.h"
 #include "base/values.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/browsing_data/core/browsing_data_utils.h"
@@ -21,14 +22,9 @@
 #include "content/public/test/browser_task_environment.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/common/extension_builder.h"
-#include "extensions/common/value_builder.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace {
-
-using extensions::DictionaryBuilder;
-using extensions::ListBuilder;
 
 class HostedAppsCounterTest : public testing::Test {
  public:
@@ -43,40 +39,36 @@ class HostedAppsCounterTest : public testing::Test {
   // Adding and removing apps and extensions. ----------------------------------
 
   std::string AddExtension() {
-    return AddItem(base::GenerateGUID(), /*app_manifest=*/absl::nullopt);
+    return AddItem(base::Uuid::GenerateRandomV4().AsLowercaseString(),
+                   /*app_manifest=*/std::nullopt);
   }
 
   std::string AddPackagedApp() {
     return AddItem(
-        base::GenerateGUID(),
-        DictionaryBuilder()
-            .Set("launch", DictionaryBuilder().Set(
-                "local_path", "index.html").Build())
-            .Build());
+        base::Uuid::GenerateRandomV4().AsLowercaseString(),
+        base::DictValue().Set(
+            "launch", base::DictValue().Set("local_path", "index.html")));
   }
 
   std::string AddHostedApp() {
-    return AddHostedAppWithName(base::GenerateGUID());
+    return AddHostedAppWithName(
+        base::Uuid::GenerateRandomV4().AsLowercaseString());
   }
 
   std::string AddHostedAppWithName(const std::string& name) {
     return AddItem(
-        name,
-        DictionaryBuilder()
-            .Set("urls", ListBuilder().Append("https://example.com").Build())
-            .Set("launch",
-                 DictionaryBuilder().Set(
-                     "web_url", "https://example.com").Build())
-            .Build());
+        name, base::DictValue()
+                  .Set("urls", base::ListValue().Append("https://example.com"))
+                  .Set("launch", base::DictValue().Set("web_url",
+                                                       "https://example.com")));
   }
 
   std::string AddItem(const std::string& name,
-                      absl::optional<base::Value::Dict> app_manifest) {
-    DictionaryBuilder manifest_builder;
-    manifest_builder
-        .Set("manifest_version", 2)
-        .Set("name", name)
-        .Set("version", "1");
+                      std::optional<base::DictValue> app_manifest) {
+    auto manifest_builder = base::DictValue()
+                                .Set("manifest_version", 2)
+                                .Set("name", name)
+                                .Set("version", "1");
 
     if (app_manifest) {
       manifest_builder.Set("app", std::move(*app_manifest));
@@ -84,7 +76,7 @@ class HostedAppsCounterTest : public testing::Test {
 
     scoped_refptr<const extensions::Extension> item =
         extensions::ExtensionBuilder()
-            .SetManifest(manifest_builder.Build())
+            .SetManifest(std::move(manifest_builder))
             .SetID(crx_file::id_util::GenerateId(name))
             .Build();
 
@@ -154,7 +146,6 @@ TEST_F(HostedAppsCounterTest, Count) {
   Profile* profile = GetProfile();
   HostedAppsCounter counter(profile);
   counter.Init(profile->GetPrefs(),
-               browsing_data::ClearBrowsingDataTab::ADVANCED,
                base::BindRepeating(&HostedAppsCounterTest::Callback,
                                    base::Unretained(this)));
   counter.Restart();
@@ -182,7 +173,6 @@ TEST_F(HostedAppsCounterTest, OnlyHostedApps) {
   Profile* profile = GetProfile();
   HostedAppsCounter counter(profile);
   counter.Init(profile->GetPrefs(),
-               browsing_data::ClearBrowsingDataTab::ADVANCED,
                base::BindRepeating(&HostedAppsCounterTest::Callback,
                                    base::Unretained(this)));
 
@@ -221,7 +211,6 @@ TEST_F(HostedAppsCounterTest, Examples) {
   Profile* profile = GetProfile();
   HostedAppsCounter counter(profile);
   counter.Init(profile->GetPrefs(),
-               browsing_data::ClearBrowsingDataTab::ADVANCED,
                base::BindRepeating(&HostedAppsCounterTest::Callback,
                                    base::Unretained(this)));
   counter.Restart();

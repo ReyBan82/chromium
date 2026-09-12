@@ -30,7 +30,6 @@
 
 #include "third_party/blink/renderer/core/html/forms/week_input_type.h"
 
-#include "third_party/blink/public/strings/grit/blink_strings.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/forms/date_time_fields_state.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
@@ -38,7 +37,9 @@
 #include "third_party/blink/renderer/core/input_type_names.h"
 #include "third_party/blink/renderer/platform/text/date_components.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "ui/strings/grit/ax_strings.h"
 
 namespace blink {
 
@@ -49,10 +50,6 @@ static const int kWeekStepScaleFactor = 604800000;
 
 void WeekInputType::CountUsage() {
   CountUsageIfVisible(WebFeature::kInputTypeWeek);
-}
-
-const AtomicString& WeekInputType::FormControlType() const {
-  return input_type_names::kWeek;
 }
 
 StepRange WeekInputType::CreateStepRange(
@@ -82,12 +79,13 @@ bool WeekInputType::SetMillisecondToDateComponents(double value,
 }
 
 void WeekInputType::WarnIfValueIsInvalid(const String& value) const {
-  if (value != GetElement().SanitizeValue(value))
+  if (value != GetElement().SanitizeValue(value)) {
     AddWarningToConsole(
-        "The specified value %s does not conform to the required format.  The "
+        "The specified value {} does not conform to the required format.  The "
         "format is \"yyyy-Www\" where yyyy is year in four or more digits, and "
         "ww is 01-53.",
         value);
+  }
 }
 
 String WeekInputType::FormatDateTimeFieldsState(
@@ -95,14 +93,14 @@ String WeekInputType::FormatDateTimeFieldsState(
   if (!date_time_fields_state.HasYear() ||
       !date_time_fields_state.HasWeekOfYear())
     return g_empty_string;
-  return String::Format("%04u-W%02u", date_time_fields_state.Year(),
-                        date_time_fields_state.WeekOfYear());
+  return Format("{:04}-W{:02}", date_time_fields_state.Year(),
+                date_time_fields_state.WeekOfYear());
 }
 
 void WeekInputType::SetupLayoutParameters(
     DateTimeEditElement::LayoutParameters& layout_parameters,
     const DateComponents&) const {
-  layout_parameters.date_time_format = GetLocale().WeekFormatInLDML();
+  layout_parameters.date_time_format = GetLocale().WeekFormatInLdml();
   layout_parameters.fallback_date_time_format = "yyyy-'W'ww";
   if (!ParseToDateComponents(
           GetElement().FastGetAttribute(html_names::kMinAttr),

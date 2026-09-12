@@ -5,10 +5,11 @@
 #include "chrome/browser/bitmap_fetcher/bitmap_fetcher.h"
 
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
+#include "base/strings/string_view_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/test/browser_test.h"
@@ -121,11 +122,12 @@ class BitmapFetcherBrowserTest : public InProcessBrowserTest {
     std::unique_ptr<BasicHttpResponse> response(new BasicHttpResponse);
     if (request.relative_url == kStartTestURL) {
       // Encode the bits as a PNG.
-      std::vector<unsigned char> compressed;
-      gfx::PNGCodec::EncodeBGRASkBitmap(test_bitmap(), true, &compressed);
+      std::optional<std::vector<uint8_t>> compressed =
+          gfx::PNGCodec::EncodeBGRASkBitmap(test_bitmap(),
+                                            /*discard_transparency=*/true);
       // Copy the bits into a string and return them through the embedded
-      // test server
-      std::string image_string(compressed.begin(), compressed.end());
+      // test server.
+      std::string image_string(base::as_string_view(compressed.value()));
       response->set_code(net::HTTP_OK);
       response->set_content(image_string);
     } else if (request.relative_url == kOnImageDecodedTestURL) {
@@ -154,9 +156,9 @@ IN_PROC_BROWSER_TEST_F(BitmapFetcherBrowserTest, StartTest) {
   // an image in a callback to OnImageDecoded().
   fetcher.Init(
       net::ReferrerPolicy::REDUCE_GRANULARITY_ON_TRANSITION_CROSS_ORIGIN,
-      network::mojom::CredentialsMode::kInclude);
+      network::mojom::CredentialsMode::kOmit);
   fetcher.Start(browser()
-                    ->profile()
+                    ->GetProfile()
                     ->GetDefaultStoragePartition()
                     ->GetURLLoaderFactoryForBrowserProcess()
                     .get());
@@ -200,9 +202,9 @@ IN_PROC_BROWSER_TEST_F(BitmapFetcherBrowserTest, OnURLFetchFailureTest) {
 
   fetcher.Init(
       net::ReferrerPolicy::REDUCE_GRANULARITY_ON_TRANSITION_CROSS_ORIGIN,
-      network::mojom::CredentialsMode::kInclude);
+      network::mojom::CredentialsMode::kOmit);
   fetcher.Start(browser()
-                    ->profile()
+                    ->GetProfile()
                     ->GetDefaultStoragePartition()
                     ->GetURLLoaderFactoryForBrowserProcess()
                     .get());
@@ -220,9 +222,9 @@ IN_PROC_BROWSER_TEST_F(BitmapFetcherBrowserTest, HandleImageFailedTest) {
 
   fetcher.Init(
       net::ReferrerPolicy::REDUCE_GRANULARITY_ON_TRANSITION_CROSS_ORIGIN,
-      network::mojom::CredentialsMode::kInclude);
+      network::mojom::CredentialsMode::kOmit);
   fetcher.Start(browser()
-                    ->profile()
+                    ->GetProfile()
                     ->GetDefaultStoragePartition()
                     ->GetURLLoaderFactoryForBrowserProcess()
                     .get());
@@ -240,9 +242,9 @@ IN_PROC_BROWSER_TEST_F(BitmapFetcherBrowserTest, DataURLNonImage) {
 
   fetcher.Init(
       net::ReferrerPolicy::REDUCE_GRANULARITY_ON_TRANSITION_CROSS_ORIGIN,
-      network::mojom::CredentialsMode::kInclude);
+      network::mojom::CredentialsMode::kOmit);
   fetcher.Start(browser()
-                    ->profile()
+                    ->GetProfile()
                     ->GetDefaultStoragePartition()
                     ->GetURLLoaderFactoryForBrowserProcess()
                     .get());
@@ -263,9 +265,9 @@ IN_PROC_BROWSER_TEST_F(BitmapFetcherBrowserTest, DataURLImage) {
 
   fetcher.Init(
       net::ReferrerPolicy::REDUCE_GRANULARITY_ON_TRANSITION_CROSS_ORIGIN,
-      network::mojom::CredentialsMode::kInclude);
+      network::mojom::CredentialsMode::kOmit);
   fetcher.Start(browser()
-                    ->profile()
+                    ->GetProfile()
                     ->GetDefaultStoragePartition()
                     ->GetURLLoaderFactoryForBrowserProcess()
                     .get());
@@ -293,9 +295,9 @@ IN_PROC_BROWSER_TEST_F(BitmapFetcherBrowserTest,
 
     fetcher.Init(
         net::ReferrerPolicy::REDUCE_GRANULARITY_ON_TRANSITION_CROSS_ORIGIN,
-        network::mojom::CredentialsMode::kInclude);
+        network::mojom::CredentialsMode::kOmit);
     fetcher.Start(browser()
-                      ->profile()
+                      ->GetProfile()
                       ->GetDefaultStoragePartition()
                       ->GetURLLoaderFactoryForBrowserProcess()
                       .get());
@@ -343,11 +345,11 @@ IN_PROC_BROWSER_TEST_F(BitmapFetcherInitiatorBrowserTest, SameOrigin) {
   BitmapFetcher fetcher(image_url, &delegate, TRAFFIC_ANNOTATION_FOR_TESTS);
 
   fetcher.Init(net::ReferrerPolicy::NEVER_CLEAR,
-               network::mojom::CredentialsMode::kInclude,
+               network::mojom::CredentialsMode::kOmit,
                net::HttpRequestHeaders(),
                /*initiator=*/url::Origin::Create(image_url));
   fetcher.Start(browser()
-                    ->profile()
+                    ->GetProfile()
                     ->GetDefaultStoragePartition()
                     ->GetURLLoaderFactoryForBrowserProcess()
                     .get());

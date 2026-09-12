@@ -7,11 +7,14 @@
 #include <Cocoa/Cocoa.h>
 #include <sys/stat.h>
 
+#include <string_view>
+
+#include "base/apple/foundation_util.h"
 #include "base/files/file.h"
+#include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
-#include "base/mac/foundation_util.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "third_party/zlib/google/zip.h"
@@ -19,9 +22,9 @@
 
 namespace {
 
-base::StringPiece AsStringPiece(NSString* str) {
+std::string_view AsStringPiece(NSString* str) {
   const char* data = [str fileSystemRepresentation];
-  return data ? base::StringPiece(data) : base::StringPiece();
+  return data ? std::string_view(data) : std::string_view();
 }
 
 // Given the |path| of a package, returns the destination that the package
@@ -51,6 +54,28 @@ base::FilePath ZipDestination(const base::FilePath& path) {
 // parent directory.
 std::vector<base::FilePath> RelativePathsForPackage(
     const base::FilePath& package) {
+  // Reject packages where the root itself is a symbolic link.
+  // When a user selects a file or package through the standard file picker
+  // (NSOpenPanel), AppKit's `resolvesAliases` property is enabled by default,
+  // resolving both Finder aliases and symlinks to their target directory before
+  // reaching this code. Therefore, legitimate user selections through the
+  // dialog already have their targets resolved. A raw symlink only arrives here
+  // if the selection bypassed NSOpenPanel (such as via drag-and-drop onto an
+  // <input type="file">). Following a root symlink in that case is dangerous
+  // (e.g. a dropped "Fake.app -> /Users/victim" would cause the entire target
+  // directory to be considered part of the package and zipped).
+  if (base::IsLink(package)) {
+    return {};
+  }
+
+  base::FilePath real_package = base::MakeAbsoluteFilePath(package);
+  // MakeAbsoluteFilePath() uses realpath(3) and returns an empty path if the
+  // package path does not exist on disk, permission is denied, or resolution
+  // fails.
+  if (real_package.empty()) {
+    return {};
+  }
+
   // Get the base directory.
   base::FilePath base_dir = package.DirName();
 
@@ -60,15 +85,27 @@ std::vector<base::FilePath> RelativePathsForPackage(
 
   // Add the components of the package as relative paths.
   base::FileEnumerator file_enumerator(
-      package,
-      true /* recursive */,
-      base::FileEnumerator::FILES | base::FileEnumerator::DIRECTORIES);
+      package, true /* recursive */,
+      base::FileEnumerator::FILES | base::FileEnumerator::DIRECTORIES |
+          base::FileEnumerator::SHOW_SYM_LINKS);
   for (base::FilePath path = file_enumerator.Next(); !path.empty();
        path = file_enumerator.Next()) {
+    // Only include symlinks whose targets reside inside the package tree.
+    // External symlinks (or broken symlinks) are skipped to prevent file
+    // leakage outside the package. Internal symlinks are preserved by having
+    // their target contents copied into the zip archive, preserving working
+    // bundles.
+    if (S_ISLNK(file_enumerator.GetInfo().stat().st_mode)) {
+      base::FilePath target = base::MakeAbsoluteFilePath(path);
+      if (target.empty() || !real_package.IsParent(target)) {
+        continue;
+      }
+    }
     base::FilePath relative_path;
     bool success = base_dir.AppendRelativePath(path, &relative_path);
-    if (success)
+    if (success) {
       relative_paths.push_back(relative_path);
+    }
   }
 
   return relative_paths;
@@ -89,6 +126,10 @@ base::FilePath FileSelectHelper::ZipPackage(const base::FilePath& path) {
     return base::FilePath();
 
   std::vector<base::FilePath> files_to_zip(RelativePathsForPackage(path));
+  if (files_to_zip.empty()) {
+    return base::FilePath();
+  }
+
   base::FilePath base_dir = path.DirName();
   bool success = zip::ZipFiles(base_dir, files_to_zip, file.GetPlatformFile());
 
@@ -106,7 +147,7 @@ void FileSelectHelper::ProcessSelectedFilesMac(
   std::vector<base::FilePath> temporary_files;
 
   for (auto& file_info : files_out) {
-    NSString* filename = base::mac::FilePathToNSString(file_info.local_path);
+    NSString* filename = base::apple::FilePathToNSString(file_info.local_path);
     BOOL isPackage =
         [[NSWorkspace sharedWorkspace] isFilePackageAtPath:filename];
     if (isPackage && base::DirectoryExists(file_info.local_path)) {
@@ -123,8 +164,8 @@ void FileSelectHelper::ProcessSelectedFilesMac(
 
   content::GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE,
-      base::BindOnce(&FileSelectHelper::ProcessSelectedFilesMacOnUIThread,
-                     base::Unretained(this), files_out, temporary_files));
+      base::BindOnce(&FileSelectHelper::ProcessSelectedFilesMacOnUIThread, this,
+                     files_out, temporary_files));
 }
 
 void FileSelectHelper::ProcessSelectedFilesMacOnUIThread(

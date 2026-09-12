@@ -4,15 +4,7 @@
 
 module gpu.mojom;
 
-// See gpu/command_buffer/common/constants.h
-enum CommandBufferNamespace {
-  INVALID = -1,
-
-  GPU_IO,
-  IN_PROCESS,
-  MOJO,
-  MOJO_LOCAL
-};
+import "gpu/ipc/common/constants.mojom";
 
 // See gpu/command_buffer/common/sync_token.h
 struct SyncToken {

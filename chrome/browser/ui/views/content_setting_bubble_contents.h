@@ -5,13 +5,12 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_CONTENT_SETTING_BUBBLE_CONTENTS_H_
 #define CHROME_BROWSER_UI_VIEWS_CONTENT_SETTING_BUBBLE_CONTENTS_H_
 
-#include <map>
 #include <memory>
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "chrome/browser/ui/content_settings/content_setting_bubble_model.h"
-#include "components/content_settings/core/common/content_settings_types.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
@@ -20,7 +19,6 @@
 
 namespace views {
 class Combobox;
-class ImageButton;
 class RadioButton;
 class LabelButton;
 }  // namespace views
@@ -37,12 +35,14 @@ class LabelButton;
 class ContentSettingBubbleContents : public content::WebContentsObserver,
                                      public views::BubbleDialogDelegateView,
                                      public ContentSettingBubbleModel::Owner {
+  METADATA_HEADER(ContentSettingBubbleContents, views::BubbleDialogDelegateView)
+
  public:
-  METADATA_HEADER(ContentSettingBubbleContents);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kMainElementId);
   ContentSettingBubbleContents(
       std::unique_ptr<ContentSettingBubbleModel> content_setting_bubble_model,
       content::WebContents* web_contents,
-      views::View* anchor_view,
+      views::BubbleAnchor anchor,
       views::BubbleBorder::Arrow arrow);
   ContentSettingBubbleContents(const ContentSettingBubbleContents&) = delete;
   ContentSettingBubbleContents& operator=(const ContentSettingBubbleContents&) =
@@ -57,6 +57,7 @@ class ContentSettingBubbleContents : public content::WebContentsObserver,
       const ContentSettingBubbleModel::ListItem& item) override;
   void OnListItemRemovedAt(int index) override;
   int GetSelectedRadioOption() override;
+  void CloseBubble() override;
 
   void managed_button_clicked_for_test() {
     content_setting_bubble_model_->is_UMA_for_test = true;
@@ -68,6 +69,14 @@ class ContentSettingBubbleContents : public content::WebContentsObserver,
     content_setting_bubble_model_->OnLearnMoreClicked();
   }
 
+  std::u16string get_message_for_test() const {
+    return content_setting_bubble_model_->bubble_content().message;
+  }
+
+  ContentSettingBubbleModel* bubble_model_for_test() {
+    return content_setting_bubble_model_.get();
+  }
+
  protected:
   // views::WidgetDelegate:
   std::u16string GetWindowTitle() const override;
@@ -75,13 +84,11 @@ class ContentSettingBubbleContents : public content::WebContentsObserver,
 
   // views::BubbleDialogDelegateView:
   void Init() override;
-  void OnThemeChanged() override;
 
  private:
-  class ListItemContainer;
+  FRIEND_TEST_ALL_PREFIXES(FramebustBlockBrowserTest, ModelAllowsRedirection);
 
-  // Applies coloring to the learn more button.
-  void StyleLearnMoreButton();
+  class ListItemContainer;
 
   // Create the extra view for this dialog, which contains any subset of: a
   // "learn more" button and a "manage" button.
@@ -93,20 +100,22 @@ class ContentSettingBubbleContents : public content::WebContentsObserver,
   void OnPerformAction(views::Combobox* combobox);
 
   // content::WebContentsObserver:
-  void PrimaryPageChanged(content::Page& page) override;
   void OnVisibilityChanged(content::Visibility visibility) override;
-  void WebContentsDestroyed() override;
+
+  void ResetBubbleModelAndClose();
 
   // Provides data for this bubble.
   std::unique_ptr<ContentSettingBubbleModel> content_setting_bubble_model_;
 
   raw_ptr<ListItemContainer, DanglingUntriaged> list_item_container_ = nullptr;
 
-  typedef std::vector<views::RadioButton*> RadioGroup;
+  typedef std::vector<raw_ptr<views::RadioButton, VectorExperimental>>
+      RadioGroup;
   RadioGroup radio_group_;
   raw_ptr<views::LabelButton, DanglingUntriaged> manage_button_ = nullptr;
   raw_ptr<views::Checkbox, DanglingUntriaged> manage_checkbox_ = nullptr;
-  raw_ptr<views::ImageButton, DanglingUntriaged> learn_more_button_ = nullptr;
+
+  base::WeakPtrFactory<ContentSettingBubbleContents> weak_factory_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_CONTENT_SETTING_BUBBLE_CONTENTS_H_

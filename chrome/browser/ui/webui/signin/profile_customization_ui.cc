@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ui/webui/signin/profile_customization_ui.h"
 
+#include "base/check_deref.h"
 #include "base/feature_list.h"
 #include "base/functional/callback_helpers.h"
 #include "base/strings/utf_string_conversions.h"
@@ -12,28 +13,30 @@
 #include "chrome/browser/profiles/profile_attributes_entry.h"
 #include "chrome/browser/profiles/profile_attributes_storage.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/signin/signin_features.h"
-#include "chrome/browser/ui/webui/customize_themes/chrome_customize_themes_handler.h"
+#include "chrome/browser/regional_capabilities/regional_capabilities_service_factory.h"
+#include "chrome/browser/search/background/ntp_custom_background_service_factory.h"
+#include "chrome/browser/ui/webui/cr_components/theme_color_picker/theme_color_picker_handler.h"
 #include "chrome/browser/ui/webui/signin/profile_customization_handler.h"
 #include "chrome/browser/ui/webui/signin/signin_url_utils.h"
-#include "chrome/browser/ui/webui/webui_util.h"
 #include "chrome/common/webui_url_constants.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/grit/signin_resources.h"
+#include "components/regional_capabilities/regional_capabilities_service.h"
+#include "components/signin/public/base/signin_switches.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/webui/resource_path.h"
 #include "ui/base/webui/web_ui_util.h"
-#include "ui/resources/grit/webui_resources.h"
+#include "ui/webui/webui_util.h"
 
 ProfileCustomizationUI::ProfileCustomizationUI(content::WebUI* web_ui)
-    : ui::MojoWebUIController(web_ui, /*enable_chrome_send=*/true),
-      customize_themes_factory_receiver_(this) {
+    : ui::MojoWebUIController(web_ui, /*enable_chrome_send=*/true) {
   Profile* profile = Profile::FromWebUI(web_ui);
   content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
       profile, chrome::kChromeUIProfileCustomizationHost);
@@ -41,6 +44,8 @@ ProfileCustomizationUI::ProfileCustomizationUI(content::WebUI* web_ui)
   static constexpr webui::ResourcePath kResources[] = {
       {"profile_customization_app.js",
        IDR_SIGNIN_PROFILE_CUSTOMIZATION_PROFILE_CUSTOMIZATION_APP_JS},
+      {"profile_customization_app.css.js",
+       IDR_SIGNIN_PROFILE_CUSTOMIZATION_PROFILE_CUSTOMIZATION_APP_CSS_JS},
       {"profile_customization_app.html.js",
        IDR_SIGNIN_PROFILE_CUSTOMIZATION_PROFILE_CUSTOMIZATION_APP_HTML_JS},
       {"profile_customization_browser_proxy.js",
@@ -54,21 +59,25 @@ ProfileCustomizationUI::ProfileCustomizationUI(content::WebUI* web_ui)
   };
 
   webui::SetupWebUIDataSource(
-      source, base::make_span(kResources),
+      source, kResources,
       IDR_SIGNIN_PROFILE_CUSTOMIZATION_PROFILE_CUSTOMIZATION_HTML);
 
   // Localized strings.
   static constexpr webui::LocalizedString kLocalizedStrings[] = {
+      {"controlledSettingPolicy", IDS_CONTROLLED_SETTING_POLICY},
       {"profileCustomizationDoneLabel",
        IDS_PROFILE_CUSTOMIZATION_DONE_BUTTON_LABEL},
       {"profileCustomizationSkipLabel",
        IDS_PROFILE_CUSTOMIZATION_SKIP_BUTTON_LABEL},
       {"profileCustomizationInputLabel", IDS_PROFILE_CUSTOMIZATION_INPUT_LABEL},
+      {"profileCustomizationInputTitle", IDS_PROFILE_CUSTOMIZATION_INPUT_TITLE},
       {"profileCustomizationInputPlaceholder",
        IDS_PROFILE_CUSTOMIZATION_INPUT_PLACEHOLDER},
       {"profileCustomizationInputErrorMessage",
        IDS_PROFILE_CUSTOMIZATION_INPUT_ERROR_MESSAGE},
       {"profileCustomizationText", IDS_PROFILE_CUSTOMIZATION_TEXT},
+      {"profileCustomizationThemePickerLabel",
+       IDS_PROFILE_CUSTOMIZATION_THEME_PICKER_LABEL},
       {"profileCustomizationTitle", IDS_PROFILE_CUSTOMIZATION_TITLE_V2},
       {"localProfileCreationTitle",
        IDS_PROFILE_CUSTOMIZATION_LOCAL_PROFILE_CREATION_TITLE},
@@ -82,12 +91,16 @@ ProfileCustomizationUI::ProfileCustomizationUI(content::WebUI* web_ui)
        IDS_PROFILE_CUSTOMIZATION_AVATAR_SELECTION_BACK_BUTTON_LABEL},
 
       // Color picker strings:
+      {"close", IDS_CLOSE},
       {"colorPickerLabel", IDS_NTP_CUSTOMIZE_COLOR_PICKER_LABEL},
-      {"defaultThemeLabel", IDS_NTP_CUSTOMIZE_DEFAULT_LABEL},
-      {"themesContainerLabel",
-       IDS_PROFILE_CUSTOMIZATION_THEMES_CONTAINER_LABEL},
-      {"thirdPartyThemeDescription", IDS_NTP_CUSTOMIZE_3PT_THEME_DESC},
-      {"uninstallThirdPartyThemeButton", IDS_NTP_CUSTOMIZE_3PT_THEME_UNINSTALL},
+      {"colorsContainerLabel", IDS_NTP_THEMES_CONTAINER_LABEL},
+      {"defaultColorName", IDS_NTP_CUSTOMIZE_DEFAULT_LABEL},
+      {"hueSliderTitle", IDS_NTP_CUSTOMIZE_COLOR_HUE_SLIDER_TITLE},
+      {"hueSliderAriaLabel", IDS_NTP_CUSTOMIZE_COLOR_HUE_SLIDER_ARIA_LABEL},
+      {"greyDefaultColorName", IDS_NTP_CUSTOMIZE_GREY_DEFAULT_LABEL},
+      {"managedColorsBody", IDS_NTP_THEME_MANAGED_DIALOG_BODY},
+      {"managedColorsTitle", IDS_NTP_THEME_MANAGED_DIALOG_TITLE},
+      {"ok", IDS_OK},
   };
   source->AddLocalizedStrings(kLocalizedStrings);
 
@@ -98,15 +111,19 @@ ProfileCustomizationUI::ProfileCustomizationUI(content::WebUI* web_ui)
           .GetProfileAttributesWithPath(profile->GetPath());
   source->AddString("profileName",
                     base::UTF16ToUTF8(entry->GetLocalProfileName()));
-  source->AddBoolean(
-      "profileCustomizationInDialogDesign",
-      base::FeatureList::IsEnabled(kSyncPromoAfterSigninIntercept));
   const GURL& url = web_ui->GetWebContents()->GetVisibleURL();
   source->AddBoolean("isLocalProfileCreation",
                      GetProfileCustomizationStyle(url) ==
                          ProfileCustomizationStyle::kLocalProfileCreation);
 
-  if (url.query() == "debug") {
+  const bool is_in_search_engine_choice_region =
+      CHECK_DEREF(regional_capabilities::RegionalCapabilitiesServiceFactory::
+                      GetForProfile(profile))
+          .IsInSearchEngineChoiceScreenRegion();
+  source->AddBoolean("isRefreshedUI", switches::IsFirstRunDesktopRefreshEnabled(
+                                          is_in_search_engine_choice_region));
+
+  if (url.GetQuery() == "debug") {
     // Not intended to be hooked to anything. The bubble will not initialize it
     // so we force it here.
     Initialize(base::DoNothing());
@@ -127,11 +144,13 @@ void ProfileCustomizationUI::Initialize(
 
 void ProfileCustomizationUI::BindInterface(
     mojo::PendingReceiver<
-        customize_themes::mojom::CustomizeThemesHandlerFactory>
+        theme_color_picker::mojom::ThemeColorPickerHandlerFactory>
         pending_receiver) {
-  if (customize_themes_factory_receiver_.is_bound())
-    customize_themes_factory_receiver_.reset();
-  customize_themes_factory_receiver_.Bind(std::move(pending_receiver));
+  if (theme_color_picker_handler_factory_receiver_.is_bound()) {
+    theme_color_picker_handler_factory_receiver_.reset();
+  }
+  theme_color_picker_handler_factory_receiver_.Bind(
+      std::move(pending_receiver));
 }
 
 ProfileCustomizationHandler*
@@ -139,14 +158,16 @@ ProfileCustomizationUI::GetProfileCustomizationHandlerForTesting() {
   return profile_customization_handler_;
 }
 
-void ProfileCustomizationUI::CreateCustomizeThemesHandler(
-    mojo::PendingRemote<customize_themes::mojom::CustomizeThemesClient>
-        pending_client,
-    mojo::PendingReceiver<customize_themes::mojom::CustomizeThemesHandler>
-        pending_handler) {
-  customize_themes_handler_ = std::make_unique<ChromeCustomizeThemesHandler>(
-      std::move(pending_client), std::move(pending_handler),
-      web_ui()->GetWebContents(), Profile::FromWebUI(web_ui()));
+void ProfileCustomizationUI::CreateThemeColorPickerHandler(
+    mojo::PendingRemote<theme_color_picker::mojom::ThemeColorPickerClient>
+        client,
+    mojo::PendingReceiver<theme_color_picker::mojom::ThemeColorPickerHandler>
+        handler) {
+  theme_color_picker_handler_ = std::make_unique<ThemeColorPickerHandler>(
+      std::move(handler), std::move(client),
+      NtpCustomBackgroundServiceFactory::GetForProfile(
+          Profile::FromWebUI(web_ui())),
+      web_ui()->GetWebContents());
 }
 
 WEB_UI_CONTROLLER_TYPE_IMPL(ProfileCustomizationUI)

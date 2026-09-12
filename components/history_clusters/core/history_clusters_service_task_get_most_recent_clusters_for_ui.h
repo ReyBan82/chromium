@@ -37,6 +37,7 @@ class HistoryClustersServiceTaskGetMostRecentClustersForUI
       ClusteringBackend* const backend,
       history::HistoryService* const history_service,
       ClusteringRequestSource clustering_request_source,
+      QueryClustersFilterParams filter_params,
       base::Time begin_time,
       QueryClustersContinuationParams continuation_params,
       QueryClustersCallback callback);
@@ -48,16 +49,15 @@ class HistoryClustersServiceTaskGetMostRecentClustersForUI
   //   OnGotModelClusters()
 
   // Invoked during construction. Will asyncly request persisted basic clusters.
-  void Start();
+  void Start(QueryClustersFilterParams filter_params);
 
   // Invoked after `Start()` asyncly fetches clusters.
-  void OnGotMostRecentPersistedClusters(base::TimeTicks start_time,
+  void OnGotMostRecentPersistedClusters(QueryClustersFilterParams filter_params,
                                         std::vector<history::Cluster> clusters);
 
   // Invoked after `OnGotMostRecentPersistedClusters()` asyncly obtains
   // clusters. Will syncly invoke `callback_`.
-  void OnGotModelClusters(base::TimeTicks start_time,
-                          QueryClustersContinuationParams continuation_params,
+  void OnGotModelClusters(QueryClustersContinuationParams continuation_params,
                           std::vector<history::Cluster> clusters);
 
   // Never nullptr.

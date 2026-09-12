@@ -10,11 +10,11 @@
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "components/user_manager/scoped_user_manager.h"
 #endif
-#include "build/chromeos_buildflags.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
@@ -47,7 +47,7 @@ class OnStartupHandlerTest : public testing::Test {
   void SetUp() override {
     ASSERT_TRUE(profile_manager_.SetUp());
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     auto* fake_user_manager = new ash::FakeChromeUserManager;
     user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
         base::WrapUnique(fake_user_manager));
@@ -71,14 +71,14 @@ class OnStartupHandlerTest : public testing::Test {
   TestingProfileManager profile_manager_;
   std::unique_ptr<TestOnStartupHandler> handler_;
   raw_ptr<Profile> profile_;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
 #endif
   content::TestWebUI web_ui_;
 };
 
 TEST_F(OnStartupHandlerTest, HandleGetNtpExtension) {
-  base::Value::List list_args;
+  base::ListValue list_args;
   list_args.Append(kCallbackId);
   handler()->HandleGetNtpExtension(list_args);
 
@@ -95,7 +95,7 @@ TEST_F(OnStartupHandlerTest, HandleGetNtpExtension) {
 }
 
 TEST_F(OnStartupHandlerTest, HandleValidateStartupPage_Valid) {
-  base::Value::List list_args;
+  base::ListValue list_args;
   list_args.Append(kCallbackId);
   list_args.Append("http://example.com");
   handler()->HandleValidateStartupPage(list_args);
@@ -116,7 +116,7 @@ TEST_F(OnStartupHandlerTest, HandleValidateStartupPage_Valid) {
 }
 
 TEST_F(OnStartupHandlerTest, HandleValidateStartupPage_Invalid) {
-  base::Value::List list_args;
+  base::ListValue list_args;
   list_args.Append(kCallbackId);
   list_args.Append("@");
   handler()->HandleValidateStartupPage(list_args);

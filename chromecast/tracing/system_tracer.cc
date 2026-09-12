@@ -7,14 +7,18 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+
+#include <string_view>
 #include <utility>
 
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
-#include "base/message_loop/message_pump_libevent.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/posix/unix_domain_socket.h"
+#include "base/strings/string_view_util.h"
 #include "base/trace_event/trace_config.h"
 #include "chromecast/chromecast_buildflags.h"
 #include "chromecast/tracing/system_tracing_common.h"
@@ -46,10 +50,10 @@ base::ScopedFD CreateClientSocket() {
 
 class SystemTracerImpl : public SystemTracer {
  public:
-  SystemTracerImpl() : buffer_(new char[kBufferSize]) {}
+  SystemTracerImpl() : buffer_(base::HeapArray<uint8_t>::Uninit(kBufferSize)) {}
   ~SystemTracerImpl() override { Cleanup(); }
 
-  void StartTracing(base::StringPiece categories,
+  void StartTracing(std::string_view categories,
                     StartTracingCallback callback) override;
 
   void StopTracing(const StopTracingCallback& callback) override;
@@ -83,7 +87,7 @@ class SystemTracerImpl : public SystemTracer {
   std::unique_ptr<base::FileDescriptorWatcher::Controller> trace_pipe_watcher_;
 
   // Read buffer (of size kBufferSize).
-  std::unique_ptr<char[]> buffer_;
+  base::HeapArray<uint8_t> buffer_;
 
   // Callbacks for StartTracing() and StopTracing().
   StartTracingCallback start_tracing_callback_;
@@ -93,7 +97,7 @@ class SystemTracerImpl : public SystemTracer {
   std::string trace_data_;
 };
 
-void SystemTracerImpl::StartTracing(base::StringPiece categories,
+void SystemTracerImpl::StartTracing(std::string_view categories,
                                     StartTracingCallback callback) {
   start_tracing_callback_ = std::move(callback);
   if (state_ != State::INITIAL) {
@@ -113,8 +117,9 @@ void SystemTracerImpl::StartTracing(base::StringPiece categories,
     return;
   }
 
-  if (!base::UnixDomainSocket::SendMsg(connection_fd_.get(), categories.data(),
-                                       categories.size(), std::vector<int>())) {
+  if (!base::UnixDomainSocket::SendMsg(connection_fd_.get(),
+                                       base::as_byte_span(categories),
+                                       std::vector<int>())) {
     PLOG(ERROR) << "sendmsg";
     FailStartTracing();
     return;
@@ -134,10 +139,10 @@ void SystemTracerImpl::StopTracing(const StopTracingCallback& callback) {
     return;
   }
 
-  char stop_tracing_message[] = {0};
+  constexpr uint8_t stop_tracing_message[] = {0};
   if (!base::UnixDomainSocket::SendMsg(
           connection_fd_.get(), stop_tracing_message,
-          sizeof(stop_tracing_message), std::vector<int>())) {
+          std::vector<int>())) {
     PLOG(ERROR) << "sendmsg";
     FailStopTracing();
     return;
@@ -154,8 +159,8 @@ void SystemTracerImpl::ReceiveStartAckAndTracePipe() {
   DCHECK_EQ(state_, State::STARTING);
 
   std::vector<base::ScopedFD> fds;
-  ssize_t received = base::UnixDomainSocket::RecvMsg(
-      connection_fd_.get(), buffer_.get(), kBufferSize, &fds);
+  ssize_t received =
+      base::UnixDomainSocket::RecvMsg(connection_fd_.get(), buffer_, &fds);
   if (received == 0) {
     LOG(ERROR) << "EOF from server";
     FailStartTracing();
@@ -182,8 +187,8 @@ void SystemTracerImpl::ReceiveTraceData() {
   DCHECK_EQ(state_, State::READING);
 
   for (;;) {
-    ssize_t bytes =
-        HANDLE_EINTR(read(trace_pipe_fd_.get(), buffer_.get(), kBufferSize));
+    ssize_t bytes = HANDLE_EINTR(
+        read(trace_pipe_fd_.get(), buffer_.data(), buffer_.size()));
     if (bytes < 0) {
       if (errno == EAGAIN)
         return;  // Wait for more data.
@@ -197,7 +202,7 @@ void SystemTracerImpl::ReceiveTraceData() {
       return;
     }
 
-    trace_data_.append(buffer_.get(), bytes);
+    trace_data_.append(base::as_string_view(buffer_.first(bytes)));
 
     static constexpr size_t kPartialTraceDataSize = 1UL << 20;  // 1 MiB
     if (trace_data_.size() > kPartialTraceDataSize) {
@@ -244,7 +249,7 @@ class FakeSystemTracer : public SystemTracer {
   FakeSystemTracer() = default;
   ~FakeSystemTracer() override = default;
 
-  void StartTracing(base::StringPiece categories,
+  void StartTracing(std::string_view categories,
                     StartTracingCallback callback) override {
     std::move(callback).Run(Status::OK);
   }

@@ -4,12 +4,16 @@
 
 #include "gpu/command_buffer/service/service_transfer_cache.h"
 
+#include "base/memory_coordinator/memory_coordinator_features.h"
+#include "base/memory_coordinator/utils.h"
+#include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/time/time_override.h"
 #include "cc/paint/raw_memory_transfer_cache_entry.h"
 #include "gpu/config/gpu_preferences.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace gpu {
-namespace {
 
 constexpr int kDecoderId = 2;
 constexpr auto kEntryType = cc::TransferCacheEntryType::kRawMemory;
@@ -17,12 +21,13 @@ constexpr auto kEntryType = cc::TransferCacheEntryType::kRawMemory;
 std::unique_ptr<cc::ServiceTransferCacheEntry> CreateEntry(size_t size) {
   auto entry = std::make_unique<cc::ServiceRawMemoryTransferCacheEntry>();
   std::vector<uint8_t> data(size, 0u);
-  entry->Deserialize(nullptr, data);
+  entry->Deserialize(/*gr_context=*/nullptr, /*graphite_recorder=*/nullptr,
+                     data);
   return entry;
 }
 
-TEST(ServiceTransferCacheTest, EnforcesOnPurgeMemory) {
-  ServiceTransferCache cache{GpuPreferences()};
+TEST(ServiceTransferCacheTest, EnforcesOnReleaseMemory) {
+  ServiceTransferCache cache{GpuPreferences(), base::RepeatingClosure()};
   uint32_t entry_id = 0u;
   size_t entry_size = 1024u;
   uint32_t number_of_entry = 4u;
@@ -31,8 +36,7 @@ TEST(ServiceTransferCacheTest, EnforcesOnPurgeMemory) {
       ServiceTransferCache::EntryKey(kDecoderId, kEntryType, ++entry_id),
       CreateEntry(entry_size));
   EXPECT_EQ(cache.cache_size_for_testing(), entry_size);
-  cache.PurgeMemory(
-      base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_CRITICAL);
+  cache.OnReleaseMemory(base::kCriticalMemoryPressureThreshold);
   EXPECT_EQ(cache.cache_size_for_testing(), 0u);
 
   cache.SetCacheSizeLimitForTesting(entry_size * number_of_entry);
@@ -51,14 +55,61 @@ TEST(ServiceTransferCacheTest, EnforcesOnPurgeMemory) {
       CreateEntry(entry_size));
   EXPECT_EQ(cache.cache_size_for_testing(), entry_size * 4);
 
-  cache.PurgeMemory(
-      base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_MODERATE);
+  cache.OnReleaseMemory(base::kModerateMemoryPressureThreshold);
   // Only 1/4 of cache limits remains.
   EXPECT_EQ(cache.cache_size_for_testing(), entry_size);
 }
 
+TEST(ServiceTransferCacheTest, OnUpdateMemoryLimitStateful) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(base::kStatefulMemoryPressure);
+
+  ServiceTransferCache cache{GpuPreferences(), base::RepeatingClosure()};
+  uint32_t entry_id = 0u;
+  size_t entry_size = 1024u;
+  uint32_t number_of_entry = 4u;
+
+  cache.SetCacheSizeLimitForTesting(entry_size * number_of_entry);
+  for (uint32_t i = 0; i < number_of_entry; i++) {
+    cache.CreateLocalEntry(
+        ServiceTransferCache::EntryKey(kDecoderId, kEntryType, ++entry_id),
+        CreateEntry(entry_size));
+  }
+  EXPECT_EQ(cache.cache_size_for_testing(), entry_size * 4);
+
+  // Moderate memory limit (50%). OnUpdateMemoryLimit must NOT release memory,
+  // so existing usage remains 4 * entry_size.
+  cache.OnUpdateMemoryLimit(base::kModerateMemoryPressureThreshold);
+  EXPECT_EQ(cache.cache_size_for_testing(), entry_size * 4);
+
+  // OnReleaseMemory performs the actual eviction down to 1/4 (1024 bytes).
+  cache.OnReleaseMemory(base::kModerateMemoryPressureThreshold);
+  EXPECT_EQ(cache.cache_size_for_testing(), entry_size);
+
+  // Critical memory pressure (0%) purges all entries and persists limit = 0.
+  cache.OnReleaseMemory(base::kCriticalMemoryPressureThreshold);
+  EXPECT_EQ(cache.cache_size_for_testing(), 0u);
+  // Creating a new entry while critical pressure persists immediately evicts
+  // it.
+  cache.CreateLocalEntry(
+      ServiceTransferCache::EntryKey(kDecoderId, kEntryType, ++entry_id),
+      CreateEntry(entry_size));
+  EXPECT_EQ(cache.cache_size_for_testing(), 0u);
+
+  // Restore limit to 100%
+  cache.OnUpdateMemoryLimit(base::kNoMemoryPressureThreshold);
+  cache.OnReleaseMemory(base::kNoMemoryPressureThreshold);
+  // Now we can add up to 4 entries again
+  for (uint32_t i = 0; i < 4; i++) {
+    cache.CreateLocalEntry(
+        ServiceTransferCache::EntryKey(kDecoderId, kEntryType, ++entry_id),
+        CreateEntry(entry_size));
+  }
+  EXPECT_EQ(cache.cache_size_for_testing(), entry_size * 4);
+}
+
 TEST(ServiceTransferCache, MultipleDecoderUse) {
-  ServiceTransferCache cache{GpuPreferences()};
+  ServiceTransferCache cache{GpuPreferences(), base::RepeatingClosure()};
   const uint32_t entry_id = 0u;
   const size_t entry_size = 1024u;
 
@@ -85,7 +136,7 @@ TEST(ServiceTransferCache, MultipleDecoderUse) {
 }
 
 TEST(ServiceTransferCache, DeleteEntriesForDecoder) {
-  ServiceTransferCache cache{GpuPreferences()};
+  ServiceTransferCache cache{GpuPreferences(), base::RepeatingClosure()};
   const size_t entry_size = 1024u;
   const size_t cache_size = 4 * entry_size;
   cache.SetCacheSizeLimitForTesting(cache_size);
@@ -112,5 +163,27 @@ TEST(ServiceTransferCache, DeleteEntriesForDecoder) {
             nullptr);
 }
 
-}  // namespace
+TEST(ServiceTransferCacheTest, PurgeEntryOnTimer) {
+  static base::TimeTicks now_value = base::TimeTicks::Now();
+  base::subtle::ScopedTimeClockOverrides time_override(
+      nullptr, []() { return now_value; }, nullptr);
+
+  bool flush_called = false;
+  ServiceTransferCache cache{
+      GpuPreferences(),
+      base::BindLambdaForTesting([&]() { flush_called = true; })};
+
+  uint32_t entry_id = 0u;
+  size_t entry_size = 1024u;
+  cache.CreateLocalEntry(
+      ServiceTransferCache::EntryKey(kDecoderId, kEntryType, ++entry_id),
+      CreateEntry(entry_size));
+  EXPECT_EQ(cache.entries_count_for_testing(), 1u);
+
+  now_value = now_value + base::Minutes(1);
+  cache.PruneOldEntries();
+  EXPECT_EQ(cache.entries_count_for_testing(), 0u);
+  EXPECT_TRUE(flush_called);
+}
+
 }  // namespace gpu

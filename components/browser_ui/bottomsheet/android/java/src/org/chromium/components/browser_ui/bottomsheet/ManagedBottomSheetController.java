@@ -4,17 +4,20 @@
 
 package org.chromium.components.browser_ui.bottomsheet;
 
-import org.chromium.ui.util.AccessibilityUtil;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.components.browser_ui.desktop_windowing.DesktopWindowStateManager.AppHeaderObserver;
 
 /**
- * An interface for the owning object to manage interaction between the bottom sheet and the rest
- * of the system.
+ * An interface for the owning object to manage interaction between the bottom sheet and the rest of
+ * the system.
  */
+@NullMarked
 public interface ManagedBottomSheetController
-        extends BottomSheetController, BottomSheetControllerProvider.Unowned {
+        extends BottomSheetController, BottomSheetControllerProvider.Unowned, AppHeaderObserver {
     /**
      * Temporarily suppress the bottom sheet while other UI is showing. This will not itself change
      * the content displayed by the sheet.
+     *
      * @param reason The reason the sheet was suppressed.
      * @return A token to unsuppress the sheet with.
      */
@@ -36,19 +39,21 @@ public interface ManagedBottomSheetController
     /**
      * Handle a back press event. By default this will return the bottom sheet to it's minimum /
      * peeking state if it is open. However, the sheet's content has the opportunity to intercept
-     * this event and block the default behavior {@see BottomSheetContent#handleBackPress()}.
+     * this event and block the default behavior {@link BottomSheetContent#handleBackPress()}.
+     *
      * @return {@code true} if the sheet or content handled the back press.
      */
     boolean handleBackPress();
 
     /**
      * Set the hidden ratio of the browser controls.
+     *
      * @param ratio The hidden ratio of the browser controls in range [0, 1].
      */
     void setBrowserControlsHiddenRatio(float ratio);
 
-    /** @param accessibilityUtil A mechanism for testing whether accessibility is enabled. */
-    void setAccessibilityUtil(AccessibilityUtil accessibilityUtil);
+    /** Set the current offset of the bottom controls. */
+    void setBottomControlsOffset(int bottomControlsOffset);
 
     /** Clean up any state maintained by the controller. */
     void destroy();

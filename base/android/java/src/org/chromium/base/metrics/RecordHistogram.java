@@ -6,21 +6,17 @@ package org.chromium.base.metrics;
 
 import android.text.format.DateUtils;
 
-import androidx.annotation.VisibleForTesting;
-
-import org.chromium.build.annotations.MainDex;
+import org.chromium.build.annotations.NullMarked;
 
 import java.util.List;
 
-/**
- * Java API for recording UMA histograms.
- * */
-@MainDex
+/** Java API for recording UMA histograms. */
+@NullMarked
 public class RecordHistogram {
     /**
      * Records a sample in a boolean UMA histogram of the given name. Boolean histogram has two
      * buckets, corresponding to success (true) and failure (false). This is the Java equivalent of
-     * the UMA_HISTOGRAM_BOOLEAN C++ macro.
+     * base::UmaHistogramBoolean() in C++.
      *
      * @param name name of the histogram
      * @param sample sample to be recorded, either true or false
@@ -30,17 +26,18 @@ public class RecordHistogram {
     }
 
     /**
-     * Records a sample in an enumerated histogram of the given name and boundary. Note that
-     * {@code max} identifies the histogram - it should be the same at every invocation. This is the
-     * Java equivalent of the UMA_HISTOGRAM_ENUMERATION C++ macro.
+     * Records a sample in an enumerated histogram of the given name and boundary. This is the
+     * Java equivalent of base::UmaHistogramEnumeration() with three params in C++.
+     * Note: This API and the three-param C++ API expect the last param to be the enum size, rather
+     * than the max possible value. It must be 1000 or less and all call sites of a metric must pass
+     * the same value.
      *
      * @param name name of the histogram
-     * @param sample sample to be recorded, at least 0 and at most {@code max-1}
-     * @param max upper bound for legal sample values - all sample values have to be strictly
-     *            lower than {@code max}
+     * @param sample sample to be recorded, at least 0 and at most {@code enumSize-1}
+     * @param enumSize number of possible values - all {@code sample} values must be strictly lower
      */
-    public static void recordEnumeratedHistogram(String name, int sample, int max) {
-        recordExactLinearHistogram(name, sample, max);
+    public static void recordEnumeratedHistogram(String name, int sample, int enumSize) {
+        recordExactLinearHistogram(name, sample, enumSize);
     }
 
     /**
@@ -159,13 +156,34 @@ public class RecordHistogram {
     /**
      * Records a sample in a histogram of times. Useful for recording medium durations. This is the
      * Java equivalent of the UMA_HISTOGRAM_MEDIUM_TIMES C++ macro.
-     * <p>
-     * Note that histogram samples will always be converted to milliseconds when logged.
+     *
+     * <p>Note that histogram samples will always be converted to milliseconds when logged.
      *
      * @param name name of the histogram
      * @param durationMs duration to be recorded in milliseconds
      */
     public static void recordMediumTimesHistogram(String name, long durationMs) {
+        recordCustomTimesHistogramMilliseconds(
+                name, durationMs, 1, DateUtils.MINUTE_IN_MILLIS * 3, 50);
+    }
+
+    /**
+     * Records a sample in a histogram of times. Useful for recording medium durations. This is the
+     * Java equivalent of the DEPRECATED_UMA_HISTOGRAM_MEDIUM_TIMES C++ macro.
+     *
+     * <p>Warning: This method has been deprecated in order to be consistent with this function:
+     * https://source.chromium.org/chromium/chromium/src/+/main:base/metrics/histogram_functions.h?q=UmaHistogramMediumTimes
+     * If you modify your logging to use the new method, you will be making a meaningful semantic
+     * change to your data, and should change your histogram's name, as per the guidelines at
+     * https://chromium.googlesource.com/chromium/src/tools/+/HEAD/metrics/histograms/README.md#revising-histograms.
+     *
+     * <p>Note that histogram samples will always be converted to milliseconds when logged.
+     *
+     * @param name name of the histogram
+     * @param durationMs duration to be recorded in milliseconds
+     */
+    @Deprecated
+    public static void deprecatedRecordMediumTimesHistogram(String name, long durationMs) {
         recordCustomTimesHistogramMilliseconds(
                 name, durationMs, 10, DateUtils.MINUTE_IN_MILLIS * 3, 50);
     }
@@ -216,16 +234,66 @@ public class RecordHistogram {
     }
 
     /**
-     * Records a sample in a histogram of sizes in KB. This is the Java equivalent of the
-     * UMA_HISTOGRAM_MEMORY_KB C++ macro.
-     * <p>
-     * Good for sizes up to about 500MB.
+     * Records a sample in a histogram of microsecond times. Useful for recording very short
+     * durations. This is the Java equivalent of the UMA_HISTOGRAM_MICRO_TIMES C++ macro.
+     *
+     * <p>Note that (like UMA_HISTOGRAM_MICRO_TIMES) this is measured up to 1 second, not 10 seconds
+     * like the base::UmaHistogramMicrosecondsTimes function.
      *
      * @param name name of the histogram
-     * @param sizeInkB Sample to record in KB
+     * @param durationMicros duration to be recorded in microseconds
+     */
+    public static void recordMicroTimesHistogram(String name, long durationMicros) {
+        recordCustomMicroTimesHistogram(name, durationMicros, 1, 1_000_000, 50);
+    }
+
+    /**
+     * Records a sample in a histogram of microsecond times with custom buckets. This is the Java
+     * equivalent of the UMA_HISTOGRAM_CUSTOM_MICRO_TIMES C++ macro.
+     *
+     * @param name name of the histogram
+     * @param durationMicros duration to be recorded in microseconds; expected to fall in range
+     *     {@code [min, max)}
+     * @param min the smallest expected sample value; at least 1
+     * @param max the smallest sample value that will be recorded in overflow bucket
+     * @param numBuckets the number of buckets including underflow ({@code [0, min)}) and overflow
+     *     ({@code [max, inf)}) buckets; at most 100
+     */
+    public static void recordCustomMicroTimesHistogram(
+            String name, long durationMicros, long min, long max, int numBuckets) {
+        UmaRecorderHolder.get()
+                .recordExponentialHistogram(
+                        name,
+                        clampToInt(durationMicros),
+                        clampToInt(min),
+                        clampToInt(max),
+                        numBuckets);
+    }
+
+    /**
+     * Records a sample in a histogram of sizes in KB. This is the Java equivalent of the
+     * UMA_HISTOGRAM_MEMORY_KB C++ macro.
+     *
+     * <p>Good for sizes up to about 500MB.
+     *
+     * @param name name of the histogram
+     * @param sizeInKB Sample to record in KB
      */
     public static void recordMemoryKBHistogram(String name, int sizeInKB) {
         UmaRecorderHolder.get().recordExponentialHistogram(name, sizeInKB, 1000, 500000, 50);
+    }
+
+    /**
+     * Records a sample in a histogram of sizes in MB. This is the Java equivalent of the
+     * UMA_HISTOGRAM_MEMORY_MEDIUM_MB C++ macro.
+     * <p>
+     * Good for sizes up to about 4000MB.
+     *
+     * @param name name of the histogram
+     * @param sizeInMB Sample to record in MB
+     */
+    public static void recordMemoryMediumMBHistogram(String name, int sizeInMB) {
+        UmaRecorderHolder.get().recordExponentialHistogram(name, sizeInMB, 1, 4000, 100);
     }
 
     /**
@@ -254,21 +322,21 @@ public class RecordHistogram {
 
     private static void recordCustomTimesHistogramMilliseconds(
             String name, long duration, long min, long max, int numBuckets) {
-        UmaRecorderHolder.get().recordExponentialHistogram(
-                name, clampToInt(duration), clampToInt(min), clampToInt(max), numBuckets);
+        UmaRecorderHolder.get()
+                .recordExponentialHistogram(
+                        name, clampToInt(duration), clampToInt(min), clampToInt(max), numBuckets);
     }
 
     /**
      * Returns the number of samples recorded in the given bucket of the given histogram.
      *
-     * WARNING:
-     * Does not reset between batched tests. Use
+     * @deprecated Raw counts are easy to misuse. Does not reset between batched tests. Use
      * {@link org.chromium.base.test.util.HistogramWatcher} instead.
      *
      * @param name name of the histogram to look up
      * @param sample the bucket containing this sample value will be looked up
      */
-    @VisibleForTesting
+    @Deprecated
     public static int getHistogramValueCountForTesting(String name, int sample) {
         return UmaRecorderHolder.get().getHistogramValueCountForTesting(name, sample);
     }
@@ -276,18 +344,23 @@ public class RecordHistogram {
     /**
      * Returns the number of samples recorded for the given histogram.
      *
-     * WARNING:
-     * Does not reset between batched tests. Use
+     * @deprecated Raw counts are easy to misuse. Does not reset between batched tests. Use
      * {@link org.chromium.base.test.util.HistogramWatcher} instead.
      *
      * @param name name of the histogram to look up
      */
-    @VisibleForTesting
+    @Deprecated
     public static int getHistogramTotalCountForTesting(String name) {
         return UmaRecorderHolder.get().getHistogramTotalCountForTesting(name);
     }
 
-    @VisibleForTesting
+    /**
+     * Returns the buckets of samples recorded for the given histogram.
+     *
+     * Use {@link org.chromium.base.test.util.HistogramWatcher} instead of using this directly.
+     *
+     * @param name name of the histogram to look up
+     */
     public static List<HistogramBucket> getHistogramSamplesForTesting(String name) {
         return UmaRecorderHolder.get().getHistogramSamplesForTesting(name);
     }

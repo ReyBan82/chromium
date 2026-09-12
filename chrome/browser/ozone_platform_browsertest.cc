@@ -10,7 +10,7 @@ namespace ui {
 
 // Configures the ozone platform so it would return an error early at the stage
 // of initialisation.  In such event, the browser should gracefully exit.
-// See https://crbug.com/1280138.
+// See https://crbug.com/40811268.
 class OzonePlatformTest : public InProcessBrowserTest {
  public:
   OzonePlatformTest() {
@@ -23,7 +23,17 @@ class OzonePlatformTest : public InProcessBrowserTest {
   }
 };
 
-IN_PROC_BROWSER_TEST_F(OzonePlatformTest, ExitsGracefullyOnPlatormInitFailure) {
+// TODO(crbug.com/40901715) Flaky during teardown on linux ASan/LSan builder.
+#if BUILDFLAG(IS_LINUX) && \
+    (defined(ADDRESS_SANITIZER) || defined(LEAK_SANITIZER))
+#define MAYBE_ExitsGracefullyOnPlatormInitFailure \
+  DISABLED_ExitsGracefullyOnPlatormInitFailure
+#else
+#define MAYBE_ExitsGracefullyOnPlatormInitFailure \
+  ExitsGracefullyOnPlatormInitFailure
+#endif
+IN_PROC_BROWSER_TEST_F(OzonePlatformTest,
+                       MAYBE_ExitsGracefullyOnPlatormInitFailure) {
   // This should never be hit.  The browser is expected to exit before entering
   // the test body.
   ASSERT_TRUE(false);

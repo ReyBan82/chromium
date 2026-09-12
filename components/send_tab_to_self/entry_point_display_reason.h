@@ -5,7 +5,7 @@
 #ifndef COMPONENTS_SEND_TAB_TO_SELF_ENTRY_POINT_DISPLAY_REASON_H_
 #define COMPONENTS_SEND_TAB_TO_SELF_ENTRY_POINT_DISPLAY_REASON_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
 
 class GURL;
 class PrefService;
@@ -16,7 +16,7 @@ class SyncService;
 
 namespace send_tab_to_self {
 
-class SendTabToSelfSyncService;
+class SendTabToSelfModel;
 
 // A Java counterpart will be generated for this enum.
 // GENERATED_JAVA_ENUM_PACKAGE: (
@@ -29,18 +29,29 @@ enum class EntryPointDisplayReason {
   // that. "Might" because the list of target devices can't be known yet, it
   // could be empty (see below).
   kOfferSignIn,
+  // The user is in a signin pending / reauth state (e.g. invalid credentials).
+  // Offer reauthentication if the enhanced desktop UI feature is enabled.
+  kOfferReauth,
   // All the conditions for send-tab-to-self are met, but there is no valid
   // target device. In that case the entry point should inform the user they
   // can enjoy the feature by signing in on other devices.
   kInformNoTargetDevice,
+  kMaxValue = kInformNoTargetDevice,
 };
 
-// |sync_service| and |send_tab_to_self_sync_service| can be null.
-absl::optional<EntryPointDisplayReason> GetEntryPointDisplayReason(
+namespace internal {
+
+// Use SendTabToSelfService::GetEntryPointDisplayReason() instead.
+// `sync_service` and `send_tab_to_self_sync_model` can be null and that's
+// handled as if send-tab-to-self or the sync backbone aren't working, so the
+// entry point should be hidden (returns nullopt).
+std::optional<EntryPointDisplayReason> GetEntryPointDisplayReason(
     const GURL& url_to_share,
     syncer::SyncService* sync_service,
-    SendTabToSelfSyncService* send_tab_to_self_sync_service,
+    SendTabToSelfModel* send_tab_to_self_model,
     PrefService* pref_service);
+
+}  // namespace internal
 
 }  // namespace send_tab_to_self
 

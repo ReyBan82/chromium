@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 
+#include "base/compiler_specific.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/gfx/nine_image_painter.h"
 
@@ -13,13 +14,13 @@ namespace ui {
 
 namespace {
 
-std::vector<gfx::ImageSkia> ImageIdsToImages(const int image_ids[]) {
-  DCHECK(image_ids);
+std::vector<gfx::ImageSkia> ImageIdsToImages(const NineImageIds& image_ids) {
   ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
-  std::vector<gfx::ImageSkia> images(9);
-  for (size_t i = 0; i < 9; ++i) {
-    if (image_ids[i] != 0)
+  std::vector<gfx::ImageSkia> images(gfx::kNineImageCount);
+  for (size_t i = 0; i < gfx::kNineImageCount; ++i) {
+    if (image_ids[i] != 0) {
       images[i] = *rb.GetImageSkiaNamed(image_ids[i]);
+    }
   }
   return images;
 }
@@ -27,7 +28,7 @@ std::vector<gfx::ImageSkia> ImageIdsToImages(const int image_ids[]) {
 }  // namespace
 
 std::unique_ptr<gfx::NineImagePainter> CreateNineImagePainter(
-    const int image_ids[]) {
+    const NineImageIds& image_ids) {
   return std::make_unique<gfx::NineImagePainter>(ImageIdsToImages(image_ids));
 }
 

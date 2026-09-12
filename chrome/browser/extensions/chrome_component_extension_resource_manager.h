@@ -8,6 +8,14 @@
 #include <memory>
 
 #include "extensions/browser/component_extension_resource_manager.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+namespace content {
+class BrowserContext;
+}
 
 namespace extensions {
 
@@ -28,7 +36,8 @@ class ChromeComponentExtensionResourceManager
                                     const base::FilePath& resource_path,
                                     int* resource_id) const override;
   const ui::TemplateReplacements* GetTemplateReplacementsForExtension(
-      const std::string& extension_id) const override;
+      const ExtensionId& extension_id,
+      content::BrowserContext* context) const override;
 
  private:
   class Data;

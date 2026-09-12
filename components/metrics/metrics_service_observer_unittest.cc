@@ -7,15 +7,19 @@
 #include "base/base64.h"
 #include "base/callback_list.h"
 #include "base/json/json_string_value_serializer.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/bind.h"
-#include "base/test/test_simple_task_runner.h"
+#include "base/test/task_environment.h"
 #include "components/metrics/log_decoder.h"
 #include "components/metrics/metrics_log.h"
 #include "components/metrics/metrics_logs_event_manager.h"
 #include "components/metrics/metrics_pref_names.h"
+#include "components/metrics/metrics_scheduler.h"
 #include "components/metrics/metrics_service.h"
 #include "components/metrics/metrics_state_manager.h"
+#include "components/metrics/metrics_upload_scheduler.h"
+#include "components/metrics/startup_visibility.h"
 #include "components/metrics/test/test_enabled_state_provider.h"
 #include "components/metrics/test/test_metrics_service_client.h"
 #include "components/metrics/unsent_log_store_metrics_impl.h"
@@ -29,16 +33,15 @@ namespace {
 class MetricsServiceObserverTest : public testing::Test {
  public:
   MetricsServiceObserverTest()
-      : task_runner_(new base::TestSimpleTaskRunner),
-        task_runner_current_default_handle_(task_runner_),
-        enabled_state_provider_(/*consent=*/true, /*enabled=*/true) {}
+      : enabled_state_provider_(/*consent=*/true, /*enabled=*/true) {}
   ~MetricsServiceObserverTest() override = default;
 
   void SetUp() override {
     // The following call is needed for calling MetricsService::Start(), which
     // sets up callbacks for user actions (which in turn verifies that a task
     // runner is provided).
-    base::SetRecordActionTaskRunner(task_runner_);
+    base::SetRecordActionTaskRunner(
+        task_environment_.GetMainThreadTaskRunner());
     // The following call is needed for instantiating an instance of
     // MetricsStateManager, which reads various prefs in its constructor.
     MetricsService::RegisterPrefs(local_state_.registry());
@@ -64,9 +67,8 @@ class MetricsServiceObserverTest : public testing::Test {
   PrefService* local_state() { return &local_state_; }
 
  protected:
-  scoped_refptr<base::TestSimpleTaskRunner> task_runner_;
-  base::SingleThreadTaskRunner::CurrentDefaultHandle
-      task_runner_current_default_handle_;
+  base::test::TaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 
  private:
   TestEnabledStateProvider enabled_state_provider_;
@@ -101,8 +103,9 @@ TEST_F(MetricsServiceObserverTest, SuccessfulLogUpload) {
   service.InitializeMetricsRecordingState();
   service.Start();
 
-  // Run pending tasks to finish init task and complete the first ongoing log.
-  task_runner_->RunPendingTasks();
+  // Fast forward the time until the the first ongoing log is completed.
+  task_environment_.FastForwardBy(
+      base::Seconds(MetricsScheduler::GetInitialIntervalSeconds()));
 
   // Verify that |logs_observer| is aware of the log.
   std::vector<std::unique_ptr<MetricsServiceObserver::Log>>* observed_logs =
@@ -122,8 +125,9 @@ TEST_F(MetricsServiceObserverTest, SuccessfulLogUpload) {
   EXPECT_EQ(log_info->events[1].event,
             MetricsLogsEventManager::LogEvent::kLogStaged);
 
-  // Run pending tasks to trigger the uploading of the log.
-  task_runner_->RunPendingTasks();
+  // Fast forward the time to trigger the uploading of the log.
+  task_environment_.FastForwardBy(
+      MetricsUploadScheduler::GetUnsentLogsInterval());
 
   // Verify that |logs_observer| observed the log being sent.
   ASSERT_EQ(log_info->events.size(), 3U);
@@ -160,8 +164,9 @@ TEST_F(MetricsServiceObserverTest, UnsuccessfulLogUpload) {
   service.InitializeMetricsRecordingState();
   service.Start();
 
-  // Run pending tasks to finish init task and complete the first ongoing log.
-  task_runner_->RunPendingTasks();
+  // Fast forward the time until the the first ongoing log is completed.
+  task_environment_.FastForwardBy(
+      base::Seconds(MetricsScheduler::GetInitialIntervalSeconds()));
 
   // Verify that |logs_observer| is aware of the log.
   std::vector<std::unique_ptr<MetricsServiceObserver::Log>>* observed_logs =
@@ -179,9 +184,10 @@ TEST_F(MetricsServiceObserverTest, UnsuccessfulLogUpload) {
   EXPECT_EQ(log_info->events[1].event,
             MetricsLogsEventManager::LogEvent::kLogStaged);
 
-  // Run pending tasks to trigger the uploading of the log, and verify that
+  // Fast forward the time to trigger the uploading of the log, and verify that
   // |logs_observer| observed this event.
-  task_runner_->RunPendingTasks();
+  task_environment_.FastForwardBy(
+      MetricsUploadScheduler::GetUnsentLogsInterval());
   EXPECT_EQ(log_info->events.size(), 3U);
   EXPECT_EQ(log_info->events.back().event,
             MetricsLogsEventManager::LogEvent::kLogUploading);
@@ -195,9 +201,11 @@ TEST_F(MetricsServiceObserverTest, UnsuccessfulLogUpload) {
   EXPECT_EQ(log_info->events.back().event,
             MetricsLogsEventManager::LogEvent::kLogStaged);
 
-  // Run pending tasks to trigger the uploading of the log, and verify that
-  // |logs_observer| observed this event.
-  task_runner_->RunPendingTasks();
+  // Fast forward the time to trigger the re-upload of the log, and verify that
+  // |logs_observer| observed this event. Since the last upload failed, the time
+  // before the next upload is triggered is different (longer).
+  task_environment_.FastForwardBy(
+      MetricsUploadScheduler::GetInitialBackoffInterval());
   EXPECT_EQ(log_info->events.size(), 5U);
   EXPECT_EQ(log_info->events.back().event,
             MetricsLogsEventManager::LogEvent::kLogUploading);
@@ -223,7 +231,7 @@ TEST_F(MetricsServiceObserverTest, TrimLargeLog) {
   // Set the max log size to be 1 byte so that pretty much all logs will be
   // trimmed. We don't set it to 0 bytes because that is a special value that
   // represents no max size.
-  client.set_max_ongoing_log_size(1);
+  client.set_max_ongoing_log_size_bytes(1);
 
   MetricsService service(GetMetricsStateManager(), &client, local_state());
 
@@ -266,11 +274,11 @@ TEST_F(MetricsServiceObserverTest, TrimLargeLog) {
 TEST_F(MetricsServiceObserverTest, TrimLongLogList) {
   TestMetricsServiceClient client;
 
-  // Set the mininimum log count to 1 and minimum log size to 1 byte. This
+  // Set the minimum log count to 1 and minimum log size to 1 byte. This
   // essentially means that the log store, when trimming logs, will only keep
   // the most recent one. I.e., after storing one log, it will trim the rest
   // due to having stored enough logs.
-  client.set_min_ongoing_log_queue_size(1);
+  client.set_min_ongoing_log_queue_size_bytes(1);
   client.set_min_ongoing_log_queue_count(1);
 
   MetricsService service(GetMetricsStateManager(), &client, local_state());
@@ -438,9 +446,7 @@ TEST_F(MetricsServiceObserverTest, UmaLogType) {
     auto alternate_ongoing_log_store = std::make_unique<UnsentLogStore>(
         std::make_unique<UnsentLogStoreMetricsImpl>(), local_state(),
         prefs::kMetricsOngoingLogs, prefs::kMetricsOngoingLogsMetadata,
-        storage_limits.min_ongoing_log_queue_count,
-        storage_limits.min_ongoing_log_queue_size,
-        storage_limits.max_ongoing_log_size, client.GetUploadSigningKey(),
+        storage_limits.ongoing_log_queue_limits, client.GetUploadSigningKey(),
         // |logs_event_manager| will be set by |test_log_store| directly in
         // MetricsLogStore::SetAlternateOngoingLogStore().
         /*logs_event_manager=*/nullptr);
@@ -486,16 +492,18 @@ TEST_P(MetricsServiceObserverExportTest, ExportLogsAsJson) {
   service.InitializeMetricsRecordingState();
   service.Start();
 
-  // Run pending tasks to finish init task and complete the first ongoing log.
-  task_runner_->RunPendingTasks();
+  // Fast forward the time until the the first ongoing log is completed.
+  task_environment_.FastForwardBy(
+      base::Seconds(MetricsScheduler::GetInitialIntervalSeconds()));
 
   // Stage the log.
   MetricsLogStore* test_log_store = service.LogStoreForTest();
   test_log_store->StageNextLog();
   ASSERT_TRUE(test_log_store->has_staged_log());
 
-  // Run pending tasks to trigger the uploading of the log.
-  task_runner_->RunPendingTasks();
+  // Fast forward the time to trigger the uploading of the log.
+  task_environment_.FastForwardBy(
+      MetricsUploadScheduler::GetUnsentLogsInterval());
 
   // Export logs as a JSON string.
   std::string json;
@@ -512,7 +520,7 @@ TEST_P(MetricsServiceObserverExportTest, ExportLogsAsJson) {
   // |logs_observer| should be aware of a single log, which has been staged and
   // is being uploaded.
   ASSERT_TRUE(logs_value->is_dict());
-  base::Value::Dict& logs_dict = logs_value->GetDict();
+  base::DictValue& logs_dict = logs_value->GetDict();
 
   base::Value* log_type = logs_dict.Find("logType");
   ASSERT_TRUE(log_type);
@@ -522,12 +530,12 @@ TEST_P(MetricsServiceObserverExportTest, ExportLogsAsJson) {
   base::Value* logs_list_value = logs_dict.Find("logs");
   ASSERT_TRUE(logs_list_value);
   ASSERT_TRUE(logs_list_value->is_list());
-  base::Value::List& logs_list = logs_list_value->GetList();
+  base::ListValue& logs_list = logs_list_value->GetList();
   ASSERT_EQ(logs_list.size(), 1U);
 
   base::Value& log_value = logs_list.front();
   ASSERT_TRUE(log_value.is_dict());
-  base::Value::Dict& log_dict = log_value.GetDict();
+  base::DictValue& log_dict = log_value.GetDict();
 
   base::Value* uma_log_type = log_dict.Find("type");
   ASSERT_TRUE(uma_log_type);
@@ -569,12 +577,12 @@ TEST_P(MetricsServiceObserverExportTest, ExportLogsAsJson) {
   base::Value* log_events = log_dict.Find("events");
   ASSERT_TRUE(log_events);
   ASSERT_TRUE(log_events->is_list());
-  base::Value::List& log_events_list = log_events->GetList();
+  base::ListValue& log_events_list = log_events->GetList();
   ASSERT_EQ(log_events_list.size(), 3U);
 
   base::Value& first_log_event = log_events_list[0];
   ASSERT_TRUE(first_log_event.is_dict());
-  base::Value::Dict& first_log_event_dict = first_log_event.GetDict();
+  base::DictValue& first_log_event_dict = first_log_event.GetDict();
   base::Value* first_log_event_string = first_log_event_dict.Find("event");
   ASSERT_TRUE(first_log_event_string);
   ASSERT_TRUE(first_log_event_string->is_string());
@@ -586,7 +594,7 @@ TEST_P(MetricsServiceObserverExportTest, ExportLogsAsJson) {
 
   base::Value& second_log_event = log_events_list[1];
   ASSERT_TRUE(second_log_event.is_dict());
-  base::Value::Dict& second_log_event_dict = second_log_event.GetDict();
+  base::DictValue& second_log_event_dict = second_log_event.GetDict();
   base::Value* second_log_event_string = second_log_event_dict.Find("event");
   ASSERT_TRUE(second_log_event_string);
   ASSERT_TRUE(second_log_event_string->is_string());
@@ -598,7 +606,7 @@ TEST_P(MetricsServiceObserverExportTest, ExportLogsAsJson) {
 
   base::Value& third_log_event = log_events_list[2];
   ASSERT_TRUE(third_log_event.is_dict());
-  base::Value::Dict& third_log_event_dict = third_log_event.GetDict();
+  base::DictValue& third_log_event_dict = third_log_event.GetDict();
   base::Value* third_log_event_string = third_log_event_dict.Find("event");
   ASSERT_TRUE(third_log_event_string);
   ASSERT_TRUE(third_log_event_string->is_string());

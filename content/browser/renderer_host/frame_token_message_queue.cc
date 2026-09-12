@@ -4,7 +4,11 @@
 
 #include "content/browser/renderer_host/frame_token_message_queue.h"
 
+#include "base/debug/crash_logging.h"
+#include "base/debug/dump_without_crashing.h"
 #include "base/functional/bind.h"
+#include "base/strings/string_number_conversions.h"
+#include "components/viz/common/quads/compositor_frame_metadata.h"
 
 namespace content {
 
@@ -32,9 +36,21 @@ void FrameTokenMessageQueue::DidProcessFrame(uint32_t frame_token,
   // TODO(jonross): we should consider updating LocalSurfaceId to also track
   // frame_token. So that we could properly differentiate between origins of
   // frame. As we cannot enforce ordering between Reset Renderers.
-  if ((frame_token <= last_received_frame_token_) &&
+  if (frame_token <= last_received_frame_token_ &&
       !(last_received_frame_token_reset_ &&
         last_received_frame_token_reset_ != frame_token)) {
+    // TODO(crbug.com/431761865): Remove after the bug is fixed.
+    SCOPED_CRASH_KEY_STRING32("content", "Frame token",
+                              base::NumberToString(frame_token));
+    SCOPED_CRASH_KEY_STRING32("content", "Frame token (last)",
+                              base::NumberToString(last_received_frame_token_));
+    if (last_received_frame_token_reset_) {
+      SCOPED_CRASH_KEY_STRING32(
+          "content", "Frame token (last reset)",
+          base::NumberToString(last_received_frame_token_reset_));
+    }
+    SCOPED_CRASH_KEY_STRING32("content", "Main frame last committed URL",
+                              client_->GetMainFrameLastCommittedURLSpec());
     client_->OnInvalidFrameToken(frame_token);
     return;
   }
@@ -48,11 +64,17 @@ void FrameTokenMessageQueue::DidProcessFrame(uint32_t frame_token,
 
   // std::multimap already sorts on keys, so this will process all enqueued
   // messages up to the current frame token.
-  for (auto it = callback_map_.begin(); it != upper_bound; ++it)
-    std::move(it->second).Run(activation_time);
+  std::vector<base::OnceCallback<void(base::TimeTicks)>> callbacks;
+  for (auto it = callback_map_.begin(); it != upper_bound; ++it) {
+    callbacks.push_back(std::move(it->second));
+  }
 
   // Clear all callbacks up to the current frame token.
   callback_map_.erase(callback_map_.begin(), upper_bound);
+
+  for (auto& callback : callbacks) {
+    std::move(callback).Run(activation_time);
+  }
 }
 
 void FrameTokenMessageQueue::EnqueueOrRunFrameTokenCallback(

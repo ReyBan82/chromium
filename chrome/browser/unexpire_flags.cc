@@ -4,13 +4,16 @@
 
 #include "chrome/browser/unexpire_flags.h"
 
-#include "base/containers/contains.h"
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/containers/flat_map.h"
+#include "base/feature_list.h"
 #include "base/no_destructor.h"
 #include "chrome/browser/expired_flags_list.h"
 #include "chrome/browser/unexpire_flags_gen.h"
 #include "chrome/common/chrome_version.h"
-#include "components/flags_ui/flags_storage.h"
+#include "components/webui/flags/flags_storage.h"
 
 namespace flags {
 
@@ -24,13 +27,13 @@ static FlagNameToExpirationMap* GetFlagExpirationOverrideMap() {
 }
 
 int ExpirationMilestoneForFlag(const char* flag) {
-  if (base::Contains(*GetFlagExpirationOverrideMap(), flag)) {
+  if (GetFlagExpirationOverrideMap()->contains(flag)) {
     return GetFlagExpirationOverrideMap()->at(flag);
   }
 
-  for (int i = 0; kExpiredFlags[i].name; ++i) {
-    const ExpiredFlag* f = &kExpiredFlags[i];
-    if (strcmp(f->name, flag)) {
+  for (int i = 0; UNSAFE_TODO(kExpiredFlags[i]).name; ++i) {
+    const ExpiredFlag* f = &UNSAFE_TODO(kExpiredFlags[i]);
+    if (UNSAFE_TODO(strcmp(f->name, flag))) {
       continue;
     }
 
@@ -58,7 +61,8 @@ std::set<int> UnexpiredMilestonesFromStorage(
   std::set<int> unexpired;
   for (const auto& f : storage->GetFlags()) {
     int mstone;
-    if (sscanf(f.c_str(), "temporary-unexpire-flags-m%d@1", &mstone) == 1) {
+    if (UNSAFE_TODO(sscanf(f.c_str(), "temporary-unexpire-flags-m%d@1",
+                           &mstone)) == 1) {
       unexpired.insert(mstone);
     }
   }
@@ -106,7 +110,7 @@ bool IsFlagExpired(const flags_ui::FlagsStorage* storage,
   // unexpiry happens during FeatureList initialization.
   // TODO(ellyjones): what might we do about that?
   std::set<int> unexpired_milestones = UnexpiredMilestonesFromStorage(storage);
-  if (base::Contains(unexpired_milestones, mstone)) {
+  if (unexpired_milestones.contains(mstone)) {
     return false;
   }
 

@@ -2,16 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {CameraManager} from '../../device/index.js';
-import {
-  PhotoResolutionOption,
-  PhotoResolutionOptionGroup,
-} from '../../device/type.js';
+import type {CameraManager} from '../../device/index.js';
+import type {PhotoResolutionOption, PhotoResolutionOptionGroup} from '../../device/type.js';
 import * as dom from '../../dom.js';
 import * as expert from '../../expert.js';
 import {I18nString} from '../../i18n_string.js';
 import * as loadTimeData from '../../models/load_time_data.js';
-import {Facing, Resolution, ViewName} from '../../type.js';
+import type {Facing} from '../../type.js';
+import {Resolution, ViewName} from '../../type.js';
 import {instantiateTemplate, setupI18nElements} from '../../util.js';
 
 import {BaseSettings} from './base.js';
@@ -31,7 +29,7 @@ export class PhotoResolutionSettings extends BaseSettings {
     super(ViewName.PHOTO_RESOLUTION_SETTINGS);
 
     this.menu = dom.getFrom(this.root, 'div.menu', HTMLDivElement);
-    cameraManager.registerCameraUI({
+    cameraManager.registerCameraUi({
       onCameraUnavailable: () => {
         for (const input of dom.getAllFrom(
                  this.menu, 'input', HTMLInputElement)) {
@@ -98,16 +96,16 @@ export class PhotoResolutionSettings extends BaseSettings {
     input.checked = option.checked;
 
     if (!input.checked) {
-      input.addEventListener('click', (event) => {
+      input.addEventListener('click', async (event) => {
+        event.preventDefault();
         this.focusedDeviceId = deviceId;
         this.menuScrollTop = this.menu.scrollTop;
         if (expert.isEnabled(expert.ExpertOption.SHOW_ALL_RESOLUTIONS)) {
-          this.cameraManager.setPrefPhotoResolution(deviceId, resolution);
+          await this.cameraManager.setPrefPhotoResolution(deviceId, resolution);
         } else {
-          this.cameraManager.setPrefPhotoResolutionLevel(
+          await this.cameraManager.setPrefPhotoResolutionLevel(
               deviceId, option.resolutionLevel);
         }
-        event.preventDefault();
       });
     }
     this.menu.appendChild(optionElement);

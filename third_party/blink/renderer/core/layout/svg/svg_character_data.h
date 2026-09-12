@@ -26,11 +26,13 @@
 
 namespace blink {
 
-struct SVGCharacterData {
+struct SvgCharacterData {
   DISALLOW_NEW();
-  SVGCharacterData();
+  SvgCharacterData() = default;
 
-  static float EmptyValue() { return std::numeric_limits<float>::quiet_NaN(); }
+  static constexpr float EmptyValue() {
+    return std::numeric_limits<float>::quiet_NaN();
+  }
   static bool IsEmptyValue(float value) { return std::isnan(value); }
 
   bool HasX() const { return !IsEmptyValue(x); }
@@ -39,21 +41,15 @@ struct SVGCharacterData {
   bool HasDy() const { return !IsEmptyValue(dy); }
   bool HasRotate() const { return !IsEmptyValue(rotate); }
 
-  float x;
-  float y;
-  float dx;
-  float dy;
-  float rotate;
+  float x = EmptyValue();
+  float y = EmptyValue();
+  float dx = EmptyValue();
+  float dy = EmptyValue();
+  float rotate = EmptyValue();
+  bool anchored_chunk = false;
 };
 
-inline SVGCharacterData::SVGCharacterData()
-    : x(EmptyValue()),
-      y(EmptyValue()),
-      dx(EmptyValue()),
-      dy(EmptyValue()),
-      rotate(EmptyValue()) {}
-
-typedef HashMap<unsigned, SVGCharacterData> SVGCharacterDataMap;
+std::ostream& operator<<(std::ostream& ostream, const SvgCharacterData& data);
 
 }  // namespace blink
 

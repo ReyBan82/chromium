@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var tabId;
+let tabId;
 
 chrome.test.runTests([
   async function init() {
@@ -17,5 +17,5 @@ chrome.test.runTests([
     const result = await chrome.sidePanel.getOptions({tabId: tabId});
     chrome.test.assertEq(expected, result);
     chrome.test.succeed();
-  }
+  },
 ]);

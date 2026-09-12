@@ -7,6 +7,8 @@
 #include <map>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/singleton.h"
 #include "base/strings/stringprintf.h"
 #include "chrome/browser/ash/app_list/app_list_syncable_service.h"
 #include "chrome/browser/ash/app_list/app_list_syncable_service_factory.h"
@@ -15,7 +17,6 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sync/test/integration/sync_datatype_helper.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
-#include "chrome/common/extensions/sync_helper.h"
 #include "extensions/browser/app_sorting.h"
 #include "extensions/browser/extension_system.h"
 
@@ -51,8 +52,6 @@ bool SyncAppListHelper::AppListMatch(Profile* profile1, Profile* profile2) {
       AppListSyncableServiceFactory::GetForProfile(profile1);
   AppListSyncableService* service2 =
       AppListSyncableServiceFactory::GetForProfile(profile2);
-  // Note: sync item entries may not exist in verifier, but item lists should
-  // match.
   if (service1->GetModelUpdater()->ItemCount() !=
       service2->GetModelUpdater()->ItemCount()) {
     LOG(ERROR) << "Model item count: "
@@ -87,7 +86,8 @@ bool SyncAppListHelper::AppListMatch(Profile* profile1, Profile* profile2) {
 }
 
 bool SyncAppListHelper::AllProfilesHaveSameAppList(size_t* size_out) {
-  const std::vector<Profile*>& profiles = test_->GetAllProfiles();
+  const std::vector<raw_ptr<Profile, VectorExperimental>>& profiles =
+      test_->GetAllProfiles();
   for (Profile* profile : profiles) {
     if (profile != profiles.front() &&
         !AppListMatch(profiles.front(), profile)) {

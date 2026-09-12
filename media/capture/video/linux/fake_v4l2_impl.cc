@@ -9,16 +9,23 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <bit>
 #include <queue>
 #include <vector>
 
 #include "base/bits.h"
+#include "base/compiler_specific.h"
 #include "base/containers/flat_set.h"
+#include "base/containers/heap_array.h"
 #include "base/functional/bind.h"
-#include "base/ranges/algorithm.h"
+#include "base/logging.h"
+#include "base/memory/raw_ptr.h"
+#include "base/notimplemented.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
+#include "media/base/test_data_util.h"
 #include "media/base/video_frame.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -27,6 +34,10 @@
 #endif
 
 namespace media {
+
+constexpr char kMjpegFrameFile[] = "one_frame_1280x720.mjpeg";
+constexpr unsigned int kMjpegFrameWidth = 1280;
+constexpr unsigned int kMjpegFrameHeight = 720;
 
 static const int kInvalidId = -1;
 static const int kSuccessReturnValue = 0;
@@ -49,7 +60,7 @@ int Error(int error_code) {
 }
 
 __u32 RoundUpToMultipleOfPageSize(__u32 size) {
-  CHECK(base::bits::IsPowerOfTwo(getpagesize()));
+  CHECK(std::has_single_bit(base::checked_cast<__u32>(getpagesize())));
   return base::bits::AlignUp(size, base::checked_cast<__u32>(getpagesize()));
 }
 
@@ -67,8 +78,50 @@ struct FakeV4L2Buffer {
   __u32 flags;
   timeval timestamp;
   __u32 sequence;
-  std::unique_ptr<uint8_t[]> data;
+  base::HeapArray<uint8_t> data;
 };
+
+VideoPixelFormat V4L2FourccToPixelFormat(uint32_t fourcc) {
+  switch (fourcc) {
+    case V4L2_PIX_FMT_YUV420:
+      return PIXEL_FORMAT_I420;
+    case V4L2_PIX_FMT_NV12:
+      return PIXEL_FORMAT_NV12;
+    case V4L2_PIX_FMT_Y16:
+      return PIXEL_FORMAT_Y16;
+    case V4L2_PIX_FMT_Z16:
+      return PIXEL_FORMAT_Y16;
+    case V4L2_PIX_FMT_YUYV:
+      return PIXEL_FORMAT_YUY2;
+    case V4L2_PIX_FMT_RGB24:
+      return PIXEL_FORMAT_RGB24;
+    case V4L2_PIX_FMT_MJPEG:
+      return PIXEL_FORMAT_MJPEG;
+    default:
+      return PIXEL_FORMAT_I420;
+  }
+}
+
+size_t GetV4L2FrameSize(uint32_t pixelformat,
+                        unsigned int width,
+                        unsigned int height) {
+  auto size = VideoFrame::AllocationSize(V4L2FourccToPixelFormat(pixelformat),
+                                         gfx::Size(width, width));
+  if (pixelformat == V4L2_PIX_FMT_MJPEG) {
+    DCHECK_EQ(width, kMjpegFrameWidth);
+    DCHECK_EQ(height, kMjpegFrameHeight);
+    auto file_path = media::GetTestDataFilePath(kMjpegFrameFile);
+    if (!file_path.empty()) {
+      FILE* fp = fopen(file_path.value().c_str(), "rb");
+      if (fp) {
+        fseek(fp, 0, SEEK_END);
+        size = ftell(fp);
+        fclose(fp);
+      }
+    }
+  }
+  return size;
+}
 
 }  // namespace
 
@@ -82,11 +135,16 @@ class FakeV4L2Impl::OpenedDevice {
         frame_production_thread_("FakeV4L2Impl FakeProductionThread") {
     selected_format_.width = kDefaultWidth;
     selected_format_.height = kDefaultHeight;
-    selected_format_.pixelformat = V4L2_PIX_FMT_YUV420;
+    selected_format_.pixelformat = config_.v4l2_pixel_format;
+    if (config_.v4l2_pixel_format == V4L2_PIX_FMT_MJPEG) {
+      selected_format_.width = kMjpegFrameWidth;
+      selected_format_.height = kMjpegFrameHeight;
+    }
     selected_format_.field = V4L2_FIELD_NONE;
     selected_format_.bytesperline = kDefaultWidth;
-    selected_format_.sizeimage = VideoFrame::AllocationSize(
-        PIXEL_FORMAT_I420, gfx::Size(kDefaultWidth, kDefaultHeight));
+    selected_format_.sizeimage =
+        GetV4L2FrameSize(selected_format_.pixelformat, selected_format_.width,
+                         selected_format_.height);
     selected_format_.colorspace = V4L2_COLORSPACE_REC709;
     selected_format_.priv = 0;
 
@@ -102,7 +160,7 @@ class FakeV4L2Impl::OpenedDevice {
 
   FakeV4L2Buffer* LookupBufferFromOffset(off_t offset) {
     auto buffer_iter =
-        base::ranges::find(device_buffers_, offset, &FakeV4L2Buffer::offset);
+        std::ranges::find(device_buffers_, offset, &FakeV4L2Buffer::offset);
     if (buffer_iter == device_buffers_.end())
       return nullptr;
     return &(*buffer_iter);
@@ -140,22 +198,23 @@ class FakeV4L2Impl::OpenedDevice {
       return Error(EINVAL);
     }
     fmtdesc->flags = 0u;
-    strcpy(reinterpret_cast<char*>(fmtdesc->description), "YUV420");
-    fmtdesc->pixelformat = V4L2_PIX_FMT_YUV420;
-    memset(fmtdesc->reserved, 0, sizeof(fmtdesc->reserved));
+    UNSAFE_TODO(strcpy(reinterpret_cast<char*>(fmtdesc->description),
+                       FourccToString(config_.v4l2_pixel_format).c_str()));
+    fmtdesc->pixelformat = config_.v4l2_pixel_format;
+    UNSAFE_TODO(memset(fmtdesc->reserved, 0, sizeof(fmtdesc->reserved)));
     return kSuccessReturnValue;
   }
 
   int querycap(v4l2_capability* cap) {
-    strcpy(reinterpret_cast<char*>(cap->driver), "FakeV4L2");
+    UNSAFE_TODO(strcpy(reinterpret_cast<char*>(cap->driver), "FakeV4L2"));
     CHECK(config_.descriptor.display_name().size() < 31);
-    strcpy(reinterpret_cast<char*>(cap->driver),
-           config_.descriptor.display_name().c_str());
+    UNSAFE_TODO(strcpy(reinterpret_cast<char*>(cap->driver),
+                       config_.descriptor.display_name().c_str()));
     cap->bus_info[0] = 0;
     // Provide arbitrary version info
     cap->version = KERNEL_VERSION(1, 0, 0);
     cap->capabilities = V4L2_CAP_VIDEO_CAPTURE;
-    memset(cap->reserved, 0, sizeof(cap->reserved));
+    UNSAFE_TODO(memset(cap->reserved, 0, sizeof(cap->reserved)));
     return kSuccessReturnValue;
   }
 
@@ -192,19 +251,21 @@ class FakeV4L2Impl::OpenedDevice {
   int s_fmt(v4l2_format* format) {
     if (format->type != V4L2_BUF_TYPE_VIDEO_CAPTURE ||
         format->fmt.pix.width > kMaxWidth ||
-        format->fmt.pix.height > kMaxHeight) {
+        format->fmt.pix.height > kMaxHeight || format->fmt.pix.width == 0 ||
+        format->fmt.pix.height == 0 || format->fmt.pix.width % 2 == 1 ||
+        format->fmt.pix.height % 2 == 1) {
       return Error(EINVAL);
     }
     v4l2_pix_format& pix_format = format->fmt.pix;
     // We only support YUV420 output for now. Tell this to the client by
     // overwriting whatever format it requested.
-    pix_format.pixelformat = V4L2_PIX_FMT_YUV420;
+    pix_format.pixelformat = config_.v4l2_pixel_format;
     // We only support non-interlaced output
     pix_format.field = V4L2_FIELD_NONE;
     // We do not support padding bytes
     pix_format.bytesperline = pix_format.width;
-    pix_format.sizeimage = VideoFrame::AllocationSize(
-        PIXEL_FORMAT_I420, gfx::Size(pix_format.width, pix_format.height));
+    pix_format.sizeimage = GetV4L2FrameSize(
+        config_.v4l2_pixel_format, pix_format.width, pix_format.height);
     // Arbitrary colorspace
     pix_format.colorspace = V4L2_COLORSPACE_REC709;
     pix_format.priv = 0;
@@ -220,7 +281,7 @@ class FakeV4L2Impl::OpenedDevice {
     captureparm.timeperframe = timeperframe_;
     captureparm.extendedmode = 0;
     captureparm.readbuffers = 3;  // arbitrary choice
-    memset(captureparm.reserved, 0, sizeof(captureparm.reserved));
+    UNSAFE_TODO(memset(captureparm.reserved, 0, sizeof(captureparm.reserved)));
     return kSuccessReturnValue;
   }
 
@@ -232,7 +293,7 @@ class FakeV4L2Impl::OpenedDevice {
     timeperframe_ = captureparm.timeperframe;
     captureparm.extendedmode = 0;
     captureparm.readbuffers = 3;  // arbitrary choice
-    memset(captureparm.reserved, 0, sizeof(captureparm.reserved));
+    UNSAFE_TODO(memset(captureparm.reserved, 0, sizeof(captureparm.reserved)));
     return kSuccessReturnValue;
   }
 
@@ -243,8 +304,8 @@ class FakeV4L2Impl::OpenedDevice {
       // We only support device-owned buffers
       return Error(EINVAL);
     }
-    incoming_queue_ = std::queue<FakeV4L2Buffer*>();
-    outgoing_queue_ = std::queue<FakeV4L2Buffer*>();
+    incoming_queue_ = std::queue<raw_ptr<FakeV4L2Buffer, CtnExperimental>>();
+    outgoing_queue_ = std::queue<raw_ptr<FakeV4L2Buffer, CtnExperimental>>();
     device_buffers_.clear();
     uint32_t target_buffer_count = std::min(bufs->count, kMaxBufferCount);
     bufs->count = target_buffer_count;
@@ -254,7 +315,7 @@ class FakeV4L2Impl::OpenedDevice {
                                    selected_format_.sizeimage);
       current_offset += RoundUpToMultipleOfPageSize(selected_format_.sizeimage);
     }
-    memset(bufs->reserved, 0, sizeof(bufs->reserved));
+    UNSAFE_TODO(memset(bufs->reserved, 0, sizeof(bufs->reserved)));
     return kSuccessReturnValue;
   }
 
@@ -303,13 +364,34 @@ class FakeV4L2Impl::OpenedDevice {
       wait_for_outgoing_queue_event_.Wait();
     }
     base::AutoLock lock(outgoing_queue_lock_);
-    auto* buffer = outgoing_queue_.front();
+    auto* buffer = outgoing_queue_.front().get();
     outgoing_queue_.pop();
     buffer->flags = V4L2_BUF_FLAG_MAPPED & V4L2_BUF_FLAG_DONE;
     buf->index = buffer->index;
-    buf->bytesused = VideoFrame::AllocationSize(
-        PIXEL_FORMAT_I420,
-        gfx::Size(selected_format_.width, selected_format_.height));
+    buf->bytesused =
+        GetV4L2FrameSize(selected_format_.pixelformat, selected_format_.width,
+                         selected_format_.height);
+    if (selected_format_.pixelformat == V4L2_PIX_FMT_MJPEG) {
+      DCHECK_EQ(selected_format_.width, kMjpegFrameWidth);
+      DCHECK_EQ(selected_format_.height, kMjpegFrameHeight);
+      auto file_path = media::GetTestDataFilePath(kMjpegFrameFile);
+      if (!file_path.empty()) {
+        FILE* fp = fopen(file_path.value().c_str(), "rb");
+        if (fp) {
+          fseek(fp, 0, SEEK_END);
+          long len = ftell(fp);
+          if (len <= static_cast<long>(buffer->length)) {
+            fseek(fp, 0, SEEK_SET);
+            auto read_size =
+                UNSAFE_TODO(fread(buffer->data.data(), 1, len, fp));
+            buf->bytesused = read_size;
+          }
+
+          fclose(fp);
+        }
+      }
+    }
+
     buf->flags = buffer->flags;
     buf->field = V4L2_FIELD_NONE;
     buf->timestamp = buffer->timestamp;
@@ -337,8 +419,8 @@ class FakeV4L2Impl::OpenedDevice {
       return Error(EINVAL);
     should_quit_frame_production_loop_.Set();
     frame_production_thread_.Stop();
-    incoming_queue_ = std::queue<FakeV4L2Buffer*>();
-    outgoing_queue_ = std::queue<FakeV4L2Buffer*>();
+    incoming_queue_ = std::queue<raw_ptr<FakeV4L2Buffer, CtnExperimental>>();
+    outgoing_queue_ = std::queue<raw_ptr<FakeV4L2Buffer, CtnExperimental>>();
     return kSuccessReturnValue;
   }
 
@@ -417,7 +499,7 @@ class FakeV4L2Impl::OpenedDevice {
       return;
     }
 
-    auto* buffer = incoming_queue_.front();
+    auto* buffer = incoming_queue_.front().get();
     gettimeofday(&buffer->timestamp, NULL);
     static __u32 frame_counter = 0;
     buffer->sequence = frame_counter++;
@@ -432,8 +514,8 @@ class FakeV4L2Impl::OpenedDevice {
   v4l2_fract timeperframe_;
   base::flat_set<uint32_t> control_event_subscriptions_;
   std::vector<FakeV4L2Buffer> device_buffers_;
-  std::queue<FakeV4L2Buffer*> incoming_queue_;
-  std::queue<FakeV4L2Buffer*> outgoing_queue_;
+  std::queue<raw_ptr<FakeV4L2Buffer, CtnExperimental>> incoming_queue_;
+  std::queue<raw_ptr<FakeV4L2Buffer, CtnExperimental>> outgoing_queue_;
   std::queue<v4l2_event> pending_events_;
   base::WaitableEvent wait_for_outgoing_queue_event_;
   base::Thread frame_production_thread_;
@@ -599,13 +681,12 @@ int FakeV4L2Impl::ioctl(int fd, int request, void* argp) {
     case VIDIOC_DV_TIMINGS_CAP:
     case VIDIOC_ENUM_FREQ_BANDS:
       // Unsupported |request| code.
-      NOTREACHED() << "Unsupported request code " << request;
+      LOG(ERROR) << "Unsupported request code " << request;
       return kErrorReturnValue;
   }
 
   // Invalid |request|.
   NOTREACHED();
-  return kErrorReturnValue;
 }
 
 // We ignore |start| in this implementation
@@ -635,9 +716,9 @@ void* FakeV4L2Impl::mmap(void* /*start*/,
     errno = EINVAL;
     return MAP_FAILED;
   }
-  if (!buffer->data)
-    buffer->data = std::make_unique<uint8_t[]>(length);
-  return buffer->data.get();
+  if (buffer->data.empty())
+    buffer->data = base::HeapArray<uint8_t>::Uninit(length);
+  return buffer->data.data();
 }
 
 int FakeV4L2Impl::munmap(void* start, size_t length) {

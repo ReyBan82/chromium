@@ -6,18 +6,130 @@ import("//device/vr/buildflags/buildflags.gni")
 import("//mojo/public/tools/bindings/mojom.gni")
 
 mojom_component("vr_service") {
+  generate_blink = true
   output_prefix = "device_vr_service_mojo_bindings"
   macro_prefix = "DEVICE_VR_SERVICE_MOJO_BINDINGS"
 
-  sources = [ "vr_service.mojom" ]
+  sources = [
+    "vr_service.mojom",
+    "xr_hand_tracking_data.mojom",
+  ]
 
   public_deps = [
-    ":test_mojom",
+    ":xr_common",
     "//device/gamepad/public/mojom",
     "//gpu/ipc/common:interfaces",
     "//mojo/public/mojom/base",
+    "//services/viz/public/mojom/compositing:shared_image_format",
+    "//ui/display/mojom",
+    "//ui/gfx/geometry/mojom",
+    "//ui/gfx/mojom",
+  ]
+
+  shared_cpp_typemap = {
+    types = [
+      {
+        mojom = "device.mojom.RgbTupleF32"
+        cpp = "::device::RgbTupleF32"
+      },
+      {
+        mojom = "device.mojom.Pose"
+        cpp = "::device::Pose"
+      },
+      {
+        mojom = "device.mojom.PlaneId"
+        cpp = "::device::PlaneId"
+      },
+      {
+        mojom = "device.mojom.MeshId"
+        cpp = "::device::MeshId"
+      },
+      {
+        mojom = "device.mojom.AnchorId"
+        cpp = "::device::AnchorId"
+      },
+      {
+        mojom = "device.mojom.HitTestSubscriptionId"
+        cpp = "::device::HitTestSubscriptionId"
+      },
+      {
+        mojom = "device.mojom.LayerId"
+        cpp = "::device::LayerId"
+      },
+      {
+        mojom = "device.mojom.XrVisibilityMaskId"
+        cpp = "::device::XrVisibilityMaskId"
+      },
+    ]
+    traits_headers = [ "//device/vr/public/mojom/vr_service_mojom_traits.h" ]
+    traits_public_deps = [ ":vr_public_typemaps" ]
+  }
+
+  cpp_typemaps = [ shared_cpp_typemap ]
+  blink_cpp_typemaps = [ shared_cpp_typemap ]
+}
+
+# Separating the public mojom interface into vr_service and isolated_xr_service
+# components allows us to add dependencies to isolated_xr_service without having
+# a blink variant. The blink variant tends to cause problematic, unresolved
+# externals.
+mojom_component("isolated_xr_service") {
+  output_prefix = "device_vr_isolated_xr_service_mojo_bindings"
+  macro_prefix = "DEVICE_VR_ISOLATED_XR_SERVICE_MOJO_BINDINGS"
+
+  sources = [ "isolated_xr_service.mojom" ]
+  public_deps = [
+    ":vr_service",
+    ":xr_common",
+    "//gpu/ipc/common:interfaces",
+    "//mojo/public/mojom/base",
+    "//sandbox/policy/mojom",
+    "//services/network/public/mojom",
+    "//services/viz/public/mojom",
     "//skia/public/mojom",
-    "//ui/display/mojom:mojom",
+    "//ui/gfx/geometry/mojom",
+  ]
+}
+
+component("vr_public_typemaps") {
+  output_name = "device_vr_public_typemaps"
+
+  defines = [ "IS_VR_PUBLIC_TYPEMAPS_IMPL" ]
+
+  sources = [
+    "anchor_id.h",
+    "hit_test_subscription_id.h",
+    "layer_id.h",
+    "mesh_id.h",
+    "plane_id.h",
+    "pose.cc",
+    "pose.h",
+    "visibility_mask_id.h",
+  ]
+
+  deps = [
+    "//base",
+    "//skia",
+    "//ui/gfx/geometry",
+    "//ui/gfx/geometry:geometry_skia",
+  ]
+
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+}
+
+mojom_component("xr_common") {
+  generate_blink = true
+  output_prefix = "device_xr_common_mojo_bindings"
+  macro_prefix = "DEVICE_XR_COMMON_MOJO_BINDINGS"
+
+  sources = [
+    "openxr_interaction_profile_type.mojom",
+    "xr_device.mojom",
+    "xr_session.mojom",
+  ]
+
+  public_deps = [
+    "//skia/public/mojom",
     "//ui/gfx/geometry/mojom",
     "//ui/gfx/mojom",
   ]
@@ -31,79 +143,10 @@ mojom_component("vr_service") {
     enabled_features += [ "enable_cardboard" ]
   }
 
-  shared_cpp_typemap = {
-    types = [
-      {
-        mojom = "device.mojom.RgbaTupleF16"
-        cpp = "::device::RgbaTupleF16"
-      },
-      {
-        mojom = "device.mojom.RgbTupleF32"
-        cpp = "::device::RgbTupleF32"
-      },
-      {
-        mojom = "device.mojom.Pose"
-        cpp = "::device::Pose"
-      },
-    ]
-    traits_headers = [ "//device/vr/public/mojom/vr_service_mojom_traits.h" ]
-    traits_public_deps = [ ":vr_public_typemaps" ]
+  if (enable_arcore) {
+    enabled_features += [ "enable_arcore" ]
   }
 
-  cpp_typemaps = [ shared_cpp_typemap ]
-  blink_cpp_typemaps = [ shared_cpp_typemap ]
-}
-
-# Separating the public mojom interface into vr_service and isolated_xr_service
-# components allows us to add dependencies to isolated_xr_service without having
-# a blink variant. The blink variant tends to cause problematic, unresolved externals.
-mojom_component("isolated_xr_service") {
-  output_prefix = "device_vr_isolated_xr_service_mojo_bindings"
-  macro_prefix = "DEVICE_VR_ISOLATED_XR_SERVICE_MOJO_BINDINGS"
-
-  sources = [ "isolated_xr_service.mojom" ]
-
-  disable_variants = true
-
-  public_deps = [
-    ":test_mojom",
-    ":vr_service",
-    "//gpu/ipc/common:interfaces",
-    "//mojo/public/mojom/base",
-    "//sandbox/policy/mojom",
-    "//skia/public/mojom",
-    "//ui/gfx/geometry/mojom",
-  ]
-
-  deps = [ "//services/viz/public/mojom" ]
-}
-
-mojom_component("test_mojom") {
-  output_prefix = "device_vr_test_mojo_bindings"
-  macro_prefix = "DEVICE_VR_TEST_MOJO_BINDINGS"
-
-  sources = [ "browser_test_interfaces.mojom" ]
-
-  public_deps = [
-    "//ui/gfx/geometry/mojom",
-    "//ui/gfx/mojom",
-  ]
-}
-
-component("vr_public_typemaps") {
-  output_name = "device_vr_public_typemaps"
-
-  defines = [ "IS_VR_PUBLIC_TYPEMAPS_IMPL" ]
-
-  sources = [
-    "pose.cc",
-    "pose.h",
-  ]
-
-  deps = [
-    "//base:base",
-    "//skia",
-    "//ui/gfx/geometry",
-    "//ui/gfx/geometry:geometry_skia",
-  ]
+  webui_module_path = "/"
+  generate_legacy_js_bindings = true
 }

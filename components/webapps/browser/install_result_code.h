@@ -18,6 +18,8 @@ namespace webapps {
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused. Update corresponding enums.xml entry
 // when making changes here.
+//
+// LINT.IfChange(InstallResultCode)
 enum class InstallResultCode {
   // Success category:
   kSuccessNewInstall = 0,
@@ -90,8 +92,35 @@ enum class InstallResultCode {
   // non-generated icons.
   kIconDownloadingFailed = 30,
 
-  kMaxValue = kIconDownloadingFailed,
+  kCancelledDueToMainFrameNavigation = 31,
+
+  // No valid icons were provided in the manifest in an installation method
+  // which requires non-generated icons.
+  kNoValidIconsInManifest = 32,
+
+  // The manifest did not contain a developer-specific id (has_custom_id). For
+  // web install API.
+  kNoCustomManifestId = 33,
+  // The requested manifest_id check failed: actual resulting manifest_id
+  // doesn't match. For web install API.
+  kManifestIdMismatch = 34,
+
+  // For sync installs, install using the fallback WebAppInstallInfo once the
+  // trusted icon architecture is enabled.
+  kFallbackInstallUsingTrustedIcons = 35,
+
+  // No valid migration source was found for an app that requires one.
+  kNoValidMigrationSource = 36,
+
+  // The manifest id is invalid.
+  kInvalidManifestId = 37,
+
+  // The current WebContents is already involved in an install.
+  kInstallAlreadyInProgress = 38,
+
+  kMaxValue = kInstallAlreadyInProgress,
 };
+// LINT.ThenChange(//tools/metrics/histograms/enums.xml:WebAppInstallResultCode)
 
 // Checks if InstallResultCode is not a failure.
 bool IsSuccess(InstallResultCode code);

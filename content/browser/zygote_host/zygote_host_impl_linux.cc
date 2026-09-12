@@ -8,15 +8,17 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include "base/allocator/allocator_extension.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_enumerator.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/posix/unix_domain_socket.h"
 #include "base/process/kill.h"
 #include "base/process/memory.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/time/time.h"
+#include "base/types/fixed_array.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "content/common/zygote/zygote_commands_linux.h"
 #include "content/common/zygote/zygote_communication_linux.h"
 #include "content/common/zygote/zygote_handle_impl_linux.h"
@@ -46,15 +48,16 @@ bool ReceiveFixedMessage(int fd,
                          base::ProcessId* sender_pid) {
   // Allocate an extra byte of buffer space so we can check that we received
   // exactly |expect_len| bytes, and the message wasn't just truncated to fit.
-  char buf[expect_len + 1];
+  base::FixedArray<uint8_t> buf(expect_len + 1);
   std::vector<base::ScopedFD> fds_vec;
 
-  const ssize_t len = base::UnixDomainSocket::RecvMsgWithPid(
-      fd, buf, sizeof(buf), &fds_vec, sender_pid);
+  const ssize_t len =
+      base::UnixDomainSocket::RecvMsgWithPid(fd, buf, &fds_vec, sender_pid);
   if (static_cast<size_t>(len) != expect_len)
     return false;
-  if (memcmp(buf, expect_msg, expect_len) != 0)
+  if (UNSAFE_TODO(memcmp(buf.data(), expect_msg, expect_len)) != 0) {
     return false;
+  }
   if (!fds_vec.empty())
     return false;
   return true;
@@ -125,10 +128,14 @@ void ZygoteHostImpl::Init(const base::CommandLine& command_line) {
     use_suid_sandbox_for_adj_oom_score_ = use_suid_sandbox_;
   } else {
     LOG(FATAL)
-        << "No usable sandbox! Update your kernel or see "
+        << "No usable sandbox! If you are running on Ubuntu 23.10+ or another "
+           "Linux distro that has disabled unprivileged user namespaces with "
+           "AppArmor, see "
+           "https://chromium.googlesource.com/chromium/src/+/main/"
+           "docs/security/apparmor-userns-restrictions.md. Otherwise see "
            "https://chromium.googlesource.com/chromium/src/+/main/"
            "docs/linux/suid_sandbox_development.md for more information on "
-           "developing with the SUID sandbox. "
+           "developing with the (older) SUID sandbox. "
            "If you want to live dangerously and need an immediate workaround, "
            "you can try using --"
         << sandbox::policy::switches::kNoSandbox << ".";
@@ -141,29 +148,32 @@ void ZygoteHostImpl::AddZygotePid(pid_t pid) {
 }
 
 bool ZygoteHostImpl::IsZygotePid(pid_t pid) {
+  if (has_zygote_) {
+    // A sandboxed zygote's pid is only known once it has finished launching.
+    GetGenericZygote()->EnsureLaunchFinished();
+  }
   base::AutoLock lock(zygote_pids_lock_);
   return zygote_pids_.find(pid) != zygote_pids_.end();
 }
 
-void ZygoteHostImpl::SetRendererSandboxStatus(int status) {
-  renderer_sandbox_status_ = status;
-}
-
 int ZygoteHostImpl::GetRendererSandboxStatus() {
-  return renderer_sandbox_status_;
+  return has_zygote_ ? GetGenericZygote()->GetSandboxStatus() : 0;
 }
 
-pid_t ZygoteHostImpl::LaunchZygote(
+ZygoteLaunchCompletionCallback ZygoteHostImpl::LaunchZygote(
     base::CommandLine* cmd_line,
     base::ScopedFD* control_fd,
     base::FileHandleMappingVector additional_remapped_fds) {
+  has_zygote_ = true;
+
   int fds[2];
-  CHECK_EQ(0, socketpair(AF_UNIX, SOCK_SEQPACKET, 0, fds));
+  CHECK_EQ(0, socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, fds));
   CHECK(base::UnixDomainSocket::EnableReceiveProcessId(fds[0]));
 
   base::LaunchOptions options;
   options.fds_to_remap = std::move(additional_remapped_fds);
   options.fds_to_remap.emplace_back(fds[1], kZygoteSocketPairFd);
+  options.fds_to_remove_cloexec.push_back(fds[1]);
 
   const bool is_sandboxed_zygote =
       !cmd_line->HasSwitch(sandbox::policy::switches::kNoZygoteSandbox);
@@ -187,43 +197,72 @@ pid_t ZygoteHostImpl::LaunchZygote(
   close(fds[1]);
   control_fd->reset(fds[0]);
 
-  pid_t pid = process.Pid();
-
   if (is_sandboxed_zygote && (use_namespace_sandbox_ || use_suid_sandbox_)) {
-    // The namespace and SUID sandbox will execute the zygote in a new
-    // PID namespace, and the main zygote process will then fork from
-    // there. Watch now our elaborate dance to find and validate the
-    // zygote's PID.
-
-    // First we receive a message from the zygote boot process.
-    base::ProcessId boot_pid;
-    CHECK(ReceiveFixedMessage(fds[0], kZygoteBootMessage,
-                              sizeof(kZygoteBootMessage), &boot_pid));
-
-    // Within the PID namespace, the zygote boot process thinks it's PID 1,
-    // but its real PID can never be 1. This gives us a reliable test that
-    // the kernel is translating the sender's PID to our namespace.
-    CHECK_GT(boot_pid, 1)
-        << "Received invalid process ID for zygote; kernel might be too old? "
-           "See crbug.com/357670 or try using --"
-        << sandbox::policy::switches::kNoSandbox << " to workaround.";
-
-    // Now receive the message that the zygote's ready to go, along with the
-    // main zygote process's ID.
-    pid_t real_pid;
-    CHECK(ReceiveFixedMessage(fds[0], kZygoteHelloMessage,
-                              sizeof(kZygoteHelloMessage), &real_pid));
-    CHECK_GT(real_pid, 1);
-
-    if (real_pid != pid) {
-      // Reap the sandbox.
-      base::EnsureProcessGetsReaped(std::move(process));
-    }
-    pid = real_pid;
+    // Finding out the zygote's pid means waiting for it to start up. Put that
+    // off until the zygote is needed so that it starts up in parallel with the
+    // browser; ZygoteCommunication runs this before it first talks to the
+    // zygote. |this| is a leaky singleton.
+    return base::BindOnce(&ZygoteHostImpl::FinishSandboxedZygoteLaunch,
+                          base::Unretained(this), std::move(process), fds[0]);
   }
 
+  const pid_t pid = process.Pid();
   AddZygotePid(pid);
-  return pid;
+  return base::BindOnce([](pid_t pid) { return pid; }, pid);
+}
+
+pid_t ZygoteHostImpl::FinishSandboxedZygoteLaunch(base::Process process,
+                                                  int control_fd) {
+  // The namespace and SUID sandbox will execute the zygote in a new
+  // PID namespace, and the main zygote process will then fork from
+  // there. Watch now our elaborate dance to find and validate the
+  // zygote's PID.
+
+  // First we receive a message from the zygote boot process.
+  base::ProcessId boot_pid;
+  if (!ReceiveFixedMessage(control_fd, kZygoteBootMessage,
+                           sizeof(kZygoteBootMessage), &boot_pid)) {
+    int exit_code = 0;
+    bool exited = process.WaitForExitWithTimeout(base::TimeDelta(), &exit_code);
+    if (exited) {
+      LOG(FATAL) << "Zygote process exited prematurely with exit code "
+                 << exit_code;
+    } else {
+      LOG(FATAL) << "Failed to receive boot message from zygote";
+    }
+  }
+
+  // Within the PID namespace, the zygote boot process thinks it's PID 1,
+  // but its real PID can never be 1. This gives us a reliable test that
+  // the kernel is translating the sender's PID to our namespace.
+  CHECK_GT(boot_pid, 1)
+      << "Received invalid process ID for zygote; kernel might be too old? "
+         "See crbug.com/357670 or try using --"
+      << sandbox::policy::switches::kNoSandbox << " to workaround.";
+
+  // Now receive the message that the zygote's ready to go, along with the
+  // main zygote process's ID.
+  pid_t real_pid;
+  if (!ReceiveFixedMessage(control_fd, kZygoteHelloMessage,
+                           sizeof(kZygoteHelloMessage), &real_pid)) {
+    int exit_code = 0;
+    bool exited = process.WaitForExitWithTimeout(base::TimeDelta(), &exit_code);
+    if (exited) {
+      LOG(FATAL) << "Zygote process exited prematurely with exit code "
+                 << exit_code;
+    } else {
+      LOG(FATAL) << "Failed to receive hello message from zygote";
+    }
+  }
+  CHECK_GT(real_pid, 1);
+
+  if (real_pid != process.Pid()) {
+    // Reap the sandbox.
+    base::EnsureProcessGetsReaped(std::move(process));
+  }
+
+  AddZygotePid(real_pid);
+  return real_pid;
 }
 
 #if !BUILDFLAG(IS_OPENBSD)
@@ -297,13 +336,18 @@ void ZygoteHostImpl::AdjustRendererOOMScore(base::ProcessHandle pid,
 #if BUILDFLAG(IS_CHROMEOS)
 void ZygoteHostImpl::ReinitializeLogging(uint32_t logging_dest,
                                          base::PlatformFile log_file_fd) {
+  if (!HasZygote()) {
+    return;
+  }
+
   content::ZygoteCommunication* generic_zygote = content::GetGenericZygote();
   content::ZygoteCommunication* unsandboxed_zygote =
       content::GetUnsandboxedZygote();
-  if (generic_zygote)
-    generic_zygote->ReinitializeLogging(logging_dest, log_file_fd);
-  if (unsandboxed_zygote)
+
+  generic_zygote->ReinitializeLogging(logging_dest, log_file_fd);
+  if (unsandboxed_zygote) {
     unsandboxed_zygote->ReinitializeLogging(logging_dest, log_file_fd);
+  }
 }
 #endif  // BUILDFLAG(IS_CHROMEOS)
 

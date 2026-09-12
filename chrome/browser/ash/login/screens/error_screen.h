@@ -8,15 +8,17 @@
 #include <memory>
 
 #include "base/callback_list.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/help_app_launcher.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
 #include "chrome/browser/ash/login/screens/network_error.h"
 #include "chrome/browser/ash/settings/device_settings_service.h"
 #include "chrome/browser/ui/webui/ash/login/network_state_informer.h"
-#include "chromeos/ash/components/login/auth/login_performer.h"
 #include "chromeos/ash/components/network/network_connection_observer.h"
 #include "components/web_modal/web_contents_modal_dialog_manager_delegate.h"
+
+class PrefService;
 
 namespace ash {
 
@@ -25,10 +27,11 @@ class ErrorScreenView;
 
 // Controller for the error screen.
 class ErrorScreen : public BaseScreen,
-                    public LoginPerformer::Delegate,
                     public NetworkConnectionObserver {
  public:
-  explicit ErrorScreen(base::WeakPtr<ErrorScreenView> view);
+  // `local_state` must be non-null and must outlive `this`.
+  ErrorScreen(const PrefService* local_state,
+              base::WeakPtr<ErrorScreenView> view);
 
   ErrorScreen(const ErrorScreen&) = delete;
   ErrorScreen& operator=(const ErrorScreen&) = delete;
@@ -41,6 +44,12 @@ class ErrorScreen : public BaseScreen,
 
   // Toggles the guest sign-in prompt.
   void AllowGuestSignin(bool allowed);
+
+  // Disallows offline login option. We can't expose publicly an opportunity to
+  // allow offline login as it can be controlled by policy.
+  // TODO(https://crbug.com/1241511): Should be removed or refactored together
+  // with removing the global variables for the offline login allowance.
+  void DisallowOfflineLogin();
 
   // Toggles the offline sign-in.
   static void AllowOfflineLogin(bool allowed);
@@ -76,13 +85,10 @@ class ErrorScreen : public BaseScreen,
   // Sets callback that is called on hide.
   void SetHideCallback(base::OnceClosure on_hide);
 
-  // Shows captive portal dialog.
-  void ShowCaptivePortal();
-
   // Toggles the connection pending indicator.
   void ShowConnectingIndicator(bool show);
 
-  // Makes error persistent (e.g. non-closable).
+  // Makes error persistent (e.g. non-closeable).
   void SetIsPersistentError(bool is_persistent);
 
   // Register a callback to be invoked when the user indicates that an attempt
@@ -94,28 +100,24 @@ class ErrorScreen : public BaseScreen,
   // been created.
   void MaybeInitCaptivePortalWindowProxy(content::WebContents* web_contents);
 
-  void ShowNetworkErrorMessage(NetworkStateInformer::State state,
-                               NetworkError::ErrorReason reason);
+  void ShowNetworkErrorMessage(
+      NetworkStateInformer::State state,
+      NetworkError::ErrorReason reason,
+      bool show_offline_login_option_if_allowed = true);
 
  protected:
   // BaseScreen:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
  private:
-  // LoginPerformer::Delegate overrides:
-  void OnAuthFailure(const AuthFailure& error) override;
-  void OnAuthSuccess(const UserContext& user_context) override;
-  void OnOffTheRecordAuthSuccess() override;
-  void OnPasswordChangeDetectedLegacy(const UserContext& user_context) override;
-  void OnPasswordChangeDetected(
-      std::unique_ptr<UserContext> user_context) override;
-  void AllowlistCheckFailed(const std::string& email) override;
-  void PolicyLoadFailed() override;
+  // Handle user action to open captive portal page.
+  void ShowCaptivePortal();
 
   // NetworkConnectionObserver overrides:
-  void ConnectToNetworkRequested(const std::string& service_path) override;
+  ConnectToNetworkRequestVerdict ConnectToNetworkRequested(
+      const std::string& service_path) override;
 
   // Default hide_closure for Hide().
   void DefaultHideCallback();
@@ -155,14 +157,13 @@ class ErrorScreen : public BaseScreen,
   void StartGuestSessionAfterOwnershipCheck(
       DeviceSettingsService::OwnershipStatus ownership_status);
 
-  base::WeakPtr<ErrorScreenView> view_;
+  const raw_ref<const PrefService> local_state_;
 
-  // We have the guest login logic in this screen because it might be required
-  // quite early during OOBE. When Login screen is not yet shown and existing
-  // user controller not created. At this point even Guest button is not shown
-  // on the shelf. But we let user enter the guest session from the error screen
-  // to be able to look into the logs, etc.
-  std::unique_ptr<LoginPerformer> guest_login_performer_;
+  bool is_persistent_ = false;
+
+  bool is_offline_login_link_shown_ = false;
+
+  base::WeakPtr<ErrorScreenView> view_;
 
   // Proxy which manages showing of the window for captive portal entering.
   std::unique_ptr<CaptivePortalWindowProxy> captive_portal_window_proxy_;

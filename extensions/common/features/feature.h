@@ -5,21 +5,100 @@
 #ifndef EXTENSIONS_COMMON_FEATURES_FEATURE_H_
 #define EXTENSIONS_COMMON_FEATURES_FEATURE_H_
 
+#include <stddef.h>
+
+#include <functional>
+#include <map>
 #include <set>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 
-#include "base/strings/string_piece.h"
+#include "base/compiler_specific.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "extensions/common/context_data.h"
 #include "extensions/common/hashed_extension_id.h"
 #include "extensions/common/manifest.h"
+#include "extensions/common/mojom/context_type.mojom-forward.h"
 #include "extensions/common/mojom/manifest.mojom-shared.h"
 
 class GURL;
 
 namespace extensions {
 
-constexpr int kUnspecifiedContextId = -1;
+inline constexpr int kUnspecifiedContextId = -1;
 
 class Extension;
+class FeatureTestPeer;
+
+// A retained pointer to immutable descriptor data. Its consteval constructor
+// enforces static storage and compile-time-readable contents.
+template <typename T>
+class StaticFeatureData {
+ public:
+  template <typename U>
+    requires std::is_same_v<U, const T>
+  explicit consteval StaticFeatureData(U& data) : data_(&data) {
+    // Read the complete descriptor during constant evaluation to reject
+    // statically stored data whose contents are dynamically initialized.
+    [[maybe_unused]] T validated_data = data;
+  }
+
+  constexpr const T* get() const { return data_; }
+  constexpr const T* operator->() const { return data_; }
+
+ private:
+  // Safe because construction requires static storage.
+  RAW_PTR_EXCLUSION const T* data_;
+};
+
+template <typename T>
+StaticFeatureData(T&) -> StaticFeatureData<std::remove_const_t<T>>;
+
+// A pointer to a static NUL-terminated string. Half the size of a
+// std::string_view, which matters because a handful of features set these
+// fields but every feature pays for them; the length is recovered by scanning
+// on the cold paths that read them.
+//
+// The consteval constructor's attribute reads a character out of the array,
+// which requires the contents, not just the address, to be compile-time
+// constant. A bare const char* is the same size but would accept a mutable or
+// dynamically initialized global.
+class StaticCString {
+ public:
+  // Absent by default; nullptr is the sentinel, so no std::optional is needed.
+  constexpr StaticCString() = default;
+
+  template <size_t N>
+  explicit consteval StaticCString(const char (&string)[N])
+      ENABLE_IF_ATTR(string[N - 1u] == '\0', "requires a NUL-terminated string")
+      : data_(string) {}
+
+  constexpr bool has_value() const { return data_ != nullptr; }
+
+  // Stops at an embedded NUL. The attribute above only constrains the final
+  // byte, so a literal containing one still compiles.
+  constexpr std::string_view string_view() const {
+    return data_ ? std::string_view(data_) : std::string_view();
+  }
+
+ private:
+  // Safe because construction requires static storage.
+  RAW_PTR_EXCLUSION const char* data_ = nullptr;
+};
+
+// Immutable identity shared by every feature. Generated descriptors initialize
+// this with designated initializers, so the member order must match
+// FEATURE_DATA_FIELD_ORDER in tools/json_schema_compiler/feature_compiler.py.
+struct FeatureData {
+  std::string_view name;
+  // Set by a handful of features, so these hold only a pointer rather than
+  // pay for a length in every descriptor. Both are read on cold paths.
+  StaticCString alias;
+  StaticCString source;
+  bool no_parent = false;
+};
 
 // Represents a single feature accessible to an extension developer, such as a
 // top-level manifest key, a permission, or a programmatic API. A feature can
@@ -31,83 +110,102 @@ class Extension;
 // usage and types.
 class Feature {
  public:
-  // The JavaScript contexts the feature is supported in.
-  enum Context {
-    UNSPECIFIED_CONTEXT,
-    BLESSED_EXTENSION_CONTEXT,
-    UNBLESSED_EXTENSION_CONTEXT,
-    CONTENT_SCRIPT_CONTEXT,
-    WEB_PAGE_CONTEXT,
-    BLESSED_WEB_PAGE_CONTEXT,
-    WEBUI_CONTEXT,
-    WEBUI_UNTRUSTED_CONTEXT,
-    LOCK_SCREEN_EXTENSION_CONTEXT,
-    OFFSCREEN_EXTENSION_CONTEXT,
-  };
-
   // The platforms the feature is supported in.
   enum Platform {
     UNSPECIFIED_PLATFORM,
     CHROMEOS_PLATFORM,
-    LACROS_PLATFORM,
     LINUX_PLATFORM,
     MACOSX_PLATFORM,
     WIN_PLATFORM,
-    FUCHSIA_PLATFORM,
+    DESKTOP_ANDROID_PLATFORM,
   };
 
   // Whether a feature is available in a given situation or not, and if not,
   // why not.
-  enum AvailabilityResult {
-    IS_AVAILABLE,
-    NOT_FOUND_IN_ALLOWLIST,
-    INVALID_URL,
-    INVALID_TYPE,
-    INVALID_CONTEXT,
-    INVALID_LOCATION,
-    INVALID_PLATFORM,
-    INVALID_MIN_MANIFEST_VERSION,
-    INVALID_MAX_MANIFEST_VERSION,
-    INVALID_SESSION_TYPE,
-    NOT_PRESENT,
-    UNSUPPORTED_CHANNEL,
-    FOUND_IN_BLOCKLIST,
-    MISSING_COMMAND_LINE_SWITCH,
-    FEATURE_FLAG_DISABLED,
-    REQUIRES_DEVELOPER_MODE,
+  // Note: do not reorder or remove enum values because the order impacts
+  // result_as_int32() used by V8ContextNativeHandler::GetAvailability().
+  enum class AvailabilityResult {
+    kIsAvailable,
+    kNotFoundInAllowlist,
+    kInvalidUrl,
+    kInvalidType,
+    kInvalidContext,
+    kInvalidLocation,
+    kInvalidPlatform,
+    kInvalidMinManifestVersion,
+    kInvalidMaxManifestVersion,
+    kInvalidSessionType,
+    kNotPresent,
+    kUnsupportedChannel,
+    kFoundInBlocklist,
+    kMissingCommandLineSwitch,
+    kFeatureFlagDisabled,
+    kRequiresDeveloperMode,
+    kMissingDelegatedAvailabilityCheck,
+    kFailedDelegatedAvailabilityCheck
   };
 
-  // Container for AvailabiltyResult that also exposes a user-visible error
+  // Shorthand for delegated availability check handler function signature. The
+  // function signature's arguments should contain all of the arguments passed
+  // into IsAvailableToContextImpl().
+  //
+  // A plain function pointer rather than a callback: the type requires the
+  // exact signature and prevents captures or bound receivers. Handlers may
+  // consult process-global state, but have no per-registration state and live
+  // for the process lifetime. They run synchronously and must not retain
+  // `api_full_name`.
+  using DelegatedAvailabilityCheckHandler =
+      bool (*)(std::string_view api_full_name,
+               const Extension* extension,
+               mojom::ContextType context,
+               const GURL& url,
+               Platform platform,
+               int context_id,
+               bool check_developer_mode,
+               const ContextData& context_data);
+
+  // Mapping Feature::name() to override function.
+  using FeatureDelegatedAvailabilityCheckMap =
+      std::map<std::string, DelegatedAvailabilityCheckHandler, std::less<>>;
+
+  // Container for AvailabilityResult that also exposes a user-visible error
   // message in cases where the feature is not available.
   class Availability {
    public:
-    Availability(AvailabilityResult result, const std::string& message)
-        : result_(result), message_(message) {}
+    Availability(AvailabilityResult result, std::string message)
+        : result_(result), message_(std::move(message)) {}
 
     AvailabilityResult result() const { return result_; }
-    bool is_available() const { return result_ == IS_AVAILABLE; }
-    const std::string& message() const { return message_; }
+    // Used by V8ContextNativeHandler::GetAvailability().
+    int32_t result_as_int32() const { return static_cast<int32_t>(result_); }
+    bool is_available() const {
+      return result_ == AvailabilityResult::kIsAvailable;
+    }
+    const std::string& message() const LIFETIME_BOUND { return message_; }
 
    private:
     friend class SimpleFeature;
     friend class Feature;
 
-    const AvailabilityResult result_;
-    const std::string message_;
+    // Deliberately non-const. A const `message_` cannot transfer its buffer
+    // during move construction, and either const member would delete the
+    // assignment operators. Availability values are returned, stored, and
+    // propagated, so const would force copies or prevent moves. constexpr is
+    // not an alternative because the values are produced at runtime. The class
+    // is still effectively immutable, since the members are private and
+    // exposed only through const accessors.
+    AvailabilityResult result_;
+    std::string message_;
   };
 
-  Feature();
   virtual ~Feature();
 
-  const std::string& name() const { return name_; }
-  // Note that this arg is passed as a StringPiece to avoid a lot of bloat from
-  // inlined std::string code.
-  void set_name(base::StringPiece name);
-  const std::string& alias() const { return alias_; }
-  void set_alias(base::StringPiece alias);
-  const std::string& source() const { return source_; }
-  void set_source(base::StringPiece source);
-  bool no_parent() const { return no_parent_; }
+  std::string_view name() const { return feature_data_->name; }
+  std::string_view alias() const { return feature_data_->alias.string_view(); }
+  std::string_view source() const {
+    return feature_data_->source.string_view();
+  }
+  bool no_parent() const { return feature_data_->no_parent; }
 
   // Gets the platform the code is currently running on.
   static Platform GetCurrentPlatform();
@@ -136,35 +234,43 @@ class Feature {
                                              Platform platform,
                                              int context_id) const = 0;
 
-  // Returns true if the feature is available to |extension|.
+  // Returns true if the feature is available to `extension`.
   Availability IsAvailableToExtension(const Extension* extension) const;
 
   // Returns true if the feature is available to be used in the specified
   // extension and context.
   Availability IsAvailableToContext(const Extension* extension,
-                                    Context context,
+                                    mojom::ContextType context,
                                     const GURL& url,
-                                    int context_id) const {
+                                    int context_id,
+                                    const ContextData& context_data) const {
     return IsAvailableToContext(extension, context, url, GetCurrentPlatform(),
-                                context_id);
+                                context_id, context_data);
   }
 
   Availability IsAvailableToContext(const Extension* extension,
-                                    Context context,
+                                    mojom::ContextType context,
                                     const GURL& url,
                                     Platform platform,
-                                    int context_id) const {
+                                    int context_id,
+                                    const ContextData& context_data) const {
     return IsAvailableToContextImpl(extension, context, url, platform,
-                                    context_id, true);
+                                    context_id, /*check_developer_mode=*/true,
+                                    context_data,
+                                    /*delegated_handler=*/nullptr);
   }
 
-  Availability IsAvailableToContextIgnoringDevMode(const Extension* extension,
-                                                   Context context,
-                                                   const GURL& url,
-                                                   Platform platform,
-                                                   int context_id) const {
-    return IsAvailableToContextImpl(extension, context, url, platform,
-                                    context_id, false);
+  Availability IsAvailableToContextIgnoringDevMode(
+      const Extension* extension,
+      mojom::ContextType context,
+      const GURL& url,
+      Platform platform,
+      int context_id,
+      const ContextData& context_data) const {
+    return IsAvailableToContextImpl(
+        extension, context, url, platform, context_id,
+        /*check_developer_mode=*/false, context_data,
+        /*delegated_handler=*/nullptr);
   }
   // Returns true if the feature is available to the current environment,
   // without needing to know information about an Extension or any other
@@ -183,18 +289,37 @@ class Feature {
  protected:
   friend class SimpleFeature;
   friend class ComplexFeature;
+
+  explicit Feature(const FeatureData* feature_data);
+
+  // Parameters through `context_data` should be kept in sync with
+  // DelegatedAvailabilityCheckHandler. `delegated_handler` lets temporary
+  // descriptor facades use their parent's handler without storing a copy.
   virtual Availability IsAvailableToContextImpl(
       const Extension* extension,
-      Context context,
+      mojom::ContextType context,
       const GURL& url,
       Platform platform,
       int context_id,
-      bool check_developer_mode) const = 0;
+      bool check_developer_mode,
+      const ContextData& context_data,
+      DelegatedAvailabilityCheckHandler delegated_handler) const = 0;
 
-  std::string name_;
-  std::string alias_;
-  std::string source_;
-  bool no_parent_;
+  // Returns `handler` when provided, otherwise looks up the handler registered
+  // for this feature's name.
+  DelegatedAvailabilityCheckHandler ResolveDelegatedAvailabilityCheckHandler(
+      DelegatedAvailabilityCheckHandler handler) const;
+
+  // Immutable configuration, owned by whoever constructed this feature. For
+  // generated features this is static storage; tests own their own copy.
+  RAW_PTR_EXCLUSION const FeatureData* feature_data_;
+
+ private:
+  friend class FeatureTestPeer;
+
+  // Returns the registered handler, or null.
+  DelegatedAvailabilityCheckHandler delegated_availability_check_handler()
+      const;
 };
 
 }  // namespace extensions

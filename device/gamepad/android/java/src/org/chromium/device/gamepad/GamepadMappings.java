@@ -11,52 +11,49 @@ import android.view.MotionEvent;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.JNINamespace;
+import org.jni_zero.JNINamespace;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.device.DeviceFeatureList;
+import org.chromium.device.DeviceFeatureMap;
+
+import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.List;
 
-/**
- * Class to manage mapping information related to each supported gamepad controller device.
- */
+/** Class to manage mapping information related to each supported gamepad controller device. */
 @JNINamespace("content")
+@NullMarked
 abstract class GamepadMappings {
     @VisibleForTesting
     static final String NVIDIA_SHIELD_DEVICE_NAME_PREFIX = "NVIDIA Corporation NVIDIA Controller";
+
     @VisibleForTesting
     static final String MICROSOFT_XBOX_PAD_DEVICE_NAME = "Microsoft X-Box 360 pad";
+
     @VisibleForTesting
     static final String PS_DUALSHOCK_3_SIXAXIS_DEVICE_NAME = "Sony PLAYSTATION(R)3 Controller";
-    @VisibleForTesting
-    static final String SAMSUNG_EI_GP20_DEVICE_NAME = "Samsung Game Pad EI-GP20";
-    @VisibleForTesting
-    static final String AMAZON_FIRE_DEVICE_NAME = "Amazon Fire Game Controller";
 
-    @VisibleForTesting
-    static final int SONY_VENDOR_ID = 0x054c;
-    @VisibleForTesting
-    static final int PS_DUALSHOCK_4_PRODUCT_ID = 0x05c4;
-    @VisibleForTesting
-    static final int PS_DUALSHOCK_4_SLIM_PRODUCT_ID = 0x09cc;
-    @VisibleForTesting
-    static final int PS_DUALSHOCK_4_USB_RECEIVER_PRODUCT_ID = 0x0ba0;
+    @VisibleForTesting static final String SAMSUNG_EI_GP20_DEVICE_NAME = "Samsung Game Pad EI-GP20";
+    @VisibleForTesting static final String AMAZON_FIRE_DEVICE_NAME = "Amazon Fire Game Controller";
+
+    @VisibleForTesting static final int SONY_VENDOR_ID = 0x054c;
+    @VisibleForTesting static final int PS_DUALSHOCK_4_PRODUCT_ID = 0x05c4;
+    @VisibleForTesting static final int PS_DUALSHOCK_4_SLIM_PRODUCT_ID = 0x09cc;
+    @VisibleForTesting static final int PS_DUALSHOCK_4_USB_RECEIVER_PRODUCT_ID = 0x0ba0;
     static final int PS_DUAL_SENSE_PRODUCT_ID = 0x0ce6;
+    static final int PS_DUAL_SENSE_EDGE_PRODUCT_ID = 0x0df2;
 
-    @VisibleForTesting
-    static final int MICROSOFT_VENDOR_ID = 0x045e;
-    @VisibleForTesting
-    static final int XBOX_ONE_S_2016_FIRMWARE_PRODUCT_ID = 0x02e0;
-    @VisibleForTesting
-    static final int XBOX_SERIES_X_BLUETOOTH_PRODUCT_ID = 0x0b13;
+    @VisibleForTesting static final int MICROSOFT_VENDOR_ID = 0x045e;
+    @VisibleForTesting static final int XBOX_ONE_S_2016_FIRMWARE_PRODUCT_ID = 0x02e0;
+    @VisibleForTesting static final int XBOX_SERIES_X_BLUETOOTH_PRODUCT_ID = 0x0b13;
 
-    @VisibleForTesting
-    static final int BROADCOM_VENDOR_ID = 0x0a5c;
-    @VisibleForTesting
-    static final int SNAKEBYTE_IDROIDCON_PRODUCT_ID = 0x8502;
+    @VisibleForTesting static final int BROADCOM_VENDOR_ID = 0x0a5c;
+    @VisibleForTesting static final int SNAKEBYTE_IDROIDCON_PRODUCT_ID = 0x8502;
 
-    @VisibleForTesting
-    static final int GOOGLE_VENDOR_ID = 0x18d1;
-    @VisibleForTesting
-    static final int STADIA_CONTROLLER_PRODUCT_ID = 0x9400;
+    @VisibleForTesting static final int GOOGLE_VENDOR_ID = 0x18d1;
+    @VisibleForTesting static final int STADIA_CONTROLLER_PRODUCT_ID = 0x9400;
 
     private static final float BUTTON_AXIS_DEADZONE = 0.01f;
 
@@ -72,7 +69,7 @@ abstract class GamepadMappings {
     }
 
     @VisibleForTesting
-    static GamepadMappings getMappings(int vendorId, int productId, int[] axes) {
+    static @Nullable GamepadMappings getMappings(int vendorId, int productId, int[] axes) {
         if (vendorId == SONY_VENDOR_ID) {
             if (productId == PS_DUALSHOCK_4_PRODUCT_ID
                     || productId == PS_DUALSHOCK_4_SLIM_PRODUCT_ID
@@ -85,12 +82,14 @@ abstract class GamepadMappings {
                 }
                 return new Ps4Ps5GamepadMappings();
             }
-            if (productId == PS_DUAL_SENSE_PRODUCT_ID) {
+            if (productId == PS_DUAL_SENSE_PRODUCT_ID
+                    || productId == PS_DUAL_SENSE_EDGE_PRODUCT_ID) {
                 // Android 12 includes a new driver for PS5 gamepads. Use an alternate mapping for
                 // versions of Android without this driver.
                 if (android.os.Build.VERSION.SDK_INT <= Build.VERSION_CODES.R) {
                     return new Ps4Ps5GamepadMappings();
                 }
+                return new XboxCompatibleGamepadMappings();
             }
         }
         if (vendorId == MICROSOFT_VENDOR_ID) {
@@ -116,7 +115,7 @@ abstract class GamepadMappings {
     }
 
     @VisibleForTesting
-    static GamepadMappings getMappings(String deviceName) {
+    static @Nullable GamepadMappings getMappings(String deviceName) {
         if (deviceName.startsWith(NVIDIA_SHIELD_DEVICE_NAME_PREFIX)
                 || deviceName.equals(MICROSOFT_XBOX_PAD_DEVICE_NAME)) {
             return new XboxCompatibleGamepadMappings();
@@ -159,11 +158,19 @@ abstract class GamepadMappings {
     }
 
     /**
-     * Method implemented by subclasses to perform mapping from raw axes and buttons
-     * to canonical axes and buttons.
+     * Returns the number of mapped axes. Subclasses which expose axes beyond the canonical axes
+     * should override this.
      */
-    public abstract void mapToStandardGamepad(float[] mappedAxes, float[] mappedButtons,
-            float[] rawAxes, float[] rawButtons);
+    public int getAxesLength() {
+        return CanonicalAxisIndex.COUNT;
+    }
+
+    /**
+     * Method implemented by subclasses to perform mapping from raw axes and buttons to canonical
+     * axes and buttons.
+     */
+    public abstract void mapToStandardGamepad(
+            float[] mappedAxes, float[] mappedButtons, float[] rawAxes, float[] rawButtons);
 
     private static void mapCommonXYABButtons(float[] mappedButtons, float[] rawButtons) {
         float a = rawButtons[KeyEvent.KEYCODE_BUTTON_A];
@@ -198,8 +205,8 @@ abstract class GamepadMappings {
      * using this, as it can easily confuse the user. It is only really useful if
      * the controller completely lacks a second set of shoulder buttons.
      */
-    private static void mapUpperTriggerButtonsToBottomShoulder(float[] mappedButtons,
-            float[] rawButtons) {
+    private static void mapUpperTriggerButtonsToBottomShoulder(
+            float[] mappedButtons, float[] rawButtons) {
         float l1 = rawButtons[KeyEvent.KEYCODE_BUTTON_L1];
         float r1 = rawButtons[KeyEvent.KEYCODE_BUTTON_R1];
         mappedButtons[CanonicalButtonIndex.LEFT_TRIGGER] = l1;
@@ -259,8 +266,8 @@ abstract class GamepadMappings {
         mappedButtons[CanonicalButtonIndex.RIGHT_TRIGGER] = -z > BUTTON_AXIS_DEADZONE ? -z : 0.0f;
     }
 
-    private static void mapLowerTriggerButtonsToBottomShoulder(float[] mappedButtons,
-            float[] rawButtons) {
+    private static void mapLowerTriggerButtonsToBottomShoulder(
+            float[] mappedButtons, float[] rawButtons) {
         float l2 = rawButtons[KeyEvent.KEYCODE_BUTTON_L2];
         float r2 = rawButtons[KeyEvent.KEYCODE_BUTTON_R2];
         mappedButtons[CanonicalButtonIndex.LEFT_TRIGGER] = l2;
@@ -293,8 +300,8 @@ abstract class GamepadMappings {
          * to standard gamepad button and axes values.
          */
         @Override
-        public void mapToStandardGamepad(float[] mappedAxes, float[] mappedButtons,
-                float[] rawAxes, float[] rawButtons) {
+        public void mapToStandardGamepad(
+                float[] mappedAxes, float[] mappedButtons, float[] rawAxes, float[] rawButtons) {
             mapCommonXYABButtons(mappedButtons, rawButtons);
             mapTriggerButtonsToTopShoulder(mappedButtons, rawButtons);
             mapCommonThumbstickButtons(mappedButtons, rawButtons);
@@ -314,8 +321,8 @@ abstract class GamepadMappings {
          * to standard gamepad button and axes values.
          */
         @Override
-        public void mapToStandardGamepad(float[] mappedAxes, float[] mappedButtons,
-                float[] rawAxes, float[] rawButtons) {
+        public void mapToStandardGamepad(
+                float[] mappedAxes, float[] mappedButtons, float[] rawAxes, float[] rawButtons) {
             mapCommonXYABButtons(mappedButtons, rawButtons);
             mapTriggerButtonsToTopShoulder(mappedButtons, rawButtons);
             mapCommonThumbstickButtons(mappedButtons, rawButtons);
@@ -482,8 +489,8 @@ abstract class GamepadMappings {
          * axis values. This mapping function should only be used on Android 8 and earlier.
          */
         @Override
-        public void mapToStandardGamepad(float[] mappedAxes, float[] mappedButtons,
-                float[] rawAxes, float[] rawButtons) {
+        public void mapToStandardGamepad(
+                float[] mappedAxes, float[] mappedButtons, float[] rawAxes, float[] rawButtons) {
             // On DualShock 3 and SIXAXIS, X/Y has higher priority.
             float a = rawButtons[KeyEvent.KEYCODE_BUTTON_A];
             float b = rawButtons[KeyEvent.KEYCODE_BUTTON_B];
@@ -582,8 +589,8 @@ abstract class GamepadMappings {
          * to standard gamepad button and axes values.
          */
         @Override
-        public void mapToStandardGamepad(float[] mappedAxes, float[] mappedButtons,
-                float[] rawAxes, float[] rawButtons) {
+        public void mapToStandardGamepad(
+                float[] mappedAxes, float[] mappedButtons, float[] rawAxes, float[] rawButtons) {
             mapCommonXYABButtons(mappedButtons, rawButtons);
             mapUpperTriggerButtonsToBottomShoulder(mappedButtons, rawButtons);
             mapCommonThumbstickButtons(mappedButtons, rawButtons);
@@ -598,6 +605,7 @@ abstract class GamepadMappings {
     private static class StadiaControllerMappings extends GamepadMappings {
         private static final int BUTTON_INDEX_ASSISTANT = CanonicalButtonIndex.COUNT;
         private static final int BUTTON_INDEX_CAPTURE = CanonicalButtonIndex.COUNT + 1;
+
         /**
          * Method for mapping Stadia Controller axis and button values to
          * standard gamepad button and axes values.
@@ -630,47 +638,173 @@ abstract class GamepadMappings {
         private int mRightTriggerAxis = -1;
         private int mRightStickXAxis = -1;
         private int mRightStickYAxis = -1;
-        private boolean mUseHatAxes;
+        private final boolean mUseHatAxes;
         private final boolean mHasMetaButton;
+
+        // Input axes that could not be assigned a canonical axis or button, and the mapped axis
+        // index assigned to each of them.
+        private final int[] mExtraAxes;
+        private final int[] mExtraAxisIndices;
+        private final int mAxesLength;
 
         UnknownGamepadMappings(int[] axes, BitSet buttons) {
             mHasMetaButton = buttons.get(KeyEvent.KEYCODE_BUTTON_MODE);
 
-            int hatAxesFound = 0;
+            if (!DeviceFeatureMap.isEnabled(DeviceFeatureList.ANDROID_UNKNOWN_GAMEPAD_EXTRA_AXES)) {
+                // Legacy mapping logic: only the canonical axes are exposed, the last input
+                // axis matching a canonical axis wins, and unmatched input axes are dropped.
+                int hatAxesFound = 0;
+                for (int axis : axes) {
+                    switch (axis) {
+                        case MotionEvent.AXIS_LTRIGGER:
+                        case MotionEvent.AXIS_BRAKE:
+                            mLeftTriggerAxis = axis;
+                            break;
+                        case MotionEvent.AXIS_RTRIGGER:
+                        case MotionEvent.AXIS_GAS:
+                        case MotionEvent.AXIS_THROTTLE:
+                            mRightTriggerAxis = axis;
+                            break;
+                        case MotionEvent.AXIS_RX:
+                        case MotionEvent.AXIS_Z:
+                            mRightStickXAxis = axis;
+                            break;
+                        case MotionEvent.AXIS_RY:
+                        case MotionEvent.AXIS_RZ:
+                            mRightStickYAxis = axis;
+                            break;
+                        case MotionEvent.AXIS_HAT_X:
+                        case MotionEvent.AXIS_HAT_Y:
+                            hatAxesFound++;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                mUseHatAxes = hatAxesFound == 2;
+                mExtraAxes = new int[0];
+                mExtraAxisIndices = new int[0];
+                mAxesLength = CanonicalAxisIndex.COUNT;
+                return;
+            }
 
+            List<Integer> extraAxes = new ArrayList<>();
+
+            // First pass: assign input axes to the canonical stick axes. When more than one
+            // input axis maps to the same canonical axis, prefer the first candidate and treat
+            // the others as extra axes so they do not alias. The left stick axes (AXIS_X and
+            // AXIS_Y) have a single candidate each and are always mapped.
+            mRightStickXAxis =
+                    findPreferredAxis(axes, extraAxes, MotionEvent.AXIS_RX, MotionEvent.AXIS_Z);
+            mRightStickYAxis =
+                    findPreferredAxis(axes, extraAxes, MotionEvent.AXIS_RY, MotionEvent.AXIS_RZ);
+            if (mRightStickXAxis == -1 || mRightStickYAxis == -1) {
+                // The right stick is only mapped when both of its axes are present. Expose a
+                // lone axis as an extra axis instead of dropping it.
+                if (mRightStickXAxis != -1) {
+                    extraAxes.add(mRightStickXAxis);
+                    mRightStickXAxis = -1;
+                }
+                if (mRightStickYAxis != -1) {
+                    extraAxes.add(mRightStickYAxis);
+                    mRightStickYAxis = -1;
+                }
+            }
+
+            // Second pass: assign input axes to the canonical button axes with the same
+            // tie-breaking rule.
+            mLeftTriggerAxis =
+                    findPreferredAxis(
+                            axes, extraAxes, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE);
+            mRightTriggerAxis =
+                    findPreferredAxis(
+                            axes,
+                            extraAxes,
+                            MotionEvent.AXIS_RTRIGGER,
+                            MotionEvent.AXIS_GAS,
+                            MotionEvent.AXIS_THROTTLE);
+            if (mLeftTriggerAxis == -1 || mRightTriggerAxis == -1) {
+                // The triggers are only mapped when both trigger axes are present. Expose a
+                // lone trigger axis as an extra axis instead of dropping it.
+                if (mLeftTriggerAxis != -1) {
+                    extraAxes.add(mLeftTriggerAxis);
+                    mLeftTriggerAxis = -1;
+                }
+                if (mRightTriggerAxis != -1) {
+                    extraAxes.add(mRightTriggerAxis);
+                    mRightTriggerAxis = -1;
+                }
+            }
+
+            // Hat axes are synthetic axes generated by the Linux input system and never appear
+            // alone. Ignore a lone hat axis.
+            boolean hasHatXAxis = hasAxis(axes, MotionEvent.AXIS_HAT_X);
+            boolean hasHatYAxis = hasAxis(axes, MotionEvent.AXIS_HAT_Y);
+            mUseHatAxes = hasHatXAxis && hasHatYAxis;
+
+            // Append input axes that have no standard mapping to the extra axes.
             for (int axis : axes) {
                 switch (axis) {
+                    case MotionEvent.AXIS_X:
+                    case MotionEvent.AXIS_Y:
+                    case MotionEvent.AXIS_RX:
+                    case MotionEvent.AXIS_Z:
+                    case MotionEvent.AXIS_RY:
+                    case MotionEvent.AXIS_RZ:
                     case MotionEvent.AXIS_LTRIGGER:
                     case MotionEvent.AXIS_BRAKE:
-                        mLeftTriggerAxis = axis;
-                        break;
                     case MotionEvent.AXIS_RTRIGGER:
                     case MotionEvent.AXIS_GAS:
                     case MotionEvent.AXIS_THROTTLE:
-                        mRightTriggerAxis = axis;
-                        break;
-                    case MotionEvent.AXIS_RX:
-                    case MotionEvent.AXIS_Z:
-                        mRightStickXAxis = axis;
-                        break;
-                    case MotionEvent.AXIS_RY:
-                    case MotionEvent.AXIS_RZ:
-                        mRightStickYAxis = axis;
-                        break;
                     case MotionEvent.AXIS_HAT_X:
-                        hatAxesFound++;
-                        break;
                     case MotionEvent.AXIS_HAT_Y:
-                        hatAxesFound++;
                         break;
                     default:
+                        extraAxes.add(axis);
                         break;
                 }
             }
 
-            if (hatAxesFound == 2) {
-                mUseHatAxes = true;
+            // Assign each extra axis the first unassigned axis index. The left stick axes are
+            // always mapped and the right stick axes are either both mapped or both unmapped,
+            // so the unassigned indices are contiguous.
+            int nextIndex =
+                    mRightStickXAxis == -1
+                            ? CanonicalAxisIndex.RIGHT_STICK_X
+                            : CanonicalAxisIndex.COUNT;
+            mExtraAxes = new int[extraAxes.size()];
+            mExtraAxisIndices = new int[extraAxes.size()];
+            for (int i = 0; i < mExtraAxes.length; i++) {
+                mExtraAxes[i] = extraAxes.get(i);
+                mExtraAxisIndices[i] = nextIndex++;
             }
+            mAxesLength = Math.max(CanonicalAxisIndex.COUNT, nextIndex);
+        }
+
+        /**
+         * Returns the first axis in {@code candidates} that is present in {@code axes}, or -1 if
+         * none are present. Any remaining candidates that are also present are appended to {@code
+         * extraAxes}.
+         */
+        private static int findPreferredAxis(
+                int[] axes, List<Integer> extraAxes, int... candidates) {
+            int preferred = -1;
+            for (int candidate : candidates) {
+                if (!hasAxis(axes, candidate)) continue;
+                if (preferred == -1) {
+                    preferred = candidate;
+                } else {
+                    extraAxes.add(candidate);
+                }
+            }
+            return preferred;
+        }
+
+        private static boolean hasAxis(int[] axes, int axis) {
+            for (int a : axes) {
+                if (a == axis) return true;
+            }
+            return false;
         }
 
         @Override
@@ -685,8 +819,13 @@ abstract class GamepadMappings {
         }
 
         @Override
-        public void mapToStandardGamepad(float[] mappedAxes, float[] mappedButtons,
-                float[] rawAxes, float[] rawButtons) {
+        public int getAxesLength() {
+            return mAxesLength;
+        }
+
+        @Override
+        public void mapToStandardGamepad(
+                float[] mappedAxes, float[] mappedButtons, float[] rawAxes, float[] rawButtons) {
             // These are shared among all gamepads intended for use with Android
             // that we tested so far.
             mapCommonXYABButtons(mappedButtons, rawButtons);
@@ -716,6 +855,10 @@ abstract class GamepadMappings {
                 mapHatAxisToDpadButtons(mappedButtons, rawAxes);
             } else {
                 mapCommonDpadButtons(mappedButtons, rawButtons);
+            }
+
+            for (int i = 0; i < mExtraAxes.length; i++) {
+                mappedAxes[mExtraAxisIndices[i]] = rawAxes[mExtraAxes[i]];
             }
         }
     }

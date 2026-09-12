@@ -2,18 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "chromeos/ash/components/dbus/kerberos/fake_kerberos_client.h"
 
+#include <algorithm>
+#include <string_view>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_split.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "third_party/cros_system_api/dbus/kerberos/dbus-constants.h"
 
 namespace ash {
@@ -50,10 +53,11 @@ const char* const kBlocklistedConfigOptions[] = {
 
 // Performs a fake validation of a config line by just checking for some
 // non-allowlisted keywords. Returns true if no blocklisted items are contained.
-bool ValidateConfigLine(const std::string& line) {
+bool ValidateConfigLine(std::string_view line) {
   for (const char* option : kBlocklistedConfigOptions) {
-    if (line.find(option) != std::string::npos)
+    if (line.contains(option)) {
       return false;
+    }
   }
   return true;
 }
@@ -61,8 +65,8 @@ bool ValidateConfigLine(const std::string& line) {
 // Runs ValidateConfigLine() on every line of |krb5_config|. Returns a
 // ConfigErrorInfo object that indicates the first line where validation fails,
 // if any.
-kerberos::ConfigErrorInfo ValidateConfigLines(const std::string& krb5_config) {
-  std::vector<std::string> lines = base::SplitString(
+kerberos::ConfigErrorInfo ValidateConfigLines(std::string_view krb5_config) {
+  std::vector<std::string_view> lines = base::SplitStringPiece(
       krb5_config, "\r\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
   for (size_t line_index = 0; line_index < lines.size(); ++line_index) {
     if (!ValidateConfigLine(lines[line_index])) {
@@ -104,8 +108,9 @@ void PostResponse(base::OnceCallback<void(const TProto&)> callback,
 std::string ReadPassword(int password_fd) {
   std::string password;
   char c;
-  while (base::ReadFromFD(password_fd, &c, 1))
+  while (base::ReadFromFD(password_fd, base::span_from_ref(c))) {
     password.push_back(c);
+  }
   return password;
 }
 
@@ -118,8 +123,7 @@ FakeKerberosClient::~FakeKerberosClient() = default;
 void FakeKerberosClient::AddAccount(const kerberos::AddAccountRequest& request,
                                     AddAccountCallback callback) {
   MaybeRecordFunctionCallForTesting(__FUNCTION__);
-  auto it =
-      base::ranges::find(accounts_, AccountData(request.principal_name()));
+  auto it = std::ranges::find(accounts_, AccountData(request.principal_name()));
   if (it != accounts_.end()) {
     it->is_managed |= request.is_managed();
     PostResponse(std::move(callback), kerberos::ERROR_DUPLICATE_PRINCIPAL_NAME,
@@ -138,8 +142,7 @@ void FakeKerberosClient::RemoveAccount(
     RemoveAccountCallback callback) {
   MaybeRecordFunctionCallForTesting(__FUNCTION__);
   kerberos::RemoveAccountResponse response;
-  auto it =
-      base::ranges::find(accounts_, AccountData(request.principal_name()));
+  auto it = std::ranges::find(accounts_, AccountData(request.principal_name()));
   if (it == accounts_.end()) {
     response.set_error(kerberos::ERROR_UNKNOWN_PRINCIPAL_NAME);
   } else {
@@ -155,13 +158,13 @@ void FakeKerberosClient::ClearAccounts(
     const kerberos::ClearAccountsRequest& request,
     ClearAccountsCallback callback) {
   MaybeRecordFunctionCallForTesting(__FUNCTION__);
-  std::unordered_set<std::string> keep_list(
+  absl::flat_hash_set<std::string> keep_list(
       request.principal_names_to_ignore_size());
   for (int n = 0; n < request.principal_names_to_ignore_size(); ++n)
     keep_list.insert(request.principal_names_to_ignore(n));
 
   for (auto it = accounts_.begin(); it != accounts_.end(); /* empty */) {
-    if (base::Contains(keep_list, it->principal_name)) {
+    if (keep_list.contains(it->principal_name)) {
       ++it;
       continue;
     }
@@ -368,7 +371,7 @@ KerberosClient::TestInterface* FakeKerberosClient::GetTestInterface() {
 
 FakeKerberosClient::AccountData* FakeKerberosClient::GetAccountData(
     const std::string& principal_name) {
-  auto it = base::ranges::find(accounts_, AccountData(principal_name));
+  auto it = std::ranges::find(accounts_, AccountData(principal_name));
   return it != accounts_.end() ? &*it : nullptr;
 }
 

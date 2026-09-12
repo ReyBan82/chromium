@@ -3,20 +3,20 @@
 // found in the LICENSE file.
 
 import './page_favicon.js';
-import './history_clusters_shared_style.css.js';
-import 'chrome://resources/cr_elements/cr_action_menu/cr_action_menu.js';
-import 'chrome://resources/cr_elements/cr_icon_button/cr_icon_button.js';
-import 'chrome://resources/cr_elements/cr_lazy_render/cr_lazy_render.js';
+import '//resources/cr_elements/cr_action_menu/cr_action_menu.js';
+import '//resources/cr_elements/cr_icon_button/cr_icon_button.js';
 
-import {CrActionMenuElement} from 'chrome://resources/cr_elements/cr_action_menu/cr_action_menu.js';
-import {CrLazyRenderElement} from 'chrome://resources/cr_elements/cr_lazy_render/cr_lazy_render.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {I18nMixinLit} from '//resources/cr_elements/i18n_mixin_lit.js';
+import {assert} from '//resources/js/assert.js';
+import {loadTimeData} from '//resources/js/load_time_data.js';
+import {CrLitElement} from '//resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from '//resources/lit/v3_0/lit.rollup.js';
 
-import {BrowserProxyImpl} from './browser_proxy.js';
-import {Annotation, URLVisit} from './history_cluster_types.mojom-webui.js';
-import {getTemplate} from './url_visit.html.js';
+import type {URLVisit} from './history_cluster_types.mojom-webui.js';
+import {Annotation} from './history_cluster_types.mojom-webui.js';
+import {browserProxyFactory} from './history_clusters.mojom-webui.js';
+import {getCss} from './url_visit.css.js';
+import {getHtml} from './url_visit.html.js';
 import {insertHighlightedTextWithMatchesIntoElement} from './utils.js';
 
 /**
@@ -30,133 +30,63 @@ import {insertHighlightedTextWithMatchesIntoElement} from './utils.js';
  */
 const annotationToStringId: Map<number, string> = new Map([
   [Annotation.kBookmarked, 'bookmarked'],
-  [Annotation.kTabGrouped, 'savedInTabGroup'],
 ]);
 
-declare global {
-  interface HTMLElementTagNameMap {
-    'url-visit': VisitRowElement;
-  }
-}
+const ClusterMenuElementBase = I18nMixinLit(CrLitElement);
 
-const ClusterMenuElementBase = I18nMixin(PolymerElement);
-
-interface VisitRowElement {
+export interface UrlVisitElement {
   $: {
-    actionMenu: CrLazyRenderElement<CrActionMenuElement>,
     actionMenuButton: HTMLElement,
     title: HTMLElement,
     url: HTMLElement,
   };
 }
 
-class VisitRowElement extends ClusterMenuElementBase {
+export class UrlVisitElement extends ClusterMenuElementBase {
   static get is() {
     return 'url-visit';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
       /**
        * The current query for which related clusters are requested and shown.
        */
-      query: String,
+      query: {type: String},
 
       /**
        * The visit to display.
        */
-      visit: Object,
+      visit: {type: Object},
 
       /**
        * Whether this visit is within a persisted cluster.
        */
-      fromPersistence: Boolean,
-
-      /**
-       * Annotations to show for the visit (e.g., whether page was bookmarked).
-       */
-      annotations_: {
-        type: Object,
-        computed: 'computeAnnotations_(visit)',
-      },
-
-      /**
-       * True when the hide-visits feature is enabled, not showing the hide
-       * visits icon, and the visit is hide-able (i.e. belongs to a persisted
-       * cluster).
-       */
-      showHideVisitMenu_: {
-        type: Boolean,
-        computed: 'computeShowHideVisitMenu_(fromPersistence)',
-      },
-
-      /**
-       * Similar to `showHideVisitMenu_`, but showing the icon instead of the
-       * menu button.
-       */
-      showHideVisitIcon_: {
-        type: Boolean,
-        computed: 'computeShowHideVisitIcon_(fromPersistence)',
-      },
+      fromPersistence: {type: Boolean},
 
       /**
        * Usually this is true, but this can be false if deleting history is
        * prohibited by Enterprise policy.
        */
-      allowDeletingHistory_: {
-        type: Boolean,
-        value: () => loadTimeData.getBoolean('allowDeletingHistory'),
-      },
-
-      /**
-       * The action menu is hidden when the menu would be empty; i.e., both the
-       * hide visits and delete visits buttons are disabled.
-       */
-      showActionMenuButton_: {
-        type: Boolean,
-        computed: 'computeShowActionMenuButton_(showHideVisitMenu_)',
-      },
-
-      /**
-       * Debug info for the visit.
-       */
-      debugInfo_: {
-        type: String,
-        computed: 'computeDebugInfo_(visit)',
-      },
+      allowDeletingHistory_: {type: Boolean},
 
       /**
        * Whether the cluster is in the side panel.
        */
       inSidePanel_: {
         type: Boolean,
-        value: () => loadTimeData.getBoolean('inSidePanel'),
-        reflectToAttribute: true,
+        reflect: true,
       },
 
-      /**
-       * Page title for the visit. This property is actually unused. The side
-       * effect of the compute function is used to insert the HTML elements for
-       * highlighting into this.$.title element.
-       */
-      unusedTitle_: {
-        type: String,
-        computed: 'computeTitle_(visit)',
-      },
-
-      /**
-       * This property is actually unused. The side effect of the compute
-       * function is used to insert HTML elements for the highlighted
-       * `this.visit.urlForDisplay` URL into the `this.$.url` element.
-       */
-      unusedUrlForDisplay_: {
-        type: String,
-        computed: 'computeUrlForDisplay_(visit)',
-      },
+      renderActionMenu_: {type: Boolean},
     };
   }
 
@@ -164,33 +94,43 @@ class VisitRowElement extends ClusterMenuElementBase {
   // Properties
   //============================================================================
 
-  query: string;
-  visit: URLVisit;
-  fromPersistence: boolean;
-  private annotations_: string[];
-  private showHideVisitMenu_: boolean;
-  private showHideVisitIcon_: boolean;
-  private allowDeletingHistory_: boolean;
-  private showActionMenuButton_: boolean;
-  private debugInfo_: string;
-  private inSidePanel_: boolean;
-  private unusedTitle_: string;
-  private unusedVisibleUrl_: string;
+  accessor query: string = '';
+  accessor visit: URLVisit|undefined;
+  accessor fromPersistence: boolean = false;
+  protected annotations_: string[] = [];
+  protected accessor allowDeletingHistory_: boolean =
+      loadTimeData.getBoolean('allowDeletingHistory');
+  protected accessor inSidePanel_: boolean =
+      loadTimeData.getBoolean('inSidePanel');
+  protected accessor renderActionMenu_: boolean = false;
+
+  override updated(changedProperties: PropertyValues<this>) {
+    super.updated(changedProperties);
+
+    if (changedProperties.has('visit')) {
+      assert(this.visit);
+      insertHighlightedTextWithMatchesIntoElement(
+          this.$.title, this.visit.pageTitle, this.visit.titleMatchPositions);
+      insertHighlightedTextWithMatchesIntoElement(
+          this.$.url, this.visit.urlForDisplay,
+          this.visit.urlForDisplayMatchPositions);
+    }
+  }
 
   //============================================================================
   // Event handlers
   //============================================================================
 
-  private onAuxClick_() {
+  private fireVisitClickedEvent_() {
     // Notify the parent <history-cluster> element of this event.
-    this.dispatchEvent(new CustomEvent('visit-clicked', {
-      bubbles: true,
-      composed: true,
-      detail: this.visit,
-    }));
+    this.fire('visit-clicked', this.visit);
   }
 
-  private onClick_(event: MouseEvent) {
+  protected onAuxclick_(event: MouseEvent) {
+    this.onClick_(event);
+  }
+
+  protected onClick_(event: MouseEvent) {
     // Ignore previously handled events.
     if (event.defaultPrevented) {
       return;
@@ -199,67 +139,76 @@ class VisitRowElement extends ClusterMenuElementBase {
     event.preventDefault();  // Prevent default browser action (navigation).
 
     // To record metrics.
-    this.onAuxClick_();
+    this.fireVisitClickedEvent_();
 
     this.openUrl_(event);
   }
 
-  private onContextMenu_(event: MouseEvent) {
+  protected onContextmenu_(event: MouseEvent) {
     // Because WebUI has a Blink-provided context menu that's suitable, and
     // Side Panel always UIs always have a custom context menu.
-    if (!loadTimeData.getBoolean('inSidePanel')) {
+    if (!loadTimeData.getBoolean('inSidePanel') || !this.visit) {
       return;
     }
 
-    BrowserProxyImpl.getInstance().handler.showContextMenuForURL(
+    browserProxyFactory.getInstance().handler.showContextMenuForURL(
         this.visit.normalizedUrl, {x: event.clientX, y: event.clientY});
   }
 
-  private onKeydown_(e: KeyboardEvent) {
+  protected onKeydown_(e: KeyboardEvent) {
     // To be consistent with <history-list>, only handle Enter, and not Space.
     if (e.key !== 'Enter') {
       return;
     }
 
     // To record metrics.
-    this.onAuxClick_();
+    this.fireVisitClickedEvent_();
 
     this.openUrl_(e);
   }
 
-  private onActionMenuButtonClick_(event: Event) {
-    this.$.actionMenu.get().showAt(this.$.actionMenuButton);
+  protected async onActionMenuButtonClick_(event: Event) {
     event.preventDefault();  // Prevent default browser action (navigation).
+
+    if (!this.renderActionMenu_) {
+      this.renderActionMenu_ = true;
+      await this.updateComplete;
+    }
+    const menu = this.shadowRoot.querySelector('cr-action-menu');
+    assert(menu);
+    menu.showAt(this.$.actionMenuButton);
   }
 
-  private onHideSelfButtonClick_(event: Event) {
+  protected onHideSelfButtonClick_(event: Event) {
     this.emitMenuButtonClick_(event, 'hide-visit');
   }
 
-  private onRemoveSelfButtonClick_(event: Event) {
+  protected onRemoveSelfButtonClick_(event: Event) {
     this.emitMenuButtonClick_(event, 'remove-visit');
   }
 
   private emitMenuButtonClick_(event: Event, emitEventName: string) {
     event.preventDefault();  // Prevent default browser action (navigation).
 
-    this.dispatchEvent(new CustomEvent(emitEventName, {
-      bubbles: true,
-      composed: true,
-      detail: this.visit,
-    }));
+    this.fire(emitEventName, this.visit);
 
-    this.$.actionMenu.get().close();
+    // This can also be triggered from the hide visit icon, in which case the
+    // menu may not be rendered.
+    if (this.renderActionMenu_) {
+      const menu = this.shadowRoot.querySelector('cr-action-menu');
+      assert(menu);
+      menu.close();
+    }
   }
 
   //============================================================================
   // Helper methods
   //============================================================================
 
-  private computeAnnotations_(_visit: URLVisit): string[] {
+  protected computeAnnotations_(): string[] {
     // Disabling annotations until more appropriate design for annotations in
     // the side panel is complete.
-    if (this.inSidePanel_) {
+    if (this.inSidePanel_ || !this.visit) {
       return [];
     }
     return this.visit.annotations
@@ -272,47 +221,17 @@ class VisitRowElement extends ClusterMenuElementBase {
         .map((id: string) => loadTimeData.getString(id));
   }
 
-  private computeShowHideVisitMenu_(_fromPersistence: boolean): boolean {
-    // Show the hide menu item if the visit is hide-able and the hide icon is
-    // hidden.
-    return this.fromPersistence &&
-        loadTimeData.getBoolean('isHideVisitsEnabled') &&
-        !loadTimeData.getBoolean('isHideVisitsIconEnabled');
-  }
-
-  private computeShowHideVisitIcon_(_fromPersistence: boolean): boolean {
-    return this.fromPersistence &&
-        loadTimeData.getBoolean('isHideVisitsIconEnabled');
-  }
-
-  private computeShowActionMenuButton_(_showHideVisitMenu: boolean): boolean {
-    // Show the menu if either the hide or delete button is visible.
-    return this.showHideVisitMenu_ || this.allowDeletingHistory_;
-  }
-
-  private computeDebugInfo_(_visit: URLVisit): string {
-    if (!loadTimeData.getBoolean('isHistoryClustersDebug')) {
+  protected computeDebugInfo_(): string {
+    if (!loadTimeData.getBoolean('isHistoryClustersDebug') || !this.visit) {
       return '';
     }
 
     return JSON.stringify(this.visit.debugInfo);
   }
 
-  private computeTitle_(_visit: URLVisit): string {
-    insertHighlightedTextWithMatchesIntoElement(
-        this.$.title, this.visit.pageTitle, this.visit.titleMatchPositions);
-    return this.visit.pageTitle;
-  }
-
-  private computeUrlForDisplay_(_visit: URLVisit): string {
-    insertHighlightedTextWithMatchesIntoElement(
-        this.$.url, this.visit.urlForDisplay,
-        this.visit.urlForDisplayMatchPositions);
-    return this.visit.urlForDisplay;
-  }
-
   private openUrl_(event: MouseEvent|KeyboardEvent) {
-    BrowserProxyImpl.getInstance().handler.openHistoryCluster(
+    assert(this.visit);
+    browserProxyFactory.getInstance().handler.openHistoryUrl(
         this.visit.normalizedUrl, {
           middleButton: (event as MouseEvent).button === 1,
           altKey: event.altKey,
@@ -323,4 +242,10 @@ class VisitRowElement extends ClusterMenuElementBase {
   }
 }
 
-customElements.define(VisitRowElement.is, VisitRowElement);
+declare global {
+  interface HTMLElementTagNameMap {
+    'url-visit': UrlVisitElement;
+  }
+}
+
+customElements.define(UrlVisitElement.is, UrlVisitElement);

@@ -6,6 +6,7 @@
 #define COMPONENTS_VIZ_COMMON_FRAME_SINKS_COPY_OUTPUT_REQUEST_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -18,7 +19,6 @@
 #include "gpu/command_buffer/common/mailbox.h"
 #include "gpu/command_buffer/common/sync_token.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/vector2d.h"
 
@@ -72,8 +72,8 @@ class VIZ_COMMON_EXPORT CopyOutputRequest {
   ResultDestination result_destination() const { return result_destination_; }
 
   // Requests that the result callback be run as a task posted to the given
-  // |task_runner|. If this is not set, the result callback could be run from
-  // any context.
+  // |task_runner|. If this is not set, the result callback will be run on the
+  // thread that the `CopyOutputRequest` was created on.
   void set_result_task_runner(
       scoped_refptr<base::SequencedTaskRunner> task_runner) {
     result_task_runner_ = std::move(task_runner);
@@ -120,9 +120,10 @@ class VIZ_COMMON_EXPORT CopyOutputRequest {
   // called before blit request was set on the copy request.
   void set_result_selection(const gfx::Rect& selection) {
     DCHECK(result_format_ == ResultFormat::RGBA ||
+           result_format_ == ResultFormat::RGBAF16 ||
            (selection.width() % 2 == 0 && selection.height() % 2 == 0))
         << "CopyOutputRequest supports odd-sized result_selection() only for "
-           "RGBA!";
+           "RGBA and RGBAF16!";
     DCHECK(!has_blit_request());
     result_selection_ = selection;
   }
@@ -148,6 +149,9 @@ class VIZ_COMMON_EXPORT CopyOutputRequest {
   // implementation, usually a DirectRenderer.
   void SendResult(std::unique_ptr<CopyOutputResult> result);
 
+  // Sends the result with an error code from executing this request.
+  void SendError(CopyOutputResult::Error error);
+
   // Returns true if SendResult() will deliver the CopyOutputResult using the
   // same TaskRunner as that to which the current task was posted.
   bool SendsResultsInCurrentSequence() const;
@@ -171,11 +175,11 @@ class VIZ_COMMON_EXPORT CopyOutputRequest {
   scoped_refptr<base::SequencedTaskRunner> result_task_runner_;
   gfx::Vector2d scale_from_;
   gfx::Vector2d scale_to_;
-  absl::optional<base::UnguessableToken> source_;
-  absl::optional<gfx::Rect> area_;
-  absl::optional<gfx::Rect> result_selection_;
+  std::optional<base::UnguessableToken> source_;
+  std::optional<gfx::Rect> area_;
+  std::optional<gfx::Rect> result_selection_;
 
-  absl::optional<BlitRequest> blit_request_;
+  std::optional<BlitRequest> blit_request_;
 };
 
 }  // namespace viz

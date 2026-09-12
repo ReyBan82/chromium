@@ -6,14 +6,16 @@
 #include <tuple>
 #include <utility>
 #include <vector>
-#include "build/build_config.h"
 
 #include "base/command_line.h"
 #include "base/test/scoped_feature_list.h"
+#include "build/build_config.h"
 #include "cc/base/features.h"
 #include "cc/trees/render_frame_metadata.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
 #include "content/shell/browser/shell.h"
@@ -72,12 +74,7 @@ class DoubleTapToZoomBrowserTest
       public ::testing::WithParamInterface<
           std::tuple<std::string, bool, std::string>> {
  public:
-  DoubleTapToZoomBrowserTest() {
-    std::vector<base::test::FeatureRef> enable_features;
-    enable_features.push_back(features::kRemoveMobileViewportDoubleTap);
-    feature_list_.InitWithFeatures(enable_features,
-                                   std::vector<base::test::FeatureRef>());
-  }
+  DoubleTapToZoomBrowserTest() {}
   ~DoubleTapToZoomBrowserTest() override = default;
 
  protected:
@@ -90,9 +87,6 @@ class DoubleTapToZoomBrowserTest
   void LoadURL() {
     EXPECT_TRUE(NavigateToURL(shell(), HtmlAsDataUrl(std::get<0>(GetParam()))));
   }
-
- private:
-  base::test::ScopedFeatureList feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_P(DoubleTapToZoomBrowserTest, MobileOptimizedStatus) {
@@ -108,7 +102,7 @@ IN_PROC_BROWSER_TEST_P(DoubleTapToZoomBrowserTest, MobileOptimizedStatus) {
       << std::get<2>(GetParam());
 }
 
-// TODO(crbug.com/1271210): Flaky on mac and linux.
+// TODO(crbug.com/40805444): Flaky on mac and linux.
 #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
 #define MAYBE_TapDelayEnabled DISABLED_TapDelayEnabled
 #else

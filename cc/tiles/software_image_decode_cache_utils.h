@@ -74,7 +74,6 @@ class SoftwareImageDecodeCacheUtils {
     PaintImage::Id stable_id() const { return stable_id_; }
     ProcessingType type() const { return type_; }
     bool is_nearest_neighbor() const { return is_nearest_neighbor_; }
-    bool may_be_lcp_candidate() const { return may_be_lcp_candidate_; }
     gfx::Rect src_rect() const { return src_rect_; }
     gfx::Size target_size() const { return target_size_; }
     const TargetColorParams& target_color_params() const {
@@ -100,7 +99,6 @@ class SoftwareImageDecodeCacheUtils {
              PaintImage::Id stable_id,
              ProcessingType type,
              bool is_nearest_neighbor,
-             bool may_be_lcp_candidate,
              const gfx::Rect& src_rect,
              const gfx::Size& size,
              const TargetColorParams& target_color_params);
@@ -112,7 +110,6 @@ class SoftwareImageDecodeCacheUtils {
     PaintImage::Id stable_id_;
     ProcessingType type_;
     bool is_nearest_neighbor_;
-    bool may_be_lcp_candidate_;
     gfx::Rect src_rect_;
     gfx::Size target_size_;
     TargetColorParams target_color_params_;
@@ -128,7 +125,8 @@ class SoftwareImageDecodeCacheUtils {
   class CC_EXPORT CacheEntry {
    public:
     CacheEntry();
-    CacheEntry(const SkImageInfo& info,
+    CacheEntry(sk_sp<SkImage> image,
+               sk_sp<SkImage> gainmap_image,
                std::unique_ptr<base::DiscardableMemory> memory,
                const SkSize& src_rect_offset);
     ~CacheEntry();
@@ -141,6 +139,13 @@ class SoftwareImageDecodeCacheUtils {
       DCHECK(is_locked);
       return image_;
     }
+    sk_sp<SkImage> gainmap_image() const {
+      if (!memory) {
+        return nullptr;
+      }
+      DCHECK(is_locked);
+      return gainmap_image_;
+    }
     const SkSize& src_rect_offset() const { return src_rect_offset_; }
 
     bool Lock();
@@ -152,9 +157,7 @@ class SoftwareImageDecodeCacheUtils {
     // Mark this image as being used in either a draw or as a source for a
     // scaled image. Either case represents this decode as being valuable and
     // not wasted.
-    void mark_used() { usage_stats_.used = true; }
     void mark_cached() { cached_ = true; }
-    void mark_out_of_raster() { usage_stats_.first_lock_out_of_raster = true; }
 
     // Since this is an inner class, we expose these variables publicly for
     // simplicity.
@@ -172,21 +175,10 @@ class SoftwareImageDecodeCacheUtils {
     std::unique_ptr<base::DiscardableMemory> memory;
 
    private:
-    struct UsageStats {
-      // We can only create a decoded image in a locked state, so the initial
-      // lock count is 1.
-      int lock_count = 1;
-      bool used = false;
-      bool last_lock_failed = false;
-      bool first_lock_wasted = false;
-      bool first_lock_out_of_raster = false;
-    };
-
-    SkImageInfo image_info_;
     sk_sp<SkImage> image_;
+    sk_sp<SkImage> gainmap_image_;
     SkSize src_rect_offset_;
     uint64_t tracing_id_;
-    UsageStats usage_stats_;
     // Indicates whether this entry was ever in the cache.
     bool cached_ = false;
   };

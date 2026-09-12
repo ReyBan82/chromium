@@ -25,34 +25,76 @@
 
 #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h"
 
+#include "base/byte_size.h"
+#include "base/strings/stringprintf.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/platform/platform.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_element_elementimage.h"
 #include "third_party/blink/renderer/core/animation_frame/worker_animation_frame_provider.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_context_creation_attributes_core.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_image_source.h"
+#include "third_party/blink/renderer/core/html/canvas/element_image.h"
+#include "third_party/blink/renderer/core/html/canvas/html_canvas_accessibility_manager.h"
+#include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
+#include "third_party/blink/renderer/core/layout/layout_box.h"
+#include "third_party/blink/renderer/core/layout/layout_object.h"
+#include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
+#include "third_party/blink/renderer/core/paint/cull_rect_updater.h"
+#include "third_party/blink/renderer/core/paint/paint_layer.h"
+#include "third_party/blink/renderer/core/paint/paint_layer_painter.h"
 #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/graphics/accelerated_static_bitmap_image.h"
+#include "third_party/blink/renderer/platform/graphics/canvas_non_2d_resource_provider.h"
+#include "third_party/blink/renderer/platform/graphics/gpu/shared_gpu_context.h"
+#include "third_party/blink/renderer/platform/graphics/paint/paint_canvas.h"
+#include "third_party/blink/renderer/platform/graphics/paint/paint_record_builder.h"
+#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
+#include "third_party/blink/renderer/platform/scheduler/public/thread_scheduler.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+#include "third_party/blink/renderer/platform/wtf/functional.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "ui/accessibility/accessibility_features.h"
+#include "ui/gfx/geometry/rect_conversions.h"
+#include "ui/gfx/geometry/size_conversions.h"
 
 namespace blink {
+namespace {
+BASE_FEATURE(kAllowAcceleratedTexElement, base::FEATURE_ENABLED_BY_DEFAULT);
+
+// Delay for recording the UKM for canvas accessibility to allow the canvas
+// element to update its accessibility related information. This value is chosen
+// arbitrarily and can be subject to optimization.
+constexpr base::TimeDelta kAccessibilityUkmRecordingDelay = base::Seconds(5);
+}
 
 CanvasRenderingContext::CanvasRenderingContext(
     CanvasRenderingContextHost* host,
     const CanvasContextCreationAttributesCore& attrs,
     CanvasRenderingAPI canvas_rendering_API)
-    : host_(host),
-      color_params_(attrs.color_space, attrs.pixel_format, attrs.alpha),
+    : ActiveScriptWrappable<CanvasRenderingContext>({}),
+      host_(host),
       creation_attributes_(attrs),
-      canvas_rendering_type_(canvas_rendering_API) {}
-
-SkColorInfo CanvasRenderingContext::CanvasRenderingContextSkColorInfo() const {
-  return SkColorInfo(kN32_SkColorType, kPremul_SkAlphaType,
-                     SkColorSpace::MakeSRGB());
+      canvas_rendering_type_(canvas_rendering_API) {
+  // The following check is for investigating crbug.com/1470622
+  // If the crash stops happening in CanvasRenderingContext2D::
+  // GetOrCreatePaintCanvas(), and starts happening here instead,
+  // then we'll know that the bug is related to creation and the
+  // new crash reports pointing to this location will provide more
+  // actionable feedback on how to fix the issue. If the crash
+  // continues to happen at the old location, then we'll know that
+  // the problem has to do with a pre-finalizer being called
+  // prematurely.
+  CHECK(host_);
 }
 
 void CanvasRenderingContext::Dispose() {
   RenderTaskEnded();
+
+  if (did_schedule_accessibility_ukm_recording_) {
+    RecordUKMCanvasAccessibility();
+  }
 
   // HTMLCanvasElement and CanvasRenderingContext have a circular reference.
   // When the pair is no longer reachable, their destruction order is non-
@@ -60,20 +102,201 @@ void CanvasRenderingContext::Dispose() {
   // the other in order to break the circular reference.  This is to avoid
   // an error when CanvasRenderingContext::DidProcessTask() is invoked
   // after the HTMLCanvasElement is destroyed.
-  if (Host()) {
-    Host()->DetachContext();
+  if (CanvasRenderingContextHost* host = Host()) [[likely]] {
+    host->DetachContext();
     host_ = nullptr;
   }
 }
 
-NoAllocDirectCallHost* CanvasRenderingContext::AsNoAllocDirectCallHost() {
-  return nullptr;
+// static
+CanvasRenderingContext*
+CanvasRenderingContext::GetEnclosingContextForDrawElement(
+    Element* element,
+    const String& func_name,
+    ExceptionState& exception_state) {
+  auto* canvas = DynamicTo<HTMLCanvasElement>(element->parentNode());
+  if (!canvas) {
+    exception_state.ThrowTypeError(StrCat(
+        {"Only immediate children of the <canvas> element can be passed to ",
+         func_name, "."}));
+    return nullptr;
+  }
+  CanvasRenderingContext* context = canvas->RenderingContext();
+  if (!context) {
+    exception_state.ThrowTypeError(StrCat(
+        {func_name, ": containing canvas does not have a rendering context."}));
+    return nullptr;
+  }
+  if (!context->IsDrawElementImageEligible(element, func_name,
+                                           exception_state)) {
+    return nullptr;
+  }
+  return context;
+}
+
+bool CanvasRenderingContext::IsDrawElementImageEligible(
+    Element* element,
+    const String& func_name,
+    ExceptionState& exception_state) {
+  if (!Host() || Host()->IsOffscreenCanvas()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidStateError,
+        "Elements cannot be drawn into an OffscreenCanvas.");
+    return false;
+  }
+
+  HTMLCanvasElement* canvas_element = static_cast<HTMLCanvasElement*>(Host());
+  if (!canvas_element || !canvas_element->GetDocument().View()) {
+    return false;
+  }
+
+  return canvas_element->VerifyDrawElementImageEligibility(element, func_name,
+                                                           exception_state);
+}
+
+bool CanvasRenderingContext::IsDrawElementImageEligible(
+    const V8UnionElementOrElementImage* element_or_image,
+    const String& func_name,
+    ExceptionState& exception_state) {
+  if (element_or_image->IsElement()) {
+    return IsDrawElementImageEligible(element_or_image->GetAsElement(),
+                                      func_name, exception_state);
+  }
+
+  const auto& record = element_or_image->GetAsElementImage()->PaintRecord();
+  if (!record) {
+    exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                      "The ElementImage has been closed.");
+    return false;
+  }
+
+  DOMNodeId current_canvas_node_id = kInvalidDOMNodeId;
+  if (Host()) {
+    if (!Host()->IsOffscreenCanvas()) {
+      current_canvas_node_id =
+          static_cast<HTMLCanvasElement*>(Host())->GetDomNodeId();
+    } else {
+      current_canvas_node_id =
+          static_cast<OffscreenCanvas*>(Host())->PlaceholderCanvasId();
+    }
+  }
+
+  if (current_canvas_node_id == kInvalidDOMNodeId ||
+      record->paint_state.canvas_node_id != current_canvas_node_id) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidStateError,
+        "The source was captured from a different canvas.");
+    return false;
+  }
+  return true;
+}
+
+std::optional<CanvasChildPaintRecord>
+CanvasRenderingContext::GetChildPaintRecord(Element* element) {
+  return Host()->GetCanvasChildPaintRecord(element->GetDomNodeId());
+}
+
+scoped_refptr<StaticBitmapImage> CanvasRenderingContext::GetElementImage(
+    const V8UnionElementOrElementImage* element,
+    std::optional<float> sx,
+    std::optional<float> sy,
+    std::optional<float> swidth,
+    std::optional<float> sheight,
+    std::optional<uint32_t> width,
+    std::optional<uint32_t> height,
+    gpu::SharedImageUsageSet usage,
+    const String& func_name,
+    ExceptionState& exception_state) {
+  if (!IsDrawElementImageEligible(element, func_name, exception_state)) {
+    return nullptr;
+  }
+
+  std::optional<CanvasChildPaintRecord> child_paint_record;
+  if (element->IsElement()) {
+    child_paint_record = GetChildPaintRecord(element->GetAsElement());
+  } else {
+    if (const auto& record = element->GetAsElementImage()->PaintRecord()) {
+      child_paint_record = *record;
+    }
+  }
+
+  if (!child_paint_record) {
+    if (element->IsElementImage()) {
+      exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                        "The ElementImage has been closed.");
+    } else {
+      exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                        "No cached paint record for element.");
+    }
+    return nullptr;
+  }
+
+  // Element size in physical coordinates.
+  gfx::RectF src_rect(child_paint_record->paint_state.box_size);
+  if (sx && sy && swidth && sheight) {
+    float dpr = child_paint_record->paint_state.effective_zoom;
+    AdjustRectForCanvas(*sx, *sy, *swidth, *sheight);
+    src_rect = gfx::RectF(*sx * dpr, *sy * dpr, *swidth * dpr, *sheight * dpr);
+  }
+
+  // The default destination size for GetElementImage is the source content
+  // size scaled to canvas grid coordinates. This causes the element to have
+  // the same proportions when appearing inside the canvas as it would have
+  // were it painted outside the canvas.
+  gfx::SizeF intrinsic_size(src_rect.size());
+  gfx::Vector2dF canvas_scale =
+      GetCanvasGridScaleFactor(child_paint_record->paint_state, Host()->Size());
+  intrinsic_size.Scale(canvas_scale.x(), canvas_scale.y());
+  gfx::Size intrinsic_dest_size = gfx::ToCeiledSize(intrinsic_size);
+  gfx::Size dest_size(intrinsic_dest_size);
+  if (width && height) {
+    dest_size = gfx::Size(width.value(), height.value());
+    canvas_scale.Scale(
+        static_cast<float>(dest_size.width()) / intrinsic_dest_size.width(),
+        static_cast<float>(dest_size.height()) / intrinsic_dest_size.height());
+  }
+  if (dest_size.IsEmpty()) {
+    return nullptr;
+  }
+
+  auto draw_to_canvas = [&](cc::PaintCanvas& canvas) {
+    canvas.scale(canvas_scale.x(), canvas_scale.y());
+    canvas.translate(-src_rect.x(), -src_rect.y());
+    canvas.drawPicture(child_paint_record->record);
+  };
+
+  if (base::FeatureList::IsEnabled(kAllowAcceleratedTexElement) &&
+      SharedGpuContext::IsGpuCompositingEnabled()) {
+    if (auto wrapper = SharedGpuContext::ContextProviderWrapper()) {
+      auto resource_provider = CanvasNon2DResourceProvider::Create(
+          dest_size, GetN32FormatForCanvas(), kPremul_SkAlphaType,
+          gfx::ColorSpace::CreateSRGB(), gfx::HDRMetadata(), wrapper,
+          gpu::SHARED_IMAGE_USAGE_RASTER_WRITE | usage);
+
+      // GetOrCreateImageProvider() to make sure one is created prior to the
+      // call to SetAnimatedImageFrameIndexMaps().
+      resource_provider->GetOrCreateImageProvider();
+      resource_provider->SetAnimatedImageFrameIndexes(
+          child_paint_record->paint_state.animated_image_frame_index_map);
+
+      return resource_provider->DoExternalOverdrawAndSnapshot(
+          [&](cc::PaintCanvas& canvas) { draw_to_canvas(canvas); },
+          ImageOrientation());
+    }
+  }
+
+  return UnacceleratedStaticBitmapImage::CreateFromRaster(
+      dest_size, draw_to_canvas,
+      child_paint_record->paint_state.animated_image_frame_index_map);
 }
 
 void CanvasRenderingContext::DidDraw(
-    const SkIRect& dirty_rect,
+    const gfx::Rect& dirty_rect,
     CanvasPerformanceMonitor::DrawType draw_type) {
-  Host()->DidDraw(dirty_rect);
+  CanvasRenderingContextHost* const host = Host();
+  host->DidDraw(dirty_rect);
+
+  did_draw_text_ |= (draw_type == CanvasPerformanceMonitor::DrawType::kText);
 
   auto& monitor = GetCanvasPerformanceMonitor();
   monitor.DidDraw(draw_type);
@@ -85,7 +308,7 @@ void CanvasRenderingContext::DidDraw(
   // We need to store whether the document is being printed because the
   // document may exit printing state by the time DidProcessTask is called.
   // This is an issue with beforeprint event listeners.
-  did_print_in_current_task_ |= Host()->IsPrinting();
+  did_print_in_current_task_ |= host->IsPrinting();
   Thread::Current()->AddTaskObserver(this);
 }
 
@@ -95,23 +318,121 @@ void CanvasRenderingContext::DidProcessTask(
 
   // The end of a script task that drew content to the canvas is the point
   // at which the current frame may be considered complete.
-  if (Host())
-    Host()->PreFinalizeFrame();
-  FinalizeFrame(did_print_in_current_task_);
+  FlushReason reason = did_print_in_current_task_
+                           ? FlushReason::kCanvasPushFrameWhilePrinting
+                           : FlushReason::kCanvasPushFrame;
+  FinalizeFrame(reason);
   did_print_in_current_task_ = false;
-  if (Host())
-    Host()->PostFinalizeFrame();
+  if (CanvasRenderingContextHost* host = Host()) [[likely]] {
+    host->PostFinalizeFrame(reason);
+  }
+
+  did_process_task_ = true;
+  MaybeRecordUKMCanvasAccessibility();
+}
+
+void CanvasRenderingContext::MaybeRecordUKMCanvasAccessibility() {
+  if (did_record_accessibility_ukm_ || !did_process_task_) {
+    return;
+  }
+
+  // If heuristic collection is disabled, record the UKM immediately.
+  if (!base::FeatureList::IsEnabled(
+          ::features::kEnableCollectAccessibilityHeuristicInCanvasUkm)) {
+    RecordUKMCanvasAccessibility();
+    return;
+  }
+
+  if (did_schedule_accessibility_ukm_recording_) {
+    return;
+  }
+  CanvasRenderingContextHost* const host = Host();
+  if (!host) {
+    return;
+  }
+  ExecutionContext* execution_context = host->GetTopExecutionContext();
+  if (!execution_context) {
+    return;
+  }
+  did_schedule_accessibility_ukm_recording_ = true;
+  execution_context->GetTaskRunner(TaskType::kInternalDefault)
+      ->PostDelayedTask(
+          FROM_HERE,
+          blink::BindOnce(&CanvasRenderingContext::RecordUKMCanvasAccessibility,
+                          WrapWeakPersistent(this)),
+          kAccessibilityUkmRecordingDelay);
+}
+
+void CanvasRenderingContext::RecordUKMCanvasAccessibility() {
+  if (did_record_accessibility_ukm_ || !did_process_task_) {
+    return;
+  }
+
+  CanvasRenderingContextHost* const host = Host();
+  if (!host) {
+    return;
+  }
+
+  bool has_keyboard_listener = false;
+  bool has_mouse_listener = false;
+  bool is_offscreen = host->IsOffscreenCanvas();
+  if (is_offscreen) {
+    // Offscreen canvases are collected only if they push their rendered output
+    // to a placeholder element in DOM.
+    if (!static_cast<OffscreenCanvas*>(host)->HasPlaceholderCanvas()) {
+      return;
+    }
+  } else {
+    HTMLCanvasElement* canvas_element = static_cast<HTMLCanvasElement*>(host);
+    // Non offscreen canvases are only collected if they are visible.
+    if (!canvas_element->IsDisplayed()) {
+      return;
+    }
+
+    DEFINE_STATIC_LOCAL(
+        const Vector<AtomicString>, keyboard_event_types,
+        ({event_type_names::kKeydown, event_type_names::kKeypress,
+          event_type_names::kKeyup}));
+    DEFINE_STATIC_LOCAL(
+        const Vector<AtomicString>, mouse_event_types,
+        ({event_type_names::kClick, event_type_names::kMousedown,
+          event_type_names::kMouseup, event_type_names::kMousemove,
+          event_type_names::kMouseover, event_type_names::kMouseout}));
+
+    has_keyboard_listener =
+        canvas_element->HasAnyEventListeners(keyboard_event_types);
+    has_mouse_listener =
+        canvas_element->HasAnyEventListeners(mouse_event_types);
+  }
+
+  const auto& ukm_params = host->GetUkmParameters();
+  auto ukm_builder = ukm::builders::Accessibility_Canvas(ukm_params.source_id);
+  ukm_builder.SetRenderingContext(static_cast<int>(canvas_rendering_type_))
+      .SetIsOffscreen(is_offscreen)
+      .SetHasKeyboardListener(has_keyboard_listener)
+      .SetHasMouseListener(has_mouse_listener)
+      .SetHasText(did_draw_text_);
+
+  if (!is_offscreen &&
+      base::FeatureList::IsEnabled(
+          ::features::kEnableCollectAccessibilityHeuristicInCanvasUkm)) {
+    HTMLCanvasElement* canvas_element = static_cast<HTMLCanvasElement*>(host);
+    ukm_builder.SetNeedsAccessibilitySupport(
+        canvas_element->GetNeedsAccessibilitySupportHeuristic());
+  }
+
+  ukm_builder.Record(ukm_params.ukm_recorder);
+
+  did_record_accessibility_ukm_ = true;
 }
 
 void CanvasRenderingContext::RecordUMACanvasRenderingAPI() {
+  const CanvasRenderingContextHost* const host = Host();
   if (auto* window =
-          DynamicTo<LocalDOMWindow>(Host()->GetTopExecutionContext())) {
+          DynamicTo<LocalDOMWindow>(host->GetTopExecutionContext())) {
     WebFeature feature;
-    if (Host()->IsOffscreenCanvas()) {
+    if (host->IsOffscreenCanvas()) {
       switch (canvas_rendering_type_) {
-        default:
-          NOTREACHED();
-          U_FALLTHROUGH;
         case CanvasRenderingContext::CanvasRenderingAPI::k2D:
           feature = WebFeature::kOffscreenCanvas_2D;
           break;
@@ -127,12 +448,11 @@ void CanvasRenderingContext::RecordUMACanvasRenderingAPI() {
         case CanvasRenderingContext::CanvasRenderingAPI::kWebgpu:
           feature = WebFeature::kOffscreenCanvas_WebGPU;
           break;
+        default:
+          NOTREACHED();
       }
     } else {
       switch (canvas_rendering_type_) {
-        default:
-          NOTREACHED();
-          U_FALLTHROUGH;
         case CanvasRenderingContext::CanvasRenderingAPI::k2D:
           feature = WebFeature::kHTMLCanvasElement_2D;
           break;
@@ -148,6 +468,8 @@ void CanvasRenderingContext::RecordUMACanvasRenderingAPI() {
         case CanvasRenderingContext::CanvasRenderingAPI::kWebgpu:
           feature = WebFeature::kHTMLCanvasElement_WebGPU;
           break;
+        default:
+          NOTREACHED();
       }
     }
     UseCounter::Count(window->document(), feature);
@@ -155,9 +477,10 @@ void CanvasRenderingContext::RecordUMACanvasRenderingAPI() {
 }
 
 void CanvasRenderingContext::RecordUKMCanvasRenderingAPI() {
-  DCHECK(Host());
-  const auto& ukm_params = Host()->GetUkmParameters();
-  if (Host()->IsOffscreenCanvas()) {
+  CanvasRenderingContextHost* const host = Host();
+  DCHECK(host);
+  const auto& ukm_params = host->GetUkmParameters();
+  if (host->IsOffscreenCanvas()) {
     ukm::builders::ClientRenderingAPI(ukm_params.source_id)
         .SetOffscreenCanvas_RenderingContext(
             static_cast<int>(canvas_rendering_type_))
@@ -170,9 +493,10 @@ void CanvasRenderingContext::RecordUKMCanvasRenderingAPI() {
 }
 
 void CanvasRenderingContext::RecordUKMCanvasDrawnToRenderingAPI() {
-  DCHECK(Host());
-  const auto& ukm_params = Host()->GetUkmParameters();
-  if (Host()->IsOffscreenCanvas()) {
+  CanvasRenderingContextHost* const host = Host();
+  DCHECK(host);
+  const auto& ukm_params = host->GetUkmParameters();
+  if (host->IsOffscreenCanvas()) {
     ukm::builders::ClientRenderingAPI(ukm_params.source_id)
         .SetOffscreenCanvas_RenderingContextDrawnTo(
             static_cast<int>(canvas_rendering_type_))
@@ -186,44 +510,30 @@ void CanvasRenderingContext::RecordUKMCanvasDrawnToRenderingAPI() {
 }
 
 CanvasRenderingContext::CanvasRenderingAPI
-CanvasRenderingContext::RenderingAPIFromId(
-    const String& id,
-    const ExecutionContext* execution_context) {
-  if (id == "2d")
+CanvasRenderingContext::RenderingAPIFromId(const String& id) {
+  if (id == "2d") {
     return CanvasRenderingAPI::k2D;
-  if (id == "experimental-webgl")
+  }
+  if (id == "experimental-webgl") {
     return CanvasRenderingAPI::kWebgl;
-  if (id == "webgl")
+  }
+  if (id == "webgl") {
     return CanvasRenderingAPI::kWebgl;
-  if (id == "webgl2")
+  }
+  if (id == "webgl2") {
     return CanvasRenderingAPI::kWebgl2;
-  if (id == "bitmaprenderer")
+  }
+  if (id == "bitmaprenderer") {
     return CanvasRenderingAPI::kBitmaprenderer;
-  if ((id == "webgpu") &&
-      RuntimeEnabledFeatures::WebGPUEnabled(execution_context))
+  }
+  if (id == "webgpu") {
     return CanvasRenderingAPI::kWebgpu;
+  }
   return CanvasRenderingAPI::kUnknown;
-}
-
-bool CanvasRenderingContext::WouldTaintOrigin(CanvasImageSource* image_source) {
-  // Don't taint the canvas on data URLs. This special case is needed here
-  // because CanvasImageSource::WouldTaintOrigin() can return false for data
-  // URLs due to restrictions on SVG foreignObject nodes as described in
-  // https://crbug.com/294129.
-  // TODO(crbug.com/294129): Remove the restriction on foreignObject nodes, then
-  // this logic isn't needed, CanvasImageSource::SourceURL() isn't needed, and
-  // this function can just be image_source->WouldTaintOrigin().
-  const KURL& source_url = image_source->SourceURL();
-  const bool has_url = (source_url.IsValid() && !source_url.IsAboutBlankURL());
-  if (has_url && source_url.ProtocolIsData())
-    return false;
-
-  return image_source->WouldTaintOrigin();
 }
 
 void CanvasRenderingContext::Trace(Visitor* visitor) const {
   visitor->Trace(host_);
-  ScriptWrappable::Trace(visitor);
   ActiveScriptWrappable::Trace(visitor);
 }
 

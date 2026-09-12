@@ -50,7 +50,7 @@ bool OobeConfiguration::CheckCompleted() const {
 }
 
 void OobeConfiguration::ResetConfiguration() {
-  configuration_ = base::Value::Dict();
+  configuration_ = base::DictValue();
   if (check_completed_) {
     NotifyObservers();
   }
@@ -94,7 +94,7 @@ void OobeConfiguration::UpdateConfigurationValues() {
     auto* imm = input_method::InputMethodManager::Get();
     configuration_.Set(
         configuration::kInputMethod,
-        imm->GetInputMethodUtil()->MigrateInputMethod(*ime_value));
+        imm->GetInputMethodUtil()->GetMigratedInputMethod(*ime_value));
   }
 }
 

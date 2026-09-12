@@ -5,6 +5,7 @@
 #ifndef SERVICES_VIDEO_CAPTURE_DEVICE_H_
 #define SERVICES_VIDEO_CAPTURE_DEVICE_H_
 
+#include "media/capture/video_capture_types.h"
 #include "services/video_capture/public/mojom/device.mojom.h"
 
 namespace media {
@@ -19,6 +20,7 @@ class Device : public mojom::Device {
       const media::VideoCaptureParams& requested_settings,
       const base::WeakPtr<media::VideoFrameReceiver>& frame_handler) {}
   virtual void StopInProcess() {}
+  void InvalidateBuffers() override {}
 };
 
 }  // namespace video_capture

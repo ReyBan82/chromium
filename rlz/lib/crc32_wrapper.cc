@@ -12,24 +12,24 @@
 
 namespace rlz_lib {
 
-int Crc32(const unsigned char* buf, int length) {
-  return crc32(0L, buf, length);
+uint32_t Crc32(base::span<const uint8_t> data) {
+  return static_cast<uint32_t>(
+      crc32(0L, data.data(), static_cast<uInt>(data.size())));
 }
 
-bool Crc32(const char* text, int* crc) {
+bool Crc32(std::string_view text, uint32_t* crc) {
   if (!crc) {
     ASSERT_STRING("Crc32: crc is NULL.");
     return false;
   }
 
-  *crc = 0;
-  for (int i = 0; text[i]; i++) {
-    if (!IsAscii(text[i]))
+  for (char c : text) {
+    if (!IsAscii(c)) {
       return false;
-
-    *crc = crc32(*crc, reinterpret_cast<const unsigned char*>(text + i), 1);
+    }
   }
 
+  *crc = Crc32(base::as_byte_span(text));
   return true;
 }
 

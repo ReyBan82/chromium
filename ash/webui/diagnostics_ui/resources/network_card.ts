@@ -9,15 +9,16 @@ import './ip_config_info_drawer.js';
 import './network_info.js';
 import './network_troubleshooting.js';
 
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
-import {TroubleshootingInfo} from './diagnostics_types.js';
+import type {TroubleshootingInfo} from './diagnostics_types.js';
 import {filterNameServers, formatMacAddress, getNetworkCardTitle, getNetworkState, getNetworkType, isConnectedOrOnline, isNetworkMissingNameServers} from './diagnostics_utils.js';
 import {getNetworkHealthProvider} from './mojo_interface_provider.js';
 import {getTemplate} from './network_card.html.js';
-import {Network, NetworkHealthProviderInterface, NetworkState, NetworkStateObserverReceiver, NetworkType} from './network_health_provider.mojom-webui.js';
+import type {Network, NetworkHealthProviderInterface} from './network_health_provider.mojom-webui.js';
+import {NetworkState, NetworkStateObserverReceiver, NetworkType} from './network_health_provider.mojom-webui.js';
 
 const BASE_SUPPORT_URL = 'https://support.google.com/chromebook?p=diagnostics_';
 const SETTINGS_URL = 'chrome://os-settings/';
@@ -40,8 +41,8 @@ export enum TroubleshootingState {
 const NetworkCardElementBase = I18nMixin(PolymerElement);
 
 export class NetworkCardElement extends NetworkCardElementBase {
-  static get is(): string {
-    return 'network-card';
+  static get is(): 'network-card' {
+    return 'network-card' as const;
   }
 
   static get template(): HTMLTemplateElement {
@@ -114,18 +115,18 @@ export class NetworkCardElement extends NetworkCardElementBase {
     };
   }
 
-  guid: string;
-  network: Network;
-  protected showNetworkDataPoints: boolean;
-  protected showTroubleshootingCard: boolean;
-  protected macAddress: string;
-  protected unableToObtainIpAddress: boolean;
-  protected troubleshootingInfo: TroubleshootingInfo;
-  protected isMissingNameServers: boolean;
-  private networkType: string;
-  private networkState: string;
-  private timerId: number;
-  private timeoutInMs: number;
+  declare guid: string;
+  declare network: Network;
+  declare protected showNetworkDataPoints: boolean;
+  declare protected showTroubleshootingCard: boolean;
+  declare protected macAddress: string;
+  declare protected unableToObtainIpAddress: boolean;
+  declare protected troubleshootingInfo: TroubleshootingInfo;
+  declare protected isMissingNameServers: boolean;
+  declare private networkType: string;
+  declare private networkState: string;
+  declare private timerId: number;
+  declare private timeoutInMs: number;
   private networkHealthProvider: NetworkHealthProviderInterface =
       getNetworkHealthProvider();
   private networkStateObserverReceiver: NetworkStateObserverReceiver|null =
@@ -342,11 +343,27 @@ export class NetworkCardElement extends NetworkCardElementBase {
       this.timerId = -1;
     }
   }
+
+  getTimerIdForTesting(): number {
+    return this.timerId;
+  }
+
+  setTimeoutInMsForTesting(timeout: number): void {
+    this.timeoutInMs = timeout;
+  }
+
+  getTimeoutInMsForTesting(): number {
+    return this.timeoutInMs;
+  }
+
+  getUnableToObtainIpAddressForTesting(): boolean {
+    return this.unableToObtainIpAddress;
+  }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'network-card': NetworkCardElement;
+    [NetworkCardElement.is]: NetworkCardElement;
   }
 }
 

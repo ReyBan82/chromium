@@ -4,16 +4,25 @@
 
 #include "content/browser/direct_sockets/direct_sockets_test_utils.h"
 
+#include <string_view>
+
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
+#include "base/strings/escape.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/test/test_future.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/web_contents_tester.h"
+#include "net/base/url_util.h"
 #include "net/dns/host_resolver.h"
+#include "net/test/embedded_test_server/embedded_test_server.h"
+#include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
+#include "services/network/public/mojom/clear_data_filter.mojom.h"
 #include "services/network/public/mojom/udp_socket.mojom.h"
-#include "third_party/blink/public/common/permissions_policy/origin_with_possible_wildcards.h"
+#include "third_party/blink/public/mojom/navigation/navigation_params.mojom.h"
 #include "url/origin.h"
 
 namespace content::test {
@@ -56,7 +65,7 @@ void MockUDPSocket::Send(
 }
 
 void MockUDPSocket::MockSend(int32_t result,
-                             const absl::optional<base::span<uint8_t>>& data) {
+                             const std::optional<base::span<uint8_t>>& data) {
   listener_->OnReceived(result, {}, data);
 }
 
@@ -73,11 +82,11 @@ MockRestrictedUDPSocket::~MockRestrictedUDPSocket() = default;
 MockNetworkContext::MockNetworkContext()
     : MockNetworkContext(/*host_mapping_rules=*/"") {}
 
-MockNetworkContext::MockNetworkContext(base::StringPiece host_mapping_rules)
+MockNetworkContext::MockNetworkContext(std::string_view host_mapping_rules)
     : network::TestNetworkContextWithHostResolver(
           net::HostResolver::CreateStandaloneResolver(
               net::NetLog::Get(),
-              /*options=*/absl::nullopt,
+              /*options=*/std::nullopt,
               host_mapping_rules,
               /*enable_caching=*/false)) {}
 
@@ -87,13 +96,16 @@ void MockNetworkContext::CreateRestrictedUDPSocket(
     const net::IPEndPoint& addr,
     network::mojom::RestrictedUDPSocketMode mode,
     const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
-    network::mojom::UDPSocketOptionsPtr options,
+    network::mojom::RestrictedUDPSocketParamsPtr params,
     mojo::PendingReceiver<network::mojom::RestrictedUDPSocket> receiver,
     mojo::PendingRemote<network::mojom::UDPSocketListener> listener,
+    bool allow_multicast,
+    bool allow_source_specific_multicast,
     CreateRestrictedUDPSocketCallback callback) {
   auto socket = CreateMockUDPSocket(std::move(listener));
   DCHECK_EQ(mode, network::mojom::RestrictedUDPSocketMode::CONNECTED);
-  socket->Connect(addr, std::move(options), std::move(callback));
+  socket->Connect(addr, params ? std::move(params->socket_options) : nullptr,
+                  std::move(callback));
   restricted_udp_socket_ = std::make_unique<MockRestrictedUDPSocket>(
       std::move(socket), std::move(receiver));
 }
@@ -110,14 +122,14 @@ AsyncJsRunner::AsyncJsRunner(content::WebContents* web_contents)
 
 AsyncJsRunner::~AsyncJsRunner() = default;
 
-std::unique_ptr<base::test::TestFuture<std::string>> AsyncJsRunner::RunScript(
+base::test::TestFuture<std::string> AsyncJsRunner::RunScript(
     const std::string& async_script) {
   // Do not leave behind hanging futures from previous invocations.
   DCHECK(!future_callback_);
-  auto future = std::make_unique<base::test::TestFuture<std::string>>();
+  base::test::TestFuture<std::string> future;
 
   token_ = base::Token::CreateRandom();
-  future_callback_ = future->GetCallback();
+  future_callback_ = future.GetCallback();
   const std::string wrapped_script =
       MakeScriptSendResultToDomQueue(async_script);
   ExecuteScriptAsync(web_contents(), wrapped_script);
@@ -156,6 +168,52 @@ std::string AsyncJsRunner::MakeScriptSendResultToDomQueue(
       script.c_str(), token_.ToString().c_str()));
 }
 
+SetHeaderWithFileUrlBuilder::SetHeaderWithFileUrlBuilder(std::string_view path)
+    : path_(path) {}
+
+SetHeaderWithFileUrlBuilder::~SetHeaderWithFileUrlBuilder() = default;
+
+SetHeaderWithFileUrlBuilder& SetHeaderWithFileUrlBuilder::WithCOIHeaders() {
+  headers_.push_back("Cross-Origin-Opener-Policy: same-origin");
+  headers_.push_back("Cross-Origin-Embedder-Policy: require-corp");
+  return *this;
+}
+
+SetHeaderWithFileUrlBuilder& SetHeaderWithFileUrlBuilder::WithPermissionsPolicy(
+    std::string_view feature,
+    std::string_view value) {
+  permissions_policy_[std::string(feature)].emplace_back(value);
+  return *this;
+}
+
+GURL SetHeaderWithFileUrlBuilder::Build(net::EmbeddedTestServer* server) const {
+  std::vector<std::string> all_headers = headers_;
+  if (!permissions_policy_.empty()) {
+    std::vector<std::string> features;
+    for (const auto& [feature, values] : permissions_policy_) {
+      features.push_back(base::StringPrintf(
+          "%s=%s", feature.c_str(), base::JoinString(values, " ").c_str()));
+    }
+    all_headers.push_back(base::StrCat(
+        {"Permissions-Policy: ", base::JoinString(features, ", ")}));
+  }
+
+  std::string query;
+  for (const auto& header : all_headers) {
+    if (!query.empty()) {
+      query += "&";
+    }
+    query += base::EscapeQueryParamValue(header, /*use_plus=*/false);
+  }
+
+  return server->GetURL(base::StrCat(
+      {"/set-header-with-file/content/test/data", path_, "?", query}));
+}
+
+SetHeaderWithFileUrlBuilder FileWithHeaders(std::string_view path) {
+  return SetHeaderWithFileUrlBuilder{path};
+}
+
 IsolatedWebAppContentBrowserClient::IsolatedWebAppContentBrowserClient(
     const url::Origin& isolated_app_origin)
     : isolated_app_origin_(isolated_app_origin) {}
@@ -164,21 +222,6 @@ bool IsolatedWebAppContentBrowserClient::ShouldUrlUseApplicationIsolationLevel(
     BrowserContext* browser_context,
     const GURL& url) {
   return isolated_app_origin_ == url::Origin::Create(url);
-}
-
-absl::optional<blink::ParsedPermissionsPolicy>
-IsolatedWebAppContentBrowserClient::GetPermissionsPolicyForIsolatedWebApp(
-    content::BrowserContext* browser_context,
-    const url::Origin& app_origin) {
-  blink::ParsedPermissionsPolicy out;
-  blink::ParsedPermissionsPolicyDeclaration decl(
-      blink::mojom::PermissionsPolicyFeature::kDirectSockets,
-      /*allowed_origins=*/
-      {blink::OriginWithPossibleWildcards(app_origin,
-                                          /*has_subdomain_wildcard=*/false)},
-      /*matches_all_origins=*/false, /*matches_opaque_src=*/false);
-  out.push_back(decl);
-  return out;
 }
 
 // misc

@@ -8,16 +8,28 @@
 // This file contains utility functions for search engine functionality.
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "base/time/time.h"
+#include "components/lens/lens_overlay_invocation_source.h"
+#include "components/lens/lens_overlay_mime_type.h"
+#include "components/search_engines/keyword_web_data_service.h"
+#include "components/search_engines/template_url_prepopulate_data_resolver.h"
 #include "components/search_engines/template_url_service.h"
+#include "third_party/omnibox_proto/chrome_aim_entry_point.pb.h"
+#include "third_party/omnibox_proto/model_mode.pb.h"
 
 class KeywordWebDataService;
 class PrefService;
 class TemplateURL;
-class WDTypedResult;
+
+namespace lens {
+class LensOverlayContextualInputs;
+class LensOverlayRequestId;
+}  // namespace lens
 
 // Returns the short name of the default search engine, or the empty string if
 // none is set.
@@ -35,20 +47,35 @@ TemplateURL* FindURLByPrepopulateID(
 
 enum class TemplateURLMergeOption {
   kDefault,
+
+  // Stick to properties from the reference `data_to_update`,  user-modified
+  // fields and `safe_for_autoreplace` from `original_turl` are not
+  // preserved.
   kOverwriteUserEdits,
+
+  // Merge prepopulated entries with non-identical `prepopulate_id`, to carry
+  // over user modifications on pre-migration, `original_turl` data and merge it
+  // into the post-migration `data_to_update`.
+  kSplitPrepopulatedEntry,
+
+  // Flow-specific behaviour: When merging `original_turl` data from profile
+  // prefs with prepopulated `data_to_update`, certain properties are affected
+  // in the differently from other modes to stay consistent with the legacy
+  // implementation.
+  // TODO(crbug.com/446637115): Investigate removing this divergence.
+  kSettingAsDefaultProvider,
 };
 
-// Modifies `url_to_update` so that it contains user-modified fields from
-// `original_turl`. Both URLs must have the same `prepopulate_id` or
-// `starter_pack_id`. If `merge_option` is set to kOverWriteUserEdits,
-// user-modified fields and `safe_for_autoreplace` are not preserved.
+// Modifies `data_to_update` so that it contains usage-related data from
+// `original_turl`. Both `TemplateURLData` must have the matching
+// `prepopulate_id` or `starter_pack_id`.
 //
-// WARNING: Changing merge_option from the default value will result in loss of
-// user data. It should be set to kDefault unless in very specific circumstances
-// where a reset to defaults is required.
+// WARNING: Changing merge_option from the default value can result in loss of
+// user data. It should be set to kDefault unless in very specific
+// circumstances. See `TemplateURLMergeOption` docs for details.
 void MergeIntoEngineData(
-    const TemplateURL* original_turl,
-    TemplateURLData* url_to_update,
+    const TemplateURLData& original_turl,
+    TemplateURLData& data_to_update,
     TemplateURLMergeOption merge_option = TemplateURLMergeOption::kDefault);
 
 // CreateActionsFromCurrentPrepopulateData() and
@@ -95,6 +122,7 @@ void MergeEnginesFromPrepopulateData(
     std::vector<std::unique_ptr<TemplateURLData>>* prepopulated_urls,
     TemplateURLService::OwnedTemplateURLVector* template_urls,
     TemplateURL* default_search_provider,
+    const TemplateURLPrepopulateData::Resolver& template_url_data_resolver,
     std::set<std::string>* removed_keyword_guids);
 
 // Given the user's current URLs and the current set of prepopulated URLs,
@@ -106,10 +134,11 @@ void MergeEnginesFromPrepopulateData(
 ActionsFromCurrentData CreateActionsFromCurrentPrepopulateData(
     std::vector<std::unique_ptr<TemplateURLData>>* prepopulated_urls,
     const TemplateURLService::OwnedTemplateURLVector& existing_urls,
-    const TemplateURL* default_search_provider);
+    const TemplateURL* default_search_provider,
+    const TemplateURLPrepopulateData::Resolver& template_url_data_resolver);
 
 // MergeEnginesFromStarterPackData merges search engines from the built-in
-// TemplateURLStarterPackData class into `template_urls`. Calls
+// `template_url_starter_pack_data` class into `template_urls`. Calls
 // CreateActionsFromCurrentStarterPackData() to collect actions and then applies
 // them on `template_urls`. MergeEgninesFromStarterPackData is invoked when the
 // version of the starter pack data changes. If `removed_keyword_guids` is not
@@ -151,40 +180,40 @@ void ApplyActionsFromCurrentData(
 // with prepopulated search providers to result in:
 //  * a set of template_urls (search providers). The caller owns the
 //    TemplateURL* returned in template_urls.
-//  * whether there is a new resource keyword version (and the value).
-//    |*new_resource_keyword_version| is set to 0 if no new value. Otherwise,
-//    it is the new value.
+//  * `out_updated_keywords_metadata` indicating whether the set of search
+//    providers required some updates from built-in data. When that is the case,
+//    individual fields will be set to the new associated metadata and
+//    `HasBuiltinKeywordData()` and `HasStarterPackData()` will indicate this.
 // Only pass in a non-NULL value for service if the KeywordWebDataService should
-// be updated. If |removed_keyword_guids| is not NULL, any TemplateURLs removed
+// be updated. If `removed_keyword_guids` is not NULL, any TemplateURLs removed
 // from the keyword table in the KeywordWebDataService will have their Sync
-// GUIDs added to it. |default_search_provider| will be used to prevent removing
+// GUIDs added to it. `default_search_provider` will be used to prevent removing
 // the current user-selected DSE, regardless of changes in prepopulate data.
 void GetSearchProvidersUsingKeywordResult(
-    const WDTypedResult& result,
+    const WDKeywordsResult& result,
     KeywordWebDataService* service,
     PrefService* prefs,
+    const TemplateURLPrepopulateData::Resolver& template_url_data_resolver,
     TemplateURLService::OwnedTemplateURLVector* template_urls,
     TemplateURL* default_search_provider,
     const SearchTermsData& search_terms_data,
-    int* new_resource_keyword_version,
-    int* new_resource_starter_pack_version,
+    WDKeywordsResult::Metadata& out_updated_keywords_metadata,
     std::set<std::string>* removed_keyword_guids);
 
 // Like GetSearchProvidersUsingKeywordResult(), but allows the caller to pass in
 // engines in |template_urls| instead of getting them via processing a web data
 // service request.
-// |resource_keyword_version| should contain the version number of the current
-// keyword data, i.e. the version number of the most recent prepopulate data
-// that has been merged into the current keyword data.  On exit, this will be
+// |in_out_keywords_metadata| should contain the metadata associated with the
+// incoming keyword data (version numbers, etc). On exit, this will be
 // set as in GetSearchProvidersUsingKeywordResult().
 void GetSearchProvidersUsingLoadedEngines(
     KeywordWebDataService* service,
     PrefService* prefs,
+    const TemplateURLPrepopulateData::Resolver& template_url_data_resolver,
     TemplateURLService::OwnedTemplateURLVector* template_urls,
     TemplateURL* default_search_provider,
     const SearchTermsData& search_terms_data,
-    int* resource_keyword_version,
-    int* resource_starter_pack_version,
+    WDKeywordsResult::Metadata& in_out_keywords_metadata,
     std::set<std::string>* removed_keyword_guids);
 
 // Due to a bug, the |input_encodings| field of TemplateURLData could have
@@ -211,5 +240,98 @@ void RemoveDuplicatePrepopulateIDs(
 TemplateURLService::OwnedTemplateURLVector::iterator FindTemplateURL(
     TemplateURLService::OwnedTemplateURLVector* urls,
     const TemplateURL* url);
+
+// Returns whether the provided `url` leads to the AIM web page.
+bool IsAimURL(const GURL& url);
+
+// Returns whether the provided `url` leads to the AIM Zero State web page.
+bool IsAimZeroStateURL(const GURL& url);
+
+// TODO(crbug.com/488962351): Consider moving validation logic to
+// template_url.cc or template_url_service.cc.
+// Returns true if |name_input| is a valid search engine name to use.
+bool IsSearchEngineNameValidToUse(const std::u16string& name_input);
+
+// Returns true if |keyword_input| is a valid search engine keyword to use. The
+// keyword is valid if it is non-empty and does not conflict with an existing
+// entry. NOTE: this is just the keyword, not the title and url.
+// |existing_url| is the TemplateURL currently being edited, or null if adding a
+// new one.
+bool IsSearchEngineKeywordValidToUse(const std::u16string& keyword_input,
+                                     const TemplateURLService* service,
+                                     const TemplateURL* existing_url);
+
+// Returns true if |url_input| is a valid search engine URL to use.The URL is
+// valid if it contains no search terms and is a valid url, or if it contains a
+// search term and replacing that search term with a character results in a
+// valid url.
+// |existing_url| is the TemplateURL currently being edited, or null if adding a
+// new one.
+bool IsSearchEngineURLValidToUse(const std::string& url_input,
+                                 const TemplateURLService* service,
+                                 const TemplateURL* existing_url);
+
+// Fixes up and returns the URL. The returned URL is suitable for use by
+// TemplateURL.
+std::string GetFixedUpSearchEngineUrl(const std::string& url_input,
+                                      const SearchTermsData& search_terms_data);
+
+// Retrieves the URL for the AIM web page.
+// `aim_entrypoint` (aep) is required as it identifies the source of the
+// request. `query_start_time` is the time that the user clicked the submit
+// button.
+GURL GetUrlForAim(
+    TemplateURLService* turl_service,
+    omnibox::ChromeAimEntryPoint aim_entrypoint,
+    const base::Time& query_start_time,
+    const std::u16string& query_text,
+    const std::optional<lens::LensOverlayInvocationSource> invocation_source,
+    std::map<std::string, std::string> additional_params);
+
+// Retrieves the URL for the AIM web page if the a file was uploaded as part
+// of the input.
+// `aim_entrypoint` (aep) is the source of the request.
+// `search_session_id` (gsessionid) is the search session id from the cluster
+// info.
+// `request_id` (vsrid) is the visual search request id used by lens to obtain
+// the uploaded context.
+// TODO(crbug.com/430070871): Make `lns_surface` a required parameter when
+// the server supports it.
+// TODO(crbug.com/446972028): Remove this method in favor of the one below that
+// takes `contextual_inputs` once the server fully supports it.
+GURL GetUrlForMultimodalSearch(
+    TemplateURLService* turl_service,
+    bool is_aim_search,
+    omnibox::ChromeAimEntryPoint aim_entrypoint,
+    const base::Time& query_start_time,
+    const std::string& search_session_id,
+    const std::unique_ptr<lens::LensOverlayRequestId> request_id,
+    const std::optional<lens::LensOverlayInvocationSource> invocation_source =
+        std::nullopt,
+    const std::string& lns_surface = std::string(),
+    const std::u16string& query_text = std::u16string(),
+    std::map<std::string, std::string> additional_params = {});
+
+// Retrieves the URL for the AIM web page if file(s) were uploaded as part
+// of the input.
+// `aim_entrypoint` (aep) is the source of the request.
+// `search_session_id` (gsessionid) is the search session id from the cluster
+// info.
+// `contextual_inputs` (cinpts) are the visual search request ids used by lens
+// to obtain the uploaded context.
+// TODO(crbug.com/430070871): Make `lns_surface` a required parameter when
+// the server supports it.
+GURL GetUrlForMultimodalSearch(
+    TemplateURLService* turl_service,
+    bool is_aim_search,
+    omnibox::ChromeAimEntryPoint aim_entrypoint,
+    const base::Time& query_start_time,
+    const std::string& search_session_id,
+    const std::unique_ptr<lens::LensOverlayContextualInputs> contextual_inputs,
+    const std::optional<lens::LensOverlayInvocationSource> invocation_source =
+        std::nullopt,
+    const std::string& lns_surface = std::string(),
+    const std::u16string& query_text = std::u16string(),
+    std::map<std::string, std::string> additional_params = {});
 
 #endif  // COMPONENTS_SEARCH_ENGINES_UTIL_H_

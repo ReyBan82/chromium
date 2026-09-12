@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,12 +8,11 @@
 
 #include <utility>
 
+#import "base/apple/foundation_util.h"
+#include "base/byte_size.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/json/json_writer.h"
-#import "base/mac/foundation_util.h"
-#include "base/mac/scoped_nsobject.h"
-#include "base/strings/stringprintf.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/task/thread_pool.h"
 #include "base/values.h"
@@ -26,47 +25,50 @@ namespace device_signals {
 namespace {
 
 // Max plist file size.
-constexpr int kMaxFileSizeInMb = 500;
+constexpr base::ByteSize kMaxFileSize = base::MiB(500);
 
 // Max size of the setting element.
-constexpr size_t kMaxStringSizeInBytes = 1024;
+constexpr base::ByteSize kMaxStringSize = base::KiB(1);
 
 // Parses the `data_obj` for the item at the given key `path`. Returns the
 // object in the event of a successful parse, and nil otherwise.
 id ParseArrays(id data_obj, NSString* path) {
   NSArray* indexes = [path componentsSeparatedByString:@"["];
 
-  for (NSString* index_str in indexes) {
-    if (![data_obj isKindOfClass:[NSArray class]]) {
+  for (NSString* index_with_bracket in indexes) {
+    NSArray* data_array = base::apple::ObjCCast<NSArray>(data_obj);
+    if (!data_array) {
       return nil;
     }
 
-    if (![index_str length])
+    if (!index_with_bracket.length) {
       continue;
+    }
 
     // Checking for the square brackets being closed. If they are not, then the
     // key path is malformed.
-    NSRange range = [index_str rangeOfString:@"]"];
+    NSRange range = [index_with_bracket rangeOfString:@"]"];
     if (range.location == NSNotFound ||
-        range.location < [index_str length] - 1) {
+        range.location < index_with_bracket.length - 1) {
       return nil;
     }
-    index_str = [index_str substringToIndex:range.location];
+    NSString* index_str = [index_with_bracket substringToIndex:range.location];
 
     // Validate that the index is a numeric. If the index is an alpha, issues
     // will occur during string to integer conversion.
-    NSCharacterSet* numeric_set = [NSCharacterSet decimalDigitCharacterSet];
+    NSCharacterSet* numeric_set = NSCharacterSet.decimalDigitCharacterSet;
     if (![numeric_set
             isSupersetOfSet:[NSCharacterSet characterSetWithCharactersInString:
                                                 index_str]]) {
       return nil;
     }
 
-    NSUInteger index = base::checked_cast<NSUInteger>([index_str integerValue]);
-    if (index > [data_obj count])
+    NSUInteger index = base::checked_cast<NSUInteger>(index_str.integerValue);
+    if (index >= data_array.count) {
       return nil;
+    }
 
-    data_obj = [data_obj objectAtIndex:index];
+    data_obj = data_array[index];
   }
 
   return data_obj;
@@ -75,30 +77,39 @@ id ParseArrays(id data_obj, NSString* path) {
 // Parses the loaded plist `dict` for the setting item at `key_path`. Returns
 // the setting object if it is found or nil otherwise.
 id ParsePlist(NSDictionary* dict, NSString* key_path) {
-  // Check if an array exists in the path, If not, the plist can be parsed
-  // directly.
-  NSRange test_range = [key_path rangeOfString:@"["];
-  if (test_range.location == NSNotFound)
-    return [dict valueForKeyPath:key_path];
-
-  NSDictionary* current_obj = dict;
+  id current_obj = dict;
+  bool has_brackets = false;
   for (NSString* sub_path in [key_path componentsSeparatedByString:@"."]) {
+    NSDictionary* current_dict =
+        base::apple::ObjCCast<NSDictionary>(current_obj);
+    if (!current_dict) {
+      return nil;
+    }
+
     NSRange range = [sub_path rangeOfString:@"["];
     if (range.location == NSNotFound) {
-      current_obj = [current_obj valueForKey:sub_path];
+      current_obj = [current_dict objectForKey:sub_path];
     } else {
-      current_obj =
-          [current_obj valueForKey:[sub_path substringToIndex:range.location]];
+      has_brackets = true;
+      current_obj = [current_dict
+          objectForKey:[sub_path substringToIndex:range.location]];
       current_obj = ParseArrays(current_obj,
                                 [sub_path substringFromIndex:range.location]);
+    }
+
+    if (!current_obj) {
+      return nil;
     }
   }
 
   // This will occur if the key path is incorrect and does not actually point to
   // a setting item. At the end of a parse, the only remaining object should be
   // the single setting item.
-  if ([current_obj isKindOfClass:[NSArray class]] && [current_obj count] != 1) {
-    return nil;
+  if (has_brackets) {
+    NSArray* final_array = base::apple::ObjCCast<NSArray>(current_obj);
+    if (final_array && final_array.count != 1) {
+      return nil;
+    }
   }
   return current_obj;
 }
@@ -123,19 +134,20 @@ std::vector<SettingsItem> GetSettingItems(
       continue;
     }
 
-    int64_t plist_file_size = 0;
-    if (!base::GetFileSize(resolved_path, &plist_file_size) ||
-        plist_file_size > (kMaxFileSizeInMb << 20)) {
+    std::optional<int64_t> plist_file_size = base::GetFileSize(resolved_path);
+    if (!plist_file_size.has_value() ||
+        base::checked_cast<uint64_t>(plist_file_size.value()) >
+            kMaxFileSize.InBytes()) {
       item.presence = PresenceValue::kNotFound;
       items.push_back(item);
       continue;
     }
 
     NSError* error = nil;
-    NSURL* url = base::mac::FilePathToNSURL(resolved_path);
-    base::scoped_nsobject<NSDictionary> plist_dict(
-        [[NSDictionary alloc] initWithContentsOfURL:url error:&error]);
-    if (error && [error code] == NSFileReadNoPermissionError) {
+    NSURL* url = base::apple::FilePathToNSURL(resolved_path);
+    NSDictionary* plist_dict =
+        [[NSDictionary alloc] initWithContentsOfURL:url error:&error];
+    if (error && error.code == NSFileReadNoPermissionError) {
       item.presence = PresenceValue::kAccessDenied;
       items.push_back(item);
       continue;
@@ -159,24 +171,14 @@ std::vector<SettingsItem> GetSettingItems(
       continue;
     }
 
-    if (NSString* setting_str = base::mac::ObjCCast<NSString>(value_ptr)) {
-      if ([setting_str length] <= kMaxStringSizeInBytes) {
-        std::string setting_json_string;
-        base::JSONWriter::Write(
-            base::Value(base::SysNSStringToUTF8(setting_str)),
-            &setting_json_string);
-        item.setting_json_value = setting_json_string;
+    if (NSString* setting_str = base::apple::ObjCCast<NSString>(value_ptr)) {
+      if (setting_str.length <= kMaxStringSize.InBytes()) {
+        item.setting_json_value =
+            base::WriteJson(base::SysNSStringToUTF8(setting_str)).value_or("");
       }
-    } else if (NSNumber* value_num = base::mac::ObjCCast<NSNumber>(value_ptr)) {
-      // Differentiating between integer and float types.
-      const char* value_type = [value_num objCType];
-      if (strcmp(value_type, "d") == 0 || strcmp(value_type, "f") == 0) {
-        double setting_num = [value_num doubleValue];
-        item.setting_json_value = base::StringPrintf("%f", setting_num);
-      } else {
-        int setting_num = [value_num integerValue];
-        item.setting_json_value = base::StringPrintf("%d", setting_num);
-      }
+    } else if (NSNumber* value_num =
+                   base::apple::ObjCCast<NSNumber>(value_ptr)) {
+      item.setting_json_value = base::SysNSStringToUTF8(value_num.stringValue);
     }
     items.push_back(item);
   }

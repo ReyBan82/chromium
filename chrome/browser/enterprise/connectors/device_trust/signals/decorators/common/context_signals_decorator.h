@@ -6,11 +6,11 @@
 #define CHROME_BROWSER_ENTERPRISE_CONNECTORS_DEVICE_TRUST_SIGNALS_DECORATORS_COMMON_CONTEXT_SIGNALS_DECORATOR_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/time/time.h"
 #include "base/values.h"
-#include "chrome/browser/enterprise/connectors/device_trust/signals/decorators/common/signals_decorator.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/enterprise/device_trust/core/signals/decorators/common/signals_decorator.h"
 
 namespace enterprise_signals {
 class ContextInfoFetcher;
@@ -31,11 +31,11 @@ class ContextSignalsDecorator : public SignalsDecorator {
   ~ContextSignalsDecorator() override;
 
   // SignalsDecorator:
-  void Decorate(base::Value::Dict& signals,
+  void Decorate(base::DictValue& signals,
                 base::OnceClosure done_closure) override;
 
  private:
-  void OnSignalsFetched(base::Value::Dict& signals,
+  void OnSignalsFetched(base::DictValue& signals,
                         base::TimeTicks start_time,
                         base::OnceClosure done_closure,
                         enterprise_signals::ContextInfo context_info);

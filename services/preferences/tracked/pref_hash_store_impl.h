@@ -6,7 +6,9 @@
 #define SERVICES_PREFERENCES_TRACKED_PREF_HASH_STORE_IMPL_H_
 
 #include "base/compiler_specific.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/values.h"
+#include "components/os_crypt/async/common/encryptor.h"
 #include "services/preferences/tracked/pref_hash_calculator.h"
 #include "services/preferences/tracked/pref_hash_store.h"
 
@@ -24,14 +26,18 @@ class PrefHashStoreImpl : public PrefHashStore {
     VERSION_LATEST = 2,
   };
 
-  // Constructs a PrefHashStoreImpl that calculates hashes using
-  // |seed| and |legacy_device_id| and stores them in |contents|.
+  using PrefHashStore::BeginTransaction;
+
+  // Constructs a PrefHashStoreImpl that calculates hashes using `seed`.
   //
-  // The same |seed| and |legacy_device_id| must be used to load and validate
-  // previously stored hashes in |contents|.
+  // The same `seed` must be used to load and validate previously stored hashes.
+  //
+  // `use_super_hmac` controls whether a Super HMAC is calculated and verified.
+  // `use_super_encrypted_hash` controls whether a Super Encrypted Hash is
+  // verified on startup.
   PrefHashStoreImpl(const std::string& seed,
-                    const std::string& legacy_device_id,
-                    bool use_super_mac);
+                    bool use_super_hmac,
+                    bool use_super_encrypted_hash);
 
   PrefHashStoreImpl(const PrefHashStoreImpl&) = delete;
   PrefHashStoreImpl& operator=(const PrefHashStoreImpl&) = delete;
@@ -44,22 +50,44 @@ class PrefHashStoreImpl : public PrefHashStore {
 
   // PrefHashStore implementation.
   std::unique_ptr<PrefHashStoreTransaction> BeginTransaction(
-      HashStoreContents* storage) override;
+      HashStoreContents* storage,
+      scoped_refptr<const os_crypt_async::Encryptor> encryptor) override;
 
-  std::string ComputeMac(const std::string& path,
-                         const base::Value* new_value) override;
-  base::Value::Dict ComputeSplitMacs(
+  std::string ComputeHmac(const std::string& path,
+                          const base::Value* new_value) override;
+  base::DictValue ComputeSplitHmacs(
       const std::string& path,
-      const base::Value::Dict* split_values) override;
+      const base::DictValue* split_values) override;
+
+  std::string ComputeEncryptedHash(
+      const std::string& path,
+      const base::Value* value,
+      const os_crypt_async::Encryptor* encryptor) override;
+
+  std::string ComputeEncryptedHash(
+      const std::string& path,
+      const base::DictValue* dict,
+      const os_crypt_async::Encryptor* encryptor) override;
+
+  base::DictValue ComputeSplitEncryptedHashes(
+      const std::string& path,
+      const base::DictValue* split_values,
+      const os_crypt_async::Encryptor* encryptor) override;
 
  private:
+  friend class PrefHashStoreImplTest;
+  friend class PrefHashStoreImplEncryptedTest;
   class PrefHashStoreTransactionImpl;
 
-  std::string ComputeMac(const std::string& path,
-                         const base::Value::Dict* new_dict);
+  std::string ComputeHmac(const std::string& path,
+                          const base::DictValue* new_dict);
+
+  static void FilterEncryptedHashesRecursive(const base::DictValue& src,
+                                             base::DictValue& dest);
 
   const PrefHashCalculator pref_hash_calculator_;
-  bool use_super_mac_;
+  bool use_super_hmac_;
+  bool use_super_encrypted_hash_;
 };
 
 #endif  // SERVICES_PREFERENCES_TRACKED_PREF_HASH_STORE_IMPL_H_

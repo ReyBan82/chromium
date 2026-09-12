@@ -22,8 +22,10 @@ using Microsoft::WRL::MakeAndInitialize;
 
 ActivatableClass(MediaFoundationClearKeyCdmFactory);
 
-MediaFoundationClearKeyCdmFactory::MediaFoundationClearKeyCdmFactory() =
-    default;
+MediaFoundationClearKeyCdmFactory::MediaFoundationClearKeyCdmFactory() {
+  DVLOG_FUNC(1);
+}
+
 MediaFoundationClearKeyCdmFactory::~MediaFoundationClearKeyCdmFactory() {
   DVLOG_FUNC(1);
 }
@@ -61,7 +63,7 @@ MediaFoundationClearKeyCdmFactory::CreateContentDecryptionModuleAccess(
   }
 
   if (num_configurations == 0) {
-    DVLOG_FUNC(1) << "No available configration.";
+    DVLOG_FUNC(1) << "No available configuration.";
     return MF_TYPE_ERR;
   }
 

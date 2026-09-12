@@ -4,6 +4,7 @@
 
 #include "chrome/browser/safe_browsing/chrome_ui_manager_delegate.h"
 
+#include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/interstitials/enterprise_util.h"
@@ -16,8 +17,8 @@
 #include "extensions/buildflags/buildflags.h"
 #include "services/network/public/cpp/cross_thread_pending_shared_url_loader_factory.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
-#include "extensions/browser/process_manager.h"
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "extensions/browser/process_manager.h"  // nogncheck
 #endif
 
 namespace safe_browsing {
@@ -37,8 +38,9 @@ void ChromeSafeBrowsingUIManagerDelegate::
         const GURL& page_url,
         const std::string& reason,
         int net_error_code) {
-  MaybeTriggerSecurityInterstitialShownEvent(web_contents, page_url, reason,
-                                             net_error_code);
+  MaybeTriggerSecurityInterstitialShownEvent(
+      web_contents, page_url, reason, net_error_code,
+      base::UTF16ToUTF8(web_contents->GetTitle()));
 }
 
 void ChromeSafeBrowsingUIManagerDelegate::
@@ -47,21 +49,21 @@ void ChromeSafeBrowsingUIManagerDelegate::
         const GURL& page_url,
         const std::string& reason,
         int net_error_code) {
-  MaybeTriggerSecurityInterstitialProceededEvent(web_contents, page_url, reason,
-                                                 net_error_code);
+  MaybeTriggerSecurityInterstitialProceededEvent(
+      web_contents, page_url, reason, net_error_code,
+      base::UTF16ToUTF8(web_contents->GetTitle()));
 }
 
-#if !BUILDFLAG(IS_ANDROID)
 void ChromeSafeBrowsingUIManagerDelegate::
     TriggerUrlFilteringInterstitialExtensionEventIfDesired(
         content::WebContents* web_contents,
         const GURL& page_url,
         const std::string& threat_type,
         safe_browsing::RTLookupResponse rt_lookup_response) {
-  MaybeTriggerUrlFilteringInterstitialEvent(web_contents, page_url, threat_type,
-                                            rt_lookup_response);
+  MaybeTriggerUrlFilteringInterstitialEvent(
+      web_contents, page_url, threat_type, rt_lookup_response,
+      base::UTF16ToUTF8(web_contents->GetTitle()));
 }
-#endif
 
 prerender::NoStatePrefetchContents*
 ChromeSafeBrowsingUIManagerDelegate::GetNoStatePrefetchContentsIfExists(
@@ -72,7 +74,7 @@ ChromeSafeBrowsingUIManagerDelegate::GetNoStatePrefetchContentsIfExists(
 
 bool ChromeSafeBrowsingUIManagerDelegate::IsHostingExtension(
     content::WebContents* web_contents) {
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   extensions::ProcessManager* extension_manager =
       extensions::ProcessManager::Get(web_contents->GetBrowserContext());
   if (!extension_manager)
@@ -108,10 +110,6 @@ PingManager* ChromeSafeBrowsingUIManagerDelegate::GetPingManager(
 
 bool ChromeSafeBrowsingUIManagerDelegate::IsMetricsAndCrashReportingEnabled() {
   return ChromeMetricsServiceAccessor::IsMetricsAndCrashReportingEnabled();
-}
-
-bool ChromeSafeBrowsingUIManagerDelegate::IsSendingOfHitReportsEnabled() {
-  return true;
 }
 
 }  // namespace safe_browsing

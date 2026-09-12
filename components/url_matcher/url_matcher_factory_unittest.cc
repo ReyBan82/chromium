@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 #include <utility>
 
@@ -28,19 +29,19 @@ TEST(URLMatcherFactoryTest, CreateFromURLFilterDictionary) {
   scoped_refptr<URLMatcherConditionSet> result;
 
   // Invalid key: {"invalid": "foobar"}
-  base::Value::Dict invalid_condition;
+  base::DictValue invalid_condition;
   invalid_condition.Set("invalid", "foobar");
 
   // Invalid value type: {"hostSuffix": []}
-  base::Value::Dict invalid_condition2;
-  invalid_condition2.Set(keys::kHostSuffixKey, base::Value::List());
+  base::DictValue invalid_condition2;
+  invalid_condition2.Set(keys::kHostSuffixKey, base::ListValue());
 
   // Invalid regex value: {"urlMatches": "*"}
-  base::Value::Dict invalid_condition3;
+  base::DictValue invalid_condition3;
   invalid_condition3.Set(keys::kURLMatchesKey, "*");
 
   // Invalid regex value: {"originAndPathMatches": "*"}
-  base::Value::Dict invalid_condition4;
+  base::DictValue invalid_condition4;
   invalid_condition4.Set(keys::kOriginAndPathMatchesKey, "*");
 
   // Valid values:
@@ -52,17 +53,17 @@ TEST(URLMatcherFactoryTest, CreateFromURLFilterDictionary) {
   // }
 
   // Port range: Allow 80;1000-1010.
-  base::Value::List port_range;
+  base::ListValue port_range;
   port_range.Append(1000);
   port_range.Append(1010);
-  base::Value::List port_ranges;
+  base::ListValue port_ranges;
   port_ranges.Append(80);
   port_ranges.Append(std::move(port_range));
 
-  base::Value::List scheme_list;
+  base::ListValue scheme_list;
   scheme_list.Append("http");
 
-  base::Value::Dict valid_condition;
+  base::DictValue valid_condition;
   valid_condition.Set(keys::kHostSuffixKey, "example.com");
   valid_condition.Set(keys::kHostPrefixKey, "www");
   valid_condition.Set(keys::kPortsKey, std::move(port_ranges));
@@ -125,30 +126,34 @@ TEST(URLMatcherFactoryTest, UpperCase) {
   scoped_refptr<URLMatcherConditionSet> result;
 
   // {"hostContains": "exaMple"}
-  base::Value::Dict invalid_condition1;
+  base::DictValue invalid_condition1;
   invalid_condition1.Set(keys::kHostContainsKey, "exaMple");
 
   // {"hostSuffix": ".Com"}
-  base::Value::Dict invalid_condition2;
+  base::DictValue invalid_condition2;
   invalid_condition2.Set(keys::kHostSuffixKey, ".Com");
 
   // {"hostPrefix": "WWw."}
-  base::Value::Dict invalid_condition3;
+  base::DictValue invalid_condition3;
   invalid_condition3.Set(keys::kHostPrefixKey, "WWw.");
 
   // {"hostEquals": "WWW.example.Com"}
-  base::Value::Dict invalid_condition4;
+  base::DictValue invalid_condition4;
   invalid_condition4.Set(keys::kHostEqualsKey, "WWW.example.Com");
 
   // {"scheme": ["HTTP"]}
-  base::Value::List scheme_list;
+  base::ListValue scheme_list;
   scheme_list.Append("HTTP");
-  base::Value::Dict invalid_condition5;
+  base::DictValue invalid_condition5;
   invalid_condition5.Set(keys::kSchemesKey, std::move(scheme_list));
 
-  const base::Value::Dict* invalid_conditions[] = {
-      &invalid_condition1, &invalid_condition2, &invalid_condition3,
-      &invalid_condition4, &invalid_condition5};
+  auto invalid_conditions = std::to_array<const base::DictValue*>({
+      &invalid_condition1,
+      &invalid_condition2,
+      &invalid_condition3,
+      &invalid_condition4,
+      &invalid_condition5,
+  });
 
   for (size_t i = 0; i < std::size(invalid_conditions); ++i) {
     error.clear();
@@ -181,7 +186,7 @@ class UrlConditionCaseTest {
                                                        lower_case_enforced)),
         url_(url) {}
 
-  ~UrlConditionCaseTest() {}
+  ~UrlConditionCaseTest() = default;
 
   // Match the condition against |url_|. Checks via EXPECT_* macros that
   // |expected_value_| matches always, and that |incorrect_case_value_| matches
@@ -228,9 +233,9 @@ void UrlConditionCaseTest::Test() const {
 void UrlConditionCaseTest::CheckCondition(
     const std::string& value,
     UrlConditionCaseTest::ResultType expected_result) const {
-  base::Value::Dict condition;
+  base::DictValue condition;
   if (use_list_of_strings_) {
-    base::Value::List list;
+    base::ListValue list;
     list.Append(value);
     condition.Set(condition_key_, std::move(list));
   } else {
@@ -291,45 +296,49 @@ TEST(URLMatcherFactoryTest, CaseSensitivity) {
                                    kIsPathCaseSensitive ||
                                    kIsQueryCaseSensitive;
 
-  const UrlConditionCaseTest case_tests[] = {
-    UrlConditionCaseTest(keys::kSchemesKey, true, kScheme, kSchemeUpper,
-                         kIsSchemeCaseSensitive, kIsSchemeLowerCaseEnforced,
-                         url),
-    UrlConditionCaseTest(keys::kHostContainsKey, false, kHost, kHostUpper,
-                         kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kHostEqualsKey, false, kHost, kHostUpper,
-                         kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kHostPrefixKey, false, kHost, kHostUpper,
-                         kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kHostSuffixKey, false, kHost, kHostUpper,
-                         kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kPathContainsKey, false, kPath, kPathUpper,
-                         kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kPathEqualsKey, false, kPath, kPathUpper,
-                         kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kPathPrefixKey, false, kPath, kPathUpper,
-                         kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kPathSuffixKey, false, kPath, kPathUpper,
-                         kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kQueryContainsKey, false, kQuery, kQueryUpper,
-                         kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kQueryEqualsKey, false, kQuery, kQueryUpper,
-                         kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kQueryPrefixKey, false, kQuery, kQueryUpper,
-                         kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kQuerySuffixKey, false, kQuery, kQueryUpper,
-                         kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced, url),
-    // Excluding kURLMatchesKey because case sensitivity can be specified in the
-    // RE2 expression.
-    UrlConditionCaseTest(keys::kURLContainsKey, false, kUrl, kUrlUpper,
-                         kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kURLEqualsKey, false, kUrl, kUrlUpper,
-                         kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kURLPrefixKey, false, kUrl, kUrlUpper,
-                         kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
-    UrlConditionCaseTest(keys::kURLSuffixKey, false, kUrl, kUrlUpper,
-                         kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
-  };
+  const auto case_tests = std::to_array<UrlConditionCaseTest>({
+      UrlConditionCaseTest(keys::kSchemesKey, true, kScheme, kSchemeUpper,
+                           kIsSchemeCaseSensitive, kIsSchemeLowerCaseEnforced,
+                           url),
+      UrlConditionCaseTest(keys::kHostContainsKey, false, kHost, kHostUpper,
+                           kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kHostEqualsKey, false, kHost, kHostUpper,
+                           kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kHostPrefixKey, false, kHost, kHostUpper,
+                           kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kHostSuffixKey, false, kHost, kHostUpper,
+                           kIsHostCaseSensitive, kIsHostLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kPathContainsKey, false, kPath, kPathUpper,
+                           kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kPathEqualsKey, false, kPath, kPathUpper,
+                           kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kPathPrefixKey, false, kPath, kPathUpper,
+                           kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kPathSuffixKey, false, kPath, kPathUpper,
+                           kIsPathCaseSensitive, kIsPathLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kQueryContainsKey, false, kQuery, kQueryUpper,
+                           kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced,
+                           url),
+      UrlConditionCaseTest(keys::kQueryEqualsKey, false, kQuery, kQueryUpper,
+                           kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced,
+                           url),
+      UrlConditionCaseTest(keys::kQueryPrefixKey, false, kQuery, kQueryUpper,
+                           kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced,
+                           url),
+      UrlConditionCaseTest(keys::kQuerySuffixKey, false, kQuery, kQueryUpper,
+                           kIsQueryCaseSensitive, kIsQueryLowerCaseEnforced,
+                           url),
+      // Excluding kURLMatchesKey because case sensitivity can be specified in
+      // the RE2 expression.
+      UrlConditionCaseTest(keys::kURLContainsKey, false, kUrl, kUrlUpper,
+                           kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kURLEqualsKey, false, kUrl, kUrlUpper,
+                           kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kURLPrefixKey, false, kUrl, kUrlUpper,
+                           kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
+      UrlConditionCaseTest(keys::kURLSuffixKey, false, kUrl, kUrlUpper,
+                           kIsUrlCaseSensitive, kIsUrlLowerCaseEnforced, url),
+  });
 
   for (size_t i = 0; i < std::size(case_tests); ++i) {
     SCOPED_TRACE(base::StringPrintf("Iteration: %" PRIuS, i));

@@ -7,19 +7,35 @@ package org.chromium.base;
 import android.os.SystemClock;
 
 import org.chromium.build.annotations.CheckDiscard;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * Utilities related to timestamps, including the ability to use fake time for tests via
  * FakeTimeTestRule.
  */
+@NullMarked
 public class TimeUtils {
     /**
-     * Interval timer using SystemClock.uptimeMillis() (excludes deep sleep).
-     * See: https://developer.android.com/reference/android/os/SystemClock
+     * Interval timer using SystemClock.uptimeMillis() (excludes deep sleep). See:
+     * https://developer.android.com/reference/android/os/SystemClock
      */
     @CheckDiscard("Class should get inlined by R8.")
     public static class UptimeMillisTimer {
-        private final long mStart = uptimeMillis();
+        private final long mStart;
+
+        public UptimeMillisTimer() {
+            this(uptimeMillis());
+        }
+
+        /**
+         * Creates a timer whose start time is supplied by the caller.
+         *
+         * @param startUptimeMillis Start time in the {@link SystemClock#uptimeMillis()} time base.
+         */
+        public UptimeMillisTimer(long startUptimeMillis) {
+            mStart = startUptimeMillis;
+        }
 
         public long getElapsedMillis() {
             return uptimeMillis() - mStart;
@@ -50,6 +66,10 @@ public class TimeUtils {
         public long getElapsedNanos() {
             return elapsedRealtimeNanos() - mStart;
         }
+
+        public long getElapsedMicros() {
+            return (elapsedRealtimeNanos() - mStart) / NANOSECONDS_PER_MICROSECOND;
+        }
     }
 
     /**
@@ -67,8 +87,11 @@ public class TimeUtils {
 
     interface FakeClock {
         long uptimeMillis();
+
         long elapsedRealtimeNanos();
+
         long currentThreadTimeMillis();
+
         long currentTimeMillis();
     }
 
@@ -76,15 +99,19 @@ public class TimeUtils {
 
     // Use these in favor of TimeUnit.convert() in order to avoid the overhead of a
     // static-get / static-invoke.
-    public static final long NANOSECONDS_PER_MICROSECOND = 1000;
-    public static final long NANOSECONDS_PER_MILLISECOND = 1000000;
     public static final long SECONDS_PER_MINUTE = 60;
     public static final long SECONDS_PER_HOUR = SECONDS_PER_MINUTE * 60;
     public static final long SECONDS_PER_DAY = SECONDS_PER_HOUR * 24;
+    public static final long MILLISECONDS_PER_MINUTE = SECONDS_PER_MINUTE * 1000;
+    public static final long MILLISECONDS_PER_DAY = SECONDS_PER_DAY * 1000;
+    public static final long MILLISECONDS_PER_YEAR = MILLISECONDS_PER_DAY * 365;
+
+    public static final long NANOSECONDS_PER_MICROSECOND = 1000;
+    public static final long NANOSECONDS_PER_MILLISECOND = 1000000;
 
     // Used by FakeTimeTestRule. Visibility is restricted to ensure tests use the rule, which
     // restores the value to null in its clean-up logic.
-    static FakeClock sFakeClock;
+    static @Nullable FakeClock sFakeClock;
 
     /**
      * Wrapper for System.currentTimeMillis() (milliseconds since the epoch).

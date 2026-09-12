@@ -5,9 +5,10 @@
 #include "components/subresource_filter/tools/rule_parser/rule_parser.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/strings/string_piece.h"
+#include "base/compiler_specific.h"
 #include "components/subresource_filter/tools/rule_parser/rule.h"
 #include "components/subresource_filter/tools/rule_parser/rule_options.h"
 #include "components/url_pattern_index/proto/rules.pb.h"
@@ -17,7 +18,7 @@ namespace subresource_filter {
 
 namespace {
 
-void ParseAndExpectUrlRule(base::StringPiece line,
+void ParseAndExpectUrlRule(std::string_view line,
                            const UrlRule& expected_rule) {
   UrlRule canonicalized_rule = expected_rule;
   canonicalized_rule.Canonicalize();
@@ -33,9 +34,9 @@ void ParseAndExpectUrlRule(base::StringPiece line,
   EXPECT_EQ(canonicalized_rule, parser.url_rule());
 }
 
-void ParseAndExpectCssRule(base::StringPiece line,
-                           const CssRule& expected_rule) {
-  CssRule canonicalized_rule = expected_rule;
+void ParseAndExpectStyleRule(std::string_view line,
+                             const StyleRule& expected_rule) {
+  StyleRule canonicalized_rule = expected_rule;
   canonicalized_rule.Canonicalize();
 
   RuleParser parser;
@@ -45,8 +46,8 @@ void ParseAndExpectCssRule(base::StringPiece line,
   EXPECT_TRUE(parser.parse_error().line.empty());
   EXPECT_EQ(std::string::npos, parser.parse_error().error_index);
 
-  EXPECT_EQ(url_pattern_index::proto::RULE_TYPE_CSS, parser.rule_type());
-  EXPECT_EQ(canonicalized_rule, parser.css_rule());
+  EXPECT_EQ(url_pattern_index::proto::RULE_TYPE_STYLE, parser.rule_type());
+  EXPECT_EQ(canonicalized_rule, parser.style_rule());
 }
 
 }  // namespace
@@ -55,7 +56,9 @@ TEST(RuleParserTest, ParseComment) {
   RuleParser parser;
 
   static const char* kLines[] = {
-      "! this is a comment", "   ! this is a comment too", "[ and this",
+      "! this is a comment",
+      "   ! this is a comment too",
+      "[ and this",
       "    [ as well as this",
   };
 
@@ -80,7 +83,8 @@ TEST(RuleParserTest, UrlRuleMatchCase) {
     const char* line;
     bool expected_match_case;
   } kTestCases[] = {
-      {"example.com$image", false}, {"example.com$image,match-case", true},
+      {"example.com$image", false},
+      {"example.com$image,match-case", true},
   };
   RuleParser parser;
   for (const auto& test_case : kTestCases) {
@@ -95,7 +99,7 @@ TEST(RuleParserTest, ParseAllowlistUrlRule) {
   static const char* kLine = "@@?param=";
   UrlRule expected_rule;
   expected_rule.is_allowlist = true;
-  expected_rule.url_pattern = kLine + 2;
+  expected_rule.url_pattern = UNSAFE_TODO(kLine + 2);
   expected_rule.url_pattern_type =
       url_pattern_index::proto::URL_PATTERN_TYPE_SUBSTRING;
 
@@ -155,7 +159,8 @@ TEST(RuleParserTest, ParseMultipleTypeOptions) {
 
 TEST(RuleParserTest, ParseContradictingTypeOptions) {
   static const char* kLines[2] = {
-      "?param=$image,~image", "?param=$popup,image,~image",
+      "?param=$image,~image",
+      "?param=$popup,image,~image",
   };
 
   for (size_t i = 0; i < 2; ++i) {
@@ -168,7 +173,7 @@ TEST(RuleParserTest, ParseContradictingTypeOptions) {
       expected_rule.type_mask |=
           type_mask_for(url_pattern_index::proto::ELEMENT_TYPE_POPUP);
     }
-    ParseAndExpectUrlRule(kLines[i], expected_rule);
+    ParseAndExpectUrlRule(UNSAFE_TODO(kLines[i]), expected_rule);
   }
 }
 
@@ -207,8 +212,10 @@ TEST(RuleParserTest, ParseUrlRuleAnchors) {
     expected_rule.anchor_left = left_anchor.type;
 
     for (const auto& right_anchor : kAnchors) {
-      if (right_anchor.type == url_pattern_index::proto::ANCHOR_TYPE_SUBDOMAIN)
+      if (right_anchor.type ==
+          url_pattern_index::proto::ANCHOR_TYPE_SUBDOMAIN) {
         continue;
+      }
       expected_rule.anchor_right = right_anchor.type;
       std::string line = left_anchor.literal + kLine + right_anchor.literal;
       if (left_anchor.type != url_pattern_index::proto::ANCHOR_TYPE_NONE ||
@@ -307,33 +314,23 @@ TEST(RuleParserTest, ParseUrlRuleWithRegexp) {
   }
 }
 
-TEST(RuleParserTest, ParseCssRules) {
+TEST(RuleParserTest, ParseStyleRules) {
   static const std::string kCssSelector = "div.blocked_class";
   static const std::string kTestDomain = "example.com";
   static const std::string kTestSubDomain = "however.example.com";
 
-  CssRule expected_rule;
-  expected_rule.css_selector = kCssSelector;
+  StyleRule expected_rule;
+  expected_rule.selector = kCssSelector;
 
-  ParseAndExpectCssRule("##" + kCssSelector, expected_rule);
-  ParseAndExpectCssRule(" ##" + kCssSelector, expected_rule);
-  ParseAndExpectCssRule(" \t\t##" + kCssSelector, expected_rule);
+  ParseAndExpectStyleRule("##" + kCssSelector, expected_rule);
+  ParseAndExpectStyleRule(" ##" + kCssSelector, expected_rule);
+  ParseAndExpectStyleRule(" \t\t##" + kCssSelector, expected_rule);
 
   expected_rule.domains.push_back(kTestDomain);
-  ParseAndExpectCssRule(kTestDomain + "##" + kCssSelector, expected_rule);
+  ParseAndExpectStyleRule(kTestDomain + "##" + kCssSelector, expected_rule);
 
   expected_rule.is_allowlist = true;
-  ParseAndExpectCssRule(kTestDomain + "#@#" + kCssSelector, expected_rule);
-
-  expected_rule.is_allowlist = false;
-  expected_rule.domains.push_back("~" + kTestSubDomain);
-  ParseAndExpectCssRule(
-      kTestDomain + ",~" + kTestSubDomain + "##" + kCssSelector, expected_rule);
-
-  expected_rule.is_allowlist = true;
-  ParseAndExpectCssRule(
-      kTestDomain + ",~" + kTestSubDomain + "#@#" + kCssSelector,
-      expected_rule);
+  ParseAndExpectStyleRule(kTestDomain + "#@#" + kCssSelector, expected_rule);
 }
 
 TEST(RuleParserTest, ParseErrors) {
@@ -361,6 +358,10 @@ TEST(RuleParserTest, ParseErrors) {
       {"#@!", RuleParser::ParseError::WRONG_CSS_RULE_DELIM, 2},
       {"#@#", RuleParser::ParseError::EMPTY_CSS_SELECTOR, 3},
       {"example.com##", RuleParser::ParseError::EMPTY_CSS_SELECTOR, 13},
+      {"example.com,~however.example.com##div.blocked_class",
+       RuleParser::ParseError::UNSUPPORTED_FEATURE, 12},
+      {"example.com,~however.example.com#@#div.blocked_class",
+       RuleParser::ParseError::UNSUPPORTED_FEATURE, 12},
   };
 
   for (const auto& rule_and_expectation : kRulesAndExpectations) {

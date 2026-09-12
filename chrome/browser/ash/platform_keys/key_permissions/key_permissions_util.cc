@@ -11,17 +11,17 @@
 #include <utility>
 #include <vector>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/base64.h"
 #include "base/values.h"
-#include "chrome/browser/ash/platform_keys/key_permissions/key_permissions.pb.h"
-#include "chrome/common/pref_names.h"
+#include "chromeos/ash/components/kcer/key_permissions.pb.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 
 namespace ash::platform_keys::internal {
 
 namespace {
-// The profile pref prefs::kPlatformKeys stores a dictionary mapping from
+// The profile pref ash::prefs::kPlatformKeys stores a dictionary mapping from
 // public key (base64 encoding of an DER-encoded SPKI) to key properties. The
 // currently only key property is the key usage, which can either be undefined
 // or "corporate". If a key is not present in the pref, the default for the key
@@ -44,8 +44,8 @@ const base::Value* GetPrefsEntry(const std::string& public_key_spki_der_b64,
     return nullptr;
   }
 
-  const base::Value::Dict& platform_keys =
-      profile_prefs->GetDict(prefs::kPlatformKeys);
+  const base::DictValue& platform_keys =
+      profile_prefs->GetDict(ash::prefs::kPlatformKeys);
 
   return platform_keys.Find(public_key_spki_der_b64);
 }
@@ -71,9 +71,9 @@ bool IsUserKeyMarkedCorporateInPref(
 
 void MarkUserKeyCorporateInPref(const std::vector<uint8_t>& public_key_spki_der,
                                 PrefService* profile_prefs) {
-  ScopedDictPrefUpdate update(profile_prefs, prefs::kPlatformKeys);
+  ScopedDictPrefUpdate update(profile_prefs, ash::prefs::kPlatformKeys);
 
-  base::Value::Dict new_pref_entry;
+  base::DictValue new_pref_entry;
   new_pref_entry.Set(kPrefKeyUsage, kPrefKeyUsageCorporate);
 
   update->Set(base::Base64Encode(public_key_spki_der),

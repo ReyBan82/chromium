@@ -4,28 +4,41 @@
 
 #include "third_party/blink/renderer/platform/wtf/atomic_operations.h"
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace WTF {
+namespace blink {
 
 class AtomicOperationsTest : public ::testing::Test {};
 
 template <size_t buffer_size, size_t alignment, typename CopyMethod>
 void TestCopyImpl(CopyMethod copy) {
-  alignas(alignment) unsigned char src[buffer_size];
+  alignas(alignment) std::array<unsigned char, buffer_size> src;
   for (size_t i = 0; i < buffer_size; ++i)
     src[i] = static_cast<char>(i + 1);
   // Allocating extra memory before and after the buffer to make sure the
   // atomic memcpy doesn't exceed the buffer in any direction.
-  alignas(alignment) unsigned char tgt[buffer_size + (2 * sizeof(size_t))];
-  memset(tgt, 0, buffer_size + (2 * sizeof(size_t)));
-  copy(tgt + sizeof(size_t), src);
+  alignas(alignment)
+      std::array<unsigned char, buffer_size + (2 * sizeof(size_t))>
+          tgt;
+  std::ranges::fill(tgt, 0);
+  auto target_span = base::span(tgt);
+  // SAFETY: `target_span` is constructed from `tgt` which has size `buffer_size
+  // + (2 * sizeof(size_t))`. Therefore, `subspan(sizeof(size_t))` is within
+  // bounds and has at least `buffer_size` elements. The `copy` function will
+  // only access `buffer_size` bytes, which is the size of `src` and is less
+  // than or equal to the size of the target subspan.
+  UNSAFE_BUFFERS(copy(target_span.subspan(sizeof(size_t)).data(), src.data()));
   // Check nothing before the buffer was changed
-  EXPECT_EQ(0u, *reinterpret_cast<size_t*>(&tgt[0]));
+  size_t v;
+  base::byte_span_from_ref(v).copy_from(target_span.first(sizeof(size_t)));
+  EXPECT_EQ(0u, v);
   // Check buffer was copied correctly
-  EXPECT_TRUE(!memcmp(src, tgt + sizeof(size_t), buffer_size));
+  EXPECT_EQ(src, target_span.subspan(sizeof(size_t), buffer_size));
   // Check nothing after the buffer was changed
-  EXPECT_EQ(0u, *reinterpret_cast<size_t*>(&tgt[sizeof(size_t) + buffer_size]));
+  base::byte_span_from_ref(v).copy_from(target_span.last(sizeof(size_t)));
+  EXPECT_EQ(0u, v);
 }
 
 // Tests for AtomicReadMemcpy
@@ -115,17 +128,28 @@ template <size_t buffer_size, size_t alignment>
 void TestAtomicMemzero() {
   // Allocating extra memory before and after the buffer to make sure the
   // AtomicMemzero doesn't exceed the buffer in any direction.
-  alignas(alignment) unsigned char buf[buffer_size + (2 * sizeof(size_t))];
-  memset(buf, ~uint8_t{0}, buffer_size + (2 * sizeof(size_t)));
-  AtomicMemzero<buffer_size, alignment>(buf + sizeof(size_t));
+  alignas(alignment)
+      std::array<unsigned char, buffer_size + (2 * sizeof(size_t))>
+          buf;
+  std::ranges::fill(buf, ~uint8_t{0});
+  auto span = base::span(buf);
+  // SAFETY: `span` is constructed from `buf` which has size `buffer_size + (2 *
+  // sizeof(size_t))`. Therefore, `subspan(sizeof(size_t))` is within bounds and
+  // has at least `buffer_size` elements. `AtomicMemzero` will only zero
+  // `buffer_size` bytes, which is less than or equal to the size of the
+  // subspan.
+  UNSAFE_BUFFERS(AtomicMemzero<buffer_size, alignment>(
+      span.subspan(sizeof(size_t)).data()));
   // Check nothing before the buffer was changed
-  EXPECT_EQ(~size_t{0}, *reinterpret_cast<size_t*>(&buf[0]));
+  size_t v;
+  base::byte_span_from_ref(v).copy_from(span.first(sizeof(size_t)));
+  EXPECT_EQ(~size_t{0}, v);
   // Check buffer was copied correctly
-  static const unsigned char for_comparison[buffer_size] = {0};
-  EXPECT_TRUE(!memcmp(buf + sizeof(size_t), for_comparison, buffer_size));
+  static const std::array<unsigned char, buffer_size> for_comparison = {};
+  EXPECT_EQ(span.subspan(sizeof(size_t), buffer_size), for_comparison);
   // Check nothing after the buffer was changed
-  EXPECT_EQ(~size_t{0},
-            *reinterpret_cast<size_t*>(&buf[sizeof(size_t) + buffer_size]));
+  base::byte_span_from_ref(v).copy_from(span.last(sizeof(size_t)));
+  EXPECT_EQ(~size_t{0}, v);
 }
 
 TEST_F(AtomicOperationsTest, AtomicMemzero_UINT8T) {
@@ -162,4 +186,78 @@ TEST_F(AtomicOperationsTest, AtomicMemzero_127Bytes) {
   TestAtomicMemzero<127, sizeof(uintptr_t)>();
 }
 
-}  // namespace WTF
+TEST_F(AtomicOperationsTest, RuntimeAtomicOperations) {
+  alignas(sizeof(size_t)) std::array<size_t, 16> buf;
+  alignas(sizeof(size_t)) std::array<size_t, 16> src;
+  for (size_t i = 0; i < src.size(); ++i) {
+    src[i] = static_cast<size_t>(0x1234567890ABCDEFULL + i);
+  }
+
+  // Test AtomicMemzero for 0, 1, 2, 3, 4, and 8 words.
+  for (size_t words : {0u, 1u, 2u, 3u, 4u, 8u}) {
+    buf.fill(0xAA);
+    UNSAFE_BUFFERS(AtomicMemzero(buf.data(), words * sizeof(size_t)));
+    for (size_t i = 0; i < words; ++i) {
+      EXPECT_EQ(0u, buf[i]);
+    }
+    for (size_t i = words; i < buf.size(); ++i) {
+      EXPECT_EQ(0xAA, buf[i]);
+    }
+  }
+
+  // Test AtomicWriteMemcpy for 0, 1, 2, 3, 4, and 8 words.
+  for (size_t words : {0u, 1u, 2u, 3u, 4u, 8u}) {
+    buf.fill(0);
+    UNSAFE_BUFFERS(
+        AtomicWriteMemcpy(buf.data(), src.data(), words * sizeof(size_t)));
+    for (size_t i = 0; i < words; ++i) {
+      EXPECT_EQ(src[i], buf[i]);
+    }
+    for (size_t i = words; i < buf.size(); ++i) {
+      EXPECT_EQ(0u, buf[i]);
+    }
+  }
+
+  // Test AtomicReadMemcpy for 0, 1, 2, 3, 4, and 8 words.
+  for (size_t words : {0u, 1u, 2u, 3u, 4u, 8u}) {
+    buf.fill(0);
+    UNSAFE_BUFFERS(
+        AtomicReadMemcpy(buf.data(), src.data(), words * sizeof(size_t)));
+    for (size_t i = 0; i < words; ++i) {
+      EXPECT_EQ(src[i], buf[i]);
+    }
+    for (size_t i = words; i < buf.size(); ++i) {
+      EXPECT_EQ(0u, buf[i]);
+    }
+  }
+}
+
+TEST_F(AtomicOperationsTest, AtomicMemzeroRange) {
+  // Test range-based AtomicMemzero for size_t.
+  alignas(sizeof(size_t)) std::array<size_t, 16> buf;
+  for (size_t count : {0u, 1u, 2u, 3u, 4u, 8u}) {
+    buf.fill(0xAA);
+    UNSAFE_BUFFERS(AtomicMemzero(buf.data(), buf.data() + count));
+    for (size_t i = 0; i < count; ++i) {
+      EXPECT_EQ(0u, buf[i]);
+    }
+    for (size_t i = count; i < buf.size(); ++i) {
+      EXPECT_EQ(0xAA, buf[i]);
+    }
+  }
+
+  // Test range-based AtomicMemzero for uint32_t.
+  alignas(sizeof(uint32_t)) std::array<uint32_t, 16> buf32;
+  for (size_t count : {0u, 1u, 2u, 3u, 4u, 8u}) {
+    buf32.fill(0x55);
+    UNSAFE_BUFFERS(AtomicMemzero(buf32.data(), buf32.data() + count));
+    for (size_t i = 0; i < count; ++i) {
+      EXPECT_EQ(0u, buf32[i]);
+    }
+    for (size_t i = count; i < buf32.size(); ++i) {
+      EXPECT_EQ(0x55, buf32[i]);
+    }
+  }
+}
+
+}  // namespace blink

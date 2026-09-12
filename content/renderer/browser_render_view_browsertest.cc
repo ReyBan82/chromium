@@ -12,6 +12,7 @@
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_context.h"
@@ -35,6 +36,7 @@
 #include "net/disk_cache/disk_cache.h"
 #include "net/http/http_cache.h"
 #include "services/network/public/cpp/features.h"
+#include "services/network/public/mojom/clear_data_filter.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/web_url_error.h"
@@ -47,8 +49,9 @@ namespace {
 
 class TestShellContentRendererClient : public ShellContentRendererClient {
  public:
-  TestShellContentRendererClient()
-      : latest_error_valid_(false),
+  explicit TestShellContentRendererClient(bool is_browsertest)
+      : ShellContentRendererClient(is_browsertest),
+        latest_error_valid_(false),
         latest_error_reason_(0),
         latest_error_stale_copy_in_cache_(false) {}
 
@@ -93,7 +96,8 @@ class RenderViewBrowserTest : public ContentBrowserTest {
 
   void SetUpOnMainThread() override {
     // Override setting of renderer client.
-    renderer_client_ = new TestShellContentRendererClient();
+    renderer_client_ =
+        new TestShellContentRendererClient(/*is_browsertest=*/true);
     // Explicitly leaks ownership; this object will remain alive
     // until process death.  We don't deleted the returned value,
     // since some contexts set the pointer to a non-heap address.
@@ -138,18 +142,13 @@ class RenderViewBrowserTest : public ContentBrowserTest {
         error_code, stale_cache_entry_present);
   }
 
-  TestShellContentRendererClient* renderer_client_;
+  raw_ptr<TestShellContentRendererClient> renderer_client_;
 };
 
 // https://crbug.com/788788
-#if BUILDFLAG(IS_ANDROID) && defined(ADDRESS_SANITIZER)
-#define MAYBE_ConfirmCacheInformationPlumbed \
-  DISABLED_ConfirmCacheInformationPlumbed
-#else
-#define MAYBE_ConfirmCacheInformationPlumbed ConfirmCacheInformationPlumbed
-#endif  // BUILDFLAG(IS_ANDROID) && defined(ADDRESS_SANITIZER)
+// TODO(crbug.com/408394636): Tests are flaky.
 IN_PROC_BROWSER_TEST_F(RenderViewBrowserTest,
-                       MAYBE_ConfirmCacheInformationPlumbed) {
+                       DISABLED_ConfirmCacheInformationPlumbed) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
   // Load URL with "nocache" set, to create stale cache.

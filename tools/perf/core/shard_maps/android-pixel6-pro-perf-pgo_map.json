@@ -55,9 +55,6 @@
             "blink_perf.owp_storage": {
                 "abridged": false
             },
-            "blink_perf.paint": {
-                "abridged": false
-            },
             "blink_perf.parser": {
                 "end": 17,
                 "abridged": false
@@ -71,9 +68,6 @@
                 "abridged": false
             },
             "blink_perf.shadow_dom": {
-                "abridged": false
-            },
-            "blink_perf.svg": {
                 "abridged": false
             },
             "blink_perf.webaudio": {
@@ -94,26 +88,13 @@
             "blink_perf.webgl": {
                 "abridged": false
             },
-            "blink_perf.webgl_fast_call": {
-                "abridged": false
-            },
             "dummy_benchmark.noisy_benchmark_1": {
                 "abridged": false
             },
             "dummy_benchmark.stable_benchmark_1": {
                 "abridged": false
             },
-            "jetstream": {
-                "abridged": false
-            },
             "jetstream2": {
-                "abridged": false
-            },
-            "kraken": {
-                "abridged": false
-            },
-            "loading.mobile": {
-                "end": 39,
                 "abridged": false
             }
         },
@@ -128,14 +109,7 @@
     },
     "6": {
         "benchmarks": {
-            "loading.mobile": {
-                "begin": 39,
-                "abridged": false
-            },
             "media.mobile": {
-                "abridged": false
-            },
-            "octane": {
                 "abridged": false
             },
             "rasterize_and_record_micro.top_25": {
@@ -201,21 +175,6 @@
             "rendering.mobile.notracing": {
                 "abridged": false
             },
-            "speedometer": {
-                "abridged": false
-            },
-            "speedometer-future": {
-                "abridged": false
-            },
-            "speedometer2": {
-                "abridged": false
-            },
-            "speedometer2-future": {
-                "abridged": false
-            },
-            "speedometer2-pcscan": {
-                "abridged": false
-            },
             "startup.mobile": {
                 "abridged": false
             },
@@ -243,13 +202,7 @@
                 "begin": 10,
                 "abridged": false
             },
-            "system_health.pcscan": {
-                "abridged": false
-            },
             "system_health.webview_startup": {
-                "abridged": false
-            },
-            "tracing.tracing_with_background_memory_infra": {
                 "abridged": false
             },
             "v8.browsing_mobile": {

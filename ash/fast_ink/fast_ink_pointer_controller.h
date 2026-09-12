@@ -25,7 +25,7 @@ namespace views {
 class View;
 }  // namespace views
 
-namespace fast_ink {
+namespace ash {
 
 // Base class for a fast ink based pointer controller. Enables/disables
 // the pointer, receives points and passes them off to be rendered.
@@ -48,8 +48,26 @@ class FastInkPointerController : public ui::EventHandler {
   void AddExcludedWindow(aura::Window* window);
 
  protected:
+  // Returns the pointer view.
+  virtual views::View* GetPointerView() const = 0;
+
+  // Creates the pointer view.
+  virtual void CreatePointerView(base::TimeDelta presentation_delay,
+                                 aura::Window* root_window) = 0;
+
+  // Updates the pointer view.
+  virtual void UpdatePointerView(ui::TouchEvent* event) = 0;
+  virtual void UpdatePointerView(ui::MouseEvent* event) = 0;
+
+  // Destroys the pointer view if it exists.
+  virtual void DestroyPointerView();
+
+  // Resets the pointer view to its initial state when reused.
+  virtual void ResetPointerView();
+
   // Whether the controller is ready to start handling a new gesture.
   virtual bool CanStartNewGesture(ui::LocatedEvent* event);
+
   // Whether the event should be processed and stop propagation.
   // Default implementation will catch basic mouse events (e.g. mouse clicking)
   // and touch events (e.g. touch pressing) and stop them from being further
@@ -63,10 +81,11 @@ class FastInkPointerController : public ui::EventHandler {
   bool IsPointerInExcludedWindows(ui::LocatedEvent* event);
 
  private:
-  // Creates new pointer view if `can_start_new_gesture` is true. Otherwise, try
-  // to re-use existing one. Ends the current pointer session if the pointer
-  // widget is no longer valid. Returns true if there is a pointer view
-  // available.
+  // When `can_start_new_gesture` is true, it creates a new view if one doesn't
+  // exist, or resets the state of the existing one to be reused for a new
+  // gesture. If `can_start_new_gesture` is false, it ends the session if the
+  // existing view is no longer valid.
+  // Returns true if a valid pointer view is available.
   bool MaybeCreatePointerView(ui::LocatedEvent* event,
                               bool can_start_new_gesture);
 
@@ -75,27 +94,14 @@ class FastInkPointerController : public ui::EventHandler {
   void OnMouseEvent(ui::MouseEvent* event) override;
 
   void OnHasSeenStylusPrefChanged();
-  void UpdateEnabledForMouseEvent();
-
-  // Returns the pointer view.
-  virtual views::View* GetPointerView() const = 0;
-
-  // Creates the pointer view.
-  virtual void CreatePointerView(base::TimeDelta presentation_delay,
-                                 aura::Window* root_window) = 0;
-
-  // Updates the pointer view.
-  virtual void UpdatePointerView(ui::TouchEvent* event) = 0;
-  virtual void UpdatePointerView(ui::MouseEvent* event) {}
-
-  // Destroys the pointer view if it exists.
-  virtual void DestroyPointerView() = 0;
 
   // The presentation delay used for pointer location prediction.
   const base::TimeDelta presentation_delay_;
 
   bool enabled_ = false;
   bool has_seen_stylus_ = false;
+
+  std::optional<bool> pointer_view_created_by_touch_;
 
   // Set of touch ids.
   std::set<int> touch_ids_;
@@ -107,6 +113,6 @@ class FastInkPointerController : public ui::EventHandler {
   std::unique_ptr<PrefChangeRegistrar> pref_change_registrar_local_;
 };
 
-}  // namespace fast_ink
+}  // namespace ash
 
 #endif  // ASH_FAST_INK_FAST_INK_POINTER_CONTROLLER_H_

@@ -46,6 +46,10 @@ class CORE_EXPORT SVGFilterElement final : public SVGElement,
   explicit SVGFilterElement(Document&);
   ~SVGFilterElement() override;
 
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFilterElement;
+  }
+
   SVGAnimatedLength* x() const { return x_.Get(); }
   SVGAnimatedLength* y() const { return y_.Get(); }
   SVGAnimatedLength* width() const { return width_.Get(); }
@@ -71,9 +75,13 @@ class CORE_EXPORT SVGFilterElement final : public SVGElement,
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   void ChildrenChanged(const ChildrenChange&) override;
 
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
   bool SelfHasRelativeLengths() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedLength> x_;
   Member<SVGAnimatedLength> y_;

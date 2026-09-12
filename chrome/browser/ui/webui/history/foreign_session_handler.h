@@ -10,19 +10,32 @@
 #include <vector>
 
 #include "base/callback_list.h"
+#include "base/functional/callback.h"
+#include "base/gtest_prod_util.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "chrome/browser/sessions/session_service.h"
 #include "components/sync_sessions/open_tabs_ui_delegate.h"
-#include "content/public/browser/web_ui_message_handler.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/receiver.h"
+#include "mojo/public/cpp/bindings/remote.h"
+#include "ui/base/window_open_disposition.h"
+#include "ui/webui/resources/cr_components/history/foreign_sessions.mojom.h"
+
+namespace sessions {
+struct SessionTab;
+}
 
 namespace content {
-class WebUI;
-}
+class WebContents;
+}  // namespace content
 
 namespace user_prefs {
 class PrefRegistrySyncable;
 }
+
+class TabsFromOtherDevicesSidePanelUI;
 
 namespace browser_sync {
 
@@ -45,66 +58,75 @@ enum class SyncedTabsHistogram {
   LIMIT = 12  // Should always be the last one.
 };
 
-class ForeignSessionHandler : public content::WebUIMessageHandler {
+class ForeignSessionHandler : public history::mojom::ForeignSessionPageHandler {
  public:
-  // WebUIMessageHandler implementation.
-  void RegisterMessages() override;
-  void OnJavascriptAllowed() override;
-  void OnJavascriptDisallowed() override;
+  using RestoreForeignSessionTabCallback =
+      base::RepeatingCallback<void(content::WebContents* source_web_contents,
+                                   const ::sessions::SessionTab& tab,
+                                   WindowOpenDisposition disposition)>;
 
-  ForeignSessionHandler();
+  using RestoreForeignSessionWindowsCallback = base::RepeatingCallback<void(
+      Profile* profile,
+      const std::vector<const ::sessions::SessionWindow*>& windows)>;
+
+  ForeignSessionHandler(
+      mojo::PendingReceiver<history::mojom::ForeignSessionPageHandler>
+          pending_page_handler,
+      mojo::PendingRemote<history::mojom::ForeignSessionPage> pending_page,
+      Profile* profile,
+      content::WebContents* web_contents,
+      RestoreForeignSessionTabCallback restore_tab_callback,
+      RestoreForeignSessionWindowsCallback restore_windows_callback,
+      TabsFromOtherDevicesSidePanelUI* side_panel_ui);
 
   ForeignSessionHandler(const ForeignSessionHandler&) = delete;
   ForeignSessionHandler& operator=(const ForeignSessionHandler&) = delete;
 
   ~ForeignSessionHandler() override;
 
-  void InitializeForeignSessions();
+  // history::mojom::ForeignSessionPageHandler implementation.
+  void GetForeignSessions(GetForeignSessionsCallback callback) override;
+  void OpenForeignSessionAllTabs(const std::string& session_tag) override;
+  void OpenForeignSessionTab(const std::string& session_tag,
+                             int32_t tab_id,
+                             ui::mojom::ClickModifiersPtr modifiers) override;
+  void DeleteForeignSession(const std::string& session_tag) override;
+  void SetForeignSessionCollapsed(const std::string& session_tag,
+                                  bool collapsed) override;
+  void ShowUi() override;
 
   static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
 
-  static void OpenForeignSessionTab(content::WebUI* web_ui,
-                                    const std::string& session_string_value,
-                                    SessionID tab_id,
-                                    const WindowOpenDisposition& disposition);
-
-  static void OpenForeignSessionWindows(content::WebUI* web_ui,
-                                        const std::string& session_string_value,
-                                        size_t window_num);
-
   // Returns a pointer to the current session model associator or nullptr.
   static sync_sessions::OpenTabsUIDelegate* GetOpenTabsUIDelegate(
-      content::WebUI* web_ui);
+      Profile* profile);
 
-  void SetWebUIForTesting(content::WebUI* web_ui) { set_web_ui(web_ui); }
+  // Returns a string used to show the user when a session or tab was last
+  // modified (e.g. "2 hours ago").
+  static std::u16string FormatSessionTime(const base::Time& time);
 
  private:
   void OnForeignSessionUpdated();
 
-  base::Value::List GetForeignSessions();
+  std::vector<history::mojom::ForeignSessionPtr> GetForeignSessionsInternal();
 
-  // Returns a string used to show the user when a session was last modified.
-  std::u16string FormatSessionTime(const base::Time& time);
+  raw_ptr<Profile> profile_;
 
-  // Determines which session is to be opened, and then calls
-  // OpenForeignSession, to begin the process of opening a new browser window.
-  // This is a javascript callback handler.
-  void HandleOpenForeignSession(const base::Value::List& args);
+  // The WebContents that hosts the WebUI. If opened in a regular tab
+  // (chrome://history/syncedTabs), this corresponds to that tab. If opened in
+  // the side panel, this corresponds to the side panel's contents.
+  raw_ptr<content::WebContents> web_contents_;
 
-  // Determines whether foreign sessions should be obtained from the sync model.
-  // This is a javascript callback handler, and it is also called when the sync
-  // model has changed and the new tab page needs to reflect the changes.
-  void HandleGetForeignSessions(const base::Value::List& args);
+  // Interface to send information to the web ui page.
+  mojo::Remote<history::mojom::ForeignSessionPage> page_;
+  // Allows handling received messages from the web ui page.
+  mojo::Receiver<history::mojom::ForeignSessionPageHandler> receiver_;
 
-  // Delete a foreign session. This will remove it from the list of foreign
-  // sessions on all devices. It will reappear if the session is re-activated
-  // on the original device.
-  // This is a javascript callback handler.
-  void HandleDeleteForeignSession(const base::Value::List& args);
+  // Non-null if the handler is being used by the side panel UI.
+  raw_ptr<TabsFromOtherDevicesSidePanelUI> side_panel_ui_;
 
-  void HandleSetForeignSessionCollapsed(const base::Value::List& args);
-
-  absl::optional<base::Value::List> initial_session_list_;
+  RestoreForeignSessionTabCallback restore_tab_callback_;
+  RestoreForeignSessionWindowsCallback restore_windows_callback_;
 
   base::CallbackListSubscription foreign_session_updated_subscription_;
 };

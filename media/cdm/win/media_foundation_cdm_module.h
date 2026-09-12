@@ -5,10 +5,11 @@
 #ifndef MEDIA_CDM_WIN_MEDIA_FOUNDATION_CDM_MODULE_H_
 #define MEDIA_CDM_WIN_MEDIA_FOUNDATION_CDM_MODULE_H_
 
-#include <string>
-
 #include <mfcontentdecryptionmodule.h>
 #include <wrl.h>
+
+#include <optional>
+#include <string>
 
 #include "base/files/file_path.h"
 #include "base/scoped_native_library.h"
@@ -27,11 +28,25 @@ class MEDIA_EXPORT MediaFoundationCdmModule {
   // CDM is an OS or store CDM, `cdm_path` could be empty. See implementation
   // details in ActivateCdmFactory() for how OS or store CDMs are handled.
   // Must only be called once.
-  void Initialize(const base::FilePath& cdm_path);
+  bool Initialize(const base::FilePath& cdm_path);
 
   HRESULT GetCdmFactory(
       const std::string& key_system,
       Microsoft::WRL::ComPtr<IMFContentDecryptionModuleFactory>& cdm_factory);
+
+  // Returns true when the CDM is provided by the OS (today, PlayReady), which
+  // is the only kind of CDM used in production, so in production this is always
+  // true. It is false only for a CDM loaded from a cdm_path on disk, which
+  // today is exclusively the MediaFoundation Clear Key test CDM
+  // (org.chromium.externalclearkey.mediafoundation), used to drive this
+  // pipeline without real DRM.
+  bool IsOsCdm() const {
+    return is_os_cdm_for_testing_.value_or(cdm_path_.empty());
+  }
+
+  void SetIsOsCdmForTesting(bool is_os_cdm) {
+    is_os_cdm_for_testing_ = is_os_cdm;
+  }
 
  private:
   MediaFoundationCdmModule();
@@ -50,7 +65,14 @@ class MEDIA_EXPORT MediaFoundationCdmModule {
   // Indicates whether ActivateCdmFactory() has been called.
   bool activated_ = false;
 
+  std::optional<bool> is_os_cdm_for_testing_;
+
+  // Path to the CDM library to load, or empty for an OS CDM (see IsOsCdm()).
+  // In production this is always empty (OS PlayReady); a non-empty path today
+  // comes only from the MediaFoundation Clear Key test CDM registration
+  // (kMediaFoundationClearKeyCdmPathForTesting).
   base::FilePath cdm_path_;
+
   std::string key_system_;
   Microsoft::WRL::ComPtr<IMFContentDecryptionModuleFactory> cdm_factory_;
 };

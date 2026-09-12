@@ -4,7 +4,6 @@
 
 #include "components/no_state_prefetch/browser/no_state_prefetch_utils.h"
 
-#include "base/metrics/histogram_macros.h"
 #include "base/time/time.h"
 #include "components/google/core/common/google_util.h"
 #include "components/no_state_prefetch/browser/no_state_prefetch_manager.h"
@@ -26,7 +25,7 @@ bool IsGoogleOriginURL(const GURL& origin_url) {
     return false;
   }
 
-  return (origin_url.path_piece() == "/") ||
+  return (origin_url.path() == "/") ||
          google_util::IsGoogleSearchUrl(origin_url);
 }
 
@@ -53,13 +52,15 @@ void RecordNoStatePrefetchMetrics(
       nostate_prefetch_entry_found =
           no_state_prefetch_manager->GetPrefetchInformation(
               url, &prefetch_age, &final_status, &prefetch_origin);
-      if (nostate_prefetch_entry_found)
+      if (nostate_prefetch_entry_found) {
         break;
+      }
     }
   }
 
-  if (!nostate_prefetch_entry_found)
+  if (!nostate_prefetch_entry_found) {
     return;
+  }
 
   ukm::builders::NoStatePrefetch builder(source_id);
   builder.SetPrefetchedRecently_PrefetchAge(

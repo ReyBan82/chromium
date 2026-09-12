@@ -7,13 +7,15 @@
 
 #include "base/dcheck_is_on.h"
 #include "third_party/blink/renderer/core/dom/node.h"
+#include "third_party/blink/renderer/core/dom/node_rare_data_field.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
 class HTMLSlotElement;
 
-class FlatTreeNodeData final : public GarbageCollected<FlatTreeNodeData> {
+class FlatTreeNodeData final : public GarbageCollected<FlatTreeNodeData>,
+                               public NodeRareDataField {
  public:
   FlatTreeNodeData() {}
   FlatTreeNodeData(const FlatTreeNodeData&) = delete;
@@ -24,7 +26,7 @@ class FlatTreeNodeData final : public GarbageCollected<FlatTreeNodeData> {
     next_in_assigned_nodes_ = nullptr;
   }
 
-  void Trace(Visitor*) const;
+  void Trace(Visitor*) const override;
 
 #if DCHECK_IS_ON()
   bool IsCleared() const {
@@ -47,12 +49,12 @@ class FlatTreeNodeData final : public GarbageCollected<FlatTreeNodeData> {
     manually_assigned_slot_ = slot;
   }
 
-  HTMLSlotElement* AssignedSlot() { return assigned_slot_; }
-  Node* PreviousInAssignedNodes() { return previous_in_assigned_nodes_; }
-  Node* NextInAssignedNodes() { return next_in_assigned_nodes_; }
+  HTMLSlotElement* AssignedSlot() { return assigned_slot_.Get(); }
+  Node* PreviousInAssignedNodes() { return previous_in_assigned_nodes_.Get(); }
+  Node* NextInAssignedNodes() { return next_in_assigned_nodes_.Get(); }
 
   HTMLSlotElement* ManuallyAssignedSlot() const {
-    return manually_assigned_slot_;
+    return manually_assigned_slot_.Get();
   }
 
   friend class FlatTreeTraversal;

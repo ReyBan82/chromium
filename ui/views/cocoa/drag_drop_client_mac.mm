@@ -9,6 +9,7 @@
 #include "base/strings/sys_string_conversions.h"
 #import "components/remote_cocoa/app_shim/bridged_content_view.h"
 #import "components/remote_cocoa/app_shim/native_widget_ns_window_bridge.h"
+#include "components/remote_cocoa/app_shim/window_move_loop.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
 #include "ui/base/dragdrop/mojom/drag_drop_types.mojom.h"
 #import "ui/base/dragdrop/os_exchange_data_provider_mac.h"
@@ -28,10 +29,15 @@ DragDropClientMac::DragDropClientMac(
 DragDropClientMac::~DragDropClientMac() = default;
 
 void DragDropClientMac::StartDragAndDrop(
-    View* view,
     std::unique_ptr<ui::OSExchangeData> data,
     int operation,
     ui::mojom::DragEventSource source) {
+  // A window move loop already owns the held mouse button; starting a dragging
+  // session here would interfere with it.
+  if (remote_cocoa::CocoaWindowMoveLoop::IsActive()) {
+    return;
+  }
+
   exchange_data_ = std::move(data);
   source_operation_ = operation;
   is_drag_source_ = true;
@@ -48,20 +54,18 @@ void DragDropClientMac::StartDragAndDrop(
   // Synthesize an event for dragging, since we can't be sure that
   // [NSApp currentEvent] will return a valid dragging event.
   NSWindow* window = bridge_->ns_window();
-  NSPoint position = [window mouseLocationOutsideOfEventStream];
-  NSTimeInterval event_time = [[NSApp currentEvent] timestamp];
-  NSEvent* event = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged
-                                      location:position
-                                 modifierFlags:0
-                                     timestamp:event_time
-                                  windowNumber:[window windowNumber]
-                                       context:nil
-                                   eventNumber:0
-                                    clickCount:1
-                                      pressure:1.0];
+  NSEvent* event =
+      [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged
+                         location:window.mouseLocationOutsideOfEventStream
+                    modifierFlags:0
+                        timestamp:NSApp.currentEvent.timestamp
+                     windowNumber:window.windowNumber
+                          context:nil
+                      eventNumber:0
+                       clickCount:1
+                         pressure:1.0];
 
-  NSImage* image = gfx::NSImageFromImageSkiaWithColorSpace(
-      provider_mac.GetDragImage(), base::mac::GetSRGBColorSpace());
+  NSImage* image = gfx::NSImageFromImageSkia(provider_mac.GetDragImage());
 
   DCHECK(!NSEqualSizes(image.size, NSZeroSize));
   NSArray<NSDraggingItem*>* drag_items = provider_mac.GetDraggingItems();
@@ -102,19 +106,28 @@ void DragDropClientMac::StartDragAndDrop(
   base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
   quit_closure_ = run_loop.QuitClosure();
   run_loop.Run();
+
+  // As of MacOS 26, dragging with a trackpad results in a leftover mouse-up
+  // event remaining in the queue when the drag session is terminated. This
+  // ensures any leftover message is pumped to avoid handling the "release"
+  // action as a click.
+  [NSApp nextEventMatchingMask:NSEventMaskLeftMouseUp
+                     untilDate:[NSDate distantPast]
+                        inMode:NSEventTrackingRunLoopMode
+                       dequeue:YES];
 }
 
 NSDragOperation DragDropClientMac::DragUpdate(id<NSDraggingInfo> sender) {
   if (!exchange_data_) {
     exchange_data_ = std::make_unique<OSExchangeData>(
         ui::OSExchangeDataProviderMac::CreateProviderWrappingPasteboard(
-            [sender draggingPasteboard]));
+            sender.draggingPasteboard));
     source_operation_ = ui::DragDropTypes::NSDragOperationToDragOperation(
-        [sender draggingSourceOperationMask]);
+        sender.draggingSourceOperationMask);
   }
-
   last_operation_ = drop_helper_.OnDragOver(
-      *exchange_data_, LocationInView([sender draggingLocation]),
+      *exchange_data_,
+      LocationInView(sender.draggingLocation, sender.draggingDestinationWindow),
       source_operation_);
   return ui::DragDropTypes::DragOperationToNSDragOperation(last_operation_);
 }
@@ -135,20 +148,34 @@ void DragDropClientMac::EndDrag() {
   is_drag_source_ = false;
 
   // Allow a test to invoke EndDrag() without spinning the nested run loop.
-  if (!quit_closure_.is_null())
+  if (!quit_closure_.is_null()) {
     std::move(quit_closure_).Run();
+  }
 }
 
 void DragDropClientMac::DragExit() {
   drop_helper_.OnDragExit();
-  if (!is_drag_source_)
+  if (!is_drag_source_) {
     exchange_data_.reset();
+  }
 }
 
 gfx::Point DragDropClientMac::LocationInView(NSPoint point) const {
-  NSRect content_rect = [bridge_->ns_window()
-      contentRectForFrameRect:[bridge_->ns_window() frame]];
+  NSRect content_rect =
+      [bridge_->ns_window() contentRectForFrameRect:bridge_->ns_window().frame];
   return gfx::Point(point.x, NSHeight(content_rect) - point.y);
 }
 
+// In immersive fullscreen, the `NSToolbarFullScreenWindow` hosts both the tab
+// strip and toolbar. Convert the point to the corresponding hosted view's
+// coordinates.
+gfx::Point DragDropClientMac::LocationInView(
+    NSPoint point,
+    NSWindow* destination_window) const {
+  if (remote_cocoa::IsNSToolbarFullScreenWindow(destination_window)) {
+    NSView* overlay_view = [destination_window.contentView hitTest:point];
+    point = [overlay_view convertPoint:point fromView:nil];
+  }
+  return LocationInView(point);
+}
 }  // namespace views

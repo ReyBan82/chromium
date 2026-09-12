@@ -5,8 +5,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAGMENT_DIRECTIVE_TEXT_FRAGMENT_FINDER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAGMENT_DIRECTIVE_TEXT_FRAGMENT_FINDER_H_
 
-#include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_ref.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/ephemeral_range.h"
 #include "third_party/blink/renderer/core/editing/finder/find_buffer_runner.h"
@@ -56,6 +56,10 @@ class CORE_EXPORT TextFragmentFinder
                      const TextFragmentSelector& selector,
                      Document* document,
                      FindBufferRunnerType runner_type);
+  TextFragmentFinder(Client& client,
+                     const TextFragmentSelector& selector,
+                     Range* range,
+                     FindBufferRunnerType runner_type);
   virtual ~TextFragmentFinder() = default;
 
   // Begins searching in the given top-level document.
@@ -70,8 +74,6 @@ class CORE_EXPORT TextFragmentFinder
   const TextFragmentSelector& GetSelector() const { return selector_; }
 
  protected:
-  friend class TextFragmentFinderTest;
-  FRIEND_TEST_ALL_PREFIXES(TextFragmentFinderTest, DOMMutation);
   void FindPrefix();
   void FindTextStart();
   void FindTextEnd();
@@ -88,12 +90,14 @@ class CORE_EXPORT TextFragmentFinder
   SelectorMatchStep step_ = kMatchPrefix;
 
  private:
+  friend class MockTextFragmentFinder;
+  friend class TextFragmentFinderTest;
+  FRIEND_TEST_ALL_PREFIXES(TextFragmentFinderTest, DOMMutation);
+
   void FindMatchFromPosition(PositionInFlatTree search_start);
 
   void OnFindMatchInRangeComplete(String search_text,
                                   RangeInFlatTree* range,
-                                  bool word_start_bounded,
-                                  bool word_end_bounded,
                                   const EphemeralRangeInFlatTree& match);
 
   void FindMatchInRange(String search_text,
@@ -115,9 +119,12 @@ class CORE_EXPORT TextFragmentFinder
 
   bool HasValidRanges();
 
-  Client& client_;
+  // Runs the match steps in a loop, advancing one step per iteration.
+  void DriveStateMachine();
+
+  const raw_ref<Client, UnprotectedInRelease | DanglingUntriaged> client_;
   const TextFragmentSelector selector_;
-  Member<Document> document_;
+  Member<Range> range_;
 
   // Start positions for the next text end |FindTask|, this is separate as the
   // search for end might move the position, which should be discarded.
@@ -144,6 +151,10 @@ class CORE_EXPORT TextFragmentFinder
   Member<RangeInFlatTree> match_range_;
   // Used for running FindBuffer tasks.
   Member<FindBufferRunner> find_buffer_runner_;
+  // Set by GoToStep. Stays false if a step awaits its async callback.
+  bool drive_next_step_ = false;
+  // Re-entrance guard for DriveStateMachine.
+  bool in_drive_loop_ = false;
 };
 
 }  // namespace blink

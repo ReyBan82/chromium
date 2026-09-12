@@ -7,7 +7,6 @@
 import argparse
 from collections import defaultdict
 import functools
-import jinja2
 import json
 import logging
 import os
@@ -15,6 +14,15 @@ import re
 import shutil
 import subprocess
 import sys
+
+# Appends third_party/ so that coverage_utils can import jinja2 from
+# third_party/.
+sys.path.append(
+  os.path.join(
+    os.path.dirname(__file__), os.path.pardir, os.path.pardir, 'third_party'
+  )
+)
+import jinja2
 
 # The default name of the html coverage report for a directory.
 DIRECTORY_COVERAGE_HTML_REPORT_NAME = os.extsep.join(['report', 'html'])
@@ -30,27 +38,20 @@ REPORT_DIR = 'coverage'
 class CoverageSummary(object):
   """Encapsulates coverage summary representation."""
 
-  def __init__(self,
-               regions_total=0,
-               regions_covered=0,
-               functions_total=0,
-               functions_covered=0,
-               lines_total=0,
-               lines_covered=0):
+  def __init__(
+    self,
+    regions_total=0,
+    regions_covered=0,
+    functions_total=0,
+    functions_covered=0,
+    lines_total=0,
+    lines_covered=0,
+  ):
     """Initializes CoverageSummary object."""
     self._summary = {
-        'regions': {
-            'total': regions_total,
-            'covered': regions_covered
-        },
-        'functions': {
-            'total': functions_total,
-            'covered': functions_covered
-        },
-        'lines': {
-            'total': lines_total,
-            'covered': lines_covered
-        }
+      'regions': {'total': regions_total, 'covered': regions_covered},
+      'functions': {'total': functions_total, 'covered': functions_covered},
+      'lines': {'total': lines_total, 'covered': lines_covered},
     }
 
   def Get(self):
@@ -62,7 +63,8 @@ class CoverageSummary(object):
     for feature in self._summary:
       self._summary[feature]['total'] += other_summary.Get()[feature]['total']
       self._summary[feature]['covered'] += other_summary.Get()[feature][
-          'covered']
+        'covered'
+      ]
 
 
 class CoverageReportHtmlGenerator(object):
@@ -83,9 +85,10 @@ class CoverageReportHtmlGenerator(object):
     css_file_name = os.extsep.join(['style', 'css'])
     css_absolute_path = os.path.join(output_dir, css_file_name)
     assert os.path.exists(css_absolute_path), (
-        'css file doesn\'t exit. Please make sure "llvm-cov show -format=html" '
-        'is called first, and the css file is generated at: "%s".' %
-        css_absolute_path)
+      'css file doesn\'t exit. Please make sure "llvm-cov show -format=html" '
+      'is called first, and the css file is generated at: "%s".'
+      % css_absolute_path
+    )
 
     self._css_absolute_path = css_absolute_path
     self._output_dir = output_dir
@@ -99,13 +102,15 @@ class CoverageReportHtmlGenerator(object):
     template_dir = os.path.join(source_dir, 'html_templates')
 
     jinja_env = jinja2.Environment(
-        loader=jinja2.FileSystemLoader(template_dir), trim_blocks=True)
+      loader=jinja2.FileSystemLoader(template_dir), trim_blocks=True
+    )
     self._header_template = jinja_env.get_template('header.html')
     self._table_template = jinja_env.get_template('table.html')
     self._footer_template = jinja_env.get_template('footer.html')
 
     self._style_overrides = open(
-        os.path.join(source_dir, 'static', 'css', 'style.css')).read()
+      os.path.join(source_dir, 'static', 'css', 'style.css')
+    ).read()
 
   def AddLinkToAnotherReport(self, html_report_path, name, summary):
     """Adds a link to another html report in this report.
@@ -115,29 +120,32 @@ class CoverageReportHtmlGenerator(object):
     # Use relative paths instead of absolute paths to make the generated reports
     # portable.
     html_report_relative_path = GetRelativePathToDirectoryOfFile(
-        html_report_path, self._output_path)
+      html_report_path, self._output_path
+    )
 
     table_entry = self._CreateTableEntryFromCoverageSummary(
-        summary, html_report_relative_path, name,
-        os.path.basename(html_report_path) ==
-        DIRECTORY_COVERAGE_HTML_REPORT_NAME)
+      summary,
+      html_report_relative_path,
+      name,
+      os.path.basename(html_report_path) == DIRECTORY_COVERAGE_HTML_REPORT_NAME,
+    )
     self._table_entries.append(table_entry)
 
   def CreateTotalsEntry(self, summary):
     """Creates an entry corresponds to the 'Totals' row in the html report."""
     self._total_entry = self._CreateTableEntryFromCoverageSummary(summary)
 
-  def _CreateTableEntryFromCoverageSummary(self,
-                                           summary,
-                                           href=None,
-                                           name=None,
-                                           is_dir=None):
+  def _CreateTableEntryFromCoverageSummary(
+    self, summary, href=None, name=None, is_dir=None
+  ):
     """Creates an entry to display in the html report."""
     assert (href is None and name is None and is_dir is None) or (
-        href is not None and name is not None and is_dir is not None), (
-            'The only scenario when href or name or is_dir can be None is when '
-            'creating an entry for the Totals row, and in that case, all three '
-            'attributes must be None.')
+      href is not None and name is not None and is_dir is not None
+    ), (
+      'The only scenario when href or name or is_dir can be None is when '
+      'creating an entry for the Totals row, and in that case, all three '
+      'attributes must be None.'
+    )
 
     entry = {}
     if href is not None:
@@ -152,15 +160,18 @@ class CoverageReportHtmlGenerator(object):
       if summary_dict[feature]['total'] == 0:
         percentage = 0.0
       else:
-        percentage = float(summary_dict[feature]
-                           ['covered']) / summary_dict[feature]['total'] * 100
+        percentage = (
+          float(summary_dict[feature]['covered'])
+          / summary_dict[feature]['total']
+          * 100
+        )
 
       color_class = self._GetColorClass(percentage)
       entry[feature] = {
-          'total': summary_dict[feature]['total'],
-          'covered': summary_dict[feature]['covered'],
-          'percentage': '{:6.2f}'.format(percentage),
-          'color_class': color_class
+        'total': summary_dict[feature]['total'],
+        'covered': summary_dict[feature]['covered'],
+        'percentage': '{:6.2f}'.format(percentage),
+        'color_class': color_class,
       }
 
     return entry
@@ -191,38 +202,44 @@ class CoverageReportHtmlGenerator(object):
       return -1 if left['name'] < right['name'] else 1
 
     self._table_entries = sorted(
-        self._table_entries, key=functools.cmp_to_key(EntryCmp))
+      self._table_entries, key=functools.cmp_to_key(EntryCmp)
+    )
 
     css_path = os.path.join(self._output_dir, os.extsep.join(['style', 'css']))
 
     directory_view_path = GetDirectoryViewPath(self._output_dir)
     directory_view_href = GetRelativePathToDirectoryOfFile(
-        directory_view_path, self._output_path)
+      directory_view_path, self._output_path
+    )
 
     component_view_href = None
     if not no_component_view:
       component_view_path = GetComponentViewPath(self._output_dir)
       component_view_href = GetRelativePathToDirectoryOfFile(
-          component_view_path, self._output_path)
+        component_view_path, self._output_path
+      )
 
     # File view is optional in the report.
     file_view_href = None
     if not no_file_view:
       file_view_path = GetFileViewPath(self._output_dir)
-      file_view_href = GetRelativePathToDirectoryOfFile(file_view_path,
-                                                        self._output_path)
+      file_view_href = GetRelativePathToDirectoryOfFile(
+        file_view_path, self._output_path
+      )
 
     html_header = self._header_template.render(
-        css_path=GetRelativePathToDirectoryOfFile(css_path, self._output_path),
-        directory_view_href=directory_view_href,
-        component_view_href=component_view_href,
-        file_view_href=file_view_href,
-        style_overrides=self._style_overrides)
+      css_path=GetRelativePathToDirectoryOfFile(css_path, self._output_path),
+      directory_view_href=directory_view_href,
+      component_view_href=component_view_href,
+      file_view_href=file_view_href,
+      style_overrides=self._style_overrides,
+    )
 
     html_table = self._table_template.render(
-        entries=self._table_entries,
-        total_entry=self._total_entry,
-        table_entry_type=self._table_entry_type)
+      entries=self._table_entries,
+      total_entry=self._total_entry,
+      table_entry_type=self._table_entry_type,
+    )
     html_footer = self._footer_template.render()
 
     if not os.path.exists(os.path.dirname(self._output_path)):
@@ -234,14 +251,16 @@ class CoverageReportHtmlGenerator(object):
 class CoverageReportPostProcessor(object):
   """Post processing of code coverage reports produced by llvm-cov."""
 
-  def __init__(self,
-               output_dir,
-               src_root_dir,
-               summary_data,
-               no_component_view,
-               no_file_view,
-               component_mappings={},
-               path_equivalence=None):
+  def __init__(
+    self,
+    output_dir,
+    src_root_dir,
+    summary_data,
+    no_component_view,
+    no_file_view,
+    component_mappings={},
+    path_equivalence=None,
+  ):
     """Initializes CoverageReportPostProcessor object."""
     # Caller provided parameters.
     self.output_dir = output_dir
@@ -276,7 +295,7 @@ class CoverageReportPostProcessor(object):
     # Path to the main HTML index file.
     self.html_index_path = GetHtmlIndexPath(self.output_dir)
 
-    self.path_map = None
+    self.path_map = []
     if path_equivalence:
 
       def _PreparePath(path):
@@ -286,8 +305,12 @@ class CoverageReportPostProcessor(object):
           path += os.sep
         return path
 
-      self.path_map = [_PreparePath(p) for p in path_equivalence.split(',')]
-      assert len(self.path_map) == 2, 'Path equivalence argument is incorrect.'
+      if isinstance(path_equivalence, str):
+        path_equivalence = [path_equivalence]
+      for pe in path_equivalence:
+        parts = [_PreparePath(p) for p in pe.split(',')]
+        assert len(parts) == 2, 'Path equivalence argument is incorrect.'
+        self.path_map.append(parts)
 
   def _ExtractComponentToDirectoriesMapping(self, component_mappings):
     """Initializes a mapping from components to directories."""
@@ -310,9 +333,17 @@ class CoverageReportPostProcessor(object):
 
   def _MapToLocal(self, path):
     """Maps a path from the coverage data to a local path."""
-    if not self.path_map:
-      return path
-    return path.replace(self.path_map[0], self.path_map[1], 1)
+    for mapping in self.path_map:
+      if path.startswith(mapping[0]):
+        return path.replace(mapping[0], mapping[1], 1)
+    return path
+
+  def _MapFromLocal(self, path):
+    """Maps a local path back to the path from the coverage data."""
+    for mapping in self.path_map:
+      if path.startswith(mapping[1]):
+        return path.replace(mapping[1], mapping[0], 1)
+    return path
 
   def CalculatePerDirectoryCoverageSummary(self, per_file_coverage_summary):
     """Calculates per directory coverage summary."""
@@ -333,8 +364,9 @@ class CoverageReportPostProcessor(object):
     logging.debug('Finished calculating per-directory coverage summary.')
     return per_directory_coverage_summary
 
-  def CalculatePerComponentCoverageSummary(self,
-                                           per_directory_coverage_summary):
+  def CalculatePerComponentCoverageSummary(
+    self, per_directory_coverage_summary
+  ):
     """Calculates per component coverage summary."""
     logging.debug('Calculating per-component coverage summary.')
     per_component_coverage_summary = defaultdict(lambda: CoverageSummary())
@@ -344,52 +376,67 @@ class CoverageReportPostProcessor(object):
         absolute_directory_path = GetFullPath(directory)
         if absolute_directory_path in per_directory_coverage_summary:
           per_component_coverage_summary[component].AddSummary(
-              per_directory_coverage_summary[absolute_directory_path])
+            per_directory_coverage_summary[absolute_directory_path]
+          )
 
     logging.debug('Finished calculating per-component coverage summary.')
     return per_component_coverage_summary
 
-  def GeneratePerComponentCoverageInHtml(self, per_component_coverage_summary,
-                                         per_directory_coverage_summary):
+  def GeneratePerComponentCoverageInHtml(
+    self, per_component_coverage_summary, per_directory_coverage_summary
+  ):
     """Generates per-component coverage reports in html."""
     logging.debug('Writing per-component coverage html reports.')
     for component in per_component_coverage_summary:
-      self.GenerateCoverageInHtmlForComponent(component,
-                                              per_component_coverage_summary,
-                                              per_directory_coverage_summary)
+      self.GenerateCoverageInHtmlForComponent(
+        component,
+        per_component_coverage_summary,
+        per_directory_coverage_summary,
+      )
     logging.debug('Finished writing per-component coverage html reports.')
 
   def GenerateComponentViewHtmlIndexFile(self, per_component_coverage_summary):
     """Generates the html index file for component view."""
     component_view_index_file_path = self.component_view_path
-    logging.debug('Generating component view html index file as: "%s".',
-                  component_view_index_file_path)
+    logging.debug(
+      'Generating component view html index file as: "%s".',
+      component_view_index_file_path,
+    )
     html_generator = CoverageReportHtmlGenerator(
-        self.output_dir, component_view_index_file_path, 'Component')
+      self.output_dir, component_view_index_file_path, 'Component'
+    )
     for component in per_component_coverage_summary:
       html_generator.AddLinkToAnotherReport(
-          self.GetCoverageHtmlReportPathForComponent(component), component,
-          per_component_coverage_summary[component])
+        self.GetCoverageHtmlReportPathForComponent(component),
+        component,
+        per_component_coverage_summary[component],
+      )
 
     # Do not create a totals row for the component view as the value is
     # incorrect due to failure to account for UNKNOWN component and some paths
     # belonging to multiple components.
-    html_generator.WriteHtmlCoverageReport(self.no_component_view,
-                                           self.no_file_view)
+    html_generator.WriteHtmlCoverageReport(
+      self.no_component_view, self.no_file_view
+    )
     logging.debug('Finished generating component view html index file.')
 
-  def GenerateCoverageInHtmlForComponent(self, component_name,
-                                         per_component_coverage_summary,
-                                         per_directory_coverage_summary):
+  def GenerateCoverageInHtmlForComponent(
+    self,
+    component_name,
+    per_component_coverage_summary,
+    per_directory_coverage_summary,
+  ):
     """Generates coverage html report for a component."""
     component_html_report_path = self.GetCoverageHtmlReportPathForComponent(
-        component_name)
+      component_name
+    )
     component_html_report_dir = os.path.dirname(component_html_report_path)
     if not os.path.exists(component_html_report_dir):
       os.makedirs(component_html_report_dir)
 
     html_generator = CoverageReportHtmlGenerator(
-        self.output_dir, component_html_report_path, 'Path')
+      self.output_dir, component_html_report_path, 'Path'
+    )
 
     for dir_path in self.component_to_directories[component_name]:
       dir_absolute_path = GetFullPath(dir_path)
@@ -399,14 +446,17 @@ class CoverageReportPostProcessor(object):
         continue
 
       html_generator.AddLinkToAnotherReport(
-          self.GetCoverageHtmlReportPathForDirectory(dir_path),
-          os.path.relpath(dir_path, self.src_root_dir),
-          per_directory_coverage_summary[dir_absolute_path])
+        self.GetCoverageHtmlReportPathForDirectory(dir_path),
+        os.path.relpath(dir_path, self.src_root_dir),
+        per_directory_coverage_summary[dir_absolute_path],
+      )
 
     html_generator.CreateTotalsEntry(
-        per_component_coverage_summary[component_name])
-    html_generator.WriteHtmlCoverageReport(self.no_component_view,
-                                           self.no_file_view)
+      per_component_coverage_summary[component_name]
+    )
+    html_generator.WriteHtmlCoverageReport(
+      self.no_component_view, self.no_file_view
+    )
 
   def GetCoverageHtmlReportPathForComponent(self, component_name):
     """Given a component, returns the corresponding html report path."""
@@ -416,18 +466,23 @@ class CoverageReportPostProcessor(object):
 
   def GetCoverageHtmlReportPathForDirectory(self, dir_path):
     """Given a directory path, returns the corresponding html report path."""
-    assert os.path.isdir(
-        self._MapToLocal(dir_path)), '"%s" is not a directory.' % dir_path
+    assert os.path.isdir(self._MapToLocal(dir_path)), (
+      '"%s" is not a directory.' % dir_path
+    )
     html_report_path = os.path.join(
-        GetFullPath(dir_path), DIRECTORY_COVERAGE_HTML_REPORT_NAME)
+      GetFullPath(dir_path), DIRECTORY_COVERAGE_HTML_REPORT_NAME
+    )
 
     return self.CombineAbsolutePaths(self.report_root_dir, html_report_path)
 
   def GetCoverageHtmlReportPathForFile(self, file_path):
     """Given a file path, returns the corresponding html report path."""
-    assert os.path.isfile(
-        self._MapToLocal(file_path)), '"%s" is not a file.' % file_path
-    html_report_path = os.extsep.join([GetFullPath(file_path), 'html'])
+    assert os.path.isfile(self._MapToLocal(file_path)), (
+      '"%s" is not a file.' % file_path
+    )
+
+    unmapped_file_path = self._MapFromLocal(file_path)
+    html_report_path = os.extsep.join([GetFullPath(unmapped_file_path), 'html'])
 
     return self.CombineAbsolutePaths(self.html_file_root_dir, html_report_path)
 
@@ -441,25 +496,34 @@ class CoverageReportPostProcessor(object):
     # paths and os.path.join ignores the first path.
     return path1 + path2
 
-  def GenerateFileViewHtmlIndexFile(self, per_file_coverage_summary,
-                                    file_view_index_file_path):
+  def GenerateFileViewHtmlIndexFile(
+    self, per_file_coverage_summary, file_view_index_file_path
+  ):
     """Generates html index file for file view."""
-    logging.debug('Generating file view html index file as: "%s".',
-                  file_view_index_file_path)
+    logging.debug(
+      'Generating file view html index file as: "%s".',
+      file_view_index_file_path,
+    )
     html_generator = CoverageReportHtmlGenerator(
-        self.output_dir, file_view_index_file_path, 'Path')
+      self.output_dir, file_view_index_file_path, 'Path'
+    )
     totals_coverage_summary = CoverageSummary()
 
     for file_path in per_file_coverage_summary:
+      if not os.path.isfile(self._MapToLocal(file_path)):
+        logging.warning('%s is not a file.', file_path)
+        continue
       totals_coverage_summary.AddSummary(per_file_coverage_summary[file_path])
       html_generator.AddLinkToAnotherReport(
-          self.GetCoverageHtmlReportPathForFile(file_path),
-          os.path.relpath(file_path, self.src_root_dir),
-          per_file_coverage_summary[file_path])
+        self.GetCoverageHtmlReportPathForFile(file_path),
+        os.path.relpath(file_path, self.src_root_dir),
+        per_file_coverage_summary[file_path],
+      )
 
     html_generator.CreateTotalsEntry(totals_coverage_summary)
-    html_generator.WriteHtmlCoverageReport(self.no_component_view,
-                                           self.no_file_view)
+    html_generator.WriteHtmlCoverageReport(
+      self.no_component_view, self.no_file_view
+    )
     logging.debug('Finished generating file view html index file.')
 
   def GeneratePerFileCoverageSummary(self):
@@ -468,67 +532,80 @@ class CoverageReportPostProcessor(object):
 
     per_file_coverage_summary = {}
     for file_coverage_data in files_coverage_data:
-      file_path = os.path.normpath(file_coverage_data['filename'])
+      file_path = self._MapToLocal(
+        os.path.normpath(file_coverage_data['filename'])
+      )
       assert file_path.startswith(self.src_root_dir), (
-          'File path "%s" in coverage summary is outside source checkout.' %
-          file_path)
+        'File path "%s" in coverage summary is outside source checkout.'
+        % file_path
+      )
 
       summary = file_coverage_data['summary']
       if summary['lines']['count'] == 0:
         continue
 
       per_file_coverage_summary[file_path] = CoverageSummary(
-          regions_total=summary['regions']['count'],
-          regions_covered=summary['regions']['covered'],
-          functions_total=summary['functions']['count'],
-          functions_covered=summary['functions']['covered'],
-          lines_total=summary['lines']['count'],
-          lines_covered=summary['lines']['covered'])
+        regions_total=summary['regions']['count'],
+        regions_covered=summary['regions']['covered'],
+        functions_total=summary['functions']['count'],
+        functions_covered=summary['functions']['covered'],
+        lines_total=summary['lines']['count'],
+        lines_covered=summary['lines']['covered'],
+      )
 
     logging.debug('Finished generating per-file code coverage summary.')
     return per_file_coverage_summary
 
-  def GeneratePerDirectoryCoverageInHtml(self, per_directory_coverage_summary,
-                                         per_file_coverage_summary):
+  def GeneratePerDirectoryCoverageInHtml(
+    self, per_directory_coverage_summary, per_file_coverage_summary
+  ):
     """Generates per directory coverage breakdown in html."""
     logging.debug('Writing per-directory coverage html reports.')
     for dir_path in per_directory_coverage_summary:
       self.GenerateCoverageInHtmlForDirectory(
-          dir_path, per_directory_coverage_summary, per_file_coverage_summary)
+        dir_path, per_directory_coverage_summary, per_file_coverage_summary
+      )
 
     logging.debug('Finished writing per-directory coverage html reports.')
 
-  def GenerateCoverageInHtmlForDirectory(self, dir_path,
-                                         per_directory_coverage_summary,
-                                         per_file_coverage_summary):
+  def GenerateCoverageInHtmlForDirectory(
+    self, dir_path, per_directory_coverage_summary, per_file_coverage_summary
+  ):
     """Generates coverage html report for a single directory."""
     html_generator = CoverageReportHtmlGenerator(
-        self.output_dir, self.GetCoverageHtmlReportPathForDirectory(dir_path),
-        'Path')
+      self.output_dir,
+      self.GetCoverageHtmlReportPathForDirectory(dir_path),
+      'Path',
+    )
 
     for entry_name in os.listdir(self._MapToLocal(dir_path)):
       entry_path = os.path.normpath(os.path.join(dir_path, entry_name))
 
       if entry_path in per_file_coverage_summary:
         entry_html_report_path = self.GetCoverageHtmlReportPathForFile(
-            entry_path)
+          entry_path
+        )
         entry_coverage_summary = per_file_coverage_summary[entry_path]
       elif entry_path in per_directory_coverage_summary:
         entry_html_report_path = self.GetCoverageHtmlReportPathForDirectory(
-            entry_path)
+          entry_path
+        )
         entry_coverage_summary = per_directory_coverage_summary[entry_path]
       else:
         # Any file without executable lines shouldn't be included into the
         # report. For example, OWNER and README.md files.
         continue
 
-      html_generator.AddLinkToAnotherReport(entry_html_report_path,
-                                            os.path.basename(entry_path),
-                                            entry_coverage_summary)
+      html_generator.AddLinkToAnotherReport(
+        entry_html_report_path,
+        os.path.basename(entry_path),
+        entry_coverage_summary,
+      )
 
     html_generator.CreateTotalsEntry(per_directory_coverage_summary[dir_path])
-    html_generator.WriteHtmlCoverageReport(self.no_component_view,
-                                           self.no_file_view)
+    html_generator.WriteHtmlCoverageReport(
+      self.no_component_view, self.no_file_view
+    )
 
   def GenerateDirectoryViewHtmlIndexFile(self):
     """Generates the html index file for directory view.
@@ -538,12 +615,16 @@ class CoverageReportPostProcessor(object):
     structural consistency with other views.
     """
     directory_view_index_file_path = self.directory_view_path
-    logging.debug('Generating directory view html index file as: "%s".',
-                  directory_view_index_file_path)
+    logging.debug(
+      'Generating directory view html index file as: "%s".',
+      directory_view_index_file_path,
+    )
     src_root_html_report_path = self.GetCoverageHtmlReportPathForDirectory(
-        self.src_root_dir)
-    WriteRedirectHtmlFile(directory_view_index_file_path,
-                          src_root_html_report_path)
+      self.src_root_dir
+    )
+    WriteRedirectHtmlFile(
+      directory_view_index_file_path, src_root_html_report_path
+    )
     logging.debug('Finished generating directory view html index file.')
 
   def OverwriteHtmlReportsIndexFile(self):
@@ -563,23 +644,29 @@ class CoverageReportPostProcessor(object):
     per_file_coverage_summary = self.GeneratePerFileCoverageSummary()
 
     if not self.no_file_view:
-      self.GenerateFileViewHtmlIndexFile(per_file_coverage_summary,
-                                         self.file_view_path)
+      self.GenerateFileViewHtmlIndexFile(
+        per_file_coverage_summary, self.file_view_path
+      )
 
     per_directory_coverage_summary = self.CalculatePerDirectoryCoverageSummary(
-        per_file_coverage_summary)
+      per_file_coverage_summary
+    )
 
-    self.GeneratePerDirectoryCoverageInHtml(per_directory_coverage_summary,
-                                            per_file_coverage_summary)
+    self.GeneratePerDirectoryCoverageInHtml(
+      per_directory_coverage_summary, per_file_coverage_summary
+    )
 
     self.GenerateDirectoryViewHtmlIndexFile()
 
     if not self.no_component_view:
       per_component_coverage_summary = (
-          self.CalculatePerComponentCoverageSummary(
-              per_directory_coverage_summary))
-      self.GeneratePerComponentCoverageInHtml(per_component_coverage_summary,
-                                              per_directory_coverage_summary)
+        self.CalculatePerComponentCoverageSummary(
+          per_directory_coverage_summary
+        )
+      )
+      self.GeneratePerComponentCoverageInHtml(
+        per_component_coverage_summary, per_directory_coverage_summary
+      )
       self.GenerateComponentViewHtmlIndexFile(per_component_coverage_summary)
 
     # The default index file is generated only for the list of source files,
@@ -588,8 +675,9 @@ class CoverageReportPostProcessor(object):
     self.CleanUpOutputDir()
 
     html_index_file_path = 'file://' + GetFullPath(self.html_index_path)
-    logging.info('Index file for html report is generated as: "%s".',
-                 html_index_file_path)
+    logging.info(
+      'Index file for html report is generated as: "%s".', html_index_file_path
+    )
 
 
 def ConfigureLogging(verbose=False, log_file=None):
@@ -602,7 +690,8 @@ def ConfigureLogging(verbose=False, log_file=None):
 def GetComponentViewPath(output_dir):
   """Path to the HTML file for the component view."""
   return os.path.join(
-      GetCoverageReportRootDirPath(output_dir), COMPONENT_VIEW_INDEX_FILE)
+    GetCoverageReportRootDirPath(output_dir), COMPONENT_VIEW_INDEX_FILE
+  )
 
 
 def GetCoverageReportRootDirPath(output_dir):
@@ -611,20 +700,22 @@ def GetCoverageReportRootDirPath(output_dir):
 
 
 def GetHtmlFileRootDirPath(output_dir):
-  """The directory that contains llvm-cov generated coverage html reports. """
+  """The directory that contains llvm-cov generated coverage html reports."""
   return os.path.join(output_dir, REPORT_DIR)
 
 
 def GetDirectoryViewPath(output_dir):
   """Path to the HTML file for the directory view."""
   return os.path.join(
-      GetCoverageReportRootDirPath(output_dir), DIRECTORY_VIEW_INDEX_FILE)
+    GetCoverageReportRootDirPath(output_dir), DIRECTORY_VIEW_INDEX_FILE
+  )
 
 
 def GetFileViewPath(output_dir):
   """Path to the HTML file for the file view."""
   return os.path.join(
-      GetCoverageReportRootDirPath(output_dir), FILE_VIEW_INDEX_FILE)
+    GetCoverageReportRootDirPath(output_dir), FILE_VIEW_INDEX_FILE
+  )
 
 
 def GetHtmlIndexPath(output_dir):
@@ -658,8 +749,9 @@ def GetRelativePathToDirectoryOfFile(target_path, base_path):
   os.path.relpath directly.
   """
   assert os.path.dirname(base_path) != base_path, (
-      'Base path: "%s" is a directory, please call os.path.relpath directly.' %
-      base_path)
+    'Base path: "%s" is a directory, please call os.path.relpath directly.'
+    % base_path
+  )
   base_dir = os.path.dirname(base_path)
   return os.path.relpath(target_path, base_dir)
 
@@ -673,8 +765,9 @@ def GetSharedLibraries(binary_paths, build_dir, otool_path):
 
   if sys.platform.startswith('linux'):
     cmd.extend(['ldd'])
-    shared_library_re = re.compile(r'.*\.so[.0-9]*\s=>\s(.*' + build_dir +
-                                   r'.*\.so[.0-9]*)\s.*')
+    shared_library_re = re.compile(
+      r'.*\.so[.0-9]*\s=>\s(.*' + build_dir + r'.*\.so[.0-9]*)\s.*'
+    )
   elif sys.platform.startswith('darwin'):
     otool = otool_path if otool_path else 'otool'
     cmd.extend([otool, '-L'])
@@ -700,9 +793,11 @@ def GetSharedLibraries(binary_paths, build_dir, otool_path):
     if shared_library_path in shared_libraries:
       continue
 
-    assert os.path.exists(shared_library_path), ('Shared library "%s" used by '
-                                                 'the given target(s) does not '
-                                                 'exist.' % shared_library_path)
+    assert os.path.exists(shared_library_path), (
+      'Shared library "%s" used by '
+      'the given target(s) does not '
+      'exist.' % shared_library_path
+    )
     with open(shared_library_path, 'rb') as f:
       data = f.read()
 
@@ -710,8 +805,9 @@ def GetSharedLibraries(binary_paths, build_dir, otool_path):
     if b'__llvm_cov' in data:
       shared_libraries.append(shared_library_path)
 
-  logging.debug('Found shared libraries (%d): %s.', len(shared_libraries),
-                shared_libraries)
+  logging.debug(
+    'Found shared libraries (%d): %s.', len(shared_libraries), shared_libraries
+  )
   logging.info('Finished finding shared libraries for targets.')
   return shared_libraries
 
@@ -719,15 +815,19 @@ def GetSharedLibraries(binary_paths, build_dir, otool_path):
 def WriteRedirectHtmlFile(from_html_path, to_html_path):
   """Writes a html file that redirects to another html file."""
   to_html_relative_path = GetRelativePathToDirectoryOfFile(
-      to_html_path, from_html_path)
-  content = ("""
+    to_html_path, from_html_path
+  )
+  content = (
+    """
     <!DOCTYPE html>
     <html>
       <head>
         <!-- HTML meta refresh URL redirection -->
         <meta http-equiv="refresh" content="0; url=%s">
       </head>
-    </html>""" % to_html_relative_path)
+    </html>"""
+    % to_html_relative_path
+  )
   with open(from_html_path, 'w') as f:
     f.write(content)
 
@@ -744,7 +844,8 @@ def _CmdSharedLibraries(args):
 
   # Print output in the format that can be passed to llvm-cov tool.
   output = ' '.join(
-      '-object=%s' % os.path.normpath(path) for path in library_paths)
+    '-object=%s' % os.path.normpath(path) for path in library_paths
+  )
   print(output)
   return 0
 
@@ -755,48 +856,59 @@ def _CmdPostProcess(args):
     summary_data = f.read()
 
   processor = CoverageReportPostProcessor(
-      args.output_dir,
-      args.src_root_dir,
-      summary_data,
-      no_component_view=True,
-      no_file_view=False,
-      path_equivalence=args.path_equivalence)
+    args.output_dir,
+    args.src_root_dir,
+    summary_data,
+    no_component_view=True,
+    no_file_view=False,
+    path_equivalence=args.path_equivalence,
+  )
   processor.PrepareHtmlReport()
 
 
 def Main():
   parser = argparse.ArgumentParser(
-      'coverage_utils', description='Code coverage utils.')
+    'coverage_utils', description='Code coverage utils.'
+  )
   parser.add_argument(
-      '-v',
-      '--verbose',
-      action='store_true',
-      help='Prints additional debug output.')
+    '-v',
+    '--verbose',
+    action='store_true',
+    help='Prints additional debug output.',
+  )
 
   subparsers = parser.add_subparsers(dest='command')
 
   shared_libs_parser = subparsers.add_parser(
-      'shared_libs', help='Detect shared libraries.')
+    'shared_libs', help='Detect shared libraries.'
+  )
   shared_libs_parser.add_argument(
-      '-build-dir', help='Path to the build dir.', required=True)
+    '-build-dir', help='Path to the build dir.', required=True
+  )
   shared_libs_parser.add_argument(
-      '-object',
-      action='append',
-      help='Path to the binary using shared libs.',
-      required=True)
+    '-object',
+    action='append',
+    help='Path to the binary using shared libs.',
+    required=True,
+  )
 
   post_processing_parser = subparsers.add_parser(
-      'post_process', help='Post process a report.')
+    'post_process', help='Post process a report.'
+  )
   post_processing_parser.add_argument(
-      '-output-dir', help='Path to the report dir.', required=True)
+    '-output-dir', help='Path to the report dir.', required=True
+  )
   post_processing_parser.add_argument(
-      '-src-root-dir', help='Path to the src root dir.', required=True)
+    '-src-root-dir', help='Path to the src root dir.', required=True
+  )
   post_processing_parser.add_argument(
-      '-summary-file', help='Path to the summary file.', required=True)
+    '-summary-file', help='Path to the summary file.', required=True
+  )
   post_processing_parser.add_argument(
-      '-path-equivalence',
-      help='Map the paths in the coverage data to local '
-      'source files path (=<from>,<to>)')
+    '-path-equivalence',
+    help='Map the paths in the coverage data to local '
+    'source files path (=<from>,<to>)',
+  )
 
   args = parser.parse_args()
   ConfigureLogging(args.verbose)

@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ui/javascript_dialogs/chrome_javascript_app_modal_dialog_view_factory.h"
+#include <memory>
 
 #include "build/build_config.h"
 #include "chrome/browser/ui/blocked_content/popunder_preventer.h"
+#include "chrome/browser/ui/javascript_dialogs/chrome_javascript_app_modal_dialog_view_factory.h"
 #include "chrome/browser/ui/views/javascript_app_modal_event_blocker.h"
 #include "components/constrained_window/constrained_window_views.h"
 #include "components/javascript_dialogs/app_modal_dialog_controller.h"
@@ -14,7 +15,7 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "ui/display/screen.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/widget/widget.h"
 
 #if BUILDFLAG(IS_OZONE)
@@ -42,9 +43,11 @@ class ChromeJavaScriptAppModalDialogViews
     : public javascript_dialogs::AppModalDialogViewViews {
  public:
   explicit ChromeJavaScriptAppModalDialogViews(
-      javascript_dialogs::AppModalDialogController* parent)
-      : javascript_dialogs::AppModalDialogViewViews(parent),
-        popunder_preventer_(parent->web_contents()) {}
+      std::unique_ptr<javascript_dialogs::AppModalDialogController> controller)
+      : javascript_dialogs::AppModalDialogViewViews(std::move(controller)) {
+    popunder_preventer_ =
+        std::make_unique<PopunderPreventer>(this->controller()->web_contents());
+  }
   ChromeJavaScriptAppModalDialogViews(
       const ChromeJavaScriptAppModalDialogViews&) = delete;
   ChromeJavaScriptAppModalDialogViews& operator=(
@@ -72,13 +75,13 @@ class ChromeJavaScriptAppModalDialogViews
   // Blocks events to other browser windows while the dialog is open.
   std::unique_ptr<JavascriptAppModalEventBlocker> event_blocker_;
 
-  PopunderPreventer popunder_preventer_;
+  std::unique_ptr<PopunderPreventer> popunder_preventer_;
 };
 
 void AdjustWidgetBoundsIfOffscreen(views::Widget* widget) {
   gfx::Rect widget_bounds = widget->GetWindowBoundsInScreen();
   gfx::Rect screen_rect =
-      display::Screen::GetScreen()
+      display::Screen::Get()
           ->GetDisplayNearestPoint(widget_bounds.CenterPoint())
           .work_area();
 
@@ -89,13 +92,12 @@ void AdjustWidgetBoundsIfOffscreen(views::Widget* widget) {
 }
 
 javascript_dialogs::AppModalDialogView* CreateViewsJavaScriptDialog(
-    javascript_dialogs::AppModalDialogController* controller) {
+    std::unique_ptr<javascript_dialogs::AppModalDialogController> controller) {
+  content::WebContents* web_contents = controller->web_contents();
   javascript_dialogs::AppModalDialogViewViews* dialog =
-      new ChromeJavaScriptAppModalDialogViews(controller);
-  controller->web_contents()->GetDelegate()->ActivateContents(
-      controller->web_contents());
-  gfx::NativeWindow parent_window =
-      controller->web_contents()->GetTopLevelNativeWindow();
+      new ChromeJavaScriptAppModalDialogViews(std::move(controller));
+  web_contents->GetDelegate()->ActivateContents(web_contents);
+  gfx::NativeWindow parent_window = web_contents->GetTopLevelNativeWindow();
 #if defined(USE_AURA)
   if (!parent_window->GetRootWindow()) {
     // When we are part of a WebContents that isn't actually being displayed

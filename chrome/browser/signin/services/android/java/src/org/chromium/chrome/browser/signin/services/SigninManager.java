@@ -4,40 +4,34 @@
 
 package org.chromium.chrome.browser.signin.services;
 
-import android.accounts.Account;
-
 import androidx.annotation.MainThread;
-import androidx.annotation.Nullable;
 
 import org.chromium.base.Callback;
-import org.chromium.components.signin.base.CoreAccountId;
+import org.chromium.base.CallbackUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.components.signin.base.CoreAccountInfo;
 import org.chromium.components.signin.identitymanager.IdentityManager;
 import org.chromium.components.signin.metrics.SigninAccessPoint;
 import org.chromium.components.signin.metrics.SignoutReason;
 
 /**
  * Android wrapper of the SigninManager which provides access from the Java layer.
- * <p/>
- * This class handles common paths during the sign-in and sign-out flows.
- * <p/>
- * Only usable from the UI thread as the native SigninManager requires its access to be in the
- * UI thread.
- * <p/>
- * See chrome/browser/android/signin/signin_manager_android.h for more details.
+ *
+ * <p>This class handles common paths during the sign-in and sign-out flows.
+ *
+ * <p>Only usable from the UI thread as the native SigninManager requires its access to be in the UI
+ * thread.
+ *
+ * <p>See chrome/browser/android/signin/signin_manager_android.h for more details.
  */
+@NullMarked
 public interface SigninManager {
-    /**
-     * A SignInStateObserver is notified when the user signs in to or out of Chrome.
-     */
+    /** A SignInStateObserver is notified when the user signs in to or out of Chrome. */
     interface SignInStateObserver {
-        /**
-         * Invoked when the user has signed in to Chrome.
-         */
+        /** Invoked when the user has signed in to Chrome. */
         default void onSignedIn() {}
 
-        /**
-         * Invoked when the user has signed out of Chrome.
-         */
+        /** Invoked when the user has signed out of Chrome. */
         default void onSignedOut() {}
 
         /**
@@ -49,39 +43,22 @@ public interface SigninManager {
         default void onSignOutAllowedChanged() {}
     }
 
-    /**
-     * Callbacks for the sign-in flow.
-     */
+    /** Callbacks for the sign-in flow. */
     interface SignInCallback {
         /**
-         * Invoked after sign-in is completed successfully.
+         * Invoked after sign-in is completed successfully. Sign-in preferences may not be committed
+         * yet.
          */
-        void onSignInComplete();
+        default void onSignInComplete() {}
 
-        /**
-         * Invoked if the sign-in processes does not complete for any reason.
-         */
-        void onSignInAborted();
+        /** Invoked after sign-in preferences are committed. */
+        default void onPrefsCommitted() {}
+
+        /** Invoked if the sign-in processes does not complete for any reason. */
+        default void onSignInAborted() {}
     }
 
-    /**
-     * Callbacks for the sign-out flow.
-     */
-    interface SignOutCallback {
-        /**
-         * Called before the data wiping is started.
-         */
-        default void preWipeData() {}
-
-        /**
-         * Called after the data is wiped.
-         */
-        void signOutComplete();
-    }
-
-    /**
-     * Extracts the domain name of a given account's email.
-     */
+    /** Extracts the domain name of a given account's email. */
     String extractDomainName(String accountEmail);
 
     /**
@@ -90,30 +67,30 @@ public interface SigninManager {
     IdentityManager getIdentityManager();
 
     /**
-     * Returns true if sign in can be started now.
+     * Returns true if sign in flow can be started right away, meaning that:
+     *
+     * <p>1. No sign-in is in progress; 2. No account is already signed-in; 3. Sign-in is not
+     * disabled manually via the settings toggle; 4. Sign-in is not disabled by policy; 5. Google
+     * Play Services are available.
      */
     boolean isSigninAllowed();
 
     /**
-     * Returns true if sync opt in can be started now.
+     * Returns whether the user can sign-in (maybe after an update to Google Play services).
+     *
+     * @param requireUpdatedPlayServices Indicates whether an updated version of play services is
+     *     required or not.
      */
-    boolean isSyncOptInAllowed();
+    boolean isSigninSupported(boolean requireUpdatedPlayServices);
 
     /**
-     * Returns true if signin is disabled by policy.
+     * Returns true if switching to the given account is allowed, meaning that:
+     *
+     * <p>1. No sign-in is in progress; 2. Sign-in is not disabled manually via the settings toggle;
+     * 3. Sign-in is not disabled by policy; 4. Google Play Services are available; 5. Sign out is
+     * allowed.
      */
-    boolean isSigninDisabledByPolicy();
-
-    /**
-     * @return Whether true if the current user is not demo user and the user has a reasonable
-     *         Google Play Services installed.
-     */
-    boolean isSigninSupported();
-
-    /**
-     * @return Whether force sign-in is enabled by policy.
-     */
-    boolean isForceSigninEnabled();
+    boolean isSwitchAccountAllowed();
 
     /**
      * Adds a {@link SignInStateObserver} to be notified when the user signs in or out of Chrome.
@@ -128,34 +105,29 @@ public interface SigninManager {
     /**
      * Starts the sign-in flow, and executes the callback when finished.
      *
-     * The sign-in flow goes through the following steps:
+     * <p>The sign-in flow goes through the following steps:
      *
-     *   - Wait for AccountTrackerService to be seeded.
-     *   - Complete sign-in with the native IdentityManager.
-     *   - Call the callback if provided.
+     * <p>- Wait for accounts to be seeded. - Complete sign-in with the native IdentityManager. -
+     * Call the callback if provided.
      *
-     * @param account The account to sign in to.
+     * @param coreAccountInfo The {@link CoreAccountInfo} to sign in to.
+     * @param accessPoint {@link SigninAccessPoint} that initiated the sign-in flow.
      * @param callback Optional callback for when the sign-in process is finished.
      */
-    void signin(Account account, @Nullable SignInCallback callback);
+    void signin(
+            CoreAccountInfo coreAccountInfo,
+            @SigninAccessPoint int accessPoint,
+            SignInCallback callback);
 
     /**
-     * Starts the sign-in flow, and executes the callback when finished.
+     * This method is used in existing native tests to test the old sync consent flow. New tests
+     * should not use this method.
      *
-     * The sign-in flow goes through the following steps:
-     *
-     *   - Wait for AccountTrackerService to be seeded.
-     *   - Wait for policy to be checked for the account.
-     *   - If managed, wait for the policy to be fetched.
-     *   - Complete sign-in with the native IdentityManager.
-     *   - Call the callback if provided.
-     *
+     * @param coreAccountInfo The {@link CoreAccountInfo} to sign in to.
      * @param accessPoint {@link SigninAccessPoint} that initiated the sign-in flow.
-     * @param account The account to sign in to.
-     * @param callback Optional callback for when the sign-in process is finished.
      */
-    void signinAndEnableSync(
-            @SigninAccessPoint int accessPoint, Account account, @Nullable SignInCallback callback);
+    @Deprecated
+    void turnOnSyncForTesting(CoreAccountInfo coreAccountInfo, @SigninAccessPoint int accessPoint);
 
     /**
      * Schedules the runnable to be invoked after all sign-in, sign-out, or sync data wipe operation
@@ -166,71 +138,67 @@ public interface SigninManager {
     void runAfterOperationInProgress(Runnable runnable);
 
     /**
-     * Revokes sync consent (which disables the sync feature). This method should only be called
-     * for child accounts.
-     *
-     * @param signoutSource describes the event driving disabling sync (e.g.
-     *         {@link SignoutReason.USER_CLICKED_TURN_OFF_SYNC_SETTINGS}).
-     * @param signOutCallback Callback to notify about progress.
-     * @param forceWipeUserData Whether user selected to wipe all device data.
-     */
-    void revokeSyncConsent(@SignoutReason int signoutSource, SignOutCallback signOutCallback,
-            boolean forceWipeUserData);
-
-    /**
-     * Returns true if sign out can be started now.
+     * Returns true if sign out can be started now. Sign out can start if there is no sign in/out in
+     * progress and there is a signed-in account.
      */
     boolean isSignOutAllowed();
 
     /**
-     * Invokes signOut with no callback.
+     * Sets whether extensions associated with the account will be uninstalled during the next
+     * sign-out event.
      */
+    void setUninstallAccountExtensionsOnSignout(boolean uninstall);
+
+    /** Returns true if there are extensions associated with the signed-in account. */
+    boolean hasSignedInAccountExtensions();
+
+    /** Invokes signOut with no callback. */
     default void signOut(@SignoutReason int signoutSource) {
-        signOut(signoutSource, null, false);
+        signOut(signoutSource, CallbackUtils.emptyRunnable());
     }
 
     /**
      * Signs out of Chrome. This method clears the signed-in username, stops sync and sends out a
      * sign-out notification on the native side.
      *
-     * @param signoutSource describes the event driving the signout (e.g.
-     *         {@link SignoutReason#USER_CLICKED_SIGNOUT_SETTINGS}).
-     * @param signOutCallback Callback to notify about the sign-out progress.
-     * @param forceWipeUserData Whether user selected to wipe all device data.
+     * @param signoutSource describes the event driving the signout (e.g. {@link
+     *     SignoutReason#USER_CLICKED_SIGNOUT_SETTINGS}).
+     * @param signOutCallback Callback to notify when the sign-out is complete.
      */
-    void signOut(@SignoutReason int signoutSource, SignOutCallback signOutCallback,
-            boolean forceWipeUserData);
+    void signOut(@SignoutReason int signoutSource, Runnable signOutCallback);
 
     /**
-     * Returns the management domain if the signed in account is managed, otherwise returns null.
-     */
-    String getManagementDomain();
-
-    /**
-     * Verifies if the account is managed. Callback may be called either
-     * synchronously or asynchronously depending on the availability of the
-     * result.
-     * TODO(crbug.com/1002408) Update API to use CoreAccountInfo instead of email
+     * Verifies if the account is managed. Callback may be called either synchronously or
+     * asynchronously depending on the availability of the result.
      *
-     * @param email An email of the account.
+     * @param accountInfo A CoreAccountInfo representing the account.
      * @param callback The callback that will receive true if the account is managed, false
-     *                 otherwise.
+     *     otherwise.
      */
-    void isAccountManaged(String email, Callback<Boolean> callback);
-
-    /**
-     * Reloads all the accounts from the system within the {@link IdentityManager}.
-     * @param primaryAccountId {@link CoreAccountId} of the primary account.
-     */
-    void reloadAllAccountsFromSystem(CoreAccountId primaryAccountId);
+    void isAccountManaged(CoreAccountInfo accountInfo, Callback<Boolean> callback);
 
     /**
      * Wipes the user's bookmarks and sync data.
      *
-     * Callers should make this call within a runAfterOperationInProgress() call in order to ensure
-     * serialization of wipe operations.
+     * <p>TODO(crbug.com/506130502): This API doesn't belong here and has weird behavior, replace
+     * with direct calls to BrowsingDataBridge.
+     *
+     * <p>Callers should make this call within a runAfterOperationInProgress() call in order to
+     * ensure serialization of wipe operations.
      *
      * @param wipeDataCallback A callback which will be called once the data is wiped.
      */
+    @Deprecated
     void wipeSyncUserData(Runnable wipeDataCallback);
+
+    /** Records that the user has accepted signing into a Managed Account. */
+    void setUserAcceptedAccountManagement(boolean acceptedAccountManagement);
+
+    /**
+     * @return Whether the user has accepted signing into a Managed Account.
+     */
+    boolean getUserAcceptedAccountManagement();
+
+    /** Returns whether fetching the list of accounts from the device eventually succeeded. */
+    boolean didAccountsFetchSucceed();
 }

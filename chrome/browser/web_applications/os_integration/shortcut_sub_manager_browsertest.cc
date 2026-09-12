@@ -1,166 +1,138 @@
-// Copyright 2022 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <memory>
-#include <utility>
-
 #include "base/files/file_util.h"
-#include "base/test/scoped_feature_list.h"
+#include "base/functional/callback_helpers.h"
+#include "base/run_loop.h"
 #include "base/test/test_future.h"
 #include "base/threading/thread_restrictions.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/web_applications/web_app_controller_browsertest.h"
-#include "chrome/browser/web_applications/os_integration/os_integration_manager.h"
-#include "chrome/browser/web_applications/os_integration/os_integration_test_override.h"
-#include "chrome/browser/web_applications/os_integration/shortcut_sub_manager.h"
+#include "build/build_config.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/profiles/delete_profile_helper.h"
+#include "chrome/browser/profiles/profile_manager.h"
+#include "chrome/browser/ui/web_applications/web_app_browsertest_base.h"
+#include "chrome/browser/web_applications/mojom/user_display_mode.mojom.h"
+#include "chrome/browser/web_applications/os_integration/web_app_shortcut.h"
+#include "chrome/browser/web_applications/test/os_integration_test_override_impl.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
-#include "chrome/browser/web_applications/test/web_app_test_utils.h"
-#include "chrome/browser/web_applications/web_app_command_manager.h"
 #include "chrome/browser/web_applications/web_app_command_scheduler.h"
-#include "chrome/browser/web_applications/web_app_id.h"
-#include "chrome/browser/web_applications/web_app_install_finalizer.h"
+#include "chrome/browser/web_applications/web_app_constants.h"
+#include "chrome/browser/web_applications/web_app_install_info.h"
 #include "chrome/browser/web_applications/web_app_provider.h"
-#include "chrome/common/chrome_features.h"
-#include "components/sync/base/time.h"
-#include "components/webapps/browser/install_result_code.h"
-#include "content/public/browser/web_contents.h"
+#include "chrome/test/base/profile_destruction_waiter.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/test/browser_test.h"
-#include "testing/gtest/include/gtest/gtest.h"
+#include "url/gurl.h"
 
 namespace web_app {
 
-using ::testing::Eq;
-using ::testing::IsFalse;
-
-namespace {
-
-class ShortcutSubManagerBrowserTest
-    : public WebAppControllerBrowserTest,
-      public ::testing::WithParamInterface<OsIntegrationSubManagersState> {
+class ShortcutSubManagerBrowserTest : public WebAppBrowserTestBase {
  public:
-  const int kTotalIconSizes = 9;
-
-  void SetUpOnMainThread() override {
-    os_hooks_suppress_.reset();
-    {
-      base::ScopedAllowBlockingForTesting allow_blocking;
-      test_override_ =
-          OsIntegrationTestOverride::OverrideForTesting(base::GetHomeDir());
-    }
-    WebAppControllerBrowserTest::SetUpOnMainThread();
-  }
-
-  void SetUp() override {
-    if (GetParam() == OsIntegrationSubManagersState::kSaveStateToDB) {
-      scoped_feature_list_.InitAndEnableFeatureWithParameters(
-          features::kOsIntegrationSubManagers, {{"stage", "write_config"}});
-    } else if (GetParam() ==
-               OsIntegrationSubManagersState::kSaveStateAndExecute) {
-      scoped_feature_list_.InitAndEnableFeatureWithParameters(
-          features::kOsIntegrationSubManagers,
-          {{"stage", "execute_and_write_config"}});
-    } else {
-      scoped_feature_list_.InitWithFeatures(
-          /*enabled_features=*/{},
-          /*disabled_features=*/{features::kOsIntegrationSubManagers});
-    }
-    WebAppControllerBrowserTest::SetUp();
-  }
-
-  void TearDownOnMainThread() override {
-    test::UninstallAllWebApps(profile());
-    {
-      base::ScopedAllowBlockingForTesting allow_blocking;
-      test_override_.reset();
-    }
-    WebAppControllerBrowserTest::TearDownOnMainThread();
-  }
-
-  AppId LoadUrlAndInstallApp(const GURL& url) {
-    EXPECT_TRUE(NavigateAndAwaitInstallabilityCheck(browser(), url));
-    base::test::TestFuture<const AppId, webapps::InstallResultCode> test_future;
-    provider().scheduler().FetchManifestAndInstall(
-        webapps::WebappInstallSource::OMNIBOX_INSTALL_ICON,
-        browser()->tab_strip_model()->GetActiveWebContents()->GetWeakPtr(),
-        /*bypass_service_worker_check=*/false,
-        base::BindOnce(test::TestAcceptDialogCallback),
-        test_future.GetCallback<const AppId&, webapps::InstallResultCode>(),
-        /*use_fallback=*/false);
-    EXPECT_THAT(test_future.Get<webapps::InstallResultCode>(),
-                testing::Eq(webapps::InstallResultCode::kSuccessNewInstall));
-    return test_future.Get<AppId>();
-  }
-
-  void UninstallWebApp(const AppId& app_id) {
-    base::test::TestFuture<webapps::UninstallResultCode> uninstall_future;
-    provider().install_finalizer().UninstallWebApp(
-        app_id, webapps::WebappUninstallSource::kAppsPage,
-        uninstall_future.GetCallback());
-    EXPECT_THAT(uninstall_future.Get(),
-                testing::Eq(webapps::UninstallResultCode::kSuccess));
-  }
-
- private:
-  std::unique_ptr<OsIntegrationTestOverride::BlockingRegistration>
-      test_override_;
-  base::test::ScopedFeatureList scoped_feature_list_;
+  ShortcutSubManagerBrowserTest() = default;
+  ~ShortcutSubManagerBrowserTest() override = default;
 };
 
-IN_PROC_BROWSER_TEST_P(ShortcutSubManagerBrowserTest, Configure) {
-  GURL test_url = https_server()->GetURL(
-      "/banners/"
-      "manifest_test_page.html");
+static_assert(BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC));
 
-  const AppId& app_id = LoadUrlAndInstallApp(test_url);
-
-  auto state =
-      provider().registrar_unsafe().GetAppCurrentOsIntegrationState(app_id);
-  ASSERT_TRUE(state.has_value());
-  if (AreOsIntegrationSubManagersEnabled()) {
-    ASSERT_THAT(state.value().shortcut().title(),
-                testing::Eq("Manifest test app"));
-    // All icons are read from the disk.
-    ASSERT_THAT(state.value().shortcut().icon_data_any_size(),
-                testing::Eq(kTotalIconSizes));
-
-    for (const proto::ShortcutIconData& icon_time_map_data :
-         state.value().shortcut().icon_data_any()) {
-      ASSERT_THAT(
-          syncer::ProtoTimeToTime(icon_time_map_data.timestamp()).is_null(),
-          testing::IsFalse());
-    }
-    // TODO(dmurph): Implement shortcut & color detection if
-    // `AreSubManagersExecuteEnabled()` returns true. https://crbug.com/1404032.
-  } else {
-    ASSERT_FALSE(state.value().has_shortcut());
+void FlushShortcutTasks() {
+  {
+    base::RunLoop loop;
+    internals::GetShortcutIOTaskRunner()->PostTask(FROM_HERE,
+                                                   loop.QuitClosure());
+    loop.Run();
+  }
+  {
+    base::RunLoop loop;
+    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE, loop.QuitClosure());
+    loop.Run();
   }
 }
 
-IN_PROC_BROWSER_TEST_P(ShortcutSubManagerBrowserTest,
-                       ConfigureUninstallReturnsEmptyState) {
-  GURL test_url = https_server()->GetURL(
-      "/banners/"
-      "manifest_test_page.html");
-  const AppId& app_id = LoadUrlAndInstallApp(test_url);
+IN_PROC_BROWSER_TEST_F(ShortcutSubManagerBrowserTest,
+                       CleanUpEphemeralProfileDeletesShortcuts) {
+  base::ScopedAllowBlockingForTesting allow_blocking;
 
-  test::UninstallAllWebApps(profile());
-  auto state =
-      provider().registrar_unsafe().GetAppCurrentOsIntegrationState(app_id);
-  EXPECT_FALSE(state.has_value());
+  ProfileManager* profile_manager = g_browser_process->profile_manager();
 
-  // TODO(dmurph): Implement shortcut & color detection if
-  // `AreSubManagersExecuteEnabled()` returns true. https://crbug.com/1404032.
+  base::test::TestFuture<Profile*> profile_future;
+  ProfileManager::CreateMultiProfileAsync(
+      u"A Profile", /*icon_index=*/0, /*is_hidden=*/true,
+      profile_future.GetCallback(), base::DoNothing());
+  Profile* secondary = profile_future.Get();
+  ASSERT_TRUE(secondary);
+
+  web_app::test::WaitUntilWebAppProviderAndSubsystemsReady(
+      WebAppProvider::GetForTest(secondary));
+
+  // Install a web app in the secondary profile.
+  auto web_app_info = WebAppInstallInfo::CreateWithStartUrlForTesting(
+      GURL("https://example.com/"));
+  web_app_info->title = u"A Web App";
+  web_app_info->user_display_mode = mojom::UserDisplayMode::kStandalone;
+  webapps::AppId app_id =
+      web_app::test::InstallWebApp(secondary, std::move(web_app_info));
+
+  FlushShortcutTasks();
+
+  // Enable run-on-OS-login so we can verify it is also cleaned up.
+  base::test::TestFuture<void> rool_future;
+  WebAppProvider::GetForTest(secondary)->scheduler().SetRunOnOsLoginMode(
+      app_id, RunOnOsLoginMode::kWindowed, rool_future.GetCallback());
+  ASSERT_TRUE(rool_future.Wait());
+
+  // Verify the shortcut was created via the real installation path.
+  EXPECT_TRUE(os_integration_override().IsShortcutCreated(secondary, app_id,
+                                                          "A Web App"));
+  EXPECT_TRUE(os_integration_override().IsRunOnOsLoginEnabled(secondary, app_id,
+                                                              "A Web App"));
+
+#if BUILDFLAG(IS_WIN)
+  base::FilePath desktop_shortcut_path =
+      os_integration_override().GetShortcutPath(
+          secondary, os_integration_override().desktop(), app_id, "A Web App");
+  base::FilePath shortcut_path = os_integration_override().GetShortcutPath(
+      secondary, os_integration_override().application_menu(), app_id,
+      "A Web App");
+  base::FilePath startup_shortcut_path =
+      os_integration_override().GetShortcutPath(
+          secondary, os_integration_override().startup(), app_id, "A Web App");
+  EXPECT_FALSE(desktop_shortcut_path.empty());
+  EXPECT_TRUE(base::PathExists(desktop_shortcut_path));
+  EXPECT_FALSE(shortcut_path.empty());
+  EXPECT_TRUE(base::PathExists(shortcut_path));
+  EXPECT_FALSE(startup_shortcut_path.empty());
+  EXPECT_TRUE(base::PathExists(startup_shortcut_path));
+#elif BUILDFLAG(IS_MAC)
+  base::FilePath shortcut_path = os_integration_override().GetShortcutPath(
+      secondary, os_integration_override().chrome_apps_folder(), app_id,
+      "A Web App");
+  EXPECT_FALSE(shortcut_path.empty());
+  EXPECT_TRUE(base::PathExists(shortcut_path));
+#elif BUILDFLAG(IS_LINUX)
+  base::FilePath shortcut_path = os_integration_override().GetShortcutPath(
+      secondary, os_integration_override().desktop(), app_id, "A Web App");
+  EXPECT_FALSE(shortcut_path.empty());
+  EXPECT_TRUE(base::PathExists(shortcut_path));
+#endif
+
+  ProfileDestructionWaiter destruction_waiter(secondary);
+  profile_manager->ClearFirstBrowserWindowKeepAlive(secondary);
+  destruction_waiter.Wait();
+
+  profile_manager->GetDeleteProfileHelper().CleanUpEphemeralProfiles();
+
+  FlushShortcutTasks();
+
+  // Verify the shortcut(s) and run-on-OS-login entry were deleted.
+  EXPECT_FALSE(base::PathExists(shortcut_path));
+#if BUILDFLAG(IS_WIN)
+  EXPECT_FALSE(base::PathExists(desktop_shortcut_path));
+  EXPECT_FALSE(base::PathExists(startup_shortcut_path));
+#elif BUILDFLAG(IS_MAC)
+  EXPECT_FALSE(os_integration_override().IsRunOnOsLoginEnabled(
+      secondary, app_id, "A Web App"));
+#endif
 }
-
-INSTANTIATE_TEST_SUITE_P(
-    All,
-    ShortcutSubManagerBrowserTest,
-    ::testing::Values(OsIntegrationSubManagersState::kSaveStateToDB,
-                      OsIntegrationSubManagersState::kSaveStateAndExecute,
-                      OsIntegrationSubManagersState::kDisabled),
-    test::GetOsIntegrationSubManagersTestName);
-
-}  // namespace
 
 }  // namespace web_app

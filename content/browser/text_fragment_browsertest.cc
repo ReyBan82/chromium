@@ -44,18 +44,12 @@
 namespace content {
 
 class TextFragmentAnchorBrowserTest : public ContentBrowserTest {
- public:
-  TextFragmentAnchorBrowserTest() {
-    feature_list_.InitAndEnableFeature(features::kDocumentPolicy);
-  }
-
  protected:
   void SetUpOnMainThread() override {
     host_resolver()->AddRule("*", "127.0.0.1");
   }
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    ContentBrowserTest::SetUpCommandLine(command_line);
     command_line->AppendSwitchASCII(switches::kEnableBlinkFeatures,
                                     "TextFragmentIdentifiers");
     // Slow bots are flaky due to slower loading interacting with
@@ -83,7 +77,6 @@ class TextFragmentAnchorBrowserTest : public ContentBrowserTest {
 
     SimulateMouseClickAt(web_contents, 0, blink::WebMouseEvent::Button::kLeft,
                          gfx::Point(x, y));
-    RunUntilInputProcessed(GetWidgetHost());
   }
 
   void WaitForPageLoad(WebContents* contents) {
@@ -98,8 +91,6 @@ class TextFragmentAnchorBrowserTest : public ContentBrowserTest {
                                           ->GetRenderViewHost()
                                           ->GetWidget());
   }
-
-  base::test::ScopedFeatureList feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest, EnabledOnUserNavigation) {
@@ -322,10 +313,17 @@ IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
   EXPECT_DID_SCROLL(false);
 }
 
+// crbug.com/1470712: Flaky on CrOS Debug
+#if BUILDFLAG(IS_CHROMEOS) && !defined(NDEBUG)
+#define MAYBE_SameDocumentBrowserNavigation \
+  DISABLED_SameDocumentBrowserNavigation
+#else
+#define MAYBE_SameDocumentBrowserNavigation SameDocumentBrowserNavigation
+#endif
 // Ensure a same-document navigation from browser UI scrolls to the text
 // fragment.
 IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
-                       SameDocumentBrowserNavigation) {
+                       MAYBE_SameDocumentBrowserNavigation) {
   ASSERT_TRUE(embedded_test_server()->Start());
   GURL url(embedded_test_server()->GetURL(
       "/scrollable_page_with_content.html#:~:text=text"));
@@ -356,11 +354,19 @@ IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
   EXPECT_DID_SCROLL(true);
 }
 
-IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
-                       SameDocumentBrowserNavigationOnScriptNavigatedDocument) {
+// crbug.com/1470712: Flaky on CrOS Debug
+#if BUILDFLAG(IS_CHROMEOS) && !defined(NDEBUG)
+#define MAYBE_SameDocumentBrowserNavigationOnScriptNavigatedDocument \
+  DISABLED_SameDocumentBrowserNavigationOnScriptNavigatedDocument
+#else
+#define MAYBE_SameDocumentBrowserNavigationOnScriptNavigatedDocument \
+  SameDocumentBrowserNavigationOnScriptNavigatedDocument
+#endif
+IN_PROC_BROWSER_TEST_F(
+    TextFragmentAnchorBrowserTest,
+    MAYBE_SameDocumentBrowserNavigationOnScriptNavigatedDocument) {
   ASSERT_TRUE(embedded_test_server()->Start());
   WebContents* main_contents = shell()->web_contents();
-  RenderFrameSubmissionObserver frame_observer(main_contents);
   // The test assumes the RenderWidgetHost stays the same after navigation,
   // which won't happen if same-site back/forward-cache is enabled. Disable it
   // so that we will keep RenderWidgetHost even after navigation.
@@ -385,6 +391,8 @@ IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
     EXPECT_TRUE(ExecJs(main_contents, "location = '" + target_url.spec() + "';",
                        EXECUTE_SCRIPT_NO_USER_GESTURE));
     observer.Wait();
+
+    RenderFrameSubmissionObserver frame_observer(main_contents);
     EXPECT_EQ(target_url, main_contents->GetLastCommittedURL());
     frame_observer.WaitForScrollOffsetAtTop(false);
     EXPECT_DID_SCROLL(true);
@@ -394,6 +402,7 @@ IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
   // we'll use below to ensure the same-document navigation invokes the text
   // fragment.
   {
+    RenderFrameSubmissionObserver frame_observer(main_contents);
     EXPECT_TRUE(ExecJs(main_contents, "window.scrollTo(0, 0)"));
     frame_observer.WaitForScrollOffsetAtTop(true);
     RunUntilInputProcessed(GetWidgetHost());
@@ -408,6 +417,7 @@ IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
         "/scrollable_page_with_content.html#:~:text=some"));
     EXPECT_TRUE(NavigateToURL(shell(), same_doc_url));
 
+    RenderFrameSubmissionObserver frame_observer(main_contents);
     WaitForPageLoad(main_contents);
 
     frame_observer.WaitForScrollOffsetAtTop(
@@ -626,6 +636,82 @@ IN_PROC_BROWSER_TEST_F(TextFragmentAnchorBrowserTest,
     EXPECT_EQ(target_text_url, main_contents->GetLastCommittedURL());
 
     WaitForPageLoad(main_contents);
+    EXPECT_DID_SCROLL(false);
+  }
+}
+
+// Ensure same-document navigation to a text-fragment is blocked when initiated
+// from a different origin and the destination intercepts the navigation via the
+// navigation API.
+IN_PROC_BROWSER_TEST_F(
+    TextFragmentAnchorBrowserTest,
+    SameDocumentScriptNavigationCrossOriginWithNavigationIntercept) {
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL url(embedded_test_server()->GetURL(
+      "a.test", "/scrollable_page_with_content.html"));
+  GURL target_text_url(embedded_test_server()->GetURL(
+      "a.test", "/scrollable_page_with_content.html#:~:text=hidden"));
+  GURL cross_origin_inner_url(
+      embedded_test_server()->GetURL("b.test", "/hello.html"));
+
+  EXPECT_TRUE(NavigateToURL(shell(), url));
+
+  WebContentsImpl* main_contents =
+      static_cast<WebContentsImpl*>(shell()->web_contents());
+  FrameTreeNode* root = main_contents->GetPrimaryFrameTree().root();
+
+  // Register a navigate handler that intercepts the same-document navigation
+  // and add a hidden=until-found target so we can detect whether the text
+  // directive was processed via the beforematch event.
+  EXPECT_TRUE(ExecJs(main_contents,
+                     R"JS(
+        let target = document.createElement('div');
+        target.hidden = 'until-found';
+        target.textContent = 'hidden text';
+        document.body.appendChild(target);
+        var did_match = false;
+        target.addEventListener('beforematch', () => { did_match = true; });
+        navigation.addEventListener('navigate', e => {
+          if (e.canIntercept) {
+            e.intercept({handler: async () => {}});
+          }
+        });
+      )JS",
+                     EXECUTE_SCRIPT_NO_USER_GESTURE));
+
+  // Insert a cross-origin iframe from which we'll execute script.
+  {
+    const auto script = JsReplace(
+        R"JS(
+            let f = document.createElement("iframe");
+            f.src=$1;
+            document.body.appendChild(f);
+          )JS",
+        cross_origin_inner_url);
+
+    TestNavigationObserver observer(main_contents);
+    EXPECT_TRUE(ExecJs(main_contents, script, EXECUTE_SCRIPT_NO_USER_GESTURE));
+    observer.Wait();
+    ASSERT_EQ(1u, root->child_count());
+  }
+
+  // Try navigating the top frame to a same-document text fragment from inside
+  // the iframe via location.replace(). The destination page intercepts the
+  // navigation, but the text directive should still be blocked because the
+  // initiator is cross-origin.
+  {
+    TestNavigationObserver observer(main_contents);
+    RenderFrameHostImpl* child_rfh = root->child_at(0)->current_frame_host();
+    EXPECT_TRUE(ExecJs(child_rfh, JsReplace("window.top.location.replace($1);",
+                                            target_text_url)));
+    observer.Wait();
+    EXPECT_EQ(target_text_url, main_contents->GetLastCommittedURL());
+
+    WaitForPageLoad(main_contents);
+    RunUntilInputProcessed(GetWidgetHost());
+    RunUntilInputProcessed(GetWidgetHost());
+    EXPECT_EQ(false, EvalJs(main_contents, "did_match;",
+                            EXECUTE_SCRIPT_NO_USER_GESTURE));
     EXPECT_DID_SCROLL(false);
   }
 }
@@ -870,6 +956,7 @@ IN_PROC_BROWSER_TEST_F(ForceLoadAtTopBrowserTest, SameDocumentNavigation) {
   // Click on a link with a fragment id. Ensure we scroll to the targeted
   // element.
   ClickElementWithId(main_contents, "link");
+  RunUntilInputProcessed(GetWidgetHost());
 
   EXPECT_DID_SCROLL(true);
 }

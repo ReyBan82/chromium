@@ -100,7 +100,7 @@ class PLATFORM_EXPORT DateTimeFormat {
     kFieldTypeZoneLocalized = 'O',
     kFieldTypeNonLocationZone = 'v',
     kFieldTypeZoneId = 'V',
-    kFieldTypeRFC822Zone = 'Z',
+    kFieldTypeRfc822Zone = 'Z',
     kFieldTypeZoneIso8601Z = 'X',
     kFieldTypeZoneIso8601 = 'x',
   };
@@ -119,7 +119,7 @@ class PLATFORM_EXPORT DateTimeFormat {
 
   // Returns true if succeeded, false if failed.
   static bool Parse(const String&, TokenHandler&);
-  static void QuoteAndappend(const String&, StringBuilder&);
+  static void QuoteAndAppend(const StringView&, StringBuilder&);
 };
 
 }  // namespace blink

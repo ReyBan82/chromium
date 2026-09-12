@@ -1,15 +1,10 @@
 This is a testharness.js-based test.
-PASS ClipboardItem({string, Blob}) succeeds with different types
-PASS ClipboardItem() succeeds with empty options
-PASS ClipboardItem({}) fails with empty dictionary input
-PASS ClipboardItem(Blob) fails
-PASS ClipboardItem() fails with null input
-PASS ClipboardItem() fails with no input
-PASS types() returns correct values
-PASS getType(DOMString valid type) succeeds with correct output
-PASS getType(DOMString invalid type) succeeds with correct output
-PASS getType(DOMString type) rejects correctly when querying for missing type
-FAIL getType(DOMString valid type) converts DOMString to Blob assert_equals: expected (string) "text/plain" but got (undefined) undefined
-FAIL getType(DOMString invalid type) converts DOMString to Blob assert_equals: expected (string) "not a/real type" but got (undefined) undefined
+Harness Error. harness_status.status = 1 , harness_status.message = Unhandled rejection: promise_rejects_js: getType(DOMString type) should reject with TypeError for invalid type function "function() { throw e; }" threw object "NotFoundError: Failed to execute 'getType' on 'ClipboardItem': The type was not found" ("NotFoundError") expected instance of function "function TypeError() { [native code] }" ("TypeError")
+[FAIL] ClipboardItem() fails with invalid type string
+  assert_throws_js: function "() => {new ClipboardItem({"not a/real type": blob2});}" did not throw
+[FAIL] ClipboardItem() fails with invalid web custom format
+  assert_throws_js: function "() => {new ClipboardItem({"web notarealtype": blob3});}" did not throw
+[FAIL] supports(text/uri-list) returns true
+  assert_equals: expected true but got false
 Harness: the test ran to completion.
 

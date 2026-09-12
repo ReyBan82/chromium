@@ -6,9 +6,12 @@
 
 #include <utility>
 
+#include "base/notreached.h"
+#include "base/task/single_thread_task_runner.h"
 #include "net/base/net_errors.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-shared.h"
 #include "third_party/blink/public/mojom/frame/lifecycle.mojom-shared.h"
-#include "third_party/blink/public/mojom/permissions_policy/permissions_policy_feature.mojom-shared.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
@@ -34,11 +37,20 @@ CreateDOMExceptionCodeAndMessageFromNetErrorCode(int32_t net_error) {
       return {DOMExceptionCode::kUnknownError, "Unexpected error occured."};
     case net::ERR_ACCESS_DENIED:
       return {DOMExceptionCode::kInvalidAccessError,
-              "Access to the requested host is blocked."};
-    case net::ERR_BLOCKED_BY_RESPONSE:
-      return {
-          DOMExceptionCode::kInvalidAccessError,
-          "Access to the requested host is blocked by cross-origin policy."};
+              "Access to the requested host or port is blocked."};
+    case net::ERR_NETWORK_ACCESS_DENIED:
+      return {DOMExceptionCode::kInvalidAccessError, "Firewall error."};
+    case net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS:
+      return {DOMExceptionCode::kInvalidAccessError,
+              "Access to local network is blocked."};
+    case net::ERR_NOT_IMPLEMENTED:
+      return {DOMExceptionCode::kNotSupportedError,
+              "This operation is not supported on the current platform."};
+    case net::ERR_SOCKET_NOT_CONNECTED:
+      return {DOMExceptionCode::kInvalidStateError,
+              "The socket is not in a state that allows this operation."};
+    case net::ERR_ADDRESS_INVALID:
+      return {DOMExceptionCode::kDataError, "The address is not valid."};
     default:
       return {DOMExceptionCode::kNetworkError, "Network Error."};
   }
@@ -46,12 +58,8 @@ CreateDOMExceptionCodeAndMessageFromNetErrorCode(int32_t net_error) {
 
 }  // namespace
 
-ScriptPromise Socket::opened(ScriptState* script_state) const {
-  return ScriptPromise(script_state, opened_.Get(script_state->GetIsolate()));
-}
-
-ScriptPromise Socket::closed(ScriptState* script_state) const {
-  return ScriptPromise(script_state, closed_.Get(script_state->GetIsolate()));
+ScriptPromise<IDLUndefined> Socket::closed(ScriptState* script_state) const {
+  return closed_->Promise(script_state->World());
 }
 
 Socket::Socket(ScriptState* script_state)
@@ -63,26 +71,20 @@ Socket::Socket(ScriptState* script_state)
           GetExecutionContext()->GetScheduler()->RegisterFeature(
               SchedulingPolicy::Feature::kOutstandingNetworkRequestDirectSocket,
               {SchedulingPolicy::DisableBackForwardCache()})),
-      opened_resolver_(
-          MakeGarbageCollected<ScriptPromiseResolver>(script_state)),
-      opened_(script_state->GetIsolate(),
-              opened_resolver_->Promise().V8Promise()),
-      closed_resolver_(
-          MakeGarbageCollected<ScriptPromiseResolver>(script_state)),
-      closed_(script_state->GetIsolate(),
-              closed_resolver_->Promise().V8Promise()) {
+      closed_(MakeGarbageCollected<ScriptPromiseProperty<IDLUndefined, IDLAny>>(
+          GetExecutionContext())) {
   UpdateStateIfNeeded();
 
   GetExecutionContext()->GetBrowserInterfaceBroker().GetInterface(
       service_.BindNewPipeAndPassReceiver(
           GetExecutionContext()->GetTaskRunner(TaskType::kNetworking)));
   service_.set_disconnect_handler(
-      WTF::BindOnce(&Socket::OnServiceConnectionError, WrapPersistent(this)));
+      BindOnce(&Socket::OnServiceConnectionError, WrapPersistent(this)));
 
   // |closed| promise is just one of the ways to learn that the socket state has
   // changed. Therefore it's not necessary to force developers to handle
   // rejections.
-  closed_resolver_->Promise().MarkAsHandled();
+  closed_->MarkAsHandled();
 }
 
 Socket::~Socket() = default;
@@ -96,16 +98,28 @@ bool Socket::CheckContextAndPermissions(ScriptState* script_state,
     return false;
   }
 
-  if (!ExecutionContext::From(script_state)
-           ->IsFeatureEnabled(
-               mojom::blink::PermissionsPolicyFeature::kDirectSockets)) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kNotAllowedError,
-        "Permissions-Policy: direct-sockets are disabled.");
-    return false;
+  ExecutionContext* execution_context = ExecutionContext::From(script_state);
+  if (execution_context->IsIsolatedContext()) {
+    if (!execution_context->CrossOriginIsolatedCapability()) {
+      exception_state.ThrowDOMException(
+          DOMExceptionCode::kNotAllowedError,
+          "Frame is not sufficiently isolated to use Direct Sockets.");
+      return false;
+    }
+    if (execution_context->IsWindow() &&
+        !execution_context->IsFeatureEnabled(
+            network::mojom::PermissionsPolicyFeature::kDirectSockets)) {
+      exception_state.ThrowDOMException(
+          DOMExceptionCode::kNotAllowedError,
+          "Permissions-Policy: direct-sockets are disabled.");
+      return false;
+    }
+    return true;
+  } else {
+    // Embedder-enabled Direct Sockets run in custom contexts and do not rely on
+    // permissions policies.
+    return true;
   }
-
-  return true;
 }
 
 // static
@@ -118,19 +132,24 @@ DOMException* Socket::CreateDOMExceptionFromNetErrorCode(int32_t net_error) {
 void Socket::Trace(Visitor* visitor) const {
   visitor->Trace(script_state_);
   visitor->Trace(service_);
-
-  visitor->Trace(opened_resolver_);
-  visitor->Trace(opened_);
-
-  visitor->Trace(closed_resolver_);
   visitor->Trace(closed_);
-
   ExecutionContextLifecycleStateObserver::Trace(visitor);
 }
 
 void Socket::ResetServiceAndFeatureHandle() {
   feature_handle_for_scheduler_.reset();
   service_.reset();
+}
+
+// static
+protocol::Network::DirectSocketDnsQueryType Socket::MapProbeDnsQueryType(
+    V8SocketDnsQueryType dns_query_type) {
+  switch (dns_query_type.AsEnum()) {
+    case V8SocketDnsQueryType::Enum::kIpv4:
+      return protocol::Network::DirectSocketDnsQueryTypeEnum::Ipv4;
+    case V8SocketDnsQueryType::Enum::kIpv6:
+      return protocol::Network::DirectSocketDnsQueryTypeEnum::Ipv6;
+  }
 }
 
 }  // namespace blink

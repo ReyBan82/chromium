@@ -4,6 +4,7 @@
 
 #include "components/component_updater/installer_policies/on_device_head_suggest_component_installer.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -37,22 +38,23 @@ std::string GetNormalizedLocale(const std::string& raw_locale) {
   std::string locale, locale_constraint;
   // Both incognito and non-incognito will use a same model so it's okay to
   // fetch the param from either feature.
-  if (OmniboxFieldTrial::IsOnDeviceHeadSuggestEnabledForIncognito())
+  if (OmniboxFieldTrial::IsOnDeviceHeadSuggestEnabledForIncognito()) {
     locale_constraint =
         OmniboxFieldTrial::OnDeviceHeadModelLocaleConstraint(true);
-  else if (OmniboxFieldTrial::IsOnDeviceHeadSuggestEnabledForNonIncognito())
+  } else if (OmniboxFieldTrial::IsOnDeviceHeadSuggestEnabledForNonIncognito()) {
     locale_constraint =
         OmniboxFieldTrial::OnDeviceHeadModelLocaleConstraint(false);
+  }
 
   locale = raw_locale;
-  for (const auto c : "-_")
-    locale.erase(std::remove(locale.begin(), locale.end(), c), locale.end());
+  std::erase_if(locale, [](const char c) { return c == '-' || c == '_'; });
 
-  std::transform(locale.begin(), locale.end(), locale.begin(),
-                 [](char c) -> char { return base::ToUpperASCII(c); });
+  std::ranges::transform(locale, locale.begin(),
+                         [](char c) { return base::ToUpperASCII(c); });
 
-  if (!locale_constraint.empty())
+  if (!locale_constraint.empty()) {
     locale += locale_constraint;
+  }
 
   VLOG(1) << "On Device Head Component will fetch model for locale: " << locale;
 
@@ -69,12 +71,13 @@ OnDeviceHeadSuggestInstallerPolicy::~OnDeviceHeadSuggestInstallerPolicy() =
     default;
 
 bool OnDeviceHeadSuggestInstallerPolicy::VerifyInstallation(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) const {
   const std::string* name = manifest.FindString("name");
 
-  if (!name || *name != ("OnDeviceHeadSuggest" + accept_locale_))
+  if (!name || *name != ("OnDeviceHeadSuggest" + accept_locale_)) {
     return false;
+  }
 
   bool is_successful = base::PathExists(install_dir);
   VLOG(1) << "On Device head model "
@@ -95,7 +98,7 @@ bool OnDeviceHeadSuggestInstallerPolicy::RequiresNetworkEncryption() const {
 
 update_client::CrxInstaller::Result
 OnDeviceHeadSuggestInstallerPolicy::OnCustomInstall(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) {
   return update_client::CrxInstaller::Result(0);  // Nothing custom here.
 }
@@ -105,10 +108,11 @@ void OnDeviceHeadSuggestInstallerPolicy::OnCustomUninstall() {}
 void OnDeviceHeadSuggestInstallerPolicy::ComponentReady(
     const base::Version& version,
     const base::FilePath& install_dir,
-    base::Value::Dict manifest) {
+    base::DictValue manifest) {
   auto* listener = OnDeviceModelUpdateListener::GetInstance();
-  if (listener)
+  if (listener) {
     listener->OnHeadModelUpdate(install_dir);
+  }
 }
 
 base::FilePath OnDeviceHeadSuggestInstallerPolicy::GetRelativeInstallDir()
@@ -118,8 +122,7 @@ base::FilePath OnDeviceHeadSuggestInstallerPolicy::GetRelativeInstallDir()
 
 void OnDeviceHeadSuggestInstallerPolicy::GetHash(
     std::vector<uint8_t>* hash) const {
-  hash->assign(std::begin(kOnDeviceHeadSuggestPublicKeySHA256),
-               std::end(kOnDeviceHeadSuggestPublicKeySHA256));
+  hash->assign_range(kOnDeviceHeadSuggestPublicKeySHA256);
 }
 
 std::string OnDeviceHeadSuggestInstallerPolicy::GetName() const {
@@ -136,7 +139,7 @@ void RegisterOnDeviceHeadSuggestComponent(ComponentUpdateService* cus,
   // Ideally we should only check if the feature is enabled for non-incognito or
   // incognito, but whether the browser is currently on incognito or not is not
   // available yet during component registration on iOS platform.
-  if (OmniboxFieldTrial::IsOnDeviceHeadSuggestEnabledForAnyMode()) {
+  if (OmniboxFieldTrial::IsOnDeviceHeadSuggestEnabledForLocale(locale)) {
     auto installer = base::MakeRefCounted<ComponentInstaller>(
         std::make_unique<OnDeviceHeadSuggestInstallerPolicy>(locale));
     installer->Register(cus, base::OnceClosure());

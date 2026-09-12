@@ -11,66 +11,41 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.robolectric.Shadows.shadowOf;
 
-import android.os.Looper;
+import android.os.Build;
 
-import org.junit.After;
-import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
-import org.robolectric.annotation.LooperMode;
-import org.robolectric.annotation.LooperMode.Mode;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.shadows.ShadowLooper;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
+
+import java.util.concurrent.TimeUnit;
 
 /** Tests for {@link ToastManager}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
-@LooperMode(Mode.PAUSED)
 public class ToastManagerTest {
-    @Mock
-    Toast mToast;
-    @Mock
-    Toast mToastNext;
-    @Mock
-    android.widget.Toast mAndroidToastObject;
-    @Mock
-    android.widget.Toast mAndroidToastObjectNext;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock Toast mToast;
+    @Mock Toast mToastNext;
+    @Mock android.widget.Toast mAndroidToastObject;
+    @Mock android.widget.Toast mAndroidToastObjectNext;
 
     private static final String TOAST_MSG = "now";
     private static final String TOAST_MSG_NEXT = "next";
-    @Before
-    public void setUp() {
-        MockitoAnnotations.initMocks(this);
-        ToastManager.setEnabledForTesting(true);
-    }
-
-    @After
-    public void tearDown() {
-        waitForIdleUi();
-        ToastManager.resetForTesting();
-        clearInvocations(mAndroidToastObject);
-        clearInvocations(mAndroidToastObjectNext);
-        ToastManager.setEnabledForTesting(false);
-    }
-
-    private static void waitForIdleUi() {
-        shadowOf(Looper.getMainLooper()).idle();
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
-    }
+    private static final long DURATION_SHORT_MS = 2000;
 
     @Test
     public void showToast() {
         doReturn(mAndroidToastObject).when(mToast).getAndroidToast();
 
-        ToastManager toastManager = ToastManager.getInstance();
-
-        toastManager.requestShow(mToast);
+        ToastManager.getInstance().requestShow(mToast);
         verify(mAndroidToastObject).show();
     }
 
@@ -90,9 +65,12 @@ public class ToastManagerTest {
 
         // Canceling lets the next queued one to show up immediately.
         toastManager.cancel(mToast);
+        triggerCallback(mAndroidToastObject);
         assertFalse("The current toast should have canceled", toastManager.isShowingForTesting());
         toastManager.requestShow(mToastNext);
-        assertEquals("The next toast should show right away", mToastNext,
+        assertEquals(
+                "The next toast should show right away",
+                mToastNext,
                 toastManager.getCurrentToast());
         verify(mAndroidToastObjectNext).show();
     }
@@ -116,7 +94,7 @@ public class ToastManagerTest {
         // just removes the item from the queue, so won't show in the end.
         toastManager.cancel(mToastNext);
         assertEquals("Current toast should stay visible", mToast, toastManager.getCurrentToast());
-        waitForIdleUi();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(mAndroidToastObjectNext, never()).show();
     }
 
@@ -136,7 +114,9 @@ public class ToastManagerTest {
         verify(mAndroidToastObjectNext, never()).show();
 
         // The next toast shows only after the delay.
-        waitForIdleUi();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        triggerCallback(mAndroidToastObject);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(mAndroidToastObjectNext).show();
     }
 
@@ -156,7 +136,9 @@ public class ToastManagerTest {
         verify(mAndroidToastObjectNext, never()).show();
 
         // The next toast shows only after the delay.
-        waitForIdleUi();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        triggerCallback(mAndroidToastObject);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(mAndroidToastObjectNext).show();
     }
 
@@ -189,9 +171,13 @@ public class ToastManagerTest {
         toastManager.requestShow(toastHigh);
 
         verify(androidToast1).show();
-        waitForIdleUi();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        triggerCallback(androidToast1);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(androidToast3).show(); // One with high priority comes before the next normal one.
-        waitForIdleUi();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        triggerCallback(androidToast3);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(androidToast2).show();
     }
 
@@ -211,10 +197,99 @@ public class ToastManagerTest {
         toastManager.requestShow(mToast);
         toastManager.requestShow(mToastNext);
 
-        waitForIdleUi();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         verify(mAndroidToastObject, never()).show(); // Duplicated object
-
-        waitForIdleUi();
         verify(mAndroidToastObjectNext, never()).show(); // Duplicated text content
+    }
+
+    @Test
+    public void test500msGapBetweenTwoToasts() {
+        doReturn(mAndroidToastObject).when(mToast).getAndroidToast();
+        doReturn(mAndroidToastObjectNext).when(mToastNext).getAndroidToast();
+
+        doReturn(TOAST_MSG).when(mToast).getText();
+        doReturn(TOAST_MSG_NEXT).when(mToastNext).getText();
+
+        ToastManager toastManager = ToastManager.getInstance();
+
+        toastManager.requestShow(mToast);
+        toastManager.requestShow(mToastNext);
+
+        // The first toast should show without the 500ms delay.
+        verify(mAndroidToastObject).show();
+
+        // When the current toast is showing and the next toast is added to the queue,
+        // the next toast should not show.
+        assertEquals("mToast should be the current toast", mToast, toastManager.getCurrentToast());
+        verify(mAndroidToastObjectNext, never()).show();
+
+        // When current toast is done showing but hasn't hit the 500ms gap in between shows,
+        // the next toast should not show.
+        triggerCallback(mAndroidToastObject);
+        assertEquals("mToast should be the current toast", mToast, toastManager.getCurrentToast());
+        verify(mAndroidToastObjectNext, never()).show();
+
+        // The next toast shows only after the current toast is done showing and the 500ms delay.
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        verify(mAndroidToastObjectNext).show();
+    }
+
+    @Test
+    public void testNoUnnecessaryDelaysBetweenToasts() {
+        doReturn(mAndroidToastObject).when(mToast).getAndroidToast();
+        doReturn(mAndroidToastObjectNext).when(mToastNext).getAndroidToast();
+
+        doReturn(TOAST_MSG).when(mToast).getText();
+        doReturn(TOAST_MSG_NEXT).when(mToastNext).getText();
+
+        ToastManager toastManager = ToastManager.getInstance();
+
+        // The first toast should show without the 500ms delay.
+        toastManager.requestShow(mToast);
+        verify(mAndroidToastObject).show();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        triggerCallback(mAndroidToastObject);
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        // The second toast should also show without the 500ms delay.
+        toastManager.requestShow(mToastNext);
+        verify(mAndroidToastObjectNext).show();
+    }
+
+    @Test
+    public void testCancelAndShowNextToast() {
+        doReturn(mAndroidToastObject).when(mToast).getAndroidToast();
+        doReturn(mAndroidToastObjectNext).when(mToastNext).getAndroidToast();
+
+        doReturn(TOAST_MSG).when(mToast).getText();
+        doReturn(TOAST_MSG_NEXT).when(mToastNext).getText();
+
+        ToastManager toastManager = ToastManager.getInstance();
+
+        toastManager.requestShow(mToast);
+        toastManager.requestShow(mToastNext);
+
+        verify(mAndroidToastObject).show();
+
+        toastManager.cancel(mToast);
+        triggerCallback(mAndroidToastObject);
+        assertFalse(
+                "The current toast should have been canceled", toastManager.isShowingForTesting());
+        // The next toast should not show immediately.
+        verify(mAndroidToastObjectNext, never()).show();
+
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
+        // The next toast should show after the 500ms delay.
+        verify(mAndroidToastObjectNext).show();
+    }
+
+    private void triggerCallback(android.widget.Toast mockToast) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            ArgumentCaptor<android.widget.Toast.Callback> callbackCaptor =
+                    ArgumentCaptor.forClass(android.widget.Toast.Callback.class);
+            verify(mockToast).addCallback(callbackCaptor.capture());
+            callbackCaptor.getValue().onToastHidden();
+        } else if (ToastManager.getInstance().isShowingForTesting()) {
+            ShadowLooper.idleMainLooper(DURATION_SHORT_MS, TimeUnit.MILLISECONDS);
+        }
     }
 }

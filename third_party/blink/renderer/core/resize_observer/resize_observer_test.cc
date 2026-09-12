@@ -5,6 +5,7 @@
 #include "third_party/blink/renderer/core/resize_observer/resize_observer.h"
 
 #include "third_party/blink/public/web/web_heap.h"
+#include "third_party/blink/renderer/bindings/core/v8/frozen_array.h"
 #include "third_party/blink/renderer/bindings/core/v8/sanitize_script_errors.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_gc_controller.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_resize_observer_options.h"
@@ -74,8 +75,8 @@ TEST_F(ResizeObserverUnitTest, ResizeObserverDOMContentBoxAndSVG) {
   ResizeObserver::Delegate* delegate =
       MakeGarbageCollected<TestResizeObserverDelegate>(Window());
   ResizeObserver* observer = ResizeObserver::Create(&Window(), delegate);
-  Element* dom_target = GetDocument().getElementById("domTarget");
-  Element* svg_target = GetDocument().getElementById("svgTarget");
+  Element* dom_target = GetDocument().getElementById(AtomicString("domTarget"));
+  Element* svg_target = GetDocument().getElementById(AtomicString("svgTarget"));
   ResizeObservation* dom_observation = MakeGarbageCollected<ResizeObservation>(
       dom_target, observer, ResizeObserverBoxOptions::kContentBox);
   ResizeObservation* svg_observation = MakeGarbageCollected<ResizeObservation>(
@@ -86,14 +87,14 @@ TEST_F(ResizeObserverUnitTest, ResizeObserverDOMContentBoxAndSVG) {
   ASSERT_TRUE(svg_observation->ObservationSizeOutOfSync());
 
   // Target size is correct
-  LayoutSize size = dom_observation->ComputeTargetSize();
-  ASSERT_EQ(size.Width(), 100);
-  ASSERT_EQ(size.Height(), 100);
+  LogicalSize size = dom_observation->ComputeTargetSize();
+  ASSERT_EQ(size.inline_size, 100);
+  ASSERT_EQ(size.block_size, 100);
   dom_observation->SetObservationSize(size);
 
   size = svg_observation->ComputeTargetSize();
-  ASSERT_EQ(size.Width(), 200);
-  ASSERT_EQ(size.Height(), 200);
+  ASSERT_EQ(size.inline_size, 200);
+  ASSERT_EQ(size.block_size, 200);
   svg_observation->SetObservationSize(size);
 
   // Target size is in sync
@@ -119,7 +120,8 @@ TEST_F(ResizeObserverUnitTest, ResizeObserverDOMBorderBox) {
   ResizeObserver::Delegate* delegate =
       MakeGarbageCollected<TestResizeObserverDelegate>(Window());
   ResizeObserver* observer = ResizeObserver::Create(&Window(), delegate);
-  Element* dom_border_target = GetDocument().getElementById("domBorderTarget");
+  Element* dom_border_target =
+      GetDocument().getElementById(AtomicString("domBorderTarget"));
   auto* dom_border_observation = MakeGarbageCollected<ResizeObservation>(
       dom_border_target, observer, ResizeObserverBoxOptions::kBorderBox);
 
@@ -127,9 +129,9 @@ TEST_F(ResizeObserverUnitTest, ResizeObserverDOMBorderBox) {
   ASSERT_TRUE(dom_border_observation->ObservationSizeOutOfSync());
 
   // Target size is correct
-  LayoutSize size = dom_border_observation->ComputeTargetSize();
-  ASSERT_EQ(size.Width(), 110);
-  ASSERT_EQ(size.Height(), 110);
+  LogicalSize size = dom_border_observation->ComputeTargetSize();
+  ASSERT_EQ(size.inline_size, 110);
+  ASSERT_EQ(size.block_size, 110);
   dom_border_observation->SetObservationSize(size);
 
   // Target size is in sync
@@ -153,8 +155,9 @@ TEST_F(ResizeObserverUnitTest, ResizeObserverDOMDevicePixelContentBox) {
   ResizeObserver::Delegate* delegate =
       MakeGarbageCollected<TestResizeObserverDelegate>(Window());
   ResizeObserver* observer = ResizeObserver::Create(&Window(), delegate);
-  Element* dom_target = GetDocument().getElementById("domTarget");
-  Element* dom_dp_target = GetDocument().getElementById("domDPTarget");
+  Element* dom_target = GetDocument().getElementById(AtomicString("domTarget"));
+  Element* dom_dp_target =
+      GetDocument().getElementById(AtomicString("domDPTarget"));
 
   auto* dom_dp_nested_observation = MakeGarbageCollected<ResizeObservation>(
       dom_dp_target, observer,
@@ -167,14 +170,14 @@ TEST_F(ResizeObserverUnitTest, ResizeObserverDOMDevicePixelContentBox) {
   ASSERT_TRUE(dom_dp_nested_observation->ObservationSizeOutOfSync());
 
   // Target size is correct
-  LayoutSize size = dom_dp_observation->ComputeTargetSize();
-  ASSERT_EQ(size.Width(), 100);
-  ASSERT_EQ(size.Height(), 100);
+  LogicalSize size = dom_dp_observation->ComputeTargetSize();
+  ASSERT_EQ(size.inline_size, 100);
+  ASSERT_EQ(size.block_size, 100);
   dom_dp_observation->SetObservationSize(size);
 
   size = dom_dp_nested_observation->ComputeTargetSize();
-  ASSERT_EQ(size.Width(), 150);
-  ASSERT_EQ(size.Height(), 90);
+  ASSERT_EQ(size.inline_size, 150);
+  ASSERT_EQ(size.block_size, 90);
   dom_dp_nested_observation->SetObservationSize(size);
 
   // Target size is in sync
@@ -197,12 +200,12 @@ TEST_F(ResizeObserverUnitTest, TestBoxOverwrite) {
   main_resource.Finish();
 
   ResizeObserverOptions* border_box_option = ResizeObserverOptions::Create();
-  border_box_option->setBox("border-box");
+  border_box_option->setBox(V8ResizeObserverBoxOptions::Enum::kBorderBox);
 
   ResizeObserver::Delegate* delegate =
       MakeGarbageCollected<TestResizeObserverDelegate>(Window());
   ResizeObserver* observer = ResizeObserver::Create(&Window(), delegate);
-  Element* dom_target = GetDocument().getElementById("domTarget");
+  Element* dom_target = GetDocument().getElementById(AtomicString("domTarget"));
 
   // Assert no observations (depth returned is kDepthBottom)
   size_t min_observed_depth = ResizeObserverController::kDepthBottom;
@@ -228,9 +231,9 @@ TEST_F(ResizeObserverUnitTest, TestNonBoxTarget) {
   main_resource.Finish();
 
   ResizeObserverOptions* border_box_option = ResizeObserverOptions::Create();
-  border_box_option->setBox("border-box");
+  border_box_option->setBox(V8ResizeObserverBoxOptions::Enum::kBorderBox);
 
-  Element* dom_target = GetDocument().getElementById("domTarget");
+  Element* dom_target = GetDocument().getElementById(AtomicString("domTarget"));
 
   auto* entry = MakeGarbageCollected<ResizeObserverEntry>(dom_target);
 

@@ -14,6 +14,7 @@
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
+#include "components/services/quarantine/test_support.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 
@@ -30,21 +31,21 @@ const char kInternetURL[] = "http://example.com/some-url";
 const char kInternetReferrerURL[] = "http://example.com/some-other-url";
 const char kTestGUID[] = "69f8621d-c46a-4e88-b915-1ce5415cb008";
 
-void CheckQuarantineResult(QuarantineFileResult result,
-                           QuarantineFileResult expected_result) {
-  EXPECT_EQ(expected_result, result);
+void CheckQuarantineResult(QuarantineFileResult expected,
+                           QuarantineFileResult actual) {
+  EXPECT_EQ(expected, actual);
 }
 
-class QuarantineTest : public testing::Test {
+class QuarantineTest : public QuarantineTestBase {
  public:
   void SetUp() override {
+    QuarantineTestBase::SetUp();
 #if BUILDFLAG(IS_WIN)
     ASSERT_TRUE(com_initializer_.Succeeded());
 #endif
     ASSERT_TRUE(test_dir_.CreateUniqueTempDir());
-    ASSERT_EQ(
-        static_cast<int>(std::size(kTestData)),
-        base::WriteFile(GetTestFilePath(), kTestData, std::size(kTestData)));
+    ASSERT_TRUE(
+        base::WriteFile(GetTestFilePath(), {kTestData, std::size(kTestData)}));
   }
 
  protected:
@@ -65,7 +66,8 @@ class QuarantineTest : public testing::Test {
 TEST_F(QuarantineTest, FileCanBeOpenedForReadAfterAnnotation) {
   base::FilePath test_file = GetTestFilePath();
   QuarantineFile(
-      test_file, GURL(kInternetURL), GURL(kInternetReferrerURL), kTestGUID,
+      test_file, GURL(kInternetURL), GURL(kInternetReferrerURL),
+      /*request_initiator=*/std::nullopt, kTestGUID,
       base::BindOnce(&CheckQuarantineResult, QuarantineFileResult::OK));
   base::RunLoop().RunUntilIdle();
 
@@ -77,7 +79,7 @@ TEST_F(QuarantineTest, FileCanBeOpenedForReadAfterAnnotation) {
 TEST_F(QuarantineTest, FileCanBeAnnotatedWithNoGUID) {
   QuarantineFile(
       GetTestFilePath(), GURL(kInternetURL), GURL(kInternetReferrerURL),
-      std::string(),
+      /*request_initiator=*/std::nullopt, std::string(),
       base::BindOnce(&CheckQuarantineResult, QuarantineFileResult::OK));
   base::RunLoop().RunUntilIdle();
 }

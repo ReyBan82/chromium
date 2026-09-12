@@ -17,7 +17,7 @@
 
 namespace {
 
-constexpr base::FilePath::StringPieceType kOldLauncherSuffix =
+constexpr base::FilePath::StringViewType kOldLauncherSuffix =
     FILE_PATH_LITERAL("_old");
 
 // A callback invoked by |work_item| that tries to create a hardlink to
@@ -56,7 +56,7 @@ void ReplaceLauncherWithLatestVersion(const base::FilePath& launcher_path,
   // Move |launcher_path| to |old_path|.
   std::unique_ptr<WorkItemList> change_list(WorkItem::CreateWorkItemList());
   change_list->AddMoveTreeWorkItem(launcher_path, old_path, temp_dir.GetPath(),
-                                   WorkItem::ALWAYS_MOVE);
+                                   WorkItem::MoveTreeOptions{});
 
   // Create a hardlink or copy of |latest_version_path| at |launcher_path|.
   change_list->AddCallbackWorkItem(

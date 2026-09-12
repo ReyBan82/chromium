@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/features.gni")
 import("//testing/test.gni")
 
 config("clang_config") {
@@ -42,6 +41,8 @@ source_set("media_foundation_clear_key") {
     "media_foundation_clear_key_session.h",
     "media_foundation_clear_key_trusted_input.cc",
     "media_foundation_clear_key_trusted_input.h",
+    "mock_media_protection_pmp_server.cc",
+    "mock_media_protection_pmp_server.h",
   ]
 
   configs += [
@@ -50,7 +51,7 @@ source_set("media_foundation_clear_key") {
 
   deps = [
     "//base",
-    "//media/base/win:media_foundation_util",
+    "//media",
     "//media/cdm:clear_key_cdm_common",
   ]
 
@@ -75,7 +76,7 @@ shared_library("media_foundation_clear_key_cdm") {
   deps = [
     ":media_foundation_clear_key",
     "//base",
-    "//media/base/win:media_foundation_util",
+    "//media",
   ]
 
   inputs = [ "dll_export.def" ]

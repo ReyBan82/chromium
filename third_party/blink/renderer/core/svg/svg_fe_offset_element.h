@@ -33,6 +33,9 @@ class SVGFEOffsetElement final : public SVGFilterPrimitiveStandardAttributes {
 
  public:
   explicit SVGFEOffsetElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEOffsetElement;
+  }
 
   SVGAnimatedNumber* dx() { return dx_.Get(); }
   SVGAnimatedNumber* dy() { return dy_.Get(); }
@@ -44,6 +47,10 @@ class SVGFEOffsetElement final : public SVGFilterPrimitiveStandardAttributes {
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override { return false; }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumber> dx_;
   Member<SVGAnimatedNumber> dy_;

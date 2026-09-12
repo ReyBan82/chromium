@@ -4,12 +4,12 @@
 
 #include "device/bluetooth/floss/bluetooth_adapter_floss.h"
 
-#include "base/containers/contains.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/observer_list.h"
 #include "base/strings/string_util.h"
@@ -17,6 +17,7 @@
 #include "components/device_event_log/device_event_log.h"
 #include "device/bluetooth/bluetooth_adapter.h"
 #include "device/bluetooth/bluetooth_socket_thread.h"
+#include "device/bluetooth/chromeos_platform_features.h"
 #include "device/bluetooth/floss/bluetooth_advertisement_floss.h"
 #include "device/bluetooth/floss/bluetooth_device_floss.h"
 #include "device/bluetooth/floss/bluetooth_local_gatt_service_floss.h"
@@ -28,13 +29,10 @@
 #include "device/bluetooth/public/cpp/bluetooth_address.h"
 
 #if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/devicetype.h"
 #include "device/bluetooth/chromeos/bluetooth_connection_logger.h"
 #include "device/bluetooth/chromeos/bluetooth_utils.h"
 #endif
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "ash/constants/devicetype.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
 
 namespace floss {
 
@@ -53,25 +51,6 @@ void InitWhenObjectManagerKnown(base::OnceClosure callback) {
       std::move(callback));
 }
 
-BluetoothDeviceFloss::ConnectErrorCode BtifStatusToConnectErrorCode(
-    uint32_t status) {
-  switch (static_cast<FlossAdapterClient::BtifStatus>(status)) {
-    case FlossAdapterClient::BtifStatus::kFail:
-      return BluetoothDeviceFloss::ConnectErrorCode::ERROR_FAILED;
-    case FlossAdapterClient::BtifStatus::kAuthFailure:
-      return BluetoothDeviceFloss::ConnectErrorCode::ERROR_AUTH_FAILED;
-    case FlossAdapterClient::BtifStatus::kAuthRejected:
-      return BluetoothDeviceFloss::ConnectErrorCode::ERROR_AUTH_REJECTED;
-    case FlossAdapterClient::BtifStatus::kDone:
-    case FlossAdapterClient::BtifStatus::kBusy:
-      return BluetoothDeviceFloss::ConnectErrorCode::ERROR_INPROGRESS;
-    case FlossAdapterClient::BtifStatus::kUnsupported:
-      return BluetoothDeviceFloss::ConnectErrorCode::ERROR_UNSUPPORTED_DEVICE;
-    default:
-      return BluetoothDeviceFloss::ConnectErrorCode::ERROR_UNKNOWN;
-  }
-}
-
 bool DeviceNeedsToReadProperties(device::BluetoothDevice* device) {
   if (device) {
     BluetoothDeviceFloss* floss_device =
@@ -84,6 +63,33 @@ bool DeviceNeedsToReadProperties(device::BluetoothDevice* device) {
 }
 
 }  // namespace
+
+// Empty delegate for BLE scanning used during discovery.
+class BleDelegateForDiscovery
+    : public device::BluetoothLowEnergyScanSession::Delegate {
+ public:
+  BleDelegateForDiscovery() = default;
+  ~BleDelegateForDiscovery() override = default;
+
+  base::WeakPtr<BleDelegateForDiscovery> GetWeakPtr() {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+  // Empty device::BluetoothLowEnergyScanSession::Delegate overrides
+  void OnSessionStarted(
+      device::BluetoothLowEnergyScanSession* scan_session,
+      std::optional<device::BluetoothLowEnergyScanSession::ErrorCode>
+          error_code) override {}
+  void OnDeviceFound(device::BluetoothLowEnergyScanSession* scan_session,
+                     device::BluetoothDevice* device) override {}
+  void OnDeviceLost(device::BluetoothLowEnergyScanSession* scan_session,
+                    device::BluetoothDevice* device) override {}
+  void OnSessionInvalidated(
+      device::BluetoothLowEnergyScanSession* scan_session) override {}
+
+ private:
+  base::WeakPtrFactory<BleDelegateForDiscovery> weak_ptr_factory_{this};
+};
 
 // According to the Bluetooth spec, these are the min and max values possible
 // for advertising interval. Core 5.3 Spec, Vol 4, Part E, Section 7.8.5.
@@ -98,6 +104,8 @@ scoped_refptr<BluetoothAdapterFloss> BluetoothAdapterFloss::CreateAdapter() {
 BluetoothAdapterFloss::BluetoothAdapterFloss() {
   ui_task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
   socket_thread_ = device::BluetoothSocketThread::Get();
+
+  le_discovery_session_delegate_ = std::make_unique<BleDelegateForDiscovery>();
 }
 
 BluetoothAdapterFloss::~BluetoothAdapterFloss() {
@@ -129,16 +137,18 @@ void BluetoothAdapterFloss::Initialize(base::OnceClosure callback) {
 void BluetoothAdapterFloss::Shutdown() {
   BLUETOOTH_LOG(EVENT) << "BluetoothAdapterFloss::Shutdown";
 
-  if (dbus_is_shutdown_)
+  if (dbus_is_shutdown_) {
     return;
+  }
 
   if (!FlossDBusManager::Get()->IsObjectManagerSupported()) {
     dbus_is_shutdown_ = true;
     return;
   }
 
-  if (IsPresent())
+  if (IsPresent()) {
     RemoveAdapter();  // Cleans up devices and adapter observers.
+  }
   DCHECK(devices_.empty());
 
   // This may call unregister on advertisements that have already been
@@ -153,8 +163,14 @@ void BluetoothAdapterFloss::Shutdown() {
   FlossDBusManager::Get()->GetManagerClient()->RemoveObserver(this);
   dbus_is_shutdown_ = true;
 
-  for (const auto& [key, scanner] : scanners_) {
-    scanner->OnRelease();
+  // Copy scanners_ to avoid iterating over it while it's being modified.
+  std::map<device::BluetoothUUID,
+           base::WeakPtr<BluetoothLowEnergyScanSessionFloss>>
+      scanners_copy(scanners_);
+  for (const auto& [_, scanner] : scanners_copy) {
+    if (scanner) {
+      scanner->OnRelease();
+    }
   }
   scanners_.clear();
 }
@@ -173,41 +189,34 @@ void BluetoothAdapterFloss::AddAdapterObservers() {
 #endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
-void BluetoothAdapterFloss::RemoveAdapter() {
-  if (!FlossDBusManager::Get()->HasActiveAdapter())
-    return;
-
-  ClearAllDevices();
-
+void BluetoothAdapterFloss::RemoveAdapterObservers() {
   // Clean up observers
   FlossDBusManager::Get()->GetAdapterClient()->RemoveObserver(this);
   FlossDBusManager::Get()->GetLEScanClient()->RemoveObserver(this);
+  FlossDBusManager::Get()->GetBatteryManagerClient()->RemoveObserver(this);
 #if BUILDFLAG(IS_CHROMEOS)
   FlossDBusManager::Get()->GetAdminClient()->RemoveObserver(this);
 #endif  // BUILDFLAG(IS_CHROMEOS)
+}
+
+void BluetoothAdapterFloss::RemoveAdapter() {
+  if (!FlossDBusManager::Get()->HasActiveAdapter()) {
+    return;
+  }
+
+  RemoveAdapterObservers();
+  ClearAllDevices();
 
   // Remove adapter by switching to an invalid adapter (cleans up DBus clients)
   // and then emitting |AdapterPresentChanged| to observers.
-  FlossDBusManager::Get()->SwitchAdapter(FlossDBusManager::kInvalidAdapter);
+  FlossDBusManager::Get()->SwitchAdapter(FlossDBusManager::kInvalidAdapter,
+                                         base::DoNothing());
   PresentChanged(false);
 }
 
 void BluetoothAdapterFloss::PopulateInitialDevices() {
   FlossDBusManager::Get()->GetAdapterClient()->GetBondedDevices();
   FlossDBusManager::Get()->GetAdapterClient()->GetConnectedDevices();
-}
-
-void BluetoothAdapterFloss::ClearAllDevices() {
-  // Move all elements of the original devices list to a new list here,
-  // leaving the original list empty so that when we send DeviceRemoved(),
-  // GetDevices() returns no devices.
-  DevicesMap devices_swapped;
-  devices_swapped.swap(devices_);
-
-  for (auto& iter : devices_swapped) {
-    for (auto& observer : observers_)
-      observer.DeviceRemoved(this, iter.second.get());
-  }
 }
 
 void BluetoothAdapterFloss::Init() {
@@ -226,6 +235,11 @@ void BluetoothAdapterFloss::Init() {
   // Register for manager callbacks
   FlossDBusManager::Get()->GetManagerClient()->AddObserver(this);
 
+  // Start with invalid DBus clients. This will return right away so don't need
+  // to wait for callback.
+  FlossDBusManager::Get()->SwitchAdapter(FlossDBusManager::kInvalidAdapter,
+                                         base::DoNothing());
+
   // Switch to adapter if the default adapter is present and enabled. If it is
   // not enabled, wait for upper layers to power it on.
   if (IsPresent()) {
@@ -233,14 +247,49 @@ void BluetoothAdapterFloss::Init() {
     int default_adapter = manager->GetDefaultAdapter();
 
     if (manager->GetAdapterEnabled(default_adapter)) {
-      FlossDBusManager::Get()->SwitchAdapter(default_adapter);
-      AddAdapterObservers();
+      AdapterEnabledChanged(default_adapter, /*enabled=*/true);
     }
   }
 
   VLOG(1) << "BluetoothAdapterFloss::Init completed. Calling init callback.";
   initialized_ = true;
+
   std::move(init_callback_).Run();
+}
+
+void BluetoothAdapterFloss::NotifyDeviceFound(uint8_t scanner_id,
+                                              const std::string& address) {
+  if (!devices_.contains(address)) {
+    return;
+  }
+
+  BluetoothDeviceFloss* device_ptr =
+      static_cast<BluetoothDeviceFloss*>(devices_[address].get());
+
+  for (const auto& [key, scanner] : scanners_) {
+    if (scanner->GetScannerId() == scanner_id) {
+      scanner->OnDeviceFound(device_ptr);
+    }
+  }
+}
+
+BluetoothDeviceFloss* BluetoothAdapterFloss::CreateOrGetDeviceForUpdate(
+    const std::string& address,
+    const std::string& name) {
+  BluetoothDeviceFloss* device_ptr;
+  std::string canonical_address = device::CanonicalizeBluetoothAddress(address);
+
+  if (devices_.contains(canonical_address)) {
+    device_ptr =
+        static_cast<BluetoothDeviceFloss*>(devices_[canonical_address].get());
+    device_ptr->UpdateTimestamp();
+  } else {
+    auto device = CreateBluetoothDeviceFloss(
+        FlossDeviceId({.address = address, .name = name}));
+    device_ptr = device.get();
+    devices_.emplace(canonical_address, std::move(device));
+  }
+  return device_ptr;
 }
 
 BluetoothAdapterFloss::UUIDList BluetoothAdapterFloss::GetUUIDs() const {
@@ -256,8 +305,9 @@ std::string BluetoothAdapterFloss::GetAddress() const {
 }
 
 std::string BluetoothAdapterFloss::GetName() const {
-  if (!IsPresent())
+  if (!IsPresent()) {
     return std::string();
+  }
 
   return FlossDBusManager::Get()->GetAdapterClient()->GetName();
 }
@@ -329,8 +379,9 @@ void BluetoothAdapterFloss::SetPowered(bool powered,
 }
 
 bool BluetoothAdapterFloss::IsDiscoverable() const {
-  if (!IsPresent())
+  if (!IsPresent()) {
     return false;
+  }
 
   return FlossDBusManager::Get()->GetAdapterClient()->GetDiscoverable();
 }
@@ -362,8 +413,9 @@ base::TimeDelta BluetoothAdapterFloss::GetDiscoverableTimeout() const {
 }
 
 bool BluetoothAdapterFloss::IsDiscovering() const {
-  if (!IsPresent())
+  if (!IsPresent()) {
     return false;
+  }
 
   return NumScanningDiscoverySessions() > 0;
 }
@@ -422,7 +474,8 @@ void BluetoothAdapterFloss::OnStartDiscovery(
     BLUETOOTH_LOG(ERROR) << adapter_path
                          << ": Failed to start discovery: " << ret.error();
     std::move(callback).Run(true, TranslateDiscoveryErrorToUMA(ret.error()));
-
+    // Clear any LE discovery session if starting discovery failed.
+    le_discovery_session_.reset(nullptr);
     return;
   }
 
@@ -463,8 +516,17 @@ void BluetoothAdapterFloss::OnStopDiscovery(
 
 void BluetoothAdapterFloss::OnInitializeDeviceProperties(
     BluetoothDeviceFloss* device_ptr) {
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.DeviceAdded(this, device_ptr);
+  }
+}
+
+void BluetoothAdapterFloss::OnDeviceUuidsChanged(
+    BluetoothDeviceFloss* device_ptr) {
+  // SDP done. Calling |SetGattServicesDiscoveryComplete| because it actually
+  // refers to all services including SDP, not just GATT.
+  device_ptr->SetGattServicesDiscoveryComplete(true);
+  NotifyDeviceChanged(device_ptr);
 }
 
 void BluetoothAdapterFloss::OnGetConnectionState(const FlossDeviceId& device_id,
@@ -498,27 +560,14 @@ void BluetoothAdapterFloss::OnGetConnectionState(const FlossDeviceId& device_id,
   }
 }
 
-void BluetoothAdapterFloss::OnGetBondState(const FlossDeviceId& device_id,
-                                           DBusResult<uint32_t> ret) {
-  BluetoothDeviceFloss* device =
-      static_cast<BluetoothDeviceFloss*>(GetDevice(device_id.address));
-
-  if (!device) {
-    LOG(WARNING) << "GetBondState returned for a non-existing device "
-                 << device_id;
+void BluetoothAdapterFloss::OnGetBatteryInformation(
+    DBusResult<std::optional<BatterySet>> battery_set) {
+  if (!battery_set.has_value() || !battery_set.value().has_value()) {
     return;
   }
 
-  if (!ret.has_value()) {
-    LOG(WARNING) << "GetBondState returned error: " << ret.error()
-                 << " on device: " << device_id;
-    return;
-  }
-
-  device->SetBondState(static_cast<FlossAdapterClient::BondState>(*ret));
-  if (device->HasReadProperties()) {
-    NotifyDevicePairedChanged(device, device->IsPaired());
-  }
+  auto set = battery_set.value().value();
+  BatteryInfoUpdated(set.address, set);
 }
 
 // Announce to observers a change in the adapter state.
@@ -545,6 +594,12 @@ void BluetoothAdapterFloss::DiscoveringChanged(bool discovering) {
   } else {
     for (auto& observer : observers_) {
       observer.AdapterDiscoveringChanged(this, discovering);
+    }
+
+    // No active discovery sessions and we stopped discovering. Make sure the LE
+    // session is also stopped.
+    if (!discovering) {
+      le_discovery_session_.reset(nullptr);
     }
   }
 }
@@ -603,6 +658,18 @@ void BluetoothAdapterFloss::AdapterPresent(int adapter, bool present) {
   // If default adapter isn't present, we need to clean up the dbus manager
   if (!present) {
     RemoveAdapter();
+    return;
+  }
+
+  if (FlossDBusManager::Get()->GetManagerClient()->GetAdapterEnabled(adapter) &&
+      adapter != FlossDBusManager::Get()->GetActiveAdapter()) {
+    // If the adapter is already enabled in platform layer, defer the present
+    // changed until the clients are ready, so the observers could get the
+    // correct power state right after present.
+    FlossDBusManager::Get()->SwitchAdapter(
+        adapter, base::BindOnce(&BluetoothAdapterFloss::OnAdapterClientsReady,
+                                weak_ptr_factory_.GetWeakPtr(),
+                                /* is_newly_present = */ true));
   } else {
     // Notify observers
     PresentChanged(present);
@@ -610,9 +677,6 @@ void BluetoothAdapterFloss::AdapterPresent(int adapter, bool present) {
 }
 
 void BluetoothAdapterFloss::AdapterEnabledChanged(int adapter, bool enabled) {
-  VLOG(1) << "BluetoothAdapterFloss: Adapter " << adapter
-          << ", enabled: " << enabled;
-
   // TODO(b/191906229) - Support non-default adapters
   if (adapter !=
       FlossDBusManager::Get()->GetManagerClient()->GetDefaultAdapter()) {
@@ -621,20 +685,36 @@ void BluetoothAdapterFloss::AdapterEnabledChanged(int adapter, bool enabled) {
     return;
   }
 
-  if (enabled && !FlossDBusManager::Get()->HasActiveAdapter()) {
-    FlossDBusManager::Get()->SwitchAdapter(adapter);
-    AddAdapterObservers();
+  if (enabled && adapter != FlossDBusManager::Get()->GetActiveAdapter()) {
+    FlossDBusManager::Get()->SwitchAdapter(
+        adapter, base::BindOnce(&BluetoothAdapterFloss::OnAdapterClientsReady,
+                                weak_ptr_factory_.GetWeakPtr(),
+                                /* is_newly_present = */ false));
   } else if (!enabled && FlossDBusManager::Get()->HasActiveAdapter()) {
-    FlossDBusManager::Get()->SwitchAdapter(FlossDBusManager::kInvalidAdapter);
-  }
-
-  if (enabled) {
-    PopulateInitialDevices();
-  } else {
     ClearAllDevices();
+    RemoveAdapterObservers();
+    FlossDBusManager::Get()->SwitchAdapter(FlossDBusManager::kInvalidAdapter,
+                                           base::DoNothing());
+    NotifyAdapterPoweredChanged(false);
+  }
+}
+
+void BluetoothAdapterFloss::OnAdapterClientsReady(bool is_newly_present) {
+  AddAdapterObservers();
+  PopulateInitialDevices();
+#if BUILDFLAG(IS_CHROMEOS)
+  SetStandardChromeOSAdapterName();
+  if (base::FeatureList::IsEnabled(
+          chromeos::bluetooth::features::kBluetoothFlossTelephony)) {
+    ConfigureBluetoothTelephony(true);
+  }
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+  if (is_newly_present) {
+    PresentChanged(true);
   }
 
-  NotifyAdapterPoweredChanged(enabled);
+  NotifyAdapterPoweredChanged(true);
 }
 
 void BluetoothAdapterFloss::AdapterDiscoveringChanged(bool state) {
@@ -648,7 +728,16 @@ void BluetoothAdapterFloss::AdapterFoundDevice(
   DCHECK(FlossDBusManager::Get());
   DCHECK(IsPresent());
 
-  BLUETOOTH_LOG(EVENT) << __func__ << device_found;
+  BLUETOOTH_LOG(EVENT) << __func__ << ": " << device_found;
+
+  UpdateDeviceProperties(true, device_found);
+}
+
+void BluetoothAdapterFloss::UpdateDeviceProperties(
+    bool is_triggered_by_inquiry,
+    const FlossDeviceId& device_found) {
+  DCHECK(FlossDBusManager::Get());
+  DCHECK(IsPresent());
 
   auto device_floss = CreateBluetoothDeviceFloss(device_found);
   BluetoothDeviceFloss* new_device_ptr = nullptr;
@@ -658,7 +747,7 @@ void BluetoothAdapterFloss::AdapterFoundDevice(
 
   // Devices are newly found if they aren't in the devices_ map or they were
   // added via ScanResult (which doesn't trigger property reads).
-  if (!base::Contains(devices_, canonical_address)) {
+  if (!devices_.contains(canonical_address)) {
     new_device_ptr = device_floss.get();
     devices_.emplace(canonical_address, std::move(device_floss));
   } else if (DeviceNeedsToReadProperties(devices_[canonical_address].get())) {
@@ -666,22 +755,24 @@ void BluetoothAdapterFloss::AdapterFoundDevice(
         static_cast<BluetoothDeviceFloss*>(devices_[canonical_address].get());
   }
 
+  BluetoothDeviceFloss::PropertiesState state =
+      BluetoothDeviceFloss::PropertiesState::kTriggeredByScan;
+  if (is_triggered_by_inquiry) {
+    state = BluetoothDeviceFloss::PropertiesState::kTriggeredByInquiry;
+  }
+
   // Trigger property reads for new devices.
   if (new_device_ptr) {
     new_device_ptr->InitializeDeviceProperties(
+        state,
         base::BindOnce(&BluetoothAdapterFloss::OnInitializeDeviceProperties,
                        weak_ptr_factory_.GetWeakPtr(), new_device_ptr));
 
-    // TODO(b/204708206): Convert "Paired" and "Connected" property into a
-    // property framework.
-    FlossDBusManager::Get()->GetAdapterClient()->GetBondState(
-        base::BindOnce(&BluetoothAdapterFloss::OnGetBondState,
-                       weak_ptr_factory_.GetWeakPtr(), device_found),
-        device_found);
-    FlossDBusManager::Get()->GetAdapterClient()->GetConnectionState(
-        base::BindOnce(&BluetoothAdapterFloss::OnGetConnectionState,
-                       weak_ptr_factory_.GetWeakPtr(), device_found),
-        device_found);
+    FlossDBusManager::Get()->GetBatteryManagerClient()->GetBatteryInformation(
+        base::BindOnce(&BluetoothAdapterFloss::OnGetBatteryInformation,
+                       weak_ptr_factory_.GetWeakPtr()),
+        new_device_ptr->AsFlossDeviceId());
+
     return;
   }
 
@@ -689,12 +780,15 @@ void BluetoothAdapterFloss::AdapterFoundDevice(
       static_cast<BluetoothDeviceFloss*>(devices_[canonical_address].get());
 
   // If the name has changed, we should also reinitialize the device properties.
+  // For dual mode devices, if this is the first inquiry result received or
+  // first scan result received, reinitialize the device properties.
   // NotifyDeviceChanged will get called after properties are re-init.
-  if (device_floss->GetName() && device->GetName() != device_floss->GetName()) {
-    device->SetName(device_floss->GetName().value_or(""));
+  if ((!device_found.name.empty() && device->GetName() != device_found.name) ||
+      !(device->GetPropertiesState() & state)) {
+    device->SetName(device_found.name);
     device->InitializeDeviceProperties(
-        base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceChanged,
-                       weak_ptr_factory_.GetWeakPtr(), device));
+        state, base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceChanged,
+                              weak_ptr_factory_.GetWeakPtr(), device));
   }
 }
 
@@ -706,7 +800,7 @@ void BluetoothAdapterFloss::AdapterClearedDevice(
   auto device_floss = CreateBluetoothDeviceFloss(device_cleared);
   std::string canonical_address =
       device::CanonicalizeBluetoothAddress(device_floss->GetAddress());
-  if (base::Contains(devices_, canonical_address)) {
+  if (devices_.contains(canonical_address)) {
     BluetoothDeviceFloss* device_ptr = device_floss.get();
     BluetoothDeviceFloss* found_ptr = static_cast<BluetoothDeviceFloss*>(
         GetDevice(device_floss->GetAddress()));
@@ -714,13 +808,78 @@ void BluetoothAdapterFloss::AdapterClearedDevice(
     // Only remove devices from devices_ that are not paired or connected.
     if (!found_ptr || (!found_ptr->IsPaired() && !found_ptr->IsConnected())) {
       devices_.erase(canonical_address);
-    }
 
-    for (auto& observer : observers_)
-      observer.DeviceRemoved(this, device_ptr);
+      for (auto& observer : observers_) {
+        observer.DeviceRemoved(this, device_ptr);
+      }
+    }
   }
 
-  BLUETOOTH_LOG(EVENT) << __func__ << device_cleared;
+  BLUETOOTH_LOG(EVENT) << __func__ << ": " << device_cleared;
+}
+
+void BluetoothAdapterFloss::AdapterKeyMissingDevice(
+    const FlossDeviceId& device) {
+  BLUETOOTH_LOG(EVENT) << __func__ << ": " << device;
+#if BUILDFLAG(IS_CHROMEOS)
+  device::RecordDeviceKeyMissing();
+#endif  // BUILDFLAG(IS_CHROMEOS)
+}
+
+void BluetoothAdapterFloss::AdapterDevicePropertyChanged(
+    FlossAdapterClient::BtPropertyType prop_type,
+    const FlossDeviceId& device) {
+  DCHECK(FlossDBusManager::Get());
+  DCHECK(IsPresent());
+
+  BLUETOOTH_LOG(EVENT) << __func__ << ": " << device
+                       << ": prop_type = " << static_cast<uint32_t>(prop_type);
+
+  BluetoothDeviceFloss* device_ptr =
+      static_cast<BluetoothDeviceFloss*>(GetDevice(device.address));
+
+  if (!device_ptr) {
+    return;
+  }
+
+  switch (prop_type) {
+    case FlossAdapterClient::BtPropertyType::kBdName:
+      if (device.name.size() != 0 &&
+          device.name != device_ptr->GetName().value_or("")) {
+        device_ptr->SetName(device.name);
+        device_ptr->InitializeDeviceProperties(
+            BluetoothDeviceFloss::PropertiesState::kTriggeredByScan,
+            base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceChanged,
+                           weak_ptr_factory_.GetWeakPtr(), device_ptr));
+      }
+      break;
+    case FlossAdapterClient::BtPropertyType::kTypeOfDevice:
+      device_ptr->FetchRemoteType(
+          base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceChanged,
+                         weak_ptr_factory_.GetWeakPtr(), device_ptr));
+      break;
+    case FlossAdapterClient::BtPropertyType::kUuids:
+      device_ptr->FetchRemoteUuids(
+          base::BindOnce(&BluetoothAdapterFloss::OnDeviceUuidsChanged,
+                         weak_ptr_factory_.GetWeakPtr(), device_ptr));
+      break;
+    case FlossAdapterClient::BtPropertyType::kAppearance:
+      device_ptr->FetchRemoteAppearance(
+          base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceChanged,
+                         weak_ptr_factory_.GetWeakPtr(), device_ptr));
+      break;
+    case FlossAdapterClient::BtPropertyType::kVendorProductInfo:
+      device_ptr->FetchRemoteVendorProductInfo(
+          base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceChanged,
+                         weak_ptr_factory_.GetWeakPtr(), device_ptr));
+      break;
+    case FlossAdapterClient::BtPropertyType::kRemoteAddrType:
+      device_ptr->FetchRemoteAddressType(
+          base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceChanged,
+                         weak_ptr_factory_.GetWeakPtr(), device_ptr));
+      break;
+    default:;  // Do nothing for other property types for now
+  }
 }
 
 void BluetoothAdapterFloss::AdapterSspRequest(
@@ -738,8 +897,28 @@ void BluetoothAdapterFloss::AdapterSspRequest(
 
   BluetoothPairingFloss* pairing = device->pairing();
 
+  // For incoming bonding which is not "just works", let the user decide whether
+  // to accept or reject the request. Don't process "just works" requests as
+  // it will be auto-accepted but it might be originated from a malicious peer.
+  if (!pairing &&
+      variant != FlossAdapterClient::BluetoothSspVariant::kConsent) {
+    device::BluetoothDevice::PairingDelegate* pairing_delegate =
+        DefaultPairingDelegate();
+    if (pairing_delegate) {
+      pairing = device->BeginPairing(pairing_delegate);
+    }
+  }
+
   if (!pairing) {
-    LOG(WARNING) << "SSP request for an unknown pairing";
+    // Reject the request right away to avoid users try to pair with it while
+    // the remote is waiting reply.
+    FlossDBusManager::Get()->GetAdapterClient()->SetPairingConfirmation(
+        base::DoNothing(), remote_device, /*accept=*/false);
+    return;
+  }
+
+  if (!pairing->active()) {
+    LOG(WARNING) << "SSP request for an inactive pairing";
     return;
   }
 
@@ -779,6 +958,96 @@ void BluetoothAdapterFloss::AdapterSspRequest(
   }
 }
 
+void BluetoothAdapterFloss::AdapterPinDisplay(
+    const FlossDeviceId& remote_device,
+    std::string pincode) {
+  BluetoothDeviceFloss* device =
+      static_cast<BluetoothDeviceFloss*>(GetDevice(remote_device.address));
+
+  if (!device) {
+    LOG(WARNING) << "PIN display for an unknown device";
+    return;
+  }
+
+  if (pincode.length() != 6) {
+    LOG(WARNING) << "PIN display for length=" << pincode.length()
+                 << " is not supported";
+    return;
+  }
+
+  BluetoothPairingFloss* pairing = device->pairing();
+
+  // Initiate pairing data for the incoming bonding.
+  if (!pairing) {
+    device::BluetoothDevice::PairingDelegate* pairing_delegate =
+        DefaultPairingDelegate();
+    if (pairing_delegate) {
+      pairing = device->BeginPairing(pairing_delegate);
+    }
+  }
+
+  if (!pairing->active()) {
+    LOG(WARNING) << "PIN display for an inactive pairing";
+    return;
+  }
+
+  device::BluetoothDevice::PairingDelegate* pairing_delegate =
+      pairing->pairing_delegate();
+
+  if (!pairing_delegate) {
+    LOG(WARNING) << "PIN display for an unknown delegate";
+    return;
+  }
+
+  pairing_delegate->DisplayPinCode(device, pincode);
+}
+
+void BluetoothAdapterFloss::AdapterPinRequest(
+    const FlossDeviceId& remote_device,
+    uint32_t cod,
+    bool min_16_digit) {
+  BluetoothDeviceFloss* device =
+      static_cast<BluetoothDeviceFloss*>(GetDevice(remote_device.address));
+
+  if (!device) {
+    LOG(WARNING) << "PIN request for an unknown device";
+    return;
+  }
+
+  if (min_16_digit) {
+    LOG(WARNING) << "16-digit pin is not supported";
+    return;
+  }
+
+  BluetoothPairingFloss* pairing = device->pairing();
+
+  // Initiate pairing data for the incoming bonding.
+  if (!pairing) {
+    device::BluetoothDevice::PairingDelegate* pairing_delegate =
+        DefaultPairingDelegate();
+    if (pairing_delegate) {
+      pairing = device->BeginPairing(pairing_delegate);
+    }
+  }
+
+  if (!pairing->active()) {
+    LOG(WARNING) << "PIN request for an inactive pairing";
+    return;
+  }
+
+  device::BluetoothDevice::PairingDelegate* pairing_delegate =
+      pairing->pairing_delegate();
+
+  if (!pairing_delegate) {
+    LOG(WARNING) << "PIN request for an unknown delegate";
+    return;
+  }
+
+  pairing->SetPairingExpectation(
+      BluetoothPairingFloss::PairingExpectation::kPinCode);
+  pairing_delegate->RequestPinCode(device);
+}
+
 void BluetoothAdapterFloss::DeviceBondStateChanged(
     const FlossDeviceId& remote_device,
     uint32_t status,
@@ -786,7 +1055,7 @@ void BluetoothAdapterFloss::DeviceBondStateChanged(
   std::string canonical_address =
       device::CanonicalizeBluetoothAddress(remote_device.address);
 
-  if (!base::Contains(devices_, canonical_address)) {
+  if (!devices_.contains(canonical_address)) {
     LOG(WARNING) << "Received BondStateChanged for a non-existent device";
     return;
   }
@@ -799,8 +1068,15 @@ void BluetoothAdapterFloss::DeviceBondStateChanged(
       static_cast<BluetoothDeviceFloss*>(devices_[canonical_address].get());
 
   if (status != 0) {
-    LOG(ERROR) << "Received BondStateChanged with error status = " << status;
-    device->SetBondState(bond_state);
+    if (device->pairing()) {
+      // Mark that no actions should be triggered for pairing delegate.
+      device->pairing()->SetActive(false);
+    }
+    LOG(ERROR) << "Received BondStateChanged with error status = " << status
+               << " for " << remote_device.address;
+    device->SetBondState(bond_state,
+                         FlossDBusClient::BtifStatusToConnectErrorCode(
+                             static_cast<FlossDBusClient::BtifStatus>(status)));
     if (bond_state == FlossAdapterClient::BondState::kNotBonded) {
       // Since we're no longer bonded, update connection state so that
       // ConnectCallback can process the error correctly.
@@ -810,7 +1086,6 @@ void BluetoothAdapterFloss::DeviceBondStateChanged(
     NotifyDevicePairedChanged(device, device->IsPaired());
 
     // TODO(b/192289534): Record status in UMA.
-    device->TriggerConnectCallback(BtifStatusToConnectErrorCode(status));
     return;
   }
 
@@ -818,13 +1093,11 @@ void BluetoothAdapterFloss::DeviceBondStateChanged(
     return;
   }
 
-  device->SetBondState(bond_state);
+  device->SetBondState(bond_state, std::nullopt);
   NotifyDeviceChanged(device);
   NotifyDevicePairedChanged(device, device->IsPaired());
 
-  if (bond_state == FlossAdapterClient::BondState::kBonded) {
-    device->ConnectAllEnabledProfiles();
-  } else if (bond_state == FlossAdapterClient::BondState::kNotBonded) {
+  if (bond_state == FlossAdapterClient::BondState::kNotBonded) {
     // If we're no longer bonded (or paired/connected), we should clear the
     // device so it doesn't show up in found devices list.
     AdapterClearedDevice(remote_device);
@@ -843,7 +1116,7 @@ void BluetoothAdapterFloss::AdapterDeviceConnected(
   if (!device) {
     BLUETOOTH_LOG(EVENT) << "Adding newly connected device to devices_ map: "
                          << device_id.address;
-    AdapterFoundDevice(device_id);
+    UpdateDeviceProperties(false, device_id);
     return;
   }
 
@@ -861,7 +1134,28 @@ void BluetoothAdapterFloss::AdapterDeviceConnected(
   }
 }
 
-absl::optional<device::BluetoothDevice::BatteryType> variant_to_battery_type(
+void BluetoothAdapterFloss::AdapterDeviceConnectionFailed(
+    const FlossDeviceId& device_id,
+    uint32_t status) {
+  DCHECK(FlossDBusManager::Get());
+  DCHECK(IsPresent());
+
+  BLUETOOTH_LOG(EVENT) << __func__ << ": " << device_id
+                       << ", status: " << status;
+
+  BluetoothDeviceFloss* device =
+      static_cast<BluetoothDeviceFloss*>(GetDevice(device_id.address));
+  if (!device) {
+    LOG(WARNING) << "Connect failed for an unknown device "
+                 << device_id.address;
+    return;
+  }
+
+  device->OnDeviceConnectionFailed(
+      static_cast<FlossDBusClient::BtifStatus>(status));
+}
+
+std::optional<device::BluetoothDevice::BatteryType> variant_to_battery_type(
     const std::string& variant) {
   std::unordered_map<std::string, device::BluetoothDevice::BatteryType>
       battery_type_lookup = {
@@ -871,8 +1165,8 @@ absl::optional<device::BluetoothDevice::BatteryType> variant_to_battery_type(
            device::BluetoothDevice::BatteryType::kRightBudTrueWireless},
           {"case", device::BluetoothDevice::BatteryType::kCaseTrueWireless},
       };
-  if (!base::Contains(battery_type_lookup, variant)) {
-    return absl::nullopt;
+  if (!battery_type_lookup.contains(variant)) {
+    return std::nullopt;
   }
   return battery_type_lookup[variant];
 }
@@ -887,7 +1181,7 @@ void BluetoothAdapterFloss::BatteryInfoUpdated(std::string remote_address,
   }
 
   for (const auto& battery : battery_set.batteries) {
-    absl::optional<device::BluetoothDevice::BatteryType> battery_type =
+    std::optional<device::BluetoothDevice::BatteryType> battery_type =
         variant_to_battery_type(battery.variant);
     if (!battery_type) {
       LOG(WARNING) << "Unable to convert to battery_type from "
@@ -931,7 +1225,7 @@ BluetoothAdapterFloss::RetrieveGattConnectedDevicesWithDiscoveryFilter(
 #if BUILDFLAG(IS_CHROMEOS)
 void BluetoothAdapterFloss::DevicePolicyEffectChanged(
     const FlossDeviceId& device_id,
-    const absl::optional<PolicyEffect>& effect) {
+    const std::optional<PolicyEffect>& effect) {
   BLUETOOTH_LOG(EVENT) << __func__ << ": " << device_id;
 
   BluetoothDeviceFloss* device =
@@ -950,7 +1244,7 @@ void BluetoothAdapterFloss::ServiceAllowlistChanged(
     const std::vector<device::BluetoothUUID>& allowlist) {
   std::vector<std::string> uuid_str(allowlist.size());
 
-  base::ranges::transform(
+  std::ranges::transform(
       allowlist, uuid_str.begin(),
       [](device::BluetoothUUID dev) { return dev.canonical_value(); });
 
@@ -1014,6 +1308,16 @@ void BluetoothAdapterFloss::RegisterAdvertisement(
   advertisements_.emplace_back(advertisement);
 }
 
+#if BUILDFLAG(IS_CHROMEOS)
+bool BluetoothAdapterFloss::IsExtendedAdvertisementsAvailable() const {
+  if (!IsPresent()) {
+    return false;
+  }
+
+  return FlossDBusManager::Get()->GetAdapterClient()->IsExtAdvSupported();
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
 void BluetoothAdapterFloss::SetAdvertisingInterval(
     const base::TimeDelta& min,
     const base::TimeDelta& max,
@@ -1026,9 +1330,9 @@ void BluetoothAdapterFloss::SetAdvertisingInterval(
       std::min(static_cast<int64_t>(std::numeric_limits<uint16_t>::max()),
                max.InMilliseconds()));
 
-  // TODO(b/253718595): Support a 'no preference' option so Floss can choose a
-  // default value for the advertising interval. We are temporarily performing
-  // parameter checking to fulfill existing callers' expectations.
+  // Parameter checking for the advertising interval is performed to fulfill
+  // existing callers' expectations, as a 'no preference' option is not
+  // supported. See b/253718595 for more details.
   if (min_ms < kMinIntervalMs || max_ms > kMaxIntervalMs || min_ms > max_ms) {
     std::move(error_callback)
         .Run(device::BluetoothAdvertisement::
@@ -1055,18 +1359,20 @@ void BluetoothAdapterFloss::ResetAdvertising(
 
 void BluetoothAdapterFloss::ConnectDevice(
     const std::string& address,
-    const absl::optional<device::BluetoothDevice::AddressType>& address_type,
+    const std::optional<device::BluetoothDevice::AddressType>& address_type,
     ConnectDeviceCallback callback,
     ConnectDeviceErrorCallback error_callback) {
   // On Floss, ACL and RFCOMM connection are done with
   // createRfcommSocketToServiceRecord(UUID). This should be called after
   // ConnectDevice. Since all that is required on Floss for insecure connection
   // is an address, this function currently just creates a device pointer.
-  // TODO(b/259725491): This function should actually create an ACL connection.
+  // TODO(b/269500327): This behavior is actually a better design. We should
+  // rename this function to CreateDevice which does only device creation and
+  // let the caller decide what to do with it (Connect, Pair, etc).
   BluetoothDeviceFloss* device_ptr;
   std::string canonical_address = device::CanonicalizeBluetoothAddress(address);
 
-  if (base::Contains(devices_, canonical_address)) {
+  if (devices_.contains(canonical_address)) {
     device_ptr =
         static_cast<BluetoothDeviceFloss*>(devices_[canonical_address].get());
   } else {
@@ -1081,7 +1387,7 @@ void BluetoothAdapterFloss::ConnectDevice(
 
 void BluetoothAdapterFloss::AddLocalGattService(
     std::unique_ptr<BluetoothLocalGattServiceFloss> service) {
-  DCHECK(!base::Contains(owned_gatt_services_, service->GetIdentifier()));
+  DCHECK(!owned_gatt_services_.contains(service->GetIdentifier()));
   owned_gatt_services_[service->GetIdentifier()] = std::move(service);
 }
 
@@ -1097,7 +1403,6 @@ void BluetoothAdapterFloss::RemoveLocalGattService(
     return;
   }
 
-  // TODO: Unregister registered service.
   owned_gatt_services_.erase(service_iter);
 }
 
@@ -1108,28 +1413,47 @@ device::BluetoothLocalGattService* BluetoothAdapterFloss::GetGattService(
                                                : service->second.get();
 }
 
+base::WeakPtr<device::BluetoothLocalGattService>
+BluetoothAdapterFloss::CreateLocalGattService(
+    const device::BluetoothUUID& uuid,
+    bool is_primary,
+    device::BluetoothLocalGattService::Delegate* delegate) {
+  return floss::BluetoothLocalGattServiceFloss::Create(this, uuid, is_primary,
+                                                       delegate);
+}
+
 void BluetoothAdapterFloss::RegisterGattService(
+    BluetoothLocalGattServiceFloss* service) {
+  FlossDBusManager::Get()->GetGattManagerClient()->AddService(
+      base::BindOnce(&BluetoothAdapterFloss::OnGattServiceAdded,
+                     weak_ptr_factory_.GetWeakPtr(), service),
+      service->ToGattService());
+}
+
+void BluetoothAdapterFloss::OnGattServiceAdded(
     BluetoothLocalGattServiceFloss* service,
-    base::OnceClosure callback,
-    device::BluetoothGattService::ErrorCallback error_callback) {
-  // TODO: Forced success. Update when GATT server work completed. Route this
-  // request to the GATT manager client to have it translated into a DBUS call.
-  // The daemon should callback with an updated GATT service structure
-  // containing the registered instance ID/handle. Design a way to update the
-  // instance ID/handle for the service object while allowing other applications
-  // to access them through old identifiers.
-  service->SetRegistered(true);
-  std::move(callback).Run();
+    DBusResult<Void> ret) {
+  if (!ret.has_value()) {
+    service->GattServerServiceAdded(GattStatus::kError,
+                                    service->ToGattService());
+  }
 }
 
 void BluetoothAdapterFloss::UnregisterGattService(
+    BluetoothLocalGattServiceFloss* service) {
+  FlossDBusManager::Get()->GetGattManagerClient()->RemoveService(
+      base::BindOnce(&BluetoothAdapterFloss::OnGattServiceRemoved,
+                     weak_ptr_factory_.GetWeakPtr(), service),
+      service->InstanceId());
+}
+
+void BluetoothAdapterFloss::OnGattServiceRemoved(
     BluetoothLocalGattServiceFloss* service,
-    base::OnceClosure callback,
-    device::BluetoothGattService::ErrorCallback error_callback) {
-  DCHECK(FlossDBusManager::Get());
-  // TODO: Forced success. Update when GATT server work completed.
-  service->SetRegistered(false);
-  std::move(callback).Run();
+    DBusResult<Void> ret) {
+  if (!ret.has_value()) {
+    service->GattServerServiceRemoved(GattStatus::kError,
+                                      service->InstanceId());
+  }
 }
 
 bool BluetoothAdapterFloss::SendValueChanged(
@@ -1139,7 +1463,14 @@ bool BluetoothAdapterFloss::SendValueChanged(
     return false;
   }
 
-  // TODO: Forced success. Update when GATT server work completed.
+  bool confirm =
+      characteristic->CccdNotificationType() ==
+      device::BluetoothLocalGattCharacteristic::NotificationType::kIndication;
+  std::string service_name =
+      FlossDBusManager::Get()->GetGattManagerClient()->ServiceName();
+  FlossDBusManager::Get()->GetGattManagerClient()->ServerSendNotification(
+      base::DoNothing(), service_name, characteristic->InstanceId(), confirm,
+      value);
   return true;
 }
 
@@ -1152,6 +1483,17 @@ void BluetoothAdapterFloss::SetServiceAllowList(const UUIDList& uuids,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                      std::move(error_callback)),
       uuids);
+}
+
+void BluetoothAdapterFloss::SetSimpleSecurePairingEnabled(
+    bool enabled,
+    base::OnceClosure callback,
+    ErrorCallback error_callback) {
+  FlossDBusManager::Get()->GetAdminClient()->SetSimpleSecurePairingEnabled(
+      base::BindOnce(&BluetoothAdapterFloss::OnMethodResponse,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback),
+                     std::move(error_callback)),
+      enabled);
 }
 
 std::unique_ptr<device::BluetoothLowEnergyScanSession>
@@ -1170,19 +1512,67 @@ BluetoothAdapterFloss::StartLowEnergyScanSession(
 
 device::BluetoothAdapter::LowEnergyScanSessionHardwareOffloadingStatus
 BluetoothAdapterFloss::GetLowEnergyScanSessionHardwareOffloadingStatus() {
-  NOTIMPLEMENTED();
-  return LowEnergyScanSessionHardwareOffloadingStatus::kNotSupported;
+  if (!IsPowered()) {
+    BLUETOOTH_LOG(ERROR)
+        << "GetLowEnergyScanSessionHardwareOffloadingStatus called when "
+        << "adapter is not powered.";
+    return device::BluetoothAdapter::
+        LowEnergyScanSessionHardwareOffloadingStatus::kUndetermined;
+  }
+  return FlossDBusManager::Get()->GetGattManagerClient()->GetMsftSupported()
+             ? device::BluetoothAdapter::
+                   LowEnergyScanSessionHardwareOffloadingStatus::kSupported
+             : device::BluetoothAdapter::
+                   LowEnergyScanSessionHardwareOffloadingStatus::kNotSupported;
 }
-#endif  // BUILDFLAG(IS_CHROMEOS)
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+std::vector<device::BluetoothAdapter::BluetoothRole>
+BluetoothAdapterFloss::GetSupportedRoles() {
+  std::vector<BluetoothAdapter::BluetoothRole> roles;
+
+  if (!IsPresent()) {
+    return roles;
+  }
+
+  for (auto role :
+       FlossDBusManager::Get()->GetAdapterClient()->GetSupportedRoles()) {
+    switch (role) {
+      case FlossAdapterClient::BtAdapterRole::kCentral:
+        roles.push_back(BluetoothAdapter::BluetoothRole::kCentral);
+        break;
+      case FlossAdapterClient::BtAdapterRole::kPeripheral:
+        roles.push_back(BluetoothAdapter::BluetoothRole::kPeripheral);
+        break;
+      case FlossAdapterClient::BtAdapterRole::kCentralPeripheral:
+        roles.push_back(BluetoothAdapter::BluetoothRole::kCentralPeripheral);
+        break;
+      default:
+        BLUETOOTH_LOG(EVENT)
+            << __func__ << ": Unknown role: " << static_cast<uint32_t>(role);
+    }
+  }
+
+  return roles;
+}
+
 void BluetoothAdapterFloss::SetStandardChromeOSAdapterName() {
-  DCHECK(IsPresent());
+  if (!IsPresent()) {
+    BLUETOOTH_LOG(ERROR)
+        << "SetStandardChromeOSAdapterName called when adapter is not present.";
+    return;
+  }
+
   std::string alias = ash::GetDeviceBluetoothName(GetAddress());
   FlossDBusManager::Get()->GetAdapterClient()->SetName(base::DoNothing(),
                                                        alias);
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+
+void BluetoothAdapterFloss::ConfigureBluetoothTelephony(bool enabled) {
+  FlossDBusManager::Get()->GetBluetoothTelephonyClient()->SetPhoneOpsEnabled(
+      base::DoNothing(), enabled);
+}
+
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 void BluetoothAdapterFloss::ScannerRegistered(device::BluetoothUUID uuid,
                                               uint8_t scanner_id,
@@ -1191,7 +1581,7 @@ void BluetoothAdapterFloss::ScannerRegistered(device::BluetoothUUID uuid,
                        << ", scanner id = " << static_cast<int>(scanner_id)
                        << ", status = " << static_cast<int>(status);
 
-  if (!base::Contains(scanners_, uuid)) {
+  if (!scanners_.contains(uuid)) {
     VLOG(1) << "ScannerRegistered but no longer exists " << uuid;
     return;
   }
@@ -1206,57 +1596,84 @@ void BluetoothAdapterFloss::ScannerRegistered(device::BluetoothUUID uuid,
   FlossDBusManager::Get()->GetLEScanClient()->StartScan(
       base::BindOnce(&BluetoothAdapterFloss::OnStartScan,
                      weak_ptr_factory_.GetWeakPtr(), uuid, scanner_id),
-      scanner_id, ScanSettings{}, scanners_[uuid]->GetFlossScanFilter());
+      scanner_id, std::nullopt, scanners_[uuid]->GetFlossScanFilter());
 }
 
 void BluetoothAdapterFloss::ScanResultReceived(ScanResult scan_result) {
   BLUETOOTH_LOG(DEBUG) << __func__ << ": " << scan_result.address;
 
-  BluetoothDeviceFloss* device_ptr;
-  std::string canonical_address =
-      device::CanonicalizeBluetoothAddress(scan_result.address);
+  bool already_found = devices_.contains(
+      device::CanonicalizeBluetoothAddress(scan_result.address));
 
-  if (base::Contains(devices_, canonical_address)) {
-    device_ptr =
-        static_cast<BluetoothDeviceFloss*>(devices_[canonical_address].get());
-    device_ptr->UpdateTimestamp();
-  } else {
-    auto device = CreateBluetoothDeviceFloss(FlossDeviceId(
-        {.address = scan_result.address, .name = scan_result.name}));
-    device_ptr = device.get();
-    devices_.emplace(canonical_address, std::move(device));
-  }
+  BluetoothDeviceFloss* device_ptr =
+      CreateOrGetDeviceForUpdate(scan_result.address, scan_result.name);
 
+  std::vector<device::BluetoothUUID> service_uuids = scan_result.service_uuids;
   device::BluetoothDevice::ServiceDataMap service_data_map;
-  for (const auto& [uuid, bytes] : scan_result.service_data) {
-    service_data_map[device::BluetoothUUID(uuid)] = bytes;
+  for (const auto& [uuid_str, bytes] : scan_result.service_data) {
+    auto uuid = device::BluetoothUUID(uuid_str);
+    service_uuids.push_back(uuid);
+    service_data_map[uuid] = bytes;
   }
 
-  device_ptr->UpdateAdvertisementData(
-      scan_result.rssi, scan_result.flags, scan_result.service_uuids,
-      scan_result.tx_power, service_data_map,
-      device::BluetoothDevice::ManufacturerDataMap(
-          scan_result.manufacturer_data.begin(),
-          scan_result.manufacturer_data.end()));
+  device::BluetoothDevice::ManufacturerDataMap manufacturer_data_map(
+      scan_result.manufacturer_data.begin(),
+      scan_result.manufacturer_data.end());
+  device_ptr->UpdateAdvertisementData(scan_result.rssi, scan_result.flags,
+                                      service_uuids, scan_result.tx_power,
+                                      service_data_map, manufacturer_data_map);
 
-  for (auto& observer : observers_)
+  for (auto& observer : observers_) {
     observer.DeviceAdvertisementReceived(this, device_ptr, scan_result.rssi,
                                          scan_result.adv_data);
+    observer.DeviceAdvertisementReceived(
+        scan_result.address, /*device_name=*/device_ptr->GetName(),
+        /*advertisement_name=*/scan_result.name, scan_result.rssi,
+        scan_result.tx_power, device_ptr->GetAppearance(), service_uuids,
+        service_data_map, manufacturer_data_map);
+  }
 
-  // All scanners share scan results
-  for (const auto& [key, scanner] : scanners_) {
-    scanner->OnDeviceFound(device_ptr);
+  // Update properties and emit a |DeviceFound| if newly found.
+  // Also explicitly call |DeviceChanged| if already found since
+  // |UpdateDeviceProperties| doesn't always emit |DeviceChanged|.
+  UpdateDeviceProperties(false, device_ptr->AsFlossDeviceId());
+  if (already_found) {
+    NotifyDeviceChanged(device_ptr);
   }
 }
 
-void BluetoothAdapterFloss::ScanResultLost(ScanResult scan_result) {
+void BluetoothAdapterFloss::AdvertisementFound(uint8_t scanner_id,
+                                               ScanResult scan_result) {
+  BLUETOOTH_LOG(DEBUG) << __func__ << ": " << scan_result.address;
+
+  CreateOrGetDeviceForUpdate(scan_result.address, scan_result.name);
+
+  // MSFT event does not arrive together with the advertisement data, but they
+  // always arrive very close to each other.
+  // Ideally Floss daemon should consolidate the advertisement data into the
+  // AdvertisementFound callback, but for now the workaround is to delay
+  // notifying client for a little bit to practically be sure that the client
+  // will have updated the advertisement data by the time they hear
+  // OnDeviceFound.
+  // TODO(b/271165074): Fix this by combining AdvertisementFound with the first
+  // advertisement data.
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(&BluetoothAdapterFloss::NotifyDeviceFound,
+                     weak_ptr_factory_.GetWeakPtr(), scanner_id,
+                     device::CanonicalizeBluetoothAddress(scan_result.address)),
+      base::Seconds(1));
+}
+
+void BluetoothAdapterFloss::AdvertisementLost(uint8_t scanner_id,
+                                              ScanResult scan_result) {
   BLUETOOTH_LOG(DEBUG) << __func__ << ": " << scan_result.address;
 
   auto device = CreateBluetoothDeviceFloss(FlossDeviceId(
       {.address = scan_result.address, .name = scan_result.name}));
   std::string canonical_address =
       device::CanonicalizeBluetoothAddress(device->GetAddress());
-  if (!base::Contains(devices_, canonical_address)) {
+  if (!devices_.contains(canonical_address)) {
     BLUETOOTH_LOG(EVENT) << __func__
                          << ": Device lost but never previously found: "
                          << scan_result.address;
@@ -1264,23 +1681,27 @@ void BluetoothAdapterFloss::ScanResultLost(ScanResult scan_result) {
   }
 
   BluetoothDeviceFloss* device_ptr = device.get();
-  BluetoothDeviceFloss* found_ptr =
-      static_cast<BluetoothDeviceFloss*>(GetDevice(device->GetAddress()));
-
-  // Only remove devices from devices_ that are not paired or connected.
-  if (!found_ptr || (!found_ptr->IsPaired() && !found_ptr->IsConnected())) {
-    devices_.erase(canonical_address);
-  }
-
-  // All scanners share scan results
   for (const auto& [key, scanner] : scanners_) {
-    scanner->OnDeviceLost(device_ptr);
+    if (scanner->GetScannerId() == scanner_id) {
+      scanner->OnDeviceLost(device_ptr);
+    }
   }
 }
 
 void BluetoothAdapterFloss::RemovePairingDelegateInternal(
     device::BluetoothDevice::PairingDelegate* pairing_delegate) {
-  NOTIMPLEMENTED();
+  // Check if any device is using the pairing delegate.
+  // If so, clear the pairing context which will make any responses no-ops.
+  for (auto& [_, device] : devices_) {
+    BluetoothDeviceFloss* device_floss =
+        static_cast<BluetoothDeviceFloss*>(device.get());
+
+    BluetoothPairingFloss* pairing = device_floss->pairing();
+    if (pairing && pairing->pairing_delegate() == pairing_delegate) {
+      BLUETOOTH_LOG(DEBUG) << __func__ << ": " << device_floss->GetAddress();
+      device_floss->ResetPairing();
+    }
+  }
 }
 
 base::WeakPtr<device::BluetoothAdapter> BluetoothAdapterFloss::GetWeakPtr() {
@@ -1289,7 +1710,6 @@ base::WeakPtr<device::BluetoothAdapter> BluetoothAdapterFloss::GetWeakPtr() {
 
 bool BluetoothAdapterFloss::SetPoweredImpl(bool powered) {
   NOTREACHED();
-  return false;
 }
 
 void BluetoothAdapterFloss::StartScanWithFilter(
@@ -1304,6 +1724,16 @@ void BluetoothAdapterFloss::StartScanWithFilter(
   }
 
   BLUETOOTH_LOG(EVENT) << __func__;
+
+#if BUILDFLAG(IS_CHROMEOS)
+  // First start LE scan before discovery
+  if (!le_discovery_session_) {
+    le_discovery_session_ = StartLowEnergyScanSession(
+        nullptr, static_cast<BleDelegateForDiscovery*>(
+                     le_discovery_session_delegate_.get())
+                     ->GetWeakPtr());
+  }
+#endif
 
   // TODO(b/192251662) - Support scan filtering. For now, start scanning with no
   // filters in place.
@@ -1345,13 +1775,21 @@ void BluetoothAdapterFloss::StopScan(DiscoverySessionResultCallback callback) {
   FlossDBusManager::Get()->GetAdapterClient()->CancelDiscovery(
       base::BindOnce(&BluetoothAdapterFloss::OnStopDiscovery,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
+
+  // Deleting the scan session will stop any active scanning.
+  le_discovery_session_.reset(nullptr);
 }
 
 void BluetoothAdapterFloss::OnRegisterScanner(
     base::WeakPtr<BluetoothLowEnergyScanSessionFloss> scan_session,
     DBusResult<device::BluetoothUUID> ret) {
-  if (!ret.has_value()) {
-    BLUETOOTH_LOG(ERROR) << "Failed RegisterScanner: " << ret.error();
+  if (!scan_session) {
+    BLUETOOTH_LOG(ERROR)
+        << "Scan session removed before registration completed.";
+    return;
+  }
+  if (!ret.has_value() || ret.value().canonical_value() == kEmptyUuidStr) {
+    BLUETOOTH_LOG(ERROR) << "Failed RegisterScanner.";
     scan_session->OnRelease();
     return;
   }
@@ -1364,7 +1802,7 @@ void BluetoothAdapterFloss::OnStartScan(
     device::BluetoothUUID uuid,
     uint8_t scanner_id,
     DBusResult<FlossDBusClient::BtifStatus> ret) {
-  if (!base::Contains(scanners_, uuid)) {
+  if (!scanners_.contains(uuid)) {
     VLOG(1) << "Started scanning but scanner no longer exists " << uuid;
     return;
   }
@@ -1390,22 +1828,25 @@ void BluetoothAdapterFloss::OnLowEnergyScanSessionDestroyed(
   BLUETOOTH_LOG(EVENT) << __func__ << ": UUID = " << uuid_str;
 
   device::BluetoothUUID uuid = device::BluetoothUUID(uuid_str);
-  if (!base::Contains(scanners_, uuid)) {
+  if (!scanners_.contains(uuid)) {
     return;
   }
 
   uint8_t scanner_id = scanners_[uuid]->GetScannerId();
   scanners_.erase(uuid);
 
-  FlossDBusManager::Get()->GetLEScanClient()->UnregisterScanner(
-      base::BindOnce(&BluetoothAdapterFloss::OnUnregisterScanner,
-                     weak_ptr_factory_.GetWeakPtr(), scanner_id),
-      scanner_id);
+  if (IsPowered()) {
+    FlossDBusManager::Get()->GetLEScanClient()->UnregisterScanner(
+        base::BindOnce(&BluetoothAdapterFloss::OnUnregisterScanner,
+                       weak_ptr_factory_.GetWeakPtr(), scanner_id),
+        scanner_id);
+  }
 }
 
 void BluetoothAdapterFloss::OnUnregisterScanner(uint8_t scanner_id,
                                                 DBusResult<bool> ret) {
-  BLUETOOTH_LOG(EVENT) << __func__ << ": scanner_id = " << scanner_id;
+  BLUETOOTH_LOG(EVENT) << __func__
+                       << ": scanner_id = " << static_cast<int>(scanner_id);
 
   if (!ret.has_value()) {
     BLUETOOTH_LOG(ERROR) << "Failed UnregisterScanner: " << ret.error();

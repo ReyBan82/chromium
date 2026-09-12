@@ -25,8 +25,10 @@
 
 #include "third_party/blink/renderer/core/editing/spellcheck/spell_check_requester.h"
 
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
 #include "third_party/blink/public/platform/task_type.h"
+#include "third_party/blink/public/web/web_spelling_marker.h"
 #include "third_party/blink/public/web/web_text_check_client.h"
 #include "third_party/blink/public/web/web_text_checking_completion.h"
 #include "third_party/blink/public/web/web_text_checking_result.h"
@@ -34,7 +36,9 @@
 #include "third_party/blink/renderer/core/dom/node.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/core/editing/ephemeral_range.h"
+#include "third_party/blink/renderer/core/editing/markers/document_marker.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker_controller.h"
+#include "third_party/blink/renderer/core/editing/spellcheck/spell_check_requester_helper.h"
 #include "third_party/blink/renderer/core/editing/spellcheck/spell_checker.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/html/forms/text_control_element.h"
@@ -45,11 +49,27 @@ namespace blink {
 namespace {
 
 static Vector<TextCheckingResult> ToCoreResults(
-    const WebVector<WebTextCheckingResult>& results) {
+    const std::vector<WebTextCheckingResult>& results) {
   Vector<TextCheckingResult> core_results;
   for (size_t i = 0; i < results.size(); ++i)
     core_results.push_back(results[i]);
   return core_results;
+}
+
+std::vector<WebSpellingMarker> MapToWebSpellingMarkers(
+    const blink::DocumentMarkerVector& spelling_markers) {
+  std::vector<WebSpellingMarker> web_spelling_markers;
+  for (const auto& marker : spelling_markers) {
+    if (marker->GetType() == DocumentMarker::kSpelling ||
+        marker->GetType() == DocumentMarker::kGrammar ||
+        // TODO(crbug.com/479924245): improve cast logic for SuggestionMarker
+        (IsA<SuggestionMarker>(marker.Get()) &&
+         (To<SuggestionMarker>(marker.Get())->IsGrammarError() ||
+          To<SuggestionMarker>(marker.Get())->IsMisspelling()))) {
+      web_spelling_markers.emplace_back(*marker);
+    }
+  }
+  return web_spelling_markers;
 }
 
 class WebTextCheckingCompletionImpl : public WebTextCheckingCompletion {
@@ -58,7 +78,7 @@ class WebTextCheckingCompletionImpl : public WebTextCheckingCompletion {
       : request_(request) {}
 
   void DidFinishCheckingText(
-      const WebVector<WebTextCheckingResult>& results) override {
+      const std::vector<WebTextCheckingResult>& results) override {
     if (request_)
       request_->DidSucceed(ToCoreResults(results));
     request_ = nullptr;
@@ -82,15 +102,22 @@ class WebTextCheckingCompletionImpl : public WebTextCheckingCompletion {
 
 SpellCheckRequest::SpellCheckRequest(Range* checking_range,
                                      const String& text,
-                                     int request_number)
-    : requester_(nullptr),
-      checking_range_(checking_range),
+                                     int request_number,
+                                     bool should_force_refresh)
+    : checking_range_(checking_range),
       root_editable_element_(
           blink::RootEditableElement(*checking_range_->startContainer())),
       text_(text),
-      request_number_(request_number) {
+      request_number_(request_number),
+      should_force_refresh_(should_force_refresh) {
   DCHECK(checking_range_);
   DCHECK(checking_range_->IsConnected());
+
+  if (ShouldSendSpellingMarkersInfo()) {
+    spelling_markers_ = GetSpellingMarkersFromRange(
+        checking_range_->startContainer()->GetDocument(),
+        root_editable_element_, EphemeralRange(checking_range_));
+  }
 }
 
 SpellCheckRequest::~SpellCheckRequest() = default;
@@ -99,6 +126,7 @@ void SpellCheckRequest::Trace(Visitor* visitor) const {
   visitor->Trace(requester_);
   visitor->Trace(checking_range_);
   visitor->Trace(root_editable_element_);
+  visitor->Trace(spelling_markers_);
 }
 
 void SpellCheckRequest::Dispose() {
@@ -109,7 +137,8 @@ void SpellCheckRequest::Dispose() {
 // static
 SpellCheckRequest* SpellCheckRequest::Create(
     const EphemeralRange& checking_range,
-    int request_number) {
+    int request_number,
+    bool should_force_refresh) {
   if (checking_range.IsNull())
     return nullptr;
   if (!blink::RootEditableElement(
@@ -126,7 +155,7 @@ SpellCheckRequest* SpellCheckRequest::Create(
   Range* checking_range_object = CreateRange(checking_range);
 
   SpellCheckRequest* request = MakeGarbageCollected<SpellCheckRequest>(
-      checking_range_object, text, request_number);
+      checking_range_object, text, request_number, should_force_refresh);
   if (request->RootEditableElement())
     return request;
 
@@ -183,12 +212,16 @@ void SpellCheckRequester::TimerFiredToProcessQueuedRequest() {
 }
 
 bool SpellCheckRequester::RequestCheckingFor(const EphemeralRange& range) {
-  return RequestCheckingFor(range, 0);
+  return RequestCheckingFor(range, /*request_num=*/0,
+                            /*should_force_refresh=*/false);
 }
 
-bool SpellCheckRequester::RequestCheckingFor(const EphemeralRange& range,
-                                             int request_num) {
-  SpellCheckRequest* request = SpellCheckRequest::Create(range, request_num);
+bool SpellCheckRequester::RequestCheckingFor(
+    const EphemeralRange& range,
+    int request_num,
+    bool should_force_refresh) {
+  SpellCheckRequest* request =
+      SpellCheckRequest::Create(range, request_num, should_force_refresh);
   if (!request)
     return false;
 
@@ -231,6 +264,10 @@ void SpellCheckRequester::InvokeRequest(SpellCheckRequest* request) {
   if (WebTextCheckClient* text_checker_client = GetTextCheckerClient()) {
     text_checker_client->RequestCheckingOfText(
         processing_request_->GetText(),
+        MapToWebSpellingMarkers(processing_request_->GetSpellingMarkers()),
+        processing_request_->ShouldForceRefresh()
+            ? WebTextCheckClient::ShouldForceRefreshTextCheckService::kYes
+            : WebTextCheckClient::ShouldForceRefreshTextCheckService::kNo,
         std::make_unique<WebTextCheckingCompletionImpl>(request));
   }
 }
@@ -259,8 +296,8 @@ void SpellCheckRequester::EnqueueRequest(SpellCheckRequest* request) {
   // overwrite each other.
   if (!continuation) {
     RequestQueue::const_iterator same_element_request =
-        base::ranges::find(request_queue_, request->RootEditableElement(),
-                           &SpellCheckRequest::RootEditableElement);
+        std::ranges::find(request_queue_, request->RootEditableElement(),
+                          &SpellCheckRequest::RootEditableElement);
     if (same_element_request != request_queue_.end())
       request_queue_.erase(same_element_request);
   }
@@ -273,8 +310,6 @@ bool SpellCheckRequester::EnsureValidRequestQueueFor(int sequence) {
   if (processing_request_->Sequence() == sequence)
     return true;
   NOTREACHED();
-  request_queue_.clear();
-  return false;
 }
 
 void SpellCheckRequester::DidCheck(int sequence) {
@@ -285,8 +320,8 @@ void SpellCheckRequester::DidCheck(int sequence) {
   if (!request_queue_.empty()) {
     timer_to_process_queued_request_ = PostCancellableTask(
         *window_->GetTaskRunner(TaskType::kInternalDefault), FROM_HERE,
-        WTF::BindOnce(&SpellCheckRequester::TimerFiredToProcessQueuedRequest,
-                      WrapPersistent(this)));
+        BindOnce(&SpellCheckRequester::TimerFiredToProcessQueuedRequest,
+                 WrapPersistent(this)));
   }
 }
 

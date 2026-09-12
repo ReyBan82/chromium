@@ -9,7 +9,7 @@ const itemToDict = (item) => {
     displayFormat: item.displayFormat,
     textData: !!item.textData,
     imageData: !!item.imageData,
-    timeCopied: !!item.timeCopied
+    timeCopied: !!item.timeCopied,
   };
 };
 
@@ -23,26 +23,26 @@ function checkFullResult(result) {
       'displayFormat': 'file',
       'textData': true,
       'imageData': true,
-      'timeCopied': true
+      'timeCopied': true,
     },
     {
       'displayFormat': 'png',
       'textData': false,
       'imageData': true,
-      'timeCopied': true
+      'timeCopied': true,
     },
     {
       'displayFormat': 'text',
       'textData': true,
       'imageData': false,
-      'timeCopied': true
+      'timeCopied': true,
     },
     {
       'displayFormat': 'html',
       'textData': false,
       'imageData': true,
-      'timeCopied': true
-    }
+      'timeCopied': true,
+    },
   ]);
 }
 
@@ -53,10 +53,26 @@ function checkEmptyResult(result) {
   chrome.test.assertEq(parsed, []);
 }
 
+function multipaste() {
+  chrome.virtualKeyboardPrivate.getClipboardHistory(
+      {}, callbackPass(checkFullResult));
+}
+
+function multipasteUnderLockScreen() {
+  chrome.virtualKeyboardPrivate.getClipboardHistory(
+      {}, callbackPass(checkEmptyResult));
+}
+
+const tests_funcs_by_names = {
+  'multipaste': multipaste,
+  'multipasteUnderLockScreen': multipasteUnderLockScreen,
+};
+
 chrome.test.getConfig(function(config) {
-  const screenLocked = config.customArg;
-  chrome.test.runTests([function multipasteApi() {
-    chrome.virtualKeyboardPrivate.getClipboardHistory(
-        {}, callbackPass(screenLocked ? checkEmptyResult : checkFullResult));
-  }]);
+  const test_name = config.customArg;
+  if (test_name in tests_funcs_by_names) {
+    chrome.test.runTests([tests_funcs_by_names[test_name]]);
+  } else {
+    chrome.test.fail('Invalid test name');
+  }
 });

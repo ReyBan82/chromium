@@ -9,13 +9,16 @@
 
 #include <memory>
 
+#include "base/byte_size.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "chrome/browser/task_manager/providers/task.h"
 #include "components/favicon/core/favicon_driver_observer.h"
 
 class ProcessResourceUsage;
 
 namespace content {
+class NavigationEntry;
 class RenderFrameHost;
 class RenderProcessHost;
 class WebContents;
@@ -51,6 +54,8 @@ class RendererTask : public Task,
 
   // task_manager::Task:
   void Activate() override;
+  bool IsKillable() override;
+  bool Kill() override;
   void Refresh(const base::TimeDelta& update_interval,
                int64_t refresh_flags) override;
   Type GetType() const override;
@@ -59,8 +64,10 @@ class RendererTask : public Task,
                             int* out_error_code) const override;
   std::u16string GetProfileName() const override;
   SessionID GetTabId() const override;
-  int64_t GetV8MemoryAllocated() const override;
-  int64_t GetV8MemoryUsed() const override;
+  std::optional<base::ByteSize> GetV8MemoryAllocated() const override;
+  std::optional<base::ByteSize> GetV8MemoryUsed() const override;
+  std::optional<base::ByteSize> GetCppGCMemoryAllocated() const override;
+  std::optional<base::ByteSize> GetCppGCMemoryUsed() const override;
   bool ReportsWebCacheStats() const override;
   blink::WebCacheResourceTypeStats GetWebCacheStats() const override;
 
@@ -81,15 +88,16 @@ class RendererTask : public Task,
 
   content::WebContents* web_contents() const { return web_contents_; }
 
+  base::WeakPtr<RendererTask> AsWeakPtr();
+
  protected:
   // Returns the title of the given |web_contents|.
   static std::u16string GetTitleFromWebContents(
       content::WebContents* web_contents);
 
-  // Returns the favicon of the given |web_contents| if any, and returns
-  // |nullptr| otherwise.
-  static const gfx::ImageSkia* GetFaviconFromWebContents(
-      content::WebContents* web_contents);
+  // Returns true if the favicon of |entry| is athemeable favicon, i.e. one the
+  // UI must recolor to keep it visible against the background it's painted on.
+  static bool ShouldThemifyFaviconOfEntry(content::NavigationEntry* entry);
 
   // Prefixes the given renderer |title| with the appropriate string based on
   // whether it's an app, an extension, incognito or a background page or
@@ -100,17 +108,29 @@ class RendererTask : public Task,
                                                   bool is_incognito,
                                                   bool is_background);
 
+  // Sets the icon to the current favicon of web_contents() (see
+  // GetFaviconFromWebContents()), flagged for theming when it is a themeable
+  // favicon (see ShouldThemifyFaviconOfEntry()). Tasks whose icon is the
+  // favicon of their WebContents use this both to initialize the icon in
+  // their constructor and to refresh it from UpdateFavicon().
+  void DefaultUpdateFaviconImpl();
+
  private:
   RendererTask(const std::u16string& title,
                const gfx::ImageSkia* icon,
                content::WebContents* web_contents,
                content::RenderProcessHost* render_process_host);
 
+  // Returns the favicon of the given |web_contents| if any, and returns
+  // |nullptr| otherwise.
+  static std::unique_ptr<gfx::ImageSkia> GetFaviconFromWebContents(
+      content::WebContents* web_contents);
+
   // The WebContents of the task this object represents.
-  raw_ptr<content::WebContents> web_contents_;
+  const raw_ptr<content::WebContents> web_contents_;
 
   // The render process host of the task this object represents.
-  raw_ptr<content::RenderProcessHost> render_process_host_;
+  const raw_ptr<content::RenderProcessHost> render_process_host_;
 
   // The Mojo service wrapper that will provide us with the V8 memory usage and
   // the WebCache resource stats of the render process represented by this
@@ -121,18 +141,25 @@ class RendererTask : public Task,
   const int render_process_id_;
 
   // The allocated and used V8 memory (in bytes).
-  int64_t v8_memory_allocated_;
-  int64_t v8_memory_used_;
+  base::ByteSize v8_memory_allocated_;
+  base::ByteSize v8_memory_used_;
+
+  // The allocated and used CppGC memory (in bytes).
+  base::ByteSize cppgc_memory_allocated_;
+  base::ByteSize cppgc_memory_used_;
 
   // The WebKit resource cache statistics for this renderer.
-  blink::WebCacheResourceTypeStats webcache_stats_;
+  blink::WebCacheResourceTypeStats webcache_stats_ = {};
 
   // The profile name associated with the browser context of the render view
   // host.
   const std::u16string profile_name_;
 
-  base::TerminationStatus termination_status_;
-  int termination_error_code_;
+  base::TerminationStatus termination_status_ =
+      base::TERMINATION_STATUS_STILL_RUNNING;
+  int termination_error_code_ = 0;
+
+  base::WeakPtrFactory<RendererTask> weak_ptr_factor_{this};
 };
 
 }  // namespace task_manager

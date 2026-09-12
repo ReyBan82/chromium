@@ -5,6 +5,7 @@
 #ifndef SANDBOX_WIN_SRC_SANDBOX_TYPES_H_
 #define SANDBOX_WIN_SRC_SANDBOX_TYPES_H_
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/process/kill.h"
 #include "base/process/launch.h"
@@ -14,8 +15,7 @@ namespace sandbox {
 // Operation result codes returned by the sandbox API.
 //
 // Note: These codes are listed in a histogram and any new codes should be added
-// at the end. If the underlying type is changed then the forward declaration in
-// sandbox_init_win.h must be updated.
+// at the end.
 //
 enum ResultCode : int {
   SBOX_ALL_OK = 0,
@@ -60,7 +60,7 @@ enum ResultCode : int {
   SBOX_ERROR_DELEGATE_PRE_SPAWN = 19,
   // Could not assign process to job object.
   SBOX_ERROR_ASSIGN_PROCESS_TO_JOB_OBJECT = 20,
-  // Could not assign process to job object.
+  // Could not assign initial thread token.
   SBOX_ERROR_SET_THREAD_TOKEN = 21,
   // Could not get thread context of new process.
   SBOX_ERROR_GET_THREAD_CONTEXT = 22,
@@ -166,12 +166,20 @@ enum ResultCode : int {
   SBOX_ERROR_FAILED_TO_FREEZE_CONFIG = 69,
   // Unable to obtain the environment in the broker process.
   SBOX_ERROR_CANNOT_OBTAIN_ENVIRONMENT = 70,
+  // Unable to initialize the target configuration.
+  SBOX_ERROR_DELEGATE_INITIALIZE_CONFIG = 71,
+  // Failed to disable apphelp in the child's PEB.
+  SBOX_ERROR_DISABLING_APPHELP = 72,
+  // Note: Also update tools/metrics/histograms/enums.xml:LaunchErrorCodes.
   // Placeholder for last item of the enum.
   SBOX_ERROR_LAST
 };
 
 // If the sandbox cannot create a secure environment for the target, the
-// target will be forcibly terminated. These are the process exit codes.
+// target will be forcibly terminated. The sandbox may terminate the broker
+// process during shutdown if continuing would be unsafe. These are the process
+// exit codes. Note: keep up to date with CrashExitCodes enum in
+// tools/metrics/histograms/enums.xml.
 enum TerminationCodes {
   SBOX_FATAL_INTEGRITY = 7006,        // Could not set the integrity level.
   SBOX_FATAL_DROPTOKEN = 7007,        // Could not lower the token.
@@ -181,6 +189,7 @@ enum TerminationCodes {
   SBOX_FATAL_MITIGATION = 7011,       // Could not set the mitigation policy.
   SBOX_FATAL_MEMORY_EXCEEDED = 7012,  // Exceeded the job memory limit.
   SBOX_FATAL_WARMUP = 7013,           // Failed to warmup.
+  SBOX_FATAL_BROKER_SHUTDOWN_HUNG = 7014,  // Broker terminated in shutdown.
   SBOX_FATAL_LAST
 };
 
@@ -206,6 +215,13 @@ enum InterceptionType {
   INTERCEPTION_UNLOAD_MODULE,  // Unload the module (don't patch)
   INTERCEPTION_LAST            // Placeholder for last item in the enumeration
 };
+
+// This callback is used for returning a process launch result from
+// StartSandboxedProcess() to the child process launcher helper. The parameters
+// include the new process handle, the Win32 last error code, and the sandbox
+// ResultCode.
+using StartSandboxedProcessCallback =
+    base::OnceCallback<void(base::Process, DWORD, int)>;
 
 }  // namespace sandbox
 

@@ -2,17 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <set>
+#include <vector>
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/path_service.h"
-#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/task/current_thread.h"
 #include "base/test/bind.h"
 #include "base/test/scoped_path_override.h"
 #include "base/test/test_file_util.h"
 #include "base/test/test_future.h"
+#include "base/threading/thread_restrictions.h"
+#include "base/values.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/file_system_access/chrome_file_system_access_permission_context.h"
@@ -20,23 +23,39 @@
 #include "chrome/browser/file_system_access/file_system_access_permission_request_manager.h"
 #include "chrome/browser/safe_browsing/download_protection/download_protection_service.h"
 #include "chrome/browser/safe_browsing/safe_browsing_service.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/actions/chrome_action_id.h"
+#include "chrome/browser/ui/browser_actions.h"
+#include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/public/tab_features.h"
+#include "chrome/browser/ui/tabs/split_tab_metrics.h"
+#include "chrome/browser/ui/tabs/tab_enums.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/ui_features.h"
+#include "chrome/browser/ui/views/file_system_access/file_system_access_page_action_controller.h"
 #include "chrome/browser/ui/views/file_system_access/file_system_access_test_utils.h"
+#include "chrome/browser/ui/views/file_system_access/file_system_access_usage_bubble_view.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/frame/toolbar_button_provider.h"
-#include "chrome/browser/ui/views/page_action/page_action_icon_view.h"
+#include "chrome/browser/ui/views/location_bar/icon_label_bubble_view.h"
+#include "chrome/browser/ui/views/page_action/page_action_view_interface.h"
+#include "chrome/browser/ui/views/page_action/test_support/page_action_test_accessor.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
-#include "components/network_session_configurator/common/network_switches.h"
 #include "components/permissions/permission_util.h"
 #include "components/safe_browsing/buildflags.h"
-#include "content/public/common/content_features.h"
+#include "components/safe_browsing/content/common/file_type_policies_test_util.h"
+#include "components/tabs/public/tab_interface.h"
+#include "content/public/browser/file_system_access_permission_context.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/common/content_switches.h"
+#include "content/public/test/back_forward_cache_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/fenced_frame_test_util.h"
+#include "content/public/test/file_system_chooser_test_helpers.h"
 #include "content/public/test/prerender_test_util.h"
 #include "content/public/test/scoped_web_ui_controller_factory_registration.h"
 #include "content/public/test/test_navigation_observer.h"
@@ -44,7 +63,8 @@
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/controllable_http_response.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
-#include "third_party/blink/public/common/features.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/webui/webui_allowlist.h"
 
 using safe_browsing::ClientDownloadRequest;
@@ -54,6 +74,8 @@ using safe_browsing::ClientDownloadRequest;
 // various bits of UI and permissions checks implemented in the chrome layer.
 class FileSystemAccessBrowserTest : public InProcessBrowserTest {
  public:
+  FileSystemAccessBrowserTest() = default;
+
   void SetUp() override {
     // Create a scoped directory under %TEMP% instead of using
     // `base::ScopedTempDir::CreateUniqueTempDir`.
@@ -72,11 +94,6 @@ class FileSystemAccessBrowserTest : public InProcessBrowserTest {
   }
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    // Ignore cert errors so that URLs can be loaded from a site
-    // other than localhost (the EmbeddedTestServer serves a certificate that
-    // is valid for localhost).
-    command_line->AppendSwitch(switches::kIgnoreCertificateErrors);
-
     command_line->AppendSwitch(
         switches::kEnableExperimentalWebPlatformFeatures);
   }
@@ -89,7 +106,7 @@ class FileSystemAccessBrowserTest : public InProcessBrowserTest {
 
   bool IsFullscreen() {
     content::WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        browser()->GetTabStripModel()->GetActiveWebContents();
     return web_contents->IsFullscreen();
   }
 
@@ -101,12 +118,10 @@ class FileSystemAccessBrowserTest : public InProcessBrowserTest {
     return result;
   }
 
-  bool IsUsageIndicatorVisible(Browser* browser) {
-    auto* browser_view = BrowserView::GetBrowserViewForBrowser(browser);
-    auto* icon_view =
-        browser_view->toolbar_button_provider()->GetPageActionIconView(
-            PageActionIconType::kFileSystemAccess);
-    return icon_view && icon_view->GetVisible();
+  bool IsUsageIndicatorVisible(BrowserWindowInterface* browser) {
+    return page_actions::PageActionTestAccessor(browser,
+                                                kActionShowFileSystemAccess)
+        .GetVisible();
   }
 
  protected:
@@ -118,11 +133,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest, SaveFile) {
   const std::string file_contents = "file contents to write";
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), embedded_test_server()->GetURL("/title1.html")));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   EXPECT_FALSE(IsUsageIndicatorVisible(browser()));
 
@@ -161,11 +177,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest, OpenFile) {
   const std::string file_contents = "file contents to write";
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), embedded_test_server()->GetURL("/title1.html")));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   FileSystemAccessPermissionRequestManager::FromWebContents(web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
@@ -211,11 +228,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest, FullscreenOpenFile) {
   GURL frame_url = embedded_test_server()->GetURL("/title1.html");
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), embedded_test_server()->GetURL("/title1.html")));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   FileSystemAccessPermissionRequestManager::FromWebContents(web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
@@ -227,25 +245,26 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest, FullscreenOpenFile) {
                             "  self.entry = e;"
                             "  return e.name; })()"));
 
-  EXPECT_TRUE(
-      content::ExecuteScript(web_contents,
-                             "(async () => {"
-                             "  await document.body.requestFullscreen();"
-                             "})()"));
+  EXPECT_TRUE(content::ExecJs(web_contents,
+                              "(async () => {"
+                              "  await document.body.requestFullscreen();"
+                              "})()",
+                              content::EXECUTE_SCRIPT_NO_RESOLVE_PROMISES));
 
   // Wait until the fullscreen operation completes.
   base::RunLoop().RunUntilIdle();
   EXPECT_TRUE(IsFullscreen());
 
-  EXPECT_TRUE(content::ExecuteScript(
-      web_contents,
-      "(async () => {"
-      "  let fsChangePromise = new Promise((resolve) => {"
-      "    document.onfullscreenchange = resolve;"
-      "  });"
-      "  const w = await self.entry.createWritable();"
-      "  await fsChangePromise;"
-      "  return; })()"));
+  EXPECT_TRUE(
+      content::ExecJs(web_contents,
+                      "(async () => {"
+                      "  let fsChangePromise = new Promise((resolve) => {"
+                      "    document.onfullscreenchange = resolve;"
+                      "  });"
+                      "  const w = await self.entry.createWritable();"
+                      "  await fsChangePromise;"
+                      "  return; })()",
+                      content::EXECUTE_SCRIPT_NO_RESOLVE_PROMISES));
 
   // Wait until the fullscreen exit operation completes.
   base::RunLoop().RunUntilIdle();
@@ -274,17 +293,25 @@ class FileSystemAccessBrowserSlowLoadTest : public FileSystemAccessBrowserTest {
       main_document_response_;
 };
 
-IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserSlowLoadTest, WaitUntilLoaded) {
+// TODO(crbug.com/435037306): Flaky on Mac.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_WaitUntilLoaded DISABLED_WaitUntilLoaded
+#else
+#define MAYBE_WaitUntilLoaded WaitUntilLoaded
+#endif
+IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserSlowLoadTest,
+                       MAYBE_WaitUntilLoaded) {
   const base::FilePath test_file = CreateTestFile("");
   const std::string file_contents = "file contents to write";
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), embedded_test_server()->GetURL("/title1.html")));
 
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   FileSystemAccessPermissionRequestManager::FromWebContents(web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
@@ -362,8 +389,22 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserSlowLoadTest, WaitUntilLoaded) {
   EXPECT_TRUE(IsUsageIndicatorVisible(browser()));
 }
 
-#if BUILDFLAG(FULL_SAFE_BROWSING)
-IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest, SafeBrowsing) {
+#if BUILDFLAG(SAFE_BROWSING_DOWNLOAD_PROTECTION)
+IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
+                       SafeBrowsing) {  // change this to p
+  safe_browsing::FileTypePoliciesTestOverlay policies;
+  std::unique_ptr<safe_browsing::DownloadFileTypeConfig> file_type_config =
+      std::make_unique<safe_browsing::DownloadFileTypeConfig>();
+  auto* file_type = file_type_config->mutable_default_file_type();
+  file_type->set_uma_value(-1);
+  file_type->set_ping_setting(safe_browsing::DownloadFileType::FULL_PING);
+  auto* platform_settings = file_type->add_platform_settings();
+  platform_settings->set_danger_level(
+      safe_browsing::DownloadFileType::NOT_DANGEROUS);
+  platform_settings->set_auto_open_hint(
+      safe_browsing::DownloadFileType::ALLOW_AUTO_OPEN);
+  policies.SwapConfig(file_type_config);
+
   const std::string file_name("test.pdf");
   const base::FilePath test_file = temp_dir_.GetPath().AppendASCII(file_name);
 
@@ -377,10 +418,11 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest, SafeBrowsing) {
   GURL frame_url = embedded_test_server()->GetURL("/title1.html");
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), frame_url));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   bool invoked_safe_browsing = false;
 
@@ -434,16 +476,17 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   const std::string file_contents = "file contents to write";
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
 
   auto url = embedded_test_server()->GetURL("/title1.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   // Grant write permission.
   HostContentSettingsMap* host_content_settings_map =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
   host_content_settings_map->SetContentSettingDefaultScope(
       url, url, ContentSettingsType::FILE_SYSTEM_WRITE_GUARD,
       CONTENT_SETTING_ALLOW);
@@ -486,16 +529,17 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   const std::string file_contents = "file contents to write";
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
 
   auto url = embedded_test_server()->GetURL("/title1.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   // Grant write permission.
   HostContentSettingsMap* host_content_settings_map =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
   host_content_settings_map->SetContentSettingDefaultScope(
       url, url, ContentSettingsType::FILE_SYSTEM_WRITE_GUARD,
       CONTENT_SETTING_ALLOW);
@@ -532,21 +576,45 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   }
 }
 
+class PersistedPermissionsFileSystemAccessBrowserTest
+    : public FileSystemAccessBrowserTest {
+ public:
+  PersistedPermissionsFileSystemAccessBrowserTest() {
+    feature_list_.InitAndEnableFeature(
+        features::kFileSystemAccessPersistentPermissions);
+  }
+
+  void SetUpOnMainThread() override {
+    FileSystemAccessBrowserTest::SetUpOnMainThread();
+  }
+
+  ~PersistedPermissionsFileSystemAccessBrowserTest() override = default;
+
+  PersistedPermissionsFileSystemAccessBrowserTest(
+      const PersistedPermissionsFileSystemAccessBrowserTest&) = delete;
+  PersistedPermissionsFileSystemAccessBrowserTest& operator=(
+      const PersistedPermissionsFileSystemAccessBrowserTest&) = delete;
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+};
+
 // Tests that permissions are revoked after all top-level frames have navigated
 // away to a different origin.
-IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
+IN_PROC_BROWSER_TEST_F(PersistedPermissionsFileSystemAccessBrowserTest,
                        RevokePermissionAfterNavigation) {
   const base::FilePath test_file = CreateTestFile("");
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
 
   net::EmbeddedTestServer https_server(net::EmbeddedTestServer::TYPE_HTTPS);
-  https_server.SetSSLConfig(net::EmbeddedTestServer::CERT_OK);
+  https_server.SetCertHostnames({"a.com", "b.com", "c.com"});
   https_server.AddDefaultHandlers(GetChromeTestDataDir());
   content::SetupCrossSiteRedirector(&https_server);
   ASSERT_TRUE(https_server.Start());
 
-  Profile* profile = browser()->profile();
+  Profile* profile = browser()->GetProfile();
 
   // Create three separate windows:
 
@@ -554,7 +622,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), https_server.GetURL("b.com", "/title1.html")));
   content::WebContents* first_party_web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   FileSystemAccessPermissionRequestManager::FromWebContents(
       first_party_web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
@@ -565,13 +633,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   content::TestNavigationObserver popup_observer(nullptr);
   popup_observer.StartWatchingNewWebContents();
   auto iframe_url = https_server.GetURL("a.com", "/iframe_cross_site.html");
-  EXPECT_TRUE(ExecuteScript(
+  EXPECT_TRUE(ExecJs(
       first_party_web_contents,
       "self.third_party_window = window.open('" + iframe_url.spec() + "');"));
   popup_observer.Wait();
-  ASSERT_EQ(2, browser()->tab_strip_model()->count());
+  ASSERT_EQ(2, browser()->GetTabStripModel()->count());
   content::WebContents* third_party_web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   ASSERT_NE(first_party_web_contents, third_party_web_contents);
   content::RenderFrameHost* third_party_iframe =
       ChildFrameAt(third_party_web_contents, 0);
@@ -581,7 +649,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                 ->GetLastCommittedOrigin());
 
   // 3. Also showing https://b.com/title1.html
-  Browser* third_window = CreateBrowser(profile);
+  BrowserWindowInterface* third_window = CreateBrowser(profile);
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       third_window, https_server.GetURL("b.com", "/title1.html")));
 
@@ -591,13 +659,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   // the b.com iframe since a.com is cross-origin. Also, this approach avoids
   // using BroadcastChannel which doesn't work when third-party storage
   // partitioning is enabled.
-  EXPECT_EQ(nullptr,
+  EXPECT_EQ(base::Value(),
             content::EvalJs(third_party_iframe,
                             "self.message_promise = new Promise(resolve => {\n"
                             "  self.onmessage = resolve;\n"
                             "}); null;"));
 
-  EXPECT_EQ(nullptr,
+  EXPECT_EQ(base::Value(),
             content::EvalJs(
                 third_party_web_contents,
                 "self.onmessage = (e) => {\n"
@@ -605,7 +673,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                 "  iframe.contentWindow.postMessage('😀', '*', [e.ports[0]]);\n"
                 "}; null;"));
 
-  EXPECT_EQ(nullptr,
+  EXPECT_EQ(base::Value(),
             content::EvalJs(first_party_web_contents,
                             "let message_channel = new MessageChannel();\n"
                             "self.message_port = message_channel.port1;\n"
@@ -614,7 +682,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                             "null;"));
 
   EXPECT_EQ(
-      nullptr,
+      base::Value(),
       content::EvalJs(third_party_iframe,
                       "(async () => {\n"
                       "  let e = await self.message_promise;\n"
@@ -624,6 +692,9 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                       "  })})();"));
 
   // Top-level page in first window picks files and sends it to iframe.
+  browser()->GetTabStripModel()->ActivateTabAt(
+      browser()->GetTabStripModel()->GetIndexOfWebContents(
+          first_party_web_contents));
   EXPECT_EQ(test_file.BaseName().AsUTF8Unsafe(),
             content::EvalJs(first_party_web_contents,
                             "(async () => {"
@@ -673,19 +744,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   }
 
   // Now navigate away from b.com in first window.
-  browser()->tab_strip_model()->ActivateTabAt(0);
+  browser()->GetTabStripModel()->ActivateTabAt(0);
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), https_server.GetURL("c.com", "/title1.html")));
 
   // Permission should still be granted in iframe.
-  browser()->tab_strip_model()->ActivateTabAt(1);
-  EXPECT_EQ("granted",
-            content::EvalJs(third_party_iframe,
-                            "self.entry.queryPermission({mode: 'readwrite'})"));
-
-  // Even after triggering the timer in the permission context.
-  FileSystemAccessPermissionContextFactory::GetForProfile(profile)
-      ->TriggerTimersForTesting();
+  browser()->GetTabStripModel()->ActivateTabAt(1);
   EXPECT_EQ("granted",
             content::EvalJs(third_party_iframe,
                             "self.entry.queryPermission({mode: 'readwrite'})"));
@@ -694,16 +758,12 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       third_window, https_server.GetURL("a.com", "/title1.html")));
 
-  // Permission should still be granted in iframe.
-  EXPECT_EQ("granted",
-            content::EvalJs(third_party_iframe,
-                            "self.entry.queryPermission({mode: 'readwrite'})"));
-
-  // But after triggering the timer in the permission context ...
+  // On some platforms, permission revocation from the tab closure is
+  // triggered by timer, so manually invoke it.
   FileSystemAccessPermissionContextFactory::GetForProfile(profile)
       ->TriggerTimersForTesting();
 
-  // ... permission should have been revoked.
+  // Permission should have been revoked.
   EXPECT_EQ("prompt",
             content::EvalJs(third_party_iframe,
                             "self.entry.queryPermission({mode: 'readwrite'})"));
@@ -714,19 +774,20 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
 
 // Tests that permissions are revoked after all top-level frames have been
 // closed.
-IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
+IN_PROC_BROWSER_TEST_F(PersistedPermissionsFileSystemAccessBrowserTest,
                        RevokePermissionAfterClosingTab) {
   const base::FilePath test_file = CreateTestFile("");
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
 
   net::EmbeddedTestServer https_server(net::EmbeddedTestServer::TYPE_HTTPS);
-  https_server.SetSSLConfig(net::EmbeddedTestServer::CERT_OK);
+  https_server.SetCertHostnames({"a.com", "b.com"});
   https_server.AddDefaultHandlers(GetChromeTestDataDir());
   content::SetupCrossSiteRedirector(&https_server);
   ASSERT_TRUE(https_server.Start());
 
-  Profile* profile = browser()->profile();
+  Profile* profile = browser()->GetProfile();
 
   // Create two separate windows:
 
@@ -734,7 +795,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), https_server.GetURL("b.com", "/title1.html")));
   content::WebContents* first_party_web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   FileSystemAccessPermissionRequestManager::FromWebContents(
       first_party_web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
@@ -745,13 +806,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   content::TestNavigationObserver popup_observer(nullptr);
   popup_observer.StartWatchingNewWebContents();
   auto iframe_url = https_server.GetURL("a.com", "/iframe_cross_site.html");
-  EXPECT_TRUE(ExecuteScript(
+  EXPECT_TRUE(ExecJs(
       first_party_web_contents,
       "self.third_party_window = window.open('" + iframe_url.spec() + "');"));
   popup_observer.Wait();
-  ASSERT_EQ(2, browser()->tab_strip_model()->count());
+  ASSERT_EQ(2, browser()->GetTabStripModel()->count());
   content::WebContents* third_party_web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   ASSERT_NE(first_party_web_contents, third_party_web_contents);
   content::RenderFrameHost* third_party_iframe =
       ChildFrameAt(third_party_web_contents, 0);
@@ -766,13 +827,13 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
   // iframe since a.com is cross-origin. Also, this approach avoids using
   // BroadcastChannel which doesn't work when third-party storage partitioning
   // is enabled.
-  EXPECT_EQ(nullptr,
+  EXPECT_EQ(base::Value(),
             content::EvalJs(third_party_iframe,
                             "self.message_promise = new Promise(resolve => {\n"
                             "  self.onmessage = resolve;\n"
                             "}); null;"));
 
-  EXPECT_EQ(nullptr,
+  EXPECT_EQ(base::Value(),
             content::EvalJs(
                 third_party_web_contents,
                 "self.onmessage = (e) => {\n"
@@ -780,7 +841,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                 "  iframe.contentWindow.postMessage('😀', '*', [e.ports[0]]);\n"
                 "}; null;"));
 
-  EXPECT_EQ(nullptr,
+  EXPECT_EQ(base::Value(),
             content::EvalJs(first_party_web_contents,
                             "let message_channel = new MessageChannel();\n"
                             "self.message_port = message_channel.port1;\n"
@@ -789,7 +850,7 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                             "null;"));
 
   EXPECT_EQ(
-      nullptr,
+      base::Value(),
       content::EvalJs(third_party_iframe,
                       "(async () => {\n"
                       "  let e = await self.message_promise;\n"
@@ -799,6 +860,9 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                       "  })})();"));
 
   // Top-level page in first window picks files and sends it to iframe.
+  browser()->GetTabStripModel()->ActivateTabAt(
+      browser()->GetTabStripModel()->GetIndexOfWebContents(
+          first_party_web_contents));
   EXPECT_EQ(test_file.BaseName().AsUTF8Unsafe(),
             content::EvalJs(first_party_web_contents,
                             "(async () => {"
@@ -833,22 +897,18 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
                             "self.entry.queryPermission({mode: 'readwrite'})"));
 
   // Now close first window.
-  browser()->tab_strip_model()->CloseWebContentsAt(
+  browser()->GetTabStripModel()->CloseWebContentsAt(
       0, TabCloseTypes::CLOSE_CREATE_HISTORICAL_TAB);
-  ASSERT_EQ(1, browser()->tab_strip_model()->count());
-  ASSERT_EQ(browser()->tab_strip_model()->GetActiveWebContents(),
+  ASSERT_EQ(1, browser()->GetTabStripModel()->count());
+  ASSERT_EQ(browser()->GetTabStripModel()->GetActiveWebContents(),
             third_party_web_contents);
 
-  // Permission should still be granted in iframe.
-  EXPECT_EQ("granted",
-            content::EvalJs(third_party_iframe,
-                            "self.entry.queryPermission({mode: 'readwrite'})"));
-
-  // But after triggering the timer in the permission context ...
+  // On some platforms, permission revocation from the tab closure is
+  // triggered by timer, so manually invoke it.
   FileSystemAccessPermissionContextFactory::GetForProfile(profile)
       ->TriggerTimersForTesting();
 
-  // ... permission should have been revoked.
+  // Permission should have been revoked.
   EXPECT_EQ("prompt",
             content::EvalJs(third_party_iframe,
                             "self.entry.queryPermission({mode: 'readwrite'})"));
@@ -856,30 +916,6 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
             content::EvalJs(third_party_iframe,
                             "self.entry.queryPermission({mode: 'read'})"));
 }
-
-class PersistedPermissionsFileSystemAccessBrowserTest
-    : public FileSystemAccessBrowserTest {
- public:
-  PersistedPermissionsFileSystemAccessBrowserTest() {
-    // Enable Persisted Permissions.
-    feature_list_.InitAndEnableFeature(
-        features::kFileSystemAccessPersistentPermissions);
-  }
-
-  void SetUpOnMainThread() override {
-    FileSystemAccessBrowserTest::SetUpOnMainThread();
-  }
-
-  ~PersistedPermissionsFileSystemAccessBrowserTest() override = default;
-
-  PersistedPermissionsFileSystemAccessBrowserTest(
-      const PersistedPermissionsFileSystemAccessBrowserTest&) = delete;
-  PersistedPermissionsFileSystemAccessBrowserTest& operator=(
-      const PersistedPermissionsFileSystemAccessBrowserTest&) = delete;
-
- private:
-  base::test::ScopedFeatureList feature_list_;
-};
 
 IN_PROC_BROWSER_TEST_F(PersistedPermissionsFileSystemAccessBrowserTest,
                        UsageIndicatorVisibleWithPersistedPermissionsEnabled) {
@@ -889,29 +925,31 @@ IN_PROC_BROWSER_TEST_F(PersistedPermissionsFileSystemAccessBrowserTest,
   const std::string file_contents = "file contents to write";
   std::unique_ptr<ChromeFileSystemAccessPermissionContext> permission_context =
       std::make_unique<ChromeFileSystemAccessPermissionContext>(
-          browser()->profile());
+          browser()->GetProfile());
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), test_url));
 
   // The usage indicator is not initially visible.
   EXPECT_FALSE(IsUsageIndicatorVisible(browser()));
 
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   FileSystemAccessPermissionRequestManager::FromWebContents(web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
-
+  permission_context->SetOriginHasExtendedPermissionForTesting(kTestOrigin);
   auto grant = permission_context->GetWritePermissionGrant(
-      kTestOrigin, test_file,
+      kTestOrigin, content::PathInfo(test_file),
       content::FileSystemAccessPermissionContext::HandleType::kFile,
       content::FileSystemAccessPermissionContext::UserAction::kSave);
 
-  EXPECT_TRUE(permission_context->HasPersistedPermissionForTesting(
-      kTestOrigin, test_file,
+  EXPECT_TRUE(permission_context->HasExtendedPermissionForTesting(
+      kTestOrigin, content::PathInfo(test_file),
       content::FileSystemAccessPermissionContext::HandleType::kFile,
       ChromeFileSystemAccessPermissionContext::GrantType::kWrite));
+
   EXPECT_EQ(content::FileSystemAccessPermissionGrant::PermissionStatus::GRANTED,
             grant->GetStatus());
 
@@ -949,12 +987,87 @@ IN_PROC_BROWSER_TEST_F(PersistedPermissionsFileSystemAccessBrowserTest,
   // The usage indicator is not visible after navigating to another page.
   EXPECT_FALSE(IsUsageIndicatorVisible(browser()));
 
-  // Navigate back to the original page.
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), test_url));
+  // TODO(crbug.com/40101962): Once Extended Permission UI is
+  // implemented, mock user's response to the UI and assert that the usage
+  // indicator is visible when the original page is visited again.
+}
 
-  // With Persisted Permissions enabled, the usage indicator should be visible
-  // on the original page.
+// Tests that the usage indicator is hidden after navigating to another origin
+// even when another tab keeps the original origin open.
+IN_PROC_BROWSER_TEST_F(PersistedPermissionsFileSystemAccessBrowserTest,
+                       UsageIndicatorHiddenAfterNavigationWithBackgroundTab) {
+  const base::FilePath test_file = CreateTestFile("");
+  ui::SelectFileDialog::SetFactory(
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
+
+  const GURL test_url = embedded_test_server()->GetURL("/title1.html");
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), test_url));
+  content::WebContents* web_contents =
+      browser()->tab_strip_model()->GetActiveWebContents();
+
+  EXPECT_FALSE(IsUsageIndicatorVisible(browser()));
+
+  EXPECT_EQ(test_file.BaseName().AsUTF8Unsafe(),
+            content::EvalJs(web_contents,
+                            "(async () => {"
+                            "  let e = await self.showSaveFilePicker();"
+                            "  self.entry = e;"
+                            "  return e.name; })()"));
+
   EXPECT_TRUE(IsUsageIndicatorVisible(browser()));
+
+  // Open a second tab on the same origin in the background so that the origin
+  // remains active after the first tab navigates away.
+  ui_test_utils::NavigateToURLWithDisposition(
+      browser(), test_url, WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
+  ASSERT_EQ(web_contents, browser()->tab_strip_model()->GetActiveWebContents());
+
+  // Navigate the first tab to another origin.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL("a.com", "/title2.html")));
+
+  // The usage indicator should not be shown for the new origin.
+  EXPECT_FALSE(IsUsageIndicatorVisible(browser()));
+}
+
+// Tests that updating the page action visibility for one tab does not close
+// the usage bubble showing for a different tab.
+IN_PROC_BROWSER_TEST_F(PersistedPermissionsFileSystemAccessBrowserTest,
+                       UsageBubbleNotClosedByOtherTabUpdate) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL("/title1.html")));
+
+  // Open a second tab on a different origin in the background.
+  ui_test_utils::NavigateToURLWithDisposition(
+      browser(), embedded_test_server()->GetURL("a.com", "/title1.html"),
+      WindowOpenDisposition::NEW_BACKGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
+  ASSERT_EQ(2, browser()->tab_strip_model()->count());
+
+  // Show the usage bubble for the active tab.
+  FileSystemAccessUsageBubbleView::Usage usage;
+  usage.writable_files.emplace_back(FILE_PATH_LITERAL("/foo/bar/file.txt"));
+  FileSystemAccessUsageBubbleView::ShowBubble(
+      browser()->tab_strip_model()->GetActiveWebContents(),
+      url::Origin::Create(GURL("https://example.com")), std::move(usage));
+  ASSERT_NE(FileSystemAccessUsageBubbleView::GetBubble(), nullptr);
+
+  // Updating the page action visibility for the background tab, which has no
+  // grants, should not close the bubble showing for the active tab.
+  tabs::TabInterface* background_tab =
+      browser()->tab_strip_model()->GetTabAtIndex(1);
+  ASSERT_TRUE(background_tab);
+  FileSystemAccessPageActionController* controller =
+      background_tab->GetTabFeatures()
+          ->file_system_access_page_action_controller();
+  ASSERT_TRUE(controller);
+  controller->UpdateVisibility();
+
+  EXPECT_NE(FileSystemAccessUsageBubbleView::GetBubble(), nullptr);
+
+  FileSystemAccessUsageBubbleView::CloseCurrentBubble();
 }
 
 class BackForwardCacheFileSystemAccessBrowserTest
@@ -963,11 +1076,9 @@ class BackForwardCacheFileSystemAccessBrowserTest
   BackForwardCacheFileSystemAccessBrowserTest() {
     // Enable BackForwardCache.
     feature_list_.InitWithFeaturesAndParameters(
-        {{features::kBackForwardCache, {{}}},
-         {features::kBackForwardCacheTimeToLiveControl,
-          {{"time_to_live_seconds", "3600"}}}},
-        // Allow BackForwardCache for all devices regardless of their memory.
-        {features::kBackForwardCacheMemoryControls});
+        content::GetDefaultEnabledBackForwardCacheFeaturesForTesting(
+            /*ignore_outstanding_network_request=*/false),
+        content::GetDefaultDisabledBackForwardCacheFeaturesForTesting());
   }
   ~BackForwardCacheFileSystemAccessBrowserTest() override = default;
 
@@ -984,7 +1095,7 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheFileSystemAccessBrowserTest,
                        RequestWriteAccess) {
   std::unique_ptr<ChromeFileSystemAccessPermissionContext> permission_context =
       std::make_unique<ChromeFileSystemAccessPermissionContext>(
-          browser()->profile());
+          browser()->GetProfile());
 
   const base::FilePath test_file = CreateTestFile("");
 
@@ -994,7 +1105,7 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheFileSystemAccessBrowserTest,
   auto* initial_rfh = ui_test_utils::NavigateToURL(browser(), initial_url);
   ASSERT_TRUE(initial_rfh);
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   FileSystemAccessPermissionRequestManager::FromWebContents(web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
@@ -1008,11 +1119,11 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheFileSystemAccessBrowserTest,
   EXPECT_FALSE(deleted_observer.deleted());
 
   auto grant = permission_context->GetWritePermissionGrant(
-      url::Origin::Create(initial_url), test_file,
+      url::Origin::Create(initial_url), content::PathInfo(test_file),
       content::FileSystemAccessPermissionContext::HandleType::kFile,
       content::FileSystemAccessPermissionContext::UserAction::kOpen);
 
-  absl::optional<
+  std::optional<
       content::FileSystemAccessPermissionGrant::PermissionRequestOutcome>
       result;
 
@@ -1022,8 +1133,8 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheFileSystemAccessBrowserTest,
       initial_rfh->GetGlobalId(),
       content::FileSystemAccessPermissionGrant::UserActivationState::kRequired,
       base::BindOnce(
-          [](absl::optional<content::FileSystemAccessPermissionGrant::
-                                PermissionRequestOutcome>* result_out,
+          [](std::optional<content::FileSystemAccessPermissionGrant::
+                               PermissionRequestOutcome>* result_out,
              content::FileSystemAccessPermissionGrant::PermissionRequestOutcome
                  result) { *result_out = result; },
           base::Unretained(&result)));
@@ -1046,7 +1157,7 @@ class PrerenderFileSystemAccessBrowserTest
       const PrerenderFileSystemAccessBrowserTest&) = delete;
 
   void SetUp() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     FileSystemAccessBrowserTest::SetUp();
   }
 
@@ -1055,7 +1166,7 @@ class PrerenderFileSystemAccessBrowserTest
 
  private:
   content::WebContents* web_contents() const {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 };
 
@@ -1063,21 +1174,22 @@ IN_PROC_BROWSER_TEST_F(PrerenderFileSystemAccessBrowserTest,
                        RequestWriteAccess) {
   std::unique_ptr<ChromeFileSystemAccessPermissionContext> permission_context =
       std::make_unique<ChromeFileSystemAccessPermissionContext>(
-          browser()->profile());
+          browser()->GetProfile());
   const base::FilePath test_file = CreateTestFile("");
 
   // Navigate to the initial page.
   const GURL initial_url = embedded_test_server()->GetURL("/title1.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), initial_url));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   FileSystemAccessPermissionRequestManager::FromWebContents(web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
 
   // Load a page in the prerender.
   GURL prerender_url = embedded_test_server()->GetURL("/title2.html");
-  int host_id = prerender_helper_.AddPrerender(prerender_url);
+  content::PrerenderHostId host_id =
+      prerender_helper_.AddPrerender(prerender_url);
   content::test::PrerenderHostObserver host_observer(*web_contents, host_id);
   EXPECT_FALSE(host_observer.was_activated());
   content::RenderFrameHost* prerender_frame =
@@ -1086,11 +1198,11 @@ IN_PROC_BROWSER_TEST_F(PrerenderFileSystemAccessBrowserTest,
   content::RenderFrameDeletedObserver deleted_observer(prerender_frame);
 
   auto grant = permission_context->GetWritePermissionGrant(
-      url::Origin::Create(initial_url), test_file,
+      url::Origin::Create(initial_url), content::PathInfo(test_file),
       content::FileSystemAccessPermissionContext::HandleType::kFile,
       content::FileSystemAccessPermissionContext::UserAction::kOpen);
 
-  absl::optional<
+  std::optional<
       content::FileSystemAccessPermissionGrant::PermissionRequestOutcome>
       result;
 
@@ -1099,8 +1211,8 @@ IN_PROC_BROWSER_TEST_F(PrerenderFileSystemAccessBrowserTest,
       prerender_frame->GetGlobalId(),
       content::FileSystemAccessPermissionGrant::UserActivationState::kRequired,
       base::BindOnce(
-          [](absl::optional<content::FileSystemAccessPermissionGrant::
-                                PermissionRequestOutcome>* result_out,
+          [](std::optional<content::FileSystemAccessPermissionGrant::
+                               PermissionRequestOutcome>* result_out,
              content::FileSystemAccessPermissionGrant::PermissionRequestOutcome
                  result) { *result_out = result; },
           base::Unretained(&result)));
@@ -1133,14 +1245,15 @@ class FencedFrameFileSystemAccessBrowserTest
   content::RenderFrameHost* CreateFencedFrame(
       content::RenderFrameHost* fenced_frame_parent,
       const GURL& url) {
-    if (fenced_frame_helper_)
+    if (fenced_frame_helper_) {
       return fenced_frame_helper_->CreateFencedFrame(fenced_frame_parent, url);
+    }
 
     // FencedFrameTestHelper only supports the MPArch version of fenced
     // frames. So need to maually create a fenced frame for the ShadowDOM
     // version.
     content::TestNavigationManager navigation(
-        browser()->tab_strip_model()->GetActiveWebContents(), url);
+        browser()->GetTabStripModel()->GetActiveWebContents(), url);
     constexpr char kAddFencedFrameScript[] = R"({
         const fenced_frame = document.createElement('fencedframe');
         fenced_frame.src = $1;
@@ -1168,16 +1281,17 @@ IN_PROC_BROWSER_TEST_F(FencedFrameFileSystemAccessBrowserTest,
                        RequestWriteAccess) {
   std::unique_ptr<ChromeFileSystemAccessPermissionContext> permission_context =
       std::make_unique<ChromeFileSystemAccessPermissionContext>(
-          browser()->profile());
+          browser()->GetProfile());
 
   const base::FilePath test_file = CreateTestFile("");
 
   ui::SelectFileDialog::SetFactory(
-      new SelectPredeterminedFileDialogFactory({test_file}));
+      std::make_unique<SelectPredeterminedFileDialogFactory>(
+          std::vector<base::FilePath>{test_file}));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(), embedded_test_server()->GetURL("/title1.html")));
   content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
 
   FileSystemAccessPermissionRequestManager::FromWebContents(web_contents)
       ->set_auto_response_for_test(permissions::PermissionAction::GRANTED);
@@ -1201,7 +1315,7 @@ IN_PROC_BROWSER_TEST_F(FencedFrameFileSystemAccessBrowserTest,
   EXPECT_FALSE(IsUsageIndicatorVisible(browser()));
 
   auto grant = permission_context->GetWritePermissionGrant(
-      url::Origin::Create(fenced_frame_url), test_file,
+      url::Origin::Create(fenced_frame_url), content::PathInfo(test_file),
       content::FileSystemAccessPermissionContext::HandleType::kFile,
       content::FileSystemAccessPermissionContext::UserAction::kOpen);
 
@@ -1218,8 +1332,106 @@ IN_PROC_BROWSER_TEST_F(FencedFrameFileSystemAccessBrowserTest,
                                 PermissionRequestOutcome::kInvalidFrame);
 }
 
-// The helper methods in this class uses ExecuteScriptXXX, because WebUI has
-// a Content Security Policy that interferes with ExecJs and EvalJs.
+// https://crbug.com/419721056
+IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
+                       ShowOpenFilePickerInBackgroundTab) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL("/title1.html")));
+  content::WebContents* first_tab =
+      browser()->GetTabStripModel()->GetActiveWebContents();
+
+  // Create a second tab
+  ui_test_utils::NavigateToURLWithDisposition(
+      browser(), embedded_test_server()->GetURL("/title2.html"),
+      WindowOpenDisposition::NEW_FOREGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
+
+  content::WebContents* second_tab =
+      browser()->GetTabStripModel()->GetActiveWebContents();
+  EXPECT_NE(first_tab, second_tab);
+
+  // Switch back to the first tab, making the second tab a background tab.
+  browser()->GetTabStripModel()->ActivateTabAt(0);
+  EXPECT_EQ(first_tab, browser()->GetTabStripModel()->GetActiveWebContents());
+  EXPECT_NE(second_tab, browser()->GetTabStripModel()->GetActiveWebContents());
+
+  // Try to show a file picker in the background tab.
+  // This should be blocked.
+  EXPECT_EQ("AbortError",
+            content::EvalJs(second_tab,
+                            "self.showOpenFilePicker().catch(e => e.name)"));
+}
+
+// Test that opening another tab while the dialog is showing closes the dialog.
+// https://crbug.com/419721056
+IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest, ShowOpenFileThenHide) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL("/title1.html")));
+  content::WebContents* first_tab =
+      browser()->GetTabStripModel()->GetActiveWebContents();
+
+  // Open the dialog and wait until it's created.
+  content::SelectFileDialogRecorder recorder;
+  ui::SelectFileDialog::SetFactory(
+      std::make_unique<content::ObservableSelectFileDialogFactory>(
+          recorder.GetWeakPtr()));
+  ASSERT_EQ(42,
+            content::EvalJs(
+                first_tab,
+                "window.p = self.showOpenFilePicker().catch(e => e.name); 42"));
+  ASSERT_TRUE(base::test::RunUntil([&recorder]() {
+    return recorder.state != content::SelectFileDialogRecorder::kNotCreated;
+  }));
+
+  // Create a second tab.
+  ui_test_utils::NavigateToURLWithDisposition(
+      browser(), embedded_test_server()->GetURL("/title2.html"),
+      WindowOpenDisposition::NEW_FOREGROUND_TAB,
+      ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
+
+  // The first tab should not be the active tab anymore.
+  ASSERT_NE(first_tab, browser()->GetTabStripModel()->GetActiveWebContents());
+
+  // Check that the dialog was closed.
+  ASSERT_EQ("AbortError", content::EvalJs(first_tab, "window.p"));
+}
+
+// Test that creating a split view while the dialog is showing closes the
+// dialog. https://crbug.com/474583539 https://crbug.com/454484864
+IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTest,
+                       ShowOpenFileThenHideDueToSplitView) {
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), embedded_test_server()->GetURL("/title1.html")));
+  content::WebContents* first_tab =
+      browser()->GetTabStripModel()->GetActiveWebContents();
+
+  // Open the dialog and wait until it's created.
+  content::SelectFileDialogRecorder recorder;
+  ui::SelectFileDialog::SetFactory(
+      std::make_unique<content::ObservableSelectFileDialogFactory>(
+          recorder.GetWeakPtr()));
+  ASSERT_EQ(42,
+            content::EvalJs(
+                first_tab,
+                "window.p = self.showOpenFilePicker().catch(e => e.name); 42"));
+  ASSERT_TRUE(base::test::RunUntil([&recorder]() {
+    return recorder.state != content::SelectFileDialogRecorder::kNotCreated;
+  }));
+
+  // Create a split view.
+  const int active_index = browser()->GetTabStripModel()->active_index();
+  chrome::NewSplitTab(browser(), split_tabs::SplitTabLayout::kSideBySide,
+                      split_tabs::SplitTabCreatedSource::kToolbarButton);
+  EXPECT_TRUE(content::WaitForLoadStop(
+      browser()->GetTabStripModel()->GetWebContentsAt(active_index + 1)));
+
+  // The first tab should not be the active tab anymore.
+  ASSERT_NE(first_tab, browser()->GetTabStripModel()->GetActiveWebContents());
+
+  // Check that the dialog was closed.
+  ASSERT_EQ("AbortError", content::EvalJs(first_tab, "window.p"));
+}
+
 class FileSystemAccessBrowserTestForWebUI : public InProcessBrowserTest {
  public:
   FileSystemAccessBrowserTestForWebUI() {
@@ -1233,32 +1445,23 @@ class FileSystemAccessBrowserTestForWebUI : public InProcessBrowserTest {
     CHECK(temp_dir_.CreateUniqueTempDirUnderPath(base::GetTempDirForTesting()));
   }
 
-  // Return the evaluated value of a JavaScript |statement| as a std::string.
-  // The statement can be a Promise that resolves to a string. If errors are
-  // encountered during evaluation, returns the error's message.
-  std::string GetJsStatementValueAsString(content::WebContents* web_contents,
-                                          const std::string& statement) {
-    std::string result;
-    EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-        web_contents,
-        base::StrCat({"Promise.resolve(", statement, ").then(",
-                      "  result => domAutomationController.send(result),"
-                      "  error => domAutomationController.send(error.message)"
-                      ");"}),
-        &result));
-    return result;
+  void SetUpOnMainThread() override {
+    InProcessBrowserTest::SetUpOnMainThread();
+    factory_registration_ =
+        std::make_unique<content::ScopedWebUIControllerFactoryRegistration>(
+            &factory_);
   }
 
   content::WebContents* SetUpAndNavigateToTestWebUI() {
     const GURL kWebUITestUrl = content::GetWebUIURL("webui/title1.html");
-    WebUIAllowlist::GetOrCreate(browser()->profile())
+    WebUIAllowlist::GetOrCreate(browser()->GetProfile())
         ->RegisterAutoGrantedPermissions(
             url::Origin::Create(kWebUITestUrl),
             {ContentSettingsType::FILE_SYSTEM_READ_GUARD,
              ContentSettingsType::FILE_SYSTEM_WRITE_GUARD});
 
     EXPECT_TRUE(ui_test_utils::NavigateToURL(browser(), kWebUITestUrl));
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
   void TestFilePermissionInDirectory(content::WebContents* web_contents,
@@ -1279,25 +1482,22 @@ class FileSystemAccessBrowserTestForWebUI : public InProcessBrowserTest {
 
     // Open the dialog and choose the file.
     ui::SelectFileDialog::SetFactory(
-        new SelectPredeterminedFileDialogFactory({test_file_path}));
-    EXPECT_EQ("ok",
-              GetJsStatementValueAsString(web_contents,
-                                          "window.showOpenFilePicker().then("
-                                          "  handles => {"
-                                          "    window.file_handle = handles[0];"
-                                          "    return 'ok';"
-                                          "})"));
+        std::make_unique<SelectPredeterminedFileDialogFactory>(
+            std::vector<base::FilePath>{test_file_path}));
+    EXPECT_TRUE(
+        content::ExecJs(web_contents,
+                        "window.showOpenFilePicker().then("
+                        "  handles => { window.file_handle = handles[0]; })"));
 
-    EXPECT_EQ("file", GetJsStatementValueAsString(web_contents,
-                                                  "window.file_handle.kind"));
+    EXPECT_EQ("file", content::EvalJs(web_contents, "window.file_handle.kind"));
 
     // Check permission descriptors.
     EXPECT_EQ("granted",
-              GetJsStatementValueAsString(
+              content::EvalJs(
                   web_contents,
                   "window.file_handle.queryPermission({ mode: 'read' })"));
     EXPECT_EQ("granted",
-              GetJsStatementValueAsString(
+              content::EvalJs(
                   web_contents,
                   "window.file_handle.queryPermission({ mode: 'readwrite' })"));
   }
@@ -1312,26 +1512,24 @@ class FileSystemAccessBrowserTestForWebUI : public InProcessBrowserTest {
 
     // Open the dialog and choose the directory.
     ui::SelectFileDialog::SetFactory(
-        new SelectPredeterminedFileDialogFactory({dir_path}));
+        std::make_unique<SelectPredeterminedFileDialogFactory>(
+            std::vector<base::FilePath>{dir_path}));
 
-    EXPECT_EQ("ok",
-              GetJsStatementValueAsString(web_contents,
-                                          "window.showDirectoryPicker().then("
-                                          "  handle => {"
-                                          "    window.dir_handle = handle;"
-                                          "    return 'ok';"
-                                          "})"));
+    EXPECT_TRUE(
+        content::ExecJs(web_contents,
+                        "window.showDirectoryPicker().then("
+                        "  handle => { window.dir_handle = handle; })"));
 
-    EXPECT_EQ("directory", GetJsStatementValueAsString(
-                               web_contents, "window.dir_handle.kind"));
+    EXPECT_EQ("directory",
+              content::EvalJs(web_contents, "window.dir_handle.kind"));
 
     // Check permission descriptors.
+    EXPECT_EQ(
+        "granted",
+        content::EvalJs(web_contents,
+                        "window.dir_handle.queryPermission({ mode: 'read' })"));
     EXPECT_EQ("granted",
-              GetJsStatementValueAsString(
-                  web_contents,
-                  "window.dir_handle.queryPermission({ mode: 'read' })"));
-    EXPECT_EQ("granted",
-              GetJsStatementValueAsString(
+              content::EvalJs(
                   web_contents,
                   "window.dir_handle.queryPermission({ mode: 'readwrite' })"));
   }
@@ -1341,8 +1539,9 @@ class FileSystemAccessBrowserTestForWebUI : public InProcessBrowserTest {
 
  private:
   content::TestWebUIControllerFactory factory_;
-  content::ScopedWebUIControllerFactoryRegistration factory_registration_{
-      &factory_};
+  std::unique_ptr<content::ScopedWebUIControllerFactoryRegistration>
+      factory_registration_;
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_F(FileSystemAccessBrowserTestForWebUI,

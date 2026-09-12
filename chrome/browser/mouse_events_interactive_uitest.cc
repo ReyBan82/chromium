@@ -9,15 +9,16 @@
 #include "build/build_config.h"
 #include "chrome/browser/renderer_context_menu/render_view_context_menu.h"
 #include "chrome/browser/renderer_context_menu/render_view_context_menu_browsertest_util.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/test/base/chrome_test_path_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/javascript_dialogs/tab_modal_dialog_manager.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/common/isolated_world_ids.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "ui/base/test/ui_controls.h"
@@ -59,7 +60,7 @@ class MouseEventsTest : public InProcessBrowserTest {
     ui_controls::SendMouseMove(bounds.CenterPoint().x(), bounds.y() - 2);
 
     // Navigate to the test page and wait for onload to be called.
-    const GURL url = ui_test_utils::GetTestUrl(
+    const GURL url = chrome_test_utils::GetTestUrl(
         base::FilePath(),
         base::FilePath(FILE_PATH_LITERAL("mouse_events_test.html")));
     ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -81,8 +82,8 @@ class MouseEventsTest : public InProcessBrowserTest {
   }
 };
 
-#if BUILDFLAG(IS_MAC)
-// Flaky; http://crbug.com/133361.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+// Flaky; http://crbug.com/40845791.
 #define MAYBE_MouseOver DISABLED_MouseOver
 #else
 #define MAYBE_MouseOver MouseOver
@@ -93,7 +94,7 @@ IN_PROC_BROWSER_TEST_F(MouseEventsTest, MAYBE_MouseOver) {
 }
 
 #if BUILDFLAG(IS_MAC)
-// Flaky; http://crbug.com/133361.
+// Flaky; http://crbug.com/40845791.
 #define MAYBE_ClickAndDoubleClick DISABLED_ClickAndDoubleClick
 #else
 #define MAYBE_ClickAndDoubleClick ClickAndDoubleClick
@@ -111,7 +112,7 @@ IN_PROC_BROWSER_TEST_F(MouseEventsTest, MAYBE_ClickAndDoubleClick) {
 
 #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
     BUILDFLAG(IS_WIN)
-// Flaky; http://crbug.com/133361.
+// Flaky; http://crbug.com/40845791.
 #define MAYBE_TestOnMouseOut DISABLED_TestOnMouseOut
 #else
 #define MAYBE_TestOnMouseOut TestOnMouseOut
@@ -122,9 +123,9 @@ IN_PROC_BROWSER_TEST_F(MouseEventsTest, MAYBE_TestOnMouseOut) {
 }
 
 #if BUILDFLAG(IS_WIN)
-// Mac/Linux are flaky; http://crbug.com/133361.
+// Mac/Linux are flaky; http://crbug.com/40845791.
 IN_PROC_BROWSER_TEST_F(MouseEventsTest, MouseDownOnBrowserCaption) {
-  gfx::Rect browser_bounds = browser()->window()->GetBounds();
+  gfx::Rect browser_bounds = browser()->GetWindow()->GetBounds();
   ui_controls::SendMouseMove(browser_bounds.x() + 200, browser_bounds.y() + 10);
   ui_controls::SendMouseClick(ui_controls::LEFT);
 
@@ -138,7 +139,7 @@ IN_PROC_BROWSER_TEST_F(MouseEventsTest, MouseDownOnBrowserCaption) {
 // when showing the context menu and it could make the unexpecting
 // content behavior such as clearing the hover status.
 // Please refer to the below issue for understanding what happens .
-// Flaky; See http://crbug.com/656101.
+// Flaky; See http://crbug.com/40489100.
 #define MAYBE_ContextMenu DISABLED_ContextMenu
 #else
 #define MAYBE_ContextMenu ContextMenu
@@ -153,8 +154,8 @@ IN_PROC_BROWSER_TEST_F(MouseEventsTest, MAYBE_ContextMenu) {
   menu_observer.WaitForMenuOpenAndClose();
 
   content::WebContents* tab = GetActiveWebContents();
-  tab->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(u"done()",
-                                                        base::NullCallback());
+  tab->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
+      u"done()", base::NullCallback(), content::ISOLATED_WORLD_ID_GLOBAL);
   const std::u16string success_title = u"without mouseleave";
   const std::u16string failure_title = u"with mouseleave";
   content::TitleWatcher done_title_watcher(tab, success_title);
@@ -165,8 +166,8 @@ IN_PROC_BROWSER_TEST_F(MouseEventsTest, MAYBE_ContextMenu) {
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
     BUILDFLAG(IS_CHROMEOS)
 // Test that a mouseleave is not triggered when showing a modal dialog.
-// Sample regression: crbug.com/394672
-// Flaky; http://crbug.com/838120
+// Sample regression: crbug.com/41120621
+// Flaky; http://crbug.com/41386176
 #define MAYBE_ModalDialog DISABLED_ModalDialog
 #else
 #define MAYBE_ModalDialog ModalDialog
@@ -181,15 +182,15 @@ IN_PROC_BROWSER_TEST_F(MouseEventsTest, MAYBE_ModalDialog) {
   base::RunLoop dialog_wait;
   js_dialog_manager->SetDialogShownCallbackForTesting(
       dialog_wait.QuitClosure());
-  tab->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(u"alert()",
-                                                        base::NullCallback());
+  tab->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
+      u"alert()", base::NullCallback(), content::ISOLATED_WORLD_ID_GLOBAL);
   dialog_wait.Run();
 
   // Cancel the dialog.
   js_dialog_manager->HandleJavaScriptDialog(tab, false, nullptr);
 
-  tab->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(u"done()",
-                                                        base::NullCallback());
+  tab->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
+      u"done()", base::NullCallback(), content::ISOLATED_WORLD_ID_GLOBAL);
   const std::u16string success_title = u"without mouseleave";
   const std::u16string failure_title = u"with mouseleave";
   content::TitleWatcher done_title_watcher(tab, success_title);

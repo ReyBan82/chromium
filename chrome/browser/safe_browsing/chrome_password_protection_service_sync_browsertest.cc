@@ -2,21 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/safe_browsing/chrome_password_protection_service.h"
-
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "build/build_config.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/safe_browsing/chrome_password_protection_service.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
-#include "chrome/browser/ssl/security_state_tab_helper.h"
 #include "chrome/browser/sync/sync_service_factory.h"
 #include "chrome/browser/sync/test/integration/sync_service_impl_harness.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/common/url_constants.h"
@@ -34,8 +32,8 @@
 #include "components/signin/public/base/signin_pref_names.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
 #include "components/signin/public/identity_manager/identity_test_utils.h"
-#include "components/sync/driver/sync_service.h"
-#include "components/sync/driver/sync_user_settings.h"
+#include "components/sync/service/sync_service.h"
+#include "components/sync/service/sync_user_settings.h"
 #include "components/sync/test/fake_server_network_resources.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
@@ -67,31 +65,6 @@ class ChromePasswordProtectionServiceSyncBrowserTest : public SyncTest {
   ChromePasswordProtectionServiceSyncBrowserTest& operator=(
       const ChromePasswordProtectionServiceSyncBrowserTest&) = delete;
 
-  void SetUpOnMainThread() override {
-    SyncTest::SetUpOnMainThread();
-
-    ASSERT_TRUE(embedded_test_server()->Start());
-
-    ASSERT_TRUE(SetupClients());
-
-    // Sign the profile in.
-    ASSERT_TRUE(GetClient(0)->SignInPrimaryAccount());
-
-    CoreAccountInfo current_info =
-        IdentityManagerFactory::GetForProfile(GetProfile(0))
-            ->GetPrimaryAccountInfo(signin::ConsentLevel::kSync);
-    // Need to update hosted domain since it is not populated.
-    AccountInfo account_info;
-    account_info.account_id = current_info.account_id;
-    account_info.gaia = current_info.gaia;
-    account_info.email = current_info.email;
-    account_info.hosted_domain = "domain.com";
-    signin::UpdateAccountInfoForAccount(
-        IdentityManagerFactory::GetForProfile(GetProfile(0)), account_info);
-
-    ASSERT_TRUE(GetClient(0)->SetupSync());
-  }
-
   safe_browsing::ChromePasswordProtectionService* GetService(
       bool is_incognito) {
     return ChromePasswordProtectionService::GetPasswordProtectionService(
@@ -112,10 +85,11 @@ class ChromePasswordProtectionServiceSyncBrowserTest : public SyncTest {
 
 IN_PROC_BROWSER_TEST_F(ChromePasswordProtectionServiceSyncBrowserTest,
                        GSuitePasswordAlertMode) {
+  ASSERT_TRUE(SetupSync(SyncTestAccount::kEnterpriseAccount1));
+
   ConfigureEnterprisePasswordProtection(
       PasswordProtectionTrigger::PASSWORD_REUSE);
   ChromePasswordProtectionService* service = GetService(/*is_incognito=*/false);
-  chrome::NewTab(GetBrowser(0));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       GetBrowser(0), embedded_test_server()->GetURL(kLoginPageUrl)));
   base::HistogramTester histograms;
@@ -143,7 +117,7 @@ IN_PROC_BROWSER_TEST_F(ChromePasswordProtectionServiceSyncBrowserTest,
   std::string script =
       "var node = document.getElementById('reset-password-button'); \n"
       "node.click();";
-  ASSERT_TRUE(content::ExecuteScript(interstitial_web_contents, script));
+  ASSERT_TRUE(content::ExecJs(interstitial_web_contents, script));
   content::TestNavigationObserver observer1(interstitial_web_contents,
                                             /*number_of_navigations=*/1);
   observer1.Wait();

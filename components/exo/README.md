@@ -7,8 +7,6 @@ Current clients of Exo include:
 
 * ARC++ (Android apps on Chrome OS)
 * Crostini (Linux apps on Chrome OS)
-* [Lacros](https://chromium.googlesource.com/chromium/src/+/main/docs/lacros.md)
-* PluginVM
 
 In addition to the core Wayland protocol, Exo supports a number of protocol
 extensions. Some are third-party; see

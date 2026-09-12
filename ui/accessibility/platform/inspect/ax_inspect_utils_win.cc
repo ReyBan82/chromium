@@ -4,11 +4,11 @@
 
 #include "ui/accessibility/platform/inspect/ax_inspect_utils_win.h"
 
-#include <uiautomation.h>
-
 #include <map>
 #include <string>
 
+#include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
 #include "base/logging.h"
 #include "base/memory/singleton.h"
 #include "base/strings/pattern.h"
@@ -18,6 +18,8 @@
 #include "base/win/scoped_bstr.h"
 #include "third_party/iaccessible2/ia2_api_all.h"
 #include "ui/accessibility/platform/inspect/ax_inspect.h"
+
+#include <uiautomation.h>
 
 namespace ui {
 namespace {
@@ -33,11 +35,9 @@ struct PlatformConstantToNameEntry {
 };
 
 std::wstring GetNameForPlatformConstant(
-    const PlatformConstantToNameEntry table[],
-    size_t table_size,
+    base::span<const PlatformConstantToNameEntry> table,
     int32_t value) {
-  for (size_t i = 0; i < table_size; ++i) {
-    auto& entry = table[i];
+  for (const auto& entry : table) {
     if (entry.value == value)
       return base::ASCIIToWide(entry.name);
   }
@@ -105,7 +105,7 @@ std::wstring IAccessibleRoleToString(int32_t ia_role) {
       QUOTE(ROLE_SYSTEM_WHITESPACE),     QUOTE(ROLE_SYSTEM_WINDOW),
   };
 
-  return GetNameForPlatformConstant(ia_table, std::size(ia_table), ia_role);
+  return GetNameForPlatformConstant(ia_table, ia_role);
 }
 
 COMPONENT_EXPORT(AX_PLATFORM)
@@ -170,7 +170,7 @@ std::wstring IAccessible2RoleToString(int32_t ia2_role) {
       QUOTE(IA2_ROLE_COMMENT),
   };
 
-  return GetNameForPlatformConstant(ia2_table, std::size(ia2_table), ia2_role);
+  return GetNameForPlatformConstant(ia2_table, ia2_role);
 }
 
 COMPONENT_EXPORT(AX_PLATFORM)
@@ -248,7 +248,7 @@ std::wstring AccessibilityEventToString(int32_t event) {
       QUOTE(IA2_EVENT_ROLE_CHANGED),
   };
 
-  return GetNameForPlatformConstant(event_table, std::size(event_table), event);
+  return GetNameForPlatformConstant(event_table, event);
 }
 
 void IAccessibleStateToStringVector(int32_t ia_state,
@@ -672,7 +672,7 @@ std::wstring UiaIdentifierToString(int32_t identifier) {
       QUOTE(UIA_AppBarControlTypeId),
   };
 
-  return GetNameForPlatformConstant(id_table, std::size(id_table), identifier);
+  return GetNameForPlatformConstant(id_table, identifier);
 }
 
 COMPONENT_EXPORT(AX_PLATFORM)
@@ -680,7 +680,7 @@ std::wstring UiaOrientationToString(int32_t identifier) {
   static const PlatformConstantToNameEntry id_table[] = {
       QUOTE(OrientationType_None), QUOTE(OrientationType_Horizontal),
       QUOTE(OrientationType_Vertical)};
-  return GetNameForPlatformConstant(id_table, std::size(id_table), identifier);
+  return GetNameForPlatformConstant(id_table, identifier);
 }
 
 COMPONENT_EXPORT(AX_PLATFORM)
@@ -688,7 +688,7 @@ std::wstring UiaLiveSettingToString(int32_t identifier) {
   static const PlatformConstantToNameEntry id_table[] = {
       QUOTE(LiveSetting::Off), QUOTE(LiveSetting::Polite),
       QUOTE(LiveSetting::Assertive)};
-  return GetNameForPlatformConstant(id_table, std::size(id_table), identifier);
+  return GetNameForPlatformConstant(id_table, identifier);
 }
 
 COMPONENT_EXPORT(AX_PLATFORM) std::string BstrToUTF8(BSTR bstr) {
@@ -726,7 +726,7 @@ BOOL CALLBACK MatchWindow(HWND hwnd, LPARAM lParam) {
     title.erase(actual_length);
 
   auto* info = reinterpret_cast<HWNDSearchInfo*>(lParam);
-  if (base::EndsWith(title, info->title) &&
+  if (title.ends_with(info->title) &&
       (info->pattern.empty() ||
        base::MatchPattern(base::AsStringPiece16(title),
                           base::AsStringPiece16(info->pattern)))) {
@@ -805,7 +805,7 @@ std::string RoleVariantToString(const base::win::ScopedVariant& role) {
 }
 
 COMPONENT_EXPORT(AX_PLATFORM)
-absl::optional<std::string> GetIAccessible2Attribute(
+std::optional<std::string> GetIAccessible2Attribute(
     Microsoft::WRL::ComPtr<IAccessible2> element,
     std::string attribute) {
   base::win::ScopedBstr bstr;
@@ -825,7 +825,7 @@ absl::optional<std::string> GetIAccessible2Attribute(
         return ia2_attribute[1];
     }
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 COMPONENT_EXPORT(AX_PLATFORM)
@@ -834,7 +834,7 @@ std::string GetDOMId(Microsoft::WRL::ComPtr<IAccessible> element) {
   if (S_OK != IA2QueryInterface<IAccessible2>(element.Get(), &ia2))
     return "";
 
-  absl::optional<std::string> id = GetIAccessible2Attribute(ia2, "id");
+  std::optional<std::string> id = GetIAccessible2Attribute(ia2, "id");
   if (id) {
     return *id;
   }
@@ -845,7 +845,7 @@ COMPONENT_EXPORT(AX_PLATFORM)
 std::vector<Microsoft::WRL::ComPtr<IAccessible>> IAccessibleChildrenOf(
     Microsoft::WRL::ComPtr<IAccessible> parent) {
   auto children = std::vector<Microsoft::WRL::ComPtr<IAccessible>>();
-  for (const ui::MSAAChild& msaa_child : ui::MSAAChildren(parent)) {
+  for (const MSAAChild& msaa_child : MSAAChildren(parent)) {
     Microsoft::WRL::ComPtr<IAccessible> child = msaa_child.AsIAccessible();
     if (child) {
       children.emplace_back(child);
@@ -880,8 +880,8 @@ MSAAChildren::MSAAChildren(IAccessible* parent) {
   if (FAILED(parent->get_accChildCount(&count_)))
     return;
 
-  std::unique_ptr<VARIANT[]> children_variants(new VARIANT[count_]);
-  if (FAILED(AccessibleChildren(parent, 0, count_, children_variants.get(),
+  auto children_variants = base::HeapArray<VARIANT>::Uninit(count_);
+  if (FAILED(AccessibleChildren(parent, 0, count_, children_variants.data(),
                                 &count_))) {
     count_ = 0;
     return;

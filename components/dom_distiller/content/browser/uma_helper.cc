@@ -47,29 +47,11 @@ bool UMAHelper::DistillabilityDriverTimer::HasStarted() {
          total_active_time_ != base::TimeDelta();
 }
 
-bool UMAHelper::DistillabilityDriverTimer::IsTimingDistilledPage() {
-  return HasStarted() && is_distilled_page_;
-}
-
 base::TimeDelta UMAHelper::DistillabilityDriverTimer::GetElapsedTime() {
   // If the timer is unpaused, add in the current time too.
   if (active_time_start_ != base::Time())
     return total_active_time_ + (base::Time::Now() - active_time_start_);
   return total_active_time_;
-}
-
-// static
-void UMAHelper::RecordReaderModeEntry(ReaderModeEntryPoint entry_point) {
-  // Use histograms instead of user actions because order doesn't matter.
-  base::UmaHistogramEnumeration("DomDistiller.ReaderMode.EntryPoint",
-                                entry_point);
-}
-
-// static
-void UMAHelper::RecordReaderModeExit(ReaderModeEntryPoint exit_point) {
-  // Use histograms instead of user actions because order doesn't matter.
-  base::UmaHistogramEnumeration("DomDistiller.ReaderMode.ExitPoint",
-                                exit_point);
 }
 
 // static
@@ -136,35 +118,8 @@ void UMAHelper::UpdateTimersOnNavigation(content::WebContents* web_contents,
   if (!driver->GetTimer().HasStarted())
     return;
 
-  // Stop timing distilled pages when a user navigates away. (Note that
-  // distillable pages are logged only when reader mode is triggered, so there
-  // is no need to log time on a distillable page at navigation.
-  if (driver->GetTimer().IsTimingDistilledPage())
-    LogTimeOnDistilledPage(driver->GetTimer().GetElapsedTime());
+  // Stop timing distilled pages when a user navigates away.
   driver->GetTimer().Reset();
-}
-
-// static
-void UMAHelper::LogTimeOnDistillablePage(content::WebContents* web_contents) {
-  CHECK(web_contents);
-  DistillabilityDriver::CreateForWebContents(web_contents);
-  DistillabilityDriver* driver =
-      DistillabilityDriver::FromWebContents(web_contents);
-  CHECK(driver);
-  DCHECK(driver->GetTimer().HasStarted());
-
-  // We shouldn't log time on a distillable page if this is a distilled page.
-  DCHECK(!driver->GetTimer().IsTimingDistilledPage());
-
-  base::UmaHistogramLongTimes(
-      "DomDistiller.Time.ActivelyViewingArticleBeforeDistilling",
-      driver->GetTimer().GetElapsedTime());
-  driver->GetTimer().Reset();
-}
-
-void UMAHelper::LogTimeOnDistilledPage(base::TimeDelta time) {
-  base::UmaHistogramLongTimes("DomDistiller.Time.ActivelyViewingReaderModePage",
-                              time);
 }
 
 }  // namespace dom_distiller

@@ -4,6 +4,8 @@
 
 #include "ash/utility/layer_util.h"
 
+#include <memory>
+
 #include "base/cancelable_callback.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
@@ -11,11 +13,12 @@
 #include "base/timer/timer.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/compositor/compositor.h"
-#include "ui/compositor/layer.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
+#include "ui/compositor/layer_textured.h"
+#include "ui/compositor/layer_with_external_texture.h"
 #include "ui/compositor/test/test_compositor_host.h"
 #include "ui/compositor/test/test_context_factories.h"
 #include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 
 namespace ash {
 namespace {
@@ -59,30 +62,32 @@ class LayerUtilTest : public testing::Test {
 
   std::unique_ptr<ui::TestContextFactories> context_factories_;
   std::unique_ptr<ui::TestCompositorHost> host_;
-  ui::Layer root_;
+  ui::LayerTextured root_;
 };
 
 }  // namespace
 
 TEST_F(LayerUtilTest, CopyContentToExistingLayer) {
-  ui::ScopedAnimationDurationScaleMode non_zero(
-      ui::ScopedAnimationDurationScaleMode::NORMAL_DURATION);
+  gfx::ScopedAnimationDurationScaleMode non_zero(
+      gfx::ScopedAnimationDurationScaleMode::NORMAL_DURATION);
 
-  ui::Layer layer1;
+  ui::LayerTextured layer1;
   layer1.SetBounds(gfx::Rect(100, 100));
   root_layer()->Add(&layer1);
 
-  ui::Layer layer2;
+  ui::LayerWithExternalTexture layer2;
   layer2.SetBounds(gfx::Rect(100, 100));
   root_layer()->Add(&layer2);
 
   {
     bool called = false;
-    base::CancelableOnceCallback<void(ui::Layer**)> cancelable;
-    cancelable.Reset(base::BindLambdaForTesting([&](ui::Layer** dummy) {
-      called = true;
-      *dummy = &layer2;
-    }));
+    base::CancelableOnceCallback<void(ui::LayerWithExternalTexture**)>
+        cancelable;
+    cancelable.Reset(
+        base::BindLambdaForTesting([&](ui::LayerWithExternalTexture** dummy) {
+          called = true;
+          *dummy = &layer2;
+        }));
     CopyLayerContentToLayer(&layer1, cancelable.callback());
 
     GenerateOneFrame();
@@ -93,11 +98,13 @@ TEST_F(LayerUtilTest, CopyContentToExistingLayer) {
   // Test cancel scenario.
   {
     bool called = false;
-    base::CancelableOnceCallback<void(ui::Layer**)> cancelable;
-    cancelable.Reset(base::BindLambdaForTesting([&](ui::Layer** dummy) {
-      called = true;
-      *dummy = &layer2;
-    }));
+    base::CancelableOnceCallback<void(ui::LayerWithExternalTexture**)>
+        cancelable;
+    cancelable.Reset(
+        base::BindLambdaForTesting([&](ui::LayerWithExternalTexture** dummy) {
+          called = true;
+          *dummy = &layer2;
+        }));
 
     CopyLayerContentToLayer(&layer1, cancelable.callback());
     cancelable.Cancel();

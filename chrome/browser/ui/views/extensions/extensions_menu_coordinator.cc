@@ -6,42 +6,55 @@
 
 #include <memory>
 
+#include "base/check_deref.h"
 #include "base/feature_list.h"
-#include "chrome/browser/ui/views/extensions/extensions_menu_view_controller.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/extensions/extensions_menu_view_model.h"
+#include "chrome/browser/ui/views/chrome_layout_provider.h"
+#include "chrome/browser/ui/views/extensions/extensions_container_views.h"
+#include "chrome/browser/ui/views/extensions/extensions_menu_delegate_desktop.h"
 #include "extensions/common/extension_features.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/layout/layout_provider.h"
+#include "ui/views/metadata/view_factory.h"
 #include "ui/views/view_tracker.h"
 #include "ui/views/widget/widget.h"
 
-ExtensionsMenuCoordinator::ExtensionsMenuCoordinator(Browser* browser)
-    : browser_(browser) {}
+ExtensionsMenuCoordinator::ExtensionsMenuCoordinator(
+    BrowserWindowInterface* browser,
+    ExtensionsContainer* extensions_container)
+    : browser_(browser),
+      extensions_container_(CHECK_DEREF(extensions_container)) {}
 
 ExtensionsMenuCoordinator::~ExtensionsMenuCoordinator() {
-  Hide();
+  if (views::Widget* const menu = GetExtensionsMenuWidget()) {
+    // Close the menu widget synchronously as it may hold references back to the
+    // coordinator and its host Browser.
+    menu->CloseNow();
+  }
 }
 
 void ExtensionsMenuCoordinator::Show(
-    views::View* anchor_view,
-    ExtensionsContainer* extensions_container) {
+    views::BubbleAnchor anchor,
+    ExtensionsContainerViews* extensions_container_views) {
   DCHECK(base::FeatureList::IsEnabled(
       extensions_features::kExtensionsMenuAccessControl));
   std::unique_ptr<views::BubbleDialogDelegate> bubble_delegate =
-      CreateExtensionsMenuBubbleDialogDelegate(anchor_view,
-                                               extensions_container);
+      CreateExtensionsMenuBubbleDialogDelegate(anchor,
+                                               extensions_container_views);
 
-  views::BubbleDialogDelegate::CreateBubble(std::move(bubble_delegate))->Show();
+  views::BubbleDialogDelegate::CreateBubbleDeprecated(
+      std::move(bubble_delegate),
+      views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET)
+      ->Show();
 }
 
 void ExtensionsMenuCoordinator::Hide() {
   DCHECK(base::FeatureList::IsEnabled(
       extensions_features::kExtensionsMenuAccessControl));
-  views::Widget* const menu = GetExtensionsMenuWidget();
-  if (menu) {
-    menu->Close();
-    // Immediately stop tracking the view. Widget will be destroyed
-    // asynchronously.
-    bubble_tracker_.SetView(nullptr);
+  if (views::Widget* const menu = GetExtensionsMenuWidget()) {
+    menu->CloseNow();
   }
 }
 
@@ -55,42 +68,50 @@ views::Widget* ExtensionsMenuCoordinator::GetExtensionsMenuWidget() {
 
 std::unique_ptr<views::BubbleDialogDelegate>
 ExtensionsMenuCoordinator::CreateExtensionsMenuBubbleDialogDelegateForTesting(
-    views::View* anchor_view,
-    ExtensionsContainer* extensions_container) {
-  return CreateExtensionsMenuBubbleDialogDelegate(anchor_view,
-                                                  extensions_container);
+    views::BubbleAnchor anchor,
+    ExtensionsContainerViews* extensions_container_views) {
+  return CreateExtensionsMenuBubbleDialogDelegate(anchor,
+                                                  extensions_container_views);
 }
 
 std::unique_ptr<views::BubbleDialogDelegate>
 ExtensionsMenuCoordinator::CreateExtensionsMenuBubbleDialogDelegate(
-    views::View* anchor_view,
-    ExtensionsContainer* extensions_container) {
+    views::BubbleAnchor anchor,
+    ExtensionsContainerViews* extensions_container_views) {
   DCHECK(base::FeatureList::IsEnabled(
       extensions_features::kExtensionsMenuAccessControl));
+  views::BubbleBorder::Arrow arrow =
+      extensions_container_views ? extensions_container_views->GetPopupArrow()
+                                 : views::BubbleBorder::TOP_RIGHT;
   auto bubble_delegate = std::make_unique<views::BubbleDialogDelegate>(
-      anchor_view, views::BubbleBorder::TOP_RIGHT);
+      anchor, arrow, views::BubbleBorder::DIALOG_SHADOW, /*autosize=*/true);
+  bubble_delegate->SetOwnedByWidget(
+      views::WidgetDelegate::OwnedByWidgetPassKey());
   bubble_delegate->set_margins(gfx::Insets(0));
   bubble_delegate->set_fixed_width(
       views::LayoutProvider::Get()->GetDistanceMetric(
-          views::DISTANCE_BUBBLE_PREFERRED_WIDTH));
+          ChromeDistanceMetric::DISTANCE_EXTENSIONS_MENU_WIDTH));
   // Let anchor view's MenuButtonController handle the highlight.
   bubble_delegate->set_highlight_button_when_shown(false);
-  bubble_delegate->SetButtons(ui::DIALOG_BUTTON_NONE);
+  bubble_delegate->SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
   bubble_delegate->SetEnableArrowKeyTraversal(true);
 
   auto* bubble_contents = bubble_delegate->SetContentsView(
       views::Builder<views::View>().SetUseDefaultFillLayout(true).Build());
-  bubble_contents->View::AddObserver(this);
+  bubble_view_observation_.Observe(bubble_contents);
   bubble_tracker_.SetView(bubble_contents);
 
-  controller_ = std::make_unique<ExtensionsMenuViewController>(
-      browser_, extensions_container, bubble_contents, bubble_delegate.get());
-  controller_->OpenMainPage();
+  menu_delegate_ = std::make_unique<ExtensionsMenuDelegateDesktop>(
+      browser_, &extensions_container_.get(), extensions_container_views,
+      bubble_contents);
+  menu_delegate_->OpenMainPage();
 
   return bubble_delegate;
 }
 
 void ExtensionsMenuCoordinator::OnViewIsDeleting(views::View* observed_view) {
-  // Reset the controller to keep 1:1 lifetime with the view.
-  controller_.reset();
+  bubble_tracker_.SetView(nullptr);
+  bubble_view_observation_.Reset();
+  // Reset the delegate to keep 1:1 lifetime with the view.
+  menu_delegate_.reset();
 }

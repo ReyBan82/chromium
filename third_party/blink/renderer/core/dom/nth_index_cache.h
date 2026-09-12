@@ -126,7 +126,7 @@ class CORE_EXPORT NthIndexCache final {
     Member<const CSSSelectorList> filter;
 
     void Trace(Visitor* visitor) const;
-    unsigned GetHash() const;
+    uint32_t GetHash() const;
     bool operator==(const Key& other) const {
       // NOTE: We compare filter by identity, which makes for potentially
       // (theoretically) less effective caching between different selectors, but
@@ -138,8 +138,8 @@ class CORE_EXPORT NthIndexCache final {
 
   // Helper needed to make sure Key is compared by value and not by pointer,
   // even though the hash map key is a Member<> (which Oilpan forces us to).
-  struct KeyHashTraits : WTF::MemberHashTraits<Key> {
-    static unsigned GetHash(const Member<Key>& key) { return key->GetHash(); }
+  struct KeyHashTraits : MemberHashTraits<Key> {
+    static uint32_t GetHash(const Member<Key>& key) { return key->GetHash(); }
     static bool Equal(const Member<Key>& a, const Member<Key>& b) {
       return *a == *b;
     }
@@ -151,7 +151,7 @@ class CORE_EXPORT NthIndexCache final {
   struct KeyHashTranslator {
     STATIC_ONLY(KeyHashTranslator);
 
-    static unsigned GetHash(const Key& key) { return key.GetHash(); }
+    static uint32_t GetHash(const Key& key) { return key.GetHash(); }
     static bool Equal(const Member<Key>& a, const Key& b) {
       return a && *a == b;
     }
@@ -186,7 +186,7 @@ class CORE_EXPORT NthIndexCache final {
 
   // Effectively maps (parent, optional tag name, child) → index.
   // (The child part of the key is in NthIndexData.)
-  HeapHashMap<Member<Key>, Member<NthIndexData>, KeyHashTraits>* cache_ =
+  GCedHeapHashMap<Member<Key>, Member<NthIndexData>, KeyHashTraits>* cache_ =
       nullptr;
 
 #if DCHECK_IS_ON()

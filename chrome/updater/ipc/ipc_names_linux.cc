@@ -4,23 +4,26 @@
 
 #include "chrome/updater/ipc/ipc_names.h"
 
+#include <optional>
+
+#include "base/check.h"
+#include "base/files/file_path.h"
 #include "chrome/updater/linux/ipc_constants.h"
 #include "chrome/updater/updater_scope.h"
 #include "mojo/public/cpp/platform/named_platform_channel.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace updater {
 
 mojo::NamedPlatformChannel::ServerName GetUpdateServiceInternalServerName(
     UpdaterScope scope) {
-  return GetActiveDutyInternalSocketPath(scope).MaybeAsASCII();
+  return GetActiveDutyInternalSocketPath(scope).AsUTF8Unsafe();
 }
 
 mojo::NamedPlatformChannel::ServerName GetUpdateServiceServerName(
     UpdaterScope scope) {
-  absl::optional<base::FilePath> socket = GetActiveDutySocketPath(scope);
+  std::optional<base::FilePath> socket = GetActiveDutySocketPath(scope);
   CHECK(socket);
-  return socket->MaybeAsASCII();
+  return socket->AsUTF8Unsafe();
 }
 
 }  // namespace updater

@@ -59,14 +59,14 @@ void GLOzoneEGL::ShutdownGL(gl::GLDisplay* display) {
   gl::ClearBindingsEGL();
 }
 
-bool GLOzoneEGL::CanImportNativePixmap() {
+bool GLOzoneEGL::CanImportNativePixmap(viz::SharedImageFormat format) {
   return false;
 }
 
 std::unique_ptr<NativePixmapGLBinding> GLOzoneEGL::ImportNativePixmap(
     scoped_refptr<gfx::NativePixmap> pixmap,
-    gfx::BufferFormat plane_format,
-    gfx::BufferPlane plane,
+    viz::SharedImageFormat plane_format,
+    std::optional<int> plane_index,
     gfx::Size plane_size,
     const gfx::ColorSpace& color_space,
     GLenum target,

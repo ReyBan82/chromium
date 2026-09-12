@@ -19,7 +19,6 @@
 #include "media/base/video_decoder_config.h"
 #include "media/mojo/mojom/remoting.mojom.h"
 #include "mojo/public/cpp/bindings/receiver.h"
-#include "mojo/public/cpp/bindings/remote.h"
 #include "third_party/openscreen/src/cast/streaming/remoting.pb.h"
 
 namespace base {
@@ -48,7 +47,7 @@ class StreamProvider final : public Demuxer {
       const scoped_refptr<base::SequencedTaskRunner>& media_task_runner);
 
   // Demuxer implementation.
-  std::vector<DemuxerStream*> GetAllStreams() override;
+  std::vector<raw_ptr<DemuxerStream>> GetAllStreams() override;
   std::string GetDisplayName() const override;
   DemuxerType GetDemuxerType() const override;
   void Initialize(DemuxerHost* host, PipelineStatusCallback status_cb) override;
@@ -61,14 +60,13 @@ class StreamProvider final : public Demuxer {
   base::TimeDelta GetStartTime() const override;
   base::Time GetTimelineOffset() const override;
   int64_t GetMemoryUsage() const override;
-  absl::optional<container_names::MediaContainerName> GetContainerForMetrics()
+  std::optional<container_names::MediaContainerName> GetContainerForMetrics()
       const override;
-  void OnEnabledAudioTracksChanged(const std::vector<MediaTrack::Id>& track_ids,
-                                   base::TimeDelta curr_time,
-                                   TrackChangeCB change_completed_cb) override;
-  void OnSelectedVideoTrackChanged(const std::vector<MediaTrack::Id>& track_ids,
-                                   base::TimeDelta curr_time,
-                                   TrackChangeCB change_completed_cb) override;
+  void OnTracksChanged(DemuxerStream::Type track_type,
+                       std::optional<MediaTrack::Id> track_id,
+                       base::TimeDelta curr_time,
+                       TrackChangeCB change_completed_cb) override;
+  void SetPlaybackRate(double rate) override {}
 
  protected:
   // Deletion is only allowed via Destroy().
@@ -278,10 +276,8 @@ template <>
 struct default_delete<media::remoting::StreamProvider> {
   constexpr default_delete() = default;
 
-  template <typename U,
-            typename = typename std::enable_if<std::is_convertible<
-                U*,
-                media::remoting::StreamProvider*>::value>::type>
+  template <typename U>
+    requires(std::is_convertible_v<U*, media::remoting::StreamProvider*>)
   explicit default_delete(const default_delete<U>& d) {}
 
   void operator()(media::remoting::StreamProvider* ptr) const;

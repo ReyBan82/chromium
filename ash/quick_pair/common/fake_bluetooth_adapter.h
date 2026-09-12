@@ -5,16 +5,16 @@
 #ifndef ASH_QUICK_PAIR_COMMON_FAKE_BLUETOOTH_ADAPTER_H_
 #define ASH_QUICK_PAIR_COMMON_FAKE_BLUETOOTH_ADAPTER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "device/bluetooth/test/mock_bluetooth_adapter.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace ash {
-namespace quick_pair {
+namespace ash::quick_pair {
 
 class FakeBluetoothAdapter
     : public testing::NiceMock<device::MockBluetoothAdapter> {
  public:
-  void NotifyPoweredChanged(bool powered);
+  FakeBluetoothAdapter();
 
   void SetBluetoothIsPowered(bool powered);
 
@@ -43,11 +43,16 @@ class FakeBluetoothAdapter
       device::BluetoothRemoteGattCharacteristic* characteristic);
 
   void NotifyConfirmPasskey(uint32_t passkey, device::BluetoothDevice* device);
+  void NotifyDisplayPasskey(device::BluetoothDevice* device, uint32_t passkey);
 
   void NotifyDevicePairedChanged(device::BluetoothDevice* device,
                                  bool new_paired_status);
 
   void NotifyDeviceChanged(device::BluetoothDevice* device);
+
+  void NotifyDeviceConnectedStateChanged(device::BluetoothDevice* device,
+                                         bool is_now_connected);
+  void NotifyDeviceAdded(device::BluetoothDevice* device);
 
   bool IsPowered() const override;
 
@@ -64,7 +69,7 @@ class FakeBluetoothAdapter
 
   void ConnectDevice(
       const std::string& address,
-      const absl::optional<device::BluetoothDevice::AddressType>& address_type,
+      const std::optional<device::BluetoothDevice::AddressType>& address_type,
       base::OnceCallback<void(device::BluetoothDevice*)> callback,
       base::OnceCallback<void(const std::string&)> error_callback) override;
 
@@ -76,13 +81,13 @@ class FakeBluetoothAdapter
   bool connect_device_failure_ = false;
   bool get_device_returns_nullptr_ = false;
   bool connect_device_timeout_ = false;
-  device::BluetoothDevice::PairingDelegate* pairing_delegate_ = nullptr;
+  raw_ptr<device::BluetoothDevice::PairingDelegate, DanglingUntriaged>
+      pairing_delegate_ = nullptr;
   device::BluetoothAdapter::LowEnergyScanSessionHardwareOffloadingStatus
       hardware_offloading_status_ = device::BluetoothAdapter::
           LowEnergyScanSessionHardwareOffloadingStatus::kSupported;
 };
 
-}  // namespace quick_pair
-}  // namespace ash
+}  // namespace ash::quick_pair
 
 #endif  // ASH_QUICK_PAIR_COMMON_FAKE_BLUETOOTH_ADAPTER_H_

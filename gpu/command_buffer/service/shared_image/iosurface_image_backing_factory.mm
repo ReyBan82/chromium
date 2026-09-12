@@ -4,30 +4,33 @@
 
 #include "gpu/command_buffer/service/shared_image/iosurface_image_backing_factory.h"
 
+#include <optional>
+
+#include "base/bits.h"
 #include "base/memory/scoped_refptr.h"
 #include "build/build_config.h"
-#include "components/viz/common/resources/resource_format_utils.h"
-#include "components/viz/common/resources/resource_sizes.h"
+#include "components/viz/common/resources/shared_image_format.h"
+#include "components/viz/common/resources/shared_image_format_utils.h"
+#include "gpu/command_buffer/common/iosurface_validation.h"
 #include "gpu/command_buffer/common/shared_image_usage.h"
-#include "gpu/command_buffer/service/mailbox_manager.h"
+#include "gpu/command_buffer/service/service_utils.h"
 #include "gpu/command_buffer/service/shared_context_state.h"
 #include "gpu/command_buffer/service/shared_image/iosurface_image_backing.h"
 #include "gpu/command_buffer/service/shared_image/shared_image_backing.h"
 #include "gpu/command_buffer/service/shared_image/shared_image_factory.h"
-#include "gpu/command_buffer/service/shared_image/shared_image_format_utils.h"
+#include "gpu/command_buffer/service/shared_image/shared_image_format_service_utils.h"
 #include "gpu/command_buffer/service/shared_image/shared_image_representation.h"
 #include "gpu/command_buffer/service/skia_utils.h"
 #include "gpu/command_buffer/service/texture_manager.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/skia/include/core/SkPromiseImageTexture.h"
-#include "ui/gfx/buffer_format_util.h"
+#include "ui/gfx/buffer_types.h"
+#include "ui/gfx/gpu_memory_buffer_handle.h"
 #include "ui/gfx/mac/io_surface.h"
-#include "ui/gl/buffer_format_utils.h"
 #include "ui/gl/buildflags.h"
 #include "ui/gl/gl_context.h"
 #include "ui/gl/gl_implementation.h"
 
 #if BUILDFLAG(IS_MAC)
+#include "base/mac/mac_util.h"
 #include "ui/gfx/mac/display_icc_profiles.h"
 #endif
 
@@ -36,20 +39,65 @@
 namespace gpu {
 
 namespace {
-bool IsFormatSupported(viz::ResourceFormat resource_format) {
-  switch (resource_format) {
-    case viz::ResourceFormat::RGBA_8888:
-    case viz::ResourceFormat::RGBX_8888:
-    case viz::ResourceFormat::BGRA_8888:
-    case viz::ResourceFormat::BGRX_8888:
-    case viz::ResourceFormat::RGBA_F16:
-    case viz::ResourceFormat::RED_8:
-    case viz::ResourceFormat::BGRA_1010102:
-    case viz::ResourceFormat::RGBA_1010102:
-      return true;
-    default:
-      return false;
+bool UsageWillResultInGLWrite(gpu::SharedImageUsageSet usage,
+                              GrContextType gr_context_type) {
+  return usage.Has(SHARED_IMAGE_USAGE_GLES2_WRITE) ||
+         ((gr_context_type == GrContextType::kGL) &&
+          usage.HasAny(SHARED_IMAGE_USAGE_RASTER_WRITE |
+                       SHARED_IMAGE_USAGE_DISPLAY_WRITE));
+}
+
+bool IsFormatSupported(viz::SharedImageFormat format,
+                       const gles2::FeatureInfo::FeatureFlags& flags) {
+  // These are assumed to be always supported on Apple.
+  if (format == viz::SinglePlaneFormat::kRGBA_8888 ||
+      format == viz::SinglePlaneFormat::kRGBA_4444 ||
+      format == viz::SinglePlaneFormat::kBGR_565 ||
+      format == viz::SinglePlaneFormat::kRGBA_F16 ||
+      // Support R_F16 for SHARED_IMAGE_USAGE_WEBNN_SHARED_TENSOR.
+      format == viz::SinglePlaneFormat::kR_F16 ||
+      format == viz::MultiPlaneFormat::kNV12 ||
+      format == viz::MultiPlaneFormat::kP210 ||
+      format == viz::MultiPlaneFormat::kP410 ||
+      format == viz::MultiPlaneFormat::kP010 ||
+      format == viz::MultiPlaneFormat::kNV12A ||
+      format == viz::MultiPlaneFormat::kNV16 ||
+      format == viz::MultiPlaneFormat::kNV24) {
+    return true;
   }
+
+  if (format == viz::SinglePlaneFormat::kRGBX_8888) {
+    return !flags.disable_mac_swangle_rgbx;
+  }
+
+  if (format == viz::SinglePlaneFormat::kBGRA_8888) {
+    return flags.ext_texture_format_bgra8888;
+  }
+
+  if (format == viz::SinglePlaneFormat::kBGRX_8888) {
+    return flags.ext_texture_format_bgra8888 && !flags.disable_mac_swangle_rgbx;
+  }
+
+  // BGRA_1010102 is always supported on Apple but RGBA_1010102 is not.
+  if (format == viz::SinglePlaneFormat::kBGRA_1010102) {
+    return flags.chromium_image_ar30;
+  }
+
+  if (format == viz::SinglePlaneFormat::kRGBA_1010102) {
+    return flags.chromium_image_ab30;
+  }
+
+  if (format == viz::SinglePlaneFormat::kR_8 ||
+      format == viz::SinglePlaneFormat::kRG_88) {
+    return flags.ext_texture_rg;
+  }
+
+  if (format == viz::SinglePlaneFormat::kR_16 ||
+      format == viz::SinglePlaneFormat::kRG_1616) {
+    return flags.ext_texture_norm16;
+  }
+
+  return false;
 }
 
 void SetIOSurfaceColorSpace(IOSurfaceRef io_surface,
@@ -59,10 +107,10 @@ void SetIOSurfaceColorSpace(IOSurfaceRef io_surface,
   }
 
 #if BUILDFLAG(IS_MAC)
-  base::ScopedCFTypeRef<CFDataRef> cf_data =
+  base::apple::ScopedCFTypeRef<CFDataRef> cf_data =
       gfx::DisplayICCProfiles::GetInstance()->GetDataForColorSpace(color_space);
   if (cf_data) {
-    IOSurfaceSetValue(io_surface, CFSTR("IOSurfaceColorSpace"), cf_data);
+    IOSurfaceSetValue(io_surface, CFSTR("IOSurfaceColorSpace"), cf_data.get());
   } else {
     IOSurfaceSetColorSpace(io_surface, color_space);
   }
@@ -88,29 +136,36 @@ bool IsPixelDataValid(viz::SharedImageFormat format,
     return true;
   }
   // If we have initial data to upload, ensure it is sized appropriately
-  size_t estimated_size;
-  if (!viz::ResourceSizes::MaybeSizeInBytes(size, format.resource_format(),
-                                            &estimated_size)) {
-    DLOG(ERROR) << "Failed to calculate SharedImage size";
+
+  auto estimated_size = format.MaybeEstimatedSizeInBytes(size);
+  if (!estimated_size) {
+    LOG(ERROR) << "Failed to calculate SharedImage size";
     return false;
   }
-  if (pixel_data.size() != estimated_size) {
+  if (pixel_data.size() != estimated_size.value()) {
     LOG(ERROR) << "Initial data does not have expected size.";
     return false;
   }
   return true;
 }
 
-constexpr uint32_t kSupportedUsage =
-    SHARED_IMAGE_USAGE_GLES2 | SHARED_IMAGE_USAGE_GLES2_FRAMEBUFFER_HINT |
+constexpr SharedImageUsageSet kSupportedUsage =
+    SHARED_IMAGE_USAGE_GLES2_READ | SHARED_IMAGE_USAGE_GLES2_WRITE |
     SHARED_IMAGE_USAGE_DISPLAY_WRITE | SHARED_IMAGE_USAGE_DISPLAY_READ |
-    SHARED_IMAGE_USAGE_RASTER | SHARED_IMAGE_USAGE_OOP_RASTERIZATION |
-    SHARED_IMAGE_USAGE_SCANOUT | SHARED_IMAGE_USAGE_WEBGPU |
-    SHARED_IMAGE_USAGE_CONCURRENT_READ_WRITE | SHARED_IMAGE_USAGE_VIDEO_DECODE |
+    SHARED_IMAGE_USAGE_RASTER_READ | SHARED_IMAGE_USAGE_RASTER_WRITE |
+    SHARED_IMAGE_USAGE_SCANOUT | SHARED_IMAGE_USAGE_WEBGPU_READ |
+    SHARED_IMAGE_USAGE_WEBGPU_WRITE | SHARED_IMAGE_USAGE_CONCURRENT_READ_WRITE |
+    SHARED_IMAGE_USAGE_VIDEO_DECODE |
     SHARED_IMAGE_USAGE_WEBGPU_SWAP_CHAIN_TEXTURE |
     SHARED_IMAGE_USAGE_MACOS_VIDEO_TOOLBOX |
-    SHARED_IMAGE_USAGE_RASTER_DELEGATED_COMPOSITING |
-    SHARED_IMAGE_USAGE_HIGH_PERFORMANCE_GPU;
+    SHARED_IMAGE_USAGE_HIGH_PERFORMANCE_GPU |
+    SHARED_IMAGE_USAGE_CPU_WRITE_ONLY |
+    SHARED_IMAGE_USAGE_WEBGPU_STORAGE_TEXTURE | SHARED_IMAGE_USAGE_CPU_UPLOAD |
+    SHARED_IMAGE_USAGE_RASTER_COPY_SOURCE | SHARED_IMAGE_USAGE_CPU_READ |
+    SHARED_IMAGE_USAGE_WEBGPU_SHARED_BUFFER |
+    SHARED_IMAGE_USAGE_WEBNN_SHARED_TENSOR |
+    SHARED_IMAGE_USAGE_WEBNN_SHARED_TENSOR_WRITE |
+    SHARED_IMAGE_USAGE_WEBNN_SHARED_TENSOR_READ;
 
 }  // anonymous namespace
 
@@ -118,129 +173,154 @@ constexpr uint32_t kSupportedUsage =
 // IOSurfaceImageBackingFactory
 
 IOSurfaceImageBackingFactory::IOSurfaceImageBackingFactory(
-    const GpuPreferences& gpu_preferences,
-    const GpuDriverBugWorkarounds& workarounds,
-    const gles2::FeatureInfo* feature_info,
-    gl::ProgressReporter* progress_reporter)
+    GrContextType gr_context_type,
+    int32_t max_texture_size,
+    gles2::FeatureInfo* feature_info,
+    gl::ProgressReporter* progress_reporter,
+    uint32_t texture_target)
     : SharedImageBackingFactory(kSupportedUsage),
+      gr_context_type_(gr_context_type),
+      max_texture_size_(max_texture_size),
+      feature_info_(feature_info),
       progress_reporter_(progress_reporter),
-      gpu_memory_buffer_formats_(
-          feature_info->feature_flags().gpu_memory_buffer_formats),
-      angle_texture_usage_(feature_info->feature_flags().angle_texture_usage) {
-  gl::GLApi* api = gl::g_current_gl_context;
-  api->glGetIntegervFn(GL_MAX_TEXTURE_SIZE, &max_texture_size_);
-  // Ensure max_texture_size_ is less than INT_MAX so that gfx::Rect and friends
-  // can be used to accurately represent all valid sub-rects, with overflow
-  // cases, clamped to INT_MAX, always invalid.
-  max_texture_size_ = std::min(max_texture_size_, INT_MAX - 1);
-
-  for (gfx::BufferFormat buffer_format : gpu_memory_buffer_formats_) {
-    viz::ResourceFormat resource_format = viz::GetResourceFormat(buffer_format);
-    if (IsFormatSupported(resource_format)) {
-      supported_formats_.insert(resource_format);
-    }
-  }
-}
+      texture_target_(texture_target) {}
 
 IOSurfaceImageBackingFactory::~IOSurfaceImageBackingFactory() = default;
 
-std::unique_ptr<SharedImageBacking>
-IOSurfaceImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    SurfaceHandle surface_handle,
+// static
+gfx::GpuMemoryBufferHandle
+IOSurfaceImageBackingFactory::CreateGpuMemoryBufferHandle(
     const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
-    bool is_thread_safe) {
-  DCHECK(!is_thread_safe);
-  return CreateSharedImageInternal(mailbox, format, surface_handle, size,
-                                   color_space, surface_origin, alpha_type,
-                                   usage, base::span<const uint8_t>());
-}
-
-std::unique_ptr<SharedImageBacking>
-IOSurfaceImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
-    base::span<const uint8_t> pixel_data) {
-  return CreateSharedImageInternal(mailbox, format, kNullSurfaceHandle, size,
-                                   color_space, surface_origin, alpha_type,
-                                   usage, pixel_data);
-}
-
-std::unique_ptr<SharedImageBacking>
-IOSurfaceImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
-    gfx::GpuMemoryBufferHandle handle) {
-  return CreateSharedImageGMBs(
-      mailbox, format, size, color_space, surface_origin, alpha_type, usage,
-      std::move(handle), /*io_surface_plane=*/0, gfx::BufferPlane::DEFAULT,
-      /*is_plane_format=*/false);
-}
-
-std::unique_ptr<SharedImageBacking>
-IOSurfaceImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    gfx::GpuMemoryBufferHandle handle,
-    gfx::BufferFormat buffer_format,
-    gfx::BufferPlane plane,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage) {
-  if (!gpu::IsPlaneValidForGpuMemoryBufferFormat(plane, buffer_format)) {
-    LOG(ERROR) << "Invalid plane " << gfx::BufferPlaneToString(plane) << " for "
-               << gfx::BufferFormatToString(buffer_format);
-    return nullptr;
+    viz::SharedImageFormat format) {
+  base::apple::ScopedCFTypeRef<IOSurfaceRef> io_surface =
+      gfx::CreateIOSurface(size, format, /*should_clear=*/true);
+  if (!io_surface) {
+    LOG(ERROR) << "Failed to allocate IOSurface.";
+    return {};
   }
 
-  const uint32_t io_surface_plane = GetPlaneIndex(plane, buffer_format);
-  auto format = viz::SharedImageFormat::SinglePlane(
-      viz::GetResourceFormat(buffer_format));
+  return gfx::GpuMemoryBufferHandle(std::move(io_surface));
+}
+
+std::unique_ptr<SharedImageBacking>
+IOSurfaceImageBackingFactory::CreateSharedImage(const Mailbox& mailbox,
+                                                const SharedImageInfo& si_info,
+                                                SurfaceHandle surface_handle,
+                                                bool is_thread_safe) {
+  return CreateSharedImageInternal(mailbox, si_info, surface_handle,
+                                   is_thread_safe, base::span<const uint8_t>());
+}
+
+std::unique_ptr<SharedImageBacking>
+IOSurfaceImageBackingFactory::CreateSharedImage(
+    const Mailbox& mailbox,
+    const SharedImageInfo& si_info,
+    bool is_thread_safe,
+    base::span<const uint8_t> pixel_data) {
+  return CreateSharedImageInternal(mailbox, si_info, kNullSurfaceHandle,
+                                   is_thread_safe, pixel_data);
+}
+
+std::unique_ptr<SharedImageBacking>
+IOSurfaceImageBackingFactory::CreateSharedImage(
+    const Mailbox& mailbox,
+    const SharedImageInfo& si_info,
+    bool is_thread_safe,
+    gfx::GpuMemoryBufferHandle handle) {
+  // MacOS does not support external sampler.
+  CHECK(!si_info.format.PrefersExternalSampler());
+  return CreateSharedImageGMBs(mailbox, si_info, std::move(handle),
+                               is_thread_safe);
+}
+
+std::unique_ptr<SharedImageBacking>
+IOSurfaceImageBackingFactory::CreateSharedImage(const Mailbox& mailbox,
+                                                const SharedImageInfo& si_info,
+                                                SurfaceHandle surface_handle,
+                                                bool is_thread_safe,
+                                                gfx::BufferUsage buffer_usage) {
+  // |scoped_progress_reporter| will notify |progress_reporter_| upon
+  // construction and destruction. We limit the scope so that progress is
+  // reported immediately after allocation/upload and before other GL
+  // operations.
+  gfx::ScopedIOSurface io_surface;
+  {
+    gl::ScopedProgressReporter scoped_progress_reporter(progress_reporter_);
+    const bool should_clear = true;
+    const bool override_rgba_to_bgra =
+#if BUILDFLAG(IS_IOS)
+        false;
+#else
+        gr_context_type_ == GrContextType::kGL;
+#endif
+    io_surface = gfx::CreateIOSurface(si_info.size, si_info.format,
+                                      should_clear, override_rgba_to_bgra);
+    if (!io_surface) {
+      LOG(ERROR) << "CreateSharedImage: Failed to create bindable image";
+      return nullptr;
+    }
+  }
+  SetIOSurfaceColorSpace(io_surface.get(), si_info.color_space);
+
+  CHECK(!si_info.format.PrefersExternalSampler());
   return CreateSharedImageGMBs(
-      mailbox, format, size, color_space, surface_origin, alpha_type, usage,
-      std::move(handle), io_surface_plane, plane, /*is_plane_format=*/true);
+      mailbox, si_info, gfx::GpuMemoryBufferHandle(std::move(io_surface)),
+      is_thread_safe, std::move(buffer_usage));
 }
 
 bool IOSurfaceImageBackingFactory::IsSupported(
-    uint32_t usage,
+    SharedImageUsageSet usage,
     viz::SharedImageFormat format,
     const gfx::Size& size,
     bool thread_safe,
     gfx::GpuMemoryBufferType gmb_type,
     GrContextType gr_context_type,
     base::span<const uint8_t> pixel_data) {
+  if (usage.Has(SHARED_IMAGE_USAGE_WEBGPU_SHARED_BUFFER)) {
+    // If the SharedImage can be used as a WebGPU buffer, that means it's
+    // readable and writable and must have those usages.
+    if (!usage.HasAll(gpu::SHARED_IMAGE_USAGE_WEBGPU_READ |
+                      gpu::SHARED_IMAGE_USAGE_WEBGPU_WRITE)) {
+      return false;
+    }
+
+    // Only allow WebGPU shared buffer for WebNN use case for now.
+    if (!usage.Has(SHARED_IMAGE_USAGE_WEBNN_SHARED_TENSOR)) {
+      return false;
+    }
+  }
+
+  // This is the only format that can be used as MLMultiArray for WebNN.
+  if (usage.Has(SHARED_IMAGE_USAGE_WEBNN_SHARED_TENSOR)) {
+    if (format != viz::SinglePlaneFormat::kR_F16) {
+      return false;
+    }
+  }
+
+  // Never used with shared memory GMBs.
+  if (gmb_type != gfx::EMPTY_BUFFER && gmb_type != gfx::IO_SURFACE_BUFFER) {
+    return false;
+  }
+
+  if (usage.Has(SHARED_IMAGE_USAGE_CPU_WRITE_ONLY) &&
+      gmb_type != gfx::IO_SURFACE_BUFFER) {
+    // Only CPU writable when the client provides a IOSurface.
+    return false;
+  }
+
+  if (!IsFormatSupported(format, feature_info_->feature_flags())) {
+    return false;
+  }
+
+  if (!IsValidSize(size, max_texture_size_)) {
+    return false;
+  }
+
+  // Creation from pixel data is not supported for multiplanar formats.
   if (format.is_multi_plane() && !pixel_data.empty()) {
     return false;
   }
-  if (!pixel_data.empty() && gr_context_type != GrContextType::kGL) {
-    return false;
-  }
-  if (thread_safe) {
-    return false;
-  }
-  // Never used with shared memory GMBs.
-  if (gmb_type == gfx::SHARED_MEMORY_BUFFER) {
-    return false;
-  }
-  if (usage & SHARED_IMAGE_USAGE_CPU_UPLOAD) {
-    return false;
-  }
+
   // On macOS, there is no separate interop factory. Any GpuMemoryBuffer-backed
   // image can be used with both OpenGL and Metal
 
@@ -255,7 +335,7 @@ bool IOSurfaceImageBackingFactory::IsSupported(
   // IOSurfaceImageBacking::GLTextureImageRepresentationEndAccess().
   if (gl::GetANGLEImplementation() == gl::ANGLEImplementation::kSwiftShader ||
       gl::GetANGLEImplementation() == gl::ANGLEImplementation::kMetal) {
-    if (usage & SHARED_IMAGE_USAGE_CONCURRENT_READ_WRITE) {
+    if (usage.Has(SHARED_IMAGE_USAGE_CONCURRENT_READ_WRITE)) {
       return false;
     }
   }
@@ -266,57 +346,55 @@ bool IOSurfaceImageBackingFactory::IsSupported(
 std::unique_ptr<SharedImageBacking>
 IOSurfaceImageBackingFactory::CreateSharedImageInternal(
     const Mailbox& mailbox,
-    viz::SharedImageFormat format,
+    const SharedImageInfo& si_info,
     SurfaceHandle surface_handle,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
+    bool is_thread_safe,
     base::span<const uint8_t> pixel_data) {
-  if (!base::Contains(supported_formats_, format.resource_format())) {
-    LOG(ERROR) << "CreateSharedImage: SCANOUT shared images unavailable. "
-                  "Format= "
-               << format.ToString();
-    return nullptr;
-  }
-  if (!IsValidSize(size, max_texture_size_) ||
-      !IsPixelDataValid(format, size, pixel_data)) {
+  const auto format = si_info.format;
+  const auto size = si_info.size;
+  const auto usage = si_info.usage;
+
+  if (!IsPixelDataValid(format, size, pixel_data)) {
     return nullptr;
   }
 
   const bool for_framebuffer_attachment =
-      (usage & (SHARED_IMAGE_USAGE_RASTER |
-                SHARED_IMAGE_USAGE_GLES2_FRAMEBUFFER_HINT)) != 0;
+      UsageWillResultInGLWrite(usage, gr_context_type_);
 
   // |scoped_progress_reporter| will notify |progress_reporter_| upon
   // construction and destruction. We limit the scope so that progress is
   // reported immediately after allocation/upload and before other GL
   // operations.
   gfx::ScopedIOSurface io_surface;
-  const uint32_t io_surface_plane = 0;
-  const gfx::GenericSharedMemoryId io_surface_id;
-  const gfx::BufferFormat buffer_format = ToBufferFormat(format);
+  const bool should_clear =
+      usage.Has(SHARED_IMAGE_USAGE_WEBNN_SHARED_TENSOR) ? true : false;
   {
     gl::ScopedProgressReporter scoped_progress_reporter(progress_reporter_);
-    const bool should_clear = false;
-    io_surface.reset(gfx::CreateIOSurface(size, buffer_format, should_clear));
+
+    const bool override_rgba_to_bgra =
+#if BUILDFLAG(IS_IOS)
+        false;
+#else
+        gr_context_type_ == GrContextType::kGL;
+#endif
+    io_surface =
+        gfx::CreateIOSurface(size, format, should_clear, override_rgba_to_bgra);
     if (!io_surface) {
       LOG(ERROR) << "CreateSharedImage: Failed to create bindable image";
       return nullptr;
     }
   }
-  SetIOSurfaceColorSpace(io_surface.get(), color_space);
+  SetIOSurfaceColorSpace(io_surface.get(), si_info.color_space);
 
-  const bool is_cleared = !pixel_data.empty();
+  const bool is_cleared = !pixel_data.empty() || should_clear;
   const bool framebuffer_attachment_angle =
-      for_framebuffer_attachment && angle_texture_usage_;
-  GLenum texture_target = gpu::GetPlatformSpecificTextureTarget();
+      for_framebuffer_attachment &&
+      feature_info_->feature_flags().angle_texture_usage;
 
   auto backing = std::make_unique<IOSurfaceImageBacking>(
-      io_surface, io_surface_plane, io_surface_id, mailbox, format, size,
-      color_space, surface_origin, alpha_type, usage, texture_target,
-      framebuffer_attachment_angle, is_cleared);
+      io_surface, mailbox, si_info, texture_target_,
+      framebuffer_attachment_angle, is_cleared, is_thread_safe,
+      gr_context_type_);
   if (!pixel_data.empty()) {
     gl::ScopedProgressReporter scoped_progress_reporter(progress_reporter_);
     backing->InitializePixels(pixel_data);
@@ -327,80 +405,43 @@ IOSurfaceImageBackingFactory::CreateSharedImageInternal(
 std::unique_ptr<SharedImageBacking>
 IOSurfaceImageBackingFactory::CreateSharedImageGMBs(
     const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
+    const SharedImageInfo& si_info,
     gfx::GpuMemoryBufferHandle handle,
-    uint32_t io_surface_plane,
-    gfx::BufferPlane buffer_plane,
-    bool is_plane_format) {
-  if (handle.type != gfx::IO_SURFACE_BUFFER || !handle.io_surface) {
+    bool is_thread_safe,
+    std::optional<gfx::BufferUsage> buffer_usage) {
+  const auto format = si_info.format;
+  const auto size = si_info.size;
+  const bool cpu_access = si_info.usage.HasAny(
+      SHARED_IMAGE_USAGE_CPU_READ | SHARED_IMAGE_USAGE_CPU_WRITE_ONLY |
+      SHARED_IMAGE_USAGE_CPU_ONLY_READ_WRITE | SHARED_IMAGE_USAGE_CPU_UPLOAD);
+
+  if (handle.type != gfx::IO_SURFACE_BUFFER || !handle.io_surface()) {
     LOG(ERROR) << "Invalid IOSurface GpuMemoryBufferHandle.";
     return nullptr;
   }
 
-  auto buffer_format = ToBufferFormat(format);
-  if (!gpu_memory_buffer_formats_.Has(buffer_format)) {
-    LOG(ERROR) << "CreateSharedImage: unsupported buffer format "
-               << gfx::BufferFormatToString(buffer_format);
+  auto io_surface = std::move(handle).io_surface();
+  std::string validation_error;
+  if (!ValidateIOSurface(io_surface, format, size, cpu_access,
+                         &validation_error)) {
+    LOG(ERROR) << validation_error;
     return nullptr;
-  }
-
-  // Note that `size` refers to the size of the IOSurface.
-  if (!gpu::IsImageSizeValidForGpuMemoryBufferFormat(size, buffer_format)) {
-    LOG(ERROR) << "Invalid size " << size.ToString() << " for "
-               << gfx::BufferFormatToString(buffer_format);
-    return nullptr;
-  }
-
-  const GLenum target = gpu::GetPlatformSpecificTextureTarget();
-  auto io_surface = handle.io_surface;
-  const auto io_surface_id = handle.id;
-
-  // Ensure that the IOSurface has the same size and pixel format as those
-  // specified by `size` and `buffer_format`. A malicious client could lie about
-  // this, which, if subsequently used to determine parameters for bounds
-  // checking, could result in an out-of-bounds memory access.
-  {
-    uint32_t io_surface_format = IOSurfaceGetPixelFormat(io_surface);
-    if (io_surface_format !=
-        BufferFormatToIOSurfacePixelFormat(buffer_format)) {
-      DLOG(ERROR)
-          << "IOSurface pixel format does not match specified buffer format.";
-      return nullptr;
-    }
-    gfx::Size io_surface_size(IOSurfaceGetWidth(io_surface),
-                              IOSurfaceGetHeight(io_surface));
-    if (io_surface_size != size) {
-      DLOG(ERROR) << "IOSurface size does not match specified size.";
-      return nullptr;
-    }
   }
 
   const bool for_framebuffer_attachment =
-      (usage & (SHARED_IMAGE_USAGE_RASTER |
-                SHARED_IMAGE_USAGE_GLES2_FRAMEBUFFER_HINT)) != 0;
+      UsageWillResultInGLWrite(si_info.usage, gr_context_type_);
   const bool framebuffer_attachment_angle =
-      for_framebuffer_attachment && angle_texture_usage_;
-
-  if (is_plane_format) {
-    const gfx::Size plane_size = gpu::GetPlaneSize(buffer_plane, size);
-    auto plane_format =
-        viz::SharedImageFormat::SinglePlane(viz::GetResourceFormat(
-            GetPlaneBufferFormat(buffer_plane, buffer_format)));
-    return std::make_unique<IOSurfaceImageBacking>(
-        io_surface, io_surface_plane, io_surface_id, mailbox, plane_format,
-        plane_size, color_space, surface_origin, alpha_type, usage, target,
-        framebuffer_attachment_angle, /*is_cleared=*/true);
-  }
+      for_framebuffer_attachment &&
+      feature_info_->feature_flags().angle_texture_usage;
 
   return std::make_unique<IOSurfaceImageBacking>(
-      io_surface, /*io_surface_plane=*/0, io_surface_id, mailbox, format, size,
-      color_space, surface_origin, alpha_type, usage, target,
-      framebuffer_attachment_angle, /*is_cleared=*/true);
+      std::move(io_surface), mailbox, si_info, texture_target_,
+      framebuffer_attachment_angle, /*is_cleared=*/true, is_thread_safe,
+      gr_context_type_, std::move(buffer_usage));
+}
+
+SharedImageBackingType IOSurfaceImageBackingFactory::GetBackingType() {
+  return SharedImageBackingType::kIOSurface;
 }
 
 }  // namespace gpu

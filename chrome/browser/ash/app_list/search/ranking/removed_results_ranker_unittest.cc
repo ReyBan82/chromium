@@ -6,6 +6,7 @@
 
 #include "ash/public/cpp/app_list/app_list_types.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ash/app_list/search/files/file_result.h"
 #include "chrome/browser/ash/app_list/search/test/test_result.h"
 #include "chrome/browser/ash/file_suggest/file_suggest_keyed_service_factory.h"
@@ -48,10 +49,11 @@ class RemovedResultsRankerTest : public testing::Test {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
     profile_ = testing_profile_manager_->CreateTestingProfile(
         "primary_profile@test",
-        {{ash::FileSuggestKeyedServiceFactory::GetInstance(),
-          base::BindRepeating(&ash::MockFileSuggestKeyedService::
-                                  BuildMockFileSuggestKeyedService,
-                              temp_dir_.GetPath().Append("proto"))}});
+        {TestingProfile::TestingFactory{
+            ash::FileSuggestKeyedServiceFactory::GetInstance(),
+            base::BindRepeating(&ash::MockFileSuggestKeyedService::
+                                    BuildMockFileSuggestKeyedService,
+                                temp_dir_.GetPath().Append("proto"))}});
     ranker_ = std::make_unique<RemovedResultsRanker>(profile_);
   }
 
@@ -68,7 +70,7 @@ class RemovedResultsRankerTest : public testing::Test {
   content::BrowserTaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
   std::unique_ptr<TestingProfileManager> testing_profile_manager_;
-  TestingProfile* profile_ = nullptr;
+  raw_ptr<TestingProfile> profile_ = nullptr;
   base::ScopedTempDir temp_dir_;
   std::unique_ptr<RemovedResultsRanker> ranker_;
 };
@@ -84,7 +86,6 @@ TEST_F(RemovedResultsRankerTest, UpdateResultRanks) {
 
   ResultsMap results_map;
   results_map[ResultType::kInstalledApp] = MakeResults({"A", "B"});
-  results_map[ResultType::kInternalApp] = MakeResults({"C", "D"});
   results_map[ResultType::kOmnibox] = MakeResults({"E"});
 
   // Installed apps: The 0th result ("A") is marked to be filtered.
@@ -92,16 +93,7 @@ TEST_F(RemovedResultsRankerTest, UpdateResultRanks) {
   EXPECT_TRUE(results_map[ResultType::kInstalledApp][0]->scoring().filtered());
   EXPECT_FALSE(results_map[ResultType::kInstalledApp][1]->scoring().filtered());
 
-  // Internal apps: The 0th result ("C") is marked to be filtered.
-  ranker_->UpdateResultRanks(results_map, ResultType::kInternalApp);
-  EXPECT_TRUE(results_map[ResultType::kInternalApp][0]->scoring().filtered());
-  EXPECT_FALSE(results_map[ResultType::kInternalApp][1]->scoring().filtered());
-
   // Omnibox: The 0th result ("C") is marked to be filtered.
-  //
-  // TODO(crbug.com/1272361): Ranking here should not affect Omnibox results,
-  // after support is added to the autocomplete controller for removal of
-  // non-zero state Omnibox results.
   ranker_->UpdateResultRanks(results_map, ResultType::kOmnibox);
   EXPECT_TRUE(results_map[ResultType::kOmnibox][0]->scoring().filtered());
 }
@@ -128,18 +120,12 @@ TEST_F(RemovedResultsRankerTest, RankDuplicateResults) {
   ResultsMap results_map;
   // Include some duplicated results.
   results_map[ResultType::kInstalledApp] = MakeResults({"A", "A", "B"});
-  results_map[ResultType::kInternalApp] = MakeResults({"C", "D"});
 
   // Installed apps: The 0th and 1st results ("A") are marked to be filtered.
   ranker_->UpdateResultRanks(results_map, ResultType::kInstalledApp);
   EXPECT_TRUE(results_map[ResultType::kInstalledApp][0]->scoring().filtered());
   EXPECT_TRUE(results_map[ResultType::kInstalledApp][1]->scoring().filtered());
   EXPECT_FALSE(results_map[ResultType::kInstalledApp][2]->scoring().filtered());
-
-  // Internal apps: The 0th result ("C") is marked to be filtered.
-  ranker_->UpdateResultRanks(results_map, ResultType::kInternalApp);
-  EXPECT_TRUE(results_map[ResultType::kInternalApp][0]->scoring().filtered());
-  EXPECT_FALSE(results_map[ResultType::kInternalApp][1]->scoring().filtered());
 }
 
 // Verifies that the ranker removes a result through the file suggest keyed
@@ -150,10 +136,11 @@ TEST_F(RemovedResultsRankerTest, RemoveFileSuggestions) {
   const base::FilePath drive_file_result_path("file_A");
   FileResult drive_file_result(
       "zero_state_drive://" + drive_file_result_path.value(),
-      drive_file_result_path, absl::nullopt,
+      drive_file_result_path, std::nullopt,
       ash::AppListSearchResultType::kZeroStateDrive,
       ash::SearchResultDisplayType::kList, /*relevance=*/0.5f,
-      /*query=*/std::u16string(), FileResult::Type::kFile, profile_);
+      /*query=*/std::u16string(), FileResult::Type::kFile, profile_,
+      /*thumbnail_loader=*/nullptr);
   ash::MockFileSuggestKeyedService* mock_service =
       static_cast<ash::MockFileSuggestKeyedService*>(
           ash::FileSuggestKeyedServiceFactory::GetInstance()->GetService(
@@ -169,9 +156,10 @@ TEST_F(RemovedResultsRankerTest, RemoveFileSuggestions) {
   const base::FilePath local_file_path("file_B");
   FileResult local_file_result(
       "zero_state_file://" + local_file_path.value(), local_file_path,
-      absl::nullopt, ash::AppListSearchResultType::kZeroStateDrive,
+      std::nullopt, ash::AppListSearchResultType::kZeroStateDrive,
       ash::SearchResultDisplayType::kList, /*relevance=*/0.5f,
-      /*query=*/std::u16string(), FileResult::Type::kFile, profile_);
+      /*query=*/std::u16string(), FileResult::Type::kFile, profile_,
+      /*thumbnail_loader=*/nullptr);
   auto local_file_metadata = local_file_result.CloneMetadata();
   EXPECT_CALL(*mock_service, RemoveSuggestionBySearchResultAndNotify)
       .WillOnce([&](const ash::SearchResultMetadata& search_result) {

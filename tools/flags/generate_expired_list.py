@@ -18,7 +18,7 @@ This program can be run with no arguments to run its own unit tests.
 
 from __future__ import print_function
 
-import utils
+import flags_utils
 import os
 import sys
 
@@ -28,8 +28,9 @@ ROOT_PATH = os.path.join(os.path.dirname(__file__), '..', '..')
 
 def get_chromium_version():
   """Parses the Chromium version out of //chrome/VERSION."""
-  with open(os.path.join(ROOT_PATH, 'chrome', 'VERSION'),
-            encoding='utf-8') as f:
+  with open(
+    os.path.join(ROOT_PATH, 'chrome', 'VERSION'), encoding='utf-8'
+  ) as f:
     for line in f.readlines():
       key, value = line.strip().split('=')
       if key == 'MAJOR':
@@ -94,7 +95,7 @@ def gen_file_body(flags, mstone):
   '  {"foo", 1},\\n  {"bar", 2},'
   """
   if mstone != None:
-    flags = utils.keep_expired_by(flags, mstone)
+    flags = flags_utils.keep_expired_by(flags, mstone)
   output = []
   for f in flags:
     if f['expiry_milestone'] != -1:
@@ -105,13 +106,31 @@ def gen_file_body(flags, mstone):
 
 def gen_expiry_file(program_name, metadata_name):
   output = gen_file_header(program_name, metadata_name)
-  output += gen_file_body(utils.load_metadata(), get_chromium_version())
+  output += gen_file_body(flags_utils.load_metadata(), get_chromium_version())
   output += gen_file_footer()
   return output
 
 
+def write_if_changed(filename, contents):
+  """Write contents into the named file if the file's content is different.
+
+  This avoids updating the mtime if the file's contents haven't changed,
+  which helps reduce spurious rebuilds.
+  """
+  try:
+    with open(filename, 'r', encoding='utf-8') as f:
+      current = f.read()
+  except FileNotFoundError:
+    # If the file doesn't exist yet, we'll always need to rewrite the file.
+    current = None
+  if not current or contents != current:
+    with open(filename, 'w', encoding='utf-8') as f:
+      f.write(contents)
+
+
 def main():
   import doctest
+
   doctest.testmod()
 
   if len(sys.argv) < 3:
@@ -119,8 +138,7 @@ def main():
     return
 
   output = gen_expiry_file(sys.argv[0], sys.argv[1])
-  with open(sys.argv[2], 'w', encoding='utf-8') as f:
-    f.write(output)
+  write_if_changed(sys.argv[2], output)
 
 
 if __name__ == '__main__':

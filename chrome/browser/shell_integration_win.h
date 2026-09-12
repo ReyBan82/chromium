@@ -19,9 +19,6 @@ enum class ShortcutOperation;
 
 namespace shell_integration::win {
 
-struct ShortcutProperties;
-enum class ShortcutOperation;
-
 // Initiates the interaction with the system settings for the default browser.
 // The function takes care of making sure |on_finished_callback| will get called
 // exactly once when the interaction is finished.
@@ -73,8 +70,24 @@ std::wstring GetAppUserModelIdForBrowser(const base::FilePath& profile_path);
 // with the connection to the remote process.
 using ConnectionErrorCallback = base::OnceClosure;
 using IsPinnedToTaskbarCallback = base::OnceCallback<void(bool, bool)>;
-void GetIsPinnedToTaskbarState(ConnectionErrorCallback on_error_callback,
-                               IsPinnedToTaskbarCallback result_callback);
+void GetIsPinnedToTaskbarState(IsPinnedToTaskbarCallback result_callback);
+
+// LINT.IfChange(IsPinnedToTaskbarResult)
+// Buckets for Windows.IsPinnedToTaskbar and Windows.IsPinnedToTaskbar3
+// histograms.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class IsPinnedToTaskbarResult {
+  kNotPinned = 0,
+  kPinned = 1,
+  kFailure = 2,
+  kMaxValue = kFailure,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/windows/enums.xml:IsPinnedToTaskbarResult)
+
+// Uses IPinnedList3 to verify if Chrome (chrome.exe) is pinned to the taskbar.
+// Must be called on an STA COM thread.
+IsPinnedToTaskbarResult GetIsPinnedToTaskbar3State();
 
 // Unpins `shortcuts` from the taskbar, and run `completion_callback` when done.
 void UnpinShortcuts(const std::vector<base::FilePath>& shortcuts,
@@ -91,7 +104,7 @@ void CreateOrUpdateShortcuts(
     CreateOrUpdateShortcutsResultCallback callback);
 
 // Migrates existing chrome taskbar pins by tagging them with correct app id.
-// see http://crbug.com/28104. Migrates taskbar pins via a task and runs
+// see http://crbug.com/40330895. Migrates taskbar pins via a task and runs
 // |completion_callback| on the calling sequence when done.
 void MigrateTaskbarPins(base::OnceClosure completion_callback);
 
@@ -100,8 +113,7 @@ void MigrateTaskbarPinsCallback(const base::FilePath& pins_path,
                                 const base::FilePath& implicit_apps_path);
 
 // Migrates all shortcuts in |path| which point to |chrome_exe| such that they
-// have the appropriate AppUserModelId. Also clears the legacy dual_mode
-// property from shortcuts with the default chrome app id.
+// have the appropriate AppUserModelId.
 // Returns the number of shortcuts migrated.
 // This method should not be called prior to Windows 7.
 // This method is only public for the sake of tests and shouldn't be called

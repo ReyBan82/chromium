@@ -2,23 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ios/web_view/internal/autofill/web_view_autocomplete_history_manager_factory.h"
+#import "ios/web_view/internal/autofill/web_view_autocomplete_history_manager_factory.h"
 
-#include <utility>
+#import <utility>
 
-#include "base/no_destructor.h"
-#include "components/autofill/core/browser/autocomplete_history_manager.h"
-#include "components/autofill/core/browser/webdata/autofill_webdata_service.h"
-#include "components/keyed_service/core/service_access_type.h"
-#include "components/keyed_service/ios/browser_state_dependency_manager.h"
-#include "ios/web_view/internal/app/application_context.h"
-#include "ios/web_view/internal/signin/web_view_identity_manager_factory.h"
-#include "ios/web_view/internal/web_view_browser_state.h"
-#include "ios/web_view/internal/webdata_services/web_view_web_data_service_wrapper_factory.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "base/no_destructor.h"
+#import "components/autofill/core/browser/single_field_fillers/autocomplete/autocomplete_history_manager.h"
+#import "components/autofill/core/browser/webdata/autofill_webdata_service.h"
+#import "components/keyed_service/core/service_access_type.h"
+#import "components/keyed_service/ios/browser_state_dependency_manager.h"
+#import "ios/web_view/internal/app/application_context.h"
+#import "ios/web_view/internal/signin/web_view_identity_manager_factory.h"
+#import "ios/web_view/internal/web_view_browser_state.h"
+#import "ios/web_view/internal/webdata_services/web_view_web_data_service_wrapper_factory.h"
 
 namespace ios_web_view {
 
@@ -53,22 +49,11 @@ WebViewAutocompleteHistoryManagerFactory::BuildServiceInstanceFor(
     web::BrowserState* context) const {
   WebViewBrowserState* browser_state =
       WebViewBrowserState::FromBrowserState(context);
-  std::unique_ptr<autofill::AutocompleteHistoryManager> service(
-      new autofill::AutocompleteHistoryManager());
   auto profile_db =
       WebViewWebDataServiceWrapperFactory::GetAutofillWebDataForBrowserState(
           browser_state, ServiceAccessType::EXPLICIT_ACCESS);
-  service->Init(profile_db, browser_state->GetPrefs(),
-                browser_state->IsOffTheRecord());
-  return service;
-}
-
-web::BrowserState*
-WebViewAutocompleteHistoryManagerFactory::GetBrowserStateToUse(
-    web::BrowserState* context) const {
-  WebViewBrowserState* browser_state =
-      WebViewBrowserState::FromBrowserState(context);
-  return browser_state;
+  return std::make_unique<autofill::AutocompleteHistoryManager>(
+      profile_db, browser_state->GetPrefs());
 }
 
 }  // namespace ios_web_view

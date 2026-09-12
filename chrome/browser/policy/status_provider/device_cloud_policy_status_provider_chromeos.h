@@ -11,12 +11,15 @@ namespace policy {
 class BrowserPolicyConnectorAsh;
 }  // namespace policy
 
+class Profile;
+
 // A cloud policy status provider for device policy.
 class DeviceCloudPolicyStatusProviderChromeOS
     : public CloudPolicyCoreStatusProvider {
  public:
   explicit DeviceCloudPolicyStatusProviderChromeOS(
-      const policy::BrowserPolicyConnectorAsh* connector);
+      const policy::BrowserPolicyConnectorAsh* connector,
+      Profile* profile);
 
   DeviceCloudPolicyStatusProviderChromeOS(
       const DeviceCloudPolicyStatusProviderChromeOS&) = delete;
@@ -26,7 +29,8 @@ class DeviceCloudPolicyStatusProviderChromeOS
   ~DeviceCloudPolicyStatusProviderChromeOS() override;
 
   // CloudPolicyCoreStatusProvider implementation.
-  base::Value::Dict GetStatus() override;
+  base::DictValue GetStatus() override;
+  policy::mojom::StatusPtr GetStatusMojo() override;
 
  private:
   std::string enterprise_domain_manager_;

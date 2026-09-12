@@ -10,6 +10,7 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/scheduler/public/non_main_thread.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_copier_base.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
@@ -48,7 +49,7 @@ class ThreadSafeScriptContainerTest : public ::testing::Test {
                base::WaitableEvent* waiter) {
               auto data =
                   std::make_unique<ThreadSafeScriptContainer::RawScriptData>(
-                      String::FromUTF8("utf-8") /* encoding */,
+                      "utf-8" /* encoding */,
                       Vector<uint8_t>() /* script_text */,
                       Vector<uint8_t>() /* meta_data */);
               *out_data = data.get();
@@ -119,6 +120,7 @@ class ThreadSafeScriptContainerTest : public ::testing::Test {
   }
 
  private:
+  test::TaskEnvironment task_environment_;
   std::unique_ptr<NonMainThread> writer_thread_;
   std::unique_ptr<NonMainThread> reader_thread_;
 

@@ -21,9 +21,9 @@
 #include "ui/message_center/public/cpp/notification_types.h"
 #include "ui/message_center/public/cpp/notifier_id.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/constants/notifier_catalogs.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace message_center {
 
@@ -130,7 +130,7 @@ class NotificationListTest : public testing::Test {
     return iter->second;
   }
 
-  static const char kIdFormat[];
+  static constexpr char kIdFormat[] = "id%zu";
   static const char16_t kDisplaySource[];
   static const char kExtensionId[];
 
@@ -142,14 +142,14 @@ class NotificationListTest : public testing::Test {
 
 bool IsInNotifications(const NotificationList::Notifications& notifications,
                        const std::string& id) {
-  for (auto iter = notifications.begin(); iter != notifications.end(); ++iter) {
-    if ((*iter)->id() == id)
+  for (const auto& notification : notifications) {
+    if (notification->id() == id) {
       return true;
+    }
   }
   return false;
 }
 
-const char NotificationListTest::kIdFormat[] = "id%ld";
 const char16_t NotificationListTest::kDisplaySource[] = u"source";
 const char NotificationListTest::kExtensionId[] = "ext";
 
@@ -279,12 +279,12 @@ TEST_F(NotificationListTest, GetNotificationsByNotifierId) {
   NotifierId id0(NotifierType::APPLICATION, "ext0");
   NotifierId id1(NotifierType::APPLICATION, "ext1");
   NotifierId id2(GURL("http://example.com"));
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   NotifierId id3(NotifierType::SYSTEM_COMPONENT, "system-notifier",
                  ash::NotificationCatalogName::kTestCatalogName);
 #else
   NotifierId id3(NotifierType::SYSTEM_COMPONENT, "system-notifier");
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<Notification> notification(new Notification(
       NOTIFICATION_TYPE_SIMPLE, "id0", u"title0", u"message0", ui::ImageModel(),
       u"source0", GURL(), id0, RichNotificationData(), nullptr));
@@ -393,8 +393,8 @@ TEST_F(NotificationListTest, Priority) {
 
   NotificationList::Notifications notifications =
       notification_list_->GetVisibleNotifications(blockers_);
-  for (auto iter = notifications.begin(); iter != notifications.end(); ++iter) {
-    notification_list_->RemoveNotification((*iter)->id());
+  for (const auto& notification : notifications) {
+    notification_list_->RemoveNotification(notification->id());
   }
 
   // Higher priority: no limits to the number of popups.
@@ -479,7 +479,7 @@ TEST_F(NotificationListTest, GetNotificationsByAppId) {
   }
 
   for (std::string app_id : {app_id1, app_id2}) {
-    for (auto* notification :
+    for (Notification* notification :
          notification_list_->GetNotificationsByAppId(app_id)) {
       EXPECT_EQ(app_id, notification->notifier_id().id);
     }
@@ -547,7 +547,7 @@ TEST_F(NotificationListTest, GetNotificationsByOriginUrl) {
   }
 
   for (GURL url : {kUrl1, kUrl2}) {
-    for (auto* notification :
+    for (Notification* notification :
          notification_list_->GetNotificationsByOriginUrl(url)) {
       EXPECT_EQ(url, notification->origin_url());
     }
@@ -563,7 +563,7 @@ TEST_F(NotificationListTest, HasPopupsWithPriority) {
   EXPECT_EQ(1u, GetPopupCounts());
 }
 
-TEST_F(NotificationListTest, HasPopupsWithSystemPriority) {
+TEST_F(NotificationListTest, AllPopupsDismissedWhenMarkedAsShown) {
   ASSERT_EQ(0u, notification_list_->NotificationCount(blockers_));
 
   std::string normal_id = AddPriorityNotification(DEFAULT_PRIORITY);
@@ -578,10 +578,6 @@ TEST_F(NotificationListTest, HasPopupsWithSystemPriority) {
   notification_list_->MarkSinglePopupAsShown(normal_id, false);
   notification_list_->MarkSinglePopupAsShown(system_id, false);
 
-  EXPECT_EQ(1u, GetPopupCounts());
-
-  // Mark as read -- emulation of mouse click.
-  notification_list_->MarkSinglePopupAsShown(system_id, true);
   EXPECT_EQ(0u, GetPopupCounts());
 }
 

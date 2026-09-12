@@ -26,10 +26,12 @@ private:
 
 template<typename T>
 class TemplatedObject {
-private:
-    T m_part;
+  DISALLOW_NEW();
+
+ private:
+  T m_part;
 };
 
 }
 
-#endif
+#endif  // CLASS_REQUIRES_TRACE_METHOD_TMPL_H_

@@ -6,8 +6,10 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "content/browser/devtools/protocol/devtools_protocol_test_support.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
 #include "content/shell/browser/shell.h"
@@ -20,23 +22,18 @@ class FontPreferencesBrowserTest : public DevToolsProtocolTest {
   FontPreferencesBrowserTest() = default;
   ~FontPreferencesBrowserTest() override = default;
 
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    command_line->AppendSwitchASCII(switches::kEnableBlinkFeatures,
-                                    "CSSFontFamilyMath");
-  }
-
  protected:
   std::string GetFirstPlatformFontForBody() {
-    base::Value::Dict params1;
+    base::DictValue params1;
     params1.Set("depth", 0);
-    const base::Value::Dict* result =
+    const base::DictValue* result =
         SendCommand("DOM.getDocument", std::move(params1));
 
-    absl::optional<int> body_node_id =
+    std::optional<int> body_node_id =
         result->FindIntByDottedPath("root.nodeId");
     DCHECK(body_node_id);
 
-    base::Value::Dict params2;
+    base::DictValue params2;
     params2.Set("nodeId", *body_node_id);
     params2.Set("selector", "body");
     result = SendCommand("DOM.querySelector", std::move(params2));
@@ -44,12 +41,12 @@ class FontPreferencesBrowserTest : public DevToolsProtocolTest {
     body_node_id = result->FindInt("nodeId");
     DCHECK(body_node_id);
 
-    base::Value::Dict params3;
+    base::DictValue params3;
     params3.Set("nodeId", *body_node_id);
-    const base::Value::Dict* font_info =
+    const base::DictValue* font_info =
         SendCommand("CSS.getPlatformFontsForNode", std::move(params3));
     DCHECK(font_info);
-    const base::Value::List* font_list = font_info->FindList("fonts");
+    const base::ListValue* font_list = font_info->FindList("fonts");
     DCHECK(font_list);
     DCHECK(font_list->size() > 0);
     const base::Value& first_font_info = font_list->front();
@@ -79,6 +76,8 @@ class FontPreferencesBrowserTest : public DevToolsProtocolTest {
     const std::string non_default_system_font = "Lucida Console";
 #elif BUILDFLAG(IS_MAC)
     const std::string non_default_system_font = "Monaco";
+#elif BUILDFLAG(IS_IOS)
+    const std::string non_default_system_font = "Verdana";
 #elif BUILDFLAG(IS_FUCHSIA)
     // Fuchsia platforms don't seem to have many pre-installed fonts besides the
     // default Roboto families. Let's instead choose the default monospace
@@ -120,8 +119,8 @@ IN_PROC_BROWSER_TEST_F(FontPreferencesBrowserTest, GenericFamilies) {
   EXPECT_TRUE(NavigateToURL(shell(), GURL("data:text/html,BODY_TEXT")));
   Attach();
 
-  ASSERT_TRUE(SendCommand("DOM.enable", base::Value::Dict(), true));
-  ASSERT_TRUE(SendCommand("CSS.enable", base::Value::Dict(), true));
+  ASSERT_TRUE(SendCommand("DOM.enable", base::DictValue(), true));
+  ASSERT_TRUE(SendCommand("CSS.enable", base::DictValue(), true));
 
   blink::web_pref::WebPreferences default_preferences =
       shell()->web_contents()->GetOrCreateWebPreferences();

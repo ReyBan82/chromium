@@ -5,10 +5,14 @@
 #include "components/url_rewrite/common/url_loader_throttle.h"
 
 #include <string>
+#include <string_view>
 
+#include "base/logging.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "net/base/net_errors.h"
+#include "net/url_request/redirect_info.h"
+#include "services/network/public/cpp/http_request_headers_update_params.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "url/url_constants.h"
 
@@ -27,7 +31,7 @@ void ApplySubstituteQueryPattern(
     network::ResourceRequest* request,
     const mojom::UrlRequestRewriteSubstituteQueryPatternPtr&
         substitute_query_pattern) {
-  std::string url_query = request->url.query();
+  std::string url_query = request->url.GetQuery();
 
   base::ReplaceSubstringsAfterOffset(&url_query, 0,
                                      substitute_query_pattern->pattern,
@@ -51,17 +55,17 @@ void ApplyReplaceUrl(network::ResourceRequest* request,
   }
 
   if (new_url.has_scheme() &&
-      new_url.scheme().compare(request->url.scheme()) != 0) {
+      new_url.GetScheme().compare(request->url.GetScheme()) != 0) {
     // No cross-scheme redirect allowed.
     return;
   }
 
   GURL::Replacements replacements;
-  std::string host = new_url.host();
+  std::string host = new_url.GetHost();
   replacements.SetHostStr(host);
-  std::string port = new_url.port();
+  std::string port = new_url.GetPort();
   replacements.SetPortStr(port);
-  std::string path = new_url.path();
+  std::string path = new_url.GetPath();
   replacements.SetPathStr(path);
 
   request->url = request->url.ReplaceComponents(replacements);
@@ -70,9 +74,9 @@ void ApplyReplaceUrl(network::ResourceRequest* request,
 void ApplyRemoveHeader(
     network::ResourceRequest* request,
     const mojom::UrlRequestRewriteRemoveHeaderPtr& remove_header) {
-  absl::optional<std::string> query_pattern = remove_header->query_pattern;
-  if (query_pattern &&
-      request->url.query().find(query_pattern.value()) == std::string::npos) {
+  std::optional<std::string> query_pattern = remove_header->query_pattern;
+  if (query_pattern && request->url.GetQuery().find(query_pattern.value()) ==
+                           std::string::npos) {
     // Per the FIDL API, the header should be removed if there is no query
     // pattern or if the pattern matches. Neither is true here.
     return;
@@ -86,8 +90,9 @@ void ApplyAppendToQuery(
     network::ResourceRequest* request,
     const mojom::UrlRequestRewriteAppendToQueryPtr& append_to_query) {
   std::string url_query;
-  if (request->url.has_query() && !request->url.query().empty())
-    url_query = request->url.query() + "&";
+  if (request->url.has_query() && !request->url.GetQuery().empty()) {
+    url_query = request->url.GetQuery() + "&";
+  }
   url_query += append_to_query->query;
 
   GURL::Replacements replacements;
@@ -95,9 +100,8 @@ void ApplyAppendToQuery(
   request->url = request->url.ReplaceComponents(replacements);
 }
 
-bool HostMatches(const base::StringPiece& url_host,
-                 const base::StringPiece& rule_host) {
-  const base::StringPiece kWildcard("*.");
+bool HostMatches(std::string_view url_host, std::string_view rule_host) {
+  const std::string_view kWildcard("*.");
   if (base::StartsWith(rule_host, kWildcard, base::CompareCase::SENSITIVE)) {
     if (base::EndsWith(url_host, rule_host.substr(1),
                        base::CompareCase::SENSITIVE)) {
@@ -117,9 +121,10 @@ bool RuleFiltersMatchUrl(const GURL& url,
                          const mojom::UrlRequestRulePtr& rule) {
   if (rule->hosts_filter) {
     bool found = false;
-    for (const base::StringPiece host : rule->hosts_filter.value()) {
-      if ((found = HostMatches(url.host(), host)))
+    for (const std::string_view host : rule->hosts_filter.value()) {
+      if ((found = HostMatches(url.GetHost(), host))) {
         break;
+      }
     }
     if (!found)
       return false;
@@ -128,7 +133,7 @@ bool RuleFiltersMatchUrl(const GURL& url,
   if (rule->schemes_filter) {
     bool found = false;
     for (const auto& scheme : rule->schemes_filter.value()) {
-      if (url.scheme().compare(scheme) == 0) {
+      if (url.GetScheme().compare(scheme) == 0) {
         found = true;
         break;
       }
@@ -188,14 +193,48 @@ void URLLoaderThrottle::WillStartRequest(network::ResourceRequest* request,
     return;
   }
 
-  for (const auto& rule : rules_->data->rules)
+  GURL current_url = request->url;
+  for (const auto& rule : rules_->data->rules) {
     ApplyRule(request, rule);
+    if (request->url != current_url) {
+      if (!IsRequestAllowed(request, rules_->data)) {
+        delegate_->CancelWithError(net::ERR_ABORTED,
+                                   "Resource load blocked by embedder policy.");
+        return;
+      }
+      current_url = request->url;
+    }
+  }
+
+  if (!added_headers_.empty()) {
+    original_origin_ = url::Origin::Create(request->url);
+  }
+
   *defer = false;
 }
 
-bool URLLoaderThrottle::makes_unsafe_redirect() {
-  // WillStartRequest() does not make cross-scheme redirects.
-  return false;
+void URLLoaderThrottle::WillRedirectRequest(
+    net::RedirectInfo* redirect_info,
+    const network::mojom::URLResponseHead& response_head,
+    bool* defer,
+    network::HttpRequestHeadersUpdateParams* headers_update_params) {
+  if (added_headers_.empty()) {
+    return;
+  }
+
+  if (!url::Origin::Create(redirect_info->new_url)
+           .IsSameOriginWith(original_origin_)) {
+    LOG(WARNING) << "Http headers [" << base::JoinString(added_headers_, ", ")
+                 << "] will be removed due to cross origin redirection "
+                    "from "
+                 << original_origin_ << " to "
+                 << url::Origin::Create(redirect_info->new_url);
+    headers_update_params->removed_headers.insert(
+        headers_update_params->removed_headers.end(),
+        std::make_move_iterator(added_headers_.begin()),
+        std::make_move_iterator(added_headers_.end()));
+    added_headers_.clear();
+  }
 }
 
 void URLLoaderThrottle::ApplyRule(network::ResourceRequest* request,
@@ -254,6 +293,7 @@ void URLLoaderThrottle::ApplyAddHeaders(
     } else {
       request->headers.SetHeader(header->name, header->value);
     }
+    added_headers_.push_back(header->name);
   }
 }
 

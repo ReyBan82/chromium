@@ -4,30 +4,51 @@
 
 package org.chromium.chrome.browser.omnibox;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.browser.tabmodel.TabModel;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JniType;
 
-import java.util.ArrayList;
-import java.util.List;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.TabNativeUtils;
+import org.chromium.chrome.browser.tabmodel.TabModel;
+import org.chromium.components.metrics.OmniboxEventProtosIntDef.PageClassification;
+import org.chromium.components.omnibox.PageClassificationUtils;
+
+import java.util.Arrays;
 
 /**
  * Creates the c++ class that provides ChromeAutocompleteProviderClient to access java resources.
  */
+@NullMarked
 public class ChromeAutocompleteProviderClient {
     @CalledByNative
-    private static Tab[] getAllHiddenTabs(TabModel[] tabModels) {
-        if (tabModels == null) return null;
-        List<Tab> tabList = new ArrayList<>();
-
+    // Returns all eligible tabs for the android tab matcher. For most {@link PageClassification}s
+    // this is all hidden tabs, but for PageClassification.ANDROID_HUB and
+    // PageClassification.ANDROID_TAB_SEARCH_OVERLAY, they include all tabs.
+    private static @JniType("std::vector<int64_t>") long[] getAllEligibleTabs(
+            TabModel[] tabModels, @PageClassification int pageClassification, int activeTabId) {
+        int totalTabs = 0;
         for (TabModel tabModel : tabModels) {
             if (tabModel == null) continue;
 
-            for (int i = 0; i < tabModel.getCount(); ++i) {
-                Tab tab = tabModel.getTabAt(i);
-                if (tab.isHidden()) tabList.add(tab);
+            totalTabs += tabModel.getCount();
+        }
+
+        long[] tempTabPtrArray = new long[totalTabs];
+        int addedCount = 0;
+        for (TabModel tabModel : tabModels) {
+            if (tabModel == null) continue;
+
+            for (Tab tab : tabModel) {
+                if (tab.getId() != activeTabId
+                        || PageClassificationUtils.isHubOrTabSearch(pageClassification)) {
+                    long nativePtr = TabNativeUtils.getNativePtr(tab);
+                    if (nativePtr != 0) {
+                        tempTabPtrArray[addedCount++] = nativePtr;
+                    }
+                }
             }
         }
-        return tabList.isEmpty() ? null : tabList.toArray(new Tab[0]);
+        return Arrays.copyOf(tempTabPtrArray, addedCount);
     }
 }

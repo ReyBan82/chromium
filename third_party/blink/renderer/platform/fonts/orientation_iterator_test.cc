@@ -32,10 +32,10 @@ class OrientationIteratorTest : public testing::Test {
     text.Ensure16Bit();
     Vector<OrientationExpectedRun> expect;
     for (auto& run : runs) {
-      text.Append(String::FromUTF8(run.text));
+      text.Append(String::FromUtf8(run.text));
       expect.push_back(OrientationExpectedRun(text.length(), run.code));
     }
-    OrientationIterator orientation_iterator(text.Characters16(), text.length(),
+    OrientationIterator orientation_iterator(text.Span16(),
                                              FontOrientation::kVerticalMixed);
     VerifyRuns(&orientation_iterator, expect);
   }
@@ -44,7 +44,7 @@ class OrientationIteratorTest : public testing::Test {
                   const Vector<OrientationExpectedRun>& expect) {
     unsigned limit;
     OrientationIterator::RenderOrientation render_orientation;
-    size_t run_count = 0;
+    wtf_size_t run_count = 0;
     while (orientation_iterator->Consume(&limit, &render_orientation)) {
       ASSERT_LT(run_count, expect.size());
       ASSERT_EQ(expect[run_count].limit, limit);
@@ -55,16 +55,13 @@ class OrientationIteratorTest : public testing::Test {
   }
 };
 
-// TODO(esprehn): WTF::Vector should allow initialization from a literal.
-#define CHECK_ORIENTATION(...)                                       \
-  static const OrientationTestRun kRunsArray[] = __VA_ARGS__;        \
-  Vector<OrientationTestRun> runs;                                   \
-  runs.Append(kRunsArray, sizeof(kRunsArray) / sizeof(*kRunsArray)); \
+#define CHECK_ORIENTATION(...)                   \
+  Vector<OrientationTestRun> runs = __VA_ARGS__; \
   CheckRuns(runs);
 
 TEST_F(OrientationIteratorTest, Empty) {
   String empty(g_empty_string16_bit);
-  OrientationIterator orientation_iterator(empty.Characters16(), empty.length(),
+  OrientationIterator orientation_iterator(empty.Span16(),
                                            FontOrientation::kVerticalMixed);
   unsigned limit = 0;
   OrientationIterator::RenderOrientation orientation =

@@ -4,12 +4,13 @@
 
 #include "services/network/sct_auditing/sct_auditing_cache.h"
 
+#include <utility>
+
 #include "base/memory/scoped_refptr.h"
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/task_environment.h"
-#include "crypto/secure_hash.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 #include "net/base/hash_value.h"
 #include "net/base/host_port_pair.h"
 #include "net/cert/ct_serialization.h"
@@ -25,9 +26,7 @@
 #include "services/network/sct_auditing/sct_auditing_reporter.h"
 #include "services/network/test/test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/utility/utility.h"
 #include "third_party/boringssl/src/include/openssl/pool.h"
-#include "third_party/boringssl/src/include/openssl/sha.h"
 
 namespace network {
 
@@ -50,7 +49,7 @@ class SCTAuditingCacheTest : public testing::Test {
  protected:
   // Initializes the configuration for the SCTAuditingCache to defaults.
   void InitSCTAuditing(SCTAuditingCache* cache, double sampling_rate = 1.0) {
-    mojom::SCTAuditingConfigurationPtr configuration(absl::in_place);
+    mojom::SCTAuditingConfigurationPtr configuration(std::in_place);
     configuration->sampling_rate = sampling_rate;
     configuration->traffic_annotation =
         net::MutableNetworkTrafficAnnotationTag(TRAFFIC_ANNOTATION_FOR_TESTS);
@@ -103,14 +102,10 @@ void MakeTestSCTAndStatus(
 // computes cache keys internally.
 net::HashValue ComputeCacheKey(
     net::SignedCertificateTimestampAndStatusList sct_list) {
-  net::HashValue cache_key(net::HASH_VALUE_SHA256);
-  SHA256_CTX ctx;
-  SHA256_Init(&ctx);
   std::string encoded_sct;
   net::ct::EncodeSignedCertificateTimestamp(sct_list.at(0).sct, &encoded_sct);
-  SHA256_Update(&ctx, encoded_sct.data(), encoded_sct.size());
-  SHA256_Final(reinterpret_cast<uint8_t*>(cache_key.data()), &ctx);
-  return cache_key;
+  return net::HashValue(net::HASH_VALUE_SHA256,
+                        crypto::hash::Sha256(encoded_sct));
 }
 
 }  // namespace
@@ -139,19 +134,18 @@ TEST_F(SCTAuditingCacheTest, EvictLRUAfterCacheFull) {
   const net::HostPortPair host_port_pair2("example2.com", 443);
   const net::HostPortPair host_port_pair3("example3.com", 443);
 
-  net::HashValue first_key(net::HASH_VALUE_SHA256);
-  {
+  net::HashValue first_key = [&]() -> auto {
     net::SignedCertificateTimestampAndStatusList sct_list;
     MakeTestSCTAndStatus(net::ct::SignedCertificateTimestamp::SCT_EMBEDDED,
                          "extensions1", "signature1", base::Time::Now(),
                          net::ct::SCT_STATUS_OK, &sct_list);
-    ASSERT_TRUE(cache.MaybeGenerateReportEntry(host_port_pair1, chain_.get(),
-                                               sct_list));
-    ASSERT_EQ(1u, cache.GetCacheForTesting()->size());
+    CHECK(cache.MaybeGenerateReportEntry(host_port_pair1, chain_.get(),
+                                         sct_list));
+    CHECK_EQ(1u, cache.GetCacheForTesting()->size());
 
     // Save the initial cache key for later inspection.
-    first_key = ComputeCacheKey(sct_list);
-  }
+    return ComputeCacheKey(sct_list);
+  }();
 
   {
     net::SignedCertificateTimestampAndStatusList sct_list;
@@ -314,7 +308,7 @@ TEST_F(SCTAuditingCacheTest, ReportSizeMetrics) {
   MakeTestSCTAndStatus(net::ct::SignedCertificateTimestamp::SCT_EMBEDDED,
                        "extensions", "signature", base::Time::Now(),
                        net::ct::SCT_STATUS_OK, &sct_list);
-  absl::optional<SCTAuditingCache::ReportEntry> entry =
+  std::optional<SCTAuditingCache::ReportEntry> entry =
       cache.MaybeGenerateReportEntry(host_port_pair, chain_.get(), sct_list);
   ASSERT_TRUE(entry);
 
@@ -328,7 +322,6 @@ TEST_F(SCTAuditingCacheTest, ReportSizeMetrics) {
   EXPECT_FALSE(
       cache.MaybeGenerateReportEntry(host_port_pair, chain_.get(), sct_list));
 
-  histograms.ExpectTotalCount("Security.SCTAuditing.OptIn.ReportSampled", 1);
   histograms.ExpectTotalCount("Security.SCTAuditing.OptIn.ReportSize", 1);
   histograms.ExpectBucketCount("Security.SCTAuditing.OptIn.ReportDeduplicated",
                                true, 1);
@@ -350,8 +343,6 @@ TEST_F(SCTAuditingCacheTest, ReportSampleDroppedMetrics) {
   EXPECT_FALSE(
       cache.MaybeGenerateReportEntry(host_port_pair, chain_.get(), sct_list));
 
-  histograms.ExpectUniqueSample("Security.SCTAuditing.OptIn.ReportSampled",
-                                false, 1);
   histograms.ExpectTotalCount("Security.SCTAuditing.OptIn.ReportSize", 0);
   histograms.ExpectBucketCount("Security.SCTAuditing.OptIn.ReportDeduplicated",
                                false, 1);

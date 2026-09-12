@@ -6,6 +6,7 @@
 
 #include <linux/kcmp.h>
 
+#include "base/notreached.h"
 #include "media/gpu/buildflags.h"
 #include "sandbox/linux/seccomp-bpf-helpers/sigsys_handlers.h"
 #include "sandbox/linux/seccomp-bpf-helpers/syscall_parameters_restrictions.h"
@@ -31,7 +32,17 @@ HardwareVideoDecodingProcessPolicy::ComputePolicyType(
   // GPU. In reality, we should base this on the video decoding hardware. This
   // is good enough on ChromeOS but may be not good enough for a Linux system
   // with multiple GPUs.
-#if BUILDFLAG(USE_VAAPI)
+#if BUILDFLAG(USE_VAAPI) && BUILDFLAG(USE_V4L2_CODEC)
+  // Both backends are compiled in; the active backend is chosen at runtime by
+  // the media process via the kPreferV4L2VideoAcceleration feature. Sandbox the
+  // process with the union of what either backend needs (we cannot consult the
+  // media layer here without violating sandbox layering, and broker permissions
+  // are immutable once the sandbox is up). The VA-API half still depends on the
+  // GPU, so we keep the Intel/AMD split here just like in the single-backend
+  // case.
+  return use_amd_specific_policies ? PolicyType::kVaapiOnAMDAndV4L2
+                                   : PolicyType::kVaapiAndV4L2;
+#elif BUILDFLAG(USE_VAAPI)
   return use_amd_specific_policies ? PolicyType::kVaapiOnAMD
                                    : PolicyType::kVaapiOnIntel;
 #elif BUILDFLAG(USE_V4L2_CODEC)
@@ -43,11 +54,10 @@ HardwareVideoDecodingProcessPolicy::ComputePolicyType(
   // sandbox type to exist only in those configurations so that the
   // HardwareVideoDecodingProcessPolicy is only compiled in those scenarios. As
   // it is now, kHardwareVideoDecoding exists for all ash-chrome builds because
-  // chrome/browser/ash/arc/video/gpu_arc_video_service_host.cc depends on it
-  // and that file is built for ash-chrome regardless of VA-API/V4L2. That means
-  // that bots like linux-chromeos-rel end up compiling this policy.
-  CHECK(false);
-  return PolicyType::kVaapiOnIntel;
+  // chromeos/ash/experiences/arc/video/gpu_arc_video_service_host.cc depends on
+  // it and that file is built for ash-chrome regardless of VA-API/V4L2. That
+  // means that bots like linux-chromeos-rel end up compiling this policy.
+  NOTREACHED();
 #endif
 }
 
@@ -64,7 +74,16 @@ ResultExpr HardwareVideoDecodingProcessPolicy::EvaluateSyscall(
       return EvaluateSyscallForVaapiOnAMD(system_call_number);
     case PolicyType::kV4L2:
       return EvaluateSyscallForV4L2(system_call_number);
+    case PolicyType::kVaapiAndV4L2:
+      return EvaluateSyscallForVaapiAndV4L2(system_call_number);
+    case PolicyType::kVaapiOnAMDAndV4L2:
+      // EvaluateSyscallForVaapiOnAMD() is a strict superset of
+      // EvaluateSyscallForV4L2() (it already allows ioctl and a restricted
+      // sched_setaffinity, and crashes on truncate), so the union of the two
+      // is simply the AMD policy.
+      return EvaluateSyscallForVaapiOnAMD(system_call_number);
   }
+  NOTREACHED();
 }
 
 ResultExpr HardwareVideoDecodingProcessPolicy::EvaluateSyscallForVaapiOnIntel(
@@ -135,9 +154,42 @@ ResultExpr HardwareVideoDecodingProcessPolicy::EvaluateSyscallForV4L2(
   if (system_call_number == __NR_ioctl)
     return Allow();
 
+  if (system_call_number == __NR_sched_setaffinity) {
+    return RestrictSchedTarget(GetPolicyPid(), system_call_number);
+  }
+
   auto* sandbox_linux = SandboxLinux::GetInstance();
   if (sandbox_linux->ShouldBrokerHandleSyscall(system_call_number))
     return sandbox_linux->HandleViaBroker(system_call_number);
+
+  return BPFBasePolicy::EvaluateSyscall(system_call_number);
+}
+
+ResultExpr HardwareVideoDecodingProcessPolicy::EvaluateSyscallForVaapiAndV4L2(
+    int system_call_number) const {
+  // Union of the VA-API-on-Intel and V4L2 filters. The runtime backend choice
+  // is not visible at sandbox-build time, so we permit the superset of what
+  // either backend needs.
+  if (SyscallSets::IsTruncate(system_call_number)) {
+    // Explicitly disallow ftruncate()/truncate() to eliminate the possibility
+    // that a video decoder process can change the size of a file (including,
+    // e.g., a dma-buf).
+    return CrashSIGSYS();
+  }
+
+  if (system_call_number == __NR_ioctl) {
+    return Allow();
+  }
+
+  // From the V4L2 policy: V4L2 drivers may pin worker threads.
+  if (system_call_number == __NR_sched_setaffinity) {
+    return RestrictSchedTarget(GetPolicyPid(), system_call_number);
+  }
+
+  auto* sandbox_linux = SandboxLinux::GetInstance();
+  if (sandbox_linux->ShouldBrokerHandleSyscall(system_call_number)) {
+    return sandbox_linux->HandleViaBroker(system_call_number);
+  }
 
   return BPFBasePolicy::EvaluateSyscall(system_call_number);
 }

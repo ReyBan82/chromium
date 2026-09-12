@@ -6,8 +6,8 @@
 
 #include "base/command_line.h"
 #include "base/logging.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/url_constants.h"
@@ -20,6 +20,8 @@
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "third_party/blink/public/common/chrome_debug_urls.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "url/gurl.h"
 
 using content::OpenURLParams;
@@ -34,8 +36,10 @@ bool HandleMessage(int severity,
                    int line,
                    size_t message_start,
                    const std::string& str) {
-  if (severity == logging::LOG_ERROR && file && file == std::string("CONSOLE"))
+  if (severity == logging::LOGGING_ERROR && file &&
+      file == std::string("CONSOLE")) {
     had_console_errors = true;
+  }
   return false;
 }
 
@@ -43,9 +47,7 @@ bool HandleMessage(int severity,
 
 class NewTabUIBrowserTest : public InProcessBrowserTest {
  public:
-  NewTabUIBrowserTest() {
-    logging::SetLogMessageHandler(&HandleMessage);
-  }
+  NewTabUIBrowserTest() { logging::SetLogMessageHandler(&HandleMessage); }
 
   ~NewTabUIBrowserTest() override { logging::SetLogMessageHandler(nullptr); }
 
@@ -58,26 +60,26 @@ class NewTabUIBrowserTest : public InProcessBrowserTest {
 // Navigate to incognito NTP. Fails if there are console errors.
 IN_PROC_BROWSER_TEST_F(NewTabUIBrowserTest, ShowIncognito) {
   ASSERT_TRUE(ui_test_utils::NavigateToURL(CreateIncognitoBrowser(),
-                                           GURL(chrome::kChromeUINewTabURL)));
+                                           chrome::ChromeUINewTabURLAsGURL()));
 }
 
 class NewTabUIProcessPerTabTest : public NewTabUIBrowserTest {
  public:
-   NewTabUIProcessPerTabTest() {}
+  NewTabUIProcessPerTabTest() = default;
 
-   void SetUpCommandLine(base::CommandLine* command_line) override {
-     command_line->AppendSwitch(switches::kProcessPerTab);
-   }
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    command_line->AppendSwitch(switches::kProcessPerTab);
+  }
 };
 
 // Navigates away from NTP before it commits, in process-per-tab mode.
 // Ensures that we don't load the normal page in the NTP process (and thus
-// crash), as in http://crbug.com/69224.
-// If this flakes, use http://crbug.com/87200
+// crash), as in http://crbug.com/41301876.
+// If this flakes, use http://crbug.com/40588433
 IN_PROC_BROWSER_TEST_F(NewTabUIProcessPerTabTest, NavBeforeNTPCommits) {
   // Bring up a new tab page.
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(),
-                                           GURL(chrome::kChromeUINewTabURL)));
+                                           chrome::ChromeUINewTabURLAsGURL()));
 
   // Navigate to chrome://hang/ to stall the process.
   ui_test_utils::NavigateToURLWithDisposition(
@@ -86,15 +88,17 @@ IN_PROC_BROWSER_TEST_F(NewTabUIProcessPerTabTest, NavBeforeNTPCommits) {
 
   // Visit a normal URL in another NTP that hasn't committed.
   ui_test_utils::NavigateToURLWithDisposition(
-      browser(), GURL(chrome::kChromeUINewTabURL),
+      browser(), chrome::ChromeUINewTabURLAsGURL(),
       WindowOpenDisposition::NEW_FOREGROUND_TAB, 0);
 
   // We don't use ui_test_utils::NavigateToURLWithDisposition because that waits
   // for current loading to stop.
   content::TestNavigationObserver observer(
-      browser()->tab_strip_model()->GetActiveWebContents());
-  browser()->OpenURL(OpenURLParams(
-      GURL("data:text/html,hello world"), Referrer(),
-      WindowOpenDisposition::CURRENT_TAB, ui::PAGE_TRANSITION_TYPED, false));
+      browser()->GetTabStripModel()->GetActiveWebContents());
+  browser()->OpenURL(
+      OpenURLParams(GURL("data:text/html,hello world"), Referrer(),
+                    WindowOpenDisposition::CURRENT_TAB,
+                    ui::PAGE_TRANSITION_TYPED, false),
+      /*navigation_handle_callback=*/{});
   observer.Wait();
 }

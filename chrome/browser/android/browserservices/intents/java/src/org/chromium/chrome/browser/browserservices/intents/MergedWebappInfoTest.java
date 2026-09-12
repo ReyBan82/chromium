@@ -9,16 +9,12 @@ import android.content.Intent;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.browser.webapps.WebappIntentDataProviderFactory;
 
-/**
- * Tests the WebappInfo class's ability to parse various URLs.
- */
+/** Tests the WebappInfo class's ability to parse various URLs. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class MergedWebappInfoTest {
     private static final String APP_ID = "webapp id";
     private static final String APP_URL = "about:blank";
@@ -38,8 +34,8 @@ public class MergedWebappInfoTest {
         intentOld.putExtra(WebappConstants.EXTRA_IS_ICON_GENERATED, false);
         WebappInfo oldInfo = createWebappInfo(intentOld);
 
-        // Test for issue https://crbug.com/1341149. Make sure we don't get a valid Merged object if
-        // provider is null.
+        // Test for issue https://crbug.com/40850868. Make sure we don't get a valid Merged object
+        // if provider is null.
         Assert.assertEquals(null, MergedWebappInfo.create(oldInfo, /* provider= */ null));
         Assert.assertEquals(null, MergedWebappInfo.create(null, /* provider= */ null));
     }
@@ -69,7 +65,7 @@ public class MergedWebappInfoTest {
         Assert.assertEquals(APP_SHORTNAME_OLD, oldInfo.shortName());
         Assert.assertEquals(APP_SHORTNAME_NEW, newInfo.shortName());
         Assert.assertTrue(newInfo.icon() != oldInfo.icon());
-        Assert.assertTrue(newInfo.iconUrlToMurmur2HashMap() != oldInfo.iconUrlToMurmur2HashMap());
+        Assert.assertNotSame(newInfo.iconUrlToMurmur2HashMap(), oldInfo.iconUrlToMurmur2HashMap());
         Assert.assertFalse(oldInfo.isIconAdaptive());
         Assert.assertTrue(newInfo.isIconAdaptive());
         Assert.assertFalse(oldInfo.isIconGenerated());
@@ -81,7 +77,7 @@ public class MergedWebappInfoTest {
         Assert.assertEquals(APP_SHORTNAME_OLD, newInfo.shortName());
         // But the icon stuff should be unchanged.
         Assert.assertTrue(newInfo.icon() != oldInfo.icon());
-        Assert.assertTrue(newInfo.iconUrlToMurmur2HashMap() != oldInfo.iconUrlToMurmur2HashMap());
+        Assert.assertNotSame(newInfo.iconUrlToMurmur2HashMap(), oldInfo.iconUrlToMurmur2HashMap());
         Assert.assertTrue(newInfo.isIconAdaptive());
         Assert.assertTrue(newInfo.isIconGenerated());
 
@@ -111,7 +107,7 @@ public class MergedWebappInfoTest {
         Assert.assertEquals(APP_SHORTNAME_OLD, oldInfo.shortName());
         Assert.assertEquals(APP_SHORTNAME_NEW, newInfo.shortName());
         Assert.assertTrue(newInfo.icon() != oldInfo.icon());
-        Assert.assertTrue(newInfo.iconUrlToMurmur2HashMap() != oldInfo.iconUrlToMurmur2HashMap());
+        Assert.assertNotSame(newInfo.iconUrlToMurmur2HashMap(), oldInfo.iconUrlToMurmur2HashMap());
         Assert.assertFalse(oldInfo.isIconAdaptive());
         Assert.assertTrue(newInfo.isIconAdaptive());
         Assert.assertFalse(oldInfo.isIconGenerated());
@@ -124,16 +120,5 @@ public class MergedWebappInfoTest {
 
     private MergedWebappInfo createMergedWebappInfo(WebappInfo oldInfo, WebappInfo newInfo) {
         return MergedWebappInfo.createForTesting(oldInfo, newInfo);
-    }
-
-    /**
-     * Creates intent with url and id. If the url or id are not set createWebappInfo() returns
-     * null.
-     */
-    private Intent createIntentWithUrlAndId() {
-        Intent intent = new Intent();
-        intent.putExtra(WebappConstants.EXTRA_ID, "web app id");
-        intent.putExtra(WebappConstants.EXTRA_URL, "about:blank");
-        return intent;
     }
 }

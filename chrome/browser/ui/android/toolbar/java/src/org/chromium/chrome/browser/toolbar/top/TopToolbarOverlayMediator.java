@@ -4,35 +4,65 @@
 
 package org.chromium.chrome.browser.toolbar.top;
 
+import android.animation.TimeAnimator;
+import android.animation.TimeAnimator.TimeListener;
 import android.content.Context;
+import android.graphics.Rect;
 import android.view.View;
 
 import androidx.annotation.ColorInt;
-import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.Callback;
-import org.chromium.base.supplier.ObservableSupplier;
+import org.chromium.base.MathUtils;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.base.supplier.MonotonicObservableSupplier;
+import org.chromium.base.supplier.NonNullObservableSupplier;
+import org.chromium.base.supplier.NullableObservableSupplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.cc.input.BrowserControlsState;
+import org.chromium.chrome.browser.browser_controls.BrowserControlsOffsetTagsInfo;
 import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider;
+import org.chromium.chrome.browser.browser_controls.BrowserControlsStateProvider.ControlsPosition;
 import org.chromium.chrome.browser.browser_controls.BrowserControlsUtils;
+import org.chromium.chrome.browser.browser_controls.BrowserControlsVisibilityManager;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider.LayoutStateObserver;
 import org.chromium.chrome.browser.layouts.LayoutType;
 import org.chromium.chrome.browser.tab.CurrentTabObserver;
-import org.chromium.chrome.browser.tab.EmptyTabObserver;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.TabObserver;
+import org.chromium.chrome.browser.theme.ThemeColorProvider.ThemeColorObserver;
 import org.chromium.chrome.browser.theme.ThemeUtils;
-import org.chromium.chrome.browser.theme.TopUiThemeColorProvider;
-import org.chromium.chrome.browser.toolbar.ToolbarFeatures;
+import org.chromium.chrome.browser.theme.ToolbarThemeColorProvider;
+import org.chromium.chrome.browser.toolbar.ToolbarProgressBar;
 import org.chromium.components.browser_ui.widget.ClipDrawableProgressBar;
+import org.chromium.components.browser_ui.widget.ClipDrawableProgressBar.DrawingInfo;
+import org.chromium.components.browser_ui.widget.ClipDrawableProgressBar.ProgressBarObserver;
 import org.chromium.ui.base.DeviceFormFactor;
 import org.chromium.ui.modelutil.PropertyModel;
 
+import java.util.function.Supplier;
+
 /** The business logic for controlling the top toolbar's cc texture. */
-public class TopToolbarOverlayMediator {
+@NullMarked
+public class TopToolbarOverlayMediator implements ThemeColorObserver {
+    // LINT.IfChange(InvalidContentOffset)
+    static final float INVALID_CONTENT_OFFSET = -10001.f;
+    // LINT.ThenChange(//chrome/browser/android/compositor/layer/toolbar_layer.cc:InvalidContentOffset)
+
     // Forced testing params.
-    private static Boolean sIsTabletForTesting;
-    private static Integer sToolbarBackgroundColorForTesting;
-    private static Integer sUrlBarColorForTesting;
+    private static @Nullable Boolean sIsTabletForTesting;
+    private static @Nullable Integer sToolbarBackgroundColorForTesting;
+    private static @Nullable Integer sUrlBarColorForTesting;
+
+    private final Callback<Integer> mOnBottomToolbarControlsOffsetChanged =
+            this::onBottomToolbarControlsOffsetChanged;
+    private final Callback<Boolean> mOnSuppressToolbarSceneLayerChanged =
+            this::onSuppressToolbarSceneLayerChanged;
+    private final Callback<Long> mOnCaptureResourceIdSupplierChange =
+            this::onCaptureResourceIdSupplierChange;
 
     /** An Android Context. */
     private final Context mContext;
@@ -50,15 +80,29 @@ public class TopToolbarOverlayMediator {
     private final CurrentTabObserver mTabObserver;
 
     /** Access to the current state of the browser controls. */
-    private final BrowserControlsStateProvider mBrowserControlsStateProvider;
+    private final BrowserControlsVisibilityManager mBrowserControlsVisibilityManager;
 
     /** An observer of the browser controls offsets. */
     private final BrowserControlsStateProvider.Observer mBrowserControlsObserver;
 
-    private final TopUiThemeColorProvider mTopUiThemeColorProvider;
+    private final ProgressBarObserver mProgressBarObserver;
+
+    private final ToolbarThemeColorProvider mToolbarThemeColorProvider;
 
     /** The view state for this overlay. */
     private final PropertyModel mModel;
+
+    /**
+     * Supplies the height of the Bookmark Bar (if visible) to offset the content of the Toolbar
+     * during scroll. We do not plumb this through constructors since the ToolbarManager (which
+     * initializes |this|) is always created prior to the Bookmark Bar, so the object will always be
+     * null in the constructor.
+     */
+    // TODO(crbug.com/417238089): This should have no hard dependency on Bookmark Bar.
+    private @Nullable Supplier<Integer> mBookmarkBarHeightSupplier;
+
+    private final NonNullObservableSupplier<Integer> mBottomToolbarControlsOffsetSupplier;
+    private final NonNullObservableSupplier<Boolean> mSuppressToolbarSceneLayerSupplier;
 
     /** Whether visibility is controlled internally or manually by the feature. */
     private boolean mIsVisibilityManuallyControlled;
@@ -72,96 +116,315 @@ public class TopToolbarOverlayMediator {
     /** Whether the overlay should be visible despite other signals. */
     private boolean mManualVisibility;
 
+    /**
+     * Whether the hairline shadow is externally suppressed (e.g., during fullscreen video or XR
+     * mode).
+     */
+    private boolean mToolbarHairlineSuppressed;
+
     /** Whether a layout that this overlay can be displayed on is showing. */
     private boolean mIsOnValidLayout;
 
-    TopToolbarOverlayMediator(PropertyModel model, Context context,
+    private final NullableObservableSupplier<Tab> mTabSupplier;
+    private final MonotonicObservableSupplier<Long> mCaptureResourceIdSupplier;
+    private float mViewportHeight;
+
+    private @Nullable BrowserControlsOffsetTagsInfo mBrowserControlsOffsetTagsInfo;
+    private boolean mCurrentlyAnimating;
+
+    private float mAnimatedProgress;
+    private float mTargetProgress;
+    private static final long ANIMATION_DURATION_MS = 3000;
+
+    private final TimeAnimator mProgressBarAnimation = new TimeAnimator();
+
+    {
+        mProgressBarAnimation.setTimeListener(
+                new TimeListener() {
+                    @Override
+                    public void onTimeUpdate(
+                            TimeAnimator animation, long totalTimeMs, long deltaTimeMs) {
+                        if (MathUtils.areFloatsEqual(mAnimatedProgress, mTargetProgress)
+                                || mAnimatedProgress > mTargetProgress) {
+                            return;
+                        }
+
+                        mAnimatedProgress += (deltaTimeMs / ((float) ANIMATION_DURATION_MS));
+                        mAnimatedProgress = Math.min(mAnimatedProgress, mTargetProgress);
+                        updateProgress();
+                    }
+                });
+    }
+
+    TopToolbarOverlayMediator(
+            PropertyModel model,
+            Context context,
             LayoutStateProvider layoutStateProvider,
-            Callback<ClipDrawableProgressBar.DrawingInfo> progressInfoCallback,
-            ObservableSupplier<Tab> tabSupplier,
-            BrowserControlsStateProvider browserControlsStateProvider,
-            TopUiThemeColorProvider topUiThemeColorProvider, int layoutsToShowOn,
-            boolean manualVisibilityControl) {
+            Callback<DrawingInfo> progressInfoCallback,
+            NullableObservableSupplier<Tab> tabSupplier,
+            BrowserControlsVisibilityManager browserControlsVisibilityManager,
+            ToolbarThemeColorProvider toolbarThemeColorProvider,
+            NonNullObservableSupplier<Integer> bottomToolbarControlsOffsetSupplier,
+            NonNullObservableSupplier<Boolean> suppressToolbarSceneLayerSupplier,
+            int layoutsToShowOn,
+            boolean manualVisibilityControl,
+            MonotonicObservableSupplier<Long> captureResourceIdSupplier,
+            @Nullable ToolbarProgressBar progressBar) {
         mContext = context;
         mLayoutStateProvider = layoutStateProvider;
         mProgressInfoCallback = progressInfoCallback;
-        mBrowserControlsStateProvider = browserControlsStateProvider;
-        mTopUiThemeColorProvider = topUiThemeColorProvider;
+        mBrowserControlsVisibilityManager = browserControlsVisibilityManager;
+        mToolbarThemeColorProvider = toolbarThemeColorProvider;
         mModel = model;
+        mBottomToolbarControlsOffsetSupplier = bottomToolbarControlsOffsetSupplier;
+        mSuppressToolbarSceneLayerSupplier = suppressToolbarSceneLayerSupplier;
+        mBottomToolbarControlsOffsetSupplier.addSyncObserverAndPostIfNonNull(
+                mOnBottomToolbarControlsOffsetChanged);
+        mSuppressToolbarSceneLayerSupplier.addSyncObserverAndPostIfNonNull(
+                mOnSuppressToolbarSceneLayerChanged);
         mIsVisibilityManuallyControlled = manualVisibilityControl;
-
         mIsOnValidLayout = (mLayoutStateProvider.getActiveLayoutType() & layoutsToShowOn) > 0;
+        mTabSupplier = tabSupplier;
+        mCaptureResourceIdSupplier = captureResourceIdSupplier;
+        mCaptureResourceIdSupplier.addSyncObserverAndCallIfNonNull(
+                mOnCaptureResourceIdSupplierChange);
         updateVisibility();
 
-        mSceneChangeObserver = new LayoutStateObserver() {
-            @Override
-            public void onStartedShowing(@LayoutType int layout, boolean showToolbar) {
-                mIsOnValidLayout = (layout & layoutsToShowOn) > 0;
-                updateVisibility();
-            }
-        };
+        mSceneChangeObserver =
+                new LayoutStateObserver() {
+                    @Override
+                    public void onStartedShowing(@LayoutType int layoutType) {
+                        mIsOnValidLayout = (layoutType & layoutsToShowOn) > 0;
+                        updateVisibility();
+                    }
+                };
         mLayoutStateProvider.addObserver(mSceneChangeObserver);
 
         // Keep an observer attached to the visible tab (and only the visible tab) to update
         // properties including theme color.
-        Callback<Tab> activityTabCallback = (tab) -> {
-            if (tab == null) return;
-            updateVisibility();
-            updateThemeColor(tab);
-            updateProgress();
-        };
-        mTabObserver = new CurrentTabObserver(tabSupplier, new EmptyTabObserver() {
-            @Override
-            public void onDidChangeThemeColor(Tab tab, int color) {
-                updateThemeColor(tab);
-            }
+        Callback<@Nullable Tab> activityTabCallback =
+                (tab) -> {
+                    if (tab == null) return;
+                    updateVisibility();
+                    updateThemeColor(tab);
+                    updateProgress();
+                    updateAnonymize(tab);
+                    updateOffsetTag(mBrowserControlsOffsetTagsInfo);
+                };
+        mTabObserver =
+                new CurrentTabObserver(
+                        tabSupplier,
+                        new TabObserver() {
+                            @Override
+                            public void onDidChangeThemeColor(Tab tab, int color) {
+                                updateThemeColor(tab);
+                            }
 
-            @Override
-            public void onLoadProgressChanged(Tab tab, float progress) {
-                updateProgress();
-            }
+                            @Override
+                            public void onLoadProgressChanged(Tab tab, float progress) {
+                                if (ChromeFeatureList.sAndroidAnimatedProgressBarInBrowser
+                                        .isEnabled()) {
+                                    if (ChromeFeatureList.sAndroidApb144Patch6.isEnabled()) {
+                                        return;
+                                    } else {
+                                        mTargetProgress = progress;
+                                    }
+                                }
+                                updateProgress();
+                            }
 
-            @Override
-            public void onContentChanged(Tab tab) {
-                updateVisibility();
-                updateThemeColor(tab);
-            }
-        }, activityTabCallback);
+                            @Override
+                            public void onContentChanged(Tab tab) {
+                                updateVisibility();
+                                updateThemeColor(tab);
+                                updateAnonymize(tab);
+                                updateOffsetTag(mBrowserControlsOffsetTagsInfo);
+                            }
+
+                            @Override
+                            public void didBackForwardTransitionAnimationChange(Tab tab) {
+                                updateVisibility();
+                            }
+                        },
+                        activityTabCallback);
 
         activityTabCallback.onResult(tabSupplier.get());
         mTabObserver.triggerWithCurrentTab();
 
-        mBrowserControlsObserver = new BrowserControlsStateProvider.Observer() {
-            @Override
-            public void onControlsOffsetChanged(int topOffset, int topControlsMinHeightOffset,
-                    int bottomOffset, int bottomControlsMinHeightOffset, boolean needsAnimate) {
-                // The toolbar layer is positioned below the minimum height (i.e. the top of the
-                // toolbar layer is set to the bottom of minimum height). Hence, the offset
-                // consists of the top controls offset plus top controls minimum height.
-                int yOffset = topOffset + mBrowserControlsStateProvider.getTopControlsMinHeight();
-                mModel.set(TopToolbarOverlayProperties.Y_OFFSET, yOffset);
+        mBrowserControlsObserver =
+                new BrowserControlsStateProvider.Observer() {
+                    @Override
+                    public void onControlsOffsetChanged(
+                            int topOffset,
+                            int topControlsMinHeightOffset,
+                            boolean topControlsMinHeightChanged,
+                            int bottomOffset,
+                            int bottomControlsMinHeightOffset,
+                            boolean bottomControlsMinHeightChanged,
+                            boolean requestNewFrame,
+                            boolean isVisibilityForced) {
+                        if (requestNewFrame || isVisibilityForced) {
+                            updateContentOffset();
+                        } else {
+                            // We need to set the height, as it would have changed if this is the
+                            // first frame of an animation. Any existing offsets from scrolling and
+                            // animations will be applied by OffsetTags.
 
-                updateShadowState();
-                updateVisibility();
-            }
+                            // When the bookmark bar is enabled, the toolbar is no longer the bottom
+                            // item of the top controls, so we need to subtract the height of the
+                            // bookmark bar to shift the toolbar up.
+                            // TODO(crbug.com/417238089): Get offset from TopControlsStacker.
+                            int height =
+                                    getBookmarkBarAdjustedContentOffset(
+                                            mBrowserControlsVisibilityManager
+                                                    .getTopControlsHeight());
+                            if (getControlsPosition() == ControlsPosition.TOP) {
+                                applyContentOffsetToModel(adjustContentOffsetForHairline(height));
+                            } else if (getControlsPosition() == ControlsPosition.BOTTOM) {
+                                applyContentOffsetToModel(
+                                        mBottomToolbarControlsOffsetSupplier.get()
+                                                + mViewportHeight);
+                            }
+                        }
 
-            @Override
-            public void onAndroidControlsVisibilityChanged(int visibility) {
-                if (ToolbarFeatures.shouldSuppressCaptures()) {
-                    mIsBrowserControlsAndroidViewVisible = visibility == View.VISIBLE;
-                    updateShadowState();
-                }
-            }
-        };
-        mBrowserControlsStateProvider.addObserver(mBrowserControlsObserver);
-        if (ToolbarFeatures.shouldSuppressCaptures()) {
-            mIsBrowserControlsAndroidViewVisible =
-                    mBrowserControlsStateProvider.getAndroidControlsVisibility() == View.VISIBLE;
+                        // TODO(peilinwang) Clean up this flag and remove the updateVisibility call
+                        // when stable experiment is finished.
+                        if (!ChromeFeatureList.sAlwaysDrawCompositedToolbarHairline.isEnabled()) {
+                            updateShadowState();
+                            updateVisibility();
+                        }
+                    }
+
+                    @Override
+                    public void onAndroidControlsVisibilityChanged(int visibility) {
+                        mIsBrowserControlsAndroidViewVisible = visibility == View.VISIBLE;
+                        updateShadowState();
+                        updateVisibility();
+                    }
+
+                    @Override
+                    public void onOffsetTagsInfoChanged(
+                            BrowserControlsOffsetTagsInfo oldOffsetTagsInfo,
+                            BrowserControlsOffsetTagsInfo offsetTagsInfo,
+                            @BrowserControlsState int constraints,
+                            boolean shouldUpdateOffsets) {
+                        // Offset tag application is handled by TopControlsStacker when
+                        // browser controls is at the top.
+                        if (getControlsPosition() == ControlsPosition.BOTTOM) {
+                            updateOffsetTag(offsetTagsInfo);
+                        }
+                        if (shouldUpdateOffsets) {
+                            applyContentOffsetToModel(
+                                    mBrowserControlsVisibilityManager.getContentOffset());
+                        }
+                    }
+
+                    @Override
+                    public void onControlsPositionChanged(int controlsPosition) {
+                        updateOffsetTag(mBrowserControlsOffsetTagsInfo);
+                        Tab tab = mTabSupplier.get();
+                        if (tab != null) {
+                            updateThemeColor(tab);
+                        }
+                        if (ChromeFeatureList.sAndroidAnimatedProgressBarInBrowser.isEnabled()
+                                && ChromeFeatureList.sAndroidApb144Patch8.isEnabled()) {
+                            updateProgress();
+                        }
+                    }
+
+                    @Override
+                    public void onBottomControlsHeightAnimationStarted() {
+                        mCurrentlyAnimating = true;
+                        if (getControlsPosition() == ControlsPosition.BOTTOM) {
+                            mModel.set(TopToolbarOverlayProperties.TOOLBAR_OFFSET_TAG, null);
+                        }
+                    }
+
+                    @Override
+                    public void onBottomControlsHeightAnimationEnded() {
+                        mCurrentlyAnimating = false;
+                        updateOffsetTag(mBrowserControlsOffsetTagsInfo);
+                    }
+                };
+        mBrowserControlsVisibilityManager.addObserver(mBrowserControlsObserver);
+
+        mProgressBarObserver =
+                new ProgressBarObserver() {
+                    @Override
+                    public void onVisibleProgressUpdated() {
+                        updateProgress();
+                    }
+
+                    @Override
+                    public void onCompositedLayersVisibilityChanged() {
+                        updateProgress();
+                    }
+                };
+        if (progressBar != null) {
+            progressBar.addObserver(mProgressBarObserver);
+        }
+
+        mToolbarThemeColorProvider.addThemeColorObserver(this);
+
+        mIsBrowserControlsAndroidViewVisible =
+                mBrowserControlsVisibilityManager.getAndroidControlsVisibility() == View.VISIBLE;
+    }
+
+    private boolean isBookmarkBarVisible() {
+        int offset = mBookmarkBarHeightSupplier != null ? mBookmarkBarHeightSupplier.get() : 0;
+        return offset != 0;
+    }
+
+    private int getBookmarkBarAdjustedContentOffset(int originalContentOffset) {
+        if (getControlsPosition() == ControlsPosition.BOTTOM) {
+            return originalContentOffset;
+        }
+        int offset = mBookmarkBarHeightSupplier != null ? mBookmarkBarHeightSupplier.get() : 0;
+        if (offset == 0) {
+            return originalContentOffset;
+        }
+
+        // During startup, when bookmark bar is created and added to the stack, the render might not
+        // be able to respond to the new height yet, and browser controls state provider might be
+        // holding a "stale" contentOffset (that's equal to the browser controls height
+        // before bookmark bar). In such case, just reducing the originalContentOffset is wrong and
+        // it will push the toolbar overlay too high.
+        //
+        // As a workaround, we are checking the diff between content offset and top controls offset,
+        // then compare that with the current browser controls height to determine if we'll perform
+        // the adjustment. This is guaranteed to almost always work, because onControlsOffsetChanged
+        // will be called when render can respond to the new height.
+        int renderTopControlsHeight =
+                mBrowserControlsVisibilityManager.getContentOffset()
+                        - mBrowserControlsVisibilityManager.getTopControlOffset();
+        if (renderTopControlsHeight != mBrowserControlsVisibilityManager.getTopControlsHeight()) {
+            return originalContentOffset;
+        }
+        return originalContentOffset - offset;
+    }
+
+    void updateOffsetTag(@Nullable BrowserControlsOffsetTagsInfo offsetTagsInfo) {
+        mBrowserControlsOffsetTagsInfo = offsetTagsInfo;
+        if (mCurrentlyAnimating) return;
+
+        if (offsetTagsInfo == null) {
+            mModel.set(TopToolbarOverlayProperties.TOOLBAR_OFFSET_TAG, null);
+        } else if (getControlsPosition() == ControlsPosition.TOP) {
+            mModel.set(
+                    TopToolbarOverlayProperties.TOOLBAR_OFFSET_TAG,
+                    offsetTagsInfo.getTopControlsOffsetTag());
+        } else if (getControlsPosition() == ControlsPosition.BOTTOM) {
+            mModel.set(
+                    TopToolbarOverlayProperties.TOOLBAR_OFFSET_TAG,
+                    offsetTagsInfo.getBottomControlsOffsetTag());
+        } else {
+            assert false : "Unknown control position.";
         }
     }
 
     /**
      * Set whether the android view corresponding with this overlay is showing.
+     *
      * @param isVisible Whether the android view is visible.
      */
     void setIsAndroidViewVisible(boolean isVisible) {
@@ -170,42 +433,75 @@ public class TopToolbarOverlayMediator {
     }
 
     /**
+     * Called when the external suppression state of the toolbar hairline shadow changes.
+     *
+     * @param suppressed Whether the hairline shadow should be suppressed (e.g., when in fullscreen
+     *     or XR mode).
+     */
+    void onToolbarHairlineSuppressedChanged(boolean suppressed) {
+        if (mToolbarHairlineSuppressed == suppressed) return;
+        mToolbarHairlineSuppressed = suppressed;
+        updateShadowState();
+    }
+
+    /**
      * Compute whether the texture's shadow should be visible. The shadow is visible whenever the
      * android view is not shown.
      */
     private void updateShadowState() {
-        boolean drawControlsAsTexture;
-        if (ToolbarFeatures.shouldSuppressCaptures()) {
-            drawControlsAsTexture = !mIsBrowserControlsAndroidViewVisible;
-        } else {
-            drawControlsAsTexture =
-                    BrowserControlsUtils.drawControlsAsTexture(mBrowserControlsStateProvider);
+        if (mToolbarHairlineSuppressed) {
+            mModel.set(TopToolbarOverlayProperties.SHOW_SHADOW, false);
+            return;
         }
-        boolean showShadow = drawControlsAsTexture || !mIsToolbarAndroidViewVisible
-                || mIsVisibilityManuallyControlled;
+
+        if (ChromeFeatureList.sAlwaysDrawCompositedToolbarHairline.isEnabled()) {
+            // With BCIV enabled, the hairline on the composited toolbar is shown by default.
+            // During normal browser scrolling and view transitions, SHOW_SHADOW is already true so
+            // setting it here is a no-op (avoiding extra compositor frames). However, when exiting
+            // external suppression (such as fullscreen video or XR mode where SHOW_SHADOW was set
+            // to false above), setting true here is required to restore the composited hairline.
+            mModel.set(TopToolbarOverlayProperties.SHOW_SHADOW, true);
+            return;
+        }
+
+        boolean drawControlsAsTexture = !mIsBrowserControlsAndroidViewVisible;
+        boolean showShadow =
+                drawControlsAsTexture
+                        || !mIsToolbarAndroidViewVisible
+                        || mIsVisibilityManuallyControlled;
+        // We hide the shadow no matter what when the bookmark bar is visible.
+        showShadow = showShadow && !isBookmarkBarVisible();
 
         mModel.set(TopToolbarOverlayProperties.SHOW_SHADOW, showShadow);
     }
 
     /**
      * Update the colors of the layer based on the specified tab.
+     *
      * @param tab The tab to base the colors on.
      */
     private void updateThemeColor(Tab tab) {
-        @ColorInt
-        int color = getToolbarBackgroundColor(tab);
+        @ColorInt int color = getToolbarBackgroundColor(tab);
         mModel.set(TopToolbarOverlayProperties.TOOLBAR_BACKGROUND_COLOR, color);
         mModel.set(TopToolbarOverlayProperties.URL_BAR_COLOR, getUrlBarBackgroundColor(tab, color));
+    }
+
+    // ThemeColorObserver implementation.
+    @Override
+    public void onThemeColorChanged(@ColorInt int color, boolean shouldAnimate) {
+        Tab tab = mTabSupplier.get();
+        if (tab != null) {
+            updateThemeColor(tab);
+        }
     }
 
     /**
      * @param tab The tab to get the background color for.
      * @return The background color.
      */
-    @ColorInt
-    private int getToolbarBackgroundColor(Tab tab) {
+    private @ColorInt int getToolbarBackgroundColor(Tab tab) {
         if (sToolbarBackgroundColorForTesting != null) return sToolbarBackgroundColorForTesting;
-        return mTopUiThemeColorProvider.getSceneLayerBackground(tab);
+        return mToolbarThemeColorProvider.getToolbarBackgroundColor(tab);
     }
 
     /**
@@ -213,8 +509,7 @@ public class TopToolbarOverlayMediator {
      * @param backgroundColor The tab's background color.
      * @return The url bar color.
      */
-    @ColorInt
-    private int getUrlBarBackgroundColor(Tab tab, @ColorInt int backgroundColor) {
+    private @ColorInt int getUrlBarBackgroundColor(Tab tab, @ColorInt int backgroundColor) {
         if (sUrlBarColorForTesting != null) return sUrlBarColorForTesting;
         return ThemeUtils.getTextBoxColorForToolbarBackground(mContext, tab, backgroundColor);
     }
@@ -222,21 +517,55 @@ public class TopToolbarOverlayMediator {
     /** Update the state of the composited progress bar. */
     private void updateProgress() {
         // Tablets have their own version of a progress "spinner".
-        if (isTablet()) return;
+        if (!ChromeFeatureList.sAndroidAnimatedProgressBarInBrowser.isEnabled() && isTablet()) {
+            return;
+        }
 
         if (mModel.get(TopToolbarOverlayProperties.PROGRESS_BAR_INFO) == null) {
-            mModel.set(TopToolbarOverlayProperties.PROGRESS_BAR_INFO,
+            mModel.set(
+                    TopToolbarOverlayProperties.PROGRESS_BAR_INFO,
                     new ClipDrawableProgressBar.DrawingInfo());
         }
 
         // Update and set the progress info to trigger an update; the PROGRESS_BAR_INFO
         // property skips the object equality check.
-        mProgressInfoCallback.onResult(mModel.get(TopToolbarOverlayProperties.PROGRESS_BAR_INFO));
-        mModel.set(TopToolbarOverlayProperties.PROGRESS_BAR_INFO,
+        DrawingInfo drawingInfo = mModel.get(TopToolbarOverlayProperties.PROGRESS_BAR_INFO);
+        mProgressInfoCallback.onResult(drawingInfo);
+
+        // TODO(https://crbug.com/439461293) Try not updating the model if nothing changed.
+        mModel.set(
+                TopToolbarOverlayProperties.PROGRESS_BAR_INFO,
                 mModel.get(TopToolbarOverlayProperties.PROGRESS_BAR_INFO));
+
+        if (ChromeFeatureList.sAndroidAnimatedProgressBarInBrowser.isEnabled()
+                && !ChromeFeatureList.sAndroidApb144Patch6.isEnabled()) {
+            if (drawingInfo.visible && !mProgressBarAnimation.isStarted()) {
+                mAnimatedProgress = 0;
+                mProgressBarAnimation.start();
+            } else if (!drawingInfo.visible) {
+                mProgressBarAnimation.cancel();
+            }
+
+            Rect foregroundRect = drawingInfo.progressBarRect;
+            Rect backgroundRect = drawingInfo.progressBarBackgroundRect;
+            Rect staticBackgroundRect = drawingInfo.progressBarStaticBackgroundRect;
+            int progressX =
+                    foregroundRect.left
+                            + Math.round(mAnimatedProgress * staticBackgroundRect.width());
+            int gap = backgroundRect.left - foregroundRect.right;
+            drawingInfo.progressBarRect.set(
+                    foregroundRect.left, foregroundRect.top, progressX, foregroundRect.bottom);
+            drawingInfo.progressBarBackgroundRect.set(
+                    progressX + gap,
+                    backgroundRect.top,
+                    backgroundRect.right,
+                    backgroundRect.bottom);
+        }
     }
 
-    /** @return Whether this component is in tablet mode. */
+    /**
+     * @return Whether this component is in tablet mode.
+     */
     private boolean isTablet() {
         if (sIsTabletForTesting != null) return sIsTabletForTesting;
         return DeviceFormFactor.isNonMultiDisplayContextOnTablet(mContext);
@@ -246,37 +575,74 @@ public class TopToolbarOverlayMediator {
     void destroy() {
         mTabObserver.destroy();
 
+        mToolbarThemeColorProvider.removeThemeColorObserver(this);
+
+        mBottomToolbarControlsOffsetSupplier.removeObserver(mOnBottomToolbarControlsOffsetChanged);
+        mSuppressToolbarSceneLayerSupplier.removeObserver(mOnSuppressToolbarSceneLayerChanged);
         mLayoutStateProvider.removeObserver(mSceneChangeObserver);
-        mBrowserControlsStateProvider.removeObserver(mBrowserControlsObserver);
+        mBrowserControlsVisibilityManager.removeObserver(mBrowserControlsObserver);
+        mCaptureResourceIdSupplier.removeObserver(mOnCaptureResourceIdSupplierChange);
     }
 
     /** Update the visibility of the overlay. */
     private void updateVisibility() {
-        if (mIsVisibilityManuallyControlled) {
+        Tab tab = mTabSupplier.get();
+        if (mSuppressToolbarSceneLayerSupplier.get()
+                || (tab != null && tab.isNativePage() && tab.isDisplayingBackForwardAnimation())
+                || (tab != null
+                        && tab.isTrustedWebActivity()
+                        && ChromeFeatureList.sBrowserControlsHidingToken.isEnabled()
+                        && mBrowserControlsVisibilityManager.hasHidingTokens())) {
+            // TODO(crbug.com/365818512): Add a screenshot capture test to cover this case.
+            mModel.set(TopToolbarOverlayProperties.VISIBLE, false);
+        } else if (mIsVisibilityManuallyControlled) {
             mModel.set(TopToolbarOverlayProperties.VISIBLE, mManualVisibility && mIsOnValidLayout);
         } else {
-            mModel.set(TopToolbarOverlayProperties.VISIBLE,
-                    !BrowserControlsUtils.areBrowserControlsOffScreen(mBrowserControlsStateProvider)
-                            && mIsOnValidLayout);
+            // When BCIV is enabled, we want to show the composited view even if the controls are
+            // offscreen, because we want to avoid an additional compositor frame when scrolling
+            // them back on screen.
+            mModel.set(TopToolbarOverlayProperties.VISIBLE, mIsOnValidLayout);
         }
     }
 
-    /** @return Whether this overlay should be attached to the tree. */
+    private void updateAnonymize(Tab tab) {
+        if (!mIsVisibilityManuallyControlled) {
+            boolean isNativePage = tab.isNativePage();
+            mModel.set(TopToolbarOverlayProperties.ANONYMIZE, isNativePage);
+        }
+    }
+
+    /**
+     * @return Whether this overlay should be attached to the tree.
+     */
     boolean shouldBeAttachedToTree() {
         return true;
     }
 
-    /** @param xOffset The x offset of the toolbar. */
+    /**
+     * @param xOffset The x offset of the toolbar.
+     */
     void setXOffset(float xOffset) {
         mModel.set(TopToolbarOverlayProperties.X_OFFSET, xOffset);
     }
 
-    /** @param anonymize Whether the URL should be hidden when the layer is rendered. */
+    /**
+     * @param yOffset The Y offset of the toolbar.
+     */
+    void setYOffset(float yOffset) {
+        mModel.set(TopToolbarOverlayProperties.Y_OFFSET, yOffset);
+    }
+
+    /**
+     * @param anonymize Whether the URL should be hidden when the layer is rendered.
+     */
     void setAnonymize(boolean anonymize) {
         mModel.set(TopToolbarOverlayProperties.ANONYMIZE, anonymize);
     }
 
-    /** @param visible Whether the overlay and shadow should be visible despite other signals. */
+    /**
+     * @param visible Whether the overlay and shadow should be visible despite other signals.
+     */
     void setManualVisibility(boolean visible) {
         assert mIsVisibilityManuallyControlled
                 : "Manual visibility control was not set for this overlay.";
@@ -285,25 +651,98 @@ public class TopToolbarOverlayMediator {
         updateVisibility();
     }
 
-    @VisibleForTesting
+    /**
+     * @param bookmarkBarHeightSupplier Supplier of the current Bookmark Bar height.
+     */
+    void setBookmarkBarHeightSupplier(@Nullable Supplier<Integer> bookmarkBarHeightSupplier) {
+        mBookmarkBarHeightSupplier = bookmarkBarHeightSupplier;
+    }
+
     void setVisibilityManuallyControlledForTesting(boolean manuallyControlled) {
         mIsVisibilityManuallyControlled = manuallyControlled;
         updateShadowState();
         updateVisibility();
     }
 
-    @VisibleForTesting
+    void setViewportHeight(float viewportHeight) {
+        if (viewportHeight == mViewportHeight) return;
+        mViewportHeight = viewportHeight;
+        updateContentOffset();
+    }
+
+    @ControlsPosition
+    int getControlsPosition() {
+        return mBrowserControlsVisibilityManager.getControlsPosition();
+    }
+
+    private void updateContentOffset() {
+        // When top-anchored, the content offset is used to position the toolbar
+        // layer instead of the top controls offset because the top controls can
+        // have a different height than that of just the toolbar, (e.g. when status
+        // indicator is visible or tab strip is hidden), and the toolbar should be
+        // positioned at the bottom of the top controls regardless of the overall
+        // height.
+        // When the toolbar is bottom-anchored, the situation is even more ambiguous
+        // because the bottom-anchored toolbar can't be assumed to sit at the top or
+        // bottom of the bottom controls stack. Instead, we rely on an offset
+        // provided to us indirectly via BottomControlsStacker, which controls the
+        // position of bottom controls layers.
+        int contentOffset = mBrowserControlsVisibilityManager.getContentOffset();
+
+        if (getControlsPosition() == ControlsPosition.BOTTOM) {
+            contentOffset = (int) (mBottomToolbarControlsOffsetSupplier.get() + mViewportHeight);
+            applyContentOffsetToModel(contentOffset);
+            return;
+        }
+
+        contentOffset = adjustContentOffsetForHairline(contentOffset);
+        contentOffset = getBookmarkBarAdjustedContentOffset(contentOffset);
+
+        applyContentOffsetToModel(contentOffset);
+    }
+
+    private int adjustContentOffsetForHairline(int contentOffset) {
+        int topControlsMinHeight = mBrowserControlsVisibilityManager.getTopControlsMinHeight();
+        int topControlsHairlineHeight =
+                mBrowserControlsVisibilityManager.getTopControlsHairlineHeight();
+        if (BrowserControlsUtils.shouldContentOffsetHideTopControlsHairline(
+                contentOffset, topControlsMinHeight, topControlsHairlineHeight)) {
+            return contentOffset - topControlsHairlineHeight;
+        }
+        return contentOffset;
+    }
+
+    private void applyContentOffsetToModel(float contentOffset) {
+        if (getControlsPosition() == ControlsPosition.TOP && !mIsVisibilityManuallyControlled) {
+            contentOffset = INVALID_CONTENT_OFFSET;
+        }
+        mModel.set(TopToolbarOverlayProperties.LEGACY_CONTENT_OFFSET, contentOffset);
+    }
+
+    private void onBottomToolbarControlsOffsetChanged(Integer ignored) {
+        updateContentOffset();
+    }
+
+    private void onSuppressToolbarSceneLayerChanged(Boolean ignored) {
+        updateVisibility();
+    }
+
+    private void onCaptureResourceIdSupplierChange(Long captureResourceId) {
+        mModel.set(TopToolbarOverlayProperties.CAPTURE_RESOURCE_ID, captureResourceId);
+    }
+
     static void setIsTabletForTesting(Boolean isTablet) {
         sIsTabletForTesting = isTablet;
+        ResettersForTesting.register(() -> sIsTabletForTesting = null);
     }
 
-    @VisibleForTesting
-    static void setToolbarBackgroundColorForTesting(@ColorInt int color) {
+    static void setToolbarBackgroundColorForTesting(@Nullable Integer color) {
         sToolbarBackgroundColorForTesting = color;
+        ResettersForTesting.register(() -> sToolbarBackgroundColorForTesting = null);
     }
 
-    @VisibleForTesting
-    static void setUrlBarColorForTesting(@ColorInt int color) {
+    static void setUrlBarColorForTesting(@Nullable Integer color) {
         sUrlBarColorForTesting = color;
+        ResettersForTesting.register(() -> sUrlBarColorForTesting = null);
     }
 }

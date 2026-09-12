@@ -7,13 +7,13 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <optional>
 
 #include "base/logging.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "gpu/vulkan/vulkan_device_queue.h"
 #include "gpu/vulkan/vulkan_function_pointers.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "gpu/vulkan/vulkan_util.h"
 
 namespace gpu {
 namespace {
@@ -38,14 +38,13 @@ std::unique_ptr<VulkanImage> VulkanImage::Create(
     VkFormat format,
     VkImageUsageFlags usage,
     VkImageCreateFlags flags,
-    VkImageTiling image_tiling,
-    const void* extra_image_create_info,
-    const void* extra_memory_allocation_info) {
+    VkImageTiling image_tiling) {
   auto image = std::make_unique<VulkanImage>(base::PassKey<VulkanImage>());
-  if (!image->InitializeSingleOrJointPlanes(
+  if (image->InitializeSingleOrJointPlanes(
           device_queue, size, format, usage, flags, image_tiling,
-          extra_image_create_info, extra_memory_allocation_info,
-          /*requirements=*/nullptr)) {
+          /*extra_image_create_info=*/nullptr,
+          /*extra_memory_allocation_info=*/nullptr,
+          /*requirements=*/nullptr) != kSuccess) {
     return nullptr;
   }
   return image;
@@ -58,13 +57,12 @@ std::unique_ptr<VulkanImage> VulkanImage::CreateWithExternalMemory(
     VkFormat format,
     VkImageUsageFlags usage,
     VkImageCreateFlags flags,
-    VkImageTiling image_tiling,
-    const void* extra_image_create_info,
-    const void* extra_memory_allocation_info) {
+    VkImageTiling image_tiling) {
   auto image = std::make_unique<VulkanImage>(base::PassKey<VulkanImage>());
-  if (!image->InitializeWithExternalMemory(
+  if (image->InitializeWithExternalMemory(
           device_queue, size, format, usage, flags, image_tiling,
-          extra_image_create_info, extra_memory_allocation_info)) {
+          /*extra_image_create_info=*/nullptr,
+          /*extra_memory_allocation_info=*/nullptr) != kSuccess) {
     return nullptr;
   }
   return image;
@@ -99,7 +97,6 @@ std::unique_ptr<VulkanImage> VulkanImage::Create(
     VkImageTiling image_tiling,
     VkDeviceSize device_size,
     uint32_t memory_type_index,
-    absl::optional<VulkanYCbCrInfo>& ycbcr_info,
     VkImageUsageFlags usage,
     VkImageCreateFlags flags) {
   auto image = std::make_unique<VulkanImage>(base::PassKey<VulkanImage>());
@@ -111,7 +108,6 @@ std::unique_ptr<VulkanImage> VulkanImage::Create(
                                 static_cast<uint32_t>(size.height()), 1};
   image->create_info_.format = format;
   image->create_info_.tiling = image_tiling;
-  image->ycbcr_info_ = ycbcr_info;
   image->create_info_.usage = usage;
   image->create_info_.flags = flags;
   return image;
@@ -248,6 +244,7 @@ bool VulkanImage::BindMemory(size_t plane,
     if (result != VK_SUCCESS) {
       DLOG(ERROR) << "Failed to bind memory to external VkImage plane= "
                   << plane << " :" << result;
+      memory->Destroy();
       return false;
     }
 
@@ -261,6 +258,7 @@ bool VulkanImage::BindMemory(size_t plane,
   if (result != VK_SUCCESS) {
     DLOG(ERROR) << "Failed to bind memory to external VkImage plane= " << plane
                 << " :" << result;
+    memory->Destroy();
     return false;
   }
 
@@ -268,7 +266,7 @@ bool VulkanImage::BindMemory(size_t plane,
   return true;
 }
 
-bool VulkanImage::AllocateAndBindMemory(
+VulkanImage::InitializeResult VulkanImage::AllocateAndBindMemory(
     size_t plane,
     const VkMemoryRequirements* requirements,
     const void* extra_memory_allocation_info) {
@@ -280,7 +278,7 @@ bool VulkanImage::AllocateAndBindMemory(
     tmp_requirements = GetMemoryRequirements(plane);
     if (!tmp_requirements.memoryTypeBits) {
       DLOG(ERROR) << "vkGetImageMemoryRequirements failed";
-      return false;
+      return kFailedBeforeAllocateMemory;
     }
     requirements = &tmp_requirements;
   }
@@ -296,17 +294,17 @@ bool VulkanImage::AllocateAndBindMemory(
   auto memory =
       VulkanMemory::Create(device_queue_, requirements, &dedicated_memory_info);
   if (!memory) {
-    return false;
+    return kFailedBeforeAllocateMemory;
   }
 
   if (!BindMemory(plane, std::move(memory))) {
-    return false;
+    return kFailedAfterAllocateMemory;
   }
 
-  return true;
+  return kSuccess;
 }
 
-bool VulkanImage::InitializeSingleOrJointPlanes(
+VulkanImage::InitializeResult VulkanImage::InitializeSingleOrJointPlanes(
     VulkanDeviceQueue* device_queue,
     const gfx::Size& size,
     VkFormat format,
@@ -321,6 +319,7 @@ bool VulkanImage::InitializeSingleOrJointPlanes(
 
   device_queue_ = device_queue;
   disjoint_planes_ = false;
+  InitializeResult result = kFailedBeforeAllocateMemory;
 
   do {
     if (!CreateVkImage(size, format, usage, flags, image_tiling,
@@ -328,7 +327,9 @@ bool VulkanImage::InitializeSingleOrJointPlanes(
       break;
     }
 
-    if (!AllocateAndBindMemory(0, requirements, extra_memory_allocation_info)) {
+    result =
+        AllocateAndBindMemory(0, requirements, extra_memory_allocation_info);
+    if (result != kSuccess) {
       break;
     }
 
@@ -338,7 +339,7 @@ bool VulkanImage::InitializeSingleOrJointPlanes(
     // VK_IMAGE_TILING_OPTIMAL the layout is not usable and
     // vkGetImageSubresourceLayout() is illegal.
     if (image_tiling != VK_IMAGE_TILING_LINEAR) {
-      return true;
+      return kSuccess;
     }
 
     const VkImageSubresource image_subresource = {
@@ -349,15 +350,15 @@ bool VulkanImage::InitializeSingleOrJointPlanes(
     vkGetImageSubresourceLayout(device_queue_->GetVulkanDevice(), image_,
                                 &image_subresource, &layouts_[0]);
 
-    return true;
+    return kSuccess;
   } while (false);
 
   // Initialize failed.
   Destroy();
-  return false;
+  return result;
 }
 
-bool VulkanImage::InitializeWithExternalMemory(
+VulkanImage::InitializeResult VulkanImage::InitializeWithExternalMemory(
     VulkanDeviceQueue* device_queue,
     const gfx::Size& size,
     VkFormat format,
@@ -375,61 +376,22 @@ bool VulkanImage::InitializeWithExternalMemory(
   constexpr auto kHandleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 #endif
 
-  VkPhysicalDeviceImageFormatInfo2 format_info_2 = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
-      .format = format,
-      .type = VK_IMAGE_TYPE_2D,
-      .tiling = image_tiling,
-      .usage = usage,
-      .flags = flags,
-  };
-
-  VkPhysicalDeviceExternalImageFormatInfo external_info = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
-      .handleType = kHandleType,
-  };
-  format_info_2.pNext = &external_info;
-
-// TODO(crbug.com/1052397): Revisit once build flag switch of lacros-chrome is
-// complete.
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS)
-  VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier_info = {
-      .sType =
-          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-  };
-  // If image_tiling is VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT, a modifier_info
-  // struct has to be appended.
-  if (image_tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
-    external_info.pNext = &modifier_info;
-#endif
-
-  VkImageFormatProperties2 image_format_properties_2 = {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
-  };
-  VkExternalImageFormatProperties external_image_format_properties = {
-      .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
-  };
-  image_format_properties_2.pNext = &external_image_format_properties;
-
-  auto result = vkGetPhysicalDeviceImageFormatProperties2(
-      device_queue->GetVulkanPhysicalDevice(), &format_info_2,
-      &image_format_properties_2);
+  VkExternalMemoryProperties external_format_properties;
+  VkResult result = QueryVkExternalMemoryProperties(
+      device_queue->GetVulkanPhysicalDevice(), format, VK_IMAGE_TYPE_2D,
+      image_tiling, usage, flags, kHandleType, &external_format_properties);
   if (result != VK_SUCCESS) {
     DLOG(ERROR) << "External memory is not supported."
                 << " format:" << format << " image_tiling:" << image_tiling
                 << " usage:" << usage << " flags:" << flags;
-    return false;
+    return kFailedBeforeAllocateMemory;
   }
-
-  const auto& external_format_properties =
-      external_image_format_properties.externalMemoryProperties;
   if (!(external_format_properties.externalMemoryFeatures &
         VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT)) {
     DLOG(ERROR) << "External memory cannot be exported."
                 << " format:" << format << " image_tiling:" << image_tiling
                 << " usage:" << usage << " flags:" << flags;
-    return false;
+    return kFailedBeforeAllocateMemory;
   }
 
   handle_types_ = external_format_properties.compatibleHandleTypes;

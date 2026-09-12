@@ -53,7 +53,9 @@ class ContentInfoBarManager
   void set_ignore_next_reload() { ignore_next_reload_ = true; }
 
   // InfoBarManager:
-  void OpenURL(const GURL& url, WindowOpenDisposition disposition) override;
+  void OpenURL(const GURL& url,
+               WindowOpenDisposition disposition,
+               const std::string& text_fragment) override;
 
  private:
   friend class content::WebContentsUserData<ContentInfoBarManager>;
@@ -70,7 +72,6 @@ class ContentInfoBarManager
       content::NavigationHandle* navigation_handle) override;
   void NavigationEntryCommitted(
       const content::LoadCommittedDetails& load_details) override;
-  void WebContentsDestroyed() override;
 
   // See description in set_ignore_next_reload().
   bool ignore_next_reload_ = false;

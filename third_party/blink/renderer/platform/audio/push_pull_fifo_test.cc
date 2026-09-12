@@ -7,7 +7,9 @@
 #include <memory>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
+#include "media/base/audio_bus.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
@@ -25,17 +27,12 @@ namespace {
 TEST(PushPullFIFOBasicTest, BasicTests) {
   // This suppresses the multi-thread warning for GTest. Potently it increases
   // the test execution time, but this specific test is very short and simple.
-  testing::FLAGS_gtest_death_test_style = "threadsafe";
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
 
-  const unsigned kRenderQuantumFrames = 128;
-
-  // FIFO length exceeding the maximum length allowed will cause crash.
-  // i.e.) fifo_length_ <= kMaxFIFOLength
-  EXPECT_DEATH_IF_SUPPORTED(
-      new PushPullFIFO(2, PushPullFIFO::kMaxFIFOLength + 1), "");
+  constexpr unsigned kRenderQuantumFrames = 128;
 
   std::unique_ptr<PushPullFIFO> test_fifo =
-      std::make_unique<PushPullFIFO>(2, 1024);
+      PushPullFIFO::TryCreate(2, 1024, kRenderQuantumFrames);
 
   // The input bus length must be |audio_utilities::kRenderQuantumFrames|.
   // i.e.) input_bus->length() == kRenderQuantumFrames
@@ -64,7 +61,7 @@ TEST(PushPullFIFOBasicTest, BasicTests) {
 // value will be |starting_value| + |bus_length|.
 size_t FillBusWithLinearRamp(AudioBus* target_bus, size_t starting_value) {
   for (unsigned c = 0; c < target_bus->NumberOfChannels(); ++c) {
-    float* bus_channel = target_bus->Channel(c)->MutableData();
+    base::span<float> bus_channel = target_bus->Channel(c)->MutableSpan();
     for (size_t i = 0; i < target_bus->Channel(c)->length(); ++i) {
       bus_channel[i] = static_cast<float>(starting_value + i);
     }
@@ -75,10 +72,10 @@ size_t FillBusWithLinearRamp(AudioBus* target_bus, size_t starting_value) {
 // Inspect the content of AudioBus with a given set of index and value across
 // channels.
 bool VerifyBusValueAtIndex(AudioBus* target_bus,
-                           int index,
+                           size_t index,
                            float expected_value) {
   for (unsigned c = 0; c < target_bus->NumberOfChannels(); ++c) {
-    float* bus_channel = target_bus->Channel(c)->MutableData();
+    base::span<const float> bus_channel = target_bus->Channel(c)->Span();
     if (bus_channel[index] != expected_value) {
       LOG(ERROR) << ">> [FAIL] expected " << expected_value << " at index "
                  << index << " but got " << bus_channel[index] << ".";
@@ -92,7 +89,7 @@ struct FIFOAction {
   // The type of action; "PUSH" or "PULL".
   const char* action;
   // Number of frames for the operation.
-  const size_t number_of_frames;
+  const uint32_t number_of_frames;
 };
 
 struct AudioBusSample {
@@ -104,9 +101,10 @@ struct AudioBusSample {
 
 struct FIFOTestSetup {
   // Length of FIFO to be created for test case.
-  const size_t fifo_length;
+  const uint32_t fifo_length;
   // Channel count of FIFO to be created for test case.
   const unsigned number_of_channels;
+  const uint32_t render_quantum_frames;
   // A list of |FIFOAction| entries to be performed in test case.
   const std::vector<FIFOAction> fifo_actions;
 };
@@ -145,15 +143,15 @@ TEST_P(PushPullFIFOFeatureTest, FeatureTests) {
   const FIFOTestExpectedState expected_state = GetParam().expected_state;
 
   // Create a FIFO with a specified configuration.
-  std::unique_ptr<PushPullFIFO> fifo = std::make_unique<PushPullFIFO>(
-      setup.number_of_channels, setup.fifo_length);
+  std::unique_ptr<PushPullFIFO> fifo = PushPullFIFO::TryCreate(
+      setup.number_of_channels, setup.fifo_length, setup.render_quantum_frames);
 
   scoped_refptr<AudioBus> output_bus;
 
   // Iterate all the scheduled push/pull actions.
   size_t frame_counter = 0;
   for (const auto& action : setup.fifo_actions) {
-    if (strcmp(action.action, "PUSH") == 0) {
+    if (std::string_view(action.action) == "PUSH") {
       scoped_refptr<AudioBus> input_bus =
           AudioBus::Create(setup.number_of_channels, action.number_of_frames);
       frame_counter = FillBusWithLinearRamp(input_bus.get(), frame_counter);
@@ -169,7 +167,7 @@ TEST_P(PushPullFIFOFeatureTest, FeatureTests) {
   }
 
   // Get FIFO config data.
-  const PushPullFIFOStateForTest actual_state = fifo->GetStateForTest();
+  const PushPullFIFOStateForTest actual_state = fifo->StateForTest();
 
   // Verify the read/write indexes.
   EXPECT_EQ(expected_state.index_read, actual_state.index_read);
@@ -179,8 +177,8 @@ TEST_P(PushPullFIFOFeatureTest, FeatureTests) {
 
   // Verify in-FIFO samples.
   for (const auto& sample : expected_state.fifo_samples) {
-    EXPECT_TRUE(VerifyBusValueAtIndex(fifo->GetFIFOBusForTest(),
-                                      sample.index, sample.value));
+    EXPECT_TRUE(VerifyBusValueAtIndex(fifo->FIFOBusForTest(), sample.index,
+                                      sample.value));
   }
 
   // Verify samples from the most recent output bus.
@@ -194,20 +192,20 @@ FIFOTestParam g_feature_test_params[] = {
     // Test cases 0 ~ 3: Regular operation on various channel configuration.
     //  - Mono, Stereo, Quad, 5.1.
     //  - FIFO length and pull size are RQ-aligned.
-    {{512, 1, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
+    {{512, 1, 128, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
      {256, 256, 0, 0, {{0, 0}}, {{0, 0}, {255, 255}}}},
 
-    {{512, 2, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
+    {{512, 2, 128, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
      {256, 256, 0, 0, {{0, 0}}, {{0, 0}, {255, 255}}}},
 
-    {{512, 4, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
+    {{512, 4, 128, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
      {256, 256, 0, 0, {{0, 0}}, {{0, 0}, {255, 255}}}},
 
-    {{512, 6, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
+    {{512, 6, 128, {{"PUSH", 128}, {"PUSH", 128}, {"PULL", 256}}},
      {256, 256, 0, 0, {{0, 0}}, {{0, 0}, {255, 255}}}},
 
     // Test case 4: Pull size less than or equal to 128.
-    {{128, 2, {{"PUSH", 128}, {"PULL", 128}, {"PUSH", 128}, {"PULL", 64}}},
+    {{128, 2, 128, {{"PUSH", 128}, {"PULL", 128}, {"PUSH", 128}, {"PULL", 64}}},
      {64, 0, 0, 0, {{64, 192}, {0, 128}}, {{0, 128}, {63, 191}}}},
 
     // Test case 5: Unusual FIFO and Pull length.
@@ -216,6 +214,7 @@ FIFOTestParam g_feature_test_params[] = {
     //  - Check if the output bus starts and ends with correct values.
     {{997,
       1,
+      128,
       {
           {"PUSH", 128},
           {"PUSH", 128},
@@ -240,6 +239,7 @@ FIFOTestParam g_feature_test_params[] = {
     //    index. Thus pulled frames must not contain overwritten data.
     {{512,
       3,
+      128,
       {
           {"PUSH", 128},
           {"PUSH", 128},
@@ -260,6 +260,7 @@ FIFOTestParam g_feature_test_params[] = {
     //    index. Thus pulled frames must not contain overwritten data.
     {{577,
       5,
+      128,
       {
           {"PUSH", 128},
           {"PUSH", 128},
@@ -280,6 +281,7 @@ FIFOTestParam g_feature_test_params[] = {
     //    index. Frames pulled after FIFO underflows must be zeroed.
     {{512,
       7,
+      128,
       {
           {"PUSH", 128},
           {"PUSH", 128},
@@ -307,6 +309,7 @@ FIFOTestParam g_feature_test_params[] = {
     //    index. Frames pulled after FIFO underflows must be zeroed.
     {{523,
       11,
+      128,
       {
           {"PUSH", 128},
           {"PUSH", 128},
@@ -334,6 +337,7 @@ FIFOTestParam g_feature_test_params[] = {
     //    index. Frames pulled after FIFO underflows must be zeroed.
     {{1024,
       11,
+      128,
       {
           {"PUSH", 128},
           {"PUSH", 128},
@@ -353,6 +357,7 @@ FIFOTestParam g_feature_test_params[] = {
     // Test case 11: Multiple pull from an empty FIFO. (zero push)
     {{1024,
       11,
+      128,
       {
           {"PULL", 144},
           {"PULL", 144},
@@ -372,8 +377,8 @@ INSTANTIATE_TEST_SUITE_P(PushPullFIFOFeatureTest,
 
 struct FIFOEarmarkTestParam {
   FIFOTestSetup setup;
-  size_t callback_buffer_size;
-  size_t expected_earmark_frames;
+  uint32_t callback_buffer_size;
+  uint32_t expected_earmarked_frames;
 };
 
 class PushPullFIFOEarmarkFramesTest
@@ -382,29 +387,30 @@ class PushPullFIFOEarmarkFramesTest
 TEST_P(PushPullFIFOEarmarkFramesTest, FeatureTests) {
   const FIFOTestSetup setup = GetParam().setup;
   const size_t callback_buffer_size = GetParam().callback_buffer_size;
-  const size_t expected_earmark_frames = GetParam().expected_earmark_frames;
+  const size_t expected_earmarked_frames = GetParam().expected_earmarked_frames;
 
   // Create a FIFO with a specified configuration.
-  std::unique_ptr<PushPullFIFO> fifo = std::make_unique<PushPullFIFO>(
-      setup.number_of_channels, setup.fifo_length);
-  fifo->SetEarmarkFrames(callback_buffer_size);
+  std::unique_ptr<PushPullFIFO> fifo = PushPullFIFO::TryCreate(
+      setup.number_of_channels, setup.fifo_length, setup.render_quantum_frames);
+  fifo->SetEarmarkedFrames(callback_buffer_size);
 
   scoped_refptr<AudioBus> output_bus;
 
   // Iterate all the scheduled push/pull actions.
   size_t frame_counter = 0;
   for (const auto& action : setup.fifo_actions) {
-    if (strcmp(action.action, "PUSH") == 0) {
+    if (std::string_view(action.action) == "PUSH") {
       scoped_refptr<AudioBus> input_bus =
           AudioBus::Create(setup.number_of_channels, action.number_of_frames);
       frame_counter = FillBusWithLinearRamp(input_bus.get(), frame_counter);
       fifo->Push(input_bus.get());
       LOG(INFO) << "PUSH " << action.number_of_frames
                 << " frames (frameCounter=" << frame_counter << ")";
-    } else if (strcmp(action.action, "PULL_EARMARK") == 0) {
+    } else if (std::string_view(action.action) == "PULL_EARMARK") {
       output_bus =
           AudioBus::Create(setup.number_of_channels, action.number_of_frames);
-      fifo->PullAndUpdateEarmark(output_bus.get(), action.number_of_frames);
+      fifo->PullAndUpdateEarmarkedFrames(output_bus.get(),
+                                         action.number_of_frames);
       LOG(INFO) << "PULL_EARMARK " << action.number_of_frames << " frames";
     } else {
       NOTREACHED();
@@ -412,52 +418,77 @@ TEST_P(PushPullFIFOEarmarkFramesTest, FeatureTests) {
   }
 
   // Test the earmark frames.
-  const size_t actual_earmark_frames = fifo->GetEarmarkFramesForTest();
-  EXPECT_EQ(expected_earmark_frames, actual_earmark_frames);
+  const size_t actual_earmarked_frames = fifo->EarmarkedFramesForTest();
+  EXPECT_EQ(expected_earmarked_frames, actual_earmarked_frames);
 }
 
 FIFOEarmarkTestParam g_earmark_test_params[] = {
-  // When there's no underrun, the earmark is equal to the callback size.
-  {{8192, 2, {
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PULL_EARMARK", 256},
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PULL_EARMARK", 256}
-    }}, 256, 256},
-  // The first underrun increases the earmark by the callback size.
-  {{8192, 2, {
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PULL_EARMARK", 384}, // udnerrun; updating earmark and skipping pull.
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PULL_EARMARK", 384}  // OK
-    }}, 384, 768},
-  // Simulating "bursty and irregular" callbacks.
-  {{8192, 2, {
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PULL_EARMARK", 480}, // OK
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PULL_EARMARK", 480}, // underrun; updating earmark and skipping pull.
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PUSH", 128},
-      {"PULL_EARMARK", 480}, // OK
-      {"PUSH", 128},
-      {"PULL_EARMARK", 480}  // underrun; updating earmark and skipping pull.
-    }}, 480, 1440}
-};
+    // When there's no underrun, the earmark is equal to the callback size.
+    {{8192,
+      2,
+      128,
+      {{"PUSH", 128},
+       {"PUSH", 128},
+       {"PULL_EARMARK", 256},
+       {"PUSH", 128},
+       {"PUSH", 128},
+       {"PULL_EARMARK", 256}}},
+     256,
+     256},
+    // The first underrun increases the earmark by the callback size.
+    {{8192,
+      2,
+      128,
+      {
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PULL_EARMARK",
+           384},  // udnerrun; updating earmark and skipping pull.
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PULL_EARMARK", 384}  // OK
+      }},
+     384,
+     768},
+    // Simulating "bursty and irregular" callbacks.
+    {{8192,
+      2,
+      128,
+      {
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PULL_EARMARK", 480},  // OK
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PULL_EARMARK",
+           480},  // underrun; updating earmark and skipping pull.
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PUSH", 128},
+          {"PULL_EARMARK", 480},  // OK
+          {"PUSH", 128},
+          {"PULL_EARMARK",
+           480}  // underrun; updating earmark and skipping pull.
+      }},
+     480,
+     1440}};
 
 INSTANTIATE_TEST_SUITE_P(PushPullFIFOEarmarkFramesTest,
                          PushPullFIFOEarmarkFramesTest,
                          testing::ValuesIn(g_earmark_test_params));
+
+TEST(PushPullFIFOAllocationTest, FailAllocationWithTooManyChannels) {
+  constexpr unsigned kRenderQuantumFrames = 128;
+  // TryCreate should return nullptr instead of crashing when the channel count
+  // exceeds the Chromium-specific implementation limit (kMaxBusChannels = 32).
+  // Note: The W3C Web Audio API standard allows supporting >32 channels.
+  std::unique_ptr<PushPullFIFO> fifo =
+      PushPullFIFO::TryCreate(33, 1024, kRenderQuantumFrames);
+  EXPECT_EQ(fifo, nullptr);
+}
 
 }  // namespace
 

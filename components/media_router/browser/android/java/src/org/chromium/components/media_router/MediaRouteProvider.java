@@ -4,7 +4,8 @@
 
 package org.chromium.components.media_router;
 
-import androidx.annotation.Nullable;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * An interface components providing media sinks and routes need to implement to hooks up into
@@ -13,10 +14,9 @@ import androidx.annotation.Nullable;
  * Note: Empty-string origins passed through this interface should be considered
  * "unique origins" from url::Origin for the purposes of comparison.
  */
+@NullMarked
 public interface MediaRouteProvider {
-    /**
-     * Factory for {@link MediaRouteProvider}s.
-     */
+    /** Factory for {@link MediaRouteProvider}s. */
     interface Factory {
         void addProviders(MediaRouteManager manager);
     }
@@ -30,13 +30,16 @@ public interface MediaRouteProvider {
     /**
      * Initiates the discovery of media sinks corresponding to the given source id. Does nothing if
      * the source id is not supported by the MRP.
+     *
      * @param sourceId The id of the source to discover the media sinks for.
+     * @param origin The origin of the frame initiating the request.
      */
-    void startObservingMediaSinks(String sourceId);
+    void startObservingMediaSinks(String sourceId, String origin);
 
     /**
-     * Stops the discovery of media sinks corresponding to the given source id. Does nothing if
-     * the source id is not supported by the MRP.
+     * Stops the discovery of media sinks corresponding to the given source id. Does nothing if the
+     * source id is not supported by the MRP.
+     *
      * @param sourceId The id of the source to discover the media sinks for.
      */
     void stopObservingMediaSinks(String sourceId);
@@ -51,8 +54,14 @@ public interface MediaRouteProvider {
      * @param isOffTheRecord Whether the route is being requested from an OffTheRecord profile.
      * @param nativeRequestId The id of the request tracked by the native side.
      */
-    void createRoute(String sourceId, String sinkId, String presentationId, String origin,
-            int tabId, boolean isOffTheRecord, int nativeRequestId);
+    void createRoute(
+            String sourceId,
+            String sinkId,
+            String presentationId,
+            String origin,
+            int tabId,
+            boolean isOffTheRecord,
+            int nativeRequestId);
 
     /**
      * Tries to join an existing media route for the given media source and presentation id.
@@ -90,6 +99,5 @@ public interface MediaRouteProvider {
      * Returns null if no FlingingController can be retrieved from the given route ID.
      * @param routeId The id of the route.
      */
-    @Nullable
-    FlingingController getFlingingController(String routeId);
+    @Nullable FlingingController getFlingingController(String routeId);
 }

@@ -11,13 +11,20 @@
 #include "base/android/jni_array.h"
 #include "base/android/jni_string.h"
 #include "base/functional/bind.h"
+#include "base/uuid.h"
 #include "components/omnibox/browser/actions/omnibox_action.h"
-#include "components/omnibox/browser/actions/omnibox_pedal_jni_wrapper.h"
+#include "components/omnibox/browser/actions/omnibox_action_factory_android.h"
 #include "components/omnibox/browser/clipboard_provider.h"
-#include "components/omnibox/browser/jni_headers/AutocompleteMatch_jni.h"
 #include "components/omnibox/browser/search_suggestion_parser.h"
-#include "components/query_tiles/android/tile_conversion_bridge.h"
+#include "components/omnibox/common/omnibox_feature_configs.h"
+#include "components/saved_tab_groups/public/android/tab_group_sync_conversions_bridge.h"
+#include "components/saved_tab_groups/public/android/tab_group_sync_conversions_utils.h"
+#include "third_party/jni_zero/default_conversions.h"
+#include "third_party/omnibox_proto/suggest_template_info.pb.h"
 #include "url/android/gurl_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "components/omnibox/browser/jni_headers/AutocompleteMatch_jni.h"
 
 using base::android::ConvertUTF16ToJavaString;
 using base::android::ConvertUTF8ToJavaString;
@@ -33,88 +40,96 @@ jclass AutocompleteMatch::GetClazz(JNIEnv* env) {
 }
 
 ScopedJavaLocalRef<jobject> AutocompleteMatch::GetOrCreateJavaObject(
-    JNIEnv* env) const {
+    JNIEnv* env,
+    const TemplateURLService* template_url_service) const {
   // Short circuit if we already built the match.
   if (java_match_)
     return ScopedJavaLocalRef<jobject>(*java_match_);
 
-  std::vector<int> contents_class_offsets;
-  std::vector<int> contents_class_styles;
+  std::vector<int32_t> contents_class_offsets;
+  std::vector<int32_t> contents_class_styles;
+  contents_class_offsets.reserve(contents_class.size());
+  contents_class_styles.reserve(contents_class.size());
   for (auto contents_class_item : contents_class) {
     contents_class_offsets.push_back(contents_class_item.offset);
     contents_class_styles.push_back(contents_class_item.style);
   }
 
-  std::vector<int> description_class_offsets;
-  std::vector<int> description_class_styles;
+  std::vector<int32_t> description_class_offsets;
+  std::vector<int32_t> description_class_styles;
+  description_class_offsets.reserve(description_class.size());
+  description_class_styles.reserve(description_class.size());
   for (auto description_class_item : description_class) {
     description_class_offsets.push_back(description_class_item.offset);
     description_class_styles.push_back(description_class_item.style);
   }
 
-  base::android::ScopedJavaLocalRef<jobject> janswer;
-  if (answer)
-    janswer = answer->CreateJavaObject();
-  ScopedJavaLocalRef<jstring> j_image_dominant_color;
-  ScopedJavaLocalRef<jstring> j_post_content_type;
-  ScopedJavaLocalRef<jbyteArray> j_post_content;
-  std::string clipboard_image_data;
-
-  if (!image_dominant_color.empty()) {
-    j_image_dominant_color = ConvertUTF8ToJavaString(env, image_dominant_color);
+  ScopedJavaLocalRef<jbyteArray> j_answer_template;
+  if (answer_template) {
+    std::string str_answer_template;
+    if (answer_template->SerializeToString(&str_answer_template)) {
+      j_answer_template =
+          base::android::ToJavaByteArray(env, str_answer_template);
+    }
   }
 
-  if (post_content && !post_content->first.empty() &&
-      !post_content->second.empty()) {
-    j_post_content_type = ConvertUTF8ToJavaString(env, post_content->first);
-    j_post_content = ToJavaByteArray(env, post_content->second);
+  std::string post_content_type;
+  ScopedJavaLocalRef<jbyteArray> j_post_data;
+  if (post_content) {
+    post_content_type = post_content->first;
+    j_post_data = base::android::ToJavaByteArray(env, post_content->second);
   }
 
+  ScopedJavaLocalRef<jbyteArray> j_clipboard_image_data;
   if (search_terms_args.get()) {
-    clipboard_image_data = search_terms_args->image_thumbnail_content;
+    j_clipboard_image_data = base::android::ToJavaByteArray(
+        env, search_terms_args->image_thumbnail_content);
   }
 
-  ScopedJavaLocalRef<jobject> j_query_tiles =
-      query_tiles::TileConversionBridge::CreateJavaTiles(env, query_tiles);
+  std::vector<int32_t> temp_subtypes(subtypes.begin(), subtypes.end());
 
-  std::vector<std::u16string> suggest_titles;
-  suggest_titles.reserve(suggest_tiles.size());
-  std::vector<base::android::ScopedJavaLocalRef<jobject>> suggest_urls;
-  suggest_urls.reserve(suggest_tiles.size());
-  // Note: vector<bool> is a specialized version of vector that behaves
-  // differently, storing values as individual bits. This makes it impossible
-  // for us to use it to represent tile.is_search on the Java side.
-  std::vector<int> suggest_types;
-  suggest_types.reserve(suggest_tiles.size());
-  for (const auto& tile : suggest_tiles) {
-    suggest_titles.push_back(tile.title);
-    suggest_urls.push_back(url::GURLAndroid::FromNativeGURL(env, tile.url));
-    suggest_types.push_back(tile.is_search);
+  std::vector<jni_zero::ScopedJavaLocalRef<jobject>> actions_list =
+      ToJavaOmniboxActionsList(env, actions);
+  base::android::ScopedJavaLocalRef<jobject> j_takeover_action;
+  if (takeover_action) {
+    j_takeover_action = takeover_action->GetOrCreateJavaObject(env);
   }
 
-  std::vector<int> temp_subtypes(subtypes.begin(), subtypes.end());
+  int icon_type = omnibox::SuggestTemplateInfo::IconType::
+      SuggestTemplateInfo_IconType_ICON_TYPE_UNSPECIFIED;
+
+  ScopedJavaLocalRef<jbyteArray> j_suggest_template;
+
+  if (suggest_template.has_value()) {
+    icon_type = suggest_template.value().type_icon();
+
+    std::string str_suggest_template;
+    if (suggest_template->SerializeToString(&str_suggest_template)) {
+      j_suggest_template =
+          base::android::ToJavaByteArray(env, str_suggest_template);
+    }
+  }
+
+  int starter_pack_id = static_cast<int>(StarterPackId(template_url_service));
 
   java_match_ = std::make_unique<ScopedJavaGlobalRef<jobject>>(
       Java_AutocompleteMatch_build(
-          env, reinterpret_cast<intptr_t>(this), type,
-          ToJavaIntArray(env, temp_subtypes), IsSearchType(type), relevance,
-          transition, ConvertUTF16ToJavaString(env, contents),
-          ToJavaIntArray(env, contents_class_offsets),
-          ToJavaIntArray(env, contents_class_styles),
-          ConvertUTF16ToJavaString(env, description),
-          ToJavaIntArray(env, description_class_offsets),
-          ToJavaIntArray(env, description_class_styles), janswer,
-          ConvertUTF16ToJavaString(env, fill_into_edit),
-          url::GURLAndroid::FromNativeGURL(env, destination_url),
-          url::GURLAndroid::FromNativeGURL(env, image_url),
-          j_image_dominant_color, SupportsDeletion(), j_post_content_type,
-          j_post_content, suggestion_group_id.value_or(omnibox::GROUP_INVALID),
-          j_query_tiles, ToJavaByteArray(env, clipboard_image_data),
-          has_tab_match.value_or(false),
-          ToJavaArrayOfStrings(env, suggest_titles),
-          url::GURLAndroid::ToJavaArrayOfGURLs(env, suggest_urls),
-          ToJavaIntArray(env, suggest_types),
-          ToJavaOmniboxActionsList(env, actions)));
+          env, reinterpret_cast<intptr_t>(this), type, temp_subtypes,
+          IsSearchType(type), static_cast<int>(GetOmniboxSuggestionKind()),
+          icon_type, transition, contents, contents_class_offsets,
+          contents_class_styles, description, description_class_offsets,
+          description_class_styles, j_answer_template, fill_into_edit,
+          destination_url, image_url, image_dominant_color, SupportsDeletion(),
+          starter_pack_id, post_content_type, j_post_data,
+          suggestion_group_id.value_or(omnibox::GROUP_INVALID),
+          swap_contents_and_description, j_clipboard_image_data,
+          has_tab_match.value_or(false), android_tab_id, actions_list,
+          j_takeover_action, allowed_to_be_default_match, inline_autocompletion,
+          additional_text,
+          matching_tab_group_uuid
+              ? std::make_optional(matching_tab_group_uuid->AsLowercaseString())
+              : std::nullopt,
+          associated_keyword, j_suggest_template, document_type));
 
   return ScopedJavaLocalRef<jobject>(*java_match_);
 }
@@ -139,7 +154,7 @@ void AutocompleteMatch::DestroyJavaObject() {
 
 void AutocompleteMatch::UpdateWithClipboardContent(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& j_callback) {
+    const base::android::JavaRef<jobject>& j_callback) {
   DCHECK(provider) << "No provider available";
   DCHECK(provider->type() == AutocompleteProvider::TYPE_CLIPBOARD)
       << "Invalid provider type: " << provider->type();
@@ -147,7 +162,7 @@ void AutocompleteMatch::UpdateWithClipboardContent(
   ClipboardProvider* clipboard_provider =
       static_cast<ClipboardProvider*>(provider);
   clipboard_provider->UpdateClipboardMatchWithContent(
-      this,
+      weak_ptr_factory_.GetWeakPtr(),
       base::BindOnce(&AutocompleteMatch::OnClipboardSuggestionContentUpdated,
                      weak_ptr_factory_.GetWeakPtr(),
                      base::android::ScopedJavaGlobalRef<jobject>(j_callback)));
@@ -157,82 +172,77 @@ void AutocompleteMatch::OnClipboardSuggestionContentUpdated(
     const base::android::JavaRef<jobject>& j_callback) {
   JNIEnv* env = base::android::AttachCurrentThread();
   UpdateClipboardContent(env);
-  RunRunnableAndroid(j_callback);
-}
-
-void AutocompleteMatch::UpdateMatchingJavaTab(
-    const JavaObjectWeakGlobalRef& tab) {
-  matching_java_tab_ = tab;
-
-  // Default state is: we don't have a matching tab. If that default state has
-  // changed, reflect it in the UI.
-  // TODO(crbug.com/1266558): when Tab.java is relocated to Components, pass the
-  // Tab object directly to Java. This is not possible right now due to
-  // //components being explicitly denied to depend on //chrome targets.
-  if (!java_match_ || !has_tab_match.value_or(false))
-    return;
-
-  JNIEnv* env = base::android::AttachCurrentThread();
-  Java_AutocompleteMatch_updateMatchingTab(env, *java_match_, true);
-}
-
-JavaObjectWeakGlobalRef AutocompleteMatch::GetMatchingJavaTab() const {
-  return matching_java_tab_;
+  jni_zero::RunRunnable(j_callback);
 }
 
 void AutocompleteMatch::UpdateClipboardContent(JNIEnv* env) {
   if (!java_match_)
     return;
 
-  std::string clipboard_image_data;
+  ScopedJavaLocalRef<jbyteArray> j_clipboard_image_data;
   if (search_terms_args.get()) {
-    clipboard_image_data = search_terms_args->image_thumbnail_content;
+    j_clipboard_image_data = base::android::ToJavaByteArray(
+        env, search_terms_args->image_thumbnail_content);
   }
 
-  ScopedJavaLocalRef<jstring> j_post_content_type;
-  ScopedJavaLocalRef<jbyteArray> j_post_content;
-  if (post_content && !post_content->first.empty() &&
-      !post_content->second.empty()) {
-    j_post_content_type = ConvertUTF8ToJavaString(env, post_content->first);
-    j_post_content = ToJavaByteArray(env, post_content->second);
+  ScopedJavaLocalRef<jbyteArray> j_post_data;
+  if (post_content) {
+    j_post_data = base::android::ToJavaByteArray(env, post_content->second);
   }
 
   Java_AutocompleteMatch_updateClipboardContent(
-      env, *java_match_, ConvertUTF16ToJavaString(env, contents),
-      url::GURLAndroid::FromNativeGURL(env, destination_url),
-      j_post_content_type, j_post_content,
-      ToJavaByteArray(env, clipboard_image_data));
+      env, *java_match_, contents, destination_url,
+      post_content ? post_content->first : "", j_post_data,
+      j_clipboard_image_data);
 }
 
-void AutocompleteMatch::UpdateJavaDestinationUrl() {
+void AutocompleteMatch::UpdateJavaNavigationDetails() {
   if (java_match_) {
     JNIEnv* env = base::android::AttachCurrentThread();
-    Java_AutocompleteMatch_setDestinationUrl(
-        env, *java_match_,
-        url::GURLAndroid::FromNativeGURL(env, destination_url));
+
+    std::vector<std::string> header_keys;
+    std::vector<std::string> header_vals;
+    for (const auto& [key, val] : extra_headers) {
+      header_keys.emplace_back(key);
+      header_vals.emplace_back(val);
+    }
+
+    Java_AutocompleteMatch_updateNavigationDetails(
+        env, *java_match_, destination_url, header_keys, header_vals);
   }
 }
 
 void AutocompleteMatch::UpdateJavaAnswer() {
   if (java_match_) {
     JNIEnv* env = base::android::AttachCurrentThread();
-    Java_AutocompleteMatch_setAnswer(
-        env, *java_match_, answer ? answer->CreateJavaObject() : nullptr);
+    if (answer_template) {
+      ScopedJavaLocalRef<jbyteArray> j_answer_template;
+      std::string str_answer_template;
+      if (answer_template->SerializeToString(&str_answer_template)) {
+        j_answer_template =
+            base::android::ToJavaByteArray(env, str_answer_template);
+      }
+      Java_AutocompleteMatch_setAnswerTemplate(
+          env, *java_match_, answer_template ? j_answer_template : nullptr);
+    }
   }
 }
 
 void AutocompleteMatch::UpdateJavaDescription() {
   if (java_match_) {
-    std::vector<int> description_class_offsets;
-    std::vector<int> description_class_styles;
+    std::vector<int32_t> description_class_offsets;
+    std::vector<int32_t> description_class_styles;
+    description_class_offsets.reserve(description_class.size());
+    description_class_styles.reserve(description_class.size());
     for (auto description_class_item : description_class) {
       description_class_offsets.push_back(description_class_item.offset);
       description_class_styles.push_back(description_class_item.style);
     }
     JNIEnv* env = base::android::AttachCurrentThread();
-    Java_AutocompleteMatch_setDescription(
-        env, *java_match_, ConvertUTF16ToJavaString(env, description),
-        ToJavaIntArray(env, description_class_offsets),
-        ToJavaIntArray(env, description_class_styles));
+    Java_AutocompleteMatch_setDescription(env, *java_match_, description,
+                                          description_class_offsets,
+                                          description_class_styles);
   }
 }
+
+DEFINE_JNI(AutocompleteMatch)

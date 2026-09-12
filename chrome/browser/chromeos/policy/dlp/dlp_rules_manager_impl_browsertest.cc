@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager_impl.h"
+
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/chromeos/policy/dlp/dlp_policy_constants.h"
 #include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager.h"
 #include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager_factory.h"
-#include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager_impl.h"
-#include "chrome/browser/chromeos/policy/dlp/dlp_rules_manager_test_utils.h"
+#include "chrome/browser/chromeos/policy/dlp/test/dlp_rules_manager_test_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_pref_names.h"
@@ -26,8 +26,8 @@ constexpr char kUrlStr1[] = "https://wwww.example.com";
 
 class FakeDlpRulesManager : public DlpRulesManagerImpl {
  public:
-  explicit FakeDlpRulesManager(PrefService* local_state)
-      : DlpRulesManagerImpl(local_state) {}
+  explicit FakeDlpRulesManager(PrefService* local_state, Profile* profile)
+      : DlpRulesManagerImpl(local_state, profile) {}
   ~FakeDlpRulesManager() override = default;
 };
 }  // namespace
@@ -38,7 +38,7 @@ class DlpRulesPolicyTest : public InProcessBrowserTest {
 
   void InitializeRulesManager() {
     policy::DlpRulesManagerFactory::GetInstance()->SetTestingFactory(
-        browser()->profile(),
+        browser()->GetProfile(),
         base::BindRepeating(&DlpRulesPolicyTest::SetDlpRulesManager,
                             base::Unretained(this)));
     ASSERT_TRUE(DlpRulesManagerFactory::GetForPrimaryProfile());
@@ -46,8 +46,8 @@ class DlpRulesPolicyTest : public InProcessBrowserTest {
 
   std::unique_ptr<KeyedService> SetDlpRulesManager(
       content::BrowserContext* context) {
-    auto new_rules_manager =
-        std::make_unique<FakeDlpRulesManager>(g_browser_process->local_state());
+    auto new_rules_manager = std::make_unique<FakeDlpRulesManager>(
+        g_browser_process->local_state(), Profile::FromBrowserContext(context));
     rules_manager_ = new_rules_manager.get();
     return new_rules_manager;
   }
@@ -64,8 +64,8 @@ IN_PROC_BROWSER_TEST_F(DlpRulesPolicyTest, ParsePolicyPref) {
                                 policy_prefs::kDlpRulesList);
 
     dlp_test_util::DlpRule rule("rule #1", "Block", "testid1");
-    rule.AddSrcUrl(kUrlStr1).AddRestriction(dlp::kScreenshotRestriction,
-                                            dlp::kBlockLevel);
+    rule.AddSrcUrl(kUrlStr1).AddRestriction(
+        data_controls::kRestrictionScreenshot, data_controls::kLevelBlock);
 
     update->Append(rule.Create());
   }

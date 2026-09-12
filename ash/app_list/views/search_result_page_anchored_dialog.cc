@@ -14,7 +14,7 @@
 #include "ui/gfx/geometry/transform.h"
 #include "ui/views/view.h"
 #include "ui/views/window/dialog_delegate.h"
-#include "ui/views/window/non_client_view.h"
+#include "ui/views/window/frame_view.h"
 #include "ui/wm/core/coordinate_conversion.h"
 
 namespace ash {
@@ -37,20 +37,20 @@ SearchResultPageAnchoredDialog::SearchResultPageAnchoredDialog(
   views::Widget* const parent = host_view_->GetWidget();
 
   widget_ = new views::Widget();
-  views::Widget::InitParams params;
-
-    params.type = views::Widget::InitParams::TYPE_WINDOW_FRAMELESS;
-    params.layer_type = ui::LAYER_NOT_DRAWN;
-    params.parent = parent->GetNativeWindow();
-    params.delegate = dialog.release();
+  views::Widget::InitParams params(
+      views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
+      views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
+  params.layer_type = ui::LAYER_NOT_DRAWN;
+  params.parent = parent->GetNativeWindow();
+  params.delegate = dialog.release();
 
   widget_->Init(std::move(params));
 
   // The |dialog| ownership is passed to the window hierarchy.
-  widget_observations_.AddObservation(widget_);
+  widget_observations_.AddObservation(widget_.get());
   widget_observations_.AddObservation(parent);
 
-  view_observations_.AddObservation(host_view_);
+  view_observations_.AddObservation(host_view_.get());
   view_observations_.AddObservation(widget_->GetContentsView());
 }
 

@@ -4,15 +4,17 @@
 
 #include "chromecast/media/audio/cast_audio_manager_alsa.h"
 
+#include <string_view>
 #include <utility>
 
 #include "base/logging.h"
 #include "base/memory/free_deleter.h"
-#include "base/strings/string_piece.h"
+#include "base/notimplemented.h"
+#include "base/strings/string_view_util.h"
 #include "base/task/single_thread_task_runner.h"
 #include "chromecast/media/api/cma_backend_factory.h"
 #include "chromecast/media/audio/audio_buildflags.h"
-#include "chromecast/media/audio/cast_audio_input_stream.h"
+
 #include "media/audio/alsa/alsa_input.h"
 #include "media/audio/alsa/alsa_wrapper.h"
 
@@ -27,14 +29,11 @@ const int kDefaultSampleRate = BUILDFLAG(AUDIO_INPUT_SAMPLE_RATE);
 // TODO(jyw): Query the preferred value from media backend.
 const int kDefaultInputBufferSize = 1024;
 
-#if BUILDFLAG(ENABLE_AUDIO_CAPTURE_SERVICE)
-const int kCommunicationsSampleRate = 16000;
-const int kCommunicationsInputBufferSize = 160;  // 10 ms.
-#endif
+
 
 // Since "default" and "dmix" devices are virtual devices mapped to real
 // devices, we remove them from the list to avoiding duplicate counting.
-constexpr base::StringPiece kInvalidAudioInputDevices[] = {
+constexpr std::string_view kInvalidAudioInputDevices[] = {
     "default",
     "dmix",
     "null",
@@ -56,9 +55,10 @@ bool IsAlsaDeviceAvailable(CastAudioManagerAlsa::StreamType type,
   // it or not.
   if (type == CastAudioManagerAlsa::kStreamCapture) {
     // Check if the device is in the list of invalid devices.
-    for (size_t i = 0; i < std::size(kInvalidAudioInputDevices); ++i) {
-      if (kInvalidAudioInputDevices[i] == device_name)
+    for (const auto& invalid_audio_input_device : kInvalidAudioInputDevices) {
+      if (invalid_audio_input_device == device_name) {
         return false;
+      }
     }
     return true;
   } else {
@@ -86,17 +86,13 @@ CastAudioManagerAlsa::CastAudioManagerAlsa(
     CastAudioManagerHelper::Delegate* delegate,
     base::RepeatingCallback<CmaBackendFactory*()> backend_factory_getter,
     scoped_refptr<base::SingleThreadTaskRunner> browser_task_runner,
-    scoped_refptr<base::SingleThreadTaskRunner> media_task_runner,
-    external_service_support::ExternalConnector* connector,
-    bool use_mixer)
+    scoped_refptr<base::SingleThreadTaskRunner> media_task_runner)
     : CastAudioManager(std::move(audio_thread),
                        audio_log_factory,
                        delegate,
                        std::move(backend_factory_getter),
                        browser_task_runner,
-                       media_task_runner,
-                       connector,
-                       use_mixer),
+                       media_task_runner),
       wrapper_(new ::media::AlsaWrapper()) {}
 
 CastAudioManagerAlsa::~CastAudioManagerAlsa() {}
@@ -105,7 +101,7 @@ bool CastAudioManagerAlsa::HasAudioInputDevices() {
   return true;
 }
 
-void CastAudioManagerAlsa::GetAudioInputDeviceNames(
+bool CastAudioManagerAlsa::GetAudioInputDeviceNames(
     ::media::AudioDeviceNames* device_names) {
   DCHECK(device_names->empty());
 
@@ -113,26 +109,16 @@ void CastAudioManagerAlsa::GetAudioInputDeviceNames(
   // list for all platforms. Note, pulse has exclusively opened the default
   // device, so we must open the device via the "default" moniker.
   device_names->push_front(::media::AudioDeviceName::CreateDefault());
-#if BUILDFLAG(ENABLE_AUDIO_CAPTURE_SERVICE)
-  device_names->push_back(::media::AudioDeviceName::CreateCommunications());
-#endif  // BUILDFLAG(ENABLE_AUDIO_CAPTURE_SERVICE)
 
-  GetAlsaAudioDevices(kStreamCapture, device_names);
+  return GetAlsaAudioDevices(kStreamCapture, device_names);
 }
 
 ::media::AudioParameters CastAudioManagerAlsa::GetInputStreamParameters(
     const std::string& device_id) {
   if (device_id == ::media::AudioDeviceDescription::kCommunicationsDeviceId) {
-#if !BUILDFLAG(ENABLE_AUDIO_CAPTURE_SERVICE)
     NOTIMPLEMENTED()
         << "Capture Service is not enabled, return a fake AudioParameters.";
     return ::media::AudioParameters();
-#else
-    return ::media::AudioParameters(::media::AudioParameters::AUDIO_PCM_LINEAR,
-                                    ::media::CHANNEL_LAYOUT_MONO,
-                                    kCommunicationsSampleRate,
-                                    kCommunicationsInputBufferSize);
-#endif  // BUILDFLAG(ENABLE_AUDIO_CAPTURE_SERVICE)
   }
   // TODO(jyw): Be smarter about sample rate instead of hardcoding it.
   // Need to send a valid AudioParameters object even when it will be unused.
@@ -166,36 +152,43 @@ void CastAudioManagerAlsa::GetAudioInputDeviceNames(
           ? ::media::AlsaPcmInputStream::kAutoSelectDevice
           : device_id;
   if (device_name == ::media::AudioDeviceDescription::kCommunicationsDeviceId) {
-#if !BUILDFLAG(ENABLE_AUDIO_CAPTURE_SERVICE)
     NOTIMPLEMENTED() << "Capture Service is not enabled, return nullptr.";
     return nullptr;
-#else
-    return new CastAudioInputStream(this, params, device_name);
-#endif  // BUILDFLAG(ENABLE_AUDIO_CAPTURE_SERVICE)
   }
   return new ::media::AlsaPcmInputStream(this, device_name, params,
                                          wrapper_.get());
 }
 
-void CastAudioManagerAlsa::GetAlsaAudioDevices(
+bool CastAudioManagerAlsa::GetAlsaAudioDevices(
     StreamType type,
     ::media::AudioDeviceNames* device_names) {
   int card = -1;
 
   // Loop through the sound cards to get ALSA device hints.
-  while (!wrapper_->CardNext(&card) && card >= 0) {
+  bool had_error = false;
+  int card_next_result = 0;
+  while ((card_next_result = wrapper_->CardNext(&card)) == 0 && card >= 0) {
     void** hints = NULL;
-    int error = wrapper_->DeviceNameHint(card, kPcmInterfaceName, &hints);
-    if (!error) {
+    int hint_result = wrapper_->DeviceNameHint(card, kPcmInterfaceName, &hints);
+    if (!hint_result) {
       GetAlsaDevicesInfo(type, hints, device_names);
 
       // Destroy the hints now that we're done with it.
       wrapper_->DeviceNameFreeHint(hints);
     } else {
+      had_error = true;
       DLOG(WARNING) << "GetAlsaAudioDevices: unable to get device hints: "
-                    << wrapper_->StrError(error);
+                    << wrapper_->StrError(hint_result);
     }
   }
+
+  if (card_next_result != 0) {
+    had_error = true;
+    DLOG(WARNING) << "GetAlsaAudioDevices: unable to get next card: "
+                  << wrapper_->StrError(card_next_result);
+  }
+
+  return !had_error;
 }
 
 void CastAudioManagerAlsa::GetAlsaDevicesInfo(
@@ -205,35 +198,34 @@ void CastAudioManagerAlsa::GetAlsaDevicesInfo(
   const std::string unwanted_device_type =
       UnwantedDeviceTypeWhenEnumerating(type);
 
-  for (void** hint_iter = hints; *hint_iter != NULL; hint_iter++) {
+  for (void** hint_iter = hints; *hint_iter != NULL; UNSAFE_TODO(hint_iter++)) {
     // Only examine devices of the right type.  Valid values are
     // "Input", "Output", and NULL which means both input and output.
-    std::unique_ptr<char, base::FreeDeleter> io(
-        wrapper_->DeviceNameGetHint(*hint_iter, kIoHintName));
-    if (io && unwanted_device_type == io.get())
+    auto io = wrapper_->DeviceNameGetHint(*hint_iter, kIoHintName);
+    if (unwanted_device_type == base::as_string_view(io)) {
       continue;
+    }
 
     // Get the unique device name for the device.
-    std::unique_ptr<char, base::FreeDeleter> unique_device_name(
-        wrapper_->DeviceNameGetHint(*hint_iter, kNameHintName));
+    auto unique_device_name =
+        wrapper_->DeviceNameGetHint(*hint_iter, kNameHintName);
 
     // Find out if the device is available.
-    if (IsAlsaDeviceAvailable(type, unique_device_name.get())) {
+    if (IsAlsaDeviceAvailable(type, unique_device_name.data())) {
       // Get the description for the device.
-      std::unique_ptr<char, base::FreeDeleter> desc(
-          wrapper_->DeviceNameGetHint(*hint_iter, kDescriptionHintName));
+      auto desc = wrapper_->DeviceNameGetHint(*hint_iter, kDescriptionHintName);
 
       ::media::AudioDeviceName name;
-      name.unique_id = unique_device_name.get();
-      if (desc) {
-        name.device_name = desc.get();
+      name.unique_id = base::as_string_view(unique_device_name);
+      if (!desc.empty()) {
         // Use the more user friendly description as name.
         // Replace '\n' with '-'.
-        name.device_name.replace(name.device_name.find('\n'), 1, 1, '-');
+        std::ranges::replace(desc, '\n', '-');
+        name.device_name = base::as_string_view(desc);
       } else {
         // Virtual devices don't necessarily have descriptions.
         // Use their names instead.
-        name.device_name = unique_device_name.get();
+        name.device_name = base::as_string_view(unique_device_name);
       }
 
       // Store the device information.

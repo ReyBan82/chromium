@@ -2,31 +2,34 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#import <memory>
+
+#import "base/functional/bind.h"
+#import "base/location.h"
+#import "base/notreached.h"
+#import "base/strings/sys_string_conversions.h"
+#import "base/time/time.h"
+#import "components/autofill/core/browser/data_manager/addresses/address_data_manager.h"
+#import "components/autofill/core/browser/data_manager/payments/payments_data_manager.h"
+#import "components/autofill/core/browser/data_manager/personal_data_manager.h"
+#import "components/autofill/core/browser/data_manager/personal_data_manager_observer.h"
+#import "components/password_manager/core/browser/password_manager_util.h"
+#import "components/password_manager/core/browser/password_store/password_form_converters.h"
+#import "components/password_manager/core/browser/password_store/password_store_change.h"
+#import "components/password_manager/core/browser/password_store/password_store_consumer.h"
+#import "components/password_manager/core/browser/password_store/password_store_interface.h"
+#import "components/password_manager/core/browser/password_store/password_store_util.h"
+#import "components/password_manager/core/browser/password_string.h"
+#import "ios/web/public/thread/web_task_traits.h"
+#import "ios/web/public/thread/web_thread.h"
 #import "ios/web_view/internal/autofill/cwv_autofill_data_manager_internal.h"
-
-#include <memory>
-
-#include "base/functional/bind.h"
-#include "base/notreached.h"
-#include "base/strings/sys_string_conversions.h"
-#include "components/autofill/core/browser/personal_data_manager.h"
-#include "components/autofill/core/browser/personal_data_manager_observer.h"
-#include "components/password_manager/core/browser/password_manager_util.h"
-#include "components/password_manager/core/browser/password_store_change.h"
-#include "components/password_manager/core/browser/password_store_consumer.h"
-#include "components/password_manager/core/browser/password_store_interface.h"
-#include "ios/web/public/thread/web_task_traits.h"
-#include "ios/web/public/thread/web_thread.h"
 #import "ios/web_view/internal/autofill/cwv_autofill_profile_internal.h"
 #import "ios/web_view/internal/autofill/cwv_credit_card_internal.h"
 #import "ios/web_view/internal/passwords/cwv_password_internal.h"
 #import "ios/web_view/public/cwv_autofill_data_manager_observer.h"
 #import "ios/web_view/public/cwv_credential_provider_extension_utils.h"
-#include "url/gurl.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ui/base/resource/resource_bundle.h"
+#import "url/gurl.h"
 
 // Typedefs of |completionHandler| in |fetchProfilesWithCompletionHandler:|,
 // |fetchCreditCardsWithCompletionHandler:|, and
@@ -37,6 +40,10 @@ typedef void (^CWVFetchCreditCardsCompletionHandler)(
     NSArray<CWVCreditCard*>* creditCards);
 typedef void (^CWVFetchPasswordsCompletionHandler)(
     NSArray<CWVPassword*>* passwords);
+
+namespace {
+using PasswordFormList = std::vector<password_manager::PasswordForm>;
+}  // namespace
 
 @interface CWVAutofillDataManager ()
 
@@ -56,6 +63,8 @@ typedef void (^CWVFetchPasswordsCompletionHandler)(
 // Collects and converts autofill::CreditCards stored internally in
 // |_personalDataManager| to CWVCreditCards.
 - (NSArray<CWVCreditCard*>*)creditCards;
+// Check if the password affiliation is enabled.
+- (BOOL)isPasswordAffiliationEnabled;
 
 @end
 
@@ -74,10 +83,6 @@ class WebViewPersonalDataManagerObserverBridge
     [data_manager_ personalDataDidChange];
   }
 
-  void OnInsufficientFormData() override {
-    // Nop.
-  }
-
  private:
   __weak CWVAutofillDataManager* data_manager_;
 };
@@ -89,12 +94,25 @@ class WebViewPasswordStoreConsumer
   explicit WebViewPasswordStoreConsumer(CWVAutofillDataManager* data_manager)
       : data_manager_(data_manager) {}
 
-  void OnGetPasswordStoreResults(
-      std::vector<std::unique_ptr<password_manager::PasswordForm>> results)
-      override {
+  void OnGetPasswordStoreResultsOrErrorFrom(
+      password_manager::PasswordStoreInterface* store,
+      base::expected<std::vector<password_manager::StoredCredential>,
+                     password_manager::PasswordStoreBackendError>
+          results_or_error) override {
+    if (!results_or_error) {
+      [data_manager_ handlePasswordStoreResults:@[]];
+      return;
+    }
+    std::vector<password_manager::StoredCredential> results =
+        std::move(*results_or_error);
+
+    BOOL isAffiliationsEnabled = [data_manager_ isPasswordAffiliationEnabled];
+
     NSMutableArray<CWVPassword*>* passwords = [NSMutableArray array];
     for (auto& form : results) {
-      CWVPassword* password = [[CWVPassword alloc] initWithPasswordForm:*form];
+      CWVPassword* password =
+          [[CWVPassword alloc] initWithPasswordForm:ToPasswordForm(form)
+                               isAffiliationEnabled:isAffiliationsEnabled];
       [passwords addObject:password];
     }
     [data_manager_ handlePasswordStoreResults:passwords];
@@ -118,15 +136,17 @@ class WebViewPasswordStoreObserver
   void OnLoginsChanged(
       password_manager::PasswordStoreInterface* store,
       const password_manager::PasswordStoreChangeList& changes) override {
+    BOOL isAffiliationsEnabled = [data_manager_ isPasswordAffiliationEnabled];
     NSMutableArray* added = [NSMutableArray array];
     NSMutableArray* updated = [NSMutableArray array];
     NSMutableArray* removed = [NSMutableArray array];
     for (const password_manager::PasswordStoreChange& change : changes) {
-      if (change.form().blocked_by_user) {
+      if (change.credential().blocked_by_user) {
         continue;
       }
-      CWVPassword* password =
-          [[CWVPassword alloc] initWithPasswordForm:change.form()];
+      CWVPassword* password = [[CWVPassword alloc]
+          initWithPasswordForm:ToPasswordForm(change.credential())
+          isAffiliationEnabled:isAffiliationsEnabled];
       switch (change.type()) {
         case password_manager::PasswordStoreChange::ADD:
           [added addObject:password];
@@ -139,21 +159,21 @@ class WebViewPasswordStoreObserver
           break;
         default:
           NOTREACHED();
-          break;
       }
-    }
-    [data_manager_ handlePasswordStoreLoginsAdded:added
-                                          updated:updated
-                                          removed:removed];
+      }
+      [data_manager_ handlePasswordStoreLoginsAdded:added
+                                            updated:updated
+                                            removed:removed];
   }
   void OnLoginsRetained(password_manager::PasswordStoreInterface* store,
-                        const std::vector<password_manager::PasswordForm>&
-                            retained_passwords) override {
+                        const std::vector<password_manager::StoredCredential>&
+                            retained_credentials) override {
     // No op.
   }
 
  private:
   __weak CWVAutofillDataManager* data_manager_;
+  base::WeakPtrFactory<WebViewPasswordStoreObserver> weak_ptr_factory_{this};
 };
 
 }  // namespace ios_web_view
@@ -174,21 +194,24 @@ class WebViewPasswordStoreObserver
   NSHashTable<id<CWVAutofillDataManagerObserver>>* _observers;
 
   password_manager::PasswordStoreInterface* _passwordStore;
+  BOOL _isPasswordAffiliationEnabled;
   std::unique_ptr<ios_web_view::WebViewPasswordStoreConsumer>
       _passwordStoreConsumer;
   std::unique_ptr<ios_web_view::WebViewPasswordStoreObserver>
       _passwordStoreObserver;
 }
 
-- (instancetype)initWithPersonalDataManager:
-                    (autofill::PersonalDataManager*)personalDataManager
-                              passwordStore:
-                                  (password_manager::PasswordStoreInterface*)
-                                      passwordStore {
+- (instancetype)
+     initWithPersonalDataManager:
+         (autofill::PersonalDataManager*)personalDataManager
+                   passwordStore:
+                       (password_manager::PasswordStoreInterface*)passwordStore
+    isPasswordAffiliationEnabled:(BOOL)isPasswordAffiliationEnabled {
   self = [super init];
   if (self) {
     _personalDataManager = personalDataManager;
     _passwordStore = passwordStore;
+    _isPasswordAffiliationEnabled = isPasswordAffiliationEnabled;
     _passwordStoreObserver =
         std::make_unique<ios_web_view::WebViewPasswordStoreObserver>(self);
     _passwordStore->AddObserver(_passwordStoreObserver.get());
@@ -235,11 +258,36 @@ class WebViewPasswordStoreObserver
 }
 
 - (void)updateProfile:(CWVAutofillProfile*)profile {
-  _personalDataManager->UpdateProfile(*profile.internalProfile);
+  _personalDataManager->address_data_manager().UpdateProfile(
+      *profile.internalProfile);
 }
 
 - (void)deleteProfile:(CWVAutofillProfile*)profile {
-  _personalDataManager->RemoveByGUID(profile.internalProfile->guid());
+  _personalDataManager->address_data_manager().RemoveProfile(
+      profile.internalProfile->guid());
+}
+
+- (UIImage*)fetchIconForCreditCard:(CWVCreditCard*)creditCard {
+  // Check if custom card art is available.
+  GURL cardArtURL = _personalDataManager->payments_data_manager().GetCardArtURL(
+      *creditCard.internalCard);
+  if (!cardArtURL.is_empty() && cardArtURL.is_valid()) {
+    if (const gfx::Image* image =
+            _personalDataManager->payments_data_manager()
+                .GetCachedCardArtImageForUrl(cardArtURL)) {
+      return image->ToUIImage();
+    }
+  }
+
+  // Otherwise, try to get the default card icon
+  autofill::Suggestion::Icon icon =
+      creditCard.internalCard->CardIconForAutofillSuggestion();
+  return icon == autofill::Suggestion::Icon::kNoIcon
+             ? nil
+             : ui::ResourceBundle::GetSharedInstance()
+                   .GetNativeImageNamed(
+                       autofill::CreditCard::IconResourceId(icon))
+                   .ToUIImage();
 }
 
 - (void)fetchCreditCardsWithCompletionHandler:
@@ -268,19 +316,23 @@ class WebViewPasswordStoreObserver
 
   _passwordStoreConsumer.reset(
       new ios_web_view::WebViewPasswordStoreConsumer(self));
-  _passwordStore->GetAllLogins(_passwordStoreConsumer->GetWeakPtr());
+  _passwordStore->GetAllLoginsWithAffiliationAndBrandingInformation(
+      _passwordStoreConsumer->GetWeakPtr());
 }
 
 - (void)updatePassword:(CWVPassword*)password
            newUsername:(nullable NSString*)newUsername
-           newPassword:(nullable NSString*)newPassword {
+           newPassword:(nullable NSString*)newPassword
+             timestamp:(NSDate*)timestamp {
   password_manager::PasswordForm* passwordForm =
       [password internalPasswordForm];
+  passwordForm->date_password_modified = base::Time::FromNSDate(timestamp);
 
   // Only change the password if it actually changed and not empty.
   if (newPassword && newPassword.length > 0 &&
       ![newPassword isEqualToString:password.password]) {
-    passwordForm->password_value = base::SysNSStringToUTF16(newPassword);
+    passwordForm->password_value =
+        password_manager::PasswordString(base::SysNSStringToUTF16(newPassword));
   }
 
   // Because a password's primary key depends on its username, changing the
@@ -291,19 +343,24 @@ class WebViewPasswordStoreObserver
     auto oldPasswordForm = *passwordForm;
     passwordForm->username_value = base::SysNSStringToUTF16(newUsername);
     auto newPasswordForm = *passwordForm;
-    _passwordStore->UpdateLoginWithPrimaryKey(newPasswordForm, oldPasswordForm);
+    _passwordStore->UpdateLoginWithPrimaryKey(
+        password_manager::FromPasswordForm(std::move(newPasswordForm)),
+        password_manager::FromPasswordForm(std::move(oldPasswordForm)));
   } else {
-    _passwordStore->UpdateLogin(*passwordForm);
+    _passwordStore->UpdateLogin(
+        password_manager::FromPasswordForm(*passwordForm));
   }
 }
 
 - (void)deletePassword:(CWVPassword*)password {
-  _passwordStore->RemoveLogin(*[password internalPasswordForm]);
+  _passwordStore->RemoveLogin(FROM_HERE, password_manager::FromPasswordForm(
+                                             *[password internalPasswordForm]));
 }
 
 - (void)addNewPasswordForUsername:(NSString*)username
                          password:(NSString*)password
-                             site:(NSString*)site {
+                             site:(NSString*)site
+                        timestamp:(NSDate*)timestamp {
   password_manager::PasswordForm form;
 
   DCHECK_GT(username.length, 0ul);
@@ -314,14 +371,17 @@ class WebViewPasswordStoreObserver
   form.url = password_manager_util::StripAuthAndParams(url);
   form.signon_realm = form.url.DeprecatedGetOriginAsURL().spec();
   form.username_value = base::SysNSStringToUTF16(username);
-  form.password_value = base::SysNSStringToUTF16(password);
+  form.password_value =
+      password_manager::PasswordString(base::SysNSStringToUTF16(password));
+  form.date_created = base::Time::FromNSDate(timestamp);
 
-  _passwordStore->AddLogin(form);
+  _passwordStore->AddLogin(password_manager::FromPasswordForm(std::move(form)));
 }
 
 - (void)addNewPasswordForUsername:(NSString*)username
                 serviceIdentifier:(NSString*)serviceIdentifier
-               keychainIdentifier:(NSString*)keychainIdentifier {
+               keychainIdentifier:(NSString*)keychainIdentifier
+                        timestamp:(NSDate*)timestamp {
   password_manager::PasswordForm form;
 
   GURL url(base::SysNSStringToUTF8(serviceIdentifier));
@@ -330,12 +390,17 @@ class WebViewPasswordStoreObserver
   form.url = password_manager_util::StripAuthAndParams(url);
   form.signon_realm = form.url.DeprecatedGetOriginAsURL().spec();
   form.username_value = base::SysNSStringToUTF16(username);
-  form.encrypted_password = base::SysNSStringToUTF8(keychainIdentifier);
+  form.keychain_identifier = base::SysNSStringToUTF8(keychainIdentifier);
+  form.date_created = base::Time::FromNSDate(timestamp);
 
-  _passwordStore->AddLogin(form);
+  _passwordStore->AddLogin(password_manager::FromPasswordForm(std::move(form)));
 }
 
 #pragma mark - Private Methods
+
+- (BOOL)isPasswordAffiliationEnabled {
+  return _isPasswordAffiliationEnabled;
+}
 
 - (void)handlePasswordStoreLoginsAdded:(NSArray<CWVPassword*>*)added
                                updated:(NSArray<CWVPassword*>*)updated
@@ -384,8 +449,8 @@ class WebViewPasswordStoreObserver
 
 - (NSArray<CWVAutofillProfile*>*)profiles {
   NSMutableArray* profiles = [NSMutableArray array];
-  for (autofill::AutofillProfile* internalProfile :
-       _personalDataManager->GetProfiles()) {
+  for (const autofill::AutofillProfile* internalProfile :
+       _personalDataManager->address_data_manager().GetProfiles()) {
     CWVAutofillProfile* profile =
         [[CWVAutofillProfile alloc] initWithProfile:*internalProfile];
     [profiles addObject:profile];
@@ -394,12 +459,23 @@ class WebViewPasswordStoreObserver
 }
 
 - (NSArray<CWVCreditCard*>*)creditCards {
+  std::vector<const autofill::CreditCard*> fetchedCards =
+      _personalDataManager->payments_data_manager().GetCreditCards();
+
   NSMutableArray* creditCards = [NSMutableArray array];
-  for (autofill::CreditCard* internalCard :
-       _personalDataManager->GetCreditCards()) {
-    CWVCreditCard* creditCard =
-        [[CWVCreditCard alloc] initWithCreditCard:*internalCard];
-    [creditCards addObject:creditCard];
+  for (const autofill::CreditCard* card : fetchedCards) {
+    if (card->virtual_card_enrollment_state() ==
+        autofill::CreditCard::VirtualCardEnrollmentState::kEnrolled) {
+      autofill::CreditCard virtualCard =
+          autofill::CreditCard::CreateVirtualCard(*card);
+      CWVCreditCard* cwvVirtualCard =
+          [[CWVCreditCard alloc] initWithCreditCard:virtualCard];
+      [creditCards addObject:cwvVirtualCard];
+      // Do not `continue` here. Enrolled cards should be added twice, once as
+      // a virtual card and once as a regular card, to allow the user to choose.
+    }
+    CWVCreditCard* cwvCard = [[CWVCreditCard alloc] initWithCreditCard:*card];
+    [creditCards addObject:cwvCard];
   }
   return [creditCards copy];
 }

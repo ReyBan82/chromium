@@ -7,19 +7,27 @@
 #include "base/callback_list.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "chrome/browser/ui/toolbar/toolbar_action_hover_card_types.h"
-#include "chrome/browser/ui/views/extensions/extensions_toolbar_container.h"
+#include "chrome/browser/ui/toolbar/toolbar_action_view_model.h"
+#include "chrome/browser/ui/views/extensions/extensions_toolbar_desktop.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_action_hover_card_bubble_view.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_action_view.h"
 #include "content/public/browser/web_contents.h"
 #include "extensions/common/extension_features.h"
+#include "ui/display/screen.h"
+#include "ui/events/event.h"
 #include "ui/events/event_observer.h"
+#include "ui/views/bubble/bubble_anchor.h"
 #include "ui/views/event_monitor.h"
 #include "ui/views/view.h"
 #include "ui/views/widget/widget.h"
+#if defined(USE_AURA)
+#include "ui/aura/env.h"
+#endif
 
 namespace {
 
@@ -30,6 +38,10 @@ constexpr base::TimeDelta kHoverCardSlideDuration = base::Milliseconds(200);
 
 // static
 bool ToolbarActionHoverCardController::disable_animations_for_testing_ = false;
+
+// static
+std::optional<gfx::Point>
+    ToolbarActionHoverCardController::test_mouse_location_;
 
 //-------------------------------------------------------------------
 // ToolbarActionHoverCardController::EventSniffer
@@ -48,8 +60,9 @@ class ToolbarActionHoverCardController::EventSniffer
     event_monitor_ = views::EventMonitor::CreateWindowMonitor(
         this,
         controller_->extensions_container_->GetWidget()->GetNativeWindow(),
-        {ui::ET_KEY_PRESSED, ui::ET_KEY_RELEASED, ui::ET_MOUSE_PRESSED,
-         ui::ET_MOUSE_RELEASED, ui::ET_GESTURE_BEGIN, ui::ET_GESTURE_END});
+        {ui::EventType::kKeyPressed, ui::EventType::kKeyReleased,
+         ui::EventType::kMousePressed, ui::EventType::kMouseReleased,
+         ui::EventType::kGestureBegin, ui::EventType::kGestureEnd});
   }
 
   ~EventSniffer() override = default;
@@ -57,11 +70,28 @@ class ToolbarActionHoverCardController::EventSniffer
  protected:
   // ui::EventObserver:
   void OnEvent(const ui::Event& event) override {
-    controller_->UpdateHoverCard(nullptr,
-                                 ToolbarActionHoverCardUpdateType::kEvent);
+    bool close_hover_card = true;
+    if (event.IsKeyEvent()) {
+      close_hover_card = event.AsKeyEvent()->key_code() == ui::VKEY_RETURN ||
+                         event.AsKeyEvent()->key_code() == ui::VKEY_ESCAPE ||
+                         event.AsKeyEvent()->key_code() == ui::VKEY_SPACE ||
+                         !IsExtensionsContainerFocused();
+    }
+
+    if (close_hover_card) {
+      controller_->UpdateHoverCard(nullptr,
+                                   ToolbarActionHoverCardUpdateType::kEvent);
+    }
   }
 
  private:
+  bool IsExtensionsContainerFocused() const {
+    views::View* container_view = controller_->extensions_container_;
+    return container_view && container_view->GetFocusManager() &&
+           container_view->Contains(
+               container_view->GetFocusManager()->GetFocusedView());
+  }
+
   const raw_ptr<ToolbarActionHoverCardController> controller_;
   std::unique_ptr<views::EventMonitor> event_monitor_;
 };
@@ -70,7 +100,7 @@ class ToolbarActionHoverCardController::EventSniffer
 // ToolbarActionHoverCardController
 
 ToolbarActionHoverCardController::ToolbarActionHoverCardController(
-    ExtensionsToolbarContainer* extensions_container)
+    ExtensionsToolbarDesktop* extensions_container)
     : extensions_container_(extensions_container) {}
 
 ToolbarActionHoverCardController::~ToolbarActionHoverCardController() = default;
@@ -88,8 +118,9 @@ bool ToolbarActionHoverCardController::IsHoverCardVisible() const {
 bool ToolbarActionHoverCardController::IsHoverCardShowingForAction(
     ToolbarActionView* action_view) const {
   DCHECK(action_view);
-  return action_view->GetCurrentWebContents() && IsHoverCardVisible() &&
-         !fade_animator_->IsFadingOut() && GetTargetAnchorView() == action_view;
+  return extensions_container_->GetCurrentWebContents() &&
+         IsHoverCardVisible() && !fade_animator_->IsFadingOut() &&
+         GetTargetAnchorView() == action_view;
 }
 
 void ToolbarActionHoverCardController::UpdateHoverCard(
@@ -100,7 +131,7 @@ void ToolbarActionHoverCardController::UpdateHoverCard(
     return;
   }
 
-  // TODO(crbug.com/1351778): Check if we need to handle never displaying a
+  // TODO(crbug.com/40857356): Check if we need to handle never displaying a
   // hover card for a toolbar action that is closing (pin was removed).
 
   // Update this ASAP so that if we try to fade-in and we have the wrong target
@@ -109,21 +140,24 @@ void ToolbarActionHoverCardController::UpdateHoverCard(
   if (target_action_view_ != action_view) {
     delayed_show_timer_.Stop();
     target_action_view_observation_.Reset();
-    if (action_view)
+    if (action_view) {
       target_action_view_observation_.Observe(action_view);
+    }
     target_action_view_ = action_view;
   }
 
   // If there's nothing to attach to then there's no point in creating a card.
-  if (!hover_card_ && (!action_view || !action_view->GetCurrentWebContents() ||
-                       !extensions_container_->GetWidget())) {
+  if (!hover_card_ &&
+      (!action_view || !extensions_container_->GetCurrentWebContents() ||
+       !extensions_container_->GetWidget())) {
     return;
   }
 
   switch (update_type) {
     case ToolbarActionHoverCardUpdateType::kHover:
-      if (!action_view)
+      if (!action_view) {
         last_mouse_exit_timestamp_ = base::TimeTicks::Now();
+      }
       break;
     case ToolbarActionHoverCardUpdateType::kToolbarActionUpdated:
       DCHECK(action_view);
@@ -136,12 +170,25 @@ void ToolbarActionHoverCardController::UpdateHoverCard(
     case ToolbarActionHoverCardUpdateType::kEvent:
       // No special action taken for this type of event.
       break;
+    case ToolbarActionHoverCardUpdateType::kFocus:
+      // No special action taken for this type of event.
+      break;
   }
 
-  if (action_view && action_view->GetCurrentWebContents())
+  if (action_view && extensions_container_->GetCurrentWebContents()) {
+    delayed_hide_timer_.Stop();
     UpdateOrShowHoverCard(action_view, update_type);
-  else
-    HideHoverCard();
+  } else {
+    if (update_type == ToolbarActionHoverCardUpdateType::kHover &&
+        !disable_animations_for_testing_) {
+      delayed_hide_timer_.Start(
+          FROM_HERE, kTriggerDelay,
+          base::BindOnce(&ToolbarActionHoverCardController::HideHoverCard,
+                         weak_ptr_factory_.GetWeakPtr(), /*force=*/false));
+    } else {
+      HideHoverCard(/*force=*/true);
+    }
+  }
 }
 
 void ToolbarActionHoverCardController::UpdateOrShowHoverCard(
@@ -149,10 +196,13 @@ void ToolbarActionHoverCardController::UpdateOrShowHoverCard(
     ToolbarActionHoverCardUpdateType update_type) {
   DCHECK(action_view);
 
+  views::BubbleAnchor action_view_anchor = views::BubbleAnchor(action_view);
+
   // Close is asynchronous, so make sure that if we're closing we clear out all
   // of our data *now* rather than waiting for the deletion message.
-  if (hover_card_ && hover_card_->GetWidget()->IsClosed())
+  if (hover_card_ && hover_card_->GetWidget()->IsClosed()) {
     OnViewIsDeleting(hover_card_);
+  }
 
   // Cancel any pending fades.
   if (hover_card_ && fade_animator_->IsFadingOut()) {
@@ -160,17 +210,15 @@ void ToolbarActionHoverCardController::UpdateOrShowHoverCard(
   }
 
   if (hover_card_) {
-    // Card should never exist without an anchor or web contents
-    DCHECK(hover_card_->GetAnchorView());
     UpdateHoverCardContent(action_view);
 
     // If widget is already visible and anchored to the correct action view we
     // should not try to reset the anchor view or reshow.
-    if (!UseAnimations() || (hover_card_->GetAnchorView() == action_view &&
+    if (!UseAnimations() || (hover_card_->IsSameAnchor(action_view_anchor) &&
                              !slide_animator_->is_animating())) {
-      slide_animator_->SnapToAnchorView(action_view);
+      slide_animator_->SnapToAnchor(action_view_anchor);
     } else {
-      slide_animator_->AnimateToAnchorView(action_view);
+      slide_animator_->AnimateToAnchor(action_view_anchor);
     }
     return;
   }
@@ -197,22 +245,38 @@ void ToolbarActionHoverCardController::UpdateOrShowHoverCard(
 void ToolbarActionHoverCardController::UpdateHoverCardContent(
     ToolbarActionView* action_view) {
   DCHECK(action_view);
-  content::WebContents* web_contents = action_view->GetCurrentWebContents();
+  content::WebContents* web_contents =
+      extensions_container_->GetCurrentWebContents();
   DCHECK(web_contents);
 
-  // If the hover card is transitioning between tabs, we need to do a
+  // If the hover card is transitioning between extensions, we need to do a
   // cross-fade.
-  if (hover_card_->GetAnchorView() != action_view)
+  if (hover_card_->GetAnchorView() != action_view) {
     hover_card_->SetTextFade(0.0);
+  }
 
-  hover_card_->UpdateCardContent(action_view->view_controller(), web_contents);
+  ToolbarActionViewModel* const action_view_model = action_view->view_model();
+  std::u16string extension_name = action_view_model->GetActionName();
+  std::u16string action_title = action_view_model->GetActionTitle(web_contents);
+  // Hover card only uses the action title when it's different than the
+  // extension name.
+  action_title =
+      extension_name == action_title ? std::u16string() : action_title;
+  ToolbarActionViewModel::HoverCardState state =
+      action_view_model->GetHoverCardState(web_contents);
+  ToolbarActionViewModel::HoverCardUiState ui_state =
+      action_view_model->GetHoverCardUiState(state, web_contents);
+
+  hover_card_->UpdateCardContent(extension_name, action_title,
+                                 std::move(ui_state));
 }
 
 void ToolbarActionHoverCardController::CreateHoverCard(
     ToolbarActionView* action_view) {
   DCHECK(action_view);
 
-  hover_card_ = new ToolbarActionHoverCardBubbleView(action_view);
+  hover_card_ = new ToolbarActionHoverCardBubbleView(
+      action_view, weak_ptr_factory_.GetWeakPtr());
   hover_card_observation_.Observe(hover_card_.get());
   event_sniffer_ = std::make_unique<EventSniffer>(this);
 
@@ -241,13 +305,14 @@ void ToolbarActionHoverCardController::ShowHoverCard(
   // Make sure the hover card isn't accidentally shown if it's already visible
   // or if the anchor is gone or changed.
   if (hover_card_ || target_action_view_ != intended_action_view ||
-      !TargetActionViewIsValid())
+      !TargetActionViewIsValid()) {
     return;
+  }
 
   CreateHoverCard(target_action_view_);
   UpdateHoverCardContent(target_action_view_);
-  slide_animator_->UpdateTargetBounds();
-  // TODO(crbug.com/1351778): Do we need to fix widget stack order? Revisit
+  slide_animator_->UpdateTargetBounds(views::BubbleAnchor(target_action_view_));
+  // TODO(crbug.com/40857356): Do we need to fix widget stack order? Revisit
   // this, specially after adding IPH.
 
   if (!is_initial || !UseAnimations()) {
@@ -258,9 +323,14 @@ void ToolbarActionHoverCardController::ShowHoverCard(
   fade_animator_->FadeIn();
 }
 
-void ToolbarActionHoverCardController::HideHoverCard() {
-  if (!hover_card_ || hover_card_->GetWidget()->IsClosed())
+void ToolbarActionHoverCardController::HideHoverCard(bool force) {
+  if (!force && (IsMouseOverHoverCard() || IsMouseOverAnchorView())) {
     return;
+  }
+
+  if (!hover_card_ || hover_card_->GetWidget()->IsClosed()) {
+    return;
+  }
 
   // Cancel any pending fade-in.
   if (fade_animator_->IsFadingIn()) {
@@ -273,8 +343,9 @@ void ToolbarActionHoverCardController::HideHoverCard() {
     hover_card_->GetWidget()->Close();
     return;
   }
-  if (fade_animator_->IsFadingOut())
+  if (fade_animator_->IsFadingOut()) {
     return;
+  }
 
   fade_animator_->FadeOut();
 }
@@ -292,39 +363,44 @@ bool ToolbarActionHoverCardController::ShouldShowImmediately(
   bool within_delay_time_buffer = !last_mouse_exit_timestamp_.is_null() &&
                                   elapsed_time <= kShowWithoutDelayTimeBuffer;
   // Hover cards should be shown without delay if triggered within the time
-  // buffer.
-  // TODO(crbug.com/1351778): Should hover cards be shown if the action view
-  // is keyboard focused?
-  return within_delay_time_buffer;
+  // buffer or if the action view is keyboard focused.
+  return within_delay_time_buffer || action_view->HasFocus();
 }
 
 const views::View* ToolbarActionHoverCardController::GetTargetAnchorView()
     const {
-  if (!hover_card_)
+  if (!hover_card_) {
     return nullptr;
-  if (slide_animator_->is_animating())
-    return slide_animator_->desired_anchor_view();
+  }
+  if (slide_animator_->is_animating()) {
+    views::BubbleAnchor desired_anchor = slide_animator_->desired_anchor();
+    views::View* anchor_view = desired_anchor.GetIfView();
+    CHECK(anchor_view);
+    return anchor_view;
+  }
   return hover_card_->GetAnchorView();
 }
 
 bool ToolbarActionHoverCardController::TargetActionViewIsValid() const {
-  // TODO(crbug.com/1351778): Explore more conditions where an action view is no
-  // longer valid.
+  // TODO(crbug.com/40857356): Explore more conditions where an action view is
+  // no longer valid.
   return target_action_view_ && target_action_view_->GetVisible();
 }
 
 void ToolbarActionHoverCardController::OnFadeAnimationEnded(
     views::WidgetFadeAnimator* animator,
     views::WidgetFadeAnimator::FadeType fade_type) {
-  if (fade_type == views::WidgetFadeAnimator::FadeType::kFadeOut)
+  if (fade_type == views::WidgetFadeAnimator::FadeType::kFadeOut) {
     hover_card_->GetWidget()->Close();
+  }
 }
 
 void ToolbarActionHoverCardController::OnSlideAnimationProgressed(
     views::BubbleSlideAnimator* animator,
     double value) {
-  if (hover_card_)
+  if (hover_card_) {
     hover_card_->SetTextFade(value);
+  }
 }
 
 void ToolbarActionHoverCardController::OnSlideAnimationComplete(
@@ -339,6 +415,7 @@ void ToolbarActionHoverCardController::OnViewIsDeleting(
     views::View* observed_view) {
   if (hover_card_ == observed_view) {
     delayed_show_timer_.Stop();
+    delayed_hide_timer_.Stop();
     hover_card_observation_.Reset();
     event_sniffer_.reset();
     slide_progressed_subscription_ = base::CallbackListSubscription();
@@ -359,18 +436,61 @@ void ToolbarActionHoverCardController::OnViewIsDeleting(
 
 void ToolbarActionHoverCardController::OnViewVisibilityChanged(
     views::View* observed_view,
-    views::View* starting_view) {
+    views::View* starting_view,
+    bool visible) {
   // Only care about target action view becoming invisible.
-  if (observed_view != target_action_view_)
+  if (observed_view != target_action_view_) {
     return;
-  // Visibility comes from `starting_view` or the widget, if no starting view;
-  // see documentation for ViewObserver::OnViewVisibilityChanged().
-  const bool visible = starting_view
-                           ? starting_view->GetVisible()
-                           : (observed_view->GetWidget() &&
-                              observed_view->GetWidget()->IsVisible());
-  // If visibility changed to false, treat it as if the target action view had
-  // gone away.
-  if (!visible)
+  }
+  // If visibility anywhere in the hierarchy changed to false, then the target
+  // view is not visible, so treat it as if it is going away.
+  if (!visible) {
     OnViewIsDeleting(observed_view);
+  }
+}
+
+void ToolbarActionHoverCardController::OnHoverCardMouseEntered() {
+  delayed_hide_timer_.Stop();
+}
+
+void ToolbarActionHoverCardController::OnHoverCardMouseExited() {
+  if (IsMouseOverAnchorView()) {
+    return;
+  }
+  delayed_hide_timer_.Start(
+      FROM_HERE, kTriggerDelay,
+      base::BindOnce(&ToolbarActionHoverCardController::HideHoverCard,
+                     weak_ptr_factory_.GetWeakPtr(), /*force=*/false));
+}
+
+bool ToolbarActionHoverCardController::IsMouseOverHoverCard() const {
+  if (!hover_card_ || !hover_card_->GetWidget()) {
+    return false;
+  }
+  gfx::Rect bounds = hover_card_->GetWidget()->GetWindowBoundsInScreen();
+  if (test_mouse_location_.has_value()) {
+    return bounds.Contains(test_mouse_location_.value());
+  }
+#if defined(USE_AURA)
+  if (bounds.Contains(aura::Env::GetInstance()->last_mouse_location())) {
+    return true;
+  }
+#endif
+  return bounds.Contains(display::Screen::Get()->GetCursorScreenPoint());
+}
+
+bool ToolbarActionHoverCardController::IsMouseOverAnchorView() const {
+  if (!target_action_view_) {
+    return false;
+  }
+  gfx::Rect bounds = target_action_view_->GetBoundsInScreen();
+  if (test_mouse_location_.has_value()) {
+    return bounds.Contains(test_mouse_location_.value());
+  }
+#if defined(USE_AURA)
+  if (bounds.Contains(aura::Env::GetInstance()->last_mouse_location())) {
+    return true;
+  }
+#endif
+  return bounds.Contains(display::Screen::Get()->GetCursorScreenPoint());
 }

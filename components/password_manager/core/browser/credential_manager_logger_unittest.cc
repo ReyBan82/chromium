@@ -5,6 +5,7 @@
 #include "components/password_manager/core/browser/credential_manager_logger.h"
 
 #include <string>
+#include <string_view>
 
 #include "components/autofill/core/browser/logging/stub_log_manager.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -22,9 +23,9 @@ using ::testing::Return;
 constexpr char kSiteOrigin[] = "https://example.com";
 constexpr char kFederationOrigin[] = "https://google.com";
 
-auto JsonHasSubstr(base::StringPiece text) {
+auto JsonHasSubstr(std::string_view text) {
   return testing::ResultOf(
-      [](const base::Value::Dict& dict) {
+      [](const base::DictValue& dict) {
         const std::string* value = dict.FindString("value");
         return value ? *value : "";
       },
@@ -40,7 +41,7 @@ class MockLogManager : public autofill::StubLogManager {
 
   MOCK_METHOD(void,
               ProcessLog,
-              (base::Value::Dict node,
+              (base::DictValue node,
                base::PassKey<autofill::LogBufferSubmitter>),
               (override));
 };

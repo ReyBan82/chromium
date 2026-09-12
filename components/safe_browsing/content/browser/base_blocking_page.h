@@ -5,7 +5,6 @@
 #ifndef COMPONENTS_SAFE_BROWSING_CONTENT_BROWSER_BASE_BLOCKING_PAGE_H_
 #define COMPONENTS_SAFE_BROWSING_CONTENT_BROWSER_BASE_BLOCKING_PAGE_H_
 
-#include <map>
 #include <string>
 #include <vector>
 
@@ -16,10 +15,6 @@
 #include "components/security_interstitials/core/base_safe_browsing_error_ui.h"
 #include "components/security_interstitials/core/metrics_helper.h"
 #include "url/gurl.h"
-
-namespace content {
-class NavigationHandle;
-}
 
 namespace security_interstitials {
 class SettingsPageHelper;
@@ -48,7 +43,8 @@ class BaseBlockingPage
 
   // Returns true if the passed |unsafe_resources| is blocking the load of
   // the main page.
-  static bool IsMainPageLoadBlocked(const UnsafeResourceList& unsafe_resources);
+  static bool IsMainPageResourceLoadPending(
+      const UnsafeResourceList& unsafe_resources);
 
   // SecurityInterstitialPage method:
   void CommandReceived(const std::string& command) override;
@@ -56,9 +52,11 @@ class BaseBlockingPage
   // Checks the threat type to decide if we should report ThreatDetails.
   static bool ShouldReportThreatDetails(SBThreatType threat_type);
 
-  // Populates the report details for |unsafe_resources|.
+  // Populates the report details for |unsafe_resources| and
+  // |blocked_page_shown_timestamp|.
   static security_interstitials::MetricsHelper::ReportDetails GetReportingInfo(
-      const UnsafeResourceList& unsafe_resources);
+      const UnsafeResourceList& unsafe_resources,
+      std::optional<base::TimeTicks> blocked_page_shown_timestamp);
 
   // Can be used by implementations of SafeBrowsingBlockingPageFactory.
   static std::unique_ptr<
@@ -69,13 +67,10 @@ class BaseBlockingPage
       BaseUIManager* ui_manager,
       PrefService* pref_service,
       std::unique_ptr<security_interstitials::SettingsPageHelper>
-          settings_page_helper);
+          settings_page_helper,
+      std::optional<base::TimeTicks> blocked_page_shown_timestamp);
 
-  // If `this` was created for a post commit error page,
-  // `error_page_navigation_handle` is the navigation created for this blocking
-  // page.
-  virtual void CreatedPostCommitErrorPageNavigation(
-      content::NavigationHandle* error_page_navigation_handle) {}
+  BaseSafeBrowsingErrorUI* sb_error_ui() const;
 
  protected:
   // Don't instantiate this class directly, use ShowBlockingPage instead.
@@ -90,7 +85,7 @@ class BaseBlockingPage
       const BaseSafeBrowsingErrorUI::SBErrorDisplayOptions& display_options);
 
   // SecurityInterstitialPage methods:
-  void PopulateInterstitialStrings(base::Value::Dict& load_time_data) override;
+  void PopulateInterstitialStrings(base::DictValue& load_time_data) override;
   void OnInterstitialClosing() override {}
 
   // Called when the interstitial is going away. Intentionally do nothing in
@@ -104,12 +99,9 @@ class BaseBlockingPage
   // interstitial at a time.
   static UnsafeResourceMap* GetUnsafeResourcesMap();
 
-  static std::string GetMetricPrefix(
+  static std::string_view GetMetricPrefix(
       const UnsafeResourceList& unsafe_resources,
       BaseSafeBrowsingErrorUI::SBInterstitialReason interstitial_reason);
-
-  static std::string GetExtraMetricsSuffix(
-      const UnsafeResourceList& unsafe_resources);
 
   // Return the most severe interstitial reason from a list of unsafe resources.
   // Severity ranking: malware > UwS (harmful) > phishing.
@@ -125,8 +117,6 @@ class BaseBlockingPage
   bool proceeded() const;
 
   int64_t threat_details_proceed_delay() const;
-
-  BaseSafeBrowsingErrorUI* sb_error_ui() const;
 
   void set_proceeded(bool proceeded);
 

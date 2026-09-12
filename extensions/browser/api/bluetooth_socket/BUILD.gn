@@ -7,6 +7,8 @@ import("//extensions/buildflags/buildflags.gni")
 assert(enable_extensions,
        "Cannot depend on extensions because enable_extensions=false.")
 
+assert(is_chromeos, "This target should only be built for ChromeOS")
+
 source_set("bluetooth_socket") {
   sources = [
     "bluetooth_api_socket.cc",
@@ -17,12 +19,17 @@ source_set("bluetooth_socket") {
     "bluetooth_socket_event_dispatcher.h",
   ]
 
-  deps = [
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
+  public_deps = [
+    "//base",
     "//content/public/browser",
-    "//extensions/browser/api:async_api_function",
+    "//device/bluetooth",
+    "//device/bluetooth/public/cpp",
+    "//extensions/browser:browser_sources",
     "//extensions/common",
     "//extensions/common/api",
   ]
 
-  public_deps = [ "//extensions/browser:browser_sources" ]
+  deps = [ "//net" ]
 }

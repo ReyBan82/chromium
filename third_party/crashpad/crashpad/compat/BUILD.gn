@@ -17,7 +17,7 @@ import("../build/crashpad_buildconfig.gni")
 config("compat_config") {
   include_dirs = []
 
-  if (crashpad_is_mac || crashpad_is_ios) {
+  if (crashpad_is_apple) {
     include_dirs += [ "mac" ]
   }
 
@@ -41,7 +41,7 @@ config("compat_config") {
 }
 
 template("compat_target") {
-  if (crashpad_is_mac || crashpad_is_ios) {
+  if (crashpad_is_apple) {
     # There are no sources to compile, which doesn’t mix will with a
     # static_library.
     group(target_name) {
@@ -64,7 +64,7 @@ template("compat_target") {
 compat_target("compat") {
   sources = []
 
-  if (crashpad_is_mac || crashpad_is_ios) {
+  if (crashpad_is_apple) {
     sources += [
       "mac/Availability.h",
       "mac/AvailabilityVersions.h",
@@ -99,21 +99,7 @@ compat_target("compat") {
   }
 
   if (crashpad_is_android) {
-    sources += [
-      "android/dlfcn_internal.cc",
-      "android/dlfcn_internal.h",
-      "android/elf.h",
-      "android/linux/elf.h",
-      "android/linux/prctl.h",
-      "android/linux/ptrace.h",
-      "android/sched.h",
-      "android/sys/epoll.cc",
-      "android/sys/epoll.h",
-      "android/sys/mman.h",
-      "android/sys/mman_mmap.cc",
-      "android/sys/syscall.h",
-      "android/sys/user.h",
-    ]
+    sources += [ "android/elf.h" ]
   }
 
   if (crashpad_is_win) {

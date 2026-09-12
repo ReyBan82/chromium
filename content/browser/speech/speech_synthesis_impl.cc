@@ -4,20 +4,31 @@
 
 #include "content/browser/speech/speech_synthesis_impl.h"
 
+#include "content/browser/media/audio_stream_monitor.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
+#include "content/browser/speech/tts_controller_impl.h"
 #include "content/browser/speech/tts_utterance_impl.h"
+#include "content/browser/web_contents/web_contents_impl.h"
 #include "content/public/browser/web_contents.h"
+#include "services/metrics/public/cpp/ukm_builders.h"
+#include "services/metrics/public/cpp/ukm_recorder.h"
 
 namespace content {
 namespace {
 
+using AudibleCB = base::RepeatingCallback<
+    std::unique_ptr<AudioStreamMonitor::AudibleClientRegistration>()>;
+
 // The lifetime of instances of this class is manually bound to the lifetime of
-// the associated TtsUtterance. See OnTtsEvent.
+// the associated TtsUtterance.
 class EventThunk : public UtteranceEventDelegate {
  public:
-  explicit EventThunk(
-      mojo::PendingRemote<blink::mojom::SpeechSynthesisClient> client)
-      : client_(std::move(client)) {}
+  EventThunk(mojo::PendingRemote<blink::mojom::SpeechSynthesisClient> client,
+             AudibleCB audible_cb,
+             bool is_audible)
+      : client_(std::move(client)),
+        audible_cb_(std::move(audible_cb)),
+        is_audible_(is_audible) {}
   ~EventThunk() override = default;
 
   // UtteranceEventDelegate methods:
@@ -33,17 +44,23 @@ class EventThunk : public UtteranceEventDelegate {
 
     switch (event_type) {
       case TTS_EVENT_START:
+        if (is_audible_) {
+          audible_client_ = audible_cb_.Run();
+        }
         client_->OnStartedSpeaking();
         break;
       case TTS_EVENT_END:
+        audible_client_.reset();
         client_->OnFinishedSpeaking(
             blink::mojom::SpeechSynthesisErrorCode::kNoError);
         break;
       case TTS_EVENT_INTERRUPTED:
+        audible_client_.reset();
         client_->OnFinishedSpeaking(
             blink::mojom::SpeechSynthesisErrorCode::kInterrupted);
         break;
       case TTS_EVENT_CANCELLED:
+        audible_client_.reset();
         client_->OnFinishedSpeaking(
             blink::mojom::SpeechSynthesisErrorCode::kCancelled);
         break;
@@ -57,23 +74,29 @@ class EventThunk : public UtteranceEventDelegate {
         // The web platform API does not support this event.
         break;
       case TTS_EVENT_ERROR:
+        audible_client_.reset();
         // The web platform API does not support error text.
         client_->OnEncounteredSpeakingError();
         break;
       case TTS_EVENT_PAUSE:
+        audible_client_.reset();
         client_->OnPausedSpeaking();
         break;
       case TTS_EVENT_RESUME:
+        if (is_audible_) {
+          audible_client_ = audible_cb_.Run();
+        }
         client_->OnResumedSpeaking();
         break;
     }
-
-    if (utterance->IsFinished())
-      delete this;
   }
 
  private:
   mojo::Remote<blink::mojom::SpeechSynthesisClient> client_;
+  AudibleCB audible_cb_;
+  std::unique_ptr<AudioStreamMonitor::AudibleClientRegistration>
+      audible_client_;
+  bool is_audible_;
 };
 
 void SendVoiceListToObserver(
@@ -98,9 +121,10 @@ void SendVoiceListToObserver(
 SpeechSynthesisImpl::SpeechSynthesisImpl(BrowserContext* browser_context,
                                          RenderFrameHostImpl* rfh)
     : browser_context_(browser_context),
-      web_contents_(WebContents::FromRenderFrameHost((rfh))) {
-  DCHECK(browser_context_);
-  DCHECK(web_contents_);
+      web_contents_(WebContents::FromRenderFrameHost((rfh))),
+      frame_id_(rfh->GetGlobalId()) {
+  CHECK(browser_context_, base::NotFatalUntil::M159);
+  CHECK(web_contents_, base::NotFatalUntil::M159);
   TtsController::GetInstance()->AddVoicesChangedDelegate(this);
 }
 
@@ -125,7 +149,14 @@ void SpeechSynthesisImpl::AddVoiceListObserver(
 
   std::vector<VoiceData> voices;
   TtsController::GetInstance()->GetVoices(browser_context_, GURL(), &voices);
-  SendVoiceListToObserver(observer.get(), voices);
+  // While the platform voices are still loading the list is not known yet, so
+  // do not report an empty one: the page would see a voiceschanged event for
+  // it and could take that as the answer. OnVoicesChanged() sends the list to
+  // every observer as soon as loading completes.
+  if (!voices.empty() ||
+      !TtsControllerImpl::GetInstance()->TtsPlatformLoading()) {
+    SendVoiceListToObserver(observer.get(), voices);
+  }
 
   observer_set_.Add(std::move(observer));
 }
@@ -136,6 +167,13 @@ void SpeechSynthesisImpl::Speak(
   if (web_contents_->IsAudioMuted())
     return;
 
+  RenderFrameHostImpl* rfh = RenderFrameHostImpl::FromID(frame_id_);
+  if (rfh) {
+    ukm::builders::WebSpeech_Usage(rfh->GetPageUkmSourceId())
+        .SetSpeechSynthesisUsed(1)
+        .Record(ukm::UkmRecorder::Get());
+  }
+
   std::unique_ptr<TtsUtterance> tts_utterance =
       std::make_unique<TtsUtteranceImpl>(browser_context_, web_contents_);
   tts_utterance->SetText(utterance->text);
@@ -145,8 +183,19 @@ void SpeechSynthesisImpl::Speak(
   tts_utterance->SetContinuousParameters(utterance->rate, utterance->pitch,
                                          utterance->volume);
 
+  bool is_audible =
+      (utterance->volume == blink::mojom::kSpeechSynthesisDoublePrefNotSet) ||
+      (utterance->volume > 0.0);
+
   // See comments on EventThunk about how lifetime of this instance is managed.
-  tts_utterance->SetEventDelegate(new EventThunk(std::move(client)));
+  tts_utterance->SetEventDelegate(std::make_unique<EventThunk>(
+      std::move(client),
+      base::BindRepeating(
+          &AudioStreamMonitor::RegisterAudibleClient,
+          base::Unretained(static_cast<WebContentsImpl*>(web_contents_)
+                               ->audio_stream_monitor()),
+          frame_id_),
+      is_audible));
 
   TtsController::GetInstance()->SpeakOrEnqueue(std::move(tts_utterance));
 }

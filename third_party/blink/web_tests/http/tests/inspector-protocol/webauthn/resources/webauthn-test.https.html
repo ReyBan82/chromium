@@ -22,6 +22,34 @@ function arrayBufferToBase64(buffer) {
   return window.btoa(binary);
 };
 
+function parseAuthenticatorFlags(flags) {
+  return {
+    up: !!(flags & 1 << 0),
+    uv: !!(flags & 1 << 2),
+    be: !!(flags & 1 << 3),
+    bs: !!(flags & 1 << 4),
+    at: !!(flags & 1 << 6),
+    ed: !!(flags & 1 << 7),
+  };
+}
+
+function parsePRF(extensions) {
+  let prf = {};
+  if ('enabled' in extensions.prf) {
+    prf.enabled = extensions.prf.enabled;
+  }
+  if ('results' in extensions.prf) {
+    prf.results = {
+      first: arrayBufferToBase64(extensions.prf.results.first),
+    };
+    if ('second' in extensions.prf.results) {
+      prf.results.second =
+          arrayBufferToBase64(extensions.prf.results.second);
+    }
+  }
+  return prf;
+}
+
 async function generateBase64Key() {
   let ecKey = await window.crypto.subtle.generateKey(
       { name: "ECDSA", namedCurve: "P-256" }, true /* extractable */, ["sign", "verify"]);
@@ -73,6 +101,17 @@ async function registerCredential(options = {}) {
     if ('credBlob' in extensions) {
       result.credBlob = extensions.credBlob;
     }
+    if ('prf' in extensions) {
+      result.prf = parsePRF(extensions);
+    }
+    if ('cmtgKey' in extensions) {
+      result.cmtgKey = {
+        cmtgKey: arrayBufferToBase64(extensions.cmtgKey.cmtgKey),
+        signature: arrayBufferToBase64(extensions.cmtgKey.signature),
+      };
+    }
+    result.flags = parseAuthenticatorFlags(
+      new Uint8Array(credential.response.getAuthenticatorData())[32]);
     return result;
   } catch (error) {
     return {status: error.toString()};
@@ -93,10 +132,22 @@ async function getCredential(credential, options = {}) {
       status: "OK",
       attestation,
     };
-    if (attestation.getClientExtensionResults().largeBlob) {
-      result.blob = new TextDecoder().decode(
-        attestation.getClientExtensionResults().largeBlob.blob);
+    const extensions = attestation.getClientExtensionResults();
+    if (extensions.largeBlob) {
+      result.blob = new TextDecoder().decode(extensions.largeBlob.blob);
     }
+    if ('prf' in extensions) {
+      result.prf = parsePRF(extensions);
+    }
+    if ('cmtgKey' in extensions) {
+      result.cmtgKey = {
+        cmtgKey: arrayBufferToBase64(extensions.cmtgKey.cmtgKey),
+        signature: arrayBufferToBase64(extensions.cmtgKey.signature),
+      };
+    }
+    const dataView = new DataView(attestation.response.authenticatorData);
+    result.flags = parseAuthenticatorFlags(dataView.getUint8(32));
+    result.signCount = dataView.getUint32(33, false);
     return result;
   } catch (error) {
     return {status: error.toString()};
@@ -136,6 +187,24 @@ async function getFlags(bitNumber) {
     }
   } catch(error) {
     return {status: error.toString()};
+  }
+}
+
+async function signalCurrentUserDetails(options) {
+  try {
+    await PublicKeyCredential.signalCurrentUserDetails(options);
+    return { status: "OK" };
+  } catch (error) {
+    return { status: error.toString() };
+  }
+}
+
+async function signalUnknownCredential(options) {
+  try {
+    await PublicKeyCredential.signalUnknownCredential(options);
+    return { status: "OK" };
+  } catch (error) {
+    return { status: error.toString() };
   }
 }
 

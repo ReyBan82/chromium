@@ -7,6 +7,8 @@
 #include "base/check.h"
 #include "base/notreached.h"
 #include "base/time/time.h"
+#include "components/stylus_handwriting/win/features.h"
+#include "ui/events/event_constants.h"
 #include "ui/events/event_utils.h"
 
 namespace views {
@@ -14,11 +16,13 @@ namespace {
 
 int GetFlagsFromPointerMessage(UINT message, const POINTER_INFO& pointer_info) {
   int flags = ui::EF_NONE;
-  if (pointer_info.pointerFlags & POINTER_FLAG_FIRSTBUTTON)
+  if (pointer_info.pointerFlags & POINTER_FLAG_FIRSTBUTTON) {
     flags |= ui::EF_LEFT_MOUSE_BUTTON;
+  }
 
-  if (pointer_info.pointerFlags & POINTER_FLAG_SECONDBUTTON)
+  if (pointer_info.pointerFlags & POINTER_FLAG_SECONDBUTTON) {
     flags |= ui::EF_RIGHT_MOUSE_BUTTON;
+  }
 
   return flags;
 }
@@ -60,18 +64,23 @@ std::unique_ptr<ui::Event> PenEventProcessor::GenerateEvent(
   // [0, 1024] as specified on MSDN.
   float pressure = static_cast<float>(pointer_pen_info.pressure) / 1024;
   int rotation_angle = static_cast<int>(pointer_pen_info.rotation) % 180;
-  if (rotation_angle < 0)
+  if (rotation_angle < 0) {
     rotation_angle += 180;
+  }
   int tilt_x = pointer_pen_info.tiltX;
   int tilt_y = pointer_pen_info.tiltY;
+
   ui::PointerDetails pointer_details(
       input_type, mapped_pointer_id, /* radius_x */ 0.0f, /* radius_y */ 0.0f,
       pressure, rotation_angle, tilt_x, tilt_y, /* tangential_pressure */ 0.0f);
 
+  int32_t device_id = pen_id_handler_.TryGetPenUniqueId(pointer_id)
+                          .value_or(ui::ED_UNKNOWN_DEVICE);
+
   // If the flag is disabled, we send mouse events for all pen inputs.
   if (!direct_manipulation_enabled_) {
     return GenerateMouseEvent(message, pointer_id, pointer_pen_info.pointerInfo,
-                              point, pointer_details);
+                              point, pointer_details, device_id);
   }
   bool is_pointer_event =
       message == WM_POINTERENTER || message == WM_POINTERLEAVE;
@@ -81,17 +90,17 @@ std::unique_ptr<ui::Event> PenEventProcessor::GenerateEvent(
   // we read |send_touch_for_pen_| before we process the event as we want to
   // ensure a TouchRelease is sent appropriately at the end when the stylus is
   // no longer in contact with the digitizer.
-  bool send_touch = send_touch_for_pen_.count(pointer_id) == 0
-                        ? false
-                        : send_touch_for_pen_[pointer_id];
+  const auto it = send_touch_for_pen_.find(pointer_id);
+  bool send_touch = it == send_touch_for_pen_.end() ? false : it->second;
   if (pointer_pen_info.pointerInfo.pointerFlags & POINTER_FLAG_INCONTACT) {
-    if (!pen_in_contact_[pointer_id]) {
+    bool& pen_in_contact = pen_in_contact_[pointer_id];
+    if (!pen_in_contact) {
       send_touch = send_touch_for_pen_[pointer_id] =
           (pointer_pen_info.pointerInfo.pointerFlags &
            (POINTER_FLAG_SECONDBUTTON | POINTER_FLAG_THIRDBUTTON |
             POINTER_FLAG_FOURTHBUTTON | POINTER_FLAG_FIFTHBUTTON)) == 0;
     }
-    pen_in_contact_[pointer_id] = true;
+    pen_in_contact = true;
   } else {
     pen_in_contact_.erase(pointer_id);
     send_touch_for_pen_.erase(pointer_id);
@@ -99,11 +108,22 @@ std::unique_ptr<ui::Event> PenEventProcessor::GenerateEvent(
 
   if (is_pointer_event || !send_touch) {
     return GenerateMouseEvent(message, pointer_id, pointer_pen_info.pointerInfo,
-                              point, pointer_details);
+                              point, pointer_details, device_id);
+  }
+
+  std::optional<ui::StylusHandwritingPropertiesWin> handwriting_properties;
+  if (stylus_handwriting::win::IsStylusHandwritingWinEnabled() &&
+      message == WM_POINTERDOWN) {
+    handwriting_properties =
+        std::make_optional<ui::StylusHandwritingPropertiesWin>();
+    handwriting_properties->handwriting_pointer_id = pointer_id;
+    handwriting_properties->handwriting_stroke_id =
+        ui::GetHandwritingStrokeId(pointer_id);
   }
 
   return GenerateTouchEvent(message, pointer_id, pointer_pen_info.pointerInfo,
-                            point, pointer_details);
+                            point, pointer_details, handwriting_properties,
+                            device_id);
 }
 
 std::unique_ptr<ui::Event> PenEventProcessor::GenerateMouseEvent(
@@ -111,25 +131,27 @@ std::unique_ptr<ui::Event> PenEventProcessor::GenerateMouseEvent(
     UINT32 pointer_id,
     const POINTER_INFO& pointer_info,
     const gfx::Point& point,
-    const ui::PointerDetails& pointer_details) {
-  ui::EventType event_type = ui::ET_MOUSE_MOVED;
+    const ui::PointerDetails& pointer_details,
+    int32_t device_id) {
+  ui::EventType event_type = ui::EventType::kMouseMoved;
   int flag = GetFlagsFromPointerMessage(message, pointer_info);
   int changed_flag = ui::EF_NONE;
   int click_count = 0;
   switch (message) {
     case WM_POINTERDOWN:
     case WM_NCPOINTERDOWN:
-      event_type = ui::ET_MOUSE_PRESSED;
-      if (pointer_info.ButtonChangeType == POINTER_CHANGE_FIRSTBUTTON_DOWN)
+      event_type = ui::EventType::kMousePressed;
+      if (pointer_info.ButtonChangeType == POINTER_CHANGE_FIRSTBUTTON_DOWN) {
         changed_flag = ui::EF_LEFT_MOUSE_BUTTON;
-      else
+      } else {
         changed_flag = ui::EF_RIGHT_MOUSE_BUTTON;
+      }
       click_count = 1;
       sent_mouse_down_[pointer_id] = true;
       break;
     case WM_POINTERUP:
-    case WM_NCPOINTERUP:
-      event_type = ui::ET_MOUSE_RELEASED;
+    case WM_NCPOINTERUP: {
+      event_type = ui::EventType::kMouseReleased;
       if (pointer_info.ButtonChangeType == POINTER_CHANGE_FIRSTBUTTON_UP) {
         flag |= ui::EF_LEFT_MOUSE_BUTTON;
         changed_flag = ui::EF_LEFT_MOUSE_BUTTON;
@@ -139,31 +161,35 @@ std::unique_ptr<ui::Event> PenEventProcessor::GenerateMouseEvent(
       }
       id_generator_->ReleaseNumber(pointer_id);
       click_count = 1;
-      if (sent_mouse_down_.count(pointer_id) == 0 ||
-          !sent_mouse_down_[pointer_id])
+      auto it = sent_mouse_down_.find(pointer_id);
+      if (it == sent_mouse_down_.end() || !it->second) {
         return nullptr;
-      sent_mouse_down_[pointer_id] = false;
+      }
+      it->second = false;
       break;
+    }
     case WM_POINTERUPDATE:
     case WM_NCPOINTERUPDATE:
-      event_type = ui::ET_MOUSE_DRAGGED;
-      if (flag == ui::EF_NONE)
-        event_type = ui::ET_MOUSE_MOVED;
+      event_type = ui::EventType::kMouseDragged;
+      if (flag == ui::EF_NONE) {
+        event_type = ui::EventType::kMouseMoved;
+      }
       break;
     case WM_POINTERENTER:
-      event_type = ui::ET_MOUSE_ENTERED;
+      event_type = ui::EventType::kMouseEntered;
       break;
     case WM_POINTERLEAVE:
-      event_type = ui::ET_MOUSE_EXITED;
+      event_type = ui::EventType::kMouseExited;
       id_generator_->ReleaseNumber(pointer_id);
       break;
     default:
-      NOTREACHED_NORETURN();
+      NOTREACHED();
   }
   std::unique_ptr<ui::Event> event = std::make_unique<ui::MouseEvent>(
       event_type, point, point, ui::EventTimeForNow(),
       flag | ui::GetModifiersFromKeyState(), changed_flag, pointer_details);
   event->AsMouseEvent()->SetClickCount(click_count);
+  event->set_source_device_id(device_id);
   return event;
 }
 
@@ -172,31 +198,36 @@ std::unique_ptr<ui::Event> PenEventProcessor::GenerateTouchEvent(
     UINT32 pointer_id,
     const POINTER_INFO& pointer_info,
     const gfx::Point& point,
-    const ui::PointerDetails& pointer_details) {
+    const ui::PointerDetails& pointer_details,
+    const std::optional<ui::StylusHandwritingPropertiesWin>&
+        handwriting_properties,
+    int32_t device_id) {
   int flags = GetFlagsFromPointerMessage(message, pointer_info);
 
-  ui::EventType event_type = ui::ET_TOUCH_MOVED;
+  ui::EventType event_type = ui::EventType::kTouchMoved;
   switch (message) {
     case WM_POINTERDOWN:
     case WM_NCPOINTERDOWN:
-      event_type = ui::ET_TOUCH_PRESSED;
+      event_type = ui::EventType::kTouchPressed;
       sent_touch_start_[pointer_id] = true;
       break;
     case WM_POINTERUP:
-    case WM_NCPOINTERUP:
-      event_type = ui::ET_TOUCH_RELEASED;
+    case WM_NCPOINTERUP: {
+      event_type = ui::EventType::kTouchReleased;
       id_generator_->ReleaseNumber(pointer_id);
-      if (sent_touch_start_.count(pointer_id) == 0 ||
-          !sent_touch_start_[pointer_id])
+      auto it = sent_touch_start_.find(pointer_id);
+      if (it == sent_touch_start_.end() || !it->second) {
         return nullptr;
-      sent_touch_start_[pointer_id] = false;
+      }
+      it->second = false;
       break;
+    }
     case WM_POINTERUPDATE:
     case WM_NCPOINTERUPDATE:
-      event_type = ui::ET_TOUCH_MOVED;
+      event_type = ui::EventType::kTouchMoved;
       break;
     default:
-      NOTREACHED_NORETURN();
+      NOTREACHED();
   }
 
   const base::TimeTicks event_time = ui::EventTimeForNow();
@@ -206,9 +237,13 @@ std::unique_ptr<ui::Event> PenEventProcessor::GenerateTouchEvent(
       flags | ui::GetModifiersFromKeyState());
   ui::ComputeEventLatencyOSFromPOINTER_INFO(event_type, pointer_info,
                                             event_time);
-  event->set_hovering(event_type == ui::ET_TOUCH_RELEASED);
+  event->set_hovering(event_type == ui::EventType::kTouchReleased);
   event->latency()->AddLatencyNumberWithTimestamp(
       ui::INPUT_EVENT_LATENCY_ORIGINAL_COMPONENT, event_time);
+  event->set_source_device_id(device_id);
+  if (handwriting_properties.has_value()) {
+    ui::SetStylusHandwritingProperties(*event, handwriting_properties.value());
+  }
   return event;
 }
 

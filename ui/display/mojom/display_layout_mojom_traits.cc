@@ -4,6 +4,8 @@
 
 #include "ui/display/mojom/display_layout_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 display::mojom::Position
@@ -20,27 +22,22 @@ EnumTraits<display::mojom::Position, display::DisplayPlacement::Position>::
       return display::mojom::Position::LEFT;
   }
   NOTREACHED();
-  return display::mojom::Position::TOP;
 }
 
-bool EnumTraits<display::mojom::Position, display::DisplayPlacement::Position>::
-    FromMojom(display::mojom::Position rotation,
-              display::DisplayPlacement::Position* out) {
+display::DisplayPlacement::Position
+EnumTraits<display::mojom::Position, display::DisplayPlacement::Position>::
+    FromMojom(display::mojom::Position rotation) {
   switch (rotation) {
     case display::mojom::Position::TOP:
-      *out = display::DisplayPlacement::TOP;
-      return true;
+      return display::DisplayPlacement::TOP;
     case display::mojom::Position::RIGHT:
-      *out = display::DisplayPlacement::RIGHT;
-      return true;
+      return display::DisplayPlacement::RIGHT;
     case display::mojom::Position::BOTTOM:
-      *out = display::DisplayPlacement::BOTTOM;
-      return true;
+      return display::DisplayPlacement::BOTTOM;
     case display::mojom::Position::LEFT:
-      *out = display::DisplayPlacement::LEFT;
-      return true;
+      return display::DisplayPlacement::LEFT;
   }
-  return false;
+  NOTREACHED();
 }
 
 display::mojom::OffsetReference
@@ -54,22 +51,19 @@ EnumTraits<display::mojom::OffsetReference,
       return display::mojom::OffsetReference::BOTTOM_RIGHT;
   }
   NOTREACHED();
-  return display::mojom::OffsetReference::TOP_LEFT;
 }
 
-bool EnumTraits<display::mojom::OffsetReference,
-                display::DisplayPlacement::OffsetReference>::
-    FromMojom(display::mojom::OffsetReference rotation,
-              display::DisplayPlacement::OffsetReference* out) {
+display::DisplayPlacement::OffsetReference
+EnumTraits<display::mojom::OffsetReference,
+           display::DisplayPlacement::OffsetReference>::
+    FromMojom(display::mojom::OffsetReference rotation) {
   switch (rotation) {
     case display::mojom::OffsetReference::TOP_LEFT:
-      *out = display::DisplayPlacement::TOP_LEFT;
-      return true;
+      return display::DisplayPlacement::TOP_LEFT;
     case display::mojom::OffsetReference::BOTTOM_RIGHT:
-      *out = display::DisplayPlacement::BOTTOM_RIGHT;
-      return true;
+      return display::DisplayPlacement::BOTTOM_RIGHT;
   }
-  return false;
+  NOTREACHED();
 }
 
 bool StructTraits<display::mojom::DisplayPlacementDataView,

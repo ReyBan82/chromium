@@ -39,15 +39,13 @@ class TestExtensionEventObserver
 
  private:
   // The arguments passed for the last observed event.
-  base::Value::List latest_event_args_;
+  base::ListValue latest_event_args_;
   std::string latest_event_name_;
 };
 
 std::unique_ptr<KeyedService> BuildSafeBrowsingPrivateEventRouter(
     content::BrowserContext* context);
 
-std::unique_ptr<KeyedService> BuildRealtimeReportingClient(
-    content::BrowserContext* context);
 }  // namespace safe_browsing
 
 #endif  // CHROME_BROWSER_SAFE_BROWSING_TEST_EXTENSION_EVENT_OBSERVER_H_

@@ -51,17 +51,23 @@ public class HomeFragment extends DevUiBaseFragment {
 
         mInfoListView = view.findViewById(R.id.main_info_list);
         // Copy item's text to clipboard on long tapping a list item.
-        mInfoListView.setOnItemLongClickListener((parent, clickedView, pos, id) -> {
-            InfoItem item = (InfoItem) parent.getItemAtPosition(pos);
-            ClipboardManager clipboard =
-                    (ClipboardManager) mContext.getSystemService(Context.CLIPBOARD_SERVICE);
-            ClipData clip = ClipData.newPlainText(item.title, item.subtitle);
-            clipboard.setPrimaryClip(clip);
-            // Show a toast that the text has been copied.
-            Toast.makeText(mContext, "Copied " + item.title, Toast.LENGTH_SHORT).show();
+        mInfoListView.setOnItemLongClickListener(
+                (parent, clickedView, pos, id) -> {
+                    InfoItem item = (InfoItem) parent.getItemAtPosition(pos);
+                    ClipboardManager clipboard =
+                            (ClipboardManager) mContext.getSystemService(Context.CLIPBOARD_SERVICE);
+                    ClipData clip = ClipData.newPlainText(item.title, item.subtitle);
+                    clipboard.setPrimaryClip(clip);
+                    // Show a toast that the text has been copied.
+                    Toast.makeText(mContext, "Copied " + item.title, Toast.LENGTH_SHORT).show();
 
-            return true;
-        });
+                    return true;
+                });
+
+        if (isTV()) {
+            View navBarButton = activity.findViewById(R.id.navigation_home);
+            registerBackPressToNavBarCallback(navBarButton);
+        }
     }
 
     @Override
@@ -71,24 +77,73 @@ public class HomeFragment extends DevUiBaseFragment {
         List<InfoItem> infoItems = new ArrayList<>();
         PackageInfo currentWebViewPackage = WebViewPackageHelper.getCurrentWebViewPackage(mContext);
         PackageInfo devToolsPackage = WebViewPackageHelper.getContextPackageInfo(mContext);
-        boolean isDifferentPackage = currentWebViewPackage == null
-                || !devToolsPackage.packageName.equals(currentWebViewPackage.packageName);
+        boolean isDifferentPackage =
+                currentWebViewPackage == null
+                        || !devToolsPackage.packageName.equals(currentWebViewPackage.packageName);
 
         if (currentWebViewPackage != null) {
-            infoItems.add(new InfoItem("WebView package",
-                    String.format(Locale.US, "%s (%s/%s)", currentWebViewPackage.packageName,
-                            currentWebViewPackage.versionName, currentWebViewPackage.versionCode)));
+            infoItems.add(
+                    new InfoItem(
+                            "WebView package",
+                            String.format(
+                                    Locale.US,
+                                    "%s (%s/%s)",
+                                    currentWebViewPackage.packageName,
+                                    currentWebViewPackage.versionName,
+                                    currentWebViewPackage.versionCode)));
         }
         if (isDifferentPackage) {
-            infoItems.add(new InfoItem("DevTools package",
-                    String.format(Locale.US, "%s (%s/%s)", devToolsPackage.packageName,
-                            devToolsPackage.versionName, devToolsPackage.versionCode)));
+            infoItems.add(
+                    new InfoItem(
+                            "DevTools package",
+                            String.format(
+                                    Locale.US,
+                                    "%s (%s/%s)",
+                                    devToolsPackage.packageName,
+                                    devToolsPackage.versionName,
+                                    devToolsPackage.versionCode)));
         }
-        infoItems.add(new InfoItem("Device info",
-                String.format(Locale.US, "%s - %s", Build.MODEL, Build.FINGERPRINT)));
+        infoItems.add(
+                new InfoItem(
+                        "Device info",
+                        String.format(Locale.US, "%s - %s", Build.MODEL, Build.FINGERPRINT)));
 
         ArrayAdapter<InfoItem> itemsArrayAdapter = new InfoListAdapter(infoItems);
         mInfoListView.setAdapter(itemsArrayAdapter);
+
+        if (isTV()) {
+            mInfoListView.setItemsCanFocus(true);
+            setupTvFocusOnResume();
+            View actionButton = requireActivity().findViewById(R.id.action_button);
+            if (actionButton != null) {
+                registerDownPressToFocusOnFirstItem(actionButton, mInfoListView);
+            }
+        }
+    }
+
+    @Override
+    public void onPause() {
+        if (isTV()) {
+            View actionButton = requireActivity().findViewById(R.id.action_button);
+            if (actionButton != null) {
+                // When user leaves HomeFragment, cancel registerDownPressToFocusOnFirstItem
+                // (pressing DOWN on actionButton goes to HomeFragment mInfoListView)
+                actionButton.setOnKeyListener(null);
+            }
+        }
+        super.onPause();
+    }
+
+    private void setupTvFocusOnResume() {
+        if (!shouldRequestFocus()) return;
+        mInfoListView.post(
+                () -> {
+                    if (mInfoListView.getChildCount() > 0) {
+                        mInfoListView.getChildAt(0).requestFocus();
+                    } else {
+                        mInfoListView.requestFocus();
+                    }
+                });
     }
 
     /**
@@ -135,7 +190,18 @@ public class HomeFragment extends DevUiBaseFragment {
             title.setText(item.title);
             subtitle.setText(item.subtitle);
 
+            if (isTV()) {
+                setupTvFocusForInfoItem(view, position);
+            }
+
             return view;
+        }
+
+        private void setupTvFocusForInfoItem(View view, int position) {
+            if (position == 0) {
+                view.setNextFocusUpId(R.id.action_button);
+            }
+            preventFocusEscapeFromLastItem(view, position == getCount() - 1);
         }
     }
 }

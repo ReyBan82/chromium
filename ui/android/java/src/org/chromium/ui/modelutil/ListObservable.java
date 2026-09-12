@@ -3,7 +3,8 @@
 // found in the LICENSE file.
 package org.chromium.ui.modelutil;
 
-import androidx.annotation.Nullable;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * An interface for models notifying about changes to a list of items. Note that ListObservable
@@ -16,6 +17,7 @@ import androidx.annotation.Nullable;
  * @param <P> The parameter type for the payload for partial updates. Use {@link Void} for
  *         implementations that don't support partial updates.
  */
+@NullMarked
 public interface ListObservable<P> {
     /**
      * @param observer An observer to be notified of changes to the model.
@@ -70,13 +72,5 @@ public interface ListObservable<P> {
          * @param newIndex New position of the moved item.
          */
         default void onItemMoved(ListObservable source, int curIndex, int newIndex) {}
-
-        /**
-         * Notifies that the items as {@code firstIndex} and {@code secondIndex} have been swapped.
-         *
-         * @param firstIndex The first position of the swap.
-         * @param secondIndex The second position of the swap.
-         */
-        default void onItemSwapped(ListObservable source, int firstIndex, int secondIndex) {}
     }
 }

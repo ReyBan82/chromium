@@ -24,12 +24,10 @@ class UrlFilterBridge {
   ~UrlFilterBridge();
 
   // Destroys this object.
-  void Destroy(JNIEnv* env, const base::android::JavaParamRef<jobject>& obj);
+  void Destroy(JNIEnv* env);
 
   // Whether |jurl| is matched by this filter.
-  bool MatchesUrl(JNIEnv* env,
-                  const base::android::JavaParamRef<jobject>& obj,
-                  const base::android::JavaParamRef<jstring>& jurl) const;
+  bool MatchesUrl(JNIEnv* env, const std::string& url_spec) const;
 
   // The Java counterpart of this object.
   const base::android::ScopedJavaGlobalRef<jobject>& j_bridge() const {
@@ -44,4 +42,4 @@ class UrlFilterBridge {
   base::android::ScopedJavaGlobalRef<jobject> j_bridge_;
 };
 
-#endif // CHROME_BROWSER_ANDROID_BROWSING_DATA_URL_FILTER_BRIDGE_H_
+#endif  // CHROME_BROWSER_ANDROID_BROWSING_DATA_URL_FILTER_BRIDGE_H_

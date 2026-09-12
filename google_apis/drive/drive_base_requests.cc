@@ -16,10 +16,10 @@
 #include "base/json/json_writer.h"
 #include "base/location.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
+#include "google_apis/common/base_requests.h"
 #include "google_apis/common/request_sender.h"
 #include "google_apis/common/task_util.h"
 #include "google_apis/common/time_util.h"
@@ -27,6 +27,7 @@
 #include "google_apis/drive/request_util.h"
 #include "net/base/load_flags.h"
 #include "net/base/mime_util.h"
+#include "net/http/http_response_headers.h"
 #include "net/http/http_util.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
@@ -126,8 +127,8 @@ void GenerateMultipartBody(MultipartType multipart_type,
     while (true) {
       boundary = net::GenerateMimeMultipartBoundary();
       bool conflict_with_content = false;
-      for (auto& part : parts) {
-        if (part.data.find(boundary, 0) != std::string::npos) {
+      for (const auto& part : parts) {
+        if (part.data.contains(boundary)) {
           conflict_with_content = true;
           break;
         }
@@ -151,7 +152,7 @@ void GenerateMultipartBody(MultipartType multipart_type,
   output->data.clear();
   if (data_offset)
     data_offset->clear();
-  for (auto& part : parts) {
+  for (const auto& part : parts) {
     output->data.append(base::StringPrintf(
         kMultipartItemHeaderFormat, boundary.c_str(), part.type.c_str()));
     if (data_offset)
@@ -284,8 +285,8 @@ GURL UploadRangeRequestBase::GetURL() const {
   return upload_url_;
 }
 
-std::string UploadRangeRequestBase::GetRequestType() const {
-  return "PUT";
+HttpRequestMethod UploadRangeRequestBase::GetRequestType() const {
+  return HttpRequestMethod::kPut;
 }
 
 void UploadRangeRequestBase::ProcessURLFetchResults(
@@ -529,7 +530,7 @@ void MultipartUploadRequestBase::NotifyResult(
                        weak_ptr_factory_.GetWeakPtr(), code,
                        std::move(notify_complete_callback)));
   } else {
-    absl::optional<std::string> reason = MapJsonErrorToReason(body);
+    std::optional<std::string> reason = MapJsonErrorToReason(body);
     NotifyError(reason.has_value() ? MapDriveReasonToError(code, reason.value())
                                    : code);
     std::move(notify_complete_callback).Run();

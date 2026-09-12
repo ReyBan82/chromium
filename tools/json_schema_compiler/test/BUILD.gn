@@ -2,12 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/features.gni")
 import("//extensions/buildflags/buildflags.gni")
 import("//tools/json_schema_compiler/json_features.gni")
 import("//tools/json_schema_compiler/json_schema_api.gni")
 
-assert(enable_extensions)
+assert(enable_extensions_core)
 
 sources_ = [
   "additional_properties.json",
@@ -25,6 +24,7 @@ sources_ = [
   "idl_other_namespace.idl",
   "idl_other_namespace_sub_namespace.idl",
   "idl_properties.idl",
+  "ignore_additional_properties.json",
   "objects.json",
   "objects_movable.idl",
   "objects_movable_json.json",
@@ -69,10 +69,12 @@ source_set("unit_tests") {
     "crossref_unittest.cc",
     "enums_unittest.cc",
     "error_generation_unittest.cc",
+    "features_generation_unittest.cc",
     "functions_as_parameters_unittest.cc",
     "functions_on_types_unittest.cc",
     "generated_schemas_unittest.cc",
     "idl_schemas_unittest.cc",
+    "ignore_additional_properties_unittest.cc",
     "objects_unittest.cc",
     "returns_async_unittest.cc",
     "simple_api_unittest.cc",
@@ -86,6 +88,9 @@ source_set("unit_tests") {
     ":generated_api_json_strings",
     ":generated_types",
     "//base",
+    "//base/test:test_support",
+    "//extensions/buildflags",
+    "//extensions/common",
     "//testing/gmock",
     "//testing/gtest",
   ]

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "ash/ash_export.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
@@ -279,6 +280,7 @@ class ASH_EXPORT TouchExplorationController
 
   // ui::GestureConsumer:
   const std::string& GetName() const override;
+  base::WeakPtr<ui::GestureConsumer> GetWeakPtr() override;
 
   // Process the gesture events that have been created.
   void ProcessGestureEvents();
@@ -458,10 +460,10 @@ class ASH_EXPORT TouchExplorationController
 
   void SetAnchorPointInternal(const gfx::PointF& anchor_point);
 
-  aura::Window* root_window_;
+  raw_ptr<aura::Window> root_window_;
 
   // Handles volume control. Not owned.
-  TouchExplorationControllerDelegate* delegate_;
+  raw_ptr<TouchExplorationControllerDelegate> delegate_;
 
   // A set of touch ids for fingers currently touching the screen.
   std::vector<int> current_touch_ids_;
@@ -536,8 +538,6 @@ class ASH_EXPORT TouchExplorationController
   bool VLOG_on_;
 
   // LocatedEvents within this area should be left alone.
-  // TODO(crbug.com/616793): Multi display support. With this implementation, we
-  // cannot specify display.
   gfx::Rect exclude_bounds_;
 
   // Code that detects a touch-screen gesture to enable or disable
@@ -549,8 +549,6 @@ class ASH_EXPORT TouchExplorationController
   // Any touch exploration that both starts and ends (touch pressed, and
   // released) within this rectangle, triggers a simulated single finger tap at
   // the anchor point on release.
-  // TODO(crbug.com/616793): Multi display support. With this implementation, we
-  // cannot specify display.
   gfx::Rect lift_activation_bounds_;
 
   // Whether or not we've seen a touch press event yet.
@@ -558,6 +556,8 @@ class ASH_EXPORT TouchExplorationController
 
   // The maximum touch points seen in the current gesture.
   size_t max_gesture_touch_points_ = 0;
+
+  base::WeakPtrFactory<TouchExplorationController> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

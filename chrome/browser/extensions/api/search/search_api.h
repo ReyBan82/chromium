@@ -6,6 +6,9 @@
 #define CHROME_BROWSER_EXTENSIONS_API_SEARCH_SEARCH_API_H_
 
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -17,6 +20,9 @@ class SearchQueryFunction : public ExtensionFunction {
  private:
   ~SearchQueryFunction() override = default;
   ResponseAction Run() override;
+
+  // Called after navigate is initiated.
+  void OnNavigate();
 };
 
 }  // namespace extensions

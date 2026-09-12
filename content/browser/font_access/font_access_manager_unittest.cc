@@ -5,6 +5,7 @@
 #include "content/browser/font_access/font_access_manager.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -22,11 +23,11 @@
 #include "content/browser/font_access/font_enumeration_data_source.h"
 #include "content/browser/renderer_host/frame_tree_node.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
+#include "content/public/browser/permission_result.h"
 #include "content/public/test/test_browser_context.h"
 #include "content/test/test_render_frame_host.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/font_access/font_enumeration_table.pb.h"
 #include "third_party/blink/public/mojom/font_access/font_access.mojom.h"
@@ -81,7 +82,7 @@ class FontAccessManagerTest : public RenderViewHostImplTestHarness {
     RenderViewHostImplTestHarness::SetUp();
     NavigateAndCommit(kTestUrl);
 
-    const int process_id = main_rfh()->GetProcess()->GetID();
+    const int process_id = main_rfh()->GetProcess()->GetDeprecatedID();
     const int routing_id = main_rfh()->GetRoutingID();
     const GlobalRenderFrameHostId main_frame_id(process_id, routing_id);
 
@@ -90,7 +91,7 @@ class FontAccessManagerTest : public RenderViewHostImplTestHarness {
     base::SequenceBound<FontEnumerationCache> font_enumeration_cache =
         FontEnumerationCache::CreateForTesting(
             cache_task_runner_, FontEnumerationDataSource::Create(),
-            /* locale_override= */ absl::nullopt);
+            /* locale_override= */ std::nullopt);
     manager_ =
         FontAccessManager::CreateForTesting(std::move(font_enumeration_cache));
     manager_->BindReceiver(main_frame_id,
@@ -126,7 +127,9 @@ class FontAccessManagerTest : public RenderViewHostImplTestHarness {
   void AutoGrantPermission() {
     test_permission_manager()->SetRequestCallback(base::BindRepeating(
         [](TestFontAccessPermissionManager::PermissionCallback callback) {
-          std::move(callback).Run({blink::mojom::PermissionStatus::GRANTED});
+          std::move(callback).Run(
+              {PermissionResult(blink::mojom::PermissionStatus::GRANTED,
+                                PermissionStatusSource::UNSPECIFIED)});
         }));
     test_permission_manager()->SetPermissionStatusForCurrentDocument(
         blink::mojom::PermissionStatus::GRANTED);
@@ -135,7 +138,9 @@ class FontAccessManagerTest : public RenderViewHostImplTestHarness {
   void AutoDenyPermission() {
     test_permission_manager()->SetRequestCallback(base::BindRepeating(
         [](TestFontAccessPermissionManager::PermissionCallback callback) {
-          std::move(callback).Run({blink::mojom::PermissionStatus::DENIED});
+          std::move(callback).Run(
+              {PermissionResult(blink::mojom::PermissionStatus::DENIED,
+                                PermissionStatusSource::UNSPECIFIED)});
         }));
     test_permission_manager()->SetPermissionStatusForCurrentDocument(
         blink::mojom::PermissionStatus::DENIED);
@@ -144,7 +149,9 @@ class FontAccessManagerTest : public RenderViewHostImplTestHarness {
   void AskGrantPermission() {
     test_permission_manager()->SetRequestCallback(base::BindRepeating(
         [](TestFontAccessPermissionManager::PermissionCallback callback) {
-          std::move(callback).Run({blink::mojom::PermissionStatus::GRANTED});
+          std::move(callback).Run(
+              {PermissionResult(blink::mojom::PermissionStatus::GRANTED,
+                                PermissionStatusSource::UNSPECIFIED)});
         }));
     test_permission_manager()->SetPermissionStatusForCurrentDocument(
         blink::mojom::PermissionStatus::ASK);
@@ -153,7 +160,9 @@ class FontAccessManagerTest : public RenderViewHostImplTestHarness {
   void AskDenyPermission() {
     test_permission_manager()->SetRequestCallback(base::BindRepeating(
         [](TestFontAccessPermissionManager::PermissionCallback callback) {
-          std::move(callback).Run({blink::mojom::PermissionStatus::DENIED});
+          std::move(callback).Run(
+              {PermissionResult(blink::mojom::PermissionStatus::DENIED,
+                                PermissionStatusSource::UNSPECIFIED)});
         }));
     test_permission_manager()->SetPermissionStatusForCurrentDocument(
         blink::mojom::PermissionStatus::ASK);
@@ -282,6 +291,99 @@ TEST_F(FontAccessManagerTest, PermissionPreviouslyDeniedErrors) {
 
   const auto [status, region] = manager_sync_->EnumerateLocalFonts();
   EXPECT_EQ(status, FontEnumerationStatus::kPermissionDenied);
+}
+
+TEST_F(FontAccessManagerTest, PermissionDeniedForOpaqueOrigin) {
+  AutoGrantPermission();
+  SimulateUserActivation();
+
+  NavigateAndCommit(GURL("data:text/html,test"));
+  ASSERT_TRUE(main_rfh()->GetLastCommittedOrigin().opaque());
+
+  const int process_id = main_rfh()->GetProcess()->GetDeprecatedID();
+  const int routing_id = main_rfh()->GetRoutingID();
+  const GlobalRenderFrameHostId main_frame_id(process_id, routing_id);
+
+  mojo::Remote<blink::mojom::FontAccessManager> manager_remote;
+  manager_->BindReceiver(main_frame_id,
+                         manager_remote.BindNewPipeAndPassReceiver());
+  FontAccessManagerSync sync_manager(manager_remote.get());
+
+  const auto [status, region] = sync_manager.EnumerateLocalFonts();
+  EXPECT_EQ(status, FontEnumerationStatus::kPermissionDenied);
+  EXPECT_FALSE(region.IsValid());
+}
+
+TEST_F(FontAccessManagerTest, EnumerationFailsWhenInactive) {
+  AskGrantPermission();
+  SimulateUserActivation();
+  EXPECT_TRUE(main_rfh()->HasTransientUserActivation());
+
+  static_cast<RenderFrameHostImpl*>(main_rfh())
+      ->SetLifecycleState(
+          RenderFrameHostLifecycleStateImpl::kRunningUnloadHandlers);
+  EXPECT_FALSE(main_rfh()->IsActive());
+
+  const auto [status, region] = manager_sync_->EnumerateLocalFonts();
+  EXPECT_EQ(status, FontEnumerationStatus::kNeedsUserActivation);
+  EXPECT_FALSE(region.IsValid());
+
+  // Transient user activation must NOT have been consumed.
+  EXPECT_TRUE(main_rfh()->HasTransientUserActivation());
+}
+
+TEST_F(FontAccessManagerTest,
+       EnumerationDoesNotConsumeTreeActivationWhenInactive) {
+  AskGrantPermission();
+
+  TestRenderFrameHost* child_rfh = main_test_rfh()->AppendChild("child");
+  child_rfh->InitializeRenderFrameIfNeeded();
+
+  mojo::Remote<blink::mojom::FontAccessManager> child_remote;
+  manager_->BindReceiver(child_rfh->GetGlobalId(),
+                         child_remote.BindNewPipeAndPassReceiver());
+  FontAccessManagerSync child_sync(child_remote.get());
+
+  // Arm user activation on both frames.
+  child_rfh->SimulateUserActivation();
+  SimulateUserActivation();
+  EXPECT_TRUE(child_rfh->HasTransientUserActivation());
+  EXPECT_TRUE(main_rfh()->HasTransientUserActivation());
+
+  // Transition child frame to inactive state.
+  child_rfh->SetLifecycleState(
+      RenderFrameHostLifecycleStateImpl::kRunningUnloadHandlers);
+  EXPECT_FALSE(child_rfh->IsActive());
+  EXPECT_TRUE(main_rfh()->IsActive());
+
+  // Calling enumeration on the inactive child must fail without consuming
+  // activation on the main frame.
+  const auto [status, region] = child_sync.EnumerateLocalFonts();
+  EXPECT_EQ(status, FontEnumerationStatus::kNeedsUserActivation);
+  EXPECT_FALSE(region.IsValid());
+
+  // Main frame's transient activation must remain intact.
+  EXPECT_TRUE(main_rfh()->HasTransientUserActivation());
+}
+
+TEST_F(FontAccessManagerTest, EnumerationWhenInactiveWithKillSwitchDisabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      blink::features::kFontAccessCheckFrameIsActive);
+
+  AskGrantPermission();
+  SimulateUserActivation();
+  EXPECT_TRUE(main_rfh()->HasTransientUserActivation());
+
+  static_cast<RenderFrameHostImpl*>(main_rfh())
+      ->SetLifecycleState(
+          RenderFrameHostLifecycleStateImpl::kRunningUnloadHandlers);
+  EXPECT_FALSE(main_rfh()->IsActive());
+
+  const auto [status, region] = manager_sync_->EnumerateLocalFonts();
+  // With kill switch disabled, activation is consumed by
+  // UpdateUserActivationState.
+  EXPECT_FALSE(main_rfh()->HasTransientUserActivation());
 }
 
 }  // namespace

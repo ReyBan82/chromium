@@ -30,15 +30,15 @@ GURL AppendFingerprintParamToDoodleURL(const GURL& logo_url,
 // request to the server, see AppendFingerprintParamToDoodleURL().
 GURL AppendPreliminaryParamsToDoodleURL(bool gray_background,
                                         bool for_webui_ntp,
+                                        bool enable_animated_logo,
                                         const GURL& logo_url);
 
 // Implements ParseLogoResponse, defined in logo_common.h, for Google or
 // third-party doodles.
-std::unique_ptr<EncodedLogo> ParseDoodleLogoResponse(
-    const GURL& base_url,
-    std::unique_ptr<std::string> response,
-    base::Time response_time,
-    bool* parsing_failed);
+std::unique_ptr<EncodedLogo> ParseDoodleLogoResponse(const GURL& base_url,
+                                                     std::string response,
+                                                     base::Time response_time,
+                                                     bool* parsing_failed);
 
 }  // namespace search_provider_logos
 

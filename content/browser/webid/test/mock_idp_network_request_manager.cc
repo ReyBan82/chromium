@@ -4,14 +4,19 @@
 
 #include "content/browser/webid/test/mock_idp_network_request_manager.h"
 
+#include "content/public/browser/weak_document_ptr.h"
 #include "services/network/public/mojom/client_security_state.mojom.h"
 
 namespace content {
 
 MockIdpNetworkRequestManager::MockIdpNetworkRequestManager()
     : IdpNetworkRequestManager(url::Origin(),
+                               url::Origin(),
                                nullptr,
-                               network::mojom::ClientSecurityState::New()) {}
+                               nullptr,
+                               network::mojom::ClientSecurityState::New(),
+                               FrameTreeNodeId(),
+                               WeakDocumentPtr()) {}
 
 MockIdpNetworkRequestManager::~MockIdpNetworkRequestManager() = default;
 

@@ -9,15 +9,17 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 
+#include "base/compiler_specific.h"
 #include "base/containers/lru_cache.h"
 #include "base/files/file_path.h"
-#include "base/lazy_instance.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
-#include "base/strings/string_piece.h"
 #include "base/trace_event/trace_event.h"
+#include "skia/ext/font_utils.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "third_party/icu/source/common/unicode/uchar.h"
 #include "third_party/icu/source/common/unicode/utf16.h"
 #include "third_party/skia/include/core/SkFontMgr.h"
@@ -92,7 +94,7 @@ sk_sp<SkTypeface> GetSkTypefaceFromPathAndIndex(const base::FilePath& font_path,
   if (entry != cache->end())
     return sk_sp<SkTypeface>(entry->second);
 
-  sk_sp<SkFontMgr> font_mgr = SkFontMgr::RefDefault();
+  sk_sp<SkFontMgr> font_mgr = skia::DefaultFontMgr();
   std::string filename = font_path.AsUTF8Unsafe();
   sk_sp<SkTypeface> typeface =
       font_mgr->makeFromFile(filename.c_str(), ttc_index);
@@ -222,7 +224,7 @@ void ClearAllFontFallbackCachesForTesting() {
 
 bool GetFallbackFont(const Font& font,
                      const std::string& locale,
-                     base::StringPiece16 text,
+                     std::u16string_view text,
                      Font* result) {
   TRACE_EVENT0("fonts", "gfx::GetFallbackFont");
 
@@ -267,7 +269,7 @@ bool GetFallbackFont(const Font& font,
       // Add each potential fallback font returned by font-config to the
       // set of fallback fonts and keep track of their codepoints coverage.
       for (int i = 0; i < fonts->nfont; ++i) {
-        FcPattern* current_font = fonts->fonts[i];
+        FcPattern* current_font = UNSAFE_TODO(fonts->fonts[i]);
         if (!IsValidFontFromPattern(current_font))
           continue;
 
@@ -305,7 +307,7 @@ bool GetFallbackFont(const Font& font,
     size_t i = 0;
     while (i < text.length()) {
       UChar32 c = 0;
-      U16_NEXT(text.data(), i, text.length(), c);
+      UNSAFE_TODO(U16_NEXT(text.data(), i, text.length(), c));
       if (entry.HasGlyphForCharacter(c)) {
         ++matching_glyphs;
       } else {
@@ -366,16 +368,16 @@ std::vector<Font> GetFallbackFonts(const Font& font) {
     FcResult result;
     FcFontSet* fonts = FcFontSort(config, pattern, FcTrue, nullptr, &result);
     if (fonts) {
-      std::set<std::string> fallback_names;
+      absl::flat_hash_set<std::string> fallback_names;
       for (int i = 0; i < fonts->nfont; ++i) {
-        std::string name_str = GetFontName(fonts->fonts[i]);
+        std::string name_str = GetFontName(UNSAFE_TODO(fonts->fonts[i]));
         if (name_str.empty())
           continue;
 
         // FontConfig returns multiple fonts with the same family name and
         // different configurations. Check to prevent duplicate family names.
         if (fallback_names.insert(name_str).second)
-          fallback_fonts.push_back(Font(name_str, 13));
+          fallback_fonts.emplace_back(std::move(name_str), 13);
       }
       FcFontSetDestroy(fonts);
     }
@@ -488,7 +490,7 @@ class CachedFontSet {
       return;
 
     for (int i = 0; i < font_set_->nfont; ++i) {
-      FcPattern* pattern = font_set_->fonts[i];
+      FcPattern* pattern = UNSAFE_TODO(font_set_->fonts[i]);
 
       if (!IsValidFontFromPattern(pattern))
         continue;
@@ -511,8 +513,10 @@ class CachedFontSet {
 };
 
 typedef std::map<std::string, std::unique_ptr<CachedFontSet>> FontSetCache;
-base::LazyInstance<FontSetCache>::Leaky g_font_sets_by_locale =
-    LAZY_INSTANCE_INITIALIZER;
+FontSetCache& GetFontSetsByLocale() {
+  static base::NoDestructor<FontSetCache> font_sets_by_locale;
+  return *font_sets_by_locale;
+}
 
 }  // namespace
 
@@ -524,7 +528,7 @@ FallbackFontData& FallbackFontData::operator=(const FallbackFontData& other) =
 bool GetFallbackFontForChar(UChar32 c,
                             const std::string& locale,
                             FallbackFontData* fallback_font) {
-  auto& cached_font_set = g_font_sets_by_locale.Get()[locale];
+  auto& cached_font_set = GetFontSetsByLocale()[locale];
   if (!cached_font_set)
     cached_font_set = CachedFontSet::CreateForLocale(locale);
   return cached_font_set->GetFallbackFontForChar(c, fallback_font);

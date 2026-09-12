@@ -12,11 +12,13 @@
 #include "base/functional/callback.h"
 #include "base/path_service.h"
 #include "chrome/browser/ash/file_manager/volume_manager.h"
+#include "chrome/browser/ash/fileapi/file_system_backend.h"
 #include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/storage_partition.h"
+#include "content/public/common/child_process_id.h"
 #include "extensions/browser/api/extensions_api_client.h"
 #include "extensions/browser/api/file_handlers/app_file_handler_util.h"
 #include "extensions/browser/api/file_system/consent_provider.h"
@@ -25,7 +27,6 @@
 #include "extensions/browser/extension_util.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
-#include "storage/browser/file_system/file_system_backend.h"
 #include "storage/browser/file_system/file_system_context.h"
 #include "storage/browser/file_system/file_system_url.h"
 #include "storage/browser/file_system/isolated_context.h"
@@ -91,8 +92,7 @@ void OnConsentReceived(content::BrowserContext* browser_context,
   scoped_refptr<storage::FileSystemContext> file_system_context =
       util::GetStoragePartitionForExtensionId(origin.host(), browser_context)
           ->GetFileSystemContext();
-  storage::ExternalFileSystemBackend* const backend =
-      file_system_context->external_backend();
+  auto* const backend = ash::FileSystemBackend::Get(*file_system_context);
   DCHECK(backend);
 
   base::FilePath virtual_path;
@@ -132,7 +132,9 @@ void OnConsentReceived(content::BrowserContext* browser_context,
 
   const auto process_id = requester->source_process_id();
   // Read-only permisisons.
-  policy->GrantReadFile(process_id, volume->mount_path());
+  // TODO(crbug.com/379869738) Remove FromUnsafeValue.
+  policy->GrantReadFile(content::ChildProcessId::FromUnsafeValue(process_id),
+                        volume->mount_path());
   policy->GrantReadFileSystem(process_id, file_system.id());
 
   // Additional write permissions.
@@ -168,8 +170,9 @@ void DispatchVolumeListChangeEventAsh(
   file_system::VolumeListChangedEvent event_args;
   FillVolumeList(browser_context, &event_args.volumes);
   for (const auto& extension : registry->enabled_extensions()) {
-    if (!consent_provider->IsGrantable(*extension.get()))
+    if (!consent_provider->IsGrantable(*extension.get())) {
       continue;
+    }
 
     event_router->DispatchEventToExtension(
         extension->id(),
@@ -225,8 +228,7 @@ void ChromeFileSystemDelegateAsh::RequestFileSystem(
   scoped_refptr<storage::FileSystemContext> file_system_context =
       util::GetStoragePartitionForExtensionId(extension.id(), browser_context)
           ->GetFileSystemContext();
-  storage::ExternalFileSystemBackend* const backend =
-      file_system_context->external_backend();
+  auto* const backend = ash::FileSystemBackend::Get(*file_system_context);
   DCHECK(backend);
 
   base::FilePath virtual_path;

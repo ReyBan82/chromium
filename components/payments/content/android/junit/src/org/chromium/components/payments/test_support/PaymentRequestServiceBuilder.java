@@ -8,6 +8,7 @@ import androidx.annotation.Nullable;
 
 import org.mockito.Mockito;
 
+import org.chromium.base.supplier.SupplierUtils;
 import org.chromium.components.payments.BrowserPaymentRequest;
 import org.chromium.components.payments.JourneyLogger;
 import org.chromium.components.payments.MethodStrings;
@@ -15,6 +16,7 @@ import org.chromium.components.payments.PaymentAppService;
 import org.chromium.components.payments.PaymentRequestService;
 import org.chromium.components.payments.PaymentRequestService.Delegate;
 import org.chromium.components.payments.PaymentRequestSpec;
+import org.chromium.components.payments.SecurePaymentConfirmationRequestValidationError;
 import org.chromium.content_public.browser.RenderFrameHost;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.payments.mojom.PaymentCurrencyAmount;
@@ -53,23 +55,32 @@ public class PaymentRequestServiceBuilder implements Delegate {
     private String mFrameOrigin;
     private boolean mIsOriginAllowedToUseWebPaymentApis = true;
     private boolean mIsPaymentDetailsValid = true;
+    private @SecurePaymentConfirmationRequestValidationError int
+            mSecurePaymentConfirmationValidationError =
+                    SecurePaymentConfirmationRequestValidationError.OK;
     private PaymentRequestSpec mSpec;
-    private SecurePaymentConfirmationRequest mSecurePaymentConfirmationRequest;
+    private final SecurePaymentConfirmationRequest mSecurePaymentConfirmationRequest;
 
-    public static PaymentRequestServiceBuilder defaultBuilder(Runnable onClosedListener,
-            PaymentRequestClient client, PaymentAppService appService,
-            BrowserPaymentRequest browserPaymentRequest, JourneyLogger journeyLogger) {
+    public static PaymentRequestServiceBuilder defaultBuilder(
+            Runnable onClosedListener,
+            PaymentRequestClient client,
+            PaymentAppService appService,
+            BrowserPaymentRequest browserPaymentRequest,
+            JourneyLogger journeyLogger) {
         return new PaymentRequestServiceBuilder(
                 onClosedListener, client, appService, browserPaymentRequest, journeyLogger);
     }
 
-    public PaymentRequestServiceBuilder(Runnable onClosedListener, PaymentRequestClient client,
-            PaymentAppService appService, BrowserPaymentRequest browserPaymentRequest,
+    public PaymentRequestServiceBuilder(
+            Runnable onClosedListener,
+            PaymentRequestClient client,
+            PaymentAppService appService,
+            BrowserPaymentRequest browserPaymentRequest,
             JourneyLogger journeyLogger) {
         mWebContents = Mockito.mock(WebContents.class);
-        setTopLevelOrigin(JUnitTestGURLs.getGURL(JUnitTestGURLs.URL_1));
+        setTopLevelOrigin(JUnitTestGURLs.URL_1);
         mRenderFrameHost = Mockito.mock(RenderFrameHost.class);
-        setFrameOrigin(JUnitTestGURLs.getGURL(JUnitTestGURLs.URL_2));
+        setFrameOrigin(JUnitTestGURLs.URL_2);
         Origin origin = Mockito.mock(Origin.class);
         Mockito.doReturn(origin).when(mRenderFrameHost).getLastCommittedOrigin();
         mJourneyLogger = journeyLogger;
@@ -115,7 +126,7 @@ public class PaymentRequestServiceBuilder implements Delegate {
     }
 
     @Override
-    public String getInvalidSslCertificateErrorMessage() {
+    public @Nullable String getInvalidSslCertificateErrorMessage() {
         return mInvalidSslCertificateErrorMessage;
     }
 
@@ -141,18 +152,13 @@ public class PaymentRequestServiceBuilder implements Delegate {
     }
 
     @Override
-    public JourneyLogger createJourneyLogger(boolean isIncognito, WebContents webContents) {
+    public JourneyLogger createJourneyLogger(WebContents webContents) {
         return mJourneyLogger;
     }
 
     @Override
     public String formatUrlForSecurityDisplay(GURL url) {
         return url.getSpec();
-    }
-
-    @Override
-    public byte[][] getCertificateChain(WebContents webContents) {
-        return new byte[0][];
     }
 
     @Override
@@ -166,8 +172,19 @@ public class PaymentRequestServiceBuilder implements Delegate {
     }
 
     @Override
-    public PaymentRequestSpec createPaymentRequestSpec(PaymentOptions paymentOptions,
-            PaymentDetails details, Collection<PaymentMethodData> values,
+    public @SecurePaymentConfirmationRequestValidationError int
+            validateSecurePaymentConfirmationRequest(
+                    SecurePaymentConfirmationRequest request,
+                    Origin initiatorOrigin,
+                    String applicationLocale) {
+        return mSecurePaymentConfirmationValidationError;
+    }
+
+    @Override
+    public PaymentRequestSpec createPaymentRequestSpec(
+            PaymentOptions paymentOptions,
+            PaymentDetails details,
+            Collection<PaymentMethodData> values,
             String defaultLocaleString) {
         return mSpec;
     }
@@ -237,8 +254,8 @@ public class PaymentRequestServiceBuilder implements Delegate {
         mMethodData = new PaymentMethodData[1];
         mMethodData[0] = new PaymentMethodData();
         mMethodData[0].supportedMethod = MethodStrings.SECURE_PAYMENT_CONFIRMATION;
-
         mMethodData[0].securePaymentConfirmation = mSecurePaymentConfirmationRequest;
+        Mockito.when(mSpec.isSecurePaymentConfirmationRequested()).thenReturn(true);
         return this;
     }
 
@@ -268,6 +285,10 @@ public class PaymentRequestServiceBuilder implements Delegate {
         return this;
     }
 
+    public RenderFrameHost getRenderFrameHost() {
+        return mRenderFrameHost;
+    }
+
     public PaymentRequestServiceBuilder setInvalidSslCertificateErrorMessage(
             String invalidSslCertificateErrorMessage) {
         mInvalidSslCertificateErrorMessage = invalidSslCertificateErrorMessage;
@@ -284,14 +305,30 @@ public class PaymentRequestServiceBuilder implements Delegate {
         return this;
     }
 
+    public PaymentRequestServiceBuilder setSecurePaymentConfirmationValidationError(
+            @SecurePaymentConfirmationRequestValidationError int error) {
+        mSecurePaymentConfirmationValidationError = error;
+        return this;
+    }
+
     public PaymentRequestServiceBuilder setPaymentRequestSpec(PaymentRequestSpec spec) {
         mSpec = spec;
         return this;
     }
 
+    public PaymentRequestServiceBuilder setPrefsCanMakePayment(boolean canMakePayment) {
+        mPrefsCanMakePayment = canMakePayment;
+        return this;
+    }
+
     public PaymentRequestService build() {
-        PaymentRequestService service = new PaymentRequestService(
-                mRenderFrameHost, mClient, mOnClosedListener, /*delegate=*/this, () -> null);
+        PaymentRequestService service =
+                new PaymentRequestService(
+                        mRenderFrameHost,
+                        mClient,
+                        mOnClosedListener,
+                        /* delegate= */ this,
+                        SupplierUtils.ofNull());
         boolean success = service.init(mMethodData, mDetails, mOptions);
         return success ? service : null;
     }

@@ -246,19 +246,14 @@ TEST(EventDispatcherTest, EventDispatchOrder) {
   h7.set_expect_post_target(true);
   h8.set_expect_post_target(true);
 
-  MouseEvent mouse(ui::ET_MOUSE_MOVED, gfx::Point(3, 4), gfx::Point(3, 4),
-                   ui::EventTimeForNow(), 0, 0);
+  MouseEvent mouse(ui::EventType::kMouseMoved, gfx::Point(3, 4),
+                   gfx::Point(3, 4), ui::EventTimeForNow(), 0, 0);
   Event::DispatcherApi event_mod(&mouse);
   dispatcher.ProcessEvent(&child, &mouse);
   EXPECT_FALSE(mouse.stopped_propagation());
   EXPECT_FALSE(mouse.handled());
 
-  {
-    int expected[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-    EXPECT_EQ(
-        std::vector<int>(expected, expected + sizeof(expected) / sizeof(int)),
-        child.handler_list());
-  }
+  EXPECT_EQ(std::vector<int>({1, 2, 3, 4, 5, 6, 7, 8}), child.handler_list());
 
   child.Reset();
   event_mod.set_phase(EP_PREDISPATCH);
@@ -269,43 +264,32 @@ TEST(EventDispatcherTest, EventDispatchOrder) {
   EXPECT_EQ(EP_POSTDISPATCH, mouse.phase());
   EXPECT_FALSE(mouse.stopped_propagation());
   EXPECT_TRUE(mouse.handled());
-  {
     // |h1| marks the event as handled. So only the pre-target handlers should
     // receive the event.
-    int expected[] = { 1, 2, 3, 4 };
-    EXPECT_EQ(
-        std::vector<int>(expected, expected + sizeof(expected) / sizeof(int)),
-        child.handler_list());
-  }
+  EXPECT_EQ(std::vector<int>({1, 2, 3, 4}), child.handler_list());
 
   child.Reset();
   event_mod.set_phase(EP_PREDISPATCH);
   event_mod.set_result(ER_UNHANDLED);
 
-  int nexpected[] = { 1, 2, 3, 4, 5 };
   h1.set_event_result(ER_UNHANDLED);
   h5.set_event_result(ER_CONSUMED);
   dispatcher.ProcessEvent(&child, &mouse);
   EXPECT_EQ(EP_POSTDISPATCH, mouse.phase());
   EXPECT_TRUE(mouse.stopped_propagation());
   EXPECT_TRUE(mouse.handled());
-  EXPECT_EQ(
-      std::vector<int>(nexpected, nexpected + sizeof(nexpected) / sizeof(int)),
-      child.handler_list());
+  EXPECT_EQ(std::vector<int>({1, 2, 3, 4, 5}), child.handler_list());
 
   child.Reset();
   event_mod.set_phase(EP_PREDISPATCH);
   event_mod.set_result(ER_UNHANDLED);
 
-  int exp[] = { 1 };
   h1.set_event_result(ER_CONSUMED);
   dispatcher.ProcessEvent(&child, &mouse);
   EXPECT_EQ(EP_POSTDISPATCH, mouse.phase());
   EXPECT_TRUE(mouse.stopped_propagation());
   EXPECT_TRUE(mouse.handled());
-  EXPECT_EQ(
-      std::vector<int>(exp, exp + sizeof(exp) / sizeof(int)),
-      child.handler_list());
+  EXPECT_EQ(std::vector<int>({1}), child.handler_list());
 
   parent.RemovePreTargetHandler(&h1);
   parent.RemovePreTargetHandler(&h2);
@@ -326,16 +310,13 @@ TEST(EventDispatcherTest, EventDispatchPhase) {
   handler.set_expect_pre_target(true);
   handler.set_expect_post_target(true);
 
-  MouseEvent mouse(ui::ET_MOUSE_MOVED, gfx::Point(3, 4), gfx::Point(3, 4),
-                   ui::EventTimeForNow(), 0, 0);
+  MouseEvent mouse(ui::EventType::kMouseMoved, gfx::Point(3, 4),
+                   gfx::Point(3, 4), ui::EventTimeForNow(), 0, 0);
   Event::DispatcherApi event_mod(&mouse);
   dispatcher.ProcessEvent(&target, &mouse);
   EXPECT_EQ(ER_UNHANDLED, mouse.result());
 
-  int handlers[] = { 11, 11 };
-  EXPECT_EQ(
-      std::vector<int>(handlers, handlers + sizeof(handlers) / sizeof(int)),
-      target.handler_list());
+  EXPECT_EQ(std::vector<int>({11, 11}), target.handler_list());
 
   target.RemovePreTargetHandler(&handler);
 }
@@ -363,8 +344,8 @@ TEST(EventDispatcherTest, EventDispatcherDestroyedDuringDispatch) {
     // destroyed the dispatcher.
     h2.set_expect_pre_target(false);
 
-    MouseEvent mouse(ui::ET_MOUSE_MOVED, gfx::Point(3, 4), gfx::Point(3, 4),
-                     ui::EventTimeForNow(), 0, 0);
+    MouseEvent mouse(ui::EventType::kMouseMoved, gfx::Point(3, 4),
+                     gfx::Point(3, 4), ui::EventTimeForNow(), 0, 0);
     EventDispatchDetails details = dispatcher->ProcessEvent(&target, &mouse);
     EXPECT_TRUE(details.dispatcher_destroyed);
     EXPECT_EQ(ER_CONSUMED, mouse.result());
@@ -429,8 +410,8 @@ TEST(EventDispatcherTest, EventDispatcherDestroyedDuringDispatch) {
     // destroyed the dispatcher.
     h2.set_expect_post_target(false);
 
-    MouseEvent mouse(ui::ET_MOUSE_MOVED, gfx::Point(3, 4), gfx::Point(3, 4),
-                     ui::EventTimeForNow(), 0, 0);
+    MouseEvent mouse(ui::EventType::kMouseMoved, gfx::Point(3, 4),
+                     gfx::Point(3, 4), ui::EventTimeForNow(), 0, 0);
     EventDispatchDetails details = dispatcher->ProcessEvent(&target, &mouse);
     EXPECT_TRUE(details.dispatcher_destroyed);
     EXPECT_EQ(ER_CONSUMED, mouse.result());
@@ -494,8 +475,8 @@ TEST(EventDispatcherTest, EventDispatcherInvalidateTarget) {
   // |h3| should not receive events as the target will be invalidated.
   h3.set_expect_pre_target(false);
 
-  MouseEvent mouse(ui::ET_MOUSE_MOVED, gfx::Point(3, 4), gfx::Point(3, 4),
-                   ui::EventTimeForNow(), 0, 0);
+  MouseEvent mouse(ui::EventType::kMouseMoved, gfx::Point(3, 4),
+                   gfx::Point(3, 4), ui::EventTimeForNow(), 0, 0);
   EventDispatchDetails details = dispatcher.ProcessEvent(&target, &mouse);
   EXPECT_FALSE(details.dispatcher_destroyed);
   EXPECT_TRUE(details.target_destroyed);
@@ -543,8 +524,8 @@ TEST(EventDispatcherTest, EventHandlerDestroyedDuringDispatch) {
     // destroyed it.
     h3->set_expect_pre_target(false);
 
-    MouseEvent mouse(ui::ET_MOUSE_MOVED, gfx::Point(3, 4), gfx::Point(3, 4),
-                     ui::EventTimeForNow(), 0, 0);
+    MouseEvent mouse(ui::EventType::kMouseMoved, gfx::Point(3, 4),
+                     gfx::Point(3, 4), ui::EventTimeForNow(), 0, 0);
     EventDispatchDetails details = dispatcher.ProcessEvent(&target, &mouse);
     EXPECT_FALSE(details.dispatcher_destroyed);
     EXPECT_FALSE(details.target_destroyed);
@@ -611,8 +592,8 @@ TEST(EventDispatcherTest, EventHandlerAndDispatcherDestroyedDuringDispatch) {
     // it.
     h3->set_expect_pre_target(false);
 
-    MouseEvent mouse(ui::ET_MOUSE_MOVED, gfx::Point(3, 4), gfx::Point(3, 4),
-                     ui::EventTimeForNow(), 0, 0);
+    MouseEvent mouse(ui::EventType::kMouseMoved, gfx::Point(3, 4),
+                     gfx::Point(3, 4), ui::EventTimeForNow(), 0, 0);
     EventDispatchDetails details = dispatcher->ProcessEvent(&target, &mouse);
     EXPECT_TRUE(details.dispatcher_destroyed);
     EXPECT_TRUE(mouse.stopped_propagation());

@@ -47,7 +47,7 @@ AsyncPolicyLoader::AsyncPolicyLoader(
       periodic_updates_(periodic_updates),
       reload_interval_(kReloadInterval) {}
 
-AsyncPolicyLoader::~AsyncPolicyLoader() {}
+AsyncPolicyLoader::~AsyncPolicyLoader() = default;
 
 Time AsyncPolicyLoader::LastModificationTime() {
   return Time();
@@ -67,13 +67,13 @@ void AsyncPolicyLoader::Reload(bool force) {
   // `management_service_` must be called on the main thread.
   // base::Unretained is okay here since `management_service_` is an instance of
   // PlatformManagementService which is a singleton that outlives this class.
-  if (!platform_management_trustworthiness_.has_value() &&
-      management_service_) {
+  if (NeedManagementBitBeforeLoad()) {
     DCHECK_EQ(management_service_, PlatformManagementService::GetInstance());
     ui_thread_task_runner_->PostTaskAndReplyWithResult(
         FROM_HERE,
         base::BindOnce(
-            &ManagementService::GetManagementAuthorityTrustworthiness,
+            &ManagementService::
+                GetManagementAuthorityTrustworthinessForPolicyLoading,
             base::Unretained(management_service_)),
         base::BindOnce(
             &AsyncPolicyLoader::SetPlatformManagementTrustworthinessAndReload,
@@ -108,8 +108,8 @@ void AsyncPolicyLoader::Reload(bool force) {
 }
 
 bool AsyncPolicyLoader::ShouldFilterSensitivePolicies() {
-#if BUILDFLAG(IS_WIN)
-  DCHECK(platform_management_trustworthiness_);
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+  DCHECK(platform_management_trustworthiness_.has_value());
 
   return *platform_management_trustworthiness_ <
          ManagementAuthorityTrustworthiness::TRUSTED;
@@ -125,6 +125,11 @@ void AsyncPolicyLoader::SetPlatformManagementTrustworthinessAndReload(
   Reload(force);
 }
 
+bool AsyncPolicyLoader::NeedManagementBitBeforeLoad() {
+  return !platform_management_trustworthiness_.has_value() &&
+         management_service_;
+}
+
 PolicyBundle AsyncPolicyLoader::InitialLoad(
     const scoped_refptr<SchemaMap>& schema_map) {
   // This is the first load, early during startup. Use this to record the
@@ -135,7 +140,8 @@ PolicyBundle AsyncPolicyLoader::InitialLoad(
   if (management_service_) {
     DCHECK_EQ(management_service_, PlatformManagementService::GetInstance());
     platform_management_trustworthiness_ =
-        management_service_->GetManagementAuthorityTrustworthiness();
+        management_service_
+            ->GetManagementAuthorityTrustworthinessForPolicyLoading();
   }
   PolicyBundle bundle = Load();
   platform_management_trustworthiness_.reset();

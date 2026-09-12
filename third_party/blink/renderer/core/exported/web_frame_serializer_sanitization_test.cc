@@ -28,16 +28,16 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "third_party/blink/public/web/web_frame_serializer.h"
-
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/platform/web_url.h"
+#include "third_party/blink/public/web/web_frame_serializer.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/exported/web_frame_serializer_test_helper.h"
 #include "third_party/blink/renderer/core/exported/web_view_impl.h"
 #include "third_party/blink/renderer/core/frame/frame_test_helpers.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/url_loader_mock_factory.h"
 #include "third_party/blink/renderer/platform/testing/url_test_helpers.h"
@@ -52,9 +52,10 @@ int MatchSubstring(const String& str, const char* pattern, wtf_size_t size) {
   int matches = 0;
   wtf_size_t start = 0;
   while (true) {
-    wtf_size_t pos = str.Find(pattern, start);
-    if (pos == WTF::kNotFound)
+    wtf_size_t pos = str.find(pattern, start);
+    if (pos == kNotFound) {
       break;
+    }
     matches++;
     start = pos + size;
   }
@@ -96,17 +97,20 @@ class WebFrameSerializerSanitizationTest : public testing::Test {
   ShadowRoot* SetShadowContent(
       TreeScope& scope,
       const char* host,
-      ShadowRootType shadow_type,
+      ShadowRootMode shadow_type,
       const char* shadow_content,
       FocusDelegation focus_delegation = FocusDelegation::kNone) {
-    Element* host_element = scope.getElementById(AtomicString::FromUTF8(host));
+    Element* host_element = scope.getElementById(AtomicString::FromUtf8(host));
     ShadowRoot* shadow_root;
-    shadow_root =
-        &host_element->AttachShadowRootInternal(shadow_type, focus_delegation);
+    shadow_root = &host_element->AttachShadowRootInternal(
+        shadow_type, focus_delegation, SlotAssignmentMode::kNamed,
+        CustomElementRegistryAssignment::Inherit(),
+        /*serializable*/ false, /*clonable*/ false,
+        /*reference_target*/ g_null_atom);
     shadow_root->SetDelegatesFocus(focus_delegation ==
                                    FocusDelegation::kDelegateFocus);
-    shadow_root->setInnerHTML(String::FromUTF8(shadow_content),
-                              ASSERT_NO_EXCEPTION);
+    shadow_root->SetInnerHTMLWithoutTrustedTypes(
+        String::FromUtf8(shadow_content));
     scope.GetDocument().View()->UpdateAllLifecyclePhasesForTest();
     return shadow_root;
   }
@@ -125,6 +129,7 @@ class WebFrameSerializerSanitizationTest : public testing::Test {
   WebLocalFrameImpl* MainFrameImpl() { return helper_.LocalMainFrame(); }
 
  private:
+  test::TaskEnvironment task_environment_;
   frame_test_helpers::WebViewHelper helper_;
 };
 
@@ -133,27 +138,27 @@ TEST_F(WebFrameSerializerSanitizationTest, RemoveInlineScriptInAttributes) {
       GenerateMHTMLFromHtml("http://www.test.com", "script_in_attributes.html");
 
   // These scripting attributes should be removed.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("onload="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("ONLOAD="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("onclick="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("href="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("from="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("to="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("javascript:"));
+  EXPECT_FALSE(mhtml.contains("onload="));
+  EXPECT_FALSE(mhtml.contains("ONLOAD="));
+  EXPECT_FALSE(mhtml.contains("onclick="));
+  EXPECT_FALSE(mhtml.contains("href="));
+  EXPECT_FALSE(mhtml.contains("from="));
+  EXPECT_FALSE(mhtml.contains("to="));
+  EXPECT_FALSE(mhtml.contains("javascript:"));
 
   // These non-scripting attributes should remain intact.
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("class="));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("id="));
+  EXPECT_TRUE(mhtml.contains("class="));
+  EXPECT_TRUE(mhtml.contains("id="));
 
   // srcdoc attribute of frame element should be replaced with src attribute.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("srcdoc="));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("src="));
+  EXPECT_FALSE(mhtml.contains("srcdoc="));
+  EXPECT_TRUE(mhtml.contains("src="));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, RemoveOtherAttributes) {
   String mhtml =
       GenerateMHTMLFromHtml("http://www.test.com", "remove_attributes.html");
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("ping="));
+  EXPECT_FALSE(mhtml.contains("ping="));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, RemoveHiddenElements) {
@@ -161,22 +166,22 @@ TEST_F(WebFrameSerializerSanitizationTest, RemoveHiddenElements) {
       GenerateMHTMLFromHtml("http://www.test.com", "hidden_elements.html");
 
   // The element with hidden attribute should be removed.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("<p id=3D\"hidden_id\""));
+  EXPECT_FALSE(mhtml.contains("<p id=3D\"hidden_id\""));
 
   // The hidden form element should be removed.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("<input type=3D\"hidden\""));
+  EXPECT_FALSE(mhtml.contains("<input type=3D\"hidden\""));
 
   // The style element should be converted to link element.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("<style"));
+  EXPECT_FALSE(mhtml.contains("<style"));
 
   // All other hidden elements should not be removed.
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<html"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<head"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<title"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<h1"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<h2"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<datalist"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<option"));
+  EXPECT_TRUE(mhtml.contains("<html"));
+  EXPECT_TRUE(mhtml.contains("<head"));
+  EXPECT_TRUE(mhtml.contains("<title"));
+  EXPECT_TRUE(mhtml.contains("<h1"));
+  EXPECT_TRUE(mhtml.contains("<h2"));
+  EXPECT_TRUE(mhtml.contains("<datalist"));
+  EXPECT_TRUE(mhtml.contains("<option"));
   // One for meta in head and another for meta in body.
   EXPECT_EQ(2, MatchSubstring(mhtml, "<meta", 5));
   // Two for original link elements: one in head and another in body.
@@ -184,10 +189,10 @@ TEST_F(WebFrameSerializerSanitizationTest, RemoveHiddenElements) {
   EXPECT_EQ(4, MatchSubstring(mhtml, "<link", 5));
 
   // These visible elements should remain intact.
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<p id=3D\"visible_id\""));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<form"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<input type=3D\"text\""));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<div"));
+  EXPECT_TRUE(mhtml.contains("<p id=3D\"visible_id\""));
+  EXPECT_TRUE(mhtml.contains("<form"));
+  EXPECT_TRUE(mhtml.contains("<input type=3D\"text\""));
+  EXPECT_TRUE(mhtml.contains("<div"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, RemoveIframeInHead) {
@@ -196,7 +201,7 @@ TEST_F(WebFrameSerializerSanitizationTest, RemoveIframeInHead) {
 
   // The iframe elements could only be found after body. Any iframes injected to
   // head should be removed.
-  EXPECT_GT(mhtml.Find("<iframe"), mhtml.Find("<body"));
+  EXPECT_GT(mhtml.find("<iframe"), mhtml.find("<body"));
 }
 
 // Regression test for crbug.com/678893, where in some cases serializing an
@@ -216,30 +221,28 @@ TEST_F(WebFrameSerializerSanitizationTest, ImageLoadedFromSrcsetForHiDPI) {
                             "frameserialization/2x.png");
 
   // Set high DPR in order to load image from srcset, instead of src.
-  WebView()->SetZoomFactorForDeviceScaleFactor(2.0f);
+  WebView()->SetZoomFactorForDeviceScaleFactor(2.0f, 1.0f);
 
   String mhtml =
       GenerateMHTMLFromHtml("http://www.test.com", "img_srcset.html");
 
   // srcset and sizes attributes should be skipped.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("srcset="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("sizes="));
+  EXPECT_FALSE(mhtml.contains("srcset="));
+  EXPECT_FALSE(mhtml.contains("sizes="));
 
   // src attribute with original URL should be preserved.
   EXPECT_EQ(2,
             MatchSubstring(mhtml, "src=3D\"http://www.test.com/1x.png\"", 34));
 
   // The image resource for original URL should be attached.
-  EXPECT_NE(WTF::kNotFound,
-            mhtml.Find("Content-Location: http://www.test.com/1x.png"));
+  EXPECT_TRUE(mhtml.contains("Content-Location: http://www.test.com/1x.png"));
 
   // Width and height attributes should be set when none is present in <img>.
-  EXPECT_NE(WTF::kNotFound,
-            mhtml.Find("id=3D\"i1\" width=3D\"6\" height=3D\"6\">"));
+  EXPECT_TRUE(mhtml.contains("id=3D\"i1\" width=3D\"6\" height=3D\"6\">"));
 
   // Height attribute should not be set if width attribute is already present in
   // <img>
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("id=3D\"i2\" width=3D\"8\">"));
+  EXPECT_TRUE(mhtml.contains("id=3D\"i2\" width=3D\"8\">"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, ImageLoadedFromSrcForNormalDPI) {
@@ -252,20 +255,19 @@ TEST_F(WebFrameSerializerSanitizationTest, ImageLoadedFromSrcForNormalDPI) {
       GenerateMHTMLFromHtml("http://www.test.com", "img_srcset.html");
 
   // srcset and sizes attributes should be skipped.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("srcset="));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("sizes="));
+  EXPECT_FALSE(mhtml.contains("srcset="));
+  EXPECT_FALSE(mhtml.contains("sizes="));
 
   // src attribute with original URL should be preserved.
   EXPECT_EQ(2,
             MatchSubstring(mhtml, "src=3D\"http://www.test.com/1x.png\"", 34));
 
   // The image resource for original URL should be attached.
-  EXPECT_NE(WTF::kNotFound,
-            mhtml.Find("Content-Location: http://www.test.com/1x.png"));
+  EXPECT_TRUE(mhtml.contains("Content-Location: http://www.test.com/1x.png"));
 
   // New width and height attributes should not be set.
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("id=3D\"i1\">"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("id=3D\"i2\" width=3D\"8\">"));
+  EXPECT_TRUE(mhtml.contains("id=3D\"i1\">"));
+  EXPECT_TRUE(mhtml.contains("id=3D\"i2\" width=3D\"8\">"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, RemovePopupOverlayIfRequested) {
@@ -274,8 +276,8 @@ TEST_F(WebFrameSerializerSanitizationTest, RemovePopupOverlayIfRequested) {
   String mhtml =
       WebFrameSerializerTestHelper::GenerateMHTMLWithPopupOverlayRemoved(
           MainFrameImpl());
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("class=3D\"overlay"));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("class=3D\"modal"));
+  EXPECT_FALSE(mhtml.contains("class=3D\"overlay"));
+  EXPECT_FALSE(mhtml.contains("class=3D\"modal"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, PopupOverlayNotFound) {
@@ -288,8 +290,8 @@ TEST_F(WebFrameSerializerSanitizationTest, PopupOverlayNotFound) {
 TEST_F(WebFrameSerializerSanitizationTest, KeepPopupOverlayIfNotRequested) {
   WebView()->MainFrameViewWidget()->Resize(gfx::Size(500, 500));
   String mhtml = GenerateMHTMLFromHtml("http://www.test.com", "popup.html");
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("class=3D\"overlay"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("class=3D\"modal"));
+  EXPECT_TRUE(mhtml.contains("class=3D\"overlay"));
+  EXPECT_TRUE(mhtml.contains("class=3D\"modal"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, LinkIntegrity) {
@@ -303,48 +305,46 @@ TEST_F(WebFrameSerializerSanitizationTest, LinkIntegrity) {
 
   // beautifull.css remains, without 'integrity'. integrityfail.css is removed.
   EXPECT_TRUE(
-      mhtml.Contains("<link rel=3D\"stylesheet\" "
+      mhtml.contains("<link rel=3D\"stylesheet\" "
                      "href=3D\"http://www.test.com/beautifull.css\">"));
-  EXPECT_EQ(WTF::kNotFound,
-            mhtml.Find("http://www.test.com/integrityfail.css"));
+  EXPECT_FALSE(mhtml.contains("http://www.test.com/integrityfail.css"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, RemoveElements) {
   String mhtml =
       GenerateMHTMLFromHtml("http://www.test.com", "remove_elements.html");
 
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("<script"));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("<noscript"));
+  EXPECT_FALSE(mhtml.contains("<script"));
+  EXPECT_FALSE(mhtml.contains("<noscript"));
 
   // Only the meta element containing "Content-Security-Policy" is removed.
   // Other meta elements should be preserved.
-  EXPECT_EQ(WTF::kNotFound,
-            mhtml.Find("<meta http-equiv=3D\"Content-Security-Policy"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<meta name=3D\"description"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<meta http-equiv=3D\"refresh"));
+  EXPECT_FALSE(mhtml.contains("<meta http-equiv=3D\"Content-Security-Policy"));
+  EXPECT_TRUE(mhtml.contains("<meta name=3D\"description"));
+  EXPECT_TRUE(mhtml.contains("<meta http-equiv=3D\"refresh"));
 
   // If an element is removed, its children should also be skipped.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("<select"));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("<option"));
+  EXPECT_FALSE(mhtml.contains("<select"));
+  EXPECT_FALSE(mhtml.contains("<option"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, ShadowDOM) {
   LoadFrame("http://www.test.com", "shadow_dom.html", "text/html");
   Document* document = MainFrameImpl()->GetFrame()->GetDocument();
   ShadowRoot* shadowRoot = SetShadowContent(
-      *document, "h2", ShadowRootType::kOpen,
+      *document, "h2", ShadowRootMode::kOpen,
       "Parent shadow\n<p id=\"h3\">Foo</p>", FocusDelegation::kDelegateFocus);
-  SetShadowContent(*shadowRoot, "h3", ShadowRootType::kClosed, "Nested shadow");
+  SetShadowContent(*shadowRoot, "h3", ShadowRootMode::kClosed, "Nested shadow");
   String mhtml = WebFrameSerializerTestHelper::GenerateMHTML(MainFrameImpl());
 
   // Template with special attribute should be created for each shadow DOM tree.
-  EXPECT_NE(WTF::kNotFound,
-            mhtml.Find("<template shadowmode=3D\"open\" shadowdelegatesfocus"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("<template shadowmode=3D\"closed\">"));
+  EXPECT_TRUE(
+      mhtml.contains("<template shadowmode=3D\"open\" shadowdelegatesfocus"));
+  EXPECT_TRUE(mhtml.contains("<template shadowmode=3D\"closed\">"));
 
   // The special attribute present in the original page should be removed.
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("shadowmode=3D\"foo\">"));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("shadowdelegatesfocus=3D\"bar\">"));
+  EXPECT_FALSE(mhtml.contains("shadowmode=3D\"foo\">"));
+  EXPECT_FALSE(mhtml.contains("shadowdelegatesfocus=3D\"bar\">"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, StyleElementsWithDynamicCSS) {
@@ -352,9 +352,9 @@ TEST_F(WebFrameSerializerSanitizationTest, StyleElementsWithDynamicCSS) {
                                        "style_element_with_dynamic_css.html");
 
   // The dynamically updated CSS rules should be preserved.
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("div { color: blue; }"));
-  EXPECT_NE(WTF::kNotFound, mhtml.Find("p { color: red; }"));
-  EXPECT_EQ(WTF::kNotFound, mhtml.Find("h1 { color: green; }"));
+  EXPECT_TRUE(mhtml.contains("div { color: blue; }"));
+  EXPECT_TRUE(mhtml.contains("p { color: red; }"));
+  EXPECT_FALSE(mhtml.contains("h1 { color: green; }"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, PictureElement) {
@@ -371,10 +371,8 @@ TEST_F(WebFrameSerializerSanitizationTest, PictureElement) {
   EXPECT_EQ(2, MatchSubstring(mhtml, "srcset=", 7));
 
   // 2x.png resource should be added.
-  EXPECT_NE(WTF::kNotFound,
-            mhtml.Find("Content-Location: http://www.test.com/2x.png"));
-  EXPECT_EQ(WTF::kNotFound,
-            mhtml.Find("Content-Location: http://www.test.com/1x.png"));
+  EXPECT_TRUE(mhtml.contains("Content-Location: http://www.test.com/2x.png"));
+  EXPECT_FALSE(mhtml.contains("Content-Location: http://www.test.com/1x.png"));
 }
 
 TEST_F(WebFrameSerializerSanitizationTest, ImageInPluginElement) {
@@ -387,10 +385,8 @@ TEST_F(WebFrameSerializerSanitizationTest, ImageInPluginElement) {
       GenerateMHTMLFromHtml("http://www.test.com", "image_in_plugin.html");
 
   // Image resources for both object and embed elements should be added.
-  EXPECT_NE(WTF::kNotFound,
-            mhtml.Find("Content-Location: http://www.test.com/1x.png"));
-  EXPECT_NE(WTF::kNotFound,
-            mhtml.Find("Content-Location: http://www.test.com/2x.png"));
+  EXPECT_TRUE(mhtml.contains("Content-Location: http://www.test.com/1x.png"));
+  EXPECT_TRUE(mhtml.contains("Content-Location: http://www.test.com/2x.png"));
 }
 
 }  // namespace blink

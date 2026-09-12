@@ -4,9 +4,18 @@
 
 #include "net/tools/tld_cleanup/tld_cleanup_util.h"
 
+#include <initializer_list>
+
+#include "base/base_paths.h"
 #include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/files/scoped_temp_dir.h"
+#include "base/path_service.h"
+#include "build/buildflag.h"
+#include "net/base/registry_controlled_domain_constants.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "url/buildflags.h"
 
 namespace net::tld_cleanup {
 
@@ -28,16 +37,13 @@ TEST(TldCleanupUtilTest, TwoRealTldsSuccessfullyRead) {
       "foo\n"
       "bar\n";
   std::string private_domains = "";
-  RuleMap rules;
-  ASSERT_EQ(
-      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains), rules),
-      NormalizeResult::kSuccess);
   EXPECT_THAT(
-      rules,
-      ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false}),
-                  Pair("foo", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false})));
+      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains)),
+      Pair(NormalizeResult::kSuccess,
+           ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                        /*is_private=*/false}),
+                       Pair("foo", Rule{/*exception=*/false, /*wildcard=*/false,
+                                        /*is_private=*/false}))));
 }
 
 TEST(TldCleanupUtilTest, TwoRealTldsSuccessfullyRead_WindowsEndings) {
@@ -45,31 +51,26 @@ TEST(TldCleanupUtilTest, TwoRealTldsSuccessfullyRead_WindowsEndings) {
       "foo\r\n"
       "bar\r\n";
   std::string private_domains = "";
-  RuleMap rules;
-  ASSERT_EQ(
-      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains), rules),
-      NormalizeResult::kSuccess);
   EXPECT_THAT(
-      rules,
-      ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false}),
-                  Pair("foo", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false})));
+      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains)),
+      Pair(NormalizeResult::kSuccess,
+           ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                        /*is_private=*/false}),
+                       Pair("foo", Rule{/*exception=*/false, /*wildcard=*/false,
+                                        /*is_private=*/false}))));
 }
 
 TEST(TldCleanupUtilTest, RealTldAutomaticallyAddedForSubdomain) {
   std::string icann_domains = "foo.bar\n";
   std::string private_domains = "";
-  RuleMap rules;
-  ASSERT_EQ(
-      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains), rules),
-      NormalizeResult::kSuccess);
   EXPECT_THAT(
-      rules,
-      ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false}),
-                  Pair("foo.bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                       /*is_private=*/false})));
+      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains)),
+      Pair(NormalizeResult::kSuccess,
+           ElementsAre(
+               Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                /*is_private=*/false}),
+               Pair("foo.bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                    /*is_private=*/false}))));
 }
 
 TEST(TldCleanupUtilTest, PrivateTldMarkedAsPrivate) {
@@ -77,33 +78,28 @@ TEST(TldCleanupUtilTest, PrivateTldMarkedAsPrivate) {
       "foo\n"
       "bar\n";
   std::string private_domains = "baz\n";
-  RuleMap rules;
-  ASSERT_EQ(
-      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains), rules),
-      NormalizeResult::kSuccess);
   EXPECT_THAT(
-      rules,
-      ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false}),
-                  Pair("baz", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/true}),
-                  Pair("foo", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false})));
+      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains)),
+      Pair(NormalizeResult::kSuccess,
+           ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                        /*is_private=*/false}),
+                       Pair("baz", Rule{/*exception=*/false, /*wildcard=*/false,
+                                        /*is_private=*/true}),
+                       Pair("foo", Rule{/*exception=*/false, /*wildcard=*/false,
+                                        /*is_private=*/false}))));
 }
 
 TEST(TldCleanupUtilTest, PrivateDomainMarkedAsPrivate) {
   std::string icann_domains = "bar\n";
   std::string private_domains = "foo.bar\n";
-  RuleMap rules;
-  ASSERT_EQ(
-      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains), rules),
-      NormalizeResult::kSuccess);
   EXPECT_THAT(
-      rules,
-      ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false}),
-                  Pair("foo.bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                       /*is_private=*/true})));
+      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains)),
+      Pair(NormalizeResult::kSuccess,
+           ElementsAre(
+               Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                /*is_private=*/false}),
+               Pair("foo.bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                    /*is_private=*/true}))));
 }
 
 TEST(TldCleanupUtilTest, ExtraTldRuleIsNotMarkedPrivate) {
@@ -111,20 +107,18 @@ TEST(TldCleanupUtilTest, ExtraTldRuleIsNotMarkedPrivate) {
       "foo.bar\n"
       "baz.bar\n";
   std::string private_domains = "qux.bar\n";
-  RuleMap rules;
-  ASSERT_EQ(
-      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains), rules),
-      NormalizeResult::kSuccess);
   EXPECT_THAT(
-      rules,
-      ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                   /*is_private=*/false}),
-                  Pair("baz.bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                       /*is_private=*/false}),
-                  Pair("foo.bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                       /*is_private=*/false}),
-                  Pair("qux.bar", Rule{/*exception=*/false, /*wildcard=*/false,
-                                       /*is_private=*/true})));
+      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains)),
+      Pair(NormalizeResult::kSuccess,
+           ElementsAre(
+               Pair("bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                /*is_private=*/false}),
+               Pair("baz.bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                    /*is_private=*/false}),
+               Pair("foo.bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                    /*is_private=*/false}),
+               Pair("qux.bar", Rule{/*exception=*/false, /*wildcard=*/false,
+                                    /*is_private=*/true}))));
 }
 
 TEST(TldCleanupUtilTest, WildcardAndExceptionParsedCorrectly) {
@@ -132,18 +126,16 @@ TEST(TldCleanupUtilTest, WildcardAndExceptionParsedCorrectly) {
       "*.bar\n"
       "!foo.bar\n";
   std::string private_domains = "!baz.bar\n";
-  RuleMap rules;
-  ASSERT_EQ(
-      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains), rules),
-      NormalizeResult::kSuccess);
   EXPECT_THAT(
-      rules,
-      ElementsAre(Pair("bar", Rule{/*exception=*/false, /*wildcard=*/true,
-                                   /*is_private=*/false}),
-                  Pair("baz.bar", Rule{/*exception=*/true, /*wildcard=*/false,
-                                       /*is_private=*/true}),
-                  Pair("foo.bar", Rule{/*exception=*/true, /*wildcard=*/false,
-                                       /*is_private=*/false})));
+      NormalizeDataToRuleMap(SetupData(icann_domains, private_domains)),
+      Pair(NormalizeResult::kSuccess,
+           ElementsAre(
+               Pair("bar", Rule{/*exception=*/false, /*wildcard=*/true,
+                                /*is_private=*/false}),
+               Pair("baz.bar", Rule{/*exception=*/true, /*wildcard=*/false,
+                                    /*is_private=*/true}),
+               Pair("foo.bar", Rule{/*exception=*/true, /*wildcard=*/false,
+                                    /*is_private=*/false}))));
 }
 
 TEST(TldCleanupUtilTest, RuleSerialization) {
@@ -178,6 +170,71 @@ domain6, 1
 domain7, 5
 %%
 )"));
+}
+
+TEST(TldCleanupUtilTest, RuleSerialize) {
+  using enum DomainRuleTag;
+  constexpr auto get_bitmask = [](std::initializer_list<DomainRuleTag> tags) {
+    return DomainRuleTags(tags).ToEnumBitmask();
+  };
+
+  EXPECT_EQ(Rule(/*exception=*/false, /*wildcard=*/false, /*is_private=*/false)
+                .Serialize(),
+            get_bitmask({}));
+  EXPECT_EQ(Rule(/*exception=*/true, /*wildcard=*/false, /*is_private=*/false)
+                .Serialize(),
+            get_bitmask({kException}));
+  EXPECT_EQ(Rule(/*exception=*/false, /*wildcard=*/true, /*is_private=*/false)
+                .Serialize(),
+            get_bitmask({kWildcard}));
+  // `exception` takes precedence over `wildcard`.
+  EXPECT_EQ(Rule(/*exception=*/true, /*wildcard=*/true, /*is_private=*/false)
+                .Serialize(),
+            get_bitmask({kException}));
+
+  EXPECT_EQ(Rule(/*exception=*/false, /*wildcard=*/false, /*is_private=*/true)
+                .Serialize(),
+            get_bitmask({kPrivate}));
+  EXPECT_EQ(Rule(/*exception=*/true, /*wildcard=*/false, /*is_private=*/true)
+                .Serialize(),
+            get_bitmask({kException, kPrivate}));
+  EXPECT_EQ(Rule(/*exception=*/false, /*wildcard=*/true, /*is_private=*/true)
+                .Serialize(),
+            get_bitmask({kWildcard, kPrivate}));
+  // `exception` takes precedence over `wildcard`.
+  EXPECT_EQ(Rule(/*exception=*/true, /*wildcard=*/true, /*is_private=*/true)
+                .Serialize(),
+            get_bitmask({kException, kPrivate}));
+}
+
+TEST(TldCleanupUtilTest, GperfIsUpToDate) {
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+
+  const base::FilePath source_dir =
+      base::PathService::CheckedGet(base::DIR_SRC_TEST_DATA_ROOT)
+          .AppendASCII("net")
+          .AppendASCII("base")
+          .AppendASCII("registry_controlled_domains");
+
+  const base::FilePath temp_file = temp_dir.GetPath().AppendASCII("temp.gperf");
+  NormalizeResult result = NormalizeFile(
+      source_dir.AppendASCII("effective_tld_names.dat"), temp_file);
+
+  ASSERT_THAT(
+      result,
+  // IDN eTLDs may cause warnings on platforms without ICU support.
+#if BUILDFLAG(USE_PLATFORM_ICU_ALTERNATIVES)
+      testing::AnyOf(NormalizeResult::kSuccess, NormalizeResult::kWarning)
+#else
+      NormalizeResult::kSuccess
+#endif
+  );
+
+  if (result == NormalizeResult::kSuccess) {
+    EXPECT_TRUE(base::ContentsEqual(
+        source_dir.AppendASCII("effective_tld_names.gperf"), temp_file));
+  }
 }
 
 }  // namespace net::tld_cleanup

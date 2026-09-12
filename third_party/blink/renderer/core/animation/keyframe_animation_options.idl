@@ -14,7 +14,8 @@ enum TimelineRange {
   "entry",
   "entry-crossing",
   "exit",
-  "exit-crossing" };
+  "exit-crossing",
+  "scroll" };
 
 dictionary TimelineRangeOffset {
     TimelineRange rangeName;
@@ -24,6 +25,6 @@ dictionary TimelineRangeOffset {
 dictionary KeyframeAnimationOptions : KeyframeEffectOptions {
     DOMString id = "";
     AnimationTimeline? timeline;
-    (DOMString or TimelineRangeOffset) rangeStart = "auto";
-    (DOMString or TimelineRangeOffset) rangeEnd =  "auto";
+    (DOMString or TimelineRangeOffset) rangeStart = "normal";
+    (DOMString or TimelineRangeOffset) rangeEnd =  "normal";
 };

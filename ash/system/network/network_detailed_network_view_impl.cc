@@ -4,6 +4,7 @@
 
 #include "ash/system/network/network_detailed_network_view_impl.h"
 
+#include "ash/ash_element_identifiers.h"
 #include "ash/constants/ash_features.h"
 #include "ash/public/cpp/ash_view_ids.h"
 #include "ash/resources/vector_icons/vector_icons.h"
@@ -12,10 +13,12 @@
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/style/ash_color_id.h"
 #include "ash/style/rounded_container.h"
+#include "ash/style/typography.h"
+#include "ash/system/model/system_tray_model.h"
 #include "ash/system/network/network_detailed_view.h"
-#include "ash/system/network/network_list_mobile_header_view_impl.h"
+#include "ash/system/network/network_list_mobile_header_view.h"
 #include "ash/system/network/network_list_network_item_view.h"
-#include "ash/system/network/network_list_wifi_header_view_impl.h"
+#include "ash/system/network/network_list_wifi_header_view.h"
 #include "ash/system/network/network_utils.h"
 #include "ash/system/network/tray_network_state_model.h"
 #include "ash/system/tray/detailed_view_delegate.h"
@@ -26,15 +29,68 @@
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/gfx/paint_vector_icon.h"
 #include "ui/views/controls/image_view.h"
+#include "ui/views/controls/scroll_view.h"
 #include "ui/views/view.h"
 #include "ui/views/view_class_properties.h"
 
 namespace ash {
 namespace {
-using chromeos::network_config::mojom::NetworkType;
+using chromeos::network_config::mojom::InhibitReason;
 
 constexpr auto kMainContainerMargins = gfx::Insets::TLBR(2, 0, 0, 0);
 constexpr auto kTopContainerBorder = gfx::Insets::TLBR(4, 0, 4, 4);
+constexpr auto kBetweenContainerMargins = gfx::Insets::TLBR(6, 0, 0, 0);
+
+// The following getter methods should only be used for
+// `NetworkType::kWiFi`, `NetworkType::kTether`, `NetworkType::kMobile`, or
+// `NetworkType::kCellular` types otherwise a crash will occur.
+std::u16string GetLabelForConfigureNetworkEntry(NetworkType type) {
+  switch (type) {
+    case NetworkType::kWiFi:
+      return l10n_util::GetStringUTF16(
+          IDS_ASH_QUICK_SETTINGS_JOIN_WIFI_NETWORK);
+    case NetworkType::kTether:
+      [[fallthrough]];
+    case NetworkType::kCellular:
+      [[fallthrough]];
+    case NetworkType::kMobile:
+      return l10n_util::GetStringUTF16(IDS_ASH_QUICK_SETTINGS_ADD_ESIM);
+    default:
+      NOTREACHED();
+  }
+}
+
+std::optional<std::u16string> GetTooltipForConfigureNetworkEntry(
+    NetworkType type) {
+  switch (type) {
+    case NetworkType::kWiFi:
+      return l10n_util::GetStringUTF16(IDS_ASH_STATUS_TRAY_OTHER_WIFI);
+    case NetworkType::kTether:
+      [[fallthrough]];
+    case NetworkType::kCellular:
+      [[fallthrough]];
+    case NetworkType::kMobile:
+      return l10n_util::GetStringUTF16(
+          GetCellularInhibitReasonMessageId(GetCellularInhibitReason()));
+    default:
+      NOTREACHED();
+  }
+}
+
+int GetViewIDForConfigureNetworkEntry(NetworkType type) {
+  switch (type) {
+    case NetworkType::kWiFi:
+      return VIEW_ID_JOIN_WIFI_NETWORK_ENTRY;
+    case NetworkType::kTether:
+      [[fallthrough]];
+    case NetworkType::kCellular:
+      [[fallthrough]];
+    case NetworkType::kMobile:
+      return VIEW_ID_ADD_ESIM_ENTRY;
+    default:
+      NOTREACHED();
+  }
+}
 }  // namespace
 
 NetworkDetailedNetworkViewImpl::NetworkDetailedNetworkViewImpl(
@@ -42,16 +98,14 @@ NetworkDetailedNetworkViewImpl::NetworkDetailedNetworkViewImpl(
     NetworkDetailedNetworkView::Delegate* delegate)
     : NetworkDetailedView(detailed_view_delegate,
                           delegate,
-                          NetworkDetailedView::ListType::LIST_TYPE_NETWORK),
-      NetworkDetailedNetworkView(delegate) {
-  RecordDetailedViewSection(DetailedViewSection::kDetailedSection);
-}
+                          NetworkDetailedViewListType::LIST_TYPE_NETWORK),
+      NetworkDetailedNetworkView(delegate) {}
 
 NetworkDetailedNetworkViewImpl::~NetworkDetailedNetworkViewImpl() = default;
 
 void NetworkDetailedNetworkViewImpl::NotifyNetworkListChanged() {
   scroll_content()->InvalidateLayout();
-  Layout();
+  DeprecatedLayoutImmediately();
 
   if (!settings_button()) {
     return;
@@ -81,69 +135,70 @@ NetworkListNetworkItemView* NetworkDetailedNetworkViewImpl::AddNetworkListItem(
       std::make_unique<NetworkListNetworkItemView>(/*listener=*/this));
 }
 
-HoverHighlightView* NetworkDetailedNetworkViewImpl::AddJoinNetworkEntry() {
-  HoverHighlightView* entry =
-      GetNetworkList(NetworkType::kWiFi)
-          ->AddChildView(
-              std::make_unique<HoverHighlightView>(/*listener=*/this));
-  entry->SetID(VIEW_ID_JOIN_NETWORK_ENTRY);
+HoverHighlightView* NetworkDetailedNetworkViewImpl::AddConfigureNetworkEntry(
+    NetworkType type) {
+  CHECK(type == NetworkType::kWiFi || type == NetworkType::kMobile ||
+        type == NetworkType::kCellular);
+  HoverHighlightView* entry = GetNetworkList(type)->AddChildView(
+      std::make_unique<HoverHighlightView>(/*listener=*/this));
+  entry->SetID(GetViewIDForConfigureNetworkEntry(type));
+  entry->SetProperty(views::kElementIdentifierKey,
+                     kNetworkDetailedViewConfigureNetworkButtonElementId);
+
+  auto tooltip_text = GetTooltipForConfigureNetworkEntry(type);
+  if (tooltip_text.has_value()) {
+    entry->SetTooltipText(tooltip_text.value());
+  }
 
   auto image_view = std::make_unique<views::ImageView>();
   image_view->SetImage(ui::ImageModel::FromVectorIcon(
       kSystemMenuPlusIcon, cros_tokens::kCrosSysPrimary));
-  entry->AddViewAndLabel(
-      std::move(image_view),
-      l10n_util::GetStringUTF16(IDS_ASH_QUICK_SETTINGS_JOIN_WIFI_NETWORK));
+  entry->AddViewAndLabel(std::move(image_view),
+                         GetLabelForConfigureNetworkEntry(type));
   views::Label* label = entry->text_label();
-  label->SetEnabledColorId(cros_tokens::kCrosSysPrimary);
-  // TODO(b/253086997): Apply the correct font to the label.
-  TrayPopupUtils::SetLabelFontList(
-      label, TrayPopupUtils::FontStyle::kDetailedViewLabel);
+  label->SetEnabledColor(cros_tokens::kCrosSysPrimary);
+  TypographyProvider::Get()->StyleLabel(ash::TypographyToken::kCrosButton2,
+                                        *label);
 
   return entry;
 }
 
 NetworkListWifiHeaderView*
 NetworkDetailedNetworkViewImpl::AddWifiSectionHeader() {
-  if (!wifi_top_container_ && features::IsQsRevampEnabled()) {
+  if (!wifi_top_container_) {
     wifi_top_container_ =
         scroll_content()->AddChildView(std::make_unique<RoundedContainer>(
             RoundedContainer::Behavior::kTopRounded));
     wifi_top_container_->SetBorderInsets(kTopContainerBorder);
     wifi_top_container_->SetProperty(views::kMarginsKey,
-                                     gfx::Insets::TLBR(6, 0, 0, 0));
+                                     kBetweenContainerMargins);
   }
-  return (features::IsQsRevampEnabled() ? wifi_top_container_
-                                        : scroll_content())
-      ->AddChildView(
-          std::make_unique<NetworkListWifiHeaderViewImpl>(/*delegate=*/this));
+  return wifi_top_container_->AddChildView(
+      std::make_unique<NetworkListWifiHeaderView>(/*delegate=*/this));
 }
 
 NetworkListMobileHeaderView*
 NetworkDetailedNetworkViewImpl::AddMobileSectionHeader() {
-  if (!mobile_top_container_ && features::IsQsRevampEnabled()) {
+  if (!mobile_top_container_) {
     mobile_top_container_ =
         scroll_content()->AddChildView(std::make_unique<RoundedContainer>(
             RoundedContainer::Behavior::kTopRounded));
     mobile_top_container_->SetBorderInsets(kTopContainerBorder);
   }
-  return (features::IsQsRevampEnabled() ? mobile_top_container_
-                                        : scroll_content())
-      ->AddChildView(
-          std::make_unique<NetworkListMobileHeaderViewImpl>(/*delegate=*/this));
+  return mobile_top_container_->AddChildView(
+      std::make_unique<NetworkListMobileHeaderView>(/*delegate=*/this));
 }
 
 views::View* NetworkDetailedNetworkViewImpl::GetNetworkList(NetworkType type) {
-  if (!features::IsQsRevampEnabled()) {
-    return scroll_content();
-  }
-
   switch (type) {
     case NetworkType::kWiFi:
       if (!wifi_network_list_view_) {
         wifi_network_list_view_ =
             scroll_content()->AddChildView(std::make_unique<RoundedContainer>(
                 RoundedContainer::Behavior::kBottomRounded));
+        wifi_network_list_view_->SetProperty(
+            views::kElementIdentifierKey,
+            kNetworkDetailedViewWifiNetworkListElementId);
 
         // Add a small empty space, like a separator, between the containers.
         wifi_network_list_view_->SetProperty(views::kMarginsKey,
@@ -152,6 +207,7 @@ views::View* NetworkDetailedNetworkViewImpl::GetNetworkList(NetworkType type) {
       return wifi_network_list_view_;
     case NetworkType::kMobile:
     case NetworkType::kTether:
+      [[fallthrough]];
     case NetworkType::kCellular:
       if (!mobile_network_list_view_) {
         mobile_network_list_view_ =
@@ -163,7 +219,6 @@ views::View* NetworkDetailedNetworkViewImpl::GetNetworkList(NetworkType type) {
                                                kMainContainerMargins);
       }
       return mobile_network_list_view_;
-    case NetworkType::kAll:
     case NetworkType::kEthernet:
       if (!first_list_view_) {
         first_list_view_ = scroll_content()->AddChildView(
@@ -172,6 +227,7 @@ views::View* NetworkDetailedNetworkViewImpl::GetNetworkList(NetworkType type) {
                                       gfx::Insets::TLBR(0, 0, 6, 0));
       }
       return first_list_view_;
+    case NetworkType::kAll:
     default:
       return scroll_content();
   }
@@ -208,9 +264,10 @@ void NetworkDetailedNetworkViewImpl::ReorderMobileListView(size_t index) {
   }
 }
 
+
 void NetworkDetailedNetworkViewImpl::MaybeRemoveFirstListView() {
   if (first_list_view_ && first_list_view_->children().empty()) {
-    scroll_content()->RemoveChildViewT(first_list_view_);
+    scroll_content()->RemoveChildViewT(first_list_view_.get());
     first_list_view_ = nullptr;
   }
 }
@@ -237,6 +294,18 @@ void NetworkDetailedNetworkViewImpl::UpdateMobileStatus(bool enabled) {
   }
 }
 
+
+void NetworkDetailedNetworkViewImpl::ScrollToPosition(int position) {
+  if (GetScrollPosition() == position) {
+    return;
+  }
+  scroller()->ScrollToPosition(scroller()->vertical_scroll_bar(), position);
+}
+
+int NetworkDetailedNetworkViewImpl::GetScrollPosition() {
+  return scroller()->GetVisibleRect().y();
+}
+
 void NetworkDetailedNetworkViewImpl::OnMobileToggleClicked(bool new_state) {
   NetworkDetailedNetworkView::delegate()->OnMobileToggleClicked(new_state);
 }
@@ -249,7 +318,7 @@ void NetworkDetailedNetworkViewImpl::UpdateScanningBarVisibility(bool visible) {
   ShowProgress(-1, visible);
 }
 
-BEGIN_METADATA(NetworkDetailedNetworkViewImpl, views::View)
+BEGIN_METADATA(NetworkDetailedNetworkViewImpl)
 END_METADATA
 
 }  // namespace ash

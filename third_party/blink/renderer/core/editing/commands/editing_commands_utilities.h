@@ -46,6 +46,7 @@ enum class DeleteDirection {
 };
 
 class CompositeEditCommand;
+class DataTransfer;
 class Document;
 class Element;
 class HTMLElement;
@@ -64,7 +65,15 @@ Node* EnclosingEmptyListItem(const VisiblePosition&);
 
 bool IsTableStructureNode(const Node*);
 bool IsNodeRendered(const Node&);
-bool IsInline(const Node*);
+
+// Returns true if the ComputedStyle of the node is kInline or kRuby. It's
+// available for Element.
+bool IsInlineElement(const Node*);
+
+// Returns true if `IsInlineElement()` above is true or the LayoutObject of the
+// node is 'inline-level' (e.g., Text).
+bool IsInlineNode(const Node*);
+
 // Returns true if specified nodes are elements, have identical tag names,
 // have identical attributes, and are editable.
 CORE_EXPORT bool AreIdenticalElements(const Node&, const Node&);
@@ -100,7 +109,7 @@ Position LeadingCollapsibleWhitespacePosition(
     TextAffinity,
     WhitespacePositionOption = kNotConsiderNonCollapsibleWhitespace);
 
-unsigned NumEnclosingMailBlockquotes(const Position&);
+wtf_size_t NumEnclosingMailBlockquotes(const Position&);
 
 // -------------------------------------------------------------------------
 // VisiblePosition
@@ -130,15 +139,27 @@ bool CanMergeLists(const Element& first_list, const Element& second_list);
 
 // Functions returning VisibleSelection
 VisibleSelection SelectionForParagraphIteration(const VisibleSelection&);
+CORE_EXPORT SelectionInDomTree
+SelectionForParagraphIteration(const SelectionInDomTree&);
+
+// Moves a position anchored directly on table-internal structure
+// (<tbody>/<thead>/<tfoot>/<tr>) into the table cell its offset points at, so
+// callers can iterate paragraphs per-cell. |edge| selects the child after the
+// position (and the first cell within it) for kStart, or the child before the
+// position (and the last cell within it) for kEnd. Positions anchored on the
+// <table> element itself, or not on table structure at all, are returned
+// unchanged.
+enum class TableCellEdge { kStart, kEnd };
+CORE_EXPORT Position SnapIntoTableCell(const Position&, TableCellEdge edge);
 
 const String& NonBreakingSpaceString();
 
-CORE_EXPORT void TidyUpHTMLStructure(Document&);
+CORE_EXPORT void TidyUpHtmlStructure(Document&);
 
-SelectionInDOMTree CorrectedSelectionAfterCommand(const SelectionForUndoStep&,
-                                                  const Document*);
+SelectionInDomTree CorrectedSelectionAfterCommand(const SelectionForUndoStep&,
+                                                  Document*);
 void ChangeSelectionAfterCommand(LocalFrame*,
-                                 const SelectionInDOMTree&,
+                                 const SelectionInDomTree&,
                                  const SetSelectionOptions&);
 
 // -------------------------------------------------------------------------
@@ -147,11 +168,13 @@ void ChangeSelectionAfterCommand(LocalFrame*,
 
 void DispatchEditableContentChangedEvents(Element* start_root,
                                           Element* end_root);
-void DispatchInputEventEditableContentChanged(Element* start_root,
-                                              Element* end_root,
-                                              InputEvent::InputType,
-                                              const String&,
-                                              InputEvent::EventIsComposing);
+void DispatchInputEventEditableContentChanged(
+    Element* start_root,
+    Element* end_root,
+    InputEvent::InputType,
+    const String&,
+    InputEvent::EventIsComposing,
+    DataTransfer* data_transfer = nullptr);
 InputEvent::EventIsComposing IsComposingFromCommand(
     const CompositeEditCommand*);
 
@@ -170,6 +193,16 @@ VisiblePosition EndOfBlock(
     EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
 bool IsStartOfBlock(const VisiblePosition&);
 bool IsEndOfBlock(const VisiblePosition&);
+
+// Position-based block overloads (no VisiblePosition dependency).
+CORE_EXPORT Position StartOfBlock(
+    const Position&,
+    EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
+CORE_EXPORT Position EndOfBlock(
+    const Position&,
+    EditingBoundaryCrossingRule = kCannotCrossEditingBoundary);
+CORE_EXPORT bool IsStartOfBlock(const Position&);
+CORE_EXPORT bool IsEndOfBlock(const Position&);
 
 }  // namespace blink
 

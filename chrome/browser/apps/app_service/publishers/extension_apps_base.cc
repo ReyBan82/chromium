@@ -2,67 +2,74 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/apps/app_service/publishers/extension_apps.h"
-
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "base/functional/callback.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/one_shot_event.h"
 #include "base/scoped_observation.h"
-#include "build/chromeos_buildflags.h"
+#include "base/time/time.h"
 #include "chrome/browser/apps/app_service/app_icon/app_icon_factory.h"
-#include "chrome/browser/apps/app_service/app_launch_params.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
-#include "chrome/browser/apps/app_service/extension_uninstaller.h"
 #include "chrome/browser/apps/app_service/launch_utils.h"
+#include "chrome/browser/apps/app_service/publishers/extension_apps.h"
 #include "chrome/browser/apps/app_service/publishers/extension_apps_enable_flow.h"
 #include "chrome/browser/apps/app_service/publishers/extension_apps_util.h"
-#include "chrome/browser/ash/app_list/extension_app_utils.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/launch_util.h"
 #include "chrome/browser/prefs/incognito_mode_prefs.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_navigator.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "chrome/browser/ui/chrome_pages.h"
 #include "chrome/browser/ui/extensions/app_launch_params.h"
 #include "chrome/browser/ui/extensions/application_launch.h"
 #include "chrome/browser/ui/extensions/extension_enable_flow.h"
 #include "chrome/browser/ui/extensions/extension_enable_flow_delegate.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/common/extensions/extension_constants.h"
 #include "chrome/common/extensions/extension_metrics.h"
 #include "chrome/common/extensions/manifest_handlers/app_launch_info.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
+#include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "components/services/app_service/public/cpp/app_registry_cache.h"
+#include "components/services/app_service/public/cpp/app_types.h"
 #include "components/services/app_service/public/cpp/icon_types.h"
 #include "components/services/app_service/public/cpp/intent.h"
 #include "components/services/app_service/public/cpp/intent_filter_util.h"
+#include "components/services/app_service/public/cpp/package_id.h"
 #include "components/services/app_service/public/cpp/types_util.h"
 #include "content/public/browser/clear_site_data_utils.h"
 #include "content/public/browser/web_contents.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/browser/extension_util.h"
+#include "extensions/browser/install_prefs_helper.h"
 #include "extensions/browser/ui_util.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension_urls.h"
+#include "extensions/common/manifest_handlers/description_info.h"
 #include "extensions/common/manifest_handlers/options_page_info.h"
 #include "extensions/common/switches.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/base/window_open_disposition_utils.h"
+#include "ui/display/types/display_constants.h"
 #include "url/url_constants.h"
 
-// TODO(crbug.com/826982): life cycle events. Extensions can be installed and
+// TODO(crbug.com/40569217): life cycle events. Extensions can be installed and
 // uninstalled. ExtensionAppsBase should implement extensions::InstallObserver
 // and be able to show download progress in the UI, a la
 // ExtensionAppModelBuilder. This might involve using an
 // extensions::InstallTracker. It might also need the equivalent of a
 // ShelfExtensionAppUpdater.
 
-// TODO(crbug.com/826982): consider that, per khmel@, "in some places Chrome
+// TODO(crbug.com/40569217): consider that, per khmel@, "in some places Chrome
 // apps is not used and raw extension app without any effect is displayed...
 // Search where ChromeAppIcon or ChromeAppIconLoader is used compared with
 // direct loading the ExtensionIcon".
@@ -114,7 +121,7 @@ void ExtensionAppsBase::OnExtensionUninstalled(
   // uninstallation.
   auto app = std::make_unique<App>(app_type(), extension->id());
   app->readiness = reason == extensions::UNINSTALL_REASON_MIGRATED
-                       ? Readiness::kUninstalledByMigration
+                       ? Readiness::kUninstalledByNonUser
                        : Readiness::kUninstalledByUser;
   AppPublisher::Publish(std::move(app));
 }
@@ -139,8 +146,10 @@ AppPtr ExtensionAppsBase::CreateAppImpl(const extensions::Extension* extension,
                                        ? InstallSource::kSystem
                                        : InstallSource::kChromeWebStore);
   app->short_name = extension->short_name();
-  app->description = extension->description();
+  app->description = extensions::DescriptionInfo::GetDescription(*extension);
   app->version = extension->GetVersionForDisplay();
+  app->installer_package_id =
+      apps::PackageId(apps::PackageType::kChromeApp, extension->id());
   app->policy_ids = {extension->id()};
 
   if (profile_) {
@@ -149,7 +158,7 @@ AppPtr ExtensionAppsBase::CreateAppImpl(const extensions::Extension* extension,
       app->last_launch_time = prefs->GetLastLaunchTime(extension->id());
       // TODO(anunoy): Determine if this value should be set to the extension's
       // first install time vs last update time.
-      app->install_time = prefs->GetLastUpdateTime(extension->id());
+      app->install_time = GetLastUpdateTime(prefs, extension->id());
     }
   }
 
@@ -159,9 +168,9 @@ AppPtr ExtensionAppsBase::CreateAppImpl(const extensions::Extension* extension,
 
   const extensions::ManagementPolicy* policy =
       extensions::ExtensionSystem::Get(profile())->management_policy();
-  DCHECK(policy);
   app->allow_uninstall = policy->UserMayModifySettings(extension, nullptr) &&
                          !policy->MustRemainInstalled(extension, nullptr);
+  app->allow_close = true;
   return app;
 }
 
@@ -185,7 +194,7 @@ content::WebContents* ExtensionAppsBase::LaunchAppWithIntentImpl(
     LaunchCallback callback) {
   const auto* extension = MaybeGetExtension(app_id);
   if (!extension || !extensions::util::IsAppLaunchable(app_id, profile_)) {
-    std::move(callback).Run(ConvertBoolToLaunchResult(/*success=*/false));
+    std::move(callback).Run(LaunchResult::kFailed);
     return nullptr;
   }
 
@@ -204,7 +213,7 @@ content::WebContents* ExtensionAppsBase::LaunchAppWithIntentImpl(
       extensions::GetLaunchContainer(extensions::ExtensionPrefs::Get(profile_),
                                      extension),
       std::move(intent), profile_);
-  std::move(callback).Run(ConvertBoolToLaunchResult(/*success=*/true));
+  std::move(callback).Run(LaunchResult::kSuccess);
   return LaunchImpl(std::move(params));
 }
 
@@ -216,8 +225,8 @@ void ExtensionAppsBase::LaunchAppWithParamsImpl(AppLaunchParams&& params,
                                                 LaunchCallback callback) {
   LaunchImpl(std::move(params));
 
-  // TODO(crbug.com/1244506): Add launch return value.
-  std::move(callback).Run(LaunchResult());
+  // TODO(crbug.com/40787924): Add launch return value.
+  std::move(callback).Run(LaunchResult::kFailed);
 }
 
 const extensions::Extension* ExtensionAppsBase::MaybeGetExtension(
@@ -345,6 +354,17 @@ void ExtensionAppsBase::Launch(const std::string& app_id,
     case apps::LaunchSource::kFromUrlHandler:
     case apps::LaunchSource::kFromLockScreen:
     case apps::LaunchSource::kFromAppHomePage:
+    case apps::LaunchSource::kFromReparenting:
+    case apps::LaunchSource::kFromProfileMenu:
+    case apps::LaunchSource::kFromSysTrayCalendar:
+    case apps::LaunchSource::kFromInstaller:
+    case apps::LaunchSource::kFromFirstRun:
+    case apps::LaunchSource::kFromWelcomeTour:
+    case apps::LaunchSource::kFromFocusMode:
+    case apps::LaunchSource::kFromSparky:
+    case apps::LaunchSource::kFromNavigationCapturing:
+    case apps::LaunchSource::kFromWebInstallApi:
+    case apps::LaunchSource::kFromMigration:
       break;
   }
 
@@ -404,8 +424,8 @@ void ExtensionAppsBase::Uninstall(const std::string& app_id,
                                   UninstallSource uninstall_source,
                                   bool clear_site_data,
                                   bool report_abuse) {
-  // TODO(crbug.com/1009248): We need to add the error code, which could be used
-  // by ExtensionFunction, ManagementUninstallFunctionBase on the callback
+  // TODO(crbug.com/40100977): We need to add the error code, which could be
+  // used by ExtensionFunction, ManagementUninstallFunctionBase on the callback
   // OnExtensionUninstallDialogClosed
   scoped_refptr<const extensions::Extension> extension =
       extensions::ExtensionRegistry::Get(profile())->GetInstalledExtension(
@@ -420,10 +440,8 @@ void ExtensionAppsBase::Uninstall(const std::string& app_id,
   }
 
   std::u16string error;
-  extensions::ExtensionSystem::Get(profile())
-      ->extension_service()
-      ->UninstallExtension(
-          app_id, GetExtensionUninstallReason(uninstall_source), &error);
+  extensions::ExtensionRegistrar::Get(profile())->UninstallExtension(
+      app_id, GetExtensionUninstallReason(uninstall_source), &error);
 
   if (!report_abuse) {
     return;
@@ -453,9 +471,10 @@ void ExtensionAppsBase::OpenNativeSettings(const std::string& app_id) {
 
   } else if (extensions::ui_util::ShouldDisplayInExtensionSettings(
                  *extension)) {
-    Browser* browser = chrome::FindTabbedBrowser(profile_, false);
+    BrowserWindowInterface* browser =
+        ProfileBrowserCollection::GetForProfile(profile_)->FindTabbedBrowser();
     if (!browser) {
-      browser = Browser::Create(Browser::CreateParams(profile_, true));
+      browser = CreateBrowserWindow(BrowserWindowCreateParams(profile_, true));
     }
 
     chrome::ShowExtensions(browser, extension->id());
@@ -533,7 +552,7 @@ void ExtensionAppsBase::OnExtensionInstalled(
     return;
   }
 
-  // TODO(crbug.com/826982): Does the is_update case need to be handled
+  // TODO(crbug.com/40569217): Does the is_update case need to be handled
   // differently? E.g. by only passing through fields that have changed.
   AppPublisher::Publish(CreateApp(extension, Readiness::kReady));
 }

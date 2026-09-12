@@ -9,25 +9,34 @@ import os
 import sys
 import unittest
 
-REPOSITORY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+REPOSITORY_ROOT = os.path.abspath(
+  os.path.join(os.path.dirname(__file__), '..', '..')
+)
 sys.path.append(os.path.join(REPOSITORY_ROOT, 'tools', 'licenses'))
 
 from spdx_writer import _get_spdx_path
 from spdx_writer import _Package
 from spdx_writer import _SPDXJSONWriter
-from test_utils import path_from_root
+
+_OS_ROOT = os.path.abspath(os.sep)
+
+
+def path_from_root(*paths: str):
+  return os.path.join(_OS_ROOT, *paths)
 
 
 class SpdxPathTest(unittest.TestCase):
   def test_get_spdx_path(self):
-    actual = _get_spdx_path(path_from_root('src'),
-                            path_from_root('src', 'root', 'third_party', 'abc'))
+    actual = _get_spdx_path(
+      path_from_root('src'), path_from_root('src', 'root', 'third_party', 'abc')
+    )
     self.assertEqual(actual, os.path.join(os.sep, 'root', 'third_party', 'abc'))
 
   def test_get_spdx_path_error(self):
     with self.assertRaises(ValueError):
-      _get_spdx_path(path_from_root('src'),
-                     path_from_root('some', 'other', 'path'))
+      _get_spdx_path(
+        path_from_root('src'), path_from_root('some', 'other', 'path')
+      )
 
 
 class PackageTest(unittest.TestCase):
@@ -48,8 +57,9 @@ class SPDXJSONWriterTest(unittest.TestCase):
     super().setUp()
 
     root_pkg = _Package('root', path_from_root('src', 'LICENSE'))
-    self.writer = _SPDXJSONWriter(path_from_root('src'), root_pkg, '', '',
-                                  '', lambda _: '')
+    self.writer = _SPDXJSONWriter(
+      path_from_root('src'), root_pkg, '', '', '', lambda _: ''
+    )
 
   def test_get_dedup_id(self):
     id_dict = collections.defaultdict(int)

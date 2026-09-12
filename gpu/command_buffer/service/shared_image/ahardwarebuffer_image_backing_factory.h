@@ -5,18 +5,22 @@
 #ifndef GPU_COMMAND_BUFFER_SERVICE_SHARED_IMAGE_AHARDWAREBUFFER_IMAGE_BACKING_FACTORY_H_
 #define GPU_COMMAND_BUFFER_SERVICE_SHARED_IMAGE_AHARDWAREBUFFER_IMAGE_BACKING_FACTORY_H_
 
-#include <dawn/dawn_proc_table.h>
-
+#include "base/containers/flat_set.h"
+#include "gpu/command_buffer/common/shared_image_info.h"
+#include "gpu/command_buffer/common/shared_image_usage.h"
+#include "gpu/command_buffer/service/gles2_cmd_validation.h"
 #include "gpu/command_buffer/service/shared_image/shared_image_backing_factory.h"
+#include "gpu/command_buffer/service/shared_image/shared_image_format_service_utils.h"
 #include "gpu/gpu_gles2_export.h"
 #include "ui/gl/gl_bindings.h"
 
 namespace gfx {
 class Size;
-class ColorSpace;
 }  // namespace gfx
 
 namespace gpu {
+
+class VulkanContextProvider;
 
 namespace gles2 {
 class FeatureInfo;
@@ -32,7 +36,8 @@ class GPU_GLES2_EXPORT AHardwareBufferImageBackingFactory
  public:
   explicit AHardwareBufferImageBackingFactory(
       const gles2::FeatureInfo* feature_info,
-      const GpuPreferences& gpu_preferences);
+      const GpuPreferences& gpu_preferences,
+      const scoped_refptr<VulkanContextProvider>& vulkan_context_provider);
 
   AHardwareBufferImageBackingFactory(
       const AHardwareBufferImageBackingFactory&) = delete;
@@ -44,61 +49,37 @@ class GPU_GLES2_EXPORT AHardwareBufferImageBackingFactory
   // SharedImageBackingFactory implementation.
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
+      const SharedImageInfo& si_info,
       SurfaceHandle surface_handle,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
       bool is_thread_safe) override;
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
+      const SharedImageInfo& si_info,
+      bool is_thread_safe,
       base::span<const uint8_t> pixel_data) override;
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      gfx::GpuMemoryBufferHandle handle,
-      gfx::BufferFormat format,
-      gfx::BufferPlane plane,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage) override;
-  bool IsSupported(uint32_t usage,
+      const SharedImageInfo& si_info,
+      bool is_thread_safe,
+      gfx::GpuMemoryBufferHandle handle) override;
+  bool IsSupported(SharedImageUsageSet usage,
                    viz::SharedImageFormat format,
                    const gfx::Size& size,
                    bool thread_safe,
                    gfx::GpuMemoryBufferType gmb_type,
                    GrContextType gr_context_type,
                    base::span<const uint8_t> pixel_data) override;
+  SharedImageBackingType GetBackingType() override;
   bool IsFormatSupported(viz::SharedImageFormat format);
+  bool IsSupportedForMappableBuffer(SharedImageUsageSet usage,
+                                    viz::SharedImageFormat format,
+                                    gfx::GpuMemoryBufferType gmb_type);
+  static bool CopyNativeBufferToSharedMemoryAsync(
+      gfx::GpuMemoryBufferHandle buffer_handle,
+      base::UnsafeSharedMemoryRegion shared_memory);
 
  private:
-  struct FormatInfo {
-    FormatInfo();
-    ~FormatInfo();
-
-    // Whether this format is supported by AHardwareBuffer.
-    bool ahb_supported = false;
-    unsigned int ahb_format = 0;
-
-    // Whether this format can be used to create a GL texture from the AHB.
-    bool gl_supported = false;
-
-    // GL internal_format/format/type triplet.
-    GLuint internal_format = 0;
-    GLenum gl_format = 0;
-    GLenum gl_type = 0;
-  };
-
-  bool ValidateUsage(uint32_t usage,
+  bool ValidateUsage(SharedImageUsageSet usage,
                      const gfx::Size& size,
                      viz::SharedImageFormat format) const;
 
@@ -106,27 +87,19 @@ class GPU_GLES2_EXPORT AHardwareBufferImageBackingFactory
 
   std::unique_ptr<SharedImageBacking> MakeBacking(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
+      const SharedImageInfo& si_info,
       bool is_thread_safe,
       base::span<const uint8_t> pixel_data);
 
-  // WARNING: Format must be single plane.
-  const FormatInfo& GetFormatInfo(viz::SharedImageFormat format) const {
-    return format_info_[format.resource_format()];
-  }
+  scoped_refptr<VulkanContextProvider> vulkan_context_provider_;
 
-  FormatInfo format_info_[viz::RESOURCE_FORMAT_MAX + 1];
+  base::flat_set<viz::SharedImageFormat> supported_gl_formats_;
 
   // Used to limit the max size of AHardwareBuffer.
   int32_t max_gl_texture_size_ = 0;
 
-  scoped_refptr<base::RefCountedData<DawnProcTable>> dawn_procs_;
   const bool use_passthrough_;
+  const GLFormatCaps gl_format_caps_;
 };
 
 }  // namespace gpu

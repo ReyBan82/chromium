@@ -10,7 +10,7 @@
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/i18n/file_util_icu.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/metrics/histogram.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
@@ -18,9 +18,8 @@
 #include "base/task/single_thread_task_runner_thread_mode.h"
 #include "base/task/task_traits.h"
 #include "base/threading/scoped_blocking_call.h"
+#include "build/branding_buildflags.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/chrome_for_testing/buildflags.h"
 #include "chrome/browser/policy/policy_path_parser.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
@@ -28,8 +27,9 @@
 #include "components/version_info/version_info.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/common/content_switches.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/constants/ash_switches.h"
 #endif
 
@@ -41,7 +41,7 @@
 
 #if !BUILDFLAG(IS_WIN)
 #include "chrome/common/channel_info.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
 #include "ui/base/l10n/l10n_util.h"
 #endif
 
@@ -51,8 +51,8 @@ namespace shell_integration {
 
 namespace {
 
-// TODO(crbug.com/773563): Remove |g_sequenced_task_runner| and use an instance
-// field / singleton instead.
+// TODO(crbug.com/40544199): Remove |g_sequenced_task_runner| and use an
+// instance field / singleton instead.
 #if BUILDFLAG(IS_WIN)
 base::LazyThreadPoolCOMSTATaskRunner g_sequenced_task_runner =
     LAZY_COM_STA_TASK_RUNNER_INITIALIZER(
@@ -75,7 +75,6 @@ bool IsValidDefaultWebClientState(DefaultWebClientState state) {
       break;
   }
   NOTREACHED();
-  return false;
 }
 
 void RunCallback(DefaultWebClientWorkerCallback callback,
@@ -129,6 +128,13 @@ base::CommandLine CommandLineArgsForLauncher(
   // during launch.
   if (!extension_app_id.empty()) {
     new_cmd_line.AppendSwitchASCII(switches::kAppId, extension_app_id);
+    // Add --enable-automation switch to support app launches against a browser
+    // process already running with --enable-automation. If not present, app
+    // launches will fail as process hand-off is prohibited in automation mode.
+    if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+            switches::kEnableAutomation)) {
+      new_cmd_line.AppendSwitch(switches::kEnableAutomation);
+    }
   } else {
     // Use '--app=url' instead of just 'url' to launch the browser with minimal
     // chrome.
@@ -140,6 +146,21 @@ base::CommandLine CommandLineArgsForLauncher(
     new_cmd_line.AppendSwitchASCII(switches::kAppRunOnOsLoginMode,
                                    run_on_os_login_mode);
   }
+
+  return new_cmd_line;
+}
+
+base::CommandLine CommandLineArgsForUrlShortcut(
+    const base::FilePath& chrome_exe_program,
+    const base::FilePath& profile_path,
+    const GURL& url) {
+  CHECK(!chrome_exe_program.empty());
+  CHECK(!profile_path.empty());
+  CHECK(url.is_valid());
+  base::CommandLine new_cmd_line(chrome_exe_program);
+  AppendProfileArgs(profile_path, &new_cmd_line);
+  new_cmd_line.AppendSwitch(switches::kIgnoreProfileDirectoryIfNotExists);
+  new_cmd_line.AppendArg(url.spec());
 
   return new_cmd_line;
 }
@@ -162,7 +183,7 @@ void AppendProfileArgs(const base::FilePath& profile_path,
       command_line->AppendSwitchPath(switches::kUserDataDir, user_data_dir);
   }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   base::FilePath profile =
       cmd_line.GetSwitchValuePath(ash::switches::kLoginProfile);
   if (!profile.empty())
@@ -267,31 +288,41 @@ DefaultBrowserWorker::DefaultBrowserWorker()
 
 DefaultBrowserWorker::~DefaultBrowserWorker() = default;
 
+// static
+bool DefaultBrowserWorker::g_disable_set_as_default_for_testing = false;
+
+// static
+void DefaultBrowserWorker::DisableSetAsDefaultForTesting() {
+  g_disable_set_as_default_for_testing = true;
+}
+
 DefaultWebClientState DefaultBrowserWorker::CheckIsDefaultImpl() {
   return GetDefaultBrowser();
 }
 
 void DefaultBrowserWorker::SetAsDefaultImpl(
     base::OnceClosure on_finished_callback) {
-  switch (GetDefaultBrowserSetPermission()) {
-    case SET_DEFAULT_NOT_ALLOWED:
-      // This is a no-op on channels where set-default is not allowed, but not
-      // an error.
-      break;
-    case SET_DEFAULT_UNATTENDED:
-      SetAsDefaultBrowser();
-      break;
-    case SET_DEFAULT_INTERACTIVE:
+  if (!g_disable_set_as_default_for_testing) {
+    switch (GetDefaultBrowserSetPermission()) {
+      case SET_DEFAULT_NOT_ALLOWED:
+        // This is a no-op on channels where set-default is not allowed, but not
+        // an error.
+        break;
+      case SET_DEFAULT_UNATTENDED:
+        SetAsDefaultBrowser();
+        break;
+      case SET_DEFAULT_INTERACTIVE:
 #if BUILDFLAG(IS_WIN)
-      if (interactive_permitted_) {
-        win::SetAsDefaultBrowserUsingSystemSettings(
-            std::move(on_finished_callback));
-        // Early return because the function above takes care of calling
-        // `on_finished_callback`.
-        return;
-      }
+        if (interactive_permitted_) {
+          win::SetAsDefaultBrowserUsingSystemSettings(
+              std::move(on_finished_callback));
+          // Early return because the function above takes care of calling
+          // `on_finished_callback`.
+          return;
+        }
 #endif  // BUILDFLAG(IS_WIN)
-      break;
+        break;
+    }
   }
   std::move(on_finished_callback).Run();
 }
@@ -305,7 +336,7 @@ DefaultSchemeClientWorker::DefaultSchemeClientWorker(const std::string& scheme)
 
 DefaultSchemeClientWorker::DefaultSchemeClientWorker(const GURL& url)
     : DefaultWebClientWorker("DefaultSchemeClient"),
-      scheme_(url.scheme()),
+      scheme_(url.GetScheme()),
       url_(url) {}
 
 void DefaultSchemeClientWorker::StartCheckIsDefaultAndGetDefaultClientName(
@@ -317,19 +348,31 @@ void DefaultSchemeClientWorker::StartCheckIsDefaultAndGetDefaultClientName(
           this, std::move(callback)));
 }
 
+#if BUILDFLAG(IS_WIN)
+void DefaultSchemeClientWorker::StartCheckIsDefaultAndGetDefaultClientProgId(
+    DefaultSchemeHandlerWorkerCallback callback) {
+  g_sequenced_task_runner.Get()->PostTask(
+      FROM_HERE,
+      base::BindOnce(
+          &DefaultSchemeClientWorker::CheckIsDefaultAndGetDefaultClientProgId,
+          this, std::move(callback)));
+}
+#endif
+
 ///////////////////////////////////////////////////////////////////////////////
 // DefaultSchemeClientWorker, protected:
 
 DefaultSchemeClientWorker::~DefaultSchemeClientWorker() = default;
 
-void DefaultSchemeClientWorker::OnCheckIsDefaultAndGetDefaultClientNameComplete(
-    DefaultWebClientState state,
-    std::u16string program_name,
-    DefaultSchemeHandlerWorkerCallback callback) {
+void DefaultSchemeClientWorker::
+    OnCheckIsDefaultAndGetDefaultClientValueComplete(
+        DefaultWebClientState state,
+        std::u16string client_value,
+        DefaultSchemeHandlerWorkerCallback callback) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   if (!callback.is_null() && IsValidDefaultWebClientState(state)) {
-    std::move(callback).Run(state, program_name);
+    std::move(callback).Run(state, client_value);
   }
 }
 
@@ -347,9 +390,26 @@ void DefaultSchemeClientWorker::CheckIsDefaultAndGetDefaultClientName(
   content::GetUIThreadTaskRunner({})->PostTask(
       FROM_HERE,
       base::BindOnce(&DefaultSchemeClientWorker::
-                         OnCheckIsDefaultAndGetDefaultClientNameComplete,
+                         OnCheckIsDefaultAndGetDefaultClientValueComplete,
                      this, state, program_name, std::move(callback)));
 }
+
+#if BUILDFLAG(IS_WIN)
+void DefaultSchemeClientWorker::CheckIsDefaultAndGetDefaultClientProgId(
+    DefaultSchemeHandlerWorkerCallback callback) {
+  DCHECK(!url_.is_empty());
+  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                base::BlockingType::MAY_BLOCK);
+
+  DefaultWebClientState state = CheckIsDefaultImpl();
+  std::u16string program_id = GetDefaultClientProgIdImpl();
+  content::GetUIThreadTaskRunner({})->PostTask(
+      FROM_HERE,
+      base::BindOnce(&DefaultSchemeClientWorker::
+                         OnCheckIsDefaultAndGetDefaultClientValueComplete,
+                     this, state, program_id, std::move(callback)));
+}
+#endif
 
 DefaultWebClientState DefaultSchemeClientWorker::CheckIsDefaultImpl() {
   return IsDefaultClientForScheme(scheme_);
@@ -358,6 +418,12 @@ DefaultWebClientState DefaultSchemeClientWorker::CheckIsDefaultImpl() {
 std::u16string DefaultSchemeClientWorker::GetDefaultClientNameImpl() {
   return GetApplicationNameForScheme(url_);
 }
+
+#if BUILDFLAG(IS_WIN)
+std::u16string DefaultSchemeClientWorker::GetDefaultClientProgIdImpl() {
+  return GetProgIdForScheme(url_);
+}
+#endif
 
 void DefaultSchemeClientWorker::SetAsDefaultImpl(
     base::OnceClosure on_finished_callback) {

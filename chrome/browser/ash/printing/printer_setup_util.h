@@ -5,18 +5,20 @@
 #ifndef CHROME_BROWSER_ASH_PRINTING_PRINTER_SETUP_UTIL_H_
 #define CHROME_BROWSER_ASH_PRINTING_PRINTER_SETUP_UTIL_H_
 
+#include <optional>
+
 #include "base/functional/callback_forward.h"
 #include "chrome/browser/ash/printing/cups_printers_manager.h"
-#include "chrome/browser/ash/printing/printer_configurer.h"
 #include "chromeos/printing/printer_configuration.h"
 #include "printing/backend/print_backend.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+class ApplicationLocaleStorage;
 
 namespace ash {
 namespace printing {
 
 using GetPrinterCapabilitiesCallback = base::OnceCallback<void(
-    const absl::optional<::printing::PrinterSemanticCapsAndDefaults>&)>;
+    const std::optional<::printing::PrinterSemanticCapsAndDefaults>&)>;
 
 // Sets up a printer (if necessary) and runs a callback with the printer
 // capabilities once printer setup is complete. The callback is run
@@ -24,8 +26,10 @@ using GetPrinterCapabilitiesCallback = base::OnceCallback<void(
 // This function must be called from the UI thread.
 // This function is called when setting up a printer from Print Preview
 // and records a metric with the printer setup result code.
-void SetUpPrinter(CupsPrintersManager* printers_manager,
-                  PrinterConfigurer* printer_configurer,
+// `application_locale_storage` must be non-null and remain valid while the
+// main RunLoop is running.
+void SetUpPrinter(const ApplicationLocaleStorage* application_locale_storage,
+                  CupsPrintersManager* printers_manager,
                   const chromeos::Printer& printer,
                   GetPrinterCapabilitiesCallback cb);
 

@@ -8,60 +8,72 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
-import android.graphics.Rect;
-import android.os.Build;
-import android.os.Build.VERSION;
-import android.os.Build.VERSION_CODES;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.PersistableBundle;
 import android.os.SystemClock;
 import android.view.Display;
-import android.view.Menu;
 import android.view.View;
 import android.view.WindowManager;
 
 import androidx.annotation.CallSuper;
-import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.StrictModeContext;
+import org.chromium.base.Log;
+import org.chromium.base.ResettersForTesting;
 import org.chromium.base.SysUtils;
 import org.chromium.base.TraceEvent;
-import org.chromium.base.compat.ApiHelperForR;
-import org.chromium.base.library_loader.LibraryLoader;
 import org.chromium.base.library_loader.LoaderErrors;
 import org.chromium.base.library_loader.ProcessInitException;
+import org.chromium.base.supplier.OneshotSupplier;
+import org.chromium.build.BuildConfig;
+import org.chromium.build.annotations.EnsuresNonNullIf;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.MonotonicNonNull;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeBaseAppCompatActivity;
 import org.chromium.chrome.browser.IntentHandler;
 import org.chromium.chrome.browser.LaunchIntentDispatcher;
 import org.chromium.chrome.browser.WarmupManager;
+import org.chromium.chrome.browser.base.ColdStartTracker;
 import org.chromium.chrome.browser.firstrun.FirstRunFlowSequencer;
 import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.chrome.browser.incognito.IncognitoUtils;
 import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcher;
+import org.chromium.chrome.browser.lifecycle.ActivityLifecycleDispatcherProvider;
 import org.chromium.chrome.browser.metrics.SimpleStartupForegroundSessionDetector;
 import org.chromium.chrome.browser.multiwindow.MultiWindowModeStateDispatcher;
 import org.chromium.chrome.browser.multiwindow.MultiWindowModeStateDispatcherImpl;
+import org.chromium.chrome.browser.multiwindow.WindowOcclusionTracker;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.browser.tasks.tab_management.TabUiFeatureUtilities;
-import org.chromium.chrome.features.start_surface.StartSurfaceConfiguration;
+import org.chromium.chrome.browser.profiles.ProfileProvider;
+import org.chromium.chrome.browser.tabmodel.SupportedProfileType;
+import org.chromium.chrome.browser.util.BrowserUiUtils;
+import org.chromium.components.browser_ui.share.ShareHelper;
 import org.chromium.components.browser_ui.util.FirstDrawDetector;
 import org.chromium.ui.base.ActivityIntentRequestTrackerDelegate;
 import org.chromium.ui.base.ActivityWindowAndroid;
 import org.chromium.ui.base.DeviceFormFactor;
 import org.chromium.ui.base.IntentRequestTracker;
+import org.chromium.ui.base.UiAndroidFeatureList;
 import org.chromium.ui.base.WindowAndroid;
-import org.chromium.ui.display.DisplayAndroid;
 import org.chromium.ui.display.DisplayUtil;
+import org.chromium.ui.widget.Toast;
 
 /**
  * An activity that talks with application and activity level delegates for async initialization.
  */
-public abstract class AsyncInitializationActivity
-        extends ChromeBaseAppCompatActivity implements ChromeActivityNativeDelegate, BrowserParts {
+@NullMarked
+public abstract class AsyncInitializationActivity extends ChromeBaseAppCompatActivity
+        implements ChromeActivityNativeDelegate, BrowserParts, ActivityLifecycleDispatcherProvider {
     @VisibleForTesting
     public static final String FIRST_DRAW_COMPLETED_TIME_MS_UMA = "FirstDrawCompletedTime";
-    private static final String TAG = "AsyncInitActivity";
+
+    public static final String TAG_PERSIST_ACROSS_REBOOTS = "PersistAcrossReboots";
+    public static final String TAG_MULTI_INSTANCE = "MultiInstance";
+
     protected final Handler mHandler;
 
     private final NativeInitializationController mNativeInitializationController =
@@ -76,11 +88,25 @@ public abstract class AsyncInitializationActivity
     /** Time at which onCreate is called. This is realtime, counted in ms since device boot. */
     private long mOnCreateTimestampMs;
 
-    private ActivityWindowAndroid mWindowAndroid;
-    private Bundle mSavedInstanceState;
+    /** Time at which onPause is called. */
+    private long mOnPauseTimestampMs;
+
+    /** Time at which onStart is called. */
+    private long mOnStartTimestampMs;
+
+    /**
+     * Time at which onPause is called before the activity is recreated due to unfolding. The
+     * timestamp is captured only if recreation starts when the activity is not in stopped state.
+     */
+    private long mOnPauseBeforeFoldRecreateTimestampMs;
+
+    private @Nullable ActivityWindowAndroid mWindowAndroid;
+    private @MonotonicNonNull OneshotSupplier<ProfileProvider> mProfileProviderSupplier;
+    private @Nullable Bundle mSavedInstanceState;
+    private boolean mReceivedPersistentState;
+    private @Nullable PersistableBundle mPersistentInstanceState;
     private int mCurrentOrientation;
     private boolean mDestroyed;
-    private long mLastUserInteractionTime;
     private boolean mIsTablet;
     private boolean mHadWarmStart;
     private boolean mIsWarmOnResume;
@@ -92,7 +118,7 @@ public abstract class AsyncInitializationActivity
     private boolean mStartupDelayed;
     private boolean mFirstDrawComplete;
 
-    private Runnable mOnInflationCompleteCallback;
+    private @Nullable Runnable mOnInflationCompleteCallback;
     private boolean mInitialLayoutInflationComplete;
 
     // See enableHardwareAcceleration()
@@ -103,13 +129,14 @@ public abstract class AsyncInitializationActivity
 
     public AsyncInitializationActivity() {
         mHandler = new Handler();
-        mIntentRequestTracker = IntentRequestTracker.createFromDelegate(
-                new ActivityIntentRequestTrackerDelegate(this) {
-                    @Override
-                    public boolean onCallbackNotFoundError(String error) {
-                        return onIntentCallbackNotFoundError(error);
-                    }
-                });
+        mIntentRequestTracker =
+                IntentRequestTracker.createFromDelegate(
+                        new ActivityIntentRequestTrackerDelegate(this) {
+                            @Override
+                            public boolean onCallbackNotFoundError(String error) {
+                                return onIntentCallbackNotFoundError(error);
+                            }
+                        });
     }
 
     /** Get the tracker of this activity's intents. */
@@ -121,34 +148,51 @@ public abstract class AsyncInitializationActivity
     @Override
     protected void onDestroy() {
         mDestroyed = true;
-        mLifecycleDispatcher.onDestroyStarted();
 
+        // Dispatch onDestroy() for objects created for the activity.
+        mLifecycleDispatcher.dispatchOnDestroy();
+
+        // Destroy ActivityWindowAndroid if it exists. This must be after
+        // mLifecycleDispatcher.dispatchOnDestroy() because objects subscribing to
+        // mLifecycleDispatcher's onDestroy events may have references to ActivityWindowAndroid.
         if (mWindowAndroid != null) {
+            if (isSelfOcclusionTrackingEnabled()) {
+                WindowOcclusionTracker.getInstance().untrack(mWindowAndroid);
+            }
             mWindowAndroid.destroy();
             mWindowAndroid = null;
         }
 
+        // Finally, destroy the activity. This must be after destroying ActivityWindowAndroid
+        // because it has a reference to the Activity.
         super.onDestroy();
-        mLifecycleDispatcher.dispatchOnDestroy();
     }
 
     @Override
-    @CallSuper
     protected boolean applyOverrides(Context baseContext, Configuration overrideConfig) {
-        super.applyOverrides(baseContext, overrideConfig);
-
-        // We override the smallestScreenWidthDp here for two reasons:
-        // 1. To prevent multi-window from hiding the tabstrip when on a tablet.
-        // 2. To ensure mIsTablet only needs to be set once. Since the override lasts for the life
-        //    of the activity, it will never change via onConfigurationUpdated().
-        // See crbug.com/588838, crbug.com/662338, crbug.com/780593.
-        overrideConfig.smallestScreenWidthDp = getCurrentSmallestScreenWidth(baseContext);
-        return true;
+        boolean result = super.applyOverrides(baseContext, overrideConfig);
+        if (!UiAndroidFeatureList.sRefactorMinWidthContextOverride.isEnabled()) {
+            // We override the smallestScreenWidthDp here for two reasons:
+            // 1. To prevent multi-window from hiding the tabstrip when on a tablet.
+            // 2. To ensure mIsTablet only needs to be set once. Since the override lasts for the
+            //    life of the activity, it will never change via onConfigurationUpdated().
+            // See crbug.com/40457992, crbug.com/40492108, crbug.com/41353023.
+            overrideConfig.smallestScreenWidthDp =
+                    DisplayUtil.getCurrentSmallestScreenWidth(baseContext);
+            return true;
+        }
+        return result;
     }
 
     @Override
     public final void preInflationStartup() {
         performPreInflationStartup();
+    }
+
+    // Returns whether startup was cold or not.
+    protected boolean isColdStart() {
+        return ColdStartTracker.wasColdOnFirstActivityCreationOrNow()
+                && SimpleStartupForegroundSessionDetector.runningCleanForegroundSession();
     }
 
     /**
@@ -158,59 +202,42 @@ public abstract class AsyncInitializationActivity
     @CallSuper
     protected void performPreInflationStartup() {
         mIsTablet = DeviceFormFactor.isNonMultiDisplayContextOnTablet(this);
-        mHadWarmStart = LibraryLoader.getInstance().isInitialized();
-        // TODO(https://crbug.com/948745): Dispatch in #preInflationStartup instead so that
+        mHadWarmStart = !isColdStart();
+        SimpleStartupForegroundSessionDetector.onTransitionToForeground();
+        // TODO(crbug.com/40621278): Dispatch in #preInflationStartup instead so that
         // subclass's #performPreInflationStartup has executed before observers are notified.
         mLifecycleDispatcher.dispatchPreInflationStartup();
     }
 
     @Override
     public final void setContentViewAndLoadLibrary(Runnable onInflationCompleteCallback) {
-        boolean enableInstantStart = isInstantStartEnabled() && !mHadWarmStart;
         mOnInflationCompleteCallback = onInflationCompleteCallback;
-        if (enableInstantStart) {
-            triggerLayoutInflation();
-        }
 
-        // Start loading libraries. It happens before triggerLayoutInflation() for regular startup,
-        // but after triggerLayoutInflation() for instant start because we prioritize a Java UI and
-        // not rendering web content. This "hides" library loading behind UI inflation and prevents
-        // stalling UI thread. See https://crbug.com/796957 for details. Note that for optimal
-        // performance AsyncInitTaskRunner.startBackgroundTasks() needs to start warmup renderer
-        // only after library is loaded.
+        // Start loading libraries. It happens before triggerLayoutInflation(). This "hides" library
+        // loading behind UI inflation and prevents stalling UI thread.
+        // See https://crbug.com/41361935 for details. Note that for optimal performance
+        // AsyncInitTaskRunner.startBackgroundTasks() needs to start warm up renderer only after
+        // library is loaded.
 
         if (!mStartupDelayed) {
             // Kick off long running IO tasks that can be done in parallel.
             mNativeInitializationController.startBackgroundTasks(shouldAllocateChildConnection());
         }
 
-        if (!enableInstantStart) {
-            triggerLayoutInflation();
-        }
+        triggerLayoutInflation();
     }
 
-    /** Controls the parameter of {@link NativeInitializationController#startBackgroundTasks}.*/
+    /** Controls the parameter of {@link NativeInitializationController#startBackgroundTasks}. */
     @VisibleForTesting
     public boolean shouldAllocateChildConnection() {
-        // If a spare WebContents exists, a child connection has already been allocated that will be
-        // used by the next created tab.
-        return !WarmupManager.getInstance().hasSpareWebContents();
+        return false;
     }
 
     @Override
     public final void postInflationStartup() {
         performPostInflationStartup();
-        dispatchOnInflationComplete();
-        mLifecycleDispatcher.dispatchPostInflationStartup();
-    }
-
-    /**
-     * This function allows subclasses overriding and adding additional tasks between calling
-     * mLifecycleDispatcher.dispatchOnInflationComplete() and
-     * mLifecycleDispatcher.dispatchPostInflationStartup().
-     */
-    protected void dispatchOnInflationComplete() {
         mLifecycleDispatcher.dispatchOnInflationComplete();
+        mLifecycleDispatcher.dispatchPostInflationStartup();
     }
 
     /**
@@ -221,15 +248,17 @@ public abstract class AsyncInitializationActivity
     protected void performPostInflationStartup() {
         View firstDrawView = getViewToBeDrawnBeforeInitializingNative();
         assert firstDrawView != null;
-        FirstDrawDetector.waitForFirstDraw(firstDrawView, () -> {
-            mFirstDrawComplete = true;
-            StartSurfaceConfiguration.recordHistogram(FIRST_DRAW_COMPLETED_TIME_MS_UMA,
-                    SystemClock.elapsedRealtime() - getOnCreateTimestampMs(),
-                    isInstantStartEnabled());
-            if (!mStartupDelayed) {
-                onFirstDrawComplete();
-            }
-        });
+        FirstDrawDetector.waitForFirstDraw(
+                firstDrawView,
+                () -> {
+                    mFirstDrawComplete = true;
+                    BrowserUiUtils.recordHistogram(
+                            FIRST_DRAW_COMPLETED_TIME_MS_UMA,
+                            SystemClock.elapsedRealtime() - getOnCreateTimestampMs());
+                    if (!mStartupDelayed) {
+                        onFirstDrawComplete();
+                    }
+                });
     }
 
     /**
@@ -246,68 +275,104 @@ public abstract class AsyncInitializationActivity
             TraceEvent.begin("maybePreconnect");
             Intent intent = getIntent();
             if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) return;
+            // Preconnect is too late if we've already started navigation early.
+            if (intent.getBooleanExtra(IntentHandler.EXTRA_CCT_EARLY_NAV, false)) return;
             String url = IntentHandler.getUrlFromIntent(intent);
             if (url == null) return;
             // Blocking pre-connect for all off-the-record profiles.
-            if (!IntentHandler.hasAnyIncognitoExtra(intent.getExtras())) {
-                WarmupManager.getInstance().maybePreconnectUrlAndSubResources(
-                        Profile.getLastUsedRegularProfile(), url);
-            }
+            if (IntentHandler.hasAnyIncognitoExtra(intent.getExtras())) return;
+            assert getProfileProviderSupplier().get() != null;
+            getProfileProviderSupplier()
+                    .runSyncOrOnAvailable(
+                            (ProfileProvider profileProvider) ->
+                                    WarmupManager.getInstance()
+                                            .maybePreconnectUrlAndSubResources(
+                                                    profileProvider.getOriginalProfile(), url));
         } finally {
             TraceEvent.end("maybePreconnect");
         }
     }
 
     @Override
-    public void initializeCompositor() { }
+    public void initializeCompositor() {}
 
     @Override
-    public void initializeState() { }
+    public void initializeState() {}
 
     @CallSuper
     @Override
     public void finishNativeInitialization() {
         // Set up the initial orientation of the device.
         checkOrientation();
-        findViewById(android.R.id.content).addOnLayoutChangeListener(
-                new View.OnLayoutChangeListener() {
-                    @Override
-                    public void onLayoutChange(View v, int left, int top, int right, int bottom,
-                            int oldLeft, int oldTop, int oldRight, int oldBottom) {
-                        checkOrientation();
-                    }
-                });
+        findViewById(android.R.id.content)
+                .addOnLayoutChangeListener((_, _, _, _, _, _, _, _, _) -> checkOrientation());
         mNativeInitializationController.onNativeInitializationComplete();
         mLifecycleDispatcher.dispatchNativeInitializationFinished();
     }
 
     @CallSuper
     @Override
-    public void onStartupFailure(Exception failureCause) {
+    public void onStartupFailure(@Nullable Exception failureCause) {
         throw new ProcessInitException(LoaderErrors.NATIVE_STARTUP_FAILED, failureCause);
+    }
+
+    @CallSuper
+    @Override
+    public void onTopResumedActivityChangedWithNative(boolean isTopResumedActivity) {
+        mLifecycleDispatcher.dispatchOnTopResumedActivityChangedWithNative(isTopResumedActivity);
     }
 
     /**
      * Extending classes should override {@link AsyncInitializationActivity#preInflationStartup()},
-     * {@link AsyncInitializationActivity#triggerLayoutInflation()} and
-     * {@link AsyncInitializationActivity#postInflationStartup()} instead of this call which will
-     * be called on that order.
+     * {@link AsyncInitializationActivity#triggerLayoutInflation()} and {@link
+     * AsyncInitializationActivity#postInflationStartup()} instead of this call which will be called
+     * on that order.
      */
     @Override
-    @SuppressLint("MissingSuperCall")  // Called in onCreateInternal.
-    protected final void onCreate(Bundle savedInstanceState) {
+    @SuppressLint("MissingSuperCall") // Called in onCreateInternal.
+    protected final void onCreate(@Nullable Bundle savedInstanceState) {
         TraceEvent.begin("AsyncInitializationActivity.onCreate()");
+        if (ChromeFeatureList.sClearIntentWhenRecreated.isEnabled()) {
+            setIntent(IntentHandler.rewriteFromHistoryIntent(getIntent(), savedInstanceState));
+        }
         onPreCreate();
         boolean willCreate = onCreateInternal(savedInstanceState);
         if (!willCreate) {
             onAbortCreate();
+        } else {
+            onPostCreate();
         }
         TraceEvent.end("AsyncInitializationActivity.onCreate()");
     }
 
+    @Override
+    public void onCreate(
+            @Nullable Bundle savedInstanceState, @Nullable PersistableBundle outPersistentState) {
+        if (ChromeFeatureList.sPersistAcrossRebootsDebugLogs.isEnabled()) {
+            Log.i(TAG_PERSIST_ACROSS_REBOOTS, "onCreate()");
+        }
+        if (shouldPersistAcrossReboots()) {
+            mReceivedPersistentState = outPersistentState != null;
+            if (ChromeFeatureList.sPersistAcrossRebootsDebugLogs.isEnabled()) {
+                Log.i(
+                        TAG_PERSIST_ACROSS_REBOOTS,
+                        mReceivedPersistentState ? "Has persistent state" : "No persistent state");
+            }
+            mPersistentInstanceState = outPersistentState;
+            verifyPersistentState(outPersistentState);
+        }
+        super.onCreate(savedInstanceState, outPersistentState);
+    }
+
     /**
-     * Override to perform operations in the first opportunity after the framework calls
-     * {@link #onCreate}. Note the activity may still be aborted by {@link #onCreateInternal}.
+     * Verify that the persistent state received matches the latest state that was saved, if
+     * applicable.
+     */
+    protected void verifyPersistentState(@Nullable PersistableBundle outPersistentState) {}
+
+    /**
+     * Override to perform operations in the first opportunity after the framework calls {@link
+     * #onCreate}. Note the activity may still be aborted by {@link #onCreateInternal}.
      */
     protected void onPreCreate() {}
 
@@ -318,23 +383,34 @@ public abstract class AsyncInitializationActivity
     protected void onAbortCreate() {}
 
     /**
-     * Called from onCreate() to give derived classes a chance to dispatch the intent using
-     * {@link LaunchIntentDispatcher}. If the method returns anything other than Action.CONTINUE,
-     * the activity is aborted. Default implementation returns Action.CONTINUE.
+     * Override to perform operations after the framework successfully calls {@link
+     * #onCreateInternal}. This method is used in the ChromeActivity derived class to increment the
+     * "Chrome.UMA.OnPostCreateCounter2" counter for the histogram
+     * UMA.AndroidPreNative.ChromeActivityCounter2.
+     */
+    protected void onPostCreate() {}
+
+    /**
+     * Called from onCreate() to give derived classes a chance to dispatch the intent using {@link
+     * LaunchIntentDispatcher}. If the method returns anything other than Action.CONTINUE, the
+     * activity is aborted. Default implementation returns Action.CONTINUE.
+     *
      * @param intent intent to dispatch
      * @return {@link LaunchIntentDispatcher.Action} to take
      */
     protected @LaunchIntentDispatcher.Action int maybeDispatchLaunchIntent(
-            Intent intent, Bundle savedInstanceState) {
+            Intent intent, @Nullable Bundle savedInstanceState) {
         return LaunchIntentDispatcher.Action.CONTINUE;
     }
 
     /**
      * @return true if will proceed with Activity creation, false if will abort.
      */
-    private final boolean onCreateInternal(Bundle savedInstanceState) {
+    private boolean onCreateInternal(@Nullable Bundle savedInstanceState) {
         initializeStartupMetrics();
-        setIntent(IntentHandler.rewriteFromHistoryIntent(getIntent()));
+        if (!ChromeFeatureList.sClearIntentWhenRecreated.isEnabled()) {
+            setIntent(IntentHandler.rewriteFromHistoryIntent(getIntent(), null));
+        }
 
         @LaunchIntentDispatcher.Action
         int dispatchAction = maybeDispatchLaunchIntent(getIntent(), savedInstanceState);
@@ -350,23 +426,38 @@ public abstract class AsyncInitializationActivity
         }
 
         if (requiresFirstRunToBeCompleted(intent)
-                && FirstRunFlowSequencer.launch(this, intent, false /* requiresBroadcast */,
-                        shouldPreferLightweightFre(intent))) {
+                && FirstRunFlowSequencer.launch(this, intent, shouldPreferLightweightFre(intent))) {
             abortLaunch(LaunchIntentDispatcher.Action.FINISH_ACTIVITY);
             return false;
         }
 
-        // Some Samsung devices load fonts from disk, crbug.com/691706.
-        try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
-            super.onCreate(transformSavedInstanceStateForOnCreate(savedInstanceState));
-        }
+        super.onCreate(transformSavedInstanceStateForOnCreate(savedInstanceState));
         mOnCreateTimestampMs = SystemClock.elapsedRealtime();
         mSavedInstanceState = savedInstanceState;
 
         mWindowAndroid = createWindowAndroid();
+        if (isSelfOcclusionTrackingEnabled()) {
+            WindowOcclusionTracker.getInstance().track(mWindowAndroid);
+        }
         mIntentRequestTracker.restoreInstanceState(getSavedInstanceState());
+        mProfileProviderSupplier = createProfileProvider();
+        if (getSupportedProfileType() == SupportedProfileType.OFF_THE_RECORD) {
+            mProfileProviderSupplier.runSyncOrOnAvailable(
+                    (profileProvider) -> {
+                        Profile profile = profileProvider.getOriginalProfile();
+                        if (profile != null && !IncognitoUtils.isIncognitoModeEnabled(profile)) {
+                            Toast.makeText(
+                                            AsyncInitializationActivity.this,
+                                            R.string.incognito_not_available_message,
+                                            Toast.LENGTH_LONG)
+                                    .show();
+                            finishAndRemoveTask();
+                        }
+                    });
+        }
 
         mStartupDelayed = shouldDelayBrowserStartup();
+
         ChromeBrowserInitializer.getInstance().handlePreNativeStartupAndLoadLibraries(this);
         return true;
     }
@@ -398,9 +489,7 @@ public abstract class AsyncInitializationActivity
         overridePendingTransition(0, R.anim.no_anim);
     }
 
-    /**
-     * Call to begin loading the library, if it was delayed.
-     */
+    /** Call to begin loading the library, if it was delayed. */
     @CallSuper
     protected void startDelayedNativeInitialization() {
         assert mStartupDelayed;
@@ -412,17 +501,9 @@ public abstract class AsyncInitializationActivity
         if (mFirstDrawComplete) onFirstDrawComplete();
     }
 
-    @VisibleForTesting
     public void startDelayedNativeInitializationForTests() {
         mStartupDelayed = true;
         startDelayedNativeInitialization();
-    }
-
-    /**
-     * @return Whether the native library initialization is delayed at this point.
-     */
-    protected boolean isStartupDelayed() {
-        return mStartupDelayed;
     }
 
     /**
@@ -434,10 +515,11 @@ public abstract class AsyncInitializationActivity
     }
 
     /**
-     * Allows subclasses to override the instance state passed to super.onCreate().
-     * The original instance state will still be available via getSavedInstanceState().
+     * Allows subclasses to override the instance state passed to super.onCreate(). The original
+     * instance state will still be available via getSavedInstanceState().
      */
-    protected Bundle transformSavedInstanceStateForOnCreate(Bundle savedInstanceState) {
+    protected @Nullable Bundle transformSavedInstanceStateForOnCreate(
+            @Nullable Bundle savedInstanceState) {
         return savedInstanceState;
     }
 
@@ -457,11 +539,16 @@ public abstract class AsyncInitializationActivity
         return false;
     }
 
-    /**
-     * Whether or not the Activity was started up via a valid Intent.
-     */
+    /** Whether or not the Activity was started up via a valid Intent. */
     protected boolean isStartedUpCorrectly(Intent intent) {
         return true;
+    }
+
+    /**
+     * @return The supported profile type for this activity.
+     */
+    protected @SupportedProfileType int getSupportedProfileType() {
+        return SupportedProfileType.UNSET;
     }
 
     /**
@@ -472,33 +559,100 @@ public abstract class AsyncInitializationActivity
     }
 
     /**
+     * @return The timestamp for the activity OnStart event in ms.
+     */
+    protected long getOnStartTimestampMs() {
+        return mOnStartTimestampMs;
+    }
+
+    /**
+     * @return The timestamp for OnPause event before activity restarts due to unfolding in ms.
+     */
+    protected long getOnPauseBeforeFoldRecreateTimestampMs() {
+        try (TraceEvent _ =
+                TraceEvent.scoped(
+                        "AsyncInit.getOnPauseBeforeFoldRecreateTimestampMs",
+                        Long.toString(mOnPauseBeforeFoldRecreateTimestampMs))) {
+            return mOnPauseBeforeFoldRecreateTimestampMs;
+        }
+    }
+
+    protected void setOnPauseBeforeFoldRecreateTimestampMs() {
+        try (TraceEvent _ =
+                TraceEvent.scoped(
+                        "AsyncInit.setOnPauseBeforeFoldRecreateTimestampMs",
+                        Long.toString(mOnPauseTimestampMs))) {
+            mOnPauseBeforeFoldRecreateTimestampMs = mOnPauseTimestampMs;
+        }
+    }
+
+    /**
      * @return The saved bundle for the last recorded state.
      */
-    public Bundle getSavedInstanceState() {
+    public @Nullable Bundle getSavedInstanceState() {
         return mSavedInstanceState;
     }
 
     /**
-     * Resets the saved state and makes it unavailable for the rest of the activity lifecycle.
+     * @return The saved {@link PersistableBundle} for the last persisted state.
      */
+    public @Nullable PersistableBundle getPersistentInstanceState() {
+        if (!shouldPersistAcrossReboots()) {
+            assert mPersistentInstanceState == null
+                    : "Persistent state should be null if the feature is not enabled.";
+            return null;
+        }
+        return mPersistentInstanceState;
+    }
+
+    /**
+     * @return Whether persistent state was restored during this session, i.e. whether a non-null
+     *     {@link PersistableBundle} was received from the OS in this Activity's #onCreate().
+     */
+    public boolean wasPersistentStateRestored() {
+        return mReceivedPersistentState;
+    }
+
+    /** Resets the saved state and makes it unavailable for the rest of the activity lifecycle. */
     protected void resetSavedInstanceState() {
         mSavedInstanceState = null;
+    }
+
+    /**
+     * Resets the persistent state and makes it unavailable for the rest of the activity lifecycle.
+     */
+    protected void resetPersistentInstanceState() {
+        mPersistentInstanceState = null;
     }
 
     @CallSuper
     @Override
     public void onStart() {
+        mOnStartTimestampMs = SystemClock.uptimeMillis();
         super.onStart();
         mNativeInitializationController.onStart();
 
         // Since this activity is being started, the FRE should have been handled somehow already.
         Intent intent = getIntent();
         if (FirstRunFlowSequencer.checkIfFirstRunIsNecessary(
-                    shouldPreferLightweightFre(intent), intent)
+                        shouldPreferLightweightFre(intent), intent)
                 && requiresFirstRunToBeCompleted(intent)) {
-            throw new IllegalStateException("The app has not completed the FRE yet "
-                    + getClass().getName() + " is trying to start.");
+            throw new IllegalStateException(
+                    "The app has not completed the FRE yet "
+                            + getClass().getName()
+                            + " is trying to start.");
         }
+    }
+
+    @EnsuresNonNullIf("mWindowAndroid")
+    private boolean isSelfOcclusionTrackingEnabled() {
+        return mWindowAndroid != null
+                && mWindowAndroid.isOcclusionTrackingAllowed()
+                && UiAndroidFeatureList.sAndroidWindowOcclusion.isEnabled()
+                && "self_occlusion"
+                        .equals(
+                                UiAndroidFeatureList.sAndroidWindowOcclusionTrackingMode
+                                        .getValue());
     }
 
     @CallSuper
@@ -506,17 +660,22 @@ public abstract class AsyncInitializationActivity
     public void onResume() {
         super.onResume();
 
+        if (!mFirstResumePending) {
+            // The foreground transition for the first onResume() is handled in
+            // #performPreInflationStartup().
+            SimpleStartupForegroundSessionDetector.onTransitionToForeground();
+        }
         // Start by setting the launch as cold or warm. It will be used in some resume handlers.
         mIsWarmOnResume = !mFirstResumePending || hadWarmStart();
         mFirstResumePending = false;
 
-        SimpleStartupForegroundSessionDetector.onTransitionToForeground();
         mNativeInitializationController.onResume();
     }
 
     @CallSuper
     @Override
     public void onPause() {
+        mOnPauseTimestampMs = SystemClock.uptimeMillis();
         SimpleStartupForegroundSessionDetector.discardSession();
         mNativeInitializationController.onPause();
         super.onPause();
@@ -534,6 +693,7 @@ public abstract class AsyncInitializationActivity
     @SuppressLint("MissingSuperCall") // Empty method in parent Activity class.
     public void onNewIntent(Intent intent) {
         if (intent == null) return;
+        if (ShareHelper.isCleanerIntent(intent)) return;
         mNativeInitializationController.onNewIntent(intent);
         setIntent(intent);
     }
@@ -541,7 +701,7 @@ public abstract class AsyncInitializationActivity
     @CallSuper
     @Override
     @SuppressLint("MissingSuperCall") // Empty method in parent Activity class.
-    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+    public void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         mNativeInitializationController.onActivityResult(requestCode, resultCode, data);
     }
 
@@ -575,6 +735,13 @@ public abstract class AsyncInitializationActivity
         mLifecycleDispatcher.dispatchOnStopWithNative();
     }
 
+    @CallSuper
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        mLifecycleDispatcher.dispatchOnUserLeaveHint();
+    }
+
     @Override
     public boolean isActivityFinishingOrDestroyed() {
         return mDestroyed || isFinishing();
@@ -600,19 +767,13 @@ public abstract class AsyncInitializationActivity
     public void performOnConfigurationChanged(Configuration newConfig) {}
 
     @Override
-    public void onMultiWindowModeChanged(boolean inMultiWindowMode) {
-        super.onMultiWindowModeChanged(inMultiWindowMode);
+    public void handleMultiWindowModeChanged(boolean inMultiWindowMode) {
+        super.handleMultiWindowModeChanged(inMultiWindowMode);
         mMultiWindowModeStateDispatcher.dispatchMultiWindowModeChanged(inMultiWindowMode);
     }
 
     @Override
     public abstract boolean shouldStartGpuProcess();
-
-    @CallSuper
-    @Override
-    public void onContextMenuClosed(Menu menu) {
-        if (mWindowAndroid != null) mWindowAndroid.onContextMenuClosed();
-    }
 
     /**
      * Called when the content view gets drawn for the first time. See {@link FirstDrawDetector} for
@@ -627,7 +788,7 @@ public abstract class AsyncInitializationActivity
     }
 
     @Override
-    public void onNewIntentWithNative(Intent intent) { }
+    public void onNewIntentWithNative(Intent intent) {}
 
     @Override
     public Intent getInitialIntent() {
@@ -637,26 +798,39 @@ public abstract class AsyncInitializationActivity
     /**
      * Creates an {@link ActivityWindowAndroid} to delegate calls to, if the Activity requires it.
      */
-    @Nullable
-    protected ActivityWindowAndroid createWindowAndroid() {
+    protected @Nullable ActivityWindowAndroid createWindowAndroid() {
         return null;
     }
 
     /**
-     * @return A {@link ActivityWindowAndroid} instance.  May be null if one was not created.
+     * @return A {@link ActivityWindowAndroid} instance. May be null if one was not created.
      */
-    @Nullable
-    public ActivityWindowAndroid getWindowAndroid() {
+    public @Nullable ActivityWindowAndroid getWindowAndroid() {
         return mWindowAndroid;
     }
 
     /**
-     * This will handle passing {@link Intent} results back to the {@link WindowAndroid}.  It will
+     * Handles creating the {@link ProfileProvider} for the given Activity.
+     *
+     * <p>Implementers should not assume the native library is loaded when this is triggered.
+     */
+    protected abstract OneshotSupplier<ProfileProvider> createProfileProvider();
+
+    /** Return a supplier for the ProfileProvider. */
+    public OneshotSupplier<ProfileProvider> getProfileProviderSupplier() {
+        // TODO(crbug.com/40275690): Convert to a thrown exception if no asserts are discovered.
+        assert mProfileProviderSupplier != null;
+        return mProfileProviderSupplier;
+    }
+
+    /**
+     * This will handle passing {@link Intent} results back to the {@link WindowAndroid}. It will
      * return whether or not the {@link WindowAndroid} has consumed the event or not.
      */
     @CallSuper
     @Override
-    public boolean onActivityResultWithNative(int requestCode, int resultCode, Intent intent) {
+    public boolean onActivityResultWithNative(
+            int requestCode, int resultCode, @Nullable Intent intent) {
         if (mIntentRequestTracker.onActivityResult(requestCode, resultCode, intent)) {
             return true;
         }
@@ -688,6 +862,16 @@ public abstract class AsyncInitializationActivity
 
     @CallSuper
     @Override
+    public void onSaveInstanceState(Bundle outState, PersistableBundle outPersistentState) {
+        super.onSaveInstanceState(outState, outPersistentState);
+
+        if (shouldPersistAcrossReboots()) {
+            mLifecycleDispatcher.dispatchOnSaveInstanceState(outState, outPersistentState);
+        }
+    }
+
+    @CallSuper
+    @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
 
@@ -701,9 +885,20 @@ public abstract class AsyncInitializationActivity
 
         mLifecycleDispatcher.dispatchOnRecreate();
 
-        // TODO(https://crbug.com/1252526): Remove stack trace logging once root cause of bug is
+        // TODO(crbug.com/40793204): Remove stack trace logging once root cause of bug is
         // identified & fixed.
+        // Piggybacking for multi-instance bug crbug.com/40282134.
+        Log.i(TAG_MULTI_INSTANCE, "Tracing recreate().");
         Thread.dumpStack();
+    }
+
+    @CallSuper
+    @Override
+    public void onTopResumedActivityChanged(boolean isTopResumedActivity) {
+        super.onTopResumedActivityChanged(isTopResumedActivity);
+
+        mLifecycleDispatcher.dispatchOnTopResumedActivityChanged(isTopResumedActivity);
+        mNativeInitializationController.onTopResumedActivityChanged(isTopResumedActivity);
     }
 
     /**
@@ -714,45 +909,7 @@ public abstract class AsyncInitializationActivity
     }
 
     /**
-     * Returns whether the instant start is enabled.
-     */
-    protected boolean isInstantStartEnabled() {
-        return TabUiFeatureUtilities.supportInstantStart(isTablet(), this);
-    }
-
-    /**
-     * Get current smallest screen width in dp. This method uses {@link WindowManager} on
-     * Android R and above; otherwise, {@link DisplayUtil#getSmallestWidth(DisplayAndroid)}.
-     *
-     * @param context {@link Context} used to get system service and target display.
-     * @return Smallest screen width in dp.
-     */
-    protected int getCurrentSmallestScreenWidth(Context context) {
-        DisplayAndroid display = DisplayAndroid.getNonMultiDisplay(context);
-        // Android T does not receive updated width upon foldable unfold from window context.
-        // Continue to rely on context on this case.
-        Context windowManagerContext = (ChromeFeatureList.sFoldableJankFix.isEnabled()
-                                               && VERSION.SDK_INT >= VERSION_CODES.R
-                                               && VERSION.SDK_INT < VERSION_CODES.TIRAMISU)
-                ? (display.getWindowContext() != null ? display.getWindowContext() : context)
-                : context;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Context#getSystemService(Context.WINDOW_SERVICE) is preferred over
-            // Activity#getWindowManager, because during #attachBaseContext, #getWindowManager
-            // is not ready yet and always returns null. See crbug.com/1252150.
-            WindowManager manager =
-                    (WindowManager) windowManagerContext.getSystemService(Context.WINDOW_SERVICE);
-            assert manager != null;
-            Rect bounds = ApiHelperForR.getMaximumWindowMetricsBounds(manager);
-            return DisplayUtil.pxToDp(
-                    display, Math.min(bounds.right - bounds.left, bounds.bottom - bounds.top));
-        }
-        return DisplayUtil.pxToDp(display, DisplayUtil.getSmallestWidth(display));
-    }
-
-    /**
-     * @return Whether the activity had a warm start because the native library was already fully
-     *     loaded and initialized.
+     * @return Whether the activity had a warm start.
      */
     public boolean hadWarmStart() {
         return mHadWarmStart;
@@ -770,26 +927,14 @@ public abstract class AsyncInitializationActivity
         return mIsWarmOnResume;
     }
 
-    @Override
-    public void onUserInteraction() {
-        mLastUserInteractionTime = SystemClock.elapsedRealtime();
-    }
-
     /**
-     * @return timestamp when the last user interaction was made.
-     */
-    public long getLastUserInteractionTime() {
-        return mLastUserInteractionTime;
-    }
-
-    /**
-     * Called when the orientation of the device changes.  The orientation is checked/detected on
+     * Called when the orientation of the device changes. The orientation is checked/detected on
      * root view layouts.
-     * @param orientation One of {@link Configuration#ORIENTATION_PORTRAIT} or
-     *                    {@link Configuration#ORIENTATION_LANDSCAPE}.
+     *
+     * @param orientation One of {@link Configuration#ORIENTATION_PORTRAIT} or {@link
+     *     Configuration#ORIENTATION_LANDSCAPE}.
      */
-    protected void onOrientationChange(int orientation) {
-    }
+    protected void onOrientationChange(int orientation) {}
 
     private void checkOrientation() {
         WindowManager wm = getWindowManager();
@@ -808,6 +953,7 @@ public abstract class AsyncInitializationActivity
      * Extending classes should implement this, inflate the layout, set the content view and then
      * call {@link #onInitialLayoutInflationComplete}.
      */
+    @Initializer
     protected abstract void triggerLayoutInflation();
 
     /**
@@ -822,9 +968,7 @@ public abstract class AsyncInitializationActivity
         mInitialLayoutInflationComplete = true;
     }
 
-    /**
-     * Returns whether initial inflation is complete.
-     */
+    /** Returns whether initial inflation is complete. */
     public boolean isInitialLayoutInflationComplete() {
         return mInitialLayoutInflationComplete;
     }
@@ -832,6 +976,7 @@ public abstract class AsyncInitializationActivity
     /**
      * @return {@link ActivityLifecycleDispatcher} associated with this activity.
      */
+    @Override
     public ActivityLifecycleDispatcher getLifecycleDispatcher() {
         return mLifecycleDispatcher;
     }
@@ -845,13 +990,17 @@ public abstract class AsyncInitializationActivity
 
     @Override
     public boolean moveTaskToBack(boolean nonRoot) {
-        // On Android L moving the task to the background flakily stops the
-        // Activity from being finished, breaking tests. Trying to bring the
-        // task back to the foreground after also happens to be flaky, so just
-        // allow tests to prevent actually moving to the background.
+        // On Android (at least until N) moving the task to the background flakily stops the
+        // Activity from being finished, breaking tests. Trying to bring the task back to the
+        // foreground after also happens to be flaky, so just allow tests to prevent actually moving
+        // to the background.
         if (sInterceptMoveTaskToBackForTesting) {
             sBackInterceptedForTesting = true;
             return false;
+        } else if (BuildConfig.IS_FOR_TEST) {
+            assert false
+                    : "moveTaskToBack must be intercepted or it will create flaky tests. "
+                            + "See #interceptMoveTaskToBackForTesting";
         }
         return super.moveTaskToBack(nonRoot);
     }
@@ -859,9 +1008,11 @@ public abstract class AsyncInitializationActivity
     public static void interceptMoveTaskToBackForTesting() {
         sInterceptMoveTaskToBackForTesting = true;
         sBackInterceptedForTesting = false;
+        ResettersForTesting.register(() -> sInterceptMoveTaskToBackForTesting = false);
     }
 
     public static boolean wasMoveTaskToBackInterceptedForTesting() {
+        assert sInterceptMoveTaskToBackForTesting;
         return sBackInterceptedForTesting;
     }
 
@@ -896,9 +1047,12 @@ public abstract class AsyncInitializationActivity
         // See enableHardwareAcceleration()
         if (mSetWindowHWA) {
             mSetWindowHWA = false;
-            getWindow().setWindowManager(getWindow().getWindowManager(),
-                    getWindow().getAttributes().token, getComponentName().flattenToString(),
-                    true /* hardwareAccelerated */);
+            getWindow()
+                    .setWindowManager(
+                            getWindow().getWindowManager(),
+                            getWindow().getAttributes().token,
+                            getComponentName().flattenToString(),
+                            /* hardwareAccelerated= */ true);
         }
     }
 }

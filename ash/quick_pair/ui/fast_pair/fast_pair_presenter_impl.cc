@@ -4,16 +4,16 @@
 
 #include "ash/quick_pair/ui/fast_pair/fast_pair_presenter_impl.h"
 
+#include <optional>
 #include <string>
 
 #include "ash/constants/ash_features.h"
 #include "ash/public/cpp/new_window_delegate.h"
 #include "ash/public/cpp/session/session_controller.h"
+#include "ash/public/cpp/system/toast_data.h"
 #include "ash/public/cpp/system_tray_client.h"
 #include "ash/quick_pair/common/device.h"
 #include "ash/quick_pair/common/fast_pair/fast_pair_metrics.h"
-#include "ash/quick_pair/common/logging.h"
-#include "ash/quick_pair/common/quick_pair_browser_delegate.h"
 #include "ash/quick_pair/proto/fastpair.pb.h"
 #include "ash/quick_pair/repository/fast_pair/fast_pair_image_decoder.h"
 #include "ash/quick_pair/repository/fast_pair_repository.h"
@@ -23,15 +23,17 @@
 #include "ash/system/model/system_tray_model.h"
 #include "ash/system/tray/tray_popup_utils.h"
 #include "ash/system/tray/tray_utils.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
 #include "base/strings/utf_string_conversions.h"
+#include "chromeos/ash/components/signin/identity_manager_provider.h"
+#include "components/cross_device/logging/logging.h"
+#include "components/session_manager/core/session.h"
+#include "components/session_manager/core/session_manager.h"
 #include "components/signin/public/base/consent_level.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/message_center/message_center.h"
 
 namespace {
@@ -68,8 +70,9 @@ FastPairPresenterImpl::Factory*
 // static
 std::unique_ptr<FastPairPresenter> FastPairPresenterImpl::Factory::Create(
     message_center::MessageCenter* message_center) {
-  if (g_test_factory_)
+  if (g_test_factory_) {
     return g_test_factory_->CreateInstance(message_center);
+  }
 
   return base::WrapUnique(new FastPairPresenterImpl(message_center));
 }
@@ -104,8 +107,9 @@ void FastPairPresenterImpl::OnDiscoveryMetadataRetrieved(
     DiscoveryCallback callback,
     DeviceMetadata* device_metadata,
     bool has_retryable_error) {
-  if (!device_metadata)
+  if (!device_metadata) {
     return;
+  }
 
   device->set_version(device_metadata->InferFastPairVersion());
 
@@ -124,13 +128,21 @@ void FastPairPresenterImpl::OnDiscoveryMetadataRetrieved(
   // detailed user notification, show the guest notification. We don't have to
   // verify opt-in status in this case because Guests will be guaranteed to not
   // have opt-in status.
+  // TODO(crbug.com/546860700): Use a more precise AccountId from the calling
+  // context instead of the active session's, if one becomes available.
+  // GetActiveSession() itself is also only meant as an interim step during
+  // ash's session_manager migration (see its doc comment); revisit its use.
+  const session_manager::Session* active_session =
+      session_manager::SessionManager::Get()->GetActiveSession();
   signin::IdentityManager* identity_manager =
-      QuickPairBrowserDelegate::Get()->GetIdentityManager();
+      active_session
+          ? IdentityManagerProvider::Get().Find(active_session->account_id())
+          : nullptr;
   if (!identity_manager ||
       !ShouldShowUserEmail(
           Shell::Get()->session_controller()->login_status())) {
-    QP_LOG(VERBOSE) << __func__
-                    << ": in guest mode, showing guest notification";
+    CD_LOG(VERBOSE, Feature::FP)
+        << __func__ << ": in guest mode, showing guest notification";
     ShowGuestDiscoveryNotification(device, callback, device_metadata);
     return;
   }
@@ -140,31 +152,8 @@ void FastPairPresenterImpl::OnDiscoveryMetadataRetrieved(
   // mention saving devices to the user account. This is flagged depending if
   // the Fast Pair Saved Devices is enabled and we are using a strict
   // interpretation of the opt-in status.
-  if (features::IsFastPairSavedDevicesEnabled() &&
-      features::IsFastPairSavedDevicesStrictOptInEnabled()) {
-    FastPairRepository::Get()->CheckOptInStatus(base::BindOnce(
-        &FastPairPresenterImpl::OnCheckOptInStatus,
-        weak_pointer_factory_.GetWeakPtr(), device, callback, device_metadata));
-    return;
-  }
-
   // If we don't have SavedDevices flag enabled, then we can ignore the user's
   // opt in status and move forward to showing the User Discovery notification.
-  ShowUserDiscoveryNotification(device, callback, device_metadata);
-}
-
-void FastPairPresenterImpl::OnCheckOptInStatus(
-    scoped_refptr<Device> device,
-    DiscoveryCallback callback,
-    DeviceMetadata* device_metadata,
-    nearby::fastpair::OptInStatus status) {
-  QP_LOG(INFO) << __func__;
-
-  if (status != nearby::fastpair::OptInStatus::STATUS_OPTED_IN) {
-    ShowGuestDiscoveryNotification(device, callback, device_metadata);
-    return;
-  }
-
   ShowUserDiscoveryNotification(device, callback, device_metadata);
 }
 
@@ -172,16 +161,32 @@ void FastPairPresenterImpl::ShowSubsequentDiscoveryNotification(
     scoped_refptr<Device> device,
     DiscoveryCallback callback,
     DeviceMetadata* device_metadata) {
-  if (!device_metadata)
+  if (!device_metadata) {
     return;
+  }
 
   // Since Subsequent Pairing scenario can only happen for a signed in user
   // when a device has already been saved to their account, this should never
   // be null. We cannot get to this scenario in Guest Mode.
+  // TODO(crbug.com/546860700): Use a more precise AccountId from the calling
+  // context instead of the active session's, if one becomes available.
+  // GetActiveSession() itself is also only meant as an interim step during
+  // ash's session_manager migration (see its doc comment); revisit its use.
+  const session_manager::Session* active_session =
+      session_manager::SessionManager::Get()->GetActiveSession();
   signin::IdentityManager* identity_manager =
-      QuickPairBrowserDelegate::Get()->GetIdentityManager();
+      active_session
+          ? IdentityManagerProvider::Get().Find(active_session->account_id())
+          : nullptr;
   DCHECK(identity_manager);
 
+  // TODO(crbug.com/546860700): This only needs the signed-in user's email,
+  // which active_session->account_id().GetUserEmail() already carries -- and
+  // since the IdentityManager above is used for nothing else, that lookup
+  // could be dropped along with it. Do that once the two are verified to
+  // agree here: AccountId's email is the canonicalized login address,
+  // whereas GetPrimaryAccountInfo().email comes from the Gaia account info,
+  // and they can differ (e.g. capitalization, or a changed primary email).
   const std::string& email =
       identity_manager->GetPrimaryAccountInfo(signin::ConsentLevel::kSignin)
           .email;
@@ -217,10 +222,25 @@ void FastPairPresenterImpl::ShowUserDiscoveryNotification(
     DeviceMetadata* device_metadata) {
   // Since we check this in |OnInitialDiscoveryMetadataRetrieved| to determine
   // if we should show the Guest notification, this should never be null.
+  // TODO(crbug.com/546860700): Use a more precise AccountId from the calling
+  // context instead of the active session's, if one becomes available.
+  // GetActiveSession() itself is also only meant as an interim step during
+  // ash's session_manager migration (see its doc comment); revisit its use.
+  const session_manager::Session* active_session =
+      session_manager::SessionManager::Get()->GetActiveSession();
   signin::IdentityManager* identity_manager =
-      QuickPairBrowserDelegate::Get()->GetIdentityManager();
+      active_session
+          ? IdentityManagerProvider::Get().Find(active_session->account_id())
+          : nullptr;
   DCHECK(identity_manager);
 
+  // TODO(crbug.com/546860700): This only needs the signed-in user's email,
+  // which active_session->account_id().GetUserEmail() already carries -- and
+  // since the IdentityManager above is used for nothing else, that lookup
+  // could be dropped along with it. Do that once the two are verified to
+  // agree here: AccountId's email is the canonicalized login address,
+  // whereas GetPrimaryAccountInfo().email comes from the Gaia account info,
+  // and they can differ (e.g. capitalization, or a changed primary email).
   const std::string& email =
       identity_manager->GetPrimaryAccountInfo(signin::ConsentLevel::kSignin)
           .email;
@@ -260,7 +280,7 @@ void FastPairPresenterImpl::OnDiscoveryDismissed(
 
 void FastPairPresenterImpl::OnDiscoveryLearnMoreClicked(
     DiscoveryCallback callback) {
-  NewWindowDelegate::GetPrimary()->OpenUrl(
+  NewWindowDelegate::GetInstance()->OpenUrl(
       GURL(kDiscoveryLearnMoreLink),
       NewWindowDelegate::OpenUrlFrom::kUserInteraction,
       NewWindowDelegate::Disposition::kNewForegroundTab);
@@ -321,8 +341,9 @@ void FastPairPresenterImpl::OnNavigateToSettings(
     Shell::Get()->system_tray_model()->client()->ShowBluetoothSettings();
     RecordNavigateToSettingsResult(/*success=*/true);
   } else {
-    QP_LOG(WARNING) << "Cannot open Bluetooth Settings since it's not possible "
-                       "to opening WebUI settings";
+    CD_LOG(WARNING, Feature::FP)
+        << "Cannot open Bluetooth Settings since it's not possible "
+           "to opening WebUI settings";
     RecordNavigateToSettingsResult(/*success=*/false);
   }
 
@@ -343,7 +364,6 @@ void FastPairPresenterImpl::OnPairingFailedDismissed(
       // Fast Pair Error Notifications do not have a timeout, so this is never
       // expected to be hit.
       NOTREACHED();
-      break;
     default:
       NOTREACHED();
   }
@@ -367,19 +387,37 @@ void FastPairPresenterImpl::OnAssociateAccountMetadataRetrieved(
     AssociateAccountCallback callback,
     DeviceMetadata* device_metadata,
     bool has_retryable_error) {
-  QP_LOG(VERBOSE) << __func__ << ": " << device;
+  CD_LOG(VERBOSE, Feature::FP) << __func__ << ": " << device;
   if (!device_metadata) {
     return;
   }
 
   device->set_version(device_metadata->InferFastPairVersion());
 
+  // TODO(crbug.com/546860700): Use a more precise AccountId from the calling
+  // context instead of the active session's, if one becomes available.
+  // GetActiveSession() itself is also only meant as an interim step during
+  // ash's session_manager migration (see its doc comment); revisit its use.
+  //
+  // TODO(crbug.com/546860700): This IdentityManager is used for nothing but
+  // the signed-in user's email below, which
+  // active_session->account_id().GetUserEmail() already carries -- so this
+  // lookup could be dropped entirely rather than just re-sourced. Do that
+  // once the two are verified to agree here: AccountId's email is the
+  // canonicalized login address, whereas GetPrimaryAccountInfo().email comes
+  // from the Gaia account info, and they can differ (e.g. capitalization, or
+  // a changed primary email).
+  const session_manager::Session* active_session =
+      session_manager::SessionManager::Get()->GetActiveSession();
   signin::IdentityManager* identity_manager =
-      QuickPairBrowserDelegate::Get()->GetIdentityManager();
+      active_session
+          ? IdentityManagerProvider::Get().Find(active_session->account_id())
+          : nullptr;
   if (!identity_manager) {
-    QP_LOG(ERROR) << __func__
-                  << ": IdentityManager is not available for Associate Account "
-                     "notification.";
+    CD_LOG(ERROR, Feature::FP)
+        << __func__
+        << ": IdentityManager is not available for Associate Account "
+           "notification.";
     return;
   }
 
@@ -409,12 +447,12 @@ void FastPairPresenterImpl::OnAssociateAccountMetadataRetrieved(
 
 void FastPairPresenterImpl::OnAssociateAccountActionClicked(
     AssociateAccountCallback callback) {
-  callback.Run(AssociateAccountAction::kAssoicateAccount);
+  callback.Run(AssociateAccountAction::kAssociateAccount);
 }
 
 void FastPairPresenterImpl::OnAssociateAccountLearnMoreClicked(
     AssociateAccountCallback callback) {
-  NewWindowDelegate::GetPrimary()->OpenUrl(
+  NewWindowDelegate::GetInstance()->OpenUrl(
       GURL(kAssociateAccountLearnMoreLink),
       NewWindowDelegate::OpenUrlFrom::kUserInteraction,
       NewWindowDelegate::Disposition::kNewForegroundTab);
@@ -439,8 +477,148 @@ void FastPairPresenterImpl::OnAssociateAccountDismissed(
   }
 }
 
-void FastPairPresenterImpl::ShowCompanionApp(scoped_refptr<Device> device,
-                                             CompanionAppCallback callback) {}
+void FastPairPresenterImpl::ShowInstallCompanionApp(
+    scoped_refptr<Device> device,
+    CompanionAppCallback callback) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  toast_collision_avoidance_timer_.Start(
+      FROM_HERE, ash::ToastData::kDefaultToastDuration,
+      base::BindOnce(&FastPairPresenterImpl::ShowInstallCompanionAppDelayed,
+                     weak_pointer_factory_.GetWeakPtr(), device, callback));
+}
+
+void FastPairPresenterImpl::ShowInstallCompanionAppDelayed(
+    scoped_refptr<Device> device,
+    CompanionAppCallback callback) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  const auto metadata_id = device->metadata_id();
+  FastPairRepository::Get()->GetDeviceMetadata(
+      metadata_id,
+      base::BindOnce(
+          &FastPairPresenterImpl::OnInstallCompanionAppMetadataRetrieved,
+          weak_pointer_factory_.GetWeakPtr(), device, callback));
+}
+
+void FastPairPresenterImpl::OnInstallCompanionAppMetadataRetrieved(
+    scoped_refptr<Device> device,
+    CompanionAppCallback callback,
+    DeviceMetadata* device_metadata,
+    bool has_retryable_error) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  if (!device_metadata) {
+    return;
+  }
+
+  std::u16string device_name;
+  // If the name of the device has been set by the user, use that name,
+  // otherwise use the OEM default name.
+  if (device->display_name().has_value()) {
+    device_name = base::UTF8ToUTF16(device->display_name().value());
+  } else {
+    device_name = base::ASCIIToUTF16(device_metadata->GetDetails().name());
+  }
+
+  notification_controller_->ShowApplicationAvailableNotification(
+      device_name, device_metadata->image(),
+      base::BindRepeating(&FastPairPresenterImpl::OnCompanionAppInstallClicked,
+                          weak_pointer_factory_.GetWeakPtr(), callback),
+      base::BindOnce(&FastPairPresenterImpl::OnCompanionAppDismissed,
+                     weak_pointer_factory_.GetWeakPtr(), callback));
+}
+
+void FastPairPresenterImpl::ShowLaunchCompanionApp(
+    scoped_refptr<Device> device,
+    CompanionAppCallback callback) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  toast_collision_avoidance_timer_.Start(
+      FROM_HERE, ash::ToastData::kDefaultToastDuration,
+      base::BindOnce(&FastPairPresenterImpl::ShowLaunchCompanionAppDelayed,
+                     weak_pointer_factory_.GetWeakPtr(), device, callback));
+}
+
+void FastPairPresenterImpl::ShowLaunchCompanionAppDelayed(
+    scoped_refptr<Device> device,
+    CompanionAppCallback callback) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  const auto metadata_id = device->metadata_id();
+  FastPairRepository::Get()->GetDeviceMetadata(
+      metadata_id,
+      base::BindOnce(
+          &FastPairPresenterImpl::OnLaunchCompanionAppMetadataRetrieved,
+          weak_pointer_factory_.GetWeakPtr(), device, callback));
+}
+
+void FastPairPresenterImpl::OnLaunchCompanionAppMetadataRetrieved(
+    scoped_refptr<Device> device,
+    CompanionAppCallback callback,
+    DeviceMetadata* device_metadata,
+    bool has_retryable_error) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  if (!device_metadata) {
+    return;
+  }
+
+  std::u16string device_name;
+  // If the name of the device has been set by the user, use that name,
+  // otherwise use the OEM default name.
+  if (device->display_name().has_value()) {
+    device_name = base::UTF8ToUTF16(device->display_name().value());
+  } else {
+    device_name = base::ASCIIToUTF16(device_metadata->GetDetails().name());
+  }
+
+  notification_controller_->ShowApplicationInstalledNotification(
+      // temporarily hardcoded text in place of companion app name
+      device_name, device_metadata->image(), u"the web companion",
+      base::BindRepeating(&FastPairPresenterImpl::OnCompanionAppSetupClicked,
+                          weak_pointer_factory_.GetWeakPtr(), callback),
+      base::BindOnce(&FastPairPresenterImpl::OnCompanionAppDismissed,
+                     weak_pointer_factory_.GetWeakPtr(), callback));
+}
+
+void FastPairPresenterImpl::OnCompanionAppInstallClicked(
+    CompanionAppCallback callback) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  callback.Run(CompanionAppAction::kDownloadAndLaunchApp);
+}
+
+void FastPairPresenterImpl::OnCompanionAppSetupClicked(
+    CompanionAppCallback callback) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  callback.Run(CompanionAppAction::kLaunchApp);
+}
+
+void FastPairPresenterImpl::OnCompanionAppDismissed(
+    CompanionAppCallback callback,
+    FastPairNotificationDismissReason dismiss_reason) {
+  CHECK(features::IsFastPairPwaCompanionEnabled());
+
+  switch (dismiss_reason) {
+    case FastPairNotificationDismissReason::kDismissedByUser:
+      callback.Run(CompanionAppAction::kDismissedByUser);
+      break;
+    case FastPairNotificationDismissReason::kDismissedByOs:
+      [[fallthrough]];
+    case FastPairNotificationDismissReason::kDismissedByTimeout:
+      callback.Run(CompanionAppAction::kDismissed);
+      break;
+    default:
+      NOTREACHED();
+  }
+}
+
+void FastPairPresenterImpl::ShowPasskey(std::u16string device_name,
+                                        uint32_t passkey) {
+  notification_controller_->ShowPasskey(device_name, passkey);
+}
 
 void FastPairPresenterImpl::RemoveNotifications() {
   notification_controller_->RemoveNotifications();

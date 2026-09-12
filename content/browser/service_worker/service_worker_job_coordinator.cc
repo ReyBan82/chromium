@@ -37,33 +37,37 @@ ServiceWorkerRegisterJobBase* ServiceWorkerJobCoordinator::JobQueue::Push(
   // Note we are releasing 'job' here in case neither of the two if() statements
   // above were true.
 
-  DCHECK(!jobs_.empty());
+  CHECK(!jobs_.empty(), base::NotFatalUntil::M159);
   return jobs_.back().get();
 }
 
 void ServiceWorkerJobCoordinator::JobQueue::Pop(
     ServiceWorkerRegisterJobBase* job) {
-  DCHECK(job == jobs_.front().get());
+  CHECK(job == jobs_.front().get(), base::NotFatalUntil::M159);
   jobs_.pop_front();
-  if (!jobs_.empty())
+  if (!jobs_.empty()) {
     StartOneJob();
+  }
 }
 
 void ServiceWorkerJobCoordinator::JobQueue::StartOneJob() {
-  DCHECK(!jobs_.empty());
+  CHECK(!jobs_.empty(), base::NotFatalUntil::M159);
   jobs_.front()->Start();
 }
 
 void ServiceWorkerJobCoordinator::JobQueue::AbortAll() {
-  for (const auto& job : jobs_)
+  while (!jobs_.empty()) {
+    std::unique_ptr<ServiceWorkerRegisterJobBase> job =
+        std::move(jobs_.front());
+    jobs_.pop_front();
     job->Abort();
-  jobs_.clear();
+  }
 }
 
 ServiceWorkerJobCoordinator::ServiceWorkerJobCoordinator(
     ServiceWorkerContextCore* context)
     : context_(context) {
-  DCHECK(context_);
+  CHECK(context_, base::NotFatalUntil::M159);
 }
 
 ServiceWorkerJobCoordinator::~ServiceWorkerJobCoordinator() {
@@ -95,27 +99,15 @@ void ServiceWorkerJobCoordinator::Unregister(
     const GURL& scope,
     const blink::StorageKey& key,
     bool is_immediate,
+    ServiceWorkerRegistration::DeleteInitiator initiator,
     ServiceWorkerUnregisterJob::UnregistrationCallback callback) {
   std::unique_ptr<ServiceWorkerRegisterJobBase> job(
-      new ServiceWorkerUnregisterJob(context_, scope, key, is_immediate));
+      new ServiceWorkerUnregisterJob(context_, scope, key, is_immediate,
+                                     initiator));
   ServiceWorkerUnregisterJob* queued_job =
       static_cast<ServiceWorkerUnregisterJob*>(
           job_queues_[UniqueRegistrationKey(scope, key)].Push(std::move(job)));
   queued_job->AddCallback(std::move(callback));
-}
-
-void ServiceWorkerJobCoordinator::Update(
-    ServiceWorkerRegistration* registration,
-    bool force_bypass_cache) {
-  DCHECK(registration);
-  // Use an empty fetch client settings object because this method is for
-  // browser-initiated update and there is no associated execution context.
-  job_queues_[UniqueRegistrationKey(registration->scope(), registration->key())]
-      .Push(base::WrapUnique<ServiceWorkerRegisterJobBase>(
-          new ServiceWorkerRegisterJob(
-              context_, registration, force_bypass_cache,
-              false /* skip_script_comparison */,
-              blink::mojom::FetchClientSettingsObject::New())));
 }
 
 void ServiceWorkerJobCoordinator::Update(
@@ -125,7 +117,7 @@ void ServiceWorkerJobCoordinator::Update(
     blink::mojom::FetchClientSettingsObjectPtr
         outside_fetch_client_settings_object,
     ServiceWorkerRegisterJob::RegistrationCallback callback) {
-  DCHECK(registration);
+  CHECK(registration, base::NotFatalUntil::M159);
   ServiceWorkerRegisterJob* queued_job = static_cast<ServiceWorkerRegisterJob*>(
       job_queues_[UniqueRegistrationKey(registration->scope(),
                                         registration->key())]
@@ -134,32 +126,45 @@ void ServiceWorkerJobCoordinator::Update(
                   context_, registration, force_bypass_cache,
                   skip_script_comparison,
                   std::move(outside_fetch_client_settings_object)))));
-  queued_job->AddCallback(std::move(callback));
+  if (callback) {
+    queued_job->AddCallback(std::move(callback));
+  }
 }
 
 void ServiceWorkerJobCoordinator::Abort(const GURL& scope,
                                         const blink::StorageKey& key) {
-  auto pending_jobs = job_queues_.find(UniqueRegistrationKey(scope, key));
-  if (pending_jobs == job_queues_.end())
-    return;
-  pending_jobs->second.AbortAll();
-  job_queues_.erase(pending_jobs);
+  UniqueRegistrationKey reg_key(scope, key);
+  while (true) {
+    auto pending_jobs = job_queues_.find(reg_key);
+    if (pending_jobs == job_queues_.end()) {
+      return;
+    }
+    JobQueue queue = std::move(pending_jobs->second);
+    job_queues_.erase(pending_jobs);
+    queue.AbortAll();
+  }
 }
 
 void ServiceWorkerJobCoordinator::AbortAll() {
-  for (auto& job_pair : job_queues_)
-    job_pair.second.AbortAll();
-  job_queues_.clear();
+  while (!job_queues_.empty()) {
+    auto it = job_queues_.begin();
+    JobQueue queue = std::move(it->second);
+    job_queues_.erase(it);
+    queue.AbortAll();
+  }
 }
 
 void ServiceWorkerJobCoordinator::FinishJob(const GURL& scope,
                                             const blink::StorageKey& key,
                                             ServiceWorkerRegisterJobBase* job) {
-  auto pending_jobs = job_queues_.find(UniqueRegistrationKey(scope, key));
-  DCHECK(pending_jobs != job_queues_.end()) << "Deleting non-existent job.";
+  UniqueRegistrationKey reg_key(scope, key);
+  auto pending_jobs = job_queues_.find(reg_key);
+  CHECK(pending_jobs != job_queues_.end()) << "Deleting non-existent job.";
   pending_jobs->second.Pop(job);
-  if (pending_jobs->second.empty())
+  pending_jobs = job_queues_.find(reg_key);
+  if (pending_jobs != job_queues_.end() && pending_jobs->second.empty()) {
     job_queues_.erase(pending_jobs);
+  }
 }
 
 }  // namespace content

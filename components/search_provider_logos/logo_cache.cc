@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include "base/files/file_util.h"
@@ -60,11 +61,30 @@ const char kDarkShareButtonOpacity[] = "dark_share_button_opacity";
 const char kDarkShareButtonIcon[] = "dark_share_button_icon";
 const char kDarkShareButtonBg[] = "dark_share_button_bg";
 
+const char kMuralUrl[] = "mural_url";
+const char kDarkMuralUrl[] = "dark_mural_url";
+const char kIsMuralAnimatedGif[] = "is_mural_animated_gif";
+const char kIsDarkMuralAnimatedGif[] = "is_dark_mural_animated_gif";
+const char kMuralWidthPx[] = "mural_width_px";
+const char kMuralHeightPx[] = "mural_height_px";
+const char kDarkMuralWidthPx[] = "dark_mural_width_px";
+const char kDarkMuralHeightPx[] = "dark_mural_height_px";
+const char kMuralCoreContentWidthPx[] = "mural_core_content_width_px";
+const char kMuralCoreContentHeightPx[] = "mural_core_content_height_px";
+const char kMuralCoreContentLeftPx[] = "mural_core_content_left_px";
+const char kMuralCoreContentTopPx[] = "mural_core_content_top_px";
+const char kDarkMuralCoreContentWidthPx[] = "dark_mural_core_content_width_px";
+const char kDarkMuralCoreContentHeightPx[] =
+    "dark_mural_core_content_height_px";
+const char kDarkMuralCoreContentLeftPx[] = "dark_mural_core_content_left_px";
+const char kDarkMuralCoreContentTopPx[] = "dark_mural_core_content_top_px";
+
+const char kLogoType[] = "LOGO";
 const char kSimpleType[] = "SIMPLE";
 const char kAnimatedType[] = "ANIMATED";
 const char kInteractiveType[] = "INTERACTIVE";
 
-bool GetTimeValue(const base::Value::Dict& dict,
+bool GetTimeValue(const base::DictValue& dict,
                   const std::string& key,
                   base::Time* time) {
   const std::string* str = dict.FindString(key);
@@ -76,14 +96,17 @@ bool GetTimeValue(const base::Value::Dict& dict,
   return false;
 }
 
-void SetTimeValue(base::Value::Dict& dict,
+void SetTimeValue(base::DictValue& dict,
                   const std::string& key,
                   const base::Time& time) {
   int64_t internal_time_value = time.ToInternalValue();
   dict.Set(key, base::NumberToString(internal_time_value));
 }
 
-LogoType LogoTypeFromString(base::StringPiece type) {
+LogoType LogoTypeFromString(std::string_view type) {
+  if (type == kLogoType) {
+    return LogoType::LOGO;
+  }
   if (type == kSimpleType) {
     return LogoType::SIMPLE;
   }
@@ -94,11 +117,13 @@ LogoType LogoTypeFromString(base::StringPiece type) {
     return LogoType::INTERACTIVE;
   }
   LOG(WARNING) << "invalid type " << type;
-  return LogoType::SIMPLE;
+  return LogoType::LOGO;
 }
 
 std::string LogoTypeToString(LogoType type) {
   switch (type) {
+    case LogoType::LOGO:
+      return kLogoType;
     case LogoType::SIMPLE:
       return kSimpleType;
     case LogoType::ANIMATED:
@@ -107,7 +132,6 @@ std::string LogoTypeToString(LogoType type) {
       return kInteractiveType;
   }
   NOTREACHED();
-  return "";
 }
 
 }  // namespace
@@ -170,7 +194,7 @@ std::unique_ptr<EncodedLogo> LogoCache::GetCachedLogo() {
   if (logo_num_bytes_ != 0) {
     encoded_image = new base::RefCountedString();
 
-    if (!base::ReadFileToString(logo_path, &encoded_image->data())) {
+    if (!base::ReadFileToString(logo_path, &encoded_image->as_string())) {
       UpdateMetadata(nullptr);
       return nullptr;
     }
@@ -187,7 +211,8 @@ std::unique_ptr<EncodedLogo> LogoCache::GetCachedLogo() {
   if (dark_logo_num_bytes_ != 0) {
     dark_encoded_image = new base::RefCountedString();
 
-    if (!base::ReadFileToString(dark_logo_path, &dark_encoded_image->data())) {
+    if (!base::ReadFileToString(dark_logo_path,
+                                &dark_encoded_image->as_string())) {
       UpdateMetadata(nullptr);
       return nullptr;
     }
@@ -213,11 +238,12 @@ std::unique_ptr<LogoMetadata> LogoCache::LogoMetadataFromString(
     const std::string& str,
     int* logo_num_bytes,
     int* dark_logo_num_bytes) {
-  absl::optional<base::Value> value = base::JSONReader::Read(str);
+  std::optional<base::Value> value =
+      base::JSONReader::Read(str, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   if (!value) {
     return nullptr;
   }
-  const base::Value::Dict* dict = value->GetIfDict();
+  const base::DictValue* dict = value->GetIfDict();
   if (!dict) {
     return nullptr;
   }
@@ -232,19 +258,19 @@ std::unique_ptr<LogoMetadata> LogoCache::LogoMetadataFromString(
     return v != nullptr;
   };
   auto get_boolean = [dict](const char* key, bool* ret) -> bool {
-    absl::optional<bool> v = dict->FindBool(key);
+    std::optional<bool> v = dict->FindBool(key);
     if (v.has_value())
       *ret = v.value();
     return v.has_value();
   };
   auto get_integer = [dict](const char* key, int* ret) -> bool {
-    absl::optional<int> v = dict->FindInt(key);
+    std::optional<int> v = dict->FindInt(key);
     if (v.has_value())
       *ret = v.value();
     return v.has_value();
   };
   auto get_double = [dict](const char* key, double* ret) -> bool {
-    absl::optional<double> v = dict->FindDouble(key);
+    std::optional<double> v = dict->FindDouble(key);
     if (v.has_value())
       *ret = v.value();
     return v.has_value();
@@ -262,6 +288,8 @@ std::unique_ptr<LogoMetadata> LogoCache::LogoMetadataFromString(
   std::string cta_log_url;
   std::string dark_cta_log_url;
   std::string short_link;
+  std::string mural_url;
+  std::string dark_mural_url;
   if (!get_string(kSourceUrlKey, &source_url) ||
       !get_string(kFingerprintKey, &metadata->fingerprint) ||
       !get_string(kTypeKey, &type) ||
@@ -292,6 +320,35 @@ std::unique_ptr<LogoMetadata> LogoCache::LogoMetadataFromString(
                   &metadata->dark_share_button_opacity) ||
       !get_string(kDarkShareButtonIcon, &metadata->dark_share_button_icon) ||
       !get_string(kDarkShareButtonBg, &metadata->dark_share_button_bg) ||
+      !get_string(kMuralUrl, &mural_url) ||
+      !get_string(kDarkMuralUrl, &dark_mural_url) ||
+      !get_boolean(kIsMuralAnimatedGif,
+                   &metadata->mural_metadata.is_animated_gif) ||
+      !get_boolean(kIsDarkMuralAnimatedGif,
+                   &metadata->dark_mural_metadata.is_animated_gif) ||
+      !get_integer(kMuralWidthPx, &metadata->mural_metadata.width_px) ||
+      !get_integer(kMuralHeightPx, &metadata->mural_metadata.height_px) ||
+      !get_integer(kDarkMuralWidthPx,
+                   &metadata->dark_mural_metadata.width_px) ||
+      !get_integer(kDarkMuralHeightPx,
+                   &metadata->dark_mural_metadata.height_px) ||
+      !get_integer(kMuralCoreContentWidthPx,
+                   &metadata->mural_metadata.core_content_area.width_px) ||
+      !get_integer(kMuralCoreContentHeightPx,
+                   &metadata->mural_metadata.core_content_area.height_px) ||
+      !get_integer(kMuralCoreContentLeftPx,
+                   &metadata->mural_metadata.core_content_area.left_px) ||
+      !get_integer(kMuralCoreContentTopPx,
+                   &metadata->mural_metadata.core_content_area.top_px) ||
+      !get_integer(kDarkMuralCoreContentWidthPx,
+                   &metadata->dark_mural_metadata.core_content_area.width_px) ||
+      !get_integer(
+          kDarkMuralCoreContentHeightPx,
+          &metadata->dark_mural_metadata.core_content_area.height_px) ||
+      !get_integer(kDarkMuralCoreContentLeftPx,
+                   &metadata->dark_mural_metadata.core_content_area.left_px) ||
+      !get_integer(kDarkMuralCoreContentTopPx,
+                   &metadata->dark_mural_metadata.core_content_area.top_px) ||
       !get_integer(kWidthPx, &metadata->width_px) ||
       !get_integer(kHeightPx, &metadata->height_px) ||
       !get_integer(kDarkWidthPx, &metadata->dark_width_px) ||
@@ -313,6 +370,8 @@ std::unique_ptr<LogoMetadata> LogoCache::LogoMetadataFromString(
   metadata->cta_log_url = GURL(cta_log_url);
   metadata->dark_cta_log_url = GURL(dark_cta_log_url);
   metadata->short_link = GURL(short_link);
+  metadata->mural_metadata.mural_url = GURL(mural_url);
+  metadata->dark_mural_metadata.mural_url = GURL(dark_mural_url);
 
   return metadata;
 }
@@ -322,7 +381,7 @@ void LogoCache::LogoMetadataToString(const LogoMetadata& metadata,
                                      int num_bytes,
                                      int dark_num_bytes,
                                      std::string* str) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set(kSourceUrlKey, metadata.source_url.spec());
   dict.Set(kFingerprintKey, metadata.fingerprint);
   dict.Set(kTypeKey, LogoTypeToString(metadata.type));
@@ -358,8 +417,33 @@ void LogoCache::LogoMetadataToString(const LogoMetadata& metadata,
   dict.Set(kIframeWidthPx, metadata.iframe_width_px);
   dict.Set(kIframeHeightPx, metadata.iframe_height_px);
   dict.Set(kDarkBackgroundColorKey, metadata.dark_background_color);
+  dict.Set(kMuralUrl, metadata.mural_metadata.mural_url.spec());
+  dict.Set(kDarkMuralUrl, metadata.dark_mural_metadata.mural_url.spec());
+  dict.Set(kIsMuralAnimatedGif, metadata.mural_metadata.is_animated_gif);
+  dict.Set(kIsDarkMuralAnimatedGif,
+           metadata.dark_mural_metadata.is_animated_gif);
+  dict.Set(kMuralWidthPx, metadata.mural_metadata.width_px);
+  dict.Set(kMuralHeightPx, metadata.mural_metadata.height_px);
+  dict.Set(kDarkMuralWidthPx, metadata.dark_mural_metadata.width_px);
+  dict.Set(kDarkMuralHeightPx, metadata.dark_mural_metadata.height_px);
+  dict.Set(kMuralCoreContentWidthPx,
+           metadata.mural_metadata.core_content_area.width_px);
+  dict.Set(kMuralCoreContentHeightPx,
+           metadata.mural_metadata.core_content_area.height_px);
+  dict.Set(kMuralCoreContentLeftPx,
+           metadata.mural_metadata.core_content_area.left_px);
+  dict.Set(kMuralCoreContentTopPx,
+           metadata.mural_metadata.core_content_area.top_px);
+  dict.Set(kDarkMuralCoreContentWidthPx,
+           metadata.dark_mural_metadata.core_content_area.width_px);
+  dict.Set(kDarkMuralCoreContentHeightPx,
+           metadata.dark_mural_metadata.core_content_area.height_px);
+  dict.Set(kDarkMuralCoreContentLeftPx,
+           metadata.dark_mural_metadata.core_content_area.left_px);
+  dict.Set(kDarkMuralCoreContentTopPx,
+           metadata.dark_mural_metadata.core_content_area.top_px);
   SetTimeValue(dict, kExpirationTimeKey, metadata.expiration_time);
-  base::JSONWriter::Write(dict, str);
+  *str = base::WriteJson(dict).value_or("");
 }
 
 base::FilePath LogoCache::GetLogoPath() {
@@ -404,7 +488,7 @@ void LogoCache::WriteMetadata() {
 
   std::string str;
   LogoMetadataToString(*metadata_, logo_num_bytes_, dark_logo_num_bytes_, &str);
-  base::WriteFile(GetMetadataPath(), str.data(), static_cast<int>(str.size()));
+  base::WriteFile(GetMetadataPath(), str);
 }
 
 void LogoCache::WriteLogo(
@@ -428,15 +512,12 @@ void LogoCache::WriteLogo(
   if (!base::DeleteFile(metadata_path))
     return;
 
-  if (encoded_image &&
-      base::WriteFile(logo_path, encoded_image->front_as<char>(),
-                      static_cast<int>(encoded_image->size())) == -1) {
+  if (encoded_image && !base::WriteFile(logo_path, *encoded_image)) {
     base::DeleteFile(logo_path);
     return;
   }
   if (dark_encoded_image &&
-      base::WriteFile(dark_logo_path, dark_encoded_image->front_as<char>(),
-                      static_cast<int>(dark_encoded_image->size())) == -1) {
+      !base::WriteFile(dark_logo_path, *dark_encoded_image)) {
     base::DeleteFile(logo_path);
     base::DeleteFile(dark_logo_path);
     return;

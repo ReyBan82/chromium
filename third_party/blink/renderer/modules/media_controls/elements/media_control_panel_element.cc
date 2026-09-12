@@ -31,8 +31,14 @@ void MediaControlPanelElement::SetIsDisplayed(bool is_displayed) {
     return;
 
   is_displayed_ = is_displayed;
-  if (is_displayed_ && opaque_)
+  if (is_displayed_ && opaque_) {
     DidBecomeVisible();
+  } else if (did_send_visible_) {
+    // The panel may have faded (MakeTransparent()) after the visible
+    // notification was sent. Balance that notification regardless of the
+    // fade state.
+    DidBecomeHidden();
+  }
 }
 
 bool MediaControlPanelElement::IsOpaque() const {
@@ -44,7 +50,7 @@ void MediaControlPanelElement::MakeOpaque() {
     return;
 
   opaque_ = true;
-  removeAttribute("class");
+  removeAttribute(html_names::kClassAttr);
 
   if (is_displayed_) {
     // Make sure we are listening for the 'transitionend' event.
@@ -62,7 +68,7 @@ void MediaControlPanelElement::MakeTransparent() {
   // Make sure we are listening for the 'transitionend' event.
   EnsureTransitionEventListener();
 
-  setAttribute("class", AtomicString(kTransparentClassName));
+  setAttribute(html_names::kClassAttr, AtomicString(kTransparentClassName));
 
   opaque_ = false;
 }
@@ -94,9 +100,8 @@ void MediaControlPanelElement::EnsureTransitionEventListener() {
   if (!event_listener_) {
     event_listener_ = MakeGarbageCollected<
         MediaControlsSharedHelpers::TransitionEventListener>(
-        this,
-        WTF::BindRepeating(&MediaControlPanelElement::HandleTransitionEndEvent,
-                           WrapWeakPersistent(this)));
+        this, BindRepeating(&MediaControlPanelElement::HandleTransitionEndEvent,
+                            WrapWeakPersistent(this)));
   }
 
   // Attach the event listener if we are not attached.
@@ -120,7 +125,14 @@ bool MediaControlPanelElement::KeepEventInNode(const Event& event) const {
 
 void MediaControlPanelElement::DidBecomeVisible() {
   DCHECK(is_displayed_ && opaque_);
+  did_send_visible_ = true;
   MediaElement().MediaControlsDidBecomeVisible();
+}
+
+void MediaControlPanelElement::DidBecomeHidden() {
+  DCHECK(!is_displayed_ || !opaque_);
+  did_send_visible_ = false;
+  MediaElement().MediaControlsDidBecomeHidden();
 }
 
 void MediaControlPanelElement::HandleTransitionEndEvent() {

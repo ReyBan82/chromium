@@ -4,31 +4,59 @@
 
 #include "chrome/browser/ui/webui/browser_command/browser_command_handler.h"
 
+#include <algorithm>
+
+#include "base/command_line.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/user_metrics.h"
+#include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/command_updater_impl.h"
 #include "chrome/browser/enterprise/util/managed_browser_utils.h"
-#include "chrome/browser/new_tab_page/promos/promo_service.h"
+#include "chrome/browser/feedback/show_feedback_page.h"
+#include "chrome/browser/glic/glic_settings_util.h"
+#include "chrome/browser/glic/public/glic_enabling.h"
+#include "chrome/browser/glic/public/glic_keyed_service.h"
+#include "chrome/browser/glic/public/glic_keyed_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_navigator.h"
-#include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/search/search.h"
+#include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "chrome/browser/ui/chrome_pages.h"
+#include "chrome/browser/ui/customize_chrome/side_panel_controller.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
+#include "chrome/browser/ui/tabs/public/tab_features.h"
+#include "chrome/browser/ui/tabs/split_tab_metrics.h"
 #include "chrome/browser/ui/tabs/tab_group_model.h"
-#include "chrome/browser/ui/user_education/user_education_service.h"
-#include "chrome/browser/ui/user_education/user_education_service_factory.h"
-#include "chrome/browser/ui/views/user_education/browser_user_education_service.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/tabs/vertical_tab_strip_metrics.h"
+#include "chrome/browser/ui/ui_features.h"
+#include "chrome/browser/ui/webui/webui_embedding_context.h"
+#include "chrome/browser/user_education/tutorial_identifiers.h"
+#include "chrome/browser/user_education/user_education_service.h"
+#include "chrome/browser/user_education/user_education_service_factory.h"
+#include "chrome/common/buildflags.h"
 #include "chrome/common/chrome_features.h"
+#include "chrome/common/chrome_switches.h"
+#include "chrome/common/pref_names.h"
 #include "chrome/common/webui_url_constants.h"
+#include "components/password_manager/core/common/password_manager_features.h"
 #include "components/performance_manager/public/features.h"
+#include "components/prefs/pref_service.h"
 #include "components/safe_browsing/content/browser/web_ui/safe_browsing_ui.h"
 #include "components/safe_browsing/core/common/safe_browsing_policy_handler.h"
 #include "components/safe_browsing/core/common/safe_browsing_prefs.h"
-#include "components/user_education/common/tutorial_identifier.h"
-#include "components/user_education/common/tutorial_service.h"
+#include "components/safe_browsing/core/common/safebrowsing_referral_methods.h"
+#include "components/saved_tab_groups/public/features.h"
+#include "components/split_tabs/split_tab_visual_data.h"
+#include "components/tabs/public/tab_interface.h"
+#include "components/user_education/common/tutorial/tutorial_identifier.h"
+#include "components/user_education/common/tutorial/tutorial_service.h"
+#include "net/base/url_util.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/window_open_disposition.h"
 #include "ui/base/window_open_disposition_utils.h"
 
@@ -43,13 +71,16 @@ const char BrowserCommandHandler::kPromoBrowserCommandHistogramName[] =
 BrowserCommandHandler::BrowserCommandHandler(
     mojo::PendingReceiver<CommandHandler> pending_page_handler,
     Profile* profile,
-    std::vector<browser_command::mojom::Command> supported_commands)
+    std::vector<browser_command::mojom::Command> supported_commands,
+    content::WebContents* web_contents)
     : profile_(profile),
       supported_commands_(supported_commands),
       command_updater_(std::make_unique<CommandUpdaterImpl>(this)),
-      page_handler_(this, std::move(pending_page_handler)) {
-  if (supported_commands_.empty())
+      page_handler_(this, std::move(pending_page_handler)),
+      web_contents_(web_contents) {
+  if (supported_commands_.empty()) {
     return;
+  }
 
   EnableSupportedCommands();
 }
@@ -59,7 +90,7 @@ BrowserCommandHandler::~BrowserCommandHandler() = default;
 void BrowserCommandHandler::CanExecuteCommand(
     browser_command::mojom::Command command_id,
     CanExecuteCommandCallback callback) {
-  if (!base::Contains(supported_commands_, command_id)) {
+  if (!std::ranges::contains(supported_commands_, command_id)) {
     std::move(callback).Run(false);
     return;
   }
@@ -70,7 +101,7 @@ void BrowserCommandHandler::CanExecuteCommand(
       // Nothing to do.
       break;
     case Command::kOpenSafetyCheck:
-      can_execute = !chrome::enterprise_util::IsBrowserManaged(profile_);
+      can_execute = !enterprise_util::IsBrowserManaged(profile_);
       break;
     case Command::kOpenSafeBrowsingEnhancedProtectionSettings: {
       bool managed = safe_browsing::SafeBrowsingPolicyHandler::
@@ -83,13 +114,14 @@ void BrowserCommandHandler::CanExecuteCommand(
       can_execute = true;
       break;
     case Command::kOpenPrivacyGuide:
-      can_execute = !chrome::enterprise_util::IsBrowserManaged(profile_) &&
-                    !profile_->IsChild();
+      can_execute =
+          !enterprise_util::IsBrowserManaged(profile_) && !profile_->IsChild();
       base::UmaHistogramBoolean("Privacy.Settings.PrivacyGuide.CanShowNTPPromo",
                                 can_execute);
       break;
     case Command::kStartTabGroupTutorial:
-      can_execute = !!GetTutorialService() && BrowserSupportsTabGroups();
+    case Command::kStartSavedTabGroupTutorial:
+      can_execute = TutorialServiceExists() && BrowserSupportsTabGroups();
       break;
     case Command::kOpenPasswordManager:
       can_execute = true;
@@ -98,11 +130,34 @@ void BrowserCommandHandler::CanExecuteCommand(
       can_execute = true;
       break;
     case Command::kOpenPerformanceSettings:
-      can_execute =
-          base::FeatureList::IsEnabled(
-              performance_manager::features::kBatterySaverModeAvailable) ||
-          base::FeatureList::IsEnabled(
-              performance_manager::features::kHighEfficiencyModeAvailable);
+      can_execute = true;
+      break;
+    case Command::kOpenNTPAndStartCustomizeChromeTutorial:
+      can_execute = TutorialServiceExists() && DefaultSearchProviderIsGoogle();
+      break;
+    case Command::kStartPasswordManagerTutorial:
+      can_execute = TutorialServiceExists();
+      break;
+    case Command::kOpenAISettings:
+      can_execute = true;
+      break;
+    case Command::kOpenSafetyCheckFromWhatsNew:
+      can_execute = true;
+      break;
+    case Command::kOpenPaymentsSettings:
+      can_execute = true;
+      break;
+    case Command::kOpenGlic:
+      can_execute = true;
+      break;
+    case Command::kOpenGlicSettings:
+      can_execute = true;
+      break;
+    case Command::kOpenSplitView:
+      can_execute = true;
+      break;
+    case Command::kEnableVerticalTabs:
+      can_execute = true;
       break;
   }
   std::move(callback).Run(can_execute);
@@ -111,7 +166,7 @@ void BrowserCommandHandler::CanExecuteCommand(
 void BrowserCommandHandler::ExecuteCommand(Command command_id,
                                            ClickInfoPtr click_info,
                                            ExecuteCommandCallback callback) {
-  if (!base::Contains(supported_commands_, command_id)) {
+  if (!std::ranges::contains(supported_commands_, command_id)) {
     std::move(callback).Run(false);
     return;
   }
@@ -125,9 +180,10 @@ void BrowserCommandHandler::ExecuteCommand(Command command_id,
   std::move(callback).Run(command_executed);
 }
 
-void BrowserCommandHandler::ExecuteCommandWithDisposition(
+void BrowserCommandHandler::HandleCommandWithDisposition(
     int id,
-    WindowOpenDisposition disposition) {
+    WindowOpenDisposition disposition,
+    base::TimeTicks time_stamp) {
   const auto command = static_cast<Command>(id);
   base::UmaHistogramEnumeration(kPromoBrowserCommandHistogramName, command);
 
@@ -142,9 +198,7 @@ void BrowserCommandHandler::ExecuteCommandWithDisposition(
           base::UserMetricsAction("NewTabPage_Promos_SafetyCheck"));
       break;
     case Command::kOpenSafeBrowsingEnhancedProtectionSettings:
-      NavigateToURL(GURL(chrome::GetSettingsUrl(
-                        chrome::kSafeBrowsingEnhancedProtectionSubPage)),
-                    disposition);
+      NavigateToEnhancedProtectionSetting();
       base::RecordAction(
           base::UserMetricsAction("NewTabPage_Promos_EnhancedProtection"));
       break;
@@ -158,12 +212,11 @@ void BrowserCommandHandler::ExecuteCommandWithDisposition(
           base::UserMetricsAction("NewTabPage_Promos_PrivacyGuide"));
       break;
     case Command::kStartTabGroupTutorial:
+    case Command::kStartSavedTabGroupTutorial:
       StartTabGroupTutorial();
       break;
     case Command::kOpenPasswordManager:
-      NavigateToURL(
-          GURL(chrome::GetSettingsUrl(chrome::kPasswordManagerSubPage)),
-          disposition);
+      OpenPasswordManager();
       break;
     case Command::kNoOpCommand:
       // Nothing to do.
@@ -172,55 +225,192 @@ void BrowserCommandHandler::ExecuteCommandWithDisposition(
       NavigateToURL(GURL(chrome::GetSettingsUrl(chrome::kPerformanceSubPage)),
                     disposition);
       break;
+    case Command::kOpenNTPAndStartCustomizeChromeTutorial:
+      OpenNTPAndStartCustomizeChromeTutorial();
+      break;
+    case Command::kStartPasswordManagerTutorial:
+      StartPasswordManagerTutorial();
+      break;
+    case Command::kOpenAISettings:
+      OpenAISettings();
+      break;
+    case Command::kOpenSafetyCheckFromWhatsNew:
+      NavigateToURL(GURL(chrome::GetSettingsUrl(chrome::kSafetyCheckSubPage)),
+                    disposition);
+      break;
+    case Command::kOpenPaymentsSettings:
+      NavigateToURL(GURL(chrome::GetSettingsUrl(chrome::kPaymentsSubPage)),
+                    disposition);
+      break;
+    case Command::kOpenGlic: {
+      OpenGlic();
+      break;
+    }
+    case Command::kOpenGlicSettings:
+      OpenGlicSettings();
+      break;
+    case Command::kOpenSplitView:
+      OpenSplitView();
+      break;
+    case Command::kEnableVerticalTabs:
+      EnableVerticalTabs();
+      break;
     default:
       NOTREACHED() << "Unspecified behavior for command " << id;
-      break;
   }
 }
 
-user_education::TutorialService* BrowserCommandHandler::GetTutorialService() {
-  auto* service = UserEducationServiceFactory::GetForProfile(profile_);
-  return service ? &service->tutorial_service() : nullptr;
+void BrowserCommandHandler::OnTutorialStarted(
+    user_education::TutorialIdentifier tutorial_id,
+    user_education::TutorialService* tutorial_service) {
+  if (tutorial_service) {
+    tutorial_service->LogStartedFromWhatsNewPage(
+        tutorial_id, tutorial_service->IsRunningTutorial(tutorial_id));
+  }
 }
 
-ui::ElementContext BrowserCommandHandler::GetUiElementContext() {
-  return chrome::FindBrowserWithProfile(profile_)
-      ->window()
-      ->GetElementContext();
+void BrowserCommandHandler::StartTutorial(StartTutorialInPage::Params params) {
+  BrowserWindowInterface* browser =
+      ProfileBrowserCollection::GetForProfile(profile_)->GetLastActiveBrowser();
+  StartTutorialInPage::Start(browser, std::move(params));
+}
+
+bool BrowserCommandHandler::TutorialServiceExists() {
+  auto* service = UserEducationServiceFactory::GetForBrowserContext(profile_);
+  auto* tutorial_service = service ? service->tutorial_service() : nullptr;
+  return !!tutorial_service;
 }
 
 bool BrowserCommandHandler::BrowserSupportsTabGroups() {
-  Browser* browser = chrome::FindBrowserWithProfile(profile_);
-  return browser->tab_strip_model()->SupportsTabGroups();
-}
-
-bool BrowserCommandHandler::BrowserHasTabGroups() {
-  Browser* browser = chrome::FindBrowserWithProfile(profile_);
-  return !browser->tab_strip_model()->group_model()->ListTabGroups().empty();
+  BrowserWindowInterface* browser =
+      ProfileBrowserCollection::GetForProfile(profile_)->GetLastActiveBrowser();
+  return browser->GetTabStripModel()->SupportsTabGroups();
 }
 
 void BrowserCommandHandler::StartTabGroupTutorial() {
-  user_education::TutorialService* tutorial_service = GetTutorialService();
+  auto* tutorial_id = kTabGroupTutorialId;
 
-  // Should never happen since we return false in CanExecuteCommand(), but
-  // avoid a browser crash anyway.
-  if (!tutorial_service)
-    return;
+  if (BrowserSupportsTabGroups()) {
+    StartTutorialInPage::Params params;
+    params.tutorial_id = tutorial_id;
+    params.callback = base::BindOnce(&BrowserCommandHandler::OnTutorialStarted,
+                                     base::Unretained(this), tutorial_id);
+    StartTutorial(std::move(params));
+  }
+}
 
-  const ui::ElementContext context = GetUiElementContext();
-  if (!context)
-    return;
+void BrowserCommandHandler::NavigateToEnhancedProtectionSetting() {
+  chrome::ShowSafeBrowsingEnhancedProtectionWithIph(
+      ProfileBrowserCollection::GetForProfile(profile_)->GetLastActiveBrowser(),
+      safe_browsing::SafeBrowsingSettingReferralMethod::kPromoSlingerReferral);
+}
 
-  if (!BrowserSupportsTabGroups()) {
+void BrowserCommandHandler::OpenPasswordManager() {
+  chrome::ShowPasswordManager(ProfileBrowserCollection::GetForProfile(profile_)
+                                  ->GetLastActiveBrowser());
+}
+
+void BrowserCommandHandler::OpenAISettings() {
+  chrome::ShowSettingsSubPage(
+      ProfileBrowserCollection::GetForProfile(profile_)->GetLastActiveBrowser(),
+      chrome::kExperimentalAISettingsSubPage);
+}
+
+bool BrowserCommandHandler::DefaultSearchProviderIsGoogle() {
+  return search::DefaultSearchProviderIsGoogle(profile_);
+}
+
+bool BrowserCommandHandler::BrowserSupportsSavedTabGroups() {
+  BrowserWindowInterface* browser =
+      ProfileBrowserCollection::GetForProfile(profile_)->GetLastActiveBrowser();
+
+  // Duplicated from chrome/browser/ui/views/bookmarks/bookmark_bar_view.cc
+  // Which cannot be included here
+  return browser->GetProfile()->IsRegularProfile();
+}
+
+void BrowserCommandHandler::OpenNTPAndStartCustomizeChromeTutorial() {
+  auto* tutorial_id = kSidePanelCustomizeChromeTutorialId;
+
+  if (DefaultSearchProviderIsGoogle()) {
+    StartTutorialInPage::Params params;
+    params.tutorial_id = tutorial_id;
+    params.callback = base::BindOnce(&BrowserCommandHandler::OnTutorialStarted,
+                                     base::Unretained(this), tutorial_id);
+    params.target_url = chrome::ChromeUINewTabPageURLAsGURL();
+    StartTutorial(std::move(params));
+  }
+}
+
+void BrowserCommandHandler::StartPasswordManagerTutorial() {
+  auto* tutorial_id = kPasswordManagerTutorialId;
+
+  StartTutorialInPage::Params params;
+  params.tutorial_id = tutorial_id;
+  params.callback = base::BindOnce(&BrowserCommandHandler::OnTutorialStarted,
+                                   base::Unretained(this), tutorial_id);
+  StartTutorial(std::move(params));
+}
+
+void BrowserCommandHandler::StartSavedTabGroupTutorial() {
+  auto* tutorial_id = kSavedTabGroupTutorialId;
+
+  StartTutorialInPage::Params params;
+  params.tutorial_id = tutorial_id;
+  params.callback = base::BindOnce(&BrowserCommandHandler::OnTutorialStarted,
+                                   base::Unretained(this), tutorial_id);
+  StartTutorial(std::move(params));
+}
+
+void BrowserCommandHandler::OpenGlic() {
+  glic::GlicKeyedService* glic_service = glic::GlicKeyedService::Get(profile_);
+
+  if (!glic_service) {
     return;
   }
 
-  user_education::TutorialIdentifier tutorial_id =
-      BrowserHasTabGroups() ? kTabGroupWithExistingGroupTutorialId
-                            : kTabGroupTutorialId;
+  auto* browser_window = webui::GetBrowserWindowInterface(web_contents_);
 
-  bool started_tutorial = tutorial_service->StartTutorial(tutorial_id, context);
-  tutorial_service->LogStartedFromWhatsNewPage(tutorial_id, started_tutorial);
+  glic_service->ToggleUI(browser_window, /*prevent_close=*/false,
+                         glic::mojom::InvocationSource::kWhatsNew);
+}
+
+void BrowserCommandHandler::OpenGlicSettings() {
+  if (glic::GlicEnabling::ShouldShowSettingsPage(profile_)) {
+    glic::OpenGlicKeyboardShortcutSetting(profile_);
+  } else {
+    // Link to help center article.
+    auto* command_line = base::CommandLine::ForCurrentProcess();
+    bool has_url =
+        command_line->HasSwitch(::switches::kGlicShortcutsLearnMoreURL);
+    const std::string url = has_url
+                                ? command_line->GetSwitchValueASCII(
+                                      ::switches::kGlicShortcutsLearnMoreURL)
+                                : features::kGlicShortcutsLearnMoreURL.Get();
+    if (url.empty()) {
+      return;
+    }
+
+    NavigateToURL(glic::GetHelpCenterUrl(url),
+                  WindowOpenDisposition::SINGLETON_TAB);
+  }
+}
+
+void BrowserCommandHandler::OpenSplitView() {
+  tabs::TabInterface* tab =
+      tabs::TabInterface::MaybeGetFromContents(web_contents_);
+  if (tab && !tab->IsSplit()) {
+    chrome::NewSplitTab(tab->GetBrowserWindowInterface(),
+                        split_tabs::SplitTabLayout::kSideBySide,
+                        split_tabs::SplitTabCreatedSource::kWhatsNew);
+  }
+}
+
+void BrowserCommandHandler::EnableVerticalTabs() {
+  profile_->GetPrefs()->SetBoolean(prefs::kVerticalTabsEnabled, true);
+
+  tabs::RecordVerticalTabStripModeChanged(
+      true, tabs::VerticalTabStripEntryPoint::kWhatsNew);
 }
 
 void BrowserCommandHandler::OpenFeedbackForm() {

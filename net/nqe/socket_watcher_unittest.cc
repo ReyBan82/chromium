@@ -33,9 +33,9 @@ class NetworkQualitySocketWatcherTest : public TestWithTaskEnvironment {
   static void OnUpdatedRTTAvailableStoreParams(
       SocketPerformanceWatcherFactory::Protocol protocol,
       const base::TimeDelta& rtt,
-      const absl::optional<IPHash>& host) {
+      const std::optional<IPHash>& host) {
     // Need to verify before another callback is executed, or explicitly call
-    // |ResetCallbackParams()|.
+    // `ResetCallbackParams()`.
     ASSERT_FALSE(callback_executed_);
     callback_rtt_ = rtt;
     callback_host_ = host;
@@ -45,9 +45,9 @@ class NetworkQualitySocketWatcherTest : public TestWithTaskEnvironment {
   static void OnUpdatedRTTAvailable(
       SocketPerformanceWatcherFactory::Protocol protocol,
       const base::TimeDelta& rtt,
-      const absl::optional<IPHash>& host) {
+      const std::optional<IPHash>& host) {
     // Need to verify before another callback is executed, or explicitly call
-    // |ResetCallbackParams()|.
+    // `ResetCallbackParams()`.
     ASSERT_FALSE(callback_executed_);
     callback_executed_ = true;
   }
@@ -61,7 +61,7 @@ class NetworkQualitySocketWatcherTest : public TestWithTaskEnvironment {
   }
 
   static void VerifyCallbackParams(const base::TimeDelta& rtt,
-                                   const absl::optional<IPHash>& host) {
+                                   const std::optional<IPHash>& host) {
     ASSERT_TRUE(callback_executed_);
     EXPECT_EQ(rtt, callback_rtt_);
     if (host)
@@ -73,7 +73,7 @@ class NetworkQualitySocketWatcherTest : public TestWithTaskEnvironment {
 
   static void ResetExpectedCallbackParams() {
     callback_rtt_ = base::Milliseconds(0);
-    callback_host_ = absl::nullopt;
+    callback_host_ = std::nullopt;
     callback_executed_ = false;
     should_notify_rtt_callback_ = false;
   }
@@ -82,7 +82,7 @@ class NetworkQualitySocketWatcherTest : public TestWithTaskEnvironment {
 
  private:
   static base::TimeDelta callback_rtt_;
-  static absl::optional<IPHash> callback_host_;
+  static std::optional<IPHash> callback_host_;
   static bool callback_executed_;
   static bool should_notify_rtt_callback_;
 };
@@ -90,8 +90,8 @@ class NetworkQualitySocketWatcherTest : public TestWithTaskEnvironment {
 base::TimeDelta NetworkQualitySocketWatcherTest::callback_rtt_ =
     base::Milliseconds(0);
 
-absl::optional<IPHash> NetworkQualitySocketWatcherTest::callback_host_ =
-    absl::nullopt;
+std::optional<IPHash> NetworkQualitySocketWatcherTest::callback_host_ =
+    std::nullopt;
 
 bool NetworkQualitySocketWatcherTest::callback_executed_ = false;
 
@@ -125,7 +125,7 @@ TEST_F(NetworkQualitySocketWatcherTest, NotificationsThrottled) {
   EXPECT_FALSE(socket_watcher.ShouldNotifyUpdatedRTT());
 
   // Advance the clock by 1000 msec more so that the current time is at least
-  // 2000 msec more than the last time |socket_watcher| received a notification.
+  // 2000 msec more than the last time `socket_watcher` received a notification.
   tick_clock.Advance(base::Milliseconds(1000));
   EXPECT_TRUE(socket_watcher.ShouldNotifyUpdatedRTT());
   ResetExpectedCallbackParams();
@@ -157,7 +157,7 @@ TEST_F(NetworkQualitySocketWatcherTest, QuicFirstNotificationDropped) {
   socket_watcher.OnUpdatedRTTAvailable(base::Seconds(10));
   base::RunLoop().RunUntilIdle();
   // First notification from a QUIC connection should be dropped, and it should
-  // be possible to notify the |socket_watcher| again.
+  // be possible to notify the `socket_watcher` again.
   EXPECT_TRUE(NetworkQualitySocketWatcherTest::callback_rtt().is_zero());
   EXPECT_TRUE(socket_watcher.ShouldNotifyUpdatedRTT());
   ResetExpectedCallbackParams();
@@ -174,7 +174,7 @@ TEST_F(NetworkQualitySocketWatcherTest, QuicFirstNotificationDropped) {
   EXPECT_FALSE(socket_watcher.ShouldNotifyUpdatedRTT());
 
   // Advance the clock by 1000 msec more so that the current time is at least
-  // 2000 msec more than the last time |socket_watcher| received a notification.
+  // 2000 msec more than the last time `socket_watcher` received a notification.
   tick_clock.Advance(base::Milliseconds(1000));
   EXPECT_TRUE(socket_watcher.ShouldNotifyUpdatedRTT());
 }

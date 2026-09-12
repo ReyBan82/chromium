@@ -4,6 +4,8 @@
 
 #include "chrome/services/mac_notifications/public/mojom/mac_notifications_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 // static
@@ -18,31 +20,30 @@ EnumTraits<mac_notifications::mojom::NotificationOperation,
     case NotificationOperation::kSettings:
       return mac_notifications::mojom::NotificationOperation::kSettings;
     case NotificationOperation::kDisablePermission:
+    case NotificationOperation::kReportAsSafe:
+    case NotificationOperation::kReportWarnedAsSpam:
+    case NotificationOperation::kReportUnwarnedAsSpam:
+    case NotificationOperation::kShowOriginalNotification:
       // This is not supported in macOS notifications.
       break;
   }
   NOTREACHED();
-  return mac_notifications::mojom::NotificationOperation::kClick;
 }
 
 // static
-bool EnumTraits<mac_notifications::mojom::NotificationOperation,
-                NotificationOperation>::
-    FromMojom(mac_notifications::mojom::NotificationOperation input,
-              NotificationOperation* output) {
+NotificationOperation
+EnumTraits<mac_notifications::mojom::NotificationOperation,
+           NotificationOperation>::
+    FromMojom(mac_notifications::mojom::NotificationOperation input) {
   switch (input) {
     case mac_notifications::mojom::NotificationOperation::kClick:
-      *output = NotificationOperation::kClick;
-      return true;
+      return NotificationOperation::kClick;
     case mac_notifications::mojom::NotificationOperation::kClose:
-      *output = NotificationOperation::kClose;
-      return true;
+      return NotificationOperation::kClose;
     case mac_notifications::mojom::NotificationOperation::kSettings:
-      *output = NotificationOperation::kSettings;
-      return true;
+      return NotificationOperation::kSettings;
   }
   NOTREACHED();
-  return false;
 }
 
 }  // namespace mojo

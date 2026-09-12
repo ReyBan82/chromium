@@ -10,12 +10,15 @@ import android.graphics.drawable.ColorDrawable;
 import android.view.View;
 import android.view.ViewGroup;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.StringRes;
 
-import org.chromium.base.Callback;
-import org.chromium.base.supplier.ObservableSupplierImpl;
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.supplier.NonNullObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.base.supplier.SettableNonNullObservableSupplier;
 import org.chromium.base.test.util.CallbackHelper;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
 
 /** A simple sheet content to test with. This only displays two empty white views. */
 public class TestBottomSheetContent implements BottomSheetContent {
@@ -25,6 +28,9 @@ public class TestBottomSheetContent implements BottomSheetContent {
     /** {@link CallbackHelper} to ensure the destroy method is called. */
     public final CallbackHelper destroyCallbackHelper = new CallbackHelper();
 
+    private final SettableNonNullObservableSupplier<Boolean> mBackPressStateChangedSupplier =
+            ObservableSuppliers.createNonNull(false);
+
     /** Empty view that represents the toolbar. */
     private View mToolbarView;
 
@@ -32,10 +38,10 @@ public class TestBottomSheetContent implements BottomSheetContent {
     private View mContentView;
 
     /** This content's priority. */
-    private @ContentPriority int mPriority;
+    private final @ContentPriority int mPriority;
 
     /** Whether this content is browser specific. */
-    private boolean mHasCustomLifecycle;
+    private final boolean mHasCustomLifecycle;
 
     /** Whether this content has a custom scrim lifecycle. */
     private boolean mHasCustomScrimLifecycle;
@@ -49,20 +55,57 @@ public class TestBottomSheetContent implements BottomSheetContent {
     /** The full height of this content. */
     private float mFullHeight;
 
+    /** The max resize content height ratio of this content. */
+    private float mMaxResizeContentHeightRatio = MAX_HEIGHT_RATIO;
+
     /** If set to true, the half state will be skipped when scrolling down the FULL sheet. */
     private boolean mSkipHalfStateScrollingDown;
 
-    /** Whether this content intercepts back button presses. */
-    private boolean mHandleBackPress;
+    /**
+     * Whether this content can be immediately replaced by higher-priority content even while the
+     * sheet is open.
+     */
+    private boolean mCanSuppressInAnyState;
 
-    /** Set to true to ask for an offset controller. */
-    private boolean mContentControlsOffset;
+    /**
+     * @param context A context to inflate views with.
+     * @param priority The content's priority.
+     * @param hasCustomLifecycle Whether the content is browser specific.
+     * @param contentView The view filling the sheet.
+     */
+    public TestBottomSheetContent(
+            Context context,
+            @ContentPriority int priority,
+            boolean hasCustomLifecycle,
+            View contentView) {
+        mPeekHeight = BottomSheetContent.HeightMode.DEFAULT;
+        mHalfHeight = BottomSheetContent.HeightMode.DEFAULT;
+        mFullHeight = BottomSheetContent.HeightMode.DEFAULT;
+        mPriority = priority;
+        mHasCustomLifecycle = hasCustomLifecycle;
+        mCanSuppressInAnyState = false;
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mToolbarView = new View(context);
+                    ViewGroup.LayoutParams params =
+                            new ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT, TOOLBAR_HEIGHT);
+                    mToolbarView.setLayoutParams(params);
+                    mToolbarView.setBackground(new ColorDrawable(Color.WHITE));
 
-    /** Current offset controller. */
-    @Nullable
-    private Callback<Integer> mOffsetController;
-
-    private ObservableSupplierImpl<Boolean> mBackPressStateChangedSupplier;
+                    if (contentView == null) {
+                        mContentView = new View(context);
+                        params =
+                                new ViewGroup.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT);
+                        mContentView.setLayoutParams(params);
+                    } else {
+                        mContentView = contentView;
+                    }
+                    mToolbarView.setBackground(new ColorDrawable(Color.WHITE));
+                });
+    }
 
     /**
      * @param context A context to inflate views with.
@@ -71,29 +114,10 @@ public class TestBottomSheetContent implements BottomSheetContent {
      */
     public TestBottomSheetContent(
             Context context, @ContentPriority int priority, boolean hasCustomLifecycle) {
-        mPeekHeight = BottomSheetContent.HeightMode.DEFAULT;
-        mHalfHeight = BottomSheetContent.HeightMode.DEFAULT;
-        mFullHeight = BottomSheetContent.HeightMode.DEFAULT;
-        mPriority = priority;
-        mHasCustomLifecycle = hasCustomLifecycle;
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mToolbarView = new View(context);
-            ViewGroup.LayoutParams params =
-                    new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, TOOLBAR_HEIGHT);
-            mToolbarView.setLayoutParams(params);
-            mToolbarView.setBackground(new ColorDrawable(Color.WHITE));
-
-            mContentView = new View(context);
-            params = new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-            mContentView.setLayoutParams(params);
-            mToolbarView.setBackground(new ColorDrawable(Color.WHITE));
-        });
+        this(context, priority, hasCustomLifecycle, null);
     }
 
-    /**
-     * @param context A context to inflate views with.
-     */
+    /** @param context A context to inflate views with. */
     public TestBottomSheetContent(Context context) {
         this(/*TestBottomSheetContent(*/ context, ContentPriority.LOW, false);
     }
@@ -103,9 +127,8 @@ public class TestBottomSheetContent implements BottomSheetContent {
         return mContentView;
     }
 
-    @Nullable
     @Override
-    public View getToolbarView() {
+    public @Nullable View getToolbarView() {
         return mToolbarView;
     }
 
@@ -165,6 +188,20 @@ public class TestBottomSheetContent implements BottomSheetContent {
         return mFullHeight;
     }
 
+    /**
+     * Sets the maximum full-height ratio cap for this test content.
+     *
+     * @param ratio The maximum full-height ratio cap.
+     */
+    public void setMaxResizeContentHeightRatio(float ratio) {
+        mMaxResizeContentHeightRatio = ratio;
+    }
+
+    @Override
+    public float getMaxResizeContentHeightRatio() {
+        return mMaxResizeContentHeightRatio;
+    }
+
     public void setHasCustomScrimLifecycle(boolean hasCustomScrimLifecycle) {
         mHasCustomScrimLifecycle = hasCustomScrimLifecycle;
     }
@@ -180,26 +217,16 @@ public class TestBottomSheetContent implements BottomSheetContent {
     }
 
     @Override
-    public boolean setContentSizeListener(@Nullable ContentSizeListener listener) {
-        return false;
-    }
-
-    @Override
     public boolean handleBackPress() {
-        return mHandleBackPress;
+        return mBackPressStateChangedSupplier.get();
     }
 
     public void setHandleBackPress(boolean handleBackPress) {
-        getBackPressStateChangedSupplier().set(handleBackPress);
-        mHandleBackPress = handleBackPress;
+        mBackPressStateChangedSupplier.set(handleBackPress);
     }
 
     @Override
-    public ObservableSupplierImpl<Boolean> getBackPressStateChangedSupplier() {
-        if (mBackPressStateChangedSupplier == null) {
-            mBackPressStateChangedSupplier = new ObservableSupplierImpl<>();
-            mBackPressStateChangedSupplier.set(false);
-        }
+    public NonNullObservableSupplier<Boolean> getBackPressStateChangedSupplier() {
         return mBackPressStateChangedSupplier;
     }
 
@@ -209,40 +236,36 @@ public class TestBottomSheetContent implements BottomSheetContent {
     }
 
     @Override
-    public int getSheetContentDescriptionStringId() {
+    public @NonNull String getSheetContentDescription(Context context) {
+        return context.getString(android.R.string.copy);
+    }
+
+    @Override
+    public @StringRes int getSheetHalfHeightAccessibilityStringId() {
         return android.R.string.copy;
     }
 
     @Override
-    public int getSheetHalfHeightAccessibilityStringId() {
+    public @StringRes int getSheetFullHeightAccessibilityStringId() {
         return android.R.string.copy;
     }
 
     @Override
-    public int getSheetFullHeightAccessibilityStringId() {
+    public @StringRes int getSheetClosedAccessibilityStringId() {
         return android.R.string.copy;
     }
 
     @Override
-    public int getSheetClosedAccessibilityStringId() {
+    public @StringRes int getSheetHiddenAccessibilityStringId() {
         return android.R.string.copy;
     }
 
     @Override
-    public boolean contentControlsOffset() {
-        return mContentControlsOffset;
+    public boolean canBeSuppressed(BottomSheetContent nextContent) {
+        return mCanSuppressInAnyState;
     }
 
-    @Override
-    public void setOffsetController(Callback<Integer> offsetController) {
-        mOffsetController = offsetController;
-    }
-
-    public Callback<Integer> getOffsetController() {
-        return mOffsetController;
-    }
-
-    public void setContentControlsOffset(boolean value) {
-        mContentControlsOffset = value;
+    public void setCanBeSuppressed(boolean value) {
+        mCanSuppressInAnyState = value;
     }
 }

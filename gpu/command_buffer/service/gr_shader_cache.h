@@ -7,16 +7,18 @@
 
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
-#include "base/containers/lru_cache.h"
+#include "base/containers/hashing_lru_cache.h"
 #include "base/hash/hash.h"
-#include "base/memory/memory_pressure_listener.h"
-#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/memory_pressure_level.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory_coordinator/async_memory_consumer_registration.h"
+#include "base/memory_coordinator/memory_consumer.h"
 #include "base/synchronization/lock.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread_checker.h"
 #include "base/trace_event/memory_dump_provider.h"
 #include "gpu/raster_export.h"
-#include "third_party/skia/include/gpu/GrContextOptions.h"
+#include "third_party/skia/include/gpu/ganesh/GrContextOptions.h"
 
 class GrDirectContext;
 
@@ -25,7 +27,8 @@ namespace raster {
 
 class RASTER_EXPORT GrShaderCache
     : public GrContextOptions::PersistentCache,
-      public base::trace_event::MemoryDumpProvider {
+      public base::trace_event::MemoryDumpProvider,
+      public base::MemoryConsumer {
  public:
   class RASTER_EXPORT Client {
    public:
@@ -41,9 +44,7 @@ class RASTER_EXPORT GrShaderCache
     ~ScopedCacheUse();
 
    private:
-    // This field is not a raw_ptr<> because it was filtered by the rewriter
-    // for: #union
-    RAW_PTR_EXCLUSION GrShaderCache* cache_;
+    raw_ptr<GrShaderCache> cache_;
   };
 
   GrShaderCache(size_t max_cache_size_bytes, Client* client);
@@ -59,12 +60,14 @@ class RASTER_EXPORT GrShaderCache
 
   void PopulateCache(const std::string& key, const std::string& data);
   void CacheClientIdOnDisk(int32_t client_id);
-  void PurgeMemory(
-      base::MemoryPressureListener::MemoryPressureLevel memory_pressure_level);
 
   // base::trace_event::MemoryDumpProvider implementation.
   bool OnMemoryDump(const base::trace_event::MemoryDumpArgs& args,
                     base::trace_event::ProcessMemoryDump* pmd) override;
+
+  // base::MemoryConsumer implementation.
+  void OnUpdateMemoryLimit() override;
+  void OnReleaseMemory() override;
 
   size_t num_cache_entries() const;
   size_t curr_size_bytes_for_testing() const;
@@ -113,25 +116,30 @@ class RASTER_EXPORT GrShaderCache
 
   using Store = base::HashingLRUCache<CacheKey, CacheData, CacheKeyHash>;
 
-  void EnforceLimits(size_t size_needed);
+  void EnforceLimits(size_t size_needed) EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  Store::iterator AddToCache(CacheKey key, CacheData data);
+  // Returns the size limit of the cache, which changes according to the current
+  // memory pressure level.
+  size_t GetCurrentCacheSizeLimit() const EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
+  Store::iterator AddToCache(CacheKey key, CacheData data)
+      EXCLUSIVE_LOCKS_REQUIRED(lock_);
   template <typename Iterator>
-  void EraseFromCache(Iterator it, bool overwriting);
+  void EraseFromCache(Iterator it) EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  void WriteToDisk(const CacheKey& key, CacheData* data);
+  void WriteToDisk(const CacheKey& key, CacheData* data)
+      EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  bool IsVkPipelineCacheEntry(const CacheKey& key);
-
-  int32_t current_client_id() const;
+  int32_t current_client_id() const EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   mutable base::Lock lock_;
-  size_t cache_size_limit_ GUARDED_BY(lock_) = 0u;
+  const size_t cache_size_limit_;
   size_t curr_size_bytes_ GUARDED_BY(lock_) = 0u;
+  // The current enforced memory limit capacity. Updated dynamically based on
+  // the active memory policy constraints.
+  size_t current_max_size_bytes_ GUARDED_BY(lock_) = 0u;
   Store store_ GUARDED_BY(lock_);
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION Client* const client_ GUARDED_BY(lock_);
+  raw_ptr<Client> const client_ GUARDED_BY(lock_);
   base::flat_set<int32_t> client_ids_to_cache_on_disk_ GUARDED_BY(lock_);
 
   // Multiple threads and hence multiple clients can be accessing the shader
@@ -139,7 +147,8 @@ class RASTER_EXPORT GrShaderCache
   base::flat_map<base::PlatformThreadId, int32_t> current_client_id_
       GUARDED_BY(lock_);
   bool need_store_pipeline_cache_ GUARDED_BY(lock_) = false;
-  const bool enable_vk_pipeline_cache_;
+
+  base::AsyncMemoryConsumerRegistration memory_consumer_registration_;
 
   // Bound to the thread on which GrShaderCache is created. Some methods can
   // only be called on this thread. GrShaderCache is created on gpu main thread.

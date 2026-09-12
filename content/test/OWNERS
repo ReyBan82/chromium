@@ -1,5 +1,3 @@
-sky@chromium.org
-
 # For RenderFrameHost/RenderWidgetHost/RenderViewHost-related test harnesses
 # and NavigationSimulator.
 file://content/browser/renderer_host/OWNERS
@@ -24,9 +22,6 @@ per-file ...fuchsia*=file://build/fuchsia/OWNERS
 
 # WebContents-related test code.
 per-file *web_contents*=file://content/browser/web_contents/OWNERS
-
-# Aggregation service related files.
-per-file *aggregation_service*=file://content/browser/aggregation_service/OWNERS
 
 # For Attribution Reporting API.
 per-file attribution_*=file://content/browser/attribution_reporting/OWNERS

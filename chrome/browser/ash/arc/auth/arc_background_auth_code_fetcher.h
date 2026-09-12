@@ -6,19 +6,24 @@
 #define CHROME_BROWSER_ASH_ARC_AUTH_ARC_BACKGROUND_AUTH_CODE_FETCHER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/arc/arc_optin_uma.h"
 #include "chrome/browser/ash/arc/auth/arc_auth_code_fetcher.h"
 #include "chrome/browser/ash/arc/auth/arc_auth_context.h"
+#include "components/account_id/account_id.h"
 
-class Profile;
+class PrefService;
 
 namespace signin {
 class AccessTokenFetcher;
 struct AccessTokenInfo;
+class IdentityManager;
 }  // namespace signin
 
 namespace network {
@@ -35,11 +40,16 @@ extern const char kTokenBootstrapEndPoint[];
 // re-created. Deleting the instance cancels inflight operation.
 class ArcBackgroundAuthCodeFetcher : public ArcAuthCodeFetcher {
  public:
-  // |account_id| is the id used by the OAuth Token Service chain.
+  // `core_account_id` is the id used by the OAuth Token Service chain.
+  // `local_state` must be non-null and must outlive `this`.
+  // `identity_manager` is the one tied to the User represented by
+  // the `account_id`. It must be non-null and must outlive `this`.
   ArcBackgroundAuthCodeFetcher(
+      PrefService* local_state,
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
-      Profile* profile,
-      const CoreAccountId& account_id,
+      const AccountId& account_id,
+      signin::IdentityManager* identity_manager,
+      const CoreAccountId& core_account_id,
       bool initial_signin,
       bool is_primary_account);
 
@@ -62,14 +72,14 @@ class ArcBackgroundAuthCodeFetcher : public ArcAuthCodeFetcher {
                                   signin::AccessTokenInfo token_info);
 
   void OnSimpleLoaderComplete(signin::AccessTokenInfo token_info,
-                              std::unique_ptr<std::string> response_body);
+                              std::optional<std::string> response_body);
 
   void ReportResult(const std::string& auth_code,
                     OptInSilentAuthCode uma_status);
 
+  const raw_ref<PrefService> local_state_;
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
-  // Unowned pointer.
-  Profile* const profile_;
+  const AccountId account_id_;
   ArcAuthContext context_;
   FetchCallback callback_;
 

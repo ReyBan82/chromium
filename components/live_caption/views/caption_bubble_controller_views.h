@@ -6,16 +6,23 @@
 #define COMPONENTS_LIVE_CAPTION_VIEWS_CAPTION_BUBBLE_CONTROLLER_VIEWS_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
 
+#include "base/containers/flat_map.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/live_caption/caption_bubble_controller.h"
 #include "components/live_caption/views/caption_bubble.h"
-#include "components/prefs/pref_service.h"
+#include "components/on_device_translation/buildflags/buildflags.h"
+#include "components/soda/soda_installer.h"
 #include "media/mojo/mojom/speech_recognition.mojom.h"
+
+#if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+#include "components/on_device_translation/installer.h"
+#endif
 
 namespace views {
 class Widget;
@@ -25,16 +32,28 @@ namespace captions {
 
 class CaptionBubble;
 class CaptionBubbleModel;
+class CaptionBubbleSettings;
 class CaptionBubbleSessionObserver;
+class TranslationViewWrapperBase;
 
 ///////////////////////////////////////////////////////////////////////////////
 // Caption Bubble Controller for Views
 //
 //  The implementation of the caption bubble controller for Views.
 //
-class CaptionBubbleControllerViews : public CaptionBubbleController {
+class CaptionBubbleControllerViews
+    : public CaptionBubbleController,
+      public speech::SodaInstaller::Observer
+#if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+    ,
+      public on_device_translation::OnDeviceTranslationInstaller::Observer
+#endif
+{
  public:
-  explicit CaptionBubbleControllerViews(PrefService* profile_prefs);
+  CaptionBubbleControllerViews(
+      CaptionBubbleSettings* caption_bubble_settings,
+      const std::string& application_locale,
+      std::unique_ptr<TranslationViewWrapperBase> translation_view_wrapper);
   ~CaptionBubbleControllerViews() override;
   CaptionBubbleControllerViews(const CaptionBubbleControllerViews&) = delete;
   CaptionBubbleControllerViews& operator=(const CaptionBubbleControllerViews&) =
@@ -43,7 +62,8 @@ class CaptionBubbleControllerViews : public CaptionBubbleController {
   // Called when a transcription is received from the service. Returns whether
   // the transcription result was set on the caption bubble successfully.
   // Transcriptions will halt if this returns false.
-  bool OnTranscription(CaptionBubbleContext* caption_bubble_context,
+  bool OnTranscription(content::RenderFrameHost* rfh,
+                       CaptionBubbleContext* caption_bubble_context,
                        const media::SpeechRecognitionResult& result) override;
 
   // Called when the speech service has an error.
@@ -54,15 +74,20 @@ class CaptionBubbleControllerViews : public CaptionBubbleController {
       OnDoNotShowAgainClickedCallback error_silenced_callback) override;
 
   // Called when the audio stream has ended.
-  void OnAudioStreamEnd(CaptionBubbleContext* caption_bubble_context) override;
+  void OnAudioStreamEnd(content::RenderFrameHost* rfh,
+                        CaptionBubbleContext* caption_bubble_context) override;
 
   // Called when the caption style changes.
   void UpdateCaptionStyle(
-      absl::optional<ui::CaptionStyle> caption_style) override;
+      std::optional<ui::CaptionStyle> caption_style) override;
 
   bool IsWidgetVisibleForTesting() override;
   bool IsGenericErrorMessageVisibleForTesting() override;
   std::string GetBubbleLabelTextForTesting() override;
+  void OnLanguageIdentificationEvent(
+      content::RenderFrameHost* rfh,
+      CaptionBubbleContext* caption_bubble_context,
+      const media::mojom::LanguageIdentificationEventPtr& event) override;
   void CloseActiveModelForTesting() override;
   views::Widget* GetCaptionWidgetForTesting();
   CaptionBubble* GetCaptionBubbleForTesting();
@@ -70,6 +95,25 @@ class CaptionBubbleControllerViews : public CaptionBubbleController {
  private:
   friend class CaptionBubbleControllerViewsTest;
   friend class LiveCaptionUnavailabilityNotifierTest;
+
+  // SodaInstaller::Observer overrides:
+  void OnSodaInstalled(speech::LanguageCode language_code) override;
+  void OnSodaInstallError(speech::LanguageCode language_code,
+                          speech::SodaInstaller::ErrorCode error_code) override;
+  void OnSodaProgress(speech::LanguageCode language_code,
+                      int progress) override;
+
+#if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+  // OnDeviceTranslationInstaller::Observer overrides:
+  void OnLanguagePackInstalled(
+      const on_device_translation::LanguagePackKey lang_pack) override;
+  void OnLanguagePackInstallationChanged(
+      const on_device_translation::LanguagePackKey lang_pack) override;
+  void OnInstallationChanged() override {}
+  void OnLanguagePackProgress(
+      const on_device_translation::LanguagePackKey lang_pack,
+      int progress) override;
+#endif
 
   // A callback passed to the CaptionBubble which is called when the
   // CaptionBubble is destroyed.
@@ -89,14 +133,16 @@ class CaptionBubbleControllerViews : public CaptionBubbleController {
   raw_ptr<CaptionBubble, DanglingUntriaged> caption_bubble_;
   raw_ptr<views::Widget, DanglingUntriaged> caption_widget_;
 
-  // A pointer to the currently active CaptionBubbleModel.
-  raw_ptr<CaptionBubbleModel, DanglingUntriaged> active_model_ = nullptr;
-
   // A map of media player ids and their corresponding CaptionBubbleModel. New
   // entries are added to this map when a previously unseen media player id is
   // received.
   std::unordered_map<CaptionBubbleContext*, std::unique_ptr<CaptionBubbleModel>>
       caption_bubble_models_;
+
+  // A pointer to the currently active CaptionBubbleModel, owned by
+  // `caption_bubble_models_`. Declared after the map so it is destroyed first
+  // and never dangles during teardown.
+  raw_ptr<CaptionBubbleModel> active_model_ = nullptr;
 
   // A collection of closed session identifiers that should not display
   // captions. Identifiers are removed from this collection when a user
@@ -107,6 +153,17 @@ class CaptionBubbleControllerViews : public CaptionBubbleController {
   // sessions.
   std::unordered_map<std::string, std::unique_ptr<CaptionBubbleSessionObserver>>
       caption_bubble_session_observers_;
+
+  std::string application_locale_;
+
+  std::optional<int> soda_progress_;
+  speech::LanguageCode soda_language_code_ = speech::LanguageCode::kNone;
+#if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+  base::flat_map<on_device_translation::LanguagePackKey, int>
+      translation_progress_;
+#endif
+
+  void UpdateCombinedProgressText();
 
   base::WeakPtrFactory<CaptionBubbleControllerViews> weak_factory_{this};
 };

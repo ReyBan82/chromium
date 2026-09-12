@@ -19,10 +19,9 @@
 #include "chrome/browser/ui/webui/settings/settings_page_ui_handler.h"
 #include "components/browsing_data/core/browsing_data_utils.h"
 #include "components/browsing_data/core/counters/browsing_data_counter.h"
-#include "components/search/search_provider_observer.h"
+#include "components/search_engines/template_url_service.h"
 #include "components/search_engines/template_url_service_observer.h"
-#include "components/signin/core/browser/account_reconcilor.h"
-#include "components/sync/driver/sync_service.h"
+#include "components/sync/service/sync_service.h"
 
 namespace content {
 class WebUI;
@@ -61,7 +60,7 @@ class ClearBrowsingDataHandler : public SettingsPageUIHandler,
                            UpdateSyncState_NonGoogleDseNotPrepopulated);
 
   // Clears browsing data, called by Javascript.
-  void HandleClearBrowsingData(const base::Value::List& value);
+  void HandleClearBrowsingData(const base::ListValue& value);
 
   // Called when a clearing task finished. |webui_callback_id| is provided
   // by the WebUI action that initiated it.
@@ -70,23 +69,33 @@ class ClearBrowsingDataHandler : public SettingsPageUIHandler,
   void OnClearingTaskFinished(
       const std::string& webui_callback_id,
       const base::flat_set<browsing_data::BrowsingDataType>& data_types,
-      std::unique_ptr<AccountReconcilor::ScopedSyncedDataDeletion> deletion,
       uint64_t failed_data_types);
 
   // Initializes the dialog UI. Called by JavaScript when the DOM is ready.
-  void HandleInitialize(const base::Value::List& args);
+  void HandleInitialize(const base::ListValue& args);
 
   // Returns the current sync state to the WebUI.
-  void HandleGetSyncState(const base::Value::List& args);
+  void HandleGetSyncState(const base::ListValue& args);
+
+  // Called by WebUI when the user takes an action that warrants restarting
+  // counters.
+  // TODO(crbug.com/331925113): Currently, this only happens when the time
+  // range dropdown is changed. However, it would make sense to also restart
+  // timers when a checkbox state changes. If that's not the case, this method
+  // should be reconciled with `HandleTimePeriodChanged` below which likewise
+  // triggers on the dropdown change, but only after the deletion has been
+  // executed and prefs updated.
+  void HandleRestartCounters(const base::ListValue& args);
 
   // Implementation of SyncServiceObserver.
   void OnStateChanged(syncer::SyncService* sync) override;
+  void OnSyncShutdown(syncer::SyncService* sync) override;
 
   // Updates the footer of the dialog when the sync state changes.
   virtual void UpdateSyncState();
 
   // Create a SyncStateEvent containing the current sync state.
-  base::Value::Dict CreateSyncStateEvent();
+  base::DictValue CreateSyncStateEvent();
 
   // Finds out whether we should show notice about other forms of history stored
   // in user's account.
@@ -98,12 +107,15 @@ class ClearBrowsingDataHandler : public SettingsPageUIHandler,
   void UpdateHistoryDeletionDialog(bool show);
 
   // Adds a browsing data |counter|.
-  void AddCounter(std::unique_ptr<browsing_data::BrowsingDataCounter> counter,
-                  browsing_data::ClearBrowsingDataTab tab);
+  void AddCounter(std::unique_ptr<browsing_data::BrowsingDataCounter> counter);
 
   // Updates a counter text according to the |result|.
   void UpdateCounterText(
       std::unique_ptr<browsing_data::BrowsingDataCounter::Result> result);
+
+  // Restarts |counters_| and instructs them to calculate the data volume for
+  // the |time_period|.
+  void RestartCounters(browsing_data::TimePeriod time_period);
 
   // Record changes to the time period preferences.
   void HandleTimePeriodChanged(const std::string& pref_name);
@@ -128,10 +140,6 @@ class ClearBrowsingDataHandler : public SettingsPageUIHandler,
   // Whether we should show a dialog informing the user about other forms of
   // history stored in their account after the history deletion is finished.
   bool show_history_deletion_dialog_;
-
-  // The TimePeriod preferences.
-  std::unique_ptr<IntegerPrefMember> period_;
-  std::unique_ptr<IntegerPrefMember> periodBasic_;
 
   // A weak pointer factory for asynchronous calls referencing this class.
   // The weak pointers are invalidated in |OnJavascriptDisallowed()| and

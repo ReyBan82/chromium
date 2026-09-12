@@ -29,11 +29,13 @@
 
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/platform/geometry/path.h"
+#include "third_party/blink/renderer/platform/geometry/path_builder.h"
 #include "third_party/blink/renderer/platform/graphics/bitmap_image.h"
+#include "third_party/blink/renderer/platform/graphics/dark_mode_settings.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_canvas.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_controller.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_record.h"
-#include "third_party/blink/renderer/platform/graphics/path.h"
 #include "third_party/blink/renderer/platform/testing/font_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/text/text_run.h"
@@ -79,8 +81,8 @@ TEST(GraphicsContextTest, Recording) {
   bitmap.eraseColor(0);
   SkiaPaintCanvas canvas(bitmap);
 
-  auto paint_controller = std::make_unique<PaintController>();
-  GraphicsContext context(*paint_controller);
+  PaintController paint_controller;
+  GraphicsContext context(paint_controller);
 
   Color opaque = Color::FromRGBA(255, 0, 0, 255);
 
@@ -110,21 +112,11 @@ TEST(GraphicsContextTest, UnboundedDrawsAreClipped) {
   Color opaque = Color::FromRGBA(255, 0, 0, 255);
   Color transparent = Color::kTransparent;
 
-  auto paint_controller = std::make_unique<PaintController>();
-  GraphicsContext context(*paint_controller);
+  PaintController paint_controller;
+  GraphicsContext context(paint_controller);
   context.BeginRecording();
 
   context.SetShouldAntialias(false);
-  context.SetMiterLimit(1);
-  context.SetStrokeThickness(5);
-  context.SetLineCap(kSquareCap);
-  context.SetStrokeStyle(kSolidStroke);
-
-  // Make skia unable to compute fast bounds for our paths.
-  DashArray dash_array;
-  dash_array.push_back(1);
-  dash_array.push_back(0);
-  context.SetLineDash(dash_array, 0);
 
   // Make the device opaque in 10,10 40x40.
   context.FillRect(gfx::RectF(10, 10, 40, 40), opaque, AutoDarkModeDisabled(),
@@ -138,9 +130,10 @@ TEST(GraphicsContextTest, UnboundedDrawsAreClipped) {
 
   // Draw a path that gets clipped. This should destroy the opaque area, but
   // only inside the clip.
-  Path path;
-  path.MoveTo(gfx::PointF(10, 10));
-  path.AddLineTo(gfx::PointF(40, 40));
+  const Path path = PathBuilder()
+      .MoveTo(gfx::PointF(10, 10))
+      .LineTo(gfx::PointF(40, 40))
+      .Finalize();
   cc::PaintFlags flags;
   flags.setColor(transparent.Rgb());
   flags.setBlendMode(SkBlendMode::kSrcOut);
@@ -156,42 +149,39 @@ class GraphicsContextDarkModeTest : public testing::Test {
     bitmap_.allocN32Pixels(4, 1);
     bitmap_.eraseColor(0);
     canvas_ = std::make_unique<SkiaPaintCanvas>(bitmap_);
-    paint_controller_ = std::make_unique<PaintController>();
   }
 
-  void DrawColorsToContext(bool is_dark_mode_on,
-                           const DarkModeSettings& settings) {
-    GraphicsContext context(*paint_controller_);
-    if (is_dark_mode_on)
-      context.UpdateDarkModeSettingsForTest(settings);
+  void DrawColorsToContext(bool is_dark_mode_on) {
+    PaintController paint_controller;
+    GraphicsContext context(paint_controller);
+    AutoDarkMode auto_dark_mode = AutoDarkMode::Disabled();
+    if (is_dark_mode_on) {
+      DarkModeSettings settings;
+      context.SetDarkModeFilterForTest(
+          std::make_unique<DarkModeFilter>(settings));
+
+      auto_dark_mode = AutoDarkMode(DarkModeFilter::ElementRole::kBackground,
+                                    /*enabled=*/true);
+    }
     context.BeginRecording();
-    context.FillRect(gfx::RectF(0, 0, 1, 1), Color::kBlack,
-                     AutoDarkMode(DarkModeFilter::ElementRole::kBackground,
-                                  is_dark_mode_on));
-    context.FillRect(gfx::RectF(1, 0, 1, 1), Color::kWhite,
-                     AutoDarkMode(DarkModeFilter::ElementRole::kBackground,
-                                  is_dark_mode_on));
+    context.FillRect(gfx::RectF(0, 0, 1, 1), Color::kBlack, auto_dark_mode);
+    context.FillRect(gfx::RectF(1, 0, 1, 1), Color::kWhite, auto_dark_mode);
     context.FillRect(gfx::RectF(2, 0, 1, 1), Color::FromSkColor(SK_ColorRED),
-                     AutoDarkMode(DarkModeFilter::ElementRole::kBackground,
-                                  is_dark_mode_on));
+                     auto_dark_mode);
     context.FillRect(gfx::RectF(3, 0, 1, 1), Color::FromSkColor(SK_ColorGRAY),
-                     AutoDarkMode(DarkModeFilter::ElementRole::kBackground,
-                                  is_dark_mode_on));
+                     auto_dark_mode);
     // Capture the result in the bitmap.
     canvas_->drawPicture(context.EndRecording());
   }
 
   SkBitmap bitmap_;
   std::unique_ptr<SkiaPaintCanvas> canvas_;
-  std::unique_ptr<PaintController> paint_controller_;
 };
 
 // This is a baseline test where dark mode is turned off. Compare other variants
 // of the test where dark mode is enabled.
 TEST_F(GraphicsContextDarkModeTest, DarkModeOff) {
-  DarkModeSettings settings;
-
-  DrawColorsToContext(false, settings);
+  DrawColorsToContext(false);
 
   EXPECT_EQ(SK_ColorBLACK, bitmap_.getColor(0, 0));
   EXPECT_EQ(SK_ColorWHITE, bitmap_.getColor(1, 0));
@@ -199,60 +189,85 @@ TEST_F(GraphicsContextDarkModeTest, DarkModeOff) {
   EXPECT_EQ(SK_ColorGRAY, bitmap_.getColor(3, 0));
 }
 
-// Simple invert for testing. Each color component |c|
-// is replaced with |255 - c| for easy testing.
-TEST_F(GraphicsContextDarkModeTest, SimpleInvertForTesting) {
-  DarkModeSettings settings;
-  settings.mode = DarkModeInversionAlgorithm::kSimpleInvertForTesting;
-  settings.contrast = 0;
-
-  DrawColorsToContext(true, settings);
+TEST_F(GraphicsContextDarkModeTest, InvertLightnessLAB) {
+  DrawColorsToContext(true);
 
   EXPECT_EQ(SK_ColorWHITE, bitmap_.getColor(0, 0));
-  EXPECT_EQ(SK_ColorBLACK, bitmap_.getColor(1, 0));
-  EXPECT_EQ(SK_ColorCYAN, bitmap_.getColor(2, 0));
-  EXPECT_EQ(0xff777777, bitmap_.getColor(3, 0));
+  EXPECT_EQ(0xff121212, bitmap_.getColor(1, 0));
+  EXPECT_EQ(0xffff1203, bitmap_.getColor(2, 0));
+  EXPECT_EQ(0xff7f7f7f, bitmap_.getColor(3, 0));
 }
 
-// Invert brightness (with gamma correction).
-TEST_F(GraphicsContextDarkModeTest, InvertBrightness) {
+TEST_F(GraphicsContextDarkModeTest, ScopedAutoDarkModeStatePaused) {
+  PaintController paint_controller;
+  GraphicsContext context(paint_controller);
   DarkModeSettings settings;
-  settings.mode = DarkModeInversionAlgorithm::kInvertBrightness;
-  settings.contrast = 0;
+  context.SetDarkModeFilterForTest(std::make_unique<DarkModeFilter>(settings));
+  AutoDarkMode auto_dark_mode(DarkModeFilter::ElementRole::kBackground,
+                              /*enabled=*/true);
 
-  DrawColorsToContext(true, settings);
+  EXPECT_FALSE(context.IsAutoDarkModePaused());
 
-  EXPECT_EQ(SK_ColorWHITE, bitmap_.getColor(0, 0));
-  EXPECT_EQ(SK_ColorBLACK, bitmap_.getColor(1, 0));
-  EXPECT_EQ(SK_ColorCYAN, bitmap_.getColor(2, 0));
-  EXPECT_EQ(0xffe1e1e1, bitmap_.getColor(3, 0));
+  context.BeginRecording();
+  {
+    // Pausing suppresses inversion, so black stays black.
+    GraphicsContext::ScopedAutoDarkModeState paused(context, /*paused=*/true);
+    EXPECT_TRUE(context.IsAutoDarkModePaused());
+    context.FillRect(gfx::RectF(0, 0, 1, 1), Color::kBlack, auto_dark_mode);
+
+    {
+      // A nested scope overrides the ancestor, re-enabling inversion so black
+      // becomes white.
+      GraphicsContext::ScopedAutoDarkModeState resumed(context,
+                                                       /*paused=*/false);
+      EXPECT_FALSE(context.IsAutoDarkModePaused());
+      context.FillRect(gfx::RectF(1, 0, 1, 1), Color::kBlack, auto_dark_mode);
+    }
+
+    // The outer paused state is restored when the nested scope exits.
+    EXPECT_TRUE(context.IsAutoDarkModePaused());
+  }
+
+  // Back to the default (not paused) state after all scopes exit; inversion
+  // applies again, so black becomes white.
+  EXPECT_FALSE(context.IsAutoDarkModePaused());
+  context.FillRect(gfx::RectF(2, 0, 1, 1), Color::kBlack, auto_dark_mode);
+
+  canvas_->drawPicture(context.EndRecording());
+
+  EXPECT_EQ(SK_ColorBLACK, bitmap_.getColor(0, 0));
+  EXPECT_EQ(SK_ColorWHITE, bitmap_.getColor(1, 0));
+  EXPECT_EQ(SK_ColorWHITE, bitmap_.getColor(2, 0));
 }
 
-// Invert lightness (in HSL space).
-TEST_F(GraphicsContextDarkModeTest, InvertLightness) {
+TEST_F(GraphicsContextDarkModeTest,
+       BitmapImageIgnoresAutoDarkModePausedStates) {
+  PaintController paint_controller;
+  GraphicsContext context(paint_controller);
   DarkModeSettings settings;
-  settings.mode = DarkModeInversionAlgorithm::kInvertLightness;
-  settings.contrast = 0;
+  context.SetDarkModeFilterForTest(std::make_unique<DarkModeFilter>(settings));
 
-  DrawColorsToContext(true, settings);
+  ImageAutoDarkMode icon(DarkModeFilter::ElementRole::kBackground,
+                         /*enabled=*/true, DarkModeFilter::ImageType::kIcon);
+  ImageAutoDarkMode photo(DarkModeFilter::ElementRole::kBackground,
+                          /*enabled=*/true, DarkModeFilter::ImageType::kPhoto);
 
-  EXPECT_EQ(SK_ColorWHITE, bitmap_.getColor(0, 0));
-  EXPECT_EQ(SK_ColorBLACK, bitmap_.getColor(1, 0));
-  EXPECT_EQ(SK_ColorRED, bitmap_.getColor(2, 0));
-  EXPECT_EQ(0xffe1e1e1, bitmap_.getColor(3, 0));
-}
+  // Not paused: icons are inverted, photos are not.
+  EXPECT_FALSE(context.IsAutoDarkModePaused());
+  EXPECT_NE(nullptr, context.GetDarkModeFilterForImage(icon));
+  EXPECT_EQ(nullptr, context.GetDarkModeFilterForImage(photo));
 
-TEST_F(GraphicsContextDarkModeTest, InvertLightnessPlusContrast) {
-  DarkModeSettings settings;
-  settings.mode = DarkModeInversionAlgorithm::kInvertLightness;
-  settings.contrast = 0.2;
+  {
+    // Paused: the icon is still inverted, and the photo is still untouched.
+    GraphicsContext::ScopedAutoDarkModeState paused(context, /*paused=*/true);
+    EXPECT_TRUE(context.IsAutoDarkModePaused());
+    EXPECT_NE(nullptr, context.GetDarkModeFilterForImage(icon));
+    EXPECT_EQ(nullptr, context.GetDarkModeFilterForImage(photo));
+  }
 
-  DrawColorsToContext(true, settings);
-
-  EXPECT_EQ(SK_ColorWHITE, bitmap_.getColor(0, 0));
-  EXPECT_EQ(SK_ColorBLACK, bitmap_.getColor(1, 0));
-  EXPECT_EQ(SK_ColorRED, bitmap_.getColor(2, 0));
-  EXPECT_EQ(0xfff1f1f1, bitmap_.getColor(3, 0));
+  // A disabled image auto dark mode never returns a filter.
+  EXPECT_EQ(nullptr,
+            context.GetDarkModeFilterForImage(ImageAutoDarkMode::Disabled()));
 }
 
 }  // namespace

@@ -9,30 +9,42 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
-#include <unordered_set>
+#include <optional>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/containers/to_vector.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/metrics/histogram_functions.h"
+#include "base/memory/ptr_util.h"
 #include "base/observer_list.h"
+#include "base/run_loop.h"
+#include "base/strings/string_split.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
-#include "components/sync/base/model_type.h"
+#include "base/trace_event/trace_event.h"
+#include "build/build_config.h"
+#include "components/sync/base/data_type.h"
+#include "components/sync/base/features.h"
 #include "components/sync/base/time.h"
 #include "components/sync/engine/commit_and_get_updates_types.h"
 #include "components/sync/model/data_type_activation_request.h"
 #include "components/sync/model/entity_change.h"
 #include "components/sync/model/metadata_batch.h"
 #include "components/sync/model/mutable_data_batch.h"
+#include "components/sync/protocol/data_type_state.pb.h"
+#include "components/sync/protocol/data_type_state_helper.h"
 #include "components/sync/protocol/device_info_specifics.pb.h"
-#include "components/sync/protocol/model_type_state.pb.h"
 #include "components/sync/protocol/sync_enums.pb.h"
 #include "components/sync_device_info/device_info_prefs.h"
 #include "components/sync_device_info/device_info_proto_enum_util.h"
 #include "components/sync_device_info/device_info_util.h"
 #include "components/sync_device_info/local_device_info_util.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace syncer {
 
@@ -41,11 +53,9 @@ using sync_pb::DeviceInfoSpecifics;
 using sync_pb::FeatureSpecificFields;
 using sync_pb::SharingSpecificFields;
 
-using Record = ModelTypeStore::Record;
-using RecordList = ModelTypeStore::RecordList;
-using WriteBatch = ModelTypeStore::WriteBatch;
-using ClientIdToSpecifics =
-    std::map<std::string, std::unique_ptr<sync_pb::DeviceInfoSpecifics>>;
+using Record = DataTypeStore::Record;
+using RecordList = DataTypeStore::RecordList;
+using WriteBatch = DataTypeStore::WriteBatch;
 
 namespace {
 
@@ -71,35 +81,30 @@ base::TimeDelta GetPulseIntervalFromSpecifics(
   return base::Days(1);
 }
 
-absl::optional<DeviceInfo::SharingInfo> SpecificsToSharingInfo(
+std::optional<DeviceInfo::SharingInfo> SpecificsToSharingInfo(
     const DeviceInfoSpecifics& specifics) {
+  TRACE_EVENT0("sync", "syncer::SpecificsToSharingInfo");
   if (!specifics.has_sharing_fields()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
-  std::set<SharingSpecificFields::EnabledFeatures> enabled_features;
+  std::set<DeviceInfo::SharingFeature> enabled_features;
   for (int i = 0; i < specifics.sharing_fields().enabled_features_size(); ++i) {
-    enabled_features.insert(specifics.sharing_fields().enabled_features(i));
+    enabled_features.insert(ToDeviceInfoSharingFeature(
+        specifics.sharing_fields().enabled_features(i)));
   }
   return DeviceInfo::SharingInfo(
-      {specifics.sharing_fields().vapid_fcm_token(),
-       specifics.sharing_fields().vapid_p256dh(),
-       specifics.sharing_fields().vapid_auth_secret()},
       {specifics.sharing_fields().sender_id_fcm_token_v2(),
        specifics.sharing_fields().sender_id_p256dh_v2(),
        specifics.sharing_fields().sender_id_auth_secret_v2()},
+      specifics.sharing_fields().chime_representative_target_id(),
       std::move(enabled_features));
 }
 
-std::vector<uint8_t> VectorFromString(const std::string& s) {
-  const uint8_t* ptr = reinterpret_cast<const uint8_t*>(s.data());
-  return std::vector<uint8_t>(ptr, ptr + s.size());
-}
-
-absl::optional<DeviceInfo::PhoneAsASecurityKeyInfo>
+std::optional<DeviceInfo::PhoneAsASecurityKeyInfo>
 SpecificsToPhoneAsASecurityKeyInfo(const DeviceInfoSpecifics& specifics) {
   if (!specifics.has_paask_fields()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   DeviceInfo::PhoneAsASecurityKeyInfo to;
@@ -108,24 +113,50 @@ SpecificsToPhoneAsASecurityKeyInfo(const DeviceInfoSpecifics& specifics) {
       !from.has_contact_id() || !from.has_secret() ||
       !from.has_peer_public_key_x962() ||
       from.tunnel_server_domain() >= 0x10000) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   to.tunnel_server_domain = from.tunnel_server_domain();
   to.id = from.id();
-  to.contact_id = VectorFromString(from.contact_id());
+  to.contact_id = base::ToVector(base::as_byte_span(from.contact_id()));
 
   if (from.secret().size() != to.secret.size()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
-  memcpy(to.secret.data(), from.secret().data(), to.secret.size());
+  UNSAFE_TODO(memcpy(to.secret.data(), from.secret().data(), to.secret.size()));
 
   if (from.peer_public_key_x962().size() != to.peer_public_key_x962.size()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
-  memcpy(to.peer_public_key_x962.data(), from.peer_public_key_x962().data(),
-         to.peer_public_key_x962.size());
+  UNSAFE_TODO(memcpy(to.peer_public_key_x962.data(),
+                     from.peer_public_key_x962().data(),
+                     to.peer_public_key_x962.size()));
 
   return to;
+}
+
+MobilePromoOnDesktopPromoTypeSet SpecificsToDesktopToIOSPromoReceivingTypes(
+    const DeviceInfoSpecifics& specifics) {
+  MobilePromoOnDesktopPromoTypeSet types;
+  for (const auto& type_int :
+       specifics.feature_fields().desktop_to_ios_promo_receiving_types()) {
+    auto type = static_cast<MobilePromoOnDesktopPromoType>(type_int);
+    if (type >= MobilePromoOnDesktopPromoType::kMinValue &&
+        type <= MobilePromoOnDesktopPromoType::kMaxValue) {
+      types.Put(type);
+    }
+  }
+  return types;
+}
+
+std::optional<base::Time> SpecificsToAutoSignOutLastSigninTimestamp(
+    const DeviceInfoSpecifics& specifics) {
+  if (!specifics.feature_fields()
+           .has_auto_sign_out_last_signin_timestamp_windows_epoch_micros()) {
+    return std::nullopt;
+  }
+  return base::Time::FromDeltaSinceWindowsEpoch(base::Microseconds(
+      specifics.feature_fields()
+          .auto_sign_out_last_signin_timestamp_windows_epoch_micros()));
 }
 
 std::string GetVersionNumberFromSpecifics(
@@ -145,39 +176,82 @@ bool IsChromeClient(const DeviceInfoSpecifics& specifics) {
   return specifics.has_chrome_version_info() || specifics.has_chrome_version();
 }
 
-// Converts DeviceInfoSpecifics into a freshly allocated DeviceInfo.
-std::unique_ptr<DeviceInfo> SpecificsToModel(
+DeviceInfo::GlicExperimentalTriggeringState
+SpecificsToGlicExperimentalTriggeringState(
     const DeviceInfoSpecifics& specifics) {
-  DeviceInfo::FormFactor device_form_factor;
-  if (specifics.has_device_form_factor()) {
-    device_form_factor = ToDeviceInfoFormFactor(specifics.device_form_factor());
-  } else {
-    // Fallback to derive from old device type enum.
-    device_form_factor =
-        DeriveFormFactorFromDeviceType(specifics.device_type());
+  if (specifics.feature_fields().has_glic_experimental_triggering_state()) {
+    return ToDeviceInfoGlicExperimentalTriggeringState(
+        specifics.feature_fields().glic_experimental_triggering_state());
   }
-  DeviceInfo::OsType os_type;
-  if (specifics.has_os_type()) {
-    os_type = ToDeviceInfoOsType(specifics.os_type());
-  } else {
-    // Fallback to derive from old device type enum.
-    os_type = DeriveOsFromDeviceType(specifics.device_type(),
-                                     specifics.manufacturer());
+  return DeviceInfo::GlicExperimentalTriggeringState::kUnavailable;
+}
+
+std::optional<int> SpecificsToGlicExperimentalTriggeringVersion(
+    const DeviceInfoSpecifics& specifics) {
+  if (specifics.feature_fields().has_glic_experimental_triggering_version()) {
+    return specifics.feature_fields().glic_experimental_triggering_version();
   }
-  return std::make_unique<DeviceInfo>(
+  return std::nullopt;
+}
+
+std::optional<DeviceInfo::PersonalContextInfo>
+SpecificsToPersonalContextInfo(const DeviceInfoSpecifics& specifics) {
+  if (!specifics.has_personal_context_fields() ||
+      !specifics.personal_context_fields().has_serialized_tink_keyset()) {
+    return std::nullopt;
+  }
+  const sync_pb::PersonalContextSpecificFields& fields =
+      specifics.personal_context_fields();
+  return DeviceInfo::PersonalContextInfo{
+      .serialized_tink_keyset =
+          base::ToVector(base::as_byte_span(fields.serialized_tink_keyset()))};
+}
+
+// Converts DeviceInfoSpecifics into DeviceInfo.
+DeviceInfo SpecificsToModel(const DeviceInfoSpecifics& specifics) {
+  const DeviceInfo::FormFactor device_form_factor =
+      specifics.has_device_form_factor()
+          ? ToDeviceInfoFormFactor(specifics.device_form_factor())
+          : DeriveFormFactorFromDeviceType(specifics.device_type());
+  const DeviceInfo::OsType os_type =
+      specifics.has_os_type()
+          ? ToDeviceInfoOsType(specifics.os_type())
+          : DeriveOsFromDeviceType(specifics.device_type(),
+                                   specifics.manufacturer());
+
+  std::optional<std::string> android_os_build_fingerprint_prefix;
+  if (specifics.has_android_os_build_fingerprint_prefix()) {
+    android_os_build_fingerprint_prefix =
+        specifics.android_os_build_fingerprint_prefix();
+  }
+
+  return DeviceInfo(
       specifics.cache_guid(), specifics.client_name(),
       GetVersionNumberFromSpecifics(specifics), specifics.sync_user_agent(),
-      specifics.device_type(), os_type, device_form_factor,
-      specifics.signin_scoped_device_id(), specifics.manufacturer(),
-      specifics.model(), specifics.full_hardware_class(),
+      ToDeviceInfoDeviceType(specifics.device_type()), os_type,
+      device_form_factor, specifics.signin_scoped_device_id(),
+      specifics.manufacturer(), specifics.model(),
+      specifics.has_server_determined_model_name()
+          ? std::make_optional(specifics.server_determined_model_name())
+          : std::nullopt,
+      specifics.full_hardware_class(),
       ProtoTimeToTime(specifics.last_updated_timestamp()),
       GetPulseIntervalFromSpecifics(specifics),
       specifics.feature_fields().send_tab_to_self_receiving_enabled(),
+      ToDeviceInfoSendTabReceivingType(
+          specifics.feature_fields().send_tab_to_self_receiving_type()),
       SpecificsToSharingInfo(specifics),
       SpecificsToPhoneAsASecurityKeyInfo(specifics),
       specifics.invalidation_fields().instance_id_token(),
-      GetModelTypeSetFromSpecificsFieldNumberList(
-          specifics.invalidation_fields().interested_data_type_ids()));
+      GetDataTypeSetFromSpecificsFieldNumberList(
+          specifics.invalidation_fields().interested_data_type_ids()),
+      SpecificsToAutoSignOutLastSigninTimestamp(specifics),
+      specifics.feature_fields().desktop_to_ios_promo_receiving_enabled(),
+      SpecificsToDesktopToIOSPromoReceivingTypes(specifics),
+      SpecificsToGlicExperimentalTriggeringState(specifics),
+      SpecificsToGlicExperimentalTriggeringVersion(specifics),
+      android_os_build_fingerprint_prefix,
+      SpecificsToPersonalContextInfo(specifics));
 }
 
 // Allocate a EntityData and copies |specifics| into it.
@@ -212,13 +286,24 @@ std::unique_ptr<DeviceInfoSpecifics> MakeLocalDeviceSpecifics(
   specifics->mutable_chrome_version_info()->set_version_number(
       info.chrome_version());
   specifics->set_sync_user_agent(info.sync_user_agent());
-  specifics->set_device_type(info.device_type());
+  specifics->set_device_type(ToDeviceTypeProto(info.device_type()));
   specifics->set_os_type(ToOsTypeProto(info.os_type()));
   specifics->set_device_form_factor(
       ToDeviceFormFactorProto(info.form_factor()));
   specifics->set_signin_scoped_device_id(info.signin_scoped_device_id());
   specifics->set_manufacturer(info.manufacturer_name());
   specifics->set_model(info.model_name());
+
+#if BUILDFLAG(IS_ANDROID)
+  if (base::FeatureList::IsEnabled(kSyncUploadAndroidBuildFingerprintPrefix)) {
+    const std::optional<std::string>& android_os_build_fingerprint_prefix =
+        info.android_os_build_fingerprint_prefix();
+    if (android_os_build_fingerprint_prefix.has_value()) {
+      specifics->set_android_os_build_fingerprint_prefix(
+          *android_os_build_fingerprint_prefix);
+    }
+  }
+#endif
 
   const std::string full_hardware_class = info.full_hardware_class();
   if (!full_hardware_class.empty()) {
@@ -234,29 +319,63 @@ std::unique_ptr<DeviceInfoSpecifics> MakeLocalDeviceSpecifics(
   FeatureSpecificFields* feature_fields = specifics->mutable_feature_fields();
   feature_fields->set_send_tab_to_self_receiving_enabled(
       info.send_tab_to_self_receiving_enabled());
+  feature_fields->set_send_tab_to_self_receiving_type(
+      ToSendTabReceivingTypeProto(info.send_tab_to_self_receiving_type()));
 
-  const absl::optional<DeviceInfo::SharingInfo>& sharing_info =
+  // The `desktop_to_ios_promo_receiving_enabled` boolean is a legacy field.
+  // Older Desktop clients (e.g. M145) only check this boolean and assume it
+  // applies to the original promos (ESB and Autofill/Passwords).
+  // To avoid breaking the feature on old Desktop clients, we set this legacy
+  // boolean to true if any of those original promos (or kAllPromos) are
+  // enabled.
+  bool legacy_enabled = info.desktop_to_ios_promo_receiving_enabled() ||
+                        info.desktop_to_ios_promo_receiving_types().HasAny(
+                            {MobilePromoOnDesktopPromoType::kAllPromos,
+                             MobilePromoOnDesktopPromoType::kAutofillPromo,
+                             MobilePromoOnDesktopPromoType::kESBPromo});
+  feature_fields->set_desktop_to_ios_promo_receiving_enabled(legacy_enabled);
+  for (const auto type : info.desktop_to_ios_promo_receiving_types()) {
+    feature_fields->add_desktop_to_ios_promo_receiving_types(
+        static_cast<sync_pb::SyncEnums_MobilePromoOnDesktopPromoType>(type));
+  }
+  if (info.auto_sign_out_last_signin_timestamp().has_value()) {
+    feature_fields
+        ->set_auto_sign_out_last_signin_timestamp_windows_epoch_micros(
+            info.auto_sign_out_last_signin_timestamp()
+                .value()
+                .ToDeltaSinceWindowsEpoch()
+                .InMicroseconds());
+  }
+  feature_fields->set_glic_experimental_triggering_state(
+      ToGlicExperimentalTriggeringStateProto(
+          info.glic_experimental_triggering_state()));
+  if (info.glic_experimental_triggering_version().has_value()) {
+    feature_fields->set_glic_experimental_triggering_version(
+        *info.glic_experimental_triggering_version());
+  } else {
+    // Clear the field if the local device does not have a version, ensuring
+    // the local device's state (unavailable) is authoritatively reflected in
+    // the synced proto.
+    feature_fields->clear_glic_experimental_triggering_version();
+  }
+  const std::optional<DeviceInfo::SharingInfo>& sharing_info =
       info.sharing_info();
   if (sharing_info) {
     SharingSpecificFields* sharing_fields = specifics->mutable_sharing_fields();
-    sharing_fields->set_vapid_fcm_token(
-        sharing_info->vapid_target_info.fcm_token);
-    sharing_fields->set_vapid_p256dh(sharing_info->vapid_target_info.p256dh);
-    sharing_fields->set_vapid_auth_secret(
-        sharing_info->vapid_target_info.auth_secret);
     sharing_fields->set_sender_id_fcm_token_v2(
         sharing_info->sender_id_target_info.fcm_token);
     sharing_fields->set_sender_id_p256dh_v2(
         sharing_info->sender_id_target_info.p256dh);
     sharing_fields->set_sender_id_auth_secret_v2(
         sharing_info->sender_id_target_info.auth_secret);
-    for (sync_pb::SharingSpecificFields::EnabledFeatures feature :
-         sharing_info->enabled_features) {
-      sharing_fields->add_enabled_features(feature);
+    sharing_fields->set_chime_representative_target_id(
+        sharing_info->chime_representative_target_id);
+    for (DeviceInfo::SharingFeature feature : sharing_info->enabled_features) {
+      sharing_fields->add_enabled_features(ToSharingFeatureProto(feature));
     }
   }
 
-  const absl::optional<DeviceInfo::PhoneAsASecurityKeyInfo>& paask_info =
+  const std::optional<DeviceInfo::PhoneAsASecurityKeyInfo>& paask_info =
       info.paask_info();
   if (paask_info) {
     *specifics->mutable_paask_fields() =
@@ -268,40 +387,41 @@ std::unique_ptr<DeviceInfoSpecifics> MakeLocalDeviceSpecifics(
     specifics->mutable_invalidation_fields()->set_instance_id_token(
         info.fcm_registration_token());
   }
-  for (const ModelType data_type : info.interested_data_types()) {
+  for (const DataType data_type : info.interested_data_types()) {
     specifics->mutable_invalidation_fields()->add_interested_data_type_ids(
-        GetSpecificsFieldNumberFromModelType(data_type));
+        GetSpecificsFieldNumberFromDataType(data_type));
+  }
+
+  const std::optional<DeviceInfo::PersonalContextInfo>& personal_context_info =
+      info.personal_context_info();
+  if (personal_context_info &&
+      !personal_context_info->serialized_tink_keyset.empty()) {
+    specifics->mutable_personal_context_fields()->set_serialized_tink_keyset(
+        personal_context_info->serialized_tink_keyset.data(),
+        personal_context_info->serialized_tink_keyset.size());
+  } else {
+    specifics->clear_personal_context_fields();
   }
 
   return specifics;
 }
 
-// Parses the content of |record_list| into |*all_data|. The output
-// parameter is first for binding purposes.
-absl::optional<ModelError> ParseSpecificsOnBackendSequence(
-    ClientIdToSpecifics* all_data,
-    std::unique_ptr<ModelTypeStore::RecordList> record_list) {
-  DCHECK(all_data);
-  DCHECK(all_data->empty());
-  DCHECK(record_list);
-
-  for (const Record& r : *record_list) {
-    std::unique_ptr<DeviceInfoSpecifics> specifics =
-        std::make_unique<DeviceInfoSpecifics>();
-    if (!specifics->ParseFromString(r.value)) {
-      return ModelError(FROM_HERE, "Failed to deserialize specifics.");
-    }
-
-    all_data->emplace(specifics->cache_guid(), std::move(specifics));
+bool ArePaaskInfosEqual(
+    const std::optional<DeviceInfo::PhoneAsASecurityKeyInfo>& a,
+    const std::optional<DeviceInfo::PhoneAsASecurityKeyInfo>& b) {
+  if (a.has_value() != b.has_value()) {
+    return false;
   }
-
-  return absl::nullopt;
+  if (!a.has_value()) {
+    return true;
+  }
+  return a->NonRotatingFieldsEqual(*b);
 }
 
 // Returns true if |stored| is similar enough to |current| that |current|
 // needn't be uploaded.
-bool StoredDeviceInfoStillAccurate(const DeviceInfo* stored,
-                                   const DeviceInfo* current) {
+bool IsStoredLocalDeviceInfoStillAccurate(const DeviceInfo* stored,
+                                          const DeviceInfo* current) {
   return current->guid() == stored->guid() &&
          current->client_name() == stored->client_name() &&
          current->chrome_version() == stored->chrome_version() &&
@@ -316,25 +436,63 @@ bool StoredDeviceInfoStillAccurate(const DeviceInfo* stored,
          current->full_hardware_class() == stored->full_hardware_class() &&
          current->send_tab_to_self_receiving_enabled() ==
              stored->send_tab_to_self_receiving_enabled() &&
+         current->send_tab_to_self_receiving_type() ==
+             stored->send_tab_to_self_receiving_type() &&
+         current->desktop_to_ios_promo_receiving_enabled() ==
+             stored->desktop_to_ios_promo_receiving_enabled() &&
+         current->desktop_to_ios_promo_receiving_types() ==
+             stored->desktop_to_ios_promo_receiving_types() &&
          current->sharing_info() == stored->sharing_info() &&
-         current->paask_info().has_value() ==
-             stored->paask_info().has_value() &&
-         (!current->paask_info().has_value() ||
-          current->paask_info()->NonRotatingFieldsEqual(
-              stored->paask_info().value())) &&
+         ArePaaskInfosEqual(current->paask_info(), stored->paask_info()) &&
          current->fcm_registration_token() ==
              stored->fcm_registration_token() &&
-         current->interested_data_types() == stored->interested_data_types();
+         current->interested_data_types() == stored->interested_data_types() &&
+         current->auto_sign_out_last_signin_timestamp() ==
+             stored->auto_sign_out_last_signin_timestamp() &&
+         current->glic_experimental_triggering_state() ==
+             stored->glic_experimental_triggering_state() &&
+         current->glic_experimental_triggering_version() ==
+             stored->glic_experimental_triggering_version() &&
+         current->personal_context_info() ==
+             stored->personal_context_info();
+}
+
+int CalculateMaxConcurrentEvents(const std::multimap<base::Time, int>& events) {
+  int max_overlapping = 0;
+  int overlapping = 0;
+  for (const auto& [time, value] : events) {
+    overlapping += value;
+    DCHECK_LE(0, overlapping);
+    max_overlapping = std::max(max_overlapping, overlapping);
+  }
+  DCHECK_EQ(overlapping, 0);
+  return max_overlapping;
+}
+
+std::string DeriveAndroidBuildFingerprintPrefix(
+    const std::string& fingerprint) {
+  std::optional<std::pair<std::string_view, std::string_view>> split =
+      base::SplitStringOnce(fingerprint, ':');
+  if (split) {
+    return std::string(split->first);
+  }
+  return fingerprint;
 }
 
 }  // namespace
 
+DeviceInfoSyncBridge::ImmutableDeviceInfoAndSpecifics::
+    ImmutableDeviceInfoAndSpecifics(sync_pb::DeviceInfoSpecifics specifics)
+    : specifics_(std::move(specifics)),
+      device_info_(SpecificsToModel(specifics_)) {}
+
 DeviceInfoSyncBridge::DeviceInfoSyncBridge(
     std::unique_ptr<MutableLocalDeviceInfoProvider> local_device_info_provider,
-    OnceModelTypeStoreFactory store_factory,
-    std::unique_ptr<ModelTypeChangeProcessor> change_processor,
-    std::unique_ptr<DeviceInfoPrefs> device_info_prefs)
-    : ModelTypeSyncBridge(std::move(change_processor)),
+    OnceDataTypeStoreFactory store_factory,
+    std::unique_ptr<DataTypeLocalChangeProcessor> change_processor,
+    std::unique_ptr<DeviceInfoPrefs> device_info_prefs,
+    scoped_refptr<base::SequencedTaskRunner> pulse_task_runner)
+    : DataTypeSyncBridge(std::move(change_processor)),
       local_device_info_provider_(std::move(local_device_info_provider)),
       device_info_prefs_(std::move(device_info_prefs)) {
   DCHECK(local_device_info_provider_);
@@ -342,6 +500,9 @@ DeviceInfoSyncBridge::DeviceInfoSyncBridge(
 
   // Provider must not be initialized, the bridge takes care.
   DCHECK(!local_device_info_provider_->GetLocalDeviceInfo());
+
+  DCHECK(pulse_task_runner);
+  pulse_timer_.SetTaskRunner(std::move(pulse_task_runner));
 
   std::move(store_factory)
       .Run(DEVICE_INFO, base::BindOnce(&DeviceInfoSyncBridge::OnStoreCreated,
@@ -365,13 +526,15 @@ void DeviceInfoSyncBridge::RefreshLocalDeviceInfoIfNeeded() {
 }
 
 void DeviceInfoSyncBridge::SetCommittedAdditionalInterestedDataTypesCallback(
-    base::RepeatingCallback<void(const ModelTypeSet&)> callback) {
+    base::RepeatingCallback<void(const DataTypeSet&)> callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   new_interested_data_types_callback_ = std::move(callback);
 }
 
 void DeviceInfoSyncBridge::OnSyncStarting(
     const DataTypeActivationRequest& request) {
-  // Store the cache GUID, mainly in case MergeSyncData() is executed later.
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  // Store the cache GUID, mainly in case MergeFullSyncData() is executed later.
   local_cache_guid_ = request.cache_guid;
   // Garbage-collect old local cache GUIDs, for privacy reasons.
   device_info_prefs_->GarbageCollectExpiredCacheGuids();
@@ -393,26 +556,30 @@ void DeviceInfoSyncBridge::OnSyncStarting(
   ReconcileLocalAndStored();
 }
 
-std::unique_ptr<MetadataChangeList>
-DeviceInfoSyncBridge::CreateMetadataChangeList() {
-  return WriteBatch::CreateMetadataChangeList();
-}
-
-absl::optional<ModelError> DeviceInfoSyncBridge::MergeSyncData(
+std::optional<ModelError> DeviceInfoSyncBridge::MergeFullSyncData(
     std::unique_ptr<MetadataChangeList> metadata_change_list,
     EntityChangeList entity_data) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(change_processor()->IsTrackingMetadata());
   DCHECK(all_data_.empty());
   DCHECK(!local_cache_guid_.empty());
+
+  std::optional<std::string> android_os_build_fingerprint_prefix;
+  if (local_device_name_info_.android_build_fingerprint.has_value()) {
+    android_os_build_fingerprint_prefix = DeriveAndroidBuildFingerprintPrefix(
+        *local_device_name_info_.android_build_fingerprint);
+  }
 
   local_device_info_provider_->Initialize(
       local_cache_guid_, GetLocalClientName(),
       local_device_name_info_.manufacturer_name,
       local_device_name_info_.model_name,
       local_device_name_info_.full_hardware_class,
+      android_os_build_fingerprint_prefix,
       /*device_info_restored_from_store=*/nullptr);
 
-  std::unique_ptr<WriteBatch> batch = store_->CreateWriteBatch();
+  std::unique_ptr<WriteBatch> batch =
+      store_->CreateWriteBatch(std::move(metadata_change_list));
   for (const auto& change : entity_data) {
     const DeviceInfoSpecifics& specifics =
         change->data().specifics.device_info();
@@ -424,21 +591,21 @@ absl::optional<ModelError> DeviceInfoSyncBridge::MergeSyncData(
       continue;
     }
 
-    StoreSpecifics(std::make_unique<DeviceInfoSpecifics>(specifics),
-                   batch.get());
+    StoreSpecifics(specifics, batch.get());
   }
 
-  batch->TakeMetadataChangesFrom(std::move(metadata_change_list));
   // Complete batch with local data and commit.
   SendLocalDataWithBatch(std::move(batch));
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<ModelError> DeviceInfoSyncBridge::ApplySyncChanges(
+std::optional<ModelError> DeviceInfoSyncBridge::ApplyIncrementalSyncChanges(
     std::unique_ptr<MetadataChangeList> metadata_change_list,
     EntityChangeList entity_changes) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(!local_cache_guid_.empty());
-  std::unique_ptr<WriteBatch> batch = store_->CreateWriteBatch();
+  std::unique_ptr<WriteBatch> batch =
+      store_->CreateWriteBatch(std::move(metadata_change_list));
   bool has_changes = false;
   bool has_tombstone_for_local_device = false;
   for (const std::unique_ptr<EntityChange>& change : entity_changes) {
@@ -463,13 +630,11 @@ absl::optional<ModelError> DeviceInfoSyncBridge::ApplySyncChanges(
       const DeviceInfoSpecifics& specifics =
           change->data().specifics.device_info();
       DCHECK(guid == specifics.cache_guid());
-      StoreSpecifics(std::make_unique<DeviceInfoSpecifics>(specifics),
-                     batch.get());
+      StoreSpecifics(specifics, batch.get());
       has_changes = true;
     }
   }
 
-  batch->TakeMetadataChangesFrom(std::move(metadata_change_list));
   CommitAndNotify(std::move(batch), has_changes);
 
   if (!change_processor()->IsEntityUnsynced(local_cache_guid_)) {
@@ -479,56 +644,66 @@ absl::optional<ModelError> DeviceInfoSyncBridge::ApplySyncChanges(
     device_info_synced_callback_list_.clear();
   }
 
-  if (has_tombstone_for_local_device) {
-    const bool should_reupload_device_info = !reuploaded_on_tombstone_;
-    base::UmaHistogramBoolean("Sync.LocalDeviceInfoDeletionReuploaded",
-                              should_reupload_device_info);
-    if (should_reupload_device_info) {
-      SendLocalData();
-      reuploaded_on_tombstone_ = true;
-    }
+  if (has_tombstone_for_local_device && !reuploaded_on_tombstone_) {
+    SendLocalData();
+    reuploaded_on_tombstone_ = true;
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-void DeviceInfoSyncBridge::GetData(StorageKeyList storage_keys,
-                                   DataCallback callback) {
+std::unique_ptr<DataBatch> DeviceInfoSyncBridge::GetDataForCommit(
+    StorageKeyList storage_keys) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto batch = std::make_unique<MutableDataBatch>();
   for (const auto& key : storage_keys) {
     const auto& iter = all_data_.find(key);
     if (iter != all_data_.end()) {
-      DCHECK_EQ(key, iter->second->cache_guid());
-      batch->Put(key, CopyToEntityData(*iter->second));
+      DCHECK_EQ(key, iter->second.specifics().cache_guid());
+      batch->Put(key, CopyToEntityData(iter->second.specifics()));
     }
   }
-  std::move(callback).Run(std::move(batch));
+  return batch;
 }
 
-void DeviceInfoSyncBridge::GetAllDataForDebugging(DataCallback callback) {
+std::unique_ptr<DataBatch> DeviceInfoSyncBridge::GetAllDataForDebugging() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto batch = std::make_unique<MutableDataBatch>();
-  for (const auto& [cache_guid, specifics] : all_data_) {
-    batch->Put(cache_guid, CopyToEntityData(*specifics));
+  for (const auto& [cache_guid, device_info] : all_data_) {
+    batch->Put(cache_guid, CopyToEntityData(device_info.specifics()));
   }
-  std::move(callback).Run(std::move(batch));
+  return batch;
 }
 
-std::string DeviceInfoSyncBridge::GetClientTag(const EntityData& entity_data) {
+std::string DeviceInfoSyncBridge::GetClientTag(
+    const EntityData& entity_data) const {
   DCHECK(entity_data.specifics.has_device_info());
   return DeviceInfoUtil::SpecificsToTag(entity_data.specifics.device_info());
 }
 
-std::string DeviceInfoSyncBridge::GetStorageKey(const EntityData& entity_data) {
+std::string DeviceInfoSyncBridge::GetStorageKey(
+    const EntityData& entity_data) const {
   DCHECK(entity_data.specifics.has_device_info());
   return entity_data.specifics.device_info().cache_guid();
 }
 
-void DeviceInfoSyncBridge::ApplyStopSyncChanges(
-    std::unique_ptr<MetadataChangeList> delete_metadata_change_list) {
-  if (!delete_metadata_change_list) {
-    return;
-  }
+sync_pb::EntitySpecifics
+DeviceInfoSyncBridge::TrimAllSupportedFieldsFromRemoteSpecifics(
+    const sync_pb::EntitySpecifics& entity_specifics) const {
+  // Clears all fields by default to avoid the memory and I/O overhead of an
+  // additional copy of the data.
+  return sync_pb::EntitySpecifics();
+}
 
+bool DeviceInfoSyncBridge::IsEntityDataValid(
+    const EntityData& entity_data) const {
+  CHECK(entity_data.specifics.has_device_info());
+  return !entity_data.specifics.device_info().cache_guid().empty();
+}
+
+void DeviceInfoSyncBridge::ApplyDisableSyncChanges(
+    std::unique_ptr<MetadataChangeList> delete_metadata_change_list) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // Sync is being disabled, so the local DeviceInfo is no longer valid and
   // should be cleared.
   local_device_info_provider_->Clear();
@@ -537,14 +712,15 @@ void DeviceInfoSyncBridge::ApplyStopSyncChanges(
 
   // Remove all local data, if sync is being disabled, the user has expressed
   // their desire to not have knowledge about other devices.
-  store_->DeleteAllDataAndMetadata(base::DoNothing());
+  store_->DeleteAllDataAndMetadata(std::move(delete_metadata_change_list),
+                                   base::DoNothing());
   if (!all_data_.empty()) {
     all_data_.clear();
     NotifyObservers();
   }
 }
 
-ModelTypeSyncBridge::CommitAttemptFailedBehavior
+DataTypeSyncBridge::CommitAttemptFailedBehavior
 DeviceInfoSyncBridge::OnCommitAttemptFailed(
     syncer::SyncCommitError commit_error) {
   // DeviceInfo is normally committed once a day and hence it's important to
@@ -565,8 +741,9 @@ DeviceInfoSyncBridge::OnCommitAttemptFailed(
 }
 
 bool DeviceInfoSyncBridge::IsSyncing() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // Both conditions are neecessary due to the following possible cases:
-  // 1. This method is called from MergeSyncData() when IsTrackingMetadata()
+  // 1. This method is called from MergeFullSyncData() when IsTrackingMetadata()
   // returns true but |all_data_| is not initialized.
   // 2. |all_data_| is initialized during loading data from the persistent
   // storage on startup but |change_processor| is not initialized yet. It
@@ -575,34 +752,51 @@ bool DeviceInfoSyncBridge::IsSyncing() const {
   return change_processor()->IsTrackingMetadata() && !all_data_.empty();
 }
 
-std::unique_ptr<DeviceInfo> DeviceInfoSyncBridge::GetDeviceInfo(
+const DeviceInfo* DeviceInfoSyncBridge::GetDeviceInfo(
     const std::string& client_id) const {
-  const ClientIdToSpecifics::const_iterator iter = all_data_.find(client_id);
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  const ClientIdToDeviceInfo::const_iterator iter = all_data_.find(client_id);
   if (iter == all_data_.end()) {
     return nullptr;
   }
-  if (!IsChromeClient(*iter->second)) {
+  if (!IsChromeClient(iter->second.specifics())) {
     return nullptr;
   }
-  return SpecificsToModel(*iter->second);
+  return &iter->second.device_info();
 }
 
-std::vector<std::unique_ptr<DeviceInfo>>
-DeviceInfoSyncBridge::GetAllDeviceInfo() const {
-  std::vector<std::unique_ptr<DeviceInfo>> list;
-  for (const auto& [cache_guid, specifics] : all_data_) {
-    if (IsChromeClient(*specifics)) {
-      list.push_back(SpecificsToModel(*specifics));
+std::vector<const DeviceInfo*> DeviceInfoSyncBridge::GetAllDeviceInfo() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  TRACE_EVENT1("sync", "DeviceInfoSyncBridge::GetAllDeviceInfo", "size",
+               all_data_.size());
+  std::vector<const DeviceInfo*> list;
+  for (const auto& [cache_guid, device_info_and_specifics] : all_data_) {
+    list.push_back(&device_info_and_specifics.device_info());
+  }
+  return list;
+}
+
+std::vector<const DeviceInfo*> DeviceInfoSyncBridge::GetAllChromeDeviceInfo()
+    const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  TRACE_EVENT1("sync", "DeviceInfoSyncBridge::GetAllChromeDeviceInfo", "size",
+               all_data_.size());
+  std::vector<const DeviceInfo*> list;
+  for (const auto& [cache_guid, device_info_and_specifics] : all_data_) {
+    if (IsChromeClient(device_info_and_specifics.specifics())) {
+      list.push_back(&device_info_and_specifics.device_info());
     }
   }
   return list;
 }
 
 void DeviceInfoSyncBridge::AddObserver(Observer* observer) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   observers_.AddObserver(observer);
 }
 
 void DeviceInfoSyncBridge::RemoveObserver(Observer* observer) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   observers_.RemoveObserver(observer);
 }
 
@@ -612,12 +806,30 @@ bool DeviceInfoSyncBridge::IsRecentLocalCacheGuid(
 }
 
 bool DeviceInfoSyncBridge::IsPulseTimerRunningForTest() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return pulse_timer_.IsRunning();
 }
 
 void DeviceInfoSyncBridge::ForcePulseForTest() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (pulse_timer_.IsRunning()) {
-    pulse_timer_.FireNow();
+    // FireNow() can't be used with SetTaskRunner, so re-set the timer to fire
+    // with no delay, and don't return until it's done.
+
+    // `timer_task` will be posted to the timer's task runner.
+    auto timer_task = base::BindOnce(&DeviceInfoSyncBridge::SendLocalData,
+                                     base::Unretained(this));
+
+    // Save the RunLoop's QuitClosure to invoke from the next call to
+    // SendLocalData[WithBatch]. Usually that's from `timer_task`, but it's
+    // possible that another caller is already in the task queue. In that case
+    // SendLocalData will run once (which counts as the "pulse" so should quit
+    // the RunLoop) and then re-schedule the timer without running `timer_task`.
+    base::RunLoop run_loop;
+    done_pulse_timer_callback_for_test_ = run_loop.QuitClosure();
+
+    pulse_timer_.Start(FROM_HERE, base::Time::Now(), std::move(timer_task));
+    run_loop.Run();
     return;
   }
 
@@ -628,22 +840,48 @@ void DeviceInfoSyncBridge::ForcePulseForTest() {
 }
 
 void DeviceInfoSyncBridge::NotifyObservers() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  TRACE_EVENT0("sync", "DeviceInfoSyncBridge::NotifyObservers");
   for (auto& observer : observers_) {
     observer.OnDeviceInfoChange();
   }
 }
 
-void DeviceInfoSyncBridge::StoreSpecifics(
-    std::unique_ptr<DeviceInfoSpecifics> specifics,
-    WriteBatch* batch) {
-  const std::string guid = specifics->cache_guid();
-  batch->WriteData(guid, specifics->SerializeAsString());
-  all_data_[guid] = std::move(specifics);
+// static
+std::optional<ModelError> DeviceInfoSyncBridge::ParseSpecificsOnBackendSequence(
+    ClientIdToDeviceInfo* all_data,
+    std::unique_ptr<DataTypeStore::RecordList> record_list) {
+  DCHECK(all_data);
+  DCHECK(all_data->empty());
+  DCHECK(record_list);
+
+  for (const Record& r : *record_list) {
+    DeviceInfoSpecifics specifics;
+    if (!specifics.ParseFromString(r.value)) {
+      return ModelError(
+          FROM_HERE, ModelError::Type::kDeviceInfoDeserializeSpecificsFailed);
+    }
+
+    std::string cache_guid = specifics.cache_guid();
+    all_data->try_emplace(std::move(cache_guid), std::move(specifics));
+  }
+
+  return std::nullopt;
+}
+
+void DeviceInfoSyncBridge::StoreSpecifics(DeviceInfoSpecifics specifics,
+                                          WriteBatch* batch) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  const std::string guid = specifics.cache_guid();
+  batch->WriteData(guid, specifics.SerializeAsString());
+  all_data_.erase(guid);
+  all_data_.emplace(guid, std::move(specifics));
 }
 
 bool DeviceInfoSyncBridge::DeleteSpecifics(const std::string& guid,
                                            WriteBatch* batch) {
-  ClientIdToSpecifics::const_iterator iter = all_data_.find(guid);
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  ClientIdToDeviceInfo::const_iterator iter = all_data_.find(guid);
   if (iter != all_data_.end()) {
     batch->DeleteData(guid);
     all_data_.erase(iter);
@@ -654,28 +892,32 @@ bool DeviceInfoSyncBridge::DeleteSpecifics(const std::string& guid,
 }
 
 std::string DeviceInfoSyncBridge::GetLocalClientName() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // |sync_mode_| may not be ready when this function is called.
   if (!sync_mode_) {
     auto device_it = all_data_.find(local_cache_guid_);
     if (device_it != all_data_.end()) {
-      return device_it->second->client_name();
+      return device_it->second.specifics().client_name();
     }
   }
 
-  return sync_mode_ == SyncMode::kFull
-             ? local_device_name_info_.personalizable_name
-             : local_device_name_info_.model_name;
+  // On all platforms, sign-in is considered explicit and thus can use the
+  // personalizable device name.
+  return local_device_name_info_.personalizable_name;
 }
 
 void DeviceInfoSyncBridge::OnStoreCreated(
-    const absl::optional<syncer::ModelError>& error,
-    std::unique_ptr<ModelTypeStore> store) {
+    const std::optional<syncer::ModelError>& error,
+    std::unique_ptr<DataTypeStore> store) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (error) {
-    change_processor()->ReportError(*error);
+    change_processor()->ReportError(
+        {FROM_HERE, ModelError::Type::kDeviceInfoStoreCreationFailed});
     return;
   }
 
   store_ = std::move(store);
+  CHECK(store_);
 
   GetLocalDeviceNameInfo(
       base::BindOnce(&DeviceInfoSyncBridge::OnLocalDeviceNameInfoRetrieved,
@@ -684,10 +926,11 @@ void DeviceInfoSyncBridge::OnStoreCreated(
 
 void DeviceInfoSyncBridge::OnLocalDeviceNameInfoRetrieved(
     LocalDeviceNameInfo local_device_name_info) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   local_device_name_info_ = std::move(local_device_name_info);
 
-  auto all_data = std::make_unique<ClientIdToSpecifics>();
-  ClientIdToSpecifics* all_data_copy = all_data.get();
+  auto all_data = std::make_unique<ClientIdToDeviceInfo>();
+  ClientIdToDeviceInfo* all_data_copy = all_data.get();
 
   store_->ReadAllDataAndPreprocess(
       base::BindOnce(&ParseSpecificsOnBackendSequence,
@@ -697,8 +940,9 @@ void DeviceInfoSyncBridge::OnLocalDeviceNameInfoRetrieved(
 }
 
 void DeviceInfoSyncBridge::OnReadAllData(
-    std::unique_ptr<ClientIdToSpecifics> all_data,
-    const absl::optional<syncer::ModelError>& error) {
+    std::unique_ptr<ClientIdToDeviceInfo> all_data,
+    const std::optional<syncer::ModelError>& error) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(all_data);
 
   if (error) {
@@ -714,43 +958,50 @@ void DeviceInfoSyncBridge::OnReadAllData(
 }
 
 void DeviceInfoSyncBridge::OnReadAllMetadata(
-    const absl::optional<ModelError>& error,
+    const std::optional<ModelError>& error,
     std::unique_ptr<MetadataBatch> metadata_batch) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  TRACE_EVENT0("sync", "DeviceInfoSyncBridge::OnReadAllMetadata");
   if (error) {
     change_processor()->ReportError(*error);
     return;
   }
 
-  // In the regular case for sync being disabled, wait for MergeSyncData()
+  // In the regular case for sync being disabled, wait for MergeFullSyncData()
   // before initializing the LocalDeviceInfoProvider.
-  if (!metadata_batch->GetModelTypeState().initial_sync_done() &&
+  if (!syncer::IsInitialSyncDone(
+          metadata_batch->GetDataTypeState().initial_sync_state()) &&
       metadata_batch->GetAllMetadata().empty() && all_data_.empty()) {
     change_processor()->ModelReadyToSync(std::move(metadata_batch));
     return;
   }
 
   const std::string local_cache_guid_in_metadata =
-      metadata_batch->GetModelTypeState().cache_guid();
+      metadata_batch->GetDataTypeState().cache_guid();
 
   // Protect against corrupt local data.
-  if (!metadata_batch->GetModelTypeState().initial_sync_done() ||
+  if (!syncer::IsInitialSyncDone(
+          metadata_batch->GetDataTypeState().initial_sync_state()) ||
       local_cache_guid_in_metadata.empty() ||
       all_data_.count(local_cache_guid_in_metadata) == 0) {
     // Data or metadata is off. Just throw everything away and start clean.
     all_data_.clear();
-    store_->DeleteAllDataAndMetadata(base::DoNothing());
+    store_->DeleteAllDataAndMetadata(/*metadata_change_list=*/nullptr,
+                                     base::DoNothing());
     change_processor()->ModelReadyToSync(std::make_unique<MetadataBatch>());
     return;
   }
 
+  bool was_local_cache_guid_empty = local_cache_guid_.empty();
   change_processor()->ModelReadyToSync(std::move(metadata_batch));
 
   // In rare cases a mismatch between cache GUIDs should cause all sync metadata
-  // dropped. In that case, MergeSyncData() will eventually follow.
+  // dropped. In that case, MergeFullSyncData() will eventually follow.
   if (!change_processor()->IsTrackingMetadata()) {
-    // In this scenario, ApplyStopSyncChanges() should have been exercised.
-    // However OnSyncStarting() must have been called during ModelReadyToSync().
-    DCHECK(!local_cache_guid_.empty());
+    // In this scenario, ApplyDisableSyncChanges() should have been exercised.
+    // If OnSyncStarting() had already been called before, then it must have
+    // been called again during ModelReadyToSync().
+    DCHECK(was_local_cache_guid_empty == local_cache_guid_.empty());
     DCHECK(all_data_.empty());
     return;
   }
@@ -767,14 +1018,20 @@ void DeviceInfoSyncBridge::OnReadAllMetadata(
   // is needed to prevent an unnecessary DeviceInfo commit on browser startup
   // when the SyncInvalidationsService is not initialized.
   auto iter = all_data_.find(local_cache_guid_);
-  DCHECK(iter != all_data_.end());
+  CHECK(iter != all_data_.end());
+
+  std::optional<std::string> android_os_build_fingerprint_prefix;
+  if (local_device_name_info_.android_build_fingerprint.has_value()) {
+    android_os_build_fingerprint_prefix = DeriveAndroidBuildFingerprintPrefix(
+        *local_device_name_info_.android_build_fingerprint);
+  }
 
   local_device_info_provider_->Initialize(
       local_cache_guid_, GetLocalClientName(),
       local_device_name_info_.manufacturer_name,
       local_device_name_info_.model_name,
       local_device_name_info_.full_hardware_class,
-      SpecificsToModel(*iter->second));
+      android_os_build_fingerprint_prefix, &iter->second.device_info());
 
   // This probably isn't strictly needed, but in case the cache_guid has changed
   // we save the new one to prefs.
@@ -790,24 +1047,28 @@ void DeviceInfoSyncBridge::OnReadAllMetadata(
 }
 
 void DeviceInfoSyncBridge::OnCommit(
-    const absl::optional<syncer::ModelError>& error) {
+    const std::optional<syncer::ModelError>& error) {
   if (error) {
     change_processor()->ReportError(*error);
   }
 }
 
 bool DeviceInfoSyncBridge::ReconcileLocalAndStored() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  TRACE_EVENT0("sync", "DeviceInfoSyncBridge::ReconcileLocalAndStored");
+  CHECK(store_);
+
   const DeviceInfo* current_info =
       local_device_info_provider_->GetLocalDeviceInfo();
   DCHECK(current_info);
 
   auto iter = all_data_.find(current_info->guid());
-  DCHECK(iter != all_data_.end());
+  CHECK(iter != all_data_.end());
 
   // Convert |iter->second| to a DeviceInfo for comparison.
-  std::unique_ptr<DeviceInfo> previous_device_info =
-      SpecificsToModel(*iter->second);
-  if (StoredDeviceInfoStillAccurate(previous_device_info.get(), current_info) &&
+  const DeviceInfo& previous_device_info = iter->second.device_info();
+  if (IsStoredLocalDeviceInfoStillAccurate(&previous_device_info,
+                                           current_info) &&
       !force_reupload_for_test_) {
     if (pulse_timer_.IsRunning()) {
       // No need to update the |pulse_timer| since nothing has changed.
@@ -815,21 +1076,22 @@ bool DeviceInfoSyncBridge::ReconcileLocalAndStored() {
     }
 
     const base::TimeDelta pulse_delay(DeviceInfoUtil::CalculatePulseDelay(
-        GetLastUpdateTime(*iter->second), Time::Now()));
+        GetLastUpdateTime(iter->second.specifics()), Time::Now()));
     if (!pulse_delay.is_zero()) {
-      pulse_timer_.Start(FROM_HERE, pulse_delay,
-                         base::BindOnce(&DeviceInfoSyncBridge::SendLocalData,
-                                        base::Unretained(this)));
+      pulse_timer_.Start(
+          FROM_HERE, base::Time::Now() + pulse_delay,
+          base::BindOnce(&DeviceInfoSyncBridge::SendLocalData,
+                         base::Unretained(this)));
       return false;
     }
   }
 
   // Initiate an additional GetUpdates request if there are new data types
   // enabled (on successful commit).
-  const ModelTypeSet new_data_types =
+  const DataTypeSet new_data_types =
       Difference(current_info->interested_data_types(),
-                 previous_device_info->interested_data_types());
-  if (new_interested_data_types_callback_ && !new_data_types.Empty()) {
+                 previous_device_info.interested_data_types());
+  if (new_interested_data_types_callback_ && !new_data_types.empty()) {
     device_info_synced_callback_list_.push_back(
         base::BindOnce(new_interested_data_types_callback_, new_data_types));
   }
@@ -843,12 +1105,16 @@ bool DeviceInfoSyncBridge::ReconcileLocalAndStored() {
 }
 
 void DeviceInfoSyncBridge::SendLocalData() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CHECK(store_);
+  CHECK(IsSyncing());
   SendLocalDataWithBatch(store_->CreateWriteBatch());
 }
 
 void DeviceInfoSyncBridge::SendLocalDataWithBatch(
-    std::unique_ptr<ModelTypeStore::WriteBatch> batch) {
-  DCHECK(store_);
+    std::unique_ptr<DataTypeStore::WriteBatch> batch) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CHECK(store_);
   DCHECK(local_device_info_provider_->GetLocalDeviceInfo());
   DCHECK(change_processor()->IsTrackingMetadata());
 
@@ -856,16 +1122,22 @@ void DeviceInfoSyncBridge::SendLocalDataWithBatch(
       *local_device_info_provider_->GetLocalDeviceInfo());
   change_processor()->Put(specifics->cache_guid(), CopyToEntityData(*specifics),
                           batch->GetMetadataChangeList());
-  StoreSpecifics(std::move(specifics), batch.get());
+  StoreSpecifics(std::move(*specifics), batch.get());
   CommitAndNotify(std::move(batch), /*should_notify=*/true);
 
-  pulse_timer_.Start(FROM_HERE, DeviceInfoUtil::GetPulseInterval(),
-                     base::BindOnce(&DeviceInfoSyncBridge::SendLocalData,
-                                    base::Unretained(this)));
+  pulse_timer_.Start(
+      FROM_HERE, base::Time::Now() + DeviceInfoUtil::GetPulseInterval(),
+      base::BindOnce(&DeviceInfoSyncBridge::SendLocalData,
+                     base::Unretained(this)));
+  if (done_pulse_timer_callback_for_test_) {
+    std::move(done_pulse_timer_callback_for_test_).Run();
+  }
 }
 
 void DeviceInfoSyncBridge::CommitAndNotify(std::unique_ptr<WriteBatch> batch,
                                            bool should_notify) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CHECK(store_);
   store_->CommitWriteBatch(std::move(batch),
                            base::BindOnce(&DeviceInfoSyncBridge::OnCommit,
                                           weak_ptr_factory_.GetWeakPtr()));
@@ -874,8 +1146,9 @@ void DeviceInfoSyncBridge::CommitAndNotify(std::unique_ptr<WriteBatch> batch,
   }
 }
 
-std::map<DeviceInfo::FormFactor, int>
+absl::flat_hash_map<DeviceInfo::FormFactor, int>
 DeviceInfoSyncBridge::CountActiveDevicesByType() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // The algorithm below leverages sync timestamps to give a tight lower bound
   // (modulo clock skew) on how many distinct devices are currently active
   // (where active means being used recently enough as specified by
@@ -892,16 +1165,17 @@ DeviceInfoSyncBridge::CountActiveDevicesByType() const {
   // The series of relevant events over time, the value being +1 when a device
   // was seen for the first time, and -1 when a device was seen last.
   const base::Time now = base::Time::Now();
-  std::map<std::pair<DeviceInfo::FormFactor, DeviceInfo::OsType>,
-           std::multimap<base::Time, int>>
-      relevant_events;
+  absl::flat_hash_map<std::pair<DeviceInfo::FormFactor, DeviceInfo::OsType>,
+                      std::multimap<base::Time, int>>
+      events_by_type;
 
-  for (const auto& [cache_guid, specifics] : all_data_) {
-    if (!IsChromeClient(*specifics)) {
+  for (const auto& [cache_guid, device_info_and_specifics] : all_data_) {
+    if (!IsChromeClient(device_info_and_specifics.specifics())) {
       continue;
     }
 
-    if (DeviceInfoUtil::IsActive(GetLastUpdateTime(*specifics), now)) {
+    if (DeviceInfoUtil::IsActive(
+            GetLastUpdateTime(device_info_and_specifics.specifics()), now)) {
       base::Time begin = change_processor()->GetEntityCreationTime(cache_guid);
       base::Time end =
           change_processor()->GetEntityModificationTime(cache_guid);
@@ -911,53 +1185,38 @@ DeviceInfoSyncBridge::CountActiveDevicesByType() const {
       if (begin > end) {
         continue;
       }
-      DeviceInfo::OsType os_type;
-      DeviceInfo::FormFactor form_factor;
-      if (specifics->has_os_type() && specifics->has_device_form_factor()) {
-        form_factor = ToDeviceInfoFormFactor(specifics->device_form_factor());
-        os_type = ToDeviceInfoOsType(specifics->os_type());
-      } else {
-        // Fallback to derive from old device type enum.
-        form_factor = DeriveFormFactorFromDeviceType(specifics->device_type());
-        os_type = DeriveOsFromDeviceType(specifics->device_type(),
-                                         specifics->manufacturer());
-      }
-      relevant_events[{form_factor, os_type}].emplace(begin, 1);
-      relevant_events[{form_factor, os_type}].emplace(end, -1);
+
+      DeviceInfo::OsType os_type =
+          device_info_and_specifics.device_info().os_type();
+      DeviceInfo::FormFactor form_factor =
+          device_info_and_specifics.device_info().form_factor();
+      events_by_type[{form_factor, os_type}].emplace(begin, 1);
+      events_by_type[{form_factor, os_type}].emplace(end, -1);
     }
   }
 
-  std::map<std::pair<DeviceInfo::FormFactor, DeviceInfo::OsType>, int>
-      device_count_by_type;
-  for (const auto& [type, events] : relevant_events) {
-    int max_overlapping = 0;
-    int overlapping = 0;
-    for (const auto& [time, value] : events) {
-      overlapping += value;
-      DCHECK_LE(0, overlapping);
-      max_overlapping = std::max(max_overlapping, overlapping);
-    }
-    device_count_by_type[type] = max_overlapping;
-    DCHECK_EQ(overlapping, 0);
-  }
-
-  std::map<DeviceInfo::FormFactor, int> device_count_by_form_factor;
-  for (const auto& [type, counts] : device_count_by_type) {
-    device_count_by_form_factor[type.first] += counts;
+  absl::flat_hash_map<DeviceInfo::FormFactor, int> device_count_by_form_factor;
+  for (const auto& [type, events] : events_by_type) {
+    device_count_by_form_factor[type.first] +=
+        CalculateMaxConcurrentEvents(events);
   }
 
   return device_count_by_form_factor;
 }
 
 void DeviceInfoSyncBridge::ExpireOldEntries() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  CHECK(store_);
+  TRACE_EVENT0("sync", "DeviceInfoSyncBridge::ExpireOldEntries");
   const base::Time expiration_threshold =
       base::Time::Now() - kExpirationThreshold;
-  std::unordered_set<std::string> cache_guids_to_expire;
+  absl::flat_hash_set<std::string> cache_guids_to_expire;
   // Just collecting cache guids to expire to avoid modifying |all_data_| via
   // DeleteSpecifics() while iterating over it.
-  for (const auto& [cache_guid, specifics] : all_data_) {
+  for (const auto& [cache_guid, device_info_and_specifics] : all_data_) {
     if (cache_guid != local_cache_guid_ &&
-        GetLastUpdateTime(*specifics) < expiration_threshold) {
+        GetLastUpdateTime(device_info_and_specifics.specifics()) <
+            expiration_threshold) {
       cache_guids_to_expire.insert(cache_guid);
     }
   }
@@ -973,6 +1232,11 @@ void DeviceInfoSyncBridge::ExpireOldEntries() {
     change_processor()->UntrackEntityForStorageKey(cache_guid);
   }
   CommitAndNotify(std::move(batch), /*should_notify=*/true);
+}
+
+std::string DeriveAndroidBuildFingerprintPrefixForTesting(  // IN-TEST
+    const std::string& fingerprint) {
+  return DeriveAndroidBuildFingerprintPrefix(fingerprint);
 }
 
 }  // namespace syncer

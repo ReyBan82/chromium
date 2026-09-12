@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "third_party/blink/renderer/platform/audio/push_pull_fifo.h"
-
 #include <memory>
 
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/synchronization/waitable_event.h"
+#include "media/base/audio_bus.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
+#include "third_party/blink/renderer/platform/audio/push_pull_fifo.h"
 #include "third_party/blink/renderer/platform/scheduler/public/non_main_thread.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
-#include "third_party/blink/renderer/platform/testing/testing_platform_support_with_mock_scheduler.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
@@ -29,9 +29,9 @@ class FIFOClient {
   USING_FAST_MALLOC(FIFOClient);
 
  public:
-  FIFOClient(PushPullFIFO* fifo, size_t bus_length, size_t jitter_range_ms)
+  FIFOClient(PushPullFIFO* fifo, uint32_t bus_length, size_t jitter_range_ms)
       : fifo_(fifo),
-        bus_(AudioBus::Create(fifo->GetStateForTest().number_of_channels,
+        bus_(AudioBus::Create(fifo->StateForTest().number_of_channels,
                               bus_length)),
         client_thread_(NonMainThread::CreateThread(
             ThreadCreationParams(ThreadType::kTestThread)
@@ -53,7 +53,9 @@ class FIFOClient {
   virtual void Stop(int callback_counter) = 0;
   virtual void RunTask() = 0;
 
-  void Pull(size_t frames_to_pull) { fifo_->Pull(bus_.get(), frames_to_pull); }
+  void Pull(uint32_t frames_to_pull) {
+    fifo_->Pull(bus_.get(), frames_to_pull);
+  }
 
   void Push() { fifo_->Push(bus_.get()); }
 
@@ -78,10 +80,9 @@ class FIFOClient {
 
   // Should be instantiated before calling Thread::CreateThread().
   // Do not place this after the |client_thread_| below.
-  ScopedTestingPlatformSupport<TestingPlatformSupportWithMockScheduler>
-      platform_;
+  ScopedTestingPlatformSupport<TestingPlatformSupport> platform_;
 
-  PushPullFIFO* fifo_;
+  raw_ptr<PushPullFIFO> fifo_;
   scoped_refptr<AudioBus> bus_;
   std::unique_ptr<NonMainThread> client_thread_;
   std::unique_ptr<base::WaitableEvent> done_event_;
@@ -107,10 +108,11 @@ class FIFOClient {
 // |frames_to_pull| is variable.
 class PullClient final : public FIFOClient {
  public:
-  PullClient(PushPullFIFO* fifo, size_t frames_to_pull, double jitter_range_ms)
+  PullClient(PushPullFIFO* fifo,
+             uint32_t frames_to_pull,
+             double jitter_range_ms)
       : FIFOClient(fifo, frames_to_pull, jitter_range_ms),
-        frames_to_pull_(frames_to_pull) {
-  }
+        frames_to_pull_(frames_to_pull) {}
 
   void RunTask() override {
     Pull(frames_to_pull_);
@@ -121,14 +123,16 @@ class PullClient final : public FIFOClient {
   }
 
  private:
-  size_t frames_to_pull_;
+  uint32_t frames_to_pull_;
 };
 
 // FIFO-pushing client (producer). This mimics the WebAudio rendering thread.
 // The frames to push are static as 128 frames.
 class PushClient final : public FIFOClient {
  public:
-  PushClient(PushPullFIFO* fifo, size_t frames_to_push, double jitter_range_ms)
+  PushClient(PushPullFIFO* fifo,
+             uint32_t frames_to_push,
+             double jitter_range_ms)
       : FIFOClient(fifo, frames_to_push, jitter_range_ms) {}
 
   void RunTask() override {
@@ -143,14 +147,15 @@ class PushClient final : public FIFOClient {
 struct FIFOSmokeTestParam {
   const double sample_rate;
   const unsigned number_of_channels;
-  const size_t fifo_length;
+  const uint32_t render_quantum_frames;
+  const uint32_t fifo_length;
   const double test_duration_ms;
   // Buffer size for pulling. Equivalent of |callback_buffer_size|.
-  const size_t pull_buffer_size;
+  const uint32_t pull_buffer_size;
   // Jitter range for the pulling interval.
   const double pull_jitter_range_ms;
   // Buffer size for pushing. Equivalent of WebAudio render quantum.
-  const size_t push_buffer_size;
+  const uint32_t push_buffer_size;
   // Jitter range for the pushing interval.
   const double push_jitter_range_ms;
 };
@@ -167,8 +172,8 @@ TEST_P(PushPullFIFOSmokeTest, SmokeTests) {
   const double push_interval_ms =
       param.push_buffer_size / sample_rate * 1000;
 
-  std::unique_ptr<PushPullFIFO> test_fifo = std::make_unique<PushPullFIFO>(
-      param.number_of_channels, param.fifo_length);
+  std::unique_ptr<PushPullFIFO> test_fifo = PushPullFIFO::TryCreate(
+      param.number_of_channels, param.fifo_length, param.render_quantum_frames);
   std::unique_ptr<PullClient> pull_client = std::make_unique<PullClient>(
       test_fifo.get(), param.pull_buffer_size, param.pull_jitter_range_ms);
   std::unique_ptr<PushClient> push_client = std::make_unique<PushClient>(
@@ -183,45 +188,44 @@ TEST_P(PushPullFIFOSmokeTest, SmokeTests) {
   LOG(INFO) << "PushPullFIFOSmokeTest - Started";
 
   // We have to wait both of events to be signaled.
-  base::WaitableEvent::WaitMany(done_events.data(), done_events.size());
-  base::WaitableEvent::WaitMany(done_events.data(), done_events.size());
+  base::WaitableEvent::WaitMany(done_events);
+  base::WaitableEvent::WaitMany(done_events);
 }
 
 FIFOSmokeTestParam smoke_test_params[] = {
     // Test case 0 (OSX): 256 Pull, 128 Push, Minimal jitter.
     // Thread's priority is lower than the device thread, so its jitter range
     // is slightly bigger than the other.
-    {48000, 2, 8192, 250, 256, 1, 128, 2},
+    {48000, 2, 128, 8192, 250, 256, 1, 128, 2},
 
     // Test case 1 (Windows): 441 Pull, 128 Push. Moderate Jitter.
     // Windows' audio callback is known to be ~10ms and UMA data shows the
     // evidence for it. The jitter range was determined speculatively.
-    {44100, 2, 8192, 250, 441, 2, 128, 3},
+    {44100, 2, 128, 8192, 250, 441, 2, 128, 3},
 
     // Test case 2 (Ubuntu/Linux): 512 Pull, 128 Push. Unstable callback, but
     // fast CPU. A typical configuration for Ubuntu + PulseAudio setup.
     // PulseAudio's callback is known to be rather unstable.
-    {48000, 2, 8192, 250, 512, 8, 128, 1},
+    {48000, 2, 128, 8192, 250, 512, 8, 128, 1},
 
     // Test case 3 (Android-Reference): 512 Pull, 128 Push. Similar to Linux,
-    // but
-    // low profile CPU.
-    {44100, 2, 8192, 250, 512, 8, 128, 3},
+    // but low profile CPU.
+    {44100, 2, 128, 8192, 250, 512, 8, 128, 3},
 
     // Test case 4 (Android-ExternalA): 441 Pull, 128 Push. Extreme jitter with
     // low profile CPU.
-    {44100, 2, 8192, 250, 441, 24, 128, 8},
+    {44100, 2, 128, 8192, 250, 441, 24, 128, 8},
 
     // Test case 5 (Android-ExternalB): 5768 Pull, 128 Push. Huge callback with
     // large jitter. Low profile CPU.
-    {44100, 2, 8192, 250, 5768, 120, 128, 12},
+    {44100, 2, 128, 8192, 250, 5768, 120, 128, 12},
 
     // Test case 6 (User-specified buffer size): 960 Pull, 128 Push. Minimal
     // Jitter. 960 frames = 20ms at 48KHz.
-    {48000, 2, 8192, 250, 960, 1, 128, 1},
+    {48000, 2, 128, 8192, 250, 960, 1, 128, 1},
 
     // Test case 7 (Longer test duration): 256 Pull, 128 Push. 2.5 seconds.
-    {48000, 2, 8192, 2500, 256, 0, 128, 1}};
+    {48000, 2, 128, 8192, 2500, 256, 0, 128, 1}};
 
 INSTANTIATE_TEST_SUITE_P(PushPullFIFOSmokeTest,
                          PushPullFIFOSmokeTest,

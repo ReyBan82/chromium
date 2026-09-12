@@ -26,14 +26,17 @@
 #include "third_party/blink/renderer/modules/indexeddb/idb_open_db_request.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 
-#include "base/metrics/histogram_macros.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+#include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/modules/indexeddb/idb_database.h"
+#include "third_party/blink/renderer/modules/indexeddb/idb_factory.h"
 #include "third_party/blink/renderer/modules/indexeddb/idb_version_change_event.h"
+#include "third_party/blink/renderer/modules/indexeddb/shared_idb_database_connection.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 
@@ -41,134 +44,265 @@ namespace blink {
 
 IDBOpenDBRequest::IDBOpenDBRequest(
     ScriptState* script_state,
+    IDBFactory* factory,
+    const String& name,
     mojo::PendingAssociatedReceiver<mojom::blink::IDBDatabaseCallbacks>
         callbacks_receiver,
-    std::unique_ptr<WebIDBTransaction> transaction_backend,
+    IDBTransaction::TransactionMojoRemote transaction_remote,
     int64_t transaction_id,
     int64_t version,
-    IDBRequest::AsyncTraceState metrics,
-    mojo::PendingRemote<mojom::blink::ObservedFeature> connection_lifetime)
-    : IDBRequest(script_state,
-                 nullptr,
-                 nullptr,
-                 std::move(metrics)),
+    IDBRequest::AsyncTraceState metrics)
+    : IDBRequest(script_state, nullptr, nullptr, std::move(metrics)),
       callbacks_receiver_(std::move(callbacks_receiver)),
-      transaction_backend_(std::move(transaction_backend)),
+      factory_(factory),
+      db_name_(name),
+      transaction_remote_(std::move(transaction_remote)),
       transaction_id_(transaction_id),
-      version_(version),
-      connection_lifetime_(std::move(connection_lifetime)),
-      start_time_(base::Time::Now()) {
+      version_(version) {
+  DCHECK(factory_);
   DCHECK(!ResultAsAny());
 }
 
-IDBOpenDBRequest::~IDBOpenDBRequest() = default;
+IDBOpenDBRequest::~IDBOpenDBRequest() {
+  CHECK(!shared_connection_target_);
+  CHECK(shared_requests_.empty());
+}
+
+void IDBOpenDBRequest::BindToConnection(
+    SharedIDBDatabaseConnection* connection) {
+  CHECK(connection);
+  CHECK_EQ(ready_state_, PENDING);
+  // Release any previously targeted connection (e.g. if this request was
+  // optimistically bound to a cached connection in
+  // `IDBFactory::OpenInternalImpl`, but the browser subsequently triggered
+  // `OnUpgradeNeeded`).
+  if (shared_connection_target_) {
+    shared_connection_target_->DecrementPendingSharingCount();
+    shared_connection_target_ = nullptr;
+  }
+  shared_connection_target_ = connection;
+  // Increment the pending sharing count to lock the connection and prevent
+  // it from closing if all active database frontends are closed before this
+  // request completes. The count is decremented in OnRequestComplete().
+  connection->IncrementPendingSharingCount();
+}
+
+void IDBOpenDBRequest::OnRequestComplete() {
+  if (!shared_requests_.empty() && GetExecutionContext() &&
+      !GetExecutionContext()->IsContextDestroyed()) {
+    factory_->PromoteSharedRequest(this, shared_requests_);
+  } else {
+    factory_->UnregisterPendingRequest(this);
+  }
+  if (shared_connection_target_) {
+    shared_connection_target_->DecrementPendingSharingCount();
+    shared_connection_target_ = nullptr;
+  }
+  shared_requests_.clear();
+}
+
+void IDBOpenDBRequest::RegisterSharedConnection(
+    SharedIDBDatabaseConnection* connection,
+    const String& name) {
+  DCHECK(base::FeatureList::IsEnabled(
+      features::kIndexedDBConnectionDeduplication));
+  factory_->RegisterSharedConnection(name, connection);
+  for (auto& shared : shared_requests_) {
+    shared->BindToConnection(connection);
+  }
+  shared_requests_.clear();
+}
 
 void IDBOpenDBRequest::Trace(Visitor* visitor) const {
+  visitor->Trace(factory_);
+  visitor->Trace(shared_connection_target_);
+
+  visitor->Trace(shared_requests_);
+  visitor->Trace(transaction_remote_);
   IDBRequest::Trace(visitor);
 }
 
 void IDBOpenDBRequest::ContextDestroyed() {
   IDBRequest::ContextDestroyed();
+  if (factory_client_) {
+    factory_client_->DetachRequest();
+    factory_client_ = nullptr;
+  }
+  OnRequestComplete();
+}
+
+std::unique_ptr<IDBFactoryClient> IDBOpenDBRequest::CreateFactoryClient() {
+  DCHECK(!factory_client_);
+  auto client = std::make_unique<IDBFactoryClient>(this);
+  factory_client_ = client.get();
+  return client;
+}
+
+void IDBOpenDBRequest::FactoryClientDestroyed(
+    IDBFactoryClient* factory_client) {
+  DCHECK_EQ(factory_client_, factory_client);
+  factory_client_ = nullptr;
 }
 
 const AtomicString& IDBOpenDBRequest::InterfaceName() const {
   return event_target_names::kIDBOpenDBRequest;
 }
 
-void IDBOpenDBRequest::EnqueueBlocked(int64_t old_version) {
+void IDBOpenDBRequest::OnBlocked(int64_t old_version) {
   TRACE_EVENT0("IndexedDB", "IDBOpenDBRequest::onBlocked()");
-  if (!ShouldEnqueueEvent())
+  probe::AsyncTask async_task(GetExecutionContext(), async_task_context(),
+                              "blocked");
+  if (!CanStillSendResult()) {
     return;
-  absl::optional<uint64_t> new_version_nullable;
+  }
+  std::optional<uint64_t> new_version_nullable;
   if (version_ != IDBDatabaseMetadata::kDefaultVersion) {
     new_version_nullable = version_;
   }
-  EnqueueEvent(MakeGarbageCollected<IDBVersionChangeEvent>(
+  DispatchEvent(*MakeGarbageCollected<IDBVersionChangeEvent>(
       event_type_names::kBlocked, old_version, new_version_nullable));
 }
 
-void IDBOpenDBRequest::EnqueueUpgradeNeeded(
+void IDBOpenDBRequest::OnUpgradeNeeded(
     int64_t old_version,
-    std::unique_ptr<WebIDBDatabase> backend,
+    mojo::PendingAssociatedRemote<mojom::blink::IDBDatabase> pending_database,
+    scoped_refptr<base::SingleThreadTaskRunner> task_runner,
     const IDBDatabaseMetadata& metadata,
-    mojom::IDBDataLoss data_loss,
+    mojom::blink::IDBDataLoss data_loss,
     String data_loss_message) {
   TRACE_EVENT0("IndexedDB", "IDBOpenDBRequest::onUpgradeNeeded()");
-  if (!ShouldEnqueueEvent()) {
+  probe::AsyncTask async_task(GetExecutionContext(), async_task_context(),
+                              "upgradeNeeded");
+  if (!CanStillSendResult()) {
     metrics_.RecordAndReset();
     return;
   }
 
   DCHECK(callbacks_receiver_);
 
-  auto* idb_database = MakeGarbageCollected<IDBDatabase>(
-      GetExecutionContext(), std::move(backend), std::move(callbacks_receiver_),
-      std::move(connection_lifetime_));
+  IDBDatabase* idb_database = nullptr;
+  if (base::FeatureList::IsEnabled(
+          features::kIndexedDBConnectionDeduplication)) {
+    auto* shared_connection = MakeGarbageCollected<SharedIDBDatabaseConnection>(
+        GetExecutionContext(), std::move(callbacks_receiver_),
+        std::move(pending_database), metadata);
+    BindToConnection(shared_connection);
+    idb_database = MakeGarbageCollected<IDBDatabase>(
+        GetExecutionContext(), shared_connection, connection_priority_);
+  } else {
+    idb_database = MakeGarbageCollected<IDBDatabase>(
+        GetExecutionContext(), std::move(callbacks_receiver_),
+        std::move(pending_database), connection_priority_);
+  }
+
   idb_database->SetMetadata(metadata);
 
   if (old_version == IDBDatabaseMetadata::kNoVersion) {
     // This database hasn't had a version before.
     old_version = IDBDatabaseMetadata::kDefaultVersion;
   }
-  IDBDatabaseMetadata old_database_metadata(
-      metadata.name, metadata.id, old_version, metadata.max_object_store_id,
-      metadata.was_cold_open);
+  IDBDatabaseMetadata old_database_metadata;
+  old_database_metadata.CopyFrom(metadata);
+  old_database_metadata.version = old_version;
 
   transaction_ = IDBTransaction::CreateVersionChange(
-      GetExecutionContext(), std::move(transaction_backend_), transaction_id_,
+      GetExecutionContext(), std::move(transaction_remote_), transaction_id_,
       idb_database, this, old_database_metadata);
   SetResult(MakeGarbageCollected<IDBAny>(idb_database));
 
   if (version_ == IDBDatabaseMetadata::kNoVersion)
     version_ = 1;
-  EnqueueEvent(MakeGarbageCollected<IDBVersionChangeEvent>(
+  DispatchEvent(*MakeGarbageCollected<IDBVersionChangeEvent>(
       event_type_names::kUpgradeneeded, old_version, version_, data_loss,
       data_loss_message));
 }
 
-void IDBOpenDBRequest::EnqueueResponse(std::unique_ptr<WebIDBDatabase> backend,
-                                       const IDBDatabaseMetadata& metadata) {
-  TRACE_EVENT0("IndexedDB", "IDBOpenDBRequest::onSuccess()");
-  if (!ShouldEnqueueEvent()) {
+void IDBOpenDBRequest::OnOpenDBSuccess(
+    mojo::PendingAssociatedRemote<mojom::blink::IDBDatabase> pending_database,
+    scoped_refptr<base::SingleThreadTaskRunner> task_runner,
+    const IDBDatabaseMetadata& metadata) {
+  TRACE_EVENT0("IndexedDB", "IDBOpenDBRequest::onSuccess(database)");
+  probe::AsyncTask async_task(GetExecutionContext(), async_task_context(),
+                              "success");
+
+  if (!CanStillSendResult()) {
     metrics_.RecordAndReset();
     return;
   }
 
   IDBDatabase* idb_database = nullptr;
   if (ResultAsAny()) {
-    // Previous OnUpgradeNeeded call delivered the backend.
-    DCHECK(!backend.get());
+    DCHECK(!pending_database.is_valid());
     idb_database = ResultAsAny()->IdbDatabase();
     DCHECK(idb_database);
     DCHECK(!callbacks_receiver_);
+    if (base::FeatureList::IsEnabled(
+            features::kIndexedDBConnectionDeduplication)) {
+      CHECK(shared_connection_target_);
+      RegisterSharedConnection(shared_connection_target_, metadata.name);
+    }
   } else {
-    DCHECK(backend.get());
     DCHECK(callbacks_receiver_);
-    idb_database = MakeGarbageCollected<IDBDatabase>(
-        GetExecutionContext(), std::move(backend),
-        std::move(callbacks_receiver_), std::move(connection_lifetime_));
+    if (base::FeatureList::IsEnabled(
+            features::kIndexedDBConnectionDeduplication)) {
+      SharedIDBDatabaseConnection* shared_connection;
+      // If the browser did not return a new database remote, it means we are
+      // sharing an existing connection.
+      if (!pending_database.is_valid()) {
+        // The primary request should have already pushed the connection target
+        // to us when it succeeded.
+        CHECK(shared_connection_target_);
+        shared_connection = shared_connection_target_;
+        // Discard the callbacks receiver; the shared connection already
+        // receives callbacks for this pipe.
+        callbacks_receiver_.reset();
+      } else {
+        // This request established a new connection. Create the shared wrapper
+        // and register it in the factory cache for future requests to reuse.
+        shared_connection = MakeGarbageCollected<SharedIDBDatabaseConnection>(
+            GetExecutionContext(), std::move(callbacks_receiver_),
+            std::move(pending_database), metadata);
+        RegisterSharedConnection(shared_connection, metadata.name);
+      }
+
+      idb_database = MakeGarbageCollected<IDBDatabase>(
+          GetExecutionContext(), shared_connection, connection_priority_);
+    } else {
+      DCHECK(pending_database);
+      idb_database = MakeGarbageCollected<IDBDatabase>(
+          GetExecutionContext(), std::move(callbacks_receiver_),
+          std::move(pending_database), connection_priority_);
+    }
     SetResult(MakeGarbageCollected<IDBAny>(idb_database));
   }
   idb_database->SetMetadata(metadata);
-  EnqueueEvent(Event::Create(event_type_names::kSuccess));
+  OnRequestComplete();
+  DispatchEvent(*Event::Create(event_type_names::kSuccess));
 }
 
-void IDBOpenDBRequest::EnqueueResponse(int64_t old_version) {
-  TRACE_EVENT0("IndexedDB", "IDBOpenDBRequest::onSuccess()");
-  if (!ShouldEnqueueEvent()) {
+void IDBOpenDBRequest::OnDeleteDBSuccess(int64_t old_version) {
+  TRACE_EVENT0("IndexedDB", "IDBOpenDBRequest::onDeleteDBSuccess(int64_t)");
+  probe::AsyncTask async_task(GetExecutionContext(), async_task_context(),
+                              "success");
+  if (!CanStillSendResult()) {
     metrics_.RecordAndReset();
     return;
   }
-  if (old_version == IDBDatabaseMetadata::kNoVersion) {
-    // This database hasn't had an integer version before.
-    old_version = IDBDatabaseMetadata::kDefaultVersion;
-  }
+  OnRequestComplete();
+  // The spec requires oldVersion to be 0 if the database does not exist:
+  // https://w3c.github.io/IndexedDB/#delete-a-database.
+  CHECK_GE(old_version, 0);
   SetResult(MakeGarbageCollected<IDBAny>(IDBAny::kUndefinedType));
-  EnqueueEvent(MakeGarbageCollected<IDBVersionChangeEvent>(
-      event_type_names::kSuccess, old_version, absl::nullopt));
+  DispatchEvent(*MakeGarbageCollected<IDBVersionChangeEvent>(
+      event_type_names::kSuccess, old_version, std::nullopt));
 }
 
-bool IDBOpenDBRequest::ShouldEnqueueEvent() const {
+void IDBOpenDBRequest::OnDBFactoryError(DOMException* error) {
+  OnRequestComplete();
+  SendError(error);
+}
+
+bool IDBOpenDBRequest::CanStillSendResult() const {
   if (!GetExecutionContext())
     return false;
   DCHECK(ready_state_ == PENDING || ready_state_ == DONE);
@@ -193,25 +327,9 @@ DispatchEventResult IDBOpenDBRequest::DispatchEventInternal(Event& event) {
       ResultAsAny()->GetType() == IDBAny::kIDBDatabaseType &&
       ResultAsAny()->IdbDatabase()->IsClosePending()) {
     SetResult(nullptr);
-    HandleResponse(MakeGarbageCollected<DOMException>(
-        DOMExceptionCode::kAbortError, "The connection was closed."));
+    SendError(MakeGarbageCollected<DOMException>(DOMExceptionCode::kAbortError,
+                                                 "The connection was closed."));
     return DispatchEventResult::kCanceledBeforeDispatch;
-  }
-
-  if (!open_time_recorded_ &&
-      (event.type() == event_type_names::kSuccess ||
-       event.type() == event_type_names::kUpgradeneeded) &&
-      ResultAsAny()->GetType() == IDBAny::kIDBDatabaseType) {
-    // Note: The result type is checked because this request type is also used
-    // for calls to DeleteDatabase, which sets the result to undefined (see
-    // EnqueueResponse(int64_t) above).
-    open_time_recorded_ = true;
-    IDBDatabase* idb_database = ResultAsAny()->IdbDatabase();
-    base::TimeDelta time_diff = base::Time::Now() - start_time_;
-    if (idb_database->Metadata().was_cold_open)
-      UMA_HISTOGRAM_MEDIUM_TIMES("WebCore.IndexedDB.OpenTime.Cold", time_diff);
-    else
-      UMA_HISTOGRAM_MEDIUM_TIMES("WebCore.IndexedDB.OpenTime.Warm", time_diff);
   }
 
   return IDBRequest::DispatchEventInternal(event);

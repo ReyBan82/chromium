@@ -8,12 +8,15 @@
 #include "base/containers/queue.h"
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "chromeos/ash/components/multidevice/remote_device_ref.h"
 #include "chromeos/ash/services/secure_channel/authenticator.h"
 #include "chromeos/ash/services/secure_channel/connection.h"
 #include "chromeos/ash/services/secure_channel/connection_observer.h"
 #include "chromeos/ash/services/secure_channel/device_to_device_authenticator.h"
 #include "chromeos/ash/services/secure_channel/file_transfer_update_callback.h"
+#include "chromeos/ash/services/secure_channel/public/mojom/nearby_connector.mojom-shared.h"
+#include "chromeos/ash/services/secure_channel/public/mojom/secure_channel.mojom-shared.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel_types.mojom-forward.h"
 #include "chromeos/ash/services/secure_channel/secure_context.h"
 
@@ -24,7 +27,9 @@ namespace ash::secure_channel {
 // authenticating it via a security handshake once the connection has occurred.
 // Once the channel has been authenticated, messages sent are automatically
 // encrypted and messages received are automatically decrypted.
-class SecureChannel : public ConnectionObserver {
+class SecureChannel : public ConnectionObserver,
+                      public NearbyConnectionObserver,
+                      public AuthenticatorObserver {
  public:
   // Enumeration of possible states of connecting to a remote device.
   //   DISCONNECTED: There is no connection to the device, nor is there a
@@ -49,7 +54,7 @@ class SecureChannel : public ConnectionObserver {
 
   static std::string StatusToString(const Status& status);
 
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
     virtual void OnSecureChannelStatusChanged(SecureChannel* secure_channel,
                                               const Status& old_status,
@@ -63,6 +68,18 @@ class SecureChannel : public ConnectionObserver {
     // corresponds to the value returned by an earlier call to SendMessage().
     virtual void OnMessageSent(SecureChannel* secure_channel,
                                int sequence_number) {}
+
+    virtual void OnNearbyConnectionStateChanged(
+        SecureChannel* secure_channel,
+        mojom::NearbyConnectionStep step,
+        mojom::NearbyConnectionStepResult result) {}
+
+    virtual void OnSecureChannelAuthenticationStateChanged(
+        SecureChannel* secure_channel,
+        mojom::SecureChannelState secure_channel_state) {}
+
+   protected:
+    ~Observer() override = default;
   };
 
   class Factory {
@@ -111,13 +128,13 @@ class SecureChannel : public ConnectionObserver {
   virtual void RemoveObserver(Observer* observer);
 
   // Returns the RSSI of the connection; if no derived class overrides this
-  // function, absl::nullopt is returned.
+  // function, std::nullopt is returned.
   virtual void GetConnectionRssi(
-      base::OnceCallback<void(absl::optional<int32_t>)> callback);
+      base::OnceCallback<void(std::optional<int32_t>)> callback);
 
   // The |responder_auth| message. Returns null if |secure_context_| is null or
   // status() != AUTHENTICATED.
-  virtual absl::optional<std::string> GetChannelBindingData();
+  virtual std::optional<std::string> GetChannelBindingData();
 
   Status status() const { return status_; }
 
@@ -131,8 +148,17 @@ class SecureChannel : public ConnectionObserver {
                        const WireMessage& wire_message,
                        bool success) override;
 
+  // NearbyConnectionObserver:
+  void OnNearbyConnectionStateChanged(
+      mojom::NearbyConnectionStep step,
+      mojom::NearbyConnectionStepResult result) override;
+
+  // AuthenticatorObserver:
+  void OnAuthenticationStateChanged(
+      mojom::SecureChannelState secure_channel_state) override;
+
  protected:
-  SecureChannel(std::unique_ptr<Connection> connection);
+  explicit SecureChannel(std::unique_ptr<Connection> connection);
 
   Status status_;
 
@@ -170,7 +196,9 @@ class SecureChannel : public ConnectionObserver {
   base::queue<std::unique_ptr<PendingMessage>> queued_messages_;
   std::unique_ptr<PendingMessage> pending_message_;
   int next_sequence_number_ = 0;
-  base::ObserverList<Observer>::Unchecked observer_list_;
+  base::ObserverList<Observer> observer_list_;
+  base::ScopedObservation<Connection, ConnectionObserver>
+      connection_observation_{this};
   base::WeakPtrFactory<SecureChannel> weak_ptr_factory_{this};
 };
 

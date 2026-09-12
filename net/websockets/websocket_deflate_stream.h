@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/scoped_refptr.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/net_export.h"
 #include "net/log/net_log_with_source.h"
@@ -23,6 +24,8 @@ namespace net {
 
 class WebSocketDeflateParameters;
 class WebSocketDeflatePredictor;
+class IOBufferWithSize;
+class NetLogWithSource;
 
 // WebSocketDeflateStream is a WebSocketStream subclass.
 // WebSocketDeflateStream is for permessage-deflate WebSocket extension[1].
@@ -37,9 +40,12 @@ class WebSocketDeflatePredictor;
 // a message m1 is read / written before the last frame of a message m2,
 // WebSocketDeflateStream will respect the order.
 //
-// [1]: http://tools.ietf.org/html/draft-ietf-hybi-permessage-compression-12
+// [1]: https://www.rfc-editor.org/rfc/rfc7692
 class NET_EXPORT_PRIVATE WebSocketDeflateStream : public WebSocketStream {
  public:
+  static constexpr size_t kChunkSize = 32 * 1024;
+  static constexpr int kWindowBits = 15;
+
   WebSocketDeflateStream(std::unique_ptr<WebSocketStream> stream,
                          const WebSocketDeflateParameters& params,
                          std::unique_ptr<WebSocketDeflatePredictor> predictor);

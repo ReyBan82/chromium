@@ -17,9 +17,6 @@ class COMPONENT_EXPORT(OZONE_BASE) NativePixmapGLBinding {
  public:
   NativePixmapGLBinding();
   virtual ~NativePixmapGLBinding();
-
-  virtual GLuint GetInternalFormat() = 0;
-  virtual GLenum GetDataType() = 0;
 };
 
 }  // namespace ui

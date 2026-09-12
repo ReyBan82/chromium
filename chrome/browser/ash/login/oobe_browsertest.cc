@@ -2,33 +2,31 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "ash/constants/ash_login_pref_names.h"
 #include "ash/constants/ash_switches.h"
 #include "ash/display/window_tree_host_manager.h"
 #include "ash/public/cpp/test/shell_test_api.h"
 #include "ash/shell.h"
 #include "base/auto_reset.h"
+#include "base/check_deref.h"
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/task/single_thread_task_runner.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
 #include "chrome/browser/ash/login/test/feature_parameter_interface.h"
-#include "chrome/browser/ash/login/test/local_state_mixin.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
 #include "chrome/browser/ash/login/test/oobe_screen_waiter.h"
+#include "chrome/browser/ash/login/test/oobe_screens_utils.h"
 #include "chrome/browser/ash/login/test/session_manager_state_waiter.h"
-#include "chrome/browser/ash/login/ui/login_display_host_webui.h"
 #include "chrome/browser/ash/login/wizard_context.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
 #include "chrome/browser/ash/policy/enrollment/enrollment_requisition_manager.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/lifetime/application_lifetime.h"
+#include "chrome/browser/ui/ash/login/login_display_host_webui.h"
 #include "chrome/browser/ui/webui/ash/login/gaia_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/update_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/welcome_screen_handler.h"
 #include "chrome/browser/ui/webui/signin/signin_utils.h"
-#include "chrome/common/chrome_switches.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/test/base/fake_gaia_mixin.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chromeos/ash/components/dbus/cryptohome/key.pb.h"
@@ -36,6 +34,7 @@
 #include "chromeos/ash/components/dbus/userdataauth/fake_userdataauth_client.h"
 #include "chromeos/ash/components/login/auth/public/cryptohome_key_constants.h"
 #include "components/account_id/account_id.h"
+#include "components/session_manager/core/session_manager.h"
 #include "components/user_manager/known_user.h"
 #include "components/user_manager/user.h"
 #include "content/public/test/browser_test.h"
@@ -44,9 +43,10 @@
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/test/embedded_test_server/http_response.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/display/display_switches.h"
 #include "ui/display/manager/display_manager.h"
+#include "ui/display/manager/managed_display_info.h"
 #include "ui/display/screen.h"
-#include "ui/display/test/display_manager_test_api.h"
 #include "ui/events/test/event_generator.h"
 #include "ui/views/widget/widget.h"
 
@@ -67,19 +67,30 @@ class OobeTest : public OobeBaseTest {
     OobeBaseTest::SetUpCommandLine(command_line);
   }
 
+  void SetUpOnMainThread() override {
+    OobeBaseTest::SetUpOnMainThread();
+    // Configure FakeGaia with default OAuth access tokens and Gaia ID mappings.
+    //
+    // Previously, asynchronous Mojo delays in AccountManagerFacade deferred
+    // token availability notifications until after session startup completed,
+    // masking the fact that FakeGaia was unconfigured for token fetching.
+    // Without those delays, token availability fires immediately during active
+    // session startup; when KeyedServices react by fetching access tokens,
+    // this setup ensures those requests succeed rather than timing out.
+    fake_gaia_.SetupFakeGaiaForLoginWithDefaults();
+  }
+
   void TearDownOnMainThread() override {
     // If the login display is still showing, exit gracefully.
     if (LoginDisplayHost::default_host()) {
       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-          FROM_HERE, base::BindOnce(&chrome::AttemptExit));
+          FROM_HERE, base::BindOnce([]() {
+            session_manager::SessionManager::Get()->RequestSignOut();
+          }));
       RunUntilBrowserProcessQuits();
     }
 
     OobeBaseTest::TearDownOnMainThread();
-  }
-
-  LoginDisplay* GetLoginDisplay() {
-    return LoginDisplayHost::default_host()->GetLoginDisplay();
   }
 
   views::Widget* GetLoginWindowWidget() {
@@ -125,7 +136,8 @@ IN_PROC_BROWSER_TEST_F(OobeTest, Accelerator) {
 
   ui::test::EventGenerator generator(login_window->GetRootWindow());
 
-  generator.PressKey(ui::VKEY_E, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN);
+  generator.PressAndReleaseKeyAndModifierKeys(
+      ui::VKEY_E, ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN);
   OobeScreenWaiter(EnrollmentScreenView::kScreenId).Wait();
 }
 
@@ -133,16 +145,13 @@ IN_PROC_BROWSER_TEST_F(OobeTest, Accelerator) {
 // in the local state.
 class PendingUpdateScreenTest
     : public OobeBaseTest,
-      public LocalStateMixin::Delegate,
       public ::testing::WithParamInterface<std::string> {
  protected:
-  // LocalStateMixin::Delegate:
-  void SetUpLocalState() final {
-    PrefService* prefs = g_browser_process->local_state();
-    prefs->SetString(prefs::kOobeScreenPending, GetParam());
+  void SetUpLocalStatePrefService(PrefService* local_state) final {
+    OobeBaseTest::SetUpLocalStatePrefService(local_state);
+    local_state->SetString(prefs::kOobeScreenPending, GetParam());
   }
   base::AutoReset<bool> branded_build{&WizardContext::g_is_branded_build, true};
-  LocalStateMixin local_state_mixin_{&mixin_host_, this};
 };
 
 IN_PROC_BROWSER_TEST_P(PendingUpdateScreenTest, UpdateScreenShown) {
@@ -160,75 +169,72 @@ INSTANTIATE_TEST_SUITE_P(All,
                                          "oobe-update" /* actual value */));
 
 // Checks that invalid (not existing) pending screen is handled gracefully.
-class InvalidPendingScreenTest : public OobeBaseTest,
-                                 public LocalStateMixin::Delegate {
+class InvalidPendingScreenTest : public OobeBaseTest {
  protected:
-  // LocalStateMixin::Delegate:
-  void SetUpLocalState() final {
-    PrefService* prefs = g_browser_process->local_state();
-    prefs->SetString(prefs::kOobeScreenPending, "not_existing_screen");
+  void SetUpLocalStatePrefService(PrefService* local_state) final {
+    OobeBaseTest::SetUpLocalStatePrefService(local_state);
+    local_state->SetString(prefs::kOobeScreenPending, "not_existing_screen");
   }
-  LocalStateMixin local_state_mixin_{&mixin_host_, this};
 };
 
 IN_PROC_BROWSER_TEST_F(InvalidPendingScreenTest, WelcomeScreenShown) {
-  OobeScreenWaiter(WelcomeView::kScreenId).Wait();
+  test::WaitForWelcomeScreen();
 }
 
-class DisplayOobeTest : public OobeBaseTest {
+class MeetDeviceDisplayOobeTest
+    : public OobeBaseTest,
+      public ::testing::WithParamInterface<std::tuple<const char*, gfx::Size>> {
  public:
-  DisplayOobeTest() = default;
-  ~DisplayOobeTest() override = default;
+  MeetDeviceDisplayOobeTest() = default;
+  ~MeetDeviceDisplayOobeTest() override = default;
 
-  // InProcessBrowserTest:
+  // OobeBaseTest:
   void SetUpCommandLine(base::CommandLine* command_line) override {
+    std::string display_spec;
+    std::tie(display_spec, scaled_display_size_) = GetParam();
+    display::ManagedDisplayInfo display_info =
+        display::ManagedDisplayInfo::CreateFromSpec(display_spec);
+    native_display_size_ = display_info.size_in_pixel();
+
     command_line->AppendSwitch(switches::kOobeLargeScreenSpecialScaling);
+    command_line->AppendSwitchASCII(::switches::kHostWindowBounds,
+                                    display_spec);
     OobeBaseTest::SetUpCommandLine(command_line);
   }
+
+  void SetUpLocalStatePrefService(PrefService* local_state) override {
+    OobeBaseTest::SetUpLocalStatePrefService(local_state);
+    policy::EnrollmentRequisitionManager::SetDeviceRequisition(
+        CHECK_DEREF(local_state),
+        policy::EnrollmentRequisitionManager::kRemoraRequisition);
+  }
+
+  gfx::Size ExpectedScaledDisplaySize() { return scaled_display_size_; }
+
+  gfx::Size ExpectedNativeDisplaySize() { return native_display_size_; }
+
+ private:
+  gfx::Size native_display_size_;
+  gfx::Size scaled_display_size_;
 };
 
-// TODO(crbug.com/1367438): Fix this test.
-IN_PROC_BROWSER_TEST_F(DisplayOobeTest, DISABLED_OobeMeets4kDisplay) {
-  policy::EnrollmentRequisitionManager::SetDeviceRequisition(
-      policy::EnrollmentRequisitionManager::kRemoraRequisition);
-
-  std::string display_spec("0+0-3840x2160");
-  ShellTestApi shell_test_api;
-  display::test::DisplayManagerTestApi(shell_test_api.display_manager())
-      .UpdateDisplay(display_spec);
-
-  display::Screen* screen = display::Screen::GetScreen();
-  gfx::Size display = screen->GetPrimaryDisplay().size();
-  EXPECT_EQ(display.width(), 2560);
-  EXPECT_EQ(display.height(), 1440);
+IN_PROC_BROWSER_TEST_P(MeetDeviceDisplayOobeTest, OobeMeetsScaledResolution) {
+  display::Screen* screen = display::Screen::Get();
+  gfx::Size display_size = screen->GetPrimaryDisplay().size();
+  EXPECT_EQ(display_size, ExpectedScaledDisplaySize());
 
   display::DisplayManager* display_manager = Shell::Get()->display_manager();
   display_manager->ResetDisplayZoom(screen->GetPrimaryDisplay().id());
-  display = screen->GetPrimaryDisplay().size();
-  EXPECT_EQ(display.width(), 3840);
-  EXPECT_EQ(display.height(), 2160);
+  display_size = screen->GetPrimaryDisplay().size();
+  EXPECT_EQ(display_size, ExpectedNativeDisplaySize());
 }
 
-// TODO(crbug.com/1367438): Fix this test.
-IN_PROC_BROWSER_TEST_F(DisplayOobeTest, DISABLED_OobeMeets2kDisplay) {
-  policy::EnrollmentRequisitionManager::SetDeviceRequisition(
-      policy::EnrollmentRequisitionManager::kRemoraRequisition);
-
-  std::string display_spec("0+0-2560x1440");
-  ShellTestApi shell_test_api;
-  display::test::DisplayManagerTestApi(shell_test_api.display_manager())
-      .UpdateDisplay(display_spec);
-
-  display::Screen* screen = display::Screen::GetScreen();
-  gfx::Size display = screen->GetPrimaryDisplay().size();
-  EXPECT_EQ(display.width(), 1920);
-  EXPECT_EQ(display.height(), 1080);
-
-  display::DisplayManager* display_manager = Shell::Get()->display_manager();
-  display_manager->ResetDisplayZoom(screen->GetPrimaryDisplay().id());
-  display = screen->GetPrimaryDisplay().size();
-  EXPECT_EQ(display.width(), 2560);
-  EXPECT_EQ(display.height(), 1440);
-}
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    MeetDeviceDisplayOobeTest,
+    testing::Values(std::tuple<const char*, gfx::Size>("0+0-3840x2160",
+                                                       gfx::Size(2560, 1440)),
+                    std::tuple<const char*, gfx::Size>("0+0-2560x1440",
+                                                       gfx::Size(1920, 1080))));
 
 }  // namespace ash

@@ -7,16 +7,15 @@
 #include "android_webview/common/aw_paths.h"
 #include "base/android/library_loader/library_loader_hooks.h"
 #include "base/base_paths_android.h"
+#include "base/command_line.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/path_service.h"
 #include "base/task/single_thread_task_executor.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
-#include "components/component_updater/component_updater_paths.h"
 #include "components/prefs/json_pref_store.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/pref_service_factory.h"
-#include "components/update_client/update_client.h"
 
 namespace android_webview {
 
@@ -35,7 +34,7 @@ WebViewApkProcess* WebViewApkProcess::GetInstance() {
 // static
 // Must be called exactly once during the process startup.
 void WebViewApkProcess::Init() {
-  // TODO(crbug.com/1179303): Add check to assert this is only loaded by
+  // TODO(crbug.com/40749658): Add check to assert this is only loaded by
   // LibraryProcessType PROCESS_WEBVIEW_NONEMBEDDED.
 
   // This doesn't have to be thread safe, because it should only happen once on
@@ -55,11 +54,6 @@ WebViewApkProcess::WebViewApkProcess() {
       base::MessagePumpType::JAVA);
 
   RegisterPathProvider();
-  component_updater::RegisterPathProvider(
-      /*components_system_root_key=*/android_webview::DIR_COMPONENTS_ROOT,
-      /*components_system_root_key_alt=*/android_webview::DIR_COMPONENTS_ROOT,
-      /*components_user_root_key=*/android_webview::DIR_COMPONENTS_ROOT);
-
   CreatePrefService();
 }
 
@@ -89,8 +83,6 @@ void WebViewApkProcess::CreatePrefService() {
 
 void WebViewApkProcess::RegisterPrefs(PrefRegistrySimple* pref_registry) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-
-  update_client::RegisterPrefs(pref_registry);
 }
 
 }  // namespace android_webview

@@ -2,19 +2,32 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+/**
+ * @fileoverview Test suite for the font size slider.
+ */
+
 suite('FontSizeSlider', function() {
-  test('Font Scale Desktop Selection', function() {
-    chai.assert.strictEqual(pincher, undefined);
+  suiteSetup(function() {
+    // The UI components are normally lazily initialized. We need to initialize
+    // them here for tests.
+    initializeDomDistillerViewer();
+  });
+
+  test('Font Scale Desktop Selection', async function() {
+    // Use a dynamic import since this file is not executed as a module from
+    // distilled_page_js_browsertest.cc
+    const {assert} = await import('./index.js');
+
     const documentElement = document.documentElement;
     const fontSizeSelector = document.getElementById('font-size-selection');
 
     useFontScaling(1);
-    chai.assert.equal(documentElement.style.fontSize, '16px');
+    assert.equal(documentElement.style.fontSize, '16px');
 
     useFontScaling(3);
-    chai.assert.equal(documentElement.style.fontSize, '48px');
+    assert.equal(documentElement.style.fontSize, '48px');
 
     useFontScaling(0.875);
-    chai.assert.equal(documentElement.style.fontSize, '14px');
+    assert.equal(documentElement.style.fontSize, '14px');
   });
 });

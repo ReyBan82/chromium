@@ -6,36 +6,31 @@
 
 #include "base/task/single_thread_task_runner.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "third_party/blink/public/mojom/permissions/permission_status.mojom-blink.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_permission_state.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
-#include "third_party/blink/renderer/modules/permissions/permission_utils.h"
 #include "third_party/blink/renderer/modules/permissions/permissions.h"
 
 namespace blink {
 
 PermissionStatusListener* PermissionStatusListener::Create(
-    Permissions& associated_permissions_object,
     ExecutionContext* execution_context,
-    MojoPermissionStatus status,
+    MojoPermissionStatusWithDetails status,
     MojoPermissionDescriptor descriptor) {
   PermissionStatusListener* permission_status =
       MakeGarbageCollected<PermissionStatusListener>(
-          associated_permissions_object, execution_context, status,
-          std::move(descriptor));
+          execution_context, std::move(status), std::move(descriptor));
   return permission_status;
 }
 
 PermissionStatusListener::PermissionStatusListener(
-    Permissions& associated_permissions_object,
     ExecutionContext* execution_context,
-    MojoPermissionStatus status,
+    MojoPermissionStatusWithDetails status,
     MojoPermissionDescriptor descriptor)
     : ExecutionContextClient(execution_context),
-      status_(status),
+      status_(std::move(status)),
       descriptor_(std::move(descriptor)),
-      receiver_(this, execution_context) {
-  associated_permissions_object.PermissionStatusObjectCreated();
-}
-
+      receiver_(this, execution_context) {}
 PermissionStatusListener::~PermissionStatusListener() = default;
 
 void PermissionStatusListener::StartListening() {
@@ -48,7 +43,7 @@ void PermissionStatusListener::StartListening() {
   mojo::Remote<mojom::blink::PermissionService> service;
   ConnectToPermissionService(GetExecutionContext(),
                              service.BindNewPipeAndPassReceiver(task_runner));
-  service->AddPermissionObserver(descriptor_->Clone(), status_,
+  service->AddPermissionObserver(descriptor_->Clone(), status_.Clone(),
                                  std::move(observer));
 }
 
@@ -69,11 +64,12 @@ void PermissionStatusListener::NotifyEventListener(
 }
 
 void PermissionStatusListener::OnPermissionStatusChange(
-    MojoPermissionStatus status) {
-  if (status_ == status)
+    MojoPermissionStatusWithDetails status) {
+  if (status_.Equals(status)) {
     return;
+  }
 
-  status_ = status;
+  status_ = std::move(status);
 
   // The `observers_` list can change in response to permission status change
   // events as the observers map to PermissionStatus JS objects which can be
@@ -87,7 +83,7 @@ void PermissionStatusListener::OnPermissionStatusChange(
 
   for (const auto& observer : observers) {
     if (observer)
-      observer->OnPermissionStatusChange(status);
+      observer->OnPermissionStatusChange(status_.Clone());
     else
       RemoveObserver(observer);
   }
@@ -127,12 +123,17 @@ bool PermissionStatusListener::HasPendingActivity() {
   return receiver_.is_bound();
 }
 
-String PermissionStatusListener::state() const {
-  return PermissionStatusToString(status_);
+V8PermissionState PermissionStatusListener::state() const {
+  return ToV8PermissionState(status_->status);
 }
 
-String PermissionStatusListener::name() const {
-  return PermissionNameToString(descriptor_->name);
+const mojom::blink::PermissionDetailsPtr& PermissionStatusListener::details()
+    const {
+  return status_->details;
+}
+
+mojom::blink::PermissionName PermissionStatusListener::permission_name() const {
+  return descriptor_->name;
 }
 
 void PermissionStatusListener::Trace(Visitor* visitor) const {

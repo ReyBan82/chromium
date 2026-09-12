@@ -6,10 +6,13 @@
 
 #include <windows.h>
 
+#include <algorithm>
+
 #include "base/containers/flat_map.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/trace_event/trace_event.h"
 #include "base/win/scoped_gdi_object.h"
@@ -17,8 +20,7 @@
 #include "base/win/scoped_select_object.h"
 #include "ui/gfx/platform_font.h"
 
-namespace gfx {
-namespace win {
+namespace gfx::win {
 
 namespace {
 
@@ -29,7 +31,7 @@ class SystemFonts {
       Initialize();
 
     auto it = system_fonts_.find(system_font);
-    DCHECK(it != system_fonts_.end())
+    CHECK(it != system_fonts_.end())
         << "System font #" << static_cast<int>(system_font) << " not found!";
     return it->second;
   }
@@ -78,18 +80,17 @@ class SystemFonts {
       new_height = logfont->lfHeight > 0 ? 1 : -1;
     logfont->lfHeight = new_height;
     if (!font_adjustment.font_family_override.empty()) {
-      auto result = wcscpy_s(logfont->lfFaceName,
-                             font_adjustment.font_family_override.c_str());
-      DCHECK_EQ(0, result) << "Font name "
-                           << font_adjustment.font_family_override
-                           << " cannot be copied into LOGFONT structure.";
+      size_t copied = base::wcslcpy(logfont->lfFaceName,
+                                    font_adjustment.font_family_override);
+      DCHECK_LT(copied, std::size(logfont->lfFaceName))
+          << "Font family name was truncated.";
     }
   }
 
   static Font GetFontFromLOGFONT(const LOGFONT& logfont) {
     // Finds a matching font by triggering font mapping. The font mapper finds
     // the closest physical font for a given logical font.
-    base::win::ScopedHFONT font(::CreateFontIndirect(&logfont));
+    base::win::ScopedGDIObject<HFONT> font(::CreateFontIndirect(&logfont));
     base::win::ScopedGetDC screen_dc(NULL);
     base::win::ScopedSelectObject scoped_font(screen_dc, font.get());
 
@@ -178,7 +179,7 @@ class SystemFonts {
     // we don't have to).
     FontAdjustment font_adjustment;
     if (adjust_font_callback_) {
-      adjust_font_callback_(&font_adjustment);
+      adjust_font_callback_(font_adjustment);
     }
 
     // Factor out system DPI scale that Windows will include in reported font
@@ -268,22 +269,6 @@ const Font& GetSystemFont(SystemFont system_font) {
   return SystemFonts::Instance()->GetFont(system_font);
 }
 
-NativeFont AdjustExistingSystemFont(NativeFont existing_font,
-                                    const FontAdjustment& font_adjustment) {
-  LOGFONT logfont;
-  auto result = GetObject(existing_font, sizeof(logfont), &logfont);
-  DCHECK(result);
-
-  // Make the necessary adjustments.
-  SystemFonts::AdjustLOGFONT(font_adjustment, &logfont);
-
-  // Cap at minimum font size.
-  logfont.lfHeight = SystemFonts::AdjustFontSize(logfont.lfHeight, 0);
-
-  // Create the Font object.
-  return ::CreateFontIndirect(&logfont);
-}
-
 int AdjustFontSize(int lf_height, int size_delta) {
   return SystemFonts::AdjustFontSize(lf_height, size_delta);
 }
@@ -302,5 +287,4 @@ void ResetSystemFontsForTesting() {
   SystemFonts::Instance()->ResetForTesting();
 }
 
-}  // namespace win
-}  // namespace gfx
+}  // namespace gfx::win

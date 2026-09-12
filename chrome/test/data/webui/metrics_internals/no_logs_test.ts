@@ -4,8 +4,8 @@
 
 import 'chrome://metrics-internals/app.js';
 
-import {MetricsInternalsAppElement} from 'chrome://metrics-internals/app.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import type {MetricsInternalsAppElement} from 'chrome://metrics-internals/app.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {assertEquals, assertGT, assertTrue} from 'chrome://webui-test/chai_assert.js';
 
 import {getTableRowAsStringArray} from './utils.js';
@@ -28,7 +28,7 @@ suite('NoLogsModuleTest', function() {
     // The table should be non-empty. Test for a few rows that should be there.
     assertGT(rows.length, 0);
     const rowsKeys = Array.from(rows).map(
-        el => (el!.firstElementChild as HTMLElement).innerText);
+        el => (el.firstElementChild as HTMLElement).innerText);
     assertTrue(rowsKeys.includes('Client ID'));
     assertTrue(rowsKeys.includes('Metrics Reporting Enabled'));
   });
@@ -43,10 +43,12 @@ suite('NoLogsModuleTest', function() {
     // there.
     assertGT(rows.length, 0);
     const rowsKeys = Array.from(rows).map(
-        el => (el!.firstElementChild as HTMLElement).innerText);
+        el => (el.firstElementChild as HTMLElement).innerText);
     assertTrue(rowsKeys.includes('Channel'));
     assertTrue(rowsKeys.includes('Version'));
     assertTrue(rowsKeys.includes('Platform'));
+    assertTrue(
+        rowsKeys.includes('Administrative area (Session Consistency)'));
   });
 
   test('table should show an empty log if there are no logs', function() {
@@ -71,4 +73,55 @@ suite('NoLogsModuleTest', function() {
     assertTrue(!!exportedLogsObj.logs);
     assertEquals(exportedLogsObj.logs.length, 0);
   });
+
+  test('UKM summary table should have info', function() {
+    const tabBox = app.shadowRoot!.querySelector('cr-tab-box');
+    assert(tabBox);
+    tabBox.setAttribute('selected-index', '1');
+
+    const ukmSummaryTable =
+        app.shadowRoot!.querySelector<HTMLElement>('#ukm-summary-body');
+    assert(ukmSummaryTable);
+    const rows = ukmSummaryTable.querySelectorAll('tr');
+
+    // The table should be non-empty. Test for a few rows that should be there.
+    assertGT(rows.length, 0);
+    const rowsKeys = Array.from(rows).map(
+        el => (el.firstElementChild as HTMLElement).innerText);
+    assertTrue(rowsKeys.includes('Client ID'));
+    assertTrue(rowsKeys.includes('Session ID'));
+  });
+
+  test('UKM table should show an empty log if there are no logs', function() {
+    const tabBox = app.shadowRoot!.querySelector('cr-tab-box');
+    assert(tabBox);
+    tabBox.setAttribute('selected-index', '1');
+
+    const ukmLogsTable =
+        app.shadowRoot!.querySelector<HTMLElement>('#ukm-logs-body');
+    assert(ukmLogsTable);
+
+    // All 4 columns of the first row should be filled with 'N/A'.
+    const firstRow = getTableRowAsStringArray(ukmLogsTable, 0);
+    assertEquals(firstRow.length, 4);
+    firstRow.forEach((el: string) => {
+      assertEquals(el, 'N/A');
+    });
+  });
+
+  test(
+      'exported UKM logs should be empty if there are no logs',
+      async function() {
+        const tabBox = app.shadowRoot!.querySelector('cr-tab-box');
+        assert(tabBox);
+        tabBox.setAttribute('selected-index', '1');
+
+        const exportedLogs = await app.getUkmLogsExportContent();
+        const exportedLogsObj = JSON.parse(exportedLogs);
+
+        // The exported logs should contain no logs.
+        assertEquals(exportedLogsObj.logType, 'UKM');
+        assertTrue(!!exportedLogsObj.logs);
+        assertEquals(exportedLogsObj.logs.length, 0);
+      });
 });

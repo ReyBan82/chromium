@@ -8,13 +8,11 @@
 #include "base/notreached.h"
 #include "build/build_config.h"
 #include "build/buildflag.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/chooser_controller/title_util.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/scoped_tabbed_browser_displayer.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/permissions/constants.h"
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/page_navigator.h"
@@ -26,11 +24,11 @@
 #include "ui/base/window_open_disposition.h"
 #include "url/gurl.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/webui/settings/public/constants/routes.mojom.h"
 #include "chrome/browser/ui/settings_window_manager_chromeos.h"
-#include "chrome/browser/ui/webui/settings/chromeos/constants/routes.mojom.h"
 #include "chrome/common/webui_url_constants.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_MAC)
 #include "base/mac/mac_util.h"
@@ -38,11 +36,11 @@
 
 namespace {
 
-Browser* GetBrowser() {
+BrowserWindowInterface* GetBrowser() {
   chrome::ScopedTabbedBrowserDisplayer browser_displayer(
       ProfileManager::GetLastUsedProfileAllowedByPolicy());
-  DCHECK(browser_displayer.browser());
-  return browser_displayer.browser();
+  DCHECK(browser_displayer.browser_window_interface());
+  return browser_displayer.browser_window_interface();
 }
 
 }  // namespace
@@ -53,25 +51,25 @@ ChromeBluetoothChooserController::ChromeBluetoothChooserController(
     : permissions::BluetoothChooserController(
           owner,
           event_handler,
-          CreateExtensionAwareChooserTitle(
-              owner,
-              IDS_BLUETOOTH_DEVICE_CHOOSER_PROMPT_ORIGIN,
-              IDS_BLUETOOTH_DEVICE_CHOOSER_PROMPT_EXTENSION_NAME)) {}
+          CreateChooserTitle(owner, IDS_BLUETOOTH_DEVICE_CHOOSER_PROMPT)) {}
 
 ChromeBluetoothChooserController::~ChromeBluetoothChooserController() = default;
 
 void ChromeBluetoothChooserController::OpenAdapterOffHelpUrl() const {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Chrome OS can directly link to the OS setting to turn on the adapter.
   chrome::SettingsWindowManager::GetInstance()->ShowOSSettings(
-      GetBrowser()->profile(),
+      GetBrowser()->GetProfile(),
       chromeos::settings::mojom::kBluetoothDevicesSubpagePath);
 #else
   // For other operating systems, show a help center page in a tab.
-  GetBrowser()->OpenURL(content::OpenURLParams(
-      GURL(chrome::kBluetoothAdapterOffHelpURL), content::Referrer(),
-      WindowOpenDisposition::NEW_FOREGROUND_TAB,
-      ui::PAGE_TRANSITION_AUTO_TOPLEVEL, false /* is_renderer_initialized */));
+  GetBrowser()->OpenURL(
+      content::OpenURLParams(GURL(chrome::kBluetoothAdapterOffHelpURL),
+                             content::Referrer(),
+                             WindowOpenDisposition::NEW_FOREGROUND_TAB,
+                             ui::PAGE_TRANSITION_AUTO_TOPLEVEL,
+                             false /* is_renderer_initialized */),
+      /*navigation_handle_callback=*/{});
 #endif
 }
 
@@ -85,8 +83,11 @@ void ChromeBluetoothChooserController::OpenPermissionPreferences() const {
 }
 
 void ChromeBluetoothChooserController::OpenHelpCenterUrl() const {
-  GetBrowser()->OpenURL(content::OpenURLParams(
-      GURL(permissions::kChooserBluetoothOverviewURL), content::Referrer(),
-      WindowOpenDisposition::NEW_FOREGROUND_TAB,
-      ui::PAGE_TRANSITION_AUTO_TOPLEVEL, false /* is_renderer_initialized */));
+  GetBrowser()->OpenURL(
+      content::OpenURLParams(GURL(permissions::kChooserBluetoothOverviewURL),
+                             content::Referrer(),
+                             WindowOpenDisposition::NEW_FOREGROUND_TAB,
+                             ui::PAGE_TRANSITION_AUTO_TOPLEVEL,
+                             false /* is_renderer_initialized */),
+      /*navigation_handle_callback=*/{});
 }

@@ -21,32 +21,39 @@ namespace content {
 SignedExchangeDevToolsProxy::SignedExchangeDevToolsProxy(
     const GURL& outer_request_url,
     network::mojom::URLResponseHeadPtr outer_response,
-    int frame_tree_node_id,
-    absl::optional<const base::UnguessableToken> devtools_navigation_token,
+    FrameTreeNodeId frame_tree_node_id,
+    std::optional<const base::UnguessableToken> devtools_navigation_token,
     bool report_raw_headers)
     : outer_request_url_(outer_request_url),
       outer_response_(std::move(outer_response)),
       frame_tree_node_id_(frame_tree_node_id),
       devtools_navigation_token_(devtools_navigation_token),
       devtools_enabled_(report_raw_headers) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 }
 
 SignedExchangeDevToolsProxy::~SignedExchangeDevToolsProxy() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 }
 
 void SignedExchangeDevToolsProxy::ReportError(
     const std::string& message,
-    absl::optional<SignedExchangeError::FieldIndexPair> error_field) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    std::optional<SignedExchangeError::FieldIndexPair> error_field) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   errors_.push_back(SignedExchangeError(message, std::move(error_field)));
-  WebContents* web_contents =
-      WebContents::FromFrameTreeNodeId(frame_tree_node_id_);
-  if (!web_contents)
+
+  FrameTreeNode* frame_tree_node =
+      FrameTreeNode::GloballyFindByID(frame_tree_node_id_);
+  if (!frame_tree_node) {
     return;
-  web_contents->GetPrimaryMainFrame()->AddMessageToConsole(
-      blink::mojom::ConsoleMessageLevel::kError, message);
+  }
+
+  RenderFrameHost* rfh = frame_tree_node->current_frame_host();
+  if (!rfh) {
+    return;
+  }
+
+  rfh->AddMessageToConsole(blink::mojom::ConsoleMessageLevel::kError, message);
 }
 
 void SignedExchangeDevToolsProxy::CertificateRequestSent(
@@ -100,10 +107,10 @@ void SignedExchangeDevToolsProxy::CertificateRequestCompleted(
 }
 
 void SignedExchangeDevToolsProxy::OnSignedExchangeReceived(
-    const absl::optional<SignedExchangeEnvelope>& envelope,
+    const std::optional<SignedExchangeEnvelope>& envelope,
     const scoped_refptr<net::X509Certificate>& certificate,
-    const absl::optional<net::SSLInfo>& ssl_info) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    const std::optional<net::SSLInfo>& ssl_info) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   if (!devtools_enabled_)
     return;
 

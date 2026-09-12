@@ -4,14 +4,19 @@
 
 #include "media/audio/audio_output_device_thread_callback.h"
 
+#include <atomic>
 #include <utility>
 
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "media/audio/audio_device_stats_reporter.h"
+#include "media/base/audio_bus.h"
 #include "media/base/audio_glitch_info.h"
+#include "media/media_buildflags.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 
 namespace media {
 
@@ -26,10 +31,14 @@ AudioOutputDeviceThreadCallback::AudioOutputDeviceThreadCallback(
       shared_memory_region_(std::move(shared_memory_region)),
       render_callback_(render_callback),
       create_time_(base::TimeTicks::Now()),
-      stats_reporter_(audio_parameters) {
+      stats_reporter_(audio_parameters,
+                      AudioDeviceStatsReporter::Type::kOutput) {
   // CHECK that the shared memory is large enough. The memory allocated must be
   // at least as large as expected.
   CHECK(memory_length_ <= shared_memory_region_.GetSize());
+#if !BUILDFLAG(ENABLE_PASSTHROUGH_AUDIO_CODECS)
+  CHECK(!audio_parameters_.IsBitstreamFormat());
+#endif
 }
 
 AudioOutputDeviceThreadCallback::~AudioOutputDeviceThreadCallback() {
@@ -42,35 +51,41 @@ void AudioOutputDeviceThreadCallback::MapSharedMemory() {
   shared_memory_mapping_ = shared_memory_region_.MapAt(0, memory_length_);
   CHECK(shared_memory_mapping_.IsValid());
 
-  media::AudioOutputBuffer* buffer =
-      reinterpret_cast<media::AudioOutputBuffer*>(
-          shared_memory_mapping_.memory());
-  output_bus_ = media::AudioBus::WrapMemory(audio_parameters_, buffer->audio);
+  base::span<uint8_t> data = shared_memory_mapping_.GetMemoryAsSpan<uint8_t>();
+  base::span<uint8_t> audio_data_span =
+      data.subspan<sizeof(media::AudioOutputBufferParameters)>();
+
+  const media::AudioOutputBuffer* buffer =
+      shared_memory_mapping_.GetMemoryAs<media::AudioOutputBuffer>();
+  CHECK_EQ(audio_data_span.data(), buffer->audio);
+
+  output_bus_ = media::AudioBus::WrapMemory(audio_parameters_, audio_data_span);
+#if BUILDFLAG(ENABLE_PASSTHROUGH_AUDIO_CODECS)
   output_bus_->set_is_bitstream_format(audio_parameters_.IsBitstreamFormat());
+#endif
 }
 
 // Called whenever we receive notifications about pending data.
 void AudioOutputDeviceThreadCallback::Process(uint32_t control_signal) {
   callback_num_++;
 
-  // Read and reset the glitch info.
   media::AudioOutputBuffer* buffer =
       reinterpret_cast<media::AudioOutputBuffer*>(
           shared_memory_mapping_.memory());
-  media::AudioGlitchInfo glitch_info{
-      .duration = base::Microseconds(buffer->params.glitch_duration_us),
-      .count = buffer->params.glitch_count};
-  buffer->params.glitch_duration_us = {};
-  buffer->params.glitch_count = 0;
-
-  TRACE_EVENT_BEGIN2("audio", "AudioOutputDevice::FireRenderCallback",
-                     "callback_num", callback_num_, "glitches",
-                     glitch_info.count);
+  // Read the glitch info.
+  media::AudioGlitchInfo glitch_info =
+      buffer_helper_.GetGlitchIncrementSinceLastCall(buffer->params);
 
   base::TimeDelta delay = base::Microseconds(buffer->params.delay_us);
 
   base::TimeTicks delay_timestamp =
       base::TimeTicks() + base::Microseconds(buffer->params.delay_timestamp_us);
+
+  TRACE_EVENT("audio", "AudioOutputDevice::FireRenderCallback", "callback_num",
+              callback_num_, "delay_timestamp (ms)",
+              (delay_timestamp - base::TimeTicks()).InMillisecondsF(),
+              "playout_delay (ms)", delay.InMillisecondsF());
+  glitch_info.MaybeAddTraceEvent();
 
   DVLOG(4) << __func__ << " delay:" << delay << " delay_timestamp:" << delay;
 
@@ -78,8 +93,9 @@ void AudioOutputDeviceThreadCallback::Process(uint32_t control_signal) {
   // that we have some data, we'll get another one after the device is awake and
   // ingesting data, which is what we want to track with this trace.
   if (callback_num_ == 2) {
-    TRACE_EVENT_NESTABLE_ASYNC_END0("audio", "StartingPlayback",
-                                    TRACE_ID_LOCAL(this));
+    TRACE_EVENT_END("audio",
+                    perfetto::NamedTrack::FromPointer(
+                        "media::AudioOutputDeviceThreadCallback", this));
     if (first_play_start_time_) {
       UmaHistogramTimes("Media.Audio.Render.OutputDeviceStartTime2",
                         base::TimeTicks::Now() - *first_play_start_time_);
@@ -94,15 +110,16 @@ void AudioOutputDeviceThreadCallback::Process(uint32_t control_signal) {
                            output_bus_.get());
   stats_reporter_.ReportCallback(delay, glitch_info);
 
+#if BUILDFLAG(ENABLE_PASSTHROUGH_AUDIO_CODECS)
   if (audio_parameters_.IsBitstreamFormat()) {
-    buffer->params.bitstream_data_size = output_bus_->GetBitstreamDataSize();
+    buffer->params.bitstream_data_size = output_bus_->bitstream_data().size();
     buffer->params.bitstream_frames = output_bus_->GetBitstreamFrames();
   }
+#endif
+}
 
-  TRACE_EVENT_END2("audio", "AudioOutputDevice::FireRenderCallback",
-                   "timestamp (ms)",
-                   (delay_timestamp - base::TimeTicks()).InMillisecondsF(),
-                   "delay (ms)", delay.InMillisecondsF());
+void AudioOutputDeviceThreadCallback::OnSocketError() {
+  render_callback_->OnRenderError();
 }
 
 bool AudioOutputDeviceThreadCallback::CurrentThreadIsAudioDeviceThread() {
@@ -114,8 +131,9 @@ void AudioOutputDeviceThreadCallback::InitializePlayStartTime() {
     return;
 
   DCHECK(!callback_num_);
-  TRACE_EVENT_NESTABLE_ASYNC_BEGIN0("audio", "StartingPlayback",
-                                    TRACE_ID_LOCAL(this));
+  TRACE_EVENT_BEGIN("audio", "StartingPlayback",
+                    perfetto::NamedTrack::FromPointer(
+                        "media::AudioOutputDeviceThreadCallback", this));
   first_play_start_time_ = base::TimeTicks::Now();
 }
 

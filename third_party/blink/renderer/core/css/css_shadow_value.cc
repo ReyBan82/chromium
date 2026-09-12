@@ -32,7 +32,7 @@ CSSShadowValue::CSSShadowValue(CSSPrimitiveValue* x,
                                CSSPrimitiveValue* blur,
                                CSSPrimitiveValue* spread,
                                CSSIdentifierValue* style,
-                               CSSValue* color)
+                               const CSSValue* color)
     : CSSValue(kShadowClass),
       x(x),
       y(y),
@@ -77,6 +77,14 @@ bool CSSShadowValue::Equals(const CSSShadowValue& other) const {
          base::ValuesEquivalent(blur, other.blur) &&
          base::ValuesEquivalent(spread, other.spread) &&
          base::ValuesEquivalent(style, other.style);
+}
+
+bool CSSShadowValue::HasRandomFunctions() const {
+  return (x && x->HasRandomFunctions()) || (y && y->HasRandomFunctions()) ||
+         (blur && blur->HasRandomFunctions()) ||
+         (spread && spread->HasRandomFunctions()) ||
+         (style && style->HasRandomFunctions()) ||
+         (color && color->HasRandomFunctions());
 }
 
 void CSSShadowValue::TraceAfterDispatch(blink::Visitor* visitor) const {

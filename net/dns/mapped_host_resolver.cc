@@ -4,6 +4,7 @@
 
 #include "net/dns/mapped_host_resolver.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -15,7 +16,6 @@
 #include "net/base/url_util.h"
 #include "net/dns/host_resolver.h"
 #include "net/log/net_log_with_source.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 #include "url/scheme_host_port.h"
 #include "url/url_canon.h"
@@ -35,27 +35,29 @@ std::unique_ptr<HostResolver::ResolveHostRequest>
 MappedHostResolver::CreateRequest(
     url::SchemeHostPort host,
     NetworkAnonymizationKey network_anonymization_key,
+    handles::NetworkHandle target_network,
     NetLogWithSource source_net_log,
-    absl::optional<ResolveHostParameters> optional_parameters) {
+    std::optional<ResolveHostParameters> optional_parameters) {
   GURL rewritten_url = host.GetURL();
   HostMappingRules::RewriteResult result = rules_.RewriteUrl(rewritten_url);
 
   switch (result) {
     case HostMappingRules::RewriteResult::kRewritten:
       DCHECK(rewritten_url.is_valid());
-      DCHECK_NE(rewritten_url.host_piece(), "~NOTFOUND");
+      DCHECK_NE(rewritten_url.host(), "^NOTFOUND");
       return impl_->CreateRequest(url::SchemeHostPort(rewritten_url),
                                   std::move(network_anonymization_key),
-                                  std::move(source_net_log),
+                                  target_network, std::move(source_net_log),
                                   std::move(optional_parameters));
     case HostMappingRules::RewriteResult::kInvalidRewrite:
-      // Treat any invalid mapping as if it was "~NOTFOUND" (which should itself
+      // Treat any invalid mapping as if it was "^NOTFOUND" (which should itself
       // result in `kInvalidRewrite`).
       return CreateFailingRequest(ERR_NAME_NOT_RESOLVED);
     case HostMappingRules::RewriteResult::kNoMatchingRule:
       return impl_->CreateRequest(
           std::move(host), std::move(network_anonymization_key),
-          std::move(source_net_log), std::move(optional_parameters));
+          std::move(target_network), std::move(source_net_log),
+          std::move(optional_parameters));
   }
 }
 
@@ -63,16 +65,61 @@ std::unique_ptr<HostResolver::ResolveHostRequest>
 MappedHostResolver::CreateRequest(
     const HostPortPair& host,
     const NetworkAnonymizationKey& network_anonymization_key,
+    handles::NetworkHandle target_network,
     const NetLogWithSource& source_net_log,
-    const absl::optional<ResolveHostParameters>& optional_parameters) {
+    const std::optional<ResolveHostParameters>& optional_parameters) {
   HostPortPair rewritten = host;
   rules_.RewriteHost(&rewritten);
 
-  if (rewritten.host() == "~NOTFOUND")
+  if (rewritten.host() == "^NOTFOUND") {
     return CreateFailingRequest(ERR_NAME_NOT_RESOLVED);
+  }
 
   return impl_->CreateRequest(rewritten, network_anonymization_key,
-                              source_net_log, optional_parameters);
+                              target_network, source_net_log,
+                              optional_parameters);
+}
+
+std::unique_ptr<HostResolver::ServiceEndpointRequest>
+MappedHostResolver::CreateServiceEndpointRequest(
+    Host host,
+    NetworkAnonymizationKey network_anonymization_key,
+    handles::NetworkHandle target_network,
+    NetLogWithSource net_log,
+    ResolveHostParameters parameters) {
+  if (host.HasScheme()) {
+    GURL rewritten_url = host.AsSchemeHostPort().GetURL();
+    HostMappingRules::RewriteResult result = rules_.RewriteUrl(rewritten_url);
+
+    switch (result) {
+      case HostMappingRules::RewriteResult::kRewritten:
+        DCHECK(rewritten_url.is_valid());
+        DCHECK_NE(rewritten_url.host(), "^NOTFOUND");
+        return impl_->CreateServiceEndpointRequest(
+            Host(url::SchemeHostPort(rewritten_url)),
+            std::move(network_anonymization_key), std::move(target_network),
+            std::move(net_log), std::move(parameters));
+      case HostMappingRules::RewriteResult::kInvalidRewrite:
+        // Treat any invalid mapping as if it was "^NOTFOUND" (which should
+        // itself result in `kInvalidRewrite`).
+        return CreateFailingServiceEndpointRequest(ERR_NAME_NOT_RESOLVED);
+      case HostMappingRules::RewriteResult::kNoMatchingRule:
+        return impl_->CreateServiceEndpointRequest(
+            std::move(host), std::move(network_anonymization_key),
+            std::move(target_network), std::move(net_log),
+            std::move(parameters));
+    }
+  } else {
+    HostPortPair rewritten = host.AsHostPortPair();
+    rules_.RewriteHost(&rewritten);
+
+    if (rewritten.host() == "^NOTFOUND") {
+      return CreateFailingServiceEndpointRequest(ERR_NAME_NOT_RESOLVED);
+    }
+    return impl_->CreateServiceEndpointRequest(
+        Host(std::move(rewritten)), std::move(network_anonymization_key),
+        std::move(target_network), std::move(net_log), std::move(parameters));
+  }
 }
 
 std::unique_ptr<HostResolver::ProbeRequest>
@@ -84,12 +131,16 @@ HostCache* MappedHostResolver::GetHostCache() {
   return impl_->GetHostCache();
 }
 
-base::Value MappedHostResolver::GetDnsConfigAsValue() const {
+base::DictValue MappedHostResolver::GetDnsConfigAsValue() const {
   return impl_->GetDnsConfigAsValue();
 }
 
 void MappedHostResolver::SetRequestContext(URLRequestContext* request_context) {
   impl_->SetRequestContext(request_context);
+}
+
+bool MappedHostResolver::IsHappyEyeballsV3Enabled() const {
+  return impl_->IsHappyEyeballsV3Enabled();
 }
 
 HostResolverManager* MappedHostResolver::GetManagerForTesting() {

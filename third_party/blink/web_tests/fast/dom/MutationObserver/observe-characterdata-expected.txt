@@ -30,12 +30,6 @@ PASS mutations2[0].type is "characterData"
 PASS mutations2[0].target is charDataNode
 
 
-Testing mutation records are enqueued for characterData before DOMSubtreeModified is dispatched.
-PASS mutations.length is 2
-PASS mutations[0].type is "characterData"
-PASS mutations[1].type is "attributes"
-
-
 Testing that oldValue is returned when requested.
 PASS mutations.length is 2
 PASS mutations[0].type is "characterData"

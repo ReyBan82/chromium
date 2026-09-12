@@ -54,7 +54,8 @@
                 "builder": "GPU FYI Mac arm64 Builder",
                 "project": "chromium"
               },
-              "run_tests_serially": true
+              "run_tests_serially": true,
+              "use_test_trigger_cas": true
             }
           }
         ]
@@ -71,7 +72,8 @@
           "builder": "gpu-fyi-try-mac-arm64-apple-m1-rel",
           "group": "tryserver.chromium.mac"
         }
-      ]
+      ],
+      "targets_spec_directory": "infra/config/generated/builders/ci/Mac FYI Release (Apple M1)/targets"
     }
   },
   "$recipe_engine/resultdb/test_presentation": {
@@ -82,6 +84,9 @@
     ]
   },
   "builder_group": "chromium.gpu.fyi",
+  "gardener_rotations": [
+    "chromium.gpu"
+  ],
   "perf_dashboard_machine_group": "ChromiumGPUFYI",
   "recipe": "chromium",
   "sheriff_rotations": [

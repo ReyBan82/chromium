@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "third_party/blink/renderer/core/css/cssom/css_color_value.h"
+
 #include "third_party/blink/renderer/bindings/core/v8/v8_typedefs.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_csscolorvalue_cssstylevalue.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_cssnumericvalue_double.h"
@@ -17,30 +18,15 @@
 #include "third_party/blink/renderer/core/css/cssom/css_unit_value.h"
 #include "third_party/blink/renderer/core/css/cssom/cssom_types.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser_context.h"
-#include "third_party/blink/renderer/core/css/parser/css_parser_token.h"
+#include "third_party/blink/renderer/core/css/parser/css_parser_local_context.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser_token_stream.h"
-#include "third_party/blink/renderer/core/css/parser/css_tokenizer.h"
 #include "third_party/blink/renderer/core/css/properties/css_parsing_utils.h"
-#include "third_party/blink/renderer/core/css/style_color.h"
 #include "third_party/blink/renderer/core/css_value_keywords.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
-
-enum CSSColorType { kInvalid, kInvalidOrNamedColor, kRGB, kHSL, kHWB };
-
-CSSRGB* CSSColorValue::toRGB() const {
-  return MakeGarbageCollected<CSSRGB>(ToColor());
-}
-
-CSSHSL* CSSColorValue::toHSL() const {
-  return MakeGarbageCollected<CSSHSL>(ToColor());
-}
-
-CSSHWB* CSSColorValue::toHWB() const {
-  return MakeGarbageCollected<CSSHWB>(ToColor());
-}
 
 const CSSValue* CSSColorValue::ToCSSValue() const {
   return cssvalue::CSSColor::Create(ToColor());
@@ -75,99 +61,62 @@ float CSSColorValue::ComponentToColorInput(CSSNumericValue* input) {
   return input->to(CSSPrimitiveValue::UnitType::kNumber)->value();
 }
 
-static CSSColorType DetermineColorType(CSSParserTokenRange& range) {
-  if (range.Peek().GetType() == kFunctionToken) {
-    switch (range.Peek().FunctionId()) {
-      case CSSValueID::kRgb:
-      case CSSValueID::kRgba:
-        return CSSColorType::kRGB;
-      case CSSValueID::kHsl:
-      case CSSValueID::kHsla:
-        return CSSColorType::kHSL;
-      case CSSValueID::kHwb:
-        return CSSColorType::kHWB;
-      default:
-        return CSSColorType::kInvalid;
-    }
-  } else if (range.Peek().GetType() == kHashToken) {
-    return CSSColorType::kRGB;
-  }
-  return CSSColorType::kInvalidOrNamedColor;
-}
-
-static CSSRGB* CreateCSSRGBByNumbers(int red, int green, int blue, int alpha) {
-  return MakeGarbageCollected<CSSRGB>(
-      CSSNumericValue::FromNumberish(MakeGarbageCollected<V8CSSNumberish>(red)),
-      CSSNumericValue::FromNumberish(
-          MakeGarbageCollected<V8CSSNumberish>(green)),
-      CSSNumericValue::FromNumberish(
-          MakeGarbageCollected<V8CSSNumberish>(blue)),
-      CSSNumericValue::FromPercentish(
-          MakeGarbageCollected<V8CSSNumberish>(alpha / 255.0)));
-}
-
-V8UnionCSSColorValueOrCSSStyleValue* CSSColorValue::parse(
-    const ExecutionContext* execution_context,
+V8UnionCSSColorValueOrCSSStyleValue::Ret CSSColorValue::parse(
+    ScriptState* script_state,
     const String& css_text,
     ExceptionState& exception_state) {
-  CSSTokenizer tokenizer(css_text);
-  CSSParserTokenStream stream(tokenizer);
-  stream.ConsumeWhitespace();
-  auto range = stream.ConsumeUntilPeekedTypeIs<>();
+  ExecutionContext* execution_context = ExecutionContext::From(script_state);
+  CSSParserTokenStream stream(css_text);
   stream.ConsumeWhitespace();
 
-  const CSSColorType color_type = DetermineColorType(range);
-
-  // Validate it is not color function before parsing execution
-  if (color_type == CSSColorType::kInvalid) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kSyntaxError,
-                                      "Invalid color expression");
-    return nullptr;
-  }
-
+  CSSParserLocalContext local_context =
+      CSSParserLocalContext::CreateWithoutPropertyForCSSOM();
   const CSSValue* parsed_value = css_parsing_utils::ConsumeColor(
-      range, *MakeGarbageCollected<CSSParserContext>(*execution_context));
+      stream, *MakeGarbageCollected<CSSParserContext>(*execution_context),
+      local_context);
+  stream.ConsumeWhitespace();
 
   if (!parsed_value) {
     exception_state.ThrowDOMException(DOMExceptionCode::kSyntaxError,
                                       "Invalid color expression");
-    return nullptr;
+    return {};
   }
 
-  if (parsed_value->IsColorValue()) {
-    const cssvalue::CSSColor* result = To<cssvalue::CSSColor>(parsed_value);
-    switch (color_type) {
-      case CSSColorType::kRGB:
-        return MakeGarbageCollected<V8UnionCSSColorValueOrCSSStyleValue>(
-            CreateCSSRGBByNumbers(
-                result->Value().Red(), result->Value().Green(),
-                result->Value().Blue(), result->Value().Alpha()));
-      case CSSColorType::kHSL:
-        return MakeGarbageCollected<V8UnionCSSColorValueOrCSSStyleValue>(
-            MakeGarbageCollected<CSSHSL>(result->Value()));
-      case CSSColorType::kHWB:
-        return MakeGarbageCollected<V8UnionCSSColorValueOrCSSStyleValue>(
-            MakeGarbageCollected<CSSHWB>(result->Value()));
+  if (const auto* css_color = DynamicTo<cssvalue::CSSColor>(*parsed_value)) {
+    const Color& color = css_color->Value();
+    switch (color.GetColorSpace()) {
+      case Color::ColorSpace::kSRGB:
+      case Color::ColorSpace::kSRGBLegacy:
+        return V8UnionCSSColorValueOrCSSStyleValue::Ret(
+            script_state,
+            MakeGarbageCollected<CSSRGB>(color, color.GetColorSpace()));
+      case Color::ColorSpace::kHSL:
+        return V8UnionCSSColorValueOrCSSStyleValue::Ret(
+            script_state, MakeGarbageCollected<CSSHSL>(color));
+      case Color::ColorSpace::kHWB:
+        return V8UnionCSSColorValueOrCSSStyleValue::Ret(
+            script_state, MakeGarbageCollected<CSSHWB>(color));
       default:
         break;
     }
   }
 
-  DCHECK(parsed_value->IsIdentifierValue());
-
-  const char* value_name =
-      getValueName(To<CSSIdentifierValue>(parsed_value)->GetValueID());
-  if (const NamedColor* named_color =
-          FindColor(value_name, static_cast<wtf_size_t>(strlen(value_name)))) {
-    Color color = Color::FromRGBA32(named_color->argb_value);
-
-    return MakeGarbageCollected<V8UnionCSSColorValueOrCSSStyleValue>(
-        CreateCSSRGBByNumbers(color.Red(), color.Green(), color.Blue(),
-                              color.Alpha()));
+  if (const auto* css_ident = DynamicTo<CSSIdentifierValue>(*parsed_value)) {
+    const CSSValueID value_id = css_ident->GetValueID();
+    std::string_view value_name = GetCSSValueName(value_id);
+    if (const NamedColor* named_color = FindColor(value_name)) {
+      const Color color = Color::FromRGBA32(named_color->argb_value);
+      return V8UnionCSSColorValueOrCSSStyleValue::Ret(
+          script_state,
+          MakeGarbageCollected<CSSRGB>(color, Color::ColorSpace::kSRGBLegacy));
+    }
+    return V8UnionCSSColorValueOrCSSStyleValue::Ret(
+        script_state, MakeGarbageCollected<CSSKeywordValue>(value_id));
   }
 
-  return MakeGarbageCollected<V8UnionCSSColorValueOrCSSStyleValue>(
-      CSSKeywordValue::Create(css_text));
+  exception_state.ThrowDOMException(DOMExceptionCode::kSyntaxError,
+                                    "Invalid color expression");
+  return {};
 }
 
 }  // namespace blink

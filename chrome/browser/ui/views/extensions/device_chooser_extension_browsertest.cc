@@ -4,21 +4,23 @@
 
 #include <string>
 
+#include "base/containers/to_vector.h"
 #include "base/memory/raw_ptr.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/test/test_future.h"
 #include "build/buildflag.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/ui/chooser_bubble_testapi.h"
-#include "chrome/browser/ui/toolbar/toolbar_action_view_controller.h"
-#include "chrome/browser/ui/views/extensions/extensions_toolbar_container.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/toolbar/toolbar_action_view_model.h"
+#include "chrome/browser/ui/ui_features.h"
+#include "chrome/browser/ui/views/extensions/extensions_toolbar_desktop.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_action_view.h"
 #include "chrome/browser/ui/views/toolbar/toolbar_view.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "extensions/test/test_extension_dir.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "ui/views/layout/animating_layout_manager_test_util.h"
@@ -37,6 +39,11 @@ enum ChooserType {
 class DeviceChooserExtensionBrowserTest
     : public extensions::ExtensionBrowserTest,
       public testing::WithParamInterface<ChooserType> {
+ public:
+  DeviceChooserExtensionBrowserTest() {
+    feature_list_.InitAndDisableFeature(features::kExtensionsPinnedByDefault);
+  }
+
  protected:
   void SetUpOnMainThread() override {
     ExtensionBrowserTest::SetUpOnMainThread();
@@ -63,13 +70,18 @@ class DeviceChooserExtensionBrowserTest
     ASSERT_EQ(url, web_contents()->GetLastCommittedURL());
   }
 
+  void TearDownOnMainThread() override {
+    extension_ = nullptr;
+    ExtensionBrowserTest::TearDownOnMainThread();
+  }
+
   const std::string& extension_id() { return extension_->id(); }
 
   content::WebContents* web_contents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
-  ExtensionsToolbarContainer* extensions_container() {
+  ExtensionsToolbarDesktop* extensions_container() {
     return BrowserView::GetBrowserViewForBrowser(browser())
         ->toolbar()
         ->extensions_container();
@@ -91,49 +103,47 @@ class DeviceChooserExtensionBrowserTest
   std::vector<ToolbarActionView*> GetPinnedExtensionViews() {
     auto is_visible = [&](ToolbarActionView* const action) -> bool {
 #if BUILDFLAG(IS_MAC)
-      // TODO(crbug.com/1045212): Use IsActionVisibleOnToolbar() because it
+      // TODO(crbug.com/40670141): Use IsActionVisibleOnToolbar() because it
       // queries the underlying model and not GetVisible(), as that relies on an
       // animation running, which is not reliable in unit tests on Mac.
       return extensions_container()->IsActionVisibleOnToolbar(
-          action->view_controller()->GetId());
+          action->view_model()->GetId());
 #else
       return action->GetVisible();
 #endif
     };
 
     std::vector<ToolbarActionView*> result;
-    for (auto* child : extensions_container()->children()) {
+    for (views::View* child : extensions_container()->children()) {
       // Ensure we don't downcast the ExtensionsToolbarButton.
       if (views::IsViewClass<ToolbarActionView>(child)) {
         auto* action = static_cast<ToolbarActionView*>(child);
-        if (is_visible(action))
+        if (is_visible(action)) {
           result.push_back(action);
+        }
       }
     }
     return result;
   }
 
   std::vector<std::string> GetPinnedExtensionNames() {
-    std::vector<ToolbarActionView*> views = GetPinnedExtensionViews();
-    std::vector<std::string> result;
-    result.resize(views.size());
-    base::ranges::transform(views, result.begin(), [](auto* view) {
-      return base::UTF16ToUTF8(view->view_controller()->GetActionName());
+    return base::ToVector(GetPinnedExtensionViews(), [](auto* view) {
+      return base::UTF16ToUTF8(view->view_model()->GetActionName());
     });
-    return result;
   }
 
   void WaitForAnimation() {
 #if BUILDFLAG(IS_MAC)
-    // TODO(crbug.com/1045212): we avoid using animations on Mac due to the lack
-    // of support in unit tests. Therefore this is a no-op.
+    // TODO(crbug.com/40670141): we avoid using animations on Mac due to the
+    // lack of support in unit tests. Therefore this is a no-op.
 #else
     views::test::WaitForAnimatingLayoutManager(extensions_container());
 #endif
   }
 
  private:
-  raw_ptr<const extensions::Extension, DanglingUntriaged> extension_ = nullptr;
+  raw_ptr<const extensions::Extension> extension_ = nullptr;
+  base::test::ScopedFeatureList feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_P(DeviceChooserExtensionBrowserTest,

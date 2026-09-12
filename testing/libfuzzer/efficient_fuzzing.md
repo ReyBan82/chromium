@@ -1,5 +1,8 @@
 # Efficient Fuzzing Guide
 
+This relates to fuzzers created using [libfuzzer] not [FuzzTests] - none of this
+advice is necessary for FuzzTests.
+
 Once you have a fuzz target running, you can analyze and tweak it to improve its
 efficiency. This document describes techniques to minimize fuzzing time and
 maximize your results.
@@ -235,8 +238,7 @@ Add a fuzzer dictionary:
 1) Create a flat ASCII text file that lists one input token per line in the
    format `name="value"`. The value must appear in quotes with hex escaping
    (`\xNN`) applied to all non-printable, high-bit, or otherwise problematic
-   characters (`\` and `"` shorthands are recognized, too). This syntax is
-   similar to the one used by the [AFL] fuzzing engine (`-x` option).
+   characters (`\` and `"` shorthands are recognized, too).
 
    *** note
    **Note:** `name` can be omitted, but it is a convenient way to document the
@@ -280,8 +282,11 @@ Add a fuzzer dictionary:
 
 ### Custom build
 
-If you need to change the code being tested by your fuzz target, you can use an
-`#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` macro in your target code.
+If you need to change the code being tested by your fuzz target, you can use
+conditional compilation as follows:
+
+* `#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` in C/C++ code
+* `if cfg!(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION) { ... }` in Rust code
 
 *** note
 **Note:** Patching target code is not a preferred way of improving the
@@ -291,13 +296,14 @@ the target code uses a random generator that affects the reproducibility of
 crashes).
 ***
 
-[AFL]: http://lcamtuf.coredump.cx/afl/
 [ClusterFuzz status]: libFuzzer_integration.md#Status-Links
 [Corpus GCS Bucket]: https://console.cloud.google.com/storage/clusterfuzz-corpus/libfuzzer
 [Getting Started Guide]: getting_started.md
 [gn config]: getting_started.md#running-the-fuzz-target
 [corpus from ClusterFuzz]: libFuzzer_integration.md#Corpus
 [coverage script]: https://cs.chromium.org/chromium/src/tools/code_coverage/coverage.py
-[fuzzing coverage]: https://chromium-coverage.appspot.com/reports/latest_fuzzers_only/linux/index.html
+[fuzzing coverage]: https://analysis.chromium.org/coverage/p/chromium?platform=fuzz
 [gsutil]: https://cloud.google.com/storage/docs/gsutil
 [startup initialization]: https://llvm.org/docs/LibFuzzer.html#startup-initialization
+[libfuzzer]: getting_started_with_libfuzzer.md
+[fuzztests]: getting_started.md

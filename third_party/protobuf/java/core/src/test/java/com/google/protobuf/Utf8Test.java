@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -34,6 +11,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Random;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -43,8 +21,8 @@ import org.junit.runners.JUnit4;
 public class Utf8Test {
   private static final int NUM_CHARS = 16384;
 
-  private static final Utf8.Processor safeProcessor = new Utf8.SafeProcessor();
-  private static final Utf8.Processor unsafeProcessor = new Utf8.UnsafeProcessor();
+  private static final Utf8.Processor mobileProcessor = new Utf8.MobileProcessor();
+  private static final Utf8.Processor serverProcessor = new Utf8.ServerProcessor();
 
   @Test
   public void testEncode() {
@@ -109,48 +87,42 @@ public class Utf8Test {
 
   private static void assertIsValid(byte[] data, boolean valid) {
     assertWithMessage("isValidUtf8[ARRAY]")
-        .that(safeProcessor.isValidUtf8(data, 0, data.length))
-        .isEqualTo(valid);
-    assertWithMessage("isValidUtf8[ARRAY_UNSAFE]")
-        .that(unsafeProcessor.isValidUtf8(data, 0, data.length))
+        .that(Utf8.isValidUtf8(data, 0, data.length))
         .isEqualTo(valid);
 
     ByteBuffer buffer = ByteBuffer.wrap(data);
     assertWithMessage("isValidUtf8[NIO_HEAP]")
-        .that(safeProcessor.isValidUtf8(buffer, buffer.position(), buffer.remaining()))
+        .that(Utf8.isValidUtf8(buffer))
         .isEqualTo(valid);
 
     // Direct buffers.
     buffer = ByteBuffer.allocateDirect(data.length);
     buffer.put(data);
     buffer.flip();
-    assertWithMessage("isValidUtf8[NIO_DEFAULT]")
-        .that(safeProcessor.isValidUtf8(buffer, buffer.position(), buffer.remaining()))
-        .isEqualTo(valid);
-    assertWithMessage("isValidUtf8[NIO_UNSAFE]")
-        .that(unsafeProcessor.isValidUtf8(buffer, buffer.position(), buffer.remaining()))
+    assertWithMessage("isValidUtf8[NIO_DIRECT]")
+        .that(Utf8.isValidUtf8(buffer))
         .isEqualTo(valid);
   }
 
   private static void assertEncoding(String message) {
-    byte[] expected = message.getBytes(Internal.UTF_8);
-    byte[] output = encodeToByteArray(message, expected.length, safeProcessor);
+    byte[] expected = message.getBytes(StandardCharsets.UTF_8);
+    byte[] output = encodeToByteArray(message, expected.length, mobileProcessor);
     assertWithMessage("encodeUtf8[ARRAY]")
         .that(output).isEqualTo(expected);
 
-    output = encodeToByteArray(message, expected.length, unsafeProcessor);
+    output = encodeToByteArray(message, expected.length, serverProcessor);
     assertWithMessage("encodeUtf8[ARRAY_UNSAFE]")
         .that(output).isEqualTo(expected);
 
-    output = encodeToByteBuffer(message, expected.length, false, safeProcessor);
+    output = encodeToByteBuffer(message, expected.length, false, mobileProcessor);
     assertWithMessage("encodeUtf8[NIO_HEAP]")
         .that(output).isEqualTo(expected);
 
-    output = encodeToByteBuffer(message, expected.length, true, safeProcessor);
+    output = encodeToByteBuffer(message, expected.length, true, mobileProcessor);
     assertWithMessage("encodeUtf8[NIO_DEFAULT]")
         .that(output).isEqualTo(expected);
 
-    output = encodeToByteBuffer(message, expected.length, true, unsafeProcessor);
+    output = encodeToByteBuffer(message, expected.length, true, serverProcessor);
     assertWithMessage("encodeUtf8[NIO_UNSAFE]")
         .that(output).isEqualTo(expected);
   }
@@ -160,64 +132,63 @@ public class Utf8Test {
     Class<ArrayIndexOutOfBoundsException> clazz = ArrayIndexOutOfBoundsException.class;
 
     try {
-      encodeToByteArray(message, length, safeProcessor);
+      encodeToByteArray(message, length, mobileProcessor);
       assertWithMessage("Expected " + clazz.getSimpleName()).fail();
     } catch (Throwable t) {
       // Expected
       assertThat(t).isInstanceOf(clazz);
-      // byte[] + safeProcessor will not exit early. We can't match the message since we don't
-      // know which char/index due to random input.
+      assertThat(t)
+          .hasMessageThat()
+          .isEqualTo("Not enough space in output buffer to encode UTF-8 string");
     }
 
     try {
-      encodeToByteArray(message, length, unsafeProcessor);
+      encodeToByteArray(message, length, serverProcessor);
       assertWithMessage("Expected " + clazz.getSimpleName()).fail();
     } catch (Throwable t) {
       assertThat(t).isInstanceOf(clazz);
-      // byte[] + unsafeProcessor will exit early, so we have can match the message.
-      String pattern = "Failed writing (.) at index " + length;
-      assertThat(t).hasMessageThat().matches(pattern);
+      assertThat(t)
+          .hasMessageThat()
+          .isEqualTo("Not enough space in output buffer to encode UTF-8 string");
     }
 
     try {
-      encodeToByteBuffer(message, length, false, safeProcessor);
-      assertWithMessage("Expected " + clazz.getSimpleName()).fail();
-    } catch (Throwable t) {
-      // Expected
-      assertThat(t).isInstanceOf(clazz);
-      // ByteBuffer + safeProcessor will not exit early. We can't match the message since we don't
-      // know which char/index due to random input.
-    }
-
-    try {
-      encodeToByteBuffer(message, length, true, safeProcessor);
+      encodeToByteBuffer(message, length, false, mobileProcessor);
       assertWithMessage("Expected " + clazz.getSimpleName()).fail();
     } catch (Throwable t) {
       // Expected
       assertThat(t).isInstanceOf(clazz);
-      // ByteBuffer + safeProcessor will not exit early. We can't match the message since we don't
-      // know which char/index due to random input.
+      assertThat(t)
+          .hasMessageThat()
+          .isEqualTo("Not enough space in output buffer to encode UTF-8 string");
     }
 
     try {
-      encodeToByteBuffer(message, length, true, unsafeProcessor);
+      encodeToByteBuffer(message, length, true, mobileProcessor);
       assertWithMessage("Expected " + clazz.getSimpleName()).fail();
     } catch (Throwable t) {
       // Expected
       assertThat(t).isInstanceOf(clazz);
-      // Direct ByteBuffer + unsafeProcessor will exit early if it's not on Android, so we can
-      // match the message. On Android, a direct ByteBuffer will have hasArray() being true and
-      // it will take a different code path and produces a different message.
-      if (!Android.isOnAndroidDevice()) {
-        String pattern = "Failed writing (.) at index " + length;
-        assertThat(t).hasMessageThat().matches(pattern);
-      }
+      assertThat(t)
+          .hasMessageThat()
+          .isEqualTo("Not enough space in output buffer to encode UTF-8 string");
+    }
+
+    try {
+      encodeToByteBuffer(message, length, true, serverProcessor);
+      assertWithMessage("Expected " + clazz.getSimpleName()).fail();
+    } catch (Throwable t) {
+      // Expected
+      assertThat(t).isInstanceOf(clazz);
+      assertThat(t)
+          .hasMessageThat()
+          .isEqualTo("Not enough space in output buffer to encode UTF-8 string");
     }
   }
 
   private static byte[] encodeToByteArray(String message, int length, Utf8.Processor processor) {
     byte[] output = new byte[length];
-    processor.encodeUtf8(message, output, 0, output.length);
+    int unused = processor.encodeUtf8(message, output, 0, output.length);
     return output;
   }
 

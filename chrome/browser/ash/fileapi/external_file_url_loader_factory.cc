@@ -6,13 +6,15 @@
 
 #include <algorithm>
 
+#include "base/byte_size.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_span.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "chrome/browser/ash/file_manager/fileapi_util.h"
 #include "chrome/browser/ash/fileapi/external_file_resolver.h"
 #include "chrome/browser/ash/fileapi/external_file_url_util.h"
-#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -44,22 +46,6 @@ namespace {
 
 constexpr size_t kDefaultPipeSize = 65536;
 
-// An IOBuffer that doesn't own its data.
-class MojoPipeIOBuffer : public net::IOBuffer {
- public:
-  explicit MojoPipeIOBuffer(void* data)
-      : net::IOBuffer(static_cast<char*>(data)) {}
-
-  MojoPipeIOBuffer(const MojoPipeIOBuffer&) = delete;
-  MojoPipeIOBuffer& operator=(const MojoPipeIOBuffer&) = delete;
-
- protected:
-  ~MojoPipeIOBuffer() override {
-    // Set data_ to null so ~IOBuffer won't try to delete it.
-    data_ = nullptr;
-  }
-};
-
 // A helper class to read data from a FileStreamReader, and write it to a
 // Mojo data pipe.
 class FileSystemReaderDataPipeProducer {
@@ -71,8 +57,9 @@ class FileSystemReaderDataPipeProducer {
       base::OnceCallback<void(net::Error)> callback)
       : producer_handle_(std::move(producer_handle)),
         stream_reader_(std::move(stream_reader)),
+        read_buffer_(
+            base::MakeRefCounted<net::IOBufferWithSize>(kDefaultPipeSize)),
         remaining_bytes_(remaining_bytes),
-        total_bytes_written_(0),
         pipe_watcher_(std::make_unique<mojo::SimpleWatcher>(
             FROM_HERE,
             mojo::SimpleWatcher::ArmingPolicy::MANUAL,
@@ -92,66 +79,61 @@ class FileSystemReaderDataPipeProducer {
 
   void Write() {
     while (remaining_bytes_ > 0) {
-      if (!producer_handle_.is_valid())
-        CompleteWithResult(net::ERR_FAILED);
-      void* pipe_buffer;
-      uint32_t buffer_size = kDefaultPipeSize;
-      MojoResult result = producer_handle_->BeginWriteData(
-          &pipe_buffer, &buffer_size, MOJO_WRITE_DATA_FLAG_NONE);
-      // If we can't synchronously get the buffer to write to, stop for now and
-      // wait for the SimpleWatcher to notify us that the pipe is writable.
-      if (result == MOJO_RESULT_SHOULD_WAIT) {
-        pipe_watcher_->ArmOrNotify();
-        return;
+      // Flush any previously read data to the pipe before reading more.
+      while (!pending_write_.empty()) {
+        size_t bytes_written = 0;
+        MojoResult result = producer_handle_->WriteData(
+            pending_write_, MOJO_WRITE_DATA_FLAG_NONE, bytes_written);
+        // If the pipe is full, stop for now and wait for the SimpleWatcher to
+        // notify us that the pipe is writable.
+        if (result == MOJO_RESULT_SHOULD_WAIT) {
+          pipe_watcher_->ArmOrNotify();
+          return;
+        }
+        if (result != MOJO_RESULT_OK) {
+          CompleteWithResult(MojoResultToErrorCode(result));
+          return;
+        }
+        pending_write_ = pending_write_.subspan(bytes_written);
+        remaining_bytes_ -= base::checked_cast<int64_t>(bytes_written);
+        total_bytes_written_ += base::ByteSize(bytes_written);
       }
-      if (result != MOJO_RESULT_OK) {
-        CompleteWithResult(MojoResultToErrorCode(result));
-        return;
+      if (remaining_bytes_ <= 0) {
+        break;
       }
-
-      DCHECK(base::IsValueInRangeForNumericType<int>(buffer_size));
-      scoped_refptr<MojoPipeIOBuffer> io_buffer =
-          base::MakeRefCounted<MojoPipeIOBuffer>(pipe_buffer);
+      const int bytes_to_read = base::checked_cast<int>(
+          std::min<int64_t>(read_buffer_->size(), remaining_bytes_));
       const int read_size = stream_reader_->Read(
-          io_buffer.get(), std::min<int64_t>(buffer_size, remaining_bytes_),
+          read_buffer_.get(), bytes_to_read,
           base::BindOnce(
               &FileSystemReaderDataPipeProducer::OnPendingReadComplete,
               weak_ptr_factory_.GetWeakPtr()));
       // Read will return ERR_IO_PENDING if the read couldn't be completed
       // synchronously. In that case return, and OnPendingReadComplete will
       // be called when the read is complete.
-      if (read_size == net::ERR_IO_PENDING)
-        return;
-      net::Error write_error = FinishWrite(read_size);
-      if (write_error != net::OK) {
-        CompleteWithResult(write_error);
+      if (read_size == net::ERR_IO_PENDING) {
         return;
       }
+      if (read_size <= 0) {
+        CompleteWithResult(static_cast<net::Error>(read_size));
+        return;
+      }
+      pending_write_ =
+          read_buffer_->first(base::checked_cast<size_t>(read_size));
     }
     CompleteWithResult(net::OK);
   }
 
-  int64_t total_bytes_written() { return total_bytes_written_; }
+  base::ByteSize total_bytes_written() { return total_bytes_written_; }
 
  private:
-  net::Error FinishWrite(int read_size) {
-    MojoResult result =
-        producer_handle_->EndWriteData(std::max<int>(0, read_size));
-    if (read_size <= 0)
-      return static_cast<net::Error>(read_size);
-    if (result != MOJO_RESULT_OK)
-      return MojoResultToErrorCode(result);
-    remaining_bytes_ -= read_size;
-    total_bytes_written_ += read_size;
-    return net::OK;
-  }
-
   void OnPendingReadComplete(int read_result) {
-    net::Error result = FinishWrite(read_result);
-    if (result != net::OK) {
-      CompleteWithResult(result);
+    if (read_result <= 0) {
+      CompleteWithResult(static_cast<net::Error>(read_result));
       return;
     }
+    pending_write_ =
+        read_buffer_->first(base::checked_cast<size_t>(read_result));
     Write();
   }
 
@@ -191,8 +173,14 @@ class FileSystemReaderDataPipeProducer {
 
   mojo::ScopedDataPipeProducerHandle producer_handle_;
   std::unique_ptr<storage::FileStreamReader> stream_reader_;
+  // The buffer passed to `stream_reader_` is owned here so that its storage
+  // remains valid for as long as any reference to it is retained, even if a
+  // pending read outlives this object.
+  scoped_refptr<net::IOBufferWithSize> read_buffer_;
+  // Subspan of `read_buffer_` that still needs to be written to the pipe.
+  base::raw_span<const uint8_t> pending_write_;
   int64_t remaining_bytes_;
-  int64_t total_bytes_written_;
+  base::ByteSize total_bytes_written_;
   std::unique_ptr<mojo::SimpleWatcher> pipe_watcher_;
   base::OnceCallback<void(net::Error)> callback_;
   base::WeakPtrFactory<FileSystemReaderDataPipeProducer> weak_ptr_factory_{
@@ -219,14 +207,10 @@ class ExternalFileURLLoader : public network::mojom::URLLoader {
 
   // network::mojom::URLLoader:
   void FollowRedirect(
-      const std::vector<std::string>& removed_headers,
-      const net::HttpRequestHeaders& modified_headers,
-      const net::HttpRequestHeaders& modified_cors_exempt_headers,
-      const absl::optional<GURL>& new_url) override {}
+      network::HttpRequestHeadersUpdateParams headers_update_params,
+      const std::optional<GURL>& new_url) override {}
   void SetPriority(net::RequestPriority priority,
                    int32_t intra_priority_value) override {}
-  void PauseReadingBodyFromNet() override {}
-  void ResumeReadingBodyFromNet() override {}
 
  private:
   explicit ExternalFileURLLoader(
@@ -289,7 +273,7 @@ class ExternalFileURLLoader : public network::mojom::URLLoader {
     }
     head_.response_start = base::TimeTicks::Now();
     client_->OnReceiveResponse(head_.Clone(), std::move(consumer_handle),
-                               absl::nullopt);
+                               std::nullopt);
 
     data_producer_ = std::make_unique<FileSystemReaderDataPipeProducer>(
         std::move(producer_handle), std::move(stream_reader), size,
@@ -299,7 +283,7 @@ class ExternalFileURLLoader : public network::mojom::URLLoader {
   }
 
   void OnFileWritten(net::Error error) {
-    int64_t total_bytes_written = data_producer_->total_bytes_written();
+    base::ByteSize total_bytes_written = data_producer_->total_bytes_written();
     data_producer_.reset();
     if (error != net::OK) {
       CompleteWithError(error);
@@ -348,8 +332,9 @@ class ExternalFileURLLoader : public network::mojom::URLLoader {
 ExternalFileURLLoaderFactory::ExternalFileURLLoaderFactory(
     void* profile_id,
     int render_process_host_id,
-    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver)
-    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver)),
+    mojo::PendingReceiver<network::mojom::URLLoaderFactory> factory_receiver,
+    base::SelfDeletingPassKey key)
+    : network::SelfDeletingURLLoaderFactory(std::move(factory_receiver), key),
       profile_id_(profile_id),
       render_process_host_id_(render_process_host_id) {}
 
@@ -385,7 +370,7 @@ ExternalFileURLLoaderFactory::Create(void* profile_id,
   // The ExternalFileURLLoaderFactory will delete itself when there are no more
   // receivers - see the network::SelfDeletingURLLoaderFactory::OnDisconnect
   // method.
-  new ExternalFileURLLoaderFactory(
+  base::MakeSelfDeleting<ExternalFileURLLoaderFactory>(
       profile_id, render_process_host_id,
       pending_remote.InitWithNewPipeAndPassReceiver());
 

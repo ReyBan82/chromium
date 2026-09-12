@@ -4,10 +4,16 @@
 
 #include "extensions/browser/renderer_startup_helper.h"
 
-#include "base/containers/contains.h"
 #include "base/memory/raw_ptr.h"
+#include "base/test/run_until.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/types/pass_key.h"
 #include "components/crx_file/id_util.h"
+#include "components/user_prefs/user_prefs.h"
 #include "content/public/test/mock_render_process_host.h"
+#include "content/public/test/test_browser_context.h"
+#include "extensions/browser/extension_mojo_binder_registry.h"
+#include "extensions/browser/extension_mojo_binder_registry_factory.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_factory.h"
@@ -15,10 +21,20 @@
 #include "extensions/browser/extensions_test.h"
 #include "extensions/browser/test_extensions_browser_client.h"
 #include "extensions/common/extension_builder.h"
-#include "extensions/common/extension_messages.h"
+#include "extensions/common/extension_id.h"
+#include "extensions/common/mojom/host_id.mojom.h"
 #include "extensions/common/mojom/renderer.mojom.h"
 #include "extensions/common/permissions/permissions_data.h"
 #include "mojo/public/cpp/bindings/associated_receiver_set.h"
+#include "third_party/blink/public/common/features.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chromeos/constants/chromeos_features.h"
+#include "chromeos/constants/pref_names.h"
+#include "components/prefs/pref_registry_simple.h"
+#include "components/prefs/pref_service.h"
+#include "components/prefs/testing_pref_service.h"
+#endif
 
 namespace extensions {
 
@@ -40,13 +56,23 @@ class RendererStartupHelperInterceptor : public RendererStartupHelper,
     return num_loaded_extensions_in_incognito_;
   }
 
+  struct LoadedExtensionInfo {
+    ExtensionId id;
+    bool is_mojo_js_enabled_for_service_worker;
+  };
+
   size_t num_unloaded_extensions() { return unloaded_extensions_.size(); }
+
+  const std::vector<LoadedExtensionInfo>& loaded_params() const {
+    return loaded_params_;
+  }
 
   void clear_extensions() {
     activated_extensions_.clear();
     num_loaded_extensions_ = 0;
     num_loaded_extensions_in_incognito_ = 0;
     unloaded_extensions_.clear();
+    loaded_params_.clear();
   }
 
   const URLPatternSet& default_policy_blocked_hosts() const {
@@ -67,16 +93,19 @@ class RendererStartupHelperInterceptor : public RendererStartupHelper,
 
  private:
   // mojom::Renderer implementation:
-  void ActivateExtension(const std::string& extension_id) override {
+  void ActivateExtension(const ExtensionId& extension_id) override {
     activated_extensions_.push_back(extension_id);
   }
   void SetActivityLoggingEnabled(bool enabled) override {}
+  void SetPolicyActivityLoggingEnabled(bool enabled) override {}
 
   void LoadExtensions(
       std::vector<mojom::ExtensionLoadedParamsPtr> loaded_extensions) override {
     for (const auto& param : loaded_extensions) {
-      const std::set<content::RenderProcessHost*>& process_set =
-          extension_process_map_[param->id];
+      loaded_params_.push_back(
+          {param->id, param->is_mojo_js_enabled_for_service_worker});
+      const std::set<raw_ptr<content::RenderProcessHost, SetExperimental>>&
+          process_set = extension_process_map_[param->id];
       for (content::RenderProcessHost* process : process_set) {
         // Count the invocation of the LoadExtensions method on the normal
         // renderer or the incognito renderer.
@@ -91,30 +120,39 @@ class RendererStartupHelperInterceptor : public RendererStartupHelper,
     }
   }
 
-  void UnloadExtension(const std::string& extension_id) override {
+  void UnloadExtension(const ExtensionId& extension_id) override {
     unloaded_extensions_.push_back(extension_id);
   }
 
   void SuspendExtension(
-      const std::string& extension_id,
+      const ExtensionId& extension_id,
       mojom::Renderer::SuspendExtensionCallback callback) override {
     std::move(callback).Run();
   }
 
-  void CancelSuspendExtension(const std::string& extension_id) override {}
+  void CancelSuspendExtension(const ExtensionId& extension_id) override {}
 
   void SetDeveloperMode(bool current_developer_mode) override {}
 
+  void SetUserScriptsAllowed(const std::string& extension_id,
+                             bool allowed) override {}
+
   void SetSessionInfo(version_info::Channel channel,
-                      mojom::FeatureSessionType session,
-                      bool is_lock_screen_context) override {}
+                      mojom::FeatureSessionType session) override {}
   void SetSystemFont(const std::string& font_family,
                      const std::string& font_size) override {}
 
   void SetWebViewPartitionID(const std::string& partition_id) override {}
 
   void SetScriptingAllowlist(
-      const std::vector<std::string>& extension_ids) override {}
+      const std::vector<ExtensionId>& extension_ids) override {}
+
+  void UpdateUserScriptWorlds(
+      std::vector<mojom::UserScriptWorldInfoPtr> info) override {}
+
+  void ClearUserScriptWorldConfig(
+      const ExtensionId& extension_id,
+      const std::optional<std::string>& world_id) override {}
 
   void ShouldSuspend(ShouldSuspendCallback callback) override {
     std::move(callback).Run();
@@ -124,7 +162,7 @@ class RendererStartupHelperInterceptor : public RendererStartupHelper,
     std::move(callback).Run();
   }
 
-  void UpdatePermissions(const std::string& extension_id,
+  void UpdatePermissions(const ExtensionId& extension_id,
                          PermissionSet active_permissions,
                          PermissionSet withheld_permissions,
                          URLPatternSet policy_blocked_hosts,
@@ -141,7 +179,7 @@ class RendererStartupHelperInterceptor : public RendererStartupHelper,
   void UpdateUserHostRestrictions(URLPatternSet user_blocked_hosts,
                                   URLPatternSet user_allowed_hosts) override {}
 
-  void UpdateTabSpecificPermissions(const std::string& extension_id,
+  void UpdateTabSpecificPermissions(const ExtensionId& extension_id,
                                     URLPatternSet new_hosts,
                                     int tab_id,
                                     bool update_origin_allowlist) override {}
@@ -150,7 +188,7 @@ class RendererStartupHelperInterceptor : public RendererStartupHelper,
                          mojom::HostIDPtr host_id) override {}
 
   void ClearTabSpecificPermissions(
-      const std::vector<std::string>& extension_ids,
+      const std::vector<ExtensionId>& extension_ids,
       int tab_id,
       bool update_origin_allowlist) override {}
 
@@ -158,10 +196,11 @@ class RendererStartupHelperInterceptor : public RendererStartupHelper,
 
   URLPatternSet default_blocked_hosts_;
   URLPatternSet default_allowed_hosts_;
-  std::vector<std::string> activated_extensions_;
+  std::vector<ExtensionId> activated_extensions_;
   size_t num_loaded_extensions_;
   size_t num_loaded_extensions_in_incognito_;
-  std::vector<std::string> unloaded_extensions_;
+  std::vector<ExtensionId> unloaded_extensions_;
+  std::vector<LoadedExtensionInfo> loaded_params_;
   raw_ptr<content::BrowserContext> browser_context_;
   mojo::AssociatedReceiverSet<mojom::Renderer> receivers_;
 };
@@ -176,6 +215,10 @@ class RendererStartupHelperTest : public ExtensionsTest {
 
   ~RendererStartupHelperTest() override {}
 
+  base::PassKey<RendererStartupHelperTest> CreatePassKey() const {
+    return base::PassKey<RendererStartupHelperTest>();
+  }
+
   void SetUp() override {
     ExtensionsTest::SetUp();
     helper_ =
@@ -187,6 +230,8 @@ class RendererStartupHelperTest : public ExtensionsTest {
     incognito_render_process_host_ =
         std::make_unique<content::MockRenderProcessHost>(incognito_context());
     extension_ = CreateExtension("ext_1");
+    user_prefs::UserPrefs::Set(browser_context(), pref_service());
+    user_prefs::UserPrefs::Set(incognito_context(), pref_service());
   }
 
   void TearDown() override {
@@ -205,43 +250,37 @@ class RendererStartupHelperTest : public ExtensionsTest {
     helper_->RenderProcessHostDestroyed(rph);
   }
 
-  scoped_refptr<const Extension> CreateExtension(const std::string& id_input) {
-    base::Value::Dict manifest = DictionaryBuilder()
-                                     .Set("name", "extension")
-                                     .Set("description", "an extension")
-                                     .Set("manifest_version", 2)
-                                     .Set("version", "0.1")
-                                     .Build();
+  scoped_refptr<const Extension> CreateExtension(const ExtensionId& id_input) {
+    base::DictValue manifest = base::DictValue()
+                                   .Set("name", "extension")
+                                   .Set("description", "an extension")
+                                   .Set("manifest_version", 2)
+                                   .Set("version", "0.1");
     return CreateExtension(id_input, std::move(manifest));
   }
 
-  scoped_refptr<const Extension> CreateTheme(const std::string& id_input) {
-    base::Value::Dict manifest = DictionaryBuilder()
-                                     .Set("name", "theme")
-                                     .Set("description", "a theme")
-                                     .Set("theme", DictionaryBuilder().Build())
-                                     .Set("manifest_version", 2)
-                                     .Set("version", "0.1")
-                                     .Build();
+  scoped_refptr<const Extension> CreateTheme(const ExtensionId& id_input) {
+    base::DictValue manifest = base::DictValue()
+                                   .Set("name", "theme")
+                                   .Set("description", "a theme")
+                                   .Set("theme", base::DictValue())
+                                   .Set("manifest_version", 2)
+                                   .Set("version", "0.1");
     return CreateExtension(id_input, std::move(manifest));
   }
 
   scoped_refptr<const Extension> CreatePlatformApp(
-      const std::string& id_input) {
-    base::Value::Dict background =
-        DictionaryBuilder()
-            .Set("scripts", ListBuilder().Append("background.js").Build())
-            .Build();
-    base::Value::Dict manifest =
-        DictionaryBuilder()
+      const ExtensionId& id_input) {
+    base::DictValue background = base::DictValue().Set(
+        "scripts", base::ListValue().Append("background.js"));
+    base::DictValue manifest =
+        base::DictValue()
             .Set("name", "platform_app")
             .Set("description", "a platform app")
-            .Set("app", DictionaryBuilder()
-                            .Set("background", std::move(background))
-                            .Build())
+            .Set("app",
+                 base::DictValue().Set("background", std::move(background)))
             .Set("manifest_version", 2)
-            .Set("version", "0.1")
-            .Build();
+            .Set("version", "0.1");
     return CreateExtension(id_input, std::move(manifest));
   }
 
@@ -254,36 +293,35 @@ class RendererStartupHelperTest : public ExtensionsTest {
   }
 
   bool IsProcessInitialized(content::RenderProcessHost* rph) {
-    return base::Contains(helper_->process_mojo_map_, rph);
+    return helper_->process_mojo_map_.contains(rph);
   }
 
   bool IsExtensionLoaded(const Extension& extension) {
-    return base::Contains(helper_->extension_process_map_, extension.id());
+    return helper_->extension_process_map_.contains(extension.id());
   }
 
   bool IsExtensionLoadedInProcess(const Extension& extension,
                                   content::RenderProcessHost* rph) {
     return IsExtensionLoaded(extension) &&
-           base::Contains(helper_->extension_process_map_[extension.id()], rph);
+           helper_->extension_process_map_[extension.id()].contains(rph);
   }
 
   bool IsExtensionPendingActivationInProcess(const Extension& extension,
                                              content::RenderProcessHost* rph) {
-    return base::Contains(helper_->pending_active_extensions_, rph) &&
-           base::Contains(helper_->pending_active_extensions_[rph],
-                          extension.id());
+    return helper_->pending_active_extensions_.contains(rph) &&
+           helper_->pending_active_extensions_[rph].contains(extension.id());
   }
 
   std::unique_ptr<RendererStartupHelperInterceptor> helper_;
-  raw_ptr<ExtensionRegistry> registry_;  // Weak.
+  raw_ptr<ExtensionRegistry, DanglingUntriaged> registry_;  // Weak.
   std::unique_ptr<content::MockRenderProcessHost> render_process_host_;
   std::unique_ptr<content::MockRenderProcessHost>
       incognito_render_process_host_;
   scoped_refptr<const Extension> extension_;
 
  private:
-  scoped_refptr<const Extension> CreateExtension(const std::string& id_input,
-                                                 base::Value::Dict manifest) {
+  scoped_refptr<const Extension> CreateExtension(const ExtensionId& id_input,
+                                                 base::DictValue manifest) {
     return ExtensionBuilder()
         .SetManifest(std::move(manifest))
         .SetID(crx_file::id_util::GenerateId(id_input))
@@ -410,25 +448,19 @@ TEST_F(RendererStartupHelperTest, LoadTheme) {
   scoped_refptr<const Extension> extension(CreateTheme("theme"));
   ASSERT_TRUE(extension->is_theme());
 
-  IPC::TestSink& sink = render_process_host_->sink();
-
   // Enable the theme. Verify it isn't loaded and activated in the renderer.
-  sink.ClearMessages();
   EXPECT_FALSE(IsExtensionLoaded(*extension));
   AddExtensionToRegistry(extension_);
   helper_->OnExtensionLoaded(*extension);
-  EXPECT_EQ(0u, sink.message_count());
   EXPECT_TRUE(IsExtensionLoaded(*extension));
   EXPECT_FALSE(
       IsExtensionLoadedInProcess(*extension, render_process_host_.get()));
 
   helper_->ActivateExtensionInProcess(*extension, render_process_host_.get());
-  EXPECT_EQ(0u, sink.message_count());
   EXPECT_FALSE(IsExtensionPendingActivationInProcess(
       *extension, render_process_host_.get()));
 
   helper_->OnExtensionUnloaded(*extension);
-  EXPECT_EQ(0u, sink.message_count());
   EXPECT_FALSE(IsExtensionLoaded(*extension));
 }
 
@@ -519,6 +551,172 @@ TEST_F(RendererStartupHelperTest, PlatformAppInIncognitoRenderer) {
                                          incognito_render_process_host_.get()));
   base::RunLoop().RunUntilIdle();
   ASSERT_EQ(1u, helper_->num_loaded_extensions_in_incognito());
+}
+
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
+// Tests the process re-registration workflow when OnRenderProcessLaunched() is
+// called after the process has exited. This simulates:
+// 1. OnRenderProcessHostCreated() initializes process
+// 2. Process exits (e.g., OOM termination), clearing process_mojo_map_
+// 3. OnRenderProcessLaunched() is called later due to delayed callbacks
+// The process should be re-registered without crashing, and extensions should
+// not be re-loaded to avoid duplicate loading.
+TEST_F(RendererStartupHelperTest, ProcessReregistrationAfterExit) {
+  // Initialize render process via OnRenderProcessHostCreated.
+  EXPECT_FALSE(IsProcessInitialized(render_process_host_.get()));
+  SimulateRenderProcessCreated(render_process_host_.get());
+  base::RunLoop().RunUntilIdle();
+  EXPECT_TRUE(IsProcessInitialized(render_process_host_.get()));
+
+  // Enable extension.
+  helper_->clear_extensions();
+  EXPECT_FALSE(IsExtensionLoaded(*extension_));
+  AddExtensionToRegistry(extension_);
+  helper_->OnExtensionLoaded(*extension_);
+  EXPECT_TRUE(
+      IsExtensionLoadedInProcess(*extension_, render_process_host_.get()));
+  base::RunLoop().RunUntilIdle();
+  ASSERT_EQ(1u, helper_->num_loaded_extensions());
+
+  // Simulate process exiting.
+  // This clears the process from process_mojo_map_ via UntrackProcess().
+  SimulateRenderProcessTerminated(render_process_host_.get());
+
+  // Process should no longer be initialized.
+  EXPECT_FALSE(IsProcessInitialized(render_process_host_.get()));
+
+  // Simulate OnRenderProcessLaunched being called after process exit
+  // due to delayed callbacks. This should re-register the process
+  // without crashing.
+  helper_->clear_extensions();
+  helper_->OnRenderProcessLaunched(render_process_host_.get());
+  base::RunLoop().RunUntilIdle();
+
+  // Process should be initialized again via RegisterProcess().
+  EXPECT_TRUE(IsProcessInitialized(render_process_host_.get()));
+
+  // Verify that RegisterProcess() only re-registers the Mojo communication
+  // and does NOT re-load extensions (to avoid duplicate loading).
+  ASSERT_EQ(0u, helper_->num_loaded_extensions());
+}
+#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(IS_CHROMEOS)
+class RendererStartupHelperTestCaptivePortalPopupWindow
+    : public RendererStartupHelperTest {
+ public:
+  RendererStartupHelperTestCaptivePortalPopupWindow() = default;
+  ~RendererStartupHelperTestCaptivePortalPopupWindow() override = default;
+  void SetUp() override {
+    RendererStartupHelperTest::SetUp();
+    static_cast<TestingPrefServiceSimple*>(pref_service())
+        ->registry()
+        ->RegisterBooleanPref(chromeos::prefs::kCaptivePortalSignin, false);
+  }
+};
+
+// Tests that only incognito-enabled extensions are loaded in an incognito
+// context.
+TEST_F(RendererStartupHelperTestCaptivePortalPopupWindow,
+       ExtensionInCaptivePortalSigninRenderer) {
+  // Set prefs::kCaptivePortalSignin to true in the shared PerfService instance.
+  ASSERT_TRUE(pref_service());
+  pref_service()->SetBoolean(chromeos::prefs::kCaptivePortalSignin, true);
+
+  // Initialize the incognito renderer.
+  EXPECT_FALSE(IsProcessInitialized(incognito_render_process_host_.get()));
+  SimulateRenderProcessCreated(incognito_render_process_host_.get());
+  EXPECT_TRUE(IsProcessInitialized(incognito_render_process_host_.get()));
+
+  // Enable the extension. With the pref set it *should* be loaded in the
+  // initialized incognito renderer.
+  helper_->clear_extensions();
+  AddExtensionToRegistry(extension_);
+  helper_->OnExtensionLoaded(*extension_);
+  EXPECT_TRUE(util::IsIncognitoEnabled(extension_->id(), incognito_context()));
+  EXPECT_TRUE(IsExtensionLoaded(*extension_));
+}
+#endif
+
+TEST_F(RendererStartupHelperTest, InitializeProcessIdempotency) {
+  // 1. First call should initialize the process.
+  // render_process_host_ is already created in SetUp().
+  helper_->InitializeProcess(render_process_host_.get());
+  EXPECT_TRUE(IsProcessInitialized(render_process_host_.get()));
+
+  // 2. Second call should return early without creating duplicate state.
+  // This is now safe because of your "contains" check in InitializeProcess.
+  helper_->InitializeProcess(render_process_host_.get());
+  EXPECT_TRUE(IsProcessInitialized(render_process_host_.get()));
+}
+
+#if !BUILDFLAG(IS_ANDROID)
+TEST_F(RendererStartupHelperTest, SkipInitializationOnLaunchWithFeature) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(
+      blink::features::kInitialWebUIWithoutExtensions);
+
+  // Use a new mock process to simulate a fresh launch.
+  auto new_process =
+      std::make_unique<content::MockRenderProcessHost>(browser_context());
+
+  new_process->SetIsForTopChromeWebUI(true);
+
+  // 1. Simulate process launch.
+  helper_->OnRenderProcessLaunched(new_process.get());
+
+  // VERIFY: The process should NOT be initialized yet.
+  EXPECT_FALSE(IsProcessInitialized(new_process.get()));
+
+  // 2. Manually calling InitializeProcess (as ReadyToCommitNavigation would)
+  // should still work.
+  helper_->InitializeProcess(new_process.get());
+  EXPECT_TRUE(IsProcessInitialized(new_process.get()));
+}
+#endif  // !BUILDFLAG(IS_ANDROID)
+
+TEST_F(RendererStartupHelperTest,
+       ExtensionLoadedParams_ServiceWorkerMojoEnabled) {
+  SimulateRenderProcessCreated(render_process_host_.get());
+
+  scoped_refptr<const Extension> standard_extension =
+      ExtensionBuilder("Standard Extension")
+          .SetLocation(mojom::ManifestLocation::kComponent)
+          .Build();
+  scoped_refptr<const Extension> sw_mojo_extension =
+      ExtensionBuilder("SW Mojo Extension")
+          .SetLocation(mojom::ManifestLocation::kComponent)
+          .Build();
+
+  class TestProvider : public ExtensionMojoBinderProvider {
+   public:
+    explicit TestProvider(ExtensionId id)
+        : ExtensionMojoBinderProvider(std::move(id)) {}
+    bool IsMojoJsEnabledForServiceWorker() const override { return true; }
+  };
+
+  ExtensionMojoBinderRegistryFactory::GetOrCreateForBrowserContext(
+      browser_context())
+      ->RegisterProvider(CreatePassKey(), std::make_unique<TestProvider>(
+                                              sw_mojo_extension->id()));
+
+  helper_->OnExtensionLoaded(*standard_extension);
+  EXPECT_TRUE(base::test::RunUntil(
+      [&]() { return helper_->loaded_params().size() == 1u; }));
+
+  ASSERT_EQ(1u, helper_->loaded_params().size());
+  EXPECT_EQ(standard_extension->id(), helper_->loaded_params().back().id);
+  EXPECT_FALSE(
+      helper_->loaded_params().back().is_mojo_js_enabled_for_service_worker);
+
+  helper_->OnExtensionLoaded(*sw_mojo_extension);
+  EXPECT_TRUE(base::test::RunUntil(
+      [&]() { return helper_->loaded_params().size() == 2u; }));
+
+  ASSERT_EQ(2u, helper_->loaded_params().size());
+  EXPECT_EQ(sw_mojo_extension->id(), helper_->loaded_params().back().id);
+  EXPECT_TRUE(
+      helper_->loaded_params().back().is_mojo_js_enabled_for_service_worker);
 }
 
 }  // namespace extensions

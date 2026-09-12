@@ -5,16 +5,18 @@
 #include "chrome/browser/ash/login/screens/multidevice_setup_screen.h"
 
 #include "base/functional/bind.h"
+#include "base/metrics/histogram_base.h"
 #include "base/run_loop.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "chrome/browser/ash/login/screen_manager.h"
 #include "chrome/browser/ash/login/test/js_checker.h"
 #include "chrome/browser/ash/login/test/login_manager_mixin.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
 #include "chrome/browser/ash/login/test/oobe_screen_exit_waiter.h"
 #include "chrome/browser/ash/login/test/oobe_screen_waiter.h"
-#include "chrome/browser/ash/login/ui/login_display_host.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/ui/ash/login/login_display_host.h"
 #include "chrome/browser/ui/webui/ash/login/gaia_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/multidevice_setup_screen_handler.h"
 #include "chromeos/ash/services/device_sync/public/cpp/fake_device_sync_client.h"
@@ -263,8 +265,10 @@ class MultiDeviceSetupScreenTest : public OobeBaseTest {
         MultiDeviceSetupScreen::OobeMultideviceScreenSkippedReason::kUnknown);
   }
 
-  absl::optional<MultiDeviceSetupScreen::Result> screen_result_;
+  std::optional<MultiDeviceSetupScreen::Result> screen_result_;
   base::HistogramTester histogram_tester_;
+  std::unique_ptr<multidevice_setup::FakeMultiDeviceSetupClient>
+      fake_multidevice_setup_client_;
 
  private:
   void CheckSkippedReason(
@@ -312,8 +316,6 @@ class MultiDeviceSetupScreenTest : public OobeBaseTest {
 
   bool screen_exited_ = false;
   base::RepeatingClosure screen_exit_callback_;
-  std::unique_ptr<multidevice_setup::FakeMultiDeviceSetupClient>
-      fake_multidevice_setup_client_;
   std::unique_ptr<device_sync::FakeDeviceSyncClient> fake_device_sync_client_;
 
   LoginManagerMixin login_manager_mixin_{&mixin_host_};
@@ -429,6 +431,33 @@ IN_PROC_BROWSER_TEST_F(MultiDeviceSetupScreenTest, SkippedReason_Unknown) {
   ShowMultiDeviceSetupScreen();
   WaitForScreenExit();
   CheckUnknownSkippedReason();
+}
+
+IN_PROC_BROWSER_TEST_F(MultiDeviceSetupScreenTest,
+                       NoQuickStartPhoneInstanceIdSet) {
+  WizardContext* context =
+      LoginDisplayHost::default_host()->GetWizardContextForTesting();
+  ASSERT_TRUE(context->quick_start_phone_instance_id.empty());
+
+  SimulateHostStatusChange();
+  ShowMultiDeviceSetupScreen();
+  WaitForScreenShown();
+  EXPECT_TRUE(fake_multidevice_setup_client_->qs_phone_instance_id().empty());
+}
+
+IN_PROC_BROWSER_TEST_F(MultiDeviceSetupScreenTest,
+                       QuickStartPhoneInstanceIdSet) {
+  WizardContext* context =
+      LoginDisplayHost::default_host()->GetWizardContextForTesting();
+  ASSERT_TRUE(context->quick_start_phone_instance_id.empty());
+  std::string expected_phone_instance_id = "someArbitraryID";
+  context->quick_start_phone_instance_id = expected_phone_instance_id;
+
+  SimulateHostStatusChange();
+  ShowMultiDeviceSetupScreen();
+  WaitForScreenShown();
+  EXPECT_EQ(fake_multidevice_setup_client_->qs_phone_instance_id(),
+            expected_phone_instance_id);
 }
 
 }  // namespace ash

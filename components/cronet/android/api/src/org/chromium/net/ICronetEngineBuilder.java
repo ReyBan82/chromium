@@ -14,7 +14,7 @@ import java.util.Set;
  * org.chromium.net.CronetEngine.Builder} and {@link
  * org.chromium.net.ExperimentalCronetEngine.Builder}.
  *
- * <p>{@hide internal class}
+ * @hide
  */
 public abstract class ICronetEngineBuilder {
     // The fields below list values which are known to getSupportedConfigOptions().
@@ -27,10 +27,15 @@ public abstract class ICronetEngineBuilder {
     public static final int CONNECTION_MIGRATION_OPTIONS = 1;
     public static final int DNS_OPTIONS = 2;
     public static final int QUIC_OPTIONS = 3;
+    // No longer used. Keep around to make sure future *_OPTIONS do not use this value.
+    public static final int PROXY_OPTIONS = 4;
 
     // Public API methods.
-    public abstract ICronetEngineBuilder addPublicKeyPins(String hostName, Set<byte[]> pinsSha256,
-            boolean includeSubdomains, Date expirationDate);
+    public abstract ICronetEngineBuilder addPublicKeyPins(
+            String hostName,
+            Set<byte[]> pinsSha256,
+            boolean includeSubdomains,
+            Date expirationDate);
 
     public abstract ICronetEngineBuilder addQuicHint(String host, int port, int alternatePort);
 
@@ -63,8 +68,21 @@ public abstract class ICronetEngineBuilder {
         return this;
     }
 
+    // This was originally named setProxyOptions. While experimental, Cronet's proxy API received
+    // many non-ABI stable changes. To avoid a call to setProxyOptions to succeed, only for
+    // Proxy.HttpConnectCallback to fail later on (due to ABI mismatch), this has been renamed to
+    // setProxyOptionsV2. This way, callers will always get an UnsupportedOperationException at
+    // CronetEngine.Builder#setProxyOptions time, if the implementation being used is too old.
+    public ICronetEngineBuilder setProxyOptionsV2(ProxyOptions proxyOptions) {
+        // API layer last resort: prevents calling setProxyOptionsV2 on an implementation that does
+        // not know about it.
+        throw new UnsupportedOperationException(
+                "This Cronet implementation does not support ProxyOptions");
+    }
+
     public abstract ICronetEngineBuilder setExperimentalOptions(String options);
 
+    @Deprecated
     public abstract ICronetEngineBuilder setLibraryLoader(
             CronetEngine.Builder.LibraryLoader loader);
 
@@ -99,5 +117,15 @@ public abstract class ICronetEngineBuilder {
 
     public ICronetEngineBuilder setThreadPriority(int priority) {
         return this;
+    }
+
+    /**
+     * Communicates the cronetInitializationRef for use in telemetry/logging, or 0 if the impl does
+     * not support this method.
+     *
+     * <p>Cronet API code with API version level >=31 calls this method shortly after construction.
+     */
+    protected long getLogCronetInitializationRef() {
+        return 0;
     }
 }

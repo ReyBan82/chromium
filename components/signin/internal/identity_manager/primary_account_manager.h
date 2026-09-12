@@ -18,25 +18,35 @@
 #ifndef COMPONENTS_SIGNIN_INTERNAL_IDENTITY_MANAGER_PRIMARY_ACCOUNT_MANAGER_H_
 #define COMPONENTS_SIGNIN_INTERNAL_IDENTITY_MANAGER_PRIMARY_ACCOUNT_MANAGER_H_
 
+#include <optional>
+#include <string>
+#include <utility>
+#include <variant>
+
+#include "base/feature_list.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/observer_list_types.h"
-#include "build/chromeos_buildflags.h"
+#include "base/scoped_observation.h"
+#include "build/build_config.h"
 #include "components/signin/internal/identity_manager/profile_oauth2_token_service_observer.h"
 #include "components/signin/public/base/consent_level.h"
+#include "components/signin/public/base/signin_buildflags.h"
 #include "components/signin/public/base/signin_client.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/signin/public/identity_manager/primary_account_change_event.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 
 class AccountTrackerService;
 class PrefRegistrySimple;
-class PrefService;
 class ProfileOAuth2TokenService;
+
+namespace metrics {
+class ProfileMetricsService;
+}  // namespace metrics
 
 namespace signin_metrics {
 enum class ProfileSignout;
-enum class SignoutDelete;
 }  // namespace signin_metrics
 
 class PrimaryAccountManager : public ProfileOAuth2TokenServiceObserver {
@@ -55,11 +65,51 @@ class PrimaryAccountManager : public ProfileOAuth2TokenServiceObserver {
     kKeepAllAccounts = 0,
     // Remove all the accounts.
     kRemoveAllAccounts,
+    // Remove the primary account, but keep the accounts in the
+    // `IdentityManager`.
+    kKeepAllAccountsAndClearPrimary,
   };
 
-  PrimaryAccountManager(SigninClient* client,
-                        ProfileOAuth2TokenService* token_service,
-                        AccountTrackerService* account_tracker_service);
+  // Enum for histogram 'Signin.PAMInitialize.PrimaryAccountInfoState'.
+  //
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  //
+  // LINT.IfChange(InitializeAccountInfoState)
+  enum class InitializeAccountInfoState {
+    kAccountInfoAvailable = 0,
+    kEmptyAccountInfo_RestoreFailedNotSyncConsented = 1,
+    kEmptyAccountInfo_RestoreFailedNoLastSyncGaiaId = 2,
+    kEmptyAccountInfo_RestoreFailedNoLastSyncEmail = 3,
+    kEmptyAccountInfo_RestoreFailedAccountIdDontMatch = 4,
+    // kEmptyAccountInfo_RestoreFailedAsRestoreFeatureIsDisabled = 5, // no
+    // longer used, related feature flag has been removed
+    kEmptyAccountInfo_RestoreSuccessFromLastSyncInfo = 6,
+    kMaxValue = kEmptyAccountInfo_RestoreSuccessFromLastSyncInfo,
+  };
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/signin/enums.xml:PAMInitializePrimaryAccountInfoState)
+
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  // LINT.IfChange(ExplicitSigninDatatypeMigrationState)
+  // Enum for histogram 'Signin.ExplicitSigninDatatypeMigration'.
+  //
+  // These values are persisted to logs. Entries should not be renumbered and
+  // numeric values should never be reused.
+  enum class ExplicitSigninDatatypeMigrationState {
+    kSignedIn = 0,  // Baseline.
+    kSignedInWithExplicitBookmarks = 1,
+    kSignedInWithExplicitExtensions = 2,
+
+    kMaxValue = kSignedInWithExplicitExtensions,
+  };
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/signin/enums.xml:ExplicitSigninDatatypeMigrationState)
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
+
+  PrimaryAccountManager(
+      SigninClient* client,
+      ProfileOAuth2TokenService* token_service,
+      AccountTrackerService* account_tracker_service,
+      metrics::ProfileMetricsService* profile_metrics_service);
 
   PrimaryAccountManager(const PrimaryAccountManager&) = delete;
   PrimaryAccountManager& operator=(const PrimaryAccountManager&) = delete;
@@ -71,10 +121,6 @@ class PrimaryAccountManager : public ProfileOAuth2TokenServiceObserver {
 
   // Registers per-install prefs.
   static void RegisterPrefs(PrefRegistrySimple* registry);
-
-  // If user was signed in, load tokens from DB if available.
-  void Initialize(PrefService* local_state);
-  bool IsInitialized() const;
 
   // Returns whether the user's primary account is available. If consent is
   // |ConsentLevel::kSync| then true implies that the user has blessed this
@@ -99,29 +145,37 @@ class PrimaryAccountManager : public ProfileOAuth2TokenServiceObserver {
   // account can only be changed if the user has not consented for sync. If the
   // user has consented for sync already, then use ClearPrimaryAccount() or
   // RevokeSync() instead.
-  void SetPrimaryAccountInfo(const CoreAccountInfo& account_info,
-                             signin::ConsentLevel consent_level,
-                             signin_metrics::AccessPoint access_point);
+  // `prefs_committed_callback` is called once the primary account preferences
+  // are written to the persistent storage.
+  void SetPrimaryAccountInfo(
+      const CoreAccountInfo& account_info,
+      signin::ConsentLevel consent_level,
+      signin_metrics::AccessPoint access_point,
+      base::OnceClosure prefs_committed_callback = base::NullCallback());
 
   // Updates the primary account information from AccountTrackerService.
   void UpdatePrimaryAccountInfo();
 
   // Signout API surfaces (not supported on ChromeOS, where signout is not
   // permitted).
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   // Clears the primary account, erasing all keys associated with the primary
   // account (also cancels all auth in progress).
   // It removes all accounts from the identity manager by revoking all refresh
   // tokens.
-  void ClearPrimaryAccount(signin_metrics::ProfileSignout signout_source_metric,
-                           signin_metrics::SignoutDelete signout_delete_metric);
+  void ClearPrimaryAccount(
+      signin_metrics::ProfileSignout signout_source_metric);
+  // Clears the primary account, erasing all keys associated with the primary
+  // account (also cancels all auth in progress).
+  // It keeps all accounts in the identity manager.
+  void RemovePrimaryAccountButKeepTokens(
+      signin_metrics::ProfileSignout signout_source_metric);
 
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
   // Rovokes the sync consent but leaves the primary account and the rest of
   // the accounts untouched.
-  void RevokeSyncConsent(signin_metrics::ProfileSignout signout_source_metric,
-                         signin_metrics::SignoutDelete signout_delete_metric);
+  void RevokeSyncConsent(signin_metrics::ProfileSignout signout_source_metric);
 
   // Adds and removes observers.
   void AddObserver(Observer* observer);
@@ -130,13 +184,32 @@ class PrimaryAccountManager : public ProfileOAuth2TokenServiceObserver {
  private:
   class ScopedPrefCommit;
 
+  // The primary account information. The account may or may not be consented
+  // for Sync.
+  struct PrimaryAccount {
+    const CoreAccountInfo account_info;
+    const bool consented_to_sync;
+    PrimaryAccount(const CoreAccountInfo& account_info, bool consented_to_sync);
+  };
+
+  // Prepares the primary account and consented preferences before loading them.
+  void PrepareToLoadPrefs();
+
+  // Returns the primary account info to be used during initialization. If the
+  // primary account info is not available in the account tracker service, then
+  // it attempts to restore.
+  std::pair<CoreAccountInfo, InitializeAccountInfoState>
+  GetOrRestorePrimaryAccountInfoOnInitialize(const std::string& pref_account_id,
+                                             bool pref_consented_to_sync);
+
   // Sets the primary account id, when the user has consented to sync.
   // If the user has consented for sync with the same account, then this method
   // is a no-op.
   // It is forbidden to call this method if the user has already consented for
   // sync  with a different account (this method will DCHECK in that case).
   // |account_id| must not be empty.
-  void SetSyncPrimaryAccountInternal(const CoreAccountInfo& account_info);
+  void SetSyncPrimaryAccountInternal(const CoreAccountInfo& account_info,
+                                     ScopedPrefCommit& scoped_pref_commit);
 
   // Sets |primary_account_info_| and updates the associated preferences.
   void SetPrimaryAccountInternal(const CoreAccountInfo& account_info,
@@ -145,13 +218,11 @@ class PrimaryAccountManager : public ProfileOAuth2TokenServiceObserver {
 
   // Starts the sign out process.
   void StartSignOut(signin_metrics::ProfileSignout signout_source_metric,
-                    signin_metrics::SignoutDelete signout_delete_metric,
                     RemoveAccountsOption remove_option);
 
   // The sign out process which is started by SigninClient::PreSignOut()
   void OnSignoutDecisionReached(
       signin_metrics::ProfileSignout signout_source_metric,
-      signin_metrics::SignoutDelete signout_delete_metric,
       RemoveAccountsOption remove_option,
       SigninClient::SignoutDecision signout_decision);
 
@@ -161,32 +232,59 @@ class PrimaryAccountManager : public ProfileOAuth2TokenServiceObserver {
   // Fires OnPrimaryAccountChanged() notifications on all observers.
   void FirePrimaryAccountChanged(
       const signin::PrimaryAccountChangeEvent::State& previous_state,
-      absl::variant<signin_metrics::AccessPoint, signin_metrics::ProfileSignout>
-          event_source);
+      std::variant<signin_metrics::AccessPoint, signin_metrics::ProfileSignout>
+          event_source,
+      ScopedPrefCommit& scoped_pref_commit);
 
   // ProfileOAuth2TokenServiceObserver:
   void OnRefreshTokensLoaded() override;
 
-  const CoreAccountInfo& primary_account_info() const {
-    return primary_account_info_;
-  }
+  // Sets the values for various sign-in prefs based on the sign-in access point
+  // and feature enabled states.
+  void SetExplicitBrowserSigninPrefs(
+      const signin::PrimaryAccountChangeEvent& event_details,
+      ScopedPrefCommit& scoped_pref_commit);
 
+  // Returns the primary account. Crashes if it is called before the primary
+  // account was initialized.
+  const PrimaryAccount& GetPrimaryAccount() const;
+
+  // The SigninClient instance associated with this object. Must outlive this
+  // object.
   raw_ptr<SigninClient> client_;
 
   // The ProfileOAuth2TokenService instance associated with this object. Must
   // outlive this object.
   raw_ptr<ProfileOAuth2TokenService> token_service_ = nullptr;
+
+  // The AccountTrackerService instance associated with this object. Must
+  // outlive this object.
   raw_ptr<AccountTrackerService> account_tracker_service_ = nullptr;
 
-  bool initialized_ = false;
+  // Allows per profile metrics to be recorded. Should be used to record metrics
+  // of interest instead of regular `base::Uma*()` methods. Must outlive this
+  // object.
+  raw_ref<metrics::ProfileMetricsService> profile_metrics_service_;
 
   // The primary account information. The account may or may not be consented
   // for Sync.
   // Must be kept in sync with prefs. Use SetPrimaryAccountInternal() to change
   // this field.
-  CoreAccountInfo primary_account_info_;
+  std::optional<PrimaryAccount> primary_account_;
 
+#if BUILDFLAG(IS_IOS)
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      false,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>
+      observers_;
+#else
   base::ObserverList<Observer> observers_;
+#endif
+  base::ScopedObservation<ProfileOAuth2TokenService,
+                          ProfileOAuth2TokenServiceObserver>
+      token_service_observation_{this};
 };
 
 #endif  // COMPONENTS_SIGNIN_INTERNAL_IDENTITY_MANAGER_PRIMARY_ACCOUNT_MANAGER_H_

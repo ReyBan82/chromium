@@ -5,11 +5,11 @@
 package org.chromium.content.browser;
 
 import android.os.SystemClock;
-import android.support.test.InstrumentationRegistry;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 
+import androidx.test.InstrumentationRegistry;
 import androidx.test.filters.SmallTest;
 
 import org.hamcrest.Matchers;
@@ -30,24 +30,22 @@ import org.chromium.content_public.browser.test.util.WebContentsUtils;
 import org.chromium.content_shell_apk.ContentShellActivityTestRule;
 import org.chromium.content_shell_apk.ContentShellActivityTestRule.RerunWithUpdatedContainerView;
 
-/**
- * Tests that we can scroll and fling a ContentView running inside ContentShell.
- */
+/** Tests that we can scroll and fling a ContentView running inside ContentShell. */
 @RunWith(BaseJUnit4ClassRunner.class)
 public class ContentViewScrollingTest {
     @Rule
     public ContentShellActivityTestRule mActivityTestRule = new ContentShellActivityTestRule();
 
-    private static final String LARGE_PAGE = UrlUtils.encodeHtmlDataUri("<html><head>"
-            + "<meta name=\"viewport\" content=\"width=device-width, "
-            + "initial-scale=2.0, maximum-scale=2.0\" />"
-            + "<style>body { width: 5000px; height: 5000px; }</style></head>"
-            + "<body>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</body>"
-            + "</html>");
+    private static final String LARGE_PAGE =
+            UrlUtils.encodeHtmlDataUri(
+                    "<html><head><meta name=\"viewport\" content=\"width=device-width,"
+                        + " initial-scale=2.0, maximum-scale=2.0\" /><style>body { width: 5000px;"
+                        + " height: 5000px; }</style></head><body>Lorem ipsum dolor sit amet,"
+                        + " consectetur adipiscing elit.</body></html>");
 
     /**
-     * InternalAccessDelegate to ensure AccessibilityEvent notifications (Eg:TYPE_VIEW_SCROLLED)
-     * are being sent properly on scrolling a page.
+     * InternalAccessDelegate to ensure AccessibilityEvent notifications (Eg:TYPE_VIEW_SCROLLED) are
+     * being sent properly on scrolling a page.
      */
     static class TestInternalAccessDelegate implements InternalAccessDelegate {
 
@@ -89,89 +87,128 @@ public class ContentViewScrollingTest {
     private RenderCoordinatesImpl mCoordinates;
 
     private void waitForScroll(final boolean hugLeft, final boolean hugTop) {
-        CriteriaHelper.pollInstrumentationThread(() -> {
-            // Scrolling and flinging don't result in exact coordinates.
-            final int minThreshold = 5;
-            final int maxThreshold = 100;
-            if (hugLeft) {
-                Criteria.checkThat(
-                        mCoordinates.getScrollXPixInt(), Matchers.lessThan(minThreshold));
-            } else {
-                Criteria.checkThat(
-                        mCoordinates.getScrollXPixInt(), Matchers.greaterThan(maxThreshold));
-            }
+        CriteriaHelper.pollInstrumentationThread(
+                () -> {
+                    // Scrolling and flinging don't result in exact coordinates.
+                    final int minThreshold = 5;
+                    final int maxThreshold = 100;
+                    if (hugLeft) {
+                        Criteria.checkThat(
+                                mCoordinates.getScrollXPixInt(), Matchers.lessThan(minThreshold));
+                    } else {
+                        Criteria.checkThat(
+                                mCoordinates.getScrollXPixInt(),
+                                Matchers.greaterThan(maxThreshold));
+                    }
 
-            if (hugTop) {
-                Criteria.checkThat(
-                        mCoordinates.getScrollYPixInt(), Matchers.lessThan(minThreshold));
-            } else {
-                Criteria.checkThat(
-                        mCoordinates.getScrollYPixInt(), Matchers.greaterThan(maxThreshold));
-            }
-        });
+                    if (hugTop) {
+                        Criteria.checkThat(
+                                mCoordinates.getScrollYPixInt(), Matchers.lessThan(minThreshold));
+                    } else {
+                        Criteria.checkThat(
+                                mCoordinates.getScrollYPixInt(),
+                                Matchers.greaterThan(maxThreshold));
+                    }
+                });
     }
 
     private void waitForScrollToPosition(final int x, final int y) {
-        CriteriaHelper.pollInstrumentationThread(() -> {
-            // Scrolling and flinging don't result in exact coordinates.
-            final int threshold = 5;
+        CriteriaHelper.pollInstrumentationThread(
+                () -> {
+                    // Scrolling and flinging don't result in exact coordinates.
+                    final int threshold = 5;
 
-            Criteria.checkThat(mCoordinates.getScrollXPixInt(),
-                    Matchers.allOf(
-                            Matchers.lessThan(x + threshold), Matchers.greaterThan(x - threshold)));
-            Criteria.checkThat(mCoordinates.getScrollYPixInt(),
-                    Matchers.allOf(
-                            Matchers.lessThan(y + threshold), Matchers.greaterThan(y - threshold)));
-        });
+                    Criteria.checkThat(
+                            mCoordinates.getScrollXPixInt(),
+                            Matchers.allOf(
+                                    Matchers.lessThan(x + threshold),
+                                    Matchers.greaterThan(x - threshold)));
+                    Criteria.checkThat(
+                            mCoordinates.getScrollYPixInt(),
+                            Matchers.allOf(
+                                    Matchers.lessThan(y + threshold),
+                                    Matchers.greaterThan(y - threshold)));
+                });
     }
 
     private void waitForViewportInitialization() {
-        CriteriaHelper.pollInstrumentationThread(() -> {
-            Criteria.checkThat(mCoordinates.getLastFrameViewportWidthPixInt(), Matchers.not(0));
-        });
+        CriteriaHelper.pollInstrumentationThread(
+                () -> {
+                    Criteria.checkThat(
+                            mCoordinates.getLastFrameViewportWidthPixInt(), Matchers.not(0));
+                });
     }
 
     private void fling(final int vx, final int vy) {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(new Runnable() {
-            @Override
-            public void run() {
-                mActivityTestRule.getWebContents().getEventForwarder().startFling(
-                        SystemClock.uptimeMillis(), vx, vy, false, true);
-            }
-        });
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                mActivityTestRule
+                                        .getWebContents()
+                                        .getEventForwarder()
+                                        .startFling(
+                                                SystemClock.uptimeMillis(),
+                                                /* x= */ 0f,
+                                                /* y= */ 0f,
+                                                /* rawX= */ 0f,
+                                                /* rawY= */ 0f,
+                                                vx,
+                                                vy,
+                                                /* syntheticScroll= */ false,
+                                                /* preventBoosting= */ true,
+                                                /* isTouchpadEvent= */ false,
+                                                /* targetViewport= */ true);
+                            }
+                        });
     }
 
     private void scrollTo(final int x, final int y) {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(new Runnable() {
-            @Override
-            public void run() {
-                mActivityTestRule.getContainerView().scrollTo(x, y);
-            }
-        });
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                mActivityTestRule.getContainerView().scrollTo(x, y);
+                            }
+                        });
     }
 
     private void scrollBy(final int dx, final int dy) {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(new Runnable() {
-            @Override
-            public void run() {
-                mActivityTestRule.getContainerView().scrollBy(dx, dy);
-            }
-        });
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                mActivityTestRule.getContainerView().scrollBy(dx, dy);
+                            }
+                        });
     }
 
     private void scrollWithJoystick(final float deltaAxisX, final float deltaAxisY) {
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(new Runnable() {
-            @Override
-            public void run() {
-                // Synthesize joystick motion event and send to content layer.
-                MotionEvent leftJoystickMotionEvent =
-                        MotionEvent.obtain(0, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE,
-                                deltaAxisX, deltaAxisY, 0);
-                leftJoystickMotionEvent.setSource(
-                        leftJoystickMotionEvent.getSource() | InputDevice.SOURCE_CLASS_JOYSTICK);
-                mActivityTestRule.getContainerView().onGenericMotionEvent(leftJoystickMotionEvent);
-            }
-        });
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                // Synthesize joystick motion event and send to content layer.
+                                MotionEvent leftJoystickMotionEvent =
+                                        MotionEvent.obtain(
+                                                0,
+                                                SystemClock.uptimeMillis(),
+                                                MotionEvent.ACTION_MOVE,
+                                                deltaAxisX,
+                                                deltaAxisY,
+                                                0);
+                                leftJoystickMotionEvent.setSource(
+                                        leftJoystickMotionEvent.getSource()
+                                                | InputDevice.SOURCE_CLASS_JOYSTICK);
+                                mActivityTestRule
+                                        .getContainerView()
+                                        .onGenericMotionEvent(leftJoystickMotionEvent);
+                            }
+                        });
     }
 
     @Before
@@ -193,11 +230,12 @@ public class ContentViewScrollingTest {
     public void testFling() {
         // Scaling the initial velocity by the device scale factor ensures that
         // it's of sufficient magnitude for all displays densities.
-        float deviceScaleFactor = InstrumentationRegistry.getInstrumentation()
-                                          .getTargetContext()
-                                          .getResources()
-                                          .getDisplayMetrics()
-                                          .density;
+        float deviceScaleFactor =
+                InstrumentationRegistry.getInstrumentation()
+                        .getTargetContext()
+                        .getResources()
+                        .getDisplayMetrics()
+                        .density;
         int velocity = (int) (1000 * deviceScaleFactor);
 
         // Vertical fling to lower-left.
@@ -228,27 +266,28 @@ public class ContentViewScrollingTest {
     public void testFlingDistance() {
         // Scaling the initial velocity by the device scale factor ensures that
         // it's of sufficient magnitude for all displays densities.
-        float deviceScaleFactor = InstrumentationRegistry.getInstrumentation()
-                                          .getTargetContext()
-                                          .getResources()
-                                          .getDisplayMetrics()
-                                          .density;
+        float deviceScaleFactor =
+                InstrumentationRegistry.getInstrumentation()
+                        .getTargetContext()
+                        .getResources()
+                        .getDisplayMetrics()
+                        .density;
         int velocity = (int) (1000 * deviceScaleFactor);
         // Expected total fling distance calculated by FlingCurve with initial
         // velocity 1000.
-        int expected_dist = (int) (194 * deviceScaleFactor);
+        int expectedDist = (int) (194 * deviceScaleFactor);
 
         // Vertical fling to lower-left.
         fling(0, -velocity);
-        waitForScrollToPosition(0, expected_dist);
+        waitForScrollToPosition(0, expectedDist);
 
         // Horizontal fling to lower-right.
         fling(-velocity, 0);
-        waitForScrollToPosition(expected_dist, expected_dist);
+        waitForScrollToPosition(expectedDist, expectedDist);
 
         // Vertical fling to upper-right.
         fling(0, velocity);
-        waitForScrollToPosition(expected_dist, 0);
+        waitForScrollToPosition(expectedDist, 0);
 
         // Horizontal fling to top-left.
         fling(velocity, 0);
@@ -344,8 +383,8 @@ public class ContentViewScrollingTest {
     }
 
     /**
-     * To ensure the device properly responds to bounds-exceeding scrolls, e.g., overscroll
-     * effects are properly initialized.
+     * To ensure the device properly responds to bounds-exceeding scrolls, e.g., overscroll effects
+     * are properly initialized.
      */
     @Test
     @SmallTest
@@ -385,12 +424,16 @@ public class ContentViewScrollingTest {
         final int scrollToX = mCoordinates.getScrollXPixInt() + 2500;
         final int scrollToY = mCoordinates.getScrollYPixInt() + 2500;
         final TestInternalAccessDelegate accessDelegate = new TestInternalAccessDelegate();
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(new Runnable() {
-            @Override
-            public void run() {
-                mActivityTestRule.getViewEventSink().setAccessDelegate(accessDelegate);
-            }
-        });
+        InstrumentationRegistry.getInstrumentation()
+                .runOnMainSync(
+                        new Runnable() {
+                            @Override
+                            public void run() {
+                                mActivityTestRule
+                                        .getViewEventSink()
+                                        .setAccessDelegate(accessDelegate);
+                            }
+                        });
         scrollTo(scrollToX, scrollToY);
         waitForScroll(false, false);
         CriteriaHelper.pollInstrumentationThread(accessDelegate::isScrollChanged);

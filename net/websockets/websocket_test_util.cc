@@ -5,24 +5,39 @@
 #include "net/websockets/websocket_test_util.h"
 
 #include <stddef.h>
+
 #include <algorithm>
+#include <sstream>
 #include <utility>
 
+#include "base/check.h"
+#include "base/containers/span.h"
+#include "base/logging.h"
+#include "base/notreached.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
-#include "net/base/ip_endpoint.h"
+#include "base/task/single_thread_task_runner.h"
+#include "net/base/auth.h"
+#include "net/base/net_errors.h"
+#include "net/base/transport_info.h"
 #include "net/http/http_network_session.h"
+#include "net/http/http_response_headers.h"
 #include "net/proxy_resolution/configured_proxy_resolution_service.h"
+#include "net/proxy_resolution/proxy_resolution_service.h"
 #include "net/socket/socket_test_util.h"
-#include "net/third_party/quiche/src/quiche/spdy/core/spdy_protocol.h"
+#include "net/ssl/ssl_info.h"
+#include "net/third_party/quiche/src/quiche/http2/core/spdy_protocol.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "net/url_request/url_request_context.h"
 #include "net/url_request/url_request_context_builder.h"
 #include "net/websockets/websocket_basic_handshake_stream.h"
+#include "net/websockets/websocket_handshake_request_info.h"
 #include "url/origin.h"
 
 namespace net {
+class WebSocketHttp2HandshakeStream;
+class WebSocketHttp3HandshakeStream;
 
 namespace {
 
@@ -84,19 +99,20 @@ std::string WebSocketStandardRequestWithCookies(
   std::stringstream request_headers;
 
   request_headers << base::StringPrintf("GET %s HTTP/1.1\r\n", path.c_str());
-  headers.SetHeader("Host", host);
-  headers.SetHeader("Connection", "Upgrade");
-  headers.SetHeader("Pragma", "no-cache");
-  headers.SetHeader("Cache-Control", "no-cache");
+  headers.SetHeader(net::HttpRequestHeaders::kHost, host);
+  headers.SetHeader(net::HttpRequestHeaders::kConnection, "Upgrade");
+  headers.SetHeader(net::HttpRequestHeaders::kPragma, "no-cache");
+  headers.SetHeader(net::HttpRequestHeaders::kCacheControl, "no-cache");
   for (const auto& [key, value] : send_additional_request_headers)
     headers.SetHeader(key, value);
   headers.SetHeader("Upgrade", "websocket");
-  headers.SetHeader("Origin", origin.Serialize());
+  headers.SetHeader(net::HttpRequestHeaders::kOrigin, origin.Serialize());
   headers.SetHeader("Sec-WebSocket-Version", "13");
-  if (!headers.HasHeader("User-Agent"))
-    headers.SetHeader("User-Agent", "");
-  headers.SetHeader("Accept-Encoding", "gzip, deflate");
-  headers.SetHeader("Accept-Language", "en-us,fr");
+  if (!headers.HasHeader(net::HttpRequestHeaders::kUserAgent)) {
+    headers.SetHeader(net::HttpRequestHeaders::kUserAgent, "");
+  }
+  headers.SetHeader(net::HttpRequestHeaders::kAcceptEncoding, "gzip, deflate");
+  headers.SetHeader(net::HttpRequestHeaders::kAcceptLanguage, "en-us,fr");
   for (const auto& [key, value] : cookies)
     headers.SetHeader(key, value);
   headers.SetHeader("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
@@ -110,36 +126,38 @@ std::string WebSocketStandardRequestWithCookies(
 }
 
 std::string WebSocketStandardResponse(const std::string& extra_headers) {
-  return base::StringPrintf(
-      "HTTP/1.1 101 Switching Protocols\r\n"
-      "Upgrade: websocket\r\n"
-      "Connection: Upgrade\r\n"
-      "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"
-      "%s\r\n",
-      extra_headers.c_str());
+  return base::StrCat(
+      {"HTTP/1.1 101 Switching Protocols\r\n"
+       "Upgrade: websocket\r\n"
+       "Connection: Upgrade\r\n"
+       "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n",
+       extra_headers, "\r\n"});
 }
 
 HttpRequestHeaders WebSocketCommonTestHeaders() {
   HttpRequestHeaders request_headers;
-  request_headers.SetHeader("Host", "www.example.org");
-  request_headers.SetHeader("Connection", "Upgrade");
-  request_headers.SetHeader("Pragma", "no-cache");
-  request_headers.SetHeader("Cache-Control", "no-cache");
+  request_headers.SetHeader(net::HttpRequestHeaders::kHost, "www.example.org");
+  request_headers.SetHeader(net::HttpRequestHeaders::kConnection, "Upgrade");
+  request_headers.SetHeader(net::HttpRequestHeaders::kPragma, "no-cache");
+  request_headers.SetHeader(net::HttpRequestHeaders::kCacheControl, "no-cache");
   request_headers.SetHeader("Upgrade", "websocket");
-  request_headers.SetHeader("Origin", "http://origin.example.org");
+  request_headers.SetHeader(net::HttpRequestHeaders::kOrigin,
+                            "http://origin.example.org");
   request_headers.SetHeader("Sec-WebSocket-Version", "13");
-  request_headers.SetHeader("User-Agent", "");
-  request_headers.SetHeader("Accept-Encoding", "gzip, deflate");
-  request_headers.SetHeader("Accept-Language", "en-us,fr");
+  request_headers.SetHeader(net::HttpRequestHeaders::kUserAgent, "");
+  request_headers.SetHeader(net::HttpRequestHeaders::kAcceptEncoding,
+                            "gzip, deflate");
+  request_headers.SetHeader(net::HttpRequestHeaders::kAcceptLanguage,
+                            "en-us,fr");
   return request_headers;
 }
 
-spdy::Http2HeaderBlock WebSocketHttp2Request(
+quiche::HttpHeaderBlock WebSocketHttp2Request(
     const std::string& path,
     const std::string& authority,
     const std::string& origin,
     const WebSocketExtraHeaders& extra_headers) {
-  spdy::Http2HeaderBlock request_headers;
+  quiche::HttpHeaderBlock request_headers;
   request_headers[spdy::kHttp2MethodHeader] = "CONNECT";
   request_headers[spdy::kHttp2AuthorityHeader] = authority;
   request_headers[spdy::kHttp2SchemeHeader] = "https";
@@ -160,9 +178,9 @@ spdy::Http2HeaderBlock WebSocketHttp2Request(
   return request_headers;
 }
 
-spdy::Http2HeaderBlock WebSocketHttp2Response(
+quiche::HttpHeaderBlock WebSocketHttp2Response(
     const WebSocketExtraHeaders& extra_headers) {
-  spdy::Http2HeaderBlock response_headers;
+  quiche::HttpHeaderBlock response_headers;
   response_headers[spdy::kHttp2StatusHeader] = "200";
   for (const auto& header : extra_headers) {
     response_headers[base::ToLowerASCII(header.first)] = header.second;
@@ -193,27 +211,24 @@ MockClientSocketFactory* WebSocketMockClientSocketFactoryMaker::factory() {
 void WebSocketMockClientSocketFactoryMaker::SetExpectations(
     const std::string& expect_written,
     const std::string& return_to_read) {
-  const size_t kHttpStreamParserBufferSize = 4096;
+  constexpr size_t kHttpStreamParserBufferSize = 4096;
   // We need to extend the lifetime of these strings.
   detail_->expect_written = expect_written;
   detail_->return_to_read = return_to_read;
   int sequence = 0;
-  detail_->write = MockWrite(SYNCHRONOUS,
-                             detail_->expect_written.data(),
-                             detail_->expect_written.size(),
-                             sequence++);
+  detail_->write = MockWrite(SYNCHRONOUS, sequence++, detail_->expect_written);
   // HttpStreamParser reads 4KB at a time. We need to take this implementation
   // detail into account if |return_to_read| is big enough.
-  for (size_t place = 0; place < detail_->return_to_read.size();
+  std::string_view to_read(detail_->return_to_read);
+  for (size_t place = 0; place < to_read.size();
        place += kHttpStreamParserBufferSize) {
-    detail_->reads.emplace_back(SYNCHRONOUS,
-                                detail_->return_to_read.data() + place,
-                                std::min(detail_->return_to_read.size() - place,
-                                         kHttpStreamParserBufferSize),
-                                sequence++);
+    detail_->reads.emplace_back(
+        SYNCHRONOUS, sequence++,
+        to_read.substr(place, std::min(to_read.size() - place,
+                                       kHttpStreamParserBufferSize)));
   }
   auto socket_data = std::make_unique<SequencedSocketData>(
-      detail_->reads, base::make_span(&detail_->write, 1u));
+      detail_->reads, base::span_from_ref(detail_->write));
   socket_data->set_connect_data(MockConnect(SYNCHRONOUS, OK));
   AddRawExpectations(std::move(socket_data));
 }
@@ -237,7 +252,6 @@ WebSocketTestURLRequestContextHost::WebSocketTestURLRequestContextHost()
   HttpNetworkSessionParams params;
   params.enable_spdy_ping_based_connection_checking = false;
   params.enable_quic = false;
-  params.disable_idle_sockets_close_on_memory_pressure = false;
   url_request_context_builder_->set_http_network_session_params(params);
 }
 
@@ -264,12 +278,19 @@ void WebSocketTestURLRequestContextHost::SetProxyConfig(
       std::move(proxy_resolution_service));
 }
 
+int DummyConnectDelegate::OnURLRequestConnected(
+    URLRequest* request,
+    const TransportInfo& info,
+    CompletionOnceCallback callback) {
+  return OK;
+}
+
 int DummyConnectDelegate::OnAuthRequired(
     const AuthChallengeInfo& auth_info,
     scoped_refptr<HttpResponseHeaders> response_headers,
     const IPEndPoint& host_port_pair,
     base::OnceCallback<void(const AuthCredentials*)> callback,
-    absl::optional<AuthCredentials>* credentials) {
+    std::optional<AuthCredentials>* credentials) {
   return OK;
 }
 
@@ -293,4 +314,116 @@ void TestWebSocketStreamRequestAPI::OnHttp2HandshakeStreamCreated(
 
 void TestWebSocketStreamRequestAPI::OnHttp3HandshakeStreamCreated(
     WebSocketHttp3HandshakeStream* handshake_stream) {}
+
+ConnectTestingEventInterface::ConnectTestingEventInterface() = default;
+ConnectTestingEventInterface::~ConnectTestingEventInterface() = default;
+
+std::string ConnectTestingEventInterface::failure_message() const {
+  return failure_message_;
+}
+
+std::string ConnectTestingEventInterface::selected_subprotocol() const {
+  return selected_subprotocol_;
+}
+
+std::string ConnectTestingEventInterface::extensions() const {
+  return extensions_;
+}
+
+void ConnectTestingEventInterface::OnCreateURLRequest(URLRequest* request) {}
+
+int ConnectTestingEventInterface::OnURLRequestConnected(
+    net::URLRequest* request,
+    const net::TransportInfo& info,
+    net::CompletionOnceCallback callback) {
+  return OK;
+}
+
+void ConnectTestingEventInterface::OnAddChannelResponse(
+    std::unique_ptr<WebSocketHandshakeResponseInfo> response,
+    const std::string& selected_subprotocol,
+    const std::string& extensions) {
+  response_ = std::move(response);
+  selected_subprotocol_ = selected_subprotocol;
+  extensions_ = extensions;
+  on_response_future_.SetValue();
+}
+
+void ConnectTestingEventInterface::OnDataFrame(bool fin,
+                                               WebSocketMessageType type,
+                                               base::span<const char> payload) {
+  DVLOG(3) << "Received WebSocket data frame with message: "
+           << base::as_string_view(payload);
+  SetReceivedMessageFuture(std::string(base::as_string_view(payload)));
+}
+
+bool ConnectTestingEventInterface::HasPendingDataFrames() {
+  return false;
+}
+
+void ConnectTestingEventInterface::OnSendDataFrameDone() {}
+
+void ConnectTestingEventInterface::OnClosingHandshake() {
+  DVLOG(3) << "OnClosingHandshake() invoked.";
+}
+
+void ConnectTestingEventInterface::OnDropChannel(bool was_clean,
+                                                 uint16_t code,
+                                                 const std::string& reason) {
+  DVLOG(3) << "OnDropChannel() invoked, was_clean: " << was_clean
+           << ", code: " << code << ", reason: " << reason;
+  if (was_clean) {
+    drop_channel_future_.SetValue();
+  } else {
+    DVLOG(1) << "OnDropChannel() did not receive a clean close.";
+    NOTREACHED();
+  }
+}
+
+void ConnectTestingEventInterface::OnFailChannel(
+    const std::string& message,
+    int net_error,
+    std::optional<int> response_code) {
+  DVLOG(3) << "OnFailChannel invoked with message: " << message;
+  failed_ = true;
+  failure_message_ = message;
+  net_error_ = net_error;
+  response_code_ = response_code;
+  on_response_future_.SetValue();
+}
+
+void ConnectTestingEventInterface::OnStartOpeningHandshake(
+    std::unique_ptr<WebSocketHandshakeRequestInfo> request) {}
+
+void ConnectTestingEventInterface::OnSSLCertificateError(
+    std::unique_ptr<SSLErrorCallbacks> ssl_error_callbacks,
+    const GURL& url,
+    int net_error,
+    const SSLInfo& ssl_info,
+    bool fatal) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(&SSLErrorCallbacks::CancelSSLRequest,
+                                base::Owned(ssl_error_callbacks.release()),
+                                ERR_SSL_PROTOCOL_ERROR, /*ssl_info=*/nullptr));
+}
+
+int ConnectTestingEventInterface::OnAuthRequired(
+    const AuthChallengeInfo& auth_info,
+    scoped_refptr<HttpResponseHeaders> response_headers,
+    const IPEndPoint& remote_endpoint,
+    base::OnceCallback<void(const AuthCredentials*)> callback,
+    std::optional<AuthCredentials>* credentials) {
+  *credentials = std::nullopt;
+  return OK;
+}
+
+void ConnectTestingEventInterface::SetReceivedMessageFuture(
+    std::string received_message) {
+  received_message_future_.SetValue(received_message);
+}
+
+std::string ConnectTestingEventInterface::GetDataFramePayload() {
+  return received_message_future_.Get();
+}
+
 }  // namespace net

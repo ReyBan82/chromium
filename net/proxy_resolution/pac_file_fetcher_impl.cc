@@ -4,14 +4,15 @@
 
 #include "net/proxy_resolution/pac_file_fetcher_impl.h"
 
+#include <algorithm>
+#include <string_view>
+
 #include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram_macros.h"
-#include "base/ranges/algorithm.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
 #include "net/base/data_url.h"
@@ -50,22 +51,22 @@ const int kDefaultMaxResponseBytes = 1048576;  // 1 megabyte
 constexpr base::TimeDelta kDefaultMaxDuration = base::Seconds(30);
 
 // Returns true if |mime_type| is one of the known PAC mime type.
-constexpr bool IsPacMimeType(base::StringPiece mime_type) {
-  constexpr base::StringPiece kSupportedPacMimeTypes[] = {
+constexpr bool IsPacMimeType(std::string_view mime_type) {
+  constexpr std::string_view kSupportedPacMimeTypes[] = {
       "application/x-ns-proxy-autoconfig",
       "application/x-javascript-config",
   };
-  return base::ranges::any_of(kSupportedPacMimeTypes, [&](auto pac_mime_type) {
+  return std::ranges::any_of(kSupportedPacMimeTypes, [&](auto pac_mime_type) {
     return base::EqualsCaseInsensitiveASCII(pac_mime_type, mime_type);
   });
 }
 
 struct BomMapping {
-  base::StringPiece prefix;
+  std::string_view prefix;
   const char* charset;
 };
 
-const BomMapping kBomMappings[] = {
+constexpr BomMapping kBomMappings[] = {
     {"\xFE\xFF", "utf-16be"},
     {"\xFF\xFE", "utf-16le"},
     {"\xEF\xBB\xBF", "utf-8"},
@@ -75,13 +76,12 @@ const BomMapping kBomMappings[] = {
 // to |*utf16|.
 // If |charset| is empty, then we don't know what it was and guess.
 void ConvertResponseToUTF16(const std::string& charset,
-                            const std::string& bytes,
+                            std::string_view bytes,
                             std::u16string* utf16) {
   if (charset.empty()) {
     // Guess the charset by looking at the BOM.
-    base::StringPiece bytes_str(bytes);
     for (const auto& bom : kBomMappings) {
-      if (base::StartsWith(bytes_str, bom.prefix)) {
+      if (bytes.starts_with(bom.prefix)) {
         return ConvertResponseToUTF16(
             bom.charset,
             // Strip the BOM in the converted response.
@@ -170,8 +170,17 @@ int PacFileFetcherImpl::Fetch(
 
   // Use highest priority, so if socket pools are being used for other types of
   // requests, PAC requests are aren't blocked on them.
-  cur_request_ = url_request_context_->CreateRequest(url, MAXIMUM_PRIORITY,
-                                                     this, traffic_annotation);
+  cur_request_ = url_request_context_->CreateRequest(
+      url, MAXIMUM_PRIORITY, this, traffic_annotation,
+      // TODO(crbug.com/517071653): Support targeting a specific network for
+      // PAC fetches.
+      net::handles::kInvalidNetworkHandle);
+  // DBSC should be disabled for PAC fetches to avoid a circular dependency
+  // leading to a deadlock: fetching a PAC file might trigger a DBSC
+  // session refresh, which in turn might require another PAC fetch
+  // to resolve the proxy for the refresh request (crbug.com/483088603).
+  cur_request_->set_device_bound_session_mode(
+      net::DeviceBoundSessionMode::kDisabled);
 
   cur_request_->set_isolation_info(isolation_info());
 
@@ -316,7 +325,7 @@ void PacFileFetcherImpl::OnReadCompleted(URLRequest* request, int num_bytes) {
 
 PacFileFetcherImpl::PacFileFetcherImpl(URLRequestContext* url_request_context)
     : url_request_context_(url_request_context),
-      buf_(base::MakeRefCounted<IOBuffer>(kBufSize)),
+      buf_(base::MakeRefCounted<IOBufferWithSize>(kBufSize)),
       max_response_bytes_(kDefaultMaxResponseBytes),
       max_duration_(kDefaultMaxDuration) {
   DCHECK(url_request_context);
@@ -375,10 +384,9 @@ void PacFileFetcherImpl::FetchCompleted() {
     // Calculate duration of time for PAC file fetch to complete.
     DCHECK(!fetch_start_time_.is_null());
     DCHECK(!fetch_time_to_first_byte_.is_null());
-    UMA_HISTOGRAM_MEDIUM_TIMES("Net.ProxyScriptFetcher.SuccessDuration",
-                               base::TimeTicks::Now() - fetch_start_time_);
-    UMA_HISTOGRAM_MEDIUM_TIMES("Net.ProxyScriptFetcher.FirstByteDuration",
-                               fetch_time_to_first_byte_ - fetch_start_time_);
+    DEPRECATED_UMA_HISTOGRAM_MEDIUM_TIMES(
+        "Net.ProxyScriptFetcher.FirstByteDuration",
+        fetch_time_to_first_byte_ - fetch_start_time_);
 
     // The caller expects the response to be encoded as UTF16.
     std::string charset;

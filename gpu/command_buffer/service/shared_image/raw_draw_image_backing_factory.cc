@@ -9,69 +9,36 @@
 #include "gpu/command_buffer/service/shared_image/raw_draw_image_backing.h"
 
 namespace gpu {
-constexpr uint32_t kSupportedUsage =
-    SHARED_IMAGE_USAGE_DISPLAY_READ | SHARED_IMAGE_USAGE_RASTER |
-    SHARED_IMAGE_USAGE_OOP_RASTERIZATION | SHARED_IMAGE_USAGE_RAW_DRAW;
+// NOTE: These are the *exact* set of usages that the client must list in order
+// for the RawDraw backing to be applied. The client must explicitly opt into
+// using RawDraw, and that only in the expected context of rasterizing content
+// into PaintOps to play back during compositing.
+constexpr SharedImageUsageSet kRequiredUsage = SHARED_IMAGE_USAGE_DISPLAY_READ |
+                                               SHARED_IMAGE_USAGE_RASTER_WRITE |
+                                               SHARED_IMAGE_USAGE_RAW_DRAW;
 
 RawDrawImageBackingFactory::RawDrawImageBackingFactory()
-    : SharedImageBackingFactory(kSupportedUsage) {}
+    : SharedImageBackingFactory(kRequiredUsage) {}
 
 RawDrawImageBackingFactory::~RawDrawImageBackingFactory() = default;
 
 std::unique_ptr<SharedImageBacking>
-RawDrawImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    SurfaceHandle surface_handle,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
-    bool is_thread_safe) {
+RawDrawImageBackingFactory::CreateSharedImage(const Mailbox& mailbox,
+                                              const SharedImageInfo& si_info,
+                                              SurfaceHandle surface_handle,
+                                              bool is_thread_safe) {
   DCHECK(is_thread_safe);
-  auto texture = std::make_unique<RawDrawImageBacking>(
-      mailbox, format, size, color_space, surface_origin, alpha_type, usage);
-  return texture;
-}
-
-std::unique_ptr<SharedImageBacking>
-RawDrawImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
-    base::span<const uint8_t> data) {
-  NOTREACHED() << "Not supported";
-  return nullptr;
-}
-
-std::unique_ptr<SharedImageBacking>
-RawDrawImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    gfx::GpuMemoryBufferHandle handle,
-    gfx::BufferFormat buffer_format,
-    gfx::BufferPlane plane,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage) {
-  NOTREACHED() << "Not supported";
-  return nullptr;
+  return std::make_unique<RawDrawImageBacking>(mailbox, si_info);
 }
 
 bool RawDrawImageBackingFactory::CanUseRawDrawImageBacking(
-    uint32_t usage,
+    SharedImageUsageSet usage,
     GrContextType gr_context_type) const {
-  return usage == kSupportedUsage;
+  return usage == kRequiredUsage;
 }
 
 bool RawDrawImageBackingFactory::IsSupported(
-    uint32_t usage,
+    SharedImageUsageSet usage,
     viz::SharedImageFormat format,
     const gfx::Size& size,
     bool thread_safe,
@@ -94,6 +61,10 @@ bool RawDrawImageBackingFactory::IsSupported(
   }
 
   return true;
+}
+
+SharedImageBackingType RawDrawImageBackingFactory::GetBackingType() {
+  return SharedImageBackingType::kRawDraw;
 }
 
 }  // namespace gpu

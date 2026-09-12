@@ -1,4 +1,8 @@
-dandrader@google.com
+zgroza@chromium.org
+
+# For backup
+paulinagacek@google.com
+file://components/webapps/isolated_web_apps/PLATFORM_OWNERS  #{LAST_RESORT_SUGGESTION}
 
 # Changes to Mojo interfaces require a security review to avoid
 # introducing new sandbox escapes.

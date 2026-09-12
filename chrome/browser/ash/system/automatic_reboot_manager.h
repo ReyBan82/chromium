@@ -6,8 +6,11 @@
 #define CHROME_BROWSER_ASH_SYSTEM_AUTOMATIC_REBOOT_MANAGER_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/callback_list.h"
+#include "base/check_deref.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
@@ -17,6 +20,7 @@
 #include "base/timer/wall_clock_timer.h"
 #include "chrome/browser/ash/system/automatic_reboot_manager_observer.h"
 #include "chromeos/ash/components/dbus/update_engine/update_engine_client.h"
+#include "chromeos/ash/components/login/session/session_termination_manager.h"
 #include "chromeos/dbus/power/power_manager_client.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/session_manager/core/session_manager.h"
@@ -24,6 +28,7 @@
 #include "ui/base/user_activity/user_activity_observer.h"
 
 class PrefRegistrySimple;
+class PrefService;
 
 namespace base {
 class TickClock;
@@ -75,9 +80,12 @@ struct SystemEventTimes;
 class AutomaticRebootManager : public chromeos::PowerManagerClient::Observer,
                                public UpdateEngineClient::Observer,
                                public ui::UserActivityObserver,
-                               public session_manager::SessionManagerObserver {
+                               public session_manager::SessionManagerObserver,
+                               public ash::SessionTerminationManager::Observer {
  public:
-  AutomaticRebootManager(const base::Clock* clock,
+  // `local_state` must be non-null, and must outlive `this`.
+  AutomaticRebootManager(PrefService* local_state,
+                         const base::Clock* clock,
                          const base::TickClock* tick_clock);
 
   AutomaticRebootManager(const AutomaticRebootManager&) = delete;
@@ -109,6 +117,9 @@ class AutomaticRebootManager : public chromeos::PowerManagerClient::Observer,
   // session_manager::SessionManagerObserver:
   void OnUserSessionStarted(bool is_primary_user) override;
 
+  // ash::SessionTerminationManager::Observer:
+  void OnAppTerminating() override;
+
   static void RegisterPrefs(PrefRegistrySimple* registry);
 
  private:
@@ -134,18 +145,16 @@ class AutomaticRebootManager : public chromeos::PowerManagerClient::Observer,
   // Reboots immediately unless a non-kiosk session is active.
   void Reboot();
 
-  // Callback invoked when Chrome shuts down.
-  void OnAppTerminating();
-
   // Event that is signaled when Init() runs.
   base::WaitableEvent initialized_{
       base::WaitableEvent::ResetPolicy::MANUAL,
       base::WaitableEvent::InitialState::NOT_SIGNALED};
 
   // Clocks that can be mocked in tests to fast-forward time.
-  const base::Clock* const clock_;
-  const base::TickClock* const tick_clock_;
+  const raw_ptr<const base::Clock> clock_;
+  const raw_ptr<const base::TickClock> tick_clock_;
 
+  const raw_ref<PrefService> local_state_;
   PrefChangeRegistrar local_state_registrar_;
 
   base::CallbackListSubscription on_app_terminating_subscription_;
@@ -155,11 +164,11 @@ class AutomaticRebootManager : public chromeos::PowerManagerClient::Observer,
   std::unique_ptr<base::OneShotTimer> login_screen_idle_timer_;
 
   // The time at which the device was booted, in |tick_clock_| ticks.
-  absl::optional<base::TimeTicks> boot_time_;
+  std::optional<base::TimeTicks> boot_time_;
 
   // The time at which an update was applied and a reboot became necessary to
   // complete the update process, in |tick_clock_| ticks.
-  absl::optional<base::TimeTicks> update_reboot_needed_time_;
+  std::optional<base::TimeTicks> update_reboot_needed_time_;
 
   // The reason for the reboot request. Updated whenever a reboot is scheduled.
   AutomaticRebootManagerObserver::Reason reboot_reason_ =
@@ -178,6 +187,10 @@ class AutomaticRebootManager : public chromeos::PowerManagerClient::Observer,
   base::ScopedObservation<session_manager::SessionManager,
                           session_manager::SessionManagerObserver>
       session_manager_observation_{this};
+
+  base::ScopedObservation<ash::SessionTerminationManager,
+                          ash::SessionTerminationManager::Observer>
+      session_termination_observation_{this};
 
   base::WeakPtrFactory<AutomaticRebootManager> weak_ptr_factory_{this};
 };

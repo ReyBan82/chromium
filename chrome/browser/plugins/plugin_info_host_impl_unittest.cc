@@ -13,8 +13,8 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/i18n/rtl.h"
+#include "base/i18n/test/scoped_rtl_for_testing.h"
 #include "base/memory/raw_ptr.h"
-#include "base/run_loop.h"
 #include "base/test/icu_test_util.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
@@ -42,11 +42,6 @@ using content::PluginService;
 using testing::Eq;
 
 namespace {
-
-void PluginsLoaded(base::OnceClosure callback,
-                   const std::vector<content::WebPluginInfo>& plugins) {
-  std::move(callback).Run();
-}
 
 class FakePluginServiceFilter : public content::PluginServiceFilter {
  public:
@@ -90,7 +85,7 @@ class PluginInfoHostImplTest : public ::testing::Test {
   PluginInfoHostImplTest()
       : foo_plugin_path_(FILE_PATH_LITERAL("/path/to/foo")),
         bar_plugin_path_(FILE_PATH_LITERAL("/path/to/bar")),
-        context_(0, &profile_),
+        context_(content::GlobalRenderFrameHostToken(), &profile_),
         host_content_settings_map_(
             HostContentSettingsMapFactory::GetForProfile(&profile_)) {}
 
@@ -98,20 +93,22 @@ class PluginInfoHostImplTest : public ::testing::Test {
     PluginService::GetInstance()->Init();
     PluginService::GetInstance()->SetFilter(&filter_);
 
-    content::WebPluginInfo foo_plugin(u"Foo Plugin", foo_plugin_path_, u"1",
-                                      u"The Foo plugin.");
-    content::WebPluginMimeType mime_type;
-    mime_type.mime_type = "foo/bar";
-    foo_plugin.mime_types.push_back(mime_type);
-    foo_plugin.type = content::WebPluginInfo::PLUGIN_TYPE_PEPPER_IN_PROCESS;
-    PluginService::GetInstance()->RegisterInternalPlugin(foo_plugin, false);
-
     content::WebPluginInfo bar_plugin(u"Bar Plugin", bar_plugin_path_, u"1",
                                       u"The Bar plugin.");
+    content::WebPluginMimeType mime_type;
     mime_type.mime_type = "foo/bar";
     bar_plugin.mime_types.push_back(mime_type);
-    bar_plugin.type = content::WebPluginInfo::PLUGIN_TYPE_PEPPER_IN_PROCESS;
-    PluginService::GetInstance()->RegisterInternalPlugin(bar_plugin, false);
+    bar_plugin.type =
+        content::WebPluginInfo::PLUGIN_TYPE_BROWSER_INTERNAL_PLUGIN;
+    PluginService::GetInstance()->RegisterInternalPlugin(bar_plugin);
+
+    content::WebPluginInfo foo_plugin(u"Foo Plugin", foo_plugin_path_, u"1",
+                                      u"The Foo plugin.");
+    mime_type.mime_type = "foo/bar";
+    foo_plugin.mime_types.push_back(mime_type);
+    foo_plugin.type =
+        content::WebPluginInfo::PLUGIN_TYPE_BROWSER_INTERNAL_PLUGIN;
+    PluginService::GetInstance()->RegisterInternalPlugin(foo_plugin);
 
     RefreshPlugins();
   }
@@ -126,24 +123,18 @@ class PluginInfoHostImplTest : public ::testing::Test {
   }
 
   void RefreshPlugins() {
-    PluginService::GetInstance()->RefreshPlugins();
-
 #if !BUILDFLAG(IS_WIN)
     // Can't go out of process in unit tests.
     content::RenderProcessHost::SetRunRendererInProcess(true);
 #endif
-    base::RunLoop run_loop;
-    PluginService::GetInstance()->GetPlugins(
-        base::BindOnce(&PluginsLoaded, run_loop.QuitClosure()));
-    run_loop.Run();
+    PluginService::GetInstance()->GetPlugins();
 #if !BUILDFLAG(IS_WIN)
     content::RenderProcessHost::SetRunRendererInProcess(false);
 #endif
   }
 
   void RegisterAndRefreshPlugin(const content::WebPluginInfo& plugin) {
-    PluginService::GetInstance()->RegisterInternalPlugin(
-        plugin, /*add_at_beginning=*/false);
+    PluginService::GetInstance()->RegisterInternalPlugin(plugin);
     RefreshPlugins();
     filter_.set_plugin_enabled(plugin.path, true);
   }
@@ -208,7 +199,7 @@ TEST_F(PluginInfoHostImplTest, FindEnabledPlugin) {
 
 TEST_F(PluginInfoHostImplTest, FindEnabledPluginWithBidiPdfViewerName) {
   base::test::ScopedRestoreICUDefaultLocale restore_locale;
-  base::i18n::SetRTLForTesting(true);
+  base::i18n::ScopedRTLForTesting scoped_rtl(true);
 
   static constexpr char16_t kPluginName[] = u"Bidi Name";
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)

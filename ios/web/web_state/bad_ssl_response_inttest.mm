@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#import "base/ios/ios_util.h"
 #import "base/run_loop.h"
 #import "base/test/ios/wait_util.h"
 #import "base/test/scoped_feature_list.h"
@@ -11,8 +12,6 @@
 #import "ios/web/public/security/certificate_policy_cache.h"
 #import "ios/web/public/security/security_style.h"
 #import "ios/web/public/security/ssl_status.h"
-#import "ios/web/public/session/crw_session_certificate_policy_cache_storage.h"
-#import "ios/web/public/session/crw_session_storage.h"
 #import "ios/web/public/session/session_certificate_policy_cache.h"
 #import "ios/web/public/test/error_test_util.h"
 #import "ios/web/public/test/fakes/fake_web_client.h"
@@ -26,10 +25,6 @@
 #import "net/test/embedded_test_server/default_handlers.h"
 #import "net/test/embedded_test_server/embedded_test_server.h"
 #import "testing/gtest/include/gtest/gtest.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 using base::test::ios::kWaitForPageLoadTimeout;
 using base::test::ios::WaitUntilConditionOrTimeout;
@@ -78,10 +73,18 @@ TEST_F(BadSslResponseTest, ShowSSLErrorPageCommittedInterstitial) {
     base::RunLoop().RunUntilIdle();
     return !web_state()->IsLoading();
   }));
-  NSError* error = testing::CreateErrorWithUnderlyingErrorChain(
-      {{@"NSURLErrorDomain", NSURLErrorServerCertificateUntrusted},
-       {@"kCFErrorDomainCFNetwork", kCFURLErrorServerCertificateUntrusted},
-       {net::kNSErrorDomain, net::ERR_CERT_AUTHORITY_INVALID}});
+  NSError* error;
+  if (base::ios::IsRunningOnOrLater(26, 4, 0)) {
+    error = testing::CreateErrorWithUnderlyingErrorChain(
+        {{@"NSURLErrorDomain", NSURLErrorServerCertificateUntrusted},
+         {@"NSOSStatusErrorDomain", -9808},
+         {net::kNSErrorDomain, net::ERR_CERT_AUTHORITY_INVALID}});
+  } else {
+    error = testing::CreateErrorWithUnderlyingErrorChain(
+        {{@"NSURLErrorDomain", NSURLErrorServerCertificateUntrusted},
+         {@"kCFErrorDomainCFNetwork", kCFURLErrorServerCertificateUntrusted},
+         {net::kNSErrorDomain, net::ERR_CERT_AUTHORITY_INVALID}});
+  }
   ASSERT_TRUE(test::WaitForWebViewContainingText(
       web_state(), testing::GetErrorText(
                        web_state(), url, error,

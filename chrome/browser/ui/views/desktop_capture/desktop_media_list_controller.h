@@ -44,18 +44,22 @@ class DesktopMediaListController : public DesktopMediaListObserver,
   // The abstract interface implemented by any view controlled by this
   // controller.
   class ListView : public views::View {
-   public:
-    METADATA_HEADER(ListView);
+    METADATA_HEADER(ListView, views::View)
 
+   public:
     // Returns the DesktopMediaID of the selected element of this list, or
     // nullopt if no element is selected.
-    virtual absl::optional<content::DesktopMediaID> GetSelection() = 0;
+    virtual std::optional<content::DesktopMediaID> GetSelection() = 0;
 
     // Returns the SourceListListener to use to notify this ListView of changes
     // to the backing DesktopMediaList.
     virtual SourceListListener* GetSourceListListener() = 0;
 
     virtual void ClearSelection() = 0;
+
+    // Updates the action button label based on whether audio sharing is
+    // currently enabled.
+    virtual void SetAudioShared(bool audio_shared) {}
 
    protected:
     ListView() = default;
@@ -72,7 +76,8 @@ class DesktopMediaListController : public DesktopMediaListObserver,
   std::unique_ptr<views::View> CreateView(
       DesktopMediaSourceViewStyle generic_style,
       DesktopMediaSourceViewStyle single_style,
-      const std::u16string& accessible_name);
+      const std::u16string& accessible_name,
+      DesktopMediaList::Type type);
 
   std::unique_ptr<views::View> CreateTabListView(
       const std::u16string& accessible_name);
@@ -84,6 +89,8 @@ class DesktopMediaListController : public DesktopMediaListObserver,
   // Focuses this controller's view.
   void FocusView();
 
+  void ShowDelegatedList();
+
   void HideView();
 
   // Used to indicate if the underlying DesktopMediaList supports the notion of
@@ -92,13 +99,17 @@ class DesktopMediaListController : public DesktopMediaListObserver,
 
   void OnReselectRequested();
 
+  // Called when the user toggles the audio sharing checkbox.
+  // Propagates this update to the underlying view.
+  void OnAudioShareToggled(bool audio_shared);
+
   // Returns whether or not the reselect button (if supported), should be
   // enabled.
   bool can_reselect() const { return can_reselect_; }
 
   // Returns the DesktopMediaID corresponding to the current selection in this
   // controller's view, if there is one.
-  absl::optional<content::DesktopMediaID> GetSelection() const;
+  std::optional<content::DesktopMediaID> GetSelection() const;
 
   void ClearSelection();
 
@@ -115,7 +126,7 @@ class DesktopMediaListController : public DesktopMediaListObserver,
   size_t GetSourceCount() const;
   const DesktopMediaList::Source& GetSource(size_t index) const;
   void SetThumbnailSize(const gfx::Size& size);
-  void SetPreviewedSource(const absl::optional<content::DesktopMediaID>& id);
+  void SetPreviewedSource(const std::optional<content::DesktopMediaID>& id);
 
   // Returns a WeakPtr to the current DesktopMediaListController. Note that the
   // weak pointer must only be used on the UI thread.
@@ -167,9 +178,12 @@ class DesktopMediaListController : public DesktopMediaListObserver,
 
   // Auto-selection. Used only in tests.
   const std::string auto_select_tab_;        // Only tabs, by title.
+  const std::string auto_select_window_;     // Only windows, by title.
+  const bool auto_select_any_screen_;        // Any screen.
   const std::string auto_select_source_;     // Any source by its title.
   const bool auto_accept_this_tab_capture_;  // Only for current-tab capture.
   const bool auto_reject_this_tab_capture_;  // Only for current-tab capture.
+  const bool auto_reject_capture_;           // Applies to any capture.
 
   base::WeakPtrFactory<DesktopMediaListController> weak_factory_{this};
 };

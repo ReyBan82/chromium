@@ -3291,7 +3291,8 @@ class MonthPopupButton extends View {
    */
   constructor(maxWidth) {
     super(createElement('button', MonthPopupButton.ClassNameMonthPopupButton));
-    this.element.setAttribute('aria-label', global.params.axShowMonthSelector);
+    this.element.setAttribute(
+        'aria-description', global.params.axShowMonthSelector);
 
     /**
      * @type {!Element}
@@ -3299,6 +3300,8 @@ class MonthPopupButton extends View {
      */
     this.labelElement = createElement(
         'span', MonthPopupButton.ClassNameMonthPopupButtonLabel, '-----');
+    this.labelElement.setAttribute('aria-live', 'polite');
+    this.labelElement.setAttribute('aria-atomic', 'true');
     this.element.appendChild(this.labelElement);
 
     /**
@@ -3559,6 +3562,8 @@ class CalendarHeaderView extends View {
         this.onNavigationButtonClick.bind(this));
     this._previousMonthButton.element.setAttribute(
         'aria-label', global.params.axShowPreviousMonth);
+    this._previousMonthButton.element.setAttribute(
+        'title', global.params.axShowPreviousMonth);
 
     /**
      * @type {!CalendarNavigationButton}
@@ -3574,6 +3579,8 @@ class CalendarHeaderView extends View {
         this.onNavigationButtonClick.bind(this));
     this._nextMonthButton.element.setAttribute(
         'aria-label', global.params.axShowNextMonth);
+    this._nextMonthButton.element.setAttribute(
+        'title', global.params.axShowNextMonth);
 
     if (global.params.isLocaleRTL) {
       this._nextMonthButton.element.innerHTML =
@@ -3766,10 +3773,13 @@ class DayCell extends ListCell {
    * @param {!boolean} selected
    */
   setIsToday(selected) {
-    if (selected)
+    if (selected) {
       this.element.classList.add(DayCell.ClassNameToday);
-    else
+      this.element.setAttribute('aria-current', 'date');
+    } else {
       this.element.classList.remove(DayCell.ClassNameToday);
+      this.element.removeAttribute('aria-current');
+    }
   }
 
   /**
@@ -4124,7 +4134,8 @@ class CalendarTableView extends ListView {
   }
 
   onClearButtonClick() {
-    window.pagePopupController.setValueAndClosePopup(0, '');
+    window.pagePopupController.setValueAndClosePopup(
+        0, '', /* is_keyboard_event= */ false);
   }
 
   onTodayButtonClick(sender) {
@@ -4312,6 +4323,7 @@ class CalendarTableView extends ListView {
 class CalendarPicker extends dateRangeManagerMixin(View) {
   // clang-format on
   /**
+   * @param {!string} type
    * @param {!Object} config
    */
   constructor(type, config) {
@@ -4325,6 +4337,12 @@ class CalendarPicker extends dateRangeManagerMixin(View) {
      * @const
      */
     this.type = type;
+    /**
+     * Set `skipWindowResize: true` in `config` when embedded in a parent
+     * picker that owns the popup size (e.g. DateTimeLocalPicker).
+     * @type {!boolean}
+     */
+    this._skipWindowResize = config.skipWindowResize === true;
     if (this.type === 'week')
       this._dateTypeConstructor = Week;
     else if (this.type === 'month')
@@ -4685,13 +4703,15 @@ class CalendarPicker extends dateRangeManagerMixin(View) {
     const value = this._selection.toString();
     if (CalendarPicker.commitDelayMs == 0) {
       // For testing.
-      window.pagePopupController.setValueAndClosePopup(0, value);
+      window.pagePopupController.setValueAndClosePopup(
+          0, value, /* is_keyboard_event= */ false);
     } else if (CalendarPicker.commitDelayMs < 0) {
       // For testing.
       window.pagePopupController.setValue(value);
     } else {
       setTimeout(function() {
-        window.pagePopupController.setValueAndClosePopup(0, value);
+        window.pagePopupController.setValueAndClosePopup(
+            0, value, /* is_keyboard_event= */ false);
       }, CalendarPicker.commitDelayMs);
     }
   }
@@ -4917,7 +4937,9 @@ class CalendarPicker extends dateRangeManagerMixin(View) {
     if (this._height === height)
       return;
     this._height = height;
-    resizeWindow(this.width(), this._height);
+    if (!this._skipWindowResize) {
+      resizeWindow(this.width(), this._height);
+    }
     this.calendarTableView.setHeight(
         this._height - CalendarHeaderView.Height -
         CalendarHeaderView.BottomMargin - CalendarPicker.Padding * 2 -
@@ -4983,7 +5005,7 @@ class CalendarPicker extends dateRangeManagerMixin(View) {
                   '.month-popup-button, .year-list-view')) {
             if (this._selection) {
               window.pagePopupController.setValueAndClosePopup(
-                  0, this.getSelectedValue());
+                  0, this.getSelectedValue(), /* is_keyboard_event= */ true);
             } else {
               // If there is no selection it must be the case that there are no
               // valid values (because min >= max).  There's nothing useful to

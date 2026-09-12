@@ -5,7 +5,6 @@
 #include "chrome/test/chromedriver/chrome/download_directory_override_manager.h"
 
 #include "base/values.h"
-#include "chrome/test/chromedriver/chrome/browser_info.h"
 #include "chrome/test/chromedriver/chrome/devtools_client.h"
 #include "chrome/test/chromedriver/chrome/status.h"
 
@@ -33,7 +32,7 @@ Status DownloadDirectoryOverrideManager::OnConnected(DevToolsClient* client) {
 }
 
 Status DownloadDirectoryOverrideManager::ApplyOverride() {
-  base::Value::Dict params;
+  base::DictValue params;
   params.Set("behavior", "allow");
   params.Set("downloadPath", *download_directory_);
   return client_->SendCommand("Browser.setDownloadBehavior", params);

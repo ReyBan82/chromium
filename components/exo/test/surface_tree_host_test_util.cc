@@ -10,6 +10,17 @@
 
 namespace exo::test {
 
+void WaitForLastFrameAck(SurfaceTreeHost* surface_tree_host) {
+  CHECK(!surface_tree_host->GetFrameCallbacksForTesting().empty());
+
+  auto& list = surface_tree_host->GetFrameCallbacksForTesting().back();
+  base::RunLoop runloop;
+  list.push_back(base::BindRepeating(
+      [](base::RepeatingClosure callback, base::TimeTicks) { callback.Run(); },
+      runloop.QuitClosure()));
+  runloop.Run();
+}
+
 void WaitForLastFramePresentation(SurfaceTreeHost* surface_tree_host) {
   CHECK(!surface_tree_host->GetActivePresentationCallbacksForTesting().empty());
 
@@ -23,6 +34,31 @@ void WaitForLastFramePresentation(SurfaceTreeHost* surface_tree_host) {
       },
       runloop.QuitClosure()));
   runloop.Run();
+}
+
+base::RepeatingClosure CreateReleaseBufferClosure(
+    int* release_buffer_call_count,
+    base::RepeatingClosure closure) {
+  return base::BindLambdaForTesting(
+      [release_buffer_call_count, closure = std::move(closure)]() {
+        if (release_buffer_call_count) {
+          (*release_buffer_call_count)++;
+        }
+        closure.Run();
+      });
+}
+
+base::OnceCallback<void(gfx::GpuFenceHandle)> CreateExplicitReleaseCallback(
+    int* release_call_count,
+    base::RepeatingClosure closure) {
+  return base::BindLambdaForTesting(
+      [release_call_count,
+       closure = std::move(closure)](gfx::GpuFenceHandle release_fence) {
+        if (release_call_count) {
+          (*release_call_count)++;
+        }
+        closure.Run();
+      });
 }
 
 }  // namespace exo::test

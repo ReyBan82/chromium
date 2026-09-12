@@ -8,29 +8,28 @@
 #include <stdint.h>
 
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/span.h"
 #include "base/notreached.h"
-#include "base/strings/string_piece.h"
 #include "components/cbor/cbor_export.h"
 
 namespace cbor {
 
 // A class for Concise Binary Object Representation (CBOR) values.
-// This does not support:
-//  * Floating-point numbers.
-//  * Indefinite-length encodings.
+// This does not support indefinite-length encodings.
 class CBOR_EXPORT Value {
  public:
   struct Less {
     // Comparison predicate to order keys in a dictionary as required by the
     // canonical CBOR order defined in
     // https://tools.ietf.org/html/rfc7049#section-3.9
-    // TODO(808022): Clarify where this stands.
+    // TODO(crbug.com/40560917): Clarify where this stands.
     bool operator()(const Value& a, const Value& b) const {
       // The current implementation only supports integer, text string, byte
       // string and invalid UTF8 keys.
@@ -84,7 +83,6 @@ class CBOR_EXPORT Value {
       }
 
       NOTREACHED();
-      return false;
     }
 
     using is_transparent = void;
@@ -101,7 +99,7 @@ class CBOR_EXPORT Value {
     STRING = 3,
     ARRAY = 4,
     MAP = 5,
-    TAG = 6,
+    // TAG = 6, but not actually supported.
     SIMPLE_VALUE = 7,
     NONE = -1,
     INVALID_UTF8 = -2,
@@ -112,20 +110,23 @@ class CBOR_EXPORT Value {
     TRUE_VALUE = 21,
     NULL_VALUE = 22,
     UNDEFINED = 23,
+
+    kMinValue = FALSE_VALUE,
+    kMaxValue = UNDEFINED,
   };
 
   // Returns a Value with Type::INVALID_UTF8. This factory method lets tests
   // encode such a value as a CBOR string. It should never be used outside of
   // tests since encoding may yield invalid CBOR data.
-  static Value InvalidUTF8StringValueForTesting(base::StringPiece in_string);
+  static Value InvalidUTF8StringValueForTesting(std::string_view in_string);
 
   Value(Value&& that) noexcept;
   Value() noexcept;  // A NONE value.
 
-  explicit Value(Type type);
-
   explicit Value(SimpleValue in_simple);
   explicit Value(bool boolean_value);
+  explicit Value(float float_value) = delete;
+  explicit Value(double float_value) = delete;
 
   explicit Value(int integer_value);
   explicit Value(int64_t integer_value);
@@ -136,7 +137,7 @@ class CBOR_EXPORT Value {
 
   explicit Value(const char* in_string, Type type = Type::STRING);
   explicit Value(std::string&& in_string, Type type = Type::STRING) noexcept;
-  explicit Value(base::StringPiece in_string, Type type = Type::STRING);
+  explicit Value(std::string_view in_string, Type type = Type::STRING);
 
   explicit Value(const ArrayValue& in_array);
   explicit Value(ArrayValue&& in_array) noexcept;
@@ -178,16 +179,16 @@ class CBOR_EXPORT Value {
   // These will all fatally assert if the type doesn't match.
   SimpleValue GetSimpleValue() const;
   bool GetBool() const;
-  const int64_t& GetInteger() const;
-  const int64_t& GetUnsigned() const;
-  const int64_t& GetNegative() const;
-  const BinaryValue& GetBytestring() const;
-  base::StringPiece GetBytestringAsString() const;
+  int64_t GetInteger() const;
+  int64_t GetUnsigned() const;
+  int64_t GetNegative() const;
+  const BinaryValue& GetBytestring() const LIFETIME_BOUND;
+  std::string_view GetBytestringAsString() const LIFETIME_BOUND;
   // Returned string may contain NUL characters.
-  const std::string& GetString() const;
-  const ArrayValue& GetArray() const;
-  const MapValue& GetMap() const;
-  const BinaryValue& GetInvalidUTF8() const;
+  const std::string& GetString() const LIFETIME_BOUND;
+  const ArrayValue& GetArray() const LIFETIME_BOUND;
+  const MapValue& GetMap() const LIFETIME_BOUND;
+  const BinaryValue& GetInvalidUTF8() const LIFETIME_BOUND;
 
  private:
   friend class Reader;

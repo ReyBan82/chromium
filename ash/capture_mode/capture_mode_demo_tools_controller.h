@@ -6,12 +6,14 @@
 #define ASH_CAPTURE_MODE_CAPTURE_MODE_DEMO_TOOLS_CONTROLLER_H_
 
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
 #include "ui/base/ime/input_method_observer.h"
 #include "ui/base/ime/text_input_client.h"
 #include "ui/events/keycodes/keyboard_codes_posix.h"
 #include "ui/views/widget/unique_widget_ptr.h"
+#include "ui/views/widget/widget.h"
 
 namespace ui {
 class KeyEvent;
@@ -44,6 +46,10 @@ class CaptureModeDemoToolsController : public ui::InputMethodObserver {
       const CaptureModeDemoToolsController&) = delete;
   ~CaptureModeDemoToolsController() override;
 
+  const views::Widget* key_combo_widget() const {
+    return key_combo_widget_.get();
+  }
+
   // Decides whether to show a helper widget for the `event` or not.
   void OnKeyEvent(ui::KeyEvent* event);
 
@@ -51,7 +57,7 @@ class CaptureModeDemoToolsController : public ui::InputMethodObserver {
   // grow-and-fade-out animation on it.
   void PerformMousePressAnimation(const gfx::PointF& event_location_in_window);
 
-  // Refreshes the bounds of the key combo viewer.
+  // Refreshes the bounds of `key_combo_widget_`.
   void RefreshBounds();
 
   // Decides whether to show the highlight for the touch event or not.
@@ -82,7 +88,7 @@ class CaptureModeDemoToolsController : public ui::InputMethodObserver {
   // can not be displayed independently.
   bool ShouldResetKeyComboWidget() const;
 
-  // Resets the `key_combo_widget_` when the `hide_timer_` expires.
+  // Resets the `key_combo_widget_` when the `key_up_refresh_timer_` expires.
   void AnimateToResetKeyComboWidget();
 
   void UpdateTextInputType(const ui::TextInputClient* client);
@@ -108,9 +114,9 @@ class CaptureModeDemoToolsController : public ui::InputMethodObserver {
   void OnTouchDragged(const ui::PointerId& pointer_id,
                       const gfx::PointF& event_location_in_window);
 
-  VideoRecordingWatcher* const video_recording_watcher_;
+  const raw_ptr<VideoRecordingWatcher> video_recording_watcher_;
   views::UniqueWidgetPtr key_combo_widget_;
-  KeyComboView* key_combo_view_ = nullptr;
+  raw_ptr<KeyComboView> key_combo_view_ = nullptr;
 
   // The state of the modifier keys i.e. Shift/Ctrl/Alt/Launcher keys.
   int modifiers_ = 0;

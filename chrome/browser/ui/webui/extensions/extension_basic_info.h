@@ -6,6 +6,9 @@
 #define CHROME_BROWSER_UI_WEBUI_EXTENSIONS_EXTENSION_BASIC_INFO_H_
 
 #include "base/values.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -15,7 +18,7 @@ class Extension;
 // |enabled| is injected for easier testing.
 void GetExtensionBasicInfo(const Extension* extension,
                            bool enabled,
-                           base::Value::Dict* info);
+                           base::DictValue* info);
 
 }  // namespace extensions
 

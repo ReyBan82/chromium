@@ -1,5 +1,8 @@
-eirage@chromium.org
-mvanouwerkerk@chromium.org
+jinsukkim@chromium.org
 peconn@chromium.org
+sinansahin@google.com
+adelm@google.com
+lizeb@chromium.org
 
-per-file *TabInteractionRecorder*=file://chrome/android/java/src/org/chromium/chrome/browser/customtabs/features/sessionrestore/OWNERS
+per-file *MismatchNotificationController*=samarchehade@google.com
+per-file *WebappInsetsConsumer*=clhager@google.com

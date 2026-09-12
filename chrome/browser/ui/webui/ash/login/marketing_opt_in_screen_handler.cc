@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/command_line.h"
 #include "base/values.h"
 #include "chrome/browser/ash/login/screens/marketing_opt_in_screen.h"
@@ -73,7 +74,7 @@ void MarketingOptInScreenHandler::Show(bool opt_in_visible,
                                        bool opt_in_default_state,
                                        bool legal_footer_visible,
                                        bool cloud_gaming_enabled) {
-  base::Value::Dict data;
+  base::DictValue data;
   data.Set(kOptInVisibility, opt_in_visible);
   data.Set(kOptInDefaultState, opt_in_default_state);
   data.Set(kLegalFooterVisibility, legal_footer_visible);
@@ -92,8 +93,13 @@ void MarketingOptInScreenHandler::UpdateA11yShelfNavigationButtonToggle(
   CallExternalAPI("updateA11yNavigationButtonToggle", enabled);
 }
 
+base::WeakPtr<MarketingOptInScreenView>
+MarketingOptInScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
+}
+
 void MarketingOptInScreenHandler::GetAdditionalParameters(
-    base::Value::Dict* parameters) {
+    base::DictValue* parameters) {
   BaseScreenHandler::GetAdditionalParameters(parameters);
 }
 

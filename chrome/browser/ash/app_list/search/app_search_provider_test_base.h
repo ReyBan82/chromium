@@ -9,6 +9,7 @@
 #include <string>
 
 #include "base/files/scoped_temp_dir.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/simple_test_clock.h"
 #include "chrome/browser/ash/app_list/app_list_test_util.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_test.h"
@@ -38,6 +39,7 @@ class AppSearchProviderTestBase : public AppListTestBase {
 
   // AppListTestBase overrides:
   void SetUp() override;
+  void TearDown() override;
 
   //  Sets up app search provider to be used in the test.
   void InitializeSearchProvider();
@@ -77,7 +79,7 @@ class AppSearchProviderTestBase : public AppListTestBase {
   // Waits for base::Time::Now() is updated.
   void WaitTimeUpdated();
 
-  ArcAppTest& arc_test() { return arc_test_; }
+  ArcAppTest& arc_app_test() { return arc_app_test_; }
 
  private:
   // Whether the test is testing zero state, or queried apps search provider.
@@ -87,9 +89,9 @@ class AppSearchProviderTestBase : public AppListTestBase {
   base::ScopedTempDir temp_dir_;
   std::unique_ptr<TestSearchController> search_controller_;
   std::unique_ptr<AppSearchDataSource> data_source_;
-  SearchProvider* app_search_ = nullptr;
+  raw_ptr<SearchProvider, DanglingUntriaged> app_search_ = nullptr;
   std::unique_ptr<::test::TestAppListControllerDelegate> controller_;
-  ArcAppTest arc_test_;
+  ArcAppTest arc_app_test_;
 };
 
 }  // namespace app_list

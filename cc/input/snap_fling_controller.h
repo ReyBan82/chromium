@@ -6,6 +6,7 @@
 #define CC_INPUT_SNAP_FLING_CONTROLLER_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
@@ -26,6 +27,7 @@ class SnapFlingCurve;
 class SnapFlingClient {
  public:
   virtual bool GetSnapFlingInfoAndSetAnimatingSnapTarget(
+      const gfx::Vector2dF& current_delta,
       const gfx::Vector2dF& natural_displacement,
       gfx::PointF* out_initial_position,
       gfx::PointF* out_target_position) const = 0;
@@ -47,6 +49,7 @@ class CC_EXPORT SnapFlingController {
   struct GestureScrollUpdateInfo {
     gfx::Vector2dF delta;
     bool is_in_inertial_phase;
+    bool is_overscroll;
     base::TimeTicks event_time;
   };
 
@@ -72,6 +75,9 @@ class CC_EXPORT SnapFlingController {
 
   // Notifies the snap fling controller to update or end the scroll animation.
   void Animate(base::TimeTicks time);
+
+  // Finishes the current snap fling animation if active.
+  void Finish();
 
  private:
   friend class test::SnapFlingControllerTest;
@@ -103,6 +109,8 @@ class CC_EXPORT SnapFlingController {
   raw_ptr<SnapFlingClient> client_;
   State state_ = State::kIdle;
   std::unique_ptr<SnapFlingCurve> curve_;
+  std::optional<gfx::Vector2dF> last_inertial_delta_;
+  int consecutive_decay_frames_ = 0;
 };
 
 }  // namespace cc

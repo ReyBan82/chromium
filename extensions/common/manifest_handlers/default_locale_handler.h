@@ -14,6 +14,8 @@ namespace extensions {
 
 // A structure to hold the locale information for an extension.
 struct LocaleInfo : public Extension::ManifestData {
+  static const char* kManifestDataKey;
+
   // Default locale for fall back. Can be empty if extension is not localized.
   std::string default_locale;
 
@@ -33,7 +35,7 @@ class DefaultLocaleHandler : public ManifestHandler {
   bool Parse(Extension* extension, std::u16string* error) override;
 
   // Validates locale info. Doesn't check if messages.json files are valid.
-  bool Validate(const Extension* extension,
+  bool Validate(const Extension& extension,
                 std::string* error,
                 std::vector<InstallWarning>* warnings) const override;
 

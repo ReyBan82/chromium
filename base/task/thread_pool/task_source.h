@@ -11,13 +11,14 @@
 #include "base/containers/intrusive_heap.h"
 #include "base/dcheck_is_on.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/raw_ptr_exclusion.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/stack_allocated.h"
 #include "base/sequence_token.h"
 #include "base/task/common/checked_lock.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool/task.h"
 #include "base/task/thread_pool/task_source_sort_key.h"
+#include "base/task/thread_type.h"
 #include "base/threading/sequence_local_storage_map.h"
 #include "base/time/time.h"
 
@@ -35,8 +36,30 @@ enum class TaskSourceExecutionMode {
 };
 
 struct BASE_EXPORT ExecutionEnvironment {
-  SequenceToken token;
-  raw_ptr<SequenceLocalStorageMap> sequence_local_storage;
+  STACK_ALLOCATED();
+
+ public:
+  ExecutionEnvironment(SequenceToken token) : token(token) {}
+
+  ExecutionEnvironment(SequenceToken token,
+                       SequenceLocalStorageMap* sequence_local_storage,
+                       SingleThreadTaskRunner* single_thread_task_runner)
+      : token(token),
+        sequence_local_storage(sequence_local_storage),
+        single_thread_task_runner(single_thread_task_runner) {}
+
+  ExecutionEnvironment(SequenceToken token,
+                       SequenceLocalStorageMap* sequence_local_storage,
+                       SequencedTaskRunner* sequenced_task_runner)
+      : token(token),
+        sequence_local_storage(sequence_local_storage),
+        sequenced_task_runner(sequenced_task_runner) {}
+  ~ExecutionEnvironment();
+
+  const SequenceToken token;
+  SequenceLocalStorageMap* const sequence_local_storage = nullptr;
+  SingleThreadTaskRunner* const single_thread_task_runner = nullptr;
+  SequencedTaskRunner* const sequenced_task_runner = nullptr;
 };
 
 // A TaskSource is a virtual class that provides a series of Tasks that must be
@@ -79,7 +102,7 @@ struct BASE_EXPORT ExecutionEnvironment {
 // Note: there is a known refcounted-ownership cycle in the ThreadPool
 // architecture: TaskSource -> TaskRunner -> TaskSource -> ... This is okay so
 // long as the other owners of TaskSource (PriorityQueue and WorkerThread in
-// alternation and ThreadGroupImpl::WorkerThreadDelegateImpl::GetWork()
+// alternation and ThreadGroup::WorkerThreadDelegateImpl::GetWork()
 // temporarily) keep running it (and taking Tasks from it as a result). A
 // dangling reference cycle would only occur should they release their reference
 // to it while it's not empty. In other words, it is only correct for them to
@@ -104,8 +127,11 @@ class BASE_EXPORT TaskSource : public RefCountedThreadSafe<TaskSource> {
   // A Transaction can perform multiple operations atomically on a
   // TaskSource. While a Transaction is alive, it is guaranteed that nothing
   // else will access the TaskSource; the TaskSource's lock is held for the
-  // lifetime of the Transaction.
+  // lifetime of the Transaction. No Transaction must be held when ~TaskSource()
+  // is called.
   class BASE_EXPORT Transaction {
+    STACK_ALLOCATED();
+
    public:
     Transaction(Transaction&& other);
     Transaction(const Transaction&) = delete;
@@ -119,8 +145,11 @@ class BASE_EXPORT TaskSource : public RefCountedThreadSafe<TaskSource> {
 
     // Returns the traits of all Tasks in the TaskSource.
     TaskTraits traits() const { return task_source_->traits_; }
+    ThreadType thread_type() const;
 
     TaskSource* task_source() const { return task_source_; }
+
+    void Release();
 
    protected:
     explicit Transaction(TaskSource* task_source);
@@ -128,19 +157,14 @@ class BASE_EXPORT TaskSource : public RefCountedThreadSafe<TaskSource> {
    private:
     friend class TaskSource;
 
-    // This field is not a raw_ptr<> because it was filtered by the rewriter
-    // for: #union
-    RAW_PTR_EXCLUSION TaskSource* task_source_;
+    TaskSource* task_source_ = nullptr;
   };
 
   // |traits| is metadata that applies to all Tasks in the TaskSource.
-  // |task_runner| is a reference to the TaskRunner feeding this TaskSource.
-  // |task_runner| can be nullptr only for tasks with no TaskRunner, in which
-  // case |execution_mode| must be kParallel. Otherwise, |execution_mode| is the
-  // execution mode of |task_runner|.
   TaskSource(const TaskTraits& traits,
-             TaskRunner* task_runner,
-             TaskSourceExecutionMode execution_mode);
+             TaskSourceExecutionMode execution_mode,
+             ThreadType originating_thread_type,
+             bool inherit_by_default = false);
   TaskSource(const TaskSource&) = delete;
   TaskSource& operator=(const TaskSource&) = delete;
 
@@ -184,29 +208,28 @@ class BASE_EXPORT TaskSource : public RefCountedThreadSafe<TaskSource> {
 
   HeapHandle delayed_heap_handle() const { return delayed_pq_heap_handle_; }
 
-  // Returns the shutdown behavior of all Tasks in the TaskSource. Can be
-  // accessed without a Transaction because it is never mutated.
+  // Returns a racy thread_type of the TaskSource. Can be accessed without a
+  // Transaction but may return an outdated result.
+  ThreadType thread_type_racy() const {
+    return thread_type_racy_.load(std::memory_order_relaxed);
+  }
+
+  // The following traits can be accessed without a Transaction because
+  // they are never mutated.
   TaskShutdownBehavior shutdown_behavior() const {
     return traits_.shutdown_behavior();
   }
-  // Returns a racy priority of the TaskSource. Can be accessed without a
-  // Transaction but may return an outdated result.
-  TaskPriority priority_racy() const {
-    return priority_racy_.load(std::memory_order_relaxed);
-  }
-  // Returns the thread policy of the TaskSource. Can be accessed without a
-  // Transaction because it is never mutated.
   ThreadPolicy thread_policy() const { return traits_.thread_policy(); }
-
-  // A reference to TaskRunner is only retained between
-  // PushImmediateTask()/PushDelayedTask() and when DidProcessTask() returns
-  // false, guaranteeing it is safe to dereference this pointer. Otherwise, the
-  // caller should guarantee such TaskRunner still exists before dereferencing.
-  TaskRunner* task_runner() const { return task_runner_; }
-
   TaskSourceExecutionMode execution_mode() const { return execution_mode_; }
+  bool inherit_thread_type() const { return traits_.inherit_thread_type(); }
+  ThreadType max_thread_type() const {
+    DCHECK(inherit_thread_type());
+    return traits_.max_thread_type();
+  }
 
   void ClearForTesting();
+
+  const TaskTraits& traits() const { return traits_; }
 
  protected:
   virtual ~TaskSource();
@@ -224,16 +247,16 @@ class BASE_EXPORT TaskSource : public RefCountedThreadSafe<TaskSource> {
   // The implementation needs to support this being called multiple times;
   // unless it guarantees never to hand-out multiple RegisteredTaskSources that
   // are concurrently ready.
-  virtual Task Clear(TaskSource::Transaction* transaction) = 0;
-
-  // Sets TaskSource priority to |priority|.
-  void UpdatePriority(TaskPriority priority);
+  virtual std::optional<Task> Clear(TaskSource::Transaction* transaction) = 0;
 
   // The TaskTraits of all Tasks in the TaskSource.
   TaskTraits traits_;
 
-  // The cached priority for atomic access.
-  std::atomic<TaskPriority> priority_racy_;
+  // The cached thread_type for atomic access.
+  std::atomic<ThreadType> thread_type_racy_;
+
+  const ThreadType originating_thread_type_;
+  const bool inherit_by_default_;
 
   // Synchronizes access to all members.
   mutable CheckedLock lock_{UniversalPredecessor()};
@@ -249,15 +272,6 @@ class BASE_EXPORT TaskSource : public RefCountedThreadSafe<TaskSource> {
   // The TaskSource's position in its current DelayedPriorityQueue. Access is
   // protected by the DelayedPriorityQueue's lock.
   HeapHandle delayed_pq_heap_handle_;
-
-  // A pointer to the TaskRunner that posts to this TaskSource, if any. The
-  // derived class is responsible for calling AddRef() when a TaskSource from
-  // which no Task is executing becomes non-empty and Release() when
-  // it becomes empty again (e.g. when DidProcessTask() returns false).
-  //
-  // In practise, this pointer is going to become dangling. See task_runner()
-  // comment.
-  raw_ptr<TaskRunner, DisableDanglingPtrDetection> task_runner_;
 
   TaskSourceExecutionMode execution_mode_;
 };
@@ -321,7 +335,8 @@ class BASE_EXPORT RegisteredTaskSource {
   // Returns a task that clears this TaskSource to make it empty. |transaction|
   // is optional and should only be provided if this operation is already part
   // of a transaction.
-  [[nodiscard]] Task Clear(TaskSource::Transaction* transaction = nullptr);
+  [[nodiscard]] std::optional<Task> Clear(
+      TaskSource::Transaction* transaction = nullptr);
 
  private:
   friend class TaskTracker;
@@ -331,36 +346,37 @@ class BASE_EXPORT RegisteredTaskSource {
 #if DCHECK_IS_ON()
   // Indicates the step of a task execution chain.
   enum class State {
-    kInitial,       // WillRunTask() may be called.
-    kReady,         // After WillRunTask() returned a valid RunStatus.
+    kInitial,  // WillRunTask() may be called.
+    kReady,    // After WillRunTask() returned a valid RunStatus.
   };
 
   State run_step_ = State::kInitial;
 #endif  // DCHECK_IS_ON()
 
   scoped_refptr<TaskSource> task_source_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION TaskTracker* task_tracker_ = nullptr;
+  // Uses UnprotectedInRelease: Performance reasons (visible in sampling
+  // profiler stacks).
+  raw_ptr<TaskTracker, UnprotectedInRelease> task_tracker_ = nullptr;
 };
 
 // A pair of Transaction and RegisteredTaskSource. Useful to carry a
 // RegisteredTaskSource with an associated Transaction.
-// TODO(crbug.com/839091): Rename to RegisteredTaskSourceAndTransaction.
-struct BASE_EXPORT TransactionWithRegisteredTaskSource {
+struct BASE_EXPORT RegisteredTaskSourceAndTransaction {
+  STACK_ALLOCATED();
+
  public:
-  TransactionWithRegisteredTaskSource(RegisteredTaskSource task_source_in,
-                                      TaskSource::Transaction transaction_in);
+  RegisteredTaskSourceAndTransaction(RegisteredTaskSource task_source_in,
+                                     TaskSource::Transaction transaction_in);
 
-  TransactionWithRegisteredTaskSource(
-      TransactionWithRegisteredTaskSource&& other) = default;
-  TransactionWithRegisteredTaskSource(
-      const TransactionWithRegisteredTaskSource&) = delete;
-  TransactionWithRegisteredTaskSource& operator=(
-      const TransactionWithRegisteredTaskSource&) = delete;
-  ~TransactionWithRegisteredTaskSource() = default;
+  RegisteredTaskSourceAndTransaction(
+      RegisteredTaskSourceAndTransaction&& other) = default;
+  RegisteredTaskSourceAndTransaction(
+      const RegisteredTaskSourceAndTransaction&) = delete;
+  RegisteredTaskSourceAndTransaction& operator=(
+      const RegisteredTaskSourceAndTransaction&) = delete;
+  ~RegisteredTaskSourceAndTransaction() = default;
 
-  static TransactionWithRegisteredTaskSource FromTaskSource(
+  static RegisteredTaskSourceAndTransaction FromTaskSource(
       RegisteredTaskSource task_source_in);
 
   RegisteredTaskSource task_source;
@@ -368,6 +384,8 @@ struct BASE_EXPORT TransactionWithRegisteredTaskSource {
 };
 
 struct BASE_EXPORT TaskSourceAndTransaction {
+  STACK_ALLOCATED();
+
  public:
   TaskSourceAndTransaction(scoped_refptr<TaskSource> task_source_in,
                            TaskSource::Transaction transaction_in);

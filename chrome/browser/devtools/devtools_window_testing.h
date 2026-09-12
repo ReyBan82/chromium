@@ -6,10 +6,12 @@
 #define CHROME_BROWSER_DEVTOOLS_DEVTOOLS_WINDOW_TESTING_H_
 
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/devtools/devtools_window.h"
+#include "components/policy/core/common/mock_configuration_policy_provider.h"
 #include "ui/gfx/geometry/rect.h"
 
-class Browser;
+class BrowserWindowInterface;
 class Profile;
 
 namespace content {
@@ -33,8 +35,8 @@ class DevToolsWindowTesting {
   static DevToolsWindow* OpenDevToolsWindowSync(
       content::WebContents* inspected_web_contents,
       bool is_docked);
-  static DevToolsWindow* OpenDevToolsWindowSync(
-      Browser* browser, bool is_docked);
+  static DevToolsWindow* OpenDevToolsWindowSync(BrowserWindowInterface* browser,
+                                                bool is_docked);
   static DevToolsWindow* OpenDevToolsWindowSync(
       Profile* profile,
       scoped_refptr<content::DevToolsAgentHost> agent_host);
@@ -47,7 +49,7 @@ class DevToolsWindowTesting {
 
   static DevToolsWindowTesting* Get(DevToolsWindow* window);
 
-  Browser* browser();
+  BrowserWindowInterface* browser();
   content::WebContents* main_web_contents();
   content::WebContents* toolbox_web_contents();
   void SetInspectedPageBounds(const gfx::Rect& bounds);
@@ -63,8 +65,26 @@ class DevToolsWindowTesting {
   static void WindowClosed(DevToolsWindow* window);
   static DevToolsWindowTesting* Find(DevToolsWindow* window);
 
-  DevToolsWindow* devtools_window_;
+  raw_ptr<DevToolsWindow> devtools_window_;
   base::OnceClosure close_callback_;
+};
+
+// A class which allows DevTools to be disabled. This is useful for testing code
+// that uses `DevToolsWindow::AllowDevToolsFor()` to gate access to DevTools.
+//
+// Due to implementation restrictions, this must be created as a member variable
+// of the test in question.
+class DevToolsDisabler {
+ public:
+  DevToolsDisabler();
+  ~DevToolsDisabler();
+
+  void SetUp();
+
+  void DisableDevTools();
+
+ private:
+  testing::NiceMock<policy::MockConfigurationPolicyProvider> provider_;
 };
 
 class DevToolsWindowCreationObserver {
@@ -78,7 +98,8 @@ class DevToolsWindowCreationObserver {
 
   ~DevToolsWindowCreationObserver();
 
-  using DevToolsWindows = std::vector<DevToolsWindow*>;
+  using DevToolsWindows =
+      std::vector<raw_ptr<DevToolsWindow, VectorExperimental>>;
   const DevToolsWindows& devtools_windows() { return devtools_windows_; }
   DevToolsWindow* devtools_window();
 

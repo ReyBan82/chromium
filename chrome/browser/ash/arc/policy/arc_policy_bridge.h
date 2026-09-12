@@ -12,17 +12,17 @@
 #include <string>
 #include <vector>
 
-#include "ash/components/arc/mojom/policy.mojom.h"
-#include "ash/components/arc/session/connection_observer.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/arc/session/arc_session_manager_observer.h"
+#include "chromeos/ash/experiences/arc/mojom/policy.mojom.h"
+#include "chromeos/ash/experiences/arc/session/connection_observer.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/policy/core/common/policy_namespace.h"
 #include "components/policy/core/common/policy_service.h"
-#include "services/data_decoder/public/cpp/data_decoder.h"
 
 class BrowserContextKeyedServiceFactory;
 
@@ -35,6 +35,7 @@ class BrowserContext;
 }  // namespace content
 
 namespace policy {
+class DeviceAttributes;
 class PolicyMap;
 }  // namespace policy
 
@@ -69,30 +70,6 @@ class ArcPolicyBridge : public KeyedService,
     virtual void OnComplianceReportReceived(
         const base::Value* compliance_report) {}
 
-    // Called when a request to install set of packages was sent to CloudDPS.
-    virtual void OnCloudDpsRequested(
-        base::Time time,
-        const std::set<std::string>& package_names) {}
-
-    // Called when CloudDPS successfully processed request for install for a
-    // set of packages. Note |package_names| may not match to what was
-    // requested.
-    virtual void OnCloudDpsSucceeded(
-        base::Time time,
-        const std::set<std::string>& package_names) {}
-
-    // Called when CloudDPS returned an error for the package installation
-    // request. |reason| defines the failure reason.
-    virtual void OnCloudDpsFailed(base::Time time,
-                                  const std::string& package_name,
-                                  mojom::InstallErrorReason reason) {}
-
-    // Called when in CloudDPC the main loop of retries to install apps failed
-    // to install some apps.
-    virtual void OnReportForceInstallMainLoopFailed(
-        base::Time time,
-        const std::set<std::string>& package_names) {}
-
     // Called when ARC DPC starts.
     virtual void OnReportDPCVersion(const std::string& version) {}
 
@@ -110,7 +87,6 @@ class ArcPolicyBridge : public KeyedService,
   static const char kApplications[];
   static const char kPackageName[];
   static const char kManagedConfiguration[];
-  static const char kResetAndroidIdEnabled[];
 
   // Returns singleton instance for the given BrowserContext,
   // or nullptr if the browser |context| is not allowed to use ARC.
@@ -127,9 +103,12 @@ class ArcPolicyBridge : public KeyedService,
 
   ArcPolicyBridge(content::BrowserContext* context,
                   ArcBridgeService* bridge_service);
+
+  // `device_attributes` must be non-null.
   ArcPolicyBridge(content::BrowserContext* context,
                   ArcBridgeService* bridge_service,
-                  policy::PolicyService* policy_service);
+                  policy::PolicyService* policy_service,
+                  std::unique_ptr<policy::DeviceAttributes> device_attributes);
 
   ArcPolicyBridge(const ArcPolicyBridge&) = delete;
   ArcPolicyBridge& operator=(const ArcPolicyBridge&) = delete;
@@ -151,18 +130,6 @@ class ArcPolicyBridge : public KeyedService,
   void GetPolicies(GetPoliciesCallback callback) override;
   void ReportCompliance(const std::string& request,
                         ReportComplianceCallback callback) override;
-  void ReportCloudDpsRequested(
-      base::Time time,
-      const std::vector<std::string>& package_names) override;
-  void ReportCloudDpsSucceeded(
-      base::Time time,
-      const std::vector<std::string>& package_names) override;
-  void ReportCloudDpsFailed(base::Time time,
-                            const std::string& package_name,
-                            mojom::InstallErrorReason reason) override;
-  void ReportForceInstallMainLoopFailed(
-      base::Time time,
-      const std::vector<std::string>& package_names) override;
   void ReportDPCVersion(const std::string& version) override;
   void ReportPlayStoreLocalPolicySet(
       base::Time time,
@@ -199,20 +166,22 @@ class ArcPolicyBridge : public KeyedService,
   // Called when the compliance report from ARC is parsed.
   void OnReportComplianceParse(
       base::OnceCallback<void(const std::string&)> callback,
-      data_decoder::DataDecoder::ValueOrError result);
+      std::optional<base::Value> result);
 
   // Check the policy to see if ARC needs to be activated to install any
   // applications
   static void ActivateArcIfRequiredByPolicy(
       const policy::PolicyMap& policy_map);
 
-  content::BrowserContext* const context_;
-  ArcBridgeService* const arc_bridge_service_;  // Owned by ArcServiceManager.
+  const raw_ptr<content::BrowserContext> context_;
+  const raw_ptr<ArcBridgeService>
+      arc_bridge_service_;  // Owned by ArcServiceManager.
 
-  policy::PolicyService* policy_service_ = nullptr;
+  raw_ptr<policy::PolicyService> policy_service_ = nullptr;
 
   bool is_managed_ = false;
   bool is_policy_service_observed = false;
+  bool is_dpc_first_compliance_reported_ = false;
 
   // HACK(b/73762796): A GUID that is regenerated whenever |this| is created,
   // ensuring that the first policy sent to CloudDPC is considered different
@@ -231,6 +200,8 @@ class ArcPolicyBridge : public KeyedService,
   std::string arc_policy_compliance_report_;
   // Saved ARC DPC version.
   std::string arc_dpc_version_;
+
+  const std::unique_ptr<policy::DeviceAttributes> device_attributes_;
 
   // Must be the last member.
   base::WeakPtrFactory<ArcPolicyBridge> weak_ptr_factory_{this};

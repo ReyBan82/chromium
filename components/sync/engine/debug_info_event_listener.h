@@ -8,19 +8,22 @@
 #include "base/containers/circular_deque.h"
 #include "base/gtest_prod_util.h"
 #include "base/sequence_checker.h"
-#include "components/sync/base/model_type.h"
+#include "components/sync/base/data_type.h"
 #include "components/sync/engine/cycle/debug_info_getter.h"
 #include "components/sync/engine/cycle/sync_cycle_snapshot.h"
 #include "components/sync/engine/sync_encryption_handler.h"
 #include "components/sync/engine/sync_manager.h"
-#include "components/sync/protocol/client_debug_info.pb.h"
-#include "components/sync/protocol/sync_enums.pb.h"
 
 namespace sync_pb {
-class EncryptedData;
-}
+class DebugEventInfo;
+class DebugInfo;
+enum SyncEnums_SingletonDebugEventType : int;
+}  // namespace sync_pb
 
 namespace syncer {
+
+class CustomPassphraseBootstrapToken;
+class RequiredPassphraseVerifier;
 
 // Listens to events and records them in a queue. And passes the events to
 // syncer when requested.
@@ -31,7 +34,7 @@ class DebugInfoEventListener : public SyncManager::Observer,
  public:
   // Keep a few more events than there are data types, to ensure that any
   // data-type-specific events during first sync or startup aren't dropped.
-  static constexpr const size_t kMaxEvents = GetNumModelTypes() + 10;
+  static constexpr const size_t kMaxEvents = GetNumDataTypes() + 10;
 
   DebugInfoEventListener();
 
@@ -46,18 +49,20 @@ class DebugInfoEventListener : public SyncManager::Observer,
   void OnSyncCycleCompleted(const SyncCycleSnapshot& snapshot) override;
   void OnConnectionStatusChange(ConnectionStatus connection_status) override;
   void OnActionableProtocolError(const SyncProtocolError& sync_error) override;
-  void OnMigrationRequested(ModelTypeSet types) override;
+  void OnMigrationRequested(DataTypeSet types) override;
   void OnProtocolEvent(const ProtocolEvent& event) override;
   void OnSyncStatusChanged(const SyncStatus& status) override;
 
   // SyncEncryptionHandler::Observer implementation.
   void OnPassphraseRequired(
-      const KeyDerivationParams& key_derivation_params,
-      const sync_pb::EncryptedData& pending_keys) override;
-  void OnPassphraseAccepted() override;
+      std::unique_ptr<RequiredPassphraseVerifier> verifier) override;
+  void OnPassphraseAccepted(
+      const CustomPassphraseBootstrapToken& bootstrap_token) override;
   void OnTrustedVaultKeyRequired() override;
   void OnTrustedVaultKeyAccepted() override;
-  void OnEncryptedTypesChanged(ModelTypeSet encrypted_types,
+  void OnKeystoreKeysRequired() override;
+  void OnKeystoreKeysAccepted() override;
+  void OnEncryptedTypesChanged(DataTypeSet encrypted_types,
                                bool encrypt_everything) override;
   void OnCryptographerStateChanged(Cryptographer* cryptographer,
                                    bool has_pending_keys) override;
@@ -65,7 +70,7 @@ class DebugInfoEventListener : public SyncManager::Observer,
                                base::Time explicit_passphrase_time) override;
 
   // Sync manager events.
-  void OnNudgeFromDatatype(ModelType datatype);
+  void OnNudgeFromDatatype(DataType datatype);
 
   // DebugInfoGetter implementation.
   sync_pb::DebugInfo GetDebugInfo() const override;
@@ -80,7 +85,7 @@ class DebugInfoEventListener : public SyncManager::Observer,
   FRIEND_TEST_ALL_PREFIXES(DebugInfoEventListenerTest, VerifyClearEvents);
 
   void AddEventToQueue(const sync_pb::DebugEventInfo& event_info);
-  void CreateAndAddEvent(sync_pb::SyncEnums::SingletonDebugEventType type);
+  void CreateAndAddEvent(sync_pb::SyncEnums_SingletonDebugEventType type);
 
   // Stores the most recent events, up to some limit.
   base::circular_deque<sync_pb::DebugEventInfo> events_;

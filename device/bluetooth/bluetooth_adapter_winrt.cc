@@ -9,12 +9,11 @@
 #include <windows.storage.streams.h>
 #include <wrl/event.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
-#include "base/containers/cxx20_erase.h"
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
@@ -22,11 +21,12 @@
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/notimplemented.h"
 #include "base/scoped_native_library.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
@@ -105,14 +105,9 @@ using ABI::Windows::Storage::Streams::IDataReaderStatics;
 using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 
-bool ResolveCoreWinRT() {
-  return base::win::ResolveCoreWinRTDelayload() &&
-         base::win::ScopedHString::ResolveCoreWinRTStringDelayload();
-}
-
 // Query string for powered Bluetooth radios. GUID Reference:
 // https://docs.microsoft.com/en-us/windows-hardware/drivers/install/guid-bthport-device-interface
-// TODO(https://crbug.com/821766): Consider adding WindowsCreateStringReference
+// TODO(crbug.com/40567018): Consider adding WindowsCreateStringReference
 // to base::win::ScopedHString to avoid allocating memory for this string.
 constexpr wchar_t kPoweredRadiosAqsFilter[] =
     L"System.Devices.InterfaceClassGuid:=\"{0850302A-B344-4fda-9BE9-"
@@ -133,7 +128,6 @@ constexpr const char* ToCString(RadioAccessStatus access_status) {
   }
 
   NOTREACHED();
-  return "";
 }
 
 template <typename VectorView, typename T>
@@ -156,7 +150,7 @@ bool ToStdVector(VectorView* view, std::vector<T>* vector) {
   return true;
 }
 
-absl::optional<std::vector<uint8_t>> ExtractVector(IBuffer* buffer) {
+std::optional<std::vector<uint8_t>> ExtractVector(IBuffer* buffer) {
   ComPtr<IDataReaderStatics> data_reader_statics;
   HRESULT hr = base::win::GetActivationFactory<
       IDataReaderStatics, RuntimeClass_Windows_Storage_Streams_DataReader>(
@@ -165,7 +159,7 @@ absl::optional<std::vector<uint8_t>> ExtractVector(IBuffer* buffer) {
     BLUETOOTH_LOG(ERROR)
         << "Getting DataReaderStatics Activation Factory failed: "
         << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   ComPtr<IDataReader> data_reader;
@@ -173,7 +167,7 @@ absl::optional<std::vector<uint8_t>> ExtractVector(IBuffer* buffer) {
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "FromBuffer() failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   uint32_t buffer_length;
@@ -181,7 +175,7 @@ absl::optional<std::vector<uint8_t>> ExtractVector(IBuffer* buffer) {
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "get_Length() failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   std::vector<uint8_t> bytes(buffer_length);
@@ -189,27 +183,27 @@ absl::optional<std::vector<uint8_t>> ExtractVector(IBuffer* buffer) {
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "ReadBytes() failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return bytes;
 }
 
-absl::optional<uint8_t> ExtractFlags(IBluetoothLEAdvertisement* advertisement) {
+std::optional<uint8_t> ExtractFlags(IBluetoothLEAdvertisement* advertisement) {
   if (!advertisement)
-    return absl::nullopt;
+    return std::nullopt;
 
   ComPtr<IReference<BluetoothLEAdvertisementFlags>> flags_ref;
   HRESULT hr = advertisement->get_Flags(&flags_ref);
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "get_Flags() failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   if (!flags_ref) {
     BLUETOOTH_LOG(DEBUG) << "No advertisement flags found.";
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   BluetoothLEAdvertisementFlags flags;
@@ -217,7 +211,7 @@ absl::optional<uint8_t> ExtractFlags(IBluetoothLEAdvertisement* advertisement) {
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "get_Value() failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return flags;
@@ -271,7 +265,7 @@ void PopulateServiceData(
     if (!bytes)
       continue;
 
-    auto bytes_span = base::make_span(*bytes);
+    auto bytes_span = base::span(*bytes);
     if (bytes_span.size() < num_bytes_uuid) {
       BLUETOOTH_LOG(ERROR) << "Buffer Length is too small: "
                            << bytes_span.size() << " vs. " << num_bytes_uuid;
@@ -285,7 +279,7 @@ void PopulateServiceData(
 
     // HexEncode the bytes and add dashes as required.
     std::string uuid_str;
-    for (char c : base::HexEncode(uuid_bytes.data(), uuid_bytes.size())) {
+    for (char c : base::HexEncode(uuid_bytes)) {
       const size_t size = uuid_str.size();
       if (size == 8 || size == 13 || size == 18 || size == 23)
         uuid_str.push_back('-');
@@ -384,10 +378,9 @@ BluetoothDevice::ManufacturerDataMap ExtractManufacturerData(
 // Similarly to extracting the service data Windows does not provide a specific
 // API to extract the tx power. Thus we also parse the raw data sections here.
 // If present, we expect a single entry for tx power with a blob of size 1 byte.
-absl::optional<int8_t> ExtractTxPower(
-    IBluetoothLEAdvertisement* advertisement) {
+std::optional<int8_t> ExtractTxPower(IBluetoothLEAdvertisement* advertisement) {
   if (!advertisement)
-    return absl::nullopt;
+    return std::nullopt;
 
   ComPtr<IVectorView<BluetoothLEAdvertisementDataSection*>> data_sections;
   HRESULT hr = advertisement->GetSectionsByType(
@@ -395,17 +388,17 @@ absl::optional<int8_t> ExtractTxPower(
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "GetSectionsByType() failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   std::vector<ComPtr<IBluetoothLEAdvertisementDataSection>> vector;
   if (!ToStdVector(data_sections.Get(), &vector) || vector.empty())
-    return absl::nullopt;
+    return std::nullopt;
 
   if (vector.size() != 1u) {
     BLUETOOTH_LOG(ERROR) << "Unexpected number of data sections: "
                          << vector.size();
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   ComPtr<IBuffer> buffer;
@@ -413,16 +406,16 @@ absl::optional<int8_t> ExtractTxPower(
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "get_Data() failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   auto bytes = ExtractVector(buffer.Get());
   if (!bytes)
-    return absl::nullopt;
+    return std::nullopt;
 
   if (bytes->size() != 1) {
     BLUETOOTH_LOG(ERROR) << "Unexpected number of bytes: " << bytes->size();
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return bytes->front();
@@ -440,22 +433,22 @@ ComPtr<IBluetoothLEAdvertisement> GetAdvertisement(
   return advertisement;
 }
 
-absl::optional<std::string> ExtractDeviceName(
+std::optional<std::string> ExtractDeviceName(
     IBluetoothLEAdvertisement* advertisement) {
   if (!advertisement)
-    return absl::nullopt;
+    return std::nullopt;
 
   HSTRING local_name;
   HRESULT hr = advertisement->get_LocalName(&local_name);
   if (FAILED(hr)) {
     BLUETOOTH_LOG(ERROR) << "Getting Local Name failed: "
                          << logging::SystemErrorCodeToString(hr);
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Return early otherwise ScopedHString will create an empty string.
   if (!local_name)
-    return absl::nullopt;
+    return std::nullopt;
 
   return base::win::ScopedHString(local_name).GetAsUTF8();
 }
@@ -671,13 +664,6 @@ void BluetoothAdapterWinrt::InitForTests(
     ComPtr<IBluetoothAdapterStatics> bluetooth_adapter_statics,
     ComPtr<IDeviceInformationStatics> device_information_statics,
     ComPtr<IRadioStatics> radio_statics) {
-  if (!ResolveCoreWinRT()) {
-    CompleteInit(std::move(init_callback), std::move(bluetooth_adapter_statics),
-                 std::move(device_information_statics),
-                 std::move(radio_statics));
-    return;
-  }
-
   auto statics = PerformSlowInitTasks();
 
   // This allows any passed in values (which would be fakes) to replace
@@ -701,9 +687,6 @@ void BluetoothAdapterWinrt::InitForTests(
 BluetoothAdapterWinrt::StaticsInterfaces
 BluetoothAdapterWinrt::PerformSlowInitTasks() {
   base::win::AssertComApartmentType(base::win::ComApartmentType::MTA);
-  if (!ResolveCoreWinRT())
-    return BluetoothAdapterWinrt::StaticsInterfaces();
-
   ComPtr<IBluetoothAdapterStatics> adapter_statics;
   HRESULT hr = base::win::GetActivationFactory<
       IBluetoothAdapterStatics,
@@ -784,12 +767,24 @@ BluetoothAdapterWinrt::GetAgileReferencesForStatics(
                            std::move(radio_statics_agileref));
 }
 
+// static
+void BluetoothAdapterWinrt::DestroyAgileStaticsOnMTA(
+    StaticsInterfaces /* agile_statics */) {
+  base::win::AssertComApartmentType(base::win::ComApartmentType::MTA);
+}
+
 void BluetoothAdapterWinrt::CompleteInitAgile(base::OnceClosure init_callback,
                                               StaticsInterfaces agile_statics) {
   if (!agile_statics.adapter_statics ||
       !agile_statics.device_information_statics ||
       !agile_statics.radio_statics) {
     CompleteInit(std::move(init_callback), nullptr, nullptr, nullptr);
+    base::ThreadPool::PostTask(
+        FROM_HERE,
+        {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
+         base::ThreadPolicy::MUST_USE_FOREGROUND},
+        base::BindOnce(&BluetoothAdapterWinrt::DestroyAgileStaticsOnMTA,
+                       std::move(agile_statics)));
     return;
   }
   ComPtr<IBluetoothAdapterStatics> bluetooth_adapter_statics;
@@ -806,6 +801,12 @@ void BluetoothAdapterWinrt::CompleteInitAgile(base::OnceClosure init_callback,
 
   CompleteInit(std::move(init_callback), std::move(bluetooth_adapter_statics),
                std::move(device_information_statics), std::move(radio_statics));
+  base::ThreadPool::PostTask(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
+       base::ThreadPolicy::MUST_USE_FOREGROUND},
+      base::BindOnce(&BluetoothAdapterWinrt::DestroyAgileStaticsOnMTA,
+                     std::move(agile_statics)));
 }
 
 void BluetoothAdapterWinrt::CompleteInit(
@@ -818,12 +819,20 @@ void BluetoothAdapterWinrt::CompleteInit(
   // run no matter how the function exits. Furthermore, we set |is_initialized_|
   // to true if adapter is still active when the callback gets run.
   base::ScopedClosureRunner on_init(base::BindOnce(
-      [](base::WeakPtr<BluetoothAdapterWinrt> adapter,
+      [](scoped_refptr<base::SequencedTaskRunner> expected_runner,
+         base::WeakPtr<BluetoothAdapterWinrt> adapter,
          base::OnceClosure init_callback) {
+        // This callback can be destroyed on a different sequence during
+        // shutdown if the target task runner has already shut down. In that
+        // case, we must not access the WeakPtr or run the callback.
+        if (!expected_runner->RunsTasksInCurrentSequence()) {
+          return;
+        }
         if (adapter)
           adapter->is_initialized_ = true;
         std::move(init_callback).Run();
       },
+      base::SequencedTaskRunner::GetCurrentDefault(),
       weak_ptr_factory_.GetWeakPtr(), std::move(init_callback)));
 
   bluetooth_adapter_statics_ = bluetooth_adapter_statics;
@@ -1338,9 +1347,9 @@ void BluetoothAdapterWinrt::OnAdvertisementReceived(
 
   // Extract the remaining advertisement data.
   ComPtr<IBluetoothLEAdvertisement> advertisement = GetAdvertisement(received);
-  absl::optional<std::string> device_name =
+  std::optional<std::string> device_name =
       ExtractDeviceName(advertisement.Get());
-  absl::optional<int8_t> tx_power = ExtractTxPower(advertisement.Get());
+  std::optional<int8_t> tx_power = ExtractTxPower(advertisement.Get());
   BluetoothDevice::UUIDList advertised_uuids =
       ExtractAdvertisedUUIDs(advertisement.Get());
   BluetoothDevice::ServiceDataMap service_data_map =
@@ -1383,9 +1392,9 @@ void BluetoothAdapterWinrt::OnAdvertisementWatcherStopped(
 void BluetoothAdapterWinrt::OnRegisterAdvertisement(
     BluetoothAdvertisement* advertisement,
     CreateAdvertisementCallback callback) {
-  DCHECK(base::Contains(pending_advertisements_, advertisement));
+  DCHECK(std::ranges::contains(pending_advertisements_, advertisement));
   auto wrapped_advertisement = base::WrapRefCounted(advertisement);
-  base::Erase(pending_advertisements_, advertisement);
+  std::erase(pending_advertisements_, advertisement);
   std::move(callback).Run(std::move(wrapped_advertisement));
 }
 
@@ -1395,7 +1404,7 @@ void BluetoothAdapterWinrt::OnRegisterAdvertisementError(
     BluetoothAdvertisement::ErrorCode error_code) {
   // Note: We are not DCHECKing that |pending_advertisements_| contains
   // |advertisement|, as this method might be invoked during destruction.
-  base::Erase(pending_advertisements_, advertisement);
+  std::erase(pending_advertisements_, advertisement);
   std::move(error_callback).Run(error_code);
 }
 

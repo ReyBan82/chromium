@@ -14,29 +14,27 @@
 
 #include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/observer_list.h"
 #include "base/observer_list_types.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
+#include "chrome/browser/ash/app_list/search/app_discovery_metrics_manager.h"
 #include "chrome/browser/ash/app_list/search/burn_in_controller.h"
 #include "chrome/browser/ash/app_list/search/common/keyword_util.h"
-#include "chrome/browser/ash/app_list/search/federated_metrics_manager.h"
 #include "chrome/browser/ash/app_list/search/ranking/launch_data.h"
 #include "chrome/browser/ash/app_list/search/ranking/ranker_manager.h"
+#include "chrome/browser/ash/app_list/search/search_file_scanner.h"
 #include "chrome/browser/ash/app_list/search/types.h"
 
 class AppListControllerDelegate;
 class AppListModelUpdater;
 class ChromeSearchResult;
+class PrefService;
 class Profile;
 
 namespace ash {
 class AppListNotifier;
-
-namespace federated {
-class FederatedServiceController;
-}  // namespace federated
-
 }  // namespace ash
 
 namespace app_list {
@@ -45,9 +43,10 @@ class AppSearchDataSource;
 class SearchMetricsManager;
 class SearchSessionMetricsManager;
 class SearchProvider;
+class SearchEngine;
 
 // Long queries will be truncated down to this length.
-constexpr int kMaxAllowedQueryLength = 500;
+inline constexpr int kMaxAllowedQueryLength = 500;
 
 // A controller that collects queries from the AppListClient, dispatches them to
 // search providers, then ranks and publishes the results to the AppListModel.
@@ -56,12 +55,12 @@ class SearchController {
  public:
   using ResultsChangedCallback = base::RepeatingCallback<void(ResultType)>;
 
-  SearchController(AppListModelUpdater* model_updater,
+  // `local_state` must be non-null and must outlive `this`.
+  SearchController(PrefService* local_state,
+                   AppListModelUpdater* model_updater,
                    AppListControllerDelegate* list_controller,
                    ash::AppListNotifier* notifier,
-                   Profile* profile,
-                   ash::federated::FederatedServiceController*
-                       federated_service_controller_);
+                   Profile* profile);
   virtual ~SearchController();
 
   SearchController(const SearchController&) = delete;
@@ -87,6 +86,12 @@ class SearchController {
   // the TestSearchController mock.
   void Initialize();
 
+  // Returns the search categories that are available for users to choose if
+  // they want to have the results in the categories displayed in launcher
+  // search.
+  std::vector<ash::AppListSearchControlCategory> GetToggleableCategories()
+      const;
+
   // Takes ownership of |provider|.
   virtual void AddProvider(std::unique_ptr<SearchProvider> provider);
 
@@ -95,15 +100,17 @@ class SearchController {
 
   virtual void StartZeroState(base::OnceClosure on_done,
                               base::TimeDelta timeout);
-  // Stops zero state.
-  void AppListClosing();
+
+  // Callback made when app list view is open or closed. |is_visible| should be
+  // true when the view is open.
+  void AppListViewChanging(bool is_visible);
 
   void OpenResult(ChromeSearchResult* result, int event_flags);
   void InvokeResultAction(ChromeSearchResult* result,
                           ash::SearchResultActionType action);
 
   // Update the controller with the given results.
-  virtual void SetResults(const SearchProvider* provider, Results results);
+  virtual void SetResults(ResultType result_type, Results results);
 
   // Publishes results to ash.
   void Publish();
@@ -159,9 +166,9 @@ class SearchController {
   // Rank the results of |provider_type|.
   void Rank(ResultType provider_type);
 
-  void SetSearchResults(const SearchProvider* provider);
+  void SetSearchResults(ResultType result_type);
 
-  void SetZeroStateResults(const SearchProvider* provider);
+  void SetZeroStateResults(ResultType result_type);
 
   void OnZeroStateTimedOut();
 
@@ -199,9 +206,12 @@ class SearchController {
 
   bool disable_ranking_for_test_ = false;
 
+  std::vector<ControlCategory> toggleable_categories_;
+
   // If set, called when results set by a provider change. Only set by tests.
   ResultsChangedCallback results_changed_callback_for_test_;
 
+  const raw_ref<const PrefService> local_state_;
   const raw_ptr<Profile> profile_;
 
   std::unique_ptr<BurnInController> burn_in_controller_;
@@ -209,18 +219,17 @@ class SearchController {
 
   std::unique_ptr<SearchMetricsManager> metrics_manager_;
   std::unique_ptr<SearchSessionMetricsManager> session_metrics_manager_;
-  std::unique_ptr<federated::FederatedMetricsManager>
-      federated_metrics_manager_;
+  std::unique_ptr<AppDiscoveryMetricsManager> app_discovery_metrics_manager_;
 
   std::unique_ptr<AppSearchDataSource> app_search_data_source_;
 
-  std::vector<std::unique_ptr<SearchProvider>> providers_;
+  std::unique_ptr<SearchEngine> search_engine_;
+
+  std::unique_ptr<SearchFileScanner> search_file_scanner_;
 
   const raw_ptr<AppListModelUpdater> model_updater_;
   const raw_ptr<AppListControllerDelegate> list_controller_;
   const raw_ptr<ash::AppListNotifier> notifier_;
-  const raw_ptr<ash::federated::FederatedServiceController>
-      federated_service_controller_;
 
   base::ObserverList<Observer> observer_list_;
 };

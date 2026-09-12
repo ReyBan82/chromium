@@ -5,114 +5,184 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_VARIABLE_DATA_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_CSS_CSS_VARIABLE_DATA_H_
 
+#include "base/types/pass_key.h"
+#include "base/types/strong_alias.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser_token.h"
-#include "third_party/blink/renderer/core/css/parser/css_parser_token_range.h"
-#include "third_party/blink/renderer/core/css/parser/css_tokenized_value.h"
-#include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
+#include "third_party/blink/renderer/platform/wtf/hash_functions_memory.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
 class CSSSyntaxDefinition;
+class CSSParserLocalContext;
 enum class SecureContextMode;
 
-class CORE_EXPORT CSSVariableData : public RefCounted<CSSVariableData> {
-  USING_FAST_MALLOC(CSSVariableData);
+enum class VariableDataFeature : uint8_t {
+  kNone = 0,
+  kHasFontUnits = 1 << 0,
+  kHasRootFontUnits = 1 << 1,
+  kHasLineHeightUnits = 1 << 2,
+  kHasDashedFunctions = 1 << 3,
+  kHasReferences = 1 << 4,
+  kHasRandomFunctions = 1 << 5,
+};
+static constexpr size_t kVariableDataFeatureBits = 6;
+using VariableDataFeatures = unsigned;
 
+class CORE_EXPORT CSSVariableData : public GarbageCollected<CSSVariableData> {
  public:
-  static scoped_refptr<CSSVariableData> Create() {
-    return base::AdoptRef(new CSSVariableData());
-  }
-  static scoped_refptr<CSSVariableData> Create(
-      const CSSTokenizedValue& tokenized_value,
-      bool is_animation_tainted,
-      bool needs_variable_resolution) {
-    void* buf =
-        AllocateSpaceIncludingCSSParserTokens(tokenized_value.range.size());
-    return base::AdoptRef(new (buf) CSSVariableData(
-        tokenized_value, is_animation_tainted, needs_variable_resolution));
+  CSSVariableData()
+      : length_(0),
+        features_(
+            static_cast<VariableDataFeatures>(VariableDataFeature::kNone)),
+        is_animation_tainted_(false),
+        is_attr_tainted_(false),
+        is_8bit_(true) {}
+
+  using PassKey = base::PassKey<CSSVariableData>;
+  CSSVariableData(PassKey,
+                  StringView,
+                  bool is_animation_tainted,
+                  bool is_attr_tainted,
+                  VariableDataFeatures features);
+
+  // This is the fastest (non-trivial) constructor if you've got the has_* data
+  // already, e.g. because you extracted them while tokenizing (see
+  // ExtractFeatures()) or got them from another CSSVariableData instance during
+  // substitution.
+  static CSSVariableData* Create(StringView original_text,
+                                 bool is_animation_tainted,
+                                 bool is_attr_tainted,
+                                 VariableDataFeatures features) {
+    if (original_text.length() > kMaxVariableBytes) {
+      // This should have been blocked off during variable substitution.
+      NOTREACHED();
+    }
+
+    return MakeGarbageCollected<CSSVariableData>(
+        AdditionalBytes(original_text.Is8Bit() ? original_text.length()
+                                               : 2 * original_text.length()),
+        PassKey(), original_text, is_animation_tainted, is_attr_tainted,
+        features);
   }
 
-  CSSParserTokenRange TokenRange() const {
-    return CSSParserTokenRange{
-        base::span<CSSParserToken>(TokenInternalPtr(), num_tokens_)};
+  // This tokenizes the string to determine the has_* data.
+  // (The tokens are not used apart from that; only the original string is
+  // stored.)
+  using HasReferences = base::StrongAlias<class HasReferencesTag, bool>;
+  static CSSVariableData* Create(const String& original_text,
+                                 bool is_animation_tainted,
+                                 bool is_attr_tainted,
+                                 HasReferences has_references);
+
+  void Trace(Visitor*) const {}
+
+  StringView OriginalText() const {
+    // SAFETY: See AdditionalBytes() in Create().
+    if (is_8bit_) {
+      return StringView(UNSAFE_BUFFERS(base::span(
+          base::unchecked, reinterpret_cast<const LChar*>(this + 1), length_)));
+    } else {
+      return StringView(UNSAFE_BUFFERS(base::span(
+          base::unchecked, reinterpret_cast<const UChar*>(this + 1), length_)));
+    }
   }
 
-  base::span<CSSParserToken> Tokens() const {
-    return {TokenInternalPtr(), num_tokens_};
-  }
-
-  const AtomicString& BackingString() const { return backing_string_; }
+  uint32_t Hash() const { return HashMemory32(OriginalText().RawByteSpan()); }
 
   String Serialize() const;
+
+  bool EqualsIgnoringAttrTainting(const CSSVariableData& other) const;
 
   bool operator==(const CSSVariableData& other) const;
 
   bool IsAnimationTainted() const { return is_animation_tainted_; }
 
-  bool NeedsVariableResolution() const { return needs_variable_resolution_; }
+  bool IsAttrTainted() const { return is_attr_tainted_; }
+
+  bool NeedsVariableResolution() const {
+    return features_ & static_cast<VariableDataFeatures>(
+                           VariableDataFeature::kHasReferences);
+  }
 
   // True if the CSSVariableData has tokens with units that are relative to the
   // font-size of the current element, e.g. 'em'.
-  bool HasFontUnits() const { return has_font_units_; }
+  bool HasFontUnits() const {
+    return features_ & static_cast<VariableDataFeatures>(
+                           VariableDataFeature::kHasFontUnits);
+  }
 
   // True if the CSSVariableData has tokens with units that are relative to the
   // font-size of the root element, e.g. 'rem'.
-  bool HasRootFontUnits() const { return has_root_font_units_; }
+  bool HasRootFontUnits() const {
+    return features_ & static_cast<VariableDataFeatures>(
+                           VariableDataFeature::kHasRootFontUnits);
+  }
 
   // True if the CSSVariableData has tokens with 'lh' units which are relative
   // to line-height property.
-  bool HasLineHeightUnits() const { return has_line_height_units_; }
+  bool HasLineHeightUnits() const {
+    return features_ & static_cast<VariableDataFeatures>(
+                           VariableDataFeature::kHasLineHeightUnits);
+  }
+
+  // https://drafts.csswg.org/css-mixins-1/#typedef-dashed-function
+  bool HasDashedFunctions() const {
+    return features_ & static_cast<VariableDataFeatures>(
+                           VariableDataFeature::kHasDashedFunctions);
+  }
+
+  bool HasRandomFunctions() const {
+    return features_ & static_cast<VariableDataFeatures>(
+                           VariableDataFeature::kHasRandomFunctions);
+  }
+
+  VariableDataFeatures GetVariableDataFeatures() const { return features_; }
 
   const CSSValue* ParseForSyntax(const CSSSyntaxDefinition&,
-                                 SecureContextMode) const;
+                                 SecureContextMode,
+                                 CSSParserLocalContext&) const;
 
   CSSVariableData(const CSSVariableData&) = delete;
   CSSVariableData& operator=(const CSSVariableData&) = delete;
   CSSVariableData(CSSVariableData&&) = delete;
   CSSVariableData& operator=(const CSSVariableData&&) = delete;
 
+  // ORs the given flags with those of the given token.
+  static VariableDataFeatures ExtractFeatures(const CSSParserToken& token);
+
+  // The maximum number of bytes for a CSS variable (including text
+  // that comes from var() substitution). This matches Firefox.
+  //
+  // If you change this, length_ below may need updates.
+  //
+  // https://drafts.csswg.org/css-values-5/#long-substitution
+  static const size_t kMaxVariableBytes = 2097152;
+
  private:
-  CSSVariableData() {}
+  // We'd like to use bool for the booleans, but this causes the struct to
+  // balloon in size on Windows:
+  // https://randomascii.wordpress.com/2010/06/06/bit-field-packing-with-visual-c/
 
-  CSSVariableData(const CSSTokenizedValue&,
-                  bool is_animation_tainted,
-                  bool needs_variable_resolution);
+  // Enough for storing up to 2MB (and then some), cf. kMaxSubstitutionBytes.
+  // The remaining 2 bits are kept in reserve for future use.
+  const unsigned length_ : 22;
+  VariableDataFeatures features_ : kVariableDataFeatureBits;
+  const unsigned is_animation_tainted_ : 1;       // bool.
+  const unsigned is_attr_tainted_ : 1;            // bool.
+  const unsigned is_8bit_ : 1;                    // bool.
+  unsigned /* unused_ */ : 1;
 
-  void ConsumeAndUpdateTokens(const CSSParserTokenRange&);
-#if EXPENSIVE_DCHECKS_ARE_ON()
-  void VerifyStringBacking() const;
-#endif  // EXPENSIVE_DCHECKS_ARE_ON()
-
-  static void* AllocateSpaceIncludingCSSParserTokens(size_t num_tokens) {
-    const size_t bytes_needed =
-        sizeof(CSSVariableData) + num_tokens * sizeof(CSSParserToken);
-    return WTF::Partitions::FastMalloc(
-        bytes_needed, WTF::GetStringWithTypeName<CSSVariableData>());
-  }
-
-  CSSParserToken* TokenInternalPtr() const {
-    return const_cast<CSSParserToken*>(
-        reinterpret_cast<const CSSParserToken*>(this + 1));
-  }
-
-  // tokens_ may have raw pointers to string data, we store the String object
-  // owning that data in backing_string_ to keep it alive alongside the
-  // tokens_. (AtomicString makes sure it is deduplicated.)
-  AtomicString backing_string_;
-  String original_text_;
-  wtf_size_t num_tokens_ = 0;
-  const bool is_animation_tainted_ = false;
-  const bool needs_variable_resolution_ = false;
-  bool has_font_units_ = false;
-  bool has_root_font_units_ = false;
-  bool has_line_height_units_ = false;
-
-  // The CSSParserTokens are stored after this.
+  // The actual character data is stored after this.
 };
+
+#if !DCHECK_IS_ON()
+static_assert(sizeof(CSSVariableData) <= 4,
+              "CSSVariableData must not grow without thinking");
+#endif
 
 }  // namespace blink
 

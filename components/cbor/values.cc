@@ -6,23 +6,22 @@
 
 #include <new>
 #include <ostream>
+#include <string_view>
 #include <utility>
 
 #include "base/check_op.h"
+#include "base/containers/span.h"
+#include "base/containers/to_vector.h"
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
-#include "components/cbor/constants.h"
+#include "base/strings/string_view_util.h"
 
 namespace cbor {
 
 // static
-Value Value::InvalidUTF8StringValueForTesting(base::StringPiece in_string) {
-  return Value(
-      base::span<const uint8_t>(
-          reinterpret_cast<const uint8_t*>(in_string.data()), in_string.size()),
-      Type::INVALID_UTF8);
+Value Value::InvalidUTF8StringValueForTesting(std::string_view in_string) {
+  return Value(base::as_byte_span(in_string), Type::INVALID_UTF8);
 }
 
 Value::Value() noexcept : type_(Type::NONE) {}
@@ -31,54 +30,25 @@ Value::Value(Value&& that) noexcept {
   InternalMoveConstructFrom(std::move(that));
 }
 
-Value::Value(Type type) : type_(type) {
-  // Initialize with the default value.
-  switch (type_) {
-    case Type::UNSIGNED:
-    case Type::NEGATIVE:
-      integer_value_ = 0;
-      return;
-    case Type::INVALID_UTF8:
-    case Type::BYTE_STRING:
-      new (&bytestring_value_) BinaryValue();
-      return;
-    case Type::STRING:
-      new (&string_value_) std::string();
-      return;
-    case Type::ARRAY:
-      new (&array_value_) ArrayValue();
-      return;
-    case Type::MAP:
-      new (&map_value_) MapValue();
-      return;
-    case Type::TAG:
-      NOTREACHED() << constants::kUnsupportedMajorType;
-      return;
-    case Type::SIMPLE_VALUE:
-      simple_value_ = Value::SimpleValue::UNDEFINED;
-      return;
-    case Type::NONE:
-      return;
-  }
-  NOTREACHED();
-}
-
 Value::Value(SimpleValue in_simple)
     : type_(Type::SIMPLE_VALUE), simple_value_(in_simple) {
-  CHECK(static_cast<int>(in_simple) >= 20 && static_cast<int>(in_simple) <= 23);
+  CHECK(std::to_underlying(in_simple) >=
+            std::to_underlying(SimpleValue::kMinValue) &&
+        std::to_underlying(in_simple) <=
+            std::to_underlying(SimpleValue::kMaxValue));
 }
 
-Value::Value(bool boolean_value) : type_(Type::SIMPLE_VALUE) {
-  simple_value_ = boolean_value ? Value::SimpleValue::TRUE_VALUE
-                                : Value::SimpleValue::FALSE_VALUE;
-}
+Value::Value(bool boolean_value)
+    : type_(Type::SIMPLE_VALUE),
+      simple_value_(boolean_value ? SimpleValue::TRUE_VALUE
+                                  : SimpleValue::FALSE_VALUE) {}
 
 Value::Value(int integer_value)
     : Value(base::checked_cast<int64_t>(integer_value)) {}
 
-Value::Value(int64_t integer_value) : integer_value_(integer_value) {
-  type_ = integer_value >= 0 ? Type::UNSIGNED : Type::NEGATIVE;
-}
+Value::Value(int64_t integer_value)
+    : type_(integer_value >= 0 ? Type::UNSIGNED : Type::NEGATIVE),
+      integer_value_(integer_value) {}
 
 Value::Value(base::span<const uint8_t> in_bytes)
     : type_(Type::BYTE_STRING),
@@ -93,14 +63,14 @@ Value::Value(BinaryValue&& in_bytes) noexcept
     : type_(Type::BYTE_STRING), bytestring_value_(std::move(in_bytes)) {}
 
 Value::Value(const char* in_string, Type type)
-    : Value(base::StringPiece(in_string), type) {}
+    : Value(std::string_view(in_string), type) {}
 
 Value::Value(std::string&& in_string, Type type) noexcept : type_(type) {
   switch (type_) {
     case Type::STRING:
       new (&string_value_) std::string();
       string_value_ = std::move(in_string);
-      DCHECK(base::IsStringUTF8(string_value_));
+      DCHECK(base::IsStringUTF8AllowingNoncharacters(string_value_));
       break;
     case Type::BYTE_STRING:
       new (&bytestring_value_) BinaryValue();
@@ -111,12 +81,12 @@ Value::Value(std::string&& in_string, Type type) noexcept : type_(type) {
   }
 }
 
-Value::Value(base::StringPiece in_string, Type type) : type_(type) {
+Value::Value(std::string_view in_string, Type type) : type_(type) {
   switch (type_) {
     case Type::STRING:
       new (&string_value_) std::string();
       string_value_ = std::string(in_string);
-      DCHECK(base::IsStringUTF8(string_value_));
+      DCHECK(base::IsStringUTF8AllowingNoncharacters(string_value_));
       break;
     case Type::BYTE_STRING:
       new (&bytestring_value_) BinaryValue();
@@ -127,21 +97,19 @@ Value::Value(base::StringPiece in_string, Type type) : type_(type) {
   }
 }
 
-Value::Value(const ArrayValue& in_array) : type_(Type::ARRAY), array_value_() {
-  array_value_.reserve(in_array.size());
-  for (const auto& val : in_array)
-    array_value_.emplace_back(val.Clone());
-}
+Value::Value(const ArrayValue& in_array)
+    : type_(Type::ARRAY),
+      array_value_(base::ToVector(in_array, &Value::Clone)) {}
 
 Value::Value(ArrayValue&& in_array) noexcept
     : type_(Type::ARRAY), array_value_(std::move(in_array)) {}
 
-Value::Value(const MapValue& in_map) : type_(Type::MAP), map_value_() {
-  map_value_.reserve(in_map.size());
-  for (const auto& it : in_map)
-    map_value_.emplace_hint(map_value_.end(), it.first.Clone(),
-                            it.second.Clone());
-}
+Value::Value(const MapValue& in_map)
+    : type_(Type::MAP),
+      map_value_(base::sorted_unique,
+                 base::ToVector(in_map, [](const auto& it) {
+                   return std::make_pair(it.first.Clone(), it.second.Clone());
+                 })) {}
 
 Value::Value(MapValue&& in_map) noexcept
     : type_(Type::MAP), map_value_(std::move(in_map)) {}
@@ -174,15 +142,11 @@ Value Value::Clone() const {
       return Value(array_value_);
     case Type::MAP:
       return Value(map_value_);
-    case Type::TAG:
-      NOTREACHED() << constants::kUnsupportedMajorType;
-      return Value();
     case Type::SIMPLE_VALUE:
       return Value(simple_value_);
   }
 
   NOTREACHED();
-  return Value();
 }
 
 Value::SimpleValue Value::GetSimpleValue() const {
@@ -195,18 +159,18 @@ bool Value::GetBool() const {
   return simple_value_ == SimpleValue::TRUE_VALUE;
 }
 
-const int64_t& Value::GetInteger() const {
+int64_t Value::GetInteger() const {
   CHECK(is_integer());
   return integer_value_;
 }
 
-const int64_t& Value::GetUnsigned() const {
+int64_t Value::GetUnsigned() const {
   CHECK(is_unsigned());
   CHECK_GE(integer_value_, 0);
   return integer_value_;
 }
 
-const int64_t& Value::GetNegative() const {
+int64_t Value::GetNegative() const {
   CHECK(is_negative());
   CHECK_LT(integer_value_, 0);
   return integer_value_;
@@ -222,12 +186,8 @@ const Value::BinaryValue& Value::GetBytestring() const {
   return bytestring_value_;
 }
 
-base::StringPiece Value::GetBytestringAsString() const {
-  CHECK(is_bytestring());
-  const auto& bytestring_value = GetBytestring();
-  return base::StringPiece(
-      reinterpret_cast<const char*>(bytestring_value.data()),
-      bytestring_value.size());
+std::string_view Value::GetBytestringAsString() const {
+  return base::as_string_view(GetBytestring());
 }
 
 const Value::ArrayValue& Value::GetArray() const {
@@ -266,9 +226,6 @@ void Value::InternalMoveConstructFrom(Value&& that) {
     case Type::MAP:
       new (&map_value_) MapValue(std::move(that.map_value_));
       return;
-    case Type::TAG:
-      NOTREACHED() << constants::kUnsupportedMajorType;
-      return;
     case Type::SIMPLE_VALUE:
       simple_value_ = that.simple_value_;
       return;
@@ -292,9 +249,6 @@ void Value::InternalCleanup() {
       break;
     case Type::MAP:
       map_value_.~MapValue();
-      break;
-    case Type::TAG:
-      NOTREACHED() << constants::kUnsupportedMajorType;
       break;
     case Type::NONE:
     case Type::UNSIGNED:

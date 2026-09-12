@@ -11,12 +11,9 @@
 
 namespace media {
 
-class VideoColorSpace;
-
 class JniHdrMetadata {
  public:
-  JniHdrMetadata(const VideoColorSpace& color_space,
-                 const gfx::HDRMetadata& hdr_metadata);
+  explicit JniHdrMetadata(const gfx::HDRMetadata& hdr_metadata);
 
   JniHdrMetadata(const JniHdrMetadata&) = delete;
   JniHdrMetadata& operator=(const JniHdrMetadata&) = delete;
@@ -27,43 +24,20 @@ class JniHdrMetadata {
 
   // Java HdrMetadata implementation.
 
-  jint Primaries(JNIEnv* env, const base::android::JavaParamRef<jobject>& obj);
-  jint ColorTransfer(JNIEnv* env,
-                     const base::android::JavaParamRef<jobject>& obj);
-  jint Range(JNIEnv* env, const base::android::JavaParamRef<jobject>& obj);
-
-  jfloat PrimaryRChromaticityX(JNIEnv* env,
-                               const base::android::JavaParamRef<jobject>& obj);
-  jfloat PrimaryRChromaticityY(JNIEnv* env,
-                               const base::android::JavaParamRef<jobject>& obj);
-  jfloat PrimaryGChromaticityX(JNIEnv* env,
-                               const base::android::JavaParamRef<jobject>& obj);
-  jfloat PrimaryGChromaticityY(JNIEnv* env,
-                               const base::android::JavaParamRef<jobject>& obj);
-  jfloat PrimaryBChromaticityX(JNIEnv* env,
-                               const base::android::JavaParamRef<jobject>& obj);
-  jfloat PrimaryBChromaticityY(JNIEnv* env,
-                               const base::android::JavaParamRef<jobject>& obj);
-  jfloat WhitePointChromaticityX(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  jfloat WhitePointChromaticityY(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  jfloat MaxColorVolumeLuminance(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  jfloat MinColorVolumeLuminance(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  jint MaxContentLuminance(JNIEnv* env,
-                           const base::android::JavaParamRef<jobject>& obj);
-  jint MaxFrameAverageLuminance(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
+  float PrimaryRChromaticityX(JNIEnv* env);
+  float PrimaryRChromaticityY(JNIEnv* env);
+  float PrimaryGChromaticityX(JNIEnv* env);
+  float PrimaryGChromaticityY(JNIEnv* env);
+  float PrimaryBChromaticityX(JNIEnv* env);
+  float PrimaryBChromaticityY(JNIEnv* env);
+  float WhitePointChromaticityX(JNIEnv* env);
+  float WhitePointChromaticityY(JNIEnv* env);
+  float MaxColorVolumeLuminance(JNIEnv* env);
+  float MinColorVolumeLuminance(JNIEnv* env);
+  int32_t MaxContentLuminance(JNIEnv* env);
+  int32_t MaxFrameAverageLuminance(JNIEnv* env);
 
  private:
-  const raw_ref<const VideoColorSpace> color_space_;
   const raw_ref<const gfx::HDRMetadata> hdr_metadata_;
   base::android::ScopedJavaLocalRef<jobject> jobject_;
 };

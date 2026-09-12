@@ -14,7 +14,7 @@ CSSAlternateValue::CSSAlternateValue(const CSSFunctionValue& function,
 
 String CSSAlternateValue::CustomCSSText() const {
   StringBuilder builder;
-  builder.Append(getValueName(function_->FunctionType()));
+  builder.Append(GetCSSValueNameAs<StringView>(function_->FunctionType()));
   builder.Append('(');
   builder.Append(aliases_->CssText());
   builder.Append(')');
@@ -24,6 +24,11 @@ String CSSAlternateValue::CustomCSSText() const {
 bool CSSAlternateValue::Equals(const CSSAlternateValue& other) const {
   return base::ValuesEquivalent(function_, other.function_) &&
          base::ValuesEquivalent(aliases_, other.aliases_);
+}
+
+bool CSSAlternateValue::HasRandomFunctions() const {
+  return (function_ && function_->HasRandomFunctions()) ||
+         (aliases_ && aliases_->HasRandomFunctions());
 }
 
 }  // namespace blink::cssvalue

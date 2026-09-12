@@ -17,10 +17,12 @@ def register_fuchsia_args(parser: argparse.ArgumentParser) -> None:
     """Register common arguments for deploying to Fuchsia."""
 
     fuchsia_args = parser.add_argument_group(
-        'fuchsia', 'Arguments for working with Fuchsia checkout.')
-    fuchsia_args.add_argument('--fuchsia-out-dir',
-                              help='Path to output directory of a local '
-                              'Fuchsia checkout.')
+        'fuchsia', 'Arguments for working with Fuchsia checkout.'
+    )
+    fuchsia_args.add_argument(
+        '--fuchsia-out-dir',
+        help='Path to output directory of a local Fuchsia checkout.',
+    )
 
 
 def main():
@@ -34,9 +36,9 @@ def main():
     args = parser.parse_args()
 
     fuchsia_out_dir = os.path.expanduser(args.fuchsia_out_dir)
+    args.repo = os.path.join(fuchsia_out_dir, 'amber-files')
     package_paths = read_package_paths(args.out_dir, args.package)
-    publish_packages(package_paths, os.path.join(fuchsia_out_dir,
-                                                 'amber-files'))
+    publish_packages(package_paths, args)
     install_symbols(package_paths, fuchsia_out_dir)
 
 

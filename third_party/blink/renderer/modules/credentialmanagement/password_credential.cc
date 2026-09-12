@@ -72,12 +72,12 @@ PasswordCredential* PasswordCredential::Create(
       continue;
     const String& usv_string_value = value->GetAsUSVString();
 
-    Vector<String> autofill_tokens;
-    submittable_element->ToHTMLElement()
-        .FastGetAttribute(html_names::kAutocompleteAttr)
-        .GetString()
-        .LowerASCII()
-        .Split(' ', autofill_tokens);
+    String lower_value = submittable_element->ToHTMLElement()
+                             .FastGetAttribute(html_names::kAutocompleteAttr)
+                             .GetString()
+                             .ToAsciiLower();
+    Vector<StringView> autofill_tokens =
+        StringView(lower_value).SplitSkippingEmpty(' ');
     for (const auto& token : autofill_tokens) {
       if (token == "current-password" || token == "new-password") {
         data->setPassword(usv_string_value);
@@ -115,7 +115,7 @@ PasswordCredential* PasswordCredential::Create(const String& id,
                                                const String& name,
                                                const KURL& icon_url) {
   return MakeGarbageCollected<PasswordCredential>(
-      id, password, name, icon_url.IsEmpty() ? blink::KURL() : icon_url);
+      id, password, name, icon_url.IsEmpty() ? NullUrl() : icon_url);
 }
 
 PasswordCredential::PasswordCredential(const String& id,

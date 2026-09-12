@@ -8,8 +8,7 @@
 #include "chrome/browser/sync/sessions/sync_sessions_web_contents_router.h"
 #include "chrome/browser/sync/sessions/sync_sessions_web_contents_router_factory.h"
 #include "chrome/browser/translate/chrome_translate_client.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -36,6 +35,8 @@ class TestLocalSessionEventHandler
       std::move(quit_closure_).Run();
     }
   }
+
+  void OnLocalTabClosed() override { OnLocalTabModified(nullptr); }
 
   bool local_tab_updated() { return local_tab_updated_; }
   void reset_local_tab_updated() { local_tab_updated_ = false; }
@@ -87,12 +88,12 @@ class SyncSessionsRouterTabHelperBrowserTest : public InProcessBrowserTest {
   ~SyncSessionsRouterTabHelperBrowserTest() override = default;
 
   void SetUp() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     InProcessBrowserTest::SetUp();
   }
 
   void SetUpOnMainThread() override {
-    web_contents_ = browser()->tab_strip_model()->GetActiveWebContents();
+    web_contents_ = browser()->GetTabStripModel()->GetActiveWebContents();
     ASSERT_TRUE(embedded_test_server()->Start());
   }
 
@@ -108,7 +109,7 @@ class SyncSessionsRouterTabHelperBrowserTest : public InProcessBrowserTest {
   }
 
   void RemoveLanguageDetectionObserver() {
-    observer_.SetInterestedURL(GURL::EmptyGURL());
+    observer_.SetInterestedURL(GURL());
     ChromeTranslateClient* chrome_translate_client =
         ChromeTranslateClient::FromWebContents(web_contents());
     if (!chrome_translate_client) {
@@ -129,7 +130,8 @@ class SyncSessionsRouterTabHelperBrowserTest : public InProcessBrowserTest {
 
  protected:
  private:
-  raw_ptr<content::WebContents, DanglingUntriaged> web_contents_ = nullptr;
+  raw_ptr<content::WebContents, AcrossTasksDanglingUntriaged> web_contents_ =
+      nullptr;
   content::test::PrerenderTestHelper prerender_helper_;
   TestLocalSessionEventHandler handler;
   TestTranslateDriverObserver observer_;
@@ -149,7 +151,7 @@ IN_PROC_BROWSER_TEST_F(SyncSessionsRouterTabHelperBrowserTest,
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   sync_sessions::SyncSessionsWebContentsRouterFactory::GetInstance()
-      ->GetForProfile(browser()->profile())
+      ->GetForProfile(browser()->GetProfile())
       ->StartRoutingTo(GetSessionEventHandler());
   // Wait for OnLanguageDetermined().
   GetTranslateDriverObserver()->WaitForLanguageDetermined();
@@ -162,7 +164,8 @@ IN_PROC_BROWSER_TEST_F(SyncSessionsRouterTabHelperBrowserTest,
   // it, SyncSessionsRouterTabHelper doesn't trigger OnLocalTabModified() on
   // prerendering.
   GURL prerender_url = embedded_test_server()->GetURL("/title1.html");
-  int prerender_id = prerender_helper()->AddPrerender(prerender_url);
+  content::PrerenderHostId prerender_id =
+      prerender_helper()->AddPrerender(prerender_url);
   content::test::PrerenderHostObserver host_observer(*web_contents(),
                                                      prerender_id);
   // Make sure that OnLocalTabModified() is not called.
@@ -178,7 +181,7 @@ IN_PROC_BROWSER_TEST_F(SyncSessionsRouterTabHelperBrowserTest,
   RemoveLanguageDetectionObserver();
   // Stop Routing.
   sync_sessions::SyncSessionsWebContentsRouterFactory::GetInstance()
-      ->GetForProfile(browser()->profile())
+      ->GetForProfile(browser()->GetProfile())
       ->Stop();
 
   // Make sure that the prerender was activated when the main frame was

@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
@@ -19,7 +20,7 @@
 #include "content/browser/service_worker/service_worker_consts.h"
 #include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/browser/service_worker/service_worker_test_utils.h"
-#include "content/browser/url_loader_factory_getter.h"
+#include "content/common/features.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/url_loader_interceptor.h"
 #include "mojo/public/cpp/system/data_pipe.h"
@@ -31,6 +32,7 @@
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "net/url_request/redirect_info.h"
+#include "services/network/public/cpp/parsed_headers.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/url_loader_completion_status.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
@@ -95,8 +97,6 @@ class MockNetwork {
     access_network_ = access_network;
   }
 
-  network::ResourceRequest last_request() const { return last_request_; }
-
   bool InterceptNetworkRequest(URLLoaderInterceptor::RequestParams* params) {
     const network::ResourceRequest& url_request = params->url_request;
     last_request_ = url_request;
@@ -112,7 +112,8 @@ class MockNetwork {
     if (response.has_certificate_error) {
       response_head->cert_status = response.cert_status;
     }
-    response_head->parsed_headers = network::mojom::ParsedHeaders::New();
+    response_head->parsed_headers = network::PopulateParsedHeaders(
+        response_head->headers.get(), url_request.url);
 
     mojo::Remote<network::mojom::URLLoaderClient>& client = params->client;
     if (response_head->headers->response_code() == 307) {
@@ -120,15 +121,14 @@ class MockNetwork {
       return true;
     }
 
-    uint32_t bytes_written = response.body.size();
     mojo::ScopedDataPipeConsumerHandle consumer;
     mojo::ScopedDataPipeProducerHandle producer;
     CHECK_EQ(MOJO_RESULT_OK, mojo::CreateDataPipe(nullptr, producer, consumer));
-    MojoResult result = producer->WriteData(
-        response.body.data(), &bytes_written, MOJO_WRITE_DATA_FLAG_ALL_OR_NONE);
+    MojoResult result =
+        producer->WriteAllData(base::as_byte_span(response.body));
     CHECK_EQ(MOJO_RESULT_OK, result);
     client->OnReceiveResponse(std::move(response_head), std::move(consumer),
-                              absl::nullopt);
+                              std::nullopt);
 
     network::URLLoaderCompletionStatus status;
     status.error_code = net::OK;
@@ -242,10 +242,11 @@ class ServiceWorkerNewScriptLoaderTest : public testing::Test {
     *out_client = std::make_unique<network::TestURLLoaderClient>();
     *out_loader = ServiceWorkerNewScriptLoader::CreateAndStart(
         request_id, options, request, (*out_client)->CreateRemote(), version_,
-        helper_->url_loader_factory_getter()->GetNetworkFactory(),
+        helper_->GetNetworkFactory(),
         net::MutableNetworkTrafficAnnotationTag(TRAFFIC_ANNOTATION_FOR_TESTS),
         resource_id, /*is_throttle_needed=*/false,
-        /*requesting_frame_id=*/GlobalRenderFrameHostId());
+        /*requesting_frame_id=*/GlobalRenderFrameHostId(),
+        version_->network_restrictions_id());
   }
 
   // Returns false if the entry for |url| doesn't exist in the storage.
@@ -406,7 +407,7 @@ class BodyDataPipeTestURLLoaderFactory final
 
     client->OnReceiveResponse(std::move(response_head),
                               std::move(body_consumer),
-                              /*cached_metadata=*/absl::nullopt);
+                              /*cached_metadata=*/std::nullopt);
 
     network::URLLoaderCompletionStatus status;
     status.error_code = net::OK;
@@ -450,7 +451,8 @@ TEST_F(ServiceWorkerNewScriptLoaderTest, Success_ClientConsumeBodyLater) {
       net::MutableNetworkTrafficAnnotationTag(TRAFFIC_ANNOTATION_FOR_TESTS),
       /*cache_resource_id=*/5,
       /*is_throttle_needed=*/false,
-      /*requesting_frame_id=*/GlobalRenderFrameHostId());
+      /*requesting_frame_id=*/GlobalRenderFrameHostId(),
+      version_->network_restrictions_id());
 
   client.RunUntilResponseReceived();
   ASSERT_TRUE(client.has_received_response());
@@ -459,16 +461,17 @@ TEST_F(ServiceWorkerNewScriptLoaderTest, Success_ClientConsumeBodyLater) {
   // Keep writing body until ServiceWorkerNewScriptLoader's client producer
   // data pipe becomes full.
   mojo::ScopedDataPipeProducerHandle body_producer = loader_factory.TakeBody();
-  uint32_t total_bytes_written = 0;
+  size_t total_bytes_written = 0;
   while (true) {
-    uint32_t bytes_written = ServiceWorkerNewScriptLoader::kReadBufferSize;
-    MojoResult result = body_producer->WriteData(kBody.data(), &bytes_written,
-                                                 MOJO_WRITE_DATA_FLAG_NONE);
+    size_t actually_written_bytes = 0;
+    MojoResult result = body_producer->WriteData(base::as_byte_span(kBody),
+                                                 MOJO_WRITE_DATA_FLAG_NONE,
+                                                 actually_written_bytes);
     if (result != MOJO_RESULT_OK) {
       ASSERT_EQ(result, MOJO_RESULT_SHOULD_WAIT);
       break;
     }
-    total_bytes_written += bytes_written;
+    total_bytes_written += actually_written_bytes;
     // Make sure ServiceWorkerNewScriptLoader have a chance to write data to the
     // client's producer data pipe. This should not enter an infinite loop.
     base::RunLoop().RunUntilIdle();
@@ -788,6 +791,168 @@ TEST_F(ServiceWorkerNewScriptLoaderTest, AccessedNetwork) {
   client->RunUntilComplete();
   EXPECT_EQ(net::OK, client->completion_status().error_code);
   EXPECT_FALSE(version_->embedded_worker()->network_accessed_for_script());
+}
+
+TEST_F(ServiceWorkerNewScriptLoaderTest, PolicyDowngrade_FlagDisabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndDisableFeature(
+      features::kServiceWorkerVerifyMainScriptUrl);
+
+  const GURL kMainScriptURL(kNormalScriptURL);
+  const GURL kForgedScriptURL("https://example.com/forge.js");
+
+  // Main script with strict COEP.
+  mock_server_.Set(
+      kMainScriptURL,
+      MockHTTPServer::Response("HTTP/1.1 200 OK\n"
+                               "Content-Type: text/javascript\n"
+                               "Cross-Origin-Embedder-Policy: require-corp\n\n",
+                               "// main script"));
+
+  // Forged script with no COEP.
+  mock_server_.Set(kForgedScriptURL,
+                   MockHTTPServer::Response("HTTP/1.1 200 OK\n"
+                                            "Content-Type: text/javascript\n\n",
+                                            "// forged script"));
+
+  SetUpRegistration(kMainScriptURL);
+
+  base::HistogramTester histogram_tester;
+
+  // 1. Load the legitimate main script.
+  {
+    std::unique_ptr<network::TestURLLoaderClient> client;
+    std::unique_ptr<ServiceWorkerNewScriptLoader> loader;
+    DoRequest(kMainScriptURL, &client, &loader);
+    client->RunUntilComplete();
+    EXPECT_EQ(net::OK, client->completion_status().error_code);
+  }
+
+  histogram_tester.ExpectBucketCount(
+      "ServiceWorker.MainScriptUrlValidationResult",
+      ServiceWorkerMainScriptRequestValidationResult::kOk, 1);
+
+  // Verify initial policy (COEP: require-corp).
+  ASSERT_TRUE(version_->policy_container_host());
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kRequireCorp,
+            version_->policy_container_host()
+                ->policies()
+                .cross_origin_embedder_policy.value);
+
+  // 2. Load a forged script, pretending it's a main script.
+  {
+    network::ResourceRequest request;
+    request.url = kForgedScriptURL;
+    // Attacker forges these fields.
+    request.destination = network::mojom::RequestDestination::kServiceWorker;
+    request.mode = network::mojom::RequestMode::kSameOrigin;
+
+    std::unique_ptr<network::TestURLLoaderClient> client =
+        std::make_unique<network::TestURLLoaderClient>();
+    std::unique_ptr<ServiceWorkerNewScriptLoader> loader =
+        ServiceWorkerNewScriptLoader::CreateAndStart(
+            1, 0, request, client->CreateRemote(), version_,
+            helper_->GetNetworkFactory(),
+            net::MutableNetworkTrafficAnnotationTag(
+                TRAFFIC_ANNOTATION_FOR_TESTS),
+            GetNewResourceIdSync(context()->GetStorageControl()),
+            /*is_throttle_needed=*/false,
+            /*requesting_frame_id=*/GlobalRenderFrameHostId(),
+            version_->network_restrictions_id());
+    client->RunUntilComplete();
+    EXPECT_EQ(net::OK, client->completion_status().error_code);
+  }
+
+  histogram_tester.ExpectBucketCount(
+      "ServiceWorker.MainScriptUrlValidationResult",
+      ServiceWorkerMainScriptRequestValidationResult::kForgedUrl, 1);
+
+  // BUG: The policy was downgraded because the flag is disabled.
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kNone,
+            version_->policy_container_host()
+                ->policies()
+                .cross_origin_embedder_policy.value);
+}
+
+TEST_F(ServiceWorkerNewScriptLoaderTest, PolicyDowngrade_FlagEnabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      features::kServiceWorkerVerifyMainScriptUrl);
+
+  const GURL kMainScriptURL(kNormalScriptURL);
+  const GURL kForgedScriptURL("https://example.com/forge.js");
+
+  // Main script with strict COEP.
+  mock_server_.Set(
+      kMainScriptURL,
+      MockHTTPServer::Response("HTTP/1.1 200 OK\n"
+                               "Content-Type: text/javascript\n"
+                               "Cross-Origin-Embedder-Policy: require-corp\n\n",
+                               "// main script"));
+
+  // Forged script with no COEP.
+  mock_server_.Set(kForgedScriptURL,
+                   MockHTTPServer::Response("HTTP/1.1 200 OK\n"
+                                            "Content-Type: text/javascript\n\n",
+                                            "// forged script"));
+
+  SetUpRegistration(kMainScriptURL);
+
+  base::HistogramTester histogram_tester;
+
+  // 1. Load the legitimate main script.
+  {
+    std::unique_ptr<network::TestURLLoaderClient> client;
+    std::unique_ptr<ServiceWorkerNewScriptLoader> loader;
+    DoRequest(kMainScriptURL, &client, &loader);
+    client->RunUntilComplete();
+    EXPECT_EQ(net::OK, client->completion_status().error_code);
+  }
+
+  histogram_tester.ExpectBucketCount(
+      "ServiceWorker.MainScriptUrlValidationResult",
+      ServiceWorkerMainScriptRequestValidationResult::kOk, 1);
+
+  // Verify initial policy (COEP: require-corp).
+  ASSERT_TRUE(version_->policy_container_host());
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kRequireCorp,
+            version_->policy_container_host()
+                ->policies()
+                .cross_origin_embedder_policy.value);
+
+  // 2. Load a forged script, pretending it's a main script.
+  {
+    network::ResourceRequest request;
+    request.url = kForgedScriptURL;
+    // Attacker forges these fields.
+    request.destination = network::mojom::RequestDestination::kServiceWorker;
+    request.mode = network::mojom::RequestMode::kSameOrigin;
+
+    std::unique_ptr<network::TestURLLoaderClient> client =
+        std::make_unique<network::TestURLLoaderClient>();
+    std::unique_ptr<ServiceWorkerNewScriptLoader> loader =
+        ServiceWorkerNewScriptLoader::CreateAndStart(
+            1, 0, request, client->CreateRemote(), version_,
+            helper_->GetNetworkFactory(),
+            net::MutableNetworkTrafficAnnotationTag(
+                TRAFFIC_ANNOTATION_FOR_TESTS),
+            GetNewResourceIdSync(context()->GetStorageControl()),
+            /*is_throttle_needed=*/false,
+            /*requesting_frame_id=*/GlobalRenderFrameHostId(),
+            version_->network_restrictions_id());
+    client->RunUntilComplete();
+    EXPECT_EQ(net::OK, client->completion_status().error_code);
+  }
+
+  histogram_tester.ExpectBucketCount(
+      "ServiceWorker.MainScriptUrlValidationResult",
+      ServiceWorkerMainScriptRequestValidationResult::kForgedUrl, 1);
+
+  // FIXED: The policy should NOT be downgraded.
+  EXPECT_EQ(network::mojom::CrossOriginEmbedderPolicyValue::kRequireCorp,
+            version_->policy_container_host()
+                ->policies()
+                .cross_origin_embedder_policy.value);
 }
 
 }  // namespace service_worker_new_script_loader_unittest

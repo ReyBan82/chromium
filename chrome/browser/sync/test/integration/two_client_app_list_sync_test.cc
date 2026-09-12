@@ -20,7 +20,7 @@
 #include "components/prefs/pref_service.h"
 #include "components/sync/base/pref_names.h"
 #include "components/sync/base/user_selectable_type.h"
-#include "components/sync/driver/sync_user_settings.h"
+#include "components/sync/service/sync_user_settings.h"
 #include "content/public/test/browser_test.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_system.h"
@@ -73,6 +73,11 @@ class TwoClientAppListSyncTest : public SyncTest {
     // for each Profile.
     SyncAppListHelper::GetInstance();
     return true;
+  }
+
+  // This test suite is ChromeOS specific, where there's only Sync-the-feature.
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return SetupSyncMode::kSyncTheFeature;
   }
 
   void AwaitQuiescenceAndInstallAppsPendingForSync() {
@@ -364,12 +369,12 @@ IN_PROC_BROWSER_TEST_F(TwoClientAppListSyncTest, DisableSync) {
   WaitForExtensionServicesToLoad();
   ASSERT_TRUE(AllProfilesHaveSameAppList());
 
-  ASSERT_TRUE(GetClient(1)->DisableSyncForAllDatatypes());
+  ASSERT_TRUE(GetClient(1)->DisableAllSelectableTypes());
   InstallHostedApp(GetProfile(0), 0);
   ASSERT_TRUE(UpdatedProgressMarkerChecker(GetSyncService(0)).Wait());
   ASSERT_FALSE(AllProfilesHaveSameAppList());
 
-  ASSERT_TRUE(GetClient(1)->EnableSyncForRegisteredDatatypes());
+  ASSERT_TRUE(GetClient(1)->EnableAllSelectableTypes());
   AwaitQuiescenceAndInstallAppsPendingForSync();
 
   ASSERT_TRUE(AllProfilesHaveSameAppList());

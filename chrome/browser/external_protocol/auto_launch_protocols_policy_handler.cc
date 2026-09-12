@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/strings/string_util.h"
@@ -27,7 +28,7 @@ namespace {
 const char kValidProtocolChars[] =
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+-.";
 
-bool IsValidProtocol(const base::StringPiece protocol) {
+bool IsValidProtocol(std::string_view protocol) {
   // RFC3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
   if (protocol.empty())
     return false;
@@ -42,10 +43,11 @@ bool IsValidProtocol(const base::StringPiece protocol) {
 
 // Catches obvious errors like including a [/path] or [@query] element in the
 // pattern.
-bool IsValidOriginMatchingPattern(const base::StringPiece origin_pattern) {
+bool IsValidOriginMatchingPattern(std::string_view origin_pattern) {
   GURL gurl(origin_pattern);
-  if (gurl.has_path() && gurl.path_piece() != "/")
+  if (gurl.has_path() && gurl.path() != "/") {
     return false;
+  }
   if (gurl.has_query())
     return false;
   return true;
@@ -70,9 +72,9 @@ bool AutoLaunchProtocolsPolicyHandler::CheckPolicySettings(
   if (!CheckAndGetValue(policies, nullptr, &policy_value) || !policy_value)
     return false;
 
-  base::Value::List& policy_list = policy_value->GetList();
+  base::ListValue& policy_list = policy_value->GetList();
   for (size_t i = 0; i < policy_list.size(); ++i) {
-    const base::Value::Dict& protocol_origins_map = policy_list[i].GetDict();
+    const base::DictValue& protocol_origins_map = policy_list[i].GetDict();
 
     // If the protocol is invalid mark it as an error.
     const std::string* protocol = protocol_origins_map.FindString(
@@ -83,7 +85,7 @@ bool AutoLaunchProtocolsPolicyHandler::CheckPolicySettings(
                        IDS_POLICY_INVALID_PROTOCOL_ERROR, PolicyErrorPath{i});
     }
 
-    const base::Value::List* origins_list = protocol_origins_map.FindList(
+    const base::ListValue* origins_list = protocol_origins_map.FindList(
         policy::external_protocol::kOriginListKey);
     for (const auto& entry : *origins_list) {
       const std::string pattern = entry.GetString();
@@ -111,10 +113,10 @@ void AutoLaunchProtocolsPolicyHandler::ApplyPolicySettings(
   std::unique_ptr<base::Value> policy_value;
   CheckAndGetValue(policies, nullptr, &policy_value);
 
-  base::Value::List validated_pref_values;
+  base::ListValue validated_pref_values;
   for (auto& protocol_origins_map : policy_value->GetList()) {
     // If the protocol is invalid skip the entry.
-    base::Value::Dict& protocol_origins_dict = protocol_origins_map.GetDict();
+    base::DictValue& protocol_origins_dict = protocol_origins_map.GetDict();
     const std::string* protocol = protocol_origins_dict.FindString(
         policy::external_protocol::kProtocolNameKey);
     DCHECK(protocol);
@@ -122,7 +124,7 @@ void AutoLaunchProtocolsPolicyHandler::ApplyPolicySettings(
       continue;
 
     // Remove invalid patterns from the list.
-    base::Value::List* origin_patterns_list = protocol_origins_dict.FindList(
+    base::ListValue* origin_patterns_list = protocol_origins_dict.FindList(
         policy::external_protocol::kOriginListKey);
     origin_patterns_list->EraseIf([](const base::Value& pattern) {
       return !IsValidOriginMatchingPattern(pattern.GetString());

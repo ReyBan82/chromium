@@ -7,19 +7,26 @@
 #include <memory>
 #include <utility>
 
+#include "base/logging.h"
+#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/scoped_canvas.h"
 #include "ui/gfx/skia_paint_util.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/animation/ink_drop.h"
 #include "ui/views/animation/ink_drop_highlight.h"
 #include "ui/views/background.h"
 #include "ui/views/controls/button/image_button.h"
 #include "ui/views/controls/button/label_button.h"
 #include "ui/views/controls/button/md_text_button.h"
+#include "ui/views/controls/button/md_text_button_with_down_arrow.h"
 #include "ui/views/examples/examples_color_id.h"
 #include "ui/views/examples/examples_window.h"
 #include "ui/views/examples/grit/views_examples_resources.h"
@@ -51,14 +58,14 @@ class SolidRoundRectPainterWithShadow : public Painter {
  public:
   SolidRoundRectPainterWithShadow(SkColor bg_color,
                                   SkColor stroke_color,
-                                  float radius,
+                                  const gfx::RoundedCornersF& corner_radii,
                                   const gfx::Insets& insets,
                                   SkBlendMode blend_mode,
                                   bool antialias,
                                   bool has_shadow)
       : bg_color_(bg_color),
         stroke_color_(stroke_color),
-        radius_(radius),
+        corner_radii_(corner_radii),
         insets_(insets),
         blend_mode_(blend_mode),
         antialias_(antialias),
@@ -76,7 +83,9 @@ class SolidRoundRectPainterWithShadow : public Painter {
   void Paint(gfx::Canvas* canvas, const gfx::Size& size) override {
     gfx::ScopedCanvas scoped_canvas(canvas);
     const float scale = canvas->UndoDeviceScaleFactor();
-    float scaled_radius = radius_ * scale;
+    // Taking one of the radiuses and using it. |DrawRoundRect()| doesn't
+    // support setting radii separately.
+    float scaled_radius = corner_radii_.upper_left() * scale;
 
     gfx::Rect inset_rect(size);
     inset_rect.Inset(insets_);
@@ -120,7 +129,7 @@ class SolidRoundRectPainterWithShadow : public Painter {
  private:
   const SkColor bg_color_;
   const SkColor stroke_color_;
-  const float radius_;
+  const gfx::RoundedCornersF corner_radii_;
   const gfx::Insets insets_;
   const SkBlendMode blend_mode_;
   const bool antialias_;
@@ -132,6 +141,8 @@ class SolidRoundRectPainterWithShadow : public Painter {
 // library. This is a prototype of a potential way to implement such an effect
 // by overriding the hover effect to draw a new background with a shadow.
 class FabButton : public views::MdTextButton {
+  METADATA_HEADER(FabButton, views::MdTextButton)
+
  public:
   using MdTextButton::MdTextButton;
   FabButton(const FabButton&) = delete;
@@ -143,8 +154,8 @@ class FabButton : public views::MdTextButton {
         ExamplesColorIds::kColorButtonBackgroundFab);
     SetBackground(CreateBackgroundFromPainter(
         std::make_unique<SolidRoundRectPainterWithShadow>(
-            bg_color, SK_ColorTRANSPARENT, GetCornerRadiusValue(),
-            gfx::Insets(), SkBlendMode::kSrcOver, true, use_shadow_)));
+            bg_color, SK_ColorTRANSPARENT, GetCornerRadii(), gfx::Insets(),
+            SkBlendMode::kSrcOver, true, use_shadow_)));
   }
 
   void OnHoverChanged() {
@@ -165,29 +176,17 @@ class FabButton : public views::MdTextButton {
   bool use_shadow_ = false;
 };
 
-class IconAndTextButton : public views::MdTextButton {
- public:
-  IconAndTextButton(PressedCallback callback,
-                    const std::u16string& text,
-                    const gfx::VectorIcon& icon)
-      : MdTextButton(callback, text), icon_(icon) {}
-  IconAndTextButton(const IconAndTextButton&) = delete;
-  IconAndTextButton& operator=(const IconAndTextButton&) = delete;
-  ~IconAndTextButton() override = default;
+BEGIN_METADATA(FabButton)
+END_METADATA
 
-  void OnThemeChanged() override {
-    views::MdTextButton::OnThemeChanged();
+BEGIN_VIEW_BUILDER(/* no export */, FabButton, MdTextButton)
+END_VIEW_BUILDER
 
-    // Use the text color for the associated vector image.
-    SetImageModel(
-        views::Button::ButtonState::STATE_NORMAL,
-        ui::ImageModel::FromVectorIcon(*icon_, label()->GetEnabledColor()));
-  }
+}  // namespace views::examples
 
- private:
-  const raw_ref<const gfx::VectorIcon> icon_;
-};
+DEFINE_VIEW_BUILDER(, ::views::examples::FabButton)
 
+namespace views::examples {
 ButtonExample::ButtonExample() : ExampleBase("Button") {
   ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
   icon_ = rb.GetImageNamed(IDR_CLOSE_H).ToImageSkia();
@@ -197,74 +196,112 @@ ButtonExample::~ButtonExample() = default;
 
 void ButtonExample::CreateExampleView(View* container) {
   container->SetUseDefaultFillLayout(true);
-  ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
 
-  auto view = Builder<BoxLayoutView>()
-                  .SetOrientation(BoxLayout::Orientation::kVertical)
-                  .SetInsideBorderInsets(gfx::Insets(10))
-                  .SetBetweenChildSpacing(10)
-                  .SetCrossAxisAlignment(BoxLayout::CrossAxisAlignment::kCenter)
-                  .AddChildren(Builder<LabelButton>()
-                                   .CopyAddressTo(&label_button_)
-                                   .SetText(kLabelButton)
-                                   .SetRequestFocusOnPress(true)
-                                   .SetCallback(base::BindRepeating(
-                                       &ButtonExample::LabelButtonPressed,
-                                       base::Unretained(this), label_button_)),
-                               Builder<MdTextButton>()
-                                   .CopyAddressTo(&md_button_)
-                                   .SetText(u"Material Design"),
-                               Builder<MdTextButton>()
-                                   .CopyAddressTo(&md_disabled_button_)
-                                   .SetText(u"Material Design Disabled Button")
-                                   .SetState(Button::STATE_DISABLED),
-                               Builder<MdTextButton>()
-                                   .CopyAddressTo(&md_default_button_)
-                                   .SetText(u"Default")
-                                   .SetIsDefault(true),
-                               Builder<MdTextButton>()
-                                   .CopyAddressTo(&md_tonal_button_)
-                                   .SetText(u"Tonal"),
-                               Builder<ImageButton>()
-                                   .CopyAddressTo(&image_button_)
-                                   .SetAccessibleName(l10n_util::GetStringUTF16(
-                                       IDS_BUTTON_IMAGE_BUTTON_AX_LABEL))
-                                   .SetRequestFocusOnPress(true)
-                                   .SetCallback(base::BindRepeating(
-                                       &ButtonExample::ImageButtonPressed,
-                                       base::Unretained(this))))
-                  .Build();
+  auto view =
+      Builder<BoxLayoutView>()
+          .SetOrientation(BoxLayout::Orientation::kVertical)
+          .SetInsideBorderInsets(gfx::Insets(10))
+          .SetBetweenChildSpacing(10)
+          .SetCrossAxisAlignment(BoxLayout::CrossAxisAlignment::kCenter)
+          .AddChildren(Builder<LabelButton>()
+                           .CopyAddressTo(&label_button_)
+                           .SetText(kLabelButton)
+                           .SetRequestFocusOnPress(true)
+                           .SetMinSize(gfx::Size(150, 36))
+                           .SetHorizontalAlignment(gfx::ALIGN_CENTER)
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::LabelButtonPressed,
+                               base::Unretained(this), label_button_)),
+                       Builder<MdTextButton>()
+                           .CopyAddressTo(&md_button_)
+                           .SetText(u"Material Design")
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::MdButtonPressed,
+                               base::Unretained(this), md_button_)),
+                       Builder<MdTextButton>()
+                           .CopyAddressTo(&md_disabled_button_)
+                           .SetText(u"Material Design Disabled Button")
+                           .SetState(Button::STATE_DISABLED)
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::MdButtonPressed,
+                               base::Unretained(this), md_disabled_button_)),
+                       Builder<MdTextButton>()
+                           .CopyAddressTo(&md_default_button_)
+                           .SetText(u"Default")
+                           .SetIsDefault(true)
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::MdButtonPressed,
+                               base::Unretained(this), md_default_button_)),
+                       Builder<MdTextButton>()
+                           .CopyAddressTo(&md_tonal_button_)
+                           .SetStyle(ui::ButtonStyle::kTonal)
+                           .SetText(u"Tonal")
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::MdButtonPressed,
+                               base::Unretained(this), md_tonal_button_)),
+                       Builder<MdTextButton>()
+                           .CopyAddressTo(&md_text_button_)
+                           .SetStyle(ui::ButtonStyle::kText)
+                           .SetText(u"Material Text")
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::MdButtonPressed,
+                               base::Unretained(this), md_text_button_)),
+                       Builder<MdTextButton>()
+                           .CopyAddressTo(&md_icon_text_button_)
+                           .SetText(u"Material Text with Icon")
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::MdButtonPressed,
+                               base::Unretained(this), md_icon_text_button_)),
+                       Builder<FabButton>()
+                           .CopyAddressTo(&fab_button_)
+                           .SetText(u"Fab Prototype")
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::MdButtonPressed,
+                               base::Unretained(this), fab_button_)),
+                       Builder<ImageButton>()
+                           .CopyAddressTo(&image_button_)
+                           .SetAccessibleName(l10n_util::GetStringUTF16(
+                               IDS_BUTTON_IMAGE_BUTTON_AX_LABEL))
+                           .SetRequestFocusOnPress(true)
+                           .SetCallback(base::BindRepeating(
+                               &ButtonExample::ImageButtonPressed,
+                               base::Unretained(this))))
+          .Build();
+  md_icon_text_button_->SetImageModel(
+      views::Button::ButtonState::STATE_NORMAL,
+      ui::ImageModel::FromVectorIcon(
+          features::IsRoundedIconsEnabled() ? kInfoIcon : views::kInfoOldIcon));
 
-  view->AddChildView(std::make_unique<IconAndTextButton>(
+  view->AddChildView(ImageButton::CreateIconButton(
       base::BindRepeating(&ButtonExample::ImageButtonPressed,
                           base::Unretained(this)),
-      l10n_util::GetStringUTF16(IDS_COLORED_DIALOG_CHOOSER_BUTTON),
-      views::kInfoIcon));
-  view->AddChildView(std::make_unique<FabButton>(
+      features::IsRoundedIconsEnabled() ? kOpenInNewIcon
+                                        : views::kLaunchOldIcon,
+      u"Icon button"));
+  view->AddChildView(std::make_unique<views::MdTextButtonWithDownArrow>(
       base::BindRepeating(&ButtonExample::ImageButtonPressed,
                           base::Unretained(this)),
-      u"Fab Prototype"));
+      u"TextButton with down arrow"));
 
-  image_button_->SetImage(ImageButton::STATE_NORMAL,
-                          rb.GetImageNamed(IDR_CLOSE).ToImageSkia());
-  image_button_->SetImage(ImageButton::STATE_HOVERED,
-                          rb.GetImageNamed(IDR_CLOSE_H).ToImageSkia());
-  image_button_->SetImage(ImageButton::STATE_PRESSED,
-                          rb.GetImageNamed(IDR_CLOSE_P).ToImageSkia());
+  image_button_->SetImageModel(ImageButton::STATE_NORMAL,
+                               ui::ImageModel::FromResourceId(IDR_CLOSE));
+  image_button_->SetImageModel(ImageButton::STATE_HOVERED,
+                               ui::ImageModel::FromResourceId(IDR_CLOSE_H));
+  image_button_->SetImageModel(ImageButton::STATE_PRESSED,
+                               ui::ImageModel::FromResourceId(IDR_CLOSE_P));
 
-  md_tonal_button_->SetStyle(MdTextButton::Style::kTonal);
   container->AddChildView(std::move(view));
 }
 
 void ButtonExample::LabelButtonPressed(LabelButton* label_button,
                                        const ui::Event& event) {
-  PrintStatus("Label Button Pressed! count: %d", ++count_);
+  PrintStatus(base::StringPrintf("Label Button Pressed! count: %d", ++count_));
   if (event.IsControlDown()) {
     if (event.IsShiftDown()) {
-      label_button->SetText(
-          label_button->GetText().empty()
-              ? kLongText
-              : label_button->GetText().length() > 50 ? kLabelButton : u"");
+      label_button->SetText(label_button->GetText().empty() ? kLongText
+                            : label_button->GetText().length() > 50
+                                ? kLabelButton
+                                : u"");
     } else if (event.IsAltDown()) {
       label_button->SetImageModel(
           Button::STATE_NORMAL,
@@ -279,7 +316,7 @@ void ButtonExample::LabelButtonPressed(LabelButton* label_button,
   } else if (event.IsShiftDown()) {
     if (event.IsAltDown()) {
       // Toggle focusability.
-      label_button->IsAccessibilityFocusable()
+      label_button->GetViewAccessibility().IsAccessibilityFocusable()
           ? label_button->SetFocusBehavior(View::FocusBehavior::NEVER)
           : label_button->SetFocusBehavior(
                 PlatformStyle::kDefaultFocusBehavior);
@@ -288,11 +325,18 @@ void ButtonExample::LabelButtonPressed(LabelButton* label_button,
     label_button->SetIsDefault(!label_button->GetIsDefault());
   }
   example_view()->GetLayoutManager()->Layout(example_view());
-  PrintViewHierarchy(example_view());
+  LOG(ERROR) << '\n' << PrintViewHierarchy(example_view());
 }
 
 void ButtonExample::ImageButtonPressed() {
-  PrintStatus("Image Button Pressed! count: %d", ++count_);
+  PrintStatus(base::StringPrintf("Image Button Pressed! count: %d", ++count_));
+}
+
+void ButtonExample::MdButtonPressed(MdTextButton* md_button,
+                                    const ui::Event& event) {
+  PrintStatus(base::StringPrintf(
+      "MD Button Pressed: %s, count: %d",
+      base::UTF16ToUTF8(md_button->GetText()).c_str(), ++count_));
 }
 
 }  // namespace views::examples

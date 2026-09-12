@@ -10,15 +10,22 @@
 #include <stdint.h>
 
 #include <string>
+#include <string_view>
 
 #include "base/memory/raw_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
+#include "components/background_task_scheduler/task_ids.h"
 #include "components/metrics/data_use_tracker.h"
 #include "components/metrics/metrics_log_uploader.h"
 #include "components/metrics/metrics_logs_event_manager.h"
 #include "third_party/metrics_proto/reporting_info.pb.h"
 #include "url/gurl.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/types/pass_key.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 
 class PrefService;
 class PrefRegistrySimple;
@@ -29,6 +36,10 @@ class LogStore;
 class MetricsUploadScheduler;
 class MetricsServiceClient;
 
+#if BUILDFLAG(IS_ANDROID)
+class BackgroundUploadTask;
+#endif  // BUILDFLAG(IS_ANDROID)
+
 // ReportingService is an abstract class which uploads serialized logs from a
 // LogStore to a remote server. A concrete implementation of this class must
 // provide the specific LogStore and parameters for the MetricsLogUploader, and
@@ -36,16 +47,16 @@ class MetricsServiceClient;
 // occur while attempting to upload logs.
 class ReportingService {
  public:
-  // Creates a ReportingService with the given |client|, |local_state|,
-  // |max_retransmit_size|, and |logs_event_manager|. Does not take ownership
-  // of the parameters; instead it stores a weak pointer to each. Caller should
-  // ensure that the parameters are valid for the lifetime of this class.
-  // |logs_event_manager| is used to notify observers of log events. Can be set
-  // to null if observing the events is not necessary.
+  // Creates a ReportingService with the given parameters. Does not take
+  // ownership of the parameters; instead it stores a weak pointer to each.
+  // Caller should ensure that the parameters are valid for the lifetime of this
+  // class. |logs_event_manager| is used to notify observers of log events. Can
+  // be set to null if observing the events is not necessary.
   ReportingService(MetricsServiceClient* client,
                    PrefService* local_state,
                    size_t max_retransmit_size,
-                   MetricsLogsEventManager* logs_event_manager);
+                   MetricsLogsEventManager* logs_event_manager,
+                   background_task::TaskIds background_upload_task_id);
 
   ReportingService(const ReportingService&) = delete;
   ReportingService& operator=(const ReportingService&) = delete;
@@ -72,13 +83,36 @@ class ReportingService {
   void EnableReporting();
   void DisableReporting();
 
+#if BUILDFLAG(IS_ANDROID)
+  // Immediately starts the uploading of the next completed log from the log
+  // manager (see `SendNextLogImpl()` below).
+  void SendNextLogNow(base::PassKey<BackgroundUploadTask>,
+                      base::OnceClosure done_callback);
+
+  bool background_upload_task_scheduled() const {
+    return background_upload_task_scheduled_;
+  }
+
+  background_task::TaskIds background_upload_task_id() const {
+    return background_upload_task_id_;
+  }
+
+  // Sets `on_stop_task_called_`, which indicates that OnStopTask() was called
+  // for the active background upload task. This is usually triggered by the OS
+  // when it wants to urgently stop the background task.
+  void OnStopTask(base::PassKey<BackgroundUploadTask>);
+#endif  // BUILDFLAG(IS_ANDROID)
+
   // True iff reporting is currently enabled.
   bool reporting_active() const;
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
-  void SetIsInForegound(bool is_in_foreground) {
-    is_in_foreground_ = is_in_foreground;
+  MetricsUploadScheduler* GetUploadSchedulerForTesting() const {
+    return upload_scheduler_.get();
   }
+
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+  void OnAppEnterBackground();
+  void OnAppEnterForeground();
 #endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
 
   // Registers local state prefs used by this class. This should only be called
@@ -95,7 +129,7 @@ class ReportingService {
   // Getters for MetricsLogUploader parameters.
   virtual GURL GetUploadUrl() const = 0;
   virtual GURL GetInsecureUploadUrl() const = 0;
-  virtual base::StringPiece upload_mime_type() const = 0;
+  virtual std::string_view upload_mime_type() const = 0;
   virtual MetricsLogUploader::MetricServiceType service_type() const = 0;
 
   // Methods for recording data to histograms.
@@ -107,16 +141,31 @@ class ReportingService {
   virtual void LogSuccessLogSize(size_t log_size) {}
   virtual void LogSuccessMetadata(const std::string& staged_log) {}
   virtual void LogLargeRejection(size_t log_size) {}
+  virtual void LogBackgroundUploadTaskPendingTime(base::TimeDelta time) {}
+
+  // Uploads the next completed log from the log manager when possible. On
+  // Android, this means scheduling the upload to the OS through a JobScheduler,
+  // which allows network requests in the background (required starting from
+  // Android 15). On other platforms, there is no scheduling, and calling this
+  // immediately starts the upload (see `SendNextLogImpl()` below).
+  void SendNextLogWhenPossible();
 
   // If recording is enabled, begins uploading the next completed log from
   // the log manager, staging it if necessary.
-  void SendNextLog();
+  void SendNextLogImpl(base::OnceClosure done_callback);
 
   // Uploads the currently staged log (which must be non-null).
   void SendStagedLog();
 
   // Called after transmission completes (either successfully or with failure).
-  void OnLogUploadComplete(int response_code, int error_code, bool was_https);
+  // If |force_discard| is true, discard the log regardless of the response or
+  // error code. For example, this is used for builds that do not include any
+  // metrics server URLs (no reason to keep re-sending to a non-existent URL).
+  void OnLogUploadComplete(int response_code,
+                           int error_code,
+                           bool was_https,
+                           bool force_discard,
+                           std::string_view force_discard_reason);
 
   // Used to interact with the embedder. Weak pointer; must outlive |this|
   // instance.
@@ -140,8 +189,16 @@ class ReportingService {
   // Instance of the helper class for uploading logs.
   std::unique_ptr<MetricsLogUploader> log_uploader_;
 
-  // Whether there is a current log upload in progress.
-  bool log_upload_in_progress_;
+#if BUILDFLAG(IS_ANDROID)
+  // Whether the current log upload was initiated while the app was in the
+  // background. Set only when there is a log upload in progress.
+  std::optional<bool> log_upload_initiated_from_background_ = std::nullopt;
+
+  // Set when the most recent uploads have failed. Its value will be whether the
+  // first failure was from an upload initiated from the background. Unset when
+  // a successful upload occurs.
+  std::optional<bool> failures_started_from_background_ = std::nullopt;
+#endif  // BUILDFLAG(IS_ANDROID)
 
   // The scheduler for determining when uploads should happen.
   std::unique_ptr<MetricsUploadScheduler> upload_scheduler_;
@@ -162,6 +219,25 @@ class ReportingService {
   // uploading a log.
   bool is_in_foreground_ = false;
 #endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+
+  // The background task ID that will be posted to the JobScheduler to schedule
+  // a log upload (see `metrics::BackgroundUploadTask`). Used only on Android
+  // (not including WebView). This is intentionally not surrounded by a
+  // BUILDFLAG for the sake of making the constructor cleaner.
+  [[maybe_unused]] const background_task::TaskIds background_upload_task_id_;
+
+#if BUILDFLAG(IS_ANDROID)
+  // If there is a currently a scheduled JobScheduler upload task pending.
+  bool background_upload_task_scheduled_ = false;
+
+  // The time a background upload task was scheduled/posted to the JobScheduler.
+  // Used to track the time taken between the task being scheduled and the time
+  // the task actually runs.
+  std::optional<base::TimeTicks> background_upload_task_scheduled_time_;
+
+  // True if OnStopTask() was called for the active background task.
+  bool on_stop_task_called_ = false;
+#endif  // BUILDFLAG(IS_ANDROID)
 
   SEQUENCE_CHECKER(sequence_checker_);
 

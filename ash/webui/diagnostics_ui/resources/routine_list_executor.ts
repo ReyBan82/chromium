@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
 
-import {RoutineResult, RoutineResultInfo, RoutineRunnerReceiver, RoutineType, SystemRoutineControllerInterface} from './system_routine_controller.mojom-webui.js';
+import type {RoutineResult, RoutineResultInfo, RoutineType, SystemRoutineControllerInterface} from './system_routine_controller.mojom-webui.js';
+import {RoutineRunnerReceiver} from './system_routine_controller.mojom-webui.js';
 
 /**
  * Represents the execution progress of a test routine.
@@ -36,6 +37,7 @@ export class ResultStatusItem {
   routine: RoutineType;
   progress: ExecutionProgress;
   result: RoutineResult|null = null;
+  details: string|null = null;
 
   constructor(routine: RoutineType, progress = ExecutionProgress.NOT_STARTED) {
     this.routine = routine;
@@ -140,6 +142,7 @@ export class RoutineListExecutor {
 
               const status = new ResultStatusItem(name, progress);
               status.result = result;
+              status.details = info?.details ?? null;
               statusCallback(status);
               return progress;
             });

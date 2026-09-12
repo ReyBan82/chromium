@@ -23,7 +23,13 @@ class ReadingListLocal;
 // the current instance of the app.
 // |ADDED_VIA_EXTENSION| is when the entry was added via the share extension.
 // |ADDED_VIA_SYNC| is when the entry was added with sync.
-enum EntrySource { ADDED_VIA_CURRENT_APP, ADDED_VIA_EXTENSION, ADDED_VIA_SYNC };
+// |ADDED_VIA_IMPORT| is when the entry was created via a data import.
+enum EntrySource {
+  ADDED_VIA_CURRENT_APP,
+  ADDED_VIA_EXTENSION,
+  ADDED_VIA_SYNC,
+  ADDED_VIA_IMPORT,
+};
 
 }  // namespace reading_list
 
@@ -96,6 +102,7 @@ class ReadingListEntry : public base::RefCounted<ReadingListEntry> {
   // 1970. Returns 0 if the entry was not distilled.
   int64_t DistillationTime() const;
   // The size of the stored page in bytes.
+  // TODO(crbug.com/40894644): Remove after M115
   int64_t DistillationSize() const;
   // The time before the next try. This is automatically increased when the
   // state is set to WILL_RETRY or ERROR from a non-error state.
@@ -108,6 +115,9 @@ class ReadingListEntry : public base::RefCounted<ReadingListEntry> {
   bool IsRead() const;
   // Returns if an entry has ever been seen.
   bool HasBeenSeen() const;
+  // Returns whether the passed ReadingListSpecifics can be used to construct an
+  // entry via FromReadingListValidSpecifics().
+  static bool IsSpecificsValid(const sync_pb::ReadingListSpecifics& pb_entry);
 
   // The last update time of the entry. This value may be used to sort the
   // entries. The value is in microseconds since Jan 1st 1970.
@@ -144,7 +154,8 @@ class ReadingListEntry : public base::RefCounted<ReadingListEntry> {
 
   // Created a ReadingListEntry from the protobuf format.
   // If creation time is not set, it will be set to |now|.
-  static scoped_refptr<ReadingListEntry> FromReadingListSpecifics(
+  // Please note that |pb_entry| must be valid, as per IsSpecificsValid().
+  static scoped_refptr<ReadingListEntry> FromReadingListValidSpecifics(
       const sync_pb::ReadingListSpecifics& pb_entry,
       const base::Time& now);
 
@@ -226,6 +237,7 @@ class ReadingListEntry : public base::RefCounted<ReadingListEntry> {
   int64_t update_time_us_;
   int64_t update_title_time_us_;
   int64_t distillation_time_us_;
+  // TODO(crbug.com/40894644): Remove after M115
   int64_t distillation_size_;
 };
 

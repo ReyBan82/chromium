@@ -6,7 +6,6 @@
 
 #include <string>
 
-#include "ash/constants/app_types.h"
 #include "ash/public/cpp/shelf_config.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
@@ -23,6 +22,8 @@
 
 namespace ash {
 
+using chromeos::AppType;
+
 using WindowPositionerTest = AshTestBase;
 
 TEST_F(WindowPositionerTest, OpenDefaultWindowOnSecondDisplay) {
@@ -38,7 +39,7 @@ TEST_F(WindowPositionerTest, OpenDefaultWindowOnSecondDisplay) {
 
   // The window should be in the 2nd display with the default size.
   EXPECT_EQ("300x300", bounds.size().ToString());
-  EXPECT_TRUE(display::Screen::GetScreen()
+  EXPECT_TRUE(display::Screen::Get()
                   ->GetDisplayNearestWindow(second_root_window)
                   .bounds()
                   .Contains(bounds));
@@ -116,12 +117,12 @@ TEST_F(WindowPositionerTest, IgnoreFullscreenInAutoRearrange) {
 TEST_F(WindowPositionerTest, AutoRearrangeOnHideOrRemove) {
   // Create 2 browser windows.
   std::unique_ptr<aura::Window> window1 =
-      CreateAppWindow(gfx::Rect(200, 200, 330, 230), AppType::BROWSER);
+      CreateWindowWithAppType(AppType::BROWSER, {200, 200, 330, 230});
   std::unique_ptr<aura::Window> window2 =
-      CreateAppWindow(gfx::Rect(400, 600, 330, 230), AppType::BROWSER);
+      CreateWindowWithAppType(AppType::BROWSER, {400, 600, 330, 230});
   // Create 1 app window.
   std::unique_ptr<aura::Window> window3 =
-      CreateAppWindow(gfx::Rect(300, 200, 330, 230), AppType::SYSTEM_APP);
+      CreateWindowWithAppType(AppType::SYSTEM_APP, {300, 200, 330, 230});
 
   WindowState::Get(window1.get())->SetWindowPositionManaged(true);
   WindowState::Get(window2.get())->SetWindowPositionManaged(true);

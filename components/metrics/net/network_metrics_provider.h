@@ -11,7 +11,6 @@
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/metrics/histogram_base.h"
 #include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
@@ -41,7 +40,7 @@ class NetworkMetricsProvider
     NetworkQualityEstimatorProvider& operator=(
         const NetworkQualityEstimatorProvider&) = delete;
 
-    virtual ~NetworkQualityEstimatorProvider() {}
+    virtual ~NetworkQualityEstimatorProvider() = default;
 
     // Provides |this| with |callback| that would be invoked by |this| every
     // time there is a change in the network quality estimates.
@@ -50,7 +49,7 @@ class NetworkMetricsProvider
             callback) = 0;
 
    protected:
-    NetworkQualityEstimatorProvider() {}
+    NetworkQualityEstimatorProvider() = default;
   };
 
   // Creates a NetworkMetricsProvider, where
@@ -79,17 +78,10 @@ class NetworkMetricsProvider
   void ProvideSystemProfileMetrics(SystemProfileProto* system_profile) override;
 
   // NetworkConnectionObserver:
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   SystemProfileProto::Network::ConnectionType GetConnectionType() const;
-  SystemProfileProto::Network::WifiPHYLayerProtocol GetWifiPHYLayerProtocol()
-      const;
-
-  // Posts a call to net::GetWifiPHYLayerProtocol on the blocking pool.
-  void ProbeWifiPHYLayerProtocol();
-  // Callback from the blocking pool with the result of
-  // net::GetWifiPHYLayerProtocol.
-  void OnWifiPHYLayerProtocolResult(net::WifiPHYLayerProtocol mode);
 
   void OnEffectiveConnectionTypeChanged(net::EffectiveConnectionType type);
 
@@ -108,15 +100,9 @@ class NetworkMetricsProvider
   // True if |connection_type_| changed during the lifetime of the log.
   bool connection_type_is_ambiguous_;
   // The connection type according to network::NetworkConnectionTracker.
-  network::mojom::ConnectionType connection_type_;
+  net::NetworkChangeNotifier::ConnectionType connection_type_;
   // True if the network connection tracker has been initialized.
   bool network_connection_tracker_initialized_;
-
-  // True if |wifi_phy_layer_protocol_| changed during the lifetime of the log.
-  bool wifi_phy_layer_protocol_is_ambiguous_;
-  // The PHY mode of the currently associated access point obtained via
-  // net::GetWifiPHYLayerProtocol.
-  net::WifiPHYLayerProtocol wifi_phy_layer_protocol_;
 
   // Provides the network quality estimator. May be null.
   std::unique_ptr<NetworkQualityEstimatorProvider>

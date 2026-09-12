@@ -10,8 +10,6 @@
 #include "android_webview/common/aw_paths.h"
 #include "android_webview/common/aw_switches.h"
 #include "android_webview/common/crash_reporter/crash_keys.h"
-#include "android_webview/common_jni_headers/AwCrashReporterClient_jni.h"
-#include "base/android/build_info.h"
 #include "base/android/java_exception_reporter.h"
 #include "base/android/jni_android.h"
 #include "base/base_paths_android.h"
@@ -28,6 +26,9 @@
 #include "components/version_info/android/channel_getter.h"
 #include "components/version_info/version_info.h"
 #include "components/version_info/version_info_values.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/crash_client_jni/AwCrashReporterClient_jni.h"
 
 using base::android::AttachCurrentThread;
 
@@ -54,17 +55,22 @@ class AwCrashReporterClient : public crash_reporter::CrashReporterClient {
     return false;
   }
 
-  void GetProductNameAndVersion(std::string* product_name,
-                                std::string* version,
-                                std::string* channel) override {
-    *product_name = "AndroidWebView";
-    *version = PRODUCT_VERSION;
-    *channel =
-        version_info::GetChannelString(version_info::android::GetChannel());
+  void GetProductInfo(ProductInfo* product_info) override {
+    *product_info = ProductInfo(
+        "AndroidWebView", PRODUCT_VERSION,
+        version_info::GetChannelString(version_info::android::GetChannel()));
   }
 
   bool GetCrashDumpLocation(base::FilePath* crash_dir) override {
     return base::PathService::Get(android_webview::DIR_CRASH_DUMPS, crash_dir);
+  }
+
+  bool GetCrashMetricsLocation(base::FilePath* metrics_dir) override {
+    // WebView doesn't currently create/upload metrics from Crashpad. Returning
+    // false is already the default behavior, but we override it here to be
+    // explicit.
+    // TODO(crbug.com/440359722): decide if we want these metrics or not.
+    return false;
   }
 
   void GetSanitizationInformation(const char* const** crash_key_allowlist,
@@ -116,7 +122,6 @@ bool g_enabled;
 void EnableCrashReporter(const std::string& process_type) {
   if (g_enabled) {
     NOTREACHED() << "EnableCrashReporter called more than once";
-    return;
   }
 
   AwCrashReporterClient* client = AwCrashReporterClient::Get();
@@ -124,11 +129,14 @@ void EnableCrashReporter(const std::string& process_type) {
   crash_reporter::InitializeCrashpad(process_type.empty(), process_type);
   if (process_type.empty()) {
     base::android::InitJavaExceptionReporter();
+    // Only use the Java exception filter for the main process; in the child,
+    // we assume all exceptions are interesting as there is no app code in the
+    // process to generate irrelevant exceptions.
+    base::android::SetJavaExceptionFilter(base::BindRepeating(
+        &AwCrashReporterClient::JavaExceptionFilter, base::Unretained(client)));
   } else {
     base::android::InitJavaExceptionReporterForChildProcess();
   }
-  base::android::SetJavaExceptionFilter(base::BindRepeating(
-      &AwCrashReporterClient::JavaExceptionFilter, base::Unretained(client)));
   g_enabled = true;
 }
 
@@ -137,3 +145,5 @@ bool CrashReporterEnabled() {
 }
 
 }  // namespace android_webview
+
+DEFINE_JNI(AwCrashReporterClient)

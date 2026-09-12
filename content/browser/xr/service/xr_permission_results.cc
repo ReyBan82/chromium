@@ -4,8 +4,10 @@
 
 #include "content/browser/xr/service/xr_permission_results.h"
 
-#include "base/containers/contains.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
+#include "content/public/browser/permission_result.h"
+#include "device/vr/public/mojom/xr_session.mojom-shared.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
 
 namespace {
@@ -18,7 +20,8 @@ base::flat_map<blink::PermissionType, blink::mojom::PermissionStatus>
 CreatePermissionTypeToStatusMap(
     const std::vector<blink::PermissionType>& permissions,
     const std::vector<blink::mojom::PermissionStatus>& permission_statuses) {
-  DCHECK_EQ(permissions.size(), permission_statuses.size());
+  CHECK_EQ(permissions.size(), permission_statuses.size(),
+           base::NotFatalUntil::M159);
 
   base::flat_map<blink::PermissionType, blink::mojom::PermissionStatus> result;
   for (size_t i = 0; i < permissions.size(); ++i) {
@@ -62,7 +65,7 @@ bool XrPermissionResults::HasPermissionsFor(
 
 bool XrPermissionResults::HasPermissionsFor(
     blink::PermissionType permission_type) const {
-  if (!base::Contains(permission_type_to_status_, permission_type)) {
+  if (!permission_type_to_status_.contains(permission_type)) {
     return false;
   }
 
@@ -71,7 +74,7 @@ bool XrPermissionResults::HasPermissionsFor(
 }
 
 // static
-absl::optional<blink::PermissionType> XrPermissionResults::GetPermissionFor(
+std::optional<blink::PermissionType> XrPermissionResults::GetPermissionFor(
     device::mojom::XRSessionMode mode) {
   switch (mode) {
     case device::mojom::XRSessionMode::kInline:
@@ -84,13 +87,16 @@ absl::optional<blink::PermissionType> XrPermissionResults::GetPermissionFor(
 }
 
 // static
-absl::optional<blink::PermissionType> XrPermissionResults::GetPermissionFor(
+std::optional<blink::PermissionType> XrPermissionResults::GetPermissionFor(
     device::mojom::XRSessionFeature feature) {
   if (feature == device::mojom::XRSessionFeature::CAMERA_ACCESS) {
     return blink::PermissionType::VIDEO_CAPTURE;
   }
+  if (feature == device::mojom::XRSessionFeature::HAND_INPUT) {
+    return blink::PermissionType::HAND_TRACKING;
+  }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace content

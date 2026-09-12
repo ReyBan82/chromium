@@ -4,6 +4,8 @@
 
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 
+#include "components/services/app_service/public/protos/app_types.pb.h"
+
 namespace apps {
 
 WindowInfo::WindowInfo(int64_t display_id) : display_id(display_id) {}
@@ -88,6 +90,30 @@ ApplicationLaunchSource ConvertLaunchSourceToProtoApplicationLaunchSource(
       return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_LOCK_SCREEN;
     case LaunchSource::kFromAppHomePage:
       return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_APP_HOME_PAGE;
+    case LaunchSource::kFromReparenting:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_REPARENTING;
+    case LaunchSource::kFromProfileMenu:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_PROFILE_MENU;
+    case LaunchSource::kFromSysTrayCalendar:
+      return ApplicationLaunchSource::
+          APPLICATION_LAUNCH_SOURCE_SYSTEM_TRAY_CALENDAR;
+    case LaunchSource::kFromInstaller:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_INSTALLER;
+    case LaunchSource::kFromFirstRun:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_FIRST_RUN;
+    case LaunchSource::kFromWelcomeTour:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_WELCOME_TOUR;
+    case LaunchSource::kFromFocusMode:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_FOCUS_MODE;
+    case LaunchSource::kFromSparky:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_CHROME_INTERNAL;
+    case LaunchSource::kFromNavigationCapturing:
+      return ApplicationLaunchSource::
+          APPLICATION_LAUNCH_SOURCE_NAVIGATION_CAPTURING;
+    case LaunchSource::kFromWebInstallApi:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_WEB_INSTALL_API;
+    case LaunchSource::kFromMigration:
+      return ApplicationLaunchSource::APPLICATION_LAUNCH_SOURCE_MIGRATION;
   }
 }
 

@@ -45,7 +45,6 @@
 #include "base/containers/small_map.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
-#include "base/functional/callback_helpers.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
@@ -83,17 +82,21 @@ class BASE_EXPORT CancelableTaskTracker {
                           OnceClosure task,
                           OnceClosure reply);
 
-  template <typename TaskReturnType, typename ReplyArgType>
-  TaskId PostTaskAndReplyWithResult(TaskRunner* task_runner,
-                                    const Location& from_here,
-                                    OnceCallback<TaskReturnType()> task,
-                                    OnceCallback<void(ReplyArgType)> reply) {
-    auto* result = new std::unique_ptr<TaskReturnType>();
+  template <typename TaskReturnType, typename... ReplyArgTypes>
+  TaskId PostTaskAndReplyWithResult(
+      TaskRunner* task_runner,
+      const Location& from_here,
+      OnceCallback<TaskReturnType()> task,
+      OnceCallback<void(ReplyArgTypes...)> reply) {
+    using ReplyStorageType =
+        typename internal::ensure_tuple<TaskReturnType>::type;
+    auto* result = new std::unique_ptr<ReplyStorageType>();
     return PostTaskAndReply(
         task_runner, from_here,
-        BindOnce(&internal::ReturnAsParamAdapter<TaskReturnType>,
-                 std::move(task), Unretained(result)),
-        BindOnce(&internal::ReplyAdapter<TaskReturnType, ReplyArgType>,
+        BindOnce(
+            &internal::ReturnAsParamAdapter<ReplyStorageType, TaskReturnType>,
+            std::move(task), Unretained(result)),
+        BindOnce(&internal::ReplyAdapter<ReplyStorageType, ReplyArgTypes...>,
                  std::move(reply), Owned(result)));
   }
 
@@ -132,19 +135,14 @@ class BASE_EXPORT CancelableTaskTracker {
   // See https://crbug.com/918948.
   using TaskCancellationFlag = RefCountedData<AtomicFlag>;
 
-  static void RunIfNotCanceled(
-      const scoped_refptr<SequencedTaskRunner>& origin_task_runner,
-      const scoped_refptr<TaskCancellationFlag>& flag,
-      OnceClosure task);
+  static void RunIfNotCanceled(const scoped_refptr<TaskCancellationFlag>& flag,
+                               OnceClosure task);
   static void RunThenUntrackIfNotCanceled(
-      const scoped_refptr<SequencedTaskRunner>& origin_task_runner,
       const scoped_refptr<TaskCancellationFlag>& flag,
       OnceClosure task,
       OnceClosure untrack);
-  static bool IsCanceled(
-      const scoped_refptr<SequencedTaskRunner>& origin_task_runner,
-      const scoped_refptr<TaskCancellationFlag>& flag,
-      const ScopedClosureRunner& cleanup_runner);
+  static bool IsCanceled(const scoped_refptr<TaskCancellationFlag>& flag,
+                         const ScopedClosureRunner& cleanup_runner);
 
   void Track(TaskId id, scoped_refptr<TaskCancellationFlag> flag);
   void Untrack(TaskId id);
@@ -159,7 +157,7 @@ class BASE_EXPORT CancelableTaskTracker {
   TaskId next_id_ = 1;
   SEQUENCE_CHECKER(sequence_checker_);
 
-  // TODO(https://crbug.com/1009795): Remove once crasher is resolved.
+  // TODO(crbug.com/40050290): Remove once crasher is resolved.
   base::WeakPtr<CancelableTaskTracker> weak_this_;
   base::WeakPtrFactory<CancelableTaskTracker> weak_factory_{this};
 };

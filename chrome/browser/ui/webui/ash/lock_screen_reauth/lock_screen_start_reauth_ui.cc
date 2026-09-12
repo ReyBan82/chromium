@@ -6,58 +6,88 @@
 
 #include <memory>
 
+#include "ash/constants/ash_features.h"
+#include "ash/constants/webui_url_constants.h"
+#include "ash/login/resources/grit/ash_login_strings.h"
+#include "ash/webui/common/trusted_types_util.h"
+#include "base/check_deref.h"
 #include "base/strings/utf_string_conversions.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/ui/webui/ash/lock_screen_reauth/lock_screen_reauth_handler.h"
 #include "chrome/browser/ui/webui/ash/login/oobe_ui.h"
 #include "chrome/browser/ui/webui/metrics_handler.h"
-#include "chrome/common/webui_url_constants.h"
-#include "chrome/grit/browser_resources.h"
+#include "chrome/browser/ui/webui/theme_source.h"
+#include "chrome/grit/gaia_action_buttons_resources.h"
+#include "chrome/grit/gaia_action_buttons_resources_map.h"
 #include "chrome/grit/gaia_auth_host_resources_map.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/grit/lock_screen_reauth_resources.h"
 #include "chrome/grit/lock_screen_reauth_resources_map.h"
-#include "chrome/grit/oobe_unconditional_resources_map.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_types.h"
+#include "content/public/browser/url_data_source.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/chromeos/devicetype_utils.h"
+#include "ui/webui/webui_util.h"
 
 namespace ash {
 
-bool LockScreenStartReauthUIConfig::IsWebUIEnabled(
-    content::BrowserContext* browser_context) {
-  return ash::ProfileHelper::IsLockScreenProfile(
-      Profile::FromBrowserContext(browser_context));
+LockScreenStartReauthUIConfig::LockScreenStartReauthUIConfig(
+    PrefService* local_state,
+    const ApplicationLocaleStorage* application_locale_storage,
+    const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash)
+    : WebUIConfig(content::kChromeUIScheme,
+                  ash::kChromeUILockScreenStartReauthHost),
+      local_state_(CHECK_DEREF(local_state)),
+      application_locale_storage_(CHECK_DEREF(application_locale_storage)),
+      browser_policy_connector_ash_(CHECK_DEREF(browser_policy_connector_ash)) {
 }
 
-LockScreenStartReauthUI::LockScreenStartReauthUI(content::WebUI* web_ui)
+LockScreenStartReauthUIConfig::~LockScreenStartReauthUIConfig() = default;
+
+bool LockScreenStartReauthUIConfig::IsWebUIEnabled(
+    content::BrowserContext* browser_context) {
+  return IsLockScreenBrowserContext(browser_context);
+}
+
+std::unique_ptr<content::WebUIController>
+LockScreenStartReauthUIConfig::CreateWebUIController(content::WebUI* web_ui,
+                                                     const GURL& url) {
+  return std::make_unique<LockScreenStartReauthUI>(
+      &local_state_.get(), &application_locale_storage_.get(),
+      &browser_policy_connector_ash_.get(), web_ui);
+}
+
+LockScreenStartReauthUI::LockScreenStartReauthUI(
+    PrefService* local_state,
+    const ApplicationLocaleStorage* application_locale_storage,
+    const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+    content::WebUI* web_ui)
     : ui::WebDialogUI(web_ui) {
   Profile* profile = Profile::FromWebUI(web_ui);
+  content::URLDataSource::Add(profile, std::make_unique<ThemeSource>(profile));
   const user_manager::User* user =
-      user_manager::UserManager::Get()->GetActiveUser();
+      user_manager::UserManager::Get()->GetPrimaryUser();
   std::string email;
   if (user) {
     email = user->GetDisplayEmail();
   }
 
   content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
-      profile, chrome::kChromeUILockScreenStartReauthHost);
+      profile, ash::kChromeUILockScreenStartReauthHost);
+  ash::EnableTrustedTypesCSP(source);
 
-  auto main_handler = std::make_unique<LockScreenReauthHandler>(email);
+  auto main_handler = std::make_unique<LockScreenReauthHandler>(
+      local_state, application_locale_storage, browser_policy_connector_ash,
+      email);
   main_handler_ = main_handler.get();
   web_ui->AddMessageHandler(std::move(main_handler));
   web_ui->AddMessageHandler(std::make_unique<MetricsHandler>());
 
-  // TODO(crbug.com/1400799): Enable TrustedTypes.
-  source->DisableTrustedTypesCSP();
-
   source->EnableReplaceI18nInJS();
   source->UseStringsJs();
 
-  source->AddString("lockScreenReauthSubtitile",
-                    l10n_util::GetStringFUTF16(IDS_LOCK_SCREEN_REAUTH_SUBTITLE,
-                                               base::UTF8ToUTF16(email)));
   source->AddString(
       "lockScreenReauthSubtitile1WithError",
       l10n_util::GetStringUTF16(IDS_LOCK_SCREEN_WRONG_USER_SUBTITLE1));
@@ -65,7 +95,6 @@ LockScreenStartReauthUI::LockScreenStartReauthUI(content::WebUI* web_ui)
       "lockScreenReauthSubtitile2WithError",
       l10n_util::GetStringFUTF16(IDS_LOCK_SCREEN_WRONG_USER_SUBTITLE2,
                                  base::UTF8ToUTF16(email)));
-
   source->AddString("lockScreenVerifyButton",
                     l10n_util::GetStringUTF16(IDS_LOCK_SCREEN_VERIFY_BUTTON));
   source->AddString(
@@ -120,8 +149,8 @@ LockScreenStartReauthUI::LockScreenStartReauthUI(content::WebUI* web_ui)
       "samlChangeProviderButton",
       l10n_util::GetStringUTF16(IDS_LOGIN_SAML_CHANGE_PROVIDER_BUTTON));
 
-  source->AddResourcePaths(base::make_span(kLockScreenReauthResources,
-                                           kLockScreenReauthResourcesSize));
+  source->AddResourcePaths(kLockScreenReauthResources);
+  source->AddResourcePaths(kGaiaActionButtonsResources);
   source->SetDefaultResource(
       IDR_LOCK_SCREEN_REAUTH_LOCK_SCREEN_REAUTH_APP_HTML);
 
@@ -130,5 +159,7 @@ LockScreenStartReauthUI::LockScreenStartReauthUI(content::WebUI* web_ui)
 }
 
 LockScreenStartReauthUI::~LockScreenStartReauthUI() = default;
+
+WEB_UI_CONTROLLER_TYPE_IMPL(LockScreenStartReauthUI)
 
 }  // namespace ash

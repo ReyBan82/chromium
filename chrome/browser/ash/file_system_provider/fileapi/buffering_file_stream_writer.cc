@@ -7,20 +7,21 @@
 #include <algorithm>
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
+#include "base/numerics/safe_conversions.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
 
-namespace ash {
-namespace file_system_provider {
+namespace ash::file_system_provider {
 
 BufferingFileStreamWriter::BufferingFileStreamWriter(
     std::unique_ptr<storage::FileStreamWriter> file_stream_writer,
     int intermediate_buffer_length)
     : file_stream_writer_(std::move(file_stream_writer)),
       intermediate_buffer_length_(intermediate_buffer_length),
-      intermediate_buffer_(
-          base::MakeRefCounted<net::IOBuffer>(intermediate_buffer_length_)),
+      intermediate_buffer_(base::MakeRefCounted<net::IOBufferWithSize>(
+          intermediate_buffer_length_)),
       buffered_bytes_(0) {}
 
 BufferingFileStreamWriter::~BufferingFileStreamWriter() {
@@ -31,6 +32,10 @@ BufferingFileStreamWriter::~BufferingFileStreamWriter() {
 int BufferingFileStreamWriter::Write(net::IOBuffer* buffer,
                                      int buffer_length,
                                      net::CompletionOnceCallback callback) {
+  if (!buffer || (buffer_length < 0)) {
+    return net::ERR_INVALID_ARGUMENT;
+  }
+
   // If |buffer_length| is larger than the intermediate buffer, then call the
   // inner file stream writer directly. Note, that the intermediate buffer
   // (used for buffering) must be flushed first.
@@ -54,7 +59,7 @@ int BufferingFileStreamWriter::Write(net::IOBuffer* buffer,
   const int buffer_bytes =
       std::min(intermediate_buffer_length_ - buffered_bytes_, buffer_length);
 
-  CopyToIntermediateBuffer(base::WrapRefCounted(buffer), 0 /* buffer_offset */,
+  CopyToIntermediateBuffer(base::WrapRefCounted(buffer), /*buffer_offset=*/0,
                            buffer_bytes);
   const int bytes_left = buffer_length - buffer_bytes;
 
@@ -77,12 +82,13 @@ int BufferingFileStreamWriter::Cancel(net::CompletionOnceCallback callback) {
   return file_stream_writer_->Cancel(std::move(callback));
 }
 
-int BufferingFileStreamWriter::Flush(net::CompletionOnceCallback callback) {
+int BufferingFileStreamWriter::Flush(storage::FlushMode flush_mode,
+                                     net::CompletionOnceCallback callback) {
   // Flush all the buffered bytes first, then invoke Flush() on the inner file
   // stream writer.
   FlushIntermediateBuffer(base::BindOnce(
       &BufferingFileStreamWriter::OnFlushIntermediateBufferForFlushCompleted,
-      weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
+      weak_ptr_factory_.GetWeakPtr(), std::move(callback), flush_mode));
   return net::ERR_IO_PENDING;
 }
 
@@ -90,10 +96,15 @@ void BufferingFileStreamWriter::CopyToIntermediateBuffer(
     scoped_refptr<net::IOBuffer> buffer,
     int buffer_offset,
     int buffer_length) {
+  const size_t buffer_offset_size = base::checked_cast<size_t>(buffer_offset);
+  const size_t buffer_length_size = base::checked_cast<size_t>(buffer_length);
+  DCHECK_LE(buffer_length_size, buffer->span().size());
   DCHECK_GE(intermediate_buffer_length_, buffer_length + buffered_bytes_);
-  memcpy(intermediate_buffer_->data() + buffered_bytes_,
-         buffer->data() + buffer_offset,
-         buffer_length);
+  intermediate_buffer_->span()
+      .subspan(base::checked_cast<size_t>(buffered_bytes_))
+      .first(buffer_length_size)
+      .copy_prefix_from(
+          buffer->span().subspan(buffer_offset_size, buffer_length_size));
   buffered_bytes_ += buffer_length;
 }
 
@@ -165,15 +176,16 @@ void BufferingFileStreamWriter::
 
 void BufferingFileStreamWriter::OnFlushIntermediateBufferForFlushCompleted(
     net::CompletionOnceCallback callback,
+    storage::FlushMode flush_mode,
     int result) {
   if (result < 0) {
     std::move(callback).Run(result);
     return;
   }
 
-  const int flush_result = file_stream_writer_->Flush(std::move(callback));
+  const int flush_result =
+      file_stream_writer_->Flush(flush_mode, std::move(callback));
   DCHECK_EQ(net::ERR_IO_PENDING, flush_result);
 }
 
-}  // namespace file_system_provider
-}  // namespace ash
+}  // namespace ash::file_system_provider

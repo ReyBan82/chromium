@@ -4,9 +4,6 @@
 
 #import "ios/web/public/test/fakes/fake_web_state_delegate.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace web {
 
@@ -32,6 +29,13 @@ FakeAuthenticationRequest::~FakeAuthenticationRequest() = default;
 FakeAuthenticationRequest::FakeAuthenticationRequest(
     FakeAuthenticationRequest&&) = default;
 
+FakeProxyAuthenticationRequest::FakeProxyAuthenticationRequest() = default;
+
+FakeProxyAuthenticationRequest::~FakeProxyAuthenticationRequest() = default;
+
+FakeProxyAuthenticationRequest::FakeProxyAuthenticationRequest(
+    FakeProxyAuthenticationRequest&&) = default;
+
 FakeWebStateDelegate::FakeWebStateDelegate() {}
 
 FakeWebStateDelegate::~FakeWebStateDelegate() = default;
@@ -47,8 +51,7 @@ WebState* FakeWebStateDelegate::CreateNewWebState(WebState* source,
   last_create_new_web_state_request_->opener_url = opener_url;
   last_create_new_web_state_request_->initiated_by_user = initiated_by_user;
 
-  if (!initiated_by_user &&
-      allowed_popups_.find(opener_url) == allowed_popups_.end()) {
+  if (!initiated_by_user && !allowed_popups_.contains(opener_url)) {
     popups_.push_back(FakePopup(url, opener_url));
     return nullptr;
   }
@@ -92,7 +95,9 @@ JavaScriptDialogPresenter* FakeWebStateDelegate::GetJavaScriptDialogPresenter(
 
 void FakeWebStateDelegate::ShowRepostFormWarningDialog(
     WebState* source,
+    web::FormWarningType warningType,
     base::OnceCallback<void(bool)> callback) {
+  // TODO(crbug.com/40941405): Handle warningType as well.
   last_repost_form_request_ = std::make_unique<FakeRepostFormRequest>();
   last_repost_form_request_->web_state = source;
   last_repost_form_request_->callback = std::move(callback);
@@ -107,21 +112,47 @@ void FakeWebStateDelegate::OnAuthRequired(
     WebState* source,
     NSURLProtectionSpace* protection_space,
     NSURLCredential* credential,
-    AuthCallback callback) {
+    HTTPAuthCallback callback) {
   last_authentication_request_ = std::make_unique<FakeAuthenticationRequest>();
   last_authentication_request_->web_state = source;
   last_authentication_request_->protection_space = protection_space;
   last_authentication_request_->credential = credential;
-  last_authentication_request_->auth_callback = std::move(callback);
+  last_authentication_request_->http_auth_callback = std::move(callback);
 }
 
-bool FakeWebStateDelegate::HandlePermissionsDecisionRequest(
+void FakeWebStateDelegate::OnAuthRequired(
+    WebState* source,
+    NSURLProtectionSpace* protection_space,
+    ClientCertAuthCallback callback) {
+  last_authentication_request_ = std::make_unique<FakeAuthenticationRequest>();
+  last_authentication_request_->web_state = source;
+  last_authentication_request_->protection_space = protection_space;
+  last_authentication_request_->client_cert_auth_callback = std::move(callback);
+}
+
+void FakeWebStateDelegate::OnProxyAuthChallenge(
+    WebState* source,
+    NSURLProtectionSpace* protection_space,
+    NSURLCredential* proposed_credential,
+    NSURLResponse* failure_response,
+    ProxyAuthCallback callback) {
+  last_proxy_authentication_request_ =
+      std::make_unique<FakeProxyAuthenticationRequest>();
+  last_proxy_authentication_request_->web_state = source;
+  last_proxy_authentication_request_->protection_space = protection_space;
+  last_proxy_authentication_request_->proposed_credential = proposed_credential;
+  last_proxy_authentication_request_->failure_response = failure_response;
+  last_proxy_authentication_request_->proxy_auth_callback = std::move(callback);
+}
+
+void FakeWebStateDelegate::HandlePermissionsDecisionRequest(
     WebState* source,
     NSArray<NSNumber*>* permissions,
     WebStatePermissionDecisionHandler handler) {
   last_requested_permissions_ = permissions;
-  handler(should_grant_permissions_);
-  return true;
+  if (should_handle_permission_decision_) {
+    handler(permission_decision_);
+  }
 }
 
 }  // namespace web

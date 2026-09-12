@@ -9,8 +9,9 @@
 
 #include <utility>
 
+#include "base/apple/mach_logging.h"
 #include "base/containers/buffer_iterator.h"
-#include "base/mac/mach_logging.h"
+#include "base/containers/span.h"
 #include "base/mac/scoped_mach_msg_destroy.h"
 
 namespace mach_fuzzer {
@@ -44,7 +45,7 @@ SendablePort ConvertPort(const MachPortType& port_proto) {
   SendablePort port;
   kern_return_t kr = mach_port_allocate(
       mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
-      base::mac::ScopedMachReceiveRight::Receiver(port.receive_right).get());
+      base::apple::ScopedMachReceiveRight::Receiver(port.receive_right).get());
   MACH_CHECK(kr == KERN_SUCCESS, kr) << "mach_port_allocate";
 
   port.name = port.receive_right.get();
@@ -112,7 +113,9 @@ SendableMessage ConvertProtoToMachMessage(const MachMessage& proto) {
       (sizeof(mach_msg_descriptor_t) * descriptor_count) + data_size;
   message.buffer = std::make_unique<uint8_t[]>(round_msg(message_size));
 
-  base::BufferIterator<uint8_t> iterator(message.buffer.get(), message_size);
+  // SAFETY: message.buffer is allocated with at least message_size bytes.
+  auto iterator = UNSAFE_BUFFERS(
+      base::BufferIterator<uint8_t>(message.buffer.get(), message_size));
 
   auto* header = iterator.MutableObject<mach_msg_header_t>();
   message.header = header;
@@ -148,7 +151,7 @@ SendableMessage ConvertProtoToMachMessage(const MachMessage& proto) {
   }
 
   auto data = iterator.MutableSpan<uint8_t>(data_size);
-  memcpy(data.data(), proto.data().data(), proto.data().size());
+  data.copy_from(base::as_byte_span(proto.data()));
 
   header->msgh_size = round_msg(iterator.position());
 

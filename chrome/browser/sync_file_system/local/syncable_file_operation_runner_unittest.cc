@@ -59,7 +59,7 @@ class SyncableFileOperationRunnerTest : public testing::Test {
       : task_environment_(content::BrowserTaskEnvironment::IO_MAINLOOP),
         in_memory_env_(
             leveldb_chrome::NewMemEnv("SyncableFileOperationRunnerTest")),
-        file_system_(GURL("http://example.com"),
+        file_system_(GURL("chrome-extension://example"),
                      in_memory_env_.get(),
                      base::SingleThreadTaskRunner::GetCurrentDefault().get(),
                      base::SingleThreadTaskRunner::GetCurrentDefault().get()),
@@ -206,7 +206,7 @@ TEST_F(SyncableFileOperationRunnerTest, SimpleQueue) {
 }
 
 // Disabled because the implementation doesn't actually give the ordering
-// guarantees this test expects. https://crbug.com/1092668
+// guarantees this test expects. https://crbug.com/40698457
 TEST_F(SyncableFileOperationRunnerTest, DISABLED_WriteToParentAndChild) {
   // First create the kDir directory and kChild in the dir.
   EXPECT_EQ(File::FILE_OK, file_system_.CreateDirectory(URL(kDir)));
@@ -369,9 +369,7 @@ TEST_F(SyncableFileOperationRunnerTest, CopyInForeignFile) {
 
   base::FilePath temp_path;
   ASSERT_TRUE(CreateTempFile(&temp_path));
-  ASSERT_EQ(static_cast<int>(kTestData.size()),
-            base::WriteFile(
-                temp_path, kTestData.data(), kTestData.size()));
+  ASSERT_TRUE(base::WriteFile(temp_path, kTestData));
 
   sync_status()->StartSyncing(URL(kFile));
   ASSERT_FALSE(sync_status()->IsWritable(URL(kFile)));

@@ -6,33 +6,19 @@
 
 #include <memory>
 
-#include "ash/constants/ash_features.h"
-#include "base/functional/bind.h"
 #include "base/test/scoped_feature_list.h"
-#include "chrome/browser/ash/login/users/mock_user_manager.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
 #include "chrome/browser/ui/webui/signin/login_ui_service.h"
 #include "chrome/browser/ui/webui/signin/login_ui_service_factory.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
+#include "components/sync/base/features.h"
 #include "components/sync/test/test_sync_service.h"
-#include "components/user_manager/scoped_user_manager.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 
 namespace ash {
 
 namespace {
-
-// Notification ID corresponding to kProfileSyncNotificationId + the test
-// profile's name.
-constexpr char kNotificationId[] =
-    "chrome://settings/sync/testing_profile@test";
-
-class FakeLoginUIService : public LoginUIService {
- public:
-  FakeLoginUIService() : LoginUIService(nullptr) {}
-  ~FakeLoginUIService() override = default;
-};
 
 class FakeLoginUI : public LoginUIService::LoginUI {
  public:
@@ -41,11 +27,6 @@ class FakeLoginUI : public LoginUIService::LoginUI {
 
   void FocusUI() override {}
 };
-
-std::unique_ptr<KeyedService> BuildFakeLoginUIService(
-    content::BrowserContext* profile) {
-  return std::make_unique<FakeLoginUIService>();
-}
 
 class SyncErrorNotifierTest : public BrowserWithTestWindowTest {
  public:
@@ -59,27 +40,33 @@ class SyncErrorNotifierTest : public BrowserWithTestWindowTest {
   void SetUp() override {
     BrowserWithTestWindowTest::SetUp();
 
-    FakeLoginUIService* login_ui_service = static_cast<FakeLoginUIService*>(
-        LoginUIServiceFactory::GetInstance()->SetTestingFactoryAndUse(
-            profile(), base::BindRepeating(&BuildFakeLoginUIService)));
+    LoginUIService* login_ui_service =
+        LoginUIServiceFactory::GetForProfile(profile());
     login_ui_service->SetLoginUI(&login_ui_);
 
     error_notifier_ = std::make_unique<SyncErrorNotifier>(&service_, profile());
-
-    display_service_ =
-        std::make_unique<NotificationDisplayServiceTester>(profile());
   }
 
   void TearDown() override {
+    // Explicitly destroy the notifier to ensure it doesn't outlive the profile.
     error_notifier_->Shutdown();
+    error_notifier_.reset();
 
     BrowserWithTestWindowTest::TearDown();
   }
 
  protected:
+  const std::string& GetNotificationId() const {
+    return error_notifier_->GetNotificationIdForTesting();
+  }
+
+  const message_center::Notification* GetNotification() const {
+    return message_center::MessageCenter::Get()->FindNotificationById(
+        GetNotificationId());
+  }
+
   void ExpectNotificationShown(bool expected_notification) {
-    absl::optional<message_center::Notification> notification =
-        display_service_->GetNotification(kNotificationId);
+    const message_center::Notification* notification = GetNotification();
     if (expected_notification) {
       ASSERT_TRUE(notification);
       EXPECT_FALSE(notification->title().empty());
@@ -92,36 +79,94 @@ class SyncErrorNotifierTest : public BrowserWithTestWindowTest {
   std::unique_ptr<SyncErrorNotifier> error_notifier_;
   syncer::TestSyncService service_;
   FakeLoginUI login_ui_;
-  std::unique_ptr<NotificationDisplayServiceTester> display_service_;
-  user_manager::ScopedUserManager scoped_user_manager_{
-      std::make_unique<ash::MockUserManager>()};
 };
 
 TEST_F(SyncErrorNotifierTest, NoNotificationWhenNoPassphrase) {
-  service_.SetPassphraseRequiredForPreferredDataTypes(false);
-  service_.SetFirstSetupComplete(true);
+  ASSERT_FALSE(service_.GetUserSettings()->IsPassphraseRequired());
+  service_.SetInitialSyncFeatureSetupComplete(true);
+  error_notifier_->OnStateChanged(&service_);
+  ExpectNotificationShown(false);
+}
+
+TEST_F(SyncErrorNotifierTest,
+       NotificationShownWhenSyncFeatureDisabledViaDashboard) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(syncer::kReplaceSyncPromosWithSignInPromos);
+
+  service_.SetSignedIn(signin::ConsentLevel::kSignin);
+  service_.GetUserSettings()->SetSyncFeatureDisabledViaDashboard();
+  service_.SetInitialSyncFeatureSetupComplete(true);
+
+  error_notifier_->OnStateChanged(&service_);
+  ExpectNotificationShown(true);
+}
+
+TEST_F(SyncErrorNotifierTest,
+       NoNotificationWhenSyncFeatureDisabledViaDashboardWithoutFlag) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      syncer::kReplaceSyncPromosWithSignInPromos);
+
+  service_.SetSignedIn(signin::ConsentLevel::kSignin);
+  service_.GetUserSettings()->SetSyncFeatureDisabledViaDashboard();
+  service_.SetInitialSyncFeatureSetupComplete(true);
+
   error_notifier_->OnStateChanged(&service_);
   ExpectNotificationShown(false);
 }
 
 TEST_F(SyncErrorNotifierTest, NotificationShownWhenBrowserSyncEnabled) {
-  service_.SetPassphraseRequiredForPreferredDataTypes(true);
-  service_.SetFirstSetupComplete(true);
+  service_.GetUserSettings()->SetPassphraseRequired();
+  service_.SetInitialSyncFeatureSetupComplete(true);
   error_notifier_->OnStateChanged(&service_);
   ExpectNotificationShown(true);
 }
 
 TEST_F(SyncErrorNotifierTest, NotificationShownOnce) {
-  service_.SetPassphraseRequiredForPreferredDataTypes(true);
-  service_.SetFirstSetupComplete(true);
+  service_.GetUserSettings()->SetPassphraseRequired();
+  service_.SetInitialSyncFeatureSetupComplete(true);
   error_notifier_->OnStateChanged(&service_);
   ExpectNotificationShown(true);
 
   // Close the notification and verify it isn't shown again.
-  display_service_->RemoveNotification(NotificationHandler::Type::TRANSIENT,
-                                       kNotificationId, true /* by_user */);
+  message_center::MessageCenter::Get()->RemoveNotification(GetNotificationId(),
+                                                           /*by_user=*/true);
   error_notifier_->OnStateChanged(&service_);
   ExpectNotificationShown(false);
+}
+
+TEST_F(SyncErrorNotifierTest, NotificationClickRedirectsToSyncSetupByDefault) {
+  service_.GetUserSettings()->SetPassphraseRequired();
+  service_.SetInitialSyncFeatureSetupComplete(true);
+
+  EXPECT_EQ(SyncErrorNotifier::GetDestinationSubpage(&service_), "syncSetup");
+}
+
+TEST_F(
+    SyncErrorNotifierTest,
+    NotificationClickRedirectsToAccountSettingsWhenFlagEnabledAndNoSyncConsent) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(syncer::kReplaceSyncPromosWithSignInPromos);
+
+  // Consent level kSignin (means HasSyncConsent is false).
+  service_.SetSignedIn(signin::ConsentLevel::kSignin);
+  service_.GetUserSettings()->SetPassphraseRequired();
+  service_.SetInitialSyncFeatureSetupComplete(true);
+
+  EXPECT_EQ(SyncErrorNotifier::GetDestinationSubpage(&service_), "account");
+}
+
+TEST_F(SyncErrorNotifierTest,
+       NotificationClickRedirectsToSyncSetupWhenFlagEnabledAndHasSyncConsent) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(syncer::kReplaceSyncPromosWithSignInPromos);
+
+  // Consent level kSync (means HasSyncConsent is true).
+  service_.SetSignedIn(signin::ConsentLevel::kSync);
+  service_.GetUserSettings()->SetPassphraseRequired();
+  service_.SetInitialSyncFeatureSetupComplete(true);
+
+  EXPECT_EQ(SyncErrorNotifier::GetDestinationSubpage(&service_), "syncSetup");
 }
 
 }  // namespace

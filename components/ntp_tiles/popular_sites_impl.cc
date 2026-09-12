@@ -8,16 +8,20 @@
 
 #include <map>
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/json/json_reader.h"
+#include "base/metrics/field_trial_params.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
+#include "base/types/expected_macros.h"
 #include "base/values.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
@@ -34,13 +38,11 @@
 #include "net/base/load_flags.h"
 #include "net/http/http_status_code.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
-#include "services/data_decoder/public/cpp/data_decoder.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
-#include "base/json/json_reader.h"
 #include "components/grit/components_resources.h"
 #include "ui/base/resource/resource_bundle.h"
 #endif
@@ -57,46 +59,41 @@ namespace {
 
 const char kPopularSitesURLFormat[] =
     "https://www.gstatic.com/%ssuggested_sites_%s_%s.json";
+const char kPopularSitesURLFormatWithArm[] =
+    "https://www.gstatic.com/%ssuggested_sites_%s_%s_%d.json";
 const char kPopularSitesDefaultDirectory[] = "chrome/ntp/";
 const char kPopularSitesDefaultCountryCode[] = "DEFAULT";
-const char kPopularSitesDefaultVersion[] = "5";
+const char kPopularSitesDefaultVersion[] = "7";
 const int kSitesExplorationStartVersion = 6;
 const int kPopularSitesRedownloadIntervalHours = 24;
-const char kIOSDefaultPopularSitesExperimentIncludeApps[] =
+#if BUILDFLAG(IS_IOS)
+const char kIOSDefaultPopularSitesLocaleUS[] =
     "https://www.gstatic.com/chrome/ntp/ios/"
     "suggested_sites_US_2023q1_mvt_experiment_with_popular_sites.json";
-const char kIOSDefaultPopularSitesExperimentExcludeApps[] =
-    "https://www.gstatic.com/chrome/ntp/ios/"
-    "suggested_sites_US_2023q1_mvt_experiment_without_popular_sites.json";
+#endif
 
 GURL GetPopularSitesURL(const std::string& directory,
                         const std::string& country,
                         const std::string& version) {
-  // A Chrome iOS-only experiment is being run for M109 which overrides the
-  // popular sites URL.
-  IOSDefaultPopularSitesExperimentBehavior experiment_type =
-      GetDefaultPopularSitesExperimentType();
-
-  // If the experiment is enabled, and the popular sites suggestions should
-  // include sites with native iOS apps,
-  // `kIOSDefaultPopularSitesExperimentIncludeApps` is used.
-  if (country == "US" &&
-      experiment_type ==
-          IOSDefaultPopularSitesExperimentBehavior::kIncludePopularApps) {
-    return GURL(kIOSDefaultPopularSitesExperimentIncludeApps);
+  // US-based Chrome iOS users have a curated set of default Most Visited Tiles,
+  // based on Chrome iOS history in the US.
+#if BUILDFLAG(IS_IOS)
+  if (country == "US") {
+    return GURL(kIOSDefaultPopularSitesLocaleUS);
   }
-
-  // If the experiment is enabled, and the popular sites suggestions should
-  // exclude sites with native iOS apps,
-  // `kIOSDefaultPopularSitesExperimentExcludeApps` is used.
-  if (country == "US" &&
-      experiment_type ==
-          IOSDefaultPopularSitesExperimentBehavior::kExcludePopularApps) {
-    return GURL(kIOSDefaultPopularSitesExperimentExcludeApps);
-  }
+#endif
 
   return GURL(base::StringPrintf(kPopularSitesURLFormat, directory.c_str(),
                                  country.c_str(), version.c_str()));
+}
+
+GURL GetPopularSitesURLWithArm(const std::string& directory,
+                               const std::string& country,
+                               const std::string& version,
+                               int arm) {
+  return GURL(base::StringPrintf(kPopularSitesURLFormatWithArm,
+                                 directory.c_str(), country.c_str(),
+                                 version.c_str(), arm));
 }
 
 // Extract the country from the default search engine if the default search
@@ -106,8 +103,9 @@ std::string GetDefaultSearchEngineCountryCode(
   DCHECK(template_url_service);
 
   base::CommandLine* cmd_line = base::CommandLine::ForCurrentProcess();
-  if (!cmd_line->HasSwitch(switches::kEnableNTPSearchEngineCountryDetection))
+  if (!cmd_line->HasSwitch(switches::kEnableNTPSearchEngineCountryDetection)) {
     return std::string();
+  }
 
   const TemplateURL* default_provider =
       template_url_service->GetDefaultSearchProvider();
@@ -130,45 +128,48 @@ std::string GetDefaultSearchEngineCountryCode(
 }
 
 std::string GetVariationCountry() {
-  return variations::GetVariationParamValue(kPopularSitesFieldTrialName,
-                                            "country");
+  return base::GetFieldTrialParamValue(kPopularSitesFieldTrialName, "country");
 }
 
 std::string GetVariationVersion() {
-  return variations::GetVariationParamValue(kPopularSitesFieldTrialName,
-                                            "version");
+  return base::GetFieldTrialParamValue(kPopularSitesFieldTrialName, "version");
 }
 
 std::string GetVariationDirectory() {
-  return variations::GetVariationParamValue(kPopularSitesFieldTrialName,
-                                            "directory");
+  return base::GetFieldTrialParamValue(kPopularSitesFieldTrialName,
+                                       "directory");
 }
 
-PopularSites::SitesVector ParseSiteList(const base::Value::List& list) {
+PopularSites::SitesVector ParseSiteList(const base::ListValue& list) {
   PopularSites::SitesVector sites;
   for (const base::Value& item_value : list) {
-    if (!item_value.is_dict())
+    if (!item_value.is_dict()) {
       continue;
-    const base::Value::Dict& item = item_value.GetDict();
+    }
+    const base::DictValue& item = item_value.GetDict();
     std::u16string title;
-    if (const std::string* ptr = item.FindString("title"))
+    if (const std::string* ptr = item.FindString("title")) {
       title = base::UTF8ToUTF16(*ptr);
-    else
+    } else {
       continue;
+    }
     std::string url;
-    if (const std::string* ptr = item.FindString("url"))
+    if (const std::string* ptr = item.FindString("url")) {
       url = *ptr;
-    else
+    } else {
       continue;
+    }
     std::string favicon_url;
-    if (const std::string* ptr = item.FindString("favicon_url"))
+    if (const std::string* ptr = item.FindString("favicon_url")) {
       favicon_url = *ptr;
+    }
     std::string large_icon_url;
-    if (const std::string* ptr = item.FindString("large_icon_url"))
+    if (const std::string* ptr = item.FindString("large_icon_url")) {
       large_icon_url = *ptr;
+    }
 
     TileTitleSource title_source = TileTitleSource::UNKNOWN;
-    absl::optional<int> title_source_int = item.FindInt("title_source");
+    std::optional<int> title_source_int = item.FindInt("title_source");
     if (!title_source_int) {
       // Only v6 and later have "title_source". Earlier versions use title tags.
       title_source = TileTitleSource::TITLE_TAG;
@@ -179,29 +180,36 @@ PopularSites::SitesVector ParseSiteList(const base::Value::List& list) {
 
     sites.emplace_back(title, GURL(url), GURL(favicon_url),
                        GURL(large_icon_url), title_source);
-    absl::optional<int> default_icon_resource =
+    std::optional<int> default_icon_resource =
         item.FindInt("default_icon_resource");
-    if (default_icon_resource)
+    if (default_icon_resource) {
       sites.back().default_icon_resource = *default_icon_resource;
-    absl::optional<bool> baked_in = item.FindBool("baked_in");
-    if (baked_in.has_value())
+    }
+    std::optional<bool> baked_in = item.FindBool("baked_in");
+    if (baked_in.has_value()) {
       sites.back().baked_in = baked_in.value();
+    }
   }
   return sites;
 }
 
-std::map<SectionType, PopularSites::SitesVector> ParseVersion5(
-    const base::Value::List& list) {
+std::map<SectionType, PopularSites::SitesVector> ParseSimple(
+    const base::ListValue& list) {
   return {{SectionType::PERSONALIZED, ParseSiteList(list)}};
 }
 
-std::map<SectionType, PopularSites::SitesVector> ParseVersion6OrAbove(
-    const base::Value::List& list) {
+bool IsSectioned(const base::ListValue& list) {
+  return !list.empty() && list[0].is_dict() &&
+         list[0].GetDict().contains("section");
+}
+
+std::map<SectionType, PopularSites::SitesVector> ParseSectioned(
+    const base::ListValue& list) {
   // Valid lists would have contained at least the PERSONALIZED section.
   std::map<SectionType, PopularSites::SitesVector> sections = {
       std::make_pair(SectionType::PERSONALIZED, PopularSites::SitesVector{})};
   for (size_t i = 0; i < list.size(); i++) {
-    const base::Value::Dict* item_dict = list[i].GetIfDict();
+    const base::DictValue* item_dict = list[i].GetIfDict();
     if (!item_dict) {
       LOG(WARNING) << "Parsed SitesExploration list contained an invalid "
                    << "section at position " << i << ".";
@@ -216,72 +224,66 @@ std::map<SectionType, PopularSites::SitesVector> ParseVersion6OrAbove(
     // Non-personalized site exploration tiles are no longer supported, so
     // ignore all other section types.
     SectionType section_type = static_cast<SectionType>(section);
-    if (section_type != SectionType::PERSONALIZED)
+    if (section_type != SectionType::PERSONALIZED) {
       continue;
-    const base::Value::List* sites_list = item_dict->FindList("sites");
-    if (!sites_list)
+    }
+    const base::ListValue* sites_list = item_dict->FindList("sites");
+    if (!sites_list) {
       continue;
+    }
     sections[section_type] = ParseSiteList(*sites_list);
   }
   return sections;
 }
 
 std::map<SectionType, PopularSites::SitesVector> ParseSites(
-    const base::Value::List& list,
+    const base::ListValue& list,
     int version) {
-  if (version >= kSitesExplorationStartVersion)
-    return ParseVersion6OrAbove(list);
-  return ParseVersion5(list);
+  if (version < kSitesExplorationStartVersion) {
+    return ParseSimple(list);
+  }
+  // Look for sections and parse if found; else fall back to ParseSimple().
+  return IsSectioned(list) ? ParseSectioned(list) : ParseSimple(list);
 }
 
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING) && \
     (BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS))
 void SetDefaultResourceForSite(size_t index,
                                int resource_id,
-                               base::Value::List& sites) {
-  if (index >= sites.size() || !sites[index].is_dict())
+                               base::ListValue& sites) {
+  if (index >= sites.size() || !sites[index].is_dict()) {
     return;
+  }
 
   sites[index].GetDict().Set("default_icon_resource", resource_id);
 }
 #endif
 
 // Creates the list of popular sites based on a snapshot available for mobile.
-base::Value DefaultPopularSites() {
+base::ListValue DefaultPopularSites(std::optional<std::string> country) {
 #if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
-  return base::Value(base::Value::Type::LIST);
+  return base::ListValue();
 #else
-  if (!base::FeatureList::IsEnabled(kPopularSitesBakedInContentFeature))
-    return base::Value(base::Value::Type::LIST);
+  if (!base::FeatureList::IsEnabled(kPopularSitesBakedInContentFeature)) {
+    return base::ListValue();
+  }
 
   int popular_sites_json = IDR_DEFAULT_POPULAR_SITES_JSON;
 
-  // A Chrome iOS-only experiment is being run which overrides the popular sites
-  // URL.
-  IOSDefaultPopularSitesExperimentBehavior experiment_type =
-      GetDefaultPopularSitesExperimentType();
-
-  // If the experiment is enabled, and the popular sites suggestions should
-  // include sites with native iOS apps,
-  // `kIOSDefaultPopularSitesExperimentIncludeApps` is used.
-  if (experiment_type ==
-      IOSDefaultPopularSitesExperimentBehavior::kIncludePopularApps) {
+#if BUILDFLAG(IS_IOS)
+  if (country.has_value() && *country == "US") {
     popular_sites_json = IDR_DEFAULT_POPULAR_SITES_WITH_POPULAR_APPS_JSON;
   }
+#endif
 
-  // If the experiment is enabled, and the popular sites suggestions should
-  // exclude sites with native iOS apps,
-  // `kIOSDefaultPopularSitesExperimentExcludeApps` is used.
-  if (experiment_type ==
-      IOSDefaultPopularSitesExperimentBehavior::kExcludePopularApps) {
-    popular_sites_json = IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_JSON;
-  }
-
-  absl::optional<base::Value> sites = base::JSONReader::Read(
+  std::optional<base::Value> sites = base::JSONReader::Read(
       ui::ResourceBundle::GetSharedInstance().LoadDataResourceString(
-          popular_sites_json));
-  for (base::Value& site : sites->GetList())
+          popular_sites_json),
+      base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  base::ListValue& sites_list = sites->GetList();
+  for (base::Value& site : sites_list) {
     site.GetDict().Set("baked_in", true);
+  }
 
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
   static constexpr int default_popular_sites_icons[] = {
@@ -291,11 +293,10 @@ base::Value DefaultPopularSites() {
       IDR_DEFAULT_POPULAR_SITES_ICON6, IDR_DEFAULT_POPULAR_SITES_ICON7};
   base::span<const int> icon_list = default_popular_sites_icons;
 
-  // If the experiment is enabled, and the popular sites suggestions should
-  // include sites with native iOS apps,
-  // `kIOSDefaultPopularSitesExperimentIncludeApps` is used.
-  if (experiment_type ==
-      IOSDefaultPopularSitesExperimentBehavior::kIncludePopularApps) {
+#if BUILDFLAG(IS_IOS)
+  // US-based Chrome iOS users have a curated set of default Most Visited Tiles,
+  // based on Chrome iOS history in the US.
+  if (country.has_value() && *country == "US") {
     static constexpr int popular_sites_icons_with_popular_ios_apps[] = {
         IDR_DEFAULT_POPULAR_SITES_WITH_POPULAR_APPS_ICON0,
         IDR_DEFAULT_POPULAR_SITES_WITH_POPULAR_APPS_ICON1,
@@ -308,31 +309,14 @@ base::Value DefaultPopularSites() {
 
     icon_list = popular_sites_icons_with_popular_ios_apps;
   }
-
-  // If the experiment is enabled, and the popular sites suggestions should
-  // exclude sites with native iOS apps,
-  // `kIOSDefaultPopularSitesExperimentExcludeApps` is used.
-  if (experiment_type ==
-      IOSDefaultPopularSitesExperimentBehavior::kExcludePopularApps) {
-    static constexpr int popular_sites_icons_without_popular_ios_apps[] = {
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON0,
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON1,
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON2,
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON3,
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON4,
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON5,
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON6,
-        IDR_DEFAULT_POPULAR_SITES_WITHOUT_POPULAR_APPS_ICON7};
-
-    icon_list = popular_sites_icons_without_popular_ios_apps;
-  }
+#endif
 
   size_t index = 0;
   for (int icon_resource : icon_list) {
-    SetDefaultResourceForSite(index++, icon_resource, sites->GetList());
+    SetDefaultResourceForSite(index++, icon_resource, sites_list);
   }
 #endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
-  return std::move(sites.value());
+  return std::move(sites_list);
 #endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
 }
 
@@ -353,7 +337,7 @@ PopularSites::Site::Site(const std::u16string& title,
 
 PopularSites::Site::Site(const Site& other) = default;
 
-PopularSites::Site::~Site() {}
+PopularSites::Site::~Site() = default;
 
 PopularSitesImpl::PopularSitesImpl(
     PrefService* prefs,
@@ -369,7 +353,7 @@ PopularSitesImpl::PopularSitesImpl(
           ParseSites(prefs->GetList(prefs::kPopularSitesJsonPref),
                      prefs_->GetInteger(prefs::kPopularSitesVersionPref))) {}
 
-PopularSitesImpl::~PopularSitesImpl() {}
+PopularSitesImpl::~PopularSitesImpl() = default;
 
 bool PopularSitesImpl::MaybeStartFetch(bool force_download,
                                        FinishedCallback callback) {
@@ -402,10 +386,6 @@ PopularSitesImpl::sections() const {
   return sections_;
 }
 
-GURL PopularSitesImpl::GetLastURLFetched() const {
-  return GURL(prefs_->GetString(prefs::kPopularSitesURLPref));
-}
-
 GURL PopularSitesImpl::GetURLToFetch() {
   const std::string directory = GetDirectoryToFetch();
   const std::string country = GetCountryToFetch();
@@ -425,20 +405,32 @@ GURL PopularSitesImpl::GetURLToFetch() {
 
   const GURL override_url =
       GURL(prefs_->GetString(prefs::kPopularSitesOverrideURL));
-  return override_url.is_valid()
-             ? override_url
-             : GetPopularSitesURL(directory, country, version);
+  if (override_url.is_valid()) {
+    return override_url;
+  }
+
+  if (base::FeatureList::IsEnabled(kPopularSitesRefreshUs)) {
+    int arm = kPopularSitesRefreshUsArm.Get();
+    if (arm >= 1 && arm <= 3 &&
+        (country == "US" || country == kPopularSitesDefaultCountryCode)) {
+      return GetPopularSitesURLWithArm(directory, country, version, arm);
+    }
+  }
+
+  return GetPopularSitesURL(directory, country, version);
 }
 
 std::string PopularSitesImpl::GetDirectoryToFetch() {
   std::string directory =
       prefs_->GetString(prefs::kPopularSitesOverrideDirectory);
 
-  if (directory.empty())
+  if (directory.empty()) {
     directory = GetVariationDirectory();
+  }
 
-  if (directory.empty())
+  if (directory.empty()) {
     directory = kPopularSitesDefaultDirectory;
+  }
 
   return directory;
 }
@@ -454,22 +446,27 @@ std::string PopularSitesImpl::GetCountryToFetch() {
   std::string country_code =
       prefs_->GetString(prefs::kPopularSitesOverrideCountry);
 
-  if (country_code.empty())
+  if (country_code.empty()) {
     country_code = GetVariationCountry();
+  }
 
-  if (country_code.empty())
+  if (country_code.empty()) {
     country_code = GetDefaultSearchEngineCountryCode(template_url_service_);
+  }
 
-  if (country_code.empty() && variations_)
+  if (country_code.empty() && variations_) {
     country_code = variations_->GetStoredPermanentCountry();
+  }
 
 #if BUILDFLAG(IS_IOS)
-  if (country_code.empty())
+  if (country_code.empty()) {
     country_code = GetDeviceCountryCode();
+  }
 #endif
 
-  if (country_code.empty())
+  if (country_code.empty()) {
     country_code = kPopularSitesDefaultCountryCode;
+  }
 
   return base::ToUpperASCII(country_code);
 }
@@ -481,16 +478,18 @@ std::string PopularSitesImpl::GetCountryToFetch() {
 std::string PopularSitesImpl::GetVersionToFetch() {
   std::string version = prefs_->GetString(prefs::kPopularSitesOverrideVersion);
 
-  if (version.empty())
+  if (version.empty()) {
     version = GetVariationVersion();
+  }
 
-  if (version.empty())
+  if (version.empty()) {
     version = kPopularSitesDefaultVersion;
+  }
 
   return version;
 }
 
-const base::Value::List& PopularSitesImpl::GetCachedJson() {
+const base::ListValue& PopularSitesImpl::GetCachedJson() {
   return prefs_->GetList(prefs::kPopularSitesJsonPref);
 }
 
@@ -508,8 +507,24 @@ void PopularSitesImpl::RegisterProfilePrefs(
 
   user_prefs->RegisterInt64Pref(prefs::kPopularSitesLastDownloadPref, 0);
   user_prefs->RegisterStringPref(prefs::kPopularSitesURLPref, std::string());
+
+#if BUILDFLAG(IS_IOS)
+  // Estimate the country code; `GetVariationCountry()` cannot be called because
+  // `RegisterProfilePrefs()` is static.
+  std::string country_code_estimate = GetVariationCountry();
+
+  if (country_code_estimate.empty()) {
+    country_code_estimate = GetDeviceCountryCode();
+  }
+
+  std::optional<std::string> country(country_code_estimate);
+
   user_prefs->RegisterListPref(prefs::kPopularSitesJsonPref,
-                               DefaultPopularSites());
+                               DefaultPopularSites(country));
+#else
+  user_prefs->RegisterListPref(prefs::kPopularSitesJsonPref,
+                               DefaultPopularSites(std::nullopt));
+#endif
   int version;
   base::StringToInt(kPopularSitesDefaultVersion, &version);
   user_prefs->RegisterIntegerPref(prefs::kPopularSitesVersionPref, version);
@@ -550,7 +565,7 @@ void PopularSitesImpl::FetchPopularSites() {
 }
 
 void PopularSitesImpl::OnSimpleLoaderComplete(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   simple_url_loader_.reset();
 
   if (!response_body) {
@@ -558,27 +573,23 @@ void PopularSitesImpl::OnSimpleLoaderComplete(
     return;
   }
 
-  data_decoder::DataDecoder::ParseJsonIsolated(
-      *response_body, base::BindOnce(&PopularSitesImpl::OnJsonParsed,
-                                     weak_ptr_factory_.GetWeakPtr()));
-}
-
-void PopularSitesImpl::OnJsonParsed(
-    data_decoder::DataDecoder::ValueOrError result) {
+  base::JSONReader::Result result =
+      base::JSONReader::ReadAndReturnValueWithError(*response_body,
+                                                    base::JSON_PARSE_RFC);
   if (!result.has_value()) {
-    DLOG(WARNING) << "JSON parsing failed: " << result.error();
+    DLOG(WARNING) << "JSON parsing failed: " << result.error().message;
     OnDownloadFailed();
     return;
   }
 
-  base::Value list = std::move(*result);
-  if (!list.is_list()) {
+  base::ListValue* list = result->GetIfList();
+  if (!list) {
     DLOG(WARNING) << "JSON is not a list";
     OnDownloadFailed();
     return;
   }
-  sections_ = ParseSites(list.GetList(), version_in_pending_url_);
-  prefs_->SetList(prefs::kPopularSitesJsonPref, std::move(list).TakeList());
+  sections_ = ParseSites(*list, version_in_pending_url_);
+  prefs_->SetList(prefs::kPopularSitesJsonPref, std::move(*list));
   prefs_->SetInt64(prefs::kPopularSitesLastDownloadPref,
                    base::Time::Now().ToInternalValue());
   prefs_->SetInteger(prefs::kPopularSitesVersionPref, version_in_pending_url_);

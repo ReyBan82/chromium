@@ -29,13 +29,14 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_FFT_CONVOLVER_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_FFT_CONVOLVER_H_
 
+#include "base/containers/span.h"
 #include "third_party/blink/renderer/platform/audio/audio_array.h"
 #include "third_party/blink/renderer/platform/audio/fft_frame.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
 namespace blink {
 
-class FFTConvolver {
+class FFTConvolver final {
   USING_FAST_MALLOC(FFTConvolver);
 
  public:
@@ -44,19 +45,12 @@ class FFTConvolver {
   FFTConvolver(const FFTConvolver&) = delete;
   FFTConvolver& operator=(const FFTConvolver&) = delete;
 
-  // For now, with multiple calls to Process(), framesToProcess MUST add up
-  // EXACTLY to fftSize / 2
+  // The input to output latency is equal to fftSize / 2.
   //
-  // FIXME: Later, we can do more sophisticated buffering to relax this
-  // requirement...
-  //
-  // The input to output latency is equal to fftSize / 2
-  //
-  // Processing in-place is allowed...
+  // Processing in-place is allowed.
   void Process(const FFTFrame* fft_kernel,
-               const float* source_p,
-               float* dest_p,
-               uint32_t frames_to_process);
+               base::span<const float> source,
+               base::span<float> dest);
 
   void Reset();
 
@@ -66,7 +60,7 @@ class FFTConvolver {
   FFTFrame frame_;
 
   // Buffer input until we get fftSize / 2 samples then do an FFT
-  size_t read_write_index_;
+  size_t read_write_index_ = 0;
   AudioFloatArray input_buffer_;
 
   // Stores output which we read a little at a time

@@ -5,17 +5,18 @@
 #ifndef COMPONENTS_MEDIA_ROUTER_COMMON_PROVIDERS_CAST_CHANNEL_CAST_MESSAGE_UTIL_H_
 #define COMPONENTS_MEDIA_ROUTER_COMMON_PROVIDERS_CAST_CHANNEL_CAST_MESSAGE_UTIL_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/openscreen/src/cast/common/channel/proto/cast_channel.pb.h"
 
 namespace cast_channel {
 
 class AuthContext;
-using ::cast::channel::CastMessage;
-using ::cast::channel::DeviceAuthMessage;
+using ::openscreen::cast::proto::CastMessage;
+using ::openscreen::cast::proto::DeviceAuthMessage;
 
 // Reserved message namespaces for internal messages.
 static constexpr char kAuthNamespace[] =
@@ -26,8 +27,6 @@ static constexpr char kConnectionNamespace[] =
     "urn:x-cast:com.google.cast.tp.connection";
 static constexpr char kReceiverNamespace[] =
     "urn:x-cast:com.google.cast.receiver";
-static constexpr char kBroadcastNamespace[] =
-    "urn:x-cast:com.google.cast.broadcast";
 static constexpr char kMediaNamespace[] = "urn:x-cast:com.google.cast.media";
 
 // Sender and receiver IDs to use for platform messages.
@@ -60,7 +59,7 @@ enum class CastMessageType {
   // Close virtual connection
   kCloseConnection,
 
-  // Application broadcast / precache
+  // Application broadcast/precache. No longer used.
   kBroadcast,
 
   // Session launch request
@@ -173,11 +172,11 @@ bool IsCastMessageValid(const CastMessage& message_proto);
 
 // Returns true if |message_namespace| is a namespace reserved for internal
 // messages.
-bool IsCastReservedNamespace(base::StringPiece message_namespace);
+bool IsCastReservedNamespace(std::string_view message_namespace);
 
 // Returns the value in the "type" field or |kOther| if the field is not found.
 // The result is only valid if |payload| is a Cast application protocol message.
-CastMessageType ParseMessageTypeFromPayload(const base::Value::Dict& payload);
+CastMessageType ParseMessageTypeFromPayload(const base::DictValue& payload);
 
 // Returns a human readable string for |message_type|.
 const char* ToString(CastMessageType message_type);
@@ -244,24 +243,6 @@ CastMessage CreateGetAppAvailabilityRequest(const std::string& source_id,
 CastMessage CreateReceiverStatusRequest(const std::string& source_id,
                                         int request_id);
 
-// Represents a broadcast request. Currently it is used for precaching data
-// on a receiver.
-struct BroadcastRequest {
-  BroadcastRequest(const std::string& broadcast_namespace,
-                   const std::string& message);
-  ~BroadcastRequest();
-  bool operator==(const BroadcastRequest& other) const;
-
-  std::string broadcast_namespace;
-  std::string message;
-};
-
-// Creates a broadcast request with the given parameters.
-CastMessage CreateBroadcastRequest(const std::string& source_id,
-                                   int request_id,
-                                   const std::vector<std::string>& app_ids,
-                                   const BroadcastRequest& request);
-
 // Creates a session launch request with the given parameters.
 CastMessage CreateLaunchRequest(
     const std::string& source_id,
@@ -269,7 +250,7 @@ CastMessage CreateLaunchRequest(
     const std::string& app_id,
     const std::string& locale,
     const std::vector<std::string>& supported_app_types,
-    const absl::optional<base::Value>& app_params);
+    const std::optional<base::Value>& app_params);
 
 CastMessage CreateStopRequest(const std::string& source_id,
                               int request_id,
@@ -282,12 +263,12 @@ CastMessage CreateCastMessage(const std::string& message_namespace,
                               const std::string& source_id,
                               const std::string& destination_id);
 
-CastMessage CreateMediaRequest(const base::Value::Dict& body,
+CastMessage CreateMediaRequest(const base::DictValue& body,
                                int request_id,
                                const std::string& source_id,
                                const std::string& destination_id);
 
-CastMessage CreateSetVolumeRequest(const base::Value::Dict& body,
+CastMessage CreateSetVolumeRequest(const base::DictValue& body,
                                    int request_id,
                                    const std::string& source_id);
 
@@ -304,12 +285,12 @@ enum class GetAppAvailabilityResult {
 const char* ToString(GetAppAvailabilityResult result);
 
 // Extracts request ID from |payload| corresponding to a Cast message response.
-absl::optional<int> GetRequestIdFromResponse(const base::Value::Dict& payload);
+std::optional<int> GetRequestIdFromResponse(const base::DictValue& payload);
 
 // Returns the GetAppAvailabilityResult corresponding to |app_id| in |payload|.
 // Returns kUnknown if result is not found.
 GetAppAvailabilityResult GetAppAvailabilityResultFromResponse(
-    const base::Value::Dict& payload,
+    const base::DictValue& payload,
     const std::string& app_id);
 
 // Result of a session launch.
@@ -340,7 +321,7 @@ struct LaunchSessionResponse {
 
   Result result = Result::kUnknown;
   // Populated if |result| is |kOk|.
-  absl::optional<base::Value::Dict> receiver_status;
+  std::optional<base::DictValue> receiver_status;
   // Populated if |result| is |kError|.
   std::string error_msg;
 };
@@ -349,8 +330,7 @@ struct LaunchSessionResponse {
 // LaunchSessionResponse if |payload| is not a properly formatted launch
 // response. |payload| must be a dictionary from the string payload of a
 // CastMessage.
-LaunchSessionResponse GetLaunchSessionResponse(
-    const base::Value::Dict& payload);
+LaunchSessionResponse GetLaunchSessionResponse(const base::DictValue& payload);
 
 LaunchSessionResponse GetLaunchSessionResponseError(std::string error_msg);
 

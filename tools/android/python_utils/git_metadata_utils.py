@@ -6,6 +6,7 @@
 
 import datetime as dt
 import functools
+import os
 import pathlib
 import sys
 from typing import Optional, Union
@@ -20,18 +21,19 @@ PathStr = Union[pathlib.Path, str]
 
 @functools.lru_cache(maxsize=1)
 def get_chromium_src_path() -> pathlib.Path:
-    """Returns the root 'src' absolute path of this Chromium Git checkout.
+    """Returns the root 'src' absolute path of this Chromium checkout.
 
     Example Path: /home/username/git/chromium/src
 
     Returns:
-        The absolute path to the 'src' root directory of the Chromium Git
-        checkout containing this file.
+        The absolute path to the 'src' root directory of the Chromium checkout
+        containing this file.
     """
     _CHROMIUM_SRC_ROOT = pathlib.Path(__file__).resolve(strict=True).parents[3]
-    if _CHROMIUM_SRC_ROOT.name != 'src':
-        raise AssertionError(
-            f'_CHROMIUM_SRC_ROOT "{_CHROMIUM_SRC_ROOT}" should end in "src".')
+
+    # .git directory does not exist on cog.
+    if os.getcwd().startswith('/google/cog/cloud'):
+        return _CHROMIUM_SRC_ROOT
 
     try:
         _assert_git_repository(_CHROMIUM_SRC_ROOT)
@@ -41,8 +43,9 @@ def get_chromium_src_path() -> pathlib.Path:
     return _CHROMIUM_SRC_ROOT
 
 
-def get_head_commit_format(git_repo: Optional[PathStr] = None,
-                           format: str = '') -> str:
+def get_head_commit_format(
+    git_repo: Optional[PathStr] = None, format: str = ''
+) -> str:
     """Gets formatted info from the commit at HEAD for a Git repository.
 
     Args:
@@ -72,8 +75,8 @@ def get_head_commit_format(git_repo: Optional[PathStr] = None,
     _assert_git_repository(git_repo)
 
     return subprocess_utils.run_command(
-        ['git', 'show', '--no-patch', f'--pretty=format:{format}'],
-        cwd=git_repo)
+        ['git', 'show', '--no-patch', f'--pretty=format:{format}'], cwd=git_repo
+    )
 
 
 def get_head_commit_hash(git_repo: Optional[PathStr] = None) -> str:
@@ -91,8 +94,7 @@ def get_head_commit_time(git_repo: Optional[PathStr] = None) -> str:
     return get_head_commit_format(git_repo, '%cd')
 
 
-def get_head_commit_datetime(git_repo: Optional[PathStr] = None
-                             ) -> dt.datetime:
+def get_head_commit_datetime(git_repo: Optional[PathStr] = None) -> dt.datetime:
     """Gets the datetime of the commit at HEAD for a Git repository in UTC.
 
     The datetime returned contains timezone information (in timezone.utc) so
@@ -122,11 +124,13 @@ def get_head_commit_cr_position(git_repo: Optional[PathStr] = None) -> str:
         if 'Cr-Commit-Position: ' in line:
             last_hash_idx = line.rfind('#')
             assert last_hash_idx != -1, (
-                f'Could not find # in Cr-Commit-Position line: {line}.')
+                f'Could not find # in Cr-Commit-Position line: {line}.'
+            )
             last_right_curly_idx = line.rfind('}')
             assert last_hash_idx < last_right_curly_idx, (
-                'Could not find } after # in ' + line)
-            return line[last_hash_idx + 1:last_right_curly_idx]
+                'Could not find } after # in ' + line
+            )
+            return line[last_hash_idx + 1 : last_right_curly_idx]
     return ''
 
 
@@ -136,21 +140,25 @@ def _assert_git_repository(git_repo_root: pathlib.Path) -> None:
     except FileNotFoundError as err:
         raise ValueError(
             f'The Git repository root "{git_repo_root}" is invalid;'
-            f' {err.strerror}: "{err.filename}".')
+            f' {err.strerror}: "{err.filename}".'
+        )
 
     if not repo_path.is_dir():
         raise ValueError(
             f'The Git repository root "{git_repo_root}" is invalid;'
-            f' not a directory.')
+            f' not a directory.'
+        )
 
     try:
         git_internals_path = repo_path.joinpath('.git').resolve(strict=True)
     except FileNotFoundError as err:
         raise ValueError(
             f'The path "{git_repo_root}" is not a root directory for a Git'
-            f' repository; {err.strerror}: "{err.filename}".')
+            f' repository; {err.strerror}: "{err.filename}".'
+        )
 
     if not repo_path.is_dir():
         raise ValueError(
             f'The Git repository root "{git_repo_root}" is invalid;'
-            f' {git_internals_path} is not a directory.')
+            f' {git_internals_path} is not a directory.'
+        )

@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
 #include <tuple>
 
-#include "base/containers/contains.h"
-#include "base/strings/string_piece.h"
+#include "base/compiler_specific.h"
+#include "base/i18n/char_iterator.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/test/task_environment.h"
@@ -67,9 +68,9 @@ class GetFallbackFontTest
       font_option += std::string("F") + base_font_option.family_name;
     if (base_font_option.delta || base_font_option.style ||
         base_font_option.style) {
-      font_option +=
-          base::StringPrintf("_d%ds%dw%d", base_font_option.delta,
-                             base_font_option.style, base_font_option.weight);
+      font_option += base::StringPrintf(
+          "_d%ds%dw%d", base_font_option.delta, base_font_option.style,
+          static_cast<int>(base_font_option.weight));
     }
 
     std::string language_tag = test_case.language_tag;
@@ -92,10 +93,9 @@ class GetFallbackFontTest
   bool EnsuresScriptSupportCodePoints(const std::u16string& text,
                                       UScriptCode script,
                                       const std::string& script_name) {
-    size_t i = 0;
-    while (i < text.length()) {
-      UChar32 code_point;
-      U16_NEXT(text.c_str(), i, text.size(), code_point);
+    base::i18n::UTF16CharIterator iter(text);
+    while (!iter.end()) {
+      UChar32 code_point = iter.get();
       if (!uscript_hasScript(code_point, script)) {
         // Retrieve the appropriate script
         UErrorCode script_error;
@@ -108,6 +108,7 @@ class GetFallbackFontTest
                       << "' detected.";
         return false;
       }
+      iter.Advance();
     }
     return true;
   }
@@ -120,14 +121,14 @@ class GetFallbackFontTest
       return false;
     }
 
-    size_t i = 0;
+    base::i18n::UTF16CharIterator iter(text);
     const SkGlyphID kUnsupportedGlyph = 0;
-    while (i < text.length()) {
-      UChar32 code_point;
-      U16_NEXT(text.c_str(), i, text.size(), code_point);
+    while (!iter.end()) {
+      UChar32 code_point = iter.get();
       SkGlyphID glyph_id = skia_face->unicharToGlyph(code_point);
       if (glyph_id == kUnsupportedGlyph)
         return false;
+      iter.Advance();
     }
     return true;
   }
@@ -192,8 +193,8 @@ TEST_P(GetFallbackFontTest, GetFallbackFont) {
 
   // Ensure the fallback font is a part of the validation fallback fonts list.
   if (!test_option_.skip_fallback_fonts_validation) {
-    if (!base::Contains(test_case_.fallback_fonts,
-                        fallback_font.GetFontName())) {
+    if (!std::ranges::contains(test_case_.fallback_fonts,
+                               fallback_font.GetFontName())) {
       ADD_FAILURE() << "GetFallbackFont failed for '" << script_name_
                     << "' invalid fallback font: "
                     << fallback_font.GetFontName()
@@ -202,6 +203,14 @@ TEST_P(GetFallbackFontTest, GetFallbackFont) {
       return;
     }
   }
+
+#if BUILDFLAG(IS_IOS)
+  // TODO(crbug.com/40279916): font fallback does not appear to be working
+  // consistently.
+  if (fallback_font.GetFontName() == ".LastResort") {
+    GTEST_SKIP() << ".LastResort is not currently behaving correctly.";
+  }
+#endif
 
   // Ensure that glyphs exists in the fallback font.
   if (!DoesFontSupportCodePoints(fallback_font, test_case_.text)) {

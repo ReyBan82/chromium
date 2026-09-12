@@ -15,7 +15,6 @@
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
-#include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 
@@ -59,10 +58,10 @@ void ActivityStorage::PruneActivityPeriods(
 
 void ActivityStorage::TrimActivityPeriods(int64_t min_day_key,
                                           int64_t max_day_key) {
-  base::Value::Dict copy;
+  base::DictValue copy;
 
   ForEachActivityPeriodFromPref(base::BindRepeating(
-      [](base::Value::Dict& copy, int64_t min_day_key, int64_t max_day_key,
+      [](base::DictValue& copy, int64_t min_day_key, int64_t max_day_key,
          int64_t start, int64_t end, const std::string& activity_id) {
         int64_t day_key = start;
         // Remove data that is too old, or too far in the future.
@@ -94,22 +93,23 @@ void ActivityStorage::RemoveOverlappingActivityPeriods() {
          std::map<int64_t, base::TimeDelta>* day_capacities,
          const int64_t start, const int64_t end,
          const std::string& activity_id) {
-        if (day_capacities->count(start) == 0)
-          day_capacities->emplace(start, base::Days(1));
-        if (day_capacities->at(start).is_zero())
+        auto [start_duration_iter, unused_start_inserted] =
+            day_capacities->try_emplace(start, base::Days(1));
+        base::TimeDelta& start_duration = start_duration_iter->second;
+        if (start_duration.is_zero()) {
           return;
-        base::TimeDelta duration = std::min(base::Milliseconds(end - start),
-                                            day_capacities->at(start));
-        day_capacities->at(start) -= duration;
+        }
+        base::TimeDelta duration =
+            std::min(base::Milliseconds(end - start), start_duration);
+        start_duration -= duration;
 
         enterprise_management::TimePeriod period;
         period.set_start_timestamp(start);
         period.set_end_timestamp(start + duration.InMilliseconds());
-        if (periods_by_activity_id->count(activity_id) == 0) {
-          Activities activities;
-          periods_by_activity_id->emplace(activity_id, activities);
-        }
-        Activities& activities = periods_by_activity_id->at(activity_id);
+        auto [activities_iter, unused_activities_inserted] =
+            periods_by_activity_id->try_emplace(activity_id,
+                                                ActivityStorage::Activities());
+        ActivityStorage::Activities& activities = activities_iter->second;
         activities.push_back(period);
       },
       &periods_by_activity_id, &day_capacities));
@@ -120,12 +120,11 @@ void ActivityStorage::RemoveOverlappingActivityPeriods() {
 const ActivityStorage::Activities ActivityStorage::GetActivityPeriodsWithNoId(
     base::Time end_time) const {
   const auto& activity_periods = GetActivityPeriods(end_time);
-  std::string no_id;
-  if (activity_periods.count(no_id)) {
-    return activity_periods.at(no_id);
-  } else {
-    return {};
+  if (auto it = activity_periods.find("");
+      it != activity_periods.end()) {
+    return it->second;
   }
+  return {};
 }
 
 const std::map<std::string, ActivityStorage::Activities>
@@ -144,11 +143,9 @@ ActivityStorage::GetActivityPeriods(base::Time end_time) const {
         enterprise_management::TimePeriod period;
         period.set_start_timestamp(start);
         period.set_end_timestamp(end);
-        if (periods_by_activity_id->count(activity_id) == 0) {
-          Activities activities;
-          periods_by_activity_id->emplace(activity_id, activities);
-        }
-        Activities& activities = periods_by_activity_id->at(activity_id);
+        auto [activities_iter, unused] = periods_by_activity_id->try_emplace(
+            activity_id, ActivityStorage::Activities());
+        ActivityStorage::Activities& activities = activities_iter->second;
         activities.push_back(period);
       },
       &periods_by_activity_id, day_key));
@@ -163,7 +160,7 @@ void ActivityStorage::AddActivityPeriod(base::Time start,
   DCHECK(!end.is_max());
 
   ScopedDictPrefUpdate update(pref_service_, pref_name_);
-  base::Value::Dict& activity_times = update.Get();
+  base::DictValue& activity_times = update.Get();
 
   // Assign the period to day buckets in local time.
   base::Time midnight = GetBeginningOfDay(start);
@@ -173,8 +170,9 @@ void ActivityStorage::AddActivityPeriod(base::Time start,
 
     const int64_t day_key = LocalTimeToUtcDayStart(start);
     const std::string key = MakeActivityPeriodPrefKey(day_key, activity_id);
-    VLOG(1) << "Add Activity: " << base::Time::FromJavaTime(day_key) << " to "
-            << base::Time::FromJavaTime(day_key + activity);
+    VLOG(1) << "Add Activity: "
+            << base::Time::FromMillisecondsSinceUnixEpoch(day_key) << " to "
+            << base::Time::FromMillisecondsSinceUnixEpoch(day_key + activity);
     const auto previous_activity = activity_times.FindIntByDottedPath(key);
     if (previous_activity.has_value()) {
       activity += previous_activity.value();
@@ -186,7 +184,7 @@ void ActivityStorage::AddActivityPeriod(base::Time start,
 
 void ActivityStorage::SetActivityPeriods(
     const std::map<std::string, Activities>& new_activity_periods) {
-  base::Value::Dict copy;
+  base::DictValue copy;
   for (const auto& activity_pair : new_activity_periods) {
     const std::string& activity_id = activity_pair.first;
     const Activities& activities = activity_pair.second;
@@ -207,12 +205,12 @@ int64_t ActivityStorage::LocalTimeToUtcDayStart(base::Time timestamp) const {
     // is not needed, just keep it as is. timestamp like this cannot be part
     // of an actual activity interval, it only happens as a threshold for
     // activities report.
-    return timestamp.ToJavaTime();
+    return timestamp.InMillisecondsSinceUnixEpoch();
   }
 
   base::Time::Exploded exploded;
   base::Time day_start = GetBeginningOfDay(timestamp);
-  // TODO(crbug.com/827386): directly test this time change. Currently it is
+  // TODO(crbug.com/40569404): directly test this time change. Currently it is
   // tested through ScreenTimeControllerBrowsertest.
   if (timestamp < day_start)
     day_start -= base::Days(1);
@@ -220,7 +218,7 @@ int64_t ActivityStorage::LocalTimeToUtcDayStart(base::Time timestamp) const {
   base::Time out_time;
   bool conversion_success = base::Time::FromUTCExploded(exploded, &out_time);
   DCHECK(conversion_success);
-  return out_time.ToJavaTime();
+  return out_time.InMillisecondsSinceUnixEpoch();
 }
 
 // static
@@ -231,9 +229,7 @@ std::string ActivityStorage::MakeActivityPeriodPrefKey(
   if (activity_id.empty())
     return day_key;
 
-  std::string encoded_activity_id;
-  base::Base64Encode(activity_id, &encoded_activity_id);
-  return day_key + kActivityKeySeparator + encoded_activity_id;
+  return day_key + kActivityKeySeparator + base::Base64Encode(activity_id);
 }
 
 // static
@@ -252,7 +248,7 @@ bool ActivityStorage::ParseActivityPeriodPrefKey(const std::string& key,
 void ActivityStorage::ForEachActivityPeriodFromPref(
     const base::RepeatingCallback<
         void(const int64_t, const int64_t, const std::string&)>& f) const {
-  const base::Value::Dict& stored_activity_periods =
+  const base::DictValue& stored_activity_periods =
       pref_service_->GetDict(pref_name_);
   for (const auto item : stored_activity_periods) {
     int64_t timestamp;

@@ -15,8 +15,7 @@
 #include "base/functional/callback.h"
 #include "device/bluetooth/bluetooth_adapter.h"
 
-namespace ash {
-namespace quick_pair {
+namespace ash::quick_pair {
 
 FakeFastPairHandshake::FakeFastPairHandshake(
     scoped_refptr<device::BluetoothAdapter> adapter,
@@ -32,11 +31,9 @@ FakeFastPairHandshake::FakeFastPairHandshake(
 
 FakeFastPairHandshake::~FakeFastPairHandshake() = default;
 
-void FakeFastPairHandshake::InvokeCallback(
-    absl::optional<PairFailure> failure) {
+void FakeFastPairHandshake::InvokeCallback(std::optional<PairFailure> failure) {
   completed_successfully_ = !failure.has_value();
   std::move(on_complete_callback_).Run(device_, failure);
 }
 
-}  // namespace quick_pair
-}  // namespace ash
+}  // namespace ash::quick_pair

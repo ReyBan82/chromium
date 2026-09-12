@@ -9,12 +9,11 @@
 #include "ash/style/color_util.h"
 #include "base/time/time.h"
 #include "ui/aura/window.h"
-#include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
-#include "ui/color/color_provider_source_observer.h"
-#include "ui/compositor/layer.h"
+#include "ui/compositor/layer_solid_color.h"
 #include "ui/wm/core/visibility_controller.h"
 #include "ui/wm/core/window_animations.h"
+#include "ui/wm/public/activation_delegate.h"
 
 namespace ash {
 namespace {
@@ -31,6 +30,7 @@ WindowDimmer::WindowDimmer(aura::Window* parent,
     : parent_(parent),
       window_(new aura::Window(nullptr, aura::client::WINDOW_TYPE_NORMAL)),
       delegate_(delegate) {
+  wm::SetActivationDelegate(window_, this);
   window_->Init(ui::LAYER_SOLID_COLOR);
   window_->SetName("Dimming Window");
   if (animate) {
@@ -84,13 +84,19 @@ void WindowDimmer::SetDimOpacity(float target_opacity) {
   dim_color_type_.reset();
 
   DCHECK(window_);
-  window_->layer()->SetColor(SkColorSetA(SK_ColorBLACK, 255 * target_opacity));
+  window_->layer()->AsSolidColor()->SetColor(
+      SkColor4f::FromColor(SkColorSetA(SK_ColorBLACK, 255 * target_opacity)));
 }
 
 void WindowDimmer::SetDimColor(ui::ColorId color_id) {
   DCHECK(window_);
   dim_color_type_ = color_id;
   UpdateDimColor();
+}
+
+bool WindowDimmer::ShouldActivate() const {
+  // The dimming window should never be activate-able.
+  return false;
 }
 
 void WindowDimmer::OnWindowBoundsChanged(aura::Window* window,
@@ -118,7 +124,7 @@ void WindowDimmer::OnWindowDestroying(aura::Window* window) {
 
 void WindowDimmer::OnWindowHierarchyChanging(
     const HierarchyChangeParams& params) {
-  if (params.receiver == window_ && params.target == params.receiver) {
+  if (params.receiver == window_.get() && params.target == params.receiver) {
     // This may happen on a display change or some unexpected condition. Hide
     // the window to ensure it isn't obscuring the wrong thing.
     window_->Hide();
@@ -163,7 +169,8 @@ void WindowDimmer::UpdateDimColor() {
   auto dimming_color = color_provider_source->GetColorProvider()->GetColor(
       dim_color_type_.value());
   DCHECK_NE(SkColorGetA(dimming_color), SK_AlphaOPAQUE);
-  window_->layer()->SetColor(dimming_color);
+  window_->layer()->AsSolidColor()->SetColor(
+      SkColor4f::FromColor(dimming_color));
 }
 
 }  // namespace ash

@@ -6,6 +6,7 @@
 
 #include "base/run_loop.h"
 #include "build/build_config.h"
+#include "cc/input/browser_controls_offset_tag_modifications.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/input/web_gesture_event.h"
 #include "third_party/blink/public/common/input/web_mouse_event.h"
@@ -62,9 +63,12 @@ void MockWidgetInputHandler::ImeSetComposition(
     const gfx::Range& range,
     int32_t start,
     int32_t end,
+    blink::mojom::ImeState ime_state,
+    const blink::DOMNodeIdType& target_dom_node_id,
     ImeSetCompositionCallback callback) {
   dispatched_messages_.emplace_back(std::make_unique<DispatchedIMEMessage>(
-      "SetComposition", text, ime_text_spans, range, start, end));
+      "SetComposition", text, ime_text_spans, range, start, end, ime_state,
+      target_dom_node_id));
   if (callback)
     std::move(callback).Run();
 }
@@ -74,12 +78,21 @@ void MockWidgetInputHandler::ImeCommitText(
     const std::vector<ui::ImeTextSpan>& ime_text_spans,
     const gfx::Range& range,
     int32_t relative_cursor_position,
+    const blink::DOMNodeIdType& target_dom_node_id,
     ImeCommitTextCallback callback) {
   dispatched_messages_.emplace_back(std::make_unique<DispatchedIMEMessage>(
       "CommitText", text, ime_text_spans, range, relative_cursor_position,
-      relative_cursor_position));
+      relative_cursor_position, blink::mojom::ImeState::kNone,
+      target_dom_node_id));
   if (callback)
     std::move(callback).Run();
+}
+
+void MockWidgetInputHandler::PasteIntoNode(
+    const std::u16string& text,
+    const blink::DOMNodeIdType& target_dom_node_id) {
+  dispatched_messages_.emplace_back(
+      std::make_unique<DispatchedMessage>("PasteIntoNode"));
 }
 
 void MockWidgetInputHandler::ImeFinishComposingText(bool keep_selection) {
@@ -101,6 +114,8 @@ void MockWidgetInputHandler::RequestCompositionUpdates(bool immediate_request,
 
 void MockWidgetInputHandler::DispatchEvent(
     std::unique_ptr<blink::WebCoalescedInputEvent> event,
+    std::optional<std::unique_ptr<blink::WebCoalescedInputEvent>>
+        original_event_for_gesture,
     DispatchEventCallback callback) {
   dispatched_messages_.emplace_back(std::make_unique<DispatchedEventMessage>(
       std::move(event), std::move(callback)));
@@ -116,6 +131,8 @@ void MockWidgetInputHandler::WaitForInputProcessed(
     WaitForInputProcessedCallback callback) {
   NOTREACHED();
 }
+
+void MockWidgetInputHandler::PingMainThread(PingMainThreadCallback callback) {}
 
 MockWidgetInputHandler::MessageVector
 MockWidgetInputHandler::GetAndResetDispatchedMessages() {
@@ -140,7 +157,14 @@ void MockWidgetInputHandler::GetFrameWidgetInputHandler(
 void MockWidgetInputHandler::UpdateBrowserControlsState(
     cc::BrowserControlsState constraints,
     cc::BrowserControlsState current,
-    bool animate) {}
+    bool animate,
+    const std::optional<cc::BrowserControlsOffsetTagModifications>&
+        offset_tag_modifications) {}
+
+void MockWidgetInputHandler::FlushReceiverForTesting() {
+  DCHECK(receiver_.is_bound());
+  receiver_.FlushForTesting();
+}
 
 MockWidgetInputHandler::DispatchedMessage::DispatchedMessage(
     const std::string& name)
@@ -181,13 +205,17 @@ MockWidgetInputHandler::DispatchedIMEMessage::DispatchedIMEMessage(
     const std::vector<ui::ImeTextSpan>& text_spans,
     const gfx::Range& range,
     int32_t start,
-    int32_t end)
+    int32_t end,
+    blink::mojom::ImeState ime_state,
+    blink::DOMNodeIdType target_dom_node_id)
     : DispatchedMessage(name),
       text_(text),
       text_spans_(text_spans),
       range_(range),
       start_(start),
-      end_(end) {}
+      end_(end),
+      ime_state_(ime_state),
+      target_dom_node_id_(target_dom_node_id) {}
 
 MockWidgetInputHandler::DispatchedIMEMessage::~DispatchedIMEMessage() {}
 
@@ -201,9 +229,12 @@ bool MockWidgetInputHandler::DispatchedIMEMessage::Matches(
     const std::vector<ui::ImeTextSpan>& ime_text_spans,
     const gfx::Range& range,
     int32_t start,
-    int32_t end) const {
+    int32_t end,
+    blink::mojom::ImeState ime_state,
+    blink::DOMNodeIdType target_dom_node_id) const {
   return text_ == text && text_spans_ == ime_text_spans && range_ == range &&
-         start_ == start && end_ == end;
+         start_ == start && end_ == end && ime_state_ == ime_state &&
+         target_dom_node_id_ == target_dom_node_id;
 }
 
 MockWidgetInputHandler::DispatchedEditCommandMessage::
@@ -233,10 +264,9 @@ MockWidgetInputHandler::DispatchedEventMessage::DispatchedEventMessage(
 
 MockWidgetInputHandler::DispatchedEventMessage::~DispatchedEventMessage() {
   if (callback_) {
-    std::move(callback_).Run(blink::mojom::InputEventResultSource::kUnknown,
-                             ui::LatencyInfo(),
-                             blink::mojom::InputEventResultState::kNotConsumed,
-                             nullptr, nullptr, nullptr);
+    std::move(callback_).Run(
+        blink::mojom::InputEventResultSource::kUnknown, ui::LatencyInfo(),
+        blink::mojom::InputEventResultState::kNotConsumed, nullptr, nullptr);
     base::RunLoop().RunUntilIdle();
   }
 }
@@ -250,8 +280,7 @@ void MockWidgetInputHandler::DispatchedEventMessage::CallCallback(
     blink::mojom::InputEventResultState state) {
   if (callback_) {
     std::move(callback_).Run(blink::mojom::InputEventResultSource::kMainThread,
-                             ui::LatencyInfo(), state, nullptr, nullptr,
-                             nullptr);
+                             ui::LatencyInfo(), state, nullptr, nullptr);
     base::RunLoop().RunUntilIdle();
   }
 }
@@ -261,12 +290,10 @@ void MockWidgetInputHandler::DispatchedEventMessage::CallCallback(
     const ui::LatencyInfo& latency_info,
     blink::mojom::InputEventResultState state,
     blink::mojom::DidOverscrollParamsPtr overscroll,
-    blink::mojom::TouchActionOptionalPtr touch_action,
-    blink::mojom::ScrollResultDataPtr scroll_result_data) {
+    blink::mojom::TouchActionOptionalPtr touch_action) {
   if (callback_) {
     std::move(callback_).Run(source, latency_info, state, std::move(overscroll),
-                             std::move(touch_action),
-                             std::move(scroll_result_data));
+                             std::move(touch_action));
     base::RunLoop().RunUntilIdle();
   }
 }

@@ -7,12 +7,12 @@
 #include <string>
 
 #include "ash/constants/ash_features.h"
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "chrome/browser/ash/login/oobe_screen.h"
 #include "chrome/browser/ash/login/screens/hid_detection_screen.h"
-#include "chrome/browser/browser_process.h"
 #include "chrome/browser/ui/webui/ash/login/oobe_ui.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
@@ -74,27 +74,31 @@ void HIDDetectionScreenHandler::SetContinueButtonEnabled(bool value) {
   CallExternalAPI("setContinueButtonEnabled", value);
 }
 
+base::WeakPtr<HIDDetectionView> HIDDetectionScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
+}
+
 void HIDDetectionScreenHandler::DeclareLocalizedValues(
     ::login::LocalizedValuesBuilder* builder) {
   builder->Add("hidDetectionContinue", IDS_HID_DETECTION_CONTINUE_BUTTON);
   builder->Add("hidDetectionInvitation", IDS_HID_DETECTION_INVITATION_TEXT);
   builder->Add("hidDetectionPrerequisites",
-      IDS_HID_DETECTION_PRECONDITION_TEXT);
+               IDS_HID_DETECTION_PRECONDITION_TEXT);
   builder->Add("hidDetectionPrerequisitesTouchscreen",
                IDS_HID_DETECTION_PRECONDITION_TOUCHSCREEN_TEXT);
   builder->Add("hidDetectionMouseSearching", IDS_HID_DETECTION_SEARCHING_MOUSE);
   builder->Add("hidDetectionKeyboardSearching",
-      IDS_HID_DETECTION_SEARCHING_KEYBOARD);
+               IDS_HID_DETECTION_SEARCHING_KEYBOARD);
   builder->Add("hidDetectionUSBMouseConnected",
-      IDS_HID_DETECTION_CONNECTED_USB_MOUSE);
+               IDS_HID_DETECTION_CONNECTED_USB_MOUSE);
   builder->Add("hidDetectionPointingDeviceConnected",
-      IDS_HID_DETECTION_CONNECTED_POINTING_DEVICE);
+               IDS_HID_DETECTION_CONNECTED_POINTING_DEVICE);
   builder->Add("hidDetectionKeyboardPairing",
                IDS_HID_DETECTION_PAIRING_BLUETOOTH_KEYBOARD);
   builder->Add("hidDetectionUSBKeyboardConnected",
-      IDS_HID_DETECTION_CONNECTED_USB_KEYBOARD);
+               IDS_HID_DETECTION_CONNECTED_USB_KEYBOARD);
   builder->Add("hidDetectionBTMousePaired",
-      IDS_HID_DETECTION_PAIRED_BLUETOOTH_MOUSE);
+               IDS_HID_DETECTION_PAIRED_BLUETOOTH_MOUSE);
   builder->Add("hidDetectionBTEnterKey", IDS_HID_DETECTION_BLUETOOTH_ENTER_KEY);
   builder->Add("hidDetectionPinDialogTitle",
                IDS_HID_DETECTION_PAIRING_BLUETOOTH_KEYBOARD_PIN_DIALOG_TITLE);
@@ -118,10 +122,7 @@ void HIDDetectionScreenHandler::DeclareLocalizedValues(
                IDS_HID_DETECTION_A11Y_CONTINUE_BUTTON_DISABLED);
 }
 
-void HIDDetectionScreenHandler::GetAdditionalParameters(
-    base::Value::Dict* dict) {
-  dict->Set("enableOobeHidDetectionRevamp",
-            base::FeatureList::IsEnabled(features::kOobeHidDetectionRevamp));
+void HIDDetectionScreenHandler::GetAdditionalParameters(base::DictValue* dict) {
   BaseScreenHandler::GetAdditionalParameters(dict);
 }
 

@@ -6,9 +6,10 @@
 
 #include <lib/sys/cpp/component_context.h>
 #include <lib/zx/event.h>
+
 #include <memory>
 
-#include "base/containers/contains.h"
+#include "base/containers/flat_set.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/fuchsia/process_context.h"
 #include "base/functional/bind.h"
@@ -29,6 +30,7 @@
 #include "ui/ozone/platform/flatland/flatland_window.h"
 #include "ui/ozone/platform/flatland/flatland_window_manager.h"
 #include "ui/ozone/platform/flatland/vulkan_implementation_flatland.h"
+#include "ui/ozone/public/native_pixmap_usage_utils.h"
 #include "ui/ozone/public/surface_ozone_canvas.h"
 
 namespace ui {
@@ -48,7 +50,7 @@ class GLOzoneEGLFlatland : public GLOzoneEGL {
       gfx::AcceleratedWidget window) override {
     // GL rendering to Flatland views is not supported. This function is
     // used only for unittests. Return an off-screen surface, so the tests pass.
-    // TODO(crbug.com/1271760): Use Vulkan in unittests and remove this hack.
+    // TODO(crbug.com/40205840): Use Vulkan in unittests and remove this hack.
     return gl::InitializeGLSurface(base::MakeRefCounted<gl::SurfacelessEGL>(
         display->GetAs<gl::GLDisplayEGL>(), gfx::Size(100, 100)));
   }
@@ -72,8 +74,8 @@ class GLOzoneEGLFlatland : public GLOzoneEGL {
   }
 };
 
-fuchsia::sysmem::AllocatorHandle ConnectSysmemAllocator() {
-  fuchsia::sysmem::AllocatorHandle allocator;
+fuchsia::sysmem2::AllocatorHandle ConnectSysmemAllocator() {
+  fuchsia::sysmem2::AllocatorHandle allocator;
   base::ComponentContextForProcess()->svc()->Connect(allocator.NewRequest());
   return allocator;
 }
@@ -124,7 +126,6 @@ std::vector<gl::GLImplementationParts>
 FlatlandSurfaceFactory::GetAllowedGLImplementations() {
   return std::vector<gl::GLImplementationParts>{
       gl::GLImplementationParts(gl::kGLImplementationEGLANGLE),
-      gl::GLImplementationParts(gl::kGLImplementationEGLGLES2),
       gl::GLImplementationParts(gl::kGLImplementationStubGL),
   };
 }
@@ -132,7 +133,6 @@ FlatlandSurfaceFactory::GetAllowedGLImplementations() {
 GLOzone* FlatlandSurfaceFactory::GetGLOzone(
     const gl::GLImplementationParts& implementation) {
   switch (implementation.gl) {
-    case gl::kGLImplementationEGLGLES2:
     case gl::kGLImplementationEGLANGLE:
       return egl_implementation_.get();
     default:
@@ -169,32 +169,23 @@ scoped_refptr<gfx::NativePixmap> FlatlandSurfaceFactory::CreateNativePixmap(
     gfx::AcceleratedWidget widget,
     gpu::VulkanDeviceQueue* device_queue,
     gfx::Size size,
-    gfx::BufferFormat format,
+    viz::SharedImageFormat format,
     gfx::BufferUsage usage,
-    absl::optional<gfx::Size> framebuffer_size) {
+    std::optional<gfx::Size> framebuffer_size) {
   DCHECK(!framebuffer_size || framebuffer_size == size);
 
   VkDevice vk_device = device_queue->GetVulkanDevice();
-  return flatland_sysmem_buffer_manager_.CreateNativePixmap(vk_device, size,
-                                                            format, usage);
-}
-
-void FlatlandSurfaceFactory::CreateNativePixmapAsync(
-    gfx::AcceleratedWidget widget,
-    gpu::VulkanDeviceQueue* device_queue,
-    gfx::Size size,
-    gfx::BufferFormat format,
-    gfx::BufferUsage usage,
-    NativePixmapCallback callback) {
-  std::move(callback).Run(
-      CreateNativePixmap(widget, device_queue, size, format, usage));
+  NativePixmapUsageSet native_pixmap_usage =
+      BufferUsageToNativePixmapUsage(usage);
+  return flatland_sysmem_buffer_manager_.CreateNativePixmap(
+      vk_device, size, format, native_pixmap_usage);
 }
 
 scoped_refptr<gfx::NativePixmap>
 FlatlandSurfaceFactory::CreateNativePixmapFromHandle(
     gfx::AcceleratedWidget widget,
     gfx::Size size,
-    gfx::BufferFormat format,
+    viz::SharedImageFormat format,
     gfx::NativePixmapHandle handle) {
   auto collection = flatland_sysmem_buffer_manager_.GetCollectionByHandle(
       handle.buffer_collection_handle);
@@ -213,23 +204,20 @@ FlatlandSurfaceFactory::CreateVulkanImplementation(
       allow_protected_memory);
 }
 
-std::vector<gfx::BufferFormat>
-FlatlandSurfaceFactory::GetSupportedFormatsForTexturing() const {
-  return {
-      gfx::BufferFormat::R_8,
-      gfx::BufferFormat::RG_88,
-      gfx::BufferFormat::RGBA_8888,
-      gfx::BufferFormat::RGBX_8888,
-      gfx::BufferFormat::BGRA_8888,
-      gfx::BufferFormat::BGRX_8888,
-      gfx::BufferFormat::YUV_420_BIPLANAR,
-  };
+bool FlatlandSurfaceFactory::IsFormatSupportedForTexturing(
+    viz::SharedImageFormat format) const {
+  auto kSupportedFormats = base::flat_set<viz::SharedImageFormat>(
+      {viz::SinglePlaneFormat::kR_8, viz::SinglePlaneFormat::kRG_88,
+       viz::SinglePlaneFormat::kRGBA_8888, viz::SinglePlaneFormat::kBGRA_8888,
+       viz::SinglePlaneFormat::kRGBX_8888, viz::SinglePlaneFormat::kBGRX_8888,
+       viz::MultiPlaneFormat::kNV12});
+  return kSupportedFormats.contains(format);
 }
 
 void FlatlandSurfaceFactory::AddSurface(gfx::AcceleratedWidget widget,
                                         FlatlandSurface* surface) {
   base::AutoLock lock(surface_lock_);
-  DCHECK(!base::Contains(surface_map_, widget));
+  DCHECK(!surface_map_.contains(widget));
   surface->AssertBelongsToCurrentThread();
   surface_map_.emplace(widget, surface);
 }
@@ -237,7 +225,7 @@ void FlatlandSurfaceFactory::AddSurface(gfx::AcceleratedWidget widget,
 void FlatlandSurfaceFactory::RemoveSurface(gfx::AcceleratedWidget widget) {
   base::AutoLock lock(surface_lock_);
   auto it = surface_map_.find(widget);
-  DCHECK(it != surface_map_.end());
+  CHECK(it != surface_map_.end());
   FlatlandSurface* surface = it->second;
   surface->AssertBelongsToCurrentThread();
   surface_map_.erase(it);

@@ -5,6 +5,7 @@
 #include "chrome/browser/ash/chromebox_for_meetings/diagnostics/diagnostics_service.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -14,22 +15,21 @@
 #include "base/test/bind.h"
 #include "base/test/mock_callback.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "chromeos/ash/components/dbus/chromebox_for_meetings/fake_cfm_hotline_client.h"
 #include "chromeos/ash/components/mojo_service_manager/fake_mojo_service_manager.h"
-#include "chromeos/ash/services/chromebox_for_meetings/public/cpp/fake_service_connection.h"
-#include "chromeos/ash/services/chromebox_for_meetings/public/cpp/fake_service_context.h"
-#include "chromeos/ash/services/chromebox_for_meetings/public/cpp/service_connection.h"
-#include "chromeos/ash/services/chromebox_for_meetings/public/mojom/cfm_service_manager.mojom.h"
-#include "chromeos/ash/services/chromebox_for_meetings/public/mojom/meet_devices_diagnostics.mojom.h"
 #include "chromeos/ash/services/cros_healthd/public/cpp/fake_cros_healthd.h"
 #include "chromeos/ash/services/cros_healthd/public/cpp/service_connection.h"
-#include "content/public/test/test_utils.h"
+#include "chromeos/services/chromebox_for_meetings/public/cpp/fake_service_connection.h"
+#include "chromeos/services/chromebox_for_meetings/public/cpp/fake_service_context.h"
+#include "chromeos/services/chromebox_for_meetings/public/cpp/service_connection.h"
+#include "chromeos/services/chromebox_for_meetings/public/mojom/cfm_service_manager.mojom.h"
+#include "chromeos/services/chromebox_for_meetings/public/mojom/meet_devices_diagnostics.mojom.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "testing/gmock/include/gmock/gmock.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash::cfm {
 namespace {
@@ -46,7 +46,7 @@ class CfmDiagnosticsServiceTest : public ::testing::Test {
   void SetUp() override {
     cros_healthd::FakeCrosHealthd::Initialize();
     CfmHotlineClient::InitializeFake();
-    ServiceConnection::UseFakeServiceConnectionForTesting(
+    chromeos::cfm::ServiceConnection::UseFakeServiceConnectionForTesting(
         &fake_service_connection_);
     DiagnosticsService::Initialize();
   }
@@ -86,13 +86,17 @@ class CfmDiagnosticsServiceTest : public ::testing::Test {
             mojo::PendingRemote<mojom::CfmServiceAdaptor>
                 pending_adaptor_remote,
             mojom::CfmServiceContext::ProvideAdaptorCallback callback) {
-          ASSERT_EQ(interface_name, service_id);
+          EXPECT_EQ(interface_name, service_id);
           adaptor_remote_.Bind(std::move(pending_adaptor_remote));
           std::move(callback).Run(true);
+          run_loop.Quit();
         }));
 
-    EXPECT_TRUE(GetClient()->FakeEmitSignal(interface_name));
-    run_loop.RunUntilIdle();
+    const bool signal_emitted = GetClient()->FakeEmitSignal(interface_name);
+    EXPECT_TRUE(signal_emitted);
+    if (signal_emitted) {
+      run_loop.Run();
+    }
 
     EXPECT_TRUE(adaptor_remote_.is_connected());
 
@@ -104,11 +108,11 @@ class CfmDiagnosticsServiceTest : public ::testing::Test {
   }
 
  protected:
-  FakeCfmServiceContext context_;
+  chromeos::cfm::FakeCfmServiceContext context_;
   mojo::Remote<mojom::MeetDevicesDiagnostics> diagnostics_remote_;
   mojo::ReceiverSet<mojom::CfmServiceContext> context_receiver_set_;
   mojo::Remote<mojom::CfmServiceAdaptor> adaptor_remote_;
-  FakeServiceConnectionImpl fake_service_connection_;
+  chromeos::cfm::FakeServiceConnectionImpl fake_service_connection_;
   base::test::SingleThreadTaskEnvironment task_environment_;
   ::ash::mojo_service_manager::FakeMojoServiceManager fake_service_manager_;
 };
@@ -135,33 +139,23 @@ TEST_F(CfmDiagnosticsServiceTest, GetDeviceInfoService) {
 // This test ensure that the diagnostics service can retrieve telemetry
 // information from cros_healthd.
 TEST_F(CfmDiagnosticsServiceTest, GetCrosHealthdTelemetry) {
-  auto response = cros_healthd::mojom::TelemetryInfo::New();
   cros_healthd::FakeCrosHealthd::Get()->SetProbeTelemetryInfoResponseForTesting(
-      response);
-  base::RunLoop run_loop;
-  DiagnosticsService::Get()->GetCrosHealthdTelemetry(base::BindLambdaForTesting(
-      [&](cros_healthd::mojom::TelemetryInfoPtr info) {
-        EXPECT_EQ(info, response);
-        run_loop.Quit();
-      }));
-  run_loop.Run();
+      cros_healthd::mojom::TelemetryInfo::New());
+  base::test::TestFuture<cros_healthd::mojom::TelemetryInfoPtr> future;
+  DiagnosticsService::Get()->GetCrosHealthdTelemetry(future.GetCallback());
+  EXPECT_EQ(cros_healthd::mojom::TelemetryInfo::New(), future.Get());
 }
 
 // This test ensure that the diagnostics service can retrieve process-specific
 // information from cros_healthd.
 TEST_F(CfmDiagnosticsServiceTest, GetCrosHealthdProcessInfo) {
-  auto response = cros_healthd::mojom::ProcessResult::NewProcessInfo(
-      cros_healthd::mojom::ProcessInfo::New());
   cros_healthd::FakeCrosHealthd::Get()->SetProbeProcessInfoResponseForTesting(
-      response);
-  base::RunLoop run_loop;
-  DiagnosticsService::Get()->GetCrosHealthdProcessInfo(
-      /*pid=*/10, base::BindLambdaForTesting(
-                      [&](cros_healthd::mojom::ProcessResultPtr info) {
-                        EXPECT_EQ(info, response);
-                        run_loop.Quit();
-                      }));
-  run_loop.Run();
+      cros_healthd::mojom::ProcessResult::NewProcessInfo(
+          cros_healthd::mojom::ProcessInfo::New()));
+  base::test::TestFuture<cros_healthd::mojom::ProcessResultPtr> future;
+  DiagnosticsService::Get()->GetCrosHealthdProcessInfo(/*pid=*/10,
+                                                       future.GetCallback());
+  EXPECT_TRUE(future.Get()->is_process_info());
 }
 
 }  // namespace

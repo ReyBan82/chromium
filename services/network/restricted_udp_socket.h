@@ -11,6 +11,10 @@
 #include "net/dns/public/host_resolver_results.h"
 #include "services/network/public/mojom/restricted_udp_socket.mojom.h"
 
+#if BUILDFLAG(IS_CHROMEOS)
+#include "services/network/public/mojom/socket_connection_tracker.mojom.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
 namespace network {
 
 class UDPSocket;
@@ -25,28 +29,47 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) RestrictedUDPSocket
   RestrictedUDPSocket(
       std::unique_ptr<UDPSocket> udp_socket,
       net::MutableNetworkTrafficAnnotationTag traffic_annotation,
-      std::unique_ptr<SimpleHostResolver> resolver);
+      std::unique_ptr<SimpleHostResolver> resolver,
+      bool allow_multicast,
+      bool allow_source_specific_multicast);
   ~RestrictedUDPSocket() override;
 
   // blink::mojom::RestrictedUDPSocket:
+  void JoinGroup(const net::IPAddress& group_address,
+                 const std::optional<net::IPAddress>& source_address,
+                 JoinGroupCallback callback) override;
+  void LeaveGroup(const net::IPAddress& group_address,
+                  const std::optional<net::IPAddress>& source_address,
+                  LeaveGroupCallback callback) override;
   void ReceiveMore(uint32_t num_additional_datagrams) override;
   void Send(base::span<const uint8_t> data, SendCallback callback) override;
   void SendTo(base::span<const uint8_t> data,
               const net::HostPortPair& dest_addr,
+              net::DnsQueryType dns_query_type,
               SendToCallback callback) override;
 
+#if BUILDFLAG(IS_CHROMEOS)
+  void AttachConnectionTracker(
+      mojo::PendingRemote<mojom::SocketConnectionTracker>);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
  private:
-  void OnResolveCompleteForSendTo(
-      std::vector<uint8_t> data,
-      SendToCallback callback,
-      int result,
-      const net::ResolveErrorInfo&,
-      const absl::optional<net::AddressList>& resolved_addresses,
-      const absl::optional<net::HostResolverEndpointResults>&);
+  void OnResolveCompleteForSendTo(std::vector<uint8_t> data,
+                                  SendToCallback callback,
+                                  int result,
+                                  const net::ResolveErrorInfo&,
+                                  const net::AddressList& resolved_addresses,
+                                  const net::HostResolverEndpointResults&);
 
   std::unique_ptr<UDPSocket> udp_socket_;
   net::MutableNetworkTrafficAnnotationTag traffic_annotation_;
   std::unique_ptr<SimpleHostResolver> resolver_;
+  bool allow_multicast_;
+  bool allow_source_specific_multicast_;
+
+#if BUILDFLAG(IS_CHROMEOS)
+  mojo::PendingRemote<mojom::SocketConnectionTracker> connection_tracker_;
+#endif  // BUILDFLAG(IS_CHROMEOS)
 };
 
 }  // namespace network

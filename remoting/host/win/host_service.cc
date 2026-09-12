@@ -8,12 +8,14 @@
 #include "remoting/host/win/host_service.h"
 
 #include <windows.h>
+
 #include <sddl.h>
 #include <wtsapi32.h>
 
 #include "base/base_paths.h"
 #include "base/base_switches.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/message_loop/message_pump_type.h"
@@ -25,12 +27,13 @@
 #include "base/win/message_window.h"
 #include "base/win/scoped_com_initializer.h"
 #include "remoting/base/auto_thread.h"
+#include "remoting/base/branding.h"
 #include "remoting/base/cpu_utils.h"
 #include "remoting/base/logging.h"
 #include "remoting/base/scoped_sc_handle_win.h"
 #include "remoting/host/base/host_exit_codes.h"
-#include "remoting/host/branding.h"
 #include "remoting/host/daemon_process.h"
+#include "remoting/host/win/acl_util.h"
 #include "remoting/host/win/com_security.h"
 #include "remoting/host/win/core_resource.h"
 #include "remoting/host/win/wts_terminal_observer.h"
@@ -60,6 +63,50 @@ const wchar_t kComProcessSd[] =
 const wchar_t kComProcessMandatoryLabel[] =
     SDDL_SACL L":"
     SDDL_ACE(SDDL_MANDATORY_LABEL, SDDL_NO_EXECUTE_UP, SDDL_ML_MEDIUM);
+
+// Changes the service start type to 'manual'.
+void DisableAutoStart() {
+  ScopedScHandle scmanager(
+      OpenSCManager(nullptr, SERVICES_ACTIVE_DATABASE,
+                    SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE));
+  if (!scmanager.is_valid()) {
+    PLOG(INFO) << "Failed to connect to the service control manager";
+    return;
+  }
+
+  DWORD desired_access = SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS;
+  ScopedScHandle service(
+      OpenService(scmanager.Get(), kWindowsServiceName, desired_access));
+  if (!service.is_valid()) {
+    PLOG(INFO) << "Failed to open to the '" << kWindowsServiceName
+               << "' service";
+    return;
+  }
+
+  // Change the service start type to 'manual'. All |nullptr| parameters below
+  // mean that there is no change to the corresponding service parameter.
+  if (!ChangeServiceConfig(service.Get(), SERVICE_NO_CHANGE,
+                           SERVICE_DEMAND_START, SERVICE_NO_CHANGE, nullptr,
+                           nullptr, nullptr, nullptr, nullptr, nullptr,
+                           nullptr)) {
+    PLOG(INFO) << "Failed to change the '" << kWindowsServiceName
+               << "'service start type to 'manual'";
+  }
+}
+
+// Grants PROCESS_QUERY_LIMITED_INFORMATION on the current process and
+// TOKEN_QUERY on its process token to standard users. This allows standard
+// user client processes to verify the session ID and integrity level of the
+// SYSTEM daemon process during named pipe connections.
+void GrantQueryAccessToAuthenticatedUsers() {
+  bool success = AddProcessAccessRightForWellKnownSid(
+                     base::win::WellKnownSid::kAuthenticatedUser,
+                     PROCESS_QUERY_LIMITED_INFORMATION) &&
+                 AddTokenAccessRightForWellKnownSid(
+                     base::win::WellKnownSid::kAuthenticatedUser, TOKEN_QUERY);
+  CHECK(success)
+      << "Failed to grant process/token query access to Authenticated Users.";
+}
 
 }  // namespace
 
@@ -177,10 +224,16 @@ void HostService::OnSessionChange(uint32_t event, uint32_t session_id) {
       continue;
     }
 
-    // The client currently attached to |session_id| was attached to a different
-    // session before. Reconnect it to |session_id|.
+    // The terminal currently attached to |session_id| was attached to a
+    // different session before. Reconnect it to |session_id|. Only the console
+    // terminal may be re-attached while its observer is still bound to another
+    // session: the physical console moves between sessions (e.g. on fast user
+    // switching). A virtual terminal is backed by a single RDP connection, so
+    // its observer stays bound to the session the terminal was originally
+    // attached to.
     if (attached && i->terminal_id == terminal_id &&
-        i->session_id != session_id) {
+        i->session_id != session_id &&
+        (i->session_id == kInvalidSessionId || i->terminal_id == kConsole)) {
       WtsTerminalObserver* observer = i->observer;
 
       if (i->session_id != kInvalidSessionId) {
@@ -210,7 +263,6 @@ void HostService::CreateLauncher(
                                  base::MessagePumpType::IO);
   if (!io_task_runner.get()) {
     LOG(FATAL) << "Failed to start the I/O thread";
-    return;
   }
 
   daemon_process_ = DaemonProcess::Create(
@@ -252,7 +304,7 @@ void HostService::RunAsServiceImpl() {
 
   // Report running status of the service.
   SERVICE_STATUS service_status;
-  ZeroMemory(&service_status, sizeof(service_status));
+  UNSAFE_TODO(ZeroMemory(&service_status, sizeof(service_status)));
   service_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
   service_status.dwCurrentState = SERVICE_RUNNING;
   service_status.dwControlsAccepted = SERVICE_ACCEPT_SHUTDOWN |
@@ -294,6 +346,7 @@ void HostService::RunAsServiceImpl() {
     return;
   }
 
+  GrantQueryAccessToAuthenticatedUsers();
   CreateLauncher(scoped_refptr<AutoThreadTaskRunner>(
       new AutoThreadTaskRunner(main_task_runner_, run_loop.QuitClosure())));
 
@@ -348,6 +401,7 @@ int HostService::RunInConsole() {
   // Subscribe to session change notifications.
   if (WTSRegisterSessionNotification(window.hwnd(), NOTIFY_FOR_ALL_SESSIONS) !=
       FALSE) {
+    GrantQueryAccessToAuthenticatedUsers();
     CreateLauncher(scoped_refptr<AutoThreadTaskRunner>(
         new AutoThreadTaskRunner(main_task_runner_, run_loop.QuitClosure())));
 
@@ -372,8 +426,17 @@ cleanup:
   return result;
 }
 
-void HostService::StopDaemonProcess() {
+void HostService::StopDaemonProcess(int exit_code) {
   DCHECK(main_task_runner_->BelongsToCurrentThread());
+
+  // Both kInvalidHostIdExitCode and kInvalidOAuthCredentialsExitCode are
+  // errors that will never go away with the current config.
+  // Disabling automatic service start until the host is re-enabled and config
+  // updated.
+  if (exit_code == kInvalidHostIdExitCode ||
+      exit_code == kInvalidOAuthCredentialsExitCode) {
+    DisableAutoStart();
+  }
 
   daemon_process_.reset();
 }
@@ -401,8 +464,8 @@ BOOL WINAPI HostService::ConsoleControlHandler(DWORD event) {
     case CTRL_LOGOFF_EVENT:
     case CTRL_SHUTDOWN_EVENT:
       self->main_task_runner_->PostTask(
-          FROM_HERE,
-          base::BindOnce(&HostService::StopDaemonProcess, self->weak_ptr_));
+          FROM_HERE, base::BindOnce(&HostService::StopDaemonProcess,
+                                    self->weak_ptr_, kSuccessExitCode));
       return TRUE;
 
     default:
@@ -423,8 +486,8 @@ DWORD WINAPI HostService::ServiceControlHandler(DWORD control,
     case SERVICE_CONTROL_SHUTDOWN:
     case SERVICE_CONTROL_STOP:
       self->main_task_runner_->PostTask(
-          FROM_HERE,
-          base::BindOnce(&HostService::StopDaemonProcess, self->weak_ptr_));
+          FROM_HERE, base::BindOnce(&HostService::StopDaemonProcess,
+                                    self->weak_ptr_, kSuccessExitCode));
       return NO_ERROR;
 
     case SERVICE_CONTROL_SESSIONCHANGE:

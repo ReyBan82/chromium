@@ -4,37 +4,33 @@
 
 #include "chrome/browser/ash/login/saml/public_saml_url_fetcher.h"
 
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
+#include "base/check.h"
+#include "base/check_deref.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
-#include "chrome/browser/ash/arc/arc_optin_uma.h"
 #include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
 #include "chrome/browser/ash/policy/core/device_local_account.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
 #include "chrome/browser/ash/settings/device_settings_service.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/browser_process_platform_part.h"
-#include "chrome/browser/net/system_network_context_manager.h"
 #include "chromeos/ash/components/install_attributes/install_attributes.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
 #include "components/account_id/account_id.h"
+#include "components/policy/core/common/cloud/cloud_policy_constants.h"
 #include "components/policy/core/common/cloud/device_management_service.h"
 #include "components/policy/core/common/cloud/dm_auth.h"
 #include "components/policy/core/common/cloud/dmserver_job_configurations.h"
+#include "device_management_backend.pb.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
-#include "url/gurl.h"
 
 namespace ash {
 namespace {
 
 namespace em = ::enterprise_management;
-
-std::string GetDeviceId() {
-  policy::BrowserPolicyConnectorAsh* connector =
-      g_browser_process->platform_part()->browser_policy_connector_ash();
-  return connector->GetInstallAttributes()->GetDeviceId();
-}
 
 std::string GetAccountId(std::string user_id) {
   std::vector<policy::DeviceLocalAccount> device_local_accounts =
@@ -49,8 +45,15 @@ std::string GetAccountId(std::string user_id) {
 
 }  // namespace
 
-PublicSamlUrlFetcher::PublicSamlUrlFetcher(AccountId account_id)
-    : account_id_(GetAccountId(account_id.GetUserEmail())) {}
+PublicSamlUrlFetcher::PublicSamlUrlFetcher(
+    policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+    AccountId account_id)
+    : browser_policy_connector_ash_(CHECK_DEREF(browser_policy_connector_ash)),
+      shared_url_loader_factory_(std::move(shared_url_loader_factory)),
+      account_id_(GetAccountId(account_id.GetUserEmail())) {
+  CHECK(shared_url_loader_factory_);
+}
 
 PublicSamlUrlFetcher::~PublicSamlUrlFetcher() = default;
 
@@ -66,19 +69,16 @@ void PublicSamlUrlFetcher::Fetch(base::OnceClosure callback) {
   DCHECK(!callback_);
   callback_ = std::move(callback);
   policy::DeviceManagementService* service =
-      g_browser_process->platform_part()
-          ->browser_policy_connector_ash()
-          ->device_management_service();
+      browser_policy_connector_ash_->device_management_service();
   std::unique_ptr<policy::DMServerJobConfiguration> config = std::make_unique<
       policy::DMServerJobConfiguration>(
       service,
       policy::DeviceManagementService::JobConfiguration::TYPE_REQUEST_SAML_URL,
-      GetDeviceId(), /*critical=*/false,
+      browser_policy_connector_ash_->GetInstallAttributes()->GetDeviceId(),
+      /*critical=*/false,
       policy::DMAuth::FromDMToken(
           DeviceSettingsService::Get()->policy_data()->request_token()),
-      /*oauth_token=*/absl::nullopt,
-      g_browser_process->system_network_context_manager()
-          ->GetSharedURLLoaderFactory(),
+      /*oauth_token=*/std::nullopt, shared_url_loader_factory_,
       base::BindOnce(&PublicSamlUrlFetcher::OnPublicSamlUrlReceived,
                      weak_ptr_factory_.GetWeakPtr()));
 

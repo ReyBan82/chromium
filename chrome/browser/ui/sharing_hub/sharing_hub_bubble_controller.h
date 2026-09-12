@@ -8,6 +8,7 @@
 #include "base/callback_list.h"
 #include "chrome/browser/share/share_attempt.h"
 #include "chrome/browser/sharing_hub/sharing_hub_model.h"
+#include "ui/base/interaction/element_identifier.h"
 
 namespace content {
 class WebContents;
@@ -23,6 +24,8 @@ class SharingHubBubbleView;
 // Responsible for showing and hiding an associated dialog bubble.
 class SharingHubBubbleController {
  public:
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kIconElementId);
+
   static SharingHubBubbleController* CreateOrGetFromWebContents(
       content::WebContents* web_contents);
 
@@ -36,8 +39,7 @@ class SharingHubBubbleController {
   // Returns true if the omnibox icon should be shown.
   virtual bool ShouldOfferOmniboxIcon() = 0;
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
-    BUILDFLAG(IS_FUCHSIA)
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
   // This method returns the set of first-party actions, which are actions
   // internal to Chrome. Third-party actions (those outside Chrome) are
   // currently not supported.
@@ -46,28 +48,15 @@ class SharingHubBubbleController {
   // ShareAttempt? Does that make sense, even?
   virtual std::vector<SharingHubAction> GetFirstPartyActions() = 0;
 
-  // Returns whether the sharing hub should show a preview section or not.
-  // TODO(ellyjones): Remove this once the preview section is launched.
-  virtual bool ShouldUsePreview() = 0;
-
-  // The sharing hub can load images asynchronously under some circumstances; to
-  // allow for that, the controller allows clients to register a callback to be
-  // notified when a new image is loaded.
-  using PreviewImageChangedCallback =
-      base::RepeatingCallback<void(ui::ImageModel)>;
-  virtual base::CallbackListSubscription RegisterPreviewImageChangedCallback(
-      PreviewImageChangedCallback callback) = 0;
-
   virtual base::WeakPtr<SharingHubBubbleController> GetWeakPtr() = 0;
 
   // Client code should call these when the corresponding things happen in the
   // View.
   virtual void OnBubbleClosed() = 0;
-  virtual void OnActionSelected(int command_id,
-                                std::string feature_name_for_metrics) = 0;
+  virtual void OnActionSelected(const SharingHubAction& action) = 0;
 #endif
 };
 
 }  // namespace sharing_hub
 
-#endif  // CHROME_BROWSER_UI_SHARING_HUB_SHARING_HUB_BUBBLE_CONTROLLER_INTERFACE_H_
+#endif  // CHROME_BROWSER_UI_SHARING_HUB_SHARING_HUB_BUBBLE_CONTROLLER_H_

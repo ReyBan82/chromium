@@ -7,7 +7,7 @@
 
 #include <jni.h>
 
-#include "base/feature_list.h"
+#include <optional>
 
 class PrefRegistrySimple;
 class PrefService;
@@ -22,9 +22,13 @@ enum CustomTabsVisibilityHistogram {
   kMaxValue = NO_VISIBLE_TAB,
 };
 
+// Following enum should always be in sync with ChromeActivityType defined in
+// tools/metrics/histograms/metadata/android/enums.xml
+
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.chrome.browser.flags
 enum class ActivityType {
-  // Chrome is running as the Chrome Android Browser App (i.e., traditional Chrome).
+  // Chrome is running as the Chrome Android Browser App (i.e., traditional
+  // Chrome).
   kTabbed,
 
   // Chrome is running embedded in another application as a Custom Tab.
@@ -41,20 +45,37 @@ enum class ActivityType {
   // Chrome is running as a Web App
   //
   // See
-  //   - https://chromium.googlesource.com/chromium/src/+/HEAD/docs/webapps/README.md
+  //   -
+  //   https://chromium.googlesource.com/chromium/src/+/HEAD/docs/webapps/README.md
   kWebapp,
 
   // Chrome is running as a WebAPK.
   //
   // See:
   //   - https://web.dev/webapks/
-  //   - https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/android/webapk/README.md
+  //   -
+  //   https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/android/webapk/README.md
   kWebApk,
 
-  // Chrome has started running, but no tab has yet become visible (for example: warm-up,
+  // Chrome has started running, but no tab has yet become visible (for example:
+  // warm-up,
   // FRE, downloads manager shown in response to a notification click, etc).
   kPreFirstTab,
-  kMaxValue = kPreFirstTab,
+
+  // Chrome is running embedded in another application as auth-dedicated tab.
+  //
+  // See:
+  //   -
+  //   https://developer.android.com/reference/androidx/browser/auth/AuthTabIntent
+  kAuthTab,
+
+  // Chrome is running as DevTools.
+  //
+  // See:
+  //   - https://goo.gle/chromium-devtools
+  kDevTools,
+
+  kMaxValue = kDevTools,
 };
 
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.chrome.browser.flags
@@ -82,6 +103,17 @@ enum class MultipleUserProfilesState {
   kMaxValue = kMultipleProfiles,
 };
 
+// The type of Profile and UI that is used by the custom tab.
+// GENERATED_JAVA_ENUM_PACKAGE: org.chromium.chrome.browser.flags
+enum class CustomTabProfileType {
+  // The normal user profile.
+  kRegular = 0,
+  // An off-the-record profile with incognito UI.
+  kIncognito = 1,
+  // An off-the-record profile without references to incognito mode.
+  kEphemeral = 2,
+};
+
 // Returns the CustomTabs.Visible histogram value that corresponde to |type|.
 CustomTabsVisibilityHistogram GetCustomTabsVisibleValue(ActivityType type);
 
@@ -107,7 +139,7 @@ void EmitActivityTypeHistograms(ActivityType type);
 void RegisterActivityTypePrefs(PrefRegistrySimple* registry);
 
 // Retrieves the activity type from |local_state|.
-absl::optional<chrome::android::ActivityType> GetActivityTypeFromLocalState(
+std::optional<chrome::android::ActivityType> GetActivityTypeFromLocalState(
     PrefService* local_state);
 
 // Saves the activity type |value| to |local_state|.

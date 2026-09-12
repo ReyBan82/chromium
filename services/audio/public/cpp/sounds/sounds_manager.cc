@@ -5,6 +5,7 @@
 #include "services/audio/public/cpp/sounds/sounds_manager.h"
 
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -16,9 +17,6 @@
 namespace audio {
 
 namespace {
-
-SoundsManager* g_instance = NULL;
-bool g_initialized_for_testing = false;
 
 // SoundsManagerImpl ---------------------------------------------------
 
@@ -36,10 +34,12 @@ class SoundsManagerImpl : public SoundsManager {
 
   // SoundsManager implementation:
   bool Initialize(SoundKey key,
-                  const base::StringPiece& data,
-                  media::AudioCodec codec) override;
+                  int resource_id,
+                  media::AudioCodec codec,
+                  bool loop) override;
   bool Play(SoundKey key) override;
   bool Stop(SoundKey key) override;
+  bool Pause(SoundKey key) override;
   base::TimeDelta GetDuration(SoundKey key) override;
 
  private:
@@ -55,15 +55,16 @@ class SoundsManagerImpl : public SoundsManager {
 };
 
 bool SoundsManagerImpl::Initialize(SoundKey key,
-                                   const base::StringPiece& data,
-                                   media::AudioCodec codec) {
+                                   int resource_id,
+                                   media::AudioCodec codec,
+                                   bool loop) {
   if (AudioStreamHandler* handler = GetHandler(key)) {
     DCHECK(handler->IsInitialized());
     return true;
   }
 
-  std::unique_ptr<AudioStreamHandler> handler(
-      new AudioStreamHandler(stream_factory_binder_, data, codec));
+  auto handler = std::make_unique<AudioStreamHandler>(stream_factory_binder_,
+                                                      resource_id, codec, loop);
   if (!handler->IsInitialized()) {
     LOG(WARNING) << "Can't initialize AudioStreamHandler for key=" << key;
     return false;
@@ -82,10 +83,20 @@ bool SoundsManagerImpl::Play(SoundKey key) {
 bool SoundsManagerImpl::Stop(SoundKey key) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   AudioStreamHandler* handler = GetHandler(key);
-  if (!handler)
+  if (!handler) {
     return false;
+  }
   handler->Stop();
   return true;
+}
+
+bool SoundsManagerImpl::Pause(SoundKey key) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  AudioStreamHandler* handler = GetHandler(key);
+  if (!handler) {
+    return false;
+  }
+  return handler->Pause();
 }
 
 base::TimeDelta SoundsManagerImpl::GetDuration(SoundKey key) {
@@ -96,49 +107,25 @@ base::TimeDelta SoundsManagerImpl::GetDuration(SoundKey key) {
 
 AudioStreamHandler* SoundsManagerImpl::GetHandler(SoundKey key) {
   for (auto& entry : handlers_) {
-    if (entry.key == key)
+    if (entry.key == key) {
       return entry.handler.get();
+    }
   }
   return nullptr;
 }
 
 }  // namespace
 
+// static
+std::unique_ptr<SoundsManager> SoundsManager::Create(
+    SoundsManager::StreamFactoryBinder stream_factory_binder) {
+  return std::make_unique<SoundsManagerImpl>(std::move(stream_factory_binder));
+}
+
 SoundsManager::SoundsManager() = default;
 
 SoundsManager::~SoundsManager() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-}
-
-// static
-void SoundsManager::Create(StreamFactoryBinder stream_factory_binder) {
-  CHECK(!g_instance || g_initialized_for_testing)
-      << "SoundsManager::Create() is called twice";
-  if (g_initialized_for_testing)
-    return;
-  g_instance = new SoundsManagerImpl(std::move(stream_factory_binder));
-}
-
-// static
-void SoundsManager::Shutdown() {
-  CHECK(g_instance) << "SoundsManager::Shutdown() is called "
-                    << "without previous call to Create()";
-  delete g_instance;
-  g_instance = NULL;
-}
-
-// static
-SoundsManager* SoundsManager::Get() {
-  CHECK(g_instance) << "SoundsManager::Get() is called before Create()";
-  return g_instance;
-}
-
-// static
-void SoundsManager::InitializeForTesting(SoundsManager* manager) {
-  CHECK(!g_instance) << "SoundsManager is already initialized.";
-  CHECK(manager);
-  g_instance = manager;
-  g_initialized_for_testing = true;
 }
 
 }  // namespace audio

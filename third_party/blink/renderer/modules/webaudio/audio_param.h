@@ -31,13 +31,11 @@
 
 #include <sys/types.h>
 
-#include <atomic>
-
 #include "base/memory/scoped_refptr.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_automation_rate.h"
 #include "third_party/blink/renderer/core/typed_arrays/array_buffer_view_helpers.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_param_handler.h"
-#include "third_party/blink/renderer/modules/webaudio/audio_param_timeline.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_summing_junction.h"
 #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
 #include "third_party/blink/renderer/modules/webaudio/inspector_helper_mixin.h"
@@ -47,10 +45,9 @@
 
 namespace blink {
 
-class AudioNodeOutput;
-
 // AudioParam class represents web-exposed AudioParam interface.
-class AudioParam final : public ScriptWrappable, public InspectorHelperMixin {
+class MODULES_EXPORT AudioParam final : public ScriptWrappable,
+                                        public InspectorHelperMixin {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
@@ -59,7 +56,7 @@ class AudioParam final : public ScriptWrappable, public InspectorHelperMixin {
       const String& parent_uuid,
       AudioParamHandler::AudioParamType,
       double default_value,
-      AudioParamHandler::AutomationRate rate,
+      V8AutomationRate::Enum rate,
       AudioParamHandler::AutomationRateMode rate_mode,
       float min_value = -std::numeric_limits<float>::max(),
       float max_value = std::numeric_limits<float>::max());
@@ -68,7 +65,7 @@ class AudioParam final : public ScriptWrappable, public InspectorHelperMixin {
              const String& parent_uuid,
              AudioParamHandler::AudioParamType,
              double default_value,
-             AudioParamHandler::AutomationRate rate,
+             V8AutomationRate::Enum rate,
              AudioParamHandler::AutomationRateMode rate_mode,
              float min,
              float max);
@@ -76,30 +73,21 @@ class AudioParam final : public ScriptWrappable, public InspectorHelperMixin {
   ~AudioParam() override;
 
   void Trace(Visitor*) const override;
-  // `Handler()` always returns a valid object.
-  AudioParamHandler& Handler() const { return *handler_; }
-  // `Context()` always returns a valid object.
-  BaseAudioContext* Context() const { return context_; }
 
-  AudioParamHandler::AudioParamType GetParamType() const {
-    return Handler().GetParamType();
-  }
-  String GetParamName() const { return Handler().GetParamName(); }
-  void SetParamType(AudioParamHandler::AudioParamType);
-  void SetCustomParamName(const String name);
+  // InspectorHelperMixin: an AudioParam is always owned by an AudioNode so
+  // its notification is done by the parent AudioNode.
+  void ReportDidCreate() override {}
+  void ReportWillBeDestroyed() override {}
 
+  // https://webaudio.github.io/web-audio-api/#AudioParam
   float value() const;
   void setValue(float, ExceptionState&);
   void setValue(float);
-
-  String automationRate() const;
-  void setAutomationRate(const String&, ExceptionState&);
-
+  V8AutomationRate automationRate() const;
+  void setAutomationRate(const V8AutomationRate&, ExceptionState&);
   float defaultValue() const;
-
   float minValue() const;
   float maxValue() const;
-
   AudioParam* setValueAtTime(float value, double time, ExceptionState&);
   AudioParam* linearRampToValueAtTime(float value,
                                       double time,
@@ -118,10 +106,13 @@ class AudioParam final : public ScriptWrappable, public InspectorHelperMixin {
   AudioParam* cancelScheduledValues(double start_time, ExceptionState&);
   AudioParam* cancelAndHoldAtTime(double start_time, ExceptionState&);
 
-  // InspectorHelperMixin: an AudioParam is always owned by an AudioNode so
-  // its notification is done by the parent AudioNode.
-  void ReportDidCreate() final {}
-  void ReportWillBeDestroyed() final {}
+  String GetParamName() const { return Handler().GetParamName(); }
+  void SetCustomParamName(const String name);
+
+  // `Handler()` always returns a valid object.
+  AudioParamHandler& Handler() const { return *handler_; }
+  // `Context()` always returns a valid object.
+  BaseAudioContext* Context() const { return context_.Get(); }
 
  private:
   void WarnIfOutsideRange(const String& param_methd, float value);

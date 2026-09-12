@@ -6,12 +6,13 @@
 #define COMPONENTS_PERFORMANCE_MANAGER_EXECUTION_CONTEXT_PRIORITY_BOOSTING_VOTE_AGGREGATOR_H_
 
 #include <map>
+#include <optional>
 #include <set>
+#include <vector>
 
 #include "base/memory/raw_ptr.h"
 #include "base/task/task_traits.h"
 #include "components/performance_manager/public/execution_context_priority/execution_context_priority.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace performance_manager {
 namespace execution_context_priority {
@@ -72,30 +73,16 @@ class BoostingVote {
 // class must outlive all boosting votes registered with it.
 class BoostingVoteAggregator : public VoteObserver {
  public:
-  BoostingVoteAggregator();
-  BoostingVoteAggregator(const BoostingVoteAggregator&) = delete;
-  BoostingVoteAggregator& operator=(const BoostingVoteAggregator&) = delete;
-  ~BoostingVoteAggregator() override;
-
-  // Both of these must be called in order for the aggregator to be setup
-  // ("IsSetup" will return true). Both of these should be called exactly once.
-  VotingChannel GetVotingChannel();
-  void SetUpstreamVotingChannel(VotingChannel channel);
-
-  bool IsSetup() const;
-
- protected:
-  friend class BoostingVote;
-
-  // We currently require that base::TaskPriority be zero-based, and
+  // We currently require that base::Process::Priority be zero-based, and
   // consecutive. These static asserts ensure that we revisit this code if the
-  // base::TaskPriority enum ever changes.
-  static_assert(static_cast<int>(base::TaskPriority::LOWEST) == 0,
+  // base::Process::Priority enum ever changes.
+  static_assert(static_cast<int>(base::Process::Priority::kMinValue) == 0,
                 "expect 0-based priorities");
-  static_assert(static_cast<int>(base::TaskPriority::HIGHEST) == 2,
+  static_assert(static_cast<int>(base::Process::Priority::kMaxValue) == 2,
                 "expect 3 priority levels");
 
-  using NodePriorityMap = std::map<const ExecutionContext*, base::TaskPriority>;
+  using NodePriorityMap =
+      std::map<const ExecutionContext*, base::Process::Priority>;
 
   // Small helper class used to endow both edges and nodes with "active" bits
   // for each priority layer.
@@ -131,54 +118,25 @@ class BoostingVoteAggregator : public VoteObserver {
 
     const Vote& incoming_vote() const { return incoming_vote_.value(); }
 
-    // Sets/Cancels the incoming vote.
-    void SetIncomingVote(const Vote& incoming_vote) {
-      DCHECK(!incoming_vote_.has_value());
-      incoming_vote_ = incoming_vote;
-    }
-    void RemoveIncomingVote() {
-      DCHECK(incoming_vote_.has_value());
-      incoming_vote_ = absl::nullopt;
-    }
-    // Updates the incoming vote.
-    void UpdateIncomingVote(const Vote& incoming_vote) {
-      DCHECK(incoming_vote_.has_value());
+    void SetIncomingVote(const std::optional<Vote>& incoming_vote) {
       incoming_vote_ = incoming_vote;
     }
 
-    // Sets/Cancels the outgoing vote.
-    void SetOutgoingVote(const Vote& outgoing_vote) {
-      DCHECK(!outgoing_vote_.has_value());
+    const std::optional<Vote>& outgoing_vote() const { return outgoing_vote_; }
+    void SetOutgoingVote(const std::optional<Vote>& outgoing_vote) {
       outgoing_vote_ = outgoing_vote;
-    }
-    void CancelOutgoingVote() {
-      DCHECK(outgoing_vote_.has_value());
-      outgoing_vote_ = absl::nullopt;
-    }
-    // Updates the outgoing vote. Returns true if it changed.
-    bool UpdateOutgoingVote(const Vote& outgoing_vote) {
-      DCHECK(outgoing_vote_.has_value());
-      if (outgoing_vote == outgoing_vote_.value())
-        return false;
-
-      outgoing_vote_ = outgoing_vote;
-      return true;
     }
 
     // Returns true if this node has an active |incoming| vote. If false that
     // means this node exists only because it is referenced by a BoostedVote.
-    // Same as |incoming_vote_.has_value()|, but more readable.
     bool HasIncomingVote() const { return incoming_vote_.has_value(); }
-
-    // Returns true if this node has an active outgoing vote.
-    bool HasOutgoingVote() const { return outgoing_vote_.has_value(); }
 
     // Returns true if this node is involved in any edges.
     bool HasEdges() const { return edge_count_ > 0; }
 
     // Returns the effective priority of this node based on the highest of the
     // values in |supporting_node_count_|.
-    base::TaskPriority GetEffectivePriorityLevel() const;
+    base::Process::Priority GetEffectivePriorityLevel() const;
 
     // For keeping track of the number of edges in which this node is involved.
     void IncrementEdgeCount();
@@ -193,10 +151,10 @@ class BoostingVoteAggregator : public VoteObserver {
     size_t edge_count_ = 0;
 
     // The input vote we've received, if any.
-    absl::optional<Vote> incoming_vote_;
+    std::optional<Vote> incoming_vote_;
 
     // The output vote we're emitted, if any.
-    absl::optional<Vote> outgoing_vote_;
+    std::optional<Vote> outgoing_vote_;
   };
 
   // NOTE: It is important that NodeDataMap preserve pointers to NodeData
@@ -249,16 +207,12 @@ class BoostingVoteAggregator : public VoteObserver {
         : src_(boosting_vote->input_execution_context()),
           dst_(boosting_vote->output_execution_context()) {}
     Edge(const Edge&) = default;
-    ~Edge() {}
+    ~Edge() = default;
 
     Edge& operator=(const Edge&) = default;
     Edge& operator=(Edge&&) = delete;
 
-    bool operator==(const Edge& rhs) const {
-      return std::tie(src_, dst_) == std::tie(rhs.src_, rhs.dst_);
-    }
-
-    bool operator!=(const Edge& rhs) const { return !(*this == rhs); }
+    friend bool operator==(const Edge&, const Edge&) = default;
 
     // Forward edges sort by (src, dst), while reverse edges sort by (dst, src).
     bool operator<(const Edge& rhs) const {
@@ -282,19 +236,41 @@ class BoostingVoteAggregator : public VoteObserver {
   using ForwardEdges = std::map<ForwardEdge, EdgeData>;
   using ReverseEdges = std::map<ReverseEdge, EdgeData*>;
 
+  BoostingVoteAggregator();
+  BoostingVoteAggregator(const BoostingVoteAggregator&) = delete;
+  BoostingVoteAggregator& operator=(const BoostingVoteAggregator&) = delete;
+  ~BoostingVoteAggregator() override;
+
+  // Both of these must be called in order for the aggregator to be setup
+  // ("IsSetup" will return true). Both of these should be called exactly once.
+  VotingChannel GetVotingChannel();
+  void SetUpstreamVotingChannel(VotingChannel channel);
+
+  bool IsSetup() const;
+
+  const NodeDataMap& nodes_for_testing() const { return nodes_; }
+  const ForwardEdges& forward_edges_for_testing() const {
+    return forward_edges_;
+  }
+  const ReverseEdges& reverse_edges_for_testing() const {
+    return reverse_edges_;
+  }
+
+ private:
+  friend class BoostingVote;
+
   // To be called by BoostingVote.
   void SubmitBoostingVote(const BoostingVote* boosting_vote);
   void CancelBoostingVote(const BoostingVote* boosting_vote);
 
   // VoteObserver implementation:
-  void OnVoteSubmitted(VoterId voter_id,
-                       const ExecutionContext* execution_context,
-                       const Vote& vote) override;
-  void OnVoteChanged(VoterId voter_id,
-                     const ExecutionContext* execution_context,
-                     const Vote& new_vote) override;
-  void OnVoteInvalidated(VoterId voter_id,
-                         const ExecutionContext* execution_context) override;
+  void OnVoteSet(VoterId voter_id,
+                 const ExecutionContext* execution_context,
+                 const std::optional<Vote>& vote) override;
+
+  // Helpers for OnVoteSet to handle setting vs removing votes.
+  void SetVote(const ExecutionContext* execution_context, const Vote& vote);
+  void RemoveVote(const ExecutionContext* execution_context);
 
   // Helper functions for enumerating over incoming and outgoing edges.
   // |function| should accept a single input parameter that is a

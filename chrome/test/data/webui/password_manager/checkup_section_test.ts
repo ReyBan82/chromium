@@ -4,15 +4,16 @@
 
 import 'chrome://password-manager/password_manager.js';
 
-import {CheckupSubpage, Page, PasswordCheckInteraction, PasswordManagerImpl, Router, UrlParam} from 'chrome://password-manager/password_manager.js';
-import {PluralStringProxy, PluralStringProxyImpl} from 'chrome://resources/js/plural_string_proxy.js';
-import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
+import type {PluralStringProxy} from 'chrome://password-manager/password_manager.js';
+import {CheckupSubpage, Page, PasswordCheckInteraction, PasswordManagerActionableError, PasswordManagerImpl, PluralStringProxyImpl, Router, UrlParam} from 'chrome://password-manager/password_manager.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+import {assertArrayEquals, assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
 import {flushTasks} from 'chrome://webui-test/polymer_test_util.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
 import {isVisible} from 'chrome://webui-test/test_util.js';
 
 import {TestPasswordManagerProxy} from './test_password_manager_proxy.js';
-import {makeInsecureCredential, makePasswordCheckStatus} from './test_util.js';
+import {createPasswordEntry, makeInsecureCredential, makePasswordCheckStatus} from './test_util.js';
 
 const PasswordCheckState = chrome.passwordsPrivate.PasswordCheckState;
 
@@ -28,6 +29,7 @@ class CheckupTestPluralStringProxy extends TestBrowserProxy implements
       'checkedPasswords',
       'checkingPasswords',
       'compromisedPasswords',
+      'compromisedPasswordsTitle',
       'reusedPasswords',
       'weakPasswords',
     ]);
@@ -81,7 +83,7 @@ suite('CheckupSectionTest', function() {
     assertFalse(section.$.refreshButton.disabled);
     assertTrue(isVisible(section.$.checkupStatusSubLabel));
     assertEquals(
-        elapsedTime, section.$.checkupStatusSubLabel.textContent!.trim());
+        elapsedTime, section.$.checkupStatusSubLabel.textContent.trim());
     assertFalse(isVisible(section.$.retryButton));
     assertFalse(isVisible(section.$.spinner));
   });
@@ -101,7 +103,7 @@ suite('CheckupSectionTest', function() {
     assertTrue(isVisible(section.$.checkupStatusSubLabel));
     assertEquals(
         section.i18n('checkupProgress', 4, 10),
-        section.$.checkupStatusSubLabel.textContent!.trim());
+        section.$.checkupStatusSubLabel.textContent.trim());
     assertFalse(isVisible(section.$.retryButton));
     assertTrue(isVisible(section.$.spinner));
   });
@@ -121,10 +123,40 @@ suite('CheckupSectionTest', function() {
     assertEquals(
         section.i18n(
             'checkupErrorNoPasswords', section.i18n('localPasswordManager')),
-        section.$.checkupStatusSubLabel.textContent!.trim());
+        section.$.checkupStatusSubLabel.textContent.trim());
     assertFalse(isVisible(section.$.retryButton));
     assertFalse(isVisible(section.$.spinner));
   });
+
+  test(
+      'displays locked empty state and triggers unlock on link click',
+      async function() {
+        loadTimeData.overrideValues({enableTrustedVaultUnlock: true});
+        passwordManager.data.getActionableError =
+            PasswordManagerActionableError.kTrustedVaultKeyNeeded;
+        passwordManager.data.checkStatus =
+            makePasswordCheckStatus({state: PasswordCheckState.NO_PASSWORDS});
+
+        const section = document.createElement('checkup-section');
+        document.body.appendChild(section);
+        await passwordManager.whenCalled('getPasswordManagerActionableError');
+        await flushTasks();
+
+        assertFalse(isVisible(section.$.checkupResult));
+        assertFalse(isVisible(section.$.refreshButton));
+        assertTrue(isVisible(section.$.checkupStatusLabel));
+        assertTrue(isVisible(section.$.checkupStatusSubLabel));
+
+        const unlockLink =
+            section.$.checkupStatusSubLabel.querySelector<HTMLElement>('a');
+        assertTrue(!!unlockLink);
+
+        unlockLink.click();
+        await flushTasks();
+
+        assertEquals(
+            1, passwordManager.getCallCount('startTrustedVaultUnlock'));
+      });
 
   [{state: PasswordCheckState.QUOTA_LIMIT, message: 'checkupErrorQuota'},
    {state: PasswordCheckState.OFFLINE, message: 'checkupErrorOffline'},
@@ -143,7 +175,7 @@ suite('CheckupSectionTest', function() {
                  assertTrue(isVisible(section.$.checkupStatusSubLabel));
                  assertEquals(
                      passwordManager.data.checkStatus.elapsedTimeSinceLastCheck,
-                     section.$.checkupStatusSubLabel.textContent!.trim());
+                     section.$.checkupStatusSubLabel.textContent.trim());
                  assertTrue(isVisible(section.$.retryButton));
                  assertFalse(isVisible(section.$.spinner));
                  assertEquals(
@@ -221,24 +253,27 @@ suite('CheckupSectionTest', function() {
     assertTrue(section.$.weakRow.hasAttribute('show-yellow-icon'));
 
     // Expect a proper rear icon state
-    assertFalse(section.$.compromisedRow.hasAttribute('hide-icon'));
-    assertTrue(section.$.reusedRow.hasAttribute('hide-icon'));
-    assertFalse(section.$.weakRow.hasAttribute('hide-icon'));
+    assertFalse(section.$.compromisedRow.hasAttribute('non-clickable'));
+    assertTrue(section.$.reusedRow.hasAttribute('non-clickable'));
+    assertFalse(section.$.weakRow.hasAttribute('non-clickable'));
   });
 
-  test('Number of checked passwords', async function() {
+  test('Number of checked passwords shown', async function() {
+    passwordManager.data.passwords = Array(10).fill(createPasswordEntry());
     passwordManager.data.checkStatus = makePasswordCheckStatus(
-        {state: PasswordCheckState.IDLE, totalNumber: 10});
+        {state: PasswordCheckState.IDLE, totalNumber: 20});
 
     const section = document.createElement('checkup-section');
     document.body.appendChild(section);
+    passwordManager.whenCalled('getPasswordCheckStatus');
+
     await flushTasks();
 
-    assertEquals(10, await pluralString.whenCalled('checkedPasswords'));
-    const statusLabel =
-        section.shadowRoot!.querySelector<HTMLElement>('#checkupStatusLabel');
-    assertTrue(!!statusLabel);
-    assertEquals('checkedPasswords', statusLabel.textContent!.trim());
+    await pluralString.whenCalled('checkedPasswords');
+    // getPluralString() for 'checkedPasswords' is called 2 times with 0 and 10.
+    assertArrayEquals([0, 10], pluralString.getArgs('checkedPasswords'));
+    assertEquals(
+        'checkedPasswords', section.$.checkupStatusLabel.textContent.trim());
   });
 
   [CheckupSubpage.COMPROMISED, CheckupSubpage.REUSED, CheckupSubpage.WEAK]
@@ -315,5 +350,76 @@ suite('CheckupSectionTest', function() {
         await passwordManager.whenCalled('recordPasswordCheckInteraction');
     assertEquals(
         PasswordCheckInteraction.START_CHECK_AUTOMATICALLY, interaction);
+  });
+
+  test('changing number of passwords changes title', async function() {
+    passwordManager.data.passwords = Array(10).fill(createPasswordEntry());
+    passwordManager.data.checkStatus = makePasswordCheckStatus(
+        {state: PasswordCheckState.IDLE, totalNumber: 20});
+
+    const section = document.createElement('checkup-section');
+    document.body.appendChild(section);
+    passwordManager.whenCalled('getPasswordCheckStatus');
+
+    await flushTasks();
+
+    await pluralString.whenCalled('checkedPasswords');
+    // getPluralString() for 'checkedPasswords' is called 2 times with 0 and 10.
+    assertArrayEquals([0, 10], pluralString.getArgs('checkedPasswords'));
+
+    assertTrue(!!passwordManager.listeners.savedPasswordListChangedListener);
+    passwordManager.listeners.savedPasswordListChangedListener(
+        Array(9).fill(createPasswordEntry()));
+
+    await pluralString.whenCalled('checkedPasswords');
+    // getPluralString() for 'checkedPasswords' is called 3 times with 0, 10
+    // and 9.
+    assertArrayEquals([0, 10, 9], pluralString.getArgs('checkedPasswords'));
+  });
+
+  test('Compromised section - subheader', async function() {
+    passwordManager.data.checkStatus =
+        makePasswordCheckStatus({state: PasswordCheckState.IDLE});
+
+    // 3 compromised, 0 reused, 4 weak credentials
+    passwordManager.data.insecureCredentials = [
+      makeInsecureCredential({
+        types: [
+          CompromiseType.PHISHED,
+          CompromiseType.LEAKED,
+          CompromiseType.WEAK,
+        ],
+      }),
+      makeInsecureCredential({
+        types: [
+          CompromiseType.PHISHED,
+          CompromiseType.WEAK,
+        ],
+      }),
+      makeInsecureCredential({
+        types: [
+          CompromiseType.LEAKED,
+          CompromiseType.WEAK,
+        ],
+      }),
+      makeInsecureCredential({types: [CompromiseType.WEAK]}),
+    ];
+
+    const section = document.createElement('checkup-section');
+    document.body.appendChild(section);
+
+    await passwordManager.whenCalled('getInsecureCredentials');
+    await passwordManager.whenCalled('getPasswordCheckStatus');
+
+    // Expect a proper number of insecure credentials as a parameter to
+    // PluralStringProxy.
+    assertEquals(3, await pluralString.whenCalled('compromisedPasswords'));
+    assertEquals(3, await pluralString.whenCalled('compromisedPasswordsTitle'));
+    await flushTasks();
+
+    // Expect string returned by PluralStringProxy.
+    assertEquals('compromisedPasswords', section.$.compromisedRow.label);
+    assertEquals(
+        'compromisedPasswordsTitle', section.$.compromisedRow.subLabel);
   });
 });

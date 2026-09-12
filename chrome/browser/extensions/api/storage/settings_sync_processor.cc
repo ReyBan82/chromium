@@ -13,12 +13,17 @@
 #include "components/sync/protocol/extension_setting_specifics.pb.h"
 #include "extensions/browser/api/storage/backend_task_runner.h"
 #include "extensions/browser/api/storage/settings_namespace.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/extension_id.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
 SettingsSyncProcessor::SettingsSyncProcessor(
-    const std::string& extension_id,
-    syncer::ModelType type,
+    const ExtensionId& extension_id,
+    syncer::DataType type,
     syncer::SyncChangeProcessor* sync_processor)
     : extension_id_(extension_id),
       type_(type),
@@ -33,7 +38,7 @@ SettingsSyncProcessor::~SettingsSyncProcessor() {
   DCHECK(IsOnBackendSequence());
 }
 
-void SettingsSyncProcessor::Init(const base::Value::Dict& initial_state) {
+void SettingsSyncProcessor::Init(const base::DictValue& initial_state) {
   DCHECK(IsOnBackendSequence());
   CHECK(!initialized_) << "Init called multiple times";
 
@@ -44,18 +49,18 @@ void SettingsSyncProcessor::Init(const base::Value::Dict& initial_state) {
   initialized_ = true;
 }
 
-absl::optional<syncer::ModelError> SettingsSyncProcessor::SendChanges(
+std::optional<syncer::ModelError> SettingsSyncProcessor::SendChanges(
     const value_store::ValueStoreChangeList& changes) {
   DCHECK(IsOnBackendSequence());
   CHECK(initialized_) << "Init not called";
 
   syncer::SyncChangeList sync_changes;
-  std::set<std::string> added_keys;
-  std::set<std::string> deleted_keys;
+  absl::flat_hash_set<std::string> added_keys;
+  absl::flat_hash_set<std::string> deleted_keys;
 
   for (const auto& i : changes) {
     if (i.new_value) {
-      if (synced_keys_.count(i.key)) {
+      if (synced_keys_.contains(i.key)) {
         // New value, key is synced; send ACTION_UPDATE.
         sync_changes.push_back(settings_sync_util::CreateUpdate(
             extension_id_, i.key, *i.new_value, type_));
@@ -66,7 +71,7 @@ absl::optional<syncer::ModelError> SettingsSyncProcessor::SendChanges(
         added_keys.insert(i.key);
       }
     } else {
-      if (synced_keys_.count(i.key)) {
+      if (synced_keys_.contains(i.key)) {
         // Clearing value, key is synced; send ACTION_DELETE.
         sync_changes.push_back(
             settings_sync_util::CreateDelete(extension_id_, i.key, type_));
@@ -77,20 +82,22 @@ absl::optional<syncer::ModelError> SettingsSyncProcessor::SendChanges(
     }
   }
 
-  if (sync_changes.empty())
-    return absl::nullopt;
+  if (sync_changes.empty()) {
+    return std::nullopt;
+  }
 
-  absl::optional<syncer::ModelError> error =
+  std::optional<syncer::ModelError> error =
       sync_processor_->ProcessSyncChanges(FROM_HERE, sync_changes);
-  if (error.has_value())
+  if (error.has_value()) {
     return error;
+  }
 
   synced_keys_.insert(added_keys.begin(), added_keys.end());
   for (const auto& deleted_key : deleted_keys) {
     synced_keys_.erase(deleted_key);
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 void SettingsSyncProcessor::NotifyChanges(
@@ -99,10 +106,11 @@ void SettingsSyncProcessor::NotifyChanges(
   CHECK(initialized_) << "Init not called";
 
   for (const auto& i : changes) {
-    if (i.new_value)
+    if (i.new_value) {
       synced_keys_.insert(i.key);
-    else
+    } else {
       synced_keys_.erase(i.key);
+    }
   }
 }
 

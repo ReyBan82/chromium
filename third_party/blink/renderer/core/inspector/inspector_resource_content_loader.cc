@@ -29,23 +29,7 @@ namespace blink {
 namespace {
 
 bool ShouldSkipFetchingUrl(const KURL& url) {
-  return !url.IsValid() || url.IsAboutBlankURL() || url.IsAboutSrcdocURL();
-}
-
-bool IsServiceWorkerPresent(Document* document) {
-  DocumentLoader* loader = document->Loader();
-  if (!loader)
-    return false;
-
-  if (loader->GetResponse().WasFetchedViaServiceWorker())
-    return true;
-
-  WebServiceWorkerNetworkProvider* provider =
-      loader->GetServiceWorkerNetworkProvider();
-  if (!provider)
-    return false;
-
-  return provider->ControllerServiceWorkerID() >= 0;
+  return !url.IsValid() || url.IsAboutBlankUrl() || url.IsAboutSrcdocUrl();
 }
 
 }  // namespace
@@ -69,8 +53,9 @@ class InspectorResourceContentLoader::ResourceClient final
   Member<InspectorResourceContentLoader> loader_;
 
   void NotifyFinished(Resource* resource) override {
-    if (loader_)
+    if (loader_) {
       loader_->ResourceFinished(this);
+    }
     ClearResource();
   }
 
@@ -94,11 +79,21 @@ void InspectorResourceContentLoader::Start() {
   InspectedFrames* inspected_frames =
       MakeGarbageCollected<InspectedFrames>(inspected_frame_);
   for (LocalFrame* frame : *inspected_frames) {
-    if (frame->GetDocument()->IsInitialEmptyDocument())
+    if (frame->GetDocument()->IsInitialEmptyDocument()) {
       continue;
+    }
     documents.push_back(frame->GetDocument());
   }
   for (Document* document : documents) {
+    ExecutionContext* execution_context = document->GetExecutionContext();
+    if (!execution_context) {
+      continue;
+    }
+    if (execution_context->GetSecurityOrigin()->IsOpaque()) {
+      // Skip opaque origins as fetching from them might fail and shutdown
+      // the renderer for security reasons.
+      continue;
+    }
     HashSet<String> urls_to_fetch;
 
     ResourceRequest resource_request;
@@ -111,21 +106,18 @@ void InspectorResourceContentLoader::Start() {
       resource_request = ResourceRequest(document->Url());
       resource_request.SetCacheMode(mojom::FetchCacheMode::kOnlyIfCached);
     }
+    // kOnlyIfCached requires kSameOrigin mode to allow hitting the service
+    // worker cache for web requests. However, local schemes (such as 'file:')
+    // are treated as unique origins and cannot be requested in kSameOrigin
+    // mode without failing CORS checks and logging a security warning.
+    if (!resource_request.Url().IsLocalFile()) {
+      resource_request.SetMode(network::mojom::RequestMode::kSameOrigin);
+    }
     resource_request.SetRequestContext(
         mojom::blink::RequestContextType::INTERNAL);
-
-    if (IsServiceWorkerPresent(document)) {
-      // If the request is going to be intercepted by a service worker, then
-      // don't use only-if-cached. only-if-cached will cause the service worker
-      // to throw an exception if it repeats the request, which is a problem:
-      // crbug.com/823392 crbug.com/1098389
-      resource_request.SetCacheMode(mojom::FetchCacheMode::kDefault);
-    }
-
     ResourceFetcher* fetcher = document->Fetcher();
 
-    scoped_refptr<const DOMWrapperWorld> world =
-        document->GetExecutionContext()->GetCurrentWorld();
+    const DOMWrapperWorld* world = execution_context->GetCurrentWorld();
     if (!ShouldSkipFetchingUrl(resource_request.Url())) {
       urls_to_fetch.insert(resource_request.Url().GetString());
       ResourceLoaderOptions options(world);
@@ -142,17 +134,24 @@ void InspectorResourceContentLoader::Start() {
     HeapVector<Member<CSSStyleSheet>> style_sheets;
     InspectorCSSAgent::CollectAllDocumentStyleSheets(document, style_sheets);
     for (CSSStyleSheet* style_sheet : style_sheets) {
-      if (style_sheet->IsInline() || !style_sheet->Contents()->LoadCompleted())
+      if (style_sheet->IsInline() ||
+          !style_sheet->Contents()->LoadCompleted()) {
         continue;
+      }
       String url = style_sheet->href();
-      if (ShouldSkipFetchingUrl(KURL(url)) || urls_to_fetch.Contains(url))
+      if (ShouldSkipFetchingUrl(KURL(url)) || urls_to_fetch.Contains(url)) {
         continue;
+      }
       urls_to_fetch.insert(url);
       ResourceRequest style_sheet_resource_request(url);
       style_sheet_resource_request.SetRequestContext(
           mojom::blink::RequestContextType::INTERNAL);
       ResourceLoaderOptions options(world);
       options.initiator_info.name = fetch_initiator_type_names::kInternal;
+      auto* owner_element = DynamicTo<HTMLElement>(style_sheet->ownerNode());
+      if (owner_element && owner_element->nonce()) {
+        options.content_security_policy_nonce = owner_element->nonce();
+      }
       FetchParameters params(std::move(style_sheet_resource_request), options);
       ResourceClient* resource_client =
           MakeGarbageCollected<ResourceClient>(this);
@@ -161,8 +160,9 @@ void InspectorResourceContentLoader::Start() {
           CSSStyleSheetResource::Fetch(params, fetcher, resource_client));
       // A cache hit for a css stylesheet will complete synchronously. Don't
       // mark the client as pending if it already finished.
-      if (resource_client->GetResource())
+      if (resource_client->GetResource()) {
         pending_resource_clients_.insert(resource_client);
+      }
     }
 
     // Fetch app manifest if available.
@@ -170,10 +170,11 @@ void InspectorResourceContentLoader::Start() {
     // and manifest_fetcher.cc. Move it to a shared place.
     HTMLLinkElement* link_element = document->LinkManifest();
     KURL link;
-    if (link_element)
+    if (link_element) {
       link = link_element->Href();
+    }
     if (!ShouldSkipFetchingUrl(link)) {
-      auto use_credentials = EqualIgnoringASCIICase(
+      auto use_credentials = EqualIgnoringAsciiCase(
           link_element->FastGetAttribute(html_names::kCrossoriginAttr),
           "use-credentials");
       ResourceRequest manifest_request(link);
@@ -196,8 +197,9 @@ void InspectorResourceContentLoader::Start() {
           MakeGarbageCollected<ResourceClient>(this);
       resources_.push_back(
           RawResource::Fetch(manifest_params, fetcher, manifest_client));
-      if (manifest_client->GetResource())
+      if (manifest_client->GetResource()) {
         pending_resource_clients_.insert(manifest_client);
+      }
     }
   }
 
@@ -212,8 +214,9 @@ int InspectorResourceContentLoader::CreateClientId() {
 void InspectorResourceContentLoader::EnsureResourcesContentLoaded(
     int client_id,
     base::OnceClosure callback) {
-  if (!started_)
+  if (!started_) {
     Start();
+  }
   callbacks_.insert(client_id, Callbacks())
       .stored_value->value.push_back(std::move(callback));
   CheckDone();
@@ -235,14 +238,16 @@ void InspectorResourceContentLoader::Trace(Visitor* visitor) const {
 
 void InspectorResourceContentLoader::DidCommitLoadForLocalFrame(
     LocalFrame* frame) {
-  if (frame == inspected_frame_)
+  if (frame == inspected_frame_) {
     Stop();
+  }
 }
 
 Resource* InspectorResourceContentLoader::ResourceForURL(const KURL& url) {
   for (const auto& resource : resources_) {
-    if (resource->Url() == url)
-      return resource;
+    if (resource->Url() == url) {
+      return resource.Get();
+    }
   }
   return nullptr;
 }
@@ -254,8 +259,9 @@ void InspectorResourceContentLoader::Dispose() {
 void InspectorResourceContentLoader::Stop() {
   HeapHashSet<Member<ResourceClient>> pending_resource_clients;
   pending_resource_clients_.swap(pending_resource_clients);
-  for (const auto& client : pending_resource_clients)
+  for (const auto& client : pending_resource_clients) {
     client->loader_ = nullptr;
+  }
   resources_.clear();
   // Make sure all callbacks are called to prevent infinite waiting time.
   CheckDone();
@@ -268,13 +274,15 @@ bool InspectorResourceContentLoader::HasFinished() {
 }
 
 void InspectorResourceContentLoader::CheckDone() {
-  if (!HasFinished())
+  if (!HasFinished()) {
     return;
+  }
   HashMap<int, Callbacks> callbacks;
   callbacks.swap(callbacks_);
   for (auto& key_value : callbacks) {
-    for (auto& callback : key_value.value)
+    for (auto& callback : key_value.value) {
       std::move(callback).Run();
+    }
   }
 }
 

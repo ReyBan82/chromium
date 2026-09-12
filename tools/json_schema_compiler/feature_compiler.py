@@ -6,6 +6,7 @@ import argparse
 import copy
 from datetime import datetime
 from functools import partial
+from typing import NamedTuple
 import json
 import os
 import posixpath
@@ -52,11 +53,17 @@ CC_FILE_BEGIN = """
 
 #include "%(header_file_path)s"
 
+#include <array>
+#include <string_view>
+
+#include "base/containers/span.h"
 #include "extensions/common/features/complex_feature.h"
 #include "extensions/common/features/feature_provider.h"
 #include "extensions/common/features/manifest_feature.h"
 #include "extensions/common/features/permission_feature.h"
+#include "extensions/common/mojom/context_type.mojom.h"
 #include "extensions/common/mojom/feature_session_type.mojom.h"
+#include "printing/buildflags/buildflags.h"
 
 namespace extensions {
 
@@ -70,6 +77,7 @@ CC_FILE_END = """
 }  // namespace extensions
 """
 
+
 def ToPosixPath(path):
   """Returns |path| with separator converted to POSIX style.
 
@@ -77,10 +85,23 @@ def ToPosixPath(path):
   """
   return path.replace(os.path.sep, posixpath.sep)
 
-# Returns true if the list 'l' only contains strings that are a hex-encoded SHA1
-# hashes.
-def ListContainsOnlySha1Hashes(l):
-  return len(list(filter(lambda s: not re.match("^[A-F0-9]{40}$", s), l))) == 0
+
+# Compiled regular expression matching either a 40-character (SHA-1)
+# or 64-character (SHA-256) uppercase hexadecimal string.
+HEX_HASH_PATTERN = re.compile(r"^([A-F0-9]{40}|[A-F0-9]{64})$")
+
+
+# Returns true if the hash list only contains strings that are hex-encoded SHA1
+# or SHA256 hashes.
+# TODO(crbug.com/455599844): Remove the 40-character (SHA-1) regex matching and
+# rename to ListContainsOnlySha256Hashes once the rollout is 100% complete.
+def ListContainsOnlySha1OrSha256Hashes(hash_list):
+  """Returns True if all elements in hash_list are valid hex SHA-1 or SHA-256 hashes."""
+  return all(
+    isinstance(hash_entry, str) and HEX_HASH_PATTERN.match(hash_entry)
+    for hash_entry in hash_list
+  )
+
 
 # A "grammar" for what is and isn't allowed in the features.json files. This
 # grammar has to list all possible keys and the requirements for each. The
@@ -105,9 +126,9 @@ def ListContainsOnlySha1Hashes(l):
 #                a value of "all" for a list value, and will replace it with
 #                the collection of all possible values. For instance, if a
 #                feature specifies 'contexts': 'all', the generated C++ will
-#                assign the list of Feature::BLESSED_EXTENSION_CONTEXT,
-#                Feature::BLESSED_WEB_PAGE_CONTEXT et al for contexts. If not
-#                specified, defaults to false.
+#                assign the list of mojom::ContextType::kPrivilegedExtension,
+#                mojom::ContextType::kPrivilegedWebPage et al for contexts. If
+#                not specified, defaults to false.
 #   'allow_empty': Only applicable for lists. Whether an empty list is a valid
 #                  value. If omitted, empty lists are prohibited.
 #   'validators': A list of (function, str) pairs with a function to run on the
@@ -124,186 +145,158 @@ def ListContainsOnlySha1Hashes(l):
 #       setting an option.
 # If a type definition does not have any restrictions (beyond the type itself),
 # an empty definition ({}) is used.
-FEATURE_GRAMMAR = ({
-    'alias': {
-        str: {},
-        'shared': True
-    },
-    'allowlist': {
-        list: {
-            'subtype':
-            str,
-            'validators':
-            [(ListContainsOnlySha1Hashes,
-              'list should only have hex-encoded SHA1 hashes of extension ids')]
-        }
-    },
-    'blocklist': {
-        list: {
-            'subtype':
-            str,
-            'validators':
-            [(ListContainsOnlySha1Hashes,
-              'list should only have hex-encoded SHA1 hashes of extension ids')]
-        }
-    },
-    'channel': {
-        str: {
-            'enum_map': {
-                'trunk': 'version_info::Channel::UNKNOWN',
-                'canary': 'version_info::Channel::CANARY',
-                'dev': 'version_info::Channel::DEV',
-                'beta': 'version_info::Channel::BETA',
-                'stable': 'version_info::Channel::STABLE',
-            }
-        }
-    },
-    'command_line_switch': {
-        str: {}
-    },
-    'component_extensions_auto_granted': {
-        bool: {}
-    },
-    'contexts': {
-        list: {
-            'enum_map': {
-                'blessed_extension': 'Feature::BLESSED_EXTENSION_CONTEXT',
-                'blessed_web_page': 'Feature::BLESSED_WEB_PAGE_CONTEXT',
-                'content_script': 'Feature::CONTENT_SCRIPT_CONTEXT',
-                'lock_screen_extension':
-                'Feature::LOCK_SCREEN_EXTENSION_CONTEXT',
-                'offscreen_extension': 'Feature::OFFSCREEN_EXTENSION_CONTEXT',
-                'web_page': 'Feature::WEB_PAGE_CONTEXT',
-                'webui': 'Feature::WEBUI_CONTEXT',
-                'webui_untrusted': 'Feature::WEBUI_UNTRUSTED_CONTEXT',
-                'unblessed_extension': 'Feature::UNBLESSED_EXTENSION_CONTEXT',
-            },
-            'allow_all': True,
-            'allow_empty': True
-        },
-    },
-    'default_parent': {
-        bool: {
-            'values': [True]
-        }
-    },
-    'dependencies': {
-        list: {
-            # We allow an empty list of dependencies for child features that
-            # want to override their parents' dependency set.
-            'allow_empty': True,
-            'subtype': str
-        }
-    },
-    'developer_mode_only': {
-        bool: {}
-    },
-    'disallow_for_service_workers': {
-        bool: {}
-    },
-    'extension_types': {
-        list: {
-            'enum_map': {
-                'extension': 'Manifest::TYPE_EXTENSION',
-                'hosted_app': 'Manifest::TYPE_HOSTED_APP',
-                'legacy_packaged_app': 'Manifest::TYPE_LEGACY_PACKAGED_APP',
-                'platform_app': 'Manifest::TYPE_PLATFORM_APP',
-                'shared_module': 'Manifest::TYPE_SHARED_MODULE',
-                'theme': 'Manifest::TYPE_THEME',
-                'login_screen_extension':
-                'Manifest::TYPE_LOGIN_SCREEN_EXTENSION',
-                'chromeos_system_extension':
-                'Manifest::TYPE_CHROMEOS_SYSTEM_EXTENSION',
-            },
-            'allow_all': True
-        },
-    },
-    'feature_flag': {
-        str: {}
-    },
-    'location': {
-        str: {
-            'enum_map': {
-                'component': 'SimpleFeature::COMPONENT_LOCATION',
-                'external_component':
-                'SimpleFeature::EXTERNAL_COMPONENT_LOCATION',
-                'policy': 'SimpleFeature::POLICY_LOCATION',
-                'unpacked': 'SimpleFeature::UNPACKED_LOCATION',
-            }
-        }
-    },
-    'internal': {
-        bool: {
-            'values': [True]
-        }
-    },
-    'matches': {
-        list: {
-            'subtype': str
-        }
-    },
-    'max_manifest_version': {
-        int: {
-            'values': [1, 2]
-        }
-    },
-    'min_manifest_version': {
-        int: {
-            'values': [2, 3]
-        }
-    },
-    'requires_delegated_availability_check': {
-      bool: {
-            'values': [True]
+FEATURE_GRAMMAR = {
+  'alias': {str: {}, 'shared': True},
+  'allowlist': {
+    list: {
+      'subtype': str,
+      'validators': [
+        (
+          ListContainsOnlySha1OrSha256Hashes,
+          'list should only have hex-encoded SHA-1 or SHA-256 hashes of extension ids',
+        )
+      ],
+    }
+  },
+  'blocklist': {
+    list: {
+      'subtype': str,
+      'validators': [
+        (
+          ListContainsOnlySha1OrSha256Hashes,
+          'list should only have hex-encoded SHA-1 or SHA-256 hashes of extension ids',
+        )
+      ],
+    }
+  },
+  'channel': {
+    str: {
+      'enum_map': {
+        'trunk': 'version_info::Channel::UNKNOWN',
+        'canary': 'version_info::Channel::CANARY',
+        'dev': 'version_info::Channel::DEV',
+        'beta': 'version_info::Channel::BETA',
+        'stable': 'version_info::Channel::STABLE',
       }
+    }
+  },
+  'command_line_switch': {str: {}},
+  'component_extensions_auto_granted': {bool: {}},
+  'contexts': {
+    list: {
+      'enum_map': {
+        'privileged_extension': 'mojom::ContextType::kPrivilegedExtension',
+        'privileged_web_page': 'mojom::ContextType::kPrivilegedWebPage',
+        'content_script': 'mojom::ContextType::kContentScript',
+        'offscreen_extension': 'mojom::ContextType::kOffscreenExtension',
+        'user_script': 'mojom::ContextType::kUserScript',
+        'web_page': 'mojom::ContextType::kWebPage',
+        'webui': 'mojom::ContextType::kWebUi',
+        'webui_untrusted': 'mojom::ContextType::kUntrustedWebUi',
+        'unprivileged_extension': 'mojom::ContextType::kUnprivilegedExtension',
+      },
+      'allow_all': True,
+      'allow_empty': True,
     },
-    'noparent': {
-        bool: {
-            'values': [True]
-        }
+  },
+  'default_parent': {bool: {'values': [True]}},
+  'dependencies': {
+    list: {
+      # We allow an empty list of dependencies for child features that
+      # want to override their parents' dependency set.
+      'allow_empty': True,
+      'subtype': str,
+    }
+  },
+  'developer_mode_only': {bool: {}},
+  'disallow_for_service_workers': {bool: {}},
+  'extension_types': {
+    list: {
+      'enum_map': {
+        'extension': 'Manifest::Type::kExtension',
+        'hosted_app': 'Manifest::Type::kHostedApp',
+        'legacy_packaged_app': 'Manifest::Type::kLegacyPackagedApp',
+        'platform_app': 'Manifest::Type::kPlatformApp',
+        'shared_module': 'Manifest::Type::kSharedModule',
+        'theme': 'Manifest::Type::kTheme',
+        'login_screen_extension': 'Manifest::Type::kLoginScreenExtension',
+        'chromeos_system_extension': 'Manifest::Type::kChromeOSSystemExtension',
+      },
+      'allow_all': True,
     },
-    'platforms': {
-        list: {
-            'enum_map': {
-                'chromeos': 'Feature::CHROMEOS_PLATFORM',
-                'fuchsia': 'Feature::FUCHSIA_PLATFORM',
-                'lacros': 'Feature::LACROS_PLATFORM',
-                'linux': 'Feature::LINUX_PLATFORM',
-                'mac': 'Feature::MACOSX_PLATFORM',
-                'win': 'Feature::WIN_PLATFORM',
-            }
-        }
-    },
-    'session_types': {
-        list: {
-            'enum_map': {
-                'regular': 'mojom::FeatureSessionType::kRegular',
-                'kiosk': 'mojom::FeatureSessionType::kKiosk',
-                'kiosk.autolaunched':
-                  'mojom::FeatureSessionType::kAutolaunchedKiosk',
-            }
-        }
-    },
-    'source': {
-        str: {},
-        'shared': True
-    },
-})
+  },
+  'feature_flag': {str: {}},
+  'location': {
+    str: {
+      'enum_map': {
+        'component': 'SimpleFeature::Location::kComponent',
+        'external_component': 'SimpleFeature::Location::kExternalComponent',
+        'policy': 'SimpleFeature::Location::kPolicy',
+        'unpacked': 'SimpleFeature::Location::kUnpacked',
+      }
+    }
+  },
+  'internal': {bool: {'values': [True]}},
+  'matches': {list: {'subtype': str}},
+  'max_manifest_version': {int: {'values': [1, 2]}},
+  'min_manifest_version': {int: {'values': [2, 3]}},
+  'requires_delegated_availability_check': {bool: {'values': [True]}},
+  'noparent': {bool: {'values': [True]}},
+  'platforms': {
+    list: {
+      'enum_map': {
+        'chromeos': 'Feature::CHROMEOS_PLATFORM',
+        'desktop_android': 'Feature::DESKTOP_ANDROID_PLATFORM',
+        'linux': 'Feature::LINUX_PLATFORM',
+        'mac': 'Feature::MACOSX_PLATFORM',
+        'win': 'Feature::WIN_PLATFORM',
+      }
+    }
+  },
+  'required_buildflags': {list: {'values': ['use_cups']}},
+  'session_types': {
+    list: {
+      'enum_map': {
+        'regular': 'mojom::FeatureSessionType::kRegular',
+        'kiosk': 'mojom::FeatureSessionType::kKiosk',
+        'kiosk.autolaunched': 'mojom::FeatureSessionType::kAutolaunchedKiosk',
+      }
+    }
+  },
+  'source': {str: {}, 'shared': True},
+}
 
-FEATURE_TYPES = ['APIFeature', 'BehaviorFeature',
-                 'ManifestFeature', 'PermissionFeature']
+FEATURE_TYPES = [
+  'APIFeature',
+  'BehaviorFeature',
+  'ManifestFeature',
+  'PermissionFeature',
+]
+
 
 def HasProperty(property_name, value):
   return property_name in value
 
+
 def HasAtLeastOneProperty(property_names, value):
   return any([HasProperty(name, value) for name in property_names])
+
 
 def DoesNotHaveAllProperties(property_names, value):
   return not all([HasProperty(name, value) for name in property_names])
 
+
 def DoesNotHaveProperty(property_name, value):
   return property_name not in value
+
+
+def DoesNotHavePropertyInComplexFeature(property_name, feature, all_features):
+  if type(feature) is ComplexFeature:
+    for child_feature in feature.feature_list:
+      if child_feature.GetValue(property_name):
+        return False
+  return True
+
 
 def IsEmptyContextsAllowed(feature, all_features):
   # An alias feature wouldn't have the 'contexts' feature value.
@@ -322,14 +315,17 @@ def IsEmptyContextsAllowed(feature, all_features):
   allowlisted_empty_context_namespaces = [
     'manifestTypes',
     'extensionsManifestTypes',
-    'empty_contexts' # Only added for testing.
+    'empty_contexts',  # Only added for testing.
   ]
-  return (contexts != '{}' or
-          feature.name in allowlisted_empty_context_namespaces)
+  return (
+    contexts != '{}' or feature.name in allowlisted_empty_context_namespaces
+  )
 
-def IsFeatureCrossReference(property_name, reverse_property_name, feature,
-                            all_features):
-  """ Verifies that |property_name| on |feature| references a feature that
+
+def IsFeatureCrossReference(
+  property_name, reverse_property_name, feature, all_features
+):
+  """Verifies that |property_name| on |feature| references a feature that
   references |feature| back using |reverse_property_name| property.
   |property_name| and |reverse_property_name| are expected to have string
   values.
@@ -341,7 +337,8 @@ def IsFeatureCrossReference(property_name, reverse_property_name, feature,
   value_regex = re.compile('^"(.+)"$')
   parsed_value = value_regex.match(value)
   assert parsed_value, (
-      'IsFeatureCrossReference should only be used on unicode properties')
+    'IsFeatureCrossReference should only be used on unicode properties'
+  )
 
   referenced_feature = all_features.get(parsed_value.group(1))
   if not referenced_feature:
@@ -355,6 +352,7 @@ def IsFeatureCrossReference(property_name, reverse_property_name, feature,
   if feature.has_parent:
     return True
   return reverse_reference_value == ('"%s"' % feature.name)
+
 
 # Verifies that a feature with an allowlist is not available to hosted apps,
 # returning true on success.
@@ -380,9 +378,9 @@ def DoesNotHaveAllowlistForHostedApps(value):
     return True
 
   types = value['extension_types']
-  # |types| looks like "{Manifest::TYPE_1, Manifest::TYPE_2}", so just looking
-  # for the "TYPE_HOSTED_APP substring is sufficient.
-  if 'TYPE_HOSTED_APP' not in types:
+  # |types| looks like "{Manifest::Type::kOne, Manifest::Type::kTwo}", so just
+  # looking for the "Type::kHostedApp" substring is sufficient.
+  if 'Type::kHostedApp' not in types:
     return True
 
   # Helper to convert our C++ string array like "{\"aaa\", \"bbb\"}" (which is
@@ -398,7 +396,7 @@ def DoesNotHaveAllowlistForHostedApps(value):
   # Exceptions (see the feature files).
   # DO NOT ADD MORE.
   HOSTED_APP_EXCEPTIONS = [
-      'B44D08FD98F1523ED5837D78D0A606EA9D6206E5',
+    'B44D08FD98F1523ED5837D78D0A606EA9D6206E5',
   ]
 
   allowlist = cpp_list_to_list(value['allowlist'])
@@ -409,93 +407,310 @@ def DoesNotHaveAllowlistForHostedApps(value):
   return True
 
 
-SIMPLE_FEATURE_CPP_CLASSES = ({
+SIMPLE_FEATURE_CPP_CLASSES = {
   'APIFeature': 'SimpleFeature',
   'ManifestFeature': 'ManifestFeature',
   'PermissionFeature': 'PermissionFeature',
   'BehaviorFeature': 'SimpleFeature',
-})
+}
 
-VALIDATION = ({
+COMPLEX_FEATURE_TYPES = {
+  'APIFeature': 'ComplexFeatureType::kSimple',
+  'ManifestFeature': 'ComplexFeatureType::kManifest',
+  'PermissionFeature': 'ComplexFeatureType::kPermission',
+  'BehaviorFeature': 'ComplexFeatureType::kSimple',
+}
+
+VALIDATION = {
   'all': [
-    (partial(HasAtLeastOneProperty, ['channel', 'dependencies']),
-     'Features must specify either a channel or dependencies'),
-    (DoesNotHaveAllowlistForHostedApps,
-     'Hosted apps are not allowed to use restricted features')
+    (
+      partial(HasAtLeastOneProperty, ['channel', 'dependencies']),
+      'Features must specify either a channel or dependencies',
+    ),
+    (
+      DoesNotHaveAllowlistForHostedApps,
+      'Hosted apps are not allowed to use restricted features',
+    ),
   ],
   'APIFeature': [
-    (partial(HasProperty, 'contexts'),
-     'APIFeatures must specify the contexts property'),
-    (partial(DoesNotHaveAllProperties, ['alias', 'source']),
-     'Features cannot specify both alias and source.')
+    (
+      partial(HasProperty, 'contexts'),
+      'APIFeatures must specify the contexts property',
+    ),
+    (
+      partial(DoesNotHaveAllProperties, ['alias', 'source']),
+      'Features cannot specify both alias and source.',
+    ),
   ],
   'ManifestFeature': [
-    (partial(HasProperty, 'extension_types'),
-     'ManifestFeatures must specify at least one extension type'),
-    (partial(DoesNotHaveProperty, 'contexts'),
-     'ManifestFeatures do not support contexts.'),
-    (partial(DoesNotHaveProperty, 'alias'),
-     'ManifestFeatures do not support alias.'),
-    (partial(DoesNotHaveProperty, 'source'),
-     'ManifestFeatures do not support source.'),
+    (
+      partial(HasProperty, 'extension_types'),
+      'ManifestFeatures must specify at least one extension type',
+    ),
+    (
+      partial(DoesNotHaveProperty, 'contexts'),
+      'ManifestFeatures do not support contexts.',
+    ),
+    (
+      partial(DoesNotHaveProperty, 'alias'),
+      'ManifestFeatures do not support alias.',
+    ),
+    (
+      partial(DoesNotHaveProperty, 'source'),
+      'ManifestFeatures do not support source.',
+    ),
+    # The `required_buildflags` field is intended to be used to toggle the
+    # availability of certain APIs; if we support this for feature types
+    # other than APIFeature, we may emit warnings that are visible to
+    # developers which is not desirable.
+    (
+      partial(DoesNotHaveProperty, 'required_buildflags'),
+      'ManifestFeatures do not support required_buildflags.',
+    ),
   ],
   'BehaviorFeature': [
-    (partial(DoesNotHaveProperty, 'alias'),
-     'BehaviorFeatures do not support alias.'),
-    (partial(DoesNotHaveProperty, 'source'),
-     'BehaviorFeatures do not support source.'),
-   ],
-  'PermissionFeature': [
-    (partial(HasProperty, 'extension_types'),
-     'PermissionFeatures must specify at least one extension type'),
-    (partial(DoesNotHaveProperty, 'contexts'),
-     'PermissionFeatures do not support contexts.'),
-    (partial(DoesNotHaveProperty, 'alias'),
-     'PermissionFeatures do not support alias.'),
-    (partial(DoesNotHaveProperty, 'source'),
-     'PermissionFeatures do not support source.'),
+    (
+      partial(DoesNotHaveProperty, 'alias'),
+      'BehaviorFeatures do not support alias.',
+    ),
+    (
+      partial(DoesNotHaveProperty, 'source'),
+      'BehaviorFeatures do not support source.',
+    ),
+    # The `required_buildflags` field is intended to be used to toggle the
+    # availability of certain APIs; if we support this for feature types
+    # other than APIFeature, we may emit warnings that are visible to
+    # developers which is not desirable.
+    (
+      partial(DoesNotHaveProperty, 'required_buildflags'),
+      'BehaviorFeatures do not support required_buildflags.',
+    ),
   ],
-})
+  'PermissionFeature': [
+    (
+      partial(HasProperty, 'extension_types'),
+      'PermissionFeatures must specify at least one extension type',
+    ),
+    (
+      partial(DoesNotHaveProperty, 'contexts'),
+      'PermissionFeatures do not support contexts.',
+    ),
+    (
+      partial(DoesNotHaveProperty, 'alias'),
+      'PermissionFeatures do not support alias.',
+    ),
+    (
+      partial(DoesNotHaveProperty, 'source'),
+      'PermissionFeatures do not support source.',
+    ),
+    # The `required_buildflags` field is intended to be used to toggle the
+    # availability of certain APIs; if we support this for feature types
+    # other than APIFeature, we may emit warnings that are visible to
+    # developers which is not desirable.
+    (
+      partial(DoesNotHaveProperty, 'required_buildflags'),
+      'PermissionFeatures do not support required_buildflags.',
+    ),
+  ],
+}
 
-FINAL_VALIDATION = ({
-  'all': [],
+FINAL_VALIDATION = {
+  'all': [
+    # A complex feature requires at least one child entry at all times; with
+    # `required_buildflags` it becomes harder to guarantee that this holds
+    # for every potential combination of the provided flags.
+    (
+      partial(DoesNotHavePropertyInComplexFeature, 'required_buildflags'),
+      'required_buildflags cannot be nested in a ComplexFeature',
+    ),
+  ],
   'APIFeature': [
-    (partial(IsFeatureCrossReference, 'alias', 'source'),
-     'A feature alias property should reference a feature whose source '
-     'property references it back.'),
-    (partial(IsFeatureCrossReference, 'source', 'alias'),
-     'A feature source property should reference a feature whose alias '
-     'property references it back.'),
-    (IsEmptyContextsAllowed,
-    'An empty contexts list is not allowed for this feature.')
+    (
+      partial(IsFeatureCrossReference, 'alias', 'source'),
+      'A feature alias property should reference a feature whose source '
+      'property references it back.',
+    ),
+    (
+      partial(IsFeatureCrossReference, 'source', 'alias'),
+      'A feature source property should reference a feature whose alias '
+      'property references it back.',
+    ),
+    (
+      IsEmptyContextsAllowed,
+      'An empty contexts list is not allowed for this feature.',
+    ),
   ],
   'ManifestFeature': [],
   'BehaviorFeature': [],
-  'PermissionFeature': []
-})
+  'PermissionFeature': [],
+}
 
-# These keys are used to find the parents of different features, but are not
-# compiled into the features themselves.
-IGNORED_KEYS = ['default_parent']
+# These keys can not be set on a feature and are hence ignored.
+IGNORED_KEYS = ['default_parent', 'required_buildflags']
+
+
+class StaticSpanListSpec(NamedTuple):
+  array_name: str
+  element_type: str
+  emit_empty_setter: bool = False
+
+
+STATIC_SPAN_LIST_KEYS = {
+  'matches': StaticSpanListSpec(
+    array_name='kMatches', element_type='std::string_view'
+  ),
+  'blocklist': StaticSpanListSpec(
+    array_name='kBlocklist', element_type='std::string_view'
+  ),
+  'allowlist': StaticSpanListSpec(
+    array_name='kAllowlist', element_type='std::string_view'
+  ),
+  'dependencies': StaticSpanListSpec(
+    array_name='kDependencies', element_type='std::string_view'
+  ),
+  'extension_types': StaticSpanListSpec(
+    array_name='kExtensionTypes', element_type='Manifest::Type'
+  ),
+  'session_types': StaticSpanListSpec(
+    array_name='kSessionTypes', element_type='mojom::FeatureSessionType'
+  ),
+  'platforms': StaticSpanListSpec(
+    array_name='kPlatforms', element_type='Feature::Platform'
+  ),
+  'contexts': StaticSpanListSpec(
+    array_name='kContexts',
+    element_type='mojom::ContextType',
+    emit_empty_setter=True,
+  ),
+}
+
+STATIC_CSTRING_KEYS = {'alias', 'command_line_switch', 'feature_flag', 'source'}
+
+FEATURE_DATA_KEYS = {
+    'alias': 'alias',
+    'noparent': 'no_parent',
+    'source': 'source',
+}
+
+SIMPLE_FEATURE_CONFIG_KEYS = {
+    'internal': 'is_internal',
+    'matches': 'match_patterns',
+}
+
+# Generated descriptors use C++20 designated initializers, so these lists must
+# match the member order of `extensions::FeatureData` and
+# `extensions::SimpleFeatureConfig`. Changing the members there requires the
+# same edit here.
+FEATURE_DATA_FIELD_ORDER = ['name', 'alias', 'source', 'no_parent']
+
+SIMPLE_FEATURE_CONFIG_FIELD_ORDER = [
+    'blocklist',
+    'allowlist',
+    'dependencies',
+    'extension_types',
+    'session_types',
+    'contexts',
+    'platforms',
+    'match_patterns',
+    'location',
+    'min_manifest_version',
+    'max_manifest_version',
+    'command_line_switch',
+    'feature_flag',
+    'channel',
+    'component_extensions_auto_granted',
+    'is_internal',
+    'requires_delegated_availability_check',
+    'developer_mode_only',
+    'disallow_for_service_workers',
+]
 
 # By default, if an error is encountered, assert to stop the compilation. This
 # can be disabled for testing.
 ENABLE_ASSERTIONS = True
 
-def GetCodeForFeatureValues(feature_values):
-  """ Gets the Code object for setting feature values for this object. """
+
+def _FieldOrderKey(field_order, field_order_name, struct_name):
+  """Returns a sort key ordering fields by C++ member declaration order."""
+
+  def key(field):
+    name = field[0]
+    if name not in field_order:
+      raise ValueError(
+        'Feature field "%s" has no position in %s. Add it at the same '
+        'position it is declared at in the C++ %s struct; designated '
+        'initializers must be written in member declaration order.'
+        % (name, field_order_name, struct_name)
+      )
+    return field_order.index(name)
+
+  return key
+
+
+def GetCodeForSimpleFeatureData(name,
+                                feature_values,
+                                descriptor_name='kData',
+                                array_name_suffix=''):
+  """Gets code declaring the static descriptor for a simple feature."""
   c = Code()
+  feature_fields = [('name', '"%s"' % name)]
+  config_fields = []
+
   for key in sorted(feature_values.keys()):
     if key in IGNORED_KEYS:
-      continue;
+      continue
 
-    c.Append('feature->set_%s(%s);' % (key, feature_values[key]))
+    value = feature_values[key]
+    if key in STATIC_SPAN_LIST_KEYS:
+      spec = STATIC_SPAN_LIST_KEYS[key]
+      if value.strip() == '{}':
+        if spec.emit_empty_setter:
+          config_fields.append((SIMPLE_FEATURE_CONFIG_KEYS.get(key, key),
+                                'StaticSpan<%s>()' % spec.element_type))
+        continue
+      array_name = spec.array_name + array_name_suffix
+      c.Append('static constexpr auto %s =' % array_name)
+      c.Append('    std::to_array<%s>(' % spec.element_type)
+      c.Append('        %s);' % value)
+      config_fields.append(
+          (SIMPLE_FEATURE_CONFIG_KEYS.get(key,
+                                          key), 'StaticSpan(%s)' % array_name))
+    elif key in FEATURE_DATA_KEYS:
+      if key in STATIC_CSTRING_KEYS:
+        value = 'StaticCString(%s)' % value
+      feature_fields.append((FEATURE_DATA_KEYS[key], value))
+    elif key in STATIC_CSTRING_KEYS:
+      config_fields.append((key, 'StaticCString(%s)' % value))
+    else:
+      config_fields.append((SIMPLE_FEATURE_CONFIG_KEYS.get(key, key), value))
+
+  feature_fields.sort(key=_FieldOrderKey(
+      FEATURE_DATA_FIELD_ORDER, 'FEATURE_DATA_FIELD_ORDER', 'FeatureData'))
+  config_fields.sort(key=_FieldOrderKey(SIMPLE_FEATURE_CONFIG_FIELD_ORDER,
+                                        'SIMPLE_FEATURE_CONFIG_FIELD_ORDER',
+                                        'SimpleFeatureConfig'))
+
+  c.Append('static constexpr SimpleFeatureData %s = {' % descriptor_name)
+  c.Append('    .feature =')
+  c.Append('        {')
+  for field, value in feature_fields:
+    c.Append('            .%s = %s,' % (field, value))
+  c.Append('        },')
+  if config_fields:
+    c.Append('    .config =')
+    c.Append('        {')
+    for field, value in config_fields:
+      c.Append('            .%s = %s,' % (field, value))
+    c.Append('        },')
+  c.Append('};')
   return c
+
 
 class Feature(object):
   """A representation of a single simple feature that can handle all parsing,
   validation, and code generation.
   """
+
   def __init__(self, name):
     self.name = name
     self.has_parent = False
@@ -513,13 +728,14 @@ class Feature(object):
       assert False, error
 
   def _AddKeyError(self, key, error):
-    """Adds an error relating to a particular key in the feature.
-    """
-    self.AddError('Error parsing feature "%s" at key "%s": %s' %
-                      (self.name, key, error))
+    """Adds an error relating to a particular key in the feature."""
+    self.AddError(
+      'Error parsing feature "%s" at key "%s": %s' % (self.name, key, error)
+    )
 
-  def _GetCheckedValue(self, key, expected_type, expected_values,
-                       enum_map, value):
+  def _GetCheckedValue(
+    self, key, expected_type, expected_values, enum_map, value
+  ):
     """Returns a string to be used in the generated C++ code for a given key's
     python value, or None if the value is invalid. For example, if the python
     value is True, this returns 'true', for a string foo, this returns "foo",
@@ -550,6 +766,8 @@ class Feature(object):
       return enum_map[value]
 
     if t is str:
+      if key == 'required_buildflags':
+        return value
       return '"%s"' % str(value)
     if t is int:
       return str(value)
@@ -586,8 +804,9 @@ class Feature(object):
 
     if value_type is list and not is_all and len(v) == 0:
       if 'allow_empty' in grammar[list]:
-        assert grammar[list]['allow_empty'], \
-               '`allow_empty` only supports `True`.'
+        assert grammar[list]['allow_empty'], (
+          '`allow_empty` only supports `True`.'
+        )
       else:
         self._AddKeyError(key, 'List must specify at least one element.')
         return
@@ -614,15 +833,17 @@ class Feature(object):
     if value_type is list:
       cpp_value = []
       for sub_value in v:
-        cpp_sub_value = self._GetCheckedValue(key, expected_type,
-                                              expected_values, enum_map,
-                                              sub_value)
+        cpp_sub_value = self._GetCheckedValue(
+          key, expected_type, expected_values, enum_map, sub_value
+        )
         if cpp_sub_value:
           cpp_value.append(cpp_sub_value)
-      cpp_value = '{' + ','.join(cpp_value) + '}'
+      if key != 'required_buildflags':
+        cpp_value = '{' + ','.join(cpp_value) + '}'
     else:
-      cpp_value = self._GetCheckedValue(key, expected_type, expected_values,
-                                        enum_map, v)
+      cpp_value = self._GetCheckedValue(
+        key, expected_type, expected_values, enum_map, v
+      )
 
     if 'validators' in expected:
       validators = expected['validators']
@@ -662,7 +883,7 @@ class Feature(object):
   def Validate(self, feature_type, shared_values):
     feature_values = self.feature_values.copy()
     feature_values.update(shared_values)
-    for validator, error in (VALIDATION[feature_type] + VALIDATION['all']):
+    for validator, error in VALIDATION[feature_type] + VALIDATION['all']:
       if not validator(feature_values):
         self.AddError(error)
 
@@ -670,54 +891,74 @@ class Feature(object):
     """Returns the Code object for generating this feature."""
     c = Code()
     cpp_feature_class = SIMPLE_FEATURE_CPP_CLASSES[feature_type]
-    c.Append('%s* feature = new %s();' % (cpp_feature_class, cpp_feature_class))
-    c.Append('feature->set_name("%s");' % self.name)
-    c.Concat(GetCodeForFeatureValues(self.GetAllFeatureValues()))
+    c.Concat(GetCodeForSimpleFeatureData(self.name, self.GetAllFeatureValues()))
+    c.Append('%s* feature =' % cpp_feature_class)
+    c.Append('    new %s(StaticFeatureData(kData));' % cpp_feature_class)
     return c
 
   def AsParent(self):
-    """ Returns the feature values that should be inherited by children features
+    """Returns the feature values that should be inherited by children features
     when this feature is set as parent.
     """
     return self
 
   def GetValue(self, key):
-    """ Gets feature value for the specified key """
+    """Gets feature value for the specified key"""
     value = self.feature_values.get(key)
     return value if value else self.shared_values.get(key)
 
   def GetAllFeatureValues(self):
-    """ Gets all values set for this feature. """
+    """Gets all values set for this feature."""
     values = self.feature_values.copy()
     values.update(self.shared_values)
     return values
 
   def GetErrors(self):
-    return self.errors;
+    return self.errors
+
 
 class ComplexFeature(Feature):
-  """ Complex feature - feature that is comprised of list of features.
+  """Complex feature - feature that is comprised of list of features.
   Overall complex feature is available if any of contained
   feature is available.
   """
+
   def __init__(self, name):
     Feature.__init__(self, name)
     self.feature_list = []
 
   def GetCode(self, feature_type):
     c = Code()
-    c.Append('std::vector<Feature*> features;')
-    for f in self.feature_list:
+    descriptor_names = []
+    for index, f in enumerate(self.feature_list):
       # Sanity check that components of complex features have no shared values
       # set.
       assert not f.shared_values
-      c.Sblock('{')
-      c.Concat(f.GetCode(feature_type))
-      c.Append('features.push_back(feature);')
-      c.Eblock('}')
-    c.Append('ComplexFeature* feature(new ComplexFeature(&features));')
-    c.Append('feature->set_name("%s");' % self.name)
-    c.Concat(GetCodeForFeatureValues(self.shared_values))
+      descriptor_name = 'kFeature%d' % index
+      descriptor_names.append(descriptor_name)
+      c.Concat(
+          GetCodeForSimpleFeatureData(self.name, f.GetAllFeatureValues(),
+                                      descriptor_name, str(index)))
+    c.Append('static constexpr auto kFeatures =')
+    c.Append('    std::to_array<SimpleFeatureData>({%s});' %
+             ', '.join(descriptor_names))
+    c.Append('static constexpr ComplexFeatureData kData = {')
+    c.Append('    .feature =')
+    c.Append('        {')
+    c.Append('            .name = "%s",' % self.name)
+    for key in ('alias', 'source'):
+      if key in self.shared_values:
+        c.Append('            .%s = StaticCString(%s),' %
+                 (key, self.shared_values[key]))
+    no_parent = self.feature_list[0].GetValue('noparent')
+    if no_parent:
+      c.Append('            .no_parent = %s,' % no_parent)
+    c.Append('        },')
+    c.Append('    .features = StaticSpan(kFeatures),')
+    c.Append('    .feature_type = %s,' % COMPLEX_FEATURE_TYPES[feature_type])
+    c.Append('};')
+    c.Append('ComplexFeature* feature =')
+    c.Append('    new ComplexFeature(StaticFeatureData(kData));')
     return c
 
   def AsParent(self):
@@ -735,11 +976,21 @@ class ComplexFeature(Feature):
       errors.extend(feature.GetErrors())
     return errors
 
+
 class FeatureCompiler(object):
   """A compiler to load, parse, and generate C++ code for a number of
   features.json files."""
-  def __init__(self, chrome_root, source_files, feature_type,
-               method_name, out_root, gen_dir_relpath, out_base_filename):
+
+  def __init__(
+    self,
+    chrome_root,
+    source_files,
+    feature_type,
+    method_name,
+    out_root,
+    gen_dir_relpath,
+    out_base_filename,
+  ):
     # See __main__'s ArgumentParser for documentation on these properties.
     self._chrome_root = chrome_root
     self._source_files = source_files
@@ -759,16 +1010,23 @@ class FeatureCompiler(object):
     self._json."""
     for f in self._source_files:
       abs_source_file = os.path.join(self._chrome_root, f)
-      try:
-        with open(abs_source_file, 'r') as f:
-          f_json = json_parse.Parse(f.read())
-      except:
-        print('FAILED: Exception encountered while loading "%s"' %
-                  abs_source_file)
-        raise
-      dupes = set(f_json) & set(self._json)
-      assert not dupes, 'Duplicate keys found: %s' % list(dupes)
+      f_json = self._LoadFile(abs_source_file)
+      override_file_root, override_file_ext = os.path.splitext(abs_source_file)
+      override_file_path = f"{override_file_root}.override{override_file_ext}"
+      if os.path.exists(override_file_path):
+        f_json.update(self._LoadFile(override_file_path))
       self._json.update(f_json)
+
+  def _LoadFile(self, file_path):
+    try:
+      with open(file_path, 'r') as f:
+        f_json = json_parse.Parse(f.read())
+    except:
+      print('FAILED: Exception encountered while loading "%s"' % file_path)
+      raise
+    dupes = set(f_json) & set(self._json)
+    assert not dupes, 'Duplicate keys found: %s' % list(dupes)
+    return f_json
 
   def _FindParent(self, feature_name, feature_value):
     """Checks to see if a feature has a parent. If it does, returns the
@@ -778,8 +1036,9 @@ class FeatureCompiler(object):
       no_parent_values = ['noparent' in v for v in feature_value]
       no_parent = all(no_parent_values)
       assert no_parent or not any(no_parent_values), (
-              '"%s:" All child features must contain the same noparent value' %
-                  feature_name)
+        '"%s:" All child features must contain the same noparent value'
+        % feature_name
+      )
     else:
       no_parent = 'noparent' in feature_value
     sep = feature_name.rfind('.')
@@ -809,7 +1068,8 @@ class FeatureCompiler(object):
     """Parses a single feature."""
     if 'nocompile' in feature_value:
       assert feature_value['nocompile'], (
-          'nocompile should only be true; otherwise omit this key.')
+        'nocompile should only be true; otherwise omit this key.'
+      )
       return
 
     def parse_and_validate(name, value, parent, shared_values):
@@ -830,11 +1090,12 @@ class FeatureCompiler(object):
     # Handle complex features, which are lists of simple features.
     if type(feature_value) is list:
       assert len(feature_value) > 1, (
-          'Error parsing feature "%s": A complex feature ' % feature_name +
-          'definition is only needed when there are multiple objects ' +
-          'specifying different groups of properties for feature ' +
-          'availability. You can reduce it down to a single object on the ' +
-          'feature key instead of a list.')
+        'Error parsing feature "%s": A complex feature ' % feature_name
+        + 'definition is only needed when there are multiple objects '
+        + 'specifying different groups of properties for feature '
+        + 'availability. You can reduce it down to a single object on the '
+        + 'feature key instead of a list.'
+      )
 
       feature = ComplexFeature(feature_name)
 
@@ -842,11 +1103,13 @@ class FeatureCompiler(object):
       # the best.
       for v in feature_value:
         feature.feature_list.append(
-            parse_and_validate(feature_name, v, parent, shared_values))
+          parse_and_validate(feature_name, v, parent, shared_values)
+        )
       self._features[feature_name] = feature
     else:
       self._features[feature_name] = parse_and_validate(
-          feature_name, feature_value, parent, shared_values)
+        feature_name, feature_value, parent, shared_values
+      )
 
     # Apply parent shared values at the end to enable child features to
     # override parent shared value - if parent shared values are added to
@@ -879,8 +1142,16 @@ class FeatureCompiler(object):
     for k in sorted(self._features.keys()):
       c.Sblock('{')
       feature = self._features[k]
+      required_buildflags = feature.GetValue('required_buildflags')
+      if required_buildflags:
+        formatted_buildflags = [
+          'BUILDFLAG(%s)' % format(flag.upper()) for flag in required_buildflags
+        ]
+        c.Append('#if %s' % format(' && '.join(formatted_buildflags)))
       c.Concat(feature.GetCode(self._feature_type))
       c.Append('provider->AddFeature("%s", feature);' % k)
+      if required_buildflags:
+        c.Append('#endif')
       c.Eblock('}')
     c.Eblock()
     return c
@@ -890,17 +1161,18 @@ class FeatureCompiler(object):
     header_file = self._out_base_filename + '.h'
     cc_file = self._out_base_filename + '.cc'
 
-    include_file_root = self._out_root[len(self._gen_dir_relpath)+1:]
+    include_file_root = self._out_root[len(self._gen_dir_relpath) + 1 :]
     header_file_path = '%s/%s' % (include_file_root, header_file)
     cc_file_path = '%s/%s' % (include_file_root, cc_file)
-    substitutions = ({
-        'header_file_path': header_file_path,
-        'header_guard': (header_file_path.replace('/', '_').
-                             replace('.', '_').upper()),
-        'method_name': self._method_name,
-        'source_files': str([ToPosixPath(f) for f in self._source_files]),
-        'year': str(datetime.now().year)
-    })
+    substitutions = {
+      'header_file_path': header_file_path,
+      'header_guard': (
+        header_file_path.replace('/', '_').replace('.', '_').upper()
+      ),
+      'method_name': self._method_name,
+      'source_files': str([ToPosixPath(f) for f in self._source_files]),
+      'year': str(datetime.now().year),
+    }
     if not os.path.exists(self._out_root):
       os.makedirs(self._out_root)
     # Write the .h file.
@@ -921,32 +1193,55 @@ class FeatureCompiler(object):
       cc_file.Concat(cc_end)
       f.write(cc_file.Render().strip())
 
+
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Compile json feature files')
-  parser.add_argument('chrome_root', type=str,
-                      help='The root directory of the chrome checkout')
   parser.add_argument(
-      'feature_type', type=str,
-      help='The name of the class to use in feature generation ' +
-               '(e.g. APIFeature, PermissionFeature)')
-  parser.add_argument('method_name', type=str,
-                      help='The name of the method to populate the provider')
-  parser.add_argument('out_root', type=str,
-                      help='The root directory to generate the C++ files into')
-  parser.add_argument('gen_dir_relpath', default='gen', help='Path of the '
-      'gen directory relative to the out/. If running in the default '
-      'toolchain, the path is gen, otherwise $toolchain_name/gen')
+    'chrome_root', type=str, help='The root directory of the chrome checkout'
+  )
   parser.add_argument(
-      'out_base_filename', type=str,
-      help='The base filename for the C++ files (.h and .cc will be appended)')
-  parser.add_argument('source_files', type=str, nargs='+',
-                      help='The source features.json files')
+    'feature_type',
+    type=str,
+    help='The name of the class to use in feature generation '
+    + '(e.g. APIFeature, PermissionFeature)',
+  )
+  parser.add_argument(
+    'method_name',
+    type=str,
+    help='The name of the method to populate the provider',
+  )
+  parser.add_argument(
+    'out_root',
+    type=str,
+    help='The root directory to generate the C++ files into',
+  )
+  parser.add_argument(
+    'gen_dir_relpath',
+    default='gen',
+    help='Path of the '
+    'gen directory relative to the out/. If running in the default '
+    'toolchain, the path is gen, otherwise $toolchain_name/gen',
+  )
+  parser.add_argument(
+    'out_base_filename',
+    type=str,
+    help='The base filename for the C++ files (.h and .cc will be appended)',
+  )
+  parser.add_argument(
+    'source_files', type=str, nargs='+', help='The source features.json files'
+  )
   args = parser.parse_args()
   if args.feature_type not in FEATURE_TYPES:
     raise NameError('Unknown feature type: %s' % args.feature_type)
-  c = FeatureCompiler(args.chrome_root, args.source_files, args.feature_type,
-                      args.method_name, args.out_root, args.gen_dir_relpath,
-                      args.out_base_filename)
+  c = FeatureCompiler(
+    args.chrome_root,
+    args.source_files,
+    args.feature_type,
+    args.method_name,
+    args.out_root,
+    args.gen_dir_relpath,
+    args.out_base_filename,
+  )
   c.Load()
   c.Compile()
   c.Write()

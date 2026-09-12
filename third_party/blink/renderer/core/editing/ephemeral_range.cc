@@ -4,12 +4,13 @@
 
 #include "third_party/blink/renderer/core/editing/ephemeral_range.h"
 
-#include <ostream>  // NOLINT
+#include <ostream>
 
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/abstract_range.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element.h"
+#include "third_party/blink/renderer/core/dom/node_range.h"
 #include "third_party/blink/renderer/core/dom/range.h"
 #include "third_party/blink/renderer/core/dom/text.h"
 
@@ -61,8 +62,7 @@ EphemeralRangeTemplate<Strategy>::EphemeralRangeTemplate(
     : EphemeralRangeTemplate(position, position) {}
 
 template <typename Strategy>
-EphemeralRangeTemplate<Strategy>::EphemeralRangeTemplate(
-    const AbstractRange* range)
+EphemeralRangeTemplate<Strategy>::EphemeralRangeTemplate(const NodeRange* range)
     : EphemeralRangeTemplate(PositionTemplate<Strategy>(range->startContainer(),
                                                         range->startOffset()),
                              PositionTemplate<Strategy>(range->endContainer(),
@@ -73,8 +73,8 @@ EphemeralRangeTemplate<Strategy>::EphemeralRangeTemplate(const Range* range) {
   if (!range)
     return;
   DCHECK(range->IsConnected());
-  start_position_ = FromPositionInDOMTree<Strategy>(range->StartPosition());
-  end_position_ = FromPositionInDOMTree<Strategy>(range->EndPosition());
+  start_position_ = FromPositionInDomTree<Strategy>(range->StartPosition());
+  end_position_ = FromPositionInDomTree<Strategy>(range->EndPosition());
 #if DCHECK_IS_ON()
   dom_tree_version_ = range->OwnerDocument().DomTreeVersion();
 #endif
@@ -103,12 +103,6 @@ bool EphemeralRangeTemplate<Strategy>::operator==(
     const EphemeralRangeTemplate<Strategy>& other) const {
   return StartPosition() == other.StartPosition() &&
          EndPosition() == other.EndPosition();
-}
-
-template <typename Strategy>
-bool EphemeralRangeTemplate<Strategy>::operator!=(
-    const EphemeralRangeTemplate<Strategy>& other) const {
-  return !operator==(other);
 }
 
 template <typename Strategy>

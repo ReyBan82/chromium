@@ -11,16 +11,15 @@
 #include "chrome/browser/ash/login/test/session_manager_state_waiter.h"
 #include "chrome/browser/ash/policy/login/login_policy_test_base.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "components/policy/policy_constants.h"
 #include "components/policy/proto/cloud_policy.pb.h"
 #include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
-#include "content/public/browser/notification_service.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
 #include "ui/display/manager/display_manager.h"
@@ -28,7 +27,7 @@
 
 namespace policy {
 
-// TODO(crbug.com/1110548): Enable and modify for lacros.
+// TODO(crbug.com/40142202): Enable and modify for lacros.
 class ForceMaximizeOnFirstRunTest : public LoginPolicyTestBase {
  public:
   ForceMaximizeOnFirstRunTest(const ForceMaximizeOnFirstRunTest&) = delete;
@@ -36,7 +35,7 @@ class ForceMaximizeOnFirstRunTest : public LoginPolicyTestBase {
       delete;
 
  protected:
-  ForceMaximizeOnFirstRunTest() {}
+  ForceMaximizeOnFirstRunTest() = default;
 
   void GetPolicySettings(
       enterprise_management::CloudPolicySettings* policy) const override {
@@ -51,7 +50,7 @@ class ForceMaximizeOnFirstRunTest : public LoginPolicyTestBase {
         .UpdateDisplay(resolution);
   }
 
-  const Browser* OpenNewBrowserWindow() {
+  const BrowserWindowInterface* OpenNewBrowserWindow() {
     const user_manager::User* const user =
         user_manager::UserManager::Get()->GetActiveUser();
     Profile* const profile = ash::ProfileHelper::Get()->GetProfileByUser(user);
@@ -65,21 +64,21 @@ IN_PROC_BROWSER_TEST_F(ForceMaximizeOnFirstRunTest, PRE_TwoRuns) {
   LogIn();
 
   // Check that the first browser window is maximized.
-  const BrowserList* const browser_list = BrowserList::GetInstance();
-  EXPECT_EQ(1U, browser_list->size());
-  const Browser* const browser = browser_list->get(0);
+  EXPECT_EQ(1U, GlobalBrowserCollection::GetInstance()->GetSize());
+  BrowserWindowInterface* const browser =
+      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
   ASSERT_TRUE(browser);
-  EXPECT_TRUE(browser->window()->IsMaximized());
+  EXPECT_TRUE(browser->GetWindow()->IsMaximized());
 
   // Un-maximize the window as its state will be carried forward to the next
   // opened window.
-  browser->window()->Restore();
-  EXPECT_FALSE(browser->window()->IsMaximized());
+  browser->GetWindow()->Restore();
+  EXPECT_FALSE(browser->GetWindow()->IsMaximized());
 
   // Create a second window and check that it is not affected by the policy.
-  const Browser* const browser1 = OpenNewBrowserWindow();
+  const BrowserWindowInterface* const browser1 = OpenNewBrowserWindow();
   ASSERT_TRUE(browser1);
-  EXPECT_FALSE(browser1->window()->IsMaximized());
+  EXPECT_FALSE(browser1->GetWindow()->IsMaximized());
 }
 
 IN_PROC_BROWSER_TEST_F(ForceMaximizeOnFirstRunTest, TwoRuns) {
@@ -88,9 +87,9 @@ IN_PROC_BROWSER_TEST_F(ForceMaximizeOnFirstRunTest, TwoRuns) {
                                           true /* check_if_submittable */);
   ash::test::WaitForPrimaryUserSessionStart();
 
-  const Browser* const browser = OpenNewBrowserWindow();
+  const BrowserWindowInterface* const browser = OpenNewBrowserWindow();
   ASSERT_TRUE(browser);
-  EXPECT_FALSE(browser->window()->IsMaximized());
+  EXPECT_FALSE(browser->GetWindow()->IsMaximized());
 }
 
 class ForceMaximizePolicyFalseTest : public ForceMaximizeOnFirstRunTest {
@@ -113,11 +112,11 @@ IN_PROC_BROWSER_TEST_F(ForceMaximizePolicyFalseTest, GeneralFirstRun) {
   SkipToLoginScreen();
   LogIn();
 
-  const BrowserList* const browser_list = BrowserList::GetInstance();
-  EXPECT_EQ(1U, browser_list->size());
-  const Browser* const browser = browser_list->get(0);
+  EXPECT_EQ(1U, GlobalBrowserCollection::GetInstance()->GetSize());
+  BrowserWindowInterface* const browser =
+      GetLastActiveBrowserWindowInterfaceWithAnyProfile();
   ASSERT_TRUE(browser);
-  EXPECT_FALSE(browser->window()->IsMaximized());
+  EXPECT_FALSE(browser->GetWindow()->IsMaximized());
 }
 
 }  // namespace policy

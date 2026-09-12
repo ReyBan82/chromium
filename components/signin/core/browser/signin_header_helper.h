@@ -13,9 +13,12 @@
 #include "base/memory/raw_ref.h"
 #include "build/build_config.h"
 #include "components/prefs/pref_member.h"
+#include "components/signin/core/browser/dice_response_params.h"
 #include "components/signin/public/base/account_consistency_method.h"
 #include "components/signin/public/base/signin_buildflags.h"
+#include "components/signin/public/identity_manager/tribool.h"
 #include "google_apis/gaia/core_account_id.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "url/gurl.h"
 
 namespace content_settings {
@@ -27,8 +30,6 @@ class HttpRequestHeaders;
 }
 
 namespace signin {
-
-enum class Tribool;
 
 // Profile mode flags.
 enum ProfileMode {
@@ -43,6 +44,7 @@ extern const char kChromeConnectedHeader[];
 extern const char kChromeManageAccountsHeader[];
 extern const char kDiceRequestHeader[];
 extern const char kDiceResponseHeader[];
+extern const char kDiceLinkedAccountsMetaHeader[];
 
 // The X-Auto-Login header detects when a user is prompted to enter their
 // credentials on the Gaia sign-in page. It is sent with an empty email if the
@@ -68,13 +70,6 @@ enum GAIAServiceType : int {
   kMaxValue = GAIA_SERVICE_TYPE_DEFAULT
 };
 
-enum class DiceAction {
-  NONE,
-  SIGNIN,      // Sign in an account.
-  SIGNOUT,     // Sign out of all sessions.
-  ENABLE_SYNC  // Enable Sync on a signed-in account.
-};
-
 // Struct describing the parameters received in the manage account header.
 struct ManageAccountsParams {
   // The requested service type such as "ADDSESSION".
@@ -96,81 +91,6 @@ struct ManageAccountsParams {
   ManageAccountsParams();
   ManageAccountsParams(const ManageAccountsParams& other);
   ManageAccountsParams& operator=(const ManageAccountsParams& other);
-};
-
-// Struct describing the parameters received in the Dice response header.
-struct DiceResponseParams {
-  struct AccountInfo {
-    AccountInfo();
-    AccountInfo(const std::string& gaia_id,
-                const std::string& email,
-                int session_index);
-    ~AccountInfo();
-    AccountInfo(const AccountInfo&);
-
-    // Gaia ID of the account.
-    std::string gaia_id;
-    // Email of the account.
-    std::string email;
-    // Session index for the account.
-    int session_index;
-  };
-
-  // Parameters for the SIGNIN action.
-  struct SigninInfo {
-    SigninInfo();
-    SigninInfo(const SigninInfo&);
-    ~SigninInfo();
-
-    // AccountInfo of the account signed in.
-    AccountInfo account_info;
-    // Authorization code to fetch a refresh token.
-    std::string authorization_code;
-    // Whether Dice response contains the 'no_authorization_code' header value.
-    // If true then LSO was unavailable for provision of auth code.
-    bool no_authorization_code = false;
-  };
-
-  // Parameters for the SIGNOUT action.
-  struct SignoutInfo {
-    SignoutInfo();
-    SignoutInfo(const SignoutInfo&);
-    ~SignoutInfo();
-
-    // Account infos for the accounts signed out.
-    std::vector<AccountInfo> account_infos;
-  };
-
-  // Parameters for the ENABLE_SYNC action.
-  struct EnableSyncInfo {
-    EnableSyncInfo();
-    EnableSyncInfo(const EnableSyncInfo&);
-    ~EnableSyncInfo();
-
-    // AccountInfo of the account enabling Sync.
-    AccountInfo account_info;
-  };
-
-  DiceResponseParams();
-
-  DiceResponseParams(const DiceResponseParams&) = delete;
-  DiceResponseParams& operator=(const DiceResponseParams&) = delete;
-
-  DiceResponseParams(DiceResponseParams&&);
-  DiceResponseParams& operator=(DiceResponseParams&&);
-
-  ~DiceResponseParams();
-
-  DiceAction user_intention = DiceAction::NONE;
-
-  // Populated when |user_intention| is SIGNIN.
-  std::unique_ptr<SigninInfo> signin_info;
-
-  // Populated when |user_intention| is SIGNOUT.
-  std::unique_ptr<SignoutInfo> signout_info;
-
-  // Populated when |user_intention| is ENABLE_SYNC.
-  std::unique_ptr<EnableSyncInfo> enable_sync_info;
 };
 
 class RequestAdapter {
@@ -211,12 +131,6 @@ class SigninHeaderHelper {
                                    const char* header_name,
                                    const std::string& header_value);
 
-  // Returns wether an account consistency header should be built for this
-  // request.
-  virtual bool ShouldBuildRequestHeader(
-      const GURL& url,
-      const content_settings::CookieSettings* cookie_settings) = 0;
-
   // Dictionary of fields in a account consistency response header.
   using ResponseHeaderDictionary = std::multimap<std::string, std::string>;
 
@@ -239,9 +153,10 @@ bool IsUrlEligibleForMirrorCookie(const GURL& url);
 
 // Returns the CHROME_CONNECTED cookie, or an empty string if it should not be
 // added to the request to |url|.
+// Supports nullptr as a value for `cookie_settings` if unavailable.
 std::string BuildMirrorRequestCookieIfPossible(
     const GURL& url,
-    const std::string& gaia_id,
+    const GaiaId& gaia_id,
     AccountConsistencyMethod account_consistency,
     const content_settings::CookieSettings* cookie_settings,
     int profile_mode_mask);
@@ -254,7 +169,7 @@ std::string BuildMirrorRequestCookieIfPossible(
 void AppendOrRemoveMirrorRequestHeader(
     RequestAdapter* request,
     const GURL& redirect_url,
-    const std::string& gaia_id,
+    const GaiaId& gaia_id,
     Tribool is_child_account,
     AccountConsistencyMethod account_consistency,
     const content_settings::CookieSettings* cookie_settings,
@@ -262,38 +177,9 @@ void AppendOrRemoveMirrorRequestHeader(
     const std::string& source,
     bool force_account_consistency);
 
-// Adds the Dice to all Gaia requests from a connected profile, with the
-// exception of requests from gaia webview.
-// Removes the header in case it should not be transfered to a redirected url.
-// Returns whether the request has the Dice request header.
-bool AppendOrRemoveDiceRequestHeader(
-    RequestAdapter* request,
-    const GURL& redirect_url,
-    const std::string& gaia_id,
-    bool sync_enabled,
-    AccountConsistencyMethod account_consistency,
-    const content_settings::CookieSettings* cookie_settings,
-    const std::string& device_id);
-
 // Returns the parameters contained in the X-Chrome-Manage-Accounts response
 // header.
 ManageAccountsParams BuildManageAccountsParams(const std::string& header_value);
-
-#if BUILDFLAG(ENABLE_DICE_SUPPORT)
-// Returns the parameters contained in the X-Chrome-ID-Consistency-Response
-// response header.
-// Returns DiceAction::NONE in case of error (such as missing or malformed
-// parameters).
-DiceResponseParams BuildDiceSigninResponseParams(
-    const std::string& header_value);
-
-// Returns the parameters contained in the Google-Accounts-SignOut response
-// header.
-// Returns DiceAction::NONE in case of error (such as missing or malformed
-// parameters).
-DiceResponseParams BuildDiceSignoutResponseParams(
-    const std::string& header_value);
-#endif
 
 }  // namespace signin
 

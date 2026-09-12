@@ -23,11 +23,10 @@
 #endif
 
 namespace content {
-XrFrameSinkClientImpl::XrFrameSinkClientImpl(int32_t render_process_id,
-                                             int32_t render_frame_id)
+XrFrameSinkClientImpl::XrFrameSinkClientImpl(
+    const content::GlobalRenderFrameHostId& global_frame_id)
     : ui_thread_task_runner_(GetUIThreadTaskRunner({})),
-      render_process_id_(render_process_id),
-      render_frame_id_(render_frame_id) {
+      global_frame_id_(global_frame_id) {
   DCHECK(IsOnUiThread())
       << "XrFrameSinkClientImpl must be constructed on the UI thread.";
 }
@@ -46,7 +45,7 @@ bool XrFrameSinkClientImpl::IsOnUiThread() const {
 }
 
 void XrFrameSinkClientImpl::SurfaceDestroyed() {
-  DCHECK(IsOnUiThread());
+  CHECK(IsOnUiThread(), base::NotFatalUntil::M159);
   if (!initialized_)
     return;
 
@@ -54,15 +53,21 @@ void XrFrameSinkClientImpl::SurfaceDestroyed() {
 
   // Since this code can be run during destruction, it's theoretically possible,
   // though unlikely, that the FrameSinkManager no longer exists.
-  if (frame_sink_manager)
-    frame_sink_manager->InvalidateFrameSinkId(root_frame_sink_id_);
+  if (frame_sink_manager) {
+    if (registered_dom_frame_sink_id_.is_valid()) {
+      frame_sink_manager->UnregisterFrameSinkHierarchy(
+          root_frame_sink_id_, registered_dom_frame_sink_id_);
+      registered_dom_frame_sink_id_ = viz::FrameSinkId();
+    }
+    frame_sink_manager->InvalidateFrameSinkId(root_frame_sink_id_, this, {});
+  }
 
   // Reset the initialized state and the root FrameSinkId to an invalid value.
   initialized_ = false;
   root_frame_sink_id_ = viz::FrameSinkId();
 }
 
-absl::optional<viz::SurfaceId> XrFrameSinkClientImpl::GetDOMSurface() {
+std::optional<viz::SurfaceId> XrFrameSinkClientImpl::GetDOMSurface() {
   base::AutoLock lock(dom_surface_lock_);
   return dom_surface_id_;
 }
@@ -75,7 +80,7 @@ void XrFrameSinkClientImpl::InitializeRootCompositorFrameSink(
     viz::mojom::RootCompositorFrameSinkParamsPtr root_params,
     device::DomOverlaySetup dom_setup,
     base::OnceClosure on_initialized) {
-  DCHECK(!initialized_);
+  CHECK(!initialized_, base::NotFatalUntil::M159);
   DVLOG(1) << __func__;
 
   ui_thread_task_runner_->PostTask(
@@ -90,7 +95,7 @@ void XrFrameSinkClientImpl::InitializeOnUiThread(
     device::DomOverlaySetup dom_setup,
     base::OnceClosure on_initialized) {
   // AllocateFrameSinkId needs to be called from the UI thread.
-  DCHECK(IsOnUiThread());
+  CHECK(IsOnUiThread(), base::NotFatalUntil::M159);
   DVLOG(1) << __func__;
 
   root_frame_sink_id_ = AllocateFrameSinkId();
@@ -110,14 +115,13 @@ void XrFrameSinkClientImpl::InitializeOnUiThread(
 }
 
 void XrFrameSinkClientImpl::ConfigureDOMOverlay() {
-  DCHECK(IsOnUiThread());
+  CHECK(IsOnUiThread(), base::NotFatalUntil::M159);
   base::AutoLock lock(dom_surface_lock_);
 
   // This is left outside of the OS_ANDROID ifdef to prevent warnings about the
-  // render_process_id and render_frame_id from being unused. Since we check
-  // the render_frame_host for an early return, it is in fact used.
-  RenderFrameHostImpl* render_frame_host =
-      RenderFrameHostImpl::FromID(render_process_id_, render_frame_id_);
+  // global_frame_id_ from being unused. Since we check the render_frame_host
+  // for an early return, it is in fact used.
+  auto* render_frame_host = RenderFrameHostImpl::FromID(global_frame_id_);
   if (!render_frame_host)
     return;
 
@@ -143,8 +147,11 @@ void XrFrameSinkClientImpl::ConfigureDOMOverlay() {
 #endif
 
   if (dom_surface_id_ && dom_surface_id_->is_valid()) {
-    GetHostFrameSinkManager()->RegisterFrameSinkHierarchy(
-        root_frame_sink_id_, dom_surface_id_->frame_sink_id());
+    const viz::FrameSinkId dom_frame_sink_id = dom_surface_id_->frame_sink_id();
+    if (GetHostFrameSinkManager()->RegisterFrameSinkHierarchy(
+            root_frame_sink_id_, dom_frame_sink_id)) {
+      registered_dom_frame_sink_id_ = dom_frame_sink_id;
+    }
   }
 }
 

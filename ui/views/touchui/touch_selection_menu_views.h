@@ -19,14 +19,15 @@ class LabelButton;
 // A bubble that contains actions available for the selected text. An object of
 // this type, as a BubbleDialogDelegateView, manages its own lifetime.
 class VIEWS_EXPORT TouchSelectionMenuViews : public BubbleDialogDelegateView {
- public:
-  METADATA_HEADER(TouchSelectionMenuViews);
+  METADATA_HEADER(TouchSelectionMenuViews, BubbleDialogDelegateView)
 
+ public:
   enum ButtonViewId : int { kEllipsisButton = 1 };
 
   TouchSelectionMenuViews(TouchSelectionMenuRunnerViews* owner,
                           base::WeakPtr<ui::TouchSelectionMenuClient> client,
-                          aura::Window* context);
+                          aura::Window* context,
+                          bool can_paste);
 
   TouchSelectionMenuViews(const TouchSelectionMenuViews&) = delete;
   TouchSelectionMenuViews& operator=(const TouchSelectionMenuViews&) = delete;
@@ -35,7 +36,8 @@ class VIEWS_EXPORT TouchSelectionMenuViews : public BubbleDialogDelegateView {
                 const gfx::Size& handle_image_size);
 
   // Checks whether there is any command available to show in the menu.
-  static bool IsMenuAvailable(const ui::TouchSelectionMenuClient* client);
+  static bool IsMenuAvailable(const ui::TouchSelectionMenuClient* client,
+                              bool can_paste);
 
   // Closes the menu. This will eventually self-destroy the object.
   void CloseMenu();
@@ -51,6 +53,8 @@ class VIEWS_EXPORT TouchSelectionMenuViews : public BubbleDialogDelegateView {
   LabelButton* CreateButton(const std::u16string& title,
                             Button::PressedCallback callback);
 
+  void CreateSeparator();
+
  private:
   friend class TouchSelectionMenuRunnerViews::TestApi;
 
@@ -62,11 +66,11 @@ class VIEWS_EXPORT TouchSelectionMenuViews : public BubbleDialogDelegateView {
   void DisconnectOwner();
 
   // BubbleDialogDelegateView:
-  void OnPaint(gfx::Canvas* canvas) override;
   void WindowClosing() override;
 
   raw_ptr<TouchSelectionMenuRunnerViews> owner_;
   const base::WeakPtr<ui::TouchSelectionMenuClient> client_;
+  const bool can_paste_;
 };
 
 }  // namespace views

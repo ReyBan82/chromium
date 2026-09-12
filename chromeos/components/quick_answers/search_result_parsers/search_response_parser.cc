@@ -4,92 +4,111 @@
 
 #include "chromeos/components/quick_answers/search_result_parsers/search_response_parser.h"
 
+#include <memory>
 #include <utility>
 
-#include "base/functional/bind.h"
+#include "base/json/json_reader.h"
+#include "base/logging.h"
 #include "base/values.h"
+#include "chromeos/components/quick_answers/quick_answers_model.h"
 #include "chromeos/components/quick_answers/search_result_parsers/result_parser.h"
 
 namespace quick_answers {
 namespace {
 
-using base::Value;
-
 // String to prepend to JSON responses to prevent XSSI. See http://go/xssi.
 constexpr char kJsonSafetyPrefix[] = ")]}'\n";
 
+std::unique_ptr<QuickAnswersSession> ProcessResult(const base::Value& result);
+
 }  // namespace
 
-SearchResponseParser::SearchResponseParser(
-    SearchResponseParserCallback complete_callback) {
-  complete_callback_ = std::move(complete_callback);
-}
-
-SearchResponseParser::~SearchResponseParser() {
-  if (complete_callback_)
-    std::move(complete_callback_).Run(/*quick_answer=*/nullptr);
-}
-
-void SearchResponseParser::ProcessResponse(
-    std::unique_ptr<std::string> response_body) {
-  if (response_body->length() < strlen(kJsonSafetyPrefix) ||
-      response_body->substr(0, strlen(kJsonSafetyPrefix)) !=
-          kJsonSafetyPrefix) {
+std::unique_ptr<QuickAnswersSession> ParseSearchResponse(
+    const std::string& response_body) {
+  if (response_body.length() < strlen(kJsonSafetyPrefix) ||
+      response_body.substr(0, strlen(kJsonSafetyPrefix)) != kJsonSafetyPrefix) {
     LOG(ERROR) << "Invalid search response.";
-    std::move(complete_callback_).Run(nullptr);
-    return;
+    return nullptr;
   }
-  data_decoder::DataDecoder::ParseJsonIsolated(
-      response_body->substr(strlen(kJsonSafetyPrefix)),
-      base::BindOnce(&SearchResponseParser::OnJsonParsed,
-                     base::Unretained(this)));
-}
 
-void SearchResponseParser::OnJsonParsed(
-    data_decoder::DataDecoder::ValueOrError result) {
-  DCHECK(complete_callback_);
-
+  base::JSONReader::Result result =
+      base::JSONReader::ReadAndReturnValueWithError(
+          response_body.substr(strlen(kJsonSafetyPrefix)),
+          base::JSON_PARSE_RFC);
   if (!result.has_value()) {
-    LOG(ERROR) << "JSON parsing failed: " << result.error();
-    std::move(complete_callback_).Run(nullptr);
-    return;
+    LOG(ERROR) << "JSON parsing failed: " << result.error().message;
+    return nullptr;
   }
 
   // Get the first result.
-  const Value::List* entries =
-      result->GetDict().FindListByDottedPath("results");
+  const base::ListValue* entries = result->GetDict().FindList("results");
   if (!entries) {
-    std::move(complete_callback_).Run(nullptr);
-    return;
+    return nullptr;
   }
 
   for (const auto& entry : *entries) {
-    auto quick_answer = std::make_unique<QuickAnswer>();
-    if (ProcessResult(&entry, quick_answer.get())) {
-      std::move(complete_callback_).Run(std::move(quick_answer));
-      return;
+    std::unique_ptr<QuickAnswersSession> quick_answers_session =
+        ProcessResult(entry);
+    if (quick_answers_session) {
+      return quick_answers_session;
     }
   }
 
-  std::move(complete_callback_).Run(nullptr);
+  return nullptr;
 }
 
-bool SearchResponseParser::ProcessResult(const Value* result,
-                                         QuickAnswer* quick_answer) {
-  const base::Value::Dict& dict = result->GetDict();
+namespace {
+
+std::unique_ptr<QuickAnswersSession> ProcessResult(const base::Value& result) {
+  const base::DictValue& dict = result.GetDict();
   auto one_namespace_type = dict.FindInt("oneNamespaceType");
   if (!one_namespace_type.has_value()) {
     // Can't find valid one namespace type from the response.
     LOG(ERROR) << "Can't find valid one namespace type from the response.";
-    return false;
+    return nullptr;
   }
 
   std::unique_ptr<ResultParser> result_parser =
       ResultParserFactory::Create(one_namespace_type.value());
-  if (!result_parser)
-    return false;
+  if (!result_parser) {
+    return nullptr;
+  }
 
-  return result_parser->Parse(dict, quick_answer);
+  if (result_parser->SupportsNewInterface()) {
+    // Try to parse from StructuredResult, which supports Rich Answers.
+    std::unique_ptr<StructuredResult> structured_result =
+        result_parser->ParseInStructuredResult(dict);
+    if (!structured_result) {
+      return nullptr;
+    }
+
+    std::unique_ptr<QuickAnswer> quick_answer = std::make_unique<QuickAnswer>();
+    if (!result_parser->PopulateQuickAnswer(*structured_result,
+                                            quick_answer.get())) {
+      return nullptr;
+    }
+
+    std::unique_ptr<QuickAnswersSession> quick_answers_session =
+        std::make_unique<QuickAnswersSession>();
+    quick_answers_session->structured_result = std::move(structured_result);
+    quick_answers_session->quick_answer = std::move(quick_answer);
+    return quick_answers_session;
+  }
+
+  // If a parser does not support `StructuredResult`, falls back to `Parse`
+  // method. This is for a parser which has not migrated to the new interfaces
+  // yet.
+  std::unique_ptr<QuickAnswer> quick_answer = std::make_unique<QuickAnswer>();
+  if (!result_parser->Parse(dict, quick_answer.get())) {
+    return nullptr;
+  }
+
+  std::unique_ptr<QuickAnswersSession> quick_answers_session =
+      std::make_unique<QuickAnswersSession>();
+  quick_answers_session->quick_answer = std::move(quick_answer);
+  return quick_answers_session;
 }
+
+}  // namespace
 
 }  // namespace quick_answers

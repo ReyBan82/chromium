@@ -13,46 +13,18 @@
 #include "base/observer_list_types.h"
 #include "build/build_config.h"
 #include "components/keyed_service/core/keyed_service.h"
-#include "components/omnibox/browser/autocomplete_input.h"
-#include "components/omnibox/browser/autocomplete_provider_client.h"
 #include "components/omnibox/browser/search_suggestion_parser.h"
+#include "components/omnibox/common/zero_suggest_cache_service_interface.h"
 #include "components/prefs/pref_service.h"
 
-class ZeroSuggestCacheService : public KeyedService {
+class AutocompleteSchemeClassifier;
+
+class ZeroSuggestCacheService : public ZeroSuggestCacheServiceInterface,
+                                public KeyedService {
  public:
-  struct CacheEntry {
-    CacheEntry();
-    explicit CacheEntry(const std::string& response_json);
-    CacheEntry(const CacheEntry& entry);
-
-    CacheEntry& operator=(const CacheEntry& entry) = default;
-
-    ~CacheEntry();
-
-    // JSON response received from the remote Suggest service.
-    std::string response_json;
-
-    // Parses the stored JSON response in order to extract the list of
-    // suggestions received from the remote Suggest service.
-    // For memory efficiency reasons, CacheEntry does not store the
-    // deserialized SuggestResults object as a data member.
-    SearchSuggestionParser::SuggestResults GetSuggestResults(
-        const AutocompleteInput& input,
-        const AutocompleteProviderClient& client) const;
-
-    // Estimates dynamic memory usage.
-    // See base/trace_event/memory_usage_estimator.h for more info.
-    size_t EstimateMemoryUsage() const;
-  };
-
-  class Observer : public base::CheckedObserver {
-   public:
-    // Notifies listeners when a particular cache entry has been updated.
-    virtual void OnZeroSuggestResponseUpdated(const std::string& page_url,
-                                              const CacheEntry& response) {}
-  };
-
-  ZeroSuggestCacheService(PrefService* prefs, size_t cache_size);
+  ZeroSuggestCacheService(
+      std::unique_ptr<AutocompleteSchemeClassifier> scheme_classifier,
+      PrefService* prefs);
 
   ZeroSuggestCacheService(const ZeroSuggestCacheService&) = delete;
   ZeroSuggestCacheService& operator=(const ZeroSuggestCacheService&) = delete;
@@ -60,31 +32,26 @@ class ZeroSuggestCacheService : public KeyedService {
   ~ZeroSuggestCacheService() override;
 
   // Read/write zero suggest cache entries.
-  CacheEntry ReadZeroSuggestResponse(const std::string& page_url) const;
+  CacheEntry ReadZeroSuggestResponse(const std::string& page_url,
+                                     bool is_composebox = false) const;
   void StoreZeroSuggestResponse(const std::string& page_url,
-                                const std::string& response_json);
+                                const std::string& response_json,
+                                bool is_composebox = false);
 
   // Remove all zero suggest cache entries.
   void ClearCache();
 
-  // Returns whether or not the zero suggest cache is empty.
-  bool IsCacheEmpty() const;
-
-  // Add/remove observer.
-  void AddObserver(Observer* observer);
-  void RemoveObserver(Observer* observer);
+  // ZeroSuggestCacheServiceInterface:
+  std::vector<ZeroSuggestCacheServiceInterface::CacheEntrySuggestResult>
+  GetSuggestResults(const ZeroSuggestCacheServiceInterface::CacheEntry&
+                        cache_entry) const override;
+  void AddObserver(Observer* observer) override;
+  void RemoveObserver(Observer* observer) override;
 
  private:
+  std::unique_ptr<AutocompleteSchemeClassifier> scheme_classifier_;
   // Pref service used for in-memory cache data persistence. Not owned.
   const raw_ptr<PrefService> prefs_;
-  // Cache mapping each page URL to the corresponding zero suggest response
-  // (serialized JSON). |mutable| is used here because reading from the cache,
-  // while logically const, will actually modify the internal recency list of
-  // the HashingLRUCache object.
-  mutable base::HashingLRUCache<std::string, CacheEntry> cache_;
-  // Dedicated cache entry for "ZPS on NTP" data in order to minimize any
-  // negative impact due to cache eviction policy.
-  CacheEntry ntp_entry_;
   base::ObserverList<Observer> observers_;
 };
 

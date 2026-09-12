@@ -17,16 +17,20 @@ namespace blink {
 // or grammar error.
 class CORE_EXPORT SpellCheckMarker : public DocumentMarker {
  public:
-  SpellCheckMarker(unsigned start_offset,
-                   unsigned end_offset,
-                   const String& description);
+  SpellCheckMarker(wtf_size_t start_offset,
+                   wtf_size_t end_offset,
+                   const String& description,
+                   bool should_hide_suggestion_menu);
   SpellCheckMarker(const SpellCheckMarker&) = delete;
   SpellCheckMarker& operator=(const SpellCheckMarker&) = delete;
 
   const String& Description() const { return description_; }
 
+  bool ShouldHideSuggestionMenu() const { return should_hide_suggestion_menu_; }
+
  private:
   const String description_;
+  bool should_hide_suggestion_menu_;
 };
 
 bool CORE_EXPORT IsSpellCheckMarker(const DocumentMarker&);

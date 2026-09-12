@@ -7,20 +7,38 @@ package org.chromium.chrome.browser.history;
 import org.junit.Assert;
 
 import org.chromium.components.browser_ui.widget.DateDividedAdapter.ItemViewType;
+import org.chromium.components.browser_ui.widget.DateDividedAdapter.TimedItem;
 
-/**
- * Util class for functions and helper classes that share between different test files.
- */
+/** Util class for functions and helper classes that share between different test files. */
 public class HistoryTestUtils {
     static void checkAdapterContents(
-            HistoryAdapter adapter, boolean hasHeader, boolean hasFooter, Object... items) {
+            HistoryAdapter adapter,
+            boolean hasStandardHeader,
+            boolean hasFooter,
+            TimedItem... items) {
+        checkAdapterContents(
+                adapter, hasStandardHeader, /* hasPersistentHeader= */ false, hasFooter, items);
+    }
+
+    static void checkAdapterContents(
+            HistoryAdapter adapter,
+            boolean hasStandardHeader,
+            boolean hasPersistentHeader,
+            boolean hasFooter,
+            TimedItem... items) {
         Assert.assertEquals(items.length, adapter.getItemCount());
-        Assert.assertEquals(hasHeader, adapter.hasListHeader());
+        Assert.assertEquals(hasStandardHeader || hasPersistentHeader, adapter.hasListHeader());
         Assert.assertEquals(hasFooter, adapter.hasListFooter());
+        int persistentHeaderPosition = hasPersistentHeader ? (hasStandardHeader ? 1 : 0) : -1;
 
         for (int i = 0; i < items.length; i++) {
-            if (i == 0 && hasHeader) {
-                Assert.assertEquals(ItemViewType.HEADER, adapter.getItemViewType(i));
+            if (i == 0 && hasStandardHeader) {
+                Assert.assertEquals(ItemViewType.STANDARD_HEADER, adapter.getItemViewType(i));
+                continue;
+            }
+
+            if (i == persistentHeaderPosition) {
+                Assert.assertEquals(ItemViewType.PERSISTENT_HEADER, adapter.getItemViewType(i));
                 continue;
             }
 
@@ -34,7 +52,38 @@ public class HistoryTestUtils {
                 Assert.assertEquals(ItemViewType.DATE, adapter.getItemViewType(i));
             } else {
                 Assert.assertEquals(ItemViewType.NORMAL, adapter.getItemViewType(i));
-                Assert.assertEquals(items[i], adapter.getItemAt(i).second);
+                HistoryItem expected = (HistoryItem) items[i];
+                HistoryItem actual = (HistoryItem) adapter.getItemAt(i).second;
+                if (expected == actual) {
+                    // Success, exact object reference match.
+                } else if (actual.isClusterHead()
+                        && actual.getSubItems() != null
+                        && !actual.getSubItems().isEmpty()
+                        && expected.getUrl().equals(actual.getSubItems().get(0).getUrl())) {
+                    // Success, the actual item is a virtual head representing the expected template
+                    // item.
+                } else if (expected.getUrl().equals(actual.getUrl())
+                        && expected.getTimestamp() == actual.getTimestamp()) {
+                    // Success, the objects represent the same underlying navigation but might be
+                    // different instances (e.g. one has a cluster ID assigned).
+                } else {
+                    System.out.println(
+                            "checkAdapterContents MISMATCH at index "
+                                    + i
+                                    + "\n Expected: url="
+                                    + expected.getUrl()
+                                    + ", timestamp="
+                                    + expected.getTimestamp()
+                                    + ", isClusterHead="
+                                    + expected.isClusterHead()
+                                    + "\n Actual: url="
+                                    + actual.getUrl()
+                                    + ", timestamp="
+                                    + actual.getTimestamp()
+                                    + ", isClusterHead="
+                                    + actual.isClusterHead());
+                    Assert.assertEquals(expected, actual);
+                }
             }
         }
     }

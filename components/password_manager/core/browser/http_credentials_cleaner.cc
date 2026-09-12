@@ -4,14 +4,15 @@
 
 #include "components/password_manager/core/browser/http_credentials_cleaner.h"
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_helpers.h"
 #include "base/metrics/histogram_functions.h"
 #include "components/password_manager/core/browser/http_password_store_migrator.h"
 #include "components/password_manager/core/browser/password_manager_util.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
 #include "components/password_manager/core/common/password_manager_pref_names.h"
 #include "components/prefs/pref_service.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 #include "url/gurl.h"
 
 namespace password_manager {
@@ -28,7 +29,7 @@ HttpCredentialCleaner::HttpCredentialCleaner(
 HttpCredentialCleaner::~HttpCredentialCleaner() = default;
 
 bool HttpCredentialCleaner::NeedsCleaning() {
-  auto last = base::Time::FromDoubleT(prefs_->GetDouble(
+  auto last = base::Time::FromSecondsSinceUnixEpoch(prefs_->GetDouble(
       password_manager::prefs::kLastTimeObsoleteHttpCredentialsRemoved));
   return ((base::Time::Now() - last).InDays() >= kCleanUpDelayInDays);
 }
@@ -40,17 +41,26 @@ void HttpCredentialCleaner::StartCleaning(Observer* observer) {
   store_->GetAutofillableLogins(weak_ptr_factory_.GetWeakPtr());
 }
 
-void HttpCredentialCleaner::OnGetPasswordStoreResults(
-    std::vector<std::unique_ptr<PasswordForm>> results) {
+void HttpCredentialCleaner::OnGetPasswordStoreResultsOrErrorFrom(
+    PasswordStoreInterface* store,
+    base::expected<std::vector<StoredCredential>, PasswordStoreBackendError>
+        results_or_error) {
+  if (!results_or_error) {
+    observer_->CleaningCompleted();
+    return;
+  }
+  std::vector<StoredCredential> results = std::move(*results_or_error);
+
   // Non HTTP or HTTPS credentials are ignored, in particular Android or
   // federated credentials.
-  for (auto& form : RemoveNonHTTPOrHTTPSForms(std::move(results))) {
+  for (auto& form : RemoveNonHTTPOrHTTPSForms(
+           password_manager::ToPasswordForms(std::move(results)))) {
     FormKey form_key(
         {std::string(
-             password_manager_util::GetSignonRealmWithProtocolExcluded(*form)),
-         form->scheme, form->username_value});
-    if (form->url.SchemeIs(url::kHttpScheme)) {
-      auto origin = url::Origin::Create(form->url);
+             password_manager_util::GetSignonRealmWithProtocolExcluded(form)),
+         form.scheme, form.username_value});
+    if (form.url.SchemeIs(url::kHttpScheme)) {
+      auto origin = url::Origin::Create(form.url);
       PostHSTSQueryForHostAndNetworkContext(
           origin, network_context_getter_.Run(),
           base::BindOnce(&HttpCredentialCleaner::OnHSTSQueryResult,
@@ -58,7 +68,7 @@ void HttpCredentialCleaner::OnGetPasswordStoreResults(
                          form_key));
       ++total_http_credentials_;
     } else {  // HTTPS
-      https_credentials_map_[form_key].insert(form->password_value);
+      https_credentials_map_[form_key].insert(form.password_value.value());
     }
   }
 
@@ -66,16 +76,15 @@ void HttpCredentialCleaner::OnGetPasswordStoreResults(
   SetPrefIfDone();
 }
 
-void HttpCredentialCleaner::OnHSTSQueryResult(
-    std::unique_ptr<PasswordForm> form,
-    FormKey key,
-    HSTSResult hsts_result) {
+void HttpCredentialCleaner::OnHSTSQueryResult(PasswordForm form,
+                                              FormKey key,
+                                              HSTSResult hsts_result) {
   ++processed_results_;
-  base::ScopedClosureRunner report(base::BindOnce(
-      &HttpCredentialCleaner::SetPrefIfDone, base::Unretained(this)));
+  absl::Cleanup report = [this] { SetPrefIfDone(); };
 
-  if (hsts_result == HSTSResult::kError)
+  if (hsts_result == HSTSResult::kError) {
     return;
+  }
 
   bool is_hsts = (hsts_result == HSTSResult::kYes);
 
@@ -88,14 +97,14 @@ void HttpCredentialCleaner::OnHSTSQueryResult(
                 : HttpCredentialType::kHasNoMatchingHttpsWithoutHsts);
     if (is_hsts) {
       // Migrate credentials to HTTPS, by moving them.
-      store_->AddLogin(
-          HttpPasswordStoreMigrator::MigrateHttpFormToHttps(*form));
-      store_->RemoveLogin(*form);
+      store_->AddLogin(password_manager::FromPasswordForm(
+          HttpPasswordStoreMigrator::MigrateHttpFormToHttps(form)));
+      store_->RemoveLogin(FROM_HERE, password_manager::FromPasswordForm(form));
     }
     return;
   }
 
-  if (base::Contains(user_it->second, form->password_value)) {
+  if (user_it->second.contains(form.password_value.value())) {
     // The password store contains the same credentials (signon_realm, scheme,
     // username and password) on HTTPS version of the form.
     base::UmaHistogramEnumeration(
@@ -104,7 +113,7 @@ void HttpCredentialCleaner::OnHSTSQueryResult(
                 : HttpCredentialType::kHasEquivalentHttpsWithoutHsts);
     if (is_hsts) {
       // This HTTP credential is no more used.
-      store_->RemoveLogin(*form);
+      store_->RemoveLogin(FROM_HERE, password_manager::FromPasswordForm(form));
     }
   } else {
     base::UmaHistogramEnumeration(
@@ -115,11 +124,12 @@ void HttpCredentialCleaner::OnHSTSQueryResult(
 }
 
 void HttpCredentialCleaner::SetPrefIfDone() {
-  if (processed_results_ != total_http_credentials_)
+  if (processed_results_ != total_http_credentials_) {
     return;
+  }
 
   prefs_->SetDouble(prefs::kLastTimeObsoleteHttpCredentialsRemoved,
-                    base::Time::Now().ToDoubleT());
+                    base::Time::Now().InSecondsFSinceUnixEpoch());
   observer_->CleaningCompleted();
 }
 

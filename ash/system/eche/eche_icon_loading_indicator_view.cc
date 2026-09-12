@@ -3,16 +3,19 @@
 // found in the LICENSE file.
 
 #include "ash/system/eche/eche_icon_loading_indicator_view.h"
+
 #include <algorithm>
 
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
 #include "ui/gfx/animation/throb_animation.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/paint_throbber.h"
+#include "ui/views/property_effects.h"
 #include "ui/views/view.h"
 #include "ui/views/view_observer.h"
 
@@ -26,7 +29,7 @@ constexpr int kThrobberStrokeWidth = 3;
 
 EcheIconLoadingIndicatorView::EcheIconLoadingIndicatorView(views::View* parent)
     : parent_(parent) {
-  observed_session_.Observe(parent_);
+  observed_session_.Observe(parent_.get());
 
   // Don't let the loading indicator process events.
   SetCanProcessEventsWithinSubtree(false);
@@ -44,7 +47,7 @@ void EcheIconLoadingIndicatorView::SetAnimating(bool animating) {
     throbber_start_time_.reset();
     animation_.Reset();
   }
-  OnPropertyChanged(&throbber_start_time_, views::kPropertyEffectsNone);
+  OnPropertyChanged(&throbber_start_time_, views::PropertyEffects::kNone);
 }
 
 bool EcheIconLoadingIndicatorView::GetAnimating() const {
@@ -77,5 +80,8 @@ void EcheIconLoadingIndicatorView::AnimationProgressed(
   DCHECK_EQ(animation, &animation_);
   SchedulePaint();
 }
+
+BEGIN_METADATA(EcheIconLoadingIndicatorView)
+END_METADATA
 
 }  // namespace ash

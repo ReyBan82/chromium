@@ -3,17 +3,18 @@
 // found in the LICENSE file.
 
 function runTest() {
-  var guestUrl = '/extensions/autoplay_iframe/frame.html';
+  const guestUrl = '/extensions/autoplay_iframe/frame.html';
 
-  var iframe = document.querySelector('iframe');
-  iframe.addEventListener('load', function() {
-    window.addEventListener('message', (e) => {
-      window.domAutomationController.send(
-          ('autoplayed' == e.data || 'NotSupportedError' == e.data));
+  const iframe = document.querySelector('iframe');
+  return new Promise(resolve => {
+    iframe.addEventListener('load', function() {
+      window.addEventListener('message', (e) => {
+        resolve(('autoplayed' === e.data || 'NotSupportedError' === e.data));
+      }, {once: true});
+
+      iframe.contentWindow.postMessage('start', '*');
     }, {once: true});
 
-    iframe.contentWindow.postMessage('start', '*');
-  }, {once: true});
-
-  iframe.src = guestUrl;
+    iframe.src = guestUrl;
+  });
 }

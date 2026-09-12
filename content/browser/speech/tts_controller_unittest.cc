@@ -4,26 +4,24 @@
 
 // Unit tests for the TTS Controller.
 
-#include "content/browser/speech/tts_controller_impl.h"
-
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
+#include "content/browser/speech/tts_controller_impl.h"
 #include "content/browser/speech/tts_utterance_impl.h"
 #include "content/public/browser/tts_platform.h"
 #include "content/public/browser/visibility.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_browser_context.h"
+#include "content/public/test/test_content_browser_client.h"
 #include "content/public/test/test_renderer_host.h"
-#include "content/test/test_content_browser_client.h"
 #include "content/test/test_web_contents.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/mojom/speech/speech_synthesis.mojom.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "content/public/browser/tts_controller_delegate.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "content/public/browser/tts_controller_delegate_chromeos.h"
 #endif
 
 namespace content {
@@ -74,9 +72,6 @@ class MockTtsPlatformImpl : public TtsPlatform {
   void Shutdown() override {}
   void FinalizeVoiceOrdering(std::vector<VoiceData>& voices) override {}
   void RefreshVoices() override {}
-  content::ExternalPlatformDelegate* GetExternalPlatformDelegate() override {
-    return nullptr;
-  }
 
   void SetPlatformImplSupported(bool state) { platform_supported_ = state; }
   void SetPlatformImplInitialized(bool state) { platform_initialized_ = state; }
@@ -103,8 +98,10 @@ class MockTtsPlatformImpl : public TtsPlatform {
     utterance_id_ = -1;
   }
 
+  void ClearController() { controller_ = nullptr; }
+
  private:
-  const raw_ptr<TtsController> controller_;
+  raw_ptr<TtsController> controller_;
   bool platform_supported_ = true;
   bool platform_initialized_ = true;
   std::vector<VoiceData> voices_;
@@ -132,6 +129,22 @@ class MockTtsEngineDelegate : public TtsEngineDelegate {
   void Speak(TtsUtterance* utterance, const VoiceData& voice) override {
     utterance_id_ = utterance->GetId();
   }
+
+  void UninstallLanguageRequest(content::BrowserContext* browser_context,
+                                const std::string& lang,
+                                const std::string& client_id,
+                                int source,
+                                bool uninstall_immediately) override {}
+
+  void InstallLanguageRequest(BrowserContext* browser_context,
+                              const std::string& lang,
+                              const std::string& client_id,
+                              int source) override {}
+
+  void LanguageStatusRequest(BrowserContext* browser_context,
+                             const std::string& lang,
+                             const std::string& client_id,
+                             int source) override {}
 
   void LoadBuiltInTtsEngine(BrowserContext* browser_context) override {}
 
@@ -165,13 +178,14 @@ class MockTtsEngineDelegate : public TtsEngineDelegate {
   int stop_called_ = 0;
 };
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 class MockTtsControllerDelegate : public TtsControllerDelegate {
  public:
   MockTtsControllerDelegate() = default;
   ~MockTtsControllerDelegate() override = default;
 
   void SetPreferredVoiceIds(const PreferredVoiceIds& ids) { ids_ = ids; }
+  void SetFallbackEngineId(const std::string& id) { fallback_engine_id_ = id; }
 
   BrowserContext* GetLastBrowserContext() {
     BrowserContext* result = last_browser_context_;
@@ -192,9 +206,14 @@ class MockTtsControllerDelegate : public TtsControllerDelegate {
                                         double* pitch,
                                         double* volume) override {}
 
+  bool IsFallbackEngine(std::string_view engine_id) override {
+    return engine_id == fallback_engine_id_;
+  }
+
  private:
-  BrowserContext* last_browser_context_ = nullptr;
+  raw_ptr<BrowserContext> last_browser_context_ = nullptr;
   PreferredVoiceIds ids_;
+  std::string fallback_engine_id_ = "espeak";
 };
 #endif
 
@@ -213,7 +232,7 @@ class TestTtsControllerImpl : public TtsControllerImpl {
   using TtsControllerImpl::GetMatchingVoice;
   using TtsControllerImpl::SpeakNextUtterance;
   using TtsControllerImpl::UpdateUtteranceDefaults;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   using TtsControllerImpl::SetTtsControllerDelegateForTesting;
 #endif
   using TtsControllerImpl::IsPausedForTesting;
@@ -229,6 +248,8 @@ class TtsControllerTest : public testing::Test {
   ~TtsControllerTest() override = default;
 
   void SetUp() override {
+    original_locale_ =
+        TestContentBrowserClient::GetInstance()->GetApplicationLocale();
     controller_ = std::make_unique<TestTtsControllerImpl>();
     platform_impl_ = std::make_unique<MockTtsPlatformImpl>(controller_.get());
     browser_context_ = std::make_unique<TestBrowserContext>();
@@ -238,13 +259,15 @@ class TtsControllerTest : public testing::Test {
     // since it has no extensions.
     controller()->SetTtsEngineDelegate(&engine_delegate_);
 #endif  // !BUILDFLAG(IS_ANDROID)
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     controller()->SetTtsControllerDelegateForTesting(&delegate_);
 #endif
     controller()->AddVoicesChangedDelegate(&voices_changed_);
   }
 
   void TearDown() override {
+    TestContentBrowserClient::GetInstance()->set_application_locale(
+        original_locale_);
     if (controller())
       controller()->RemoveVoicesChangedDelegate(&voices_changed_);
   }
@@ -254,10 +277,15 @@ class TtsControllerTest : public testing::Test {
   TestBrowserContext* browser_context() { return browser_context_.get(); }
   MockTtsEngineDelegate* engine_delegate() { return &engine_delegate_; }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   MockTtsControllerDelegate* delegate() { return &delegate_; }
 #endif
-  void ReleaseTtsController() { controller_.reset(); }
+  void ReleaseTtsController() {
+    // Need to clear the controller on MockTtsPlatformImpl to avoid a dangling
+    // pointer.
+    platform_impl_->ClearController();
+    controller_.reset();
+  }
   void ReleaseBrowserContext() {
     // BrowserContext::~BrowserContext(...) is calling OnBrowserContextDestroyed
     // on the tts controller singleton. That call is simulated here to ensures
@@ -287,17 +315,18 @@ class TtsControllerTest : public testing::Test {
   content::BrowserTaskEnvironment task_environment_;
   RenderViewHostTestEnabler rvh_enabler_;
 
+  std::string original_locale_;
   std::unique_ptr<TestTtsControllerImpl> controller_;
   std::unique_ptr<MockTtsPlatformImpl> platform_impl_;
   std::unique_ptr<TestBrowserContext> browser_context_;
   MockTtsEngineDelegate engine_delegate_;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   MockTtsControllerDelegate delegate_;
 #endif
   MockVoicesChangedDelegate voices_changed_;
 };
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 TEST_F(TtsControllerTest, TestBrowserContextRemoved) {
   std::vector<VoiceData> voices;
   VoiceData voice_data;
@@ -432,7 +461,7 @@ TEST_F(TtsControllerTest, TestGetMatchingVoice) {
     std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
     EXPECT_EQ(0, controller()->GetMatchingVoice(utterance.get(), voices));
 
-    std::set<TtsEventType> types;
+    base::flat_set<TtsEventType> types;
     types.insert(TTS_EVENT_WORD);
     utterance->SetRequiredEventTypes(types);
     EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
@@ -450,7 +479,7 @@ TEST_F(TtsControllerTest, TestGetMatchingVoice) {
     utterance->SetEngineId("id5");
     EXPECT_EQ(5, controller()->GetMatchingVoice(utterance.get(), voices));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     TtsControllerDelegate::PreferredVoiceIds preferred_voice_ids;
     preferred_voice_ids.locale_voice_id.emplace("Voice7", "id7");
     preferred_voice_ids.any_locale_voice_id.emplace("Android", "");
@@ -517,7 +546,7 @@ TEST_F(TtsControllerTest, TestGetMatchingVoice) {
     utterance->SetLang("");
     EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     // voice0 is matched against the system language which has no region piece.
     TestContentBrowserClient::GetInstance()->set_application_locale("en");
     EXPECT_EQ(0, controller()->GetMatchingVoice(utterance.get(), voices));
@@ -555,7 +584,7 @@ TEST_F(TtsControllerTest, TestGetMatchingVoice) {
     utterance->SetLang("EN-US");
     EXPECT_EQ(0, controller()->GetMatchingVoice(utterance.get(), voices));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     // Add another English voice.
     VoiceData voice2;
     voice2.engine_id = "id1";
@@ -576,12 +605,302 @@ TEST_F(TtsControllerTest, TestGetMatchingVoice) {
   }
 }
 
-// Note: The following tests are disabled since they do not apply for Lacros
-// build. TtsPlatformImpl is not supported for Lacros when lacros tts support
-// feature is disabled.
-// TODO(crbug.com/1227543): Add new tests for lacros with tts support feature
-// being enabled.
-#if !BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_CHROMEOS)
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_PrefersRegionalVoiceOverFallbackInSameLanguage) {
+  // Verifies that when a generic language request (e.g. "it") is made and both
+  // a regional high-quality voice (e.g. "it-IT") and a generic fallback voice
+  // (e.g. "it") are available, the regional voice is prioritized over the
+  // fallback engine regardless of candidate vector ordering (even when the
+  // fallback voice appears first at index 0).
+  TestContentBrowserClient::GetInstance()->set_application_locale("it");
+
+  std::vector<VoiceData> voices;
+  VoiceData espeak_voice;
+  espeak_voice.engine_id = "espeak";
+  espeak_voice.name = "eSpeak Italian";
+  espeak_voice.lang = "it";
+  voices.push_back(espeak_voice);
+
+  VoiceData google_voice;
+  google_voice.engine_id = "google_tts";
+  google_voice.name = "Google italiano";
+  google_voice.lang = "it-IT";
+  voices.push_back(google_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("it");
+
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_PrefersRegionalVoiceOverFallbackWhenAppLocaleDiffers) {
+  // Verifies that even when the system application locale differs from the
+  // utterance language (e.g. app locale "en-US" vs utterance "it"), a regional
+  // primary voice (e.g. "it-IT") is prioritized over a generic fallback voice
+  // ("it") regardless of candidate vector ordering.
+  TestContentBrowserClient::GetInstance()->set_application_locale("en-US");
+
+  std::vector<VoiceData> voices;
+  VoiceData espeak_voice;
+  espeak_voice.engine_id = "espeak";
+  espeak_voice.name = "eSpeak Italian";
+  espeak_voice.lang = "it";
+  voices.push_back(espeak_voice);
+
+  VoiceData google_voice;
+  google_voice.engine_id = "google_tts";
+  google_voice.name = "Google italiano";
+  google_voice.lang = "it-IT";
+  voices.push_back(google_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("it");
+
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_PrefersRegionalVoiceForGenericLanguage) {
+  // Verifies that a generic language request (e.g. "en") correctly matches a
+  // regional dialect voice (e.g. "en-US") as a primary match rather than
+  // defaulting to a generic fallback voice, even when the fallback voice
+  // appears first in the candidate list.
+  TestContentBrowserClient::GetInstance()->set_application_locale("en-US");
+
+  std::vector<VoiceData> voices;
+  VoiceData espeak_voice;
+  espeak_voice.engine_id = "espeak";
+  espeak_voice.name = "eSpeak English";
+  espeak_voice.lang = "en";
+  voices.push_back(espeak_voice);
+
+  VoiceData google_voice;
+  google_voice.engine_id = "google_tts";
+  google_voice.name = "Google US English";
+  google_voice.lang = "en-US";
+  voices.push_back(google_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("en");
+
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(
+    TtsControllerTest,
+    GetMatchingVoice_NeverSelectsWrongLanguageOverFallbackInCorrectLanguage) {
+  // Verifies the critical invariant that language correctness is absolute:
+  // a fallback engine in the requested language (e.g. Greek "el") is strictly
+  // chosen over primary high-quality voices in different languages ("en-US"
+  // or "it-IT").
+  TestContentBrowserClient::GetInstance()->set_application_locale("it");
+
+  std::vector<VoiceData> voices;
+  VoiceData english_voice;
+  english_voice.engine_id = "google_tts";
+  english_voice.name = "Google US English";
+  english_voice.lang = "en-US";
+  voices.push_back(english_voice);
+
+  VoiceData italian_voice;
+  italian_voice.engine_id = "google_tts";
+  italian_voice.name = "Google italiano";
+  italian_voice.lang = "it-IT";
+  voices.push_back(italian_voice);
+
+  VoiceData greek_espeak_voice;
+  greek_espeak_voice.engine_id = "espeak";
+  greek_espeak_voice.name = "eSpeak Greek";
+  greek_espeak_voice.lang = "el";
+  voices.push_back(greek_espeak_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("el");
+
+  EXPECT_EQ(2, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_PrefersNonFallbackOverFallbackWhenLocalesAreIdentical) {
+  // Verifies that when two candidate voices have identical generic locale tags
+  // (e.g. both "it"), the non-fallback engine is prioritized over the fallback
+  // engine regardless of candidate vector ordering (even when the fallback
+  // voice is encountered first at index 0).
+  TestContentBrowserClient::GetInstance()->set_application_locale("it");
+
+  std::vector<VoiceData> voices;
+  VoiceData espeak_voice;
+  espeak_voice.engine_id = "espeak";
+  espeak_voice.name = "eSpeak Italian";
+  espeak_voice.lang = "it";
+  voices.push_back(espeak_voice);
+
+  VoiceData primary_voice;
+  primary_voice.engine_id = "primary_tts";
+  primary_voice.name = "Primary Italian";
+  primary_voice.lang = "it";
+  voices.push_back(primary_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("it");
+
+  // Primary voice at index 1 must defeat fallback voice at index 0.
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_PrefersNonFallbackOverHypotheticalRegionalFallback) {
+  // Verifies that when two candidate voices have identical regional locale tags
+  // (e.g. both "it-IT"), the non-fallback engine is prioritized over the
+  // fallback engine even when the fallback voice appears first in the list.
+  TestContentBrowserClient::GetInstance()->set_application_locale("it");
+
+  std::vector<VoiceData> voices;
+  VoiceData espeak_voice;
+  espeak_voice.engine_id = "espeak";
+  espeak_voice.name = "eSpeak Italian (Italy)";
+  espeak_voice.lang = "it-IT";
+  voices.push_back(espeak_voice);
+
+  VoiceData google_voice;
+  google_voice.engine_id = "google_tts";
+  google_voice.name = "Google italiano";
+  google_voice.lang = "it-IT";
+  voices.push_back(google_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("it");
+
+  // Google voice at index 1 must defeat fallback voice at index 0.
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_RespectsExplicitUserPreferenceForFallback) {
+  // Verifies that when a user explicitly configures a preference for a fallback
+  // engine voice in settings, their explicit selection takes precedence over
+  // automatic voice ordering and regional matching.
+  TestContentBrowserClient::GetInstance()->set_application_locale("it");
+
+  std::vector<VoiceData> voices;
+  VoiceData google_voice;
+  google_voice.engine_id = "google_tts";
+  google_voice.name = "Google italiano";
+  google_voice.lang = "it-IT";
+  voices.push_back(google_voice);
+
+  VoiceData espeak_voice;
+  espeak_voice.engine_id = "espeak";
+  espeak_voice.name = "eSpeak Italian";
+  espeak_voice.lang = "it";
+  voices.push_back(espeak_voice);
+
+  TtsControllerDelegate::PreferredVoiceIds preferred_voice_ids;
+  preferred_voice_ids.lang_voice_id.emplace(espeak_voice.name,
+                                            espeak_voice.engine_id);
+  delegate()->SetPreferredVoiceIds(preferred_voice_ids);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("it");
+
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+
+  delegate()->SetPreferredVoiceIds({});
+}
+
+TEST_F(TtsControllerTest, GetMatchingVoice_HandlesUnparsableLocaleTagsSafely) {
+  // Verifies that unparsable or malformed locale tags evaluate safely to
+  // LocaleMatchLevel::kNone instead of falsely matching each other as exact or
+  // regional dialects due to empty language subtag comparisons.
+  std::vector<VoiceData> voices;
+  VoiceData invalid_fallback_voice;
+  invalid_fallback_voice.engine_id = "espeak";
+  invalid_fallback_voice.name = "Malformed Fallback Voice";
+  invalid_fallback_voice.lang = "---";
+  voices.push_back(invalid_fallback_voice);
+
+  VoiceData valid_voice;
+  valid_voice.engine_id = "google_tts";
+  valid_voice.name = "French Voice";
+  valid_voice.lang = "fr-FR";
+  voices.push_back(valid_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("___");
+
+  // If "---" and "___" falsely matched as empty language subtags, index 0
+  // would receive +256 points and be selected. With the empty language guard,
+  // neither voice matches the utterance language, so the non-fallback engine
+  // at index 1 receives the engine tie-breaker (+1) and is selected.
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_PrefersExactRegionalMatchOverLanguageOnlyMatch) {
+  // Verifies that when an utterance explicitly requests a regional dialect
+  // (e.g. "it-IT"), an exact dialect match ("it-IT") scores higher and beats
+  // a generic language-only match ("it") even when both candidates are primary
+  // non-fallback engines, and regardless of candidate vector ordering.
+  TestContentBrowserClient::GetInstance()->set_application_locale("en-US");
+
+  std::vector<VoiceData> voices;
+  VoiceData generic_primary_voice;
+  generic_primary_voice.engine_id = "primary_tts_generic";
+  generic_primary_voice.name = "Generic Primary Italian";
+  generic_primary_voice.lang = "it";
+  voices.push_back(generic_primary_voice);
+
+  VoiceData exact_primary_voice;
+  exact_primary_voice.engine_id = "primary_tts_regional";
+  exact_primary_voice.name = "Exact Primary Italian";
+  exact_primary_voice.lang = "it-IT";
+  voices.push_back(exact_primary_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("it-IT");
+
+  // The exact dialect match at index 1 must defeat the language-only match at
+  // index 0.
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+
+  // Also verify that an exact dialect match defeats a fallback voice in the
+  // generic language.
+  voices[0].engine_id = "espeak";
+  voices[0].name = "eSpeak Italian";
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+
+TEST_F(TtsControllerTest,
+       GetMatchingVoice_PrefersExactAppLocaleMatchOverLanguageOnlyMatch) {
+  // Verifies that when matching against the system application locale (e.g.
+  // "it-IT") without an utterance language, an exact dialect match ("it-IT")
+  // receives a higher match score than a language-only match ("it").
+  TestContentBrowserClient::GetInstance()->set_application_locale("it-IT");
+
+  std::vector<VoiceData> voices;
+  VoiceData generic_primary_voice;
+  generic_primary_voice.engine_id = "primary_tts_generic";
+  generic_primary_voice.name = "Generic Primary Italian";
+  generic_primary_voice.lang = "it";
+  voices.push_back(generic_primary_voice);
+
+  VoiceData exact_primary_voice;
+  exact_primary_voice.engine_id = "primary_tts_regional";
+  exact_primary_voice.name = "Exact Primary Italian";
+  exact_primary_voice.lang = "it-IT";
+  voices.push_back(exact_primary_voice);
+
+  std::unique_ptr<TtsUtterance> utterance(TtsUtterance::Create());
+  utterance->SetLang("");
+
+  // Exact application locale match at index 1 defeats language-only match at
+  // index 0.
+  EXPECT_EQ(1, controller()->GetMatchingVoice(utterance.get(), voices));
+}
+#endif
+
 TEST_F(TtsControllerTest, TestTtsControllerShutdown) {
   std::unique_ptr<TtsUtterance> utterance1 = TtsUtterance::Create();
   utterance1->SetShouldClearQueue(false);
@@ -609,6 +928,21 @@ TEST_F(TtsControllerTest, StopsWhenWebContentsDestroyed) {
 
   web_contents.reset();
   // Destroying the WebContents should reset
+  // |TtsController::current_utterance_|.
+  EXPECT_FALSE(TtsControllerCurrentUtterance());
+}
+
+TEST_F(TtsControllerTest, StopsWhenWebContentsPrimaryPageChanged) {
+  std::unique_ptr<TestWebContents> web_contents = CreateWebContents();
+  std::unique_ptr<TtsUtteranceImpl> utterance =
+      CreateUtteranceImpl(web_contents.get());
+
+  controller()->SpeakOrEnqueue(std::move(utterance));
+  EXPECT_TRUE(controller()->IsSpeaking());
+  EXPECT_TRUE(TtsControllerCurrentUtterance());
+
+  web_contents->NavigateAndCommit(GURL("https://example.com"));
+  // Navigating to a new page should reset
   // |TtsController::current_utterance_|.
   EXPECT_FALSE(TtsControllerCurrentUtterance());
 }
@@ -985,7 +1319,6 @@ TEST_F(TtsControllerTest, EngineIdSetNoDelegateSpeakPauseResumeStop) {
   EXPECT_FALSE(TtsControllerCurrentUtterance());
   EXPECT_FALSE(controller()->IsSpeaking());
 }
-#endif  // !BUILDFLAG(IS_CHROMEOS_LACROS)
 
 TEST_F(TtsControllerTest, PauseResumeNoUtterance) {
   // Pause should not call the platform API when there is no utterance.
@@ -1016,7 +1349,6 @@ TEST_F(TtsControllerTest, PlatformNotSupported) {
   EXPECT_EQ(0, platform_impl()->stop_speaking_called());
 }
 
-#if !BUILDFLAG(IS_CHROMEOS_LACROS)
 TEST_F(TtsControllerTest, SpeakWhenLoadingPlatformImpl) {
   platform_impl()->SetPlatformImplInitialized(false);
 
@@ -1070,14 +1402,9 @@ TEST_F(TtsControllerTest, GetVoicesOnlineOffline) {
   EXPECT_EQ(1U, controller_voices.size());
   EXPECT_EQ("offline", controller_voices[0].name);
 }
-#endif  // !BUILDFLAG(IS_CHROMEOS_LACROS)
 
 #if !BUILDFLAG(IS_ANDROID)
 TEST_F(TtsControllerTest, SpeakWhenLoadingBuiltInEngine) {
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  platform_impl()->SetPlatformImplSupported(false);
-#endif
-
   engine_delegate()->set_is_built_in_tts_engine_initialized(false);
 
   std::vector<VoiceData> voices;

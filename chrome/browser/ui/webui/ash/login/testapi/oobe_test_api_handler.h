@@ -10,7 +10,6 @@
 
 #include "base/values.h"
 #include "chrome/browser/ui/webui/ash/login/base_webui_handler.h"
-#include "chromeos/crosapi/mojom/cros_display_config.mojom.h"
 
 namespace ash {
 
@@ -25,23 +24,23 @@ class OobeTestAPIHandler : public BaseWebUIHandler {
   void DeclareLocalizedValues(
       ::login::LocalizedValuesBuilder* builder) override;
   void DeclareJSCallbacks() override;
-  void GetAdditionalParameters(base::Value::Dict* dict) override;
+  void GetAdditionalParameters(base::DictValue* dict) override;
 
  private:
   void LoginWithPin(const std::string& username, const std::string& pin);
   void AdvanceToScreen(const std::string& screen);
   void SkipToLoginForTesting();
   void SkipPostLoginScreens();
+  void HandleCompleteLogin(const std::string& gaia_id,
+                           const std::string& typed_email,
+                           const std::string& password);
   void LoginAsGuest();
   void ShowGaiaDialog();
-  void IsGaiaDialogVisible();
   void HandleGetPrimaryDisplayName(const std::string& callback_id);
-
-  // Emulate that a USB Mouse and a USB Keyboard are connected for testing.
-  void EmulateDevicesConnectedForTesting();
-  void OnGetDisplayUnitInfoList(
-      const std::string& callback_id,
-      std::vector<crosapi::mojom::DisplayUnitInfoPtr> info_list);
+  void HandleGetShouldSkipChoobe(const std::string& callback_id);
+  void HandleGetShouldSkipTouchpadScroll(const std::string& callback_id);
+  void HandleGetMetricsClientID(const std::string& callback_id);
+  void HandleGetShouldSkipSplitModifierScreen(const std::string& callback_id);
 };
 
 }  // namespace ash

@@ -83,14 +83,18 @@ class NodeUnittest(unittest.TestCase):
     node.EndParsing()
 
     non_indented_xml = node.FormatXml()
-    self.assertTrue(non_indented_xml == '<message name="name">\n  Hello '
-                    '&lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
-                    '\n</message>')
+    self.assertTrue(
+      non_indented_xml == '<message name="name">\n  Hello '
+      '&lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
+      '\n</message>'
+    )
 
     indented_xml = node.FormatXml('  ')
-    self.assertTrue(indented_xml == '  <message name="name">\n    Hello '
-                    '&lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
-                    '\n  </message>')
+    self.assertTrue(
+      indented_xml == '  <message name="name">\n    Hello '
+      '&lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
+      '\n  </message>'
+    )
 
   def testXmlFormatMixedContentWithLeadingWhitespace(self):
     # Again test using the Message node type, because it is the only mixed
@@ -116,29 +120,37 @@ class NodeUnittest(unittest.TestCase):
     node.EndParsing()
 
     non_indented_xml = node.FormatXml()
-    self.assertTrue(non_indented_xml ==
-                    "<message name=\"name\">\n  '''   Hello"
-                    ' &lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
-                    " yessiree '''\n</message>")
+    self.assertTrue(
+      non_indented_xml == "<message name=\"name\">\n  '''   Hello"
+      ' &lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
+      " yessiree '''\n</message>"
+    )
 
     indented_xml = node.FormatXml('  ')
-    self.assertTrue(indented_xml ==
-                    "  <message name=\"name\">\n    '''   Hello"
-                    ' &lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
-                    " yessiree '''\n  </message>")
+    self.assertTrue(
+      indented_xml == "  <message name=\"name\">\n    '''   Hello"
+      ' &lt;young&gt; <ph name="USERNAME">$1<ex>Joi</ex></ph>'
+      " yessiree '''\n  </message>"
+    )
 
     self.assertTrue(node.GetNodeById('name'))
 
   def testXmlFormatContentWithEntities(self):
     '''Tests a bug where &nbsp; would not be escaped correctly.'''
     from grit import tclib
-    msg_node = message.MessageNode.Construct(None, tclib.Message(
-      text = 'BEGIN_BOLDHelloWHITESPACEthere!END_BOLD Bingo!',
-      placeholders = [
-        tclib.Placeholder('BEGIN_BOLD', '<b>', 'bla'),
-        tclib.Placeholder('WHITESPACE', '&nbsp;', 'bla'),
-        tclib.Placeholder('END_BOLD', '</b>', 'bla')]),
-                                             'BINGOBONGO')
+
+    msg_node = message.MessageNode.Construct(
+      None,
+      tclib.Message(
+        text='BEGIN_BOLDHelloWHITESPACEthere!END_BOLD Bingo!',
+        placeholders=[
+          tclib.Placeholder('BEGIN_BOLD', '<b>', 'bla'),
+          tclib.Placeholder('WHITESPACE', '&nbsp;', 'bla'),
+          tclib.Placeholder('END_BOLD', '</b>', 'bla'),
+        ],
+      ),
+      'BINGOBONGO',
+    )
     xml = msg_node.FormatXml()
     self.assertTrue(xml.find('&nbsp;') == -1, 'should have no entities')
 
@@ -159,7 +171,10 @@ class NodeUnittest(unittest.TestCase):
     node.AppendContent(" space before two after  '''")
 
     order = [
-        message.MessageNode, message.PhNode, message.ExNode, message.PhNode
+      message.MessageNode,
+      message.PhNode,
+      message.ExNode,
+      message.PhNode,
     ]
     for n in node:
       self.assertTrue(type(n) == order[0])
@@ -185,19 +200,27 @@ class NodeUnittest(unittest.TestCase):
           </messages>
         </release>
       </grit>'''
-    grd = grd_reader.Parse(io.StringIO(xml),
-                           util.PathFromRoot('grit/test/data'))
+    grd = grd_reader.Parse(
+      io.StringIO(xml), util.PathFromRoot('grit/test/data')
+    )
     from grit.node import node_io
+
     output_nodes = grd.GetChildrenOfType(node_io.OutputNode)
     self.assertEqual(len(output_nodes), 3)
-    self.assertEqual(output_nodes[2].attrs['filename'],
-                         'de/generated_resources.rc')
+    self.assertEqual(
+      output_nodes[2].attrs['filename'], 'de/generated_resources.rc'
+    )
 
   def testEvaluateExpression(self):
-    def AssertExpr(expected_value, expr, defs, target_platform,
-                   extra_variables):
-      self.assertEqual(expected_value, base.Node.EvaluateExpression(
-          expr, defs, target_platform, extra_variables))
+    def AssertExpr(
+      expected_value, expr, defs, target_platform, extra_variables
+    ):
+      self.assertEqual(
+        expected_value,
+        base.Node.EvaluateExpression(
+          expr, defs, target_platform, extra_variables
+        ),
+      )
 
     AssertExpr(True, "True", {}, 'linux', {})
     AssertExpr(False, "False", {}, 'linux', {})
@@ -213,11 +236,9 @@ class NodeUnittest(unittest.TestCase):
     AssertExpr(False, "is_linux", {}, 'linux-foo', {})  # Must match exactly.
     AssertExpr(False, "is_linux", {}, 'foollinux', {})
     AssertExpr(False, "is_linux", {'chromeos_ash': True}, 'chromeos', {})
-    AssertExpr(False, "is_linux", {'chromeos_lacros': True}, 'chromeos', {})
     # `is_chromeos` is not used with GRIT and is thus ignored.
     AssertExpr(True, "is_linux", {'is_chromeos': True}, 'linux', {})
     AssertExpr(True, "is_chromeos", {'chromeos_ash': True}, 'chromeos', {})
-    AssertExpr(True, "is_chromeos", {'chromeos_lacros': True}, 'chromeos', {})
     AssertExpr(False, "is_chromeos", {}, 'linux', {})
     AssertExpr(False, "is_fuchsia", {}, 'linux', {})
     AssertExpr(False, "is_linux", {}, 'win32', {})
@@ -231,7 +252,6 @@ class NodeUnittest(unittest.TestCase):
     AssertExpr(False, "is_ios", {}, 'darwin', {})
     AssertExpr(True, "is_posix", {}, 'linux', {})
     AssertExpr(True, "is_posix", {'chromeos_ash': True}, 'chromeos', {})
-    AssertExpr(True, "is_posix", {'chromeos_lacros': True}, 'chromeos', {})
     AssertExpr(True, "is_posix", {}, 'darwin', {})
     AssertExpr(True, "is_posix", {}, 'android', {})
     AssertExpr(True, "is_posix", {}, 'ios', {})
@@ -255,30 +275,41 @@ class NodeUnittest(unittest.TestCase):
     AssertExpr(False, "lang == 'de'", {}, 'win32', {'lang': 'fr'})
 
     # Test a couple more complex expressions for good measure.
-    AssertExpr(True, "is_ios and (lang in ['de', 'fr'] or foo)",
-               {'foo': 'bar'}, 'ios', {'lang': 'fr', 'context': 'today'})
-    AssertExpr(False, "is_ios and (lang in ['de', 'fr'] or foo)",
-               {'foo': False}, 'linux', {
-                   'lang': 'fr',
-                   'context': 'today'
-               })
-    AssertExpr(False, "is_ios and (lang in ['de', 'fr'] or foo)", {
-        'baz': 'bar',
-        'is_ios': True,
-        'foo': False
-    }, 'ios', {
-        'lang': 'he',
-        'context': 'today'
-    })
-    AssertExpr(True, "foo == 'bar' or not baz", {
-        'foo': 'bar',
-        'baz': True
-    }, 'ios', {
-        'lang': 'en',
-        'context': 'java'
-    })
-    AssertExpr(False, "foo == 'bar' or not baz",
-               {'foo': 'ruz', 'baz': True}, 'ios', {'lang': 'en'})
+    AssertExpr(
+      True,
+      "is_ios and (lang in ['de', 'fr'] or foo)",
+      {'foo': 'bar'},
+      'ios',
+      {'lang': 'fr', 'context': 'today'},
+    )
+    AssertExpr(
+      False,
+      "is_ios and (lang in ['de', 'fr'] or foo)",
+      {'foo': False},
+      'linux',
+      {'lang': 'fr', 'context': 'today'},
+    )
+    AssertExpr(
+      False,
+      "is_ios and (lang in ['de', 'fr'] or foo)",
+      {'baz': 'bar', 'is_ios': True, 'foo': False},
+      'ios',
+      {'lang': 'he', 'context': 'today'},
+    )
+    AssertExpr(
+      True,
+      "foo == 'bar' or not baz",
+      {'foo': 'bar', 'baz': True},
+      'ios',
+      {'lang': 'en', 'context': 'java'},
+    )
+    AssertExpr(
+      False,
+      "foo == 'bar' or not baz",
+      {'foo': 'ruz', 'baz': True},
+      'ios',
+      {'lang': 'en'},
+    )
 
   def testEvaluateExpressionThrows(self):
     def AssertThrows(expr, defs, target_platform, message):
@@ -287,28 +318,15 @@ class NodeUnittest(unittest.TestCase):
       self.assertTrue(str(cm.exception) == message)
 
     # Test undefined variables.
-    AssertThrows("foo == 'baz'", {}, 'linux',
-                 'undefined Grit variable found: foo')
-    AssertThrows("foo == 'bar' or not baz", {
-        'foo': 'bar',
-        'fun': True
-    }, 'linux', 'undefined Grit variable found: baz')
-
-    # Test invalid chromeos configurations.
-    AssertThrows("is_chromeos", {}, 'chromeos',
-                 'The chromeos target must be either ash or lacros')
-    AssertThrows("is_chromeos", {
-        'chromeos_ash': True,
-        'chromeos_lacros': True
-    }, 'chromeos', 'The chromeos target must be either ash or lacros')
-    AssertThrows("is_linux", {'chromeos_ash': True}, 'linux',
-                 'Non-chromeos targets cannot be ash or lacros')
-    AssertThrows("is_linux", {'chromeos_lacros': True}, 'linux',
-                 'Non-chromeos targets cannot be ash or lacros')
-    AssertThrows("is_linux", {
-        'chromeos_ash': True,
-        'chromeos_lacros': True
-    }, 'linux', 'Non-chromeos targets cannot be ash or lacros')
+    AssertThrows(
+      "foo == 'baz'", {}, 'linux', 'undefined Grit variable found: foo'
+    )
+    AssertThrows(
+      "foo == 'bar' or not baz",
+      {'foo': 'bar', 'fun': True},
+      'linux',
+      'undefined Grit variable found: baz',
+    )
 
 
 if __name__ == '__main__':

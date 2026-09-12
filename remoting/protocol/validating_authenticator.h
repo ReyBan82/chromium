@@ -45,15 +45,17 @@ class ValidatingAuthenticator : public Authenticator {
   ~ValidatingAuthenticator() override;
 
   // Authenticator interface.
+  CredentialsType credentials_type() const override;
+  const Authenticator& implementing_authenticator() const override;
   State state() const override;
   bool started() const override;
   RejectionReason rejection_reason() const override;
+  RejectionDetails rejection_details() const override;
   const std::string& GetAuthKey() const override;
-  std::unique_ptr<ChannelAuthenticator> CreateChannelAuthenticator()
-      const override;
-  void ProcessMessage(const jingle_xmpp::XmlElement* message,
+  const SessionPolicies* GetSessionPolicies() const override;
+  void ProcessMessage(const JingleAuthentication& message,
                       base::OnceClosure resume_callback) override;
-  std::unique_ptr<jingle_xmpp::XmlElement> GetNextMessage() override;
+  JingleAuthentication GetNextMessage() override;
 
  private:
   // Checks |result|.  If the connection was rejected, |state_| and
@@ -63,6 +65,8 @@ class ValidatingAuthenticator : public Authenticator {
   // Updates |state_| to reflect the current underlying authenticator state.
   // |resume_callback| is called after the state is updated.
   void UpdateState(base::OnceClosure resume_callback);
+
+  void NotifyStateChangeAfterAccepted() override;
 
   // The JID of the remote user.
   std::string remote_jid_;
@@ -76,10 +80,11 @@ class ValidatingAuthenticator : public Authenticator {
   // Returns the rejection reason. Can be called only when in REJECTED state.
   RejectionReason rejection_reason_ =
       Authenticator::RejectionReason::INVALID_CREDENTIALS;
+  RejectionDetails rejection_details_;
 
   std::unique_ptr<Authenticator> current_authenticator_;
 
-  std::unique_ptr<jingle_xmpp::XmlElement> pending_auth_message_;
+  std::optional<JingleAuthentication> pending_auth_message_;
 
   base::WeakPtrFactory<ValidatingAuthenticator> weak_factory_{this};
 };

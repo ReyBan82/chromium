@@ -4,31 +4,39 @@
 
 #include "chrome/browser/ui/views/send_tab_to_self/send_tab_to_self_toolbar_bubble_view.h"
 
+#include "base/feature_list.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
-#include "chrome/browser/ui/browser_navigator.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
-#include "chrome/browser/ui/views/chrome_layout_provider.h"
-#include "chrome/browser/ui/views/send_tab_to_self/send_tab_to_self_toolbar_icon_view.h"
+#include "chrome/browser/send_tab_to_self/send_tab_to_self_client_service.h"
+#include "chrome/browser/send_tab_to_self/send_tab_to_self_client_service_factory.h"
+#include "chrome/browser/sync/send_tab_to_self_sync_service_factory.h"
+#include "chrome/browser/ui/actions/chrome_action_id.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/send_tab_to_self/send_tab_to_self_util.h"
+#include "chrome/browser/ui/views/toolbar/pinned_toolbar_actions.h"
 #include "chrome/grit/generated_resources.h"
+#include "components/send_tab_to_self/features.h"
 #include "components/send_tab_to_self/metrics_util.h"
 #include "components/send_tab_to_self/send_tab_to_self_entry.h"
+#include "components/send_tab_to_self/send_tab_to_self_model.h"
+#include "components/send_tab_to_self/send_tab_to_self_sync_service.h"
 #include "components/url_formatter/elide_url.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/views/controls/button/md_text_button.h"
 #include "ui/views/layout/flex_layout.h"
-#include "ui/views/layout/flex_layout_types.h"
 
 namespace send_tab_to_self {
 
 // static
 SendTabToSelfToolbarBubbleView* SendTabToSelfToolbarBubbleView::CreateBubble(
-    Profile* profile,
-    SendTabToSelfToolbarIconView* parent,
-    const SendTabToSelfEntry& entry,
-    base::OnceCallback<void(NavigateParams*)> navigate_callback) {
+    BrowserWindowInterface& browser,
+    views::BubbleAnchor anchor,
+    const SendTabToSelfEntry& entry) {
   SendTabToSelfToolbarBubbleView* bubble_view =
-      new SendTabToSelfToolbarBubbleView(profile, parent, entry,
-                                         std::move(navigate_callback));
+      new SendTabToSelfToolbarBubbleView(browser, anchor, entry);
   // The widget is owned by the views system.
   views::Widget* widget =
       views::BubbleDialogDelegateView::CreateBubble(bubble_view);
@@ -39,19 +47,13 @@ SendTabToSelfToolbarBubbleView* SendTabToSelfToolbarBubbleView::CreateBubble(
 SendTabToSelfToolbarBubbleView::~SendTabToSelfToolbarBubbleView() = default;
 
 SendTabToSelfToolbarBubbleView::SendTabToSelfToolbarBubbleView(
-    Profile* profile,
-    SendTabToSelfToolbarIconView* parent,
-    const SendTabToSelfEntry& entry,
-    base::OnceCallback<void(NavigateParams*)> navigate_callback)
-    : views::BubbleDialogDelegateView(parent, views::BubbleBorder::TOP_RIGHT),
-      toolbar_button_(parent),
-      navigate_callback_(std::move(navigate_callback)),
-      profile_(profile),
-      title_(entry.GetTitle()),
-      url_(entry.GetURL()),
-      device_name_(entry.GetDeviceName()),
-      guid_(entry.GetGUID()) {
-  SetButtons(ui::DIALOG_BUTTON_NONE);
+    BrowserWindowInterface& browser,
+    views::BubbleAnchor anchor,
+    const SendTabToSelfEntry& entry)
+    : views::BubbleDialogDelegateView(anchor, views::BubbleBorder::TOP_RIGHT),
+      browser_(browser),
+      entry_(entry) {
+  SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
   SetShowCloseButton(true);
   SetTitle(
       l10n_util::GetStringUTF16(IDS_TOOLBAR_BUTTON_SEND_TAB_TO_SELF_TITLE));
@@ -65,12 +67,12 @@ SendTabToSelfToolbarBubbleView::SendTabToSelfToolbarBubbleView(
       ->SetOrientation(views::LayoutOrientation::kVertical)
       .SetCrossAxisAlignment(views::LayoutAlignment::kStart);
 
-  // TODO(crbug/1206381): metrics.
   auto margin = views::LayoutProvider::Get()->GetDistanceMetric(
       views::DISTANCE_BUTTON_HORIZONTAL_PADDING);
 
   // Page title.
-  auto title = std::make_unique<views::Label>(base::UTF8ToUTF16(title_));
+  auto title =
+      std::make_unique<views::Label>(base::UTF8ToUTF16(entry_.GetTitle()));
   title->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
   title->SetTextStyle(views::style::STYLE_PRIMARY);
   title->SetElideBehavior(gfx::ELIDE_TAIL);
@@ -78,24 +80,24 @@ SendTabToSelfToolbarBubbleView::SendTabToSelfToolbarBubbleView(
       views::LayoutProvider::Get()->GetDistanceMetric(
           views::DISTANCE_BUBBLE_PREFERRED_WIDTH) -
       margin * 2);
-  AddChildView(std::move(title));
+  title_label_ = AddChildView(std::move(title));
 
   // Page URL.
   auto url = std::make_unique<views::Label>(
-      url_formatter::FormatUrlForSecurityDisplay(url_));
+      url_formatter::FormatUrlForSecurityDisplay(entry_.GetURL()));
   url->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
   url->SetTextStyle(views::style::STYLE_SECONDARY);
   url->SetElideBehavior(gfx::ELIDE_TAIL);
-  AddChildView(std::move(url));
+  url_label_ = AddChildView(std::move(url));
 
   // Device name.
   auto device = std::make_unique<views::Label>(l10n_util::GetStringFUTF16(
       IDS_TOOLBAR_BUTTON_SEND_TAB_TO_SELF_FROM_DEVICE,
-      base::UTF8ToUTF16(device_name_)));
+      base::UTF8ToUTF16(entry_.GetDeviceName())));
   device->SetHorizontalAlignment(gfx::HorizontalAlignment::ALIGN_LEFT);
   device->SetTextStyle(views::style::STYLE_SECONDARY);
   device->SetElideBehavior(gfx::ELIDE_TAIL);
-  AddChildView(std::move(device));
+  device_label_ = AddChildView(std::move(device));
 
   // Open in New Tab button.
   auto button = std::make_unique<views::MdTextButton>(
@@ -103,40 +105,51 @@ SendTabToSelfToolbarBubbleView::SendTabToSelfToolbarBubbleView(
                           base::Unretained(this)),
       l10n_util::GetStringUTF16(
           IDS_TOOLBAR_BUTTON_SEND_TAB_TO_SELF_BUTTON_LABEL));
-  button->SetProminent(true);
+  button->SetStyle(ui::ButtonStyle::kProminent);
   button->SetProperty(views::kCrossAxisAlignmentKey,
                       views::LayoutAlignment::kEnd);
   AddChildView(std::move(button));
 
-  base::TimeDelta kTimeoutMs = base::Milliseconds(30000);
-  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
-      FROM_HERE,
-      base::BindOnce(&SendTabToSelfToolbarBubbleView::Timeout,
-                     weak_ptr_factory_.GetWeakPtr()),
-      kTimeoutMs);
+  if (base::FeatureList::IsEnabled(kSendTabToSelfEnableNotificationTimeOut)) {
+    base::TimeDelta kTimeoutMs = base::Milliseconds(30000);
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE,
+        base::BindOnce(&SendTabToSelfToolbarBubbleView::Timeout,
+                       weak_ptr_factory_.GetWeakPtr()),
+        kTimeoutMs);
+  }
 }
 
 void SendTabToSelfToolbarBubbleView::OpenInNewTab() {
   opened_ = true;
-  NavigateParams params(profile_, url_, ui::PAGE_TRANSITION_LINK);
-  params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
-  params.window_action = NavigateParams::SHOW_WINDOW;
-  std::move(navigate_callback_).Run(&params);
-
+  send_tab_to_self::RecordNotificationStatus(
+      send_tab_to_self::NotificationStatus::kOpened);
+  OpenEntryInNewForegroundTab(
+      browser_->GetProfile(), entry_,
+      send_tab_to_self::ShareActivatedEntryPoint::kDesktopToolbarBubble);
   GetWidget()->Close();
-  toolbar_button_->LogNotificationOpened();
 }
 
 void SendTabToSelfToolbarBubbleView::Timeout() {
-  send_tab_to_self::RecordNotificationTimedOut();
+  send_tab_to_self::RecordNotificationStatus(
+      send_tab_to_self::NotificationStatus::kTimedOut);
   GetWidget()->Close();
 }
 
 void SendTabToSelfToolbarBubbleView::Hide() {
   if (!opened_) {
-    toolbar_button_->LogNotificationDismissed();
+    send_tab_to_self::RecordNotificationStatus(
+        send_tab_to_self::NotificationStatus::kDismissed);
   }
-  toolbar_button_->DismissEntry(guid_);
+  SendTabToSelfClientServiceFactory::GetForProfile(browser_->GetProfile())
+      ->GetReceivingUiHandler()
+      ->DismissEntries(std::vector<std::string>({entry_.GetGUID()}));
+  browser_->GetFeatures()
+      .pinned_toolbar_actions()
+      ->ShowActionEphemerallyInToolbar(kActionSendTabToSelf, false);
 }
+
+BEGIN_METADATA(SendTabToSelfToolbarBubbleView)
+END_METADATA
 
 }  // namespace send_tab_to_self

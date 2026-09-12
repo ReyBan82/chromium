@@ -4,7 +4,6 @@
 
 #include "ash/system/bluetooth/bluetooth_device_list_item_battery_view.h"
 
-#include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/test/ash_test_base.h"
 #include "base/strings/string_number_conversions.h"
@@ -23,7 +22,8 @@ class BluetoothDeviceListItemBatteryViewTest : public AshTestBase {
   void SetUp() override {
     AshTestBase::SetUp();
 
-    widget_ = CreateTestWidget();
+    widget_ =
+        CreateTestWidget(views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET);
     bluetooth_device_list_battery_item_ =
         std::make_unique<BluetoothDeviceListItemBatteryView>();
     // Add the item to widget hierarchy to make sure `ui::ColorProvider` will

@@ -3,18 +3,19 @@
 // found in the LICENSE file.
 
 import './app_item.js';
+import './app_home_empty_page.js';
 import '//resources/cr_elements/cr_action_menu/cr_action_menu.js';
 import '//resources/cr_elements/cr_checkbox/cr_checkbox.js';
 
-import {CrActionMenuElement} from '//resources/cr_elements/cr_action_menu/cr_action_menu.js';
-import {PolymerElement} from '//resources/polymer/v3_0/polymer/polymer_bundled.min.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {CrLitElement} from '//resources/lit/v3_0/lit.rollup.js';
+import {assert} from 'chrome://resources/js/assert.js';
 
-import {AppInfo, PageCallbackRouter} from './app_home.mojom-webui.js';
+import type {AppInfo, PageCallbackRouter} from './app_home.mojom-webui.js';
+import {browserProxyFactory} from './app_home.mojom-webui.js';
 import {AppHomeUserAction, recordUserAction} from './app_home_utils.js';
-import {AppItemElement} from './app_item.js';
-import {getTemplate} from './app_list.html.js';
-import {BrowserProxy} from './browser_proxy.js';
+import type {AppItemElement} from './app_item.js';
+import {getCss} from './app_list.css.js';
+import {getHtml} from './app_list.html.js';
 
 export interface ActionMenuModel {
   appItem: AppItemElement;
@@ -22,61 +23,46 @@ export interface ActionMenuModel {
 
 type MenuHandleEvent = CustomEvent<ActionMenuModel>;
 
-export interface AppListElement {
-  $: {
-    menu: CrActionMenuElement,
-    container: HTMLElement,
-  };
-}
-
-export class AppListElement extends PolymerElement {
+export class AppListElement extends CrLitElement {
   static get is() {
     return 'app-list';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
-    return {
-      apps_: {
-        type: Array,
-        value() {
-          return [];
-        },
-      },
+  override render() {
+    return getHtml.bind(this)();
+  }
 
-      selectedAppItem_: Object,
+  static override get properties() {
+    return {
+      apps_: {type: Array},
+
+      selectedAppItem_: {type: Object},
     };
   }
 
-  private apps_: AppInfo[];
+  protected accessor apps_: AppInfo[] = [];
+  private boundContextMenuListener_: (e: Event) => void;
+  private boundKeydownListener_: (e: KeyboardEvent) => void;
+  private listenerIds_: number[] = [];
   private mojoEventTarget_: PageCallbackRouter;
-  private listenerIds_: number[];
   // The app item that has the context menu click opened by user.
-  private selectedAppItem_: AppItemElement|null = null;
-  private boundKeydownListener_: any;
-  private boundContextMenuListener_: any;
+  private accessor selectedAppItem_: AppItemElement|null = null;
 
   constructor() {
     super();
 
-    this.mojoEventTarget_ = BrowserProxy.getInstance().callbackRouter;
+    this.mojoEventTarget_ = browserProxyFactory.getInstance().callbackRouter;
 
-    BrowserProxy.getInstance().handler.getApps().then(result => {
+    browserProxyFactory.getInstance().handler.getApps().then(result => {
       this.apps_ = result.appList;
     });
 
     this.boundKeydownListener_ = this.handleKeyDown.bind(this);
     this.boundContextMenuListener_ = this.closeCurrentAppMenu.bind(this);
-  }
-
-  override ready() {
-    super.ready();
-    this.addEventListener('on-menu-open-triggered', this.switchActiveMenu_);
-    this.addEventListener('on-menu-closed', this.clearActiveMenu_);
-    recordUserAction(AppHomeUserAction.APP_HOME_INIT);
   }
 
   override connectedCallback() {
@@ -85,6 +71,7 @@ export class AppListElement extends PolymerElement {
     this.listenerIds_ = [
       this.mojoEventTarget_.addApp.addListener(this.addApp_.bind(this)),
       this.mojoEventTarget_.removeApp.addListener(this.removeApp_.bind(this)),
+      this.mojoEventTarget_.updateApp.addListener(this.updateApp_.bind(this)),
     ];
     document.addEventListener('contextmenu', this.boundContextMenuListener_);
     document.addEventListener('keydown', this.boundKeydownListener_);
@@ -100,32 +87,62 @@ export class AppListElement extends PolymerElement {
     document.removeEventListener('keydown', this.boundKeydownListener_);
   }
 
+  override firstUpdated() {
+    this.addEventListener('on-menu-open-triggered', this.switchActiveMenu_);
+    this.addEventListener('on-menu-closed', this.clearActiveMenu_);
+    recordUserAction(AppHomeUserAction.APP_HOME_INIT);
+  }
+
   private handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter') {
       this.launchFocusedApp();
     } else if (['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown'].includes(
                    e.key)) {
       this.handleNavigateWithArrows(e);
+    } else if (e.key === 'F10' && e.shiftKey) {
+      this.launchContextMenuForFocusedApp();
+      e.preventDefault();
+      e.stopPropagation();
     }
   }
 
   private launchFocusedApp() {
-    const activeElementId = this.shadowRoot!.activeElement?.id;
+    const activeElementId = this.shadowRoot.activeElement?.id;
     if (activeElementId !== undefined &&
         this.apps_.some(app => activeElementId === app.id)) {
-      BrowserProxy.getInstance().handler.launchApp(activeElementId!, null);
+      browserProxyFactory.getInstance().handler.launchApp(
+          activeElementId, null);
     }
+  }
+
+  private launchContextMenuForFocusedApp() {
+    const activeElementId = this.shadowRoot.activeElement?.id;
+    if (!activeElementId) {
+      return;
+    }
+
+    const currIndex = this.apps_.findIndex(app => activeElementId === app.id);
+    if (currIndex < 0) {
+      return;
+    }
+
+    const appElement = this.shadowRoot.getElementById('container')
+                           ?.querySelector('#' + this.apps_[currIndex]!.id);
+    if (!appElement) {
+      return;
+    }
+
+    // Dispatch the contextmenu event on the focused element.
+    appElement.dispatchEvent(new CustomEvent('contextmenu'));
   }
 
   // Capture arrow key events to focus on apps and navigate the apps as a grid.
   private handleNavigateWithArrows(e: KeyboardEvent) {
     const numApps = this.apps_.length;
+    const cssProps =
+        window.getComputedStyle(this.shadowRoot.getElementById('container')!);
     const numColumns: number =
-        window
-            .getComputedStyle(
-                this.$.container,
-                )!.getPropertyValue('grid-template-columns')!.split(' ')
-            .length;
+        cssProps.getPropertyValue('grid-template-columns').split(' ').length;
     const keyActions = {
       ArrowRight: 1,
       ArrowLeft: -1,
@@ -137,10 +154,10 @@ export class AppListElement extends PolymerElement {
       return;
     }
 
-    const activeElementId = this.shadowRoot!.activeElement?.id;
+    const activeElementId = this.shadowRoot.activeElement?.id;
     if (!activeElementId) {
-      (this.$.container.querySelector('#' + this.apps_[0].id) as
-       HTMLElement)!.focus();
+      this.shadowRoot.getElementById('container')
+          ?.querySelector<HTMLElement>('#' + this.apps_[0]!.id)!.focus();
       return;
     }
 
@@ -157,17 +174,27 @@ export class AppListElement extends PolymerElement {
       nextIndex = currIndex;
     }
 
-    (this.$.container.querySelector('#' + this.apps_[nextIndex].id) as
-     HTMLElement)!.focus();
+    this.shadowRoot.getElementById('container')
+        ?.querySelector<HTMLElement>('#' + this.apps_[nextIndex]!.id)!.focus();
   }
 
   private addApp_(appInfo: AppInfo) {
-    const index = this.apps_.findIndex(app => app.id === appInfo.id);
-    if (index !== -1) {
-      this.set(`apps_.${index}`, appInfo);
-    } else {
-      this.push('apps_', appInfo);
+    const currIndex = this.apps_.findIndex(app => app.id === appInfo.id);
+    if (currIndex !== -1) {
+      this.apps_[currIndex] = appInfo;
+      this.requestUpdate();
+      return;
     }
+
+    const newIndex = this.apps_.findIndex(app => app.name > appInfo.name);
+    if (newIndex === -1) {
+      this.apps_.push(appInfo);
+      this.requestUpdate();
+      return;
+    }
+
+    this.apps_.splice(newIndex, 0, appInfo);
+    this.requestUpdate();
   }
 
   private removeApp_(appInfo: AppInfo) {
@@ -180,8 +207,21 @@ export class AppListElement extends PolymerElement {
     // the list of apps shown in current page, it's none of the concern
     // for this page to remove it.
     if (index !== -1) {
-      this.splice('apps_', index, 1);
+      this.apps_.splice(index, 1);
+      this.requestUpdate();
     }
+  }
+
+  private updateApp_(appInfo: AppInfo) {
+    const currIndex = this.apps_.findIndex(app => app.id === appInfo.id);
+    // If the app is found in the existing grid, remove it.
+    if (currIndex !== -1) {
+      this.apps_.splice(currIndex, 1);
+    }
+
+    // Add the current app in the correct place in the "grid" to
+    // show the app. This will call `requestUpdate()` under the hood.
+    this.addApp_(appInfo);
   }
 
   private closeCurrentAppMenu() {
@@ -199,6 +239,13 @@ export class AppListElement extends PolymerElement {
   private switchActiveMenu_(event: MenuHandleEvent) {
     this.closeCurrentAppMenu();
     this.selectedAppItem_ = event.detail.appItem;
+  }
+
+  protected notLocallyInstalledString_(installed: boolean, i18nString: string) {
+    if (!installed) {
+      return ' (' + i18nString + ')';
+    }
+    return '';
   }
 }
 

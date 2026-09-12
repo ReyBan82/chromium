@@ -2,19 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
+
 #include "base/android/jni_android.h"
+#include "base/android/jni_array.h"
 #include "base/android/jni_string.h"
 #include "base/android/scoped_java_ref.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "chrome/android/chrome_jni_headers/CustomTabsConnection_jni.h"
 #include "chrome/browser/android/customtabs/client_data_header_web_contents_observer.h"
 #include "chrome/browser/android/customtabs/detached_resource_request.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/profiles/profile_android.h"
 #include "content/public/common/referrer.h"
 #include "net/url_request/referrer_policy.h"
 #include "url/gurl.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/CustomTabsConnection_jni.h"
 
 namespace customtabs {
 
@@ -26,34 +30,26 @@ void NotifyClientOfDetachedRequestCompletion(
     int net_error) {
   JNIEnv* env = base::android::AttachCurrentThread();
   Java_CustomTabsConnection_notifyClientOfDetachedRequestCompletion(
-      env, session, base::android::ConvertUTF8ToJavaString(env, url.spec()),
-      net_error);
+      env, session, url.spec(), net_error);
 }
 
 }  // namespace
 
 static void JNI_CustomTabsConnection_CreateAndStartDetachedResourceRequest(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& profile,
-    const base::android::JavaParamRef<jobject>& session,
-    const base::android::JavaParamRef<jstring>& package_name,
-    const base::android::JavaParamRef<jstring>& url,
-    const base::android::JavaParamRef<jstring>& origin,
-    jint referrer_policy,
-    jint motivation) {
-  DCHECK(profile && url && origin);
-
-  Profile* native_profile = ProfileAndroid::FromProfileAndroid(profile);
+    Profile* native_profile,
+    const base::android::JavaRef<jobject>& session,
+    const std::string& package_name,
+    const std::string& url,
+    const std::string& origin,
+    int32_t referrer_policy,
+    int32_t motivation) {
   DCHECK(native_profile);
 
-  GURL native_url(base::android::ConvertJavaStringToUTF8(env, url));
-  GURL native_origin(base::android::ConvertJavaStringToUTF8(env, origin));
+  GURL native_url(url);
+  GURL native_origin(origin);
   DCHECK(native_url.is_valid());
   DCHECK(native_origin.is_valid());
-
-  std::string native_package;
-  if (!package_name.is_null())
-    base::android::ConvertJavaStringToUTF8(env, package_name, &native_package);
 
   // Java only knows about the blink referrer policy.
   net::ReferrerPolicy url_request_referrer_policy =
@@ -71,17 +67,19 @@ static void JNI_CustomTabsConnection_CreateAndStartDetachedResourceRequest(
 
   DetachedResourceRequest::CreateAndStart(
       native_profile, native_url, native_origin, url_request_referrer_policy,
-      request_motivation, native_package, std::move(cb));
+      request_motivation, package_name, std::move(cb));
 }
 
 static void JNI_CustomTabsConnection_SetClientDataHeader(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& jweb_contents,
-    const base::android::JavaParamRef<jstring>& jheader) {
+    const base::android::JavaRef<jobject>& jweb_contents,
+    const std::string& jheader) {
   auto* web_contents = content::WebContents::FromJavaWebContents(jweb_contents);
   ClientDataHeaderWebContentsObserver::CreateForWebContents(web_contents);
   ClientDataHeaderWebContentsObserver::FromWebContents(web_contents)
-      ->SetHeader(base::android::ConvertJavaStringToUTF8(jheader));
+      ->SetHeader(jheader);
 }
 
 }  // namespace customtabs
+
+DEFINE_JNI(CustomTabsConnection)

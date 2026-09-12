@@ -11,6 +11,7 @@
 <translation id="2987449669841041897">គេហទំព័រនេះមិនអាចស្នើសុំការអនុញ្ញាតរបស់អ្នកបានទេ</translation>
 <translation id="3036750288708366620"><ph name="BEGIN_LINK" />ទទួលជំនួយ<ph name="END_LINK" /></translation>
 <translation id="3773755127849930740"><ph name="BEGIN_LINK" />បើក​ប៊្លូធូស<ph name="END_LINK" />ដើម្បី​អនុញ្ញាត​ការផ្គូផ្គង</translation>
+<translation id="3878792656892132392"><ph name="APP_NAME" /> ត្រូវការ​ការអនុញ្ញាត ដើម្បី​តាមដាន​ដៃ​របស់អ្នក។</translation>
 <translation id="4915549754973153784"><ph name="BEGIN_LINK" />ទទួលជំនួយ<ph name="END_LINK" /> ខណៈពេលស្កេនរកឧបករណ៍…</translation>
 <translation id="4925793601605263825"><ph name="APP_NAME" /> ត្រូវការ​ការអនុញ្ញាតឱ្យ​ចូលប្រើ​មីក្រូហ្វូន​របស់អ្នក​សម្រាប់​គេហទំព័រនេះ។</translation>
 <translation id="5230560987958996918"><ph name="SITE" /> ចង់ស្កេនរក​ឧបករណ៍ប៊្លូធូស​នៅជិត។ បានរកឃើញ​ឧបករណ៍​ខាងក្រោម៖</translation>
@@ -23,6 +24,7 @@
 <translation id="6656545060687952787">Chrome ត្រូវការចូលប្រើទីតាំងដើម្បីស្កេនរកឧបករណ៍។ <ph name="BEGIN_LINK" />អាប់ដេតសិទ្ធិអនុញ្ញាត<ph name="END_LINK" /></translation>
 <translation id="7146360184282545445"><ph name="APP_NAME" /> ត្រូវការ​ការអនុញ្ញាតឱ្យ​ចូលប្រើកាមេរ៉ា​របស់អ្នក ដើម្បីបង្កើត​ផែនទី 3D នៃមជ្ឈដ្ឋានជុំវិញ​របស់អ្នក។</translation>
 <translation id="7624880197989616768"><ph name="BEGIN_LINK1" />ទទួលជំនួយ<ph name="END_LINK1" /> ឬ<ph name="BEGIN_LINK2" />ស្កេនសារឡើងវិញ<ph name="END_LINK2" /></translation>
+<translation id="7658239707568436148">បដិសេធ</translation>
 <translation id="781351614677332494"><ph name="APP_NAME" /> ត្រូវការ​សិទ្ធិចូលប្រើ​ទីតាំង​របស់អ្នក ដើម្បី​ចែករំលែក​ទីតាំង​របស់អ្នក​ជាមួយ​គេហទំព័រនេះ។</translation>
 <translation id="7884346424584885269">Chrome ត្រូវការការអនុញ្ញាត ដើម្បីស្កេនឧបករណ៍នៅជិត។ <ph name="BEGIN_LINK" />ធ្វើបច្ចុប្បន្នភាពការអនុញ្ញាត<ph name="END_LINK" />។</translation>
 <translation id="8368027906805972958">ឧបករណ៍ដែល​មិនស្គាល់ ឬ​មិនអាច​ប្រើបាន (<ph name="DEVICE_ID" />)</translation>

@@ -10,26 +10,40 @@
 
 namespace enterprise_signals::features {
 
-// Feature flag for new private SecureConnect functions exposing additional
-// device signals.
-BASE_DECLARE_FEATURE(kNewEvSignalsEnabled);
+// Allows the reporting of client certificates for managed users.
+BASE_DECLARE_FEATURE(kAllowClientCertificateReportingForUsers);
 
-// Feature parameters that can be used to turn off individual functions.
-extern const base::FeatureParam<bool> kDisableFileSystemInfo;
-extern const base::FeatureParam<bool> kDisableSettings;
-extern const base::FeatureParam<bool> kDisableAntiVirus;
-extern const base::FeatureParam<bool> kDisableHotfix;
+BASE_DECLARE_FEATURE(kProfileSignalsReportingEnabled);
+BASE_DECLARE_FEATURE(kBrowserSignalsReportingEnabled);
+BASE_DECLARE_FEATURE(kDetectedAgentSignalCollectionEnabled);
+BASE_DECLARE_FEATURE(kPolicyDataCollectionEnabled);
+BASE_DECLARE_FEATURE(kCertificateCollectionEnabled);
+BASE_DECLARE_FEATURE(kContentBindingVersioningEnabled);
 
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
-BASE_DECLARE_FEATURE(kDeviceSignalsPromoAfterSigninIntercept);
-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+// Signals reporting related feature parameters.
+extern const base::FeatureParam<bool> kTriggerOnCookieChange;
+extern const base::FeatureParam<base::TimeDelta>
+    kProfileSignalsReportingInterval;
 
-// Enum used to map a given function to its kill switch.
-enum class NewEvFunction { kFileSystemInfo, kSettings, kAntiVirus, kHotfix };
+// Returns true if additional device signals reporting for profile-level Chrome
+// reports has been enabled.
+bool IsProfileSignalsReportingEnabled();
+// Returns true if additional device signals reporting for browser-level Chrome
+// reports has been enabled.
+bool IsBrowserSignalsReportingEnabled();
+// Returns true if detected agent signal collection has been
+// enabled.
+bool IsDetectedAgentSignalCollectionEnabled();
+// Returns true if policy collection feature has been enabled.
+bool IsPolicyDataCollectionEnabled();
+// Returns true if certificate collection feature has been enabled.
+bool IsCertificateCollectionEnabled();
+// Returns true if content binding versioning feature has been enabled.
+bool IsContentBindingVersioningEnabled();
 
-// Returns true if the function pointed at by `new_ev_function` is considered
-// to be enabled based on the feature flag and its parameters.
-bool IsNewFunctionEnabled(NewEvFunction new_ev_function);
+// Feature flag for supporting the new private SecureConnect functions in
+// unaffiliated contexts via the consent flow.
+BASE_DECLARE_FEATURE(kNewEvSignalsUnaffiliatedEnabled);
 
 }  // namespace enterprise_signals::features
 

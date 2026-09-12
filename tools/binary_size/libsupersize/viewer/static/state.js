@@ -73,10 +73,11 @@ class UiState {
 class QueryParamUiState extends UiState {
   /**
    * @param {string} name
-   * @param {?function(string): StateValue} parser
    * @param {!StateValue} defaultValue
+   * @param {?function(string): StateValue} parser
+   * @param {boolean} isHash
    */
-  constructor(name, defaultValue, parser) {
+  constructor(name, defaultValue, parser, isHash) {
     super(defaultValue);
 
     /** @public @const {string} */
@@ -84,6 +85,9 @@ class QueryParamUiState extends UiState {
 
     /** @private @const {?function(string): StateValue} null = identity. */
     this.parser = parser;
+
+    /** @public @const {boolean} */
+    this.isHash = isHash;
 
     /** @public {string} */
     this.hidden = false;
@@ -124,8 +128,9 @@ class ElementUiState extends QueryParamUiState {
   /**
    * @param {string} name
    * @param {!HasValue} elt
+   * @param {boolean} isHash
    */
-  constructor(name, elt) {
+  constructor(name, elt, isHash) {
     let parser = null;
     let readElt = () => elt.value;
     let writeElt = (v) => {
@@ -178,7 +183,7 @@ class ElementUiState extends QueryParamUiState {
       throw new Error('Unknown element type.');
     }
 
-    super(name, readElt(), parser);
+    super(name, readElt(), parser, isHash);
 
     /** @private @const {function(): StateValue} */
     this.readElt = readElt;
@@ -222,13 +227,14 @@ class MainState {
      * Instantiation helper that also pushes object to |uiStates|.
      * @param {string} name
      * @param {?HasValue} elt
+     * @param {boolean=} isHash
      */
-    const newUiState = (name, elt) => {
+    const newUiState = (name, elt, isHash = false) => {
       if (!elt) {
         // Assume string value with defaultValue == ''.
-        this.uiStates.push(new QueryParamUiState(name, '', null));
+        this.uiStates.push(new QueryParamUiState(name, '', null, isHash));
       } else {
-        this.uiStates.push(new ElementUiState(name, elt));
+        this.uiStates.push(new ElementUiState(name, elt, isHash));
       }
       return this.uiStates[this.uiStates.length - 1];
     };
@@ -269,6 +275,9 @@ class MainState {
     /** @public @const {!ElementUiState} */
     this.stFlagFilter = newUiState(STATE_KEY.FLAG_FILTER, g_el.rnlFlagFilter);
 
+    /** @public @const {!QueryParamUiState} */
+    this.stFocus = newUiState(STATE_KEY.FOCUS, null, true);
+
     /** @private {boolean} */
     this.diffMode = false;
   }
@@ -279,18 +288,45 @@ class MainState {
    * @private
    */
   toString() {
-    const params = new URLSearchParams();
+    const queryParams = new URLSearchParams();
+    const hashParams = new URLSearchParams();
     for (const st of this.uiStates) {
-      st.writeToSearchParams(params);
+      st.writeToSearchParams(st.isHash ? hashParams : queryParams);
     }
-    const queryString = params.toString();
-    return queryString.length > 0 ? `?${queryString}` : '';
+    const queryString = queryParams.toString();
+    const hashString = hashParams.toString();
+    return (queryString.length > 0 ? `?${queryString}` : '') +
+        (hashString.length > 0 ? `#${hashString}` : '');
   }
 
   /** @private */
   updateUrlParams() {
     // Passing empty `state` leads to no change, so use `location.pathname`.
     history.replaceState(null, null, this.toString() || location.pathname);
+  }
+
+  /**
+   * @return {?function(string): boolean}
+   * @public
+   */
+  getFilter() {
+    const getRegExpOrNull = (s) => {
+      if (s) {
+        try {
+          return new RegExp(s);
+        } catch (err) {
+        }
+      }
+      return null;
+    };
+
+    const includeRE = getRegExpOrNull(this.stInclude.get());
+    const excludeRE = getRegExpOrNull(this.stExclude.get());
+    if (includeRE) {
+      return excludeRE ? (s) => includeRE.test(s) && !excludeRE.test(s) :
+                         (s) => includeRE.test(s);
+    }
+    return excludeRE ? (s) => !excludeRE.test(s) : null;
   }
 
   /**
@@ -337,9 +373,10 @@ class MainState {
 
   /** @public */
   init() {
-    const params = new URLSearchParams(location.search.slice(1));
+    const queryParams = new URLSearchParams(location.search.slice(1));
+    const hashParams = new URLSearchParams(location.hash.slice(1));
     for (const st of this.uiStates) {
-      st.readFromSearchParams(params);
+      st.readFromSearchParams(st.isHash ? hashParams : queryParams);
     }
     // At this point it's possible to update the URL to fix mistakes and
     // canonicalize (e.g., param ordering). However, we choose to NOT do this
@@ -370,6 +407,8 @@ class MainState {
       }
       this.updateUrlParams();
     });
+
+    this.stFocus.addObserver(() => this.updateUrlParams());
   }
 }
 
@@ -456,38 +495,56 @@ function _startListeners() {
 }
 
 function _makeIconTemplateGetter() {
-  const getIcon = (q) => assertNotNull(g_el.divIcons.querySelector(q));
+  const getSymbolIcon = (q) => assertNotNull(g_el.divIcons.querySelector(q));
 
   /**
    * @type {{[type:string]: SVGSVGElement}} Icon elements
    * that correspond to each symbol type.
    */
   const symbolIcons = {
-    D: getIcon('.foldericon'),
-    G: getIcon('.groupicon'),
-    J: getIcon('.javaclassicon'),
-    F: getIcon('.fileicon'),
-    b: getIcon('.bssicon'),
-    d: getIcon('.dataicon'),
-    r: getIcon('.readonlyicon'),
-    t: getIcon('.codeicon'),
-    R: getIcon('.relroicon'),
-    x: getIcon('.dexicon'),
-    m: getIcon('.dexmethodicon'),
-    p: getIcon('.localpakicon'),
-    P: getIcon('.nonlocalpakicon'),
-    o: getIcon('.othericon'),  // used as default icon
+    D: getSymbolIcon('.foldericon'),
+    G: getSymbolIcon('.groupicon'),
+    J: getSymbolIcon('.javaclassicon'),
+    F: getSymbolIcon('.fileicon'),
+    b: getSymbolIcon('.bssicon'),
+    d: getSymbolIcon('.dataicon'),
+    r: getSymbolIcon('.readonlyicon'),
+    t: getSymbolIcon('.codeicon'),
+    R: getSymbolIcon('.relroicon'),
+    x: getSymbolIcon('.dexothericon'),
+    m: getSymbolIcon('.dexmethodicon'),
+    p: getSymbolIcon('.localpakicon'),
+    P: getSymbolIcon('.nonlocalpakicon'),
+    a: getSymbolIcon('.arscicon'),
+    o: getSymbolIcon('.othericon'),  // used as default icon
     '*': null,
   };
 
-  const getDiffStatusIcons = (q) => {
+  const getDiffStatusIcon = (q) => {
     return assertNotNull(g_el.divDiffStatusIcons.querySelector(q));
   };
   const statusIcons = {
-    added: getDiffStatusIcons('.addedicon'),
-    removed: getDiffStatusIcons('.removedicon'),
-    changed: getDiffStatusIcons('.changedicon'),
-    unchanged: getDiffStatusIcons('.unchangedicon'),
+    added: getDiffStatusIcon('.addedicon'),
+    removed: getDiffStatusIcon('.removedicon'),
+    changed: getDiffStatusIcon('.changedicon'),
+    unchanged: getDiffStatusIcon('.unchangedicon'),
+  };
+
+  const getMiscIcon = (q) => {
+    return assertNotNull(g_el.divMiscIcons.querySelector(q))
+  };
+  const metricsIcons = {
+    group: getSymbolIcon('.groupicon'),  // Reuse.
+    elf: getMiscIcon('.elficon'),
+    dex: getMiscIcon('.dexicon'),
+    arsc: getSymbolIcon('.arscicon'),  // Reuse.
+    metrics: getMiscIcon('.metricsicon'),
+    other: getSymbolIcon('.othericon'),  // Reuse.
+  };
+
+  const metadataIcons = {
+    root: getMiscIcon('.metadataicon'),
+    group: getSymbolIcon('.groupicon'),  // Reuse.
   };
 
   /** @type {Map<string, {color:string, description:string}>} */
@@ -563,15 +620,49 @@ function _makeIconTemplateGetter() {
     return statusIcons[key].cloneNode(true);
   }
 
+  /**
+   * @param {string} key
+   * @return {SVGSVGElement}
+   */
+  function getMetricsIconTemplate(key) {
+    return metricsIcons[key].cloneNode(true);
+  }
+
+  /**
+   * @param {string} key
+   * @return {SVGSVGElement}
+   */
+  function getMetadataIconTemplate(key) {
+    return metadataIcons[key].cloneNode(true);
+  }
+
   return {
     getIconTemplate,
     getIconTemplateWithFill,
     getIconStyle,
-    getDiffStatusTemplate
+    getDiffStatusTemplate,
+    getMetricsIconTemplate,
+    getMetadataIconTemplate,
   };
 }
 
 function _makeSizeTextGetter() {
+  /**
+   * @param {number} bytes
+   * @return {!DocumentFragment}
+   */
+  function makeBytesElement(bytes) {
+    const unit = /** @type {string} */ (state.stByteUnit.get());
+    const suffix = _BYTE_UNITS[unit];
+    // Format |bytes| as a number with 2 digits after the decimal point
+    const text = formatNumber(bytes / suffix, 2, 2);
+    const textNode = document.createTextNode(`${text} `);
+    // Display the suffix with a smaller font
+    const suffixElement = dom.textElement('small', unit);
+
+    return dom.createFragment([textNode, suffixElement]);
+  }
+
   /**
    * Create the contents for the size element of a tree node.
    * The unit to use is selected from the current state.
@@ -607,21 +698,19 @@ function _makeSizeTextGetter() {
         descriptionToks.push(`(${before} → ${after})`);  // '→' is '\u2192'.
       }
       descriptionToks.push(`${formatNumber(bytes)} bytes`);
-      if (node.numAliases && node.numAliases > 1) {
-        descriptionToks.push(`for 1 of ${node.numAliases} aliases`);
+      const beforeNumAliases = node.beforeNumAliases || node.numAliases || 1;
+      const afterNumAliases = node.afterNumAliases || node.numAliases || 1;
+      if (beforeNumAliases > 1 || afterNumAliases > 1) {
+        if (beforeNumAliases === afterNumAliases) {
+          descriptionToks.push(`for 1 of ${afterNumAliases} aliases`);
+        } else {
+          descriptionToks.push(`for 1 of ${beforeNumAliases} → ${afterNumAliases} aliases`);
+        }
       }
-
-      const unit = /** @type {string} */ (state.stByteUnit.get());
-      const suffix = _BYTE_UNITS[unit];
-      // Format |bytes| as a number with 2 digits after the decimal point
-      const text = formatNumber(bytes / suffix, 2, 2);
-      const textNode = document.createTextNode(`${text} `);
-      // Display the suffix with a smaller font
-      const suffixElement = dom.textElement('small', unit);
 
       return {
         description: descriptionToks.join(' '),
-        element: dom.createFragment([textNode, suffixElement]),
+        element: makeBytesElement(bytes),
         value: bytes,
       };
     }
@@ -631,9 +720,10 @@ function _makeSizeTextGetter() {
    * Set classes on an element based on the size it represents.
    * @param {HTMLElement} sizeElement
    * @param {number} value
+   * @param {boolean} isCount Whether |value| is count (true) or byte (false).
    */
-  function setSizeClasses(sizeElement, value) {
-    const cutOff = state.stMethodCount.get() ? 10 : 50000;
+  function setSizeClasses(sizeElement, value, isCount) {
+    const cutOff = isCount ? 10 : 50000;
     const shouldHaveStyle = state.getDiffMode() && Math.abs(value) > cutOff;
 
     if (shouldHaveStyle) {
@@ -649,7 +739,7 @@ function _makeSizeTextGetter() {
     }
   }
 
-  return {getSizeContents, setSizeClasses};
+  return {makeBytesElement, getSizeContents, setSizeClasses};
 }
 
 /** Global UI State. */
@@ -661,7 +751,10 @@ const {
   getIconTemplate,
   getIconTemplateWithFill,
   getIconStyle,
-  getDiffStatusTemplate
+  getDiffStatusTemplate,
+  getMetricsIconTemplate,
+  getMetadataIconTemplate,
 } = _makeIconTemplateGetter();
-const {getSizeContents, setSizeClasses} = _makeSizeTextGetter();
+const {makeBytesElement, getSizeContents, setSizeClasses} =
+    _makeSizeTextGetter();
 _startListeners();

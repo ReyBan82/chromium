@@ -4,15 +4,20 @@
 
 #include "content/public/test/test_web_ui.h"
 
+#include <string_view>
 #include <utility>
 
 #include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
 #include "base/no_destructor.h"
-#include "base/notreached.h"
-#include "base/strings/string_piece.h"
+#include "base/notimplemented.h"
+#include "content/browser/renderer_host/render_frame_host_impl.h"
+#include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_ui_browser_interface_broker_registry.h"
 #include "content/public/browser/web_ui_controller.h"
 #include "content/public/browser/web_ui_message_handler.h"
+#include "content/public/browser/webui_config.h"
+#include "content/public/browser/webui_config_map.h"
 
 namespace content {
 
@@ -27,7 +32,7 @@ void TestWebUI::ClearTrackedCalls() {
 }
 
 void TestWebUI::HandleReceivedMessage(const std::string& handler_name,
-                                      const base::Value::List& args) {
+                                      const base::ListValue& args) {
   const auto callbacks_map_it = message_callbacks_.find(handler_name);
   if (callbacks_map_it != message_callbacks_.end()) {
     // Create a copy of the callbacks before running them. Without this, it
@@ -48,6 +53,10 @@ WebUIController* TestWebUI::GetController() {
   return controller_.get();
 }
 
+RenderFrameHost* TestWebUI::GetRenderFrameHost() {
+  return render_frame_host_.get();
+}
+
 void TestWebUI::SetController(std::unique_ptr<WebUIController> controller) {
   controller_ = std::move(controller);
 }
@@ -56,15 +65,19 @@ float TestWebUI::GetDeviceScaleFactor() {
   return 1.0f;
 }
 
+void TestWebUI::OverrideTitle(const std::u16string& title) {
+  temp_string_ = title;
+}
+
 const std::u16string& TestWebUI::GetOverriddenTitle() {
   return temp_string_;
 }
 
-int TestWebUI::GetBindings() {
+BindingsPolicySet TestWebUI::GetBindings() {
   return bindings_;
 }
 
-void TestWebUI::SetBindings(int bindings) {
+void TestWebUI::SetBindings(BindingsPolicySet bindings) {
   bindings_ = bindings;
 }
 
@@ -86,29 +99,42 @@ void TestWebUI::AddMessageHandler(
   handlers_.push_back(std::move(handler));
 }
 
-void TestWebUI::RegisterMessageCallback(base::StringPiece message,
+void TestWebUI::RegisterMessageCallback(std::string_view message,
                                         MessageCallback callback) {
   message_callbacks_[static_cast<std::string>(message)].push_back(
       std::move(callback));
+}
+
+void TestWebUI::ProcessWebUIMessage(const GURL& source_url,
+                                    const std::string& message,
+                                    base::ListValue args) {
+  auto callback_entry = message_callbacks_.find(message);
+  if (callback_entry == message_callbacks_.end()) {
+    return;
+  }
+
+  for (auto& callback : callback_entry->second) {
+    callback.Run(args);
+  }
 }
 
 bool TestWebUI::CanCallJavascript() {
   return true;
 }
 
-void TestWebUI::CallJavascriptFunctionUnsafe(base::StringPiece function_name) {
-  call_data_.push_back(base::WrapUnique(new CallData(function_name)));
-  OnJavascriptCall(*call_data_.back());
-}
-
 void TestWebUI::CallJavascriptFunctionUnsafe(
-    base::StringPiece function_name,
+    std::string_view function_name,
     base::span<const base::ValueView> args) {
   call_data_.push_back(base::WrapUnique(new CallData(function_name)));
   for (const auto& arg : args) {
     call_data_.back()->AppendArgument(arg.ToValue());
   }
   OnJavascriptCall(*call_data_.back());
+}
+
+WebUIConfig* TestWebUI::GetWebUIConfig() {
+  return WebUIConfigMap::GetInstance().GetConfig(
+      web_contents_->GetBrowserContext(), web_contents_->GetLastCommittedURL());
 }
 
 void TestWebUI::OnJavascriptCall(const CallData& call_data) {
@@ -121,14 +147,14 @@ TestWebUI::GetHandlersForTesting() {
   return &handlers_;
 }
 
-TestWebUI::CallData::CallData(base::StringPiece function_name)
+TestWebUI::CallData::CallData(std::string_view function_name)
     : function_name_(function_name.data(), function_name.size()) {}
 
 TestWebUI::CallData::~CallData() {
 }
 
 void TestWebUI::CallData::AppendArgument(base::Value arg) {
-  args_.push_back(std::move(arg));
+  args_.Append(std::move(arg));
 }
 
 }  // namespace content

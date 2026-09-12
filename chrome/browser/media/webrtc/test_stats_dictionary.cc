@@ -5,14 +5,14 @@
 #include "chrome/browser/media/webrtc/test_stats_dictionary.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/check.h"
 #include "base/json/json_writer.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace content {
 
-TestStatsReportDictionary::TestStatsReportDictionary(base::Value::Dict report)
+TestStatsReportDictionary::TestStatsReportDictionary(base::DictValue report)
     : report_(std::move(report)) {}
 
 TestStatsReportDictionary::~TestStatsReportDictionary() = default;
@@ -20,7 +20,7 @@ TestStatsReportDictionary::~TestStatsReportDictionary() = default;
 void TestStatsReportDictionary::ForEach(
     std::function<void(const TestStatsDictionary&)> iteration) {
   for (auto it : report_) {
-    const base::Value::Dict* it_value = it.second.GetIfDict();
+    const base::DictValue* it_value = it.second.GetIfDict();
     CHECK(it_value);
     iteration(TestStatsDictionary(this, it_value));
   }
@@ -38,7 +38,7 @@ std::vector<TestStatsDictionary> TestStatsReportDictionary::Filter(
 
 std::unique_ptr<TestStatsDictionary> TestStatsReportDictionary::Get(
     const std::string& id) {
-  const base::Value::Dict* dictionary = report_.FindDict(id);
+  const base::DictValue* dictionary = report_.FindDict(id);
   if (!dictionary)
     return nullptr;
   return std::make_unique<TestStatsDictionary>(this, dictionary);
@@ -56,7 +56,7 @@ std::vector<TestStatsDictionary> TestStatsReportDictionary::GetByType(
 }
 
 TestStatsDictionary::TestStatsDictionary(TestStatsReportDictionary* report,
-                                         const base::Value::Dict* stats)
+                                         const base::DictValue* stats)
     : report_(report), stats_(stats) {
   CHECK(report_);
   CHECK(stats_);
@@ -65,8 +65,7 @@ TestStatsDictionary::TestStatsDictionary(TestStatsReportDictionary* report,
 TestStatsDictionary::TestStatsDictionary(
     const TestStatsDictionary& other) = default;
 
-TestStatsDictionary::~TestStatsDictionary() {
-}
+TestStatsDictionary::~TestStatsDictionary() = default;
 
 bool TestStatsDictionary::IsBoolean(const std::string& key) const {
   bool value;
@@ -138,7 +137,7 @@ std::vector<std::string> TestStatsDictionary::GetSequenceString(
 
 bool TestStatsDictionary::GetBoolean(
     const std::string& key, bool* out) const {
-  if (absl::optional<bool> value = stats_->FindBool(key)) {
+  if (std::optional<bool> value = stats_->FindBool(key)) {
     *out = *value;
     return true;
   }
@@ -147,7 +146,7 @@ bool TestStatsDictionary::GetBoolean(
 
 bool TestStatsDictionary::GetNumber(
     const std::string& key, double* out) const {
-  if (absl::optional<double> value = stats_->FindDouble(key)) {
+  if (std::optional<double> value = stats_->FindDouble(key)) {
     *out = *value;
     return true;
   }
@@ -157,12 +156,12 @@ bool TestStatsDictionary::GetNumber(
 bool TestStatsDictionary::GetSequenceBoolean(
     const std::string& key,
     std::vector<bool>* out) const {
-  const base::Value::List* list = stats_->FindList(key);
+  const base::ListValue* list = stats_->FindList(key);
   if (!list)
     return false;
   std::vector<bool> sequence;
   for (const base::Value& arg : *list) {
-    absl::optional<bool> bool_value = arg.GetIfBool();
+    std::optional<bool> bool_value = arg.GetIfBool();
     if (!bool_value.has_value())
       return false;
     sequence.push_back(*bool_value);
@@ -174,13 +173,13 @@ bool TestStatsDictionary::GetSequenceBoolean(
 bool TestStatsDictionary::GetSequenceNumber(
     const std::string& key,
     std::vector<double>* out) const {
-  const base::Value::List* number_sequence = stats_->FindList(key);
+  const base::ListValue* number_sequence = stats_->FindList(key);
   if (!number_sequence)
     return false;
 
   out->clear();
   for (const base::Value& element : *number_sequence) {
-    absl::optional<double> double_value = element.GetIfDouble();
+    std::optional<double> double_value = element.GetIfDouble();
     if (!double_value)
       return false;
 
@@ -193,7 +192,7 @@ bool TestStatsDictionary::GetSequenceNumber(
 bool TestStatsDictionary::GetSequenceString(
     const std::string& key,
     std::vector<std::string>* out) const {
-  const base::Value::List* list = stats_->FindList(key);
+  const base::ListValue* list = stats_->FindList(key);
   if (!list)
     return false;
   std::vector<std::string> sequence;

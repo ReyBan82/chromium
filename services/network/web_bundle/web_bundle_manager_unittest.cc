@@ -4,15 +4,16 @@
 
 #include "services/network/web_bundle/web_bundle_manager.h"
 
+#include "base/functional/callback_helpers.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/task_environment.h"
 #include "base/unguessable_token.h"
 #include "components/web_package/web_bundle_builder.h"
+#include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/system/data_pipe_utils.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "services/network/public/cpp/resource_request.h"
-#include "services/network/public/mojom/devtools_observer.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/web_bundle_handle.mojom.h"
 #include "services/network/test/test_url_loader_client.h"
@@ -51,7 +52,7 @@ class TestWebBundleHandle : public mojom::WebBundleHandle {
     web_bundle_handles_.Add(this, std::move(receiver));
   }
 
-  const absl::optional<std::pair<mojom::WebBundleErrorType, std::string>>&
+  const std::optional<std::pair<mojom::WebBundleErrorType, std::string>>&
   last_bundle_error() const {
     return last_bundle_error_;
   }
@@ -79,7 +80,7 @@ class TestWebBundleHandle : public mojom::WebBundleHandle {
   void OnWebBundleLoadFinished(bool success) override {}
 
  private:
-  absl::optional<std::pair<mojom::WebBundleErrorType, std::string>>
+  std::optional<std::pair<mojom::WebBundleErrorType, std::string>>
       last_bundle_error_;
   base::OnceClosure quit_closure_for_bundle_error_;
 
@@ -99,9 +100,7 @@ CreateWebBundleLoaderFactory(WebBundleManager& manager, int32_t process_id) {
   base::WeakPtr<WebBundleURLLoaderFactory> factory =
       manager.CreateWebBundleURLLoaderFactory(
           GURL(kBundleUrl), create_params, process_id,
-          /*devtools_observer=*/mojo::PendingRemote<mojom::DevToolsObserver>(),
-          /*devtools_request_id=*/absl::nullopt, CrossOriginEmbedderPolicy(),
-          /*coep_reporter=*/nullptr);
+          CrossOriginEmbedderPolicy(), mojo::NullRemote());
 
   return std::forward_as_tuple(std::move(factory), std::move(handle));
 }
@@ -173,10 +172,8 @@ TEST_F(WebBundleManagerTest, NoFactoryExistsForDifferentProcessId) {
                                                       std::move(handle));
 
   auto factory = manager.CreateWebBundleURLLoaderFactory(
-      GURL(kBundleUrl), create_params, process_id1,
-      /*devtools_observer=*/mojo::PendingRemote<mojom::DevToolsObserver>(),
-      /*devtools_request_id=*/absl::nullopt, CrossOriginEmbedderPolicy(),
-      /*coep_reporter=*/nullptr);
+      GURL(kBundleUrl), create_params, process_id1, CrossOriginEmbedderPolicy(),
+      mojo::NullRemote());
   ASSERT_TRUE(factory);
 
   ResourceRequest::WebBundleTokenParams find_params(GURL(kBundleUrl), token,
@@ -195,10 +192,8 @@ TEST_F(WebBundleManagerTest, UseProcesIdInTokenParamsForRequestsFromBrowser) {
                                                       std::move(handle));
 
   auto factory = manager.CreateWebBundleURLLoaderFactory(
-      GURL(kBundleUrl), create_params, process_id1,
-      /*devtools_observer=*/mojo::PendingRemote<mojom::DevToolsObserver>(),
-      /*devtools_request_id=*/absl::nullopt, CrossOriginEmbedderPolicy(),
-      /*coep_reporter=*/nullptr);
+      GURL(kBundleUrl), create_params, process_id1, CrossOriginEmbedderPolicy(),
+      mojo::NullRemote());
   ASSERT_TRUE(factory);
 
   ResourceRequest::WebBundleTokenParams find_params1(GURL(kBundleUrl), token,
@@ -227,9 +222,7 @@ TEST_F(WebBundleManagerTest, RemoveFactoryWhenDisconnected) {
 
     auto factory = manager.CreateWebBundleURLLoaderFactory(
         GURL(kBundleUrl), create_params, process_id1,
-        /*devtools_observer=*/mojo::PendingRemote<mojom::DevToolsObserver>(),
-        /*devtools_request_id=*/absl::nullopt, CrossOriginEmbedderPolicy(),
-        /*coep_reporter=*/nullptr);
+        CrossOriginEmbedderPolicy(), mojo::NullRemote());
     ASSERT_TRUE(factory);
     ASSERT_TRUE(
         GetWebBundleURLLoaderFactory(manager, find_params, process_id1));
@@ -270,7 +263,7 @@ TEST_F(WebBundleManagerTest,
   // manually here, as network::URLLoaderFactory does, and verify that the
   // subresource request is correctly loaded.
   //
-  // TODO(crbug.com/1158709): Find a better way to test this scenario.
+  // TODO(crbug.com/40161416): Find a better way to test this scenario.
 
   WebBundleManager manager;
 
@@ -315,10 +308,8 @@ TEST_F(WebBundleManagerTest,
       token_params.handle.InitWithNewPipeAndPassReceiver();
 
   auto factory = manager.CreateWebBundleURLLoaderFactory(
-      GURL(kBundleUrl), token_params, process_id1,
-      /*devtools_observer=*/mojo::PendingRemote<mojom::DevToolsObserver>(),
-      /*devtools_request_id=*/absl::nullopt, CrossOriginEmbedderPolicy(),
-      /*coep_reporter=*/nullptr);
+      GURL(kBundleUrl), token_params, process_id1, CrossOriginEmbedderPolicy(),
+      mojo::NullRemote());
 
   // Then, simulate that the bundle is loaded from the network, calling
   // SetBundleStream manually.
@@ -336,7 +327,7 @@ TEST_F(WebBundleManagerTest,
     req.client->RunUntilComplete();
 
     EXPECT_EQ(net::OK, req.client->completion_status().error_code);
-    EXPECT_EQ(req.client->response_head()->web_bundle_url, GURL(kBundleUrl));
+    EXPECT_TRUE(req.client->response_head()->is_web_bundle_inner_response);
     std::string body;
     EXPECT_TRUE(
         mojo::BlockingCopyToString(req.client->response_body_release(), &body));
@@ -573,7 +564,7 @@ TEST_F(WebBundleManagerTest, MemoryQuota_ProcessIsolation) {
   // Confirm that the subresource is correctly loaded.
   client1_1->RunUntilComplete();
   EXPECT_EQ(net::OK, client1_1->completion_status().error_code);
-  EXPECT_EQ(client1_1->response_head()->web_bundle_url, GURL(kBundleUrl));
+  EXPECT_TRUE(client1_1->response_head()->is_web_bundle_inner_response);
   std::string body1_1;
   EXPECT_TRUE(
       mojo::BlockingCopyToString(client1_1->response_body_release(), &body1_1));
@@ -596,7 +587,7 @@ TEST_F(WebBundleManagerTest, MemoryQuota_ProcessIsolation) {
   // Confirm that the subresource is correctly loaded.
   client1_2->RunUntilComplete();
   EXPECT_EQ(net::OK, client1_2->completion_status().error_code);
-  EXPECT_EQ(client1_2->response_head()->web_bundle_url, GURL(kBundleUrl));
+  EXPECT_TRUE(client1_2->response_head()->is_web_bundle_inner_response);
   std::string body1_2;
   EXPECT_TRUE(
       mojo::BlockingCopyToString(client1_2->response_body_release(), &body1_2));
@@ -642,7 +633,7 @@ TEST_F(WebBundleManagerTest, MemoryQuota_ProcessIsolation) {
   // Confirm that the subresource is correctly loaded.
   client2->RunUntilComplete();
   EXPECT_EQ(net::OK, client2->completion_status().error_code);
-  EXPECT_EQ(client2->response_head()->web_bundle_url, GURL(kBundleUrl));
+  EXPECT_TRUE(client2->response_head()->is_web_bundle_inner_response);
   std::string body2;
   EXPECT_TRUE(
       mojo::BlockingCopyToString(client2->response_body_release(), &body2));
@@ -685,9 +676,7 @@ TEST_F(WebBundleManagerTest, WebBundleURLRedirection) {
   base::WeakPtr<WebBundleURLLoaderFactory> factory =
       manager.CreateWebBundleURLLoaderFactory(
           redirected_bundle_url, create_params, process_id1,
-          /*devtools_observer=*/{},
-          /*devtools_request_id=*/absl::nullopt, CrossOriginEmbedderPolicy(),
-          /*coep_reporter=*/nullptr);
+          CrossOriginEmbedderPolicy(), mojo::NullRemote());
 
   // TestWebBundleHandle must receive an error.
   handle->RunUntilBundleError();
@@ -705,6 +694,81 @@ TEST_F(WebBundleManagerTest, WebBundleURLRedirection) {
   client->RunUntilComplete();
   EXPECT_EQ(net::ERR_INVALID_WEB_BUNDLE,
             client->completion_status().error_code);
+}
+
+// Regression test for crbug.com/544415098.
+//
+// When a WebBundle request is redirected, the factory is created in an error
+// state. In this state, StartLoader(loader1) fails synchronously and deletes
+// loader1, which in turn removes loader1 from the pending loaders list.
+//
+// We queue multiple requests (request1 and request2) to verify that an error
+// during request1's processing does not prevent request2 from being handled
+// properly.
+TEST_F(WebBundleManagerTest, WebBundleURLRedirectionEarlySubresourceRequest) {
+  WebBundleManager manager;
+  base::UnguessableToken token = base::UnguessableToken::Create();
+  mojo::PendingRemote<mojom::WebBundleHandle> handle_remote;
+  auto handle = std::make_unique<TestWebBundleHandle>(
+      handle_remote.InitWithNewPipeAndPassReceiver());
+  ResourceRequest::WebBundleTokenParams create_params(GURL(kBundleUrl), token,
+                                                      std::move(handle_remote));
+
+  // Subresource requests arrive earlier than the bundle request.
+  //
+  // The 1st request.
+  mojo::Remote<network::mojom::URLLoader> loader1;
+  auto client1 = std::make_unique<network::TestURLLoaderClient>();
+  network::ResourceRequest request1;
+  request1.url = GURL(kResourceUrl);
+  request1.method = "GET";
+  request1.request_initiator = url::Origin::Create(GURL(kInitiatorUrl));
+  ResourceRequest::WebBundleTokenParams subresource_params1(
+      GURL(kBundleUrl), token, mojo::PendingRemote<mojom::WebBundleHandle>());
+  request1.web_bundle_token_params = subresource_params1;
+
+  manager.StartSubresourceRequest(
+      loader1.BindNewPipeAndPassReceiver(), request1, client1->CreateRemote(),
+      process_id1, mojo::Remote<mojom::TrustedHeaderClient>());
+
+  // The 2nd request.
+  mojo::Remote<network::mojom::URLLoader> loader2;
+  auto client2 = std::make_unique<network::TestURLLoaderClient>();
+  network::ResourceRequest request2;
+  request2.url = GURL("https://example.com/subresource2.js");
+  request2.method = "GET";
+  request2.request_initiator = url::Origin::Create(GURL(kInitiatorUrl));
+  ResourceRequest::WebBundleTokenParams subresource_params2(
+      GURL(kBundleUrl), token, mojo::PendingRemote<mojom::WebBundleHandle>());
+  request2.web_bundle_token_params = subresource_params2;
+
+  manager.StartSubresourceRequest(
+      loader2.BindNewPipeAndPassReceiver(), request2, client2->CreateRemote(),
+      process_id1, mojo::Remote<mojom::TrustedHeaderClient>());
+
+  // Create a WebBundleURLLoaderFactory where bundle request URL is different
+  // from WebBundleTokenParams::bundle_url. This triggers an error factory that
+  // synchronously fails early subresource loaders during StartLoader iteration.
+  GURL redirected_bundle_url("https://redirected.example.com/bundle.wbn");
+  base::WeakPtr<WebBundleURLLoaderFactory> factory =
+      manager.CreateWebBundleURLLoaderFactory(
+          redirected_bundle_url, create_params, process_id1,
+          CrossOriginEmbedderPolicy(), mojo::NullRemote());
+
+  handle->RunUntilBundleError();
+  ASSERT_TRUE(handle->last_bundle_error().has_value());
+  EXPECT_EQ(handle->last_bundle_error()->first,
+            mojom::WebBundleErrorType::kWebBundleRedirected);
+
+  client1->RunUntilComplete();
+  EXPECT_EQ(net::ERR_INVALID_WEB_BUNDLE,
+            client1->completion_status().error_code);
+
+  // Verify that the second subresource request also completes safely without
+  // crashing or hanging.
+  client2->RunUntilComplete();
+  EXPECT_EQ(net::ERR_INVALID_WEB_BUNDLE,
+            client2->completion_status().error_code);
 }
 
 }  // namespace network

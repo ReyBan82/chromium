@@ -15,8 +15,10 @@
 #include "absl/strings/internal/cord_rep_consume.h"
 
 #include <array>
+#include <cstddef>
 #include <utility>
 
+#include "absl/base/config.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
 #include "absl/strings/internal/cord_internal.h"
@@ -42,7 +44,8 @@ CordRep* ClipSubstring(CordRepSubstring* substring) {
 
 }  // namespace
 
-void Consume(CordRep* rep, ConsumeFn consume_fn) {
+void Consume(CordRep* rep,
+             FunctionRef<void(CordRep*, size_t, size_t)> consume_fn) {
   size_t offset = 0;
   size_t length = rep->length;
 
@@ -53,8 +56,9 @@ void Consume(CordRep* rep, ConsumeFn consume_fn) {
   consume_fn(rep, offset, length);
 }
 
-void ReverseConsume(CordRep* rep, ConsumeFn consume_fn) {
-  return Consume(rep, std::move(consume_fn));
+void ReverseConsume(CordRep* rep,
+                    FunctionRef<void(CordRep*, size_t, size_t)> consume_fn) {
+  return Consume(rep, consume_fn);
 }
 
 }  // namespace cord_internal

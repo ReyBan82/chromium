@@ -5,41 +5,61 @@
 #include "chrome/browser/ui/passwords/credential_manager_dialog_controller_impl.h"
 
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sync/sync_service_factory.h"
 #include "chrome/browser/ui/passwords/password_dialog_prompts.h"
 #include "chrome/browser/ui/passwords/passwords_model_delegate.h"
 #include "chrome/browser/ui/passwords/ui_utils.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/browser/webauthn/credential_sorter.h"
+#include "chrome/grit/branded_strings.h"
 #include "chrome/grit/generated_resources.h"
-#include "components/device_reauth/biometric_authenticator.h"
+#include "components/password_manager/core/browser/features/password_features.h"
 #include "components/password_manager/core/browser/password_bubble_experiment.h"
 #include "components/password_manager/core/browser/password_feature_manager.h"
 #include "components/password_manager/core/browser/password_form.h"
 #include "components/password_manager/core/browser/password_manager_metrics_util.h"
+#include "components/password_manager/core/browser/password_sync_util.h"
 #include "components/password_manager/core/browser/password_ui_utils.h"
 #include "components/password_manager/core/common/password_manager_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "components/strings/grit/components_strings.h"
-#include "components/sync/driver/sync_service.h"
+#include "components/sync/service/sync_service.h"
+#include "components/url_formatter/elide_url.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "url/origin.h"
 
 namespace {
 
-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
 std::u16string GetAuthenticationMessage(PasswordsModelDelegate* delegate) {
-  if (!delegate || !delegate->GetWebContents())
+  std::u16string message;
+  if (!delegate || !delegate->GetWebContents()) {
     return u"";
+  }
   const std::u16string origin = base::UTF8ToUTF16(
       password_manager::GetShownOrigin(delegate->GetWebContents()
                                            ->GetPrimaryMainFrame()
                                            ->GetLastCommittedOrigin()));
-  return l10n_util::GetStringFUTF16(IDS_PASSWORD_MANAGER_FILLING_REAUTH,
-                                    origin);
+  message =
+      l10n_util::GetStringFUTF16(IDS_PASSWORD_MANAGER_FILLING_REAUTH, origin);
+  return message;
 }
-#endif
+#endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+
+struct PasswordFormTraits {
+  static std::u16string GetAccountName(
+      const std::unique_ptr<password_manager::PasswordForm>& form) {
+    return form->username_value;
+  }
+
+  static base::Time GetLastUsedTime(
+      const std::unique_ptr<password_manager::PasswordForm>& form) {
+    return form->date_last_used;
+  }
+};
 
 }  // namespace
 
@@ -57,22 +77,28 @@ CredentialManagerDialogControllerImpl::
 }
 
 void CredentialManagerDialogControllerImpl::ShowAccountChooser(
-    AccountChooserPrompt* dialog,
+    std::unique_ptr<AccountChooserPrompt> dialog,
     std::vector<std::unique_ptr<password_manager::PasswordForm>> locals) {
   DCHECK(!account_chooser_dialog_);
   DCHECK(!autosignin_dialog_);
   DCHECK(dialog);
-  local_credentials_.swap(locals);
-  account_chooser_dialog_ = dialog;
+  local_credentials_ = std::move(locals);
+  if (base::FeatureList::IsEnabled(
+          password_manager::features::kCredentialManagementUnifiedUi)) {
+    local_credentials_ = webauthn::sorting::SortCredentials<
+        std::unique_ptr<password_manager::PasswordForm>, PasswordFormTraits>(
+        std::move(local_credentials_));
+  }
+  account_chooser_dialog_ = std::move(dialog);
   account_chooser_dialog_->ShowAccountChooser();
 }
 
 void CredentialManagerDialogControllerImpl::ShowAutosigninPrompt(
-    AutoSigninFirstRunPrompt* dialog) {
+    std::unique_ptr<AutoSigninFirstRunPrompt> dialog) {
   DCHECK(!account_chooser_dialog_);
   DCHECK(!autosignin_dialog_);
   DCHECK(dialog);
-  autosignin_dialog_ = dialog;
+  autosignin_dialog_ = std::move(dialog);
   autosignin_dialog_->ShowAutoSigninPrompt();
 }
 
@@ -85,7 +111,11 @@ CredentialManagerDialogControllerImpl::GetLocalForms() const {
   return local_credentials_;
 }
 
-std::u16string CredentialManagerDialogControllerImpl::GetAccoutChooserTitle()
+url::Origin CredentialManagerDialogControllerImpl::GetOrigin() const {
+  return delegate_->GetOrigin();
+}
+
+std::u16string CredentialManagerDialogControllerImpl::GetAccountChooserTitle()
     const {
   return l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_ACCOUNT_CHOOSER_TITLE);
 }
@@ -112,20 +142,16 @@ std::u16string CredentialManagerDialogControllerImpl::GetAutoSigninText()
 bool CredentialManagerDialogControllerImpl::ShouldShowFooter() const {
   const syncer::SyncService* sync_service =
       SyncServiceFactory::GetForProfile(profile_);
-  return password_bubble_experiment::HasChosenToSyncPasswords(sync_service);
+  // TODO(crbug.com/40066949): Remove this codepath once
+  // `IsSyncFeatureEnabled()` is fully deprecated.
+  return password_manager::sync_util::IsSyncFeatureEnabledIncludingPasswords(
+      sync_service);
 }
 
 void CredentialManagerDialogControllerImpl::OnChooseCredentials(
     const password_manager::PasswordForm& password_form,
     password_manager::CredentialType credential_type) {
-  if (local_credentials_.size() == 1) {
-    password_manager::metrics_util::LogAccountChooserUserActionOneAccount(
-        password_manager::metrics_util::ACCOUNT_CHOOSER_CREDENTIAL_CHOSEN);
-  } else {
-    password_manager::metrics_util::LogAccountChooserUserActionManyAccounts(
-        password_manager::metrics_util::ACCOUNT_CHOOSER_CREDENTIAL_CHOSEN);
-  }
-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
   if (delegate_->GetPasswordFeatureManager()
           ->IsBiometricAuthenticationBeforeFillingEnabled()) {
     delegate_->AuthenticateUserWithMessage(
@@ -141,10 +167,8 @@ void CredentialManagerDialogControllerImpl::OnChooseCredentials(
 }
 
 void CredentialManagerDialogControllerImpl::OnSignInClicked() {
-  DCHECK_EQ(1u, local_credentials_.size());
-  password_manager::metrics_util::LogAccountChooserUserActionOneAccount(
-      password_manager::metrics_util::ACCOUNT_CHOOSER_SIGN_IN);
-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+  CHECK_EQ(1u, local_credentials_.size());
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
   if (delegate_->GetPasswordFeatureManager()
           ->IsBiometricAuthenticationBeforeFillingEnabled()) {
     delegate_->AuthenticateUserWithMessage(
@@ -167,8 +191,15 @@ void CredentialManagerDialogControllerImpl::OnAutoSigninOK() {
       profile_->GetPrefs());
   password_manager::metrics_util::LogAutoSigninPromoUserAction(
       password_manager::metrics_util::AUTO_SIGNIN_OK_GOT_IT);
-  ResetDialog();
-  OnCloseDialog();
+  if (autosignin_dialog_) {
+    autosignin_dialog_->ControllerGone();
+    // Delete the dialog asynchronously because we are currently in a views
+    // callback. Synchronous destruction would cause a use-after-free crash
+    // when the call stack unwinds back to the views framework.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
+        FROM_HERE, std::move(autosignin_dialog_));
+  }
+  delegate_->OnDialogHidden();
 }
 
 void CredentialManagerDialogControllerImpl::OnAutoSigninTurnOff() {
@@ -178,25 +209,31 @@ void CredentialManagerDialogControllerImpl::OnAutoSigninTurnOff() {
       profile_->GetPrefs());
   password_manager::metrics_util::LogAutoSigninPromoUserAction(
       password_manager::metrics_util::AUTO_SIGNIN_TURN_OFF);
-  ResetDialog();
-  OnCloseDialog();
+  if (autosignin_dialog_) {
+    autosignin_dialog_->ControllerGone();
+    // Delete the dialog asynchronously because we are currently in a views
+    // callback. Synchronous destruction would cause a use-after-free crash
+    // when the call stack unwinds back to the views framework.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
+        FROM_HERE, std::move(autosignin_dialog_));
+  }
+  delegate_->OnDialogHidden();
 }
 
 void CredentialManagerDialogControllerImpl::OnCloseDialog() {
+  // Delete the dialogs asynchronously because we are currently in a views
+  // callback (WindowClosing). Synchronous destruction would cause a
+  // use-after-free crash when the call stack unwinds back to the views
+  // framework.
   if (account_chooser_dialog_) {
-    if (local_credentials_.size() == 1) {
-      password_manager::metrics_util::LogAccountChooserUserActionOneAccount(
-          password_manager::metrics_util::ACCOUNT_CHOOSER_DISMISSED);
-    } else {
-      password_manager::metrics_util::LogAccountChooserUserActionManyAccounts(
-          password_manager::metrics_util::ACCOUNT_CHOOSER_DISMISSED);
-    }
-    account_chooser_dialog_ = nullptr;
+    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
+        FROM_HERE, std::move(account_chooser_dialog_));
   }
   if (autosignin_dialog_) {
     password_manager::metrics_util::LogAutoSigninPromoUserAction(
         password_manager::metrics_util::AUTO_SIGNIN_NO_ACTION);
-    autosignin_dialog_ = nullptr;
+    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(
+        FROM_HERE, std::move(autosignin_dialog_));
   }
   delegate_->OnDialogHidden();
 }
@@ -204,11 +241,11 @@ void CredentialManagerDialogControllerImpl::OnCloseDialog() {
 void CredentialManagerDialogControllerImpl::ResetDialog() {
   if (account_chooser_dialog_) {
     account_chooser_dialog_->ControllerGone();
-    account_chooser_dialog_ = nullptr;
+    account_chooser_dialog_.reset();
   }
   if (autosignin_dialog_) {
     autosignin_dialog_->ControllerGone();
-    autosignin_dialog_ = nullptr;
+    autosignin_dialog_.reset();
   }
 }
 
@@ -216,8 +253,41 @@ void CredentialManagerDialogControllerImpl::OnBiometricReauthCompleted(
     password_manager::PasswordForm password_form,
     password_manager::CredentialType credential_type,
     bool result) {
-  if (!result)
+  if (!result) {
     return;
+  }
   ResetDialog();
   delegate_->ChooseCredential(password_form, credential_type);
+}
+
+PasswordCombinedSelectorController::DisplayType
+CredentialManagerDialogControllerImpl::GetDisplayType() const {
+  return DisplayType::kCredentialManager;
+}
+
+bool CredentialManagerDialogControllerImpl::ShouldShowTopIllustration() const {
+  return false;
+}
+
+std::u16string CredentialManagerDialogControllerImpl::GetTitle() const {
+  return l10n_util::GetStringFUTF16(
+      IDS_WEBAUTHN_SIGN_IN_TO_WEBSITE_DIALOG_TITLE,
+      url_formatter::FormatOriginForSecurityDisplay(
+          GetOrigin(),
+          url_formatter::SchemeDisplay::OMIT_CRYPTOGRAPHIC));
+}
+
+std::u16string CredentialManagerDialogControllerImpl::GetSubtitle() const {
+  return std::u16string();
+}
+
+gfx::Range CredentialManagerDialogControllerImpl::GetSubtitleLinkRange() const {
+  return gfx::Range();
+}
+
+void CredentialManagerDialogControllerImpl::OnSubtitleLinkClicked() {}
+
+std::u16string CredentialManagerDialogControllerImpl::GetOkButtonLabel() const {
+  return l10n_util::GetStringUTF16(
+      IDS_PASSWORD_MANAGER_ACCOUNT_CHOOSER_SIGN_IN);
 }

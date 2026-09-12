@@ -6,6 +6,7 @@
 #define NET_HTTP_HTTP_AUTH_CONTROLLER_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -18,7 +19,6 @@
 #include "net/http/http_auth.h"
 #include "net/http/http_auth_preferences.h"
 #include "net/log/net_log_with_source.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 #include "url/scheme_host_port.h"
 
@@ -34,6 +34,7 @@ class HostResolver;
 class NetLogWithSource;
 struct HttpRequestInfo;
 class SSLInfo;
+class X509Certificate;
 
 // HttpAuthController is the main entry point for external callers into the HTTP
 // authentication stack. A single instance of an HttpAuthController can be used
@@ -120,12 +121,19 @@ class NET_EXPORT_PRIVATE HttpAuthController
 
   bool HaveAuth() const;
 
+  // Returns true if the target scheme, host, and port that this controller was
+  // constructed to authenticate against matches `scheme_host_port`.
+  bool MatchesSchemeHostPort(
+      const url::SchemeHostPort& scheme_host_port) const {
+    return auth_scheme_host_port_ == scheme_host_port;
+  }
+
   // Return whether the authentication scheme is incompatible with HTTP/2
   // and thus the server would presumably reject a request on HTTP/2 anyway.
   bool NeedsHTTP11() const;
 
   // Swaps the authentication challenge info into |other|.
-  void TakeAuthInfo(absl::optional<AuthChallengeInfo>* other);
+  void TakeAuthInfo(std::optional<AuthChallengeInfo>* other);
 
   bool IsAuthSchemeDisabled(HttpAuth::Scheme scheme) const;
   void DisableAuthScheme(HttpAuth::Scheme scheme);
@@ -190,6 +198,15 @@ class NET_EXPORT_PRIVATE HttpAuthController
 
   void OnGenerateAuthTokenDone(int result);
 
+  enum AuthEvent {
+    AUTH_EVENT_START = 0,
+    AUTH_EVENT_REJECT,
+    AUTH_EVENT_MAX,
+  };
+
+  // Records the number of authentication events per authentication scheme.
+  void HistogramAuthEvent(AuthEvent auth_event);
+
   // Indicates if this handler is for Proxy auth or Server auth.
   HttpAuth::Target target_;
 
@@ -211,6 +228,13 @@ class NET_EXPORT_PRIVATE HttpAuthController
   // associated auth handler.
   std::unique_ptr<HttpAuthHandler> handler_;
 
+  // The server certificate from the connection on which |handler_| was
+  // created. Connection-based handlers derive per-connection state (such as
+  // channel bindings) from this certificate at creation time, so the handler
+  // must be dropped if a later challenge arrives over a connection with a
+  // different certificate.
+  scoped_refptr<X509Certificate> handler_server_cert_;
+
   // |identity_| holds the credentials that should be used by the handler_ to
   // generate challenge responses. This identity can come from a number of
   // places (url, cache, prompt).
@@ -221,7 +245,7 @@ class NET_EXPORT_PRIVATE HttpAuthController
   std::string auth_token_;
 
   // Contains information about the auth challenge.
-  absl::optional<AuthChallengeInfo> auth_info_;
+  std::optional<AuthChallengeInfo> auth_info_;
 
   // True if we've used the username:password embedded in the URL.  This
   // makes sure we use the embedded identity only once for the transaction,

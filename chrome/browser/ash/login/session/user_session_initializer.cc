@@ -6,7 +6,9 @@
 
 #include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
-#include "base/feature_list.h"
+#include "ash/constants/chrome_pref_names.h"
+#include "ash/system/media/media_notification_provider.h"
+#include "base/check_deref.h"
 #include "base/files/file_util.h"
 #include "base/path_service.h"
 #include "base/system/sys_info.h"
@@ -16,6 +18,8 @@
 #include "base/task/thread_pool.h"
 #include "chrome/browser/ash/accessibility/live_caption/system_live_caption_service_factory.h"
 #include "chrome/browser/ash/arc/session/arc_service_launcher.h"
+#include "chrome/browser/ash/boca/boca_manager_factory.h"
+#include "chrome/browser/ash/calendar/calendar_keyed_service_factory.h"
 #include "chrome/browser/ash/camera_mic/vm_camera_mic_manager.h"
 #include "chrome/browser/ash/child_accounts/child_status_reporting_service_factory.h"
 #include "chrome/browser/ash/child_accounts/child_user_service_factory.h"
@@ -24,38 +28,46 @@
 #include "chrome/browser/ash/crostini/crostini_manager.h"
 #include "chrome/browser/ash/eche_app/eche_app_manager_factory.h"
 #include "chrome/browser/ash/guest_os/guest_os_session_tracker.h"
-#include "chrome/browser/ash/lock_screen_apps/state_controller.h"
+#include "chrome/browser/ash/guest_os/guest_os_session_tracker_factory.h"
 #include "chrome/browser/ash/login/startup_utils.h"
 #include "chrome/browser/ash/phonehub/phone_hub_manager_factory.h"
-#include "chrome/browser/ash/plugin_vm/plugin_vm_manager.h"
-#include "chrome/browser/ash/plugin_vm/plugin_vm_manager_factory.h"
 #include "chrome/browser/ash/policy/reporting/app_install_event_log_manager_wrapper.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/browser_process_platform_part_ash.h"
 #include "chrome/browser/component_updater/crl_set_component_installer.h"
 #include "chrome/browser/google/google_brand_chromeos.h"
+#include "chrome/browser/manta/manta_service_factory.h"
 #include "chrome/browser/net/nss_service.h"
 #include "chrome/browser/net/nss_service_factory.h"
+#include "chrome/browser/net/server_certificate_database_service_factory.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/ash/calendar/calendar_keyed_service_factory.h"
-#include "chrome/browser/ui/ash/clipboard_image_model_factory_impl.h"
-#include "chrome/browser/ui/ash/glanceables/chrome_glanceables_delegate.h"
+#include "chrome/browser/screen_ai/screen_ai_dlc_installer.h"
+#include "chrome/browser/ui/ash/birch/birch_keyed_service_factory.h"
+#include "chrome/browser/ui/ash/glanceables/glanceables_keyed_service_factory.h"
 #include "chrome/browser/ui/ash/holding_space/holding_space_keyed_service_factory.h"
-#include "chrome/browser/ui/ash/media_client_impl.h"
-#include "chrome/browser/ui/webui/settings/ash/peripheral_data_access_handler.h"
-#include "chrome/common/pref_names.h"
+#include "chrome/browser/ui/ash/media_client/media_client_impl.h"
+#include "chrome/browser/ui/webui/ash/settings/pages/privacy/peripheral_data_access_handler.h"
 #include "chromeos/ash/components/audio/cras_audio_handler.h"
+#include "chromeos/ash/components/boca/boca_role_util.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
+#include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
 #include "chromeos/ash/components/dbus/pciguard/pciguard_client.h"
+#include "chromeos/ash/components/dbus/session_manager/session_manager_client.h"
 #include "chromeos/ash/components/install_attributes/install_attributes.h"
 #include "chromeos/ash/components/network/network_cert_loader.h"
 #include "chromeos/ash/components/peripheral_notification/peripheral_notification_manager.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
+#include "chromeos/ash/services/cros_safety/cros_safety_service.h"
+#include "chromeos/constants/chromeos_features.h"
 #include "components/live_caption/caption_util.h"
 #include "components/prefs/pref_service.h"
+#include "components/server_certificate_database/server_certificate_database_service.h"
 #include "components/user_manager/user_manager.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
+#include "media/base/media_switches.h"
+#include "rlz/buildflags/buildflags.h"
 
 #if BUILDFLAG(ENABLE_RLZ)
 #include "chrome/browser/rlz/chrome_rlz_tracker_delegate.h"
@@ -105,7 +117,7 @@ void GetCertDBOnIOThread(
 // Note: This unsafely grabs a persistent pointer to the `NssService`'s
 // `NSSCertDatabase` outside of the IO thread, and the `NSSCertDatabase`
 // will be invalidated once the associated profile is shut down.
-// TODO(https://crbug.com/1186373): Provide better lifetime guarantees and
+// TODO(crbug.com/40753707): Provide better lifetime guarantees and
 // pass the Getter to the NetworkCertLoader.
 void OnGotNSSCertDatabaseForUser(net::NSSCertDatabase* database) {
   if (!NetworkCertLoader::IsInitialized())
@@ -116,13 +128,19 @@ void OnGotNSSCertDatabaseForUser(net::NSSCertDatabase* database) {
 
 }  // namespace
 
-UserSessionInitializer::UserSessionInitializer() {
+UserSessionInitializer::UserSessionInitializer(
+    PrefService* local_state,
+    session_manager::SessionManager* session_manager)
+    : local_state_(CHECK_DEREF(local_state)) {
+  CHECK(session_manager);
   DCHECK(!g_instance);
   g_instance = this;
+  session_manager_observation_.Observe(session_manager);
 }
 
 UserSessionInitializer::~UserSessionInitializer() {
   DCHECK(g_instance);
+  session_manager_observation_.Reset();
   g_instance = nullptr;
 }
 
@@ -140,10 +158,9 @@ void UserSessionInitializer::OnUserProfileLoaded(const AccountId& account_id) {
     // is called more than once.
     if (primary_profile_ != nullptr) {
       NOTREACHED();
-      CHECK_EQ(primary_profile_, profile);
-      return;
     }
     primary_profile_ = profile;
+    primary_profile_observer_.Observe(profile);
 
     InitRlz(profile);
     InitializeCerts(profile);
@@ -151,10 +168,15 @@ void UserSessionInitializer::OnUserProfileLoaded(const AccountId& account_id) {
     InitializePrimaryProfileServices(profile, user);
 
     FamilyUserMetricsServiceFactory::GetForBrowserContext(profile);
+    if (features::IsCrosSafetyServiceEnabled()) {
+      cros_safety_service_ = std::make_unique<CrosSafetyService>(
+          manta::MantaServiceFactory::GetForProfile(profile));
+    }
   }
 
-  if (user->GetType() == user_manager::USER_TYPE_CHILD)
+  if (user->GetType() == user_manager::UserType::kChild) {
     InitializeChildUserServices(profile);
+  }
 }
 
 void UserSessionInitializer::InitializeChildUserServices(Profile* profile) {
@@ -169,11 +191,8 @@ void UserSessionInitializer::InitRlz(Profile* profile) {
   // if it is empty.  The latter is to correct a problem in older builds where
   // an empty brand code would be persisted if the first login after OOBE was
   // a guest session.
-  if (!g_browser_process->local_state()->HasPrefPath(::prefs::kRLZBrand) ||
-      g_browser_process->local_state()
-          ->GetValue(::prefs::kRLZBrand)
-          .GetString()
-          .empty()) {
+  if (!local_state_->HasPrefPath(ash::prefs::kRLZBrand) ||
+      local_state_->GetValue(ash::prefs::kRLZBrand).GetString().empty()) {
     // Read brand code asynchronously from an OEM data and repost ourselves.
     google_brand::chromeos::InitBrand(base::BindOnce(
         &UserSessionInitializer::InitRlz, weak_factory_.GetWeakPtr(), profile));
@@ -196,7 +215,7 @@ void UserSessionInitializer::InitializeCerts(Profile* profile) {
       base::SysInfo::IsRunningOnChromeOS()) {
     // Note: This unsafely grabs a persistent reference to the `NssService`'s
     // `NSSCertDatabase`, which may be invalidated once `profile` is shut down.
-    // TODO(https://crbug.com/1186373): Provide better lifetime guarantees and
+    // TODO(crbug.com/40753707): Provide better lifetime guarantees and
     // pass the `NssCertDatabaseGetter` to the `NetworkCertLoader`.
     content::GetIOThreadTaskRunner({})->PostTask(
         FROM_HERE,
@@ -205,6 +224,12 @@ void UserSessionInitializer::InitializeCerts(Profile* profile) {
                            ->CreateNSSCertDatabaseGetterForIOThread(),
                        base::BindPostTaskToCurrentDefault(
                            base::BindOnce(&OnGotNSSCertDatabaseForUser))));
+
+    net::ServerCertificateDatabaseService* user_cert_db =
+        net::ServerCertificateDatabaseServiceFactory::GetForBrowserContext(
+            profile);
+    CHECK(user_cert_db);
+    NetworkCertLoader::Get()->SetUserServerCertDatabaseService(user_cert_db);
   }
 }
 
@@ -218,30 +243,32 @@ void UserSessionInitializer::InitializeCRLSetFetcher() {
 void UserSessionInitializer::InitializePrimaryProfileServices(
     Profile* profile,
     const user_manager::User* user) {
-  lock_screen_apps::StateController::Get()->SetPrimaryProfile(profile);
+  // We should call this method at most once, when a user logs in. Logging out
+  // kills the chrome process.
+  static int call_count = 0;
+  ++call_count;
+  CHECK_EQ(call_count, 1);
 
-  if (user->GetType() == user_manager::USER_TYPE_REGULAR) {
+  if (user->GetType() == user_manager::UserType::kRegular) {
     // App install logs for extensions and ARC++ are uploaded via the user's
     // communication channel with the management server. This channel exists for
     // regular users only. `AppInstallEventLogManagerWrapper` and
     // `ExtensionInstallEventLogManagerWrapper` manages their own lifetime and
     // self-destruct on logout.
-    policy::AppInstallEventLogManagerWrapper::CreateForProfile(profile);
+    policy::AppInstallEventLogManagerWrapper::CreateForProfile(
+        &local_state_.get(), profile);
   }
 
   arc::ArcServiceLauncher::Get()->OnPrimaryUserProfilePrepared(profile);
-  guest_os::GuestOsSessionTracker::GetForProfile(profile);
+  guest_os::GuestOsSessionTrackerFactory::GetForProfile(profile);
 
   crostini::CrostiniManager* crostini_manager =
       crostini::CrostiniManager::GetForProfile(profile);
-  if (crostini_manager)
-    crostini_manager->MaybeUpdateCrostini();
+  if (crostini_manager) {
+    crostini_manager->OnUserProfilePrepared();
+  }
 
-  clipboard_image_model_factory_impl_ =
-      std::make_unique<ClipboardImageModelFactoryImpl>(profile);
-
-  if (captions::IsLiveCaptionFeatureSupported() &&
-      base::FeatureList::IsEnabled(features::kSystemLiveCaption)) {
+  if (::captions::IsLiveCaptionFeatureSupported()) {
     SystemLiveCaptionServiceFactory::GetInstance()->GetForProfile(profile);
   }
 
@@ -259,44 +286,84 @@ void UserSessionInitializer::OnUserSessionStarted(bool is_primary_user) {
   // created one per user in a multiprofile session.
   CalendarKeyedServiceFactory::GetInstance()->GetService(profile);
 
+  // Ensure that the `GlanceablesKeyedService` for `profile` is created. It is
+  // created one per user in a multiprofile session.
+  GlanceablesKeyedServiceFactory::GetInstance()->GetService(profile);
+
+  if (ash::boca_util::IsEnabled(
+          ash::BrowserContextHelper::Get()->GetUserByBrowserContext(profile))) {
+    // Ensure that the `BocaManager` for `profile` is created. It is created one
+    // per user in a multiprofile session.
+    BocaManagerFactory::GetInstance()->GetForProfile(profile);
+  }
+
+  screen_ai::dlc_installer::ManageInstallation(&local_state_.get());
+
   if (is_primary_user) {
     DCHECK_EQ(primary_profile_, profile);
 
-    if (features::AreGlanceablesEnabled()) {
-      // Must be called after CalenderKeyedServiceFactory is initialized.
-      ChromeGlanceablesDelegate::Get()->OnPrimaryUserSessionStarted(profile);
-    }
+    // Ensure that one `BirchKeyedService` is created for the primary profile.
+    BirchKeyedServiceFactory::GetInstance()->GetService(profile);
 
     // Ensure that PhoneHubManager and EcheAppManager are created for the
     // primary profile.
     phonehub::PhoneHubManagerFactory::GetForProfile(profile);
     eche_app::EcheAppManagerFactory::GetForProfile(profile);
 
-    plugin_vm::PluginVmManager* plugin_vm_manager =
-        plugin_vm::PluginVmManagerFactory::GetForProfile(primary_profile_);
-    if (plugin_vm_manager)
-      plugin_vm_manager->OnPrimaryUserSessionStarted();
-
     VmCameraMicManager::Get()->OnPrimaryUserSessionStarted(primary_profile_);
 
     // Pciguard can only be set by non-guest, primary users. By default,
     // Pciguard is turned on.
+    const bool pref_state =
+        settings::PeripheralDataAccessHandler::GetPrefState(local_state_.get());
     if (PeripheralNotificationManager::IsInitialized()) {
       PeripheralNotificationManager::Get()->SetPcieTunnelingAllowedState(
-          settings::PeripheralDataAccessHandler::GetPrefState());
+          pref_state);
     }
-    PciguardClient::Get()->SendExternalPciDevicesPermissionState(
-        settings::PeripheralDataAccessHandler::GetPrefState());
-    TypecdClient::Get()->SetPeripheralDataAccessPermissionState(
-        settings::PeripheralDataAccessHandler::GetPrefState());
+    PciguardClient::Get()->SendExternalPciDevicesPermissionState(pref_state);
+    TypecdClient::Get()->SetPeripheralDataAccessPermissionState(pref_state);
 
-    CrasAudioHandler::Get()->RefreshNoiseCancellationState();
+    CrasAudioHandler::Get()->RefreshVoiceIsolationState();
+    CrasAudioHandler::Get()->RefreshVoiceIsolationPreferredEffect();
+
+    MediaNotificationProvider::Get()->OnPrimaryUserSessionStarted();
+    if (base::FeatureList::IsEnabled(media::kShowForceRespectUiGainsToggle)) {
+      CrasAudioHandler::Get()->RefreshForceRespectUiGainsState();
+    }
+
+    CrasAudioHandler::Get()->RefreshHfpMicSrState();
+    CrasAudioHandler::Get()->RefreshSpatialAudioState();
+  }
+}
+
+void UserSessionInitializer::OnUserSessionStartUpTaskCompleted() {
+  const AccountId& account_id =
+      user_manager::UserManager::Get()->GetPrimaryUser()->GetAccountId();
+  SessionManagerClient::Get()->EmitStartedUserSession(
+      cryptohome::CreateAccountIdentifierFromAccountId(account_id));
+}
+
+void UserSessionInitializer::OnProfileWillBeDestroyed(Profile* profile) {
+  // `primary_profile_` is the only Profile that an observer is added for.
+  CHECK_EQ(profile, primary_profile_);
+
+  primary_profile_observer_.Reset();
+  primary_profile_ = nullptr;
+
+  // CrosSafetyService depends on profile and should shutdown before profile
+  // being destroyed.
+  cros_safety_service_.reset();
+
+  if (NetworkCertLoader::IsInitialized() &&
+      base::SysInfo::IsRunningOnChromeOS()) {
+    NetworkCertLoader::Get()->SetUserServerCertDatabaseService(nullptr);
   }
 }
 
 void UserSessionInitializer::PreStartSession(bool is_primary_session) {
   if (is_primary_session) {
     NetworkCertLoader::Get()->MarkUserNSSDBWillBeInitialized();
+    NetworkCertLoader::Get()->MarkUserServerCertDatabaseWillBeInitialized();
   }
 }
 
@@ -324,27 +391,25 @@ void UserSessionInitializer::InitRlzImpl(Profile* profile,
   //     sessions have ever been used on this device. This is the only
   //     situation where the enrollment state is NOT KNOWN at this point.
 
-  PrefService* local_state = g_browser_process->local_state();
   if (params.disabled || (profile->IsGuestSession() &&
                           !InstallAttributes::Get()->IsDeviceLocked())) {
     // Empty brand code means an organic install (no RLZ pings are sent).
     google_brand::chromeos::ClearBrandForCurrentSession();
   }
-  if (params.disabled != local_state->GetBoolean(::prefs::kRLZDisabled)) {
+  if (params.disabled != local_state_->GetBoolean(ash::prefs::kRLZDisabled)) {
     // When switching to RLZ enabled/disabled state, clear all recorded events.
     rlz::RLZTracker::ClearRlzState();
-    local_state->SetBoolean(::prefs::kRLZDisabled, params.disabled);
+    local_state_->SetBoolean(ash::prefs::kRLZDisabled, params.disabled);
   }
   // Init the RLZ library.
   int ping_delay =
-      profile->GetPrefs()->GetInteger(::prefs::kRlzPingDelaySeconds);
+      profile->GetPrefs()->GetInteger(ash::chrome_prefs::kRlzPingDelaySeconds);
   // Negative ping delay means to send ping immediately after a first search is
   // recorded.
   bool send_ping_immediately = ping_delay < 0;
   base::TimeDelta delay =
       base::Seconds(abs(ping_delay)) - params.time_since_oobe_completion;
-  rlz::RLZTracker::SetRlzDelegate(
-      base::WrapUnique(new ChromeRLZTrackerDelegate));
+  rlz::RLZTracker::SetRlzDelegate(std::make_unique<ChromeRLZTrackerDelegate>());
   rlz::RLZTracker::InitRlzDelayed(
       user_manager::UserManager::Get()->IsCurrentUserNew(),
       send_ping_immediately, delay,

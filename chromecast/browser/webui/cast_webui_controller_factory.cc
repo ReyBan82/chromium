@@ -7,21 +7,34 @@
 #include <algorithm>
 #include <mutex>
 
-#include "base/containers/contains.h"
 #include "chromecast/browser/webui/cast_resource_data_source.h"
 #include "chromecast/browser/webui/cast_webui.h"
 #include "chromecast/browser/webui/constants.h"
 #include "content/public/browser/url_data_source.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui_controller_factory.h"
+#include "content/public/common/url_constants.h"
 #include "url/gurl.h"
 
 namespace chromecast {
+namespace {
+
+std::vector<std::string> FilterHosts(const std::vector<std::string>& hosts) {
+  std::vector<std::string> filtered;
+  for (const auto& host : hosts) {
+    if (IsKnownCastWebUiHost(host)) {
+      filtered.push_back(host);
+    }
+  }
+  return filtered;
+}
+
+}  // namespace
 
 CastWebUiControllerFactory::CastWebUiControllerFactory(
     mojo::PendingRemote<mojom::WebUiClient> client,
     const std::vector<std::string>& hosts)
-    : client_(std::move(client)), hosts_(hosts) {
+    : client_(std::move(client)), hosts_(FilterHosts(hosts)) {
   DCHECK(client_);
 }
 
@@ -30,7 +43,8 @@ CastWebUiControllerFactory::~CastWebUiControllerFactory() = default;
 content::WebUI::TypeID CastWebUiControllerFactory::GetWebUIType(
     content::BrowserContext* browser_context,
     const GURL& url) {
-  if (base::Contains(hosts_, url.host())) {
+  if (url.SchemeIs(content::kChromeUIScheme) &&
+      std::ranges::contains(hosts_, url.GetHost())) {
     return const_cast<CastWebUiControllerFactory*>(this);
   }
   return content::WebUI::kNoWebUI;
@@ -55,7 +69,7 @@ CastWebUiControllerFactory::CreateWebUIControllerForURL(content::WebUI* web_ui,
                                 std::move(cast_resources));
   });
 
-  return CastWebUI::Create(web_ui, url.host(), client_.get());
+  return CastWebUI::Create(web_ui, url.GetHost(), client_.get());
 }
 
 }  // namespace chromecast

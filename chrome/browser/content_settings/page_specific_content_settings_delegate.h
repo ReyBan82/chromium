@@ -5,13 +5,14 @@
 #ifndef CHROME_BROWSER_CONTENT_SETTINGS_PAGE_SPECIFIC_CONTENT_SETTINGS_DELEGATE_H_
 #define CHROME_BROWSER_CONTENT_SETTINGS_PAGE_SPECIFIC_CONTENT_SETTINGS_DELEGATE_H_
 
+#include <memory>
+
+#include "base/scoped_observation.h"
 #include "build/build_config.h"
-#include "chrome/browser/browsing_data/access_context_audit_service.h"
+#include "components/browsing_data/content/browsing_data_model.h"
 #include "components/content_settings/browser/page_specific_content_settings.h"
 #include "components/custom_handlers/protocol_handler.h"
 #include "content/public/browser/web_contents_observer.h"
-
-namespace chrome {
 
 using StorageType =
     content_settings::mojom::ContentSettingsManager::StorageType;
@@ -67,38 +68,41 @@ class PageSpecificContentSettingsDelegate
     return pending_protocol_handler_setting_;
   }
 
+  // Called by MediaObserver
+  void OnIsCapturingVideoChanged(content::WebContents* web_contents,
+                                 bool is_capturing_video);
+  void OnIsCapturingAudioChanged(content::WebContents* web_contents,
+                                 bool is_capturing_audio);
+
  private:
   // PageSpecificContentSettings::Delegate:
   void UpdateLocationBar() override;
   PrefService* GetPrefs() override;
   HostContentSettingsMap* GetSettingsMap() override;
+  std::unique_ptr<BrowsingDataModel::Delegate> CreateBrowsingDataModelDelegate()
+      override;
   void SetDefaultRendererContentSettingRules(
       content::RenderFrameHost* rfh,
       RendererContentSettingRules* rules) override;
-  std::vector<storage::FileSystemType> GetAdditionalFileSystemTypes() override;
-  browsing_data::CookieHelper::IsDeletionDisabledCallback
-  GetIsDeletionDisabledCallback() override;
-  bool IsMicrophoneCameraStateChanged(
-      content_settings::PageSpecificContentSettings::MicrophoneCameraState
-          microphone_camera_state,
-      const std::string& media_stream_selected_audio_device,
-      const std::string& media_stream_selected_video_device) override;
   content_settings::PageSpecificContentSettings::MicrophoneCameraState
   GetMicrophoneCameraState() override;
   content::WebContents* MaybeGetSyncedWebContentsForPictureInPicture(
       content::WebContents* web_contents) override;
   void OnContentAllowed(ContentSettingsType type) override;
   void OnContentBlocked(ContentSettingsType type) override;
-  void OnStorageAccessAllowed(StorageType storage_type,
-                              const url::Origin& origin,
-                              content::Page& page) override;
-  void OnCookieAccessAllowed(const net::CookieList& accessed_cookies,
-                             content::Page& page) override;
-  void OnServiceWorkerAccessAllowed(const url::Origin& origin,
-                                    content::Page& page) override;
+  bool IsBlockedOnSystemLevel(ContentSettingsType type) override;
+  bool IsFrameAllowlistedForJavaScript(
+      content::RenderFrameHost* render_frame_host) override;
+  bool IsPiPWindow(content::WebContents* web_contents) override;
 
   // content::WebContentsObserver:
   void PrimaryPageChanged(content::Page& page) override;
+
+  // Notify `PageSpecificContentSettings` about changes in capturing audio and
+  // video.
+  void OnCapturingStateChanged(content::WebContents* web_contents,
+                               ContentSettingsType type,
+                               bool is_capturing);
 
   // The pending protocol handler, if any. This can be set if
   // registerProtocolHandler was invoked without user gesture.
@@ -113,14 +117,14 @@ class PageSpecificContentSettingsDelegate
   custom_handlers::ProtocolHandler previous_protocol_handler_ =
       custom_handlers::ProtocolHandler::EmptyProtocolHandler();
 
+  // It subscribes to Camera and Microphone capturing updates. It is used to
+  // show/hide camera/mic activity indicators.
+  class MediaObserver;
+  std::unique_ptr<MediaObserver> media_observer_;
+
   // The setting on the pending protocol handler registration. Persisted in case
   // the user opens the bubble and makes changes multiple times.
   ContentSetting pending_protocol_handler_setting_ = CONTENT_SETTING_DEFAULT;
-
-  std::unique_ptr<AccessContextAuditService::CookieAccessHelper>
-      cookie_access_helper_;
 };
-
-}  // namespace chrome
 
 #endif  // CHROME_BROWSER_CONTENT_SETTINGS_PAGE_SPECIFIC_CONTENT_SETTINGS_DELEGATE_H_

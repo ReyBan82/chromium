@@ -2,21 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import "ios/web/web_state/ui/crw_web_view_scroll_view_proxy+internal.h"
-
 #import <objc/runtime.h>
+
 #import <memory>
 
+#import "base/apple/foundation_util.h"
 #import "base/auto_reset.h"
 #import "base/ios/crb_protocol_observers.h"
-#import "base/mac/foundation_util.h"
 #import "base/strings/sys_string_conversions.h"
 #import "ios/web/common/features.h"
 #import "ios/web/web_state/ui/crw_web_view_scroll_view_delegate_proxy.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/web/web_state/ui/crw_web_view_scroll_view_proxy+internal.h"
 
 // *Address of* this variable is used as a marker to specify that it matches any
 // context.
@@ -192,8 +188,9 @@ static int gAnyContext = 0;
 }
 
 - (void)setScrollView:(UIScrollView*)scrollView {
-  if (self.underlyingScrollView == scrollView)
+  if (self.underlyingScrollView == scrollView) {
     return;
+  }
 
   // Use a placeholder UIScrollView instead when nil is given. See the comment
   // in -init why this is necessary.
@@ -316,14 +313,21 @@ static int gAnyContext = 0;
 #pragma mark -
 
 + (NSArray*)scrollViewObserverKeyPaths {
+  CHECK(web::features::ShouldUseBroadcasterForSmoothScrolling());
   return @[ @"frame", @"contentSize", @"contentInset" ];
 }
 
 + (void)startObservingScrollView:(UIScrollView*)scrollView
                            proxy:(CRWWebViewScrollViewProxy*)proxy {
   // Add observations by `proxy`.
-  for (NSString* keyPath in [proxy.class scrollViewObserverKeyPaths]) {
-    [scrollView addObserver:proxy forKeyPath:keyPath options:0 context:nil];
+  if (web::features::ShouldUseBroadcasterForSmoothScrolling()) {
+    for (NSString* keyPath in [proxy.class scrollViewObserverKeyPaths]) {
+      [scrollView addObserver:proxy
+                   forKeyPath:keyPath
+                      options:NSKeyValueObservingOptionNew |
+                              NSKeyValueObservingOptionOld
+                      context:nil];
+    }
   }
 
   // Restore observers which were added to the past underlying scroll views.
@@ -346,8 +350,10 @@ static int gAnyContext = 0;
 + (void)stopObservingScrollView:(UIScrollView*)scrollView
                           proxy:(CRWWebViewScrollViewProxy*)proxy {
   // Remove observations by `self`.
-  for (NSString* keyPath in [proxy.class scrollViewObserverKeyPaths]) {
-    [scrollView removeObserver:proxy forKeyPath:keyPath];
+  if (web::features::ShouldUseBroadcasterForSmoothScrolling()) {
+    for (NSString* keyPath in [proxy.class scrollViewObserverKeyPaths]) {
+      [scrollView removeObserver:proxy forKeyPath:keyPath];
+    }
   }
 
   // Remove observations added externally.
@@ -371,12 +377,17 @@ static int gAnyContext = 0;
                         change:(NSDictionary*)change
                        context:(void*)context {
   DCHECK_EQ(object, self.underlyingScrollView);
-  if ([keyPath isEqualToString:@"frame"])
+  CHECK(web::features::ShouldUseBroadcasterForSmoothScrolling());
+
+  if ([keyPath isEqualToString:@"frame"]) {
     [_observers webViewScrollViewFrameDidChange:self];
-  if ([keyPath isEqualToString:@"contentSize"])
-    [_observers webViewScrollViewDidResetContentSize:self];
-  if ([keyPath isEqualToString:@"contentInset"])
+  }
+  if ([keyPath isEqualToString:@"contentInset"]) {
     [_observers webViewScrollViewDidResetContentInset:self];
+  }
+  if ([keyPath isEqualToString:@"contentSize"]) {
+    [_observers webViewScrollViewDidResetContentSize:self];
+  }
 }
 
 - (UIScrollView*)asUIScrollView {

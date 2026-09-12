@@ -15,7 +15,13 @@
 #include "absl/strings/internal/str_format/output.h"
 
 #include <errno.h>
+
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
+
+#include "absl/base/config.h"
+#include "absl/strings/string_view.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -33,9 +39,11 @@ struct ClearErrnoGuard {
 
 void BufferRawSink::Write(string_view v) {
   size_t to_write = std::min(v.size(), size_);
-  std::memcpy(buffer_, v.data(), to_write);
-  buffer_ += to_write;
-  size_ -= to_write;
+  if (to_write > 0) {
+    std::memcpy(buffer_, v.data(), to_write);
+    buffer_ += to_write;
+    size_ -= to_write;
+  }
   total_written_ += v.size();
 }
 

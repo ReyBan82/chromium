@@ -7,15 +7,23 @@
 
 #include "base/functional/callback_forward.h"
 
+#if !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_ANDROID)
+namespace media::mojom {
+class SpeechRecognitionContext;
+}
+#endif  // !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_ANDROID)
+
 namespace content {
 
 class SpeechRecognitionEventListener;
+
+struct GlobalRenderFrameHostId;
 
 // Allows embedders to display the current state of recognition, for getting the
 // user's permission and for fetching optional request information.
 class SpeechRecognitionManagerDelegate {
  public:
-  virtual ~SpeechRecognitionManagerDelegate() {}
+  virtual ~SpeechRecognitionManagerDelegate() = default;
 
   // Checks (asynchronously) if current setup allows speech recognition.
   // This is called on the IO thread.
@@ -28,9 +36,15 @@ class SpeechRecognitionManagerDelegate {
   // This is called on the IO thread.
   virtual SpeechRecognitionEventListener* GetEventListener() = 0;
 
-  // Checks whether the speech recognition for the given renderer should filter
-  // profanities or not.
-  virtual bool FilterProfanities(int render_process_id) = 0;
+#if !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_ANDROID)
+  // This interfaces is used to bind the On-Device Speech Recognition Service on
+  // the non-android platforms.
+  // This is called on the IO thread.
+  virtual void BindSpeechRecognitionContext(
+      mojo::PendingReceiver<media::mojom::SpeechRecognitionContext> receiver,
+      const std::string& language,
+      const GlobalRenderFrameHostId& render_frame_host_id) = 0;
+#endif  // !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_ANDROID)
 };
 
 }  // namespace content

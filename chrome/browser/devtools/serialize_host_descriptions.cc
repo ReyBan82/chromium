@@ -5,10 +5,9 @@
 #include "chrome/browser/devtools/serialize_host_descriptions.h"
 
 #include <map>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
-
-#include "base/strings/string_piece.h"
 
 namespace {
 
@@ -19,10 +18,10 @@ namespace {
 // key |child_key| in the parent's |representation|. This is destructive to the
 // representation stored with the nodes (which gets moved out of them).
 base::Value Serialize(
-    base::StringPiece child_key,
+    std::string_view child_key,
     base::Value* root,
     const std::map<base::Value*, std::vector<base::Value*>>& children) {
-  base::Value::List children_list;
+  base::ListValue children_list;
   auto child_it = children.find(root);
   if (child_it != children.end()) {
     for (base::Value* child : child_it->second) {
@@ -45,17 +44,14 @@ void CreateDictionaryForest(
     std::vector<HostDescriptionNode> hosts,
     std::map<base::Value*, std::vector<base::Value*>>* children,
     std::unordered_set<base::Value*>* roots,
-    std::vector<base::Value>* representations) {
+    base::ListValue* representations) {
   representations->reserve(hosts.size());
-  children->clear();
-  roots->clear();
-  representations->clear();
 
-  std::map<base::StringPiece, base::Value*> name_to_representation;
+  std::map<std::string_view, base::Value*> name_to_representation;
 
   // First move the representations and map the names to them.
   for (HostDescriptionNode& node : hosts) {
-    representations->push_back(std::move(node.representation));
+    representations->Append(std::move(node.representation));
     // If there are multiple nodes with the same name, subsequent insertions
     // will be ignored, so only the first node with a given name will be
     // referenced by |roots| and |children|.
@@ -65,7 +61,7 @@ void CreateDictionaryForest(
   // Now compute children.
   for (HostDescriptionNode& node : hosts) {
     base::Value* node_rep = name_to_representation[node.name];
-    base::StringPiece parent_name = node.parent_name;
+    std::string_view parent_name = node.parent_name;
     if (parent_name.empty()) {
       roots->insert(node_rep);
       continue;
@@ -81,18 +77,18 @@ void CreateDictionaryForest(
 
 }  // namespace
 
-base::Value::List SerializeHostDescriptions(
+base::ListValue SerializeHostDescriptions(
     std::vector<HostDescriptionNode> hosts,
-    base::StringPiece child_key) {
+    std::string_view child_key) {
   // |representations| must outlive |children| and |roots|, which contain
   // pointers to objects in |representations|.
-  std::vector<base::Value> representations;
+  base::ListValue representations;
   std::map<base::Value*, std::vector<base::Value*>> children;
   std::unordered_set<base::Value*> roots;
 
   CreateDictionaryForest(std::move(hosts), &children, &roots, &representations);
 
-  base::Value::List result;
+  base::ListValue result;
   result.reserve(roots.size());
   for (auto* root : roots) {
     result.Append(Serialize(child_key, root, children));

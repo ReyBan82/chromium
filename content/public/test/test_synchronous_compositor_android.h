@@ -30,6 +30,8 @@ class CONTENT_EXPORT TestSynchronousCompositor : public SynchronousCompositor {
 
   void SetClient(SynchronousCompositorClient* client);
 
+  void OnCompositorVisible() override {}
+  void OnCompositorHidden() override {}
   scoped_refptr<FrameFuture> DemandDrawHwAsync(
       const gfx::Size& viewport_size,
       const gfx::Rect& viewport_rect_for_tile_priority,
@@ -39,10 +41,11 @@ class CONTENT_EXPORT TestSynchronousCompositor : public SynchronousCompositor {
   void OnCompositorFrameTransitionDirectiveProcessed(
       uint32_t layer_tree_frame_sink_id,
       uint32_t sequence_id) override {}
-  void DidPresentCompositorFrames(viz::FrameTimingDetailsMap timing_details,
-                                  uint32_t frame_token) override {}
+  void DidPresentCompositorFrames(
+      viz::FrameTimingDetailsMap timing_details) override {}
   bool DemandDrawSw(SkCanvas* canvas, bool software_canvas) override;
   void SetMemoryPolicy(size_t bytes_limit) override {}
+  float GetVelocityInPixelsPerSecond() override;
   void DidBecomeActive() override {}
   void DidChangeRootLayerScrollOffset(const gfx::PointF& root_offset) override {
   }

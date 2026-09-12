@@ -5,10 +5,12 @@
 #include <math.h>
 #include <stddef.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/debug/leak_annotations.h"
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
@@ -258,16 +260,16 @@ void TtsPlatformImplBackgroundWorker::InitializeVoices(PlatformVoices* voices) {
   char** modules = libspeechd_loader_.spd_list_modules(conn_);
   if (!modules)
     return;
-  for (int i = 0; modules[i]; i++) {
-    char* module = modules[i];
+  for (int i = 0; UNSAFE_TODO(modules[i]); i++) {
+    char* module = UNSAFE_TODO(modules[i]);
     libspeechd_loader_.spd_set_output_module(conn_, module);
     SPDVoice** spd_voices = libspeechd_loader_.spd_list_synthesis_voices(conn_);
     if (!spd_voices) {
       free(module);
       continue;
     }
-    for (int j = 0; spd_voices[j]; j++) {
-      SPDVoice* spd_voice = spd_voices[j];
+    for (int j = 0; UNSAFE_TODO(spd_voices[j]); j++) {
+      SPDVoice* spd_voice = UNSAFE_TODO(spd_voices[j]);
       SPDChromeVoice spd_data;
       spd_data.name = spd_voice->name;
       spd_data.module = module;
@@ -277,9 +279,9 @@ void TtsPlatformImplBackgroundWorker::InitializeVoices(PlatformVoices* voices) {
       key.append(" ");
       key.append(spd_data.module);
       voices->insert(std::pair<std::string, SPDChromeVoice>(key, spd_data));
-      free(spd_voices[j]);
+      free(UNSAFE_TODO(spd_voices[j]));
     }
-    free(modules[i]);
+    free(UNSAFE_TODO(modules[i]));
   }
 }
 
@@ -317,7 +319,6 @@ void TtsPlatformImplBackgroundWorker::CloseConnection() {
 
 void TtsPlatformImplBackgroundWorker::OnSpeechEvent(int msg_id,
                                                     SPDNotificationType type) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
   if (!conn_ || msg_id != msg_uid_)
     return;
 
@@ -401,7 +402,8 @@ void TtsPlatformImplBackgroundWorker::IndexMarkCallback(
 
 TtsPlatformImplLinux::TtsPlatformImplLinux()
     : worker_(base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()})) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
   const base::CommandLine& command_line =
       *base::CommandLine::ForCurrentProcess();
   if (!command_line.HasSwitch(switches::kEnableSpeechDispatcher))
@@ -428,8 +430,9 @@ void TtsPlatformImplLinux::Speak(
     const VoiceData& voice,
     const UtteranceContinuousParameters& params,
     base::OnceCallback<void(bool)> on_speak_finished) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
-  DCHECK(PlatformImplInitialized());
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
+  CHECK(PlatformImplInitialized(), base::NotFatalUntil::M159);
 
   if (paused_ || is_speaking_) {
     std::move(on_speak_finished).Run(false);
@@ -453,8 +456,9 @@ void TtsPlatformImplLinux::Speak(
 }
 
 bool TtsPlatformImplLinux::StopSpeaking() {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
-  DCHECK(PlatformImplInitialized());
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
+  CHECK(PlatformImplInitialized(), base::NotFatalUntil::M159);
 
   worker_.AsyncCall(&TtsPlatformImplBackgroundWorker::StopSpeaking);
   paused_ = false;
@@ -466,8 +470,9 @@ bool TtsPlatformImplLinux::StopSpeaking() {
 }
 
 void TtsPlatformImplLinux::Pause() {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
-  DCHECK(PlatformImplInitialized());
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
+  CHECK(PlatformImplInitialized(), base::NotFatalUntil::M159);
 
   if (paused_ || !is_speaking_)
     return;
@@ -477,8 +482,9 @@ void TtsPlatformImplLinux::Pause() {
 }
 
 void TtsPlatformImplLinux::Resume() {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
-  DCHECK(PlatformImplInitialized());
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
+  CHECK(PlatformImplInitialized(), base::NotFatalUntil::M159);
 
   if (!paused_ || !is_speaking_)
     return;
@@ -492,8 +498,9 @@ bool TtsPlatformImplLinux::IsSpeaking() {
 }
 
 void TtsPlatformImplLinux::GetVoices(std::vector<VoiceData>* out_voices) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
-  DCHECK(PlatformImplInitialized());
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
+  CHECK(PlatformImplInitialized(), base::NotFatalUntil::M159);
 
   for (auto it = voices_.begin(); it != voices_.end(); ++it) {
     out_voices->push_back(VoiceData());
@@ -515,7 +522,8 @@ void TtsPlatformImplLinux::Shutdown() {
 }
 
 void TtsPlatformImplLinux::OnInitialized(bool success, PlatformVoices voices) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
   if (success)
     voices_ = std::move(voices);
   is_initialized_ = true;
@@ -525,8 +533,9 @@ void TtsPlatformImplLinux::OnInitialized(bool success, PlatformVoices voices) {
 void TtsPlatformImplLinux::OnSpeakScheduled(
     base::OnceCallback<void(bool)> on_speak_finished,
     bool success) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
-  DCHECK(is_speaking_);
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
+  CHECK(is_speaking_, base::NotFatalUntil::M159);
 
   // If the utterance was not able to be emitted, stop the speaking. There
   // won't be any asynchronous TTS event to confirm the end of the speech.
@@ -540,12 +549,13 @@ void TtsPlatformImplLinux::OnSpeakScheduled(
 }
 
 void TtsPlatformImplLinux::OnSpeakFinished(int utterance_id) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
   if (utterance_id != utterance_id_)
     return;
 
-  DCHECK(is_speaking_);
-  DCHECK_NE(utterance_id_, kInvalidUtteranceId);
+  CHECK(is_speaking_, base::NotFatalUntil::M159);
+  CHECK_NE(utterance_id_, kInvalidUtteranceId, base::NotFatalUntil::M159);
   is_speaking_ = false;
   utterance_id_ = kInvalidUtteranceId;
 }
@@ -557,13 +567,12 @@ void TtsPlatformImplLinux::ProcessSpeech(
     const UtteranceContinuousParameters& params,
     base::OnceCallback<void(bool)> on_speak_finished,
     const std::string& parsed_utterance) {
-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+  CHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI),
+        base::NotFatalUntil::M159);
 
   // Speech dispatcher's speech params are around 3x at either limit.
-  float rate = params.rate > 3 ? 3 : params.rate;
-  rate = params.rate < 0.334 ? 0.334 : rate;
-  float pitch = params.pitch > 3 ? 3 : params.pitch;
-  pitch = params.pitch < 0.334 ? 0.334 : pitch;
+  float rate = std::clamp(static_cast<float>(params.rate), 0.334f, 3.0f);
+  float pitch = std::clamp(static_cast<float>(params.pitch), 0.334f, 3.0f);
 
   SPDChromeVoice matched_voice;
   auto it = voices_.find(voice.name);

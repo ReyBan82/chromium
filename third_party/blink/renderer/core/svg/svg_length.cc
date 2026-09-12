@@ -24,17 +24,22 @@
 #include "third_party/blink/renderer/core/css/css_math_function_value.h"
 #include "third_party/blink/renderer/core/css/css_numeric_literal_value.h"
 #include "third_party/blink/renderer/core/css/css_primitive_value.h"
+#include "third_party/blink/renderer/core/css/css_unparsed_declaration_value.h"
 #include "third_party/blink/renderer/core/css/css_value.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser.h"
+#include "third_party/blink/renderer/core/css/parser/css_parser_token_stream.h"
+#include "third_party/blink/renderer/core/css/parser/css_variable_parser.h"
 #include "third_party/blink/renderer/core/execution_context/security_context.h"
 #include "third_party/blink/renderer/core/svg/animation/smil_animation_effect_parameters.h"
+#include "third_party/blink/renderer/core/svg/svg_length_context.h"
+#include "third_party/blink/renderer/core/svg/svg_zoom_migration.h"
 #include "third_party/blink/renderer/core/svg_names.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
-
 namespace {
 
 #define CAST_UNIT(unit) \
@@ -43,15 +48,19 @@ namespace {
 // Table of initial values for SVGLength properties. Indexed by the
 // SVGLength::Initial enumeration, hence these two need to be kept
 // synchronized.
-const struct {
+struct InitialLengthData {
   int8_t value;
   uint8_t unit;
-} g_initial_lengths_table[] = {
-    {0, CAST_UNIT(kUserUnits)},    {-10, CAST_UNIT(kPercentage)},
-    {0, CAST_UNIT(kPercentage)},   {50, CAST_UNIT(kPercentage)},
-    {100, CAST_UNIT(kPercentage)}, {120, CAST_UNIT(kPercentage)},
-    {3, CAST_UNIT(kUserUnits)},
 };
+constexpr auto g_initial_lengths_table = std::to_array<InitialLengthData>({
+    {0, CAST_UNIT(kUserUnits)},
+    {-10, CAST_UNIT(kPercentage)},
+    {0, CAST_UNIT(kPercentage)},
+    {50, CAST_UNIT(kPercentage)},
+    {100, CAST_UNIT(kPercentage)},
+    {120, CAST_UNIT(kPercentage)},
+    {3, CAST_UNIT(kUserUnits)},
+});
 static_assert(static_cast<size_t>(SVGLength::Initial::kNumValues) ==
                   std::size(g_initial_lengths_table),
               "the enumeration is synchronized with the value table");
@@ -70,6 +79,35 @@ const CSSPrimitiveValue& CreateInitialCSSValue(
       entry.value, static_cast<CSSPrimitiveValue::UnitType>(entry.unit));
 }
 
+bool IsSupportedCSSUnitType(CSSPrimitiveValue::UnitType type) {
+  return (CSSPrimitiveValue::IsLength(type) ||
+          type == CSSPrimitiveValue::UnitType::kNumber ||
+          type == CSSPrimitiveValue::UnitType::kPercentage) &&
+         type != CSSPrimitiveValue::UnitType::kQuirkyEms;
+}
+
+bool IsSupportedCalculationCategory(CalculationResultCategory category) {
+  switch (category) {
+    case kCalcLength:
+    case kCalcNumber:
+    case kCalcPercent:
+    case kCalcLengthFunction:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool AllowedCSSValueForSVGLength(const CSSValue& value) {
+  if (auto* numeric_value = DynamicTo<CSSNumericLiteralValue>(value)) {
+    return IsSupportedCSSUnitType(numeric_value->GetType());
+  }
+  if (auto* math_value = DynamicTo<CSSMathFunctionValue>(value)) {
+    return IsSupportedCalculationCategory(math_value->Category());
+  }
+  return value.IsUnparsedDeclaration();
+}
+
 }  // namespace
 
 SVGLength::SVGLength(SVGLengthMode mode)
@@ -81,9 +119,10 @@ SVGLength::SVGLength(SVGLengthMode mode)
 SVGLength::SVGLength(Initial initial, SVGLengthMode mode)
     : SVGLength(CreateInitialCSSValue(initial), mode) {}
 
-SVGLength::SVGLength(const CSSPrimitiveValue& value, SVGLengthMode mode)
+SVGLength::SVGLength(const CSSValue& value, SVGLengthMode mode)
     : value_(value), unit_mode_(static_cast<unsigned>(mode)) {
   DCHECK_EQ(UnitMode(), mode);
+  DCHECK(AllowedCSSValueForSVGLength(value));
 }
 
 void SVGLength::Trace(Visitor* visitor) const {
@@ -95,51 +134,50 @@ SVGLength* SVGLength::Clone() const {
   return MakeGarbageCollected<SVGLength>(*value_, UnitMode());
 }
 
-SVGPropertyBase* SVGLength::CloneForAnimation(const String& value) const {
-  auto* length = MakeGarbageCollected<SVGLength>(UnitMode());
-  length->SetValueAsString(value);
-  return length;
-}
-
 bool SVGLength::operator==(const SVGLength& other) const {
   return unit_mode_ == other.unit_mode_ && value_ == other.value_;
 }
 
 Length SVGLength::ConvertToLength(
     const SVGLengthConversionData& conversion_data) const {
-  return value_->ConvertToLength(conversion_data);
+  const CSSValue* resolved_value =
+      conversion_data.MaybeResolveUnparsedValue(*value_);
+  if (!resolved_value) {
+    return Length::Fixed(0);
+  }
+  return To<CSSPrimitiveValue>(*resolved_value)
+      .ConvertToLength(conversion_data);
 }
 
 float SVGLength::Value(const SVGLengthConversionData& conversion_data,
                        float dimension) const {
-  return FloatValueForLength(value_->ConvertToLength(conversion_data),
-                             dimension);
+  const CSSValue* resolved_value =
+      conversion_data.MaybeResolveUnparsedValue(*value_);
+  if (!resolved_value) {
+    return 0;
+  }
+  return FloatValueForLength(
+      To<CSSPrimitiveValue>(*resolved_value).ConvertToLength(conversion_data),
+      dimension);
 }
 
 float SVGLength::Value(const SVGLengthContext& context) const {
-  if (IsCalculated() || HasContainerRelativeUnits())
-    return context.ResolveValue(AsCSSPrimitiveValue(), UnitMode());
-
-  return context.ConvertValueToUserUnits(value_->GetFloatValue(), UnitMode(),
-                                         NumericLiteralType());
+  const CSSValue* resolved_value = context.MaybeResolveUnparsedValue(*value_);
+  if (!resolved_value) {
+    return 0;
+  }
+  if (const auto* math_function =
+          DynamicTo<CSSMathFunctionValue>(*resolved_value)) {
+    return context.ResolveValue(*math_function, UnitMode());
+  }
+  const auto& numeric_literal = To<CSSNumericLiteralValue>(*resolved_value);
+  return context.ConvertValueToUserUnits(numeric_literal.DoubleValue(),
+                                         UnitMode(), numeric_literal.GetType());
 }
 
 void SVGLength::SetValueAsNumber(float value) {
   value_ = CSSNumericLiteralValue::Create(
       value, CSSPrimitiveValue::UnitType::kUserUnits);
-}
-
-void SVGLength::SetValue(float value, const SVGLengthContext& context) {
-  // |value| is in user units.
-  if (IsCalculated() || HasContainerRelativeUnits()) {
-    value_ = CSSNumericLiteralValue::Create(
-        value, CSSPrimitiveValue::UnitType::kUserUnits);
-    return;
-  }
-  value_ = CSSNumericLiteralValue::Create(
-      context.ConvertValueFromUserUnits(value, UnitMode(),
-                                        NumericLiteralType()),
-      NumericLiteralType());
 }
 
 void SVGLength::SetValueInSpecifiedUnits(float value) {
@@ -152,27 +190,11 @@ bool SVGLength::IsRelative() const {
     return true;
   // TODO(crbug.com/979895): This is the result of a refactoring, which might
   // have revealed an existing bug with relative units in math functions.
-  return !IsCalculated() &&
-         CSSPrimitiveValue::IsRelativeUnit(NumericLiteralType());
-}
-
-static bool IsSupportedCSSUnitType(CSSPrimitiveValue::UnitType type) {
-  return (CSSPrimitiveValue::IsLength(type) ||
-          type == CSSPrimitiveValue::UnitType::kNumber ||
-          type == CSSPrimitiveValue::UnitType::kPercentage) &&
-         type != CSSPrimitiveValue::UnitType::kQuirkyEms;
-}
-
-static bool IsSupportedCalculationCategory(CalculationCategory category) {
-  switch (category) {
-    case kCalcLength:
-    case kCalcNumber:
-    case kCalcPercent:
-    case kCalcPercentLength:
-      return true;
-    default:
-      return false;
+  if (!IsNumericValue()) {
+    return false;
   }
+
+  return CSSPrimitiveValue::IsRelativeUnit(NumericLiteralType());
 }
 
 namespace {
@@ -191,10 +213,17 @@ const CSSParserContext* GetSVGAttributeParserContext() {
 }  // namespace
 
 SVGParsingError SVGLength::SetValueAsString(const String& string) {
+  return SetValueAsString(string, nullptr);
+}
+
+SVGParsingError SVGLength::SetValueAsString(
+    const String& string,
+    const CSSParserContext* parser_context) {
   // TODO(fs): Preferably we wouldn't need to special-case the null
   // string (which we'll get for example for removeAttribute.)
   // Hopefully work on crbug.com/225807 can help here.
-  if (string.IsNull()) {
+  if (!RuntimeEnabledFeatures::SvgEmptyAttributeStringParsingFixEnabled() &&
+      string.IsNull()) {
     value_ = CSSNumericLiteralValue::Create(
         0, CSSPrimitiveValue::UnitType::kUserUnits);
     return SVGParseStatus::kNoError;
@@ -203,8 +232,39 @@ SVGParsingError SVGLength::SetValueAsString(const String& string) {
   const CSSValue* parsed = CSSParser::ParseSingleValue(
       CSSPropertyID::kX, string, GetSVGAttributeParserContext());
   const auto* new_value = DynamicTo<CSSPrimitiveValue>(parsed);
-  if (!new_value)
-    return SVGParseStatus::kExpectedLength;
+  if (!new_value) {
+    if (RuntimeEnabledFeatures::SvgLengthResolveUnparsedValueEnabled()) {
+      CSSParserTokenStream stream(string);
+      stream.EnsureLookAhead();
+      bool important = false;
+      CSSVariableData* variable_data =
+          CSSVariableParser::ConsumeUnparsedDeclaration(
+              stream,
+              /*allow_important_annotation=*/true,
+              /*is_animation_tainted=*/false,
+              /*must_contain_variable_reference=*/true,
+              /*restricted_value=*/true, /*comma_ends_declaration=*/false,
+              important, *GetSVGAttributeParserContext());
+      if (!variable_data || important) {
+        return SVGParseStatus::kExpectedLength;
+      }
+      // The SVG parser context allows unitless lengths, but CSS variable
+      // resolution occurs during the cascade phase where unitless lengths
+      // are forbidden. To maintain consistent CSS behavior and avoid SVG-
+      // specific quirks, we pass the document's parser context here, when
+      // available.
+      //
+      // https://github.com/web-platform-tests/wpt/pull/56390#issuecomment-3656298717
+      auto* unparsed_value = MakeGarbageCollected<CSSUnparsedDeclarationValue>(
+          variable_data,
+          parser_context ? parser_context : GetSVGAttributeParserContext());
+
+      value_ = unparsed_value;
+      return SVGParseStatus::kNoError;
+    } else {
+      return SVGParseStatus::kExpectedLength;
+    }
+  }
 
   if (const auto* math_value = DynamicTo<CSSMathFunctionValue>(new_value)) {
     if (!IsSupportedCalculationCategory(math_value->Category()))
@@ -220,7 +280,7 @@ SVGParsingError SVGLength::SetValueAsString(const String& string) {
 }
 
 String SVGLength::ValueAsString() const {
-  return value_->CustomCSSText();
+  return value_->CssText();
 }
 
 void SVGLength::NewValueSpecifiedUnits(CSSPrimitiveValue::UnitType type,
@@ -238,44 +298,6 @@ void SVGLength::ConvertToSpecifiedUnits(CSSPrimitiveValue::UnitType type,
       type);
 }
 
-SVGLengthMode SVGLength::LengthModeForAnimatedLengthAttribute(
-    const QualifiedName& attr_name) {
-  typedef HashMap<QualifiedName, SVGLengthMode> LengthModeForLengthAttributeMap;
-  DEFINE_STATIC_LOCAL(LengthModeForLengthAttributeMap, length_mode_map, ());
-
-  if (length_mode_map.empty()) {
-    length_mode_map.Set(svg_names::kXAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kYAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kCxAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kCyAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kDxAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kDyAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kFrAttr, SVGLengthMode::kOther);
-    length_mode_map.Set(svg_names::kFxAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kFyAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kRAttr, SVGLengthMode::kOther);
-    length_mode_map.Set(svg_names::kRxAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kRyAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kWidthAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kHeightAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kX1Attr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kX2Attr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kY1Attr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kY2Attr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kRefXAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kRefYAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kMarkerWidthAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kMarkerHeightAttr, SVGLengthMode::kHeight);
-    length_mode_map.Set(svg_names::kTextLengthAttr, SVGLengthMode::kWidth);
-    length_mode_map.Set(svg_names::kStartOffsetAttr, SVGLengthMode::kWidth);
-  }
-
-  if (length_mode_map.Contains(attr_name))
-    return length_mode_map.at(attr_name);
-
-  return SVGLengthMode::kOther;
-}
-
 bool SVGLength::NegativeValuesForbiddenForAnimatedLengthAttribute(
     const QualifiedName& attr_name) {
   DEFINE_STATIC_LOCAL(
@@ -289,11 +311,18 @@ bool SVGLength::NegativeValuesForbiddenForAnimatedLengthAttribute(
   return no_negative_values_set.Contains(attr_name);
 }
 
-void SVGLength::Add(const SVGPropertyBase* other,
+bool SVGLength::Add(const SVGPropertyBase* other,
                     const SVGElement* context_element) {
   SVGLengthContext length_context(context_element);
-  SetValue(Value(length_context) + To<SVGLength>(other)->Value(length_context),
-           length_context);
+  const float sum =
+      Value(length_context) + To<SVGLength>(other)->Value(length_context);
+  if (IsCalculated()) {
+    SetValueAsNumber(NoopWillBeInvScaleScalar(sum, length_context.GetZoom()));
+    return true;
+  }
+  SetValueInSpecifiedUnits(length_context.ConvertValueFromUserUnits(
+      sum, UnitMode(), NumericLiteralType()));
+  return true;
 }
 
 void SVGLength::CalculateAnimatedValue(
@@ -320,8 +349,7 @@ void SVGLength::CalculateAnimatedValue(
   const SVGLength* unit_determining_length =
       (percentage < 0.5) ? from_length : to_length;
   CSSPrimitiveValue::UnitType result_unit =
-      (!unit_determining_length->IsCalculated() &&
-       !unit_determining_length->HasContainerRelativeUnits())
+      unit_determining_length->IsNumericValue()
           ? unit_determining_length->NumericLiteralType()
           : CSSPrimitiveValue::UnitType::kUserUnits;
 
@@ -337,8 +365,9 @@ float SVGLength::CalculateDistance(const SVGPropertyBase* to_value,
                                    const SVGElement* context_element) const {
   SVGLengthContext length_context(context_element);
   auto* to_length = To<SVGLength>(to_value);
-
-  return fabsf(to_length->Value(length_context) - Value(length_context));
+  const float distance =
+      std::fabsf(to_length->Value(length_context) - Value(length_context));
+  return NoopWillBeInvScaleScalar(distance, length_context.GetZoom());
 }
 
 void SVGLength::SetInitial(unsigned initial_value) {
@@ -346,9 +375,12 @@ void SVGLength::SetInitial(unsigned initial_value) {
 }
 
 bool SVGLength::IsNegativeNumericLiteral() const {
-  if (!value_->IsNumericLiteralValue())
+  if (!value_->IsPrimitiveValue()) {
     return false;
-  return value_->GetDoubleValue() < 0;
+  }
+  std::optional<double> value =
+      To<CSSPrimitiveValue>(*value_).GetValueIfKnown();
+  return value && *value < 0.0;
 }
 
 }  // namespace blink

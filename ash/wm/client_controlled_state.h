@@ -9,12 +9,10 @@
 
 #include "ash/ash_export.h"
 #include "ash/wm/base_state.h"
-#include "ash/wm/wm_event.h"
-#include "base/time/time.h"
-#include "ui/display/display.h"
-#include "ui/gfx/geometry/rect.h"
 
 namespace ash {
+
+class WMEvent;
 
 // ClientControlledState delegates the window state transition and
 // bounds control to the client. Its window state and bounds are
@@ -72,6 +70,7 @@ class ASH_EXPORT ClientControlledState : public BaseState {
   }
 
   // WindowState::State:
+  void OnWMEvent(WindowState* window_state, const WMEvent* event) override;
   void AttachState(WindowState* window_state,
                    WindowState::State* previous_state) override;
   void DetachState(WindowState* window_state) override;
@@ -92,6 +91,8 @@ class ASH_EXPORT ClientControlledState : public BaseState {
   // false otherwise.
   bool EnterNextState(WindowState* window_state,
                       chromeos::WindowStateType next_state_type);
+
+  Delegate* delegate_for_testing() { return delegate_.get(); }
 
  private:
   chromeos::WindowStateType GetResolvedNextWindowStateType(

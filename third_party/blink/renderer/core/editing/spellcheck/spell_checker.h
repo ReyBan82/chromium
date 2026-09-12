@@ -29,6 +29,7 @@
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker.h"
+#include "third_party/blink/renderer/core/editing/markers/suggestion_marker.h"
 #include "third_party/blink/renderer/core/editing/spellcheck/text_checking.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
@@ -37,11 +38,10 @@ namespace blink {
 class DocumentMarkerGroup;
 class Element;
 class IdleSpellCheckController;
+class OnDemandSpellCheckController;
 class LocalDOMWindow;
 class LocalFrame;
 class HTMLElement;
-class Node;
-class SpellCheckMarker;
 class SpellCheckRequest;
 class SpellCheckRequester;
 struct TextCheckingResult;
@@ -84,12 +84,18 @@ class CORE_EXPORT SpellChecker final : public GarbageCollected<SpellChecker> {
                                   int from,
                                   int length) const;
 
+  void ElementRemoved(Element*);
+
   // Exposed for testing and idle time spell checker
   SpellCheckRequester& GetSpellCheckRequester() const {
     return *spell_check_requester_;
   }
   IdleSpellCheckController& GetIdleSpellCheckController() const {
     return *idle_spell_check_controller_;
+  }
+
+  OnDemandSpellCheckController& GetOnDemandSpellCheckController() const {
+    return *on_demand_spell_check_controller_;
   }
 
  private:
@@ -100,11 +106,14 @@ class CORE_EXPORT SpellChecker final : public GarbageCollected<SpellChecker> {
   std::pair<String, int> FindFirstMisspelling(const Position&, const Position&);
 
   void RemoveMarkers(const EphemeralRange&, DocumentMarker::MarkerTypes);
+  void RemoveSuggestionMarkersByType(const EphemeralRange&,
+                                     SuggestionMarker::SuggestionType);
 
   Member<LocalDOMWindow> window_;
 
   const Member<SpellCheckRequester> spell_check_requester_;
   const Member<IdleSpellCheckController> idle_spell_check_controller_;
+  const Member<OnDemandSpellCheckController> on_demand_spell_check_controller_;
 };
 
 }  // namespace blink

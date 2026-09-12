@@ -7,36 +7,35 @@ package org.chromium.midi;
 import android.media.midi.MidiDevice;
 import android.media.midi.MidiInputPort;
 
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+
 import org.chromium.base.Log;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.io.IOException;
 
-/**
- * A class implementing midi::MidiOutputPortAndroid functionality.
- */
+/** A class implementing midi::MidiOutputPortAndroid functionality. */
 // Note "OutputPort" is named in the Web MIDI manner. It corresponds to MidiInputPort class in the
 // Android API.
 @JNINamespace("midi")
+@NullMarked
 class MidiOutputPortAndroid {
-    /**
-     * The underlying port.
-     */
-    private MidiInputPort mPort;
-    /**
-     * The device this port belongs to.
-     */
+    /** The underlying port. */
+    private volatile @Nullable MidiInputPort mPort;
+
+    /** The device this port belongs to. */
     private final MidiDevice mDevice;
-    /**
-     * The index of the port in the associated device.
-     */
+
+    /** The index of the port in the associated device. */
     private final int mIndex;
 
-    private static final String TAG = "midi";
+    private static final String TAG = "MidiOutPortAndroid";
 
     /**
      * constructor
+     *
      * @param device The device this port belongs to.
      * @param index The index of the port in the associated device.
      */
@@ -54,39 +53,47 @@ class MidiOutputPortAndroid {
         if (mPort != null) {
             return true;
         }
-        mPort = mDevice.openInputPort(mIndex);
-        return mPort != null;
+        try {
+            mPort = mDevice.openInputPort(mIndex);
+            return mPort != null;
+        } catch (SecurityException | IllegalArgumentException e) {
+            Log.w(TAG, "Failed to open port", e);
+            return false;
+        }
     }
 
-    /**
-     * Sends the data to the underlying output port.
-     */
+    /** Sends the data to the underlying output port. */
     @CalledByNative
     void send(byte[] bs) {
-        if (mPort == null) {
+        MidiInputPort localPort = mPort;
+        if (localPort == null) {
             return;
         }
         try {
-            mPort.send(bs, 0, bs.length);
+            localPort.send(bs, 0, bs.length);
         } catch (IOException e) {
             // We can do nothing here. Just ignore the error.
             Log.e(TAG, "MidiOutputPortAndroid.send: " + e);
         }
     }
 
-    /**
-     * Closes the port.
-     */
+    /** Closes the port. */
     @CalledByNative
     void close() {
-        if (mPort == null) {
-            return;
+        MidiInputPort localPort;
+
+        synchronized (this) {
+            if (mPort == null) {
+                return;
+            }
+            localPort = mPort;
+            mPort = null;
         }
+
         try {
-            mPort.close();
+            localPort.close();
         } catch (IOException e) {
             // We can do nothing here. Just ignore the error.
         }
-        mPort = null;
     }
 }

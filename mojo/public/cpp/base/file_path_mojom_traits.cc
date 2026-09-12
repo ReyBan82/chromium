@@ -4,6 +4,7 @@
 
 #include "mojo/public/cpp/base/file_path_mojom_traits.h"
 
+#include "base/compiler_specific.h"
 #include "build/build_config.h"
 
 namespace mojo {
@@ -12,11 +13,12 @@ namespace mojo {
 bool StructTraits<mojo_base::mojom::FilePathDataView, base::FilePath>::Read(
     mojo_base::mojom::FilePathDataView data,
     base::FilePath* out) {
-  base::FilePath::StringPieceType path_view;
+  base::FilePath::StringViewType path_view;
 #if BUILDFLAG(IS_WIN)
   ArrayDataView<uint16_t> view;
   data.GetPathDataView(&view);
-  path_view = {reinterpret_cast<const wchar_t*>(view.data()), view.size()};
+  path_view = UNSAFE_TODO(base::FilePath::StringViewType(
+      reinterpret_cast<const wchar_t*>(view.data()), view.size()));
 #else
   if (!data.ReadPath(&path_view)) {
     return false;
@@ -33,8 +35,9 @@ StructTraits<mojo_base::mojom::RelativeFilePathDataView, base::FilePath>::path(
     const base::FilePath& path) {
   CHECK(!path.IsAbsolute());
   CHECK(!path.ReferencesParent());
-  return base::make_span(reinterpret_cast<const uint16_t*>(path.value().data()),
-                         path.value().size());
+  return UNSAFE_TODO(
+      base::span(reinterpret_cast<const uint16_t*>(path.value().data()),
+                 path.value().size()));
 }
 #else
 // static
@@ -50,11 +53,12 @@ StructTraits<mojo_base::mojom::RelativeFilePathDataView, base::FilePath>::path(
 // static
 bool StructTraits<mojo_base::mojom::RelativeFilePathDataView, base::FilePath>::
     Read(mojo_base::mojom::RelativeFilePathDataView data, base::FilePath* out) {
-  base::FilePath::StringPieceType path_view;
+  base::FilePath::StringViewType path_view;
 #if BUILDFLAG(IS_WIN)
   ArrayDataView<uint16_t> view;
   data.GetPathDataView(&view);
-  path_view = {reinterpret_cast<const wchar_t*>(view.data()), view.size()};
+  path_view = UNSAFE_TODO(base::FilePath::StringViewType(
+      reinterpret_cast<const wchar_t*>(view.data()), view.size()));
 #else
   if (!data.ReadPath(&path_view)) {
     return false;

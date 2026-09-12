@@ -16,6 +16,10 @@
 
 namespace extensions {
 
+// static
+const char* FileSystemProviderCapabilities::kManifestDataKey =
+    manifest_keys::kFileSystemProviderCapabilities;
+
 FileSystemProviderCapabilities::FileSystemProviderCapabilities()
     : configurable_(false),
       watchable_(false),
@@ -34,29 +38,25 @@ FileSystemProviderCapabilities::FileSystemProviderCapabilities(
       source_(source) {
 }
 
-FileSystemProviderCapabilities::~FileSystemProviderCapabilities() {
-}
+FileSystemProviderCapabilities::~FileSystemProviderCapabilities() = default;
 
-FileSystemProviderCapabilitiesHandler::FileSystemProviderCapabilitiesHandler() {
-}
+FileSystemProviderCapabilitiesHandler::FileSystemProviderCapabilitiesHandler() =
+    default;
 
 FileSystemProviderCapabilitiesHandler::
-    ~FileSystemProviderCapabilitiesHandler() {
-}
+    ~FileSystemProviderCapabilitiesHandler() = default;
 
 // static
 const FileSystemProviderCapabilities* FileSystemProviderCapabilities::Get(
     const Extension* extension) {
-  return static_cast<FileSystemProviderCapabilities*>(
-      extension->GetManifestData(
-          manifest_keys::kFileSystemProviderCapabilities));
+  return extension->GetManifestData<FileSystemProviderCapabilities>();
 }
 
 bool FileSystemProviderCapabilitiesHandler::Parse(Extension* extension,
                                                   std::u16string* error) {
   const bool has_permission = extensions::PermissionsParser::HasAPIPermission(
       extension, mojom::APIPermissionID::kFileSystemProvider);
-  const base::Value* section = extension->manifest()->FindDictPathAsValue(
+  const base::DictValue* section = extension->manifest()->FindDictPath(
       manifest_keys::kFileSystemProviderCapabilities);
 
   if (has_permission && !section) {
@@ -77,37 +77,37 @@ bool FileSystemProviderCapabilitiesHandler::Parse(Extension* extension,
     return true;
   }
 
-  api::manifest_types::FileSystemProviderCapabilities idl_capabilities;
-  if (!api::manifest_types::FileSystemProviderCapabilities::Populate(
-          *section, &idl_capabilities, error)) {
+  auto idl_capabilities =
+      api::manifest_types::FileSystemProviderCapabilities::FromValue(*section);
+  if (!idl_capabilities.has_value()) {
+    *error = std::move(idl_capabilities).error();
     return false;
   }
 
   FileSystemProviderSource source = SOURCE_FILE;
-  switch (idl_capabilities.source) {
-    case api::manifest_types::FILE_SYSTEM_PROVIDER_SOURCE_FILE:
+  switch (idl_capabilities->source) {
+    case api::manifest_types::FileSystemProviderSource::kFile:
       source = SOURCE_FILE;
       break;
-    case api::manifest_types::FILE_SYSTEM_PROVIDER_SOURCE_DEVICE:
+    case api::manifest_types::FileSystemProviderSource::kDevice:
       source = SOURCE_DEVICE;
       break;
-    case api::manifest_types::FILE_SYSTEM_PROVIDER_SOURCE_NETWORK:
+    case api::manifest_types::FileSystemProviderSource::kNetwork:
       source = SOURCE_NETWORK;
       break;
-    case api::manifest_types::FILE_SYSTEM_PROVIDER_SOURCE_NONE:
+    case api::manifest_types::FileSystemProviderSource::kNone:
       NOTREACHED();
   }
 
   std::unique_ptr<FileSystemProviderCapabilities> capabilities(
       new FileSystemProviderCapabilities(
-          idl_capabilities.configurable.value_or(false) /* false by default */,
-          idl_capabilities.watchable.value_or(false) /* false by default */,
-          idl_capabilities.multiple_mounts.value_or(
+          idl_capabilities->configurable.value_or(false) /* false by default */,
+          idl_capabilities->watchable.value_or(false) /* false by default */,
+          idl_capabilities->multiple_mounts.value_or(
               false) /* false by default */,
           source));
 
-  extension->SetManifestData(manifest_keys::kFileSystemProviderCapabilities,
-                             std::move(capabilities));
+  extension->SetManifestData(std::move(capabilities));
   return true;
 }
 

@@ -7,13 +7,13 @@
 
 #include <stdint.h>
 
-#include <memory>
-#include <set>
 #include <vector>
 
+#include "base/containers/flat_map.h"
 #include "base/memory/weak_ptr.h"
-#include "base/task/sequenced_task_runner.h"
+#include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/common/child_process_id.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -24,11 +24,13 @@
 
 namespace content {
 
+class RenderProcessHostImpl;
+
 // Responsible for P2P sockets. Lives on the UI thread.
 class P2PSocketDispatcherHost
     : public network::mojom::P2PTrustedSocketManagerClient {
  public:
-  explicit P2PSocketDispatcherHost(int render_process_id);
+  explicit P2PSocketDispatcherHost(ChildProcessId render_process_id);
 
   P2PSocketDispatcherHost(const P2PSocketDispatcherHost&) = delete;
   P2PSocketDispatcherHost& operator=(const P2PSocketDispatcherHost&) = delete;
@@ -62,13 +64,13 @@ class P2PSocketDispatcherHost
                   uint64_t packet_length,
                   bool incoming) override;
 
-  int render_process_id_;
+  const ChildProcessId render_process_id_;
 
   bool dump_incoming_rtp_packet_ = false;
   bool dump_outgoing_rtp_packet_ = false;
   RenderProcessHost::WebRtcRtpPacketCallback packet_callback_;
 
-  // TODO(crbug.com/1178670): We use sets of interfaces for now (instead of
+  // TODO(crbug.com/40169214): We use sets of interfaces for now (instead of
   // creating a host-per-frame) since RTP dumps are started/stopped at the
   // process level (for now).
   // There are, however, plans to:

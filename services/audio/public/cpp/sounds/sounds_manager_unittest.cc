@@ -5,23 +5,37 @@
 #include "services/audio/public/cpp/sounds/sounds_manager.h"
 
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "base/check_deref.h"
 #include "base/compiler_specific.h"
 #include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
-#include "base/strings/string_piece.h"
-#include "base/test/test_message_loop.h"
+#include "base/test/task_environment.h"
 #include "media/audio/simple_sources.h"
 #include "media/audio/test_audio_thread.h"
 #include "media/base/audio_codecs.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "services/audio/public/cpp/sounds/audio_stream_handler.h"
 #include "services/audio/public/cpp/sounds/test_data.h"
+#include "services/audio/test/fake_output_stream.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/resource/mock_resource_bundle_delegate.h"
+#include "ui/base/resource/resource_bundle.h"
 
 namespace audio {
+namespace {
+
+using ::testing::_;
+using ::testing::DoAll;
+using ::testing::NiceMock;
+using ::testing::Return;
+using ::testing::SetArgPointee;
+
+constexpr int kTestResourceId = 1;
 
 class SoundsManagerTest : public testing::Test {
  public:
@@ -29,76 +43,110 @@ class SoundsManagerTest : public testing::Test {
   ~SoundsManagerTest() override = default;
 
   void SetUp() override {
-    SoundsManager::Create(base::DoNothing());
+    sounds_manager_ = SoundsManager::Create(fake_output_stream_.GetBinder());
     base::RunLoop().RunUntilIdle();
   }
 
   void TearDown() override {
-    SoundsManager::Shutdown();
+    sounds_manager_.reset();
     base::RunLoop().RunUntilIdle();
   }
 
-  void SetObserverForTesting(AudioStreamHandler::TestObserver* observer) {
-    AudioStreamHandler::SetObserverForTesting(observer);
+ protected:
+  SoundsManager& sounds_manager() { return CHECK_DEREF(sounds_manager_); }
+
+  FakeOutputStream& fake_output_stream() { return fake_output_stream_; }
+
+  ui::MockResourceBundleDelegate& mock_resource_delegate() {
+    return mock_resource_delegate_;
   }
 
  private:
-  base::TestMessageLoop message_loop_;
+  base::test::TaskEnvironment env_;
+
+  FakeOutputStream fake_output_stream_;
+  std::unique_ptr<SoundsManager> sounds_manager_;
+
+  NiceMock<ui::MockResourceBundleDelegate> mock_resource_delegate_;
+  ui::ResourceBundle resource_bundle_{&mock_resource_delegate_};
+  ui::ResourceBundle::SharedInstanceSwapperForTesting resource_bundle_swapper_{
+      &resource_bundle_};
 };
 
 TEST_F(SoundsManagerTest, Play) {
-  ASSERT_TRUE(SoundsManager::Get());
+  EXPECT_CALL(mock_resource_delegate(),
+              GetRawDataResource(kTestResourceId, _, _))
+      .WillOnce(DoAll(SetArgPointee<2>(std::string_view(
+                          kTestAudioData, std::size(kTestAudioData))),
+                      Return(true)));
 
-  base::RunLoop run_loop;
-  TestObserver observer(run_loop.QuitClosure());
+  ASSERT_TRUE(sounds_manager().Initialize(
+      kTestAudioKey, kTestResourceId, media::AudioCodec::kPCM, /*loop=*/false));
+  ASSERT_EQ(20, sounds_manager().GetDuration(kTestAudioKey).InMicroseconds());
+  ASSERT_TRUE(sounds_manager().Play(kTestAudioKey));
 
-  SetObserverForTesting(&observer);
+  fake_output_stream().ExpectPlay();
+  EXPECT_EQ(1, fake_output_stream().play_count());
+  int frames = fake_output_stream().ConsumeAllAudioFrames();
+  EXPECT_GT(frames, 0);
 
-  ASSERT_TRUE(SoundsManager::Get()->Initialize(
-      kTestAudioKey,
-      base::StringPiece(kTestAudioData, std::size(kTestAudioData)),
-      media::AudioCodec::kPCM));
-  ASSERT_EQ(20,
-            SoundsManager::Get()->GetDuration(kTestAudioKey).InMicroseconds());
-  ASSERT_TRUE(SoundsManager::Get()->Play(kTestAudioKey));
-  run_loop.Run();
-
-  ASSERT_EQ(1, observer.num_play_requests());
-  ASSERT_EQ(1, observer.num_stop_requests());
-
-  SetObserverForTesting(NULL);
+  sounds_manager().Stop(kTestAudioKey);
+  fake_output_stream().ExpectPause();
+  EXPECT_EQ(1, fake_output_stream().pause_count());
+  fake_output_stream().ExpectDisconnect();
 }
 
 TEST_F(SoundsManagerTest, Stop) {
-  ASSERT_TRUE(SoundsManager::Get());
+  EXPECT_CALL(mock_resource_delegate(),
+              GetRawDataResource(kTestResourceId, _, _))
+      .WillOnce(DoAll(SetArgPointee<2>(std::string_view(
+                          kTestAudioData, std::size(kTestAudioData))),
+                      Return(true)));
 
-  base::RunLoop run_loop;
-  TestObserver observer(run_loop.QuitClosure());
+  ASSERT_TRUE(sounds_manager().Initialize(
+      kTestAudioKey, kTestResourceId, media::AudioCodec::kPCM, /*loop=*/false));
 
-  SetObserverForTesting(&observer);
+  EXPECT_EQ(0, fake_output_stream().play_count());
+  EXPECT_EQ(0, fake_output_stream().pause_count());
 
-  ASSERT_TRUE(SoundsManager::Get()->Initialize(
-      kTestAudioKey,
-      base::StringPiece(kTestAudioData, std::size(kTestAudioData)),
-      media::AudioCodec::kPCM));
+  ASSERT_TRUE(sounds_manager().Play(kTestAudioKey));
+  fake_output_stream().ExpectPlay();
+  EXPECT_EQ(1, fake_output_stream().play_count());
 
-  ASSERT_EQ(0, observer.num_play_requests());
-  ASSERT_EQ(0, observer.num_stop_requests());
+  ASSERT_TRUE(sounds_manager().Stop(kTestAudioKey));
+  fake_output_stream().ExpectPause();
+  EXPECT_EQ(1, fake_output_stream().pause_count());
+  fake_output_stream().ExpectDisconnect();
+}
 
-  ASSERT_TRUE(SoundsManager::Get()->Play(kTestAudioKey));
-  ASSERT_TRUE(SoundsManager::Get()->Stop(kTestAudioKey));
-  run_loop.Run();
+TEST_F(SoundsManagerTest, Pause) {
+  EXPECT_CALL(mock_resource_delegate(),
+              GetRawDataResource(kTestResourceId, _, _))
+      .WillOnce(DoAll(SetArgPointee<2>(std::string_view(
+                          kTestAudioData, std::size(kTestAudioData))),
+                      Return(true)));
 
-  ASSERT_EQ(1, observer.num_play_requests());
-  ASSERT_EQ(1, observer.num_stop_requests());
+  ASSERT_TRUE(sounds_manager().Initialize(
+      kTestAudioKey, kTestResourceId, media::AudioCodec::kPCM, /*loop=*/false));
 
-  SetObserverForTesting(NULL);
+  EXPECT_EQ(0, fake_output_stream().play_count());
+  EXPECT_EQ(0, fake_output_stream().pause_count());
+
+  ASSERT_TRUE(sounds_manager().Play(kTestAudioKey));
+  fake_output_stream().ExpectPlay();
+  EXPECT_EQ(1, fake_output_stream().play_count());
+
+  ASSERT_TRUE(sounds_manager().Pause(kTestAudioKey));
+  fake_output_stream().ExpectPause();
+  EXPECT_EQ(1, fake_output_stream().pause_count());
+  fake_output_stream().ExpectDisconnect();
 }
 
 TEST_F(SoundsManagerTest, Uninitialized) {
-  ASSERT_TRUE(SoundsManager::Get());
-  ASSERT_FALSE(SoundsManager::Get()->Play(kTestAudioKey));
-  ASSERT_FALSE(SoundsManager::Get()->Stop(kTestAudioKey));
+  ASSERT_FALSE(sounds_manager().Play(kTestAudioKey));
+  ASSERT_FALSE(sounds_manager().Stop(kTestAudioKey));
+  ASSERT_FALSE(sounds_manager().Pause(kTestAudioKey));
 }
 
+}  // namespace
 }  // namespace audio

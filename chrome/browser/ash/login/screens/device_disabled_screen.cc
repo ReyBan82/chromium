@@ -6,13 +6,15 @@
 
 #include <string>
 
-#include "ash/constants/ash_features.h"
+#include "base/check_deref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/notreached.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/browser_process_platform_part.h"
+#include "chrome/browser/browser_process_platform_part_ash.h"
 #include "chrome/browser/ui/webui/ash/login/device_disabled_screen_handler.h"
-#include "chromeos/ash/components/install_attributes/install_attributes.h"
+#include "chromeos/ash/components/policy/restriction_schedule/device_restriction_schedule_controller.h"
+#include "ui/chromeos/devicetype_utils.h"
 
 namespace ash {
 namespace {
@@ -24,9 +26,13 @@ system::DeviceDisablingManager* DeviceDisablingManager() {
 }  // namespace
 
 DeviceDisabledScreen::DeviceDisabledScreen(
+    policy::DeviceRestrictionScheduleController*
+        device_restriction_schedule_controller,
     base::WeakPtr<DeviceDisabledScreenView> view)
     : BaseScreen(DeviceDisabledScreenView::kScreenId,
                  OobeScreenPriority::SCREEN_DEVICE_DISABLED),
+      device_restriction_schedule_controller_(
+          CHECK_DEREF(device_restriction_schedule_controller)),
       view_(std::move(view)) {}
 
 DeviceDisabledScreen::~DeviceDisabledScreen() = default;
@@ -36,15 +42,23 @@ void DeviceDisabledScreen::ShowImpl() {
     return;
   }
 
-  const bool is_disabled_ad_device =
-      !features::IsChromadAvailableEnabled() &&
-      InstallAttributes::Get()->IsActiveDirectoryManaged();
-
-  view_->Show(DeviceDisablingManager()->serial_number(),
-              DeviceDisablingManager()->enrollment_domain(),
-              DeviceDisablingManager()->disabled_message(),
-              is_disabled_ad_device);
-  DeviceDisablingManager()->AddObserver(this);
+  DeviceDisabledScreenView::Params params;
+  params.serial = DeviceDisablingManager()->serial_number();
+  params.domain = DeviceDisablingManager()->enrollment_domain();
+  params.message = DeviceDisablingManager()->disabled_message();
+  params.location_tracking_enabled =
+      DeviceDisablingManager()->location_tracking_enabled();
+  params.device_restriction_schedule_enabled =
+      device_restriction_schedule_controller_->RestrictionScheduleEnabled();
+  params.device_name = ui::GetChromeOSDeviceName();
+  params.restriction_schedule_end_day =
+      device_restriction_schedule_controller_->RestrictionScheduleEndDay();
+  params.restriction_schedule_end_time =
+      device_restriction_schedule_controller_->RestrictionScheduleEndTime();
+  view_->Show(params);
+  device_disabling_manager_observation_.Observe(DeviceDisablingManager());
+  restriction_schedule_observation_.Observe(
+      &device_restriction_schedule_controller_.get());
 }
 
 void DeviceDisabledScreen::HideImpl() {
@@ -53,13 +67,27 @@ void DeviceDisabledScreen::HideImpl() {
   }
 
   NOTREACHED() << "Device disabled screen can't be hidden";
-  DeviceDisablingManager()->RemoveObserver(this);
 }
 
 void DeviceDisabledScreen::OnDisabledMessageChanged(
     const std::string& disabled_message) {
   if (view_) {
     view_->UpdateMessage(disabled_message);
+  }
+}
+
+void DeviceDisabledScreen::OnLocationTrackingEnabledChanged(
+    bool location_tracking_enabled) {
+  if (view_) {
+    view_->UpdateLocationTracking(location_tracking_enabled);
+  }
+}
+
+void DeviceDisabledScreen::OnRestrictionScheduleMessageChanged() {
+  if (view_) {
+    view_->UpdateRestrictionScheduleMessage(
+        device_restriction_schedule_controller_->RestrictionScheduleEndDay(),
+        device_restriction_schedule_controller_->RestrictionScheduleEndTime());
   }
 }
 

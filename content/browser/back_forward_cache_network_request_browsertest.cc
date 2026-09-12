@@ -4,13 +4,16 @@
 
 #include "content/browser/back_forward_cache_browsertest.h"
 
+#include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "build/build_config.h"
 #include "content/browser/renderer_host/navigation_request.h"
 #include "content/browser/web_contents/web_contents_impl.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
 #include "content/shell/browser/shell.h"
 #include "net/test/embedded_test_server/controllable_http_response.h"
+#include "net/test/embedded_test_server/expectation_handler.h"
 #include "third_party/blink/public/common/features.h"
 
 // This file contains back-/forward-cache tests for fetching from the network.
@@ -28,8 +31,8 @@ using NotRestoredReason = BackForwardCacheMetrics::NotRestoredReason;
 // kLoadingTaskUnfreezable, a page will keep processing the in-flight network
 // requests while the page is frozen in BackForwardCache.
 IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest, FetchWhileStoring) {
-  net::test_server::ControllableHttpResponse fetch_response(
-      embedded_test_server(), "/fetch");
+  net::test_server::ExpectationHandler handler(embedded_test_server());
+  handler.OnRequest("/fetch").RespondWith("text/html", "TheResponse");
   ASSERT_TRUE(embedded_test_server()->Start());
 
   GURL url_a(embedded_test_server()->GetURL("a.com", "/title1.html"));
@@ -49,10 +52,6 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest, FetchWhileStoring) {
 
   // 2) Navigate to B.
   EXPECT_TRUE(NavigateToURL(shell(), url_b));
-
-  fetch_response.WaitForRequest();
-  fetch_response.Send(net::HTTP_OK, "text/html", "TheResponse");
-  fetch_response.Done();
   EXPECT_TRUE(rfh_a->IsInBackForwardCache());
   EXPECT_FALSE(delete_observer_rfh_a.deleted());
 
@@ -63,8 +62,9 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest, FetchWhileStoring) {
 
 // Eviction is triggered when a normal fetch request gets redirected while the
 // page is in back-forward cache.
+// TODO(crbug.com/40937269): Disabled due to flakiness.
 IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
-                       FetchRedirectedWhileStoring) {
+                       DISABLED_FetchRedirectedWhileStoring) {
   net::test_server::ControllableHttpResponse fetch_response(
       embedded_test_server(), "/fetch");
   net::test_server::ControllableHttpResponse fetch2_response(
@@ -111,13 +111,31 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
                     {}, FROM_HERE);
 }
 
-// Eviction is triggered when a keepalive fetch request gets redirected while
-// the page is in back-forward cache.
-// TODO(https://crbug.com/1137682): We should not trigger eviction on redirects
-// of keepalive fetches.
-// TODO(https://crbug.com/1377737): Disabled for flakiness.
-IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
-                       DISABLED_KeepAliveFetchRedirectedWhileStoring) {
+class BackForwardCacheKeepAliveBrowserMigrationTest
+    : public BackForwardCacheBrowserTest,
+      public testing::WithParamInterface<bool> {
+ protected:
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    if (IsKeepAliveInBrowserMigrationEnabled()) {
+      EnableFeatureAndSetParams(blink::features::kKeepAliveInBrowserMigration,
+                                "", "");
+    } else {
+      DisableFeature(blink::features::kKeepAliveInBrowserMigration);
+    }
+    BackForwardCacheBrowserTest::SetUpCommandLine(command_line);
+  }
+  bool IsKeepAliveInBrowserMigrationEnabled() const { return GetParam(); }
+};
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         BackForwardCacheKeepAliveBrowserMigrationTest,
+                         testing::Bool());
+
+// When a keepalive fetch request gets redirected while the page is in
+// back-forward cache, we no longer evict the page if keepalive browser
+// migration flag is on.
+IN_PROC_BROWSER_TEST_P(BackForwardCacheKeepAliveBrowserMigrationTest,
+                       KeepAliveFetchRedirectedWhileStoring) {
   net::test_server::ControllableHttpResponse fetch_response(
       embedded_test_server(), "/fetch");
   net::test_server::ControllableHttpResponse fetch2_response(
@@ -137,7 +155,10 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
                      "my_fetch = fetch('/fetch', { keepalive: true });");
 
   // 2) Navigate to B.
+  PageLifecycleStateManagerTestDelegate delegate(
+      rfh_a->render_view_host()->GetPageLifecycleStateManager());
   EXPECT_TRUE(NavigateToURL(shell(), url_b));
+  ASSERT_TRUE(delegate.WaitForInBackForwardCacheAck());
 
   // Page A is initially stored in the back-forward cache.
   EXPECT_TRUE(rfh_a->IsInBackForwardCache());
@@ -149,29 +170,110 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
       "Location: /fetch2");
   fetch_response.Done();
 
-  // Ensure that the request to /fetch2 was never sent (because the page is
-  // immediately evicted) by checking after 3 seconds.
-  // TODO(https://crbug.com/1137682): We should not trigger eviction on
-  // redirects of keepalive fetches and the redirect request should be sent.
-  base::RunLoop loop;
-  base::OneShotTimer timer;
-  timer.Start(FROM_HERE, base::Seconds(3), loop.QuitClosure());
-  loop.Run();
-  EXPECT_EQ(nullptr, fetch2_response.http_request());
-
-  // Page A should be evicted from the back-forward cache.
-  delete_observer_rfh_a.WaitUntilDeleted();
-
-  // 3) Go back to A.
-  ASSERT_TRUE(HistoryGoBack(web_contents()));
-  ExpectNotRestored({NotRestoredReason::kNetworkRequestRedirected}, {}, {}, {},
-                    {}, FROM_HERE);
+  if (IsKeepAliveInBrowserMigrationEnabled()) {
+    // The browser-side loader immediately follows the redirect.
+    fetch2_response.WaitForRequest();
+    fetch2_response.Send("HTTP/1.1 200 OK\r\n\r\n");
+    fetch2_response.Done();
+    // Page A should remain in the back-forward cache.
+    EXPECT_TRUE(rfh_a->IsInBackForwardCache());
+    // 3) Go back to A, expecting it to be restored successfully.
+    ASSERT_TRUE(HistoryGoBack(web_contents()));
+    ExpectRestored(FROM_HERE);
+  } else {
+    // Ensure that the request to /fetch2 was never sent (because the page is
+    // immediately evicted) by checking after 3 seconds.
+    base::RunLoop loop;
+    base::OneShotTimer timer;
+    timer.Start(FROM_HERE, base::Seconds(3), loop.QuitClosure());
+    loop.Run();
+    EXPECT_EQ(nullptr, fetch2_response.http_request());
+    // The redirect cannot be followed while frozen, so the page is evicted.
+    delete_observer_rfh_a.WaitUntilDeleted();
+    // 3) Go back to A, expecting it not to be restored due to eviction.
+    ASSERT_TRUE(HistoryGoBack(web_contents()));
+    ExpectNotRestored({NotRestoredReason::kNetworkRequestRedirected}, {}, {},
+                      {}, {}, FROM_HERE);
+  }
 }
+
+class BackForwardCacheDrainedAsBytesConsumerTest
+    : public BackForwardCacheBrowserTest,
+      public testing::WithParamInterface<bool> {
+ public:
+  static constexpr int kMaxBufferedBytesPerProcess = 10000;
+
+ protected:
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    EnableFeatureAndSetParams(
+        blink::features::kAllowDatapipeDrainedAsBytesConsumerInBFCache, "", "");
+    BackForwardCacheBrowserTest::SetUpCommandLine(command_line);
+    feature_list_.InitWithFeaturesAndParameters(
+        {{blink::features::kLoadingTasksUnfreezable,
+          {{"max_buffered_bytes_per_process",
+            base::NumberToString(kMaxBufferedBytesPerProcess)}}}},
+        {});
+  }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+};
 
 // Tests the case when the header was received before the page is frozen,
 // but parts of the response body is received when the page is frozen.
-IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
-                       PageWithDrainedDatapipeRequestsForFetchShouldBeEvicted) {
+IN_PROC_BROWSER_TEST_F(
+    BackForwardCacheDrainedAsBytesConsumerTest,
+    PageWithDrainedDatapipeRequestsForFetchShouldBeEvictedOrNot) {
+  net::test_server::ControllableHttpResponse fetch_response(
+      embedded_test_server(), "/fetch");
+  ASSERT_TRUE(embedded_test_server()->Start());
+
+  GURL url_a(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  GURL url_b(embedded_test_server()->GetURL("b.com", "/title1.html"));
+
+  // 1) Navigate to A.
+  EXPECT_TRUE(NavigateToURL(shell(), url_a));
+
+  // Call fetch before navigating away.
+  EXPECT_TRUE(ExecJs(current_frame_host(), R"(
+    var fetch_response_promise = my_fetch = fetch('/fetch').then(response => {
+        return response.text();
+    });
+  )"));
+  // Send response header and a piece of the body before navigating away.
+  fetch_response.WaitForRequest();
+  fetch_response.Send(net::HTTP_OK, "text/plain");
+  fetch_response.Send("hello");
+
+  // 2) Navigate to B.
+  EXPECT_TRUE(NavigateToURL(shell(), url_b));
+  fetch_response.Send("world");
+  fetch_response.Done();
+
+  // 3) Go back to A.
+  // Note that we cannot reliably wait for the datapipe to be drained as bytes
+  // consumer, so sometimes this is not testing the case in question, but the
+  // page will be restored in either way, and the test will not be flaky.
+  ASSERT_TRUE(HistoryGoBack(web_contents()));
+  ExpectRestored(FROM_HERE);
+  // Ensure that the fetch response is complete, having both of the parts from
+  // before entering back/forward cache and after.
+  EXPECT_EQ("helloworld",
+            content::EvalJs(current_frame_host(), "fetch_response_promise"));
+}
+
+// If too much data is processed while in bfcache, evict the entry.
+// TODO(crbug.com/325558875): Flaky on Mac and ChromeOS bots.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_CHROMEOS)
+#define MAYBE_PageWithDrainedDatapipeAsBytesConsumerCannotProcessTooMuchData \
+  DISABLED_PageWithDrainedDatapipeAsBytesConsumerCannotProcessTooMuchData
+#else
+#define MAYBE_PageWithDrainedDatapipeAsBytesConsumerCannotProcessTooMuchData \
+  PageWithDrainedDatapipeAsBytesConsumerCannotProcessTooMuchData
+#endif
+IN_PROC_BROWSER_TEST_F(
+    BackForwardCacheDrainedAsBytesConsumerTest,
+    MAYBE_PageWithDrainedDatapipeAsBytesConsumerCannotProcessTooMuchData) {
   net::test_server::ControllableHttpResponse fetch_response(
       embedded_test_server(), "/fetch");
   ASSERT_TRUE(embedded_test_server()->Start());
@@ -192,18 +294,25 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
   // Send response header and a piece of the body before navigating away.
   fetch_response.WaitForRequest();
   fetch_response.Send(net::HTTP_OK, "text/plain");
-  fetch_response.Send("body");
+  fetch_response.Send("start sending body");
 
   // 2) Navigate to B.
   EXPECT_TRUE(NavigateToURL(shell(), url_b));
+  ASSERT_TRUE(rfh_a->IsInBackForwardCache());
 
+  // Complete the response after navigating away.
+  // Data over the limit is processed, so the bfcache entry should be evicted.
+  std::string body(kMaxBufferedBytesPerProcess * 10, '*');
+  fetch_response.Send(body);
+  fetch_response.Done();
   ASSERT_TRUE(rfh_a.WaitUntilRenderFrameDeleted());
 
   // 3) Go back to A.
+  // Note that we cannot reliably wait for the datapipe to be drained as bytes
+  // consumer, so sometimes this is not testing the case in question.
   ASSERT_TRUE(HistoryGoBack(web_contents()));
-  ExpectNotRestored(
-      {NotRestoredReason::kNetworkRequestDatapipeDrainedAsBytesConsumer}, {},
-      {}, {}, {}, FROM_HERE);
+  ExpectNotRestored({NotRestoredReason::kNetworkExceedsBufferLimit}, {}, {}, {},
+                    {}, FROM_HERE);
 }
 
 IN_PROC_BROWSER_TEST_F(
@@ -246,8 +355,14 @@ IN_PROC_BROWSER_TEST_F(
   ExpectRestored(FROM_HERE);
 }
 
+enum class BackgroundResourceFetchTestCase {
+  kBackgroundResourceFetchEnabled,
+  kBackgroundResourceFetchDisabled,
+};
+
 class BackForwardCacheNetworkLimitBrowserTest
-    : public BackForwardCacheBrowserTest {
+    : public BackForwardCacheBrowserTest,
+      public testing::WithParamInterface<BackgroundResourceFetchTestCase> {
  public:
   const int kMaxBufferedBytesPerProcess = 10000;
   const base::TimeDelta kGracePeriodToFinishLoading = base::Seconds(5);
@@ -261,15 +376,49 @@ class BackForwardCacheNetworkLimitBrowserTest
            {"grace_period_to_finish_loading_in_seconds",
             base::NumberToString(kGracePeriodToFinishLoading.InSeconds())}}}},
         {});
+    if (IsBackgroundResourceFetchEnabled()) {
+      feature_background_resource_fetch_.InitAndEnableFeature(
+          blink::features::kBackgroundResourceFetch);
+    }
   }
 
  private:
+  bool IsBackgroundResourceFetchEnabled() const {
+    return GetParam() ==
+           BackgroundResourceFetchTestCase::kBackgroundResourceFetchEnabled;
+  }
+
   base::test::ScopedFeatureList feature_list_;
+  base::test::ScopedFeatureList feature_background_resource_fetch_;
 };
 
-IN_PROC_BROWSER_TEST_F(
+INSTANTIATE_TEST_SUITE_P(
+    All,
     BackForwardCacheNetworkLimitBrowserTest,
-    PageWithDrainedDatapipeRequestsForScriptStreamerShouldBeEvictedIfStreamedTooMuch) {
+    testing::ValuesIn(
+        {BackgroundResourceFetchTestCase::kBackgroundResourceFetchEnabled,
+         BackgroundResourceFetchTestCase::kBackgroundResourceFetchDisabled}),
+    [](const testing::TestParamInfo<BackgroundResourceFetchTestCase>& info) {
+      switch (info.param) {
+        case (BackgroundResourceFetchTestCase::kBackgroundResourceFetchEnabled):
+          return "BackgroundResourceFetchEnabled";
+        case (
+            BackgroundResourceFetchTestCase::kBackgroundResourceFetchDisabled):
+          return "BackgroundResourceFetchDisabled";
+      }
+    });
+
+// TODO(crbug.com/448737648): Flaky on MacOS.
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_PageWithDrainedDatapipeRequestsForScriptStreamerShouldBeEvictedIfStreamedTooMuch \
+  DISABLED_PageWithDrainedDatapipeRequestsForScriptStreamerShouldBeEvictedIfStreamedTooMuch
+#else
+#define MAYBE_PageWithDrainedDatapipeRequestsForScriptStreamerShouldBeEvictedIfStreamedTooMuch \
+  PageWithDrainedDatapipeRequestsForScriptStreamerShouldBeEvictedIfStreamedTooMuch
+#endif
+IN_PROC_BROWSER_TEST_P(
+    BackForwardCacheNetworkLimitBrowserTest,
+    MAYBE_PageWithDrainedDatapipeRequestsForScriptStreamerShouldBeEvictedIfStreamedTooMuch) {
   net::test_server::ControllableHttpResponse response(embedded_test_server(),
                                                       "/small_script.js");
   ASSERT_TRUE(embedded_test_server()->Start());
@@ -317,7 +466,7 @@ IN_PROC_BROWSER_TEST_F(
                     {}, FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(BackForwardCacheNetworkLimitBrowserTest,
+IN_PROC_BROWSER_TEST_P(BackForwardCacheNetworkLimitBrowserTest,
                        ImageStillLoading_ResponseStartedWhileFrozen) {
   net::test_server::ControllableHttpResponse image_response(
       embedded_test_server(), "/image.png");
@@ -350,7 +499,7 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheNetworkLimitBrowserTest,
   EXPECT_EQ("error", EvalJs(rfh_1.get(), "image_load_status"));
 }
 
-IN_PROC_BROWSER_TEST_F(
+IN_PROC_BROWSER_TEST_P(
     BackForwardCacheNetworkLimitBrowserTest,
     ImageStillLoading_ResponseStartedWhileRestoring_DoNotTriggerEviction) {
   net::test_server::ControllableHttpResponse image_response(
@@ -400,9 +549,16 @@ IN_PROC_BROWSER_TEST_F(
   ExpectRestored(FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit \
+  DISABLED_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit
+#else
+#define MAYBE_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit \
+  ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit
+#endif
+IN_PROC_BROWSER_TEST_P(
     BackForwardCacheNetworkLimitBrowserTest,
-    ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit) {
+    MAYBE_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit) {
   net::test_server::ControllableHttpResponse image1_response(
       embedded_test_server(), "/image1.png");
   net::test_server::ControllableHttpResponse image2_response(
@@ -467,9 +623,16 @@ IN_PROC_BROWSER_TEST_F(
                     {}, FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_SameSiteSubframe \
+  DISABLED_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_SameSiteSubframe
+#else
+#define MAYBE_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_SameSiteSubframe \
+  ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_SameSiteSubframe
+#endif
+IN_PROC_BROWSER_TEST_P(
     BackForwardCacheNetworkLimitBrowserTest,
-    ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_SameSiteSubframe) {
+    MAYBE_ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_SameSiteSubframe) {
   net::test_server::ControllableHttpResponse image1_response(
       embedded_test_server(), "/image1.png");
   net::test_server::ControllableHttpResponse image2_response(
@@ -547,7 +710,7 @@ IN_PROC_BROWSER_TEST_F(
                     {}, FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(
+IN_PROC_BROWSER_TEST_P(
     BackForwardCacheNetworkLimitBrowserTest,
     ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_ResetOnRestore) {
   net::test_server::ControllableHttpResponse image1_response(
@@ -621,7 +784,7 @@ IN_PROC_BROWSER_TEST_F(
   ExpectRestored(FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(
+IN_PROC_BROWSER_TEST_P(
     BackForwardCacheNetworkLimitBrowserTest,
     ImageStillLoading_ResponseStartedWhileFrozen_ExceedsPerProcessBytesLimit_ResetOnDetach) {
   net::test_server::ControllableHttpResponse image1_response(
@@ -698,7 +861,7 @@ IN_PROC_BROWSER_TEST_F(
   EXPECT_EQ("error", EvalJs(rfh_2.get(), "image2_load_status"));
 }
 
-IN_PROC_BROWSER_TEST_F(BackForwardCacheNetworkLimitBrowserTest,
+IN_PROC_BROWSER_TEST_P(BackForwardCacheNetworkLimitBrowserTest,
                        ImageStillLoading_ResponseStartedWhileFrozen_Timeout) {
   net::test_server::ControllableHttpResponse image_response(
       embedded_test_server(), "/image.png");
@@ -731,9 +894,16 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheNetworkLimitBrowserTest,
                     FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(
+#if BUILDFLAG(IS_MAC)
+#define MAYBE_ImageStillLoading_ResponseStartedBeforeFreezing_ExceedsPerProcessBytesLimit \
+  DISABLED_ImageStillLoading_ResponseStartedBeforeFreezing_ExceedsPerProcessBytesLimit
+#else
+#define MAYBE_ImageStillLoading_ResponseStartedBeforeFreezing_ExceedsPerProcessBytesLimit \
+  ImageStillLoading_ResponseStartedBeforeFreezing_ExceedsPerProcessBytesLimit
+#endif
+IN_PROC_BROWSER_TEST_P(
     BackForwardCacheNetworkLimitBrowserTest,
-    ImageStillLoading_ResponseStartedBeforeFreezing_ExceedsPerProcessBytesLimit) {
+    MAYBE_ImageStillLoading_ResponseStartedBeforeFreezing_ExceedsPerProcessBytesLimit) {
   net::test_server::ControllableHttpResponse image1_response(
       embedded_test_server(), "/image1.png");
   net::test_server::ControllableHttpResponse image2_response(
@@ -804,7 +974,7 @@ IN_PROC_BROWSER_TEST_F(
                     {}, FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(BackForwardCacheNetworkLimitBrowserTest,
+IN_PROC_BROWSER_TEST_P(BackForwardCacheNetworkLimitBrowserTest,
                        TimeoutNotTriggeredAfterDone) {
   net::test_server::ControllableHttpResponse image_response(
       embedded_test_server(), "/image.png");
@@ -847,7 +1017,7 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheNetworkLimitBrowserTest,
   ExpectRestored(FROM_HERE);
 }
 
-IN_PROC_BROWSER_TEST_F(
+IN_PROC_BROWSER_TEST_P(
     BackForwardCacheNetworkLimitBrowserTest,
     TimeoutNotTriggeredAfterDone_ResponseStartedBeforeFreezing) {
   net::test_server::ControllableHttpResponse image_response(
@@ -928,21 +1098,72 @@ IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest,
   EXPECT_EQ("error", EvalJs(rfh_1.get(), "image_load_status"));
 }
 
-class BackForwardCacheWithKeepaliveSupportBrowserTest
+class BackForwardCacheBrowserTestWithDisallowJavaScriptExecution
     : public BackForwardCacheBrowserTest {
  public:
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    EnableFeatureAndSetParams(
-        blink::features::kBackForwardCacheWithKeepaliveRequest, "", "");
-
     BackForwardCacheBrowserTest::SetUpCommandLine(command_line);
+    feature_list_.InitAndEnableFeature(
+        blink::features::kBackForwardCacheDWCOnJavaScriptExecution);
+    DCHECK(base::FeatureList::IsEnabled(
+        blink::features::kBackForwardCacheDWCOnJavaScriptExecution));
   }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
 };
 
-// With the feature, keepalive doesn't prevent the page from entering into the
-// bfcache.
-IN_PROC_BROWSER_TEST_F(BackForwardCacheWithKeepaliveSupportBrowserTest,
-                       KeepAliveFetch) {
+IN_PROC_BROWSER_TEST_F(
+    BackForwardCacheBrowserTestWithDisallowJavaScriptExecution,
+    EvictWillNotTriggerReadystatechange) {
+  net::test_server::ControllableHttpResponse image_response(
+      embedded_test_server(), "/back_forward_cache/image.png");
+  ASSERT_TRUE(embedded_test_server()->Start());
+  GURL url_a(embedded_test_server()->GetURL(
+      "a.com", "/back_forward_cache/page_with_non_existing_image.html"));
+  GURL url_b(embedded_test_server()->GetURL("b.com", "/title1.html"));
+
+  // 1) Navigate to A.
+  shell()->LoadURL(url_a);
+  // Wait until the image request is received to ensure the navigation to A has
+  // committed before capturing its RenderFrameHost.
+  image_response.WaitForRequest();
+  RenderFrameHostImplWrapper rfh_a(current_frame_host());
+  // Start sending response before the page gets in the back-forward cache, so
+  // that the readystate of the document is interactive instead of complete.
+  image_response.Send(net::HTTP_OK, "image/png");
+  image_response.Send(" ");
+  ASSERT_TRUE(WaitForDOMContentLoaded(rfh_a.get()));
+  // Add event listener and make sure that the readystate is set to interactive.
+  ASSERT_EQ("interactive", EvalJs(rfh_a.get(), "interactivePromise"));
+
+  // 2) Navigate to B. Use |LoadURL()| and |TestNavigationManager| instead of
+  // |NavigateToURL()| because the first navigation to a.com has not been
+  // complete yet because of in-flight image request.
+  TestNavigationManager nav_manager(web_contents(), url_b);
+  shell()->LoadURL(url_b);
+  ASSERT_TRUE(nav_manager.WaitForNavigationFinished());
+  EXPECT_TRUE(rfh_a->IsInBackForwardCache());
+
+  // 3) Evict entry A. This will change the readystate to complete as part of
+  // document detach, but the readystatechange event is queued instead of being
+  // fired synchronously.
+  DisableBFCacheForRFHForTesting(rfh_a->GetGlobalId());
+  EXPECT_TRUE(rfh_a->is_evicted_from_back_forward_cache());
+
+  // 4.) Go back. Expect that readystatechange event has not been fired, and
+  // DumpWithoutCrashing is not hit.
+  TestNavigationManager nav_manager_2(web_contents(), url_a);
+  web_contents()->GetController().GoBack();
+  EXPECT_TRUE(nav_manager_2.WaitForNavigationFinished());
+  ExpectNotRestored({BackForwardCacheMetrics::NotRestoredReason::
+                         kDisableForRenderFrameHostCalled},
+                    {}, {}, {RenderFrameHostDisabledForTestingReason()}, {},
+                    FROM_HERE);
+}
+
+// Keepalive doesn't prevent the page from entering into the bfcache.
+IN_PROC_BROWSER_TEST_F(BackForwardCacheBrowserTest, KeepAliveFetch) {
   net::test_server::ControllableHttpResponse fetch_response(
       embedded_test_server(), "/fetch");
   ASSERT_TRUE(embedded_test_server()->Start());

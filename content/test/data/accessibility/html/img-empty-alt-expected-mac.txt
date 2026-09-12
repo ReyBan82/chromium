@@ -1,4 +1,9 @@
 AXWebArea
 ++AXGroup
-++++AXImage AXDescription='To get missing image descriptions, open the context menu.'
-++++AXImage AXDescription='full'
+++++AXStaticText AXValue=' '
+++++AXStaticText AXValue=' '
+++++AXStaticText AXValue=' '
+++++AXStaticText AXValue=' '
+++++AXImage AXDescription='To get missing image descriptions, open the context menu.' AXTitle='To get missing image descriptions, open the context menu.'
+++++AXStaticText AXValue=' '
+++++AXImage AXDescription='full' AXTitle='full'

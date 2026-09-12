@@ -26,7 +26,7 @@ FORWARD_DECLARE_TEST(FontFamilyCacheTest, Caching);
 // This class caches the strings necessary to update
 // "blink::web_pref::ScriptFontFamilyMap". This is necessary since Chrome
 // attempts to update blink::web_pref::ScriptFontFamilyMap 20000 times at
-// startup. See https://crbug.com/308095.
+// startup. See https://crbug.com/40337107.
 class FontFamilyCache : public base::SupportsUserData::Data {
  public:
   explicit FontFamilyCache(Profile* profile);
@@ -83,7 +83,7 @@ class FontFamilyCache : public base::SupportsUserData::Data {
   // Weak reference.
   // Note: The lifetime of this object is tied to the lifetime of the
   // PrefService, so there is no worry about an invalid pointer.
-  raw_ptr<const PrefService, DanglingUntriaged> prefs_;
+  raw_ptr<const PrefService, AcrossTasksDanglingUntriaged> prefs_;
 
   // Reacts to profile font changes. |font_change_registrar_| will be
   // automatically unregistered when the FontPrefChangeNotifier is destroyed as

@@ -13,8 +13,9 @@
 #include <string>
 
 #include "base/trace_event/traced_value.h"
+#include "base/tracing/protos/chrome_track_event.pbzero.h"
 #include "cc/cc_export.h"
-#include "third_party/perfetto/protos/perfetto/trace/track_event/chrome_compositor_scheduler_state.pbzero.h"
+#include "ui/gfx/geometry/size.h"
 
 namespace cc {
 
@@ -27,7 +28,6 @@ enum WhichTree {
 };
 
 enum TileResolution {
-  LOW_RESOLUTION = 0 ,
   HIGH_RESOLUTION = 1,
   NON_IDEAL_RESOLUTION = 2,
 };
@@ -36,14 +36,14 @@ std::string TileResolutionToString(TileResolution resolution);
 struct CC_EXPORT TilePriority {
   enum PriorityBin { NOW, SOON, EVENTUALLY };
 
-  TilePriority()
+  constexpr TilePriority()
       : resolution(NON_IDEAL_RESOLUTION),
         priority_bin(EVENTUALLY),
         distance_to_visible(std::numeric_limits<float>::infinity()) {}
 
-  TilePriority(TileResolution resolution,
-               PriorityBin bin,
-               float distance_to_visible)
+  constexpr TilePriority(TileResolution resolution,
+                         PriorityBin bin,
+                         float distance_to_visible)
       : resolution(resolution),
         priority_bin(bin),
         distance_to_visible(distance_to_visible) {}
@@ -94,8 +94,9 @@ enum TreePriority {
 // TODO(nuskos): remove TreePriorityToString once we have a utility function to
 // take protozero to strings.
 std::string TreePriorityToString(TreePriority prio);
-perfetto::protos::pbzero::ChromeCompositorStateMachine::MinorState::TreePriority
-TreePriorityToProtozeroEnum(TreePriority priority);
+perfetto::protos::pbzero::ChromeCompositorStateMachineV2::MinorStateV2::
+    TreePriority
+    TreePriorityToProtozeroEnum(TreePriority priority);
 
 class GlobalStateThatImpactsTilePriority {
  public:
@@ -114,12 +115,15 @@ class GlobalStateThatImpactsTilePriority {
 
   TreePriority tree_priority;
 
+  gfx::Size viewport_size;
+
   bool operator==(const GlobalStateThatImpactsTilePriority& other) const {
     return memory_limit_policy == other.memory_limit_policy &&
            soft_memory_limit_in_bytes == other.soft_memory_limit_in_bytes &&
            hard_memory_limit_in_bytes == other.hard_memory_limit_in_bytes &&
            num_resources_limit == other.num_resources_limit &&
-           tree_priority == other.tree_priority;
+           tree_priority == other.tree_priority &&
+           viewport_size == other.viewport_size;
   }
   bool operator!=(const GlobalStateThatImpactsTilePriority& other) const {
     return !(*this == other);

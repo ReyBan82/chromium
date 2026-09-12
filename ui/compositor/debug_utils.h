@@ -17,14 +17,17 @@ namespace ui {
 
 class Layer;
 
+
 // Log the layer hierarchy. Mark layers which contain |mouse_location| with '*'.
 COMPOSITOR_EXPORT void PrintLayerHierarchy(const Layer* layer,
-                                           const gfx::Point& mouse_location);
+                                           const gfx::Point& mouse_location,
+                                           bool print_invisible = true);
 
 // Print the layer hierarchy to |out|. Mark layers which contain
 // |mouse_location| with '*'.
 COMPOSITOR_EXPORT void PrintLayerHierarchy(const Layer* layer,
                                            const gfx::Point& mouse_location,
+                                           bool print_invisible,
                                            std::ostringstream* out);
 
 }  // namespace ui

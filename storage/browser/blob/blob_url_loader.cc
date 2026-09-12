@@ -5,8 +5,14 @@
 #include "storage/browser/blob/blob_url_loader.h"
 
 #include <stddef.h>
+
+#include <optional>
 #include <utility>
+#include <vector>
+
+#include "base/byte_size.h"
 #include "base/check_op.h"
+#include "base/feature_list.h"
 #include "base/format_macros.h"
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
@@ -27,6 +33,7 @@
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "storage/browser/blob/blob_data_handle.h"
+#include "storage/browser/blob/features.h"
 #include "storage/browser/blob/mojo_blob_reader.h"
 #include "third_party/blink/public/common/blob/blob_utils.h"
 
@@ -82,8 +89,9 @@ void BlobURLLoader::CreateAndStart(
     const network::ResourceRequest& request,
     mojo::PendingRemote<network::mojom::URLLoaderClient> client,
     std::unique_ptr<BlobDataHandle> blob_handle) {
-  new BlobURLLoader(std::move(url_loader_receiver), request.method,
-                    request.headers, std::move(client), std::move(blob_handle));
+  (new BlobURLLoader(std::move(url_loader_receiver), std::move(client),
+                     std::move(blob_handle)))
+      ->Start(request.method, request.headers);
 }
 
 // static
@@ -93,26 +101,20 @@ void BlobURLLoader::CreateAndStart(
     const net::HttpRequestHeaders& headers,
     mojo::PendingRemote<network::mojom::URLLoaderClient> client,
     std::unique_ptr<BlobDataHandle> blob_handle) {
-  new BlobURLLoader(std::move(url_loader_receiver), method, headers,
-                    std::move(client), std::move(blob_handle));
+  (new BlobURLLoader(std::move(url_loader_receiver), std::move(client),
+                     std::move(blob_handle)))
+      ->Start(method, headers);
 }
 
 BlobURLLoader::~BlobURLLoader() = default;
 
 BlobURLLoader::BlobURLLoader(
     mojo::PendingReceiver<network::mojom::URLLoader> url_loader_receiver,
-    const std::string& method,
-    const net::HttpRequestHeaders& headers,
     mojo::PendingRemote<network::mojom::URLLoaderClient> client,
     std::unique_ptr<BlobDataHandle> blob_handle)
     : receiver_(this, std::move(url_loader_receiver)),
       client_(std::move(client)),
-      blob_handle_(std::move(blob_handle)) {
-  // PostTask since it might destruct.
-  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-      FROM_HERE, base::BindOnce(&BlobURLLoader::Start,
-                                weak_factory_.GetWeakPtr(), method, headers));
-}
+      blob_handle_(std::move(blob_handle)) {}
 
 void BlobURLLoader::Start(const std::string& method,
                           const net::HttpRequestHeaders& headers) {
@@ -129,21 +131,42 @@ void BlobURLLoader::Start(const std::string& method,
     return;
   }
 
-  std::string range_header;
-  if (headers.GetHeader(net::HttpRequestHeaders::kRange, &range_header)) {
-    // We only care about "Range" header here.
-    std::vector<net::HttpByteRange> ranges;
-    if (net::HttpUtil::ParseRangeHeader(range_header, &ranges)) {
-      if (ranges.size() == 1) {
-        byte_range_set_ = true;
-        byte_range_ = ranges[0];
-      } else {
-        // We don't support multiple range requests in one single URL request,
-        // because we need to do multipart encoding here.
-        // TODO(jianli): Support multipart byte range requests.
+  if (std::optional<std::string> range_header =
+          headers.GetHeader(net::HttpRequestHeaders::kRange);
+      range_header) {
+    if (base::FeatureList::IsEnabled(
+            features::kBlobURLFetchRangeHeaderValidation)) {
+      // Blob URL fetch follows the Fetch Standard's single-range parser.
+      // Invalid or unsupported Range values must fail the request.
+      std::optional<net::HttpByteRange> range =
+          net::HttpUtil::ParseFetchSingleRange(range_header.value(),
+                                               /*allow_whitespace=*/true);
+      if (!range || !range->IsValid()) {
+        // Range header is invalid or malformed. Fail the request.
+        // Reuses the multi-range error code; surfaces to Fetch as a TypeError.
         OnComplete(net::ERR_REQUEST_RANGE_NOT_SATISFIABLE, 0);
         delete this;
         return;
+      }
+      byte_range_set_ = true;
+      byte_range_ = *range;
+    } else {
+      // Legacy behavior (kill switch off): lenient RFC 7233 parsing that
+      // silently serves the full blob when the Range header fails to parse.
+      // We only care about "Range" header here.
+      std::vector<net::HttpByteRange> ranges;
+      if (net::HttpUtil::ParseRangeHeader(range_header.value(), &ranges)) {
+        if (ranges.size() == 1) {
+          byte_range_set_ = true;
+          byte_range_ = ranges[0];
+        } else {
+          // We don't support multiple range requests in one single URL request,
+          // because we need to do multipart encoding here.
+          // TODO(jianli): Support multipart byte range requests.
+          OnComplete(net::ERR_REQUEST_RANGE_NOT_SATISFIABLE, 0);
+          delete this;
+          return;
+        }
       }
     }
   }
@@ -168,10 +191,8 @@ void BlobURLLoader::Start(const std::string& method,
 }
 
 void BlobURLLoader::FollowRedirect(
-    const std::vector<std::string>& removed_headers,
-    const net::HttpRequestHeaders& modified_headers,
-    const net::HttpRequestHeaders& modified_cors_exempt_headers,
-    const absl::optional<GURL>& new_url) {
+    network::HttpRequestHeadersUpdateParams headers_update_params,
+    const std::optional<GURL>& new_url) {
   NOTREACHED();
 }
 
@@ -192,25 +213,25 @@ MojoBlobReader::Delegate::RequestSideData BlobURLLoader::DidCalculateSize(
     return REQUEST_SIDE_DATA;
   }
 
-  HeadersCompleted(status_code, content_size, absl::nullopt);
+  HeadersCompleted(status_code, content_size, std::nullopt);
   return DONT_REQUEST_SIDE_DATA;
 }
 
-void BlobURLLoader::DidReadSideData(absl::optional<mojo_base::BigBuffer> data) {
+void BlobURLLoader::DidReadSideData(std::optional<mojo_base::BigBuffer> data) {
   HeadersCompleted(net::HTTP_OK, total_size_, std::move(data));
 }
 
 void BlobURLLoader::OnComplete(net::Error error_code,
                                uint64_t total_written_bytes) {
   network::URLLoaderCompletionStatus status(error_code);
-  status.encoded_body_length = total_written_bytes;
-  status.decoded_body_length = total_written_bytes;
+  status.encoded_body_length = base::ByteSize(total_written_bytes);
+  status.decoded_body_length = base::ByteSize(total_written_bytes);
   client_->OnComplete(status);
 }
 void BlobURLLoader::HeadersCompleted(
     net::HttpStatusCode status_code,
     uint64_t content_size,
-    absl::optional<mojo_base::BigBuffer> metadata) {
+    std::optional<mojo_base::BigBuffer> metadata) {
   auto response = network::mojom::URLResponseHead::New();
   response->content_length = 0;
   if (status_code == net::HTTP_OK || status_code == net::HTTP_PARTIAL_CONTENT)

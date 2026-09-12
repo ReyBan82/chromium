@@ -8,8 +8,8 @@
 
 namespace blink {
 
-CustomHighlightMarker::CustomHighlightMarker(unsigned start_offset,
-                                             unsigned end_offset,
+CustomHighlightMarker::CustomHighlightMarker(wtf_size_t start_offset,
+                                             wtf_size_t end_offset,
                                              const String& highlight_name,
                                              const Member<Highlight> highlight)
     : HighlightPseudoMarker(start_offset, end_offset),
@@ -26,6 +26,14 @@ PseudoId CustomHighlightMarker::GetPseudoId() const {
 
 const AtomicString& CustomHighlightMarker::GetPseudoArgument() const {
   return GetHighlightName();
+}
+
+void CustomHighlightMarker::SetHasVisualOverflow(bool has_overflow) {
+  highlight_has_visual_overflow_ = has_overflow;
+}
+
+bool CustomHighlightMarker::HasVisualOverflow() const {
+  return highlight_has_visual_overflow_;
 }
 
 void CustomHighlightMarker::Trace(blink::Visitor* visitor) const {

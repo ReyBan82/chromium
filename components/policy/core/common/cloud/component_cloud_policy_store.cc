@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <string_view>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -15,6 +16,7 @@
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
 #include "components/policy/core/common/cloud/cloud_policy_constants.h"
@@ -26,7 +28,7 @@
 #include "components/policy/core/common/policy_proto_decoders.h"
 #include "components/policy/proto/chrome_extension_policy.pb.h"
 #include "components/policy/proto/device_management_backend.pb.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 #include "google_apis/gaia/gaia_auth_util.h"
 #include "url/gurl.h"
 
@@ -43,10 +45,6 @@ struct ComponentCloudPolicyStore::DomainConstants {
 };
 
 namespace {
-
-const char kValue[] = "Value";
-const char kLevel[] = "Level";
-const char kRecommended[] = "Recommended";
 
 const ComponentCloudPolicyStore::DomainConstants kDomains[] = {
     {
@@ -79,25 +77,6 @@ const ComponentCloudPolicyStore::DomainConstants* GetDomainConstantsForType(
       return &constants;
   }
   return nullptr;
-}
-
-base::Value::Dict TranslatePolicyMapEntryToJson(const PolicyMap::Entry& entry) {
-  base::Value::Dict result;
-  // This is actually safe because this code just copies the value,
-  // not caring about its type.
-  result.Set(kValue, entry.value_unsafe()->Clone());
-  if (entry.level == POLICY_LEVEL_RECOMMENDED) {
-    result.Set(kLevel, base::StringPiece(kRecommended));
-  }
-  return result;
-}
-
-base::Value::Dict TranslatePolicyMapToJson(const PolicyMap& policy_map) {
-  base::Value::Dict result;
-  for (const auto& [key, entry] : policy_map) {
-    result.Set(key, TranslatePolicyMapEntryToJson(entry));
-  }
-  return result;
 }
 
 }  // namespace
@@ -148,7 +127,7 @@ const std::string& ComponentCloudPolicyStore::GetCachedHash(
 }
 
 void ComponentCloudPolicyStore::SetCredentials(const std::string& username,
-                                               const std::string& gaia_id,
+                                               const GaiaId& gaia_id,
                                                const std::string& dm_token,
                                                const std::string& device_id,
                                                const std::string& public_key,
@@ -220,7 +199,7 @@ void ComponentCloudPolicyStore::Load() {
     policy_bundle_.Get(ns).Swap(&policy);
     cached_hashes_[ns] = payload.secure_hash();
     stored_policy_times_[ns] =
-        base::Time::FromJavaTime(policy_data.timestamp());
+        base::Time::FromMillisecondsSinceUnixEpoch(policy_data.timestamp());
   }
   delegate_->OnComponentCloudPolicyStoreUpdated();
 }
@@ -253,7 +232,8 @@ bool ComponentCloudPolicyStore::Store(const PolicyNamespace& ns,
   // And expose the policy.
   policy_bundle_.Get(ns).Swap(&policy);
   cached_hashes_[ns] = secure_hash;
-  stored_policy_times_[ns] = base::Time::FromJavaTime(policy_data->timestamp());
+  stored_policy_times_[ns] =
+      base::Time::FromMillisecondsSinceUnixEpoch(policy_data->timestamp());
   delegate_->OnComponentCloudPolicyStoreUpdated();
   return true;
 }
@@ -423,7 +403,8 @@ bool ComponentCloudPolicyStore::ValidateData(const std::string& data,
                                              const std::string& secure_hash,
                                              PolicyMap* policy,
                                              std::string* error) {
-  if (crypto::SHA256HashString(data) != secure_hash) {
+  if (std::string(base::as_string_view(crypto::hash::Sha256(data))) !=
+      secure_hash) {
     *error = "The received data doesn't match the expected hash.";
     return false;
   }
@@ -436,8 +417,7 @@ bool ComponentCloudPolicyStore::ParsePolicy(const std::string& data,
   auto value_with_error = base::JSONReader::ReadAndReturnValueWithError(
       data, base::JSONParserOptions::JSON_ALLOW_TRAILING_COMMAS);
   if (!value_with_error.has_value()) {
-    *error =
-        base::StrCat({"Invalid JSON blob: ", value_with_error.error().message});
+    *error = "Invalid JSON blob: " + value_with_error.error().message;
     return false;
   }
   base::Value json = std::move(*value_with_error);
@@ -446,17 +426,9 @@ bool ComponentCloudPolicyStore::ParsePolicy(const std::string& data,
     return false;
   }
 
-  return ParseComponentPolicy(std::move(json), domain_constants_->scope,
-                              POLICY_SOURCE_CLOUD, policy, error);
-}
-
-ComponentPolicyMap ComponentCloudPolicyStore::GetJsonPolicyMap() {
-  ComponentPolicyMap result;
-  for (const auto& [policy_namespace, policy_map] : policy_bundle_) {
-    result[policy_namespace] =
-        base::Value(TranslatePolicyMapToJson(policy_map));
-  }
-  return result;
+  return ParseComponentPolicy(std::move(json).TakeDict(),
+                              domain_constants_->scope, POLICY_SOURCE_CLOUD,
+                              policy, error);
 }
 
 }  // namespace policy

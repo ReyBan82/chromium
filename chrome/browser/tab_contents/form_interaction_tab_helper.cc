@@ -4,13 +4,13 @@
 
 #include "chrome/browser/tab_contents/form_interaction_tab_helper.h"
 
-#include "base/functional/bind.h"
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/memory/weak_ptr.h"
 #include "components/performance_manager/public/graph/graph.h"
 #include "components/performance_manager/public/graph/page_node.h"
 #include "components/performance_manager/public/performance_manager.h"
-#include "components/performance_manager/public/web_contents_proxy.h"
-#include "content/public/browser/browser_task_traits.h"
-#include "content/public/browser/browser_thread.h"
+#include "components/tabs/public/tab_interface.h"
 
 namespace {
 
@@ -20,9 +20,11 @@ bool g_observer_exists = false;
 
 }  // namespace
 
+DEFINE_USER_DATA(FormInteractionTabHelper);
+
 // Graph observer used to receive the page form interaction events.
 class FormInteractionTabHelper::GraphObserver
-    : public performance_manager::PageNode::ObserverDefaultImpl,
+    : public performance_manager::PageNodeObserver,
       public performance_manager::GraphOwned {
  public:
   GraphObserver() = default;
@@ -31,13 +33,7 @@ class FormInteractionTabHelper::GraphObserver
   GraphObserver& operator=(const GraphObserver&) = delete;
 
  private:
-  // Should be called on the UI thread to dispatch the OnHadFormInteraction
-  // signal received on the PM sequence.
-  static void DispatchOnHadFormInteraction(
-      const performance_manager::WebContentsProxy& contents_proxy,
-      bool had_form_interaction);
-
-  // performance_manager::PageNode::ObserverDefaultImpl:
+  // performance_manager::PageNodeObserver:
   void OnHadFormInteractionChanged(
       const performance_manager::PageNode* page_node) override;
 
@@ -46,31 +42,24 @@ class FormInteractionTabHelper::GraphObserver
   void OnTakenFromGraph(performance_manager::Graph* graph) override;
 };
 
-// static
-void FormInteractionTabHelper::GraphObserver::DispatchOnHadFormInteraction(
-    const performance_manager::WebContentsProxy& contents_proxy,
-    bool had_form_interaction) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  // If the web contents is still alive then dispatch to the actual
-  // implementation in TabLifecycleUnitSource.
-  if (auto* contents = contents_proxy.Get()) {
-    // Notifications can be emitted by extensions, ignore these.
-    if (auto* tab_helper =
-            FormInteractionTabHelper::FromWebContents(contents)) {
-      // Sanity check against spurious changes.
-      DCHECK_NE(tab_helper->had_form_interaction_, had_form_interaction);
-      tab_helper->had_form_interaction_ = had_form_interaction;
-    }
-  }
-}
-
 void FormInteractionTabHelper::GraphObserver::OnHadFormInteractionChanged(
     const performance_manager::PageNode* page_node) {
-  // Forward the notification over to the UI thread.
-  content::GetUIThreadTaskRunner({})->PostTask(
-      FROM_HERE, base::BindOnce(&GraphObserver::DispatchOnHadFormInteraction,
-                                page_node->GetContentsProxy(),
-                                page_node->HadFormInteraction()));
+  base::WeakPtr<content::WebContents> contents = page_node->GetWebContents();
+  CHECK(contents);
+  bool had_form_interaction = page_node->HadFormInteraction();
+
+  // Notifications can be emitted for non-tab contents (e.g. extensions),
+  // ignore these.
+  tabs::TabInterface* tab =
+      tabs::TabInterface::MaybeGetFromContents(contents.get());
+  if (!tab) {
+    return;
+  }
+  if (auto* tab_helper = FormInteractionTabHelper::From(tab)) {
+    // Sanity check against spurious changes.
+    DCHECK_NE(tab_helper->had_form_interaction_, had_form_interaction);
+    tab_helper->had_form_interaction_ = had_form_interaction;
+  }
 }
 
 void FormInteractionTabHelper::GraphObserver::OnPassedToGraph(
@@ -97,11 +86,16 @@ FormInteractionTabHelper::CreateGraphObserver() {
   return std::make_unique<FormInteractionTabHelper::GraphObserver>();
 }
 
-FormInteractionTabHelper::FormInteractionTabHelper(
-    content::WebContents* contents)
-    : content::WebContentsUserData<FormInteractionTabHelper>(*contents) {}
+FormInteractionTabHelper::FormInteractionTabHelper(tabs::TabInterface& tab)
+    : scoped_unowned_user_data_(tab.GetUnownedUserDataHost(), *this) {}
 
 FormInteractionTabHelper::~FormInteractionTabHelper() = default;
+
+// static
+FormInteractionTabHelper* FormInteractionTabHelper::From(
+    tabs::TabInterface* tab) {
+  return Get(tab->GetUnownedUserDataHost());
+}
 
 bool FormInteractionTabHelper::had_form_interaction() const {
 #if DCHECK_IS_ON()
@@ -112,5 +106,3 @@ bool FormInteractionTabHelper::had_form_interaction() const {
 #endif
   return had_form_interaction_;
 }
-
-WEB_CONTENTS_USER_DATA_KEY_IMPL(FormInteractionTabHelper);

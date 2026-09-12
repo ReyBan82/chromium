@@ -4,7 +4,10 @@
 
 package org.chromium.chrome.browser.download.settings;
 
+import static org.chromium.build.NullUtil.assertNonNull;
+
 import android.content.Context;
+import android.graphics.Typeface;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.StyleSpan;
@@ -12,44 +15,59 @@ import android.util.AttributeSet;
 
 import androidx.preference.DialogPreference;
 
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.download.DirectoryOption;
 import org.chromium.chrome.browser.download.R;
+import org.chromium.chrome.browser.download.settings.DownloadDirectoryAdapter.DownloadLocationHelper;
+import org.chromium.components.browser_ui.settings.SettingsUtils;
 
-/**
- * The preference used to save the download directory in download settings page.
- */
-public class DownloadLocationPreference
-        extends DialogPreference implements DownloadDirectoryAdapter.Delegate {
+/** The preference used to save the download directory in download settings page. */
+@NullMarked
+public class DownloadLocationPreference extends DialogPreference
+        implements DownloadDirectoryAdapter.Delegate {
     /**
      * Provides data for the list of available download directories options. Uses an asynchronous
      * operation to query the directory options.
      */
-    private DownloadLocationPreferenceAdapter mAdapter;
+    private final DownloadLocationPreferenceAdapter mAdapter;
 
-    /**
-     * Constructor for DownloadLocationPreference.
-     */
+    private @Nullable DownloadLocationHelper mLocationHelper;
+
+    /** Constructor for DownloadLocationPreference. */
     public DownloadLocationPreference(Context context, AttributeSet attrs) {
         super(context, attrs);
+        SettingsUtils.initializePreferenceDefaults(context, attrs, this);
         setDialogLayoutResource(R.layout.download_location_preference);
         mAdapter = new DownloadLocationPreferenceAdapter(getContext(), this);
+    }
+
+    /** Set the helper to access and update the default download location. */
+    @Initializer
+    public void setDownloadLocationHelper(DownloadLocationHelper helper) {
+        mLocationHelper = helper;
         mAdapter.update();
     }
 
-    /**
-     * Updates the summary that shows the download location directory.
-     */
+    /** Updates the summary that shows the download location directory. */
     public void updateSummary() {
         if (mAdapter.getSelectedItemId() < 0) return;
 
         DirectoryOption directoryOption =
                 (DirectoryOption) mAdapter.getItem(mAdapter.getSelectedItemId());
+        assertNonNull(directoryOption);
         final SpannableStringBuilder summaryBuilder = new SpannableStringBuilder();
         summaryBuilder.append(directoryOption.name);
         summaryBuilder.append(" ");
         summaryBuilder.append(directoryOption.location);
-        summaryBuilder.setSpan(new StyleSpan(android.graphics.Typeface.BOLD), 0,
-                directoryOption.name.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (directoryOption.name != null) {
+            summaryBuilder.setSpan(
+                    new StyleSpan(Typeface.BOLD),
+                    0,
+                    directoryOption.name.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
 
         setSummary(summaryBuilder);
     }
@@ -67,6 +85,11 @@ public class DownloadLocationPreference
     @Override
     public void onDirectorySelectionChanged() {
         updateSummary();
+    }
+
+    @Override
+    public @Nullable DownloadLocationHelper getDownloadLocationHelper() {
+        return mLocationHelper;
     }
 
     DownloadLocationPreferenceAdapter getAdapter() {

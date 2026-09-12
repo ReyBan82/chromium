@@ -6,10 +6,12 @@
 
 #include <resolv.h>
 
+#include <array>
 #include <memory>
+#include <optional>
 
 #include "base/cancelable_callback.h"
-#include "base/files/file_util.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/sys_byteorder.h"
@@ -23,7 +25,6 @@
 #include "net/dns/dns_config.h"
 #include "net/dns/public/dns_protocol.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "base/android/path_utils.h"
@@ -41,7 +42,7 @@ namespace net {
 namespace {
 
 // MAXNS is normally 3, but let's test 4 if possible.
-const char* const kNameserversIPv4[] = {
+constexpr std::array<const char*, 4> kNameserversIPv4 = {
     "8.8.8.8",
     "192.168.1.1",
     "63.1.2.4",
@@ -49,7 +50,7 @@ const char* const kNameserversIPv4[] = {
 };
 
 #if BUILDFLAG(IS_CHROMEOS)
-const char* const kNameserversIPv6[] = {
+constexpr std::array<const char*, 4> kNameserversIPv6 = {
     nullptr,
     "2001:DB8:0::42",
     nullptr,
@@ -63,7 +64,7 @@ void DummyConfigCallback(const DnsConfig& config) {
 
 // Fills in |res| with sane configuration.
 void InitializeResState(res_state res) {
-  memset(res, 0, sizeof(*res));
+  UNSAFE_TODO(memset(res, 0, sizeof(*res)));
   res->options = RES_INIT | RES_RECURSE | RES_DEFNAMES | RES_DNSRCH |
                  RES_ROTATE;
   res->ndots = 2;
@@ -71,16 +72,16 @@ void InitializeResState(res_state res) {
   res->retry = 7;
 
   const char kDnsrch[] = "chromium.org" "\0" "example.com";
-  memcpy(res->defdname, kDnsrch, sizeof(kDnsrch));
+  UNSAFE_TODO(memcpy(res->defdname, kDnsrch, sizeof(kDnsrch)));
   res->dnsrch[0] = res->defdname;
-  res->dnsrch[1] = res->defdname + sizeof("chromium.org");
+  res->dnsrch[1] = UNSAFE_TODO(res->defdname + sizeof("chromium.org"));
 
   for (unsigned i = 0; i < std::size(kNameserversIPv4) && i < MAXNS; ++i) {
     struct sockaddr_in sa;
     sa.sin_family = AF_INET;
     sa.sin_port = base::HostToNet16(NS_DEFAULTPORT + i);
     inet_pton(AF_INET, kNameserversIPv4[i], &sa.sin_addr);
-    res->nsaddr_list[i] = sa;
+    UNSAFE_TODO(res->nsaddr_list[i]) = sa;
     ++res->nscount;
   }
 
@@ -88,16 +89,17 @@ void InitializeResState(res_state res) {
   // Install IPv6 addresses, replacing the corresponding IPv4 addresses.
   unsigned nscount6 = 0;
   for (unsigned i = 0; i < std::size(kNameserversIPv6) && i < MAXNS; ++i) {
-    if (!kNameserversIPv6[i])
+    if (!kNameserversIPv6[i]) {
       continue;
+    }
     // Must use malloc to mimick res_ninit.
     struct sockaddr_in6 *sa6;
     sa6 = (struct sockaddr_in6 *)malloc(sizeof(*sa6));
     sa6->sin6_family = AF_INET6;
     sa6->sin6_port = base::HostToNet16(NS_DEFAULTPORT - i);
     inet_pton(AF_INET6, kNameserversIPv6[i], &sa6->sin6_addr);
-    res->_u._ext.nsaddrs[i] = sa6;
-    memset(&res->nsaddr_list[i], 0, sizeof res->nsaddr_list[i]);
+    UNSAFE_TODO(res->_u._ext.nsaddrs[i]) = sa6;
+    UNSAFE_TODO(memset(&res->nsaddr_list[i], 0, sizeof res->nsaddr_list[i]));
     ++nscount6;
   }
   res->_u._ext.nscount6 = nscount6;
@@ -107,8 +109,9 @@ void InitializeResState(res_state res) {
 void CloseResState(res_state res) {
 #if BUILDFLAG(IS_CHROMEOS)
   for (int i = 0; i < res->nscount; ++i) {
-    if (res->_u._ext.nsaddrs[i] != nullptr)
-      free(res->_u._ext.nsaddrs[i]);
+    if (UNSAFE_TODO(res->_u._ext.nsaddrs[i]) != nullptr) {
+      free(UNSAFE_TODO(res->_u._ext.nsaddrs[i]));
+    }
   }
 #endif
 }
@@ -132,8 +135,9 @@ void InitializeExpectedConfig(DnsConfig* config) {
 
 #if BUILDFLAG(IS_CHROMEOS)
   for (unsigned i = 0; i < std::size(kNameserversIPv6) && i < MAXNS; ++i) {
-    if (!kNameserversIPv6[i])
+    if (!kNameserversIPv6[i]) {
       continue;
+    }
     IPAddress ip;
     EXPECT_TRUE(ip.AssignFromIPLiteral(kNameserversIPv6[i]));
     config->nameservers[i] = IPEndPoint(ip, NS_DEFAULTPORT - i);
@@ -155,10 +159,10 @@ TEST(DnsConfigServicePosixTest, CreateAndDestroy) {
 TEST(DnsConfigServicePosixTest, ConvertResStateToDnsConfig) {
   struct __res_state res;
   InitializeResState(&res);
-  absl::optional<DnsConfig> config = internal::ConvertResStateToDnsConfig(res);
+  std::optional<DnsConfig> config = internal::ConvertResStateToDnsConfig(res);
   CloseResState(&res);
   ASSERT_TRUE(config.has_value());
-  EXPECT_TRUE(config->IsValid());
+  EXPECT_FALSE(config->nameservers.empty());
 
   DnsConfig expected_config;
   EXPECT_FALSE(expected_config.EqualsIgnoreHosts(config.value()));
@@ -170,7 +174,7 @@ TEST(DnsConfigServicePosixTest, RejectEmptyNameserver) {
   struct __res_state res = {};
   res.options = RES_INIT | RES_RECURSE | RES_DEFNAMES | RES_DNSRCH;
   const char kDnsrch[] = "chromium.org";
-  memcpy(res.defdname, kDnsrch, sizeof(kDnsrch));
+  UNSAFE_TODO(memcpy(res.defdname, kDnsrch, sizeof(kDnsrch)));
   res.dnsrch[0] = res.defdname;
 
   struct sockaddr_in sa = {};

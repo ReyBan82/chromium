@@ -4,6 +4,7 @@
 
 #import "components/password_manager/ios/password_controller_driver_helper.h"
 
+#import "base/memory/raw_ptr.h"
 #import "components/password_manager/core/browser/password_generation_frame_helper.h"
 #import "components/password_manager/core/browser/password_manager.h"
 #import "components/password_manager/core/browser/password_manager_client.h"
@@ -17,10 +18,6 @@
 #import "testing/platform_test.h"
 #import "third_party/ocmock/OCMock/OCMock.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 using password_manager::PasswordManager;
 using testing::Return;
 
@@ -29,7 +26,7 @@ class MockPasswordManagerClient
  public:
   MOCK_METHOD(bool,
               IsSavingAndFillingEnabled,
-              (const GURL&),
+              (const url::Origin&, base::optional_ref<const GURL>),
               (const, override));
 };
 
@@ -53,7 +50,7 @@ class PasswordControllerDriverHelperTest : public PlatformTest {
   web::FakeWebState web_state_;
   id password_controller_;
   PasswordControllerDriverHelper* password_controller_helper_;
-  web::FakeWebFramesManager* web_frames_manager_;
+  raw_ptr<web::FakeWebFramesManager> web_frames_manager_;
   testing::StrictMock<MockPasswordManagerClient> password_manager_client_;
   PasswordManager password_manager_ =
       PasswordManager(&password_manager_client_);
@@ -61,7 +58,7 @@ class PasswordControllerDriverHelperTest : public PlatformTest {
 
 // Tests that the driver can be retrieved.
 TEST_F(PasswordControllerDriverHelperTest, PasswordManagerDriver) {
-  auto web_frame = web::FakeWebFrame::CreateMainWebFrame(GURL());
+  auto web_frame = web::FakeWebFrame::CreateMainWebFrame();
   web::WebFrame* frame = web_frame.get();
   web_frames_manager_->AddWebFrame(std::move(web_frame));
 
@@ -72,7 +69,7 @@ TEST_F(PasswordControllerDriverHelperTest, PasswordManagerDriver) {
 
 // Tests that the password generation helper can be retrieved.
 TEST_F(PasswordControllerDriverHelperTest, PasswordGenerationHelper) {
-  auto web_frame = web::FakeWebFrame::CreateMainWebFrame(GURL());
+  auto web_frame = web::FakeWebFrame::CreateMainWebFrame();
   web::WebFrame* frame = web_frame.get();
   web_frames_manager_->AddWebFrame(std::move(web_frame));
 

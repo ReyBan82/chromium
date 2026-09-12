@@ -5,11 +5,12 @@
 #ifndef CHROME_BROWSER_DOWNGRADE_USER_DATA_DOWNGRADE_H_
 #define CHROME_BROWSER_DOWNGRADE_USER_DATA_DOWNGRADE_H_
 
+#include <optional>
+
 #include "base/containers/flat_set.h"
 #include "base/files/file_path.h"
 #include "base/time/time.h"
 #include "base/version.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class Time;
@@ -18,13 +19,13 @@ class Time;
 namespace downgrade {
 
 // The suffix of pending deleted directory.
-extern const base::FilePath::StringPieceType kDowngradeDeleteSuffix;
+extern const base::FilePath::StringViewType kDowngradeDeleteSuffix;
 
 // The name of "Last Version" file.
-extern const base::FilePath::StringPieceType kDowngradeLastVersionFile;
+extern const base::FilePath::StringViewType kDowngradeLastVersionFile;
 
 // The name of the Snapshot directory.
-extern const base::FilePath::StringPieceType kSnapshotsDir;
+extern const base::FilePath::StringViewType kSnapshotsDir;
 
 // Returns the path to the "Last Version" file in |user_data_dir|.
 base::FilePath GetLastVersionFile(const base::FilePath& user_data_dir);
@@ -32,13 +33,8 @@ base::FilePath GetLastVersionFile(const base::FilePath& user_data_dir);
 // Returns the value contained in the "Last Version" file in |user_data_dir|, or
 // a null value if the file does not exist, cannot be read, or does not contain
 // a version number.
-absl::optional<base::Version> GetLastVersion(
+std::optional<base::Version> GetLastVersion(
     const base::FilePath& user_data_dir);
-
-// Return the disk cache directory override if one is set via administrative
-// policy or a command line switch; otherwise, an empty path (the disk cache is
-// within the User Data directory).
-base::FilePath GetDiskCacheDir();
 
 // Returns the versions that have a complete snapshot available.
 base::flat_set<base::Version> GetAvailableSnapshots(
@@ -51,16 +47,16 @@ std::vector<base::FilePath> GetInvalidSnapshots(
 
 // Return the highest available snapshot version that is not greater than
 // |version|.
-absl::optional<base::Version> GetSnapshotToRestore(
+std::optional<base::Version> GetSnapshotToRestore(
     const base::Version& version,
     const base::FilePath& user_data_dir);
 
 // Removes snapshot data created after |delete_begin| for |profile_path|.
-// |remove_mask| (of bits from ChromeBrowsingDataRemoverDelegate::DataType)
-// indicates the types of data to be cleared from the profile's snapshots.
-void RemoveDataForProfile(base::Time delete_begin,
-                          const base::FilePath& profile_path,
-                          uint64_t remove_mask);
+// If |files_to_delete| is nullopt, all data for the profile is removed.
+void RemoveDataForProfile(
+    base::Time delete_begin,
+    const base::FilePath& profile_path,
+    std::optional<std::vector<base::FilePath>> files_to_delete);
 
 }  // namespace downgrade
 

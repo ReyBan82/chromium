@@ -8,10 +8,10 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/notreached.h"
-#include "chrome/browser/enterprise/connectors/device_trust/signals/decorators/common/metrics_utils.h"
 #include "chrome/browser/enterprise/connectors/device_trust/signals/decorators/common/signals_utils.h"
 #include "chrome/browser/enterprise/signals/context_info_fetcher.h"
 #include "components/device_signals/core/common/signals_constants.h"
+#include "components/enterprise/device_trust/core/metrics_utils.h"
 
 namespace enterprise_connectors {
 
@@ -27,7 +27,7 @@ enum class PasswordProtectionTrigger {
 };
 
 PasswordProtectionTrigger ConvertPasswordProtectionTrigger(
-    const absl::optional<safe_browsing::PasswordProtectionTrigger>&
+    const std::optional<safe_browsing::PasswordProtectionTrigger>&
         policy_value) {
   if (!policy_value) {
     return PasswordProtectionTrigger::kUnset;
@@ -42,7 +42,6 @@ PasswordProtectionTrigger ConvertPasswordProtectionTrigger(
       return PasswordProtectionTrigger::kPhisingReuse;
     case safe_browsing::PASSWORD_PROTECTION_TRIGGER_MAX:
       NOTREACHED();
-      return PasswordProtectionTrigger::kUnset;
   }
 }
 
@@ -57,7 +56,7 @@ ContextSignalsDecorator::ContextSignalsDecorator(
 
 ContextSignalsDecorator::~ContextSignalsDecorator() = default;
 
-void ContextSignalsDecorator::Decorate(base::Value::Dict& signals,
+void ContextSignalsDecorator::Decorate(base::DictValue& signals,
                                        base::OnceClosure done_closure) {
   context_info_fetcher_->Fetch(base::BindOnce(
       &ContextSignalsDecorator::OnSignalsFetched,
@@ -66,7 +65,7 @@ void ContextSignalsDecorator::Decorate(base::Value::Dict& signals,
 }
 
 void ContextSignalsDecorator::OnSignalsFetched(
-    base::Value::Dict& signals,
+    base::DictValue& signals,
     base::TimeTicks start_time,
     base::OnceClosure done_closure,
     enterprise_signals::ContextInfo context_info) {
@@ -92,16 +91,6 @@ void ContextSignalsDecorator::OnSignalsFetched(
               static_cast<int32_t>(context_info.os_firewall));
   signals.Set(device_signals::names::kSystemDnsServers,
               ToListValue(context_info.system_dns_servers));
-
-  if (context_info.chrome_cleanup_enabled) {
-    signals.Set(device_signals::names::kChromeCleanupEnabled,
-                context_info.chrome_cleanup_enabled.value());
-  }
-
-  if (context_info.third_party_blocking_enabled) {
-    signals.Set(device_signals::names::kThirdPartyBlockingEnabled,
-                context_info.third_party_blocking_enabled.value());
-  }
 
   LogSignalsCollectionLatency(kLatencyHistogramVariant, start_time);
 

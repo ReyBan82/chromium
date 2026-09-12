@@ -19,17 +19,19 @@ ActivityFilteringWebSocketHandshakeThrottle::
 
 void ActivityFilteringWebSocketHandshakeThrottle::ThrottleHandshake(
     const blink::WebURL& url,
+    const blink::WebSecurityOrigin& creator_origin,
+    const blink::WebSecurityOrigin& isolated_world_origin,
     blink::WebSocketHandshakeThrottle::OnCompletion completion_callback) {
   GURL gurl = GURL(url);
 
   // Pass through allowed URLs, block otherwise.
   if (url_filter_->UrlMatchesWhitelist(gurl)) {
-    std::move(completion_callback).Run(absl::nullopt);
+    std::move(completion_callback).Run(std::nullopt);
     return;
   }
 
   std::move(completion_callback)
-      .Run(blink::WebString::FromUTF8(base::StringPrintf(
+      .Run(blink::WebString::FromUtf8(base::StringPrintf(
           "WebSocket connection to %s is blocked", gurl.spec().c_str())));
 }
 

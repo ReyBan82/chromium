@@ -16,10 +16,12 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_handle.h"
+#include "content/public/browser/page.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/web_contents.h"
+#include "net/http/http_request_headers.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
 
 namespace android_webview {
@@ -66,30 +68,6 @@ void AwRenderViewHostExt::DocumentHasImages(DocumentHasImagesResult result) {
     // Otherwise the listener of the response may be starved.
     std::move(result).Run(false);
   }
-}
-
-void AwRenderViewHostExt::RequestNewHitTestDataAt(
-    const gfx::PointF& touch_center,
-    const gfx::SizeF& touch_area) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-
-  // If the new hit testing approach for touch start is enabled we just early
-  // return.
-  if (base::FeatureList::IsEnabled(
-          features::kWebViewHitTestInBlinkOnTouchStart)) {
-    return;
-  }
-
-  // The following code is broken for OOPIF and fenced frames. The hit testing
-  // feature for touch start replaces this code and works correctly in those
-  // scenarios. For mitigating risk we've put the old code behind a feature
-  // flag.
-  //
-  // We only need to get blink::WebView on the renderer side to invoke the
-  // blink hit test Mojo method, so sending this message via LocalMainFrame
-  // interface is enough.
-  if (auto* local_main_frame_remote = GetLocalMainFrameRemote())
-    local_main_frame_remote->HitTest(touch_center, touch_area);
 }
 
 mojom::HitTestDataPtr AwRenderViewHostExt::TakeLastHitTestData() {
@@ -156,24 +134,26 @@ void AwRenderViewHostExt::OnPageScaleFactorChanged(float page_scale_factor) {
 
 void AwRenderViewHostExt::UpdateHitTestData(
     mojom::HitTestDataPtr hit_test_data) {
-  content::RenderFrameHost* render_frame_host =
-      frame_host_receivers_.GetCurrentTargetFrame();
+  content::RenderFrameHost& render_frame_host =
+      frame_host_receivers_.CurrentTargetFrame();
   // Make sense from any frame of the active frame tree, because a focused
   // node could be in either the mainframe or a subframe.
-  if (!render_frame_host->IsActive())
+  if (!render_frame_host.IsActive()) {
     return;
+  }
 
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   last_hit_test_data_ = std::move(hit_test_data);
 }
 
 void AwRenderViewHostExt::ContentsSizeChanged(const gfx::Size& contents_size) {
-  content::RenderFrameHost* render_frame_host =
-      frame_host_receivers_.GetCurrentTargetFrame();
+  content::RenderFrameHost& render_frame_host =
+      frame_host_receivers_.CurrentTargetFrame();
 
   // Only makes sense coming from the main frame of the current frame tree.
-  if (!render_frame_host->IsInPrimaryMainFrame())
+  if (!render_frame_host.IsInPrimaryMainFrame()) {
     return;
+  }
 
   client_->OnWebLayoutContentsSizeChanged(contents_size);
 }
@@ -181,17 +161,20 @@ void AwRenderViewHostExt::ContentsSizeChanged(const gfx::Size& contents_size) {
 void AwRenderViewHostExt::ShouldOverrideUrlLoading(
     const std::u16string& url,
     bool has_user_gesture,
-    bool is_redirect,
-    bool is_main_frame,
     ShouldOverrideUrlLoadingCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+
+  content::RenderFrameHost& render_frame_host =
+      frame_host_receivers_.CurrentTargetFrame();
 
   bool ignore_navigation = false;
   AwContentsClientBridge* client =
       AwContentsClientBridge::FromWebContents(web_contents());
   if (client) {
-    if (!client->ShouldOverrideUrlLoading(url, has_user_gesture, is_redirect,
-                                          is_main_frame, &ignore_navigation)) {
+    if (!client->ShouldOverrideUrlLoading(
+            url, has_user_gesture, /*is_redirect=*/false,
+            render_frame_host.IsInPrimaryMainFrame(), net::HttpRequestHeaders(),
+            &ignore_navigation)) {
       // If the shouldOverrideUrlLoading call caused a java exception we should
       // always return immediately here!
       return;

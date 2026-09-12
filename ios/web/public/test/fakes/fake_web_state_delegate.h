@@ -10,6 +10,7 @@
 #include <memory>
 #include <set>
 
+#import "base/memory/raw_ptr.h"
 #import "ios/web/public/test/fakes/fake_java_script_dialog_presenter.h"
 #import "ios/web/public/web_state_delegate.h"
 
@@ -17,7 +18,7 @@ namespace web {
 
 // Encapsulates parameters passed to CreateNewWebState.
 struct FakeCreateNewWebStateRequest {
-  WebState* web_state = nullptr;
+  raw_ptr<WebState, DanglingUntriaged> web_state = nullptr;
   GURL url;
   GURL opener_url;
   bool initiated_by_user = false;
@@ -25,7 +26,7 @@ struct FakeCreateNewWebStateRequest {
 
 // Encapsulates parameters passed to CloseWebState.
 struct FakeCloseWebStateRequest {
-  WebState* web_state = nullptr;
+  raw_ptr<WebState> web_state = nullptr;
 };
 
 // Encapsulates parameters passed to OpenURLFromWebState.
@@ -33,7 +34,7 @@ struct FakeOpenURLRequest {
   FakeOpenURLRequest();
   FakeOpenURLRequest(const FakeOpenURLRequest&);
   ~FakeOpenURLRequest();
-  WebState* web_state = nullptr;
+  raw_ptr<WebState> web_state = nullptr;
   WebState::OpenURLParams params;
 };
 
@@ -41,7 +42,7 @@ struct FakeOpenURLRequest {
 struct FakeRepostFormRequest {
   FakeRepostFormRequest();
   ~FakeRepostFormRequest();
-  WebState* web_state = nullptr;
+  raw_ptr<WebState> web_state = nullptr;
   base::OnceCallback<void(bool)> callback;
 };
 
@@ -50,10 +51,23 @@ struct FakeAuthenticationRequest {
   FakeAuthenticationRequest();
   FakeAuthenticationRequest(FakeAuthenticationRequest&&);
   ~FakeAuthenticationRequest();
-  WebState* web_state = nullptr;
+  raw_ptr<WebState, DanglingUntriaged> web_state = nullptr;
   NSURLProtectionSpace* protection_space;
   NSURLCredential* credential;
-  WebStateDelegate::AuthCallback auth_callback;
+  WebStateDelegate::HTTPAuthCallback http_auth_callback;
+  WebStateDelegate::ClientCertAuthCallback client_cert_auth_callback;
+};
+
+// Encapsulates parameters passed to OnProxyAuthChallenge.
+struct FakeProxyAuthenticationRequest {
+  FakeProxyAuthenticationRequest();
+  FakeProxyAuthenticationRequest(FakeProxyAuthenticationRequest&&);
+  ~FakeProxyAuthenticationRequest();
+  raw_ptr<WebState> web_state = nullptr;
+  NSURLProtectionSpace* protection_space = nil;
+  NSURLCredential* proposed_credential = nil;
+  NSURLResponse* failure_response = nil;
+  WebStateDelegate::ProxyAuthCallback proxy_auth_callback;
 };
 
 // Encapsulates information about popup.
@@ -81,17 +95,26 @@ class FakeWebStateDelegate : public WebStateDelegate {
   JavaScriptDialogPresenter* GetJavaScriptDialogPresenter(WebState*) override;
   void ShowRepostFormWarningDialog(
       WebState* source,
+      web::FormWarningType warning_type,
       base::OnceCallback<void(bool)> callback) override;
   FakeJavaScriptDialogPresenter* GetFakeJavaScriptDialogPresenter();
   void OnAuthRequired(WebState* source,
                       NSURLProtectionSpace* protection_space,
                       NSURLCredential* proposed_credential,
-                      AuthCallback callback) override;
-  bool HandlePermissionsDecisionRequest(
+                      HTTPAuthCallback callback) override;
+  void OnAuthRequired(WebState* source,
+                      NSURLProtectionSpace* protection_space,
+                      ClientCertAuthCallback callback) override;
+  void OnProxyAuthChallenge(WebState* source,
+                            NSURLProtectionSpace* protection_space,
+                            NSURLCredential* proposed_credential,
+                            NSURLResponse* failure_response,
+                            ProxyAuthCallback callback) override
+      API_AVAILABLE(ios(18.1));
+  void HandlePermissionsDecisionRequest(
       WebState* source,
       NSArray<NSNumber*>* permissions,
-      WebStatePermissionDecisionHandler handler) override
-      API_AVAILABLE(ios(15.0));
+      WebStatePermissionDecisionHandler handler) override;
 
   // Allows popups requested by a page with `opener_url`.
   void allow_popups(const GURL& opener_url) {
@@ -143,6 +166,18 @@ class FakeWebStateDelegate : public WebStateDelegate {
     last_authentication_request_.reset();
   }
 
+  // Returns the last proxy authentication request passed to
+  // `OnProxyAuthChallenge`.
+  FakeProxyAuthenticationRequest* last_proxy_authentication_request() const {
+    return last_proxy_authentication_request_.get();
+  }
+
+  // Clears the last proxy authentication request passed to
+  // `OnProxyAuthChallenge`.
+  void ClearLastProxyAuthenticationRequest() {
+    last_proxy_authentication_request_.reset();
+  }
+
   // Returns the last requested permissions passed to
   // `HandlePermissionsDecisionRequest`.
   NSArray<NSNumber*>* last_requested_permissions() {
@@ -153,15 +188,21 @@ class FakeWebStateDelegate : public WebStateDelegate {
   // `HandlePermissionsDecisionRequest`.
   void ClearLastRequestedPermissions() { last_requested_permissions_ = nil; }
 
-  // Sets that whether permissions should be granted or denied the next time
+  // Sets that permission decision the for next time
   // `HandlePermissionsDecisionRequest` is called.
-  void SetShouldGrantPermissions(bool should_grant_permissions) {
-    should_grant_permissions_ = should_grant_permissions;
+  void SetPermissionDecision(PermissionDecision permission_decision) {
+    permission_decision_ = permission_decision;
   }
 
   // Sets the return value of `ShouldAllowAppLaunching`.
   void SetShouldAllowAppLaunching(bool should_allow_apps) {
     should_allow_app_launching_ = should_allow_apps;
+  }
+
+  // Sets whether the delegate should handle permission decision.
+  void SetShouldHandlePermissionDecision(
+      bool should_handle_permission_decision) {
+    should_handle_permission_decision_ = should_handle_permission_decision;
   }
 
  private:
@@ -179,9 +220,12 @@ class FakeWebStateDelegate : public WebStateDelegate {
   bool get_java_script_dialog_presenter_called_ = false;
   FakeJavaScriptDialogPresenter java_script_dialog_presenter_;
   std::unique_ptr<FakeAuthenticationRequest> last_authentication_request_;
+  std::unique_ptr<FakeProxyAuthenticationRequest>
+      last_proxy_authentication_request_;
   NSArray<NSNumber*>* last_requested_permissions_;
   bool should_allow_app_launching_ = false;
-  bool should_grant_permissions_ = false;
+  PermissionDecision permission_decision_ = PermissionDecisionDeny;
+  bool should_handle_permission_decision_ = true;
 };
 
 }  // namespace web

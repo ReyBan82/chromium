@@ -11,11 +11,15 @@
 
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/ui/webauthn/hover_list_model.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/models/image_model.h"
+#include "ui/views/controls/button/button.h"
 #include "ui/views/controls/scroll_view.h"
 #include "ui/views/view.h"
+
+namespace ui {
+class Event;
+}  // namespace ui
 
 namespace views {
 class Separator;
@@ -38,8 +42,9 @@ class WebAuthnHoverButton;
 //  +----------------------------------+
 //
 class HoverListView : public views::View {
+  METADATA_HEADER(HoverListView, views::View)
+
  public:
-  METADATA_HEADER(HoverListView);
   explicit HoverListView(std::unique_ptr<HoverListModel> model);
   HoverListView(const HoverListView&) = delete;
   HoverListView& operator=(const HoverListView&) = delete;
@@ -54,8 +59,9 @@ class HoverListView : public views::View {
   void AppendListItemView(const ui::ImageModel& icon,
                           std::u16string item_text,
                           std::u16string item_description,
+                          bool enabled,
                           int item_tag);
-  void CreateAndAppendPlaceholderItem();
+  void OnListItemSelected(int item_tag, const ui::Event& event);
   views::Button& GetTopListItemView() const;
   int GetPreferredViewHeight() const;
 

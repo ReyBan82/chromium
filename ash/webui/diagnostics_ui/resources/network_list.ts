@@ -7,17 +7,19 @@ import './diagnostics_shared.css.js';
 import './icons.html.js';
 import './network_card.js';
 
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {afterNextRender, PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
-import {ConnectivityCardElement} from './connectivity_card.js';
-import {DiagnosticsBrowserProxy, DiagnosticsBrowserProxyImpl} from './diagnostics_browser_proxy.js';
+import type {ConnectivityCardElement} from './connectivity_card.js';
+import type {DiagnosticsBrowserProxy} from './diagnostics_browser_proxy.js';
+import {DiagnosticsBrowserProxyImpl} from './diagnostics_browser_proxy.js';
 import {getNetworkHealthProvider} from './mojo_interface_provider.js';
-import {NetworkCardElement} from './network_card.js';
-import {NetworkHealthProviderInterface, NetworkListObserverReceiver} from './network_health_provider.mojom-webui.js';
+import type {NetworkCardElement} from './network_card.js';
+import type {NetworkHealthProviderInterface} from './network_health_provider.mojom-webui.js';
+import {NetworkListObserverReceiver} from './network_health_provider.mojom-webui.js';
 import {getTemplate} from './network_list.html.js';
 import {TestSuiteStatus} from './routine_list_executor.js';
 
@@ -36,8 +38,8 @@ export interface NetworkListElement {
 const NetworkListElementBase = I18nMixin(PolymerElement);
 
 export class NetworkListElement extends NetworkListElementBase {
-  static get is(): string {
-    return 'network-list';
+  static get is(): 'network-list' {
+    return 'network-list' as const;
   }
 
   static get template(): HTMLTemplateElement {
@@ -74,11 +76,11 @@ export class NetworkListElement extends NetworkListElementBase {
     };
   }
 
-  testSuiteStatus: TestSuiteStatus;
-  isActive: boolean;
-  protected isLoggedIn: boolean;
-  private otherNetworkGuids: string[];
-  private activeGuid: string;
+  declare testSuiteStatus: TestSuiteStatus;
+  declare isActive: boolean;
+  declare protected isLoggedIn: boolean;
+  declare private otherNetworkGuids: string[];
+  declare private activeGuid: string;
   private browserProxy: DiagnosticsBrowserProxy =
       DiagnosticsBrowserProxyImpl.getInstance();
   private networkHealthProvider: NetworkHealthProviderInterface =
@@ -130,20 +132,24 @@ export class NetworkListElement extends NetworkListElementBase {
       // fallback to focusing the element's main container.
       afterNextRender(this, () => {
         if (this.activeGuid) {
-          const connectivityCard: ConnectivityCardElement|null =
-              this.shadowRoot!.querySelector('connectivity-card');
+          const connectivityCard =
+              this.shadowRoot!.querySelector<ConnectivityCardElement>(
+                  'connectivity-card');
           assert(connectivityCard);
-          const cardTitle: HTMLDivElement|null =
-              connectivityCard.shadowRoot!.querySelector('#cardTitle');
+          const cardTitle =
+              connectivityCard.shadowRoot!.querySelector<HTMLDivElement>(
+                  '#cardTitle');
           assert(cardTitle);
           cardTitle.focus();
           return;
         } else if (this.otherNetworkGuids.length > 0) {
-          const networkCard: NetworkCardElement|null =
-              this.shadowRoot!.querySelector('network-card');
+          const networkCard =
+              this.shadowRoot!.querySelector<NetworkCardElement>(
+                  'network-card');
           assert(networkCard);
-          const cardTitle: HTMLDivElement|null =
-              networkCard.shadowRoot!.querySelector('#cardTitle');
+          const cardTitle =
+              networkCard.shadowRoot!.querySelector<HTMLDivElement>(
+                  '#cardTitle');
           assert(cardTitle);
           cardTitle.focus();
         }
@@ -158,11 +164,23 @@ export class NetworkListElement extends NetworkListElementBase {
   protected getSettingsString(): TrustedHTML {
     return this.i18nAdvanced('settingsLinkText');
   }
+
+  setActiveGuidForTesting(guid: string): void {
+    this.activeGuid = guid;
+  }
+
+  setIsLoggedInForTesting(state: boolean): void {
+    this.isLoggedIn = state;
+  }
+
+  getOtherNetworkGuidsForTesting(): string[] {
+    return this.otherNetworkGuids;
+  }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'network-list': NetworkListElement;
+    [NetworkListElement.is]: NetworkListElement;
   }
 }
 

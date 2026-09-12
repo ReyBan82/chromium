@@ -27,7 +27,7 @@ BASH_TEMPLATE = textwrap.dedent("""\
 # directly.
 BATCH_TEMPLATE = textwrap.dedent("""\
     @SETLOCAL ENABLEDELAYEDEXPANSION \
-      & vpython3.bat -x "%~f0" %* \
+      & CMD /C vpython3.bat -x "%~f0" %* \
       & EXIT /B !ERRORLEVEL!
     _SCRIPT_LOCATION = __file__
     {script}
@@ -40,7 +40,7 @@ SCRIPT_TEMPLATES = {
 }
 
 
-PY_TEMPLATE = textwrap.dedent("""\
+PY_TEMPLATE = textwrap.dedent(r"""
     import os
     import re
     import shlex
@@ -55,8 +55,10 @@ PY_TEMPLATE = textwrap.dedent("""\
 
 
     def ExpandWrappedPath(arg):
-      m = _WRAPPED_PATH_RE.match(arg)
+      m = _WRAPPED_PATH_RE.search(arg)
       if m:
+        head = arg[:m.start()]
+        tail = arg[m.end():]
         relpath = os.path.join(
             os.path.relpath(_SCRIPT_DIR), _PATH_TO_OUTPUT_DIR, m.group(1))
         npath = os.path.normpath(relpath)
@@ -78,8 +80,8 @@ PY_TEMPLATE = textwrap.dedent("""\
           # WrappedPath() somehow to distinguish between the two, or
           # somehow ensure that the wrapped executable doesn't hit cases
           # like this.
-          return '.' + os.path.sep + npath
-        return npath
+          return head + '.' + os.path.sep + npath + tail
+        return head + npath + tail
       return arg
 
 
@@ -197,55 +199,58 @@ PY_TEMPLATE = textwrap.dedent("""\
 
 
 def Wrap(args):
-  """Writes a wrapped script according to the provided arguments.
+    """Writes a wrapped script according to the provided arguments.
 
-  Arguments:
-    args: an argparse.Namespace object containing command-line arguments
-      as parsed by a parser returned by CreateArgumentParser.
-  """
-  path_to_output_dir = os.path.relpath(
-      args.output_directory,
-      os.path.dirname(args.wrapper_script))
+    Arguments:
+      args: an argparse.Namespace object containing command-line arguments
+        as parsed by a parser returned by CreateArgumentParser.
+    """
+    path_to_output_dir = os.path.relpath(
+        args.output_directory, os.path.dirname(args.wrapper_script)
+    )
 
-  with open(args.wrapper_script, 'w') as wrapper_script:
-    py_contents = PY_TEMPLATE.format(
-        path_to_output_dir=path_to_output_dir,
-        executable_path=str(args.executable),
-        executable_args=str(args.executable_args))
-    template = SCRIPT_TEMPLATES[args.script_language]
-    wrapper_script.write(template.format(script=py_contents))
-  os.chmod(args.wrapper_script, 0o750)
+    with open(args.wrapper_script, 'w') as wrapper_script:
+        py_contents = PY_TEMPLATE.format(
+            path_to_output_dir=path_to_output_dir,
+            executable_path=str(args.executable),
+            executable_args=str(args.executable_args),
+        )
+        template = SCRIPT_TEMPLATES[args.script_language]
+        wrapper_script.write(template.format(script=py_contents))
+    os.chmod(args.wrapper_script, 0o750)
 
-  return 0
+    return 0
 
 
 def CreateArgumentParser():
-  """Creates an argparse.ArgumentParser instance."""
-  parser = argparse.ArgumentParser()
-  parser.add_argument(
-      '--executable',
-      help='Executable to wrap.')
-  parser.add_argument(
-      '--wrapper-script',
-      help='Path to which the wrapper script will be written.')
-  parser.add_argument(
-      '--output-directory',
-      help='Path to the output directory.')
-  parser.add_argument(
-      '--script-language',
-      choices=SCRIPT_TEMPLATES.keys(),
-      help='Language in which the wrapper script will be written.')
-  parser.add_argument(
-      'executable_args', nargs='*',
-      help='Arguments to wrap into the executable.')
-  return parser
+    """Creates an argparse.ArgumentParser instance."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--executable', help='Executable to wrap.')
+    parser.add_argument(
+        '--wrapper-script',
+        help='Path to which the wrapper script will be written.',
+    )
+    parser.add_argument(
+        '--output-directory', help='Path to the output directory.'
+    )
+    parser.add_argument(
+        '--script-language',
+        choices=SCRIPT_TEMPLATES.keys(),
+        help='Language in which the wrapper script will be written.',
+    )
+    parser.add_argument(
+        'executable_args',
+        nargs='*',
+        help='Arguments to wrap into the executable.',
+    )
+    return parser
 
 
 def main(raw_args):
-  parser = CreateArgumentParser()
-  args = parser.parse_args(raw_args)
-  return Wrap(args)
+    parser = CreateArgumentParser()
+    args = parser.parse_args(raw_args)
+    return Wrap(args)
 
 
 if __name__ == '__main__':
-  sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:]))

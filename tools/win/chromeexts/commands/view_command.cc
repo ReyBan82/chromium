@@ -4,8 +4,9 @@
 
 #include "tools/win/chromeexts/commands/view_command.h"
 
-#include <dbgeng.h>
 #include <windows.h>
+
+#include <dbgeng.h>
 #include <wrl/client.h>
 
 #include <ostream>
@@ -157,7 +158,7 @@ class VirtualViewDebugWrapper : public views::debug::ViewDebugWrapper {
     return buffer;
   }
 
-  absl::optional<intptr_t> GetAddress() override {
+  std::optional<intptr_t> GetAddress() override {
     return view_block_.address();
   }
 
@@ -181,6 +182,21 @@ class VirtualViewDebugWrapper : public views::debug::ViewDebugWrapper {
   }
   bool GetEnabled() override {
     return view_block_.GetFieldValue<bool>("enabled_");
+  }
+  bool IsPaintLocked() override {
+    if (view_block_.GetFieldValue<int>("paint_lock_count_") > 0) {
+      return true;
+    }
+
+    intptr_t parent_ptr = view_block_.GetFieldValue<intptr_t>("parent_");
+    if (!parent_ptr) {
+      return false;
+    }
+
+    VirtualMemoryBlock parent_block(debug_client_.Get(), "views!views::View",
+                                    parent_ptr);
+    VirtualViewDebugWrapper parent_wrapper(parent_block, debug_client_.Get());
+    return parent_wrapper.IsPaintLocked();
   }
   std::vector<ViewDebugWrapper*> GetChildren() override {
     if (children_.empty()) {
@@ -248,10 +264,9 @@ HRESULT ViewCommand::Execute() {
 
     if (command_line().HasSwitch("r")) {
       DebugOutputBuffer buffer(GetDebugClientAs<IDebugControl>().Get());
-      std::ostream out(&buffer);
       VirtualViewDebugWrapper root(view_block,
                                    GetDebugClientAs<IDebugClient>().Get());
-      PrintViewHierarchy(&out, &root);
+      std::ostream(&buffer) << PrintViewHierarchy(&root);
     } else {
       for (auto val : children_ptrs) {
         Printf("%x ", val);

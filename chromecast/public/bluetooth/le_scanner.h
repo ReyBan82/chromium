@@ -8,8 +8,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "bluetooth_types.h"    // NOLINT(build/include)
-#include "chromecast_export.h"  // NOLINT(build/include)
+#include "bluetooth_types.h"
+#include "chromecast_export.h"
 
 namespace chromecast {
 namespace bluetooth_v2_shlib {
@@ -53,4 +53,4 @@ inline LeScanner::ScanResult::~ScanResult() = default;
 }  // namespace bluetooth_v2_shlib
 }  // namespace chromecast
 
-#endif  //  CHROMECAST_PUBLIC_BLUETOOTH_LE_SCANNER_H_
+#endif  // CHROMECAST_PUBLIC_BLUETOOTH_LE_SCANNER_H_

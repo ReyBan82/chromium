@@ -80,10 +80,6 @@ ProcessId Process::Pid() const {
   return process_;
 }
 
-Time Process::CreationTime() const {
-  return Time();
-}
-
 bool Process::is_current() const {
   return Handle() == kCurrentProcessHandle;
 }
@@ -100,17 +96,15 @@ bool Process::WaitForExitWithTimeout(TimeDelta timeout, int* exit_code) const {
   return false;
 }
 
-void Process::Exited(int exit_code) const {}
+Process::Priority Process::GetPriority() const {
+  return Priority::kUserBlocking;
+}
 
-bool Process::IsProcessBackgrounded() const {
+bool Process::SetPriority(Priority priority) {
   return false;
 }
 
-bool Process::SetProcessBackgrounded(bool value) {
-  return false;
-}
-
-int Process::GetPriority() const {
+int Process::GetOSPriority() const {
   return -1;
 }
 

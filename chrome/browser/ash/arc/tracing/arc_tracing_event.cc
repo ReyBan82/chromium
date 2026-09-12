@@ -27,40 +27,45 @@ constexpr char kKeyPhase[] = "ph";
 constexpr char kKeyTid[] = "tid";
 constexpr char kKeyTimestamp[] = "ts";
 
-int GetIntegerFromDictionary(const base::Value::Dict* dictionary,
+int GetIntegerFromDictionary(const base::DictValue* dictionary,
                              const std::string& name,
                              int default_value) {
-  if (!dictionary)
+  if (!dictionary) {
     return default_value;
+  }
   return dictionary->FindInt(name).value_or(default_value);
 }
 
-double GetDoubleFromDictionary(const base::Value::Dict* dictionary,
+double GetDoubleFromDictionary(const base::DictValue* dictionary,
                                const std::string& name,
                                double default_value) {
-  if (!dictionary)
+  if (!dictionary) {
     return default_value;
-  absl::optional<double> double_value = dictionary->FindDouble(name);
-  if (double_value)
+  }
+  std::optional<double> double_value = dictionary->FindDouble(name);
+  if (double_value) {
     return *double_value;
-  absl::optional<int> int_value = dictionary->FindInt(name);
-  if (int_value)
+  }
+  std::optional<int> int_value = dictionary->FindInt(name);
+  if (int_value) {
     return *int_value;
+  }
   return default_value;
 }
 
-std::string GetStringFromDictionary(const base::Value::Dict* dictionary,
+std::string GetStringFromDictionary(const base::DictValue* dictionary,
                                     const std::string& name,
                                     const std::string& default_value) {
-  if (!dictionary)
+  if (!dictionary) {
     return default_value;
+  }
   const std::string* value = dictionary->FindString(name);
   return value ? *value : default_value;
 }
 
 }  // namespace
 
-ArcTracingEvent::ArcTracingEvent(base::Value::Dict dictionary)
+ArcTracingEvent::ArcTracingEvent(base::DictValue dictionary)
     : dictionary_(std::move(dictionary)) {}
 
 ArcTracingEvent::~ArcTracingEvent() = default;
@@ -88,12 +93,13 @@ void ArcTracingEvent::SetTid(int tid) {
 }
 
 std::string ArcTracingEvent::GetId() const {
-  const base::Value::Dict* dictionary = GetDictionary();
+  const base::DictValue* dictionary = GetDictionary();
   const std::string* id_value = dictionary->FindString(kKeyId);
-  if (id_value)
+  if (id_value) {
     return *id_value;
+  }
 
-  const base::Value::Dict* id2_value = dictionary->FindDict(kKeyId2);
+  const base::DictValue* id2_value = dictionary->FindDict(kKeyId2);
   if (id2_value) {
     return GetStringFromDictionary(id2_value, kKeyLocal,
                                    std::string() /* default_value */);
@@ -155,11 +161,11 @@ uint64_t ArcTracingEvent::GetEndTimestamp() const {
   return GetTimestamp() + GetDuration();
 }
 
-const base::Value::Dict* ArcTracingEvent::GetDictionary() const {
+const base::DictValue* ArcTracingEvent::GetDictionary() const {
   return &dictionary_;
 }
 
-const base::Value::Dict* ArcTracingEvent::GetArgs() const {
+const base::DictValue* ArcTracingEvent::GetArgs() const {
   return dictionary_.FindDict(kKeyArguments);
 }
 
@@ -185,18 +191,22 @@ ArcTracingEvent::Position ArcTracingEvent::ClassifyPositionOf(
   const int64_t this_end = this_start + GetDuration();
   const int64_t other_start = other.GetTimestamp();
   const int64_t other_end = other_start + other.GetDuration();
-  if (this_start <= other_start && this_end >= other_end)
+  if (this_start <= other_start && this_end >= other_end) {
     return Position::kInside;
-  if (this_end <= other_start)
+  }
+  if (this_end <= other_start) {
     return Position::kAfter;
-  if (other_end <= this_start)
+  }
+  if (other_end <= this_start) {
     return Position::kBefore;
+  }
   return Position::kOverlap;
 }
 
 bool ArcTracingEvent::AppendChild(std::unique_ptr<ArcTracingEvent> child) {
-  if (ClassifyPositionOf(*child) != Position::kInside)
+  if (ClassifyPositionOf(*child) != Position::kInside) {
     return false;
+  }
 
   if (children_.empty() ||
       children_.back()->ClassifyPositionOf(*child) == Position::kAfter) {
@@ -207,22 +217,34 @@ bool ArcTracingEvent::AppendChild(std::unique_ptr<ArcTracingEvent> child) {
 }
 
 bool ArcTracingEvent::Validate() const {
-  if (!GetPid() || GetCategory().empty() || GetName().empty())
+  const std::string name = GetName();
+  if (GetCategory().empty() || name.empty()) {
     return false;
+  }
+  if (name == "ActiveProcesses") {
+    // Does not have pid or tid, so will not pass below checks.
+    return true;
+  }
+  if (!GetPid()) {
+    return false;
+  }
 
   switch (GetPhase()) {
     case TRACE_EVENT_PHASE_COMPLETE:
     case TRACE_EVENT_PHASE_COUNTER:
-      if (!GetTid())
+    case TRACE_EVENT_PHASE_INSTANT:
+      if (!GetTid()) {
         return false;
+      }
       break;
     case TRACE_EVENT_PHASE_METADATA:
       break;
     case TRACE_EVENT_PHASE_ASYNC_BEGIN:
     case TRACE_EVENT_PHASE_ASYNC_END:
     case TRACE_EVENT_PHASE_ASYNC_STEP_INTO:
-      if (!GetTid() || GetId().empty())
+      if (!GetTid() || GetId().empty()) {
         return false;
+      }
       break;
     default:
       return false;
@@ -235,7 +257,7 @@ std::string ArcTracingEvent::ToString() const {
       "%d|%d|%" PRId64 "|%" PRId64 "|%c|%s|%s|%s", GetPid(), GetTid(),
       GetTimestamp(), GetDuration(), GetPhase(), GetCategory().c_str(),
       GetName().c_str(), GetId().c_str());
-  const base::Value::Dict* args = GetArgs();
+  const base::DictValue* args = GetArgs();
   if (args) {
     bool first_arg = true;
     for (const auto arg : *args) {
@@ -265,8 +287,9 @@ std::string ArcTracingEvent::ToString() const {
 void ArcTracingEvent::Dump(const std::string& prefix,
                            std::ostream& stream) const {
   stream << prefix << ToString() << "\n";
-  for (const auto& event : children_)
+  for (const auto& event : children_) {
     event->Dump(prefix + "  ", stream);
+  }
 }
 
 }  // namespace arc

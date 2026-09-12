@@ -6,29 +6,40 @@
 
 #include <algorithm>
 #include <memory>
+#include <string_view>
 
+#include "base/check.h"
 #include "base/feature_list.h"
 #include "base/files/safe_base_name.h"
+#include "base/logging.h"
 #include "base/metrics/histogram_macros.h"
-#include "base/strings/string_piece.h"
+#include "base/notreached.h"
 #include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "chrome/browser/bad_message.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/safe_browsing/safe_browsing_service.h"
-#include "chrome/common/chrome_features.h"
-#include "components/safe_browsing/content/common/file_type_policies.h"
-#include "components/safe_browsing/core/browser/db/database_manager.h"
+#include "components/safe_browsing/buildflags.h"
+#include "components/tabs/public/tab_interface.h"
+#include "content/public/browser/visibility.h"
 #include "content/public/browser/web_contents.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
-#include "third_party/blink/public/mojom/permissions_policy/permissions_policy_feature.mojom.h"
-
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom.h"
+#include "ui/display/types/display_constants.h"
 #if BUILDFLAG(IS_MAC)
 #include "chrome/browser/webshare/mac/sharing_service_operation.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
 #include "chrome/browser/webshare/win/share_operation.h"
+#include "ui/display/display.h"
+#endif
+
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
+#include "chrome/browser/safe_browsing/safe_browsing_service.h"
+#include "chrome/browser/safe_browsing/v5_get_hash_protocol_manager_factory.h"
+#include "components/safe_browsing/content/common/file_type_policies.h"
+#include "components/safe_browsing/core/browser/db/database_manager.h"
+#include "components/safe_browsing/core/browser/db/v5_get_hash_protocol_manager.h"
 #endif
 
 // IsDangerousFilename() and IsDangerousMimeType() should be kept in sync with
@@ -46,7 +57,9 @@ ShareServiceImpl::ShareServiceImpl(
           content::WebContents::FromRenderFrameHost(&render_frame_host))
 #endif
 {
-  DCHECK(base::FeatureList::IsEnabled(features::kWebShare));
+#if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_MAC)
+  NOTREACHED();
+#endif
 }
 
 ShareServiceImpl::~ShareServiceImpl() = default;
@@ -123,7 +136,7 @@ bool ShareServiceImpl::IsDangerousFilename(const base::FilePath& path) {
 }
 
 // static
-bool ShareServiceImpl::IsDangerousMimeType(base::StringPiece content_type) {
+bool ShareServiceImpl::IsDangerousMimeType(std::string_view content_type) {
   constexpr std::array<const char*, 28> kPermitted = {
       "application/pdf",
       "audio/flac",
@@ -162,6 +175,23 @@ bool ShareServiceImpl::IsDangerousMimeType(base::StringPiece content_type) {
   return true;
 }
 
+// static
+bool ShareServiceImpl::IsWebContentsForegroundAndVisible(
+    content::WebContents* web_contents) {
+  if (!web_contents) {
+    return false;
+  }
+  if (web_contents->GetVisibility() != content::Visibility::VISIBLE) {
+    return false;
+  }
+  tabs::TabInterface* tab_interface =
+      tabs::TabInterface::MaybeGetFromContents(web_contents);
+  if (tab_interface && !tab_interface->IsActivated()) {
+    return false;
+  }
+  return true;
+}
+
 void ShareServiceImpl::Share(const std::string& title,
                              const std::string& text,
                              const GURL& share_url,
@@ -170,16 +200,23 @@ void ShareServiceImpl::Share(const std::string& title,
   UMA_HISTOGRAM_ENUMERATION(kWebShareApiCountMetric, WebShareMethod::kShare);
 
   if (!render_frame_host().IsFeatureEnabled(
-          blink::mojom::PermissionsPolicyFeature::kWebShare)) {
+          network::mojom::PermissionsPolicyFeature::kWebShare)) {
     std::move(callback).Run(blink::mojom::ShareError::PERMISSION_DENIED);
     ReportBadMessageAndDeleteThis("Feature policy blocks Web Share");
     return;
   }
 
+  if (!share_url.is_empty() && !share_url.SchemeIsHTTPOrHTTPS()) {
+    std::move(callback).Run(blink::mojom::ShareError::PERMISSION_DENIED);
+    ReportBadMessageAndDeleteThis(
+        "Web Share URL scheme must be http or https.");
+    return;
+  }
+
   content::WebContents* const web_contents =
       content::WebContents::FromRenderFrameHost(&render_frame_host());
-  if (!web_contents) {
-    VLOG(1) << "Cannot share after navigating away";
+  if (!web_contents || !IsWebContentsForegroundAndVisible(web_contents)) {
+    VLOG(1) << "Cannot share if tab is not active and visible";
     std::move(callback).Run(blink::mojom::ShareError::PERMISSION_DENIED);
     return;
   }
@@ -190,7 +227,9 @@ void ShareServiceImpl::Share(const std::string& title,
     return;
   }
 
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
   bool should_check_url = false;
+#endif
   for (auto& file : files) {
     if (!file || !file->blob || !file->blob->blob) {
       mojo::ReportBadMessage("Invalid file to share()");
@@ -206,6 +245,7 @@ void ShareServiceImpl::Share(const std::string& title,
       return;
     }
 
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
     // Check if at least one file is marked by the download protection service
     // to send a ping to check this file type.
     if (!should_check_url &&
@@ -213,6 +253,7 @@ void ShareServiceImpl::Share(const std::string& title,
             path)) {
       should_check_url = true;
     }
+#endif  // BUILDFLAG(SAFE_BROWSING_AVAILABLE)
 
     // In the case where the original blob handle was to a native file (of
     // unknown size), the serialized data does not contain an accurate file
@@ -221,35 +262,45 @@ void ShareServiceImpl::Share(const std::string& title,
     // the blobs.
   }
 
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
   DCHECK(!safe_browsing_request_);
   if (should_check_url && g_browser_process->safe_browsing_service()) {
+    auto* v5_manager =
+        web_contents->GetBrowserContext()
+            ? safe_browsing::V5GetHashProtocolManagerFactory::
+                  GetForBrowserContext(web_contents->GetBrowserContext())
+            : nullptr;
     safe_browsing_request_.emplace(
         g_browser_process->safe_browsing_service()->database_manager(),
+        v5_manager ? v5_manager->GetWeakPtr() : nullptr,
         web_contents->GetLastCommittedURL(),
-        base::BindOnce(&ShareServiceImpl::OnSafeBrowsingResultReceived,
+        base::BindOnce(&ShareServiceImpl::RunShareOperation,
                        weak_factory_.GetWeakPtr(), title, text, share_url,
                        std::move(files), std::move(callback)));
     return;
   }
+#endif  // BUILDFLAG(SAFE_BROWSING_AVAILABLE)
 
-  OnSafeBrowsingResultReceived(title, text, share_url, std::move(files),
-                               std::move(callback),
-                               /*is_url_safe=*/true);
+  RunShareOperation(title, text, share_url, std::move(files),
+                    std::move(callback),
+                    /*is_url_safe=*/true);
 }
 
-void ShareServiceImpl::OnSafeBrowsingResultReceived(
+void ShareServiceImpl::RunShareOperation(
     const std::string& title,
     const std::string& text,
     const GURL& share_url,
     std::vector<blink::mojom::SharedFilePtr> files,
     ShareCallback callback,
     bool is_url_safe) {
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
   safe_browsing_request_.reset();
+#endif
 
   content::WebContents* const web_contents =
       content::WebContents::FromRenderFrameHost(&render_frame_host());
-  if (!web_contents) {
-    VLOG(1) << "Cannot share after navigating away";
+  if (!web_contents || !IsWebContentsForegroundAndVisible(web_contents)) {
+    VLOG(1) << "Cannot share if tab is not active and visible";
     std::move(callback).Run(blink::mojom::ShareError::PERMISSION_DENIED);
     return;
   }
@@ -282,16 +333,28 @@ void ShareServiceImpl::OnSafeBrowsingResultReceived(
          blink::mojom::ShareError result) { std::move(callback).Run(result); },
       std::move(sharing_service_operation), std::move(callback)));
 #elif BUILDFLAG(IS_WIN)
+  auto blocker = web_contents->ForSecurityDropFullscreen(
+      /*display_id=*/display::kInvalidDisplayId);
+  if (!blocker) {
+    std::move(callback).Run(blink::mojom::ShareError::PERMISSION_DENIED);
+    return;
+  }
+
   auto share_operation = std::make_unique<webshare::ShareOperation>(
-      title, text, share_url, std::move(files), web_contents);
+      title, text, share_url, web_contents);
   auto* const share_operation_ptr = share_operation.get();
-  share_operation_ptr->Run(base::BindOnce(
-      [](std::unique_ptr<webshare::ShareOperation> share_operation,
-         ShareCallback callback,
-         blink::mojom::ShareError result) { std::move(callback).Run(result); },
-      std::move(share_operation), std::move(callback)));
+  share_operation_ptr->Run(
+      std::move(files),
+      base::BindOnce(
+          [](std::unique_ptr<webshare::ShareOperation> share_operation,
+             base::ScopedClosureRunner fullscreen_block, ShareCallback callback,
+             blink::mojom::ShareError result) {
+            fullscreen_block.RunAndReset();
+            std::move(callback).Run(result);
+          },
+          std::move(share_operation), std::move(*blocker),
+          std::move(callback)));
 #else
   NOTREACHED();
-  std::move(callback).Run(blink::mojom::ShareError::INTERNAL_ERROR);
 #endif
 }

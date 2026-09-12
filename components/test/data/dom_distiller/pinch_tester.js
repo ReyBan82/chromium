@@ -2,7 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(https://crbug.com/1027612): Consider replacing this class with
+/**
+ * @fileoverview Test suite for the Pincher class in pinch_handler.js.
+ */
+
+// TODO(crbug.com/40108835): Consider replacing this class with
 // dispatched touch events.
 class Touch {
   constructor() {
@@ -47,36 +51,51 @@ class Touch {
 }
 
 suite('Pincher', function() {
+  let chaiAssert = null;
+  let pincher = null;
+
+  suiteSetup(async function() {
+    // Use a dynamic import since this file is not executed as a module from
+    // distilled_page_js_browsertest.cc
+    const {assert} = await import('./index.js');
+    chaiAssert = assert;
+    // The UI components are normally lazily initialized. We need to initialize
+    // them here for tests.
+    initializeDomDistillerViewer();
+    pincher = Pincher.getInstance();
+  });
+
   test('Zoom Out', function() {
     pincher.reset();
+    useFontScaling(1.5, false);
     const t = new Touch();
 
     // Make sure start event doesn't change state
     let oldState = pincher.status();
     t.addTouchPoint(100, 100);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.addTouchPoint(300, 300);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     // Make sure extra move event doesn't change state
     pincher.handleTouchMove(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     t.updateTouchPoint(0, 150, 150);
     t.updateTouchPoint(1, 250, 250);
     pincher.handleTouchMove(t.events());
-    chai.assert.isBelow(pincher.status().clampedScale, 0.9);
+    chaiAssert.isBelow(pincher.status().clampedScale, 1.3);
 
     // Make sure end event doesn't change state
     oldState = pincher.status();
     t.releaseTouchPoint(1);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.releaseTouchPoint(0);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
   });
 
   test('Zoom In', function() {
@@ -86,27 +105,28 @@ suite('Pincher', function() {
     let oldState = pincher.status();
     t.addTouchPoint(150, 150);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.addTouchPoint(250, 250);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     t.updateTouchPoint(0, 100, 100);
     t.updateTouchPoint(1, 300, 300);
     pincher.handleTouchMove(t.events());
-    chai.assert.isAbove(pincher.status().clampedScale, 1.1);
+    chaiAssert.isAbove(pincher.status().clampedScale, 1.1);
 
     oldState = pincher.status();
     t.releaseTouchPoint(1);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.releaseTouchPoint(0);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
   });
 
-  test('Zomm Out And Pan', function() {
+  test('Zoom Out And Pan', function() {
     pincher.reset();
+    useFontScaling(1.5, false);
     const t = new Touch();
     t.addTouchPoint(100, 100);
     pincher.handleTouchStart(t.events());
@@ -123,9 +143,9 @@ suite('Pincher', function() {
     t.releaseTouchPoint(0);
     pincher.handleTouchEnd(t.events());
 
-    chai.assert.closeTo(pincher.status().shiftX, 10, 1e-5);
-    chai.assert.closeTo(pincher.status().shiftY, -5, 1e-5);
-    chai.assert.isBelow(pincher.status().clampedScale, 0.9);
+    chaiAssert.closeTo(pincher.status().shiftX, 10, 1e-5);
+    chaiAssert.closeTo(pincher.status().shiftY, -5, 1e-5);
+    chaiAssert.isBelow(pincher.status().clampedScale, 1.3);
   });
 
   test('Reversible', function() {
@@ -153,26 +173,27 @@ suite('Pincher', function() {
     pincher.handleTouchEnd(t.events());
     t.releaseTouchPoint(0);
     pincher.handleTouchEnd(t.events());
-    chai.assert.closeTo(pincher.status().clampedScale, 1, 1e-5);
+    chaiAssert.closeTo(pincher.status().clampedScale, 1, 1e-5);
   });
 
   test('Multitouch Zoom Out', function() {
     pincher.reset();
+    useFontScaling(1.5, false);
     const t = new Touch();
 
     let oldState = pincher.status();
     t.addTouchPoint(100, 100);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.addTouchPoint(300, 300);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.addTouchPoint(100, 300);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.addTouchPoint(300, 100);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     // Multi-touch zoom out.
     t.updateTouchPoint(0, 150, 150);
@@ -184,60 +205,61 @@ suite('Pincher', function() {
     oldState = pincher.status();
     t.releaseTouchPoint(3);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.releaseTouchPoint(2);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.releaseTouchPoint(1);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.releaseTouchPoint(0);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
-    chai.assert.isBelow(pincher.status().clampedScale, 0.9);
+    chaiAssert.isBelow(pincher.status().clampedScale, 1.3);
   });
 
   test('Zoom Out Then Multi', function() {
     pincher.reset();
+    useFontScaling(1.5, false);
     const t = new Touch();
 
     let oldState = pincher.status();
     t.addTouchPoint(100, 100);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.addTouchPoint(300, 300);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     // Zoom out.
     t.updateTouchPoint(0, 150, 150);
     t.updateTouchPoint(1, 250, 250);
     pincher.handleTouchMove(t.events());
-    chai.assert.isBelow(pincher.status().clampedScale, 0.9);
+    chaiAssert.isBelow(pincher.status().clampedScale, 1.3);
 
     // Make sure adding and removing more point doesn't change state
     oldState = pincher.status();
     t.addTouchPoint(600, 600);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
     t.releaseTouchPoint(2);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     // More than two fingers.
     t.addTouchPoint(150, 250);
     pincher.handleTouchStart(t.events());
     t.addTouchPoint(250, 150);
     pincher.handleTouchStart(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     t.updateTouchPoint(0, 100, 100);
     t.updateTouchPoint(1, 300, 300);
     t.updateTouchPoint(2, 100, 300);
     t.updateTouchPoint(3, 300, 100);
     pincher.handleTouchMove(t.events());
-    chai.assert.closeTo(pincher.status().scale, 1, 1e-5);
+    chaiAssert.closeTo(pincher.status().scale, 1, 1e-5);
 
     oldState = pincher.status();
     t.releaseTouchPoint(3);
@@ -245,11 +267,12 @@ suite('Pincher', function() {
     t.releaseTouchPoint(1);
     t.releaseTouchPoint(0);
     pincher.handleTouchEnd(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
   });
 
   test('Cancel', function() {
     pincher.reset();
+    useFontScaling(1.5, false);
     const t = new Touch();
 
     t.addTouchPoint(100, 100);
@@ -259,13 +282,13 @@ suite('Pincher', function() {
     t.updateTouchPoint(0, 150, 150);
     t.updateTouchPoint(1, 250, 250);
     pincher.handleTouchMove(t.events());
-    chai.assert.isBelow(pincher.status().clampedScale, 0.9);
+    chaiAssert.isBelow(pincher.status().clampedScale, 1.3);
 
     const oldState = pincher.status();
     t.releaseTouchPoint(1);
     t.releaseTouchPoint(0);
     pincher.handleTouchCancel(t.events());
-    chai.assert.deepEqual(oldState, pincher.status());
+    chaiAssert.deepEqual(oldState, pincher.status());
 
     t.addTouchPoint(150, 150);
     pincher.handleTouchStart(t.events());
@@ -274,7 +297,7 @@ suite('Pincher', function() {
     t.updateTouchPoint(0, 100, 100);
     t.updateTouchPoint(1, 300, 300);
     pincher.handleTouchMove(t.events());
-    chai.assert.closeTo(pincher.status().clampedScale, 1, 1e-5);
+    chaiAssert.closeTo(pincher.status().clampedScale, 1.5, 1e-2);
   });
 
   test('Singularity', function() {
@@ -288,15 +311,16 @@ suite('Pincher', function() {
     t.updateTouchPoint(0, 150, 150);
     t.updateTouchPoint(1, 50, 50);
     pincher.handleTouchMove(t.events());
-    chai.assert.isAbove(pincher.status().clampedScale, 1.1);
-    chai.assert.isBelow(pincher.status().clampedScale, 100);
-    chai.assert.isBelow(pincher.status().scale, 100);
+    chaiAssert.isAbove(pincher.status().clampedScale, 1.1);
+    chaiAssert.isBelow(pincher.status().clampedScale, 100);
+    chaiAssert.isBelow(pincher.status().scale, 100);
 
     pincher.handleTouchCancel();
   });
 
   test('Min Span', function() {
     pincher.reset();
+    useFontScaling(1.5, false);
     const t = new Touch();
 
     t.addTouchPoint(50, 50);
@@ -306,9 +330,9 @@ suite('Pincher', function() {
     t.updateTouchPoint(0, 100, 100);
     t.updateTouchPoint(1, 100, 100);
     pincher.handleTouchMove(t.events());
-    chai.assert.isBelow(pincher.status().clampedScale, 0.9);
-    chai.assert.isAbove(pincher.status().clampedScale, 0);
-    chai.assert.isAbove(pincher.status().scale, 0);
+    chaiAssert.isBelow(pincher.status().clampedScale, 1.3);
+    chaiAssert.isAbove(pincher.status().clampedScale, 0);
+    chaiAssert.isAbove(pincher.status().scale, 0);
 
     pincher.handleTouchCancel();
   });
@@ -316,7 +340,7 @@ suite('Pincher', function() {
   test('Font Scaling', function() {
     pincher.reset();
     useFontScaling(1.5);
-    chai.assert.closeTo(pincher.status().clampedScale, 1.5, 1e-5);
+    chaiAssert.closeTo(pincher.status().clampedScale, 1.5, 1e-5);
 
     let t = new Touch();
 
@@ -333,12 +357,12 @@ suite('Pincher', function() {
     pincher.handleTouchMove(t.events());
 
     // Verify scale is smaller.
-    chai.assert.isBelow(
+    chaiAssert.isBelow(
         pincher.status().clampedScale, 0.9 * oldState.clampedScale);
     pincher.handleTouchCancel();
 
     useFontScaling(0.8);
-    chai.assert.closeTo(pincher.status().clampedScale, 0.8, 1e-5);
+    chaiAssert.closeTo(pincher.status().clampedScale, 0.8, 1e-5);
 
     // Start touch.
     t = new Touch();
@@ -354,7 +378,7 @@ suite('Pincher', function() {
     pincher.handleTouchMove(t.events());
 
     // Verify scale is larger.
-    chai.assert.isAbove(
+    chaiAssert.isAbove(
         pincher.status().clampedScale, 1.1 * oldState.clampedScale);
     pincher.handleTouchCancel();
   });

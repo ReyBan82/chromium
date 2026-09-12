@@ -5,9 +5,7 @@
 #ifndef CHROMECAST_COMMON_ACTIVITY_FILTERING_URL_LOADER_THROTTLE_H_
 #define CHROMECAST_COMMON_ACTIVITY_FILTERING_URL_LOADER_THROTTLE_H_
 
-#include <string>
-#include <vector>
-
+#include "base/memory/raw_ptr.h"
 #include "chromecast/common/activity_url_filter.h"
 #include "third_party/blink/public/common/loader/url_loader_throttle.h"
 #include "url/gurl.h"
@@ -34,9 +32,7 @@ class ActivityFilteringURLLoaderThrottle : public blink::URLLoaderThrottle {
       net::RedirectInfo* redirect_info,
       const network::mojom::URLResponseHead& response_head,
       bool* defer,
-      std::vector<std::string>* to_be_removed_request_headers,
-      net::HttpRequestHeaders* modified_request_headers,
-      net::HttpRequestHeaders* modified_cors_exempt_request_headers) override;
+      network::HttpRequestHeadersUpdateParams* headers_update_params) override;
 
  private:
   // content::URLLoaderThrottle implementation:
@@ -44,7 +40,7 @@ class ActivityFilteringURLLoaderThrottle : public blink::URLLoaderThrottle {
 
   void FilterURL(const GURL& url);
 
-  ActivityUrlFilter* url_filter_;
+  raw_ptr<ActivityUrlFilter> url_filter_;
 };
 
 }  // namespace chromecast

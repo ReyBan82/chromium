@@ -10,7 +10,10 @@ import subprocess
 from gpu_path_util import CHROMIUM_SRC_DIR, setup_fuchsia_paths
 # pylint: enable=unused-import
 
-from common import register_common_args  # pylint: disable=no-name-in-module
+# This needs to come after setup_fuchsia_paths so we can actually import this.
+# pylint: disable=wrong-import-order,import-error
+from common import register_common_args
+# pylint: enable=wrong-import-order,import-error
 
 
 def RunTestOnFuchsiaDevice(script_type):
@@ -25,8 +28,9 @@ def RunTestOnFuchsiaDevice(script_type):
   if not script_args.out_dir:
     script_args.out_dir = os.getcwd()
 
-  script = os.path.join(CHROMIUM_SRC_DIR, 'build', 'fuchsia', 'test',
-                        'run_test.py')
+  script = os.path.join(
+    CHROMIUM_SRC_DIR, 'build', 'fuchsia', 'test', 'run_test.py'
+  )
   script_cmd = [script, script_type, '--out-dir', script_args.out_dir]
   script_cmd.extend(rest_args)
 

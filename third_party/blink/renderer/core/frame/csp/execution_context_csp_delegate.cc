@@ -79,20 +79,19 @@ void ExecutionContextCSPDelegate::SetRequireTrustedTypes() {
   execution_context_->SetRequireTrustedTypes();
 }
 
-void ExecutionContextCSPDelegate::AddInsecureRequestPolicy(
+void ExecutionContextCSPDelegate::ApplyInsecureRequestPolicy(
     mojom::blink::InsecureRequestPolicy policy) {
   SecurityContext& security_context = GetSecurityContext();
 
   auto* window = DynamicTo<LocalDOMWindow>(execution_context_.Get());
 
   // Step 2. Set settings’s insecure requests policy to Upgrade. [spec text]
-  // Upgrade Insecure Requests: Update the policy.
+  // Upgrade Insecure Requests: Update the local policy. Browser-side
+  // replicated state is intentionally NOT updated here; see the comment on
+  // ContentSecurityPolicyDelegate::ApplyInsecureRequestPolicy and
+  // crbug/40580002.
   security_context.SetInsecureRequestPolicy(
       security_context.GetInsecureRequestPolicy() | policy);
-  if (window && window->GetFrame()) {
-    window->GetFrame()->GetLocalFrameHostRemote().EnforceInsecureRequestPolicy(
-        security_context.GetInsecureRequestPolicy());
-  }
 
   // Upgrade Insecure Requests: Update the set of insecure URLs to upgrade.
   if ((policy &
@@ -110,24 +109,44 @@ void ExecutionContextCSPDelegate::AddInsecureRequestPolicy(
     // This should be safe, because the insecure navigations set is not used
     // in non-Document contexts.
     if (window && !Url().Host().empty()) {
-      uint32_t hash = Url().Host().Impl()->GetHash();
+      uint32_t hash = Url().Host().ToString().Impl()->GetHash();
       security_context.AddInsecureNavigationUpgrade(hash);
-      if (auto* frame = window->GetFrame()) {
-        frame->GetLocalFrameHostRemote().EnforceInsecureNavigationsSet(
-            SecurityContext::SerializeInsecureNavigationSet(
-                GetSecurityContext().InsecureNavigationsToUpgrade()));
-      }
     }
   }
 }
 
-std::unique_ptr<SourceLocation>
-ExecutionContextCSPDelegate::GetSourceLocation() {
+void ExecutionContextCSPDelegate::NotifyBrowserOfInsecureRequestPolicy(
+    mojom::blink::InsecureRequestPolicy added_policy) {
+  auto* window = DynamicTo<LocalDOMWindow>(execution_context_.Get());
+  if (!window || !window->GetFrame()) {
+    return;
+  }
+
+  SecurityContext& security_context = GetSecurityContext();
+  window->GetFrame()->GetLocalFrameHostRemote().EnforceInsecureRequestPolicy(
+      security_context.GetInsecureRequestPolicy());
+
+  // Only send the navigations-set IPC when |added_policy| actually included
+  // upgrade-insecure-requests: the set can only change if the incoming
+  // policy contained UIR, and the host must be non-empty (matching the
+  // gating on AddInsecureNavigationUpgrade in ApplyInsecureRequestPolicy
+  // above).
+  if ((added_policy &
+       mojom::blink::InsecureRequestPolicy::kUpgradeInsecureRequests) !=
+          mojom::blink::InsecureRequestPolicy::kLeaveInsecureRequestsAlone &&
+      !Url().Host().empty()) {
+    window->GetFrame()->GetLocalFrameHostRemote().EnforceInsecureNavigationsSet(
+        SecurityContext::SerializeInsecureNavigationSet(
+            security_context.InsecureNavigationsToUpgrade()));
+  }
+}
+
+SourceLocation* ExecutionContextCSPDelegate::GetSourceLocation() {
   return CaptureSourceLocation(execution_context_);
 }
 
-absl::optional<uint16_t> ExecutionContextCSPDelegate::GetStatusCode() {
-  absl::optional<uint16_t> status_code;
+std::optional<uint16_t> ExecutionContextCSPDelegate::GetStatusCode() {
+  std::optional<uint16_t> status_code;
 
   // TODO(mkwst): We only have status code information for Documents. It would
   // be nice to get them for Workers as well.
@@ -154,10 +173,9 @@ void ExecutionContextCSPDelegate::DispatchViolationEvent(
   execution_context_->GetTaskRunner(TaskType::kNetworking)
       ->PostTask(
           FROM_HERE,
-          WTF::BindOnce(
-              &ExecutionContextCSPDelegate::DispatchViolationEventInternal,
-              WrapPersistent(this), WrapPersistent(&violation_data),
-              WrapPersistent(element)));
+          BindOnce(&ExecutionContextCSPDelegate::DispatchViolationEventInternal,
+                   WrapPersistent(this), WrapPersistent(&violation_data),
+                   WrapPersistent(element)));
 }
 
 void ExecutionContextCSPDelegate::PostViolationReport(
@@ -199,7 +217,8 @@ void ExecutionContextCSPDelegate::PostViolationReport(
 
   for (const auto& report_endpoint : report_endpoints) {
     PingLoader::SendViolationReport(execution_context_.Get(),
-                                    KURL(report_endpoint), report);
+                                    KURL(report_endpoint), report,
+                                    is_frame_ancestors_violation);
   }
 }
 
@@ -231,7 +250,7 @@ void ExecutionContextCSPDelegate::ReportBlockedScriptExecutionToInspector(
 }
 
 void ExecutionContextCSPDelegate::DidAddContentSecurityPolicies(
-    WTF::Vector<network::mojom::blink::ContentSecurityPolicyPtr> policies) {
+    Vector<network::mojom::blink::ContentSecurityPolicyPtr> policies) {
   auto* window = DynamicTo<LocalDOMWindow>(execution_context_.Get());
   if (!window)
     return;
@@ -242,8 +261,9 @@ void ExecutionContextCSPDelegate::DidAddContentSecurityPolicies(
 
   // Record what source was used to find main frame CSP. Do not record
   // this for fence frame roots since they will never become an
-  // outermost main frame, but we do wish to record this for portals.
-  if (frame->IsMainFrame() && !frame->IsInFencedFrameTree()) {
+  // outermost main frame.
+  bool is_main_frame = frame->IsMainFrame() && !frame->IsInFencedFrameTree();
+  if (is_main_frame) {
     for (const auto& policy : policies) {
       switch (policy->header->source) {
         case network::mojom::ContentSecurityPolicySource::kHTTP:
@@ -255,6 +275,16 @@ void ExecutionContextCSPDelegate::DidAddContentSecurityPolicies(
       }
     }
   }
+  // As the injection-mitigatedness of a context changes only when CSPs are
+  // added, we can measure the prevalance here:
+  if (execution_context_->IsInjectionMitigatedContext()) {
+    Count(is_main_frame ? WebFeature::kInjectionMitigatedContextMainFrame
+                        : WebFeature::kInjectionMitigatedContextSubFrame);
+  }
+}
+
+bool ExecutionContextCSPDelegate::ScriptSrcExtendedHashesEnabled() {
+  return RuntimeEnabledFeatures::CSPHashesV1Enabled(execution_context_);
 }
 
 SecurityContext& ExecutionContextCSPDelegate::GetSecurityContext() {

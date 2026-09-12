@@ -10,9 +10,32 @@ import shutil
 import subprocess
 import sys
 
-_RSP_RE = re.compile(r' (@(.+?\.rsp)) ')
-_GOMA_CMD_LINE_RE = re.compile(
-    r'^(?P<gomacc>.*gomacc(\.exe)?"?\s+)?(?P<clang>\S*clang\S*)\s+(?P<args>.*)$'
+_CLANG_WRAPPER_CMD_LINE_RE = re.compile(
+  r'''
+    (
+      (?P<rewrapper>.*rewrapper(\.exe)?"?\s+)
+      # rewrapper may have args between it and clang.
+      # Assume the args do not contain spaces.
+      (?P<rewrapper_arg>\-\S+\s+)*
+    )?
+    # Optional wrapper(s) that should be skipped.
+    (?P<wrapper>.*?\s+)?
+    # Assume the path to clang does not contain spaces.
+    # Identifying the compiler binary name specifically to avoid wrappers.
+    # e.g. clang, clang++, clang-cl, clang-18, clang-cl.exe, clang++-15
+    (?P<clang>
+      "?                          # Optional leading quote.
+      \S*?\bclang                 # Base name of the compiler.
+      (?:\+\+)?                   # C++ mode suffix.
+      (?:-(?:cl|[\d.]+)|[\d.]+)?  # Optional version or MSVC drop-in suffix.
+      (?:\.exe)?                  # Optional .exe suffix for Windows.
+      "?                          # Optional trailing quote.
+    )
+    (?!\w)                        # Boundary to reject unexpected trailing text (like '_wrapper').
+    \s+
+    (?P<args>.*)
+    ''',
+  re.VERBOSE,
 )
 _debugging = False
 
@@ -21,14 +44,14 @@ def _IsTargettingWindows(target_os):
   if target_os is not None:
     # Available choices are based on: gn help target_os
     assert target_os in [
-        'android',
-        'chromeos',
-        'fuchsia',
-        'ios',
-        'linux',
-        'mac',
-        'nacl',
-        'win',
+      'android',
+      'chromeos',
+      'fuchsia',
+      'ios',
+      'linux',
+      'mac',
+      'nacl',
+      'win',
     ]
     return target_os == 'win'
   return sys.platform == 'win32'
@@ -38,19 +61,27 @@ def _FilterFlags(command, additional_filtered_flags):
   # Dictionary from flags to filter, to the number of additional arguments each
   # flag consumes (so we can remove any flag parameters).
   flags_to_filter = {
-      # These are Visual Studio-specific arguments not recognized or used by
-      # some third-party clang tooling. They only suppress or activate graphical
-      # output anyway.
-      '/nologo': 0,
-      '/showIncludes': 0,
-      # Drop frontend-only arguments, which generally aren't needed by clang
-      # tooling.
-      '-Xclang': 1,
-      # This is used for profiling-guided optimizations. Not necessary by tools,
-      # and clangd complains it cannot find the referenced profile file.
-      '-fprofile-sample-use': 1,
-      # Remove goma compiler path, as this flag is not recognized by clang.
-      '--gomacc-path': 1,
+    # These are Visual Studio-specific arguments not recognized or used by
+    # some third-party clang tooling. They only suppress or activate graphical
+    # output anyway.
+    '/nologo': 0,
+    '/showIncludes': 0,
+    # Drop frontend-only arguments, which generally aren't needed by clang
+    # tooling.
+    '-Xclang': 1,
+    # This is used for profiling-guided optimizations. Not necessary by tools,
+    # and clangd complains it cannot find the referenced profile file.
+    '-fprofile-sample-use': 1,
+    '-fprofile-use': 1,
+    # This flag is only usable with -fprofile-sample-use excluded above.
+    # Exclude it to avoid having an unused-command-line-argument error.
+    '-fsample-profile-use-profi': 1,
+    # Clang modules don't play particularly well with clangd.
+    # To solve this, we simply need to remove all references to modulemaps and
+    # to modules.
+    '-fbuiltin-module-map': 0,
+    '-fmodule-map-file': 1,
+    '-fmodule-file': 1,
   }
   # Add user-added flags. We only support flags with no parameters here.
   if additional_filtered_flags:
@@ -70,8 +101,10 @@ def _FilterFlags(command, additional_filtered_flags):
       if expected_params == 1:
         continue
       elif _debugging:
-        print("Expecting %s to have %d parameters, but got 1" %
-              (split_flag[0], expected_params))
+        print(
+          "Expecting %s to have %d parameters, but got 1"
+          % (split_flag[0], expected_params)
+        )
         print("The flag will be kept in the command!")
     # Handle regular parameters.
     if command_part in flags_to_filter:
@@ -93,22 +126,23 @@ def _ProcessCommand(command, filtered_args, target_os):
   if _IsTargettingWindows(target_os) and '--driver-mode' not in command:
     driver_mode = '--driver-mode=cl'
 
-  # Removes gomacc(.exe). On Windows inserts --driver-mode=cl as the first arg.
+  # Removes rewrapper(.exe). On Windows inserts --driver-mode=cl as the
+  # first arg.
   #
-  # Deliberately avoid  shlex.split() here, because it doesn't work predictably
+  # Deliberately avoid shlex.split() here, because it doesn't work predictably
   # for Windows commands (specifically, it doesn't parse args the same way that
   # Clang does on Windows).
   #
   # Instead, use a regex, with the simplifying assumption that the path to
   # clang-cl.exe contains no spaces.
-  match = _GOMA_CMD_LINE_RE.search(command)
+  match = _CLANG_WRAPPER_CMD_LINE_RE.fullmatch(command)
   if match:
     match_dict = match.groupdict()
     command = ' '.join([match_dict['clang'], driver_mode, match_dict['args']])
   elif _debugging:
     print('Compile command didn\'t match expected regex!')
     print('Command:', command)
-    print('Regex:', _GOMA_CMD_LINE_RE.pattern)
+    print('Regex:', _CLANG_WRAPPER_CMD_LINE_RE.pattern)
 
   return _FilterFlags(command, filtered_args)
 
@@ -116,25 +150,9 @@ def _ProcessCommand(command, filtered_args, target_os):
 def _ProcessEntry(entry, filtered_args, target_os):
   """Transforms one entry in a compile db to be more clang-tool friendly.
 
-  Expands the contents of the response file, if any, and performs any
-  transformations needed to make the compile DB easier to use for third-party
-  tooling.
+  Performs any transformations needed to make the compile DB easier to use for
+  third-party tooling.
   """
-  # Expand the contents of the response file, if any.
-  # http://llvm.org/bugs/show_bug.cgi?id=21634
-  try:
-    match = _RSP_RE.search(entry['command'])
-    if match:
-      rsp_path = os.path.join(entry['directory'], match.group(2))
-      rsp_contents = open(rsp_path).read()
-      entry['command'] = ''.join([
-          entry['command'][:match.start(1)], rsp_contents,
-          entry['command'][match.end(1):]
-      ])
-  except IOError:
-    if _debugging:
-      print('Couldn\'t read response file for %s' % entry['file'])
-
   entry['command'] = _ProcessCommand(entry['command'], filtered_args, target_os)
 
   return entry
@@ -161,8 +179,10 @@ def ProcessCompileDatabase(compile_db, filtered_args, target_os=None):
   # Filter out NaCl stuff. The clang tooling chokes on them.
   # TODO(dcheng): This doesn't appear to do anything anymore, remove?
   compile_db = [
-      e for e in compile_db if '_nacl.cc.pdb' not in e['command']
-      and '_nacl_win64.cc.pdb' not in e['command']
+    e
+    for e in compile_db
+    if '_nacl.cc.pdb' not in e['command']
+    and '_nacl_win64.cc.pdb' not in e['command']
   ]
   if _debugging:
     print('Filtered out %d entries...' % (original_length - len(compile_db)))
@@ -174,8 +194,16 @@ def ProcessCompileDatabase(compile_db, filtered_args, target_os=None):
 
 def GetNinjaPath():
   ninja_executable = 'ninja.exe' if sys.platform == 'win32' else 'ninja'
-  return os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..',
-                      '..', '..', 'third_party', 'ninja', ninja_executable)
+  return os.path.join(
+    os.path.dirname(os.path.realpath(__file__)),
+    '..',
+    '..',
+    '..',
+    '..',
+    'third_party',
+    'ninja',
+    ninja_executable,
+  )
 
 
 # FIXME: This really should be a build target, rather than generated at runtime.
@@ -198,8 +226,10 @@ def GenerateWithNinja(path, targets=None):
   if targets is None:
     targets = []
   json_compile_db = subprocess.check_output(
-      [ninja_path, '-C', path] + targets +
-      ['-t', 'compdb', 'cc', 'cxx', 'objc', 'objcxx'])
+    [ninja_path, '-C', path]
+    + targets
+    + ['-t', 'compdb', '-x', 'cc', 'cxx', 'objc', 'objcxx']
+  )
   return json.loads(json_compile_db)
 
 

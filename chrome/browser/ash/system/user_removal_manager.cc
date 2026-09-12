@@ -6,6 +6,7 @@
 
 #include <utility>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/location.h"
@@ -14,11 +15,9 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_runner.h"
 #include "base/time/time.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/lifetime/application_lifetime.h"
-#include "chrome/common/pref_names.h"
 #include "components/prefs/persistent_pref_store.h"
 #include "components/prefs/pref_service.h"
+#include "components/session_manager/core/session_manager.h"
 #include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
 
@@ -39,10 +38,9 @@ base::OnceClosure& GetLogOutOverrideCallbackForTest() {
 
 }  // namespace
 
-bool RemoveUsersIfNeeded() {
-  PrefService* local_state = g_browser_process->local_state();
+bool RemoveUsersIfNeeded(PrefService* local_state) {
   const PrefService::Preference* pref =
-      local_state->FindPreference(prefs::kRemoveUsersRemoteCommand);
+      local_state->FindPreference(ash::prefs::kRemoveUsersRemoteCommand);
 
   if (pref->IsDefaultValue()) {
     // Nothing to be done.
@@ -55,23 +53,23 @@ bool RemoveUsersIfNeeded() {
     return false;
   }
 
-  local_state->SetBoolean(prefs::kRemoveUsersRemoteCommand, false);
+  local_state->SetBoolean(ash::prefs::kRemoveUsersRemoteCommand, false);
   local_state->CommitPendingWrite();
   // TODO(https://crbug.com/1344832): Emit start metric here.
 
   user_manager::UserManager* user_manager = user_manager::UserManager::Get();
   // Make a copy of the list since we'll be removing users (and the list would
   // change underneath us if we used a reference).
-  const user_manager::UserList user_list = user_manager->GetUsers();
+  const user_manager::UserList user_list = user_manager->GetPersistedUsers();
 
-  for (user_manager::User* user : user_list)
+  for (user_manager::User* user : user_list) {
     user_manager->RemoveUser(
         user->GetAccountId(),
-        user_manager::UserRemovalReason::REMOTE_ADMIN_INITIATED,
-        /*delegate=*/nullptr);
+        user_manager::UserRemovalReason::REMOTE_ADMIN_INITIATED);
+  }
 
   // Revert to default value after removal is done.
-  local_state->ClearPref(prefs::kRemoveUsersRemoteCommand);
+  local_state->ClearPref(ash::prefs::kRemoveUsersRemoteCommand);
 
   // TODO(https://crbug.com/1344832): Emit finish metric here.
   return true;
@@ -83,7 +81,7 @@ void LogOut() {
     std::move(log_out_override_callback).Run();
     return;
   }
-  chrome::AttemptUserExit();
+  session_manager::SessionManager::Get()->RequestSignOut();
 }
 
 void OverrideLogOutForTesting(base::OnceClosure callback) {
@@ -91,9 +89,9 @@ void OverrideLogOutForTesting(base::OnceClosure callback) {
   log_out_override_callback = std::move(callback);
 }
 
-void InitiateUserRemoval(base::OnceClosure on_pref_persisted_callback) {
-  PrefService* local_state = g_browser_process->local_state();
-  local_state->SetBoolean(prefs::kRemoveUsersRemoteCommand, true);
+void InitiateUserRemoval(PrefService* local_state,
+                         base::OnceClosure on_pref_persisted_callback) {
+  local_state->SetBoolean(ash::prefs::kRemoveUsersRemoteCommand, true);
 
   local_state->CommitPendingWrite(base::BindOnce(
       [](base::OnceClosure on_pref_persisted_callback) {

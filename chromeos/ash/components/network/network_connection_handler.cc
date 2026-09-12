@@ -55,6 +55,8 @@ const char NetworkConnectionHandler::kErrorCertLoadTimeout[] =
     "cert-load-timeout";
 const char NetworkConnectionHandler::kErrorBlockedByPolicy[] =
     "blocked-by-policy";
+const char NetworkConnectionHandler::kErrorWaitingForScan[] =
+    "waiting-for-scan";
 const char NetworkConnectionHandler::kErrorHexSsidRequired[] =
     "hex-ssid-required";
 const char NetworkConnectionHandler::kErrorActivateFailed[] = "activate-failed";
@@ -68,7 +70,9 @@ const char NetworkConnectionHandler::kErrorCellularOutOfCredits[] =
     "cellular-out-of-credits";
 const char NetworkConnectionHandler::kErrorESimProfileIssue[] =
     "esim-profile-issue";
-const char NetworkConnectionHandler::kErrorSimLocked[] = "sim-locked";
+const char NetworkConnectionHandler::kErrorSimPinPukLocked[] = "sim-locked";
+const char NetworkConnectionHandler::kErrorSimCarrierLocked[] =
+    "sim-carrier-locked";
 const char NetworkConnectionHandler::kErrorCellularDeviceBusy[] =
     "cellular-device-busy";
 const char NetworkConnectionHandler::kErrorConnectTimeout[] = "connect-timeout";

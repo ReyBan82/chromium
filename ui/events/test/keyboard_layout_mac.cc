@@ -5,32 +5,41 @@
 #include "ui/events/test/keyboard_layout.h"
 
 #include "base/check_op.h"
+#include "base/notreached.h"
+#include "base/strings/sys_string_conversions.h"
 
 namespace ui {
 
 PlatformKeyboardLayout GetPlatformKeyboardLayout(KeyboardLayout layout) {
-  // Right now tests only need US English.  If other layouts need to be
-  // supported in the future this code should be extended.
-  DCHECK_EQ(KEYBOARD_LAYOUT_ENGLISH_US, layout);
+  const char* input_source_id = nullptr;
+  switch (layout) {
+    case KEYBOARD_LAYOUT_ENGLISH_US:
+      input_source_id = "com.apple.keylayout.US";
+      break;
+    case KEYBOARD_LAYOUT_DVORAK:
+      input_source_id = "com.apple.keylayout.Dvorak";
+      break;
+    default:
+      NOTREACHED() << "Unsupported keyboard layout";
+  }
 
-  const char kUsInputSourceId[] = "com.apple.keylayout.US";
-
-  base::ScopedCFTypeRef<CFMutableDictionaryRef> input_source_list_filter(
+  base::apple::ScopedCFTypeRef<CFMutableDictionaryRef> input_source_list_filter(
       CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
                                 &kCFTypeDictionaryKeyCallBacks,
                                 &kCFTypeDictionaryValueCallBacks));
-  base::ScopedCFTypeRef<CFStringRef> input_source_id_ref(
-      CFStringCreateWithCString(kCFAllocatorDefault, kUsInputSourceId,
-                                kCFStringEncodingUTF8));
-  CFDictionaryAddValue(input_source_list_filter, kTISPropertyInputSourceID,
-                       input_source_id_ref);
-  base::ScopedCFTypeRef<CFArrayRef> input_source_list(
-      TISCreateInputSourceList(input_source_list_filter, true));
-  if (CFArrayGetCount(input_source_list) != 1)
+  base::apple::ScopedCFTypeRef<CFStringRef> input_source_id_ref =
+      base::SysUTF8ToCFStringRef(input_source_id);
+  CFDictionaryAddValue(input_source_list_filter.get(),
+                       kTISPropertyInputSourceID, input_source_id_ref.get());
+  base::apple::ScopedCFTypeRef<CFArrayRef> input_source_list(
+      TISCreateInputSourceList(input_source_list_filter.get(),
+                               /*includeAllInstalled=*/true));
+  if (!input_source_list || CFArrayGetCount(input_source_list.get()) != 1) {
     return PlatformKeyboardLayout();
+  }
 
-  return base::ScopedCFTypeRef<TISInputSourceRef>(
-      (TISInputSourceRef)CFArrayGetValueAtIndex(input_source_list, 0),
+  return base::apple::ScopedCFTypeRef<TISInputSourceRef>(
+      (TISInputSourceRef)CFArrayGetValueAtIndex(input_source_list.get(), 0),
       base::scoped_policy::RETAIN);
 }
 
@@ -48,9 +57,9 @@ void ScopedKeyboardLayout::ActivateLayout(PlatformKeyboardLayout layout) {
   // "enabled" even though it is present - we aren't sure why this happens,
   // perhaps if input sources have never been switched on this bot before? In
   // any case, it's harmless to re-enable it here if it's already enabled.
-  OSStatus result = TISEnableInputSource(layout);
+  OSStatus result = TISEnableInputSource(layout.get());
   DCHECK_EQ(noErr, result);
-  result = TISSelectInputSource(layout);
+  result = TISSelectInputSource(layout.get());
   DCHECK_EQ(noErr, result);
 }
 

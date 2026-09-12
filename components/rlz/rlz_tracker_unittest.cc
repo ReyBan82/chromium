@@ -6,32 +6,33 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
+#include "base/notimplemented.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/rlz/rlz_tracker_delegate.h"
 #include "net/url_request/url_request_test_util.h"
 #include "rlz/test/rlz_test_helpers.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 #if BUILDFLAG(IS_IOS)
 #include "ui/base/device_form_factor.h"
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chromeos/ash/components/system/fake_statistics_provider.h"
 #endif
 
-using testing::AssertionResult;
-using testing::AssertionSuccess;
-using testing::AssertionFailure;
+using ::testing::HasSubstr;
+using ::testing::Not;
 
 namespace rlz {
 namespace {
@@ -108,6 +109,12 @@ class TestRLZTrackerDelegate : public RLZTrackerDelegate {
     on_homepage_search_callback_ = std::move(callback);
   }
 
+  void RunHomepageSearchCallback() override {
+    if (!on_homepage_search_callback_.is_null()) {
+      std::move(on_homepage_search_callback_).Run();
+    }
+  }
+
   // A speculative fix for https://crbug.com/907379.
   bool ShouldUpdateExistingAccessPointRlz() override { return false; }
 
@@ -130,39 +137,7 @@ const char kAppListRlzString[] = "test_applist";
 const char kNewAppListRlzString[] = "new_applist";
 #endif  // !BUILDFLAG(IS_IOS)
 
-// Some helper macros to test it a string contains/does not contain a substring.
 
-AssertionResult CmpHelperSTRC(const char* str_expression,
-                              const char* substr_expression,
-                              const char* str,
-                              const char* substr) {
-  if (nullptr != strstr(str, substr)) {
-    return AssertionSuccess();
-  }
-
-  return AssertionFailure() << "Expected: (" << substr_expression << ") in ("
-                            << str_expression << "), actual: '"
-                            << substr << "' not in '" << str << "'";
-}
-
-AssertionResult CmpHelperSTRNC(const char* str_expression,
-                               const char* substr_expression,
-                               const char* str,
-                               const char* substr) {
-  if (nullptr == strstr(str, substr)) {
-    return AssertionSuccess();
-  }
-
-  return AssertionFailure() << "Expected: (" << substr_expression
-                            << ") not in (" << str_expression << "), actual: '"
-                            << substr << "' in '" << str << "'";
-}
-
-#define EXPECT_STR_CONTAINS(str, substr) \
-    EXPECT_PRED_FORMAT2(CmpHelperSTRC, str, substr)
-
-#define EXPECT_STR_NOT_CONTAIN(str, substr) \
-    EXPECT_PRED_FORMAT2(CmpHelperSTRNC, str, substr)
 
 }  // namespace
 
@@ -212,7 +187,7 @@ class TestRLZTracker : public RLZTracker {
     return !assume_not_ui_thread_;
   }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   bool ScheduleClearRlzState() override { return !assume_not_ui_thread_; }
 #endif
 
@@ -262,7 +237,7 @@ class RlzLibTest : public testing::Test {
   std::unique_ptr<TestRLZTracker> tracker_;
   RlzLibTestNoMachineStateHelper m_rlz_test_helper_;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<ash::system::FakeStatisticsProvider> statistics_provider_;
 #endif
 };
@@ -280,14 +255,14 @@ void RlzLibTest::SetUp() {
   SetMainBrand("TEST");
   SetReactivationBrand("");
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   statistics_provider_ =
       std::make_unique<ash::system::FakeStatisticsProvider>();
   ash::system::StatisticsProvider::SetTestProvider(statistics_provider_.get());
   statistics_provider_->SetMachineStatistic(
       ash::system::kShouldSendRlzPingKey,
       ash::system::kShouldSendRlzPingValueTrue);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void RlzLibTest::TearDown() {
@@ -296,9 +271,9 @@ void RlzLibTest::TearDown() {
   testing::Test::TearDown();
   m_rlz_test_helper_.TearDown();
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   ash::system::StatisticsProvider::SetTestProvider(nullptr);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void RlzLibTest::SetMainBrand(const char* brand) {
@@ -328,12 +303,11 @@ void RlzLibTest::InvokeDelayedInit() {
 }
 
 void RlzLibTest::ExpectEventRecorded(const char* event_name, bool expected) {
-  char cgi[rlz_lib::kMaxCgiLength];
-  GetProductEventsAsCgi(rlz_lib::CHROME, cgi, std::size(cgi));
+  std::string cgi = GetProductEventsAsCgi(rlz_lib::CHROME).value_or("");
   if (expected) {
-    EXPECT_STR_CONTAINS(cgi, event_name);
+    EXPECT_THAT(cgi, HasSubstr(event_name));
   } else {
-    EXPECT_STR_NOT_CONTAIN(cgi, event_name);
+    EXPECT_THAT(cgi, Not(HasSubstr(event_name)));
   }
 }
 
@@ -401,14 +375,29 @@ const char kHomepageFirstSearch[] = "C2F";
 const char kAppListInstall[] = "C7I";
 const char kAppListSetToGoogle[] = "C7S";
 const char kAppListFirstSearch[] = "C7F";
+
+const char kEnterpriseEnrollment[] = "C1X";
+const char kEnterpriseUnenrollment[] = "C1Y";
+const char kEnterpriseEnrolledActivate[] = "C1Z";
+const char kEnterpriseEnrolledFirstSearch[] = "C1W";
 #elif BUILDFLAG(IS_IOS)
 const char kOmniboxInstallPhone[] = "CDI";
 const char kOmniboxSetToGooglePhone[] = "CDS";
 const char kOmniboxFirstSearchPhone[] = "CDF";
 
+const char kEnterpriseEnrollmentPhone[] = "CDX";
+const char kEnterpriseUnenrollmentPhone[] = "CDY";
+const char kEnterpriseEnrolledActivatePhone[] = "CDZ";
+const char kEnterpriseEnrolledFirstSearchPhone[] = "CDW";
+
 const char kOmniboxInstallTablet[] = "C9I";
 const char kOmniboxSetToGoogleTablet[] = "C9S";
 const char kOmniboxFirstSearchTablet[] = "C9F";
+
+const char kEnterpriseEnrollmentTablet[] = "C9X";
+const char kEnterpriseUnenrollmentTablet[] = "C9Y";
+const char kEnterpriseEnrolledActivateTablet[] = "C9Z";
+const char kEnterpriseEnrolledFirstSearchTablet[] = "C9W";
 #elif BUILDFLAG(IS_MAC)
 const char kOmniboxInstall[] = "C5I";
 const char kOmniboxSetToGoogle[] = "C5S";
@@ -421,7 +410,12 @@ const char kHomepageFirstSearch[] = "C6F";
 const char kAppListInstall[] = "C8I";
 const char kAppListSetToGoogle[] = "C8S";
 const char kAppListFirstSearch[] = "C8F";
-#elif BUILDFLAG(IS_CHROMEOS_ASH)
+
+const char kEnterpriseEnrollment[] = "C5X";
+const char kEnterpriseUnenrollment[] = "C5Y";
+const char kEnterpriseEnrolledActivate[] = "C5Z";
+const char kEnterpriseEnrolledFirstSearch[] = "C5W";
+#elif BUILDFLAG(IS_CHROMEOS)
 const char kOmniboxInstall[] = "CAI";
 const char kOmniboxSetToGoogle[] = "CAS";
 const char kOmniboxFirstSearch[] = "CAF";
@@ -433,6 +427,11 @@ const char kHomepageFirstSearch[] = "CBF";
 const char kAppListInstall[] = "CCI";
 const char kAppListSetToGoogle[] = "CCS";
 const char kAppListFirstSearch[] = "CCF";
+
+const char kEnterpriseEnrollment[] = "CAX";
+const char kEnterpriseUnenrollment[] = "CAY";
+const char kEnterpriseEnrolledActivate[] = "CAZ";
+const char kEnterpriseEnrolledFirstSearch[] = "CAW";
 #endif
 
 const char* OmniboxInstall() {
@@ -465,6 +464,46 @@ const char* OmniboxFirstSearch() {
 #endif
 }
 
+const char* EnterpriseEnrollment() {
+#if BUILDFLAG(IS_IOS)
+  return ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_TABLET
+             ? kEnterpriseEnrollmentTablet
+             : kEnterpriseEnrollmentPhone;
+#else
+  return kEnterpriseEnrollment;
+#endif
+}
+
+const char* EnterpriseUnenrollment() {
+#if BUILDFLAG(IS_IOS)
+  return ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_TABLET
+             ? kEnterpriseUnenrollmentTablet
+             : kEnterpriseUnenrollmentPhone;
+#else
+  return kEnterpriseUnenrollment;
+#endif
+}
+
+const char* EnterpriseEnrolledActivate() {
+#if BUILDFLAG(IS_IOS)
+  return ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_TABLET
+             ? kEnterpriseEnrolledActivateTablet
+             : kEnterpriseEnrolledActivatePhone;
+#else
+  return kEnterpriseEnrolledActivate;
+#endif
+}
+
+const char* EnterpriseEnrolledFirstSearch() {
+#if BUILDFLAG(IS_IOS)
+  return ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_TABLET
+             ? kEnterpriseEnrolledFirstSearchTablet
+             : kEnterpriseEnrolledFirstSearchPhone;
+#else
+  return kEnterpriseEnrolledFirstSearch;
+#endif
+}
+
 const base::TimeDelta kDelay = base::Milliseconds(20);
 
 TEST_F(RlzLibTest, RecordProductEvent) {
@@ -472,6 +511,22 @@ TEST_F(RlzLibTest, RecordProductEvent) {
                                  rlz_lib::FIRST_SEARCH);
 
   ExpectEventRecorded(OmniboxFirstSearch(), true);
+}
+
+TEST_F(RlzLibTest, RecordEnterpriseEvents) {
+  task_environment_.RunUntilIdle();
+
+  RLZTracker::RecordEnterpriseEnrollment();
+  RLZTracker::RecordEnterpriseUnenrollment();
+  RLZTracker::RecordEnterpriseEnrolledActivate();
+  RLZTracker::RecordEnterpriseEnrolledFirstSearch();
+
+  task_environment_.RunUntilIdle();
+
+  ExpectEventRecorded(EnterpriseEnrollment(), true);
+  ExpectEventRecorded(EnterpriseUnenrollment(), true);
+  ExpectEventRecorded(EnterpriseEnrolledActivate(), true);
+  ExpectEventRecorded(EnterpriseEnrolledFirstSearch(), true);
 }
 
 TEST_F(RlzLibTest, QuickStopAfterStart) {
@@ -912,7 +967,7 @@ TEST_F(RlzLibTest, GetAccessPointRlzIsCached) {
   EXPECT_STREQ(kOmniboxRlzString, base::UTF16ToUTF8(rlz).c_str());
 }
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 // By design, on Chrome OS the RLZ string can only be set once.  Once set,
 // pings cannot change int.
 TEST_F(RlzLibTest, PingUpdatesRlzCache) {
@@ -970,7 +1025,7 @@ TEST_F(RlzLibTest, PingUpdatesRlzCache) {
   EXPECT_STREQ(kNewAppListRlzString, base::UTF16ToUTF8(rlz).c_str());
 #endif  // !BUILDFLAG(IS_IOS)
 }
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // !BUILDFLAG(IS_CHROMEOS)
 
 // TODO(thakis): Reactivation doesn't exist on Mac yet.
 TEST_F(RlzLibTest, ReactivationNonOrganicNonOrganic) {
@@ -1016,7 +1071,7 @@ TEST_F(RlzLibTest, ReactivationOrganicOrganic) {
   ExpectReactivationRlzPingSent(false);
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 TEST_F(RlzLibTest, ClearRlzState) {
   RLZTracker::RecordProductEvent(rlz_lib::CHROME, RLZTracker::ChromeOmnibox(),
                                  rlz_lib::FIRST_SEARCH);
@@ -1060,6 +1115,23 @@ TEST_F(RlzLibTest, DoNotRecordEventUnlessShouldSendRlzPingKeyIsTrue) {
                                  rlz_lib::FIRST_SEARCH);
   ExpectEventRecorded(OmniboxFirstSearch(), false);
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+#if !BUILDFLAG(IS_IOS)
+TEST_F(RlzLibTest, RecordChromeHomePageSearch) {
+  TestRLZTracker::InitRlzDelayed(true, false, kDelay, true, true, false);
+  EXPECT_TRUE(TestRLZTracker::ShouldRecordChromeHomePageSearch());
+
+  TestRLZTracker::RecordChromeHomePageSearch();
+  EXPECT_FALSE(TestRLZTracker::ShouldRecordChromeHomePageSearch());
+  ExpectEventRecorded(kHomepageFirstSearch, true);
+}
+
+TEST_F(RlzLibTest, ShouldNotRecordChromeHomePageSearch) {
+  SetMainBrand("GGLS");
+  TestRLZTracker::InitRlzDelayed(true, false, kDelay, true, true, false);
+  EXPECT_FALSE(TestRLZTracker::ShouldRecordChromeHomePageSearch());
+}
+#endif  // !BUILDFLAG(IS_IOS)
 
 }  // namespace rlz

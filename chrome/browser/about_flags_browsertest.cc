@@ -10,8 +10,6 @@
 #include "base/test/bind.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/unexpire_flags.h"
 #include "chrome/browser/unexpire_flags_gen.h"
@@ -19,7 +17,7 @@
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "components/flags_ui/feature_entry_macros.h"
+#include "components/webui/flags/feature_entry_macros.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -61,77 +59,80 @@ const char kSanitizedInputAndCommandLine[] =
 void SimulateTextType(content::WebContents* contents,
                       const char* experiment_id,
                       const char* text) {
-  EXPECT_TRUE(content::ExecuteScript(
-      contents, base::StringPrintf(
-                    "var parent = document.getElementById('%s');"
-                    "var textarea = parent.getElementsByTagName('textarea')[0];"
-                    "textarea.focus();"
-                    "textarea.value = `%s`;"
-                    "textarea.onchange();",
-                    experiment_id, text)));
+  EXPECT_TRUE(content::ExecJs(
+      contents,
+      base::StringPrintf(
+          "var parent = "
+          "document.querySelector('flags-app').shadowRoot.getElementById('%s');"
+          "var textarea = parent.getElementsByTagName('textarea')[0];"
+          "textarea.focus();"
+          "textarea.value = `%s`;"
+          "textarea.dispatchEvent(new Event('change'));",
+          experiment_id, text)));
 }
 
 void ToggleEnableDropdown(content::WebContents* contents,
                           const char* experiment_id,
                           bool enable) {
-  EXPECT_TRUE(content::ExecuteScript(
+  EXPECT_TRUE(content::ExecJs(
       contents,
       base::StringPrintf(
-          "var k = document.getElementById('%s');"
-          "var s = k.getElementsByClassName('experiment-enable-disable')[0];"
+          "var k = "
+          "document.querySelector('flags-app').shadowRoot.getElementById('%s');"
+          "var s = "
+          "k.shadowRoot."
+          "querySelector('.experiment-enable-disable');"
           "s.focus();"
           "s.selectedIndex = %d;"
-          "s.onchange();",
+          "s.dispatchEvent(new Event('change'));",
           experiment_id, enable ? 1 : 0)));
 }
 
 std::string GetOriginListText(content::WebContents* contents,
                               const char* experiment_id) {
-  std::string text;
-  EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-      contents,
-      base::StringPrintf(
-          "var k = document.getElementById('%s');"
-          "var s = k.getElementsByClassName('experiment-origin-list-value')[0];"
-          "window.domAutomationController.send(s.value );",
-          experiment_id),
-      &text));
-  return text;
+  return content::EvalJs(
+             contents,
+             base::StringPrintf(
+                 "var k = "
+                 "document.querySelector('flags-app').shadowRoot."
+                 "getElementById('%s');"
+                 "var s = "
+                 "k.getElementsByClassName('experiment-origin-list-value')[0];"
+                 "s.value;",
+                 experiment_id))
+      .ExtractString();
 }
 
 bool IsDropdownEnabled(content::WebContents* contents,
                        const char* experiment_id) {
-  bool result = false;
-  EXPECT_TRUE(content::ExecuteScriptAndExtractBool(
-      contents,
-      base::StringPrintf(
-          "var k = document.getElementById('%s');"
-          "var s = k.getElementsByClassName('experiment-enable-disable')[0];"
-          "window.domAutomationController.send(s.value == 'enabled');",
-          experiment_id),
-      &result));
-  return result;
+  return content::EvalJs(
+             contents,
+             base::StringPrintf(
+                 "var k = "
+                 "document.querySelector('flags-app').shadowRoot."
+                 "getElementById('%s');"
+                 "var s = "
+                 "k.getElementsByClassName('experiment-enable-disable')[0];"
+                 "s.value == 'enabled';",
+                 experiment_id))
+      .ExtractBool();
 }
 
 bool IsFlagPresent(content::WebContents* contents, const char* experiment_id) {
-  bool result = false;
-  EXPECT_TRUE(content::ExecuteScriptAndExtractBool(
-      contents,
-      base::StringPrintf("var k = document.getElementById('%s');"
-                         "window.domAutomationController.send(k != null);",
-                         experiment_id),
-      &result));
-  return result;
+  return content::EvalJs(contents,
+                         base::StringPrintf("var k = "
+                                            "document.querySelector('flags-app'"
+                                            ").shadowRoot.getElementById('%s');"
+                                            "k != null;",
+                                            experiment_id))
+      .ExtractBool();
 }
 
 void WaitForExperimentalFeatures(content::WebContents* contents) {
-  bool unused;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(
+  ASSERT_TRUE(content::ExecJs(
       contents,
-      "experimentalFeaturesReadyForTest.then(() => {"
-      "  window.domAutomationController.send(true);"
-      "});",
-      &unused));
+      "var k = document.querySelector('flags-app');"
+      "k.experimentalFeaturesReadyForTesting().then(() => true);"));
 }
 
 const std::vector<flags_ui::FeatureEntry> GetFeatureEntries(
@@ -232,7 +233,7 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, PRE_OriginFlagDisabled) {
             GetOriginListText(contents, kFlagName));
 }
 
-// Flaky. http://crbug.com/1010678
+// Flaky. http://crbug.com/40651256
 IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, DISABLED_OriginFlagDisabled) {
   // Even though the feature is disabled, the switch is set directly via command
   // line.
@@ -272,7 +273,7 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, PRE_OriginFlagEnabled) {
   // non-ChromeOS.
   ToggleEnableDropdown(contents, kFlagName, true);
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   // On non-ChromeOS, the command line is not modified until restart.
   EXPECT_EQ(kInitialSwitches,
             base::CommandLine::ForCurrentProcess()->GetSwitches());
@@ -291,9 +292,9 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, PRE_OriginFlagEnabled) {
             GetOriginListText(contents, kFlagName));
 }
 
-// Flaky. http://crbug.com/1010678
+// Flaky. http://crbug.com/40651256
 IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, DISABLED_OriginFlagEnabled) {
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
   // On non-ChromeOS, the command line is modified after restart.
   EXPECT_EQ(
       GetSanitizedInputAndCommandLine(),
@@ -312,7 +313,7 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, DISABLED_OriginFlagEnabled) {
   EXPECT_EQ(GetSanitizedInputAndCommandLine(),
             GetOriginListText(contents, kFlagName));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // ChromeOS doesn't read chrome://flags values on startup so we explicitly
   // need to disable and re-enable the flag here.
   ToggleEnableDropdown(contents, kFlagName, true);
@@ -323,13 +324,7 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, DISABLED_OriginFlagEnabled) {
       base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(kSwitchName));
 }
 
-// Crashes on Win.  http://crbug.com/1108357
-#if BUILDFLAG(IS_WIN)
-#define MAYBE_ExpiryHidesFlag DISABLED_ExpiryHidesFlag
-#else
-#define MAYBE_ExpiryHidesFlag ExpiryHidesFlag
-#endif
-IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, MAYBE_ExpiryHidesFlag) {
+IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, ExpiryHidesFlag) {
   NavigateToFlagsPage();
   content::WebContents* contents =
       browser()->tab_strip_model()->GetActiveWebContents();
@@ -337,7 +332,7 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, MAYBE_ExpiryHidesFlag) {
   EXPECT_FALSE(IsFlagPresent(contents, kExpiredFlagName));
 }
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, PRE_ExpiredFlagDoesntApply) {
   NavigateToFlagsPage();
   content::WebContents* contents =
@@ -348,7 +343,7 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, PRE_ExpiredFlagDoesntApply) {
   ToggleEnableDropdown(contents, kExpiredFlagName, true);
 }
 
-// Flaky everywhere: https://crbug.com/1024028
+// Flaky everywhere: https://crbug.com/40107269
 IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, DISABLED_ExpiredFlagDoesntApply) {
   NavigateToFlagsPage();
   content::WebContents* contents =
@@ -360,7 +355,7 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, DISABLED_ExpiredFlagDoesntApply) {
 }
 #endif
 
-// Regression test for https://crbug.com/1101828:
+// Regression test for https://crbug.com/40703779:
 // Test that simply setting a flag (without the backing feature) is sufficient
 // to consider a flag unexpired. This test checks that by using a flag with the
 // expected unexpire name, but wired to a dummy switch rather than the usual
@@ -393,12 +388,15 @@ IN_PROC_BROWSER_TEST_P(AboutFlagsBrowserTest, FormRestore) {
   // change event for it. This simulates what happens during form restoration in
   // Blink, when navigating back and then forward to the flags page. This test
   // ensures that that does not crash the browser.
-  // See https://crbug.com/1038638 for more details.
+  // See https://crbug.com/40666411 for more details.
   EXPECT_TRUE(content::ExecJs(
       contents,
       base::StringPrintf(
-          "var k = document.getElementById('%s');"
-          "var s = k.getElementsByClassName('experiment-enable-disable')[0];"
+          "var k = "
+          "document.querySelector('flags-app').shadowRoot.getElementById('%s');"
+          "var s = "
+          "k.shadowRoot."
+          "querySelector('.experiment-enable-disable');"
           "delete s.internal_name;"
           "const e = document.createEvent('HTMLEvents');"
           "e.initEvent('change', true, true);"

@@ -2,12 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/chromeos/ui_mode.gni")
 import("//build/config/features.gni")
 
 if (is_android) {
   import("//build/config/android/config.gni")
-  import("//build/config/android/rules.gni")  # For generate_jni().
+  import("//build/config/android/rules.gni")
+  import("//third_party/jni_zero/jni_zero.gni")
 }
 
 component("gamepad") {
@@ -51,18 +51,25 @@ component("gamepad") {
     "hid_haptic_gamepad.cc",
     "hid_haptic_gamepad.h",
     "hid_writer.h",
+    "normalization.h",
+    "simulated_gamepad_data_fetcher.cc",
+    "simulated_gamepad_data_fetcher.h",
+    "simulated_gamepad_inputs.cc",
+    "simulated_gamepad_inputs.h",
+    "simulated_gamepad_params.cc",
+    "simulated_gamepad_params.h",
     "xbox_hid_controller.cc",
     "xbox_hid_controller.h",
   ]
 
   deps = [
     "//base",
-    "//base/third_party/dynamic_annotations",
     "//device/base/synchronization",
     "//device/gamepad/public/cpp:shared_with_blink",
     "//device/gamepad/public/cpp:switches",
     "//device/gamepad/public/mojom",
     "//mojo/public/cpp/system",
+    "//third_party/abseil-cpp:absl",
     "//third_party/blink/public:blink_headers",
   ]
 
@@ -72,6 +79,10 @@ component("gamepad") {
 
   if (is_win) {
     sources += [
+      "gameinput_data_fetcher.cc",
+      "gameinput_data_fetcher.h",
+      "gameinput_gamepad_device.cc",
+      "gameinput_gamepad_device.h",
       "gamepad_standard_mappings_win.cc",
       "hid_writer_win.cc",
       "hid_writer_win.h",
@@ -107,10 +118,7 @@ component("gamepad") {
         "udev_gamepad_linux.cc",
         "udev_gamepad_linux.h",
       ]
-      deps += [
-        "//build:chromeos_buildflags",
-        "//device/udev_linux",
-      ]
+      deps += [ "//device/udev_linux" ]
     }
   }
 
@@ -124,7 +132,7 @@ component("gamepad") {
     deps += [ ":jni_headers" ]
   }
 
-  if (!is_android && !is_fuchsia) {
+  if (!is_android && !is_fuchsia && !is_ios) {
     sources += [
       "nintendo_controller.cc",
       "nintendo_controller.h",
@@ -133,34 +141,48 @@ component("gamepad") {
     ]
   }
 
-  if (is_mac) {
+  if (is_apple) {
     sources += [
       "game_controller_data_fetcher_mac.h",
       "game_controller_data_fetcher_mac.mm",
-      "gamepad_device_mac.h",
-      "gamepad_device_mac.mm",
-      "gamepad_platform_data_fetcher_mac.h",
-      "gamepad_platform_data_fetcher_mac.mm",
+      "game_controller_gamepad.h",
+      "game_controller_gamepad.mm",
       "gamepad_standard_mappings_mac.mm",
-      "hid_writer_mac.cc",
-      "hid_writer_mac.h",
-      "xbox_controller_mac.h",
-      "xbox_controller_mac.mm",
-      "xbox_data_fetcher_mac.cc",
-      "xbox_data_fetcher_mac.h",
     ]
     frameworks = [
       "CoreFoundation.framework",
+      "CoreHaptics.framework",
       "Foundation.framework",
-      "ForceFeedback.framework",
       "GameController.framework",
-      "IOKit.framework",
     ]
+
+    if (is_mac) {
+      sources += [
+        "gamepad_device_mac.h",
+        "gamepad_device_mac.mm",
+        "gamepad_platform_data_fetcher_mac.h",
+        "gamepad_platform_data_fetcher_mac.mm",
+        "hid_writer_mac.cc",
+        "hid_writer_mac.h",
+        "xbox_controller_mac.h",
+        "xbox_controller_mac.mm",
+        "xbox_data_fetcher_mac.cc",
+        "xbox_data_fetcher_mac.h",
+      ]
+      frameworks += [
+        "ForceFeedback.framework",
+        "IOKit.framework",
+      ]
+    }
   }
 
   if (is_chromeos) {
     deps += [ "//chromeos/dbus/permission_broker" ]
   }
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 static_library("test_helpers") {
@@ -181,6 +203,14 @@ static_library("test_helpers") {
 
   if (is_win) {
     sources += [
+      "test_support/fake_gameinput_environment.cc",
+      "test_support/fake_gameinput_environment.h",
+      "test_support/fake_igameinput.cc",
+      "test_support/fake_igameinput.h",
+      "test_support/fake_igameinputdevice.cc",
+      "test_support/fake_igameinputdevice.h",
+      "test_support/fake_igameinputreading.cc",
+      "test_support/fake_igameinputreading.h",
       "test_support/fake_igamepad.cc",
       "test_support/fake_igamepad.h",
       "test_support/fake_igamepad_statics.cc",
@@ -191,6 +221,10 @@ static_library("test_helpers") {
       "test_support/fake_winrt_wgi_environment.h",
       "test_support/wgi_test_error_code.h",
     ]
+
+    # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+    # enable the diagnostic by removing this line.
+    configs += [ "//build/config/compiler:no_exit_time_destructors" ]
   }
 }
 
@@ -208,12 +242,16 @@ if (is_android) {
     ]
     deps = [
       "//base:base_java",
-      "//base:jni_java",
       "//build/android:build_java",
+      "//services/device/public/java:device_feature_list_java",
       "//third_party/androidx:androidx_annotation_annotation_java",
+      "//third_party/jni_zero:jni_zero_java",
     ]
-    annotation_processor_deps = [ "//base/android/jni_generator:jni_processor" ]
-    srcjar_deps = [ ":java_enums_srcjar" ]
+
+    srcjar_deps = [
+      ":java_enums_srcjar",
+      ":jni_headers",
+    ]
   }
 
   java_cpp_enum("java_enums_srcjar") {

@@ -7,18 +7,14 @@ package org.chromium.base;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.DiscardableReferencePool.DiscardableReference;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
 import java.lang.ref.WeakReference;
 
-/**
- * Tests for {@link DiscardableReferencePool}.
- */
+/** Tests for {@link DiscardableReferencePool}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class DiscardableReferencePoolTest {
     /**
      * Tests that draining the pool clears references and allows objects to be garbage collected.

@@ -12,8 +12,13 @@
 
 #include "base/functional/callback_helpers.h"
 #include "base/memory/discardable_memory_allocator.h"
+#include "base/memory/post_delayed_memory_reduction_task.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/ref_counted.h"
 #include "base/memory/ref_counted_delete_on_sequence.h"
 #include "base/memory/unsafe_shared_memory_region.h"
+#include "base/memory_coordinator/async_memory_consumer_registration.h"
+#include "base/memory_coordinator/memory_consumer.h"
 #include "base/synchronization/lock.h"
 #include "base/threading/thread_checker.h"
 #include "base/trace_event/memory_dump_provider.h"
@@ -34,6 +39,7 @@ namespace discardable_memory {
 class DISCARDABLE_MEMORY_EXPORT ClientDiscardableSharedMemoryManager
     : public base::DiscardableMemoryAllocator,
       public base::trace_event::MemoryDumpProvider,
+      public base::MemoryConsumer,
       public base::RefCountedDeleteOnSequence<
           ClientDiscardableSharedMemoryManager> {
  public:
@@ -77,6 +83,10 @@ class DISCARDABLE_MEMORY_EXPORT ClientDiscardableSharedMemoryManager
   void SetBytesAllocatedLimitForTesting(size_t limit) {
     bytes_allocated_limit_for_testing_ = limit;
   }
+
+  // base::MemoryConsumer:
+  void OnUpdateMemoryLimit() override;
+  void OnReleaseMemory() override;
 
   // Anything younger than |kMinAgeForScheduledPurge| is not discarded when we
   // do our periodic purge.
@@ -156,7 +166,8 @@ class DISCARDABLE_MEMORY_EXPORT ClientDiscardableSharedMemoryManager
 
   // Purge any unlocked memory from foreground that hasn't been touched in a
   // while.
-  void ScheduledPurge() LOCKS_EXCLUDED(lock_);
+  void ScheduledPurge(base::MemoryReductionTaskContext task_type)
+      LOCKS_EXCLUDED(lock_);
 
   // This is only virtual for testing.
   virtual std::unique_ptr<base::DiscardableSharedMemory>
@@ -197,7 +208,8 @@ class DISCARDABLE_MEMORY_EXPORT ClientDiscardableSharedMemoryManager
       manager_mojo_;
 
   // Holds all locked and unlocked instances which have not yet been purged.
-  std::set<DiscardableMemoryImpl*> allocated_memory_ GUARDED_BY(lock_);
+  std::set<raw_ptr<DiscardableMemoryImpl, SetExperimental>> allocated_memory_
+      GUARDED_BY(lock_);
   size_t bytes_allocated_limit_for_testing_ = 0;
 
   // Used in metrics to distinguish in-use consumers from background ones. We
@@ -205,6 +217,8 @@ class DISCARDABLE_MEMORY_EXPORT ClientDiscardableSharedMemoryManager
   // we're in the foreground. This is parallel to what we do in
   // RenderThreadImpl.
   bool foregrounded_ = false;
+
+  base::AsyncMemoryConsumerRegistration memory_consumer_registration_;
 
   THREAD_CHECKER(thread_checker_);
 };

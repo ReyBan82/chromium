@@ -9,55 +9,86 @@
 #include <functional>
 #include <memory>
 
+#include "base/compiler_specific.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/task/bind_post_task.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "media/base/audio_buffer.h"
 #include "media/base/audio_bus.h"
 #include "media/base/audio_decoder_config.h"
 #include "media/base/audio_discard_helper.h"
+#include "media/base/channel_layout.h"
 #include "media/base/decoder_buffer.h"
 #include "media/base/limits.h"
+#include "media/base/media_switches.h"
 #include "media/base/timestamp_constants.h"
 #include "media/ffmpeg/ffmpeg_common.h"
 #include "media/ffmpeg/ffmpeg_decoding_loop.h"
 #include "media/filters/ffmpeg_glue.h"
 
+// Used to check static IsCodecSupported().
+#if BUILDFLAG(ENABLE_SYMPHONIA)
+#include "media/filters/symphonia_audio_decoder.h"
+#endif
+
 namespace media {
 
+namespace {
+
 // Return the number of channels from the data in |frame|.
-static inline int DetermineChannels(AVFrame* frame) {
+inline int DetermineChannels(AVFrame* frame) {
   return frame->ch_layout.nb_channels;
 }
 
 // Called by FFmpeg's allocation routine to allocate a buffer. Uses
 // AVCodecContext.opaque to get the object reference in order to call
 // GetAudioBuffer() to do the actual allocation.
-static int GetAudioBufferImpl(struct AVCodecContext* s,
-                              AVFrame* frame,
-                              int flags) {
+int GetAudioBufferImpl(struct AVCodecContext* s, AVFrame* frame, int flags) {
   FFmpegAudioDecoder* decoder = static_cast<FFmpegAudioDecoder*>(s->opaque);
   return decoder->GetAudioBuffer(s, frame, flags);
 }
 
 // Called by FFmpeg's allocation routine to free a buffer. |opaque| is the
 // AudioBuffer allocated, so unref it.
-static void ReleaseAudioBufferImpl(void* opaque, uint8_t* data) {
+void ReleaseAudioBufferImpl(void* opaque, uint8_t* data) {
   if (opaque)
     static_cast<AudioBuffer*>(opaque)->Release();
 }
 
+// Returns true iff the FFmpegAudioDecoder should be disabled because current
+// base::Features have a different decoder enabled.
+bool IsCodecDisabledByFeatures(AudioCodec codec) {
+  // FFmpegAudioDecoder does not support Opus when this flag is enabled.
+  // OpusAudioDecoder should be used instead.
+  if (codec == AudioCodec::kOpus) {
+    return base::FeatureList::IsEnabled(kDirectOpusAudioDecoding);
+  }
+
+#if BUILDFLAG(ENABLE_SYMPHONIA)
+  return SymphoniaAudioDecoder::IsCodecSupported(codec);
+#else
+  return false;
+#endif
+}
+}  // namespace
+
 FFmpegAudioDecoder::FFmpegAudioDecoder(
     const scoped_refptr<base::SequencedTaskRunner>& task_runner,
-    MediaLog* media_log)
+    MediaLog* media_log,
+    ExecutionMode mode)
     : task_runner_(task_runner),
-      state_(DecoderState::kUninitialized),
-      av_sample_format_(0),
       media_log_(media_log),
-      pool_(new AudioBufferMemoryPool()) {
+      mode_(mode),
+      pool_(base::MakeRefCounted<AudioBufferMemoryPool>(
+          limits::kFFmpegBufferAddressAlignment)) {
   DETACH_FROM_SEQUENCE(sequence_checker_);
+  CHECK(media_log_);
+  if (mode_ == ExecutionMode::kAsynchronous) {
+    CHECK(task_runner_);
+  }
 }
 
 FFmpegAudioDecoder::~FFmpegAudioDecoder() {
@@ -79,13 +110,21 @@ void FFmpegAudioDecoder::Initialize(const AudioDecoderConfig& config,
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(config.IsValidConfig());
 
-  InitCB bound_init_cb = base::BindPostTaskToCurrentDefault(std::move(init_cb));
+  InitCB bound_init_cb = BindCallbackIfNeeded(std::move(init_cb));
 
+  // This decoder does not support encrypted content.
   if (config.is_encrypted()) {
+    // FFmpegAudioDecoder does not support encrypted content.
     std::move(bound_init_cb)
-        .Run(DecoderStatus(
-            DecoderStatus::Codes::kUnsupportedEncryptionMode,
-            "FFmpegAudioDecoder does not support encrypted content"));
+        .Run(DecoderStatus(DecoderStatus::Codes::kUnsupportedEncryptionMode));
+    return;
+  }
+
+  // If another decoder is enabled in features for this codec, FFmpeg should
+  // not be enabled.
+  if (IsCodecDisabledByFeatures(config.codec())) {
+    std::move(bound_init_cb)
+        .Run(DecoderStatus(DecoderStatus::Codes::kUnsupportedCodec));
     return;
   }
 
@@ -106,7 +145,7 @@ void FFmpegAudioDecoder::Initialize(const AudioDecoderConfig& config,
 
   // Success!
   config_ = config;
-  output_cb_ = base::BindPostTaskToCurrentDefault(output_cb);
+  output_cb_ = BindCallbackIfNeeded(output_cb);
   state_ = DecoderState::kNormal;
   std::move(bound_init_cb).Run(DecoderStatus::Codes::kOk);
 }
@@ -116,8 +155,7 @@ void FFmpegAudioDecoder::Decode(scoped_refptr<DecoderBuffer> buffer,
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(decode_cb);
   CHECK_NE(state_, DecoderState::kUninitialized);
-  DecodeCB decode_cb_bound =
-      base::BindPostTaskToCurrentDefault(std::move(decode_cb));
+  DecodeCB decode_cb_bound = BindCallbackIfNeeded(std::move(decode_cb));
 
   if (state_ == DecoderState::kError) {
     std::move(decode_cb_bound).Run(DecoderStatus::Codes::kFailed);
@@ -139,7 +177,12 @@ void FFmpegAudioDecoder::Reset(base::OnceClosure closure) {
   avcodec_flush_buffers(codec_context_.get());
   state_ = DecoderState::kNormal;
   ResetTimestampState(config_);
-  task_runner_->PostTask(FROM_HERE, std::move(closure));
+
+  if (mode_ == ExecutionMode::kAsynchronous) {
+    task_runner_->PostTask(FROM_HERE, std::move(closure));
+  } else {
+    std::move(closure).Run();
+  }
 }
 
 void FFmpegAudioDecoder::DecodeBuffer(const DecoderBuffer& buffer,
@@ -157,6 +200,12 @@ void FFmpegAudioDecoder::DecodeBuffer(const DecoderBuffer& buffer,
     return;
   }
 
+  if (!buffer.end_of_stream() && buffer.is_encrypted()) {
+    DLOG(ERROR) << "Encrypted buffer not supported";
+    std::move(decode_cb).Run(DecoderStatus::Codes::kUnsupportedEncryptionMode);
+    return;
+  }
+
   if (!FFmpegDecode(buffer)) {
     state_ = DecoderState::kError;
     std::move(decode_cb).Run(DecoderStatus::Codes::kFailed);
@@ -171,12 +220,13 @@ void FFmpegAudioDecoder::DecodeBuffer(const DecoderBuffer& buffer,
 
 bool FFmpegAudioDecoder::FFmpegDecode(const DecoderBuffer& buffer) {
   AVPacket* packet = av_packet_alloc();
-  if (buffer.end_of_stream()) {
-    packet->data = NULL;
+  if (buffer.end_of_stream() || buffer.size() == 0) {
+    packet->data = nullptr;
     packet->size = 0;
   } else {
-    packet->data = const_cast<uint8_t*>(buffer.data());
-    packet->size = buffer.data_size();
+    auto buffer_span = base::span(buffer);
+    packet->data = const_cast<uint8_t*>(buffer_span.data());
+    packet->size = base::checked_cast<int>(buffer_span.size());
     packet->pts =
         ConvertToTimeBase(codec_context_->time_base, buffer.timestamp());
 
@@ -219,8 +269,8 @@ bool FFmpegAudioDecoder::FFmpegDecode(const DecoderBuffer& buffer) {
   // Even if we didn't decode a frame this loop, we should still send the packet
   // to the discard helper for caching.
   if (!decoded_frame_this_loop && !buffer.end_of_stream()) {
-    const bool result =
-        discard_helper_->ProcessBuffers(buffer.time_info(), nullptr);
+    const bool result = discard_helper_->ProcessBuffers(
+        AudioDiscardHelper::TimeInfo::FromBuffer(buffer), nullptr);
     DCHECK(!result);
   }
 
@@ -234,8 +284,8 @@ bool FFmpegAudioDecoder::OnNewFrame(const DecoderBuffer& buffer,
 
   // Translate unsupported into discrete layouts for discrete configurations;
   // ffmpeg does not have a labeled discrete configuration internally.
-  ChannelLayout channel_layout = ChannelLayoutToChromeChannelLayout(
-      codec_context_->ch_layout.u.mask, codec_context_->ch_layout.nb_channels);
+  ChannelLayout channel_layout =
+      ChannelLayoutToChromeChannelLayout(codec_context_->ch_layout);
   if (channel_layout == CHANNEL_LAYOUT_UNSUPPORTED &&
       config_.channel_layout() == CHANNEL_LAYOUT_DISCRETE) {
     channel_layout = CHANNEL_LAYOUT_DISCRETE;
@@ -268,10 +318,16 @@ bool FFmpegAudioDecoder::OnNewFrame(const DecoderBuffer& buffer,
         << config_.samples_per_second() << ", ChannelLayout: " << channel_layout
         << " vs " << config_.channel_layout() << ", Channels: " << channels
         << " vs " << config_.channels();
-    config_.Initialize(config_.codec(), config_.sample_format(), channel_layout,
-                       frame->sample_rate, config_.extra_data(),
-                       config_.encryption_scheme(), config_.seek_preroll(),
-                       config_.codec_delay());
+    const bool should_discard_decoder_delay =
+        config_.should_discard_decoder_delay();
+    config_.Initialize(config_.codec(), config_.sample_format(),
+                       {channel_layout, channels}, frame->sample_rate,
+                       config_.extra_data(), config_.encryption_scheme(),
+                       config_.seek_preroll(), config_.codec_delay());
+    if (!should_discard_decoder_delay) {
+      config_.disable_discard_decoder_delay();
+    }
+
     if (is_sample_rate_change)
       ResetTimestampState(config_);
   }
@@ -288,7 +344,8 @@ bool FFmpegAudioDecoder::OnNewFrame(const DecoderBuffer& buffer,
     output->TrimEnd(unread_frames);
 
   *decoded_frame_this_loop = true;
-  if (discard_helper_->ProcessBuffers(buffer.time_info(), output.get())) {
+  if (discard_helper_->ProcessBuffers(
+          AudioDiscardHelper::TimeInfo::FromBuffer(buffer), output.get())) {
     if (is_config_change &&
         output->sample_rate() != config_.samples_per_second()) {
       // At the boundary of the config change, FFmpeg's AAC decoder gives the
@@ -316,7 +373,7 @@ bool FFmpegAudioDecoder::ConfigureDecoder(const AudioDecoderConfig& config) {
   ReleaseFFmpegResources();
 
   // Initialize AVCodecContext structure.
-  codec_context_.reset(avcodec_alloc_context3(NULL));
+  codec_context_.reset(avcodec_alloc_context3(nullptr));
   AudioDecoderConfigToAVCodecContext(config, codec_context_.get());
 
   codec_context_->opaque = this;
@@ -325,13 +382,13 @@ bool FFmpegAudioDecoder::ConfigureDecoder(const AudioDecoderConfig& config) {
   if (!config.should_discard_decoder_delay())
     codec_context_->flags2 |= AV_CODEC_FLAG2_SKIP_MANUAL;
 
-  AVDictionary* codec_options = NULL;
+  AVDictionary* codec_options = nullptr;
   if (config.codec() == AudioCodec::kOpus) {
     codec_context_->request_sample_fmt = AV_SAMPLE_FMT_FLT;
 
     // Disable phase inversion to avoid artifacts in mono downmix. See
     // http://crbug.com/806219
-    if (config.target_output_channel_layout() == CHANNEL_LAYOUT_MONO) {
+    if (config.target_output_channel_layout() == ChannelLayoutConfig::Mono()) {
       int result = av_dict_set(&codec_options, "apply_phase_inv", "0", 0);
       DCHECK_GE(result, 0);
     }
@@ -340,8 +397,13 @@ bool FFmpegAudioDecoder::ConfigureDecoder(const AudioDecoderConfig& config) {
   const AVCodec* codec = avcodec_find_decoder(codec_context_->codec_id);
   if (!codec ||
       avcodec_open2(codec_context_.get(), codec, &codec_options) < 0) {
-    DLOG(ERROR) << "Could not initialize audio decoder: "
-                << codec_context_->codec_id;
+#if DCHECK_ALWAYS_ON
+    const AVCodecDescriptor* descriptor =
+        avcodec_descriptor_get(codec_context_->codec_id);
+    LOG(ERROR) << "Could not initialize audio decoder with codec name \""
+               << (descriptor ? descriptor->name : "unknown")
+               << "\" (codec id=" << codec_context_->codec_id << ")";
+#endif
     ReleaseFFmpegResources();
     state_ = DecoderState::kUninitialized;
     return false;
@@ -351,16 +413,6 @@ bool FFmpegAudioDecoder::ConfigureDecoder(const AudioDecoderConfig& config) {
 
   // Success!
   av_sample_format_ = codec_context_->sample_fmt;
-
-  if (codec_context_->ch_layout.nb_channels != config.channels()) {
-    MEDIA_LOG(ERROR, media_log_)
-        << "Audio configuration specified " << config.channels()
-        << " channels, but FFmpeg thinks the file contains "
-        << codec_context_->ch_layout.nb_channels << " channels";
-    ReleaseFFmpegResources();
-    state_ = DecoderState::kUninitialized;
-    return false;
-  }
 
   decoding_loop_ =
       std::make_unique<FFmpegDecodingLoop>(codec_context_.get(), true);
@@ -372,9 +424,10 @@ void FFmpegAudioDecoder::ResetTimestampState(const AudioDecoderConfig& config) {
   // Opus codec delay is handled by ffmpeg.
   const int codec_delay =
       config.codec() == AudioCodec::kOpus ? 0 : config.codec_delay();
+  // TODO(crbug.com/498560799): Remove delayed discard functionality now that
+  // it's no loner used.
   discard_helper_ = std::make_unique<AudioDiscardHelper>(
-      config.samples_per_second(), codec_delay,
-      config.codec() == AudioCodec::kVorbis);
+      config.samples_per_second(), codec_delay, /*delayed_discard=*/false);
   discard_helper_->Reset(codec_delay);
 }
 
@@ -386,8 +439,7 @@ int FFmpegAudioDecoder::GetAudioBuffer(struct AVCodecContext* s,
 
   // Since this routine is called by FFmpeg when a buffer is required for
   // audio data, use the values supplied by FFmpeg (ignoring the current
-  // settings). FFmpegDecode() gets to determine if the buffer is useable or
-  // not.
+  // settings). FFmpegDecode() gets to determine if the buffer is usable or not.
   AVSampleFormat format = static_cast<AVSampleFormat>(frame->format);
   SampleFormat sample_format =
       AVSampleFormatToSampleFormat(format, s->codec_id);
@@ -440,8 +492,7 @@ int FFmpegAudioDecoder::GetAudioBuffer(struct AVCodecContext* s,
   ChannelLayout channel_layout =
       config_.channel_layout() == CHANNEL_LAYOUT_DISCRETE
           ? CHANNEL_LAYOUT_DISCRETE
-          : ChannelLayoutToChromeChannelLayout(s->ch_layout.u.mask,
-                                               s->ch_layout.nb_channels);
+          : ChannelLayoutToChromeChannelLayout(s->ch_layout);
 
   if (channel_layout == CHANNEL_LAYOUT_UNSUPPORTED) {
     DLOG(ERROR) << "Unsupported channel layout.";
@@ -459,7 +510,7 @@ int FFmpegAudioDecoder::GetAudioBuffer(struct AVCodecContext* s,
   if (number_of_planes <= AV_NUM_DATA_POINTERS) {
     DCHECK_EQ(frame->extended_data, frame->data);
     for (int i = 0; i < number_of_planes; ++i)
-      frame->data[i] = buffer->channel_data()[i];
+      UNSAFE_TODO(frame->data[i]) = buffer->channel_data()[i];
   } else {
     // There are more channels than can fit into data[], so allocate
     // extended_data[] and fill appropriately.
@@ -467,9 +518,10 @@ int FFmpegAudioDecoder::GetAudioBuffer(struct AVCodecContext* s,
         av_malloc(number_of_planes * sizeof(*frame->extended_data)));
     int i = 0;
     for (; i < AV_NUM_DATA_POINTERS; ++i)
-      frame->extended_data[i] = frame->data[i] = buffer->channel_data()[i];
+      UNSAFE_TODO(frame->extended_data[i]) = UNSAFE_TODO(frame->data[i]) =
+          buffer->channel_data()[i];
     for (; i < number_of_planes; ++i)
-      frame->extended_data[i] = buffer->channel_data()[i];
+      UNSAFE_TODO(frame->extended_data[i]) = buffer->channel_data()[i];
   }
 
   // Now create an AVBufferRef for the data just allocated. It will own the

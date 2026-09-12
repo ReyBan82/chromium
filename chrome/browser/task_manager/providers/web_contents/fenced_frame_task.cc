@@ -8,6 +8,7 @@
 #include "chrome/grit/generated_resources.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/security_principal.h"
 #include "content/public/browser/site_instance.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "url/gurl.h"
@@ -15,21 +16,23 @@
 namespace task_manager {
 
 FencedFrameTask::FencedFrameTask(content::RenderFrameHost* render_frame_host,
-                                 RendererTask* embedder_task)
+                                 base::WeakPtr<RendererTask> embedder_task)
     : RendererTask(
           /*title=*/u"",
           /*icon=*/nullptr,
           /*subframe=*/render_frame_host),
       site_instance_(render_frame_host->GetSiteInstance()),
-      embedder_task_(embedder_task) {
+      embedder_task_(std::move(embedder_task)) {
   set_title(GetTitle());
 }
+
+FencedFrameTask::~FencedFrameTask() = default;
 
 void FencedFrameTask::Activate() {
   embedder_task_->Activate();
 }
 
-const task_manager::Task* FencedFrameTask::GetParentTask() const {
+base::WeakPtr<task_manager::Task> FencedFrameTask::GetParentTask() const {
   return embedder_task_;
 }
 
@@ -38,10 +41,11 @@ void FencedFrameTask::UpdateTitle() {
 }
 
 std::u16string FencedFrameTask::GetTitle() const {
-  const auto message_id = site_instance_->GetBrowserContext()->IsOffTheRecord()
-                              ? IDS_TASK_MANAGER_FENCED_FRAME_INCOGNITO_PREFIX
-                              : IDS_TASK_MANAGER_FENCED_FRAME_PREFIX;
-  const auto title = base::UTF8ToUTF16(site_instance_->GetSiteURL().spec());
+  const int message_id = site_instance_->GetBrowserContext()->IsOffTheRecord()
+                             ? IDS_TASK_MANAGER_FENCED_FRAME_INCOGNITO_PREFIX
+                             : IDS_TASK_MANAGER_FENCED_FRAME_PREFIX;
+  const auto title = base::UTF8ToUTF16(
+      site_instance_->GetSecurityPrincipal().GetDeprecatedSiteURL().spec());
   return l10n_util::GetStringFUTF16(message_id, title);
 }
 

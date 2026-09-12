@@ -8,7 +8,6 @@
 
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/permissions_policy/document_policy.h"
-#include "third_party/blink/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
 
 namespace blink {
 
@@ -18,9 +17,13 @@ constexpr const mojom::blink::DocumentPolicyFeature kBoolFeature =
     static_cast<mojom::blink::DocumentPolicyFeature>(1);
 constexpr const mojom::blink::DocumentPolicyFeature kDoubleFeature =
     static_cast<mojom::blink::DocumentPolicyFeature>(2);
+// kEnumFeature aliases kJSProfilingMode — the only registered enum feature —
+// so that serialization round-trips go through DocumentPolicyEnumValueToToken.
+constexpr const mojom::blink::DocumentPolicyFeature kEnumFeature =
+    mojom::blink::DocumentPolicyFeature::kJSProfilingMode;
 
 // This is the test version of |PolicyParserMessageBuffer::Message| as
-// WTF::String cannot be statically allocated.
+// blink::String cannot be statically allocated.
 struct MessageForTest {
   mojom::ConsoleMessageLevel level;
   const char* content;
@@ -41,19 +44,22 @@ class DocumentPolicyParserTest
             {"*", kDefault},
             {"f-bool", kBoolFeature},
             {"f-double", kDoubleFeature},
+            {"f-enum", kEnumFeature},
         }),
         feature_info_map(DocumentPolicyFeatureInfoMap{
             {kDefault, {"*", PolicyValue::CreateBool(true)}},
             {kBoolFeature, {"f-bool", PolicyValue::CreateBool(true)}},
             {kDoubleFeature, {"f-double", PolicyValue::CreateDecDouble(1.0)}},
+            {kEnumFeature, {"f-enum", PolicyValue::CreateEnum(0)}},
         }) {
     available_features.insert(kBoolFeature);
     available_features.insert(kDoubleFeature);
+    available_features.insert(kEnumFeature);
   }
 
   ~DocumentPolicyParserTest() override = default;
 
-  absl::optional<DocumentPolicy::ParsedDocumentPolicy> Parse(
+  std::optional<DocumentPolicy::ParsedDocumentPolicy> Parse(
       const String& policy_string,
       PolicyParserMessageBuffer& logger) {
     return DocumentPolicyParser::ParseInternal(policy_string, name_feature_map,
@@ -61,7 +67,7 @@ class DocumentPolicyParserTest
                                                available_features, logger);
   }
 
-  absl::optional<std::string> Serialize(
+  std::optional<std::string> Serialize(
       const DocumentPolicyFeatureState& policy) {
     return DocumentPolicy::SerializeInternal(policy, feature_info_map);
   }
@@ -334,8 +340,8 @@ const ParseTestCase DocumentPolicyParserTest::kCases[] = {
         },
         /* messages */
         {{mojom::blink::ConsoleMessageLevel::kWarning,
-          "Parameter for feature f-double should be Double, not "
-          "Boolean."}},
+          "Parameter for feature f-double should be double, not "
+          "boolean."}},
     },
     {
         "ParsePolicyWithWrongTypeOfParamExpectedBooleanTypeButGet"
@@ -348,8 +354,8 @@ const ParseTestCase DocumentPolicyParserTest::kCases[] = {
         },
         /* messages */
         {{mojom::blink::ConsoleMessageLevel::kWarning,
-          "Parameter for feature f-bool should be Boolean, not "
-          "Decimal."}},
+          "Parameter for feature f-bool should be boolean, not "
+          "decimal."}},
     },
     {
         "FeatureValueItemShouldNotBeEmpty",
@@ -361,8 +367,8 @@ const ParseTestCase DocumentPolicyParserTest::kCases[] = {
         },
         /* messages */
         {{mojom::blink::ConsoleMessageLevel::kWarning,
-          "Parameter for feature f-double should be single item, but get list "
-          "of items(length=0)."}},
+          "Parameter for feature f-double should be single item, but got inner "
+          "list."}},
     },
     {
         "TooManyFeatureValueItems",
@@ -374,8 +380,8 @@ const ParseTestCase DocumentPolicyParserTest::kCases[] = {
         },
         /* messages */
         {{mojom::blink::ConsoleMessageLevel::kWarning,
-          "Parameter for feature f-double should be single item, but get list "
-          "of items(length=2)."}},
+          "Parameter for feature f-double should be single item, but got inner "
+          "list."}},
     },
     {
         "ReportToParameterValueTypeShouldBeTokenInsteadOf"
@@ -389,6 +395,80 @@ const ParseTestCase DocumentPolicyParserTest::kCases[] = {
         /* messages */
         {{mojom::blink::ConsoleMessageLevel::kWarning,
           "\"report-to\" parameter should be a token in feature f-bool."}},
+    },
+    //
+    // Enum feature tests.
+    //
+    {
+        "ParseEnumFeatureEager",
+        "f-enum=eager",
+        /* parsed_policy */
+        {
+            /* feature_state */ {{kEnumFeature, PolicyValue::CreateEnum(1)}},
+            /* endpoint_map */ {},
+        },
+        /* messages */ {},
+    },
+    {
+        "ParseEnumFeatureLazy",
+        "f-enum=lazy",
+        /* parsed_policy */
+        {
+            /* feature_state */ {{kEnumFeature, PolicyValue::CreateEnum(2)}},
+            /* endpoint_map */ {},
+        },
+        /* messages */ {},
+    },
+    {
+        // When js-profiling-mode is absent the feature is not present in
+        // feature_state; callers fall back to the default value (kNone/0).
+        "ParseEnumFeatureAbsent",
+        "",
+        /* parsed_policy */
+        {
+            /* feature_state */ {},
+            /* endpoint_map */ {},
+        },
+        /* messages */ {},
+    },
+    {
+        // Enum features require an explicit value; a bare token (no =value)
+        // is parsed as a boolean true by the structured header parser, which
+        // is the wrong type and should produce a warning.
+        "ParseEnumFeatureNoValue",
+        "f-enum",
+        /* parsed_policy */
+        {
+            /* feature_state */ {},
+            /* endpoint_map */ {},
+        },
+        /* messages */
+        {{mojom::blink::ConsoleMessageLevel::kWarning,
+          "Parameter for feature f-enum should be enum, not boolean."}},
+    },
+    {
+        "ParseEnumFeatureInvalidToken",
+        "f-enum=unknown",
+        /* parsed_policy */
+        {
+            /* feature_state */ {},
+            /* endpoint_map */ {},
+        },
+        /* messages */
+        {{mojom::blink::ConsoleMessageLevel::kWarning,
+          "Parameter for feature f-enum should be enum, not token."}},
+    },
+    {
+        "ParseEnumFeatureWrongTypeBool",
+        "f-enum=?1",
+        /* parsed_policy */
+        {
+            /* feature_state */ {},
+            /* endpoint_map */ {},
+        },
+        /* messages */
+        {{mojom::blink::ConsoleMessageLevel::kWarning,
+          "Parameter for feature f-enum should be enum, not boolean."}},
     },
 };
 
@@ -406,7 +486,11 @@ const std::pair<DocumentPolicyFeatureState, std::string>
         // result ordering of feature.
         {{{kBoolFeature, PolicyValue::CreateBool(true)},
           {kDoubleFeature, PolicyValue::CreateDecDouble(1.0)}},
-         "f-bool, f-double=1.0"}};
+         "f-bool, f-double=1.0"},
+        // Enum features serialize to tokens (value 0 has no token and is
+        // skipped).
+        {{{kEnumFeature, PolicyValue::CreateEnum(1)}}, "f-enum=eager"},
+        {{{kEnumFeature, PolicyValue::CreateEnum(2)}}, "f-enum=lazy"}};
 
 const DocumentPolicyFeatureState kParsedPolicies[] = {
     {},  // An empty policy
@@ -414,7 +498,9 @@ const DocumentPolicyFeatureState kParsedPolicies[] = {
     {{kBoolFeature, PolicyValue::CreateBool(true)}},
     {{kDoubleFeature, PolicyValue::CreateDecDouble(1.0)}},
     {{kBoolFeature, PolicyValue::CreateBool(true)},
-     {kDoubleFeature, PolicyValue::CreateDecDouble(1.0)}}};
+     {kDoubleFeature, PolicyValue::CreateDecDouble(1.0)}},
+    {{kEnumFeature, PolicyValue::CreateEnum(1)}},
+    {{kEnumFeature, PolicyValue::CreateEnum(2)}}};
 
 // Serialize and then Parse the result of serialization should cancel each
 // other out, i.e. d == Parse(Serialize(d)).
@@ -424,10 +510,10 @@ const DocumentPolicyFeatureState kParsedPolicies[] = {
 // PolicyValue::CreateDecDouble(1.0) and get serialized to value=1.0.
 TEST_F(DocumentPolicyParserTest, SerializeAndParse) {
   for (const auto& policy : kParsedPolicies) {
-    const absl::optional<std::string> policy_string = Serialize(policy);
+    const std::optional<std::string> policy_string = Serialize(policy);
     ASSERT_TRUE(policy_string.has_value());
     PolicyParserMessageBuffer logger;
-    const absl::optional<DocumentPolicy::ParsedDocumentPolicy> reparsed_policy =
+    const std::optional<DocumentPolicy::ParsedDocumentPolicy> reparsed_policy =
         Parse(policy_string.value().c_str(), logger);
 
     ASSERT_TRUE(reparsed_policy.has_value());
@@ -460,7 +546,7 @@ TEST_P(DocumentPolicyParserTest, ParseResultShouldMatch) {
 
   const auto result = Parse(test_case.input_string, logger);
 
-  // All tese cases should not return absl::nullopt because they all comply to
+  // All tese cases should not return std::nullopt because they all comply to
   // structured header syntax.
   ASSERT_TRUE(result.has_value());
 

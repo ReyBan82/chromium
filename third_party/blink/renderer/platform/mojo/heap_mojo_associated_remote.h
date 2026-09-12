@@ -7,10 +7,12 @@
 
 #include <utility>
 
+#include "base/gtest_prod_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "third_party/blink/renderer/platform/context_lifecycle_observer.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/prefinalizer.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_wrapper_mode.h"
 #include "third_party/blink/renderer/platform/mojo/mojo_binding_context.h"
 
@@ -43,6 +45,7 @@ class HeapMojoAssociatedRemote {
   Proxy* operator->() const { return get(); }
   Proxy* get() const { return wrapper_->associated_remote().get(); }
   bool is_bound() const { return wrapper_->associated_remote().is_bound(); }
+  explicit operator bool() const { return is_bound(); }
   bool is_connected() const {
     return wrapper_->associated_remote().is_connected();
   }
@@ -76,6 +79,9 @@ class HeapMojoAssociatedRemote {
     wrapper_->associated_remote().Bind(std::move(pending_associated_remote),
                                        std::move(task_runner));
   }
+  [[nodiscard]] mojo::PendingAssociatedRemote<Interface> Unbind() {
+    return wrapper_->associated_remote().Unbind();
+  }
   void FlushForTesting() {
     return wrapper_->associated_remote().FlushForTesting();
   }
@@ -83,9 +89,18 @@ class HeapMojoAssociatedRemote {
   void Trace(Visitor* visitor) const { visitor->Trace(wrapper_); }
 
  private:
+  FRIEND_TEST_ALL_PREFIXES(HeapMojoAssociatedRemoteGCWithContextObserverTest,
+                           NoResetOnConservativeGC);
+  FRIEND_TEST_ALL_PREFIXES(HeapMojoAssociatedRemoteGCWithContextObserverTest,
+                           ResetsOnGC);
+  FRIEND_TEST_ALL_PREFIXES(HeapMojoAssociatedRemoteGCWithoutContextObserverTest,
+                           ResetsOnGC);
+
   // Garbage collected wrapper class to add ContextLifecycleObserver.
   class Wrapper final : public GarbageCollected<Wrapper>,
                         public ContextLifecycleObserver {
+    USING_PRE_FINALIZER(Wrapper, Dispose);
+
    public:
     explicit Wrapper(ContextLifecycleNotifier* notifier) {
       SetContextLifecycleNotifier(notifier);
@@ -98,6 +113,8 @@ class HeapMojoAssociatedRemote {
     void Trace(Visitor* visitor) const override {
       ContextLifecycleObserver::Trace(visitor);
     }
+
+    void Dispose() { associated_remote_.reset(); }
 
     mojo::AssociatedRemote<Interface>& associated_remote() {
       return associated_remote_;

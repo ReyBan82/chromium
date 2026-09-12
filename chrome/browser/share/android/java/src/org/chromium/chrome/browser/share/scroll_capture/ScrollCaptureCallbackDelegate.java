@@ -4,6 +4,8 @@
 
 package org.chromium.chrome.browser.share.scroll_capture;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -15,13 +17,17 @@ import android.util.Size;
 import android.view.Surface;
 import android.view.View;
 
-import androidx.annotation.IntDef;
-import androidx.annotation.NonNull;
-import androidx.annotation.VisibleForTesting;
-
 import org.chromium.base.Callback;
+import org.chromium.base.FeatureList;
+import org.chromium.base.MemoryPressureLevel;
+import org.chromium.base.memory.MemoryPressureMonitor;
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.paint_preview.PaintPreviewCompositorUtils;
+import org.chromium.chrome.browser.share.long_screenshots.LongScreenshotsUtils;
+import org.chromium.chrome.browser.share.long_screenshots.LongScreenshotsUtils.BitmapGeneratorStatus;
 import org.chromium.chrome.browser.share.long_screenshots.bitmap_generation.EntryManager;
 import org.chromium.chrome.browser.share.long_screenshots.bitmap_generation.EntryManager.BitmapGeneratorObserver;
 import org.chromium.chrome.browser.share.long_screenshots.bitmap_generation.LongScreenshotsEntry;
@@ -30,39 +36,25 @@ import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.content_public.browser.RenderCoordinates;
 import org.chromium.content_public.browser.WebContents;
 
-/**
- * An delegate to provide an Android API level independent implementation Scroll Capture.
- */
+/** An delegate to provide an Android API level independent implementation Scroll Capture. */
+@NullMarked
 public class ScrollCaptureCallbackDelegate {
     private static final int BITMAP_HEIGHT_THRESHOLD = 20;
 
-    // These values are persisted to logs. Entries should not be renumbered and
-    // numeric values should never be reused.
-    @IntDef({BitmapGeneratorStatus.CAPTURE_COMPLETE, BitmapGeneratorStatus.INSUFFICIENT_MEMORY,
-            BitmapGeneratorStatus.GENERATION_ERROR})
-    private @interface BitmapGeneratorStatus {
-        int CAPTURE_COMPLETE = 0;
-        int INSUFFICIENT_MEMORY = 1;
-        int GENERATION_ERROR = 2;
-        int COUNT = 3;
-    }
-
-    /**
-     * Wrapper class for {@link EntryManager}.
-     */
+    /** Wrapper class for {@link EntryManager}. */
     public static class EntryManagerWrapper {
         EntryManager create(Tab tab) {
-            return new EntryManager(tab.getContext(), tab, /*inMemory=*/true);
+            return new EntryManager(tab.getContext(), tab, /* inMemory= */ true);
         }
     }
 
     private final EntryManagerWrapper mEntryManagerWrapper;
-    private Tab mCurrentTab;
-    private EntryManager mEntryManager;
+    private @Nullable Tab mCurrentTab;
+    private @Nullable EntryManager mEntryManager;
 
-    private Rect mContentArea;
+    private @Nullable Rect mContentArea;
     // Holds the viewport size.
-    private Rect mViewportRect;
+    private @Nullable Rect mViewportRect;
 
     private int mInitialYOffset;
     private float mMinPageScaleFactor;
@@ -73,11 +65,30 @@ public class ScrollCaptureCallbackDelegate {
         mEntryManagerWrapper = entryManagerWrapper;
     }
 
-    /**
-     * See {@link ScrollCaptureCallback#onScrollCaptureSearch}.
-     */
-    public Rect onScrollCaptureSearch(@NonNull CancellationSignal cancellationSignal) {
+    /** See {@link ScrollCaptureCallback#onScrollCaptureSearch}. */
+    public Rect onScrollCaptureSearch(CancellationSignal cancellationSignal) {
         assert mCurrentTab != null;
+
+        int pressure = MemoryPressureMonitor.INSTANCE.getLastReportedPressure();
+        RecordHistogram.recordEnumeratedHistogram(
+                "Sharing.ScrollCapture.MemoryPressureOnSearch",
+                pressure,
+                MemoryPressureLevel.CRITICAL + 1);
+
+        int threshold =
+                (FeatureList.isNativeInitialized()
+                                && ChromeFeatureList.isEnabled(
+                                        ChromeFeatureList.LONG_SCREENSHOTS_LENIENT_MEMORY_CHECK))
+                        ? MemoryPressureLevel.CRITICAL
+                        : MemoryPressureLevel.MODERATE;
+
+        // If the system is under memory pressure, don't give the user the option to create
+        // a long screenshot.
+        boolean skipMemoryCheck = ChromeFeatureList.sLongScreenshotsNoMemoryCheck.isEnabled();
+        if (!skipMemoryCheck && pressure >= threshold) {
+            return new Rect();
+        }
+
         WebContents webContents = mCurrentTab.getWebContents();
         View view = mCurrentTab.getView();
         if (view == null || webContents == null || mCurrentTab.isFrozen()) {
@@ -87,110 +98,111 @@ public class ScrollCaptureCallbackDelegate {
         RenderCoordinates renderCoordinates = RenderCoordinates.fromWebContents(webContents);
         // getLastFrameViewport{Width|Height}PixInt() always reports in physical pixels no matter
         // the scale factor.
-        mViewportRect = new Rect(0, 0, renderCoordinates.getLastFrameViewportWidthPixInt(),
-                renderCoordinates.getLastFrameViewportHeightPixInt());
+        mViewportRect =
+                new Rect(
+                        0,
+                        0,
+                        renderCoordinates.getLastFrameViewportWidthPixInt(),
+                        renderCoordinates.getLastFrameViewportHeightPixInt());
         mMinPageScaleFactor = renderCoordinates.getMinPageScaleFactor();
         return mViewportRect;
     }
 
-    /**
-     * See {@link ScrollCaptureCallback#onScrollCaptureStart}.
-     */
-    public void onScrollCaptureStart(
-            @NonNull CancellationSignal signal, @NonNull Runnable onReady) {
+    /** See {@link ScrollCaptureCallback#onScrollCaptureStart}. */
+    public void onScrollCaptureStart(CancellationSignal signal, Runnable onReady) {
         assert mCurrentTab != null;
 
         mCaptureStartTime = SystemClock.elapsedRealtime();
         mEntryManager = mEntryManagerWrapper.create(mCurrentTab);
-        mEntryManager.addBitmapGeneratorObserver(new BitmapGeneratorObserver() {
-            @Override
-            public void onStatusChange(int status) {
-                if (status == EntryStatus.CAPTURE_IN_PROGRESS) return;
+        mEntryManager.addBitmapGeneratorObserver(
+                new BitmapGeneratorObserver() {
+                    @Override
+                    public void onStatusChange(int status) {
+                        if (status == EntryStatus.CAPTURE_IN_PROGRESS) return;
+                        assumeNonNull(mEntryManager);
 
-                // Abort if BitmapGenerator is not initialized successfully.
-                if (status != EntryStatus.CAPTURE_COMPLETE) {
-                    mEntryManager.removeBitmapGeneratorObserver(this);
-                    mEntryManager.destroy();
-                    signal.cancel();
-                    // The compositor won't be started so stop the pre-warmed compositor.
-                    PaintPreviewCompositorUtils.stopWarmCompositor();
-                    if (status == EntryStatus.INSUFFICIENT_MEMORY) {
-                        logBitmapGeneratorStatus(BitmapGeneratorStatus.INSUFFICIENT_MEMORY);
-                    } else {
-                        logBitmapGeneratorStatus(BitmapGeneratorStatus.GENERATION_ERROR);
+                        // Abort if BitmapGenerator is not initialized successfully.
+                        if (status != EntryStatus.CAPTURE_COMPLETE) {
+                            mEntryManager.removeBitmapGeneratorObserver(this);
+                            int bitmapGeneratorStatus =
+                                    (status == EntryStatus.INSUFFICIENT_MEMORY)
+                                            ? BitmapGeneratorStatus.INSUFFICIENT_MEMORY
+                                            : BitmapGeneratorStatus.GENERATION_ERROR;
+                            handleFailedCapture(onReady, bitmapGeneratorStatus);
+                        }
                     }
-                }
-            }
 
-            @Override
-            public void onCompositorReady(Size contentSize, Point scrollOffset) {
-                mEntryManager.removeBitmapGeneratorObserver(this);
-                if (contentSize.getWidth() == 0 || contentSize.getHeight() == 0) {
-                    mEntryManager.destroy();
-                    signal.cancel();
-                    logBitmapGeneratorStatus(BitmapGeneratorStatus.GENERATION_ERROR);
-                    return;
-                }
+                    @Override
+                    public void onCompositorReady(Size contentSize, Point scrollOffset) {
+                        assumeNonNull(mEntryManager);
+                        mEntryManager.removeBitmapGeneratorObserver(this);
+                        if (contentSize.getWidth() == 0 || contentSize.getHeight() == 0) {
+                            handleFailedCapture(onReady, BitmapGeneratorStatus.GENERATION_ERROR);
+                            return;
+                        }
 
-                // Store the content area and Y offset in physical pixel coordinates
-                mContentArea = new Rect(0, 0,
-                        (int) Math.floor(contentSize.getWidth() * mMinPageScaleFactor),
-                        (int) Math.floor(contentSize.getHeight() * mMinPageScaleFactor));
-                mInitialYOffset = (int) Math.floor(scrollOffset.y * mMinPageScaleFactor);
-                logBitmapGeneratorStatus(BitmapGeneratorStatus.CAPTURE_COMPLETE);
-                onReady.run();
-            }
-        });
+                        // Store the content area and Y offset in physical pixel coordinates
+                        int width = (int) Math.floor(contentSize.getWidth() * mMinPageScaleFactor);
+                        int height =
+                                (int) Math.floor(contentSize.getHeight() * mMinPageScaleFactor);
+                        mContentArea = new Rect(0, 0, width, height);
+                        mInitialYOffset = (int) Math.floor(scrollOffset.y * mMinPageScaleFactor);
+                        logBitmapGeneratorStatus(BitmapGeneratorStatus.CAPTURE_COMPLETE);
+                        onReady.run();
+                    }
+                });
         PaintPreviewCompositorUtils.warmupCompositor();
     }
 
-    /**
-     * See {@link ScrollCaptureCallback#onScrollCaptureImageRequest}.
-     */
-    public void onScrollCaptureImageRequest(@NonNull Surface surface,
-            @NonNull CancellationSignal signal, @NonNull Rect captureArea,
+    /** See {@link ScrollCaptureCallback#onScrollCaptureImageRequest}. */
+    public void onScrollCaptureImageRequest(
+            Surface surface,
+            CancellationSignal signal,
+            Rect captureArea,
             Callback<Rect> onComplete) {
         // Reposition the captureArea to the content area coordinates.
         captureArea.offset(0, mInitialYOffset);
-        if (!captureArea.intersect(mContentArea)
+        if (mContentArea == null
+                || !captureArea.intersect(mContentArea)
                 || captureArea.height() < BITMAP_HEIGHT_THRESHOLD) {
             onComplete.onResult(new Rect());
             return;
         }
 
+        assumeNonNull(mEntryManager);
         LongScreenshotsEntry entry = mEntryManager.generateEntry(captureArea);
-        entry.setListener(status -> {
-            if (status == EntryStatus.BITMAP_GENERATION_IN_PROGRESS) return;
+        entry.setListener(
+                status -> {
+                    if (status == EntryStatus.BITMAP_GENERATION_IN_PROGRESS) return;
 
-            Bitmap bitmap = entry.getBitmap();
-            if (status != EntryStatus.BITMAP_GENERATED || bitmap == null) {
-                onComplete.onResult(new Rect());
-                return;
-            }
+                    Bitmap bitmap = entry.getBitmap();
+                    if (status != EntryStatus.BITMAP_GENERATED || bitmap == null) {
+                        onComplete.onResult(new Rect());
+                        return;
+                    }
 
-            Rect destRect = new Rect(0, 0, captureArea.width(), captureArea.height());
-            Canvas canvas = surface.lockCanvas(destRect);
-            canvas.drawColor(Color.WHITE);
-            canvas.drawBitmap(bitmap, null, destRect, null);
-            surface.unlockCanvasAndPost(canvas);
-            // Translate the captureArea Rect back to its original coordinates.
-            captureArea.offset(0, -mInitialYOffset);
-            onComplete.onResult(captureArea);
-            return;
-        });
+                    Rect destRect = new Rect(0, 0, captureArea.width(), captureArea.height());
+                    Canvas canvas = surface.lockCanvas(destRect);
+                    canvas.drawColor(Color.WHITE);
+                    canvas.drawBitmap(bitmap, null, destRect, null);
+                    surface.unlockCanvasAndPost(canvas);
+                    // Translate the captureArea Rect back to its original coordinates.
+                    captureArea.offset(0, -mInitialYOffset);
+                    onComplete.onResult(captureArea);
+                    return;
+                });
     }
 
-    /**
-     * See {@link ScrollCaptureCallback#onScrollCaptureEnd}.
-     */
-    public void onScrollCaptureEnd(@NonNull Runnable onReady) {
+    /** See {@link ScrollCaptureCallback#onScrollCaptureEnd}. */
+    public void onScrollCaptureEnd(Runnable onReady) {
         PaintPreviewCompositorUtils.stopWarmCompositor();
         if (mEntryManager != null) {
             mEntryManager.destroy();
             mEntryManager = null;
         }
         if (mCaptureStartTime != 0) {
-            RecordHistogram.recordTimesHistogram("Sharing.ScrollCapture.SuccessfulCaptureDuration",
+            RecordHistogram.recordTimesHistogram(
+                    "Sharing.ScrollCapture.SuccessfulCaptureDuration",
                     SystemClock.elapsedRealtime() - mCaptureStartTime);
         }
         mCaptureStartTime = 0;
@@ -201,7 +213,24 @@ public class ScrollCaptureCallbackDelegate {
         onReady.run();
     }
 
-    void setCurrentTab(Tab tab) {
+    /**
+     * Respond to a failed scrolling screenshot capture.
+     *
+     * @param onReady Callback to notify the system that the delegate is ready after aborting.
+     * @param status The specific {@link BitmapGeneratorStatus} to be logged.
+     */
+    private void handleFailedCapture(Runnable onReady, @BitmapGeneratorStatus int status) {
+        if (mEntryManager != null) {
+            mEntryManager.destroy();
+            mEntryManager = null;
+        }
+        LongScreenshotsUtils.showErrorMessage(assumeNonNull(mCurrentTab).getContext());
+        onReady.run();
+        PaintPreviewCompositorUtils.stopWarmCompositor();
+        logBitmapGeneratorStatus(status);
+    }
+
+    void setCurrentTab(@Nullable Tab tab) {
         mCurrentTab = tab;
     }
 
@@ -210,12 +239,10 @@ public class ScrollCaptureCallbackDelegate {
                 "Sharing.ScrollCapture.BitmapGeneratorStatus", status, BitmapGeneratorStatus.COUNT);
     }
 
-    @VisibleForTesting
-    Rect getContentAreaForTesting() {
+    @Nullable Rect getContentAreaForTesting() {
         return mContentArea;
     }
 
-    @VisibleForTesting
     int getInitialYOffsetForTesting() {
         return mInitialYOffset;
     }

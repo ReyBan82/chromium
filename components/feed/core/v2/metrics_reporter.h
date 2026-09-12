@@ -7,6 +7,8 @@
 
 #include <climits>
 #include <map>
+#include <optional>
+#include <string_view>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
@@ -17,9 +19,7 @@
 #include "components/feed/core/v2/feed_network.h"
 #include "components/feed/core/v2/public/common_enums.h"
 #include "components/feed/core/v2/public/stream_type.h"
-#include "components/feed/core/v2/public/web_feed_subscriptions.h"
 #include "components/feed/core/v2/types.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class PrefService;
 namespace feedstore {
@@ -41,14 +41,7 @@ class MetricsReporter {
 
   class Delegate {
    public:
-    // Calls `callback` with the number of Web Feeds for which the user is
-    // subscribed.
-    virtual void SubscribedWebFeedCount(
-        base::OnceCallback<void(int)> callback) = 0;
-    virtual void RegisterFeedUserSettingsFieldTrial(
-        base::StringPiece group) = 0;
-    virtual ContentOrder GetContentOrder(
-        const StreamType& stream_type) const = 0;
+    virtual void RegisterFeedUserSettingsFieldTrial(std::string_view group) = 0;
   };
 
   explicit MetricsReporter(PrefService* profile_prefs);
@@ -78,6 +71,7 @@ class MetricsReporter {
   void PageLoaded();
   void OtherUserAction(const StreamType& stream_type,
                        FeedUserActionType action_type);
+  void OtherUserAction(FeedUserActionType action_type);
   // Report a period of time during which at least one content slice was visible
   // enough or covering enough of the viewport.
   void ReportStableContentSliceVisibilityTimeForGoodVisits(
@@ -93,9 +87,6 @@ class MetricsReporter {
   void SurfaceClosed(SurfaceId surface_id);
 
   // Network metrics.
-
-  void NetworkRefreshRequestStarted(const StreamType& stream_type,
-                                    ContentOrder content_order);
   static void NetworkRequestComplete(NetworkRequestType type,
                                      const NetworkResponseInfo& response_info);
 
@@ -103,22 +94,14 @@ class MetricsReporter {
 
   struct LoadStreamResultSummary {
     LoadStreamResultSummary();
-    LoadStreamResultSummary(
-        LoadStreamStatus load_from_store_status,
-        LoadStreamStatus final_status,
-        bool is_initial_load,
-        bool loaded_new_content_from_network,
-        base::TimeDelta stored_content_age,
-        ContentOrder content_order,
-        absl::optional<feedstore::Metadata::StreamMetadata> stream_metadata);
+    LoadStreamResultSummary(const LoadStreamResultSummary& src);
     ~LoadStreamResultSummary();
-    LoadStreamStatus load_from_store_status;
-    LoadStreamStatus final_status;
-    bool is_initial_load;
-    bool loaded_new_content_from_network;
+    LoadStreamStatus load_from_store_status = LoadStreamStatus::kNoStatus;
+    LoadStreamStatus final_status = LoadStreamStatus::kNoStatus;
+    bool is_initial_load = false;
+    bool loaded_new_content_from_network = false;
     base::TimeDelta stored_content_age;
-    ContentOrder content_order;
-    absl::optional<feedstore::Metadata::StreamMetadata> stream_metadata;
+    std::optional<feedstore::Metadata::StreamMetadata> stream_metadata;
   };
   virtual void OnLoadStream(const StreamType& stream_type,
                             const LoadStreamResultSummary& result_summary,
@@ -140,6 +123,7 @@ class MetricsReporter {
   void OnEnterBackground();
 
   static void OnImageFetched(const GURL& url, int net_error_or_http_status);
+  static void OnResourceFetched(int net_error_or_http_status);
 
   // Actions upload.
   static void OnUploadActionsBatch(UploadActionsBatchStatus status);
@@ -148,18 +132,6 @@ class MetricsReporter {
   static void ActivityLoggingEnabled(bool response_has_logging_enabled);
   static void NoticeCardFulfilled(bool response_has_notice_card);
   static void NoticeCardFulfilledObsolete(bool response_has_notice_card);
-
-  // Web Feed events.
-  void OnFollowAttempt(bool followed_with_id,
-                       const WebFeedSubscriptions::FollowWebFeedResult& result);
-  void OnUnfollowAttempt(
-      const WebFeedSubscriptions::UnfollowWebFeedResult& status);
-  void RefreshRecommendedWebFeedsAttempted(WebFeedRefreshStatus status,
-                                           int recommended_web_feed_count);
-  void RefreshSubscribedWebFeedsAttempted(bool subscriptions_were_stale,
-                                          WebFeedRefreshStatus status,
-                                          int subscribed_web_feed_count);
-  void OnQueryAttempt(const WebFeedSubscriptions::QueryWebFeedResult& result);
 
   // Info card events.
   void OnInfoCardTrackViewStarted(const StreamType& stream_type,
@@ -217,15 +189,13 @@ class MetricsReporter {
   void ReportGetMoreIfNeeded(SurfaceId surface_id, bool success);
   void FinalizeMetrics();
   void FinalizeVisit();
-  void ReportFollowCountOnLoad(bool content_shown, int subscription_count);
 
   StreamStats& ForStream(const StreamType& stream_type);
 
   raw_ptr<PrefService> profile_prefs_;
-  raw_ptr<Delegate> delegate_ = nullptr;
+  raw_ptr<Delegate, DanglingUntriaged> delegate_ = nullptr;
 
   StreamStats for_you_stats_;
-  StreamStats web_feed_stats_;
   StreamStats combined_stats_;
 
   // State below here is shared between all stream types.
@@ -250,7 +220,7 @@ class MetricsReporter {
   SurfaceWaiting pending_open_;
 
   // For tracking time spent in the Feed.
-  absl::optional<base::TimeTicks> time_in_feed_start_;
+  std::optional<base::TimeTicks> time_in_feed_start_;
   // For TimeSpentOnFeed.
   base::TimeDelta tracked_visit_time_in_feed_;
   // Non-null only directly after a stream load.

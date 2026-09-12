@@ -1,6 +1,9 @@
 // Copyright 2012 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+//
+// This interface is deprecated and being removed: https://crbug.com/406190025.
+// New users should use crypto/sign instead.
 
 #ifndef CRYPTO_SIGNATURE_VERIFIER_H_
 #define CRYPTO_SIGNATURE_VERIFIER_H_
@@ -13,23 +16,15 @@
 #include "base/containers/span.h"
 #include "build/build_config.h"
 #include "crypto/crypto_export.h"
+#include "crypto/sign.h"
 
 namespace crypto {
 
 // The SignatureVerifier class verifies a signature using a bare public key
 // (as opposed to a certificate).
+// TODO(https://crbug.com/406190025): Delete this.
 class CRYPTO_EXPORT SignatureVerifier {
  public:
-  // The set of supported signature algorithms. Extend as required.
-  enum SignatureAlgorithm {
-    RSA_PKCS1_SHA1,
-    RSA_PKCS1_SHA256,
-    ECDSA_SHA256,
-    // This is RSA-PSS with SHA-256 as both signing hash and MGF-1 hash, and the
-    // salt length matching the hash length.
-    RSA_PSS_SHA256,
-  };
-
   SignatureVerifier();
   ~SignatureVerifier();
 
@@ -46,7 +41,7 @@ class CRYPTO_EXPORT SignatureVerifier {
   //   SubjectPublicKeyInfo  ::=  SEQUENCE  {
   //       algorithm            AlgorithmIdentifier,
   //       subjectPublicKey     BIT STRING  }
-  bool VerifyInit(SignatureAlgorithm signature_algorithm,
+  bool VerifyInit(sign::SignatureKind signature_algorithm,
                   base::span<const uint8_t> signature,
                   base::span<const uint8_t> public_key_info);
 

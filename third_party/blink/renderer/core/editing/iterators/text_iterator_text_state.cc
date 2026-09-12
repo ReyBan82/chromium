@@ -39,7 +39,7 @@ namespace {
 
 bool IsTextSecurityNode(const Node& node) {
   return node.GetLayoutObject() &&
-         node.GetLayoutObject()->Style()->TextSecurity() !=
+         node.GetLayoutObject()->StyleRef().TextSecurity() !=
              ETextSecurity::kNone;
 }
 
@@ -49,17 +49,17 @@ TextIteratorTextState::TextIteratorTextState(
     const TextIteratorBehavior& behavior)
     : behavior_(behavior) {}
 
-unsigned TextIteratorTextState::PositionStartOffset() const {
+wtf_size_t TextIteratorTextState::PositionStartOffset() const {
   DCHECK(position_container_node_);
   return position_start_offset_.value();
 }
 
-unsigned TextIteratorTextState::PositionEndOffset() const {
+wtf_size_t TextIteratorTextState::PositionEndOffset() const {
   DCHECK(position_container_node_);
   return position_end_offset_.value();
 }
 
-UChar TextIteratorTextState::CharacterAt(unsigned index) const {
+UChar TextIteratorTextState::CharacterAt(wtf_size_t index) const {
   SECURITY_DCHECK(index < length());
   if (!(index < length()))
     return 0;
@@ -75,23 +75,19 @@ UChar TextIteratorTextState::CharacterAt(unsigned index) const {
 
 String TextIteratorTextState::GetTextForTesting() const {
   if (single_character_buffer_)
-    return String(&single_character_buffer_, 1u);
-  return text_.Substring(text_start_offset_, length());
+    return String(base::span_from_ref(single_character_buffer_));
+  return text_.substr(text_start_offset_, length());
 }
 
 void TextIteratorTextState::AppendTextToStringBuilder(
-    StringBuilder& builder,
-    unsigned position,
-    unsigned max_length) const {
-  SECURITY_DCHECK(position <= this->length());
-  unsigned length_to_append = std::min(length() - position, max_length);
-  if (!length_to_append)
+    StringBuilder& builder) const {
+  if (!text_length_) {
     return;
+  }
   if (single_character_buffer_) {
-    DCHECK_EQ(position, 0u);
     builder.Append(single_character_buffer_);
   } else {
-    builder.Append(text_, text_start_offset_ + position, length_to_append);
+    builder.Append(text_, text_start_offset_, text_length_);
   }
 }
 
@@ -109,13 +105,13 @@ void TextIteratorTextState::ResetPositionContainerNode(
   position_node_type_ = node_type;
   position_container_node_ = nullptr;
   position_node_ = &node;
-  position_start_offset_ = absl::nullopt;
-  position_end_offset_ = absl::nullopt;
+  position_start_offset_ = std::nullopt;
+  position_end_offset_ = std::nullopt;
 }
 
 void TextIteratorTextState::UpdatePositionOffsets(
     const ContainerNode& container_node,
-    unsigned node_index) const {
+    wtf_size_t node_index) const {
   DCHECK(!position_container_node_);
   DCHECK(!position_start_offset_.has_value());
   DCHECK(!position_end_offset_.has_value());
@@ -141,7 +137,6 @@ void TextIteratorTextState::UpdatePositionOffsets(
     case PositionNodeType::kInText:
     case PositionNodeType::kNone:
       NOTREACHED();
-      return;
   }
   NOTREACHED() << static_cast<int>(position_node_type_);
 }
@@ -183,7 +178,7 @@ void TextIteratorTextState::EmitChar16BeforeNode(UChar code_unit,
 
 void TextIteratorTextState::EmitChar16Before(UChar code_unit,
                                              const Text& text_node,
-                                             unsigned offset) {
+                                             wtf_size_t offset) {
   // TODO(editing-dev): text-transform:uppercase can make text longer, e.g.
   // "U+00DF" to "SS". See "fast/css/case-transform.html"
   // DCHECK_LE(offset, text_node.length());
@@ -197,7 +192,7 @@ void TextIteratorTextState::EmitChar16Before(UChar code_unit,
 
 void TextIteratorTextState::EmitReplacmentCodeUnit(UChar code_unit,
                                                    const Text& text_node,
-                                                   unsigned offset) {
+                                                   wtf_size_t offset) {
   SetTextNodePosition(text_node, offset, offset + 1);
   PopulateStringBufferFromChar16(code_unit);
 }
@@ -216,11 +211,11 @@ void TextIteratorTextState::PopulateStringBufferFromChar16(UChar code_unit) {
 }
 
 void TextIteratorTextState::EmitText(const Text& text_node,
-                                     unsigned position_start_offset,
-                                     unsigned position_end_offset,
+                                     wtf_size_t position_start_offset,
+                                     wtf_size_t position_end_offset,
                                      const String& string,
-                                     unsigned text_start_offset,
-                                     unsigned text_end_offset) {
+                                     wtf_size_t text_start_offset,
+                                     wtf_size_t text_end_offset) {
   DCHECK_LE(position_start_offset, position_end_offset);
   const String text =
       behavior_.EmitsSmallXForTextSecurity() && IsTextSecurityNode(text_node)
@@ -237,8 +232,8 @@ void TextIteratorTextState::EmitText(const Text& text_node,
 }
 
 void TextIteratorTextState::PopulateStringBuffer(const String& text,
-                                                 unsigned text_start_offset,
-                                                 unsigned text_end_offset) {
+                                                 wtf_size_t text_start_offset,
+                                                 wtf_size_t text_end_offset) {
   DCHECK_LE(text_start_offset, text_end_offset);
   DCHECK_LE(text_end_offset, text.length());
   text_ = text;
@@ -250,9 +245,10 @@ void TextIteratorTextState::PopulateStringBuffer(const String& text,
   has_emitted_ = true;
 }
 
-void TextIteratorTextState::SetTextNodePosition(const Text& text_node,
-                                                unsigned position_start_offset,
-                                                unsigned position_end_offset) {
+void TextIteratorTextState::SetTextNodePosition(
+    const Text& text_node,
+    wtf_size_t position_start_offset,
+    wtf_size_t position_end_offset) {
   DCHECK_LT(position_start_offset, position_end_offset);
   // TODO(editing-dev): text-transform:uppercase can make text longer, e.g.
   // "U+00DF" to "SS". See "fast/css/case-transform.html"

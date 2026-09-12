@@ -4,13 +4,12 @@
 
 #include "chrome/browser/ash/login/signin_partition_manager.h"
 
+#include <string>
+#include <utility>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/guid.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/net/system_network_context_manager.h"
-#include "chrome/browser/profiles/incognito_helpers.h"
-#include "components/keyed_service/content/browser_context_dependency_manager.h"
+#include "base/uuid.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/storage_partition.h"
@@ -26,7 +25,7 @@ namespace {
 
 // Generates a new unique StoragePartition name.
 std::string GeneratePartitionName() {
-  return base::GenerateGUID();
+  return base::Uuid::GenerateRandomV4().AsLowercaseString();
 }
 
 // Clears data from the passed storage partition. `partition_data_cleared`
@@ -34,14 +33,8 @@ std::string GeneratePartitionName() {
 void ClearStoragePartition(content::StoragePartition* storage_partition,
                            base::OnceClosure partition_data_cleared) {
   storage_partition->ClearData(
-      content::StoragePartition::REMOVE_DATA_MASK_ALL,
-      content::StoragePartition::QUOTA_MANAGED_STORAGE_MASK_ALL,
-      blink::StorageKey(), base::Time(), base::Time::Max(),
-      std::move(partition_data_cleared));
-}
-
-network::mojom::NetworkContext* GetSystemNetworkContext() {
-  return g_browser_process->system_network_context_manager()->GetContext();
+      content::StoragePartition::REMOVE_DATA_MASK_ALL, blink::StorageKey(),
+      base::Time(), base::Time::Max(), std::move(partition_data_cleared));
 }
 
 // Copies the http auth cache proxy entries with key `cache_key` into
@@ -69,12 +62,13 @@ void TransferHttpAuthCacheProxyEntries(
 }  // namespace
 
 SigninPartitionManager::SigninPartitionManager(
+    network::NetworkContextGetter system_network_context_getter,
     content::BrowserContext* browser_context)
     : browser_context_(browser_context),
       clear_storage_partition_task_(
           base::BindRepeating(&ClearStoragePartition)),
       get_system_network_context_task_(
-          base::BindRepeating(&GetSystemNetworkContext)) {}
+          std::move(system_network_context_getter)) {}
 
 SigninPartitionManager::~SigninPartitionManager() = default;
 
@@ -89,7 +83,7 @@ void SigninPartitionManager::StartSigninSession(
   // The storage partition domain identifies the site embedding the webview. It
   // won't change when the webview navigates.
   storage_partition_domain_ =
-      embedder_web_contents->GetLastCommittedURL().host();
+      embedder_web_contents->GetLastCommittedURL().GetHost();
   current_storage_partition_name_ = GeneratePartitionName();
 
   auto storage_partition_config = content::StoragePartitionConfig::Create(
@@ -98,7 +92,7 @@ void SigninPartitionManager::StartSigninSession(
   current_storage_partition_ =
       browser_context_->GetStoragePartition(storage_partition_config, true);
   if (on_create_new_storage_partition_) {
-    on_create_new_storage_partition_.Run(current_storage_partition_);
+    on_create_new_storage_partition_.Run(current_storage_partition_.get());
   }
 
   TransferHttpAuthCacheProxyEntries(
@@ -113,7 +107,7 @@ void SigninPartitionManager::CloseCurrentSigninSession(
     std::move(partition_data_cleared).Run();
     return;
   }
-  clear_storage_partition_task_.Run(current_storage_partition_,
+  clear_storage_partition_task_.Run(current_storage_partition_.get(),
                                     std::move(partition_data_cleared));
   current_storage_partition_ = nullptr;
   current_storage_partition_name_.clear();
@@ -129,8 +123,8 @@ void SigninPartitionManager::SetClearStoragePartitionTaskForTesting(
 }
 
 void SigninPartitionManager::SetGetSystemNetworkContextForTesting(
-    GetSystemNetworkContextTask get_system_network_context_task) {
-  get_system_network_context_task_ = get_system_network_context_task;
+    network::NetworkContextGetter get_system_network_context_task) {
+  get_system_network_context_task_ = std::move(get_system_network_context_task);
 }
 
 void SigninPartitionManager::SetOnCreateNewStoragePartitionForTesting(
@@ -153,32 +147,6 @@ SigninPartitionManager::GetCurrentStoragePartition() {
 bool SigninPartitionManager::IsCurrentSigninStoragePartition(
     const content::StoragePartition* storage_partition) const {
   return IsInSigninSession() && storage_partition == current_storage_partition_;
-}
-
-SigninPartitionManager::Factory::Factory()
-    : ProfileKeyedServiceFactory(
-          "SigninPartitionManager",
-          ProfileSelections::BuildForRegularAndIncognito()) {}
-
-SigninPartitionManager::Factory::~Factory() = default;
-
-// static
-SigninPartitionManager* SigninPartitionManager::Factory::GetForBrowserContext(
-    content::BrowserContext* browser_context) {
-  return static_cast<SigninPartitionManager*>(
-      GetInstance()->GetServiceForBrowserContext(browser_context,
-                                                 true /* create */));
-}
-
-// static
-SigninPartitionManager::Factory*
-SigninPartitionManager::Factory::GetInstance() {
-  return base::Singleton<SigninPartitionManager::Factory>::get();
-}
-
-KeyedService* SigninPartitionManager::Factory::BuildServiceInstanceFor(
-    content::BrowserContext* context) const {
-  return new SigninPartitionManager(context);
 }
 
 }  // namespace login

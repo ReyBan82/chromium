@@ -1,47 +1,21 @@
 # -*- coding: utf-8 -*-
 # Protocol Buffers - Google's data interchange format
 # Copyright 2008 Google Inc.  All rights reserved.
-# https://developers.google.com/protocol-buffers/
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are
-# met:
-#
-#     * Redistributions of source code must retain the above copyright
-# notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above
-# copyright notice, this list of conditions and the following disclaimer
-# in the documentation and/or other materials provided with the
-# distribution.
-#     * Neither the name of Google Inc. nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file or at
+# https://developers.google.com/open-source/licenses/bsd
 
 """Tests python protocol buffers against the golden message.
 
 Note that the golden messages exercise every known field type, thus this
 test ends up exercising and verifying nearly all of the parsing and
 serialization code in the whole library.
-
-TODO(kenton):  Merge with wire_format_test?  It doesn't make a whole lot of
-sense to call this a test of the "message" module, which only declares an
-abstract interface.
 """
 
 __author__ = 'gps@google.com (Gregory P. Smith)'
 
+import array
 import collections
 import copy
 import math
@@ -49,90 +23,79 @@ import operator
 import pickle
 import pydoc
 import sys
+import types
 import unittest
+from unittest import mock
 import warnings
 
 cmp = lambda x, y: (x > y) - (x < y)
 
+from google.protobuf.internal import message_set_extensions_pb2
+from google.protobuf.internal import api_implementation  # pylint: disable=g-import-not-at-top
+from google.protobuf.internal import decoder
+from google.protobuf.internal import encoder
+from google.protobuf.internal import enum_type_wrapper
+from google.protobuf.internal import more_extensions_pb2
+from google.protobuf.internal import more_messages_pb2
+from google.protobuf.internal import packed_field_test_pb2
+from google.protobuf.internal import self_recursive_pb2
+from google.protobuf.internal import test_proto3_optional_pb2
+from google.protobuf.internal import test_util
+from google.protobuf.internal import testing_refleaks
+from google.protobuf.internal import wire_format
+from google.protobuf import descriptor
+from google.protobuf import message
+from google.protobuf import unknown_fields
+from absl.testing import parameterized
 from google.protobuf import map_proto2_unittest_pb2
 from google.protobuf import map_unittest_pb2
 from google.protobuf import unittest_pb2
 from google.protobuf import unittest_proto3_arena_pb2
-from google.protobuf import descriptor_pb2
-from google.protobuf import descriptor
-from google.protobuf import descriptor_pool
-from google.protobuf import message_factory
-from google.protobuf import text_format
-from google.protobuf.internal import api_implementation
-from google.protobuf.internal import encoder
-from google.protobuf.internal import more_extensions_pb2
-from google.protobuf.internal import packed_field_test_pb2
-from google.protobuf.internal import test_util
-from google.protobuf.internal import test_proto3_optional_pb2
-from google.protobuf.internal import testing_refleaks
-from google.protobuf import message
-from google.protobuf.internal import _parameterized
 
 UCS2_MAXUNICODE = 65535
 
 warnings.simplefilter('error', DeprecationWarning)
 
 
-@_parameterized.named_parameters(('_proto2', unittest_pb2),
-                                ('_proto3', unittest_proto3_arena_pb2))
+@parameterized.named_parameters(
+    ('_proto2', unittest_pb2), ('_proto3', unittest_proto3_arena_pb2)
+)
 @testing_refleaks.TestCase
 class MessageTest(unittest.TestCase):
 
   def testBadUtf8String(self, message_module):
     if api_implementation.Type() != 'python':
-      self.skipTest('Skipping testBadUtf8String, currently only the python '
-                    'api implementation raises UnicodeDecodeError when a '
-                    'string field contains bad utf-8.')
+      self.skipTest(
+          'Skipping testBadUtf8String, currently only the python '
+          'api implementation raises UnicodeDecodeError when a '
+          'string field contains bad utf-8.'
+      )
     bad_utf8_data = test_util.GoldenFileData('bad_utf8_string')
     with self.assertRaises(UnicodeDecodeError) as context:
       message_module.TestAllTypes.FromString(bad_utf8_data)
     self.assertIn('TestAllTypes.optional_string', str(context.exception))
 
-  def testGoldenMessage(self, message_module):
-    # Proto3 doesn't have the "default_foo" members or foreign enums,
-    # and doesn't preserve unknown fields, so for proto3 we use a golden
-    # message that doesn't have these fields set.
-    if message_module is unittest_pb2:
-      golden_data = test_util.GoldenFileData('golden_message_oneof_implemented')
-    else:
-      golden_data = test_util.GoldenFileData('golden_message_proto3')
-
-    golden_message = message_module.TestAllTypes()
-    golden_message.ParseFromString(golden_data)
-    if message_module is unittest_pb2:
-      test_util.ExpectAllFieldsSet(self, golden_message)
-    self.assertEqual(golden_data, golden_message.SerializeToString())
-    golden_copy = copy.deepcopy(golden_message)
-    self.assertEqual(golden_data, golden_copy.SerializeToString())
-
-  def testGoldenPackedMessage(self, message_module):
-    golden_data = test_util.GoldenFileData('golden_packed_fields_message')
-    golden_message = message_module.TestPackedTypes()
-    parsed_bytes = golden_message.ParseFromString(golden_data)
-    all_set = message_module.TestPackedTypes()
-    test_util.SetAllPackedFields(all_set)
-    self.assertEqual(parsed_bytes, len(golden_data))
-    self.assertEqual(all_set, golden_message)
-    self.assertEqual(golden_data, all_set.SerializeToString())
-    golden_copy = copy.deepcopy(golden_message)
-    self.assertEqual(golden_data, golden_copy.SerializeToString())
-
   def testParseErrors(self, message_module):
     msg = message_module.TestAllTypes()
     self.assertRaises(TypeError, msg.FromString, 0)
     self.assertRaises(Exception, msg.FromString, '0')
-    # TODO(jieluo): Fix cpp extension to raise error instead of warning.
-    # b/27494216
+
+    # Unexpected end group tag.
     end_tag = encoder.TagBytes(1, 4)
-    if api_implementation.Type() == 'python':
-      with self.assertRaises(message.DecodeError) as context:
-        msg.FromString(end_tag)
-      self.assertEqual('Unexpected end-group tag.', str(context.exception))
+    with self.assertRaises(message.DecodeError) as context:
+      msg.FromString(end_tag)
+    if api_implementation.Type() != 'upb':
+      # upb raises a less specific exception.
+      self.assertRegex(str(context.exception), 'Unexpected end-group tag.*')
+
+    # Unmatched start group tag.
+    start_tag = encoder.TagBytes(2, 3)
+    with self.assertRaises(message.DecodeError):
+      msg.FromString(start_tag)
+
+    # Mismatched end group tag.
+    with self.assertRaises(message.DecodeError):
+      msg.FromString(start_tag + end_tag)
 
     # Field number 0 is illegal.
     self.assertRaises(message.DecodeError, msg.FromString, b'\3\4')
@@ -141,10 +104,12 @@ class MessageTest(unittest.TestCase):
     # This message is always deterministically serialized, even if determinism
     # is disabled, so we can use it to verify that all the determinism
     # parameters work correctly.
-    golden_data = (b'\xe2\x02\nOne string'
-                   b'\xe2\x02\nTwo string'
-                   b'\xe2\x02\nRed string'
-                   b'\xe2\x02\x0bBlue string')
+    golden_data = (
+        b'\xe2\x02\nOne string'
+        b'\xe2\x02\nTwo string'
+        b'\xe2\x02\nRed string'
+        b'\xe2\x02\x0bBlue string'
+    )
     golden_message = message_module.TestAllTypes()
     golden_message.repeated_string.extend([
         'One string',
@@ -152,12 +117,15 @@ class MessageTest(unittest.TestCase):
         'Red string',
         'Blue string',
     ])
-    self.assertEqual(golden_data,
-                     golden_message.SerializeToString(deterministic=None))
-    self.assertEqual(golden_data,
-                     golden_message.SerializeToString(deterministic=False))
-    self.assertEqual(golden_data,
-                     golden_message.SerializeToString(deterministic=True))
+    self.assertEqual(
+        golden_data, golden_message.SerializeToString(deterministic=None)
+    )
+    self.assertEqual(
+        golden_data, golden_message.SerializeToString(deterministic=False)
+    )
+    self.assertEqual(
+        golden_data, golden_message.SerializeToString(deterministic=True)
+    )
 
     class BadArgError(Exception):
       pass
@@ -174,7 +142,9 @@ class MessageTest(unittest.TestCase):
       golden_message.SerializeToString(deterministic=BadArg())
 
   def testPickleSupport(self, message_module):
-    golden_data = test_util.GoldenFileData('golden_message')
+    golden_message = message_module.TestAllTypes()
+    test_util.SetAllFields(golden_message)
+    golden_data = golden_message.SerializeToString()
     golden_message = message_module.TestAllTypes()
     golden_message.ParseFromString(golden_data)
     pickled_message = pickle.dumps(golden_message)
@@ -197,15 +167,19 @@ class MessageTest(unittest.TestCase):
 
   def testPositiveInfinity(self, message_module):
     if message_module is unittest_pb2:
-      golden_data = (b'\x5D\x00\x00\x80\x7F'
-                     b'\x61\x00\x00\x00\x00\x00\x00\xF0\x7F'
-                     b'\xCD\x02\x00\x00\x80\x7F'
-                     b'\xD1\x02\x00\x00\x00\x00\x00\x00\xF0\x7F')
+      golden_data = (
+          b'\x5D\x00\x00\x80\x7F'
+          b'\x61\x00\x00\x00\x00\x00\x00\xF0\x7F'
+          b'\xCD\x02\x00\x00\x80\x7F'
+          b'\xD1\x02\x00\x00\x00\x00\x00\x00\xF0\x7F'
+      )
     else:
-      golden_data = (b'\x5D\x00\x00\x80\x7F'
-                     b'\x61\x00\x00\x00\x00\x00\x00\xF0\x7F'
-                     b'\xCA\x02\x04\x00\x00\x80\x7F'
-                     b'\xD2\x02\x08\x00\x00\x00\x00\x00\x00\xF0\x7F')
+      golden_data = (
+          b'\x5D\x00\x00\x80\x7F'
+          b'\x61\x00\x00\x00\x00\x00\x00\xF0\x7F'
+          b'\xCA\x02\x04\x00\x00\x80\x7F'
+          b'\xD2\x02\x08\x00\x00\x00\x00\x00\x00\xF0\x7F'
+      )
 
     golden_message = message_module.TestAllTypes()
     golden_message.ParseFromString(golden_data)
@@ -217,15 +191,19 @@ class MessageTest(unittest.TestCase):
 
   def testNegativeInfinity(self, message_module):
     if message_module is unittest_pb2:
-      golden_data = (b'\x5D\x00\x00\x80\xFF'
-                     b'\x61\x00\x00\x00\x00\x00\x00\xF0\xFF'
-                     b'\xCD\x02\x00\x00\x80\xFF'
-                     b'\xD1\x02\x00\x00\x00\x00\x00\x00\xF0\xFF')
+      golden_data = (
+          b'\x5D\x00\x00\x80\xFF'
+          b'\x61\x00\x00\x00\x00\x00\x00\xF0\xFF'
+          b'\xCD\x02\x00\x00\x80\xFF'
+          b'\xD1\x02\x00\x00\x00\x00\x00\x00\xF0\xFF'
+      )
     else:
-      golden_data = (b'\x5D\x00\x00\x80\xFF'
-                     b'\x61\x00\x00\x00\x00\x00\x00\xF0\xFF'
-                     b'\xCA\x02\x04\x00\x00\x80\xFF'
-                     b'\xD2\x02\x08\x00\x00\x00\x00\x00\x00\xF0\xFF')
+      golden_data = (
+          b'\x5D\x00\x00\x80\xFF'
+          b'\x61\x00\x00\x00\x00\x00\x00\xF0\xFF'
+          b'\xCA\x02\x04\x00\x00\x80\xFF'
+          b'\xD2\x02\x08\x00\x00\x00\x00\x00\x00\xF0\xFF'
+      )
 
     golden_message = message_module.TestAllTypes()
     golden_message.ParseFromString(golden_data)
@@ -236,10 +214,12 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(golden_data, golden_message.SerializeToString())
 
   def testNotANumber(self, message_module):
-    golden_data = (b'\x5D\x00\x00\xC0\x7F'
-                   b'\x61\x00\x00\x00\x00\x00\x00\xF8\x7F'
-                   b'\xCD\x02\x00\x00\xC0\x7F'
-                   b'\xD1\x02\x00\x00\x00\x00\x00\x00\xF8\x7F')
+    golden_data = (
+        b'\x5D\x00\x00\xC0\x7F'
+        b'\x61\x00\x00\x00\x00\x00\x00\xF8\x7F'
+        b'\xCD\x02\x00\x00\xC0\x7F'
+        b'\xD1\x02\x00\x00\x00\x00\x00\x00\xF8\x7F'
+    )
     golden_message = message_module.TestAllTypes()
     golden_message.ParseFromString(golden_data)
     self.assertTrue(math.isnan(golden_message.optional_float))
@@ -260,8 +240,10 @@ class MessageTest(unittest.TestCase):
     self.assertTrue(math.isnan(message.repeated_double[0]))
 
   def testPositiveInfinityPacked(self, message_module):
-    golden_data = (b'\xA2\x06\x04\x00\x00\x80\x7F'
-                   b'\xAA\x06\x08\x00\x00\x00\x00\x00\x00\xF0\x7F')
+    golden_data = (
+        b'\xA2\x06\x04\x00\x00\x80\x7F'
+        b'\xAA\x06\x08\x00\x00\x00\x00\x00\x00\xF0\x7F'
+    )
     golden_message = message_module.TestPackedTypes()
     golden_message.ParseFromString(golden_data)
     self.assertEqual(golden_message.packed_float[0], math.inf)
@@ -269,8 +251,10 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(golden_data, golden_message.SerializeToString())
 
   def testNegativeInfinityPacked(self, message_module):
-    golden_data = (b'\xA2\x06\x04\x00\x00\x80\xFF'
-                   b'\xAA\x06\x08\x00\x00\x00\x00\x00\x00\xF0\xFF')
+    golden_data = (
+        b'\xA2\x06\x04\x00\x00\x80\xFF'
+        b'\xAA\x06\x08\x00\x00\x00\x00\x00\x00\xF0\xFF'
+    )
     golden_message = message_module.TestPackedTypes()
     golden_message.ParseFromString(golden_data)
     self.assertEqual(golden_message.packed_float[0], -math.inf)
@@ -278,8 +262,10 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(golden_data, golden_message.SerializeToString())
 
   def testNotANumberPacked(self, message_module):
-    golden_data = (b'\xA2\x06\x04\x00\x00\xC0\x7F'
-                   b'\xAA\x06\x08\x00\x00\x00\x00\x00\x00\xF8\x7F')
+    golden_data = (
+        b'\xA2\x06\x04\x00\x00\xC0\x7F'
+        b'\xAA\x06\x08\x00\x00\x00\x00\x00\x00\xF8\x7F'
+    )
     golden_message = message_module.TestPackedTypes()
     golden_message.ParseFromString(golden_data)
     self.assertTrue(math.isnan(golden_message.packed_float[0]))
@@ -345,13 +331,13 @@ class MessageTest(unittest.TestCase):
     self.assertAlmostEqual(message.optional_float, max_float)
 
     # Test set double to float field.
-    message.optional_float = 3.4028235e+39
+    message.optional_float = 3.4028235e39
     self.assertEqual(message.optional_float, float('inf'))
     serialized_data = message.SerializeToString()
     message.ParseFromString(serialized_data)
     self.assertEqual(message.optional_float, float('inf'))
 
-    message.optional_float = -3.4028235e+39
+    message.optional_float = -3.4028235e39
     self.assertEqual(message.optional_float, float('-inf'))
 
     message.optional_float = 1.4028235e-39
@@ -405,7 +391,17 @@ class MessageTest(unittest.TestCase):
   def testFloatPrinting(self, message_module):
     message = message_module.TestAllTypes()
     message.optional_float = 2.0
-    self.assertEqual(str(message), 'optional_float: 2.0\n')
+    # Python/C++ customizes the C++ TextFormat to always print trailing ".0" for
+    # floats. upb doesn't do this, it matches C++ TextFormat.
+    if api_implementation.Type() == 'upb':
+      self.assertEqual(str(message), 'optional_float: 2\n')
+    else:
+      self.assertEqual(str(message), 'optional_float: 2.0\n')
+
+  def testFloatNanPrinting(self, message_module):
+    message = message_module.TestAllTypes()
+    message.optional_float = float('nan')
+    self.assertEqual(str(message), 'optional_float: nan\n')
 
   def testHighPrecisionFloatPrinting(self, message_module):
     msg = message_module.TestAllTypes()
@@ -413,6 +409,11 @@ class MessageTest(unittest.TestCase):
     old_float = msg.optional_float
     msg.ParseFromString(msg.SerializeToString())
     self.assertEqual(old_float, msg.optional_float)
+
+  def testDoubleNanPrinting(self, message_module):
+    message = message_module.TestAllTypes()
+    message.optional_double = float('nan')
+    self.assertEqual(str(message), 'optional_double: nan\n')
 
   def testHighPrecisionDoublePrinting(self, message_module):
     msg = message_module.TestAllTypes()
@@ -426,10 +427,27 @@ class MessageTest(unittest.TestCase):
     empty.ParseFromString(populated.SerializeToString())
     self.assertEqual(str(empty), '')
 
+  def testCopyFromEmpty(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    test_msg = message_module.NestedTestAllTypes()
+    test_util.SetAllFields(test_msg.payload)
+    self.assertTrue(test_msg.HasField('payload'))
+    # Copy from empty message
+    test_msg.CopyFrom(msg)
+    self.assertEqual(0, len(test_msg.ListFields()))
+
+    test_util.SetAllFields(test_msg.payload)
+    self.assertTrue(test_msg.HasField('payload'))
+    # Copy from a non exist message
+    test_msg.CopyFrom(msg.child)
+    self.assertFalse(test_msg.HasField('payload'))
+    self.assertEqual(0, len(test_msg.ListFields()))
+
   def testAppendRepeatedCompositeField(self, message_module):
     msg = message_module.TestAllTypes()
     msg.repeated_nested_message.append(
-        message_module.TestAllTypes.NestedMessage(bb=1))
+        message_module.TestAllTypes.NestedMessage(bb=1)
+    )
     nested = message_module.TestAllTypes.NestedMessage(bb=2)
     msg.repeated_nested_message.append(nested)
     try:
@@ -439,28 +457,56 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(2, len(msg.repeated_nested_message))
     self.assertEqual([1, 2], [m.bb for m in msg.repeated_nested_message])
 
+  def testExtendRepeatedCompositeField(self, message_module):
+    msg = message_module.TestAllTypes()
+    msg.repeated_nested_message.extend([
+        message_module.TestAllTypes.NestedMessage(bb=1),
+        message_module.TestAllTypes.NestedMessage(bb=2),
+    ])
+    self.assertEqual(2, len(msg.repeated_nested_message))
+    self.assertEqual([1, 2], [m.bb for m in msg.repeated_nested_message])
+
+    # Extend with an invalid item should raise TypeError.
+    with self.assertRaises(TypeError):
+      msg.repeated_nested_message.extend([
+          message_module.TestAllTypes.NestedMessage(bb=3),
+          1,
+          message_module.TestAllTypes.NestedMessage(bb=4),
+      ])
+    # Should not have added the invalid item or any subsequent items.
+    self.assertEqual(3, len(msg.repeated_nested_message))
+    with self.assertRaises(TypeError):
+      msg.repeated_nested_message[:] = []
+
   def testInsertRepeatedCompositeField(self, message_module):
     msg = message_module.TestAllTypes()
     msg.repeated_nested_message.insert(
-        -1, message_module.TestAllTypes.NestedMessage(bb=1))
+        -1, message_module.TestAllTypes.NestedMessage(bb=1)
+    )
     sub_msg = msg.repeated_nested_message[0]
     msg.repeated_nested_message.insert(
-        0, message_module.TestAllTypes.NestedMessage(bb=2))
+        0, message_module.TestAllTypes.NestedMessage(bb=2)
+    )
     msg.repeated_nested_message.insert(
-        99, message_module.TestAllTypes.NestedMessage(bb=3))
+        99, message_module.TestAllTypes.NestedMessage(bb=3)
+    )
     msg.repeated_nested_message.insert(
-        -2, message_module.TestAllTypes.NestedMessage(bb=-1))
+        -2, message_module.TestAllTypes.NestedMessage(bb=-1)
+    )
     msg.repeated_nested_message.insert(
-        -1000, message_module.TestAllTypes.NestedMessage(bb=-1000))
+        -1000, message_module.TestAllTypes.NestedMessage(bb=-1000)
+    )
     try:
       msg.repeated_nested_message.insert(1, 999)
     except TypeError:
       pass
     self.assertEqual(5, len(msg.repeated_nested_message))
-    self.assertEqual([-1000, 2, -1, 1, 3],
-                     [m.bb for m in msg.repeated_nested_message])
     self.assertEqual(
-        str(msg), 'repeated_nested_message {\n'
+        [-1000, 2, -1, 1, 3], [m.bb for m in msg.repeated_nested_message]
+    )
+    self.assertEqual(
+        str(msg),
+        'repeated_nested_message {\n'
         '  bb: -1000\n'
         '}\n'
         'repeated_nested_message {\n'
@@ -474,8 +520,221 @@ class MessageTest(unittest.TestCase):
         '}\n'
         'repeated_nested_message {\n'
         '  bb: 3\n'
-        '}\n')
+        '}\n',
+    )
     self.assertEqual(sub_msg.bb, 1)
+
+  def testAssignRepeatedField(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    msg.payload.repeated_int32[:] = [1, 2, 3, 4]
+    self.assertEqual(4, len(msg.payload.repeated_int32))
+    self.assertEqual([1, 2, 3, 4], msg.payload.repeated_int32)
+
+  def testRepeatedFieldSelfSliceAssignment(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    for field_name in [
+        'repeated_int32',
+        'repeated_int64',
+        'repeated_uint32',
+        'repeated_uint64',
+        'repeated_sint32',
+        'repeated_sint64',
+        'repeated_fixed32',
+        'repeated_fixed64',
+        'repeated_sfixed32',
+        'repeated_sfixed64',
+    ]:
+      field = getattr(msg.payload, field_name)
+      field[:] = [1, 2, 3, 4]
+      field[:] = field
+      self.assertEqual([1, 2, 3, 4], field)
+      field[:] = field[1:-1]
+      self.assertEqual([2, 3], field)
+    for field_name in [
+        'repeated_float',
+        'repeated_double',
+    ]:
+      field = getattr(msg.payload, field_name)
+      field[:] = [1.25, 2.25, 3.25, 4.25]
+      field[:] = field
+      self.assertEqual([1.25, 2.25, 3.25, 4.25], field)
+
+  def testRepeatedFieldExtendWithPartialSuccess(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    msg.payload.repeated_int32[:] = [1, 2, 3, 4]
+    with self.assertRaises(ValueError):
+      msg.payload.repeated_int32.extend([4, 5, 6, 2**34])
+    if api_implementation.Type() == 'cpp':
+      self.assertEqual([1, 2, 3, 4, 4, 5, 6], msg.payload.repeated_int32)
+    else:
+      self.assertEqual([1, 2, 3, 4], msg.payload.repeated_int32)
+
+  def testRepeatedFieldSubSliceAssignment(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    msg.payload.repeated_int32[:] = range(1, 6)
+    msg.payload.repeated_int32[1:3] = msg.payload.repeated_int32[2:4]
+    self.assertEqual([1, 3, 4, 4, 5], msg.payload.repeated_int32)
+    msg.payload.repeated_int32.extend(msg.payload.repeated_int32[1:3])
+    self.assertEqual([1, 3, 4, 4, 5, 3, 4], msg.payload.repeated_int32)
+
+  def testRepeatedFieldDifferentTypeSliceAssignment(self, message_module):
+    msg1 = message_module.NestedTestAllTypes()
+    msg2 = message_module.NestedTestAllTypes()
+    # int64 -> int32
+    msg2.payload.repeated_int64[:] = [1, 2, 3, 4]
+    msg1.payload.repeated_int32[:] = msg2.payload.repeated_int64
+    self.assertEqual([1, 2, 3, 4], msg1.payload.repeated_int32)
+    # int32 -> int64
+    msg2.payload.repeated_int32[:] = [1, 2, 3, 4]
+    msg1.payload.repeated_int64[:] = msg2.payload.repeated_int32
+    self.assertEqual([1, 2, 3, 4], msg1.payload.repeated_int64)
+    # int64 overflow -> int32
+    msg2.payload.repeated_int64[:] = [1, 2, 3, 2**35]
+    with self.assertRaises((ValueError, OverflowError, TypeError)):
+      msg1.payload.repeated_int32[:] = msg2.payload.repeated_int64
+    # double -> float
+    msg2.payload.repeated_double[:] = [1.5, 2.5, 3.5]
+    msg1.payload.repeated_float[:] = msg2.payload.repeated_double
+    self.assertEqual([1.5, 2.5, 3.5], msg1.payload.repeated_float)
+    # float -> double
+    msg2.payload.repeated_float[:] = [1.5, 2.5, 3.5]
+    msg1.payload.repeated_double[:] = msg2.payload.repeated_float
+    self.assertEqual([1.5, 2.5, 3.5], msg1.payload.repeated_double)
+
+    msg2.payload.repeated_double[:] = [1.5, 2.5, 1e300]
+    msg1.payload.repeated_float[:] = msg2.payload.repeated_double
+    self.assertEqual([1.5, 2.5, float('inf')], msg1.payload.repeated_float)
+
+  def testRepeatedFieldSelfExtend(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    msg.payload.repeated_int32[:] = [1, 2, 3, 4]
+    msg.payload.repeated_int32.extend(msg.payload.repeated_int32)
+    self.assertEqual([1, 2, 3, 4] * 2, msg.payload.repeated_int32)
+
+  def testAssignOutOfRange(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    with self.assertRaises(ValueError):
+      msg.payload.repeated_int32.extend([1, 2, 3, 2**34])
+    if api_implementation.Type() == 'cpp':
+      self.assertEqual(msg.payload.repeated_int32, [1, 2, 3])
+    else:
+      self.assertEqual(msg.payload.repeated_int32, [])
+
+  def testAssignRepeatedFieldFromArray(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    msg.payload.repeated_int32[:] = array.array('i', [1, 2, 3, 4])
+    self.assertEqual(4, len(msg.payload.repeated_int32))
+    self.assertEqual([1, 2, 3, 4], msg.payload.repeated_int32)
+
+  def testAssignRepeatedFieldFromSlicedMemoryView(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    arr = array.array('i', [1, 1, 2, 2, 3, 3, 4, 4])
+    msg.payload.repeated_int32[:] = memoryview(arr)[::2]
+    self.assertEqual(4, len(msg.payload.repeated_int32))
+    self.assertEqual([1, 2, 3, 4], msg.payload.repeated_int32)
+
+  def testAssignRepeatedFieldAllRanges(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    arr = ['a', 'b', 'c', 'd']
+    msg.payload.repeated_string[:] = arr
+    self.assertEqual(arr, msg.payload.repeated_string)
+    msg.payload.repeated_string[1:3] = ['x', 'y']
+    arr[1:3] = ['x', 'y']
+    self.assertEqual(arr, msg.payload.repeated_string)
+    msg.payload.repeated_string[1:2] = ['z']
+    arr[1:2] = ['z']
+    self.assertEqual(arr, msg.payload.repeated_string)
+    msg.payload.repeated_string[:0] = ['q', 'r']
+    arr[:0] = ['q', 'r']
+    self.assertEqual(arr, msg.payload.repeated_string)
+    msg.payload.repeated_string[7:] = ['s']
+    arr[7:] = ['s']
+    self.assertEqual(arr, msg.payload.repeated_string)
+    msg.payload.repeated_string[1:5] = ['t']
+    arr[1:5] = ['t']
+    self.assertEqual(arr, msg.payload.repeated_string)
+    msg.payload.repeated_string[-1:] = ['u', 'v', 'w']
+    arr[-1:] = ['u', 'v', 'w']
+    self.assertEqual(arr, msg.payload.repeated_string)
+
+  def testAssignRepeatedStringSliceWithStep(self, message_module):
+    # Test valid extended slice assignments on repeated_string
+    msg = message_module.NestedTestAllTypes()
+    arr = ['a', 'b', 'c', 'd']
+    msg.payload.repeated_string[:] = arr
+    self.assertEqual(arr, msg.payload.repeated_string)
+
+    # Check that slice assignment with size mismatch raises ValueError
+    with self.assertRaises(ValueError):
+      msg.payload.repeated_string[::2] = ['1', '2', '3']
+    with self.assertRaises(ValueError):
+      msg.payload.repeated_string[::2] = '1'
+
+    # Check that assigning to a full slice from a single string works
+    msg.payload.repeated_string[:] = 'xyz'
+    self.assertEqual(['x', 'y', 'z'], msg.payload.repeated_string)
+
+    # Check that assigning non-scalar elements to repeated_string slice raises TypeError
+    with self.assertRaises(TypeError):
+      msg.payload.repeated_string[:] = [1, 2, 3]
+
+  @unittest.skipIf(
+      api_implementation.Type() == 'python', 'python has different behavior'
+  )
+  def testAssignRepeatedFieldSliceWithStep(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    arr = [1, 2, 3, 4]
+    msg.payload.repeated_int32[:] = arr
+    self.assertEqual(arr, msg.payload.repeated_int32)
+
+    # Check step
+    msg.payload.repeated_int32[::2] = [10, 20]
+    arr[::2] = [10, 20]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+
+    # Check array assignment with step
+    msg.payload.repeated_int32[::2] = array.array('i', [100, 200])
+    arr[::2] = [100, 200]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+
+    # Check size mismatch raises ValueError
+    with self.assertRaises(ValueError):
+      msg.payload.repeated_int32[::2] = [1, 2, 3]
+
+  def testAssignRepeatedFieldAllRangesArray(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+    arr = [1, 2, 3, 4]
+    msg.payload.repeated_int32[:] = array.array('i', arr)
+    self.assertEqual(arr, msg.payload.repeated_int32)
+    msg.payload.repeated_int32[1:3] = array.array('i', [10, 20])
+    arr[1:3] = [10, 20]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+    msg.payload.repeated_int32[1:2] = array.array('i', [100])
+    arr[1:2] = [100]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+    msg.payload.repeated_int32[:0] = array.array('i', [200, 300])
+    arr[:0] = [200, 300]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+    msg.payload.repeated_int32[7:] = array.array('i', [400])
+    arr[7:] = [400]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+    msg.payload.repeated_int32[1:5] = array.array('i', [50])
+    arr[1:5] = [50]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+    msg.payload.repeated_int32[-1:] = array.array('i', [600, 700, 800])
+    arr[-1:] = [600, 700, 800]
+    self.assertEqual(arr, msg.payload.repeated_int32)
+
+  def testAssignRepeatedFieldFromGenerator(self, message_module):
+    msg = message_module.NestedTestAllTypes()
+
+    def gen():
+      for i in range(1, 5):
+        yield i
+
+    msg.payload.repeated_int32[:] = gen()
+    self.assertEqual(4, len(msg.payload.repeated_int32))
+    self.assertEqual([1, 2, 3, 4], msg.payload.repeated_int32)
 
   def testMergeFromRepeatedField(self, message_module):
     msg = message_module.TestAllTypes()
@@ -494,6 +753,50 @@ class MessageTest(unittest.TestCase):
 
     msg.repeated_nested_message.MergeFrom(other_msg.repeated_nested_message)
     self.assertEqual([1, 2, 3, 4], [m.bb for m in msg.repeated_nested_message])
+
+  def testInternalMergeWithMissingRequiredField(self, message_module):
+    req = more_messages_pb2.RequiredField()
+    more_messages_pb2.RequiredWrapper(request=req)
+
+  def testMergeFromMissingRequiredField(self, message_module):
+    msg = more_messages_pb2.RequiredField()
+    message = more_messages_pb2.RequiredField()
+    message.MergeFrom(msg)
+    self.assertEqual(msg, message)
+
+  def testScalarRepeatedClear(self, message_module):
+    msg = message_module.TestAllTypes()
+    empty_size = msg.ByteSize()
+    msg.repeated_int32.append(1)
+    msg.repeated_int32.append(3)
+    repeated_int = msg.repeated_int32
+    self.assertEqual(2, len(msg.repeated_int32))
+    self.assertGreater(msg.ByteSize(), empty_size)
+    msg.repeated_int32.clear()
+    self.assertEqual(0, len(msg.repeated_int32))
+    self.assertEqual(0, len(repeated_int))
+    self.assertEqual(empty_size, msg.ByteSize())
+
+  def testCompositeRepeatedClear(self, message_module):
+    msg = message_module.TestAllTypes()
+    empty_size = msg.ByteSize()
+    msg.repeated_nested_message.add(bb=123)
+    msg.repeated_nested_message.add(bb=2)
+    repeated_nested_message = msg.repeated_nested_message
+    self.assertEqual(2, len(msg.repeated_nested_message))
+    self.assertGreater(msg.ByteSize(), empty_size)
+    msg.repeated_nested_message.clear()
+    self.assertEqual(0, len(msg.repeated_nested_message))
+    self.assertEqual(0, len(repeated_nested_message))
+    self.assertEqual(empty_size, msg.ByteSize())
+
+  def testCompositeRepeatedClearRelease(self, message_module):
+    msg = message_module.TestAllTypes()
+    msg.repeated_nested_message.add(bb=123)
+    # sub msg reference should still work after clear()
+    sub_msg = msg.repeated_nested_message[0]
+    msg.repeated_nested_message.clear()
+    self.assertEqual(123, sub_msg.bb)
 
   def testAddWrongRepeatedNestedField(self, message_module):
     msg = message_module.TestAllTypes()
@@ -539,16 +842,27 @@ class MessageTest(unittest.TestCase):
     msg.repeated_nested_message.add(bb=4)
 
     self.assertEqual([1, 2, 3, 4], [m.bb for m in msg.repeated_nested_message])
-    self.assertEqual([4, 3, 2, 1],
-                     [m.bb for m in reversed(msg.repeated_nested_message)])
-    self.assertEqual([4, 3, 2, 1],
-                     [m.bb for m in msg.repeated_nested_message[::-1]])
+    self.assertEqual(
+        [4, 3, 2, 1], [m.bb for m in reversed(msg.repeated_nested_message)]
+    )
+    self.assertEqual(
+        [4, 3, 2, 1], [m.bb for m in msg.repeated_nested_message[::-1]]
+    )
+
+  def testSortEmptyRepeated(self, message_module):
+    message = message_module.NestedTestAllTypes()
+    self.assertFalse(message.HasField('child'))
+    self.assertFalse(message.HasField('payload'))
+    message.child.repeated_child.sort()
+    message.payload.repeated_int32.sort()
+    self.assertFalse(message.HasField('child'))
+    self.assertFalse(message.HasField('payload'))
 
   def testSortingRepeatedScalarFieldsDefaultComparator(self, message_module):
     """Check some different types with the default comparator."""
     message = message_module.TestAllTypes()
 
-    # TODO(mattp): would testing more scalar types strengthen test?
+    # TODO: would testing more scalar types strengthen test?
     message.repeated_int32.append(1)
     message.repeated_int32.append(3)
     message.repeated_int32.append(2)
@@ -573,7 +887,7 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(message.repeated_string[0], 'a')
     self.assertEqual(message.repeated_string[1], 'b')
     self.assertEqual(message.repeated_string[2], 'c')
-    self.assertEqual(str(message.repeated_string), str([u'a', u'b', u'c']))
+    self.assertEqual(str(message.repeated_string), str(['a', 'b', 'c']))
 
     message.repeated_bytes.append(b'a')
     message.repeated_bytes.append(b'c')
@@ -623,7 +937,8 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(message.repeated_nested_message[5].bb, 6)
     self.assertEqual(
         str(message.repeated_nested_message),
-        '[bb: 1\n, bb: 2\n, bb: 3\n, bb: 4\n, bb: 5\n, bb: 6\n]')
+        '[bb: 1\n, bb: 2\n, bb: 3\n, bb: 4\n, bb: 5\n, bb: 6\n]',
+    )
 
   def testSortingRepeatedCompositeFieldsStable(self, message_module):
     """Check passing a custom comparator to sort a repeated composite field."""
@@ -637,16 +952,20 @@ class MessageTest(unittest.TestCase):
     message.repeated_nested_message.add().bb = 24
     message.repeated_nested_message.add().bb = 10
     message.repeated_nested_message.sort(key=lambda z: z.bb // 10)
-    self.assertEqual([13, 11, 10, 21, 20, 24, 33],
-                     [n.bb for n in message.repeated_nested_message])
+    self.assertEqual(
+        [13, 11, 10, 21, 20, 24, 33],
+        [n.bb for n in message.repeated_nested_message],
+    )
 
     # Make sure that for the C++ implementation, the underlying fields
     # are actually reordered.
     pb = message.SerializeToString()
     message.Clear()
     message.MergeFromString(pb)
-    self.assertEqual([13, 11, 10, 21, 20, 24, 33],
-                     [n.bb for n in message.repeated_nested_message])
+    self.assertEqual(
+        [13, 11, 10, 21, 20, 24, 33],
+        [n.bb for n in message.repeated_nested_message],
+    )
 
   def testRepeatedCompositeFieldSortArguments(self, message_module):
     """Check sorting a repeated composite field using list.sort() arguments."""
@@ -660,11 +979,13 @@ class MessageTest(unittest.TestCase):
     message.repeated_nested_message.add().bb = 5
     message.repeated_nested_message.add().bb = 4
     message.repeated_nested_message.sort(key=get_bb)
-    self.assertEqual([k.bb for k in message.repeated_nested_message],
-                     [1, 2, 3, 4, 5, 6])
+    self.assertEqual(
+        [k.bb for k in message.repeated_nested_message], [1, 2, 3, 4, 5, 6]
+    )
     message.repeated_nested_message.sort(key=get_bb, reverse=True)
-    self.assertEqual([k.bb for k in message.repeated_nested_message],
-                     [6, 5, 4, 3, 2, 1])
+    self.assertEqual(
+        [k.bb for k in message.repeated_nested_message], [6, 5, 4, 3, 2, 1]
+    )
 
   def testRepeatedScalarFieldSortArguments(self, message_module):
     """Check sorting a scalar field using list.sort() arguments."""
@@ -705,8 +1026,9 @@ class MessageTest(unittest.TestCase):
   def testRepeatedFieldsAreSequences(self, message_module):
     m = message_module.TestAllTypes()
     self.assertIsInstance(m.repeated_int32, collections.abc.MutableSequence)
-    self.assertIsInstance(m.repeated_nested_message,
-                          collections.abc.MutableSequence)
+    self.assertIsInstance(
+        m.repeated_nested_message, collections.abc.MutableSequence
+    )
 
   def testRepeatedFieldsNotHashable(self, message_module):
     m = message_module.TestAllTypes()
@@ -714,6 +1036,32 @@ class MessageTest(unittest.TestCase):
       hash(m.repeated_int32)
     with self.assertRaises(TypeError):
       hash(m.repeated_nested_message)
+
+  @unittest.skipIf(
+      api_implementation.Type() == 'upb', 'upb has different behavior'
+  )
+  def testRepeatedCompositeNotComparableWithList(self, message_module):
+    msg = message_module.TestAllTypes()
+    msg.repeated_nested_message.add(bb=1)
+    with self.assertRaisesRegex(
+        TypeError,
+        'Can only compare repeated composite fields against other repeated'
+        ' composite fields',
+    ):
+      _ = msg.repeated_nested_message == [
+          message_module.TestAllTypes.NestedMessage(bb=1)
+      ]
+
+  @unittest.skipIf(
+      api_implementation.Type() != 'upb', 'upb has different behavior'
+  )
+  def testRepeatedCompositeComparableWithList(self, message_module):
+    msg = message_module.TestAllTypes()
+    msg.repeated_nested_message.add(bb=1)
+    self.assertEqual(
+        msg.repeated_nested_message,
+        [message_module.TestAllTypes.NestedMessage(bb=1)],
+    )
 
   def testRepeatedFieldInsideNestedMessage(self, message_module):
     m = message_module.NestedTestAllTypes()
@@ -742,8 +1090,10 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(1, nested.bb)
 
     # Test repeated field.
-    self.assertEqual(msg1.payload.repeated_nested_message,
-                     msg1.payload.repeated_nested_message)
+    self.assertEqual(
+        msg1.payload.repeated_nested_message,
+        msg1.payload.repeated_nested_message,
+    )
     nested = msg2.payload.repeated_nested_message.add()
     nested.bb = 1
     msg1.MergeFrom(msg2)
@@ -771,6 +1121,46 @@ class MessageTest(unittest.TestCase):
     serialized = m2.SerializeToString()
     memview = memoryview(serialized)
     m1 = message_module.TestAllTypes.FromString(memview)
+
+    self.assertEqual(m1.optional_bytes, b'scalar bytes')
+    self.assertEqual(m1.repeated_bytes, [b'repeated bytes'])
+    self.assertEqual(m1.optional_string, 'scalar string')
+    self.assertEqual(m1.repeated_string, ['repeated string'])
+    # Make sure that the memoryview was correctly converted to bytes, and
+    # that a sub-sliced memoryview is not being used.
+    self.assertIsInstance(m1.optional_bytes, bytes)
+    self.assertIsInstance(m1.repeated_bytes[0], bytes)
+    self.assertIsInstance(m1.optional_string, str)
+    self.assertIsInstance(m1.repeated_string[0], str)
+
+  @unittest.skipIf(
+      api_implementation.Type() == 'upb' or sys.version_info < (3, 12),
+      'upb only supports memoryview and 3.12+ needed for buffer protocol',
+  )
+  def testMergeFromStringUsingBufferProtocol(self, message_module):
+    # A class that implements the buffer protocol and mangles the data when the
+    # buffer is released.
+    class Buffer:
+
+      def __init__(self, data):
+        self._data = bytearray(data)
+
+      def __buffer__(self, flags):
+        return memoryview(self._data)
+
+      def __release_buffer__(self, buffer):
+        for i in range(len(self._data)):
+          self._data[i] = 0xAA
+
+    m2 = message_module.TestAllTypes()
+    m2.optional_string = 'scalar string'
+    m2.repeated_string.append('repeated string')
+    m2.optional_bytes = b'scalar bytes'
+    m2.repeated_bytes.append(b'repeated bytes')
+
+    serialized = m2.SerializeToString()
+    buffer = Buffer(serialized)
+    m1 = message_module.TestAllTypes.FromString(buffer)
 
     self.assertEqual(m1.optional_bytes, b'scalar bytes')
     self.assertEqual(m1.repeated_bytes, [b'repeated bytes'])
@@ -832,7 +1222,7 @@ class MessageTest(unittest.TestCase):
     self.assertEqual('oneof_uint32', m.WhichOneof('oneof_field'))
     self.assertTrue(m.HasField('oneof_uint32'))
 
-    m.oneof_string = u'foo'
+    m.oneof_string = 'foo'
     self.assertEqual('oneof_string', m.WhichOneof('oneof_field'))
     self.assertFalse(m.HasField('oneof_uint32'))
     self.assertTrue(m.HasField('oneof_string'))
@@ -888,6 +1278,7 @@ class MessageTest(unittest.TestCase):
 
   def testOneofClearField(self, message_module):
     m = message_module.TestAllTypes()
+    m.ClearField('oneof_field')
     m.oneof_uint32 = 11
     m.ClearField('oneof_field')
     if message_module is unittest_pb2:
@@ -946,14 +1337,61 @@ class MessageTest(unittest.TestCase):
     m2 = message_module.NestedTestAllTypes()
     m2.payload.oneof_uint32 = 13
     m2.MergeFrom(m)
-    self.assertEqual('oneof_nested_message',
-                     m2.payload.WhichOneof('oneof_field'))
-    self.assertEqual('oneof_nested_message',
-                     m2.child.payload.WhichOneof('oneof_field'))
+    self.assertEqual(
+        'oneof_nested_message', m2.payload.WhichOneof('oneof_field')
+    )
+    self.assertEqual(
+        'oneof_nested_message', m2.child.payload.WhichOneof('oneof_field')
+    )
+
+  def testOneofReleaseMergeFrom(self, message_module):
+    m = unittest_pb2.TestOneof2()
+    m.foo_message.moo_int = 123
+    reference = m.foo_message
+    self.assertEqual(m.foo_message.moo_int, 123)
+    m2 = unittest_pb2.TestOneof2()
+    m2.foo_lazy_message.moo_int = 456
+    m.MergeFrom(m2)
+    self.assertEqual(reference.moo_int, 123)
+    self.assertEqual(m.foo_message.moo_int, 0)
+    m.foo_message.CopyFrom(reference)
+    self.assertEqual(m.foo_message.moo_int, 123)
+
+  def testNestedOneofRleaseMergeFrom(self, message_module):
+    m = message_module.NestedTestAllTypes()
+    m.payload.oneof_nested_message.bb = 1
+    m.child.payload.oneof_nested_message.bb = 2
+    ref1 = m.payload.oneof_nested_message
+    ref2 = m.child.payload.oneof_nested_message
+    other = message_module.NestedTestAllTypes()
+    other.payload.oneof_uint32 = 22
+    other.child.payload.oneof_string = 'hi'
+    self.assertEqual(ref1.bb, 1)
+    self.assertEqual(ref2.bb, 2)
+    m.MergeFrom(other)
+    # oneof messages are released
+    self.assertEqual(ref1.bb, 1)
+    self.assertEqual(ref2.bb, 2)
+    self.assertEqual(m.payload.oneof_nested_message.bb, 0)
+    self.assertEqual(m.child.payload.oneof_nested_message.bb, 0)
+    self.assertEqual(m.payload.oneof_uint32, 22)
+    self.assertEqual(m.child.payload.oneof_string, 'hi')
+
+  def testOneofNotReleaseMergeFrom(self, message_module):
+    m = message_module.NestedTestAllTypes()
+    m.payload.oneof_nested_message.bb = 1
+    ref = m.payload.oneof_nested_message
+    other = message_module.NestedTestAllTypes()
+    other.payload.oneof_nested_message.bb = 2
+    self.assertEqual(ref.bb, 1)
+    m.MergeFrom(other)
+    # oneof message is not released
+    self.assertEqual(ref.bb, 2)
 
   def testOneofNestedMessageInit(self, message_module):
     m = message_module.TestAllTypes(
-        oneof_nested_message=message_module.TestAllTypes.NestedMessage())
+        oneof_nested_message=message_module.TestAllTypes.NestedMessage()
+    )
     self.assertEqual('oneof_nested_message', m.WhichOneof('oneof_field'))
 
   def testOneofClear(self, message_module):
@@ -982,12 +1420,12 @@ class MessageTest(unittest.TestCase):
 
     # Repeated scalar
     m.repeated_int32.append(1)
-    sl = m.repeated_int32[int(0):int(len(m.repeated_int32))]
+    sl = m.repeated_int32[int(0) : int(len(m.repeated_int32))]
     self.assertEqual(len(m.repeated_int32), len(sl))
 
     # Repeated composite
     m.repeated_nested_message.add().bb = 3
-    sl = m.repeated_nested_message[int(0):int(len(m.repeated_nested_message))]
+    sl = m.repeated_nested_message[int(0) : int(len(m.repeated_nested_message))]
     self.assertEqual(len(m.repeated_nested_message), len(sl))
 
   def testExtendShouldNotSwallowExceptions(self, message_module):
@@ -998,46 +1436,60 @@ class MessageTest(unittest.TestCase):
     with self.assertRaises(NameError) as _:
       m.repeated_nested_enum.extend(a for i in range(10))  # pylint: disable=undefined-variable
 
-  FALSY_VALUES = [None, False, 0, 0.0, b'', u'', bytearray(), [], {}, set()]
+  FALSY_VALUES = [None, False, 0, 0.0]
+  EMPTY_VALUES = [b'', '', bytearray(), [], {}, set()]
 
   def testExtendInt32WithNothing(self, message_module):
     """Test no-ops extending repeated int32 fields."""
     m = message_module.TestAllTypes()
     self.assertSequenceEqual([], m.repeated_int32)
 
-    # TODO(ptucker): Deprecate this behavior. b/18413862
     for falsy_value in MessageTest.FALSY_VALUES:
-      m.repeated_int32.extend(falsy_value)
+      with self.assertRaises(TypeError) as context:
+        m.repeated_int32.extend(falsy_value)
+      self.assertIn('iterable', str(context.exception))
       self.assertSequenceEqual([], m.repeated_int32)
 
-    m.repeated_int32.extend([])
-    self.assertSequenceEqual([], m.repeated_int32)
+    for empty_value in MessageTest.EMPTY_VALUES:
+      m.repeated_int32.extend(empty_value)
+      self.assertSequenceEqual([], m.repeated_int32)
 
   def testExtendFloatWithNothing(self, message_module):
     """Test no-ops extending repeated float fields."""
     m = message_module.TestAllTypes()
     self.assertSequenceEqual([], m.repeated_float)
 
-    # TODO(ptucker): Deprecate this behavior. b/18413862
     for falsy_value in MessageTest.FALSY_VALUES:
-      m.repeated_float.extend(falsy_value)
+      with self.assertRaises(TypeError) as context:
+        m.repeated_float.extend(falsy_value)
+      self.assertIn('iterable', str(context.exception))
       self.assertSequenceEqual([], m.repeated_float)
 
-    m.repeated_float.extend([])
-    self.assertSequenceEqual([], m.repeated_float)
+    for empty_value in MessageTest.EMPTY_VALUES:
+      m.repeated_float.extend(empty_value)
+      self.assertSequenceEqual([], m.repeated_float)
 
   def testExtendStringWithNothing(self, message_module):
     """Test no-ops extending repeated string fields."""
     m = message_module.TestAllTypes()
     self.assertSequenceEqual([], m.repeated_string)
 
-    # TODO(ptucker): Deprecate this behavior. b/18413862
     for falsy_value in MessageTest.FALSY_VALUES:
-      m.repeated_string.extend(falsy_value)
+      with self.assertRaises(TypeError) as context:
+        m.repeated_string.extend(falsy_value)
+      self.assertIn('iterable', str(context.exception))
       self.assertSequenceEqual([], m.repeated_string)
 
-    m.repeated_string.extend([])
-    self.assertSequenceEqual([], m.repeated_string)
+    for empty_value in MessageTest.EMPTY_VALUES:
+      m.repeated_string.extend(empty_value)
+      self.assertSequenceEqual([], m.repeated_string)
+
+  def testExtendWithNoLen(self, message_module):
+    """Test extending repeated fields with iterables but no len"""
+    m = message_module.TestAllTypes()
+    self.assertSequenceEqual([], m.repeated_int32)
+    m.repeated_int32.extend(i for i in range(2))
+    self.assertSequenceEqual([0, 1], m.repeated_int32)
 
   def testExtendInt32WithPythonList(self, message_module):
     """Test extending repeated int32 fields with python lists."""
@@ -1049,6 +1501,8 @@ class MessageTest(unittest.TestCase):
     self.assertSequenceEqual([0, 1, 2], m.repeated_int32)
     m.repeated_int32.extend([3, 4])
     self.assertSequenceEqual([0, 1, 2, 3, 4], m.repeated_int32)
+    with self.assertRaises(TypeError):
+      m.repeated_int32.extend([5, 6, 'hi', 7])
 
   def testExtendFloatWithPythonList(self, message_module):
     """Test extending repeated float fields with python lists."""
@@ -1083,7 +1537,6 @@ class MessageTest(unittest.TestCase):
     """This iterable object mimics the behavior of numpy.array.
 
     __nonzero__ fails for length > 1, and returns bool(item[0]) for length == 1.
-
     """
 
     def __init__(self, values=None):
@@ -1192,6 +1645,7 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(0, m.repeated_int32.pop(0))
     self.assertEqual(2, m.repeated_int32.pop(1))
     self.assertEqual([1, 3], m.repeated_int32)
+    self.assertEqual(3, m.repeated_int32.pop(-1))
 
   def testRepeatedCompositeFieldPop(self, message_module):
     m = message_module.TestAllTypes()
@@ -1206,6 +1660,35 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(0, m.repeated_nested_message.pop(0).bb)
     self.assertEqual(2, m.repeated_nested_message.pop(1).bb)
     self.assertEqual([1, 3], [n.bb for n in m.repeated_nested_message])
+    self.assertEqual(3, m.repeated_nested_message.pop(-1).bb)
+
+  @unittest.skipIf(
+      api_implementation.Type() == 'upb',
+      "Currently broken in upb, will be fixed in the next breaking release"
+  )
+  def testRepeatedPopOutOfBounds(self, message_module):
+    m = message_module.TestAllTypes()
+    m.repeated_int32.extend(range(5))
+    m.repeated_int32.pop()
+    m.repeated_int32.pop(0)
+    m.repeated_int32.pop(1)
+
+    with self.assertRaises(IndexError):
+      m.repeated_int32.pop(-5)
+    with self.assertRaises(IndexError):
+      m.repeated_int32.pop(999999)
+
+    m2 = message_module.TestAllTypes()
+    for i in range(5):
+      m2.repeated_nested_message.add().bb = i
+    m2.repeated_nested_message.pop()
+    m2.repeated_nested_message.pop(0)
+    m2.repeated_nested_message.pop(1)
+
+    with self.assertRaises(IndexError):
+      m2.repeated_nested_message.pop(-5)
+    with self.assertRaises(IndexError):
+      m2.repeated_nested_message.pop(999999)
 
   def testRepeatedCompareWithSelf(self, message_module):
     m = message_module.TestAllTypes()
@@ -1256,6 +1739,300 @@ class MessageTest(unittest.TestCase):
     self.assertEqual(bool, type(m.repeated_bool[0]))
     self.assertEqual(True, m.repeated_bool[0])
 
+  def testDir(self, message_module):
+    m = message_module.TestAllTypes()
+    attributes = dir(m)
+    self.assertGreaterEqual(len(attributes), 124)
+
+    attribute_set = set(attributes)
+    self.assertIn('DESCRIPTOR', attributes)
+    self.assertIn('oneof_string', attribute_set)
+    self.assertIn('optional_double', attribute_set)
+    self.assertIn('repeated_float', attribute_set)
+
+    class_attributes = dir(type(m))
+    for attr in class_attributes:
+      if attr != 'Extensions':
+        self.assertIn(attr, attribute_set)
+
+  def testAllAttributeFromDirAccessible(self, message_module):
+    m = message_module.TestAllTypes()
+    attributes = dir(m)
+    for attribute in attributes:
+      try:
+        getattr(m, attribute)
+      except AttributeError:
+        self.fail(f'Attribute {attribute} is not accessible.')
+
+  def testEquality(self, message_module):
+    m = message_module.TestAllTypes()
+    m2 = message_module.TestAllTypes()
+    self.assertEqual(m, m)
+    self.assertEqual(m, m2)
+    self.assertEqual(m2, m)
+
+    different_m = message_module.TestAllTypes()
+    different_m.repeated_float.append(1)
+    self.assertNotEqual(m, different_m)
+    self.assertNotEqual(different_m, m)
+
+    self.assertIsNotNone(m)
+    self.assertIsNotNone(m)
+    self.assertNotEqual(42, m)
+    self.assertNotEqual(m, 42)
+    self.assertNotEqual('foo', m)
+    self.assertNotEqual(m, 'foo')
+
+    self.assertEqual(mock.ANY, m)
+    self.assertEqual(m, mock.ANY)
+
+    class ComparesWithFoo(object):
+
+      def __eq__(self, other):
+        if getattr(other, 'optional_string', 'not_foo') == 'foo':
+          return True
+        return NotImplemented
+
+    m.optional_string = 'foo'
+    self.assertEqual(m, ComparesWithFoo())
+    self.assertEqual(ComparesWithFoo(), m)
+    m.optional_string = 'bar'
+    self.assertNotEqual(m, ComparesWithFoo())
+    self.assertNotEqual(ComparesWithFoo(), m)
+
+  def testTypeUnion(self, message_module):
+    # Below python 3.10 you cannot create union types with the | operator, so we
+    # skip testing for unions with old versions.
+    if sys.version_info < (3, 10):
+      return
+    enum_type = enum_type_wrapper.EnumTypeWrapper(
+        message_module.TestAllTypes.NestedEnum.DESCRIPTOR
+    )
+    union_type = enum_type | int
+    self.assertIsInstance(union_type, types.UnionType)
+
+    def get_union() -> union_type:
+      return enum_type
+
+    union = get_union()
+    self.assertIsInstance(union, enum_type_wrapper.EnumTypeWrapper)
+    self.assertEqual(
+        union.DESCRIPTOR, message_module.TestAllTypes.NestedEnum.DESCRIPTOR
+    )
+
+  def testIn(self, message_module):
+    m = message_module.TestAllTypes()
+    self.assertNotIn('optional_nested_message', m)
+    self.assertNotIn('oneof_bytes', m)
+    self.assertNotIn('oneof_string', m)
+    with self.assertRaises(ValueError) as e:
+      'repeated_int32' in m
+    with self.assertRaises(ValueError) as e:
+      'repeated_nested_message' in m
+    with self.assertRaises(ValueError) as e:
+      1 in m
+    with self.assertRaises(ValueError) as e:
+      'not_a_field' in m
+    test_util.SetAllFields(m)
+    self.assertIn('optional_nested_message', m)
+    self.assertIn('oneof_bytes', m)
+    self.assertNotIn('oneof_string', m)
+
+  def testMessageClassName(self, message_module):
+    m = message_module.TestAllTypes()
+    self.assertEqual('TestAllTypes', type(m).__name__)
+    self.assertEqual('TestAllTypes', m.__class__.__qualname__)
+
+    nested = message_module.TestAllTypes.NestedMessage()
+    self.assertEqual('NestedMessage', type(nested).__name__)
+    self.assertEqual('NestedMessage', nested.__class__.__name__)
+    self.assertEqual(
+        'TestAllTypes.NestedMessage', nested.__class__.__qualname__
+    )
+
+  def create_bool_to_int(self, message_module, **kwargs):
+    with self.assertRaises(TypeError) as e:
+      m = message_module.TestAllTypes(**kwargs)
+    self.assertIn('bool', str(e.exception))
+    return None
+
+  def assign_bool_to_int(self, msg, field_name, value):
+    old_value = getattr(msg, field_name)
+    with self.assertRaises(TypeError) as e:
+      setattr(msg, field_name, value)
+    self.assertIn('bool', str(e.exception))
+    self.assertEqual(getattr(msg, field_name), old_value)
+
+  def assign_bool_to_map_or_extension(self, msg, field_name, key, value):
+    with self.assertRaises(TypeError) as e:
+      getattr(msg, field_name)[key] = value
+    self.assertIn('bool', str(e.exception))
+
+  def testAssignBoolToEnum(self, message_module):
+    m = self.create_bool_to_int(message_module, optional_nested_enum=True)
+    if m is not None:
+      self.assertEqual(m.optional_nested_enum, 1)
+
+    m = message_module.TestAllTypes(optional_nested_enum=2)
+    self.assign_bool_to_int(m, 'optional_nested_enum', True)
+
+    with warnings.catch_warnings(record=True) as w:
+      m.optional_nested_enum = 2
+      self.assertFalse(w)
+    self.assertEqual(m.optional_nested_enum, 2)
+
+  def testEnumStringAssignment(self, message_module):
+    msg = message_module.TestAllTypes()
+
+    if api_implementation.Type() == 'upb':
+      msg.optional_nested_enum = 'FOO'
+      self.assertEqual(
+          msg.optional_nested_enum, message_module.TestAllTypes.FOO
+      )
+
+      # Label which is not one of the values in the corresponding enum.
+      with self.assertRaises(ValueError):
+        msg.optional_nested_enum = 'INVALID_LABEL'
+
+      # str that is not a valid UTF-8.
+      with self.assertRaises(ValueError):
+        msg.optional_nested_enum = '\ud800'
+
+    else:
+      # Pure Python and cpp implementations do not support string assignment to
+      # enums.
+      with self.assertRaises(TypeError):
+        msg.optional_nested_enum = 'FOO'
+      with self.assertRaises(TypeError):
+        msg.optional_nested_enum = 'INVALID_LABEL'
+      with self.assertRaises(TypeError):
+        msg.optional_nested_enum = '\ud800'
+
+  def testBoolToRepeatedEnum(self, message_module):
+    m = self.create_bool_to_int(message_module, repeated_nested_enum=[True])
+    if m is not None:
+      self.assertEqual(m.repeated_nested_enum, [1])
+
+    m = message_module.TestAllTypes()
+    with self.assertRaises(TypeError) as e:
+      m = message_module.TestAllTypes(repeated_nested_enum=[True])
+    self.assertIn('bool', str(e.exception))
+    self.assertEqual(m.repeated_nested_enum, [])
+
+  def testBoolToOneofEnum(self, message_module):
+    m = unittest_pb2.TestOneof2()
+    self.assign_bool_to_int(m, 'foo_enum', True)
+
+  def testBoolToMapEnum(self, message_module):
+    m = map_unittest_pb2.TestMap()
+    self.assign_bool_to_map_or_extension(m, 'map_int32_enum', 10, True)
+
+  def testBoolToExtensionEnum(self, message_module):
+    m = unittest_pb2.TestAllExtensions()
+    self.assign_bool_to_map_or_extension(
+        m, 'Extensions', unittest_pb2.optional_nested_enum_extension, True
+    )
+
+  def testClosedEnumExtension(self, message_module):
+    m = unittest_pb2.TestAllExtensions()
+    m.ParseFromString(b'\xa8\x01\x7f')
+    unknown = unknown_fields.UnknownFieldSet(m)
+
+    # The data is present in unknown fields.
+    self.assertEqual(unknown[0].field_number, 21)
+    self.assertEqual(unknown[0].wire_type, wire_format.WIRETYPE_VARINT)
+    self.assertEqual(unknown[0].data, 0x7F)
+
+    # There is no extension present.
+    self.assertFalse(
+        m.HasExtension(unittest_pb2.optional_nested_enum_extension)
+    )
+
+  def testAssignBoolToInt(self, message_module):
+    m = self.create_bool_to_int(message_module, optional_int32=True)
+    if m is not None:
+      self.assertEqual(m.optional_int32, 1)
+
+    m = message_module.TestAllTypes(optional_uint32=123)
+    self.assign_bool_to_int(m, 'optional_uint32', True)
+
+    with warnings.catch_warnings(record=True) as w:
+      m.optional_uint32 = 321
+      self.assertFalse(w)
+    self.assertEqual(m.optional_uint32, 321)
+
+  def testAssignBoolToRepeatedInt(self, message_module):
+    m = self.create_bool_to_int(message_module, repeated_int64=[True])
+    if m is not None:
+      self.assertEqual(m.repeated_int64, [1])
+
+    m = message_module.TestAllTypes()
+    with self.assertRaises(TypeError) as e:
+      m.repeated_int64.append(True)
+    self.assertIn('bool', str(e.exception))
+    self.assertEqual(m.repeated_int64, [])
+
+  def testAssignBoolToOneofInt(self, message_module):
+    m = unittest_pb2.TestOneof2()
+    self.assign_bool_to_int(m, 'foo_int', True)
+
+  def testAssignBoolToMapInt(self, message_module):
+    m = map_unittest_pb2.TestMap()
+    self.assign_bool_to_map_or_extension(m, 'map_int32_int32', 10, True)
+    self.assign_bool_to_map_or_extension(m, 'map_int32_int32', True, 1)
+
+  def testAssignBoolToExtensionInt(self, message_module):
+    m = unittest_pb2.TestAllExtensions()
+    self.assign_bool_to_map_or_extension(
+        m, 'Extensions', unittest_pb2.optional_int32_extension, True
+    )
+
+
+@testing_refleaks.TestCase
+class TestRecursiveGroup(unittest.TestCase):
+
+  def _MakeRecursiveGroupMessage(self, n):
+    msg = self_recursive_pb2.SelfRecursive()
+    sub = msg
+    for _ in range(n):
+      sub = sub.sub_group
+    sub.i = 1
+    return msg.SerializeToString()
+
+  def testRecursiveGroups(self):
+    recurse_msg = self_recursive_pb2.SelfRecursive()
+    data = self._MakeRecursiveGroupMessage(100)
+    recurse_msg.ParseFromString(data)
+    self.assertTrue(recurse_msg.HasField('sub_group'))
+
+  def testRecursiveGroupsException(self):
+    if api_implementation.Type() != 'python':
+      api_implementation._c_module.SetAllowOversizeProtos(False)
+    recurse_msg = self_recursive_pb2.SelfRecursive()
+    data = self._MakeRecursiveGroupMessage(300)
+    with self.assertRaises(message.DecodeError) as context:
+      recurse_msg.ParseFromString(data)
+    self.assertIn('Error parsing message', str(context.exception))
+    if api_implementation.Type() == 'python':
+      self.assertIn('too many levels of nesting', str(context.exception))
+
+  def testRecursiveGroupsUnknownFields(self):
+    if api_implementation.Type() != 'python':
+      api_implementation._c_module.SetAllowOversizeProtos(False)
+    test_msg = unittest_pb2.TestAllTypes()
+    data = self._MakeRecursiveGroupMessage(300)  # unknown to test_msg
+    with self.assertRaises(message.DecodeError) as context:
+      test_msg.ParseFromString(data)
+    self.assertIn(
+        'Error parsing message',
+        str(context.exception),
+    )
+    if api_implementation.Type() == 'python':
+      self.assertIn('too many levels of nesting', str(context.exception))
+      decoder.SetRecursionLimit(310)
+      test_msg.ParseFromString(data)
+      decoder.SetRecursionLimit(decoder.DEFAULT_RECURSION_LIMIT)
+
 
 # Class to test proto2-only features (required, extensions, etc.)
 @testing_refleaks.TestCase
@@ -1287,33 +2064,50 @@ class Proto2Test(unittest.TestCase):
     self.assertTrue(message.HasField('optional_int32'))
     self.assertTrue(message.HasField('optional_bool'))
     self.assertTrue(message.HasField('optional_nested_message'))
+    self.assertIn('optional_int32', message)
+    self.assertIn('optional_bool', message)
+    self.assertIn('optional_nested_message', message)
 
     # Set the fields to non-default values.
     message.optional_int32 = 5
     message.optional_bool = True
     message.optional_nested_message.bb = 15
 
-    self.assertTrue(message.HasField(u'optional_int32'))
+    self.assertTrue(message.HasField('optional_int32'))
     self.assertTrue(message.HasField('optional_bool'))
     self.assertTrue(message.HasField('optional_nested_message'))
 
     # Clearing the fields unsets them and resets their value to default.
     message.ClearField('optional_int32')
-    message.ClearField(u'optional_bool')
+    message.ClearField('optional_bool')
     message.ClearField('optional_nested_message')
 
     self.assertFalse(message.HasField('optional_int32'))
     self.assertFalse(message.HasField('optional_bool'))
     self.assertFalse(message.HasField('optional_nested_message'))
+    self.assertNotIn('optional_int32', message)
+    self.assertNotIn('optional_bool', message)
+    self.assertNotIn('optional_nested_message', message)
     self.assertEqual(0, message.optional_int32)
     self.assertEqual(False, message.optional_bool)
     self.assertEqual(0, message.optional_nested_message.bb)
 
+  def testDel(self):
+    msg = unittest_pb2.TestAllTypes()
+
+    # Fields cannot be deleted.
+    with self.assertRaises(AttributeError):
+      del msg.optional_int32
+    with self.assertRaises(AttributeError):
+      del msg.optional_bool
+    with self.assertRaises(AttributeError):
+      del msg.repeated_nested_message
+
   def testAssignInvalidEnum(self):
-    """Assigning an invalid enum number is not allowed in proto2."""
+    """Assigning an invalid enum number is not allowed for closed enums."""
     m = unittest_pb2.TestAllTypes()
 
-    # Proto2 can not assign unknown enum.
+    # Can not assign unknown enum to closed enums.
     with self.assertRaises(ValueError) as _:
       m.optional_nested_enum = 1234567
     self.assertRaises(ValueError, m.repeated_nested_enum.append, 1234567)
@@ -1322,6 +2116,10 @@ class Proto2Test(unittest.TestCase):
     m.repeated_nested_enum[0] = 2
     with self.assertRaises(ValueError):
       m.repeated_nested_enum[0] = 123456
+    with self.assertRaises(ValueError):
+      m.repeated_nested_enum.extend([123456])
+    with self.assertRaises(ValueError):
+      m.repeated_nested_enum[:] = [123456]
 
     # Unknown enum value can be parsed but is ignored.
     m2 = unittest_proto3_arena_pb2.TestAllTypes()
@@ -1346,6 +2144,12 @@ class Proto2Test(unittest.TestCase):
     with self.assertRaises(ValueError):
       m.unknown_map_field[1] = 123
 
+  def testDeepCopyClosedEnum(self):
+    m = map_proto2_unittest_pb2.TestEnumMap()
+    m.known_map_field[123] = 0
+    m2 = copy.deepcopy(m)
+    self.assertEqual(m, m2)
+
   def testExtensionsErrors(self):
     msg = unittest_pb2.TestAllTypes()
     self.assertRaises(AttributeError, getattr, msg, 'Extensions')
@@ -1356,7 +2160,8 @@ class Proto2Test(unittest.TestCase):
     # Cpp extension will lazily create a sub message which is immutable.
     self.assertEqual(
         0,
-        msg1.submessage.Extensions[more_extensions_pb2.optional_int_extension])
+        msg1.submessage.Extensions[more_extensions_pb2.optional_int_extension],
+    )
     self.assertFalse(msg1.HasField('submessage'))
     msg2.submessage.Extensions[more_extensions_pb2.optional_int_extension] = 123
     # Make sure cmessage and extensions pointing to a mutable message
@@ -1364,29 +2169,35 @@ class Proto2Test(unittest.TestCase):
     msg1.MergeFrom(msg2)
     self.assertEqual(
         123,
-        msg1.submessage.Extensions[more_extensions_pb2.optional_int_extension])
+        msg1.submessage.Extensions[more_extensions_pb2.optional_int_extension],
+    )
 
-  def testGoldenExtensions(self):
-    golden_data = test_util.GoldenFileData('golden_message')
-    golden_message = unittest_pb2.TestAllExtensions()
-    golden_message.ParseFromString(golden_data)
+  def testCopyFromAll(self):
+    message = unittest_pb2.TestAllTypes()
+    test_util.SetAllFields(message)
+    copy = unittest_pb2.TestAllTypes()
+    copy.CopyFrom(message)
+    self.assertEqual(message, copy)
+    message.repeated_nested_message.add().bb = 123
+    self.assertNotEqual(message, copy)
+
+  def testCopyFromAllExtensions(self):
     all_set = unittest_pb2.TestAllExtensions()
     test_util.SetAllExtensions(all_set)
-    self.assertEqual(all_set, golden_message)
-    self.assertEqual(golden_data, golden_message.SerializeToString())
-    golden_copy = copy.deepcopy(golden_message)
-    self.assertEqual(golden_data, golden_copy.SerializeToString())
+    copy = unittest_pb2.TestAllExtensions()
+    copy.CopyFrom(all_set)
+    self.assertEqual(all_set, copy)
+    all_set.Extensions[unittest_pb2.repeatedgroup_extension].add().a = 321
+    self.assertNotEqual(all_set, copy)
 
-  def testGoldenPackedExtensions(self):
-    golden_data = test_util.GoldenFileData('golden_packed_fields_message')
-    golden_message = unittest_pb2.TestPackedExtensions()
-    golden_message.ParseFromString(golden_data)
+  def testCopyFromAllPackedExtensions(self):
     all_set = unittest_pb2.TestPackedExtensions()
     test_util.SetAllPackedExtensions(all_set)
-    self.assertEqual(all_set, golden_message)
-    self.assertEqual(golden_data, all_set.SerializeToString())
-    golden_copy = copy.deepcopy(golden_message)
-    self.assertEqual(golden_data, golden_copy.SerializeToString())
+    copy = unittest_pb2.TestPackedExtensions()
+    copy.CopyFrom(all_set)
+    self.assertEqual(all_set, copy)
+    all_set.Extensions[unittest_pb2.packed_float_extension].extend([61.0, 71.0])
+    self.assertNotEqual(all_set, copy)
 
   def testPickleIncompleteProto(self):
     golden_message = unittest_pb2.TestRequired(a=1)
@@ -1398,7 +2209,7 @@ class Proto2Test(unittest.TestCase):
     # This is still an incomplete proto - so serializing should fail
     self.assertRaises(message.EncodeError, unpickled_message.SerializeToString)
 
-  # TODO(haberman): this isn't really a proto2-specific test except that this
+  # TODO: this isn't really a proto2-specific test except that this
   # message has a required field in it.  Should probably be factored out so
   # that we can test the other parts with proto3.
   def testParsingMerge(self):
@@ -1409,7 +2220,7 @@ class Proto2Test(unittest.TestCase):
     messages = [
         unittest_pb2.TestAllTypes(),
         unittest_pb2.TestAllTypes(),
-        unittest_pb2.TestAllTypes()
+        unittest_pb2.TestAllTypes(),
     ]
     messages[0].optional_int32 = 1
     messages[1].optional_int64 = 2
@@ -1441,18 +2252,23 @@ class Proto2Test(unittest.TestCase):
     # Required and optional fields should be merged.
     self.assertEqual(parsing_merge.required_all_types, merged_message)
     self.assertEqual(parsing_merge.optional_all_types, merged_message)
-    self.assertEqual(parsing_merge.optionalgroup.optional_group_all_types,
-                     merged_message)
+    self.assertEqual(
+        parsing_merge.optionalgroup.optional_group_all_types, merged_message
+    )
     self.assertEqual(
         parsing_merge.Extensions[unittest_pb2.TestParsingMerge.optional_ext],
-        merged_message)
+        merged_message,
+    )
 
     # Repeated fields should not be merged.
     self.assertEqual(len(parsing_merge.repeated_all_types), 3)
     self.assertEqual(len(parsing_merge.repeatedgroup), 3)
     self.assertEqual(
-        len(parsing_merge.Extensions[
-            unittest_pb2.TestParsingMerge.repeated_ext]), 3)
+        len(
+            parsing_merge.Extensions[unittest_pb2.TestParsingMerge.repeated_ext]
+        ),
+        3,
+    )
 
   def testPythonicInit(self):
     message = unittest_pb2.TestAllTypes(
@@ -1464,53 +2280,58 @@ class Proto2Test(unittest.TestCase):
         optional_nested_message={'bb': 500},
         optional_foreign_message={},
         optional_nested_enum='BAZ',
-        repeatedgroup=[{
-            'a': 600
-        }, {
-            'a': 700
-        }],
+        repeatedgroup=[{'a': 600}, {'a': 700}],
         repeated_nested_enum=['FOO', unittest_pb2.TestAllTypes.BAR],
         default_int32=800,
-        oneof_string='y')
+        oneof_string='y',
+    )
     self.assertIsInstance(message, unittest_pb2.TestAllTypes)
     self.assertEqual(100, message.optional_int32)
     self.assertEqual(200, message.optional_fixed32)
     self.assertEqual(300.5, message.optional_float)
     self.assertEqual(b'x', message.optional_bytes)
     self.assertEqual(400, message.optionalgroup.a)
-    self.assertIsInstance(message.optional_nested_message,
-                          unittest_pb2.TestAllTypes.NestedMessage)
+    self.assertIsInstance(
+        message.optional_nested_message, unittest_pb2.TestAllTypes.NestedMessage
+    )
     self.assertEqual(500, message.optional_nested_message.bb)
     self.assertTrue(message.HasField('optional_foreign_message'))
-    self.assertEqual(message.optional_foreign_message,
-                     unittest_pb2.ForeignMessage())
-    self.assertEqual(unittest_pb2.TestAllTypes.BAZ,
-                     message.optional_nested_enum)
+    self.assertEqual(
+        message.optional_foreign_message, unittest_pb2.ForeignMessage()
+    )
+    self.assertEqual(
+        unittest_pb2.TestAllTypes.BAZ, message.optional_nested_enum
+    )
     self.assertEqual(2, len(message.repeatedgroup))
     self.assertEqual(600, message.repeatedgroup[0].a)
     self.assertEqual(700, message.repeatedgroup[1].a)
     self.assertEqual(2, len(message.repeated_nested_enum))
-    self.assertEqual(unittest_pb2.TestAllTypes.FOO,
-                     message.repeated_nested_enum[0])
-    self.assertEqual(unittest_pb2.TestAllTypes.BAR,
-                     message.repeated_nested_enum[1])
+    self.assertEqual(
+        unittest_pb2.TestAllTypes.FOO, message.repeated_nested_enum[0]
+    )
+    self.assertEqual(
+        unittest_pb2.TestAllTypes.BAR, message.repeated_nested_enum[1]
+    )
     self.assertEqual(800, message.default_int32)
     self.assertEqual('y', message.oneof_string)
     self.assertFalse(message.HasField('optional_int64'))
     self.assertEqual(0, len(message.repeated_float))
     self.assertEqual(42, message.default_int64)
 
-    message = unittest_pb2.TestAllTypes(optional_nested_enum=u'BAZ')
-    self.assertEqual(unittest_pb2.TestAllTypes.BAZ,
-                     message.optional_nested_enum)
+    message = unittest_pb2.TestAllTypes(optional_nested_enum='BAZ')
+    self.assertEqual(
+        unittest_pb2.TestAllTypes.BAZ, message.optional_nested_enum
+    )
 
     with self.assertRaises(ValueError):
       unittest_pb2.TestAllTypes(
-          optional_nested_message={'INVALID_NESTED_FIELD': 17})
+          optional_nested_message={'INVALID_NESTED_FIELD': 17}
+      )
 
     with self.assertRaises(TypeError):
       unittest_pb2.TestAllTypes(
-          optional_nested_message={'bb': 'INVALID_VALUE_TYPE'})
+          optional_nested_message={'bb': 'INVALID_VALUE_TYPE'}
+      )
 
     with self.assertRaises(ValueError):
       unittest_pb2.TestAllTypes(optional_nested_enum='INVALID_LABEL')
@@ -1518,23 +2339,29 @@ class Proto2Test(unittest.TestCase):
     with self.assertRaises(ValueError):
       unittest_pb2.TestAllTypes(repeated_nested_enum='FOO')
 
+    m1 = unittest_pb2.TestAllTypes(repeated_foreign_message=[{'c': 1}])
+    with self.assertRaises(TypeError):
+      unittest_pb2.TestAllTypes(
+          repeated_nested_message=m1.repeated_foreign_message
+      )
+
   def testPythonicInitWithDict(self):
     # Both string/unicode field name keys should work.
     kwargs = {
         'optional_int32': 100,
-        u'optional_fixed32': 200,
+        'optional_fixed32': 200,
     }
     msg = unittest_pb2.TestAllTypes(**kwargs)
     self.assertEqual(100, msg.optional_int32)
     self.assertEqual(200, msg.optional_fixed32)
-
 
   def test_documentation(self):
     # Also used by the interactive help() function.
     doc = pydoc.html.document(unittest_pb2.TestAllTypes, 'message')
     self.assertIn('class TestAllTypes', doc)
     self.assertIn('SerializePartialToString', doc)
-    self.assertIn('repeated_float', doc)
+    if api_implementation.Type() != 'upb':
+      self.assertIn('repeated_float', doc)
     base = unittest_pb2.TestAllTypes.__bases__[0]
     self.assertRaises(AttributeError, getattr, base, '_extensions_by_name')
 
@@ -1580,6 +2407,12 @@ class Proto3Test(unittest.TestCase):
     with self.assertRaises(ValueError):
       message.HasField('repeated_nested_message')
 
+    # Can not test "in" operator.
+    with self.assertRaises(ValueError):
+      'repeated_int32' in message
+    with self.assertRaises(ValueError):
+      'repeated_nested_message' in message
+
     # Fields should default to their type-specific default.
     self.assertEqual(0, message.optional_int32)
     self.assertEqual(0, message.optional_float)
@@ -1590,6 +2423,7 @@ class Proto3Test(unittest.TestCase):
     # Setting a submessage should still return proper presence information.
     message.optional_nested_message.bb = 0
     self.assertTrue(message.HasField('optional_nested_message'))
+    self.assertIn('optional_nested_message', message)
 
     # Set the fields to non-default values.
     message.optional_int32 = 5
@@ -1615,12 +2449,28 @@ class Proto3Test(unittest.TestCase):
     message_proto2 = unittest_pb2.TestAllTypes()
     message_proto2.optional_int32 = 0
     message_proto2.optional_string = ''
+    message_proto2.optional_float = 0.0
     message_proto2.optional_bytes = b''
-    self.assertEqual(len(message_proto2.ListFields()), 3)
+    self.assertEqual(len(message_proto2.ListFields()), 4)
 
     message_proto3 = unittest_proto3_arena_pb2.TestAllTypes()
     message_proto3.ParseFromString(message_proto2.SerializeToString())
     self.assertEqual(len(message_proto3.ListFields()), 0)
+
+  def testProto3ParserKeepsNonDefaultScalar(self):
+    message_proto2 = unittest_pb2.TestAllTypes()
+    message_proto2.optional_int32 = 1
+    message_proto2.optional_string = '\0'
+    message_proto2.optional_float = -0.0
+    message_proto2.optional_double = -0.0
+    message_proto2.optional_bytes = b'\0'
+    self.assertEqual(len(message_proto2.ListFields()), 5)
+    serialized = message_proto2.SerializeToString()
+
+    message_proto3 = unittest_proto3_arena_pb2.TestAllTypes()
+    message_proto3.ParseFromString(serialized)
+    self.assertEqual(len(message_proto3.ListFields()), 5)
+    self.assertEqual(message_proto3.SerializeToString(), serialized)
 
   def testProto3Optional(self):
     msg = test_proto3_optional_pb2.TestProto3Optional()
@@ -1677,9 +2527,10 @@ class Proto3Test(unittest.TestCase):
 
     # Test has presence:
     for field in test_proto3_optional_pb2.TestProto3Optional.DESCRIPTOR.fields:
-      self.assertTrue(field.has_presence)
+      if field.name.startswith('optional_'):
+        self.assertTrue(field.has_presence)
     for field in unittest_pb2.TestAllTypes.DESCRIPTOR.fields:
-      if field.label == descriptor.FieldDescriptor.LABEL_REPEATED:
+      if field.is_repeated:
         self.assertFalse(field.has_presence)
       else:
         self.assertTrue(field.has_presence)
@@ -1724,7 +2575,7 @@ class Proto3Test(unittest.TestCase):
 
     # Scalars start out unset.
     self.assertFalse(-123 in msg.map_int32_int32)
-    self.assertFalse(-2**33 in msg.map_int64_int64)
+    self.assertFalse(-(2**33) in msg.map_int64_int64)
     self.assertFalse(123 in msg.map_uint32_uint32)
     self.assertFalse(2**33 in msg.map_uint64_uint64)
     self.assertFalse(123 in msg.map_int32_double)
@@ -1735,7 +2586,7 @@ class Proto3Test(unittest.TestCase):
 
     # Accessing an unset key returns the default.
     self.assertEqual(0, msg.map_int32_int32[-123])
-    self.assertEqual(0, msg.map_int64_int64[-2**33])
+    self.assertEqual(0, msg.map_int64_int64[-(2**33)])
     self.assertEqual(0, msg.map_uint32_uint32[123])
     self.assertEqual(0, msg.map_uint64_uint64[2**33])
     self.assertEqual(0.0, msg.map_int32_double[123])
@@ -1748,7 +2599,7 @@ class Proto3Test(unittest.TestCase):
 
     # It also sets the value in the map
     self.assertTrue(-123 in msg.map_int32_int32)
-    self.assertTrue(-2**33 in msg.map_int64_int64)
+    self.assertTrue(-(2**33) in msg.map_int64_int64)
     self.assertTrue(123 in msg.map_uint32_uint32)
     self.assertTrue(2**33 in msg.map_uint64_uint64)
     self.assertTrue(123 in msg.map_int32_double)
@@ -1766,6 +2617,51 @@ class Proto3Test(unittest.TestCase):
 
     with self.assertRaises(TypeError):
       123 in msg.map_string_string
+
+    with self.assertRaises(TypeError):
+      msg.map_string_string.__contains__(123)
+
+  def testScalarMapComparison(self):
+    msg1 = map_unittest_pb2.TestMap()
+    msg2 = map_unittest_pb2.TestMap()
+
+    self.assertEqual(msg1.map_int32_int32, msg2.map_int32_int32)
+
+  def testScalarMapSetdefault(self):
+    msg = map_unittest_pb2.TestMap()
+    value = msg.map_int32_int32.setdefault(123, 888)
+    self.assertEqual(value, 888)
+    self.assertEqual(msg.map_int32_int32[123], 888)
+    value = msg.map_int32_int32.setdefault(123, 777)
+    self.assertEqual(value, 888)
+
+    with self.assertRaises(ValueError):
+      value = msg.map_int32_int32.setdefault(1001)
+    self.assertNotIn(1001, msg.map_int32_int32)
+    with self.assertRaises(TypeError):
+      value = msg.map_int32_int32.setdefault()
+    with self.assertRaises(TypeError):
+      value = msg.map_int32_int32.setdefault(1, 2, 3)
+    with self.assertRaises(TypeError):
+      value = msg.map_int32_int32.setdefault('1', 2)
+    with self.assertRaises(TypeError):
+      value = msg.map_int32_int32.setdefault(1, '2')
+
+  def testMessageMapComparison(self):
+    msg1 = map_unittest_pb2.TestMap()
+    msg2 = map_unittest_pb2.TestMap()
+
+    self.assertEqual(
+        msg1.map_int32_foreign_message, msg2.map_int32_foreign_message
+    )
+
+  def testMessageMapSetdefault(self):
+    msg = map_unittest_pb2.TestMap()
+    msg.map_int32_foreign_message[123].c = 888
+    with self.assertRaises(NotImplementedError):
+      msg.map_int32_foreign_message.setdefault(
+          1, msg.map_int32_foreign_message[123]
+      )
 
   def testMapGet(self):
     # Need to test that get() properly returns the default, even though the dict
@@ -1799,7 +2695,7 @@ class Proto3Test(unittest.TestCase):
     self.assertFalse(5 in msg.map_int32_int32)
 
     msg.map_int32_int32[-123] = -456
-    msg.map_int64_int64[-2**33] = -2**34
+    msg.map_int64_int64[-(2**33)] = -(2**34)
     msg.map_uint32_uint32[123] = 456
     msg.map_uint64_uint64[2**33] = 2**34
     msg.map_int32_float[2] = 1.2
@@ -1839,7 +2735,7 @@ class Proto3Test(unittest.TestCase):
       msg2.map_string_string['123'] = 123
 
     self.assertEqual(-456, msg2.map_int32_int32[-123])
-    self.assertEqual(-2**34, msg2.map_int64_int64[-2**33])
+    self.assertEqual(-(2**34), msg2.map_int64_int64[-(2**33)])
     self.assertEqual(456, msg2.map_uint32_uint32[123])
     self.assertEqual(2**34, msg2.map_uint64_uint64[2**33])
     self.assertAlmostEqual(1.2, msg.map_int32_float[2])
@@ -1855,18 +2751,19 @@ class Proto3Test(unittest.TestCase):
     msg.map_int32_int32[0] = 0
     msg.map_string_string[''] = ''
     self.assertEqual(msg.ByteSize(), 12)
-    self.assertEqual(b'\n\x04\x08\x00\x10\x00r\x04\n\x00\x12\x00',
-                     msg.SerializeToString())
+    self.assertEqual(
+        b'\n\x04\x08\x00\x10\x00r\x04\n\x00\x12\x00', msg.SerializeToString()
+    )
 
   def testStringUnicodeConversionInMap(self):
     msg = map_unittest_pb2.TestMap()
 
-    unicode_obj = u'\u1234'
+    unicode_obj = '\u1234'
     bytes_obj = unicode_obj.encode('utf8')
 
     msg.map_string_string[bytes_obj] = bytes_obj
 
-    (key, value) = list(msg.map_string_string.items())[0]
+    key, value = list(msg.map_string_string.items())[0]
 
     self.assertEqual(key, unicode_obj)
     self.assertEqual(value, unicode_obj)
@@ -1893,6 +2790,12 @@ class Proto3Test(unittest.TestCase):
     with self.assertRaises(TypeError):
       msg.map_int32_foreign_message['123']
 
+    with self.assertRaises(TypeError):
+      '123' in msg.map_int32_foreign_message
+
+    with self.assertRaises(TypeError):
+      msg.map_int32_foreign_message.__contains__('123')
+
     # Can't assign directly to submessage.
     with self.assertRaises(ValueError):
       msg.map_int32_foreign_message[999] = msg.map_int32_foreign_message[123]
@@ -1910,10 +2813,11 @@ class Proto3Test(unittest.TestCase):
     self.assertIn(-456, msg2.map_int32_foreign_message)
     self.assertEqual(2, len(msg2.map_int32_foreign_message))
     msg2.map_int32_foreign_message[123].c = 1
-    # TODO(jieluo): Fix text format for message map.
+    # TODO: Fix text format for message map.
     self.assertIn(
         str(msg2.map_int32_foreign_message),
-        ('{-456: , 123: c: 1\n}', '{123: c: 1\n, -456: }'))
+        ('{-456: , 123: c: 1\n}', '{123: c: 1\n, -456: }'),
+    )
 
   def testNestedMessageMapItemDelete(self):
     msg = map_unittest_pb2.TestMap()
@@ -1943,6 +2847,14 @@ class Proto3Test(unittest.TestCase):
     size = msg.ByteSize()
     msg.map_int32_foreign_message[19].c = 128
     self.assertEqual(msg.ByteSize(), size + 1)
+
+  def testRecursiveMapSerialization(self):
+    # Test that the serialization of a very deeply recursive map finishes.
+    s = map_unittest_pb2.TestRecursiveMapMessage()
+    current = s
+    for _ in range(95):
+      current = current.a['x']
+    self.assertGreater(len(s.SerializeToString()), 0)
 
   def testMergeFrom(self):
     msg = map_unittest_pb2.TestMap()
@@ -2065,28 +2977,31 @@ class Proto3Test(unittest.TestCase):
     # Merge a dict to map field is not accepted
     with self.assertRaises(AttributeError):
       m1.map_int32_all_types.MergeFrom(
-          {1: unittest_proto3_arena_pb2.TestAllTypes()})
+          {1: unittest_proto3_arena_pb2.TestAllTypes()}
+      )
 
   def testMergeFromBadType(self):
     msg = map_unittest_pb2.TestMap()
     with self.assertRaisesRegex(
         TypeError,
         r'Parameter to MergeFrom\(\) must be instance of same class: expected '
-        r'.+TestMap got int\.'):
+        r'.+TestMap.+got.+int.+',
+    ):
       msg.MergeFrom(1)
 
   def testCopyFromBadType(self):
     msg = map_unittest_pb2.TestMap()
     with self.assertRaisesRegex(
         TypeError,
-        r'Parameter to [A-Za-z]*From\(\) must be instance of same class: '
-        r'expected .+TestMap got int\.'):
+        r'Parameter to (Copy|Merge)From\(\) must be instance of same class: '
+        r'expected .+TestMap.+got.+int.+',
+    ):
       msg.CopyFrom(1)
 
   def testIntegerMapWithLongs(self):
     msg = map_unittest_pb2.TestMap()
     msg.map_int32_int32[int(-123)] = int(-456)
-    msg.map_int64_int64[int(-2**33)] = int(-2**34)
+    msg.map_int64_int64[int(-(2**33))] = int(-(2**34))
     msg.map_uint32_uint32[int(123)] = int(456)
     msg.map_uint64_uint64[int(2**33)] = int(2**34)
 
@@ -2095,7 +3010,7 @@ class Proto3Test(unittest.TestCase):
     msg2.ParseFromString(serialized)
 
     self.assertEqual(-456, msg2.map_int32_int32[-123])
-    self.assertEqual(-2**34, msg2.map_int64_int64[-2**33])
+    self.assertEqual(-(2**34), msg2.map_int64_int64[-(2**33)])
     self.assertEqual(456, msg2.map_uint32_uint32[123])
     self.assertEqual(2**34, msg2.map_uint64_uint64[2**33])
 
@@ -2139,7 +3054,8 @@ class Proto3Test(unittest.TestCase):
     self.assertEqual(msg, msg2)
 
     msg.test_map.map_int32_foreign_message[888].MergeFrom(
-        msg.test_map.map_int32_foreign_message[123])
+        msg.test_map.map_int32_foreign_message[123]
+    )
     serialized = msg.SerializeToString()
     msg2.ParseFromString(serialized)
     self.assertEqual(msg, msg2)
@@ -2181,11 +3097,11 @@ class Proto3Test(unittest.TestCase):
     int32_foreign_keys = list(msg.map_int32_foreign_message.keys())
 
     keys = []
-    for key in msg.map_string_string:
+    for key in list(msg.map_string_string.keys()):
       keys.append(key)
       msg.map_string_string[key] = '000'
-    self.assertEqual(keys, string_string_keys)
-    self.assertEqual(keys, list(msg.map_string_string.keys()))
+    self.assertCountEqual(keys, string_string_keys)
+    self.assertCountEqual(keys, list(msg.map_string_string.keys()))
 
     keys = []
     for key in msg.map_int32_foreign_message:
@@ -2194,6 +3110,19 @@ class Proto3Test(unittest.TestCase):
     self.assertEqual(keys, int32_foreign_keys)
     self.assertEqual(keys, list(msg.map_int32_foreign_message.keys()))
 
+  def test_map_clear_during_iteration(self):
+    # Regression: clear() did not bump iterator version, causing UAF.
+    msg = map_unittest_pb2.TestMap()
+    msg.map_string_string['a'] = '1'
+    msg.map_string_string['b'] = '2'
+    msg.map_string_string['c'] = '3'
+    msg.map_string_string['d'] = '4'
+
+    it = iter(msg.map_string_string)
+    next(it)
+    msg.map_string_string.clear()
+    with self.assertRaises(RuntimeError):
+      next(it)
   def testSubmessageMap(self):
     msg = map_unittest_pb2.TestMap()
 
@@ -2231,7 +3160,7 @@ class Proto3Test(unittest.TestCase):
   def testMapItems(self):
     # Map items used to have strange behaviors when use c extension. Because
     # [] may reorder the map and invalidate any existing iterators.
-    # TODO(jieluo): Check if [] reordering the map is a bug or intended
+    # TODO: Check if [] reordering the map is a bug or intended
     # behavior.
     msg = map_unittest_pb2.TestMap()
     msg.map_string_string['local_init_op'] = ''
@@ -2244,15 +3173,17 @@ class Proto3Test(unittest.TestCase):
     self.assertEqual(items1, items2)
 
   def testMapDeterministicSerialization(self):
-    golden_data = (b'r\x0c\n\x07init_op\x12\x01d'
-                   b'r\n\n\x05item1\x12\x01e'
-                   b'r\n\n\x05item2\x12\x01f'
-                   b'r\n\n\x05item3\x12\x01g'
-                   b'r\x0b\n\x05item4\x12\x02QQ'
-                   b'r\x12\n\rlocal_init_op\x12\x01a'
-                   b'r\x0e\n\tsummaries\x12\x01e'
-                   b'r\x18\n\x13trainable_variables\x12\x01b'
-                   b'r\x0e\n\tvariables\x12\x01c')
+    golden_data = (
+        b'r\x0c\n\x07init_op\x12\x01d'
+        b'r\n\n\x05item1\x12\x01e'
+        b'r\n\n\x05item2\x12\x01f'
+        b'r\n\n\x05item3\x12\x01g'
+        b'r\x0b\n\x05item4\x12\x02QQ'
+        b'r\x12\n\rlocal_init_op\x12\x01a'
+        b'r\x0e\n\tsummaries\x12\x01e'
+        b'r\x18\n\x13trainable_variables\x12\x01b'
+        b'r\x0e\n\tvariables\x12\x01c'
+    )
     msg = map_unittest_pb2.TestMap()
     msg.map_string_string['local_init_op'] = 'a'
     msg.map_string_string['trainable_variables'] = 'b'
@@ -2292,7 +3223,8 @@ class Proto3Test(unittest.TestCase):
     self.assertEqual(4, msg.map_int32_int32[3])
 
     msg = map_unittest_pb2.TestMap(
-        map_int32_foreign_message={3: unittest_pb2.ForeignMessage(c=5)})
+        map_int32_foreign_message={3: unittest_pb2.ForeignMessage(c=5)}
+    )
     self.assertEqual(5, msg.map_int32_foreign_message[3].c)
 
   def testMapScalarFieldConstruction(self):
@@ -2305,8 +3237,13 @@ class Proto3Test(unittest.TestCase):
     msg1 = map_unittest_pb2.TestMap()
     msg1.map_string_foreign_message['test'].c = 42
     msg2 = map_unittest_pb2.TestMap(
-        map_string_foreign_message=msg1.map_string_foreign_message)
+        map_string_foreign_message=msg1.map_string_foreign_message
+    )
     self.assertEqual(42, msg2.map_string_foreign_message['test'].c)
+    msg3 = map_unittest_pb2.TestMap(
+        map_string_foreign_message={'test': dict(c=42)}
+    )
+    self.assertEqual(42, msg3.map_string_foreign_message['test'].c)
 
   def testMapFieldRaisesCorrectError(self):
     # Should raise a TypeError when given a non-iterable.
@@ -2349,10 +3286,6 @@ class Proto3Test(unittest.TestCase):
     msg = map_unittest_pb2.TestMap()
     msg.map_int32_all_types[2].optional_string = 'bar'
 
-    if api_implementation.Type() == 'cpp':
-      # Need to keep the map reference because of b/27942626.
-      # TODO(jieluo): Remove it.
-      unused_map = msg.map_int32_all_types  # pylint: disable=unused-variable
     msg_value = msg.map_int32_all_types[2]
     msg.Clear()
 
@@ -2401,17 +3334,20 @@ class Proto3Test(unittest.TestCase):
     msg = map_unittest_pb2.TestMap()
     self.assertIsInstance(msg.map_int32_int32, collections.abc.Mapping)
     self.assertIsInstance(msg.map_int32_int32, collections.abc.MutableMapping)
-    self.assertIsInstance(msg.map_int32_foreign_message,
-                          collections.abc.Mapping)
-    self.assertIsInstance(msg.map_int32_foreign_message,
-                          collections.abc.MutableMapping)
+    self.assertIsInstance(
+        msg.map_int32_foreign_message, collections.abc.Mapping
+    )
+    self.assertIsInstance(
+        msg.map_int32_foreign_message, collections.abc.MutableMapping
+    )
 
   def testMapsCompare(self):
     msg = map_unittest_pb2.TestMap()
     msg.map_int32_int32[-123] = -456
     self.assertEqual(msg.map_int32_int32, msg.map_int32_int32)
-    self.assertEqual(msg.map_int32_foreign_message,
-                     msg.map_int32_foreign_message)
+    self.assertEqual(
+        msg.map_int32_foreign_message, msg.map_int32_foreign_message
+    )
     self.assertNotEqual(msg.map_int32_int32, 0)
 
   def testMapFindInitializationErrorsSmokeTest(self):
@@ -2424,7 +3360,7 @@ class Proto3Test(unittest.TestCase):
   @unittest.skipIf(sys.maxunicode == UCS2_MAXUNICODE, 'Skip for ucs2')
   def testStrictUtf8Check(self):
     # Test u'\ud801' is rejected at parser in both python2 and python3.
-    serialized = (b'r\x03\xed\xa0\x81')
+    serialized = b'r\x03\xed\xa0\x81'
     msg = unittest_proto3_arena_pb2.TestAllTypes()
     with self.assertRaises(Exception) as context:
       msg.MergeFromString(serialized)
@@ -2435,26 +3371,49 @@ class Proto3Test(unittest.TestCase):
 
     # Test optional_string=u'😍' is accepted.
     serialized = unittest_proto3_arena_pb2.TestAllTypes(
-        optional_string=u'😍').SerializeToString()
+        optional_string='😍'
+    ).SerializeToString()
     msg2 = unittest_proto3_arena_pb2.TestAllTypes()
     msg2.MergeFromString(serialized)
-    self.assertEqual(msg2.optional_string, u'😍')
+    self.assertEqual(msg2.optional_string, '😍')
 
-    msg = unittest_proto3_arena_pb2.TestAllTypes(optional_string=u'\ud001')
-    self.assertEqual(msg.optional_string, u'\ud001')
+    msg = unittest_proto3_arena_pb2.TestAllTypes(optional_string='\ud001')
+    self.assertEqual(msg.optional_string, '\ud001')
 
   def testSurrogatesInPython3(self):
     # Surrogates are rejected at setters in Python3.
     with self.assertRaises(ValueError):
-      unittest_proto3_arena_pb2.TestAllTypes(optional_string=u'\ud801\udc01')
+      unittest_proto3_arena_pb2.TestAllTypes(optional_string='\ud801\udc01')
     with self.assertRaises(ValueError):
       unittest_proto3_arena_pb2.TestAllTypes(optional_string=b'\xed\xa0\x81')
     with self.assertRaises(ValueError):
-      unittest_proto3_arena_pb2.TestAllTypes(optional_string=u'\ud801')
+      unittest_proto3_arena_pb2.TestAllTypes(optional_string='\ud801')
     with self.assertRaises(ValueError):
-      unittest_proto3_arena_pb2.TestAllTypes(optional_string=u'\ud801\ud801')
+      unittest_proto3_arena_pb2.TestAllTypes(optional_string='\ud801\ud801')
 
+  def testCrashNullAA(self):
+    self.assertEqual(
+        unittest_proto3_arena_pb2.TestAllTypes.NestedMessage(),
+        unittest_proto3_arena_pb2.TestAllTypes.NestedMessage(),
+    )
 
+  def testCrashNullAB(self):
+    self.assertEqual(
+        unittest_proto3_arena_pb2.TestAllTypes.NestedMessage(),
+        unittest_proto3_arena_pb2.TestAllTypes().optional_nested_message,
+    )
+
+  def testCrashNullBA(self):
+    self.assertEqual(
+        unittest_proto3_arena_pb2.TestAllTypes().optional_nested_message,
+        unittest_proto3_arena_pb2.TestAllTypes.NestedMessage(),
+    )
+
+  def testCrashNullBB(self):
+    self.assertEqual(
+        unittest_proto3_arena_pb2.TestAllTypes().optional_nested_message,
+        unittest_proto3_arena_pb2.TestAllTypes().optional_nested_message,
+    )
 
 
 @testing_refleaks.TestCase
@@ -2463,11 +3422,14 @@ class ValidTypeNamesTest(unittest.TestCase):
   def assertImportFromName(self, msg, base_name):
     # Parse <type 'module.class_name'> to extra 'some.name' as a string.
     tp_name = str(type(msg)).split("'")[1]
-    valid_names = ('Repeated%sContainer' % base_name,
-                   'Repeated%sFieldContainer' % base_name)
+    valid_names = (
+        'Repeated%sContainer' % base_name,
+        'Repeated%sFieldContainer' % base_name,
+    )
     self.assertTrue(
         any(tp_name.endswith(v) for v in valid_names),
-        '%r does end with any of %r' % (tp_name, valid_names))
+        '%r does end with any of %r' % (tp_name, valid_names),
+    )
 
     parts = tp_name.split('.')
     class_name = parts[-1]
@@ -2479,6 +3441,36 @@ class ValidTypeNamesTest(unittest.TestCase):
     pb = unittest_pb2.TestAllTypes()
     self.assertImportFromName(pb.repeated_int32, 'Scalar')
     self.assertImportFromName(pb.repeated_nested_message, 'Composite')
+
+
+# We can only test this case under proto2, because proto3 will reject invalid
+# UTF-8 in the parser, so there should be no way of creating a string field
+# that contains invalid UTF-8.
+#
+# We also can't test it in pure-Python, which validates all string fields for
+# UTF-8 even when the spec says it shouldn't.
+@unittest.skipIf(
+    api_implementation.Type() == 'python',
+    "Python can't create invalid UTF-8 strings",
+)
+@testing_refleaks.TestCase
+class InvalidUtf8Test(unittest.TestCase):
+
+  def testInvalidUtf8Printing(self):
+    one_bytes = unittest_pb2.OneBytes()
+    one_bytes.data = b'ABC\xff123'
+    one_string = unittest_pb2.OneString()
+    one_string.ParseFromString(one_bytes.SerializeToString())
+    self.assertIn('data: "ABC\\377123"', str(one_string))
+
+  def testValidUtf8Printing(self):
+    self.assertIn('data: "€"', str(unittest_pb2.OneString(data='€')))  # 2 byte
+    self.assertIn(
+        'data: "￡"', str(unittest_pb2.OneString(data='￡'))
+    )  # 3 byte
+    self.assertIn(
+        'data: "🙂"', str(unittest_pb2.OneString(data='🙂'))
+    )  # 4 byte
 
 
 @testing_refleaks.TestCase
@@ -2503,102 +3495,174 @@ class PackedFieldTest(unittest.TestCase):
   def testPackedFields(self):
     message = packed_field_test_pb2.TestPackedTypes()
     self.setMessage(message)
-    golden_data = (b'\x0A\x01\x01'
-                   b'\x12\x01\x01'
-                   b'\x1A\x01\x01'
-                   b'\x22\x01\x01'
-                   b'\x2A\x01\x02'
-                   b'\x32\x01\x02'
-                   b'\x3A\x04\x01\x00\x00\x00'
-                   b'\x42\x08\x01\x00\x00\x00\x00\x00\x00\x00'
-                   b'\x4A\x04\x01\x00\x00\x00'
-                   b'\x52\x08\x01\x00\x00\x00\x00\x00\x00\x00'
-                   b'\x5A\x04\x00\x00\x80\x3f'
-                   b'\x62\x08\x00\x00\x00\x00\x00\x00\xf0\x3f'
-                   b'\x6A\x01\x01'
-                   b'\x72\x01\x01')
+    golden_data = (
+        b'\x0A\x01\x01'
+        b'\x12\x01\x01'
+        b'\x1A\x01\x01'
+        b'\x22\x01\x01'
+        b'\x2A\x01\x02'
+        b'\x32\x01\x02'
+        b'\x3A\x04\x01\x00\x00\x00'
+        b'\x42\x08\x01\x00\x00\x00\x00\x00\x00\x00'
+        b'\x4A\x04\x01\x00\x00\x00'
+        b'\x52\x08\x01\x00\x00\x00\x00\x00\x00\x00'
+        b'\x5A\x04\x00\x00\x80\x3f'
+        b'\x62\x08\x00\x00\x00\x00\x00\x00\xf0\x3f'
+        b'\x6A\x01\x01'
+        b'\x72\x01\x01'
+    )
     self.assertEqual(golden_data, message.SerializeToString())
 
   def testUnpackedFields(self):
     message = packed_field_test_pb2.TestUnpackedTypes()
     self.setMessage(message)
-    golden_data = (b'\x08\x01'
-                   b'\x10\x01'
-                   b'\x18\x01'
-                   b'\x20\x01'
-                   b'\x28\x02'
-                   b'\x30\x02'
-                   b'\x3D\x01\x00\x00\x00'
-                   b'\x41\x01\x00\x00\x00\x00\x00\x00\x00'
-                   b'\x4D\x01\x00\x00\x00'
-                   b'\x51\x01\x00\x00\x00\x00\x00\x00\x00'
-                   b'\x5D\x00\x00\x80\x3f'
-                   b'\x61\x00\x00\x00\x00\x00\x00\xf0\x3f'
-                   b'\x68\x01'
-                   b'\x70\x01')
+    golden_data = (
+        b'\x08\x01'
+        b'\x10\x01'
+        b'\x18\x01'
+        b'\x20\x01'
+        b'\x28\x02'
+        b'\x30\x02'
+        b'\x3D\x01\x00\x00\x00'
+        b'\x41\x01\x00\x00\x00\x00\x00\x00\x00'
+        b'\x4D\x01\x00\x00\x00'
+        b'\x51\x01\x00\x00\x00\x00\x00\x00\x00'
+        b'\x5D\x00\x00\x80\x3f'
+        b'\x61\x00\x00\x00\x00\x00\x00\xf0\x3f'
+        b'\x68\x01'
+        b'\x70\x01'
+    )
     self.assertEqual(golden_data, message.SerializeToString())
 
 
-@unittest.skipIf(api_implementation.Type() != 'cpp',
-                 'explicit tests of the C++ implementation')
+@testing_refleaks.TestCase
+class MergeFromTest(unittest.TestCase):
+
+  def testBugFixupAfterMerge(self):
+    target = more_messages_pb2.LotsOfMessageFields()
+    wrappers = []
+
+    # Access all fields mutably, except for a10 which is accessed read-only.
+    for i in range(1, 21):
+      sub = getattr(target, f'a{i}')
+      wrappers.append(sub)
+      if i != 10:
+        # Access mutable.
+        sub.b = 1
+
+    self.assertEqual(target.a10.b, 0)
+    self.assertFalse(target.HasField('a10'))
+
+    source = more_messages_pb2.LotsOfMessageFields()
+    source.a10.b = 1
+
+    # The read-only message target.a10 needs to be updated to point to the new
+    # message that is created by MergeFrom.
+    target.MergeFrom(source)
+
+    self.assertEqual(target.a10.b, 1)
+    self.assertTrue(target.HasField('a10'))
+
+
 @testing_refleaks.TestCase
 class OversizeProtosTest(unittest.TestCase):
 
-  @classmethod
-  def setUpClass(cls):
-    # At the moment, reference cycles between DescriptorPool and Message classes
-    # are not detected and these objects are never freed.
-    # To avoid errors with ReferenceLeakChecker, we create the class only once.
-    file_desc = """
-      name: "f/f.msg2"
-      package: "f"
-      message_type {
-        name: "msg1"
-        field {
-          name: "payload"
-          number: 1
-          label: LABEL_OPTIONAL
-          type: TYPE_STRING
-        }
-      }
-      message_type {
-        name: "msg2"
-        field {
-          name: "field"
-          number: 1
-          label: LABEL_OPTIONAL
-          type: TYPE_MESSAGE
-          type_name: "msg1"
-        }
-      }
-    """
-    pool = descriptor_pool.DescriptorPool()
-    desc = descriptor_pb2.FileDescriptorProto()
-    text_format.Parse(file_desc, desc)
-    pool.Add(desc)
-    cls.proto_cls = message_factory.MessageFactory(pool).GetPrototype(
-        pool.FindMessageTypeByName('f.msg2'))
+  def GenerateNestedProto(self, n):
+    msg = unittest_pb2.TestRecursiveMessage()
+    sub = msg
+    for _ in range(n):
+      sub = sub.a
+    sub.i = 0
+    return msg.SerializeToString()
 
-  def setUp(self):
-    self.p = self.proto_cls()
-    self.p.field.payload = 'c' * (1024 * 1024 * 64 + 1)
-    self.p_serialized = self.p.SerializeToString()
+  def testSucceedOkSizedProto(self):
+    msg = unittest_pb2.TestRecursiveMessage()
+    decoder.SetRecursionLimit(100)
+    msg.ParseFromString(self.GenerateNestedProto(100))
 
   def testAssertOversizeProto(self):
-    from google.protobuf.pyext._message import SetAllowOversizeProtos
-    SetAllowOversizeProtos(False)
-    q = self.proto_cls()
-    try:
-      q.ParseFromString(self.p_serialized)
-    except message.DecodeError as e:
-      self.assertEqual(str(e), 'Error parsing message')
+    if api_implementation.Type() != 'python':
+      api_implementation._c_module.SetAllowOversizeProtos(False)
+    msg = unittest_pb2.TestRecursiveMessage()
+    with self.assertRaises(message.DecodeError) as context:
+      msg.ParseFromString(self.GenerateNestedProto(101))
+    self.assertIn('Error parsing message', str(context.exception))
 
   def testSucceedOversizeProto(self):
-    from google.protobuf.pyext._message import SetAllowOversizeProtos
-    SetAllowOversizeProtos(True)
-    q = self.proto_cls()
-    q.ParseFromString(self.p_serialized)
-    self.assertEqual(self.p.field.payload, q.field.payload)
+
+    if api_implementation.Type() == 'python':
+      decoder.SetRecursionLimit(310)
+    else:
+      api_implementation._c_module.SetAllowOversizeProtos(True)
+
+    msg = unittest_pb2.TestRecursiveMessage()
+    msg.ParseFromString(self.GenerateNestedProto(101))
+    decoder.SetRecursionLimit(decoder.DEFAULT_RECURSION_LIMIT)
+
+  def testRecursionMap(self):
+    if api_implementation.Type() == 'python':
+      # pure python need a smaller depth limit to avoid test timeout
+      depth = 10
+      decoder.SetRecursionLimit(depth * 2)
+    else:
+      depth = 50
+    msg = more_messages_pb2.TestRecursiveMapMessage()
+    sub = msg
+    for _ in range(depth):
+      sub.map_field[0].i = 123
+      sub = sub.map_field[0]
+    parsed_msg = more_messages_pb2.TestRecursiveMapMessage()
+    # message can be parsed with the max recursion depth
+    parsed_msg.ParseFromString(msg.SerializeToString())
+    # message can not be parsed with one more recursion
+    sub.map_field[0].i = 123
+    with self.assertRaises(message.DecodeError) as context:
+      parsed_msg.ParseFromString(msg.SerializeToString())
+    self.assertIn('Error parsing message', str(context.exception))
+    if api_implementation.Type() == 'python':
+      decoder.SetRecursionLimit(decoder.DEFAULT_RECURSION_LIMIT)
+
+  def testRecisionMessageSet(self):
+    msg = message_set_extensions_pb2.TestMessageSet()
+    test_msg = message_set_extensions_pb2.TestMessageSetExtension1
+    ext = test_msg.message_set_extension
+    sub = msg
+    if api_implementation.Type() == 'cpp':
+      # TODO: message_set_extension was double counted for
+      # depth in c++. Should fix it to only count once.
+      depth = 33
+    else:
+      depth = 50
+    for _ in range(depth):
+      sub.Extensions[ext].i = 123
+      sub = sub.Extensions[ext].sub_msg
+    # message can be parsed with the max recursion depth
+    parsed_msg = message_set_extensions_pb2.TestMessageSet()
+    parsed_msg.ParseFromString(msg.SerializeToString())
+    # message can not be parsed when exceed max recursion depth
+    sub.Extensions[ext].i = 123
+    with self.assertRaises(message.DecodeError) as context:
+      msg.ParseFromString(msg.SerializeToString())
+    self.assertIn('Error parsing message', str(context.exception))
+
+
+@testing_refleaks.TestCase
+class MessageMetaGetAttrTest(unittest.TestCase):
+
+  def testMessageMetaGetAttrException(self):
+    class BombDescriptor:
+      def __get__(self, obj, objtype=None):
+        raise KeyboardInterrupt('should not be swallowed')
+
+    unittest_pb2.TestAllTypes.bomb = BombDescriptor()
+    try:
+      with self.assertRaises(KeyboardInterrupt):
+        _ = unittest_pb2.TestAllTypes.bomb
+    finally:
+      try:
+        del unittest_pb2.TestAllTypes.bomb
+      except Exception:
+        pass
 
 
 if __name__ == '__main__':

@@ -11,12 +11,12 @@ import {UnitLabelAlign} from './line_chart/constants.js';
 import {DataSeries} from './line_chart/data_series.js';
 import {LineChart} from './line_chart/line_chart.js';
 import {UnitLabel} from './line_chart/unit_label.js';
-import {CounterType, DataSeriesSet, GeneralCpuType, GeneralInfoType, GeneralMemoryType, GeneralZramType, MemoryDataSeriesSet, ZramDataSeriesSet} from './types.js';
 
-/** @type {!DataSeriesSet} */
+
+/** @type {!import('./types.js').DataSeriesSet} */
 const dataSeries = initDataSeries();
 
-/** @type {!GeneralInfoType} */
+/** @type {!import('./types.js').GeneralInfoType} */
 const generalInfo = initGeneralInfo();
 
 /** @type{!Object<string, PromiseResolver>} */
@@ -38,7 +38,7 @@ export const lineChart = new LineChart();
  */
 let counterMax = 0;
 
-/** @const{Map<string, !CounterType>} */
+/** @const{Map<string, !import('./types.js').CounterType>} */
 const counterDict = new Map();
 
 /**
@@ -103,10 +103,10 @@ export function closeDrawer() {
 
 /**
  * Initialize the data series of the page.
- * @return {!DataSeriesSet}
+ * @return {!import('./types.js').DataSeriesSet}
  */
 function initDataSeries() {
-  const /** DataSeriesSet */ dataSeriesRes = {
+  const /** import('./types.js').DataSeriesSet */ dataSeriesRes = {
     cpus: null,
     memory: {
       memUsed: new DataSeries('Used Memory', MEMORY_COLOR_SET[0]),
@@ -129,7 +129,7 @@ function initDataSeries() {
 
 /**
  * Initialize generalInfo.
- * @return {!GeneralInfoType}
+ * @return {!import('./types.js').GeneralInfoType}
  */
 function initGeneralInfo() {
   return {
@@ -152,6 +152,8 @@ function initGeneralInfo() {
       orig: 0,
       total: 0,
     },
+    gpu: null,
+    npu: null,
   };
 }
 
@@ -191,6 +193,8 @@ export function handleUpdateData(data, timestamp) {
   updateCpuData(data.cpus, timestamp);
   updateMemoryData(data.memory, timestamp);
   updateZramData(data.zram, timestamp);
+  updateGpuData(data.gpu, timestamp);
+  updateNpuData(data.npu, timestamp);
 
   if (isInfoPage()) {
     updateInfoPage();
@@ -209,7 +213,7 @@ function updateCpuData(cpus, timestamp) {
     initCpuDataSeries(cpus);
   }
   const /** Array<!DataSeries> */ cpuDataSeries = dataSeries.cpus;
-  if (cpus.length != cpuDataSeries.length) {
+  if (cpus.length !== cpuDataSeries.length) {
     console.warn('Cpu Data: Number of processors changed.');
     return;
   }
@@ -218,7 +222,7 @@ function updateCpuData(cpus, timestamp) {
   let allIdle = 0;
   for (let i = 0; i < cpus.length; ++i) {
     /* Check if this cpu is offline */
-    if (cpus[i].total == 0) {
+    if (cpus[i].total === 0) {
       cpuDataSeries[i].addDataPoint(0, timestamp);
       continue;
     }
@@ -232,20 +236,21 @@ function updateCpuData(cpus, timestamp) {
         getDiffAndUpdateCounter(`cpu_${i}_total`, cpus[i].total, timestamp);
     /* Total may be zero at first update. */
     const /** number */ percentage =
-        total == 0 ? 0 : (user + kernel) / total * 100;
+        total === 0 ? 0 : (user + kernel) / total * 100;
     cpuDataSeries[i].addDataPoint(percentage, timestamp);
     allKernel += kernel;
     allUser += user;
     allIdle += idle;
   }
 
-  const /** !GeneralCpuType */ generalCpu = generalInfo.cpu;
+  const /** !import('./types.js').GeneralCpuType */ generalCpu =
+      generalInfo.cpu;
   generalCpu.core = cpus.length;
   const allTotal = allKernel + allUser + allIdle;
-  generalCpu.usage = allTotal == 0 ? 0 : (allKernel + allUser) / allTotal;
-  generalCpu.kernel = allTotal == 0 ? 0 : allKernel / allTotal;
-  generalCpu.user = allTotal == 0 ? 0 : allUser / allTotal;
-  generalCpu.idle = allTotal == 0 ? 0 : allIdle / allTotal;
+  generalCpu.usage = allTotal === 0 ? 0 : (allKernel + allUser) / allTotal;
+  generalCpu.kernel = allTotal === 0 ? 0 : allKernel / allTotal;
+  generalCpu.user = allTotal === 0 ? 0 : allUser / allTotal;
+  generalCpu.idle = allTotal === 0 ? 0 : allIdle / allTotal;
 }
 
 /**
@@ -254,7 +259,7 @@ function updateCpuData(cpus, timestamp) {
  * @param {!Array<!SysInfoApiCpuResult>} cpus
  */
 function initCpuDataSeries(cpus) {
-  if (cpus.length == 0) {
+  if (cpus.length === 0) {
     return;
   }
   dataSeries.cpus = [];
@@ -271,7 +276,8 @@ function initCpuDataSeries(cpus) {
  * @param {number} timestamp
  */
 function updateMemoryData(memory, timestamp) {
-  const /** !MemoryDataSeriesSet */ memDataSeries = dataSeries.memory;
+  const /** !import('./types.js').MemoryDataSeriesSet */ memDataSeries =
+      dataSeries.memory;
   const /** number */ memUsed = memory.total - memory.available;
   memDataSeries.memUsed.addDataPoint(memUsed, timestamp);
   const /** number */ swapUsed = memory.swapTotal - memory.swapFree;
@@ -283,7 +289,8 @@ function updateMemoryData(memory, timestamp) {
       getDiffPerSecAndUpdateCounter('pswpout', memory.pswpout, timestamp);
   memDataSeries.pswpout.addDataPoint(pswpout, timestamp);
 
-  const /** !GeneralMemoryType */ generalMem = generalInfo.memory;
+  const /** !import('./types.js').GeneralMemoryType */ generalMem =
+      generalInfo.memory;
   generalMem.total = memory.total;
   generalMem.used = memUsed;
   generalMem.swapTotal = memory.swapTotal;
@@ -296,7 +303,8 @@ function updateMemoryData(memory, timestamp) {
  * @param {number} timestamp
  */
 function updateZramData(zram, timestamp) {
-  const /** !ZramDataSeriesSet */ zramDataSeries = dataSeries.zram;
+  const /** !import('./types.js').ZramDataSeriesSet */ zramDataSeries =
+      dataSeries.zram;
   zramDataSeries.origDataSize.addDataPoint(zram.origDataSize, timestamp);
   zramDataSeries.comprDataSize.addDataPoint(zram.comprDataSize, timestamp);
   zramDataSeries.memUsedTotal.addDataPoint(zram.memUsedTotal, timestamp);
@@ -307,7 +315,8 @@ function updateZramData(zram, timestamp) {
       getDiffPerSecAndUpdateCounter('numWrites', zram.numWrites, timestamp);
   zramDataSeries.numWrites.addDataPoint(numWrites, timestamp);
 
-  const /** !GeneralZramType */ generalZram = generalInfo.zram;
+  const /** !import('./types.js').GeneralZramType */ generalZram =
+      generalInfo.zram;
   generalZram.total = zram.memUsedTotal;
   generalZram.orig = zram.origDataSize;
   generalZram.compr = zram.comprDataSize;
@@ -315,6 +324,47 @@ function updateZramData(zram, timestamp) {
    * there is no comprRatio now. */
   generalZram.comprRatio =
       (zram.origDataSize - zram.comprDataSize) / zram.origDataSize;
+}
+
+/**
+ * Handle the new gpu data.
+ * @param {?SysInfoApiGpuResult} gpu
+ * @param {number} timestamp
+ */
+function updateGpuData(gpu, timestamp) {
+  if (gpu === null) {
+    generalInfo.gpu = null;
+    return;
+  }
+
+  const busyMsPerSec =
+      getDiffPerSecAndUpdateCounter('gpuBusy', gpu.busy, timestamp);
+
+  // When the system is busy, the time drift between sampling in C++ and calling
+  // Data.now() in JS may make the value slightly over 1.0.
+  const usage = Math.min(busyMsPerSec / 1000, 1.0);
+  generalInfo.gpu = {usage};
+}
+
+
+/**
+ * Handle the new npu data.
+ * @param {?SysInfoApiNpuResult} npu
+ * @param {number} timestamp
+ */
+function updateNpuData(npu, timestamp) {
+  if (npu === null) {
+    generalInfo.npu = null;
+    return;
+  }
+
+  const busyMsPerSec =
+      getDiffPerSecAndUpdateCounter('npuBusy', npu.busy, timestamp);
+
+  // When the system is busy, the time drift between sampling in C++ and calling
+  // Data.now() in JS may make the value slightly over 1.0.
+  const usage = Math.min(busyMsPerSec / 1000, 1.0);
+  generalInfo.npu = {usage};
 }
 
 /**
@@ -326,11 +376,12 @@ function updateZramData(zram, timestamp) {
  * @return {number}
  */
 export function getDiffAndUpdateCounter(name, newValue, timestamp) {
-  if (counterDict.get(name) == undefined) {
+  if (counterDict.get(name) === undefined) {
     counterDict.set(name, {value: newValue, timestamp: timestamp});
     return 0;
   }
-  const /** !CounterType */ counter = counterDict.get(name);
+  const /** !import('./types.js').CounterType */ counter =
+      counterDict.get(name);
   let /** number */ valueDelta = newValue - counter.value;
 
   /* If the increments of the counter is negative, it means that the counter
@@ -360,7 +411,7 @@ export function getDiffPerSecAndUpdateCounter(name, newValue, timestamp) {
 
   /* If oldTimeStamp is -1, it means that this is the first value of the
    * counter. */
-  if (oldTimeStamp == -1) {
+  if (oldTimeStamp === -1) {
     return 0;
   }
 
@@ -370,7 +421,7 @@ export function getDiffPerSecAndUpdateCounter(name, newValue, timestamp) {
    */
   const timeDelta = (timestamp - oldTimeStamp) / 1000;
   const /** number */ deltaPerSec =
-      (timeDelta == 0) ? 0 : valueDelta / timeDelta;
+      (timeDelta === 0) ? 0 : valueDelta / timeDelta;
   return deltaPerSec;
 }
 
@@ -385,24 +436,36 @@ export function updateInfoPage() {
     setTextById(id, getValueWithUnit(value, UNITS_MEMORY, UNITBASE_MEMORY));
   };
 
-  const /** !GeneralCpuType */ cpu = generalInfo.cpu;
+  const cpu = generalInfo.cpu;
   setTextById('infopage-num-of-cpu', cpu.core.toString());
   setPercentageById('infopage-cpu-usage', cpu.usage);
   setPercentageById('infopage-cpu-kernel', cpu.kernel);
   setPercentageById('infopage-cpu-user', cpu.user);
   setPercentageById('infopage-cpu-idle', cpu.idle);
 
-  const /** !GeneralMemoryType */ memory = generalInfo.memory;
+  const memory = generalInfo.memory;
   setMemoryById('infopage-memory-total', memory.total);
   setMemoryById('infopage-memory-used', memory.used);
   setMemoryById('infopage-memory-swap-total', memory.swapTotal);
   setMemoryById('infopage-memory-swap-used', memory.swapUsed);
 
-  const /** !GeneralZramType */ zram = generalInfo.zram;
+  const zram = generalInfo.zram;
   setMemoryById('infopage-zram-total', zram.total);
   setMemoryById('infopage-zram-orig', zram.orig);
   setMemoryById('infopage-zram-compr', zram.compr);
   setPercentageById('infopage-zram-compr-ratio', zram.comprRatio);
+
+  const gpu = generalInfo.gpu;
+  $('infopage-panel-gpu').classList.toggle('hidden', gpu === null);
+  if (gpu !== null) {
+    setPercentageById('infopage-gpu-usage', gpu.usage)
+  }
+
+  const npu = generalInfo.npu;
+  $('infopage-panel-npu').classList.toggle('hidden', npu === null);
+  if (npu !== null) {
+    setPercentageById('infopage-npu-usage', npu.usage)
+  }
 }
 
 /**
@@ -480,7 +543,7 @@ function onHashChange() {
  * @return {boolean}
  */
 export function isInfoPage() {
-  return location.hash == '';
+  return location.hash === '';
 }
 
 /**
@@ -499,7 +562,7 @@ const /** number */ RIGHT = UnitLabelAlign.RIGHT;
  */
 function setupCPUPage() {
   /* This function is async so we need to check the page is still CPU page. */
-  if (location.hash != PAGE_HASH.CPU) {
+  if (location.hash !== PAGE_HASH.CPU) {
     return;
   }
 
@@ -519,7 +582,8 @@ function setupCPUPage() {
  * Set the current page to memory page.
  */
 function setupMemoryPage() {
-  const /** !MemoryDataSeriesSet */ memDataSeries = dataSeries.memory;
+  const /** !import('./types.js').MemoryDataSeriesSet */ memDataSeries =
+      dataSeries.memory;
   lineChart.setSubChart(
       LEFT, UNITS_NUMBER_PER_SECOND, UNITBASE_NUMBER_PER_SECOND);
   lineChart.setSubChart(RIGHT, UNITS_MEMORY, UNITBASE_MEMORY);
@@ -533,7 +597,8 @@ function setupMemoryPage() {
  * Set the current page to zram page.
  */
 function setupZramPage() {
-  const /** !ZramDataSeriesSet */ zramDataSeries = dataSeries.zram;
+  const /** !import('./types.js').ZramDataSeriesSet */ zramDataSeries =
+      dataSeries.zram;
   lineChart.setSubChart(
       LEFT, UNITS_NUMBER_PER_SECOND, UNITBASE_NUMBER_PER_SECOND);
   lineChart.setSubChart(RIGHT, UNITS_MEMORY, UNITBASE_MEMORY);

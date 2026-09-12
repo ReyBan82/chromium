@@ -15,7 +15,6 @@
 #include "base/auto_reset.h"
 #include "base/command_line.h"
 #include "base/containers/adapters.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -25,17 +24,21 @@
 #include "base/numerics/safe_math.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
+#include "base/task/common/task_annotator.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/timer/elapsed_timer.h"
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/traced_value.h"
+#include "base/tracing/protos/chrome_track_event.pbzero.h"
+#include "base/types/optional_ref.h"
 #include "build/build_config.h"
 #include "cc/base/devtools_instrumentation.h"
 #include "cc/base/features.h"
 #include "cc/base/histograms.h"
 #include "cc/base/math_util.h"
 #include "cc/debug/rendering_stats_instrumentation.h"
+#include "cc/input/browser_controls_offset_tag_modifications.h"
 #include "cc/input/layer_selection_bound.h"
 #include "cc/input/overscroll_behavior.h"
 #include "cc/input/page_scale_animation.h"
@@ -43,22 +46,25 @@
 #include "cc/layers/heads_up_display_layer_impl.h"
 #include "cc/layers/layer.h"
 #include "cc/layers/painted_scrollbar_layer.h"
-#include "cc/metrics/ukm_smoothness_data.h"
+#include "cc/metrics/ukm_dropped_frames_data.h"
 #include "cc/paint/paint_worklet_layer_painter.h"
 #include "cc/resources/ui_resource_manager.h"
 #include "cc/tiles/raster_dark_mode_filter.h"
+#include "cc/trees/client_layer_tree_host_impl.h"
 #include "cc/trees/clip_node.h"
 #include "cc/trees/commit_state.h"
 #include "cc/trees/compositor_commit_data.h"
 #include "cc/trees/draw_property_utils.h"
 #include "cc/trees/effect_node.h"
-#include "cc/trees/layer_tree_host_client.h"
+#include "cc/trees/layer_tree_host_delegate.h"
 #include "cc/trees/layer_tree_host_impl.h"
 #include "cc/trees/layer_tree_impl.h"
 #include "cc/trees/mobile_optimized_viewport_util.h"
 #include "cc/trees/mutator_host.h"
 #include "cc/trees/paint_holding_reason.h"
 #include "cc/trees/property_tree_builder.h"
+#include "cc/trees/property_tree_layer_list_delegate.h"
+#include "cc/trees/property_tree_layer_tree_delegate.h"
 #include "cc/trees/proxy_main.h"
 #include "cc/trees/render_frame_metadata_observer.h"
 #include "cc/trees/scroll_node.h"
@@ -66,16 +72,16 @@
 #include "cc/trees/swap_promise_manager.h"
 #include "cc/trees/transform_node.h"
 #include "cc/trees/tree_synchronizer.h"
-#include "cc/trees/ukm_manager.h"
 #include "cc/view_transition/view_transition_request.h"
 #include "components/viz/common/features.h"
 #include "components/viz/common/frame_sinks/copy_output_request.h"
-#include "services/metrics/public/cpp/ukm_recorder.h"
-#include "services/tracing/public/cpp/perfetto/flow_event_utils.h"
 #include "services/tracing/public/cpp/perfetto/macros.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 #include "ui/gfx/geometry/size_conversions.h"
 #include "ui/gfx/geometry/vector2d_conversions.h"
 #include "ui/gfx/presentation_feedback.h"
+#include "ui/latency/latency_info.h"
 
 namespace {
 static base::AtomicSequenceNumber s_layer_tree_host_sequence_number;
@@ -122,14 +128,14 @@ std::unique_ptr<LayerTreeHost> LayerTreeHost::CreateThreaded(
 }
 
 std::unique_ptr<LayerTreeHost> LayerTreeHost::CreateSingleThreaded(
-    LayerTreeHostSingleThreadClient* single_thread_client,
+    LayerTreeHostSingleThreadDelegate* single_thread_delegate,
     InitParams params) {
   DCHECK(params.settings);
   scoped_refptr<base::SingleThreadTaskRunner> main_task_runner =
       params.main_task_runner;
   auto layer_tree_host = base::WrapUnique(
       new LayerTreeHost(std::move(params), CompositorMode::SINGLE_THREADED));
-  layer_tree_host->InitializeSingleThreaded(single_thread_client,
+  layer_tree_host->InitializeSingleThreaded(single_thread_delegate,
                                             std::move(main_task_runner));
   return layer_tree_host;
 }
@@ -137,19 +143,19 @@ std::unique_ptr<LayerTreeHost> LayerTreeHost::CreateSingleThreaded(
 LayerTreeHost::LayerTreeHost(InitParams params, CompositorMode mode)
     : micro_benchmark_controller_(this),
       image_worker_task_runner_(std::move(params.image_worker_task_runner)),
-      ukm_recorder_factory_(std::move(params.ukm_recorder_factory)),
       compositor_mode_(mode),
       ui_resource_manager_(std::make_unique<UIResourceManager>()),
       client_(params.client),
-      scheduling_client_(params.scheduling_client),
+      scheduling_delegate_(params.scheduling_delegate),
       rendering_stats_instrumentation_(RenderingStatsInstrumentation::Create()),
       pending_commit_state_(std::make_unique<CommitState>()),
-      thread_unsafe_commit_state_(params.mutator_host, *this),
+      thread_unsafe_commit_state_(params.mutator_host),
       settings_(*params.settings),
       id_(s_layer_tree_host_sequence_number.GetNext() + 1),
       task_graph_runner_(params.task_graph_runner),
       mutator_host_(params.mutator_host),
-      dark_mode_filter_(params.dark_mode_filter) {
+      dark_mode_filter_(params.dark_mode_filter),
+      property_tree_delegate_(params.property_tree_delegate) {
   DCHECK(task_graph_runner_);
   DCHECK(!settings_.enable_checker_imaging || image_worker_task_runner_);
 
@@ -160,30 +166,47 @@ LayerTreeHost::LayerTreeHost(InitParams params, CompositorMode mode)
 
   rendering_stats_instrumentation_->set_record_rendering_stats(
       pending_commit_state_->debug_state.RecordRenderingStats());
+
+  if (!params.property_tree_delegate) {
+    if (IsUsingLayerLists()) {
+      owned_property_tree_delegate_ =
+          std::make_unique<PropertyTreeLayerListDelegate>();
+      property_tree_delegate_ = owned_property_tree_delegate_.get();
+    } else {
+      owned_property_tree_delegate_ =
+          std::make_unique<PropertyTreeLayerTreeDelegate>();
+      property_tree_delegate_ = owned_property_tree_delegate_.get();
+    }
+  }
+  property_tree_delegate_->SetLayerTreeHost(this);
 }
 
 bool LayerTreeHost::IsMobileOptimized() const {
   gfx::SizeF scrollable_viewport_size;
-  const auto* inner_node = property_trees()->scroll_tree().Node(
-      pending_commit_state()->viewport_property_ids.inner_scroll);
-  if (!inner_node)
+  int inner_scroll_id =
+      pending_commit_state()->viewport_property_ids.inner_scroll;
+  if (inner_scroll_id == kInvalidPropertyNodeId) {
     scrollable_viewport_size = gfx::SizeF();
-  else
+  } else {
     scrollable_viewport_size = gfx::ScaleSize(
-        gfx::SizeF(inner_node->container_bounds),
+        gfx::SizeF(property_trees()
+                       ->scroll_tree()
+                       .Node(inner_scroll_id)
+                       .container_bounds),
         1.0f / (pending_commit_state()->external_page_scale_factor *
                 page_scale_factor()));
+  }
 
   gfx::SizeF scrollable_size;
-  const auto* scroll_node = property_trees()->scroll_tree().Node(
-      pending_commit_state()->viewport_property_ids.outer_scroll);
-  if (!scroll_node) {
-    DCHECK(!inner_node);
+  int outer_scroll_id =
+      pending_commit_state()->viewport_property_ids.outer_scroll;
+  if (outer_scroll_id == kInvalidPropertyNodeId) {
+    DCHECK(inner_scroll_id == kInvalidPropertyNodeId);
     scrollable_size = gfx::SizeF();
   } else {
     const auto& scroll_tree = property_trees()->scroll_tree();
-    auto size = scroll_tree.scroll_bounds(scroll_node->id);
-    size.SetToMax(gfx::SizeF(scroll_tree.container_bounds(scroll_node->id)));
+    auto size = scroll_tree.scroll_bounds(outer_scroll_id);
+    size.SetToMax(gfx::SizeF(scroll_tree.container_bounds(outer_scroll_id)));
     scrollable_size = size;
   }
 
@@ -204,10 +227,10 @@ void LayerTreeHost::InitializeThreaded(
 }
 
 void LayerTreeHost::InitializeSingleThreaded(
-    LayerTreeHostSingleThreadClient* single_thread_client,
+    LayerTreeHostSingleThreadDelegate* single_thread_delegate,
     scoped_refptr<base::SingleThreadTaskRunner> main_task_runner) {
   task_runner_provider_ = TaskRunnerProvider::Create(main_task_runner, nullptr);
-  InitializeProxy(SingleThreadProxy::Create(this, single_thread_client,
+  InitializeProxy(SingleThreadProxy::Create(this, single_thread_delegate,
                                             task_runner_provider_.get()));
 }
 
@@ -223,7 +246,7 @@ void LayerTreeHost::SetTaskRunnerProviderForTesting(
   DCHECK(!task_runner_provider_);
   task_runner_provider_ = std::move(task_runner_provider);
   // This is done in InitializeProxy(), but not all tests call it.
-  mutator_host_->SetMutatorHostClient(this);
+  mutator_host_->SetMutatorHostDelegate(this);
 }
 
 void LayerTreeHost::SetUIResourceManagerForTesting(
@@ -236,7 +259,7 @@ void LayerTreeHost::InitializeProxy(std::unique_ptr<Proxy> proxy) {
   DCHECK(task_runner_provider_);
   DCHECK(IsMainThread());
 
-  mutator_host_->SetMutatorHostClient(this);
+  mutator_host_->SetMutatorHostDelegate(this);
 
   proxy_ = std::move(proxy);
   proxy_->Start();
@@ -252,7 +275,7 @@ LayerTreeHost::~LayerTreeHost() {
   TRACE_EVENT0("cc", "LayerTreeHost::~LayerTreeHost");
 
   // Clear any references into the LayerTreeHost.
-  mutator_host()->SetMutatorHostClient(nullptr);
+  mutator_host()->SetMutatorHostDelegate(nullptr);
 
   if (root_layer()) {
     root_layer()->SetLayerTreeHost(nullptr);
@@ -263,9 +286,12 @@ LayerTreeHost::~LayerTreeHost() {
     thread_unsafe_commit_state().root_layer = nullptr;
   }
 
+  property_tree_delegate_->SetLayerTreeHost(nullptr);
+
   // Fail any pending image decodes.
-  for (auto& pair : pending_image_decodes_)
-    std::move(pair.second).Run(false);
+  for (auto& entry : pending_image_decodes_) {
+    std::move(entry.second.first).Run(false);
+  }
 
   if (proxy_) {
     proxy_->Stop();
@@ -341,8 +367,10 @@ void LayerTreeHost::QueueSwapPromise(
 void LayerTreeHost::WillBeginMainFrame() {
   DCHECK(IsMainThread());
   inside_main_frame_ = true;
-  devtools_instrumentation::WillBeginMainThreadFrame(GetId(),
-                                                     SourceFrameNumber());
+  if (!GetSettings().is_layer_tree_for_ui) {
+    devtools_instrumentation::WillBeginMainThreadFrame(GetId(),
+                                                       SourceFrameNumber());
+  }
   client_->WillBeginMainFrame();
 }
 
@@ -350,6 +378,7 @@ void LayerTreeHost::DidBeginMainFrame() {
   DCHECK(IsMainThread());
   inside_main_frame_ = false;
   client_->DidBeginMainFrame();
+  force_commit_for_propagation_ = false;
 }
 
 void LayerTreeHost::BeginMainFrameNotExpectedSoon() {
@@ -383,13 +412,8 @@ void LayerTreeHost::RequestMainFrameUpdate(bool report_metrics) {
 
 void LayerTreeHost::ImageDecodesFinished(
     const std::vector<std::pair<int, bool>>& results) {
-  DCHECK(IsMainThread());
-  // Issue stored callbacks and remove them from the pending list.
   for (const auto& pair : results) {
-    auto it = pending_image_decodes_.find(pair.first);
-    DCHECK(it != pending_image_decodes_.end());
-    std::move(it->second).Run(pair.second);
-    pending_image_decodes_.erase(it);
+    NotifyImageDecodeFinished(pair.first, pair.second);
   }
 }
 
@@ -402,42 +426,95 @@ std::unique_ptr<CommitState> LayerTreeHost::WillCommit(
     bool has_updates) {
   DCHECK(IsMainThread());
   DCHECK(!commit_completion_event_);
-  std::unique_ptr<CommitState> result;
-  if (has_updates)
-    result = ActivateCommitState();
+
+  std::vector<std::pair<int, gfx::Rect>> layer_update_rects;
+  for (auto* layer : *this) {
+    if (!layer->update_rect().IsEmpty()) {
+      layer->SetNeedsPushProperties();
+      layer_update_rects.emplace_back(layer->id(), layer->update_rect());
+      layer->ResetUpdateRect();
+    }
+  }
+  std::sort(layer_update_rects.begin(), layer_update_rects.end());
+  pending_commit_state()->layer_update_rects = base::flat_map<int, gfx::Rect>(
+      base::sorted_unique_t(), std::move(layer_update_rects));
+
   swap_promise_manager_.WillCommit();
-  client_->WillCommit(has_updates ? *result : *pending_commit_state());
+  mutator_host()->RemoveStaleTimelines();
+  mutator_host()->RemoveStaleTriggers();
+
+  // TODO(paint-dev): We can avoid the churn of this call when (!has_updates) if
+  // we know there are no paint event handlers registered.
+  std::unique_ptr<CommitState> activated_commit_state = ActivateCommitState();
+
+  {
+    base::AutoReset<bool> in_will_commit(&inside_will_commit_, true);
+    client_->WillCommit(*activated_commit_state.get());
+  }
+
+  // We need activated_commit_state to absorb any effects of
+  // UpdateAfterPaintEvent() and applying layer invalidation rects, so we swap
+  // it into pending_commit_state_ for this sequence.
+  std::swap(pending_commit_state_, activated_commit_state);
+  for (auto* layer : *this) {
+    if (layer->MayUpdateAfterPaintEvent()) {
+      has_updates |= layer->UpdateAfterPaintEvent();
+      if (!layer->update_rect().IsEmpty()) {
+        DCHECK(has_updates);
+        layer->SetNeedsPushProperties();
+        pending_commit_state()->layer_update_rects[layer->id()].Union(
+            layer->update_rect());
+        layer->ResetUpdateRect();
+      }
+    }
+  }
+  std::swap(pending_commit_state_, activated_commit_state);
+
+  if (!has_updates) {
+    // Even after paint event handlers there is no update. Unwind the effects of
+    // ActiveCommitState() and return.
+    pending_commit_state_ = std::move(activated_commit_state);
+    pending_commit_state()->source_frame_number++;
+    property_trees()->ApplyChangeStateFrom(
+        pending_commit_state()->property_trees);
+    pending_commit_state()->property_trees.clear();
+    // The completion event will be handled appropriately by the caller that
+    // provided it.
+    commit_completion_event_ = std::move(completion);
+    return nullptr;
+  }
+
   pending_commit_state()->source_frame_number++;
+
+  // Pull state not stored directly on LayerTreeHost
+  activated_commit_state->event_metrics =
+      events_metrics_manager_.TakeSavedEventsMetrics();
+  activated_commit_state->swap_promises =
+      GetSwapPromiseManager()->TakeSwapPromises();
+  activated_commit_state->ui_resource_request_queue =
+      ui_resource_manager_->TakeUIResourcesRequests();
+  activated_commit_state->ui_resource_sizes =
+      ui_resource_manager_->GetUIResourceSizes();
+  activated_commit_state->benchmarks =
+      micro_benchmark_controller_.CreateImplBenchmarks();
+
   commit_completion_event_ = std::move(completion);
-  pending_commit_state()->previous_surfaces_visual_update_duration =
-      base::TimeDelta();
-  return result;
+  return activated_commit_state;
 }
 
 std::unique_ptr<CommitState> LayerTreeHost::ActivateCommitState() {
   DCHECK(IsMainThread());
   DCHECK(pending_commit_state());
 
-  // Pull state not stored directly on LayerTreeHost
-  pending_commit_state()->event_metrics =
-      events_metrics_manager_.TakeSavedEventsMetrics();
-  pending_commit_state()->swap_promises =
-      GetSwapPromiseManager()->TakeSwapPromises();
-  pending_commit_state()->ui_resource_request_queue =
-      ui_resource_manager_->TakeUIResourcesRequests();
-  pending_commit_state()->ui_resource_sizes =
-      ui_resource_manager_->GetUIResourceSizes();
-  pending_commit_state()->benchmarks =
-      micro_benchmark_controller_.CreateImplBenchmarks();
-
-  // Snapshot PropertyTrees change tracking state prior to resetting it.
-  property_trees()->GetChangeState(
-      pending_commit_state()->property_trees_change_state);
+  // Snapshot property trees now to lock in the commit state while paint event
+  // handlers run.
+  pending_commit_state()->property_trees = *property_trees();
+  pending_commit_state()->property_trees.TakeChangeStateFrom(*property_trees());
   property_trees()->ResetAllChangeTracking();
 
-  auto active_commit_state = std::move(pending_commit_state_);
-  pending_commit_state_ = std::make_unique<CommitState>(*active_commit_state);
-  return active_commit_state;
+  std::unique_ptr<CommitState> result = std::move(pending_commit_state_);
+  pending_commit_state_ = std::make_unique<CommitState>(*result.get());
+  return result;
 }
 
 void LayerTreeHost::WaitForProtectedSequenceCompletion() const {
@@ -448,23 +525,13 @@ void LayerTreeHost::WaitForProtectedSequenceCompletion() const {
 
 void LayerTreeHost::WaitForCommitCompletion(bool for_protected_sequence) const {
   DCHECK(IsMainThread());
+  // We should not be running code that modifies commit state just prior to the
+  // impl commit.
+  CHECK(!inside_will_commit_);
   if (commit_completion_event_) {
     TRACE_EVENT0("cc", "LayerTreeHost::WaitForCommitCompletion");
-    base::ElapsedTimer timer;
     commit_completion_event_->Wait();
     commit_completion_event_ = nullptr;
-    if (for_protected_sequence) {
-      waited_for_protected_sequence_ = true;
-      auto elapsed = timer.Elapsed();
-      base::UmaHistogramMicrosecondsTimes(
-          "Compositing.MainThreadBlockedDuringCommitTime", elapsed);
-      if (in_apply_compositor_changes_) {
-        base::UmaHistogramMicrosecondsTimes(
-            "Compositing.MainThreadBlockedDuringCommitTime."
-            "ApplyCompositorChanges",
-            elapsed);
-      }
-    }
   }
 }
 
@@ -482,36 +549,58 @@ bool LayerTreeHost::IsUsingLayerLists() const {
   return settings_.use_layer_lists;
 }
 
-void LayerTreeHost::CommitComplete(const CommitTimestamps& commit_timestamps) {
+void LayerTreeHost::CommitComplete(int source_frame_number,
+                                   const CommitTimestamps& commit_timestamps) {
   DCHECK(IsMainThread());
+
   // At this point, commit_completion_event_ could be for the *next* commit, and
-  // may not yet have been signaled.
+  // may not yet have been signaled. If we blocked on a protected sequence
+  // during the commit then the completion event for the frame will have been
+  // reset, which in turn unblocks starting a commit for the next frame. If we
+  // have a commit completion event that has been signaled, it means that we
+  // have not been blocked on a protected sequence during the commit. In this
+  // case, we still need to call WaitForCommitCompletion, which performs the
+  // flag reset; however, the Wait will be non-blocking given that the event was
+  // already signaled.
+  if (!in_commit()) {
+    mutator_host()->RemoveStaleTimelines();
+    mutator_host()->RemoveStaleTriggers();
+  }
   if (commit_completion_event_ && commit_completion_event_->IsSignaled())
     WaitForCommitCompletion(/* for_protected_sequence */ false);
-  client_->DidCommit(commit_timestamps.start, commit_timestamps.finish);
+  client_->DidCommit(source_frame_number, commit_timestamps.start,
+                     commit_timestamps.finish);
   if (did_complete_scale_animation_) {
-    client_->DidCompletePageScaleAnimation();
+    client_->DidCompletePageScaleAnimation(source_frame_number);
     did_complete_scale_animation_ = false;
   }
-  if (compositor_mode_ == CompositorMode::THREADED) {
-    UMA_HISTOGRAM_BOOLEAN("Compositing.DidMainThreadBlockDuringCommit",
-                          waited_for_protected_sequence_);
-  }
-  waited_for_protected_sequence_ = false;
+}
+
+void LayerTreeHost::NotifyImageDecodeFinished(int request_id,
+                                              bool decode_succeeded) {
+  DCHECK(IsMainThread());
+  auto it = pending_image_decodes_.find(request_id);
+  CHECK(it != pending_image_decodes_.end());
+  // Issue stored callback and remove them from the pending list.
+  std::move(it->second.first).Run(decode_succeeded);
+  pending_image_decodes_.erase(it);
 }
 
 void LayerTreeHost::NotifyTransitionRequestsFinished(
-    const std::vector<uint32_t>& sequence_ids) {
+    const uint32_t sequence_id,
+    const viz::ViewTransitionElementResourceRects& rects) {
   DCHECK(IsMainThread());
   // TODO(vmpstr): This might also be a good spot to expire long standing
   // requests if they were not finished.
-  for (auto& sequence_id : sequence_ids) {
-    auto it = view_transition_callbacks_.find(sequence_id);
-    if (it == view_transition_callbacks_.end())
-      continue;
-    std::move(it->second).Run();
-    view_transition_callbacks_.erase(it);
+  auto it = view_transition_callbacks_.find(sequence_id);
+  if (it == view_transition_callbacks_.end()) {
+    return;
   }
+  // The callback can cause more requests to be added and run the lifecycle, so
+  // unwind the stack before calling it.
+  task_runner_provider_->MainThreadTaskRunner()->PostTask(
+      FROM_HERE, base::BindOnce(std::move(it->second), rects));
+  view_transition_callbacks_.erase(it);
 }
 
 void LayerTreeHost::SetLayerTreeFrameSink(
@@ -534,9 +623,28 @@ std::unique_ptr<LayerTreeFrameSink> LayerTreeHost::ReleaseLayerTreeFrameSink() {
   return std::move(current_layer_tree_frame_sink_);
 }
 
+ScopedKeepSurfaceAlive::ScopedKeepSurfaceAlive(LayerTreeHost* host,
+                                               const viz::SurfaceId& surface_id)
+    : host_(host->weak_ptr_factory_.GetWeakPtr()),
+      range_(surface_id, surface_id) {
+  host_->AddSurfaceRange(range_);
+}
+
+ScopedKeepSurfaceAlive::~ScopedKeepSurfaceAlive() {
+  if (host_) {
+    host_->RemoveSurfaceRange(range_);
+  }
+}
+
+std::unique_ptr<ScopedKeepSurfaceAlive>
+LayerTreeHost::CreateScopedKeepSurfaceAlive(const viz::SurfaceId& surface_id) {
+  return std::make_unique<ScopedKeepSurfaceAlive>(this, surface_id);
+}
+
 void LayerTreeHost::RequestNewLayerTreeFrameSink() {
   DCHECK(IsMainThread());
   client_->RequestNewLayerTreeFrameSink();
+  should_warm_up_ = false;
 }
 
 void LayerTreeHost::DidInitializeLayerTreeFrameSink() {
@@ -557,8 +665,8 @@ void LayerTreeHost::DidFailToInitializeLayerTreeFrameSink() {
   client_->DidFailToInitializeLayerTreeFrameSink();
 }
 
-std::unique_ptr<LayerTreeHostImpl> LayerTreeHost::CreateLayerTreeHostImpl(
-    LayerTreeHostImplClient* client) {
+std::unique_ptr<ClientLayerTreeHostImpl> LayerTreeHost::CreateLayerTreeHostImpl(
+    LayerTreeHostImplDelegate* delegate) {
   // This method is special: it should be the only LayerTreeHost method that
   // runs on the impl thread. As such, it cannot use LayerTreeHost getter
   // methods that enforce DCHECK(IsMainThread()). Because it only ever runs when
@@ -566,16 +674,15 @@ std::unique_ptr<LayerTreeHostImpl> LayerTreeHost::CreateLayerTreeHostImpl(
   DCHECK(IsImplThread());
   DCHECK(task_runner_provider_->IsMainThreadBlocked());
   return CreateLayerTreeHostImplInternal(
-      client, thread_unsafe_commit_state_.mutator_host, settings_,
+      delegate, thread_unsafe_commit_state_.mutator_host, settings_,
       task_runner_provider_.get(), dark_mode_filter_, id_, task_graph_runner_,
-      image_worker_task_runner_, scheduling_client_,
-      rendering_stats_instrumentation_.get(), ukm_recorder_factory_,
-      compositor_delegate_weak_ptr_);
+      image_worker_task_runner_, scheduling_delegate_,
+      rendering_stats_instrumentation_.get(), compositor_delegate_weak_ptr_);
 }
 
-std::unique_ptr<LayerTreeHostImpl>
+std::unique_ptr<ClientLayerTreeHostImpl>
 LayerTreeHost::CreateLayerTreeHostImplInternal(
-    LayerTreeHostImplClient* client,
+    LayerTreeHostImplDelegate* delegate,
     MutatorHost* mutator_host,
     const LayerTreeSettings& settings,
     TaskRunnerProvider* task_runner_provider,
@@ -583,9 +690,8 @@ LayerTreeHost::CreateLayerTreeHostImplInternal(
     int id,
     raw_ptr<TaskGraphRunner>& task_graph_runner,
     scoped_refptr<base::SequencedTaskRunner> image_worker_task_runner,
-    LayerTreeHostSchedulingClient* scheduling_client,
+    LayerTreeHostSchedulingDelegate* scheduling_delegate,
     RenderingStatsInstrumentation* rendering_stats_instrumentation,
-    std::unique_ptr<UkmRecorderFactory>& ukm_recorder_factory,
     base::WeakPtr<CompositorDelegateForInput>& compositor_delegate_weak_ptr) {
   std::unique_ptr<MutatorHost> mutator_host_impl =
       mutator_host->CreateImplInstance();
@@ -595,14 +701,12 @@ LayerTreeHost::CreateLayerTreeHostImplInternal(
         settings.scroll_animation_duration_for_testing);
   }
 
-  std::unique_ptr<LayerTreeHostImpl> host_impl = LayerTreeHostImpl::Create(
-      settings, client, task_runner_provider, rendering_stats_instrumentation,
-      task_graph_runner, std::move(mutator_host_impl), dark_mode_filter, id,
-      std::move(image_worker_task_runner), scheduling_client);
-  if (ukm_recorder_factory) {
-    host_impl->InitializeUkm(ukm_recorder_factory->CreateRecorder());
-    ukm_recorder_factory.reset();
-  }
+  std::unique_ptr<ClientLayerTreeHostImpl> host_impl =
+      ClientLayerTreeHostImpl::Create(
+          settings, delegate, task_runner_provider,
+          rendering_stats_instrumentation, task_graph_runner,
+          std::move(mutator_host_impl), dark_mode_filter, id,
+          std::move(image_worker_task_runner), scheduling_delegate);
 
   task_graph_runner = nullptr;
   dark_mode_filter = nullptr;
@@ -640,26 +744,23 @@ LayerTreeHost::DeferMainFrameUpdate() {
 ScopedPauseRendering::ScopedPauseRendering(LayerTreeHost* host)
     : host_(host->weak_ptr_factory_.GetWeakPtr()) {
   host->pause_rendering_count_++;
-  host->proxy_->SetPauseRendering(true);
+  host->proxy_->SetPauseRendering(true, false);
 }
 
 ScopedPauseRendering::~ScopedPauseRendering() {
   LayerTreeHost* host = host_.get();
   if (host) {
     DCHECK_GT(host->pause_rendering_count_, 0u);
-    if (--host->pause_rendering_count_ == 0)
-      host->proxy_->SetPauseRendering(false);
+    if (--host->pause_rendering_count_ == 0) {
+      host->SetNeedsCommit();
+      host->proxy_->SetPauseRendering(false, delay_until_visibility_change_);
+    }
   }
 }
 
 std::unique_ptr<ScopedPauseRendering> LayerTreeHost::PauseRendering() {
   DCHECK(IsMainThread());
   return std::make_unique<ScopedPauseRendering>(this);
-}
-
-void LayerTreeHost::OnPauseRenderingChanged(bool paused) {
-  DCHECK(IsMainThread());
-  client_->OnPauseRenderingChanged(paused);
 }
 
 void LayerTreeHost::OnDeferMainFrameUpdatesChanged(bool defer_status) {
@@ -673,9 +774,9 @@ bool LayerTreeHost::StartDeferringCommits(base::TimeDelta timeout,
   return proxy_->StartDeferringCommits(timeout, reason);
 }
 
-void LayerTreeHost::StopDeferringCommits(PaintHoldingCommitTrigger trigger) {
+void LayerTreeHost::StopDeferringCommits() {
   DCHECK(IsMainThread());
-  proxy_->StopDeferringCommits(trigger);
+  proxy_->StopDeferringCommits();
 }
 
 bool LayerTreeHost::IsDeferringCommits() const {
@@ -687,18 +788,39 @@ bool LayerTreeHost::IsRenderingPaused() const {
   return pause_rendering_count_ > 0;
 }
 
-void LayerTreeHost::OnDeferCommitsChanged(
-    bool defer_status,
-    PaintHoldingReason reason,
-    absl::optional<PaintHoldingCommitTrigger> trigger) {
+void LayerTreeHost::OnDeferCommitsChanged(bool defer_status,
+                                          PaintHoldingReason reason) {
   DCHECK(IsMainThread());
-  client_->OnDeferCommitsChanged(defer_status, reason, trigger);
+  client_->OnDeferCommitsChanged(defer_status, reason);
+}
+
+
+ScopedRequestHighFramerate::ScopedRequestHighFramerate(LayerTreeHost* host)
+    : host_(host->weak_ptr_factory_.GetWeakPtr()) {
+  host->SetRequestHighFramerate(true);
+}
+
+ScopedRequestHighFramerate::~ScopedRequestHighFramerate() {
+  LayerTreeHost* host = host_.get();
+  if (host) {
+    host_->SetRequestHighFramerate(false);
+  }
+}
+
+std::unique_ptr<ScopedRequestHighFramerate>
+LayerTreeHost::RequestHighFramerate() {
+  return std::make_unique<ScopedRequestHighFramerate>(this);
+}
+
+void LayerTreeHost::SetRequestHighFramerate(bool flag) {
+  TRACE_EVENT("cc", __PRETTY_FUNCTION__);
+  proxy_->SetRequestHighFramerate(flag);
 }
 
 DISABLE_CFI_PERF
-void LayerTreeHost::SetNeedsAnimate() {
+void LayerTreeHost::SetNeedsAnimate(BeginMainFrameReason reason, bool urgent) {
   DCHECK(IsMainThread());
-  proxy_->SetNeedsAnimate();
+  proxy_->SetNeedsAnimate(reason, urgent);
   swap_promise_manager_.NotifyLatencyInfoSwapPromiseMonitors();
   events_metrics_manager_.SaveActiveEventMetrics();
 }
@@ -717,9 +839,10 @@ void LayerTreeHost::SetNeedsUpdateLayers() {
   events_metrics_manager_.SaveActiveEventMetrics();
 }
 
-void LayerTreeHost::SetNeedsCommit() {
+void LayerTreeHost::SetNeedsCommit(bool urgent) {
+  TRACE_EVENT("cc", __PRETTY_FUNCTION__, "urgent", urgent);
   DCHECK(IsMainThread());
-  proxy_->SetNeedsCommit();
+  proxy_->SetNeedsCommit(urgent);
   swap_promise_manager_.NotifyLatencyInfoSwapPromiseMonitors();
   events_metrics_manager_.SaveActiveEventMetrics();
 }
@@ -731,7 +854,9 @@ void LayerTreeHost::OnCommitRequested() {
 void LayerTreeHost::SetTargetLocalSurfaceId(
     const viz::LocalSurfaceId& target_local_surface_id) {
   DCHECK(IsMainThread());
-  proxy_->SetTargetLocalSurfaceId(target_local_surface_id);
+  if (target_local_surface_id.is_valid()) {
+    proxy_->SetTargetLocalSurfaceId(target_local_surface_id);
+  }
 }
 
 bool LayerTreeHost::RequestedMainFramePending() const {
@@ -758,14 +883,21 @@ void LayerTreeHost::SetNeedsCommitWithForcedRedraw() {
   pending_commit_state()->next_commit_forces_redraw = true;
   // This method is used by tests to ensure a commit before grabbing a screen
   // shot or processing input, so do not defer the commit.
-  StopDeferringCommits(PaintHoldingCommitTrigger::kFeatureDisabled);
+  StopDeferringCommits();
   proxy_->SetNeedsCommit();
 }
 
+void LayerTreeHost::RequestMainFrameOnCompositorAnimation(
+    PropertyChangeForcesCommitCriteria criteria,
+    bool force_propagation) {
+  pending_commit_state()->property_change_forces_commit_criteria = criteria;
+  force_commit_for_propagation_ |= force_propagation;
+}
+
 void LayerTreeHost::SetDebugState(const LayerTreeDebugState& new_debug_state) {
-  if (LayerTreeDebugState::Equal(pending_commit_state()->debug_state,
-                                 new_debug_state))
+  if (pending_commit_state()->debug_state == new_debug_state) {
     return;
+  }
 
   pending_commit_state()->debug_state = new_debug_state;
 
@@ -804,12 +936,15 @@ bool LayerTreeHost::IsVisible() const {
   return visible_;
 }
 
-void LayerTreeHost::LayoutAndUpdateLayers() {
-  DCHECK(IsSingleThreaded());
-  // This function is only valid when not using the scheduler.
-  DCHECK(!settings_.single_thread_proxy_scheduler);
-  RequestMainFrameUpdate(false);
-  UpdateLayers();
+void LayerTreeHost::SetShouldWarmUp() {
+  DCHECK(IsMainThread());
+  should_warm_up_ = true;
+  proxy_->SetShouldWarmUp();
+}
+
+bool LayerTreeHost::ShouldWarmUp() const {
+  DCHECK(IsMainThread());
+  return should_warm_up_;
 }
 
 void LayerTreeHost::CompositeForTest(base::TimeTicks frame_begin_time,
@@ -858,15 +993,15 @@ void LayerTreeHost::DidPresentCompositorFrame(
     uint32_t frame_token,
     std::vector<PresentationTimeCallbackBuffer::Callback>
         presentation_callbacks,
-    std::vector<PresentationTimeCallbackBuffer::SuccessfulCallback>
+    std::vector<PresentationTimeCallbackBuffer::SuccessfulCallbackWithDetails>
         successful_presentation_callbacks,
-    const gfx::PresentationFeedback& feedback) {
+    const viz::FrameTimingDetails& frame_timing_details) {
   DCHECK(IsMainThread());
   for (auto& callback : presentation_callbacks)
-    std::move(callback).Run(feedback);
+    std::move(callback).Run(frame_timing_details.presentation_feedback);
   for (auto& callback : successful_presentation_callbacks)
-    std::move(callback).Run(feedback.timestamp);
-  client_->DidPresentCompositorFrame(frame_token, feedback);
+    std::move(callback).Run(frame_timing_details);
+  client_->DidPresentCompositorFrame(frame_token, frame_timing_details);
 }
 
 void LayerTreeHost::DidCompletePageScaleAnimation() {
@@ -898,10 +1033,11 @@ bool LayerTreeHost::CaptureContent(std::vector<NodeInfo>* content) const {
 }
 
 void LayerTreeHost::DidObserveFirstScrollDelay(
+    int source_frame_number,
     base::TimeDelta first_scroll_delay,
     base::TimeTicks first_scroll_timestamp) {
   DCHECK(IsMainThread());
-  client_->DidObserveFirstScrollDelay(first_scroll_delay,
+  client_->DidObserveFirstScrollDelay(source_frame_number, first_scroll_delay,
                                       first_scroll_timestamp);
 }
 
@@ -909,9 +1045,45 @@ void LayerTreeHost::AddViewTransitionRequest(
     std::unique_ptr<ViewTransitionRequest> request) {
   // Store the commit callback on LayerTreeHost, so that we can invoke them
   // when the request is finished.
-  DCHECK(!base::Contains(view_transition_callbacks_, request->sequence_id()));
+  DCHECK(!view_transition_callbacks_.contains(request->sequence_id()));
   if (auto callback = request->TakeFinishedCallback()) {
     view_transition_callbacks_[request->sequence_id()] = std::move(callback);
+  }
+  if (request->maybe_cross_frame_sink()) {
+    auto request_token = request->token();
+    auto request_type = request->type();
+    if (request_type == viz::CompositorFrameTransitionDirective::Type::kSave &&
+        !view_transition_needs_new_lsid_.contains(request_token) &&
+        view_transition_needs_new_lsid_.size() <
+            view_transition_needs_new_lsid_max_size_) {
+      view_transition_needs_new_lsid_[request_token] = true;
+    }
+    if (request_type ==
+            viz::CompositorFrameTransitionDirective::Type::kAnimateRenderer &&
+        view_transition_needs_new_lsid_.contains(request_token)) {
+      // For cross frame-sink view transitions, Animate directive from new
+      // document should come to a different Surface than that used for Save
+      // directive for old document, to allow viz to fulfill previous Surface's
+      // CopyOutputRequests in the same frame.
+      if (view_transition_needs_new_lsid_[request_token]) {
+        RequestNewLocalSurfaceId();
+      }
+      // We can be erase entry from the map as it is no longer needed.
+      view_transition_needs_new_lsid_.erase(request_token);
+    }
+    CHECK_NE(view_transition_needs_new_lsid_.size(),
+             view_transition_needs_new_lsid_max_size_);
+    // Clear this map if it has outgrown its size, removing all outdated
+    // ViewTransition requests that were unfulfilled.
+    if (view_transition_needs_new_lsid_.size() ==
+        view_transition_needs_new_lsid_max_size_) {
+      // This can have an effect on last ongoing ViewTransition request which
+      // was added to map on Save but does not have new LSId on Animate as it is
+      // cleared here (if map was filled already with 99 stale ViewTransitions),
+      // but better to clear here than future ViewTransition Animations having
+      // unfulfilled CORs due to same LocalSurfaceId.
+      view_transition_needs_new_lsid_.clear();
+    }
   }
   pending_commit_state()->view_transition_requests.push_back(
       std::move(request));
@@ -925,31 +1097,7 @@ bool LayerTreeHost::DoUpdateLayers() {
 
   UpdateHudLayer(pending_commit_state()->debug_state.ShouldCreateHudLayer());
 
-  // In layer lists mode, the cc property trees are built directly and do not
-  // need to be built here.
-  if (!IsUsingLayerLists()) {
-    TRACE_EVENT0("cc", "LayerTreeHost::UpdateLayers::BuildPropertyTrees");
-    PropertyTreeBuilder::BuildPropertyTrees(this);
-    TRACE_EVENT_INSTANT1(TRACE_DISABLED_BY_DEFAULT("cc.debug"),
-                         "LayerTreeHost::UpdateLayers_BuiltPropertyTrees",
-                         TRACE_EVENT_SCOPE_THREAD, "property_trees",
-                         property_trees()->AsTracedValue());
-  } else {
-    TRACE_EVENT_INSTANT1(TRACE_DISABLED_BY_DEFAULT("cc.debug"),
-                         "LayerTreeHost::UpdateLayers_ReceivedPropertyTrees",
-                         TRACE_EVENT_SCOPE_THREAD, "property_trees",
-                         property_trees()->AsTracedValue());
-    // The HUD layer is managed outside the layer list sent to LayerTreeHost
-    // and needs to have its property tree state set.
-    if (hud_layer() && root_layer()) {
-      hud_layer()->SetTransformTreeIndex(root_layer()->transform_tree_index());
-      hud_layer()->SetEffectTreeIndex(root_layer()->effect_tree_index());
-      hud_layer()->SetClipTreeIndex(root_layer()->clip_tree_index());
-      hud_layer()->SetScrollTreeIndex(root_layer()->scroll_tree_index());
-      hud_layer()->set_property_tree_sequence_number(
-          root_layer()->property_tree_sequence_number());
-    }
-  }
+  property_tree_delegate_->UpdatePropertyTreesIfNeeded();
 
 #if DCHECK_IS_ON()
   // Ensure property tree nodes were created for all layers. When using layer
@@ -958,26 +1106,23 @@ bool LayerTreeHost::DoUpdateLayers() {
   // |PropertyTreeBuilder::BuildPropertyTrees| fails to create property tree
   // nodes.
   for (auto* layer : *this) {
-    DCHECK(property_trees()->effect_tree().Node(layer->effect_tree_index()));
-    DCHECK(
-        property_trees()->transform_tree().Node(layer->transform_tree_index()));
-    DCHECK(property_trees()->clip_tree().Node(layer->clip_tree_index()));
-    DCHECK(property_trees()->scroll_tree().Node(layer->scroll_tree_index()));
+    property_trees()->effect_tree().Node(layer->effect_tree_index());
+    property_trees()->transform_tree().Node(layer->transform_tree_index());
+    property_trees()->clip_tree().Node(layer->clip_tree_index());
+    property_trees()->scroll_tree().Node(layer->scroll_tree_index());
   }
 #else
   // This is a quick sanity check for readiness of paint properties.
-  // TODO(crbug.com/913464): This is to help analysis of crashes of the bug.
-  // Remove this CHECK when we close the bug.
-  CHECK(
-      property_trees()->effect_tree().Node(root_layer()->effect_tree_index()));
+  // TODO(crbug.com/40605801): This is to help analysis of crashes of the bug.
+  // Remove this check when we close the bug.
+  property_trees()->effect_tree().Node(root_layer()->effect_tree_index());
 #endif
 
   draw_property_utils::UpdatePropertyTrees(this);
 
   LayerList update_layer_list;
   draw_property_utils::FindLayersThatNeedUpdates(this, &update_layer_list);
-  bool did_paint_content = PaintContent(update_layer_list);
-  return did_paint_content;
+  return PaintContent(update_layer_list);
 }
 
 void LayerTreeHost::ApplyViewportChanges(
@@ -998,12 +1143,17 @@ void LayerTreeHost::ApplyViewportChanges(
                                 ? commit_data.ongoing_scroll_animation
                                 : (commit_data.ongoing_scroll_animation &&
                                    commit_data.manipulation_info);
-  if (scroll_animation_.in_progress && !new_ongoing_scroll) {
-    scroll_animation_.in_progress = false;
-    if (!scroll_animation_.end_notification.is_null())
-      std::move(scroll_animation_.end_notification).Run();
-  } else {
-    scroll_animation_.in_progress = new_ongoing_scroll;
+  scroll_animation_.in_progress = new_ongoing_scroll;
+
+  // A pointer-down event on a scrollbar button triggers two scroll animations:
+  // one that starts immediately and ends after one scroll increment (typically
+  // 40px); and an autoscroll that starts after a 250ms delay and continues
+  // until pointer-up or until the end of the scroll node is reached.
+  // scroll_animation_.end_notification should wait for the first animation to
+  // finish, but it should *not* wait for the autoscroll to finish.
+  if (!scroll_animation_.end_notification.is_null() &&
+      (!scroll_animation_.in_progress || commit_data.is_auto_scrolling)) {
+    std::move(scroll_animation_.end_notification).Run();
   }
 
   if (inner_viewport_scroll_delta.IsZero() &&
@@ -1011,7 +1161,7 @@ void LayerTreeHost::ApplyViewportChanges(
       commit_data.elastic_overscroll_delta.IsZero() &&
       !commit_data.top_controls_delta && !commit_data.bottom_controls_delta &&
       !commit_data.browser_controls_constraint_changed &&
-      !commit_data.scroll_gesture_did_end &&
+      commit_data.scroll_end_data.done_containers.empty() &&
       commit_data.is_pinch_gesture_active ==
           is_pinch_gesture_active_from_impl_) {
     return;
@@ -1021,10 +1171,13 @@ void LayerTreeHost::ApplyViewportChanges(
   // const_cast to ensure the compiler chooses to the const version of
   // property_trees(), to avoid blocking on commit.
   const auto* pt = const_cast<const LayerTreeHost*>(this)->property_trees();
-  if (const auto* inner_scroll = pt->scroll_tree().Node(
-          pending_commit_state()->viewport_property_ids.inner_scroll)) {
+  int inner_scroll_id =
+      pending_commit_state()->viewport_property_ids.inner_scroll;
+  if (inner_scroll_id != kInvalidPropertyNodeId) {
+    const ScrollNode& inner_scroll = pt->scroll_tree().Node(inner_scroll_id);
     UpdateScrollOffsetFromImpl(
-        inner_scroll->element_id, inner_viewport_scroll_delta,
+        inner_scroll.element_id, inner_viewport_scroll_delta,
+        ScrollSourceType::kNone,
         commit_data.inner_viewport_scroll.snap_target_element_ids);
   }
 
@@ -1038,67 +1191,17 @@ void LayerTreeHost::ApplyViewportChanges(
        commit_data.page_scale_delta, commit_data.is_pinch_gesture_active,
        commit_data.top_controls_delta, commit_data.bottom_controls_delta,
        commit_data.browser_controls_constraint,
-       commit_data.scroll_gesture_did_end});
+       !commit_data.scroll_end_data.done_containers.empty()});
   SetNeedsUpdateLayers();
 }
 
 void LayerTreeHost::UpdateScrollOffsetFromImpl(
     const ElementId& id,
     const gfx::Vector2dF& delta,
-    const absl::optional<TargetSnapAreaElementIds>& snap_target_ids) {
-  if (IsUsingLayerLists()) {
-    auto& scroll_tree = property_trees()->scroll_tree_mutable();
-    auto new_offset = scroll_tree.current_scroll_offset(id) + delta;
-    TRACE_EVENT_INSTANT2("cc", "NotifyDidScroll", TRACE_EVENT_SCOPE_THREAD,
-                         "cur_y", scroll_tree.current_scroll_offset(id).y(),
-                         "delta", delta.y());
-    if (auto* scroll_node = scroll_tree.FindNodeFromElementId(id)) {
-      // This update closely follows
-      // blink::PropertyTreeManager::DirectlyUpdateScrollOffsetTransform.
-
-      scroll_tree.SetScrollOffset(id, new_offset);
-      // |blink::PropertyTreeManager::DirectlySetScrollOffset| (called from
-      // |blink::PropertyTreeManager::DirectlyUpdateScrollOffsetTransform|)
-      // marks the layer as needing to push properties in order to clobber
-      // animations, but that is not needed for an impl-side scroll.
-
-      // Update the offset in the transform node.
-      DCHECK(scroll_node->transform_id != kInvalidPropertyNodeId);
-      TransformTree& transform_tree =
-          property_trees()->transform_tree_mutable();
-      auto* transform_node = transform_tree.Node(scroll_node->transform_id);
-      if (transform_node->scroll_offset != new_offset) {
-        transform_node->scroll_offset = new_offset;
-        transform_node->needs_local_transform_update = true;
-        transform_node->transform_changed = true;
-        transform_tree.set_needs_update(true);
-
-        // If the scroll was realized on the compositor, then its transform node
-        // is already updated (see LayerTreeImpl::DidUpdateScrollOffset) and we
-        // are now "catching up" to it on main, so we don't need a commit.
-        //
-        // But if the scroll was NOT realized on the compositor, we need a
-        // commit to push the transform change.
-        //
-        // Skip this if scroll unification is disabled as we will not set
-        // ScrollNode::is_composited in that case.
-        //
-        if (base::FeatureList::IsEnabled(features::kScrollUnification) &&
-            !scroll_tree.CanRealizeScrollsOnCompositor(*scroll_node)) {
-          SetNeedsCommit();
-        }
-      }
-
-      // The transform tree has been modified which requires a call to
-      // |LayerTreeHost::UpdateLayers| to update the property trees.
-      SetNeedsUpdateLayers();
-    }
-
-    scroll_tree.NotifyDidCompositorScroll(id, new_offset, snap_target_ids);
-  } else if (Layer* layer = LayerByElementId(id)) {
-    layer->SetScrollOffsetFromImplSide(layer->scroll_offset() + delta);
-    SetNeedsUpdateLayers();
-  }
+    ScrollSourceType type,
+    const std::optional<TargetSnapAreaElementIds>& snap_target_ids) {
+  property_tree_delegate_->UpdateScrollOffsetFromImpl(id, delta, type,
+                                                      snap_target_ids);
 }
 
 void LayerTreeHost::ApplyCompositorChanges(CompositorCommitData* commit_data) {
@@ -1106,29 +1209,29 @@ void LayerTreeHost::ApplyCompositorChanges(CompositorCommitData* commit_data) {
   DCHECK(commit_data);
   TRACE_EVENT0("cc", "LayerTreeHost::ApplyCompositorChanges");
 
-  DCHECK(!in_apply_compositor_changes_);
-  base::AutoReset<bool> in_apply_changes(&in_apply_compositor_changes_, true);
-
-  using perfetto::protos::pbzero::ChromeLatencyInfo;
   using perfetto::protos::pbzero::TrackEvent;
 
   for (auto& swap_promise : commit_data->swap_promises) {
-    TRACE_EVENT(
-        "input,benchmark", "LatencyInfo.Flow",
-        [&swap_promise](perfetto::EventContext ctx) {
-          ChromeLatencyInfo* info = ctx.event()->set_chrome_latency_info();
-          info->set_trace_id(swap_promise->GetTraceId());
-          info->set_step(ChromeLatencyInfo::STEP_MAIN_THREAD_SCROLL_UPDATE);
-          tracing::FillFlowEvent(ctx, TrackEvent::LegacyEvent::FLOW_INOUT,
-                                 swap_promise->GetTraceId());
-        });
+    int64_t trace_id = swap_promise->GetTraceId();
+    TRACE_EVENT("input,benchmark", "LatencyInfo.Flow",
+                [&](perfetto::EventContext ctx) {
+                  base::TaskAnnotator::EmitTaskTimingDetails(ctx);
+                  ui::LatencyInfo::FillTraceEvent(
+                      ctx, trace_id,
+                      perfetto::protos::pbzero::ChromeLatencyInfo2::Step::
+                          STEP_MAIN_THREAD_SCROLL_UPDATE);
+                });
     swap_promise_manager_.QueueSwapPromise(std::move(swap_promise));
   }
 
   if (has_root_layer()) {
     for (auto& scroll : commit_data->scrolls) {
+      ScrollSourceType scroll_type = ScrollSourceType::kNone;
+      if (scroll.element_id == commit_data->scroll_latched_element_id) {
+        scroll_type = commit_data->scroll_type;
+      }
       UpdateScrollOffsetFromImpl(scroll.element_id, scroll.scroll_delta,
-                                 scroll.snap_target_element_ids);
+                                 scroll_type, scroll.snap_target_element_ids);
     }
     // const_cast to ensure the compiler chooses to the const version of
     // property_trees(), to avoid blocking on commit.
@@ -1140,6 +1243,7 @@ void LayerTreeHost::ApplyCompositorChanges(CompositorCommitData* commit_data) {
   }
 
   client_->UpdateCompositorScrollState(*commit_data);
+  client_->UpdateAnimatedImageState(*commit_data);
 
   // This needs to happen after scroll deltas have been sent to prevent top
   // controls from clamping the layout viewport both on the compositor and
@@ -1165,10 +1269,10 @@ void LayerTreeHost::RecordEndOfFrameMetrics(
   client_->RecordEndOfFrameMetrics(frame_begin_time, trackers);
 }
 
-void LayerTreeHost::NotifyThroughputTrackerResults(
+void LayerTreeHost::NotifyCompositorMetricsTrackerResults(
     CustomTrackerResults results) {
   DCHECK(IsMainThread());
-  client_->NotifyThroughputTrackerResults(std::move(results));
+  client_->NotifyCompositorMetricsTrackerResults(std::move(results));
 }
 
 const base::WeakPtr<CompositorDelegateForInput>&
@@ -1177,27 +1281,35 @@ LayerTreeHost::GetDelegateForInput() const {
   return compositor_delegate_weak_ptr_;
 }
 
-void LayerTreeHost::UpdateBrowserControlsState(BrowserControlsState constraints,
-                                               BrowserControlsState current,
-                                               bool animate) {
+void LayerTreeHost::DetachInputDelegateAndRenderFrameObserver() {
+  DCHECK(IsMainThread());
+  proxy_->DetachInputDelegateAndRenderFrameObserver();
+}
+
+void LayerTreeHost::UpdateBrowserControlsState(
+    BrowserControlsState constraints,
+    BrowserControlsState current,
+    bool animate,
+    base::optional_ref<const BrowserControlsOffsetTagModifications>
+        offset_tag_modifications) {
   DCHECK(IsMainThread());
   // Browser controls are only used in threaded mode but Blink layout tests may
   // call into this. The single threaded version is a no-op.
-  proxy_->UpdateBrowserControlsState(constraints, current, animate);
+  proxy_->UpdateBrowserControlsState(constraints, current, animate,
+                                     offset_tag_modifications);
 }
 
 void LayerTreeHost::AnimateLayers(base::TimeTicks monotonic_time) {
   std::unique_ptr<MutatorEvents> events = mutator_host()->CreateEvents();
 
-  if (mutator_host()->TickAnimations(monotonic_time,
-                                     property_trees()->scroll_tree(), true))
+  AnimationTickResult tick_result = mutator_host()->TickAnimations(
+      monotonic_time, property_trees()->scroll_tree(), true, events.get());
+  if (tick_result.animated) {
     mutator_host()->UpdateAnimationState(true, events.get());
+  }
 
   if (!events->IsEmpty()) {
-    // If not using layer lists, animation state changes will require
-    // rebuilding property trees to track them.
-    if (!IsUsingLayerLists())
-      property_trees()->set_needs_rebuild(true);
+    property_tree_delegate_->OnAnimateLayers();
 
     // A commit is required to push animation changes to the compositor.
     SetNeedsCommit();
@@ -1206,14 +1318,15 @@ void LayerTreeHost::AnimateLayers(base::TimeTicks monotonic_time) {
 
 int LayerTreeHost::ScheduleMicroBenchmark(
     const std::string& benchmark_name,
-    base::Value settings,
+    base::DictValue settings,
     MicroBenchmark::DoneCallback callback) {
   DCHECK(IsMainThread());
   return micro_benchmark_controller_.ScheduleRun(
       benchmark_name, std::move(settings), std::move(callback));
 }
 
-bool LayerTreeHost::SendMessageToMicroBenchmark(int id, base::Value message) {
+bool LayerTreeHost::SendMessageToMicroBenchmark(int id,
+                                                base::DictValue message) {
   DCHECK(IsMainThread());
   return micro_benchmark_controller_.SendMessage(id, std::move(message));
 }
@@ -1263,7 +1376,7 @@ void LayerTreeHost::RequestPresentationTimeForNextFrame(
 }
 
 void LayerTreeHost::RequestSuccessfulPresentationTimeForNextFrame(
-    PresentationTimeCallbackBuffer::SuccessfulCallback callback) {
+    PresentationTimeCallbackBuffer::SuccessfulCallbackWithDetails callback) {
   pending_commit_state()->pending_successful_presentation_callbacks.push_back(
       std::move(callback));
 }
@@ -1306,18 +1419,21 @@ void LayerTreeHost::SetRootLayer(scoped_refptr<Layer> new_root_layer) {
 
 void LayerTreeHost::RegisterViewportPropertyIds(
     const ViewportPropertyIds& ids) {
-  DCHECK(IsUsingLayerLists());
+  property_tree_delegate_->RegisterViewportPropertyIds(ids);
+}
+
+void LayerTreeHost::SetViewportPropertyIds(const ViewportPropertyIds& ids) {
   pending_commit_state()->viewport_property_ids = ids;
-  // Outer viewport properties exist only if inner viewport property exists.
-  DCHECK(ids.inner_scroll != kInvalidPropertyNodeId ||
-         (ids.outer_scroll == kInvalidPropertyNodeId &&
-          ids.outer_clip == kInvalidPropertyNodeId));
 }
 
 Layer* LayerTreeHost::InnerViewportScrollLayerForTesting() {
-  auto* scroll_node = property_trees()->scroll_tree_mutable().Node(
-      pending_commit_state()->viewport_property_ids.inner_scroll);
-  return scroll_node ? LayerByElementId(scroll_node->element_id) : nullptr;
+  int scroll_id = pending_commit_state()->viewport_property_ids.inner_scroll;
+  if (scroll_id == kInvalidPropertyNodeId) {
+    return nullptr;
+  }
+  auto& scroll_node =
+      property_trees()->scroll_tree_mutable().MutableNode(scroll_id);
+  return LayerByElementId(scroll_node.element_id);
 }
 
 Layer* LayerTreeHost::OuterViewportScrollLayerForTesting() {
@@ -1325,9 +1441,11 @@ Layer* LayerTreeHost::OuterViewportScrollLayerForTesting() {
 }
 
 ElementId LayerTreeHost::OuterViewportScrollElementId() const {
-  const auto* scroll_node = property_trees()->scroll_tree().Node(
-      pending_commit_state()->viewport_property_ids.outer_scroll);
-  return scroll_node ? scroll_node->element_id : ElementId();
+  int outer_scroll_id =
+      pending_commit_state()->viewport_property_ids.outer_scroll;
+  return outer_scroll_id != kInvalidPropertyNodeId
+             ? property_trees()->scroll_tree().Node(outer_scroll_id).element_id
+             : ElementId();
 }
 
 void LayerTreeHost::RegisterSelection(const LayerSelection& selection) {
@@ -1360,16 +1478,18 @@ void LayerTreeHost::SetViewportRectAndScale(
     const gfx::Rect& device_viewport_rect,
     float device_scale_factor,
     const viz::LocalSurfaceId& local_surface_id_from_parent) {
+  TRACE_EVENT("cc", __PRETTY_FUNCTION__);
   const viz::LocalSurfaceId previous_local_surface_id =
       pending_commit_state()->local_surface_id_from_parent;
   SetLocalSurfaceIdFromParent(local_surface_id_from_parent);
 
-  TRACE_EVENT_NESTABLE_ASYNC_END1("cc", "LayerTreeHostSize",
-                                  TRACE_ID_LOCAL(this), "id", id_);
-  TRACE_EVENT_NESTABLE_ASYNC_BEGIN2("cc", "LayerTreeHostSize",
-                                    TRACE_ID_LOCAL(this), "size",
-                                    device_viewport_rect.ToString(), "lsid",
-                                    local_surface_id_from_parent.ToString());
+  const auto size_track =
+      perfetto::NamedTrack::FromPointer("LayerTreeHostSize", this);
+  TRACE_EVENT_END("cc", /*"LayerTreeHostSize"*/
+                  size_track, "id", id_);
+  TRACE_EVENT_BEGIN("cc", "LayerTreeHostSize", size_track, "size",
+                    device_viewport_rect.ToString(), "lsid",
+                    local_surface_id_from_parent.ToString());
 
   bool device_viewport_rect_changed = false;
   if (pending_commit_state()->device_viewport_rect != device_viewport_rect) {
@@ -1395,7 +1515,8 @@ void LayerTreeHost::SetViewportRectAndScale(
 
   // If a new viz::LocalSurfaceId has been provided, and the viewport has
   // changed, we need not begin new frames until it has activated.
-  if (previous_local_surface_id != local_surface_id_from_parent &&
+  if (local_surface_id_from_parent.is_valid() &&
+      previous_local_surface_id != local_surface_id_from_parent &&
       device_viewport_rect_changed) {
     SetTargetLocalSurfaceId(local_surface_id_from_parent);
   }
@@ -1403,7 +1524,10 @@ void LayerTreeHost::SetViewportRectAndScale(
   if (device_viewport_rect_changed || painted_device_scale_factor_changed ||
       device_scale_factor_changed) {
     SetPropertyTreesNeedRebuild();
-    SetNeedsCommit();
+    // Urgent because we want resize to be reflected immediately. For instance
+    // if a side panel is expanding / contracting, we want the content to reflow
+    // as quickly as possible.
+    SetNeedsCommit(/*urgent=*/true);
   }
 }
 
@@ -1424,6 +1548,17 @@ void LayerTreeHost::SetVisualDeviceViewportSize(
 
   pending_commit_state()->visual_device_viewport_size =
       visual_device_viewport_size;
+  SetNeedsCommit();
+}
+
+void LayerTreeHost::SetMaxSafeAreaInsets(
+    const gfx::InsetsF& max_safe_area_insets) {
+  if (pending_commit_state()->max_safe_area_insets == max_safe_area_insets) {
+    return;
+  }
+
+  pending_commit_state()->max_safe_area_insets = max_safe_area_insets;
+
   SetNeedsCommit();
 }
 
@@ -1457,10 +1592,19 @@ void LayerTreeHost::SetOverscrollBehavior(const OverscrollBehavior& behavior) {
 void LayerTreeHost::SetPageScaleFactorAndLimits(float page_scale_factor,
                                                 float min_page_scale_factor,
                                                 float max_page_scale_factor) {
-  if (pending_commit_state()->page_scale_factor == page_scale_factor &&
+  if (pending_commit_state()->page_scale_factor_limits_set &&
+      pending_commit_state()->page_scale_factor == page_scale_factor &&
       pending_commit_state()->min_page_scale_factor == min_page_scale_factor &&
-      pending_commit_state()->max_page_scale_factor == max_page_scale_factor)
+      pending_commit_state()->max_page_scale_factor == max_page_scale_factor) {
     return;
+  }
+  if (page_scale_factor <= 0) {
+    page_scale_factor = 1;
+  }
+  if (min_page_scale_factor <= 0) {
+    min_page_scale_factor = page_scale_factor;
+  }
+  DCHECK_GE(max_page_scale_factor, min_page_scale_factor);
   DCHECK_GE(page_scale_factor, min_page_scale_factor);
   DCHECK_LE(page_scale_factor, max_page_scale_factor);
   // We should never process non-unit page_scale_delta for an OOPIF subframe.
@@ -1472,6 +1616,7 @@ void LayerTreeHost::SetPageScaleFactorAndLimits(float page_scale_factor,
       << pending_commit_state()->page_scale_factor
       << ", new psf = " << page_scale_factor;
 
+  pending_commit_state()->page_scale_factor_limits_set = true;
   pending_commit_state()->page_scale_factor = page_scale_factor;
   pending_commit_state()->min_page_scale_factor = min_page_scale_factor;
   pending_commit_state()->max_page_scale_factor = max_page_scale_factor;
@@ -1505,9 +1650,24 @@ void LayerTreeHost::SetDisplayColorSpaces(
     const gfx::DisplayColorSpaces& display_color_spaces) {
   if (pending_commit_state()->display_color_spaces == display_color_spaces)
     return;
+  bool only_hdr_changed = gfx::DisplayColorSpaces::EqualExceptForHdrHeadroom(
+      pending_commit_state()->display_color_spaces, display_color_spaces);
   pending_commit_state()->display_color_spaces = display_color_spaces;
-  for (auto* layer : *this)
-    layer->SetNeedsDisplay();
+
+  // Some layers needs to re-display when HDR headroom changes (e.g, any layer
+  // containing an HDR image needs to re-raster, and layers with HDR video will
+  // require re-tone-mapping).
+  bool did_set_needs_display = false;
+  for (auto* layer : *this) {
+    if (!only_hdr_changed ||
+        layer->RequiresSetNeedsDisplayOnHdrHeadroomChange()) {
+      layer->SetNeedsDisplay();
+      did_set_needs_display = true;
+    }
+  }
+  if (did_set_needs_display) {
+    SetNeedsCommit();
+  }
 }
 
 void LayerTreeHost::UpdateViewportIsMobileOptimized(
@@ -1576,33 +1736,34 @@ void LayerTreeHost::SetLocalSurfaceIdFromParent(
   // incoming flow (it comes from a different process), and TRACE_ID_LOCAL for
   // the outgoing flow. The outgoing flow uses local to ensure that it doesn't
   // flow into the wrong trace in different process.
-  TRACE_EVENT_WITH_FLOW2(
-      TRACE_DISABLED_BY_DEFAULT("viz.surface_id_flow"),
-      "LocalSurfaceId.Submission.Flow",
-      TRACE_ID_GLOBAL(local_surface_id_from_parent.submission_trace_id()),
-      TRACE_EVENT_FLAG_FLOW_IN, "step", "SetLocalSurfaceIdFromParent",
-      "local_surface_id", local_surface_id_from_parent.ToString());
-  TRACE_EVENT_WITH_FLOW2(
-      TRACE_DISABLED_BY_DEFAULT("viz.surface_id_flow"),
-      "LocalSurfaceId.Submission.Flow",
-      TRACE_ID_LOCAL(local_surface_id_from_parent.submission_trace_id()),
-      TRACE_EVENT_FLAG_FLOW_OUT, "step", "SetLocalSurfaceIdFromParent",
-      "local_surface_id", local_surface_id_from_parent.ToString());
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("viz.surface_id_flow"),
+              "LocalSurfaceId.Submission.Flow",
+              perfetto::TerminatingFlow::Global(
+                  local_surface_id_from_parent.submission_trace_id()),
+              "step", "SetLocalSurfaceIdFromParent", "local_surface_id",
+              local_surface_id_from_parent.ToString());
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("viz.surface_id_flow"),
+              "LocalSurfaceId.Submission.Flow",
+              perfetto::Flow::ProcessScoped(
+                  local_surface_id_from_parent.submission_trace_id()),
+              "step", "SetLocalSurfaceIdFromParent", "local_surface_id",
+              local_surface_id_from_parent.ToString());
   // Always update the cached state of the viz::LocalSurfaceId to reflect the
   // latest value received from our parent.
   pending_commit_state()->local_surface_id_from_parent =
       local_surface_id_from_parent;
 
-  // When we are switching to a new viz::LocalSurfaceId add our current visual
-  // update duration to that of previous surfaces, and clear out the total. So
-  // that we can begin to track the updates for this new Surface.
-  pending_commit_state()->previous_surfaces_visual_update_duration +=
-      pending_commit_state()->visual_update_duration;
-  pending_commit_state()->visual_update_duration = base::TimeDelta();
+  // If rendering is currently paused, we need to notify that a new local
+  // surface id is expected. This is used to unblock pending copy output
+  // requests in viz that might not be satisfied due to the fact that we aren't
+  // producing new frames.
+  if (proxy()->IsRenderingPaused()) {
+    proxy()->NotifyNewLocalSurfaceIdExpectedWhilePaused();
+  }
 
   // If the parent sequence number has not advanced, then there is no need to
   // commit anything. This can occur when the child sequence number has
-  // advanced. Which means that child has changed visual properites, and the
+  // advanced. Which means that child has changed visual properties, and the
   // parent agreed upon these without needing to further advance its sequence
   // number. When this occurs the child is already up-to-date and a commit here
   // is simply redundant.
@@ -1613,6 +1774,26 @@ void LayerTreeHost::SetLocalSurfaceIdFromParent(
     return;
   }
   UpdateDeferMainFrameUpdateInternal();
+  SetNeedsCommit();
+}
+
+void LayerTreeHost::RequestViewportScreenshot(
+    const base::UnguessableToken& token) {
+  CHECK(pending_commit_state()->new_local_surface_id_request)
+      << "Must have requested a new LocalSurfaceID before making "
+         "this request";
+  pending_commit_state()->screenshot_destination_token = token;
+  SetNeedsCommit();
+}
+
+void LayerTreeHost::SetPrimaryMainFrameItemSequenceNumber(
+    int64_t primary_main_frame_item_sequence_number) {
+  if (pending_commit_state()->primary_main_frame_item_sequence_number ==
+      primary_main_frame_item_sequence_number) {
+    return;
+  }
+  pending_commit_state()->primary_main_frame_item_sequence_number =
+      primary_main_frame_item_sequence_number;
   SetNeedsCommit();
 }
 
@@ -1629,36 +1810,39 @@ void LayerTreeHost::RegisterLayer(Layer* layer) {
   DCHECK(IsMainThread());
   DCHECK(!LayerById(layer->id()));
   DCHECK(!in_paint_layer_contents_);
-  layer_id_map_[layer->id()] = layer;
+  thread_unsafe_commit_state().layer_id_map[layer->id()] = layer;
 }
 
 void LayerTreeHost::UnregisterLayer(Layer* layer) {
   DCHECK(IsMainThread());
   DCHECK(LayerById(layer->id()));
   DCHECK(!in_paint_layer_contents_);
-  pending_commit_state()->layers_that_should_push_properties.erase(layer);
-  layer_id_map_.erase(layer->id());
+  pending_commit_state()->layer_ids_that_should_push_properties.erase(
+      layer->id());
+  thread_unsafe_commit_state().layer_id_map.erase(layer->id());
 }
 
 Layer* LayerTreeHost::LayerById(int id) {
   DCHECK(IsMainThread());
-  auto iter = layer_id_map_.find(id);
-  return iter != layer_id_map_.end() ? iter->second : nullptr;
+  return thread_unsafe_commit_state().LayerById(id);
 }
 
 bool LayerTreeHost::PaintContent(const LayerList& update_layer_list) {
   DCHECK(IsMainThread());
+  bool result = false;
   base::AutoReset<bool> painting(&in_paint_layer_contents_, true);
-  bool did_paint_content = false;
   for (const auto& layer : update_layer_list) {
-    did_paint_content |= layer->Update();
+    result |= layer->Update();
   }
-  return did_paint_content;
+  return result;
 }
 
 void LayerTreeHost::AddSurfaceRange(const viz::SurfaceRange& surface_range) {
-  if (++pending_commit_state()->surface_ranges[surface_range] == 1)
+  CHECK(surface_range.IsValid());
+  if (++pending_commit_state()->surface_ranges[surface_range] == 1) {
     pending_commit_state()->needs_surface_ranges_sync = true;
+    SetNeedsCommit();
+  }
 }
 
 void LayerTreeHost::RemoveSurfaceRange(const viz::SurfaceRange& surface_range) {
@@ -1669,11 +1853,13 @@ void LayerTreeHost::RemoveSurfaceRange(const viz::SurfaceRange& surface_range) {
   if (--iter->second <= 0) {
     pending_commit_state()->surface_ranges.erase(iter);
     pending_commit_state()->needs_surface_ranges_sync = true;
+    SetNeedsCommit();
   }
 }
 
 void LayerTreeHost::AddLayerShouldPushProperties(Layer* layer) {
-  pending_commit_state()->layers_that_should_push_properties.insert(layer);
+  pending_commit_state()->layer_ids_that_should_push_properties.insert(
+      layer->id());
 }
 
 void LayerTreeHost::SetPageScaleFromImplSide(float page_scale) {
@@ -1709,16 +1895,6 @@ void LayerTreeHost::UpdateHudLayer(bool show_hud_info) {
     hud_layer()->UpdateLocationAndSize(
         pending_commit_state()->device_viewport_rect.size(),
         pending_commit_state()->device_scale_factor);
-    if (pending_commit_state()->debug_state.show_web_vital_metrics) {
-      // This WebVitalMetrics is filled by the main frame, which is equivalent
-      // to WebPerf's numbers. The main frame's number doesn't include any
-      // iframes. UMA/UKM records metrics for the entire page aggregating all
-      // the frames. The page metrics are in the browser process.
-      // TODO(weiliangc): Get the page metrics for display.
-      auto metrics = client_->GetWebVitalMetrics();
-      if (metrics && metrics->HasValue())
-        hud_layer()->UpdateWebVitalMetrics(std::move(metrics));
-    }
   } else if (hud_layer()) {
     hud_layer()->RemoveFromParent();
     hud_layer_ = nullptr;
@@ -1757,17 +1933,32 @@ const Layer* LayerTreeHost::LayerByElementId(ElementId element_id) const {
   return iter != element_layers_map_.end() ? iter->second : nullptr;
 }
 
-void LayerTreeHost::RegisterElement(ElementId element_id,
-                                    Layer* layer) {
+void LayerTreeHost::RegisterElement(ElementId element_id, Layer* layer) {
   DCHECK(IsMainThread());
+  DCHECK(layer);
+  const Layer* existing_layer = LayerByElementId(element_id);
+  if (existing_layer) {
+    if (existing_layer == layer) {
+      return;
+    } else {
+      UnregisterElement(element_id, existing_layer);
+    }
+  }
   element_layers_map_[element_id] = layer;
 }
 
-void LayerTreeHost::UnregisterElement(ElementId element_id) {
+void LayerTreeHost::UnregisterElement(ElementId element_id,
+                                      const Layer* layer) {
   DCHECK(IsMainThread());
-  if (!IsUsingLayerLists()) {
-    mutator_host()->RemoveElementId(element_id);
+  DCHECK(layer);
+  const Layer* existing_layer = LayerByElementId(element_id);
+  if (existing_layer != layer) {
+    // Nothing to do; the element_id is already associated with another layer.
+    // This can happen if a scrollbar is lost and restored in the same frame,
+    // as we register the new scrollbar layer before cleaning up the old one.
+    return;
   }
+  property_tree_delegate_->OnUnregisterElement(element_id);
   element_layers_map_.erase(element_id);
 }
 
@@ -1778,16 +1969,14 @@ void LayerTreeHost::SetElementIdsForTesting() {
 
 void LayerTreeHost::BuildPropertyTreesForTesting() {
   PropertyTreeBuilder::BuildPropertyTrees(this);
+  pending_commit_state()->property_trees = *property_trees();
 }
 
 bool LayerTreeHost::IsElementInPropertyTrees(ElementId element_id,
                                              ElementListType list_type) const {
   DCHECK(IsMainThread());
-  if (IsUsingLayerLists()) {
-    return list_type == ElementListType::ACTIVE &&
-           property_trees()->HasElement(element_id);
-  }
-  return list_type == ElementListType::ACTIVE && LayerByElementId(element_id);
+  return property_tree_delegate_->IsElementInPropertyTrees(element_id,
+                                                           list_type);
 }
 
 void LayerTreeHost::SetMutatorsNeedCommit() {
@@ -1804,17 +1993,8 @@ void LayerTreeHost::SetElementFilterMutated(ElementId element_id,
   if (list_type != ElementListType::ACTIVE)
     return;
 
-  if (IsUsingLayerLists()) {
-    // In BlinkGenPropertyTrees/CompositeAfterPaint we always have property
-    // tree nodes and can set the filter directly on the effect node.
-    property_trees()->effect_tree_mutable().OnFilterAnimated(element_id,
-                                                             filters);
-    return;
-  }
-
-  Layer* layer = LayerByElementId(element_id);
-  DCHECK(layer);
-  layer->OnFilterAnimated(filters);
+  property_tree_delegate_->OnElementFilterMutated(element_id, list_type,
+                                                  filters);
 }
 
 void LayerTreeHost::SetElementBackdropFilterMutated(
@@ -1824,17 +2004,8 @@ void LayerTreeHost::SetElementBackdropFilterMutated(
   if (list_type != ElementListType::ACTIVE)
     return;
 
-  if (IsUsingLayerLists()) {
-    // In BlinkGenPropertyTrees/CompositeAfterPaint we always have property
-    // tree nodes and can set the backdrop_filter directly on the effect node.
-    property_trees()->effect_tree_mutable().OnBackdropFilterAnimated(
-        element_id, backdrop_filters);
-    return;
-  }
-
-  Layer* layer = LayerByElementId(element_id);
-  DCHECK(layer);
-  layer->OnBackdropFilterAnimated(backdrop_filters);
+  property_tree_delegate_->OnElementBackdropFilterMutated(element_id, list_type,
+                                                          backdrop_filters);
 }
 
 void LayerTreeHost::SetElementOpacityMutated(ElementId element_id,
@@ -1846,27 +2017,8 @@ void LayerTreeHost::SetElementOpacityMutated(ElementId element_id,
   if (list_type != ElementListType::ACTIVE)
     return;
 
-  if (IsUsingLayerLists()) {
-    property_trees()->effect_tree_mutable().OnOpacityAnimated(element_id,
-                                                              opacity);
-    return;
-  }
-
-  Layer* layer = LayerByElementId(element_id);
-  DCHECK(layer);
-  layer->OnOpacityAnimated(opacity);
-
-  if (EffectNode* node = property_trees()->effect_tree_mutable().Node(
-          layer->effect_tree_index())) {
-    DCHECK_EQ(layer->effect_tree_index(), node->id);
-    if (node->opacity == opacity)
-      return;
-
-    node->opacity = opacity;
-    property_trees()->effect_tree_mutable().set_needs_update(true);
-  }
-
-  SetNeedsUpdateLayers();
+  property_tree_delegate_->OnElementOpacityMutated(element_id, list_type,
+                                                   opacity);
 }
 
 void LayerTreeHost::SetElementTransformMutated(
@@ -1876,29 +2028,8 @@ void LayerTreeHost::SetElementTransformMutated(
   if (list_type != ElementListType::ACTIVE)
     return;
 
-  if (IsUsingLayerLists()) {
-    property_trees()->transform_tree_mutable().OnTransformAnimated(element_id,
-                                                                   transform);
-    return;
-  }
-
-  Layer* layer = LayerByElementId(element_id);
-  DCHECK(layer);
-  layer->OnTransformAnimated(transform);
-
-  if (layer->has_transform_node()) {
-    TransformNode* node = property_trees()->transform_tree_mutable().Node(
-        layer->transform_tree_index());
-    if (node->local == transform)
-      return;
-
-    node->local = transform;
-    node->needs_local_transform_update = true;
-    node->has_potential_animation = true;
-    property_trees()->transform_tree_mutable().set_needs_update(true);
-  }
-
-  SetNeedsUpdateLayers();
+  property_tree_delegate_->OnElementTransformMutated(element_id, list_type,
+                                                     transform);
 }
 
 void LayerTreeHost::SetElementScrollOffsetMutated(
@@ -1934,13 +2065,20 @@ bool LayerTreeHost::RunsOnCurrentThread() const {
   return !task_runner_provider_ || task_runner_provider_->IsMainThread();
 }
 
-void LayerTreeHost::QueueImageDecode(const PaintImage& image,
-                                     base::OnceCallback<void(bool)> callback) {
+void LayerTreeHost::QueueImageDecode(const DrawImage& image,
+                                     base::OnceCallback<void(bool)> callback,
+                                     bool speculative) {
   TRACE_EVENT0("cc", "LayerTreeHost::QueueImageDecode");
   int next_id = s_image_decode_sequence_number.GetNext();
-  pending_commit_state()->queued_image_decodes.emplace_back(
-      next_id, std::make_unique<PaintImage>(image));
-  pending_image_decodes_.emplace(next_id, std::move(callback));
+  if (base::FeatureList::IsEnabled(
+          features::kSendExplicitDecodeRequestsImmediately)) {
+    proxy()->QueueImageDecode(next_id, image, speculative);
+  } else {
+    pending_commit_state()->queued_image_decodes.emplace_back(std::make_tuple(
+        next_id, std::make_unique<DrawImage>(image), speculative));
+  }
+  pending_image_decodes_.emplace(
+      next_id, std::make_pair(std::move(callback), speculative));
   SetNeedsCommit();
 }
 
@@ -1983,7 +2121,7 @@ LayerListReverseConstIterator LayerTreeHost::rend() const {
 
 void LayerTreeHost::SetPropertyTreesForTesting(
     const PropertyTrees* property_trees) {
-  thread_unsafe_commit_state().property_trees = *property_trees;
+  property_trees_ = *property_trees;
 }
 
 void LayerTreeHost::SetNeedsDisplayOnAllLayers() {
@@ -1994,6 +2132,12 @@ void LayerTreeHost::SetNeedsDisplayOnAllLayers() {
 void LayerTreeHost::SetHasCopyRequest(bool has_copy_request) {
   DCHECK(IsMainThread());
   has_copy_request_ = has_copy_request;
+}
+
+void LayerTreeHost::RequestImmediateBeginMainFrame() {
+  if (features::SendEarlyFinalBeginMainFrameIsEnabled()) {
+    proxy_->SendImmediateBeginMainFrame();
+  }
 }
 
 void LayerTreeHost::RequestBeginMainFrameNotExpected(bool new_state) {
@@ -2012,18 +2156,6 @@ void LayerTreeHost::SetSourceURL(ukm::SourceId source_id, const GURL& url) {
     pending_commit_state()->debug_state.TurnOffHudInfoDisplay();
 }
 
-base::ReadOnlySharedMemoryRegion
-LayerTreeHost::CreateSharedMemoryForSmoothnessUkm() {
-  DCHECK(IsMainThread());
-  const auto size = sizeof(UkmSmoothnessDataShared);
-  auto ukm_smoothness_mapping = base::ReadOnlySharedMemoryRegion::Create(size);
-  if (!ukm_smoothness_mapping.IsValid())
-    return {};
-  proxy_->SetUkmSmoothnessDestination(
-      std::move(ukm_smoothness_mapping.mapping));
-  return std::move(ukm_smoothness_mapping.region);
-}
-
 void LayerTreeHost::SetRenderFrameObserver(
     std::unique_ptr<RenderFrameMetadataObserver> observer) {
   DCHECK(IsMainThread());
@@ -2036,24 +2168,56 @@ void LayerTreeHost::SetDelegatedInkMetadata(
   SetNeedsCommit();
 }
 
-std::vector<base::OnceClosure>
+std::vector<ViewTransitionRequest::ViewTransitionCaptureCallback>
 LayerTreeHost::TakeViewTransitionCallbacksForTesting() {
   DCHECK(IsMainThread());
-  std::vector<base::OnceClosure> result;
+  std::vector<ViewTransitionRequest::ViewTransitionCaptureCallback> result;
   for (auto& item : view_transition_callbacks_)
     result.push_back(std::move(item.second));
   view_transition_callbacks_.clear();
   return result;
 }
 
-double LayerTreeHost::GetPercentDroppedFrames() const {
+double LayerTreeHost::GetAverageThroughput() const {
   DCHECK(IsMainThread());
-  return proxy_->GetPercentDroppedFrames();
+  return proxy_->GetAverageThroughput();
 }
 
-void LayerTreeHost::IncrementVisualUpdateDuration(
-    base::TimeDelta visual_update_duration) {
-  pending_commit_state()->visual_update_duration += visual_update_duration;
+void LayerTreeHost::DropActiveScrollDeltaNextCommit(ElementId scroll_element) {
+  pending_commit_state()->scrollers_clobbering_active_value.insert(
+      scroll_element);
+  SetNeedsCommit();
+}
+
+void LayerTreeHost::SetUnboundedFrameSink(
+    std::unique_ptr<LayerTreeFrameSink> unbounded_frame_sink,
+    const viz::LocalSurfaceId& local_surface_id) {
+  DCHECK(settings_.enable_unbounded_element);
+  DCHECK(IsMainThread());
+  proxy_->SetUnboundedFrameSink(std::move(unbounded_frame_sink),
+                                local_surface_id);
+}
+
+void LayerTreeHost::SetUnboundedFrameSinkId(
+    const viz::FrameSinkId& frame_sink_id,
+    const viz::LocalSurfaceId& local_surface_id) {
+  DCHECK(settings_.enable_unbounded_element);
+  DCHECK(IsMainThread());
+  CHECK(base::FeatureList::IsEnabled(features::kTreesInViz));
+  proxy_->SetUnboundedFrameSinkId(frame_sink_id, local_surface_id);
+}
+
+void LayerTreeHost::DismissUnboundedFrameSink() {
+  DCHECK(settings_.enable_unbounded_element);
+  DCHECK(IsMainThread());
+  proxy_->DismissUnboundedFrameSink();
+}
+
+void LayerTreeHost::SetUnboundedLocalSurfaceId(
+    const viz::LocalSurfaceId& local_surface_id) {
+  DCHECK(settings_.enable_unbounded_element);
+  DCHECK(IsMainThread());
+  proxy_->SetUnboundedLocalSurfaceId(local_surface_id);
 }
 
 }  // namespace cc

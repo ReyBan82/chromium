@@ -9,6 +9,7 @@
 
 #include "base/component_export.h"
 #include "base/functional/callback.h"
+#include "base/observer_list_types.h"
 #include "dbus/object_proxy.h"
 
 namespace dbus {
@@ -24,7 +25,7 @@ class COMPONENT_EXPORT(SYSTEM_CLOCK) SystemClockClient {
   using GetLastSyncInfoCallback = base::OnceCallback<void(bool synchronized)>;
 
   // Interface for observing changes from the system clock.
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
     // Called when the status is updated.
     virtual void SystemClockUpdated() {}
@@ -32,9 +33,6 @@ class COMPONENT_EXPORT(SYSTEM_CLOCK) SystemClockClient {
     // Called when the system clock has become settable or unsettable, e.g.
     // when the clock syncs with or goes out of sync with the network.
     virtual void SystemClockCanSetTimeChanged(bool can_set_time) {}
-
-   protected:
-    virtual ~Observer() {}
   };
 
   // Interface for testing. Only implemented in the fake implementation.
@@ -50,6 +48,13 @@ class COMPONENT_EXPORT(SYSTEM_CLOCK) SystemClockClient {
     // WaitForServiceToBeAvailable will pile up, until |is_available| is set
     // back to true.
     virtual void SetServiceIsAvailable(bool is_available) = 0;
+
+    // Configures service to be permanently disabled. Callbacks passed to
+    // WaitForServiceToBeAvailable are immediately invoked with
+    // |service_is_available| set to false. This includes any callbacks that
+    // piled up after SetServiceIsAvailable(false). To enable service again,
+    // invoke SetServiceIsAvailable(true);
+    virtual void DisableService() = 0;
   };
 
   // Creates and initializes the global instance. |bus| must not be null.

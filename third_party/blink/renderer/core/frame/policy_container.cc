@@ -7,7 +7,8 @@
 #include <tuple>
 
 #include "services/network/public/cpp/web_sandbox_flags.h"
-#include "third_party/blink/renderer/core/frame/csp/conversion_util.h"
+#include "services/network/public/mojom/integrity_policy.mojom-blink.h"
+#include "third_party/blink/renderer/platform/loader/fetch/policy_container_utils.h"
 
 namespace blink {
 
@@ -23,9 +24,10 @@ std::unique_ptr<PolicyContainer> PolicyContainer::CreateEmpty() {
   // ignored.
   mojo::AssociatedRemote<mojom::blink::PolicyContainerHost> dummy_host;
   std::ignore = dummy_host.BindNewEndpointAndPassDedicatedReceiver();
+  auto policies = mojom::blink::PolicyContainerPolicies::New();
 
-  return std::make_unique<PolicyContainer>(
-      dummy_host.Unbind(), mojom::blink::PolicyContainerPolicies::New());
+  return std::make_unique<PolicyContainer>(dummy_host.Unbind(),
+                                           std::move(policies));
 }
 
 // static
@@ -33,21 +35,10 @@ std::unique_ptr<PolicyContainer> PolicyContainer::CreateFromWebPolicyContainer(
     std::unique_ptr<WebPolicyContainer> container) {
   if (!container)
     return nullptr;
-  network::CrossOriginEmbedderPolicy cross_origin_embedder_policy;
-  cross_origin_embedder_policy.value =
-      container->policies.cross_origin_embedder_policy;
-  mojom::blink::PolicyContainerPoliciesPtr policies =
-      mojom::blink::PolicyContainerPolicies::New(
-          cross_origin_embedder_policy, container->policies.referrer_policy,
-          ConvertToMojoBlink(
-              std::move(container->policies.content_security_policies)),
-          container->policies.is_credentialless,
-          container->policies.sandbox_flags,
-          container->policies.ip_address_space,
-          container->policies.can_navigate_top_without_user_gesture);
 
-  return std::make_unique<PolicyContainer>(std::move(container->remote),
-                                           std::move(policies));
+  return std::make_unique<PolicyContainer>(
+      std::move(container->remote),
+      FromWebPolicyContainerPolicies(container->policies));
 }
 
 network::mojom::blink::ReferrerPolicy PolicyContainer::GetReferrerPolicy()
@@ -56,9 +47,12 @@ network::mojom::blink::ReferrerPolicy PolicyContainer::GetReferrerPolicy()
 }
 
 void PolicyContainer::UpdateReferrerPolicy(
-    network::mojom::blink::ReferrerPolicy policy) {
+    network::mojom::blink::ReferrerPolicy policy,
+    const InitiatorStateToken& initiator_state_token) {
   policies_->referrer_policy = policy;
-  policy_container_host_remote_->SetReferrerPolicy(policy);
+
+  policy_container_host_remote_->SetReferrerPolicy(policy,
+                                                   initiator_state_token);
 }
 
 const mojom::blink::PolicyContainerPolicies& PolicyContainer::GetPolicies()
@@ -67,21 +61,14 @@ const mojom::blink::PolicyContainerPolicies& PolicyContainer::GetPolicies()
 }
 
 void PolicyContainer::AddContentSecurityPolicies(
-    Vector<network::mojom::blink::ContentSecurityPolicyPtr> policies) {
+    Vector<network::mojom::blink::ContentSecurityPolicyPtr> policies,
+    const InitiatorStateToken& initiator_state_token) {
   for (const auto& policy : policies) {
     policies_->content_security_policies.push_back(policy->Clone());
   }
-  policy_container_host_remote_->AddContentSecurityPolicies(
-      std::move(policies));
-}
 
-mojo::PendingRemote<mojom::blink::PolicyContainerHostKeepAliveHandle>
-PolicyContainer::IssueKeepAliveHandle() {
-  mojo::PendingRemote<mojom::blink::PolicyContainerHostKeepAliveHandle>
-      keep_alive_remote;
-  policy_container_host_remote_->IssueKeepAliveHandle(
-      keep_alive_remote.InitWithNewPipeAndPassReceiver());
-  return keep_alive_remote;
+  policy_container_host_remote_->AddContentSecurityPolicies(
+      std::move(policies), initiator_state_token);
 }
 
 }  // namespace blink

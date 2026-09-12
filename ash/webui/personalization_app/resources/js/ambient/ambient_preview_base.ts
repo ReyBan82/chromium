@@ -8,17 +8,22 @@
  * polymer element.
  */
 
-import {Url} from 'chrome://resources/mojo/url/mojom/url.mojom-webui.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import {isNonEmptyArray} from 'chrome://resources/ash/common/sea_pen/sea_pen_utils.js';
+import type {Url} from 'chrome://resources/mojo/url/mojom/url.mojom-webui.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 
-import {AmbientModeAlbum, TopicSource} from '../../personalization_app.mojom-webui.js';
-import {isAmbientModeAllowed, isPersonalizationJellyEnabled} from '../load_time_booleans.js';
-import {setErrorAction} from '../personalization_actions.js';
+import type {AmbientModeAlbum} from '../../personalization_app.mojom-webui.js';
+import {TopicSource} from '../../personalization_app.mojom-webui.js';
+import {isAmbientModeAllowed} from '../load_time_booleans.js';
+import {dismissErrorAction, setErrorAction} from '../personalization_actions.js';
 import {WithPersonalizationStore} from '../personalization_store.js';
-import {isNonEmptyArray} from '../utils.js';
 
 import {AmbientObserver} from './ambient_observer.js';
 import {getPhotoCount, getTopicSourceName} from './utils.js';
+
+const AMBIENT_ERROR_ID = 'AmbientPreviewBase';
+
+export type LoadingTimeoutIds = Record<'refresh'|'timeout', number>;
 
 /**
  * Removes the resolution suffix at the end of an image (from character '=' to
@@ -29,6 +34,11 @@ function replaceResolutionSuffix(url: string, resolution: string): string {
 }
 
 export class AmbientPreviewBase extends WithPersonalizationStore {
+  static timeoutsMs: LoadingTimeoutIds = {
+    refresh: 30 * 1000,
+    timeout: 60 * 1000,
+  };
+
   static get properties(): PolymerElementProperties {
     return {
       ambientModeEnabled_: Boolean,
@@ -51,18 +61,16 @@ export class AmbientPreviewBase extends WithPersonalizationStore {
       loading_: {
         type: Boolean,
         computed:
-            'computeLoading_(isAmbientModeAllowed_, ambientModeEnabled_, albums_, topicSource_, googlePhotosAlbumsPreviews_)',
+            'computeLoading_(isAmbientModeAllowed_, ambientModeEnabled_, albums_, topicSource_, previewImages_)',
         observer: 'onLoadingChanged_',
       },
-      googlePhotosAlbumsPreviews_: {
+      shouldShowLoadingAnimation_: {
+        type: Boolean,
+        value: true,
+      },
+      previewImages_: {
         type: Array,
         value: null,
-      },
-      isPersonalizationJellyEnabled_: {
-        type: Boolean,
-        value() {
-          return isPersonalizationJellyEnabled();
-        },
       },
       isAmbientModeAllowed_: {
         type: Boolean,
@@ -73,18 +81,18 @@ export class AmbientPreviewBase extends WithPersonalizationStore {
     };
   }
 
-  protected ambientModeEnabled_: boolean|null;
-  protected googlePhotosAlbumsPreviews_: Url[]|null;
-  protected isPersonalizationJellyEnabled_: boolean;
-  protected previewAlbums_: AmbientModeAlbum[]|null;
-  protected topicSource_: TopicSource|null;
+  declare protected ambientModeEnabled_: boolean|null;
+  declare protected previewImages_: Url[]|null;
+  declare protected previewAlbums_: AmbientModeAlbum[]|null;
+  declare protected topicSource_: TopicSource|null;
 
-  private albums_: AmbientModeAlbum[]|null;
-  private firstPreviewAlbum_: AmbientModeAlbum|null;
-  private isAmbientModeAllowed_: boolean;
-  private loading_: boolean;
+  declare private albums_: AmbientModeAlbum[]|null;
+  declare private firstPreviewAlbum_: AmbientModeAlbum|null;
+  declare private isAmbientModeAllowed_: boolean;
+  declare private loading_: boolean;
+  declare private shouldShowLoadingAnimation_: boolean;
 
-  private loadingTimeoutId_: number|null = null;
+  private loadingTimeoutIds_: LoadingTimeoutIds|null = null;
 
   override ready() {
     super.ready();
@@ -96,31 +104,62 @@ export class AmbientPreviewBase extends WithPersonalizationStore {
     this.watch(
         'ambientModeEnabled_', state => state.ambient.ambientModeEnabled);
     this.watch('albums_', state => state.ambient.albums);
-    this.watch(
-        'googlePhotosAlbumsPreviews_',
-        state => state.ambient.googlePhotosAlbumsPreviews);
+    this.watch('previewImages_', state => state.ambient.previews);
     this.watch('topicSource_', state => state.ambient.topicSource);
     this.updateFromStore();
   }
 
+  override disconnectedCallback() {
+    this.cleanUpTimeoutIds_();
+  }
+
+  private cleanUpTimeoutIds_() {
+    if (!this.loadingTimeoutIds_) {
+      return;
+    }
+    window.clearTimeout(this.loadingTimeoutIds_.refresh);
+    window.clearTimeout(this.loadingTimeoutIds_.timeout);
+    this.loadingTimeoutIds_ = null;
+  }
+
   private computeLoading_(): boolean {
-    return this.isAmbientModeAllowed_ &&
-        (this.ambientModeEnabled_ === null || this.albums_ === null ||
-         this.topicSource_ === null ||
-         this.googlePhotosAlbumsPreviews_ === null);
+    if (!this.isAmbientModeAllowed_ || this.ambientModeEnabled_ === false) {
+      return false;
+    }
+    return this.ambientModeEnabled_ === null || this.albums_ === null ||
+        this.topicSource_ === null || this.previewImages_ === null;
   }
 
   private onLoadingChanged_(value: boolean) {
-    if (!value && this.loadingTimeoutId_) {
-      window.clearTimeout(this.loadingTimeoutId_);
-      this.loadingTimeoutId_ = null;
+    if (!value && this.loadingTimeoutIds_) {
+      this.cleanUpTimeoutIds_();
+      this.shouldShowLoadingAnimation_ = false;
+      if (this.getState().error) {
+        this.dispatch(dismissErrorAction(AMBIENT_ERROR_ID, false));
+      }
       return;
     }
-    if (value && !this.loadingTimeoutId_) {
-      this.loadingTimeoutId_ = window.setTimeout(
-          () => this.dispatch(
-              setErrorAction({message: this.i18n('ambientModeNetworkError')})),
-          60 * 1000);
+    if (value && !this.loadingTimeoutIds_) {
+      this.shouldShowLoadingAnimation_ = true;
+      this.loadingTimeoutIds_ = {
+        // Show an error and stop the loading animation.
+        timeout: window.setTimeout(
+            () => {
+              this.shouldShowLoadingAnimation_ = false;
+              this.dispatch(setErrorAction({
+                id: AMBIENT_ERROR_ID,
+                message: this.i18n('ambientModeNetworkError')
+              }))
+            },
+            AmbientPreviewBase.timeoutsMs.timeout),
+        // Restart AmbientObserver if loading has not finished.
+        refresh: window.setTimeout(
+            () => {
+              AmbientObserver.shutdown();
+              AmbientObserver.initAmbientObserverIfNeeded();
+            },
+            AmbientPreviewBase.timeoutsMs.refresh)
+      };
     }
   }
 
@@ -142,18 +181,13 @@ export class AmbientPreviewBase extends WithPersonalizationStore {
     const classes = [];
 
     if (this.ambientModeEnabled_ || this.loading_) {
-      classes.push('zero-state-disabled');
+      classes.push('ambient-mode-enabled');
     }
 
     if (!this.ambientModeEnabled_) {
       classes.push('ambient-mode-disabled');
     }
 
-    /* TODO(b/253470553): Remove this condition after Ambient subpage UI change
-     * is released. */
-    if (!this.isPersonalizationJellyEnabled_) {
-      classes.push('jelly-disabled');
-    }
     return classes.join(' ');
   }
 
@@ -161,9 +195,8 @@ export class AmbientPreviewBase extends WithPersonalizationStore {
     // Replace the resolution suffix appended at the end of the images
     // with a new resolution suffix of 512px so that we do not download very
     // large images. This won't impact images with no resolution suffix.
-    return album && album.url ?
-        replaceResolutionSuffix(album.url.url, '=s512') :
-        '';
+    return album && album.url ? replaceResolutionSuffix(album.url, '=s512') :
+                                '';
   }
 
   private getPreviewTextAriaLabel_(): string {
@@ -185,11 +218,16 @@ export class AmbientPreviewBase extends WithPersonalizationStore {
         // and number of photos in the album (only applicable for Google
         // Photos).
         const topicSourceDesc = getTopicSourceName(this.topicSource_);
-        // TODO(b/223834394): replace dot separator symbol • with an icon/image.
-        return this.topicSource_ === TopicSource.kArtGallery ?
-            topicSourceDesc :
-            `${topicSourceDesc} • ${
-                getPhotoCount(this.previewAlbums_[0].numberOfPhotos)}`;
+        if (this.topicSource_ === TopicSource.kArtGallery) {
+          return topicSourceDesc;
+        } else if (this.topicSource_ === TopicSource.kVideo) {
+          return this.previewAlbums_[0].description;
+        } else {
+          // TODO(b/223834394): replace dot separator symbol • with an
+          // icon/image.
+          return `${topicSourceDesc} • ${
+              getPhotoCount(this.previewAlbums_[0].numberOfPhotos)}`;
+        }
       case 2:
       case 3:
         // For 2-3 selected albums, album description includes the titles of all
@@ -206,5 +244,13 @@ export class AmbientPreviewBase extends WithPersonalizationStore {
             'ambientModeMultipleAlbumsDesc', this.previewAlbums_[1].title,
             this.previewAlbums_.length - 2);
     }
+  }
+
+  private getPlaceholderClasses_(shouldShowLoadingAnimation: boolean): string {
+    const classes = ['placeholder'];
+    if (!shouldShowLoadingAnimation) {
+      classes.push('placeholder-no-animation');
+    }
+    return classes.join(' ');
   }
 }

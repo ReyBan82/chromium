@@ -50,8 +50,9 @@ void PreloadCheckRunner::OnCheckComplete(const PreloadCheck::Errors& errors) {
   called_ = true;
   errors_ = errors;
 
-  if (run_loop_)
+  if (run_loop_) {
     run_loop_->Quit();
+  }
 }
 
 // PreloadCheckStub:
@@ -65,7 +66,7 @@ void PreloadCheckStub::Start(ResultCallback callback) {
   started_ = true;
   if (is_async_) {
     // TODO(michaelpg): Bind the callback directly and remove RunCallback
-    // once crbug.com/704027 is addressed.
+    // once crbug.com/40511934 is addressed.
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE,
         base::BindOnce(&PreloadCheckStub::RunCallback,

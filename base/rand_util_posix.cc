@@ -4,40 +4,42 @@
 
 #include "base/rand_util.h"
 
-#include <errno.h>
-#include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/syscall.h>
-#include <sys/utsname.h>
-#include <unistd.h>
 
 #include "base/check.h"
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/feature_list.h"
-#include "base/files/file_util.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/no_destructor.h"
-#include "base/posix/eintr_wrapper.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-
-#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && !BUILDFLAG(IS_NACL)
-#include "third_party/lss/linux_syscall_support.h"
-#elif BUILDFLAG(IS_MAC)
-// TODO(crbug.com/995996): Waiting for this header to appear in the iOS SDK.
-// (See below.)
-#include <sys/random.h>
-#endif
-
-#if !BUILDFLAG(IS_NACL)
-#include "third_party/boringssl/src/include/openssl/crypto.h"
 #include "third_party/boringssl/src/include/openssl/rand.h"
-#endif
+
+#if BUILDFLAG(IS_MAC)
+#include <sys/random.h>
+#elif BUILDFLAG(IS_APPLE)
+#include <CommonCrypto/CommonRandom.h>
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include "base/files/file_util.h"
+#include "base/no_destructor.h"
+#include "base/posix/eintr_wrapper.h"
+#include "base/system/sys_info.h"
+#endif  // BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+#include "third_party/lss/linux_syscall_support.h"
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 
 namespace base {
 
 namespace {
+
+#if !BUILDFLAG(IS_APPLE)
 
 #if BUILDFLAG(IS_AIX)
 // AIX has no 64-bit support for O_CLOEXEC.
@@ -64,41 +66,13 @@ class URandomFd {
   const int fd_;
 };
 
-#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
-     BUILDFLAG(IS_ANDROID)) &&                        \
-    !BUILDFLAG(IS_NACL)
-// TODO(pasko): Unify reading kernel version numbers in:
-// mojo/core/channel_linux.cc
-// chrome/browser/android/seccomp_support_detector.cc
-void KernelVersionNumbers(int32_t* major_version,
-                          int32_t* minor_version,
-                          int32_t* bugfix_version) {
-  struct utsname info;
-  if (uname(&info) < 0) {
-    NOTREACHED();
-    *major_version = 0;
-    *minor_version = 0;
-    *bugfix_version = 0;
-    return;
-  }
-  int num_read = sscanf(info.release, "%d.%d.%d", major_version, minor_version,
-                        bugfix_version);
-  if (num_read < 1)
-    *major_version = 0;
-  if (num_read < 2)
-    *minor_version = 0;
-  if (num_read < 3)
-    *bugfix_version = 0;
-}
+#endif  // !BUILDFLAG(IS_APPLE)
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
 
 bool KernelSupportsGetRandom() {
-  int32_t major = 0;
-  int32_t minor = 0;
-  int32_t bugfix = 0;
-  KernelVersionNumbers(&major, &minor, &bugfix);
-  if (major > 3 || (major == 3 && minor >= 17))
-    return true;
-  return false;
+  return base::SysInfo::KernelVersionNumber::Current() >=
+         base::SysInfo::KernelVersionNumber(3, 17);
 }
 
 bool GetRandomSyscall(void* output, size_t output_length) {
@@ -116,48 +90,20 @@ bool GetRandomSyscall(void* output, size_t output_length) {
   }
   return false;
 }
-#endif  // (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
-        // BUILDFLAG(IS_ANDROID)) && !BUILDFLAG(IS_NACL)
-
-#if BUILDFLAG(IS_ANDROID)
-std::atomic<bool> g_use_getrandom;
-
-// Note: the BoringSSL feature takes precedence over the getrandom() trial if
-// both are enabled.
-BASE_FEATURE(kUseGetrandomForRandBytes,
-             "UseGetrandomForRandBytes",
-             FEATURE_ENABLED_BY_DEFAULT);
-
-bool UseGetrandom() {
-  return g_use_getrandom.load(std::memory_order_relaxed);
-}
-#elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && !BUILDFLAG(IS_NACL)
-bool UseGetrandom() {
-  return true;
-}
-#endif
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+        // BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
 namespace internal {
 
-#if BUILDFLAG(IS_ANDROID)
-void ConfigureRandBytesFieldTrial() {
-  g_use_getrandom.store(FeatureList::IsEnabled(kUseGetrandomForRandBytes),
-                        std::memory_order_relaxed);
-}
-#endif
-
 namespace {
 
-#if !BUILDFLAG(IS_NACL)
 // The BoringSSl helpers are duplicated in rand_util_fuchsia.cc and
 // rand_util_win.cc.
 std::atomic<bool> g_use_boringssl;
 
-BASE_FEATURE(kUseBoringSSLForRandBytes,
-             "UseBoringSSLForRandBytes",
-             FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kUseBoringSSLForRandBytes, FEATURE_ENABLED_BY_DEFAULT);
 
 }  // namespace
 
@@ -169,51 +115,42 @@ void ConfigureBoringSSLBackedRandBytesFieldTrial() {
 bool UseBoringSSLForRandBytes() {
   return g_use_boringssl.load(std::memory_order_relaxed);
 }
-#endif
 
 }  // namespace internal
 
 namespace {
 
-void RandBytes(void* output, size_t output_length, bool avoid_allocation) {
-#if !BUILDFLAG(IS_NACL)
+void RandBytesInternal(span<uint8_t> output, bool avoid_allocation) {
   // The BoringSSL experiment takes priority over everything else.
   if (!avoid_allocation && internal::UseBoringSSLForRandBytes()) {
-    // Ensure BoringSSL is initialized so it can use things like RDRAND.
-    CRYPTO_library_init();
     // BoringSSL's RAND_bytes always returns 1. Any error aborts the program.
-    (void)RAND_bytes(static_cast<uint8_t*>(output), output_length);
+    (void)RAND_bytes(output.data(), output.size());
     return;
   }
-#endif
-#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
-     BUILDFLAG(IS_ANDROID)) &&                        \
-    !BUILDFLAG(IS_NACL)
-  if (avoid_allocation || UseGetrandom()) {
-    // On Android it is mandatory to check that the kernel _version_ has the
-    // support for a syscall before calling. The same check is made on Linux and
-    // ChromeOS to avoid making a syscall that predictably returns ENOSYS.
-    static const bool kernel_has_support = KernelSupportsGetRandom();
-    if (kernel_has_support && GetRandomSyscall(output, output_length))
-      return;
-  }
-#elif BUILDFLAG(IS_MAC)
-  // TODO(crbug.com/995996): Enable this on iOS too, when sys/random.h arrives
-  // in its SDK.
-  if (getentropy(output, output_length) == 0) {
+#if BUILDFLAG(IS_MAC)
+  CHECK(getentropy(output.data(), output.size()) == 0);
+#elif BUILDFLAG(IS_APPLE)
+  CHECK(CCRandomGenerateBytes(output.data(), output.size()) == kCCSuccess);
+#else
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+  // On Android it is mandatory to check that the kernel _version_ has the
+  // support for a syscall before calling. The same check is made on Linux and
+  // ChromeOS to avoid making a syscall that predictably returns ENOSYS.
+  static const bool kernel_has_support = KernelSupportsGetRandom();
+  if (kernel_has_support && GetRandomSyscall(output.data(), output.size())) {
     return;
   }
-#endif
-
+#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) ||
+        // BUILDFLAG(IS_ANDROID)
   // If the OS-specific mechanisms didn't work, fall through to reading from
   // urandom.
   //
-  // TODO(crbug.com/995996): When we no longer need to support old Linux
+  // TODO(crbug.com/40641285): When we no longer need to support old Linux
   // kernels, we can get rid of this /dev/urandom branch altogether.
   const int urandom_fd = GetUrandomFD();
-  const bool success =
-      ReadFromFD(urandom_fd, static_cast<char*>(output), output_length);
+  const bool success = ReadFromFD(urandom_fd, as_writable_chars(output));
   CHECK(success);
+#endif  // BUILDFLAG(IS_MAC)
 }
 
 }  // namespace
@@ -222,20 +159,22 @@ namespace internal {
 
 double RandDoubleAvoidAllocation() {
   uint64_t number;
-  RandBytes(&number, sizeof(number), /*avoid_allocation=*/true);
+  RandBytesInternal(byte_span_from_ref(number), /*avoid_allocation=*/true);
   // This transformation is explained in rand_util.cc.
   return (number >> 11) * 0x1.0p-53;
 }
 
 }  // namespace internal
 
-void RandBytes(void* output, size_t output_length) {
-  RandBytes(output, output_length, /*avoid_allocation=*/false);
+void RandBytes(span<uint8_t> output) {
+  RandBytesInternal(output, /*avoid_allocation=*/false);
 }
 
+#if !BUILDFLAG(IS_APPLE)
 int GetUrandomFD() {
   static NoDestructor<URandomFd> urandom_fd;
   return urandom_fd->fd();
 }
+#endif  // !BUILDFLAG(IS_APPLE)
 
 }  // namespace base

@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include "base/memory/raw_ptr.h"
@@ -30,9 +31,9 @@ class EventLogger {
  public:
   EventLogger() = default;
 
-  void AddEvent(StringPiece event) {
+  void AddEvent(std::string_view event) {
     AutoLock guard(lock_);
-    events_.push_back(std::string(event));
+    events_.emplace_back(event);
   }
   std::vector<std::string> TakeEvents() {
     AutoLock guard(lock_);
@@ -227,8 +228,9 @@ class BoxedValue {
   ~BoxedValue() {
     EXPECT_TRUE(sequence_checker_.CalledOnValidSequence());
     AddEventIfNeeded(StringPrintf("destroyed BoxedValue = %d", value_));
-    if (destruction_callback_)
+    if (destruction_callback_) {
       std::move(destruction_callback_).Run();
+    }
   }
 
   void set_destruction_callback(OnceClosure callback) {
@@ -249,7 +251,7 @@ class BoxedValue {
   }
 
  private:
-  void AddEventIfNeeded(StringPiece event) const {
+  void AddEventIfNeeded(std::string_view event) const {
     if (logger_) {
       logger_->AddEvent(event);
     }
@@ -819,7 +821,7 @@ TYPED_TEST(SequenceBoundTest, AsyncCallNoArgsVoidThen) {
 
   {
     RunLoop loop;
-    s.AsyncCall(&NoArgsVoidReturn::Method).Then(BindLambdaForTesting([&]() {
+    s.AsyncCall(&NoArgsVoidReturn::Method).Then(BindLambdaForTesting([&] {
       loop.Quit();
     }));
     loop.Run();
@@ -827,8 +829,9 @@ TYPED_TEST(SequenceBoundTest, AsyncCallNoArgsVoidThen) {
 
   {
     RunLoop loop;
-    s.AsyncCall(&NoArgsVoidReturn::ConstMethod)
-        .Then(BindLambdaForTesting([&]() { loop.Quit(); }));
+    s.AsyncCall(&NoArgsVoidReturn::ConstMethod).Then(BindLambdaForTesting([&] {
+      loop.Quit();
+    }));
     loop.Run();
   }
 }
@@ -1077,40 +1080,6 @@ TYPED_TEST(SequenceBoundTest, AsyncCallIgnoreResultWithArgsThen) {
   }
 }
 
-// TODO(https://crbug.com/1382549): Maybe use the nocompile harness here instead
-// of being "clever"...
-TYPED_TEST(SequenceBoundTest, NoCompileTests) {
-  // TODO(https://crbug.com/1382549): Test calling WithArgs() on a method that
-  // takes no arguments.
-  //
-  // Given:
-  //   class C {
-  //     void F();
-  //   };
-  //
-  // Then:
-  //   SequenceBound<C> s(...);
-  //   s.AsyncCall(&C::F).WithArgs(...);
-  //
-  // should not compile.
-  //
-  // TODO(https://crbug.com/1382549): Test calling Then() before calling
-  // WithArgs().
-  //
-  // Given:
-  //   class C {
-  //     void F(int);
-  //   };
-  //
-  // Then:
-  //   SequenceBound<C> s(...);
-  //   s.AsyncCall(&C::F).Then(...).WithArgs(...);
-  //
-  // should not compile.
-  //
-  // TODO(https://crbug.com/1382549): Add no-compile tests for converting
-  // between SequenceBound<T> and SequenceBound<std::unique_ptr<T>>.
-}
 #undef SequenceBound
 
 class SequenceBoundDeathTest : public ::testing::Test {

@@ -9,16 +9,22 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/containers/span.h"
+#include "base/memory/free_deleter.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/synchronization/condition_variable.h"
 #include "base/time/time.h"
+#include "base/values.h"
+#include "build/build_config.h"
 #include "net/base/connection_endpoint_metadata.h"
 #include "net/base/ip_endpoint.h"
 #include "net/dns/dns_client.h"
@@ -26,12 +32,19 @@
 #include "net/dns/dns_response.h"
 #include "net/dns/dns_transaction.h"
 #include "net/dns/dns_util.h"
+#include "net/dns/filtering_details_url_generator.h"
 #include "net/dns/public/dns_over_https_server_config.h"
 #include "net/dns/public/dns_protocol.h"
+#include "net/dns/public/resolution_details.h"
 #include "net/dns/public/secure_dns_mode.h"
 #include "net/socket/socket_test_util.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/scheme_host_port.h"
+
+#if BUILDFLAG(IS_WIN)
+#include <iphlpapi.h>
+
+#include "base/containers/heap_array.h"
+#endif  // BUILDFLAG(IS_WIN)
 
 namespace net {
 
@@ -67,7 +80,7 @@ static const char* const kT0IpAddresses[] = {
 static const char kT0CanonName[] = "www.l.google.com";
 static const base::TimeDelta kT0Ttl = base::Seconds(0x000000e4);
 // +1 for the CNAME record.
-static const unsigned kT0RecordCount = std::size(kT0IpAddresses) + 1;
+static const uint32_t kT0RecordCount = std::size(kT0IpAddresses) + 1;
 
 //-----------------------------------------------------------------------------
 // Query/response set for codereview.chromium.org, ID is fixed to 1.
@@ -97,7 +110,7 @@ static const char* const kT1IpAddresses[] = {
 static const char kT1CanonName[] = "ghs.l.google.com";
 static const base::TimeDelta kT1Ttl = base::Seconds(0x0000010b);
 // +1 for the CNAME record.
-static const unsigned kT1RecordCount = std::size(kT1IpAddresses) + 1;
+static const uint32_t kT1RecordCount = std::size(kT1IpAddresses) + 1;
 
 //-----------------------------------------------------------------------------
 // Query/response set for www.ccs.neu.edu, ID is fixed to 2.
@@ -126,7 +139,7 @@ static const char* const kT2IpAddresses[] = {
 static const char kT2CanonName[] = "vulcan.ccs.neu.edu";
 static const base::TimeDelta kT2Ttl = base::Seconds(0x0000012c);
 // +1 for the CNAME record.
-static const unsigned kT2RecordCount = std::size(kT2IpAddresses) + 1;
+static const uint32_t kT2RecordCount = std::size(kT2IpAddresses) + 1;
 
 //-----------------------------------------------------------------------------
 // Query/response set for www.google.az, ID is fixed to 3.
@@ -168,7 +181,7 @@ static const char* const kT3IpAddresses[] = {
 static const char kT3CanonName[] = "www.l.google.com";
 static const base::TimeDelta kT3Ttl = base::Seconds(0x00000015);
 // +2 for the CNAME records, +1 for TXT record.
-static const unsigned kT3RecordCount = std::size(kT3IpAddresses) + 3;
+static const uint32_t kT3RecordCount = std::size(kT3IpAddresses) + 3;
 
 //-----------------------------------------------------------------------------
 // Query/response set for www.gstatic.com, ID is fixed to 0.
@@ -188,7 +201,7 @@ static const uint8_t kT4ResponseDatagram[] = {
 
 static const char* const kT4IpAddresses[] = {"172.217.6.195"};
 static const base::TimeDelta kT4Ttl = base::Seconds(0x0000012b);
-static const unsigned kT4RecordCount = std::size(kT0IpAddresses);
+static const uint32_t kT4RecordCount = std::size(kT0IpAddresses);
 
 class AddressSorter;
 class DnsClient;
@@ -197,13 +210,29 @@ class IPAddress;
 class ResolveContext;
 class URLRequestContext;
 
+DnsConfig CreateValidDnsConfig();
+
+class ScopedSetFilteringDetailsUrlGeneratorForTesting {
+ public:
+  ScopedSetFilteringDetailsUrlGeneratorForTesting();
+  ~ScopedSetFilteringDetailsUrlGeneratorForTesting();
+
+  ScopedSetFilteringDetailsUrlGeneratorForTesting(
+      const ScopedSetFilteringDetailsUrlGeneratorForTesting&) = delete;
+  ScopedSetFilteringDetailsUrlGeneratorForTesting& operator=(
+      const ScopedSetFilteringDetailsUrlGeneratorForTesting&) = delete;
+
+ private:
+  FilteringDetailsUrlGenerator generator_;
+};
+
 DnsResourceRecord BuildTestDnsRecord(std::string name,
                                      uint16_t type,
-                                     std::string rdata,
+                                     base::span<const uint8_t> rdata,
                                      base::TimeDelta ttl = base::Days(1));
 
 DnsResourceRecord BuildTestCnameRecord(std::string name,
-                                       base::StringPiece canonical_name,
+                                       std::string_view canonical_name,
                                        base::TimeDelta ttl = base::Days(1));
 
 DnsResourceRecord BuildTestAddressRecord(std::string name,
@@ -216,7 +245,7 @@ DnsResourceRecord BuildTestTextRecord(std::string name,
 
 DnsResourceRecord BuildTestHttpsAliasRecord(
     std::string name,
-    base::StringPiece alias_name,
+    std::string_view alias_name,
     base::TimeDelta ttl = base::Days(1));
 
 std::pair<uint16_t, std::string> BuildTestHttpsServiceAlpnParam(
@@ -224,6 +253,9 @@ std::pair<uint16_t, std::string> BuildTestHttpsServiceAlpnParam(
 
 std::pair<uint16_t, std::string> BuildTestHttpsServiceEchConfigParam(
     base::span<const uint8_t> ech_config_list);
+
+std::pair<uint16_t, std::string> BuildTestHttpsServiceTrustAnchorIDsParam(
+    const std::vector<std::vector<uint8_t>>& trust_anchor_ids);
 
 std::pair<uint16_t, std::string> BuildTestHttpsServiceMandatoryParam(
     std::vector<uint16_t> param_key_list);
@@ -236,9 +268,13 @@ std::pair<uint16_t, std::string> BuildTestHttpsServicePortParam(uint16_t port);
 DnsResourceRecord BuildTestHttpsServiceRecord(
     std::string name,
     uint16_t priority,
-    base::StringPiece service_name,
+    std::string_view service_name,
     const std::map<uint16_t, std::string>& params,
     base::TimeDelta ttl = base::Days(1));
+
+DnsResourceRecord BuildTestOptRecord(uint16_t udp_payload_size,
+                                     uint32_t extended_rcode_and_flags,
+                                     base::span<const uint8_t> rdata);
 
 DnsResponse BuildTestDnsResponse(
     std::string name,
@@ -307,17 +343,20 @@ struct MockDnsClientRule {
   };
 
   struct Result {
-    explicit Result(ResultType type,
-                    absl::optional<DnsResponse> response = absl::nullopt,
-                    absl::optional<int> net_error = absl::nullopt);
+    explicit Result(
+        ResultType type,
+        std::optional<DnsResponse> response = std::nullopt,
+        std::optional<int> net_error = std::nullopt,
+        std::optional<DohResolutionDetails> doh_details = std::nullopt);
     explicit Result(DnsResponse response);
     Result(Result&&);
     Result& operator=(Result&&);
     ~Result();
 
     ResultType type;
-    absl::optional<DnsResponse> response;
-    absl::optional<int> net_error;
+    std::optional<DnsResponse> response;
+    std::optional<int> net_error;
+    std::optional<DohResolutionDetails> doh_details;
   };
 
   // If |delay| is true, matching transactions will be delayed until triggered
@@ -336,7 +375,7 @@ struct MockDnsClientRule {
   uint16_t qtype;
   bool secure;
   bool delay;
-  raw_ptr<URLRequestContext> context;
+  raw_ptr<URLRequestContext, DanglingUntriaged> context;
 };
 
 typedef std::vector<MockDnsClientRule> MockDnsClientRuleList;
@@ -351,15 +390,14 @@ class MockDnsTransactionFactory : public DnsTransactionFactory {
       std::string hostname,
       uint16_t qtype,
       const NetLogWithSource&,
-      bool secure,
+      AttemptMode attempt_mode,
       SecureDnsMode secure_dns_mode,
+      handles::NetworkHandle target_network,
       ResolveContext* resolve_context,
       bool fast_timeout) override;
 
   std::unique_ptr<DnsProbeRunner> CreateDohProbeRunner(
       ResolveContext* resolve_context) override;
-
-  void AddEDNSOption(std::unique_ptr<OptRecordRdata::Opt> opt) override;
 
   SecureDnsMode GetSecureDnsModeForTest() override;
 
@@ -370,6 +408,11 @@ class MockDnsTransactionFactory : public DnsTransactionFactory {
 
   bool doh_probes_running() { return !running_doh_probe_runners_.empty(); }
   void CompleteDohProbeRuners() { running_doh_probe_runners_.clear(); }
+
+  void SetNextDohProbeRunner(
+      std::unique_ptr<DnsProbeRunner> next_probe_runner) {
+    next_probe_runner_ = std::move(next_probe_runner);
+  }
 
   void set_force_doh_server_available(bool available) {
     force_doh_server_available_ = available;
@@ -384,7 +427,9 @@ class MockDnsTransactionFactory : public DnsTransactionFactory {
   DelayedTransactionList delayed_transactions_;
 
   bool force_doh_server_available_ = true;
-  std::set<MockDohProbeRunner*> running_doh_probe_runners_;
+  std::unique_ptr<DnsProbeRunner> next_probe_runner_;
+  std::set<raw_ptr<MockDohProbeRunner, SetExperimental>>
+      running_doh_probe_runners_;
 
   base::WeakPtrFactory<MockDnsTransactionFactory> weak_ptr_factory_{this};
 };
@@ -397,28 +442,36 @@ class MockDnsClient : public DnsClient {
 
   // DnsClient interface:
   bool CanUseSecureDnsTransactions() const override;
-  bool CanUseInsecureDnsTransactions() const override;
-  bool CanQueryAdditionalTypesViaInsecureDns() const override;
-  void SetInsecureEnabled(bool enabled, bool additional_types_enabled) override;
+  bool CanUseInsecureDnsTransactions(
+      std::optional<EchMode> ech_mode) const override;
+  bool CanQueryAdditionalTypesViaInsecureDns(
+      std::optional<EchMode> ech_mode) const override;
+  void SetInsecureEnabled(InsecureDnsMode mode,
+                          bool additional_types_enabled) override;
+  InsecureDnsMode GetInsecureDnsMode(
+      std::optional<EchMode> ech_mode) const override;
   bool FallbackFromSecureTransactionPreferred(
       ResolveContext* resolve_context) const override;
-  bool FallbackFromInsecureTransactionPreferred() const override;
-  bool SetSystemConfig(absl::optional<DnsConfig> system_config) override;
+  bool FallbackFromInsecureTransactionPreferred(
+      std::optional<EchMode> ech_mode) const override;
+  bool SetSystemConfig(std::optional<DnsConfig> system_config) override;
   bool SetConfigOverrides(DnsConfigOverrides config_overrides) override;
   void ReplaceCurrentSession() override;
   DnsSession* GetCurrentSession() override;
-  const DnsConfig* GetEffectiveConfig() const override;
+  const DnsConfig& GetEffectiveConfig() const override;
   const DnsHosts* GetHosts() const override;
   DnsTransactionFactory* GetTransactionFactory() override;
   AddressSorter* GetAddressSorter() override;
   void IncrementInsecureFallbackFailures() override;
   void ClearInsecureFallbackFailures() override;
-  base::Value GetDnsConfigAsValueForNetLog() const override;
-  absl::optional<DnsConfig> GetSystemConfigForTesting() const override;
+  base::DictValue GetDnsConfigAsValueForNetLog() const override;
+  std::optional<DnsConfig> GetSystemConfigForTesting() const override;
   DnsConfigOverrides GetConfigOverridesForTesting() const override;
   void SetTransactionFactoryForTesting(
       std::unique_ptr<DnsTransactionFactory> factory) override;
-  absl::optional<std::vector<IPEndPoint>> GetPresetAddrs(
+  void SetAddressSorterForTesting(
+      std::unique_ptr<AddressSorter> address_sorter) override;
+  std::optional<std::vector<IPEndPoint>> GetPresetAddrs(
       const url::SchemeHostPort& endpoint) const override;
 
   // Completes all DnsTransactions that were delayed by a rule.
@@ -435,7 +488,7 @@ class MockDnsClient : public DnsClient {
     ignore_system_config_changes_ = ignore_system_config_changes;
   }
 
-  void set_preset_endpoint(absl::optional<url::SchemeHostPort> endpoint) {
+  void set_preset_endpoint(std::optional<url::SchemeHostPort> endpoint) {
     preset_endpoint_ = std::move(endpoint);
   }
 
@@ -448,10 +501,10 @@ class MockDnsClient : public DnsClient {
   MockDnsTransactionFactory* factory() { return factory_.get(); }
 
  private:
-  absl::optional<DnsConfig> BuildEffectiveConfig();
+  DnsConfig BuildEffectiveConfig();
   scoped_refptr<DnsSession> BuildSession();
 
-  bool insecure_enabled_ = false;
+  InsecureDnsMode insecure_dns_mode_ = InsecureDnsMode::kDisabled;
   bool additional_types_enabled_ = false;
   int fallback_failures_ = 0;
   int max_fallback_failures_ = DnsClient::kMaxInsecureFallbackFailures;
@@ -464,15 +517,115 @@ class MockDnsClient : public DnsClient {
   bool force_doh_server_available_ = true;
 
   MockClientSocketFactory socket_factory_;
-  absl::optional<DnsConfig> config_;
+  std::optional<DnsConfig> config_;
   scoped_refptr<DnsSession> session_;
   DnsConfigOverrides overrides_;
-  absl::optional<DnsConfig> effective_config_;
+  DnsConfig effective_config_;
   std::unique_ptr<MockDnsTransactionFactory> factory_;
   std::unique_ptr<AddressSorter> address_sorter_;
-  absl::optional<url::SchemeHostPort> preset_endpoint_;
-  absl::optional<std::vector<IPEndPoint>> preset_addrs_;
+  std::optional<url::SchemeHostPort> preset_endpoint_;
+  std::optional<std::vector<IPEndPoint>> preset_addrs_;
 };
+
+// A HostResolverProc that pushes each host mapped into a list and allows
+// waiting for a specific number of requests. Unlike RuleBasedHostResolverProc
+// it never calls SystemHostResolverCall. By default resolves all hostnames to
+// "127.0.0.1". After AddRule(), it resolves only names explicitly specified.
+class MockHostResolverProc : public HostResolverProc {
+ public:
+  struct ResolveKey {
+    ResolveKey(const std::string& hostname,
+               AddressFamily address_family,
+               HostResolverFlags flags)
+        : hostname(hostname), address_family(address_family), flags(flags) {}
+    bool operator<(const ResolveKey& other) const {
+      return std::tie(address_family, hostname, flags) <
+             std::tie(other.address_family, other.hostname, other.flags);
+    }
+    std::string hostname;
+    AddressFamily address_family;
+    HostResolverFlags flags;
+  };
+
+  typedef std::vector<ResolveKey> CaptureList;
+
+  MockHostResolverProc();
+
+  MockHostResolverProc(const MockHostResolverProc&) = delete;
+  MockHostResolverProc& operator=(const MockHostResolverProc&) = delete;
+
+  // Waits until `count` calls to `Resolve` are blocked. Returns false when
+  // timed out.
+  bool WaitFor(uint32_t count);
+
+  // Signals `count` waiting calls to `Resolve`. First come first served.
+  void SignalMultiple(uint32_t count);
+
+  // Signals all waiting calls to `Resolve`. Beware of races.
+  void SignalAll();
+
+  void AddRule(const std::string& hostname,
+               AddressFamily family,
+               const AddressList& result,
+               HostResolverFlags flags = 0);
+
+  void AddRule(const std::string& hostname,
+               AddressFamily family,
+               const std::string& ip_list,
+               HostResolverFlags flags = 0,
+               const std::string& canonical_name = "");
+
+  void AddRuleForAllFamilies(const std::string& hostname,
+                             const std::string& ip_list,
+                             HostResolverFlags flags = 0,
+                             const std::string& canonical_name = "");
+
+  int Resolve(const std::string& hostname,
+              AddressFamily address_family,
+              HostResolverFlags host_resolver_flags,
+              AddressList* addrlist,
+              int* os_error) override;
+
+  int Resolve(const std::string& hostname,
+              AddressFamily address_family,
+              HostResolverFlags host_resolver_flags,
+              AddressList* addrlist,
+              int* os_error,
+              handles::NetworkHandle network) override;
+
+  CaptureList GetCaptureList() const;
+
+  void ClearCaptureList();
+
+  bool HasBlockedRequests() const;
+
+ protected:
+  ~MockHostResolverProc() override;
+
+ private:
+  mutable base::Lock lock_;
+  std::map<ResolveKey, AddressList> rules_;
+  CaptureList capture_list_;
+  uint32_t num_requests_waiting_ = 0;
+  uint32_t num_slots_available_ = 0;
+  base::ConditionVariable requests_waiting_;
+  base::ConditionVariable slots_available_;
+};
+
+#if BUILDFLAG(IS_WIN)
+
+struct AdapterInfo {
+  IFTYPE if_type;
+  IF_OPER_STATUS oper_status;
+  const WCHAR* dns_suffix;
+  std::string dns_server_addresses[4];  // Empty string indicates end.
+  uint16_t ports[4];
+};
+
+std::unique_ptr<IP_ADAPTER_ADDRESSES, base::FreeDeleter> CreateAdapterAddresses(
+    const std::vector<AdapterInfo>& infos);
+
+#endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace net
 

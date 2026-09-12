@@ -5,23 +5,29 @@
 #include "chrome/browser/ui/views/page_info/about_this_site_side_panel_coordinator.h"
 
 #include "base/functional/bind.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "base/functional/callback_helpers.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/page_info/about_this_site_side_panel.h"
-#include "chrome/browser/ui/views/chrome_layout_provider.h"
+#include "chrome/browser/ui/side_panel/side_panel_entry.h"
+#include "chrome/browser/ui/side_panel/side_panel_entry_key.h"
+#include "chrome/browser/ui/side_panel/side_panel_registry.h"
+#include "chrome/browser/ui/side_panel/side_panel_ui.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
-#include "chrome/browser/ui/views/page_info/about_this_site_side_panel_view.h"
-#include "chrome/browser/ui/views/side_panel/side_panel_coordinator.h"
-#include "chrome/browser/ui/views/side_panel/side_panel_entry.h"
-#include "chrome/browser/ui/views/side_panel/side_panel_registry.h"
+#include "chrome/browser/ui/views/page_info/web_view_side_panel_view.h"
 #include "components/page_info/core/about_this_site_service.h"
-#include "components/strings/grit/components_strings.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/page_navigator.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "net/base/url_util.h"
-#include "ui/base/l10n/l10n_util.h"
-#include "ui/views/vector_icons.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
+
+constexpr char kStaticLoadingScreenURL[] =
+    "https://www.gstatic.com/diner/chrome/atp_loading.html";
 
 namespace {
 content::OpenURLParams CreateOpenUrlParams(const GURL& url) {
@@ -61,11 +67,12 @@ AboutThisSideSidePanelCoordinator::~AboutThisSideSidePanelCoordinator() =
 
 void AboutThisSideSidePanelCoordinator::RegisterEntry(
     const GURL& more_about_url) {
-  auto* browser_view = GetBrowserView();
-  if (!browser_view)
+  SidePanelUI* side_panel_ui = GetSidePanelUI();
+  if (!side_panel_ui) {
     return;
+  }
 
-  auto* registry = SidePanelRegistry::Get(web_contents());
+  auto* registry = SidePanelRegistry::GetDeprecated(web_contents());
   last_url_info_ = {web_contents()->GetLastCommittedURL(), more_about_url,
                     CreateOpenUrlParams(more_about_url)};
   registered_but_not_shown_ = true;
@@ -73,28 +80,26 @@ void AboutThisSideSidePanelCoordinator::RegisterEntry(
   // Check if the view is already registered.
   if (!registry->GetEntryForKey(
           SidePanelEntry::Key(SidePanelEntry::Id::kAboutThisSite))) {
-    const int icon_size = ChromeLayoutProvider::Get()->GetDistanceMetric(
-        ChromeDistanceMetric::DISTANCE_SIDE_PANEL_HEADER_VECTOR_ICON_SIZE);
     auto entry = std::make_unique<SidePanelEntry>(
-        SidePanelEntry::Id::kAboutThisSite,
-        l10n_util::GetStringUTF16(IDS_PAGE_INFO_ABOUT_THIS_PAGE_TITLE),
-        ui::ImageModel::FromVectorIcon(views::kInfoIcon, ui::kColorIcon,
-                                       icon_size),
+        SidePanelEntry::Key(SidePanelEntry::Id::kAboutThisSite),
         base::BindRepeating(
             &AboutThisSideSidePanelCoordinator::CreateAboutThisSiteWebView,
             base::Unretained(this)),
         base::BindRepeating(
             &AboutThisSideSidePanelCoordinator::GetOpenInNewTabUrl,
-            base::Unretained(this)));
+            base::Unretained(this)),
+        /*more_info_callback=*/base::NullCallback(),
+        /*default_content_width_callback=*/base::NullCallback());
     registry->Register(std::move(entry));
   }
 }
 
 void AboutThisSideSidePanelCoordinator::RegisterEntryAndShow(
     const GURL& more_about_url) {
-  auto* browser_view = GetBrowserView();
-  if (!browser_view)
+  SidePanelUI* side_panel_ui = GetSidePanelUI();
+  if (!side_panel_ui) {
     return;
+  }
 
   RegisterEntry(more_about_url);
   registered_but_not_shown_ = false;
@@ -104,45 +109,49 @@ void AboutThisSideSidePanelCoordinator::RegisterEntryAndShow(
     about_this_site_side_panel_view_->OpenUrl(last_url_info_->url_params);
   }
 
-  auto* side_panel_coordinator = browser_view->side_panel_coordinator();
-  if (side_panel_coordinator->GetCurrentEntryId() !=
-      SidePanelEntry::Id::kAboutThisSite) {
-    side_panel_coordinator->Show(SidePanelEntry::Id::kAboutThisSite);
+  if (!side_panel_ui->IsSidePanelEntryShowing(
+          SidePanelEntryKey(SidePanelEntry::Id::kAboutThisSite))) {
+    side_panel_ui->Show(SidePanelEntry::Id::kAboutThisSite);
   }
 }
 
 void AboutThisSideSidePanelCoordinator::DidFinishNavigation(
     content::NavigationHandle* navigation_handle) {
   if (!navigation_handle->IsInPrimaryMainFrame() ||
-      navigation_handle->IsSameDocument() ||
       !navigation_handle->HasCommitted()) {
     return;
   }
 
-  auto* browser_view = GetBrowserView();
-  if (!browser_view)
+  if (navigation_handle->IsSameDocument() &&
+      web_contents()->GetLastCommittedURL().GetWithoutRef() ==
+          last_url_info_->context_url.GetWithoutRef()) {
     return;
-
-  // If the side panel is open and shows the AboutThisSide panel, close it.
-  auto* side_panel_coordinator = browser_view->side_panel_coordinator();
-  if (side_panel_coordinator->GetCurrentEntryId() ==
-      SidePanelEntry::Id::kAboutThisSite) {
-    side_panel_coordinator->Close();
   }
 
-  // If the user navigates to a different page than the one we have data for
-  // we need to remove the SidePanel registration. We might already have data
-  // from cacao for the current pageload if it was locally cached.
-  auto* registry = SidePanelRegistry::Get(web_contents());
+  SidePanelUI* side_panel_ui = GetSidePanelUI();
+  if (!side_panel_ui) {
+    return;
+  }
+
+  auto* registry = SidePanelRegistry::GetDeprecated(web_contents());
   SidePanelEntry::Key key(SidePanelEntry::Id::kAboutThisSite);
-  if (registry->GetEntryForKey(key) &&
-      web_contents()->GetLastCommittedURL() != last_url_info_->context_url) {
-    registry->Deregister(key);
-    last_url_info_.reset();
+
+  // Update the SidePanel when a user navigates to another url with the
+  // correct Diner URL.
+  if (about_this_site_side_panel_view_ &&
+      side_panel_ui->IsSidePanelEntryShowing(
+          SidePanelEntryKey(SidePanelEntry::Id::kAboutThisSite))) {
+    page_info::AboutThisSiteService::OnSameTabNavigation();
+    RegisterEntryAndShow(
+        page_info::AboutThisSiteService::CreateMoreAboutUrlForNavigation(
+            navigation_handle->GetURL()));
   }
 
-  // If the view is cached, we will remove it since it shows the wrong page.
-  if (about_this_site_side_panel_view_) {
+  // If the about this site side panel is no longer being shown and the view is
+  // cached, then we will remove the cached view since it shows the wrong page.
+  if (!side_panel_ui->IsSidePanelEntryShowing(
+          SidePanelEntryKey(SidePanelEntry::Id::kAboutThisSite)) &&
+      about_this_site_side_panel_view_) {
     auto* entry = registry->GetEntryForKey(
         SidePanelEntry::Key(SidePanelEntry::Id::kAboutThisSite));
     DCHECK(entry);
@@ -151,7 +160,8 @@ void AboutThisSideSidePanelCoordinator::DidFinishNavigation(
 }
 
 std::unique_ptr<views::View>
-AboutThisSideSidePanelCoordinator::CreateAboutThisSiteWebView() {
+AboutThisSideSidePanelCoordinator::CreateAboutThisSiteWebView(
+    SidePanelEntryScope& scope) {
   DCHECK(GetBrowserView());
   DCHECK(last_url_info_);
   if (registered_but_not_shown_) {
@@ -159,22 +169,32 @@ AboutThisSideSidePanelCoordinator::CreateAboutThisSiteWebView() {
     registered_but_not_shown_ = false;
   }
 
-  auto side_panel_view_ =
-      std::make_unique<AboutThisSiteSidePanelView>(GetBrowserView());
+  auto side_panel_view_ = std::make_unique<WebViewSidePanelView>(
+      web_contents(), kStaticLoadingScreenURL,
+      page_info::AboutThisSiteRenderModeParameterName);
   side_panel_view_->OpenUrl(last_url_info_->url_params);
   about_this_site_side_panel_view_ = side_panel_view_->AsWeakPtr();
   return side_panel_view_;
 }
 
 BrowserView* AboutThisSideSidePanelCoordinator::GetBrowserView() const {
-  auto* browser = chrome::FindBrowserWithWebContents(web_contents());
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+          web_contents());
   return browser ? BrowserView::GetBrowserViewForBrowser(browser) : nullptr;
+}
+
+SidePanelUI* AboutThisSideSidePanelCoordinator::GetSidePanelUI() {
+  BrowserWindowInterface* browser =
+      GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+          web_contents());
+  return browser ? SidePanelUI::From(browser) : nullptr;
 }
 
 GURL AboutThisSideSidePanelCoordinator::GetOpenInNewTabUrl() {
   DCHECK(last_url_info_.has_value());
-  DCHECK(!base::Contains(last_url_info_.value().new_tab_url.query_piece(),
-                         page_info::AboutThisSiteRenderModeParameterName));
+  DCHECK(!last_url_info_.value().new_tab_url.query().contains(
+      page_info::AboutThisSiteRenderModeParameterName));
   return last_url_info_.value().new_tab_url;
 }
 

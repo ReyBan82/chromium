@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
@@ -20,30 +22,36 @@
 namespace filesystem {
 
 DirectoryImpl::DirectoryImpl(base::FilePath directory_path,
-                             scoped_refptr<SharedTempDir> temp_dir)
-    : directory_path_(directory_path), temp_dir_(std::move(temp_dir)) {}
+                             scoped_refptr<SharedTempDir> temp_dir,
+                             AccessMode access_mode)
+    : directory_path_(directory_path),
+      temp_dir_(std::move(temp_dir)),
+      access_mode_(access_mode) {}
 
-DirectoryImpl::~DirectoryImpl() {}
+DirectoryImpl::~DirectoryImpl() = default;
 
 void DirectoryImpl::Read(ReadCallback callback) {
   std::vector<mojom::DirectoryEntryPtr> entries;
   base::FileEnumerator directory_enumerator(
       directory_path_, false,
       base::FileEnumerator::DIRECTORIES | base::FileEnumerator::FILES);
-  for (base::FilePath name = directory_enumerator.Next(); !name.empty();
-       name = directory_enumerator.Next()) {
+  for (base::FilePath path = directory_enumerator.Next(); !path.empty();
+       path = directory_enumerator.Next()) {
     base::FileEnumerator::FileInfo info = directory_enumerator.GetInfo();
     mojom::DirectoryEntryPtr entry = mojom::DirectoryEntry::New();
     entry->type = info.IsDirectory() ? mojom::FsFileType::DIRECTORY
                                      : mojom::FsFileType::REGULAR_FILE;
-    entry->name = info.GetName();
+    auto name = base::SafeBaseName::Create(path);
+    CHECK(name) << path;
+    entry->name = *name;
+    entry->display_name = info.GetName().AsUTF8Unsafe();
+
     entries.push_back(std::move(entry));
   }
 
-  std::move(callback).Run(base::File::Error::FILE_OK,
-                          entries.empty()
-                              ? absl::nullopt
-                              : absl::make_optional(std::move(entries)));
+  std::move(callback).Run(
+      base::File::Error::FILE_OK,
+      entries.empty() ? std::nullopt : std::make_optional(std::move(entries)));
 }
 
 // TODO(erg): Consider adding an implementation of Stat()/Touch() to the
@@ -78,6 +86,12 @@ void DirectoryImpl::OpenDirectory(
     mojo::PendingReceiver<mojom::Directory> receiver,
     uint32_t open_flags,
     OpenDirectoryCallback callback) {
+  if (access_mode_ == AccessMode::kReadOnly &&
+      (open_flags & ~(mojom::kFlagOpen | mojom::kFlagRead)) != 0) {
+    std::move(callback).Run(base::File::Error::FILE_ERROR_SECURITY);
+    return;
+  }
+
   base::FilePath path;
   base::File::Error error = ValidatePath(raw_path, directory_path_, &path);
   if (error != base::File::Error::FILE_OK) {
@@ -107,7 +121,8 @@ void DirectoryImpl::OpenDirectory(
 
   if (receiver) {
     mojo::MakeSelfOwnedReceiver(
-        std::make_unique<DirectoryImpl>(path, temp_dir_), std::move(receiver));
+        std::make_unique<DirectoryImpl>(path, temp_dir_, access_mode_),
+        std::move(receiver));
   }
 
   std::move(callback).Run(base::File::Error::FILE_OK);
@@ -116,6 +131,11 @@ void DirectoryImpl::OpenDirectory(
 void DirectoryImpl::Rename(const std::string& raw_old_path,
                            const std::string& raw_new_path,
                            RenameCallback callback) {
+  if (access_mode_ == AccessMode::kReadOnly) {
+    std::move(callback).Run(base::File::Error::FILE_ERROR_SECURITY);
+    return;
+  }
+
   base::FilePath old_path;
   base::File::Error error =
       ValidatePath(raw_old_path, directory_path_, &old_path);
@@ -142,6 +162,11 @@ void DirectoryImpl::Rename(const std::string& raw_old_path,
 void DirectoryImpl::Replace(const std::string& raw_old_path,
                             const std::string& raw_new_path,
                             ReplaceCallback callback) {
+  if (access_mode_ == AccessMode::kReadOnly) {
+    std::move(callback).Run(base::File::Error::FILE_ERROR_SECURITY);
+    return;
+  }
+
   base::FilePath old_path;
   base::File::Error error =
       ValidatePath(raw_old_path, directory_path_, &old_path);
@@ -169,6 +194,11 @@ void DirectoryImpl::Replace(const std::string& raw_old_path,
 void DirectoryImpl::Delete(const std::string& raw_path,
                            uint32_t delete_flags,
                            DeleteCallback callback) {
+  if (access_mode_ == AccessMode::kReadOnly) {
+    std::move(callback).Run(base::File::Error::FILE_ERROR_SECURITY);
+    return;
+  }
+
   base::FilePath path;
   base::File::Error error = ValidatePath(raw_path, directory_path_, &path);
   if (error != base::File::Error::FILE_OK) {
@@ -208,6 +238,11 @@ void DirectoryImpl::IsWritable(const std::string& raw_path,
   base::File::Error error = ValidatePath(raw_path, directory_path_, &path);
   if (error != base::File::Error::FILE_OK) {
     std::move(callback).Run(error, false);
+    return;
+  }
+
+  if (access_mode_ == AccessMode::kReadOnly) {
+    std::move(callback).Run(base::File::Error::FILE_OK, false);
     return;
   }
 
@@ -261,7 +296,7 @@ void DirectoryImpl::StatFile(const std::string& raw_path,
 
 void DirectoryImpl::Clone(mojo::PendingReceiver<mojom::Directory> receiver) {
   mojo::MakeSelfOwnedReceiver(
-      std::make_unique<DirectoryImpl>(directory_path_, temp_dir_),
+      std::make_unique<DirectoryImpl>(directory_path_, temp_dir_, access_mode_),
       std::move(receiver));
 }
 
@@ -287,11 +322,17 @@ void DirectoryImpl::ReadEntireFile(const std::string& raw_path,
   }
 
   std::vector<uint8_t> contents;
-  const int kBufferSize = 1 << 16;
-  std::unique_ptr<char[]> buf(new char[kBufferSize]);
-  int len;
-  while ((len = base_file.ReadAtCurrentPos(buf.get(), kBufferSize)) > 0)
-    contents.insert(contents.end(), buf.get(), buf.get() + len);
+  constexpr int kBufferSize = 1 << 16;
+  auto buf = base::HeapArray<uint8_t>::Uninit(kBufferSize);
+  while (true) {
+    std::optional<size_t> bytes_read =
+        base_file.ReadAtCurrentPos(buf.as_span());
+    if (bytes_read.value_or(0) == 0) {
+      break;
+    }
+    base::span<const uint8_t> bytes = buf.first(bytes_read.value());
+    contents.insert(contents.end(), bytes.begin(), bytes.end());
+  }
 
   std::move(callback).Run(base::File::Error::FILE_OK, contents);
 }
@@ -299,6 +340,11 @@ void DirectoryImpl::ReadEntireFile(const std::string& raw_path,
 void DirectoryImpl::WriteFile(const std::string& raw_path,
                               const std::vector<uint8_t>& data,
                               WriteFileCallback callback) {
+  if (access_mode_ == AccessMode::kReadOnly) {
+    std::move(callback).Run(base::File::Error::FILE_ERROR_SECURITY);
+    return;
+  }
+
   base::FilePath path;
   base::File::Error error = ValidatePath(raw_path, directory_path_, &path);
   if (error != base::File::Error::FILE_OK) {
@@ -319,10 +365,8 @@ void DirectoryImpl::WriteFile(const std::string& raw_path,
   }
 
   // If we're given empty data, we don't write and just truncate the file.
-  if (data.size()) {
-    const int data_size = static_cast<int>(data.size());
-    if (base_file.Write(0, reinterpret_cast<const char*>(&data.front()),
-                        data_size) == -1) {
+  if (!data.empty()) {
+    if (!base_file.Write(0, data)) {
       std::move(callback).Run(GetError(base_file));
       return;
     }
@@ -333,6 +377,11 @@ void DirectoryImpl::WriteFile(const std::string& raw_path,
 
 base::File DirectoryImpl::OpenFileHandleImpl(const std::string& raw_path,
                                              uint32_t open_flags) {
+  if (access_mode_ == AccessMode::kReadOnly &&
+      (open_flags & ~(mojom::kFlagOpen | mojom::kFlagRead)) != 0) {
+    return base::File(base::File::FILE_ERROR_SECURITY);
+  }
+
   base::FilePath path;
   base::File::Error error = ValidatePath(raw_path, directory_path_, &path);
   if (error != base::File::Error::FILE_OK)

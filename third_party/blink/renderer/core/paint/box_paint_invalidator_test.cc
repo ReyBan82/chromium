@@ -8,6 +8,7 @@
 #include "third_party/blink/renderer/core/html/html_frame_owner_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/layout/layout_view.h"
+#include "third_party/blink/renderer/core/layout/physical_box_fragment.h"
 #include "third_party/blink/renderer/core/paint/paint_and_raster_invalidation_test.h"
 #include "third_party/blink/renderer/core/paint/paint_controller_paint_test.h"
 #include "third_party/blink/renderer/core/paint/paint_invalidator.h"
@@ -15,6 +16,7 @@
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
 #include "third_party/blink/renderer/platform/graphics/paint/raster_invalidation_tracking.h"
 #include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -42,7 +44,7 @@ class BoxPaintInvalidatorTest : public PaintAndRasterInvalidationTest {
     SCOPED_TRACE(test_title);
 
     UpdateAllLifecyclePhasesForTest();
-    auto& target = *GetDocument().getElementById("target");
+    auto& target = *GetDocument().getElementById(AtomicString("target"));
     auto& box = *target.GetLayoutBox();
     auto paint_offset = box.FirstFragment().PaintOffset();
     box.SetShouldCheckForPaintInvalidation();
@@ -53,7 +55,8 @@ class BoxPaintInvalidatorTest : public PaintAndRasterInvalidationTest {
 
     target.setAttribute(
         html_names::kStyleAttr,
-        target.getAttribute(html_names::kStyleAttr) + "; width: 200px");
+        AtomicString(StrCat(
+            {target.getAttribute(html_names::kStyleAttr), "; width: 200px"})));
     GetDocument().View()->UpdateLifecycleToLayoutClean(
         DocumentUpdateReason::kTest);
 
@@ -99,10 +102,10 @@ INSTANTIATE_PAINT_TEST_SUITE_P(BoxPaintInvalidatorTest);
 // (tested in paint_and_raster_invalidation_test.cc).
 TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonEmptyContent) {
   SetUpHTML();
-  auto& target = *GetDocument().getElementById("target");
+  auto& target = *GetDocument().getElementById(AtomicString("target"));
   auto& box = *target.GetLayoutBox();
   // Remove border.
-  target.setAttribute(html_names::kClassAttr, "");
+  target.setAttribute(html_names::kClassAttr, g_empty_atom);
   UpdateAllLifecyclePhasesForTest();
 
   box.SetShouldCheckForPaintInvalidation();
@@ -118,7 +121,7 @@ TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonEmptyContent) {
             ComputePaintInvalidationReason(box, old_paint_offset));
 
   // Size change.
-  target.setAttribute(html_names::kStyleAttr, "width: 200px");
+  target.setAttribute(html_names::kStyleAttr, AtomicString("width: 200px"));
   GetDocument().View()->UpdateLifecycleToLayoutClean(
       DocumentUpdateReason::kTest);
   EXPECT_EQ(PaintInvalidationReason::kIncremental,
@@ -127,11 +130,11 @@ TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonEmptyContent) {
 
 TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonBasic) {
   SetUpHTML();
-  auto& target = *GetDocument().getElementById("target");
+  auto& target = *GetDocument().getElementById(AtomicString("target"));
   auto& box = *target.GetLayoutBox();
   // Remove border.
-  target.setAttribute(html_names::kClassAttr, "");
-  target.setAttribute(html_names::kStyleAttr, "background: blue");
+  target.setAttribute(html_names::kClassAttr, g_empty_atom);
+  target.setAttribute(html_names::kStyleAttr, AtomicString("background: blue"));
   UpdateAllLifecyclePhasesForTest();
 
   box.SetShouldCheckForPaintInvalidation();
@@ -143,20 +146,23 @@ TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonBasic) {
             ComputePaintInvalidationReason(box, paint_offset));
 
   // Size change.
-  target.setAttribute(html_names::kStyleAttr, "background: blue; width: 200px");
+  target.setAttribute(html_names::kStyleAttr,
+                      AtomicString("background: blue; width: 200px"));
   GetDocument().View()->UpdateLifecycleToLayoutClean(
       DocumentUpdateReason::kTest);
   EXPECT_EQ(PaintInvalidationReason::kIncremental,
             ComputePaintInvalidationReason(box, paint_offset));
 
   // Add visual overflow.
-  target.setAttribute(html_names::kStyleAttr,
-                      "background: blue; width: 200px; outline: 5px solid red");
+  target.setAttribute(
+      html_names::kStyleAttr,
+      AtomicString("background: blue; width: 200px; outline: 5px solid red"));
   UpdateAllLifecyclePhasesForTest();
 
   // Size change with visual overflow.
-  target.setAttribute(html_names::kStyleAttr,
-                      "background: blue; width: 100px; outline: 5px solid red");
+  target.setAttribute(
+      html_names::kStyleAttr,
+      AtomicString("background: blue; width: 100px; outline: 5px solid red"));
   GetDocument().View()->UpdateLifecycleToLayoutClean(
       DocumentUpdateReason::kTest);
 
@@ -192,45 +198,50 @@ TEST_P(BoxPaintInvalidatorTest,
   )HTML");
 
   UpdateAllLifecyclePhasesForTest();
-  auto& target = *GetDocument().getElementById("target");
-  target.setAttribute(html_names::kStyleAttr, "");
+  auto& target = *GetDocument().getElementById(AtomicString("target"));
+  target.setAttribute(html_names::kStyleAttr, g_empty_atom);
   UpdateAllLifecyclePhasesForTest();
   // This test passes if no underinvalidation occurs.
 }
 
 TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonOtherCases) {
   SetUpHTML();
-  auto& target = *GetDocument().getElementById("target");
+  auto& target = *GetDocument().getElementById(AtomicString("target"));
 
   // The target initially has border.
   ExpectFullPaintInvalidationOnGeometryChange("With border");
 
   // Clear border, set background.
-  target.setAttribute(html_names::kClassAttr, "background");
-  target.setAttribute(html_names::kStyleAttr, "border-radius: 5px");
+  target.setAttribute(html_names::kClassAttr, AtomicString("background"));
+  target.setAttribute(html_names::kStyleAttr,
+                      AtomicString("border-radius: 5px"));
   ExpectFullPaintInvalidationOnGeometryChange("With border-radius");
 
-  target.setAttribute(html_names::kStyleAttr, "-webkit-mask: url(#)");
+  target.setAttribute(html_names::kStyleAttr,
+                      AtomicString("-webkit-mask: url(#)"));
   ExpectFullPaintInvalidationOnGeometryChange("With mask");
 
-  target.setAttribute(html_names::kStyleAttr, "filter: blur(5px)");
+  target.setAttribute(html_names::kStyleAttr,
+                      AtomicString("filter: blur(5px)"));
   ExpectFullPaintInvalidationOnGeometryChange("With filter");
 
-  target.setAttribute(html_names::kStyleAttr, "box-shadow: inset 3px 2px");
+  target.setAttribute(html_names::kStyleAttr,
+                      AtomicString("box-shadow: inset 3px 2px"));
   ExpectFullPaintInvalidationOnGeometryChange("With box-shadow");
 
   target.setAttribute(html_names::kStyleAttr,
-                      "clip-path: circle(50% at 0 50%)");
+                      AtomicString("clip-path: circle(50% at 0 50%)"));
   ExpectFullPaintInvalidationOnGeometryChange("With clip-path");
 }
 
 TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonOutline) {
   SetUpHTML();
-  auto& target = *GetDocument().getElementById("target");
+  auto& target = *GetDocument().getElementById(AtomicString("target"));
   auto* object = target.GetLayoutObject();
 
   GetDocument().View()->SetTracksRasterInvalidations(true);
-  target.setAttribute(html_names::kStyleAttr, "outline: 2px solid blue;");
+  target.setAttribute(html_names::kStyleAttr,
+                      AtomicString("outline: 2px solid blue;"));
   UpdateAllLifecyclePhasesForTest();
   EXPECT_THAT(GetRasterInvalidationTracking()->Invalidations(),
               UnorderedElementsAre(RasterInvalidationInfo{
@@ -240,7 +251,7 @@ TEST_P(BoxPaintInvalidatorTest, ComputePaintInvalidationReasonOutline) {
 
   GetDocument().View()->SetTracksRasterInvalidations(true);
   target.setAttribute(html_names::kStyleAttr,
-                      "outline: 2px solid blue; width: 100px;");
+                      AtomicString("outline: 2px solid blue; width: 100px;"));
   UpdateAllLifecyclePhasesForTest();
   EXPECT_THAT(GetRasterInvalidationTracking()->Invalidations(),
               UnorderedElementsAre(RasterInvalidationInfo{
@@ -264,10 +275,243 @@ TEST_P(BoxPaintInvalidatorTest, InvalidateHitTestOnCompositingStyleChange) {
   )HTML");
 
   UpdateAllLifecyclePhasesForTest();
-  auto& target = *GetDocument().getElementById("target");
-  target.setAttribute(html_names::kStyleAttr, "");
+  auto& target = *GetDocument().getElementById(AtomicString("target"));
+  target.setAttribute(html_names::kStyleAttr, g_empty_atom);
   UpdateAllLifecyclePhasesForTest();
   // This test passes if no under-invalidation occurs.
+}
+
+TEST_P(BoxPaintInvalidatorTest, GapDecorationGridChildSizeChange) {
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #grid {
+        display: grid;
+        grid-template-columns: 50px 50px;
+        gap: 10px;
+        column-rule: 2px solid black;
+      }
+      .item { height: 50px; }
+    </style>
+    <div id="grid">
+      <div class="item" id="item1"></div>
+      <div class="item"></div>
+      <div class="item"></div>
+      <div class="item"></div>
+    </div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+
+  auto* grid = GetDocument().getElementById(AtomicString("grid"));
+  ASSERT_TRUE(grid);
+  auto* grid_object = grid->GetLayoutObject();
+  EXPECT_FALSE(grid_object->ShouldDoFullPaintInvalidation());
+
+  GetDocument().View()->SetTracksRasterInvalidations(true);
+  auto* item1 = GetDocument().getElementById(AtomicString("item1"));
+  item1->setAttribute(html_names::kStyleAttr, AtomicString("height: 100px"));
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_THAT(GetRasterInvalidationTracking()->Invalidations(),
+              testing::Contains(testing::Field(
+                  &RasterInvalidationInfo::client_id, grid_object->Id())));
+  GetDocument().View()->SetTracksRasterInvalidations(false);
+}
+
+TEST_P(BoxPaintInvalidatorTest, GapDecorationFlexChildRemoval) {
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #flex {
+        display: flex;
+        gap: 10px;
+        column-rule: 2px solid green;
+      }
+      .item { width: 50px; height: 50px; }
+    </style>
+    <div id="flex">
+      <div class="item"></div>
+      <div class="item" id="removable"></div>
+      <div class="item"></div>
+    </div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+
+  auto* flex = GetDocument().getElementById(AtomicString("flex"));
+  ASSERT_TRUE(flex);
+  auto* flex_object = flex->GetLayoutObject();
+  EXPECT_FALSE(flex_object->ShouldDoFullPaintInvalidation());
+
+  GetDocument().View()->SetTracksRasterInvalidations(true);
+  auto* removable = GetDocument().getElementById(AtomicString("removable"));
+  removable->remove();
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_THAT(GetRasterInvalidationTracking()->Invalidations(),
+              testing::Contains(testing::Field(
+                  &RasterInvalidationInfo::client_id, flex_object->Id())));
+  GetDocument().View()->SetTracksRasterInvalidations(false);
+}
+
+TEST_P(BoxPaintInvalidatorTest, GapDecorationNoChangeNoInvalidation) {
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #grid {
+        display: grid;
+        grid-template-columns: 50px 50px;
+        gap: 10px;
+        column-rule: 2px solid black;
+      }
+      .item { height: 50px; }
+    </style>
+    <div id="grid">
+      <div class="item" id="item1"></div>
+      <div class="item"></div>
+    </div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+
+  auto* grid = GetDocument().getElementById(AtomicString("grid"));
+  ASSERT_TRUE(grid);
+  auto* grid_object = grid->GetLayoutObject();
+
+  // Add a small enough amount of text to trigger layout within the child
+  // without affecting gap geometry.
+  GetDocument().View()->SetTracksRasterInvalidations(true);
+  auto* item1 = GetDocument().getElementById(AtomicString("item1"));
+  item1->setTextContent(AtomicString("hello"));
+  UpdateAllLifecyclePhasesForTest();
+  for (const auto& inv : GetRasterInvalidationTracking()->Invalidations()) {
+    EXPECT_NE(inv.client_id, grid_object->Id());
+  }
+  GetDocument().View()->SetTracksRasterInvalidations(false);
+}
+
+TEST_P(BoxPaintInvalidatorTest, GapDecorationAddedToExistingGrid) {
+  ScopedPaintUnderInvalidationCheckingForTest under_invalidation_checking(true);
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #grid {
+        display: grid;
+        grid-template-columns: 50px 50px;
+        gap: 10px;
+      }
+      .item { height: 50px; }
+    </style>
+    <div id="grid">
+      <div class="item"></div>
+      <div class="item"></div>
+    </div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+
+  // Adding a column-rule to a grid that previously had no gap decorations
+  // should not cause under-invalidation.
+  auto* grid = GetDocument().getElementById(AtomicString("grid"));
+  ASSERT_TRUE(grid);
+  grid->setAttribute(html_names::kStyleAttr,
+                     AtomicString("column-rule: 2px solid red"));
+  UpdateAllLifecyclePhasesForTest();
+}
+
+TEST_P(BoxPaintInvalidatorTest, GapDecorationRemovedFromGrid) {
+  ScopedPaintUnderInvalidationCheckingForTest under_invalidation_checking(true);
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #grid {
+        display: grid;
+        grid-template-columns: 50px 50px;
+        gap: 10px;
+        column-rule: 2px solid black;
+      }
+      .item { height: 50px; }
+    </style>
+    <div id="grid">
+      <div class="item"></div>
+      <div class="item"></div>
+    </div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+
+  // Removing the column-rule should not cause under-invalidation.
+  auto* grid = GetDocument().getElementById(AtomicString("grid"));
+  ASSERT_TRUE(grid);
+  grid->setAttribute(html_names::kStyleAttr, AtomicString("column-rule: none"));
+  UpdateAllLifecyclePhasesForTest();
+}
+
+// Verify that BoxPaintInvalidator handles multicol column-rule invalidation
+// through per-fragment gap geometry comparison.
+TEST_P(BoxPaintInvalidatorTest, GapDecorationMulticolColumnRuleInvalidation) {
+  ScopedPaintUnderInvalidationCheckingForTest under_invalidation_checking(true);
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #multicol {
+        columns: 2;
+        column-fill: auto;
+        width: 200px;
+        height: 100px;
+        column-rule: 2px solid black;
+      }
+    </style>
+    <div id="multicol">
+      <div style="height: 300px;"></div>
+    </div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+
+  // Changing column-rule should not cause under-invalidation.
+  auto* multicol = GetDocument().getElementById(AtomicString("multicol"));
+  ASSERT_TRUE(multicol);
+  multicol->setAttribute(html_names::kStyleAttr,
+                         AtomicString("column-rule: 4px solid red"));
+
+  UpdateAllLifecyclePhasesForTest();
+}
+
+TEST_P(BoxPaintInvalidatorTest, BorderShapeBoxShadowChange) {
+  ScopedPaintUnderInvalidationCheckingForTest under_invalidation_checking(true);
+  ScopedCSSBorderShapeForTest scoped_border_shape(true);
+  // Test that changing box-shadow on an element with border-shape does not
+  // cause under-invalidation (crbug.com/483350719).
+  // For border-shape, the shadow is painted via OuterPathWithOffset(style,
+  // outer_reference_rect, spread), so the full shadow extent from the outer
+  // path is (spread + sigma_3), matching BoxDecorationOutsets().
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      #target {
+        width: 100px;
+        height: 100px;
+        border-shape: circle(50px at 50% 50%);
+        box-shadow: 0 0 10px 10px black;
+      }
+    </style>
+    <div id="target"></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+
+  // Verify the ink overflow rect accounts for the full shadow extent:
+  // spread=10, blur=10, sigma_3=ceil(3*5)=15 -> outset = 25px each side.
+  EXPECT_EQ(GetLayoutBoxByElementId("target")
+                ->GetPhysicalFragment(0)
+                ->InkOverflowRect(),
+            PhysicalRect(-25, -25, 150, 150));
+  EXPECT_EQ(GetLayoutBoxByElementId("target")->SelfVisualOverflowRect(),
+            PhysicalRect(-25, -25, 150, 150));
+
+  // Changing box-shadow while border-shape is active should not cause
+  // under-invalidation (crbug.com/483350719).
+  auto* target = GetDocument().getElementById(AtomicString("target"));
+  ASSERT_TRUE(target);
+  target->setAttribute(html_names::kStyleAttr,
+                       AtomicString("box-shadow: 0 0 20px 20px black;"));
+  UpdateAllLifecyclePhasesForTest();
+
+  // The shadow has grown: spread=20, blur=20, sigma_3=ceil(3*10)=30
+  // (blur as sigma is 20*0.5=10), giving outset = 50px each side.
+  // Verify the overflow rects update accordingly as well.
+  EXPECT_EQ(GetLayoutBoxByElementId("target")
+                ->GetPhysicalFragment(0)
+                ->InkOverflowRect(),
+            PhysicalRect(-50, -50, 200, 200));
+  EXPECT_EQ(GetLayoutBoxByElementId("target")->SelfVisualOverflowRect(),
+            PhysicalRect(-50, -50, 200, 200));
 }
 
 }  // namespace blink

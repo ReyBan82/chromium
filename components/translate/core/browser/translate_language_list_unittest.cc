@@ -4,29 +4,49 @@
 
 #include "components/translate/core/browser/translate_language_list.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "base/command_line.h"
-#include "base/containers/contains.h"
+#include "base/i18n/tag_converters.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/scoped_command_line.h"
 #include "base/test/task_environment.h"
 #include "components/translate/core/browser/translate_download_manager.h"
+#include "components/translate/core/browser/translate_url_fetcher.h"
 #include "components/translate/core/browser/translate_url_util.h"
 #include "components/variations/scoped_variations_ids_provider.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 
 namespace translate {
+namespace {
+
+using ::testing::ElementsAre;
+
+class DummyTranslateUrlFetcher : public TranslateUrlFetcher {
+ public:
+  DummyTranslateUrlFetcher() = default;
+  ~DummyTranslateUrlFetcher() override = default;
+
+  bool Request(const GURL& url, Callback callback, bool is_incognito) override {
+    return true;
+  }
+
+  State state() const override { return IDLE; }
+};
+
+}  // namespace
 
 class TranslateLanguageListTest : public testing::Test {
  public:
  private:
-  variations::ScopedVariationsIdsProvider scoped_variations_ids_provider_{
+  variations::test::ScopedVariationsIdsProvider scoped_variations_ids_provider_{
       variations::VariationsIdsProvider::Mode::kUseSignedInState};
 };
 
@@ -35,8 +55,10 @@ class TranslateLanguageListTest : public testing::Test {
 TEST_F(TranslateLanguageListTest, SetSupportedLanguages) {
   const std::string language_list(
       "{"
-      "\"sl\":{\"en\":\"English\",\"ja\":\"Japanese\"},"
-      "\"tl\":{\"en\":\"English\",\"ja\":\"Japanese\"}"
+      "\"sl\":{\"en\":\"English\",\"ja\":\"Japanese\",\"tl\":\"Tagalog\","
+      "\"xx\":\"NotALanguage\"},"
+      "\"tl\":{\"en\":\"English\",\"ja\":\"Japanese\",\"tl\":\"Tagalog\","
+      "\"xx\":\"NotALanguage\"}"
       "}");
 
   base::test::TaskEnvironment task_environment;
@@ -47,21 +69,23 @@ TEST_F(TranslateLanguageListTest, SetSupportedLanguages) {
   TranslateDownloadManager* manager = TranslateDownloadManager::GetInstance();
   manager->set_application_locale("en");
   manager->set_url_loader_factory(test_shared_loader_factory);
+  manager->set_language_list(std::make_unique<TranslateLanguageList>(
+      std::make_unique<DummyTranslateUrlFetcher>()));
   EXPECT_TRUE(manager->language_list()->SetSupportedLanguages(language_list));
 
   std::vector<std::string> results;
   manager->language_list()->GetSupportedLanguages(true /* translate_allowed */,
                                                   &results);
-  ASSERT_EQ(2u, results.size());
-  EXPECT_EQ("en", results[0]);
-  EXPECT_EQ("ja", results[1]);
+  ASSERT_EQ(3u, results.size());
+  EXPECT_THAT(results, ElementsAre("en", "fil", "ja"));
   manager->ResetForTesting();
 }
 
 // Test that the language code back-off of locale is done correctly (where
 // required).
 TEST_F(TranslateLanguageListTest, GetLanguageCode) {
-  TranslateLanguageList language_list;
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
   EXPECT_EQ("en", language_list.GetLanguageCode("en"));
   // Test backoff of unsupported locale.
   EXPECT_EQ("en", language_list.GetLanguageCode("en-US"));
@@ -73,7 +97,8 @@ TEST_F(TranslateLanguageListTest, GetLanguageCode) {
 // translate-security-origin command-line flag correctly overrides the default
 // value.
 TEST_F(TranslateLanguageListTest, TranslateLanguageUrl) {
-  TranslateLanguageList language_list;
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
 
   // Test default security origin.
   // The command-line override switch should not be set by default.
@@ -94,10 +119,171 @@ TEST_F(TranslateLanguageListTest, TranslateLanguageUrl) {
 // Test that IsSupportedLanguage() is true for languages that should be
 // supported, and false for invalid languages.
 TEST_F(TranslateLanguageListTest, IsSupportedLanguage) {
-  TranslateLanguageList language_list;
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
   EXPECT_TRUE(language_list.IsSupportedLanguage("en"));
   EXPECT_TRUE(language_list.IsSupportedLanguage("zh-CN"));
   EXPECT_FALSE(language_list.IsSupportedLanguage("xx"));
+}
+
+// Test that IsSupportedPartialTranslateLanguage() is true for languages that
+// should be supported, and false for invalid languages.
+TEST_F(TranslateLanguageListTest, IsSupportedPartialTranslateLanguage) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
+  EXPECT_TRUE(language_list.IsSupportedPartialTranslateLanguage("en"));
+  EXPECT_TRUE(language_list.IsSupportedPartialTranslateLanguage("zh-CN"));
+  EXPECT_FALSE(language_list.IsSupportedPartialTranslateLanguage("xx"));
+  EXPECT_FALSE(language_list.IsSupportedPartialTranslateLanguage("ilo"));
+  EXPECT_FALSE(language_list.IsSupportedPartialTranslateLanguage("mni-Mtei"));
+}
+
+// Test that all "old" languages are still supported.
+TEST_F(TranslateLanguageListTest, SanityCheckAllLanguages) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
+  const std::string_view kAllLanguages[] = {
+      "af",        // Afrikaans
+      "ak",        // Twi
+      "am",        // Amharic
+      "ar",        // Arabic
+      "as",        // Assamese
+      "ay",        // Aymara
+      "az",        // Azerbaijani
+      "be",        // Belarusian
+      "bg",        // Bulgarian
+      "bho",       // Bhojpuri
+      "bm",        // Bambara
+      "bn",        // Bengali
+      "bs",        // Bosnian
+      "ca",        // Catalan
+      "ceb",       // Cebuano
+      "ckb",       // Kurdish (Sorani)
+      "co",        // Corsican
+      "cs",        // Czech
+      "cy",        // Welsh
+      "da",        // Danish
+      "de",        // German
+      "doi",       // Dogri
+      "dv",        // Dhivehi
+      "ee",        // Ewe
+      "el",        // Greek
+      "en",        // English
+      "eo",        // Esperanto
+      "es",        // Spanish
+      "et",        // Estonian
+      "eu",        // Basque
+      "fa",        // Persian
+      "fi",        // Finnish
+      "fil",       // Filipino
+      "fr",        // French
+      "fy",        // Frisian
+      "ga",        // Irish
+      "gd",        // Scots Gaelic
+      "gl",        // Galician
+      "kok",       // Konkani
+      "gu",        // Gujarati
+      "ha",        // Hausa
+      "haw",       // Hawaiian
+      "hi",        // Hindi
+      "hmn",       // Hmong
+      "hr",        // Croatian
+      "ht",        // Haitian Creole
+      "hu",        // Hungarian
+      "hy",        // Armenian
+      "id",        // Indonesian
+      "ig",        // Igbo
+      "ilo",       // Ilocano
+      "is",        // Icelandic
+      "it",        // Italian
+      "he",        // Hebrew - Chrome uses "he"
+      "ja",        // Japanese
+      "jv",        // Javanese - Chrome uses "jv"
+      "ka",        // Georgian
+      "kk",        // Kazakh
+      "km",        // Khmer
+      "kn",        // Kannada
+      "ko",        // Korean
+      "kri",       // Krio
+      "ku",        // Kurdish
+      "ky",        // Kyrgyz
+      "la",        // Latin
+      "lb",        // Luxembourgish
+      "lg",        // Luganda
+      "ln",        // Lingala
+      "lo",        // Lao
+      "lt",        // Lithuanian
+      "lus",       // Mizo
+      "lv",        // Latvian
+      "mai",       // Maithili
+      "mg",        // Malagasy
+      "mi",        // Maori
+      "mk",        // Macedonian
+      "ml",        // Malayalam
+      "mn",        // Mongolian
+      "mni-Mtei",  // Manipuri (Meitei Mayek)
+      "mr",        // Marathi
+      "ms",        // Malay
+      "mt",        // Maltese
+      "my",        // Burmese
+      "ne",        // Nepali
+      "nl",        // Dutch
+      "no",        // Norwegian - Chrome uses "nb"
+      "nso",       // Sepedi
+      "ny",        // Nyanja
+      "om",        // Oromo
+      "or",        // Odia (Oriya)
+      "pa",        // Punjabi
+      "pl",        // Polish
+      "ps",        // Pashto
+      "pt",        // Portuguese
+      "qu",        // Quechua
+      "ro",        // Romanian
+      "ru",        // Russian
+      "rw",        // Kinyarwanda
+      "sa",        // Sanskrit
+      "sd",        // Sindhi
+      "si",        // Sinhala
+      "sk",        // Slovak
+      "sl",        // Slovenian
+      "sm",        // Samoan
+      "sn",        // Shona
+      "so",        // Somali
+      "sq",        // Albanian
+      "sr",        // Serbian
+      "st",        // Southern Sotho
+      "su",        // Sundanese
+      "sv",        // Swedish
+      "sw",        // Swahili
+      "ta",        // Tamil
+      "te",        // Telugu
+      "tg",        // Tajik
+      "th",        // Thai
+      "ti",        // Tigrinya
+      "tk",        // Turkmen
+      "tr",        // Turkish
+      "ts",        // Tsonga
+      "tt",        // Tatar
+      "ug",        // Uyghur
+      "uk",        // Ukrainian
+      "ur",        // Urdu
+      "uz",        // Uzbek
+      "vi",        // Vietnamese
+      "xh",        // Xhosa
+      "yi",        // Yiddish
+      "yo",        // Yoruba
+      "zh-CN",     // Chinese (Simplified)
+      "zh-TW",     // Chinese (Traditional)
+      "zu",        // Zulu
+  };
+
+  std::vector<std::string> languages;
+  language_list.GetSupportedLanguages(true, &languages);
+  for (std::string_view lang : kAllLanguages) {
+    EXPECT_TRUE(language_list.IsSupportedLanguage(lang))
+        << "Language " << lang << " should be supported";
+    EXPECT_THAT(languages, ::testing::Contains(lang));
+  }
 }
 
 // Sanity test for the default set of supported languages. The default set of
@@ -105,18 +291,48 @@ TEST_F(TranslateLanguageListTest, IsSupportedLanguage) {
 // If either of these tests are not true, the default language configuration is
 // likely to be incorrect.
 TEST_F(TranslateLanguageListTest, GetSupportedLanguages) {
-  TranslateLanguageList language_list;
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
   std::vector<std::string> languages;
   language_list.GetSupportedLanguages(true /* translate_allowed */, &languages);
   // Check there are a lot of default languages.
   EXPECT_GE(languages.size(), 100ul);
   // Check that some very common languages are there.
-  EXPECT_TRUE(base::Contains(languages, "en"));
-  EXPECT_TRUE(base::Contains(languages, "es"));
-  EXPECT_TRUE(base::Contains(languages, "fr"));
-  EXPECT_TRUE(base::Contains(languages, "ru"));
-  EXPECT_TRUE(base::Contains(languages, "zh-CN"));
-  EXPECT_TRUE(base::Contains(languages, "zh-TW"));
+  EXPECT_TRUE(std::ranges::contains(languages, "en"));
+  EXPECT_TRUE(std::ranges::contains(languages, "es"));
+  EXPECT_TRUE(std::ranges::contains(languages, "fr"));
+  EXPECT_TRUE(std::ranges::contains(languages, "ru"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-CN"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-TW"));
+}
+
+// Sanity test for the default set of partial translate supported languages. The
+// default set of languages should be large (> 100) and must contain very common
+// languages. If either of these tests are not true, the default language
+// configuration is likely to be incorrect.
+TEST_F(TranslateLanguageListTest, GetSupportedPartialTranslateLanguages) {
+  TranslateLanguageList language_list(
+      std::make_unique<DummyTranslateUrlFetcher>());
+  std::vector<std::string> languages;
+  language_list.GetSupportedPartialTranslateLanguages(&languages);
+  // Check there are a lot of default languages.
+  EXPECT_GE(languages.size(), 100ul);
+  // Check that some very common languages are there.
+  EXPECT_TRUE(std::ranges::contains(languages, "en"));
+  EXPECT_TRUE(std::ranges::contains(languages, "es"));
+  EXPECT_TRUE(std::ranges::contains(languages, "fr"));
+  EXPECT_TRUE(std::ranges::contains(languages, "ru"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-CN"));
+  EXPECT_TRUE(std::ranges::contains(languages, "zh-TW"));
+
+  // Check that unsupported languages are not there
+  EXPECT_FALSE(std::ranges::contains(languages, "ilo"));
+  EXPECT_FALSE(std::ranges::contains(languages, "lus"));
+  EXPECT_FALSE(std::ranges::contains(languages, "mni-Mtei"));
+  EXPECT_FALSE(std::ranges::contains(languages, "gom"));
+  EXPECT_FALSE(std::ranges::contains(languages, "doi"));
+  EXPECT_FALSE(std::ranges::contains(languages, "bm"));
+  EXPECT_FALSE(std::ranges::contains(languages, "ckb"));
 }
 
 // Check that we contact the translate server to update the supported language

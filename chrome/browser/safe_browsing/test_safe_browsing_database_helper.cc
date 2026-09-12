@@ -4,9 +4,10 @@
 
 #include "chrome/browser/safe_browsing/test_safe_browsing_database_helper.h"
 
+#include <algorithm>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
@@ -17,10 +18,14 @@
 #include "base/task/sequenced_task_runner.h"
 #include "chrome/browser/safe_browsing/safe_browsing_service.h"
 #include "chrome/browser/safe_browsing/test_safe_browsing_service.h"
-#include "components/safe_browsing/core/browser/db/v4_database.h"
+#include "chrome/browser/safe_browsing/v5_search_hashes_cache_factory.h"
+#include "components/safe_browsing/core/browser/db/sb_database.h"
+#include "components/safe_browsing/core/browser/db/sb_test_util.h"
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
-#include "components/safe_browsing/core/browser/db/v4_test_util.h"
+#include "components/safe_browsing/core/browser/db/v5_search_hashes_cache.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "components/security_interstitials/core/unsafe_resource.h"
+#include "content/public/test/test_utils.h"
 
 namespace {
 
@@ -29,49 +34,54 @@ namespace {
 class FakeSafeBrowsingUIManager
     : public safe_browsing::TestSafeBrowsingUIManager {
  public:
-  FakeSafeBrowsingUIManager() {}
+  FakeSafeBrowsingUIManager() = default;
 
   FakeSafeBrowsingUIManager(const FakeSafeBrowsingUIManager&) = delete;
   FakeSafeBrowsingUIManager& operator=(const FakeSafeBrowsingUIManager&) =
       delete;
 
  protected:
-  ~FakeSafeBrowsingUIManager() override {}
+  ~FakeSafeBrowsingUIManager() override = default;
 
   void DisplayBlockingPage(const UnsafeResource& resource) override {
     resource.DispatchCallback(FROM_HERE, true /* proceed */,
-                              true /* showed_interstitial */);
+                              true /* showed_interstitial */,
+                              false /* has_post_commit_interstitial_skipped */);
   }
 };
 
 }  // namespace
 
+// TODO(crbug.com/362791941): Handle v4 references.
 // This class automatically inserts lists into the store map when initializing
 // the test database.
-class InsertingDatabaseFactory : public safe_browsing::TestV4DatabaseFactory {
+class InsertingDatabaseFactory : public safe_browsing::TestSBDatabaseFactory {
  public:
   explicit InsertingDatabaseFactory(
       safe_browsing::TestV4StoreFactory* store_factory,
       const std::vector<safe_browsing::ListIdentifier>& lists_to_insert)
       : lists_to_insert_(lists_to_insert), store_factory_(store_factory) {}
 
-  std::unique_ptr<safe_browsing::V4Database, base::OnTaskRunnerDeleter> Create(
+  std::unique_ptr<safe_browsing::SBDatabase, base::OnTaskRunnerDeleter> Create(
       const scoped_refptr<base::SequencedTaskRunner>& db_task_runner,
       std::unique_ptr<safe_browsing::StoreMap> store_map) override {
     const base::FilePath base_store_path(FILE_PATH_LITERAL("UrlDb.store"));
     for (const auto& id : lists_to_insert_) {
-      if (!base::Contains(*store_map, id)) {
-        const base::FilePath store_path =
-            base_store_path.InsertBeforeExtensionASCII(base::StringPrintf(
-                " (%d)", base::GetUniquePathNumber(base_store_path)));
-        (*store_map)[id] =
-            store_factory_->CreateV4Store(db_task_runner, store_path);
+      if (!store_map->contains(id)) {
+        const base::FilePath store_path = base::GetUniquePath(base_store_path);
+        store_map->insert(
+            {id, store_factory_->CreateV4Store(
+                     db_task_runner,
+                     store_path.empty() ? base_store_path : store_path,
+                     /*v5_prefix_size=*/4,
+                     /*is_eligible_for_migration=*/true,
+                     /*is_extensions_blocklist=*/false)});
       }
     }
 
     for (const auto& it : *store_map)
       lists_.push_back(it.first);
-    return safe_browsing::TestV4DatabaseFactory::Create(db_task_runner,
+    return safe_browsing::TestSBDatabaseFactory::Create(db_task_runner,
                                                         std::move(store_map));
   }
 
@@ -97,19 +107,19 @@ TestSafeBrowsingDatabaseHelper::TestSafeBrowsingDatabaseHelper(
   sb_factory_ =
       std::make_unique<safe_browsing::TestSafeBrowsingServiceFactory>();
   sb_factory_->SetTestUIManager(new FakeSafeBrowsingUIManager());
-  sb_factory_->UseV4LocalDatabaseManager();
+  sb_factory_->UseSBLocalDatabaseManager();
   safe_browsing::SafeBrowsingService::RegisterFactory(sb_factory_.get());
 
   auto store_factory = std::make_unique<safe_browsing::TestV4StoreFactory>();
-  auto v4_db_factory = std::make_unique<InsertingDatabaseFactory>(
+  auto sb_db_factory = std::make_unique<InsertingDatabaseFactory>(
       store_factory.get(), lists_to_insert);
 
-  v4_db_factory_ = v4_db_factory.get();
+  sb_db_factory_ = sb_db_factory.get();
 
-  safe_browsing::V4Database::RegisterStoreFactoryForTest(
+  safe_browsing::SBDatabase::RegisterStoreFactoryForTest(
       std::move(store_factory));
-  safe_browsing::V4Database::RegisterDatabaseFactoryForTest(
-      std::move(v4_db_factory));
+  safe_browsing::SBDatabase::RegisterDatabaseFactoryForTest(
+      std::move(sb_db_factory));
 
   if (v4_get_hash_factory) {
     safe_browsing::V4GetHashProtocolManager::RegisterFactory(
@@ -119,19 +129,31 @@ TestSafeBrowsingDatabaseHelper::TestSafeBrowsingDatabaseHelper(
 
 TestSafeBrowsingDatabaseHelper::~TestSafeBrowsingDatabaseHelper() {
   safe_browsing::V4GetHashProtocolManager::RegisterFactory(nullptr);
-  safe_browsing::V4Database::RegisterDatabaseFactoryForTest(nullptr);
-  safe_browsing::V4Database::RegisterStoreFactoryForTest(nullptr);
+  safe_browsing::SBDatabase::RegisterDatabaseFactoryForTest(nullptr);
+  safe_browsing::SBDatabase::RegisterStoreFactoryForTest(nullptr);
   safe_browsing::SafeBrowsingService::RegisterFactory(nullptr);
 }
 
+// TODO(crbug.com/372395685): Remove list_id (which can be derived from
+// threat_type in V5) and threat_metadata when deprecating V4.
 void TestSafeBrowsingDatabaseHelper::AddFullHashToDbAndFullHashCache(
     const GURL& bad_url,
     const safe_browsing::ListIdentifier& list_id,
-    const safe_browsing::ThreatMetadata& threat_metadata) {
-  // Should only be called if we are mocking the v4 hash factory.
-  DCHECK(v4_get_hash_factory_);
-
+    const safe_browsing::ThreatMetadata& threat_metadata,
+    safe_browsing::V5::ThreatType threat_type,
+    bool is_warn_only,
+    Profile* profile) {
   LocallyMarkPrefixAsBad(bad_url, list_id);
+
+  if (base::FeatureList::IsEnabled(safe_browsing::kLocalListsUseSBv5)) {
+    safe_browsing::V5SearchHashesCacheFactory::GetForProfile(profile)
+        ->CacheArtificialV5SearchHashesLookupVerdict(bad_url, threat_type,
+                                                     is_warn_only);
+    return;
+  }
+
+  // Should only be called if we are mocking the v4 hash factory.
+  CHECK(v4_get_hash_factory_);
 
   safe_browsing::FullHashInfo full_hash_info =
       GetFullHashInfoWithMetadata(bad_url, list_id, threat_metadata);
@@ -142,11 +164,14 @@ void TestSafeBrowsingDatabaseHelper::LocallyMarkPrefixAsBad(
     const GURL& url,
     const safe_browsing::ListIdentifier& list_id) {
   safe_browsing::FullHashStr full_hash =
-      safe_browsing::V4ProtocolManagerUtil::GetFullHash(url);
-  v4_db_factory_->MarkPrefixAsBad(list_id, full_hash);
+      safe_browsing::SBProtocolManagerUtil::GetFullHash(url);
+  while (!sb_db_factory_->IsReady()) {
+    content::RunAllTasksUntilIdle();
+  }
+  sb_db_factory_->MarkPrefixAsBad(list_id, full_hash);
 }
 
 bool TestSafeBrowsingDatabaseHelper::HasListSynced(
     const safe_browsing::ListIdentifier& list_id) {
-  return base::Contains(v4_db_factory_->lists(), list_id);
+  return std::ranges::contains(sb_db_factory_->lists(), list_id);
 }

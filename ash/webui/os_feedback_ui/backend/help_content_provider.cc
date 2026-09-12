@@ -6,26 +6,26 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "ash/webui/os_feedback_ui/mojom/os_feedback_ui.mojom.h"
 #include "base/functional/bind.h"
+#include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
-#include "content/public/browser/browser_context.h"
-#include "content/public/browser/storage_partition.h"
 #include "google_apis/google_api_keys.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
-#include "services/data_decoder/public/cpp/data_decoder.h"
+#include "net/http/http_response_headers.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace ash {
@@ -73,6 +73,15 @@ const net::NetworkTrafficAnnotationTag kTrafficAnnotation =
           data:
             "The free-form text that user has entered."
           destination: GOOGLE_OWNED_SERVICE
+          internal {
+            contacts {
+              email: "cros-device-enablement@google.com"
+            }
+          }
+          user_data {
+            type: ARBITRARY_DATA
+          }
+          last_reviewed: "2023-08-14"
         }
         policy {
           cookies_allowed: NO
@@ -135,7 +144,7 @@ bool IsLoaderSuccessful(const network::SimpleURLLoader* loader) {
 //       ...
 //     },
 // ]
-HelpContentPtr GetHelpContent(const base::Value::Dict& data) {
+HelpContentPtr GetHelpContent(const base::DictValue& data) {
   HelpContentPtr help_content = HelpContent::New();
 
   const std::string* title = data.FindString("title");
@@ -174,7 +183,7 @@ std::string ConvertSearchRequestToJson(
     const std::string& app_locale,
     bool is_child_account,
     const os_feedback_ui::mojom::SearchRequestPtr& request) {
-  base::Value::Dict request_dict;
+  base::DictValue request_dict;
 
   request_dict.Set("helpcenter", "chromeos");
   request_dict.Set("query", request->query);
@@ -188,8 +197,7 @@ std::string ConvertSearchRequestToJson(
     requested_results += kExtraItemsInRawResponse;
   }
   request_dict.Set("max_results", base::NumberToString(requested_results));
-  std::string request_content;
-  base::JSONWriter::Write(request_dict, &request_content);
+  std::string request_content = base::WriteJson(request_dict).value_or("");
   VLOG(2) << request_content;
   return request_content;
 }
@@ -202,7 +210,7 @@ HelpContentType ToHelpContentType(const std::string& result_type) {
     return HelpContentType::kArticle;
   }
 
-  if (result_type.find("FORUM") != std::string::npos) {
+  if (result_type.contains("FORUM")) {
     return HelpContentType::kForum;
   }
   LOG(WARNING) << "HelpContentProvider unknown content type: " << result_type;
@@ -222,7 +230,7 @@ void PopulateSearchResponse(const std::string& app_locale,
   }
   DVLOG(2) << "HelpContentProvider response body after safe parsed: "
            << search_result;
-  const base::Value::Dict& dict = search_result.GetDict();
+  const base::DictValue& dict = search_result.GetDict();
 
   // Extract totalResults.
   const std::string* total_results_str = dict.FindString("totalResults");
@@ -233,7 +241,7 @@ void PopulateSearchResponse(const std::string& app_locale,
   }
 
   // Extract resource.
-  const base::Value::List* resources = dict.FindList("resource");
+  const base::ListValue* resources = dict.FindList("resource");
   if (resources == nullptr) {
     return;
   }
@@ -247,7 +255,7 @@ void PopulateSearchResponse(const std::string& app_locale,
     if (!resource.is_dict()) {
       continue;
     }
-    const base::Value::Dict& res_dict = resource.GetDict();
+    const base::DictValue& res_dict = resource.GetDict();
     const std::string* lang_str = res_dict.FindString("language");
     // Take items in the same language (regardless of regions). If the account
     // is a child account, we only add articles to the result.
@@ -262,19 +270,10 @@ void PopulateSearchResponse(const std::string& app_locale,
 }
 
 HelpContentProvider::HelpContentProvider(
-    const std::string& app_locale,
-    const bool is_child_account,
-    content::BrowserContext* browser_context)
-    : app_locale_(app_locale),
-      is_child_account_(is_child_account),
-      url_loader_factory_(browser_context->GetDefaultStoragePartition()
-                              ->GetURLLoaderFactoryForBrowserProcess()) {}
-
-HelpContentProvider::HelpContentProvider(
-    const std::string& app_locale,
+    std::string app_locale,
     const bool is_child_account,
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory)
-    : app_locale_(app_locale),
+    : app_locale_(std::move(app_locale)),
       is_child_account_(is_child_account),
       url_loader_factory_(url_loader_factory) {}
 
@@ -312,34 +311,19 @@ void HelpContentProvider::OnHelpContentSearchResponse(
     const uint32_t max_results,
     GetHelpContentsCallback callback,
     std::unique_ptr<network::SimpleURLLoader> url_loader,
-    std::unique_ptr<std::string> response_body) {
-  if (IsLoaderSuccessful(url_loader.get()) && response_body) {
-    DVLOG(2) << "HelpContentProvider response body: " << *response_body;
-    // Send the JSON string to a dedicated service for safe parsing.
-    data_decoder_.ParseJson(
-        *response_body,
-        base::BindOnce(&HelpContentProvider::OnResponseJsonParsed,
-                       weak_ptr_factory_.GetWeakPtr(), max_results,
-                       std::move(callback)));
-  } else {
-    SearchResponsePtr response = SearchResponse::New();
-    std::move(callback).Run(std::move(response));
-  }
-}
-
-void HelpContentProvider::OnResponseJsonParsed(
-    const uint32_t max_results,
-    GetHelpContentsCallback callback,
-    data_decoder::DataDecoder::ValueOrError result) {
+    std::optional<std::string> response_body) {
   SearchResponsePtr response = SearchResponse::New();
 
-  if (result.has_value()) {
-    PopulateSearchResponse(app_locale_, is_child_account_, max_results, *result,
-                           response);
-  } else {
-    LOG(ERROR)
-        << "HelpContentProvider data decoder failed to parse json. Error: "
-        << result.error();
+  if (IsLoaderSuccessful(url_loader.get()) && response_body) {
+    DVLOG(2) << "HelpContentProvider response body: " << *response_body;
+    std::optional<base::Value> result = base::JSONReader::Read(
+        *response_body, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+    if (result.has_value()) {
+      PopulateSearchResponse(app_locale_, is_child_account_, max_results,
+                             *result, response);
+    } else {
+      LOG(ERROR) << "HelpContentProvider failed to parse json";
+    }
   }
 
   std::move(callback).Run(std::move(response));

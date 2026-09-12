@@ -1,45 +1,23 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf.util;
 
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.FieldMask;
 import com.google.protobuf.Message;
 import com.google.protobuf.UninitializedMessageException;
-import protobuf_unittest.UnittestProto.NestedTestAllTypes;
-import protobuf_unittest.UnittestProto.TestAllTypes;
-import protobuf_unittest.UnittestProto.TestAllTypes.NestedMessage;
-import protobuf_unittest.UnittestProto.TestRequired;
-import protobuf_unittest.UnittestProto.TestRequiredMessage;
+import proto2_unittest.UnittestProto.NestedTestAllTypes;
+import proto2_unittest.UnittestProto.TestAllTypes;
+import proto2_unittest.UnittestProto.TestAllTypes.NestedMessage;
+import proto2_unittest.UnittestProto.TestRequired;
+import proto2_unittest.UnittestProto.TestRequiredMessage;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -117,6 +95,15 @@ public class FieldMaskTreeTest {
   }
 
   @Test
+  public void testRemoveFieldPath_leavesBranchKept() throws Exception {
+    FieldMaskTree tree = new FieldMaskTree(FieldMaskUtil.fromString("a.b.c,a.b.d"));
+    assertThat(tree.toString()).isEqualTo("a.b.c,a.b.d");
+
+    tree.removeFieldPath("a.b.c");
+    assertThat(tree.toString()).isEqualTo("a.b.d");
+  }
+
+  @Test
   public void testRemoveFromFieldMask() throws Exception {
     FieldMaskTree tree = new FieldMaskTree(FieldMaskUtil.fromString("foo,bar.baz,bar.quz"));
     assertThat(tree.toString()).isEqualTo("bar.baz,bar.quz,foo");
@@ -146,6 +133,30 @@ public class FieldMaskTreeTest {
     // Match a non-leaf node.
     tree.intersectFieldPath("bar", result);
     assertThat(result.toString()).isEqualTo("bar.baz,bar.quz,foo");
+  }
+
+  @Test
+  public void testGetFieldPaths_excessivelyDeepTree() {
+    StringBuilder sb = new StringBuilder("a");
+    for (int i = 0; i < 100000; i++) {
+      sb.append(".a");
+    }
+    String deepPath = sb.toString();
+
+    FieldMaskTree tree = new FieldMaskTree();
+    tree.addFieldPath(deepPath);
+    tree.addFieldPath(deepPath);
+    tree.removeFieldPath(deepPath);
+
+    FieldMask mask1 = tree.toFieldMask();
+    assertThat(mask1.getPathsCount()).isEqualTo(0);
+
+    tree.addFieldPath(deepPath);
+    tree.addFieldPath(deepPath);
+
+    FieldMask mask2 = tree.toFieldMask();
+    assertThat(mask2.getPathsCount()).isEqualTo(1);
+    assertThat(mask2.getPaths(0)).isEqualTo(deepPath);
   }
 
   @Test
@@ -245,29 +256,45 @@ public class FieldMaskTreeTest {
 
     // Test merging each individual field.
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload.optional_int32"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.optional_int32"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     expected = NestedTestAllTypes.newBuilder();
     expected.getPayloadBuilder().setOptionalInt32(1234);
     assertThat(builder.build()).isEqualTo(expected.build());
 
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload.optional_nested_message"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.optional_nested_message"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     expected = NestedTestAllTypes.newBuilder();
     expected.getPayloadBuilder().setOptionalNestedMessage(NestedMessage.newBuilder().setBb(5678));
     assertThat(builder.build()).isEqualTo(expected.build());
 
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload.repeated_int32"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.repeated_int32"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     expected = NestedTestAllTypes.newBuilder();
     expected.getPayloadBuilder().addRepeatedInt32(4321);
     assertThat(builder.build()).isEqualTo(expected.build());
 
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload.repeated_nested_message"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.repeated_nested_message"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     expected = NestedTestAllTypes.newBuilder();
     expected.getPayloadBuilder().addRepeatedNestedMessage(NestedMessage.newBuilder().setBb(8765));
     assertThat(builder.build()).isEqualTo(expected.build());
@@ -298,15 +325,23 @@ public class FieldMaskTreeTest {
     assertThat(builder.build()).isEqualTo(expected.build());
 
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("child.payload.repeated_int32"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("child.payload.repeated_int32"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     expected = NestedTestAllTypes.newBuilder();
     expected.getChildBuilder().getPayloadBuilder().addRepeatedInt32(4321);
     assertThat(builder.build()).isEqualTo(expected.build());
 
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("child.payload.repeated_nested_message"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("child.payload.repeated_nested_message"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     expected = NestedTestAllTypes.newBuilder();
     expected
         .getChildBuilder()
@@ -316,23 +351,35 @@ public class FieldMaskTreeTest {
 
     // Test merging all fields.
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("child").addFieldPath("payload"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("child").addFieldPath("payload"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     assertThat(builder.build()).isEqualTo(source);
 
     // Test repeated options.
     builder = NestedTestAllTypes.newBuilder();
     builder.getPayloadBuilder().addRepeatedInt32(1000);
-    merge(new FieldMaskTree().addFieldPath("payload.repeated_int32"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.repeated_int32"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     // Default behavior is to append repeated fields.
     assertThat(builder.getPayload().getRepeatedInt32Count()).isEqualTo(2);
     assertThat(builder.getPayload().getRepeatedInt32(0)).isEqualTo(1000);
     assertThat(builder.getPayload().getRepeatedInt32(1)).isEqualTo(4321);
     // Change to replace repeated fields.
     options.setReplaceRepeatedFields(true);
-    merge(new FieldMaskTree().addFieldPath("payload.repeated_int32"),
-        source, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.repeated_int32"),
+        source,
+        builder,
+        options,
+        useDynamicMessage);
     assertThat(builder.getPayload().getRepeatedInt32Count()).isEqualTo(1);
     assertThat(builder.getPayload().getRepeatedInt32(0)).isEqualTo(4321);
 
@@ -340,8 +387,7 @@ public class FieldMaskTreeTest {
     builder = NestedTestAllTypes.newBuilder();
     builder.getPayloadBuilder().setOptionalInt32(1000);
     builder.getPayloadBuilder().setOptionalUint32(2000);
-    merge(new FieldMaskTree().addFieldPath("payload"),
-        source, builder, options, useDynamicMessage);
+    merge(new FieldMaskTree().addFieldPath("payload"), source, builder, options, useDynamicMessage);
     // Default behavior is to merge message fields.
     assertThat(builder.getPayload().getOptionalInt32()).isEqualTo(1234);
     assertThat(builder.getPayload().getOptionalUint32()).isEqualTo(2000);
@@ -349,14 +395,22 @@ public class FieldMaskTreeTest {
     // Test merging unset message fields.
     NestedTestAllTypes clearedSource = source.toBuilder().clearPayload().build();
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload"),
-        clearedSource, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload"),
+        clearedSource,
+        builder,
+        options,
+        useDynamicMessage);
     assertThat(builder.hasPayload()).isFalse();
 
     // Skip a message field if they are unset in both source and target.
     builder = NestedTestAllTypes.newBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload.optional_int32"),
-        clearedSource, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.optional_int32"),
+        clearedSource,
+        builder,
+        options,
+        useDynamicMessage);
     assertThat(builder.hasPayload()).isFalse();
 
     // Change to replace message fields.
@@ -364,8 +418,7 @@ public class FieldMaskTreeTest {
     builder = NestedTestAllTypes.newBuilder();
     builder.getPayloadBuilder().setOptionalInt32(1000);
     builder.getPayloadBuilder().setOptionalUint32(2000);
-    merge(new FieldMaskTree().addFieldPath("payload"),
-        source, builder, options, useDynamicMessage);
+    merge(new FieldMaskTree().addFieldPath("payload"), source, builder, options, useDynamicMessage);
     assertThat(builder.getPayload().getOptionalInt32()).isEqualTo(1234);
     assertThat(builder.getPayload().getOptionalUint32()).isEqualTo(0);
 
@@ -373,8 +426,12 @@ public class FieldMaskTreeTest {
     builder = NestedTestAllTypes.newBuilder();
     builder.getPayloadBuilder().setOptionalInt32(1000);
     builder.getPayloadBuilder().setOptionalUint32(2000);
-    merge(new FieldMaskTree().addFieldPath("payload"),
-        clearedSource, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload"),
+        clearedSource,
+        builder,
+        options,
+        useDynamicMessage);
     assertThat(builder.hasPayload()).isFalse();
 
     // Test merging unset primitive fields.
@@ -382,16 +439,24 @@ public class FieldMaskTreeTest {
     builder.getPayloadBuilder().clearOptionalInt32();
     NestedTestAllTypes sourceWithPayloadInt32Unset = builder.build();
     builder = source.toBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload.optional_int32"),
-        sourceWithPayloadInt32Unset, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.optional_int32"),
+        sourceWithPayloadInt32Unset,
+        builder,
+        options,
+        useDynamicMessage);
     assertThat(builder.getPayload().hasOptionalInt32()).isTrue();
     assertThat(builder.getPayload().getOptionalInt32()).isEqualTo(0);
 
     // Change to clear unset primitive fields.
     options.setReplacePrimitiveFields(true);
     builder = source.toBuilder();
-    merge(new FieldMaskTree().addFieldPath("payload.optional_int32"),
-        sourceWithPayloadInt32Unset, builder, options, useDynamicMessage);
+    merge(
+        new FieldMaskTree().addFieldPath("payload.optional_int32"),
+        sourceWithPayloadInt32Unset,
+        builder,
+        options,
+        useDynamicMessage);
     assertThat(builder.hasPayload()).isTrue();
     assertThat(builder.getPayload().hasOptionalInt32()).isFalse();
   }

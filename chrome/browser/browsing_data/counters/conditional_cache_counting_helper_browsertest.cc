@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/browsing_data/content/conditional_cache_counting_helper.h"
+
 #include <algorithm>
 #include <memory>
 #include <set>
@@ -12,9 +14,8 @@
 #include "base/strings/strcat.h"
 #include "build/build_config.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/test/base/in_process_browser_test.h"
-#include "components/browsing_data/content/conditional_cache_counting_helper.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/storage_partition.h"
@@ -23,6 +24,7 @@
 #include "net/test/embedded_test_server/default_handlers.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
+#include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/simple_url_loader.h"
 
 using browsing_data::ConditionalCacheCountingHelper;
@@ -62,7 +64,7 @@ class ConditionalCacheCountingHelperBrowserTest : public InProcessBrowserTest {
     DCHECK_CURRENTLY_ON(BrowserThread::UI);
     last_size_ = -1;
     ConditionalCacheCountingHelper::Count(
-        browser()->profile()->GetDefaultStoragePartition(), begin_time,
+        browser()->GetProfile()->GetDefaultStoragePartition(), begin_time,
         end_time,
         base::BindOnce(
             &ConditionalCacheCountingHelperBrowserTest::CountCallback,
@@ -102,7 +104,7 @@ class ConditionalCacheCountingHelperBrowserTest : public InProcessBrowserTest {
                                            TRAFFIC_ANNOTATION_FOR_TESTS);
       simple_loader->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
           browser()
-              ->profile()
+              ->GetProfile()
               ->GetDefaultStoragePartition()
               ->GetURLLoaderFactoryForBrowserProcess()
               .get(),
@@ -120,7 +122,7 @@ class ConditionalCacheCountingHelperBrowserTest : public InProcessBrowserTest {
 
 // Tests that ConditionalCacheCountingHelper only counts those cache entries
 // that match the condition.
-// TODO(https://crbug.com/1287432): The test is flaky on Win.
+// TODO(crbug.com/40816226): The test is flaky on Win.
 #if BUILDFLAG(IS_WIN)
 #define MAYBE_Count DISABLED_Count
 #else

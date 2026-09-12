@@ -10,12 +10,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <optional>
 #include <string>
 
+#include "base/check.h"
 #include "base/check_op.h"
 #include "base/files/file.h"
 #include "base/files/file_util.h"
-#include "base/notreached.h"
+#include "base/notimplemented.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
@@ -27,49 +29,24 @@ namespace {
 // Deny |permission| on the file |path|.
 bool DenyFilePermission(const FilePath& path, mode_t permission) {
   stat_wrapper_t stat_buf;
-  if (File::Stat(path.value().c_str(), &stat_buf) != 0)
+  if (File::Stat(path, &stat_buf) != 0) {
     return false;
+  }
   stat_buf.st_mode &= ~permission;
 
   int rv = HANDLE_EINTR(chmod(path.value().c_str(), stat_buf.st_mode));
   return rv == 0;
 }
 
-// Gets a blob indicating the permission information for |path|.
-// |length| is the length of the blob.  Zero on failure.
-// Returns the blob pointer, or NULL on failure.
-void* GetPermissionInfo(const FilePath& path, size_t* length) {
-  DCHECK(length);
-  *length = 0;
-
+// Gets a mode_t indicating the permission information for `path`.
+// Returns an empty value on failure.
+std::optional<mode_t> GetPermissionInfo(const FilePath& path) {
   stat_wrapper_t stat_buf;
-  if (File::Stat(path.value().c_str(), &stat_buf) != 0)
-    return nullptr;
+  if (File::Stat(path, &stat_buf) != 0) {
+    return std::nullopt;
+  }
 
-  *length = sizeof(mode_t);
-  mode_t* mode = new mode_t;
-  *mode = stat_buf.st_mode & ~S_IFMT;  // Filter out file/path kind.
-
-  return mode;
-}
-
-// Restores the permission information for |path|, given the blob retrieved
-// using |GetPermissionInfo()|.
-// |info| is the pointer to the blob.
-// |length| is the length of the blob.
-// Either |info| or |length| may be NULL/0, in which case nothing happens.
-bool RestorePermissionInfo(const FilePath& path, void* info, size_t length) {
-  if (!info || (length == 0))
-    return false;
-
-  DCHECK_EQ(sizeof(mode_t), length);
-  mode_t* mode = reinterpret_cast<mode_t*>(info);
-
-  int rv = HANDLE_EINTR(chmod(path.value().c_str(), *mode));
-
-  delete mode;
-
-  return rv == 0;
+  return stat_buf.st_mode & ~S_IFMT;  // Filter out file/path kind.
 }
 
 }  // namespace
@@ -77,8 +54,9 @@ bool RestorePermissionInfo(const FilePath& path, void* info, size_t length) {
 bool DieFileDie(const FilePath& file, bool recurse) {
   // There is no need to workaround Windows problems on POSIX.
   // Just pass-through.
-  if (recurse)
+  if (recurse) {
     return DeletePathRecursively(file);
+  }
   return DeleteFile(file);
 }
 
@@ -104,16 +82,21 @@ bool MakeFileUnwritable(const FilePath& path) {
   return DenyFilePermission(path, S_IWUSR | S_IWGRP | S_IWOTH);
 }
 
+struct FilePermissionRestorer::SavedFilePermissions {
+  explicit SavedFilePermissions(mode_t mode) : mode_(mode) {}
+  mode_t mode_;
+};
+
 FilePermissionRestorer::FilePermissionRestorer(const FilePath& path)
-    : path_(path), info_(nullptr), length_(0) {
-  info_ = GetPermissionInfo(path_, &length_);
-  DCHECK(info_ != nullptr);
-  DCHECK_NE(0u, length_);
+    : path_(path) {
+  auto mode = GetPermissionInfo(path);
+  CHECK(mode);
+  permissions_ = std::make_unique<SavedFilePermissions>(*mode);
 }
 
 FilePermissionRestorer::~FilePermissionRestorer() {
-  if (!RestorePermissionInfo(path_, info_, length_))
-    NOTREACHED();
+  CHECK(permissions_);
+  CHECK_EQ(HANDLE_EINTR(chmod(path_.value().c_str(), permissions_->mode_)), 0);
 }
 
 }  // namespace base

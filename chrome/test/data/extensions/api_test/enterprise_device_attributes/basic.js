@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(https://crbug.com/1090941) automate packing procedure
+// TODO(crbug.com/40697472) automate packing procedure
 // Must be packed to ../enterprise_device_attributes.crx using the private key
 // ../enterprise_device_attributes.pem .
 
 chrome.test.getConfig(function(config) {
-  var customArg = JSON.parse(config.customArg);
-  var expectedDirectoryDeviceId = customArg.expectedDirectoryDeviceId;
-  var expectedSerialNumber = customArg.expectedSerialNumber;
-  var expectedAssetId = customArg.expectedAssetId;
-  var expectedAnnotatedLocation = customArg.expectedAnnotatedLocation;
-  var expectedHostname = customArg.expectedHostname;
+  const customArg = JSON.parse(config.customArg);
+  const expectedDirectoryDeviceId = customArg.expectedDirectoryDeviceId;
+  const expectedSerialNumber = customArg.expectedSerialNumber;
+  const expectedAssetId = customArg.expectedAssetId;
+  const expectedAnnotatedLocation = customArg.expectedAnnotatedLocation;
+  const expectedHostname = customArg.expectedHostname;
 
   chrome.test.runTests([
     function testDirectoryDeviceId() {
@@ -28,7 +28,6 @@ chrome.test.getConfig(function(config) {
         chrome.test.assertEq(expectedSerialNumber, serialNumber);
         chrome.test.succeed();
       });
-
     },
     function testDeviceAssetId() {
       chrome.enterprise.deviceAttributes.getDeviceAssetId(function(assetId) {
@@ -48,6 +47,6 @@ chrome.test.getConfig(function(config) {
         chrome.test.assertEq(expectedHostname, hostname);
         chrome.test.succeed();
       });
-    }
+    },
   ]);
 });

@@ -7,21 +7,17 @@
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 
-#include "base/command_line.h"
+#include "base/containers/span.h"
 #include "base/files/scoped_file.h"
 #include "base/linux_util.h"
 #include "base/logging.h"
-#include "base/memory/platform_shared_memory_region.h"
+#include "base/pickle.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/posix/unix_domain_socket.h"
-#include "base/process/launch.h"
-#include "base/strings/string_number_conversions.h"
-#include "content/public/common/content_switches.h"
 #include "sandbox/linux/services/libc_interceptor.h"
 #include "sandbox/policy/linux/sandbox_linux.h"
 
@@ -45,12 +41,11 @@ void SandboxIPCHandler::Run() {
     const int r =
         HANDLE_EINTR(poll(pfds, std::size(pfds), -1 /* no timeout */));
     // '0' is not a possible return value with no timeout.
-    DCHECK_NE(0, r);
+    CHECK_NE(0, r, base::NotFatalUntil::M158);
     if (r < 0) {
       PLOG(WARNING) << "poll";
       if (failed_polls++ == 3) {
         LOG(FATAL) << "poll(2) failing. SandboxIPCHandler aborting.";
-        return;
       }
       continue;
     }
@@ -89,105 +84,34 @@ void SandboxIPCHandler::HandleRequestFromChild(int fd) {
   // kMaxSandboxIPCMessagePayloadSize set to 64 should be plenty.
   // 128 bytes padding are necessary so recvmsg() does not return MSG_TRUNC
   // error for a maximum length message.
-  char buf[kMaxSandboxIPCMessagePayloadSize + 128];
+  uint8_t buf[kMaxSandboxIPCMessagePayloadSize + 128];
 
-  const ssize_t len =
-      base::UnixDomainSocket::RecvMsg(fd, buf, sizeof(buf), &fds);
+  const ssize_t len = base::UnixDomainSocket::RecvMsg(fd, buf, &fds);
   if (len == -1) {
     // TODO: should send an error reply, or the sender might block forever.
     if (errno == EMSGSIZE) {
       NOTREACHED() << "Sandbox host message is larger than "
                       "kMaxSandboxIPCMessagePayloadSize";
     } else {
-      PLOG(ERROR) << "Recvmsg failed";
-      NOTREACHED();
+      // TODO(pbos): Consider implementing PNOTREACHED() instead of using PCHECK
+      // here.
+      PCHECK(false) << "Recvmsg failed";
     }
-    return;
   }
+  // Note that FDs may be exhausted in this process, in which case len == 0. No
+  // op here. The sender should get EOF; see
+  // UnixDomainSocket::SendRecvMsgWithFlags.
   if (fds.empty())
     return;
 
-  base::Pickle pickle(buf, len);
-  base::PickleIterator iter(pickle);
+  base::PickleIterator iter = base::PickleIterator::WithData(
+      base::span(buf).first(base::checked_cast<size_t>(len)));
 
   int kind;
   if (!iter.ReadInt(&kind))
     return;
 
-  // Give sandbox first shot at request, if it is not handled, then
-  // false is returned and we continue on.
-  if (sandbox::HandleInterceptedCall(kind, fd, iter, fds))
-    return;
-
-  if (kind ==
-      sandbox::policy::SandboxLinux::METHOD_MAKE_SHARED_MEMORY_SEGMENT) {
-    HandleMakeSharedMemorySegment(fd, iter, fds);
-    return;
-  }
-  NOTREACHED();
-}
-
-void SandboxIPCHandler::HandleMakeSharedMemorySegment(
-    int fd,
-    base::PickleIterator iter,
-    const std::vector<base::ScopedFD>& fds) {
-  uint32_t size;
-  if (!iter.ReadUInt32(&size))
-    return;
-  // TODO(crbug.com/982879): executable shared memory should be removed when
-  // NaCl is unshipped.
-  bool executable;
-  if (!iter.ReadBool(&executable))
-    return;
-  base::ScopedFD shm_fd;
-  if (executable) {
-    shm_fd =
-        base::subtle::PlatformSharedMemoryRegion::ExecutableRegion::CreateFD(
-            size);
-  } else {
-    base::subtle::PlatformSharedMemoryRegion region =
-        base::subtle::PlatformSharedMemoryRegion::CreateUnsafe(size);
-    shm_fd = std::move(region.PassPlatformHandle().fd);
-  }
-  base::Pickle reply;
-  SendRendererReply(fds, reply, shm_fd.get());
-  // shm_fd will close the handle which is no longer needed by this process.
-}
-
-void SandboxIPCHandler::SendRendererReply(
-    const std::vector<base::ScopedFD>& fds,
-    const base::Pickle& reply,
-    int reply_fd) {
-  struct msghdr msg;
-  memset(&msg, 0, sizeof(msg));
-  struct iovec iov = {const_cast<void*>(reply.data()), reply.size()};
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
-  char control_buffer[CMSG_SPACE(sizeof(reply_fd))];
-
-  if (reply_fd != -1) {
-    struct stat st;
-    if (fstat(reply_fd, &st) == 0 && S_ISDIR(st.st_mode)) {
-      LOG(FATAL) << "Tried to send a directory descriptor over sandbox IPC";
-      // We must never send directory descriptors to a sandboxed process
-      // because they can use openat with ".." elements in the path in order
-      // to escape the sandbox and reach the real filesystem.
-    }
-
-    struct cmsghdr* cmsg;
-    msg.msg_control = control_buffer;
-    msg.msg_controllen = sizeof(control_buffer);
-    cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(reply_fd));
-    memcpy(CMSG_DATA(cmsg), &reply_fd, sizeof(reply_fd));
-    msg.msg_controllen = cmsg->cmsg_len;
-  }
-
-  if (HANDLE_EINTR(sendmsg(fds[0].get(), &msg, MSG_DONTWAIT)) < 0)
-    PLOG(ERROR) << "sendmsg";
+  CHECK(sandbox::HandleInterceptedCall(kind, fd, iter, fds));
 }
 
 SandboxIPCHandler::~SandboxIPCHandler() {

@@ -24,6 +24,16 @@ class NetworkHealthManager {
  public:
   static NetworkHealthManager* GetInstance();
 
+  // These functions create or retrieve an existing NetworkHealthManager
+  // instance and bind a `receiver` to it.
+  static void NetworkDiagnosticsServiceCallback(
+      mojo::PendingReceiver<
+          chromeos::network_diagnostics::mojom::NetworkDiagnosticsRoutines>
+          receiver);
+  static void NetworkHealthServiceCallback(
+      mojo::PendingReceiver<
+          chromeos::network_health::mojom::NetworkHealthService> receiver);
+
   NetworkHealthManager();
   ~NetworkHealthManager() = delete;
 
@@ -44,6 +54,12 @@ class NetworkHealthManager {
   void AddObserver(
       mojo::PendingRemote<
           chromeos::network_health::mojom::NetworkEventsObserver> observer);
+
+  // Runs the GoogleServicesConnectivity diagnostic routine directly
+  // (bypassing Mojo IPC) and invokes `callback` with the result.
+  void RunGoogleServicesConnectivity(
+      chromeos::network_diagnostics::mojom::NetworkDiagnosticsRoutines::
+          RunGoogleServicesConnectivityCallback callback);
 
   NetworkHealthHelper* helper() { return helper_.get(); }
 

@@ -2,11 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {CustomizeChromePageCallbackRouter, CustomizeChromePageHandlerFactory, CustomizeChromePageHandlerInterface, CustomizeChromePageHandlerRemote} from './customize_chrome.mojom-webui.js';
-
-let instance: CustomizeChromeApiProxy|null = null;
+import type {CustomizeChromePageHandlerInterface} from './customize_chrome.mojom-webui.js';
+import {CustomizeChromePageCallbackRouter, CustomizeChromePageHandlerFactory, CustomizeChromePageHandlerRemote} from './customize_chrome.mojom-webui.js';
 
 export class CustomizeChromeApiProxy {
+  handler: CustomizeChromePageHandlerInterface;
+  callbackRouter: CustomizeChromePageCallbackRouter;
+
+  private constructor(
+      handler: CustomizeChromePageHandlerInterface,
+      callbackRouter: CustomizeChromePageCallbackRouter) {
+    this.handler = handler;
+    this.callbackRouter = callbackRouter;
+  }
+
   static getInstance(): CustomizeChromeApiProxy {
     if (!instance) {
       const handler = new CustomizeChromePageHandlerRemote();
@@ -24,14 +33,6 @@ export class CustomizeChromeApiProxy {
       callbackRouter: CustomizeChromePageCallbackRouter) {
     instance = new CustomizeChromeApiProxy(handler, callbackRouter);
   }
-
-  handler: CustomizeChromePageHandlerInterface;
-  callbackRouter: CustomizeChromePageCallbackRouter;
-
-  private constructor(
-      handler: CustomizeChromePageHandlerInterface,
-      callbackRouter: CustomizeChromePageCallbackRouter) {
-    this.handler = handler;
-    this.callbackRouter = callbackRouter;
-  }
 }
+
+let instance: CustomizeChromeApiProxy|null = null;

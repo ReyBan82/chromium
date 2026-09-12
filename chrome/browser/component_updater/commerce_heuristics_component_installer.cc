@@ -4,10 +4,10 @@
 
 #include "chrome/browser/component_updater/commerce_heuristics_component_installer.h"
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "base/feature_list.h"
@@ -19,10 +19,9 @@
 #include "components/commerce/core/commerce_heuristics_data.h"
 #include "components/component_updater/component_updater_paths.h"
 #if !BUILDFLAG(IS_ANDROID)
-#include "chrome/browser/new_tab_page/new_tab_page_util.h"
+#include "chrome/browser/new_tab_page/new_tab_page_util.h"  // nogncheck crbug.com/40147906
 #include "components/search/ntp_features.h"
 #else
-#include "chrome/browser/fast_checkout/fast_checkout_features.h"
 #include "components/commerce/core/commerce_feature_list.h"
 #endif
 
@@ -67,8 +66,9 @@ base::FilePath GetCommerceCartExtractionScriptInstalledPath(
 
 void LoadHeuristicFilesFromDisk(const base::Version& version,
                                 const base::FilePath& install_dir) {
-  if (install_dir.empty())
+  if (install_dir.empty()) {
     return;
+  }
 
   const base::FilePath& commerce_hint_file_path =
       GetCommerceHintHeuristicsInstalledPath(install_dir);
@@ -138,7 +138,7 @@ bool CommerceHeuristicsInstallerPolicy::RequiresNetworkEncryption() const {
 
 update_client::CrxInstaller::Result
 CommerceHeuristicsInstallerPolicy::OnCustomInstall(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) {
   return update_client::CrxInstaller::Result(0);  // Nothing custom here.
 }
@@ -148,7 +148,7 @@ void CommerceHeuristicsInstallerPolicy::OnCustomUninstall() {}
 void CommerceHeuristicsInstallerPolicy::ComponentReady(
     const base::Version& version,
     const base::FilePath& install_dir,
-    base::Value::Dict manifest) {
+    base::DictValue manifest) {
   VLOG(1) << "Component ready, version " << version.GetString() << " in "
           << install_dir.value();
 
@@ -159,7 +159,7 @@ void CommerceHeuristicsInstallerPolicy::ComponentReady(
 
 // Called during startup and installation before ComponentReady().
 bool CommerceHeuristicsInstallerPolicy::VerifyInstallation(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) const {
   return base::PathExists(
              GetCommerceGlobalHeuristicsInstalledPath(install_dir)) &&
@@ -173,8 +173,7 @@ base::FilePath CommerceHeuristicsInstallerPolicy::GetRelativeInstallDir()
 
 void CommerceHeuristicsInstallerPolicy::GetHash(
     std::vector<uint8_t>* hash) const {
-  hash->assign(std::begin(kCommerceHeuristicsPublicKeySHA256),
-               std::end(kCommerceHeuristicsPublicKeySHA256));
+  hash->assign_range(kCommerceHeuristicsPublicKeySHA256);
 }
 
 std::string CommerceHeuristicsInstallerPolicy::GetName() const {
@@ -188,12 +187,11 @@ CommerceHeuristicsInstallerPolicy::GetInstallerAttributes() const {
 
 void RegisterCommerceHeuristicsComponent(
     component_updater::ComponentUpdateService* cus) {
+  bool is_cart_module_enabled = true;
 #if !BUILDFLAG(IS_ANDROID)
-  if (IsCartModuleEnabled()) {
-#else
-  if (base::FeatureList::IsEnabled(commerce::kCommerceHintAndroid) ||
-      base::FeatureList::IsEnabled(features::kFastCheckout)) {
+  is_cart_module_enabled = IsCartModuleEnabled();
 #endif
+  if (is_cart_module_enabled) {
     VLOG(1) << "Registering Commerce Heuristics component.";
     auto installer = base::MakeRefCounted<ComponentInstaller>(
         std::make_unique<CommerceHeuristicsInstallerPolicy>());

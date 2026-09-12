@@ -7,14 +7,13 @@
 
 #include <type_traits>
 
-#include "base/memory/scoped_refptr.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/hash_functions.h"
 #include "third_party/blink/renderer/platform/wtf/hash_set.h"
 #include "third_party/blink/renderer/platform/wtf/ref_counted.h"
 
-namespace WTF {
+namespace blink {
 
 class DestructCounter {
   USING_FAST_MALLOC(DestructCounter);
@@ -100,8 +99,8 @@ struct MoveOnlyHashTraits : public GenericHashTraits<MoveOnlyHashValue> {
   static bool IsDeletedValue(const MoveOnlyHashValue& value) {
     return value.Value() == MoveOnlyHashValue::kDeleted;
   }
-  static unsigned GetHash(const MoveOnlyHashValue& value) {
-    return WTF::GetHash(value.Value());
+  static uint32_t GetHash(const MoveOnlyHashValue& value) {
+    return blink::GetHash(value.Value());
   }
   static bool Equal(const MoveOnlyHashValue& left,
                     const MoveOnlyHashValue& right) {
@@ -145,8 +144,8 @@ struct CountCopyHashTraits : public GenericHashTraits<CountCopy> {
   static bool IsDeletedValue(const CountCopy& value) {
     return value.Counter() == CountCopy::kDeletedValue;
   }
-  static unsigned GetHash(const CountCopy& value) {
-    return WTF::GetHash(value.Counter());
+  static uint32_t GetHash(const CountCopy& value) {
+    return blink::GetHash(value.Counter());
   }
   static bool Equal(const CountCopy& left, const CountCopy& right) {
     return left.Counter() == right.Counter();
@@ -156,11 +155,13 @@ struct CountCopyHashTraits : public GenericHashTraits<CountCopy> {
 template <>
 struct HashTraits<CountCopy> : CountCopyHashTraits {};
 
-template <typename T>
-class ValueInstanceCount final {
- public:
+struct ValueInstanceCountBase {
   static int* const kDeletedValue;
+};
 
+template <typename T>
+class ValueInstanceCount final : public ValueInstanceCountBase {
+ public:
   ValueInstanceCount() : counter_(nullptr), value_(T()) {}
   explicit ValueInstanceCount(int* counter, T value = T())
       : counter_(counter), value_(value) {
@@ -207,8 +208,8 @@ struct ValueInstanceCountHashTraits
   static bool IsDeletedValue(const ValueInstanceCount<T>& value) {
     return value.Counter() == ValueInstanceCount<T>::kDeletedValue;
   }
-  static unsigned GetHash(const ValueInstanceCount<T>& value) {
-    return WTF::GetHash(value.Counter());
+  static uint32_t GetHash(const ValueInstanceCount<T>& value) {
+    return blink::GetHash(value.Counter());
   }
   static bool Equal(const ValueInstanceCount<T>& left,
                     const ValueInstanceCount<T>& right) {
@@ -232,13 +233,13 @@ class DummyRefCounted : public RefCounted<DummyRefCounted> {
 
   void AddRef() {
     DCHECK(!is_deleted_);
-    WTF::RefCounted<DummyRefCounted>::AddRef();
+    RefCounted<DummyRefCounted>::AddRef();
     ++ref_invokes_count_;
   }
 
   void Release() {
     DCHECK(!is_deleted_);
-    WTF::RefCounted<DummyRefCounted>::Release();
+    RefCounted<DummyRefCounted>::Release();
   }
 
   static int ref_invokes_count_;
@@ -293,6 +294,6 @@ class LivenessCounter {
   static unsigned live_;
 };
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_WTF_TEST_HELPER_H_

@@ -13,12 +13,15 @@
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/core/loader/modulescript/module_script_creation_params.h"
 #include "third_party/blink/renderer/core/loader/modulescript/module_script_fetch_request.h"
+#include "third_party/blink/renderer/core/scheduler/task_attribution_util.h"
 #include "third_party/blink/renderer/core/script/modulator.h"
 #include "third_party/blink/renderer/core/script/module_script.h"
+#include "third_party/blink/renderer/core/timing/resource_timing_context.h"
 #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/bindings/v8_throw_exception.h"
 #include "third_party/blink/renderer/platform/loader/fetch/fetch_client_settings_object_snapshot.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "v8/include/v8.h"
 
 namespace blink {
@@ -29,8 +32,12 @@ class DynamicImportTreeClient final : public ModuleTreeClient {
  public:
   DynamicImportTreeClient(const KURL& url,
                           Modulator* modulator,
-                          ScriptPromiseResolver* promise_resolver)
-      : url_(url), modulator_(modulator), promise_resolver_(promise_resolver) {}
+                          ScriptPromiseResolver<IDLAny>* promise_resolver,
+                          v8::ModuleImportPhase import_phase)
+      : url_(url),
+        modulator_(modulator),
+        promise_resolver_(promise_resolver),
+        import_phase_(import_phase) {}
 
   void Trace(Visitor*) const override;
 
@@ -40,32 +47,40 @@ class DynamicImportTreeClient final : public ModuleTreeClient {
 
   const KURL url_;
   const Member<Modulator> modulator_;
-  const Member<ScriptPromiseResolver> promise_resolver_;
+  const Member<ScriptPromiseResolver<IDLAny>> promise_resolver_;
+  const v8::ModuleImportPhase import_phase_;
 };
 
 // Abstract callback for modules resolution.
-class ModuleResolutionCallback : public ScriptFunction::Callable {
+class ModuleResolutionCallback
+    : public ThenCallable<IDLAny, ModuleResolutionCallback> {
  public:
-  explicit ModuleResolutionCallback(ScriptPromiseResolver* promise_resolver)
+  explicit ModuleResolutionCallback(
+      ScriptPromiseResolver<IDLAny>* promise_resolver)
       : promise_resolver_(promise_resolver) {}
 
   void Trace(Visitor* visitor) const override {
     visitor->Trace(promise_resolver_);
-    ScriptFunction::Callable::Trace(visitor);
+    ThenCallable<IDLAny, ModuleResolutionCallback>::Trace(visitor);
   }
 
+  virtual void React(ScriptState* script_state, ScriptValue value) = 0;
+
  protected:
-  Member<ScriptPromiseResolver> promise_resolver_;
+  Member<ScriptPromiseResolver<IDLAny>> promise_resolver_;
 };
 
 // Callback for modules with top-level await.
 // Called on successful resolution.
 class ModuleResolutionSuccessCallback final : public ModuleResolutionCallback {
  public:
-  ModuleResolutionSuccessCallback(ScriptPromiseResolver* promise_resolver,
-                                  ModuleScript* module_script)
+  ModuleResolutionSuccessCallback(
+      ScriptPromiseResolver<IDLAny>* promise_resolver,
+      ModuleScript* module_script,
+      v8::ModuleImportPhase import_phase)
       : ModuleResolutionCallback(promise_resolver),
-        module_script_(module_script) {}
+        module_script_(module_script),
+        import_phase_(import_phase) {}
 
   void Trace(Visitor* visitor) const final {
     visitor->Trace(module_script_);
@@ -73,15 +88,16 @@ class ModuleResolutionSuccessCallback final : public ModuleResolutionCallback {
   }
 
  private:
-  ScriptValue Call(ScriptState* script_state, ScriptValue value) override {
+  void React(ScriptState* script_state, ScriptValue value) final {
     ScriptState::Scope scope(script_state);
     v8::Local<v8::Module> record = module_script_->V8Module();
-    v8::Local<v8::Value> module_namespace = ModuleRecord::V8Namespace(record);
+    v8::Local<v8::Value> module_namespace =
+        ModuleRecord::V8Namespace(record, import_phase_);
     promise_resolver_->Resolve(module_namespace);
-    return ScriptValue();
   }
 
   Member<ModuleScript> module_script_;
+  v8::ModuleImportPhase import_phase_;
 };
 
 // Callback for modules with top-level await.
@@ -89,14 +105,13 @@ class ModuleResolutionSuccessCallback final : public ModuleResolutionCallback {
 class ModuleResolutionFailureCallback final : public ModuleResolutionCallback {
  public:
   explicit ModuleResolutionFailureCallback(
-      ScriptPromiseResolver* promise_resolver)
+      ScriptPromiseResolver<IDLAny>* promise_resolver)
       : ModuleResolutionCallback(promise_resolver) {}
 
  private:
-  ScriptValue Call(ScriptState* script_state, ScriptValue exception) override {
+  void React(ScriptState* script_state, ScriptValue exception) final {
     ScriptState::Scope scope(script_state);
     promise_resolver_->Reject(exception);
-    return ScriptValue();
   }
 };
 
@@ -121,8 +136,8 @@ void DynamicImportTreeClient::NotifyModuleTreeLoadFinished(
     // <spec step="2.1">Let completion be Completion { [[Type]]: throw,
     // [[Value]]: a new TypeError, [[Target]]: empty }.</spec>
     v8::Local<v8::Value> error = V8ThrowException::CreateTypeError(
-        isolate,
-        "Failed to fetch dynamically imported module: " + url_.GetString());
+        isolate, StrCat({"Failed to fetch dynamically imported module: ",
+                         url_.GetString()}));
 
     // <spec step="2.2">Perform FinishDynamicImport(referencingScriptOrModule,
     // specifier, promiseCapability, completion).</spec>
@@ -132,13 +147,40 @@ void DynamicImportTreeClient::NotifyModuleTreeLoadFinished(
     return;
   }
 
+  if (import_phase_ == v8::ModuleImportPhase::kSource) {
+    if (!module_script->IsWasmModuleRecord()) {
+      v8::Local<v8::Value> error = V8ThrowException::CreateSyntaxError(
+          isolate,
+          StrCat({url_.GetString(), kNonWasmImportInSourcePhaseError}));
+      promise_resolver_->Reject(error);
+      return;
+    }
+    if (module_script->HasParseError()) {
+      promise_resolver_->Reject(module_script->CreateParseError());
+      return;
+    }
+    DCHECK(!module_script->HasEmptyRecord());
+    v8::Local<v8::Value> wasm_module = module_script->WasmModule();
+    promise_resolver_->Resolve(wasm_module);
+    return;
+  }
+
+  // https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/ResourceTimingInitiatorInfo/explainer.md
+  std::optional<scheduler::TaskAttributionTracker::TaskScope>
+      task_attribution_resource_timing_scope;
+  if (RuntimeEnabledFeatures::ResourceTimingInitiatorEnabled()) {
+    ResourceTimingContext* resource_timing_context =
+        MakeGarbageCollected<ResourceTimingContext>(module_script->SourceUrl());
+    task_attribution_resource_timing_scope = SetTaskStateVariable(
+        resource_timing_context, ExecutionContext::From(script_state));
+  }
+
   // <spec step="9">Otherwise, set promise to the result of running a module
   // script given result and true.</spec>
   ScriptEvaluationResult result =
-      module_script->RunScriptOnScriptStateAndReturnValue(
-          script_state,
-          ExecuteScriptPolicy::kDoNotExecuteScriptWhenScriptsDisabled,
-          V8ScriptRunner::RethrowErrorsOption::Rethrow(String()));
+      module_script->RunScriptOnScriptStateAndReturnValueWithImportPhase(
+          script_state, V8ScriptRunner::RethrowErrorsOption::Rethrow(String()),
+          import_phase_);
 
   switch (result.GetResultType()) {
     case ScriptEvaluationResult::ResultType::kException:
@@ -157,14 +199,12 @@ void DynamicImportTreeClient::NotifyModuleTreeLoadFinished(
       // <spec step="10">Perform
       // FinishDynamicImport(referencingScriptOrModule, specifier,
       // promiseCapability, promise).</spec>
-      ScriptPromise promise = result.GetPromise(script_state);
-      auto* callback_success = MakeGarbageCollected<ScriptFunction>(
-          script_state, MakeGarbageCollected<ModuleResolutionSuccessCallback>(
-                            promise_resolver_, module_script));
-      auto* callback_failure = MakeGarbageCollected<ScriptFunction>(
-          script_state, MakeGarbageCollected<ModuleResolutionFailureCallback>(
-                            promise_resolver_));
-      promise.Then(callback_success, callback_failure);
+      result.GetPromise(script_state)
+          .Then(script_state,
+                MakeGarbageCollected<ModuleResolutionSuccessCallback>(
+                    promise_resolver_, module_script, import_phase_),
+                MakeGarbageCollected<ModuleResolutionFailureCallback>(
+                    promise_resolver_));
       break;
     }
   }
@@ -187,8 +227,13 @@ void DynamicModuleResolver::Trace(Visitor* visitor) const {
 void DynamicModuleResolver::ResolveDynamically(
     const ModuleRequest& module_request,
     const ReferrerScriptInfo& referrer_info,
-    ScriptPromiseResolver* promise_resolver) {
-  DCHECK(modulator_->GetScriptState()->GetIsolate()->InContext())
+    ScriptPromiseResolver<IDLAny>* promise_resolver) {
+  // CSS Module Scripts can be imported declaratively, so this DCHECK doesn't
+  // apply in that context.
+  const ModuleType module_type =
+      modulator_->ModuleTypeFromRequest(module_request);
+  DCHECK(modulator_->GetScriptState()->GetIsolate()->InContext() ||
+         (module_type == ModuleType::kCSS))
       << "ResolveDynamically should be called from V8 callback, within a valid "
          "context.";
 
@@ -221,10 +266,9 @@ void DynamicModuleResolver::ResolveDynamically(
 
   // <spec label="fetch-an-import()-module-script-graph" step="1">Let url be the
   // result of resolving a module specifier given base URL and specifier.</spec>
-  KURL url =
-      modulator_->ResolveModuleSpecifier(module_request.specifier, base_url);
+  KURL url = modulator_->ResolveModuleSpecifier(
+      module_request.specifier, base_url, /*failure_reason=*/nullptr);
 
-  ModuleType module_type = modulator_->ModuleTypeFromRequest(module_request);
 
   // <spec label="fetch-an-import()-module-script-graph" step="2">If url is
   // failure, then asynchronously complete this algorithm with null, and abort
@@ -233,19 +277,19 @@ void DynamicModuleResolver::ResolveDynamically(
     // <spec step="6">If result is null, then:</spec>
     String error_message;
     if (!url.IsValid()) {
-      error_message = "Failed to resolve module specifier '" +
-                      module_request.specifier + "'";
-      if (referrer_info.BaseURL().IsAboutBlankURL() &&
-          base_url.IsAboutBlankURL()) {
+      error_message = StrCat({"Failed to resolve module specifier '",
+                              module_request.specifier, "'"});
+      if (referrer_info.BaseURL().IsAboutBlankUrl() &&
+          base_url.IsAboutBlankUrl()) {
         error_message =
-            error_message +
-            ". The base URL is about:blank because import() is called from a "
-            "CORS-cross-origin script.";
+            StrCat({error_message,
+                    ". The base URL is about:blank because import() is called "
+                    "from a CORS-cross-origin script."});
       }
 
     } else {
-      error_message = "\"" + module_request.GetModuleTypeString() +
-                      "\" is not a valid module type.";
+      error_message = StrCat({"\"", module_request.GetModuleTypeString(),
+                              "\" is not a valid module type."});
     }
 
     // <spec step="6.1">Let completion be Completion { [[Type]]: throw,
@@ -280,10 +324,12 @@ void DynamicModuleResolver::ResolveDynamically(
   // <spec href="https://wicg.github.io/priority-hints/#script">
   // dynamic imports get kAuto. Only the main script resource is impacted by
   // Priority Hints.
+  //
   ScriptFetchOptions options(
-      referrer_info.Nonce(), IntegrityMetadataSet(), String(),
-      referrer_info.ParserState(), referrer_info.CredentialsMode(),
-      referrer_info.GetReferrerPolicy(), mojom::blink::FetchPriorityHint::kAuto,
+      referrer_info.Nonce(), modulator_->GetIntegrityMetadata(url),
+      modulator_->GetIntegrityMetadataString(url), referrer_info.ParserState(),
+      referrer_info.CredentialsMode(), referrer_info.GetReferrerPolicy(),
+      mojom::blink::FetchPriorityHint::kAuto,
       RenderBlockingBehavior::kNonBlocking);
 
   // <spec label="fetch-an-import()-module-script-graph" step="3">Fetch a single
@@ -293,7 +339,7 @@ void DynamicModuleResolver::ResolveDynamically(
   // those along as well. Wait until the algorithm asynchronously completes with
   // result.</spec>
   auto* tree_client = MakeGarbageCollected<DynamicImportTreeClient>(
-      url, modulator_.Get(), promise_resolver);
+      url, modulator_.Get(), promise_resolver, module_request.import_phase);
   // TODO(kouhei): ExecutionContext::From(modulator_->GetScriptState()) is
   // highly discouraged since it breaks layering. Rewrite this.
   auto* execution_context =
@@ -301,7 +347,9 @@ void DynamicModuleResolver::ResolveDynamically(
   modulator_->FetchTree(url, module_type, execution_context->Fetcher(),
                         mojom::blink::RequestContextType::SCRIPT,
                         network::mojom::RequestDestination::kScript, options,
-                        ModuleScriptCustomFetchType::kNone, tree_client);
+                        ModuleScriptCustomFetchType::kNone, tree_client,
+                        module_request.import_phase,
+                        referrer_info.BaseURL().GetString());
 
   // Steps 6-9 are implemented at
   // DynamicImportTreeClient::NotifyModuleLoadFinished.

@@ -8,18 +8,23 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "base/compiler_specific.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/sequence_checker.h"
 #include "base/win/scoped_handle.h"
+#include "base/win/sid.h"
 #include "ipc/ipc_listener.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "mojo/public/cpp/bindings/generic_pending_associated_receiver.h"
 #include "mojo/public/cpp/bindings/scoped_interface_endpoint_handle.h"
 #include "remoting/host/mojom/desktop_session.mojom.h"
-#include "remoting/host/win/worker_process_launcher.h"
+#include "remoting/host/win/security_descriptor.h"
+#include "remoting/host/win/windows_process_delegate.h"
 
 namespace base {
 class CommandLine;
@@ -28,7 +33,6 @@ class SingleThreadTaskRunner;
 
 namespace IPC {
 class ChannelProxy;
-class Message;
 }  // namespace IPC
 
 namespace remoting {
@@ -36,17 +40,27 @@ namespace remoting {
 // Implements logic for launching and monitoring a worker process under a less
 // privileged user account.
 class UnprivilegedProcessDelegate : public IPC::Listener,
-                                    public WorkerProcessLauncher::Delegate {
+                                    public WindowsProcessDelegate {
  public:
+  enum class IntegrityLevel {
+    kLow,
+    kUntrusted,
+  };
+
   UnprivilegedProcessDelegate(
       scoped_refptr<base::SingleThreadTaskRunner> io_task_runner,
-      std::unique_ptr<base::CommandLine> target_command);
+      std::unique_ptr<base::CommandLine> target_command,
+      IntegrityLevel integrity_level);
 
   UnprivilegedProcessDelegate(const UnprivilegedProcessDelegate&) = delete;
   UnprivilegedProcessDelegate& operator=(const UnprivilegedProcessDelegate&) =
       delete;
 
   ~UnprivilegedProcessDelegate() override;
+
+  // If non-empty, the worker process will be launched inside an AppContainer
+  // with the specified profile name.
+  void UseAppContainer(const std::wstring& profile_name);
 
   // WorkerProcessLauncher::Delegate implementation.
   void LaunchProcess(WorkerProcessLauncher* event_handler) override;
@@ -56,9 +70,30 @@ class UnprivilegedProcessDelegate : public IPC::Listener,
   void CrashProcess(const base::Location& location) override;
   void KillProcess() override;
 
+ protected:
+  virtual void ReportProcessLaunched(base::win::ScopedHandle worker_process);
+
  private:
+  friend class UnprivilegedProcessDelegateTest;
+
+  struct AppContainer {
+    AppContainer();
+    AppContainer(AppContainer&&);
+    AppContainer& operator=(AppContainer&&);
+    ~AppContainer();
+
+    SECURITY_CAPABILITIES GetSecurityCapabilities();
+
+    ScopedSid package_sid;
+    std::vector<base::win::Sid> capability_sids;
+    std::vector<SID_AND_ATTRIBUTES> capabilities;
+    std::wstring profile_name;
+  };
+
+  static std::optional<AppContainer> CreateAppContainer(
+      const std::wstring& profile_name);
+
   // IPC::Listener implementation.
-  bool OnMessageReceived(const IPC::Message& message) override;
   void OnChannelConnected(int32_t peer_pid) override;
   void OnChannelError() override;
   void OnAssociatedInterfaceRequest(
@@ -66,7 +101,6 @@ class UnprivilegedProcessDelegate : public IPC::Listener,
       mojo::ScopedInterfaceEndpointHandle handle) override;
 
   void ReportFatalError();
-  void ReportProcessLaunched(base::win::ScopedHandle worker_process);
 
   // The task runner serving job object notifications.
   scoped_refptr<base::SingleThreadTaskRunner> io_task_runner_;
@@ -78,12 +112,11 @@ class UnprivilegedProcessDelegate : public IPC::Listener,
   // process.
   std::unique_ptr<IPC::ChannelProxy> channel_;
 
-  raw_ptr<WorkerProcessLauncher> event_handler_;
-
-  // The handle of the worker process, if launched.
-  base::win::ScopedHandle worker_process_;
-
   mojo::AssociatedRemote<mojom::WorkerProcessControl> worker_process_control_;
+
+  IntegrityLevel integrity_level_;
+  std::wstring app_container_profile_name_;
+  std::optional<AppContainer> app_container_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 };

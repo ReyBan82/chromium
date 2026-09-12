@@ -59,14 +59,6 @@ PASS mutations[1].type is "attributes"
 PASS mutations[1].attributeName is "href"
 
 
-Testing mutation records are enqueued for attributes before DOMSubtreeModified is dispatched.
-PASS mutations.length is 2
-PASS mutations[0].type is "attributes"
-PASS mutations[0].attributeName is "foo"
-PASS mutations[1].type is "attributes"
-PASS mutations[1].attributeName is "baz"
-
-
 Testing basic oldValue delivery.
 PASS mutations.length is 3
 PASS mutations[0].type is "attributes"

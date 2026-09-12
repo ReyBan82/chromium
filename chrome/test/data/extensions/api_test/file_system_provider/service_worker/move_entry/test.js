@@ -11,8 +11,8 @@ async function main() {
   const fileSystem = await mountTestFileSystem();
 
   const srcPath = TestFileSystemProvider.FILE_READ_SUCCESS;
-  const dstPath = srcPath + '-moved';
-  const FILE_MOVE_FAIL = 'move-fail.txt'
+  const dstPath = `${srcPath}-moved`;
+  const FILE_MOVE_FAIL = 'move-fail.txt';
 
   await remoteProvider.addFiles({
     // Moving this file to a location which already holds a file will fail.

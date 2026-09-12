@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "ash/constants/ash_features.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/scoped_feature_list.h"
@@ -16,14 +17,17 @@
 #include "chrome/browser/ash/policy/handlers/minimum_version_policy_test_helpers.h"
 #include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
 #include "chrome/browser/ash/settings/scoped_testing_cros_settings.h"
-#include "chrome/common/pref_names.h"
-#include "chrome/test/base/scoped_testing_local_state.h"
+#include "chrome/browser/browser_process_platform_part.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chromeos/ash/components/dbus/shill/shill_service_client.h"
 #include "chromeos/ash/components/dbus/update_engine/fake_update_engine_client.h"
 #include "chromeos/ash/components/dbus/update_engine/update_engine_client.h"
 #include "chromeos/ash/components/install_attributes/stub_install_attributes.h"
+#include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
+#include "chromeos/ash/components/network/network_state.h"
+#include "chromeos/ash/components/network/network_state_handler.h"
+#include "chromeos/ash/components/network/network_state_handler_observer.h"
 #include "chromeos/ash/components/settings/cros_settings_names.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/test/browser_task_environment.h"
@@ -43,10 +47,36 @@ const char kNewVersion[] = "13305.25.0";
 const char kNewerVersion[] = "13310.0.0";
 const char kNewestVersion[] = "13320.10.0";
 const char kOldVersion[] = "13301.0.0";
+const char kEthernetServicePath[] = "/service/eth";
 
 const int kLongWarning = 10;
 const int kShortWarning = 2;
 const int kNoWarning = 0;
+
+class DefaultEthernetWaiter : public ash::NetworkStateHandlerObserver {
+ public:
+  DefaultEthernetWaiter() {
+    observation_.Observe(ash::NetworkHandler::Get()->network_state_handler());
+  }
+
+  DefaultEthernetWaiter(const DefaultEthernetWaiter&) = delete;
+  DefaultEthernetWaiter& operator=(const DefaultEthernetWaiter&) = delete;
+
+  ~DefaultEthernetWaiter() override = default;
+
+  void Wait() { run_loop_.Run(); }
+
+ private:
+  void DefaultNetworkChanged(const ash::NetworkState* network) override {
+    if (network && network->path() == kEthernetServicePath &&
+        network->IsConnectedState()) {
+      run_loop_.Quit();
+    }
+  }
+
+  base::RunLoop run_loop_;
+  ash::NetworkStateHandlerScopedObservation observation_{this};
+};
 
 }  // namespace
 
@@ -54,13 +84,13 @@ class MinimumVersionPolicyHandlerTest
     : public testing::Test,
       public MinimumVersionPolicyHandler::Delegate {
  public:
-  MinimumVersionPolicyHandlerTest();
+  MinimumVersionPolicyHandlerTest() = default;
 
   void SetUp() override;
   void TearDown() override;
 
   // MinimumVersionPolicyHandler::Delegate:
-  bool IsKioskMode() const override;
+  bool IsKioskMode(const PrefService&) const override;
   bool IsDeviceEnterpriseManaged() const override;
   base::Version GetCurrentVersion() const override;
   bool IsUserEnterpriseManaged() const override;
@@ -78,7 +108,7 @@ class MinimumVersionPolicyHandlerTest
       const;
 
   // Set new value for policy pref.
-  void SetPolicyPref(base::Value::Dict value);
+  void SetPolicyPref(base::DictValue value);
 
   MinimumVersionPolicyHandler* GetMinimumVersionPolicyHandler() {
     return minimum_version_policy_handler_.get();
@@ -91,20 +121,15 @@ class MinimumVersionPolicyHandlerTest
 
  private:
   bool user_managed_ = true;
-  ScopedTestingLocalState local_state_;
   base::test::ScopedFeatureList feature_list_;
   ash::ScopedTestingCrosSettings scoped_testing_cros_settings_;
   ash::ScopedStubInstallAttributes scoped_stub_install_attributes_;
-  ash::FakeUpdateEngineClient* fake_update_engine_client_;
+  raw_ptr<ash::FakeUpdateEngineClient, DanglingUntriaged>
+      fake_update_engine_client_;
   std::unique_ptr<ash::NetworkHandlerTestHelper> network_handler_test_helper_;
   std::unique_ptr<base::Version> current_version_;
   std::unique_ptr<MinimumVersionPolicyHandler> minimum_version_policy_handler_;
 };
-
-MinimumVersionPolicyHandlerTest::MinimumVersionPolicyHandlerTest()
-    : local_state_(TestingBrowserProcess::GetGlobal()) {
-  feature_list_.InitAndEnableFeature(ash::features::kMinimumChromeVersion);
-}
 
 void MinimumVersionPolicyHandlerTest::SetUp() {
   fake_update_engine_client_ = ash::UpdateEngineClient::InitializeFakeForTest();
@@ -114,10 +139,11 @@ void MinimumVersionPolicyHandlerTest::SetUp() {
   ash::ShillServiceClient::TestInterface* service_test =
       network_handler_test_helper_->service_test();
   service_test->ClearServices();
-  service_test->AddService("/service/eth", "eth" /* guid */, "eth",
+  DefaultEthernetWaiter default_ethernet_waiter;
+  service_test->AddService(kEthernetServicePath, "eth" /* guid */, "eth",
                            shill::kTypeEthernet, shill::kStateOnline,
                            true /* visible */);
-  base::RunLoop().RunUntilIdle();
+  default_ethernet_waiter.Wait();
 
   scoped_stub_install_attributes_.Get()->SetCloudManaged("managed.com",
                                                          "device_id");
@@ -133,8 +159,13 @@ void MinimumVersionPolicyHandlerTest::TearDown() {
 
 void MinimumVersionPolicyHandlerTest::CreateMinimumVersionHandler() {
   minimum_version_policy_handler_ =
-      std::make_unique<MinimumVersionPolicyHandler>(this,
-                                                    ash::CrosSettings::Get());
+      std::make_unique<MinimumVersionPolicyHandler>(
+          TestingBrowserProcess::GetGlobal()->local_state(),
+          TestingBrowserProcess::GetGlobal()->GetBuildState(),
+          TestingBrowserProcess::GetGlobal()
+              ->platform_part()
+              ->browser_policy_connector_ash(),
+          this, ash::CrosSettings::Get());
 }
 
 const MinimumVersionRequirement* MinimumVersionPolicyHandlerTest::GetState()
@@ -148,7 +179,7 @@ void MinimumVersionPolicyHandlerTest::SetCurrentVersionString(
   ASSERT_TRUE(current_version_->IsValid());
 }
 
-bool MinimumVersionPolicyHandlerTest::IsKioskMode() const {
+bool MinimumVersionPolicyHandlerTest::IsKioskMode(const PrefService&) const {
   return false;
 }
 
@@ -172,7 +203,7 @@ base::Version MinimumVersionPolicyHandlerTest::GetCurrentVersion() const {
   return *current_version_;
 }
 
-void MinimumVersionPolicyHandlerTest::SetPolicyPref(base::Value::Dict value) {
+void MinimumVersionPolicyHandlerTest::SetPolicyPref(base::DictValue value) {
   scoped_testing_cros_settings_.device_settings()->Set(
       ash::kDeviceMinimumVersion, base::Value(std::move(value)));
 }
@@ -189,8 +220,8 @@ TEST_F(MinimumVersionPolicyHandlerTest, RequirementsNotMetState) {
       run_loop.QuitClosure());
 
   // Create policy value as a list of requirements.
-  base::Value::List requirement_list;
-  base::Value::Dict new_version_short_warning =
+  base::ListValue requirement_list;
+  base::DictValue new_version_short_warning =
       CreateMinimumVersionPolicyRequirement(kNewVersion, kShortWarning,
                                             kNoWarning);
   auto strongest_requirement = MinimumVersionRequirement::CreateInstanceIfValid(
@@ -218,7 +249,7 @@ TEST_F(MinimumVersionPolicyHandlerTest, RequirementsNotMetState) {
             kShortWarning);
 
   // Reset the pref to empty list and verify state is reset.
-  SetPolicyPref(base::Value::Dict());
+  SetPolicyPref(base::DictValue());
   EXPECT_TRUE(GetMinimumVersionPolicyHandler()->RequirementsAreSatisfied());
   EXPECT_FALSE(GetState());
   EXPECT_FALSE(GetMinimumVersionPolicyHandler()->GetTimeRemainingInDays());
@@ -231,12 +262,10 @@ TEST_F(MinimumVersionPolicyHandlerTest, CriticalUpdates) {
 
   base::RunLoop run_loop;
   // Expect calls to make sure that user is logged out.
-  EXPECT_CALL(*this, RestartToLoginScreen())
-      .Times(1)
-      .WillOnce(testing::Invoke([&run_loop]() {
-        run_loop.Quit();
-        return false;
-      }));
+  EXPECT_CALL(*this, RestartToLoginScreen()).Times(1).WillOnce([&run_loop]() {
+    run_loop.Quit();
+    return false;
+  });
   EXPECT_CALL(*this, ShowUpdateRequiredScreen()).Times(0);
   EXPECT_CALL(*this, HideUpdateRequiredScreenIfShown()).Times(0);
   EXPECT_CALL(*this, IsLoginSessionState())
@@ -268,12 +297,10 @@ TEST_F(MinimumVersionPolicyHandlerTest, CriticalUpdatesUnmanagedUser) {
   // Unmanaged user is not logged out of the session. The run loop is quit on
   // reaching IsLoginSessionState() because that implies we have fetched the
   // EOL status and reached the end of the policy handler code flow.
-  EXPECT_CALL(*this, IsLoginSessionState())
-      .Times(1)
-      .WillOnce(testing::Invoke([&run_loop]() {
-        run_loop.Quit();
-        return false;
-      }));
+  EXPECT_CALL(*this, IsLoginSessionState()).Times(1).WillOnce([&run_loop]() {
+    run_loop.Quit();
+    return false;
+  });
 
   // Set user as unmanaged.
   SetUserManaged(false);
@@ -295,7 +322,7 @@ TEST_F(MinimumVersionPolicyHandlerTest, RequirementsMetState) {
   EXPECT_FALSE(GetState());
 
   // Create policy value as a list of requirements.
-  base::Value::List requirement_list;
+  base::ListValue requirement_list;
   auto current_version_no_warning = CreateMinimumVersionPolicyRequirement(
       kFakeCurrentVersion, kNoWarning, kNoWarning);
   auto old_version_long_warning = CreateMinimumVersionPolicyRequirement(

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {assertGT} from 'chrome://webui-test/chai_assert.js';
 
 /**
@@ -14,5 +14,6 @@ export function getTableRowAsStringArray(
   assertGT(rows.length, row);
   const rowEl = rows[row];
   assert(rowEl);
-  return Array.from(rowEl.querySelectorAll('td')).map(el => el.innerText);
+  return Array.from(rowEl.querySelectorAll('td'))
+      .map(el => el.innerText.trim());
 }

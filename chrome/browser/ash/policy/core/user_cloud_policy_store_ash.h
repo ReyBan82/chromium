@@ -9,7 +9,8 @@
 #include <string>
 
 #include "base/files/file_path.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chromeos/ash/components/dbus/session_manager/session_manager_client.h"
 #include "components/account_id/account_id.h"
@@ -31,22 +32,15 @@ class CachedPolicyKeyLoader;
 // Implements a policy store backed by the Chrome OS' session_manager, which
 // takes care of persisting policy to disk and is accessed via DBus calls
 // through SessionManagerClient.
-// TODO(tnagel): Rename class to reflect that it can store Active Directory
-// policy as well. Also think about whether it would make more sense to keep
-// cloud and AD policy stores separate and to extract the common functionality
-// somewhere else.
 class UserCloudPolicyStoreAsh : public UserCloudPolicyStoreBase {
  public:
-  // Policy validation is relaxed when |is_active_directory| is set, most
-  // notably signature validation is disabled.  It is essential that this flag
-  // is only set when install attributes are locked into Active Directory mode.
   UserCloudPolicyStoreAsh(
       ash::CryptohomeMiscClient* cryptohome_misc_client,
       ash::SessionManagerClient* session_manager_client,
       scoped_refptr<base::SequencedTaskRunner> background_task_runner,
       const AccountId& account_id,
       const base::FilePath& user_policy_key_dir,
-      bool is_active_directory);
+      const std::string& policy_type);
 
   UserCloudPolicyStoreAsh(const UserCloudPolicyStoreAsh&) = delete;
   UserCloudPolicyStoreAsh& operator=(const UserCloudPolicyStoreAsh&) = delete;
@@ -62,7 +56,7 @@ class UserCloudPolicyStoreAsh : public UserCloudPolicyStoreBase {
 
  protected:
   // UserCloudPolicyStoreBase:
-  std::unique_ptr<UserCloudPolicyValidator> CreateValidator(
+  std::unique_ptr<CloudPolicyValidatorBase> CreateValidator(
       std::unique_ptr<enterprise_management::PolicyFetchResponse> policy,
       CloudPolicyValidatorBase::ValidateTimestampOption option) override;
 
@@ -73,7 +67,7 @@ class UserCloudPolicyStoreAsh : public UserCloudPolicyStoreBase {
 
   // Completion handler for policy validation on the Store() path.
   // Starts a store operation if the validation succeeded.
-  void OnPolicyToStoreValidated(UserCloudPolicyValidator* validator);
+  void OnPolicyToStoreValidated(CloudPolicyValidatorBase* validator);
 
   // Called back from SessionManagerClient for policy store operations.
   void OnPolicyStored(bool success);
@@ -89,14 +83,13 @@ class UserCloudPolicyStoreAsh : public UserCloudPolicyStoreBase {
 
   // Completion handler for policy validation on the Load() path. Installs the
   // policy and publishes it if validation succeeded.
-  void OnRetrievedPolicyValidated(UserCloudPolicyValidator* validator);
+  void OnRetrievedPolicyValidated(CloudPolicyValidatorBase* validator);
 
-  std::unique_ptr<UserCloudPolicyValidator> CreateValidatorForLoad(
+  std::unique_ptr<CloudPolicyValidatorBase> CreateValidatorForLoad(
       std::unique_ptr<enterprise_management::PolicyFetchResponse> policy);
 
-  ash::SessionManagerClient* session_manager_client_;
+  raw_ptr<ash::SessionManagerClient> session_manager_client_;
   const AccountId account_id_;
-  bool is_active_directory_;
 
   // Used to load the policy key provided by session manager as a file.
   std::unique_ptr<CachedPolicyKeyLoader> cached_policy_key_loader_;

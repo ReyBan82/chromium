@@ -6,6 +6,7 @@
 #define CHROMEOS_ASH_COMPONENTS_NETWORK_SHILL_PROPERTY_HANDLER_H_
 
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -18,8 +19,7 @@
 #include "chromeos/ash/components/dbus/shill/shill_service_client.h"
 #include "chromeos/ash/components/network/managed_state.h"
 #include "chromeos/ash/components/network/network_handler_callbacks.h"
-#include "chromeos/dbus/common/dbus_method_call_status.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "chromeos/dbus/common/dbus_callback.h"
 
 namespace ash {
 
@@ -36,9 +36,8 @@ class ShillPropertyObserver;
 // (including once to set their initial state after Init() gets called).
 // It also observes Shill.Service for all services in Manager.ServiceWatchList.
 // This class must not outlive the ShillManagerClient instance.
-class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
-    : public ShillPropertyChangedObserver,
-      public base::SupportsWeakPtr<ShillPropertyHandler> {
+class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler final
+    : public ShillPropertyChangedObserver {
  public:
   typedef std::map<std::string, std::unique_ptr<ShillPropertyObserver>>
       ShillPropertyObserverMap;
@@ -47,16 +46,16 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
    public:
     // Called when the entries in a managed list have changed.
     virtual void UpdateManagedList(ManagedState::ManagedType type,
-                                   const base::Value& entries) = 0;
+                                   const base::ListValue& entries) = 0;
 
     // Called when the properties for a managed state have changed.
     virtual void UpdateManagedStateProperties(
         ManagedState::ManagedType type,
         const std::string& path,
-        const base::Value::Dict& properties) = 0;
+        const base::DictValue& properties) = 0;
 
     // Called when the list of profiles changes.
-    virtual void ProfileListChanged(const base::Value& profile_list) = 0;
+    virtual void ProfileListChanged(const base::ListValue& profile_list) = 0;
 
     // Called when a property for a watched network service has changed.
     virtual void UpdateNetworkServiceProperty(const std::string& service_path,
@@ -72,7 +71,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
     virtual void UpdateIPConfigProperties(ManagedState::ManagedType type,
                                           const std::string& path,
                                           const std::string& ip_config_path,
-                                          base::Value::Dict properties) = 0;
+                                          base::DictValue properties) = 0;
 
     // Called when the list of devices with portal check enabled changes.
     virtual void CheckPortalListChanged(
@@ -132,9 +131,6 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
   // listed in |technologies|. Note: Modifies Manager state.
   void SetProhibitedTechnologies(const std::vector<std::string>& technologies);
 
-  // Sets the list of devices on which portal check is enabled.
-  void SetCheckPortalList(const std::string& check_portal_list);
-
   // Sets the Manager.WakeOnLan property. Note: we do not track this state, we
   // only set it.
   void SetWakeOnLanEnabled(bool enabled);
@@ -182,7 +178,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
       TypeRequestMap;
 
   // Callback for dbus method fetching properties.
-  void ManagerPropertiesCallback(absl::optional<base::Value::Dict> properties);
+  void ManagerPropertiesCallback(std::optional<base::DictValue> properties);
 
   // Notifies the listener when a ManagedStateList has changed and all pending
   // updates have been received. |key| can either identify the list that
@@ -225,7 +221,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
   // Called when Shill returns the properties for a service or device.
   void GetPropertiesCallback(ManagedState::ManagedType type,
                              const std::string& path,
-                             absl::optional<base::Value::Dict> properties);
+                             std::optional<base::DictValue> properties);
 
   // Callback invoked when a watched property changes. Calls appropriate
   // handlers and signals observers.
@@ -255,9 +251,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
   void GetIPConfigCallback(ManagedState::ManagedType type,
                            const std::string& path,
                            const std::string& ip_config_path,
-                           absl::optional<base::Value::Dict> properties);
-
-  void SetProhibitedTechnologiesEnforced(bool enforced);
+                           std::optional<base::DictValue> properties);
 
   // Pointer to containing class (owns this)
   raw_ptr<Listener> listener_;
@@ -285,6 +279,8 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ShillPropertyHandler
   std::set<std::string> disabling_technologies_;
   std::set<std::string> prohibited_technologies_;
   std::set<std::string> uninitialized_technologies_;
+
+  base::WeakPtrFactory<ShillPropertyHandler> weak_ptr_factory_{this};
 };
 
 }  // namespace internal

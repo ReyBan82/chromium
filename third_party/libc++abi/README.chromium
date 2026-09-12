@@ -1,0 +1,12 @@
+Name: libcxxabi
+Short Name: libc++abi
+URL: http://libcxxabi.llvm.org/
+Version: N/A
+Revision: 8ca7c6c3a4f615f5f9a487318e783efc0cfce5c2
+Update Mechanism: Autoroll
+License: NCSA, Apache-with-LLVM-Exception, MIT
+License File: src/LICENSE.TXT
+Security Critical: yes
+Shipped: yes
+Description:
+libc++abi for Chromium.

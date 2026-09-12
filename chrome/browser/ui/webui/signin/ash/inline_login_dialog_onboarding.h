@@ -5,12 +5,13 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_SIGNIN_ASH_INLINE_LOGIN_DIALOG_ONBOARDING_H_
 #define CHROME_BROWSER_UI_WEBUI_SIGNIN_ASH_INLINE_LOGIN_DIALOG_ONBOARDING_H_
 
-#include "chrome/browser/ui/webui/signin/ash/inline_login_dialog.h"
-
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ui/webui/signin/ash/inline_login_dialog.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/base/ui_base_types.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/widget/widget_observer.h"
 
 namespace views {
@@ -47,23 +48,22 @@ class InlineLoginDialogOnboarding : public InlineLoginDialog {
     // views::WidgetObserver:
     void OnWidgetClosing(views::Widget* widget) override;
 
-    InlineLoginDialogOnboarding* dialog_ = nullptr;
-    views::Widget* widget_ = nullptr;
+    raw_ptr<InlineLoginDialogOnboarding> dialog_ = nullptr;
+    raw_ptr<views::Widget> widget_ = nullptr;
   };
 
   static InlineLoginDialogOnboarding* Show(
       const gfx::Size& size,
       gfx::NativeWindow window,
-      base::OnceCallback<void(void)> dialog_closed_callback);
+      base::OnceClosure dialog_closed_callback);
 
  protected:
   // ui::WebDialogDelegate overrides
-  ui::ModalType GetDialogModalType() const override;
+  ui::mojom::ModalType GetDialogModalType() const override;
 
  private:
-  InlineLoginDialogOnboarding(
-      const gfx::Size& bounds,
-      base::OnceCallback<void(void)> dialog_closed_callback);
+  InlineLoginDialogOnboarding(const gfx::Size& bounds,
+                              base::OnceClosure dialog_closed_callback);
   ~InlineLoginDialogOnboarding() override;
 
   InlineLoginDialogOnboarding(const InlineLoginDialogOnboarding&) = delete;
@@ -79,7 +79,7 @@ class InlineLoginDialogOnboarding : public InlineLoginDialog {
   void OnDialogClosed(const std::string& json_retval) override;
 
   gfx::Size size_;
-  base::OnceCallback<void(void)> dialog_closed_callback_;
+  base::OnceClosure dialog_closed_callback_;
 };
 
 }  // namespace ash

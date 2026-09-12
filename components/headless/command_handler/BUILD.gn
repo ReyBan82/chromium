@@ -7,6 +7,10 @@ import("//tools/grit/repack.gni")
 
 grit("headless_command_resources") {
   source = "headless_command.grd"
+  inputs = [
+    "headless_command.html",
+    "headless_command.js",
+  ]
   outputs = [
     "grit/headless_command_resources.h",
     "$root_gen_dir/components/headless/command_handler/headless_command_resources.pak",
@@ -23,15 +27,27 @@ repack("headless_command_resources_pack") {
   deps = [ ":headless_command_resources" ]
 }
 
-static_library("command_handler") {
+source_set("switches") {
   sources = [
-    "headless_command_handler.cc",
-    "headless_command_handler.h",
     "headless_command_switches.cc",
     "headless_command_switches.h",
   ]
 
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
+  deps = [ "//base" ]
+}
+
+static_library("command_handler") {
+  sources = [
+    "headless_command_handler.cc",
+    "headless_command_handler.h",
+  ]
+
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
   deps = [
+    ":switches",
     "//base",
     "//components/devtools/simple_devtools_protocol_client",
     "//content",

@@ -24,14 +24,12 @@ namespace {
 #if defined(ARCH_CPU_X86_64)
 const char kPolicyImageKeyArchSpecific[] = "installer_image_x86_64";
 const char kPolicyPflashKeyArchSpecific[] = "uefi_pflash_x86_64";
-const char kPolicyUefiKeyArchSpecific[] = "uefi_image_x86_64";
 
 constexpr policy::PolicyMap::MessageType kUninstallableErrorLevel =
     policy::PolicyMap::MessageType::kError;
 #else
 const char kPolicyImageKeyArchSpecific[] = "";
 const char kPolicyPflashKeyArchSpecific[] = "";
-const char kPolicyUefiKeyArchSpecific[] = "";
 
 constexpr policy::PolicyMap::MessageType kUninstallableErrorLevel =
     policy::PolicyMap::MessageType::kInfo;
@@ -76,7 +74,7 @@ bool BruschettaPolicyHandler::CheckDownloadableObject(
     policy::PolicyErrorMap* errors,
     const std::string& id,
     const std::string& key,
-    const base::Value::Dict& dict) {
+    const base::DictValue& dict) {
   bool retval = true;
 
   const auto* url_str = dict.FindString(prefs::kPolicyURLKey);
@@ -121,7 +119,7 @@ bool BruschettaPolicyHandler::CheckPolicySettings(
 
   for (const auto outer_config : value->GetDict()) {
     const std::string& id = outer_config.first;
-    const base::Value::Dict& config = outer_config.second.GetDict();
+    const base::DictValue& config = outer_config.second.GetDict();
 
     bool valid_config = true;
 
@@ -129,14 +127,6 @@ bool BruschettaPolicyHandler::CheckPolicySettings(
     if (installer_image) {
       if (!CheckDownloadableObject(errors, id, kPolicyImageKeyArchSpecific,
                                    *installer_image)) {
-        valid_config = false;
-      }
-    }
-
-    const auto* uefi_image = config.FindDict(kPolicyUefiKeyArchSpecific);
-    if (uefi_image) {
-      if (!CheckDownloadableObject(errors, id, kPolicyUefiKeyArchSpecific,
-                                   *uefi_image)) {
         valid_config = false;
       }
     }
@@ -151,7 +141,7 @@ bool BruschettaPolicyHandler::CheckPolicySettings(
 
     if (EnabledStrToEnum(*config.FindString(prefs::kPolicyEnabledKey)) ==
         prefs::PolicyEnabledState::INSTALL_ALLOWED) {
-      if (!installer_image || !uefi_image) {
+      if (!installer_image) {
         // This is an error on x86_64, since that's currently our *only*
         // supported architecture so this definitely indicates a
         // misconfiguration, but we also leave an informational level message
@@ -161,7 +151,7 @@ bool BruschettaPolicyHandler::CheckPolicySettings(
                          policy::PolicyErrorPath{id}, kUninstallableErrorLevel);
       }
 
-      if (!installer_image || !uefi_image || !valid_config) {
+      if (!installer_image || !valid_config) {
         downgraded_by_error_.insert(id);
       }
     }
@@ -181,13 +171,13 @@ void BruschettaPolicyHandler::ApplyPolicySettings(
   // We can mostly skip error checking here because by this point the policy has
   // already been checked against the schema.
 
-  base::Value::Dict pref;
+  base::DictValue pref;
 
   for (const auto outer_config : value->GetDict()) {
     const std::string& id = outer_config.first;
-    const base::Value::Dict& config = outer_config.second.GetDict();
+    const base::DictValue& config = outer_config.second.GetDict();
 
-    base::Value::Dict pref_config;
+    base::DictValue pref_config;
     bool installable;
 
     {
@@ -217,13 +207,6 @@ void BruschettaPolicyHandler::ApplyPolicySettings(
     }
 
     {
-      const auto* uefi_image = config.FindDict(kPolicyUefiKeyArchSpecific);
-      if (uefi_image && installable) {
-        pref_config.Set(prefs::kPolicyUefiKey, uefi_image->Clone());
-      }
-    }
-
-    {
       const auto* pflash = config.FindDict(kPolicyPflashKeyArchSpecific);
       if (pflash && installable) {
         pref_config.Set(prefs::kPolicyPflashKey, pflash->Clone());
@@ -245,12 +228,31 @@ void BruschettaPolicyHandler::ApplyPolicySettings(
         }
       }
 
-      base::Value::Dict pref_vtpm;
+      base::DictValue pref_vtpm;
       pref_vtpm.Set(prefs::kPolicyVTPMEnabledKey, vtpm_enabled);
       pref_vtpm.Set(prefs::kPolicyVTPMUpdateActionKey,
                     static_cast<int>(vtpm_update_action));
 
       pref_config.Set(prefs::kPolicyVTPMKey, std::move(pref_vtpm));
+    }
+
+    {
+      base::ListValue pref_oem_strings;
+
+      const auto* oem_strings = config.FindList(prefs::kPolicyOEMStringsKey);
+      if (oem_strings) {
+        for (const auto& oem_string : *oem_strings) {
+          pref_oem_strings.Append(oem_string.GetString());
+        }
+      }
+
+      pref_config.Set(prefs::kPolicyOEMStringsKey, std::move(pref_oem_strings));
+    }
+
+    {
+      pref_config.Set(
+          prefs::kPolicyDisplayOrderKey,
+          config.FindInt(prefs::kPolicyDisplayOrderKey).value_or(0));
     }
 
     pref.Set(id, std::move(pref_config));

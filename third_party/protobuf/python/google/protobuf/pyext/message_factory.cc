@@ -1,43 +1,22 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 #include <unordered_map>
+#include <utility>
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
-#include <google/protobuf/dynamic_message.h>
-#include <google/protobuf/pyext/descriptor.h>
-#include <google/protobuf/pyext/message.h>
-#include <google/protobuf/pyext/message_factory.h>
-#include <google/protobuf/pyext/scoped_pyobject_ptr.h>
+#include "google/protobuf/dynamic_message.h"
+#include "google/protobuf/pyext/descriptor.h"
+#include "google/protobuf/pyext/free_threading_mutex.h"
+#include "google/protobuf/pyext/message.h"
+#include "google/protobuf/pyext/message_factory.h"
+#include "google/protobuf/pyext/scoped_pyobject_ptr.h"
 
 #define PyString_AsStringAndSize(ob, charpp, sizep)              \
   (PyUnicode_Check(ob)                                           \
@@ -69,6 +48,7 @@ PyMessageFactory* NewMessageFactory(PyTypeObject* type, PyDescriptorPool* pool) 
   Py_INCREF(pool);
 
   factory->classes_by_descriptor = new PyMessageFactory::ClassesByMessageMap();
+  factory->classes_by_descriptor_mutex = new FreeThreadingMutex();
 
   return factory;
 }
@@ -110,13 +90,16 @@ static void Dealloc(PyObject* pself) {
   }
   delete self->classes_by_descriptor;
   delete self->message_factory;
+  delete self->classes_by_descriptor_mutex;
   Py_CLEAR(self->pool);
+  PyObject_GC_UnTrack(pself);
   Py_TYPE(self)->tp_free(pself);
 }
 
 static int GcTraverse(PyObject* pself, visitproc visit, void* arg) {
   PyMessageFactory* self = reinterpret_cast<PyMessageFactory*>(pself);
   Py_VISIT(self->pool);
+  FreeThreadingLockGuard lock(*self->classes_by_descriptor_mutex);
   for (const auto& desc_and_class : *self->classes_by_descriptor) {
     Py_VISIT(desc_and_class.second);
   }
@@ -127,6 +110,7 @@ static int GcClear(PyObject* pself) {
   PyMessageFactory* self = reinterpret_cast<PyMessageFactory*>(pself);
   // Here it's important to not clear self->pool, so that the C++ DescriptorPool
   // is still alive when self->message_factory is destructed.
+  FreeThreadingLockGuard lock(*self->classes_by_descriptor_mutex);
   for (auto& desc_and_class : *self->classes_by_descriptor) {
     Py_CLEAR(desc_and_class.second);
   }
@@ -139,6 +123,7 @@ int RegisterMessageClass(PyMessageFactory* self,
                          const Descriptor* message_descriptor,
                          CMessageClass* message_class) {
   Py_INCREF(message_class);
+  FreeThreadingLockGuard lock(*self->classes_by_descriptor_mutex);
   typedef PyMessageFactory::ClassesByMessageMap::iterator iterator;
   std::pair<iterator, bool> ret = self->classes_by_descriptor->insert(
       std::make_pair(message_descriptor, message_class));
@@ -155,11 +140,14 @@ CMessageClass* GetOrCreateMessageClass(PyMessageFactory* self,
   // This is the same implementation as MessageFactory.GetPrototype().
 
   // Do not create a MessageClass that already exists.
-  std::unordered_map<const Descriptor*, CMessageClass*>::iterator it =
-      self->classes_by_descriptor->find(descriptor);
-  if (it != self->classes_by_descriptor->end()) {
-    Py_INCREF(it->second);
-    return it->second;
+  {
+    FreeThreadingLockGuard lock(*self->classes_by_descriptor_mutex);
+    std::unordered_map<const Descriptor*, CMessageClass*>::iterator it =
+        self->classes_by_descriptor->find(descriptor);
+    if (it != self->classes_by_descriptor->end()) {
+      Py_INCREF(it->second);
+      return it->second;
+    }
   }
   ScopedPyObjectPtr py_descriptor(
       PyMessageDescriptor_FromDescriptor(descriptor));
@@ -168,10 +156,8 @@ CMessageClass* GetOrCreateMessageClass(PyMessageFactory* self,
   }
   // Create a new message class.
   ScopedPyObjectPtr args(Py_BuildValue(
-      "s(){sOsOsO}", descriptor->name().c_str(),
-      "DESCRIPTOR", py_descriptor.get(),
-      "__module__", Py_None,
-      "message_factory", self));
+      "s(){sOsOsO}", std::string(descriptor->name()).c_str(), "DESCRIPTOR",
+      py_descriptor.get(), "__module__", Py_None, "message_factory", self));
   if (args == nullptr) {
     return nullptr;
   }
@@ -208,11 +194,6 @@ CMessageClass* GetOrCreateMessageClass(PyMessageFactory* self,
     if (py_extension == nullptr) {
       return nullptr;
     }
-    ScopedPyObjectPtr result(cmessage::RegisterExtension(
-        py_extended_class.get(), py_extension.get()));
-    if (result == nullptr) {
-      return nullptr;
-    }
   }
   return reinterpret_cast<CMessageClass*>(message_class.release());
 }
@@ -220,11 +201,12 @@ CMessageClass* GetOrCreateMessageClass(PyMessageFactory* self,
 // Retrieve the message class added to our database.
 CMessageClass* GetMessageClass(PyMessageFactory* self,
                                const Descriptor* message_descriptor) {
+  FreeThreadingLockGuard lock(*self->classes_by_descriptor_mutex);
   typedef PyMessageFactory::ClassesByMessageMap::iterator iterator;
   iterator ret = self->classes_by_descriptor->find(message_descriptor);
   if (ret == self->classes_by_descriptor->end()) {
     PyErr_Format(PyExc_TypeError, "No message class registered for '%s'",
-                 message_descriptor->full_name().c_str());
+                 std::string(message_descriptor->full_name()).c_str());
     return nullptr;
   } else {
     return ret->second;

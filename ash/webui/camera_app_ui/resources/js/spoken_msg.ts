@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 import * as dom from './dom.js';
-import {I18nString} from './i18n_string.js';
+import type {I18nString} from './i18n_string.js';
 import * as loadTimeData from './models/load_time_data.js';
 
 /**
@@ -18,8 +18,6 @@ export function speak(label: I18nString, ...substitutions: string[]): void {
 
 /**
  * Speaks a message.
- *
- * @param message The message to speak.
  */
 export function speakMessage(message: string): void {
   // TTS speaks changes of on-screen aria-live elements. Force content changes

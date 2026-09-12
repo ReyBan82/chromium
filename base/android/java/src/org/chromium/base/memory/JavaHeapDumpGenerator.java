@@ -7,22 +7,22 @@ package org.chromium.base.memory;
 import android.os.Debug;
 
 import org.chromium.base.Log;
-import org.chromium.base.annotations.CalledByNative;
+import org.chromium.build.annotations.NullMarked;
 
 import java.io.IOException;
-/**
- * Enables the generation of hprof files from heap dumps.
- */
+
+/** Enables the generation of hprof files from heap dumps. */
+@NullMarked
 public final class JavaHeapDumpGenerator {
     private static final String TAG = "JavaHprofGenerator";
+
     private JavaHeapDumpGenerator() {}
 
     /**
      * Generates an hprof file at the given filePath.
-     * @param filePath
+     *
      * @return whether or not the hprof file was properly generated.
      */
-    @CalledByNative
     public static boolean generateHprof(String filePath) {
         try {
             Debug.dumpHprofData(filePath);

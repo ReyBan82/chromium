@@ -6,10 +6,11 @@
 #define PRINTING_PRINTING_CONTEXT_MAC_H_
 
 #include <ApplicationServices/ApplicationServices.h>
-#include <string>
 
-#include "base/mac/scoped_nsobject.h"
-#include "base/strings/string_piece.h"
+#include <string>
+#include <string_view>
+
+#include "base/memory/raw_ptr_exclusion.h"
 #include "printing/mojom/print.mojom.h"
 #include "printing/print_job_constants.h"
 #include "printing/printing_context.h"
@@ -20,7 +21,8 @@ namespace printing {
 
 class COMPONENT_EXPORT(PRINTING) PrintingContextMac : public PrintingContext {
  public:
-  explicit PrintingContextMac(Delegate* delegate);
+  PrintingContextMac(Delegate* delegate,
+                     OutOfProcessBehavior out_of_process_behavior);
   PrintingContextMac(const PrintingContextMac&) = delete;
   PrintingContextMac& operator=(const PrintingContextMac&) = delete;
   ~PrintingContextMac() override;
@@ -83,6 +85,10 @@ class COMPONENT_EXPORT(PRINTING) PrintingContextMac : public PrintingContext {
   // Returns true if the orientation was set.
   bool SetOrientationIsLandscape(bool landscape);
 
+  // Set the page range in native print info object.
+  // Returns true if the range was set.
+  bool SetPrintRangeInPrintSettings(const PageRanges& ranges);
+
   // Sets duplex mode in PMPrintSettings.
   // Returns true if duplex mode is set.
   bool SetDuplexModeInPrintSettings(mojom::DuplexMode mode);
@@ -97,7 +103,7 @@ class COMPONENT_EXPORT(PRINTING) PrintingContextMac : public PrintingContext {
 
   // Sets key-value pair in PMPrintSettings.
   // Returns true is the pair is set.
-  bool SetKeyValue(base::StringPiece key, base::StringPiece value);
+  bool SetKeyValue(std::string_view key, std::string_view value);
 
   // Starts a new page.
   mojom::ResultCode NewPage();
@@ -106,11 +112,13 @@ class COMPONENT_EXPORT(PRINTING) PrintingContextMac : public PrintingContext {
   mojom::ResultCode PageDone();
 
   // The native print info object.
-  base::scoped_nsobject<NSPrintInfo> print_info_;
+  NSPrintInfo* __strong print_info_;
 
   // The current page's context; only valid between NewPage and PageDone call
   // pairs.
-  CGContext* context_;
+  // This field is not a raw_ptr<> because it was filtered by the rewriter
+  // for: #addr-of
+  RAW_PTR_EXCLUSION CGContextRef context_ = nullptr;
 };
 
 }  // namespace printing

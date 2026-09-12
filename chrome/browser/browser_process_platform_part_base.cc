@@ -11,17 +11,9 @@
 #include "chrome/browser/lifetime/application_lifetime_desktop.h"
 #endif
 
-BrowserProcessPlatformPartBase::BrowserProcessPlatformPartBase() {
-}
+BrowserProcessPlatformPartBase::BrowserProcessPlatformPartBase() = default;
 
-BrowserProcessPlatformPartBase::~BrowserProcessPlatformPartBase() {
-}
-
-void BrowserProcessPlatformPartBase::PlatformSpecificCommandLineProcessing(
-    const base::CommandLine& /* command_line */) {
-}
-
-void BrowserProcessPlatformPartBase::BeginStartTearDown() {}
+BrowserProcessPlatformPartBase::~BrowserProcessPlatformPartBase() = default;
 
 void BrowserProcessPlatformPartBase::StartTearDown() {
 }
@@ -37,5 +29,6 @@ void BrowserProcessPlatformPartBase::AttemptExit(bool try_to_quit_application) {
 #endif
 }
 
-void BrowserProcessPlatformPartBase::PreMainMessageLoopRun() {
-}
+void BrowserProcessPlatformPartBase::PreMainMessageLoopRun() {}
+
+void BrowserProcessPlatformPartBase::PostDestroyThreads() {}

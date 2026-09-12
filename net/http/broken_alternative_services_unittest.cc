@@ -8,9 +8,11 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/test_mock_time_task_runner.h"
 #include "base/time/tick_clock.h"
 #include "base/time/time.h"
+#include "net/base/features.h"
 #include "net/base/network_anonymization_key.h"
 #include "net/base/schemeful_site.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -34,8 +36,10 @@ class BrokenAlternativeServicesTest
         broken_services_(50, this, broken_services_clock_) {
     SchemefulSite site1(GURL("http://foo.test"));
     SchemefulSite site2(GURL("http://bar.test"));
-    network_anonymization_key1_ = NetworkAnonymizationKey(site1, site1);
-    network_anonymization_key2_ = NetworkAnonymizationKey(site2, site2);
+    network_anonymization_key1_ =
+        NetworkAnonymizationKey::CreateSameSite(std::move(site1));
+    network_anonymization_key2_ =
+        NetworkAnonymizationKey::CreateSameSite(std::move(site2));
   }
 
   // BrokenAlternativeServices::Delegate implementation
@@ -67,14 +71,14 @@ class BrokenAlternativeServicesTest
 
 TEST_F(BrokenAlternativeServicesTest, MarkBroken) {
   const BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoHTTP2, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   const BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoHTTP2, "foo", 1234), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 1234),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   const BrokenAlternativeService alternative_service3(
-      AlternativeService(kProtoHTTP2, "foo", 443), network_anonymization_key2_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key2_, true /* use_network_anonymization_key */);
 
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service1));
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service2));
@@ -121,14 +125,14 @@ TEST_F(BrokenAlternativeServicesTest, MarkBroken) {
 
 TEST_F(BrokenAlternativeServicesTest, MarkBrokenUntilDefaultNetworkChanges) {
   const BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoHTTP2, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   const BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoHTTP2, "foo", 1234), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 1234),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   const BrokenAlternativeService alternative_service3(
-      AlternativeService(kProtoHTTP2, "foo", 443), network_anonymization_key2_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key2_, true /* use_network_anonymization_key */);
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service1));
   EXPECT_FALSE(broken_services_.WasRecentlyBroken(alternative_service1));
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service2));
@@ -189,11 +193,11 @@ TEST_F(BrokenAlternativeServicesTest, MarkBrokenUntilDefaultNetworkChanges) {
 
 TEST_F(BrokenAlternativeServicesTest, MarkRecentlyBroken) {
   const BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoHTTP2, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   const BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoHTTP2, "foo", 443), network_anonymization_key2_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key2_, true /* use_network_anonymization_key */);
 
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service1));
   EXPECT_FALSE(broken_services_.WasRecentlyBroken(alternative_service1));
@@ -227,14 +231,14 @@ TEST_F(BrokenAlternativeServicesTest, MarkRecentlyBroken) {
 
 TEST_F(BrokenAlternativeServicesTest, OnDefaultNetworkChanged) {
   BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoQUIC, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoQUIC, "bar", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "bar", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service3(
-      AlternativeService(kProtoQUIC, "foo", 443), network_anonymization_key2_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      network_anonymization_key2_, true /* use_network_anonymization_key */);
 
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service1));
   EXPECT_FALSE(broken_services_.WasRecentlyBroken(alternative_service1));
@@ -310,8 +314,8 @@ TEST_F(BrokenAlternativeServicesTest, OnDefaultNetworkChanged) {
 TEST_F(BrokenAlternativeServicesTest,
        ExpireBrokenAlternativeServiceOnDefaultNetwork) {
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
 
   broken_services_.MarkBrokenUntilDefaultNetworkChanges(alternative_service);
 
@@ -345,8 +349,8 @@ TEST_F(BrokenAlternativeServicesTest,
 
 TEST_F(BrokenAlternativeServicesTest, ExpireBrokenAlternateProtocolMappings) {
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
 
   broken_services_.MarkBroken(alternative_service);
 
@@ -381,8 +385,8 @@ TEST_F(BrokenAlternativeServicesTest, ExpireBrokenAlternateProtocolMappings) {
 TEST_F(BrokenAlternativeServicesTest, IsBroken) {
   // Tests the IsBroken() methods.
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
   base::TimeTicks brokenness_expiration;
 
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service));
@@ -425,8 +429,8 @@ TEST_F(BrokenAlternativeServicesTest, IsBroken) {
 // - brokenness expires after two intervals.
 TEST_F(BrokenAlternativeServicesTest, BrokenAfterBrokenOnDefaultNetwork) {
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   // Mark the alternative service broken on the default network.
   broken_services_.MarkBrokenUntilDefaultNetworkChanges(alternative_service);
@@ -475,8 +479,8 @@ TEST_F(BrokenAlternativeServicesTest, BrokenAfterBrokenOnDefaultNetwork) {
 // - (signal received that default network changes);
 TEST_F(BrokenAlternativeServicesTest, BrokenOnDefaultNetworkAfterBroken) {
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   // Mark the alternative service broken.
   broken_services_.MarkBroken(alternative_service);
@@ -518,8 +522,8 @@ TEST_F(BrokenAlternativeServicesTest, BrokenOnDefaultNetworkAfterBroken) {
 TEST_F(BrokenAlternativeServicesTest,
        BrokenUntilDefaultNetworkChangeWithExponentialBackoff) {
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   // Mark the alternative service broken on the default network.
   broken_services_.MarkBrokenUntilDefaultNetworkChanges(alternative_service);
@@ -578,8 +582,8 @@ TEST_F(BrokenAlternativeServicesTest, ExponentialBackoff) {
   // longer apply.
 
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   broken_services_.MarkBroken(alternative_service);
   test_task_runner_->FastForwardBy(base::Minutes(5) - base::Seconds(1));
@@ -667,8 +671,8 @@ void BrokenAlternativeServicesTest::TestExponentialBackoff(
                                   exponential_backoff_on_initial_delay);
 
   BrokenAlternativeService alternative_service(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   broken_services_.MarkBroken(alternative_service);
   test_task_runner_->FastForwardBy(initial_delay - base::Seconds(1));
@@ -739,11 +743,11 @@ TEST_F(BrokenAlternativeServicesTest, RemoveExpiredBrokenAltSvc) {
   // expire before A.
 
   BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoQUIC, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoQUIC, "bar", 443), network_anonymization_key2_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "bar", 443),
+      network_anonymization_key2_, true /* use_network_anonymization_key */);
 
   // Repeately mark |alternative_service1| broken and let brokenness expire.
   // Do this a few times.
@@ -841,11 +845,11 @@ TEST_F(BrokenAlternativeServicesTest, RemoveExpiredBrokenAltSvc) {
 TEST_F(BrokenAlternativeServicesTest,
        RemoveExpiredBrokenAltSvcWithNetworkAnonymizationKey) {
   BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoQUIC, "foo", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoQUIC, "foo", 443), network_anonymization_key2_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      network_anonymization_key2_, true /* use_network_anonymization_key */);
 
   // Repeately mark |alternative_service1| broken and let brokenness expire.
   // Do this a few times.
@@ -940,11 +944,11 @@ TEST_F(BrokenAlternativeServicesTest,
 
 TEST_F(BrokenAlternativeServicesTest, SetBrokenAlternativeServices) {
   BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoQUIC, "foo1", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo1", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoQUIC, "foo2", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo2", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   base::TimeDelta delay1 = base::Minutes(1);
 
@@ -1000,14 +1004,14 @@ TEST_F(BrokenAlternativeServicesTest, SetBrokenAlternativeServices) {
 TEST_F(BrokenAlternativeServicesTest,
        SetBrokenAlternativeServicesWithExisting) {
   BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoQUIC, "foo1", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo1", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoQUIC, "foo2", 443), network_anonymization_key1_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo2", 443),
+      network_anonymization_key1_, true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service3(
-      AlternativeService(kProtoQUIC, "foo3", 443), network_anonymization_key2_,
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo3", 443),
+      network_anonymization_key2_, true /* use_network_anonymization_key */);
 
   std::unique_ptr<BrokenAlternativeServiceList> broken_list =
       std::make_unique<BrokenAlternativeServiceList>();
@@ -1099,11 +1103,11 @@ TEST_F(BrokenAlternativeServicesTest, ScheduleExpireTaskAfterExpire) {
   // is scheduled for the next broken alt svc in the expiration queue.
 
   BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoQUIC, "bar", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "bar", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   // Mark |alternative_service1| broken and let brokenness expire. This will
   // increase its expiration delay the next time it's marked broken.
@@ -1128,11 +1132,11 @@ TEST_F(BrokenAlternativeServicesTest, ScheduleExpireTaskAfterExpire) {
 
 TEST_F(BrokenAlternativeServicesTest, Clear) {
   BrokenAlternativeService alternative_service1(
-      AlternativeService(kProtoQUIC, "foo", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "foo", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
   BrokenAlternativeService alternative_service2(
-      AlternativeService(kProtoQUIC, "bar", 443), NetworkAnonymizationKey(),
-      true /* use_network_anonymization_key */);
+      AlternativeService(NextProto::kProtoQUIC, "bar", 443),
+      NetworkAnonymizationKey(), true /* use_network_anonymization_key */);
 
   broken_services_.MarkBroken(alternative_service1);
   broken_services_.MarkRecentlyBroken(alternative_service2);
@@ -1169,6 +1173,44 @@ TEST_F(BrokenAlternativeServicesTest, Clear) {
   EXPECT_FALSE(broken_services_.IsBroken(alternative_service1));
   EXPECT_FALSE(broken_services_.WasRecentlyBroken(alternative_service1));
   EXPECT_FALSE(broken_services_.WasRecentlyBroken(alternative_service2));
+}
+
+TEST_F(BrokenAlternativeServicesTest, InitialDelayFinchFlag) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeatureWithParameters(
+      features::kInitialDelayForBrokenAlternativeService,
+      {{features::kInitialDelayForBrokenAlternativeServiceParam.name, "10s"}});
+
+  BrokenAlternativeServices broken_services(50, this, broken_services_clock_);
+  const BrokenAlternativeService alternative_service(
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key1_, true);
+
+  broken_services.MarkBroken(alternative_service);
+  base::TimeTicks expiration;
+  EXPECT_TRUE(broken_services.IsBroken(alternative_service, &expiration));
+  EXPECT_EQ(broken_services_clock_->NowTicks() + base::Seconds(10), expiration);
+}
+
+TEST_F(BrokenAlternativeServicesTest, MaxDelayFinchFlag) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeatureWithParameters(
+      features::kMaxDelayForBrokenAlternativeService,
+      {{features::kMaxDelayForBrokenAlternativeServiceParam.name, "100s"}});
+
+  BrokenAlternativeServices broken_services(50, this, broken_services_clock_);
+  const BrokenAlternativeService alternative_service(
+      AlternativeService(NextProto::kProtoHTTP2, "foo", 443),
+      network_anonymization_key1_, true);
+
+  broken_services.MarkBroken(alternative_service);
+  test_task_runner_->FastForwardBy(base::Seconds(300));
+  broken_services.MarkBroken(alternative_service);
+
+  base::TimeTicks expiration;
+  EXPECT_TRUE(broken_services.IsBroken(alternative_service, &expiration));
+  EXPECT_EQ(broken_services_clock_->NowTicks() + base::Seconds(100),
+            expiration);
 }
 
 }  // namespace

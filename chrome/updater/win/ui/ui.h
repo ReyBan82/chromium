@@ -5,6 +5,8 @@
 #ifndef CHROME_UPDATER_WIN_UI_UI_H_
 #define CHROME_UPDATER_WIN_UI_UI_H_
 
+#include <windows.h>
+
 #include <string>
 #include <vector>
 
@@ -12,8 +14,12 @@
 #include "base/sequence_checker.h"
 #include "base/win/scoped_gdi_object.h"
 #include "chrome/updater/updater_scope.h"
+#include "chrome/updater/win/ui/message_loop.h"
 #include "chrome/updater/win/ui/owner_draw_controls.h"
 #include "chrome/updater/win/ui/resources/resources.grh"
+#include "chrome/updater/win/ui/ui_util.h"
+#include "chrome/updater/win/ui/window_impl.h"
+#include "ui/gfx/win/msg_util.h"
 
 namespace updater::ui {
 
@@ -29,12 +35,10 @@ class OmahaWndEvents {
 };
 
 // Implements the UI progress window.
-class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
+class OmahaWnd : public DialogImpl,
                  public OwnerDrawTitleBar,
                  public CustomDlgColors,
-                 public WTL::CMessageFilter {
-  using Base = CAxDialogImpl<OmahaWnd>;
-
+                 public MessageFilter {
  public:
   const int IDD;
 
@@ -44,7 +48,7 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
 
   virtual HRESULT Initialize();
 
-  // Overrides for CMessageFilter.
+  // Overrides for MessageFilter.
   BOOL PreTranslateMessage(MSG* msg) override;
 
   void SetEventSink(OmahaWndEvents* ev) { events_sink_ = ev; }
@@ -56,14 +60,18 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
 
   virtual void Show();
 
-  BEGIN_MSG_MAP(OmahaWnd)
-    MESSAGE_HANDLER(WM_CLOSE, OnClose)
-    MESSAGE_HANDLER(WM_NCDESTROY, OnNCDestroy)
-    COMMAND_ID_HANDLER(IDCANCEL, OnCancel)
-    CHAIN_MSG_MAP(Base)
-    CHAIN_MSG_MAP(OwnerDrawTitleBar)
-    CHAIN_MSG_MAP(CustomDlgColors)
-  END_MSG_MAP()
+  CR_BEGIN_MSG_MAP_EX(OmahaWnd)
+    CR_MESSAGE_HANDLER_EX(WM_CLOSE, OnClose)
+    CR_MESSAGE_HANDLER_EX(WM_NCDESTROY, OnNCDestroy)
+    CR_MESSAGE_HANDLER_EX(WM_DPICHANGED, OnDpiChanged)
+    CR_MESSAGE_HANDLER_EX(WM_SYSCOLORCHANGE, OnThemeChanged)
+    CR_MESSAGE_HANDLER_EX(WM_SETTINGCHANGE, OnSettingChange)
+    CR_MESSAGE_HANDLER_EX(WM_THEMECHANGED, OnThemeChanged)
+    CR_MESSAGE_HANDLER_EX(WM_SETCURSOR, OnSetCursor)
+    CR_COMMAND_ID_HANDLER_EX(IDCANCEL, OnCancel)
+    CR_CHAIN_MSG_MAP(OwnerDrawTitleBar)
+    CR_CHAIN_MSG_MAP(CustomDlgColors)
+  CR_END_MSG_MAP()
 
  protected:
   struct ControlAttributes {
@@ -74,21 +82,21 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
     const bool is_default = false;
   };
 
-  OmahaWnd(int dialog_id, WTL::CMessageLoop* message_loop, HWND parent);
+  OmahaWnd(int dialog_id,
+           MessageLoop* message_loop,
+           HWND parent,
+           const std::wstring& lang);
 
   // Message and command handlers.
-  LRESULT OnClose(UINT msg,
-                  WPARAM wparam,
-                  LPARAM lparam,
-                  BOOL& handled);  // NOLINT
-  LRESULT OnNCDestroy(UINT msg,
-                      WPARAM wparam,
-                      LPARAM lparam,
-                      BOOL& handled);  // NOLINT
-  LRESULT OnCancel(WORD notify_code,
-                   WORD id,
-                   HWND wnd_ctl,
-                   BOOL& handled);  // NOLINT
+  LRESULT OnClose(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnNCDestroy(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnDpiChanged(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnSettingChange(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnThemeChanged(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnSetCursor(UINT msg, WPARAM wparam, LPARAM lparam);
+  void OnCancel(UINT notify_code, int id, HWND wnd_ctl);
+
+  virtual void ApplyDpiScaling(UINT dpi);
 
   // Returns true if the window is closed.
   virtual bool MaybeCloseWindow() = 0;
@@ -105,11 +113,15 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
   void SetControlAttributes(int control_id,
                             const ControlAttributes& attributes);
 
+  // Updates or clears the window icon derived from the given bitmap.
+  void UpdateWindowIcon(HBITMAP bitmap, UINT dpi = 0);
+
   void SetVisible(bool visible) {
-    ShowWindow(visible ? SW_SHOWNORMAL : SW_HIDE);
+    ::ShowWindow(hwnd(), visible ? SW_SHOWNORMAL : SW_HIDE);
   }
 
-  WTL::CMessageLoop* message_loop() { return message_loop_; }
+  MessageLoop* message_loop() { return message_loop_; }
+  std::wstring lang() const { return lang_; }
   bool is_complete() { return is_complete_; }
   bool is_close_enabled() { return is_close_enabled_; }
   UpdaterScope scope() { return scope_; }
@@ -122,16 +134,17 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
   static const ControlAttributes kVisibleImageAttributes;
   static const ControlAttributes kDisabledNonButtonAttributes;
 
- private:
-  HRESULT SetWindowIcon();
+  void ResetWindowIconCache();
 
+ private:
   void MaybeRequestExitProcess();
   void RequestExitProcess();
 
   SEQUENCE_CHECKER(sequence_checker_);
 
-  raw_ptr<WTL::CMessageLoop> message_loop_;
+  raw_ptr<MessageLoop> message_loop_;
   HWND parent_;
+  const std::wstring lang_;
 
   bool is_complete_;
   bool is_close_enabled_;
@@ -141,14 +154,19 @@ class OmahaWnd : public CAxDialogImpl<OmahaWnd>,
   UpdaterScope scope_;
   std::u16string bundle_name_;
 
-  // Handle to large icon to show when ALT-TAB
-  base::win::ScopedGDIObject<HICON> hicon_;
+  // Handles to icons to show when ALT-TAB (big) and in taskbar/titlebar
+  // (small).
+  WindowIcons window_icons_;
+  HBITMAP current_logo_ = nullptr;
+  UINT current_dpi_ = 0;
 
-  WTL::CFont default_font_;
-  WTL::CFont font_;
-  WTL::CFont error_font_;
+  base::win::ScopedGDIObject<HFONT> default_font_;
+  base::win::ScopedGDIObject<HFONT> header_font_;
+  base::win::ScopedGDIObject<HFONT> font_;
 
   CustomProgressBarCtrl progress_bar_;
+
+  CR_MSG_MAP_CLASS_DECLARATIONS(OmahaWnd)
 };
 
 // Registers the specified common control classes from the common control DLL.

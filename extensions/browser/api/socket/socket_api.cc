@@ -5,7 +5,6 @@
 #include "extensions/browser/api/socket/socket_api.h"
 
 #include <memory>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -15,13 +14,14 @@
 #include "base/values.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/network_service_instance.h"
 #include "content/public/browser/storage_partition.h"
 #include "extensions/browser/api/socket/socket.h"
 #include "extensions/browser/api/socket/tcp_socket.h"
 #include "extensions/browser/api/socket/tls_socket.h"
 #include "extensions/browser/api/socket/udp_socket.h"
+#include "extensions/browser/api/socket/write_quota_checker.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/common/api/sockets/sockets_manifest_data.h"
 #include "extensions/common/extension.h"
@@ -38,6 +38,7 @@
 #include "net/log/net_log_with_source.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/network_service.mojom.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 #if BUILDFLAG(IS_CHROMEOS)
 #include "extensions/browser/api/socket/app_firewall_hole_manager.h"
@@ -47,9 +48,9 @@ using extensions::mojom::APIPermissionID;
 
 namespace extensions {
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 const char kCrOSTerminal[] = "chrome-untrusted://terminal";
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace {
 
@@ -86,6 +87,27 @@ bool IsPortValid(int port) {
 using content::BrowserThread;
 using content::SocketPermissionRequest;
 
+SocketApiFunction::ScopedWriteQuota::ScopedWriteQuota(SocketApiFunction* owner,
+                                                      size_t bytes_used)
+    : owner_(owner), bytes_used_(bytes_used) {
+  DCHECK(owner_);
+}
+
+SocketApiFunction::ScopedWriteQuota::~ScopedWriteQuota() {
+  // Null check `BrowserContext` and `WriteQuotaChecker` since they could be
+  // released before `SocketApiFunction` during shutdown.
+  content::BrowserContext* const context = owner_->browser_context();
+  if (!context) {
+    return;
+  }
+  WriteQuotaChecker* const checker = WriteQuotaChecker::GetIfExists(context);
+  if (!checker) {
+    return;
+  }
+
+  checker->ReturnBytes(owner_->GetOriginId(), bytes_used_);
+}
+
 SocketApiFunction::SocketApiFunction() = default;
 
 SocketApiFunction::~SocketApiFunction() = default;
@@ -102,7 +124,7 @@ void SocketApiFunction::ReplaceSocket(int api_resource_id, Socket* socket) {
   manager_->Replace(GetOriginId(), api_resource_id, socket);
 }
 
-std::unordered_set<int>* SocketApiFunction::GetSocketIds() {
+absl::flat_hash_set<int>* SocketApiFunction::GetSocketIds() {
   return manager_->GetResourceIds(GetOriginId());
 }
 
@@ -124,16 +146,14 @@ void SocketApiFunction::OpenFirewallHole(const std::string& address,
     net::IPEndPoint local_address;
     if (!socket->GetLocalAddress(&local_address)) {
       NOTREACHED() << "Cannot get address of recently bound socket.";
-      Respond(ErrorWithCode(-1, kFirewallFailure));
-      return;
     }
 
     AppFirewallHoleManager* manager =
         AppFirewallHoleManager::Get(browser_context());
     std::unique_ptr<AppFirewallHole> hole =
         manager->Open(socket->GetSocketType() == Socket::TYPE_TCP
-                          ? AppFirewallHole::PortType::kTcp
-                          : AppFirewallHole::PortType::kUdp,
+                          ? chromeos::FirewallHole::PortType::kTcp
+                          : chromeos::FirewallHole::PortType::kUdp,
                       local_address.port(), GetOriginId());
     if (!hole) {
       Respond(ErrorWithCode(-1, kFirewallFailure));
@@ -154,13 +174,13 @@ ExtensionFunction::ResponseAction SocketApiFunction::Run() {
 ExtensionFunction::ResponseValue SocketApiFunction::ErrorWithCode(
     int error_code,
     const std::string& error) {
-  base::Value::List args;
+  base::ListValue args;
   args.Append(error_code);
-  return ErrorWithArguments(std::move(args), error);
+  return ErrorWithArgumentsDoNotUse(std::move(args), error);
 }
 
 std::string SocketApiFunction::GetOriginId() const {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Terminal app is the only non-extension to use sockets (crbug.com/1350479).
   if (!extension()) {
     auto origin = url::Origin::Create(source_url()).Serialize();
@@ -173,7 +193,7 @@ std::string SocketApiFunction::GetOriginId() const {
 
 bool SocketApiFunction::CheckPermission(
     const APIPermission::CheckParam& param) const {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Terminal app is the only non-extension to use sockets (crbug.com/1350479).
   if (!extension()) {
     CHECK_EQ(url::Origin::Create(source_url()).Serialize(), kCrOSTerminal);
@@ -186,7 +206,7 @@ bool SocketApiFunction::CheckPermission(
 
 bool SocketApiFunction::CheckRequest(
     const content::SocketPermissionRequest& param) const {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Terminal app is the only non-extension to use sockets (crbug.com/1350479).
   if (!extension()) {
     CHECK_EQ(url::Origin::Create(source_url()).Serialize(), kCrOSTerminal);
@@ -194,6 +214,21 @@ bool SocketApiFunction::CheckRequest(
   }
 #endif
   return SocketsManifestData::CheckRequest(extension(), param);
+}
+
+bool SocketApiFunction::TakeWriteQuota(size_t bytes_to_write) {
+  if (!WriteQuotaChecker::Get(browser_context())
+           ->TakeBytes(GetOriginId(), bytes_to_write)) {
+    return false;
+  }
+
+  DCHECK(!write_quota_used_.has_value());
+  write_quota_used_.emplace(this, bytes_to_write);
+  return true;
+}
+
+void SocketApiFunction::ReturnWriteQuota() {
+  write_quota_used_.reset();
 }
 
 SocketExtensionWithDnsLookupFunction::SocketExtensionWithDnsLookupFunction() =
@@ -211,7 +246,7 @@ void SocketExtensionWithDnsLookupFunction::StartDnsLookup(
       ->GetDefaultStoragePartition()
       ->GetNetworkContext()
       ->CreateHostResolver(
-          absl::nullopt,
+          std::nullopt,
           pending_host_resolver_.InitWithNewPipeAndPassReceiver());
   DCHECK(pending_host_resolver_);
 
@@ -224,14 +259,12 @@ void SocketExtensionWithDnsLookupFunction::StartDnsLookup(
   // Intentionally using a HostPortPair because scheme isn't specified.
   host_resolver_->ResolveHost(
       network::mojom::HostResolverHost::NewHostPortPair(host_port_pair),
-      net::NetworkAnonymizationKey(net::SchemefulSite(origin),
-                                   net::SchemefulSite(origin)),
+      net::NetworkAnonymizationKey::CreateSameSite(net::SchemefulSite(origin)),
       std::move(params), receiver_.BindNewPipeAndPassRemote());
   receiver_.set_disconnect_handler(base::BindOnce(
       &SocketExtensionWithDnsLookupFunction::OnComplete, base::Unretained(this),
       net::ERR_NAME_NOT_RESOLVED, net::ResolveErrorInfo(net::ERR_FAILED),
-      /*resolved_addresses=*/absl::nullopt,
-      /*endpoint_results_with_metadata=*/absl::nullopt));
+      net::AddressList(), net::HostResolverEndpointResults()));
 
   // Balanced in OnComplete().
   AddRef();
@@ -240,14 +273,13 @@ void SocketExtensionWithDnsLookupFunction::StartDnsLookup(
 void SocketExtensionWithDnsLookupFunction::OnComplete(
     int result,
     const net::ResolveErrorInfo& resolve_error_info,
-    const absl::optional<net::AddressList>& resolved_addresses,
-    const absl::optional<net::HostResolverEndpointResults>&
-        endpoint_results_with_metadata) {
+    const net::AddressList& resolved_addresses,
+    const net::HostResolverEndpointResults& alternative_endpoints) {
   host_resolver_.reset();
   receiver_.reset();
   if (result == net::OK) {
-    DCHECK(resolved_addresses && !resolved_addresses->empty());
-    addresses_ = resolved_addresses.value();
+    DCHECK(!resolved_addresses.empty());
+    addresses_ = resolved_addresses;
   }
   AfterDnsLookup(result);
 
@@ -259,17 +291,17 @@ SocketCreateFunction::SocketCreateFunction() = default;
 SocketCreateFunction::~SocketCreateFunction() = default;
 
 ExtensionFunction::ResponseAction SocketCreateFunction::Work() {
-  std::unique_ptr<api::socket::Create::Params> params =
+  std::optional<api::socket::Create::Params> params =
       api::socket::Create::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = nullptr;
   switch (params->type) {
-    case extensions::api::socket::SOCKET_TYPE_TCP:
+    case extensions::api::socket::SocketType::kTcp:
       socket = new TCPSocket(browser_context(), GetOriginId());
       break;
 
-    case extensions::api::socket::SOCKET_TYPE_UDP: {
+    case extensions::api::socket::SocketType::kUdp: {
       mojo::PendingRemote<network::mojom::UDPSocketListener> listener_remote;
       mojo::PendingReceiver<network::mojom::UDPSocketListener>
           socket_listener_receiver =
@@ -285,16 +317,15 @@ ExtensionFunction::ResponseAction SocketCreateFunction::Work() {
                         std::move(socket_listener_receiver), GetOriginId());
       break;
     }
-    case extensions::api::socket::SOCKET_TYPE_NONE:
+    case extensions::api::socket::SocketType::kNone:
       NOTREACHED();
-      return RespondNow(NoArguments());
   }
 
   DCHECK(socket);
 
-  base::Value::Dict result;
+  base::DictValue result;
   result.Set(kSocketIdKey, AddSocket(socket));
-  return RespondNow(OneArgument(base::Value(std::move(result))));
+  return RespondNow(WithArguments(std::move(result)));
 }
 
 ExtensionFunction::ResponseAction SocketDestroyFunction::Work() {
@@ -343,8 +374,6 @@ ExtensionFunction::ResponseAction SocketConnectFunction::Work() {
       break;
     default:
       NOTREACHED() << "Unknown socket type.";
-      operation_type = SocketPermissionRequest::NONE;
-      break;
   }
 
   SocketPermission::CheckParam param(operation_type, hostname_, port_);
@@ -377,7 +406,7 @@ void SocketConnectFunction::StartConnect() {
 }
 
 void SocketConnectFunction::OnConnect(int result) {
-  Respond(OneArgument(base::Value(result)));
+  Respond(WithArguments(result));
 }
 
 ExtensionFunction::ResponseAction SocketDisconnectFunction::Work() {
@@ -389,12 +418,12 @@ ExtensionFunction::ResponseAction SocketDisconnectFunction::Work() {
   Socket* socket = GetSocket(socket_id);
   if (socket) {
     socket->Disconnect(false /* socket_destroying */);
-    return RespondNow(OneArgument(base::Value()));
+    return RespondNow(WithArguments(base::Value()));
   } else {
-    base::Value::List args;
+    base::ListValue args;
     args.Append(base::Value());
     return RespondNow(
-        ErrorWithArguments(std::move(args), kSocketNotFoundError));
+        ErrorWithArgumentsDoNotUse(std::move(args), kSocketNotFoundError));
   }
 }
 
@@ -445,13 +474,13 @@ void SocketBindFunction::OnCompleted(int net_result) {
   }
 
   if (net_result != net::OK) {
-    Respond(OneArgument(base::Value(net_result)));
+    Respond(WithArguments(net_result));
     return;
   }
 
   OpenFirewallHole(address_, socket_id_, socket);
   if (!did_respond()) {
-    Respond(OneArgument(base::Value(net_result)));
+    Respond(WithArguments(net_result));
   }
 }
 
@@ -461,7 +490,7 @@ SocketListenFunction::~SocketListenFunction() = default;
 
 ExtensionFunction::ResponseAction SocketListenFunction::Work() {
   params_ = api::socket::Listen::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params_.get());
+  EXTENSION_FUNCTION_VALIDATE(params_);
 
   Socket* socket = GetSocket(params_->socket_id);
   if (!socket) {
@@ -496,7 +525,7 @@ void SocketListenFunction::OnCompleted(int result,
 
   OpenFirewallHole(params_->address, params_->socket_id, socket);
   if (!did_respond()) {
-    Respond(OneArgument(base::Value(result)));
+    Respond(WithArguments(result));
   }
 }
 
@@ -505,9 +534,9 @@ SocketAcceptFunction::SocketAcceptFunction() = default;
 SocketAcceptFunction::~SocketAcceptFunction() = default;
 
 ExtensionFunction::ResponseAction SocketAcceptFunction::Work() {
-  std::unique_ptr<api::socket::Accept::Params> params =
+  std::optional<api::socket::Accept::Params> params =
       api::socket::Accept::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (socket) {
@@ -516,7 +545,7 @@ ExtensionFunction::ResponseAction SocketAcceptFunction::Work() {
   } else {
     api::socket::AcceptInfo info;
     info.result_code = net::ERR_FAILED;
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         api::socket::Accept::Results::Create(info), kSocketNotFoundError));
   }
 }
@@ -524,10 +553,10 @@ ExtensionFunction::ResponseAction SocketAcceptFunction::Work() {
 void SocketAcceptFunction::OnAccept(
     int result_code,
     mojo::PendingRemote<network::mojom::TCPConnectedSocket> socket,
-    const absl::optional<net::IPEndPoint>& remote_addr,
+    const std::optional<net::IPEndPoint>& remote_addr,
     mojo::ScopedDataPipeConsumerHandle receive_pipe_handle,
     mojo::ScopedDataPipeProducerHandle send_pipe_handle) {
-  base::Value::Dict result;
+  base::DictValue result;
   result.Set(kResultCodeKey, result_code);
   if (result_code == net::OK) {
     Socket* client_socket =
@@ -535,7 +564,7 @@ void SocketAcceptFunction::OnAccept(
                       std::move(send_pipe_handle), remote_addr, GetOriginId());
     result.Set(kSocketIdKey, AddSocket(client_socket));
   }
-  Respond(OneArgument(base::Value(std::move(result))));
+  Respond(WithArguments(std::move(result)));
 }
 
 SocketReadFunction::SocketReadFunction() = default;
@@ -543,15 +572,15 @@ SocketReadFunction::SocketReadFunction() = default;
 SocketReadFunction::~SocketReadFunction() = default;
 
 ExtensionFunction::ResponseAction SocketReadFunction::Work() {
-  std::unique_ptr<api::socket::Read::Params> params =
+  std::optional<api::socket::Read::Params> params =
       api::socket::Read::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket) {
     api::socket::ReadInfo info;
     info.result_code = -1;
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         api::socket::Read::Results::Create(info), kSocketNotFoundError));
   }
 
@@ -563,15 +592,14 @@ ExtensionFunction::ResponseAction SocketReadFunction::Work() {
 void SocketReadFunction::OnCompleted(int bytes_read,
                                      scoped_refptr<net::IOBuffer> io_buffer,
                                      bool socket_destroying) {
-  base::Value::Dict result;
+  base::DictValue result;
   result.Set(kResultCodeKey, bytes_read);
   base::span<const uint8_t> data_span;
   if (bytes_read > 0) {
-    data_span = base::as_bytes(
-        base::make_span(io_buffer->data(), static_cast<size_t>(bytes_read)));
+    data_span = io_buffer->first(static_cast<size_t>(bytes_read));
   }
   result.Set(kDataKey, base::Value(data_span));
-  Respond(OneArgument(base::Value(std::move(result))));
+  Respond(WithArguments(std::move(result)));
 }
 
 SocketWriteFunction::SocketWriteFunction() = default;
@@ -587,16 +615,19 @@ ExtensionFunction::ResponseAction SocketWriteFunction::Work() {
 
   int socket_id = socket_id_value.GetInt();
   size_t io_buffer_size = data_value.GetBlob().size();
+  if (!TakeWriteQuota(io_buffer_size)) {
+    return RespondNow(Error(kExceedWriteQuotaError));
+  }
 
-  scoped_refptr<net::IOBuffer> io_buffer =
-      base::MakeRefCounted<net::IOBuffer>(data_value.GetBlob().size());
-  base::ranges::copy(data_value.GetBlob(), io_buffer->data());
+  auto io_buffer =
+      base::MakeRefCounted<net::IOBufferWithSize>(data_value.GetBlob().size());
+  std::ranges::copy(data_value.GetBlob(), io_buffer->data());
 
   Socket* socket = GetSocket(socket_id);
   if (!socket) {
     api::socket::WriteInfo info;
     info.bytes_written = -1;
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         api::socket::Write::Results::Create(info), kSocketNotFoundError));
   }
 
@@ -606,9 +637,11 @@ ExtensionFunction::ResponseAction SocketWriteFunction::Work() {
 }
 
 void SocketWriteFunction::OnCompleted(int bytes_written) {
-  base::Value::Dict result;
+  ReturnWriteQuota();
+
+  base::DictValue result;
   result.Set(kBytesWrittenKey, bytes_written);
-  Respond(OneArgument(base::Value(std::move(result))));
+  Respond(WithArguments(std::move(result)));
 }
 
 SocketRecvFromFunction::SocketRecvFromFunction() = default;
@@ -616,16 +649,16 @@ SocketRecvFromFunction::SocketRecvFromFunction() = default;
 SocketRecvFromFunction::~SocketRecvFromFunction() = default;
 
 ExtensionFunction::ResponseAction SocketRecvFromFunction::Work() {
-  std::unique_ptr<api::socket::RecvFrom::Params> params =
+  std::optional<api::socket::RecvFrom::Params> params =
       api::socket::RecvFrom::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket || socket->GetSocketType() != Socket::TYPE_UDP) {
     api::socket::RecvFromInfo info;
     info.result_code = -1;
     info.port = 0;
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         api::socket::RecvFrom::Results::Create(info), kSocketNotFoundError));
   }
 
@@ -639,17 +672,16 @@ void SocketRecvFromFunction::OnCompleted(int bytes_read,
                                          bool socket_destroying,
                                          const std::string& address,
                                          uint16_t port) {
-  base::Value::Dict result;
+  base::DictValue result;
   result.Set(kResultCodeKey, bytes_read);
   base::span<const uint8_t> data_span;
   if (bytes_read > 0) {
-    data_span = base::as_bytes(
-        base::make_span(io_buffer->data(), static_cast<size_t>(bytes_read)));
+    data_span = io_buffer->first(static_cast<size_t>(bytes_read));
   }
   result.Set(kDataKey, base::Value(data_span));
   result.Set(kAddressKey, address);
   result.Set(kPortKey, port);
-  Respond(OneArgument(base::Value(std::move(result))));
+  Respond(WithArguments(std::move(result)));
 }
 
 SocketSendToFunction::SocketSendToFunction() = default;
@@ -676,9 +708,9 @@ ExtensionFunction::ResponseAction SocketSendToFunction::Work() {
   hostname_ = hostname_value.GetString();
 
   io_buffer_size_ = data_value.GetBlob().size();
-
-  io_buffer_ = base::MakeRefCounted<net::IOBuffer>(data_value.GetBlob().size());
-  base::ranges::copy(data_value.GetBlob(), io_buffer_->data());
+  io_buffer_ =
+      base::MakeRefCounted<net::IOBufferWithSize>(data_value.GetBlob().size());
+  std::ranges::copy(data_value.GetBlob(), io_buffer_->data());
 
   Socket* socket = GetSocket(socket_id_);
   if (!socket) {
@@ -713,11 +745,18 @@ void SocketSendToFunction::StartSendTo() {
     return;
   }
 
+  if (!TakeWriteQuota(io_buffer_size_)) {
+    Respond(Error(kExceedWriteQuotaError));
+    return;
+  }
+
   socket->SendTo(io_buffer_, io_buffer_size_, addresses_.front(),
                  base::BindOnce(&SocketSendToFunction::OnCompleted, this));
 }
 
 void SocketSendToFunction::OnCompleted(int bytes_written) {
+  ReturnWriteQuota();
+
   api::socket::WriteInfo info;
   info.bytes_written = bytes_written;
   Respond(ArgumentList(api::socket::SendTo::Results::Create(info)));
@@ -728,19 +767,20 @@ SocketSetKeepAliveFunction::SocketSetKeepAliveFunction() = default;
 SocketSetKeepAliveFunction::~SocketSetKeepAliveFunction() = default;
 
 ExtensionFunction::ResponseAction SocketSetKeepAliveFunction::Work() {
-  std::unique_ptr<api::socket::SetKeepAlive::Params> params =
+  std::optional<api::socket::SetKeepAlive::Params> params =
       api::socket::SetKeepAlive::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket) {
-    return RespondNow(
-        ErrorWithArguments(api::socket::SetKeepAlive::Results::Create(false),
-                           kSocketNotFoundError));
+    return RespondNow(ErrorWithArgumentsDoNotUse(
+        api::socket::SetKeepAlive::Results::Create(false),
+        kSocketNotFoundError));
   }
   int delay = 0;
-  if (params->delay)
+  if (params->delay) {
     delay = *params->delay;
+  }
   socket->SetKeepAlive(
       params->enable, delay,
       base::BindOnce(&SocketSetKeepAliveFunction::OnCompleted, this));
@@ -748,7 +788,7 @@ ExtensionFunction::ResponseAction SocketSetKeepAliveFunction::Work() {
 }
 
 void SocketSetKeepAliveFunction::OnCompleted(bool success) {
-  Respond(OneArgument(base::Value(success)));
+  Respond(WithArguments(success));
 }
 
 SocketSetNoDelayFunction::SocketSetNoDelayFunction() = default;
@@ -756,13 +796,13 @@ SocketSetNoDelayFunction::SocketSetNoDelayFunction() = default;
 SocketSetNoDelayFunction::~SocketSetNoDelayFunction() = default;
 
 ExtensionFunction::ResponseAction SocketSetNoDelayFunction::Work() {
-  std::unique_ptr<api::socket::SetNoDelay::Params> params =
+  std::optional<api::socket::SetNoDelay::Params> params =
       api::socket::SetNoDelay::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket) {
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         api::socket::SetNoDelay::Results::Create(false), kSocketNotFoundError));
   }
   socket->SetNoDelay(
@@ -772,7 +812,7 @@ ExtensionFunction::ResponseAction SocketSetNoDelayFunction::Work() {
 }
 
 void SocketSetNoDelayFunction::OnCompleted(bool success) {
-  Respond(OneArgument(base::Value(success)));
+  Respond(WithArguments(success));
 }
 
 SocketGetInfoFunction::SocketGetInfoFunction() = default;
@@ -780,7 +820,7 @@ SocketGetInfoFunction::SocketGetInfoFunction() = default;
 SocketGetInfoFunction::~SocketGetInfoFunction() = default;
 
 ExtensionFunction::ResponseAction SocketGetInfoFunction::Work() {
-  std::unique_ptr<api::socket::GetInfo::Params> params =
+  std::optional<api::socket::GetInfo::Params> params =
       api::socket::GetInfo::Params::Create(args());
 
   Socket* socket = GetSocket(params->socket_id);
@@ -791,10 +831,11 @@ ExtensionFunction::ResponseAction SocketGetInfoFunction::Work() {
   api::socket::SocketInfo info;
   // This represents what we know about the socket, and does not call through
   // to the system.
-  if (socket->GetSocketType() == Socket::TYPE_TCP)
-    info.socket_type = extensions::api::socket::SOCKET_TYPE_TCP;
-  else
-    info.socket_type = extensions::api::socket::SOCKET_TYPE_UDP;
+  if (socket->GetSocketType() == Socket::TYPE_TCP) {
+    info.socket_type = extensions::api::socket::SocketType::kTcp;
+  } else {
+    info.socket_type = extensions::api::socket::SocketType::kUdp;
+  }
   info.connected = socket->IsConnected();
 
   // Grab the peer address as known by the OS. This and the call below will
@@ -825,7 +866,7 @@ ExtensionFunction::ResponseAction SocketGetNetworkListFunction::Run() {
 }
 
 void SocketGetNetworkListFunction::GotNetworkList(
-    const absl::optional<net::NetworkInterfaceList>& interface_list) {
+    const std::optional<net::NetworkInterfaceList>& interface_list) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   if (!interface_list.has_value()) {
     Respond(Error(kNetworkListError));
@@ -851,9 +892,9 @@ SocketJoinGroupFunction::SocketJoinGroupFunction() = default;
 SocketJoinGroupFunction::~SocketJoinGroupFunction() = default;
 
 ExtensionFunction::ResponseAction SocketJoinGroupFunction::Work() {
-  std::unique_ptr<api::socket::JoinGroup::Params> params =
+  std::optional<api::socket::JoinGroup::Params> params =
       api::socket::JoinGroup::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket) {
@@ -880,7 +921,7 @@ ExtensionFunction::ResponseAction SocketJoinGroupFunction::Work() {
 
 void SocketJoinGroupFunction::OnCompleted(int result) {
   if (result == net::OK) {
-    Respond(OneArgument(base::Value(result)));
+    Respond(WithArguments(result));
   } else {
     Respond(ErrorWithCode(result, net::ErrorToString(result)));
   }
@@ -891,9 +932,9 @@ SocketLeaveGroupFunction::SocketLeaveGroupFunction() = default;
 SocketLeaveGroupFunction::~SocketLeaveGroupFunction() = default;
 
 ExtensionFunction::ResponseAction SocketLeaveGroupFunction::Work() {
-  std::unique_ptr<api::socket::LeaveGroup::Params> params =
+  std::optional<api::socket::LeaveGroup::Params> params =
       api::socket::LeaveGroup::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
 
@@ -920,7 +961,7 @@ ExtensionFunction::ResponseAction SocketLeaveGroupFunction::Work() {
 
 void SocketLeaveGroupFunction::OnCompleted(int result) {
   if (result == net::OK) {
-    Respond(OneArgument(base::Value(result)));
+    Respond(WithArguments(result));
   } else {
     Respond(ErrorWithCode(result, net::ErrorToString(result)));
   }
@@ -933,9 +974,9 @@ SocketSetMulticastTimeToLiveFunction::~SocketSetMulticastTimeToLiveFunction() =
     default;
 
 ExtensionFunction::ResponseAction SocketSetMulticastTimeToLiveFunction::Work() {
-  std::unique_ptr<api::socket::SetMulticastTimeToLive::Params> params =
+  std::optional<api::socket::SetMulticastTimeToLive::Params> params =
       api::socket::SetMulticastTimeToLive::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket) {
@@ -949,7 +990,7 @@ ExtensionFunction::ResponseAction SocketSetMulticastTimeToLiveFunction::Work() {
   int result =
       static_cast<UDPSocket*>(socket)->SetMulticastTimeToLive(params->ttl);
   if (result == 0) {
-    return RespondNow(OneArgument(base::Value(result)));
+    return RespondNow(WithArguments(result));
   } else {
     return RespondNow(ErrorWithCode(result, net::ErrorToString(result)));
   }
@@ -963,9 +1004,9 @@ SocketSetMulticastLoopbackModeFunction::
 
 ExtensionFunction::ResponseAction
 SocketSetMulticastLoopbackModeFunction::Work() {
-  std::unique_ptr<api::socket::SetMulticastLoopbackMode::Params> params =
+  std::optional<api::socket::SetMulticastLoopbackMode::Params> params =
       api::socket::SetMulticastLoopbackMode::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket) {
@@ -979,7 +1020,7 @@ SocketSetMulticastLoopbackModeFunction::Work() {
   int result = static_cast<UDPSocket*>(socket)->SetMulticastLoopbackMode(
       params->enabled);
   if (result == 0) {
-    return RespondNow(OneArgument(base::Value(result)));
+    return RespondNow(WithArguments(result));
   } else {
     return RespondNow(ErrorWithCode(result, net::ErrorToString(result)));
   }
@@ -990,9 +1031,9 @@ SocketGetJoinedGroupsFunction::SocketGetJoinedGroupsFunction() = default;
 SocketGetJoinedGroupsFunction::~SocketGetJoinedGroupsFunction() = default;
 
 ExtensionFunction::ResponseAction SocketGetJoinedGroupsFunction::Work() {
-  std::unique_ptr<api::socket::GetJoinedGroups::Params> params =
+  std::optional<api::socket::GetJoinedGroups::Params> params =
       api::socket::GetJoinedGroups::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   Socket* socket = GetSocket(params->socket_id);
   if (!socket) {
@@ -1010,12 +1051,12 @@ ExtensionFunction::ResponseAction SocketGetJoinedGroupsFunction::Work() {
     return RespondNow(ErrorWithCode(-1, kPermissionError));
   }
 
-  base::Value::List values;
+  base::ListValue values;
   auto* udp_socket = static_cast<UDPSocket*>(socket);
   for (const std::string& group : udp_socket->GetJoinedGroups()) {
     values.Append(group);
   }
-  return RespondNow(OneArgument(base::Value(std::move(values))));
+  return RespondNow(WithArguments(std::move(values)));
 }
 
 SocketSecureFunction::SocketSecureFunction() = default;
@@ -1025,7 +1066,7 @@ SocketSecureFunction::~SocketSecureFunction() = default;
 ExtensionFunction::ResponseAction SocketSecureFunction::Work() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   params_ = api::socket::Secure::Params::Create(args());
-  EXTENSION_FUNCTION_VALIDATE(params_.get());
+  EXTENSION_FUNCTION_VALIDATE(params_);
 
   Socket* socket = GetSocket(params_->socket_id);
   if (!socket) {
@@ -1069,7 +1110,7 @@ void SocketSecureFunction::TlsConnectDone(
                                   std::move(receive_pipe_handle),
                                   std::move(send_pipe_handle), GetOriginId());
   ReplaceSocket(params_->socket_id, socket.release());
-  Respond(OneArgument(base::Value(result)));
+  Respond(WithArguments(result));
 }
 
 }  // namespace extensions

@@ -5,9 +5,13 @@
 #include "third_party/blink/renderer/core/inspector/resolve_node.h"
 
 #include "third_party/blink/renderer/bindings/core/v8/binding_security.h"
+#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+#include "third_party/blink/renderer/core/dom/css_pseudo_element.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/node.h"
+#include "third_party/blink/renderer/core/dom/pseudo_element.h"
+#include "third_party/blink/renderer/core/execution_context/agent.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/inspector/main_thread_debugger.h"
 #include "third_party/blink/renderer/core/inspector/v8_inspector_string.h"
@@ -15,19 +19,26 @@
 namespace blink {
 
 v8::Local<v8::Value> NodeV8Value(v8::Local<v8::Context> context, Node* node) {
-  v8::Isolate* isolate = context->GetIsolate();
-  if (!node || !BindingSecurity::ShouldAllowAccessTo(
-                   CurrentDOMWindow(isolate), node,
-                   BindingSecurity::ErrorReportOption::kDoNotReport))
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  if (!node ||
+      !BindingSecurity::ShouldAllowAccessTo(CurrentDOMWindow(isolate), node)) {
     return v8::Null(isolate);
-  return ToV8(node, context->Global(), isolate);
+  }
+  ScriptState* script_state = ScriptState::From(isolate, context);
+  if (auto* pseudo_element = DynamicTo<PseudoElement>(node)) {
+    CSSPseudoElement* css_pseudo = CSSPseudoElement::From(pseudo_element);
+    if (css_pseudo) {
+      return ToV8Traits<CSSPseudoElement>::ToV8(script_state, css_pseudo);
+    }
+  }
+  return ToV8Traits<Node>::ToV8(script_state, node);
 }
 
 std::unique_ptr<v8_inspector::protocol::Runtime::API::RemoteObject> ResolveNode(
     v8_inspector::V8InspectorSession* v8_session,
     Node* node,
     const String& object_group,
-    protocol::Maybe<int> v8_execution_context_id) {
+    std::optional<int> v8_execution_context_id) {
   if (!node)
     return nullptr;
 
@@ -37,13 +48,13 @@ std::unique_ptr<v8_inspector::protocol::Runtime::API::RemoteObject> ResolveNode(
   if (!frame)
     return nullptr;
 
-  v8::Isolate* isolate = V8PerIsolateData::MainThreadIsolate();
+  v8::Isolate* isolate = document->GetAgent().isolate();
   v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context;
-  if (v8_execution_context_id.isJust()) {
-    if (!MainThreadDebugger::Instance()
+  if (v8_execution_context_id.has_value()) {
+    if (!MainThreadDebugger::Instance(isolate)
              ->GetV8Inspector()
-             ->contextById(v8_execution_context_id.fromJust())
+             ->contextById(v8_execution_context_id.value())
              .ToLocal(&context)) {
       return nullptr;
     }

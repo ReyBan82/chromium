@@ -6,24 +6,19 @@
 #define CONTENT_BROWSER_RENDERER_HOST_STORED_PAGE_H_
 
 #include <set>
-#include <unordered_map>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/safe_ref.h"
 #include "content/browser/site_instance_group.h"
+#include "content/public/browser/frame_tree_node_id.h"
 #include "content/public/browser/site_instance.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 #include "third_party/blink/public/mojom/page/page.mojom.h"
 
 namespace content {
 class RenderFrameHostImpl;
 class RenderFrameProxyHost;
 class RenderViewHostImpl;
-
-// Comparator for RenderViewHostImpl SafeRefs.
-struct RenderViewHostImplSafeRefComparator {
-  bool operator()(const base::SafeRef<RenderViewHostImpl>& a,
-                  const base::SafeRef<RenderViewHostImpl>& b) const;
-};
 
 // StoredPage contains a page which is not tied to a FrameTree. It holds the
 // main RenderFrameHost together with RenderViewHosts and main document's
@@ -36,13 +31,11 @@ struct RenderViewHostImplSafeRefComparator {
 class StoredPage : public SiteInstanceGroup::Observer {
  public:
   using RenderFrameProxyHostMap =
-      std::unordered_map<SiteInstanceGroupId,
-                         std::unique_ptr<RenderFrameProxyHost>,
-                         SiteInstanceGroupId::Hasher>;
+      absl::flat_hash_map<SiteInstanceGroupId,
+                          std::unique_ptr<RenderFrameProxyHost>>;
 
   using RenderViewHostImplSafeRefSet =
-      std::set<base::SafeRef<RenderViewHostImpl>,
-               RenderViewHostImplSafeRefComparator>;
+      std::set<base::SafeRef<RenderViewHostImpl>>;
 
   // A delegate class for various state change callbacks.
   class Delegate {
@@ -56,7 +49,7 @@ class StoredPage : public SiteInstanceGroup::Observer {
   StoredPage(std::unique_ptr<RenderFrameHostImpl> rfh,
              RenderFrameProxyHostMap proxy_hosts,
              RenderViewHostImplSafeRefSet render_view_hosts);
-  virtual ~StoredPage();
+  ~StoredPage() override;
 
   void SetDelegate(Delegate* delegate);
 
@@ -93,6 +86,20 @@ class StoredPage : public SiteInstanceGroup::Observer {
   RenderFrameProxyHostMap TakeProxyHosts();
   RenderViewHostImplSafeRefSet TakeRenderViewHosts();
 
+  void SetViewTransitionState(
+      std::optional<blink::ViewTransitionState> view_transition_state);
+  std::optional<blink::ViewTransitionState> TakeViewTransitionState();
+
+  // The frame that was focused within this page when it was stored, so that the
+  // focused frame can be restored on activation (e.g. for back-forward cache).
+  // Invalid if no frame in this page was focused.
+  void set_focused_frame_tree_node_id(FrameTreeNodeId id) {
+    focused_frame_tree_node_id_ = id;
+  }
+  FrameTreeNodeId focused_frame_tree_node_id() const {
+    return focused_frame_tree_node_id_;
+  }
+
  private:
   void ClearAllObservers();
 
@@ -124,6 +131,14 @@ class StoredPage : public SiteInstanceGroup::Observer {
   blink::mojom::PageRestoreParamsPtr page_restore_params_;
 
   raw_ptr<Delegate> delegate_ = nullptr;
+
+  // View transition state to use when the page is activated, either via BFCache
+  // activation or prerender activation.
+  std::optional<blink::ViewTransitionState> view_transition_state_;
+
+  // The frame focused within this page when it was stored. See the accessors
+  // above.
+  FrameTreeNodeId focused_frame_tree_node_id_;
 };
 
 }  // namespace content

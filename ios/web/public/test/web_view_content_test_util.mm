@@ -7,7 +7,10 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
+#import <map>
+
 #import "base/functional/bind.h"
+#import "base/no_destructor.h"
 #import "base/run_loop.h"
 #import "base/strings/stringprintf.h"
 #import "base/strings/sys_string_conversions.h"
@@ -16,12 +19,8 @@
 #import "ios/web/public/js_messaging/web_frames_manager.h"
 #import "ios/web/public/test/web_view_interaction_test_util.h"
 #import "ios/web/public/web_state.h"
-#import "net/base/mac/url_conversions.h"
+#import "net/base/apple/url_conversions.h"
 #import "url/gurl.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 using base::test::ios::kWaitForDownloadTimeout;
 using base::test::ios::WaitUntilConditionOrTimeout;
@@ -50,8 +49,8 @@ char kGetDocumentBodyJavaScript[] =
     "function allTextContent(element) { "
     "  if (!element) { return ''; }"
     "  let textString = element.textContent;"
-    "  if (element == document.body || element instanceof HTMLElement) {"
-    "    for (let e of element.getElementsByTagName('*')) {"
+    "  if (element.querySelectorAll) {"
+    "    for (let e of element.querySelectorAll('*')) {"
     "      if (e && e.shadowRoot) {"
     "        textString += '|' + allTextContent(e.shadowRoot);"
     "      }"
@@ -92,11 +91,11 @@ UIImage* LoadImage(const GURL& image_url) {
   }
   return image;
 }
-}
+}  // namespace
 
-using base::test::ios::WaitUntilConditionOrTimeout;
 using base::test::ios::kWaitForJSCompletionTimeout;
 using base::test::ios::kWaitForUIElementTimeout;
+using base::test::ios::WaitUntilConditionOrTimeout;
 
 namespace web {
 namespace test {
@@ -107,7 +106,7 @@ bool IsWebViewContainingText(web::WebState* web_state,
       web::test::ExecuteJavaScript(web_state, kGetDocumentBodyJavaScript);
   std::string body;
   if (value && value->is_string()) {
-    return value->GetString().find(text) != std::string::npos;
+    return value->GetString().contains(text);
   }
   return false;
 }
@@ -123,7 +122,7 @@ bool IsWebViewContainingTextInFrame(web::WebState* web_state,
     FindInPageJavaScriptFeature* find_in_page_feature =
         FindInPageJavaScriptFeature::GetInstance();
     find_in_page_feature->Search(
-        frame, text, base::BindOnce(^(absl::optional<int> result_matches) {
+        frame, text, base::BindOnce(^(std::optional<int> result_matches) {
           if (result_matches && result_matches.value() >= 1) {
             text_found = true;
           }
@@ -131,8 +130,9 @@ bool IsWebViewContainingTextInFrame(web::WebState* web_state,
         }));
   }
   bool success = WaitUntilConditionOrTimeout(kWaitForJSCompletionTimeout, ^{
-    if (text_found)
+    if (text_found) {
       return true;
+    }
     return number_frames_processing == 0;
   });
   return text_found && success;
@@ -165,42 +165,52 @@ bool WaitForWebViewContainingTextInFrame(web::WebState* web_state,
   });
 }
 
-bool WaitForWebViewContainingImage(std::string image_id,
-                                   web::WebState* web_state,
-                                   ImageStateElement image_state) {
+bool IsWebViewContainingImage(std::string image_id,
+                              web::WebState* web_state,
+                              ImageStateElement image_state) {
   std::string get_url_script =
       base::StringPrintf("document.getElementById('%s').src", image_id.c_str());
   std::unique_ptr<base::Value> url_as_value =
       web::test::ExecuteJavaScript(web_state, get_url_script);
-  if (!url_as_value->is_string())
+  if (!url_as_value || !url_as_value->is_string()) {
     return false;
+  }
+  std::string image_url = url_as_value->GetString();
 
-  UIImage* image = LoadImage(GURL(url_as_value->GetString()));
-  if (!image)
-    return false;
+  static base::NoDestructor<std::map<std::string, CGSize>> expected_sizes;
+  CGSize expected_size;
+  auto it = expected_sizes->find(image_url);
+  if (it == expected_sizes->end()) {
+    UIImage* image = LoadImage(GURL(image_url));
+    if (!image) {
+      return false;
+    }
+    expected_size = image.size;
+    expected_sizes->insert({image_url, expected_size});
+  } else {
+    expected_size = it->second;
+  }
 
-  CGSize expected_size = image.size;
-
-  return WaitUntilConditionOrTimeout(kWaitForUIElementTimeout, ^{
-    NSString* const kGetElementAttributesScript =
-        [NSString stringWithFormat:@"var image = document.getElementById('%@');"
-                                   @"var imageHeight = image.height;"
-                                   @"var imageWidth = image.width;"
-                                   @"JSON.stringify({"
-                                   @"  height:imageHeight,"
-                                   @"  width:imageWidth"
-                                   @"});",
-                                   base::SysUTF8ToNSString(image_id)];
-    std::unique_ptr<base::Value> value = web::test::ExecuteJavaScript(
-        web_state, base::SysNSStringToUTF8(kGetElementAttributesScript));
-    if (value && value->is_string()) {
-      NSString* evaluation_result = base::SysUTF8ToNSString(value->GetString());
-      NSData* image_attributes_as_data =
-          [evaluation_result dataUsingEncoding:NSUTF8StringEncoding];
-      NSDictionary* image_attributes =
-          [NSJSONSerialization JSONObjectWithData:image_attributes_as_data
-                                          options:0
-                                            error:nil];
+  NSString* const kGetElementAttributesScript =
+      [NSString stringWithFormat:@"var image = document.getElementById('%@');"
+                                 @"var imageHeight = image.height;"
+                                 @"var imageWidth = image.width;"
+                                 @"JSON.stringify({"
+                                 @"  height:imageHeight,"
+                                 @"  width:imageWidth"
+                                 @"});",
+                                 base::SysUTF8ToNSString(image_id)];
+  std::unique_ptr<base::Value> value = web::test::ExecuteJavaScript(
+      web_state, base::SysNSStringToUTF8(kGetElementAttributesScript));
+  if (value && value->is_string()) {
+    NSString* evaluation_result = base::SysUTF8ToNSString(value->GetString());
+    NSData* image_attributes_as_data =
+        [evaluation_result dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary* image_attributes =
+        [NSJSONSerialization JSONObjectWithData:image_attributes_as_data
+                                        options:0
+                                          error:nil];
+    if (image_attributes) {
       CGFloat height = [image_attributes[@"height"] floatValue];
       CGFloat width = [image_attributes[@"width"] floatValue];
       switch (image_state) {
@@ -210,8 +220,8 @@ bool WaitForWebViewContainingImage(std::string image_id,
           return height == expected_size.height && width == expected_size.width;
       }
     }
-    return false;
-  });
+  }
+  return false;
 }
 
 bool IsWebViewContainingElement(web::WebState* web_state,
@@ -222,8 +232,9 @@ bool IsWebViewContainingElement(web::WebState* web_state,
 
   std::unique_ptr<base::Value> value =
       web::test::ExecuteJavaScript(web_state, script);
-  if (!value)
+  if (!value) {
     return false;
+  }
   return value->GetIfBool().value_or(false);
 }
 

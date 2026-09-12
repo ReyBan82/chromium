@@ -27,40 +27,38 @@ class PerfBenchmarkTest(unittest.TestCase):
 
   def _PopulateGenFiles(self, output_dir=None):
     root = output_dir if output_dir is not None else self._output_dir
-    gen_path = os.path.join(root, 'gen', 'components', 'subresource_filter',
-                            'tools')
+    gen_path = os.path.join(
+      root, 'gen', 'components', 'subresource_filter', 'tools'
+    )
     os.makedirs(gen_path)
 
     # Just make an empty ruleset file.
     open(os.path.join(gen_path, 'GeneratedRulesetData'), 'w').close()
 
     placeholder_json = {
-        'subresource_filter' : {
-            'ruleset_version' : {
-                'content': '1000',
-                'format': 100,
-                'checksum': 0
-            }
-        }
+      'subresource_filter': {
+        'ruleset_version': {'content': '1000', 'format': 100, 'checksum': 0}
+      }
     }
     with open(os.path.join(gen_path, 'default_local_state.json'), 'w') as f:
       json.dump(placeholder_json, f)
-
 
   def _ExpectAdTaggingProfileFiles(self, browser_options, expect_present):
     files_to_copy = browser_options.profile_files_to_copy
 
     local_state_to_copy = [
-        (s, d) for (s, d) in files_to_copy if d == 'Local State']
+      (s, d) for (s, d) in files_to_copy if d == 'Local State'
+    ]
     ruleset_data_to_copy = [
-        (s, d) for (s, d) in files_to_copy if d.endswith('Ruleset Data')]
+      (s, d) for (s, d) in files_to_copy if d.endswith('Ruleset Data')
+    ]
 
     num_expected_matches = 1 if expect_present else 0
     self.assertEqual(num_expected_matches, len(local_state_to_copy))
     self.assertEqual(num_expected_matches, len(ruleset_data_to_copy))
 
-  @decorators.Disabled('android-nougat'  # Flaky: https://crbug.com/1342706
-                       )
+  # Flaky: https://crbug.com/1342706
+  @decorators.Disabled('android')
   def testVariationArgs(self):
     benchmark = perf_benchmark.PerfBenchmark()
     options = options_for_unittests.GetCopy()
@@ -71,47 +69,63 @@ class PerfBenchmarkTest(unittest.TestCase):
     if possible_browser is None:
       return
     target_os = perf_benchmark.PerfBenchmark.FixupTargetOS(
-        possible_browser.target_os)
+      possible_browser.target_os
+    )
     self.assertIsNotNone(target_os)
 
-    testing_config = json.dumps({
-      "OtherPlatformStudy": [{
-          "platforms": ["fake_platform"],
-          "experiments": [{
-              "name": "OtherPlatformFeature",
-              "enable_features": ["NonExistentFeature"]
-          }]
-      }],
-      "TestStudy": [{
-          "platforms": [target_os],
-          "experiments": [{
-              "name": "TestFeature",
-              "params": { "param1" : "value1" },
-              "enable_features": ["Feature1", "Feature2"],
-              "disable_features": ["Feature3", "Feature4"]}]}]})
+    testing_config = json.dumps(
+      {
+        "OtherPlatformStudy": [
+          {
+            "platforms": ["fake_platform"],
+            "experiments": [
+              {
+                "name": "OtherPlatformFeature",
+                "enable_features": ["NonExistentFeature"],
+              }
+            ],
+          }
+        ],
+        "TestStudy": [
+          {
+            "platforms": [target_os],
+            "experiments": [
+              {
+                "name": "TestFeature",
+                "params": {"param1": "value1"},
+                "enable_features": ["Feature1", "Feature2"],
+                "disable_features": ["Feature3", "Feature4"],
+              }
+            ],
+          }
+        ],
+      }
+    )
     variations_dir = os.path.join(self._output_dir, "testing", "variations")
     os.makedirs(variations_dir)
 
     fieldtrial_path = os.path.join(
-        variations_dir, "fieldtrial_testing_config.json")
+      variations_dir, "fieldtrial_testing_config.json"
+    )
     with open(fieldtrial_path, "w") as f:
       f.write(testing_config)
 
     benchmark.CustomizeOptions(options)
 
-    # For non-Android, we expect to just pass the "--enable-field-trial-config"
-    # flag. For Android, due to binary size constraints, the flag cannot be
-    # used. We instead expect generated browser args from the testing config
-    # file. See the FIELDTRIAL_TESTING_ENABLED buildflag definition in
+    # For non-Android, we expect to pass the
+    # "--enable-field-trial-config=benchmarking" flag. For Android, due to
+    # binary size constraints, the flag cannot be used. We instead expect
+    # generated browser args from the testing config file. See the
+    # FIELDTRIAL_TESTING_ENABLED buildflag definition in
     # components/variations/service/BUILD.gn for more details.
     if not perf_benchmark.PerfBenchmark.IsAndroid(possible_browser):
-      expected_args = ['--enable-field-trial-config']
+      expected_args = ['--enable-field-trial-config=benchmarking']
     else:
       expected_args = [
-          "--enable-features=Feature1<TestStudy,Feature2<TestStudy",
-          "--disable-features=Feature3<TestStudy,Feature4<TestStudy",
-          "--force-fieldtrials=TestStudy/TestFeature",
-          "--force-fieldtrial-params=TestStudy.TestFeature:param1/value1"
+        "--enable-features=Feature1<TestStudy,Feature2<TestStudy",
+        "--disable-features=Feature3<TestStudy,Feature4<TestStudy",
+        "--force-fieldtrials=TestStudy/TestFeature",
+        "--force-fieldtrial-params=TestStudy.TestFeature:param1/value1",
       ]
 
     for arg in expected_args:
@@ -239,8 +253,13 @@ class PerfBenchmarkTest(unittest.TestCase):
   def testAdTaggingRulesetInvalidJson(self):
     self._PopulateGenFiles()
     json_path = os.path.join(
-        self._output_dir, 'gen', 'components', 'subresource_filter', 'tools',
-        'default_local_state.json')
+      self._output_dir,
+      'gen',
+      'components',
+      'subresource_filter',
+      'tools',
+      'default_local_state.json',
+    )
     self.assertTrue(os.path.exists(json_path))
     with open(json_path, 'w') as f:
       f.write('{some invalid : json, 19')

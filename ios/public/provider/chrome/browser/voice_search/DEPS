@@ -1,3 +1,5 @@
 include_rules = [
-  "+ios/chrome/browser/voice/voice_search_language.h",
+  # keep-sorted start
+  "+ios/chrome/browser/voice/model/voice_search_language.h",
+  # keep-sorted end
 ]

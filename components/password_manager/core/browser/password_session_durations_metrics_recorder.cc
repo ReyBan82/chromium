@@ -4,44 +4,39 @@
 
 #include "components/password_manager/core/browser/password_session_durations_metrics_recorder.h"
 
+#include <string_view>
+
 #include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
 #include "base/time/time.h"
-#include "components/password_manager/core/browser/password_manager_features_util.h"
+#include "components/password_manager/core/browser/features/password_manager_features_util.h"
 
 namespace password_manager {
 
 namespace {
 
-void LogStateDuration(metrics_util::PasswordAccountStorageUserState user_state,
+void LogStateDuration(features_util::PasswordAccountStorageUserState user_state,
                       base::TimeDelta session_length) {
-  std::string suffix =
+  std::string_view suffix =
       metrics_util::GetPasswordAccountStorageUserStateHistogramSuffix(
           user_state);
   base::UmaHistogramLongTimes(
-      "PasswordManager.AccountStorageUserStateDuration." + suffix,
+      base::StrCat(
+          {"PasswordManager.AccountStorageUserStateDuration.", suffix}),
       session_length);
 }
 
 }  // namespace
 
 PasswordSessionDurationsMetricsRecorder::
-    PasswordSessionDurationsMetricsRecorder(PrefService* pref_service,
-                                            syncer::SyncService* sync_service)
-    : pref_service_(pref_service),
-      sync_service_(sync_service),
-      settings_watcher_(
-          pref_service_,
-          sync_service_,
-          base::BindRepeating(
-              &PasswordSessionDurationsMetricsRecorder::CheckForUserStateChange,
-              base::Unretained(this))),
+    PasswordSessionDurationsMetricsRecorder(syncer::SyncService* sync_service)
+    : sync_service_(sync_service),
       user_state_(features_util::ComputePasswordAccountStorageUserState(
-          pref_service_,
           sync_service_)) {
-  DCHECK(pref_service_);
   // |sync_service| can be null if sync is disabled by a command line flag.
-  if (sync_service_)
+  if (sync_service_) {
     sync_observation_.Observe(sync_service_.get());
+  }
 }
 
 PasswordSessionDurationsMetricsRecorder::
@@ -58,8 +53,9 @@ void PasswordSessionDurationsMetricsRecorder::OnSessionStarted(
 void PasswordSessionDurationsMetricsRecorder::OnSessionEnded(
     base::TimeDelta session_length) {
   // If there was no active session, just ignore this call.
-  if (!total_session_timer_)
+  if (!total_session_timer_) {
     return;
+  }
 
   if (session_length.is_zero()) {
     // During Profile teardown, this method is called with a |session_length|
@@ -90,13 +86,20 @@ void PasswordSessionDurationsMetricsRecorder::OnStateChanged(
   CheckForUserStateChange();
 }
 
+void PasswordSessionDurationsMetricsRecorder::OnSyncShutdown(
+    syncer::SyncService* sync) {
+  // Unreachable, since the service owning this instance is Shutdown() before
+  // the SyncService.
+  NOTREACHED();
+}
+
 void PasswordSessionDurationsMetricsRecorder::CheckForUserStateChange() {
-  metrics_util::PasswordAccountStorageUserState new_user_state =
-      features_util::ComputePasswordAccountStorageUserState(pref_service_,
-                                                            sync_service_);
+  features_util::PasswordAccountStorageUserState new_user_state =
+      features_util::ComputePasswordAccountStorageUserState(sync_service_);
   // If the state is unchanged, nothing to do.
-  if (new_user_state == user_state_)
+  if (new_user_state == user_state_) {
     return;
+  }
 
   // The state has changed, so record metrics for the just-ended part of the
   // browsing session, and start recording time against the new state. However,

@@ -2,12 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/strings/string_number_conversions.h"
 #include "base/values.h"
-
-#include "base/containers/contains.h"
 #include "chrome/browser/policy/policy_test_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/common/pref_names.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_pref_names.h"
@@ -34,9 +32,9 @@ class WebRtcLocalIpsAllowedUrlsTest : public PolicyTest,
     provider_.UpdateChromePolicy(policies);
   }
 
-  base::Value::List GenerateUrlList() {
+  base::ListValue GenerateUrlList() {
     int num_urls = GetParam();
-    base::Value::List ret;
+    base::ListValue ret;
     for (int i = 0; i < num_urls; ++i)
       ret.Append(base::NumberToString(i) + ".example.com");
 
@@ -46,14 +44,15 @@ class WebRtcLocalIpsAllowedUrlsTest : public PolicyTest,
 
 IN_PROC_BROWSER_TEST_P(WebRtcLocalIpsAllowedUrlsTest, RunTest) {
   const PrefService::Preference* pref =
-      user_prefs::UserPrefs::Get(browser()->profile())
+      user_prefs::UserPrefs::Get(browser()->GetProfile())
           ->FindPreference(prefs::kWebRtcLocalIpsAllowedUrls);
   EXPECT_TRUE(pref->IsManaged());
-  const base::Value::List& allowed_urls = pref->GetValue()->GetList();
+  const base::ListValue& allowed_urls = pref->GetValue()->GetList();
   const auto& expected_urls = GenerateUrlList();
   EXPECT_EQ(expected_urls.size(), allowed_urls.size());
   for (const auto& allowed_url : allowed_urls) {
-    EXPECT_TRUE(base::Contains(expected_urls, allowed_url));
+    ASSERT_TRUE(allowed_url.is_string());
+    EXPECT_TRUE(expected_urls.contains(allowed_url.GetString()));
   }
 }
 

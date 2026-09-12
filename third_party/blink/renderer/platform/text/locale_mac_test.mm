@@ -26,6 +26,7 @@
 #include "third_party/blink/renderer/platform/text/locale_mac.h"
 
 #include <memory>
+
 #include "base/mac/mac_util.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/platform.h"
@@ -33,13 +34,14 @@
 #include "third_party/blink/renderer/platform/text/date_components.h"
 #include "third_party/blink/renderer/platform/wtf/date_math.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 
 namespace blink {
 
 class LocalePlatformSupport : public TestingPlatformSupport {
  public:
   WebString QueryLocalizedString(int /*resource_id*/) override {
-    return WebString::FromUTF8("Week $2, $1");
+    return WebString("Week $2, $1");
   }
 };
 
@@ -80,15 +82,16 @@ class LocaleMacTest : public testing::Test {
                                    int minute,
                                    int second,
                                    int millisecond) {
+    base::TimeDelta time = base::Hours(hour) + base::Minutes(minute) +
+                           base::Seconds(second) +
+                           base::Milliseconds(millisecond);
     DateComponents date;
-    date.SetMillisecondsSinceMidnight(hour * kMsPerHour +
-                                      minute * kMsPerMinute +
-                                      second * kMsPerSecond + millisecond);
+    date.SetMillisecondsSinceMidnight(time.InMillisecondsF());
     return date;
   }
 
   double MsForDate(int year, int month, int day) {
-    return DateToDaysFrom1970(year, month, day) * kMsPerDay;
+    return base::Days(DateToDaysFrom1970(year, month, day)).InMillisecondsF();
   }
 
   String FormatWeek(const String& locale_string, const String& iso_string) {
@@ -144,9 +147,9 @@ class LocaleMacTest : public testing::Test {
     return locale->WeekDayShortLabels()[index];
   }
 
-  bool IsRTL(const String& locale_string) {
+  bool IsRtl(const String& locale_string) {
     std::unique_ptr<LocaleMac> locale = LocaleMac::Create(locale_string);
-    return locale->IsRTL();
+    return locale->IsRtl();
   }
 
   String MonthFormat(const String& locale_string) {
@@ -180,9 +183,9 @@ class LocaleMacTest : public testing::Test {
     return locale->ShortStandAloneMonthLabels()[index];
   }
 
-  String TimeAMPMLabel(const String& locale_string, unsigned index) {
+  String TimeAmPmLabel(const String& locale_string, unsigned index) {
     std::unique_ptr<LocaleMac> locale = LocaleMac::Create(locale_string);
-    return locale->TimeAMPMLabels()[index];
+    return locale->TimeAmPmLabels()[index];
   }
 
   String DecimalSeparator(const String& locale_string) {
@@ -222,7 +225,7 @@ TEST_F(LocaleMacTest, formatTime) {
   EXPECT_EQ("13:23", FormatTime("fr_FR", 13, 23, 00, 000, true));
   EXPECT_EQ("13:23", FormatTime("ja_JP", 13, 23, 00, 000, true));
   EXPECT_EQ("\xD9\xA1:\xD9\xA2\xD9\xA3\xC2\xA0\xD9\x85",
-            FormatTime("ar", 13, 23, 00, 000, true).Utf8());
+            FormatTime("ar_SA", 13, 23, 00, 000, true).Utf8());
   EXPECT_EQ("\xDB\xB1\xDB\xB3:\xDB\xB2\xDB\xB3",
             FormatTime("fa", 13, 23, 00, 000, true).Utf8());
 
@@ -230,7 +233,7 @@ TEST_F(LocaleMacTest, formatTime) {
   EXPECT_EQ("00:00", FormatTime("fr_FR", 00, 00, 00, 000, true));
   EXPECT_EQ("0:00", FormatTime("ja_JP", 00, 00, 00, 000, true));
   EXPECT_EQ("\xD9\xA1\xD9\xA2:\xD9\xA0\xD9\xA0\xC2\xA0\xD8\xB5",
-            FormatTime("ar", 00, 00, 00, 000, true).Utf8());
+            FormatTime("ar_SA", 00, 00, 00, 000, true).Utf8());
   EXPECT_EQ("\xDB\xB0:\xDB\xB0\xDB\xB0",
             FormatTime("fa", 00, 00, 00, 000, true).Utf8());
 
@@ -239,7 +242,7 @@ TEST_F(LocaleMacTest, formatTime) {
   EXPECT_EQ("7:07:07.007", FormatTime("ja_JP", 07, 07, 07, 007, false));
   EXPECT_EQ("\xD9\xA7:\xD9\xA0\xD9\xA7:"
             "\xD9\xA0\xD9\xA7\xD9\xAB\xD9\xA0\xD9\xA0\xD9\xA7\xC2\xA0\xD8\xB5",
-            FormatTime("ar", 07, 07, 07, 007, false).Utf8());
+            FormatTime("ar_SA", 07, 07, 07, 007, false).Utf8());
   EXPECT_EQ("\xDB\xB7:\xDB\xB0\xDB\xB7:"
             "\xDB\xB0\xDB\xB7\xD9\xAB\xDB\xB0\xDB\xB0\xDB\xB7",
             FormatTime("fa", 07, 07, 07, 007, false).Utf8());
@@ -281,11 +284,11 @@ TEST_F(LocaleMacTest, weekDayShortLabels) {
   EXPECT_EQ("\xE5\x9C\x9F", WeekDayShortLabel("ja_JP", kSaturday).Utf8());
 }
 
-TEST_F(LocaleMacTest, isRTL) {
-  EXPECT_TRUE(IsRTL("ar-eg"));
-  EXPECT_FALSE(IsRTL("en-us"));
-  EXPECT_FALSE(IsRTL("ja-jp"));
-  EXPECT_FALSE(IsRTL("**invalid**"));
+TEST_F(LocaleMacTest, IsRtl) {
+  EXPECT_TRUE(IsRtl("ar-eg"));
+  EXPECT_FALSE(IsRtl("en-us"));
+  EXPECT_FALSE(IsRtl("ja-jp"));
+  EXPECT_FALSE(IsRtl("**invalid**"));
 }
 
 TEST_F(LocaleMacTest, monthFormat) {
@@ -353,15 +356,15 @@ TEST_F(LocaleMacTest, shortMonthLabels) {
   //  "\xD0\x9C\xD0\xB0\xD1\x80\xD1\x82" "\xD0\x9C\xD0\xB0\xD0\xB9" on 10.8
 }
 
-TEST_F(LocaleMacTest, timeAMPMLabels) {
-  EXPECT_EQ("AM", TimeAMPMLabel("en_US", 0));
-  EXPECT_EQ("PM", TimeAMPMLabel("en_US", 1));
+TEST_F(LocaleMacTest, TimeAmPmLabels) {
+  EXPECT_EQ("AM", TimeAmPmLabel("en_US", 0));
+  EXPECT_EQ("PM", TimeAmPmLabel("en_US", 1));
 
-  EXPECT_EQ("AM", TimeAMPMLabel("fr_FR", 0));
-  EXPECT_EQ("PM", TimeAMPMLabel("fr_FR", 1));
+  EXPECT_EQ("AM", TimeAmPmLabel("fr_FR", 0));
+  EXPECT_EQ("PM", TimeAmPmLabel("fr_FR", 1));
 
-  EXPECT_EQ("\xE5\x8D\x88\xE5\x89\x8D", TimeAMPMLabel("ja_JP", 0).Utf8());
-  EXPECT_EQ("\xE5\x8D\x88\xE5\xBE\x8C", TimeAMPMLabel("ja_JP", 1).Utf8());
+  EXPECT_EQ("\xE5\x8D\x88\xE5\x89\x8D", TimeAmPmLabel("ja_JP", 0).Utf8());
+  EXPECT_EQ("\xE5\x8D\x88\xE5\xBE\x8C", TimeAmPmLabel("ja_JP", 1).Utf8());
 }
 
 TEST_F(LocaleMacTest, decimalSeparator) {
@@ -380,7 +383,7 @@ static void TestNumberIsReversible(const AtomicString& locale_string,
   std::unique_ptr<LocaleMac> locale = LocaleMac::Create(locale_string);
   String localized = locale->ConvertToLocalizedNumber(original);
   if (should_have)
-    EXPECT_TRUE(localized.Contains(should_have));
+    EXPECT_TRUE(localized.contains(should_have));
   String converted = locale->ConvertFromLocalizedNumber(localized);
   EXPECT_EQ(original, converted);
 }
@@ -396,17 +399,17 @@ void TestNumbers(const AtomicString& locale_string,
 
 TEST_F(LocaleMacTest, localizedNumberRoundTrip) {
   // Test some of major locales.
-  TestNumbers("en_US", ".");
-  TestNumbers("fr_FR", ",");
-  TestNumbers("ar");
-  TestNumbers("de_DE");
-  TestNumbers("es_ES");
-  TestNumbers("fa");
-  TestNumbers("ja_JP");
-  TestNumbers("ko_KR");
-  TestNumbers("zh_CN");
-  TestNumbers("zh_HK");
-  TestNumbers("zh_TW");
+  TestNumbers(AtomicString("en_US"), ".");
+  TestNumbers(AtomicString("fr_FR"), ",");
+  TestNumbers(AtomicString("ar"));
+  TestNumbers(AtomicString("de_DE"));
+  TestNumbers(AtomicString("es_ES"));
+  TestNumbers(AtomicString("fa"));
+  TestNumbers(AtomicString("ja_JP"));
+  TestNumbers(AtomicString("ko_KR"));
+  TestNumbers(AtomicString("zh_CN"));
+  TestNumbers(AtomicString("zh_HK"));
+  TestNumbers(AtomicString("zh_TW"));
 }
 
 }  // namespace blink

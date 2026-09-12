@@ -6,16 +6,15 @@
 
 #include "base/auto_reset.h"
 #include "base/containers/adapters.h"
-#include "base/containers/contains.h"
-#include "base/containers/cxx20_erase.h"
+#include "base/trace_event/trace_event.h"
 #include "third_party/skia/include/core/SkRect.h"
 #include "third_party/skia/include/core/SkRegion.h"
 #include "ui/aura/env.h"
 #include "ui/aura/native_window_occlusion_tracker.h"
 #include "ui/aura/window_occlusion_change_builder.h"
 #include "ui/aura/window_tree_host.h"
-#include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animator.h"
+#include "ui/compositor/layer_solid_color.h"
 #include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/geometry/skia_conversions.h"
 #include "ui/gfx/geometry/transform.h"
@@ -26,7 +25,7 @@ namespace {
 
 // When one of these properties is animated, a window is considered non-occluded
 // and cannot occlude other windows.
-// TODO(crbug.com/1057024): Mark a window VISIBLE when COLOR animation starts.
+// The window is considered VISIBLE when COLOR animation starts.
 constexpr ui::LayerAnimationElement::AnimatableProperties
     kSkipWindowWhenPropertiesAnimated =
         ui::LayerAnimationElement::TRANSFORM |
@@ -52,7 +51,7 @@ constexpr ui::LayerAnimationElement::AnimatableProperties
 // RenderWidgetHostViewAura. https://crbug.com/827268
 constexpr int kMaxRecomputeOcclusion = 3;
 
-bool WindowOrParentHasShape(Window* window) {
+bool WindowOrParentHasShape(const Window* window) {
   if (window->layer()->alpha_shape())
     return true;
   if (window->parent())
@@ -60,7 +59,7 @@ bool WindowOrParentHasShape(Window* window) {
   return false;
 }
 
-bool WindowHasOpaqueRegionsForOcclusion(Window* window) {
+bool WindowHasOpaqueRegionsForOcclusion(const Window* window) {
   return !window->opaque_regions_for_occlusion().empty();
 }
 
@@ -81,13 +80,14 @@ gfx::Transform GetWindowTransformRelativeToRoot(
   gfx::Transform translation;
   gfx::Transform transform_relative_to_root;
   if (use_target_values) {
-    translation.Translate(
-        static_cast<float>(window->layer()->GetTargetBounds().x()),
-        static_cast<float>(window->layer()->GetTargetBounds().y()));
+    // Use aura::Window API to get bounds which works even with
+    // `layer_managed_by_parent` is set to false.
+    translation.Translate(static_cast<float>(window->GetTargetBounds().x()),
+                          static_cast<float>(window->GetTargetBounds().y()));
     transform_relative_to_root = window->layer()->GetTargetTransform();
   } else {
-    translation.Translate(static_cast<float>(window->layer()->bounds().x()),
-                          static_cast<float>(window->layer()->bounds().y()));
+    translation.Translate(static_cast<float>(window->bounds().x()),
+                          static_cast<float>(window->bounds().y()));
     transform_relative_to_root = window->layer()->transform();
   }
   transform_relative_to_root.PostConcat(translation);
@@ -95,22 +95,38 @@ gfx::Transform GetWindowTransformRelativeToRoot(
   return transform_relative_to_root;
 }
 
-SkIRect ComputeClippedAndTransformedBounds(
+// Applies `transform_relative_to_root` to `bounds` and returns the enclosing
+// bounds.
+SkIRect ComputeTransformedBoundsEnclosing(
     const gfx::Rect& bounds,
-    const gfx::Transform& transform_relative_to_root,
-    const SkIRect* clipped_bounds) {
+    const gfx::Transform& transform_relative_to_root) {
   DCHECK(transform_relative_to_root.Preserves2dAxisAlignment());
-  gfx::Rect transformed_bounds = transform_relative_to_root.MapRect(bounds);
-  SkIRect skirect_bounds = gfx::RectToSkIRect(transformed_bounds);
+  return gfx::RectToSkIRect(transform_relative_to_root.MapRect(bounds));
+}
+
+// Applies `transform_relative_to_root` to `bounds` and returns the enclosed
+// bounds.
+SkIRect ComputeTransformedBoundsEnclosed(
+    const gfx::Rect& bounds,
+    const gfx::Transform& transform_relative_to_root) {
+  DCHECK(transform_relative_to_root.Preserves2dAxisAlignment());
+  return gfx::RectToSkIRect(gfx::ToEnclosedRect(
+      transform_relative_to_root.MapRect(gfx::RectF(bounds))));
+}
+
+SkIRect ComputeClippedBounds(SkIRect bounds, const SkIRect* clipped_bounds) {
   // If necessary, clip the bounds.
-  if (clipped_bounds && !skirect_bounds.intersect(*clipped_bounds))
+  if (clipped_bounds && !bounds.intersect(*clipped_bounds)) {
     return SkIRect::MakeEmpty();
-  return skirect_bounds;
+  }
+  return bounds;
 }
 
 // Returns the bounds of |window| relative to its |root|.
 // |transform_relative_to_root| is the transform of |window| relative to its
 // root. If |clipped_bounds| is not null, the returned bounds are clipped by it.
+// If the bounds after transform have fractional coordinates, enclosed bounds in
+// integers are used.
 SkIRect GetWindowBoundsInRootWindow(
     Window* window,
     const gfx::Transform& transform_relative_to_root,
@@ -118,9 +134,10 @@ SkIRect GetWindowBoundsInRootWindow(
     bool use_target_values) {
   // Compute the unclipped bounds of |window|.
   const gfx::Rect src_bounds =
-      use_target_values ? window->layer()->GetTargetBounds() : window->bounds();
-  return ComputeClippedAndTransformedBounds(
-      gfx::Rect(src_bounds.size()), transform_relative_to_root, clipped_bounds);
+      use_target_values ? window->GetTargetBounds() : window->bounds();
+  const SkIRect transformed_bounds = ComputeTransformedBoundsEnclosed(
+      gfx::Rect(src_bounds.size()), transform_relative_to_root);
+  return ComputeClippedBounds(transformed_bounds, clipped_bounds);
 }
 
 // Returns the bounds that |window| should contribute to be used for occluding
@@ -130,6 +147,8 @@ SkIRect GetWindowBoundsInRootWindow(
 // contribute to occluding other windows because a translucent region should
 // not be considered to occlude other windows, but must be covered by something
 // opaque for it itself to be occluded.
+// If the bounds after transform have fractional coordinates, enclosing bounds
+// in integers are used.
 SkIRect GetOpaqueBoundsInRootWindow(
     Window* window,
     const gfx::Transform& transform_relative_to_root,
@@ -143,9 +162,9 @@ SkIRect GetOpaqueBoundsInRootWindow(
   // top-left corner of the window is considered to be the point (0, 0).
   gfx::Rect opaque_region = window->opaque_regions_for_occlusion()[0];
   opaque_region.Intersect(gfx::Rect(window->bounds().size()));
-
-  return ComputeClippedAndTransformedBounds(
-      opaque_region, transform_relative_to_root, clipped_bounds);
+  const SkIRect transformed_bounds = ComputeTransformedBoundsEnclosing(
+      opaque_region, transform_relative_to_root);
+  return ComputeClippedBounds(transformed_bounds, clipped_bounds);
 }
 
 float GetLayerCombinedTargetOpacity(const ui::Layer* layer) {
@@ -161,16 +180,16 @@ float GetLayerCombinedTargetOpacity(const ui::Layer* layer) {
 }  // namespace
 
 WindowOcclusionTracker::ScopedPause::ScopedPause() {
-  Env::GetInstance()->PauseWindowOcclusionTracking();
+  Env::GetInstance()->GetWindowOcclusionTracker()->Pause();
 }
 
 WindowOcclusionTracker::ScopedPause::~ScopedPause() {
-  Env::GetInstance()->UnpauseWindowOcclusionTracking();
+  Env::GetInstance()->GetWindowOcclusionTracker()->Unpause();
 }
 
 WindowOcclusionTracker::ScopedExclude::ScopedExclude(Window* window)
     : window_(window) {
-  window->AddObserver(this);
+  window_->AddObserver(this);
   Env::GetInstance()->GetWindowOcclusionTracker()->Exclude(window_);
 }
 
@@ -216,6 +235,34 @@ void WindowOcclusionTracker::ScopedForceVisible::Shutdown() {
   }
 }
 
+WindowOcclusionTracker::ScopedLockState::ScopedLockState(Window* window)
+    : window_(window) {
+  window_->AddObserver(this);
+  Env::GetInstance()->GetWindowOcclusionTracker()->Lock(window_, /*lock=*/true);
+}
+
+WindowOcclusionTracker::ScopedLockState::~ScopedLockState() {
+  if (window_) {
+    Env::GetInstance()->GetWindowOcclusionTracker()->Lock(window_,
+                                                          /*lock=*/false);
+  }
+  Shutdown();
+}
+
+void WindowOcclusionTracker::ScopedLockState::OnWindowDestroying(
+    Window* window) {
+  DCHECK_EQ(window_, window);
+  Shutdown();
+}
+
+void WindowOcclusionTracker::ScopedLockState::Shutdown() {
+  if (window_) {
+    window_->RemoveObserver(this);
+    // No need to reset the locked state here.
+    window_ = nullptr;
+  }
+}
+
 void WindowOcclusionTracker::Track(Window* window) {
   DCHECK(window);
   DCHECK(window != window->GetRootWindow());
@@ -230,26 +277,72 @@ void WindowOcclusionTracker::Track(Window* window) {
     TrackedWindowAddedToRoot(window);
 }
 
+void WindowOcclusionTracker::Untrack(Window* window) {
+  auto builder =
+      WindowOcclusionChangeBuilder::Create(/*disallow_unknown=*/false);
+
+  DCHECK(window);
+  DCHECK(window != window->GetRootWindow());
+
+  if (tracked_windows_.erase(window) == 0) {
+    return;
+  }
+
+  if (window->layer()) {
+    RemoveAnimationObservationForLayer(window->layer());
+  }
+
+  if (window->GetRootWindow()) {
+    RemoveTrackedWindowFromRoot(window);
+  }
+
+  window_observations_.RemoveObservation(window);
+  builder->Add(window, Window::OcclusionState::UNKNOWN, {});
+}
+
+Window::OcclusionState WindowOcclusionTracker::GetComputedOcclusionState(
+    Window* window) const {
+  auto it = tracked_windows_.find(window);
+  if (it == tracked_windows_.end()) {
+    return Window::OcclusionState::UNKNOWN;
+  }
+  return it->second.occlusion_state;
+}
+
+bool WindowOcclusionTracker::IsTracking(Window* window) const {
+  return WindowIsTracked(window);
+}
+
+void WindowOcclusionTracker::ForceComputeOcclusion() {
+  base::AutoReset<int> auto_reset(&num_pause_occlusion_tracking_, 0);
+  MaybeComputeOcclusion();
+}
+
 WindowOcclusionTracker::OcclusionData
 WindowOcclusionTracker::ComputeTargetOcclusionForWindow(Window* window) {
   // Compute the occlusion with target state, just for this window.
   // This doesn't update the occlusion states of any window, so we should only
   // require one pass.
   auto tracked_window_iter = tracked_windows_.find(window);
-  DCHECK(tracked_window_iter != tracked_windows_.end());
+  CHECK(tracked_window_iter != tracked_windows_.end());
 
   base::AutoReset<OcclusionData> auto_reset_occlusion_data(
       &tracked_window_iter->second, OcclusionData());
   DCHECK(!target_occlusion_window_);
-  base::AutoReset<Window*> auto_reset_target_occlusion_window(
+  base::AutoReset<raw_ptr<Window>> auto_reset_target_occlusion_window(
       &target_occlusion_window_, window);
 
   Window* root_window = window->GetRootWindow();
   SkRegion occluded_region;
-  RecomputeOcclusionImpl(root_window, gfx::Transform(), nullptr,
+  SkIRect root_window_clip = gfx::RectToSkIRect(root_window->bounds());
+  RecomputeOcclusionImpl(root_window, gfx::Transform(), &root_window_clip,
                          &occluded_region);
 
   return tracked_window_iter->second;
+}
+
+bool WindowOcclusionTracker::IsObservingWindowTreeHostsForTest() const {
+  return window_tree_host_observations_.IsObservingAnySource();
 }
 
 WindowOcclusionTracker::WindowOcclusionTracker() = default;
@@ -259,9 +352,12 @@ WindowOcclusionTracker::~WindowOcclusionTracker() = default;
 bool WindowOcclusionTracker::OcclusionStatesMatch(
     const base::flat_map<Window*, OcclusionData>& tracked_windows) {
   for (const auto& tracked_window : tracked_windows) {
-    if (tracked_window.second.occlusion_state !=
-        tracked_window.first->GetOcclusionState())
+    auto occlusion_state =
+        tracked_window.second.locked_occlusion_state.value_or(
+            tracked_window.second.occlusion_state);
+    if (occlusion_state != tracked_window.first->GetOcclusionState()) {
       return false;
+    }
   }
   return true;
 }
@@ -274,6 +370,9 @@ void WindowOcclusionTracker::MaybeComputeOcclusion() {
 
   base::AutoReset<int> auto_reset(
       &num_times_occlusion_recomputed_in_current_step_, 0);
+
+  TRACE_EVENT1("ui", "WindowOcclusionTracker::MaybeComputeOcclusion", "this",
+               reinterpret_cast<void*>(this));
 
   // Recompute occlusion states until either:
   // - They are stable, i.e. calling Window::SetOcclusionInfo() on all tracked
@@ -305,10 +404,20 @@ void WindowOcclusionTracker::MaybeComputeOcclusion() {
               Window::OcclusionState::OCCLUDED) {
             SetWindowAndDescendantsAreOccluded(
                 root_window, /* is_occluded */ true, root_window->IsVisible());
+// TODO(crbug.com/40262710): Enable for other platforms in a separate CL.
+#if BUILDFLAG(IS_CHROMEOS)
+          } else if (root_window_pair.second.occlusion_state ==
+                     Window::OcclusionState::HIDDEN) {
+            SetWindowAndDescendantsAreOccluded(root_window,
+                                               /* is_occluded */ false,
+                                               /* is_parent_visible */ false);
+#endif
           } else {
             SkRegion occluded_region = root_window_pair.second.occluded_region;
-            RecomputeOcclusionImpl(root_window, gfx::Transform(), nullptr,
-                                   &occluded_region);
+            SkIRect root_window_clip =
+                gfx::RectToSkIRect(root_window->bounds());
+            RecomputeOcclusionImpl(root_window, gfx::Transform(),
+                                   &root_window_clip, &occluded_region);
           }
         }
       }
@@ -320,33 +429,45 @@ void WindowOcclusionTracker::MaybeComputeOcclusion() {
     ++num_times_occlusion_recomputed_;
     ++num_times_occlusion_recomputed_in_current_step_;
 
-    std::unique_ptr<WindowOcclusionChangeBuilder> change_builder =
-        occlusion_change_builder_factory_
-            ? occlusion_change_builder_factory_.Run()
-            : WindowOcclusionChangeBuilder::Create();
-    for (auto& it : tracked_windows_) {
-      Window* window = it.first;
-      if (it.second.occlusion_state == Window::OcclusionState::UNKNOWN)
-        continue;
-
-      // Fallback to VISIBLE/HIDDEN if the maximum number of times that
-      // occlusion can be recomputed was exceeded.
-      if (exceeded_max_num_times_occlusion_recomputed) {
-        if (WindowIsVisible(window))
-          it.second.occlusion_state = Window::OcclusionState::VISIBLE;
-        else
-          it.second.occlusion_state = Window::OcclusionState::HIDDEN;
-        it.second.occluded_region = SkRegion();
-      }
-
-      change_builder->Add(window, it.second.occlusion_state,
-                          it.second.occluded_region);
-    }
+    NotifyOcclusionState(exceeded_max_num_times_occlusion_recomputed);
   }
 
   // Sanity check: Occlusion states in |tracked_windows_| should match those
-  // returned by Window::GetOcclusionState().
+  // returned by Window::GetOcclusionState() if the default
+  // `WindowOcclusionChangeBuilder` is being used.
   DCHECK(OcclusionStatesMatch(tracked_windows_));
+}
+
+void WindowOcclusionTracker::NotifyOcclusionState(
+    std::optional<bool> exceeded_max_num_times_occlusion_recomputed) {
+  std::unique_ptr<WindowOcclusionChangeBuilder> change_builder =
+      WindowOcclusionChangeBuilder::Create();
+
+  for (auto& it : tracked_windows_) {
+    Window* window = it.first;
+    // Fallback to VISIBLE/HIDDEN if the maximum number of times that
+    // occlusion can be recomputed was exceeded.
+    if (exceeded_max_num_times_occlusion_recomputed.value_or(false) &&
+        it.second.occlusion_state != Window::OcclusionState::UNKNOWN) {
+      if (WindowIsVisible(window)) {
+        it.second.occlusion_state = Window::OcclusionState::VISIBLE;
+      } else {
+        it.second.occlusion_state = Window::OcclusionState::HIDDEN;
+      }
+      it.second.occluded_region = SkRegion();
+    }
+
+    auto occlusion_state =
+        it.second.locked_occlusion_state.value_or(it.second.occlusion_state);
+    if (occlusion_state == Window::OcclusionState::UNKNOWN) {
+      continue;
+    }
+
+    auto occluded_region = it.second.locked_occlusion_state
+                               ? it.second.locked_occluded_region
+                               : it.second.occluded_region;
+    change_builder->Add(window, occlusion_state, occluded_region);
+  }
 }
 
 bool WindowOcclusionTracker::RecomputeOcclusionImpl(
@@ -405,7 +526,7 @@ bool WindowOcclusionTracker::RecomputeOcclusionImpl(
   SkRegion region_for_forced_visible_windows;
   SkRegion* occluded_region_for_children =
       force_visible ? &region_for_forced_visible_windows : occluded_region;
-  for (auto* child : base::Reversed(window->children())) {
+  for (aura::Window* child : base::Reversed(window->children())) {
     has_visible_child |= RecomputeOcclusionImpl(
         child, transform_relative_to_root, clipped_bounds_for_children,
         occluded_region_for_children);
@@ -437,17 +558,17 @@ bool WindowOcclusionTracker::RecomputeOcclusionImpl(
 }
 
 bool WindowOcclusionTracker::VisibleWindowCanOccludeOtherWindows(
-    Window* window) const {
+    const Window* window) const {
   DCHECK(window->layer());
   float combined_opacity = ShouldUseTargetValues()
                                ? GetLayerCombinedTargetOpacity(window->layer())
                                : window->layer()->GetCombinedOpacity();
   // Just check the alpha on this layer as an alpha on parent solid color layers
   // will not affect children's opacity.
-  if (window->layer()->type() == ui::LAYER_SOLID_COLOR) {
-    auto color = ShouldUseTargetValues() ? window->layer()->GetTargetColor()
-                                         : window->layer()->background_color();
-    combined_opacity *= SkColorGetA(color) / 255.f;
+  if (auto* layer = window->layer()->AsSolidColor()) {
+    auto color = ShouldUseTargetValues() ? layer->GetTargetColor()
+                                         : layer->background_color();
+    combined_opacity *= color.fA;
   }
   return (!window->GetTransparent() && WindowHasContent(window) &&
           combined_opacity == 1.0f &&
@@ -456,23 +577,18 @@ bool WindowOcclusionTracker::VisibleWindowCanOccludeOtherWindows(
          WindowHasOpaqueRegionsForOcclusion(window);
 }
 
-bool WindowOcclusionTracker::WindowHasContent(Window* window) const {
-  if (window->layer()->type() != ui::LAYER_NOT_DRAWN)
-    return true;
-
-  if (window_has_content_callback_)
-    return window_has_content_callback_.Run(window);
-
-  return false;
+bool WindowOcclusionTracker::WindowHasContent(const Window* window) const {
+  return !window->layer()->AsNotDrawn();
 }
 
 void WindowOcclusionTracker::CleanupAnimatedWindows() {
-  base::EraseIf(animated_windows_, [=](Window* window) {
+  base::EraseIf(animated_windows_, [=, this](Window* window) {
     ui::LayerAnimator* const animator = window->layer()->GetAnimator();
     if (animator->IsAnimatingOnePropertyOf(
             kOcclusionCanChangeWhenPropertyAnimationEnds))
       return false;
-    animator->RemoveObserver(this);
+
+    RemoveAnimationObservationForLayer(window->layer());
     MarkRootWindowAsDirty(window->GetRootWindow());
     return true;
   });
@@ -490,7 +606,8 @@ bool WindowOcclusionTracker::MaybeObserveAnimatedWindow(Window* window) {
           kOcclusionCanChangeWhenPropertyAnimationEnds)) {
     const auto insert_result = animated_windows_.insert(window);
     if (insert_result.second) {
-      animator->AddObserver(this);
+      layer_animator_observations.AddObservation(animator);
+      animated_layer_observations_.AddObservation(window->layer());
       return true;
     }
   }
@@ -540,18 +657,17 @@ void WindowOcclusionTracker::SetOccluded(Window* window,
 }
 
 bool WindowOcclusionTracker::WindowIsTracked(Window* window) const {
-  return base::Contains(tracked_windows_, window);
+  return tracked_windows_.contains(window);
 }
 
 bool WindowOcclusionTracker::WindowIsAnimated(Window* window) const {
-  return !ShouldUseTargetValues() &&
-         base::Contains(animated_windows_, window) &&
+  return !ShouldUseTargetValues() && animated_windows_.contains(window) &&
          window->layer()->GetAnimator()->IsAnimatingOnePropertyOf(
              kSkipWindowWhenPropertiesAnimated);
 }
 
 bool WindowOcclusionTracker::WindowIsExcluded(Window* window) const {
-  return base::Contains(excluded_windows_, window);
+  return excluded_windows_.contains(window);
 }
 
 bool WindowOcclusionTracker::WindowIsVisible(Window* window) const {
@@ -690,38 +806,55 @@ void WindowOcclusionTracker::TrackedWindowAddedToRoot(Window* window) {
   RootWindowState& root_window_state = root_windows_[root_window];
   ++root_window_state.num_tracked_windows;
   MarkRootWindowStateAsDirty(&root_window_state);
+  auto* host = root_window->GetHost();
+  CHECK(host);
 
   // It's only useful to track the host if |window| is the first tracked window
   // under |root_window|.  All windows under the same root have the same host.
-  if (root_window_state.num_tracked_windows == 1) {
+  if (!window_tree_host_observations_.IsObservingSource(host)) {
+    if (num_tracked_windows_count_check_) {
+      DCHECK_EQ(root_window_state.num_tracked_windows, 1);
+    }
     AddObserverToWindowAndDescendants(root_window);
-    auto* host = root_window->GetHost();
-    if (host) {
-      host->AddObserver(this);
-      if (!NativeWindowOcclusionTracker::
-              IsNativeWindowOcclusionTrackingAlwaysEnabled(host)) {
-        NativeWindowOcclusionTracker::EnableNativeWindowOcclusionTracking(host);
-      }
+    window_tree_host_observations_.AddObservation(host);
+    if (!NativeWindowOcclusionTracker::
+            IsNativeWindowOcclusionTrackingAlwaysEnabled(host)) {
+      NativeWindowOcclusionTracker::EnableNativeWindowOcclusionTracking(host);
     }
   }
   MaybeComputeOcclusion();
 }
 
 void WindowOcclusionTracker::TrackedWindowRemovedFromRoot(Window* window) {
-  Window* const root_window = window->GetRootWindow();
-  DCHECK(root_window);
-  auto root_window_state_it = root_windows_.find(root_window);
-  DCHECK(root_window_state_it != root_windows_.end());
-  --root_window_state_it->second.num_tracked_windows;
-  if (root_window_state_it->second.num_tracked_windows == 0) {
-    RemoveObserverFromWindowAndDescendants(root_window);
-    root_windows_.erase(root_window_state_it);
-    WindowTreeHost* host = root_window->GetHost();
-    host->RemoveObserver(this);
-    if (!NativeWindowOcclusionTracker::
-            IsNativeWindowOcclusionTrackingAlwaysEnabled(host)) {
-      NativeWindowOcclusionTracker::DisableNativeWindowOcclusionTracking(host);
+  if (!maybe_removed_host_) {
+    return;
+  }
+  WindowTreeHost* host_to_remove = maybe_removed_host_;
+  maybe_removed_host_ = nullptr;
+  auto* root_window = host_to_remove->window();
+
+  for (auto tracked : tracked_windows_) {
+    auto* tracked_window = tracked.first;
+    if (root_window == tracked_window->GetRootWindow()) {
+      // Host exists.
+      return;
     }
+  }
+
+  auto root_window_state_it = root_windows_.find(root_window);
+  CHECK(root_window_state_it != root_windows_.end());
+  if (num_tracked_windows_count_check_) {
+    DCHECK_EQ(0, root_window_state_it->second.num_tracked_windows);
+  }
+
+  RemoveObserverFromWindowAndDescendants(root_window);
+  root_windows_.erase(root_window_state_it);
+  window_tree_host_observations_.RemoveObservation(host_to_remove);
+
+  if (!NativeWindowOcclusionTracker::
+          IsNativeWindowOcclusionTrackingAlwaysEnabled(host_to_remove)) {
+    NativeWindowOcclusionTracker::DisableNativeWindowOcclusionTracking(
+        host_to_remove);
   }
 }
 
@@ -732,7 +865,7 @@ void WindowOcclusionTracker::RemoveObserverFromWindowAndDescendants(
   } else {
     if (window_observations_.IsObservingSource(window))
       window_observations_.RemoveObservation(window);
-    window->layer()->GetAnimator()->RemoveObserver(this);
+    RemoveAnimationObservationForLayer(window->layer());
     animated_windows_.erase(window);
   }
   for (Window* child_window : window->children())
@@ -757,7 +890,19 @@ void WindowOcclusionTracker::Pause() {
 void WindowOcclusionTracker::Unpause() {
   --num_pause_occlusion_tracking_;
   DCHECK_GE(num_pause_occlusion_tracking_, 0);
-  MaybeComputeOcclusion();
+  if (num_pause_occlusion_tracking_ == 0) {
+    for (auto& it : tracked_windows_) {
+      if (it.second.lock_state == LockState::kUnlockPending) {
+        it.second.locked_occlusion_state.reset();
+        it.second.lock_state = LockState::kUnlocked;
+        Window* root_window = it.first->GetRootWindow();
+        if (root_window) {
+          MarkRootWindowAsDirty(root_window);
+        }
+      }
+    }
+    MaybeComputeOcclusion();
+  }
 }
 
 void WindowOcclusionTracker::Exclude(Window* window) {
@@ -791,12 +936,37 @@ void WindowOcclusionTracker::ForceWindowVisible(Window* window) {
 
 void WindowOcclusionTracker::RemoveForceWindowVisible(Window* window) {
   auto iter = forced_visible_count_map_.find(window);
-  DCHECK(iter != forced_visible_count_map_.end());
+  CHECK(iter != forced_visible_count_map_.end());
   if (--iter->second == 0u) {
     forced_visible_count_map_.erase(iter);
     Window* root_window = window->GetRootWindow();
     if (root_window && MarkRootWindowAsDirty(root_window))
       MaybeComputeOcclusion();
+  }
+}
+
+void WindowOcclusionTracker::Lock(Window* window, bool lock) {
+  auto tracked_window_iter = tracked_windows_.find(window);
+  CHECK(tracked_window_iter != tracked_windows_.end());
+  auto& occlusion_data = tracked_window_iter->second;
+
+  if (lock) {
+    CHECK_NE(occlusion_data.lock_state, LockState::kLocked);
+    if (occlusion_data.lock_state == LockState::kUnlocked) {
+      occlusion_data.locked_occlusion_state = occlusion_data.occlusion_state;
+      occlusion_data.locked_occluded_region = occlusion_data.occluded_region;
+    }
+    occlusion_data.lock_state = LockState::kLocked;
+  } else {
+    CHECK_EQ(occlusion_data.lock_state, LockState::kLocked);
+    if (num_pause_occlusion_tracking_ > 0) {
+      occlusion_data.lock_state = LockState::kUnlockPending;
+    } else {
+      occlusion_data.locked_occlusion_state.reset();
+      occlusion_data.lock_state = LockState::kUnlocked;
+      NotifyOcclusionState(
+          /*exceeded_max_num_times_occlusion_recomputed=*/std::nullopt);
+    }
   }
 }
 
@@ -819,23 +989,45 @@ void WindowOcclusionTracker::OnLayerAnimationAborted(
 void WindowOcclusionTracker::OnLayerAnimationScheduled(
     ui::LayerAnimationSequence* sequence) {}
 
+bool WindowOcclusionTracker::RequiresNotificationWhenAnimatorDestroyed() const {
+  // `OnLayerAnimationAborted()` should be called if the `LayerAnimator` is
+  // destroyed while an animation is still active. This gives
+  // `WindowOcclusionTracker` a chance to unregister itself as a
+  // `LayerAnimationObserver`.
+  return true;
+}
+
+void WindowOcclusionTracker::LayerDestroyed(ui::Layer* layer) {
+  // The only known use case here is for the layer recreation. When
+  // `OnWindowLayerRecreated()` is called, the `window` already has a new
+  // `Layer` and `LayerAnimator`. `WindowOcclusionTracker` needs access to the
+  // old layer though so that it can unregister itself as an observer of any
+  // animated properties. This method should be called for the old layer.
+  //
+  // For all other use cases, this method is effectively a no-op because some
+  // other observer event in this class fired already and caused
+  // `RemoveAnimationObservationForLayer()` to be called.
+  RemoveAnimationObservationForLayer(layer);
+}
+
 void WindowOcclusionTracker::OnWindowHierarchyChanged(
     const HierarchyChangeParams& params) {
   Window* const window = params.target;
   Window* const root_window = window->GetRootWindow();
-  if (root_window && base::Contains(root_windows_, root_window) &&
+  if (root_window && root_windows_.contains(root_window) &&
       !window_observations_.IsObservingSource(window)) {
     AddObserverToWindowAndDescendants(window);
   }
 }
 
 void WindowOcclusionTracker::OnWindowAdded(Window* window) {
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(
-      window, [=]() { return WindowMoveMayAffectOcclusionStates(window); });
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
+    return WindowMoveMayAffectOcclusionStates(window);
+  });
 }
 
 void WindowOcclusionTracker::OnWillRemoveWindow(Window* window) {
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     return !WindowOrParentIsAnimated(window) &&
            WindowOrDescendantCanOccludeOtherWindows(window);
   });
@@ -844,7 +1036,7 @@ void WindowOcclusionTracker::OnWillRemoveWindow(Window* window) {
 void WindowOcclusionTracker::OnWindowVisibilityChanged(Window* window,
                                                        bool visible) {
   MaybeObserveAnimatedWindow(window);
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     // A child isn't visible when its parent isn't IsVisible(). Therefore, there
     // is no need to compute occlusion when Show() or Hide() is called on a
     // window with a hidden parent.
@@ -863,7 +1055,7 @@ void WindowOcclusionTracker::OnWindowBoundsChanged(
   const bool animation_started =
       (reason == ui::PropertyChangeReason::FROM_ANIMATION) &&
       MaybeObserveAnimatedWindow(window);
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     return animation_started || WindowMoveMayAffectOcclusionStates(window);
   });
 }
@@ -876,14 +1068,14 @@ void WindowOcclusionTracker::OnWindowOpacitySet(
   const bool animation_started =
       (reason == ui::PropertyChangeReason::FROM_ANIMATION) &&
       MaybeObserveAnimatedWindow(window);
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     return animation_started ||
            WindowOpacityChangeMayAffectOcclusionStates(window);
   });
 }
 
 void WindowOcclusionTracker::OnWindowAlphaShapeSet(Window* window) {
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     return WindowOpacityChangeMayAffectOcclusionStates(window);
   });
 }
@@ -896,7 +1088,7 @@ void WindowOcclusionTracker::OnWindowTransparentChanged(
   const bool animation_started =
       (reason == ui::PropertyChangeReason::FROM_ANIMATION) &&
       MaybeObserveAnimatedWindow(window);
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     return animation_started ||
            WindowOpacityChangeMayAffectOcclusionStates(window);
   });
@@ -910,14 +1102,15 @@ void WindowOcclusionTracker::OnWindowTransformed(
   const bool animation_started =
       (reason == ui::PropertyChangeReason::FROM_ANIMATION) &&
       MaybeObserveAnimatedWindow(window);
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     return animation_started || WindowMoveMayAffectOcclusionStates(window);
   });
 }
 
 void WindowOcclusionTracker::OnWindowStackingChanged(Window* window) {
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(
-      window, [=]() { return WindowMoveMayAffectOcclusionStates(window); });
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
+    return WindowMoveMayAffectOcclusionStates(window);
+  });
 }
 
 void WindowOcclusionTracker::OnWindowDestroyed(Window* window) {
@@ -931,6 +1124,7 @@ void WindowOcclusionTracker::OnWindowDestroyed(Window* window) {
   // access in CleanupAnimatedWindows() if |window| is being destroyed from a
   // LayerAnimationObserver after an animation has ended but before |this| has
   // been notified.
+  RemoveAnimationObservationForLayer(window->layer());
   animated_windows_.erase(window);
 }
 
@@ -943,9 +1137,25 @@ void WindowOcclusionTracker::OnWindowAddedToRootWindow(Window* window) {
 void WindowOcclusionTracker::OnWindowRemovingFromRootWindow(Window* window,
                                                             Window* new_root) {
   DCHECK(window->GetRootWindow());
-  if (WindowIsTracked(window))
-    TrackedWindowRemovedFromRoot(window);
+  if (WindowIsTracked(window)) {
+    RemoveTrackedWindowFromRoot(window);
+  }
   RemoveObserverFromWindowAndDescendants(window);
+}
+
+void WindowOcclusionTracker::RemoveTrackedWindowFromRoot(Window* window) {
+  Window* const root_window = window->GetRootWindow();
+  DCHECK(root_window);
+  maybe_removed_host_ = root_window->GetHost();
+
+  auto root_window_state_it = root_windows_.find(root_window);
+
+  CHECK(root_window_state_it != root_windows_.end());
+  --root_window_state_it->second.num_tracked_windows;
+}
+
+void WindowOcclusionTracker::OnWindowRemoved(Window* window) {
+  TrackedWindowRemovedFromRoot(window);
 }
 
 void WindowOcclusionTracker::OnWindowLayerRecreated(Window* window) {
@@ -960,7 +1170,6 @@ void WindowOcclusionTracker::OnWindowLayerRecreated(Window* window) {
   if (num_removed == 0)
     return;
 
-  animator->RemoveObserver(this);
   if (MarkRootWindowAsDirty(window->GetRootWindow()))
     MaybeComputeOcclusion();
 }
@@ -970,7 +1179,7 @@ void WindowOcclusionTracker::OnWindowOpaqueRegionsForOcclusionChanged(
   // If the opaque regions for occlusion change, the occlusion state may be
   // affected if the effective opacity of the window changes (e.g. clearing the
   // regions for occlusion), or if their bounds change.
-  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=]() {
+  MarkRootWindowAsDirtyAndMaybeComputeOcclusionIf(window, [=, this]() {
     return WindowOpacityChangeMayAffectOcclusionStates(window) ||
            WindowMoveMayAffectOcclusionStates(window);
   });
@@ -990,6 +1199,18 @@ void WindowOcclusionTracker::OnOcclusionStateChanged(
 
   MarkRootWindowAsDirty(root_window);
   MaybeComputeOcclusion();
+}
+
+void WindowOcclusionTracker::RemoveAnimationObservationForLayer(
+    ui::Layer* layer) {
+  if (animated_layer_observations_.IsObservingSource(layer)) {
+    animated_layer_observations_.RemoveObservation(layer);
+  }
+
+  ui::LayerAnimator* const animator = layer->GetAnimator();
+  if (layer_animator_observations.IsObservingSource(animator)) {
+    layer_animator_observations.RemoveObservation(animator);
+  }
 }
 
 }  // namespace aura

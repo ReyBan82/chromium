@@ -4,6 +4,7 @@
 
 package org.chromium.chrome.browser.merchant_viewer;
 
+import static org.junit.Assert.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
@@ -15,67 +16,48 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TestRule;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
-import org.chromium.base.Callback;
-import org.chromium.base.supplier.ObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.base.supplier.SettableMonotonicObservableSupplier;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabHidingType;
 import org.chromium.chrome.browser.tab.TabObserver;
-import org.chromium.chrome.test.util.browser.Features;
 import org.chromium.content_public.browser.NavigationHandle;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.url.GURL;
 
-/**
- * Tests for {@link MerchantTrustSignalsMediator}.
- */
+/** Tests for {@link MerchantTrustSignalsMediator}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 @SuppressWarnings("DoNotMock") // Mocking GURL
 public class MerchantTrustSignalsMediatorTest {
-    @Rule
-    public TestRule mProcessor = new Features.JUnitProcessor();
 
-    @Mock
-    private MerchantTrustSignalsMediator.MerchantTrustSignalsCallback mMockDelegate;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private MerchantTrustSignalsMediator.MerchantTrustSignalsCallback mMockDelegate;
 
-    @Mock
-    private Tab mMockTab;
+    @Mock private Tab mMockTab;
+    @Mock private WebContents mMockWebContents;
 
-    @Mock
-    private ObservableSupplier<Tab> mMockTabProvider;
+    @Mock private NavigationHandle mMockNavigationHandle;
 
-    @Mock
-    private WebContents mMockWebContents;
+    @Mock private GURL mMockUrl;
 
-    @Mock
-    private NavigationHandle mMockNavigationHandle;
+    @Mock private MerchantTrustMetrics mMockMetrics;
 
-    @Mock
-    private GURL mMockUrl;
+    @Captor private ArgumentCaptor<TabObserver> mTabObserverCaptor;
 
-    @Mock
-    private MerchantTrustMetrics mMockMetrics;
-
-    @Captor
-    private ArgumentCaptor<Callback<Tab>> mTabSupplierCallbackCaptor;
-
-    @Captor
-    private ArgumentCaptor<TabObserver> mTabObserverCaptor;
-
+    private final SettableMonotonicObservableSupplier<Tab> mMockTabProvider =
+            ObservableSuppliers.createMonotonic();
     private MerchantTrustSignalsMediator mMediator;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         doReturn(mMockWebContents).when(mMockTab).getWebContents();
         doReturn(false).when(mMockTab).isIncognito();
         doReturn(true).when(mMockNavigationHandle).hasCommitted();
@@ -95,21 +77,21 @@ public class MerchantTrustSignalsMediatorTest {
 
     private void createMediatorAndVerify() {
         mMediator = new MerchantTrustSignalsMediator(mMockTabProvider, mMockDelegate, mMockMetrics);
-        verify(mMockTabProvider, times(1)).addObserver(mTabSupplierCallbackCaptor.capture());
-        mTabSupplierCallbackCaptor.getValue().onResult(mMockTab);
+        mMockTabProvider.set(mMockTab);
         verify(mMockTab, times(1)).addObserver(mTabObserverCaptor.capture());
     }
 
     private void destroyAndVerify() {
         mMediator.destroy();
         verify(mMockTab, times(1)).removeObserver(mTabObserverCaptor.getValue());
-        verify(mMockTabProvider, times(1)).removeObserver(mTabSupplierCallbackCaptor.getValue());
+        assertFalse(mMockTabProvider.hasObservers());
     }
 
     @Test
     public void testTabObserverOnDidFinishNavigation() {
-        mTabObserverCaptor.getValue().onDidFinishNavigationInPrimaryMainFrame(
-                mMockTab, mMockNavigationHandle);
+        mTabObserverCaptor
+                .getValue()
+                .onDidFinishNavigationInPrimaryMainFrame(mMockTab, mMockNavigationHandle);
         verify(mMockMetrics, times(1)).updateRecordingMessageImpact(eq("fake_host"));
         verify(mMockDelegate, times(1))
                 .onFinishEligibleNavigation(any(MerchantTrustMessageContext.class));
@@ -119,8 +101,9 @@ public class MerchantTrustSignalsMediatorTest {
     public void testTabObserverOnDidFinishNavigation_IncognitoTab() {
         doReturn(true).when(mMockTab).isIncognito();
 
-        mTabObserverCaptor.getValue().onDidFinishNavigationInPrimaryMainFrame(
-                mMockTab, mMockNavigationHandle);
+        mTabObserverCaptor
+                .getValue()
+                .onDidFinishNavigationInPrimaryMainFrame(mMockTab, mMockNavigationHandle);
         verify(mMockDelegate, never())
                 .onFinishEligibleNavigation(any(MerchantTrustMessageContext.class));
     }
@@ -129,8 +112,9 @@ public class MerchantTrustSignalsMediatorTest {
     public void testTabObserverOnDidFinishNavigation_NavigationNonCommit() {
         doReturn(false).when(mMockNavigationHandle).hasCommitted();
 
-        mTabObserverCaptor.getValue().onDidFinishNavigationInPrimaryMainFrame(
-                mMockTab, mMockNavigationHandle);
+        mTabObserverCaptor
+                .getValue()
+                .onDidFinishNavigationInPrimaryMainFrame(mMockTab, mMockNavigationHandle);
         verify(mMockDelegate, never())
                 .onFinishEligibleNavigation(any(MerchantTrustMessageContext.class));
     }
@@ -139,8 +123,9 @@ public class MerchantTrustSignalsMediatorTest {
     public void testTabObserverOnDidFinishNavigation_PrimaryMainFrameFragmentNavigation() {
         doReturn(true).when(mMockNavigationHandle).isPrimaryMainFrameFragmentNavigation();
 
-        mTabObserverCaptor.getValue().onDidFinishNavigationInPrimaryMainFrame(
-                mMockTab, mMockNavigationHandle);
+        mTabObserverCaptor
+                .getValue()
+                .onDidFinishNavigationInPrimaryMainFrame(mMockTab, mMockNavigationHandle);
         verify(mMockDelegate, never())
                 .onFinishEligibleNavigation(any(MerchantTrustMessageContext.class));
     }
@@ -149,8 +134,9 @@ public class MerchantTrustSignalsMediatorTest {
     public void testTabObserverOnDidFinishNavigation_ErrorPage() {
         doReturn(true).when(mMockNavigationHandle).isErrorPage();
 
-        mTabObserverCaptor.getValue().onDidFinishNavigationInPrimaryMainFrame(
-                mMockTab, mMockNavigationHandle);
+        mTabObserverCaptor
+                .getValue()
+                .onDidFinishNavigationInPrimaryMainFrame(mMockTab, mMockNavigationHandle);
         verify(mMockDelegate, never())
                 .onFinishEligibleNavigation(any(MerchantTrustMessageContext.class));
     }
@@ -159,8 +145,9 @@ public class MerchantTrustSignalsMediatorTest {
     public void testTabObserverOnDidFinishNavigation_MissingHost() {
         doReturn(null).when(mMockUrl).getHost();
 
-        mTabObserverCaptor.getValue().onDidFinishNavigationInPrimaryMainFrame(
-                mMockTab, mMockNavigationHandle);
+        mTabObserverCaptor
+                .getValue()
+                .onDidFinishNavigationInPrimaryMainFrame(mMockTab, mMockNavigationHandle);
         verify(mMockDelegate, never())
                 .onFinishEligibleNavigation(any(MerchantTrustMessageContext.class));
     }

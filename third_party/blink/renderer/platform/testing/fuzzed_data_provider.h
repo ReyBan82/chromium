@@ -7,6 +7,9 @@
 
 #include <fuzzer/FuzzedDataProvider.h>
 
+#include <vector>
+
+#include "base/compiler_specific.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -26,6 +29,12 @@ class FuzzedDataProvider {
 
   // Returns a String containing all remaining bytes of the input data.
   std::string ConsumeRemainingBytes();
+
+  // Generic version of `ConsumeRemainingBytes()` above.
+  template <typename T>
+  std::vector<T> ConsumeRemainingBytesAs() {
+    return provider_.ConsumeRemainingBytes<T>();
+  }
 
   // Returns a bool, or false when no data remains.
   bool ConsumeBool() { return provider_.ConsumeBool(); }
@@ -59,7 +68,9 @@ class FuzzedDataProvider {
   // |array| must be a fixed-size array.
   template <typename T, size_t size>
   T PickValueInArray(T (&array)[size]) {
-    return array[provider_.ConsumeIntegralInRange<size_t>(0, size - 1)];
+    // SAFETY: size deduced by compiler during template expansion.
+    return UNSAFE_BUFFERS(
+        array[provider_.ConsumeIntegralInRange<size_t>(0, size - 1)]);
   }
 
   // Reports the remaining bytes available for fuzzed input.

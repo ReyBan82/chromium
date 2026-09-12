@@ -5,13 +5,15 @@
 #ifndef ASH_WEBUI_MULTIDEVICE_DEBUG_PROXIMITY_AUTH_WEBUI_HANDLER_H_
 #define ASH_WEBUI_MULTIDEVICE_DEBUG_PROXIMITY_AUTH_WEBUI_HANDLER_H_
 
+#include <optional>
+
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "chromeos/ash/components/multidevice/logging/log_buffer.h"
 #include "chromeos/ash/components/multidevice/remote_device_ref.h"
 #include "chromeos/ash/services/device_sync/public/cpp/device_sync_client.h"
 #include "content/public/browser/web_ui_message_handler.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -46,14 +48,14 @@ class ProximityAuthWebUIHandler
   void OnNewDevicesSynced() override;
 
   // Message handler callbacks.
-  void OnWebContentsInitialized(const base::Value::List& args);
-  void GetLogMessages(const base::Value::List& args);
-  void ClearLogBuffer(const base::Value::List& args);
-  void GetLocalState(const base::Value::List& args);
-  void ForceEnrollment(const base::Value::List& args);
-  void ForceDeviceSync(const base::Value::List& args);
+  void OnWebContentsInitialized(const base::ListValue& args);
+  void GetLogMessages(const base::ListValue& args);
+  void ClearLogBuffer(const base::ListValue& args);
+  void GetLocalState(const base::ListValue& args);
+  void ForceEnrollment(const base::ListValue& args);
+  void ForceDeviceSync(const base::ListValue& args);
 
-  base::Value::Dict RemoteDeviceToDictionary(
+  base::DictValue RemoteDeviceToDictionary(
       const multidevice::RemoteDeviceRef& remote_device);
 
   void OnForceEnrollmentNow(bool success);
@@ -64,20 +66,20 @@ class ProximityAuthWebUIHandler
   void OnGetDebugInfo(device_sync::mojom::DebugInfoPtr debug_info_ptr);
 
   void NotifyOnEnrollmentFinished(bool success,
-                                  base::Value::Dict enrollment_state);
+                                  base::DictValue enrollment_state);
   void NotifyOnSyncFinished(bool was_sync_successful,
                             bool changed,
-                            base::Value::Dict device_sync_state);
+                            base::DictValue device_sync_state);
   void NotifyGotLocalState(base::Value truncated_local_device_id,
-                           base::Value::Dict enrollment_state,
-                           base::Value::Dict device_sync_state,
-                           base::Value::List synced_devices);
+                           base::DictValue enrollment_state,
+                           base::DictValue device_sync_state,
+                           base::ListValue synced_devices);
 
   base::Value GetTruncatedLocalDeviceId();
-  base::Value::List GetRemoteDevicesList();
+  base::ListValue GetRemoteDevicesList();
 
   // The delegate used to fetch dependencies. Must outlive this instance.
-  device_sync::DeviceSyncClient* device_sync_client_;
+  raw_ptr<device_sync::DeviceSyncClient> device_sync_client_;
 
   // True if we get a message from the loaded WebContents to know that it is
   // initialized, and we can inject JavaScript.

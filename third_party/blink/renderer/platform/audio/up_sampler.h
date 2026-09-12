@@ -32,6 +32,8 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_UP_SAMPLER_H_
 
 #include <memory>
+
+#include "base/containers/span.h"
 #include "third_party/blink/renderer/platform/audio/audio_array.h"
 #include "third_party/blink/renderer/platform/audio/direct_convolver.h"
 #include "third_party/blink/renderer/platform/audio/simple_fft_convolver.h"
@@ -42,7 +44,7 @@ namespace blink {
 
 // UpSampler up-samples the source stream by a factor of 2x.
 
-class PLATFORM_EXPORT UpSampler {
+class PLATFORM_EXPORT UpSampler final {
   USING_FAST_MALLOC(UpSampler);
 
  public:
@@ -50,10 +52,8 @@ class PLATFORM_EXPORT UpSampler {
   UpSampler(const UpSampler&) = delete;
   UpSampler& operator=(const UpSampler&) = delete;
 
-  // The destination buffer |destP| is of size sourceFramesToProcess * 2.
-  void Process(const float* source_p,
-               float* dest_p,
-               uint32_t source_frames_to_process);
+  // The destination buffer `dest` is of size source.size() * 2.
+  void Process(base::span<const float> source, base::span<float> dest);
 
   void Reset();
 
@@ -61,11 +61,10 @@ class PLATFORM_EXPORT UpSampler {
   size_t LatencyFrames() const;
 
  private:
-  enum { kDefaultKernelSize = 128 };
-
   unsigned input_block_size_;
 
-  // Computes the odd sample-frames of the output.
+  // Computes the odd sample-frames of the output.  The convolution method
+  // will be selected based on the input block size.
   std::unique_ptr<DirectConvolver> direct_convolver_;
   std::unique_ptr<SimpleFFTConvolver> simple_fft_convolver_;
 

@@ -1,3 +1,5 @@
 include_rules = [
-  "+ios/chrome/browser/push_notification",
+  # keep-sorted start
+  "+ios/chrome/browser/push_notification/model",
+  # keep-sorted end
 ]

@@ -4,13 +4,13 @@
 
 #include "third_party/blink/renderer/core/css/cssom/declared_style_property_map.h"
 
-#include "third_party/blink/renderer/core/css/css_custom_property_declaration.h"
 #include "third_party/blink/renderer/core/css/css_property_value_set.h"
 #include "third_party/blink/renderer/core/css/css_style_rule.h"
 #include "third_party/blink/renderer/core/css/css_style_sheet.h"
-#include "third_party/blink/renderer/core/css/css_variable_reference_value.h"
+#include "third_party/blink/renderer/core/css/css_unparsed_declaration_value.h"
 #include "third_party/blink/renderer/core/css/style_property_serializer.h"
 #include "third_party/blink/renderer/core/css/style_rule.h"
+#include "third_party/blink/renderer/core/css/style_sheet_contents.h"
 
 namespace blink {
 
@@ -48,6 +48,7 @@ void DeclaredStylePropertyMap::SetProperty(CSSPropertyID property_id,
   }
   CSSStyleSheet::RuleMutationScope mutation_scope(owner_rule_);
   GetStyleRule()->MutableProperties().SetProperty(property_id, value);
+  NotifyRuleMutation();
 }
 
 bool DeclaredStylePropertyMap::SetShorthandProperty(
@@ -56,8 +57,11 @@ bool DeclaredStylePropertyMap::SetShorthandProperty(
     SecureContextMode secure_context_mode) {
   DCHECK(CSSProperty::Get(property_id).IsShorthand());
   CSSStyleSheet::RuleMutationScope mutation_scope(owner_rule_);
+  CSSStyleSheet* parent_sheet = owner_rule_->parentStyleSheet();
   const auto result = GetStyleRule()->MutableProperties().ParseAndSetProperty(
-      property_id, value, false /* important */, secure_context_mode);
+      property_id, value, false /* important */, secure_context_mode,
+      parent_sheet ? parent_sheet->Contents() : nullptr);
+  NotifyRuleMutation();
   return result != MutableCSSPropertyValueSet::kParseError;
 }
 
@@ -69,12 +73,13 @@ void DeclaredStylePropertyMap::SetCustomProperty(
   }
   CSSStyleSheet::RuleMutationScope mutation_scope(owner_rule_);
 
-  const auto& variable_value = To<CSSVariableReferenceValue>(value);
+  const auto& variable_value = To<CSSUnparsedDeclarationValue>(value);
   CSSVariableData* variable_data = variable_value.VariableDataValue();
   GetStyleRule()->MutableProperties().SetProperty(
       CSSPropertyName(property_name),
-      *MakeGarbageCollected<CSSCustomPropertyDeclaration>(
+      *MakeGarbageCollected<CSSUnparsedDeclarationValue>(
           variable_data, variable_value.ParserContext()));
+  NotifyRuleMutation();
 }
 
 void DeclaredStylePropertyMap::RemoveProperty(CSSPropertyID property_id) {
@@ -83,6 +88,7 @@ void DeclaredStylePropertyMap::RemoveProperty(CSSPropertyID property_id) {
   }
   CSSStyleSheet::RuleMutationScope mutation_scope(owner_rule_);
   GetStyleRule()->MutableProperties().RemoveProperty(property_id);
+  NotifyRuleMutation();
 }
 
 void DeclaredStylePropertyMap::RemoveCustomProperty(
@@ -92,6 +98,7 @@ void DeclaredStylePropertyMap::RemoveCustomProperty(
   }
   CSSStyleSheet::RuleMutationScope mutation_scope(owner_rule_);
   GetStyleRule()->MutableProperties().RemoveProperty(property_name);
+  NotifyRuleMutation();
 }
 
 void DeclaredStylePropertyMap::RemoveAllProperties() {
@@ -100,6 +107,7 @@ void DeclaredStylePropertyMap::RemoveAllProperties() {
   }
   CSSStyleSheet::RuleMutationScope mutation_scope(owner_rule_);
   GetStyleRule()->MutableProperties().Clear();
+  NotifyRuleMutation();
 }
 
 void DeclaredStylePropertyMap::ForEachProperty(IterationFunction visitor) {
@@ -107,8 +115,8 @@ void DeclaredStylePropertyMap::ForEachProperty(IterationFunction visitor) {
     return;
   }
   const CSSPropertyValueSet& declared_style_set = GetStyleRule()->Properties();
-  for (unsigned i = 0; i < declared_style_set.PropertyCount(); i++) {
-    const auto& property_reference = declared_style_set.PropertyAt(i);
+  for (const CSSPropertyValue& property_reference :
+       declared_style_set.Properties()) {
     visitor(property_reference.Name(), property_reference.Value());
   }
 }
@@ -129,6 +137,16 @@ String DeclaredStylePropertyMap::SerializationForShorthand(
   }
 
   return "";
+}
+
+void DeclaredStylePropertyMap::NotifyRuleMutation() {
+  // Similar to StyleRuleCSSStyleDeclaration::DidMutate(),
+  // except that owner_rule_ can never be anything but a CSSStyleRule.
+  if (owner_rule_ && owner_rule_->parentStyleSheet()) {
+    StyleSheetContents* parent_contents =
+        owner_rule_->parentStyleSheet()->Contents();
+    parent_contents->NotifyRuleChanged(GetStyleRule());
+  }
 }
 
 }  // namespace blink

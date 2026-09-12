@@ -10,32 +10,16 @@
 
 namespace net {
 
+SSLServerCredential::SSLServerCredential() = default;
+SSLServerCredential::SSLServerCredential(SSLServerCredential&& other) = default;
+SSLServerCredential& SSLServerCredential::operator=(
+    SSLServerCredential&& other) = default;
+SSLServerCredential::~SSLServerCredential() = default;
+
 SSLServerConfig::SSLServerConfig() = default;
 
 SSLServerConfig::SSLServerConfig(const SSLServerConfig& other) = default;
 
 SSLServerConfig::~SSLServerConfig() = default;
-
-SSLServerConfig::ECHKeysContainer::ECHKeysContainer() = default;
-
-SSLServerConfig::ECHKeysContainer::ECHKeysContainer(
-    bssl::UniquePtr<SSL_ECH_KEYS> keys)
-    : keys_(std::move(keys)) {}
-
-SSLServerConfig::ECHKeysContainer::~ECHKeysContainer() = default;
-
-SSLServerConfig::ECHKeysContainer::ECHKeysContainer(
-    const SSLServerConfig::ECHKeysContainer& other)
-    : keys_(bssl::UpRef(other.keys_)) {}
-
-SSLServerConfig::ECHKeysContainer& SSLServerConfig::ECHKeysContainer::operator=(
-    const SSLServerConfig::ECHKeysContainer& other) {
-  keys_ = bssl::UpRef(other.keys_);
-  return *this;
-}
-
-void SSLServerConfig::ECHKeysContainer::reset(SSL_ECH_KEYS* keys) {
-  keys_.reset(keys);
-}
 
 }  // namespace net

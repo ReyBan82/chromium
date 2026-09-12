@@ -10,12 +10,12 @@
 #include "base/time/time.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/aura/window.h"
-#include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animation_sequence.h"
 #include "ui/compositor/layer_animator.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/gfx/animation/tween.h"
 #include "ui/gfx/geometry/transform.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 
 namespace ash {
 
@@ -33,18 +33,20 @@ class ScreenRotationAnimationTest : public AshTestBase {
   void SetUp() override;
 
  private:
-  std::unique_ptr<ui::ScopedAnimationDurationScaleMode> non_zero_duration_mode_;
+  std::unique_ptr<gfx::ScopedAnimationDurationScaleMode>
+      non_zero_duration_mode_;
 };
 
 void ScreenRotationAnimationTest::SetUp() {
   AshTestBase::SetUp();
   non_zero_duration_mode_ =
-      std::make_unique<ui::ScopedAnimationDurationScaleMode>(
-          ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+      std::make_unique<gfx::ScopedAnimationDurationScaleMode>(
+          gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
 }
 
 TEST_F(ScreenRotationAnimationTest, LayerTransformGetsSetToTargetWhenAborted) {
-  std::unique_ptr<aura::Window> window(CreateTestWindowInShellWithId(9));
+  std::unique_ptr<aura::Window> window(
+      CreateTestWindowInShell({.window_id = 9}));
   ui::Layer* layer = window->layer();
 
   std::unique_ptr<ScreenRotationAnimation> screen_rotation =
@@ -77,7 +79,7 @@ TEST_F(ScreenRotationAnimationTest, LayerTransformGetsSetToTargetWhenAborted) {
 TEST_F(ScreenRotationAnimationTest, DestroyLayerDuringAnimation) {
   // Create a ui::Layer directly rather than an aura::Window, as the latter
   // finishes all of its animation before destroying its layer.
-  std::unique_ptr<ui::Layer> layer = std::make_unique<ui::Layer>();
+  auto layer = std::make_unique<ui::LayerTextured>();
 
   ui::Layer* root_layer = GetContext()->layer();
   layer->SetBounds(gfx::Rect(root_layer->bounds().size()));

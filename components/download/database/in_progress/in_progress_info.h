@@ -13,7 +13,6 @@
 #include "components/download/public/common/download_item.h"
 #include "components/download/public/common/download_url_parameters.h"
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace download {
@@ -131,6 +130,11 @@ struct InProgressInfo {
 
   int64_t range_request_from = kInvalidRange;
   int64_t range_request_to = kInvalidRange;
+
+  // True if a Service Worker fetch handler produced the original response.
+  // Persisted so that resume across browser restart still knows to restart
+  // (vs Range-resume) the download against the SW.
+  bool fetched_via_service_worker = false;
 };
 
 }  // namespace download

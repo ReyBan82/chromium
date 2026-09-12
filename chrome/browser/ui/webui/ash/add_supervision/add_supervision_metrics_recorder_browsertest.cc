@@ -2,16 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ui/webui/ash/add_supervision/add_supervision_metrics_recorder.h"
+
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/metrics/user_action_tester.h"
 #include "base/test/test_mock_time_task_runner.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/global_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/webui/ash/add_supervision/add_supervision.mojom.h"
 #include "chrome/browser/ui/webui/ash/add_supervision/add_supervision_handler.h"
 #include "chrome/browser/ui/webui/ash/add_supervision/add_supervision_handler_utils.h"
-#include "chrome/browser/ui/webui/ash/add_supervision/add_supervision_metrics_recorder.h"
 #include "chrome/browser/ui/webui/ash/add_supervision/add_supervision_ui.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "components/application_locale_storage/application_locale_storage.h"
 #include "components/signin/public/identity_manager/identity_test_environment.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_web_ui.h"
@@ -34,7 +39,7 @@ class AddSupervisionMetricsRecorderTest : public InProcessBrowserTest {
   void SetUpOnMainThread() override {
     identity_test_env_ = std::make_unique<signin::IdentityTestEnvironment>();
     content::WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        browser()->GetTabStripModel()->GetActiveWebContents();
     test_web_ui_.set_web_contents(web_contents);
   }
 
@@ -54,7 +59,9 @@ class AddSupervisionMetricsRecorderTest : public InProcessBrowserTest {
   void NotifySupervisionEnabled() {
     mojo::PendingReceiver<add_supervision::mojom::AddSupervisionHandler>
         receiver;
-    AddSupervisionUI add_supervision_ui(&test_web_ui_);
+    AddSupervisionUI add_supervision_ui(
+        &test_web_ui_,
+        g_browser_process->GetFeatures()->application_locale_storage()->Get());
     AddSupervisionHandler add_supervision_handler(
         std::move(receiver), &test_web_ui_,
         identity_test_env_->identity_manager(), &add_supervision_ui);
@@ -228,8 +235,12 @@ IN_PROC_BROWSER_TEST_P(AddSupervisionMetricsRecorderTimeTest, UserTimingTest) {
   // after GetParam() seconds.
   scoped_refptr<base::TestMockTimeTaskRunner> task_runner_ =
       base::MakeRefCounted<base::TestMockTimeTaskRunner>();
-  AddSupervisionMetricsRecorder::GetInstance()->SetClockForTesting(
-      task_runner_->GetMockTickClock());
+
+  // RAII object to set the mock clock and reset it afterwards
+  AddSupervisionMetricsRecorder::ScopedClockForTesting set_clock(
+      *AddSupervisionMetricsRecorder::GetInstance(),
+      *task_runner_->GetMockTickClock());
+
   base::TimeDelta duration(base::Seconds(GetParam()));
 
   // We need to start at some non-zero point in time or else

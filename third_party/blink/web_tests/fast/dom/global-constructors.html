@@ -42,8 +42,7 @@ function test()
     xmlSerializer = new XMLSerializer();
     shouldBe("XMLSerializer.prototype.isPrototypeOf(xmlSerializer)", true);
 
-    xsltProcessor = new XSLTProcessor();
-    shouldBe("XSLTProcessor.prototype.isPrototypeOf(xsltProcessor)", true);
+    shouldBe("window.XSLTProcessor", undefined);
 
     shouldBe("window.Document.prototype.isPrototypeOf(document)", true);
     shouldBe("window.HTMLDocument.prototype.isPrototypeOf(document)", true);
@@ -62,9 +61,9 @@ function test()
     cssStyleDeclaration = cssRule.style;
     shouldBe("window.CSSStyleDeclaration.prototype.isPrototypeOf(cssStyleDeclaration)", true);
 
-    event = document.createEvent("MutationEvents");
+    event = new CustomEvent("test");
     shouldBe("window.Event.prototype.isPrototypeOf(event)", true);
-    shouldBe("window.MutationEvent.prototype.isPrototypeOf(event)", true);
+    shouldBe("window.CustomEvent.prototype.isPrototypeOf(event)", true);
 
     xmldoc = document.implementation.createDocument(null, null, null);
     shouldBe("window.XMLDocument.prototype.isPrototypeOf(xmldoc)", true);

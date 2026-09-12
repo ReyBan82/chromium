@@ -16,84 +16,79 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import android.graphics.Bitmap;
 
+import jp.tomorrowkey.android.gifplayer.BaseGifImage;
+
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
-import org.robolectric.annotation.Config;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.Callback;
-import org.chromium.base.task.TaskTraits;
-import org.chromium.base.task.test.ShadowPostTask;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
+import org.chromium.ui.test.util.MockitoHelper;
 import org.chromium.url.GURL;
 import org.chromium.url.JUnitTestGURLs;
-import org.chromium.url.ShadowGURL;
 
-import jp.tomorrowkey.android.gifplayer.BaseGifImage;
-
-/**
- * Unit tests for CachedImageFetcher.
- */
+/** Unit tests for CachedImageFetcher. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, shadows = {ShadowGURL.class, ShadowPostTask.class})
 public class CachedImageFetcherTest {
     private static final String UMA_CLIENT_NAME = "TestUmaClient";
-    private static final String URL = JUnitTestGURLs.RED_1;
+    private static final String URL = JUnitTestGURLs.RED_1.getSpec();
     private static final String PATH = "test/path/cache/test.png";
     private static final int WIDTH_PX = 10;
     private static final int HEIGHT_PX = 20;
 
-    @Mock
-    ImageFetcherBridge mBridge;
-    @Mock
-    CachedImageFetcher.ImageLoader mImageLoader;
-    @Mock
-    BaseGifImage mGif;
-    @Mock
-    Callback<Bitmap> mBitmapCallback;
-    @Mock
-    Callback<BaseGifImage> mGifCallback;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock ImageFetcherBridge mBridge;
+    @Mock CachedImageFetcher.ImageLoader mImageLoader;
+    @Mock BaseGifImage mGif;
+    @Mock Callback<Bitmap> mBitmapCallback;
+    @Mock Callback<ImageDataFetchResult> mGifCallback;
 
     CachedImageFetcher mCachedImageFetcher;
     Bitmap mBitmap;
+    byte[] mTestGifData;
+    ImageDataFetchResult mImageDataFetchResult;
 
     @Before
     public void setUp() {
-        ShadowPostTask.setTestImpl(new ShadowPostTask.TestImpl() {
-            @Override
-            public void postDelayedTask(TaskTraits taskTraits, Runnable task, long delay) {
-                task.run();
-            }
-        });
-
-        MockitoAnnotations.initMocks(this);
-
         doReturn(PATH).when(mBridge).getFilePath(URL);
         mCachedImageFetcher = new CachedImageFetcher(mBridge, mImageLoader);
 
         mBitmap = Bitmap.createBitmap(WIDTH_PX, HEIGHT_PX, Bitmap.Config.ARGB_8888);
-        ArgumentCaptor<Callback<Bitmap>> bitmapCallbackCaptor =
-                ArgumentCaptor.forClass(Callback.class);
-        doAnswer((InvocationOnMock invocation) -> {
-            bitmapCallbackCaptor.getValue().onResult(mBitmap);
-            return null;
-        })
+        mTestGifData = new byte[] {1, 2, 3};
+        doReturn(mTestGifData).when(mGif).getData();
+        mImageDataFetchResult =
+                new ImageDataFetchResult(
+                        mTestGifData,
+                        new RequestMetadata("image/gif", 200, "test_content_location_header"));
+        ArgumentCaptor<Callback<Bitmap>> bitmapCallbackCaptor = MockitoHelper.callbackCaptor();
+        doAnswer(
+                        (InvocationOnMock invocation) -> {
+                            bitmapCallbackCaptor.getValue().onResult(mBitmap);
+                            return null;
+                        })
                 .when(mBridge)
                 .fetchImage(anyInt(), any(), bitmapCallbackCaptor.capture());
 
-        ArgumentCaptor<Callback<BaseGifImage>> gifCallbackCaptor =
-                ArgumentCaptor.forClass(Callback.class);
-        doAnswer((InvocationOnMock invocation) -> {
-            gifCallbackCaptor.getValue().onResult(mGif);
-            return null;
-        })
+        ArgumentCaptor<Callback<ImageDataFetchResult>> gifCallbackCaptor =
+                MockitoHelper.callbackCaptor();
+        doAnswer(
+                        (InvocationOnMock invocation) -> {
+                            gifCallbackCaptor.getValue().onResult(mImageDataFetchResult);
+                            return null;
+                        })
                 .when(mBridge)
-                .fetchGif(anyInt(), eq(ImageFetcher.Params.create(URL, UMA_CLIENT_NAME)),
+                .fetchGif(
+                        anyInt(),
+                        eq(ImageFetcher.Params.create(URL, UMA_CLIENT_NAME)),
                         gifCallbackCaptor.capture());
     }
 
@@ -104,6 +99,7 @@ public class CachedImageFetcherTest {
         ImageFetcher.Params params =
                 ImageFetcher.Params.create(URL, UMA_CLIENT_NAME, WIDTH_PX, HEIGHT_PX);
         mCachedImageFetcher.fetchImage(params, mBitmapCallback);
+        RobolectricUtil.runAllBackgroundAndUi();
         verify(mBitmapCallback).onResult(mBitmap);
         verify(mBridge).fetchImage(eq(ImageFetcherConfig.DISK_CACHE_ONLY), eq(params), any());
     }
@@ -112,9 +108,11 @@ public class CachedImageFetcherTest {
     public void testFetchImage_fileFoundOnDisk_imageNotResized() {
         doReturn(mBitmap).when(mImageLoader).tryToLoadImageFromDisk(PATH);
 
-        ImageFetcher.Params params = ImageFetcher.Params.createNoResizing(
-                new GURL(URL), UMA_CLIENT_NAME, WIDTH_PX + 1, HEIGHT_PX + 1);
+        ImageFetcher.Params params =
+                ImageFetcher.Params.createNoResizing(
+                        new GURL(URL), UMA_CLIENT_NAME, WIDTH_PX + 1, HEIGHT_PX + 1);
         mCachedImageFetcher.fetchImage(params, mBitmapCallback);
+        RobolectricUtil.runAllBackgroundAndUi();
 
         // Unresized bitmap should be returned.
         ArgumentCaptor<Bitmap> bitmapCaptor = ArgumentCaptor.forClass(Bitmap.class);
@@ -134,6 +132,7 @@ public class CachedImageFetcherTest {
         ImageFetcher.Params params =
                 ImageFetcher.Params.create(URL, UMA_CLIENT_NAME, WIDTH_PX + 1, HEIGHT_PX + 1);
         mCachedImageFetcher.fetchImage(params, mBitmapCallback);
+        RobolectricUtil.runAllBackgroundAndUi();
 
         ArgumentCaptor<Bitmap> bitmapCaptor = ArgumentCaptor.forClass(Bitmap.class);
         verify(mBitmapCallback).onResult(bitmapCaptor.capture());
@@ -143,7 +142,8 @@ public class CachedImageFetcherTest {
         Assert.assertEquals(HEIGHT_PX + 1, actual.getHeight());
 
         verify(mBridge, never())
-                .fetchImage(eq(ImageFetcherConfig.DISK_CACHE_ONLY),
+                .fetchImage(
+                        eq(ImageFetcherConfig.DISK_CACHE_ONLY),
                         eq(ImageFetcher.Params.create(URL, UMA_CLIENT_NAME, WIDTH_PX, HEIGHT_PX)),
                         any());
         verify(mBridge).reportEvent(UMA_CLIENT_NAME, ImageFetcherEvent.JAVA_DISK_CACHE_HIT);
@@ -156,10 +156,12 @@ public class CachedImageFetcherTest {
 
         ImageFetcher.Params params = ImageFetcher.Params.create(URL, UMA_CLIENT_NAME);
         mCachedImageFetcher.fetchGif(params, mGifCallback);
+        RobolectricUtil.runAllBackgroundAndUi();
 
-        ArgumentCaptor<BaseGifImage> gifCaptor = ArgumentCaptor.forClass(BaseGifImage.class);
+        ArgumentCaptor<ImageDataFetchResult> gifCaptor =
+                ArgumentCaptor.forClass(ImageDataFetchResult.class);
         verify(mGifCallback).onResult(gifCaptor.capture());
-        Assert.assertEquals(mGif, gifCaptor.getValue());
+        Assert.assertArrayEquals(mTestGifData, gifCaptor.getValue().imageData);
 
         verify(mBridge).fetchGif(eq(ImageFetcherConfig.DISK_CACHE_ONLY), eq(params), any());
     }
@@ -170,10 +172,12 @@ public class CachedImageFetcherTest {
 
         ImageFetcher.Params params = ImageFetcher.Params.create(URL, UMA_CLIENT_NAME);
         mCachedImageFetcher.fetchGif(params, mGifCallback);
+        RobolectricUtil.runAllBackgroundAndUi();
 
-        ArgumentCaptor<BaseGifImage> gifCaptor = ArgumentCaptor.forClass(BaseGifImage.class);
+        ArgumentCaptor<ImageDataFetchResult> gifCaptor =
+                ArgumentCaptor.forClass(ImageDataFetchResult.class);
         verify(mGifCallback).onResult(gifCaptor.capture());
-        Assert.assertEquals(mGif, gifCaptor.getValue());
+        Assert.assertArrayEquals(mTestGifData, gifCaptor.getValue().imageData);
 
         verify(mBridge, never())
                 .fetchGif(eq(ImageFetcherConfig.DISK_CACHE_ONLY), eq(params), any());

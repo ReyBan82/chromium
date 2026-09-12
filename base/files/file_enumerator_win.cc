@@ -7,7 +7,9 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "base/check.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
 #include "base/strings/string_util.h"
 #include "base/threading/scoped_blocking_call.h"
@@ -29,16 +31,13 @@ FilePath BuildSearchFilter(FileEnumerator::FolderSearchPolicy policy,
       return root_path.Append(FILE_PATH_LITERAL("*"));
   }
   NOTREACHED();
-  return {};
 }
 
 }  // namespace
 
 // FileEnumerator::FileInfo ----------------------------------------------------
 
-FileEnumerator::FileInfo::FileInfo() {
-  memset(&find_data_, 0, sizeof(find_data_));
-}
+FileEnumerator::FileInfo::FileInfo() = default;
 
 bool FileEnumerator::FileInfo::IsDirectory() const {
   return (find_data().dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -115,23 +114,20 @@ FileEnumerator::FileEnumerator(const FilePath& root_path,
     file_type_ |= (FileType::FILES | FileType::DIRECTORIES);
   }
 
-  memset(&find_data_, 0, sizeof(find_data_));
   pending_paths_.push(root_path);
 }
 
 FileEnumerator::~FileEnumerator() {
-  if (find_handle_ != INVALID_HANDLE_VALUE)
+  if (find_handle_ != INVALID_HANDLE_VALUE) {
     FindClose(find_handle_);
+  }
 }
 
 FileEnumerator::FileInfo FileEnumerator::GetInfo() const {
   DCHECK(!(file_type_ & FileType::NAMES_ONLY));
-  if (!has_find_data_) {
-    NOTREACHED();
-    return FileInfo();
-  }
+  CHECK(has_find_data_);
   FileInfo ret;
-  memcpy(&ret.find_data_, &find_data_, sizeof(find_data_));
+  ret.find_data_ = find_data_;
   return ret;
 }
 
@@ -139,6 +135,7 @@ FilePath FileEnumerator::Next() {
   ScopedBlockingCall scoped_blocking_call(FROM_HERE, BlockingType::MAY_BLOCK);
 
   while (has_find_data_ || !pending_paths_.empty()) {
+    DWORD last_error = ERROR_SUCCESS;
     if (!has_find_data_) {
       // The last find FindFirstFile operation is done, prepare a new one.
       root_path_ = pending_paths_.top();
@@ -152,16 +149,19 @@ FilePath FileEnumerator::Next() {
                                      ChromeToWindowsType(&find_data_),
                                      FindExSearchNameMatch, nullptr,
                                      FIND_FIRST_EX_LARGE_FETCH);
+      if (find_handle_ == INVALID_HANDLE_VALUE) {
+        last_error = GetLastError();
+      }
       has_find_data_ = true;
     } else {
       // Search for the next file/directory.
       if (!FindNextFile(find_handle_, ChromeToWindowsType(&find_data_))) {
+        last_error = GetLastError();
         FindClose(find_handle_);
         find_handle_ = INVALID_HANDLE_VALUE;
       }
     }
 
-    DWORD last_error = GetLastError();
     if (INVALID_HANDLE_VALUE == find_handle_) {
       has_find_data_ = false;
 
@@ -186,8 +186,9 @@ FilePath FileEnumerator::Next() {
     }
 
     const FilePath filename(find_data().cFileName);
-    if (ShouldSkip(filename))
+    if (ShouldSkip(filename)) {
       continue;
+    }
 
     const bool is_dir =
         (find_data().dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -200,12 +201,14 @@ FilePath FileEnumerator::Next() {
       // directory. However, don't do recursion through reparse points or we
       // may end up with an infinite cycle.
       DWORD attributes = GetFileAttributes(abs_path.value().c_str());
-      if (!(attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+      if (!(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
         pending_paths_.push(abs_path);
+      }
     }
 
-    if (IsTypeMatched(is_dir) && IsPatternMatched(filename))
+    if (IsTypeMatched(is_dir) && IsPatternMatched(filename)) {
       return abs_path;
+    }
   }
   return FilePath();
 }
@@ -222,7 +225,6 @@ bool FileEnumerator::IsPatternMatched(const FilePath& src) const {
       return PathMatchSpec(src.value().c_str(), pattern_.c_str()) == TRUE;
   }
   NOTREACHED();
-  return false;
 }
 
 }  // namespace base

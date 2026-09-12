@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chromecast/media/audio/net/audio_socket_service.h"
-
 #include <unistd.h>
 
 #include <cstring>
@@ -11,12 +9,14 @@
 #include <vector>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/posix/safe_strerror.h"
 #include "base/posix/unix_domain_socket.h"
 #include "base/task/sequenced_task_runner.h"
+#include "chromecast/media/audio/net/audio_socket_service.h"
 #include "chromecast/net/socket_util.h"
 #include "net/base/net_errors.h"
 #include "net/socket/stream_socket.h"
@@ -32,7 +32,7 @@ constexpr char kSocketMsg[] = "socket-handle";
 
 void CloseSocket(int fd) {
   int rv = IGNORE_EINTR(close(fd));
-  DCHECK_EQ(rv, 0) << "Error closing socket: " << base::safe_strerror(errno);
+  DPCHECK(rv == 0) << "Error closing socket";
 }
 
 }  // namespace
@@ -60,10 +60,10 @@ AudioSocketService::AudioSocketService(const std::string& endpoint,
   DCHECK(!endpoint.empty());
   LOG(INFO) << "Using endpoint " << endpoint;
   auto unix_socket = std::make_unique<net::UnixDomainServerSocket>(
-      base::BindRepeating([](const net::UnixDomainServerSocket::Credentials&) {
-        // Always accept the connection.
-        return true;
-      }),
+      base::BindRepeating(
+          [](const net::UnixDomainServerSocket::Credentials& credentials) {
+            return credentials.user_id == getuid() || credentials.user_id == 0;
+          }),
       true /* use_abstract_namespace */);
   int result = unix_socket->BindAndListen(endpoint, kListenBacklog);
   listen_socket_ = std::move(unix_socket);
@@ -92,7 +92,7 @@ int AudioSocketService::AcceptOne() {
 
 void AudioSocketService::OnAcceptSuccess() {
   if (!use_socket_descriptor_) {
-    delegate_->HandleAcceptedSocket(std::move(accepted_socket_));
+    delegate_->HandleAcceptedSocket(std::move(accepted_socket_), "");
     return;
   }
 
@@ -112,25 +112,26 @@ void AudioSocketService::OnAcceptSuccess() {
 void AudioSocketService::ReceiveFdFromSocket(int socket_fd) {
   fd_watcher_controllers_.erase(socket_fd);
 
-  char buffer[sizeof(kSocketMsg)];
+  uint8_t buffer[256];
   std::vector<base::ScopedFD> fds;
-  ssize_t res =
-      base::UnixDomainSocket::RecvMsg(socket_fd, buffer, sizeof(buffer), &fds);
+  ssize_t res = base::UnixDomainSocket::RecvMsg(socket_fd, buffer, &fds);
   CloseSocket(socket_fd);
-  if (res != sizeof(kSocketMsg)) {
+  if (res <= 0) {
     LOG(ERROR) << "Failed to receive message from the descriptor " << socket_fd;
     return;
   }
-  if (memcmp(buffer, kSocketMsg, sizeof(kSocketMsg)) != 0) {
-    LOG(ERROR) << "Received invalid message.";
-    return;
+  std::string session_id(reinterpret_cast<char*>(buffer), res);
+  if (session_id == kSocketMsg) {
+    session_id = "";
   }
+
   if (fds.empty()) {
     LOG(ERROR) << "No socket descriptors received.";
     return;
   }
   for (auto& fd : fds) {
-    delegate_->HandleAcceptedSocket(AdoptUnnamedSocketHandle(std::move(fd)));
+    delegate_->HandleAcceptedSocket(AdoptUnnamedSocketHandle(std::move(fd)),
+                                    session_id);
   }
 }
 

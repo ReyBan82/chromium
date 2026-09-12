@@ -2,24 +2,34 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ipcz/sequenced_queue.h"
-
 #include <string>
 
 #include "ipcz/sequence_number.h"
+#include "ipcz/sequenced_queue.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/abseil-cpp/absl/base/macros.h"
+#include "util/unsafe_buffers.h"
 
 namespace ipcz {
+
+template <typename T, typename ElementTraits>
+struct SequencedQueueTestAccessor {
+  using Queue = SequencedQueue<T, ElementTraits>;
+
+  static auto& entries(Queue& queue) { return queue.entries_; }
+  static size_t front_index(const Queue& queue) { return queue.front_index_; }
+};
+
 namespace {
 
 struct TestQueueTraits {
   static size_t GetElementSize(const std::string& s) { return s.size(); }
 };
 
+using testing::ElementsAre;
 using TestQueue = SequencedQueue<std::string>;
 using TestQueueWithSize = SequencedQueue<std::string, TestQueueTraits>;
-
 using SequencedQueueTest = testing::Test;
 
 TEST(SequencedQueueTest, Empty) {
@@ -90,7 +100,8 @@ TEST(SequencedQueueTest, ForceTerminateSequence) {
 
   // But we can still force it to terminate at its current length. Now the gap
   // at element 1 is irrelevant, and element 0 alone is the complete sequence.
-  q.ForceTerminateSequence();
+  std::vector<std::string> removed_elements = q.ForceTerminateSequence();
+  EXPECT_THAT(removed_elements, ElementsAre("woot!"));
   EXPECT_FALSE(q.ExpectsMoreElements());
   EXPECT_TRUE(q.HasNextElement());
   EXPECT_FALSE(q.Push(SequenceNumber(1), "woot?"));
@@ -115,6 +126,7 @@ TEST(SequencedQueueTest, SequenceTooLow) {
 
   EXPECT_TRUE(q.Pop(s));
   EXPECT_EQ(kEntries[1], s);
+
   EXPECT_TRUE(q.Pop(s));
   EXPECT_EQ(kEntries[2], s);
 
@@ -146,11 +158,12 @@ TEST(SequencedQueueTest, SparseSequence) {
       SequenceNumber(12), SequenceNumber(15), SequenceNumber(13),
       SequenceNumber(14)};
   for (SequenceNumber n : kMessageSequence) {
-    EXPECT_TRUE(q.Push(SequenceNumber(n), kEntries[n.value()]));
+    IPCZ_UNSAFE_TODO(
+        EXPECT_TRUE(q.Push(SequenceNumber(n), kEntries[n.value()])));
     std::string s;
     while (q.Pop(s)) {
       EXPECT_EQ(*next_expected_pop, s);
-      ++next_expected_pop;
+      IPCZ_UNSAFE_TODO(++next_expected_pop);
     }
   }
 
@@ -184,48 +197,36 @@ TEST(SequencedQueueTest, FullyConsumed) {
 TEST(SequencedQueueTest, SkipElement) {
   TestQueueWithSize q;
   const std::string kEntry = "woot";
-  constexpr size_t kTestElementSize = 42;
 
   // Skipping an element should update accounting appropriately.
-  EXPECT_TRUE(q.SkipElement(SequenceNumber(0), kTestElementSize));
+  EXPECT_TRUE(q.SkipElement(SequenceNumber(0)));
   EXPECT_EQ(0u, q.GetTotalAvailableElementSize());
-  EXPECT_EQ(kTestElementSize, q.GetTotalElementSizeQueuedSoFar());
 
   // We can't skip or push an element that's already been skipped.
-  EXPECT_FALSE(q.SkipElement(SequenceNumber(0), kTestElementSize));
+  EXPECT_FALSE(q.SkipElement(SequenceNumber(0)));
   EXPECT_FALSE(q.Push(SequenceNumber(0), kEntry));
 
   // And we can't skip an element that's already been pushed.
   EXPECT_TRUE(q.Push(SequenceNumber(1), kEntry));
-  EXPECT_FALSE(q.SkipElement(SequenceNumber(1), 7));
+  EXPECT_FALSE(q.SkipElement(SequenceNumber(1)));
   EXPECT_EQ(kEntry.size(), q.GetTotalAvailableElementSize());
-  EXPECT_EQ(kEntry.size() + kTestElementSize,
-            q.GetTotalElementSizeQueuedSoFar());
 
   std::string s;
   EXPECT_TRUE(q.Pop(s));
   EXPECT_EQ(0u, q.GetTotalAvailableElementSize());
-  EXPECT_EQ(kEntry.size() + kTestElementSize,
-            q.GetTotalElementSizeQueuedSoFar());
 
   // Skip ahead past SequenceNumber 2 and 3.
-  EXPECT_TRUE(q.SkipElement(SequenceNumber(2), kTestElementSize));
+  EXPECT_TRUE(q.SkipElement(SequenceNumber(2)));
   EXPECT_EQ(0u, q.GetTotalAvailableElementSize());
-  EXPECT_EQ(kEntry.size() + kTestElementSize * 2,
-            q.GetTotalElementSizeQueuedSoFar());
-  EXPECT_TRUE(q.SkipElement(SequenceNumber(3), kTestElementSize));
+  EXPECT_TRUE(q.SkipElement(SequenceNumber(3)));
   EXPECT_EQ(0u, q.GetTotalAvailableElementSize());
-  EXPECT_EQ(kEntry.size() + kTestElementSize * 3,
-            q.GetTotalElementSizeQueuedSoFar());
 
   // SequenceNumber 4 can now be pushed while 2 and 3 cannot.
   EXPECT_FALSE(q.Push(SequenceNumber(2), kEntry));
   EXPECT_FALSE(q.Push(SequenceNumber(3), kEntry));
   EXPECT_TRUE(q.Push(SequenceNumber(4), kEntry));
-  EXPECT_FALSE(q.SkipElement(SequenceNumber(4), kTestElementSize));
+  EXPECT_FALSE(q.SkipElement(SequenceNumber(4)));
   EXPECT_EQ(kEntry.size(), q.GetTotalAvailableElementSize());
-  EXPECT_EQ(kEntry.size() * 2 + kTestElementSize * 3,
-            q.GetTotalElementSizeQueuedSoFar());
 
   // Cap the sequence at 6 elements and verify that accounting remains intact
   // when we skip the last element.
@@ -233,14 +234,12 @@ TEST(SequencedQueueTest, SkipElement) {
   EXPECT_FALSE(q.IsSequenceFullyConsumed());
   EXPECT_TRUE(q.Pop(s));
   EXPECT_FALSE(q.IsSequenceFullyConsumed());
-  EXPECT_TRUE(q.SkipElement(SequenceNumber(5), kTestElementSize));
+  EXPECT_TRUE(q.SkipElement(SequenceNumber(5)));
   EXPECT_EQ(0u, q.GetTotalAvailableElementSize());
-  EXPECT_EQ(kEntry.size() * 2 + kTestElementSize * 4,
-            q.GetTotalElementSizeQueuedSoFar());
   EXPECT_TRUE(q.IsSequenceFullyConsumed());
 
   // Fully consumed queue: skipping must fail.
-  EXPECT_FALSE(q.SkipElement(SequenceNumber(6), kTestElementSize));
+  EXPECT_FALSE(q.SkipElement(SequenceNumber(6)));
 }
 
 TEST(SequencedQueueTest, Accounting) {
@@ -308,6 +307,143 @@ TEST(SequencedQueueTest, Accounting) {
   EXPECT_EQ(kEntries[4], s);
   EXPECT_EQ(0u, q.GetNumAvailableElements());
   EXPECT_EQ(0u, q.GetTotalAvailableElementSize());
+}
+
+TEST(SequencedQueueTest, GrowWithCompactionWithoutCompaction) {
+  TestQueue q;
+  using Accessor =
+      SequencedQueueTestAccessor<std::string,
+                                 DefaultSequencedQueueTraits<std::string>>;
+
+  // `front_index_ == 0`, so growth cannot reclaim any front slack. Pushing an
+  // entry just beyond the current logical extent must grow storage without
+  // entering either compaction path.
+  Accessor::entries(q).reserve(4);
+  EXPECT_TRUE(q.Push(SequenceNumber(3), "3"));
+
+  const size_t initial_capacity = Accessor::entries(q).capacity();
+  const size_t initial_size = Accessor::entries(q).size();
+  EXPECT_EQ(0u, Accessor::front_index(q));
+  EXPECT_EQ(4u, Accessor::entries(q).size());
+
+  const auto old_data = Accessor::entries(q).data();
+  EXPECT_TRUE(q.Push(SequenceNumber(4), "4"));
+
+  EXPECT_EQ(0u, Accessor::front_index(q));
+  EXPECT_EQ(initial_size + 1, Accessor::entries(q).size());
+  EXPECT_NE(old_data, Accessor::entries(q).data());
+  EXPECT_GT(Accessor::entries(q).capacity(), initial_capacity);
+
+  std::string popped;
+  EXPECT_FALSE(q.Pop(popped));
+  EXPECT_TRUE(q.Push(SequenceNumber(0), "0"));
+  EXPECT_TRUE(q.Pop(popped));
+  EXPECT_EQ("0", popped);
+}
+
+TEST(SequencedQueueTest, GrowWithCompactionInPlace) {
+  TestQueue q;
+  using Accessor =
+      SequencedQueueTestAccessor<std::string,
+                                 DefaultSequencedQueueTraits<std::string>>;
+
+  // Pop once to create front slack, then push far enough to require growth.
+  // After compaction the required size still fits in the existing capacity, so
+  // `GrowWithCompaction()` should compact in place.
+  Accessor::entries(q).reserve(8);
+  ASSERT_TRUE(q.Push(SequenceNumber(0), "0"));
+  ASSERT_TRUE(q.Push(SequenceNumber(5), "5"));
+
+  std::string popped;
+  ASSERT_TRUE(q.Pop(popped));
+  EXPECT_EQ("0", popped);
+  EXPECT_EQ(1u, Accessor::front_index(q));
+  const size_t old_capacity = Accessor::entries(q).capacity();
+  const auto old_data = Accessor::entries(q).data();
+
+  ASSERT_TRUE(q.Push(SequenceNumber(7), "7"));
+
+  EXPECT_EQ(old_data, Accessor::entries(q).data());
+  EXPECT_EQ(old_capacity, Accessor::entries(q).capacity());
+  EXPECT_GT(Accessor::entries(q).size(), 6u);
+
+  EXPECT_FALSE(q.Push(SequenceNumber(0), "again"));
+  EXPECT_TRUE(q.Push(SequenceNumber(1), "1"));
+  EXPECT_TRUE(q.Pop(popped));
+  EXPECT_EQ("1", popped);
+}
+
+TEST(SequencedQueueTest, GrowWithCompactionWithoutCompactionWithFrontSlack) {
+  TestQueue q;
+  using Accessor =
+      SequencedQueueTestAccessor<std::string,
+                                 DefaultSequencedQueueTraits<std::string>>;
+
+  // Pop once to create front slack, but keep enough spare capacity that the
+  // next push only needs `resize(required)`. This should bypass compaction even
+  // though `front_index_ > 0`.
+  Accessor::entries(q).reserve(8);
+  ASSERT_TRUE(q.Push(SequenceNumber(0), "0"));
+  ASSERT_TRUE(q.Push(SequenceNumber(5), "5"));
+
+  std::string popped;
+  ASSERT_TRUE(q.Pop(popped));
+  EXPECT_EQ("0", popped);
+  EXPECT_EQ(1u, Accessor::front_index(q));
+
+  const auto old_data = Accessor::entries(q).data();
+  const size_t old_capacity = Accessor::entries(q).capacity();
+  const size_t old_size = Accessor::entries(q).size();
+
+  ASSERT_TRUE(q.Push(SequenceNumber(6), "6"));
+
+  EXPECT_EQ(1u, Accessor::front_index(q));
+  EXPECT_EQ(old_data, Accessor::entries(q).data());
+  EXPECT_EQ(old_capacity, Accessor::entries(q).capacity());
+  EXPECT_EQ(old_size + 1, Accessor::entries(q).size());
+
+  EXPECT_TRUE(q.Push(SequenceNumber(1), "1"));
+  EXPECT_TRUE(q.Pop(popped));
+  EXPECT_EQ("1", popped);
+}
+
+TEST(SequencedQueueTest, GrowWithCompactionToNewBuffer) {
+  TestQueue q;
+  using Accessor =
+      SequencedQueueTestAccessor<std::string,
+                                 DefaultSequencedQueueTraits<std::string>>;
+
+  // Pop once to create front slack, then push far enough that compaction alone
+  // still cannot satisfy the required size. This must take the new-buffer
+  // compaction path.
+  Accessor::entries(q).reserve(4);
+  ASSERT_TRUE(q.Push(SequenceNumber(0), "0"));
+  ASSERT_TRUE(q.Push(SequenceNumber(3), "3"));
+
+  std::string popped;
+  ASSERT_TRUE(q.Pop(popped));
+  EXPECT_EQ("0", popped);
+  EXPECT_EQ(1u, Accessor::front_index(q));
+
+  const size_t full_capacity = Accessor::entries(q).capacity();
+
+  const auto old_data = Accessor::entries(q).data();
+  ASSERT_TRUE(q.Push(SequenceNumber(5), "5"));
+
+  EXPECT_EQ(0u, Accessor::front_index(q));
+  EXPECT_NE(old_data, Accessor::entries(q).data());
+  EXPECT_EQ(5u, Accessor::entries(q).size());
+  EXPECT_GT(Accessor::entries(q).capacity(), full_capacity);
+
+  EXPECT_FALSE(q.Push(SequenceNumber(0), "again"));
+  EXPECT_TRUE(q.Push(SequenceNumber(1), "1"));
+  EXPECT_TRUE(q.Push(SequenceNumber(2), "2"));
+  EXPECT_TRUE(q.Pop(popped));
+  EXPECT_EQ("1", popped);
+  EXPECT_TRUE(q.Pop(popped));
+  EXPECT_EQ("2", popped);
+  EXPECT_TRUE(q.Pop(popped));
+  EXPECT_EQ("3", popped);
 }
 
 }  // namespace

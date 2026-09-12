@@ -4,32 +4,46 @@
 
 #include "chrome/browser/ash/child_accounts/time_limit_notifier.h"
 
-#include "base/memory/ref_counted.h"
-#include "base/test/test_mock_time_task_runner.h"
+#include <memory>
+
+#include "ash/public/cpp/notification_utils.h"
 #include "base/time/time.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
+#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/test/base/testing_profile.h"
+#include "chromeos/ash/components/browser_context_helper/annotated_account_id.h"
+#include "components/user_manager/scoped_user_manager.h"
+#include "components/user_manager/user.h"
+#include "components/user_manager/user_names.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/message_center/message_center.h"
 
 namespace ash {
 
 class TimeLimitNotifierTest : public testing::Test {
  public:
-  TimeLimitNotifierTest()
-      : task_runner_(base::MakeRefCounted<base::TestMockTimeTaskRunner>()),
-        notification_tester_(&profile_),
-        notifier_(&profile_, task_runner_) {}
+  TimeLimitNotifierTest() : notifier_(&profile_) {}
 
   TimeLimitNotifierTest(const TimeLimitNotifierTest&) = delete;
   TimeLimitNotifierTest& operator=(const TimeLimitNotifierTest&) = delete;
 
   ~TimeLimitNotifierTest() override = default;
 
+  void SetUp() override {
+    message_center::MessageCenter::Initialize();
+    user_manager::User* user =
+        fake_user_manager_->AddUser(user_manager::StubAccountId());
+    AnnotatedAccountId::Set(&profile_, user->GetAccountId());
+    user_hash_ = user->username_hash();
+  }
+
+  void TearDown() override { message_center::MessageCenter::Shutdown(); }
+
  protected:
   bool HasLockNotification() {
-    return notification_tester_.GetNotification("time-limit-lock-notification")
-        .has_value();
+    return message_center::MessageCenter::Get()->FindNotificationById(
+        CreateUserScopedNotificationId("time-limit-lock-notification",
+                                       user_hash_));
   }
 
   bool HasPolicyUpdateNotification(TimeLimitNotifier::LimitType limit_type) {
@@ -47,18 +61,21 @@ class TimeLimitNotifierTest : public testing::Test {
       default:
         NOTREACHED();
     }
-    return notification_tester_.GetNotification(notification_id).has_value();
+    return message_center::MessageCenter::Get()->FindNotificationById(
+        CreateUserScopedNotificationId(notification_id, user_hash_));
   }
 
   void RemoveNotification() {
-    notification_tester_.RemoveAllNotifications(
-        NotificationHandler::Type::TRANSIENT, true /* by_user */);
+    message_center::MessageCenter::Get()->RemoveAllNotifications(
+        /*by_user=*/true, message_center::MessageCenter::RemoveType::ALL);
   }
 
-  scoped_refptr<base::TestMockTimeTaskRunner> task_runner_;
-  content::BrowserTaskEnvironment task_environment_;
+  content::BrowserTaskEnvironment task_environment_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
+  user_manager::TypedScopedUserManager<FakeChromeUserManager>
+      fake_user_manager_{std::make_unique<FakeChromeUserManager>()};
   TestingProfile profile_;
-  NotificationDisplayServiceTester notification_tester_;
+  std::string user_hash_;
   TimeLimitNotifier notifier_;
 };
 
@@ -67,15 +84,15 @@ TEST_F(TimeLimitNotifierTest, ShowLockNotifications) {
       TimeLimitNotifier::LimitType::kScreenTime, base::Minutes(20));
 
   // Fast forward a bit, but not far enough to show a notification.
-  task_runner_->FastForwardBy(base::Minutes(10));
+  task_environment_.FastForwardBy(base::Minutes(10));
   EXPECT_FALSE(HasLockNotification());
 
   // Fast forward to the 5-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(5));
+  task_environment_.FastForwardBy(base::Minutes(5));
   EXPECT_TRUE(HasLockNotification());
 
   // Fast forward to the 1-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(4));
+  task_environment_.FastForwardBy(base::Minutes(4));
   EXPECT_TRUE(HasLockNotification());
 }
 
@@ -84,16 +101,16 @@ TEST_F(TimeLimitNotifierTest, DismisLocksNotification) {
       TimeLimitNotifier::LimitType::kBedTime, base::Minutes(10));
 
   // Fast forward to the 5-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(5));
+  task_environment_.FastForwardBy(base::Minutes(5));
   EXPECT_TRUE(HasLockNotification());
   RemoveNotification();
 
   // Fast forward one minute; the same notification is not reshown.
-  task_runner_->FastForwardBy(base::Minutes(1));
+  task_environment_.FastForwardBy(base::Minutes(1));
   EXPECT_FALSE(HasLockNotification());
 
   // Fast forward to the 1-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(3));
+  task_environment_.FastForwardBy(base::Minutes(3));
   EXPECT_TRUE(HasLockNotification());
 }
 
@@ -102,16 +119,16 @@ TEST_F(TimeLimitNotifierTest, OnlyExiLocktNotification) {
       TimeLimitNotifier::LimitType::kScreenTime, base::Minutes(3));
 
   // Fast forward a bit, but not far enough to show a notification.
-  task_runner_->FastForwardBy(base::Minutes(1));
+  task_environment_.FastForwardBy(base::Minutes(1));
   EXPECT_FALSE(HasLockNotification());
 
   // Fast forward to the 1-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(1));
+  task_environment_.FastForwardBy(base::Minutes(1));
   EXPECT_TRUE(HasLockNotification());
   RemoveNotification();
 
   // Only one notification was shown.
-  task_runner_->FastForwardUntilNoTasksRemain();
+  task_environment_.FastForwardBy(base::Minutes(1));
   EXPECT_FALSE(HasLockNotification());
 }
 
@@ -119,7 +136,7 @@ TEST_F(TimeLimitNotifierTest, NoLockNotifications) {
   notifier_.MaybeScheduleLockNotifications(
       TimeLimitNotifier::LimitType::kBedTime, base::Seconds(30));
 
-  task_runner_->FastForwardUntilNoTasksRemain();
+  task_environment_.FastForwardBy(base::Seconds(30));
   EXPECT_FALSE(HasLockNotification());
 }
 
@@ -128,13 +145,13 @@ TEST_F(TimeLimitNotifierTest, UnscheduleLockNotifications) {
       TimeLimitNotifier::LimitType::kScreenTime, base::Minutes(10));
 
   // Fast forward to the 5-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(5));
+  task_environment_.FastForwardBy(base::Minutes(5));
   EXPECT_TRUE(HasLockNotification());
   RemoveNotification();
 
   // Stop the timers.
   notifier_.UnscheduleNotifications();
-  task_runner_->FastForwardUntilNoTasksRemain();
+  task_environment_.FastForwardBy(base::Minutes(5));
   EXPECT_FALSE(HasLockNotification());
 }
 
@@ -147,22 +164,22 @@ TEST_F(TimeLimitNotifierTest, RescheduleLockNotifications) {
       TimeLimitNotifier::LimitType::kScreenTime, base::Minutes(30));
 
   // Fast forward a bit, but not far enough to show a notification.
-  task_runner_->FastForwardBy(base::Minutes(20));
+  task_environment_.FastForwardBy(base::Minutes(20));
   EXPECT_FALSE(HasLockNotification());
 
   // Fast forward to the 5-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(5));
+  task_environment_.FastForwardBy(base::Minutes(5));
   EXPECT_TRUE(HasLockNotification());
   RemoveNotification();
 
   // Fast forward to the 1-minute warning time.
-  task_runner_->FastForwardBy(base::Minutes(4));
+  task_environment_.FastForwardBy(base::Minutes(4));
   EXPECT_TRUE(HasLockNotification());
 }
 
 TEST_F(TimeLimitNotifierTest, NoOverriePolicyUpdateNotification) {
   notifier_.ShowPolicyUpdateNotification(
-      TimeLimitNotifier::LimitType::kOverride, absl::nullopt);
+      TimeLimitNotifier::LimitType::kOverride, std::nullopt);
 
   EXPECT_FALSE(
       HasPolicyUpdateNotification(TimeLimitNotifier::LimitType::kOverride));
@@ -170,13 +187,13 @@ TEST_F(TimeLimitNotifierTest, NoOverriePolicyUpdateNotification) {
 
 TEST_F(TimeLimitNotifierTest, ShowPolicyUpdateNotifications) {
   notifier_.ShowPolicyUpdateNotification(
-      TimeLimitNotifier::LimitType::kScreenTime, absl::nullopt);
+      TimeLimitNotifier::LimitType::kScreenTime, std::nullopt);
   notifier_.ShowPolicyUpdateNotification(TimeLimitNotifier::LimitType::kBedTime,
-                                         absl::nullopt);
+                                         std::nullopt);
   base::Time lock_time;
   ASSERT_TRUE(base::Time::FromUTCString("1 Jan 2019 22:00 PST", &lock_time));
   notifier_.ShowPolicyUpdateNotification(
-      TimeLimitNotifier::LimitType::kOverride, absl::make_optional(lock_time));
+      TimeLimitNotifier::LimitType::kOverride, std::make_optional(lock_time));
 
   EXPECT_TRUE(
       HasPolicyUpdateNotification(TimeLimitNotifier::LimitType::kScreenTime));

@@ -22,12 +22,11 @@
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/input/input_device_capabilities.h"
 #include "third_party/blink/renderer/core/layout/adjust_for_absolute_zoom.h"
-#include "third_party/blink/renderer/core/layout/geometry/physical_offset.h"
 #include "third_party/blink/renderer/core/layout/layout_box.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/layout/map_coordinates_flags.h"
 #include "third_party/blink/renderer/core/pointer_type_names.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/geometry/physical_offset.h"
 #include "third_party/blink/renderer/platform/widget/frame_widget.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
@@ -57,7 +56,7 @@ void PopulateMouseEventInitCoordinates(
     LayoutObject* layout_object = element->GetLayoutObject();
     PhysicalOffset center = layout_box->PhysicalBorderBoxRect().Center();
     PhysicalOffset root_frame_center = layout_object->LocalToAncestorPoint(
-        center, nullptr, MapCoordinatesMode::kTraverseDocumentBoundaries);
+        center, nullptr, {MapCoordinatesMode::kTraverseDocumentBoundaries});
     PhysicalOffset frame_center =
         dom_window->GetFrame()->View()->ConvertFromRootFrame(root_frame_center);
     gfx::Point frame_center_point = ToRoundedPoint(frame_center);
@@ -130,7 +129,7 @@ MouseEvent* CreateMouseOrPointerEvent(
                                   ? underlying_event->PlatformTimeStamp()
                                   : base::TimeTicks::Now();
   MouseEvent::SyntheticEventType synthetic_type = MouseEvent::kPositionless;
-  if (const auto* mouse_event = DynamicTo<MouseEvent>(underlying_event)) {
+  if (IsA<MouseEvent>(underlying_event)) {
     synthetic_type = MouseEvent::kRealOrIndistinguishable;
   }
   if (creation_scope == SimulatedClickCreationScope::kFromAccessibility) {
@@ -157,12 +156,19 @@ MouseEvent* CreateMouseOrPointerEvent(
 
   MouseEvent* created_event;
   if (event_class_type == EventClassType::kPointer) {
+    initializer->setPointerId(PointerEventFactory::kReservedNonPointerId);
     if (creation_scope == SimulatedClickCreationScope::kFromAccessibility) {
       initializer->setPointerId(PointerEventFactory::kMouseId);
       initializer->setPointerType(pointer_type_names::kMouse);
       initializer->setIsPrimary(true);
-    } else {
-      initializer->setPointerId(PointerEventFactory::kReservedNonPointerId);
+    } else if (creation_scope == SimulatedClickCreationScope::kFromUserAgent) {
+      if (auto* pointer_underlying_event =
+              DynamicTo<PointerEvent>(underlying_event)) {
+        initializer->setPointerId(pointer_underlying_event->pointerId());
+        initializer->setPointerType(pointer_underlying_event->pointerType());
+        initializer->setIsPrimary(pointer_underlying_event->isPrimary());
+        initializer->setDetail(pointer_underlying_event->detail());
+      }
     }
     created_event = MakeGarbageCollected<PointerEvent>(
         event_type, initializer, timestamp, synthetic_type);
@@ -172,8 +178,9 @@ MouseEvent* CreateMouseOrPointerEvent(
   }
 
   created_event->SetTrusted(
-      creation_scope == SimulatedClickCreationScope::kFromUserAgent ||
-      creation_scope == SimulatedClickCreationScope::kFromAccessibility);
+      creation_scope == SimulatedClickCreationScope::kFromAccessibility ||
+      (creation_scope == SimulatedClickCreationScope::kFromUserAgent &&
+       (!underlying_event || underlying_event->isTrusted())));
   created_event->SetUnderlyingEvent(underlying_event);
   if (synthetic_type == MouseEvent::kRealOrIndistinguishable) {
     auto* mouse_event = To<MouseEvent>(created_event->UnderlyingEvent());

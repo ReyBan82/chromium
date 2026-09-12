@@ -41,16 +41,17 @@ void WebCryptoResult::CompleteWithError(WebCryptoErrorType error_type,
   Reset();
 }
 
-void WebCryptoResult::CompleteWithBuffer(const void* bytes,
-                                         unsigned bytes_size) {
-  if (!Cancelled())
-    impl_->CompleteWithBuffer(bytes, bytes_size);
+void WebCryptoResult::CompleteWithBuffer(base::span<const uint8_t> bytes) {
+  if (!Cancelled()) {
+    impl_->CompleteWithBuffer(bytes);
+  }
   Reset();
 }
 
-void WebCryptoResult::CompleteWithJson(const char* utf8_data, unsigned length) {
-  if (!Cancelled())
-    impl_->CompleteWithJson(utf8_data, length);
+void WebCryptoResult::CompleteWithJson(std::string_view utf8_data) {
+  if (!Cancelled()) {
+    impl_->CompleteWithJson(utf8_data);
+  }
   Reset();
 }
 
@@ -67,17 +68,49 @@ void WebCryptoResult::CompleteWithKey(const WebCryptoKey& key) {
   Reset();
 }
 
-void WebCryptoResult::CompleteWithKeyPair(const WebCryptoKey& public_key,
-                                          const WebCryptoKey& private_key) {
+void WebCryptoResult::CompleteWithKeyForGenerateKey(const WebCryptoKey& key) {
+  DCHECK(!key.IsNull());
+  if (!Cancelled()) {
+    impl_->CompleteWithKeyForGenerateKey(key);
+  }
+  Reset();
+}
+
+void WebCryptoResult::CompleteWithKeyPairForGenerateKey(
+    const WebCryptoKey& public_key,
+    const WebCryptoKey& private_key) {
   DCHECK(!public_key.IsNull());
   DCHECK(!private_key.IsNull());
   if (!Cancelled())
-    impl_->CompleteWithKeyPair(public_key, private_key);
+    impl_->CompleteWithKeyPairForGenerateKey(public_key, private_key);
+  Reset();
+}
+
+void WebCryptoResult::CompleteWithEncapsulatedKey(
+    const WebCryptoKey& shared_key,
+    base::span<const uint8_t> ciphertext) {
+  DCHECK(!shared_key.IsNull());
+  if (!Cancelled()) {
+    impl_->CompleteWithEncapsulatedKey(shared_key, ciphertext);
+  }
+  Reset();
+}
+
+void WebCryptoResult::CompleteWithEncapsulatedBits(
+    base::span<const uint8_t> shared_key,
+    base::span<const uint8_t> ciphertext) {
+  if (!Cancelled()) {
+    impl_->CompleteWithEncapsulatedBits(shared_key, ciphertext);
+  }
   Reset();
 }
 
 bool WebCryptoResult::Cancelled() const {
   return cancel_->Cancelled();
+}
+
+ExecutionContext* WebCryptoResult::GetExecutionContext() const {
+  return impl_->GetExecutionContext();
 }
 
 WebCryptoResult::WebCryptoResult(CryptoResult* impl,

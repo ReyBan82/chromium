@@ -17,8 +17,7 @@ extern const char kEnableTrackControlAppRendererFeatureUse[];
 extern const char kEnablePlayready[];
 
 extern const char kKeyAppId[];
-// Insecure content is allowed for the app.
-extern const char kKeyAllowInsecureContent[];
+extern const char kExtendedInputSupported[];
 
 // If dev mode is enabled, kDevModeOrigin will be set with origin url
 extern const char kEnableDevMode[];
@@ -41,8 +40,7 @@ extern const char kDisableBackgroundTabTimerThrottle[];
 // false.
 extern const char kDisableBackgroundSuspend[];
 
-// Enable sending/receiving messages to/from libassistant
-extern const char kEnableAssistantMessagePipe[];
+
 
 // Enable a standalone demo app to control privileged features.
 extern const char kEnableDemoStandaloneMode[];
@@ -52,8 +50,19 @@ extern const char kCastCoreRendererFeatures[];
 extern const char kCastCoreEnforceFeaturePermissions[];
 extern const char kCastCoreFeaturePermissions[];
 extern const char kCastCoreFeaturePermissionOrigins[];
+extern const char kCastCoreAllowMediaAccess[];
+extern const char kCastCoreForce720p[];
 extern const char kCastCoreIsAudioOnly[];
 extern const char kCastCoreIsRemoteControlMode[];
+extern const char kCastCoreLogJsConsoleMessages[];
+extern const char kCastCoreTurnOnScreen[];
+extern const char kCastCoreKeepScreenOn[];
+
+extern const char kCastCoreBitstreamAudioCodecsInfo[];
+extern const char kCastCoreCodecs[];
+extern const char kCastCoreSpatialRendering[];
+
+extern const char kCastCoreCrashOnStart[];
 
 }  // namespace feature
 }  // namespace chromecast

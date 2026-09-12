@@ -15,6 +15,7 @@
 
 #include "base/bits.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/memory/page_size.h"
@@ -34,8 +35,8 @@ RemoteProcessIOResult WriteRemoteData(pid_t pid,
                                       base::span<char> data) {
   CHECK_GE(remote_size, data.size());
 
-  base::span<char> remote_span(reinterpret_cast<char*>(remote_addr),
-                               remote_size);
+  base::span<char> remote_span = UNSAFE_TODO(
+      base::span<char>(reinterpret_cast<char*>(remote_addr), remote_size));
   struct iovec local_iov = {};
   struct iovec remote_iov = {};
 
@@ -59,8 +60,9 @@ RemoteProcessIOResult WriteRemoteData(pid_t pid,
       return RemoteProcessIOResult::kUnknownError;
     }
 
-    remote_span = remote_span.subspan(bytes_written);
-    data = data.subspan(bytes_written);
+    const auto bytes_written_size_t = static_cast<size_t>(bytes_written);
+    remote_span = remote_span.subspan(bytes_written_size_t);
+    data = data.subspan(bytes_written_size_t);
   }
 
   return RemoteProcessIOResult::kSuccess;
@@ -113,16 +115,17 @@ RemoteProcessIOResult ReadFilePathFromRemoteProcess(pid_t pid,
     }
 
     // We successfully performed a read.
+    const auto bytes_read_size_t = static_cast<size_t>(bytes_read);
 #if defined(MEMORY_SANITIZER)
     // Msan does not hook syscall(__NR_process_vm_readv, ...)
-    __msan_unpoison(local_iov.iov_base, bytes_read);
+    __msan_unpoison(local_iov.iov_base, bytes_read_size_t);
 #endif
-    remote_ptr += bytes_read;
-    buffer_span = buffer_span.subspan(bytes_read);
+    remote_ptr += bytes_read_size_t;
+    buffer_span = buffer_span.subspan(bytes_read_size_t);
 
     // Check for null byte.
-    char* null_byte_ptr =
-        static_cast<char*>(memchr(local_iov.iov_base, '\0', bytes_read));
+    char* null_byte_ptr = static_cast<char*>(
+        UNSAFE_TODO(memchr(local_iov.iov_base, '\0', bytes_read_size_t)));
     if (null_byte_ptr) {
       *out_str = std::string(buffer, null_byte_ptr);
       return RemoteProcessIOResult::kSuccess;

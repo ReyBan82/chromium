@@ -9,7 +9,7 @@
 #include "ui/events/event_constants.h"
 #include "ui/events/gesture_detection/gesture_detector.h"
 #include "ui/events/gesture_detection/gesture_provider_config_helper.h"
-#include "ui/events/gesture_detection/motion_event.h"
+#include "ui/events/velocity_tracker/motion_event.h"
 
 using ui::GestureDetector;
 using ui::MotionEvent;
@@ -44,7 +44,7 @@ StylusTextSelector::StylusTextSelector(StylusTextSelectorClient* client)
       drag_state_(NO_DRAG),
       anchor_x_(0.0f),
       anchor_y_(0.0f) {
-  DCHECK(client);
+  CHECK(client, base::NotFatalUntil::M152);
 }
 
 StylusTextSelector::~StylusTextSelector() {
@@ -98,8 +98,9 @@ bool StylusTextSelector::OnTouchEvent(const MotionEvent& event) {
     case MotionEvent::Action::HOVER_MOVE:
     case MotionEvent::Action::BUTTON_PRESS:
     case MotionEvent::Action::BUTTON_RELEASE:
+    case MotionEvent::Action::OUTSIDE:
+    case MotionEvent::Action::SCROLL:
       NOTREACHED();
-      break;
   }
 
   if (!gesture_detector_)
@@ -113,8 +114,9 @@ bool StylusTextSelector::OnTouchEvent(const MotionEvent& event) {
 }
 
 bool StylusTextSelector::OnSingleTapUp(const MotionEvent& e, int tap_count) {
-  DCHECK(text_selection_triggered_);
-  DCHECK_NE(DRAGGING_WITH_BUTTON_PRESSED, drag_state_);
+  CHECK(text_selection_triggered_, base::NotFatalUntil::M152);
+  CHECK_NE(DRAGGING_WITH_BUTTON_PRESSED, drag_state_,
+           base::NotFatalUntil::M152);
   client_->OnStylusSelectTap(e.GetEventTime(), e.GetX(), e.GetY());
   return true;
 }
@@ -124,7 +126,7 @@ bool StylusTextSelector::OnScroll(const MotionEvent& e1,
                                   const MotionEvent& secondary_pointer_down,
                                   float distance_x,
                                   float distance_y) {
-  DCHECK(text_selection_triggered_);
+  CHECK(text_selection_triggered_, base::NotFatalUntil::M152);
 
   // Return if Stylus button is not pressed.
   if (!secondary_button_pressed_)
@@ -142,7 +144,7 @@ bool StylusTextSelector::OnScroll(const MotionEvent& e1,
 
 // static
 bool StylusTextSelector::ShouldStartTextSelection(const MotionEvent& event) {
-  DCHECK_GT(event.GetPointerCount(), 0u);
+  CHECK_GT(event.GetPointerCount(), 0u, base::NotFatalUntil::M152);
   // Currently we are supporting stylus-only cases.
   const bool is_stylus = event.GetToolType(0) == MotionEvent::ToolType::STYLUS;
 

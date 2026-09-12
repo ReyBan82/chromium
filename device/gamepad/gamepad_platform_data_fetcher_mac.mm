@@ -4,23 +4,26 @@
 
 #include "device/gamepad/gamepad_platform_data_fetcher_mac.h"
 
+#import <Foundation/Foundation.h>
+#include <IOKit/hid/IOHIDKeys.h>
 #include <stdint.h>
 #include <string.h>
 
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_nsobject.h"
+#include "base/apple/bridging.h"
+#include "base/apple/foundation_util.h"
+#include "base/feature_list.h"
 #include "base/strings/sys_string_conversions.h"
 #import "base/task/sequenced_task_runner.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "device/gamepad/dualshock4_controller.h"
 #include "device/gamepad/gamepad_blocklist.h"
 #include "device/gamepad/gamepad_device_mac.h"
 #include "device/gamepad/gamepad_id_list.h"
 #include "device/gamepad/gamepad_uma.h"
 #include "device/gamepad/nintendo_controller.h"
-
-#import <Foundation/Foundation.h>
-#include <IOKit/hid/IOHIDKeys.h>
+#include "device/gamepad/public/cpp/gamepad_features.h"
+#include "device/gamepad/xbox_hid_controller.h"
 
 namespace device {
 
@@ -34,8 +37,8 @@ const uint16_t kMultiAxisUsageNumber = 0x08;
 
 NSDictionary* DeviceMatching(uint32_t usage_page, uint32_t usage) {
   return @{
-    base::mac::CFToNSCast(CFSTR(kIOHIDDeviceUsagePageKey)) : @(usage_page),
-    base::mac::CFToNSCast(CFSTR(kIOHIDDeviceUsageKey)) : @(usage)
+    @kIOHIDDeviceUsagePageKey : @(usage_page),
+    @kIOHIDDeviceUsageKey : @(usage)
   };
 }
 
@@ -50,47 +53,45 @@ GamepadSource GamepadPlatformDataFetcherMac::source() {
 void GamepadPlatformDataFetcherMac::OnAddedToProvider() {
   hid_manager_ref_.reset(
       IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone));
-  if (CFGetTypeID(hid_manager_ref_) != IOHIDManagerGetTypeID()) {
+  if (CFGetTypeID(hid_manager_ref_.get()) != IOHIDManagerGetTypeID()) {
     enabled_ = false;
     return;
   }
 
-  base::scoped_nsobject<NSArray> criteria(
-      [[NSArray alloc] initWithObjects:DeviceMatching(kGenericDesktopUsagePage,
-                                                      kJoystickUsageNumber),
-                                       DeviceMatching(kGenericDesktopUsagePage,
-                                                      kGameUsageNumber),
-                                       DeviceMatching(kGenericDesktopUsagePage,
-                                                      kMultiAxisUsageNumber),
-                                       nil]);
-  IOHIDManagerSetDeviceMatchingMultiple(hid_manager_ref_,
-                                        base::mac::NSToCFCast(criteria));
+  NSArray* criteria = @[
+    DeviceMatching(kGenericDesktopUsagePage, kJoystickUsageNumber),
+    DeviceMatching(kGenericDesktopUsagePage, kGameUsageNumber),
+    DeviceMatching(kGenericDesktopUsagePage, kMultiAxisUsageNumber),
+  ];
+  IOHIDManagerSetDeviceMatchingMultiple(hid_manager_ref_.get(),
+                                        base::apple::NSToCFPtrCast(criteria));
 
   RegisterForNotifications();
 }
 
 void GamepadPlatformDataFetcherMac::RegisterForNotifications() {
   // Register for plug/unplug notifications.
-  IOHIDManagerRegisterDeviceMatchingCallback(hid_manager_ref_,
+  IOHIDManagerRegisterDeviceMatchingCallback(hid_manager_ref_.get(),
                                              DeviceAddCallback, this);
-  IOHIDManagerRegisterDeviceRemovalCallback(hid_manager_ref_,
+  IOHIDManagerRegisterDeviceRemovalCallback(hid_manager_ref_.get(),
                                             DeviceRemoveCallback, this);
 
   // Register for value change notifications.
-  IOHIDManagerRegisterInputValueCallback(hid_manager_ref_, ValueChangedCallback,
-                                         this);
+  IOHIDManagerRegisterInputValueCallback(hid_manager_ref_.get(),
+                                         ValueChangedCallback, this);
 
-  IOHIDManagerScheduleWithRunLoop(hid_manager_ref_, CFRunLoopGetCurrent(),
+  IOHIDManagerScheduleWithRunLoop(hid_manager_ref_.get(), CFRunLoopGetCurrent(),
                                   kCFRunLoopDefaultMode);
 
-  const auto result = IOHIDManagerOpen(hid_manager_ref_, kIOHIDOptionsTypeNone);
+  const auto result =
+      IOHIDManagerOpen(hid_manager_ref_.get(), kIOHIDOptionsTypeNone);
   enabled_ = (result == kIOReturnSuccess || result == kIOReturnExclusiveAccess);
 }
 
 void GamepadPlatformDataFetcherMac::UnregisterFromNotifications() {
-  IOHIDManagerUnscheduleFromRunLoop(hid_manager_ref_, CFRunLoopGetCurrent(),
-                                    kCFRunLoopDefaultMode);
-  IOHIDManagerClose(hid_manager_ref_, kIOHIDOptionsTypeNone);
+  IOHIDManagerUnscheduleFromRunLoop(
+      hid_manager_ref_.get(), CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+  IOHIDManagerClose(hid_manager_ref_.get(), kIOHIDOptionsTypeNone);
 }
 
 void GamepadPlatformDataFetcherMac::PauseHint(bool pause) {
@@ -142,46 +143,64 @@ GamepadDeviceMac* GamepadPlatformDataFetcherMac::GetGamepadFromHidDevice(
 }
 
 void GamepadPlatformDataFetcherMac::DeviceAdd(IOHIDDeviceRef device) {
-  using base::mac::CFToNSCast;
-  using base::mac::CFCastStrict;
+  using base::apple::CFCastStrict;
+  using base::apple::CFToNSPtrCast;
 
-  if (!enabled_)
+  if (!enabled_) {
     return;
+  }
 
-  NSNumber* location_id = CFToNSCast(CFCastStrict<CFNumberRef>(
+  NSNumber* location_id = CFToNSPtrCast(CFCastStrict<CFNumberRef>(
       IOHIDDeviceGetProperty(device, CFSTR(kIOHIDLocationIDKey))));
-  int location_int = [location_id intValue];
+  int location_int = location_id.intValue;
 
-  NSNumber* vendor_id = CFToNSCast(CFCastStrict<CFNumberRef>(
+  NSNumber* vendor_id = CFToNSPtrCast(CFCastStrict<CFNumberRef>(
       IOHIDDeviceGetProperty(device, CFSTR(kIOHIDVendorIDKey))));
-  NSNumber* product_id = CFToNSCast(CFCastStrict<CFNumberRef>(
+  NSNumber* product_id = CFToNSPtrCast(CFCastStrict<CFNumberRef>(
       IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductIDKey))));
-  NSNumber* version_number = CFToNSCast(CFCastStrict<CFNumberRef>(
+  NSNumber* version_number = CFToNSPtrCast(CFCastStrict<CFNumberRef>(
       IOHIDDeviceGetProperty(device, CFSTR(kIOHIDVersionNumberKey))));
-  NSString* product = CFToNSCast(CFCastStrict<CFStringRef>(
+  NSString* product = CFToNSPtrCast(CFCastStrict<CFStringRef>(
       IOHIDDeviceGetProperty(device, CFSTR(kIOHIDProductKey))));
-  uint16_t vendor_int = [vendor_id intValue];
-  uint16_t product_int = [product_id intValue];
-  uint16_t version_int = [version_number intValue];
+  uint16_t vendor_int = vendor_id.intValue;
+  uint16_t product_int = product_id.intValue;
+  uint16_t version_int = version_number.intValue;
   std::string product_name = base::SysNSStringToUTF8(product);
 
   // Filter out devices that have gamepad-like HID usages but aren't gamepads.
   if (GamepadIsExcluded(vendor_int, product_int))
     return;
 
-  const auto& gamepad_id_list = GamepadIdList::Get();
-  DCHECK_EQ(kXInputTypeNone,
-            gamepad_id_list.GetXInputType(vendor_int, product_int));
-
-  if (devices_.find(location_int) != devices_.end())
+  // PlayStation and Xbox gamepads are handled by GameControllerDataFetcherMac.
+  if (IsSupportedByGameController(vendor_int, product_int)) {
+    VLOG(1) << "Gamepad (VID:" << vendor_int << ", PID:" << product_int
+            << ") handled by GameControllerDataFetcherMac";
+    RecordGamepadPlatformMacOutcome(
+        GamepadPlatformMacOutcome::kHandledByGameController);
     return;
+  }
+
+  const auto& gamepad_id_list = GamepadIdList::Get();
+  if (gamepad_id_list.GetXInputType(vendor_int, product_int) ==
+      kXInputTypeNone) {
+    VLOG(1) << "XInput gamepad claimed by GamepadPlatformDataFetcherMac";
+  }
+
+  if (devices_.contains(location_int)) {
+    RecordGamepadPlatformMacOutcome(
+        GamepadPlatformMacOutcome::kAlreadyConnected);
+    return;
+  }
 
   const GamepadId gamepad_id =
       gamepad_id_list.GetGamepadId(product_name, vendor_int, product_int);
 
   // Nintendo devices are handled by the Nintendo data fetcher.
-  if (NintendoController::IsNintendoController(gamepad_id))
+  if (NintendoController::IsNintendoController(gamepad_id)) {
+    RecordGamepadPlatformMacOutcome(
+        GamepadPlatformMacOutcome::kIsNintendoGamepad);
     return;
+  }
 
   // Record the device before excluding Made for iOS gamepads. This allows us to
   // recognize these devices even though the GameController API masks the vendor
@@ -191,18 +210,22 @@ void GamepadPlatformDataFetcherMac::DeviceAdd(IOHIDDeviceRef device) {
   // The SteelSeries Nimbus and other Made for iOS gamepads should be handled
   // through the GameController interface.
   if (gamepad_id == GamepadId::kSteelSeriesProduct1420) {
+    RecordGamepadPlatformMacOutcome(GamepadPlatformMacOutcome::kIsMfiGamepad);
     return;
   }
 
   bool is_recognized = gamepad_id != GamepadId::kUnknownGamepad;
 
-  PadState* state = GetPadState(location_int, is_recognized);
-  if (!state)
+  PadState* state = GetPadState(location_int, is_recognized, product_name);
+  if (!state) {
+    RecordGamepadPlatformMacOutcome(
+        GamepadPlatformMacOutcome::kNoSlotAvailable);
     return;  // No available slot for this device
+  }
 
   state->mapper = GetGamepadStandardMappingFunction(
       product_name, vendor_int, product_int, /*hid_specification_version=*/0,
-      version_int, GAMEPAD_BUS_UNKNOWN);
+      version_int, GAMEPAD_BUS_UNKNOWN, kGamepadDriverUnknown);
 
   UpdateGamepadStrings(product_name, vendor_int, product_int,
                        state->mapper != nullptr, state->data);
@@ -210,16 +233,25 @@ void GamepadPlatformDataFetcherMac::DeviceAdd(IOHIDDeviceRef device) {
   auto new_device = std::make_unique<GamepadDeviceMac>(
       location_int, device, product_name, vendor_int, product_int);
   if (!new_device->AddButtonsAndAxes(&state->data)) {
+    RecordGamepadPlatformMacOutcome(
+        GamepadPlatformMacOutcome::kNoButtonsOrAxes);
     new_device->Shutdown();
     return;
   }
 
-  state->data.vibration_actuator.type = GamepadHapticActuatorType::kDualRumble;
+  if (GamepadIdList::Get().HasTriggerRumbleSupport(gamepad_id)) {
+    state->data.vibration_actuator.type =
+        GamepadHapticActuatorType::kTriggerRumble;
+  } else {
+    state->data.vibration_actuator.type =
+        GamepadHapticActuatorType::kDualRumble;
+  }
   state->data.vibration_actuator.not_null = new_device->SupportsVibration();
 
   state->data.connected = true;
 
   devices_.emplace(location_int, std::move(new_device));
+  RecordGamepadPlatformMacOutcome(GamepadPlatformMacOutcome::kSuccess);
 }
 
 bool GamepadPlatformDataFetcherMac::DisconnectUnrecognizedGamepad(
@@ -257,9 +289,15 @@ void GamepadPlatformDataFetcherMac::ValueChanged(IOHIDValueRef value) {
   if (!gamepad_device)
     return;
 
-  PadState* state = GetPadState(gamepad_device->GetLocationId());
-  if (!state)
+  PadState* state = GetPadState(gamepad_device->GetLocationId(),
+                                /*new_pad_recognized=*/true,
+                                gamepad_device->GetProductName());
+  if (!state) {
+    // If we no longer have a slot for this device, remove it.
+    gamepad_device->Shutdown();
+    devices_.erase(gamepad_device->GetLocationId());
     return;
+  }
 
   gamepad_device->UpdateGamepadForValue(value, &state->data);
 }
@@ -269,9 +307,17 @@ void GamepadPlatformDataFetcherMac::GetGamepadData(bool) {
     return;
 
   // Loop through and GetPadState to indicate the devices are still connected.
-  for (const auto& iter : devices_) {
-    GetPadState(iter.first);
-  }
+  std::erase_if(devices_, [this](auto& entry) {
+    const auto& [location_id, device] = entry;
+    PadState* state = GetPadState(location_id, /*new_pad_recognized=*/true,
+                                  device->GetProductName());
+    if (!state) {
+      // If we no longer have a slot for this device, remove it.
+      device->Shutdown();
+      return true;
+    }
+    return false;
+  });
 }
 
 void GamepadPlatformDataFetcherMac::PlayEffect(
@@ -309,6 +355,37 @@ void GamepadPlatformDataFetcherMac::ResetVibration(
   }
   device_iter->second->ResetVibration(std::move(callback),
                                       std::move(callback_runner));
+}
+
+// static
+bool GamepadPlatformDataFetcherMac::IsSupportedByGameController(
+    uint16_t vendor_id,
+    uint16_t product_id) {
+  const auto& gamepad_id_list = GamepadIdList::Get();
+  GamepadId gamepad_id =
+      gamepad_id_list.GetGamepadId("", vendor_id, product_id);
+
+  if (base::FeatureList::IsEnabled(
+          features::kXboxUseGameControllerDataFetcherMac)) {
+    // Check for Xbox gamepads.
+    XInputType xinput_type =
+        gamepad_id_list.GetXInputType(vendor_id, product_id);
+    if (XboxHidController::IsXboxHid(gamepad_id) ||
+        xinput_type == kXInputTypeXbox360 ||
+        xinput_type == kXInputTypeXboxOne) {
+      return true;
+    }
+  }
+
+  // Check for PlayStation gamepads.
+  if (base::FeatureList::IsEnabled(
+          features::kPlayStationUseGameControllerDataFetcherMac) &&
+      (Dualshock4Controller::IsDualshock4(gamepad_id) ||
+       GamepadIdList::IsPlayStation5Gamepad(gamepad_id))) {
+    return true;
+  }
+
+  return false;
 }
 
 }  // namespace device

@@ -8,8 +8,11 @@
 
 #include "base/containers/lru_cache.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "components/favicon/core/favicon_service.h"
+#include "components/history/core/browser/history_types.h"
 #include "components/omnibox/browser/autocomplete_result.h"
+#include "ui/gfx/image/image.h"
 
 namespace {
 
@@ -42,32 +45,28 @@ FaviconCache::FaviconCache(favicon::FaviconService* favicon_service,
   }
 }
 
-FaviconCache::~FaviconCache() {}
+FaviconCache::~FaviconCache() = default;
 
 gfx::Image FaviconCache::GetFaviconForPageUrl(
     const GURL& page_url,
     FaviconFetchedCallback on_favicon_fetched) {
-  return GetFaviconInternal({RequestType::BY_PAGE_URL, page_url},
-                            std::move(on_favicon_fetched));
-}
-
-gfx::Image FaviconCache::GetLargestFaviconForPageUrl(
-    const GURL& page_url,
-    FaviconFetchedCallback on_favicon_fetched) {
-  return GetFaviconInternal({RequestType::RAW_BY_PAGE_URL, page_url},
-                            std::move(on_favicon_fetched));
+  return GetFaviconInternal({RequestType::kByPageUrl, page_url},
+                            std::move(on_favicon_fetched),
+                            /*notify_on_empty=*/false);
 }
 
 gfx::Image FaviconCache::GetFaviconForIconUrl(
     const GURL& icon_url,
-    FaviconFetchedCallback on_favicon_fetched) {
-  return GetFaviconInternal({RequestType::BY_ICON_URL, icon_url},
-                            std::move(on_favicon_fetched));
+    FaviconFetchedCallback on_favicon_fetched,
+    bool notify_on_empty) {
+  return GetFaviconInternal({RequestType::kByIconUrl, icon_url},
+                            std::move(on_favicon_fetched), notify_on_empty);
 }
 
 gfx::Image FaviconCache::GetFaviconInternal(
     const Request& request,
-    FaviconFetchedCallback on_favicon_fetched) {
+    FaviconFetchedCallback on_favicon_fetched,
+    bool notify_on_empty) {
   if (!favicon_service_)
     return gfx::Image();
 
@@ -82,6 +81,9 @@ gfx::Image FaviconCache::GetFaviconInternal(
   // Early exit if we've already established that we don't have the favicon.
   if (responses_without_favicons_.Peek(request) !=
       responses_without_favicons_.end()) {
+    if (notify_on_empty) {
+      std::move(on_favicon_fetched).Run(gfx::Image());
+    }
     return gfx::Image();
   }
 
@@ -89,34 +91,29 @@ gfx::Image FaviconCache::GetFaviconInternal(
   // and return an empty gfx::Image.
   auto it = pending_requests_.find(request);
   if (it != pending_requests_.end()) {
-    it->second.push_back(std::move(on_favicon_fetched));
+    it->second.push_back({std::move(on_favicon_fetched), notify_on_empty});
     return gfx::Image();
   }
 
-  if (request.type == RequestType::BY_PAGE_URL) {
-    favicon_service_->GetFaviconImageForPageURL(
-        request.url,
-        base::BindRepeating(&FaviconCache::OnFaviconFetched,
-                            weak_factory_.GetWeakPtr(), request),
-        &task_tracker_);
-  } else if (request.type == RequestType::RAW_BY_PAGE_URL) {
-    favicon_service_->GetRawFaviconForPageURL(
-        request.url, {favicon_base::IconType::kFavicon},
-        /*icon_size_in_pixels=*/0, /*fallback_to_host=*/false,
-        base::BindRepeating(&FaviconCache::OnFaviconRawBitmapFetched,
-                            weak_factory_.GetWeakPtr(), request),
-        &task_tracker_);
-  } else if (request.type == RequestType::BY_ICON_URL) {
-    favicon_service_->GetFaviconImage(
-        request.url,
-        base::BindRepeating(&FaviconCache::OnFaviconFetched,
-                            weak_factory_.GetWeakPtr(), request),
-        &task_tracker_);
-  } else {
-    NOTREACHED();
+  switch (request.type) {
+    case RequestType::kByPageUrl:
+      favicon_service_->GetFaviconImageForPageURL(
+          request.url,
+          base::BindRepeating(&FaviconCache::OnFaviconFetched,
+                              weak_factory_.GetWeakPtr(), request),
+          &task_tracker_);
+      break;
+    case RequestType::kByIconUrl:
+      favicon_service_->GetFaviconImage(
+          request.url,
+          base::BindRepeating(&FaviconCache::OnFaviconFetched,
+                              weak_factory_.GetWeakPtr(), request),
+          &task_tracker_);
+      break;
   }
 
-  pending_requests_[request].push_back(std::move(on_favicon_fetched));
+  pending_requests_[request].push_back(
+      {std::move(on_favicon_fetched), notify_on_empty});
 
   return gfx::Image();
 }
@@ -126,24 +123,18 @@ void FaviconCache::OnFaviconFetched(
     const favicon_base::FaviconImageResult& result) {
   if (result.image.IsEmpty()) {
     responses_without_favicons_.Put(request, true);
-    pending_requests_.erase(request);
+    auto it = pending_requests_.find(request);
+    CHECK(it != pending_requests_.end());
+    for (auto& pending_callback : it->second) {
+      if (pending_callback.notify_on_empty) {
+        std::move(pending_callback.callback).Run(gfx::Image());
+      }
+    }
+    pending_requests_.erase(it);
     return;
   }
 
   InvokeRequestCallbackWithFavicon(request, result.image);
-}
-
-void FaviconCache::OnFaviconRawBitmapFetched(
-    const Request& request,
-    const favicon_base::FaviconRawBitmapResult& bitmap_result) {
-  if (!bitmap_result.is_valid()) {
-    responses_without_favicons_.Put(request, true);
-    pending_requests_.erase(request);
-    return;
-  }
-
-  InvokeRequestCallbackWithFavicon(
-      request, gfx::Image::CreateFrom1xPNGBytes(bitmap_result.bitmap_data));
 }
 
 void FaviconCache::InvokeRequestCallbackWithFavicon(const Request& request,
@@ -152,18 +143,22 @@ void FaviconCache::InvokeRequestCallbackWithFavicon(const Request& request,
   lru_cache_.Put(request, image);
 
   auto it = pending_requests_.find(request);
-  DCHECK(it != pending_requests_.end());
-  for (auto& callback : it->second) {
-    std::move(callback).Run(image);
+  CHECK(it != pending_requests_.end());
+  for (auto& pending_callback : it->second) {
+    std::move(pending_callback.callback).Run(image);
   }
   pending_requests_.erase(it);
 }
 
-void FaviconCache::OnURLVisited(history::HistoryService* history_service,
-                                const history::URLRow& url_row,
-                                const history::VisitRow& new_visit) {
+void FaviconCache::OnURLVisited(
+    history::HistoryService* history_service,
+    const history::VisitedURLInfo& visited_url_info) {
+  if (visited_url_info.response_code_category ==
+      history::VisitResponseCodeCategory::k404) {
+    return;
+  }
   auto it = responses_without_favicons_.Peek(
-      {RequestType::BY_PAGE_URL, url_row.url()});
+      {RequestType::kByPageUrl, visited_url_info.url_row.url()});
   if (it != responses_without_favicons_.end())
     responses_without_favicons_.Erase(it);
 }
@@ -182,8 +177,9 @@ void FaviconCache::InvalidateCachedRequests(const Request& request) {
   }
 }
 
-void FaviconCache::OnURLsDeleted(history::HistoryService* history_service,
-                                 const history::DeletionInfo& deletion_info) {
+void FaviconCache::OnHistoryDeletions(
+    history::HistoryService* history_service,
+    const history::DeletionInfo& deletion_info) {
   // We only care about actual user (or sync) deletions.
   if (deletion_info.is_from_expiration())
     return;
@@ -195,15 +191,15 @@ void FaviconCache::OnURLsDeleted(history::HistoryService* history_service,
   }
 
   for (const history::URLRow& row : deletion_info.deleted_rows()) {
-    InvalidateCachedRequests({RequestType::BY_PAGE_URL, row.url()});
+    InvalidateCachedRequests({RequestType::kByPageUrl, row.url()});
   }
 }
 
 void FaviconCache::OnFaviconsChanged(const std::set<GURL>& page_urls,
                                      const GURL& icon_url) {
   for (GURL page_url : page_urls) {
-    InvalidateCachedRequests({RequestType::BY_PAGE_URL, page_url});
+    InvalidateCachedRequests({RequestType::kByPageUrl, page_url});
   }
 
-  InvalidateCachedRequests({RequestType::BY_ICON_URL, icon_url});
+  InvalidateCachedRequests({RequestType::kByIconUrl, icon_url});
 }

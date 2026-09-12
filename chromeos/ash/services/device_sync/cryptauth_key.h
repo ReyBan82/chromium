@@ -5,9 +5,10 @@
 #ifndef CHROMEOS_ASH_SERVICES_DEVICE_SYNC_CRYPTAUTH_KEY_H_
 #define CHROMEOS_ASH_SERVICES_DEVICE_SYNC_CRYPTAUTH_KEY_H_
 
+#include <optional>
+
 #include "base/values.h"
 #include "chromeos/ash/services/device_sync/proto/cryptauth_common.pb.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -26,14 +27,14 @@ class CryptAuthKey {
   // this status is meaningless.
   enum Status { kActive, kInactive };
 
-  static absl::optional<CryptAuthKey> FromDictionary(
-      const base::Value::Dict& value);
+  static std::optional<CryptAuthKey> FromDictionary(
+      const base::DictValue& value);
 
   // Constructor for symmetric keys.
   CryptAuthKey(const std::string& symmetric_key,
                Status status,
                cryptauthv2::KeyType type,
-               const absl::optional<std::string>& handle = absl::nullopt);
+               const std::optional<std::string>& handle = std::nullopt);
 
   // Constructor for asymmetric keys. Note that |public_key| should be a
   // serialized securemessage::GenericPublicKey proto.
@@ -41,7 +42,7 @@ class CryptAuthKey {
                const std::string& private_key,
                Status status,
                cryptauthv2::KeyType type,
-               const absl::optional<std::string>& handle = absl::nullopt);
+               const std::optional<std::string>& handle = std::nullopt);
 
   CryptAuthKey(const CryptAuthKey&);
 
@@ -68,16 +69,16 @@ class CryptAuthKey {
 
   void set_status(Status status) { status_ = status; }
 
-  // Converts CryptAuthKey to a Value::Dict of the form
+  // Converts CryptAuthKey to a base::DictValue of the form
   //   {
   //     "handle": <handle_>
   //     "status": <status_ as int>
   //     "symmetric_key": <symmetric_key_>
   //     "type": <type_ as int>
   //   }
-  base::Value::Dict AsSymmetricKeyDictionary() const;
+  base::DictValue AsSymmetricKeyDictionary() const;
 
-  // Converts CryptAuthKey to a Value::Dict of the form
+  // Converts CryptAuthKey to a base::DictValue of the form
   //   {
   //     "handle": <handle_>
   //     "private_key" : <private_key_>
@@ -85,7 +86,7 @@ class CryptAuthKey {
   //     "status": <status_ as int>
   //     "type": <type_ as int>
   //   }
-  base::Value::Dict AsAsymmetricKeyDictionary() const;
+  base::DictValue AsAsymmetricKeyDictionary() const;
 
   bool operator==(const CryptAuthKey& other) const;
   bool operator!=(const CryptAuthKey& other) const;

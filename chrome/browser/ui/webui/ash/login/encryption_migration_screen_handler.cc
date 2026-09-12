@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ui/webui/ash/login/encryption_migration_screen_handler.h"
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/system/sys_info.h"
 #include "chrome/browser/ash/login/screens/encryption_migration_screen.h"
 #include "chrome/grit/generated_resources.h"
@@ -70,35 +71,9 @@ void EncryptionMigrationScreenHandler::DeclareLocalizedValues(
   builder->Add("gaiaLoading", IDS_LOGIN_GAIA_LOADING_MESSAGE);
 }
 
-void EncryptionMigrationScreenHandler::SetBatteryState(double batteryPercent,
-                                                       bool isEnoughBattery,
-                                                       bool isCharging) {
-  CallExternalAPI("setBatteryState", batteryPercent, isEnoughBattery,
-                  isCharging);
-}
-
-void EncryptionMigrationScreenHandler::SetIsResuming(bool isResuming) {
-  CallExternalAPI("setIsResuming", isResuming);
-}
-
-void EncryptionMigrationScreenHandler::SetUIState(UIState state) {
-  CallExternalAPI("setUIState", static_cast<int>(state));
-}
-
-void EncryptionMigrationScreenHandler::SetSpaceInfoInString(
-    int64_t availableSpaceSize,
-    int64_t necessarySpaceSize) {
-  CallExternalAPI("setSpaceInfoInString", ui::FormatBytes(availableSpaceSize),
-                  ui::FormatBytes(necessarySpaceSize));
-}
-
-void EncryptionMigrationScreenHandler::SetNecessaryBatteryPercent(
-    double batteryPercent) {
-  CallExternalAPI("setNecessaryBatteryPercent", batteryPercent);
-}
-
-void EncryptionMigrationScreenHandler::SetMigrationProgress(double progress) {
-  CallExternalAPI("setMigrationProgress", progress);
+base::WeakPtr<EncryptionMigrationScreenView>
+EncryptionMigrationScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace ash

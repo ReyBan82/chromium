@@ -13,6 +13,7 @@
 #include "base/check_op.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "base/sequence_checker.h"
 #include "components/policy/core/common/cloud/cloud_policy_validator.h"
 #include "components/policy/core/common/policy_map.h"
@@ -52,9 +53,9 @@ class POLICY_EXPORT CloudPolicyStore {
   };
 
   // Callbacks for policy store events. Most importantly, policy updates.
-  class POLICY_EXPORT Observer {
+  class POLICY_EXPORT Observer : public base::CheckedObserver {
    public:
-    virtual ~Observer();
+    ~Observer() override;
 
     // Called on changes to store->policy() and/or store->policy_map().
     virtual void OnStoreLoaded(CloudPolicyStore* store) = 0;
@@ -66,7 +67,7 @@ class POLICY_EXPORT CloudPolicyStore {
     virtual void OnStoreDestruction(CloudPolicyStore* store);
   };
 
-  CloudPolicyStore();
+  explicit CloudPolicyStore(const std::string& policy_type);
   CloudPolicyStore(const CloudPolicyStore&) = delete;
   CloudPolicyStore& operator=(const CloudPolicyStore&) = delete;
   virtual ~CloudPolicyStore();
@@ -89,18 +90,11 @@ class POLICY_EXPORT CloudPolicyStore {
   }
   bool has_policy() const {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    DCHECK_EQ(policy_.get() != nullptr,
-              policy_fetch_response_.get() != nullptr);
     return policy_.get() != nullptr;
   }
   const enterprise_management::PolicyData* policy() const {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     return policy_.get();
-  }
-  const enterprise_management::PolicyFetchResponse* policy_fetch_response()
-      const {
-    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    return policy_fetch_response_.get();
   }
   bool is_managed() const;
   Status status() const {
@@ -110,6 +104,10 @@ class POLICY_EXPORT CloudPolicyStore {
   bool first_policies_loaded() const {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
     return first_policies_loaded_;
+  }
+  const std::string& policy_type() const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+    return policy_type_;
   }
   CloudPolicyValidatorBase::Status validation_status() const {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -150,6 +148,9 @@ class POLICY_EXPORT CloudPolicyStore {
   // Removes the specified observer.
   void RemoveObserver(Observer* observer);
 
+  // Checks if `observer` was already added.
+  bool HasObserver(CloudPolicyStore::Observer* observer);
+
   // The invalidation version of the last policy stored. This value can be read
   // by observers to determine which version of the policy is now available.
   int64_t invalidation_version() {
@@ -182,8 +183,6 @@ class POLICY_EXPORT CloudPolicyStore {
   virtual void UpdateFirstPoliciesLoaded();
 
   void SetPolicy(
-      std::unique_ptr<enterprise_management::PolicyFetchResponse>
-          policy_fetch_response,
       std::unique_ptr<enterprise_management::PolicyData> policy_data);
   void ResetPolicy();
 
@@ -215,18 +214,23 @@ class POLICY_EXPORT CloudPolicyStore {
   // policy.
   std::string policy_signature_public_key_;
 
+  // The type of the policy expected to be stored in the store.
+  const std::string policy_type_;
+
  private:
   // Whether the store has completed asynchronous initialization, which is
   // triggered by calling Load().
   bool is_initialized_ = false;
 
-  // Currently effective policy. Should be always in sync and kept private.
-  // Use `SetPolicy()` and `ResetPolicy()` to alter the fields.
-  std::unique_ptr<enterprise_management::PolicyFetchResponse>
-      policy_fetch_response_;
   std::unique_ptr<enterprise_management::PolicyData> policy_;
 
-  base::ObserverList<Observer, true>::Unchecked observers_;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/false,
+      /*allow_reentrancy=*/
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>
+      observers_;
 };
 
 }  // namespace policy

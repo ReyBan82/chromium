@@ -5,7 +5,7 @@
 // Tests preference.onChange API for an incognito split extension in case the
 // extension's incognito instance is not expected to be brought up.
 
-var allowCookies = chrome.privacy.websites.thirdPartyCookiesAllowed;
+const hyperlinkAuditing = chrome.privacy.websites.hyperlinkAuditingEnabled;
 
 function PreferenceChangeListener() {
   this.encounteredEvents = [];
@@ -14,12 +14,12 @@ function PreferenceChangeListener() {
 }
 
 PreferenceChangeListener.prototype.start = function(event) {
-  var listener = this.onPrefChanged_.bind(this);
+  const listener = this.onPrefChanged_.bind(this);
 
   event.addListener(listener);
   this.doneCallback_ = function() {
     event.removeListener(listener);
-  }
+  };
 };
 
 PreferenceChangeListener.prototype.stop = function(callback) {
@@ -38,20 +38,21 @@ PreferenceChangeListener.prototype.listenForValue = function(value, callback) {
 };
 
 PreferenceChangeListener.prototype.getAndClearEncounteredEvents = function() {
-  var events = this.encounteredEvents;
+  const events = this.encounteredEvents;
   this.encounteredEvents = [];
   return events;
 };
 
 PreferenceChangeListener.prototype.onPrefChanged_ = function(pref) {
   this.encounteredEvents.push(pref);
-  var callbacks = this.valueCallbacks_[pref.value];
+  const callbacks = this.valueCallbacks_[pref.value];
   delete this.valueCallbacks_[pref.value];
-  if (callbacks)
+  if (callbacks) {
     callbacks.forEach(callback => callback());
+  }
 };
 
-var allowCookiesChangeListener = null;
+let hyperlinkAuditingChangeListener = null;
 
 // The incognito background is not expected to be run - send a message to the
 // test runner, and bail out.
@@ -60,14 +61,14 @@ if (chrome.extension.inIncognitoContext) {
 } else {
   chrome.test.runTests([
     function setupPreferenceListener() {
-      chrome.test.assertFalse(!!allowCookiesChangeListener);
-      allowCookiesChangeListener = new PreferenceChangeListener();
-      allowCookiesChangeListener.start(allowCookies.onChange);
+      chrome.test.assertFalse(!!hyperlinkAuditingChangeListener);
+      hyperlinkAuditingChangeListener = new PreferenceChangeListener();
+      hyperlinkAuditingChangeListener.start(hyperlinkAuditing.onChange);
       chrome.test.succeed();
     },
 
     function getInitialValue() {
-      allowCookies.get({}, chrome.test.callbackPass(pref => {
+      hyperlinkAuditing.get({}, chrome.test.callbackPass(pref => {
         chrome.test.assertEq(
             {levelOfControl: 'controllable_by_this_extension', value: false},
             pref);
@@ -75,12 +76,12 @@ if (chrome.extension.inIncognitoContext) {
     },
 
     function listenForUserChange() {
-      allowCookiesChangeListener.listenForValue(
+      hyperlinkAuditingChangeListener.listenForValue(
           true, chrome.test.callbackPass(function() {
-            var events =
-                allowCookiesChangeListener.getAndClearEncounteredEvents();
+            const events =
+                hyperlinkAuditingChangeListener.getAndClearEncounteredEvents();
             chrome.test.assertEq(events, [
-              {levelOfControl: 'controllable_by_this_extension', value: true}
+              {levelOfControl: 'controllable_by_this_extension', value: true},
             ]);
           }));
 
@@ -88,42 +89,42 @@ if (chrome.extension.inIncognitoContext) {
     },
 
     function changeDefault() {
-      allowCookiesChangeListener.listenForValue(
+      hyperlinkAuditingChangeListener.listenForValue(
           false, chrome.test.callbackPass(function() {
-            var events =
-                allowCookiesChangeListener.getAndClearEncounteredEvents();
+            const events =
+                hyperlinkAuditingChangeListener.getAndClearEncounteredEvents();
             chrome.test.assertEq(events, [
-              {value: false, levelOfControl: 'controlled_by_this_extension'}
+              {value: false, levelOfControl: 'controlled_by_this_extension'},
             ]);
           }));
 
-      allowCookies.set({value: false}, chrome.test.callbackPass());
+      hyperlinkAuditing.set({value: false}, chrome.test.callbackPass());
     },
 
     function changeIncognitoOnly() {
-      allowCookies.set(
+      hyperlinkAuditing.set(
           {value: true, scope: 'incognito_session_only'},
           chrome.test.callbackFail(
               'You do not have permission to access incognito preferences.'));
     },
 
     function clearControl() {
-      allowCookiesChangeListener.listenForValue(
+      hyperlinkAuditingChangeListener.listenForValue(
           true, chrome.test.callbackPass(function() {
-            var events =
-                allowCookiesChangeListener.getAndClearEncounteredEvents();
+            const events =
+                hyperlinkAuditingChangeListener.getAndClearEncounteredEvents();
             chrome.test.assertEq(events, [
-              {levelOfControl: 'controllable_by_this_extension', value: true}
+              {levelOfControl: 'controllable_by_this_extension', value: true},
             ]);
           }));
 
-      allowCookies.clear({}, chrome.test.callbackPass());
+      hyperlinkAuditing.clear({}, chrome.test.callbackPass());
     },
 
     function stopPreferenceListener() {
-      var listener = allowCookiesChangeListener;
-      allowCookiesChangeListener = null;
+      const listener = hyperlinkAuditingChangeListener;
+      hyperlinkAuditingChangeListener = null;
       listener.stop(chrome.test.callbackPass());
-    }
+    },
   ]);
 }

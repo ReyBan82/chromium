@@ -4,13 +4,14 @@
 
 #include "components/lookalikes/core/safety_tips_config.h"
 
+#include <algorithm>
+
 #include "base/no_destructor.h"
-#include "base/ranges/algorithm.h"
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
 #include "third_party/re2/src/re2/re2.h"
 #include "url/gurl.h"
 
-using safe_browsing::V4ProtocolManagerUtil;
+using safe_browsing::SBProtocolManagerUtil;
 
 namespace lookalikes {
 
@@ -43,18 +44,18 @@ void UrlToSafetyTipPatterns(const GURL& url,
   std::string canon_host;
   std::string canon_path;
   std::string canon_query;
-  V4ProtocolManagerUtil::CanonicalizeUrl(url, &canon_host, &canon_path,
+  SBProtocolManagerUtil::CanonicalizeUrl(url, &canon_host, &canon_path,
                                          &canon_query);
 
   std::vector<std::string> hosts;
   if (url.HostIsIPAddress()) {
-    hosts.push_back(url.host());
+    hosts.push_back(url.GetHost());
   } else {
-    V4ProtocolManagerUtil::GenerateHostVariantsToCheck(canon_host, &hosts);
+    SBProtocolManagerUtil::GenerateHostVariantsToCheck(canon_host, &hosts);
   }
 
   std::vector<std::string> paths;
-  V4ProtocolManagerUtil::GeneratePathVariantsToCheck(canon_path, canon_query,
+  SBProtocolManagerUtil::GeneratePathVariantsToCheck(canon_path, canon_query,
                                                      &paths);
 
   for (const std::string& host : hosts) {
@@ -187,7 +188,7 @@ bool IsCommonWordInConfigProto(const reputation::SafetyTipsConfig* proto,
   }
 
   auto common_words = proto->common_word();
-  DCHECK(base::ranges::is_sorted(common_words.begin(), common_words.end()));
+  DCHECK(std::ranges::is_sorted(common_words.begin(), common_words.end()));
   auto lower = std::lower_bound(
       common_words.begin(), common_words.end(), word,
       [](const std::string& a, const std::string& b) -> bool { return a < b; });

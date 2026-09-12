@@ -17,11 +17,13 @@
 #include "ash/app_list/model/app_list_item.h"
 #include "ash/app_list/model/app_list_model.h"
 #include "ash/app_list/views/app_list_bubble_apps_page.h"
+#include "ash/app_list/views/app_list_bubble_search_page.h"
 #include "ash/app_list/views/app_list_bubble_view.h"
 #include "ash/app_list/views/app_list_folder_view.h"
 #include "ash/app_list/views/app_list_item_view.h"
 #include "ash/app_list/views/app_list_main_view.h"
 #include "ash/app_list/views/app_list_menu_model_adapter.h"
+#include "ash/app_list/views/app_list_search_view.h"
 #include "ash/app_list/views/app_list_toast_container_view.h"
 #include "ash/app_list/views/app_list_toast_view.h"
 #include "ash/app_list/views/app_list_view.h"
@@ -30,13 +32,18 @@
 #include "ash/app_list/views/apps_grid_view.h"
 #include "ash/app_list/views/apps_grid_view_test_api.h"
 #include "ash/app_list/views/contents_view.h"
+#include "ash/app_list/views/continue_section_view.h"
 #include "ash/app_list/views/paged_apps_grid_view.h"
 #include "ash/app_list/views/recent_apps_view.h"
 #include "ash/app_list/views/scrollable_apps_grid_view.h"
 #include "ash/app_list/views/search_box_view.h"
+#include "ash/app_list/views/search_result_list_view.h"
+#include "ash/app_list/views/search_result_page_view.h"
+#include "ash/constants/ash_pref_names.h"
 #include "ash/public/cpp/accelerators.h"
 #include "ash/shell.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/aura/window_observer.h"
@@ -50,6 +57,7 @@
 #include "ui/views/controls/scroll_view.h"
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/view_model.h"
+#include "ui/views/view_utils.h"
 
 namespace ash {
 
@@ -61,11 +69,11 @@ class ScopedItemMoveAnimationDisabler;
 ScopedItemMoveAnimationDisabler* g_disabler_ptr = nullptr;
 
 // Returns the menu item indicated by `order` from a non-folder item menu.
-views::MenuItemView* GetReorderOptionForNonFolderItemMenu(
+const views::MenuItemView* GetReorderOptionForNonFolderItemMenu(
     const views::MenuItemView* root_menu,
     ash::AppListSortOrder order) {
   // Get the last menu item index where the reorder submenu is.
-  views::MenuItemView* reorder_item_view =
+  const views::MenuItemView* reorder_item_view =
       root_menu->GetSubmenu()->GetLastItem();
   DCHECK_EQ(reorder_item_view->title(), u"Sort by");
   return reorder_item_view;
@@ -104,14 +112,13 @@ size_t GetMenuIndexOfSortingOrder(ash::AppListSortOrder order) {
     case ash::AppListSortOrder::kCustom:
     case ash::AppListSortOrder::kAlphabeticalEphemeralAppFirst:
       NOTREACHED();
-      return 0;
   }
 }
 
-views::MenuItemView* GetReorderOptionForAppListOrFolderItemMenu(
+const views::MenuItemView* GetReorderOptionForAppListOrFolderItemMenu(
     const views::MenuItemView* root_menu,
     const ash::AppListSortOrder order) {
-  views::MenuItemView* reorder_option = nullptr;
+  const views::MenuItemView* reorder_option = nullptr;
   switch (order) {
     case ash::AppListSortOrder::kNameAlphabetical:
       reorder_option = root_menu->GetSubmenu()->GetMenuItemAt(1);
@@ -125,7 +132,6 @@ views::MenuItemView* GetReorderOptionForAppListOrFolderItemMenu(
     case ash::AppListSortOrder::kCustom:
     case ash::AppListSortOrder::kAlphabeticalEphemeralAppFirst:
       NOTREACHED();
-      return nullptr;
   }
   return reorder_option;
 }
@@ -210,6 +216,27 @@ RecentAppsView* GetRecentAppsView() {
   return GetAppsContainerView()->GetRecentAppsView();
 }
 
+ContinueSectionView* GetContinueSectionView() {
+  if (ShouldUseBubbleAppList()) {
+    return GetAppListBubbleView()
+        ->apps_page_for_test()
+        ->GetContinueSectionView();
+  }
+  return GetAppsContainerView()->GetContinueSectionView();
+}
+
+AppListSearchView* GetSearchView() {
+  if (ShouldUseBubbleAppList()) {
+    return GetAppListBubbleView()->search_page()->search_view();
+  }
+
+  return GetAppListView()
+      ->app_list_main_view()
+      ->contents_view()
+      ->search_result_page_view()
+      ->search_view();
+}
+
 // AppListVisibilityChangedWaiter ----------------------------------------------
 
 // Waits until the app list visibility changes.
@@ -262,8 +289,8 @@ class WindowAddedWaiter : public aura::WindowObserver {
     run_loop_.Quit();
   }
 
-  aura::Window* const container_;
-  aura::Window* added_window_ = nullptr;
+  const raw_ptr<aura::Window> container_;
+  raw_ptr<aura::Window> added_window_ = nullptr;
   base::RunLoop run_loop_;
 };
 
@@ -289,7 +316,7 @@ class ScopedItemMoveAnimationDisabler {
   }
 
  private:
-  AppsGridView* const apps_grid_;
+  const raw_ptr<AppsGridView> apps_grid_;
 };
 
 }  // namespace
@@ -303,20 +330,27 @@ AppListModel* AppListTestApi::GetAppListModel() {
 
 void AppListTestApi::ShowBubbleAppListAndWait() {
   ash::AcceleratorController::Get()->PerformActionIfEnabled(
-      ash::TOGGLE_APP_LIST, {});
+      AcceleratorAction::kToggleAppList, {});
   WaitForBubbleWindow(
       /*wait_for_opening_animation=*/true);
 }
 
 void AppListTestApi::WaitForBubbleWindow(bool wait_for_opening_animation) {
-  DCHECK(!Shell::Get()->IsInTabletMode());
+  WaitForBubbleWindowInRootWindow(Shell::GetPrimaryRootWindow(),
+                                  wait_for_opening_animation);
+}
+
+void AppListTestApi::WaitForBubbleWindowInRootWindow(
+    aura::Window* root_window,
+    bool wait_for_opening_animation) {
+  DCHECK(!display::Screen::Get()->InTabletMode());
 
   // Wait for the window only when the app list window does not exist.
   auto* app_list_controller = Shell::Get()->app_list_controller();
   if (!app_list_controller->GetWindow()) {
     // Wait for a child window to be added to the app list container.
-    aura::Window* container = Shell::GetContainer(
-        Shell::GetPrimaryRootWindow(), kShellWindowId_AppListContainer);
+    aura::Window* container =
+        Shell::GetContainer(root_window, kShellWindowId_AppListContainer);
     WindowAddedWaiter waiter(container);
     waiter.Wait();
 
@@ -348,7 +382,7 @@ void AppListTestApi::WaitForAppListShowAnimation(bool is_bubble_window) {
   if (!is_bubble_window)
     return;
 
-  DCHECK(!Shell::Get()->IsInTabletMode());
+  DCHECK(!display::Screen::Get()->InTabletMode());
 
   ScrollableAppsGridView* scrollable_apps_grid_view =
       static_cast<ScrollableAppsGridView*>(GetTopLevelAppsGridView());
@@ -373,13 +407,10 @@ bool AppListTestApi::HasApp(const std::string& app_id) {
   return GetAppListModel()->FindItem(app_id);
 }
 
-std::u16string AppListTestApi::GetAppListItemViewName(
+std::u16string_view AppListTestApi::GetAppListItemViewName(
     const std::string& item_id) {
   AppListItemView* item_view = GetTopLevelItemViewFromId(item_id);
-  if (!item_view)
-    return u"";
-
-  return item_view->title()->GetText();
+  return item_view ? item_view->title()->GetText() : std::u16string_view();
 }
 
 AppListItemView* AppListTestApi::GetTopLevelItemViewFromId(
@@ -577,7 +608,7 @@ views::View* AppListTestApi::GetVisibleSearchResultView(int index) {
   app_list->GetViewsInGroup(kSearchResultViewGroup, &search_results);
 
   int current_visible_index = -1;
-  for (auto* view : search_results) {
+  for (views::View* view : search_results) {
     if (view->GetVisible())
       ++current_visible_index;
     if (current_visible_index == index)
@@ -608,6 +639,15 @@ views::View* AppListTestApi::GetRecentAppAt(int index) {
   return GetRecentAppsView()->GetItemViewAt(index);
 }
 
+std::vector<ContinueTaskView*> AppListTestApi::GetContinueTaskViews() {
+  std::vector<ContinueTaskView*> results;
+  ContinueSectionView* const container = GetContinueSectionView();
+  for (size_t i = 0; i < container->GetTasksSuggestionsCount(); ++i) {
+    results.push_back(container->GetTaskViewAtForTesting(i));
+  }
+  return results;
+}
+
 std::vector<std::string> AppListTestApi::GetRecentAppIds() {
   std::vector<std::string> ids;
   RecentAppsView* recent_apps = GetRecentAppsView();
@@ -623,6 +663,20 @@ void AppListTestApi::SimulateSearch(const std::u16string& query) {
   textfield->InsertText(
       query,
       ui::TextInputClient::InsertTextCursorBehavior::kMoveCursorAfterText);
+}
+
+SearchResultListView* AppListTestApi::GetTopVisibleSearchResultListView() {
+  std::vector<raw_ptr<SearchResultContainerView, VectorExperimental>>
+      result_containers = GetSearchView()->result_container_views_for_test();
+  // Check that one of the `result_containers` is kApps.
+  for (SearchResultContainerView* container : result_containers) {
+    SearchResultListView* list_view =
+        views::AsViewClass<SearchResultListView>(container);
+    if (list_view && list_view->GetVisible()) {
+      return list_view;
+    }
+  }
+  return nullptr;
 }
 
 void AppListTestApi::ReorderByMouseClickAtContextMenuInAppsGrid(
@@ -643,7 +697,7 @@ void AppListTestApi::ReorderByMouseClickAtContextMenuInAppsGrid(
       ShowRootMenuAndReturn(apps_grid_view, menu_type, event_generator);
 
   // Get the "Name" or "Color" option.
-  views::MenuItemView* reorder_option = nullptr;
+  const views::MenuItemView* reorder_option = nullptr;
   switch (menu_type) {
     case MenuType::kAppListPageMenu:
     case MenuType::kAppListFolderItemMenu:
@@ -652,7 +706,7 @@ void AppListTestApi::ReorderByMouseClickAtContextMenuInAppsGrid(
       break;
     case MenuType::kAppListNonFolderItemMenu: {
       // The `reorder_option` cached here is the submenu of the options.
-      views::MenuItemView* reorder_submenu =
+      const views::MenuItemView* reorder_submenu =
           GetReorderOptionForNonFolderItemMenu(root_menu, order);
       event_generator->MoveMouseTo(
           reorder_submenu->GetBoundsInScreen().CenterPoint());
@@ -744,7 +798,7 @@ void AppListTestApi::RegisterReorderAnimationDoneCallback(
     ReorderAnimationEndState* actual_state) {
   AddReorderAnimationCallback(base::BindRepeating(
       &AppListTestApi::OnReorderAnimationDone, weak_factory_.GetWeakPtr(),
-      !ash::Shell::Get()->IsInTabletMode(), actual_state));
+      !display::Screen::Get()->InTabletMode(), actual_state));
 }
 
 void AppListTestApi::OnReorderAnimationDone(bool for_bubble_app_list,

@@ -6,12 +6,12 @@
 
 #include <string>
 
+#include "ash/constants/ash_login_pref_names.h"
 #include "base/logging.h"
 #include "base/values.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
 #include "chrome/browser/ash/login/saml/in_session_password_change_manager.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "chromeos/ash/components/login/auth/public/saml_password_attributes.h"
 #include "components/prefs/pref_service.h"
 #include "components/user_manager/user_manager.h"
@@ -23,27 +23,28 @@ PasswordChangeHandler::PasswordChangeHandler(
     : password_change_url_(password_change_url) {}
 PasswordChangeHandler::~PasswordChangeHandler() = default;
 
-void PasswordChangeHandler::HandleInitialize(const base::Value::List& value) {
+void PasswordChangeHandler::HandleInitialize(const base::ListValue& value) {
   Profile* profile = Profile::FromWebUI(web_ui());
   CHECK(profile->GetPrefs()->GetBoolean(
       prefs::kSamlInSessionPasswordChangeEnabled));
 
   AllowJavascript();
-  base::Value::Dict params;
+  base::DictValue params;
   if (password_change_url_.empty()) {
     LOG(ERROR) << "Password change url is empty";
     return;
   }
   params.Set("passwordChangeUrl", password_change_url_);
   const user_manager::User* user =
-      ProfileHelper::Get()->GetUserByProfile(profile);
-  if (user)
+      BrowserContextHelper::Get()->GetUserByBrowserContext(profile);
+  if (user) {
     params.Set("userName", user->GetDisplayEmail());
-  CallJavascriptFunction("$(\'main-element\').loadAuthExtension", params);
+  }
+  CallJavascriptFunction("$(\'main-element\').loadAuthenticator", params);
 }
 
 void PasswordChangeHandler::HandleChangePassword(
-    const base::Value::List& params) {
+    const base::ListValue& params) {
   const base::Value& old_passwords = params[0];
   const base::Value& new_passwords = params[1];
   VLOG(4) << "Scraped " << old_passwords.GetList().size() << " old passwords";

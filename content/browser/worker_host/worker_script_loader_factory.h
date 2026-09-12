@@ -9,10 +9,10 @@
 #include "content/browser/navigation_subresource_loader_params.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/service_worker_client_info.h"
+#include "content/public/common/child_process_id.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/base/isolation_info.h"
-#include "services/metrics/public/cpp/ukm_source_id.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 
@@ -45,13 +45,12 @@ class CONTENT_EXPORT WorkerScriptLoaderFactory
   // the NetworkService. However, it may internally contain non-NetworkService
   // factories used for non-http(s) URLs, e.g., a chrome-extension:// URL.
   WorkerScriptLoaderFactory(
-      int process_id,
+      ChildProcessId process_id,
       const DedicatedOrSharedWorkerToken& worker_token,
       const net::IsolationInfo& isolation_info,
       ServiceWorkerMainResourceHandle* service_worker_handle,
       const BrowserContextGetter& browser_context_getter,
-      scoped_refptr<network::SharedURLLoaderFactory> loader_factory,
-      ukm::SourceId worker_source_id);
+      scoped_refptr<network::SharedURLLoaderFactory> loader_factory);
 
   WorkerScriptLoaderFactory(const WorkerScriptLoaderFactory&) = delete;
   WorkerScriptLoaderFactory& operator=(const WorkerScriptLoaderFactory&) =
@@ -74,13 +73,12 @@ class CONTENT_EXPORT WorkerScriptLoaderFactory
   base::WeakPtr<WorkerScriptLoader> GetScriptLoader() { return script_loader_; }
 
  private:
-  const int process_id_;
+  const ChildProcessId process_id_;
   const DedicatedOrSharedWorkerToken worker_token_;
   const net::IsolationInfo isolation_info_;
   base::WeakPtr<ServiceWorkerMainResourceHandle> service_worker_handle_;
   BrowserContextGetter browser_context_getter_;
   scoped_refptr<network::SharedURLLoaderFactory> loader_factory_;
-  const ukm::SourceId worker_source_id_;
 
   // This is owned by SelfOwnedReceiver associated with the given
   // mojo::PendingReceiver<URLLoader>, and invalidated after receiver completion

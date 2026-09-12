@@ -4,12 +4,54 @@
 
 #include "content/public/test/preloading_test_util.h"
 
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "content/browser/preloading/preloading_attempt_impl.h"
+#include "content/browser/preloading/preloading_config.h"
+#include "content/browser/preloading/preloading_data_impl.h"
+#include "preloading_test_util.h"
 #include "services/metrics/public/cpp/metrics_utils.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
+#include "testing/gmock/include/gmock/gmock.h"
+#include "testing/gtest/include/gtest/gtest.h"
 
 namespace content::test {
+namespace {
+
+constexpr char kAddSpeculationRuleScript[] = R"({
+    const script = document.createElement('script');
+    script.type = 'speculationrules';
+    script.text = `{
+      "$1": [{ $2 }]
+    }`;
+    document.head.appendChild(script);
+  })";
+
+constexpr char kAddSpeculationRuleWithRulesetTagScript[] = R"({
+    const script = document.createElement('script');
+    script.type = 'speculationrules';
+    script.text = `{
+      "tag": "$1",
+      "$2": [{ $3 }]
+    }`;
+    document.head.appendChild(script);
+  })";
+
+}  // namespace
+
+std::string ConvertEagernessToString(
+    blink::mojom::SpeculationEagerness eagerness) {
+  switch (eagerness) {
+    case blink::mojom::SpeculationEagerness::kImmediate:
+      return "immediate";
+    case blink::mojom::SpeculationEagerness::kEager:
+      return "eager";
+    case blink::mojom::SpeculationEagerness::kModerate:
+      return "moderate";
+    case blink::mojom::SpeculationEagerness::kConservative:
+      return "conservative";
+  }
+}
 
 using UkmEntry = ukm::TestUkmRecorder::HumanReadableUkmEntry;
 using Preloading_Attempt = ukm::builders::Preloading_Attempt;
@@ -25,6 +67,7 @@ const std::vector<std::string> kPreloadingAttemptUkmMetrics{
     Preloading_Attempt::kAccurateTriggeringName,
     Preloading_Attempt::kReadyTimeName,
     Preloading_Attempt::kTimeToNextNavigationName,
+    Preloading_Attempt::kSpeculationEagernessName,
 };
 
 const std::vector<std::string> kPreloadingPredictionUkmMetrics{
@@ -46,7 +89,8 @@ UkmEntry PreloadingAttemptUkmEntryBuilder::BuildEntry(
     PreloadingTriggeringOutcome triggering_outcome,
     PreloadingFailureReason failure_reason,
     bool accurate,
-    absl::optional<base::TimeDelta> ready_time) const {
+    std::optional<base::TimeDelta> ready_time,
+    std::optional<blink::mojom::SpeculationEagerness> eagerness) const {
   std::map<std::string, int64_t> metrics = {
       {Preloading_Attempt::kPreloadingTypeName,
        static_cast<int64_t>(preloading_type)},
@@ -67,6 +111,10 @@ UkmEntry PreloadingAttemptUkmEntryBuilder::BuildEntry(
     metrics.insert({Preloading_Attempt::kReadyTimeName,
                     ukm::GetExponentialBucketMinForCounts1000(
                         ready_time->InMilliseconds())});
+  }
+  if (eagerness) {
+    metrics.insert({Preloading_Attempt::kSpeculationEagernessName,
+                    static_cast<int64_t>(eagerness.value())});
   }
   return UkmEntry{source_id, std::move(metrics)};
 }
@@ -89,6 +137,32 @@ UkmEntry PreloadingPredictionUkmEntryBuilder::BuildEntry(
                     ukm::GetExponentialBucketMinForCounts1000(
                         base::ScopedMockElapsedTimersForTest::kMockElapsedTime
                             .InMilliseconds())}}};
+}
+
+void ExpectPreloadingAttemptUkm(
+    const ukm::TestAutoSetUkmRecorder& ukm_recorder,
+    const std::vector<ukm::TestUkmRecorder::HumanReadableUkmEntry>&
+        expected_attempt_entries) {
+  auto attempt_entries = ukm_recorder.GetEntries(
+      Preloading_Attempt::kEntryName, test::kPreloadingAttemptUkmMetrics);
+  EXPECT_EQ(attempt_entries.size(), expected_attempt_entries.size());
+  EXPECT_THAT(attempt_entries,
+              testing::UnorderedElementsAreArray(expected_attempt_entries))
+      << test::ActualVsExpectedUkmEntriesToString(attempt_entries,
+                                                  expected_attempt_entries);
+}
+
+void ExpectPreloadingPredictionUkm(
+    const ukm::TestAutoSetUkmRecorder& ukm_recorder,
+    const std::vector<ukm::TestUkmRecorder::HumanReadableUkmEntry>&
+        expected_prediction_entries) {
+  auto prediction_entries = ukm_recorder.GetEntries(
+      Preloading_Prediction::kEntryName, test::kPreloadingPredictionUkmMetrics);
+  EXPECT_EQ(prediction_entries.size(), expected_prediction_entries.size());
+  EXPECT_THAT(prediction_entries,
+              testing::UnorderedElementsAreArray(expected_prediction_entries))
+      << test::ActualVsExpectedUkmEntriesToString(prediction_entries,
+                                                  expected_prediction_entries);
 }
 
 std::string UkmEntryToString(const UkmEntry& entry) {
@@ -138,6 +212,108 @@ PreloadingTriggeringOutcome PreloadingAttemptAccessor::GetTriggeringOutcome() {
 PreloadingFailureReason PreloadingAttemptAccessor::GetFailureReason() {
   return static_cast<PreloadingAttemptImpl*>(preloading_attempt_)
       ->failure_reason_;
+}
+
+PreloadingConfigOverride::PreloadingConfigOverride() {
+  preloading_config_ = std::make_unique<PreloadingConfig>();
+  overridden_config_ =
+      PreloadingConfig::OverrideForTesting(preloading_config_.get());
+}
+
+PreloadingConfigOverride::~PreloadingConfigOverride() {
+  raw_ptr<PreloadingConfig> uninstalled_override =
+      PreloadingConfig::OverrideForTesting(overridden_config_);
+  // Make sure the override we uninstalled is the one we installed in the
+  // constructor.
+  CHECK_EQ(uninstalled_override.get(), preloading_config_.get());
+}
+
+void PreloadingConfigOverride::SetHoldback(PreloadingType preloading_type,
+                                           PreloadingPredictor predictor,
+                                           bool holdback) {
+  preloading_config_->SetHoldbackForTesting(preloading_type, predictor,
+                                            holdback);
+}
+
+void PreloadingConfigOverride::SetHoldback(std::string_view preloading_type,
+                                           std::string_view predictor,
+                                           bool holdback) {
+  preloading_config_->SetHoldbackForTesting(preloading_type, predictor,
+                                            holdback);
+}
+
+void SetHasSpeculationRulesPrerender(PreloadingData* preloading_data) {
+  static_cast<PreloadingDataImpl*>(preloading_data)
+      ->SetHasSpeculationRulesPrerender();
+}
+
+std::string BuildScriptElementSpeculationRules(
+    const std::string& action,
+    const std::vector<GURL>& urls,
+    std::optional<blink::mojom::SpeculationEagerness> eagerness,
+    std::optional<std::string> no_vary_search_hint,
+    const std::string& target_hint,
+    std::optional<std::string> ruleset_tag,
+    std::optional<bool> form_submission) {
+  if (action == "prefetch") {
+    CHECK(target_hint.empty()) << "prefetch rules should not have target_hint";
+    CHECK(!form_submission.has_value())
+        << "prefetch rules should not have form_submission";
+  }
+
+  std::stringstream ss;
+
+  // Add source field.
+  ss << R"("source": "list", )";
+
+  // Concatenate the given URLs with a comma separator.
+  std::stringstream urls_ss;
+  for (size_t i = 0; i < urls.size(); i++) {
+    // Wrap the url with double quotes.
+    urls_ss << base::StringPrintf(R"("%s")", urls[i].spec().c_str());
+    if (i + 1 < urls.size()) {
+      urls_ss << ", ";
+    }
+  }
+  // Add urls fields.
+  ss << base::StringPrintf(R"("urls": [ %s ])", urls_ss.str().c_str());
+
+  // Add eagerness field.
+  if (eagerness.has_value()) {
+    ss << base::StringPrintf(
+        R"(, "eagerness": "%s")",
+        ConvertEagernessToString(eagerness.value()).c_str());
+  }
+  if (no_vary_search_hint.has_value()) {
+    ss << base::StringPrintf(R"(, "expects_no_vary_search": "%s")",
+                             no_vary_search_hint.value().c_str());
+  }
+
+  // Add target_hint field.
+  if (!target_hint.empty() && action != "prefetch") {
+    ss << base::StringPrintf(R"(, "target_hint": "%s")", target_hint.c_str());
+  }
+
+  if (form_submission.has_value() && action != "prefetch") {
+    if (form_submission.value()) {
+      ss << R"(, "form_submission": true)";
+    } else {
+      ss << R"(, "form_submission": false)";
+    }
+  }
+
+  return ruleset_tag.has_value()
+             ? base::ReplaceStringPlaceholders(
+                   kAddSpeculationRuleWithRulesetTagScript,
+                   {ruleset_tag.value(), action, ss.str()}, nullptr)
+             : base::ReplaceStringPlaceholders(kAddSpeculationRuleScript,
+                                               {action, ss.str()}, nullptr);
+}
+
+size_t GetPreloadingAttemptsCount(WebContents* web_contents) {
+  PreloadingDataImpl* preloading_data =
+      PreloadingDataImpl::FromWebContents(web_contents);
+  return preloading_data ? preloading_data->GetAttemptsSizeForTesting() : 0;
 }
 
 }  // namespace content::test

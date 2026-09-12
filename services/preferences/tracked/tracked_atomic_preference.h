@@ -11,6 +11,9 @@
 
 #include "base/compiler_specific.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
+#include "components/os_crypt/async/common/encryptor.h"
+#include "services/preferences/tracked/features.h"
 #include "services/preferences/tracked/pref_hash_filter.h"
 #include "services/preferences/tracked/tracked_preference.h"
 #include "services/preferences/tracked/tracked_preference_helper.h"
@@ -21,7 +24,7 @@ class TrackedPreferenceValidationDelegate;
 }
 }
 
-// A TrackedAtomicPreference is tracked as a whole. A hash is stored for its
+// A TrackedAtomicPreference is tracked as a whole. Auth data is stored for its
 // entire value and it is entirely reset on mismatch. An optional delegate is
 // notified of the status of the preference during enforcement.
 class TrackedAtomicPreference : public TrackedPreference {
@@ -40,12 +43,16 @@ class TrackedAtomicPreference : public TrackedPreference {
 
   // TrackedPreference implementation.
   TrackedPreferenceType GetType() const override;
+  size_t GetReportingId() const override;
   void OnNewValue(const base::Value* value,
-                  PrefHashStoreTransaction* transaction) const override;
+                  PrefHashStoreTransaction* transaction,
+                  const os_crypt_async::Encryptor* encryptor) const override;
+
   bool EnforceAndReport(
-      base::Value::Dict& pref_store_contents,
+      base::DictValue& pref_store_contents,
       PrefHashStoreTransaction* transaction,
-      PrefHashStoreTransaction* external_validation_transaction) const override;
+      PrefHashStoreTransaction* external_validation_transaction,
+      const os_crypt_async::Encryptor* encryptor) const override;
 
  private:
   const std::string pref_path_;

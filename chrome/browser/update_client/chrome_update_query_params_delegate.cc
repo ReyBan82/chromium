@@ -5,10 +5,16 @@
 #include "chrome/browser/update_client/chrome_update_query_params_delegate.h"
 
 #include "base/lazy_instance.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/strcat.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/common/channel_info.h"
 #include "components/version_info/version_info.h"
+#include "extensions/buildflags/buildflags.h"
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/browser/extensions/updater/extension_updater_switches.h"
+#endif
 
 namespace {
 
@@ -17,11 +23,9 @@ base::LazyInstance<ChromeUpdateQueryParamsDelegate>::DestructorAtExit
 
 }  // namespace
 
-ChromeUpdateQueryParamsDelegate::ChromeUpdateQueryParamsDelegate() {
-}
+ChromeUpdateQueryParamsDelegate::ChromeUpdateQueryParamsDelegate() = default;
 
-ChromeUpdateQueryParamsDelegate::~ChromeUpdateQueryParamsDelegate() {
-}
+ChromeUpdateQueryParamsDelegate::~ChromeUpdateQueryParamsDelegate() = default;
 
 // static
 ChromeUpdateQueryParamsDelegate*
@@ -30,13 +34,18 @@ ChromeUpdateQueryParamsDelegate::GetInstance() {
 }
 
 std::string ChromeUpdateQueryParamsDelegate::GetExtraParams() {
-  return base::StringPrintf(
-      "&prodchannel=%s&prodversion=%s&lang=%s",
-      chrome::GetChannelName(chrome::WithExtendedStable(true)).c_str(),
-      version_info::GetVersionNumber().c_str(), GetLang());
+  std::string channel_name;
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  channel_name = extensions::GetChannelForExtensionUpdates();
+#else
+  channel_name = chrome::GetChannelName(chrome::WithExtendedStable(true));
+#endif
+
+  return base::StrCat({"&prodchannel=", channel_name, "&prodversion=",
+                       version_info::GetVersionNumber(), "&lang=", GetLang()});
 }
 
 // static
-const char* ChromeUpdateQueryParamsDelegate::GetLang() {
-  return g_browser_process->GetApplicationLocale().c_str();
+const std::string& ChromeUpdateQueryParamsDelegate::GetLang() {
+  return g_browser_process->GetApplicationLocale();
 }

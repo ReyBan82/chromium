@@ -5,6 +5,10 @@
 #ifndef COMPONENTS_WEBAUTHN_CORE_BROWSER_INTERNAL_AUTHENTICATOR_H_
 #define COMPONENTS_WEBAUTHN_CORE_BROWSER_INTERNAL_AUTHENTICATOR_H_
 
+#include <string_view>
+#include <vector>
+
+#include "base/containers/span.h"
 #include "base/functional/callback.h"
 #include "third_party/blink/public/mojom/webauthn/authenticator.mojom.h"
 #include "url/origin.h"
@@ -26,6 +30,10 @@ using GetMatchingCredentialIdsCallback =
 // allowed to set its own effective origin.
 class InternalAuthenticator {
  public:
+  using GetAssertionCallback = base::OnceCallback<void(
+      blink::mojom::AuthenticatorStatus,
+      blink::mojom::GetAssertionAuthenticatorResponsePtr,
+      blink::mojom::WebAuthnDOMExceptionDetailsPtr)>;
   virtual ~InternalAuthenticator() = default;
 
   // Sets the effective origin of the caller. Since this may be a browser
@@ -49,7 +57,7 @@ class InternalAuthenticator {
   // was successful.
   virtual void GetAssertion(
       blink::mojom::PublicKeyCredentialRequestOptionsPtr options,
-      blink::mojom::Authenticator::GetAssertionCallback callback) = 0;
+      GetAssertionCallback callback) = 0;
 
   // Returns true if the user platform provides an authenticator. Relying
   // Parties use this method to determine whether they can create a new
@@ -66,8 +74,8 @@ class InternalAuthenticator {
   // Optionally, can restrict to only match third-party payment enabled
   // credentials.
   virtual void GetMatchingCredentialIds(
-      const std::string& relying_party_id,
-      const std::vector<std::vector<uint8_t>>& credential_ids,
+      std::string_view relying_party_id,
+      base::span<const std::vector<uint8_t>> credential_ids,
       bool require_third_party_payment_bit,
       GetMatchingCredentialIdsCallback callback) = 0;
 

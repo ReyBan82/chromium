@@ -55,12 +55,12 @@ TEST_F(QuarantineServiceTest, QuarantineFile) {
   ASSERT_TRUE(test_dir.CreateUniqueTempDir());
 
   base::FilePath test_file = test_dir.GetPath().AppendASCII("foo.class");
-  ASSERT_EQ(static_cast<int>(std::size(kTestData)),
-            base::WriteFile(test_file, kTestData, std::size(kTestData)));
+  ASSERT_TRUE(base::WriteFile(test_file, kTestData));
 
   base::RunLoop run_loop;
   quarantine_->QuarantineFile(
-      test_file, GURL(kInternetURL), GURL(kInternetReferrerURL), std::string(),
+      test_file, GURL(kInternetURL), GURL(kInternetReferrerURL),
+      /*request_initiator=*/std::nullopt, std::string(),
       base::BindOnce(&QuarantineServiceTest::OnFileQuarantined,
                      base::Unretained(this), test_file,
                      run_loop.QuitClosure()));

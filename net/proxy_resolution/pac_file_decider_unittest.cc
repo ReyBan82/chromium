@@ -92,7 +92,6 @@ class Rules {
         return rule;
     }
     LOG(FATAL) << "Rule not found for " << url;
-    return rules_[0];
   }
 
  private:
@@ -131,7 +130,7 @@ class RuleBasedPacFileFetcher : public PacFileFetcher {
 
  private:
   raw_ptr<const Rules> rules_;
-  raw_ptr<URLRequestContext> request_context_ = nullptr;
+  raw_ptr<URLRequestContext, DanglingUntriaged> request_context_ = nullptr;
 };
 
 // A mock retriever, returns asynchronously when CompleteRequests() is called.
@@ -807,9 +806,7 @@ TEST(PacFileDeciderTest, AutodetectDhcpFailParse) {
   EXPECT_FALSE(decider.effective_config().value().has_pac_url());
 }
 
-class AsyncFailDhcpFetcher
-    : public DhcpPacFileFetcher,
-      public base::SupportsWeakPtr<AsyncFailDhcpFetcher> {
+class AsyncFailDhcpFetcher final : public DhcpPacFileFetcher {
  public:
   AsyncFailDhcpFetcher() = default;
   ~AsyncFailDhcpFetcher() override = default;
@@ -821,7 +818,7 @@ class AsyncFailDhcpFetcher
     callback_ = std::move(callback);
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&AsyncFailDhcpFetcher::CallbackWithFailure,
-                                  AsWeakPtr()));
+                                  weak_ptr_factory_.GetWeakPtr()));
     return ERR_IO_PENDING;
   }
 
@@ -839,6 +836,7 @@ class AsyncFailDhcpFetcher
  private:
   GURL dummy_gurl_;
   CompletionOnceCallback callback_;
+  base::WeakPtrFactory<AsyncFailDhcpFetcher> weak_ptr_factory_{this};
 };
 
 TEST(PacFileDeciderTest, DhcpCancelledByDestructor) {
@@ -872,6 +870,28 @@ TEST(PacFileDeciderTest, DhcpCancelledByDestructor) {
   // the callback object provided by PacFileDecider after it was
   // no longer valid.
   base::RunLoop().RunUntilIdle();
+}
+
+TEST(PacFileDeciderTest, EmptyPacSourcesDoesNotCrash) {
+  base::test::TaskEnvironment task_environment;
+
+  Rules rules;
+  RuleBasedPacFileFetcher fetcher(&rules);
+  DoNothingDhcpPacFileFetcher dhcp_fetcher;
+
+  PacFileDecider decider(&fetcher, &dhcp_fetcher, nullptr);
+
+  // Configuration with no auto-detect and no valid PAC URL.
+  ProxyConfig config = ProxyConfig::CreateDirect();
+
+  TestCompletionCallback callback;
+  int rv = decider.Start(
+      ProxyConfigWithAnnotation(config, TRAFFIC_ANNOTATION_FOR_TESTS),
+      base::TimeDelta(), /*fetch_pac_bytes=*/true, callback.callback());
+
+  EXPECT_THAT(rv, IsError(ERR_PAC_SCRIPT_FAILED));
+  EXPECT_FALSE(decider.script_data().data);
+  EXPECT_FALSE(decider.effective_config().value().has_pac_url());
 }
 
 }  // namespace

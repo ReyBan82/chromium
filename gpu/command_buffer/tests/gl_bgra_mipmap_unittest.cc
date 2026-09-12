@@ -6,6 +6,11 @@
 #include <GLES2/gl2ext.h>
 #include <stdint.h>
 
+#include <algorithm>
+#include <array>
+
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "gpu/command_buffer/tests/gl_manager.h"
 #include "gpu/command_buffer/tests/gl_test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -17,6 +22,12 @@ class GLBGRAMipMapTest : public testing::Test {
  protected:
   void SetUp() override { gl_.Initialize(GLManager::Options()); }
   void TearDown() override { gl_.Destroy(); }
+  bool ShouldSkipBGRA() const {
+    return !gl_.decoder()
+                ->GetFeatureInfo()
+                ->feature_flags()
+                .ext_texture_format_bgra8888;
+  }
   GLManager gl_;
 };
 
@@ -27,18 +38,26 @@ class GLBGRAMipMapTest : public testing::Test {
 // GL_BGRA. For example, Mesa+Intel does not support mipmapping on textures
 // that use the GL_BGRA internal format. This test verifies a workaround.
 TEST_F(GLBGRAMipMapTest, GenerateMipmapsSucceeds) {
+  if (ShouldSkipBGRA()) {
+    return;
+  }
+
   static const int kWidth = 100;
   static const int kHeight = 50;
 
-  uint8_t pixels[kWidth * kHeight * 4];
+  std::array<uint8_t, kWidth * kHeight * 4> pixels;
+  auto pixels_span = base::span(pixels);
 
   GLuint tex = 0;
   glGenTextures(1, &tex);
   glBindTexture(GL_TEXTURE_2D, tex);
 
-  memset(pixels, 128, sizeof(pixels));
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA_EXT, kWidth, kHeight, 0,
-               GL_BGRA_EXT, GL_UNSIGNED_BYTE, pixels);
+  std::ranges::fill(pixels_span, 128);
+
+  // SAFETY: The pixels buffer is sized kWidth * kHeight * 4, which matches the
+  // size required by glTexImage2D for GL_BGRA_EXT and GL_UNSIGNED_BYTE.
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA_EXT, kWidth, kHeight, 0, GL_BGRA_EXT,
+               GL_UNSIGNED_BYTE, pixels_span.data());
   EXPECT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
 
   // Without the workaround, the following call generates a

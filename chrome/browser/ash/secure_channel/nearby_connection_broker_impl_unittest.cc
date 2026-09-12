@@ -2,14 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "chrome/browser/ash/secure_channel/nearby_connection_broker_impl.h"
 
 #include <memory>
 #include <vector>
 
-#include "ash/constants/ash_features.h"
 #include "base/containers/span.h"
 #include "base/files/file_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
@@ -17,10 +18,11 @@
 #include "base/test/task_environment.h"
 #include "base/timer/mock_timer.h"
 #include "chrome/browser/ash/secure_channel/fake_nearby_endpoint_finder.h"
-#include "chrome/browser/ash/secure_channel/util/histogram_util.h"
+#include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/services/nearby/public/cpp/mock_nearby_connections.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/nearby_connector.mojom.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel_types.mojom.h"
+#include "chromeos/ash/services/secure_channel/util/histogram_util.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/shared_remote.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -45,7 +47,6 @@ using ::nearby::connections::mojom::PayloadTransferUpdate;
 using ::nearby::connections::mojom::PayloadTransferUpdatePtr;
 using ::nearby::connections::mojom::Status;
 using ::testing::_;
-using ::testing::Invoke;
 
 const char kEndpointId[] = "endpointId";
 
@@ -66,9 +67,11 @@ const std::vector<uint8_t>& GetEndpointInfo() {
 
 }  // namespace
 
-class NearbyConnectionBrokerImplTest : public testing::Test,
-                                       public mojom::NearbyMessageReceiver,
-                                       public mojom::FilePayloadListener {
+class NearbyConnectionBrokerImplTest
+    : public testing::Test,
+      public mojom::NearbyMessageReceiver,
+      public mojom::NearbyConnectionStateListener,
+      public mojom::FilePayloadListener {
  protected:
   NearbyConnectionBrokerImplTest() = default;
   ~NearbyConnectionBrokerImplTest() override = default;
@@ -83,6 +86,7 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
         message_sender_.BindNewPipeAndPassReceiver(),
         file_payload_handler_.BindNewPipeAndPassReceiver(),
         message_receiver_.BindNewPipeAndPassRemote(),
+        nearby_connection_state_listener_.BindNewPipeAndPassRemote(),
         mock_nearby_connections_.shared_remote(),
         base::BindOnce(&NearbyConnectionBrokerImplTest::OnConnected,
                        base::Unretained(this)),
@@ -96,7 +100,7 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
   void DiscoverEndpoint() {
     base::RunLoop run_loop;
     EXPECT_CALL(mock_nearby_connections_, RequestConnection(_, _, _, _, _, _))
-        .WillOnce(Invoke(
+        .WillOnce(
             [&](const std::string& service_id,
                 const std::vector<uint8_t>& endpoint_info,
                 const std::string& endpoint_id, ConnectionOptionsPtr options,
@@ -105,7 +109,7 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
               request_connection_callback_ = std::move(callback);
               connection_lifecycle_listener_.Bind(std::move(listener));
               run_loop.Quit();
-            }));
+            });
 
     fake_endpoint_finder_.NotifyEndpointFound(
         kEndpointId,
@@ -117,20 +121,21 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
   void FailDiscovery() {
     base::RunLoop run_loop;
     on_disconnected_closure_ = run_loop.QuitClosure();
-    fake_endpoint_finder_.NotifyEndpointDiscoveryFailure();
+    fake_endpoint_finder_.NotifyEndpointDiscoveryFailure(
+        ::nearby::connections::mojom::Status::kAlreadyDiscovering);
     run_loop.Run();
   }
 
-  void InvokeRequestConnectionCallback(bool success) {
-    if (!success) {
+  void InvokeRequestConnectionCallback(Status status) {
+    if (status != Status::kSuccess) {
       base::RunLoop run_loop;
       on_disconnected_closure_ = run_loop.QuitClosure();
-      std::move(request_connection_callback_).Run(Status::kError);
+      std::move(request_connection_callback_).Run(status);
       run_loop.Run();
       return;
     }
 
-    std::move(request_connection_callback_).Run(Status::kSuccess);
+    std::move(request_connection_callback_).Run(status);
 
     // Ensure that callback result is received; cannot use external event
     // because the success callback only updates internal state.
@@ -140,14 +145,14 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
   void NotifyConnectionInitiated() {
     base::RunLoop run_loop;
     EXPECT_CALL(mock_nearby_connections_, AcceptConnection(_, _, _, _))
-        .WillOnce(Invoke(
+        .WillOnce(
             [&](const std::string& service_id, const std::string& endpoint_id,
                 mojo::PendingRemote<PayloadListener> listener,
                 NearbyConnectionsMojom::AcceptConnectionCallback callback) {
               accept_connection_callback_ = std::move(callback);
               payload_listener_.Bind(std::move(listener));
               run_loop.Quit();
-            }));
+            });
 
     connection_lifecycle_listener_->OnConnectionInitiated(
         kEndpointId, ConnectionInfo::New());
@@ -155,16 +160,16 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
     run_loop.Run();
   }
 
-  void InvokeAcceptConnectionCallback(bool success) {
-    if (!success) {
+  void InvokeAcceptConnectionCallback(Status status) {
+    if (status != Status::kSuccess) {
       base::RunLoop run_loop;
       ExpectDisconnectFromEndpoint(run_loop.QuitClosure());
-      std::move(accept_connection_callback_).Run(Status::kError);
+      std::move(accept_connection_callback_).Run(status);
       run_loop.Run();
       return;
     }
 
-    std::move(accept_connection_callback_).Run(Status::kSuccess);
+    std::move(accept_connection_callback_).Run(status);
 
     // Ensure that callback result is received; cannot use external event
     // because the success callback only updates internal state.
@@ -180,9 +185,9 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
 
   void SetUpFullConnection() {
     DiscoverEndpoint();
-    InvokeRequestConnectionCallback(/*success=*/true);
+    InvokeRequestConnectionCallback(Status::kSuccess);
     NotifyConnectionInitiated();
-    InvokeAcceptConnectionCallback(/*success=*/true);
+    InvokeAcceptConnectionCallback(Status::kSuccess);
     NotifyConnectionAccepted();
   }
 
@@ -200,20 +205,19 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
     NearbyConnectionsMojom::SendPayloadCallback send_payload_callback;
     std::string sent_message;
     EXPECT_CALL(mock_nearby_connections_, SendPayload(_, _, _, _))
-        .WillOnce(
-            Invoke([&](const std::string& service_id,
-                       const std::vector<std::string>& endpoint_ids,
-                       PayloadPtr payload,
-                       NearbyConnectionsMojom::SendPayloadCallback callback) {
-              send_payload_callback = std::move(callback);
+        .WillOnce([&](const std::string& service_id,
+                      const std::vector<std::string>& endpoint_ids,
+                      PayloadPtr payload,
+                      NearbyConnectionsMojom::SendPayloadCallback callback) {
+          send_payload_callback = std::move(callback);
 
-              const std::vector<uint8_t>& payload_bytes =
-                  payload->content->get_bytes()->bytes;
-              sent_message =
-                  std::string(payload_bytes.begin(), payload_bytes.end());
+          const std::vector<uint8_t>& payload_bytes =
+              payload->content->get_bytes()->bytes;
+          sent_message =
+              std::string(payload_bytes.begin(), payload_bytes.end());
 
-              send_message_run_loop.Quit();
-            }));
+          send_message_run_loop.Quit();
+        });
 
     message_sender_->SendMessage(
         message, base::BindLambdaForTesting([&](bool did_send_succeeed) {
@@ -260,8 +264,7 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
     base::File output_file(file_path, base::File::Flags::FLAG_CREATE_ALWAYS |
                                           base::File::Flags::FLAG_WRITE);
     output_file.WriteAndCheck(
-        /*offset=*/0,
-        base::make_span(kFakeFileContent.begin(), kFakeFileContent.end()));
+        /*offset=*/0, base::span(kFakeFileContent));
     output_file.Flush();
     output_file.Close();
     base::File input_file(
@@ -287,13 +290,13 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
     NearbyConnectionsMojom::RegisterPayloadFileCallback
         register_payload_file_callback;
     EXPECT_CALL(mock_nearby_connections_, RegisterPayloadFile(_, _, _, _, _))
-        .WillOnce(Invoke(
+        .WillOnce(
             [&](const std::string& service_id, int64_t payload_id,
                 const base::File& input_file, const base::File& output_file,
                 NearbyConnectionsMojom::RegisterPayloadFileCallback callback) {
               register_payload_file_callback = std::move(callback);
               nearby_connections_run_loop.Quit();
-            }));
+            });
 
     file_payload_handler_->RegisterPayloadFile(
         payload_id,
@@ -373,13 +376,13 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
     on_disconnect_from_endpoint_closure_ =
         std::move(on_disconnect_from_endpoint_closure);
     EXPECT_CALL(mock_nearby_connections_, DisconnectFromEndpoint(_, _, _))
-        .WillOnce(Invoke(
-            [&](const std::string& service_id, const std::string& endpoint_id,
-                NearbyConnectionsMojom::DisconnectFromEndpointCallback
-                    callback) {
-              disconnect_from_endpoint_callback_ = std::move(callback);
-              std::move(on_disconnect_from_endpoint_closure_).Run();
-            }));
+        .WillOnce([&](const std::string& service_id,
+                      const std::string& endpoint_id,
+                      NearbyConnectionsMojom::DisconnectFromEndpointCallback
+                          callback) {
+          disconnect_from_endpoint_callback_ = std::move(callback);
+          std::move(on_disconnect_from_endpoint_closure_).Run();
+        });
   }
 
   bool IsTimerRunning() const { return mock_timer_->IsRunning(); }
@@ -406,6 +409,14 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
     std::move(on_message_received_closure_).Run();
   }
 
+  // mojom::NearbyConnectionStateListener:
+  void OnNearbyConnectionStateChanged(
+      mojom::NearbyConnectionStep nearby_connection_step,
+      mojom::NearbyConnectionStepResult result) override {
+    nearby_connection_step_ = nearby_connection_step;
+    nearby_connection_step_result_ = result;
+  }
+
   // mojom::FilePayloadListener:
   void OnFileTransferUpdate(mojom::FileTransferUpdatePtr update) override {
     file_transfer_updates_.push_back(std::move(update));
@@ -422,11 +433,13 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
   mojo::Remote<mojom::NearbyMessageSender> message_sender_;
   mojo::Remote<mojom::NearbyFilePayloadHandler> file_payload_handler_;
   mojo::Receiver<mojom::NearbyMessageReceiver> message_receiver_{this};
+  mojo::Receiver<mojom::NearbyConnectionStateListener>
+      nearby_connection_state_listener_{this};
   mojo::Receiver<mojom::FilePayloadListener> file_payload_listener_{this};
 
   std::unique_ptr<NearbyConnectionBroker> broker_;
 
-  base::MockOneShotTimer* mock_timer_ = nullptr;
+  raw_ptr<base::MockOneShotTimer> mock_timer_ = nullptr;
 
   base::OnceClosure on_connected_closure_;
   base::OnceClosure on_disconnected_closure_;
@@ -438,6 +451,8 @@ class NearbyConnectionBrokerImplTest : public testing::Test,
 
   std::vector<std::string> received_messages_;
   std::vector<mojom::FileTransferUpdatePtr> file_transfer_updates_;
+  mojom::NearbyConnectionStep nearby_connection_step_;
+  mojom::NearbyConnectionStepResult nearby_connection_step_result_;
 };
 
 TEST_F(NearbyConnectionBrokerImplTest, SendAndReceive) {
@@ -469,26 +484,7 @@ TEST_F(NearbyConnectionBrokerImplTest, DisconnectsUnexpectedly) {
 }
 
 TEST_F(NearbyConnectionBrokerImplTest,
-       DisconnectAfterReceivingFilePayloadWhenFeatureUnsupported) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndDisableFeature(features::kPhoneHubCameraRoll);
-  SetUpFullConnection();
-
-  base::RunLoop disconnect_from_endpoint_run_loop;
-  ExpectDisconnectFromEndpoint(disconnect_from_endpoint_run_loop.QuitClosure());
-  base::FilePath path;
-  base::CreateTemporaryFile(&path);
-  ReceiveFilePayload(/*payload_id=*/1234, path);
-  disconnect_from_endpoint_run_loop.Run();
-
-  InvokeDisconnectedFromEndpointCallback(/*success=*/true);
-  InvokeDisconnectedCallback();
-}
-
-TEST_F(NearbyConnectionBrokerImplTest,
        DisconnectAfterReceivingUnregisteredFilePayload) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(features::kPhoneHubCameraRoll);
   SetUpFullConnection();
 
   base::RunLoop disconnect_from_endpoint_run_loop;
@@ -513,8 +509,6 @@ TEST_F(NearbyConnectionBrokerImplTest,
 }
 
 TEST_F(NearbyConnectionBrokerImplTest, FileTransferUpdateForRegisteredPayload) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(features::kPhoneHubCameraRoll);
   SetUpFullConnection();
 
   int64_t payload_id = 1234;
@@ -562,8 +556,6 @@ TEST_F(NearbyConnectionBrokerImplTest, FileTransferUpdateForRegisteredPayload) {
 }
 
 TEST_F(NearbyConnectionBrokerImplTest, FileTransferUpdateForCompletedPayload) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(features::kPhoneHubCameraRoll);
   SetUpFullConnection();
 
   int64_t payload_id = 1234;
@@ -601,8 +593,6 @@ TEST_F(NearbyConnectionBrokerImplTest, FileTransferUpdateForCompletedPayload) {
 
 TEST_F(NearbyConnectionBrokerImplTest,
        FileTransferUpdateForUnregisteredPayload) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(features::kPhoneHubCameraRoll);
   SetUpFullConnection();
 
   base::FilePath path;
@@ -622,8 +612,6 @@ TEST_F(NearbyConnectionBrokerImplTest,
 }
 
 TEST_F(NearbyConnectionBrokerImplTest, FileTransferCanceledOnDisconnect) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(features::kPhoneHubCameraRoll);
   SetUpFullConnection();
 
   int64_t payload_id = 1234;
@@ -657,8 +645,6 @@ TEST_F(NearbyConnectionBrokerImplTest, FileTransferCanceledOnDisconnect) {
 }
 
 TEST_F(NearbyConnectionBrokerImplTest, FileTransferCanceledOnMojoDisconnect) {
-  base::test::ScopedFeatureList feature_list;
-  feature_list.InitAndEnableFeature(features::kPhoneHubCameraRoll);
   SetUpFullConnection();
 
   int64_t payload_id = 1234;
@@ -721,9 +707,90 @@ TEST_F(NearbyConnectionBrokerImplTest, MojoDisconnectionAfterDiscovery) {
   std::move(request_connection_callback_).Run(Status::kError);
 }
 
-TEST_F(NearbyConnectionBrokerImplTest, FailRequestingConnection) {
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_AlreadyConnectedToEndpoint) {
   DiscoverEndpoint();
-  InvokeRequestConnectionCallback(/*success=*/false);
+  InvokeRequestConnectionCallback(Status::kAlreadyConnectedToEndpoint);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_PayloadUnknown) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kPayloadUnknown);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_NotConnectedToEndpoint) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kNotConnectedToEndpoint);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_AlreadyAdvertising) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kAlreadyAdvertising);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_AlreadyHaveActiveStrategy) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kAlreadyHaveActiveStrategy);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_AlreadyListening) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kAlreadyListening);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest, FailRequestingConnection_Unknown) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kUnknown);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_EndpointIOError) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kEndpointIOError);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_EndpointUnknown) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kEndpointUnknown);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest, FailRequestingConnection_BleError) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kBleError);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_BluetoothError) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kBluetoothError);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_OutOfOrderApiCall) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kOutOfOrderApiCall);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest, FailRequestingConnection_WifiLanError) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kWifiLanError);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest, FailRequestingConnection_Reset) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kReset);
+}
+
+TEST_F(NearbyConnectionBrokerImplTest,
+       FailRequestingConnection_NearbyConnectionTimeout) {
+  DiscoverEndpoint();
+  InvokeRequestConnectionCallback(Status::kTimeout);
 }
 
 TEST_F(NearbyConnectionBrokerImplTest, FailRequestingConnection_Timeout) {
@@ -736,7 +803,7 @@ TEST_F(NearbyConnectionBrokerImplTest, FailRequestingConnection_Timeout) {
 TEST_F(NearbyConnectionBrokerImplTest,
        MojoDisconnectionAfterRequestConnection) {
   DiscoverEndpoint();
-  InvokeRequestConnectionCallback(/*success=*/true);
+  InvokeRequestConnectionCallback(Status::kSuccess);
   NotifyConnectionInitiated();
   DisconnectMojoBindings(/*expected_to_disconnect=*/true);
   InvokeDisconnectedFromEndpointCallback(/*success=*/true);
@@ -749,17 +816,17 @@ TEST_F(NearbyConnectionBrokerImplTest,
 
 TEST_F(NearbyConnectionBrokerImplTest, FailAcceptingConnection) {
   DiscoverEndpoint();
-  InvokeRequestConnectionCallback(/*success=*/true);
+  InvokeRequestConnectionCallback(Status::kSuccess);
   NotifyConnectionInitiated();
-  InvokeAcceptConnectionCallback(/*success=*/false);
+  InvokeAcceptConnectionCallback(Status::kConnectionRejected);
   InvokeDisconnectedFromEndpointCallback(/*success=*/true);
   InvokeDisconnectedCallback();
 }
 
-// Regression test for https://crbug.com/1175489.
+// Regression test for https://crbug.com/40747380.
 TEST_F(NearbyConnectionBrokerImplTest, OnAcceptedBeforeAcceptCallback) {
   DiscoverEndpoint();
-  InvokeRequestConnectionCallback(/*success=*/true);
+  InvokeRequestConnectionCallback(Status::kSuccess);
   NotifyConnectionInitiated();
 
   // Invoke OnConnectionAccepted() callback before the AcceptConnection()
@@ -767,7 +834,7 @@ TEST_F(NearbyConnectionBrokerImplTest, OnAcceptedBeforeAcceptCallback) {
   // before OnConnectionAccepted(), but we've seen in practice that this is
   // sometimes not the case.
   NotifyConnectionAccepted();
-  InvokeAcceptConnectionCallback(/*success=*/true);
+  InvokeAcceptConnectionCallback(Status::kSuccess);
 
   // The connection is now considered complete, so there should be no further
   // timeout.
@@ -776,7 +843,7 @@ TEST_F(NearbyConnectionBrokerImplTest, OnAcceptedBeforeAcceptCallback) {
 
 TEST_F(NearbyConnectionBrokerImplTest, FailAcceptingConnection_Timeout) {
   DiscoverEndpoint();
-  InvokeRequestConnectionCallback(/*success=*/true);
+  InvokeRequestConnectionCallback(Status::kSuccess);
   NotifyConnectionInitiated();
   SimulateTimeout(/*expected_to_disconnect=*/true);
   InvokeDisconnectedFromEndpointCallback(/*success=*/true);

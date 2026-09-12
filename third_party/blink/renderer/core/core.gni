@@ -11,7 +11,6 @@ blink_core_output_dir = "$root_gen_dir/third_party/blink/renderer/core"
 # modify the default lists of configs set in the build as appropriate for core
 # targets. This avoids duplicating logic across many targets.
 core_config_add = [
-  "//build/config/compiler:wexit_time_destructors",
   "//third_party/blink/renderer:config",
   "//third_party/blink/renderer:non_test_config",
   "//third_party/blink/renderer/core:config",
@@ -58,6 +57,7 @@ template("blink_core_sources") {
   } else {
     target_type = "static_library"
   }
+
   target(target_type, target_name) {
     # The visibility will get overridden by forward_variables_from below if the
     # invoker defined it.
@@ -85,6 +85,7 @@ template("blink_core_sources") {
                            ])
   }
 }
+
 set_defaults("blink_core_sources") {
   # This sets the default list of configs when the blink_core_sources target
   # is defined. The default_compiler_configs comes from BUILDCONFIG.gn and

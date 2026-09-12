@@ -10,6 +10,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
+#include "chrome/browser/profiles/profile_manager.h"
 
 namespace ash {
 
@@ -62,8 +63,11 @@ class ThemeSelectionScreen : public BaseScreen {
   bool ShouldBeSkipped(const WizardContext& context) const override;
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
+  ScreenSummary GetScreenSummary() override;
+  std::string RetrieveChoobeSubtitle();
 
+  ThemeSelectionScreen::SelectedTheme initial_theme_;
   base::WeakPtr<ThemeSelectionScreenView> view_;
   ScreenExitCallback exit_callback_;
 };

@@ -3,29 +3,32 @@
 // found in the LICENSE file.
 
 #import "ios/chrome/app/application_delegate/metrics_mediator.h"
-#import "ios/chrome/app/application_delegate/metrics_mediator_testing.h"
 
 #import <Foundation/Foundation.h>
 
 #import "base/test/metrics/histogram_tester.h"
+#import "base/test/scoped_feature_list.h"
+#import "base/test/task_environment.h"
 #import "components/metrics/metrics_service.h"
 #import "components/previous_session_info/previous_session_info.h"
 #import "components/previous_session_info/previous_session_info_private.h"
 #import "ios/chrome/app/app_startup_parameters.h"
 #import "ios/chrome/app/application_delegate/metric_kit_subscriber.h"
+#import "ios/chrome/app/application_delegate/metrics_mediator_testing.h"
 #import "ios/chrome/app/application_delegate/startup_information.h"
-#import "ios/chrome/browser/application_context/application_context.h"
-#import "ios/chrome/browser/browser_state/test_chrome_browser_state.h"
-#import "ios/chrome/browser/main/test_browser.h"
-#import "ios/chrome/browser/ui/main/browser_interface_provider.h"
-#import "ios/chrome/browser/ui/main/connection_information.h"
-#import "ios/chrome/browser/ui/main/scene_state.h"
-#import "ios/chrome/browser/ui/main/test/fake_scene_state.h"
-#import "ios/chrome/browser/url/chrome_url_constants.h"
-#import "ios/chrome/browser/web_state_list/fake_web_state_list_delegate.h"
-#import "ios/chrome/browser/web_state_list/web_state_list.h"
-#import "ios/chrome/browser/web_state_list/web_state_opener.h"
+#import "ios/chrome/browser/crash_report/model/features.h"
+#import "ios/chrome/browser/safe_mode/ui_bundled/safe_mode_coordinator.h"
+#import "ios/chrome/browser/shared/coordinator/scene/connection_information.h"
+#import "ios/chrome/browser/shared/coordinator/scene/scene_state.h"
+#import "ios/chrome/browser/shared/coordinator/scene/test/fake_scene_state.h"
+#import "ios/chrome/browser/shared/model/browser/browser_provider_interface.h"
+#import "ios/chrome/browser/shared/model/browser/test/test_browser.h"
+#import "ios/chrome/browser/shared/model/profile/test/test_profile_ios.h"
+#import "ios/chrome/browser/shared/model/url/chrome_url_constants.h"
+#import "ios/chrome/browser/shared/model/web_state_list/web_state_list.h"
+#import "ios/chrome/browser/shared/model/web_state_list/web_state_opener.h"
 #import "ios/chrome/common/app_group/app_group_metrics.h"
+#import "ios/chrome/test/ios_chrome_scoped_testing_local_state.h"
 #import "ios/testing/scoped_block_swizzler.h"
 #import "ios/web/public/test/web_task_environment.h"
 #import "net/base/network_change_notifier.h"
@@ -33,9 +36,11 @@
 #import "third_party/ocmock/OCMock/OCMock.h"
 #import "third_party/ocmock/gtest_support.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+@interface MetricsMediator ()
+- (void)setMetricsEnabled:(BOOL)enabled;
+- (void)setAppGroupMetricsEnabled:(BOOL)enabled;
+- (void)updateMetricsPrefsOnPermissionChange:(BOOL)enabled;
+@end
 
 // Mock class for testing MetricsMediator.
 @interface MetricsMediatorMock : MetricsMediator
@@ -54,6 +59,12 @@
 }
 - (BOOL)areMetricsEnabled {
   return YES;
+}
+- (void)setMetricsEnabled:(BOOL)enabled {
+}
+- (void)setAppGroupMetricsEnabled:(BOOL)enabled {
+}
+- (void)updateMetricsPrefsOnPermissionChange:(BOOL)enabled {
 }
 
 @end
@@ -106,10 +117,8 @@ typedef void (^LogLaunchMetricsBlock)(id, const char*, int);
 class MetricsMediatorLogLaunchTest : public PlatformTest {
  protected:
   MetricsMediatorLogLaunchTest()
-      : browser_state_(TestChromeBrowserState::Builder().Build()),
-        num_tabs_has_been_called_(FALSE),
-        num_ntp_tabs_has_been_called_(FALSE),
-        num_live_ntp_tabs_has_been_called_(FALSE) {}
+      : profile_(TestProfileIOS::Builder().Build()),
+        num_tabs_has_been_called_(FALSE) {}
 
   void initiateMetricsMediator(BOOL coldStart, int tabCount) {
     num_tabs_swizzle_block_ = [^(id self, int numTab) {
@@ -117,56 +126,45 @@ class MetricsMediatorLogLaunchTest : public PlatformTest {
       // Tests.
       EXPECT_EQ(tabCount, numTab);
     } copy];
-    num_ntp_tabs_swizzle_block_ = [^(id self, int numTab) {
-      num_ntp_tabs_has_been_called_ = YES;
-      // Tests.
-      EXPECT_EQ(tabCount, numTab);
-    } copy];
-    num_live_ntp_tabs_swizzle_block_ = [^(id self, int numTab) {
-      num_live_ntp_tabs_has_been_called_ = YES;
-    } copy];
     if (coldStart) {
       tabs_uma_histogram_swizzler_.reset(new ScopedBlockSwizzler(
-          [MetricsMediator class], @selector(recordNumTabAtStartup:),
+          [MetricsMediator class], @selector(recordStartupTabCount:),
           num_tabs_swizzle_block_));
-      ntp_tabs_uma_histogram_swizzler_.reset(new ScopedBlockSwizzler(
-          [MetricsMediator class], @selector(recordNumNTPTabAtStartup:),
-          num_ntp_tabs_swizzle_block_));
     } else {
       tabs_uma_histogram_swizzler_.reset(new ScopedBlockSwizzler(
-          [MetricsMediator class], @selector(recordNumTabAtResume:),
+          [MetricsMediator class], @selector(recordResumeTabCount:),
           num_tabs_swizzle_block_));
-      ntp_tabs_uma_histogram_swizzler_.reset(new ScopedBlockSwizzler(
-          [MetricsMediator class], @selector(recordNumNTPTabAtResume:),
-          num_ntp_tabs_swizzle_block_));
-      live_ntp_tabs_uma_histogram_swizzler_.reset(new ScopedBlockSwizzler(
-          [MetricsMediator class], @selector(recordNumLiveNTPTabAtResume:),
-          num_live_ntp_tabs_swizzle_block_));
     }
   }
 
   void TearDown() override {
+    for (FakeSceneState* scene_state in connected_scenes_) {
+      [scene_state shutdown];
+    }
     connected_scenes_ = nil;
     PlatformTest::TearDown();
   }
 
   void verifySwizzleHasBeenCalled() {
     EXPECT_TRUE(num_tabs_has_been_called_);
-    EXPECT_TRUE(num_ntp_tabs_has_been_called_);
+  }
+
+  NSArray<FakeSceneState*>* SceneArrayWithCount(int count) {
+    NSMutableArray<SceneState*>* scenes = [NSMutableArray array];
+    for (int i = 0; i < count; i++) {
+      [scenes
+          addObject:[[FakeSceneState alloc] initWithProfile:profile_.get()]];
+    }
+    return [scenes copy];
   }
 
   web::WebTaskEnvironment task_environment_;
-  std::unique_ptr<TestChromeBrowserState> browser_state_;
+  IOSChromeScopedTestingLocalState scoped_testing_local_state_;
+  std::unique_ptr<TestProfileIOS> profile_;
   NSArray<FakeSceneState*>* connected_scenes_;
   __block BOOL num_tabs_has_been_called_;
-  __block BOOL num_ntp_tabs_has_been_called_;
-  __block BOOL num_live_ntp_tabs_has_been_called_;
   LogLaunchMetricsBlock num_tabs_swizzle_block_;
-  LogLaunchMetricsBlock num_ntp_tabs_swizzle_block_;
-  LogLaunchMetricsBlock num_live_ntp_tabs_swizzle_block_;
   std::unique_ptr<ScopedBlockSwizzler> tabs_uma_histogram_swizzler_;
-  std::unique_ptr<ScopedBlockSwizzler> ntp_tabs_uma_histogram_swizzler_;
-  std::unique_ptr<ScopedBlockSwizzler> live_ntp_tabs_uma_histogram_swizzler_;
 };
 
 // Verifies that the log of the number of open tabs is sent and verifies
@@ -176,8 +174,7 @@ TEST_F(MetricsMediatorLogLaunchTest,
   BOOL coldStart = YES;
   initiateMetricsMediator(coldStart, 23);
   // 23 tabs across three scenes.
-  connected_scenes_ = [FakeSceneState sceneArrayWithCount:3
-                                             browserState:browser_state_.get()];
+  connected_scenes_ = SceneArrayWithCount(3);
   [connected_scenes_[0] appendWebStatesWithURL:GURL(kChromeUINewTabURL)
                                          count:9];
   [connected_scenes_[1] appendWebStatesWithURL:GURL(kChromeUINewTabURL)
@@ -218,8 +215,7 @@ TEST_F(MetricsMediatorLogLaunchTest, logLaunchMetricsNoBackgroundDate) {
   BOOL coldStart = NO;
   initiateMetricsMediator(coldStart, 32);
   // 32 tabs across five scenes.
-  connected_scenes_ = [FakeSceneState sceneArrayWithCount:5
-                                             browserState:browser_state_.get()];
+  connected_scenes_ = SceneArrayWithCount(5);
   [connected_scenes_[0] appendWebStatesWithURL:GURL(kChromeUINewTabURL)
                                          count:8];
   [connected_scenes_[1] appendWebStatesWithURL:GURL(kChromeUINewTabURL)
@@ -242,7 +238,6 @@ TEST_F(MetricsMediatorLogLaunchTest, logLaunchMetricsNoBackgroundDate) {
                                           connectedScenes:connected_scenes_];
   // Tests.
   verifySwizzleHasBeenCalled();
-  EXPECT_TRUE(num_live_ntp_tabs_has_been_called_);
 }
 
 using MetricsMediatorNoFixtureTest = PlatformTest;
@@ -267,7 +262,7 @@ TEST_F(MetricsMediatorNoFixtureTest, logDateInUserDefaultsTest) {
   EXPECT_NE(nil, lastAppClose);
 }
 
-// Tests that +logStartupDuration:connectionInformation: calls
+// Tests that +logStartupDuration: calls
 // +endExtendedLaunchTask on cold start.
 TEST_F(MetricsMediatorNoFixtureTest, endExtendedLaunchTaskOnColdStart) {
   id startupInformation =
@@ -287,36 +282,119 @@ TEST_F(MetricsMediatorNoFixtureTest, endExtendedLaunchTaskOnColdStart) {
     [invocation setReturnValue:(void*)&time];
   }] firstSceneConnectionTime];
 
-  id connectionInformation =
-      [OCMockObject mockForProtocol:@protocol(ConnectionInformation)];
-  id startupParameters =
-      [OCMockObject mockForClass:[AppStartupParameters class]];
-  [[[connectionInformation stub] andReturn:startupParameters]
-      startupParameters];
-
   id metricKitSubscriber =
       [OCMockObject mockForClass:[MetricKitSubscriber class]];
   [[metricKitSubscriber expect] endExtendedLaunchTask];
 
-  [MetricsMediator logStartupDuration:startupInformation
-                connectionInformation:connectionInformation];
+  [MetricsMediator logStartupDuration:startupInformation];
   EXPECT_OCMOCK_VERIFY(metricKitSubscriber);
 }
 
-// Tests that +logStartupDuration:connectionInformation: does not call
+// Tests that +logStartupDuration: does not call
 // +endExtendedLaunchTask on warm start.
 TEST_F(MetricsMediatorNoFixtureTest, endExtendedLaunchTaskOnWarmStart) {
   id startupInformation =
       [OCMockObject mockForProtocol:@protocol(StartupInformation)];
   [[[startupInformation stub] andReturnValue:@NO] isColdStart];
-  id connectionInformation =
-      [OCMockObject mockForProtocol:@protocol(ConnectionInformation)];
 
   id metricKitSubscriber =
       [OCMockObject mockForClass:[MetricKitSubscriber class]];
   [[metricKitSubscriber reject] endExtendedLaunchTask];
 
-  [MetricsMediator logStartupDuration:startupInformation
-                connectionInformation:connectionInformation];
+  [MetricsMediator logStartupDuration:startupInformation];
   EXPECT_OCMOCK_VERIFY(metricKitSubscriber);
+}
+
+class MetricsMediatorDeferralTest : public PlatformTest {
+ private:
+  base::test::TaskEnvironment task_environment_;
+};
+
+// Test that MetricKit registration is deferred on startup when feature flag is
+// enabled.
+TEST_F(MetricsMediatorDeferralTest, DeferMetricKitRegistrationOnStartup) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(kMetrickitDeferRegistration);
+
+  id subscriber_mock = OCMStrictClassMock([MetricKitSubscriber class]);
+  OCMStub([subscriber_mock sharedInstance]).andReturn(subscriber_mock);
+
+  MetricsMediatorMock* mediator = [[MetricsMediatorMock alloc] init];
+  [mediator updateMetricsStateBasedOnPrefsUserTriggered:NO];
+  EXPECT_OCMOCK_VERIFY(subscriber_mock);
+
+  OCMExpect([subscriber_mock setEnabled:YES]);
+  [mediator registerMetricKitSubscriberIfNeeded];
+  EXPECT_OCMOCK_VERIFY(subscriber_mock);
+
+  [subscriber_mock stopMocking];
+}
+
+// Test that MetricKit registration is deferred on startup even for
+// user-triggered preference updates, but propagates immediately once
+// initialized.
+TEST_F(MetricsMediatorDeferralTest,
+       MetricKitRegistrationDeferralAndPostInitUserTrigger) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(kMetrickitDeferRegistration);
+
+  id subscriber_mock = OCMStrictClassMock([MetricKitSubscriber class]);
+  OCMStub([subscriber_mock sharedInstance]).andReturn(subscriber_mock);
+
+  MetricsMediatorMock* mediator = [[MetricsMediatorMock alloc] init];
+  // On startup prior to registration, user-triggered update does not
+  // immediately setEnabled.
+  [mediator updateMetricsStateBasedOnPrefsUserTriggered:YES];
+  EXPECT_OCMOCK_VERIFY(subscriber_mock);
+
+  // When deferred task runs, registration happens.
+  OCMExpect([subscriber_mock setEnabled:YES]);
+  [mediator registerMetricKitSubscriberIfNeeded];
+  EXPECT_OCMOCK_VERIFY(subscriber_mock);
+
+  // Subsequent user-triggered preference updates after initialization update
+  // immediately.
+  OCMExpect([subscriber_mock setEnabled:YES]);
+  [mediator updateMetricsStateBasedOnPrefsUserTriggered:YES];
+  EXPECT_OCMOCK_VERIFY(subscriber_mock);
+
+  [subscriber_mock stopMocking];
+}
+
+// Test that MetricKit registration happens immediately when in safe mode.
+TEST_F(MetricsMediatorDeferralTest, ImmediateMetricKitRegistrationInSafeMode) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndEnableFeature(kMetrickitDeferRegistration);
+
+  id safe_mode_mock = OCMClassMock([SafeModeCoordinator class]);
+  OCMStub([safe_mode_mock shouldStart]).andReturn(YES);
+
+  id subscriber_mock = OCMStrictClassMock([MetricKitSubscriber class]);
+  OCMStub([subscriber_mock sharedInstance]).andReturn(subscriber_mock);
+  OCMExpect([subscriber_mock setEnabled:YES]);
+
+  MetricsMediatorMock* mediator = [[MetricsMediatorMock alloc] init];
+  [mediator updateMetricsStateBasedOnPrefsUserTriggered:NO];
+  EXPECT_OCMOCK_VERIFY(subscriber_mock);
+
+  [subscriber_mock stopMocking];
+  [safe_mode_mock stopMocking];
+}
+
+// Test that MetricKit registration happens immediately when the deferred
+// registration feature flag is disabled.
+TEST_F(MetricsMediatorDeferralTest,
+       ImmediateMetricKitRegistrationWhenFlagDisabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(kMetrickitDeferRegistration);
+
+  id subscriber_mock = OCMStrictClassMock([MetricKitSubscriber class]);
+  OCMStub([subscriber_mock sharedInstance]).andReturn(subscriber_mock);
+  OCMExpect([subscriber_mock setEnabled:YES]);
+
+  MetricsMediatorMock* mediator = [[MetricsMediatorMock alloc] init];
+  [mediator updateMetricsStateBasedOnPrefsUserTriggered:NO];
+  EXPECT_OCMOCK_VERIFY(subscriber_mock);
+
+  [subscriber_mock stopMocking];
 }

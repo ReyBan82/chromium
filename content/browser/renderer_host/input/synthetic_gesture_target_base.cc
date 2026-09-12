@@ -4,10 +4,14 @@
 
 #include "content/browser/renderer_host/input/synthetic_gesture_target_base.h"
 
+#include "base/check.h"
+#include "base/logging.h"
+#include "base/notreached.h"
+#include "base/trace_event/trace_event.h"
+#include "components/input/events_helper.h"
+#include "components/input/render_widget_host_input_event_router.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
-#include "content/browser/renderer_host/render_widget_host_input_event_router.h"
 #include "content/browser/renderer_host/render_widget_host_view_base.h"
-#include "content/browser/renderer_host/ui_events_helper.h"
 #include "third_party/blink/public/common/input/web_input_event.h"
 #include "ui/events/blink/web_input_event_traits.h"
 #include "ui/events/event.h"
@@ -32,7 +36,7 @@ const int kPointerAssumedStoppedTimeMs = 100;
 SyntheticGestureTargetBase::SyntheticGestureTargetBase(
     RenderWidgetHostImpl* host)
     : host_(host) {
-  DCHECK(host);
+  CHECK(host, base::NotFatalUntil::M152);
 }
 
 SyntheticGestureTargetBase::~SyntheticGestureTargetBase() {
@@ -67,28 +71,7 @@ void SyntheticGestureTargetBase::DispatchInputEventToPlatform(
       LOG(WARNING) << "Mouse wheel position is not within content bounds.";
       return;
     }
-    if (web_wheel.delta_units != ui::ScrollGranularity::kScrollByPercentage)
-      DispatchWebMouseWheelEventToPlatform(web_wheel, latency_info);
-    else {
-      // Percentage-based mouse wheel scrolls are implemented in the UI layer by
-      // converting a native event's wheel tick amount to a percentage and
-      // setting that directly on WebMouseWheelEvent (i.e. it does not read the
-      // ui::MouseWheelEvent). However, when dispatching a synthetic
-      // ui::MouseWheelEvent, the created WebMouseWheelEvent will copy values
-      // from the ui::MouseWheelEvent. ui::MouseWheelEvent does
-      // not have a float value for delta, so that codepath ends up truncating.
-      // So instead, dispatch the WebMouseWheelEvent directly through the
-      // RenderWidgetHostInputEventRouter attached to the RenderWidgetHostImpl.
-
-      DCHECK(host_->delegate());
-      DCHECK(host_->delegate()->IsWidgetForPrimaryMainFrame(host_));
-      DCHECK(host_->delegate()->GetInputEventRouter());
-
-      std::unique_ptr<WebInputEvent> wheel_evt_ptr = web_wheel.Clone();
-      host_->delegate()->GetInputEventRouter()->RouteMouseWheelEvent(
-          host_->GetView(),
-          static_cast<WebMouseWheelEvent*>(wheel_evt_ptr.get()), latency_info);
-    }
+    DispatchWebMouseWheelEventToPlatform(web_wheel, latency_info);
   } else if (WebInputEvent::IsMouseEventType(event.GetType())) {
     const WebMouseEvent& web_mouse =
         static_cast<const WebMouseEvent&>(event);
@@ -103,7 +86,8 @@ void SyntheticGestureTargetBase::DispatchInputEventToPlatform(
     const WebGestureEvent& web_pinch =
         static_cast<const WebGestureEvent&>(event);
     // Touchscreen pinches should be injected as touch events.
-    DCHECK_EQ(blink::WebGestureDevice::kTouchpad, web_pinch.SourceDevice());
+    CHECK_EQ(blink::WebGestureDevice::kTouchpad, web_pinch.SourceDevice(),
+             base::NotFatalUntil::M152);
     if (event.GetType() == WebInputEvent::Type::kGesturePinchBegin &&
         !PointIsWithinContents(web_pinch.PositionInWidget())) {
       LOG(WARNING)
@@ -115,7 +99,8 @@ void SyntheticGestureTargetBase::DispatchInputEventToPlatform(
     const WebGestureEvent& web_fling =
         static_cast<const WebGestureEvent&>(event);
     // Touchscreen swipe should be injected as touch events.
-    DCHECK_EQ(blink::WebGestureDevice::kTouchpad, web_fling.SourceDevice());
+    CHECK_EQ(blink::WebGestureDevice::kTouchpad, web_fling.SourceDevice(),
+             base::NotFatalUntil::M152);
     if (event.GetType() == WebInputEvent::Type::kGestureFlingStart &&
         !PointIsWithinContents(web_fling.PositionInWidget())) {
       LOG(WARNING)
@@ -126,6 +111,13 @@ void SyntheticGestureTargetBase::DispatchInputEventToPlatform(
   } else {
     NOTREACHED();
   }
+}
+
+void SyntheticGestureTargetBase::GetVSyncParameters(
+    base::TimeTicks& timebase,
+    base::TimeDelta& interval) const {
+  timebase = base::TimeTicks();
+  interval = base::Microseconds(16667);
 }
 
 base::TimeDelta SyntheticGestureTargetBase::PointerAssumedStoppedTime()

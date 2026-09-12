@@ -8,7 +8,6 @@
 #include "chromeos/strings/grit/chromeos_strings.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "ui/base/webui/web_ui_util.h"
-#include "ui/resources/grit/webui_resources.h"
 
 namespace ash {
 namespace traffic_counters {
@@ -21,7 +20,6 @@ constexpr webui::LocalizedString kLocalizedStrings[] = {
     {"TrafficCountersUser", IDS_TRAFFIC_COUNTERS_USER},
     {"TrafficCountersArc", IDS_TRAFFIC_COUNTERS_ARC},
     {"TrafficCountersCrosvm", IDS_TRAFFIC_COUNTERS_CROSVM},
-    {"TrafficCountersPluginvm", IDS_TRAFFIC_COUNTERS_PLUGINVM},
     {"TrafficCountersUpdateEngine", IDS_TRAFFIC_COUNTERS_UPDATE_ENGINE},
     {"TrafficCountersVpn", IDS_TRAFFIC_COUNTERS_VPN},
     {"TrafficCountersSystem", IDS_TRAFFIC_COUNTERS_SYSTEM},
@@ -49,6 +47,18 @@ constexpr webui::LocalizedString kLocalizedStrings[] = {
      IDS_TRAFFIC_COUNTERS_DATA_USAGE_ENABLE_AUTO_RESET_SUBLABEL},
     {"TrafficCountersDataUsageAutoResetDayOfMonthLabel",
      IDS_TRAFFIC_COUNTERS_DATA_USAGE_AUTO_RESET_DAY_OF_MONTH_LABEL},
+    {"TrafficCountersDataUsageAutoResetDayOfMonthSubLabel",
+     IDS_TRAFFIC_COUNTERS_DATA_USAGE_AUTO_RESET_DAY_OF_MONTH_SUBLABEL},
+    {"TrafficCountersDataUsageDifferentFromProviderLabel",
+     IDS_TRAFFIC_COUNTERS_DATA_USAGE_DIFFERENT_FROM_PROVIDER_LABEL},
+    {"TrafficCountersDataUsageResetDayTooltipText",
+     IDS_TRAFFIC_COUNTERS_DATA_USAGE_RESET_DAY_TOOLTIP_TEXT},
+    {"TrafficCountersDataUsageDropdownLabel",
+     IDS_TRAFFIC_COUNTERS_DATA_USAGE_DROPDOWN_LABEL},
+    {"TrafficCountersDataUsageResetDayTooltipA11yLabel",
+     IDS_TRAFFIC_COUNTERS_DATA_USAGE_RESET_DAY_TOOLTIP_A11Y_LABEL},
+    {"TrafficCountersDataUsageResetButtonPressedA11yMessage",
+     IDS_TRAFFIC_COUNTERS_DATA_USAGE_RESET_BUTTON_PRESSED_A11Y_MESSAGE},
 };
 
 }  // namespace

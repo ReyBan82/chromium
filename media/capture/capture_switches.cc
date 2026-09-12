@@ -5,12 +5,18 @@
 #include "media/capture/capture_switches.h"
 
 #include "base/command_line.h"
+#include "base/feature_list.h"
 
 namespace switches {
 
 // Enables GpuMemoryBuffer-based buffer pool.
 const char kVideoCaptureUseGpuMemoryBuffer[] =
     "video-capture-use-gpu-memory-buffer";
+
+// Makes the video capture service ignore devices from the wrapped factory and
+// expose only registered virtual devices.
+const char kVideoCaptureUseVirtualDevicesOnly[] =
+    "video-capture-use-virtual-devices-only";
 
 // This is for the same feature controlled by kVideoCaptureUseGpuMemoryBuffer.
 // kVideoCaptureUseGpuMemoryBuffer is settled by chromeos overlays. This flag is
@@ -22,21 +28,36 @@ const char kVideoCaptureUseGpuMemoryBuffer[] =
 const char kDisableVideoCaptureUseGpuMemoryBuffer[] =
     "disable-video-capture-use-gpu-memory-buffer";
 
-CAPTURE_EXPORT bool IsVideoCaptureUseGpuMemoryBufferEnabled() {
+bool IsVideoCaptureUseGpuMemoryBufferEnabled() {
   return !base::CommandLine::ForCurrentProcess()->HasSwitch(
              switches::kDisableVideoCaptureUseGpuMemoryBuffer) &&
          base::CommandLine::ForCurrentProcess()->HasSwitch(
              switches::kVideoCaptureUseGpuMemoryBuffer);
 }
 
+#if BUILDFLAG(IS_WIN)
+bool IsMediaFoundationCameraUsageMonitoringEnabled() {
+  return base::FeatureList::IsEnabled(
+      features::kMediaFoundationCameraUsageMonitoring);
+}
+#endif
+
 }  // namespace switches
 
 namespace features {
 
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-BASE_FEATURE(kLacrosAuraCapture,
-             "LacrosAuraCapture",
+BASE_FEATURE(kExcludePipFromScreenCapture, base::FEATURE_DISABLED_BY_DEFAULT);
+
+#if defined(WEBRTC_USE_PIPEWIRE)
+// Controls whether the PipeWire support for cameras is enabled on the
+// Wayland display server.
+BASE_FEATURE(kWebRtcPipeWireCamera, base::FEATURE_DISABLED_BY_DEFAULT);
+#endif  // defined(WEBRTC_USE_PIPEWIRE)
+
+#if BUILDFLAG(IS_WIN)
+// Controls monitoring for camera usage by other applications.
+BASE_FEATURE(kMediaFoundationCameraUsageMonitoring,
              base::FEATURE_ENABLED_BY_DEFAULT);
-#endif
+#endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace features

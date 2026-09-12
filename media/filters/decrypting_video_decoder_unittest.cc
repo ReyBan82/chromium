@@ -23,8 +23,10 @@
 #include "media/base/test_helpers.h"
 #include "media/base/video_frame.h"
 #include "testing/gmock/include/gmock/gmock.h"
+#include "ui/gfx/hdr_metadata.h"
 
 using ::base::test::RunOnceCallback;
+using ::base::test::RunOnceCallbackRepeatedly;
 using ::testing::_;
 using ::testing::HasSubstr;
 using ::testing::Invoke;
@@ -34,30 +36,16 @@ using ::testing::WithArg;
 
 namespace media {
 
-const uint8_t kFakeKeyId[] = {0x4b, 0x65, 0x79, 0x20, 0x49, 0x44};
-const uint8_t kFakeIv[DecryptConfig::kDecryptionKeySize] = {0};
 const int kDecodingDelay = 3;
-
-// Create a fake non-empty encrypted buffer.
-static scoped_refptr<DecoderBuffer> CreateFakeEncryptedBuffer() {
-  const int buffer_size = 16;  // Need a non-empty buffer;
-  scoped_refptr<DecoderBuffer> buffer(new DecoderBuffer(buffer_size));
-  buffer->set_decrypt_config(DecryptConfig::CreateCencConfig(
-      std::string(reinterpret_cast<const char*>(kFakeKeyId),
-                  std::size(kFakeKeyId)),
-      std::string(reinterpret_cast<const char*>(kFakeIv), std::size(kFakeIv)),
-      {}));
-  return buffer;
-}
 
 class DecryptingVideoDecoderTest : public testing::Test {
  public:
   DecryptingVideoDecoderTest()
-      : decoder_(new DecryptingVideoDecoder(
+      : decoder_(std::make_unique<DecryptingVideoDecoder>(
             task_environment_.GetMainThreadTaskRunner(),
             &media_log_)),
-        cdm_context_(new StrictMock<MockCdmContext>()),
-        decryptor_(new StrictMock<MockDecryptor>()),
+        cdm_context_(std::make_unique<StrictMock<MockCdmContext>>()),
+        decryptor_(std::make_unique<StrictMock<MockDecryptor>>()),
         num_decrypt_and_decode_calls_(0),
         num_frames_in_decryptor_(0),
         encrypted_buffer_(CreateFakeEncryptedBuffer()),
@@ -98,7 +86,7 @@ class DecryptingVideoDecoderTest : public testing::Test {
   }
 
   // Initialize the |decoder_| and expects it to succeed.
-  void Initialize() {
+  void Initialize(const VideoDecoderConfig& config) {
     SetCdmType(CDM_WITH_DECRYPTOR);
     EXPECT_CALL(*decryptor_, InitializeVideoDecoder(_, _))
         .WillOnce(RunOnceCallback<1>(true));
@@ -107,8 +95,10 @@ class DecryptingVideoDecoderTest : public testing::Test {
       return std::make_unique<CallbackRegistration>();
     });
 
-    InitializeAndExpectResult(TestVideoConfig::NormalEncrypted(), true);
+    InitializeAndExpectResult(config, true);
   }
+
+  void Initialize() { Initialize(TestVideoConfig::NormalEncrypted()); }
 
   // Reinitialize the |decoder_| and expects it to succeed.
   void Reinitialize(const VideoDecoderConfig& new_config) {
@@ -281,7 +271,7 @@ TEST_F(DecryptingVideoDecoderTest, Initialize_Failure) {
     return std::make_unique<CallbackRegistration>();
   });
   EXPECT_CALL(*decryptor_, InitializeVideoDecoder(_, _))
-      .WillRepeatedly(RunOnceCallback<1>(false));
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(false));
 
   InitializeAndExpectResult(TestVideoConfig::NormalEncrypted(), false);
 }
@@ -297,6 +287,43 @@ TEST_F(DecryptingVideoDecoderTest, Reinitialize_EncryptedToClear) {
   Initialize();
   EnterNormalDecodingState();
   Reinitialize(TestVideoConfig::Normal());
+}
+
+// Verify that when playing encrypted content that is clearlead, Media Log logs
+// when the stream switches from clear to encrypted buffers.
+TEST_F(DecryptingVideoDecoderTest, ClearToEncryptedNormal) {
+  Initialize();
+
+  EXPECT_CALL(*decryptor_, DecryptAndDecodeVideo(_, _))
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(Decryptor::kSuccess,
+                                                   decoded_video_frame_));
+
+  EXPECT_MEDIA_LOG(
+      HasSubstr("video stream: First switch from clear to encrypted buffers."));
+
+  // Mimicking clear lead content by starting off with a clear buffer and
+  // switching to encrypted buffers.
+  DecodeAndExpect(CreateClearBuffer(), DecoderStatus::Codes::kOk);
+  DecodeAndExpect(CreateFakeEncryptedBuffer(), DecoderStatus::Codes::kOk);
+  DecodeAndExpect(CreateFakeEncryptedBuffer(), DecoderStatus::Codes::kOk);
+}
+
+// Verify that when playing encrypted content that is not clearlead, Media Log
+// does not log that the stream switches from clear to encrypted buffers.
+TEST_F(DecryptingVideoDecoderTest, EncryptedBuffersNoMediaLog) {
+  Initialize();
+
+  EXPECT_CALL(*decryptor_, DecryptAndDecodeVideo(_, _))
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(Decryptor::kSuccess,
+                                                   decoded_video_frame_));
+
+  EXPECT_MEDIA_LOG(
+      HasSubstr("video stream: First switch from clear to encrypted buffers."))
+      .Times(0);
+
+  DecodeAndExpect(CreateFakeEncryptedBuffer(), DecoderStatus::Codes::kOk);
+  DecodeAndExpect(CreateFakeEncryptedBuffer(), DecoderStatus::Codes::kOk);
+  DecodeAndExpect(CreateFakeEncryptedBuffer(), DecoderStatus::Codes::kOk);
 }
 
 TEST_F(DecryptingVideoDecoderTest, Reinitialize_Failure) {
@@ -326,8 +353,8 @@ TEST_F(DecryptingVideoDecoderTest, DecryptAndDecode_SubsampleError) {
       CreateMismatchedBufferForTest();
 
   EXPECT_CALL(*decryptor_, DecryptAndDecodeVideo(_, _))
-      .WillRepeatedly(RunOnceCallback<1>(Decryptor::kError,
-                                         scoped_refptr<VideoFrame>(nullptr)));
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(
+          Decryptor::kError, scoped_refptr<VideoFrame>(nullptr)));
   EXPECT_MEDIA_LOG(
       HasSubstr("DecryptingVideoDecoder: Subsamples for Buffer do not match"));
 
@@ -343,8 +370,8 @@ TEST_F(DecryptingVideoDecoderTest, DecryptAndDecode_DecodeError) {
   Initialize();
 
   EXPECT_CALL(*decryptor_, DecryptAndDecodeVideo(_, _))
-      .WillRepeatedly(RunOnceCallback<1>(Decryptor::kError,
-                                         scoped_refptr<VideoFrame>(nullptr)));
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(
+          Decryptor::kError, scoped_refptr<VideoFrame>(nullptr)));
 
   EXPECT_MEDIA_LOG(HasSubstr("DecryptingVideoDecoder: decode error"));
 
@@ -369,8 +396,8 @@ TEST_F(DecryptingVideoDecoderTest, KeyAdded_DuringWaitingForKey) {
   EnterWaitingForKeyState();
 
   EXPECT_CALL(*decryptor_, DecryptAndDecodeVideo(_, _))
-      .WillRepeatedly(
-          RunOnceCallback<1>(Decryptor::kSuccess, decoded_video_frame_));
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(Decryptor::kSuccess,
+                                                   decoded_video_frame_));
   EXPECT_CALL(*this, FrameReady(decoded_video_frame_));
   EXPECT_CALL(*this, DecodeDone(IsOkStatus()));
   EXPECT_MEDIA_LOG(
@@ -388,8 +415,8 @@ TEST_F(DecryptingVideoDecoderTest, KeyAdded_DuringPendingDecode) {
   EnterPendingDecodeState();
 
   EXPECT_CALL(*decryptor_, DecryptAndDecodeVideo(_, _))
-      .WillRepeatedly(
-          RunOnceCallback<1>(Decryptor::kSuccess, decoded_video_frame_));
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(Decryptor::kSuccess,
+                                                   decoded_video_frame_));
   EXPECT_CALL(*this, FrameReady(decoded_video_frame_));
   EXPECT_CALL(*this, DecodeDone(IsOkStatus()));
   EXPECT_MEDIA_LOG(
@@ -463,9 +490,9 @@ TEST_F(DecryptingVideoDecoderTest, Destroy_DuringPendingDecoderInit) {
     return std::make_unique<CallbackRegistration>();
   });
   EXPECT_CALL(*decryptor_, InitializeVideoDecoder(_, _))
-      .WillOnce(WithArg<1>(Invoke([&](Decryptor::DecoderInitCB init_cb) {
+      .WillOnce(WithArg<1>([&](Decryptor::DecoderInitCB init_cb) {
         pending_init_cb_ = std::move(init_cb);
-      })));
+      }));
 
   InitializeAndExpectResult(TestVideoConfig::NormalEncrypted(), false);
   EXPECT_FALSE(!pending_init_cb_);
@@ -540,12 +567,50 @@ TEST_F(DecryptingVideoDecoderTest, Destroy_AfterReset) {
   Destroy();
 }
 
-// Test the case where color space in the config is set in the decoded frame.
+// Test the case where ColorSpace in the config is set in the decoded frame.
 TEST_F(DecryptingVideoDecoderTest, ColorSpace) {
-  Initialize();
-  EXPECT_FALSE(decoded_video_frame_->ColorSpace().IsValid());
+  Initialize(TestVideoConfig::NormalEncrypted());
   EnterNormalDecodingState();
   EXPECT_TRUE(decoded_video_frame_->ColorSpace().IsValid());
+  EXPECT_FALSE(decoded_video_frame_->ColorSpace().IsHDR());
+  EXPECT_TRUE(decoded_video_frame_->hdr_metadata().IsEmpty());
+}
+
+// Test the case where ColorSpace and HDRMetadata in the config are set in the
+// decoded frame.
+TEST_F(DecryptingVideoDecoderTest, HDRMetadata) {
+  Initialize(TestVideoConfig::NormalHdrEncrypted());
+  EnterNormalDecodingState();
+  EXPECT_TRUE(decoded_video_frame_->ColorSpace().IsValid());
+  EXPECT_TRUE(decoded_video_frame_->ColorSpace().IsHDR());
+  EXPECT_FALSE(decoded_video_frame_->hdr_metadata().IsEmpty());
+  EXPECT_TRUE(decoded_video_frame_->hdr_metadata().IsValid());
+}
+
+// Test the case where HDRMetadata is set on the DecoderBuffer.
+TEST_F(DecryptingVideoDecoderTest, PerFrameHDRMetadata) {
+  Initialize(TestVideoConfig::NormalHdrEncrypted());
+
+  gfx::HDRMetadata per_frame_metadata;
+  per_frame_metadata.SetCLLI(
+      skhdr::ContentLightLevelInformation{100.0f, 200.0f});
+
+  scoped_refptr<DecoderBuffer> buffer_with_metadata =
+      CreateFakeEncryptedBuffer();
+  buffer_with_metadata->WritableSideData().hdr_metadata = per_frame_metadata;
+
+  EXPECT_CALL(*decryptor_, DecryptAndDecodeVideo(_, _))
+      .WillRepeatedly(RunOnceCallbackRepeatedly<1>(Decryptor::kSuccess,
+                                                   decoded_video_frame_));
+
+  EXPECT_CALL(*this, FrameReady(_))
+      .WillOnce([&](scoped_refptr<VideoFrame> frame) {
+        EXPECT_TRUE(frame->hdr_metadata().HasCLLI());
+        EXPECT_EQ(frame->hdr_metadata().GetCLLI().fMaxCLL, 100.0f);
+        EXPECT_EQ(frame->hdr_metadata().GetCLLI().fMaxFALL, 200.0f);
+      });
+
+  DecodeAndExpect(buffer_with_metadata, DecoderStatus::Codes::kOk);
 }
 
 }  // namespace media

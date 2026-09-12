@@ -8,8 +8,10 @@
 #include <memory>
 #include <vector>
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "chromeos/ash/services/secure_channel/ble_scanner.h"
 #include "chromeos/ash/services/secure_channel/bluetooth_helper.h"
 #include "device/bluetooth/bluetooth_adapter.h"
@@ -74,6 +76,8 @@ class BleScannerImpl : public BleScanner,
   void HandleScanRequestChange() override;
 
   // device::BluetoothAdapter::Observer:
+  void AdapterPoweredChanged(device::BluetoothAdapter* adapter,
+                             bool powered) override;
   void DeviceAdvertisementReceived(device::BluetoothAdapter* adapter,
                                    device::BluetoothDevice* device,
                                    int16_t rssi,
@@ -86,7 +90,7 @@ class BleScannerImpl : public BleScanner,
                     device::BluetoothDevice* device) override;
   void OnSessionStarted(
       device::BluetoothLowEnergyScanSession* scan_session,
-      absl::optional<device::BluetoothLowEnergyScanSession::ErrorCode>
+      std::optional<device::BluetoothLowEnergyScanSession::ErrorCode>
           error_code) override;
   void OnSessionInvalidated(
       device::BluetoothLowEnergyScanSession* scan_session) override;
@@ -110,11 +114,13 @@ class BleScannerImpl : public BleScanner,
       const BluetoothHelper::DeviceWithBackgroundBool& potential_result,
       device::BluetoothDevice* bluetooth_device);
 
+  void SetDiscoverySeissionFailed(mojom::DiscoveryErrorCode error_code);
+
   void SetServiceDataProviderForTesting(
       std::unique_ptr<ServiceDataProvider> service_data_provider);
 
-  BluetoothHelper* bluetooth_helper_;
-  BleSynchronizerBase* ble_synchronizer_;
+  raw_ptr<BluetoothHelper> bluetooth_helper_;
+  raw_ptr<BleSynchronizerBase> ble_synchronizer_;
   scoped_refptr<device::BluetoothAdapter> adapter_;
 
   std::unique_ptr<ServiceDataProvider> service_data_provider_;
@@ -127,6 +133,10 @@ class BleScannerImpl : public BleScanner,
       discovery_session_weak_ptr_factory_;
 
   std::unique_ptr<device::BluetoothLowEnergyScanSession> le_scan_session_;
+
+  base::ScopedObservation<device::BluetoothAdapter,
+                          device::BluetoothAdapter::Observer>
+      bluetooth_adapter_observation_{this};
 
   base::WeakPtrFactory<BleScannerImpl> weak_ptr_factory_{this};
 };

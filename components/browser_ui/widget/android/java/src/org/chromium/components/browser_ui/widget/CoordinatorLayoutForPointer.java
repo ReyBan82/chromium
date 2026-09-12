@@ -12,13 +12,19 @@ import android.view.View;
 
 import androidx.coordinatorlayout.widget.CoordinatorLayout;
 
+import org.chromium.base.ObserverList;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+
 /**
  * This class overrides {@link onResolvePointerIcon} method to correctly determine the pointer icon
- * from a mouse motion event. This is needed because the default android impl does not consider
- * view visibility. It also allows a delegate to observe touch events.
+ * from a mouse motion event. This is needed because the default android impl does not consider view
+ * visibility. It also allows a delegate to observe touch events.
  */
-public class CoordinatorLayoutForPointer extends CoordinatorLayout {
-    private Runnable mTouchEventCallback;
+@NullMarked
+public class CoordinatorLayoutForPointer extends CoordinatorLayout implements TouchEventProvider {
+    private @Nullable Runnable mTouchEventCallback;
+    private final ObserverList<TouchEventObserver> mTouchEventObservers = new ObserverList<>();
 
     public CoordinatorLayoutForPointer(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -37,9 +43,17 @@ public class CoordinatorLayoutForPointer extends CoordinatorLayout {
         final int y = (int) event.getY(pointerIndex);
         final int childrenCount = getChildCount();
         for (int i = childrenCount - 1; i >= 0; --i) {
-            if (getChildAt(i).getVisibility() != VISIBLE) continue;
-            if (isWithinBoundOfView(x, y, getChildAt(i))) {
-                return getChildAt(i).onResolvePointerIcon(event, pointerIndex);
+            View child = getChildAt(i);
+            if (child.getVisibility() != VISIBLE) continue;
+            if (isWithinBoundOfView(x, y, child)) {
+                // The child view will receive the event with coordinates relative to its own
+                // top-left corner similarly to how android implements internally.
+                event.offsetLocation(-child.getLeft(), -child.getTop());
+                PointerIcon icon = child.onResolvePointerIcon(event, pointerIndex);
+                event.offsetLocation(child.getLeft(), child.getTop());
+                if (icon != null) {
+                    return icon;
+                }
             }
         }
         return super.onResolvePointerIcon(event, pointerIndex);
@@ -47,6 +61,10 @@ public class CoordinatorLayoutForPointer extends CoordinatorLayout {
 
     @Override
     public boolean onInterceptTouchEvent(MotionEvent ev) {
+        for (TouchEventObserver o : mTouchEventObservers) {
+            if (o.onInterceptTouchEvent(ev)) return true;
+        }
+
         if (mTouchEventCallback != null) {
             mTouchEventCallback.run();
         }
@@ -57,8 +75,19 @@ public class CoordinatorLayoutForPointer extends CoordinatorLayout {
      * Set a callback that is run for every intercepted touch event on this view and its children.
      */
     public void setTouchEventCallback(Runnable touchEventCallback) {
-        assert mTouchEventCallback == null
-                || touchEventCallback == null : "Another touchEventCallback is already set.";
+        assert mTouchEventCallback == null || touchEventCallback == null
+                : "Another touchEventCallback is already set.";
         mTouchEventCallback = touchEventCallback;
     }
+
+    @Override
+    public void addTouchEventObserver(TouchEventObserver obs) {
+        mTouchEventObservers.addObserver(obs);
+    }
+
+    @Override
+    public void removeTouchEventObserver(TouchEventObserver obs) {
+        mTouchEventObservers.removeObserver(obs);
+    }
+
 }

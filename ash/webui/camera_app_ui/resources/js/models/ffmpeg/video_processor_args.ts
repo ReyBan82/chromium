@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {Resolution} from '../../type.js';
+import type {Resolution} from '../../type.js';
 
 export interface VideoProcessorArgs {
   decoderArgs: string[];
@@ -61,4 +61,34 @@ export function createGifArgs({width, height}: Resolution): VideoProcessorArgs {
   // clang-format on
 
   return {decoderArgs, encoderArgs, outputExtension: 'gif'};
+}
+
+/**
+ * Creates the command line arguments to ffmpeg for time-lapse recording.
+ */
+export function createTimeLapseArgs(
+    {width, height}: Resolution, fps: number,
+    videoRotation = 0): VideoProcessorArgs {
+  // clang-format off
+  const decoderArgs = [
+    // input format
+    '-f', 'h264',
+    // force input framerate
+    '-r', `${fps}`,
+    // specify video size
+    '-s', `${width}x${height}`,
+  ];
+
+  // clang-format formats one argument per line, which makes the list harder
+  // to read with comments.
+  // clang-format off
+  const encoderArgs = [
+    // rotate the video by metadata
+    '-metadata:s:v', `rotate=${videoRotation}`,
+    // disable audio and copy the video stream
+    '-an', '-c:v', 'copy',
+  ];
+  // clang-format on
+
+  return {decoderArgs, encoderArgs, outputExtension: 'mp4'};
 }

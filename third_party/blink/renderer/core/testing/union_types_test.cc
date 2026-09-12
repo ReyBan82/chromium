@@ -27,7 +27,6 @@ UnionTypesTest::doubleOrStringOrStringSequenceAttribute() const {
           attribute_string_sequence_);
   }
   NOTREACHED();
-  return nullptr;
 }
 
 void UnionTypesTest::setDoubleOrStringOrStringSequenceAttribute(
@@ -57,13 +56,12 @@ String UnionTypesTest::doubleOrStringArg(V8UnionDoubleOrString* arg) {
   switch (arg->GetContentType()) {
     case V8UnionDoubleOrString::ContentType::kDouble:
       return "double is passed: " +
-             String::NumberToStringECMAScript(arg->GetAsDouble());
+             String::NumberToStringEcmaScript(arg->GetAsDouble());
     case V8UnionDoubleOrString::ContentType::kString:
       return "string is passed: " + arg->GetAsString();
   }
 
   NOTREACHED();
-  return String();
 }
 
 String UnionTypesTest::doubleOrInternalEnumArg(
@@ -73,17 +71,16 @@ String UnionTypesTest::doubleOrInternalEnumArg(
   switch (arg->GetContentType()) {
     case V8UnionDoubleOrInternalEnum::ContentType::kDouble:
       return "double is passed: " +
-             String::NumberToStringECMAScript(arg->GetAsDouble());
+             String::NumberToStringEcmaScript(arg->GetAsDouble());
     case V8UnionDoubleOrInternalEnum::ContentType::kInternalEnum:
       return "InternalEnum is passed: " + arg->GetAsInternalEnum().AsString();
   }
 
   NOTREACHED();
-  return String();
 }
 
 String UnionTypesTest::doubleOrStringSequenceArg(
-    HeapVector<Member<V8UnionDoubleOrString>>& sequence) {
+    const HeapVector<Member<V8UnionDoubleOrString>>& sequence) {
   StringBuilder builder;
   for (auto& double_or_string : sequence) {
     DCHECK(double_or_string);
@@ -93,7 +90,7 @@ String UnionTypesTest::doubleOrStringSequenceArg(
       case V8UnionDoubleOrString::ContentType::kDouble:
         builder.Append("double: ");
         builder.Append(
-            String::NumberToStringECMAScript(double_or_string->GetAsDouble()));
+            String::NumberToStringEcmaScript(double_or_string->GetAsDouble()));
         break;
       case V8UnionDoubleOrString::ContentType::kString:
         builder.Append("string: ");
@@ -123,7 +120,6 @@ String UnionTypesTest::nodeListOrElementOrNullArg(
   }
 
   NOTREACHED();
-  return String();
 }
 
 String UnionTypesTest::doubleOrStringOrStringSequenceArg(
@@ -133,7 +129,7 @@ String UnionTypesTest::doubleOrStringOrStringSequenceArg(
 
   switch (arg->GetContentType()) {
     case V8UnionDoubleOrStringOrStringSequence::ContentType::kDouble:
-      return "double: " + String::NumberToStringECMAScript(arg->GetAsDouble());
+      return "double: " + String::NumberToStringEcmaScript(arg->GetAsDouble());
     case V8UnionDoubleOrStringOrStringSequence::ContentType::kString:
       return "string: " + arg->GetAsString();
     case V8UnionDoubleOrStringOrStringSequence::ContentType::kStringSequence: {
@@ -154,7 +150,6 @@ String UnionTypesTest::doubleOrStringOrStringSequenceArg(
   }
 
   NOTREACHED();
-  return String();
 }
 
 }  // namespace blink

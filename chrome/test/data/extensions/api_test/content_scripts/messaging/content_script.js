@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var TEST_MESSAGE = 'test_message';
+const TEST_MESSAGE = 'test_message';
 
 function assertValidExternalMessageSender(sender) {
   chrome.test.assertEq(chrome.runtime.id, sender.id);
   chrome.test.assertEq(undefined, sender.tlsChannelId);
-  // TODO(crbug.com/931962): Enable after the API implementation gets fixed:
+  // TODO(crbug.com/41441298): Enable after the API implementation gets fixed:
   // chrome.test.assertEq(undefined, sender.tab);
   // chrome.test.assertEq(undefined, sender.frameId);
   // chrome.test.assertEq(undefined, sender.url);
@@ -24,9 +24,7 @@ chrome.test.runTests([
   // have custom externally_connectable manifest property.
   function testMessageToExtensionAllowingByDefault() {
     chrome.runtime.sendMessage(
-        'badpbjaedophlnacllhobhnbcgomhbcd',
-        TEST_MESSAGE,
-        function(response) {
+        'badpbjaedophlnacllhobhnbcgomhbcd', TEST_MESSAGE, function(response) {
           chrome.test.assertEq(TEST_MESSAGE, response.receivedMessage);
           assertValidExternalMessageSender(response.receivedSender);
           chrome.test.succeed();
@@ -36,9 +34,7 @@ chrome.test.runTests([
   // our extension ID in its externally_connectable manifest property.
   function testMessageToAllowingExtension() {
     chrome.runtime.sendMessage(
-        'pmnfaklgffejbafjijfofbcianldmhci',
-        TEST_MESSAGE,
-        function(response) {
+        'pmnfaklgffejbafjijfofbcianldmhci', TEST_MESSAGE, function(response) {
           chrome.test.assertEq(TEST_MESSAGE, response.receivedMessage);
           assertValidExternalMessageSender(response.receivedSender);
           chrome.test.succeed();
@@ -49,11 +45,10 @@ chrome.test.runTests([
   // ID there.
   function testMessageToDenyingExtension() {
     chrome.runtime.sendMessage(
-        'gcdagggcealpldjgchchljhjlhikcmco',
-        TEST_MESSAGE,
-        function(response) {
-          chrome.test.assertLastError('Could not establish connection. ' +
-                                      'Receiving end does not exist.');
+        'gcdagggcealpldjgchchljhjlhikcmco', TEST_MESSAGE, function(response) {
+          chrome.test.assertLastError(
+              'Could not establish connection. ' +
+              'Receiving end does not exist.');
           chrome.test.succeed();
         });
   },

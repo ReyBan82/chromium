@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "absl/numeric/int128.h"
 #include "absl/random/distributions.h"
 #include "absl/random/random.h"
 
@@ -49,7 +50,7 @@ void TestUniform(URBG* gen) {
   // (a, b) semantics, inferred types.
   absl::Uniform(absl::IntervalOpenOpen, *gen, 0, 1.0);  // Promoted to double
 
-  // Explict overriding of types.
+  // Explicit overriding of types.
   absl::Uniform<int>(*gen, 0, 100);
   absl::Uniform<int8_t>(*gen, 0, 100);
   absl::Uniform<int16_t>(*gen, 0, 100);

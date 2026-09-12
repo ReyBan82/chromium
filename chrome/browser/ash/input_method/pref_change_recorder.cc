@@ -7,12 +7,12 @@
 #include <string>
 #include <utility>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/strcat.h"
 #include "base/values.h"
 #include "chrome/browser/ash/input_method/autocorrect_prefs.h"
-#include "chrome/common/pref_names.h"
 
 namespace ash::input_method {
 namespace {
@@ -35,8 +35,8 @@ struct AutocorrectPrefChange {
 AutocorrectPrefs ExtractAutocorrectPrefs(PrefService* pref_service) {
   AutocorrectPrefs autocorrect_prefs;
 
-  for (const auto [engine_id, _] :
-       pref_service->GetDict(prefs::kLanguageInputMethodSpecificSettings)) {
+  for (const auto [engine_id, _] : pref_service->GetDict(
+           ash::prefs::kLanguageInputMethodSpecificSettings)) {
     autocorrect_prefs.insert(
         {base::StrCat({engine_id, ".VirtualKeyboard"}),
          AutocorrectPrefDetails{
@@ -61,7 +61,7 @@ AutocorrectPrefs ExtractAutocorrectPrefs(PrefService* pref_service) {
 // preference where its respective value differs between the two sets. This
 // function will be called once per setting change, so we can assume there
 // would be at most one preference with different values in the two sets.
-absl::optional<AutocorrectPrefChange> FindPrefChange(
+std::optional<AutocorrectPrefChange> FindPrefChange(
     const AutocorrectPrefs& previous,
     const AutocorrectPrefs& current) {
   for (const auto& [key, details] : current) {
@@ -86,7 +86,7 @@ absl::optional<AutocorrectPrefChange> FindPrefChange(
     }
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 AutocorrectPrefStateTransition MapToAutocorrectPrefStateTransition(
@@ -176,8 +176,9 @@ void PrefChangeRecorder::OnInputMethodOptionsChanged(
       ExtractAutocorrectPrefs(pref_service_);
 
   auto pref_change = FindPrefChange(autocorrect_prefs_, new_autocorrect_prefs);
-  if (pref_change)
+  if (pref_change) {
     RecordAutocorrectPrefChangeMetric(*pref_change);
+  }
 
   autocorrect_prefs_ = std::move(new_autocorrect_prefs);
 }

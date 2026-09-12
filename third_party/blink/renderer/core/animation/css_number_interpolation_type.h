@@ -12,9 +12,10 @@ namespace blink {
 
 class CORE_EXPORT CSSNumberInterpolationType : public CSSInterpolationType {
  public:
-  CSSNumberInterpolationType(PropertyHandle property,
-                             const PropertyRegistration* registration = nullptr,
-                             bool round_to_integer = false)
+  explicit CSSNumberInterpolationType(
+      PropertyHandle property,
+      const PropertyRegistration* registration = nullptr,
+      bool round_to_integer = false)
       : CSSInterpolationType(property, registration),
         round_to_integer_(round_to_integer) {
     // This integer flag only applies to registered custom properties.
@@ -23,6 +24,8 @@ class CORE_EXPORT CSSNumberInterpolationType : public CSSInterpolationType {
 
   InterpolationValue MaybeConvertStandardPropertyUnderlyingValue(
       const ComputedStyle&) const final;
+  InterpolationValue MaybeConvertCustomPropertyUnderlyingValue(
+      const CSSValue&) const final;
   void ApplyStandardPropertyValue(const InterpolableValue&,
                                   const NonInterpolableValue*,
                                   StyleResolverState&) const final;
@@ -30,6 +33,11 @@ class CORE_EXPORT CSSNumberInterpolationType : public CSSInterpolationType {
   const CSSValue* CreateCSSValue(const InterpolableValue&,
                                  const NonInterpolableValue*,
                                  const StyleResolverState&) const final;
+
+ protected:
+  InterpolationValue MaybeConvertValue(const CSSValue&,
+                                       const StyleResolverState&,
+                                       ConversionCheckers&) const override;
 
  private:
   InterpolationValue CreateNumberValue(double number) const;
@@ -39,9 +47,6 @@ class CORE_EXPORT CSSNumberInterpolationType : public CSSInterpolationType {
                                          ConversionCheckers&) const final;
   InterpolationValue MaybeConvertInherit(const StyleResolverState&,
                                          ConversionCheckers&) const final;
-  InterpolationValue MaybeConvertValue(const CSSValue&,
-                                       const StyleResolverState*,
-                                       ConversionCheckers&) const final;
 
   CSSPrimitiveValue::UnitType UnitType() const {
     return round_to_integer_ ? CSSPrimitiveValue::UnitType::kInteger

@@ -14,21 +14,27 @@
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/trace_event/trace_event.h"
-#include "chrome/browser/browsing_data/chrome_browsing_data_remover_constants.h"
+#include "chrome/browser/downgrade/downgrade_manager_delegate.h"
 #include "chrome/browser/downgrade/downgrade_utils.h"
-#include "chrome/browser/downgrade/snapshot_file_collector.h"
 #include "chrome/browser/downgrade/user_data_downgrade.h"
 #include "chrome/common/chrome_constants.h"
 
 namespace downgrade {
 
+SnapshotItemDetails::SnapshotItemDetails(base::FilePath path,
+                                         ItemType item_type,
+                                         uint64_t data_types)
+    : path(std::move(path)),
+      is_directory(item_type == ItemType::kDirectory),
+      data_types(data_types) {}
+
 namespace {
 
-constexpr base::FilePath::StringPieceType kSQLiteJournalSuffix(
+constexpr base::FilePath::StringViewType kSQLiteJournalSuffix(
     FILE_PATH_LITERAL("-journal"));
-constexpr base::FilePath::StringPieceType kSQLiteWalSuffix(
+constexpr base::FilePath::StringViewType kSQLiteWalSuffix(
     FILE_PATH_LITERAL("-wal"));
-constexpr base::FilePath::StringPieceType kSQLiteShmSuffix(
+constexpr base::FilePath::StringViewType kSQLiteShmSuffix(
     FILE_PATH_LITERAL("-shm"));
 
 // These values are persisted to logs. Entries should not be renumbered and
@@ -43,28 +49,24 @@ enum class SnapshotOperationResult {
 
 // Copies the item at |user_data_dir|/|relative_path| to
 // |snapshot_dir|/|relative_path| if the item exists. This also copies all files
-// related to items that are SQLite databases. Returns |true| if the item was
-// found at the source and successfully copied. Returns |false| if the item was
-// found at the source but not successfully copied. Returns no value if the file
-// was not at the source.
-absl::optional<bool> CopyItemToSnapshotDirectory(
-    const base::FilePath& relative_path,
-    const base::FilePath& user_data_dir,
-    const base::FilePath& snapshot_dir,
-    bool is_directory) {
+// related to items that are SQLite databases.
+void CopyItemToSnapshotDirectory(const base::FilePath& relative_path,
+                                 const base::FilePath& user_data_dir,
+                                 const base::FilePath& snapshot_dir,
+                                 bool is_directory) {
   const auto source = user_data_dir.Append(relative_path);
   const auto destination = snapshot_dir.Append(relative_path);
 
   // If nothing exists to be moved, do not consider it a success or a failure.
   if (!base::PathExists(source))
-    return absl::nullopt;
+    return;
 
-  bool copy_success = is_directory ? base::CopyDirectory(source, destination,
-                                                         /*recursive=*/true)
-                                   : base::CopyFile(source, destination);
+  if (is_directory) {
+    base::CopyDirectory(source, destination, /*recursive=*/true);
+    return;
+  }
 
-  if (is_directory)
-    return copy_success;
+  base::CopyFile(source, destination);
 
   // Copy SQLite journal, WAL and SHM files associated with the files that are
   // snapshotted if they exist.
@@ -77,10 +79,8 @@ absl::optional<bool> CopyItemToSnapshotDirectory(
 
     const auto destination_journal = base::FilePath(
         destination.value() + base::FilePath::StringType(suffix));
-    copy_success &= base::CopyFile(sqlite_file_path, destination_journal);
+    base::CopyFile(sqlite_file_path, destination_journal);
   }
-
-  return copy_success;
 }
 
 // Returns true if |base_name| matches a user profile directory's format. This
@@ -95,7 +95,7 @@ bool IsProfileDir(const base::FilePath& base_name) {
   int number;
   return base::StartsWith(base_name.value(), prefix.value(),
                           base::CompareCase::SENSITIVE) &&
-         base::StringToInt(base::FilePath::StringPieceType(base_name.value())
+         base::StringToInt(base::FilePath::StringViewType(base_name.value())
                                .substr(prefix.value().length()),
                            &number);
 }
@@ -131,8 +131,9 @@ void MoveFolderForLaterDeletion(const base::FilePath& source,
 
 }  // namespace
 
-SnapshotManager::SnapshotManager(const base::FilePath& user_data_dir)
-    : user_data_dir_(user_data_dir) {}
+SnapshotManager::SnapshotManager(const base::FilePath& user_data_dir,
+                                 const DowngradeManagerDelegate* delegate)
+    : user_data_dir_(user_data_dir), delegate_(delegate) {}
 
 SnapshotManager::~SnapshotManager() = default;
 
@@ -153,25 +154,18 @@ void SnapshotManager::TakeSnapshot(const base::Version& version) {
         snapshot_dir, move_target_dir.AppendASCII(version.GetString()));
   }
 
-  auto record_item_failure = [](absl::optional<bool> success,
-                                SnapshotItemId id) {
-    if (!success.value_or(true))
-      base::UmaHistogramEnumeration("Downgrade.TakeSnapshot.ItemFailure", id);
-  };
-
   // Abort the snapshot if the snapshot directory could not be created.
   if (!base::CreateDirectory(snapshot_dir))
     return;
 
   // Copy items to be preserved at the top-level of User Data.
-  for (const auto& file : GetUserSnapshotItemDetails()) {
-    record_item_failure(
-        CopyItemToSnapshotDirectory(base::FilePath(file.path), user_data_dir_,
-                                    snapshot_dir, file.is_directory),
-        file.id);
+  for (const auto& file : delegate_->GetUserDataSnapshotItems()) {
+    CopyItemToSnapshotDirectory(base::FilePath(file.path), user_data_dir_,
+                                snapshot_dir, file.is_directory);
   }
 
-  const auto profile_snapshot_item_details = GetProfileSnapshotItemDetails();
+  const auto profile_snapshot_item_details =
+      delegate_->GetProfileSnapshotItems();
 
   // Copy items to be preserved in each Profile directory.
   for (const auto& profile_dir : GetUserProfileDirectories(user_data_dir_)) {
@@ -180,21 +174,17 @@ void SnapshotManager::TakeSnapshot(const base::Version& version) {
     if (!base::CreateDirectory(snapshot_dir.Append(profile_dir)))
       continue;
     for (const auto& file : profile_snapshot_item_details) {
-      record_item_failure(CopyItemToSnapshotDirectory(
-                              profile_dir.Append(file.path), user_data_dir_,
-                              snapshot_dir, file.is_directory),
-                          file.id);
+      CopyItemToSnapshotDirectory(profile_dir.Append(file.path), user_data_dir_,
+                                  snapshot_dir, file.is_directory);
     }
   }
 
   // Copy the "Last Version" file to the snapshot directory last since it is the
   // file that determines, by its presence in the snapshot directory, if the
   // snapshot is complete.
-  record_item_failure(
-      CopyItemToSnapshotDirectory(base::FilePath(kDowngradeLastVersionFile),
-                                  user_data_dir_, snapshot_dir,
-                                  /*is_directory=*/false),
-      SnapshotItemId::kLastVersion);
+  CopyItemToSnapshotDirectory(base::FilePath(kDowngradeLastVersionFile),
+                              user_data_dir_, snapshot_dir,
+                              /*is_directory=*/false);
 }
 
 void SnapshotManager::RestoreSnapshot(const base::Version& version) {
@@ -271,7 +261,7 @@ void SnapshotManager::RestoreSnapshot(const base::Version& version) {
 
 void SnapshotManager::PurgeInvalidAndOldSnapshots(
     int max_number_of_snapshots,
-    absl::optional<uint32_t> milestone) const {
+    std::optional<uint32_t> milestone) const {
   const auto snapshot_dir = user_data_dir_.Append(kSnapshotsDir);
 
   // Move the invalid snapshots within from Snapshots/NN to Snapshots.DELETE/NN.
@@ -324,23 +314,12 @@ void SnapshotManager::PurgeInvalidAndOldSnapshots(
 void SnapshotManager::DeleteSnapshotDataForProfile(
     base::Time delete_begin,
     const base::FilePath& profile_base_name,
-    uint64_t remove_mask) {
-  using chrome_browsing_data_remover::ALL_DATA_TYPES;
-  using chrome_browsing_data_remover::WIPE_PROFILE;
+    std::optional<std::vector<base::FilePath>> files_to_delete) {
+  bool delete_all = !files_to_delete.has_value();
 
-  bool delete_all = (((remove_mask & WIPE_PROFILE) == WIPE_PROFILE) ||
-                     ((remove_mask & ALL_DATA_TYPES) == ALL_DATA_TYPES)) &&
-                    delete_begin.is_null();
-  std::vector<base::FilePath> files_to_delete;
-  if (!delete_all) {
-    for (const auto& item : CollectProfileItems()) {
-      if (item.data_types & remove_mask)
-        files_to_delete.push_back(item.path);
-    }
-  }
-
-  if (!delete_all && files_to_delete.empty())
+  if (!delete_all && files_to_delete->empty()) {
     return;
+  }
 
   const auto snapshot_dir = user_data_dir_.Append(kSnapshotsDir);
   auto available_snapshots = GetAvailableSnapshots(snapshot_dir);
@@ -359,7 +338,7 @@ void SnapshotManager::DeleteSnapshotDataForProfile(
       base::DeletePathRecursively(profile_absolute_path);
     } else if (delete_begin <= file_info.creation_time &&
                base::PathExists(profile_absolute_path)) {
-      for (const auto& filename : files_to_delete) {
+      for (const auto& filename : files_to_delete.value()) {
         base::DeletePathRecursively(profile_absolute_path.Append(filename));
       }
       // Non recursive deletion will fail if the directory is not empty. In this
@@ -367,16 +346,6 @@ void SnapshotManager::DeleteSnapshotDataForProfile(
       base::DeleteFile(profile_absolute_path);
     }
   }
-}
-
-std::vector<SnapshotItemDetails>
-SnapshotManager::GetProfileSnapshotItemDetails() const {
-  return CollectProfileItems();
-}
-
-std::vector<SnapshotItemDetails> SnapshotManager::GetUserSnapshotItemDetails()
-    const {
-  return CollectUserDataItems();
 }
 
 }  // namespace downgrade

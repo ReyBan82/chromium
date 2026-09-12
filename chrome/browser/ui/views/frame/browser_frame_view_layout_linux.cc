@@ -5,9 +5,10 @@
 #include "chrome/browser/ui/views/frame/browser_frame_view_layout_linux.h"
 
 #include "base/i18n/rtl.h"
-#include "chrome/browser/ui/layout_constants.h"
 #include "chrome/browser/ui/views/frame/browser_frame_view_linux.h"
-#include "chrome/browser/ui/views/frame/browser_frame_view_paint_utils_linux.h"
+#include "chrome/browser/ui/views/frame/opaque_browser_frame_view_layout.h"
+#include "ui/gfx/geometry/insets.h"
+#include "ui/views/window/frame_view_utils_linux.h"
 
 namespace {
 
@@ -25,8 +26,9 @@ constexpr unsigned int kExtraTopBorder = 3;
 BrowserFrameViewLayoutLinux::BrowserFrameViewLayoutLinux() = default;
 BrowserFrameViewLayoutLinux::~BrowserFrameViewLayoutLinux() = default;
 
-gfx::Insets BrowserFrameViewLayoutLinux::MirroredFrameBorderInsets() const {
-  auto border = FrameBorderInsets(false);
+gfx::Insets BrowserFrameViewLayoutLinux::RestoredMirroredFrameBorderInsets()
+    const {
+  auto border = RestoredFrameBorderInsets();
   return base::i18n::IsRTL() ? gfx::Insets::TLBR(border.top(), border.right(),
                                                  border.bottom(), border.left())
                              : border;
@@ -35,7 +37,7 @@ gfx::Insets BrowserFrameViewLayoutLinux::MirroredFrameBorderInsets() const {
 gfx::Insets BrowserFrameViewLayoutLinux::GetInputInsets() const {
   bool showing_shadow = delegate_->ShouldDrawRestoredFrameShadow() &&
                         !delegate_->IsFrameCondensed();
-  return gfx::Insets(showing_shadow ? -kResizeBorder : 0);
+  return gfx::Insets(showing_shadow ? kResizeBorder : 0);
 }
 
 int BrowserFrameViewLayoutLinux::CaptionButtonY(views::FrameButton button_id,
@@ -44,10 +46,23 @@ int BrowserFrameViewLayoutLinux::CaptionButtonY(views::FrameButton button_id,
 }
 
 gfx::Insets BrowserFrameViewLayoutLinux::RestoredFrameBorderInsets() const {
-  return GetRestoredFrameBorderInsetsLinux(
+  // Unframed mode only has a minimal frame so it is resizable from the borders.
+  if (delegate_->GetUnframedModeEnabled()) {
+    return gfx::Insets(
+        OpaqueBrowserFrameViewLayout::RestoredFrameBorderInsets());
+  }
+
+#if BUILDFLAG(IS_LINUX)
+  const bool tiled = delegate_->IsTiled();
+#else
+  const bool tiled = false;
+#endif
+  auto shadow_values =
+      tiled ? gfx::ShadowValues() : view_->GetShadowValues(true);
+  return views::GetRestoredFrameBorderInsetsLinux(
       delegate_->ShouldDrawRestoredFrameShadow(),
-      OpaqueBrowserFrameViewLayout::RestoredFrameBorderInsets(),
-      delegate_->GetTiledEdges(), view_->GetShadowValues(), kResizeBorder);
+      OpaqueBrowserFrameViewLayout::RestoredFrameBorderInsets(), shadow_values,
+      gfx::Insets(kResizeBorder));
 }
 
 gfx::Insets BrowserFrameViewLayoutLinux::RestoredFrameEdgeInsets() const {
@@ -57,5 +72,5 @@ gfx::Insets BrowserFrameViewLayoutLinux::RestoredFrameEdgeInsets() const {
 }
 
 int BrowserFrameViewLayoutLinux::NonClientExtraTopThickness() const {
-  return kExtraTopBorder;
+  return delegate_->IsTabStripVisible() ? 0 : kExtraTopBorder;
 }

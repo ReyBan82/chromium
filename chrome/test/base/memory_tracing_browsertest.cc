@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/test/base/tracing.h"
-
 #include "base/allocator/buildflags.h"
 #include "base/command_line.h"
 #include "base/location.h"
@@ -13,9 +11,9 @@
 #include "base/trace_event/trace_config_memory_test_util.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chrome/test/base/tracing.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_switches.h"
@@ -23,6 +21,7 @@
 #include "content/public/test/browser_test_utils.h"
 #include "services/resource_coordinator/public/cpp/memory_instrumentation/memory_instrumentation.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/window_open_disposition.h"
 
 namespace {
 
@@ -32,12 +31,13 @@ using base::trace_event::MemoryDumpType;
 using tracing::BeginTracingWithTraceConfig;
 using tracing::EndTracing;
 
-void RequestGlobalDumpCallback(base::OnceClosure quit_closure,
-                               bool success,
-                               uint64_t) {
+void RequestGlobalDumpCallback(
+    base::OnceClosure quit_closure,
+    memory_instrumentation::mojom::RequestOutcome outcome,
+    uint64_t) {
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE, std::move(quit_closure));
-  // TODO(ssid): Check for dump success once crbug.com/709524 is fixed.
+  // TODO(ssid): Check for dump success once crbug.com/40514597 is fixed.
 }
 
 void OnStartTracingDoneCallback(
@@ -45,8 +45,8 @@ void OnStartTracingDoneCallback(
     base::OnceClosure quit_closure) {
   memory_instrumentation::MemoryInstrumentation::GetInstance()
       ->RequestGlobalDumpAndAppendToTrace(
-          MemoryDumpType::EXPLICITLY_TRIGGERED, explicit_dump_type,
-          MemoryDumpDeterminism::NONE,
+          MemoryDumpType::kExplicitlyTriggered, explicit_dump_type,
+          MemoryDumpDeterminism::kNone,
           BindOnce(&RequestGlobalDumpCallback, std::move(quit_closure)));
 }
 
@@ -64,7 +64,7 @@ class MemoryTracingBrowserTest : public InProcessBrowserTest {
     content::WebContents* wc =
         browser()->tab_strip_model()->GetActiveWebContents();
     ASSERT_TRUE(wc);
-    ASSERT_TRUE(content::ExecuteScript(wc, ";"));
+    ASSERT_TRUE(content::ExecJs(wc, ";"));
   }
 
   void PerformDumpMemoryTestActions(
@@ -114,7 +114,7 @@ class MemoryTracingBrowserTest : public InProcessBrowserTest {
   bool should_test_memory_dump_success_;
 };
 
-// TODO(crbug.com/806988): Disabled due to excessive output on lsan bots and
+// TODO(crbug.com/41367720): Disabled due to excessive output on lsan bots and
 // timeouts on debug bots.
 #if defined(LEAK_SANITIZER) || defined(ADDRESS_SANITIZER) || !defined(NDEBUG)
 #define MAYBE_TestMemoryInfra DISABLED_TestMemoryInfra
@@ -124,17 +124,17 @@ class MemoryTracingBrowserTest : public InProcessBrowserTest {
 IN_PROC_BROWSER_TEST_F(MemoryTracingBrowserTest, MAYBE_TestMemoryInfra) {
   // TODO(ssid): Test for dump success once the on start tracing done callback
   // is fixed to be called after enable tracing is acked by all processes,
-  // crbug.com/709524. The test still tests if dumping does not crash.
+  // crbug.com/40514597. The test still tests if dumping does not crash.
   should_test_memory_dump_success_ = false;
   std::string json_events;
   PerformDumpMemoryTestActions(
       base::trace_event::TraceConfig(
           base::trace_event::TraceConfigMemoryTestUtil::
               GetTraceConfig_EmptyTriggers()),
-      base::trace_event::MemoryDumpLevelOfDetail::DETAILED, &json_events);
+      base::trace_event::MemoryDumpLevelOfDetail::kDetailed, &json_events);
 }
 
-// crbug.com/808152: This test is flakily failing on LSAN. This test also
+// crbug.com/40560992: This test is flakily failing on LSAN. This test also
 // flakily fails with timeout on Linux debug.
 #if defined(LEAK_SANITIZER) || defined(ADDRESS_SANITIZER) || !defined(NDEBUG)
 #define MAYBE_TestBackgroundMemoryInfra DISABLED_TestBackgroundMemoryInfra
@@ -145,14 +145,14 @@ IN_PROC_BROWSER_TEST_F(MemoryTracingBrowserTest,
                        MAYBE_TestBackgroundMemoryInfra) {
   // TODO(ssid): Test for dump success once the on start tracing done callback
   // is fixed to be called after enable tracing is acked by all processes,
-  // crbug.com/709524. The test still tests if dumping does not crash.
+  // crbug.com/40514597. The test still tests if dumping does not crash.
   should_test_memory_dump_success_ = false;
   std::string json_events;
   PerformDumpMemoryTestActions(
       base::trace_event::TraceConfig(
           base::trace_event::TraceConfigMemoryTestUtil::
               GetTraceConfig_BackgroundTrigger(200)),
-      base::trace_event::MemoryDumpLevelOfDetail::BACKGROUND, &json_events);
+      base::trace_event::MemoryDumpLevelOfDetail::kBackground, &json_events);
 }
 
 }  // namespace

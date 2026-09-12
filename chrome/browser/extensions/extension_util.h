@@ -9,7 +9,16 @@
 #include <string>
 
 #include "base/values.h"
+#include "build/build_config.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
+#include "extensions/common/extension_id.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+namespace base {
+class CommandLine;
+}
 
 namespace content {
 class BrowserContext;
@@ -19,11 +28,12 @@ namespace extensions {
 class PermissionSet;
 }
 
-namespace gfx {
-class ImageSkia;
+namespace user_prefs {
+class PrefRegistrySyncable;
 }
 
 class Profile;
+class GURL;
 
 namespace extensions {
 
@@ -31,64 +41,97 @@ class Extension;
 
 namespace util {
 
-// Returns true if the extension associated with |extension_id| has isolated
+// Returns true if the extension associated with `extension_id` has isolated
 // storage. This can be either because it is an app that requested this in its
 // manifest, or because it is a policy-installed app or extension running on
 // the Chrome OS sign-in profile.
 bool HasIsolatedStorage(const std::string& extension_id,
                         content::BrowserContext* context);
+bool HasIsolatedStorage(const Extension& extension,
+                        content::BrowserContext* context);
 
-// Returns true if the extension associated with `extension_id` is a Chrome App.
-bool IsChromeApp(const std::string& extension_id,
-                 content::BrowserContext* context);
+// Returns whether the extension with `extension_id` is force installed by
+// policy, and fills `reason` (if non-null) with expository text.
+bool IsExtensionForceInstalled(const std::string& extension_id,
+                               content::BrowserContext* context,
+                               std::u16string* reason = nullptr);
 
-// Sets whether |extension_id| can run in an incognito window. Reloads the
+// Sets whether `extension_id` can run in an incognito window. Reloads the
 // extension if it's enabled since this permission is applied at loading time
 // only. Note that an ExtensionService must exist.
 void SetIsIncognitoEnabled(const std::string& extension_id,
                            content::BrowserContext* context,
                            bool enabled);
 
-// Returns true if this extension can inject scripts into pages with file URLs.
-bool AllowFileAccess(const std::string& extension_id,
-                     content::BrowserContext* context);
-
-// Sets whether |extension_id| can inject scripts into pages with file URLs.
+// Sets whether `extension_id` can inject scripts into pages with file URLs.
 // Reloads the extension if it's enabled since this permission is applied at
 // loading time only. Note than an ExtensionService must exist.
 void SetAllowFileAccess(const std::string& extension_id,
                         content::BrowserContext* context,
                         bool allow);
 
-// Returns true if |extension| should be synced.
-bool ShouldSync(const Extension* extension, content::BrowserContext* context);
-
-// Returns true if |extension_id| is idle and it is safe to perform actions such
-// as updating.
-bool IsExtensionIdle(const std::string& extension_id,
-                     content::BrowserContext* context);
-
 // Sets the name, id, and icon resource path of the given extension into the
 // returned dictionary.
-base::Value::Dict GetExtensionInfo(const Extension* extension);
-
-// Returns the default extension/app icon (for extensions or apps that don't
-// have one).
-const gfx::ImageSkia& GetDefaultExtensionIcon();
-const gfx::ImageSkia& GetDefaultAppIcon();
+base::DictValue GetExtensionInfo(const Extension* extension);
 
 // Returns a PermissionSet configured with the permissions that should be
-// displayed in an extension installation prompt for the specified |extension|.
+// displayed in an extension installation prompt for the specified `extension`.
 std::unique_ptr<const PermissionSet> GetInstallPromptPermissionSetForExtension(
     const Extension* extension,
-    Profile* profile,
-    bool include_optional_permissions);
+    Profile* profile);
 
 // Returns all profiles affected by permissions of an extension running in
 // "spanning" (rather than "split) mode.
 std::vector<content::BrowserContext*> GetAllRelatedProfiles(
     Profile* profile,
     const Extension& extension);
+
+// Sets whether the given `profile` is in developer mode and notifies
+// relevant subsystems.
+void SetDeveloperModeForProfile(Profile* profile, bool in_developer_mode);
+
+// Registers miscellaneous chrome-level extension-related prefs.
+void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
+
+// Returns true if extensions have been disabled (e.g. via a command-line flag
+// or preference).
+bool AreExtensionsDisabled(const base::CommandLine& command_line,
+                           content::BrowserContext* context);
+
+// Returns the URL for the chrome://extensions page and highlights the
+// extension with `extension_id`. If `extension_id` is empty, just shows the
+// main extensions page.
+GURL GetExtensionsPageUrl(const ExtensionId& extension_id);
+
+// Represents the type of settings override configured by the extension.
+// DSE = Default Search Engine.
+// NTP = New Tab Page.
+enum class DseNtpOverrideType {
+  kNone = 0,
+  kDse = 1,
+  kNtp = 2,
+  kBoth = 3,
+  kMaxValue = kBoth,
+};
+
+constexpr bool IsValidDseNtpOverrideType(int value) {
+  return value >= static_cast<int>(DseNtpOverrideType::kNone) &&
+         value <= static_cast<int>(DseNtpOverrideType::kMaxValue);
+}
+
+DseNtpOverrideType GetDseNtpOverrideType(const Extension& extension);
+
+// Sources from which the CWS write review dialog can be launched.
+enum class CWSReviewSource {
+  kExtensionsMenu,
+  kExtensionsPage,
+  kContextMenu,
+};
+
+// Returns the URL to the Chrome Web Store's write review dialog for a specific
+// `extension_id` and `source`.
+GURL GetCWSWritingReviewUrl(const ExtensionId& extension_id,
+                            CWSReviewSource source);
 
 }  // namespace util
 }  // namespace extensions

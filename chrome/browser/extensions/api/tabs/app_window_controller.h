@@ -10,6 +10,9 @@
 
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/extensions/window_controller.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_PLATFORM_APPS));
 
 class Profile;
 
@@ -33,11 +36,24 @@ class AppWindowController : public WindowController {
   // extensions::WindowController:
   int GetWindowId() const override;
   std::string GetWindowTypeText() const override;
-  bool CanClose(Reason* reason) const override;
-  Browser* GetBrowser() const override;
+  void SetFullscreenMode(bool is_fullscreen,
+                         const GURL& extension_url) const override;
+  BrowserWindowInterface* GetBrowser() const override;
+  content::WebContents* GetActiveTab() const override;
+  int GetTabCount() const override;
+  content::WebContents* GetWebContentsAt(int i) const override;
   bool IsVisibleToTabsAPIForExtension(
       const Extension* extension,
       bool allow_dev_tools_windows) const override;
+  base::DictValue CreateWindowValueForExtension(
+      const Extension* extension,
+      PopulateTabBehavior populate_tab_behavior,
+      mojom::ContextType context) const override;
+  base::ListValue CreateTabList(const Extension* extension,
+                                mojom::ContextType context) const override;
+  bool OpenOptionsPage(const Extension* extension,
+                       const GURL& url,
+                       bool open_in_tab) override;
 
  private:
   raw_ptr<AppWindow> app_window_;  // Owns us.

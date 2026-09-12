@@ -4,6 +4,8 @@
 
 #include "chrome/renderer/extensions/api/accessibility_private_hooks_delegate.h"
 
+#include "base/i18n/language_tag.h"
+#include "base/i18n/tag_converters.h"
 #include "base/i18n/unicodestring.h"
 #include "base/strings/utf_string_conversions.h"
 #include "extensions/common/extension.h"
@@ -32,7 +34,7 @@ RequestResult AccessibilityPrivateHooksDelegate::HandleRequest(
     const std::string& method_name,
     const APISignature* signature,
     v8::Local<v8::Context> context,
-    std::vector<v8::Local<v8::Value>>* arguments,
+    v8::LocalVector<v8::Value>* arguments,
     const APITypeReferenceMap& refs) {
   // Error checks.
   // Ensure we would like to call the GetDisplayNameForLocale function.
@@ -52,7 +54,7 @@ RequestResult AccessibilityPrivateHooksDelegate::HandleRequest(
 
 RequestResult AccessibilityPrivateHooksDelegate::HandleGetDisplayNameForLocale(
     ScriptContext* script_context,
-    const std::vector<v8::Local<v8::Value>>& parsed_arguments) {
+    const v8::LocalVector<v8::Value>& parsed_arguments) {
   DCHECK(script_context->extension());
   DCHECK_EQ(2u, parsed_arguments.size());
   DCHECK(parsed_arguments[0]->IsString());
@@ -65,8 +67,12 @@ RequestResult AccessibilityPrivateHooksDelegate::HandleGetDisplayNameForLocale(
 
   bool found_valid_result = false;
   std::string locale_result;
-  if (l10n_util::IsValidLocaleSyntax(locale) &&
-      l10n_util::IsValidLocaleSyntax(display_locale)) {
+  if (base::i18n::LanguageTagConverter::GetInstance()
+          .FromString(locale)
+          .has_value() &&
+      base::i18n::LanguageTagConverter::GetInstance()
+          .FromString(display_locale)
+          .has_value()) {
     locale_result = base::UTF16ToUTF8(l10n_util::GetDisplayNameForLocale(
         locale, display_locale, true /* is_ui */));
     // Check for valid locales before getting the display name.

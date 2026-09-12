@@ -2,251 +2,291 @@
 # Copyright 2016 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-
 """api_static_checks.py - Enforce Cronet API requirements."""
-
-
 
 import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
 REPOSITORY_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir))
 
-sys.path.insert(0, os.path.join(REPOSITORY_ROOT, 'build/android/gyp'))
-from util import build_utils  # pylint: disable=wrong-import-position
-
-sys.path.insert(0, os.path.join(REPOSITORY_ROOT, 'components'))
-from cronet.tools import update_api  # pylint: disable=wrong-import-position
-
+sys.path.insert(0, REPOSITORY_ROOT)
+from components.cronet.tools import update_api  # pylint: disable=wrong-import-position
+from components.cronet.tools import utils  # pylint: disable=wrong-import-position
+from build.android.gyp.util import build_utils  # pylint: disable=wrong-import-position
 
 # These regular expressions catch the beginning of lines that declare classes
 # and methods.  The first group returned by a match is the class or method name.
-from cronet.tools.update_api import CLASS_RE  # pylint: disable=wrong-import-position
-METHOD_RE = re.compile(r'.* ([^ ]*)\(.*\);')
+from components.cronet.tools.update_api import CLASS_RE  # pylint: disable=wrong-import-position
 
-# Allowed exceptions.  Adding anything to this list is dangerous and should be
-# avoided if possible.  For now these exceptions are for APIs that existed in
-# the first version of Cronet and will be supported forever.
-# TODO(pauljensen): Remove these.
-ALLOWED_EXCEPTIONS = [
-    'org.chromium.net.impl.CronetEngineBuilderImpl/build ->'
-    ' org/chromium/net/ExperimentalCronetEngine/getVersionString:'
-    '()Ljava/lang/String;',
-    'org.chromium.net.urlconnection.CronetFixedModeOutputStream$UploadDataProviderI'
-    'mpl/read -> org/chromium/net/UploadDataSink/onReadSucceeded:(Z)V',
-    'org.chromium.net.urlconnection.CronetFixedModeOutputStream$UploadDataProviderI'
-    'mpl/rewind -> org/chromium/net/UploadDataSink/onRewindError:'
-    '(Ljava/lang/Exception;)V',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection/disconnect ->'
-    ' org/chromium/net/UrlRequest/cancel:()V',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection/disconnect ->'
-    ' org/chromium/net/UrlResponseInfo/getHttpStatusText:()Ljava/lang/String;',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection/disconnect ->'
-    ' org/chromium/net/UrlResponseInfo/getHttpStatusCode:()I',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection/getHeaderField ->'
-    ' org/chromium/net/UrlResponseInfo/getHttpStatusCode:()I',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection/getErrorStream ->'
-    ' org/chromium/net/UrlResponseInfo/getHttpStatusCode:()I',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection/setConnectTimeout ->'
-    ' org/chromium/net/UrlRequest/read:(Ljava/nio/ByteBuffer;)V',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection$CronetUrlRequestCallbac'
-    'k/onRedirectReceived -> org/chromium/net/UrlRequest/followRedirect:()V',
-    'org.chromium.net.urlconnection.CronetHttpURLConnection$CronetUrlRequestCallbac'
-    'k/onRedirectReceived -> org/chromium/net/UrlRequest/cancel:()V',
-    'org.chromium.net.urlconnection.CronetChunkedOutputStream$UploadDataProviderImp'
-    'l/read -> org/chromium/net/UploadDataSink/onReadSucceeded:(Z)V',
-    'org.chromium.net.urlconnection.CronetChunkedOutputStream$UploadDataProviderImp'
-    'l/rewind -> org/chromium/net/UploadDataSink/onRewindError:'
-    '(Ljava/lang/Exception;)V',
-    'org.chromium.net.urlconnection.CronetBufferedOutputStream$UploadDataProviderIm'
-    'pl/read -> org/chromium/net/UploadDataSink/onReadSucceeded:(Z)V',
-    'org.chromium.net.urlconnection.CronetBufferedOutputStream$UploadDataProviderIm'
-    'pl/rewind -> org/chromium/net/UploadDataSink/onRewindSucceeded:()V',
-    'org.chromium.net.urlconnection.CronetHttpURLStreamHandler/org.chromium.net.url'
-    'connection.CronetHttpURLStreamHandler -> org/chromium/net/ExperimentalCron'
-    'etEngine/openConnection:(Ljava/net/URL;)Ljava/net/URLConnection;',
-    'org.chromium.net.urlconnection.CronetHttpURLStreamHandler/org.chromium.net.url'
-    'connection.CronetHttpURLStreamHandler -> org/chromium/net/ExperimentalCron'
-    'etEngine/openConnection:(Ljava/net/URL;Ljava/net/Proxy;)Ljava/net/URLConne'
-    'ction;',
-    'org.chromium.net.impl.CronetEngineBase/newBidirectionalStreamBuilder -> org/ch'
-    'romium/net/ExperimentalCronetEngine/newBidirectionalStreamBuilder:(Ljava/l'
-    'ang/String;Lorg/chromium/net/BidirectionalStream$Callback;Ljava/util/concu'
-    'rrent/Executor;)Lorg/chromium/net/ExperimentalBidirectionalStream$'
-    'Builder;',
-    # getMessage() is an java.lang.Exception member, and so cannot be removed.
-    'org.chromium.net.impl.NetworkExceptionImpl/getMessage -> '
-    'org/chromium/net/NetworkException/getMessage:()Ljava/lang/String;',
+METHOD_RE = re.compile(r".* ([^ ]*)\(.*\)( .+)?;")
+
+# urlconnection exemptions. PLEASE READ THE WARNING IN
+# //components/cronet/android/java/src/org/chromium/net/urlconnection/README.md
+# BEFORE ADDING TO THIS LIST. urlconnection code MUST NOT assume it is running
+# against a recent version of the Cronet API.
+ALLOWED_URLCONNECTION_EXCEPTIONS = [
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/disconnect -> org/chromium/net/UrlRequest/cancel:()V',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/getResponseMessage -> org/chromium/net/UrlResponseInfo/getHttpStatusText:()Ljava/lang/String;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/getResponseCode -> org/chromium/net/UrlResponseInfo/getHttpStatusCode:()I',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/getInputStream -> org/chromium/net/UrlResponseInfo/getHttpStatusCode:()I',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/CronetEngine/newUrlRequestBuilder:(Ljava/lang/String;Lorg/chromium/net/UrlRequest$Callback;Ljava/util/concurrent/Executor;)Lorg/chromium/net/UrlRequest$Builder;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/ExperimentalUrlRequest$Builder/setUploadDataProvider:(Lorg/chromium/net/UploadDataProvider;Ljava/util/concurrent/Executor;)Lorg/chromium/net/ExperimentalUrlRequest$Builder;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/UploadDataProvider/getLength:()J',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/ExperimentalUrlRequest$Builder/addHeader:(Ljava/lang/String;Ljava/lang/String;)Lorg/chromium/net/ExperimentalUrlRequest$Builder;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/ExperimentalUrlRequest$Builder/disableCache:()Lorg/chromium/net/ExperimentalUrlRequest$Builder;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/ExperimentalUrlRequest$Builder/setHttpMethod:(Ljava/lang/String;)Lorg/chromium/net/ExperimentalUrlRequest$Builder;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/ExperimentalUrlRequest$Builder/setTrafficStatsTag:(I)Lorg/chromium/net/ExperimentalUrlRequest$Builder;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/ExperimentalUrlRequest$Builder/setTrafficStatsUid:(I)Lorg/chromium/net/ExperimentalUrlRequest$Builder;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/ExperimentalUrlRequest$Builder/build:()Lorg/chromium/net/ExperimentalUrlRequest;',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/startRequest -> org/chromium/net/UrlRequest/start:()V',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/getErrorStream -> org/chromium/net/UrlResponseInfo/getHttpStatusCode:()I',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/getMoreData -> org/chromium/net/UrlRequest/read:(Ljava/nio/ByteBuffer;)V',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection/getAllHeadersAsList -> org/chromium/net/UrlResponseInfo/getAllHeadersAsList:()Ljava/util/List;',
+    'org.chromium.net.urlconnection.CronetChunkedOutputStream$UploadDataProviderImpl/read -> org/chromium/net/UploadDataSink/onReadSucceeded:(Z)V',
+    'org.chromium.net.urlconnection.CronetChunkedOutputStream$UploadDataProviderImpl/rewind -> org/chromium/net/UploadDataSink/onRewindError:(Ljava/lang/Exception;)V',
+    'org.chromium.net.urlconnection.CronetFixedModeOutputStream$UploadDataProviderImpl/read -> org/chromium/net/UploadDataSink/onReadSucceeded:(Z)V',
+    'org.chromium.net.urlconnection.CronetFixedModeOutputStream$UploadDataProviderImpl/rewind -> org/chromium/net/UploadDataSink/onRewindError:(Ljava/lang/Exception;)V',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection$CronetUrlRequestCallback/onRedirectReceived -> org/chromium/net/UrlRequest/followRedirect:()V',
+    'org.chromium.net.urlconnection.CronetHttpURLConnection$CronetUrlRequestCallback/onRedirectReceived -> org/chromium/net/UrlRequest/cancel:()V',
+    'org.chromium.net.urlconnection.CronetHttpURLStreamHandler/openConnection -> org/chromium/net/ExperimentalCronetEngine/openConnection:(Ljava/net/URL;)Ljava/net/URLConnection;',
+    'org.chromium.net.urlconnection.CronetHttpURLStreamHandler/openConnection -> org/chromium/net/ExperimentalCronetEngine/openConnection:(Ljava/net/URL;Ljava/net/Proxy;)Ljava/net/URLConnection;',
+    'org.chromium.net.urlconnection.CronetBufferedOutputStream$UploadDataProviderImpl/read -> org/chromium/net/UploadDataSink/onReadSucceeded:(Z)V',
+    'org.chromium.net.urlconnection.CronetBufferedOutputStream$UploadDataProviderImpl/rewind -> org/chromium/net/UploadDataSink/onRewindSucceeded:()V',
 ]
 
-# Filename of file containing the interface API version number.
-INTERFACE_API_VERSION_FILENAME = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), '..', 'android', 'interface_api_version.txt'))
-# Filename of file containing the implementation API version number.
-IMPLEMENTATION_API_VERSION_FILENAME = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), '..', 'android',
-    'implementation_api_version.txt'))
-JAR_PATH = os.path.join(build_utils.JAVA_HOME, 'bin', 'jar')
-JAVAP_PATH = os.path.join(build_utils.JAVA_HOME, 'bin', 'javap')
+# Adding anything to this list is dangerous: do so only if you deeply understand Cronet's API/IMPL layering.
+ALLOWED_EXCEPTIONS = ALLOWED_URLCONNECTION_EXCEPTIONS + [
+    'org.chromium.net.impl.CronetEngineBase/newBidirectionalStreamBuilder -> org/chromium/net/ExperimentalCronetEngine/newBidirectionalStreamBuilder:(Ljava/lang/String;Lorg/chromium/net/BidirectionalStream$Callback;Ljava/util/concurrent/Executor;)Lorg/chromium/net/ExperimentalBidirectionalStream$Builder;',
+    'org.chromium.net.impl.NetworkExceptionImpl/getMessage -> org/chromium/net/NetworkException/getMessage:()Ljava/lang/String;',
+    'org.chromium.net.VersionSafeProxyOptions/org.chromium.net.VersionSafeProxyOptions -> org/chromium/net/ProxyOptions/getProxyList:()Ljava/util/List;',
+    'org.chromium.net.VersionSafeProxyOptions/createProxyCallbackList -> org/chromium/net/ProxyOptions/getProxyList:()Ljava/util/List;',
+    'org.chromium.net.VersionSafeProxyOptions/createProxyCallbackList -> org/chromium/net/Proxy/getCallback:()Lorg/chromium/net/Proxy$HttpConnectCallback;',
+    'org.chromium.net.VersionSafeProxyOptions/createProxyCallbackList -> org/chromium/net/Proxy/getExecutor:()Ljava/util/concurrent/Executor;',
+    'org.chromium.net.VersionSafeProxyOptions/createProxyOptionsProto -> org/chromium/net/ProxyOptions/getProxyList:()Ljava/util/List;',
+    'org.chromium.net.VersionSafeProxyOptions/createProxyOptionsProto -> org/chromium/net/Proxy/getHost:()Ljava/lang/String;',
+    'org.chromium.net.VersionSafeProxyOptions/createProxyOptionsProto -> org/chromium/net/Proxy/getPort:()I',
+    'org.chromium.net.VersionSafeProxyOptions/createProxyOptionsProto -> org/chromium/net/Proxy/getScheme:()I',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onFailed -> org/chromium/net/CronetException/getMessage:()Ljava/lang/String;',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onFailed -> org/chromium/net/CronetException/getMessage:()Ljava/lang/String;',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/maybeScheduleFastFailover -> org/chromium/net/ExperimentalBidirectionalStream/start:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onStreamReady -> org/chromium/net/BidirectionalStream/write:(Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onStreamReady -> org/chromium/net/BidirectionalStream/write:(Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onStreamReady -> org/chromium/net/BidirectionalStream/flush:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onStreamReady -> org/chromium/net/BidirectionalStream/flush:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/start -> org/chromium/net/BidirectionalStream/start:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/start -> org/chromium/net/ExperimentalBidirectionalStream/start:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/read -> org/chromium/net/BidirectionalStream/read:(Ljava/nio/ByteBuffer;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/write -> org/chromium/net/BidirectionalStream/write:(Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/flush -> org/chromium/net/BidirectionalStream/flush:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/cancel -> org/chromium/net/BidirectionalStream/cancel:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/cancel -> org/chromium/net/ExperimentalBidirectionalStream/cancel:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/cancel -> org/chromium/net/ExperimentalBidirectionalStream/cancel:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/isDone -> org/chromium/net/BidirectionalStream/isDone:()Z',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream/isDone -> org/chromium/net/ExperimentalBidirectionalStream/isDone:()Z',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onStreamReady -> org/chromium/net/BidirectionalStream/cancel:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onStreamReady -> org/chromium/net/BidirectionalStream/cancel:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onStreamReady -> org/chromium/net/BidirectionalStream$Callback/onStreamReady:(Lorg/chromium/net/BidirectionalStream;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onStreamReady -> org/chromium/net/BidirectionalStream$Callback/onStreamReady:(Lorg/chromium/net/BidirectionalStream;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onStreamReady -> org/chromium/net/ExperimentalBidirectionalStream/cancel:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onStreamReady -> org/chromium/net/ExperimentalBidirectionalStream/cancel:()V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onResponseHeadersReceived -> org/chromium/net/BidirectionalStream$Callback/onResponseHeadersReceived:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onResponseHeadersReceived -> org/chromium/net/BidirectionalStream$Callback/onResponseHeadersReceived:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onReadCompleted -> org/chromium/net/BidirectionalStream$Callback/onReadCompleted:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onReadCompleted -> org/chromium/net/BidirectionalStream$Callback/onReadCompleted:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onWriteCompleted -> org/chromium/net/BidirectionalStream$Callback/onWriteCompleted:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onWriteCompleted -> org/chromium/net/BidirectionalStream$Callback/onWriteCompleted:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onResponseTrailersReceived -> org/chromium/net/BidirectionalStream$Callback/onResponseTrailersReceived:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Lorg/chromium/net/UrlResponseInfo$HeaderBlock;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onResponseTrailersReceived -> org/chromium/net/BidirectionalStream$Callback/onResponseTrailersReceived:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Lorg/chromium/net/UrlResponseInfo$HeaderBlock;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onSucceeded -> org/chromium/net/BidirectionalStream$Callback/onSucceeded:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onSucceeded -> org/chromium/net/BidirectionalStream$Callback/onSucceeded:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onFailed -> org/chromium/net/BidirectionalStream$Callback/onFailed:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Lorg/chromium/net/CronetException;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onFailed -> org/chromium/net/BidirectionalStream$Callback/onFailed:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Lorg/chromium/net/CronetException;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnStreamReadyCallback/onCanceled -> org/chromium/net/BidirectionalStream$Callback/onCanceled:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.CronetAdaptiveNetworkBidirectionalStream$RaceUntilOnResponseHeadersReceivedCallback/onCanceled -> org/chromium/net/BidirectionalStream$Callback/onCanceled:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.VersionSafeProxyCallback/onBeforeTunnelRequest -> org/chromium/net/Proxy$HttpConnectCallback/onBeforeRequest:(Lorg/chromium/net/Proxy$HttpConnectCallback$Request;)V',
+    'org.chromium.net.impl.VersionSafeProxyCallback/onTunnelHeadersReceived -> org/chromium/net/Proxy$HttpConnectCallback/onResponseReceived:(Ljava/util/List;I)I',
+    'org.chromium.net.impl.VersionSafeCallbacks$UrlRequestStatusListener/onStatus -> org/chromium/net/UrlRequest$StatusListener/onStatus:(I)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UrlRequestCallback/onRedirectReceived -> org/chromium/net/UrlRequest$Callback/onRedirectReceived:(Lorg/chromium/net/UrlRequest;Lorg/chromium/net/UrlResponseInfo;Ljava/lang/String;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UrlRequestCallback/onResponseStarted -> org/chromium/net/UrlRequest$Callback/onResponseStarted:(Lorg/chromium/net/UrlRequest;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UrlRequestCallback/onReadCompleted -> org/chromium/net/UrlRequest$Callback/onReadCompleted:(Lorg/chromium/net/UrlRequest;Lorg/chromium/net/UrlResponseInfo;Ljava/nio/ByteBuffer;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UrlRequestCallback/onSucceeded -> org/chromium/net/UrlRequest$Callback/onSucceeded:(Lorg/chromium/net/UrlRequest;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UrlRequestCallback/onFailed -> org/chromium/net/UrlRequest$Callback/onFailed:(Lorg/chromium/net/UrlRequest;Lorg/chromium/net/UrlResponseInfo;Lorg/chromium/net/CronetException;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UrlRequestCallback/onCanceled -> org/chromium/net/UrlRequest$Callback/onCanceled:(Lorg/chromium/net/UrlRequest;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UploadDataProviderWrapper/getLength -> org/chromium/net/UploadDataProvider/getLength:()J',
+    'org.chromium.net.impl.VersionSafeCallbacks$UploadDataProviderWrapper/read -> org/chromium/net/UploadDataProvider/read:(Lorg/chromium/net/UploadDataSink;Ljava/nio/ByteBuffer;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UploadDataProviderWrapper/rewind -> org/chromium/net/UploadDataProvider/rewind:(Lorg/chromium/net/UploadDataSink;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$UploadDataProviderWrapper/close -> org/chromium/net/UploadDataProvider/close:()V',
+    'org.chromium.net.impl.VersionSafeCallbacks$RequestFinishedInfoListener/org.chromium.net.impl.VersionSafeCallbacks$RequestFinishedInfoListener -> org/chromium/net/RequestFinishedInfo$Listener/getExecutor:()Ljava/util/concurrent/Executor;',
+    'org.chromium.net.impl.VersionSafeCallbacks$RequestFinishedInfoListener/onRequestFinished -> org/chromium/net/RequestFinishedInfo$Listener/onRequestFinished:(Lorg/chromium/net/RequestFinishedInfo;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$RequestFinishedInfoListener/getExecutor -> org/chromium/net/RequestFinishedInfo$Listener/getExecutor:()Ljava/util/concurrent/Executor;',
+    'org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityThroughputListenerWrapper/org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityThroughputListenerWrapper -> org/chromium/net/NetworkQualityThroughputListener/getExecutor:()Ljava/util/concurrent/Executor;',
+    'org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityThroughputListenerWrapper/onThroughputObservation -> org/chromium/net/NetworkQualityThroughputListener/onThroughputObservation:(IJI)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityThroughputListenerWrapper/getExecutor -> org/chromium/net/NetworkQualityThroughputListener/getExecutor:()Ljava/util/concurrent/Executor;',
+    'org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityRttListenerWrapper/org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityRttListenerWrapper -> org/chromium/net/NetworkQualityRttListener/getExecutor:()Ljava/util/concurrent/Executor;',
+    'org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityRttListenerWrapper/onRttObservation -> org/chromium/net/NetworkQualityRttListener/onRttObservation:(IJI)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$NetworkQualityRttListenerWrapper/getExecutor -> org/chromium/net/NetworkQualityRttListener/getExecutor:()Ljava/util/concurrent/Executor;',
+    'org.chromium.net.impl.VersionSafeCallbacks$LibraryLoader/loadLibrary -> org/chromium/net/CronetEngine$Builder$LibraryLoader/loadLibrary:(Ljava/lang/String;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onStreamReady -> org/chromium/net/BidirectionalStream$Callback/onStreamReady:(Lorg/chromium/net/BidirectionalStream;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onResponseHeadersReceived -> org/chromium/net/BidirectionalStream$Callback/onResponseHeadersReceived:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onReadCompleted -> org/chromium/net/BidirectionalStream$Callback/onReadCompleted:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onWriteCompleted -> org/chromium/net/BidirectionalStream$Callback/onWriteCompleted:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Ljava/nio/ByteBuffer;Z)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onResponseTrailersReceived -> org/chromium/net/BidirectionalStream$Callback/onResponseTrailersReceived:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Lorg/chromium/net/UrlResponseInfo$HeaderBlock;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onSucceeded -> org/chromium/net/BidirectionalStream$Callback/onSucceeded:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onFailed -> org/chromium/net/BidirectionalStream$Callback/onFailed:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;Lorg/chromium/net/CronetException;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$BidirectionalStreamCallback/onCanceled -> org/chromium/net/BidirectionalStream$Callback/onCanceled:(Lorg/chromium/net/BidirectionalStream;Lorg/chromium/net/UrlResponseInfo;)V',
+    'org.chromium.net.impl.VersionSafeCallbacks$ApiVersion/getMaximumAvailableApiLevel -> org/chromium/net/ApiVersion/getApiLevel:()I',
+    'org.chromium.net.impl.VersionSafeCallbacks$ApiVersion/getMaximumAvailableApiLevel -> org/chromium/net/ApiVersion/getMaximumAvailableApiLevel:()I',
+    'org.chromium.net.impl.VersionSafeCallbacks$ApiVersion/getCronetVersion -> org/chromium/net/ApiVersion/getCronetVersion:()Ljava/lang/String;',
+]
+
+JAR_PATH = utils.JAR_PATH
+JAVAP_PATH = utils.JAVAP_PATH
 
 
 def find_api_calls(dump, api_classes, bad_calls):
-  # Given a dump of an implementation class, find calls through API classes.
-  # |dump| is the output of "javap -c" on the implementation class files.
-  # |api_classes| is the list of classes comprising the API.
-  # |bad_calls| is the list of calls through API classes.  This list is built up
-  #             by this function.
+    # Given a dump of an implementation class, find calls through API classes.
+    # |dump| is the output of "javap -c" on the implementation class files.
+    # |api_classes| is the list of classes comprising the API.
+    # |bad_calls| is the list of calls through API classes.  This list is built up
+    #             by this function.
 
-  for i, line in enumerate(dump):
-    try:
-      if CLASS_RE.match(line):
-        caller_class = CLASS_RE.match(line).group(2)
-      if METHOD_RE.match(line):
-        caller_method = METHOD_RE.match(line).group(1)
-      if line.startswith(': invoke', 8) and not line.startswith('dynamic', 16):
-        callee = line.split(' // ')[1].split('Method ')[1].split('\n')[0]
-        callee_class = callee.split('.')[0]
-        assert callee_class
-        if callee_class in api_classes:
-          callee_method = callee.split('.')[1]
-          assert callee_method
-          # Ignore constructor calls for now as every implementation class
-          # that extends an API class will call them.
-          # TODO(pauljensen): Look into enforcing restricting constructor calls.
-          # https://crbug.com/674975
-          if callee_method.startswith('"<init>"'):
-            continue
-          # Ignore VersionSafe calls
-          if 'VersionSafeCallbacks' in caller_class:
-            continue
-          bad_call = '%s/%s -> %s/%s' % (caller_class, caller_method,
-                                         callee_class, callee_method)
-          if bad_call in ALLOWED_EXCEPTIONS:
-            continue
-          bad_calls += [bad_call]
-    except Exception:
-      sys.stderr.write(f'Failed on line {i+1}: {line}')
-      raise
+    for i, line in enumerate(dump):
+        try:
+            if CLASS_RE.match(line):
+                caller_class = CLASS_RE.match(line).group(2)
+            if METHOD_RE.match(line):
+                caller_method = METHOD_RE.match(line).group(1)
+            idx = line.find(': invoke')
+            if idx != -1 and not line.startswith('dynamic', idx + 8):
+                callee = line.split(' // ')[1].split('Method ')[1].split(
+                    '\n')[0]
+                callee_class = callee.split('.')[0]
+                assert callee_class
+                if callee_class in api_classes:
+                    callee_method = callee.split('.')[1]
+                    assert callee_method
+                    # Ignore constructor calls for now as every implementation class
+                    # that extends an API class will call them.
+                    # TODO(pauljensen): Look into enforcing restricting constructor calls.
+                    # https://crbug.com/674975
+                    if callee_method.startswith('"<init>"'):
+                        continue
+                    bad_call = '%s/%s -> %s/%s' % (caller_class, caller_method,
+                                                   callee_class, callee_method)
+                    if bad_call in ALLOWED_EXCEPTIONS:
+                        continue
+                    bad_calls += [bad_call]
+        except Exception:
+            sys.stderr.write(f'Failed on line {i+1}: {line}')
+            raise
 
 
 def check_api_calls(opts):
-  # Returns True if no calls through API classes in implementation.
+    # Returns True if no calls through API classes in implementation.
 
-  temp_dir = tempfile.mkdtemp()
+    temp_dir = tempfile.mkdtemp()
 
-  # Extract API class files from jar
-  jar_cmd = [os.path.relpath(JAR_PATH, temp_dir), 'xf',
-             os.path.abspath(opts.api_jar)]
-  build_utils.CheckOutput(jar_cmd, cwd=temp_dir)
-  shutil.rmtree(os.path.join(temp_dir, 'META-INF'), ignore_errors=True)
+    # Extract API class files from jar
+    jar_cmd = [JAR_PATH, 'xf', os.path.abspath(opts.api_jar)]
+    utils.run(jar_cmd, verbose=opts.verbose, cwd=temp_dir)
+    shutil.rmtree(os.path.join(temp_dir, 'META-INF'), ignore_errors=True)
 
-  # Collect names of API classes
-  api_classes = []
-  for dirpath, _, filenames in os.walk(temp_dir):
-    if not filenames:
-      continue
-    package = os.path.relpath(dirpath, temp_dir)
-    for filename in filenames:
-      if filename.endswith('.class'):
-        classname = filename[:-len('.class')]
-        api_classes += [os.path.normpath(os.path.join(package, classname))]
+    # Collect names of API classes
+    api_classes = []
+    for dirpath, _, filenames in os.walk(temp_dir):
+        if not filenames:
+            continue
+        package = os.path.relpath(dirpath, temp_dir)
+        for filename in filenames:
+            if filename.endswith('.class'):
+                classname = filename[:-len('.class')]
+                api_classes += [
+                    os.path.normpath(os.path.join(package, classname))
+                ]
 
-  shutil.rmtree(temp_dir)
-  temp_dir = tempfile.mkdtemp()
+    shutil.rmtree(temp_dir)
+    temp_dir = tempfile.mkdtemp()
 
-  # Extract impl class files from jars
-  for impl_jar in opts.impl_jar:
-    jar_cmd = [os.path.relpath(JAR_PATH, temp_dir), 'xf',
-               os.path.abspath(impl_jar)]
-    build_utils.CheckOutput(jar_cmd, cwd=temp_dir)
-  shutil.rmtree(os.path.join(temp_dir, 'META-INF'), ignore_errors=True)
+    # Extract impl class files from jars
+    for impl_jar in opts.impl_jar:
+        jar_cmd = [JAR_PATH, 'xf', os.path.abspath(impl_jar)]
+        utils.run(jar_cmd, verbose=opts.verbose, cwd=temp_dir)
+    shutil.rmtree(os.path.join(temp_dir, 'META-INF'), ignore_errors=True)
 
-  # Process classes
-  bad_api_calls = []
-  for dirpath, _, filenames in os.walk(temp_dir):
-    if not filenames:
-      continue
-    # Dump classes
-    dump_file = os.path.join(temp_dir, 'dump.txt')
-    javap_cmd = '%s -c %s > %s' % (
-        JAVAP_PATH,
-        ' '.join(os.path.join(dirpath, f) for f in filenames).replace('$',
-                                                                      '\\$'),
-        dump_file)
-    if os.system(javap_cmd):
-      print('ERROR: javap failed on ' + ' '.join(filenames))
-      return False
-    # Process class dump
-    with open(dump_file, 'r') as dump:
-      find_api_calls(dump, api_classes, bad_api_calls)
+    # Process classes
+    bad_api_calls = []
+    for dirpath, _, filenames in os.walk(temp_dir):
+        if not filenames:
+            continue
+        # Dump classes
+        dump_file = os.path.join(temp_dir, 'dump.txt')
+        javap_cmd = [JAVAP_PATH, '-private', '-c'
+                     ] + [os.path.join(dirpath, f) for f in filenames]
+        try:
+            dump_output = utils.run_and_get_stdout(javap_cmd,
+                                                   verbose=opts.verbose)
+            utils.write_file(dump_file, dump_output)
+        except subprocess.CalledProcessError:
+            print('ERROR: javap failed on ' + ' '.join(filenames))
+            return False
+        # Process class dump
+        with open(dump_file, 'r') as dump:
+            find_api_calls(dump, api_classes, bad_api_calls)
 
-  shutil.rmtree(temp_dir)
+    shutil.rmtree(temp_dir)
 
-  if bad_api_calls:
-    print('ERROR: Found the following calls from implementation classes '
-          'through')
-    print('       API classes.  These could fail if older API is used that')
-    print('       does not contain newer methods.  Please call through a')
-    print('       wrapper class from VersionSafeCallbacks.')
-    print('\n'.join(bad_api_calls))
-  return not bad_api_calls
+    if bad_api_calls:
+        print('ERROR: Found the following calls from implementation classes '
+              'through')
+        print(
+            '       API classes.  These could fail if older API is used that')
+        print('       does not contain newer methods.  Please call through a')
+        print('       wrapper class from VersionSafeCallbacks.')
+        print('\n'.join(bad_api_calls))
+    return not bad_api_calls
 
 
 def check_api_version(opts):
-  if not update_api.check_up_to_date(opts.api_jar):
+    if update_api.check_up_to_date(opts.api_jar, verbose=opts.verbose):
+        return True
     print('ERROR: API file out of date.  Please run this command:')
-    print('       components/cronet/tools/update_api.py --api_jar %s' % (
-        os.path.abspath(opts.api_jar)))
+    print('       components/cronet/tools/update_api.py --api_jar %s' %
+          (os.path.abspath(opts.api_jar)))
     return False
-  interface_api_version = None
-  implementation_api_version = None
-  with open(INTERFACE_API_VERSION_FILENAME, 'r') \
-       as interface_api_version_file:
-    interface_api_version = int(interface_api_version_file.read())
-  with open(IMPLEMENTATION_API_VERSION_FILENAME, 'r') \
-       as implementation_api_version_file:
-    implementation_api_version = int(implementation_api_version_file.read())
-  if interface_api_version > implementation_api_version:
-    print('ERROR: Interface API version cannot be higher than the current '
-          'implementation API version.')
-    return False
-  if implementation_api_version not in \
-      (interface_api_version + 1, interface_api_version):
-    print('ERROR: Implementation API version can be preemptively bumped up '
-          'at most once. Land the interface part of the API which is already '
-          'being released before adding a new one.')
-    return False
-  return True
 
 
 def main(args):
-  parser = argparse.ArgumentParser(
-      description='Enforce Cronet API requirements.')
-  parser.add_argument('--api_jar',
-                      help='Path to API jar (i.e. cronet_api.jar)',
-                      required=True,
-                      metavar='path/to/cronet_api.jar')
-  parser.add_argument('--impl_jar',
-                      help='Path to implementation jar '
-                          '(i.e. cronet_impl_native_java.jar)',
-                      required=True,
-                      metavar='path/to/cronet_impl_native_java.jar',
-                      action='append')
-  parser.add_argument('--stamp', help='Path to touch on success.')
-  opts = parser.parse_args(args)
+    parser = argparse.ArgumentParser(
+        description='Enforce Cronet API requirements.')
+    parser.add_argument('--api_jar',
+                        help='Path to API jar (i.e. cronet_api.jar)',
+                        required=True,
+                        metavar='path/to/cronet_api.jar')
+    parser.add_argument('--impl_jar',
+                        help='Path to implementation jar '
+                        '(i.e. cronet_impl_native_java.jar)',
+                        required=True,
+                        metavar='path/to/cronet_impl_native_java.jar',
+                        action='append')
+    parser.add_argument('--stamp', help='Path to touch on success.')
+    parser.add_argument('--verbose',
+                        help='Print verbose output.',
+                        action='store_true')
+    opts = parser.parse_args(args)
 
-  ret = True
-  ret = check_api_calls(opts) and ret
-  ret = check_api_version(opts) and ret
-  if ret and opts.stamp:
-    build_utils.Touch(opts.stamp)
-  return ret
+    ret = True
+    ret = check_api_calls(opts) and ret
+    ret = check_api_version(opts) and ret
+    if ret and opts.stamp:
+        build_utils.Touch(opts.stamp)
+    return ret
 
 
 if __name__ == '__main__':
-  sys.exit(0 if main(sys.argv[1:]) else -1)
+    sys.exit(0 if main(sys.argv[1:]) else -1)

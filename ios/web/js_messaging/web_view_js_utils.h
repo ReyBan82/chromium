@@ -6,15 +6,20 @@
 #define IOS_WEB_JS_MESSAGING_WEB_VIEW_JS_UTILS_H_
 
 #import <Foundation/Foundation.h>
-#include <memory>
+
+#import "base/location.h"
 
 @class WKContentWorld;
+
 @class WKFrameInfo;
 @class WKWebView;
 
 namespace base {
 class Value;
+class DictValue;
 }  // namespace base
+
+#import "ios/web/public/js_messaging/web_view_js_utils.h"
 
 namespace web {
 
@@ -32,14 +37,18 @@ enum JSEvaluationErrorCode {
   JS_EVALUATION_ERROR_CODE_REJECTED = -1001,
 };
 
-// Converts result of WKWebView script evaluation to base::Value.
-std::unique_ptr<base::Value> ValueResultFromWKResult(id result);
+// Converts base::Value to an equivalent Foundation object.
+id NSObjectFromValueResult(const base::Value* value_result);
+
+// Converts base::DictValue to an equivalent NSDictionary.
+id NSDictionaryFromValue(const base::DictValue& dict);
 
 // Executes JavaScript on WKWebView. If the web view cannot execute JS at the
 // moment, `completion_handler` is called with an NSError.
 void ExecuteJavaScript(WKWebView* web_view,
                        NSString* script,
-                       void (^completion_handler)(id, NSError*));
+                       void (^completion_handler)(id, NSError*),
+                       const base::Location& location = FROM_HERE);
 
 // Executes JavaScript for `web_view` in `frame_info` within `content_world` and
 // calls `completion_handler` with the result. `content_world` and `frame_info`
@@ -49,7 +58,27 @@ void ExecuteJavaScript(WKWebView* web_view,
                        WKContentWorld* content_world,
                        WKFrameInfo* frame_info,
                        NSString* script,
-                       void (^completion_handler)(id, NSError*));
+                       void (^completion_handler)(id, NSError*),
+                       const base::Location& location = FROM_HERE);
+
+// Executes JavaScript asynchronously for a `web_view` in `frame_info` within
+// `content_world` and calls `completion_handler` with the result.
+// `content_world` and `frame_info` are required. If the web view cannot execute
+// JS at the moment, `completion_handler` is called with an NSError.
+void ExecuteAsyncJavaScript(WKWebView* web_view,
+                            WKContentWorld* content_world,
+                            WKFrameInfo* frame_info,
+                            NSString* script,
+                            NSDictionary<NSString*, id>* arguments,
+                            void (^completion_handler)(id, NSError*),
+                            const base::Location& location = FROM_HERE);
+
+// Calls into the JavaScript in `content_world` to trigger the registration of
+// all web frames.
+// NOTE: This call is sent to the WKWebView directly, because the result of this
+// call will create the WebFrames. (Thus, the WebFrames do not yet exist and
+// the ExecuteJavaScript variant above requiring `frame_info` can not be used.)
+void RegisterExistingFrames(WKWebView* web_view, WKContentWorld* content_world);
 
 }  // namespace web
 

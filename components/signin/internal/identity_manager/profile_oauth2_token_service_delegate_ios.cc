@@ -7,6 +7,7 @@
 #include <set>
 #include <utility>
 
+#include "base/containers/flat_map.h"
 #include "base/functional/bind.h"
 #include "base/notreached.h"
 #include "base/stl_util.h"
@@ -14,8 +15,14 @@
 #include "base/values.h"
 #include "components/signin/internal/identity_manager/account_tracker_service.h"
 #include "components/signin/public/base/signin_client.h"
+#include "components/signin/public/base/signin_switches.h"
+#include "components/signin/public/identity_manager/access_token_fetcher.h"
 #include "components/signin/public/identity_manager/account_info.h"
 #include "components/signin/public/identity_manager/ios/device_accounts_provider.h"
+#include "google_apis/gaia/core_account_id.h"
+#include "google_apis/gaia/gaia_id.h"
+#include "google_apis/gaia/gaia_urls.h"
+#include "google_apis/gaia/google_service_auth_error.h"
 #include "google_apis/gaia/oauth2_access_token_fetcher.h"
 #include "net/base/net_errors.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
@@ -24,47 +31,26 @@ namespace {
 
 using AccessTokenInfo = DeviceAccountsProvider::AccessTokenInfo;
 using AccessTokenResult = DeviceAccountsProvider::AccessTokenResult;
+using DeviceAccountInfo = DeviceAccountsProvider::DeviceAccountInfo;
 using TokenResponseBuilder = OAuth2AccessTokenConsumer::TokenResponse::Builder;
 
-// Match the way Chromium handles authentication errors in
-// google_apis/gaia/oauth2_access_token_fetcher.cc:
-GoogleServiceAuthError GetGoogleServiceAuthErrorFromAuthenticationErrorCategory(
-    AuthenticationErrorCategory error) {
-  switch (error) {
-    case kAuthenticationErrorCategoryUnknownErrors:
-      // Treat all unknown error as unexpected service response errors.
-      // This may be too general and may require a finer grain filtering.
-      return GoogleServiceAuthError(
-          GoogleServiceAuthError::UNEXPECTED_SERVICE_RESPONSE);
-    case kAuthenticationErrorCategoryAuthorizationErrors:
-      return GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
-          GoogleServiceAuthError::InvalidGaiaCredentialsReason::
-              CREDENTIALS_REJECTED_BY_SERVER);
-    case kAuthenticationErrorCategoryAuthorizationForbiddenErrors:
-      // HTTP_FORBIDDEN (403) is treated as temporary error, because it may be
-      // '403 Rate Limit Exceeded.' (for more details, see
-      // google_apis/gaia/oauth2_access_token_fetcher.cc).
-      return GoogleServiceAuthError(
-          GoogleServiceAuthError::SERVICE_UNAVAILABLE);
-    case kAuthenticationErrorCategoryNetworkServerErrors:
-      // Just set the connection error state to FAILED.
-      return GoogleServiceAuthError::FromConnectionError(net::ERR_FAILED);
-    case kAuthenticationErrorCategoryUserCancellationErrors:
-      return GoogleServiceAuthError(GoogleServiceAuthError::REQUEST_CANCELED);
-    case kAuthenticationErrorCategoryUnknownIdentityErrors:
-      return GoogleServiceAuthError(GoogleServiceAuthError::USER_NOT_SIGNED_UP);
+// Converts a DeviceAccountInfo to an AccountInfo.
+AccountInfo AccountInfoFromDeviceAccount(const DeviceAccountInfo& account) {
+  AccountInfo::Builder builder(account.GetGaiaId(), account.GetEmail());
+  if (std::string hosted_domain = account.GetHostedDomain();
+      !hosted_domain.empty()) {
+    builder.SetHostedDomain(hosted_domain);
   }
-  NOTREACHED() << "unsupported error: " << static_cast<int>(error);
+  return builder.Build();
 }
 
-// Converts a DeviceAccountsProvider::AccountInfo to an AccountInfo.
-AccountInfo AccountInfoFromDeviceAccount(
-    const DeviceAccountsProvider::AccountInfo& account) {
-  AccountInfo account_info;
-  account_info.email = account.email;
-  account_info.gaia = account.gaia;
-  account_info.hosted_domain = account.hosted_domain;
-  return account_info;
+GoogleServiceAuthError GoogleServiceAuthErrorFromDeviceAccount(
+    const DeviceAccountInfo& account) {
+  return account.HasPersistentAuthError()
+             ? GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+                   GoogleServiceAuthError::InvalidGaiaCredentialsReason::
+                       CREDENTIALS_REJECTED_BY_SERVER)
+             : GoogleServiceAuthError::AuthErrorNone();
 }
 
 class SSOAccessTokenFetcher : public OAuth2AccessTokenFetcher {
@@ -106,14 +92,14 @@ SSOAccessTokenFetcher::SSOAccessTokenFetcher(
   DCHECK(provider_);
 }
 
-SSOAccessTokenFetcher::~SSOAccessTokenFetcher() {}
+SSOAccessTokenFetcher::~SSOAccessTokenFetcher() = default;
 
 void SSOAccessTokenFetcher::Start(const std::string& client_id,
                                   const std::string& client_secret_unused,
                                   const std::vector<std::string>& scopes) {
   std::set<std::string> scopes_set(scopes.begin(), scopes.end());
   provider_->GetAccessToken(
-      account_.gaia, client_id, scopes_set,
+      account_.GetGaiaId(), client_id, scopes_set,
       base::BindOnce(&SSOAccessTokenFetcher::OnAccessTokenResponse,
                      weak_factory_.GetWeakPtr()));
 }
@@ -135,9 +121,7 @@ void SSOAccessTokenFetcher::OnAccessTokenResponse(AccessTokenResult result) {
                               .WithExpirationTime(info.expiration_time)
                               .build());
   } else {
-    FireOnGetTokenFailure(
-        GetGoogleServiceAuthErrorFromAuthenticationErrorCategory(
-            result.error()));
+    FireOnGetTokenFailure(result.error());
   }
 }
 
@@ -154,6 +138,7 @@ ProfileOAuth2TokenServiceIOSDelegate::ProfileOAuth2TokenServiceIOSDelegate(
   DCHECK(client_);
   DCHECK(provider_);
   DCHECK(account_tracker_service_);
+  device_accounts_provider_observation_.Observe(provider_.get());
 }
 
 ProfileOAuth2TokenServiceIOSDelegate::~ProfileOAuth2TokenServiceIOSDelegate() {
@@ -163,12 +148,11 @@ ProfileOAuth2TokenServiceIOSDelegate::~ProfileOAuth2TokenServiceIOSDelegate() {
 void ProfileOAuth2TokenServiceIOSDelegate::Shutdown() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   accounts_.clear();
-  ClearAuthError(absl::nullopt);
+  ClearAuthError(std::nullopt);
 }
 
-void ProfileOAuth2TokenServiceIOSDelegate::LoadCredentials(
-    const CoreAccountId& primary_account_id,
-    bool is_syncing) {
+void ProfileOAuth2TokenServiceIOSDelegate::LoadCredentialsInternal(
+    const CoreAccountId& primary_account_id) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   DCHECK_EQ(signin::LoadCredentialsState::LOAD_CREDENTIALS_NOT_STARTED,
@@ -176,25 +160,19 @@ void ProfileOAuth2TokenServiceIOSDelegate::LoadCredentials(
   set_load_credentials_state(
       signin::LoadCredentialsState::LOAD_CREDENTIALS_IN_PROGRESS);
 
-  if (primary_account_id.empty()) {
-    // On startup, always fire refresh token loaded even if there is nothing
-    // to load (not authenticated).
-    set_load_credentials_state(
-        signin::LoadCredentialsState::LOAD_CREDENTIALS_FINISHED_WITH_SUCCESS);
-    FireRefreshTokensLoaded();
-    return;
-  }
-
   ReloadCredentials(primary_account_id);
-  if (RefreshTokenIsAvailable(primary_account_id)) {
+  if (primary_account_id.empty() ||
+      RefreshTokenIsAvailable(primary_account_id)) {
     set_load_credentials_state(
         signin::LoadCredentialsState::LOAD_CREDENTIALS_FINISHED_WITH_SUCCESS);
   } else {
     // Account must have been seeded before (when the primary account was set).
     DCHECK(!account_tracker_service_->GetAccountInfo(primary_account_id)
-                .gaia.empty());
+                .GetGaiaId()
+                .empty());
     DCHECK(!account_tracker_service_->GetAccountInfo(primary_account_id)
-                .email.empty());
+                .GetEmail()
+                .empty());
 
     // For whatever reason, we failed to load the device account for the primary
     // account. There must always be an account for the primary account
@@ -202,7 +180,8 @@ void ProfileOAuth2TokenServiceIOSDelegate::LoadCredentials(
     UpdateAuthError(primary_account_id,
                     GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
                         GoogleServiceAuthError::InvalidGaiaCredentialsReason::
-                            CREDENTIALS_MISSING));
+                            CREDENTIALS_MISSING),
+                    /*fire_auth_error_changed=*/false);
     FireRefreshTokenAvailable(primary_account_id);
     set_load_credentials_state(
         signin::LoadCredentialsState::
@@ -217,10 +196,14 @@ void ProfileOAuth2TokenServiceIOSDelegate::ReloadCredentials(
 
   // Get the list of new account ids.
   std::set<CoreAccountId> new_account_ids;
-  for (const auto& new_account : provider_->GetAllAccounts()) {
-    DCHECK(!new_account.gaia.empty());
-    DCHECK(!new_account.email.empty());
-
+  base::flat_map<CoreAccountId, DeviceAccountInfo> new_accounts =
+      base::MakeFlatMap<CoreAccountId, DeviceAccountInfo>(
+          provider_->GetAccountsForProfile(), {},
+          [](const DeviceAccountInfo& account) {
+            return std::make_pair(
+                CoreAccountId::FromGaiaId(account.GetGaiaId()), account);
+          });
+  for (const auto& [new_account_id, new_account] : new_accounts) {
     // Account must to be seeded before adding an account to ensure that
     // the GAIA ID is available if any client of this token service starts
     // a fetch access token operation when it receives a
@@ -260,19 +243,22 @@ void ProfileOAuth2TokenServiceIOSDelegate::ReloadCredentials(
 
   // Load all new_accounts.
   for (const auto& account_to_add : accounts_to_add) {
-    AddOrUpdateAccount(account_to_add);
+    AddOrUpdateAccount(account_to_add, GoogleServiceAuthErrorFromDeviceAccount(
+                                           new_accounts.at(account_to_add)));
   }
 }
 
-void ProfileOAuth2TokenServiceIOSDelegate::UpdateCredentials(
+void ProfileOAuth2TokenServiceIOSDelegate::UpdateCredentialsInternal(
     const CoreAccountId& account_id,
-    const std::string& refresh_token) {
+    const std::string& refresh_token,
+    const signin::TokenBindingInfo& token_binding_info) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   NOTREACHED() << "Unexpected call to UpdateCredentials when using shared "
                   "authentication.";
 }
 
-void ProfileOAuth2TokenServiceIOSDelegate::RevokeAllCredentials() {
+void ProfileOAuth2TokenServiceIOSDelegate::RevokeAllCredentialsInternal(
+    signin_metrics::SourceForRefreshTokenOperation source) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   ScopedBatchChange batch(this);
@@ -286,25 +272,64 @@ void ProfileOAuth2TokenServiceIOSDelegate::RevokeAllCredentials() {
 
 void ProfileOAuth2TokenServiceIOSDelegate::
     ReloadAllAccountsFromSystemWithPrimaryAccount(
-        const absl::optional<CoreAccountId>& primary_account_id) {
+        const std::optional<CoreAccountId>& primary_account_id) {
   ReloadCredentials(primary_account_id.value_or(CoreAccountId()));
 }
 
 void ProfileOAuth2TokenServiceIOSDelegate::ReloadAccountFromSystem(
     const CoreAccountId& account_id) {
-  AddOrUpdateAccount(account_id);
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  GoogleServiceAuthError error = GoogleServiceAuthError::AuthErrorNone();
+  for (const auto& account : provider_->GetAccountsForProfile()) {
+    if (account_id != CoreAccountId::FromGaiaId(account.GetGaiaId())) {
+      continue;
+    }
+    error = GoogleServiceAuthErrorFromDeviceAccount(account);
+    break;
+  }
+
+  AddOrUpdateAccount(account_id, error);
 }
 
 std::unique_ptr<OAuth2AccessTokenFetcher>
 ProfileOAuth2TokenServiceIOSDelegate::CreateAccessTokenFetcher(
     const CoreAccountId& account_id,
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
-    OAuth2AccessTokenConsumer* consumer) {
+    OAuth2AccessTokenConsumer* consumer,
+    const std::string& token_binding_challenge) {
   AccountInfo account_info =
       account_tracker_service_->GetAccountInfo(account_id);
   return std::make_unique<SSOAccessTokenFetcher>(consumer, provider_.get(),
                                                  account_info);
 }
+
+#if BUILDFLAG(IS_IOS)
+void ProfileOAuth2TokenServiceIOSDelegate::GetRefreshTokenFromDevice(
+    const CoreAccountId& account_id,
+    const OAuth2AccessTokenManager::ScopeSet& scopes,
+    signin::AccessTokenFetcher::TokenCallback callback) {
+  CHECK(RefreshTokenIsAvailableOnDevice(account_id));
+  std::set<std::string> scopes_set(scopes.begin(), scopes.end());
+  provider_->GetAccessToken(
+      GaiaId(account_id.ToString()),
+      GaiaUrls::GetInstance()->oauth2_chrome_client_id(), scopes_set,
+      base::BindOnce(
+          [](signin::AccessTokenFetcher::TokenCallback callback,
+             AccessTokenResult result) {
+            if (result.has_value()) {
+              const AccessTokenInfo& info = result.value();
+              std::move(callback).Run(
+                  GoogleServiceAuthError::AuthErrorNone(),
+                  signin::AccessTokenInfo(info.token, info.expiration_time,
+                                          std::string()));
+            } else {
+              std::move(callback).Run(result.error(),
+                                      signin::AccessTokenInfo());
+            }
+          },
+          std::move(callback)));
+}
+#endif
 
 std::vector<CoreAccountId> ProfileOAuth2TokenServiceIOSDelegate::GetAccounts()
     const {
@@ -312,36 +337,85 @@ std::vector<CoreAccountId> ProfileOAuth2TokenServiceIOSDelegate::GetAccounts()
   return std::vector<CoreAccountId>(accounts_.begin(), accounts_.end());
 }
 
+std::vector<AccountInfo>
+ProfileOAuth2TokenServiceIOSDelegate::GetAccountsOnDevice() const {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+
+  // TODO(crbug.com/368409110): Cache these accounts somewhere, maybe in a
+  // separate AccountTrackerService instance.
+  std::vector<AccountInfo> account_infos;
+  for (const auto& account : provider_->GetAccountsOnDevice()) {
+    AccountInfo::Builder builder(account.GetGaiaId(), account.GetEmail());
+    builder.SetAccountId(CoreAccountId::FromGaiaId(account.GetGaiaId()));
+    if (std::string hosted_domain = account.GetHostedDomain();
+        !hosted_domain.empty()) {
+      builder.SetHostedDomain(hosted_domain);
+    }
+    // TODO(crbug.com/368409110): Find a way to determine the full AccountInfo
+    // for these accounts, not only the "core" fields.
+    account_infos.push_back(builder.Build());
+  }
+  return account_infos;
+}
+
 bool ProfileOAuth2TokenServiceIOSDelegate::RefreshTokenIsAvailable(
     const CoreAccountId& account_id) const {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
-  return accounts_.count(account_id) > 0;
+  return accounts_.contains(account_id);
+}
+
+bool ProfileOAuth2TokenServiceIOSDelegate::RefreshTokenIsAvailableOnDevice(
+    const CoreAccountId& account_id) const {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+
+  for (const auto& account : provider_->GetAccountsOnDevice()) {
+    if (account.GetGaiaId().ToString() == account_id.ToString()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Clear the authentication error state and notify all observers that a new
 // refresh token is available so that they request new access tokens.
 void ProfileOAuth2TokenServiceIOSDelegate::AddOrUpdateAccount(
-    const CoreAccountId& account_id) {
+    const CoreAccountId& account_id,
+    GoogleServiceAuthError error) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   // Account must have been seeded before attempting to add it.
-  DCHECK(!account_tracker_service_->GetAccountInfo(account_id).gaia.empty());
-  DCHECK(!account_tracker_service_->GetAccountInfo(account_id).email.empty());
+  DCHECK(!account_tracker_service_->GetAccountInfo(account_id)
+              .GetGaiaId()
+              .empty());
+  DCHECK(
+      !account_tracker_service_->GetAccountInfo(account_id).GetEmail().empty());
 
-  bool account_present = accounts_.count(account_id) > 0;
-  if (account_present &&
-      GetAuthError(account_id) == GoogleServiceAuthError::AuthErrorNone()) {
+  if (accounts_.contains(account_id) && GetAuthError(account_id) == error) {
     // No need to update the account if it is already a known account and if
-    // there is no auth error.
+    // the error didn't change.
     return;
   }
 
   accounts_.insert(account_id);
-  UpdateAuthError(account_id, GoogleServiceAuthError::AuthErrorNone(),
+  UpdateAuthError(account_id, error,
                   /*fire_auth_error_changed=*/false);
-  FireAuthErrorChanged(account_id, GoogleServiceAuthError::AuthErrorNone());
   FireRefreshTokenAvailable(account_id);
+}
+
+void ProfileOAuth2TokenServiceIOSDelegate::OnAccountsOnDeviceChanged() {
+  FireAccountsOnDeviceChanged();
+}
+
+void ProfileOAuth2TokenServiceIOSDelegate::OnAccountOnDeviceUpdated(
+    const DeviceAccountInfo& device_account) {
+  // Note: Ideally, only notifications about accounts that are *not* in the
+  // current profile would be forwarded here, since AccountTrackerService takes
+  // care of notifying observers about accounts in the profile anyway. But
+  // currently, AccountTrackerService doesn't know about some account
+  // properties, specifically about the account avatar, and those notifications
+  // would otherwise not get propagated at all.
+  FireAccountOnDeviceUpdated(AccountInfoFromDeviceAccount(device_account));
 }
 
 void ProfileOAuth2TokenServiceIOSDelegate::RemoveAccount(
@@ -349,8 +423,8 @@ void ProfileOAuth2TokenServiceIOSDelegate::RemoveAccount(
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   DCHECK(!account_id.empty());
 
-  if (accounts_.count(account_id) > 0) {
-    accounts_.erase(account_id);
+  if (auto it = accounts_.find(account_id); it != accounts_.end()) {
+    accounts_.erase(it);
     ClearAuthError(account_id);
     FireRefreshTokenRevoked(account_id);
   }

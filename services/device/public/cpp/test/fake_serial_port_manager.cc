@@ -106,9 +106,10 @@ void FakeSerialPortManager::AddPort(mojom::SerialPortInfoPtr port) {
 
 void FakeSerialPortManager::RemovePort(base::UnguessableToken token) {
   auto it = ports_.find(token);
-  DCHECK(it != ports_.end());
+  CHECK(it != ports_.end());
   mojom::SerialPortInfoPtr info = std::move(it->second);
   ports_.erase(it);
+  info->connected = false;
 
   for (auto& client : clients_)
     client->OnPortRemoved(info.Clone());
@@ -119,7 +120,8 @@ void FakeSerialPortManager::SetClient(
   clients_.Add(std::move(client));
 }
 
-void FakeSerialPortManager::GetDevices(GetDevicesCallback callback) {
+void FakeSerialPortManager::GetDevices(bool allow_bluetooth_system_prompt,
+                                       GetDevicesCallback callback) {
   std::vector<mojom::SerialPortInfoPtr> ports;
   for (const auto& map_entry : ports_)
     ports.push_back(map_entry.second.Clone());

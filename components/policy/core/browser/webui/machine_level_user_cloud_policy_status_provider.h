@@ -19,9 +19,8 @@ class CloudPolicyCore;
 
 // The following constants identify top-level keys in the dictionary returned by
 // and are specific to MachineLevelUserCloudPolicyStatusProvider.
-POLICY_EXPORT extern const char kDeviceIdKey[];
-POLICY_EXPORT extern const char kEnrollmentTokenKey[];
-POLICY_EXPORT extern const char kMachineKey[];
+inline constexpr char kDeviceIdKey[] = "deviceId";
+inline constexpr char kMachineKey[] = "machine";
 
 struct POLICY_EXPORT MachineLevelUserCloudPolicyContext {
   std::string enrollmentToken;
@@ -35,6 +34,7 @@ class POLICY_EXPORT MachineLevelUserCloudPolicyStatusProvider
  public:
   MachineLevelUserCloudPolicyStatusProvider(
       CloudPolicyCore* core,
+      CloudPolicyCore* extension_install_core,
       PrefService* prefs,
       MachineLevelUserCloudPolicyContext* context);
   MachineLevelUserCloudPolicyStatusProvider(
@@ -44,7 +44,8 @@ class POLICY_EXPORT MachineLevelUserCloudPolicyStatusProvider
   ~MachineLevelUserCloudPolicyStatusProvider() override;
 
   // PolicyStatusProvider implementation.
-  base::Value::Dict GetStatus() override;
+  base::DictValue GetStatus() override;
+  policy::mojom::StatusPtr GetStatusMojo() override;
 
   // CloudPolicyStore::Observer implementation.
   void OnStoreLoaded(CloudPolicyStore* store) override;
@@ -52,6 +53,7 @@ class POLICY_EXPORT MachineLevelUserCloudPolicyStatusProvider
 
  private:
   raw_ptr<CloudPolicyCore> core_;
+  raw_ptr<CloudPolicyCore> extension_install_core_;
   raw_ptr<PrefService> prefs_;
   raw_ptr<MachineLevelUserCloudPolicyContext> context_;
 };

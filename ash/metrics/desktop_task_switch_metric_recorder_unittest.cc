@@ -248,6 +248,26 @@ TEST_F(DesktopTaskSwitchMetricRecorderTest,
   EXPECT_EQ(0, GetActionCount());
 }
 
+// Verify user action is properly recorded when the previously active window is
+// destroyed and a new positionable window is activated.
+TEST_F(DesktopTaskSwitchMetricRecorderTest,
+       ActivatePositionableWindowAfterDestroyingLastActiveWindow) {
+  std::unique_ptr<aura::Window> positionable_window_1 =
+      CreatePositionableWindow();
+  std::unique_ptr<aura::Window> positionable_window_2 =
+      CreatePositionableWindow();
+
+  ActiveTaskWindowWithUserInput(positionable_window_1.get());
+  ResetActionCounts();
+
+  // Destroy the previously active window.
+  positionable_window_1.reset();
+
+  // Activating the second window should be recorded as a task switch.
+  ActiveTaskWindowWithUserInput(positionable_window_2.get());
+  EXPECT_EQ(1, GetActionCount());
+}
+
 // Test fixture to test the integration of the DesktopTaskSwitchMetricsRecorder
 // class with ash::Shell environment.
 class DesktopTaskSwitchMetricRecorderWithShellIntegrationTest
@@ -307,7 +327,10 @@ int DesktopTaskSwitchMetricRecorderWithShellIntegrationTest::GetActionCount()
 
 aura::Window* DesktopTaskSwitchMetricRecorderWithShellIntegrationTest::
     CreatePositionableWindowInShellWithBounds(const gfx::Rect& bounds) {
-  return CreateTestWindowInShellWithDelegate(&test_window_delegate_, 0, bounds);
+  return CreateTestWindowInShell({.delegate = &test_window_delegate_,
+                                  .bounds = bounds,
+                                  .window_id = 0})
+      .release();
 }
 
 // Verify a user action is recorded when a positionable window is activated by

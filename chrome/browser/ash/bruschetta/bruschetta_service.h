@@ -5,8 +5,12 @@
 #ifndef CHROME_BROWSER_ASH_BRUSCHETTA_BRUSCHETTA_SERVICE_H_
 #define CHROME_BROWSER_ASH_BRUSCHETTA_BRUSCHETTA_SERVICE_H_
 
+#include <string_view>
+
 #include "base/callback_list.h"
 #include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_util.h"
@@ -18,6 +22,7 @@
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/prefs/pref_change_registrar.h"
 
+class PrefService;
 class Profile;
 
 namespace bruschetta {
@@ -30,11 +35,9 @@ class BruschettaLauncher;
 class BruschettaService : public KeyedService,
                           public ash::ConciergeClient::VmObserver {
  public:
-  explicit BruschettaService(Profile* profile);
+  // `local_state` must be non-null and must outlive `this`.
+  BruschettaService(PrefService* local_state, Profile* profile);
   ~BruschettaService() override;
-
-  // Helper method to get the service instance for the given profile.
-  static BruschettaService* GetForProfile(Profile* profile);
 
   // Register an existing bruschetta instance with the terminal app.
   void RegisterWithTerminal(const guest_os::GuestId& guest_id);
@@ -69,7 +72,15 @@ class BruschettaService : public KeyedService,
   void RemoveVm(const guest_os::GuestId& guest_id,
                 base::OnceCallback<void(bool)> callback);
 
+  // Checks if the vm identified by `vm_name` is in the running list.
+  bool IsVmRunning(std::string_view vm_name);
+
+  // Stops all running VMs.
+  void StopRunningVms();
+
  private:
+  const raw_ref<PrefService> local_state_;
+
   struct VmRegistration {
     std::unique_ptr<BruschettaLauncher> launcher;
     guest_os::GuestOsMountProviderRegistry::Id mount_id;
@@ -92,14 +103,18 @@ class BruschettaService : public KeyedService,
 
   void StopVmIfRequiredByPolicy(std::string vm_name,
                                 std::string config_id,
-                                const base::Value::Dict* config);
+                                const base::DictValue* config);
 
   void OnRemoveVm(base::OnceCallback<void(bool)> callback,
                   guest_os::GuestId guest_id,
                   guest_os::GuestOsRemover::Result result);
-  void OnUninstallDlc(base::OnceCallback<void(bool)> callback,
-                      guest_os::GuestId guest_id,
-                      const std::string& result);
+  void OnUninstallToolsDlc(base::OnceCallback<void(bool)> callback,
+                           guest_os::GuestId guest_id,
+                           std::string_view result);
+  void OnUninstallAllDlcs(base::OnceCallback<void(bool)> callback,
+                          guest_os::GuestId guest_id,
+                          std::string_view tools_result,
+                          std::string_view firmware_result);
 
   base::flat_map<std::string, VmRegistration> runnable_vms_;
   base::flat_map<std::string, RunningVmPolicy> running_vms_;
@@ -112,11 +127,8 @@ class BruschettaService : public KeyedService,
 
   PrefChangeRegistrar pref_observer_;
   base::CallbackListSubscription cros_settings_observer_;
-  base::ScopedObservation<ash::ConciergeClient,
-                          ash::ConciergeClient::VmObserver>
-      vm_observer_{this};
 
-  Profile* const profile_;
+  const raw_ptr<Profile> profile_;
 
   // Must be last
   base::WeakPtrFactory<BruschettaService> weak_ptr_factory_{this};

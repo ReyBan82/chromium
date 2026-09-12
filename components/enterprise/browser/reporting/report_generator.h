@@ -15,6 +15,7 @@
 #include "components/enterprise/browser/reporting/report_request.h"
 #include "components/enterprise/browser/reporting/report_request_queue_generator.h"
 #include "components/enterprise/browser/reporting/report_type.h"
+#include "components/enterprise/browser/reporting/report_util.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 
 namespace enterprise_reporting {
@@ -23,7 +24,8 @@ class ReportingDelegateFactory;
 
 class ReportGenerator {
  public:
-  using ReportCallback = base::OnceCallback<void(ReportRequestQueue)>;
+  using ReportCallback = base::OnceCallback<void(
+      base::expected<ReportRequestQueue, ReportGenerationError>)>;
 
   class Delegate {
    public:
@@ -46,7 +48,7 @@ class ReportGenerator {
   virtual ~ReportGenerator();
 
   // Asynchronously generates a queue of report requests, providing them to
-  // |callback| when ready. If |report_type| is kFull, all details are
+  // `callback` when ready. If `report_type` is `kBrowser`, all details are
   // included for all loaded profiles. Otherwise, the report only contains
   // information that are needed by that particular type.
   virtual void Generate(ReportType report_type, ReportCallback callback);

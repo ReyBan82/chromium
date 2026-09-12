@@ -8,13 +8,20 @@
 #include <fuchsia/media/cpp/fidl_test_base.h>
 #include <lib/fidl/cpp/binding.h>
 
+#include <optional>
+
+#include "base/compiler_specific.h"
 #include "base/containers/queue.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "base/time/time.h"
+#include "base/types/fixed_array.h"
+#include "media/base/buffering_state.h"
 #include "media/base/cdm_context.h"
 #include "media/base/decoder_buffer.h"
 #include "media/base/renderer_client.h"
@@ -22,7 +29,6 @@
 #include "media/fuchsia/common/passthrough_sysmem_buffer_stream.h"
 #include "media/fuchsia/common/sysmem_client.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace {
 
@@ -40,7 +46,7 @@ class TestDemuxerStream : public media::DemuxerStream {
     explicit ReadResult(const media::AudioDecoderConfig& config)
         : config(config) {}
 
-    absl::optional<media::AudioDecoderConfig> config;
+    std::optional<media::AudioDecoderConfig> config;
     scoped_refptr<media::DecoderBuffer> buffer;
   };
 
@@ -71,10 +77,7 @@ class TestDemuxerStream : public media::DemuxerStream {
     SatisfyRead();
   }
   media::AudioDecoderConfig audio_decoder_config() override { return config_; }
-  media::VideoDecoderConfig video_decoder_config() override {
-    NOTREACHED();
-    return media::VideoDecoderConfig();
-  }
+  media::VideoDecoderConfig video_decoder_config() override { NOTREACHED(); }
   Type type() const override { return AUDIO; }
   media::StreamLiveness liveness() const override {
     return media::StreamLiveness::kRecorded;
@@ -136,11 +139,31 @@ class TestStreamSink : public fuchsia::media::testing::StreamSink_TestBase {
 
   bool received_end_of_stream() const { return received_end_of_stream_; }
 
+  bool HasPendingOrReceivedPackets() const {
+    if (!received_packets_.empty()) {
+      return true;
+    }
+    zx_signals_t observed = 0;
+    return binding_.channel().wait_one(ZX_CHANNEL_READABLE,
+                                       zx::time::infinite_past(),
+                                       &observed) == ZX_OK;
+  }
+
+  void WaitPacket() {
+    while (received_packets_.empty()) {
+      EXPECT_TRUE(packet_received_future_.Wait());
+      packet_received_future_.Clear();
+    }
+  }
+
   // fuchsia::media::StreamSink overrides.
   void SendPacket(fuchsia::media::StreamPacket packet,
                   SendPacketCallback callback) override {
     EXPECT_FALSE(received_end_of_stream_);
     received_packets_.push_back(std::move(packet));
+    if (!packet_received_future_.IsReady()) {
+      packet_received_future_.SetValue();
+    }
     callback();
   }
   void EndOfStream() override {
@@ -156,6 +179,7 @@ class TestStreamSink : public fuchsia::media::testing::StreamSink_TestBase {
     std::move(std::begin(received_packets_), std::end(received_packets_),
               std::back_inserter(discarded_packets_));
     received_packets_.clear();
+    packet_received_future_.Clear();
   }
 
   // Other methods are not expected to be called.
@@ -172,6 +196,7 @@ class TestStreamSink : public fuchsia::media::testing::StreamSink_TestBase {
 
   std::vector<fuchsia::media::StreamPacket> received_packets_;
   std::vector<fuchsia::media::StreamPacket> discarded_packets_;
+  base::test::TestFuture<void> packet_received_future_;
 
   bool received_end_of_stream_ = false;
 };
@@ -184,34 +209,14 @@ class TestAudioConsumer
       fidl::InterfaceRequest<fuchsia::media::AudioConsumer> request)
       : binding_(this, std::move(request)), volume_control_binding_(this) {}
 
-  std::unique_ptr<TestStreamSink> TakeStreamSink() {
-    return std::move(stream_sink_);
-  }
-
   std::unique_ptr<TestStreamSink> WaitStreamSinkConnected() {
-    if (!stream_sink_) {
-      base::RunLoop run_loop;
-      wait_stream_sink_created_loop_ = &run_loop;
-      run_loop.Run();
-      wait_stream_sink_created_loop_ = nullptr;
-    }
-    EXPECT_TRUE(stream_sink_);
-    return TakeStreamSink();
+    return stream_sink_future_.Take();
   }
 
-  void WaitStarted() {
-    if (started_)
-      return;
+  void WaitStarted() { EXPECT_TRUE(start_media_time_future_.Wait()); }
 
-    base::RunLoop run_loop;
-    wait_started_loop_ = &run_loop;
-    run_loop.Run();
-    wait_started_loop_ = nullptr;
-    EXPECT_TRUE(started_);
-  }
-
-  void UpdateStatus(absl::optional<base::TimeTicks> reference_time,
-                    absl::optional<base::TimeDelta> media_time) {
+  void UpdateStatus(std::optional<base::TimeTicks> reference_time,
+                    std::optional<base::TimeDelta> media_time) {
     fuchsia::media::AudioConsumerStatus status;
     if (reference_time) {
       CHECK(media_time);
@@ -234,8 +239,11 @@ class TestAudioConsumer
 
   void SignalEndOfStream() { binding_.events().OnEndOfStream(); }
 
-  bool started() const { return started_; }
-  base::TimeDelta start_media_time() const { return start_media_time_; }
+  bool IsStarted() const { return start_media_time_future_.IsReady(); }
+  bool stream_sink_had_packets_at_start() const {
+    return stream_sink_had_packets_at_start_;
+  }
+  base::TimeDelta GetStartMediaTime() { return start_media_time_future_.Get(); }
   float playback_rate() const { return playback_rate_; }
   float volume() const { return volume_; }
 
@@ -247,28 +255,27 @@ class TestAudioConsumer
       fidl::InterfaceRequest<fuchsia::media::StreamSink> stream_sink_request)
       override {
     create_stream_sink_called_ = true;
-    stream_sink_ = std::make_unique<TestStreamSink>(
+    stream_sink_future_.SetValue(std::make_unique<TestStreamSink>(
         std::move(buffers), std::move(stream_type), std::move(compression),
-        std::move(stream_sink_request));
-    if (wait_stream_sink_created_loop_)
-      wait_stream_sink_created_loop_->Quit();
+        std::move(stream_sink_request)));
   }
 
   void Start(fuchsia::media::AudioConsumerStartFlags flags,
              int64_t reference_time,
              int64_t media_time) override {
     EXPECT_TRUE(create_stream_sink_called_);
-    EXPECT_FALSE(started_);
+    EXPECT_FALSE(IsStarted());
     EXPECT_EQ(reference_time, fuchsia::media::NO_TIMESTAMP);
-    started_ = true;
-    start_media_time_ = base::TimeDelta::FromZxDuration(media_time);
-    if (wait_started_loop_)
-      wait_started_loop_->Quit();
+    stream_sink_had_packets_at_start_ =
+        stream_sink_future_.IsReady() &&
+        stream_sink_future_.Get()->HasPendingOrReceivedPackets();
+    start_media_time_future_.SetValue(
+        base::TimeDelta::FromZxDuration(media_time));
   }
 
   void Stop() override {
-    EXPECT_TRUE(started_);
-    started_ = false;
+    EXPECT_TRUE(IsStarted());
+    start_media_time_future_.Clear();
   }
 
   void SetRate(float rate) override { playback_rate_ = rate; }
@@ -304,26 +311,21 @@ class TestAudioConsumer
 
     std::move(status_callback_)(std::move(status_update_.value()));
     status_callback_ = {};
-    status_update_ = absl::nullopt;
+    status_update_ = std::nullopt;
   }
 
   fidl::Binding<fuchsia::media::AudioConsumer> binding_;
   fidl::Binding<fuchsia::media::audio::VolumeControl> volume_control_binding_;
-  std::unique_ptr<TestStreamSink> stream_sink_;
-
-  base::RunLoop* wait_stream_sink_created_loop_ = nullptr;
-  base::RunLoop* wait_started_loop_ = nullptr;
+  base::test::TestFuture<std::unique_ptr<TestStreamSink>> stream_sink_future_;
+  base::test::TestFuture<base::TimeDelta> start_media_time_future_;
 
   bool create_stream_sink_called_ = false;
+  bool stream_sink_had_packets_at_start_ = false;
 
   WatchStatusCallback status_callback_;
-  absl::optional<fuchsia::media::AudioConsumerStatus> status_update_;
-
-  bool started_ = false;
-  base::TimeDelta start_media_time_;
+  std::optional<fuchsia::media::AudioConsumerStatus> status_update_;
 
   float playback_rate_ = 1.0;
-
   float volume_ = 1.0;
 };
 
@@ -347,7 +349,7 @@ class TestRendererClient : public media::RendererClient {
 
   media::BufferingState buffering_state() const { return buffering_state_; }
 
-  absl::optional<media::AudioDecoderConfig> last_config_change() const {
+  std::optional<media::AudioDecoderConfig> last_config_change() const {
     return last_config_change_;
   }
 
@@ -385,7 +387,7 @@ class TestRendererClient : public media::RendererClient {
   }
   void OnVideoNaturalSizeChange(const gfx::Size& size) override { FAIL(); }
   void OnVideoOpacityChange(bool opaque) override { FAIL(); }
-  void OnVideoFrameRateChange(absl::optional<int> fps) override { FAIL(); }
+  void OnVideoFrameRateChange(std::optional<int> fps) override { FAIL(); }
 
  private:
   media::PipelineStatus expected_error_ = media::PIPELINE_OK;
@@ -393,7 +395,7 @@ class TestRendererClient : public media::RendererClient {
   bool expect_eos_ = false;
   media::BufferingState buffering_state_ = media::BUFFERING_HAVE_NOTHING;
   size_t bytes_decoded_ = 0;
-  absl::optional<media::AudioDecoderConfig> last_config_change_;
+  std::optional<media::AudioDecoderConfig> last_config_change_;
 };
 
 // media::SysmemBufferStream that asynchronously decouples buffer production
@@ -485,7 +487,12 @@ class TestFuchsiaCdmContext : public media::CdmContext,
 
 class WebEngineAudioRendererTestBase : public testing::Test {
  public:
-  WebEngineAudioRendererTestBase() = default;
+  WebEngineAudioRendererTestBase() {
+    // Mock clock is initialized to 0 by default. Advance it by an arbitrary
+    // value to avoid dependency on the default behavior.
+    constexpr base::TimeDelta kBaseTime = base::Seconds(3452);
+    task_environment_.AdvanceClock(kBaseTime);
+  }
   ~WebEngineAudioRendererTestBase() override = default;
 
   void CreateUninitializedRenderer();
@@ -495,7 +502,7 @@ class WebEngineAudioRendererTestBase : public testing::Test {
   void FillDemuxerStream(base::TimeDelta end_pos);
   void FillBuffer();
   void StartPlayback(base::TimeDelta start_time = base::TimeDelta());
-  void CheckGetWallClockTimes(absl::optional<base::TimeDelta> media_timestamp,
+  void CheckGetWallClockTimes(std::optional<base::TimeDelta> media_timestamp,
                               base::TimeTicks expected_wall_clock,
                               bool is_time_moving);
 
@@ -524,7 +531,7 @@ class WebEngineAudioRendererTestBase : public testing::Test {
   TestRendererClient client_;
 
   std::unique_ptr<media::AudioRenderer> audio_renderer_;
-  media::TimeSource* time_source_;
+  raw_ptr<media::TimeSource> time_source_;
   base::TimeDelta demuxer_stream_pos_;
 };
 
@@ -542,20 +549,12 @@ void WebEngineAudioRendererTestBase::InitializeRenderer() {
     demuxer_stream_ = std::make_unique<TestDemuxerStream>(GetStreamConfig());
   }
 
-  base::RunLoop run_loop;
-  media::PipelineStatus pipeline_status;
-  audio_renderer_->Initialize(
-      demuxer_stream_.get(), &cdm_context_, &client_,
-      base::BindLambdaForTesting(
-          [&run_loop, &pipeline_status](media::PipelineStatus s) {
-            pipeline_status = s;
-            run_loop.Quit();
-          }));
-  run_loop.Run();
+  base::test::TestFuture<media::PipelineStatus> status_future;
+  audio_renderer_->Initialize(demuxer_stream_.get(), &cdm_context_, &client_,
+                              status_future.GetCallback());
+  ASSERT_EQ(status_future.Get(), media::PIPELINE_OK);
 
-  ASSERT_EQ(pipeline_status, media::PIPELINE_OK);
-
-  audio_consumer_->UpdateStatus(absl::nullopt, absl::nullopt);
+  audio_consumer_->UpdateStatus(std::nullopt, std::nullopt);
 
   task_environment_.RunUntilIdle();
 }
@@ -569,8 +568,7 @@ void WebEngineAudioRendererTestBase::ProduceDemuxerPacket(
     base::TimeDelta duration) {
   // Create a dummy packet that contains just 1 byte.
   const size_t kBufferSize = 1;
-  scoped_refptr<media::DecoderBuffer> buffer =
-      new media::DecoderBuffer(kBufferSize);
+  auto buffer = base::MakeRefCounted<media::DecoderBuffer>(kBufferSize);
   buffer->set_timestamp(demuxer_stream_pos_);
   buffer->set_duration(duration);
   demuxer_stream_pos_ += duration;
@@ -613,21 +611,21 @@ void WebEngineAudioRendererTestBase::FillBuffer() {
 }
 
 void WebEngineAudioRendererTestBase::StartPlayback(base::TimeDelta start_time) {
-  EXPECT_FALSE(audio_consumer_->started());
+  EXPECT_FALSE(audio_consumer_->IsStarted());
   time_source_->SetMediaTime(start_time);
 
   ASSERT_NO_FATAL_FAILURE(FillBuffer());
   time_source_->StartTicking();
   task_environment_.RunUntilIdle();
-  EXPECT_TRUE(audio_consumer_->started());
-  EXPECT_EQ(audio_consumer_->start_media_time(), start_time);
+  EXPECT_TRUE(audio_consumer_->IsStarted());
+  EXPECT_EQ(audio_consumer_->GetStartMediaTime(), start_time);
 
   audio_consumer_->UpdateStatus(base::TimeTicks::Now(), start_time);
   task_environment_.RunUntilIdle();
 }
 
 void WebEngineAudioRendererTestBase::CheckGetWallClockTimes(
-    absl::optional<base::TimeDelta> media_timestamp,
+    std::optional<base::TimeDelta> media_timestamp,
     base::TimeTicks expected_wall_clock,
     bool is_time_moving) {
   std::vector<base::TimeDelta> media_timestamps;
@@ -648,17 +646,17 @@ void WebEngineAudioRendererTestBase::StartPlaybackAndVerifyClock(
   demuxer_stream_pos_ = start_time;
   ASSERT_NO_FATAL_FAILURE(FillBuffer());
 
-  EXPECT_FALSE(audio_consumer_->started());
+  EXPECT_FALSE(audio_consumer_->IsStarted());
   time_source_->StartTicking();
   task_environment_.RunUntilIdle();
-  EXPECT_TRUE(audio_consumer_->started());
+  EXPECT_TRUE(audio_consumer_->IsStarted());
 
   // Start position should be reported before updated status is received.
   EXPECT_EQ(time_source_->CurrentMediaTime(), start_time);
   task_environment_.FastForwardBy(kTimeStep);
   EXPECT_EQ(time_source_->CurrentMediaTime(), start_time);
 
-  CheckGetWallClockTimes(absl::nullopt, base::TimeTicks(), false);
+  CheckGetWallClockTimes(std::nullopt, base::TimeTicks(), false);
   CheckGetWallClockTimes(start_time + kTimeStep,
                          base::TimeTicks::Now() + kTimeStep, false);
 
@@ -674,7 +672,7 @@ void WebEngineAudioRendererTestBase::StartPlaybackAndVerifyClock(
   EXPECT_EQ(time_source_->CurrentMediaTime(),
             start_time + (-kStartDelay + kTimeStep) * playback_rate);
 
-  CheckGetWallClockTimes(absl::nullopt, base::TimeTicks::Now(), true);
+  CheckGetWallClockTimes(std::nullopt, base::TimeTicks::Now(), true);
   CheckGetWallClockTimes(start_time + kTimeStep,
                          start_wall_clock + kTimeStep / playback_rate, true);
   CheckGetWallClockTimes(start_time + 2 * kTimeStep,
@@ -687,9 +685,10 @@ void WebEngineAudioRendererTestBase::TestPcmStream(
     size_t bytes_per_sample_input,
     fuchsia::media::AudioSampleFormat fuchsia_sample_format,
     size_t bytes_per_sample_output) {
-  media::AudioDecoderConfig config(
-      media::AudioCodec::kPCM, sample_format, media::CHANNEL_LAYOUT_STEREO,
-      kDefaultSampleRate, {}, media::EncryptionScheme::kUnencrypted);
+  media::AudioDecoderConfig config(media::AudioCodec::kPCM, sample_format,
+                                   media::ChannelLayoutConfig::Stereo(),
+                                   kDefaultSampleRate, {},
+                                   media::EncryptionScheme::kUnencrypted);
 
   demuxer_stream_ = std::make_unique<TestDemuxerStream>(config);
 
@@ -701,12 +700,11 @@ void WebEngineAudioRendererTestBase::TestPcmStream(
   const size_t kNumSamples = 10;
   const size_t kChannels = 2;
   size_t input_buffer_size = kNumSamples * kChannels * bytes_per_sample_input;
-  scoped_refptr<media::DecoderBuffer> buffer =
-      new media::DecoderBuffer(input_buffer_size);
+  auto buffer = base::MakeRefCounted<media::DecoderBuffer>(input_buffer_size);
   buffer->set_timestamp(demuxer_stream_pos_);
   buffer->set_duration(kPacketDuration);
   for (size_t i = 0; i < input_buffer_size; ++i) {
-    buffer->writable_data()[i] = i;
+    UNSAFE_TODO(buffer->writable_data()[i]) = i;
   }
   demuxer_stream_->QueueReadResult(TestDemuxerStream::ReadResult(buffer));
 
@@ -720,9 +718,9 @@ void WebEngineAudioRendererTestBase::TestPcmStream(
   // Read and verify packet content
   size_t output_size = kNumSamples * kChannels * bytes_per_sample_output;
   EXPECT_EQ(packet.payload_size, output_size);
-  uint8_t data[output_size];
+  base::FixedArray<uint8_t> data(output_size);
   zx_status_t result = stream_sink_->buffers()[packet.payload_buffer_id].read(
-      data, 0, output_size);
+      data.data(), 0, output_size);
   ZX_CHECK(result == ZX_OK, result);
 
   for (size_t i = 0; i < output_size; ++i) {
@@ -748,9 +746,10 @@ class WebEngineAudioRendererTest
     auto encryption_scheme = GetParam().simulate_fuchsia_cdm
                                  ? media::EncryptionScheme::kCenc
                                  : media::EncryptionScheme::kUnencrypted;
-    return media::AudioDecoderConfig(
-        media::AudioCodec::kPCM, media::kSampleFormatF32,
-        media::CHANNEL_LAYOUT_MONO, kDefaultSampleRate, {}, encryption_scheme);
+    return media::AudioDecoderConfig(media::AudioCodec::kPCM,
+                                     media::kSampleFormatF32,
+                                     media::ChannelLayoutConfig::Mono(),
+                                     kDefaultSampleRate, {}, encryption_scheme);
   }
 };
 
@@ -775,6 +774,17 @@ TEST_P(WebEngineAudioRendererTest, InitializeAndBuffer) {
   ProduceDemuxerPacket(base::Milliseconds(10));
   task_environment_.RunUntilIdle();
   EXPECT_EQ(stream_sink_->received_packets()->size(), 1U);
+}
+
+TEST_P(WebEngineAudioRendererTest, SetZeroRateBeforeStart) {
+  ASSERT_NO_FATAL_FAILURE(CreateAndInitializeRenderer());
+
+  // `SetPlaybackRate(0.0)` may be called before `StartPlaying()`. This should
+  // not prevent stream buffering.
+  audio_renderer_->GetTimeSource()->SetPlaybackRate(0.0);
+  task_environment_.RunUntilIdle();
+
+  ASSERT_NO_FATAL_FAILURE(FillBuffer());
 }
 
 TEST_P(WebEngineAudioRendererTest, StartPlaybackBeforeStreamSinkConnected) {
@@ -844,9 +854,9 @@ TEST_P(WebEngineAudioRendererTest, Seek) {
   EXPECT_EQ(time_source_->CurrentMediaTime(), kStartPos + kTimeStep);
 
   // Flush the renderer.
-  base::RunLoop run_loop;
-  audio_renderer_->Flush(run_loop.QuitClosure());
-  run_loop.Run();
+  base::test::TestFuture<void> flush_future;
+  audio_renderer_->Flush(flush_future.GetCallback());
+  EXPECT_TRUE(flush_future.Wait());
 
   // Restart playback from a new position.
   const base::TimeDelta kSeekPos = base::Milliseconds(123);
@@ -887,28 +897,29 @@ struct ConfigChangeTestConfig {
   bool encrypted_tail;
 };
 
-class WebEngineAudioRendererConfgChangeTest
+class WebEngineAudioRendererConfigChangeTest
     : public WebEngineAudioRendererTestBase,
       public testing::WithParamInterface<ConfigChangeTestConfig> {
   media::AudioDecoderConfig GetStreamConfig() final {
     auto encryption_scheme = GetParam().encrypted_head
                                  ? media::EncryptionScheme::kCenc
                                  : media::EncryptionScheme::kUnencrypted;
-    return media::AudioDecoderConfig(
-        media::AudioCodec::kPCM, media::kSampleFormatF32,
-        media::CHANNEL_LAYOUT_MONO, kDefaultSampleRate, {}, encryption_scheme);
+    return media::AudioDecoderConfig(media::AudioCodec::kPCM,
+                                     media::kSampleFormatF32,
+                                     media::ChannelLayoutConfig::Mono(),
+                                     kDefaultSampleRate, {}, encryption_scheme);
   }
 };
 
 // Run all WebEngineAudioRendererTests with CDM enabled and disabled.
 INSTANTIATE_TEST_SUITE_P(ConfigChange,
-                         WebEngineAudioRendererConfgChangeTest,
+                         WebEngineAudioRendererConfigChangeTest,
                          testing::Values(ConfigChangeTestConfig{false, false},
                                          ConfigChangeTestConfig{false, true},
                                          ConfigChangeTestConfig{true, false},
                                          ConfigChangeTestConfig{true, true}));
 
-TEST_P(WebEngineAudioRendererConfgChangeTest, ConfigChange) {
+TEST_P(WebEngineAudioRendererConfigChangeTest, ConfigChange) {
   ASSERT_NO_FATAL_FAILURE(CreateAndInitializeRenderer());
   ASSERT_NO_FATAL_FAILURE(StartPlayback());
 
@@ -929,7 +940,7 @@ TEST_P(WebEngineAudioRendererConfgChangeTest, ConfigChange) {
                                    : media::EncryptionScheme::kUnencrypted;
   media::AudioDecoderConfig updated_config(
       media::AudioCodec::kOpus, media::kSampleFormatF32,
-      media::CHANNEL_LAYOUT_STEREO, kNewSampleRate, kArbitraryExtraData,
+      media::ChannelLayoutConfig::Stereo(), kNewSampleRate, kArbitraryExtraData,
       mew_encryption_scheme);
 
   demuxer_stream_->QueueReadResult(
@@ -1148,7 +1159,35 @@ TEST_P(WebEngineAudioRendererTest, PlaybackBeforeSinkCreation) {
   // Wait until the stream is started. Start() should be called only after
   // StreamSink() is connected and the packets are buffered.
   audio_consumer_->WaitStarted();
-  stream_sink_ = audio_consumer_->TakeStreamSink();
+  EXPECT_TRUE(audio_consumer_->stream_sink_had_packets_at_start());
+  stream_sink_ = audio_consumer_->WaitStreamSinkConnected();
+  stream_sink_->WaitPacket();
   EXPECT_GT(stream_sink_->received_packets()->size(), 0U);
   EXPECT_FALSE(stream_sink_->received_end_of_stream());
+}
+
+TEST_P(WebEngineAudioRendererTest, Buffering) {
+  ASSERT_NO_FATAL_FAILURE(CreateAndInitializeRenderer());
+
+  constexpr base::TimeDelta kStartPos = base::TimeDelta();
+  ASSERT_NO_FATAL_FAILURE(StartPlayback(kStartPos));
+
+  constexpr base::TimeDelta kTimeBeforeBuffering = base::Milliseconds(500);
+  FillDemuxerStream(kTimeBeforeBuffering);
+
+  // Buffering state should be set to BUFFERING_HAVE_ENOUGH while the renderer
+  // still has data to play.
+  task_environment_.FastForwardBy(kTimeBeforeBuffering - kMinLeadTime -
+                                  kPacketDuration);
+  EXPECT_EQ(client_.buffering_state(), media::BUFFERING_HAVE_ENOUGH);
+
+  // Buffering state should be updated once the renderer runs out of data it can
+  // read from the demuxer.
+  task_environment_.FastForwardBy(kPacketDuration);
+  EXPECT_EQ(client_.buffering_state(), media::BUFFERING_HAVE_NOTHING);
+
+  // Buffering state should be updated once more data is read from the demuxer.
+  FillDemuxerStream(kTimeBeforeBuffering + kMinLeadTime);
+  task_environment_.RunUntilIdle();
+  EXPECT_EQ(client_.buffering_state(), media::BUFFERING_HAVE_ENOUGH);
 }

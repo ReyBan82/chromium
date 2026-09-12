@@ -2,16 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/extensions/policy_handlers.h"
+
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "base/json/json_reader.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
-#include "base/strings/utf_string_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/extensions/extension_management_constants.h"
 #include "chrome/browser/extensions/external_policy_loader.h"
-#include "chrome/browser/extensions/policy_handlers.h"
+#include "chrome/browser/extensions/external_provider_impl.h"
+#include "components/account_id/account_id.h"
 #include "components/policy/core/browser/policy_error_map.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_types.h"
@@ -19,13 +28,25 @@
 #include "components/policy/policy_constants.h"
 #include "components/prefs/pref_value_map.h"
 #include "components/strings/grit/components_strings.h"
+#include "components/user_manager/scoped_user_manager.h"
 #include "extensions/browser/pref_names.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/mojom/manifest.mojom-shared.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/l10n/l10n_util.h"
 
 #if BUILDFLAG(IS_WIN)
 #include "base/win/win_util.h"
 #endif
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/ash_extension_constants.h"
+#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
+#endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+using extensions::mojom::ManifestLocation;
 
 namespace extensions {
 
@@ -71,14 +92,14 @@ const char kSanitizedTestManagementPolicy[] =
     "  },"
     "}";
 
-const char kTestManagementPolicy3[] =
+constexpr char kTestManagementPolicy3[] =
     "{"
     "  \"*\": {"
     "    \"runtime_blocked_hosts\": [\"%s\"]"
     "  }"
     "}";
 
-const char kTestManagementPolicy4[] =
+constexpr char kTestManagementPolicy4[] =
     "{"
     "  \"*\": {"
     "    \"runtime_allowed_hosts\": [\"%s\"]"
@@ -105,7 +126,7 @@ constexpr int kJsonParseOptions =
     base::JSON_PARSE_CHROMIUM_EXTENSIONS | base::JSON_ALLOW_TRAILING_COMMAS;
 
 TEST(ExtensionListPolicyHandlerTest, CheckPolicySettings) {
-  base::Value::List list;
+  base::ListValue list;
   policy::PolicyMap policy_map;
   policy::PolicyErrorMap errors;
   ExtensionListPolicyHandler handler(policy::key::kExtensionInstallBlocklist,
@@ -160,13 +181,21 @@ TEST(ExtensionSettingsPolicyHandlerTest, CheckPolicySettingsURL) {
       "*://example.com/*",      "https://example.*",     "*://*.example.*"};
 
   // Crafts and parses a ExtensionSettings policy to test URL parsing.
-  auto url_parses_successfully = [](const char* policy_template,
+  enum class ManagementPolicy {
+    kPolicy3,
+    kPolicy4,
+  };
+  auto url_parses_successfully = [](ManagementPolicy policy,
                                     const std::string& url) {
-    std::string policy = base::StringPrintf(policy_template, url.c_str());
-    absl::optional<base::Value> policy_value =
-        base::JSONReader::Read(policy, kJsonParseOptions);
-    if (!policy_value)
+    std::string policy_json =
+        (policy == ManagementPolicy::kPolicy3)
+            ? base::StringPrintf(kTestManagementPolicy3, url.c_str())
+            : base::StringPrintf(kTestManagementPolicy4, url.c_str());
+    std::optional<base::Value> policy_value =
+        base::JSONReader::Read(policy_json, kJsonParseOptions);
+    if (!policy_value) {
       return false;
+    }
 
     policy::Schema chrome_schema =
         policy::Schema::Wrap(policy::GetChromeSchemaData());
@@ -183,19 +212,23 @@ TEST(ExtensionSettingsPolicyHandlerTest, CheckPolicySettingsURL) {
   };
 
   for (const std::string& url : good_urls) {
-    EXPECT_TRUE(url_parses_successfully(kTestManagementPolicy3, url)) << url;
-    EXPECT_TRUE(url_parses_successfully(kTestManagementPolicy4, url)) << url;
+    EXPECT_TRUE(url_parses_successfully(ManagementPolicy::kPolicy3, url))
+        << url;
+    EXPECT_TRUE(url_parses_successfully(ManagementPolicy::kPolicy4, url))
+        << url;
   }
 
   for (const std::string& url : bad_urls) {
-    EXPECT_FALSE(url_parses_successfully(kTestManagementPolicy3, url)) << url;
-    EXPECT_FALSE(url_parses_successfully(kTestManagementPolicy4, url)) << url;
+    EXPECT_FALSE(url_parses_successfully(ManagementPolicy::kPolicy3, url))
+        << url;
+    EXPECT_FALSE(url_parses_successfully(ManagementPolicy::kPolicy4, url))
+        << url;
   }
 }
 
 TEST(ExtensionListPolicyHandlerTest, ApplyPolicySettings) {
-  base::Value::List policy;
-  base::Value::List expected;
+  base::ListValue policy;
+  base::ListValue expected;
   policy::PolicyMap policy_map;
   PrefValueMap prefs;
   base::Value* value = nullptr;
@@ -224,7 +257,7 @@ TEST(ExtensionListPolicyHandlerTest, ApplyPolicySettings) {
 }
 
 TEST(ExtensionInstallForceListPolicyHandlerTest, CheckPolicySettings) {
-  base::Value::List list;
+  base::ListValue list;
   policy::PolicyMap policy_map;
   policy::PolicyErrorMap errors;
   ExtensionInstallForceListPolicyHandler handler;
@@ -281,8 +314,8 @@ TEST(ExtensionInstallForceListPolicyHandlerTest, CheckPolicySettings) {
 }
 
 TEST(ExtensionInstallForceListPolicyHandlerTest, ApplyPolicySettings) {
-  base::Value::List policy;
-  base::Value::Dict expected;
+  base::ListValue policy;
+  base::DictValue expected;
   policy::PolicyMap policy_map;
   PrefValueMap prefs;
   base::Value* value = nullptr;
@@ -292,7 +325,7 @@ TEST(ExtensionInstallForceListPolicyHandlerTest, ApplyPolicySettings) {
   handler.ApplyPolicySettings(policy_map, &prefs);
   EXPECT_FALSE(prefs.GetValue(pref_names::kInstallForceList, &value));
   EXPECT_FALSE(value);
-  EXPECT_EQ(base::Value::Dict(), handler.GetPolicyDict(policy_map));
+  EXPECT_EQ(std::nullopt, handler.GetPolicyDict(policy_map));
 
   // Set the policy to an empty value. This shouldn't affect the pref.
   policy_map.Set(policy::key::kExtensionInstallForcelist,
@@ -300,21 +333,21 @@ TEST(ExtensionInstallForceListPolicyHandlerTest, ApplyPolicySettings) {
                  policy::POLICY_SOURCE_CLOUD, base::Value(policy.Clone()),
                  nullptr);
   handler.ApplyPolicySettings(policy_map, &prefs);
-  EXPECT_TRUE(prefs.GetValue(pref_names::kInstallForceList, &value));
+  ASSERT_TRUE(prefs.GetValue(pref_names::kInstallForceList, &value));
   EXPECT_EQ(expected, *value);
   EXPECT_EQ(expected, handler.GetPolicyDict(policy_map));
 
   // Add a correct entry to the policy. The pref should contain a corresponding
   // entry.
   policy.Append("abcdefghijklmnopabcdefghijklmnop;http://example.com");
-  extensions::ExternalPolicyLoader::AddExtension(
+  ExternalPolicyLoader::AddExtension(
       expected, "abcdefghijklmnopabcdefghijklmnop", "http://example.com");
   policy_map.Set(policy::key::kExtensionInstallForcelist,
                  policy::POLICY_LEVEL_MANDATORY, policy::POLICY_SCOPE_USER,
                  policy::POLICY_SOURCE_CLOUD, base::Value(policy.Clone()),
                  nullptr);
   handler.ApplyPolicySettings(policy_map, &prefs);
-  EXPECT_TRUE(prefs.GetValue(pref_names::kInstallForceList, &value));
+  ASSERT_TRUE(prefs.GetValue(pref_names::kInstallForceList, &value));
   EXPECT_EQ(expected, *value);
   EXPECT_EQ(expected, handler.GetPolicyDict(policy_map));
 
@@ -324,7 +357,7 @@ TEST(ExtensionInstallForceListPolicyHandlerTest, ApplyPolicySettings) {
   // documented in the policy_templates.json file), and therefore any changes to
   // it must be carefully thought out.
   policy.Append("bcdefghijklmnopabcdefghijklmnopa");
-  extensions::ExternalPolicyLoader::AddExtension(
+  ExternalPolicyLoader::AddExtension(
       expected, "bcdefghijklmnopabcdefghijklmnopa",
       "https://clients2.google.com/service/update2/crx");
   policy_map.Set(policy::key::kExtensionInstallForcelist,
@@ -349,7 +382,7 @@ TEST(ExtensionInstallForceListPolicyHandlerTest, ApplyPolicySettings) {
 }
 
 TEST(ExtensionURLPatternListPolicyHandlerTest, CheckPolicySettings) {
-  base::Value::List list;
+  base::ListValue list;
   policy::PolicyMap policy_map;
   policy::PolicyErrorMap errors;
   ExtensionURLPatternListPolicyHandler handler(
@@ -407,7 +440,7 @@ TEST(ExtensionURLPatternListPolicyHandlerTest, CheckPolicySettings) {
 }
 
 TEST(ExtensionURLPatternListPolicyHandlerTest, ApplyPolicySettings) {
-  base::Value::List list;
+  base::ListValue list;
   policy::PolicyMap policy_map;
   PrefValueMap prefs;
   base::Value* value = nullptr;
@@ -449,7 +482,7 @@ TEST(ExtensionSettingsPolicyHandlerTest, CheckPolicySettings) {
   handler.ApplyPolicySettings(policy_map, &prefs);
   base::Value* value = nullptr;
   ASSERT_TRUE(prefs.GetValue(pref_names::kExtensionManagement, &value));
-  base::Value::Dict empty_value;
+  base::DictValue empty_value;
   EXPECT_EQ(empty_value, *value);
 }
 
@@ -463,8 +496,9 @@ TEST(ExtensionSettingsPolicyHandlerTest, CheckPolicySettingsTooManyHosts) {
       "}";
 
   std::string urls;
-  for (size_t i = 0; i < 101; ++i)
+  for (size_t i = 0; i < 101; ++i) {
     urls.append("\"*://example" + base::NumberToString(i) + ".com\",");
+  }
 
   std::string policy =
       base::StringPrintf(policy_template, urls.c_str(), urls.c_str());
@@ -556,7 +590,7 @@ TEST(ExtensionSettingsPolicyHandlerTest, DropInvalidKeys) {
 }
 
 // Only enterprise managed machines can auto install extensions from a location
-// other than the webstore https://crbug.com/809004.
+// other than the webstore https://crbug.com/41368809.
 TEST(ExtensionSettingsPolicyHandlerTest, NonManagedOffWebstoreExtension) {
   // Mark as not enterprise managed.
   auto policy_result = base::JSONReader::ReadAndReturnValueWithError(
@@ -586,5 +620,124 @@ TEST(ExtensionSettingsPolicyHandlerTest, NonManagedOffWebstoreExtension) {
   ASSERT_TRUE(prefs.GetValue(pref_names::kExtensionManagement, &value));
   EXPECT_EQ(*sanitized_policy_result, *value);
 }
+
+#if BUILDFLAG(IS_CHROMEOS)
+class PolicyHandlerAshTest : public ::testing::Test {
+ public:
+  PolicyHandlerAshTest() = default;
+  ~PolicyHandlerAshTest() override = default;
+
+  void SetUp() override {
+    Test::SetUp();
+    // A logged in user is required in order to enable Lacros.
+    scoped_user_manager_.Reset(std::make_unique<ash::FakeChromeUserManager>());
+    AccountId account_id = AccountId::FromUserEmail("test@gmail.com");
+    scoped_user_manager_->AddUser(account_id);
+    scoped_user_manager_->LoginUser(account_id);
+  }
+
+  void TearDown() override {
+    scoped_user_manager_.Reset();
+    Test::TearDown();
+  }
+
+ private:
+  user_manager::TypedScopedUserManager<ash::FakeChromeUserManager>
+      scoped_user_manager_;
+  base::test::ScopedFeatureList feature_list_;
+};
+
+class ExtensionInstallBlockListPolicyHandlerAshTest
+    : public PolicyHandlerAshTest {
+ public:
+  const char* pref_name() const {
+    return pref_names::kInstallDenyList;
+  }
+  const char* policy_key() const {
+    return policy::key::kExtensionInstallBlocklist;
+  }
+};
+
+class ExtensionInstallForceListPolicyHandlerAshTest
+    : public PolicyHandlerAshTest {
+ public:
+  const char* pref_name() const {
+    return pref_names::kInstallForceList;
+  }
+  const char* policy_key() const {
+    return policy::key::kExtensionInstallForcelist;
+  }
+};
+
+TEST_F(ExtensionInstallBlockListPolicyHandlerAshTest,
+       ShouldKeepBlockListIfAshBrowserIsEnabled) {
+  policy::PolicyMap policy_map;
+  PrefValueMap prefs;
+
+  policy_map.Set(policy_key(), policy::POLICY_LEVEL_MANDATORY,
+                 policy::POLICY_SCOPE_USER, policy::POLICY_SOURCE_CLOUD,
+                 base::Value(base::ListValue()
+                                 .Append("abcdefghijklmnopabcdefghijklmnop")
+                                 .Append("*")),
+                 nullptr);
+
+  ExtensionInstallBlockListPolicyHandler handler{};
+  handler.ApplyPolicySettings(policy_map, &prefs);
+
+  base::Value* value = nullptr;
+  EXPECT_TRUE(prefs.GetValue(pref_name(), &value));
+  ASSERT_TRUE(value->is_list());
+
+  auto expected =
+      base::ListValue().Append("abcdefghijklmnopabcdefghijklmnop").Append("*");
+  ASSERT_EQ(value->GetList(), expected);
+}
+
+TEST_F(ExtensionInstallForceListPolicyHandlerAshTest,
+       AllowNonOSExtensionsIfAshBrowserEnabled) {
+  policy::PolicyMap policy_map;
+  PrefValueMap prefs;
+
+  policy_map.Set(
+      policy_key(), policy::POLICY_LEVEL_MANDATORY, policy::POLICY_SCOPE_USER,
+      policy::POLICY_SOURCE_CLOUD,
+      base::Value(base::ListValue()
+                      // Add an arbitrary extension.
+                      .Append(base::StrCat({"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                            ";", "http://www.example.com/crx"}))
+                      // Add an extension in keep list. Check
+                      // `ExtensionRunsInOS()` for details.
+                      .Append(base::StrCat(
+                          {extension_misc::kAccessibilityCommonExtensionId, ";",
+                           "http://www.access.com/crx"}))
+                      // Add an extension app in keep list. Check
+                      // `ExtensionAppRunsInOS()` for details.
+                      .Append(base::StrCat({extension_misc::kGnubbyAppId, ";",
+                                            "http://www.gnubby.com/crx"}))),
+      nullptr);
+
+  ExtensionInstallForceListPolicyHandler handler{};
+  handler.ApplyPolicySettings(policy_map, &prefs);
+
+  base::Value* value;
+  EXPECT_TRUE(prefs.GetValue(pref_name(), &value));
+  ASSERT_TRUE(value->is_dict());
+
+  // All extensions should be retained.
+  auto expected =
+      base::DictValue()
+          .Set("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+               base::DictValue().Set(ExternalProviderImpl::kExternalUpdateUrl,
+                                     "http://www.example.com/crx"))
+          .Set(extension_misc::kAccessibilityCommonExtensionId,
+               base::DictValue().Set(ExternalProviderImpl::kExternalUpdateUrl,
+                                     "http://www.access.com/crx"))
+          .Set(extension_misc::kGnubbyAppId,
+               base::DictValue().Set(ExternalProviderImpl::kExternalUpdateUrl,
+                                     "http://www.gnubby.com/crx"));
+
+  ASSERT_EQ(value->GetDict(), expected);
+}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 }  // namespace extensions

@@ -13,35 +13,59 @@
 #include <memory>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "crypto/nss_util.h"
 #include "crypto/nss_util_internal.h"
+#include "crypto/scoped_nss_types.h"
 
 namespace crypto {
 
 namespace {
+// TODO(davidben): When NSS headers in the sysroot are updated to 3.116 or
+// later, use the symbols from the NSS headers.
+constexpr int kNssMldsaKey = 12;
+struct NssSeckeyMldsaPublicKey {
+  SECOidTag paramSet;
+  SECItem publicValue;
+};
+}  // namespace
 
-// Decodes |input| as a SubjectPublicKeyInfo and returns a SECItem containing
-// the CKA_ID of that public key or nullptr on error.
-ScopedSECItem MakeIDFromSPKI(base::span<const uint8_t> input) {
-  ScopedCERTSubjectPublicKeyInfo spki = DecodeSubjectPublicKeyInfoNSS(input);
-  if (!spki)
-    return nullptr;
+ScopedSECItem MakeNssIdFromPublicKey(SECKEYPublicKey* public_key) {
+  CHECK(public_key);
 
-  ScopedSECKEYPublicKey result(SECKEY_ExtractPublicKey(spki.get()));
-  if (!result)
-    return nullptr;
-
-  // See pk11_MakeIDFromPublicKey from NSS. For now, only RSA and EC keys are
-  // supported.
-  if (SECKEY_GetPublicKeyType(result.get()) == rsaKey)
-    return ScopedSECItem(PK11_MakeIDFromPubKey(&result->u.rsa.modulus));
-  if (SECKEY_GetPublicKeyType(result.get()) == ecKey)
-    return ScopedSECItem(PK11_MakeIDFromPubKey(&result->u.ec.publicValue));
+  // See pk11_MakeIDFromPublicKey from NSS. For now, only RSA and EC public_keys
+  // are supported.
+  //
+  // TODO(davidben): When our minimum NSS version is 3.117 or later, replace
+  // this logic with `PK11_GetPublicValueFromPublicKey`.
+  if (SECKEY_GetPublicKeyType(public_key) == rsaKey) {
+    return ScopedSECItem(PK11_MakeIDFromPubKey(&public_key->u.rsa.modulus));
+  }
+  if (SECKEY_GetPublicKeyType(public_key) == ecKey) {
+    return ScopedSECItem(PK11_MakeIDFromPubKey(&public_key->u.ec.publicValue));
+  }
+  if (SECKEY_GetPublicKeyType(public_key) == kNssMldsaKey) {
+    auto* mldsa_key =
+        reinterpret_cast<NssSeckeyMldsaPublicKey*>(&public_key->u);
+    return ScopedSECItem(PK11_MakeIDFromPubKey(&mldsa_key->publicValue));
+  }
   return nullptr;
 }
 
-}  // namespace
+ScopedSECItem MakeNssIdFromSpki(base::span<const uint8_t> input) {
+  ScopedCERTSubjectPublicKeyInfo spki = DecodeSubjectPublicKeyInfoNSS(input);
+  if (!spki) {
+    return nullptr;
+  }
+
+  ScopedSECKEYPublicKey public_key(SECKEY_ExtractPublicKey(spki.get()));
+  if (!public_key) {
+    return nullptr;
+  }
+
+  return MakeNssIdFromPublicKey(public_key.get());
+}
 
 bool GenerateRSAKeyPairNSS(PK11SlotInfo* slot,
                            uint16_t num_bits,
@@ -57,8 +81,9 @@ bool GenerateRSAKeyPairNSS(PK11SlotInfo* slot,
   private_key->reset(PK11_GenerateKeyPair(slot, CKM_RSA_PKCS_KEY_PAIR_GEN,
                                           &param, &public_key_raw, permanent,
                                           permanent /* sensitive */, nullptr));
-  if (!*private_key)
+  if (!*private_key) {
     return false;
+  }
 
   public_key->reset(public_key_raw);
   return true;
@@ -89,14 +114,16 @@ bool GenerateECKeyPairNSS(PK11SlotInfo* slot,
                                   static_cast<unsigned>(parameters_buf.size())};
 
   ec_parameters.data[0] = SEC_ASN1_OBJECT_ID;
-  ec_parameters.data[1] = oid_data->oid.len;
-  memcpy(ec_parameters.data + 2, oid_data->oid.data, oid_data->oid.len);
+  UNSAFE_TODO(ec_parameters.data[1]) = oid_data->oid.len;
+  UNSAFE_TODO(
+      memcpy(ec_parameters.data + 2, oid_data->oid.data, oid_data->oid.len));
   SECKEYPublicKey* public_key_raw = nullptr;
   private_key->reset(PK11_GenerateKeyPair(slot, CKM_EC_KEY_PAIR_GEN,
                                           &ec_parameters, &public_key_raw,
                                           permanent, permanent, nullptr));
-  if (!*private_key)
+  if (!*private_key) {
     return false;
+  }
 
   public_key->reset(public_key_raw);
   return true;
@@ -120,8 +147,9 @@ ScopedSECKEYPrivateKey ImportNSSKeyFromPrivateKeyInfo(
   SECStatus rv =
       SEC_QuickDERDecodeItem(arena.get(), &der_private_key_info,
                              SEC_ASN1_GET(SEC_AnyTemplate), &input_item);
-  if (rv != SECSuccess)
+  if (rv != SECSuccess) {
     return nullptr;
+  }
 
   // Allow the private key to be used for key unwrapping, data decryption,
   // and signature generation.
@@ -131,8 +159,9 @@ ScopedSECKEYPrivateKey ImportNSSKeyFromPrivateKeyInfo(
   rv = PK11_ImportDERPrivateKeyInfoAndReturnKey(
       slot, &der_private_key_info, nullptr, nullptr, permanent,
       permanent /* sensitive */, key_usage, &key_raw, nullptr);
-  if (rv != SECSuccess)
+  if (rv != SECSuccess) {
     return nullptr;
+  }
   return ScopedSECKEYPrivateKey(key_raw);
 }
 
@@ -140,9 +169,10 @@ ScopedSECKEYPrivateKey FindNSSKeyFromPublicKeyInfo(
     base::span<const uint8_t> input) {
   EnsureNSSInit();
 
-  ScopedSECItem cka_id(MakeIDFromSPKI(input));
-  if (!cka_id)
+  ScopedSECItem cka_id(MakeNssIdFromSpki(input));
+  if (!cka_id) {
     return nullptr;
+  }
 
   // Search all slots in all modules for the key with the given ID.
   AutoSECMODListReadLock auto_lock;
@@ -152,10 +182,11 @@ ScopedSECKEYPrivateKey FindNSSKeyFromPublicKeyInfo(
     int slot_count = item->module->loaded ? item->module->slotCount : 0;
     for (int i = 0; i < slot_count; i++) {
       // Look for the key in slot |i|.
-      ScopedSECKEYPrivateKey key(
-          PK11_FindKeyByKeyID(item->module->slots[i], cka_id.get(), nullptr));
-      if (key)
+      ScopedSECKEYPrivateKey key(PK11_FindKeyByKeyID(
+          UNSAFE_TODO(item->module->slots[i]), cka_id.get(), nullptr));
+      if (key) {
         return key;
+      }
     }
   }
 
@@ -168,9 +199,10 @@ ScopedSECKEYPrivateKey FindNSSKeyFromPublicKeyInfoInSlot(
     PK11SlotInfo* slot) {
   DCHECK(slot);
 
-  ScopedSECItem cka_id(MakeIDFromSPKI(input));
-  if (!cka_id)
+  ScopedSECItem cka_id(MakeNssIdFromSpki(input));
+  if (!cka_id) {
     return nullptr;
+  }
 
   return ScopedSECKEYPrivateKey(
       PK11_FindKeyByKeyID(slot, cka_id.get(), nullptr));

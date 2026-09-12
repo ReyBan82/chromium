@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var allTests = [
+const allTests = [
   async function testAddRemoveOnDesktop() {
     const desktop = await new Promise(r => chrome.automation.getDesktop(r));
 
@@ -145,7 +145,8 @@ var allTests = [
     });
 
     chrome.test.succeed();
-  }
+  },
 ];
 
-setUpAndRunTestsInPage(allTests, 'add_remove_event_listeners.html');
+setUpAndRunTestsInPage(
+    allTests, 'add_remove_event_listeners.html', /* ensurePersists = */ false);

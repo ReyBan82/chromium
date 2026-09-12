@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_MEDIA_WEBRTC_WEBRTC_LOG_BUFFER_H_
 #define CHROME_BROWSER_MEDIA_WEBRTC_WEBRTC_LOG_BUFFER_H_
 
+#include <array>
 #include <string>
 
 #include "base/sequence_checker.h"
@@ -12,9 +13,9 @@
 #include "components/webrtc_logging/common/partial_circular_buffer.h"
 
 #if BUILDFLAG(IS_ANDROID)
-const size_t kWebRtcLogSize = 1 * 1024 * 1024;  // 1 MB
+inline constexpr size_t kWebRtcLogSize = 1 * 1024 * 1024;  // 1 MB
 #else
-const size_t kWebRtcLogSize = 6 * 1024 * 1024;  // 6 MB
+inline constexpr size_t kWebRtcLogSize = 6 * 1024 * 1024;  // 6 MB
 #endif
 
 class WebRtcLogBuffer {
@@ -39,7 +40,7 @@ class WebRtcLogBuffer {
 
  private:
   SEQUENCE_CHECKER(sequence_checker_);
-  uint8_t buffer_[kWebRtcLogSize];
+  std::array<uint8_t, kWebRtcLogSize> buffer_;
   webrtc_logging::PartialCircularBuffer circular_;
   bool read_only_;
 };

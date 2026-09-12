@@ -8,12 +8,13 @@
 #include "base/files/file.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/task/bind_post_task.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/thread_annotations.h"
+#include "base/types/expected.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/services/quarantine/quarantine.h"
 #include "content/browser/file_system_access/features.h"
 #include "content/browser/file_system_access/file_system_access_error.h"
@@ -21,7 +22,7 @@
 #include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/common/content_client.h"
-#include "crypto/secure_hash.h"
+#include "crypto/hash.h"
 #include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
@@ -50,7 +51,7 @@ class HashCalculator : public base::RefCounted<HashCalculator> {
       FileSystemAccessSafeMoveHelper::HashCallback callback,
       const storage::FileSystemURL& source_url,
       storage::FileSystemOperationRunner*) {
-    DCHECK_CURRENTLY_ON(BrowserThread::IO);
+    CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M159);
     auto calculator = base::MakeRefCounted<HashCalculator>(std::move(context),
                                                            std::move(callback));
     calculator->Start(source_url);
@@ -59,7 +60,7 @@ class HashCalculator : public base::RefCounted<HashCalculator> {
   HashCalculator(scoped_refptr<storage::FileSystemContext> context,
                  FileSystemAccessSafeMoveHelper::HashCallback callback)
       : context_(std::move(context)), callback_(std::move(callback)) {
-    DCHECK(context_);
+    CHECK(context_, base::NotFatalUntil::M159);
   }
 
  private:
@@ -72,26 +73,31 @@ class HashCalculator : public base::RefCounted<HashCalculator> {
         source_url, 0, storage::kMaximumLength, base::Time());
     int64_t length =
         reader_->GetLength(base::BindOnce(&HashCalculator::GotLength, this));
-    if (length == net::ERR_IO_PENDING)
+    if (length == net::ERR_IO_PENDING) {
       return;
-    GotLength(length);
+    }
+    if (length < 0) {
+      GotLength(base::unexpected(static_cast<net::Error>(length)));
+    } else {
+      GotLength(length);
+    }
   }
 
-  void GotLength(int64_t length) {
+  void GotLength(base::expected<int64_t, net::Error> length) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    if (length < 0) {
-      std::move(callback_).Run(storage::NetErrorToFileError(length),
+    if (!length.has_value()) {
+      std::move(callback_).Run(storage::NetErrorToFileError(length.error()),
                                std::string(), -1);
       return;
     }
 
-    file_size_ = length;
+    file_size_ = length.value();
     ReadMore();
   }
 
   void ReadMore() {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    DCHECK_GE(file_size_, 0);
+    CHECK_GE(file_size_, 0, base::NotFatalUntil::M159);
     int read_result =
         reader_->Read(buffer_.get(), buffer_->size(),
                       base::BindOnce(&HashCalculator::DidRead, this));
@@ -102,20 +108,22 @@ class HashCalculator : public base::RefCounted<HashCalculator> {
 
   void DidRead(int bytes_read) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    DCHECK_GE(file_size_, 0);
+    CHECK_GE(file_size_, 0, base::NotFatalUntil::M159);
     if (bytes_read < 0) {
       std::move(callback_).Run(storage::NetErrorToFileError(bytes_read),
                                std::string(), -1);
       return;
     }
     if (bytes_read == 0) {
-      std::string hash_str(hash_->GetHashLength(), 0);
-      hash_->Finish(std::data(hash_str), hash_str.size());
-      std::move(callback_).Run(base::File::FILE_OK, hash_str, file_size_);
+      std::string result(crypto::hash::kSha256Size, 0);
+      hash_.Finish(base::as_writable_byte_span(result));
+      std::move(callback_).Run(base::File::FILE_OK, result, file_size_);
       return;
     }
 
-    hash_->Update(buffer_->data(), bytes_read);
+    // checked_cast<size_t> is safe here: bytes_read < 0 and bytes_read == 0 are
+    // both handled above by code paths that return.
+    hash_.Update(buffer_->first(base::checked_cast<size_t>(bytes_read)));
     ReadMore();
   }
 
@@ -128,8 +136,7 @@ class HashCalculator : public base::RefCounted<HashCalculator> {
   const scoped_refptr<net::IOBufferWithSize> buffer_{
       base::MakeRefCounted<net::IOBufferWithSize>(8 * 1024)};
 
-  const std::unique_ptr<crypto::SecureHash> hash_{
-      crypto::SecureHash::Create(crypto::SecureHash::SHA256)};
+  crypto::hash::Hasher hash_{crypto::hash::kSha256};
 
   std::unique_ptr<storage::FileStreamReader> reader_
       GUARDED_BY_CONTEXT(sequence_checker_);
@@ -201,16 +208,10 @@ bool FileSystemAccessSafeMoveHelper::RequireAfterWriteChecks() const {
   if (dest_url().type() == storage::kFileSystemTypeTemporary)
     return false;
 
-  if (!base::FeatureList::IsEnabled(
-          features::
-              kFileSystemAccessSkipAfterWriteChecksIfUnchangingExtension)) {
-    return true;
-  }
-
   if (!source_url().IsInSameFileSystem(dest_url()))
     return true;
 
-  // TODO(crbug.com/1250534): Properly handle directory moves here, for
+  // TODO(crbug.com/40198034): Properly handle directory moves here, for
   // which extension checks don't make sense.
   auto source_extension = source_url().path().Extension();
   auto dest_extension = dest_url().path().Extension();
@@ -253,6 +254,7 @@ void FileSystemAccessSafeMoveHelper::DoAfterWriteCheck(
   item->size = size;
   item->frame_url = context_.url;
   item->outermost_main_frame_id = outermost_main_frame_id;
+  item->initiating_frame_id = context_.frame_id;
   item->has_user_gesture = has_transient_user_activation_;
   manager_->permission_context()->PerformAfterWriteChecks(
       std::move(item), context_.frame_id,
@@ -331,7 +333,7 @@ void FileSystemAccessSafeMoveHelper::DidFileDoQuarantine(
   // On ChromeOS on the other hand anything that isn't in the sandboxed file
   // system is also uniquely identifiable by its FileSystemURL::path(), and
   // thus we accept all other FileSystemURL types.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   DCHECK(target_url.type() != storage::kFileSystemTypeTemporary &&
          target_url.type() != storage::kFileSystemTypePersistent)
       << target_url.type();
@@ -350,6 +352,9 @@ void FileSystemAccessSafeMoveHelper::DidFileDoQuarantine(
     quarantine::mojom::Quarantine* raw_quarantine = quarantine_remote.get();
     raw_quarantine->QuarantineFile(
         target_url.path(), authority_url, referrer_url,
+        // TODO(crbug.com/351165321): Consider propagating request_initiator
+        // information here.
+        /*request_initiator=*/std::nullopt,
         GetContentClient()
             ->browser()
             ->GetApplicationClientGUIDForQuarantineCheck(),

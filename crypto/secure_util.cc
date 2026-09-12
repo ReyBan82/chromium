@@ -4,13 +4,27 @@
 
 #include "crypto/secure_util.h"
 
+#include "build/build_config.h"
 #include "third_party/boringssl/src/include/openssl/mem.h"
+
+#if BUILDFLAG(IS_WIN)
+#include <windows.h>
+#endif  // BUILDFLAG(IS_WIN)
 
 namespace crypto {
 
-bool SecureMemEqual(const void* s1, const void* s2, size_t n) {
-  return CRYPTO_memcmp(s1, s2, n) == 0;
+bool SecureMemEqual(base::span<const uint8_t> s1,
+                    base::span<const uint8_t> s2) {
+  return s1.size() == s2.size() &&
+         CRYPTO_memcmp(s1.data(), s2.data(), s1.size()) == 0;
+}
+
+void SecureZeroBuffer(base::span<uint8_t> buffer) {
+#if BUILDFLAG(IS_WIN)
+  ::SecureZeroMemory(buffer.data(), buffer.size());
+#else
+  OPENSSL_cleanse(buffer.data(), buffer.size());
+#endif  // BUILDFLAG(IS_WIN)
 }
 
 }  // namespace crypto
-

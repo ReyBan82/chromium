@@ -19,14 +19,16 @@
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_executor.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
+#include "base/test/test_future.h"
+#include "base/types/expected.h"
 #include "net/base/cache_type.h"
 #include "net/base/net_errors.h"
+#include "net/base/test_completion_callback.h"
 #include "net/disk_cache/disk_cache.h"
 #include "net/disk_cache/simple/simple_backend_impl.h"
 #include "net/disk_cache/simple/simple_index.h"
@@ -94,6 +96,7 @@ std::unique_ptr<Backend> CreateAndInitBackend(const CacheSpec& spec) {
   result = CreateCacheBackend(
       spec.cache_type, spec.backend_type, /*file_operations=*/nullptr,
       spec.path, 0, disk_cache::ResetHandling::kNeverReset, /*net_log=*/nullptr,
+      /*cache_encryption_delegate=*/nullptr,
       base::BindOnce(
           [](BackendResult* out, base::RunLoop* run_loop,
              BackendResult async_result) {
@@ -218,6 +221,17 @@ uint64_t GetMemoryConsumption() {
   }
 }
 
+int32_t GetCacheEntryCount(disk_cache::Backend* cache) {
+  base::test::TestFuture<int32_t> future;
+  base::expected<int32_t, net::Error> result =
+      cache->GetEntryCount(future.GetCallback());
+  if (result.has_value()) {
+    return result.value();
+  }
+  CHECK_EQ(result.error(), net::ERR_IO_PENDING);
+  return future.Get();
+}
+
 bool CacheMemTest(const std::vector<std::unique_ptr<CacheSpec>>& specs) {
   std::vector<std::unique_ptr<Backend>> backends;
   for (const auto& it : specs) {
@@ -225,7 +239,7 @@ bool CacheMemTest(const std::vector<std::unique_ptr<CacheSpec>>& specs) {
     if (!backend)
       return false;
     std::cout << "Number of entries in " << it->path.LossyDisplayName() << " : "
-              << backend->GetEntryCount() << std::endl;
+              << GetCacheEntryCount(backend.get()) << std::endl;
     backends.push_back(std::move(backend));
   }
   const uint64_t memory_consumption = GetMemoryConsumption();

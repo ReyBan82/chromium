@@ -4,12 +4,13 @@
 
 #include "chromeos/ash/services/quick_pair/public/mojom/fast_pair_traits.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
-#include "base/ranges/algorithm.h"
+#include "base/notreached.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace mojo {
 
@@ -17,22 +18,23 @@ namespace mojo {
 bool StructTraits<DecryptedResponseDataView, DecryptedResponse>::Read(
     DecryptedResponseDataView data,
     DecryptedResponse* out) {
-  std::vector<uint8_t> address_bytes;
-  if (!data.ReadAddressBytes(&address_bytes) ||
-      address_bytes.size() != out->address_bytes.size())
+  if (!data.ReadAddressBytes(&out->address_bytes)) {
     return false;
+  }
 
-  std::vector<uint8_t> salt_bytes;
-  if (!data.ReadSalt(&salt_bytes) || salt_bytes.size() != out->salt.size())
+  if (!data.ReadSalt(&out->salt)) {
     return false;
+  }
 
-  if (!EnumTraits<MessageType, FastPairMessageType>::FromMojom(
-          data.message_type(), &out->message_type))
+  out->message_type = EnumTraits<MessageType, FastPairMessageType>::FromMojom(
+      data.message_type());
+
+  if (!data.ReadSecondaryAddressBytes(&out->secondary_address_bytes)) {
     return false;
+  }
 
-  base::ranges::copy(address_bytes, out->address_bytes.begin());
-  base::ranges::copy(salt_bytes, out->salt.begin());
-
+  out->flags = data.flags();
+  out->num_addresses = data.num_addresses();
   return true;
 }
 
@@ -44,12 +46,11 @@ bool StructTraits<DecryptedPasskeyDataView, DecryptedPasskey>::Read(
   if (!data.ReadSalt(&salt_bytes) || salt_bytes.size() != out->salt.size())
     return false;
 
-  if (!EnumTraits<MessageType, FastPairMessageType>::FromMojom(
-          data.message_type(), &out->message_type))
-    return false;
+  out->message_type = EnumTraits<MessageType, FastPairMessageType>::FromMojom(
+      data.message_type());
 
   out->passkey = data.passkey();
-  base::ranges::copy(salt_bytes, out->salt.begin());
+  std::ranges::copy(salt_bytes, out->salt.begin());
 
   return true;
 }
@@ -70,25 +71,20 @@ MessageType EnumTraits<MessageType, FastPairMessageType>::ToMojom(
 }
 
 // static
-bool EnumTraits<MessageType, FastPairMessageType>::FromMojom(
-    MessageType input,
-    FastPairMessageType* out) {
+FastPairMessageType EnumTraits<MessageType, FastPairMessageType>::FromMojom(
+    MessageType input) {
   switch (input) {
     case MessageType::kKeyBasedPairingRequest:
-      *out = FastPairMessageType::kKeyBasedPairingRequest;
-      return true;
+      return FastPairMessageType::kKeyBasedPairingRequest;
     case MessageType::kKeyBasedPairingResponse:
-      *out = FastPairMessageType::kKeyBasedPairingResponse;
-      return true;
+      return FastPairMessageType::kKeyBasedPairingResponse;
     case MessageType::kSeekersPasskey:
-      *out = FastPairMessageType::kSeekersPasskey;
-      return true;
+      return FastPairMessageType::kSeekersPasskey;
     case MessageType::kProvidersPasskey:
-      *out = FastPairMessageType::kProvidersPasskey;
-      return true;
+      return FastPairMessageType::kProvidersPasskey;
   }
 
-  return false;
+  NOTREACHED();
 }
 
 // static
@@ -100,8 +96,8 @@ bool StructTraits<BatteryInfoDataView, BatteryInfo>::Read(
 
   out->is_charging = data.is_charging();
   out->percentage = data.percentage() == -1
-                        ? absl::nullopt
-                        : absl::make_optional(data.percentage());
+                        ? std::nullopt
+                        : std::make_optional(data.percentage());
 
   return true;
 }

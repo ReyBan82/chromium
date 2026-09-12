@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "base/files/file_descriptor_watcher_posix.h"
 
 #include <unistd.h>
@@ -34,8 +35,10 @@ class Mock {
   Mock(const Mock&) = delete;
   Mock& operator=(const Mock&) = delete;
 
-  MOCK_METHOD0(ReadableCallback, void());
-  MOCK_METHOD0(WritableCallback, void());
+  MOCK_METHOD(void, ReadableCallback, ());
+  MOCK_METHOD(void, WritableCallback, ());
+  MOCK_METHOD(void, ReadableCallback2, ());
+  MOCK_METHOD(void, WritableCallback2, ());
 };
 
 enum class FileDescriptorWatcherTestType {
@@ -60,6 +63,7 @@ class FileDescriptorWatcherTest
 
   void SetUp() override {
     ASSERT_EQ(0, pipe(pipe_fds_));
+    ASSERT_EQ(0, pipe(pipe_fds2_));
 
     scoped_refptr<SingleThreadTaskRunner> io_thread_task_runner;
     if (GetParam() ==
@@ -85,11 +89,24 @@ class FileDescriptorWatcherTest
 
     EXPECT_EQ(0, IGNORE_EINTR(close(pipe_fds_[0])));
     EXPECT_EQ(0, IGNORE_EINTR(close(pipe_fds_[1])));
+
+    // These fds may be destroyed during tests.
+    if (pipe_fds2_[0] != -1) {
+      EXPECT_EQ(0, IGNORE_EINTR(close(pipe_fds2_[0])));
+    }
+    if (pipe_fds2_[1] != -1) {
+      EXPECT_EQ(0, IGNORE_EINTR(close(pipe_fds2_[1])));
+    }
   }
 
  protected:
   int read_file_descriptor() const { return pipe_fds_[0]; }
   int write_file_descriptor() const { return pipe_fds_[1]; }
+
+  int read_file_descriptor2() const { return pipe_fds2_[0]; }
+  int write_file_descriptor2() const { return pipe_fds2_[1]; }
+  int& read_file_descriptor2_ref() { return pipe_fds2_[0]; }
+  int& write_file_descriptor2_ref() { return pipe_fds2_[1]; }
 
   // Waits for a short delay and run pending tasks.
   void WaitAndRunPendingTasks() {
@@ -124,19 +141,66 @@ class FileDescriptorWatcherTest
     return controller;
   }
 
+  // Registers ReadableCallback2() to be called on |mock_| when
+  // read_file_descriptor2() is readable without blocking.
+  std::unique_ptr<FileDescriptorWatcher::Controller> WatchReadable2() {
+    std::unique_ptr<FileDescriptorWatcher::Controller> controller =
+        FileDescriptorWatcher::WatchReadable(
+            read_file_descriptor2(),
+            BindRepeating(&Mock::ReadableCallback2, Unretained(&mock_)));
+    EXPECT_TRUE(controller);
+
+    // Unless read_file_descriptor() was readable before the callback was
+    // registered, this shouldn't do anything.
+    WaitAndRunPendingTasks();
+
+    return controller;
+  }
+
+  // Registers WritableCallback2() to be called on |mock_| when
+  // write_file_descriptor2() is writable without blocking.
+  std::unique_ptr<FileDescriptorWatcher::Controller> WatchWritable2() {
+    std::unique_ptr<FileDescriptorWatcher::Controller> controller =
+        FileDescriptorWatcher::WatchWritable(
+            write_file_descriptor2(),
+            BindRepeating(&Mock::WritableCallback2, Unretained(&mock_)));
+    EXPECT_TRUE(controller);
+    return controller;
+  }
+
   void WriteByte() {
     constexpr char kByte = '!';
     ASSERT_TRUE(WriteFileDescriptor(write_file_descriptor(),
-                                    as_bytes(make_span(&kByte, 1u))));
+                                    byte_span_from_ref(kByte)));
   }
 
   void ReadByte() {
-    // This is always called as part of the WatchReadable() callback, which
-    // should run on the main thread.
+    // This is always called in ReadableCallback(), which should run on the main
+    // thread.
     EXPECT_TRUE(thread_checker_.CalledOnValidThread());
 
     char buffer;
-    ASSERT_TRUE(ReadFromFD(read_file_descriptor(), &buffer, sizeof(buffer)));
+    ASSERT_TRUE(ReadFromFD(read_file_descriptor(), span_from_ref(buffer)));
+  }
+
+  void WriteByte2() {
+    constexpr char kByte = '!';
+    ASSERT_TRUE(WriteFileDescriptor(write_file_descriptor2(),
+                                    byte_span_from_ref(kByte)));
+  }
+
+  void ReadByte2() {
+    // This is always called in ReadableCallback2(), which should run on the
+    // main thread.
+    EXPECT_TRUE(thread_checker_.CalledOnValidThread());
+
+    char buffer;
+    ASSERT_TRUE(ReadFromFD(read_file_descriptor2(), span_from_ref(buffer)));
+  }
+
+  void CloseWriteFd2() {
+    ASSERT_EQ(0, IGNORE_EINTR(close(write_file_descriptor2())));
+    write_file_descriptor2_ref() = -1;
   }
 
   // Mock on wich callbacks are invoked.
@@ -156,6 +220,7 @@ class FileDescriptorWatcherTest
 
   // Watched file descriptors.
   int pipe_fds_[2];
+  int pipe_fds2_[2];
 
   // Used to verify that callbacks run on the thread on which they are
   // registered.
@@ -181,11 +246,10 @@ TEST_P(FileDescriptorWatcherTest, WatchReadableOneByte) {
   // call to ReadableCallback() which will read 1 byte from the pipe.
   WriteByte();
   RunLoop run_loop;
-  EXPECT_CALL(mock_, ReadableCallback())
-      .WillOnce(testing::Invoke([this, &run_loop]() {
-        ReadByte();
-        run_loop.Quit();
-      }));
+  EXPECT_CALL(mock_, ReadableCallback()).WillOnce([this, &run_loop] {
+    ReadByte();
+    run_loop.Quit();
+  });
   run_loop.Run();
   testing::Mock::VerifyAndClear(&mock_);
 
@@ -202,11 +266,11 @@ TEST_P(FileDescriptorWatcherTest, WatchReadableTwoBytes) {
   WriteByte();
   RunLoop run_loop;
   EXPECT_CALL(mock_, ReadableCallback())
-      .WillOnce(testing::Invoke([this]() { ReadByte(); }))
-      .WillOnce(testing::Invoke([this, &run_loop]() {
+      .WillOnce([this] { ReadByte(); })
+      .WillOnce([this, &run_loop] {
         ReadByte();
         run_loop.Quit();
-      }));
+      });
   run_loop.Run();
   testing::Mock::VerifyAndClear(&mock_);
 
@@ -223,14 +287,14 @@ TEST_P(FileDescriptorWatcherTest, WatchReadableByteWrittenFromCallback) {
   WriteByte();
   RunLoop run_loop;
   EXPECT_CALL(mock_, ReadableCallback())
-      .WillOnce(testing::Invoke([this]() {
+      .WillOnce([this] {
         ReadByte();
         WriteByte();
-      }))
-      .WillOnce(testing::Invoke([this, &run_loop]() {
+      })
+      .WillOnce([this, &run_loop] {
         ReadByte();
         run_loop.Quit();
-      }));
+      });
   run_loop.Run();
   testing::Mock::VerifyAndClear(&mock_);
 
@@ -245,11 +309,10 @@ TEST_P(FileDescriptorWatcherTest, DeleteControllerFromCallback) {
   // |controller| is deleted.
   WriteByte();
   RunLoop run_loop;
-  EXPECT_CALL(mock_, ReadableCallback())
-      .WillOnce(testing::Invoke([&run_loop, &controller]() {
-        controller = nullptr;
-        run_loop.Quit();
-      }));
+  EXPECT_CALL(mock_, ReadableCallback()).WillOnce([&run_loop, &controller] {
+    controller = nullptr;
+    run_loop.Quit();
+  });
   run_loop.Run();
   testing::Mock::VerifyAndClear(&mock_);
 
@@ -299,6 +362,39 @@ TEST_P(FileDescriptorWatcherTest, DeleteControllerAfterDeleteMessagePumpForIO) {
   // Deleting |controller| shouldn't crash even though that causes a task to be
   // posted to the message pump thread.
   controller = nullptr;
+}
+
+TEST_P(FileDescriptorWatcherTest,
+       WatchReadableOneByteAndWatchReadableTwoBytesOnFd2ClosedInTheMiddle) {
+  auto controller = WatchReadable();
+  auto controller2 = WatchReadable2();
+
+  // Write 1 byte to the pipe 1 and 2 bytes to the pipe 2. The write fd of the
+  // pipe 2 will be closed before finishing to read 2 bytes. Expect 1 call to
+  // ReadableCallback() and 2 calls to ReadableCallback2() which will each read
+  // 1 byte from the pipes.
+  WriteByte();
+  WriteByte2();
+  WriteByte2();
+
+  RunLoop run_loop;
+  EXPECT_CALL(mock_, ReadableCallback()).WillOnce([this, &controller] {
+    ReadByte();
+    CloseWriteFd2();
+    controller.reset();
+  });
+  EXPECT_CALL(mock_, ReadableCallback2())
+      .WillOnce([this] { ReadByte2(); })
+      .WillOnce([this, &controller2, &run_loop] {
+        ReadByte2();
+        controller2.reset();
+        run_loop.Quit();
+      });
+  run_loop.Run();
+  testing::Mock::VerifyAndClear(&mock_);
+
+  // No more call to ReadableCallback() or ReadableCallback2() is expected.
+  WaitAndRunPendingTasks();
 }
 
 INSTANTIATE_TEST_SUITE_P(

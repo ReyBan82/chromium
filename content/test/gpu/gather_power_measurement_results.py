@@ -15,28 +15,18 @@ import json
 import logging
 import re
 import sys
+import urllib.request as ulib_request
+import urllib.parse as ulib_parse
+import urllib.error
 
-import six  # pylint: disable=import-error
-
-# //content/test/gpu is Python 3-only at this point, but
-# //testing/scripts/test_buildbucket_api_gpu_use_cases.py does import this file
-# via Python 2 on bots during the "get compile targets for scripts" step. So,
-# keep this compatibility in for now.
-# pylint: disable=wrong-import-position
-if six.PY3:
-  import urllib.request as ulib_request
-  import urllib.parse as ulib_parse
-  import urllib.error
-  HTTPError = urllib.error.HTTPError
-else:
-  import urllib2 as ulib_request  # pylint: disable=import-error
-  import urllib as ulib_parse  # pylint: disable=ungrouped-imports
-  HTTPError = ulib_request.HTTPError
-# pylint: enable=wrong-import-position
+HTTPError = urllib.error.HTTPError
 
 _TESTS = [
-    'Basic', 'Video_720_MP4', 'Video_720_MP4_Fullscreen',
-    'Video_720_MP4_Underlay', 'Video_720_MP4_Underlay_Fullscreen'
+  'Basic',
+  'Video_720_MP4',
+  'Video_720_MP4_Fullscreen',
+  'Video_720_MP4_Underlay',
+  'Video_720_MP4_Underlay_Fullscreen',
 ]
 _MEASUREMENTS = ['DRAM', 'GT', 'IA']
 
@@ -51,42 +41,39 @@ def GetBuildData(method, request):
   # a JSON string.
   headers = {'content-type': 'application/json', 'accept': 'application/json'}
   url = ulib_request.Request(
-      'https://cr-buildbucket.appspot.com/prpc/buildbucket.v2.Builds/' + method,
-      request, headers)
-  conn = ulib_request.urlopen(url)
-  result = conn.read()
-  conn.close()
+    'https://cr-buildbucket.appspot.com/prpc/buildbucket.v2.Builds/' + method,
+    request,
+    headers,
+  )
+  with ulib_request.urlopen(url) as conn:
+    result = conn.read()
   # Result is a multi-line string the first line of which is
   # deliberate garbage and the rest of which is a JSON payload.
   return json.loads(''.join(result.splitlines()[1:]))
 
 
 def GetJsonForBuildSteps(bot, build):
-  request = json.dumps({
-      'builder': {
-          'project': 'chromium',
-          'bucket': 'ci',
-          'builder': bot
-      },
+  request = json.dumps(
+    {
+      'builder': {'project': 'chromium', 'bucket': 'ci', 'builder': bot},
       'buildNumber': build,
-      'fields': 'steps.*.name,steps.*.logs'
-  })
+      'fields': 'steps.*.name,steps.*.logs',
+    }
+  )
   return GetBuildData('GetBuild', request)
 
 
 def GetLatestGreenBuild(bot):
-  request = json.dumps({
+  request = json.dumps(
+    {
       'predicate': {
-          'builder': {
-              'project': 'chromium',
-              'bucket': 'ci',
-              'builder': bot
-          },
-          'status': 'SUCCESS'
+        'builder': {'project': 'chromium', 'bucket': 'ci', 'builder': bot},
+        'status': 'SUCCESS',
       },
       'fields': 'builds.*.number',
-      'pageSize': 1
-  })
+      'pageSize': 1,
+    }
+  )
   builds_json = GetBuildData('SearchBuilds', request)
   builds = builds_json['builds']
   assert len(builds) == 1
@@ -95,21 +82,19 @@ def GetLatestGreenBuild(bot):
 
 def GetJsonForLatestNBuilds(bot, build_count):
   fields = [
-      'builds.*.number',
-      'builds.*.steps.*.name',
-      'builds.*.steps.*.logs',
+    'builds.*.number',
+    'builds.*.steps.*.name',
+    'builds.*.steps.*.logs',
   ]
-  request = json.dumps({
+  request = json.dumps(
+    {
       'predicate': {
-          'builder': {
-              'project': 'chromium',
-              'bucket': 'ci',
-              'builder': bot
-          }
+        'builder': {'project': 'chromium', 'bucket': 'ci', 'builder': bot}
       },
       'fields': ','.join(fields),
-      'pageSize': build_count
-  })
+      'pageSize': build_count,
+    }
+  )
   builds_json = GetBuildData('SearchBuilds', request)
   builds = builds_json['builds']
   if len(builds) != build_count:
@@ -136,13 +121,13 @@ def FindStepLogURL(steps, step_name, log_name):
 # pylint: disable=too-many-branches
 def ProcessStepStdout(stdout_url, entry):
   number = entry['number']
-  logging.debug('[BUILD %d] stdout URL: %s', number,
-                ulib_parse.unquote(stdout_url))
+  logging.debug(
+    '[BUILD %d] stdout URL: %s', number, ulib_parse.unquote(stdout_url)
+  )
 
   # The following fails with Python 2.7.6, but succeeds with Python 2.7.14.
-  conn = ulib_request.urlopen(stdout_url + '?format=raw')
-  lines = conn.read().splitlines()
-  conn.close()
+  with ulib_request.urlopen(stdout_url + '?format=raw') as conn:
+    lines = conn.read().splitlines()
 
   pattern = re.compile(r'^\[(\d+)/(\d+)\]$')
   results = None
@@ -168,22 +153,22 @@ def ProcessStepStdout(stdout_url, entry):
       # pylint: enable=unsupported-assignment-operation
       entry['tests'].append(my_results)
     elif line.startswith('Chrome Env: '):
-      chrome_env = ast.literal_eval(line[len('Chrome Env: '):])
+      chrome_env = ast.literal_eval(line[len('Chrome Env: ') :])
       if 'COMPUTERNAME' in chrome_env:
         bot_candidates.append(chrome_env['COMPUTERNAME'])
     elif line.startswith('INFO:root:Chrome Env: '):
-      chrome_env = ast.literal_eval(line[len('INFO:root:Chrome Env: '):])
+      chrome_env = ast.literal_eval(line[len('INFO:root:Chrome Env: ') :])
       if 'COMPUTERNAME' in chrome_env:
         bot_candidates.append(chrome_env['COMPUTERNAME'])
     elif line.startswith('Env: '):
-      chrome_env = ast.literal_eval(line[len('Env: '):])
+      chrome_env = ast.literal_eval(line[len('Env: ') :])
       if 'COMPUTERNAME' in chrome_env:
         bot_candidates.append(chrome_env['COMPUTERNAME'])
     elif line.startswith(' COMPUTERNAME: '):
-      bot_candidates.append(line.strip()[len('COMPUTERNAME: '):])
+      bot_candidates.append(line.strip()[len('COMPUTERNAME: ') :])
     elif line.startswith('Results: '):
       assert results is None
-      results = ast.literal_eval(line[len('Results: '):])
+      results = ast.literal_eval(line[len('Results: ') :])
   for name in bot_candidates:
     if name.startswith('BUILD'):
       entry['bot'] = name
@@ -203,8 +188,12 @@ def CollectBuildData(build, data_entries):
     logging.warning('[BUILD %d] Missing bot name', build['number'])
     return False
   if len(build['tests']) != len(_TESTS):
-    logging.warning('[BUILD %d] Measured test count should be %d, got %d',
-                    build['number'], len(_TESTS), len(build['tests']))
+    logging.warning(
+      '[BUILD %d] Measured test count should be %d, got %d',
+      build['number'],
+      len(_TESTS),
+      len(build['tests']),
+    )
     return False
   for test in build['tests']:
     if not CollectTestData(test, data_entries):
@@ -249,13 +238,14 @@ def SaveResultsAsCSV(results, output_filename):
       continue
     csv_data.extend(entries)
   if len(csv_data) > 0:
-    with open(output_filename, 'w') as csv_file:
+    with open(output_filename, 'w', encoding='utf-8') as csv_file:
       labels = sorted(csv_data[0].keys())
       w = csv.DictWriter(csv_file, fieldnames=labels)
       w.writeheader()
       w.writerows(csv_data)
-    logging.debug('Data from %d tests saved to %s', len(csv_data),
-                  output_filename)
+    logging.debug(
+      'Data from %d tests saved to %s', len(csv_data), output_filename
+    )
   else:
     logging.warning('No valid data saved to %s', output_filename)
 
@@ -263,42 +253,50 @@ def SaveResultsAsCSV(results, output_filename):
 def main():
   rest_args = sys.argv[1:]
   parser = argparse.ArgumentParser(
-      description='Gather JSON results from a run of a Swarming test.',
-      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    description='Gather JSON results from a run of a Swarming test.',
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+  )
   parser.add_argument(
-      '-v',
-      '--verbose',
-      action='store_true',
-      default=False,
-      help='Enable verbose output')
-  parser.add_argument('--bot',
-                      default='Win10 FYI x64 Release (Intel)',
-                      help='Which bot to examine.')
+    '-v',
+    '--verbose',
+    action='store_true',
+    default=False,
+    help='Enable verbose output',
+  )
   parser.add_argument(
-      '--last-build',
-      type=int,
-      help='The last of a range of builds to fetch. If not '
-      'specified, use the latest build.')
+    '--bot',
+    default='Win10 FYI x64 Release (Intel)',
+    help='Which bot to examine.',
+  )
   parser.add_argument(
-      '--build-count',
-      type=int,
-      default=100,
-      help='How many builds to fetch. If not specified, '
-      'fetch 100 builds.')
+    '--last-build',
+    type=int,
+    help='The last of a range of builds to fetch. If not '
+    'specified, use the latest build.',
+  )
   parser.add_argument(
-      '--step',
-      default='power_measurement_test',
-      help='Which step to fetch (treated as a prefix).')
+    '--build-count',
+    type=int,
+    default=100,
+    help='How many builds to fetch. If not specified, fetch 100 builds.',
+  )
   parser.add_argument(
-      '--output-json',
-      metavar='FILE',
-      default='output.json',
-      help='Name of output json file. Default is output.json.')
+    '--step',
+    default='power_measurement_test',
+    help='Which step to fetch (treated as a prefix).',
+  )
   parser.add_argument(
-      '--output-csv',
-      metavar='FILE',
-      default='output.csv',
-      help='Name of output csv file. Default is output.csv.')
+    '--output-json',
+    metavar='FILE',
+    default='output.json',
+    help='Name of output json file. Default is output.json.',
+  )
+  parser.add_argument(
+    '--output-csv',
+    metavar='FILE',
+    default='output.csv',
+    help='Name of output csv file. Default is output.csv.',
+  )
 
   options = parser.parse_args(rest_args)
   if options.verbose:
@@ -320,8 +318,9 @@ def main():
         build_json['number'] = build_id
         builds.append(build_json)
       except HTTPError:
-        logging.warning('HTTPError raised, failed to load data from build %d',
-                        build_id)
+        logging.warning(
+          'HTTPError raised, failed to load data from build %d', build_id
+        )
 
   logging.debug('Start processing stdout data')
   results = {'builds': []}
@@ -335,14 +334,15 @@ def main():
       continue
     stdout_url = FindStepLogURL(build['steps'], options.step, 'stdout')
     if not stdout_url:
-      logging.warning('[BUILD %d] Unable to find stdout from step %s*', number,
-                      options.step)
+      logging.warning(
+        '[BUILD %d] Unable to find stdout from step %s*', number, options.step
+      )
       continue
     results['builds'].append({'number': number, 'tests': []})
     ProcessStepStdout(stdout_url, results['builds'][-1])
 
   logging.debug('Saving output to %s', options.output_json)
-  with open(options.output_json, 'w') as f:
+  with open(options.output_json, 'w', encoding='utf-8') as f:
     json.dump(results, f, sort_keys=True, indent=2, separators=(',', ': '))
 
   logging.debug('Saving output to %s', options.output_csv)

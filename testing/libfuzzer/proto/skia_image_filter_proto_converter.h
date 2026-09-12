@@ -5,22 +5,24 @@
 #ifndef TESTING_LIBFUZZER_PROTO_SKIA_IMAGE_FILTER_PROTO_CONVERTER_H_
 #define TESTING_LIBFUZZER_PROTO_SKIA_IMAGE_FILTER_PROTO_CONVERTER_H_
 
+#include <array>
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
-#include <unordered_map>
 #include <vector>
 
-#include "third_party/skia/include/core/SkPoint.h"
-
+#include "base/containers/fixed_flat_map.h"
+#include "base/containers/fixed_flat_set.h"
+#include "base/containers/span.h"
 #include "testing/libfuzzer/proto/skia_image_filter.pb.h"
+#include "third_party/skia/include/core/SkPoint.h"
 
 using google::protobuf::FieldDescriptor;
 using google::protobuf::Message;
 using google::protobuf::Reflection;
 
-typedef std::unordered_map<std::string, std::string> string_map_t;
 
 namespace skia_image_filter_proto_converter {
 
@@ -56,17 +58,15 @@ class Converter {
   static const char kSkPictReaderTag[];
   static const uint8_t kCountNibBits[];
 
-  // The size of kColorTableBuffer.
-  static const int kColorTableBufferLength;
-
   // Used to bound flattenable_depth_.
   static const int kFlattenableDepthLimit;
 
   // Used to bound numeric fields.
   static const int kNumBound;
 
-  // Used by ColorTableToArray to store a ColorTable Message as an array.
-  static uint8_t kColorTableBuffer[];
+  static constexpr size_t kColorTableEntries = 64;
+  static constexpr size_t kColorTableByteSize =
+      kColorTableEntries * sizeof(float);
 
   // There will be a 1/kMutateEnumDenominator chance that WriteEnum
   // writes an invalid enum value instead of the one given to us by LPM.
@@ -74,11 +74,79 @@ class Converter {
   static const uint8_t kMutateEnumDenominator;
 
   // Mapping of field names to types.
-  static const string_map_t kFieldToFlattenableName;
+  // Does not include SkSumPathEffect, SkComposePathEffect or SkRegion since
+  // they don't use the VISIT FLATTENABLE macros.
+  static constexpr base::fixed_flat_map<std::string_view, std::string_view, 54u>
+      kFieldToFlattenableName =
+          base::MakeFixedFlatMap<std::string_view, std::string_view>({
+              {"path_1d_path_effect", "SkPath1DPathEffect"},
+              {"path_2d_path_effect", "SkPath2DPathEffect"},
+              {"alpha_threshold_filter_impl", "SkAlphaThresholdFilterImpl"},
+              {"arithmetic_image_filter", "SkArithmeticImageFilter"},
+              {"blur_image_filter_impl", "SkBlurImageFilterImpl"},
+              {"blur_mask_filter_impl", "SkBlurMaskFilterImpl"},
+              {"color_4_shader", "SkColor4Shader"},
+              {"color_filter_image_filter", "SkColorFilterImageFilter"},
+              {"color_filter_shader", "SkColorFilterShader"},
+              {"color_matrix_filter_row_major_255",
+               "SkColorMatrixFilterRowMajor255"},
+              {"color_shader", "SkColorShader"},
+              {"compose_color_filter", "SkComposeColorFilter"},
+              {"compose_image_filter", "SkComposeImageFilter"},
+              {"compose_shader", "SkComposeShader"},
+              {"corner_path_effect", "SkCornerPathEffect"},
+              {"dash_impl", "SkDashImpl"},
+              {"diffuse_lighting_image_filter", "SkDiffuseLightingImageFilter"},
+              {"dilate_image_filter", "SkDilateImageFilter"},
+              {"discrete_path_effect", "SkDiscretePathEffect"},
+              {"displacement_map_effect", "SkDisplacementMapEffect"},
+              {"drop_shadow_image_filter", "SkDropShadowImageFilter"},
+              {"emboss_mask_filter", "SkEmbossMaskFilter"},
+              {"empty_shader", "SkEmptyShader"},
+              {"image_shader", "SkImageShader"},
+              {"image_source", "SkImageSource"},
+              {"line_2d_path_effect", "SkLine2DPathEffect"},
+              {"linear_gradient", "SkLinearGradient"},
+              {"local_matrix_image_filter", "SkLocalMatrixImageFilter"},
+              {"local_matrix_shader", "SkLocalMatrixShader"},
+              {"luma_color_filter", "SkLumaColorFilter"},
+              {"magnifier_image_filter", "SkMagnifierImageFilter"},
+              {"matrix_convolution_image_filter",
+               "SkMatrixConvolutionImageFilter"},
+              {"matrix_image_filter", "SkMatrixImageFilter"},
+              {"merge_image_filter", "SkMergeImageFilter"},
+              {"mode_color_filter", "SkModeColorFilter"},
+              {"offset_image_filter", "SkOffsetImageFilter"},
+              {"overdraw_color_filter", "SkOverdrawColorFilter"},
+              {"paint_image_filter", "SkPaintImageFilter"},
+              {"picture_image_filter", "SkPictureImageFilter"},
+              {"picture_shader", "SkPictureShader"},
+              {"radial_gradient", "SkRadialGradient"},
+              {"specular_lighting_image_filter",
+               "SkSpecularLightingImageFilter"},
+              {"sweep_gradient", "SkSweepGradient"},
+              {"tile_image_filter", "SkTileImageFilter"},
+              {"two_point_conical_gradient", "SkTwoPointConicalGradient"},
+              {"xfermode_image_filter", "SkXfermodeImageFilter"},
+              {"xfermode_image_filter__base", "SkXfermodeImageFilter_Base"},
+              {"srgb_gamma_color_filter", "SkSRGBGammaColorFilter"},
+              {"high_contrast__filter", "SkHighContrast_Filter"},
+              {"table__color_filter", "SkTable_ColorFilter"},
+              {"to_srgb_color_filter", "SkToSRGBColorFilter"},
+              {"layer_draw_looper", "SkLayerDrawLooper"},
+              {"perlin_noise_shader_impl", "SkPerlinNoiseShaderImpl"},
+              {"erode_image_filter", "SkErodeImageFilter"},
+          });
 
   // Used by IsBlacklisted to determine which skia flattenable should not be
   // serialized.
-  static const std::set<std::string> kMisbehavedFlattenableBlacklist;
+  static constexpr base::fixed_flat_set<std::string_view, 3u>
+      kMisbehavedFlattenableBlacklist =
+          base::MakeFixedFlatSet<std::string_view>({
+              "matrix_image_filter",   // Causes OOMs.
+              "discrete_path_effect",  // Causes timeouts.
+              "path_1d_path_effect",   // Causes timeouts.
+          });
 
   // Probably the most important attribute, a char vector that contains
   // serialized skia flattenable written by the Visit functions. The contents of
@@ -259,7 +327,7 @@ class Converter {
   // kFlattenableDepthLimit and flattenable_depth_).  Writes name and reserves a
   // space to write the size of the flattenable. Also increments
   // flattenable_depth_.
-  bool PreVisitFlattenable(const std::string& name);
+  bool PreVisitFlattenable(std::string_view name);
 
   // Writes the size of the flattenable to the reserved space, ensures that
   // output_ is four byte aligned and then decrements flattenable_depth_.
@@ -270,7 +338,7 @@ class Converter {
 
   void WriteColorSpaceVersion();
   // Write a string in the proper serialized format, padding if necessary.
-  void WriteString(std::string str);
+  void WriteString(std::string_view str);
 
   // Get the size of a skia flattenable that was just written and insert it at
   // the proper location. Every call to this method should have a corresponding
@@ -293,14 +361,12 @@ class Converter {
   // write_size + number of padding bytes is divisible by four.
   void Pad(const size_t write_size);
 
-  // Write size elements of RepeatedField of uint32_ts repeated_field as an
-  // array.
+  // Write repeated_field as an array.
   void WriteArray(
-      const google::protobuf::RepeatedField<uint32_t>& repeated_field,
-      const size_t size);
+      const google::protobuf::RepeatedField<uint32_t>& repeated_field);
 
-  // Write size bytes of arr as an array and pad if necessary.
-  void WriteArray(const char* arr, const size_t size);
+  // Write arr as an array and pad if necessary.
+  void WriteArray(base::span<const char> arr);
 
   void WriteBool(const bool bool_val);
 
@@ -329,7 +395,7 @@ class Converter {
 
   // Given the name of a proto field, field_name returns the name of the
   // flattenable skia flattenable object it represents.
-  std::string FieldToFlattenableName(const std::string& field_name) const;
+  std::string_view FieldToFlattenableName(std::string_view field_name) const;
 
   void CheckAlignment() const;
   // Append our proto Message proto_point to sk_points as an SkPoint.
@@ -402,9 +468,9 @@ class Converter {
   bool IsFinite(float num) const;
   bool IsBlacklisted(const std::string& field_name) const;
 
-  // Converts color_table from our proto Message format to a 256-byte array.
-  // Note that this function modifies kColorTableBuffer.
-  const uint8_t* ColorTableToArray(const ColorTable& color_table);
+  // Converts color_table from our proto Message format to an array of floats.
+  std::array<float, kColorTableEntries> ColorTableToArray(
+      const ColorTable& color_table);
 
 #ifdef DEVELOPMENT
   // ICC related functions
@@ -423,8 +489,7 @@ class Converter {
   void WriteLut8(const ICCA2B0Lut8&);
   void WriteA2B0TagCommon();
   void WriteTagSize(const char (&tag)[4], const size_t size);
-  template <typename T>
-  void WriteBigEndian(const T num);
+  void WriteBigEndian(uint32_t num);
   void WriteTagHeader(const uint32_t tag, const uint32_t len);
 
   // Write num_fields zeroes to fill the space used by ignored or reserved

@@ -5,16 +5,15 @@
 #ifndef CHROME_BROWSER_CHROMEOS_APP_MODE_CHROME_KIOSK_EXTERNAL_LOADER_BROKER_H_
 #define CHROME_BROWSER_CHROMEOS_APP_MODE_CHROME_KIOSK_EXTERNAL_LOADER_BROKER_H_
 
-#include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "base/functional/callback.h"
 #include "base/values.h"
-#include "chrome/browser/chromeos/app_mode/chrome_kiosk_app_installer.h"
-#include "chromeos/crosapi/mojom/chrome_app_kiosk_service.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "chrome/browser/ash/app_mode/kiosk_app_types.h"
 
-namespace ash {
+namespace chromeos {
 
 // Singleton broker that stands in the middle between the
 // ChromeKioskAppInstaller and the KioskAppExternalLoader. The external
@@ -23,7 +22,7 @@ namespace ash {
 class ChromeKioskExternalLoaderBroker {
  public:
   using InstallDataChangeCallback =
-      base::RepeatingCallback<void(base::Value::Dict)>;
+      base::RepeatingCallback<void(base::DictValue)>;
 
   static ChromeKioskExternalLoaderBroker* Get();
 
@@ -41,24 +40,27 @@ class ChromeKioskExternalLoaderBroker {
   void RegisterSecondaryAppInstallDataObserver(
       InstallDataChangeCallback callback);
 
-  void TriggerPrimaryAppInstall(
-      const crosapi::mojom::AppInstallParams& install_data);
-  void TriggerSecondaryAppInstall(std::vector<std::string> secondary_app_ids);
+  // Updates the primary app install data and notifies `primary_app_observer_`.
+  void TriggerPrimaryAppInstall(ash::KioskAppInstallParams install_data);
+
+  // Updates the list of secondary apps and notifies `secondary_apps_observer_`.
+  void UpdateSecondaryAppList(
+      const std::vector<std::string>& secondary_app_ids);
 
  private:
-  base::Value::Dict CreatePrimaryAppLoaderPrefs() const;
-  base::Value::Dict CreateSecondaryAppLoaderPrefs() const;
+  void CallPrimaryAppObserver();
+  void CallSecondaryAppObserver();
 
-  absl::optional<crosapi::mojom::AppInstallParams> primary_app_install_data_;
-  absl::optional<std::vector<std::string>> secondary_app_ids_;
+  std::optional<ash::KioskAppInstallParams> primary_app_data_;
+  std::optional<std::vector<std::string>> secondary_app_ids_;
 
   // Handle to the primary app external loader.
-  InstallDataChangeCallback primary_app_changed_handler_;
+  InstallDataChangeCallback primary_app_observer_;
 
   // Handle to the secondary app external loader.
-  InstallDataChangeCallback secondary_apps_changed_handler_;
+  InstallDataChangeCallback secondary_apps_observer_;
 };
 
-}  // namespace ash
+}  // namespace chromeos
 
 #endif  // CHROME_BROWSER_CHROMEOS_APP_MODE_CHROME_KIOSK_EXTERNAL_LOADER_BROKER_H_

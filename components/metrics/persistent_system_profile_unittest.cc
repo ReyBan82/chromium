@@ -9,6 +9,9 @@
 #include "base/check_op.h"
 #include "base/metrics/persistent_memory_allocator.h"
 #include "base/rand_util.h"
+#include "base/system/sys_info.h"
+#include "components/metrics/metrics_log.h"
+#include "components/metrics/version_utils.h"
 #include "components/variations/hashing.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -18,13 +21,13 @@ class PersistentSystemProfileTest : public testing::Test {
  public:
   const int32_t kAllocatorMemorySize = 1 << 20;  // 1 MiB
 
-  PersistentSystemProfileTest() {}
+  PersistentSystemProfileTest() = default;
 
   PersistentSystemProfileTest(const PersistentSystemProfileTest&) = delete;
   PersistentSystemProfileTest& operator=(const PersistentSystemProfileTest&) =
       delete;
 
-  ~PersistentSystemProfileTest() override {}
+  ~PersistentSystemProfileTest() override = default;
 
   void SetUp() override {
     memory_allocator_ = std::make_unique<base::LocalPersistentMemoryAllocator>(
@@ -40,7 +43,7 @@ class PersistentSystemProfileTest : public testing::Test {
     memory_allocator_.reset();
   }
 
-  void WriteRecord(uint8_t type, const std::string& record) {
+  void WriteRecord(uint8_t type, std::string_view record) {
     persistent_profile_.allocators_[0].Write(
         static_cast<PersistentSystemProfile::RecordType>(type), record);
   }
@@ -65,6 +68,8 @@ class PersistentSystemProfileTest : public testing::Test {
   std::unique_ptr<PersistentSystemProfile::RecordAllocator> records_;
 };
 
+namespace {
+
 TEST_F(PersistentSystemProfileTest, Create) {
   uint32_t type;
   base::PersistentMemoryAllocator::Iterator iter(memory_allocator());
@@ -75,19 +80,16 @@ TEST_F(PersistentSystemProfileTest, Create) {
 
 TEST_F(PersistentSystemProfileTest, RecordSplitting) {
   const size_t kRecordSize = 100 << 10;  // 100 KiB
-  std::vector<char> buffer;
-  buffer.resize(kRecordSize);
-  base::RandBytes(&buffer[0], kRecordSize);
+  std::string buffer(kRecordSize, '\0');
+  base::RandBytes(base::as_writable_byte_span(buffer));
 
-  WriteRecord(42, std::string(&buffer[0], kRecordSize));
+  WriteRecord(42, buffer);
 
   uint8_t type;
   std::string record;
   ASSERT_TRUE(ReadRecord(&type, &record));
   EXPECT_EQ(42U, type);
-  ASSERT_EQ(kRecordSize, record.size());
-  for (size_t i = 0; i < kRecordSize; ++i)
-    EXPECT_EQ(buffer[i], record[i]);
+  EXPECT_EQ(buffer, record);
 }
 
 TEST_F(PersistentSystemProfileTest, ProfileStorage) {
@@ -190,4 +192,101 @@ TEST_F(PersistentSystemProfileTest, ProfileExtensions) {
   EXPECT_EQ(variations::HashName("bar"), fetched.field_trial(1).group_id());
 }
 
+TEST_F(PersistentSystemProfileTest, OverwriteFieldTrialsInProfile) {
+  // Set system profile with the field trial.
+  SystemProfileProto proto;
+  SystemProfileProto::FieldTrial* trial = proto.add_field_trial();
+  trial->set_name_id(variations::HashName("foo"));
+  trial->set_group_id(456);
+  persistent_profile()->SetSystemProfile(proto, false);
+
+  // Overwrite the same trial with different group.
+  persistent_profile()->AddFieldTrial("foo", "bar");
+
+  // The fetched profile should have the latest group name,
+  SystemProfileProto fetched;
+  ASSERT_TRUE(
+      PersistentSystemProfile::GetSystemProfile(*memory_allocator(), &fetched));
+  ASSERT_EQ(1, fetched.field_trial_size());
+  EXPECT_EQ(variations::HashName("foo"), fetched.field_trial(0).name_id());
+  EXPECT_EQ(variations::HashName("bar"), fetched.field_trial(0).group_id());
+}
+
+TEST_F(PersistentSystemProfileTest, OverwriteFieldTrials) {
+  // Set up a non-empty system profile.
+  SystemProfileProto proto;
+  proto.set_client_uuid("id");
+  persistent_profile()->SetSystemProfile(proto, false);
+
+  // Set and overwrite the same trial with different group.
+  persistent_profile()->AddFieldTrial("foo", "bar");
+  persistent_profile()->AddFieldTrial("foo", "bar2");
+
+  // The fetched profile should have the latest group name,
+  SystemProfileProto fetched;
+  ASSERT_TRUE(
+      PersistentSystemProfile::GetSystemProfile(*memory_allocator(), &fetched));
+  ASSERT_EQ(1, fetched.field_trial_size());
+  EXPECT_EQ(variations::HashName("foo"), fetched.field_trial(0).name_id());
+  EXPECT_EQ(variations::HashName("bar2"), fetched.field_trial(0).group_id());
+}
+
+TEST_F(PersistentSystemProfileTest, DeleteFieldTrials) {
+  // Set up a non-empty system profile.
+  SystemProfileProto proto;
+  proto.set_client_uuid("id");
+  persistent_profile()->SetSystemProfile(proto, false);
+
+  // Set and delete the trial.
+  persistent_profile()->AddFieldTrial("foo", "bar");
+  persistent_profile()->RemoveFieldTrial("foo");
+
+  // The fetched profile should not have the deleted trial.
+  SystemProfileProto fetched;
+  ASSERT_TRUE(
+      PersistentSystemProfile::GetSystemProfile(*memory_allocator(), &fetched));
+  ASSERT_EQ(0, fetched.field_trial_size());
+
+  // Reset the trial and the fetched profile should have the latest group name.
+  persistent_profile()->AddFieldTrial("foo", "bar2");
+  ASSERT_TRUE(
+      PersistentSystemProfile::GetSystemProfile(*memory_allocator(), &fetched));
+  ASSERT_EQ(1, fetched.field_trial_size());
+  EXPECT_EQ(variations::HashName("foo"), fetched.field_trial(0).name_id());
+  EXPECT_EQ(variations::HashName("bar2"), fetched.field_trial(0).group_id());
+}
+
+TEST_F(PersistentSystemProfileTest, RecordCoreSystemProfile) {
+  // 1. Populate the profile directly using RecordCoreSystemProfile
+  SystemProfileProto system_profile;
+  MetricsLog::RecordCoreSystemProfile("version",
+                                      SystemProfileProto::CHANNEL_STABLE, false,
+                                      "en-US", "package", &system_profile);
+  system_profile.set_install_date(12345678);  // Simulate mock install date
+
+  persistent_profile()->SetSystemProfile(system_profile, /*complete=*/false);
+
+  // 2. Read it back from the allocator and verify
+  SystemProfileProto decoded_profile;
+  ASSERT_TRUE(PersistentSystemProfile::GetSystemProfile(*memory_allocator(),
+                                                        &decoded_profile));
+
+  // 3. Assert all safe fields are populated and match expected values
+  ASSERT_TRUE(decoded_profile.has_hardware());
+  EXPECT_FALSE(decoded_profile.hardware().cpu_architecture().empty());
+  EXPECT_EQ(static_cast<int64_t>(decoded_profile.hardware().system_ram_mb()),
+            static_cast<int64_t>(
+                base::SysInfo::AmountOfTotalPhysicalMemory().InMiB()));
+  EXPECT_EQ(decoded_profile.hardware().hardware_class(),
+            base::SysInfo::HardwareModelName());
+
+  ASSERT_TRUE(decoded_profile.has_os());
+  EXPECT_EQ(decoded_profile.os().name(), GetOperatingSystemName());
+  EXPECT_EQ(decoded_profile.os().version(),
+            base::SysInfo::OperatingSystemVersion());
+
+  EXPECT_EQ(decoded_profile.install_date(), 12345678U);
+}
+
+}  // namespace
 }  // namespace metrics

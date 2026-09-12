@@ -21,7 +21,7 @@
 #include "components/language/core/browser/pref_names.h"
 #include "components/language/core/browser/ulp_metrics_logger.h"
 #include "components/language/core/browser/url_language_histogram.h"
-#include "components/language/core/common/language_experiments.h"
+#include "components/language/core/common/language_util.h"
 #include "components/language/core/language_model/fluent_language_model.h"
 #include "components/language/core/language_model/ulp_language_model.h"
 #include "components/pref_registry/pref_registry_syncable.h"
@@ -31,7 +31,10 @@
 #if BUILDFLAG(IS_ANDROID)
 #include "base/android/jni_string.h"
 #include "base/android/scoped_java_ref.h"
+#include "base/i18n/language_tag.h"
+#include "base/i18n/tag_converters.h"
 #include "chrome/browser/language/android/language_bridge.h"
+#include "components/language/core/common/language_experiments.h"
 
 using language::ULPMetricsLogger;
 #endif
@@ -43,7 +46,7 @@ namespace {
 void RecordULPInitMetrics(
     PrefService* pref_service,
     const language::UrlLanguageHistogram& page_language_histogram,
-    const std::vector<std::string>& ulp_languages) {
+    const std::vector<base::i18n::LanguageTag>& ulp_languages) {
   language::ULPMetricsLogger logger;
 
   logger.RecordInitiationLanguageCount(ulp_languages.size());
@@ -96,11 +99,19 @@ void RecordULPInitMetrics(
       page_languages_not_in_ulp.size());
 }
 
-void CreateAndAddULPLanguageModel(Profile* profile,
-                                  std::vector<std::string> languages) {
+void CreateAndAddULPLanguageModel(
+    Profile* profile,
+    std::vector<base::i18n::LanguageTag> languages) {
   PrefService* pref_service = profile->GetPrefs();
   language::UrlLanguageHistogram* page_languages =
       UrlLanguageHistogramFactory::GetForBrowserContext(profile);
+
+  std::vector<std::string> lang_strings;
+  lang_strings.reserve(languages.size());
+  for (const auto& tag : languages) {
+    lang_strings.push_back(std::string(tag.tag_string()));
+  }
+
   RecordULPInitMetrics(pref_service, *page_languages, languages);
   language::LanguagePrefs(pref_service).SetULPLanguages(languages);
 
@@ -108,7 +119,7 @@ void CreateAndAddULPLanguageModel(Profile* profile,
       std::make_unique<language::ULPLanguageModel>();
 
   int score_divisor = 1;
-  for (std::string lang : languages) {
+  for (const std::string& lang : lang_strings) {
     // List of languages is already ordered by preference, generate scores
     // accordingly.
     ulp_model->AddULPLanguage(lang, 1.0f / score_divisor);
@@ -139,14 +150,16 @@ void PrepareLanguageModels(Profile* const profile,
     manager->SetPrimaryModel(language::LanguageModelManager::ModelType::FLUENT);
   }
 
-    // On Android, additionally create a ULPLanguageModel and populate it with
-    // ULP data.
+  // On Android, additionally create a ULPLanguageModel and populate it with
+  // ULP data if not disabled.
 #if BUILDFLAG(IS_ANDROID)
-  base::ThreadPool::PostTaskAndReplyWithResult(
-      FROM_HERE, {base::MayBlock()},
-      base::BindOnce(&language::LanguageBridge::GetULPLanguagesFromDevice,
-                     profile->GetProfileUserName()),
-      base::BindOnce(&CreateAndAddULPLanguageModel, profile));
+  if (base::FeatureList::IsEnabled(language::kGmsCoreUlp)) {
+    base::ThreadPool::PostTaskAndReplyWithResult(
+        FROM_HERE, {base::MayBlock()},
+        base::BindOnce(&language::LanguageBridge::GetULPLanguagesFromDevice,
+                       profile->GetProfileUserName()),
+        base::BindOnce(&CreateAndAddULPLanguageModel, profile));
+  }
 #endif
 }
 
@@ -154,7 +167,8 @@ void PrepareLanguageModels(Profile* const profile,
 
 // static
 LanguageModelManagerFactory* LanguageModelManagerFactory::GetInstance() {
-  return base::Singleton<LanguageModelManagerFactory>::get();
+  static base::NoDestructor<LanguageModelManagerFactory> instance;
+  return instance.get();
 }
 
 // static
@@ -169,15 +183,25 @@ LanguageModelManagerFactory::LanguageModelManagerFactory()
     : ProfileKeyedServiceFactory(
           "LanguageModelManager",
           // Use the original profile's language model even in Incognito mode.
-          ProfileSelections::BuildRedirectedInIncognito()) {}
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kRedirectedToOriginal)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kRedirectedToOriginal)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kRedirectedToOriginal)
+              .Build()) {}
 
-LanguageModelManagerFactory::~LanguageModelManagerFactory() {}
+LanguageModelManagerFactory::~LanguageModelManagerFactory() = default;
 
-KeyedService* LanguageModelManagerFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+LanguageModelManagerFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* const browser_context) const {
   Profile* const profile = Profile::FromBrowserContext(browser_context);
-  language::LanguageModelManager* manager = new language::LanguageModelManager(
-      profile->GetPrefs(), g_browser_process->GetApplicationLocale());
-  PrepareLanguageModels(profile, manager);
+  std::unique_ptr<language::LanguageModelManager> manager =
+      std::make_unique<language::LanguageModelManager>(
+          profile->GetPrefs(), g_browser_process->GetApplicationLocale());
+  PrepareLanguageModels(profile, manager.get());
   return manager;
 }

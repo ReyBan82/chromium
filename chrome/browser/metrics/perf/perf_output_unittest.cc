@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "chrome/browser/metrics/perf/perf_output.h"
 
 #include <stdio.h>
@@ -9,6 +10,7 @@
 
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/task/sequenced_task_runner.h"
@@ -52,10 +54,6 @@ PerfDataProto GetExamplePerfDataProto() {
 
 // Perf session ID returned by the GetPerfOutputV2 DBus method call.
 const uint64_t kFakePerfSssionId = 101;
-// Quipper command line arguments for running perf.
-const std::vector<std::string> kQuipperArgs{
-    "--duration", "4",      "--", "perf", "record", "-a",
-    "-e",         "cycles", "-g", "-c",   "4000037"};
 
 // This fakes DebugDaemonClient by serving example perf data when the profiling
 // duration elapses.
@@ -109,9 +107,9 @@ class FakeDebugDaemonClient : public ash::FakeDebugDaemonClient {
     base::ScopedAllowBlockingForTesting allow_block;
 
     auto perf_data = GetExamplePerfDataProto().SerializeAsString();
-    auto bytes_written = perf_output_file_.WriteAtCurrentPos(perf_data.c_str(),
-                                                             perf_data.size());
-    EXPECT_EQ(bytes_written, static_cast<ssize_t>(perf_data.size()));
+    EXPECT_TRUE(perf_output_file_.WriteAtCurrentPosAndCheck(
+        base::as_byte_span(perf_data)));
+
     // Need to close the pipe to unblock the pipe reader.
     perf_output_file_.Close();
   }
@@ -143,6 +141,12 @@ class PerfOutputCallTest : public testing::Test {
   }
 
  protected:
+  // Quipper command line arguments for running perf. Member variable to avoid
+  // at-exit destructors.
+  const std::vector<std::string> kQuipperArgs{
+      "--duration", "4",      "--", "perf", "record", "-a",
+      "-e",         "cycles", "-g", "-c",   "4000037"};
+
   // |task_environment_| must be the first member (or at least before
   // any member that cares about tasks) to be initialized first and
   // destroyed last.

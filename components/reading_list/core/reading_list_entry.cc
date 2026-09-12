@@ -10,7 +10,7 @@
 #include "base/memory/ptr_util.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/string_util.h"
 #include "base/time/time.h"
 #include "components/reading_list/core/offline_url_utils.h"
 #include "components/reading_list/core/proto/reading_list.pb.h"
@@ -119,7 +119,7 @@ ReadingListEntry::ReadingListEntry(
   DCHECK(url.is_valid());
 }
 
-ReadingListEntry::~ReadingListEntry() {}
+ReadingListEntry::~ReadingListEntry() = default;
 
 const GURL& ReadingListEntry::URL() const {
   return url_;
@@ -200,10 +200,6 @@ void ReadingListEntry::SetRead(bool read, const base::Time& now) {
   }
   if (FirstReadTime() == 0 && read) {
     int64_t time_to_us = TimeToUS(now);
-    int64_t time_since_creation =
-        (time_to_us - creation_time_us_) / base::Time::kMicrosecondsPerHour;
-    base::UmaHistogramCounts1000("ReadingList.Read.AgeOnFirstRead",
-                                 time_since_creation);
     first_read_time_us_ = time_to_us;
   }
   if (!(previous_state == UNSEEN && state_ == UNREAD)) {
@@ -219,6 +215,24 @@ bool ReadingListEntry::IsRead() const {
 
 bool ReadingListEntry::HasBeenSeen() const {
   return state_ != UNSEEN;
+}
+
+bool ReadingListEntry::IsSpecificsValid(
+    const sync_pb::ReadingListSpecifics& pb_entry) {
+  if (!pb_entry.has_entry_id() || !pb_entry.has_url() ||
+      pb_entry.entry_id() != pb_entry.url()) {
+    return false;
+  }
+  GURL url(pb_entry.url());
+  if (url.is_empty() || !url.is_valid() || !url.SchemeIsHTTPOrHTTPS()) {
+    return false;
+  }
+  // Some crash reports indicate that some users have reading list entries with
+  // invalid (non-UTF8) titles, so filter out such invalid items.
+  if (!base::IsStringUTF8AllowingNoncharacters(pb_entry.title())) {
+    return false;
+  }
+  return true;
 }
 
 void ReadingListEntry::SetEstimatedReadTime(
@@ -256,7 +270,7 @@ void ReadingListEntry::SetDistilledState(DistillationState distilled_state) {
 
   distilled_state_ = distilled_state;
   distilled_path_ = base::FilePath();
-  distilled_url_ = GURL::EmptyGURL();
+  distilled_url_ = GURL();
   distillation_size_ = 0;
   distillation_time_us_ = 0;
 }
@@ -411,16 +425,11 @@ scoped_refptr<ReadingListEntry> ReadingListEntry::FromReadingListLocal(
 }
 
 // static
-scoped_refptr<ReadingListEntry> ReadingListEntry::FromReadingListSpecifics(
+scoped_refptr<ReadingListEntry> ReadingListEntry::FromReadingListValidSpecifics(
     const sync_pb::ReadingListSpecifics& pb_entry,
     const base::Time& now) {
-  if (!pb_entry.has_url()) {
-    return nullptr;
-  }
-  GURL url(pb_entry.url());
-  if (url.is_empty() || !url.is_valid()) {
-    return nullptr;
-  }
+  CHECK(IsSpecificsValid(pb_entry));
+
   std::string title;
   if (pb_entry.has_title()) {
     title = pb_entry.title();
@@ -471,7 +480,7 @@ scoped_refptr<ReadingListEntry> ReadingListEntry::FromReadingListSpecifics(
   }
 
   return base::WrapRefCounted<ReadingListEntry>(new ReadingListEntry(
-      url, title, estimated_read_time, state, creation_time_us,
+      GURL(pb_entry.url()), title, estimated_read_time, state, creation_time_us,
       first_read_time_us, update_time_us, update_title_time_us, WAITING,
       base::FilePath(), GURL(), 0, 0, 0, nullptr));
 }
@@ -599,7 +608,7 @@ ReadingListEntry::AsReadingListLocal(const base::Time& now) const {
   pb_entry->set_failed_download_counter(failed_download_counter_);
 
   if (backoff_) {
-    base::Value::List backoff =
+    base::ListValue backoff =
         net::BackoffEntrySerializer::SerializeToList(*backoff_, now);
 
     std::string output;

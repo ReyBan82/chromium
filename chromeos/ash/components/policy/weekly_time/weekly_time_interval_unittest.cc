@@ -7,6 +7,7 @@
 #include <tuple>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "chromeos/ash/components/policy/weekly_time/weekly_time.h"
@@ -75,7 +76,7 @@ TEST_P(SingleWeeklyTimeIntervalTest, ToValue) {
   WeeklyTime end = WeeklyTime(end_day_of_week(), end_time(), 0);
   WeeklyTimeInterval interval = WeeklyTimeInterval(start, end);
   base::Value expected_interval_value(base::Value::Type::DICT);
-  base::Value::Dict& dict = expected_interval_value.GetDict();
+  base::DictValue& dict = expected_interval_value.GetDict();
   dict.Set(WeeklyTimeInterval::kStart, start.ToValue());
   dict.Set(WeeklyTimeInterval::kEnd, end.ToValue());
 
@@ -91,7 +92,7 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_Empty) {
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_NoEnd) {
   em::WeeklyTimeIntervalProto interval_proto;
   em::WeeklyTimeProto* start = interval_proto.mutable_start();
-  start->set_day_of_week(kWeekdays[start_day_of_week()]);
+  start->set_day_of_week(UNSAFE_TODO(kWeekdays[start_day_of_week()]));
   start->set_time(start_time());
   auto result = WeeklyTimeInterval::ExtractFromProto(interval_proto, 0);
   ASSERT_FALSE(result);
@@ -100,7 +101,7 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_NoEnd) {
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_NoStart) {
   em::WeeklyTimeIntervalProto interval_proto;
   em::WeeklyTimeProto* end = interval_proto.mutable_end();
-  end->set_day_of_week(kWeekdays[end_day_of_week()]);
+  end->set_day_of_week(UNSAFE_TODO(kWeekdays[end_day_of_week()]));
   end->set_time(end_time());
   auto result = WeeklyTimeInterval::ExtractFromProto(interval_proto, 0);
   ASSERT_FALSE(result);
@@ -112,7 +113,7 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_InvalidStart) {
   em::WeeklyTimeProto* end = interval_proto.mutable_end();
   start->set_day_of_week(kWeekdays[0]);
   start->set_time(start_time());
-  end->set_day_of_week(kWeekdays[end_day_of_week()]);
+  end->set_day_of_week(UNSAFE_TODO(kWeekdays[end_day_of_week()]));
   end->set_time(end_time());
   auto result = WeeklyTimeInterval::ExtractFromProto(interval_proto, 0);
   ASSERT_FALSE(result);
@@ -122,10 +123,22 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_InvalidEnd) {
   em::WeeklyTimeIntervalProto interval_proto;
   em::WeeklyTimeProto* start = interval_proto.mutable_start();
   em::WeeklyTimeProto* end = interval_proto.mutable_end();
-  start->set_day_of_week(kWeekdays[start_day_of_week()]);
+  start->set_day_of_week(UNSAFE_TODO(kWeekdays[start_day_of_week()]));
   start->set_time(start_time());
   end->set_day_of_week(kWeekdays[0]);
   end->set_time(end_time());
+  auto result = WeeklyTimeInterval::ExtractFromProto(interval_proto, 0);
+  ASSERT_FALSE(result);
+}
+
+TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_InvalidStartEqualsEnd) {
+  em::WeeklyTimeIntervalProto interval_proto;
+  em::WeeklyTimeProto* start = interval_proto.mutable_start();
+  em::WeeklyTimeProto* end = interval_proto.mutable_end();
+  start->set_day_of_week(UNSAFE_TODO(kWeekdays[start_day_of_week()]));
+  start->set_time(start_time());
+  end->set_day_of_week(UNSAFE_TODO(kWeekdays[start_day_of_week()]));
+  end->set_time(start_time());
   auto result = WeeklyTimeInterval::ExtractFromProto(interval_proto, 0);
   ASSERT_FALSE(result);
 }
@@ -134,9 +147,9 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_Valid) {
   em::WeeklyTimeIntervalProto interval_proto;
   em::WeeklyTimeProto* start = interval_proto.mutable_start();
   em::WeeklyTimeProto* end = interval_proto.mutable_end();
-  start->set_day_of_week(kWeekdays[start_day_of_week()]);
+  start->set_day_of_week(UNSAFE_TODO(kWeekdays[start_day_of_week()]));
   start->set_time(start_time());
-  end->set_day_of_week(kWeekdays[end_day_of_week()]);
+  end->set_day_of_week(UNSAFE_TODO(kWeekdays[end_day_of_week()]));
   end->set_time(end_time());
   auto result = WeeklyTimeInterval::ExtractFromProto(interval_proto, 0);
   ASSERT_TRUE(result);
@@ -148,14 +161,14 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromProto_Valid) {
 }
 
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_Empty) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   auto result = WeeklyTimeInterval::ExtractFromDict(dict, 0);
   ASSERT_FALSE(result);
 }
 
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_NoEnd) {
-  base::Value::Dict dict;
-  base::Value::Dict start;
+  base::DictValue dict;
+  base::DictValue start;
   EXPECT_TRUE(start.Set(WeeklyTime::kDayOfWeek,
                         WeeklyTime::kWeekDays[start_day_of_week()]));
   EXPECT_TRUE(start.Set(WeeklyTime::kTime, start_time()));
@@ -166,8 +179,8 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_NoEnd) {
 }
 
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_NoStart) {
-  base::Value::Dict dict;
-  base::Value::Dict end;
+  base::DictValue dict;
+  base::DictValue end;
   EXPECT_TRUE(end.Set(WeeklyTime::kDayOfWeek,
                       WeeklyTime::kWeekDays[end_day_of_week()]));
   EXPECT_TRUE(end.Set(WeeklyTime::kTime, end_time()));
@@ -178,12 +191,12 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_NoStart) {
 }
 
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_InvalidStart) {
-  base::Value::Dict dict;
-  base::Value::Dict start;
+  base::DictValue dict;
+  base::DictValue start;
   EXPECT_TRUE(start.Set(WeeklyTime::kDayOfWeek, WeeklyTime::kWeekDays[0]));
   EXPECT_TRUE(start.Set(WeeklyTime::kTime, start_time()));
   dict.Set(WeeklyTimeInterval::kStart, std::move(start));
-  base::Value::Dict end;
+  base::DictValue end;
   EXPECT_TRUE(end.Set(WeeklyTime::kDayOfWeek,
                       WeeklyTime::kWeekDays[end_day_of_week()]));
   EXPECT_TRUE(end.Set(WeeklyTime::kTime, end_time()));
@@ -194,13 +207,13 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_InvalidStart) {
 }
 
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_InvalidEnd) {
-  base::Value::Dict dict;
-  base::Value::Dict start;
+  base::DictValue dict;
+  base::DictValue start;
   EXPECT_TRUE(start.Set(WeeklyTime::kDayOfWeek,
                         WeeklyTime::kWeekDays[start_day_of_week()]));
   EXPECT_TRUE(start.Set(WeeklyTime::kTime, start_time()));
   dict.Set(WeeklyTimeInterval::kStart, std::move(start));
-  base::Value::Dict end;
+  base::DictValue end;
   EXPECT_TRUE(end.Set(WeeklyTime::kDayOfWeek, WeeklyTime::kWeekDays[0]));
   EXPECT_TRUE(end.Set(WeeklyTime::kTime, end_time()));
   dict.Set(WeeklyTimeInterval::kEnd, std::move(end));
@@ -209,14 +222,28 @@ TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_InvalidEnd) {
   ASSERT_FALSE(result);
 }
 
+TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_InvalidStartEqualsEnd) {
+  base::DictValue start = base::DictValue()
+                              .Set(WeeklyTime::kDayOfWeek,
+                                   WeeklyTime::kWeekDays[start_day_of_week()])
+                              .Set(WeeklyTime::kTime, start_time());
+  base::DictValue end = start.Clone();
+  base::DictValue test_dict =
+      base::DictValue()
+          .Set(WeeklyTimeInterval::kStart, std::move(start))
+          .Set(WeeklyTimeInterval::kEnd, std::move(end));
+
+  EXPECT_FALSE(WeeklyTimeInterval::ExtractFromDict(test_dict, 0));
+}
+
 TEST_P(SingleWeeklyTimeIntervalTest, ExtractFromDict_Valid) {
-  base::Value::Dict dict;
-  base::Value::Dict start;
+  base::DictValue dict;
+  base::DictValue start;
   EXPECT_TRUE(start.Set(WeeklyTime::kDayOfWeek,
                         WeeklyTime::kWeekDays[start_day_of_week()]));
   EXPECT_TRUE(start.Set(WeeklyTime::kTime, start_time()));
   dict.Set(WeeklyTimeInterval::kStart, std::move(start));
-  base::Value::Dict end;
+  base::DictValue end;
   EXPECT_TRUE(end.Set(WeeklyTime::kDayOfWeek,
                       WeeklyTime::kWeekDays[end_day_of_week()]));
   EXPECT_TRUE(end.Set(WeeklyTime::kTime, end_time()));
@@ -345,5 +372,83 @@ INSTANTIATE_TEST_SUITE_P(RandomInterval,
                                                          kSunday,
                                                          14 * kMinutesInHour,
                                                          false)));
+
+using WeeklyTimeIntervalOverlapTest = testing::Test;
+
+TEST_F(WeeklyTimeIntervalOverlapTest, NoOverlap) {
+  WeeklyTimeInterval interval_a =
+      WeeklyTimeInterval(WeeklyTime(kMonday, base::Hours(18).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt),
+                         WeeklyTime(kTuesday, base::Hours(8).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt));
+
+  WeeklyTimeInterval interval_b =
+      WeeklyTimeInterval(WeeklyTime(kFriday, base::Hours(8).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt),
+                         WeeklyTime(kSaturday, base::Hours(8).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt));
+
+  WeeklyTimeInterval interval_c = WeeklyTimeInterval(
+      WeeklyTime(kTuesday, base::Hours(8).InMilliseconds(),
+                 /*timezone_offset=*/std::nullopt),
+      WeeklyTime(kWednesday, base::Hours(14).InMilliseconds(),
+                 /*timezone_offset=*/std::nullopt));
+
+  /*
+  Mon         Tue         Wed         Thu         Fri         Sat         Sun
+          |---------|                               |--------------|
+               a                                            b
+                    |------------|
+                          c
+  */
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_a, interval_b));
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_b, interval_a));
+
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_a, interval_c));
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_c, interval_a));
+
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_b, interval_c));
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_c, interval_b));
+}
+
+TEST_F(WeeklyTimeIntervalOverlapTest, Overlap) {
+  WeeklyTimeInterval interval_a =
+      WeeklyTimeInterval(WeeklyTime(kMonday, base::Hours(18).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt),
+                         WeeklyTime(kThursday, base::Hours(18).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt));
+
+  WeeklyTimeInterval interval_b =
+      WeeklyTimeInterval(WeeklyTime(kThursday, base::Hours(6).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt),
+                         WeeklyTime(kFriday, base::Hours(13).InMilliseconds(),
+                                    /*timezone_offset=*/std::nullopt));
+
+  WeeklyTimeInterval interval_c = WeeklyTimeInterval(
+      WeeklyTime(kTuesday, base::Hours(8).InMilliseconds(),
+                 /*timezone_offset=*/std::nullopt),
+      WeeklyTime(kWednesday, base::Hours(14).InMilliseconds(),
+                 /*timezone_offset=*/std::nullopt));
+
+  /*
+  Mon         Tue         Wed         Thu         Fri         Sat         Sun
+          |------------------------------------|
+               a
+                                         |----------------|
+                                                  b
+                    |------------|
+                          c
+  */
+  EXPECT_TRUE(WeeklyTimeInterval::IntervalsOverlap(interval_a, interval_a));
+
+  EXPECT_TRUE(WeeklyTimeInterval::IntervalsOverlap(interval_a, interval_b));
+  EXPECT_TRUE(WeeklyTimeInterval::IntervalsOverlap(interval_b, interval_a));
+
+  EXPECT_TRUE(WeeklyTimeInterval::IntervalsOverlap(interval_a, interval_c));
+  EXPECT_TRUE(WeeklyTimeInterval::IntervalsOverlap(interval_c, interval_a));
+
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_b, interval_c));
+  EXPECT_FALSE(WeeklyTimeInterval::IntervalsOverlap(interval_c, interval_b));
+}
 
 }  // namespace policy

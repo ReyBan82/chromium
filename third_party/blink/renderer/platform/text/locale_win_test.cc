@@ -89,72 +89,72 @@ class LocaleWinTest : public testing::Test {
   }
 
   double MsForDate(int year, int month, int day) {
-    return DateToDaysFrom1970(year, month, day) * kMsPerDay;
+    return base::Days(DateToDaysFrom1970(year, month, day)).InMillisecondsF();
   }
 
   String FormatDate(LCID lcid, int year, int month, int day) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->FormatDateTime(GetDateComponents(year, month, day));
   }
 
   unsigned FirstDayOfWeek(LCID lcid) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->FirstDayOfWeek();
   }
 
   String MonthLabel(LCID lcid, unsigned index) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->MonthLabels()[index];
   }
 
   String WeekDayShortLabel(LCID lcid, unsigned index) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->WeekDayShortLabels()[index];
   }
 
-  bool IsRTL(LCID lcid) {
+  bool IsRtl(LCID lcid) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
-    return locale->IsRTL();
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
+    return locale->IsRtl();
   }
 
   String MonthFormat(LCID lcid) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->MonthFormat();
   }
 
   String TimeFormat(LCID lcid) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->TimeFormat();
   }
 
   String ShortTimeFormat(LCID lcid) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->ShortTimeFormat();
   }
 
   String ShortMonthLabel(LCID lcid, unsigned index) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->ShortMonthLabels()[index];
   }
 
-  String TimeAMPMLabel(LCID lcid, unsigned index) {
+  String TimeAmPmLabel(LCID lcid, unsigned index) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
-    return locale->TimeAMPMLabels()[index];
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
+    return locale->TimeAmPmLabels()[index];
   }
 
   String DecimalSeparator(LCID lcid) {
     std::unique_ptr<LocaleWin> locale =
-        LocaleWin::Create(lcid, true /* defaultsForLocale */);
+        LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
     return locale->LocalizedDecimalSeparator();
   }
 };
@@ -201,17 +201,19 @@ TEST_F(LocaleWinTest, weekDayShortLabels) {
   EXPECT_EQ("\xE5\x9C\x9F", WeekDayShortLabel(kJapaneseJP, kSaturday).Utf8());
 }
 
-TEST_F(LocaleWinTest, isRTL) {
-  EXPECT_TRUE(IsRTL(kArabicEG));
-  EXPECT_FALSE(IsRTL(kEnglishUS));
+TEST_F(LocaleWinTest, IsRtl) {
+  EXPECT_TRUE(IsRtl(kArabicEG));
+  EXPECT_FALSE(IsRtl(kEnglishUS));
 }
 
 TEST_F(LocaleWinTest, dateFormat) {
-  EXPECT_EQ("y-M-d", LocaleWin::DateFormat("y-M-d"));
-  EXPECT_EQ("''yy'-'''MM'''-'dd", LocaleWin::DateFormat("''yy-''MM''-dd"));
+  EXPECT_EQ("y-M-d", LocaleWin::DateFormatForTesting("y-M-d"));
+  EXPECT_EQ("''yy'-'''MM'''-'dd",
+            LocaleWin::DateFormatForTesting("''yy-''MM''-dd"));
   EXPECT_EQ("yyyy'-''''-'MMM'''''-'dd",
-            LocaleWin::DateFormat("yyyy-''''-MMM''''-dd"));
-  EXPECT_EQ("yyyy'-'''''MMMM-dd", LocaleWin::DateFormat("yyyy-''''MMMM-dd"));
+            LocaleWin::DateFormatForTesting("yyyy-''''-MMM''''-dd"));
+  EXPECT_EQ("yyyy'-'''''MMMM-dd",
+            LocaleWin::DateFormatForTesting("yyyy-''''MMMM-dd"));
 }
 
 TEST_F(LocaleWinTest, monthFormat) {
@@ -247,15 +249,15 @@ TEST_F(LocaleWinTest, shortMonthLabels) {
   EXPECT_EQ("12", ShortMonthLabel(kJapaneseJP, 11));
 }
 
-TEST_F(LocaleWinTest, timeAMPMLabels) {
-  EXPECT_EQ("AM", TimeAMPMLabel(kEnglishUS, 0));
-  EXPECT_EQ("PM", TimeAMPMLabel(kEnglishUS, 1));
+TEST_F(LocaleWinTest, TimeAmPmLabels) {
+  EXPECT_EQ("AM", TimeAmPmLabel(kEnglishUS, 0));
+  EXPECT_EQ("PM", TimeAmPmLabel(kEnglishUS, 1));
 
-  EXPECT_EQ("", TimeAMPMLabel(kFrenchFR, 0).Utf8());
-  EXPECT_EQ("", TimeAMPMLabel(kFrenchFR, 1).Utf8());
+  EXPECT_EQ("", TimeAmPmLabel(kFrenchFR, 0).Utf8());
+  EXPECT_EQ("", TimeAmPmLabel(kFrenchFR, 1).Utf8());
 
-  EXPECT_EQ("\xE5\x8D\x88\xE5\x89\x8D", TimeAMPMLabel(kJapaneseJP, 0).Utf8());
-  EXPECT_EQ("\xE5\x8D\x88\xE5\xBE\x8C", TimeAMPMLabel(kJapaneseJP, 1).Utf8());
+  EXPECT_EQ("\xE5\x8D\x88\xE5\x89\x8D", TimeAmPmLabel(kJapaneseJP, 0).Utf8());
+  EXPECT_EQ("\xE5\x8D\x88\xE5\xBE\x8C", TimeAmPmLabel(kJapaneseJP, 1).Utf8());
 }
 
 TEST_F(LocaleWinTest, decimalSeparator) {
@@ -267,10 +269,10 @@ static void TestNumberIsReversible(LCID lcid,
                                    const char* original,
                                    const char* should_have = 0) {
   std::unique_ptr<LocaleWin> locale =
-      LocaleWin::Create(lcid, true /* defaultsForLocale */);
+      LocaleWin::CreateForTesting(lcid, true /* defaultsForLocale */);
   String localized = locale->ConvertToLocalizedNumber(original);
   if (should_have)
-    EXPECT_TRUE(localized.Contains(should_have));
+    EXPECT_TRUE(localized.contains(should_have));
   String converted = locale->ConvertFromLocalizedNumber(localized);
   EXPECT_EQ(original, converted);
 }
@@ -303,6 +305,11 @@ TEST_F(LocaleWinTest, localizedNumberRoundTrip) {
   TestNumbers(kChineseCN);
   TestNumbers(kChineseHK);
   TestNumbers(kChineseTW);
+}
+
+TEST_F(LocaleWinTest, CreateWithNullLocale) {
+  std::unique_ptr<Locale> locale = Locale::Create(String());
+  EXPECT_EQ(12u, locale->MonthLabels().size());
 }
 
 }  // namespace blink

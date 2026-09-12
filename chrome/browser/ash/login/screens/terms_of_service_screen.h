@@ -6,16 +6,25 @@
 #define CHROME_BROWSER_ASH_LOGIN_SCREENS_TERMS_OF_SERVICE_SCREEN_H_
 
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ref.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
 
+namespace policy {
+class BrowserPolicyConnectorAsh;
+}  // namespace policy
+
 namespace network {
 class SimpleURLLoader;
-}
+class SharedURLLoaderFactory;
+}  // namespace network
 
 namespace ash {
 
@@ -36,8 +45,14 @@ class TermsOfServiceScreen : public BaseScreen {
   enum class ScreenState : int { LOADING = 0, LOADED = 1, ERROR = 2 };
 
   using ScreenExitCallback = base::RepeatingCallback<void(Result result)>;
-  TermsOfServiceScreen(base::WeakPtr<TermsOfServiceScreenView> view,
-                       const ScreenExitCallback& exit_callback);
+
+  // `shared_url_loader_factory` must be non-null.
+  // `browser_policy_connector_ash` must be non-null and must outlive `this`.
+  TermsOfServiceScreen(
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+      base::WeakPtr<TermsOfServiceScreenView> view,
+      const ScreenExitCallback& exit_callback);
 
   TermsOfServiceScreen(const TermsOfServiceScreen&) = delete;
   TermsOfServiceScreen& operator=(const TermsOfServiceScreen&) = delete;
@@ -71,7 +86,7 @@ class TermsOfServiceScreen : public BaseScreen {
   bool MaybeSkip(WizardContext& context) override;
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   // Start downloading the Terms of Service.
   void StartDownload();
@@ -80,16 +95,21 @@ class TermsOfServiceScreen : public BaseScreen {
   void OnDownloadTimeout();
 
   // Callback function called when SimpleURLLoader completes.
-  void OnDownloaded(std::unique_ptr<std::string> response_body);
+  void OnDownloaded(std::optional<std::string> response_body);
 
   // Try to load terms of service from file, show error if there is a failure.
   void LoadFromFileOrShowError();
   // Show terms of service once they are loaded from file.
-  void OnTosLoadedFromFile(absl::optional<std::string> tos);
+  void OnTosLoadedFromFile(std::optional<std::string> tos);
   // Save terms as text to a local file.
   void SaveTos(const std::string& tos);
   // Runs callback for tests.
   void OnTosSavedForTesting();
+
+  const scoped_refptr<network::SharedURLLoaderFactory>
+      shared_url_loader_factory_;
+  const raw_ref<const policy::BrowserPolicyConnectorAsh>
+      browser_policy_connector_ash_;
 
   base::WeakPtr<TermsOfServiceScreenView> view_;
   ScreenExitCallback exit_callback_;

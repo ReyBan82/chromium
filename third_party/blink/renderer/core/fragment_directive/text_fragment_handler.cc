@@ -4,27 +4,40 @@
 
 #include "third_party/blink/renderer/core/fragment_directive/text_fragment_handler.h"
 
+#include <algorithm>
+
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/strcat.h"
 #include "components/shared_highlighting/core/common/disabled_sites.h"
 #include "components/shared_highlighting/core/common/fragment_directives_utils.h"
 #include "components/shared_highlighting/core/common/shared_highlighting_features.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/core/annotation/annotation_agent_impl.h"
 #include "third_party/blink/renderer/core/annotation/annotation_selector.h"
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker_controller.h"
-#include "third_party/blink/renderer/core/editing/position_with_affinity.h"
 #include "third_party/blink/renderer/core/editing/range_in_flat_tree.h"
 #include "third_party/blink/renderer/core/editing/selection_editor.h"
+#include "third_party/blink/renderer/core/editing/visible_position.h"
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 #include "third_party/blink/renderer/core/fragment_directive/fragment_directive_utils.h"
 #include "third_party/blink/renderer/core/fragment_directive/text_fragment_anchor.h"
 #include "third_party/blink/renderer/core/fragment_directive/text_fragment_selector_generator.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/frame/local_frame_view.h"
+#include "third_party/blink/renderer/core/frame/visual_viewport.h"
+#include "third_party/blink/renderer/core/input/event_handler.h"
+#include "third_party/blink/renderer/core/layout/hit_test_location.h"
+#include "third_party/blink/renderer/core/layout/hit_test_request.h"
+#include "third_party/blink/renderer/core/layout/hit_test_result.h"
 #include "third_party/blink/renderer/core/loader/document_loader.h"
+#include "third_party/blink/renderer/core/page/page.h"
+#include "ui/gfx/geometry/point.h"
+#include "ui/gfx/geometry/point_conversions.h"
+#include "ui/gfx/geometry/rect_conversions.h"
 
 namespace blink {
 
@@ -53,6 +66,13 @@ void TextFragmentHandler::RequestSelector(RequestSelectorCallback callback) {
   DCHECK(shared_highlighting::ShouldOfferLinkToText(
       GURL(GetFrame()->GetDocument()->Url())));
 
+  if (response_callback_) {
+    std::move(response_callback_)
+        .Run(g_empty_string,
+             shared_highlighting::LinkGenerationError::kNotGenerated,
+             shared_highlighting::LinkGenerationReadyStatus::
+                 kRequestedBeforeReady);
+  }
   response_callback_ = std::move(callback);
   selector_ready_status_ =
       preemptive_generation_result_.has_value()
@@ -80,13 +100,121 @@ void TextFragmentHandler::RequestSelector(RequestSelectorCallback callback) {
     InvokeReplyCallback(preemptive_generation_result_.value(), error_);
 }
 
+void TextFragmentHandler::RequestSelectorForSelection(
+    RequestSelectorForSelectionCallback callback) {
+  preemptive_generation_result_.reset();
+  error_ = shared_highlighting::LinkGenerationError::kNone;
+  if (response_callback_) {
+    std::move(response_callback_)
+        .Run(g_empty_string,
+             shared_highlighting::LinkGenerationError::kNotGenerated,
+             shared_highlighting::LinkGenerationReadyStatus::
+                 kRequestedBeforeReady);
+  }
+  response_callback_ = std::move(callback);
+  selector_ready_status_ =
+      shared_highlighting::LinkGenerationReadyStatus::kRequestedBeforeReady;
+
+  if (!shared_highlighting::ShouldOfferLinkToText(
+          GURL(GetFrame()->GetDocument()->Url()))) {
+    error_ = shared_highlighting::LinkGenerationError::kBlockList;
+    InvokeReplyCallback(
+        TextFragmentSelector(TextFragmentSelector::SelectorType::kInvalid),
+        error_);
+    return;
+  }
+
+  GetFrame()->GetDocument()->UpdateStyleAndLayout(
+      DocumentUpdateReason::kSelection);
+
+  VisibleSelectionInFlatTree selection =
+      GetFrame()->Selection().ComputeVisibleSelectionInFlatTree();
+  EphemeralRangeInFlatTree selection_range(selection.Start(), selection.End());
+
+  bool has_valid_selection;
+  if (RuntimeEnabledFeatures::
+          NonEmptyVisibleTextSelectionForTextFragmentEnabled()) {
+    has_valid_selection = GetFrame()->Selection().HasVisibleText();
+  } else {
+    has_valid_selection = !GetFrame()->Selection().SelectedText().empty();
+  }
+
+  if (!has_valid_selection) {
+    error_ = shared_highlighting::LinkGenerationError::kEmptySelection;
+    InvokeReplyCallback(
+        TextFragmentSelector(TextFragmentSelector::SelectorType::kInvalid),
+        error_);
+    return;
+  }
+
+  RangeInFlatTree* current_selection_range =
+      MakeGarbageCollected<RangeInFlatTree>(selection_range.StartPosition(),
+                                            selection_range.EndPosition());
+
+  if (!GetTextFragmentSelectorGenerator()) {
+    text_fragment_selector_generator_ =
+        MakeGarbageCollected<TextFragmentSelectorGenerator>(GetFrame());
+  }
+
+  GetTextFragmentSelectorGenerator()->Generate(
+      *current_selection_range,
+      BindOnce(&TextFragmentHandler::DidFinishSelectorGeneration,
+               WrapWeakPersistent(this)));
+}
+
+void TextFragmentHandler::RequestSelectorForViewportCenter(
+    RequestSelectorForViewportCenterCallback callback) {
+  if (response_callback_) {
+    std::move(response_callback_)
+        .Run(g_empty_string,
+             shared_highlighting::LinkGenerationError::kNotGenerated,
+             shared_highlighting::LinkGenerationReadyStatus::
+                 kRequestedBeforeReady);
+  }
+  response_callback_ = std::move(callback);
+  selector_ready_status_ =
+      shared_highlighting::LinkGenerationReadyStatus::kRequestedBeforeReady;
+
+  if (!shared_highlighting::ShouldOfferLinkToText(
+          GURL(GetFrame()->GetDocument()->Url()))) {
+    error_ = shared_highlighting::LinkGenerationError::kBlockList;
+    InvokeReplyCallback(
+        TextFragmentSelector(TextFragmentSelector::SelectorType::kInvalid),
+        error_);
+    return;
+  }
+
+  RangeInFlatTree* range = GetRangeForReadingPosition();
+
+  if (!range) {
+    error_ = shared_highlighting::LinkGenerationError::kEmptySelection;
+    InvokeReplyCallback(
+        TextFragmentSelector(TextFragmentSelector::SelectorType::kInvalid),
+        error_);
+    return;
+  }
+
+  if (!GetTextFragmentSelectorGenerator()) {
+    text_fragment_selector_generator_ =
+        MakeGarbageCollected<TextFragmentSelectorGenerator>(GetFrame());
+  }
+
+  GetTextFragmentSelectorGenerator()->Generate(
+      *range, BindOnce(&TextFragmentHandler::DidFinishSelectorGeneration,
+                       WrapWeakPersistent(this)));
+}
+
 void TextFragmentHandler::GetExistingSelectors(
     GetExistingSelectorsCallback callback) {
   Vector<String> text_fragment_selectors;
 
   for (auto& annotation : annotation_agents_) {
-    if (annotation->IsAttached())
+    if (annotation->IsAttached() && !annotation->IsScrollOnly()) {
+      // kScrollOnly matches are internal "silent" scrolls used for
+      // restoration, and shouldn't be exposed as active highlights (e.g. for
+      // the "Link to Text" feature).
       text_fragment_selectors.push_back(annotation->GetSelector()->Serialize());
+    }
   }
 
   std::move(callback).Run(text_fragment_selectors);
@@ -100,33 +228,11 @@ void TextFragmentHandler::RemoveFragments() {
   // page-wide operation, and the URL might have selectors for a subframe.
   FragmentDirectiveUtils::RemoveSelectorsFromUrl(GetFrame());
   for (auto& annotation : annotation_agents_)
-    annotation->Remove();
+    annotation->OwningContainer()->RemoveAgent(*annotation);
 
   annotation_agents_.clear();
 
   GetFrame()->View()->ClearFragmentAnchor();
-}
-
-// static
-bool TextFragmentHandler::IsOverTextFragment(HitTestResult result) {
-  if (!result.InnerNode() || !result.InnerNodeFrame()) {
-    return false;
-  }
-
-  // Tree should be clean before accessing the position.
-  // |HitTestResult::GetPosition| calls |PositionForPoint()| which requires
-  // |kPrePaintClean|.
-  DCHECK_GE(result.InnerNodeFrame()->GetDocument()->Lifecycle().GetState(),
-            DocumentLifecycle::kPrePaintClean);
-
-  DocumentMarkerController& marker_controller =
-      result.InnerNodeFrame()->GetDocument()->Markers();
-  PositionWithAffinity pos_with_affinity = result.GetPosition();
-  const Position marker_position = pos_with_affinity.GetPosition();
-  auto markers = marker_controller.MarkersAroundPosition(
-      ToPositionInFlatTree(marker_position),
-      DocumentMarker::MarkerTypes::TextFragment());
-  return !markers.empty();
 }
 
 void TextFragmentHandler::ExtractTextFragmentsMatches(
@@ -134,7 +240,8 @@ void TextFragmentHandler::ExtractTextFragmentsMatches(
   Vector<String> text_fragment_matches;
 
   for (auto& annotation : annotation_agents_) {
-    if (annotation->IsAttached()) {
+    if (annotation->IsAttached() && !annotation->IsScrollOnly()) {
+      // kScrollOnly matches are not highlights.
       text_fragment_matches.push_back(
           PlainText(annotation->GetAttachedRange().ToEphemeralRange()));
     }
@@ -153,13 +260,31 @@ void TextFragmentHandler::ExtractFirstFragmentRect(
   }
 
   for (auto& annotation : annotation_agents_) {
-    if (!annotation->IsAttached())
+    if (!annotation->IsAttached() || annotation->IsScrollOnly()) {
+      // kScrollOnly matches are not highlights.
       continue;
+    }
 
-    PhysicalRect bounding_box(
-        ComputeTextRect(annotation->GetAttachedRange().ToEphemeralRange()));
-    rect_in_viewport =
-        GetFrame()->View()->FrameToViewport(ToEnclosingRect(bounding_box));
+    if (!RuntimeEnabledFeatures::FractionalScrollOffsetsEnabled()) {
+      PhysicalRect bounding_box(
+          ComputeTextRect(annotation->GetAttachedRange().ToEphemeralRange()));
+      rect_in_viewport =
+          GetFrame()->View()->FrameToViewport(ToEnclosingRect(bounding_box));
+      break;
+    }
+
+    gfx::RectF bounding_box;
+    for (const auto& quad :
+         ComputeTextBounds(annotation->GetAttachedRange().ToEphemeralRange())) {
+      bounding_box.Union(quad.BoundingBox());
+    }
+    const gfx::PointF top_left =
+        GetFrame()->View()->FrameToViewport(bounding_box.origin());
+    const gfx::PointF bottom_right =
+        GetFrame()->View()->FrameToViewport(bounding_box.bottom_right());
+    rect_in_viewport = gfx::ToEnclosingRect(
+        gfx::RectF(top_left.x(), top_left.y(), bottom_right.x() - top_left.x(),
+                   bottom_right.y() - top_left.y()));
     break;
   }
 
@@ -187,10 +312,13 @@ void TextFragmentHandler::StartGeneratingForCurrentSelection() {
   error_ = shared_highlighting::LinkGenerationError::kNone;
   selector_ready_status_.reset();
 
-  // It is possible we have unserved callback, but if we are starting a new
-  // generation, then we have a new selection, in which case it is safe to
-  // assume that the client is not waiting for the callback return.
-  response_callback_.Reset();
+  if (response_callback_) {
+    std::move(response_callback_)
+        .Run(g_empty_string,
+             shared_highlighting::LinkGenerationError::kNotGenerated,
+             shared_highlighting::LinkGenerationReadyStatus::
+                 kRequestedBeforeReady);
+  }
 
   VisibleSelectionInFlatTree selection =
       GetFrame()->Selection().ComputeVisibleSelectionInFlatTree();
@@ -204,8 +332,60 @@ void TextFragmentHandler::StartGeneratingForCurrentSelection() {
   }
   GetTextFragmentSelectorGenerator()->Generate(
       *current_selection_range,
-      WTF::BindOnce(&TextFragmentHandler::DidFinishSelectorGeneration,
-                    WrapWeakPersistent(this)));
+      BindOnce(&TextFragmentHandler::DidFinishSelectorGeneration,
+               WrapWeakPersistent(this)));
+}
+
+RangeInFlatTree* TextFragmentHandler::GetRangeForReadingPosition() {
+  LocalFrameView* view = GetFrame()->View();
+  if (!view) {
+    return nullptr;
+  }
+
+  VisualViewport& visual_viewport = GetFrame()->GetPage()->GetVisualViewport();
+  const gfx::RectF visible_rect = visual_viewport.VisibleRect();
+  // Eye-tracking research indicates that users typically focus around the
+  // upper third (35%) of the viewport when reading digital content.
+  constexpr float kViewportHitTestYRatio = 0.35f;
+  const gfx::PointF hit_point_in_viewport(
+      visible_rect.CenterPoint().x(),
+      visible_rect.y() + visible_rect.height() * kViewportHitTestYRatio);
+
+  HitTestLocation location(view->ViewportToFrame(hit_point_in_viewport));
+
+  HitTestRequest::HitTestRequestType hit_type = HitTestRequest::kReadOnly |
+                                                HitTestRequest::kActive |
+                                                HitTestRequest::kIgnoreClipping;
+  HitTestResult result =
+      GetFrame()->GetEventHandler().HitTestResultAtLocation(location, hit_type);
+
+  if (result.InnerNodeFrame() != GetFrame()) {
+    // If the hit test lands in a subframe, we don't generate a selector.
+    // This keeps the selector generation focused on the current frame.
+    return nullptr;
+  }
+
+  PositionInFlatTree pos =
+      ToPositionInFlatTree(result.GetPosition().GetPosition());
+  if (pos.IsNull()) {
+    return nullptr;
+  }
+
+  // A hit-test at a single point results in a collapsed range. Expand to the
+  // surrounding word to provide the generator with a starting target range.
+  // A word is used (rather than a paragraph) to keep the generated selector
+  // short, as this is intended for scroll restoration where highlighting may
+  // be disabled.
+  PositionInFlatTree start =
+      StartOfWordPosition(pos, kPreviousWordIfOnBoundary);
+  PositionInFlatTree end = EndOfWordPosition(pos, kNextWordIfOnBoundary);
+  if (start.IsNull() || end.IsNull() || start > end) {
+    // This can happen if the hit test lands on a non-text element (like an
+    // image) where a surrounding word cannot be resolved.
+    return nullptr;
+  }
+
+  return MakeGarbageCollected<RangeInFlatTree>(start, end);
 }
 
 void TextFragmentHandler::Trace(Visitor* visitor) const {
@@ -218,8 +398,11 @@ void TextFragmentHandler::Trace(Visitor* visitor) const {
 void TextFragmentHandler::DidDetachDocumentOrFrame() {
   // Clear out any state in the generator and cancel pending tasks so they
   // don't run after frame detachment.
-  if (GetTextFragmentSelectorGenerator())
+  if (GetTextFragmentSelectorGenerator()) {
     GetTextFragmentSelectorGenerator()->Reset();
+    // The generator is preserved since that's used in RequestSelector to
+    // determine whether to respond with kNotGenerated.
+  }
 
   annotation_agents_.clear();
 }
@@ -259,10 +442,8 @@ bool TextFragmentHandler::ShouldPreemptivelyGenerateFor(LocalFrame* frame) {
     return true;
 
   // Only generate for iframe urls if they are supported
-  return base::FeatureList::IsEnabled(
-             shared_highlighting::kSharedHighlightingAmp) &&
-         shared_highlighting::SupportsLinkGenerationInIframe(
-             GURL(frame->GetDocument()->Url()));
+  return shared_highlighting::SupportsLinkGenerationInIframe(
+      GURL(frame->GetDocument()->Url()));
 }
 
 // static
@@ -275,8 +456,16 @@ void TextFragmentHandler::OpenedContextMenuOverSelection(LocalFrame* frame) {
     return;
   }
 
-  if (frame->Selection().SelectedText().empty())
-    return;
+  if (RuntimeEnabledFeatures::
+          NonEmptyVisibleTextSelectionForTextFragmentEnabled()) {
+    if (!frame->Selection().HasVisibleText()) {
+      return;
+    }
+  } else {
+    if (frame->Selection().SelectedText().empty()) {
+      return;
+    }
+  }
 
   if (!frame->GetTextFragmentHandler())
     frame->CreateTextFragmentHandler();

@@ -6,25 +6,27 @@
 
 #include <utility>
 
+#include "ash/webui/common/trusted_types_util.h"
 #include "ash/webui/connectivity_diagnostics/url_constants.h"
 #include "ash/webui/grit/connectivity_diagnostics_resources.h"
 #include "ash/webui/grit/connectivity_diagnostics_resources_map.h"
 #include "ash/webui/network_ui/network_diagnostics_resource_provider.h"
 #include "ash/webui/network_ui/network_health_resource_provider.h"
+#include "base/containers/span.h"
 #include "chromeos/services/network_health/public/mojom/network_diagnostics.mojom.h"
 #include "chromeos/services/network_health/public/mojom/network_health.mojom.h"
 #include "chromeos/strings/grit/chromeos_strings.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "content/public/browser/web_ui_message_handler.h"
-#include "ui/resources/grit/webui_resources.h"
+#include "ui/webui/resources/grit/webui_resources.h"
 
 namespace ash {
 
 namespace {
 
-// TODO(crbug/1051793): Replace with webui::SetUpWebUIDataSource() once it no
-// longer requires a dependency on //chrome/browser.
+// TODO(crbug.com/40673941): Replace with webui::SetUpWebUIDataSource() once it
+// no longer requires a dependency on //chrome/browser.
 void SetUpWebUIDataSource(content::WebUIDataSource* source,
                           base::span<const webui::ResourcePath> resources,
                           int default_resource) {
@@ -65,18 +67,18 @@ class ConnectivityDiagnosticsMessageHandler
   }
 
  private:
-  void SendFeedbackReportRequest(const base::Value::List& value) {
+  void SendFeedbackReportRequest(const base::ListValue& value) {
     send_feedback_report_callback_.Run(/*extra_diagnostics*/ "");
   }
 
   // TODO(crbug/1220965): Remove conditional feedback button when WebUI feedback
   // is launched.
-  void GetShowFeedbackButton(const base::Value::List& args) {
+  void GetShowFeedbackButton(const base::ListValue& args) {
     if (args.size() < 1 || !args[0].is_string())
       return;
 
     auto callback_id = args[0].GetString();
-    base::Value::List response;
+    base::ListValue response;
     response.Append(base::Value(show_feedback_button_));
 
     AllowJavascript();
@@ -108,10 +110,9 @@ ConnectivityDiagnosticsUI::ConnectivityDiagnosticsUI(
       kChromeUIConnectivityDiagnosticsHost);
   source->OverrideContentSecurityPolicy(
       network::mojom::CSPDirectiveName::ScriptSrc,
-      "script-src chrome://resources chrome://test chrome://webui-test "
-      "'self';");
+      "script-src chrome://resources chrome://webui-test 'self';");
 
-  source->DisableTrustedTypesCSP();
+  ash::EnableTrustedTypesCSP(source);
   source->UseStringsJs();
   source->EnableReplaceI18nInJS();
 
@@ -119,9 +120,7 @@ ConnectivityDiagnosticsUI::ConnectivityDiagnosticsUI(
       std::make_unique<ConnectivityDiagnosticsMessageHandler>(
           std::move(send_feedback_report_callback), show_feedback_button));
 
-  const auto resources = base::make_span(kConnectivityDiagnosticsResources,
-                                         kConnectivityDiagnosticsResourcesSize);
-  SetUpWebUIDataSource(source, resources,
+  SetUpWebUIDataSource(source, kConnectivityDiagnosticsResources,
                        IDR_CONNECTIVITY_DIAGNOSTICS_INDEX_HTML);
   source->AddLocalizedString("appTitle", IDS_CONNECTIVITY_DIAGNOSTICS_TITLE);
   source->AddLocalizedString("networkDevicesLabel",

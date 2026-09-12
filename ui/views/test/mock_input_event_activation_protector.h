@@ -5,20 +5,23 @@
 #ifndef UI_VIEWS_TEST_MOCK_INPUT_EVENT_ACTIVATION_PROTECTOR_H_
 #define UI_VIEWS_TEST_MOCK_INPUT_EVENT_ACTIVATION_PROTECTOR_H_
 
+#include <memory>
+
 #include "testing/gmock/include/gmock/gmock.h"
 #include "ui/views/input_event_activation_protector.h"
 
 namespace views {
 
+class InputProtectionPolicy;
+class View;
+
 // Mock version of InputEventActivationProtector for injection during tests, to
 // allow verifying that protected Views work as expected.
-//
-// If you are just looking to disable input protection entirely for your test,
-// use the static views::InputEventActivationProtector::DisableForTesting method
-// instead.
 class MockInputEventActivationProtector : public InputEventActivationProtector {
  public:
   MockInputEventActivationProtector();
+  explicit MockInputEventActivationProtector(
+      std::unique_ptr<InputProtectionPolicy> policy);
   ~MockInputEventActivationProtector() override;
 
   MockInputEventActivationProtector(const MockInputEventActivationProtector&) =
@@ -26,9 +29,13 @@ class MockInputEventActivationProtector : public InputEventActivationProtector {
   MockInputEventActivationProtector& operator=(
       const MockInputEventActivationProtector&) = delete;
 
+  using InputEventActivationProtector::IsPossiblyUnintendedInteraction;
+
   MOCK_METHOD(bool,
               IsPossiblyUnintendedInteraction,
-              (const ui::Event& event),
+              (const ui::Event& event,
+               bool allow_key_events,
+               const View* target_view),
               (override));
 };
 

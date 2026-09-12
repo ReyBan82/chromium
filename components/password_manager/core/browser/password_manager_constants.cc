@@ -4,23 +4,26 @@
 
 #include "components/password_manager/core/browser/password_manager_constants.h"
 
+#include "build/build_config.h"
+
 namespace password_manager {
 
-const base::FilePath::CharType kAffiliationDatabaseFileName[] =
-    FILE_PATH_LITERAL("Affiliation Database");
+#if !BUILDFLAG(IS_ANDROID)
 const base::FilePath::CharType kLoginDataForProfileFileName[] =
     FILE_PATH_LITERAL("Login Data");
 const base::FilePath::CharType kLoginDataForAccountFileName[] =
     FILE_PATH_LITERAL("Login Data For Account");
+const base::FilePath::CharType kLoginDataJournalForProfileFileName[] =
+    FILE_PATH_LITERAL("Login Data-journal");
+const base::FilePath::CharType kLoginDataJournalForAccountFileName[] =
+    FILE_PATH_LITERAL("Login Data For Account-journal");
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 const char kPasswordManagerAccountDashboardURL[] =
     "https://passwords.google.com";
 
 const char kPasswordManagerHelpCenteriOSURL[] =
     "https://support.google.com/chrome/answer/95606?ios=1";
-
-const char kPasswordManagerHelpCenterSmartLock[] =
-    "https://support.google.com/accounts?p=smart_lock_chrome";
 
 const char kManageMyPasswordsURL[] = "https://passwords.google.com/app";
 

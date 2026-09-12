@@ -3,7 +3,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var global = {argumentsReceived: false, params: null, picker: null};
+/**
+ * @type {Object}
+ */
+const global = {
+  argumentsReceived: false,
+  params: null,
+  picker: null
+};
+
+const DELAYED_LAYOUT_THRESHOLD = 1000;
 
 /**
  * @param {Event} event
@@ -28,6 +37,25 @@ function handleArgumentsTimeout() {
   if (global.argumentsReceived)
     return;
   initialize({});
+}
+
+/**
+ * @param {!Element} parent
+ * @param {!Array} optionBounds
+ */
+function buildOptionBoundsArray(parent, optionBounds) {
+  // The optionBounds.length check prevents us from doing so many
+  // getBoundingClientRect() calls that the picker hangs for 10+ seconds.
+  for (let i = 0; i < parent.children.length &&
+       optionBounds.length < DELAYED_LAYOUT_THRESHOLD;
+       i++) {
+    const child = parent.children[i];
+    if (child.tagName === 'OPTION') {
+      optionBounds[child.index] = child.getBoundingClientRect();
+    } else if (child.tagName === 'OPTGROUP') {
+      buildOptionBoundsArray(child, optionBounds)
+    }
+  }
 }
 
 class ListPicker extends Picker {
@@ -66,18 +94,17 @@ class ListPicker extends Picker {
 
     this.trackingTouchId_ = null;
 
-    this.handleWindowDidHide_();
+    this.applyInitialLayout_();
     this.selectElement_.focus();
     this.selectElement_.value = this.config_.selectedIndex;
   }
 
-  handleWindowDidHide_() {
+  applyInitialLayout_() {
     this.fixWindowSize_();
     const selectedOption =
         this.selectElement_.options[this.selectElement_.selectedIndex];
     if (selectedOption)
       selectedOption.scrollIntoView(false);
-    window.removeEventListener('didHide', this.handleWindowDidHideBound_);
   }
 
   handleWindowMessage_(event) {
@@ -138,7 +165,7 @@ class ListPicker extends Picker {
     if (event.target.tagName !== 'OPTION')
       return;
     window.pagePopupController.setValueAndClosePopup(
-        0, this.selectElement_.value);
+        0, this.selectElement_.value, /* is_keyboard_event= */ false);
   }
 
   handleTouchStart_(event) {
@@ -189,7 +216,7 @@ class ListPicker extends Picker {
     const target = document.elementFromPoint(touch.clientX, touch.clientY);
     if (target.tagName === 'OPTION' && !target.disabled)
       window.pagePopupController.setValueAndClosePopup(
-          0, this.selectElement_.value);
+          0, this.selectElement_.value, /* is_keyboard_event= */ false);
     this.exitTouchSelectMode_();
   }
 
@@ -212,6 +239,13 @@ class ListPicker extends Picker {
   }
 
   handleChange_(event) {
+    if (this.selectElement_.selectedIndex == -1) {
+      // ListBox select elements like this.selectElement_ support a state where
+      // no option is selected and the selectedIndex is -1. If we try to send
+      // an empty value in this case to pagePopupController, then it may result
+      // in a disabled option becoming selected: http://crbug.com/40815207
+      return;
+    }
     window.pagePopupController.setValue(this.selectElement_.value);
     this.selectionSetByMouseHover_ = false;
   }
@@ -223,7 +257,7 @@ class ListPicker extends Picker {
       event.preventDefault();
     } else if (key === 'Tab' || key === 'Enter') {
       window.pagePopupController.setValueAndClosePopup(
-          0, this.selectElement_.value);
+          0, this.selectElement_.value, /* is_keyboard_event= */ true);
       event.preventDefault();
     } else if (event.altKey && (key === 'ArrowDown' || key === 'ArrowUp')) {
       // We need to add a delay here because, if we do it immediately the key
@@ -251,7 +285,11 @@ class ListPicker extends Picker {
     if (this.selectElement_.scrollHeight > this.selectElement_.clientHeight)
       desiredWindowWidth -= scrollbarWidth;
     let expectingScrollbar = false;
-    if (desiredWindowHeight > maxHeight) {
+    if (!this.selectElement_.children.length) {
+      // If there are no options, then instead of rendering just the border we
+      // should render a small empty box. See http://crbug.com/40703853
+      desiredWindowHeight = 8;
+    } else if (desiredWindowHeight > maxHeight) {
       desiredWindowHeight = maxHeight;
       // Setting overflow to auto does not increase width for the scrollbar
       // so we need to do it manually.
@@ -313,7 +351,15 @@ class ListPicker extends Picker {
     this.selectElement_.style.fontVariant = this.config_.baseStyle.fontVariant;
     if (this.config_.baseStyle.textAlign)
       this.selectElement_.style.textAlign = this.config_.baseStyle.textAlign;
+
+    // updateChildren_ takes longer when there are existing elements, so remove
+    // them to make it faster.
+    // TODO(crbug.com/388557894): Remove this after improving the performance
+    // of updateChildren_.
+    this.selectElement_.innerHTML = '';
+
     this.updateChildren_(this.selectElement_, this.config_);
+    this.setMenuListOptionsBoundsInAXTree_();
   }
 
   update_() {
@@ -329,7 +375,7 @@ class ListPicker extends Picker {
       optionUnderMouse =
           elementUnderMouse && elementUnderMouse.closest('option');
     }
-    if (optionUnderMouse)
+    if (optionUnderMouse && !optionUnderMouse.disabled)
       optionUnderMouse.selected = true;
     else
       this.selectElement_.value = oldValue;
@@ -337,9 +383,9 @@ class ListPicker extends Picker {
     this.dispatchEvent('didUpdate');
   }
 
-  static DELAYED_LAYOUT_THRESHOLD = 1000;
-
   /**
+   * TODO(crbug.com/388557894): Make this faster in the case that `parent` has
+   * a large number of children.
    * @param {!Element} parent Select element or optgroup element.
    * @param {!Object} config
    */
@@ -404,6 +450,7 @@ class ListPicker extends Picker {
     this.selectElement_.appendChild(fragment);
     this.selectElement_.classList.add('wrap');
     this.delayedChildrenConfig_ = null;
+    this.setMenuListOptionsBoundsInAXTree_(true);
   }
 
   findReusableItem_(parent, config, startIndex) {
@@ -497,6 +544,13 @@ class ListPicker extends Picker {
     }
     this.applyItemStyle_(element, config.style);
   }
+
+  setMenuListOptionsBoundsInAXTree_(childrenUpdated = false) {
+    let optionBounds = [];
+    buildOptionBoundsArray(this.selectElement_, optionBounds);
+    window.pagePopupController.setMenuListOptionsBoundsInAXTree(
+        optionBounds, childrenUpdated);
+  }
 }
 
 if (window.dialogArguments) {
@@ -505,3 +559,6 @@ if (window.dialogArguments) {
   window.addEventListener('message', handleMessage);
   window.setTimeout(handleArgumentsTimeout, 1000);
 }
+
+// Necessary for some web tests.
+window.global = global;

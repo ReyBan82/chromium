@@ -10,7 +10,7 @@
             ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
             <ActionContent
                title = "Re-sign test runner"
-               scriptText = "unset -v XCODE_DEVELOPER_DIR_PATH&#10;&#10;BUILDDIR=&quot;${PROJECT_DIR}/../${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}&quot;&#10;&#10;export PATH=&quot;@{PATH}&quot;&#10;&#10;rm -rf &quot;${BUILDDIR}/@{BLUEPRINT_NAME}-Runner.app&quot;&#10;cd &quot;${BUILDDIR}&quot; &amp;&amp; autoninja -C . &quot;@{BLUEPRINT_NAME}&quot;&#10;"
+               scriptText = "unset -v XCODE_DEVELOPER_DIR_PATH&#10;unset -v SWIFT_DEBUG_INFORMATION_FORMAT&#10;unset -v SWIFT_DEBUG_INFORMATION_VERSION&#10;&#10;BUILDDIR=&quot;${PROJECT_DIR}/../${CONFIGURATION}${EFFECTIVE_PLATFORM_NAME}&quot;&#10;&#10;export PATH=&quot;@{PATH}&quot;&#10;&#10;rm -rf &quot;${BUILDDIR}/@{BLUEPRINT_NAME}-Runner.app&quot;&#10;cd &quot;${BUILDDIR}&quot; &amp;&amp; autoninja -C . &quot;@{BLUEPRINT_NAME}&quot;&#10;"
                shellToInvoke = "/bin/sh">
                <EnvironmentBuildable>
                   <BuildableReference
@@ -55,6 +55,16 @@
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
       allowLocationSimulation = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "@{HOST_BLUEPRINT_IDENTIFIER}"
+            BuildableName = "@{HOST_BUILDABLE_NAME}"
+            BlueprintName = "@{HOST_BLUEPRINT_NAME}"
+            ReferencedContainer = "container:@{PROJECT_NAME}">
+         </BuildableReference>
+      </BuildableProductRunnable>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Profile"

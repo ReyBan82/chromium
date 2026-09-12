@@ -21,7 +21,6 @@
 #include "components/metrics/metrics_provider.h"
 #include "components/metrics/metrics_rotation_scheduler.h"
 #include "components/metrics/ukm_demographic_metrics_provider.h"
-#include "components/ukm/ukm_entry_filter.h"
 #include "components/ukm/ukm_recorder_impl.h"
 #include "components/ukm/ukm_reporting_service.h"
 
@@ -33,8 +32,10 @@ FORWARD_DECLARE_TEST(IOSChromeMetricsServiceClientTest,
 class ChromeMetricsServiceClientTestIgnoredForAppMetrics;
 
 namespace metrics {
+class MetricsServiceObserver;
 class MetricsServiceClient;
 class UkmBrowserTestBase;
+class UkmRecorderClientInterfaceRegistry;
 }  // namespace metrics
 
 namespace ukm {
@@ -72,8 +73,7 @@ class UkmService : public UkmRecorderImpl {
   UkmService(PrefService* pref_service,
              metrics::MetricsServiceClient* client,
              std::unique_ptr<metrics::UkmDemographicMetricsProvider>
-                 demographics_provider,
-             uint64_t external_client_id = 0);
+                 demographics_provider);
 
   UkmService(const UkmService&) = delete;
   UkmService& operator=(const UkmService&) = delete;
@@ -121,20 +121,23 @@ class UkmService : public UkmRecorderImpl {
   virtual void RegisterMetricsProvider(
       std::unique_ptr<metrics::MetricsProvider> provider);
 
-  // Registers the |filter| that is guaranteed to be applied to all subsequent
-  // events that are recorded via this UkmService.
-  void RegisterEventFilter(std::unique_ptr<UkmEntryFilter> filter);
-
   // Registers the names of all of the preferences used by UkmService in
   // the provided PrefRegistry.
   static void RegisterPrefs(PrefRegistrySimple* registry);
 
   int32_t report_count() const { return report_count_; }
 
-  uint64_t client_id() const { return client_id_; }
+  ukm::UkmReportingService* reporting_service() { return &reporting_service_; }
 
-  ukm::UkmReportingService& reporting_service_for_testing() {
-    return reporting_service_;
+  uint64_t client_id() const { return client_id_; }
+  int32_t session_id() const { return session_id_; }
+
+  // Adds/removes an observer that monitors logs events.
+  void AddLogsObserver(metrics::MetricsLogsEventManager::Observer* observer);
+  void RemoveLogsObserver(metrics::MetricsLogsEventManager::Observer* observer);
+
+  metrics::MetricsServiceObserver* logs_event_observer() {
+    return logs_event_observer_.get();
   }
 
   // Makes sure that the serialized UKM report can be parsed.
@@ -156,8 +159,21 @@ class UkmService : public UkmRecorderImpl {
                            TestRegisterUkmProvidersWhenUKMFeatureEnabled);
   FRIEND_TEST_ALL_PREFIXES(UkmServiceTest,
                            PurgeExtensionDataFromUnsentLogStore);
+  FRIEND_TEST_ALL_PREFIXES(
+      UkmServiceTest,
+      PurgeExtensionDataFromUnsentLogStoreWithVersionChange);
   FRIEND_TEST_ALL_PREFIXES(UkmServiceTest, PurgeAppDataFromUnsentLogStore);
   FRIEND_TEST_ALL_PREFIXES(UkmServiceTest, PurgeMsbbDataFromUnsentLogStore);
+  FRIEND_TEST_ALL_PREFIXES(UkmServiceTest, PurgeAppDataLogMetadataUpdate);
+
+  // UkmRecorderImpl:
+  bool ShouldUseMetricsConsentRestructure() const override;
+
+  // Updates the |recorder_client_registry_| about the changes in
+  // UkmRecorderParameters. Thread-safe.
+  void OnRecorderParametersChanged() override;
+
+  void OnRecorderParametersChangedImpl();
 
   // Starts metrics client initialization.
   void StartInitTask();
@@ -187,15 +203,18 @@ class UkmService : public UkmRecorderImpl {
 
   void SetInitializationCompleteCallbackForTesting(base::OnceClosure callback);
 
+  // UkmRecorderClientInterfaceRegistry keeps track of attached MojoUkmRecorder
+  // clients. This registry can be used to update all the attached clients with
+  // the new UkmRecorderParameters, which then can be used by clients to decide
+  // whether UkmInterface::AddEntry IPC needs to be sent or not.
+  std::unique_ptr<metrics::UkmRecorderClientInterfaceRegistry>
+      recorder_client_registry_;
+
   // A weak pointer to the PrefService used to read and write preferences.
   raw_ptr<PrefService> pref_service_;
 
   // The UKM client id stored in prefs.
   uint64_t client_id_ = 0;
-
-  // External client id. If specified client_id will be set to this
-  // instead of generated. This is currently only used in Lacros.
-  uint64_t external_client_id_ = 0;
 
   // The UKM session id stored in prefs.
   int32_t session_id_ = 0;
@@ -232,7 +251,22 @@ class UkmService : public UkmRecorderImpl {
   // cloned.
   base::CallbackListSubscription cloned_install_subscription_;
 
+  // Event manager to notify observers of log events.
+  metrics::MetricsLogsEventManager logs_event_manager_;
+
+  // An observer that observes all events notified through |logs_event_manager_|
+  // since the creation of this UkmService instance. This is only created if
+  // this is a debug build, or the |kExportUkmLogsToFile| command line flag is
+  // passed. This is primarily used by the chrome://metrics-internals debug
+  // page.
+  std::unique_ptr<metrics::MetricsServiceObserver> logs_event_observer_;
+
   SEQUENCE_CHECKER(sequence_checker_);
+
+  // SequencedTaskRunner is used to dispatch OnRecorderParametersChanged() on
+  // the correct sequence, set on construction using the instance assigned to
+  // the current thread.
+  scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
   // Weak pointers factory used to post task on different threads. All weak
   // pointers managed by this factory have the same lifetime as UkmService.

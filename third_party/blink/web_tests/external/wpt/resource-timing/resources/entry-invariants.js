@@ -488,11 +488,13 @@ const attribute_test_with_validator = (loader, path, validator, run_test, test_l
   attribute_test_internal(loader, path, validator, run_test, test_label);
 };
 
-const network_error_entry_test = (originalURL, args, label) => {
+const network_error_entry_test = (originalURL, args, label, loader) => {
   const url = new URL(originalURL, location.href);
   const search = new URLSearchParams(url.search.substr(1));
   const timeBefore = performance.now();
-  loader = () => new Promise(resolve => fetch(url, args).catch(resolve));
+
+  // Load using `fetch()`, unless we're given a specific loader for this test.
+  loader ??= () => new Promise(resolve => fetch(url, args).catch(resolve));
 
   attribute_test(
     loader, url,
@@ -505,6 +507,16 @@ const network_error_entry_test = (originalURL, args, label) => {
       assert_equals(entry.startTime, entry.fetchStart, 'startTime and fetchStart should be equal');
       assert_greater_than_equal(entry.startTime, timeBefore, 'startTime and fetchStart should be greater than the time before fetching');
       assert_greater_than_equal(timeAfter, entry.responseEnd, 'endTime should be less than the time right after returning from the fetch');
+      assert_equals(entry.responseStatus, 0, 'responseStatus should be 0');
+      assert_equals(entry.encodedBodySize, 0, 'encodedBodySize should be 0');
+      assert_equals(entry.decodedBodySize, 0, 'decodedBodySize should be 0');
+      assert_equals(entry.serverTiming.length, 0,
+                    'serverTiming should be empty');
+      assert_equals(entry.contentType, '', 'contentType should be empty');
+      assert_equals(entry.contentEncoding, '',
+                    'contentEncoding should be empty');
+      assert_equals(entry.nextHopProtocol, '',
+                    'nextHopProtocol should be empty');
       invariants.assert_tao_failure_resource(entry);
   }, `A ResourceTiming entry should be created for network error of type ${label}`);
 }

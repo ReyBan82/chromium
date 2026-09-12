@@ -6,13 +6,25 @@
 #define CHROME_BROWSER_ASH_LOGIN_DEMO_MODE_DEMO_COMPONENTS_H_
 
 #include <list>
+#include <optional>
 
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ref.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/demo_mode/demo_session.h"
 #include "chrome/browser/component_updater/cros_component_installer_chromeos.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+class PrefService;
+
+namespace base {
+class Version;
+}  // namespace base
+
+namespace component_updater {
+class ComponentManagerAsh;
+}  // namespace component_updater
 
 namespace ash {
 
@@ -41,7 +53,16 @@ class DemoComponents {
   // found.
   static base::FilePath GetPreInstalledPath();
 
-  explicit DemoComponents(DemoSession::DemoModeConfig config);
+  static void OverridePreinstalledResourcesRootPathForTesting(
+      const base::FilePath* path);
+
+  // `local_state` must be non-null and must be valid while the main run loop is
+  // running because it will be bound to a UI thread task.
+  // `component_manager_ash` must be non-null.
+  DemoComponents(PrefService* local_state,
+                 scoped_refptr<component_updater::ComponentManagerAsh>
+                     component_manager_ash,
+                 DemoSession::DemoModeConfig config);
 
   DemoComponents(const DemoComponents&) = delete;
   DemoComponents& operator=(const DemoComponents&) = delete;
@@ -75,7 +96,7 @@ class DemoComponents {
   // mounted at the given path (or not mounted if `path` is empty).
   void SetCrOSComponentLoadedForTesting(
       const base::FilePath& path,
-      component_updater::CrOSComponentManager::Error);
+      component_updater::ComponentManagerAsh::Error);
 
   // Fakes the offline demo mode resources image having been requested and
   // mounted at the given path (or not mounted if `path` is empty).
@@ -91,36 +112,53 @@ class DemoComponents {
   }
 
   // The error from trying to load the demo mode resources CrOS component from
-  // the CrOSComponentManager.
-  const absl::optional<component_updater::CrOSComponentManager::Error>&
+  // the ComponentManagerAsh.
+  const std::optional<component_updater::ComponentManagerAsh::Error>&
   resources_component_error() const {
     return resources_component_error_;
   }
 
   // The error from trying to load the demo mode app CrOS component from
-  // the CrOSComponentManager.
-  const absl::optional<component_updater::CrOSComponentManager::Error>&
+  // the ComponentManagerAsh.
+  const std::optional<component_updater::ComponentManagerAsh::Error>&
   app_component_error() const {
     return app_component_error_;
   }
 
+  const std::optional<base::Version>& app_component_version() const {
+    return app_component_version_;
+  }
+
+  const std::optional<base::Version>& resources_component_version() const {
+    return resources_component_version_;
+  }
+
  private:
-  void OnAppComponentLoaded(
-      base::OnceClosure load_callback,
-      component_updater::CrOSComponentManager::Error error,
-      const base::FilePath& path);
+  void OnAppVersionReady(base::OnceClosure callback,
+                         const base::Version& version);
+
+  void OnResourcesVersionReady(const base::FilePath& path,
+                               const base::Version& version);
+
+  void OnAppComponentLoaded(base::OnceClosure load_callback,
+                            component_updater::ComponentManagerAsh::Error error,
+                            const base::FilePath& path);
 
   // Called after attempting to load the installed demo mode resources CrOS
   // component has finished.
   // On success, `path` is expected to contain the path as which the component
   // is loaded.
   void InstalledComponentLoaded(
-      component_updater::CrOSComponentManager::Error error,
+      component_updater::ComponentManagerAsh::Error error,
       const base::FilePath& path);
 
   // Callback for the component or image loader request to load demo resources.
   // `mount_path` is the path at which the resources were loaded.
-  void OnDemoResourcesLoaded(absl::optional<base::FilePath> mounted_path);
+  void OnDemoResourcesLoaded(std::optional<base::FilePath> mounted_path);
+
+  const raw_ref<PrefService> local_state_;
+  const scoped_refptr<component_updater::ComponentManagerAsh>
+      component_manager_ash_;
 
   // Which config to load resources for: online or offline.
   DemoSession::DemoModeConfig config_;
@@ -130,12 +168,12 @@ class DemoComponents {
 
   // Last error (or NONE) seen when trying to load the demo-mode-resources CrOS
   // component. Has no value until the load attempt has completed.
-  absl::optional<component_updater::CrOSComponentManager::Error>
+  std::optional<component_updater::ComponentManagerAsh::Error>
       resources_component_error_;
 
   // Last error (or NONE) seen when trying to load the demo-mode-app CrOS
   // component. Has no value until the load attempt has completed.
-  absl::optional<component_updater::CrOSComponentManager::Error>
+  std::optional<component_updater::ComponentManagerAsh::Error>
       app_component_error_;
 
   // Path at which the demo-mode-resources component was loaded.
@@ -148,6 +186,9 @@ class DemoComponents {
 
   // List of pending callbacks passed to EnsureLoaded().
   std::list<base::OnceClosure> load_callbacks_;
+
+  std::optional<base::Version> app_component_version_;
+  std::optional<base::Version> resources_component_version_;
 
   base::WeakPtrFactory<DemoComponents> weak_ptr_factory_{this};
 };

@@ -7,9 +7,9 @@ import 'chrome://resources/js/ios/web_ui.js';
 
 // </if>
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {sendWithPromise} from 'chrome://resources/js/cr.js';
-import {getRequiredElement} from 'chrome://resources/js/util_ts.js';
+import {getRequiredElement} from 'chrome://resources/js/util.js';
 
 interface Metric {
   name: string;
@@ -26,6 +26,8 @@ interface UkmSource {
   type: string;
   events: UkmEvent[];
   url?: string;
+  webdx_features?: string[];
+  redirects?: string[];
 }
 
 /**
@@ -122,14 +124,31 @@ function createSourceRowsForTheSameUrl(
   if (!sourcesForUrl || sourcesForUrl.length === 0) {
     return;
   }
+
   for (const source of sourcesForUrl) {
     const sourceHtmlRow = document.createElement('tr');
     sourceHtmlRow.classList.add('source_container');
-
     sourcesTable.appendChild(sourceHtmlRow);
-    const urlElement = populateSourceHtmlRow(source, sourceHtmlRow);
+
+    // Add a row to contain the event-metrics tables.
+    const eventsRow = document.createElement('tr');
+    eventsRow.classList.add('events-row');
+    const eventsCell = document.createElement('td');
+    eventsCell.setAttribute('colspan', '3');
+    eventsRow.appendChild(eventsCell);
+    sourcesTable.appendChild(eventsRow);
+
+    // Restore the display state from the map.
     const displayState = displayStates.get(as64Bit(source.id));
-    createEventMetricTablesForSource(source, urlElement, displayState);
+    // Apply the display state if any, based on whether the user has clicked
+    // this Source row. Otherwise, apply the display state base on the
+    // "Expand/Collapse All" button state.
+    const expandedAll = getRequiredElement('toggle_expand').textContent ===
+      COLLAPSE_ALL_BUTTON_TEXT;
+    const isExpanded = displayState ? displayState === 'block' : expandedAll;
+    populateSourceHtmlRow(source, sourceHtmlRow, eventsCell, isExpanded);
+    const displayValue = isExpanded ? 'block' : 'none';
+    createEventMetricTablesForSource(source, eventsCell, displayValue);
   }
   // Add a thin horizontal line at the bottom, which visually separates this
   // group of Sources with the same URL value from the next group.
@@ -141,14 +160,19 @@ function createSourceRowsForTheSameUrl(
  * Populates a table row with the given Source data.
  * @param sourceData data pertaining to one Source.
  * @param sourceHtmlRow The HTML element whose content will be populated.
- * @return The HTML Element representing the URL value to which event-metrics
- *     tables can be appended.
+ * @param eventsCell The HTML element to which event-metric tables are appended.
+ * @param isExpanded Whether the row is initially expanded.
  */
 function populateSourceHtmlRow(
-    sourceData: UkmSource, sourceHtmlRow: Element): Element {
+    sourceData: UkmSource, sourceHtmlRow: Element, eventsCell: Element,
+    isExpanded: boolean): void {
   const urlElement = document.createElement('td');
   urlElement.classList.add('url');
-  urlElement.innerText = sourceData.url || URL_EMPTY;
+  let urlText = sourceData.url || URL_EMPTY;
+  if (sourceData.redirects && sourceData.redirects.length > 1) {
+    urlText += ' (from redirect)';
+  }
+  urlElement.innerText = urlText;
   const idElement = document.createElement('td');
   idElement.classList.add('sourceid');
   idElement.innerText = as64Bit(sourceData.id);
@@ -156,50 +180,85 @@ function populateSourceHtmlRow(
   typeElement.classList.add('sourcetype');
   typeElement.innerText = sourceData.type;
 
+  if (isExpanded) {
+    sourceHtmlRow.classList.add('expanded');
+  }
+
   sourceHtmlRow.appendChild(urlElement);
   sourceHtmlRow.appendChild(idElement);
   sourceHtmlRow.appendChild(typeElement);
 
-  // Clicking on the URL of this Source toggles the display state of its
-  // event-metrics tables.
-  urlElement.addEventListener('click', () => {
-    const eventsTables = urlElement.lastChild as HTMLElement;
-    eventsTables.style.display =
-        eventsTables.style.display === 'block' ? 'none' : 'block';
-  });
+  const toggleHandler = () => {
+    // The eventsTables child is appended later in
+    // createEventMetricTablesForSource().
+    const eventsTables = eventsCell.lastChild as HTMLElement;
+    if (eventsTables.style.display === 'block') {
+      eventsTables.style.display = 'none';
+      sourceHtmlRow.classList.remove('expanded');
+    } else {
+      eventsTables.style.display = 'block';
+      sourceHtmlRow.classList.add('expanded');
+    }
+  };
 
-  return urlElement;
+  // Clicking on the row toggles the display state of its event-metrics tables.
+  sourceHtmlRow.addEventListener('click', toggleHandler);
 }
 
 
 /**
- * Adds event-metrics tables of a Source. Clicking on the URL of the Source
+ * Adds event-metrics tables of a Source. Clicking on the Source row
  * toggles their display on or off.
  * @param sourceData Data for one Source.
- * @param urlElement The HTML element showing the URL of the source, to which
- *     the event-metrics tables will be added.
+ * @param eventsCell The HTML element to which the event-metrics tables will be
+ *     added.
  * @param displayState Display style of the event-metrics table for this Source.
  */
 function createEventMetricTablesForSource(
-    sourceData: UkmSource, urlElement: Element,
-    displayState: string|undefined) {
+    sourceData: UkmSource, eventsCell: Element,
+    displayState: string) {
   const eventMetricsElement = document.createElement('div');
   eventMetricsElement.classList.add('events');
-  urlElement.appendChild(eventMetricsElement);
+  eventsCell.appendChild(eventMetricsElement);
 
-  // Apply the display state if any, base on whether the user has clicked this
-  // Source row.
-  if (displayState) {
-    eventMetricsElement.style.display = displayState;
-  } else {
-    // Apply the display state base on the "Expand/Collapse All" button state.
-    const expandedAll = getRequiredElement('toggle_expand').textContent ===
-        COLLAPSE_ALL_BUTTON_TEXT;
-    eventMetricsElement.style.display = expandedAll ? 'block' : 'none';
+  // Apply the display state
+  eventMetricsElement.style.display = displayState;
+
+  if (sourceData.webdx_features && sourceData.webdx_features.length > 0) {
+    const featuresDiv = document.createElement('div');
+    featuresDiv.classList.add('webdx-features-list');
+    const label = document.createElement('b');
+    label.textContent = 'WebDX Features: ';
+    featuresDiv.appendChild(label);
+    featuresDiv.appendChild(
+        document.createTextNode(sourceData.webdx_features.sort().join(', ')));
+    eventMetricsElement.appendChild(featuresDiv);
+  }
+
+  const redirects = sourceData.redirects;
+  if (redirects) {
+    const redirectsInfoDiv = document.createElement('div');
+    redirectsInfoDiv.style.paddingLeft = '10px';
+
+    const redirectsInfoLabel = document.createElement('b');
+    redirectsInfoLabel.textContent = 'Full redirect chain:';
+    redirectsInfoDiv.appendChild(redirectsInfoLabel);
+
+    redirects.forEach((url, index) => {
+      const redirectUrlDiv = document.createElement('div');
+      const isFinalUrl = index === redirects.length - 1;
+      redirectUrlDiv.textContent = url + (isFinalUrl ? '' : '  ==>');
+      redirectUrlDiv.style.paddingLeft = '10px';
+      redirectUrlDiv.style.paddingBottom = isFinalUrl ? '10px' : '0px';
+      redirectsInfoDiv.appendChild(redirectUrlDiv);
+    });
+    eventMetricsElement.appendChild(redirectsInfoDiv);
   }
 
   if (sourceData.events.length === 0) {
-    eventMetricsElement.textContent = '(no events)';
+    const noEventsDiv = document.createElement('div');
+    noEventsDiv.textContent = '(no events)';
+    eventMetricsElement.appendChild(noEventsDiv);
     return;
   }
 
@@ -215,15 +274,15 @@ function createEventMetricTablesForSource(
 /**
  * Creates a table representing metrics associated to one UKM Event.
  * @param event A UKM Event.
- * @param urlElement The HTML element showing the URL of the source, to which
- *     the event-metrics table will be appended.
+ * @param eventsElement The HTML element to which the event-metrics table will
+ *     be appended.
  */
-function createEventMetricsTable(event: UkmEvent, urlElement: Element) {
+function createEventMetricsTable(event: UkmEvent, eventsElement: Element) {
   // Add first column to the table.
   const eventTable = document.createElement('table');
   eventTable.classList.add('event-table');
   eventTable.setAttribute('value', event.name);
-  urlElement.appendChild(eventTable);
+  eventsElement.appendChild(eventTable);
 
   const firstRow = document.createElement('tr');
   eventTable.appendChild(firstRow);
@@ -286,14 +345,22 @@ function addExpandAllToggleButton() {
   const toggleExpand = getRequiredElement('toggle_expand');
   toggleExpand.textContent = EXPAND_ALL_BUTTON_TEXT;
   toggleExpand.addEventListener('click', () => {
+    const containers =
+        document.body.querySelectorAll<HTMLElement>('.source_container');
+    const events = document.body.querySelectorAll<HTMLElement>('.events');
+
     if (toggleExpand.textContent === EXPAND_ALL_BUTTON_TEXT) {
       toggleExpand.textContent = COLLAPSE_ALL_BUTTON_TEXT;
-      setDisplayStyle(
-          document.body.querySelectorAll<HTMLElement>('.events'), 'block');
+      setDisplayStyle(events, 'block');
+      for (const el of containers) {
+        el.classList.add('expanded');
+      }
     } else {
       toggleExpand.textContent = EXPAND_ALL_BUTTON_TEXT;
-      setDisplayStyle(
-          document.body.querySelectorAll<HTMLElement>('.events'), 'none');
+      setDisplayStyle(events, 'none');
+      for (const el of containers) {
+        el.classList.remove('expanded');
+      }
     }
   });
 }
@@ -307,7 +374,7 @@ function addClearButton() {
   const clearButton = getRequiredElement('clear');
   clearButton.addEventListener('click', () => {
     // Note it won't be able to clear if UKM logs got cut during this call.
-    sendWithPromise('requestUkmData').then((/** @type {UkmSession} */ data) => {
+    sendWithPromise<UkmSession>('requestUkmData').then((data: UkmSession) => {
       updateUkmCache(data);
       for (const source of cachedSources.values()) {
         clearedSources.set(as64Bit(source.id), source.events.length);
@@ -370,19 +437,33 @@ function updateUkmCache(data: UkmSession) {
   for (const source of data.sources) {
     const key = as64Bit(source.id);
     if (!cachedSources.has(key)) {
-      const mergedSource:
-          UkmSource = {id: source.id, type: source.type, events: source.events};
-      if (source.url) {
-        mergedSource.url = source.url;
-      }
+      const mergedSource: UkmSource = {
+        id: source.id,
+        type: source.type,
+        events: source.events,
+        webdx_features: source.webdx_features || [],
+        url: source.url,
+        redirects: source.redirects,
+      };
       cachedSources.set(key, mergedSource);
     } else {
+      const cached = cachedSources.get(key)!;
+      if (source.redirects && !cached.redirects) {
+        cached.redirects = source.redirects;
+      }
       // Merge distinct events from the source.
-      const existingEvents = new Set(cachedSources.get(key)!.events.map(
-          event => normalizeToString(event)));
+      const existingEvents =
+          new Set(cached.events.map(event => normalizeToString(event)));
       for (const event of source.events) {
         if (!existingEvents.has(normalizeToString(event))) {
           cachedSources.get(key)!.events.push(event);
+        }
+      }
+      // Merge distinct webdx features.
+      const existingFeatures = new Set(cachedSources.get(key)!.webdx_features);
+      for (const feature of source.webdx_features || []) {
+        if (!existingFeatures.has(feature)) {
+          cachedSources.get(key)!.webdx_features!.push(feature);
         }
       }
     }
@@ -394,7 +475,7 @@ function updateUkmCache(data: UkmSession) {
  * table.
  */
 function updateUkmData() {
-  sendWithPromise('requestUkmData').then((/** @type {UkmSession} */ data) => {
+  sendWithPromise<UkmSession>('requestUkmData').then((data: UkmSession) => {
     updateUkmCache(data);
     if (document.body.querySelector<HTMLInputElement>(
                          '#include_cache')!.checked) {
@@ -410,7 +491,7 @@ function updateUkmData() {
     getRequiredElement('clientid').innerText = '0x' + data.client_id;
     getRequiredElement('sessionid').innerText = data.session_id;
     getRequiredElement('is_sampling_enabled').innerText =
-        data.is_sampling_enabled;
+        data.is_sampling_enabled.toString();
 
     const sourcesTable = getRequiredElement('sources');
     removeChildren(sourcesTable);
@@ -445,9 +526,11 @@ function updateUkmData() {
     // for example, expanded state.
     const currentDisplayStates = new Map();
     for (const el of document.getElementsByClassName('source_container')) {
-      currentDisplayStates.set(
-          el.querySelector<HTMLElement>('.sourceid')!.textContent,
-          el.querySelector<HTMLElement>('.events')!.style.display);
+      const sourceId = el.querySelector<HTMLElement>('.sourceid')!.textContent;
+      // .events is inside the next sibling (.events-row)
+      const eventsRow = el.nextElementSibling!;
+      const eventsElement = eventsRow.querySelector<HTMLElement>('.events')!;
+      currentDisplayStates.set(sourceId, eventsElement.style.display);
     }
     const urlToSources =
         urlToSourcesMapping(filterSourcesUsingFormOptions(data.sources));

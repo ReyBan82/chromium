@@ -8,6 +8,7 @@
 #include <set>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "components/page_load_metrics/common/page_load_metrics.mojom.h"
 #include "components/page_load_metrics/common/page_load_timing.h"
 #include "components/page_load_metrics/renderer/page_timing_sender.h"
@@ -30,7 +31,7 @@ namespace page_load_metrics {
 //
 // Normally, gmock would be used in place of this class, but gmock is not
 // compatible with structures that use aligned memory, and PageLoadTiming uses
-// absl::optional which uses aligned memory, so we're forced to roll
+// std::optional which uses aligned memory, so we're forced to roll
 // our own implementation here. See
 // https://groups.google.com/forum/#!topic/googletestframework/W-Hud3j_c6I for
 // more details.
@@ -48,6 +49,12 @@ class FakePageTimingSender : public PageTimingSender {
     // be passed to ExpectPageLoadTiming.
     void ExpectPageLoadTiming(const mojom::PageLoadTiming& timing);
 
+    void ExpectSoftNavigationMetrics(
+        const mojom::SoftNavigationMetrics& soft_navigation_metrics);
+    void ExpectSoftLargestContentfulPaint(
+        const mojom::LargestContentfulPaintTiming&
+            soft_largest_contentful_paint);
+
     // CpuTimings that are expected to be sent through SendTiming() should be
     // passed to ExpectCpuTiming.
     void ExpectCpuTiming(const base::TimeDelta& timing);
@@ -56,11 +63,15 @@ class FakePageTimingSender : public PageTimingSender {
     // expected timings provided via ExpectPageLoadTiming.
     void VerifyExpectedTimings() const;
 
+    void VerifyExpectedSoftNavigationMetrics() const;
+
+    void VerifyExpectedSoftLargestContentfulPaint() const;
+
     // Forces verification that actual timings sent through SendTiming() match
     // expected timings provided via ExpectCpuTiming.
     void VerifyExpectedCpuTimings() const;
 
-    void VerifyExpectedInputTiming() const;
+    void VerifyExpectedInteractionTiming() const;
 
     void VerifyExpectedSubresourceLoadMetrics() const;
 
@@ -73,14 +84,18 @@ class FakePageTimingSender : public PageTimingSender {
       expected_render_data_ = render_data.Clone();
     }
 
-    void UpdateExpectedInputTiming(const base::TimeDelta input_delay);
+    void UpdateExpectedInteractionTiming(
+        const base::TimeDelta interaction_duration,
+        uint64_t interaction_offset,
+        const base::TimeTicks interaction_time,
+        const base::TimeTicks processing_start,
+        uint64_t performance_timeline_navigation_id);
 
     void UpdateExpectedSubresourceLoadMetrics(
-        const mojom::SubresourceLoadMetrics& subresource_load_metrics);
+        const blink::SubresourceLoadMetrics& subresource_load_metrics);
 
-    void UpdateExpectedMainFrameIntersectionRect(
-        const gfx::Rect& main_frame_intersection_rect) {
-      expected_main_frame_intersection_rect_ = main_frame_intersection_rect;
+    void UpdateExpectedMainFrameRect(const gfx::Rect& main_frame_rect) {
+      expected_main_frame_rect_ = main_frame_rect;
     }
 
     void UpdateExpectedMainFrameViewportRect(
@@ -92,7 +107,7 @@ class FakePageTimingSender : public PageTimingSender {
     // expected features provided via ExpectPageLoadFeatures.
     void VerifyExpectedFeatures() const;
     void VerifyExpectedRenderData() const;
-    void VerifyExpectedMainFrameIntersectionRect() const;
+    void VerifyExpectedMainFrameRect() const;
     void VerifyExpectedMainFrameViewportRect() const;
 
     const std::vector<mojom::PageLoadTimingPtr>& expected_timings() const {
@@ -109,27 +124,42 @@ class FakePageTimingSender : public PageTimingSender {
         const std::vector<mojom::ResourceDataUpdatePtr>& resources,
         const mojom::FrameRenderDataUpdate& render_data,
         const mojom::CpuTimingPtr& cpu_timing,
-        const mojom::InputTimingPtr& input_timing,
-        const mojom::SubresourceLoadMetricsPtr& subresource_load_metrics,
-        uint32_t soft_navigation_count);
+        const std::vector<mojom::EventTimingPtr>& event_timings,
+        const std::optional<blink::SubresourceLoadMetrics>&
+            subresource_load_metrics,
+        const std::vector<mojom::SoftNavigationMetricsPtr>&
+            soft_navigation_metrics,
+        const std::vector<mojom::LargestContentfulPaintTimingPtr>&
+            soft_largest_contentful_paint,
+        const mojom::FontLoadingMetricsPtr& font_loading_metrics);
 
    private:
     std::vector<mojom::PageLoadTimingPtr> expected_timings_;
     std::vector<mojom::PageLoadTimingPtr> actual_timings_;
+    std::vector<mojom::SoftNavigationMetricsPtr>
+        expected_soft_navigation_metrics_;
+    std::vector<mojom::SoftNavigationMetricsPtr>
+        actual_soft_navigation_metrics_;
+    std::vector<mojom::LargestContentfulPaintTimingPtr>
+        expected_soft_largest_contentful_paint_;
+    std::vector<mojom::LargestContentfulPaintTimingPtr>
+        actual_soft_largest_contentful_paint_;
     std::vector<mojom::CpuTimingPtr> expected_cpu_timings_;
     std::vector<mojom::CpuTimingPtr> actual_cpu_timings_;
     std::set<blink::UseCounterFeature> expected_features_;
     std::set<blink::UseCounterFeature> actual_features_;
     mojom::FrameRenderDataUpdatePtr expected_render_data_;
     mojom::FrameRenderDataUpdate actual_render_data_;
-    absl::optional<gfx::Rect> expected_main_frame_intersection_rect_;
-    absl::optional<gfx::Rect> actual_main_frame_intersection_rect_;
-    absl::optional<gfx::Rect> expected_main_frame_viewport_rect_;
-    absl::optional<gfx::Rect> actual_main_frame_viewport_rect_;
-    mojom::InputTimingPtr expected_input_timing;
-    mojom::InputTimingPtr actual_input_timing;
-    mojom::SubresourceLoadMetricsPtr expected_subresource_load_metrics_;
-    mojom::SubresourceLoadMetricsPtr actual_subresource_load_metrics_;
+    std::optional<gfx::Rect> expected_main_frame_rect_;
+    std::optional<gfx::Rect> actual_main_frame_rect_;
+    std::optional<gfx::Rect> expected_main_frame_viewport_rect_;
+    std::optional<gfx::Rect> actual_main_frame_viewport_rect_;
+    std::vector<mojom::EventTimingPtr> expected_event_timings_;
+    std::vector<mojom::EventTimingPtr> actual_event_timings_;
+    std::optional<blink::SubresourceLoadMetrics>
+        expected_subresource_load_metrics_;
+    std::optional<blink::SubresourceLoadMetrics>
+        actual_subresource_load_metrics_;
   };
 
   explicit FakePageTimingSender(PageTimingValidator* validator);
@@ -139,21 +169,26 @@ class FakePageTimingSender : public PageTimingSender {
 
   ~FakePageTimingSender() override;
 
-  void SendTiming(const mojom::PageLoadTimingPtr& timing,
-                  const mojom::FrameMetadataPtr& metadata,
-                  const std::vector<blink::UseCounterFeature>& new_features,
-                  std::vector<mojom::ResourceDataUpdatePtr> resources,
-                  const mojom::FrameRenderDataUpdate& render_data,
-                  const mojom::CpuTimingPtr& cpu_timing,
-                  mojom::InputTimingPtr new_input_timing,
-                  mojom::SubresourceLoadMetricsPtr subresource_load_metrics,
-                  uint32_t soft_navigation_count) override;
+  void SendTiming(
+      const mojom::PageLoadTimingPtr& timing,
+      const mojom::FrameMetadataPtr& metadata,
+      const std::vector<blink::UseCounterFeature>& new_features,
+      std::vector<mojom::ResourceDataUpdatePtr> resources,
+      const mojom::FrameRenderDataUpdate& render_data,
+      const mojom::CpuTimingPtr& cpu_timing,
+      std::vector<mojom::EventTimingPtr> event_timings,
+      const std::optional<blink::SubresourceLoadMetrics>&
+          subresource_load_metrics,
+      std::vector<mojom::SoftNavigationMetricsPtr> soft_navigation_metrics,
+      std::vector<mojom::LargestContentfulPaintTimingPtr>
+          soft_largest_contentful_paint,
+      std::vector<mojom::CustomUserTimingMarkPtr> user_timings,
+      const mojom::FontLoadingMetricsPtr& font_loading_metrics) override;
 
-  void SetUpSmoothnessReporting(
-      base::ReadOnlySharedMemoryRegion shared_memory) override;
+  void SendCustomUserTiming(mojom::CustomUserTimingMarkPtr timing) override;
 
  private:
-  PageTimingValidator* const validator_;
+  const raw_ptr<PageTimingValidator> validator_;
 };
 
 }  // namespace page_load_metrics

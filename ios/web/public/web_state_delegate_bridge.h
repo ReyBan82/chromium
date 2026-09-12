@@ -41,20 +41,81 @@
 - (void)webState:(web::WebState*)webState
     runRepostFormDialogWithCompletionHandler:(void (^)(BOOL))handler;
 
+// Called when a copy operation is initiated. The delegate must call `handler`
+// with `YES` to allow the copy or `NO` to prevent it.
+// By default, copy is allowed.
+- (void)webState:(web::WebState*)webState
+    shouldAllowCopyWithDecisionHandler:(void (^)(BOOL))handler;
+
+// Called when a paste operation is initiated. The delegate must call `handler`
+// with `YES` to allow the paste or `NO` to prevent it.
+// By default, paste is allowed.
+- (void)webState:(web::WebState*)webState
+    shouldAllowPasteWithDecisionHandler:(void (^)(BOOL))handler;
+
+// Called when a cut operation is initiated. The delegate must call `handler`
+// with `YES` to allow the cut or `NO` to prevent it.
+// By default, cut is allowed.
+- (void)webState:(web::WebState*)webState
+    shouldAllowCutWithDecisionHandler:(void (^)(BOOL))handler;
+
+// Called after the user or a script pasted content into the page.
+- (void)webStateDidFinishClipboardRead:(web::WebState*)webState;
+
 // Returns a pointer to a service to manage dialogs. May return null in which
 // case dialogs aren't shown.
 - (web::JavaScriptDialogPresenter*)javaScriptDialogPresenterForWebState:
     (web::WebState*)webState;
 
+// Called when the media permission is requested and to acquire the decision
+// handler needed to process the user's decision to grant, deny media
+// permissions or show the default prompt that asks for permissions.
+- (void)webState:(web::WebState*)webState
+    handlePermissions:(NSArray<NSNumber*>*)permissions
+      decisionHandler:(web::WebStatePermissionDecisionHandler)decisionHandler;
+
 // Called when a request receives an authentication challenge specified by
 // `protectionSpace`, and is unable to respond using cached credentials.
-// Clients must call `handler` even if they want to cancel authentication
-// (in which case `username` or `password` should be nil).
+// Also called for proxy authentication challenges (HTTP 407) when
+// `webState:didRequestProxyAuthForProtectionSpace:...` is not implemented, so
+// that embedders that still rely on this method to handle proxy auth
+// challenges keep working. Clients must call `handler` even if they want to
+// cancel authentication (in which case `username` or `password` should be
+// nil).
 - (void)webState:(web::WebState*)webState
     didRequestHTTPAuthForProtectionSpace:(NSURLProtectionSpace*)protectionSpace
                       proposedCredential:(NSURLCredential*)proposedCredential
                        completionHandler:(void (^)(NSString* username,
                                                    NSString* password))handler;
+
+// Called when a request receives an authentication challenge specified by
+// `protectionSpace`, and is unable to respond using cached credentials.
+// Clients must call `handler` even if they want to cancel authentication
+// (in which case `identity` should be nil).
+- (void)webState:(web::WebState*)webState
+    didRequestClientCertAuthForProtectionSpace:
+        (NSURLProtectionSpace*)protectionSpace
+                             completionHandler:
+                                 (void (^)(SecIdentityRef))handler;
+
+// Called when a request receives a proxy authentication challenge (HTTP 407)
+// specified by `protectionSpace`, and is unable to respond using cached
+// credentials. `failureResponse` is the response that caused the challenge to
+// be issued, or nil if no response was received. Clients must call `handler`
+// with `username` and `password` on success, with `error` to cancel navigation
+// with a specific error, or with nil parameters to cancel authentication.
+// If not implemented, forwards the challenge to
+// `webState:didRequestHTTPAuthForProtectionSpace...`
+// to maintain backwards compatibility for embedders that rely on that method
+// for handling proxy auth challenges. Available in iOS 18.1 and later.
+- (void)webState:(web::WebState*)webState
+    didRequestProxyAuthForProtectionSpace:(NSURLProtectionSpace*)protectionSpace
+                       proposedCredential:(NSURLCredential*)proposedCredential
+                          failureResponse:(NSURLResponse*)failureResponse
+                        completionHandler:(void (^)(NSString* username,
+                                                    NSString* password,
+                                                    NSError* error))handler
+    API_AVAILABLE(ios(18.1));
 
 // Called to know the size of the view containing the WebView.
 - (UIView*)webViewContainerForWebState:(web::WebState*)webState;
@@ -74,6 +135,10 @@
 
 // This API can be used to show custom input views in the web view.
 - (id<CRWResponderInputView>)webStateInputViewProvider:(web::WebState*)webState;
+
+// Provides an opportunity to the delegate to react to the creation of the web
+// view.
+- (void)webStateDidCreateWebView:(web::WebState*)webState;
 
 @end
 
@@ -99,13 +164,34 @@ class WebStateDelegateBridge : public web::WebStateDelegate {
                                 const WebState::OpenURLParams&) override;
   void ShowRepostFormWarningDialog(
       WebState* source,
+      FormWarningType warning_type,
       base::OnceCallback<void(bool)> callback) override;
+  void ShouldAllowCopy(WebState* source,
+                       base::OnceCallback<void(bool)> callback) override;
+  void ShouldAllowPaste(WebState* source,
+                        base::OnceCallback<void(bool)> callback) override;
+  void ShouldAllowCut(WebState* source,
+                      base::OnceCallback<void(bool)> callback) override;
+  void DidFinishClipboardRead(WebState* source) override;
   JavaScriptDialogPresenter* GetJavaScriptDialogPresenter(
       WebState* source) override;
+  void HandlePermissionsDecisionRequest(
+      WebState* source,
+      NSArray<NSNumber*>* permissions,
+      WebStatePermissionDecisionHandler handler) override;
   void OnAuthRequired(WebState* source,
                       NSURLProtectionSpace* protection_space,
                       NSURLCredential* proposed_credential,
-                      AuthCallback callback) override;
+                      HTTPAuthCallback callback) override;
+  void OnAuthRequired(WebState* source,
+                      NSURLProtectionSpace* protection_space,
+                      ClientCertAuthCallback callback) override;
+  void OnProxyAuthChallenge(WebState* source,
+                            NSURLProtectionSpace* protection_space,
+                            NSURLCredential* proposed_credential,
+                            NSURLResponse* failure_response,
+                            ProxyAuthCallback callback) override
+      API_AVAILABLE(ios(18.1));
   UIView* GetWebViewContainer(WebState* source) override;
   void ContextMenuConfiguration(
       WebState* source,
@@ -117,11 +203,13 @@ class WebStateDelegateBridge : public web::WebStateDelegate {
 
   id<CRWResponderInputView> GetResponderInputView(WebState* source) override;
 
+  void OnNewWebViewCreated(WebState* source) override;
+
  private:
   // CRWWebStateDelegate which receives forwarded calls.
   __weak id<CRWWebStateDelegate> delegate_ = nil;
 };
 
-}  // web
+}  // namespace web
 
 #endif  // IOS_WEB_PUBLIC_WEB_STATE_DELEGATE_BRIDGE_H_

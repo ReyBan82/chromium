@@ -4,29 +4,42 @@
 
 package org.chromium.components.browser_ui.bottomsheet;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
+import android.graphics.Color;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 
+import androidx.annotation.ColorInt;
+import androidx.annotation.Px;
 import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.Callback;
-import org.chromium.base.supplier.ObservableSupplier;
-import org.chromium.base.supplier.ObservableSupplierImpl;
-import org.chromium.base.supplier.Supplier;
+import org.chromium.base.DeviceInfo;
+import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.base.supplier.NonNullObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.base.supplier.SettableNonNullObservableSupplier;
+import org.chromium.build.annotations.MonotonicNonNull;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.components.browser_ui.desktop_windowing.AppHeaderState;
+import org.chromium.components.browser_ui.desktop_windowing.DesktopWindowStateManager;
 import org.chromium.components.browser_ui.widget.gesture.BackPressHandler;
-import org.chromium.components.browser_ui.widget.scrim.ScrimCoordinator;
+import org.chromium.components.browser_ui.widget.scrim.ScrimManager;
 import org.chromium.components.browser_ui.widget.scrim.ScrimProperties;
 import org.chromium.ui.KeyboardVisibilityDelegate;
+import org.chromium.ui.insets.InsetObserver;
 import org.chromium.ui.modelutil.PropertyModel;
-import org.chromium.ui.util.AccessibilityUtil;
 import org.chromium.ui.util.TokenHolder;
 
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.function.Supplier;
 
 /**
  * This class is responsible for managing the content shown by the {@link BottomSheet}. Features
@@ -34,21 +47,62 @@ import java.util.PriorityQueue;
  * and call {@link #requestShowContent(BottomSheetContent, boolean)} which will return true if the
  * content was actually shown (see full doc on method).
  */
+@NullMarked
 class BottomSheetControllerImpl implements ManagedBottomSheetController {
     /** The initial capacity for the priority queue handling pending content show requests. */
     private static final int INITIAL_QUEUE_CAPACITY = 1;
 
+    /**
+     * A list of observers maintained by this controller until the bottom sheet is created, at which
+     * point they will be added to the bottom sheet.
+     */
+    private final List<BottomSheetObserver> mPendingSheetObservers;
+
+    /** A means of accessing the ScrimManager. */
+    private final Supplier<@Nullable ScrimManager> mScrimManagerSupplier;
+
+    /**
+     * A set of tokens for features suppressing the bottom sheet. If this holder has tokens, the
+     * sheet is suppressed.
+     */
+    private final TokenHolder mSuppressionTokens;
+
+    /** A supplier indicating whether back press should be handled by the bottom sheet. */
+    private final SettableNonNullObservableSupplier<Boolean> mBackPressStateChangedSupplier =
+            ObservableSuppliers.createNonNull(false);
+
+    /**
+     * A {@link BackPressHandler} to handle back press when the bottom sheet is open and/or has
+     * sheet content.
+     */
+    private final BackPressHandler mBackPressHandler;
+
+    /** Whether or not always use the full width of the container. */
+    private final boolean mAlwaysFullWidth;
+
+    private final Supplier<Integer> mEdgeToEdgeBottomInsetSupplier;
+    private final KeyboardVisibilityDelegate mKeyboardVisibilityDelegate;
+    private final @Nullable DesktopWindowStateManager mDesktopWindowStateManager;
+
+    /**
+     * An observer that observes changes to the bottom sheet content {@code
+     * BottomSheetContent#mBackPressStateChangedSupplier} and updates the {@code
+     * BottomSheetControllerImpl#mBackPressStateChangedSupplier}.
+     */
+    private final Callback<Boolean> mContentBackPressStateChangedObserver =
+            contentWillHandleBackPress -> updateBackPressStateChangedSupplier();
+
     /** A handle to the {@link BottomSheet} that this class controls. */
-    private BottomSheet mBottomSheet;
+    private @MonotonicNonNull BottomSheet mBottomSheet;
 
     /**
      * The container that the sheet exists in. This is one layer inside of the root coordinator view
      * to support the view's shadow.
      */
-    private ViewGroup mBottomSheetContainer;
+    private @MonotonicNonNull ViewGroup mBottomSheetContainer;
 
     /** A queue for content that is waiting to be shown in the {@link BottomSheet}. */
-    private PriorityQueue<BottomSheetContent> mContentQueue;
+    private @MonotonicNonNull PriorityQueue<BottomSheetContent> mContentQueue;
 
     /** Whether the controller is already processing a hide request for the tab. */
     private boolean mIsProcessingHideRequest;
@@ -57,90 +111,102 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     private boolean mIsSuppressingCurrentContent;
 
     /** A runnable that initializes the bottom sheet when necessary. */
-    private Runnable mSheetInitializer;
-
-    /**
-     * A list of observers maintained by this controller until the bottom sheet is created, at which
-     * point they will be added to the bottom  sheet.
-     */
-    private List<BottomSheetObserver> mPendingSheetObservers;
+    private @Nullable Runnable mSheetInitializer;
 
     /** The state of the sheet so it can be returned to what it was prior to suppression. */
-    @SheetState
-    private int mSheetStateBeforeSuppress;
+    private @SheetState int mSheetStateBeforeSuppress;
 
     /** The content being shown prior to the sheet being suppressed. */
-    private BottomSheetContent mContentWhenSuppressed;
+    private @Nullable BottomSheetContent mContentWhenSuppressed;
 
-    /** A means of accessing the ScrimCoordinator. */
-    private Supplier<ScrimCoordinator> mScrimCoordinatorSupplier;
-
-    /**
-     * A set of tokens for features suppressing the bottom sheet. If this holder has tokens, the
-     * sheet is suppressed.
-     */
-    private final TokenHolder mSuppressionTokens;
-
-    /** A means of checking whether accessibility is currently enabled. */
-    private AccessibilityUtil mAccessibilityUtil;
-
-    /** A supplier indicating whether back press should be handled by the bottom sheet. */
-    private final ObservableSupplierImpl<Boolean> mBackPressStateChangedSupplier =
-            new ObservableSupplierImpl<>();
-
-    /**
-     * A {@link BackPressHandler} to handle back press when the bottom sheet is open and/or has
-     * sheet content.
-     */
-    private final BackPressHandler mBackPressHandler;
-
-    /**
-     * An observer that observes changes to the bottom sheet content {@code
-     * BottomSheetContent#mBackPressStateChangedSupplier} and updates the {@code
-     * BottomSheetControllerImpl#mBackPressStateChangedSupplier}.
-     */
-    private Callback<Boolean> mContentBackPressStateChangedObserver;
+    private boolean mScrimVisible;
+    private int mAppHeaderHeight;
+    private int mBottomControlsOffset;
+    private boolean mIsAnchoredToBottomControls;
+    private final boolean mEnableLargeFormFactorUi;
 
     /**
      * Build a new controller of the bottom sheet.
-     * @param scrim A supplier of the scrim that shows when the bottom sheet is opened.
-     * @param initializedCallback A callback for the sheet being created (as the sheet is not
-     *                            initialized until first use.
+     *
+     * @param scrimManagerSupplier A supplier of the scrimManagerSupplier that shows when the bottom
+     *     sheet is opened.
      * @param window A means of accessing the screen size.
      * @param keyboardDelegate A means of hiding the keyboard.
      * @param root The view that should contain the sheet.
+     * @param alwaysFullWidth Whether bottom sheet is full-width.
+     * @param edgeToEdgeBottomInsetSupplier The supplier of bottom inset when e2e is on.
+     * @param desktopWindowStateManager The {@link DesktopWindowStateManager} for the app header.
+     * @param insetObserver The {@link InsetObserver} for inset changes.
+     * @param enableLargeFormFactorUi Whether to use a different UI explicitly designed for bottom
+     *     sheets when operating in a desktop or large form factor environment.
      */
-    public BottomSheetControllerImpl(final Supplier<ScrimCoordinator> scrim,
-            Callback<View> initializedCallback, Window window,
-            KeyboardVisibilityDelegate keyboardDelegate, Supplier<ViewGroup> root) {
-        mScrimCoordinatorSupplier = scrim;
+    public BottomSheetControllerImpl(
+            final Supplier<@Nullable ScrimManager> scrimManagerSupplier,
+            Window window,
+            KeyboardVisibilityDelegate keyboardDelegate,
+            Supplier<ViewGroup> root,
+            boolean alwaysFullWidth,
+            Supplier<Integer> edgeToEdgeBottomInsetSupplier,
+            @Nullable DesktopWindowStateManager desktopWindowStateManager,
+            InsetObserver insetObserver,
+            boolean enableLargeFormFactorUi) {
+        mScrimManagerSupplier = scrimManagerSupplier;
         mPendingSheetObservers = new ArrayList<>();
-        mSuppressionTokens = new TokenHolder(() -> onSuppressionTokensChanged());
+        mSuppressionTokens = new TokenHolder(this::onSuppressionTokensChanged);
+        mAlwaysFullWidth = alwaysFullWidth;
+        mEdgeToEdgeBottomInsetSupplier = edgeToEdgeBottomInsetSupplier;
+        mKeyboardVisibilityDelegate = keyboardDelegate;
+        mDesktopWindowStateManager = desktopWindowStateManager;
+        if (mDesktopWindowStateManager != null) {
+            mDesktopWindowStateManager.addObserver(this);
+        }
+        mEnableLargeFormFactorUi = enableLargeFormFactorUi;
 
-        mSheetInitializer = () -> {
-            initializeSheet(initializedCallback, window, keyboardDelegate, root);
-        };
+        mSheetInitializer =
+                () -> {
+                    initializeSheet(window, keyboardDelegate, root, insetObserver);
+                };
 
-        mBackPressHandler = new BackPressHandler() {
-            @Override
-            public void handleBackPress() {
-                assert mBottomSheet != null && !mSuppressionTokens.hasTokens()
-                        && mBottomSheet.getCurrentSheetContent() != null;
-                if (Boolean.TRUE.equals(mBottomSheet.getCurrentSheetContent()
-                                                .getBackPressStateChangedSupplier()
-                                                .get())) {
-                    mBottomSheet.getCurrentSheetContent().onBackPressed();
-                    return;
-                }
-                int sheetState = mBottomSheet.getMinSwipableSheetState();
-                mBottomSheet.setSheetState(sheetState, true, StateChangeReason.BACK_PRESS);
-            }
+        mBackPressHandler =
+                new BackPressHandler() {
+                    @Override
+                    public @BackPressResult int handleBackPress() {
+                        assert mBottomSheet != null
+                                && !mSuppressionTokens.hasTokens()
+                                && mBottomSheet.getCurrentSheetContent() != null;
+                        if (mBottomSheet
+                                .getCurrentSheetContent()
+                                .getBackPressStateChangedSupplier()
+                                .get()) {
+                            mBottomSheet.getCurrentSheetContent().onBackPressed();
+                            return BackPressResult.SUCCESS;
+                        }
+                        int sheetState = mBottomSheet.getMinSwipableSheetState();
+                        mBottomSheet.setSheetState(sheetState, true, StateChangeReason.BACK_PRESS);
+                        return BackPressResult.SUCCESS;
+                    }
 
-            @Override
-            public ObservableSupplier<Boolean> getHandleBackPressChangedSupplier() {
-                return mBackPressStateChangedSupplier;
-            }
-        };
+                    @Override
+                    public NonNullObservableSupplier<Boolean> getHandleBackPressChangedSupplier() {
+                        return mBackPressStateChangedSupplier;
+                    }
+                };
+    }
+
+    // AppHeaderObserver implementation
+    @Override
+    public void onAppHeaderStateChanged(AppHeaderState newState) {
+        int appHeaderHeight = newState.getAppHeaderHeight();
+        if (appHeaderHeight == mAppHeaderHeight) return;
+        mAppHeaderHeight = appHeaderHeight;
+        if (mBottomSheet != null) {
+            mBottomSheet.onAppHeaderHeightChanged(mAppHeaderHeight);
+        }
+    }
+
+    @VisibleForTesting
+    boolean isLargeFormFactor() {
+        return mEnableLargeFormFactorUi && DeviceInfo.isDesktop();
     }
 
     @Override
@@ -150,125 +216,150 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
 
     /**
      * Do the actual initialization of the bottom sheet.
-     * @param initializedCallback A callback for the creation of the sheet.
+     *
      * @param window A means of accessing the screen size.
      * @param keyboardDelegate A means of hiding the keyboard.
      * @param root The view that should contain the sheet.
+     * @param insetObserver The {@link InsetObserver} for inset changes.
      */
-    private void initializeSheet(Callback<View> initializedCallback, Window window,
-            KeyboardVisibilityDelegate keyboardDelegate, Supplier<ViewGroup> root) {
+    private void initializeSheet(
+            Window window,
+            KeyboardVisibilityDelegate keyboardDelegate,
+            Supplier<ViewGroup> root,
+            InsetObserver insetObserver) {
         mBottomSheetContainer = root.get();
+        if (mBottomSheetContainer == null) {
+            return;
+        }
         mBottomSheetContainer.setVisibility(View.VISIBLE);
 
-        LayoutInflater.from(root.get().getContext())
-                .inflate(R.layout.bottom_sheet, mBottomSheetContainer);
-        mBottomSheet = (BottomSheet) root.get().findViewById(R.id.bottom_sheet);
-        initializedCallback.onResult(mBottomSheet);
+        var rootView = root.get();
+        int layoutId = isLargeFormFactor() ? R.layout.bottom_sheet_desktop : R.layout.bottom_sheet;
+        LayoutInflater.from(rootView.getContext()).inflate(layoutId, mBottomSheetContainer);
+        mBottomSheet = rootView.findViewById(R.id.bottom_sheet);
 
-        mBottomSheet.init(window, keyboardDelegate);
-        mBottomSheet.setAccessibilityUtil(mAccessibilityUtil);
+        mBottomSheet.init(
+                window,
+                keyboardDelegate,
+                mAlwaysFullWidth,
+                mEdgeToEdgeBottomInsetSupplier,
+                mAppHeaderHeight,
+                mBottomControlsOffset,
+                insetObserver,
+                isLargeFormFactor());
 
         // Initialize the queue with a comparator that checks content priority.
-        mContentQueue = new PriorityQueue<>(INITIAL_QUEUE_CAPACITY,
-                (content1, content2) -> content1.getPriority() - content2.getPriority());
+        mContentQueue = new PriorityQueue<>(INITIAL_QUEUE_CAPACITY, this::comparePrecedence);
 
-        PropertyModel scrimProperties =
-                new PropertyModel.Builder(ScrimProperties.REQUIRED_KEYS)
-                        .with(ScrimProperties.TOP_MARGIN, 0)
-                        .with(ScrimProperties.AFFECTS_STATUS_BAR, true)
-                        .with(ScrimProperties.ANCHOR_VIEW, mBottomSheet)
-                        .with(ScrimProperties.SHOW_IN_FRONT_OF_ANCHOR_VIEW, false)
-                        .with(ScrimProperties.CLICK_DELEGATE,
-                                () -> {
-                                    if (!mBottomSheet.isSheetOpen()) return;
-                                    mBottomSheet.setSheetState(
-                                            mBottomSheet.getMinSwipableSheetState(), true,
-                                            StateChangeReason.TAP_SCRIM);
-                                })
-                        .build();
+        PropertyModel scrimProperties = createScrimParams();
 
-        mBottomSheet.addObserver(new EmptyBottomSheetObserver() {
-            /**
-             * Whether the scrim was shown for the last content.
-             * TODO(mdjones): We should try to make sure the content in the sheet is not nulled
-             *                prior to the close event occurring; sheets that don't have a peek
-             *                state make this difficult since the sheet needs to be hidden before it
-             *                is closed.
-             */
-            private boolean mScrimShown;
+        mBottomSheet.addObserver(
+                new BottomSheetObserver() {
+                    /**
+                     * Whether the scrim was shown for the last content. TODO(mdjones): We should
+                     * try to make sure the content in the sheet is not nulled prior to the close
+                     * event occurring; sheets that don't have a peek state make this difficult
+                     * since the sheet needs to be hidden before it is closed.
+                     */
+                    private boolean mScrimShown;
 
-            @Override
-            public void onSheetOpened(@StateChangeReason int reason) {
-                if (mBottomSheet.getCurrentSheetContent() != null
-                        && mBottomSheet.getCurrentSheetContent().hasCustomScrimLifecycle()) {
-                    updateBackPressStateChangedSupplier();
-                    return;
-                }
+                    @Override
+                    public void onSheetOpened(@StateChangeReason int reason) {
+                        // The scrim may start visible, meaning we won't get an update. Manually
+                        // trigger an update to account for this possibility.
+                        ScrimManager scrimManager = mScrimManagerSupplier.get();
+                        assumeNonNull(scrimManager);
+                        adjustBottomSheetZAxis(mScrimVisible);
+                        if (!shouldShowScrim(mBottomSheet.getCurrentSheetContent())) {
+                            updateBackPressStateChangedSupplier();
+                            return;
+                        }
 
-                mScrimCoordinatorSupplier.get().showScrim(scrimProperties);
-                mScrimShown = true;
-                updateBackPressStateChangedSupplier();
-            }
+                        if (isLargeFormFactor()
+                                && mBottomSheet.getCurrentSheetContent() != null
+                                && mBottomSheet
+                                        .getCurrentSheetContent()
+                                        .supportsLargeFormFactor()) {
+                            scrimProperties.set(
+                                    ScrimProperties.BACKGROUND_COLOR,
+                                    mBottomSheet
+                                            .getContext()
+                                            .getColor(R.color.bottom_sheet_desktop_scrim));
+                        }
 
-            @Override
-            public void onSheetClosed(@StateChangeReason int reason) {
-                // Hide the scrim if the current content doesn't have a custom scrim lifecycle.
-                if (mScrimShown) {
-                    mScrimCoordinatorSupplier.get().hideScrim(true);
-                    mScrimShown = false;
-                }
-
-                // Try to swap contents unless the sheet's content has a custom lifecycle.
-                if (mBottomSheet.getCurrentSheetContent() != null
-                        && !mBottomSheet.getCurrentSheetContent().hasCustomLifecycle()) {
-                    // If the sheet is closed, it is an opportunity for another content to try to
-                    // take its place if it is a higher priority.
-                    BottomSheetContent content = mBottomSheet.getCurrentSheetContent();
-                    BottomSheetContent nextContent = mContentQueue.peek();
-                    if (content != null && nextContent != null
-                            && nextContent.getPriority() < content.getPriority()) {
-                        mContentQueue.add(content);
-                        mBottomSheet.setSheetState(SheetState.HIDDEN, true);
+                        scrimManager.showScrim(scrimProperties);
+                        mScrimShown = true;
+                        onScrimVisibilityChanged(true);
+                        updateBackPressStateChangedSupplier();
                     }
-                }
-                updateBackPressStateChangedSupplier();
-            }
 
-            @Override
-            public void onSheetStateChanged(@SheetState int state, int reason) {
-                // If hiding request is in progress, destroy the current sheet content being hidden
-                // even when it is in suppressed state. See https://crbug.com/1057966.
-                if (state != SheetState.HIDDEN
-                        || (!mIsProcessingHideRequest && mSuppressionTokens.hasTokens())) {
-                    return;
-                }
-                if (mBottomSheet.getCurrentSheetContent() != null
-                        && !mIsSuppressingCurrentContent) {
-                    mBottomSheet.getCurrentSheetContent().destroy();
-                }
-                mIsSuppressingCurrentContent = false;
-                mIsProcessingHideRequest = false;
-                showNextContent(true);
-                updateBackPressStateChangedSupplier();
-            }
+                    @Override
+                    public void onSheetClosed(@StateChangeReason int reason) {
+                        // Hide the scrim if the current content doesn't have a custom scrim
+                        // lifecycle.
+                        if (mScrimShown) {
+                            ScrimManager scrimManager = mScrimManagerSupplier.get();
+                            assumeNonNull(scrimManager);
+                            scrimManager.hideScrim(scrimProperties, /* animate= */ true);
+                            mScrimShown = false;
+                        }
 
-            @Override
-            public void onSheetContentChanged(BottomSheetContent newContent) {
-                updateBackPressStateChangedSupplier();
+                        // Reset property to default correctly for any future sheets.
+                        scrimProperties.set(ScrimProperties.BACKGROUND_COLOR, null);
 
-                if (newContent != null) return;
+                        // Try to swap contents unless the sheet's content has a custom lifecycle.
+                        if (mBottomSheet.getCurrentSheetContent() != null
+                                && !mBottomSheet.getCurrentSheetContent().hasCustomLifecycle()) {
+                            // If the sheet is closed, it is an opportunity for another content to
+                            // try to take its place if it is a higher priority.
+                            BottomSheetContent content = mBottomSheet.getCurrentSheetContent();
+                            BottomSheetContent nextContent = mContentQueue.peek();
+                            if (content != null
+                                    && nextContent != null
+                                    && canIncomingSupersede(content, nextContent)) {
+                                mContentQueue.add(content);
+                                mBottomSheet.setSheetState(SheetState.HIDDEN, true);
+                            }
+                        }
+                        updateBackPressStateChangedSupplier();
+                    }
 
-                // If there are no more things to be shown, the container can avoid layouts.
-                mBottomSheetContainer.setVisibility(View.GONE);
-            }
-        });
+                    @Override
+                    public void onSheetStateChanged(@SheetState int state, int reason) {
+                        // If hiding request is in progress, destroy the current sheet content being
+                        // hidden even when it is in suppressed state. See
+                        // https://crbug.com/1057966.
+                        if (state != SheetState.HIDDEN
+                                || (!mIsProcessingHideRequest && mSuppressionTokens.hasTokens())) {
+                            return;
+                        }
+                        if (mBottomSheet.getCurrentSheetContent() != null
+                                && !mIsSuppressingCurrentContent) {
+                            recordBottomSheetClosedMetric(reason);
+                            mBottomSheet.getCurrentSheetContent().destroy();
+                        }
+                        mIsSuppressingCurrentContent = false;
+                        mIsProcessingHideRequest = false;
+                        showNextContent(true);
+                        updateBackPressStateChangedSupplier();
+                    }
+
+                    @Override
+                    public void onSheetContentChanged(@Nullable BottomSheetContent newContent) {
+                        updateBackPressStateChangedSupplier();
+
+                        if (newContent != null) return;
+
+                        // If there are no more things to be shown, the container can avoid layouts.
+                        mBottomSheetContainer.setVisibility(View.GONE);
+                    }
+                });
 
         // Add any of the pending observers that were added prior to the sheet being created.
         for (int i = 0; i < mPendingSheetObservers.size(); i++) {
             mBottomSheet.addObserver(mPendingSheetObservers.get(i));
         }
         mPendingSheetObservers.clear();
-
         mSheetInitializer = null;
     }
 
@@ -278,23 +369,24 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     }
 
     @Override
-    public ScrimCoordinator getScrimCoordinator() {
-        return mScrimCoordinatorSupplier.get();
+    public void setBottomControlsOffset(int bottomControlsOffset) {
+        if (mBottomControlsOffset == bottomControlsOffset) return;
+        mBottomControlsOffset = bottomControlsOffset;
+        adjustBottomSheetZAxis(mScrimVisible);
+    }
+
+    @Override
+    public @Nullable ScrimManager getScrimManager() {
+        return mScrimManagerSupplier.get();
     }
 
     @Override
     public PropertyModel createScrimParams() {
-        return new PropertyModel.Builder(ScrimProperties.REQUIRED_KEYS)
-                .with(ScrimProperties.TOP_MARGIN, 0)
+        return new PropertyModel.Builder(ScrimProperties.ALL_KEYS)
                 .with(ScrimProperties.AFFECTS_STATUS_BAR, true)
                 .with(ScrimProperties.ANCHOR_VIEW, mBottomSheet)
-                .with(ScrimProperties.SHOW_IN_FRONT_OF_ANCHOR_VIEW, false)
-                .with(ScrimProperties.CLICK_DELEGATE,
-                        () -> {
-                            if (!mBottomSheet.isSheetOpen()) return;
-                            mBottomSheet.setSheetState(mBottomSheet.getMinSwipableSheetState(),
-                                    true, StateChangeReason.TAP_SCRIM);
-                        })
+                .with(ScrimProperties.CLICK_DELEGATE, this::onScrimClicked)
+                .with(ScrimProperties.VISIBILITY_CALLBACK, this::onScrimVisibilityChanged)
                 .build();
     }
 
@@ -302,6 +394,9 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     @Override
     public void destroy() {
         if (mBottomSheet != null) mBottomSheet.destroy();
+        if (mDesktopWindowStateManager != null) {
+            mDesktopWindowStateManager.removeObserver(this);
+        }
     }
 
     @Override
@@ -323,7 +418,7 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     }
 
     @Override
-    public BottomSheetContent getCurrentSheetContent() {
+    public @Nullable BottomSheetContent getCurrentSheetContent() {
         return mBottomSheet == null ? null : mBottomSheet.getCurrentSheetContent();
     }
 
@@ -350,13 +445,38 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     }
 
     @Override
-    public int getCurrentOffset() {
+    public @Px int getCurrentOffset() {
         return mBottomSheet == null ? 0 : (int) mBottomSheet.getCurrentOffsetPx();
+    }
+
+    @Override
+    public @Px int getMaxOffset() {
+        return mBottomSheet != null ? (int) mBottomSheet.getMaxOffsetPx() : 0;
     }
 
     @Override
     public int getContainerHeight() {
         return mBottomSheet != null ? (int) mBottomSheet.getSheetContainerHeight() : 0;
+    }
+
+    @Override
+    public int getCurrentPeekHeightPx() {
+        return mBottomSheet != null ? mBottomSheet.getPeekHeightPx() : 0;
+    }
+
+    @Override
+    public int getContainerWidth() {
+        return mBottomSheet != null ? (int) mBottomSheet.getSheetContainerWidth() : 0;
+    }
+
+    @Override
+    public int getMaxSheetWidth() {
+        return mBottomSheet != null ? mBottomSheet.getMaxSheetWidth() : 0;
+    }
+
+    @Override
+    public @Px int getMaxSheetHeight() {
+        return mBottomSheet != null ? mBottomSheet.getMaxSheetHeight() : 0;
     }
 
     @Override
@@ -379,7 +499,7 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
 
     /** Handle a change in the state of the token holder responsible for the suppression tokens. */
     private void onSuppressionTokensChanged() {
-        if (!mSuppressionTokens.hasTokens()) doUnsuppression();
+        if (!mSuppressionTokens.hasTokens()) undoSuppression();
         updateBackPressStateChangedSupplier();
     }
 
@@ -394,7 +514,11 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
                 mSheetStateBeforeSuppress = getSheetState();
             }
 
-            mContentWhenSuppressed = getCurrentSheetContent();
+            // Prevent sheets that are already animating to a HIDDEN state from being captured
+            // and resurrected.
+            if (!mBottomSheet.isHiding()) {
+                mContentWhenSuppressed = getCurrentSheetContent();
+            }
             mBottomSheet.setSheetState(SheetState.HIDDEN, false, reason);
         }
 
@@ -406,14 +530,17 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
         mSuppressionTokens.releaseToken(token);
     }
 
-    private void doUnsuppression() {
+    private void undoSuppression() {
         if (mBottomSheet == null) return;
 
         if (mBottomSheet.getCurrentSheetContent() != null) {
+            boolean shouldRestoreState =
+                    mBottomSheet.getCurrentSheetContent().shouldRestoreStateOnUnsuppress();
             @SheetState
-            int openState = mContentWhenSuppressed == getCurrentSheetContent()
-                    ? mSheetStateBeforeSuppress
-                    : mBottomSheet.getOpeningState();
+            int openState =
+                    mContentWhenSuppressed == getCurrentSheetContent() && shouldRestoreState
+                            ? mSheetStateBeforeSuppress
+                            : mBottomSheet.getOpeningState();
             mBottomSheet.setSheetState(openState, true);
         } else {
             // In the event the previous content was hidden, try to show the next one.
@@ -423,24 +550,20 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
         mSheetStateBeforeSuppress = SheetState.NONE;
     }
 
-    @Override
-    public void setAccessibilityUtil(AccessibilityUtil enabledSupplier) {
-        mAccessibilityUtil = enabledSupplier;
-    }
-
-    @VisibleForTesting
     void setSheetStateForTesting(@SheetState int state, boolean animate) {
-        mBottomSheet.setSheetState(state, animate);
+        assumeNonNull(mBottomSheet).setSheetState(state, animate);
     }
 
-    @VisibleForTesting
     View getBottomSheetViewForTesting() {
-        return mBottomSheet;
+        return assumeNonNull(mBottomSheet);
     }
 
-    @VisibleForTesting
+    ViewGroup getBottomSheetContainerForTesting() {
+        return assumeNonNull(mBottomSheetContainer);
+    }
+
     public void endAnimationsForTesting() {
-        mBottomSheet.endAnimations();
+        assumeNonNull(mBottomSheet).endAnimations();
     }
 
     @VisibleForTesting
@@ -448,7 +571,7 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
         clearRequestsAndHide();
 
         // Handle content that has a custom lifecycle.
-        hideContent(mBottomSheet.getCurrentSheetContent(), /* animate= */ true);
+        hideContent(assumeNonNull(mBottomSheet).getCurrentSheetContent(), /* animate= */ true);
     }
 
     @Override
@@ -456,35 +579,49 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
         if (content == null) {
             throw new RuntimeException("Attempting to show null content in the sheet!");
         }
-
-        if (mBottomSheet == null) mSheetInitializer.run();
+        if (mBottomSheet == null) assumeNonNull(mSheetInitializer).run();
+        if (mBottomSheet == null) {
+            return false;
+        }
+        assumeNonNull(mContentQueue);
 
         // If already showing (or queued to show) the requested content, do nothing.
         if (content == mBottomSheet.getCurrentSheetContent() || mContentQueue.contains(content)) {
             return content == mBottomSheet.getCurrentSheetContent();
         }
 
-        boolean shouldSwapForPriorityContent = mBottomSheet.getCurrentSheetContent() != null
-                && content.getPriority() < mBottomSheet.getCurrentSheetContent().getPriority()
-                && canBottomSheetSwitchContent();
+        boolean shouldSwapContent =
+                mBottomSheet.getCurrentSheetContent() != null
+                        && canBottomSheetSwitchContent(content);
 
         // Always add the content to the queue, it will be handled after the sheet closes if
         // necessary. If already hidden, |showNextContent| will handle the request.
         mContentQueue.add(content);
 
+        // TODO(crbug.com/505050661): Remove COBROWSE condition once modes is implemented.
         if (mBottomSheet.getCurrentSheetContent() == null && !mSuppressionTokens.hasTokens()) {
             showNextContent(animate);
             return true;
-        } else if (shouldSwapForPriorityContent) {
-            mIsSuppressingCurrentContent = true;
-            mContentQueue.add(mBottomSheet.getCurrentSheetContent());
+        } else if (shouldSwapContent) {
+            // If bottomSheet is CoBrowse we should close the previous sheet (instead of adding it
+            // back to the queue). There should never be 2 bottomSheets with coBrowse as
+            // TabBottomSheetManager ensures that we always close the previous coBrowse
+            // bottomSheet before ever showing a new one.
+            if (!shouldBlockRequeueOnSwap(content)) {
+                // Prevent sheets that are already animating to a HIDDEN state from being captured
+                // and resurrected.
+                if (!mBottomSheet.isHiding()) {
+                    mIsSuppressingCurrentContent = true;
+                    mContentQueue.add(mBottomSheet.getCurrentSheetContent());
+                }
+            }
             if (!mSuppressionTokens.hasTokens()) {
                 mBottomSheet.setSheetState(SheetState.HIDDEN, animate);
                 return true;
             } else {
                 // Since the sheet is already suppressed and hidden, clear the sheet's content if
-                // the requested content is higher priority. The unsuppression logic will figure out
-                // which content to show next.
+                // the requested content is higher priority. The undo suppression logic will figure
+                // out which content to show next.
                 mBottomSheet.showContent(null);
             }
         }
@@ -493,11 +630,20 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
 
     @Override
     public void hideContent(
-            BottomSheetContent content, boolean animate, @StateChangeReason int hideReason) {
+            @Nullable BottomSheetContent content,
+            boolean animate,
+            @StateChangeReason int hideReason) {
         if (mBottomSheet == null) return;
 
+        if (content != null) {
+            assumeNonNull(mContentQueue).remove(content);
+            // Ensure permanently hidden sheets are completely purged from the suppression cache.
+            if (mContentWhenSuppressed == content) {
+                mContentWhenSuppressed = null;
+            }
+        }
+
         if (content != mBottomSheet.getCurrentSheetContent()) {
-            mContentQueue.remove(content);
             return;
         }
 
@@ -518,18 +664,23 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     }
 
     @Override
-    public void hideContent(BottomSheetContent content, boolean animate) {
+    public void hideContent(@Nullable BottomSheetContent content, boolean animate) {
         hideContent(content, animate, StateChangeReason.NONE);
     }
 
     @Override
     public void expandSheet() {
+        expandSheet(true);
+    }
+
+    @Override
+    public void expandSheet(boolean animate) {
         if (mBottomSheet == null || mSuppressionTokens.hasTokens() || mBottomSheet.isHiding()) {
             return;
         }
 
         if (mBottomSheet.getCurrentSheetContent() == null) return;
-        mBottomSheet.setSheetState(SheetState.HALF, true);
+        mBottomSheet.setSheetState(SheetState.HALF, animate);
     }
 
     @Override
@@ -547,33 +698,41 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     /**
      * Show the next {@link BottomSheetContent} if it is available and peek the sheet. If no content
      * is available the sheet's content is set to null.
+     *
      * @param animate Whether the sheet should animate opened.
      */
     private void showNextContent(boolean animate) {
-        if (mBottomSheet.getSheetState() != SheetState.HIDDEN) {
+        if (assumeNonNull(mBottomSheet).getSheetState() != SheetState.HIDDEN) {
             throw new RuntimeException("Showing next content before sheet is hidden!");
         }
 
         // Make sure the container is visible as it is set to "gone" when there is no content.
-        mBottomSheetContainer.setVisibility(View.VISIBLE);
+        assumeNonNull(mBottomSheetContainer).setVisibility(View.VISIBLE);
 
-        if (mContentQueue.isEmpty()) {
+        if (assumeNonNull(mContentQueue).isEmpty()) {
             mBottomSheet.showContent(null);
+            adjustBottomSheetZAxis(mScrimVisible);
             return;
         }
 
         BottomSheetContent nextContent = mContentQueue.poll();
         if (mBottomSheet.getCurrentSheetContent() != null) {
-            mBottomSheet.getCurrentSheetContent().getBackPressStateChangedSupplier().removeObserver(
-                    mContentBackPressStateChangedObserver);
+            mBottomSheet
+                    .getCurrentSheetContent()
+                    .getBackPressStateChangedSupplier()
+                    .removeObserver(mContentBackPressStateChangedObserver);
         }
         if (nextContent != null) {
-            mContentBackPressStateChangedObserver =
-                    (contentWillHandleBackPress) -> updateBackPressStateChangedSupplier();
-            nextContent.getBackPressStateChangedSupplier().addObserver(
-                    mContentBackPressStateChangedObserver);
+            mKeyboardVisibilityDelegate.hideKeyboard(mBottomSheetContainer);
+            nextContent
+                    .getBackPressStateChangedSupplier()
+                    .addSyncObserverAndPostIfNonNull(mContentBackPressStateChangedObserver);
         }
         mBottomSheet.showContent(nextContent);
+        if (nextContent != null) {
+            recordBottomSheetShownMetric();
+        }
+        adjustBottomSheetZAxis(mScrimVisible);
         mBottomSheet.setSheetState(mBottomSheet.getOpeningState(), animate);
     }
 
@@ -581,7 +740,7 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     public void clearRequestsAndHide() {
         if (mBottomSheet == null) return;
 
-        clearRequests(mContentQueue.iterator());
+        clearRequests(assumeNonNull(mContentQueue).iterator());
 
         BottomSheetContent currentContent = mBottomSheet.getCurrentSheetContent();
         if (currentContent == null || !currentContent.hasCustomLifecycle()) {
@@ -591,8 +750,101 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
         mSheetStateBeforeSuppress = SheetState.NONE;
     }
 
+    @Override
+    public boolean isFullWidth() {
+        return assumeNonNull(mBottomSheet).isFullWidth();
+    }
+
+    @Override
+    @VisibleForTesting
+    public boolean isSmallScreen() {
+        return assumeNonNull(mBottomSheet).isSmallScreen();
+    }
+
+    @Override
+    public boolean isAnchoredToBottomControls() {
+        return mIsAnchoredToBottomControls;
+    }
+
+    @Override
+    public @Px int getContainerBottomMargin() {
+        return mBottomSheet != null ? mBottomSheet.getContainerBottomMargin() : 0;
+    }
+
+    @Override
+    public boolean hasBottomInset() {
+        Integer inset = mEdgeToEdgeBottomInsetSupplier.get();
+        return inset != null && inset != 0;
+    }
+
+    @Override
+    public @Nullable Integer getSheetBackgroundColor() {
+        if (mBottomSheet == null) {
+            return null;
+        }
+
+        BottomSheetContent content = getCurrentSheetContent();
+        if (content == null || !content.hasSolidBackgroundColor()) {
+            return null;
+        }
+
+        @ColorInt int overrideColor = content.getSheetBackgroundColorOverride();
+        if (overrideColor != Color.TRANSPARENT) {
+            return overrideColor;
+        }
+        return mBottomSheet.getSheetBackgroundColor();
+    }
+
+    @Override
+    public void onSheetBackgroundColorOverrideChanged() {
+        if (mBottomSheet == null) {
+            return;
+        }
+
+        mBottomSheet.onSheetBackgroundColorOverrideChanged();
+    }
+
+    @Override
+    public boolean isLargeFormFactorUiEnabled(@Nullable BottomSheetContent content) {
+        return isLargeFormFactor() && content != null && content.supportsLargeFormFactor();
+    }
+
+    private void onScrimVisibilityChanged(boolean visible) {
+        if (mScrimVisible == visible) return;
+        mScrimVisible = visible;
+        adjustBottomSheetZAxis(visible);
+    }
+
+    private void adjustBottomSheetZAxis(boolean scrimVisible) {
+        if (mBottomSheet == null) return;
+        assumeNonNull(mBottomSheetContainer);
+        BottomSheetContent content = mBottomSheet.getCurrentSheetContent();
+        // Apply coverage on presentation without waiting for `isSheetOpen()`. When opening from
+        // closed, `isSheetOpen()` is false during measurement and animation; covering immediately
+        // prevents layout jumps on open. Dismissal clears `content`, restoring margins.
+        boolean shouldCover =
+                (scrimVisible && mBottomSheet.isSheetOpen())
+                        || (content != null && content.coversBottomControls());
+        if (shouldCover) {
+            // Scrimmed bottom sheet or sheet requesting to cover bottom controls. Draw the bottom
+            // sheet container on top of all sibling views, originating from the bottom of the
+            // screen.
+            mIsAnchoredToBottomControls = false;
+            mBottomSheetContainer.setZ(1.0f);
+            mBottomSheet.setBottomMargin(0);
+        } else {
+            // Unscrimmed bottom sheet. Draw the bottom sheet container in its "natural" order; i.e.
+            // in the order specified in res_app/layout/main.xml. Draw originating from the top of
+            // the bottom controls.
+            mIsAnchoredToBottomControls = true;
+            mBottomSheetContainer.setZ(0.0f);
+            mBottomSheet.setBottomMargin(mBottomControlsOffset);
+        }
+    }
+
     /**
      * Remove all contents from {@code iterator} that don't have a custom lifecycle.
+     *
      * @param iterator The iterator whose items must be removed.
      */
     private void clearRequests(Iterator<BottomSheetContent> iterator) {
@@ -604,15 +856,34 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
     }
 
     /**
-     * The bottom sheet cannot change content while it is open. If the user has the bottom sheet
-     * open, they are currently engaged in a task and shouldn't be interrupted.
+     * The bottom sheet cannot change content while it is open, unless the current content returns
+     * true from canSuppressInAnyState(). If the user has the bottom sheet open with content that is
+     * not suppressable, they are currently engaged in a task and shouldn't be interrupted.
+     *
      * @return Whether the sheet currently supports switching its content.
      */
-    private boolean canBottomSheetSwitchContent() {
-        return !mBottomSheet.isSheetOpen();
+    private boolean canBottomSheetSwitchContent(BottomSheetContent nextContent) {
+        BottomSheetContent currentContent = assumeNonNull(mBottomSheet).getCurrentSheetContent();
+        if (BottomSheetFeatureMap.sBottomSheetTypes.isEnabled()) {
+            BottomSheetType currentType = assumeNonNull(currentContent).getSheetType();
+            BottomSheetType nextType = nextContent.getSheetType();
+            return nextType.canSupersede(currentType);
+        }
+
+        // Legacy fallback:
+        if (nextContent.getPriority() == BottomSheetContent.ContentPriority.COBROWSE) {
+            return true;
+        }
+        if (assumeNonNull(currentContent).canBeSuppressed(nextContent)) {
+            return true;
+        }
+        if (nextContent.getPriority() < currentContent.getPriority()
+                && !mBottomSheet.isSheetOpen()) {
+            return true;
+        }
+        return false;
     }
 
-    @VisibleForTesting
     boolean hasSuppressionTokensForTesting() {
         return mSuppressionTokens.hasTokens();
     }
@@ -622,11 +893,65 @@ class BottomSheetControllerImpl implements ManagedBottomSheetController {
      * and when there are no suppression tokens, false otherwise.
      */
     private void updateBackPressStateChangedSupplier() {
-        mBackPressStateChangedSupplier.set(mBottomSheet != null && !mSuppressionTokens.hasTokens()
-                && mBottomSheet.getCurrentSheetContent() != null
-                && (Boolean.TRUE.equals(mBottomSheet.getCurrentSheetContent()
-                                                .getBackPressStateChangedSupplier()
-                                                .get())
-                        || mBottomSheet.isSheetOpen()));
+        mBackPressStateChangedSupplier.set(
+                mBottomSheet != null
+                        && !mSuppressionTokens.hasTokens()
+                        && mBottomSheet.getCurrentSheetContent() != null
+                        && (mBottomSheet
+                                        .getCurrentSheetContent()
+                                        .getBackPressStateChangedSupplier()
+                                        .get()
+                                || mBottomSheet.isSheetOpen()));
+    }
+
+    private void recordBottomSheetShownMetric() {
+        RecordHistogram.recordBooleanHistogram("Android.BottomSheet.Shown", true);
+    }
+
+    private void recordBottomSheetClosedMetric(@StateChangeReason int reason) {
+        RecordHistogram.recordEnumeratedHistogram(
+                "Android.BottomSheet.Closed", reason, StateChangeReason.MAX_VALUE + 1);
+    }
+
+    private void onScrimClicked() {
+        if (!assumeNonNull(mBottomSheet).isSheetOpen()) return;
+        mBottomSheet.setSheetState(
+                mBottomSheet.getMinSwipableSheetState(), true, StateChangeReason.TAP_SCRIM);
+    }
+
+    void runSheetInitializerForTesting() {
+        assumeNonNull(mSheetInitializer).run();
+    }
+
+    private int comparePrecedence(BottomSheetContent a, BottomSheetContent b) {
+        if (BottomSheetFeatureMap.sBottomSheetTypes.isEnabled()) {
+            BottomSheetType typeA = a.getSheetType();
+            BottomSheetType typeB = b.getSheetType();
+            return BottomSheetType.compare(typeA, typeB);
+        }
+        return Integer.compare(a.getPriority(), b.getPriority());
+    }
+
+    private boolean canIncomingSupersede(
+            @Nullable BottomSheetContent current, BottomSheetContent incoming) {
+        if (current == null) return true;
+        if (BottomSheetFeatureMap.sBottomSheetTypes.isEnabled()) {
+            BottomSheetType currentType = current.getSheetType();
+            BottomSheetType incomingType = incoming.getSheetType();
+            return incomingType.canSupersede(currentType);
+        }
+        return incoming.getPriority() < current.getPriority();
+    }
+
+    private boolean shouldBlockRequeueOnSwap(BottomSheetContent nextContent) {
+        if (BottomSheetFeatureMap.sBottomSheetTypes.isEnabled()) {
+            BottomSheetType type = nextContent.getSheetType();
+            return type.isPersistent();
+        }
+        return nextContent.getPriority() == BottomSheetContent.ContentPriority.COBROWSE;
+    }
+
+    private boolean shouldShowScrim(@Nullable BottomSheetContent content) {
+        return !BottomSheetUtils.isSheetNonModal(content);
     }
 }

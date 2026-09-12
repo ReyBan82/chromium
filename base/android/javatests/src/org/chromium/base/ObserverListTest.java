@@ -17,9 +17,7 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
-/**
- * Tests for (@link ObserverList}.
- */
+/** Tests for (@link ObserverList}. */
 @RunWith(BaseJUnit4ClassRunner.class)
 public class ObserverListTest {
     interface Observer {
@@ -40,9 +38,7 @@ public class ObserverListTest {
         }
     }
 
-    /**
-     * An observer which add a given Observer object to the list when observe is called.
-     */
+    /** An observer which add a given Observer object to the list when observe is called. */
     private static class FooAdder implements Observer {
         private final ObserverList<Observer> mList;
         private final Observer mLucky;
@@ -58,9 +54,7 @@ public class ObserverListTest {
         }
     }
 
-    /**
-     * An observer which removes a given Observer object from the list when observe is called.
-     */
+    /** An observer which removes a given Observer object from the list when observe is called. */
     private static class FooRemover implements Observer {
         private final ObserverList<Observer> mList;
         private final Observer mDoomed;
@@ -181,6 +175,25 @@ public class ObserverListTest {
             noElementExceptionThrown = true;
         }
         Assert.assertTrue(noElementExceptionThrown);
+    }
+
+    @Test
+    @SmallTest
+    @Feature({"Android-AppBase"})
+    public void testIteratorHasNextMultipleTimes() {
+        ObserverList<Integer> observerList = new ObserverList<Integer>();
+        observerList.addObserver(5);
+        observerList.addObserver(10);
+
+        Iterator<Integer> it = observerList.iterator();
+        Assert.assertTrue(it.hasNext());
+        Assert.assertTrue(it.hasNext());
+        Assert.assertEquals(5, (int) it.next());
+        Assert.assertTrue(it.hasNext());
+        Assert.assertTrue(it.hasNext());
+        Assert.assertEquals(10, (int) it.next());
+        Assert.assertFalse(it.hasNext());
+        Assert.assertFalse(it.hasNext());
     }
 
     @Test
@@ -336,5 +349,47 @@ public class ObserverListTest {
         observerList.removeObserver(new Object());
         Assert.assertEquals(0, observerList.size());
         Assert.assertTrue(observerList.isEmpty());
+    }
+
+    @Test
+    @SmallTest
+    @Feature({"Android-AppBase"})
+    public void testLazyAllocation() {
+        ObserverList<Object> observerList = new ObserverList<Object>();
+        Assert.assertNull(observerList.mObservers);
+
+        Object a = new Object();
+        observerList.addObserver(a);
+        Assert.assertNotNull(observerList.mObservers);
+
+        observerList.removeObserver(a);
+        Assert.assertNull(observerList.mObservers);
+
+        observerList.addObserver(a);
+        Assert.assertNotNull(observerList.mObservers);
+        observerList.clear();
+        Assert.assertNull(observerList.mObservers);
+    }
+
+    @Test
+    @SmallTest
+    @Feature({"Android-AppBase"})
+    public void testClearWhileIterating() {
+        ObserverList<Observer> observerList = new ObserverList<Observer>();
+        Foo a = new Foo(1);
+        Foo b = new Foo(1);
+        observerList.addObserver(a);
+        observerList.addObserver(b);
+
+        for (Observer obs : observerList) {
+            obs.observe(5);
+            observerList.clear();
+        }
+
+        // a should be observed once, but b skipped because clear() nulled out elements during
+        // iteration.
+        Assert.assertEquals(5, a.mTotal);
+        Assert.assertEquals(0, b.mTotal);
+        Assert.assertNull(observerList.mObservers);
     }
 }

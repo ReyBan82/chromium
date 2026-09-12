@@ -13,14 +13,13 @@
 
 namespace views {
 
-class InfoBubbleFrame;
 class Label;
 
 // Class to create and manage an information bubble for errors or tooltips.
 class VIEWS_EXPORT InfoBubble : public BubbleDialogDelegateView {
- public:
-  METADATA_HEADER(InfoBubble);
+  METADATA_HEADER(InfoBubble, BubbleDialogDelegateView)
 
+ public:
   InfoBubble(View* anchor,
              BubbleBorder::Arrow arrow,
              const std::u16string& message);
@@ -37,11 +36,9 @@ class VIEWS_EXPORT InfoBubble : public BubbleDialogDelegateView {
   void Hide();
 
   // BubbleDialogDelegateView:
-  std::unique_ptr<NonClientFrameView> CreateNonClientFrameView(
-      Widget* widget) override;
-  gfx::Size CalculatePreferredSize() const override;
-  void OnWidgetBoundsChanged(Widget* widget,
-                             const gfx::Rect& new_bounds) override;
+  std::unique_ptr<FrameView> CreateFrameView(Widget* widget) override;
+  gfx::Size CalculatePreferredSize(
+      const SizeBounds& available_size) const override;
 
   void set_preferred_width(int preferred_width) {
     preferred_width_ = preferred_width;
@@ -53,7 +50,6 @@ class VIEWS_EXPORT InfoBubble : public BubbleDialogDelegateView {
   // Updates the position of the bubble.
   void UpdatePosition();
 
-  raw_ptr<InfoBubbleFrame> frame_ = nullptr;
   raw_ptr<Label> label_ = nullptr;
 
   // The width this bubble prefers to be. Default is 0 (no preference).

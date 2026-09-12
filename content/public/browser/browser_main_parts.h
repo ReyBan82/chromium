@@ -7,7 +7,6 @@
 
 #include <memory>
 
-#include "base/functional/callback.h"
 #include "base/types/strong_alias.h"
 #include "content/common/content_export.h"
 
@@ -131,7 +130,7 @@ class CONTENT_EXPORT BrowserMainParts {
   virtual void PreCreateMainMessageLoop() {}
   virtual void PostCreateMainMessageLoop() {}
   virtual int PreCreateThreads();
-  virtual void PostCreateThreads() {}
+  virtual int PostCreateThreads();
   virtual int PreMainMessageLoopRun();
 
   // This method returns true by default, telling InterceptMainMessageLoopRun

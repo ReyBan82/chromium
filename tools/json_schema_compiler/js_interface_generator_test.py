@@ -59,6 +59,7 @@ namespace fakeApi {
     // |callback| : The callback which will most assuredly in all cases be
     // called; that is, of course, iff such a callback was provided and is
     // not at all null.
+    [doesNotSupportPromises="Multi-parameter callback"]
     static void bazGreek(optional BazGreekCallback callback);
 
     [deprecated="Use a new method."] static DOMString returnString();
@@ -72,7 +73,7 @@ namespace fakeApi {
 """
 
 # The output we expect from our fake idl file.
-fake_idl_output = ("""// Copyright %s The Chromium Authors
+fake_idl_output = """// Copyright %s The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -89,7 +90,7 @@ FakeApi.prototype = {
    * Does something exciting! And what's more, this is a multiline function
    * comment! It goes onto multiple lines!
    * @param {!chrome.fakeApi.Baz} baz The baz to use.
-   * @param {function(): void} callback
+   * @param {function(): void=} callback
    * @see https://developer.chrome.com/extensions/fakeApi#method-doSomething
    */
   doSomething: function(baz, callback) {},
@@ -109,8 +110,11 @@ FakeApi.prototype = {
  * @type {!ChromeEvent}
  * @see https://developer.chrome.com/extensions/fakeApi#event-onTrapDetected
  */
-FakeApi.prototype.onTrapDetected;""" % (datetime.now().year,
-                                        sys.argv[0].replace('\\', '/')))
+FakeApi.prototype.onTrapDetected;""" % (
+  datetime.now().year,
+  sys.argv[0].replace('\\', '/'),
+)
+
 
 class JsExternGeneratorTest(unittest.TestCase):
   def _GetNamespace(self, fake_content, filename):
@@ -120,13 +124,13 @@ class JsExternGeneratorTest(unittest.TestCase):
     return m.AddNamespace(api_def[0], filename)
 
   def setUp(self):
-    self.maxDiff = None # Lets us see the full diff when inequal.
+    self.maxDiff = None  # Lets us see the full diff when inequal.
 
   def testBasic(self):
     namespace = self._GetNamespace(fake_idl, 'fake_api.idl')
     self.assertMultiLineEqual(
-        fake_idl_output,
-        JsInterfaceGenerator().Generate(namespace).Render())
+      fake_idl_output, JsInterfaceGenerator().Generate(namespace).Render()
+    )
 
 
 if __name__ == '__main__':

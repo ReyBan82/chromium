@@ -4,41 +4,111 @@
 
 package org.chromium.chrome.browser.preferences;
 
+import org.chromium.base.shared_preferences.KeyPrefix;
 import org.chromium.build.annotations.CheckDiscard;
+import org.chromium.build.annotations.NullMarked;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 /**
- * These values have been used as SharedPreferences keys in the past and should not be reused.
- * Do not remove values from this list.
+ * These values have been used as SharedPreferences keys in the past and should not be reused. Do
+ * not remove values from this list.
+ *
+ * <p>TODO(crbug.com/40282028): Rename this to reflect that deprecated keys from all registries
+ * should rest here, not just Chrome-layer keys.
  */
 @CheckDiscard("Validation is performed in tests and in debug builds.")
+@NullMarked
 public class DeprecatedChromePreferenceKeys {
     static List<String> getKeysForTesting() {
-        // clang-format off
         return Arrays.asList(
                 "AUTOFILL_ASSISTANT_SKIP_INIT_SCREEN",
                 "BANDWIDTH_REDUCTION_PROXY_ENABLED",
                 "BANDWIDTH_REDUCTION_FIRST_ENABLED_TIME",
                 "Chrome.AccountPickerBottomSheet.ShownCount",
+                "Chrome.AddressBar.SettingsClicked",
+                "Chrome.AddressBar.SettingsViewCount",
+                "Chrome.Appearance.SettingsClicked",
+                "Chrome.Appearance.SettingsViewCount",
+                "Chrome.Assistant.Enabled",
+                "Chrome.AssistantVoiceConsentTapsCounter.ConsentTapsCount",
                 "Chrome.AutofillAssistant.NumberOfLiteScriptsCanceled",
+                "Chrome.AuxiliarySearch.IsSchemaV2Set",
+                "Chrome.AuxiliarySearchModule.Impression",
+                "Chrome.AuxiliarySearchModule.UserResponded",
+                "Chrome.ContinuousSearch.DismissalCount",
+                "Chrome.ContextMenu.SearchWithGoogleLensClicked",
+                "Chrome.ContextMenu.ShopImageWithGoogleLensClicked",
+                "Chrome.Contextmenu.OpenImageInEphemeralTabClicked",
+                "Chrome.Contextmenu.OpenInEphemeralTabClicked",
+                "Chrome.Cryptid.LastRenderTimestamp",
+                "Chrome.FindsNotifications.OptInDeclined",
+                "Chrome.FirstRun.FieldTrialEnabled",
+                "Chrome.FirstRun.VariationFieldTrialGroup",
                 "Chrome.Flags.PaintPreviewTestEnabled",
                 "Chrome.Flags.SafeBool.*",
                 "Chrome.Flags.SafeDouble.*",
                 "Chrome.Flags.SafeInt.*",
+                "Chrome.Flags.SafeModeEnabled",
                 "Chrome.Flags.SafeString.*",
                 "Chrome.Flags.SafeValuesVersion",
+                "Chrome.FullscreenSigninPromo.NextShowTime",
+                "Chrome.Glic.ButtonPinned",
+                "Chrome.IsolatedSplits.VersionCode",
+                "Chrome.MultiInstance.ClosedByUser.*",
+                "Chrome.MultiWindow.RestorationMessageShown",
+                "Chrome.MultiWindowMode.Activities.*",
+                "Chrome.MultiWindowMode.ActivityCount.*",
+                "Chrome.MultiWindowMode.CycleStartTime",
+                "Chrome.MultiWindowMode.DurationMs.*",
+                "Chrome.MultiWindowMode.StartTime.*",
+                "Chrome.MultiWindowMode.StartTime2.*",
+                "Chrome.NtpCustomization.BackgroundImageLandscapeMatrix",
+                "Chrome.NtpCustomization.BackgroundImagePortraitMatrix",
+                "Chrome.NtpCustomization.MainBottomSheetShown",
                 "Chrome.OfflineMeasurements.HttpProbeResultsList",
                 "Chrome.OfflineMeasurements.IsAirplaneModeEnabledList",
                 "Chrome.OfflineMeasurements.IsRoaming",
                 "Chrome.OfflineMeasurements.TimeBetweenChecksMillisList",
                 "Chrome.OfflineMeasurements.UserStateList",
+                "Chrome.PriceTracking.PriceAlerts",
+                "Chrome.PriceTracking.PriceAlertsShowCount",
                 "Chrome.PriceTracking.PriceDropAlerts",
+                "Chrome.Querytiles.RecentMvClicks",
+                "Chrome.Querytiles.RecentQueryTileClicks",
+                "Chrome.Querytiles.NextDecisionTime",
+                "Chrome.Querytiles.ShowOnNTP",
+                "Chrome.Querytiles.ShowSegmentationResult",
+                "Chrome.QueryTiles.ShownOnStartSurface",
+                "Chrome.RequestDesktopSiteExceptionsDowngrade.GlobalSettingEnabled",
+                "Chrome.RequestDesktopSiteExceptionsDowngrade.TabSettingSet",
+                "Chrome.RequestDesktopSiteGlobalSetting.DefaultEnabledCohort",
                 "Chrome.RequestDesktopSiteGlobalSetting.DefaultEnabledShowMessage",
+                "Chrome.RequestDesktopSiteGlobalSetting.DefaultOnCohortDisplaySpec",
+                "Chrome.RequestDesktopSiteGlobalSetting.OptInMessageCohort",
                 "Chrome.RequestDesktopSiteGlobalSetting.OptInMessageShown",
+                "Chrome.SearchResumptionModule.Collapse",
+                "Chrome.Segmentation.ShowQueryTiles",
                 "Chrome.SigninPromo.NTPImpressions",
+                "Chrome.StartSurface.IncognitoTabCount",
+                "Chrome.StartSurface.RegularTabCount",
+                "Chrome.Tab.ArchiveIphShowing",
+                "Chrome.Tab.ShowArchiveTabDialogIPH",
+                "Chrome.Tab.ShowTabGroupCreationDialog",
+                "Chrome.TabTearing.MaxInstancesFailureCount",
+                "Chrome.TabTearing.MaxInstancesFailureStartTimeMs",
+                "Chrome.TipsNotifications.ChannelEnabled",
+                "Chrome.TipsNotifications.OptInShown",
+                "Chrome.UMA.OnPreCreateCounter",
+                "Chrome.UMA.OnResumeCounter",
+                "Chrome.VerticalTabs.LayoutToggleViewCount",
+                "Chrome.VideoTutorials.ShareUrls",
+                "Chrome.WebFeed.IntroLastShownTimeMs",
+                "Chrome.WebFeed.IntroWebFeedIdShownTimeMs.*",
+                "Chrome.WebFeed.IntroWebFeedIdShownCount.*",
+                "LocaleManager_USR_TYPE",
                 "PersistedNotificationId",
                 "PhysicalWeb.ActivityReferral",
                 "PhysicalWeb.HasDeferredMetrics",
@@ -57,12 +127,15 @@ public class DeprecatedChromePreferenceKeys {
                 "PhysicalWeb.UrlSelected",
                 "PrefMigrationVersion",
                 "ServiceManagerFeatures",
+                "accessibility_tab_switcher",
+                "adaptive_toolbar_enabled",
                 "allow_low_end_device_ui",
                 "allow_prefetch",
                 "allow_starting_service_manager_only",
                 "bookmark_search_history",
                 "bottom_toolbar_enabled",
                 "bottom_toolbar_variation",
+                "cache_activity_taskid_enabled",
                 "cellular_experiment",
                 "chrome_home_enabled_date",
                 "chrome_home_info_promo_shown",
@@ -72,6 +145,7 @@ public class DeprecatedChromePreferenceKeys {
                 "chrome_modern_design_enabled",
                 "chromium.invalidations.uuid",
                 "click_to_call_open_dialer_directly",
+                "command_line_on_non_rooted_enabled",
                 "contextual_search_all_time_open_count",
                 "contextual_search_all_time_tap_count",
                 "contextual_search_all_time_tap_quick_answer_count",
@@ -101,7 +175,11 @@ public class DeprecatedChromePreferenceKeys {
                 "displayed_data_reduction_promo_version",
                 "displayed_data_reduction_snackbar_promo_saved_bytes",
                 "darken_websites_enabled",
+                "enhanced_bookmark_signin_promo_show_count",
+                "first_run_signin_complete",
+                "first_run_tos_accepted",
                 "fre_promo_opt_out",
+                "grid_tab_switcher_enabled",
                 "home_page_button_force_enabled",
                 "homepage_tile_enabled",
                 "inflate_toolbar_on_background_thread",
@@ -109,6 +187,8 @@ public class DeprecatedChromePreferenceKeys {
                 "labeled_bottom_toolbar_enabled",
                 "last_shared_class_name",
                 "last_shared_package_name",
+                "metrics_reporting",
+                "network_service_warm_up_enabled",
                 "night_mode_available",
                 "night_mode_cct_available",
                 "night_mode_default_to_light",
@@ -124,20 +204,27 @@ public class DeprecatedChromePreferenceKeys {
                 "prefetch_notification_offline_counter",
                 "prefetch_notification_shown_time",
                 "prioritize_bootstrap_tasks",
+                "reached_code_profiler_enabled",
+                "reached_code_profiler_group",
+                "reached_code_sampling_interval",
                 "service_manager_for_background_prefetch",
                 "service_manager_for_download_resumption",
+                "settings_personalized_signin_promo_dismissed",
                 "signin_promo_impressions_count_bookmarks",
                 "signin_promo_impressions_count_settings",
                 "sole_integration_enabled",
+                "start_surface_enabled",
                 "start_surface_single_pane_enabled",
+                "swap_pixel_format_to_fix_convert_from_translucent",
+                "tab_group_android_enabled",
                 "tab_persistent_store_task_runner_enabled",
+                "user_font_scale_factor",
+                "user_set_force_enable_zoom",
                 "webapk_number_of_uninstalls",
-                "website_settings_filter"
-        );
-        // clang-format on
+                "website_settings_filter");
     }
 
     static List<KeyPrefix> getPrefixesForTesting() {
-        return Collections.EMPTY_LIST;
+        return Collections.emptyList();
     }
 }

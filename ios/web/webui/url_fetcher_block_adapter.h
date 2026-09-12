@@ -8,6 +8,8 @@
 #import <Foundation/Foundation.h>
 
 #include <memory>
+#include <optional>
+#include <string>
 
 #include "base/memory/scoped_refptr.h"
 #include "url/gurl.h"
@@ -22,7 +24,8 @@ namespace web {
 // Class for use of URLLoader from Objective-C with a completion handler block.
 class URLFetcherBlockAdapter;
 // Block type for URLFetcherBlockAdapter callbacks.
-typedef void (^URLFetcherBlockAdapterCompletion)(NSData*,
+typedef void (^URLFetcherBlockAdapterCompletion)(NSData* data,
+                                                 NSDictionary* headers,
                                                  URLFetcherBlockAdapter*);
 
 // Class to manage retrieval of WebUI resources.
@@ -42,7 +45,7 @@ class URLFetcherBlockAdapter {
   GURL getUrl() { return url_; }
 
  protected:
-  void OnURLLoadComplete(std::unique_ptr<std::string> response_body);
+  void OnURLLoadComplete(std::optional<std::string> response_body);
 
  private:
   // The URL to fetch.

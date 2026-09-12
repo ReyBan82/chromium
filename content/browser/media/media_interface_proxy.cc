@@ -6,6 +6,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 
@@ -13,16 +14,19 @@
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
 #include "base/unguessable_token.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
+#include "content/browser/media/cdm_storage_common.h"
+#include "content/browser/media/media_web_contents_observer.h"
 #include "content/browser/renderer_host/render_frame_host_delegate.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/public/browser/media_service.h"
 #include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/security_principal.h"
 #include "content/public/browser/service_process_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -34,22 +38,22 @@
 #include "media/mojo/buildflags.h"
 #include "media/mojo/mojom/frame_interface_factory.mojom.h"
 #include "media/mojo/mojom/media_service.mojom.h"
-#include "media/mojo/mojom/stable/stable_video_decoder.mojom.h"
+#include "media/mojo/mojom/renderer_extensions.mojom.h"
 #include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "mojo/public/cpp/bindings/remote_set.h"
 
-#if BUILDFLAG(ENABLE_MOJO_CDM)
+#if BUILDFLAG(ENABLE_CDM_PROVISION_FETCHER)
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/provision_fetcher_impl.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/storage_partition.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
-#endif
+#endif  // BUILDFLAG(ENABLE_CDM_PROVISION_FETCHER)
 
 #if BUILDFLAG(ENABLE_LIBRARY_CDMS)
 #include "base/feature_list.h"
 #include "base/metrics/histogram_macros.h"
-#include "content/browser/media/media_license_manager.h"
+#include "content/browser/media/cdm_storage_manager.h"
 #include "media/base/key_system_names.h"
 #include "media/mojo/mojom/cdm_service.mojom.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
@@ -62,21 +66,25 @@
 #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(ENABLE_LIBRARY_CDMS)
 
 #if BUILDFLAG(IS_WIN)
+#include "base/win/windows_handle_util.h"
+#include "content/browser/media/content_protection_window.h"
 #include "content/browser/media/dcomp_surface_registry_broker.h"
+#include "content/public/browser/render_widget_host_view.h"
+#include "media/base/media_switches.h"
 #include "media/base/win/mf_feature_checks.h"
 #include "media/cdm/win/media_foundation_cdm.h"
+#include "ui/display/screen.h"
 #endif  // BUILDFLAG(IS_WIN)
 
 #if BUILDFLAG(IS_ANDROID)
-#include "content/browser/media/android/media_player_renderer.h"
 #include "content/browser/media/flinging_renderer.h"
 #include "media/mojo/services/mojo_renderer_service.h"  // nogncheck
 #endif
 
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-#include "content/public/browser/stable_video_decoder_factory.h"
+#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
 #include "media/base/media_switches.h"
-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+#include "mojo/public/cpp/bindings/message.h"
+#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
 
 namespace content {
 
@@ -140,6 +148,16 @@ media::mojom::MediaService& GetSecondaryMediaService() {
   return *remote->get();
 }
 
+// The remote process may drop the callback (e.g. in case of crash, or CDM
+// loading/initialization failure). Doing it here instead of in the renderer
+// process because the browser is trusted.
+media::mojom::InterfaceFactory::CreateCdmCallback WrapCreateCdmCallback(
+    media::mojom::InterfaceFactory::CreateCdmCallback callback) {
+  return mojo::WrapCallbackWithDefaultInvokeIfNotRun(
+      std::move(callback), mojo::NullRemote(), nullptr,
+      media::CreateCdmStatus::kDisconnectionError);
+}
+
 class FrameInterfaceFactoryImpl : public media::mojom::FrameInterfaceFactory,
                                   public WebContentsObserver {
  public:
@@ -152,15 +170,16 @@ class FrameInterfaceFactoryImpl : public media::mojom::FrameInterfaceFactory,
 
   // media::mojom::FrameInterfaceFactory implementation:
 
+#if BUILDFLAG(ENABLE_CDM_PROVISION_FETCHER)
   void CreateProvisionFetcher(
       mojo::PendingReceiver<media::mojom::ProvisionFetcher> receiver) override {
-#if BUILDFLAG(ENABLE_MOJO_CDM)
-    ProvisionFetcherImpl::Create(render_frame_host_->GetBrowserContext()
+    ProvisionFetcherImpl::Create(render_frame_host_,
+                                 render_frame_host_->GetBrowserContext()
                                      ->GetDefaultStoragePartition()
                                      ->GetURLLoaderFactoryForBrowserProcess(),
                                  std::move(receiver));
-#endif
   }
+#endif  // BUILDFLAG(ENABLE_CDM_PROVISION_FETCHER)
 
   void CreateCdmStorage(
       mojo::PendingReceiver<media::mojom::CdmStorage> receiver) override {
@@ -168,17 +187,14 @@ class FrameInterfaceFactoryImpl : public media::mojom::FrameInterfaceFactory,
     if (cdm_type_.is_zero())
       return;
 
-    MediaLicenseManager* media_license_manager =
-        static_cast<StoragePartitionImpl*>(
-            render_frame_host_->GetStoragePartition())
-            ->GetMediaLicenseManager();
-    DCHECK(media_license_manager);
-
     auto storage_key =
-        static_cast<RenderFrameHostImpl*>(render_frame_host_)->storage_key();
-    media_license_manager->OpenCdmStorage(
-        MediaLicenseManager::BindingContext(storage_key, cdm_type_),
-        std::move(receiver));
+        static_cast<RenderFrameHostImpl*>(render_frame_host_)->GetStorageKey();
+
+    CdmStorageManager* cdm_storage_manager = static_cast<CdmStorageManager*>(
+        render_frame_host_->GetStoragePartition()->GetCdmStorageDataModel());
+
+    cdm_storage_manager->OpenCdmStorage(
+        CdmStorageBindingContext(storage_key, cdm_type_), std::move(receiver));
 #endif
   }
 
@@ -195,7 +211,7 @@ class FrameInterfaceFactoryImpl : public media::mojom::FrameInterfaceFactory,
       mojo::PendingReceiver<media::mojom::DCOMPSurfaceRegistry> receiver)
       override {
     if (media::SupportMediaFoundationPlayback()) {
-      // TODO(crbug.com/1233379): Pass IO task runner and remove the PostTask()
+      // TODO(crbug.com/40191522): Pass IO task runner and remove the PostTask()
       // in DCOMPSurfaceRegistryBroker after bug fixed.
       mojo::MakeSelfOwnedReceiver(
           std::make_unique<DCOMPSurfaceRegistryBroker>(), std::move(receiver));
@@ -207,6 +223,60 @@ class FrameInterfaceFactoryImpl : public media::mojom::FrameInterfaceFactory,
     return std::move(callback).Run(
         render_frame_host_->GetLastCommittedOrigin());
   }
+
+#if BUILDFLAG(IS_WIN)
+  // Returns the frame's screen rect in physical pixels.
+  // Used for Media Foundation GPU adapter selection.
+  void GetFrameScreenRect(GetFrameScreenRectCallback callback) override {
+    gfx::Rect frame_rect;
+
+    // Use the outermost main frame's view so that things like cross-origin
+    // iframes resolve to the top-level window, whose view has a native window
+    // suitable for DIP-to-physical-pixel conversion. The outermost main frame's
+    // view should always have a native window; a few scenarios where this could
+    // fail are during shutdown or in headless/test environments.
+    auto* main_rfh = render_frame_host_->GetOutermostMainFrame();
+    if (auto* view = main_rfh->GetView()) {
+      // GetViewBounds() returns DIP (Device Independent Pixels).
+      // Convert to physical screen pixels for Windows APIs like
+      // CreateWindowEx.
+      frame_rect = view->GetViewBounds();
+      if (auto* native_view = view->GetNativeView()) {
+        frame_rect = display::Screen::Get()->DIPToScreenRectInWindow(
+            native_view, frame_rect);
+      }
+    }
+    std::move(callback).Run(frame_rect);
+  }
+
+  // Returns a browser-owned HWND parented to the frame's top-level browser
+  // window, transmitted as `uint32`. The HWND lives in
+  // `content_protection_window_` and is created lazily on the first call
+  // so frames that never use Media Foundation hardware DRM pay no cost.
+  // Returns 0 if the feature flag is disabled or if the HWND
+  // cannot be created (headless mode, frame torn down, etc.).
+  void GetContentProtectionWindow(
+      GetContentProtectionWindowCallback callback) override {
+    if (!base::FeatureList::IsEnabled(
+            media::kMediaFoundationMultiGpuAdapterSelection)) {
+      std::move(callback).Run(0u);
+      return;
+    }
+    if (!content_protection_window_.has_value()) {
+      ContentProtectionWindowOrStatus result =
+          ContentProtectionWindow::Create(render_frame_host_);
+      base::UmaHistogramEnumeration(
+          "Media.EME.ContentProtectionWindow.CreateStatus",
+          result.has_value() ? ContentProtectionWindowStatus::kSuccess
+                             : result.error());
+      content_protection_window_ =
+          result.has_value() ? std::move(result).value() : nullptr;
+    }
+    auto* window = content_protection_window_->get();
+    std::move(callback).Run(
+        base::win::HandleToUint32(window ? window->hwnd() : nullptr));
+  }
+#endif  // BUILDFLAG(IS_WIN)
 
   void BindEmbedderReceiver(mojo::GenericPendingReceiver receiver) override {
     GetContentClient()->browser()->BindMediaServiceReceiver(
@@ -227,8 +297,58 @@ class FrameInterfaceFactoryImpl : public media::mojom::FrameInterfaceFactory,
 
 #if BUILDFLAG(IS_WIN)
   mojo::RemoteSet<media::mojom::MuteStateObserver> site_mute_observers_;
+
+  // `has_value()` indicates `ContentProtectionWindow::Create()` has been
+  // attempted. The inner pointer is null if creation failed. This prevents
+  // retrying creation (and re-recording the UMA) on every call.
+  std::optional<std::unique_ptr<ContentProtectionWindow>>
+      content_protection_window_;
 #endif  // BUILDFLAG(IS_WIN)
 };
+
+#if BUILDFLAG(IS_WIN)
+// Proxies the MediaFoundationRendererExtension to observe the lifetime of the
+// MediaFoundationRenderer in the utility process. When either the renderer
+// or the utility process disconnects, the audibility bypass grant is revoked.
+class MediaFoundationRendererExtensionProxy
+    : public media::mojom::MediaFoundationRendererExtension {
+ public:
+  MediaFoundationRendererExtensionProxy(
+      mojo::PendingRemote<media::mojom::MediaFoundationRendererExtension>
+          target_remote,
+      AudibilityBypassTracker::ScopedGrant grant)
+      : target_remote_(std::move(target_remote)), grant_(std::move(grant)) {
+    target_remote_.set_disconnect_handler(base::BindOnce(
+        &MediaFoundationRendererExtensionProxy::OnTargetDisconnect,
+        base::Unretained(this)));
+  }
+
+  ~MediaFoundationRendererExtensionProxy() override = default;
+
+  // media::mojom::MediaFoundationRendererExtension implementation.
+  void GetDCOMPSurface(GetDCOMPSurfaceCallback callback) override {
+    target_remote_->GetDCOMPSurface(std::move(callback));
+  }
+  void SetVideoStreamEnabled(bool enabled) override {
+    target_remote_->SetVideoStreamEnabled(enabled);
+  }
+  void SetOutputRect(const gfx::Rect& rect,
+                     SetOutputRectCallback callback) override {
+    target_remote_->SetOutputRect(rect, std::move(callback));
+  }
+
+ private:
+  void OnTargetDisconnect() {
+    // The utility process disconnected (MediaFoundationRenderer destroyed).
+    // Revoke the grant by resetting it.
+    grant_.RunAndReset();
+    target_remote_.reset();
+  }
+
+  mojo::Remote<media::mojom::MediaFoundationRendererExtension> target_remote_;
+  AudibilityBypassTracker::ScopedGrant grant_;
+};
+#endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace
 
@@ -273,8 +393,7 @@ void MediaInterfaceProxy::CreateAudioDecoder(
 
 void MediaInterfaceProxy::CreateVideoDecoder(
     mojo::PendingReceiver<media::mojom::VideoDecoder> receiver,
-    mojo::PendingRemote<media::stable::mojom::StableVideoDecoder>
-        dst_video_decoder) {
+    mojo::PendingRemote<media::mojom::VideoDecoder> dst_video_decoder) {
   DCHECK(thread_checker_.CalledOnValidThread());
   // The browser process cannot act as a proxy for video decoding and clients
   // should not attempt to use it that way.
@@ -284,17 +403,28 @@ void MediaInterfaceProxy::CreateVideoDecoder(
   if (!factory)
     return;
 
-  mojo::PendingRemote<media::stable::mojom::StableVideoDecoder>
-      oop_video_decoder;
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-  if (base::FeatureList::IsEnabled(media::kUseOutOfProcessVideoDecoding)) {
-    render_frame_host().GetProcess()->CreateStableVideoDecoder(
-        oop_video_decoder.InitWithNewPipeAndPassReceiver());
-  }
-#endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+  mojo::PendingRemote<media::mojom::VideoDecoder> oop_video_decoder;
+#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
+  render_frame_host().GetProcess()->CreateOOPVideoDecoder(
+      oop_video_decoder.InitWithNewPipeAndPassReceiver());
+#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
   factory->CreateVideoDecoder(std::move(receiver),
                               std::move(oop_video_decoder));
 }
+
+#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
+void MediaInterfaceProxy::CreateVideoDecoderWithTracker(
+    mojo::PendingReceiver<media::mojom::VideoDecoder> receiver,
+    mojo::PendingRemote<media::mojom::VideoDecoderTracker> tracker) {
+  // mojo::ReportBadMessage() should be called directly within the stack frame
+  // of a message dispatch, hence the CHECK().
+  // CreateVideoDecoderWithTracker() should be called by the browser process
+  // only. This implementation is exposed to the renderer. Well-behaved clients
+  // (renderers) shouldn't call CreateVideoDecoderWithTracker().
+  CHECK(mojo::IsInMessageDispatch());
+  mojo::ReportBadMessage("CreateVideoDecoderWithTracker() called unexpectedly");
+}
+#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
 
 void MediaInterfaceProxy::CreateAudioEncoder(
     mojo::PendingReceiver<media::mojom::AudioEncoder> receiver) {
@@ -348,24 +478,6 @@ void MediaInterfaceProxy::CreateFlingingRenderer(
                                      std::move(receiver));
 }
 
-void MediaInterfaceProxy::CreateMediaPlayerRenderer(
-    mojo::PendingRemote<media::mojom::MediaPlayerRendererClientExtension>
-        client_extension_remote,
-    mojo::PendingReceiver<media::mojom::Renderer> receiver,
-    mojo::PendingReceiver<media::mojom::MediaPlayerRendererExtension>
-        renderer_extension_receiver) {
-  DCHECK(thread_checker_.CalledOnValidThread());
-
-  media::MojoRendererService::Create(
-      nullptr,
-      std::make_unique<MediaPlayerRenderer>(
-          render_frame_host().GetProcess()->GetID(),
-          render_frame_host().GetRoutingID(),
-          WebContents::FromRenderFrameHost(&render_frame_host()),
-          std::move(renderer_extension_receiver),
-          std::move(client_extension_remote)),
-      std::move(receiver));
-}
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -373,9 +485,7 @@ void MediaInterfaceProxy::CreateMediaFoundationRenderer(
     mojo::PendingRemote<media::mojom::MediaLog> media_log_remote,
     mojo::PendingReceiver<media::mojom::Renderer> receiver,
     mojo::PendingReceiver<media::mojom::MediaFoundationRendererExtension>
-        renderer_extension_receiver,
-    mojo::PendingRemote<media::mojom::MediaFoundationRendererClientExtension>
-        client_extension_remote) {
+        renderer_extension_receiver) {
   DCHECK(thread_checker_.CalledOnValidThread());
   DVLOG(1) << __func__ << ": this=" << this;
 
@@ -383,10 +493,24 @@ void MediaInterfaceProxy::CreateMediaFoundationRenderer(
   // with a CDM path in CreateCdm().
   auto* factory = GetMediaFoundationServiceInterfaceFactory(base::FilePath());
   if (factory) {
+    // `MediaFoundationRenderer` bypasses the browser's audio service.
+    // Authorize the frame for audibility bypass claims.
+    AudibilityBypassTracker::ScopedGrant grant =
+        AudibilityBypassTracker::AddGrant(&render_frame_host());
+
+    mojo::PendingRemote<media::mojom::MediaFoundationRendererExtension>
+        utility_extension_remote;
+    auto utility_extension_receiver =
+        utility_extension_remote.InitWithNewPipeAndPassReceiver();
+
+    mojo::MakeSelfOwnedReceiver(
+        std::make_unique<MediaFoundationRendererExtensionProxy>(
+            std::move(utility_extension_remote), std::move(grant)),
+        std::move(renderer_extension_receiver));
+
     factory->CreateMediaFoundationRenderer(
         std::move(media_log_remote), std::move(receiver),
-        std::move(renderer_extension_receiver),
-        std::move(client_extension_remote));
+        std::move(utility_extension_receiver));
   }
 }
 #endif  // BUILDFLAG(IS_WIN)
@@ -396,32 +520,25 @@ void MediaInterfaceProxy::CreateCdm(const media::CdmConfig& cdm_config,
   DCHECK(thread_checker_.CalledOnValidThread());
   DVLOG(1) << __func__ << ": cdm_config=" << cdm_config;
 
-  // The remote process may drop the callback (e.g. in case of crash, or CDM
-  // loading/initialization failure). Doing it here instead of in the renderer
-  // process because the browser is trusted.
-  auto callback = mojo::WrapCallbackWithDefaultInvokeIfNotRun(
-      std::move(create_cdm_cb), mojo::NullRemote(), nullptr,
-      "CDM creation failed");
-
   // Handle `use_hw_secure_codecs` cases first.
 #if BUILDFLAG(USE_CHROMEOS_PROTECTED_MEDIA)
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  const bool enable_cdm_factory_daemon =
-      base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kLacrosUseChromeosProtectedMedia);
-#else   // BUILDFLAG(IS_CHROMEOS_LACROS)
-  const bool enable_cdm_factory_daemon = true;
-#endif  // else BUILDFLAG(IS_CHROMEOS_LACROS)
+  bool enable_cdm_factory_daemon = true;
+#if defined(ARCH_CPU_ARM_FAMILY)
+  if (!base::FeatureList::IsEnabled(media::kEnableArmHwdrm)) {
+    enable_cdm_factory_daemon = false;
+  }
+#endif  // defined(ARCH_CPU_ARM_FAMILY)
   if (enable_cdm_factory_daemon && cdm_config.use_hw_secure_codecs &&
       cdm_config.allow_distinctive_identifier) {
     auto* factory = media_interface_factory_ptr_->Get();
     if (factory) {
       // We need to intercept the callback in this case so we can fallback to
       // the library CDM in case of failure.
-      factory->CreateCdm(
-          cdm_config, base::BindOnce(&MediaInterfaceProxy::OnChromeOsCdmCreated,
-                                     weak_factory_.GetWeakPtr(), cdm_config,
-                                     std::move(callback)));
+      factory->CreateCdm(cdm_config,
+                         WrapCreateCdmCallback(base::BindOnce(
+                             &MediaInterfaceProxy::OnChromeOsCdmCreated,
+                             weak_factory_.GetWeakPtr(), cdm_config,
+                             std::move(create_cdm_cb))));
       return;
     }
   }
@@ -433,7 +550,9 @@ void MediaInterfaceProxy::CreateCdm(const media::CdmConfig& cdm_config,
         !cdm_config.allow_persistent_state) {
       DVLOG(2) << "MediaFoundationService requires both distinctive identifier "
                   "and persistent state";
-      std::move(callback).Run(mojo::NullRemote(), nullptr, "Invalid CdmConfig");
+      std::move(create_cdm_cb)
+          .Run(mojo::NullRemote(), nullptr,
+               media::CreateCdmStatus::kInvalidCdmConfig);
       return;
     }
 
@@ -441,9 +560,14 @@ void MediaInterfaceProxy::CreateCdm(const media::CdmConfig& cdm_config,
         cdm_config.key_system, CdmInfo::Robustness::kHardwareSecure);
     if (cdm_info) {
       DVLOG(2) << "Get MediaFoundationService with CDM path " << cdm_info->path;
+      bool is_cached_factory = mf_interface_factory_remote_.is_bound();
       auto* factory = GetMediaFoundationServiceInterfaceFactory(cdm_info->path);
       if (factory) {
-        factory->CreateCdm(cdm_config, std::move(callback));
+        factory->CreateCdm(
+            cdm_config,
+            WrapCreateCdmCallback(base::BindOnce(
+                &MediaInterfaceProxy::OnCdmCreated, weak_factory_.GetWeakPtr(),
+                cdm_config, std::move(create_cdm_cb), is_cached_factory)));
         return;
       }
     }
@@ -453,8 +577,9 @@ void MediaInterfaceProxy::CreateCdm(const media::CdmConfig& cdm_config,
 
 #if BUILDFLAG(ENABLE_LIBRARY_CDMS)
   // Fallback to use CdmFactory even if `use_hw_secure_codecs` is true.
-  auto* factory = GetCdmFactory(cdm_config.key_system);
-#elif BUILDFLAG(ENABLE_CAST_RENDERER)
+  CreateLibraryCdm(cdm_config, std::move(create_cdm_cb));
+#else
+#if BUILDFLAG(ENABLE_CAST_RENDERER)
   // CDM service lives together with renderer service if cast renderer is
   // enabled, because cast renderer creates its own audio/video decoder. Note
   // that in content_browsertests (and Content Shell in general) we don't have
@@ -463,15 +588,73 @@ void MediaInterfaceProxy::CreateCdm(const media::CdmConfig& cdm_config,
 #else
   // CDM service lives together with audio/video decoder service.
   auto* factory = media_interface_factory_ptr_->Get();
-#endif  // BUILDFLAG(ENABLE_LIBRARY_CDMS)
+#endif  // BUILDFLAG(ENABLE_CAST_RENDERER)
 
   if (!factory) {
-    std::move(callback).Run(mojo::NullRemote(), nullptr,
-                            "Unable to find a CDM factory");
+    std::move(create_cdm_cb)
+        .Run(mojo::NullRemote(), nullptr,
+             media::CreateCdmStatus::kCdmFactoryCreationFailed);
+    return;
+  }
+  factory->CreateCdm(cdm_config,
+                     WrapCreateCdmCallback(std::move(create_cdm_cb)));
+#endif  // BUILDFLAG(ENABLE_LIBRARY_CDMS)
+}
+
+void MediaInterfaceProxy::OnCdmCreated(
+    const media::CdmConfig& cdm_config,
+    CreateCdmCallback callback,
+    bool is_cached_factory,
+    mojo::PendingRemote<media::mojom::ContentDecryptionModule> receiver,
+    media::mojom::CdmContextPtr cdm_context,
+    media::CreateCdmStatus status) {
+  DVLOG(1) << __func__ << ": status=" << static_cast<int>(status)
+           << ", is_cached_factory=" << is_cached_factory;
+  DCHECK(thread_checker_.CalledOnValidThread());
+
+  if (receiver) {
+    std::move(callback).Run(std::move(receiver), std::move(cdm_context),
+                            status);
     return;
   }
 
-  factory->CreateCdm(cdm_config, std::move(callback));
+  // If CDM creation failed on a cached factory due to disconnection error
+  // (e.g. the previous CDM process crashed, but the disconnect handler hasn't
+  // run yet), invalidate the cached remote and retry with a fresh CDM process.
+  if (is_cached_factory &&
+      status == media::CreateCdmStatus::kDisconnectionError) {
+    DVLOG(1) << "Cached CDM factory disconnected, retrying with a fresh CDM "
+                "process...";
+#if BUILDFLAG(ENABLE_LIBRARY_CDMS)
+    if (auto cdm_info = CdmRegistryImpl::GetInstance()->GetCdmInfo(
+            cdm_config.key_system, CdmInfo::Robustness::kSoftwareSecure)) {
+      cdm_factory_map_.erase(cdm_info->type);
+      auto* browser_context = render_frame_host().GetBrowserContext();
+      auto& site = render_frame_host()
+                       .GetSiteInstance()
+                       ->GetSecurityPrincipal()
+                       .GetDeprecatedSiteURL();
+      ResetCdmService(browser_context, site, cdm_info->type);
+    }
+#endif  // BUILDFLAG(ENABLE_LIBRARY_CDMS)
+
+#if BUILDFLAG(IS_WIN)
+    if (ShouldUseMediaFoundationServiceForCdm(cdm_config)) {
+      mf_interface_factory_remote_.reset();
+      auto* browser_context = render_frame_host().GetBrowserContext();
+      auto& site = render_frame_host()
+                       .GetSiteInstance()
+                       ->GetSecurityPrincipal()
+                       .GetDeprecatedSiteURL();
+      ResetMediaFoundationService(browser_context, site);
+    }
+#endif  // BUILDFLAG(IS_WIN)
+
+    CreateCdm(cdm_config, std::move(callback));
+    return;
+  }
+
+  std::move(callback).Run(std::move(receiver), std::move(cdm_context), status);
 }
 
 mojo::PendingRemote<media::mojom::FrameInterfaceFactory>
@@ -508,15 +691,20 @@ void MediaInterfaceProxy::ConnectToMediaFoundationService(
   DVLOG(1) << __func__ << ": this=" << this << ", cdm_path=" << cdm_path;
   DCHECK(!mf_interface_factory_remote_);
 
+  // Passing an empty CdmType since it is not needed in this scenario.
   auto& mf_service = GetMediaFoundationService(
-      render_frame_host().GetBrowserContext(),
-      render_frame_host().GetSiteInstance()->GetSiteURL(), cdm_path);
+      media::CdmType(), render_frame_host().GetBrowserContext(),
+      render_frame_host()
+          .GetSiteInstance()
+          ->GetSecurityPrincipal()
+          .GetDeprecatedSiteURL(),
+      cdm_path);
 
   // Passing an empty CdmType as MediaFoundation-based CDMs don't use CdmStorage
   // currently.
-  // TODO(crbug.com/1231162): This works but is a bit hacky. CdmType is used for
-  // both CDM-process-isolation and storage isolation. We probably still want to
-  // have the information on whether we want to use CdmStorage in CDM
+  // TODO(crbug.com/40779490): This works but is a bit hacky. CdmType is used
+  // for both CDM-process-isolation and storage isolation. We probably still
+  // want to have the information on whether we want to use CdmStorage in CDM
   // registration and populate that info here.
   mf_service.CreateInterfaceFactory(
       mf_interface_factory_remote_.BindNewPipeAndPassReceiver(),
@@ -539,6 +727,27 @@ bool MediaInterfaceProxy::ShouldUseMediaFoundationServiceForCdm(
 
 #if BUILDFLAG(ENABLE_LIBRARY_CDMS)
 
+void MediaInterfaceProxy::CreateLibraryCdm(const media::CdmConfig& cdm_config,
+                                           CreateCdmCallback callback) {
+  bool is_cached_factory = false;
+  if (auto cdm_info = CdmRegistryImpl::GetInstance()->GetCdmInfo(
+          cdm_config.key_system, CdmInfo::Robustness::kSoftwareSecure)) {
+    is_cached_factory = cdm_factory_map_.count(cdm_info->type) > 0;
+  }
+
+  auto* factory = GetCdmFactory(cdm_config.key_system);
+  if (!factory) {
+    std::move(callback).Run(mojo::NullRemote(), nullptr,
+                            media::CreateCdmStatus::kCdmFactoryCreationFailed);
+    return;
+  }
+
+  factory->CreateCdm(cdm_config, WrapCreateCdmCallback(base::BindOnce(
+                                     &MediaInterfaceProxy::OnCdmCreated,
+                                     weak_factory_.GetWeakPtr(), cdm_config,
+                                     std::move(callback), is_cached_factory)));
+}
+
 media::mojom::CdmFactory* MediaInterfaceProxy::GetCdmFactory(
     const std::string& key_system) {
   DCHECK(thread_checker_.CalledOnValidThread());
@@ -547,16 +756,15 @@ media::mojom::CdmFactory* MediaInterfaceProxy::GetCdmFactory(
   auto cdm_info = CdmRegistryImpl::GetInstance()->GetCdmInfo(
       key_system, CdmInfo::Robustness::kSoftwareSecure);
   if (!cdm_info) {
-    NOTREACHED() << "No valid CdmInfo for " << key_system;
+    DLOG(ERROR) << "No valid CdmInfo for " << key_system;
     return nullptr;
   }
+
   if (cdm_info->path.empty()) {
     NOTREACHED() << "CDM path for " << key_system << " is empty";
-    return nullptr;
   }
   if (!IsValidCdmDisplayName(cdm_info->name)) {
     NOTREACHED() << "Invalid CDM display name " << cdm_info->name;
-    return nullptr;
   }
 
   auto& cdm_type = cdm_info->type;
@@ -575,7 +783,10 @@ media::mojom::CdmFactory* MediaInterfaceProxy::ConnectToCdmService(
   DCHECK(!cdm_factory_map_.count(cdm_info.type));
 
   auto* browser_context = render_frame_host().GetBrowserContext();
-  auto& site = render_frame_host().GetSiteInstance()->GetSiteURL();
+  auto& site = render_frame_host()
+                   .GetSiteInstance()
+                   ->GetSecurityPrincipal()
+                   .GetDeprecatedSiteURL();
   auto& cdm_service = GetCdmService(browser_context, site, cdm_info);
 
   mojo::Remote<media::mojom::CdmFactory> cdm_factory_remote;
@@ -595,7 +806,6 @@ void MediaInterfaceProxy::OnCdmServiceConnectionError(
   DVLOG(1) << __func__;
   DCHECK(thread_checker_.CalledOnValidThread());
 
-  DCHECK(cdm_factory_map_.count(cdm_type));
   cdm_factory_map_.erase(cdm_type);
 }
 #endif  // BUILDFLAG(ENABLE_LIBRARY_CDMS)
@@ -606,26 +816,25 @@ void MediaInterfaceProxy::OnChromeOsCdmCreated(
     CreateCdmCallback callback,
     mojo::PendingRemote<media::mojom::ContentDecryptionModule> receiver,
     media::mojom::CdmContextPtr cdm_context,
-    const std::string& error_message) {
+    media::CreateCdmStatus status) {
   if (receiver) {
     ReportCdmTypeUMA(CrosCdmType::kPlatformCdm);
     // Success case, just pass it back through the callback.
     std::move(callback).Run(std::move(receiver), std::move(cdm_context),
-                            error_message);
+                            status);
     return;
   }
 
   // We failed creating a CDM with the Chrome OS daemon, fallback to the library
   // CDM interface.
   VLOG(1) << "Failed creating Chrome OS CDM, will use library CDM";
-  auto* factory = GetCdmFactory(cdm_config.key_system);
-  if (!factory) {
-    std::move(callback).Run(mojo::NullRemote(), nullptr,
-                            "Unable to find a CDM factory");
-    return;
-  }
   ReportCdmTypeUMA(CrosCdmType::kChromeCdm);
-  factory->CreateCdm(cdm_config, std::move(callback));
+#if BUILDFLAG(ENABLE_LIBRARY_CDMS)
+  CreateLibraryCdm(cdm_config, std::move(callback));
+#else
+  std::move(callback).Run(mojo::NullRemote(), nullptr,
+                          media::CreateCdmStatus::kCdmFactoryCreationFailed);
+#endif  // BUILDFLAG(ENABLE_LIBRARY_CDMS)
 }
 #endif  // BUILDFLAG(IS_CHROMEOS)
 

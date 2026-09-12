@@ -4,9 +4,12 @@
 
 #include "components/image_fetcher/core/image_data_fetcher.h"
 
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/trace_event/trace_event.h"
 #include "components/image_fetcher/core/image_fetcher_metrics_reporter.h"
 #include "net/base/data_url.h"
 #include "net/base/load_flags.h"
@@ -37,7 +40,7 @@ struct ImageDataFetcher::ImageDataFetcherRequest {
                           std::unique_ptr<network::SimpleURLLoader> loader)
       : callback(std::move(callback)), loader(std::move(loader)) {}
 
-  ~ImageDataFetcherRequest() {}
+  ~ImageDataFetcherRequest() = default;
 
   // The callback to run after the image data was fetched. The callback will
   // be run even if the image data could not be fetched successfully.
@@ -57,7 +60,7 @@ ImageDataFetcher::~ImageDataFetcher() {
 }
 
 void ImageDataFetcher::SetImageDownloadLimit(
-    absl::optional<int64_t> max_download_bytes) {
+    std::optional<int64_t> max_download_bytes) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   max_download_bytes_ = max_download_bytes;
 }
@@ -103,6 +106,10 @@ void ImageDataFetcher::FetchImageData(const GURL& image_url,
                                       const std::string& referrer,
                                       net::ReferrerPolicy referrer_policy,
                                       bool send_cookies) {
+  uint64_t flow_id =
+      reinterpret_cast<uint64_t>(this) ^ (++fetch_sequence_number_);
+  TRACE_EVENT("ui", "ImageDataFetcher::FetchImageData",
+              perfetto::Flow::ProcessScoped(flow_id));
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   // Handle data urls explicitly since SimpleURLLoader doesn't.
@@ -121,9 +128,12 @@ void ImageDataFetcher::FetchImageData(const GURL& image_url,
   request->url = image_url;
   request->referrer_policy = referrer_policy;
   request->referrer = GURL(referrer);
-  request->credentials_mode = send_cookies
-                                  ? network::mojom::CredentialsMode::kInclude
-                                  : network::mojom::CredentialsMode::kOmit;
+  if (send_cookies) {
+    request->credentials_mode = network::mojom::CredentialsMode::kInclude;
+    request->site_for_cookies = net::SiteForCookies::FromUrl(image_url);
+  } else {
+    request->credentials_mode = network::mojom::CredentialsMode::kOmit;
+  }
 
   std::unique_ptr<network::SimpleURLLoader> loader =
       network::SimpleURLLoader::Create(std::move(request),
@@ -139,14 +149,15 @@ void ImageDataFetcher::FetchImageData(const GURL& image_url,
     loader->DownloadToString(
         url_loader_factory_.get(),
         base::BindOnce(&ImageDataFetcher::OnURLLoaderComplete,
-                       base::Unretained(this), loader.get(), std::move(params)),
+                       base::Unretained(this), loader.get(), std::move(params),
+                       flow_id),
         max_download_bytes_.value());
   } else {
     loader->DownloadToStringOfUnboundedSizeUntilCrashAndDie(
         url_loader_factory_.get(),
         base::BindOnce(&ImageDataFetcher::OnURLLoaderComplete,
-                       base::Unretained(this), loader.get(),
-                       std::move(params)));
+                       base::Unretained(this), loader.get(), std::move(params),
+                       flow_id));
   }
 
   std::unique_ptr<ImageDataFetcherRequest> request_track(
@@ -159,7 +170,10 @@ void ImageDataFetcher::FetchImageData(const GURL& image_url,
 void ImageDataFetcher::OnURLLoaderComplete(
     const network::SimpleURLLoader* source,
     ImageFetcherParams params,
-    std::unique_ptr<std::string> response_body) {
+    uint64_t flow_id,
+    std::optional<std::string> response_body) {
+  TRACE_EVENT("ui", "ImageDataFetcher::OnURLLoaderComplete",
+              perfetto::Flow::ProcessScoped(flow_id));
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(pending_requests_.find(source) != pending_requests_.end());
   bool success = source->NetError() == net::OK;
@@ -170,7 +184,7 @@ void ImageDataFetcher::OnURLLoaderComplete(
     net::HttpResponseHeaders* headers = source->ResponseInfo()->headers.get();
     metadata.mime_type = source->ResponseInfo()->mime_type;
     metadata.http_response_code = headers->response_code();
-    // Just read the first value-pair for this header (not caring about |iter|).
+    // Just read the first value-pair for this header (not caring about `iter`).
     headers->EnumerateHeader(
         /*iter=*/nullptr, kContentLocationHeader,
         &metadata.content_location_header);
@@ -180,7 +194,7 @@ void ImageDataFetcher::OnURLLoaderComplete(
 
   std::string image_data;
   if (success && response_body) {
-    image_data = std::move(*response_body);
+    image_data = std::move(response_body).value();
   }
   FinishRequest(source, metadata, image_data);
 
@@ -193,11 +207,11 @@ void ImageDataFetcher::FinishRequest(const network::SimpleURLLoader* source,
                                      const std::string& image_data) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto request_iter = pending_requests_.find(source);
-  DCHECK(request_iter != pending_requests_.end());
+  CHECK(request_iter != pending_requests_.end());
   auto callback = std::move(request_iter->second->callback);
   pending_requests_.erase(request_iter);
   std::move(callback).Run(image_data, metadata);
-  // |this| might be destroyed now.
+  // `this` might be destroyed now.
 }
 
 void ImageDataFetcher::InjectResultForTesting(const RequestMetadata& metadata,

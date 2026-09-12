@@ -24,11 +24,12 @@ void BackgroundSyncNetworkObserver::SetIgnoreNetworkChangesForTests(
 BackgroundSyncNetworkObserver::BackgroundSyncNetworkObserver(
     base::RepeatingClosure connection_changed_callback)
     : network_connection_tracker_(nullptr),
-      connection_type_(network::mojom::ConnectionType::CONNECTION_UNKNOWN),
+      connection_type_(
+          net::NetworkChangeNotifier::ConnectionType::CONNECTION_UNKNOWN),
       connection_changed_callback_(std::move(connection_changed_callback)) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(connection_changed_callback_);
+  CHECK(connection_changed_callback_, base::NotFatalUntil::M159);
 
   RegisterWithNetworkConnectionTracker(GetNetworkConnectionTracker());
 }
@@ -43,7 +44,7 @@ BackgroundSyncNetworkObserver::~BackgroundSyncNetworkObserver() {
 void BackgroundSyncNetworkObserver::RegisterWithNetworkConnectionTracker(
     network::NetworkConnectionTracker* network_connection_tracker) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(network_connection_tracker);
+  CHECK(network_connection_tracker, base::NotFatalUntil::M159);
   network_connection_tracker_ = network_connection_tracker;
   network_connection_tracker_->AddNetworkConnectionObserver(this);
 
@@ -52,7 +53,7 @@ void BackgroundSyncNetworkObserver::RegisterWithNetworkConnectionTracker(
 
 void BackgroundSyncNetworkObserver::UpdateConnectionType() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  network::mojom::ConnectionType connection_type;
+  net::NetworkChangeNotifier::ConnectionType connection_type;
   bool synchronous_return = network_connection_tracker_->GetConnectionType(
       &connection_type,
       base::BindOnce(&BackgroundSyncNetworkObserver::OnConnectionChanged,
@@ -64,11 +65,12 @@ void BackgroundSyncNetworkObserver::UpdateConnectionType() {
 bool BackgroundSyncNetworkObserver::NetworkSufficient() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  return connection_type_ != network::mojom::ConnectionType::CONNECTION_NONE;
+  return connection_type_ !=
+         net::NetworkChangeNotifier::ConnectionType::CONNECTION_NONE;
 }
 
 void BackgroundSyncNetworkObserver::OnConnectionChanged(
-    network::mojom::ConnectionType connection_type) {
+    net::NetworkChangeNotifier::ConnectionType connection_type) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (ignore_network_changes_)
     return;
@@ -76,12 +78,12 @@ void BackgroundSyncNetworkObserver::OnConnectionChanged(
 }
 
 void BackgroundSyncNetworkObserver::NotifyManagerIfConnectionChangedForTesting(
-    network::mojom::ConnectionType connection_type) {
+    net::NetworkChangeNotifier::ConnectionType connection_type) {
   NotifyManagerIfConnectionChanged(connection_type);
 }
 
 void BackgroundSyncNetworkObserver::NotifyManagerIfConnectionChanged(
-    network::mojom::ConnectionType connection_type) {
+    net::NetworkChangeNotifier::ConnectionType connection_type) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (connection_type == connection_type_)
     return;

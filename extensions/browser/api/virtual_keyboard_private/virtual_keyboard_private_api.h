@@ -5,11 +5,19 @@
 #ifndef EXTENSIONS_BROWSER_API_VIRTUAL_KEYBOARD_PRIVATE_VIRTUAL_KEYBOARD_PRIVATE_API_H_
 #define EXTENSIONS_BROWSER_API_VIRTUAL_KEYBOARD_PRIVATE_VIRTUAL_KEYBOARD_PRIVATE_API_H_
 
+#include <memory>
+#include <optional>
+#include <vector>
+
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "extensions/browser/browser_context_keyed_api_factory.h"
 #include "extensions/browser/extension_function.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "extensions/common/api/virtual_keyboard_private.h"
+
+namespace ash {
+class ClipboardHistoryItem;
+}
 
 namespace content {
 class BrowserContext;
@@ -122,7 +130,7 @@ class VirtualKeyboardPrivateGetKeyboardConfigFunction
   ResponseAction Run() override;
 
  private:
-  void OnKeyboardConfig(absl::optional<base::Value::Dict> results);
+  void OnKeyboardConfig(std::optional<base::DictValue> results);
 };
 
 class VirtualKeyboardPrivateOpenSettingsFunction
@@ -258,7 +266,12 @@ class VirtualKeyboardPrivateGetClipboardHistoryFunction
   ResponseAction Run() override;
 
  private:
-  void OnGetClipboardHistory(base::Value results);
+  void OnGetClipboardHistory(
+      std::vector<ash::ClipboardHistoryItem> history_items);
+
+  using ClipboardItems =
+      std::vector<extensions::api::virtual_keyboard_private::ClipboardItem>;
+  void OnClipboardHistoryItemsConverted(std::unique_ptr<ClipboardItems> items);
 };
 
 class VirtualKeyboardPrivatePasteClipboardItemFunction

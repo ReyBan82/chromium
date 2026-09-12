@@ -12,6 +12,7 @@
 #include "content/public/test/browser_task_environment.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_status_code.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/public/mojom/proxy_lookup_client.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
@@ -60,7 +61,7 @@ class MockNetworkContext : public network::TestNetworkContext {
         std::move(proxy_lookup_client));
     if (proxy_presence_table_.count(url) == 0) {
       client->OnProxyLookupComplete(net::ERR_FAILED,
-                                    /*proxy_info=*/absl::nullopt);
+                                    /*proxy_info=*/std::nullopt);
       return;
     }
     net::ProxyInfo proxy_info;
@@ -80,12 +81,11 @@ class AttestationCAClientTest : public ::testing::Test {
  public:
   AttestationCAClientTest()
       : test_shared_url_loader_factory_(
-            base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
-                &test_url_loader_factory_)),
+            test_url_loader_factory_.GetSafeWeakWrapper()),
         num_invocations_(0),
         result_(false) {}
 
-  ~AttestationCAClientTest() override {}
+  ~AttestationCAClientTest() override = default;
 
   void SetUp() override {
     TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(

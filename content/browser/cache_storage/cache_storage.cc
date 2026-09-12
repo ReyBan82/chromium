@@ -9,30 +9,33 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/barrier_closure.h"
-#include "base/containers/contains.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/files/memory_mapped_file.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/guid.h"
 #include "base/hash/sha1.h"
 #include "base/location.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/traced_value.h"
+#include "base/types/expected.h"
+#include "base/uuid.h"
 #include "build/build_config.h"
 #include "components/services/storage/public/cpp/buckets/bucket_locator.h"
 #include "content/browser/cache_storage/cache_storage.pb.h"
@@ -45,17 +48,15 @@
 #include "content/browser/cache_storage/cache_storage_scheduler.h"
 #include "content/browser/cache_storage/cache_storage_trace_utils.h"
 #include "content/common/background_fetch/background_fetch_types.h"
-#include "crypto/symmetric_key.h"
 #include "net/base/directory_lister.h"
 #include "net/base/net_errors.h"
 #include "storage/browser/blob/blob_storage_context.h"
 #include "storage/browser/quota/quota_manager_proxy.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/quota/quota_types.mojom.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 
 using blink::mojom::CacheStorageError;
-using blink::mojom::StorageType;
-using crypto::SymmetricKey;
 
 namespace content {
 
@@ -63,9 +64,7 @@ namespace {
 
 std::string HexedHash(const std::string& value) {
   std::string value_hash = base::SHA1HashString(value);
-  std::string valued_hexed_hash = base::ToLowerASCII(
-      base::HexEncode(value_hash.c_str(), value_hash.length()));
-  return valued_hexed_hash;
+  return base::HexEncodeLower(value_hash);
 }
 
 void SizeRetrievedFromAllCaches(std::unique_ptr<int64_t> accumulator,
@@ -77,6 +76,7 @@ void SizeRetrievedFromAllCaches(std::unique_ptr<int64_t> accumulator,
 }  // namespace
 
 const char CacheStorage::kIndexFileName[] = "index.txt";
+constexpr char16_t kReplacementCharacter = 0xFFFD;
 
 struct CacheStorage::CacheMatchResponse {
   CacheMatchResponse() = default;
@@ -85,6 +85,43 @@ struct CacheStorage::CacheMatchResponse {
   CacheStorageError error;
   blink::mojom::FetchAPIResponsePtr response;
 };
+
+std::u16string CacheStorage::ConvertUTF16BytesStringToU16String(
+    const std::string& utf16_bytes,
+    bool correct_encoding) {
+  std::u16string cache_name;
+
+  // Interpret `utf16_bytes` as a sequence of raw bytes.
+  base::span<const uint8_t> serialized_cache_name_bytes =
+      base::as_byte_span(utf16_bytes);
+  std::vector<uint8_t> corrected_bytes(serialized_cache_name_bytes.begin(),
+                                       serialized_cache_name_bytes.end());
+
+  // Validate that the number of bytes in the `serialized_cache_name_bytes`
+  // (or `corrected_bytes`) is a multiple of 2. Each UTF-16 character
+  // is 2 bytes, so an odd number of bytes indicates potential data
+  // corruption or an encoding error.
+  //
+  // If an odd number of bytes is detected, the last byte is removed and
+  // replaced with the 2-byte `kReplacementCharacter` to maintain valid
+  // UTF-16 encoding. This ensures that the string remains correctly
+  // formed and can be safely processed.
+  if (correct_encoding && corrected_bytes.size() % 2 != 0) {
+    corrected_bytes.pop_back();
+    base::span<const uint8_t> replacement_char_bytes =
+        base::byte_span_from_ref(kReplacementCharacter);
+
+    corrected_bytes.insert(corrected_bytes.end(),
+                           replacement_char_bytes.begin(),
+                           replacement_char_bytes.end());
+  }
+
+  cache_name.resize(corrected_bytes.size() / sizeof(char16_t));
+  base::span<uint8_t> cache_name_bytes =
+      base::as_writable_byte_span(cache_name);
+  cache_name_bytes.copy_from(corrected_bytes);
+  return cache_name;
+}
 
 // Handles the loading and clean up of CacheStorageCache objects.
 class CacheStorage::CacheLoader {
@@ -110,7 +147,8 @@ class CacheStorage::CacheLoader {
         cache_storage_(cache_storage),
         bucket_locator_(bucket_locator),
         owner_(owner) {
-    DCHECK(!bucket_locator_.storage_key.origin().opaque());
+    CHECK(!bucket_locator_.storage_key.origin().opaque(),
+          base::NotFatalUntil::M158);
   }
 
   virtual ~CacheLoader() = default;
@@ -118,12 +156,12 @@ class CacheStorage::CacheLoader {
   // Creates a CacheStorageCache with the given name. It does not attempt to
   // load the backend, that happens lazily when the cache is used.
   virtual std::unique_ptr<CacheStorageCache> CreateCache(
-      const std::string& cache_name,
+      const std::u16string& cache_name,
       int64_t cache_size,
       int64_t cache_padding) = 0;
 
   // Deletes any pre-existing cache of the same name and then loads it.
-  virtual void PrepareNewCacheDestination(const std::string& cache_name,
+  virtual void PrepareNewCacheDestination(const std::u16string& cache_name,
                                           CacheAndErrorCallback callback) = 0;
 
   // After the backend has been deleted, do any extra house keeping such as
@@ -139,7 +177,7 @@ class CacheStorage::CacheLoader {
 
   // Called when CacheStorage has created a cache. Used to hold onto a handle to
   // the cache if necessary.
-  virtual void NotifyCacheCreated(const std::string& cache_name,
+  virtual void NotifyCacheCreated(const std::u16string& cache_name,
                                   CacheStorageCacheHandle cache_handle) {}
 
   // Notification that the cache for |cache_handle| has been doomed. If the
@@ -185,7 +223,7 @@ class CacheStorage::MemoryLoader : public CacheStorage::CacheLoader {
                     owner) {}
 
   std::unique_ptr<CacheStorageCache> CreateCache(
-      const std::string& cache_name,
+      const std::u16string& cache_name,
       int64_t cache_size,
       int64_t cache_padding) override {
     return CacheStorageCache::CreateMemoryCache(
@@ -193,7 +231,7 @@ class CacheStorage::MemoryLoader : public CacheStorage::CacheLoader {
         scheduler_task_runner_, quota_manager_proxy_, blob_storage_context_);
   }
 
-  void PrepareNewCacheDestination(const std::string& cache_name,
+  void PrepareNewCacheDestination(const std::u16string& cache_name,
                                   CacheAndErrorCallback callback) override {
     std::unique_ptr<CacheStorageCache> cache =
         CreateCache(cache_name, /*cache_size=*/0, /*cache_padding=*/0);
@@ -211,20 +249,21 @@ class CacheStorage::MemoryLoader : public CacheStorage::CacheLoader {
     std::move(callback).Run(std::make_unique<CacheStorageIndex>());
   }
 
-  void NotifyCacheCreated(const std::string& cache_name,
+  void NotifyCacheCreated(const std::u16string& cache_name,
                           CacheStorageCacheHandle cache_handle) override {
-    DCHECK(!base::Contains(cache_handles_, cache_name));
+    CHECK(!cache_handles_.contains(cache_name), base::NotFatalUntil::M158);
     cache_handles_.insert(std::make_pair(cache_name, std::move(cache_handle)));
   }
 
   void NotifyCacheDoomed(CacheStorageCacheHandle cache_handle) override {
     auto* impl = CacheStorageCache::From(cache_handle);
-    DCHECK(base::Contains(cache_handles_, impl->cache_name()));
+    CHECK(cache_handles_.contains(impl->cache_name()),
+          base::NotFatalUntil::M158);
     cache_handles_.erase(impl->cache_name());
   }
 
  private:
-  typedef std::map<std::string, CacheStorageCacheHandle> CacheHandles;
+  typedef std::map<std::u16string, CacheStorageCacheHandle> CacheHandles;
   ~MemoryLoader() override = default;
 
   // Keep a reference to each cache to ensure that it's not freed before the
@@ -254,11 +293,12 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
         directory_path_(directory_path) {}
 
   std::unique_ptr<CacheStorageCache> CreateCache(
-      const std::string& cache_name,
+      const std::u16string& cache_name,
       int64_t cache_size,
       int64_t cache_padding) override {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    DCHECK(base::Contains(cache_name_to_cache_dir_, cache_name));
+    CHECK(cache_name_to_cache_dir_.contains(cache_name),
+          base::NotFatalUntil::M158);
 
     std::string cache_dir = cache_name_to_cache_dir_[cache_name];
     base::FilePath cache_path = directory_path_.AppendASCII(cache_dir);
@@ -268,7 +308,7 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
         cache_size, cache_padding);
   }
 
-  void PrepareNewCacheDestination(const std::string& cache_name,
+  void PrepareNewCacheDestination(const std::u16string& cache_name,
                                   CacheAndErrorCallback callback) override {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
@@ -282,40 +322,38 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
   }
 
   // Runs on the cache_task_runner_.
-  static std::tuple<CacheStorageError, std::string>
+  static base::expected<std::string, CacheStorageError>
   PrepareNewCacheDirectoryInPool(const base::FilePath& directory_path) {
     std::string cache_dir;
     base::FilePath cache_path;
     do {
-      cache_dir = base::GenerateGUID();
+      cache_dir = base::Uuid::GenerateRandomV4().AsLowercaseString();
       cache_path = directory_path.AppendASCII(cache_dir);
     } while (base::PathExists(cache_path));
 
     base::File::Error error = base::File::FILE_OK;
     if (base::CreateDirectoryAndGetError(cache_path, &error)) {
-      return std::make_tuple(CacheStorageError::kSuccess, cache_dir);
-    } else {
+      return cache_dir;
+    }
+
       CacheStorageError status =
           error == base::File::FILE_ERROR_NO_SPACE
               ? CacheStorageError::kErrorQuotaExceeded
               : MakeErrorStorage(ErrorStorageType::kDidCreateNullCache);
-      return std::make_tuple(status, cache_dir);
-    }
+      return base::unexpected(status);
   }
 
   void PrepareNewCacheCreateCache(
-      const std::string& cache_name,
+      const std::u16string& cache_name,
       CacheAndErrorCallback callback,
-      const std::tuple<CacheStorageError, std::string>& result) {
-    const auto& [status, cache_dir] = result;
-
-    if (status != CacheStorageError::kSuccess) {
-      std::move(callback).Run(nullptr, status);
+      base::expected<std::string, CacheStorageError> result) {
+    if (!result.has_value()) {
+      std::move(callback).Run(nullptr, result.error());
       return;
     }
-    DCHECK(!cache_dir.empty());
 
-    cache_name_to_cache_dir_[cache_name] = cache_dir;
+    CHECK(!result->empty(), base::NotFatalUntil::M158);
+    cache_name_to_cache_dir_[cache_name] = std::move(*result);
     std::move(callback).Run(CreateCache(cache_name, CacheStorage::kSizeUnknown,
                                         CacheStorage::kSizeUnknown),
                             CacheStorageError::kSuccess);
@@ -323,11 +361,11 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
 
   void CleanUpDeletedCache(CacheStorageCache* cache) override {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    DCHECK(base::Contains(doomed_cache_to_path_, cache));
+    auto it = doomed_cache_to_path_.find(cache);
+    CHECK(it != doomed_cache_to_path_.end());
 
-    base::FilePath cache_path =
-        directory_path_.AppendASCII(doomed_cache_to_path_[cache]);
-    doomed_cache_to_path_.erase(cache);
+    base::FilePath cache_path = directory_path_.AppendASCII(it->second);
+    doomed_cache_to_path_.erase(it);
 
     cache_task_runner_->PostTask(
         FROM_HERE,
@@ -350,8 +388,8 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
     // GetURL().spec() is used here rather than Serialize() to ensure
     // backwards compatibility with older data. The serializations are
     // subtly different, e.g. Origin does not include a trailing "/".
-    // TODO(crbug.com/809329): Add a test for validating fields in the proto
-    // TODO(https://crbug.com/1199077): Stop setting the origin field once
+    // TODO(crbug.com/41368964): Add a test for validating fields in the proto
+    // TODO(crbug.com/40177656): Stop setting the origin field once
     // `CacheStorageManager` no longer uses the origin as a fallback for
     // getting the storage key associated with each cache (for more info, see
     // `GetStorageKeysAndLastModifiedOnTaskRunner`).
@@ -363,10 +401,19 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
     protobuf_index.set_bucket_is_default(bucket_locator_.is_default);
 
     for (const auto& cache_metadata : index.ordered_cache_metadata()) {
-      DCHECK(base::Contains(cache_name_to_cache_dir_, cache_metadata.name));
+      CHECK(cache_name_to_cache_dir_.contains(cache_metadata.name),
+            base::NotFatalUntil::M158);
 
       proto::CacheStorageIndex::Cache* index_cache = protobuf_index.add_cache();
-      index_cache->set_name(cache_metadata.name);
+      index_cache->set_name(base::UTF16ToUTF8(cache_metadata.name));
+
+      // Protobuf does not support UTF16 string. Store the cache name as
+      // byte array.
+      base::span<const uint8_t> byte_span =
+          base::as_byte_span(cache_metadata.name);
+      std::string_view utf16_string_view = base::as_string_view(byte_span);
+      index_cache->set_u16string_name(std::string(utf16_string_view));
+
       index_cache->set_cache_dir(cache_name_to_cache_dir_[cache_metadata.name]);
       if (cache_metadata.size == CacheStorage::kSizeUnknown)
         index_cache->clear_size();
@@ -379,7 +426,7 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
 
     std::string serialized;
     bool success = protobuf_index.SerializeToString(&serialized);
-    DCHECK(success);
+    CHECK(success, base::NotFatalUntil::M158);
 
     base::FilePath tmp_path = directory_path_.AppendASCII("index.txt.tmp");
     base::FilePath index_path =
@@ -399,10 +446,9 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
       const std::string& data,
       scoped_refptr<storage::QuotaManagerProxy> quota_manager_proxy,
       const storage::BucketLocator& bucket_locator) {
-    int bytes_written = base::WriteFile(tmp_path, data.c_str(), data.size());
-    if (bytes_written != base::checked_cast<int>(data.size())) {
+    if (!base::WriteFile(tmp_path, data)) {
       base::DeleteFile(tmp_path);
-      quota_manager_proxy->NotifyWriteFailed(bucket_locator.storage_key);
+      quota_manager_proxy->OnClientWriteFailed(bucket_locator.storage_key);
       return false;
     }
 
@@ -431,7 +477,7 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
     auto index = std::make_unique<CacheStorageIndex>();
     for (int i = 0, max = protobuf_index.cache_size(); i < max; ++i) {
       const proto::CacheStorageIndex::Cache& cache = protobuf_index.cache(i);
-      DCHECK(cache.has_cache_dir());
+      CHECK(cache.has_cache_dir(), base::NotFatalUntil::M158);
       int64_t cache_size =
           cache.has_size() ? cache.size() : CacheStorage::kSizeUnknown;
       int64_t cache_padding;
@@ -449,9 +495,29 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
         cache_padding = CacheStorage::kSizeUnknown;
       }
 
-      index->Insert(CacheStorageIndex::CacheMetadata(cache.name(), cache_size,
+      // Added support for backward compatibility to handle cache names encoded
+      // in UTF-8. This change ensures proper handling and storage of both UTF-8
+      // and UTF-16 encoded cache names. All new cache names are stored as
+      // UTF-16 encoded strings. Existing cache names that are already stored
+      // in UTF-8 format need to be read and processed in their original format.
+      // (crbug.com/41142654).
+      //
+      // TODO(crbug.com/401016018): Track UTF-8 cache name usage with metrics.
+      // Once usage drops below a defined threshold, we can safely remove
+      // support for UTF-8 cache names and rely solely on UTF-16.
+      std::u16string cache_name;
+      if (!cache.u16string_name().empty()) {
+        std::string cache_name_utf8 = cache.u16string_name();
+        cache_name = CacheStorage::ConvertUTF16BytesStringToU16String(
+            cache_name_utf8,
+            /*correct_encoding=*/true);
+      } else {
+        cache_name = base::UTF8ToUTF16(cache.name());
+      }
+
+      index->Insert(CacheStorageIndex::CacheMetadata(cache_name, cache_size,
                                                      cache_padding));
-      cache_name_to_cache_dir_[cache.name()] = cache.cache_dir();
+      cache_name_to_cache_dir_[cache_name] = cache.cache_dir();
       cache_dirs->insert(cache.cache_dir());
     }
 
@@ -463,9 +529,9 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
 
   void NotifyCacheDoomed(CacheStorageCacheHandle cache_handle) override {
     auto* impl = CacheStorageCache::From(cache_handle);
-    DCHECK(base::Contains(cache_name_to_cache_dir_, impl->cache_name()));
     auto iter = cache_name_to_cache_dir_.find(impl->cache_name());
-    doomed_cache_to_path_[cache_handle.value()] = iter->second;
+    CHECK(iter != cache_name_to_cache_dir_.end());
+    doomed_cache_to_path_[cache_handle.value()] = std::move(iter->second);
     cache_name_to_cache_dir_.erase(iter);
   }
 
@@ -484,7 +550,7 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
     {
       base::FilePath cache_path;
       while (!(cache_path = file_enum.Next()).empty()) {
-        if (!base::Contains(*cache_dirs, cache_path.BaseName().AsUTF8Unsafe()))
+        if (!cache_dirs->contains(cache_path.BaseName().AsUTF8Unsafe()))
           dirs_to_delete.push_back(cache_path);
       }
     }
@@ -536,13 +602,15 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
           }
         }
       } else {
-        // Find a new home for the cache.
+        // Find a new home for the caches that don't have a directory (legacy
+        // caches) since they predate the change where u16string `cache_names`
+        // were added.
         base::FilePath legacy_cache_path =
             directory_path.AppendASCII(HexedHash(cache.name()));
         std::string cache_dir;
         base::FilePath cache_path;
         do {
-          cache_dir = base::GenerateGUID();
+          cache_dir = base::Uuid::GenerateRandomV4().AsLowercaseString();
           cache_path = directory_path.AppendASCII(cache_dir);
         } while (base::PathExists(cache_path));
 
@@ -560,8 +628,6 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
     }
 
     if (!index.has_storage_key()) {
-      DCHECK(bucket_locator.storage_key.origin().GetURL().spec() ==
-             index.origin());
       index.set_storage_key(bucket_locator.storage_key.Serialize());
       index_modified = true;
     }
@@ -586,7 +652,7 @@ class CacheStorage::SimpleCacheLoader : public CacheStorage::CacheLoader {
   }
 
   const base::FilePath directory_path_;
-  std::map<std::string, std::string> cache_name_to_cache_dir_;
+  std::map<std::u16string, std::string> cache_name_to_cache_dir_;
   std::map<CacheStorageCache*, std::string> doomed_cache_to_path_;
 
   SEQUENCE_CHECKER(sequence_checker_);
@@ -649,7 +715,7 @@ void CacheStorage::AddHandleRef() {
 
 void CacheStorage::DropHandleRef() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_GT(handle_ref_count_, 0U);
+  CHECK_GT(handle_ref_count_, 0U, base::NotFatalUntil::M158);
   handle_ref_count_ -= 1;
   if (!handle_ref_count_ && cache_storage_manager_) {
     ReleaseUnreferencedCaches();
@@ -663,7 +729,7 @@ void CacheStorage::Init() {
     LazyInit();
 }
 
-void CacheStorage::OpenCache(const std::string& cache_name,
+void CacheStorage::OpenCache(const std::u16string& cache_name,
                              int64_t trace_id,
                              CacheAndErrorCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -688,7 +754,7 @@ void CacheStorage::OpenCache(const std::string& cache_name,
           scheduler_->WrapCallbackToRunNext(id, std::move(callback))));
 }
 
-void CacheStorage::HasCache(const std::string& cache_name,
+void CacheStorage::HasCache(const std::u16string& cache_name,
                             int64_t trace_id,
                             BoolAndErrorCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -709,7 +775,7 @@ void CacheStorage::HasCache(const std::string& cache_name,
           scheduler_->WrapCallbackToRunNext(id, std::move(callback))));
 }
 
-void CacheStorage::DoomCache(const std::string& cache_name,
+void CacheStorage::DoomCache(const std::u16string& cache_name,
                              int64_t trace_id,
                              ErrorCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -750,7 +816,7 @@ void CacheStorage::EnumerateCaches(int64_t trace_id,
           scheduler_->WrapCallbackToRunNext(id, std::move(callback))));
 }
 
-void CacheStorage::MatchCache(const std::string& cache_name,
+void CacheStorage::MatchCache(const std::u16string& cache_name,
                               blink::mojom::FetchAPIRequestPtr request,
                               blink::mojom::CacheQueryOptionsPtr match_options,
                               CacheStorageSchedulerPriority priority,
@@ -799,7 +865,7 @@ void CacheStorage::MatchAllCaches(
           scheduler_->WrapCallbackToRunNext(id, std::move(callback))));
 }
 
-void CacheStorage::WriteToCache(const std::string& cache_name,
+void CacheStorage::WriteToCache(const std::u16string& cache_name,
                                 blink::mojom::FetchAPIRequestPtr request,
                                 blink::mojom::FetchAPIResponsePtr response,
                                 int64_t trace_id,
@@ -864,7 +930,7 @@ void CacheStorage::ResetManager() {
   cache_storage_manager_ = nullptr;
 }
 
-void CacheStorage::NotifyCacheContentChanged(const std::string& cache_name) {
+void CacheStorage::NotifyCacheContentChanged(const std::u16string& cache_name) {
   if (cache_storage_manager_)
     cache_storage_manager_->NotifyCacheContentChanged(bucket_locator_,
                                                       cache_name);
@@ -899,7 +965,7 @@ void CacheStorage::WriteIndex(base::OnceCallback<void(bool)> callback) {
 
 void CacheStorage::WriteIndexImpl(base::OnceCallback<void(bool)> callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   cache_loader_->WriteIndex(*cache_index_, std::move(callback));
 }
 
@@ -917,9 +983,9 @@ bool CacheStorage::InitiateScheduledIndexWriteForTest(
 
 void CacheStorage::CacheSizeUpdated(const CacheStorageCache* cache) {
   // Should not be called for doomed caches.
-  DCHECK(
-      !base::Contains(doomed_caches_, const_cast<CacheStorageCache*>(cache)));
-  DCHECK_NE(cache->cache_padding(), kSizeUnknown);
+  CHECK(!doomed_caches_.contains(const_cast<CacheStorageCache*>(cache)),
+        base::NotFatalUntil::M158);
+  CHECK_NE(cache->cache_padding(), kSizeUnknown, base::NotFatalUntil::M158);
   bool size_changed =
       cache_index_->SetCacheSize(cache->cache_name(), cache->cache_size());
   bool padding_changed = cache_index_->SetCachePadding(cache->cache_name(),
@@ -937,8 +1003,8 @@ void CacheStorage::ReleaseUnreferencedCaches() {
 }
 
 void CacheStorage::CacheUnreferenced(CacheStorageCache* cache) {
-  DCHECK(cache);
-  DCHECK(cache->IsUnreferenced());
+  CHECK(cache, base::NotFatalUntil::M158);
+  CHECK(cache->IsUnreferenced(), base::NotFatalUntil::M158);
   auto doomed_caches_it = doomed_caches_.find(cache);
   if (doomed_caches_it != doomed_caches_.end()) {
     // The last reference to a doomed cache is gone, perform clean up.
@@ -957,7 +1023,7 @@ void CacheStorage::CacheUnreferenced(CacheStorageCache* cache) {
   // The CacheStorage is not actively being referenced.  Close the cache
   // immediately.
   auto cache_map_it = cache_map_.find(cache->cache_name());
-  DCHECK(cache_map_it != cache_map_.end());
+  CHECK(cache_map_it != cache_map_.end());
 
   cache_map_it->second.reset();
 }
@@ -978,12 +1044,12 @@ void CacheStorage::CompleteAsyncOperationForTesting(
 // Init is run lazily so that it is called on the proper MessageLoop.
 void CacheStorage::LazyInit() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!initialized_);
+  CHECK(!initialized_, base::NotFatalUntil::M158);
 
   if (initializing_)
     return;
 
-  DCHECK(!scheduler_->ScheduledOperations());
+  CHECK(!scheduler_->ScheduledOperations(), base::NotFatalUntil::M158);
 
   initializing_ = true;
   init_id_ = scheduler_->CreateId();
@@ -995,15 +1061,15 @@ void CacheStorage::LazyInit() {
 
 void CacheStorage::LazyInitImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!initialized_);
-  DCHECK(initializing_);
+  CHECK(!initialized_, base::NotFatalUntil::M158);
+  CHECK(initializing_, base::NotFatalUntil::M158);
 
   // 1. Get the cache index (async call)
   // 2. For each cache name, load the cache (async call)
   // 3. Once each load is complete, update the map variables.
   // 4. Call the list of waiting callbacks.
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   cache_loader_->LoadIndex(base::BindOnce(&CacheStorage::LazyInitDidLoadIndex,
                                           weak_factory_.GetWeakPtr()));
 }
@@ -1011,13 +1077,13 @@ void CacheStorage::LazyInitImpl() {
 void CacheStorage::LazyInitDidLoadIndex(
     std::unique_ptr<CacheStorageIndex> index) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(cache_map_.empty());
+  CHECK(cache_map_.empty(), base::NotFatalUntil::M158);
 
   for (const auto& cache_metadata : index->ordered_cache_metadata()) {
     cache_map_.insert(std::make_pair(cache_metadata.name, nullptr));
   }
 
-  DCHECK(!cache_index_);
+  CHECK(!cache_index_, base::NotFatalUntil::M158);
   cache_index_ = std::move(index);
 
   initializing_ = false;
@@ -1026,13 +1092,11 @@ void CacheStorage::LazyInitDidLoadIndex(
   scheduler_->CompleteOperationAndRunNext(init_id_);
 }
 
-void CacheStorage::OpenCacheImpl(const std::string& cache_name,
+void CacheStorage::OpenCacheImpl(const std::u16string& cache_name,
                                  int64_t trace_id,
                                  CacheAndErrorCallback callback) {
-  TRACE_EVENT_WITH_FLOW1("CacheStorage", "CacheStorage::OpenCacheImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "cache_name", cache_name);
+  TRACE_EVENT("CacheStorage", "CacheStorage::OpenCacheImpl",
+              perfetto::Flow::Global(trace_id), "cache_name", cache_name);
   CacheStorageCacheHandle cache_handle = GetLoadedCache(cache_name);
   if (cache_handle.value()) {
     std::move(callback).Run(std::move(cache_handle),
@@ -1040,7 +1104,7 @@ void CacheStorage::OpenCacheImpl(const std::string& cache_name,
     return;
   }
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   cache_loader_->PrepareNewCacheDestination(
       cache_name, base::BindOnce(&CacheStorage::CreateCacheDidCreateCache,
                                  weak_factory_.GetWeakPtr(), cache_name,
@@ -1048,20 +1112,15 @@ void CacheStorage::OpenCacheImpl(const std::string& cache_name,
 }
 
 void CacheStorage::CreateCacheDidCreateCache(
-    const std::string& cache_name,
+    const std::u16string& cache_name,
     int64_t trace_id,
     CacheAndErrorCallback callback,
     std::unique_ptr<CacheStorageCache> cache,
     CacheStorageError status) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorage::CreateCacheDidCreateCache",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
-
-  UMA_HISTOGRAM_BOOLEAN("ServiceWorkerCache.CreateCacheStorageResult",
-                        static_cast<bool>(cache));
+  TRACE_EVENT("CacheStorage", "CacheStorage::CreateCacheDidCreateCache",
+              perfetto::Flow::Global(trace_id));
 
   if (status != CacheStorageError::kSuccess) {
     std::move(callback).Run(CacheStorageCacheHandle(), status);
@@ -1093,36 +1152,30 @@ void CacheStorage::CreateCacheDidWriteIndex(
     int64_t trace_id,
     bool success) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(cache_handle.value());
+  CHECK(cache_handle.value(), base::NotFatalUntil::M158);
 
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorage::CreateCacheDidWriteIndex",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorage::CreateCacheDidWriteIndex",
+              perfetto::Flow::Global(trace_id));
 
   // TODO(jkarlin): Handle !success.
 
   std::move(callback).Run(std::move(cache_handle), CacheStorageError::kSuccess);
 }
 
-void CacheStorage::HasCacheImpl(const std::string& cache_name,
+void CacheStorage::HasCacheImpl(const std::u16string& cache_name,
                                 int64_t trace_id,
                                 BoolAndErrorCallback callback) {
-  TRACE_EVENT_WITH_FLOW1("CacheStorage", "CacheStorage::HasCacheImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "cache_name", cache_name);
-  bool has_cache = base::Contains(cache_map_, cache_name);
+  TRACE_EVENT("CacheStorage", "CacheStorage::HasCacheImpl",
+              perfetto::Flow::Global(trace_id), "cache_name", cache_name);
+  bool has_cache = cache_map_.contains(cache_name);
   std::move(callback).Run(has_cache, CacheStorageError::kSuccess);
 }
 
-void CacheStorage::DoomCacheImpl(const std::string& cache_name,
+void CacheStorage::DoomCacheImpl(const std::u16string& cache_name,
                                  int64_t trace_id,
                                  ErrorCallback callback) {
-  TRACE_EVENT_WITH_FLOW1("CacheStorage", "CacheStorage::DoomCacheImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "cache_name", cache_name);
+  TRACE_EVENT("CacheStorage", "CacheStorage::DoomCacheImpl",
+              perfetto::Flow::Global(trace_id), "cache_name", cache_name);
   CacheStorageCacheHandle cache_handle = GetLoadedCache(cache_name);
   if (!cache_handle.value()) {
     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
@@ -1131,7 +1184,7 @@ void CacheStorage::DoomCacheImpl(const std::string& cache_name,
     return;
   }
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   CacheStorageCache::From(cache_handle)->SetObserver(nullptr);
   cache_index_->DoomCache(cache_name);
   index_write_task_.Cancel();
@@ -1150,10 +1203,8 @@ void CacheStorage::DeleteCacheDidWriteIndex(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto* impl = CacheStorageCache::From(cache_handle);
 
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorage::DeleteCacheDidWriteIndex",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorage::DeleteCacheDidWriteIndex",
+              perfetto::Flow::Global(trace_id));
 
   if (!success) {
     // Undo any changes if the index couldn't be written to disk.
@@ -1167,7 +1218,7 @@ void CacheStorage::DeleteCacheDidWriteIndex(
   cache_index_->FinalizeDoomedCache();
 
   auto map_iter = cache_map_.find(impl->cache_name());
-  DCHECK(map_iter != cache_map_.end());
+  CHECK(map_iter != cache_map_.end());
 
   doomed_caches_.insert(
       std::make_pair(map_iter->second.get(), std::move(map_iter->second)));
@@ -1197,17 +1248,16 @@ void CacheStorage::DeleteCacheDidGetSize(CacheStorageCache* doomed_cache,
 
   cache_loader_->CleanUpDeletedCache(doomed_cache);
   auto doomed_caches_iter = doomed_caches_.find(doomed_cache);
-  DCHECK(doomed_caches_iter != doomed_caches_.end());
+  CHECK(doomed_caches_iter != doomed_caches_.end());
   doomed_caches_.erase(doomed_caches_iter);
 }
 
 void CacheStorage::EnumerateCachesImpl(int64_t trace_id,
                                        EnumerateCachesCallback callback) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage", "CacheStorage::EnumerateCachesImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorage::EnumerateCachesImpl",
+              perfetto::Flow::Global(trace_id));
 
-  std::vector<std::string> list;
+  std::vector<std::u16string> list;
 
   for (const auto& metadata : cache_index_->ordered_cache_metadata()) {
     list.push_back(metadata.name);
@@ -1217,16 +1267,15 @@ void CacheStorage::EnumerateCachesImpl(int64_t trace_id,
 }
 
 void CacheStorage::MatchCacheImpl(
-    const std::string& cache_name,
+    const std::u16string& cache_name,
     blink::mojom::FetchAPIRequestPtr request,
     blink::mojom::CacheQueryOptionsPtr match_options,
     CacheStorageSchedulerPriority priority,
     int64_t trace_id,
     CacheStorageCache::ResponseCallback callback) {
-  TRACE_EVENT_WITH_FLOW2(
-      "CacheStorage", "CacheStorage::MatchCacheImpl", TRACE_ID_GLOBAL(trace_id),
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT, "cache_name",
-      cache_name, "request", CacheStorageTracedValue(request));
+  TRACE_EVENT("CacheStorage", "CacheStorage::MatchCacheImpl",
+              perfetto::Flow::Global(trace_id), "cache_name", cache_name,
+              "request", CacheStorageTracedValue(request));
 
   CacheStorageCacheHandle cache_handle = GetLoadedCache(cache_name);
 
@@ -1252,9 +1301,8 @@ void CacheStorage::MatchCacheDidMatch(
     CacheStorageCache::ResponseCallback callback,
     CacheStorageError error,
     blink::mojom::FetchAPIResponsePtr response) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage", "CacheStorage::MatchCacheDidMatch",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorage::MatchCacheDidMatch",
+              perfetto::Flow::Global(trace_id));
   std::move(callback).Run(error, std::move(response));
 }
 
@@ -1264,9 +1312,8 @@ void CacheStorage::MatchAllCachesImpl(
     CacheStorageSchedulerPriority priority,
     int64_t trace_id,
     CacheStorageCache::ResponseCallback callback) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage", "CacheStorage::MatchAllCachesImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorage::MatchAllCachesImpl",
+              perfetto::Flow::Global(trace_id));
 
   std::vector<CacheMatchResponse>* match_responses =
       new std::vector<CacheMatchResponse>(cache_index_->num_entries());
@@ -1280,7 +1327,7 @@ void CacheStorage::MatchAllCachesImpl(
   size_t idx = 0;
   for (const auto& cache_metadata : cache_index_->ordered_cache_metadata()) {
     CacheStorageCacheHandle cache_handle = GetLoadedCache(cache_metadata.name);
-    DCHECK(cache_handle.value());
+    CHECK(cache_handle.value(), base::NotFatalUntil::M158);
 
     CacheStorageCache* cache_ptr = cache_handle.value();
     cache_ptr->Match(
@@ -1300,9 +1347,8 @@ void CacheStorage::MatchAllCachesDidMatch(
     int64_t trace_id,
     CacheStorageError error,
     blink::mojom::FetchAPIResponsePtr response) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage", "CacheStorage::MatchAllCachesDidMatch",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorage::MatchAllCachesDidMatch",
+              perfetto::Flow::Global(trace_id));
   out_match_response->error = error;
   out_match_response->response = std::move(response);
   barrier_closure.Run();
@@ -1312,10 +1358,8 @@ void CacheStorage::MatchAllCachesDidMatchAll(
     std::unique_ptr<std::vector<CacheMatchResponse>> match_responses,
     int64_t trace_id,
     CacheStorageCache::ResponseCallback callback) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorage::MatchAllCachesDidMatchAll",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorage::MatchAllCachesDidMatchAll",
+              perfetto::Flow::Global(trace_id));
   for (CacheMatchResponse& match_response : *match_responses) {
     if (match_response.error == CacheStorageError::kErrorNotFound)
       continue;
@@ -1326,16 +1370,14 @@ void CacheStorage::MatchAllCachesDidMatchAll(
   std::move(callback).Run(CacheStorageError::kErrorNotFound, nullptr);
 }
 
-void CacheStorage::WriteToCacheImpl(const std::string& cache_name,
+void CacheStorage::WriteToCacheImpl(const std::u16string& cache_name,
                                     blink::mojom::FetchAPIRequestPtr request,
                                     blink::mojom::FetchAPIResponsePtr response,
                                     int64_t trace_id,
                                     CacheStorage::ErrorCallback callback) {
-  TRACE_EVENT_WITH_FLOW2("CacheStorage", "CacheStorage::WriteToCacheImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "cache_name", cache_name, "request",
-                         CacheStorageTracedValue(request));
+  TRACE_EVENT("CacheStorage", "CacheStorage::WriteToCacheImpl",
+              perfetto::Flow::Global(trace_id), "cache_name", cache_name,
+              "request", CacheStorageTracedValue(request));
 
   CacheStorageCacheHandle cache_handle = GetLoadedCache(cache_name);
 
@@ -1345,16 +1387,16 @@ void CacheStorage::WriteToCacheImpl(const std::string& cache_name,
   }
 
   CacheStorageCache* cache_ptr = cache_handle.value();
-  DCHECK(cache_ptr);
+  CHECK(cache_ptr, base::NotFatalUntil::M158);
 
   cache_ptr->Put(std::move(request), std::move(response), trace_id,
                  std::move(callback));
 }
 
 CacheStorageCacheHandle CacheStorage::GetLoadedCache(
-    const std::string& cache_name) {
+    const std::u16string& cache_name) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(initialized_);
+  CHECK(initialized_, base::NotFatalUntil::M158);
 
   auto map_iter = cache_map_.find(cache_name);
   if (map_iter == cache_map_.end())
@@ -1365,7 +1407,7 @@ CacheStorageCacheHandle CacheStorage::GetLoadedCache(
   if (!cache) {
     const CacheStorageIndex::CacheMetadata* metadata =
         cache_index_->GetMetadata(cache_name);
-    DCHECK(metadata);
+    CHECK(metadata, base::NotFatalUntil::M158);
     std::unique_ptr<CacheStorageCache> new_cache = cache_loader_->CreateCache(
         cache_name, metadata->size, metadata->padding);
     CacheStorageCache* cache_ptr = new_cache.get();
@@ -1392,7 +1434,7 @@ void CacheStorage::SizeRetrievedFromCache(CacheStorageCacheHandle cache_handle,
 
 void CacheStorage::GetSizeThenCloseAllCachesImpl(SizeCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(initialized_);
+  CHECK(initialized_, base::NotFatalUntil::M158);
 
   std::unique_ptr<int64_t> accumulator(new int64_t(0));
   int64_t* accumulator_ptr = accumulator.get();
@@ -1420,7 +1462,7 @@ void CacheStorage::GetSizeThenCloseAllCachesImpl(SizeCallback callback) {
 
 void CacheStorage::SizeImpl(SizeCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(initialized_);
+  CHECK(initialized_, base::NotFatalUntil::M158);
 
   if (cache_index_->GetPaddedStorageSize() != kSizeUnknown) {
     base::SequencedTaskRunner::GetCurrentDefault()->PostTask(

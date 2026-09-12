@@ -8,22 +8,18 @@
 #include <memory>
 #include <string>
 
-#include "chrome/browser/ash/policy/external_data/handlers/cloud_external_data_policy_handler.h"
+#include "base/memory/raw_ref.h"
+#include "chrome/browser/ash/policy/external_data/cloud_external_data_policy_observer.h"
 
-namespace ash {
-class CrosSettings;
-}  // namespace ash
+class PrefService;
 
 namespace policy {
 
-class DeviceLocalAccountPolicyService;
-
 class UserAvatarImageExternalDataHandler
-    : public CloudExternalDataPolicyHandler {
+    : public CloudExternalDataPolicyObserver::Delegate {
  public:
-  UserAvatarImageExternalDataHandler(
-      ash::CrosSettings* cros_settings,
-      DeviceLocalAccountPolicyService* policy_service);
+  // `local_state` must not be nullptr and must outlive this object.
+  explicit UserAvatarImageExternalDataHandler(PrefService* local_state);
 
   UserAvatarImageExternalDataHandler(
       const UserAvatarImageExternalDataHandler&) = delete;
@@ -32,7 +28,7 @@ class UserAvatarImageExternalDataHandler
 
   ~UserAvatarImageExternalDataHandler() override;
 
-  // CloudExternalDataPolicyHandler:
+  // CloudExternalDataPolicyObserver::Delegate:
   void OnExternalDataSet(const std::string& policy,
                          const std::string& user_id) override;
   void OnExternalDataCleared(const std::string& policy,
@@ -41,11 +37,10 @@ class UserAvatarImageExternalDataHandler
                              const std::string& user_id,
                              std::unique_ptr<std::string> data,
                              const base::FilePath& file_path) override;
-  void RemoveForAccountId(const AccountId& account_id,
-                          base::OnceClosure on_removed) override;
+  void RemoveForAccountId(const AccountId& account_id) override;
 
  private:
-  CloudExternalDataPolicyObserver user_avatar_image_observer_;
+  const raw_ref<PrefService> local_state_;
 };
 
 }  // namespace policy

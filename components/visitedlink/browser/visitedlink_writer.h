@@ -12,6 +12,7 @@
 #include <set>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/files/scoped_file.h"
 #include "base/functional/callback.h"
@@ -20,7 +21,7 @@
 #include "base/memory/free_deleter.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/read_only_shared_memory_region.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
@@ -58,7 +59,7 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   // event as a constructor argument and dispatches events using it.
   class Listener {
    public:
-    virtual ~Listener() {}
+    virtual ~Listener() = default;
 
     // Called when link coloring database has been created or replaced. The
     // argument is a memory region containing the new table.
@@ -123,30 +124,12 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   // Adds a set of URLs to the table.
   void AddURLs(const std::vector<GURL>& urls);
 
-  // See DeleteURLs.
-  class URLIterator {
-   public:
-    // HasNextURL must return true when this is called. Returns the next URL
-    // then advances the iterator. Note that the returned reference is only
-    // valid until the next call of NextURL.
-    virtual const GURL& NextURL() = 0;
-
-    // Returns true if still has URLs to be iterated.
-    virtual bool HasNextURL() const = 0;
-
-   protected:
-    virtual ~URLIterator() {}
-  };
-
   // Deletes the specified URLs from |rows| from the table.
-  void DeleteURLs(URLIterator* iterator);
+  void DeleteURLs(const std::vector<GURL>& urls);
 
   // Clears the visited links table by deleting the file from disk. Used as
   // part of history clearing.
   void DeleteAllURLs();
-
-  // Returns the Delegate of this Writer.
-  VisitedLinkDelegate* GetDelegate();
 
 #if defined(UNIT_TEST) || !defined(NDEBUG) || defined(PERF_TEST)
   // This is a debugging function that can be called to double-check internal
@@ -177,14 +160,15 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   FRIEND_TEST_ALL_PREFIXES(VisitedLinkTest, Delete);
   FRIEND_TEST_ALL_PREFIXES(VisitedLinkTest, BigDelete);
   FRIEND_TEST_ALL_PREFIXES(VisitedLinkTest, BigImport);
+  FRIEND_TEST_ALL_PREFIXES(VisitedLinkTest, HashRangeWraparound);
+  FRIEND_TEST_ALL_PREFIXES(VisitedLinkTest, ResizeErrorHandling);
 
   // Keeps the result of loading the table from the database file to the UI
   // thread.
   struct LoadFromFileResult;
 
-  using TableLoadCompleteCallback = base::OnceCallback<void(
-      bool success,
-      scoped_refptr<LoadFromFileResult> load_from_file_result)>;
+  using TableLoadCompleteCallback =
+      base::OnceCallback<void(std::unique_ptr<LoadFromFileResult>)>;
 
   // Object to rebuild the table on the history thread (see the .cc file).
   class TableBuilder;
@@ -206,7 +190,7 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   static const size_t kFileHeaderSize;
 
   // When creating a fresh new table, we use this many entries.
-  static const unsigned kDefaultTableSize;
+  static const int32_t kDefaultTableSize;
 
   // When the user is adding or deleting a boatload of URLs, we don't really
   // want to do individual writes for each of them. When the count exceeds this
@@ -243,18 +227,14 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   static void LoadFromFile(const base::FilePath& filename,
                            TableLoadCompleteCallback callback);
 
-  // Load the table from the database file. Returns true on success.
-  // Fills parameter |load_from_file_result| on success. It is called from
-  // the background thread.
-  static bool LoadApartFromFile(
-      const base::FilePath& filename,
-      scoped_refptr<LoadFromFileResult>* load_from_file_result);
+  // Load the table from the database file. Returns the result on success,
+  // nullptr otherwise. It is called from the background thread.
+  static std::unique_ptr<LoadFromFileResult> LoadApartFromFile(
+      const base::FilePath& filename);
 
   // It is called from the background thread and executed on the UI
   // thread.
-  void OnTableLoadComplete(
-      bool success,
-      scoped_refptr<LoadFromFileResult> load_from_file_result);
+  void OnTableLoadComplete(std::unique_ptr<LoadFromFileResult>);
 
   // Reads the header of the link coloring database from disk. Assumes the
   // file pointer is at the beginning of the file and that it is the first
@@ -266,7 +246,7 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   static bool ReadFileHeader(FILE* hfile,
                              int32_t* num_entries,
                              int32_t* used_count,
-                             uint8_t salt[LINK_SALT_LENGTH]);
+                             LinkSalt& salt);
 
   // Fills *filename with the name of the link database filename
   bool GetDatabaseFileName(base::FilePath* filename);
@@ -331,19 +311,8 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   // Structure is filled with 0s and shared header with salt. The result of
   // allocation is saved into |mapped_region|.
   static bool CreateApartURLTable(int32_t num_entries,
-                                  const uint8_t salt[LINK_SALT_LENGTH],
+                                  LinkSalt salt,
                                   base::MappedReadOnlyRegion* memory);
-
-  // A wrapper for CreateURLTable, this will allocate a new table, initialized
-  // to empty. The caller is responsible for saving the shared memory pointer
-  // and handles before this call (they will be replaced with new ones) and
-  // releasing them later. This is designed for callers that make a new table
-  // and then copy values from the old table to the new one, then release the
-  // old table.
-  //
-  // Returns true on success. On failure, the old table will be restored. The
-  // caller should not attemp to release the pointer/handle in this case.
-  bool BeginReplaceURLTable(int32_t num_entries);
 
   // unallocates the Fingerprint table
   void FreeURLTable();
@@ -357,11 +326,11 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   // current count.
   void ResizeTable(int32_t new_size);
 
-  // Returns the default table size. It can be overrided in unit tests.
-  uint32_t DefaultTableSize() const;
+  // Returns the default table size. It can be overridden in unit tests.
+  int32_t DefaultTableSize() const;
 
   // Returns the desired table size for |item_count| URLs.
-  uint32_t NewTableSizeForCount(int32_t item_count) const;
+  static int32_t NewTableSizeForCount(int32_t item_count);
 
   // Computes the table load as fraction. For example, if 1/4 of the entries are
   // full, this value will be 0.25
@@ -392,16 +361,11 @@ class VisitedLinkWriter : public VisitedLinkCommon {
       return 0;  // Wrap around.
     return hash + 1;
   }
-  inline Hash DecrementHash(Hash hash) {
-    if (hash <= 0)
-      return table_length_ - 1;  // Wrap around.
-    return hash - 1;
-  }
 
   // Returns a pointer to the start of the hash table, given the mapping
   // containing the hash table.
   static Fingerprint* GetHashTableFromMapping(
-      const base::WritableSharedMemoryMapping& hash_table_mapping);
+      base::WritableSharedMemoryMapping& hash_table_mapping);
 
   // Reference to the browser context that this object belongs to
   // (it knows the path to where the data is stored)
@@ -451,10 +415,6 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   // Shared memory consists of a SharedHeader followed by the table.
   base::MappedReadOnlyRegion mapped_table_memory_;
 
-  // When we generate new tables, we increment the serial number of the
-  // shared memory object.
-  int32_t shared_memory_serial_ = 0;
-
   // Number of non-empty items in the table, used to compute fullness.
   int32_t used_items_ = 0;
 
@@ -484,6 +444,10 @@ class VisitedLinkWriter : public VisitedLinkCommon {
   // will be false in production.
   const bool suppress_rebuild_ = false;
 
+  // Set to fail CreateURLTable(), to simulate shared memory allocation failure.
+  // This is used for testing, will be false in production.
+  static bool fail_table_creation_for_testing_;
+
   base::WeakPtrFactory<VisitedLinkWriter> weak_ptr_factory_{this};
 };
 
@@ -494,8 +458,9 @@ class VisitedLinkWriter : public VisitedLinkCommon {
 inline void VisitedLinkWriter::DebugValidate() {
   int32_t used_count = 0;
   for (int32_t i = 0; i < table_length_; i++) {
-    if (hash_table_[i])
+    if (UNSAFE_TODO(hash_table_[i])) {
       used_count++;
+    }
   }
   DCHECK_EQ(used_count, used_items_);
 }

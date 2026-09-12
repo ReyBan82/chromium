@@ -11,11 +11,10 @@
 
 #include "base/callback_list.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-
-namespace ash {
-class SessionManagerClient;
-}
+#include "base/types/expected.h"
+#include "chromeos/ash/components/dbus/session_manager/session_manager_client.h"
 
 namespace base {
 class TimeDelta;
@@ -30,6 +29,7 @@ class ServerBackedStateKeysBroker {
  public:
   using UpdateCallbackList = base::RepeatingClosureList;
   using UpdateCallback = UpdateCallbackList::CallbackType;
+  using ErrorType = ash::SessionManagerClient::StateKeyErrorType;
   using StateKeysCallbackList =
       base::OnceCallbackList<void(const std::vector<std::string>&)>;
   using StateKeysCallback = StateKeysCallbackList::CallbackType;
@@ -41,7 +41,7 @@ class ServerBackedStateKeysBroker {
   ServerBackedStateKeysBroker& operator=(const ServerBackedStateKeysBroker&) =
       delete;
 
-  ~ServerBackedStateKeysBroker();
+  virtual ~ServerBackedStateKeysBroker();
 
   // Registers a callback to be invoked whenever the state keys get updated.
   // Note that consuming code needs to hold on to the returned subscription as
@@ -55,8 +55,8 @@ class ServerBackedStateKeysBroker {
   // there's a problem determining the state keys, the passed vector will be
   // empty. If |this| gets destroyed before the callback happens or if the time
   // sync fails / the network is not established, then the |callback| is never
-  // invoked. See http://crbug.com/649422 for more context.
-  void RequestStateKeys(StateKeysCallback callback);
+  // invoked. See http://crbug.com/40486047 for more context.
+  virtual void RequestStateKeys(StateKeysCallback callback);
 
   static base::TimeDelta GetPollIntervalForTesting();
   static base::TimeDelta GetRetryIntervalForTesting();
@@ -65,10 +65,20 @@ class ServerBackedStateKeysBroker {
   // or pending retrieval.
   const std::vector<std::string>& state_keys() const { return state_keys_; }
 
+  // Returns latest state key retrieval error.
+  virtual ErrorType error_type() const;
+
   // Returns the state key for the current point in time. Returns an empty
   // string if state keys are unavailable or pending retrieval.
   std::string current_state_key() const {
     return state_keys_.empty() ? std::string() : state_keys_.front();
+  }
+
+  // Returns the discrete time quantum index corresponding to the first state
+  // key in state_keys(). Returns 0 if state keys are unavailable or pending
+  // retrieval.
+  int64_t current_time_quantum_index() const {
+    return current_time_quantum_index_;
   }
 
   // Whether state keys are available. Returns false if state keys are
@@ -80,12 +90,15 @@ class ServerBackedStateKeysBroker {
   void FetchStateKeys();
 
   // Stores newly-received state keys and notifies consumers.
-  void StoreStateKeys(const std::vector<std::string>& state_keys);
+  void StoreStateKeys(base::expected<ash::SessionManagerClient::StateKeysData,
+                                     ErrorType> state_keys_data);
 
-  ash::SessionManagerClient* session_manager_client_;
+  raw_ptr<ash::SessionManagerClient, DanglingUntriaged> session_manager_client_;
 
   // The current set of state keys.
   std::vector<std::string> state_keys_;
+  int64_t current_time_quantum_index_ = 0;
+  ErrorType error_type_ = ErrorType::kNoError;
 
   // Whether a request for state keys is pending.
   bool requested_;

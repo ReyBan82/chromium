@@ -7,10 +7,13 @@
 #include "chrome/common/webui_url_constants.h"
 #include "content/public/test/browser_task_environment.h"
 #include "extensions/browser/api/web_request/web_request_info.h"
+#include "extensions/buildflags/buildflags.h"
 #include "google_apis/gaia/gaia_urls.h"
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -45,8 +48,8 @@ TEST_F(ChromeExtensionsAPIClientTest, ShouldHideBrowserNetworkRequest) {
     WebRequestInfoInitParams request_params;
     request_params.url = GURL("https://example.com/script.js");
     request_params.initiator =
-        url::Origin::Create(GURL(chrome::kChromeUINewTabURL));
-    request_params.render_process_id = -1;
+        url::Origin::Create(chrome::ChromeUINewTabURLAsGURL());
+    request_params.global_id = content::GlobalRenderFrameHostId();
     request_params.web_request_type = web_request_type;
     return request_params;
   };
@@ -65,7 +68,8 @@ TEST_F(ChromeExtensionsAPIClientTest, ShouldHideBrowserNetworkRequest) {
   // Similar requests made by the renderer should be visible to extensions.
   WebRequestInfoInitParams params =
       create_params(WebRequestResourceType::SCRIPT);
-  params.render_process_id = 2;
+  params.global_id = content::GlobalRenderFrameHostId(
+      content::ChildProcessId(2), IPC::mojom::kRoutingIdNone);
   EXPECT_FALSE(client.ShouldHideBrowserNetworkRequest(
       nullptr /* context */, WebRequestInfo(std::move(params))));
 }

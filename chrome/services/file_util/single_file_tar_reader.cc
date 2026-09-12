@@ -4,8 +4,10 @@
 
 #include "chrome/services/file_util/single_file_tar_reader.h"
 
+#include <optional>
+
 #include "base/check.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/numerics/safe_conversions.h"
 
 namespace {
 // https://www.gnu.org/software/tar/manual/html_node/Standard.html
@@ -43,7 +45,8 @@ bool SingleFileTarReader::ExtractChunk(base::span<const uint8_t> src_buffer,
   // A tar file always has a padding at the end of the file. If `dst_buffer`
   // contains the padding, drop it.
   if (dst_buffer.size() > bytes_remaining) {
-    dst_buffer = dst_buffer.first(bytes_remaining);
+    // The comparison above guarantees that `checked_cast` will succeed:
+    dst_buffer = dst_buffer.first(base::checked_cast<size_t>(bytes_remaining));
   }
 
   bytes_processed_ += dst_buffer.size();
@@ -58,11 +61,11 @@ bool SingleFileTarReader::IsComplete() const {
 }
 
 // static
-absl::optional<uint64_t> SingleFileTarReader::ReadOctalNumber(
+std::optional<uint64_t> SingleFileTarReader::ReadOctalNumber(
     base::span<const uint8_t> buffer) {
   const size_t length = buffer.size();
   if (length < 8u)
-    return absl::nullopt;
+    return std::nullopt;
 
   uint64_t num = 0;
 
@@ -80,8 +83,19 @@ absl::optional<uint64_t> SingleFileTarReader::ReadOctalNumber(
 
   for (size_t i = 0; i < length; ++i) {
     const char as_char = static_cast<char>(buffer[i]);
-    if (as_char == '\0')
+    // POSIX requires numeric fields to be terminated with either a space or a
+    // NUL. Stop reading when either is encountered.
+    // See "POSIX ustar Archives" section at:
+    // https://man.freebsd.org/cgi/man.cgi?query=tar&sektion=5
+    if (as_char == '\0' || as_char == ' ') {
       break;
+    }
+    // Ensure the character is a valid octal digit. If it is not, parsing would
+    // result in an invalid number, or potentially a negative value underflow
+    // if the character is not ASCII.
+    if (as_char < '0' || as_char > '7') {
+      return std::nullopt;
+    }
     num *= 8;
     num += as_char - '0';
   }

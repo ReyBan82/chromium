@@ -4,12 +4,18 @@
 
 #include "cc/metrics/events_metrics_manager.h"
 
+#include <array>
+#include <memory>
+#include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "base/functional/bind.h"
 #include "base/test/simple_test_tick_clock.h"
+#include "base/time/time.h"
 #include "cc/metrics/event_metrics.h"
+#include "cc/paint/element_id.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/events/types/event_type.h"
@@ -33,17 +39,21 @@ EventsMetricsManager::ScopedMonitor::DoneCallback CreateSimpleDoneCallback(
       std::move(metrics));
 }
 
+constexpr base::TimeTicks kScrollBeginGeneratedTimestamp =
+    base::TimeTicks() + base::Microseconds(1);
+constexpr base::TimeTicks kScrollBeginArrivalTimestamp =
+    base::TimeTicks() + base::Microseconds(2);
+
 }  // namespace
 
-#define EXPECT_SCOPED(statements) \
-  {                               \
-    SCOPED_TRACE("");             \
-    statements;                   \
-  }
-
+using ::testing::Each;
+using ::testing::ElementsAre;
+using ::testing::Field;
 using ::testing::IsEmpty;
 using ::testing::Message;
-using ::testing::UnorderedPointwise;
+using ::testing::Pointee;
+using ::testing::Pointwise;
+using ::testing::Property;
 
 class EventsMetricsManagerTest : public testing::Test {
  public:
@@ -52,10 +62,47 @@ class EventsMetricsManagerTest : public testing::Test {
 
  protected:
   std::unique_ptr<EventMetrics> CreateEventMetrics(ui::EventType type) {
+    auto [event_time, arrived_in_browser_main_timestamp] =
+        NextEventTimestamps();
+    return EventMetrics::CreateForTesting(type, event_time,
+                                          arrived_in_browser_main_timestamp,
+                                          &test_tick_clock_, std::nullopt);
+  }
+
+  std::unique_ptr<ScrollEventMetrics> CreateScrollEventMetrics(
+      ui::EventType type,
+      bool is_inertial) {
+    auto [event_time, arrived_in_browser_main_timestamp] =
+        NextEventTimestamps();
+    return ScrollEventMetrics::CreateForTesting(
+        type, ui::ScrollInputType::kTouchscreen, is_inertial, event_time,
+        arrived_in_browser_main_timestamp, &test_tick_clock_,
+        kScrollBeginGeneratedTimestamp, kScrollBeginArrivalTimestamp);
+  }
+
+  std::unique_ptr<ScrollEventMetrics> CreateScrollUpdateEventMetrics(
+      ui::EventType type,
+      bool is_inertial,
+      ScrollUpdateEventMetrics::ScrollUpdateType scroll_update_type) {
+    auto [event_time, arrived_in_browser_main_timestamp] =
+        NextEventTimestamps();
+    return ScrollUpdateEventMetrics::CreateForTesting(
+        type, ui::ScrollInputType::kTouchscreen, is_inertial,
+        scroll_update_type,
+        /* delta= */ 4.2f, event_time, arrived_in_browser_main_timestamp,
+        &test_tick_clock_,
+        /* trace_id= */ std::nullopt, kScrollBeginGeneratedTimestamp,
+        kScrollBeginArrivalTimestamp);
+  }
+
+  std::tuple<base::TimeTicks, base::TimeTicks> NextEventTimestamps() {
     test_tick_clock_.Advance(base::Microseconds(10));
     base::TimeTicks event_time = test_tick_clock_.NowTicks();
+    test_tick_clock_.Advance(base::Microseconds(5));
+    base::TimeTicks arrived_in_browser_main_timestamp =
+        test_tick_clock_.NowTicks();
     test_tick_clock_.Advance(base::Microseconds(10));
-    return EventMetrics::CreateForTesting(type, event_time, &test_tick_clock_);
+    return {event_time, arrived_in_browser_main_timestamp};
   }
 
   EventsMetricsManager manager_;
@@ -72,23 +119,27 @@ TEST_F(EventsMetricsManagerTest, EventsMetricsSaved) {
     kSaveOutsideScope,
   };
 
-  std::pair<std::unique_ptr<EventMetrics>, Behavior> events[] = {
+  auto events = std::to_array<
+      std::pair<std::unique_ptr<EventMetrics>, Behavior>>({
       // An interesting event type for which SaveActiveEventMetrics() is not
       // called.
-      {CreateEventMetrics(ui::ET_MOUSE_PRESSED), Behavior::kDoNotSave},
+      {CreateEventMetrics(ui::EventType::kMousePressed), Behavior::kDoNotSave},
 
       // An interesting event type for which SaveActiveEventMetrics() is called
       // inside its monitor scope.
-      {CreateEventMetrics(ui::ET_MOUSE_PRESSED), Behavior::kSaveInsideScope},
+      {CreateEventMetrics(ui::EventType::kMousePressed),
+       Behavior::kSaveInsideScope},
 
       // An interesting event type for which SaveActiveEventMetrics() is called
       // after its monitor scope is finished.
-      {CreateEventMetrics(ui::ET_MOUSE_PRESSED), Behavior::kSaveOutsideScope},
+      {CreateEventMetrics(ui::EventType::kMousePressed),
+       Behavior::kSaveOutsideScope},
 
       // A non-interesting event type for which SaveActiveEventMetrics() is
       // called inside its monitor scope.
-      {CreateEventMetrics(ui::ET_MOUSE_MOVED), Behavior::kSaveInsideScope},
-  };
+      {CreateEventMetrics(ui::EventType::kMouseEntered),
+       Behavior::kSaveInsideScope},
+  });
   EXPECT_NE(events[0].first, nullptr);
   EXPECT_NE(events[1].first, nullptr);
   EXPECT_NE(events[2].first, nullptr);
@@ -115,25 +166,64 @@ TEST_F(EventsMetricsManagerTest, EventsMetricsSaved) {
 
   // Check saved event metrics are as expected.
   EXPECT_THAT(manager_.TakeSavedEventsMetrics(),
-              UnorderedPointwise(UniquePtrMatches(), expected_saved_events));
+              Pointwise(UniquePtrMatches(), expected_saved_events));
 
   // The first call to TakeSavedEventsMetrics() should remove events metrics
   // from the manager, so the second call should return empty list.
   EXPECT_THAT(manager_.TakeSavedEventsMetrics(), IsEmpty());
 }
 
+// Tests that the manager will save `kGestureScrollUpdate` and
+// `kGestureScrollEnd` events even if there are no `SaveActiveEventsMetrics()`
+// calls.
+TEST_F(EventsMetricsManagerTest, ScrollUpdateAndEndSavedEvenWithoutCall) {
+  auto events = std::to_array<std::unique_ptr<EventMetrics>>(
+      {CreateScrollUpdateEventMetrics(
+           ui::EventType::kGestureScrollUpdate,
+           /* is_inertial= */ false,
+           ScrollUpdateEventMetrics::ScrollUpdateType::kContinued),
+       CreateScrollEventMetrics(ui::EventType::kGestureScrollEnd,
+                                /* is_inertial= */ false)});
+  EXPECT_EQ(events[0]->type(), EventMetrics::EventType::kGestureScrollUpdate);
+  EXPECT_EQ(events[1]->type(), EventMetrics::EventType::kGestureScrollEnd);
+
+  const EventMetrics* expected_saved_events[] = {events[0].get(),
+                                                 events[1].get()};
+
+  for (auto& metrics : events) {
+    metrics->set_caused_frame_update(true);
+    {
+      auto monitor = manager_.GetScopedMonitor(
+          // A `DoneCallback` which ignores `handled` and always returns
+          // `metrics`.
+          base::BindOnce([](std::unique_ptr<EventMetrics> metrics,
+                            bool handled) { return metrics; },
+                         std::move(metrics)));
+    }
+  }
+
+  // Check saved event metrics are as expected and that they were marked as not
+  // having caused a frame update.
+  auto saved_events_metrics = manager_.TakeSavedEventsMetrics();
+  EXPECT_THAT(saved_events_metrics,
+              Pointwise(UniquePtrMatches(), expected_saved_events));
+  EXPECT_THAT(
+      saved_events_metrics,
+      Each(Pointee(Property(&EventMetrics::caused_frame_update, false))));
+}
+
 // Tests that metrics for nested event loops are handled properly in a few
 // different configurations.
 TEST_F(EventsMetricsManagerTest, NestedEventsMetrics) {
-  struct {
-    // Type of event to use for the outer scope. `ui::EventType::ET_UNKNOWN` if
+  struct Configs {
+    // Type of event to use for the outer scope. `ui::EventType::kUnknown` if
     // no event should be used.
     ui::EventType outer_event_type;
 
     // Whether to save the outer scope metrics before starting the inner scope.
     bool save_outer_metrics_before_inner;
 
-    // Type of event to use for the inner scope. `ui::EventType::ET_UNKNOWN` if
+    // Type of event to use for the inner scope. `ui::EventType::kUnknown` if
     // no event should be used.
     ui::EventType inner_event_type;
 
@@ -142,52 +232,53 @@ TEST_F(EventsMetricsManagerTest, NestedEventsMetrics) {
 
     // Whether to save the outer scope metrics after the inner scope ended.
     bool save_outer_metrics_after_inner;
-  } configs[] = {
+  };
+  auto configs = std::to_array<Configs>({
       // Config #0.
       {
-          /*outer_event_type=*/ui::EventType::ET_MOUSE_PRESSED,
+          /*outer_event_type=*/ui::EventType::kMousePressed,
           /*save_outer_metrics_before_inner=*/true,
-          /*inner_event_type=*/ui::EventType::ET_MOUSE_RELEASED,
+          /*inner_event_type=*/ui::EventType::kMouseReleased,
           /*save_inner_metrics=*/true,
           /*save_outer_metrics_after_inner=*/false,
       },
 
       // Config #1.
       {
-          /*outer_event_type=*/ui::EventType::ET_MOUSE_PRESSED,
+          /*outer_event_type=*/ui::EventType::kMousePressed,
           /*save_outer_metrics_before_inner=*/false,
-          /*inner_event_type=*/ui::EventType::ET_MOUSE_RELEASED,
+          /*inner_event_type=*/ui::EventType::kMouseReleased,
           /*save_inner_metrics=*/true,
           /*save_outer_metrics_after_inner=*/true,
       },
 
       // Config #2.
       {
-          /*outer_event_type=*/ui::EventType::ET_MOUSE_PRESSED,
+          /*outer_event_type=*/ui::EventType::kMousePressed,
           /*save_outer_metrics_before_inner=*/true,
-          /*inner_event_type=*/ui::EventType::ET_MOUSE_RELEASED,
+          /*inner_event_type=*/ui::EventType::kMouseReleased,
           /*save_inner_metrics=*/true,
           /*save_outer_metrics_after_inner=*/true,
       },
 
       // Config #3.
       {
-          /*outer_event_type=*/ui::EventType::ET_MOUSE_PRESSED,
+          /*outer_event_type=*/ui::EventType::kMousePressed,
           /*save_outer_metrics_before_inner=*/false,
-          /*inner_event_type=*/ui::EventType::ET_UNKNOWN,
+          /*inner_event_type=*/ui::EventType::kUnknown,
           /*save_inner_metrics=*/false,
           /*save_outer_metrics_after_inner=*/true,
       },
 
       // Config #4.
       {
-          /*outer_event_type=*/ui::EventType::ET_UNKNOWN,
+          /*outer_event_type=*/ui::EventType::kUnknown,
           /*save_outer_metrics_before_inner=*/false,
-          /*inner_event_type=*/ui::EventType::ET_MOUSE_PRESSED,
+          /*inner_event_type=*/ui::EventType::kMousePressed,
           /*save_inner_metrics=*/true,
           /*save_outer_metrics_after_inner=*/false,
       },
-  };
+  });
 
   for (size_t i = 0; i < std::size(configs); i++) {
     auto& config = configs[i];
@@ -195,10 +286,11 @@ TEST_F(EventsMetricsManagerTest, NestedEventsMetrics) {
 
     {  // Start outer scope.
       std::unique_ptr<EventMetrics> outer_metrics;
-      if (config.outer_event_type != ui::EventType::ET_UNKNOWN) {
+      std::optional<const EventMetrics*> expected_saved_outer_metrics;
+      if (config.outer_event_type != ui::EventType::kUnknown) {
         outer_metrics = CreateEventMetrics(config.outer_event_type);
         DCHECK_NE(outer_metrics, nullptr);
-        expected_saved_metrics.push_back(outer_metrics.get());
+        expected_saved_outer_metrics = outer_metrics.get();
       }
       auto outer_monitor = manager_.GetScopedMonitor(
           CreateSimpleDoneCallback(std::move(outer_metrics)));
@@ -207,7 +299,7 @@ TEST_F(EventsMetricsManagerTest, NestedEventsMetrics) {
 
       {  // Start inner scope.
         std::unique_ptr<EventMetrics> inner_metrics;
-        if (config.inner_event_type != ui::EventType::ET_UNKNOWN) {
+        if (config.inner_event_type != ui::EventType::kUnknown) {
           inner_metrics = CreateEventMetrics(config.inner_event_type);
           DCHECK_NE(inner_metrics, nullptr);
           expected_saved_metrics.push_back(inner_metrics.get());
@@ -218,14 +310,155 @@ TEST_F(EventsMetricsManagerTest, NestedEventsMetrics) {
           manager_.SaveActiveEventMetrics();
       }  // End inner scope
 
+      if (expected_saved_outer_metrics) {
+        expected_saved_metrics.push_back(*expected_saved_outer_metrics);
+      }
+
       if (config.save_outer_metrics_after_inner)
         manager_.SaveActiveEventMetrics();
     }  // End outer scope.
 
     SCOPED_TRACE(Message() << "Config #" << i);
     EXPECT_THAT(manager_.TakeSavedEventsMetrics(),
-                UnorderedPointwise(UniquePtrMatches(), expected_saved_metrics));
+                Pointwise(UniquePtrMatches(), expected_saved_metrics));
   }
+}
+
+TEST_F(EventsMetricsManagerTest,
+       DropSavedEventMetricsForNoFrameUpdatePreservesScrollUpdateAndEnd) {
+  auto events = std::to_array<std::unique_ptr<EventMetrics>>(
+      {CreateEventMetrics(ui::EventType::kTouchMoved),
+       CreateScrollUpdateEventMetrics(
+           ui::EventType::kGestureScrollUpdate,
+           /* is_inertial= */ false,
+           ScrollUpdateEventMetrics::ScrollUpdateType::kContinued),
+       CreateEventMetrics(ui::EventType::kTouchReleased),
+       CreateScrollEventMetrics(ui::EventType::kGestureScrollEnd,
+                                /* is_inertial= */ false)});
+  EXPECT_EQ(events[0]->type(), EventMetrics::EventType::kTouchMoved);
+  EXPECT_EQ(events[1]->type(), EventMetrics::EventType::kGestureScrollUpdate);
+  EXPECT_EQ(events[2]->type(), EventMetrics::EventType::kTouchReleased);
+  EXPECT_EQ(events[3]->type(), EventMetrics::EventType::kGestureScrollEnd);
+
+  // Out of the above events, only `kGestureScrollUpdate` and
+  // `kGestureScrollEnd` should be preserved.
+  const EventMetrics* expected_saved_events[] = {events[1].get(),
+                                                 events[3].get()};
+
+  for (auto& event : events) {
+    event->set_caused_frame_update(true);
+    auto monitor =
+        manager_.GetScopedMonitor(CreateSimpleDoneCallback(std::move(event)));
+    manager_.SaveActiveEventMetrics();
+  }
+
+  manager_.DropSavedEventMetricsForNoFrameUpdate();
+
+  // Check that only `kGestureScrollUpdate` and `kGestureScrollEnd` were
+  // preserved and that they were marked as not having caused a frame update.
+  auto preserved_metrics = manager_.TakeSavedEventsMetrics();
+  EXPECT_THAT(preserved_metrics,
+              Pointwise(UniquePtrMatches(), expected_saved_events));
+  EXPECT_THAT(
+      preserved_metrics,
+      Each(Pointee(Property(&EventMetrics::caused_frame_update, false))));
+}
+
+// Tests that applied scroll observations recorded during a monitor's scope are
+// attached to the monitored scroll update, oldest first.
+TEST_F(EventsMetricsManagerTest, AppliedScrollObservationsAttachedToUpdate) {
+  std::unique_ptr<EventMetrics> metrics = CreateScrollUpdateEventMetrics(
+      ui::EventType::kGestureScrollUpdate,
+      /* is_inertial= */ false,
+      ScrollUpdateEventMetrics::ScrollUpdateType::kContinued);
+  const base::TimeTicks update_input_timestamp =
+      metrics->GetDispatchStageTimestamp(
+          EventMetrics::DispatchStage::kGenerated);
+
+  {
+    auto monitor =
+        manager_.GetScopedMonitor(CreateSimpleDoneCallback(std::move(metrics)));
+    manager_.SaveActiveEventMetrics();
+    manager_.RecordAppliedScrollObservation(ElementId(1));
+    manager_.RecordAppliedScrollObservation(ElementId(2));
+  }
+
+  EventMetrics::List saved_events = manager_.TakeSavedEventsMetrics();
+  ASSERT_EQ(saved_events.size(), 1u);
+  EXPECT_EQ(saved_events[0]->AsScrollUpdate()->applied_scroll_observations(),
+            (std::vector<ScrollUpdateEventMetrics::AppliedScrollObservation>{
+                {.update_input_timestamp = update_input_timestamp,
+                 .element_id = ElementId(1)},
+                {.update_input_timestamp = update_input_timestamp,
+                 .element_id = ElementId(2)}}));
+}
+
+// Tests that an applied scroll observation is attached to the innermost active
+// monitor only.
+TEST_F(EventsMetricsManagerTest, AppliedScrollObservationsUseInnermostMonitor) {
+  std::unique_ptr<EventMetrics> outer_metrics = CreateScrollUpdateEventMetrics(
+      ui::EventType::kGestureScrollUpdate,
+      /* is_inertial= */ false,
+      ScrollUpdateEventMetrics::ScrollUpdateType::kContinued);
+  std::unique_ptr<EventMetrics> inner_metrics = CreateScrollUpdateEventMetrics(
+      ui::EventType::kGestureScrollUpdate,
+      /* is_inertial= */ false,
+      ScrollUpdateEventMetrics::ScrollUpdateType::kContinued);
+  const EventMetrics* outer_metrics_ptr = outer_metrics.get();
+  const EventMetrics* inner_metrics_ptr = inner_metrics.get();
+
+  {
+    auto outer_monitor = manager_.GetScopedMonitor(
+        CreateSimpleDoneCallback(std::move(outer_metrics)));
+    manager_.SaveActiveEventMetrics();
+    {
+      auto inner_monitor = manager_.GetScopedMonitor(
+          CreateSimpleDoneCallback(std::move(inner_metrics)));
+      manager_.SaveActiveEventMetrics();
+      manager_.RecordAppliedScrollObservation(ElementId(1));
+    }
+    manager_.RecordAppliedScrollObservation(ElementId(2));
+  }
+
+  EventMetrics::List saved_events = manager_.TakeSavedEventsMetrics();
+  ASSERT_THAT(
+      saved_events,
+      Pointwise(UniquePtrMatches(), std::vector<const EventMetrics*>{
+                                        inner_metrics_ptr, outer_metrics_ptr}));
+  EXPECT_THAT(
+      saved_events[0]->AsScrollUpdate()->applied_scroll_observations(),
+      ElementsAre(
+          Field(&ScrollUpdateEventMetrics::AppliedScrollObservation::element_id,
+                ElementId(1))));
+  EXPECT_THAT(
+      saved_events[1]->AsScrollUpdate()->applied_scroll_observations(),
+      ElementsAre(
+          Field(&ScrollUpdateEventMetrics::AppliedScrollObservation::element_id,
+                ElementId(2))));
+}
+
+// Tests that movement applied with no active monitor is dropped.
+TEST_F(EventsMetricsManagerTest, AppliedScrollObservationsWithoutMonitor) {
+  manager_.RecordAppliedScrollObservation(ElementId(1));
+
+  EXPECT_EQ(manager_.saved_events_metrics_count_for_testing(), 0u);
+}
+
+// Tests that movement monitored for a non-scroll-update event is dropped.
+TEST_F(EventsMetricsManagerTest, AppliedScrollObservationsWithoutScrollUpdate) {
+  std::unique_ptr<EventMetrics> metrics =
+      CreateScrollEventMetrics(ui::EventType::kGestureScrollEnd,
+                               /* is_inertial= */ false);
+  {
+    auto monitor =
+        manager_.GetScopedMonitor(CreateSimpleDoneCallback(std::move(metrics)));
+    manager_.SaveActiveEventMetrics();
+    manager_.RecordAppliedScrollObservation(ElementId(2));
+  }
+
+  EventMetrics::List saved_events = manager_.TakeSavedEventsMetrics();
+  ASSERT_EQ(saved_events.size(), 1u);
+  EXPECT_EQ(saved_events[0]->AsScrollUpdate(), nullptr);
 }
 
 }  // namespace cc

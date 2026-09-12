@@ -4,12 +4,14 @@
 
 #include "chrome/common/extensions/permissions/chrome_permission_message_provider.h"
 
+#include <algorithm>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/memory/raw_ptr.h"
 #include "base/metrics/field_trial.h"
-#include "base/ranges/algorithm.h"
 #include "base/stl_util.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
@@ -31,14 +33,20 @@ class ComparablePermission {
  public:
   explicit ComparablePermission(const PermissionMessage& msg) : msg_(&msg) {}
 
-  bool operator<(const ComparablePermission& rhs) const {
-    return std::tie(msg_->message(), msg_->submessages()) <
-           std::tie(rhs.msg_->message(), rhs.msg_->submessages());
+  friend auto operator<=>(const ComparablePermission& a,
+                          const ComparablePermission& b) {
+    return std::tie(a.msg_->message(), a.msg_->submessages()) <=>
+           std::tie(b.msg_->message(), b.msg_->submessages());
   }
 
-  bool operator==(const ComparablePermission& rhs) const {
-    return msg_->message() == rhs.msg_->message() &&
-           msg_->submessages() == rhs.msg_->submessages();
+  // This will not be unused when std::ranges:: switches to std::ranges::, as
+  // that requires this. To avoid having to make the changes in lockstep, mark
+  // as `[[maybe_unused]]` for now.
+  // TODO(crbug.com/386918226): Remove annotation once std::ranges:: is gone.
+  [[maybe_unused]] friend bool operator==(const ComparablePermission& a,
+                                          const ComparablePermission& b) {
+    return std::tie(a.msg_->message(), a.msg_->submessages()) ==
+           std::tie(b.msg_->message(), b.msg_->submessages());
   }
 
  private:
@@ -50,11 +58,9 @@ using ComparablePermissions = std::vector<ComparablePermission>;
 
 typedef std::set<PermissionMessage> PermissionMsgSet;
 
-ChromePermissionMessageProvider::ChromePermissionMessageProvider() {
-}
+ChromePermissionMessageProvider::ChromePermissionMessageProvider() = default;
 
-ChromePermissionMessageProvider::~ChromePermissionMessageProvider() {
-}
+ChromePermissionMessageProvider::~ChromePermissionMessageProvider() = default;
 
 PermissionMessages ChromePermissionMessageProvider::GetPermissionMessages(
     const PermissionIDSet& permissions) const {
@@ -139,9 +145,10 @@ void ChromePermissionMessageProvider::AddHostPermissions(
   // Since platform apps always use isolated storage, they can't (silently)
   // access user data on other domains, so there's no need to prompt.
   // Note: this must remain consistent with IsHostPrivilegeIncrease.
-  // See crbug.com/255229.
-  if (extension_type == Manifest::TYPE_PLATFORM_APP)
+  // See crbug.com/40323545.
+  if (extension_type == Manifest::Type::kPlatformApp) {
     return;
+  }
 
   if (permissions.ShouldWarnAllHosts()) {
     permission_ids->insert(APIPermissionID::kHostsAll);
@@ -180,13 +187,6 @@ bool ChromePermissionMessageProvider::IsAPIOrManifestPrivilegeIncrease(
   if (requested_permissions.ShouldWarnAllHosts())
     potential_total_ids.insert(APIPermissionID::kHostsAll);
 
-  // For M62, we added a new permission ID for new tab page overrides. Consider
-  // the addition of this permission to not result in a privilege increase for
-  // the time being.
-  // TODO(robertshield): Remove this once most of the population is on M62+
-  granted_ids.erase(APIPermissionID::kNewTabPageOverride);
-  potential_total_ids.erase(APIPermissionID::kNewTabPageOverride);
-
   // If all the IDs were already there, it's not a privilege increase.
   if (granted_ids.Includes(potential_total_ids))
     return false;
@@ -210,7 +210,7 @@ bool ChromePermissionMessageProvider::IsAPIOrManifestPrivilegeIncrease(
   // significant difference - e.g., going from two lower warnings to a single
   // scarier warning because of adding a new permission). But let's be overly
   // conservative for now.
-  return !base::ranges::includes(granted_strings, total_strings);
+  return !std::ranges::includes(granted_strings, total_strings);
 }
 
 bool ChromePermissionMessageProvider::IsHostPrivilegeIncrease(
@@ -219,8 +219,9 @@ bool ChromePermissionMessageProvider::IsHostPrivilegeIncrease(
     Manifest::Type extension_type) const {
   // Platform apps host permission changes do not count as privilege increases.
   // Note: this must remain consistent with AddHostPermissions.
-  if (extension_type == Manifest::TYPE_PLATFORM_APP)
+  if (extension_type == Manifest::Type::kPlatformApp) {
     return false;
+  }
 
   // If the granted permission set can access any host, then it can't be
   // elevated.
@@ -249,11 +250,11 @@ bool ChromePermissionMessageProvider::IsHostPrivilegeIncrease(
   // not exactly the same.
   for (const auto& requested : requested_hosts_only) {
     bool host_matched = false;
-    const base::StringPiece unmatched(requested);
+    const std::string_view unmatched(requested);
     for (const auto& granted : granted_hosts_set) {
       if (granted.size() > 2 && granted[0] == '*' && granted[1] == '.') {
-        const base::StringPiece stripped_granted(granted.data() + 1,
-                                                 granted.length() - 1);
+        const std::string_view stripped_granted =
+            std::string_view(granted).substr(1);
         // If the unmatched host ends with the the granted host,
         // after removing the '*', then it's a match. In addition,
         // because we consider having access to "*.domain.com" as

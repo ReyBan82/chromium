@@ -29,8 +29,7 @@ class SocketUnitTest : public ExtensionApiUnittest {
     ExtensionApiUnittest::SetUp();
 
     ApiResourceManager<Socket>::GetFactoryInstance()->SetTestingFactoryAndUse(
-        browser()->profile(),
-        base::BindRepeating(&ApiResourceManagerTestFactory));
+        profile(), base::BindRepeating(&ApiResourceManagerTestFactory));
   }
 };
 
@@ -39,7 +38,7 @@ TEST_F(SocketUnitTest, Create) {
   SocketCreateFunction* function = new SocketCreateFunction();
 
   // Run tests
-  absl::optional<base::Value::Dict> result =
+  std::optional<base::DictValue> result =
       RunFunctionAndReturnDictionary(function, "[\"tcp\"]");
   ASSERT_TRUE(result);
 }

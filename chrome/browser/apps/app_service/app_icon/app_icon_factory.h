@@ -9,28 +9,25 @@
 #include <string>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/apps/app_service/app_icon/app_icon_util.h"
-#include "chrome/browser/web_applications/web_app_install_info.h"
+#include "chrome/browser/web_applications/model/web_app_icon_types.h"
+#include "components/services/app_service/public/cpp/icon_effects.h"
 #include "components/services/app_service/public/cpp/icon_types.h"
 #include "ui/gfx/image/image_skia.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "ash/components/arc/mojom/app.mojom.h"
-#include "ash/components/arc/mojom/intent_helper.mojom.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chromeos/ash/experiences/arc/mojom/app.mojom-forward.h"
+#include "chromeos/ash/experiences/arc/mojom/intent_helper.mojom-forward.h"
 #include "ui/base/resource/resource_scale_factor.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
-
-namespace content {
-class BrowserContext;
-}
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace gfx {
 class ImageSkia;
 }
 
+class Profile;
 class SkBitmap;
 
 namespace apps {
@@ -48,22 +45,28 @@ gfx::ImageSkia CreateResizedResourceImage(int icon_resource,
 
 apps::ScaleToSize GetScaleToSize(const gfx::ImageSkia& image_skia);
 
-// Decodes `data` to a SkBitmap. The decode happens in-process, so must only be
-// done with trusted data.
-SkBitmap DecompressToSkBitmap(const unsigned char* data, size_t size);
+// Converts compressed image data to a SkBitmap. Decoding happens in an isolated
+// process.
+void CompressedDataToSkBitmap(
+    base::span<const uint8_t> compressed_data,
+    base::OnceCallback<void(const SkBitmap&)> callback);
 
-// Creates an ImageSkia for the given `bitmap` and `icon_scale`;
-gfx::ImageSkia SkBitmapToImageSkia(SkBitmap bitmap, float icon_scale);
+// Converts compressed image data to an ImageSkia. Decoding happens in an
+// isolated process.
+void CompressedDataToImageSkia(
+    base::span<const uint8_t> compressed_data,
+    float icon_scale,
+    base::OnceCallback<void(gfx::ImageSkia)> callback);
 
-// Returns a callback that converts compressed data to an ImageSkia.
+// Returns a callback that converts compressed image data to an ImageSkia.
+// Decoding happens in an isolated process.
 base::OnceCallback<void(std::vector<uint8_t> compressed_data)>
 CompressedDataToImageSkiaCallback(
     base::OnceCallback<void(gfx::ImageSkia)> callback,
     float icon_scale);
 
-// Converts compressed data to a SkBitmap.
-void CompressedDataToSkBitmap(std::vector<uint8_t> compressed_data,
-                              base::OnceCallback<void(SkBitmap)> callback);
+// Creates an ImageSkia for the given `bitmap` and `icon_scale`.
+gfx::ImageSkia SkBitmapToImageSkia(const SkBitmap& bitmap, float icon_scale);
 
 // Encodes a single SkBitmap representation from the given ImageSkia to the
 // compressed PNG data. |rep_icon_scale| argument denotes, which ImageSkiaRep to
@@ -76,7 +79,7 @@ gfx::ImageSkia LoadMaskImage(const ScaleToSize& scale_to_size);
 
 gfx::ImageSkia ApplyBackgroundAndMask(const gfx::ImageSkia& image);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 gfx::ImageSkia CompositeImagesAndApplyMask(
     const gfx::ImageSkia& foreground_image,
     const gfx::ImageSkia& background_image);
@@ -91,21 +94,23 @@ void ArcActivityIconsToImageSkias(
     base::OnceCallback<void(const std::vector<gfx::ImageSkia>& icons)>
         callback);
 
-// TODO(crbug.com/1189994): Unify this function with AppIconLoader class.
+// TODO(crbug.com/40755741): Unify this function with AppIconLoader class.
 // It's the same as AppIconLoader::OnReadWebAppIcon().
 gfx::ImageSkia ConvertSquareBitmapsToImageSkia(
-    const std::map<SquareSizePx, SkBitmap>& icon_bitmaps,
+    const web_app::OrderedSizeToBitmap& icon_bitmaps,
     IconEffects icon_effects,
     int size_hint_in_dip);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 gfx::ImageSkia ConvertIconBitmapsToImageSkia(
-    const std::map<SquareSizePx, SkBitmap>& icon_bitmaps,
+    const web_app::OrderedSizeToBitmap& icon_bitmaps,
     int size_hint_in_dip);
 
 // Modifies |iv| to apply icon post-processing effects (like badging and
 // desaturation to gray) to an uncompressed icon.
-void ApplyIconEffects(IconEffects icon_effects,
+void ApplyIconEffects(Profile* profile,
+                      const std::optional<std::string>& app_id,
+                      IconEffects icon_effects,
                       int size_hint_in_dip,
                       IconValuePtr iv,
                       LoadIconCallback callback);
@@ -122,13 +127,13 @@ void ConvertUncompressedIconToCompressedIcon(IconValuePtr iv,
 // Loads an icon from an extension.
 void LoadIconFromExtension(IconType icon_type,
                            int size_hint_in_dip,
-                           content::BrowserContext* context,
+                           Profile* profile,
                            const std::string& extension_id,
                            IconEffects icon_effects,
                            LoadIconCallback callback);
 
 // Loads an icon from a web app.
-void LoadIconFromWebApp(content::BrowserContext* context,
+void LoadIconFromWebApp(Profile* profile,
                         IconType icon_type,
                         int size_hint_in_dip,
                         const std::string& web_app_id,
@@ -137,7 +142,7 @@ void LoadIconFromWebApp(content::BrowserContext* context,
 
 #if BUILDFLAG(IS_CHROMEOS)
 // Requests a compressed icon data for an web app identified by `web_app_id`.
-void GetWebAppCompressedIconData(content::BrowserContext* context,
+void GetWebAppCompressedIconData(Profile* profile,
                                  const std::string& web_app_id,
                                  int size_in_dip,
                                  ui::ResourceScaleFactor scale_factor,
@@ -145,28 +150,26 @@ void GetWebAppCompressedIconData(content::BrowserContext* context,
 
 // Requests a compressed icon data for a chrome app identified by
 // `extension_id`.
-void GetChromeAppCompressedIconData(content::BrowserContext* context,
+void GetChromeAppCompressedIconData(Profile* profile,
                                     const std::string& extension_id,
                                     int size_in_dip,
                                     ui::ResourceScaleFactor scale_factor,
                                     LoadIconCallback callback);
-#endif  // BUILDFLAG(IS_CHROMEOS)
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
 // Requests a compressed icon data for an ARC app identified by `app_id`.
-void GetArcAppCompressedIconData(content::BrowserContext* context,
+void GetArcAppCompressedIconData(Profile* profile,
                                  const std::string& app_id,
                                  int size_in_dip,
                                  ui::ResourceScaleFactor scale_factor,
                                  LoadIconCallback callback);
 
 // Requests a compressed icon data for a Guest OS app identified by `app_id`.
-void GetGuestOSAppCompressedIconData(content::BrowserContext* context,
+void GetGuestOSAppCompressedIconData(Profile* profile,
                                      const std::string& app_id,
                                      int size_in_dip,
                                      ui::ResourceScaleFactor scale_factor,
                                      LoadIconCallback callback);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 // Loads an icon from a FilePath. If that fails, it calls the fallback.
 //
@@ -194,7 +197,9 @@ void LoadIconFromCompressedData(IconType icon_type,
 
 // Loads an icon from a compiled-into-the-binary resource, with a resource_id
 // named IDR_XXX, for some value of XXX.
-void LoadIconFromResource(IconType icon_type,
+void LoadIconFromResource(Profile* profile,
+                          std::optional<std::string> app_id,
+                          IconType icon_type,
                           int size_hint_in_dip,
                           int resource_id,
                           bool is_placeholder_icon,

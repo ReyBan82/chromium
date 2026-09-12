@@ -3,7 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/buildflag_header.gni")
-import("//build/config/chromeos/ui_mode.gni")
 import("//mojo/public/tools/bindings/mojom.gni")
 import("//testing/test.gni")
 import("//ui/base/ui_features.gni")
@@ -18,14 +17,33 @@ source_set("color_headers") {
     "color_provider.h",
     "color_provider_manager.h",
     "color_provider_utils.h",
-    "system_theme.h",
+    "color_variant.h",
   ]
 
   public_deps = [
+    ":color_provider_key",
     ":mojom",
     "//base",
     "//skia",
+    "//third_party/abseil-cpp:absl",
     "//ui/gfx:color_utils",
+  ]
+}
+
+# Keep the deps on this target to a minimum so that chromeos can depend on it.
+component("color_provider_key") {
+  sources = [
+    "color_provider_key.cc",
+    "color_provider_key.h",
+    "system_theme.h",
+  ]
+
+  defines = [ "IS_COLOR_PROVIDER_KEY_IMPL" ]
+
+  deps = [
+    "//base",
+    "//skia",
+    "//third_party/abseil-cpp:absl",
   ]
 }
 
@@ -44,8 +62,7 @@ component("color") {
     "color_recipe.h",
     "color_transform.cc",
     "color_transform.h",
-    "temp_palette.cc",
-    "temp_palette.h",
+    "color_variant.cc",
   ]
 
   configs += [ "//build/config/compiler:prevent_unsafe_narrowing" ]
@@ -60,13 +77,24 @@ component("color") {
     "//ui/gfx:color_utils",
   ]
 
+  deps = [ "//third_party/abseil-cpp:absl" ]
+
   if (is_mac) {
-    frameworks = [ "AppKit.framework" ]
     sources += [
       "mac/native_color_transform.mm",
       "mac/system_color_utils.h",
       "mac/system_color_utils.mm",
     ]
+    frameworks = [ "AppKit.framework" ]
+  }
+
+  if (is_android) {
+    sources += [
+      "android/android_color_roles.h",
+      "android/color_provider_bridge.cc",
+      "android/color_provider_bridge.h",
+    ]
+    deps += [ ":ui_color_jni_headers" ]
   }
 }
 
@@ -78,18 +106,19 @@ source_set("test_support") {
   deps = [ ":color_headers" ]
 }
 
-test("color_unittests") {
+source_set("unit_tests") {
   testonly = true
 
   sources = [
     "color_mixer_unittest.cc",
+    "color_provider_key_unittest.cc",
     "color_provider_manager_unittest.cc",
     "color_provider_source_observer_unittest.cc",
     "color_provider_unittest.cc",
     "color_provider_utils_unittest.cc",
     "color_recipe_unittest.cc",
     "color_transform_unittest.cc",
-    "run_all_unittests.cc",
+    "sys_color_mixer_unittest.cc",
   ]
 
   deps = [
@@ -98,6 +127,7 @@ test("color_unittests") {
     ":test_support",
     "//base/test:test_support",
     "//testing/gtest",
+    "//ui/color/dynamic_color",
   ]
 }
 
@@ -130,6 +160,10 @@ component("mixers") {
     "color_provider_manager.h",
     "core_default_color_mixer.cc",
     "core_default_color_mixer.h",
+    "css_system_color_mixer.cc",
+    "css_system_color_mixer.h",
+    "fluent_ui_color_mixer.cc",
+    "fluent_ui_color_mixer.h",
     "material_ui_color_mixer.cc",
     "material_ui_color_mixer.h",
     "native_color_mixers.cc",
@@ -147,10 +181,14 @@ component("mixers") {
   deps = [
     ":color",
     ":color_headers",
+    ":color_provider_key",
     "//skia",
     "//third_party/material_color_utilities",
     "//ui/base:features",
+    "//ui/color/dynamic_color",
     "//ui/gfx:color_utils",
+    "//ui/native_theme/features",
+    "//ui/webui:buildflags",
   ]
 
   public_deps = [ "//base" ]
@@ -158,21 +196,63 @@ component("mixers") {
   if (is_chromeos) {
     sources += [ "chromeos/native_color_mixers_chromeos.cc" ]
   } else if (is_mac) {
-    frameworks = [ "AppKit.framework" ]
     sources += [
+      "mac/css_system_color_mixer_mac.mm",
       "mac/native_color_mixers_mac.mm",
-      "mac/scoped_current_nsappearance.h",
-      "mac/scoped_current_nsappearance.mm",
     ]
+    frameworks = [ "AppKit.framework" ]
   } else if (is_win) {
-    sources += [ "win/native_color_mixers_win.cc" ]
-    deps += [
-      ":accent_color_observer",
-      "//ui/native_theme:features",
+    sources += [
+      "win/css_system_color_mixer_win.cc",
+      "win/native_color_mixers_win.cc",
+      "win/native_color_mixers_win.h",
+    ]
+    deps += [ ":accent_color_observer" ]
+  } else if (is_android) {
+    sources += [
+      "android/sys_color_mixer_android.cc",
+      "android/sys_color_mixer_android.h",
     ]
   }
 }
 
+if (is_android) {
+  import("//build/config/android/rules.gni")
+  import("//third_party/jni_zero/jni_zero.gni")
+
+  generate_jni("ui_color_jni_headers") {
+    sources = [
+      "android/java/src/org/chromium/ui/color/ColorProviderBridgeFactory.java",
+    ]
+  }
+
+  android_library("ui_color_android_java") {
+    sources = [
+      "android/java/src/org/chromium/ui/color/ColorProviderBridge.java",
+      "android/java/src/org/chromium/ui/color/ColorProviderBridgeFactory.java",
+    ]
+    deps = [
+      "//base:base_java",
+      "//build/android:build_java",
+      "//third_party/androidx:androidx_annotation_annotation_java",
+      "//third_party/jni_zero:jni_zero_java",
+    ]
+    srcjar_deps = [
+      ":ui_color_android_java_enums",
+      ":ui_color_jni_headers",
+    ]
+  }
+
+  java_cpp_enum("ui_color_android_java_enums") {
+    sources = [ "android/android_color_roles.h" ]
+  }
+}
+
 mojom("mojom") {
-  sources = [ "color_id.mojom" ]
+  generate_blink = true
+  generate_java = true
+  sources = [
+    "color_id.mojom",
+    "scheme_variant.mojom",
+  ]
 }

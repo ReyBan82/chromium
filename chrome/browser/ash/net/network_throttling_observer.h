@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "components/prefs/pref_change_registrar.h"
 
 class PrefRegistrySimple;
@@ -16,7 +17,7 @@ namespace ash {
 // NetworkThrottlingObserver is a singleton, owned by
 // `ChromeBrowserMainPartsAsh`.
 // This class is responsible for propagating network bandwidth throttling policy
-// changes (prefs::kNetworkThrottlingEnabled) in Chrome down to Shill which
+// changes (ash::prefs::kNetworkThrottlingEnabled) in Chrome down to Shill which
 // implements by calling 'tc' in the kernel.
 class NetworkThrottlingObserver {
  public:
@@ -31,10 +32,10 @@ class NetworkThrottlingObserver {
   static void RegisterPrefs(PrefRegistrySimple* registry);
 
  private:
-  // Callback used when prefs::kNetworkThrottlingEnabled changes
+  // Callback used when ash::prefs::kNetworkThrottlingEnabled changes
   void OnPreferenceChanged(const std::string& pref_name);
 
-  PrefService* local_state_;
+  raw_ptr<PrefService> local_state_;
   PrefChangeRegistrar pref_change_registrar_;
 };
 

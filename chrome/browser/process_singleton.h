@@ -14,17 +14,19 @@
 
 #include "base/check.h"
 #include "base/command_line.h"
+#include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/process/process.h"
-#include "ui/gfx/native_widget_types.h"
 
 #if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_ANDROID)
 #include "base/files/scoped_temp_dir.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
+#include "base/time/time.h"
 #include "base/win/message_window.h"
 #endif  // BUILDFLAG(IS_WIN)
 
@@ -99,7 +101,7 @@ class ProcessSingleton {
   // handled within the current browser instance or false if the remote process
   // should handle it (i.e., because the current process is shutting down).
   using NotificationCallback =
-      base::RepeatingCallback<bool(const base::CommandLine& command_line,
+      base::RepeatingCallback<bool(base::CommandLine command_line,
                                    const base::FilePath& current_directory)>;
 
   ProcessSingleton(const base::FilePath& user_data_dir,
@@ -144,6 +146,17 @@ class ProcessSingleton {
   using ShouldKillRemoteProcessCallback = base::RepeatingCallback<bool()>;
   void OverrideShouldKillRemoteProcessCallbackForTesting(
       const ShouldKillRemoteProcessCallback& display_dialog_callback);
+
+  // Test-only callback triggered during destruction after the window is
+  // reset but before the lock file is closed.
+  void SetOnWindowDestroyedCallbackForTesting(base::OnceClosure callback);
+
+  // Overrides the sleep/delay between retries during lock acquisition.
+  using SleepCallbackForTesting =
+      base::RepeatingCallback<void(base::TimeDelta)>;
+
+  // Test-only callback triggered after a sleep.
+  static void SetSleepCallbackForTesting(SleepCallbackForTesting callback);
 #endif
 
  protected:
@@ -177,9 +190,18 @@ class ProcessSingleton {
   bool EscapeVirtualization(const base::FilePath& user_data_dir);
 
   HWND remote_window_;  // The HWND_MESSAGE of another browser.
-  base::win::MessageWindow window_;  // The message-only window.
   bool is_virtualized_;  // Stuck inside Microsoft Softricity VM environment.
-  HANDLE lock_file_;
+
+  // Do not reorder these members. The proper shutdown sequence is:
+  // 1. Destroy the message window.
+  // 2. Invoke the optional test callback.
+  // 3. Close the lock file.
+  base::File lock_file_;
+  base::ScopedClosureRunner on_window_destroyed_for_testing_;
+  base::win::MessageWindow window_;
+
+  base::OnceClosure on_sleep_called_for_testing_;
+
   base::FilePath user_data_dir_;
   ShouldKillRemoteProcessCallback should_kill_remote_process_callback_;
 #elif BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_ANDROID)
@@ -234,7 +256,7 @@ class ProcessSingleton {
   // This method extracts any waiting "open URL" AppleEvent and forwards
   // it to the running process. Returns true if an event was found and
   // forwarded.
-  // crbug.com/777863
+  // crbug.com/40546317
   bool WaitForAndForwardOpenURLEvent(pid_t event_destination_pid);
 #endif
 

@@ -6,6 +6,9 @@
 
 #include <stdint.h>
 
+#include <array>
+#include <vector>
+
 #include "base/numerics/checked_math.h"
 #include "media/base/limits.h"
 #include "media/base/video_frame.h"
@@ -13,6 +16,7 @@
 #include "third_party/blink/renderer/bindings/modules/v8/v8_plane_layout.h"
 #include "third_party/blink/renderer/modules/webcodecs/video_frame_rect_util.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
@@ -35,28 +39,12 @@ VideoFrameLayout::VideoFrameLayout(media::VideoPixelFormat format,
     const gfx::Size sample_size = media::VideoFrame::SampleSize(format_, i);
     const uint32_t sample_bytes =
         media::VideoFrame::BytesPerElement(format_, i);
-
-    if (coded_size_.width() % sample_size.width()) {
-      exception_state.ThrowTypeError(
-          String::Format("Invalid layout. Expected codedWidth to be a multiple "
-                         "of %u (the sample width in plane %u), found %u.",
-                         sample_size.width(), i, coded_size_.width()));
-      return;
-    }
-    if (coded_size_.height() % sample_size.height()) {
-      exception_state.ThrowTypeError(String::Format(
-          "Invalid layout. Expected codedHeight to be a multiple "
-          "of %u (the sample height in plane %u), found %u.",
-          sample_size.height(), i, coded_size_.height()));
-      return;
-    }
-    const uint32_t width = coded_size_.width() / sample_size.width();
-    const uint32_t height = coded_size_.height() / sample_size.height();
-    const uint32_t stride = width * sample_bytes;
-
+    const uint32_t columns =
+        PlaneSize(coded_size_.width(), sample_size.width());
+    const uint32_t rows = PlaneSize(coded_size_.height(), sample_size.height());
+    const uint32_t stride = columns * sample_bytes;
     planes_.push_back(Plane{offset, stride});
-
-    offset += stride * height;
+    offset += stride * rows;
   }
 }
 
@@ -73,57 +61,42 @@ VideoFrameLayout::VideoFrameLayout(
       static_cast<wtf_size_t>(media::VideoFrame::NumPlanes(format_));
   if (layout.size() != num_planes) {
     exception_state.ThrowTypeError(
-        String::Format("Invalid layout. Expected %u planes, found %u.",
-                       num_planes, layout.size()));
+        blink::Format("Invalid layout. Expected {} planes, found {}.",
+                      num_planes, layout.size()));
     return;
   }
 
-  uint32_t end[media::VideoFrame::kMaxPlanes] = {0};
+  std::array<uint32_t, media::VideoFrame::kMaxPlanes> end = {};
   for (wtf_size_t i = 0; i < num_planes; i++) {
     const gfx::Size sample_size = media::VideoFrame::SampleSize(format_, i);
     const uint32_t sample_bytes =
         media::VideoFrame::BytesPerElement(format_, i);
-
-    if (coded_size_.width() % sample_size.width()) {
-      exception_state.ThrowTypeError(
-          String::Format("Invalid layout. Expected codedWidth to be a multiple "
-                         "of %u (the sample width in plane %u), found %u.",
-                         sample_size.width(), i, coded_size_.width()));
-      return;
-    }
-    if (coded_size_.height() % sample_size.height()) {
-      exception_state.ThrowTypeError(String::Format(
-          "Invalid layout. Expected codedHeight to be a multiple "
-          "of %u (the sample height in plane %u), found %u.",
-          sample_size.height(), i, coded_size_.height()));
-      return;
-    }
-    const uint32_t width = coded_size_.width() / sample_size.width();
-    const uint32_t height = coded_size_.height() / sample_size.height();
-
+    const uint32_t columns =
+        PlaneSize(coded_size_.width(), sample_size.width());
+    const uint32_t rows = PlaneSize(coded_size_.height(), sample_size.height());
     const uint32_t offset = layout[i]->offset();
     const uint32_t stride = layout[i]->stride();
 
     // Each row must fit inside the stride.
-    const uint32_t min_stride = width * sample_bytes;
+    const uint32_t min_stride = columns * sample_bytes;
     if (stride < min_stride) {
       exception_state.ThrowTypeError(
-          String::Format("Invalid layout. Expected plane %u to have stride at "
-                         "least %u, found %u.",
-                         i, min_stride, stride));
+          blink::Format("Invalid layout. Expected plane {} to have stride at "
+                        "least {}, found {}.",
+                        i, min_stride, stride));
       return;
     }
 
-    const auto checked_bytes = base::CheckedNumeric<uint32_t>(stride) * height;
+    const auto checked_bytes = base::CheckedNumeric<uint32_t>(stride) * rows;
     const auto checked_end = checked_bytes + offset;
 
     // Each plane size must not overflow int for compatibility with libyuv.
     // There are probably tighter bounds we could enforce.
     if (!checked_bytes.Cast<int>().IsValid()) {
-      exception_state.ThrowTypeError(String::Format(
-          "Invalid layout. Plane %u with stride %u and height %u exceeds "
+      exception_state.ThrowTypeError(blink::Format(
+          "Invalid layout. Plane {} with stride {} and height {} exceeds "
           "implementation limit.",
-          i, stride, height));
+          i, stride, rows));
       return;
     }
 
@@ -131,9 +104,9 @@ VideoFrameLayout::VideoFrameLayout(
     // ArrayBuffer.
     if (!checked_end.IsValid()) {
       exception_state.ThrowTypeError(
-          String::Format("Invalid layout. Plane %u with offset %u and stride "
-                         "%u exceeds implementation limit.",
-                         i, offset, stride));
+          blink::Format("Invalid layout. Plane {} with offset {} and stride {} "
+                        "exceeds implementation limit.",
+                        i, offset, stride));
       return;
     }
 
@@ -141,8 +114,8 @@ VideoFrameLayout::VideoFrameLayout(
     end[i] = checked_end.ValueOrDie();
     for (wtf_size_t j = 0; j < i; j++) {
       if (offset < end[j] && planes_[j].offset < end[i]) {
-        exception_state.ThrowTypeError(String::Format(
-            "Invalid layout. Plane %u overlaps with plane %u.", i, j));
+        exception_state.ThrowTypeError(blink::Format(
+            "Invalid layout. Plane {} overlaps with plane {}.", i, j));
         return;
       }
     }
@@ -151,12 +124,27 @@ VideoFrameLayout::VideoFrameLayout(
   }
 }
 
+media::VideoFrameLayout VideoFrameLayout::ToMediaLayout() const {
+  std::vector<media::ColorPlaneLayout> planes;
+  planes.reserve(planes_.size());
+  for (wtf_size_t i = 0; i < planes_.size(); i++) {
+    const auto& plane = planes_[i];
+    const size_t height =
+        media::VideoFrame::PlaneSizeInSamples(format_, i, coded_size_).height();
+    const size_t plane_size = plane.stride * height;
+    planes.emplace_back(plane.stride, plane.offset, plane_size);
+  }
+  return media::VideoFrameLayout::CreateWithPlanes(format_, coded_size_,
+                                                   std::move(planes))
+      .value();
+}
+
 uint32_t VideoFrameLayout::Size() const {
   uint32_t size = 0;
   for (wtf_size_t i = 0; i < planes_.size(); i++) {
     const gfx::Size sample_size = media::VideoFrame::SampleSize(format_, i);
-    const uint32_t height = coded_size_.height() / sample_size.height();
-    const uint32_t end = planes_[i].offset + planes_[i].stride * height;
+    const uint32_t rows = PlaneSize(coded_size_.height(), sample_size.height());
+    const uint32_t end = planes_[i].offset + planes_[i].stride * rows;
     size = std::max(size, end);
   }
   return size;

@@ -7,6 +7,7 @@
 #include <stddef.h>
 
 #include "ui/aura/window.h"
+#include "ui/base/clipboard/clipboard.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/views/controls/button/label_button.h"
@@ -21,6 +22,11 @@ TouchSelectionMenuRunnerViews::TestApi::TestApi(
 }
 
 TouchSelectionMenuRunnerViews::TestApi::~TestApi() = default;
+
+int TouchSelectionMenuRunnerViews::TestApi::GetMenuWidth() const {
+  TouchSelectionMenuViews* menu = menu_runner_->menu_;
+  return menu ? menu->width() : 0;
+}
 
 gfx::Rect TouchSelectionMenuRunnerViews::TestApi::GetAnchorRect() const {
   TouchSelectionMenuViews* menu = menu_runner_->menu_;
@@ -61,28 +67,32 @@ void TouchSelectionMenuRunnerViews::ShowMenu(
 }
 
 bool TouchSelectionMenuRunnerViews::IsMenuAvailable(
-    const ui::TouchSelectionMenuClient* client) const {
-  return TouchSelectionMenuViews::IsMenuAvailable(client);
+    const ui::TouchSelectionMenuClient* client,
+    bool can_paste) const {
+  return TouchSelectionMenuViews::IsMenuAvailable(client, can_paste);
 }
 
 void TouchSelectionMenuRunnerViews::OpenMenu(
     base::WeakPtr<ui::TouchSelectionMenuClient> client,
     const gfx::Rect& anchor_rect,
     const gfx::Size& handle_image_size,
-    aura::Window* context) {
+    aura::Window* context,
+    bool can_paste) {
   DCHECK(client);
   CloseMenu();
 
-  if (!TouchSelectionMenuViews::IsMenuAvailable(client.get()))
+  if (!TouchSelectionMenuViews::IsMenuAvailable(client.get(), can_paste)) {
     return;
+  }
 
-  menu_ = new TouchSelectionMenuViews(this, client, context);
+  menu_ = new TouchSelectionMenuViews(this, client, context, can_paste);
   menu_->ShowMenu(anchor_rect, handle_image_size);
 }
 
 void TouchSelectionMenuRunnerViews::CloseMenu() {
-  if (!menu_)
+  if (!menu_) {
     return;
+  }
 
   // Closing the menu sets |menu_| to nullptr and eventually deletes the object.
   menu_->CloseMenu();

@@ -10,20 +10,20 @@
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
 #include "components/download/public/common/download_item.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/download_manager.h"
+#include "content/public/browser/weak_document_ptr.h"
 #include "content/public/common/referrer.h"
+#include "third_party/blink/public/common/tokens/tokens.h"
 #include "ui/base/dragdrop/download_file_interface.h"
 #include "url/gurl.h"
 
 namespace content {
-
-class WebContents;
 
 // This class implements downloading a file via dragging virtual files out of
 // the browser:
@@ -35,12 +35,12 @@ class CONTENT_EXPORT DragDownloadFile : public ui::DownloadFileProvider {
   // download into a file that has already been created, so only the UI
   // thread is involved. |file| must be null on windows but non-null on
   // posix systems. |file_path| is an absolute path on all systems.
-  DragDownloadFile(const base::FilePath& file_path,
+  DragDownloadFile(WeakDocumentPtr source_document,
+                   const base::FilePath& file_path,
                    base::File file,
                    const GURL& url,
                    const Referrer& referrer,
-                   const std::string& referrer_encoding,
-                   WebContents* web_contents);
+                   const std::string& referrer_encoding);
 
   DragDownloadFile(const DragDownloadFile&) = delete;
   DragDownloadFile& operator=(const DragDownloadFile&) = delete;

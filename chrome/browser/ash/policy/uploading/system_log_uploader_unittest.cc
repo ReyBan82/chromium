@@ -4,36 +4,42 @@
 
 #include "chrome/browser/ash/policy/uploading/system_log_uploader.h"
 
+#include <algorithm>
+#include <map>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/memory/raw_ptr.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
-#include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/test_simple_task_runner.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
 #include "chrome/browser/prefs/browser_prefs.h"
-#include "chrome/common/chrome_features.h"
 #include "chrome/test/base/testing_browser_process.h"
+#include "components/policy/core/common/remote_commands/remote_command_job.h"
 #include "components/prefs/testing_pref_service.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_utils.h"
 #include "net/http/http_request_headers.h"
+#include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
+
+using ::testing::ContainerEq;
 
 namespace policy {
 
 namespace {
 
-// Pseudo-location of policy dump file.
-constexpr char kPolicyDumpFileLocation[] = "/var/log/policy_dump.json";
 constexpr char kPolicyDump[] = "{}";
+constexpr char kTestUploadUrl[] = "https://example.com/upload";
 
 // The list of tested system log file names.
 const char* const kTestSystemLogFileNames[] = {"name1.txt", "name32.txt"};
 
 constexpr char kZippedData[] = "zipped_data";
+
+constexpr RemoteCommandJob::UniqueIDType kCommandId = 12345;
 
 // Generate the fake system log files.
 SystemLogUploader::SystemLogs GenerateTestSystemLogFiles() {
@@ -50,7 +56,7 @@ class MockUploadJob : public UploadJob {
   // Start() method is called, otherwise OnFailure() will be invoked.
   MockUploadJob(UploadJob::Delegate* delegate,
                 bool is_upload_error,
-                int max_files);
+                bool is_immediate_upload);
   ~MockUploadJob() override;
 
   // policy::UploadJob:
@@ -61,21 +67,35 @@ class MockUploadJob : public UploadJob {
   void Start() override;
 
  protected:
-  UploadJob::Delegate* delegate_;
+  const std::map<std::string, std::string> kExpectedUploadHeaders = {
+      {SystemLogUploader::kFileTypeHeaderName,
+       SystemLogUploader::kFileTypeZippedLogFile},
+      {net::HttpRequestHeaders::kContentType,
+       SystemLogUploader::kContentTypeOctetStream}};
+
+  // Immediate upload headers need to contain "Command-ID" field as they're
+  // triggered by a remote command.
+  const std::map<std::string, std::string> kExpectedHeadersImmediateUpload = {
+      {SystemLogUploader::kFileTypeHeaderName,
+       SystemLogUploader::kFileTypeZippedLogFile},
+      {net::HttpRequestHeaders::kContentType,
+       SystemLogUploader::kContentTypeOctetStream},
+      {SystemLogUploader::kCommandIdHeaderName,
+       base::NumberToString(kCommandId)}};
+
+  raw_ptr<UploadJob::Delegate> delegate_;
   bool is_upload_error_;
-  int file_index_;
-  int max_files_;
+  bool is_immediate_upload_;
 };
 
 MockUploadJob::MockUploadJob(UploadJob::Delegate* delegate,
                              bool is_upload_error,
-                             int max_files)
+                             bool is_immediate_upload)
     : delegate_(delegate),
       is_upload_error_(is_upload_error),
-      file_index_(0),
-      max_files_(max_files) {}
+      is_immediate_upload_(is_immediate_upload) {}
 
-MockUploadJob::~MockUploadJob() {}
+MockUploadJob::~MockUploadJob() = default;
 
 void MockUploadJob::AddDataSegment(
     const std::string& name,
@@ -83,39 +103,18 @@ void MockUploadJob::AddDataSegment(
     const std::map<std::string, std::string>& header_entries,
     std::unique_ptr<std::string> data) {
   // Test all fields to upload.
-  EXPECT_LT(file_index_, max_files_);
-  EXPECT_GE(file_index_, 0);
+  EXPECT_EQ(SystemLogUploader::kZippedLogsName, name);
 
-  EXPECT_EQ(base::StringPrintf(SystemLogUploader::kNameFieldTemplate,
-                               file_index_ + 1),
-            name);
+  EXPECT_EQ(SystemLogUploader::kZippedLogsFileName, filename);
 
-  if (file_index_ == max_files_ - 1) {
-    EXPECT_EQ(kPolicyDumpFileLocation, filename);
-  } else {
-    EXPECT_EQ(kTestSystemLogFileNames[file_index_], filename);
-  }
-
-  EXPECT_EQ(2U, header_entries.size());
-  EXPECT_EQ(
-      SystemLogUploader::kFileTypeLogFile,
-      header_entries.find(SystemLogUploader::kFileTypeHeaderName)->second);
-  EXPECT_EQ(SystemLogUploader::kContentTypePlainText,
-            header_entries.find(net::HttpRequestHeaders::kContentType)->second);
-
-  if (file_index_ == max_files_ - 1) {
-    EXPECT_EQ(kPolicyDump, *data);
-  } else {
-    EXPECT_EQ(kTestSystemLogFileNames[file_index_], *data);
-  }
-
-  file_index_++;
+  EXPECT_THAT(header_entries,
+              ContainerEq(is_immediate_upload_ ? kExpectedHeadersImmediateUpload
+                                               : kExpectedUploadHeaders));
+  EXPECT_EQ(kZippedData, *data);
 }
 
 void MockUploadJob::Start() {
   DCHECK(delegate_);
-  // Check if all files were uploaded.
-  EXPECT_EQ(max_files_, file_index_);
 
   if (is_upload_error_) {
     // Send any ErrorCode.
@@ -125,62 +124,19 @@ void MockUploadJob::Start() {
   }
 }
 
-class MockZippedUploadJob : public MockUploadJob {
- public:
-  // If is_upload_error is false OnSuccess() will be invoked when the
-  // Start() method is called, otherwise OnFailure() will be invoked.
-  MockZippedUploadJob(UploadJob::Delegate* delegate, bool is_upload_error);
-  ~MockZippedUploadJob() override;
-
-  // policy::UploadJob:
-  void AddDataSegment(const std::string& name,
-                      const std::string& filename,
-                      const std::map<std::string, std::string>& header_entries,
-                      std::unique_ptr<std::string> data) override;
-};
-
-MockZippedUploadJob::MockZippedUploadJob(UploadJob::Delegate* delegate,
-                                         bool is_upload_error)
-    : MockUploadJob(delegate, is_upload_error, /*max_files=*/1) {}
-
-MockZippedUploadJob::~MockZippedUploadJob() {}
-
-void MockZippedUploadJob::AddDataSegment(
-    const std::string& name,
-    const std::string& filename,
-    const std::map<std::string, std::string>& header_entries,
-    std::unique_ptr<std::string> data) {
-  // Test all fields to upload.
-  EXPECT_LT(file_index_, max_files_);
-  EXPECT_GE(file_index_, 0);
-
-  EXPECT_EQ(SystemLogUploader::kZippedLogsName, name);
-
-  EXPECT_EQ(SystemLogUploader::kZippedLogsFileName, filename);
-
-  EXPECT_EQ(2U, header_entries.size());
-  EXPECT_EQ(
-      SystemLogUploader::kFileTypeZippedLogFile,
-      header_entries.find(SystemLogUploader::kFileTypeHeaderName)->second);
-  EXPECT_EQ(SystemLogUploader::kContentTypeOctetStream,
-            header_entries.find(net::HttpRequestHeaders::kContentType)->second);
-
-  EXPECT_EQ(kZippedData, *data);
-
-  file_index_++;
-}
-
 // MockSystemLogDelegate - mock class that creates an upload job and runs upload
 // callback.
 class MockSystemLogDelegate : public SystemLogUploader::Delegate {
  public:
   MockSystemLogDelegate(bool is_upload_error,
                         const SystemLogUploader::SystemLogs& system_logs,
-                        bool is_zipped_upload)
+                        bool is_immediate_upload,
+                        const GURL& expected_upload_url)
       : is_upload_error_(is_upload_error),
+        is_immediate_upload_(is_immediate_upload),
         system_logs_(system_logs),
-        is_zipped_upload_(is_zipped_upload) {}
-  ~MockSystemLogDelegate() override {}
+        expected_upload_url_(expected_upload_url) {}
+  ~MockSystemLogDelegate() override = default;
 
   std::string GetPolicyAsJSON() override { return kPolicyDump; }
 
@@ -193,17 +149,15 @@ class MockSystemLogDelegate : public SystemLogUploader::Delegate {
   std::unique_ptr<UploadJob> CreateUploadJob(
       const GURL& url,
       UploadJob::Delegate* delegate) override {
-    if (is_zipped_upload_)
-      return std::make_unique<MockZippedUploadJob>(delegate, is_upload_error_);
+    EXPECT_EQ(url.spec(), expected_upload_url_.spec());
     return std::make_unique<MockUploadJob>(delegate, is_upload_error_,
-                                           system_logs_.size() + 1);
+                                           is_immediate_upload_);
   }
 
   void ZipSystemLogs(std::unique_ptr<SystemLogUploader::SystemLogs> system_logs,
                      ZippedLogUploadCallback upload_callback) override {
-    EXPECT_TRUE(is_zipped_upload_);
     for (const auto& log : system_logs_)
-      EXPECT_TRUE(base::Contains(*system_logs, log));
+      EXPECT_TRUE(std::ranges::contains(*system_logs, log));
     std::move(upload_callback).Run(std::string(kZippedData));
   }
 
@@ -214,29 +168,36 @@ class MockSystemLogDelegate : public SystemLogUploader::Delegate {
  private:
   bool is_upload_allowed_;
   bool is_upload_error_;
+  bool is_immediate_upload_;
   SystemLogUploader::SystemLogs system_logs_;
-  bool is_zipped_upload_;
+  const GURL expected_upload_url_;
+};
+
+class MockSystemLogUploader : public SystemLogUploader {
+ public:
+  MockSystemLogUploader(
+      PrefService* local_state,
+      std::unique_ptr<Delegate> syslog_delegate,
+      const scoped_refptr<base::SequencedTaskRunner>& task_runner,
+      const GURL& upload_url)
+      : SystemLogUploader(local_state,
+                          std::move(syslog_delegate),
+                          task_runner,
+                          upload_url) {}
+  MOCK_METHOD(void, OnSuccess, (), (override));
 };
 
 }  //  namespace
 
 class SystemLogUploaderTest : public testing::TestWithParam<bool> {
  public:
-  TestingPrefServiceSimple local_state_;
-  SystemLogUploaderTest()
-      : task_runner_(new base::TestSimpleTaskRunner()),
-        is_zipped_upload_(GetParam()) {
-    feature_list.InitWithFeatureState(features::kUploadZippedSystemLogs,
-                                      is_zipped_upload_);
-  }
+  SystemLogUploaderTest() : task_runner_(new base::TestSimpleTaskRunner()) {}
+
   void SetUp() override {
-    RegisterLocalState(local_state_.registry());
-    TestingBrowserProcess::GetGlobal()->SetLocalState(&local_state_);
     settings_helper_.ReplaceDeviceSettingsProviderWithStub();
   }
 
   void TearDown() override {
-    TestingBrowserProcess::GetGlobal()->SetLocalState(nullptr);
     settings_helper_.RestoreRealDeviceSettingsProvider();
     content::RunAllTasksUntilIdle();
   }
@@ -265,29 +226,15 @@ class SystemLogUploaderTest : public testing::TestWithParam<bool> {
     EXPECT_GE(next_task, uploader.last_upload_attempt() + expected_delay);
   }
 
-  void ExpectSuccessHistogram(int amount) {
-    histogram_tester_.ExpectUniqueSample(
-        SystemLogUploader::kSystemLogUploadResultHistogram,
-        is_zipped_upload_ ? SystemLogUploader::ZIPPED_LOGS_UPLOAD_SUCCESS
-                          : SystemLogUploader::NON_ZIPPED_LOGS_UPLOAD_SUCCESS,
-        amount);
-  }
-
-  void ExpectFailureHistogram(int amount) {
-    histogram_tester_.ExpectUniqueSample(
-        SystemLogUploader::kSystemLogUploadResultHistogram,
-        is_zipped_upload_ ? SystemLogUploader::ZIPPED_LOGS_UPLOAD_FAILURE
-                          : SystemLogUploader::NON_ZIPPED_LOGS_UPLOAD_FAILURE,
-        amount);
+  PrefService* local_state() {
+    return TestingBrowserProcess::GetGlobal()->local_state();
   }
 
  protected:
   content::BrowserTaskEnvironment task_environment_;
   ash::ScopedCrosSettingsTestHelper settings_helper_;
   scoped_refptr<base::TestSimpleTaskRunner> task_runner_;
-  bool is_zipped_upload_;
   base::test::ScopedFeatureList feature_list;
-  base::HistogramTester histogram_tester_;
 };
 
 // Verify log throttling. Try successive kLogThrottleCount log uploads by
@@ -298,12 +245,14 @@ TEST_P(SystemLogUploaderTest, LogThrottleTest) {
        upload_num < SystemLogUploader::kLogThrottleCount + 3; upload_num++) {
     EXPECT_FALSE(task_runner_->HasPendingTask());
     auto syslog_delegate = std::make_unique<MockSystemLogDelegate>(
-        false, SystemLogUploader::SystemLogs(), is_zipped_upload_);
+        false, SystemLogUploader::SystemLogs(), /*is_immediate_upload=*/false,
+        GURL(kTestUploadUrl));
 
     syslog_delegate->set_upload_allowed(true);
     settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
 
-    SystemLogUploader uploader(std::move(syslog_delegate), task_runner_);
+    SystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                               task_runner_, GURL(kTestUploadUrl));
 
     EXPECT_EQ(1U, task_runner_->NumPendingTasks());
 
@@ -322,15 +271,17 @@ TEST_P(SystemLogUploaderTest, LogThrottleTest) {
 TEST_P(SystemLogUploaderTest, ImmediateLogUpload) {
   EXPECT_FALSE(task_runner_->HasPendingTask());
   auto syslog_delegate = std::make_unique<MockSystemLogDelegate>(
-      false, SystemLogUploader::SystemLogs(), is_zipped_upload_);
+      false, SystemLogUploader::SystemLogs(), /*is_immediate_upload=*/true,
+      GURL(kTestUploadUrl));
 
   syslog_delegate->set_upload_allowed(true);
   settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
 
-  SystemLogUploader uploader(std::move(syslog_delegate), task_runner_);
+  SystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                             task_runner_, GURL(kTestUploadUrl));
   for (int upload_num = 0;
        upload_num < SystemLogUploader::kLogThrottleCount + 3; upload_num++) {
-    uploader.ScheduleNextSystemLogUploadImmediately();
+    uploader.ScheduleNextSystemLogUploadImmediately(kCommandId);
     EXPECT_EQ(task_runner_->NextPendingTaskDelay(), base::Milliseconds(0));
     task_runner_->RunPendingTasks();
     task_runner_->ClearPendingTasks();
@@ -342,15 +293,14 @@ TEST_P(SystemLogUploaderTest, Basic) {
   EXPECT_FALSE(task_runner_->HasPendingTask());
 
   std::unique_ptr<MockSystemLogDelegate> syslog_delegate(
-      new MockSystemLogDelegate(/*is_upload_error=*/false,
-                                SystemLogUploader::SystemLogs(),
-                                is_zipped_upload_));
+      new MockSystemLogDelegate(
+          /*is_upload_error=*/false, SystemLogUploader::SystemLogs(),
+          /*is_immediate_upload=*/false, GURL(kTestUploadUrl)));
   syslog_delegate->set_upload_allowed(false);
-  SystemLogUploader uploader(std::move(syslog_delegate), task_runner_);
+  SystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                             task_runner_, GURL(kTestUploadUrl));
 
   task_runner_->RunPendingTasks();
-  histogram_tester_.ExpectTotalCount(
-      SystemLogUploader::kSystemLogUploadResultHistogram, 0);
 }
 
 // One success task pending.
@@ -358,18 +308,18 @@ TEST_P(SystemLogUploaderTest, SuccessTest) {
   EXPECT_FALSE(task_runner_->HasPendingTask());
 
   std::unique_ptr<MockSystemLogDelegate> syslog_delegate(
-      new MockSystemLogDelegate(/*is_upload_error=*/false,
-                                SystemLogUploader::SystemLogs(),
-                                is_zipped_upload_));
+      new MockSystemLogDelegate(
+          /*is_upload_error=*/false, SystemLogUploader::SystemLogs(),
+          /*is_immediate_upload=*/false, GURL(kTestUploadUrl)));
   syslog_delegate->set_upload_allowed(true);
   settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
-  SystemLogUploader uploader(std::move(syslog_delegate), task_runner_);
+  SystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                             task_runner_, GURL(kTestUploadUrl));
 
   EXPECT_EQ(1U, task_runner_->NumPendingTasks());
 
   RunPendingUploadTaskAndCheckNext(
       uploader, base::Milliseconds(SystemLogUploader::kDefaultUploadDelayMs));
-  ExpectSuccessHistogram(/*amount=*/1);
 }
 
 // Three failed responses received.
@@ -377,12 +327,13 @@ TEST_P(SystemLogUploaderTest, ThreeFailureTest) {
   EXPECT_FALSE(task_runner_->HasPendingTask());
 
   std::unique_ptr<MockSystemLogDelegate> syslog_delegate(
-      new MockSystemLogDelegate(/*is_upload_error=*/true,
-                                SystemLogUploader::SystemLogs(),
-                                is_zipped_upload_));
+      new MockSystemLogDelegate(
+          /*is_upload_error=*/true, SystemLogUploader::SystemLogs(),
+          /*is_immediate_upload=*/false, GURL(kTestUploadUrl)));
   syslog_delegate->set_upload_allowed(true);
   settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
-  SystemLogUploader uploader(std::move(syslog_delegate), task_runner_);
+  SystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                             task_runner_, GURL(kTestUploadUrl));
 
   EXPECT_EQ(1U, task_runner_->NumPendingTasks());
 
@@ -395,7 +346,6 @@ TEST_P(SystemLogUploaderTest, ThreeFailureTest) {
       uploader, base::Milliseconds(SystemLogUploader::kDefaultUploadDelayMs));
   RunPendingUploadTaskAndCheckNext(
       uploader, base::Milliseconds(SystemLogUploader::kErrorUploadDelayMs));
-  ExpectFailureHistogram(/*amount=*/3);
 }
 
 // Check header fields of system log files to upload.
@@ -405,16 +355,17 @@ TEST_P(SystemLogUploaderTest, CheckHeaders) {
   SystemLogUploader::SystemLogs system_logs = GenerateTestSystemLogFiles();
   std::unique_ptr<MockSystemLogDelegate> syslog_delegate(
       new MockSystemLogDelegate(/*is_upload_error=*/false, system_logs,
-                                is_zipped_upload_));
+                                /*is_immediate_upload=*/false,
+                                GURL(kTestUploadUrl)));
   syslog_delegate->set_upload_allowed(true);
   settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
-  SystemLogUploader uploader(std::move(syslog_delegate), task_runner_);
+  SystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                             task_runner_, GURL(kTestUploadUrl));
 
   EXPECT_EQ(1U, task_runner_->NumPendingTasks());
 
   RunPendingUploadTaskAndCheckNext(
       uploader, base::Milliseconds(SystemLogUploader::kDefaultUploadDelayMs));
-  ExpectSuccessHistogram(/*amount=*/1);
 }
 
 // Disable system log uploads after one failed log upload.
@@ -422,18 +373,18 @@ TEST_P(SystemLogUploaderTest, DisableLogUpload) {
   EXPECT_FALSE(task_runner_->HasPendingTask());
 
   std::unique_ptr<MockSystemLogDelegate> syslog_delegate(
-      new MockSystemLogDelegate(/*is_upload_error=*/true,
-                                SystemLogUploader::SystemLogs(),
-                                is_zipped_upload_));
+      new MockSystemLogDelegate(
+          /*is_upload_error=*/true, SystemLogUploader::SystemLogs(),
+          /*is_immediate_upload=*/false, GURL(kTestUploadUrl)));
   MockSystemLogDelegate* mock_delegate = syslog_delegate.get();
   settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
   mock_delegate->set_upload_allowed(true);
-  SystemLogUploader uploader(std::move(syslog_delegate), task_runner_);
+  SystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                             task_runner_, GURL(kTestUploadUrl));
 
   EXPECT_EQ(1U, task_runner_->NumPendingTasks());
   RunPendingUploadTaskAndCheckNext(
       uploader, base::Milliseconds(SystemLogUploader::kErrorUploadDelayMs));
-  ExpectFailureHistogram(/*amount=*/1);
 
   // Disable log upload and check that frequency is usual, because there is no
   // errors, we should not upload logs.
@@ -445,7 +396,69 @@ TEST_P(SystemLogUploaderTest, DisableLogUpload) {
       uploader, base::Milliseconds(SystemLogUploader::kDefaultUploadDelayMs));
   RunPendingUploadTaskAndCheckNext(
       uploader, base::Milliseconds(SystemLogUploader::kDefaultUploadDelayMs));
-  ExpectFailureHistogram(/*amount=*/1);
+}
+
+// Test that we observe for settings to become trusted and create log jobs
+// when the settings become trusted.
+TEST_F(SystemLogUploaderTest, DeviceSettingsPendingToTrusted) {
+  EXPECT_FALSE(task_runner_->HasPendingTask());
+
+  std::unique_ptr<MockSystemLogDelegate> syslog_delegate(
+      new MockSystemLogDelegate(
+          /*is_upload_error=*/false, SystemLogUploader::SystemLogs(),
+          /*is_immediate_upload=*/false, GURL(kTestUploadUrl)));
+  MockSystemLogDelegate* mock_delegate = syslog_delegate.get();
+  settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
+  settings_helper_.SetTrustedStatus(
+      ash::CrosSettingsProvider::TEMPORARILY_UNTRUSTED);
+  mock_delegate->set_upload_allowed(true);
+  MockSystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                                 task_runner_, GURL(kTestUploadUrl));
+
+  // We should only see one log job success case after running all of the tasks.
+  EXPECT_CALL(uploader, OnSuccess()).Times(1);
+
+  // Tasks should not be pending while trusted settings are pending.
+  EXPECT_EQ(0U, task_runner_->NumPendingTasks());
+
+  // Change settings to trusted to trigger
+  // the log uploader's settings observer callback.
+  settings_helper_.SetTrustedStatus(ash::CrosSettingsProvider::TRUSTED);
+
+  // There should be a pending task now
+  EXPECT_EQ(1U, task_runner_->NumPendingTasks());
+  task_runner_->RunPendingTasks();
+}
+
+// Test that log jobs are not created when settings are untrusted
+// and permanently untrusted.
+TEST_F(SystemLogUploaderTest, DeviceSettingsPendingToUntrusted) {
+  EXPECT_FALSE(task_runner_->HasPendingTask());
+
+  std::unique_ptr<MockSystemLogDelegate> syslog_delegate(
+      new MockSystemLogDelegate(
+          /*is_upload_error=*/false, SystemLogUploader::SystemLogs(),
+          /*is_immediate_upload=*/false, GURL(kTestUploadUrl)));
+  MockSystemLogDelegate* mock_delegate = syslog_delegate.get();
+  settings_helper_.SetBoolean(ash::kSystemLogUploadEnabled, true);
+  settings_helper_.SetTrustedStatus(
+      ash::CrosSettingsProvider::TEMPORARILY_UNTRUSTED);
+  mock_delegate->set_upload_allowed(true);
+  MockSystemLogUploader uploader(local_state(), std::move(syslog_delegate),
+                                 task_runner_, GURL(kTestUploadUrl));
+
+  // We should not see any log job successes after running all of the tasks.
+  EXPECT_CALL(uploader, OnSuccess()).Times(0);
+
+  // Tasks should not be pending while trusted settings are pending.
+  EXPECT_EQ(0U, task_runner_->NumPendingTasks());
+
+  // Change settings to permanently untrusted.
+  settings_helper_.SetTrustedStatus(
+      ash::CrosSettingsProvider::PERMANENTLY_UNTRUSTED);
+
+  // Tasks should not be pending if trusted settings are permanently untrusted.
+  EXPECT_EQ(0U, task_runner_->NumPendingTasks());
 }
 
 INSTANTIATE_TEST_SUITE_P(SystemLogUploaderTestInstance,

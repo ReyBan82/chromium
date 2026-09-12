@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-#include "base/mac/scoped_cftyperef.h"
+#include "base/apple/scoped_cftyperef.h"
 #include "base/memory/raw_ptr.h"
 
 namespace safe_browsing {
@@ -89,6 +89,9 @@ class UDIFParser {
   uint16_t block_size_;  // The image's block size, in bytes.
   std::vector<uint8_t> signature_blob_;  // DMG signature.
 };
+
+// Returns a reference to the maximum chunk size used for decompression.
+size_t& GetMaxDecompressChunkSize();
 
 }  // namespace dmg
 }  // namespace safe_browsing

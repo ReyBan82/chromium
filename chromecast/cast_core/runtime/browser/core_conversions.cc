@@ -4,7 +4,8 @@
 
 #include "chromecast/cast_core/runtime/browser/core_conversions.h"
 
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
 #include "chromecast/common/feature_constants.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
 #include "third_party/cast_core/public/src/proto/common/application_config.pb.h"
@@ -17,15 +18,15 @@ namespace {
 std::vector<blink::PermissionType> GetFeaturePermissions(
     const cast::common::ApplicationConfig& core_config) {
   std::vector<blink::PermissionType> feature_permissions;
-  auto it = base::ranges::find(core_config.extra_features().entries(),
-                               feature::kCastCoreFeaturePermissions,
-                               &cast::common::Dictionary::Entry::key);
+  auto it = std::ranges::find(core_config.extra_features().entries(),
+                              feature::kCastCoreFeaturePermissions,
+                              &cast::common::Dictionary::Entry::key);
   if (it == core_config.extra_features().entries().end()) {
     return feature_permissions;
   }
 
   CHECK(it->value().value_case() == cast::common::Value::kArray);
-  base::ranges::for_each(
+  std::ranges::for_each(
       it->value().array().values(),
       [&feature_permissions](const cast::common::Value& value) {
         CHECK(value.value_case() == cast::common::Value::kNumber);
@@ -40,15 +41,15 @@ std::vector<blink::PermissionType> GetFeaturePermissions(
 std::vector<url::Origin> GetAdditionalFeaturePermissionOrigins(
     const cast::common::ApplicationConfig& core_config) {
   std::vector<url::Origin> feature_permission_origins;
-  auto it = base::ranges::find(core_config.extra_features().entries(),
-                               feature::kCastCoreFeaturePermissionOrigins,
-                               &cast::common::Dictionary::Entry::key);
+  auto it = std::ranges::find(core_config.extra_features().entries(),
+                              feature::kCastCoreFeaturePermissionOrigins,
+                              &cast::common::Dictionary::Entry::key);
   if (it == core_config.extra_features().entries().end()) {
     return feature_permission_origins;
   }
 
   CHECK(it->value().value_case() == cast::common::Value::kArray);
-  base::ranges::for_each(
+  std::ranges::for_each(
       it->value().array().values(),
       [&feature_permission_origins](const cast::common::Value& value) {
         CHECK(value.value_case() == cast::common::Value::kText);
@@ -57,6 +58,30 @@ std::vector<url::Origin> GetAdditionalFeaturePermissionOrigins(
         feature_permission_origins.push_back(std::move(origin));
       });
   return feature_permission_origins;
+}
+
+bool GetExtendedInputSupported(
+    const cast::common::ApplicationConfig& core_config) {
+  const auto& extra_features = core_config.extra_features().entries();
+  auto it =
+      std::ranges::find(extra_features, feature::kCastCoreRendererFeatures,
+                        &cast::common::Dictionary::Entry::key);
+  if (it == extra_features.end()) {
+    return false;
+  }
+
+  if (!it->value().has_dictionary()) {
+    return false;
+  }
+
+  const auto& entries = it->value().dictionary().entries();
+  auto feature_it = std::ranges::find(entries, feature::kExtendedInputSupported,
+                                      &cast::common::Dictionary::Entry::key);
+  if (feature_it == entries.end()) {
+    return false;
+  }
+  return feature_it->value().value_case() == cast::common::Value::kFlag &&
+         feature_it->value().flag();
 }
 
 cast_receiver::ApplicationConfig::ContentPermissions ToReceiverPermissions(
@@ -73,10 +98,11 @@ cast_receiver::ApplicationConfig ToReceiverConfig(
   cast_receiver::ApplicationConfig config{core_config.app_id(),
                                           core_config.display_name(),
                                           ToReceiverPermissions(core_config)};
+  config.is_extended_input_supported = GetExtendedInputSupported(core_config);
   if (core_config.has_cast_web_app_config()) {
     config.url = GURL(core_config.cast_web_app_config().url());
     if (!config.url->is_valid()) {
-      config.url = absl::nullopt;
+      config.url = std::nullopt;
     }
   }
 

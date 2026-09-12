@@ -5,9 +5,6 @@
 #include "chrome/browser/ui/views/frame/caption_button_placeholder_container.h"
 
 #include "ui/base/metadata/metadata_impl_macros.h"
-#include "ui/gfx/canvas.h"
-#include "ui/gfx/scoped_canvas.h"
-#include "ui/views/view.h"
 
 CaptionButtonPlaceholderContainer::CaptionButtonPlaceholderContainer() {
   SetPaintToLayer();
@@ -16,5 +13,5 @@ CaptionButtonPlaceholderContainer::CaptionButtonPlaceholderContainer() {
 CaptionButtonPlaceholderContainer::~CaptionButtonPlaceholderContainer() =
     default;
 
-BEGIN_METADATA(CaptionButtonPlaceholderContainer, views::View)
+BEGIN_METADATA(CaptionButtonPlaceholderContainer)
 END_METADATA

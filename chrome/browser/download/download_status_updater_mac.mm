@@ -6,14 +6,47 @@
 
 #import <Foundation/Foundation.h>
 
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_nsobject.h"
-#include "base/memory/scoped_policy.h"
+#include "base/apple/foundation_util.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/supports_user_data.h"
 #include "base/time/time.h"
 #import "chrome/browser/ui/cocoa/dock_icon.h"
 #include "components/download/public/common/download_item.h"
-#import "net/base/mac/url_conversions.h"
+#import "net/base/apple/url_conversions.h"
+
+@interface CrDownloadCanceller : NSObject
+- (instancetype)initWithDownloadItem:(download::DownloadItem*)download;
+- (void)cancel;
+- (void)invalidate;
+@end
+
+@implementation CrDownloadCanceller {
+  // `_download` is owned by the DownloadManager. It must not be captured by
+  // the NSProgress cancellationHandler, whose lifetime is controlled by the
+  // system. CrNSProgressUserData invalidates this pointer before the owning
+  // DownloadItem is destroyed.
+  RAW_PTR_EXCLUSION download::DownloadItem* _download;
+}
+
+- (instancetype)initWithDownloadItem:(download::DownloadItem*)download {
+  self = [super init];
+  if (self) {
+    _download = download;
+  }
+  return self;
+}
+
+- (void)cancel {
+  if (_download) {
+    _download->Cancel(/*user_cancel=*/true);
+  }
+}
+
+- (void)invalidate {
+  _download = nullptr;
+}
+
+@end
 
 namespace {
 
@@ -21,18 +54,28 @@ const char kCrNSProgressUserDataKey[] = "CrNSProgressUserData";
 
 class CrNSProgressUserData : public base::SupportsUserData::Data {
  public:
-  CrNSProgressUserData(NSProgress* progress, const base::FilePath& target)
+  CrNSProgressUserData(NSProgress* progress,
+                       CrDownloadCanceller* canceller,
+                       const base::FilePath& target)
       : target_(target) {
-    progress_.reset(progress, base::scoped_policy::RETAIN);
+    progress_ = progress;
+    canceller_ = canceller;
   }
-  ~CrNSProgressUserData() override { [progress_.get() unpublish]; }
+  ~CrNSProgressUserData() override {
+    [canceller_ invalidate];
+    // Clear the handler to eagerly release the block. The __weak reference
+    // in the block already guarantees safety if the block outlives us.
+    progress_.cancellationHandler = nil;
+    [progress_ unpublish];
+  }
 
-  NSProgress* progress() const { return progress_.get(); }
+  NSProgress* progress() const { return progress_; }
   base::FilePath target() const { return target_; }
   void setTarget(const base::FilePath& target) { target_ = target; }
 
  private:
-  base::scoped_nsobject<NSProgress> progress_;
+  CrDownloadCanceller* __strong canceller_;
+  NSProgress* __strong progress_;
   base::FilePath target_;
 };
 
@@ -53,7 +96,7 @@ CrNSProgressUserData* CreateOrGetNSProgress(download::DownloadItem* download) {
     return progress_data;
 
   base::FilePath destination_path = download->GetFullPath();
-  NSURL* destination_url = base::mac::FilePathToNSURL(destination_path);
+  NSURL* destination_url = base::apple::FilePathToNSURL(destination_path);
 
   NSProgress* progress = [NSProgress progressWithTotalUnitCount:-1];
   progress.kind = NSProgressKindFile;
@@ -66,20 +109,26 @@ CrNSProgressUserData* CreateOrGetNSProgress(download::DownloadItem* download) {
   // ship it.
   progress.pausable = NO;
 
+  CrDownloadCanceller* __strong canceller =
+      [[CrDownloadCanceller alloc] initWithDownloadItem:download];
+
   // Do publish a cancellation handler. In icon view, the Finder provides a
   // little (X) button on the icon, and using it will cause this callback.
+  // Only capture the ObjC canceller weakly because NSProgress may be held by
+  // the system after DownloadItem is destroyed.
+  __weak CrDownloadCanceller* weak_canceller = canceller;
   progress.cancellable = YES;
   progress.cancellationHandler = ^{
     dispatch_async(dispatch_get_main_queue(), ^{
-      download->Cancel(/*user_cancel=*/true);
+      [weak_canceller cancel];
     });
   };
 
   [progress publish];
 
-  download->SetUserData(
-      &kCrNSProgressUserDataKey,
-      std::make_unique<CrNSProgressUserData>(progress, destination_path));
+  download->SetUserData(&kCrNSProgressUserDataKey,
+                        std::make_unique<CrNSProgressUserData>(
+                            progress, canceller, destination_path));
 
   return static_cast<CrNSProgressUserData*>(
       download->GetUserData(&kCrNSProgressUserDataKey));
@@ -102,7 +151,7 @@ void UpdateNSProgress(download::DownloadItem* download) {
   base::FilePath download_path = download->GetFullPath();
   if (progress_data->target() != download_path) {
     progress_data->setTarget(download_path);
-    NSURL* download_url = base::mac::FilePathToNSURL(download_path);
+    NSURL* download_url = base::apple::FilePathToNSURL(download_path);
     progress.fileURL = download_url;
   }
 }
@@ -129,9 +178,9 @@ void DownloadStatusUpdater::UpdateAppIconDownloadProgress(
   //
   // There's a race condition in macOS code where unpublishing an `NSProgress`
   // object for a file that was renamed will sometimes leave a progress
-  // indicator visible in the Finder (https://crbug.com/1304233). Therefore, as
+  // indicator visible in the Finder (https://crbug.com/40217637). Therefore, as
   // soon as `DownloadItem::AllDataSaved()` returns true, do the unpublish.
-  // As an additional bug to avoid (http://crbug.com/166683), never update the
+  // As an additional bug to avoid (http://crbug.com/40297082), never update the
   // data of an `NSProgress` after the file name has changed, as that can result
   // in the file being stuck in an in-progress state in the Dock.
   if (download->GetState() == download::DownloadItem::IN_PROGRESS &&
@@ -146,15 +195,15 @@ void DownloadStatusUpdater::UpdateAppIconDownloadProgress(
   if (download->GetState() != download::DownloadItem::IN_PROGRESS &&
       !download->GetTargetFilePath().empty()) {
     NSString* download_path =
-        base::mac::FilePathToNSString(download->GetTargetFilePath());
+        base::apple::FilePathToNSString(download->GetTargetFilePath());
     if (download->GetState() == download::DownloadItem::COMPLETE) {
       // Bounce the dock icon.
-      [[NSDistributedNotificationCenter defaultCenter]
+      [NSDistributedNotificationCenter.defaultCenter
           postNotificationName:@"com.apple.DownloadFileFinished"
                         object:download_path];
     }
 
     // Notify the Finder.
-    [[NSWorkspace sharedWorkspace] noteFileSystemChanged:download_path];
+    [NSWorkspace.sharedWorkspace noteFileSystemChanged:download_path];
   }
 }

@@ -9,8 +9,9 @@
 #include <utility>
 #include <vector>
 
+#include "base/strings/string_number_conversions.h"
+#include "content/browser/back_forward_cache/back_forward_cache_disable.h"
 #include "content/browser/devtools/devtools_agent_host_impl.h"
-#include "content/browser/renderer_host/back_forward_cache_disable.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/public/browser/back_forward_cache.h"
 #include "content/public/browser/navigation_controller.h"
@@ -42,12 +43,12 @@ void SecurityHandler::Wire(UberDispatcher* dispatcher) {
 }
 
 void SecurityHandler::AttachToRenderFrameHost() {
-  DCHECK(host_);
+  CHECK(host_, base::NotFatalUntil::M159);
   WebContents* web_contents = WebContents::FromRenderFrameHost(host_);
   WebContentsObserver::Observe(web_contents);
 
   // Send an initial DidChangeVisibleSecurityState event.
-  DCHECK(enabled_);
+  CHECK(enabled_, base::NotFatalUntil::M159);
   DidChangeVisibleSecurityState();
 }
 
@@ -74,6 +75,10 @@ void SecurityHandler::FlushPendingCertificateErrorNotifications() {
         content::CERTIFICATE_REQUEST_RESULT_TYPE_CANCEL);
   }
   cert_error_callbacks_.clear();
+}
+
+bool SecurityHandler::IsIgnoreCertificateErrorsSet() const {
+  return cert_error_override_mode_ == CertErrorOverrideMode::kIgnoreAll;
 }
 
 bool SecurityHandler::NotifyCertificateError(int cert_error,
@@ -124,9 +129,9 @@ Response SecurityHandler::Disable() {
 
 Response SecurityHandler::HandleCertificateError(int event_id,
                                                  const String& action) {
-  if (cert_error_callbacks_.find(event_id) == cert_error_callbacks_.end()) {
+  if (!cert_error_callbacks_.contains(event_id)) {
     return Response::ServerError(
-        String("Unknown event id: " + std::to_string(event_id)));
+        String("Unknown event id: " + base::NumberToString(event_id)));
   }
   content::CertificateRequestResultType type =
       content::CERTIFICATE_REQUEST_RESULT_TYPE_CANCEL;
@@ -148,9 +153,10 @@ Response SecurityHandler::SetOverrideCertificateErrors(bool override) {
   if (override) {
     if (!enabled_)
       return Response::ServerError("Security domain not enabled");
-    if (cert_error_override_mode_ == CertErrorOverrideMode::kIgnoreAll)
+    if (cert_error_override_mode_ == CertErrorOverrideMode::kIgnoreAll) {
       return Response::ServerError(
           "Certificate errors are already being ignored.");
+    }
     cert_error_override_mode_ = CertErrorOverrideMode::kHandleEvents;
   } else {
     cert_error_override_mode_ = CertErrorOverrideMode::kDisabled;
@@ -172,7 +178,7 @@ Response SecurityHandler::SetIgnoreCertificateErrors(bool ignore) {
 }
 
 Response SecurityHandler::AssureTopLevelActiveFrame() {
-  DCHECK(host_);
+  CHECK(host_, base::NotFatalUntil::M159);
   constexpr char kCommandIsOnlyAvailableAtTopTarget[] =
       "Command can only be executed on top-level targets";
   if (host_->GetParentOrOuterDocument())

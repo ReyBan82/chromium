@@ -4,6 +4,7 @@
 
 #include "base/task/thread_pool/sequence.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -13,16 +14,14 @@
 #include "base/time/time.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
 namespace {
 
 class MockTask {
  public:
-  MOCK_METHOD0(Run, void());
+  MOCK_METHOD(void, Run, ());
 };
 
 Task CreateTask(MockTask* mock_task, TimeTicks now = TimeTicks::Now()) {
@@ -52,9 +51,9 @@ TEST(ThreadPoolSequenceTest, PushTakeRemove) {
   testing::StrictMock<MockTask> mock_task_d;
   testing::StrictMock<MockTask> mock_task_e;
 
-  scoped_refptr<Sequence> sequence =
-      MakeRefCounted<Sequence>(TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
-                               TaskSourceExecutionMode::kParallel);
+  scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
+      TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kDefault);
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
 
   // Push task A in the sequence. PushImmediateTask() should return true since
@@ -75,7 +74,7 @@ TEST(ThreadPoolSequenceTest, PushTakeRemove) {
   auto registered_task_source =
       RegisteredTaskSource::CreateForTesting(sequence);
   registered_task_source.WillRunTask();
-  absl::optional<Task> task =
+  std::optional<Task> task =
       registered_task_source.TakeTask(&sequence_transaction);
   ExpectMockTask(&mock_task_a, &task.value());
   EXPECT_FALSE(task->queue_time.is_null());
@@ -141,9 +140,9 @@ TEST(ThreadPoolSequenceTest, PushTakeRemove) {
 TEST(ThreadPoolSequenceTest, GetSortKeyBestEffort) {
   // Create a BEST_EFFORT sequence with a task.
   Task best_effort_task(FROM_HERE, DoNothing(), TimeTicks::Now(), TimeDelta());
-  scoped_refptr<Sequence> best_effort_sequence =
-      MakeRefCounted<Sequence>(TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
-                               TaskSourceExecutionMode::kParallel);
+  scoped_refptr<Sequence> best_effort_sequence = MakeRefCounted<Sequence>(
+      TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kDefault);
   Sequence::Transaction best_effort_sequence_transaction(
       best_effort_sequence->BeginTransaction());
   best_effort_sequence_transaction.WillPushImmediateTask();
@@ -163,7 +162,7 @@ TEST(ThreadPoolSequenceTest, GetSortKeyBestEffort) {
       &best_effort_sequence_transaction);
 
   // Verify the sort key.
-  EXPECT_EQ(TaskPriority::BEST_EFFORT, best_effort_sort_key.priority());
+  EXPECT_EQ(ThreadType::kBackground, best_effort_sort_key.thread_type());
   EXPECT_EQ(take_best_effort_task.queue_time,
             best_effort_sort_key.ready_time());
 
@@ -177,9 +176,9 @@ TEST(ThreadPoolSequenceTest, GetSortKeyBestEffort) {
 TEST(ThreadPoolSequenceTest, GetSortKeyForeground) {
   // Create a USER_VISIBLE sequence with a task.
   Task foreground_task(FROM_HERE, DoNothing(), TimeTicks::Now(), TimeDelta());
-  scoped_refptr<Sequence> foreground_sequence =
-      MakeRefCounted<Sequence>(TaskTraits(TaskPriority::USER_VISIBLE), nullptr,
-                               TaskSourceExecutionMode::kParallel);
+  scoped_refptr<Sequence> foreground_sequence = MakeRefCounted<Sequence>(
+      TaskTraits(TaskPriority::USER_VISIBLE), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kDefault);
   Sequence::Transaction foreground_sequence_transaction(
       foreground_sequence->BeginTransaction());
   foreground_sequence_transaction.WillPushImmediateTask();
@@ -198,7 +197,7 @@ TEST(ThreadPoolSequenceTest, GetSortKeyForeground) {
       &foreground_sequence_transaction);
 
   // Verify the sort key.
-  EXPECT_EQ(TaskPriority::USER_VISIBLE, foreground_sort_key.priority());
+  EXPECT_EQ(ThreadType::kUtility, foreground_sort_key.thread_type());
   EXPECT_EQ(take_foreground_task.queue_time, foreground_sort_key.ready_time());
 
   // DidProcessTask for correctness.
@@ -210,7 +209,8 @@ TEST(ThreadPoolSequenceTest, GetSortKeyForeground) {
 // didn't return a Task.
 TEST(ThreadPoolSequenceTest, DidProcessTaskWithoutWillRunTask) {
   scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
-      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel);
+      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel,
+      ThreadType::kDefault);
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
   EXPECT_TRUE(sequence_transaction.WillPushImmediateTask());
   sequence_transaction.PushImmediateTask(
@@ -218,16 +218,16 @@ TEST(ThreadPoolSequenceTest, DidProcessTaskWithoutWillRunTask) {
 
   auto registered_task_source =
       RegisteredTaskSource::CreateForTesting(sequence);
-  EXPECT_DCHECK_DEATH({
-    registered_task_source.DidProcessTask(&sequence_transaction);
-  });
+  EXPECT_DCHECK_DEATH(
+      { registered_task_source.DidProcessTask(&sequence_transaction); });
 }
 
 // Verify that a DCHECK fires if TakeTask() is called on a sequence whose front
 // slot is empty.
 TEST(ThreadPoolSequenceTest, TakeEmptyFrontSlot) {
   scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
-      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel);
+      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel,
+      ThreadType::kDefault);
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
   sequence_transaction.WillPushImmediateTask();
   sequence_transaction.PushImmediateTask(
@@ -237,7 +237,7 @@ TEST(ThreadPoolSequenceTest, TakeEmptyFrontSlot) {
       RegisteredTaskSource::CreateForTesting(sequence);
   {
     registered_task_source.WillRunTask();
-    IgnoreResult(registered_task_source.TakeTask(&sequence_transaction));
+    std::ignore = registered_task_source.TakeTask(&sequence_transaction);
     registered_task_source.DidProcessTask(&sequence_transaction);
   }
   EXPECT_DCHECK_DEATH({
@@ -249,7 +249,8 @@ TEST(ThreadPoolSequenceTest, TakeEmptyFrontSlot) {
 // Verify that a DCHECK fires if TakeTask() is called on an empty sequence.
 TEST(ThreadPoolSequenceTest, TakeEmptySequence) {
   scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
-      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel);
+      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel,
+      ThreadType::kDefault);
   auto registered_task_source =
       RegisteredTaskSource::CreateForTesting(sequence);
   EXPECT_DCHECK_DEATH({
@@ -264,9 +265,9 @@ TEST(ThreadPoolSequenceTest, SequenceHasWorker) {
   testing::StrictMock<MockTask> mock_task_a;
   testing::StrictMock<MockTask> mock_task_b;
 
-  scoped_refptr<Sequence> sequence =
-      MakeRefCounted<Sequence>(TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
-                               TaskSourceExecutionMode::kParallel);
+  scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
+      TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kDefault);
 
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
 
@@ -285,7 +286,7 @@ TEST(ThreadPoolSequenceTest, SequenceHasWorker) {
   EXPECT_TRUE(sequence->has_worker_for_testing());
 
   // The next task we get when we call Sequence::TakeTask should be Task A.
-  absl::optional<Task> task_a =
+  std::optional<Task> task_a =
       registered_task_source.TakeTask(&sequence_transaction);
 
   // Push task B into the sequence. WillPushImmediateTask() should return false.
@@ -308,7 +309,7 @@ TEST(ThreadPoolSequenceTest, SequenceHasWorker) {
   registered_task_source.WillRunTask();
 
   // The next task we get when we call Sequence::TakeTask should be Task B.
-  absl::optional<Task> task_b =
+  std::optional<Task> task_b =
       registered_task_source.TakeTask(&sequence_transaction);
 
   // Remove the empty slot. Sequence is be empty. This should return false.
@@ -329,9 +330,9 @@ TEST(ThreadPoolSequenceTest, PushTakeRemoveDelayedTasks) {
   testing::StrictMock<MockTask> mock_task_c;
   testing::StrictMock<MockTask> mock_task_d;
 
-  scoped_refptr<Sequence> sequence =
-      MakeRefCounted<Sequence>(TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
-                               TaskSourceExecutionMode::kParallel);
+  scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
+      TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kDefault);
 
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
 
@@ -364,7 +365,7 @@ TEST(ThreadPoolSequenceTest, PushTakeRemoveDelayedTasks) {
   registered_task_source.WillRunTask();
 
   // Take the task in front of the sequence. It should be task B.
-  absl::optional<Task> task =
+  std::optional<Task> task =
       registered_task_source.TakeTask(&sequence_transaction);
   ExpectMockTask(&mock_task_b, &task.value());
   EXPECT_FALSE(task->queue_time.is_null());
@@ -451,9 +452,9 @@ TEST(ThreadPoolSequenceTest, PushTakeRemoveMixedTasks) {
   testing::StrictMock<MockTask> mock_task_c;
   testing::StrictMock<MockTask> mock_task_d;
 
-  scoped_refptr<Sequence> sequence =
-      MakeRefCounted<Sequence>(TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
-                               TaskSourceExecutionMode::kParallel);
+  scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
+      TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kDefault);
 
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
 
@@ -485,7 +486,7 @@ TEST(ThreadPoolSequenceTest, PushTakeRemoveMixedTasks) {
   EXPECT_TRUE(sequence->has_worker_for_testing());
 
   // Take the task in front of the sequence. It should be task B.
-  absl::optional<Task> task =
+  std::optional<Task> task =
       registered_task_source.TakeTask(&sequence_transaction);
   ExpectMockTask(&mock_task_b, &task.value());
   EXPECT_FALSE(task->queue_time.is_null());
@@ -576,9 +577,9 @@ TEST(ThreadPoolSequenceTest, PushTakeRemoveMixedTasks) {
 TEST(ThreadPoolSequenceTest, TestPushDelayedTaskMethodUsage) {
   testing::StrictMock<MockTask> mock_task_a;
 
-  scoped_refptr<Sequence> sequence =
-      MakeRefCounted<Sequence>(TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
-                               TaskSourceExecutionMode::kParallel);
+  scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
+      TaskTraits(TaskPriority::BEST_EFFORT), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kDefault);
 
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
 
@@ -598,7 +599,8 @@ TEST(ThreadPoolSequenceTest, GetDelayedSortKeyMixedtasks) {
   testing::StrictMock<MockTask> mock_task_b;
 
   scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
-      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel);
+      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel,
+      ThreadType::kDefault);
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
 
   // Create a first delayed task.
@@ -624,7 +626,7 @@ TEST(ThreadPoolSequenceTest, GetDelayedSortKeyMixedtasks) {
   auto registered_task_source =
       RegisteredTaskSource::CreateForTesting(sequence);
   registered_task_source.WillRunTask();
-  absl::optional<Task> take_delayed_task =
+  std::optional<Task> take_delayed_task =
       registered_task_source.TakeTask(&sequence_transaction);
   ExpectMockTask(&mock_task_a, &take_delayed_task.value());
   EXPECT_FALSE(take_delayed_task->queue_time.is_null());
@@ -645,7 +647,7 @@ TEST(ThreadPoolSequenceTest, GetDelayedSortKeyMixedtasks) {
   // Take the immediate task from the sequence, so that its queue time
   // is available for the check below.
   registered_task_source.WillRunTask();
-  absl::optional<Task> take_immediate_task =
+  std::optional<Task> take_immediate_task =
       registered_task_source.TakeTask(&sequence_transaction);
   ExpectMockTask(&mock_task_b, &take_immediate_task.value());
   EXPECT_FALSE(take_immediate_task->queue_time.is_null());
@@ -666,7 +668,8 @@ TEST(ThreadPoolSequenceTest, GetDelayedSortKeyDelayedtasks) {
   testing::StrictMock<MockTask> mock_task_b;
 
   scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
-      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel);
+      TaskTraits(), nullptr, TaskSourceExecutionMode::kParallel,
+      ThreadType::kDefault);
   Sequence::Transaction sequence_transaction(sequence->BeginTransaction());
 
   // Create a first delayed task.
@@ -690,7 +693,7 @@ TEST(ThreadPoolSequenceTest, GetDelayedSortKeyDelayedtasks) {
   auto registered_task_source =
       RegisteredTaskSource::CreateForTesting(sequence);
   registered_task_source.WillRunTask();
-  absl::optional<Task> task =
+  std::optional<Task> task =
       registered_task_source.TakeTask(&sequence_transaction);
   ExpectMockTask(&mock_task_b, &task.value());
   EXPECT_FALSE(task->queue_time.is_null());
@@ -719,5 +722,11 @@ TEST(ThreadPoolSequenceTest, GetDelayedSortKeyDelayedtasks) {
   registered_task_source.DidProcessTask(&sequence_transaction);
 }
 
-}  // namespace internal
-}  // namespace base
+TEST(ThreadPoolSequenceTest, InheritThreadType) {
+  scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
+      TaskTraits(InheritThreadType()), nullptr,
+      TaskSourceExecutionMode::kParallel, ThreadType::kPresentation);
+  EXPECT_EQ(ThreadType::kPresentation, sequence->thread_type_racy());
+}
+
+}  // namespace base::internal

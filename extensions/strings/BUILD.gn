@@ -6,12 +6,17 @@ import("//build/config/locales.gni")
 import("//extensions/buildflags/buildflags.gni")
 import("//tools/grit/grit_rule.gni")
 
-assert(enable_extensions)
+assert(enable_extensions_core)
 
-grit("strings") {
+grit_strings("strings") {
   source = "extensions_strings.grd"
-  outputs =
-      [ "grit/extensions_strings.h" ] +
-      process_file_template(all_chrome_locales,
-                            [ "extensions_strings_{{source_name_part}}.pak" ])
+  inputs = [
+    "extensions_chromium_strings.grdp",
+    "extensions_google_chrome_strings.grdp",
+  ]
+  inputs +=
+      process_file_template(xtb_locales,
+                            [ "extensions_strings_{{source_name_part}}.xtb" ])
+  outputs = [ "grit/extensions_strings.h" ]
+  output_prefix = "extensions_strings_"
 }

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
-// TODO(pennymac): Consider merging into base/win/PEImage. crbug/772168
+// TODO(pennymac): Consider merging into base/win/PEImage. crbug.com/40543466
 
 #ifndef CHROME_CHROME_ELF_PE_IMAGE_SAFE_PE_IMAGE_SAFE_H_
 #define CHROME_CHROME_ELF_PE_IMAGE_SAFE_PE_IMAGE_SAFE_H_
@@ -16,8 +16,8 @@
 
 namespace pe_image_safe {
 
-constexpr DWORD kPageSize = 4096;
-constexpr DWORD kImageSizeNotSet = std::numeric_limits<DWORD>::max();
+inline constexpr DWORD kPageSize = 4096;
+inline constexpr DWORD kImageSizeNotSet = std::numeric_limits<DWORD>::max();
 
 enum class ImageBitness { kUnknown, k32, k64 };
 

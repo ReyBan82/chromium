@@ -5,6 +5,10 @@
 #ifndef COMPONENTS_SAFE_BROWSING_CORE_BROWSER_DB_FAKE_DATABASE_MANAGER_H_
 #define COMPONENTS_SAFE_BROWSING_CORE_BROWSER_DB_FAKE_DATABASE_MANAGER_H_
 
+#include <set>
+#include <string>
+#include <vector>
+
 #include "base/containers/flat_map.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/safe_browsing/core/browser/db/test_database_manager.h"
@@ -17,45 +21,51 @@ namespace safe_browsing {
 // features may test their interaction with Safe Browsing.
 class FakeSafeBrowsingDatabaseManager : public TestSafeBrowsingDatabaseManager {
  public:
-  FakeSafeBrowsingDatabaseManager(
-      scoped_refptr<base::SequencedTaskRunner> ui_task_runner,
-      scoped_refptr<base::SequencedTaskRunner> io_task_runner);
+  explicit FakeSafeBrowsingDatabaseManager(
+      scoped_refptr<base::SequencedTaskRunner> ui_task_runner);
 
   void AddDangerousUrl(const GURL& dangerous_url, SBThreatType threat_type);
-  void AddDangerousUrlPattern(const GURL& dangerous_url,
-                              ThreatPatternType pattern_type);
   void ClearDangerousUrl(const GURL& dangerous_url);
+  void SetHighConfidenceAllowlistMatchResult(const GURL& url,
+                                             bool match_allowlist);
 
   // TestSafeBrowsingDatabaseManager implementation:
   // These are implemented as needed to return stubbed values.
-  bool CanCheckRequestDestination(
-      network::mojom::RequestDestination request_destination) const override;
-  bool ChecksAreAlwaysAsync() const override;
   bool CheckBrowseUrl(
       const GURL& url,
       const SBThreatTypeSet& threat_types,
       Client* client,
-      MechanismExperimentHashDatabaseCache experiment_cache_selection) override;
+      CheckBrowseUrlType check_type) override;
   bool CheckDownloadUrl(const std::vector<GURL>& url_chain,
                         Client* client) override;
   bool CheckExtensionIDs(const std::set<std::string>& extension_ids,
                          Client* client) override;
+  void CancelCheck(Client* client) override;
+  void CheckUrlForHighConfidenceAllowlist(
+      const GURL& url,
+      CheckUrlForHighConfidenceAllowlistCallback callback) override;
   bool CheckUrlForSubresourceFilter(const GURL& url, Client* client) override;
-  safe_browsing::ThreatSource GetThreatSource() const override;
+  safe_browsing::ThreatSource GetBrowseUrlThreatSource(
+      CheckBrowseUrlType check_type) const override;
+  safe_browsing::ThreatSource GetNonBrowseUrlThreatSource() const override;
 
- private:
+ protected:
   ~FakeSafeBrowsingDatabaseManager() override;
 
-  static void CheckBrowseURLAsync(GURL url,
-                                  SBThreatType result_threat_type,
-                                  ThreatPatternType pattern_type,
-                                  Client* client);
+ private:
+  void CheckBrowseURLAsync(GURL url,
+                           SBThreatType result_threat_type,
+                           uintptr_t client_id);
   static void CheckDownloadURLAsync(const std::vector<GURL>& url_chain,
                                     SBThreatType result_threat_type,
                                     Client* client);
 
   base::flat_map<GURL, SBThreatType> dangerous_urls_;
-  base::flat_map<GURL, ThreatPatternType> dangerous_patterns_;
+  base::flat_map<GURL, bool> high_confidence_allowlist_match_urls_;
+  // TODO(crbug.com/532598569): Investigate alternate approaches in a downstream
+  // CL instead of casting the Client pointer to uintptr_t.
+  base::flat_set<uintptr_t> pending_clients_;
+  base::WeakPtrFactory<FakeSafeBrowsingDatabaseManager> weak_factory_{this};
 };
 
 }  // namespace safe_browsing

@@ -4,10 +4,11 @@
 
 #include "third_party/blink/renderer/core/editing/visible_units.h"
 
+#include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/editing/position_units.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
 #include "third_party/blink/renderer/core/editing/testing/editing_test_base.h"
 #include "third_party/blink/renderer/core/editing/visible_position.h"
-#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
 
@@ -52,18 +53,18 @@ class VisibleUnitsWordTest : public EditingTestBase {
     const Position result =
         CreateVisiblePosition(PreviousWordPosition(position)).DeepEquivalent();
     if (result.IsNull())
-      return GetSelectionTextFromBody(SelectionInDOMTree());
+      return GetSelectionTextFromBody(SelectionInDomTree());
     return GetCaretTextFromBody(result);
   }
 
   std::string DoMiddleOfWord(const std::string& selection_text) {
-    SelectionInDOMTree selection = SetSelectionTextToBody(selection_text);
+    SelectionInDomTree selection = SetSelectionTextToBody(selection_text);
     return GetCaretTextFromBody(
-        MiddleOfWordPosition(selection.Base(), selection.Extent()));
+        MiddleOfWordPosition(selection.Anchor(), selection.Focus()));
   }
 
   // To avoid name conflict in jumbo build, following functions should be here.
-  static VisiblePosition CreateVisiblePositionInDOMTree(
+  static VisiblePosition CreateVisiblePositionInDomTree(
       Node& anchor,
       int offset,
       TextAffinity affinity = TextAffinity::kDownstream) {
@@ -145,6 +146,38 @@ TEST_F(VisibleUnitsWordTest, StartOfWordCrossing) {
   EXPECT_EQ("<b>abc</b><i>def|</i>", DoStartOfWord("<b>abc</b><i>def</i>|"));
 }
 
+// https://crbug.com/40848794
+TEST_F(VisibleUnitsWordTest, StartOfWordAdjacentContentEditableSpans) {
+  SetBodyContent(
+      "<div>"
+      "<span contenteditable=\"true\">SpanNumber1</span>"
+      "<span contenteditable=\"true\" id=\"target\">SpanNumber2</span>"
+      "<span contenteditable=\"true\">SpanNumber3</span>"
+      "</div>");
+  const Element* target = GetDocument().getElementById(AtomicString("target"));
+  const Position position(target->firstChild(), 5);
+  const Position result = StartOfWordPosition(position);
+  ASSERT_FALSE(result.IsNull());
+  ASSERT_TRUE(result.IsConnected());
+  EXPECT_EQ(Position(target->firstChild(), 0), result);
+}
+
+// https://crbug.com/40848794
+TEST_F(VisibleUnitsWordTest, EndOfWordAdjacentContentEditableSpans) {
+  SetBodyContent(
+      "<div>"
+      "<span contenteditable=\"true\">SpanNumber1</span>"
+      "<span contenteditable=\"true\" id=\"target\">SpanNumber2</span>"
+      "<span contenteditable=\"true\">SpanNumber3</span>"
+      "</div>");
+  const Element* target = GetDocument().getElementById(AtomicString("target"));
+  const Position position(target->firstChild(), 5);
+  const Position result = EndOfWordPosition(position);
+  ASSERT_FALSE(result.IsNull());
+  ASSERT_TRUE(result.IsConnected());
+  EXPECT_EQ(Position(target->firstChild(), 11), result);
+}
+
 TEST_F(VisibleUnitsWordTest, StartOfWordFirstLetter) {
   InsertStyleElement("p::first-letter {font-size:200%;}");
   // Note: Expectations should match with |StartOfWordBasic|.
@@ -164,7 +197,7 @@ TEST_F(VisibleUnitsWordTest, StartOfWordFirstLetter) {
   EXPECT_EQ("<p> (1) abc def|</p>", DoStartOfWord("<p> (1) abc def</p>|"));
 }
 
-TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
+TEST_F(VisibleUnitsWordTest, StartOfWordShadowDom) {
   const char* body_content =
       "<span id=host><b slot='#one' id=one>1</b> <b slot='#two' "
       "id=two>22</b></span><i id=three>333</i>";
@@ -174,17 +207,19 @@ TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
   SetBodyContent(body_content);
   ShadowRoot* shadow_root = SetShadowContent(shadow_content, "host");
 
-  Node* one = GetDocument().getElementById("one")->firstChild();
-  Node* two = GetDocument().getElementById("two")->firstChild();
-  Node* three = GetDocument().getElementById("three")->firstChild();
-  Node* four = shadow_root->getElementById("four")->firstChild();
-  Node* five = shadow_root->getElementById("five")->firstChild();
-  Node* space = shadow_root->getElementById("space")->firstChild();
+  Node* one = GetDocument().getElementById(AtomicString("one"))->firstChild();
+  Node* two = GetDocument().getElementById(AtomicString("two"))->firstChild();
+  Node* three =
+      GetDocument().getElementById(AtomicString("three"))->firstChild();
+  Node* four = shadow_root->getElementById(AtomicString("four"))->firstChild();
+  Node* five = shadow_root->getElementById(AtomicString("five"))->firstChild();
+  Node* space =
+      shadow_root->getElementById(AtomicString("space"))->firstChild();
 
   EXPECT_EQ(Position(one, 0),
             CreateVisiblePosition(
                 StartOfWordPosition(
-                    CreateVisiblePositionInDOMTree(*one, 0).DeepEquivalent()))
+                    CreateVisiblePositionInDomTree(*one, 0).DeepEquivalent()))
                 .DeepEquivalent());
   EXPECT_EQ(PositionInFlatTree(space, 1),
             CreateVisiblePosition(
@@ -194,7 +229,7 @@ TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
   EXPECT_EQ(Position(one, 0),
             CreateVisiblePosition(
                 StartOfWordPosition(
-                    CreateVisiblePositionInDOMTree(*one, 1).DeepEquivalent()))
+                    CreateVisiblePositionInDomTree(*one, 1).DeepEquivalent()))
                 .DeepEquivalent());
 
   EXPECT_EQ(PositionInFlatTree(space, 1),
@@ -205,7 +240,7 @@ TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
   EXPECT_EQ(Position(four, 0),
             CreateVisiblePosition(
                 StartOfWordPosition(
-                    CreateVisiblePositionInDOMTree(*two, 0).DeepEquivalent()))
+                    CreateVisiblePositionInDomTree(*two, 0).DeepEquivalent()))
                 .DeepEquivalent());
   EXPECT_EQ(PositionInFlatTree(four, 0),
             CreateVisiblePosition(
@@ -215,7 +250,7 @@ TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
   EXPECT_EQ(Position(four, 0),
             CreateVisiblePosition(
                 StartOfWordPosition(
-                    CreateVisiblePositionInDOMTree(*two, 1).DeepEquivalent()))
+                    CreateVisiblePositionInDomTree(*two, 1).DeepEquivalent()))
                 .DeepEquivalent());
   EXPECT_EQ(PositionInFlatTree(four, 0),
             CreateVisiblePosition(
@@ -224,14 +259,14 @@ TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
                 .DeepEquivalent());
   EXPECT_EQ(Position(three, 0),
             CreateVisiblePosition(
-                StartOfWordPosition(CreateVisiblePositionInDOMTree(
+                StartOfWordPosition(CreateVisiblePositionInDomTree(
                                         *three, 1, TextAffinity::kUpstream)
                                         .DeepEquivalent()))
                 .DeepEquivalent());
   EXPECT_EQ(Position(three, 0),
             CreateVisiblePosition(
                 StartOfWordPosition(
-                    CreateVisiblePositionInDOMTree(*three, 1).DeepEquivalent()))
+                    CreateVisiblePositionInDomTree(*three, 1).DeepEquivalent()))
                 .DeepEquivalent());
   EXPECT_EQ(
       PositionInFlatTree(three, 0),
@@ -242,7 +277,7 @@ TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
   EXPECT_EQ(Position(four, 0),
             CreateVisiblePosition(
                 StartOfWordPosition(
-                    CreateVisiblePositionInDOMTree(*four, 1).DeepEquivalent()))
+                    CreateVisiblePositionInDomTree(*four, 1).DeepEquivalent()))
                 .DeepEquivalent());
   EXPECT_EQ(PositionInFlatTree(four, 0),
             CreateVisiblePosition(
@@ -252,7 +287,7 @@ TEST_F(VisibleUnitsWordTest, StartOfWordShadowDOM) {
   EXPECT_EQ(Position(one, 0),
             CreateVisiblePosition(
                 StartOfWordPosition(
-                    CreateVisiblePositionInDOMTree(*five, 1).DeepEquivalent()))
+                    CreateVisiblePositionInDomTree(*five, 1).DeepEquivalent()))
                 .DeepEquivalent());
   // Flat tree canonicalization moves result to downstream position
   EXPECT_EQ(PositionInFlatTree(space, 1),
@@ -385,7 +420,7 @@ TEST_F(VisibleUnitsWordTest, EndOfWordPreviousWordIfOnBoundaryBasic) {
       DoEndOfWord("<p> (1) abc def</p>|", WordSide::kPreviousWordIfOnBoundary));
 }
 
-TEST_F(VisibleUnitsWordTest, EndOfWordShadowDOM) {
+TEST_F(VisibleUnitsWordTest, EndOfWordShadowDom) {
   const char* body_content =
       "<span id=host><b slot='#one' id=one>1</b> <b slot='#two' "
       "id=two>22</b></span><i id=three>333</i>";
@@ -395,11 +430,12 @@ TEST_F(VisibleUnitsWordTest, EndOfWordShadowDOM) {
   SetBodyContent(body_content);
   ShadowRoot* shadow_root = SetShadowContent(shadow_content, "host");
 
-  Node* one = GetDocument().getElementById("one")->firstChild();
-  Node* two = GetDocument().getElementById("two")->firstChild();
-  Node* three = GetDocument().getElementById("three")->firstChild();
-  Node* four = shadow_root->getElementById("four")->firstChild();
-  Node* five = shadow_root->getElementById("five")->firstChild();
+  Node* one = GetDocument().getElementById(AtomicString("one"))->firstChild();
+  Node* two = GetDocument().getElementById(AtomicString("two"))->firstChild();
+  Node* three =
+      GetDocument().getElementById(AtomicString("three"))->firstChild();
+  Node* four = shadow_root->getElementById(AtomicString("four"))->firstChild();
+  Node* five = shadow_root->getElementById(AtomicString("five"))->firstChild();
 
   EXPECT_EQ(Position(five, 5), EndOfWordPosition(Position(*one, 0)));
   EXPECT_EQ(PositionInFlatTree(five, 5),
@@ -639,6 +675,30 @@ TEST_F(VisibleUnitsWordTest, NextWordEmojiSequence) {
             DoNextWord("<p> abc &#x1F602;&#x1F602; |def</p>"));
 }
 
+// http://crbug.com/443752821
+TEST_F(VisibleUnitsWordTest, NextWordCrossingOutOfFlow) {
+  const Position absolute_pos = SetCaretTextToBody(R"HTML(
+    <div contenteditable="true">Test|</div>
+    <div><span style="position: absolute;"></span>
+      <span><span style="display: block"> </span></span>
+    </div>)HTML");
+  EXPECT_TRUE(NextWordPosition(absolute_pos).IsNull());
+
+  const Position fixed_pos = SetCaretTextToBody(R"HTML(
+    <div contenteditable="true">Test|</div>
+    <div><span style="position: fixed;"></span>
+      <span><span style="display: block"> </span></span>
+    </div>)HTML");
+  EXPECT_TRUE(NextWordPosition(fixed_pos).IsNull());
+
+  const Position float_pos = SetCaretTextToBody(R"HTML(
+    <div contenteditable="true">Test|</div>
+    <div><span style="float: left;"></span>
+      <span><span style="display: block"> </span></span>
+    </div>)HTML");
+  EXPECT_TRUE(NextWordPosition(float_pos).IsNull());
+}
+
 //----
 
 TEST_F(VisibleUnitsWordTest, PreviousWordBasic) {
@@ -793,6 +853,33 @@ TEST_F(VisibleUnitsWordTest, PreviousWordSkipTextControl) {
             DoPreviousWord("foo<input value=\"bla\">bar|"));
 }
 
+// http://crbug.com/443752821
+TEST_F(VisibleUnitsWordTest, PreviousWordCrossingOutOfFlow) {
+  const Position absolute_pos = SetCaretTextToBody(R"HTML(
+    <div><span style="position: absolute;"></span>
+      <span><span style="display: block"> </span></span>
+    </div>
+    <div contenteditable="true">|Test</div>
+  )HTML");
+  EXPECT_TRUE(PreviousWordPosition(absolute_pos).IsNull());
+
+  const Position fixed_pos = SetCaretTextToBody(R"HTML(
+    <div><span style="position: fixed;"></span>
+      <span><span style="display: block"> </span></span>
+    </div>
+    <div contenteditable="true">|Test</div>
+  )HTML");
+  EXPECT_TRUE(PreviousWordPosition(fixed_pos).IsNull());
+
+  const Position float_pos = SetCaretTextToBody(R"HTML(
+    <div><span style="float: left;"></span>
+      <span><span style="display: block"> </span></span>
+    </div>
+    <div contenteditable="true">|Test</div>
+  )HTML");
+  EXPECT_TRUE(PreviousWordPosition(float_pos).IsNull());
+}
+
 TEST_F(VisibleUnitsWordTest, MiddleOfWord) {
   // Default case with one element.
   EXPECT_EQ("<p>This is a test sent|ence</p>",
@@ -816,6 +903,111 @@ TEST_F(VisibleUnitsWordTest, MiddleOfWord) {
   EXPECT_EQ(
       "<p>This is a <span>tes|ting</span> sentence.</p>",
       DoMiddleOfWord("<p>This is a <span>^testin|g</span> sentence.</p>"));
+}
+
+TEST_F(VisibleUnitsWordTest, NextWordSkipSpacesPunctuationFollowedByLineBreak) {
+  // On Windows, caret navigation should treat punctuation following whitespace
+  // as a word boundary, even if immediately followed by a line break. This test
+  // covers the fix for issues.chromium.org/issues/481087619.
+
+  InsertStyleElement("p { white-space: pre; }");
+
+  // 1. Verify caret stops at punctuation preceded by space, then moves to next
+  // line.
+  EXPECT_EQ("<p>    |{\n</p>", DoNextWordSkippingSpaces("<p>|    {\n</p>"));
+  EXPECT_EQ("<p>    {|\n</p>", DoNextWordSkippingSpaces("<p>    |{\n</p>"));
+
+  // Verify movement from end of previous line to punctuation, then to next
+  // line.
+  EXPECT_EQ("<p>foo\n    |{\n</p>",
+            DoNextWordSkippingSpaces("<p>foo|\n    {\n</p>"));
+  EXPECT_EQ("<p>foo\n    {|\n</p>",
+            DoNextWordSkippingSpaces("<p>foo\n    |{\n</p>"));
+
+  // 2. Verify skipping newline and whitespace to reach punctuation.
+  EXPECT_EQ("<p>\n   |.</p>", DoNextWordSkippingSpaces("<p>|\n   .</p>"));
+
+  // 3. Verify standard behavior: skip newline to reach punctuation immediately.
+  EXPECT_EQ("<p>\n|.</p>", DoNextWordSkippingSpaces("<p>|\n.</p>"));
+
+  // 4. Verify stopping at punctuation boundaries within text.
+  EXPECT_EQ("<p>foo|{bar}</p>", DoNextWordSkippingSpaces("<p>f|oo{bar}</p>"));
+  EXPECT_EQ("<p>foo{|bar}</p>", DoNextWordSkippingSpaces("<p>foo|{bar}</p>"));
+  EXPECT_EQ("<p>foo{bar|}</p>", DoNextWordSkippingSpaces("<p>foo{|bar}</p>"));
+
+  // 5. Verify stopping at every punctuation  separated by space.
+  EXPECT_EQ("<p>foo|{ { bar} }</p>",
+            DoNextWordSkippingSpaces("<p>f|oo{ { bar} }</p>"));
+  EXPECT_EQ("<p>foo{ |{ bar} }</p>",
+            DoNextWordSkippingSpaces("<p>foo|{ { bar} }</p>"));
+  EXPECT_EQ("<p>foo{ { |bar} }</p>",
+            DoNextWordSkippingSpaces("<p>foo{ |{ bar} }</p>"));
+  EXPECT_EQ("<p>foo{ { bar|} }</p>",
+            DoNextWordSkippingSpaces("<p>foo{ { |bar} }</p>"));
+  EXPECT_EQ("<p>foo{ { bar} |}</p>",
+            DoNextWordSkippingSpaces("<p>foo{ { bar|} }</p>"));
+
+  // 6. Verify navigation across multiple lines with text and punctuation.
+  EXPECT_EQ("<p>{|\nhello\n}</p>",
+            DoNextWordSkippingSpaces("<p>|{\nhello\n}</p>"));
+  EXPECT_EQ("<p>{\n|hello\n}</p>",
+            DoNextWordSkippingSpaces("<p>{|\nhello\n}</p>"));
+  EXPECT_EQ("<p>{\nhello|\n}</p>",
+            DoNextWordSkippingSpaces("<p>{\nhe|llo\n}</p>"));
+  EXPECT_EQ("<p>{\nhello\n|}</p>",
+            DoNextWordSkippingSpaces("<p>{\nhello|\n}</p>"));
+
+  // 7. Verify stopping at start of punctuation block, then moving to line end.
+  EXPECT_EQ(
+      "<p>\n     |{{{{\n    world\n    }}}}</p>",
+      DoNextWordSkippingSpaces("<p>\n  |   {{{{\n    world\n    }}}}</p>"));
+  EXPECT_EQ(
+      "<p>\n     {{{{|\n    world\n    }}}}</p>",
+      DoNextWordSkippingSpaces("<p>\n     |{{{{\n    world\n    }}}}</p>"));
+
+  // 8. Verify skipping punctuation group in bulk and moving to the line end.
+  EXPECT_EQ(
+      "<p>\n    {{{{|\n    world\n    }}}}</p>",
+      DoNextWordSkippingSpaces("<p>\n    {|{{{\n    world\n    }}}}</p>"));
+  EXPECT_EQ(
+      "<p>\n     {{{{|\n    world\n    }}}}</p>",
+      DoNextWordSkippingSpaces("<p>\n     {{|{{\n    world\n    }}}}</p>"));
+
+  // 9. Verify skipping mixed punctuation group in bulk and moving to the line
+  // end.
+  EXPECT_EQ(
+      "<p>\n    {{..{{|\n    world\n    }}..}}</p>",
+      DoNextWordSkippingSpaces("<p>\n    {|{..{{\n    world\n    }}..}}</p>"));
+  EXPECT_EQ(
+      "<p>\n    {{..{{\n    world\n    }}..}}|</p>",
+      DoNextWordSkippingSpaces("<p>\n    {{..{{\n    world\n    }|}..}}</p>"));
+
+  // 10. Verify handling of tabs (\t) as whitespace before punctuation.
+  EXPECT_EQ("<p>\t\t|{\n</p>", DoNextWordSkippingSpaces("<p>|\t\t{\n</p>"));
+  EXPECT_EQ("<p>\t\t|{\n\t\t\t\thello\n\t\t}</p>",
+            DoNextWordSkippingSpaces("<p>|\t\t{\n\t\t\t\thello\n\t\t}</p>"));
+  EXPECT_EQ("<p>\t\t{|\n\t\t\t\thello\n\t\t}</p>",
+            DoNextWordSkippingSpaces("<p>\t\t|{\n\t\t\t\thello\n\t\t}</p>"));
+  EXPECT_EQ("<p>\t\t{\n\t\t\t\t|hello\n\t\t}</p>",
+            DoNextWordSkippingSpaces("<p>\t\t{|\n\t\t\t\thello\n\t\t}</p>"));
+  EXPECT_EQ("<p>\t\t{\n\t\t\t\t|hello\n\t\t}</p>",
+            DoNextWordSkippingSpaces("<p>\t\t{\n\t|\t\t\thello\n\t\t}</p>"));
+  EXPECT_EQ("<p>\t\t{\n\t\t\t\thello|\n\t\t}</p>",
+            DoNextWordSkippingSpaces("<p>\t\t{\n\t\t\t\t|hello\n\t\t}</p>"));
+  EXPECT_EQ("<p>\t\t{\n\t\t\t\thello|\n\t\t}</p>",
+            DoNextWordSkippingSpaces("<p>\t\t{\n\t\t\t\the|llo\n\t\t}</p>"));
+  EXPECT_EQ("<p>\t\t{\n\t\t\t\thello\n\t\t|}</p>",
+            DoNextWordSkippingSpaces("<p>\t\t{\n\t\t\t\thello|\n\t\t}</p>"));
+
+  // 11. Verify non-ascii.
+  EXPECT_EQ("<p>    |¿\n</p>", DoNextWordSkippingSpaces("<p>|    ¿\n</p>"));
+  EXPECT_EQ("<p>    hello |¿\n</p>",
+            DoNextWordSkippingSpaces("<p>    h|ello ¿\n</p>"));
+  EXPECT_EQ("<p>\n|¿\n</p>", DoNextWordSkippingSpaces("<p>|\n¿\n</p>"));
+  EXPECT_EQ("<p>hello|¿world</p>",
+            DoNextWordSkippingSpaces("<p>|hello¿world</p>"));
+  EXPECT_EQ("<p>hello¿|world</p>",
+            DoNextWordSkippingSpaces("<p>hello|¿world</p>"));
 }
 
 }  // namespace blink

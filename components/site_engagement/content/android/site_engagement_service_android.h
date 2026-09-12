@@ -34,14 +34,9 @@ class SiteEngagementServiceAndroid {
 
   ~SiteEngagementServiceAndroid();
 
-  double GetScore(JNIEnv* env,
-                  const base::android::JavaParamRef<jobject>& caller,
-                  const base::android::JavaParamRef<jstring>& jurl) const;
+  double GetScore(const std::string& url) const;
 
-  void ResetBaseScoreForURL(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>& caller,
-                            const base::android::JavaParamRef<jstring>& jurl,
-                            double score);
+  void ResetBaseScoreForURL(const std::string& url, double score);
 
  private:
   base::android::ScopedJavaGlobalRef<jobject> java_service_;

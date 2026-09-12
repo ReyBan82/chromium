@@ -4,13 +4,22 @@
 
 #include "components/viz/service/hit_test/hit_test_aggregator.h"
 
+#include "base/feature.h"
+#include "base/feature_list.h"
 #include "base/trace_event/trace_event.h"
+#include "base/types/expected.h"
 #include "components/viz/common/hit_test/hit_test_region_list.h"
 #include "components/viz/service/hit_test/hit_test_aggregator_delegate.h"
 #include "components/viz/service/surfaces/latest_local_surface_id_lookup_delegate.h"
 #include "ui/gfx/geometry/rect_conversions.h"
+#include "ui/gfx/geometry/rect_f.h"
+#include "ui/gfx/geometry/rrect_f.h"
 
 namespace viz {
+namespace {
+// TODO (crbug.com/495852034): Remove once M150 hits Stable.
+BASE_FEATURE(kRejectInvalidChildRegions, base::FEATURE_ENABLED_BY_DEFAULT);
+}  // namespace
 
 HitTestAggregator::HitTestAggregator(
     const HitTestManager* hit_test_manager,
@@ -52,30 +61,35 @@ void HitTestAggregator::Aggregate(const SurfaceId& display_surface_id) {
   SendHitTestData();
 }
 
+const std::vector<AggregatedHitTestRegion>& HitTestAggregator::GetHitTestData()
+    const {
+  return hit_test_data_;
+}
+
 void HitTestAggregator::SendHitTestData() {
   hit_test_data_.resize(hit_test_data_size_);
   delegate_->OnAggregatedHitTestRegionListUpdated(root_frame_sink_id_,
                                                   hit_test_data_);
 }
 
-absl::optional<int64_t> HitTestAggregator::GetTraceIdIfUpdated(
+std::optional<int64_t> HitTestAggregator::GetTraceIdIfUpdated(
     const SurfaceId& surface_id,
-    uint64_t active_frame_index) {
+    uint32_t active_frame_index) {
   bool enabled;
   TRACE_EVENT_CATEGORY_GROUP_ENABLED(
       TRACE_DISABLED_BY_DEFAULT("viz.hit_testing_flow"), &enabled);
   if (!enabled)
-    return absl::nullopt;
+    return std::nullopt;
 
-  uint64_t& frame_index = last_active_frame_index_[surface_id.frame_sink_id()];
+  uint32_t& frame_index = last_active_frame_index_[surface_id.frame_sink_id()];
   if (frame_index == active_frame_index)
-    return absl::nullopt;
+    return std::nullopt;
   frame_index = active_frame_index;
   return ~hit_test_manager_->GetTraceId(surface_id);
 }
 
 void HitTestAggregator::AppendRoot(const SurfaceId& surface_id) {
-  uint64_t active_frame_index;
+  uint32_t active_frame_index;
   const HitTestRegionList* hit_test_region_list =
       hit_test_manager_->GetActiveHitTestRegionList(
           local_surface_id_lookup_delegate_, surface_id.frame_sink_id(),
@@ -84,13 +98,15 @@ void HitTestAggregator::AppendRoot(const SurfaceId& surface_id) {
   if (!hit_test_region_list)
     return;
 
-  absl::optional<int64_t> trace_id =
+  std::optional<int64_t> trace_id =
       GetTraceIdIfUpdated(surface_id, active_frame_index);
-  TRACE_EVENT_WITH_FLOW1(
-      TRACE_DISABLED_BY_DEFAULT("viz.hit_testing_flow"), "Event.Pipeline",
-      TRACE_ID_GLOBAL(trace_id.value_or(-1)),
-      trace_id ? TRACE_EVENT_FLAG_FLOW_IN : TRACE_EVENT_FLAG_NONE, "step",
-      "AggregateHitTestData(Root)");
+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("viz.hit_testing_flow"),
+              "Event.Pipeline", "step", "AggregateHitTestData(Root)",
+              [&](perfetto::EventContext& ctx) {
+                if (trace_id) {
+                  perfetto::TerminatingFlow::Global (*trace_id)(ctx);
+                }
+              });
 
   DCHECK(referenced_child_regions_.empty());
   referenced_child_regions_.insert(surface_id.frame_sink_id());
@@ -99,8 +115,16 @@ void HitTestAggregator::AppendRoot(const SurfaceId& surface_id) {
   for (const auto& region : hit_test_region_list->regions) {
     if (region_index >= hit_test_data_capacity_ - 1)
       break;
-    region_index = AppendRegion(region_index, region);
-    DCHECK_EQ(referenced_child_regions_.size(), 1u);
+    // In the call to `AppendRegion` the invalid child regions are not
+    // added to `hit_test_data_`. We need to complete the processing of the
+    // root itself. Otherwise we will have an invalid map to send to the Viz
+    // host.
+    if (auto result =
+            AppendRegion(region_index, region, surface_id.frame_sink_id());
+        result.has_value()) {
+      region_index = result.value();
+      DCHECK_EQ(referenced_child_regions_.size(), 1u);
+    }
   }
   referenced_child_regions_.erase(referenced_child_regions_.begin());
 
@@ -108,12 +132,14 @@ void HitTestAggregator::AppendRoot(const SurfaceId& surface_id) {
   int32_t child_count = region_index - 1;
   SetRegionAt(0, surface_id.frame_sink_id(), hit_test_region_list->flags,
               hit_test_region_list->async_hit_test_reasons,
-              hit_test_region_list->bounds, hit_test_region_list->transform,
-              child_count);
+              gfx::RRectF(hit_test_region_list->bounds),
+              hit_test_region_list->transform, child_count);
 }
 
-size_t HitTestAggregator::AppendRegion(size_t region_index,
-                                       const HitTestRegion& region) {
+base::expected<size_t, HitTestAggregator::AggregationError>
+HitTestAggregator::AppendRegion(size_t region_index,
+                                const HitTestRegion& region,
+                                const FrameSinkId& submitting_frame_sink_id) {
   size_t parent_index = region_index++;
   if (region_index >= hit_test_data_capacity_ - 1) {
     if (hit_test_data_capacity_ > max_region_size_) {
@@ -129,12 +155,21 @@ size_t HitTestAggregator::AppendRegion(size_t region_index,
   gfx::Transform transform = region.transform;
 
   if (region.flags & HitTestRegionFlags::kHitTestChildSurface) {
-    if (referenced_child_regions_.count(region.frame_sink_id))
+    if (referenced_child_regions_.count(region.frame_sink_id)) {
+      // This detects potential cycles within the HitTestRegions. We want to
+      // keep the single entry as a valid region.
       return parent_index;
+    }
+
+    // Verify that the child is actually a child of the submitting frame sink.
+    if (base::FeatureList::IsEnabled(kRejectInvalidChildRegions) &&
+        !delegate_->IsChildOf(submitting_frame_sink_id, region.frame_sink_id)) {
+      return base::unexpected(AggregationError::INVALID_CHILD_REGION);
+    }
 
     referenced_child_regions_.insert(region.frame_sink_id);
 
-    uint64_t active_frame_index;
+    uint32_t active_frame_index;
     const HitTestRegionList* hit_test_region_list =
         hit_test_manager_->GetActiveHitTestRegionList(
             local_surface_id_lookup_delegate_, region.frame_sink_id,
@@ -168,19 +203,29 @@ size_t HitTestAggregator::AppendRegion(size_t region_index,
                 region.frame_sink_id);
         SurfaceId surface_id(region.frame_sink_id, local_surface_id);
 
-        absl::optional<int64_t> trace_id =
+        std::optional<int64_t> trace_id =
             GetTraceIdIfUpdated(surface_id, active_frame_index);
-        TRACE_EVENT_WITH_FLOW1(
-            TRACE_DISABLED_BY_DEFAULT("viz.hit_testing_flow"), "Event.Pipeline",
-            TRACE_ID_GLOBAL(trace_id.value_or(-1)),
-            trace_id ? TRACE_EVENT_FLAG_FLOW_IN : TRACE_EVENT_FLAG_NONE, "step",
-            "AggregateHitTestData");
+        TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("viz.hit_testing_flow"),
+                    "Event.Pipeline", "step", "AggregateHitTestData",
+                    [&](perfetto::EventContext& ctx) {
+                      if (trace_id) {
+                        perfetto::TerminatingFlow::Global (*trace_id)(ctx);
+                      }
+                    });
       }
 
       for (const auto& child_region : hit_test_region_list->regions) {
-        region_index = AppendRegion(region_index, child_region);
-        if (region_index >= hit_test_data_capacity_ - 1)
+        if (auto result =
+                AppendRegion(region_index, child_region, region.frame_sink_id);
+            result.has_value()) {
+          region_index = result.value();
+          if (region_index >= hit_test_data_capacity_ - 1) {
+            break;
+          }
+        } else {
+          // Invalid child region
           break;
+        }
       }
     }
     referenced_child_regions_.erase(region.frame_sink_id);
@@ -189,14 +234,14 @@ size_t HitTestAggregator::AppendRegion(size_t region_index,
   int32_t child_count = region_index - parent_index - 1;
   SetRegionAt(parent_index, region.frame_sink_id, flags, reasons, region.rect,
               transform, child_count);
-  return region_index;
+  return base::ok(region_index);
 }
 
 void HitTestAggregator::SetRegionAt(size_t index,
                                     const FrameSinkId& frame_sink_id,
                                     uint32_t flags,
                                     uint32_t async_hit_test_reasons,
-                                    const gfx::Rect& rect,
+                                    const gfx::RRectF& rect,
                                     const gfx::Transform& transform,
                                     int32_t child_count) {
   hit_test_data_[index] =

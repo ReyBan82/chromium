@@ -34,12 +34,6 @@ ssize_t SocketWrite(base::PlatformFile socket,
                     const void* bytes,
                     size_t num_bytes);
 
-// Like |writev()| but handles |EINTR| and never raises |SIGPIPE|.
-COMPONENT_EXPORT(MOJO_CPP_PLATFORM)
-ssize_t SocketWritev(base::PlatformFile socket,
-                     struct iovec* iov,
-                     size_t num_iov);
-
 // Wrapper around |sendmsg()| which makes it convenient to send attached file
 // descriptors. All entries in |descriptors| must be valid and |descriptors|
 // must be non-empty.
@@ -56,7 +50,9 @@ ssize_t SendmsgWithHandles(base::PlatformFile socket,
                            size_t num_iov,
                            const std::vector<base::ScopedFD>& descriptors);
 
-// Like |recvmsg()|, but handles |EINTR|.
+// Like |recvmsg()|, but handles |EINTR|. Returns 0 if some file descriptors
+// failed to be received, -1 for other errors (in which case, refer to `errno`),
+// and a positive number if bytes were successfully received.
 COMPONENT_EXPORT(MOJO_CPP_PLATFORM)
 ssize_t SocketRecvmsg(base::PlatformFile socket,
                       void* buf,

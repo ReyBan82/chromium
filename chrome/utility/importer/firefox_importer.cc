@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <set>
+#include <string_view>
 
 #include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
@@ -13,25 +14,31 @@
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
+#include "base/types/expected_macros.h"
 #include "build/build_config.h"
 #include "chrome/common/importer/firefox_importer_utils.h"
-#include "chrome/common/importer/imported_bookmark_entry.h"
 #include "chrome/common/importer/importer_autofill_form_data_entry.h"
 #include "chrome/common/importer/importer_bridge.h"
-#include "chrome/common/importer/importer_data_types.h"
-#include "chrome/common/importer/importer_url_row.h"
 #include "chrome/grit/generated_resources.h"
-#include "chrome/utility/importer/bookmark_html_reader.h"
-#include "chrome/utility/importer/favicon_reencode.h"
+#include "components/user_data_importer/common/imported_bookmark_entry.h"
+#include "components/user_data_importer/common/importer_data_types.h"
+#include "components/user_data_importer/common/importer_url_row.h"
+#include "components/user_data_importer/content/content_bookmark_parser_utils.h"
+#include "components/user_data_importer/content/favicon_reencode.h"
+#include "components/user_data_importer/mojom/bookmark_html_parser.mojom.h"
+#include "components/user_data_importer/utility/bookmark_parser.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "sql/database.h"
 #include "sql/statement.h"
 #include "url/gurl.h"
 
-#if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
+#if !BUILDFLAG(IS_MAC)
 #include "chrome/utility/importer/nss_decryptor.h"
-#endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
+#endif  // !BUILDFLAG(IS_MAC)
 
 namespace {
+
+inline constexpr sql::Database::Tag kDatabaseTag{"FirefoxImporter"};
 
 // Original definition is in:
 //   toolkit/components/places/nsINavBookmarksService.idl
@@ -41,25 +48,6 @@ enum BookmarkItemType {
   TYPE_SEPARATOR = 3,
   TYPE_DYNAMIC_CONTAINER = 4
 };
-
-// Loads the default bookmarks in the Firefox installed at |app_path|,
-// and stores their locations in |urls|.
-void LoadDefaultBookmarks(const base::FilePath& app_path,
-                          std::set<GURL>* urls) {
-  base::FilePath file = app_path.AppendASCII("defaults")
-      .AppendASCII("profile")
-      .AppendASCII("bookmarks.html");
-  urls->clear();
-
-  std::vector<ImportedBookmarkEntry> bookmarks;
-  std::vector<importer::SearchEngineInfo> search_engines;
-  bookmark_html_reader::ImportBookmarksFile(
-      base::RepeatingCallback<bool(void)>(),
-      base::RepeatingCallback<bool(const GURL&)>(), file, &bookmarks,
-      &search_engines, nullptr);
-  for (const auto& bookmark : bookmarks)
-    urls->insert(bookmark.url);
-}
 
 // Returns true if |url| has a valid scheme that we allow to import. We
 // filter out the URL with a unsupported scheme.
@@ -80,19 +68,28 @@ bool CanImportURL(const GURL& url) {
 
 // Initializes |favicon_url| and |png_data| members of given FaviconUsageData
 // structure with provided favicon data. Returns true if data is valid.
-bool SetFaviconData(const std::string& icon_url,
+bool SetFaviconData(std::string_view icon_url,
                     const std::vector<unsigned char>& icon_data,
                     favicon_base::FaviconUsageData* usage_data) {
   usage_data->favicon_url = GURL(icon_url);
 
   // Don't bother importing favicons with invalid URLs.
-  if (!usage_data->favicon_url.is_valid())
+  if (!usage_data->favicon_url.is_valid()) {
     return false;
+  }
 
   // Data must be valid.
-  return !icon_data.empty() &&
-         importer::ReencodeFavicon(&icon_data[0], icon_data.size(),
-                                   &usage_data->png_data);
+  if (icon_data.empty()) {
+    return false;
+  }
+
+  std::optional<std::vector<uint8_t>> png_data =
+      importer::ReencodeFavicon(base::as_byte_span(icon_data));
+  if (png_data) {
+    usage_data->png_data = std::move(png_data).value();
+    return true;
+  }
+  return false;
 }
 
 }  // namespace
@@ -113,12 +110,14 @@ FirefoxImporter::FirefoxImporter() = default;
 
 FirefoxImporter::~FirefoxImporter() = default;
 
-void FirefoxImporter::StartImport(const importer::SourceProfile& source_profile,
-                                  uint16_t items,
-                                  ImporterBridge* bridge) {
+void FirefoxImporter::StartImport(
+    const user_data_importer::SourceProfile& source_profile,
+    uint16_t items,
+    ImporterBridge* bridge) {
   bridge_ = bridge;
   source_path_ = source_profile.source_path;
   app_path_ = source_profile.app_path;
+  items_ = items;
 
 #if BUILDFLAG(IS_POSIX)
   locale_ = source_profile.locale;
@@ -130,38 +129,44 @@ void FirefoxImporter::StartImport(const importer::SourceProfile& source_profile,
     bridge->NotifyEnded();
     return;
   }
-  if ((items & importer::HOME_PAGE) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::HOME_PAGE);
+  if ((items & user_data_importer::HOME_PAGE) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::HOME_PAGE);
     ImportHomepage();  // Doesn't have a UI item.
-    bridge_->NotifyItemEnded(importer::HOME_PAGE);
+    bridge_->NotifyItemEnded(user_data_importer::HOME_PAGE);
   }
 
   // Note history should be imported before bookmarks because bookmark import
   // will also import favicons and we store favicon for a URL only if the URL
   // exist in history or bookmarks.
-  if ((items & importer::HISTORY) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::HISTORY);
+  if ((items & user_data_importer::HISTORY) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::HISTORY);
     ImportHistory();
-    bridge_->NotifyItemEnded(importer::HISTORY);
+    bridge_->NotifyItemEnded(user_data_importer::HISTORY);
   }
 
-  if ((items & importer::FAVORITES) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::FAVORITES);
+  if ((items & user_data_importer::FAVORITES) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::FAVORITES);
     ImportBookmarks();
-    bridge_->NotifyItemEnded(importer::FAVORITES);
+    return;
   }
-#if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
-  if ((items & importer::PASSWORDS) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::PASSWORDS);
+
+  ImportRemainingItems();
+}
+
+void FirefoxImporter::ImportRemainingItems() {
+#if !BUILDFLAG(IS_MAC)
+  if ((items_ & user_data_importer::PASSWORDS) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::PASSWORDS);
     ImportPasswords();
-    bridge_->NotifyItemEnded(importer::PASSWORDS);
+    bridge_->NotifyItemEnded(user_data_importer::PASSWORDS);
   }
-#endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
-  if ((items & importer::AUTOFILL_FORM_DATA) && !cancelled()) {
-    bridge_->NotifyItemStarted(importer::AUTOFILL_FORM_DATA);
+#endif  // !BUILDFLAG(IS_MAC)
+  if ((items_ & user_data_importer::AUTOFILL_FORM_DATA) && !cancelled()) {
+    bridge_->NotifyItemStarted(user_data_importer::AUTOFILL_FORM_DATA);
     ImportAutofillFormData();
-    bridge_->NotifyItemEnded(importer::AUTOFILL_FORM_DATA);
+    bridge_->NotifyItemEnded(user_data_importer::AUTOFILL_FORM_DATA);
   }
+
   bridge_->NotifyEnded();
 }
 
@@ -170,7 +175,7 @@ void FirefoxImporter::ImportHistory() {
   if (!base::PathExists(file))
     return;
 
-  sql::Database db;
+  sql::Database db(kDatabaseTag);
   if (!db.Open(file))
     return;
 
@@ -187,16 +192,20 @@ void FirefoxImporter::ImportHistory() {
       "WHERE v.visit_type <= 3";
 
   sql::Statement s(db.GetUniqueStatement(query));
+  if (!s.is_valid()) {
+    return;
+  }
 
-  std::vector<ImporterURLRow> rows;
+  std::vector<user_data_importer::ImporterURLRow> rows;
   while (s.Step() && !cancelled()) {
-    GURL url(s.ColumnString(0));
+    GURL url(s.ColumnStringView(0));
 
     // Filter out unwanted URLs.
-    if (!CanImportURL(url))
+    if (!CanImportURL(url)) {
       continue;
+    }
 
-    ImporterURLRow row(url);
+    user_data_importer::ImporterURLRow row(url);
     row.title = s.ColumnString16(1);
     row.visit_count = s.ColumnInt(2);
     row.hidden = s.ColumnInt(3) == 1;
@@ -207,51 +216,108 @@ void FirefoxImporter::ImportHistory() {
   }
 
   if (!rows.empty() && !cancelled())
-    bridge_->SetHistoryItems(rows, importer::VISIT_SOURCE_FIREFOX_IMPORTED);
+    bridge_->SetHistoryItems(rows,
+                             user_data_importer::VISIT_SOURCE_FIREFOX_IMPORTED);
+}
+
+void FirefoxImporter::SetBookmarkHtmlParser(
+    mojo::PendingRemote<user_data_importer::mojom::BookmarkHtmlParser> parser) {
+  html_parser_remote_ = std::move(parser);
 }
 
 void FirefoxImporter::ImportBookmarks() {
-  base::FilePath file = GetCopiedSourcePath("places.sqlite");
-  if (!base::PathExists(file))
+  base::FilePath sqlite_file = GetCopiedSourcePath("places.sqlite");
+  if (!base::PathExists(sqlite_file)) {
+    bridge_->NotifyItemEnded(user_data_importer::FAVORITES);
+    ImportRemainingItems();
     return;
+  }
 
-  sql::Database db;
-  if (!db.Open(file))
+  auto db = std::make_unique<sql::Database>(kDatabaseTag);
+  if (!db->Open(sqlite_file)) {
+    bridge_->NotifyItemEnded(user_data_importer::FAVORITES);
+    ImportRemainingItems();
     return;
+  }
 
   // |moz_favicons| table has been introduced in Firefox 55 and is not available
   // in older Firefox profiles.
   FaviconsLocation favicons_location =
-      db.IsSQLValid("SELECT count(*) FROM moz_favicons")
+      db->IsSQLValid("SELECT count(*) FROM moz_favicons")
           ? FaviconsLocation::kPlacesDatabase
           : FaviconsLocation::kFaviconsDatabase;
 
   // Get the bookmark folders that we are interested in.
-  int toolbar_folder_id = LoadNodeIDByGUID(&db, "toolbar_____");
-  int menu_folder_id = LoadNodeIDByGUID(&db, "menu________");
-  int unsorted_folder_id = LoadNodeIDByGUID(&db, "unfiled_____");
+  int toolbar_folder_id = LoadNodeIDByGUID(db.get(), "toolbar_____");
+  int menu_folder_id = LoadNodeIDByGUID(db.get(), "menu________");
+  int unsorted_folder_id = LoadNodeIDByGUID(db.get(), "unfiled_____");
 
   // Load livemark IDs.
-  std::set<int> livemark_id;
-  LoadLivemarkIDs(&db, &livemark_id);
+  auto livemark_id = std::make_unique<std::set<int>>();
+  LoadLivemarkIDs(db.get(), livemark_id.get());
 
   // Load the default bookmarks.
+  base::FilePath bookmarks_file = app_path_.AppendASCII("defaults")
+                                      .AppendASCII("profile")
+                                      .AppendASCII("bookmarks.html");
+  std::string raw_html;
+
+  // ReadFileToString can return false, but still populate something into
+  // `raw_html`. In that case, try to recover as much data as possible.
+  base::ReadFileToString(bookmarks_file, &raw_html);
+
+  CHECK(html_parser_remote_.is_valid());
+  auto html_parser = std::make_unique<
+      mojo::Remote<user_data_importer::mojom::BookmarkHtmlParser>>(
+      std::move(html_parser_remote_));
+
+  auto* raw_parser = html_parser.get();
+  raw_parser->set_disconnect_handler(
+      base::BindOnce(&FirefoxImporter::OnBookmarkHtmlParserDisconnected,
+                     base::WrapRefCounted(this)));
+  (*raw_parser)
+      ->Parse(raw_html,
+              base::BindOnce(&FirefoxImporter::OnDefaultBookmarksParsed,
+                             base::WrapRefCounted(this), std::move(db),
+                             toolbar_folder_id, menu_folder_id,
+                             unsorted_folder_id, std::move(livemark_id),
+                             favicons_location, std::move(html_parser)));
+}
+
+void FirefoxImporter::OnBookmarkHtmlParserDisconnected() {
+  bridge_->NotifyItemEnded(user_data_importer::FAVORITES);
+  ImportRemainingItems();
+}
+
+void FirefoxImporter::OnDefaultBookmarksParsed(
+    std::unique_ptr<sql::Database> db,
+    int toolbar_folder_id,
+    int menu_folder_id,
+    int unsorted_folder_id,
+    std::unique_ptr<std::set<int>> livemark_id,
+    FaviconsLocation favicons_location,
+    std::unique_ptr<mojo::Remote<user_data_importer::mojom::BookmarkHtmlParser>>
+        html_parser,
+    user_data_importer::BookmarkParser::ParsedBookmarks default_bookmarks) {
   std::set<GURL> default_urls;
-  LoadDefaultBookmarks(app_path_, &default_urls);
+  for (const auto& bookmark : default_bookmarks.bookmarks) {
+    default_urls.insert(bookmark.url);
+  }
 
   BookmarkList list;
-  GetTopBookmarkFolder(&db, toolbar_folder_id, &list);
-  GetTopBookmarkFolder(&db, menu_folder_id, &list);
-  GetTopBookmarkFolder(&db, unsorted_folder_id, &list);
+  GetTopBookmarkFolder(db.get(), toolbar_folder_id, &list);
+  GetTopBookmarkFolder(db.get(), menu_folder_id, &list);
+  GetTopBookmarkFolder(db.get(), unsorted_folder_id, &list);
   size_t count = list.size();
-  for (size_t i = 0; i < count; ++i)
-    GetWholeBookmarkFolder(&db, &list, i, favicons_location, nullptr);
+  for (size_t i = 0; i < count; ++i) {
+    GetWholeBookmarkFolder(db.get(), &list, i, favicons_location, nullptr);
+  }
 
-  std::vector<ImportedBookmarkEntry> bookmarks;
-  std::vector<importer::SearchEngineInfo> search_engines;
+  std::vector<user_data_importer::ImportedBookmarkEntry> bookmarks;
+  std::vector<user_data_importer::SearchEngineInfo> search_engines;
   FaviconMap favicon_map;
 
-  // TODO(https://crbug.com/18107): We do not support POST based keywords yet.
+  // TODO(crbug.com/40304654): We do not support POST based keywords yet.
   // We won't include them in the list.
   std::set<int> post_keyword_ids;
   const char query[] =
@@ -259,26 +325,32 @@ void FirefoxImporter::ImportBookmarks() {
       "INNER JOIN moz_items_annos ia ON ia.item_id = b.id "
       "INNER JOIN moz_anno_attributes aa ON ia.anno_attribute_id = aa.id "
       "WHERE aa.name = 'bookmarkProperties/POSTData'";
-  sql::Statement s(db.GetUniqueStatement(query));
+  sql::Statement s(db->GetUniqueStatement(query));
 
-  if (!s.is_valid())
+  if (!s.is_valid()) {
+    bridge_->NotifyItemEnded(user_data_importer::FAVORITES);
+    ImportRemainingItems();
     return;
+  }
 
-  while (s.Step() && !cancelled())
+  while (s.Step() && !cancelled()) {
     post_keyword_ids.insert(s.ColumnInt(0));
+  }
 
   for (const auto& item : list) {
     // Folders are added implicitly on adding children, so we only explicitly
     // add empty folders.
     if (item->type != TYPE_BOOKMARK &&
-        ((item->type != TYPE_FOLDER) || !item->empty_folder))
+        ((item->type != TYPE_FOLDER) || !item->empty_folder)) {
       continue;
+    }
 
     if (CanImportURL(item->url)) {
       // Skip the default bookmarks and unwanted URLs.
       if (default_urls.find(item->url) != default_urls.end() ||
-          post_keyword_ids.find(item->id) != post_keyword_ids.end())
+          post_keyword_ids.find(item->id) != post_keyword_ids.end()) {
         continue;
+      }
 
       // Find the bookmark path by tracing their links to parent folders.
       std::vector<std::u16string> path;
@@ -287,7 +359,7 @@ void FirefoxImporter::ImportBookmarks() {
       bool is_in_toolbar = false;
       while (child->parent >= 0) {
         BookmarkItem* parent = list[child->parent].get();
-        if (livemark_id.find(parent->id) != livemark_id.end()) {
+        if (livemark_id->find(parent->id) != livemark_id->end()) {
           // Don't import live bookmarks.
           break;
         }
@@ -298,11 +370,11 @@ void FirefoxImporter::ImportBookmarks() {
           path.insert(path.begin(), parent->title);
         }
 
-        if (parent->id == toolbar_folder_id)
+        if (parent->id == toolbar_folder_id) {
           is_in_toolbar = true;
+        }
 
-        if (parent->id == toolbar_folder_id ||
-            parent->id == menu_folder_id ||
+        if (parent->id == toolbar_folder_id || parent->id == menu_folder_id ||
             parent->id == unsorted_folder_id) {
           // We've reached a root node, hooray!
           found_path = true;
@@ -312,10 +384,11 @@ void FirefoxImporter::ImportBookmarks() {
         child = parent;
       }
 
-      if (!found_path)
+      if (!found_path) {
         continue;
+      }
 
-      ImportedBookmarkEntry entry;
+      user_data_importer::ImportedBookmarkEntry entry;
       entry.creation_time = item->date_added;
       entry.title = item->title;
       entry.url = item->url;
@@ -327,25 +400,27 @@ void FirefoxImporter::ImportBookmarks() {
     }
 
     if (item->type == TYPE_BOOKMARK) {
-      if (item->favicon)
+      if (item->favicon) {
         favicon_map[item->favicon].insert(item->url);
+      }
 
-      // Import this bookmark as a search engine if it has a keyword and its URL
-      // is usable as a search engine URL. (Even if the URL doesn't allow
+      // Import this bookmark as a search engine if it has a keyword and its
+      // URL is usable as a search engine URL. (Even if the URL doesn't allow
       // substitution, importing as a "search engine" allows users to trigger
       // the bookmark by entering its keyword in the omnibox.)
-      if (item->keyword.empty())
+      if (item->keyword.empty()) {
         continue;
-      importer::SearchEngineInfo search_engine_info;
+      }
+      user_data_importer::SearchEngineInfo search_engine_info;
       std::string search_engine_url;
-      if (item->url.is_valid())
+      if (item->url.is_valid()) {
         search_engine_info.url = base::UTF8ToUTF16(item->url.spec());
-      else if (bookmark_html_reader::CanImportURLAsSearchEngine(
-                   item->url,
-                   &search_engine_url))
+      } else if (user_data_importer::CanImportURLAsSearchEngine(
+                     item->url, &search_engine_url)) {
         search_engine_info.url = base::UTF8ToUTF16(search_engine_url);
-      else
+      } else {
         continue;
+      }
       search_engine_info.keyword = base::UTF8ToUTF16(item->keyword);
       search_engine_info.display_name = item->title;
       search_engines.push_back(search_engine_info);
@@ -368,14 +443,18 @@ void FirefoxImporter::ImportBookmarks() {
       DCHECK(favicon_map.empty());
       LoadFavicons(bookmarks, &favicons);
     } else if (!favicon_map.empty()) {
-      LoadFavicons(&db, favicon_map, &favicons);
+      LoadFavicons(db.get(), favicon_map, &favicons);
     }
-    if (!favicons.empty())
+    if (!favicons.empty()) {
       bridge_->SetFavicons(favicons);
+    }
   }
+
+  bridge_->NotifyItemEnded(user_data_importer::FAVORITES);
+  ImportRemainingItems();
 }
 
-#if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
+#if !BUILDFLAG(IS_MAC)
 void FirefoxImporter::ImportPasswords() {
   // Initializes NSS3.
   NSSDecryptor decryptor;
@@ -389,7 +468,7 @@ void FirefoxImporter::ImportPasswords() {
   if (!base::PathExists(json_file))
     return;
 
-  std::vector<importer::ImportedPasswordForm> forms;
+  std::vector<user_data_importer::ImportedPasswordForm> forms;
   decryptor.ReadAndParseLogins(json_file, &forms);
 
   if (!cancelled()) {
@@ -401,7 +480,7 @@ void FirefoxImporter::ImportPasswords() {
     }
   }
 }
-#endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
+#endif  // !BUILDFLAG(IS_MAC)
 
 void FirefoxImporter::ImportHomepage() {
   GURL home_page = GetHomepage(source_path_);
@@ -415,7 +494,7 @@ void FirefoxImporter::ImportAutofillFormData() {
   if (!base::PathExists(file))
     return;
 
-  sql::Database db;
+  sql::Database db(kDatabaseTag);
   if (!db.Open(file))
     return;
 
@@ -424,6 +503,9 @@ void FirefoxImporter::ImportAutofillFormData() {
       "moz_formhistory";
 
   sql::Statement s(db.GetUniqueStatement(query));
+  if (!s.is_valid()) {
+    return;
+  }
 
   std::vector<ImporterAutofillFormDataEntry> form_entries;
   while (s.Step() && !cancelled()) {
@@ -452,6 +534,10 @@ int FirefoxImporter::LoadNodeIDByGUID(sql::Database* db,
       "FROM moz_bookmarks "
       "WHERE guid == ?";
   sql::Statement s(db->GetUniqueStatement(query));
+  if (!s.is_valid()) {
+    return -1;
+  }
+
   s.BindString(0, GUID);
 
   if (!s.Step())
@@ -470,6 +556,10 @@ void FirefoxImporter::LoadLivemarkIDs(sql::Database* db,
       "JOIN moz_items_annos b ON a.id = b.anno_attribute_id "
       "WHERE a.name = ? ";
   sql::Statement s(db->GetUniqueStatement(query));
+  if (!s.is_valid()) {
+    return;
+  }
+
   s.BindString(0, kFeedAnnotation);
 
   while (s.Step() && !cancelled())
@@ -485,6 +575,10 @@ void FirefoxImporter::GetTopBookmarkFolder(sql::Database* db,
       "WHERE b.type = 2 AND b.id = ? "
       "ORDER BY b.position";
   sql::Statement s(db->GetUniqueStatement(query));
+  if (!s.is_valid()) {
+    return;
+  }
+
   s.BindInt(0, folder_id);
 
   if (s.Step()) {
@@ -506,7 +600,6 @@ void FirefoxImporter::GetWholeBookmarkFolder(sql::Database* db,
                                              bool* empty_folder) {
   if (position >= list->size()) {
     NOTREACHED();
-    return;
   }
 
   std::string query =
@@ -520,7 +613,11 @@ void FirefoxImporter::GetWholeBookmarkFolder(sql::Database* db,
       "LEFT JOIN moz_keywords k ON k.id = b.keyword_id "
       "WHERE b.type IN (1,2) AND b.parent = ? "
       "ORDER BY b.position";
-  sql::Statement s(db->GetUniqueStatement(query.c_str()));
+  sql::Statement s(db->GetUniqueStatement(query));
+  if (!s.is_valid()) {
+    return;
+  }
+
   s.BindInt(0, (*list)[position]->id);
 
   BookmarkList temp_list;
@@ -528,11 +625,11 @@ void FirefoxImporter::GetWholeBookmarkFolder(sql::Database* db,
     std::unique_ptr<BookmarkItem> item = std::make_unique<BookmarkItem>();
     item->parent = static_cast<int>(position);
     item->id = s.ColumnInt(0);
-    item->url = GURL(s.ColumnString(1));
+    item->url = GURL(s.ColumnStringView(1));
     item->title = s.ColumnString16(2);
     item->type = static_cast<BookmarkItemType>(s.ColumnInt(3));
     item->keyword = s.ColumnString(4);
-    item->date_added = base::Time::FromTimeT(s.ColumnInt64(5)/1000000);
+    item->date_added = base::Time::FromTimeT(s.ColumnInt64(5) / 1000000);
     item->favicon = favicons_location == FaviconsLocation::kPlacesDatabase
                         ? s.ColumnInt64(6)
                         : 0;
@@ -567,13 +664,12 @@ void FirefoxImporter::LoadFavicons(
   for (const auto& i : favicon_map) {
     s.BindInt64(0, i.first);
     if (s.Step()) {
-      std::vector<unsigned char> data;
-      if (!s.ColumnBlobAsVector(1, &data))
-        continue;
+      std::vector<unsigned char> data = s.ColumnBlobAsVector(1);
 
       favicon_base::FaviconUsageData usage_data;
-      if (!SetFaviconData(s.ColumnString(0), data, &usage_data))
+      if (!SetFaviconData(s.ColumnStringView(0), data, &usage_data)) {
         continue;
+      }
 
       usage_data.urls = i.second;
       favicons->push_back(usage_data);
@@ -583,13 +679,13 @@ void FirefoxImporter::LoadFavicons(
 }
 
 void FirefoxImporter::LoadFavicons(
-    const std::vector<ImportedBookmarkEntry>& bookmarks,
+    const std::vector<user_data_importer::ImportedBookmarkEntry>& bookmarks,
     favicon_base::FaviconUsageDataList* favicons) {
   base::FilePath file = GetCopiedSourcePath("favicons.sqlite");
   if (!base::PathExists(file))
     return;
 
-  sql::Database db;
+  sql::Database db(kDatabaseTag);
   if (!db.Open(file))
     return;
 
@@ -621,13 +717,12 @@ void FirefoxImporter::LoadFavicons(
         continue;
       }
 
-      std::vector<unsigned char> data;
-      if (!s.ColumnBlobAsVector(2, &data))
-        continue;
+      std::vector<unsigned char> data = s.ColumnBlobAsVector(2);
 
       favicon_base::FaviconUsageData usage_data;
-      if (!SetFaviconData(s.ColumnString(1), data, &usage_data))
+      if (!SetFaviconData(s.ColumnStringView(1), data, &usage_data)) {
         continue;
+      }
 
       usage_data.urls.insert(entry.url);
       favicons->push_back(usage_data);
@@ -637,7 +732,7 @@ void FirefoxImporter::LoadFavicons(
 }
 
 base::FilePath FirefoxImporter::GetCopiedSourcePath(
-    base::StringPiece base_file_name) {
+    std::string_view base_file_name) {
   const base::FilePath file = source_path_.AppendASCII(base_file_name);
   if (!base::PathExists(file))
     return {};

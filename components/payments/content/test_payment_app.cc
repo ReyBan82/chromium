@@ -6,14 +6,26 @@
 
 namespace payments {
 
-TestPaymentApp::TestPaymentApp(const std::string& method)
-    : PaymentApp(/*icon_resource_id=*/0, PaymentApp::Type::SERVICE_WORKER_APP),
-      method_(method) {}
+TestPaymentApp::TestPaymentApp(const std::string& method, PaymentApp::Type type)
+    : PaymentApp(/*icon_resource_id=*/0, type), method_(method) {}
 
-TestPaymentApp::~TestPaymentApp() {}
+TestPaymentApp::TestPaymentApp(
+    const std::string& method,
+    mojom::PaymentEventResponseType error_response_type,
+    PaymentApp::Type type)
+    : PaymentApp(/*icon_resource_id=*/0, type),
+      method_(method),
+      error_response_type_(error_response_type) {}
+
+TestPaymentApp::~TestPaymentApp() = default;
 
 void TestPaymentApp::InvokePaymentApp(
     base::WeakPtr<PaymentApp::Delegate> delegate) {
+  if (error_response_type_.has_value()) {
+    delegate->OnInstrumentDetailsError(error_response_type_.value(),
+                                       "Error message");
+    return;
+  }
   const std::string stringified_details = "{\"data\":\"details\"}";
   delegate->OnInstrumentDetailsReady(method_, stringified_details, PayerData());
 }
@@ -30,7 +42,6 @@ std::u16string TestPaymentApp::GetMissingInfoLabel() const {
 bool TestPaymentApp::HasEnrolledInstrument() const {
   return true;
 }
-void TestPaymentApp::RecordUse() {}
 bool TestPaymentApp::NeedsInstallation() const {
   return false;
 }

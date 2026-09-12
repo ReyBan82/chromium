@@ -7,15 +7,26 @@
 #include "base/check_op.h"
 #include "base/functional/callback.h"
 #include "base/notreached.h"
-#include "remoting/protocol/channel_authenticator.h"
-#include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
 
 namespace remoting::protocol {
 
-RejectingAuthenticator::RejectingAuthenticator(RejectionReason rejection_reason)
-    : rejection_reason_(rejection_reason) {}
+RejectingAuthenticator::RejectingAuthenticator(
+    RejectionReason rejection_reason,
+    std::string_view rejection_message,
+    const base::Location& rejection_location)
+    : rejection_reason_(rejection_reason),
+      rejection_details_{std::string(rejection_message), rejection_location} {}
 
 RejectingAuthenticator::~RejectingAuthenticator() = default;
+
+CredentialsType RejectingAuthenticator::credentials_type() const {
+  return CredentialsType::UNKNOWN;
+}
+
+const Authenticator& RejectingAuthenticator::implementing_authenticator()
+    const {
+  return *this;
+}
 
 Authenticator::State RejectingAuthenticator::state() const {
   return state_;
@@ -30,29 +41,29 @@ Authenticator::RejectionReason RejectingAuthenticator::rejection_reason()
   return rejection_reason_;
 }
 
-void RejectingAuthenticator::ProcessMessage(
-    const jingle_xmpp::XmlElement* message,
-    base::OnceClosure resume_callback) {
+Authenticator::RejectionDetails RejectingAuthenticator::rejection_details()
+    const {
+  DCHECK_EQ(state_, REJECTED);
+  return rejection_details_;
+}
+
+void RejectingAuthenticator::ProcessMessage(const JingleAuthentication& message,
+                                            base::OnceClosure resume_callback) {
   DCHECK_EQ(state_, WAITING_MESSAGE);
   state_ = REJECTED;
   std::move(resume_callback).Run();
 }
 
-std::unique_ptr<jingle_xmpp::XmlElement>
-RejectingAuthenticator::GetNextMessage() {
+JingleAuthentication RejectingAuthenticator::GetNextMessage() {
   NOTREACHED();
-  return nullptr;
 }
 
 const std::string& RejectingAuthenticator::GetAuthKey() const {
   NOTREACHED();
-  return auth_key_;
 }
 
-std::unique_ptr<ChannelAuthenticator>
-RejectingAuthenticator::CreateChannelAuthenticator() const {
+const SessionPolicies* RejectingAuthenticator::GetSessionPolicies() const {
   NOTREACHED();
-  return nullptr;
 }
 
 }  // namespace remoting::protocol

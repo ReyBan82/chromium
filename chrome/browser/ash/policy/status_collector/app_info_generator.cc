@@ -4,11 +4,11 @@
 
 #include "chrome/browser/ash/policy/status_collector/app_info_generator.h"
 
+#include "ash/constants/ash_pref_names.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #include "components/prefs/pref_service.h"
 #include "components/services/app_service/public/cpp/app_registry_cache.h"
@@ -39,12 +39,13 @@ em::AppInfo::Status ExtractStatus(const apps::Readiness readiness) {
       return em::AppInfo::Status::AppInfo_Status_STATUS_INSTALLED;
     case apps::Readiness::kRemoved:
     case apps::Readiness::kUninstalledByUser:
-    case apps::Readiness::kUninstalledByMigration:
+    case apps::Readiness::kUninstalledByNonUser:
       return em::AppInfo::Status::AppInfo_Status_STATUS_UNINSTALLED;
     case apps::Readiness::kDisabledByBlocklist:
     case apps::Readiness::kDisabledByPolicy:
     case apps::Readiness::kDisabledByUser:
     case apps::Readiness::kTerminated:
+    case apps::Readiness::kDisabledByLocalSettings:
       return em::AppInfo::Status::AppInfo_Status_STATUS_DISABLED;
     case apps::Readiness::kUnknown:
       return em::AppInfo::Status::AppInfo_Status_STATUS_UNKNOWN;
@@ -55,14 +56,11 @@ em::AppInfo::AppType ExtractAppType(const apps::AppType app_type) {
   switch (app_type) {
     case apps::AppType::kArc:
       return em::AppInfo::AppType::AppInfo_AppType_TYPE_ARC;
-    case apps::AppType::kBuiltIn:
-      return em::AppInfo::AppType::AppInfo_AppType_TYPE_BUILTIN;
     case apps::AppType::kCrostini:
       return em::AppInfo::AppType::AppInfo_AppType_TYPE_CROSTINI;
     case apps::AppType::kPluginVm:
       return em::AppInfo::AppType::AppInfo_AppType_TYPE_PLUGINVM;
     case apps::AppType::kChromeApp:
-    case apps::AppType::kStandaloneBrowserChromeApp:
       return em::AppInfo::AppType::AppInfo_AppType_TYPE_EXTENSION;
     case apps::AppType::kWeb:
     case apps::AppType::kSystemWeb:
@@ -71,10 +69,7 @@ em::AppInfo::AppType ExtractAppType(const apps::AppType app_type) {
       return em::AppInfo::AppType::AppInfo_AppType_TYPE_BOREALIS;
     case apps::AppType::kBruschetta:
       return em::AppInfo::AppType::AppInfo_AppType_TYPE_BRUSCHETTA;
-    case apps::AppType::kMacOs:
-    case apps::AppType::kStandaloneBrowser:
     case apps::AppType::kExtension:
-    case apps::AppType::kStandaloneBrowserExtension:
     case apps::AppType::kRemote:
     case apps::AppType::kUnknown:
       return em::AppInfo::AppType::AppInfo_AppType_TYPE_UNKNOWN;
@@ -87,7 +82,7 @@ namespace policy {
 
 AppInfoGenerator::AppInfoProvider::AppInfoProvider(Profile* profile)
     : activity_storage(profile->GetPrefs(),
-                       prefs::kAppActivityTimes,
+                       ash::prefs::kAppActivityTimes,
                        /*day_start_offset=*/base::Seconds(0)),
       app_service_proxy(*apps::AppServiceProxyFactory::GetForProfile(profile)) {
 }
@@ -111,22 +106,22 @@ AppInfoGenerator::AppInstances::AppInstances(const base::Time start_time_)
 AppInfoGenerator::AppInstances::~AppInstances() = default;
 
 AppInfoGenerator::~AppInfoGenerator() {
-  SetOpenDurationsToClosed(clock_.Now());
+  SetOpenDurationsToClosed(clock_->Now());
 }
 
 // static
 void AppInfoGenerator::RegisterProfilePrefs(PrefRegistrySimple* registry) {
-  registry->RegisterDictionaryPref(prefs::kAppActivityTimes);
+  registry->RegisterDictionaryPref(ash::prefs::kAppActivityTimes);
 }
 
 const AppInfoGenerator::Result AppInfoGenerator::Generate() const {
   if (!should_report_) {
     VLOG(1) << "App usage reporting is not enabled for this user.";
-    return absl::nullopt;
+    return std::nullopt;
   }
   if (!provider_) {
     VLOG(1) << "No affiliated user session. Returning empty app list.";
-    return absl::nullopt;
+    return std::nullopt;
   }
   auto activity_periods = provider_->activity_storage.GetActivityPeriods();
   auto activity_compare = [](const em::TimePeriod& time_period1,
@@ -134,7 +129,7 @@ const AppInfoGenerator::Result AppInfoGenerator::Generate() const {
     return time_period1.start_timestamp() < time_period2.start_timestamp();
   };
   std::vector<em::AppInfo> app_infos;
-  provider_->app_service_proxy.AppRegistryCache().ForEachApp(
+  provider_->app_service_proxy->AppRegistryCache().ForEachApp(
       [&app_infos, &activity_periods, &activity_compare,
        this](const apps::AppUpdate& update) {
         ActivityStorage::Activities& app_activity =
@@ -152,9 +147,9 @@ void AppInfoGenerator::OnReportingChanged(bool should_report) {
   should_report_ = should_report;
   if (provider_) {
     if (should_report) {
-      provider_->app_service_proxy.InstanceRegistry().AddObserver(this);
+      provider_->app_service_proxy->InstanceRegistry().AddObserver(this);
     } else {
-      provider_->app_service_proxy.InstanceRegistry().RemoveObserver(this);
+      provider_->app_service_proxy->InstanceRegistry().RemoveObserver(this);
     }
   }
 }
@@ -164,14 +159,15 @@ void AppInfoGenerator::OnReportedSuccessfully(const base::Time report_time) {
     return;
   }
   provider_->activity_storage.TrimActivityPeriods(
-      report_time.ToJavaTime(), base::Time::Max().ToJavaTime());
+      report_time.InMillisecondsSinceUnixEpoch(),
+      base::Time::Max().InMillisecondsSinceUnixEpoch());
 }
 
 void AppInfoGenerator::OnWillReport() {
   if (!provider_ || device_locked_) {
     return;
   }
-  SetOpenDurationsToClosed(clock_.Now());
+  SetOpenDurationsToClosed(clock_->Now());
   SetIdleDurationsToOpen();
 }
 
@@ -187,10 +183,10 @@ void AppInfoGenerator::OnLogin(Profile* profile) {
 
   provider_ = std::make_unique<AppInfoGenerator::AppInfoProvider>(profile);
   provider_->activity_storage.PruneActivityPeriods(
-      clock_.Now(), max_stored_past_activity_interval_);
+      clock_->Now(), max_stored_past_activity_interval_);
 
   if (should_report_) {
-    provider_->app_service_proxy.InstanceRegistry().AddObserver(this);
+    provider_->app_service_proxy->InstanceRegistry().AddObserver(this);
   }
 }
 
@@ -201,7 +197,7 @@ void AppInfoGenerator::OnLogout(Profile* profile) {
 
   if (provider_) {
     if (should_report_) {
-      provider_->app_service_proxy.InstanceRegistry().RemoveObserver(this);
+      provider_->app_service_proxy->InstanceRegistry().RemoveObserver(this);
     }
     provider_.reset();
   }
@@ -209,7 +205,7 @@ void AppInfoGenerator::OnLogout(Profile* profile) {
 
 void AppInfoGenerator::OnLocked() {
   device_locked_ = true;
-  SetOpenDurationsToClosed(clock_.Now());
+  SetOpenDurationsToClosed(clock_->Now());
 }
 
 void AppInfoGenerator::OnUnlocked() {
@@ -257,7 +253,7 @@ void AppInfoGenerator::SetOpenDurationsToClosed(base::Time end_time) {
   if (!provider_) {
     return;
   }
-  provider_->app_service_proxy.InstanceRegistry().RemoveObserver(this);
+  provider_->app_service_proxy->InstanceRegistry().RemoveObserver(this);
   for (auto const& app : app_instances_by_id_) {
     const std::string& app_id = app.first;
     base::Time start_time = app.second.get()->start_time;
@@ -270,38 +266,40 @@ void AppInfoGenerator::SetIdleDurationsToOpen() {
   if (!provider_) {
     return;
   }
-  base::Time start_time = clock_.Now();
-  provider_->app_service_proxy.InstanceRegistry().ForEachInstance(
+  base::Time start_time = clock_->Now();
+  provider_->app_service_proxy->InstanceRegistry().ForEachInstance(
       [this, start_time](const apps::InstanceUpdate& update) {
         if (update.State() & apps::InstanceState::kStarted) {
           OpenUsageInterval(update.AppId(), update.InstanceId(), start_time);
         }
       });
-  provider_->app_service_proxy.InstanceRegistry().AddObserver(this);
+  provider_->app_service_proxy->InstanceRegistry().AddObserver(this);
 }
 
 void AppInfoGenerator::OpenUsageInterval(
     const std::string& app_id,
     const base::UnguessableToken& instance_id,
     const base::Time start_time) {
-  if (app_instances_by_id_.count(app_id) == 0) {
-    app_instances_by_id_[app_id] = std::make_unique<AppInstances>(start_time);
+  std::unique_ptr<AppInstances>& app_instance = app_instances_by_id_[app_id];
+  if (app_instance == nullptr) {
+    app_instance = std::make_unique<AppInstances>(start_time);
   }
-  app_instances_by_id_[app_id]->running_instances.insert(instance_id);
+  app_instance->running_instances.insert(instance_id);
 }
 
 void AppInfoGenerator::CloseUsageInterval(
     const std::string& app_id,
     const base::UnguessableToken& instance_id,
     const base::Time end_time) {
-  if (app_instances_by_id_.count(app_id)) {
-    auto& app_instances = app_instances_by_id_[app_id];
+  if (auto it = app_instances_by_id_.find(app_id);
+      it != app_instances_by_id_.end()) {
+    auto& app_instances = it->second;
     app_instances->running_instances.erase(instance_id);
     if (app_instances->running_instances.empty()) {
       base::Time start_time = app_instances->start_time;
       provider_->activity_storage.AddActivityPeriod(start_time, end_time,
                                                     app_id);
-      app_instances_by_id_.erase(app_id);
+      app_instances_by_id_.erase(it);
     }
   }
 }

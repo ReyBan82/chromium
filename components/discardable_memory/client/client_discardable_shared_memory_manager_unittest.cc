@@ -3,13 +3,16 @@
 // found in the LICENSE file.
 
 #include "components/discardable_memory/client/client_discardable_shared_memory_manager.h"
+
 #include "base/memory/discardable_memory.h"
 #include "base/memory/discardable_shared_memory.h"
 #include "base/memory/page_size.h"
+#include "base/memory_coordinator/test_memory_consumer_registry.h"
+#include "base/memory_coordinator/utils.h"
+#include "base/run_loop.h"
 #include "base/synchronization/lock.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/metrics/histogram_tester.h"
-#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -66,11 +69,6 @@ class TestClientDiscardableSharedMemoryManager
     return heap_->GetFreelistSize();
   }
 
-  size_t GetDirtyFreedMemoryPageCount() const {
-    base::AutoLock lock(lock_);
-    return heap_->dirty_freed_memory_page_count_;
-  }
-
   bool IsPurgeScheduled() const {
     base::AutoLock lock(lock_);
     return is_purge_scheduled_;
@@ -86,8 +84,22 @@ class ClientDiscardableSharedMemoryManagerTest : public testing::Test {
       : task_env_(base::test::TaskEnvironment::MainThreadType::UI,
                   base::test::TaskEnvironment::TimeSource::MOCK_TIME) {}
 
+  void NotifyUpdateMemoryLimitAndRun(int percentage) {
+    base::RunLoop run_loop;
+    test_registry_.NotifyUpdateMemoryLimitAsync(percentage,
+                                                run_loop.QuitClosure());
+    run_loop.Run();
+  }
+
+  void NotifyReleaseMemoryAndRun() {
+    base::RunLoop run_loop;
+    test_registry_.NotifyReleaseMemoryAsync(run_loop.QuitClosure());
+    run_loop.Run();
+  }
+
   const size_t page_size_ = base::GetPageSize();
   base::test::TaskEnvironment task_env_;
+  base::TestMemoryConsumerRegistry test_registry_;
 };
 
 // This test allocates a single piece of memory, then verifies that calling
@@ -456,82 +468,31 @@ TEST_F(ClientDiscardableSharedMemoryManagerTest,
   EXPECT_FALSE(client->IsPurgeScheduled());
 }
 
-TEST_F(ClientDiscardableSharedMemoryManagerTest, MarkDirtyFreelistPages) {
-  base::test::ScopedFeatureList fl;
-  fl.InitAndDisableFeature(
-      discardable_memory::kReleaseDiscardableFreeListPages);
+TEST_F(ClientDiscardableSharedMemoryManagerTest, OnReleaseMemory) {
   auto client =
       base::MakeRefCounted<TestClientDiscardableSharedMemoryManager>();
 
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
+  ASSERT_EQ(client->GetBytesAllocated(), 0u);
+  ASSERT_EQ(client->GetFreelistSize(), 0u);
 
-  auto mem1 = client->AllocateLockedDiscardableMemory(base::GetPageSize() / 2u);
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
-  auto mem2 =
-      client->AllocateLockedDiscardableMemory(base::GetPageSize() * 1.2);
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
-  // Allocate 5 MiB. This is to test large allocations, which are special-cased
-  // when allocating.
-  auto mem3 = client->AllocateLockedDiscardableMemory(5 * 1024 * 1024);
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
+  auto mem1 = client->AllocateLockedDiscardableMemory(page_size_ * 3);
   mem1 = nullptr;
 
-  ASSERT_EQ(1u, client->GetDirtyFreedMemoryPageCount());
+  // Because the manager allocates memory in larger chunks (e.g. 4MB) and carves
+  // out pages, the freelist already contains the rest of the chunk. We capture
+  // the exact size to assert that Moderate pressure frees absolutely nothing.
+  const size_t expected_freelist_size = client->GetFreelistSize();
+  EXPECT_GT(expected_freelist_size, 0u);
 
-  mem2 = nullptr;
+  // At moderate pressure, memory should NOT be released.
+  NotifyUpdateMemoryLimitAndRun(base::MemoryLimit::ModeratePressureThreshold());
+  NotifyReleaseMemoryAndRun();
+  EXPECT_EQ(client->GetFreelistSize(), expected_freelist_size);
 
-  // Allocations on done in multiples of the page size, so we have 3 pages
-  // dirtied, even though we only actually touched 1.7 pages (since the 0.5 page
-  // allocation used 1 page, and the 1.2 page allocation used 2).
-  ASSERT_EQ(3u, client->GetDirtyFreedMemoryPageCount());
-
-  mem3 = nullptr;
-
-  ASSERT_EQ(3u + 5 * 1024 * 1024 / base::GetPageSize(),
-            client->GetDirtyFreedMemoryPageCount());
-
-  client->ReleaseFreeMemory();
-
-  // All pages should be freed now, so there are no dirty pages in the freelist.
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-}
-
-TEST_F(ClientDiscardableSharedMemoryManagerTest,
-       MarkDirtyFreelistPagesReleaseFreeListPages) {
-  base::test::ScopedFeatureList fl;
-  fl.InitAndEnableFeature(discardable_memory::kReleaseDiscardableFreeListPages);
-  auto client =
-      base::MakeRefCounted<TestClientDiscardableSharedMemoryManager>();
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
-  auto mem1 = client->AllocateLockedDiscardableMemory(base::GetPageSize() / 2u);
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
-  auto mem2 =
-      client->AllocateLockedDiscardableMemory(base::GetPageSize() * 1.2);
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
-  mem1 = nullptr;
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
-  mem2 = nullptr;
-
-  // Freelist memory is released immediately, so there's no dirty memory.
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
-
-  client->ReleaseFreeMemory();
-
-  ASSERT_EQ(0u, client->GetDirtyFreedMemoryPageCount());
+  // At critical pressure, memory SHOULD be released.
+  NotifyUpdateMemoryLimitAndRun(base::MemoryLimit::CriticalPressureThreshold());
+  NotifyReleaseMemoryAndRun();
+  EXPECT_EQ(client->GetFreelistSize(), 0u);
 }
 
 }  // namespace

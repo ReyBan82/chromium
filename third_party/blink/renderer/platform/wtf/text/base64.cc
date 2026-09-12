@@ -26,11 +26,12 @@
 
 #include <limits.h>
 
+#include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_buffer.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_utf8_adaptor.h"
 #include "third_party/modp_b64/modp_b64.h"
 
-namespace WTF {
+namespace blink {
 
 namespace {
 
@@ -54,18 +55,20 @@ ModpDecodePolicy GetModpPolicy(Base64DecodePolicy policy) {
 
 // Invokes modp_b64 without stripping whitespace.
 bool Base64DecodeRaw(const StringView& in,
-                     Vector<char>& out,
+                     Vector<uint8_t>& out,
                      Base64DecodePolicy policy) {
-  // Using StringUTF8Adaptor means we avoid allocations if the string is 8-bit
+  // Using StringUtf8Adaptor means we avoid allocations if the string is 8-bit
   // ascii, which is likely given that base64 is required to be ascii.
-  StringUTF8Adaptor adaptor(in);
-  out.resize(modp_b64_decode_len(adaptor.size()));
-  size_t output_size = modp_b64_decode(out.data(), adaptor.data(), adaptor.size(),
-                                       GetModpPolicy(policy));
+  StringUtf8Adaptor adaptor(in);
+  out.resize(
+      base::checked_cast<wtf_size_t>(modp_b64_decode_len(adaptor.size())));
+  base::span<char> write_buffer = base::as_writable_chars(base::span(out));
+  size_t output_size = modp_b64_decode(write_buffer.data(), adaptor.data(),
+                                       adaptor.size(), GetModpPolicy(policy));
   if (output_size == MODP_B64_ERROR)
     return false;
 
-  out.resize(output_size);
+  out.resize(base::checked_cast<wtf_size_t>(output_size));
   return true;
 }
 
@@ -74,11 +77,11 @@ bool Base64DecodeRaw(const StringView& in,
 String Base64Encode(base::span<const uint8_t> data) {
   size_t encode_len = modp_b64_encode_data_len(data.size());
   CHECK_LE(data.size(), MODP_B64_MAX_INPUT_LEN);
-  StringBuffer<LChar> result(encode_len);
+  StringBuffer<LChar> result(base::checked_cast<wtf_size_t>(encode_len));
   if (encode_len == 0)
     return String();
   const size_t output_size = modp_b64_encode_data(
-      reinterpret_cast<char*>(result.Characters()),
+      reinterpret_cast<char*>(result.Span().data()),
       reinterpret_cast<const char*>(data.data()), data.size());
   DCHECK_EQ(output_size, encode_len);
   return result.Release();
@@ -91,14 +94,14 @@ void Base64Encode(base::span<const uint8_t> data, Vector<char>& out) {
     out.clear();
     return;
   }
-  out.resize(encode_len);
+  out.resize(base::checked_cast<wtf_size_t>(encode_len));
   const size_t output_size = modp_b64_encode_data(
       out.data(), reinterpret_cast<const char*>(data.data()), data.size());
   DCHECK_EQ(output_size, encode_len);
 }
 
 bool Base64Decode(const StringView& in,
-                  Vector<char>& out,
+                  Vector<uint8_t>& out,
                   Base64DecodePolicy policy) {
   switch (policy) {
     case Base64DecodePolicy::kForgiving: {
@@ -121,21 +124,33 @@ bool Base64Decode(const StringView& in,
   }
 }
 
-bool Base64UnpaddedURLDecode(const String& in, Vector<char>& out) {
-  if (in.Contains('+') || in.Contains('/') || in.Contains('='))
+bool Base64UnpaddedUrlDecode(const String& in, Vector<uint8_t>& out) {
+  if (in.contains('+') || in.contains('/') || in.contains('=')) {
     return false;
+  }
 
   return Base64Decode(NormalizeToBase64(in), out);
 }
 
-String Base64URLEncode(const char* data, unsigned length) {
-  return Base64Encode(base::as_bytes(base::make_span(data, length)))
-      .Replace('+', '-')
-      .Replace('/', '_');
+String Base64UrlEncode(base::span<const uint8_t> data,
+                       Base64UrlEncodePolicy policy) {
+  String result = Base64Encode(data).Replace('+', '-').Replace('/', '_');
+  if (policy == Base64UrlEncodePolicy::kOmitPadding) {
+    wtf_size_t first_padding_index = result.length();
+    for (; first_padding_index; --first_padding_index) {
+      if (result[first_padding_index - 1] != '=') {
+        break;
+      }
+    }
+    DCHECK_LE(first_padding_index, result.length());
+    DCHECK_LT(result.length() - first_padding_index, 4u);
+    result = result.substr(0, first_padding_index);
+  }
+  return result;
 }
 
 String NormalizeToBase64(const String& encoding) {
   return String(encoding).Replace('-', '+').Replace('_', '/');
 }
 
-}  // namespace WTF
+}  // namespace blink

@@ -6,10 +6,11 @@
 #include "base/values.h"
 #include "chrome/browser/ash/policy/affiliation/affiliation_mixin.h"
 #include "chrome/browser/ash/policy/affiliation/affiliation_test_helper.h"
-#include "chrome/browser/ash/policy/core/device_policy_builder.h"
 #include "chrome/browser/extensions/api/force_installed_affiliated_extension_apitest.h"
 #include "chrome/browser/extensions/extension_apitest.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chromeos/ash/components/dbus/session_manager/fake_session_manager_client.h"
+#include "chromeos/ash/components/policy/device_policy/device_policy_builder.h"
 #include "chromeos/ash/components/system/fake_statistics_provider.h"
 #include "chromeos/ash/components/system/statistics_provider.h"
 #include "components/user_manager/user_manager.h"
@@ -31,13 +32,12 @@ constexpr char kExtensionPath[] =
 constexpr char kExtensionPemPath[] =
     "extensions/api_test/enterprise_device_attributes.pem";
 
-base::Value::Dict BuildCustomArg(
-    const std::string& expected_directory_device_id,
-    const std::string& expected_serial_number,
-    const std::string& expected_asset_id,
-    const std::string& expected_annotated_location,
-    const std::string& expected_hostname) {
-  base::Value::Dict custom_arg;
+base::DictValue BuildCustomArg(const std::string& expected_directory_device_id,
+                               const std::string& expected_serial_number,
+                               const std::string& expected_asset_id,
+                               const std::string& expected_annotated_location,
+                               const std::string& expected_hostname) {
+  base::DictValue custom_arg;
   custom_arg.Set("expectedDirectoryDeviceId", expected_directory_device_id);
   custom_arg.Set("expectedSerialNumber", expected_serial_number);
   custom_arg.Set("expectedAssetId", expected_asset_id);
@@ -56,8 +56,8 @@ class EnterpriseDeviceAttributesTest
  public:
   EnterpriseDeviceAttributesTest()
       : ForceInstalledAffiliatedExtensionApiTest(GetParam()) {
-    fake_statistics_provider_.SetMachineStatistic(
-        ash::system::kSerialNumberKeyForTest, kSerialNumber);
+    fake_statistics_provider_.SetMachineStatistic(ash::system::kSerialNumberKey,
+                                                  kSerialNumber);
   }
 
  protected:

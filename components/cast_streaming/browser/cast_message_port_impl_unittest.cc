@@ -7,6 +7,7 @@
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/run_loop.h"
+#include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "components/cast/message_port/platform_message_port.h"
 #include "components/cast/message_port/test_message_port_receiver.h"
@@ -86,7 +87,7 @@ class CastMessagePortImplTest : public testing::Test,
       std::move(receiver_message_closure_).Run();
     }
   }
-  void OnError(openscreen::Error error) override {
+  void OnError(const openscreen::Error& error) override {
     latest_error_ = error;
     if (error_closure_) {
       std::move(error_closure_).Run();
@@ -153,7 +154,7 @@ TEST_F(CastMessagePortImplTest, BasicConnection) {
 // message.
 TEST_F(CastMessagePortImplTest, InjectMessage) {
   const int kRequestId = 42;
-  base::Value::Dict inject_value;
+  base::DictValue inject_value;
   inject_value.Set(kKeyType, kValueWrapped);
   inject_value.Set(kKeyRequestId, kRequestId);
   std::string inject_message;
@@ -173,7 +174,8 @@ TEST_F(CastMessagePortImplTest, InjectMessage) {
   EXPECT_EQ(sender_id, kSenderId);
   EXPECT_EQ(message_namespace, kInjectNamespace);
 
-  absl::optional<base::Value> return_value = base::JSONReader::Read(message);
+  std::optional<base::Value> return_value =
+      base::JSONReader::Read(message, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(return_value);
   ASSERT_TRUE(return_value->is_dict());
 
@@ -181,7 +183,7 @@ TEST_F(CastMessagePortImplTest, InjectMessage) {
   ASSERT_TRUE(type_value);
   EXPECT_EQ(*type_value, kValueError);
 
-  absl::optional<int> request_id_value =
+  std::optional<int> request_id_value =
       return_value->GetDict().FindInt(kKeyRequestId);
   ASSERT_TRUE(request_id_value);
   EXPECT_EQ(request_id_value.value(), kRequestId);
@@ -211,10 +213,31 @@ TEST_F(CastMessagePortImplTest, CastChannelClosed) {
   RunUntilCastChannelClosed();
 }
 
+// Tests that the client may synchronously destroy the receiver port from
+// within OnError() when the Cast Channel is closed. The on-close closure is
+// owned by the port, so destroying the port cancels it; running it afterwards
+// would mean reading it out of freed memory. Contrast with CastChannelClosed
+// above, where the client leaves the port alive and the closure does run.
+TEST_F(CastMessagePortImplTest, ClientDestroysPortOnErrorSkipsOnClose) {
+  base::RunLoop run_loop;
+  bool on_close_called = false;
+  cast_channel_closed_closure_ =
+      base::BindLambdaForTesting([&]() { on_close_called = true; });
+  error_closure_ = base::BindLambdaForTesting([&]() {
+    receiver_message_port_.reset();
+    run_loop.Quit();
+  });
+  sender_message_port_.reset();
+  run_loop.Run();
+  EXPECT_EQ(latest_error_,
+            openscreen::Error(openscreen::Error::Code::kCastV2CastSocketError));
+  EXPECT_FALSE(on_close_called);
+}
+
 // Tests the media status namespace is properly handled.
 TEST_F(CastMessagePortImplTest, MediaStatus) {
   const int kRequestId = 42;
-  base::Value::Dict media_value;
+  base::DictValue media_value;
   media_value.Set(kKeyType, kValueMediaGetStatus);
   media_value.Set(kKeyRequestId, kRequestId);
   std::string media_message;
@@ -234,7 +257,8 @@ TEST_F(CastMessagePortImplTest, MediaStatus) {
   EXPECT_EQ(sender_id, kSenderId);
   EXPECT_EQ(message_namespace, kMediaNamespace);
 
-  absl::optional<base::Value> return_value = base::JSONReader::Read(message);
+  std::optional<base::Value> return_value =
+      base::JSONReader::Read(message, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(return_value);
   ASSERT_TRUE(return_value->is_dict());
 
@@ -242,12 +266,12 @@ TEST_F(CastMessagePortImplTest, MediaStatus) {
   ASSERT_TRUE(type_value);
   EXPECT_EQ(*type_value, kValueMediaStatus);
 
-  absl::optional<int> request_id_value =
+  std::optional<int> request_id_value =
       return_value->GetDict().FindInt(kKeyRequestId);
   ASSERT_TRUE(request_id_value);
   EXPECT_EQ(request_id_value.value(), kRequestId);
 
-  const base::Value::List* status_value =
+  const base::ListValue* status_value =
       return_value->GetDict().FindList(kKeyStatus);
   ASSERT_TRUE(status_value);
   EXPECT_EQ(status_value->size(), 1u);
@@ -274,7 +298,7 @@ TEST_F(CastMessagePortImplTest, InvalidMediaMessages) {
 
   {
     // Send a message with no type.
-    base::Value::Dict media_value;
+    base::DictValue media_value;
     media_value.Set(kKeyRequestId, kRequestId);
     std::string media_message;
     ASSERT_TRUE(base::JSONWriter::Write(media_value, &media_message));
@@ -284,7 +308,7 @@ TEST_F(CastMessagePortImplTest, InvalidMediaMessages) {
 
   {
     // Send a PLAY message. This is not incorrect but should be ignored.
-    base::Value::Dict media_value;
+    base::DictValue media_value;
     media_value.Set(kKeyType, kValueMediaPlay);
     media_value.Set(kKeyRequestId, kRequestId);
     std::string media_message;
@@ -295,7 +319,7 @@ TEST_F(CastMessagePortImplTest, InvalidMediaMessages) {
 
   {
     // Send a PAUSE message. This is not incorrect but should be ignored.
-    base::Value::Dict media_value;
+    base::DictValue media_value;
     media_value.Set(kKeyType, kValueMediaPause);
     media_value.Set(kKeyRequestId, kRequestId);
     std::string media_message;
@@ -306,7 +330,7 @@ TEST_F(CastMessagePortImplTest, InvalidMediaMessages) {
 
   {
     // Send a message with an invalid type.
-    base::Value::Dict media_value;
+    base::DictValue media_value;
     media_value.Set(kKeyType, "INVALID_TYPE");
     media_value.Set(kKeyRequestId, kRequestId);
     std::string media_message;
@@ -317,7 +341,7 @@ TEST_F(CastMessagePortImplTest, InvalidMediaMessages) {
 
   {
     // Send a GET_STATUS message with no request ID.
-    base::Value::Dict media_value;
+    base::DictValue media_value;
     media_value.Set(kKeyType, kValueMediaGetStatus);
     std::string media_message;
     ASSERT_TRUE(base::JSONWriter::Write(media_value, &media_message));
@@ -327,7 +351,7 @@ TEST_F(CastMessagePortImplTest, InvalidMediaMessages) {
 
   {
     // Send a message with a non-integer request ID.
-    base::Value::Dict media_value;
+    base::DictValue media_value;
     media_value.Set(kKeyType, kValueMediaGetStatus);
     media_value.Set(kKeyRequestId, "not an integer");
     std::string media_message;

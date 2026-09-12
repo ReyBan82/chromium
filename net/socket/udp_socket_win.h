@@ -5,15 +5,18 @@
 #ifndef NET_SOCKET_UDP_SOCKET_WIN_H_
 #define NET_SOCKET_UDP_SOCKET_WIN_H_
 
+#include <winsock2.h>
+
 #include <qos2.h>
 #include <stdint.h>
-#include <winsock2.h>
+
+// Must be after winsock2.h:
+#include <MSWSock.h>
 
 #include <atomic>
 #include <memory>
 #include <set>
 
-#include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
@@ -26,7 +29,9 @@
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_export.h"
 #include "net/base/network_handle.h"
+#include "net/base/sockaddr_storage.h"
 #include "net/log/net_log_with_source.h"
+#include "net/socket/datagram_client_socket.h"
 #include "net/socket/datagram_socket.h"
 #include "net/socket/diff_serv_code_point.h"
 #include "net/socket/udp_socket_global_limits.h"
@@ -165,6 +170,9 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
                net::NetLog* net_log,
                const net::NetLogSource& source);
 
+  UDPSocketWin(DatagramSocket::BindType bind_type,
+               NetLogWithSource source_net_log);
+
   UDPSocketWin(const UDPSocketWin&) = delete;
   UDPSocketWin& operator=(const UDPSocketWin&) = delete;
 
@@ -188,7 +196,6 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
   int Bind(const IPEndPoint& address);
 
   // Closes the socket.
-  // TODO(rvargas, hidehiko): Disallow re-Open() after Close().
   void Close();
 
   // Copies the remote udp address into |address| and returns a net error code.
@@ -231,6 +238,13 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
                IPEndPoint* address,
                CompletionOnceCallback callback);
 
+  base::expected<DatagramsMetadata, Error> ReadMultiple(
+      IOBuffer* buf,
+      size_t buf_len,
+      size_t maximum_packet_size,
+      base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
+          callback);
+
   // Sends to a socket with a particular destination.
   // |buf| is the buffer to send.
   // |buf_len| is the number of bytes to send.
@@ -259,6 +273,10 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
   // there was a problem, but the socket will still be usable. Can not
   // return ERR_IO_PENDING.
   int SetDoNotFragment();
+
+  // Requests that packets received by this socket have the ECN bit set. Returns
+  // a network error code if there was a problem.
+  int SetRecvTos();
 
   // This is a no-op on Windows.
   void SetMsgConfirm(bool confirm);
@@ -307,6 +325,23 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
   // Return a net error code.
   int LeaveGroup(const IPAddress& group_address) const;
 
+  // Joins a source-specific multicast (SSM) group as defined in RFC 4607.
+  // |group_address| must be in the SSM range (232.0.0.0/8 for IPv4 or
+  // ff3x::/32 for IPv6).
+  // |source_address| specifies the unicast source to receive traffic from.
+  // Both addresses must be the same IP version.
+  // Uses IGMPv3 (IPv4) or MLDv2 (IPv6) protocol operations.
+  // Returns a net error code.
+  int JoinSourceGroup(const IPAddress& group_address,
+                      const IPAddress& source_address) const;
+
+  // Leaves a source-specific multicast (SSM) group.
+  // |group_address| and |source_address| must match a previous JoinSourceGroup
+  // call. Both addresses must be the same IP version.
+  // Returns a net error code.
+  int LeaveSourceGroup(const IPAddress& group_address,
+                       const IPAddress& source_address) const;
+
   // Sets interface to use for multicast. If |interface_index| set to 0,
   // default interface is used.
   // Should be called before Bind().
@@ -335,16 +370,28 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
   int SetMulticastLoopbackMode(bool loopback);
 
   // Sets the differentiated services flags on outgoing packets. May not do
-  // anything on some platforms.  A return value of ERR_INVALID_HANDLE indicates
+  // anything on some platforms. A return value of ERR_INVALID_HANDLE indicates
   // the value was not set but could succeed on a future call, because
   // initialization is in progress.
   int SetDiffServCodePoint(DiffServCodePoint dscp);
 
+  // Requests that packets sent by this socket have the DSCP and/or ECN
+  // bits set. Returns a network error code if there was a problem. If
+  // DSCP_NO_CHANGE or ECN_NO_CHANGE are set, will preserve those parts of
+  // the original setting.
+  // ECN values other than 0 must not be used outside of tests, without
+  // appropriate congestion control.
+  int SetTos(DiffServCodePoint dscp, EcnCodePoint ecn);
+
+  // Sets IPV6_V6ONLY on the socket. If this flag is true, the socket will be
+  // restricted to only IPv6; false allows both IPv4 and IPv6 traffic.
+  int SetIPv6Only(bool ipv6_only);
+
   // Resets the thread to be used for thread-safety checks.
   void DetachFromThread();
 
-  // This class by default uses overlapped IO. Call this method before Open()
-  // to switch to non-blocking IO.
+  // This class by default uses overlapped IO. Call this method before Open() or
+  // AdoptOpenedSocket() to switch to non-blocking IO.
   void UseNonBlockingIO();
 
   // Apply |tag| to this socket.
@@ -352,8 +399,24 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
 
   // Takes ownership of `socket`, which should be a socket descriptor opened
   // with the specified address family. The socket should only be created but
-  // not bound or connected to an address.
+  // not bound or connected to an address. This method must be called after
+  // UseNonBlockingIO, otherwise the adopted socket will not have the
+  // non-blocking IO flag set.
   int AdoptOpenedSocket(AddressFamily address_family, SOCKET socket);
+
+  uint32_t get_multicast_interface_for_testing() {
+    return multicast_interface_;
+  }
+  bool get_use_non_blocking_io_for_testing() { return use_non_blocking_io_; }
+
+  // Because the windows API separates out DSCP and ECN better than Posix, this
+  // function does not actually return the correct DSCP value, instead always
+  // returning DSCP_DEFAULT rather than the last incoming value.
+  // If a use case arises for reading the incoming DSCP value, it would only
+  // then worth be executing the system call.
+  // However, the ECN member of the return value is correct if SetRecvTos()
+  // was called previously on the socket.
+  DscpAndEcn GetLastTos() const { return last_tos_; }
 
  private:
   enum SocketOptions {
@@ -379,6 +442,8 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
   // success, or the net error code on failure.
   void LogRead(int result, const char* bytes, const IPEndPoint* address) const;
   void LogWrite(int result, const char* bytes, const IPEndPoint* address) const;
+  // Reads the last error, maps it, logs it, and returns the mapped result.
+  int LogAndReturnError() const;
 
   // Same as SendTo(), except that address is passed by pointer
   // instead of by reference. It is called from Write() with |address|
@@ -389,6 +454,27 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
                     CompletionOnceCallback callback);
 
   int InternalConnect(const IPEndPoint& address);
+
+  // Returns a function pointer to the platform's instantiation of WSARecvMsg()
+  // or WSASendMsg().
+  LPFN_WSARECVMSG GetRecvMsgPointer();
+  LPFN_WSASENDMSG GetSendMsgPointer();
+
+  // Populates |message| with |storage|, |data_buffer|, and |control_buffer| to
+  // use ECN before calls to either WSASendMsg() (if |send| is true) or
+  // WSARecvMsg().
+  // |data_buffer| is the datagram. |control_buffer| is the storage
+  // space for cmsgs. If |send| is false for an overlapped socket, the caller
+  // must retain a reference to |msghdr|, |storage|, and the buf members of
+  // |data_buffer| and |control_buffer|, in case WSARecvMsg() returns IO_PENDING
+  // and the result is delivered asynchronously.
+  void PopulateWSAMSG(WSAMSG& message,
+                      SockaddrStorage& storage,
+                      WSABUF* data_buffer,
+                      WSABUF& control_buffer,
+                      bool send);
+  // Sets last_tos_ to the last ECN codepoint contained in |message|.
+  void SetLastTosFromWSAMSG(WSAMSG& message);
 
   // Version for using overlapped IO.
   int InternalRecvFromOverlapped(IOBuffer* buf,
@@ -409,6 +495,14 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
   // Applies |socket_options_| to |socket_|. Should be called before
   // Bind().
   int SetMulticastOptions();
+
+  // Helper for JoinSourceGroup/LeaveSourceGroup. Performs the setsockopt call
+  // with the specified |option| (MCAST_JOIN_SOURCE_GROUP or
+  // MCAST_LEAVE_SOURCE_GROUP).
+  int SetSourceGroupMembership(const IPAddress& group_address,
+                               const IPAddress& source_address,
+                               int option) const;
+
   int DoBind(const IPEndPoint& address);
 
   // Configures opened `socket_` depending on whether it uses nonblocking IO.
@@ -480,6 +574,20 @@ class NET_EXPORT UDPSocketWin : public base::win::ObjectWatcher::Delegate {
   // Manages decrementing the global open UDP socket counter when this
   // UDPSocket is destroyed.
   OwnedUDPSocketCount owned_socket_count_;
+
+  DscpAndEcn last_tos_ = {DSCP_DEFAULT, ECN_DEFAULT};
+
+  // If true, the socket has been configured to report ECN on incoming
+  // datagrams.
+  bool report_ecn_ = false;
+
+  // Function pointers to the platform implementations of WSARecvMsg() and
+  // WSASendMsg().
+  LPFN_WSARECVMSG wsa_recv_msg_ = nullptr;
+  LPFN_WSASENDMSG wsa_send_msg_ = nullptr;
+
+  // The ECN codepoint to send on outgoing packets.
+  EcnCodePoint send_ecn_ = ECN_NOT_ECT;
 
   THREAD_CHECKER(thread_checker_);
 

@@ -17,11 +17,18 @@
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
 #include "components/update_client/update_client.h"
+#include "extensions/browser/extension_management_client.h"
 #include "extensions/browser/extensions_browser_client.h"
+#include "extensions/browser/safe_browsing_delegate.h"
 #include "extensions/browser/updater/extension_cache.h"
+#include "extensions/common/extension_id.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
+
+namespace update_client {
+class Configurator;
+}
 
 namespace extensions {
 class KioskDelegate;
@@ -31,9 +38,9 @@ class KioskDelegate;
 // this class should call ExtensionsBrowserClient::Set() with its instance.
 class TestExtensionsBrowserClient : public ExtensionsBrowserClient {
  public:
-  // If provided, |main_context| must not be an incognito context.
+  // If provided, `main_context` must not be an incognito context.
   explicit TestExtensionsBrowserClient(content::BrowserContext* main_context);
-  // Alternate constructor allowing |main_context_| to be set later.
+  // Alternate constructor allowing `main_context_` to be set later.
   TestExtensionsBrowserClient();
   TestExtensionsBrowserClient(const TestExtensionsBrowserClient&) = delete;
   TestExtensionsBrowserClient& operator=(const TestExtensionsBrowserClient&) =
@@ -43,18 +50,18 @@ class TestExtensionsBrowserClient : public ExtensionsBrowserClient {
   void set_process_manager_delegate(ProcessManagerDelegate* delegate) {
     process_manager_delegate_ = delegate;
   }
+  void set_user_script_listener(UserScriptListener* listener) {
+    user_script_listener_ = listener;
+  }
   void set_extension_system_factory(ExtensionSystemProvider* factory) {
     extension_system_factory_ = factory;
-  }
-  void set_pref_service(PrefService* pref_service) {
-    pref_service_ = pref_service;
   }
   void set_extension_cache(std::unique_ptr<ExtensionCache> extension_cache) {
     extension_cache_ = std::move(extension_cache);
   }
-
-  void set_lock_screen_context(content::BrowserContext* context) {
-    lock_screen_context_ = context;
+  void set_extension_management_client(
+      std::unique_ptr<ExtensionManagementClient> client) {
+    extension_management_client_ = std::move(client);
   }
 
   // Sets a factory to respond to calls of the CreateUpdateClient method.
@@ -62,17 +69,18 @@ class TestExtensionsBrowserClient : public ExtensionsBrowserClient {
       base::RepeatingCallback<update_client::UpdateClient*(void)> factory);
 
   // Sets the main browser context. Only call if a BrowserContext was not
-  // already provided. |main_context| must not be an incognito context.
+  // already provided. `main_context` must not be an incognito context.
   void SetMainContext(content::BrowserContext* main_context);
 
-  // Associates an incognito context with |main_context_|.
+  // Associates an incognito context with `main_context_`.
   void SetIncognitoContext(content::BrowserContext* incognito_context);
 
   // ExtensionsBrowserClient overrides:
+  void Init() override {}
   bool IsShuttingDown() override;
   bool AreExtensionsDisabled(const base::CommandLine& command_line,
                              content::BrowserContext* context) override;
-  bool IsValidContext(content::BrowserContext* context) override;
+  bool IsValidContext(void* context) override;
   bool IsSameContext(content::BrowserContext* first,
                      content::BrowserContext* second) override;
   bool HasOffTheRecordContext(content::BrowserContext* context) override;
@@ -80,30 +88,25 @@ class TestExtensionsBrowserClient : public ExtensionsBrowserClient {
       content::BrowserContext* context) override;
   content::BrowserContext* GetOriginalContext(
       content::BrowserContext* context) override;
-
-  content::BrowserContext* GetRedirectedContextInIncognito(
-      content::BrowserContext* context,
-      bool force_guest_profile,
-      bool force_system_profile) override;
-  content::BrowserContext* GetContextForRegularAndIncognito(
-      content::BrowserContext* context,
-      bool force_guest_profile,
-      bool force_system_profile) override;
-  content::BrowserContext* GetRegularProfile(
-      content::BrowserContext* context,
-      bool force_guest_profile,
-      bool force_system_profile) override;
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  std::string GetUserIdHashFromContext(
+  content::BrowserContext* GetContextRedirectedToOriginal(
       content::BrowserContext* context) override;
-#endif
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  bool IsFromMainProfile(content::BrowserContext* context) override;
+  content::BrowserContext* GetContextRedirectedToOriginalWithoutAshInternals(
+      content::BrowserContext* context) override;
+  content::BrowserContext* GetContextOwnInstance(
+      content::BrowserContext* context) override;
+  content::BrowserContext* GetContextForOriginalOnly(
+      content::BrowserContext* context) override;
+  bool AreExtensionsDisabledForContext(
+      content::BrowserContext* context) override;
+#if BUILDFLAG(IS_CHROMEOS)
+  bool IsActiveContext(content::BrowserContext* browser_context) const override;
 #endif
   bool IsGuestSession(content::BrowserContext* context) const override;
   bool IsExtensionIncognitoEnabled(
-      const std::string& extension_id,
+      const ExtensionId& extension_id,
+      content::BrowserContext* context) const override;
+  bool IsExtensionIncognitoEnabled(
+      const Extension* extension,
       content::BrowserContext* context) const override;
   bool CanExtensionCrossIncognito(
       const extensions::Extension* extension,
@@ -118,23 +121,27 @@ class TestExtensionsBrowserClient : public ExtensionsBrowserClient {
       const base::FilePath& resource_relative_path,
       int resource_id,
       scoped_refptr<net::HttpResponseHeaders> headers,
-      mojo::PendingRemote<network::mojom::URLLoaderClient> client) override;
-
+      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
+      content::BrowserContext* browser_context) override;
   bool AllowCrossRendererResourceLoad(
       const network::ResourceRequest& request,
       network::mojom::RequestDestination destination,
       ui::PageTransition page_transition,
-      int child_id,
+      content::ChildProcessId child_id,
       bool is_incognito,
       const Extension* extension,
       const ExtensionSet& extensions,
-      const ProcessMap& process_map) override;
-  PrefService* GetPrefServiceForContext(
-      content::BrowserContext* context) override;
+      const ProcessMap& process_map,
+      const GURL& upstream_url) override;
   void GetEarlyExtensionPrefsObservers(
       content::BrowserContext* context,
       std::vector<EarlyExtensionPrefsObserver*>* observers) const override;
   ProcessManagerDelegate* GetProcessManagerDelegate() const override;
+  mojo::PendingRemote<network::mojom::URLLoaderFactory>
+  GetControlledFrameEmbedderURLLoader(
+      const url::Origin& app_origin,
+      content::FrameTreeNodeId frame_tree_node_id,
+      content::BrowserContext* browser_context) override;
   std::unique_ptr<ExtensionHostDelegate> CreateExtensionHostDelegate() override;
   bool DidVersionUpdate(content::BrowserContext* context) override;
   void PermitExternalProtocolHandler() override;
@@ -155,44 +162,50 @@ class TestExtensionsBrowserClient : public ExtensionsBrowserClient {
   void BroadcastEventToRenderers(
       events::HistogramValue histogram_value,
       const std::string& event_name,
-      base::Value::List args,
+      base::ListValue args,
       bool dispatch_to_off_the_record_profiles) override;
   ExtensionCache* GetExtensionCache() override;
   bool IsBackgroundUpdateAllowed() override;
   bool IsMinBrowserVersionSupported(const std::string& min_version) override;
+  void CreateExtensionWebContentsObserver(
+      content::WebContents* web_contents) override;
   ExtensionWebContentsObserver* GetExtensionWebContentsObserver(
       content::WebContents* web_contents) override;
   KioskDelegate* GetKioskDelegate() override;
+  SafeBrowsingDelegate* GetSafeBrowsingDelegate() override;
+  UserScriptListener* GetUserScriptListener() override;
   scoped_refptr<update_client::UpdateClient> CreateUpdateClient(
+      scoped_refptr<update_client::Configurator> configurator) override;
+  scoped_refptr<update_client::Configurator> CreateUpdateClientConfigurator(
       content::BrowserContext* context) override;
-  bool IsLockScreenContext(content::BrowserContext* context) override;
   std::string GetApplicationLocale() override;
+  ExtensionManagementClient* GetExtensionManagementClient(
+      content::BrowserContext* context) override;
+
+  bool IsTelemetryLoggingEnabled(content::BrowserContext* context) override;
+  void SetTelemetryLoggingEnabled(bool enabled);
 
   ExtensionSystemProvider* extension_system_factory() {
     return extension_system_factory_;
   }
 
  private:
-  // Not owned.
   raw_ptr<content::BrowserContext> main_context_ = nullptr;
-  // Not owned.
   raw_ptr<content::BrowserContext> incognito_context_ = nullptr;
-  // Not owned.
-  raw_ptr<content::BrowserContext> lock_screen_context_ = nullptr;
-
-  // Not owned.
   raw_ptr<ProcessManagerDelegate> process_manager_delegate_ = nullptr;
-
-  // Not owned.
+  raw_ptr<UserScriptListener> user_script_listener_ = nullptr;
   raw_ptr<ExtensionSystemProvider> extension_system_factory_ = nullptr;
-
-  // Not owned.
-  raw_ptr<PrefService> pref_service_ = nullptr;
 
   std::unique_ptr<ExtensionCache> extension_cache_;
 
+  bool telemetry_logging_enabled_ = false;
+
   base::RepeatingCallback<update_client::UpdateClient*(void)>
       update_client_factory_;
+
+  std::unique_ptr<SafeBrowsingDelegate> safe_browsing_delegate_;
+  std::unique_ptr<ExtensionManagementClient> extension_management_client_;
+  std::unique_ptr<KioskDelegate> kiosk_delegate_;
 };
 
 }  // namespace extensions

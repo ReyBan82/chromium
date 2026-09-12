@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "third_party/blink/renderer/modules/webcodecs/decoder_selector.h"
+
 #include <vector>
 
 #include "media/base/demuxer_stream.h"
@@ -14,10 +16,9 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/scheduler/test/renderer_scheduler_test_support.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
-
-#include "third_party/blink/renderer/modules/webcodecs/decoder_selector.h"
 
 using ::testing::_;
 using ::testing::IsNull;
@@ -146,12 +147,16 @@ class WebCodecsDecoderSelectorTest : public ::testing::Test {
 
   MOCK_METHOD1_T(OnDecoderSelected, void(int));
 
-  void OnDecoderSelectedThunk(std::unique_ptr<Decoder> decoder) {
+  void OnDecoderSelectedThunk(
+      DecoderSelector<TypeParam::kStreamType>::DecoderOrError
+          decoder_or_error) {
     // Report only the id of the mock, since that's what the tests care
     // about. The decoder will be destructed immediately.
-    OnDecoderSelected(
-        decoder ? static_cast<MockDecoder*>(decoder.get())->GetDecoderId()
-                : kNoDecoder);
+    OnDecoderSelected(decoder_or_error.has_value()
+                          ? static_cast<MockDecoder*>(
+                                std::move(decoder_or_error).value().get())
+                                ->GetDecoderId()
+                          : kNoDecoder);
   }
 
   void AddMockDecoder(int decoder_id, DecoderCapability capability) {
@@ -180,20 +185,21 @@ class WebCodecsDecoderSelectorTest : public ::testing::Test {
     decoder_selector_ =
         std::make_unique<DecoderSelector<TypeParam::kStreamType>>(
             scheduler::GetSingleThreadTaskRunnerForTesting(),
-            WTF::BindRepeating(&Self::CreateDecoders, base::Unretained(this)),
-            WTF::BindRepeating(&Self::OnOutput, base::Unretained(this)));
+            BindRepeating(&Self::CreateDecoders, Unretained(this)), &media_log_,
+            blink::BindRepeating(&Self::OnOutput, Unretained(this)));
   }
 
   void SelectDecoder(DecoderConfig config = TypeParam::CreateConfig()) {
     last_set_decoder_config_ = config;
     decoder_selector_->SelectDecoder(
         config, low_delay_,
-        WTF::BindOnce(&Self::OnDecoderSelectedThunk, base::Unretained(this)));
+        BindOnce(&Self::OnDecoderSelectedThunk, Unretained(this)));
     RunUntilIdle();
   }
 
   void RunUntilIdle() { platform_->RunUntilIdle(); }
 
+  test::TaskEnvironment task_environment_;
   ScopedTestingPlatformSupport<TestingPlatformSupport> platform_;
   media::NullMediaLog media_log_;
 

@@ -24,7 +24,8 @@ namespace {
 
 class RtcLogFileReader : public FileOperations::Reader {
  public:
-  explicit RtcLogFileReader(protocol::ConnectionToClient* connection);
+  explicit RtcLogFileReader(
+      base::WeakPtr<protocol::ConnectionToClient> connection);
   ~RtcLogFileReader() override;
   RtcLogFileReader(const RtcLogFileReader&) = delete;
   RtcLogFileReader& operator=(const RtcLogFileReader&) = delete;
@@ -48,7 +49,7 @@ class RtcLogFileReader : public FileOperations::Reader {
   // if the end is reached. Returns 0 if there is no more data to be read.
   int ReadPartially(int maximum_to_read, std::vector<std::uint8_t>& output);
 
-  raw_ptr<protocol::ConnectionToClient> connection_;
+  base::WeakPtr<protocol::ConnectionToClient> connection_;
   base::FilePath filename_;
   base::circular_deque<LogSection> data_;
   FileOperations::State state_ = FileOperations::kCreated;
@@ -85,7 +86,8 @@ class RtcLogFileWriter : public FileOperations::Writer {
   FileOperations::State state() const override;
 };
 
-RtcLogFileReader::RtcLogFileReader(protocol::ConnectionToClient* connection)
+RtcLogFileReader::RtcLogFileReader(
+    base::WeakPtr<protocol::ConnectionToClient> connection)
     : connection_(connection) {}
 RtcLogFileReader::~RtcLogFileReader() = default;
 
@@ -122,6 +124,13 @@ FileOperations::State RtcLogFileReader::state() const {
 }
 
 void RtcLogFileReader::DoOpen(OpenCallback callback) {
+  if (!connection_) {
+    state_ = FileOperations::kFailed;
+    std::move(callback).Run(protocol::MakeFileTransferError(
+        FROM_HERE, protocol::FileTransfer_Error_Type_PROTOCOL_ERROR));
+    return;
+  }
+
   protocol::WebrtcEventLogData* rtc_log = connection_->rtc_event_log();
   if (!rtc_log) {
     // This is a protocol error because RTC log is only supported for WebRTC
@@ -134,10 +143,9 @@ void RtcLogFileReader::DoOpen(OpenCallback callback) {
 
   base::Time::Exploded exploded;
   base::Time::NowFromSystemTime().LocalExplode(&exploded);
-  std::string filename = base::StringPrintf(
+  filename_ = base::FilePath::FromUTF8Unsafe(base::StringPrintf(
       "host-rtc-log-%d-%d-%d_%d-%d-%d", exploded.year, exploded.month,
-      exploded.day_of_month, exploded.hour, exploded.minute, exploded.second);
-  filename_ = base::FilePath::FromUTF8Unsafe(filename);
+      exploded.day_of_month, exploded.hour, exploded.minute, exploded.second));
 
   data_ = rtc_log->TakeLogData();
   current_log_section_ = data_.begin();
@@ -219,7 +227,7 @@ FileOperations::State RtcLogFileWriter::state() const {
 }  // namespace
 
 RtcLogFileOperations::RtcLogFileOperations(
-    protocol::ConnectionToClient* connection)
+    base::WeakPtr<protocol::ConnectionToClient> connection)
     : connection_(connection) {}
 
 RtcLogFileOperations::~RtcLogFileOperations() = default;

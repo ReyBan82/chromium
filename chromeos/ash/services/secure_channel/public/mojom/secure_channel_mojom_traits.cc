@@ -20,24 +20,20 @@ EnumTraits<ash::secure_channel::mojom::ConnectionMedium,
   }
 
   NOTREACHED();
-  return ash::secure_channel::mojom::ConnectionMedium::kBluetoothLowEnergy;
 }
 
-bool EnumTraits<ash::secure_channel::mojom::ConnectionMedium,
-                ash::secure_channel::ConnectionMedium>::
-    FromMojom(ash::secure_channel::mojom::ConnectionMedium input,
-              ash::secure_channel::ConnectionMedium* out) {
+ash::secure_channel::ConnectionMedium
+EnumTraits<ash::secure_channel::mojom::ConnectionMedium,
+           ash::secure_channel::ConnectionMedium>::
+    FromMojom(ash::secure_channel::mojom::ConnectionMedium input) {
   switch (input) {
     case ash::secure_channel::mojom::ConnectionMedium::kBluetoothLowEnergy:
-      *out = ash::secure_channel::ConnectionMedium::kBluetoothLowEnergy;
-      return true;
+      return ash::secure_channel::ConnectionMedium::kBluetoothLowEnergy;
     case ash::secure_channel::mojom::ConnectionMedium::kNearbyConnections:
-      *out = ash::secure_channel::ConnectionMedium::kNearbyConnections;
-      return true;
+      return ash::secure_channel::ConnectionMedium::kNearbyConnections;
   }
 
   NOTREACHED();
-  return false;
 }
 
 ash::secure_channel::mojom::ConnectionPriority
@@ -54,27 +50,22 @@ EnumTraits<ash::secure_channel::mojom::ConnectionPriority,
   }
 
   NOTREACHED();
-  return ash::secure_channel::mojom::ConnectionPriority::LOW;
 }
 
-bool EnumTraits<ash::secure_channel::mojom::ConnectionPriority,
-                ash::secure_channel::ConnectionPriority>::
-    FromMojom(ash::secure_channel::mojom::ConnectionPriority input,
-              ash::secure_channel::ConnectionPriority* out) {
+ash::secure_channel::ConnectionPriority
+EnumTraits<ash::secure_channel::mojom::ConnectionPriority,
+           ash::secure_channel::ConnectionPriority>::
+    FromMojom(ash::secure_channel::mojom::ConnectionPriority input) {
   switch (input) {
     case ash::secure_channel::mojom::ConnectionPriority::LOW:
-      *out = ash::secure_channel::ConnectionPriority::kLow;
-      return true;
+      return ash::secure_channel::ConnectionPriority::kLow;
     case ash::secure_channel::mojom::ConnectionPriority::MEDIUM:
-      *out = ash::secure_channel::ConnectionPriority::kMedium;
-      return true;
+      return ash::secure_channel::ConnectionPriority::kMedium;
     case ash::secure_channel::mojom::ConnectionPriority::HIGH:
-      *out = ash::secure_channel::ConnectionPriority::kHigh;
-      return true;
+      return ash::secure_channel::ConnectionPriority::kHigh;
   }
 
   NOTREACHED();
-  return false;
 }
 
 }  // namespace mojo

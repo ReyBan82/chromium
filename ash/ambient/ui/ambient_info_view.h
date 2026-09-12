@@ -8,6 +8,7 @@
 #include "ash/ambient/ui/ambient_view_delegate.h"
 #include "ash/ambient/ui/glanceable_info_view.h"
 #include "ash/ash_export.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/view.h"
 
@@ -25,9 +26,9 @@ class GlanceableInfoView;
 
 class ASH_EXPORT AmbientInfoView : public views::View,
                                    public GlanceableInfoView::Delegate {
- public:
-  METADATA_HEADER(AmbientInfoView);
+  METADATA_HEADER(AmbientInfoView, views::View)
 
+ public:
   explicit AmbientInfoView(AmbientViewDelegate* delegate);
   AmbientInfoView(const AmbientInfoView&) = delete;
   AmbientInfoView& operator=(AmbientInfoView&) = delete;
@@ -44,15 +45,19 @@ class ASH_EXPORT AmbientInfoView : public views::View,
 
   void SetTextTransform(const gfx::Transform& transform);
 
+  int GetAdjustedLeftPaddingToMatchBottom();
+
+  GlanceableInfoView* GetGlanceableInfoViewForTesting() const;
+
  private:
   void InitLayout();
 
   // Owned by |AmbientController| and should always outlive |this|.
-  AmbientViewDelegate* delegate_ = nullptr;
+  raw_ptr<AmbientViewDelegate> delegate_ = nullptr;
 
-  GlanceableInfoView* glanceable_info_view_ = nullptr;
-  views::Label* details_label_ = nullptr;
-  views::Label* related_details_label_ = nullptr;
+  raw_ptr<GlanceableInfoView> glanceable_info_view_ = nullptr;
+  raw_ptr<views::Label> details_label_ = nullptr;
+  raw_ptr<views::Label> related_details_label_ = nullptr;
 };
 
 }  // namespace ash

@@ -7,12 +7,10 @@
 
 #include "base/check_is_test.h"
 #include "base/memory/raw_ptr.h"
-#include "chrome/browser/ui/views/permissions/chip_controller.h"
+#include "chrome/browser/ui/views/permissions/chip/chip_controller.h"
 #include "chrome/browser/ui/views/permissions/permission_prompt_desktop.h"
 #include "components/permissions/permission_request_manager.h"
 #include "ui/views/widget/widget_observer.h"
-
-class Browser;
 
 namespace content {
 class WebContents;
@@ -27,9 +25,7 @@ class WebContents;
 // - should be destroyed once the user has made a decision.
 class PermissionPromptChip : public PermissionPromptDesktop {
  public:
-  PermissionPromptChip(Browser* browser,
-                       content::WebContents* web_contents,
-                       Delegate* delegate);
+  PermissionPromptChip(content::WebContents* web_contents, Delegate* delegate);
   ~PermissionPromptChip() override;
   PermissionPromptChip(const PermissionPromptChip&) = delete;
   PermissionPromptChip& operator=(const PermissionPromptChip&) = delete;
@@ -38,6 +34,7 @@ class PermissionPromptChip : public PermissionPromptDesktop {
   bool UpdateAnchor() override;
   permissions::PermissionPromptDisposition GetPromptDisposition()
       const override;
+  std::optional<gfx::Rect> GetViewBoundsInScreen() const override;
 
   // PermissionPromptDesktop:
   views::Widget* GetPromptBubbleWidgetForTesting() override;
@@ -48,13 +45,8 @@ class PermissionPromptChip : public PermissionPromptDesktop {
   }
 
  private:
-  void PreemptivelyResolvePermissionRequest(content::WebContents* web_contents,
-                                            Delegate* delegate);
   // The controller handling the chip view
   raw_ptr<ChipController> chip_controller_;
-
-  // Delegate representing a permission request
-  raw_ptr<permissions::PermissionPrompt::Delegate> delegate_;
 
   base::WeakPtrFactory<PermissionPromptChip> weak_factory_{this};
 };

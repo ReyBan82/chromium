@@ -10,14 +10,16 @@
 
 #include <algorithm>
 #include <map>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "base/apple/bridging.h"
+#include "base/apple/bundle_locations.h"
+#include "base/apple/foundation_util.h"
 #include "base/check.h"
 #include "base/files/file_path.h"
-#include "base/mac/bundle_locations.h"
-#include "base/mac/foundation_util.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/sys_string_conversions.h"
 #include "build/branding_buildflags.h"
 #include "components/crash/core/app/crash_reporter_client.h"
@@ -37,12 +39,13 @@ std::map<std::string, std::string> GetProcessSimpleAnnotations() {
   static std::map<std::string, std::string> annotations = []() -> auto {
     std::map<std::string, std::string> process_annotations;
     @autoreleasepool {
-      NSBundle* outer_bundle = base::mac::OuterBundle();
+      NSBundle* outer_bundle = base::apple::OuterBundle();
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
       process_annotations["prod"] = "Chrome_Mac";
 #else
-      NSString* product = base::mac::ObjCCast<NSString>([outer_bundle
-          objectForInfoDictionaryKey:base::mac::CFToNSCast(kCFBundleNameKey)]);
+      NSString* product = base::apple::ObjCCast<NSString>(
+          [outer_bundle objectForInfoDictionaryKey:base::apple::CFToNSPtrCast(
+                                                       kCFBundleNameKey)]);
       process_annotations["prod"] =
           base::SysNSStringToUTF8(product).append("_Mac");
 #endif
@@ -53,7 +56,7 @@ std::map<std::string, std::string> GetProcessSimpleAnnotations() {
 #else
       const bool allow_empty_channel = false;
 #endif
-      NSString* channel = base::mac::ObjCCast<NSString>(
+      NSString* channel = base::apple::ObjCCast<NSString>(
           [outer_bundle objectForInfoDictionaryKey:@"KSChannelID"]);
       if (!channel || [channel isEqual:@"arm64"] ||
           [channel isEqual:@"universal"]) {
@@ -77,12 +80,16 @@ std::map<std::string, std::string> GetProcessSimpleAnnotations() {
       }
 
       NSString* version =
-          base::mac::ObjCCast<NSString>([base::mac::FrameworkBundle()
+          base::apple::ObjCCast<NSString>([base::apple::FrameworkBundle()
               objectForInfoDictionaryKey:@"CFBundleShortVersionString"]);
       process_annotations["ver"] = base::SysNSStringToUTF8(version);
 
       process_annotations["plat"] = std::string("OS X");
     }  // @autoreleasepool
+    for (auto& [key, value] :
+         GetCrashReporterClient()->GetExtraProcessAnnotations()) {
+      process_annotations.insert_or_assign(key, std::move(value));
+    }
     return process_annotations;
   }();
   return annotations;
@@ -133,15 +140,18 @@ bool PlatformCrashpadInitialization(
     const std::string& user_data_dir,
     const base::FilePath& exe_path,
     const std::vector<std::string>& initial_arguments,
+    const std::vector<base::FilePath>& attachments,
     base::FilePath* database_path) {
   base::FilePath metrics_path;  // Only valid in the browser process.
-  DCHECK(!embedded_handler);  // This is not used on Mac.
-  DCHECK(exe_path.empty());   // This is not used on Mac.
+  // These are not used on Mac.
+  DCHECK(!embedded_handler);
+  DCHECK(exe_path.empty());
   DCHECK(initial_arguments.empty());
+  DCHECK(attachments.empty());
 
   if (initial_client) {
     @autoreleasepool {
-      base::FilePath framework_bundle_path = base::mac::FrameworkBundlePath();
+      base::FilePath framework_bundle_path = base::apple::FrameworkBundlePath();
       base::FilePath handler_path =
           framework_bundle_path.Append("Helpers").Append(
               "chrome_crashpad_handler");
@@ -157,6 +167,12 @@ bool PlatformCrashpadInitialization(
 
       if (crash_reporter_client->ShouldMonitorCrashHandlerExpensively()) {
         arguments.push_back("--monitor-self");
+      }
+      if (!crash_reporter_client->ShouldRateLimitUploads()) {
+        arguments.push_back("--no-rate-limit");
+      }
+      if (!crash_reporter_client->ShouldCompressUploads()) {
+        arguments.push_back("--no-upload-gzip");
       }
 
       // Set up --monitor-self-annotation even in the absence of --monitor-self

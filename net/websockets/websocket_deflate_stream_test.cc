@@ -6,18 +6,21 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "base/check.h"
 #include "base/containers/circular_deque.h"
-#include "base/functional/bind.h"
-#include "base/functional/callback_helpers.h"
-#include "base/memory/ptr_util.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/strings/string_view_util.h"
 #include "base/test/mock_callback.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
@@ -27,7 +30,6 @@
 #include "net/websockets/websocket_deflate_predictor.h"
 #include "net/websockets/websocket_deflater.h"
 #include "net/websockets/websocket_frame.h"
-#include "net/websockets/websocket_inflater.h"
 #include "net/websockets/websocket_stream.h"
 #include "net/websockets/websocket_test_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -45,15 +47,10 @@ using ::testing::Invoke;
 using ::testing::Return;
 
 typedef uint32_t FrameFlag;
-const FrameFlag kNoFlag = 0;
-const FrameFlag kFinal = 1;
-const FrameFlag kReserved1 = 2;
+constexpr FrameFlag kNoFlag = 0;
+constexpr FrameFlag kFinal = 1;
+constexpr FrameFlag kReserved1 = 2;
 // We don't define values for other flags because we don't need them.
-
-// The value must equal to the value of the corresponding
-// constant in websocket_deflate_stream.cc
-const size_t kChunkSize = 4 * 1024;
-const int kWindowBits = 15;
 
 std::string ToString(IOBufferWithSize* buffer) {
   return std::string(buffer->data(), buffer->size());
@@ -64,9 +61,7 @@ std::string ToString(const scoped_refptr<IOBufferWithSize>& buffer) {
 }
 
 std::string ToString(const WebSocketFrame* frame) {
-  return frame->payload
-             ? std::string(frame->payload, frame->header.payload_length)
-             : "";
+  return std::string(base::as_string_view(frame->payload));
 }
 
 std::string ToString(const std::unique_ptr<WebSocketFrame>& frame) {
@@ -189,11 +184,11 @@ class WebSocketDeflatePredictorMock : public WebSocketDeflatePredictor {
   // Data frames which will be recorded by |RecordInputFrames|.
   // Pushed by |AddFrameToBeInput| and popped and verified by
   // |RecordInputFrames|.
-  base::circular_deque<const WebSocketFrame*> frames_to_be_input_;
+  base::circular_deque<raw_ptr<const WebSocketFrame>> frames_to_be_input_;
   // Data frames recorded by |RecordWrittenFrames|.
   // Pushed by |RecordWrittenFrames| and popped and verified by
   // |VerifySentFrame|.
-  base::circular_deque<const WebSocketFrame*> frames_written_;
+  base::circular_deque<raw_ptr<const WebSocketFrame>> frames_written_;
 };
 
 class WebSocketDeflateStreamTest : public ::testing::Test {
@@ -202,7 +197,8 @@ class WebSocketDeflateStreamTest : public ::testing::Test {
   ~WebSocketDeflateStreamTest() override = default;
 
   void SetUp() override {
-    Initialize(WebSocketDeflater::TAKE_OVER_CONTEXT, kWindowBits);
+    Initialize(WebSocketDeflater::TAKE_OVER_CONTEXT,
+               WebSocketDeflateStream::kWindowBits);
   }
 
  protected:
@@ -239,9 +235,9 @@ class WebSocketDeflateStreamTest : public ::testing::Test {
     auto frame = std::make_unique<WebSocketFrame>(opcode);
     frame->header.final = (flag & kFinal);
     frame->header.reserved1 = (flag & kReserved1);
-    auto buffer = std::make_unique<char[]>(data.size());
-    memcpy(buffer.get(), data.c_str(), data.size());
-    frame->payload = buffer.get();
+    auto buffer =
+        base::HeapArray<uint8_t>::CopiedFrom(base::as_byte_span(data));
+    frame->payload = buffer.as_span();
     data_buffers.push_back(std::move(buffer));
     frame->header.payload_length = data.size();
     frames->push_back(std::move(frame));
@@ -253,8 +249,7 @@ class WebSocketDeflateStreamTest : public ::testing::Test {
   // Owned by |deflate_stream_|.
   raw_ptr<WebSocketDeflatePredictorMock> predictor_ = nullptr;
 
-  // TODO(yoichio): Make this type std::vector<std::string>.
-  std::vector<std::unique_ptr<const char[]>> data_buffers;
+  std::vector<base::HeapArray<uint8_t>> data_buffers;
 };
 
 // Since WebSocketDeflater with DoNotTakeOverContext is well tested at
@@ -267,7 +262,8 @@ class WebSocketDeflateStreamWithDoNotTakeOverContextTest
   ~WebSocketDeflateStreamWithDoNotTakeOverContextTest() override = default;
 
   void SetUp() override {
-    Initialize(WebSocketDeflater::DO_NOT_TAKE_OVER_CONTEXT, kWindowBits);
+    Initialize(WebSocketDeflater::DO_NOT_TAKE_OVER_CONTEXT,
+               WebSocketDeflateStream::kWindowBits);
   }
 };
 
@@ -714,10 +710,10 @@ TEST_F(WebSocketDeflateStreamTest, ReadControlFrameBetweenDataFrames) {
 
 TEST_F(WebSocketDeflateStreamTest, SplitToMultipleFramesInReadFrames) {
   WebSocketDeflater deflater(WebSocketDeflater::TAKE_OVER_CONTEXT);
-  deflater.Initialize(kWindowBits);
-  const size_t kSize = kChunkSize * 3;
+  deflater.Initialize(WebSocketDeflateStream::kWindowBits);
+  constexpr size_t kSize = WebSocketDeflateStream::kChunkSize * 3;
   const std::string original_data(kSize, 'a');
-  deflater.AddBytes(original_data.data(), original_data.size());
+  deflater.AddBytes(base::as_byte_span(original_data));
   deflater.Finish();
 
   std::vector<std::unique_ptr<WebSocketFrame>> frames_to_output;
@@ -740,26 +736,29 @@ TEST_F(WebSocketDeflateStreamTest, SplitToMultipleFramesInReadFrames) {
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeBinary, frames[0]->header.opcode);
   EXPECT_FALSE(frames[0]->header.final);
   EXPECT_FALSE(frames[0]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[0]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[0]->header.payload_length));
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeContinuation,
             frames[1]->header.opcode);
   EXPECT_FALSE(frames[1]->header.final);
   EXPECT_FALSE(frames[1]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[1]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[1]->header.payload_length));
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeContinuation,
             frames[2]->header.opcode);
   EXPECT_TRUE(frames[2]->header.final);
   EXPECT_FALSE(frames[2]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[2]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[2]->header.payload_length));
   EXPECT_EQ(original_data,
             ToString(frames[0]) + ToString(frames[1]) + ToString(frames[2]));
 }
 
 TEST_F(WebSocketDeflateStreamTest, InflaterInternalDataCanBeEmpty) {
   WebSocketDeflater deflater(WebSocketDeflater::TAKE_OVER_CONTEXT);
-  deflater.Initialize(kWindowBits);
-  const std::string original_data(kChunkSize, 'a');
-  deflater.AddBytes(original_data.data(), original_data.size());
+  deflater.Initialize(WebSocketDeflateStream::kWindowBits);
+  const std::string original_data(WebSocketDeflateStream::kChunkSize, 'a');
+  deflater.AddBytes(base::as_byte_span(original_data));
   deflater.Finish();
 
   std::vector<std::unique_ptr<WebSocketFrame>> frames_to_output;
@@ -786,7 +785,8 @@ TEST_F(WebSocketDeflateStreamTest, InflaterInternalDataCanBeEmpty) {
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeBinary, frames[0]->header.opcode);
   EXPECT_FALSE(frames[0]->header.final);
   EXPECT_FALSE(frames[0]->header.reserved1);
-  EXPECT_EQ(kChunkSize, static_cast<size_t>(frames[0]->header.payload_length));
+  EXPECT_EQ(WebSocketDeflateStream::kChunkSize,
+            static_cast<size_t>(frames[0]->header.payload_length));
 
   EXPECT_EQ(WebSocketFrameHeader::kOpCodeContinuation,
             frames[1]->header.opcode);
@@ -1166,11 +1166,31 @@ TEST_F(WebSocketDeflateStreamTest, WriteUncompressedMessage) {
   EXPECT_EQ("AAA", ToString(frames_passed[1]));
 }
 
+TEST_F(WebSocketDeflateStreamTest,
+       LargeMessageShouldNotBeSplitIfSmallerThan32KB) {
+  WriteFramesStub stub(predictor_, OK);
+  const std::string payload(WebSocketDeflateStream::kChunkSize - 1, 'a');
+  std::vector<std::unique_ptr<WebSocketFrame>> frames;
+  AppendTo(&frames, WebSocketFrameHeader::kOpCodeText, kFinal, payload);
+  predictor_->AddFramesToBeInput(frames);
+
+  {
+    InSequence s;
+    EXPECT_CALL(*mock_stream_, WriteFrames(_, _))
+        .WillOnce(Invoke(&stub, &WriteFramesStub::Call));
+  }
+
+  ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
+              IsOk());
+  // The message is slightly smaller than kChunkSize, so it should not be split.
+  ASSERT_EQ(1u, stub.frames()->size());
+}
+
 TEST_F(WebSocketDeflateStreamTest, LargeDeflatedFramesShouldBeSplit) {
   WebSocketDeflater deflater(WebSocketDeflater::TAKE_OVER_CONTEXT);
   LinearCongruentialGenerator lcg(133);
   WriteFramesStub stub(predictor_, OK);
-  const size_t size = 1024;
+  constexpr size_t kSize = WebSocketDeflateStream::kChunkSize / 4;
 
   {
     InSequence s;
@@ -1180,22 +1200,24 @@ TEST_F(WebSocketDeflateStreamTest, LargeDeflatedFramesShouldBeSplit) {
   std::vector<std::unique_ptr<WebSocketFrame>> total_compressed_frames;
   std::vector<std::string> buffers;
 
-  deflater.Initialize(kWindowBits);
+  deflater.Initialize(WebSocketDeflateStream::kWindowBits);
   while (true) {
     bool is_final = (total_compressed_frames.size() >= 2);
     std::vector<std::unique_ptr<WebSocketFrame>> frames;
     std::string data;
-    for (size_t i = 0; i < size; ++i)
+    data.reserve(kSize);
+    for (size_t i = 0; i < kSize; ++i) {
       data += static_cast<char>(lcg.Generate());
-    deflater.AddBytes(data.data(), data.size());
+    }
+    deflater.AddBytes(base::as_byte_span(data));
     FrameFlag flag = is_final ? kFinal : kNoFlag;
     AppendTo(&frames, WebSocketFrameHeader::kOpCodeBinary, flag, data);
     predictor_->AddFramesToBeInput(frames);
     ASSERT_THAT(deflate_stream_->WriteFrames(&frames, CompletionOnceCallback()),
                 IsOk());
     for (auto& frame : *stub.frames()) {
-      buffers.emplace_back(frame->payload, frame->header.payload_length);
-      frame->payload = (buffers.end() - 1)->data();
+      buffers.emplace_back(base::as_string_view(frame->payload));
+      frame->payload = base::as_byte_span(buffers.back());
     }
     total_compressed_frames.insert(
         total_compressed_frames.end(),

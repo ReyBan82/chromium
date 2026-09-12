@@ -10,42 +10,42 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.components.module_installer.engine.InstallEngine;
 import org.chromium.components.module_installer.engine.InstallListener;
 
-/**
- * Test suite for the Module class.
- */
+/** Test suite for the Module class. */
 @RunWith(BaseRobolectricTestRunner.class)
 public class ModuleTest {
-    @Mock
-    private InstallEngine mInstallEngineMock;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private InstallEngine mInstallEngineMock;
 
-    private final String mModuleName = "module_stub";
-    private final Class mInterface = ModuleTestStubInterface.class;
+    private static final String MODULE_NAME = "module_stub";
+    private static final Class<ModuleTestStubInterface> INTERFACE = ModuleTestStubInterface.class;
     private final String mImplName = ModuleTestStub.class.getName();
 
-    private Module<ModuleTestStub> mModule;
+    private Module<ModuleTestStubInterface> mModule;
 
     /**
      * This class needs to be static (for testing purposes).
      * https://stackoverflow.com/questions/31396758/why-i-get-java-lang-instantiationexception-here
      */
     public static class ModuleTestStub implements ModuleTestStubInterface {}
+
     private interface ModuleTestStubInterface {}
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
 
-        mModule = new Module<ModuleTestStub>(mModuleName, mInterface, mImplName);
+        mModule = new Module<>(MODULE_NAME, INTERFACE, mImplName);
         mModule.setInstallEngine(mInstallEngineMock);
     }
 
@@ -58,7 +58,7 @@ public class ModuleTest {
         mModule.isInstalled();
 
         // Assert.
-        inOrder.verify(mInstallEngineMock).isInstalled(mModuleName);
+        inOrder.verify(mInstallEngineMock).isInstalled(MODULE_NAME);
         inOrder.verifyNoMoreInteractions();
     }
 
@@ -72,7 +72,7 @@ public class ModuleTest {
         mModule.install(listenerMock);
 
         // Assert.
-        inOrder.verify(mInstallEngineMock).install(mModuleName, listenerMock);
+        inOrder.verify(mInstallEngineMock).install(MODULE_NAME, listenerMock);
         inOrder.verifyNoMoreInteractions();
     }
 
@@ -85,18 +85,18 @@ public class ModuleTest {
         mModule.installDeferred();
 
         // Assert.
-        inOrder.verify(mInstallEngineMock).installDeferred(mModuleName);
+        inOrder.verify(mInstallEngineMock).installDeferred(MODULE_NAME);
         inOrder.verifyNoMoreInteractions();
     }
 
     @Test
     public void whenGetImpl_VerifyCorrectInstance() {
         // Arrange.
-        Class expectedType = ModuleTestStub.class;
-        doReturn(true).when(mInstallEngineMock).isInstalled(mModuleName);
+        Class<ModuleTestStub> expectedType = ModuleTestStub.class;
+        doReturn(true).when(mInstallEngineMock).isInstalled(MODULE_NAME);
 
         // Act.
-        ModuleTestStub impl = mModule.getImpl();
+        ModuleTestStubInterface impl = mModule.getImpl();
 
         // Assert.
         assertEquals(expectedType, impl.getClass());
@@ -106,8 +106,8 @@ public class ModuleTest {
     public void whenGettingUnknownImpl_VerifyError() {
         // Arrange.
         String impl = "some unknown type";
-        Module<ModuleTestStub> module = new Module<ModuleTestStub>(mModuleName, mInterface, impl);
-        doReturn(true).when(mInstallEngineMock).isInstalled(mModuleName);
+        Module<ModuleTestStubInterface> module = new Module<>(MODULE_NAME, INTERFACE, impl);
+        doReturn(true).when(mInstallEngineMock).isInstalled(MODULE_NAME);
         module.setInstallEngine(mInstallEngineMock);
 
         // Act & Assert.

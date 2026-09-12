@@ -35,6 +35,11 @@ const char* CrostiniResultString(const CrostiniResult res) {
     ENTRY(CONTAINER_EXPORT_IMPORT_FAILED_VM_STOPPED);
     ENTRY(CONTAINER_EXPORT_IMPORT_FAILED_VM_STARTED);
     ENTRY(CONTAINER_EXPORT_IMPORT_FAILED_ARCHITECTURE);
+    ENTRY(DISK_IMAGE_NO_RESPONSE);
+    ENTRY(DISK_IMAGE_IN_PROGRESS);
+    ENTRY(DISK_IMAGE_FAILED_NO_SPACE);
+    ENTRY(DISK_IMAGE_FAILED);
+    ENTRY(DISK_IMAGE_CANCELLED);
     ENTRY(NOT_ALLOWED);
     ENTRY(CONTAINER_EXPORT_IMPORT_FAILED_SPACE);
     ENTRY(GET_CONTAINER_SSH_KEYS_FAILED);
@@ -80,18 +85,16 @@ const char* CrostiniResultString(const CrostiniResult res) {
     ENTRY(STOP_VM_NO_RESPONSE);
     ENTRY(SIGNAL_NOT_CONNECTED);
     ENTRY(INSTALL_TERMINA_CANCELLED);
+    ENTRY(START_TIMED_OUT);
+    ENTRY(START_BAGUETTE_VM_TIMED_OUT);
+    ENTRY(UNINSTALL_BAGUETTE_FAILED);
+    ENTRY(INSTALL_BAGUETTE_CANCELLED);
+    ENTRY(DOWNLOAD_BAGUETTE_FAILED);
+    ENTRY(DISK_IMAGE_BAD_IMAGE);
   }
 #undef ENTRY
   return "unknown code";
 }
-
-LinuxPackageInfo::LinuxPackageInfo() = default;
-LinuxPackageInfo::LinuxPackageInfo(LinuxPackageInfo&&) = default;
-LinuxPackageInfo::LinuxPackageInfo(const LinuxPackageInfo&) = default;
-LinuxPackageInfo& LinuxPackageInfo::operator=(LinuxPackageInfo&&) = default;
-LinuxPackageInfo& LinuxPackageInfo::operator=(const LinuxPackageInfo&) =
-    default;
-LinuxPackageInfo::~LinuxPackageInfo() = default;
 
 ContainerInfo::ContainerInfo(std::string container_name,
                              std::string container_username,

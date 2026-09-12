@@ -5,38 +5,50 @@
 #include "components/user_education/webui/help_bubble_webui.h"
 
 #include "components/user_education/webui/help_bubble_handler.h"
-#include "components/user_education/webui/tracked_element_webui.h"
 #include "ui/base/interaction/element_identifier.h"
-#include "ui/base/interaction/framework_specific_implementation.h"
+#include "ui/base/interaction/safe_castable.h"
+#include "ui/webui/tracked_element/tracked_element_handler.h"
+#include "ui/webui/tracked_element/tracked_element_web_ui.h"
 
 namespace user_education {
 
 HelpBubbleWebUI::HelpBubbleWebUI(HelpBubbleHandlerBase* handler,
-                                 ui::ElementIdentifier anchor_id)
-    : handler_(handler), anchor_id_(anchor_id) {
+                                 ui::ElementIdentifier anchor_id,
+                                 const std::string& secondary_id)
+    : handler_(handler), anchor_id_(anchor_id), secondary_id_(secondary_id) {
   CHECK(handler_);
 }
+
 HelpBubbleWebUI::~HelpBubbleWebUI() {
-  Close();
+  Close(HelpBubble::CloseReason::kBubbleDestroyed);
+}
+
+content::WebContents* HelpBubbleWebUI::GetWebContents() {
+  return is_open() ? handler_->GetWebContents() : nullptr;
 }
 
 bool HelpBubbleWebUI::ToggleFocusForAccessibility() {
-  return handler_->ToggleHelpBubbleFocusForAccessibility(anchor_id_);
+  return handler_->ToggleHelpBubbleFocusForAccessibility(anchor_id_,
+                                                         secondary_id_);
 }
 
 gfx::Rect HelpBubbleWebUI::GetBoundsInScreen() const {
-  return handler_->GetHelpBubbleBoundsInScreen(anchor_id_);
+  return handler_->GetHelpBubbleBoundsInScreen(anchor_id_, secondary_id_);
 }
 
 ui::ElementContext HelpBubbleWebUI::GetContext() const {
   return handler_->context();
 }
 
-void HelpBubbleWebUI::CloseBubbleImpl() {
-  handler_->OnHelpBubbleClosing(anchor_id_);
+bool HelpBubbleWebUI::Close(CloseReason reason) {
+  auto on_close = BeginClose(reason);
+  if (on_close.is_valid()) {
+    handler_->OnHelpBubbleClosing(anchor_id_, secondary_id_);
+  }
+  return on_close.is_valid();
 }
 
-DEFINE_FRAMEWORK_SPECIFIC_METADATA(HelpBubbleWebUI)
+DEFINE_SAFE_CAST_TARGET(HelpBubbleWebUI)
 
 HelpBubbleFactoryWebUI::HelpBubbleFactoryWebUI() = default;
 HelpBubbleFactoryWebUI::~HelpBubbleFactoryWebUI() = default;
@@ -44,16 +56,23 @@ HelpBubbleFactoryWebUI::~HelpBubbleFactoryWebUI() = default;
 std::unique_ptr<HelpBubble> HelpBubbleFactoryWebUI::CreateBubble(
     ui::TrackedElement* element,
     HelpBubbleParams params) {
-  HelpBubbleHandlerBase* const handler =
-      element->AsA<TrackedElementWebUI>()->handler();
-  return handler->CreateHelpBubble(element->identifier(), std::move(params));
+  HelpBubbleHandlerBase* handler = element->AsA<ui::TrackedElementWebUI>()
+                                       ->handler()
+                                       ->GetHelpBubbleHandler();
+  return handler
+             ? handler->CreateHelpBubble(
+                   element->AsA<ui::TrackedElementWebUI>(), std::move(params))
+             : nullptr;
 }
 
 bool HelpBubbleFactoryWebUI::CanBuildBubbleForTrackedElement(
     const ui::TrackedElement* element) const {
-  return element->IsA<TrackedElementWebUI>();
+  if (const auto* element_webui = element->AsA<ui::TrackedElementWebUI>()) {
+    return element_webui->handler()->GetHelpBubbleHandler() != nullptr;
+  }
+  return false;
 }
 
-DEFINE_FRAMEWORK_SPECIFIC_METADATA(HelpBubbleFactoryWebUI)
+DEFINE_SAFE_CAST_TARGET(HelpBubbleFactoryWebUI)
 
 }  // namespace user_education

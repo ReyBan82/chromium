@@ -5,15 +5,27 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_PASSWORDS_AUTO_SIGNIN_FIRST_RUN_DIALOG_VIEW_H_
 #define CHROME_BROWSER_UI_VIEWS_PASSWORDS_AUTO_SIGNIN_FIRST_RUN_DIALOG_VIEW_H_
 
+#include <memory>
+#include <string>
+
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "chrome/browser/ui/passwords/password_dialog_prompts.h"
-#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/window/dialog_delegate.h"
 
-class AutoSigninFirstRunDialogView : public views::DialogDelegateView,
+namespace content {
+class WebContents;
+}
+
+namespace views {
+class Widget;
+}
+
+class CredentialManagerDialogController;
+
+class AutoSigninFirstRunDialogView : public views::DialogDelegate,
                                      public AutoSigninFirstRunPrompt {
  public:
-  METADATA_HEADER(AutoSigninFirstRunDialogView);
   AutoSigninFirstRunDialogView(CredentialManagerDialogController* controller,
                                content::WebContents* web_contents);
   AutoSigninFirstRunDialogView(const AutoSigninFirstRunDialogView&) = delete;
@@ -26,7 +38,7 @@ class AutoSigninFirstRunDialogView : public views::DialogDelegateView,
   void ControllerGone() override;
 
  private:
-  // views::DialogDelegateView:
+  // views::DialogDelegate:
   std::u16string GetWindowTitle() const override;
   void WindowClosing() override;
 
@@ -34,8 +46,10 @@ class AutoSigninFirstRunDialogView : public views::DialogDelegateView,
   void InitWindow();
 
   // A weak pointer to the controller.
-  raw_ptr<CredentialManagerDialogController, DanglingUntriaged> controller_;
-  const raw_ptr<content::WebContents, DanglingUntriaged> web_contents_;
+  raw_ptr<CredentialManagerDialogController> controller_;
+  const base::WeakPtr<content::WebContents> web_contents_;
+
+  std::unique_ptr<views::Widget> widget_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_PASSWORDS_AUTO_SIGNIN_FIRST_RUN_DIALOG_VIEW_H_

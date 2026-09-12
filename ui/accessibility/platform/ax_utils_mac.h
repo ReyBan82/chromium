@@ -7,12 +7,14 @@
 
 #import <Cocoa/Cocoa.h>
 
+#include <optional>
+
 #include "base/component_export.h"
 #include "ui/accessibility/platform/ax_platform_node_delegate.h"
 
-namespace ui {
+@class AXPlatformNodeCocoa;
 
-class AXPlatformNodeCocoa;
+namespace ui {
 
 // An AXTextMarker is used by applications like Chrome to store a position in
 // the accessibility tree's text representation. It is a data structure whose
@@ -48,7 +50,7 @@ id AXRangeToAXTextMarkerRange(AXPlatformNodeDelegate::AXRange);
 
 // Returns the AXTextMarker representing the position within the given node.
 COMPONENT_EXPORT(AX_PLATFORM)
-id AXTextMarkerFrom(const AXPlatformNodeCocoa* anchor,
+id AXTextMarkerFrom(AXPlatformNodeCocoa* anchor,
                     int offset,
                     ax::mojom::TextAffinity affinity);
 
@@ -61,6 +63,16 @@ COMPONENT_EXPORT(AX_PLATFORM) id AXTextMarkerRangeStart(id text_marker_range);
 
 // Returns the end text marker from the given AXTextMarkerRange.
 COMPONENT_EXPORT(AX_PLATFORM) id AXTextMarkerRangeEnd(id text_marker_range);
+
+// If `value` is an `NSValue` that contains a value of the type `NSRange`,
+// returns that range value, otherwise returns `std::nullopt`.
+COMPONENT_EXPORT(AX_PLATFORM)
+std::optional<NSRange> NSValueGetRange(id value);
+
+// If `value` is an `NSValue` that contains a value of the type `NSSize`,
+// returns that size value, otherwise returns `std::nullopt`.
+COMPONENT_EXPORT(AX_PLATFORM)
+std::optional<NSSize> NSValueGetSize(id value);
 
 }  // namespace ui
 

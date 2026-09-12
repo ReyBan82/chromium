@@ -4,8 +4,8 @@
  * found in the LICENSE file.
  */
 
-var request = null;
-var showPromise = null;
+let request = null;
+let showPromise = null;
 
 const TEST_DETAILS = {
   total: {label: 'Total', amount: {currency: 'USD', value: '5.00'}},
@@ -24,23 +24,12 @@ function testPaymentMethods(methods) {
 }
 
 /**
- * Launches the PaymentRequest UI with basic-card as payment methods.
- * Saves the newly created PaymentRequest and its show promise in global
- * variables. Tests can optionally call abort() to cancel this request.
- */
-function testBasicCard() {
-  testPaymentMethods([
-    {supportedMethods: 'basic-card'},
-  ]);
-}
-
-/**
- * Aborts the PaymentRequest initiated by testBasicCard().
+ * Aborts the active PaymentRequest.
  */
 async function abort() {
   await request.abort();
   return await showPromise.catch((e) => {
-    return e.name == 'AbortError';
+    return e.name === 'AbortError';
   });
 }
 

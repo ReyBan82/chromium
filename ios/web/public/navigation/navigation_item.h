@@ -5,14 +5,16 @@
 #ifndef IOS_WEB_PUBLIC_NAVIGATION_NAVIGATION_ITEM_H_
 #define IOS_WEB_PUBLIC_NAVIGATION_NAVIGATION_ITEM_H_
 
+#import <Foundation/Foundation.h>
+
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/supports_user_data.h"
 #include "base/time/time.h"
 #import "ios/web/common/user_agent.h"
 #import "ios/web/public/navigation/https_upgrade_type.h"
-#import "ios/web/public/ui/page_display_state.h"
 #include "ui/base/page_transition_types.h"
 
 class GURL;
@@ -34,6 +36,9 @@ extern const size_t kMaxTitleLength;
 // chain of navigation managed by a NavigationManager.
 class NavigationItem : public base::SupportsUserData {
  public:
+  // Dictionary mapping HTTP header key to their value.
+  using HttpRequestHeaders = NSDictionary<NSString*, NSString*>;
+
   // Creates a new NavigationItem.
   static std::unique_ptr<NavigationItem> Create();
 
@@ -77,9 +82,19 @@ class NavigationItem : public base::SupportsUserData {
   virtual void SetTitle(const std::u16string& title) = 0;
   virtual const std::u16string& GetTitle() const = 0;
 
-  // Stores the NavigationItem's last recorded scroll offset and zoom scale.
-  virtual void SetPageDisplayState(const PageDisplayState& page_state) = 0;
-  virtual const PageDisplayState& GetPageDisplayState() const = 0;
+  // A text fragment selector (that uses the syntax defined in
+  // https://wicg.github.io/scroll-to-text-fragment/#syntax) to scroll the
+  // matched text into the viewport without applying the standard highlight
+  // styling. This is used for cross-device scroll restoration.
+  // This is named "internal" to match
+  // content::NavigationController::LoadURLParams, as it is passed through the
+  // navigation stack rather than being extracted from the URL's hash fragment.
+  // The string should contain only the selector value (the part after "text="
+  // in a URL directive), not the "text=" prefix itself.
+  virtual void SetInternalScrollToTextFragment(
+      const std::optional<std::string>& internal_scroll_to_text_fragment) = 0;
+  virtual const std::optional<std::string>& GetInternalScrollToTextFragment()
+      const = 0;
 
   // Page-related helpers ------------------------------------------------------
 
@@ -116,23 +131,32 @@ class NavigationItem : public base::SupportsUserData {
   virtual base::Time GetTimestamp() const = 0;
 
   // The type of user agent requested for the navigation.
-  // TODO(crbug.com/697512): Create equivalent enum type for WebContents.
+  // TODO(crbug.com/40508799): Create equivalent enum type for WebContents.
   virtual void SetUserAgentType(UserAgentType type) = 0;
   virtual UserAgentType GetUserAgentType() const = 0;
+
+  // File resources stored outside of the app container require access
+  // permissions to load during session restore. `data` refers to the
+  // file path resource bookmark that will be stored with the corresponding
+  // access permissions.
+  virtual void SetSecurityScopedFileResource(NSData* data) = 0;
+  virtual NSData* GetSecurityScopedFileResource() = 0;
 
   // `true` if this item is the result of a POST request with data.
   virtual bool HasPostData() const = 0;
 
   // Returns the item's current http request headers.
-  virtual NSDictionary* GetHttpRequestHeaders() const = 0;
+  virtual HttpRequestHeaders* GetHttpRequestHeaders() const = 0;
 
   // Adds headers from `additional_headers` to the item's http request headers.
   // Existing headers with the same key will be overridden.
-  virtual void AddHttpRequestHeaders(NSDictionary* additional_headers) = 0;
+  virtual void AddHttpRequestHeaders(
+      HttpRequestHeaders* additional_headers) = 0;
 
   // Returns the type of the HTTPS upgrade that was applied to this navigation.
   // If the navigation wasn't upgraded to HTTPS, returns kNone.
   virtual HttpsUpgradeType GetHttpsUpgradeType() const = 0;
+
   // Sets the type of the HTTPS upgrade that was applied to this navigation. If
   // no upgrade was applied, should be kNone. This function is called from
   // NavigationManager. Once this value is set, it's never reset. Navigations

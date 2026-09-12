@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/files/scoped_file.h"
 #include "base/notreached.h"
 #include "base/posix/eintr_wrapper.h"
@@ -75,7 +76,8 @@ void SendHello(int fd) {
 
   std::vector<int> send_fds;
   send_fds.push_back(write_pipe.get());
-  CHECK(base::UnixDomainSocket::SendMsg(fd, kHello, sizeof(kHello), send_fds));
+  CHECK(base::UnixDomainSocket::SendMsg(fd, base::as_byte_span(kHello),
+                                        send_fds));
 
   write_pipe.reset();
 
@@ -96,12 +98,12 @@ void RecvHello(int fd,
                base::ScopedFD* write_pipe = NULL) {
   // Extra receiving buffer space to make sure we really received only
   // sizeof(kHello) bytes and it wasn't just truncated to fit the buffer.
-  char buf[sizeof(kHello) + 1];
+  uint8_t buf[sizeof(kHello) + 1];
   std::vector<base::ScopedFD> message_fds;
-  ssize_t n = base::UnixDomainSocket::RecvMsgWithPid(
-      fd, buf, sizeof(buf), &message_fds, sender_pid);
+  ssize_t n =
+      base::UnixDomainSocket::RecvMsgWithPid(fd, buf, &message_fds, sender_pid);
   CHECK_EQ(sizeof(kHello), static_cast<size_t>(n));
-  CHECK_EQ(0, memcmp(buf, kHello, sizeof(kHello)));
+  UNSAFE_TODO(CHECK_EQ(0, memcmp(buf, kHello, sizeof(kHello))));
   CHECK_EQ(1U, message_fds.size());
   if (write_pipe)
     std::swap(*write_pipe, message_fds[0]);

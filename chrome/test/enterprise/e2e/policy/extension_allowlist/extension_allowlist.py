@@ -13,7 +13,7 @@ from infra import ChromeEnterpriseTestCase
 @environment(file="../policy_test.asset.textpb")
 class ExtensionInstallAllowlistTest(ChromeEnterpriseTestCase):
   """Test the ExtensionInstallBlocklist policy.
-    https://cloud.google.com/docs/chrome-enterprise/policies/?policy=ExtensionInstallAllowlist"""
+  https://chromeenterprise.google/policies/?policy=ExtensionInstallAllowlist"""
 
   @before_all
   def setup(self):
@@ -26,26 +26,30 @@ class ExtensionInstallAllowlistTest(ChromeEnterpriseTestCase):
     dir = os.path.dirname(os.path.abspath(__file__))
     logging.info('Opening page: %s' % url)
     output = self.RunUITest(
-        self.win_config['client'],
-        os.path.join(dir, '../install_extension.py'),
-        args=args)
+      self.win_config['client'],
+      os.path.join(dir, '../install_extension.py'),
+      args=args,
+    )
     return output
 
   @test
   def test_ExtensionAllowlist_hangout(self):
-    extension = 'nckgahadagoaajjgafhacjanaoiihapd'
-    self.SetPolicy(self.win_config['dc'], r'ExtensionInstallBlocklist\1', '*',
-                   'String')
-    self.SetPolicy(self.win_config['dc'], r'ExtensionInstallAllowlist\1',
-                   extension, 'String')
+    extension = 'aapbdbdomjkkjkaonfhkkikfgjllcleb'
+    self.SetPolicy(
+      self.win_config['dc'], r'ExtensionInstallBlocklist\1', '*', 'String'
+    )
+    self.SetPolicy(
+      self.win_config['dc'], r'ExtensionInstallAllowlist\1', extension, 'String'
+    )
     self.RunCommand(self.win_config['client'], 'gpupdate /force')
-    logging.info('Allowlist extension install for ' + extension +
-                 ' while disabling others')
+    logging.info(
+      'Allowlist extension install for ' + extension + ' while disabling others'
+    )
 
-    test_url = 'https://chrome.google.com/webstore/detail/google-hangouts/nckgahadagoaajjgafhacjanaoiihapd'
+    test_url = 'https://chromewebstore.google.com/detail/google-translate/aapbdbdomjkkjkaonfhkkikfgjllcleb'
     output = self.installExtension(test_url)
-    self.assertIn('Not blocked', output)
+    self.assertIn('Ok', output)
 
-    negative_test_url = 'https://chrome.google.com/webstore/detail/grammarly-for-chrome/kbfnbcaeplbcioakkpcpgfkobkghlhen'
+    negative_test_url = 'https://chromewebstore.google.com/detail/grammarly-ai-writing-and/kbfnbcaeplbcioakkpcpgfkobkghlhen'
     output = self.installExtension(negative_test_url)
     self.assertIn('blocked', output)

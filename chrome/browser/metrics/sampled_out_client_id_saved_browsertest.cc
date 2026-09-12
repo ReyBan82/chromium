@@ -8,16 +8,12 @@
 #include "chrome/browser/metrics/chrome_metrics_service_accessor.h"
 #include "chrome/browser/metrics/chrome_metrics_services_manager_client.h"
 #include "chrome/browser/metrics/metrics_reporting_state.h"
+#include "chrome/test/base/platform_browser_test.h"
 #include "components/metrics/metrics_pref_names.h"
+#include "components/metrics/metrics_reporting_choice_service.h"
 #include "components/metrics/metrics_service.h"
 #include "components/metrics_services_manager/metrics_services_manager.h"
 #include "content/public/test/browser_test.h"
-
-#if BUILDFLAG(IS_ANDROID)
-#include "chrome/test/base/android/android_browser_test.h"
-#else
-#include "chrome/test/base/in_process_browser_test.h"
-#endif  // BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(IS_WIN)
 #include "base/test/test_reg_util_win.h"
@@ -38,9 +34,11 @@ void OnMetricsReportingStateChanged(bool* new_state_ptr,
 bool ChangeMetricsReporting(bool enabled) {
   bool value_after_change;
   base::RunLoop run_loop;
-  ChangeMetricsReportingStateWithReply(
-      enabled, base::BindOnce(OnMetricsReportingStateChanged,
-                              &value_after_change, run_loop.QuitClosure()));
+  metrics::ChangeMetricsReportingStateWithReply(
+      enabled,
+      base::BindOnce(OnMetricsReportingStateChanged, &value_after_change,
+                     run_loop.QuitClosure()),
+      metrics::ChangeMetricsReportingStateCalledFrom::kUiSettings);
   run_loop.Run();
   return value_after_change;
 }
@@ -73,8 +71,8 @@ class SampledOutClientIdSavedBrowserTest : public PlatformBrowserTest {
     // Because metrics reporting is disabled in non-Chrome-branded builds,
     // IsMetricsReportingEnabled() always returns false. Enable it here for
     // test consistency between Chromium and Chrome builds, otherwise
-    // ChangeMetricsReportingStateWithReply() will not have the intended effects
-    // for non-Chrome-branded builds.
+    // metrics::ChangeMetricsReportingStateWithReply() will not have the
+    // intended effects for non-Chrome-branded builds.
     ChromeMetricsServiceAccessor::SetForceIsMetricsReportingEnabledPrefLookup(
         true);
 
@@ -119,8 +117,6 @@ IN_PROC_BROWSER_TEST_F(SampledOutClientIdSavedBrowserTest, ClientIdSaved) {
   ASSERT_TRUE(metrics_service()->GetClientId().empty());
   ASSERT_TRUE(
       local_state()->GetString(metrics::prefs::kMetricsClientID).empty());
-  // TODO(crbug.com/1325166): Re-enable this test
-
 #if BUILDFLAG(IS_ANDROID)
   // On Android Chrome, since we have not yet consented to metrics reporting,
   // the new sampling trial should be used to verify sampling.
@@ -129,15 +125,18 @@ IN_PROC_BROWSER_TEST_F(SampledOutClientIdSavedBrowserTest, ClientIdSaved) {
 #endif  // BUILDFLAG(IS_ANDROID)
 
   // Verify that we are considered sampled out.
-  EXPECT_FALSE(ChromeMetricsServicesManagerClient::IsClientInSample());
+  EXPECT_FALSE(
+      ChromeMetricsServicesManagerClient::IsClientInSampleForMetrics());
 
   // Enable metrics reporting, and verify that it was successful.
   ASSERT_TRUE(ChangeMetricsReporting(true));
   ASSERT_TRUE(
-      local_state()->GetBoolean(metrics::prefs::kMetricsReportingEnabled));
+      metrics::MetricsReportingChoiceService::IsBasicMetricsReportingEnabled(
+          local_state()));
 
   // Verify that we are still considered sampled out.
-  EXPECT_FALSE(ChromeMetricsServicesManagerClient::IsClientInSample());
+  EXPECT_FALSE(
+      ChromeMetricsServicesManagerClient::IsClientInSampleForMetrics());
 
   // Verify that we are neither recording nor uploading metrics. This also
   // verifies that we are sampled out according to the metrics code, since
@@ -160,7 +159,8 @@ IN_PROC_BROWSER_TEST_F(SampledOutClientIdSavedBrowserTest, ClientIdSaved) {
   // Disable metrics reporting, and verify that it was successful.
   ASSERT_FALSE(ChangeMetricsReporting(false));
   ASSERT_FALSE(
-      local_state()->GetBoolean(metrics::prefs::kMetricsReportingEnabled));
+      metrics::MetricsReportingChoiceService::IsBasicMetricsReportingEnabled(
+          local_state()));
 
   // Verify that the pref dictating whether we use new sampling trial should be
   // used is set to true.

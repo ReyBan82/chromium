@@ -4,6 +4,8 @@
 
 #include <stddef.h>
 
+#include <array>
+
 #include "build/build_config.h"
 #include "cc/layers/content_layer_client.h"
 #include "cc/layers/picture_layer.h"
@@ -28,19 +30,23 @@ namespace {
 
 // TODO(penghuang): Fix vulkan with one copy or zero copy
 // https://crbug.com/979703
-// TODO(crbug.com/1417268): Fix SkiaGL with zero copy
 std::vector<RasterTestConfig> const kTestCases = {
     {viz::RendererType::kSoftware, TestRasterType::kBitmap},
 #if BUILDFLAG(ENABLE_GL_BACKEND_TESTS)
     {viz::RendererType::kSkiaGL, TestRasterType::kGpu},
     {viz::RendererType::kSkiaGL, TestRasterType::kOneCopy},
-#if !BUILDFLAG(IS_IOS)
+
+// Zero-copy raster is used in production only on Mac and by definition
+// relies on SharedImages having scanout support, which is not always the
+// case on other platforms and without which these tests would fail when
+// run with zero-copy raster.
+#if BUILDFLAG(IS_MAC)
     {viz::RendererType::kSkiaGL, TestRasterType::kZeroCopy},
-#endif  // !BUILDFLAG(IS_IOS)
+#endif
+
 #endif  // BUILDFLAG(ENABLE_GL_BACKEND_TESTS)
 #if BUILDFLAG(ENABLE_VULKAN_BACKEND_TESTS)
     {viz::RendererType::kSkiaVk, TestRasterType::kGpu},
-    {viz::RendererType::kSkiaVk, TestRasterType::kZeroCopy},
 #endif  // BUILDFLAG(ENABLE_VULKAN_BACKEND_TESTS)
 };
 
@@ -58,14 +64,12 @@ class MaskContentLayerClient : public ContentLayerClient {
 
   bool FillsBoundsCompletely() const override { return false; }
 
-  gfx::Rect PaintableRegion() const override { return gfx::Rect(bounds_); }
-
   scoped_refptr<DisplayItemList> PaintContentsToDisplayList() override {
     auto display_list = base::MakeRefCounted<DisplayItemList>();
     display_list->StartPaint();
 
     display_list->push<SaveOp>();
-    display_list->push<ClipRectOp>(gfx::RectToSkRect(PaintableRegion()),
+    display_list->push<ClipRectOp>(gfx::RectToSkRect(gfx::Rect(bounds_)),
                                    SkClipOp::kIntersect, false);
     SkColor4f color = SkColors::kTransparent;
     display_list->push<DrawColorOp>(color, SkBlendMode::kSrc);
@@ -83,7 +87,7 @@ class MaskContentLayerClient : public ContentLayerClient {
     }
 
     display_list->push<RestoreOp>();
-    display_list->EndPaintOfUnpaired(PaintableRegion());
+    display_list->EndPaintOfUnpaired(gfx::Rect(bounds_));
     display_list->Finalize();
     return display_list;
   }
@@ -192,12 +196,11 @@ class SolidColorEmptyMaskContentLayerClient : public ContentLayerClient {
 
   bool FillsBoundsCompletely() const override { return false; }
 
-  gfx::Rect PaintableRegion() const override { return gfx::Rect(bounds_); }
-
   scoped_refptr<DisplayItemList> PaintContentsToDisplayList() override {
     // Intentionally return a solid color, empty mask display list. This
     // is a situation where all content should be masked out.
     auto display_list = base::MakeRefCounted<DisplayItemList>();
+    display_list->Finalize();
     return display_list;
   }
 
@@ -222,10 +225,10 @@ class LayerTreeHostMaskPixelTest_SolidColorEmptyMaskWithEffectAndRenderSurface
   void SetupTree() override {
     LayerTreeHostMaskPixelTestWithLayerList::SetupTree();
 
-    auto* effect =
-        layer_tree_host()->property_trees()->effect_tree_mutable().Node(
+    auto& effect =
+        layer_tree_host()->property_trees()->effect_tree_mutable().MutableNode(
             mask_layer_->effect_tree_index());
-    effect->render_surface_reason = RenderSurfaceReason::kTest;
+    effect.render_surface_reason = RenderSurfaceReason::kTest;
   }
 };
 
@@ -326,7 +329,8 @@ TEST_P(LayerTreeHostMaskPixelTestWithLayerList, MaskWithEffectDifferentSize) {
 TEST_P(LayerTreeHostMaskPixelTestWithLayerList, ImageMaskWithEffect) {
   MaskContentLayerClient mask_client(mask_bounds_);
 
-  sk_sp<SkSurface> surface = SkSurface::MakeRasterN32Premul(50, 50);
+  sk_sp<SkSurface> surface =
+      SkSurfaces::Raster(SkImageInfo::MakeN32Premul(50, 50));
   SkCanvas* canvas = surface->getCanvas();
   scoped_refptr<DisplayItemList> mask_display_list =
       mask_client.PaintContentsToDisplayList();
@@ -352,7 +356,8 @@ TEST_P(LayerTreeHostMasksPixelTest, ImageMaskOfLayer) {
 
   gfx::Size mask_bounds(50, 50);
 
-  sk_sp<SkSurface> surface = SkSurface::MakeRasterN32Premul(50, 50);
+  sk_sp<SkSurface> surface =
+      SkSurfaces::Raster(SkImageInfo::MakeN32Premul(50, 50));
   SkCanvas* canvas = surface->getCanvas();
   MaskContentLayerClient client(mask_bounds);
   scoped_refptr<DisplayItemList> mask_display_list =
@@ -440,13 +445,12 @@ class CheckerContentLayerClient : public ContentLayerClient {
       : bounds_(bounds), color_(color), vertical_(vertical) {}
   ~CheckerContentLayerClient() override = default;
   bool FillsBoundsCompletely() const override { return false; }
-  gfx::Rect PaintableRegion() const override { return gfx::Rect(bounds_); }
   scoped_refptr<DisplayItemList> PaintContentsToDisplayList() override {
     auto display_list = base::MakeRefCounted<DisplayItemList>();
     display_list->StartPaint();
 
     display_list->push<SaveOp>();
-    display_list->push<ClipRectOp>(gfx::RectToSkRect(PaintableRegion()),
+    display_list->push<ClipRectOp>(gfx::RectToSkRect(gfx::Rect(bounds_)),
                                    SkClipOp::kIntersect, false);
     SkColor4f color = SkColors::kTransparent;
     display_list->push<DrawColorOp>(color, SkBlendMode::kSrc);
@@ -470,7 +474,7 @@ class CheckerContentLayerClient : public ContentLayerClient {
     }
 
     display_list->push<RestoreOp>();
-    display_list->EndPaintOfUnpaired(PaintableRegion());
+    display_list->EndPaintOfUnpaired(gfx::Rect(bounds_));
     display_list->Finalize();
     return display_list;
   }
@@ -487,13 +491,12 @@ class CircleContentLayerClient : public ContentLayerClient {
       : bounds_(bounds) {}
   ~CircleContentLayerClient() override = default;
   bool FillsBoundsCompletely() const override { return false; }
-  gfx::Rect PaintableRegion() const override { return gfx::Rect(bounds_); }
   scoped_refptr<DisplayItemList> PaintContentsToDisplayList() override {
     auto display_list = base::MakeRefCounted<DisplayItemList>();
     display_list->StartPaint();
 
     display_list->push<SaveOp>();
-    display_list->push<ClipRectOp>(gfx::RectToSkRect(PaintableRegion()),
+    display_list->push<ClipRectOp>(gfx::RectToSkRect(gfx::Rect(bounds_)),
                                    SkClipOp::kIntersect, false);
     SkColor4f color = SkColors::kTransparent;
     display_list->push<DrawColorOp>(color, SkBlendMode::kSrc);
@@ -509,7 +512,7 @@ class CircleContentLayerClient : public ContentLayerClient {
                          circle_x + radius, circle_y + radius),
         flags);
     display_list->push<RestoreOp>();
-    display_list->EndPaintOfUnpaired(PaintableRegion());
+    display_list->EndPaintOfUnpaired(gfx::Rect(bounds_));
     display_list->Finalize();
     return display_list;
   }
@@ -579,7 +582,7 @@ TEST_P(LayerTreeHostMasksForBackdropFiltersPixelTestWithLayerList, Test) {
           : base::FilePath(FILE_PATH_LITERAL("mask_of_backdrop_filter.png"));
 
   if (use_skia_vulkan() && use_accelerated_raster()) {
-    // Vulkan with OOP raster has 3 pixels errors (the circle mask shape is
+    // Vulkan with GPU raster has 3 pixels errors (the circle mask shape is
     // slightly different).
     pixel_comparator_ = std::make_unique<FuzzyPixelComparator>(
         FuzzyPixelComparator()
@@ -635,7 +638,7 @@ TEST_P(LayerTreeHostMasksForBackdropFiltersPixelTestWithLayerTree, Test) {
           : base::FilePath(FILE_PATH_LITERAL("mask_of_backdrop_filter.png"));
 
   if (use_skia_vulkan() && use_accelerated_raster()) {
-    // Vulkan with OOP raster has 3 pixels errors (the circle mask shape is
+    // Vulkan with GPU raster has 3 pixels errors (the circle mask shape is
     // slightly different).
     pixel_comparator_ = std::make_unique<FuzzyPixelComparator>(
         FuzzyPixelComparator()
@@ -697,7 +700,6 @@ class StaticPictureLayer : private ContentLayerClient, public PictureLayer {
         new StaticPictureLayer(std::move(display_list)));
   }
 
-  gfx::Rect PaintableRegion() const override { return gfx::Rect(bounds()); }
   scoped_refptr<DisplayItemList> PaintContentsToDisplayList() override {
     return display_list_;
   }
@@ -740,14 +742,22 @@ class LayerTreeHostMaskAsBlendingPixelTest
     int small_error_allowed = 0;
     if (!use_software_renderer()) {
       percentage_pixels_large_error = 4.0f;
+#if BUILDFLAG(IS_IOS)
+      // iOS has some pixels difference. Affected tests:
+      // RotatedClippedCircle, RotatedClippedCircleUnderflow
+      // crbug.com/1422694
+      percentage_pixels_small_error = 2.7f;
+#else
       percentage_pixels_small_error = 2.0f;
+#endif  // BUILDFLAG(IS_IOS)
       average_error_allowed_in_bad_pixels = 2.1f;
       large_error_allowed = 11;
       small_error_allowed = 1;
     } else {
 #if defined(ARCH_CPU_ARM64)
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_MAC)
-      // ARM Windows, macOS, and Fuchsia has some pixels difference
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_APPLE) || \
+    BUILDFLAG(IS_LINUX)
+      // ARM Windows, macOS, iOS, Fuchsia and Linux have some pixels difference
       // Affected tests: RotatedClippedCircle, RotatedClippedCircleUnderflow
       // crbug.com/1030244, crbug.com/1048249, crbug.com/1128443
       percentage_pixels_large_error = 7.f;
@@ -809,11 +819,12 @@ class LayerTreeHostMaskAsBlendingPixelTest
     // Creates a layer consists of solid grids. The grids are in a mix of
     // different transparency and colors (1 transparent, 3 semi-transparent,
     // and 3 opaque).
-    static SkColor test_colors[7] = {
+    static std::array<SkColor, 7> test_colors = {
         SkColorSetARGB(128, 255, 0, 0), SkColorSetARGB(255, 0, 0, 255),
         SkColorSetARGB(128, 0, 255, 0), SkColorSetARGB(128, 0, 0, 255),
         SkColorSetARGB(255, 0, 255, 0), SkColorSetARGB(0, 0, 0, 0),
-        SkColorSetARGB(255, 255, 0, 0)};
+        SkColorSetARGB(255, 255, 0, 0),
+    };
 
     auto display_list = base::MakeRefCounted<DisplayItemList>();
     display_list->StartPaint();
@@ -841,7 +852,7 @@ class LayerTreeHostMaskAsBlendingPixelTest
   std::unique_ptr<TestLayerTreeFrameSink> CreateLayerTreeFrameSink(
       const viz::RendererSettings& renderer_settings,
       double refresh_rate,
-      scoped_refptr<viz::ContextProvider> compositor_context_provider,
+      scoped_refptr<viz::RasterContextProvider> compositor_context_provider,
       scoped_refptr<viz::RasterContextProvider> worker_context_provider)
       override {
     viz::RendererSettings modified_renderer_settings = renderer_settings;
@@ -857,10 +868,14 @@ class LayerTreeHostMaskAsBlendingPixelTest
   bool force_shaders_;
 };
 
-// TODO(crbug.com/1417268): Fix SkiaGL with zero copy
 MaskTestConfig const kTestConfigs[] = {
     MaskTestConfig{{viz::RendererType::kSoftware, TestRasterType::kBitmap}, 0},
-#if BUILDFLAG(ENABLE_GL_BACKEND_TESTS) && !BUILDFLAG(IS_IOS)
+
+// Zero-copy raster is used in production only on Mac and by definition
+// relies on SharedImages having scanout support, which is not always the
+// case on other platforms and without which these tests would fail when
+// run with zero-copy raster.
+#if BUILDFLAG(ENABLE_GL_BACKEND_TESTS) && BUILDFLAG(IS_MAC)
     MaskTestConfig{{viz::RendererType::kSkiaGL, TestRasterType::kZeroCopy}, 0},
     MaskTestConfig{{viz::RendererType::kSkiaGL, TestRasterType::kZeroCopy},
                    kUseAntialiasing},
@@ -868,12 +883,7 @@ MaskTestConfig const kTestConfigs[] = {
                    kForceShaders},
     MaskTestConfig{{viz::RendererType::kSkiaGL, TestRasterType::kZeroCopy},
                    kUseAntialiasing | kForceShaders},
-#endif  // BUILDFLAG(ENABLE_GL_BACKEND_TESTS) && !BUILDFLAG(IS_IOS)
-#if BUILDFLAG(ENABLE_VULKAN_BACKEND_TESTS)
-    MaskTestConfig{{viz::RendererType::kSkiaVk, TestRasterType::kZeroCopy}, 0},
-    MaskTestConfig{{viz::RendererType::kSkiaVk, TestRasterType::kZeroCopy},
-                   kUseAntialiasing},
-#endif  // BUILDFLAG(ENABLE_VULKAN_BACKEND_TESTS)
+#endif  // BUILDFLAG(ENABLE_GL_BACKEND_TESTS) && BUILDFLAG(IS_MAC)
 };
 
 INSTANTIATE_TEST_SUITE_P(All,

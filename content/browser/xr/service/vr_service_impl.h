@@ -5,19 +5,22 @@
 #ifndef CONTENT_BROWSER_XR_SERVICE_VR_SERVICE_IMPL_H_
 #define CONTENT_BROWSER_XR_SERVICE_VR_SERVICE_IMPL_H_
 
-#include <map>
 #include <memory>
 #include <set>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
-#include "base/types/pass_key.h"
 #include "build/build_config.h"
 #include "content/browser/xr/metrics/session_metrics_helper.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/permission_result.h"
+#include "content/public/browser/visibility.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "content/public/browser/xr_install_helper.h"
 #include "device/vr/public/mojom/isolated_xr_service.mojom-forward.h"
 #include "device/vr/public/mojom/vr_service.mojom.h"
+#include "device/vr/public/mojom/xr_device.mojom.h"
+#include "device/vr/public/mojom/xr_session.mojom.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -37,7 +40,6 @@ class WebContents;
 namespace content {
 
 class XRRuntimeManagerImpl;
-class XRRuntimeManagerTest;
 class BrowserXRRuntimeImpl;
 
 // Browser process implementation of the VRService mojo interface. Instantiated
@@ -46,9 +48,6 @@ class CONTENT_EXPORT VRServiceImpl : public device::mojom::VRService,
                                      content::WebContentsObserver {
  public:
   explicit VRServiceImpl(content::RenderFrameHost* render_frame_host);
-
-  // Constructor for tests.
-  explicit VRServiceImpl(base::PassKey<XRRuntimeManagerTest>);
 
   VRServiceImpl(const VRServiceImpl&) = delete;
   VRServiceImpl& operator=(const VRServiceImpl&) = delete;
@@ -128,17 +127,25 @@ class CONTENT_EXPORT VRServiceImpl : public device::mojom::VRService,
   void OnWebContentsFocused(content::RenderWidgetHost* host) override;
   void OnWebContentsLostFocus(content::RenderWidgetHost* host) override;
   void RenderFrameDeleted(content::RenderFrameHost* host) override;
+  void OnVisibilityChanged(content::Visibility visibility) override;
 
   void OnWebContentsFocusChanged(content::RenderWidgetHost* host, bool focused);
 
   void ResolvePendingRequests();
+  void Teardown();
 
   // Returns currently active instance of SessionMetricsHelper from WebContents.
   // If the instance is not present on WebContents, it will be created with the
   // assumption that we are not already in VR.
   SessionMetricsHelper* GetSessionMetricsHelper();
 
-  bool InternalSupportsSession(device::mojom::XRSessionOptions* options);
+  bool IsRenderFrameHostVisible() const;
+
+  void DoRequestPermissions(
+      const std::vector<blink::PermissionType> request_permissions,
+      base::OnceCallback<
+          void(const std::vector<blink::mojom::PermissionStatus>&, bool)>
+          result_callback);
 
   // The following steps are ordered in the general flow for "RequestSession"
   // GetPermissionStatus will result in a call to OnPermissionResult which then
@@ -151,16 +158,18 @@ class CONTENT_EXPORT VRServiceImpl : public device::mojom::VRService,
   void OnPermissionResultsForMode(
       SessionRequestData request,
       const std::vector<blink::PermissionType>& permissions,
-      const std::vector<blink::mojom::PermissionStatus>& permission_statuses);
+      const std::vector<blink::mojom::PermissionStatus>& results,
+      bool needs_prompt);
 
   void OnPermissionResultsForFeatures(
       SessionRequestData request,
       const std::vector<blink::PermissionType>& permissions,
-      const std::vector<blink::mojom::PermissionStatus>& permission_statuses);
+      const std::vector<blink::mojom::PermissionStatus>& results,
+      bool needs_prompt);
 
   void EnsureRuntimeInstalled(SessionRequestData request,
                               BrowserXRRuntimeImpl* runtime);
-  void OnInstallResult(SessionRequestData request_data, bool install_succeeded);
+  void OnInstallResult(SessionRequestData request_data, XrInstallResult result);
 
   void DoRequestSession(SessionRequestData request);
 
@@ -174,7 +183,14 @@ class CONTENT_EXPORT VRServiceImpl : public device::mojom::VRService,
       SessionRequestData request,
       device::mojom::XRSessionPtr session,
       mojo::PendingRemote<device::mojom::XRSessionMetricsRecorder>
-          session_metrics_recorder);
+          session_metrics_recorder,
+      mojo::PendingRemote<device::mojom::WebXrInternalsRendererListener>
+          xr_internals_listener);
+
+  mojo::PendingRemote<device::mojom::WebXrInternalsRendererListener>
+  WebXrInternalsRendererListener();
+
+  ExitPresentCallback on_exit_present_;
 
   scoped_refptr<XRRuntimeManagerImpl> runtime_manager_;
   mojo::RemoteSet<device::mojom::XRSessionClient> session_clients_;
@@ -191,6 +207,8 @@ class CONTENT_EXPORT VRServiceImpl : public device::mojom::VRService,
   bool initialization_complete_ = false;
   bool in_focused_frame_ = false;
   bool frames_throttled_ = false;
+  bool has_immersive_session_ = false;
+  bool pending_device_changed_ = false;
 
   std::vector<XrCompatibleCallback> xr_compatible_callbacks_;
 

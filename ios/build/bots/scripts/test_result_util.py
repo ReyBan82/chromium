@@ -11,7 +11,15 @@ from result_sink_util import ResultSinkClient
 
 _VALID_RESULT_COLLECTION_INIT_KWARGS = set(['test_results', 'crashed'])
 _VALID_TEST_RESULT_INIT_KWARGS = set(
-    ['attachments', 'duration', 'expected_status', 'test_log', 'test_loc'])
+  [
+    'attachments',
+    'duration',
+    'expected_status',
+    'test_log',
+    'test_loc',
+    'asan_failure_detected',
+  ]
+)
 _VALID_TEST_STATUSES = set(['PASS', 'FAIL', 'CRASH', 'ABORT', 'SKIP'])
 
 
@@ -21,6 +29,7 @@ class TestStatus:
   Confirms to ResultDB TestStatus definitions:
       https://source.chromium.org/chromium/infra/infra/+/main:go/src/go.chromium.org/luci/resultdb/proto/v1/test_result.proto
   """
+
   PASS = 'PASS'
   FAIL = 'FAIL'
   CRASH = 'CRASH'
@@ -31,14 +40,15 @@ class TestStatus:
 def _validate_kwargs(kwargs, valid_args_set):
   """Validates if keywords in kwargs are accepted."""
   diff = set(kwargs.keys()) - valid_args_set
-  assert len(diff) == 0, 'Invalid keyword argument(s) in %s passed in!' % diff
+  assert len(diff) == 0, f'Invalid keyword argument(s) in {diff} passed in!'
 
 
 def _validate_test_status(status):
   """Raises if input isn't valid."""
   if not status in _VALID_TEST_STATUSES:
-    raise TypeError('Invalid test status: %s. Should be one of %s.' %
-                    (status, _VALID_TEST_STATUSES))
+    raise TypeError(
+      f'Invalid test status: {status}. Should be one of {_VALID_TEST_STATUSES}.'
+    )
 
 
 def _to_standard_json_literal(status):
@@ -70,10 +80,13 @@ class TestResult(object):
       test_loc: (dict): This is used to report test location info to resultSink.
           data required in the dict can be found in
           https://source.chromium.org/chromium/infra/infra/+/main:go/src/go.chromium.org/luci/resultdb/proto/v1/test_metadata.proto;l=32;drc=37488404d1c8aa8fccca8caae4809ece08828bae
+      asan_failure_detected: (bool): Whether or not the string
+          "ERROR: AddressSanitizer" was found in the app side logs after a crash
     """
     _validate_kwargs(kwargs, _VALID_TEST_RESULT_INIT_KWARGS)
     assert isinstance(name, str), (
-        'Test name should be an instance of str. We got: %s') % type(name)
+      f'Test name should be an instance of str. We got: {type(name)}'
+    )
     self.name = name
     _validate_test_status(status)
     self.status = status
@@ -83,6 +96,7 @@ class TestResult(object):
     self.expected_status = kwargs.get('expected_status', TestStatus.PASS)
     self.test_log = kwargs.get('test_log', '')
     self.test_loc = kwargs.get('test_loc', None)
+    self.asan_failure_detected = kwargs.get('asan_failure_detected', False)
 
     # Use the var to avoid duplicate reporting.
     self._reported_to_result_sink = False
@@ -116,14 +130,15 @@ class TestResult(object):
     """
     if not self._reported_to_result_sink:
       result_sink_client.post(
-          self.name,
-          self.status,
-          self.expected(),
-          duration=self.duration,
-          test_log=self.test_log,
-          test_loc=self.test_loc,
-          tags=self._compose_result_sink_tags(),
-          file_artifacts=self.attachments)
+        self.name,
+        self.status,
+        self.expected(),
+        duration=self.duration,
+        test_log=self.test_log,
+        test_loc=self.test_loc,
+        tags=self._compose_result_sink_tags(),
+        file_artifacts=self.attachments,
+      )
       self._reported_to_result_sink = True
 
 
@@ -142,6 +157,7 @@ class ResultCollection(object):
     self._test_results = []
     self._crashed = kwargs.get('crashed', False)
     self._crash_message = ''
+    self._spawning_test_launcher = False
     self.add_results(kwargs.get('test_results', []))
 
   @property
@@ -156,7 +172,7 @@ class ResultCollection(object):
   @crashed.setter
   def crashed(self, value):
     """Sets crash value."""
-    assert (type(value) == bool)
+    assert type(value) == bool
     self._crashed = value
 
   @property
@@ -173,6 +189,16 @@ class ResultCollection(object):
   def test_results(self):
     return self._test_results
 
+  @property
+  def spawning_test_launcher(self):
+    return self._spawning_test_launcher
+
+  @spawning_test_launcher.setter
+  def spawning_test_launcher(self, value):
+    """Sets spawning_test_launcher value."""
+    assert type(value) == bool
+    self._spawning_test_launcher = value
+
   def add_test_result(self, test_result):
     """Adds a single test result to collection.
 
@@ -180,10 +206,9 @@ class ResultCollection(object):
     """
     self._test_results.append(test_result)
 
-  def add_result_collection(self,
-                            another_collection,
-                            ignore_crash=False,
-                            overwrite_crash=False):
+  def add_result_collection(
+    self, another_collection, ignore_crash=False, overwrite_crash=False
+  ):
     """Adds results and status from another ResultCollection.
 
     Args:
@@ -192,7 +217,7 @@ class ResultCollection(object):
       overwrite_crash: (bool) Overwrite crash status of |self| and crash
           message. Only applicable when ignore_crash=False.
     """
-    assert (not (ignore_crash and overwrite_crash))
+    assert not (ignore_crash and overwrite_crash)
     if not ignore_crash:
       if overwrite_crash:
         self._crashed = False
@@ -210,7 +235,7 @@ class ResultCollection(object):
   def add_name_prefix_to_tests(self, prefix):
     """Adds a prefix to all test names of results."""
     for test_result in self._test_results:
-      test_result.name = '%s%s' % (prefix, test_result.name)
+      test_result.name = f'{prefix}{test_result.name}'
 
   def add_test_names_status(self, test_names, test_status, **kwargs):
     """Adds a list of test names with given test status.
@@ -256,12 +281,14 @@ class ResultCollection(object):
           accepts a TestResult object and returns bool.
     """
     return set(
-        map(lambda result: result.name, filter(expression, self._test_results)))
+      map(lambda result: result.name, filter(expression, self._test_results))
+    )
 
   def crashed_tests(self):
     """A set of test names with any crashed status in the collection."""
-    return self.tests_by_expression(lambda result: result.status == TestStatus.
-                                    CRASH)
+    return self.tests_by_expression(
+      lambda result: result.status == TestStatus.CRASH
+    )
 
   def disabled_tests(self):
     """A set of disabled test names in the collection."""
@@ -277,13 +304,24 @@ class ResultCollection(object):
 
   def passed_tests(self):
     """A set of test names with any passed status in the collection."""
-    return self.tests_by_expression(lambda result: result.status == TestStatus.
-                                    PASS)
+    return self.tests_by_expression(
+      lambda result: result.status == TestStatus.PASS
+    )
 
   def failed_tests(self):
     """A set of test names with any failed status in the collection."""
-    return self.tests_by_expression(lambda result: result.status == TestStatus.
-                                    FAIL)
+    return self.tests_by_expression(
+      lambda result: result.status == TestStatus.FAIL
+    )
+
+  def asan_failed_tests(self):
+    """A set of test names with any failed status and an ASan failure detected
+    in the app side logs in the collection."""
+    return self.tests_by_expression(
+      lambda result: (
+        result.status == TestStatus.FAIL and result.asan_failure_detected
+      )
+    )
 
   def flaky_tests(self):
     """A set of flaky test names in the collection."""
@@ -329,7 +367,7 @@ class ResultCollection(object):
     num_failures_by_type = {}
     tests = OrderedDict()
     seen_names = set()
-    shard_index = shard_util.shard_index()
+    shard_index = shard_util.gtest_shard_index()
 
     for test_result in self._test_results:
       test_name = test_result.name
@@ -339,20 +377,22 @@ class ResultCollection(object):
       if test_name not in seen_names:
         seen_names.add(test_name)
         result_type = _to_standard_json_literal(test_result.status)
-        num_failures_by_type[result_type] = num_failures_by_type.get(
-            result_type, 0) + 1
+        num_failures_by_type[result_type] = (
+          num_failures_by_type.get(result_type, 0) + 1
+        )
 
       # For "tests" field.
       if test_name not in tests:
         tests[test_name] = {
-            'expected': _to_standard_json_literal(test_result.expected_status),
-            'actual': _to_standard_json_literal(test_result.status),
-            'shard': shard_index,
-            'is_unexpected': not test_result.expected()
+          'expected': _to_standard_json_literal(test_result.expected_status),
+          'actual': _to_standard_json_literal(test_result.status),
+          'shard': shard_index,
+          'is_unexpected': not test_result.expected(),
         }
       else:
-        tests[test_name]['actual'] += (
-            ' ' + _to_standard_json_literal(test_result.status))
+        tests[test_name]['actual'] += ' ' + _to_standard_json_literal(
+          test_result.status
+        )
         # This means there are both expected & unexpected results for the test.
         # Thus, the overall status would be expected (is_unexpected = False)
         # and the test is regarded flaky.
@@ -361,12 +401,12 @@ class ResultCollection(object):
           tests[test_name]['is_flaky'] = True
 
     return {
-        'version': 3,
-        'path_delimiter': path_delimiter,
-        'seconds_since_epoch': int(time.time()),
-        'interrupted': self.crashed,
-        'num_failures_by_type': num_failures_by_type,
-        'tests': tests
+      'version': 3,
+      'path_delimiter': path_delimiter,
+      'seconds_since_epoch': int(time.time()),
+      'interrupted': self.crashed,
+      'num_failures_by_type': num_failures_by_type,
+      'tests': tests,
     }
 
   def test_runner_logs(self):
@@ -380,21 +420,20 @@ class ResultCollection(object):
         test_name = test_result.name
         name_count[test_name] = name_count.get(test_name, 0) + 1
         logs = unexpected_logs.get(test_name, [])
-        logs.append('Failure log of attempt %d:' % name_count[test_name])
+        logs.append(f'Failure log of attempt {name_count[test_name]}:')
         logs.extend(test_result.test_log.split('\n'))
         unexpected_logs[test_name] = logs
 
     passed = list(self.passed_tests() & self.pure_expected_tests())
     disabled = list(self.disabled_tests())
     flaked = {
-        test_name: unexpected_logs[test_name]
-        for test_name in self.flaky_tests()
+      test_name: unexpected_logs[test_name] for test_name in self.flaky_tests()
     }
     # "failed" in test runner logs are all unexpected failures (including
     # crash, etc).
     failed = {
-        test_name: unexpected_logs[test_name]
-        for test_name in self.never_expected_tests()
+      test_name: unexpected_logs[test_name]
+      for test_name in self.never_expected_tests()
     }
 
     logs = OrderedDict()

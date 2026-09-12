@@ -6,32 +6,30 @@
 
 @implementation FormSuggestionProviderQuery
 
-- (BOOL)isOnPasswordField {
-  return [_fieldType isEqual:kPasswordFieldType];
-}
-
 - (BOOL)hasFocusType {
-  return [_type isEqual:@"focus"];
+  return _type == ActivityType::kFocus;
 }
 
 - (instancetype)initWithFormName:(NSString*)formName
-                    uniqueFormID:(autofill::FormRendererId)uniqueFormID
+                  formRendererID:(autofill::FormRendererId)formRendererID
                  fieldIdentifier:(NSString*)fieldIdentifier
-                   uniqueFieldID:(autofill::FieldRendererId)uniqueFieldID
-                       fieldType:(NSString*)fieldType
-                            type:(NSString*)type
+                 fieldRendererID:(autofill::FieldRendererId)fieldRendererID
+                       fieldType:(FieldType)fieldType
+                            type:(ActivityType)type
                       typedValue:(NSString*)typedValue
-                         frameID:(NSString*)frameID {
+                         frameID:(NSString*)frameID
+                    onlyPassword:(BOOL)onlyPassword {
   self = [super init];
   if (self) {
     _formName = [formName copy];
-    _uniqueFormID = uniqueFormID;
+    _formRendererID = formRendererID;
     _fieldIdentifier = [fieldIdentifier copy];
-    _uniqueFieldID = uniqueFieldID;
-    _fieldType = [fieldType copy];
-    _type = [type copy];
+    _fieldRendererID = fieldRendererID;
+    _fieldType = fieldType;
+    _type = type;
     _typedValue = [typedValue copy];
     _frameID = [frameID copy];
+    _onlyPassword = onlyPassword;
   }
   return self;
 }

@@ -31,7 +31,10 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECTOR_MEMORY_AGENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECTOR_MEMORY_AGENT_H_
 
+#include <optional>
+
 #include "base/sampling_heap_profiler/poisson_allocation_sampler.h"
+#include "base/sampling_heap_profiler/sampling_heap_profiler.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/inspector/inspector_base_agent.h"
 #include "third_party/blink/renderer/core/inspector/protocol/memory.h"
@@ -59,8 +62,8 @@ class CORE_EXPORT InspectorMemoryAgent final
 
   // Memory protocol domain:
   protocol::Response startSampling(
-      protocol::Maybe<int> in_samplingInterval,
-      protocol::Maybe<bool> in_suppressRandomness) override;
+      std::optional<int> in_samplingInterval,
+      std::optional<bool> in_suppressRandomness) override;
   protocol::Response stopSampling() override;
   protocol::Response getSamplingProfile(
       std::unique_ptr<protocol::Memory::SamplingProfile>*) override;
@@ -68,13 +71,13 @@ class CORE_EXPORT InspectorMemoryAgent final
       std::unique_ptr<protocol::Memory::SamplingProfile>*) override;
 
  private:
-  Vector<String> Symbolize(const WebVector<void*>& addresses);
+  Vector<String> Symbolize(const std::vector<const void*>& addresses);
   std::unique_ptr<protocol::Memory::SamplingProfile> GetSamplingProfileById(
-      uint32_t id);
+      std::optional<base::SamplingHeapProfiler::Session> session);
 
   Member<InspectedFrames> frames_;
-  uint32_t profile_id_ = 0;
-  HashMap<void*, String> symbols_cache_;
+  std::optional<base::SamplingHeapProfiler::Session> profiling_session_;
+  HashMap<const void*, String> symbols_cache_;
 
   InspectorAgentState::Integer sampling_profile_interval_;
 

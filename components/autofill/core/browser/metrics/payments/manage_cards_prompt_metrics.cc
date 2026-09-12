@@ -5,16 +5,11 @@
 #include "components/autofill/core/browser/metrics/payments/manage_cards_prompt_metrics.h"
 
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 
 namespace autofill {
 
-void LogManageCardsPromptMetric(ManageCardsPromptMetric metric,
-                                bool is_upload_save) {
-  std::string destination = is_upload_save ? ".Upload" : ".Local";
-  std::string metric_with_destination =
-      "Autofill.ManageCardsPrompt" + destination;
-  base::UmaHistogramEnumeration(metric_with_destination, metric);
+void LogManageCardsPromptMetric(ManageCardsPromptMetric metric) {
+  base::UmaHistogramEnumeration("Autofill.ManageCardsPrompt", metric);
 }
 
 }  // namespace autofill

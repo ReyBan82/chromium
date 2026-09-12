@@ -29,12 +29,11 @@ class PaymentDetails {
 
   PaymentDetails& operator=(const PaymentDetails& other);
   bool operator==(const PaymentDetails& other) const;
-  bool operator!=(const PaymentDetails& other) const;
 
   // Populates the properties of this PaymentDetails from |dict|. Returns true
   // if the required values are present. If |requires_total| is true, the total
   // property has to be present.
-  bool FromValueDict(const base::Value::Dict& dict, bool requires_total);
+  bool FromValueDict(const base::DictValue& dict, bool requires_total);
 
   // The unique free-form identifier for this payment request.
   std::string id;

@@ -6,12 +6,12 @@
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/login/demo_mode/demo_mode_test_helper.h"
 #include "chrome/browser/ash/login/demo_mode/demo_session.h"
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
-#include "chrome/browser/extensions/crx_installer.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/extension_service_test_base.h"
 #include "chrome/browser/extensions/mock_crx_installer.h"
@@ -19,6 +19,7 @@
 #include "components/user_manager/scoped_user_manager.h"
 #include "content/public/test/browser_task_environment.h"
 #include "extensions/browser/crx_file_info.h"
+#include "extensions/browser/crx_installer.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/verifier_formats.h"
@@ -117,15 +118,20 @@ class InstallLimiterTest : public extensions::ExtensionServiceTestBase {
   void SetUp() override {
     extensions::ExtensionServiceTestBase::SetUp();
 
-    extensions::ExtensionServiceTestBase::ExtensionServiceInitParams params =
-        CreateDefaultInitParams();
+    ExtensionServiceInitParams params;
     params.enable_install_limiter = true;
-    InitializeExtensionService(params);
+    InitializeExtensionService(std::move(params));
 
     install_limiter_ = InstallLimiter::Get(profile());
 
     mock_installer_ =
-        base::MakeRefCounted<extensions::MockCrxInstaller>(service());
+        base::MakeRefCounted<extensions::MockCrxInstaller>(profile());
+  }
+
+  void TearDown() override {
+    mock_installer_.reset();
+    install_limiter_ = nullptr;
+    extensions::ExtensionServiceTestBase::TearDown();
   }
 
   extensions::CRXFileInfo CreateTestExtensionCrx(const base::FilePath& path,
@@ -137,7 +143,7 @@ class InstallLimiterTest : public extensions::ExtensionServiceTestBase {
     return crx_info;
   }
 
-  InstallLimiter* install_limiter_;
+  raw_ptr<InstallLimiter> install_limiter_;
   scoped_refptr<extensions::MockCrxInstaller> mock_installer_;
 };
 
@@ -232,17 +238,17 @@ TEST_F(InstallLimiterTest, InstallSmallBeforeLargeExtensions) {
     testing::InSequence s;
 
     EXPECT_CALL(*mock_installer_, AddInstallerCallback(_))
-        .WillOnce(Invoke([&](CrxInstaller::InstallerResultCallback callback) {
+        .WillOnce([&](CrxInstaller::InstallerResultCallback callback) {
           installer_callback = std::move(callback);
-        }));
+        });
     EXPECT_CALL(
         *mock_installer_,
         InstallCrxFile(Field(&extensions::CRXFileInfo::path, crx_path_small)))
-        .WillOnce(Invoke([&] {
-          absl::optional<CrxInstallError> error;
+        .WillOnce([&] {
+          std::optional<CrxInstallError> error;
           task_environment()->GetMainThreadTaskRunner()->PostTask(
               FROM_HERE, base::BindOnce(std::move(installer_callback), error));
-        }));
+        });
 
     EXPECT_CALL(*mock_installer_, AddInstallerCallback(_));
     EXPECT_CALL(

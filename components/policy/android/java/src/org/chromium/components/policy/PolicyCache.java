@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Pair;
 
+import androidx.annotation.IntDef;
 import androidx.annotation.VisibleForTesting;
 
 import org.json.JSONArray;
@@ -15,9 +16,17 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.base.ResettersForTesting;
 import org.chromium.base.StrictModeContext;
 import org.chromium.base.ThreadUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
+import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 import java.util.List;
 import java.util.Map;
 
@@ -27,34 +36,37 @@ import java.util.Map;
  * Policy loading is async on Android and caching policy values makes them
  * available during launch stage even before native library is ready.
  */
+@NullMarked
 public class PolicyCache {
-    @VisibleForTesting
-    static final String POLICY_PREF = "Components.Policy";
+    @VisibleForTesting static final String POLICY_PREF = "Components.Policy";
 
-    private static PolicyCache sPolicyCache;
+    private static @Nullable PolicyCache sInstance;
 
-    public enum Type {
-        Integer,
-        Boolean,
-        String,
-        List,
-        Dict,
+    @IntDef({Type.INTEGER, Type.BOOLEAN, Type.STRING, Type.LIST, Type.DICT})
+    @Retention(RetentionPolicy.SOURCE)
+    @Target(ElementType.TYPE_USE)
+    @Documented
+    public @interface Type {
+        int INTEGER = 0;
+        int BOOLEAN = 1;
+        int STRING = 2;
+        int LIST = 3;
+        int DICT = 4;
     }
 
     private boolean mReadable = true;
 
-    private SharedPreferences mSharedPreferences;
+    private @Nullable SharedPreferences mSharedPreferences;
 
-    private ThreadUtils.ThreadChecker mThreadChecker = new ThreadUtils.ThreadChecker();
+    private final ThreadUtils.ThreadChecker mThreadChecker = new ThreadUtils.ThreadChecker();
 
     /**
-     * Creates and returns SharedPreferences instance that is used to cache policy
-     * value.
+     * Creates and returns SharedPreferences instance that is used to cache policy value.
      *
      * @return The SharedPreferences instance that is used for policy caching. Returns null if
-     *         application context is not available.
+     *     application context is not available.
      */
-    private SharedPreferences getSharedPreferences() {
+    public @Nullable SharedPreferences getSharedPreferences() {
         assert mReadable;
         mThreadChecker.assertOnValidThread();
         if (mSharedPreferences == null) {
@@ -79,8 +91,13 @@ public class PolicyCache {
     }
 
     public static PolicyCache get() {
-        if (sPolicyCache == null) sPolicyCache = new PolicyCache();
-        return sPolicyCache;
+        var ret = sInstance;
+        if (ret == null) {
+            ret = new PolicyCache();
+            sInstance = ret;
+            ResettersForTesting.register(() -> sInstance = null);
+        }
+        return ret;
     }
 
     /**
@@ -88,7 +105,7 @@ public class PolicyCache {
      * @return The value of cached integer policy, null if there is no valid
      * cached policy.
      */
-    public Integer getIntValue(String policy) {
+    public @Nullable Integer getIntValue(String policy) {
         SharedPreferences sharedPreferences = getSharedPreferences();
         if (sharedPreferences == null) return null;
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
@@ -102,7 +119,7 @@ public class PolicyCache {
      * @return The value of cached boolean policy, null if there is no valid
      * cached policy.
      */
-    public Boolean getBooleanValue(String policy) {
+    public @Nullable Boolean getBooleanValue(String policy) {
         SharedPreferences sharedPreferences = getSharedPreferences();
         if (sharedPreferences == null) return null;
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
@@ -116,7 +133,7 @@ public class PolicyCache {
      * @return The value of cached string policy, null if there is no valid
      * cached policy.
      */
-    public String getStringValue(String policy) {
+    public @Nullable String getStringValue(String policy) {
         SharedPreferences sharedPreferences = getSharedPreferences();
         if (sharedPreferences == null) return null;
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
@@ -130,7 +147,7 @@ public class PolicyCache {
      * @return The value of cached list policy, null if there is no valid
      * cached policy.
      */
-    public JSONArray getListValue(String policy) {
+    public @Nullable JSONArray getListValue(String policy) {
         SharedPreferences sharedPreferences = getSharedPreferences();
         if (sharedPreferences == null) return null;
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
@@ -148,7 +165,7 @@ public class PolicyCache {
      * @return The value of cached dictionary policy, null if there is no valid
      * cached policy.
      */
-    public JSONObject getDictValue(String policy) {
+    public @Nullable JSONObject getDictValue(String policy) {
         SharedPreferences sharedPreferences = getSharedPreferences();
         if (sharedPreferences == null) return null;
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
@@ -161,10 +178,8 @@ public class PolicyCache {
         }
     }
 
-    /**
-     * @return All cached policies.
-     */
-    public Map<String, ?> getAllPolicies() {
+    /** @return All cached policies. */
+    public @Nullable Map<String, ?> getAllPolicies() {
         SharedPreferences sharedPreferences = getSharedPreferences();
         if (sharedPreferences == null) return null;
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
@@ -178,61 +193,71 @@ public class PolicyCache {
 
     /**
      * @param policyMap The latest policy value bundle.
-     * @param policyNames The list of policies that needs to be cached if available.
-     * Caches the policies that are available in both |policyNames| and
-     * |policyMap|. It also disables {@link PolicyCache} reading.
+     * @param policyNames The list of policies that needs to be cached if available. Caches the
+     *     policies that are available in both |policyNames| and |policyMap|. It also disables
+     *     {@link PolicyCache} reading.
      */
-    public void cachePolicies(PolicyMap policyMap, List<Pair<String, Type>> policyNames) {
+    public void cachePolicies(PolicyMap policyMap, List<Pair<String, @Type Integer>> policyNames) {
         // TODO(zmin): support policy level while caching policy.
         SharedPreferences.Editor sharedPreferencesEditor = getSharedPreferencesEditor();
 
         sharedPreferencesEditor.clear();
 
-        for (Pair<String, Type> policy : policyNames) {
+        for (Pair<String, @Type Integer> policy : policyNames) {
             String policyName = policy.first;
             switch (policy.second) {
-                case Integer: {
-                    Integer value = policyMap.getIntValue(policyName);
-                    if (value != null) {
-                        sharedPreferencesEditor.putInt(policyName, value.intValue());
+                case Type.INTEGER:
+                    {
+                        Integer value = policyMap.getIntValue(policyName);
+                        if (value != null) {
+                            sharedPreferencesEditor.putInt(policyName, value.intValue());
+                        }
+                        break;
                     }
-                    break;
-                }
-                case Boolean: {
-                    Boolean value = policyMap.getBooleanValue(policyName);
-                    if (value != null) {
-                        sharedPreferencesEditor.putBoolean(policyName, value.booleanValue());
+                case Type.BOOLEAN:
+                    {
+                        Boolean value = policyMap.getBooleanValue(policyName);
+                        if (value != null) {
+                            sharedPreferencesEditor.putBoolean(policyName, value.booleanValue());
+                        }
+                        break;
                     }
-                    break;
-                }
-                case String: {
-                    String value = policyMap.getStringValue(policyName);
-                    if (value != null) {
-                        sharedPreferencesEditor.putString(policyName, value);
+                case Type.STRING:
+                    {
+                        String value = policyMap.getStringValue(policyName);
+                        if (value != null) {
+                            sharedPreferencesEditor.putString(policyName, value);
+                        }
+                        break;
                     }
-                    break;
-                }
                 // List and Dict policy values are stored in the native library
                 // as base::Value and converted to JSON string to passed through
                 // the JNI. It's stored to the SharedPreferences as String and
                 // will be converted to JSON object when being read.
-                case List: {
-                    String value = policyMap.getListValueAsString(policyName);
-                    if (value != null) {
-                        sharedPreferencesEditor.putString(policyName, value);
+                case Type.LIST:
+                    {
+                        String value = policyMap.getListValueAsString(policyName);
+                        if (value != null) {
+                            sharedPreferencesEditor.putString(policyName, value);
+                        }
+                        break;
                     }
-                    break;
-                }
-                case Dict: {
-                    String value = policyMap.getDictValueAsString(policyName);
-                    if (value != null) {
-                        sharedPreferencesEditor.putString(policyName, value);
+                case Type.DICT:
+                    {
+                        String value = policyMap.getDictValueAsString(policyName);
+                        if (value != null) {
+                            sharedPreferencesEditor.putString(policyName, value);
+                        }
+                        break;
                     }
-                    break;
-                }
             }
         }
-        sharedPreferencesEditor.apply();
+
+        // Update sharedPreferences. The first round of updating during launch
+        // will use the main thread.
+        try (StrictModeContext ignored = StrictModeContext.allowDiskWrites()) {
+            sharedPreferencesEditor.apply();
+        }
 
         // Policy Service is up and there is no need to get policy from here anymore.
         enableWriteOnlyMode();
@@ -250,12 +275,10 @@ public class PolicyCache {
         mReadable = false;
     }
 
-    @VisibleForTesting
-    static void resetForTesting() {
-        sPolicyCache = null;
+    void enableReadability() {
+        mReadable = true;
     }
 
-    @VisibleForTesting
     public void setReadableForTesting(boolean readable) {
         mReadable = readable;
     }

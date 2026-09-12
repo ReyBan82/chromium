@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_ASH_FILE_SYSTEM_PROVIDER_MOUNT_REQUEST_HANDLER_H_
 #define CHROME_BROWSER_ASH_FILE_SYSTEM_PROVIDER_MOUNT_REQUEST_HANDLER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ash/file_system_provider/provider_interface.h"
 #include "chrome/browser/ash/file_system_provider/request_manager.h"
 
@@ -26,10 +27,10 @@ class MountRequestHandler : public RequestManager::HandlerInterface {
   // RequestManager::HandlerInterface overrides.
   bool Execute(int request_id) override;
   void OnSuccess(int request_id,
-                 std::unique_ptr<RequestValue> result,
+                 const RequestValue& result,
                  bool has_more) override;
   void OnError(int request_id,
-               std::unique_ptr<RequestValue> result,
+               const RequestValue& result,
                base::File::Error error) override;
   void OnAbort(int request_id) override;
 

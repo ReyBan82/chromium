@@ -6,9 +6,10 @@
 
 #include <memory>
 
+#include "base/i18n/language_tag.h"
 #include "base/i18n/rtl.h"
+#include "base/i18n/test/scoped_icu_locale.h"
 #include "base/i18n/unicodestring.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
@@ -19,34 +20,22 @@
 
 typedef testing::Test MessageFormatterTest;
 
-namespace base {
-namespace i18n {
-
-class MessageFormatterTest : public testing::Test {
- protected:
-  MessageFormatterTest() {
-    original_locale_ = GetConfiguredLocale();
-    SetICUDefaultLocale("en-US");
-  }
-  ~MessageFormatterTest() override {
-    SetICUDefaultLocale(original_locale_);
-  }
-
- private:
-  std::string original_locale_;
-};
-
+namespace base::i18n {
 namespace {
 
+class MessageFormatterTest : public testing::Test {
+ private:
+  ScopedDefaultIcuLocale restore_locale_{GetKnownLanguageTag("en-US")};
+};
+
 void AppendFormattedDateTime(const std::unique_ptr<icu::DateFormat>& df,
-                             const Time& now,
+                             Time now,
                              std::u16string* result) {
   icu::UnicodeString formatted;
-  result->append(UnicodeStringToString16(
-      df->format(static_cast<UDate>(now.ToJsTime()), formatted)));
+  result->append(UnicodeStringToString16(df->format(
+      static_cast<UDate>(now.InMillisecondsFSinceUnixEpoch()), formatted)));
 }
 
-}  // namespace
 
 TEST_F(MessageFormatterTest, PluralNamedArgs) {
   const std::u16string pattern =
@@ -179,5 +168,5 @@ TEST_F(MessageFormatterTest, SelectorSingleOrMultiple) {
   EXPECT_EQ(u"UNUSED", result);
 }
 
-}  // namespace i18n
-}  // namespace base
+}  // namespace
+}  // namespace base::i18n

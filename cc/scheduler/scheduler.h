@@ -15,12 +15,12 @@
 #include "base/timer/timer.h"
 #include "cc/cc_export.h"
 #include "cc/metrics/event_metrics.h"
+#include "cc/metrics/submit_info.h"
 #include "cc/scheduler/begin_frame_tracker.h"
 #include "cc/scheduler/draw_result.h"
 #include "cc/scheduler/scheduler_settings.h"
 #include "cc/scheduler/scheduler_state_machine.h"
 #include "cc/tiles/tile_priority.h"
-#include "components/power_scheduler/power_mode_voter.h"
 #include "components/viz/common/frame_sinks/begin_frame_args.h"
 #include "components/viz/common/frame_sinks/begin_frame_source.h"
 #include "components/viz/common/frame_sinks/delay_based_time_source.h"
@@ -28,7 +28,7 @@
 namespace perfetto {
 namespace protos {
 namespace pbzero {
-class ChromeCompositorSchedulerState;
+class ChromeCompositorSchedulerStateV2;
 }
 }  // namespace protos
 }  // namespace perfetto
@@ -37,7 +37,7 @@ class SingleThreadTaskRunner;
 }
 
 namespace viz {
-struct FrameTimingDetails;
+class FrameTimingDetails;
 }
 
 namespace cc {
@@ -84,13 +84,9 @@ class SchedulerClient {
   virtual void DidNotProduceFrame(const viz::BeginFrameAck& ack,
                                   FrameSkippedReason reason) = 0;
   virtual void WillNotReceiveBeginFrame() = 0;
-  virtual void SendBeginMainFrameNotExpectedSoon() = 0;
-  virtual void ScheduledActionBeginMainFrameNotExpectedUntil(
-      base::TimeTicks time) = 0;
+  virtual void DidChangeBeginFrameSourcePaused(bool paused) = 0;
   virtual void FrameIntervalUpdated(base::TimeDelta interval) = 0;
-
-  // Functions used for reporting animation targeting UMA, crbug.com/758439.
-  virtual bool HasInvalidationAnimation() const = 0;
+  virtual void OnBeginImplFrameDeadline() = 0;
 
  protected:
   virtual ~SchedulerClient() {}
@@ -98,22 +94,24 @@ class SchedulerClient {
 
 class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
  public:
-  Scheduler(
-      SchedulerClient* client,
-      const SchedulerSettings& scheduler_settings,
-      int layer_tree_host_id,
-      base::SingleThreadTaskRunner* task_runner,
-      std::unique_ptr<CompositorTimingHistory> compositor_timing_history,
-      CompositorFrameReportingController* compositor_frame_reporting_controller,
-      power_scheduler::PowerModeArbiter* power_mode_arbiter);
+  Scheduler(SchedulerClient* client,
+            const SchedulerSettings& scheduler_settings,
+            int layer_tree_host_id,
+            base::SingleThreadTaskRunner* task_runner,
+            std::unique_ptr<CompositorTimingHistory> compositor_timing_history,
+            CompositorFrameReportingController*
+                compositor_frame_reporting_controller);
   Scheduler(const Scheduler&) = delete;
   ~Scheduler() override;
 
   Scheduler& operator=(const Scheduler&) = delete;
 
-  // This is needed so that the scheduler doesn't perform spurious actions while
-  // the compositor is being torn down.
+  // This is needed so that the scheduler doesn't perform scheduled actions
+  // while the compositor is being torn down.
   void Stop();
+
+  // Cleans up references to other objects just before being destroyed.
+  void TearDown();
 
   // BeginFrameObserverBase
   void OnBeginFrameSourcePausedChanged(bool paused) override;
@@ -125,7 +123,8 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   const SchedulerSettings& settings() const { return settings_; }
 
   void SetVisible(bool visible);
-  bool visible() { return state_machine_.visible(); }
+  bool visible() { return state_machine_->visible(); }
+  void SetShouldWarmUp();
   void SetCanDraw(bool can_draw);
 
   // We have 2 copies of the layer trees on the compositor thread: pending_tree
@@ -156,11 +155,18 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   // source to be told to send BeginFrames to this client so that this client
   // can send a CompositorFrame to the display compositor with appropriate
   // timing.
-  void SetNeedsBeginMainFrame();
+  //
+  // Set `now` to true if the BeginMainFrame() should not be throttled, but
+  // happen as the next opportunity. This is useful when main frame updates are
+  // running at a lower rate than compositor frames, but we don't want to wait
+  // (e.g. there is an input event).
+  void SetNeedsBeginMainFrame(bool now = false, bool unthrottled = false);
 
   // Requests a single impl frame (after the current frame if there is one
   // active).
   void SetNeedsOneBeginImplFrame();
+
+  void SendEarlyFinalBeginMainFrame();
 
   void SetNeedsRedraw();
 
@@ -179,21 +185,18 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   void SetNeedsImplSideInvalidation(bool needs_first_draw_on_activation);
 
   bool pending_tree_is_ready_for_activation() const {
-    return state_machine_.pending_tree_is_ready_for_activation();
+    return state_machine_->pending_tree_is_ready_for_activation();
   }
 
   // Drawing should result in submitting a CompositorFrame to the
   // LayerTreeFrameSink and then calling this.
-  void DidSubmitCompositorFrame(uint32_t frame_token,
-                                base::TimeTicks submit_time,
-                                EventMetricsSet events_metrics,
-                                bool has_missing_content);
+  void DidSubmitCompositorFrame(SubmitInfo& submit_info);
   // The LayerTreeFrameSink acks when it is ready for a new frame which
   // should result in this getting called to unblock the next draw.
   void DidReceiveCompositorFrameAck();
 
   void SetTreePrioritiesAndScrollState(TreePriority tree_priority,
-                                       ScrollHandlerState scroll_handler_state);
+                                       bool is_current_scroll_main_painted);
 
   // Commit step happens after the main thread has completed updating for a
   // BeginMainFrame request from the compositor, and blocks the main thread
@@ -205,11 +208,6 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   // In the PrepareTiles step, compositor thread divides the layers into tiles
   // to reduce cost of raster large layers. Then, each tile is rastered by a
   // dedicated thread.
-  // |WillPrepareTiles| is called before PrepareTiles step to have the scheduler
-  // track when PrepareTiles starts.
-  void WillPrepareTiles();
-  // |DidPrepareTiles| is called after PrepareTiles step to have the scheduler
-  // track how long PrepareTiles takes.
   void DidPrepareTiles();
 
   // |DidPresentCompositorFrame| is called when the renderer receives
@@ -223,17 +221,17 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   // Tests do not want to shut down until all possible BeginMainFrames have
   // occured to prevent flakiness.
   bool MainFrameForTestingWillHappen() const {
-    return state_machine_.CommitPending() ||
-           state_machine_.CouldSendBeginMainFrame();
+    return state_machine_->CommitPending() ||
+           state_machine_->CouldSendBeginMainFrame();
   }
 
-  bool CommitPending() const { return state_machine_.CommitPending(); }
-  bool RedrawPending() const { return state_machine_.RedrawPending(); }
+  bool CommitPending() const { return state_machine_->CommitPending(); }
+  bool RedrawPending() const { return state_machine_->RedrawPending(); }
   bool PrepareTilesPending() const {
-    return state_machine_.PrepareTilesPending();
+    return state_machine_->PrepareTilesPending();
   }
   bool ImplLatencyTakesPriority() const {
-    return state_machine_.ImplLatencyTakesPriority();
+    return state_machine_->ImplLatencyTakesPriority();
   }
 
   // Pass in a main_thread_start_time of base::TimeTicks() if it is not
@@ -253,15 +251,23 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   // main thread are drawn.
   void SetPauseRendering(bool pause_rendering);
 
-  // Controls whether the BeginMainFrameNotExpected messages should be sent to
-  // the main thread by the cc scheduler.
-  void SetMainThreadWantsBeginMainFrameNotExpected(bool new_state);
-
   void AsProtozeroInto(
       perfetto::EventContext& ctx,
-      perfetto::protos::pbzero::ChromeCompositorSchedulerState* state) const;
+      perfetto::protos::pbzero::ChromeCompositorSchedulerStateV2* state) const;
 
   void SetVideoNeedsBeginFrames(bool video_needs_begin_frames);
+
+  // When `SetIsScrolling` notifies of a scroll, and when
+  // `SetWaitingForScrollEvent` notifies that we do not yet have input to
+  // process, we will prioritize BeginImplFrameDeadlineMode::SCROLL over that of
+  // BeginImplFrameDeadlineMode::IMMEDIATE, BeginImplFrameDeadlineMode::REGULAR,
+  // and BeginImplFrameDeadlineMode::LATE.
+  void SetIsScrolling(bool is_scrolling);
+  void SetWaitingForScrollEvent(bool waiting_for_scroll_event);
+
+  // When we receive an input event, we may want to back off of throttling, so
+  // we pass this information down to |SchedulerStateMachine|.
+  void NotifyInputEvent();
 
   const viz::BeginFrameSource* begin_frame_source() const {
     return begin_frame_source_;
@@ -283,8 +289,11 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
 
   size_t CommitDurationSampleCountForTesting() const;
 
-  std::string GetHungCommitDebugInfo() const;
-  void TraceHungCommitDebugInfo() const;
+  void SetRequestHighFramerate(bool flag);
+
+  int consecutive_no_damage_main_frames() const {
+    return state_machine_->consecutive_no_damage_main_frames();
+  }
 
  protected:
   // Virtual for testing.
@@ -304,7 +313,7 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
 
   // Owned by LayerTreeHostImpl and is destroyed when LayerTreeHostImpl is
   // destroyed.
-  raw_ptr<CompositorFrameReportingController, DanglingUntriaged>
+  raw_ptr<CompositorFrameReportingController>
       compositor_frame_reporting_controller_;
 
   // What the latest deadline was, and when it was scheduled.
@@ -343,7 +352,7 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   viz::BeginFrameArgs pending_begin_frame_args_;
   base::CancelableOnceClosure pending_begin_frame_task_;
 
-  SchedulerStateMachine state_machine_;
+  std::unique_ptr<SchedulerStateMachine> state_machine_;
   bool inside_process_scheduled_actions_ = false;
   bool inside_scheduled_action_ = false;
   SchedulerStateMachine::Action inside_action_ =
@@ -356,10 +365,6 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   // Keeps track of the begin frame interval from the last BeginFrameArgs to
   // arrive so that |client_| can be informed about changes.
   base::TimeDelta last_frame_interval_;
-
-  std::unique_ptr<power_scheduler::PowerModeVoter> power_mode_voter_;
-  power_scheduler::PowerMode last_power_mode_vote_ =
-      power_scheduler::PowerMode::kIdle;
 
  private:
   // Posts the deadline task if needed by checking
@@ -386,8 +391,6 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   // Used to drop the pending begin frame before we go idle.
   void CancelPendingBeginFrameTask();
 
-  void BeginMainFrameNotExpectedUntil(base::TimeTicks time);
-  void BeginMainFrameNotExpectedSoon();
   void DrawIfPossible();
   void DrawForced();
   void ProcessScheduledActions();
@@ -408,16 +411,6 @@ class CC_EXPORT Scheduler : public viz::BeginFrameObserverBase {
   bool IsInsideAction(SchedulerStateMachine::Action action) {
     return inside_action_ == action;
   }
-
-  void UpdatePowerModeVote();
-
-  // Used only for UMa metric calculations.
-  base::TimeDelta cc_frame_time_available_;
-  base::TimeTicks cc_frame_start_;  // Begin impl frame time.
-
-  // Temporary for production debugging of renderer hang (crbug.com/1159366).
-  std::vector<SchedulerStateMachine::Action> commit_debug_action_sequence_;
-  bool trace_actions_ = false;
 };
 
 }  // namespace cc

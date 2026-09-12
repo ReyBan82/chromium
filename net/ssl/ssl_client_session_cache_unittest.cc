@@ -4,14 +4,19 @@
 
 #include "net/ssl/ssl_client_session_cache.h"
 
+#include "base/memory_coordinator/memory_coordinator_features.h"
+#include "base/memory_coordinator/test_memory_consumer_registry.h"
+#include "base/memory_coordinator/utils.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/simple_test_clock.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "base/trace_event/memory_allocator_dump.h"
 #include "base/trace_event/process_memory_dump.h"
-#include "base/trace_event/traced_value.h"
+#include "base/trace_event/trace_event.h"
+#include "net/base/features.h"
 #include "net/base/network_anonymization_key.h"
 #include "net/base/schemeful_site.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -43,6 +48,18 @@ SSLClientSessionCache::Key MakeTestKey(const std::string& str) {
   return key;
 }
 
+SSLClientSessionCache::Key AddProxyChain(SSLClientSessionCache::Key key) {
+  key.proxy_chain = ProxyChain::FromSchemeHostAndPort(ProxyServer::SCHEME_HTTPS,
+                                                      "proxy", 999);
+  key.proxy_chain_index = 0;
+  return key;
+}
+
+SSLClientSessionCache::Key WithProxyUsage(SSLClientSessionCache::Key key) {
+  key.session_usage = SessionUsage::kProxy;
+  return key;
+}
+
 class SSLClientSessionCacheTest : public testing::Test {
  public:
   SSLClientSessionCacheTest() : ssl_ctx_(SSL_CTX_new(TLS_method())) {}
@@ -64,6 +81,20 @@ class SSLClientSessionCacheTest : public testing::Test {
     return session;
   }
 
+  void SimulateMemoryLimitAndRelease(
+      base::test::TaskEnvironment& task_environment,
+      int percentage) {
+    test_memory_consumer_registry_.NotifyUpdateMemoryLimitAsync(
+        percentage, task_environment.QuitClosure());
+    task_environment.RunUntilQuit();
+
+    test_memory_consumer_registry_.NotifyReleaseMemoryAsync(
+        task_environment.QuitClosure());
+    task_environment.RunUntilQuit();
+  }
+
+  base::TestMemoryConsumerRegistry test_memory_consumer_registry_;
+
  private:
   bssl::UniquePtr<SSL_CTX> ssl_ctx_;
 };
@@ -82,30 +113,51 @@ TEST_F(SSLClientSessionCacheTest, Basic) {
   bssl::UniquePtr<SSL_SESSION> session1 = NewSSLSession();
   bssl::UniquePtr<SSL_SESSION> session2 = NewSSLSession();
   bssl::UniquePtr<SSL_SESSION> session3 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session4 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session5 = NewSSLSession();
 
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(0u, cache.size());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(1u, cache.size());
 
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session2));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session2));
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session2.get(), cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(2u, cache.size());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session3));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session3));
   EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session2.get(), cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(2u, cache.size());
+
+  cache.Insert(cache.generation_number(), AddProxyChain(MakeTestKey("key1")),
+               bssl::UpRef(session4));
+  EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(session4.get(),
+            cache.Lookup(AddProxyChain(MakeTestKey("key1"))).get());
+  EXPECT_EQ(3u, cache.size());
+
+  cache.Insert(cache.generation_number(), WithProxyUsage(MakeTestKey("key1")),
+               bssl::UpRef(session5));
+  EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(session5.get(),
+            cache.Lookup(WithProxyUsage(MakeTestKey("key1"))).get());
+  EXPECT_EQ(4u, cache.size());
 
   cache.Flush();
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key3")).get());
+  EXPECT_EQ(nullptr, cache.Lookup(AddProxyChain(MakeTestKey("key1"))).get());
+  EXPECT_EQ(nullptr, cache.Lookup(WithProxyUsage(MakeTestKey("key1"))).get());
   EXPECT_EQ(0u, cache.size());
 }
 
@@ -122,16 +174,20 @@ TEST_F(SSLClientSessionCacheTest, BasicSingleUse) {
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(0u, cache.size());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(0u, cache.size());
 
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session2));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session2));
 
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session2.get(), cache.Lookup(MakeTestKey("key2")).get());
@@ -140,9 +196,12 @@ TEST_F(SSLClientSessionCacheTest, BasicSingleUse) {
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session3));
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session2));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session3));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session2));
   EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session2.get(), cache.Lookup(MakeTestKey("key2")).get());
@@ -154,9 +213,12 @@ TEST_F(SSLClientSessionCacheTest, BasicSingleUse) {
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key3")).get());
   EXPECT_EQ(0u, cache.size());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session2));
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session3));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session2));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session3));
   EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session2.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
@@ -174,11 +236,13 @@ TEST_F(SSLClientSessionCacheTest, MixedUse) {
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(0u, cache.size());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session_reuse));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session_reuse));
   EXPECT_EQ(session_reuse.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(1u, cache.size());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session_single));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session_single));
   EXPECT_EQ(session_single.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(0u, cache.size());
@@ -186,8 +250,10 @@ TEST_F(SSLClientSessionCacheTest, MixedUse) {
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(0u, cache.size());
 
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session_single));
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session_single));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session_single));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session_single));
   EXPECT_EQ(1u, cache.size());
 
   EXPECT_EQ(session_single.get(), cache.Lookup(MakeTestKey("key2")).get());
@@ -195,8 +261,10 @@ TEST_F(SSLClientSessionCacheTest, MixedUse) {
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(0u, cache.size());
 
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session_single));
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session_reuse));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session_single));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session_reuse));
   EXPECT_EQ(session_reuse.get(), cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(session_reuse.get(), cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(1u, cache.size());
@@ -214,12 +282,14 @@ TEST_F(SSLClientSessionCacheTest, DoubleInsert) {
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(0u, cache.size());
 
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session));
   EXPECT_EQ(session.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(1u, cache.size());
 
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session));
   EXPECT_EQ(session.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session.get(), cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(2u, cache.size());
@@ -242,16 +312,20 @@ TEST_F(SSLClientSessionCacheTest, MaxEntries) {
   bssl::UniquePtr<SSL_SESSION> session4 = NewSSLSession();
 
   // Insert three entries.
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session2));
-  cache.Insert(MakeTestKey("key3"), bssl::UpRef(session3));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session2));
+  cache.Insert(cache.generation_number(), MakeTestKey("key3"),
+               bssl::UpRef(session3));
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session2.get(), cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key3")).get());
   EXPECT_EQ(3u, cache.size());
 
   // On insertion of a fourth, the first is removed.
-  cache.Insert(MakeTestKey("key4"), bssl::UpRef(session4));
+  cache.Insert(cache.generation_number(), MakeTestKey("key4"),
+               bssl::UpRef(session4));
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session4.get(), cache.Lookup(MakeTestKey("key4")).get());
   EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key3")).get());
@@ -260,7 +334,8 @@ TEST_F(SSLClientSessionCacheTest, MaxEntries) {
 
   // Despite being newest, the next to be removed is session4 as it was accessed
   // least. recently.
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(session2.get(), cache.Lookup(MakeTestKey("key2")).get());
   EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key3")).get());
@@ -276,15 +351,16 @@ TEST_F(SSLClientSessionCacheTest, Expiration) {
 
   SSLClientSessionCache::Config config;
   config.expiration_check_count = kExpirationCheckCount;
-  SSLClientSessionCache cache(config);
   std::unique_ptr<base::SimpleTestClock> clock = MakeTestClock();
+  SSLClientSessionCache cache(config);
   cache.SetClockForTesting(clock.get());
 
   // Add |kNumEntries - 1| entries.
   for (size_t i = 0; i < kNumEntries - 1; i++) {
     bssl::UniquePtr<SSL_SESSION> session =
         MakeTestSession(clock->Now(), kTimeout);
-    cache.Insert(MakeTestKey(base::NumberToString(i)), bssl::UpRef(session));
+    cache.Insert(cache.generation_number(),
+                 MakeTestKey(base::NumberToString(i)), bssl::UpRef(session));
   }
   EXPECT_EQ(kNumEntries - 1, cache.size());
 
@@ -292,7 +368,8 @@ TEST_F(SSLClientSessionCacheTest, Expiration) {
   clock->Advance(kTimeout * 2);
   bssl::UniquePtr<SSL_SESSION> session =
       MakeTestSession(clock->Now(), kTimeout);
-  cache.Insert(MakeTestKey("key"), bssl::UpRef(session));
+  cache.Insert(cache.generation_number(), MakeTestKey("key"),
+               bssl::UpRef(session));
 
   // All entries are still in the cache.
   EXPECT_EQ(kNumEntries, cache.size());
@@ -325,14 +402,15 @@ TEST_F(SSLClientSessionCacheTest, LookupExpirationCheck) {
 
   SSLClientSessionCache::Config config;
   config.expiration_check_count = kExpirationCheckCount;
-  SSLClientSessionCache cache(config);
   std::unique_ptr<base::SimpleTestClock> clock = MakeTestClock();
+  SSLClientSessionCache cache(config);
   cache.SetClockForTesting(clock.get());
 
   // Insert an entry into the session cache.
   bssl::UniquePtr<SSL_SESSION> session =
       MakeTestSession(clock->Now(), kTimeout);
-  cache.Insert(MakeTestKey("key"), bssl::UpRef(session));
+  cache.Insert(cache.generation_number(), MakeTestKey("key"),
+               bssl::UpRef(session));
   EXPECT_EQ(session.get(), cache.Lookup(MakeTestKey("key")).get());
   EXPECT_EQ(1u, cache.size());
 
@@ -348,13 +426,15 @@ TEST_F(SSLClientSessionCacheTest, LookupExpirationCheck) {
 
   // Re-inserting a session does not refresh the lifetime. The expiration
   // information in the session is used.
-  cache.Insert(MakeTestKey("key"), bssl::UpRef(session));
+  cache.Insert(cache.generation_number(), MakeTestKey("key"),
+               bssl::UpRef(session));
   EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key")).get());
   EXPECT_EQ(0u, cache.size());
 
   // Re-insert a fresh copy of the session.
   session = MakeTestSession(clock->Now(), kTimeout);
-  cache.Insert(MakeTestKey("key"), bssl::UpRef(session));
+  cache.Insert(cache.generation_number(), MakeTestKey("key"),
+               bssl::UpRef(session));
   EXPECT_EQ(session.get(), cache.Lookup(MakeTestKey("key")).get());
   EXPECT_EQ(1u, cache.size());
 
@@ -364,8 +444,10 @@ TEST_F(SSLClientSessionCacheTest, LookupExpirationCheck) {
   EXPECT_EQ(0u, cache.size());
 }
 
-// Test that SSL cache is flushed on low memory notifications
+// Test that SSL cache is flushed on low memory notifications.
 TEST_F(SSLClientSessionCacheTest, TestFlushOnMemoryNotifications) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndDisableFeature(base::kStatefulMemoryPressure);
   base::test::TaskEnvironment task_environment;
 
   // kExpirationCheckCount is set to a suitably large number so the automated
@@ -375,14 +457,15 @@ TEST_F(SSLClientSessionCacheTest, TestFlushOnMemoryNotifications) {
 
   SSLClientSessionCache::Config config;
   config.expiration_check_count = kExpirationCheckCount;
-  SSLClientSessionCache cache(config);
   std::unique_ptr<base::SimpleTestClock> clock = MakeTestClock();
+  SSLClientSessionCache cache(config);
   cache.SetClockForTesting(clock.get());
 
   // Insert an entry into the session cache.
   bssl::UniquePtr<SSL_SESSION> session1 =
       MakeTestSession(clock->Now(), kTimeout);
-  cache.Insert(MakeTestKey("key1"), bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), MakeTestKey("key1"),
+               bssl::UpRef(session1));
   EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
   EXPECT_EQ(1u, cache.size());
 
@@ -391,13 +474,13 @@ TEST_F(SSLClientSessionCacheTest, TestFlushOnMemoryNotifications) {
   // Add one more session.
   bssl::UniquePtr<SSL_SESSION> session2 =
       MakeTestSession(clock->Now(), kTimeout);
-  cache.Insert(MakeTestKey("key2"), bssl::UpRef(session2));
+  cache.Insert(cache.generation_number(), MakeTestKey("key2"),
+               bssl::UpRef(session2));
   EXPECT_EQ(2u, cache.size());
 
   // Fire a notification that will flush expired sessions.
-  base::MemoryPressureListener::NotifyMemoryPressure(
-      base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_MODERATE);
-  base::RunLoop().RunUntilIdle();
+  SimulateMemoryLimitAndRelease(task_environment,
+                                base::kModerateMemoryPressureThreshold);
 
   // Expired session's cache should be flushed.
   // Lookup returns nullptr, when cache entry not found.
@@ -406,10 +489,147 @@ TEST_F(SSLClientSessionCacheTest, TestFlushOnMemoryNotifications) {
   EXPECT_EQ(1u, cache.size());
 
   // Fire notification that will flush everything.
-  base::MemoryPressureListener::NotifyMemoryPressure(
-      base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_CRITICAL);
-  base::RunLoop().RunUntilIdle();
+  SimulateMemoryLimitAndRelease(task_environment,
+                                base::kCriticalMemoryPressureThreshold);
   EXPECT_EQ(0u, cache.size());
+}
+
+// Tests that the session cache responds correctly to memory pressure events.
+TEST_F(SSLClientSessionCacheTest, MemoryPressure) {
+  base::test::ScopedFeatureList scoped_feature_list(
+      base::kStatefulMemoryPressure);
+  base::test::TaskEnvironment task_environment(
+      base::test::TaskEnvironment::MainThreadType::IO);
+
+  SSLClientSessionCache::Config config;
+  config.max_entries = 10;
+  // Use a large expiration check count so it doesn't interfere.
+  config.expiration_check_count = 1000;
+  SSLClientSessionCache cache(config);
+
+  EXPECT_EQ(10u, cache.max_size());
+
+  // Insert 10 entries.
+  for (size_t i = 0; i < 10; i++) {
+    bssl::UniquePtr<SSL_SESSION> session = NewSSLSession();
+    cache.Insert(cache.generation_number(),
+                 MakeTestKey(base::NumberToString(i)), bssl::UpRef(session));
+  }
+  EXPECT_EQ(10u, cache.size());
+
+  // Memory pressure moderate should halve the cache size.
+  SimulateMemoryLimitAndRelease(task_environment,
+                                base::kModerateMemoryPressureThreshold);
+  EXPECT_EQ(5u, cache.max_size());
+  EXPECT_EQ(5u, cache.size());
+
+  // Verify that the oldest entries (0-4) were removed and newer (5-9) remain.
+  for (size_t i = 0; i < 5; i++) {
+    EXPECT_EQ(nullptr,
+              cache.Lookup(MakeTestKey(base::NumberToString(i))).get());
+  }
+  for (size_t i = 5; i < 10; i++) {
+    EXPECT_NE(nullptr,
+              cache.Lookup(MakeTestKey(base::NumberToString(i))).get());
+  }
+
+  // Memory pressure critical should clear the cache.
+  SimulateMemoryLimitAndRelease(task_environment, 0);
+  EXPECT_EQ(0u, cache.max_size());
+  EXPECT_EQ(0u, cache.size());
+
+  // Can't add an element under critical memory pressure.
+  {
+    bssl::UniquePtr<SSL_SESSION> session = NewSSLSession();
+    cache.Insert(cache.generation_number(),
+                 MakeTestKey(base::NumberToString(67)), bssl::UpRef(session));
+    EXPECT_EQ(0u, cache.size());
+  }
+
+  // Memory pressure none should restore the original size limit.
+  SimulateMemoryLimitAndRelease(task_environment, 100);
+  EXPECT_EQ(10u, cache.max_size());
+  EXPECT_EQ(0u, cache.size());
+
+  // We should be able to insert 10 entries again.
+  for (size_t i = 0; i < 10; i++) {
+    bssl::UniquePtr<SSL_SESSION> session = NewSSLSession();
+    cache.Insert(cache.generation_number(),
+                 MakeTestKey(base::NumberToString(i)), bssl::UpRef(session));
+  }
+  EXPECT_EQ(10u, cache.size());
+}
+
+// Tests that when the kIgnoreMemoryPressureForSslClientSessionCache feature is
+// enabled, memory pressure events do NOT flush or resize the SSL client session
+// cache.
+TEST_F(SSLClientSessionCacheTest, IgnoresMemoryPressureWhenFeatureEnabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {features::kIgnoreMemoryPressureForSslClientSessionCache,
+       base::kStatefulMemoryPressure},
+      {});
+  base::test::TaskEnvironment task_environment(
+      base::test::TaskEnvironment::MainThreadType::IO);
+
+  SSLClientSessionCache::Config config;
+  config.max_entries = 10;
+  SSLClientSessionCache cache(config);
+
+  EXPECT_EQ(10u, cache.max_size());
+
+  // Insert 10 entries.
+  for (size_t i = 0; i < 10; i++) {
+    bssl::UniquePtr<SSL_SESSION> session = NewSSLSession();
+    cache.Insert(cache.generation_number(),
+                 MakeTestKey(base::NumberToString(i)), bssl::UpRef(session));
+  }
+  EXPECT_EQ(10u, cache.size());
+
+  // Simulate critical memory pressure.
+  SimulateMemoryLimitAndRelease(task_environment,
+                                base::kCriticalMemoryPressureThreshold);
+
+  // The cache and its size limits should remain completely unaffected.
+  EXPECT_EQ(10u, cache.max_size());
+  EXPECT_EQ(10u, cache.size());
+  EXPECT_NE(nullptr, cache.Lookup(MakeTestKey("0")).get());
+}
+
+// Tests that when the kIgnoreMemoryPressureForSslClientSessionCache feature is
+// disabled (default behavior), memory pressure events flush and resize the SSL
+// client session cache.
+TEST_F(SSLClientSessionCacheTest,
+       ClearsCacheOnMemoryPressureWhenFeatureDisabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitWithFeatures(
+      {base::kStatefulMemoryPressure},
+      {features::kIgnoreMemoryPressureForSslClientSessionCache});
+  base::test::TaskEnvironment task_environment(
+      base::test::TaskEnvironment::MainThreadType::IO);
+
+  SSLClientSessionCache::Config config;
+  config.max_entries = 10;
+  SSLClientSessionCache cache(config);
+
+  EXPECT_EQ(10u, cache.max_size());
+
+  // Insert 10 entries.
+  for (size_t i = 0; i < 10; i++) {
+    bssl::UniquePtr<SSL_SESSION> session = NewSSLSession();
+    cache.Insert(cache.generation_number(),
+                 MakeTestKey(base::NumberToString(i)), bssl::UpRef(session));
+  }
+  EXPECT_EQ(10u, cache.size());
+
+  // Simulate critical memory pressure.
+  SimulateMemoryLimitAndRelease(task_environment,
+                                base::kCriticalMemoryPressureThreshold);
+
+  // Eviction should have run normally.
+  EXPECT_EQ(0u, cache.max_size());
+  EXPECT_EQ(0u, cache.size());
+  EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("0")).get());
 }
 
 TEST_F(SSLClientSessionCacheTest, FlushForServer) {
@@ -423,36 +643,36 @@ TEST_F(SSLClientSessionCacheTest, FlushForServer) {
   SSLClientSessionCache::Key key1;
   key1.server = HostPortPair("a.test", 443);
   auto session1 = NewSSLSession();
-  cache.Insert(key1, bssl::UpRef(session1));
+  cache.Insert(cache.generation_number(), key1, bssl::UpRef(session1));
 
   SSLClientSessionCache::Key key2;
   key2.server = HostPortPair("a.test", 443);
   key2.dest_ip_addr = IPAddress::IPv4Localhost();
   key2.network_anonymization_key =
-      NetworkAnonymizationKey(kSiteB, kSiteB, /*is_cross_site=*/false);
+      NetworkAnonymizationKey::CreateSameSite(kSiteB);
   key2.privacy_mode = PRIVACY_MODE_ENABLED;
   auto session2 = NewSSLSession();
-  cache.Insert(key2, bssl::UpRef(session2));
+  cache.Insert(cache.generation_number(), key2, bssl::UpRef(session2));
 
   SSLClientSessionCache::Key key3;
   key3.server = HostPortPair("a.test", 444);
   auto session3 = NewSSLSession();
-  cache.Insert(key3, bssl::UpRef(session3));
+  cache.Insert(cache.generation_number(), key3, bssl::UpRef(session3));
 
   SSLClientSessionCache::Key key4;
   key4.server = HostPortPair("b.test", 443);
   auto session4 = NewSSLSession();
-  cache.Insert(key4, bssl::UpRef(session4));
+  cache.Insert(cache.generation_number(), key4, bssl::UpRef(session4));
 
   SSLClientSessionCache::Key key5;
   key5.server = HostPortPair("b.test", 443);
   key5.network_anonymization_key =
-      NetworkAnonymizationKey(kSiteA, kSiteA, /*is_cross_site=*/false);
+      NetworkAnonymizationKey::CreateSameSite(kSiteA);
   auto session5 = NewSSLSession();
-  cache.Insert(key5, bssl::UpRef(session5));
+  cache.Insert(cache.generation_number(), key5, bssl::UpRef(session5));
 
   // Flush an unrelated server. The cache should be unaffected.
-  cache.FlushForServer(HostPortPair("c.test", 443));
+  cache.FlushForServers({HostPortPair("c.test", 443)});
   EXPECT_EQ(5u, cache.size());
   EXPECT_EQ(session1.get(), cache.Lookup(key1).get());
   EXPECT_EQ(session2.get(), cache.Lookup(key2).get());
@@ -461,7 +681,7 @@ TEST_F(SSLClientSessionCacheTest, FlushForServer) {
   EXPECT_EQ(session5.get(), cache.Lookup(key5).get());
 
   // Flush a.test:443. |key1| and |key2| should match, but not the others.
-  cache.FlushForServer(HostPortPair("a.test", 443));
+  cache.FlushForServers({HostPortPair("a.test", 443)});
   EXPECT_EQ(3u, cache.size());
   EXPECT_EQ(nullptr, cache.Lookup(key1).get());
   EXPECT_EQ(nullptr, cache.Lookup(key2).get());
@@ -470,7 +690,7 @@ TEST_F(SSLClientSessionCacheTest, FlushForServer) {
   EXPECT_EQ(session5.get(), cache.Lookup(key5).get());
 
   // Flush b.test:443. |key4| and |key5| match, but not |key3|.
-  cache.FlushForServer(HostPortPair("b.test", 443));
+  cache.FlushForServers({HostPortPair("b.test", 443)});
   EXPECT_EQ(1u, cache.size());
   EXPECT_EQ(nullptr, cache.Lookup(key1).get());
   EXPECT_EQ(nullptr, cache.Lookup(key2).get());
@@ -479,13 +699,145 @@ TEST_F(SSLClientSessionCacheTest, FlushForServer) {
   EXPECT_EQ(nullptr, cache.Lookup(key5).get());
 
   // Flush the last host, a.test:444.
-  cache.FlushForServer(HostPortPair("a.test", 444));
+  cache.FlushForServers({HostPortPair("a.test", 444)});
   EXPECT_EQ(0u, cache.size());
   EXPECT_EQ(nullptr, cache.Lookup(key1).get());
   EXPECT_EQ(nullptr, cache.Lookup(key2).get());
   EXPECT_EQ(nullptr, cache.Lookup(key3).get());
   EXPECT_EQ(nullptr, cache.Lookup(key4).get());
   EXPECT_EQ(nullptr, cache.Lookup(key5).get());
+}
+
+TEST_F(SSLClientSessionCacheTest, FlushForServers) {
+  SSLClientSessionCache::Config config;
+  SSLClientSessionCache cache(config);
+
+  const SchemefulSite kSiteA(GURL("https://a.test"));
+  const SchemefulSite kSiteB(GURL("https://b.test"));
+
+  // Insert a number of cache entries.
+  SSLClientSessionCache::Key key1;
+  key1.server = HostPortPair("a.test", 443);
+  auto session1 = NewSSLSession();
+  cache.Insert(cache.generation_number(), key1, bssl::UpRef(session1));
+
+  SSLClientSessionCache::Key key2;
+  key2.server = HostPortPair("a.test", 443);
+  key2.dest_ip_addr = IPAddress::IPv4Localhost();
+  key2.network_anonymization_key =
+      NetworkAnonymizationKey::CreateSameSite(kSiteB);
+  key2.privacy_mode = PRIVACY_MODE_ENABLED;
+  auto session2 = NewSSLSession();
+  cache.Insert(cache.generation_number(), key2, bssl::UpRef(session2));
+
+  SSLClientSessionCache::Key key3;
+  key3.server = HostPortPair("a.test", 444);
+  auto session3 = NewSSLSession();
+  cache.Insert(cache.generation_number(), key3, bssl::UpRef(session3));
+
+  SSLClientSessionCache::Key key4;
+  key4.server = HostPortPair("b.test", 443);
+  auto session4 = NewSSLSession();
+  cache.Insert(cache.generation_number(), key4, bssl::UpRef(session4));
+
+  SSLClientSessionCache::Key key5;
+  key5.server = HostPortPair("b.test", 443);
+  key5.network_anonymization_key =
+      NetworkAnonymizationKey::CreateSameSite(kSiteA);
+  auto session5 = NewSSLSession();
+  cache.Insert(cache.generation_number(), key5, bssl::UpRef(session5));
+
+  cache.FlushForServers({
+      // Unrelated server. Should have no effect.
+      HostPortPair("c.test", 443),
+      // Flush a.test:443. |key1| and |key2| should match, but not the others.
+      HostPortPair("a.test", 443),
+      // Flush b.test:443. |key4| and |key5| match, but not |key3|.
+      HostPortPair("b.test", 443),
+  });
+  EXPECT_EQ(1u, cache.size());
+  EXPECT_EQ(nullptr, cache.Lookup(key1).get());
+  EXPECT_EQ(nullptr, cache.Lookup(key2).get());
+  EXPECT_EQ(session3.get(), cache.Lookup(key3).get());
+  EXPECT_EQ(nullptr, cache.Lookup(key4).get());
+  EXPECT_EQ(nullptr, cache.Lookup(key5).get());
+}
+
+TEST_F(SSLClientSessionCacheTest, InsertStaleConfigId) {
+  SSLClientSessionCache::Config config;
+  SSLClientSessionCache cache(config);
+
+  bssl::UniquePtr<SSL_SESSION> session1 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session2 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session3 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session4 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session5 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session6 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session7 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session8 = NewSSLSession();
+  bssl::UniquePtr<SSL_SESSION> session9 = NewSSLSession();
+
+  EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(0u, cache.size());
+
+  const uint64_t generation_number_0 = cache.generation_number();
+
+  cache.Insert(generation_number_0, MakeTestKey("key1"), bssl::UpRef(session1));
+  EXPECT_EQ(session1.get(), cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(1u, cache.size());
+
+  cache.Flush();
+  EXPECT_EQ(0u, cache.size());
+
+  cache.Insert(generation_number_0, MakeTestKey("key1"), bssl::UpRef(session2));
+  EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(0u, cache.size());
+
+  const uint64_t generation_number_1 = cache.generation_number();
+
+  cache.Insert(generation_number_1, MakeTestKey("key1"), bssl::UpRef(session3));
+  EXPECT_EQ(session3.get(), cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(1u, cache.size());
+
+  cache.Flush();
+  EXPECT_EQ(0u, cache.size());
+
+  cache.Insert(generation_number_0, MakeTestKey("key1"), bssl::UpRef(session4));
+  EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(0u, cache.size());
+
+  cache.Insert(generation_number_1, MakeTestKey("key1"), bssl::UpRef(session5));
+  EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(0u, cache.size());
+
+  const uint64_t generation_number_2 = cache.generation_number();
+
+  cache.Insert(generation_number_2, MakeTestKey("key1"), bssl::UpRef(session6));
+  EXPECT_EQ(session6.get(), cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(1u, cache.size());
+
+  cache.Insert(generation_number_2, MakeTestKey("key2"), bssl::UpRef(session7));
+  EXPECT_EQ(session7.get(), cache.Lookup(MakeTestKey("key2")).get());
+  EXPECT_EQ(2u, cache.size());
+
+  // FlushForServers also increments the generation_number, but only clears
+  // entries for the specified HostPortPair.
+  cache.FlushForServers({HostPortPair("key2", 443)});
+  EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
+  // The other cached entries that don't match the flushed server should
+  // still exist.
+  EXPECT_EQ(session6.get(), cache.Lookup(MakeTestKey("key1")).get());
+  EXPECT_EQ(1u, cache.size());
+
+  cache.Insert(generation_number_2, MakeTestKey("key2"), bssl::UpRef(session8));
+  EXPECT_EQ(nullptr, cache.Lookup(MakeTestKey("key2")).get());
+  EXPECT_EQ(1u, cache.size());
+
+  const uint64_t generation_number_3 = cache.generation_number();
+
+  cache.Insert(generation_number_3, MakeTestKey("key2"), bssl::UpRef(session9));
+  EXPECT_EQ(session9.get(), cache.Lookup(MakeTestKey("key2")).get());
+  EXPECT_EQ(2u, cache.size());
 }
 
 }  // namespace net

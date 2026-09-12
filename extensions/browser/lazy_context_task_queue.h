@@ -6,7 +6,7 @@
 #define EXTENSIONS_BROWSER_LAZY_CONTEXT_TASK_QUEUE_H_
 
 #include "base/functional/callback.h"
-#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/raw_ptr.h"
 #include "extensions/common/extension_id.h"
 #include "url/gurl.h"
 
@@ -32,22 +32,23 @@ class LazyContextTaskQueue {
   // consumers that add tasks to LazyContextTaskQueue.
   struct ContextInfo {
     const ExtensionId extension_id;
-    // `render_process_host` is not a raw_ptr<...> for performance reasons
+    // `render_process_host` uses UnprotectedInRelease for performance reasons
     // (based on analysis of sampling profiler data).
-    RAW_PTR_EXCLUSION content::RenderProcessHost* const render_process_host;
+    const raw_ptr<content::RenderProcessHost, UnprotectedInRelease>
+        render_process_host;
     const int64_t service_worker_version_id;
     const int worker_thread_id;
     const GURL url;
-    // TODO(dbertoni): This needs to be initialized for the Service Worker
-    // version of the constructor.
-    // `browser_context` is not a raw_ptr<...> for performance reasons (based on
-    // analysis of sampling profiler data).
-    RAW_PTR_EXCLUSION content::BrowserContext* const browser_context = nullptr;
+    // `browser_context` uses UnprotectedInRelease for performance reasons
+    // (based on analysis of sampling profiler data).
+    const raw_ptr<content::BrowserContext, UnprotectedInRelease>
+        browser_context = nullptr;
     // This data member will have a nullptr value for Service Worker-related
     // tasks.
-    // `web_contents` is not a raw_ptr<...> for performance reasons (based on
-    // analysis of sampling profiler data).
-    RAW_PTR_EXCLUSION content::WebContents* const web_contents = nullptr;
+    // `web_contents` uses UnprotectedInRelease for performance reasons (based
+    // on analysis of sampling profiler data).
+    const raw_ptr<content::WebContents, UnprotectedInRelease> web_contents =
+        nullptr;
 
     explicit ContextInfo(ExtensionHost* host);
 
@@ -56,6 +57,10 @@ class LazyContextTaskQueue {
                 int64_t service_worker_version_id,
                 int worker_thread_id,
                 const GURL& url);
+
+    ContextInfo(const ContextInfo& other);
+    ContextInfo(ContextInfo&& other);
+    ~ContextInfo();
   };
   using PendingTask =
       base::OnceCallback<void(std::unique_ptr<ContextInfo> params)>;
@@ -64,7 +69,11 @@ class LazyContextTaskQueue {
   // extension has a lazy background page or service worker that isn't ready
   // yet).
   virtual bool ShouldEnqueueTask(content::BrowserContext* context,
-                                 const Extension* extension) = 0;
+                                 const Extension* extension) const = 0;
+
+  // Returns true if the lazy context is ready to run tasks (a.k.a active).
+  virtual bool IsReadyToRunTasks(content::BrowserContext* context,
+                                 const Extension* extension) const = 0;
 
   // Adds a task to the queue for a given extension. If this is the first
   // task added for the extension, its "lazy context" (i.e. lazy background

@@ -4,11 +4,12 @@
 
 #include "chrome/credential_provider/gaiacp/gcp_crash_reporting.h"
 
+#include <utility>
+
 #include "base/command_line.h"
 #include "base/debug/leak_annotations.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/win/current_module.h"
-#include "build/branding_buildflags.h"
 #include "chrome/credential_provider/common/gcp_strings.h"
 #include "chrome/credential_provider/gaiacp/gcp_crash_reporter_client.h"
 #include "chrome/credential_provider/gaiacp/gcp_crash_reporting_utils.h"
@@ -22,7 +23,8 @@ namespace {
 class GcpDllCrashReporterClient
     : public credential_provider::GcpCrashReporterClient {
  public:
-  GcpDllCrashReporterClient() = default;
+  explicit GcpDllCrashReporterClient(base::FilePath crash_dump_location)
+      : GcpCrashReporterClient(std::move(crash_dump_location)) {}
   ~GcpDllCrashReporterClient() override = default;
 
  protected:
@@ -54,11 +56,18 @@ void ConfigureGcpCrashReporting(const base::CommandLine& command_line) {
   // to the crash service. Since the installer does not split its work between
   // a stub .exe and a main .dll, crash reporting can be configured in one place
   // right here.
-  // Create the crash client and install it (a la MainDllLoader::Launch).
-  GcpDllCrashReporterClient* crash_client = new GcpDllCrashReporterClient();
-  ANNOTATE_LEAKING_OBJECT_PTR(crash_client);
 
-  InitializeGcpwCrashReporting(crash_client);
+  base::FilePath crash_dir = GetFolderForCrashDumps();
+  if (crash_dir.empty()) {
+    // Crashpad cannot function without a directory in which to write.
+    return;
+  }
+
+  // Create the crash client and install it (a la MainDllLoader::Launch).
+  GcpDllCrashReporterClient* crash_client =
+      new GcpDllCrashReporterClient(std::move(crash_dir));
+  ANNOTATE_LEAKING_OBJECT_PTR(crash_client);
+  crash_reporter::SetCrashReporterClient(crash_client);
 
   base::CommandLine dll_main_cmd_line(base::CommandLine::NO_PROGRAM);
 

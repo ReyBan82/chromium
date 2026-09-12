@@ -16,30 +16,29 @@ import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
-import org.robolectric.annotation.Config;
-import org.robolectric.shadows.ShadowLooper;
 
-import org.chromium.base.supplier.ObservableSupplierImpl;
+import org.chromium.base.supplier.ObservableSuppliers;
+import org.chromium.base.supplier.SettableNullableObservableSupplier;
+import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.cc.input.BrowserControlsState;
-import org.chromium.testing.local.LocalRobolectricTestRunner;
 import org.chromium.ui.resources.dynamics.ViewResourceAdapter;
 
 /** Unit tests for {@link ConstraintsChecker}. */
-@RunWith(LocalRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
+@RunWith(BaseRobolectricTestRunner.class)
 public final class ConstraintsCheckerTest {
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Mock
-    private ViewResourceAdapter mViewResourceAdapter;
+    @Mock private ViewResourceAdapter mViewResourceAdapter;
 
-    private ObservableSupplierImpl mConstraintsSupplier = new ObservableSupplierImpl();
+    private final SettableNullableObservableSupplier<Integer> mConstraintsSupplier =
+            ObservableSuppliers.createNullable();
 
     @Test
     public void testScheduleRequestResourceOnUnlock() {
-        ConstraintsChecker constraintsChecker = new ConstraintsChecker(
-                mViewResourceAdapter, mConstraintsSupplier, Looper.myLooper());
+        ConstraintsChecker constraintsChecker =
+                new ConstraintsChecker(
+                        mViewResourceAdapter, mConstraintsSupplier, Looper.myLooper());
         constraintsChecker.scheduleRequestResourceOnUnlock();
         mConstraintsSupplier.set(BrowserControlsState.SHOWN);
         verify(mViewResourceAdapter, times(0)).onResourceRequested();
@@ -48,14 +47,15 @@ public final class ConstraintsCheckerTest {
         verify(mViewResourceAdapter, times(0)).onResourceRequested();
 
         mConstraintsSupplier.set(BrowserControlsState.BOTH);
-        ShadowLooper.idleMainLooper();
+        RobolectricUtil.runAllBackgroundAndUi();
         verify(mViewResourceAdapter, times(1)).onResourceRequested();
     }
 
     @Test
     public void testAreControlsLocked() {
-        ConstraintsChecker constraintsChecker = new ConstraintsChecker(
-                mViewResourceAdapter, mConstraintsSupplier, Looper.myLooper());
+        ConstraintsChecker constraintsChecker =
+                new ConstraintsChecker(
+                        mViewResourceAdapter, mConstraintsSupplier, Looper.myLooper());
         assertEquals(true, constraintsChecker.areControlsLocked());
 
         mConstraintsSupplier.set(BrowserControlsState.SHOWN);

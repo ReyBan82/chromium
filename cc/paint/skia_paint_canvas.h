@@ -8,6 +8,8 @@
 #include <memory>
 
 #include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "build/build_config.h"
 #include "cc/paint/paint_canvas.h"
 #include "cc/paint/paint_flags.h"
@@ -25,7 +27,6 @@ class SkCanvas;
 class SkM44;
 class SkPath;
 class SkRRect;
-class SkSurfaceProps;
 enum class SkClipOp;
 struct SkImageInfo;
 struct SkIPoint;
@@ -34,6 +35,7 @@ struct SkRect;
 
 namespace cc {
 class ImageProvider;
+class PaintFilter;
 class PaintFlags;
 
 // A PaintCanvas derived class that passes PaintCanvas APIs through to
@@ -53,7 +55,6 @@ class CC_PAINT_EXPORT SkiaPaintCanvas final : public PaintCanvas {
                            ContextFlushes context_flushes = ContextFlushes());
   explicit SkiaPaintCanvas(const SkBitmap& bitmap,
                            ImageProvider* image_provider = nullptr);
-  explicit SkiaPaintCanvas(const SkBitmap& bitmap, const SkSurfaceProps& props);
 
   SkiaPaintCanvas(const SkiaPaintCanvas&) = delete;
   ~SkiaPaintCanvas() override;
@@ -75,6 +76,8 @@ class CC_PAINT_EXPORT SkiaPaintCanvas final : public PaintCanvas {
   int saveLayer(const SkRect& bounds, const PaintFlags& flags) override;
   int saveLayerAlphaf(float alpha) override;
   int saveLayerAlphaf(const SkRect& bounds, float alpha) override;
+  int saveLayerFilters(base::span<const sk_sp<PaintFilter>> filters,
+                       const PaintFlags& flags) override;
 
   void restore() override;
   int getSaveCount() const override;
@@ -103,6 +106,10 @@ class CC_PAINT_EXPORT SkiaPaintCanvas final : public PaintCanvas {
                 SkScalar x1,
                 SkScalar y1,
                 const PaintFlags& flags) override;
+  void drawArc(const SkRect& oval,
+               SkScalar start_angle_degrees,
+               SkScalar sweep_angle_degrees,
+               const PaintFlags& flags) override;
   void drawRect(const SkRect& rect, const PaintFlags& flags) override;
   void drawIRect(const SkIRect& rect, const PaintFlags& flags) override;
   void drawOval(const SkRect& oval, const PaintFlags& flags) override;
@@ -128,6 +135,10 @@ class CC_PAINT_EXPORT SkiaPaintCanvas final : public PaintCanvas {
                      const SkSamplingOptions&,
                      const PaintFlags* flags,
                      SkCanvas::SrcRectConstraint constraint) override;
+  void drawVertices(scoped_refptr<RefCountedBuffer<SkPoint>> vertices,
+                    scoped_refptr<RefCountedBuffer<SkPoint>> uvs,
+                    scoped_refptr<RefCountedBuffer<uint16_t>> indices,
+                    const PaintFlags& flags) override;
   void drawSkottie(scoped_refptr<SkottieWrapper> skottie,
                    const SkRect& dst,
                    float t,
@@ -145,6 +156,7 @@ class CC_PAINT_EXPORT SkiaPaintCanvas final : public PaintCanvas {
                     const PaintFlags& flags) override;
 
   void drawPicture(PaintRecord record) override;
+  void drawPicture(PaintRecord record, bool local_ctm) override;
 
   SkM44 getLocalToDevice() const override;
 
@@ -168,17 +180,20 @@ class CC_PAINT_EXPORT SkiaPaintCanvas final : public PaintCanvas {
   // raster callback.
   void drawPicture(
       PaintRecord record,
-      PlaybackParams::CustomDataRasterCallback custom_raster_callback);
+      PlaybackCallbacks::CustomDataRasterCallback custom_raster_callback,
+      bool local_ctm = true);
+
+  int pendingOpsForTesting() const { return num_of_ops_; }
 
  private:
   void FlushAfterDrawIfNeeded();
 
   int GetMaxTextureSize() const;
 
-  SkCanvas* canvas_;
+  raw_ptr<SkCanvas> canvas_;
   SkBitmap bitmap_;
   std::unique_ptr<SkCanvas> owned_;
-  ImageProvider* image_provider_ = nullptr;
+  raw_ptr<ImageProvider> image_provider_ = nullptr;
 
   const ContextFlushes context_flushes_;
   int num_of_ops_ = 0;

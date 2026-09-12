@@ -4,150 +4,183 @@
 
 #include "content/browser/web_package/signed_exchange_signature_header_field.h"
 
+#include <string_view>
+
+#include "base/compiler_specific.h"
+#include "base/containers/map_util.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/trace_event/trace_event.h"
 #include "content/browser/web_package/signed_exchange_consts.h"
 #include "content/browser/web_package/signed_exchange_utils.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 #include "net/http/structured_headers.h"
 
 namespace content {
 
+namespace {
+
+using net::structured_headers::Item;
+
+template <Item::ItemType kType>
+auto* FindOrNull(net::structured_headers::ParameterisedIdentifier::Parameters&
+                     params LIFETIME_BOUND,
+                 std::string_view key) {
+  auto* value = base::FindOrNull(params, key);
+
+  if constexpr (kType == Item::kStringType) {
+    return value ? value->GetIfString() : nullptr;
+  } else if constexpr (kType == Item::kIntegerType) {
+    return value ? value->GetIfInteger() : nullptr;
+  } else if constexpr (kType == Item::kByteSequenceType) {
+    return value ? value->GetIfByteSequence() : nullptr;
+  } else {
+    static_assert(false, "add branch for kType");
+  }
+}
+
+}  // namespace
+
 // static
-absl::optional<std::vector<SignedExchangeSignatureHeaderField::Signature>>
+std::optional<std::vector<SignedExchangeSignatureHeaderField::Signature>>
 SignedExchangeSignatureHeaderField::ParseSignature(
-    base::StringPiece signature_str,
+    std::string_view signature_str,
     SignedExchangeDevToolsProxy* devtools_proxy) {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("loading"),
                "SignedExchangeSignatureHeaderField::ParseSignature");
 
-  absl::optional<net::structured_headers::ParameterisedList> values =
+  std::optional<net::structured_headers::ParameterisedList> values =
       net::structured_headers::ParseParameterisedList(signature_str);
   if (!values) {
     signed_exchange_utils::ReportErrorAndTraceEvent(
         devtools_proxy, "Failed to parse signature header.");
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   std::vector<Signature> signatures;
   signatures.reserve(values->size());
   for (auto& value : *values) {
-    if (!value.identifier.is_token()) {
+    std::string* label = value.identifier.GetIfToken();
+    if (!label) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "Failed to parse signature header.");
-      return absl::nullopt;
+      return std::nullopt;
     }
-    signatures.push_back(Signature());
-    Signature& sig = signatures.back();
-    sig.label = value.identifier.GetString();
+    Signature& sig = signatures.emplace_back();
+    sig.label = std::move(*label);
 
-    const auto& sig_item = value.params[kSig];
-    if (!sig_item.is_byte_sequence()) {
+    std::string* sig_item =
+        FindOrNull<Item::kByteSequenceType>(value.params, kSig);
+    if (!sig_item) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "Failed to parse 'sig' parameter.");
-      return absl::nullopt;
+      return std::nullopt;
     }
-    sig.sig = sig_item.GetString();
+    sig.sig = std::move(*sig_item);
     if (sig.sig.empty()) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'sig' parameter is not set,");
-      return absl::nullopt;
+      return std::nullopt;
     }
 
-    const auto& integrity_item = value.params[kIntegrity];
-    if (!integrity_item.is_string()) {
+    std::string* integrity_item =
+        FindOrNull<Item::kStringType>(value.params, kIntegrity);
+    if (!integrity_item) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "Failed to parse 'integrity' parameter.");
-      return absl::nullopt;
+      return std::nullopt;
     }
-    sig.integrity = integrity_item.GetString();
+    sig.integrity = std::move(*integrity_item);
     if (sig.integrity.empty()) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'integrity' parameter is not set.");
-      return absl::nullopt;
+      return std::nullopt;
     }
 
-    const auto& cert_url_item = value.params[kCertUrl];
-    if (!cert_url_item.is_string()) {
+    const std::string* cert_url_item =
+        FindOrNull<Item::kStringType>(value.params, kCertUrl);
+    if (!cert_url_item) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "Failed to parse 'cert-url' parameter.");
-      return absl::nullopt;
+      return std::nullopt;
     }
-    sig.cert_url = GURL(cert_url_item.GetString());
+    sig.cert_url = GURL(*cert_url_item);
     if (!sig.cert_url.is_valid() || sig.cert_url.has_ref()) {
-      // TODO(https://crbug.com/819467) : When we will support "ed25519Key", the
+      // TODO(crbug.com/40565993) : When we will support "ed25519Key", the
       // params may not have "cert-url".
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'cert-url' parameter is not a valid URL.");
-      return absl::nullopt;
+      return std::nullopt;
     }
     if (!sig.cert_url.SchemeIs("https") && !sig.cert_url.SchemeIs("data")) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'cert-url' should have 'https' or 'data' scheme.");
-      return absl::nullopt;
+      return std::nullopt;
     }
 
-    const auto& cert_sha256_item = value.params[kCertSha256Key];
-    if (!cert_sha256_item.is_byte_sequence()) {
+    const std::string* cert_sha256_string =
+        FindOrNull<Item::kByteSequenceType>(value.params, kCertSha256Key);
+    if (!cert_sha256_string) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "Failed to parse 'cert-sha256' parameter.");
-      return absl::nullopt;
+      return std::nullopt;
     }
-    const std::string& cert_sha256_string = cert_sha256_item.GetString();
-    if (cert_sha256_string.size() != crypto::kSHA256Length) {
-      // TODO(https://crbug.com/819467) : When we will support "ed25519Key", the
+    if (cert_sha256_string->size() != crypto::hash::kSha256Size) {
+      // TODO(crbug.com/40565993) : When we will support "ed25519Key", the
       // params may not have "cert-sha256".
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'cert-sha256' parameter is not a SHA-256 digest.");
-      return absl::nullopt;
+      return std::nullopt;
     }
     net::SHA256HashValue cert_sha256;
-    memcpy(&cert_sha256.data, cert_sha256_string.data(), crypto::kSHA256Length);
+    base::span<uint8_t>(cert_sha256)
+        .copy_from(base::as_byte_span(*cert_sha256_string));
     sig.cert_sha256 = std::move(cert_sha256);
 
-    // TODO(https://crbug.com/819467): Support ed25519key.
+    // TODO(crbug.com/40565993): Support ed25519key.
     // sig.ed25519_key = value.params["ed25519Key"];
 
-    const auto& validity_url_item = value.params[kValidityUrlKey];
-    if (!validity_url_item.is_string()) {
+    const std::string* validity_url_item =
+        FindOrNull<Item::kStringType>(value.params, kValidityUrlKey);
+    if (!validity_url_item) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "Failed to parse 'validity-url' parameter.");
-      return absl::nullopt;
+      return std::nullopt;
     }
     sig.validity_url =
-        signed_exchange_utils::URLWithRawString(validity_url_item.GetString());
+        signed_exchange_utils::URLWithRawString(*validity_url_item);
     if (!sig.validity_url.url.is_valid()) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'validity-url' parameter is not a valid URL.");
-      return absl::nullopt;
+      return std::nullopt;
     }
     if (sig.validity_url.url.has_ref()) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'validity-url' parameter can't have a fragment.");
-      return absl::nullopt;
+      return std::nullopt;
     }
     if (!sig.validity_url.url.SchemeIs("https")) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'validity-url' should have 'https' scheme.");
-      return absl::nullopt;
+      return std::nullopt;
     }
 
-    const auto& date_item = value.params[kDateKey];
-    if (!date_item.is_integer()) {
+    const int64_t* date_item =
+        FindOrNull<Item::kIntegerType>(value.params, kDateKey);
+    if (!date_item) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'date' parameter is not a number.");
-      return absl::nullopt;
+      return std::nullopt;
     }
-    sig.date = date_item.GetInteger();
+    sig.date = *date_item;
 
-    const auto& expires_item = value.params[kExpiresKey];
-    if (!expires_item.is_integer()) {
+    const int64_t* expires_item =
+        FindOrNull<Item::kIntegerType>(value.params, kExpiresKey);
+    if (!expires_item) {
       signed_exchange_utils::ReportErrorAndTraceEvent(
           devtools_proxy, "'expires' parameter is not a number.");
-      return absl::nullopt;
+      return std::nullopt;
     }
-    sig.expires = expires_item.GetInteger();
+    sig.expires = *expires_item;
   }
   return signatures;
 }

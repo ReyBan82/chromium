@@ -5,7 +5,9 @@
 #ifndef CHROMEOS_ASH_COMPONENTS_PHONEHUB_TETHER_CONTROLLER_IMPL_H_
 #define CHROMEOS_ASH_COMPONENTS_PHONEHUB_TETHER_CONTROLLER_IMPL_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "chromeos/ash/components/phonehub/phone_model.h"
 #include "chromeos/ash/components/phonehub/tether_controller.h"
 #include "chromeos/ash/services/multidevice_setup/public/cpp/multidevice_setup_client.h"
@@ -13,8 +15,7 @@
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 class UserActionRecorder;
 
@@ -156,9 +157,9 @@ class TetherControllerImpl
   void UpdateStatus();
   TetherController::Status ComputeStatus() const;
 
-  PhoneModel* phone_model_;
-  UserActionRecorder* user_action_recorder_;
-  multidevice_setup::MultiDeviceSetupClient* multidevice_setup_client_;
+  raw_ptr<PhoneModel> phone_model_;
+  raw_ptr<UserActionRecorder> user_action_recorder_;
+  raw_ptr<multidevice_setup::MultiDeviceSetupClient> multidevice_setup_client_;
   ConnectDisconnectStatus connect_disconnect_status_ =
       ConnectDisconnectStatus::kIdle;
   Status status_ = Status::kIneligibleForFeature;
@@ -174,10 +175,15 @@ class TetherControllerImpl
   mojo::Remote<chromeos::network_config::mojom::CrosNetworkConfig>
       cros_network_config_;
 
+  base::ScopedObservation<PhoneModel, PhoneModel::Observer>
+      phone_model_observation_{this};
+  base::ScopedObservation<multidevice_setup::MultiDeviceSetupClient,
+                          multidevice_setup::MultiDeviceSetupClient::Observer>
+      multidevice_setup_client_observation_{this};
+
   base::WeakPtrFactory<TetherControllerImpl> weak_ptr_factory_{this};
 };
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub
 
 #endif  // CHROMEOS_ASH_COMPONENTS_PHONEHUB_TETHER_CONTROLLER_IMPL_H_

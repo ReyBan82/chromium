@@ -6,6 +6,7 @@
  * @fileoverview Plugin for rollup to correctly resolve resources.
  */
 import * as path from 'path';
+import * as assert from 'node:assert';
 
 function normalizeSlashes(filepath) {
   return filepath.replace(/\\/gi, '/');
@@ -39,12 +40,27 @@ function combinePaths(origin, source) {
  * @param {string} urlSrcPath The path that corresponds to the URL prefix.
  * @param {!Array<string>} excludes List of paths that should be excluded from
  *     bundling.
+ * @param {boolean} isCss Whether the file is a CSS file.
  * @return {string} The path to |source|. If |source| does not map to
  *     |urlSrcPath|, returns an empty string. If |source| maps to a location
  *     in |urlSrcPath| but is listed in |excludes|, returns the URL
  *     corresponding to |source|. Otherwise, returns the full path for |source|.
  */
-function getPathForUrl(source, origin, urlPrefix, urlSrcPath, excludes) {
+function getPathForUrl(source, origin, urlPrefix, urlSrcPath, excludes, isCss) {
+  assert.ok(
+      !(source.startsWith('/') && !source.startsWith('//') && !!origin &&
+        origin.startsWith(normalizeSlashes(urlSrcPath))),
+      `Root-relative import '${source}' in external path '${origin}' ` +
+      `is not allowed.`);
+
+  if (source === urlPrefix) {
+    // Handle case where 'urlPrefix` matches the entire `source` URL and
+    // therefore is not just a prefix, but a complete URL.
+    assert.ok(!excludes.includes(source),
+        'Excluding non-prefix external paths not supprted yet.');
+    return urlSrcPath;
+  }
+
   let schemeRelativeUrl = urlPrefix;
   if (urlPrefix.includes('://')) {
     const url = new URL(urlPrefix);
@@ -65,7 +81,8 @@ function getPathForUrl(source, origin, urlPrefix, urlSrcPath, excludes) {
     return '';
   }
 
-  if (excludes.includes(urlPrefix + pathFromUrl) ||
+  if (isCss ||
+      excludes.includes(urlPrefix + pathFromUrl) ||
       excludes.includes(schemeRelativeUrl + pathFromUrl)) {
     return urlPrefix + pathFromUrl;
   }
@@ -107,17 +124,30 @@ export default function plugin(
             `Invalid path (missing file extension) was found: ${source}`);
       }
 
+      const isCss = path.extname(source) === '.css';
+
       // Normalize origin paths to use forward slashes.
       if (origin) {
         origin = normalizeSlashes(origin);
       }
 
       for (const [url, path] of urlsToPaths) {
-        const resultPath = getPathForUrl(source, origin, url, path, excludes);
+        const resultPath =
+            getPathForUrl(source, origin, url, path, excludes, isCss);
         if (resultPath.includes('://') || resultPath.startsWith('//')) {
           return {id: resultPath, external: 'absolute'};
         } else if (resultPath) {
           return resultPath;
+        }
+      }
+
+      // Check if the URL is an external path that isn't mapped.
+      if (source.includes('://') || source.startsWith('//')) {
+        if (isCss || excludes.includes(source)) {
+          return {id: source, external: 'absolute'};
+        } else {
+          this.error(`Invalid absolute path: ${source} is not in |excludes| ` +
+              `or |external_paths|`);
         }
       }
 
@@ -130,7 +160,7 @@ export default function plugin(
           combinePaths(origin, source);
       if (fullSourcePath.startsWith(rootPath)) {
         const pathFromRoot = relativePath(rootPath, fullSourcePath);
-        if (excludes.includes(pathFromRoot)) {
+        if (isCss || excludes.includes(pathFromRoot)) {
           const url = new URL(pathFromRoot, hostUrl);
           return source.startsWith('/') ?
               {id: url.href, external: 'absolute'} :

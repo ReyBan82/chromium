@@ -1,5 +1,6 @@
 <!doctype html>
-<html dir="$i18n{textdirection}" lang="$i18n{language}" class="loading">
+<html dir="$i18n{textdirection}" lang="$i18n{language}" class="loading"
+    $i18n{webuiRefresh2026} $i18n{settingsRefresh2026} $i18n{roundedIconsAttribute} $i18n{webuiRoundedIconsAttribute}>
 <head>
   <meta charset="utf-8">
   <meta name="color-scheme" content="light dark">
@@ -19,20 +20,25 @@
       }
     }
 
-    html.loading::before {
-      background-color: var(--md-toolbar-color);
-      border-bottom: var(--md-toolbar-border);
-      box-sizing: border-box;
-      content: '';
-      display: block;
-      height: var(--md-toolbar-height);
-    }
-
     html,
     body {
       height: 100%;
       margin: 0;
     }
+
+    html[webui-refresh-2026] {
+      background: var(--color-webui-page-background);
+    }
+
+    html[settings-refresh-2026] {
+      background: var(--color-settings-webui-page-background);
+    }
+
+<if expr="is_chromeos">
+    html[settings-refresh-2026] body {
+      font-family: 'Google Sans', Roboto, sans-serif;
+    }
+</if>
   </style>
 </head>
 <body>

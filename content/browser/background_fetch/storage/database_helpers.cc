@@ -4,6 +4,9 @@
 
 #include "content/browser/background_fetch/storage/database_helpers.h"
 
+#include <string_view>
+
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
@@ -12,50 +15,52 @@
 namespace content {
 namespace background_fetch {
 
-std::string ActiveRegistrationUniqueIdKey(const std::string& developer_id) {
+std::string ActiveRegistrationUniqueIdKey(std::string_view developer_id) {
   // Allows looking up the active registration's |unique_id| by |developer_id|.
   // Registrations are active from creation up until completed/failed/aborted.
   // These database entries correspond to the active background fetches map:
   // https://wicg.github.io/background-fetch/#service-worker-registration-active-background-fetches
-  return kActiveRegistrationUniqueIdKeyPrefix + developer_id;
+  return base::StrCat({kActiveRegistrationUniqueIdKeyPrefix, developer_id});
 }
 
-std::string RegistrationKey(const std::string& unique_id) {
+std::string RegistrationKey(std::string_view unique_id) {
   // Allows looking up a registration by |unique_id|.
-  return kRegistrationKeyPrefix + unique_id;
+  return base::StrCat({kRegistrationKeyPrefix, unique_id});
 }
 
-std::string UIOptionsKey(const std::string& unique_id) {
-  return kUIOptionsKeyPrefix + unique_id;
+std::string UIOptionsKey(std::string_view unique_id) {
+  return base::StrCat({kUIOptionsKeyPrefix, unique_id});
 }
 
-std::string PendingRequestKeyPrefix(const std::string& unique_id) {
-  return kPendingRequestKeyPrefix + unique_id + kSeparator;
+std::string PendingRequestKeyPrefix(std::string_view unique_id) {
+  return base::StrCat({kPendingRequestKeyPrefix, unique_id, kSeparator});
 }
 
-std::string PendingRequestKey(const std::string& unique_id, int request_index) {
-  return PendingRequestKeyPrefix(unique_id) + std::to_string(request_index);
+std::string PendingRequestKey(std::string_view unique_id, int request_index) {
+  return base::StrCat({PendingRequestKeyPrefix(unique_id),
+                       base::NumberToString(request_index)});
 }
 
-std::string ActiveRequestKeyPrefix(const std::string& unique_id) {
-  return kActiveRequestKeyPrefix + unique_id + kSeparator;
+std::string ActiveRequestKeyPrefix(std::string_view unique_id) {
+  return base::StrCat({kActiveRequestKeyPrefix, unique_id, kSeparator});
 }
 
-std::string ActiveRequestKey(const std::string& unique_id, int request_index) {
-  return ActiveRequestKeyPrefix(unique_id) + std::to_string(request_index);
+std::string ActiveRequestKey(std::string_view unique_id, int request_index) {
+  return base::StrCat(
+      {ActiveRequestKeyPrefix(unique_id), base::NumberToString(request_index)});
 }
 
-std::string CompletedRequestKeyPrefix(const std::string& unique_id) {
-  return kCompletedRequestKeyPrefix + unique_id + kSeparator;
+std::string CompletedRequestKeyPrefix(std::string_view unique_id) {
+  return base::StrCat({kCompletedRequestKeyPrefix, unique_id, kSeparator});
 }
 
-std::string CompletedRequestKey(const std::string& unique_id,
-                                int request_index) {
-  return CompletedRequestKeyPrefix(unique_id) + std::to_string(request_index);
+std::string CompletedRequestKey(std::string_view unique_id, int request_index) {
+  return base::StrCat({CompletedRequestKeyPrefix(unique_id),
+                       base::NumberToString(request_index)});
 }
 
-std::string StorageVersionKey(const std::string& unique_id) {
-  return kStorageVersionKeyPrefix + unique_id;
+std::string StorageVersionKey(std::string_view unique_id) {
+  return base::StrCat({kStorageVersionKeyPrefix, unique_id});
 }
 
 DatabaseStatus ToDatabaseStatus(blink::ServiceWorkerStatusCode status) {
@@ -65,6 +70,7 @@ DatabaseStatus ToDatabaseStatus(blink::ServiceWorkerStatusCode status) {
     case blink::ServiceWorkerStatusCode::kErrorFailed:
     case blink::ServiceWorkerStatusCode::kErrorAbort:
     case blink::ServiceWorkerStatusCode::kErrorStorageDisconnected:
+    case blink::ServiceWorkerStatusCode::kErrorStorageDataCorrupted:
       // kErrorFailed is for invalid arguments (e.g. empty key) or database
       // errors. kErrorAbort is for unexpected failures, e.g. because shutdown
       // is in progress. kErrorStorageDisconnected is for the Storage Service
@@ -93,13 +99,12 @@ DatabaseStatus ToDatabaseStatus(blink::ServiceWorkerStatusCode status) {
       break;
   }
   NOTREACHED();
-  return DatabaseStatus::kFailed;
 }
 
 bool ToBackgroundFetchRegistration(
     const proto::BackgroundFetchMetadata& metadata_proto,
     blink::mojom::BackgroundFetchRegistrationData* registration_data) {
-  DCHECK(registration_data);
+  CHECK(registration_data, base::NotFatalUntil::M158);
   const auto& registration_proto = metadata_proto.registration();
 
   registration_data->developer_id = registration_proto.developer_id();
@@ -150,7 +155,7 @@ bool MojoFailureReasonFromRegistrationProto(
     proto::BackgroundFetchRegistration::BackgroundFetchFailureReason
         proto_failure_reason,
     blink::mojom::BackgroundFetchFailureReason* failure_reason) {
-  DCHECK(failure_reason);
+  CHECK(failure_reason, base::NotFatalUntil::M158);
   switch (proto_failure_reason) {
     case proto::BackgroundFetchRegistration::NONE:
       *failure_reason = blink::mojom::BackgroundFetchFailureReason::NONE;
@@ -188,10 +193,10 @@ bool MojoFailureReasonFromRegistrationProto(
 }
 
 GURL MakeCacheUrlUnique(const GURL& url,
-                        const std::string& unique_id,
+                        std::string_view unique_id,
                         size_t request_index) {
-  std::string query = url.query();
-  query += unique_id + base::NumberToString(request_index);
+  std::string query = base::StrCat(
+      {url.query(), unique_id, base::NumberToString(request_index)});
 
   GURL::Replacements replacements;
   replacements.SetQueryStr(query);
@@ -200,17 +205,18 @@ GURL MakeCacheUrlUnique(const GURL& url,
 }
 
 GURL RemoveUniqueParamFromCacheURL(const GURL& url,
-                                   const std::string& unique_id) {
-  std::vector<std::string> split = base::SplitStringUsingSubstr(
+                                   std::string_view unique_id) {
+  std::vector<std::string_view> split = base::SplitStringPieceUsingSubstr(
       url.query(), unique_id, base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
   GURL::Replacements replacements;
-  if (split.size() == 1u)
+  if (split.size() == 1u) {
     replacements.ClearQuery();
-  else if (split.size() == 2u)
+  } else if (split.size() == 2u) {
     replacements.SetQueryStr(split[0]);
-  else
+  } else {
     NOTREACHED();
+  }
 
   return url.ReplaceComponents(replacements);
 }

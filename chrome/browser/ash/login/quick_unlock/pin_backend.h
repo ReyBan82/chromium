@@ -5,20 +5,22 @@
 #ifndef CHROME_BROWSER_ASH_LOGIN_QUICK_UNLOCK_PIN_BACKEND_H_
 #define CHROME_BROWSER_ASH_LOGIN_QUICK_UNLOCK_PIN_BACKEND_H_
 
+#include <optional>
 #include <string>
 
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/time/time.h"
 #include "chromeos/ash/components/login/auth/public/auth_callbacks.h"
 #include "chromeos/ash/components/login/auth/public/key.h"
 #include "chromeos/ash/services/auth_factor_config/chrome_browser_delegates.h"
 #include "components/prefs/pref_service.h"
 
 class AccountId;
-class Profile;
-class ScopedKeepAlive;
+class PrefService;
 
-namespace ash {
-namespace quick_unlock {
+namespace ash::quick_unlock {
 
 class PinStorageCryptohome;
 enum class Purpose;
@@ -28,9 +30,22 @@ enum class Purpose;
 class PinBackend : public ash::auth::PinBackendDelegate {
  public:
   using BoolCallback = base::OnceCallback<void(bool)>;
+  using AvailabilityCallback =
+      base::OnceCallback<void(bool, std::optional<base::Time>)>;
+
+  // Creates the singleton object.
+  // `local_state` must be non-null and must live until Shutdown() is called.
+  // TODO(crbug.com/498416395): Use std::unique_ptr<PinBackend> for memory
+  // management, and remove this.
+  static void Initialize(PrefService* local_state);
 
   // Fetch the PinBackend instance.
   static PinBackend* GetInstance();
+
+  // Cleans up internal states.
+  // TODO(crbug.com/498416395): Refactor PinBackend to destroy the singleton
+  // object, and remove this.
+  static void Shutdown();
 
   // Computes a new salt.
   static std::string ComputeSalt();
@@ -39,9 +54,6 @@ class PinBackend : public ash::auth::PinBackendDelegate {
   static std::string ComputeSecret(const std::string& pin,
                                    const std::string& salt,
                                    Key::KeyType key_type);
-
-  // Use GetInstance().
-  PinBackend();
 
   PinBackend(const PinBackend&) = delete;
   PinBackend& operator=(const PinBackend&) = delete;
@@ -52,9 +64,6 @@ class PinBackend : public ash::auth::PinBackendDelegate {
   // cryptohome backend is available.
   void HasLoginSupport(BoolCallback result);
 
-  // Try to migrate a prefs-based PIN to cryptohome.
-  void MigrateToCryptohome(Profile*, std::unique_ptr<UserContext>);
-
   // Check if the given account_id has a PIN registered.
   void IsSet(const AccountId& account_id, BoolCallback result);
 
@@ -63,6 +72,12 @@ class PinBackend : public ash::auth::PinBackendDelegate {
            const std::string& auth_token,
            const std::string& pin,
            BoolCallback did_set) override;
+
+  // Update the PIN for the given user.
+  void UpdateCryptohomePin(const AccountId& account_id,
+                           const std::string& auth_token,
+                           const std::string& pin,
+                           BoolCallback did_update) override;
 
   // Set the state of PIN auto submit for the given user. Called when enabling
   // auto submit through the confirmation dialog in Settings.
@@ -81,7 +96,7 @@ class PinBackend : public ash::auth::PinBackendDelegate {
   // restrictions.
   void CanAuthenticate(const AccountId& account_id,
                        Purpose purpose,
-                       BoolCallback result);
+                       AvailabilityCallback result_callback);
 
   // Try to check a pin `key` value for the given user. The `key` must be plain
   // text and not contain a salt. The `user_context` must not have an
@@ -93,14 +108,6 @@ class PinBackend : public ash::auth::PinBackendDelegate {
                        const Key& key,
                        Purpose purpose,
                        AuthOperationCallback result);
-
-  // Returns true if the cryptohome backend should be used. Sometimes the prefs
-  // backend should be used even when cryptohome is available, ie, when there is
-  // an non-migrated PIN key.
-  bool ShouldUseCryptohome(const AccountId& account_id);
-
-  // Resets any cached state for testing purposes.
-  static void ResetForTesting();
 
   // Interface for the lock/login screen to access the user's PIN length.
   // Ensures that the UI is always consistent with the pref values without the
@@ -122,14 +129,39 @@ class PinBackend : public ash::auth::PinBackendDelegate {
   };
 
  private:
+  class CryptohomeBackendState {
+   public:
+    CryptohomeBackendState();
+    CryptohomeBackendState(const CryptohomeBackendState&) = delete;
+    CryptohomeBackendState& operator=(const CryptohomeBackendState&) = delete;
+    ~CryptohomeBackendState();
+
+    // If cryptohome backend is supported `cryptohome_backend_or_null` must be
+    // non-null. Otherwiser, it must be nullptr.
+    void Set(std::unique_ptr<PinStorageCryptohome> cryptohome_backend_or_null);
+
+    // TODO(crbug.com/498416395): Removed with PinBackend::Shutdown.
+    void Shutdown();
+
+    // Returns true until `Set` is called.
+    bool IsResolving() const;
+
+    // `Set` must be called beforehand.
+    bool IsSupported() const;
+
+    // `Set` must be called beforehand.
+    PinStorageCryptohome& GetCryptohomeBackend() const;
+
+   private:
+    std::optional<bool> is_supported_;
+    std::unique_ptr<PinStorageCryptohome> cryptohome_backend_;
+  };
+
+  // Use Initialize().
+  explicit PinBackend(PrefService* local_state);
+
   // Called when we know if the cryptohome supports PIN.
   void OnIsCryptohomeBackendSupported(bool is_supported);
-
-  // Called when a migration attempt has completed. If `success` is true the PIN
-  // should be cleared from prefs.
-  void OnPinMigrationAttemptComplete(Profile* profile,
-                                     std::unique_ptr<UserContext>,
-                                     absl::optional<AuthenticationError>);
 
   // Actions to be performed after an authentication attempt with Cryptohome.
   // The only use case right now is for PIN auto submit, where we might want to
@@ -138,7 +170,7 @@ class PinBackend : public ash::auth::PinBackendDelegate {
       const Key& key,
       AuthOperationCallback result,
       std::unique_ptr<UserContext> user_context,
-      absl::optional<AuthenticationError> error);
+      std::optional<AuthenticationError> error);
 
   // Called after checking the user's PIN when enabling auto submit.
   // If the authentication was `success`ful, the `pin_length` will be
@@ -146,13 +178,25 @@ class PinBackend : public ash::auth::PinBackendDelegate {
   void OnPinAutosubmitCheckComplete(size_t pin_length,
                                     BoolCallback result,
                                     std::unique_ptr<UserContext> user_context,
-                                    absl::optional<AuthenticationError> error);
-
-  // Help method for working with the PIN auto submit preference.
-  PrefService* PrefService(const AccountId& account_id);
+                                    std::optional<AuthenticationError> error);
 
   // Simple operations to be performed for PIN auto submit during the common
   // operations in PinBackend - Set, Remove, TryAuthenticate
+  void SetWithContext(const AccountId& account_id,
+                      const std::string& auth_token,
+                      const std::string& pin,
+                      BoolCallback did_set,
+                      std::unique_ptr<UserContext> user_context);
+  void RemoveWithContext(const AccountId& account_id,
+                         const std::string& auth_token,
+                         BoolCallback did_remove,
+                         std::unique_ptr<UserContext> user_context);
+  void UpdateCryptohomePinWithContext(
+      const AccountId& account_id,
+      const std::string& token,
+      const std::string& pin,
+      BoolCallback did_set,
+      std::unique_ptr<UserContext> user_context);
 
   // When setting/updating a PIN. After every 'Set' operation the
   // exposed length can only be either the true PIN length, or zero.
@@ -181,25 +225,21 @@ class PinBackend : public ash::auth::PinBackendDelegate {
   static void OnAuthOperation(std::string auth_token,
                               BoolCallback callback,
                               std::unique_ptr<UserContext>,
-                              absl::optional<AuthenticationError>);
+                              std::optional<AuthenticationError>);
 
-  // True if still trying to determine which backend should be used.
-  bool resolving_backend_ = true;
+  raw_ptr<PrefService> local_state_;
+
   // Determining if the device supports cryptohome-based keys requires an async
   // dbus call to cryptohome. If we receive a request before we know which
   // backend to use, the request will be pushed to this list and invoked once
   // the backend configuration is determined.
   std::vector<base::OnceClosure> on_cryptohome_support_received_;
 
-  // Non-null if we should use the cryptohome backend. If null, the prefs
-  // backend should be used.
-  std::unique_ptr<PinStorageCryptohome> cryptohome_backend_;
+  CryptohomeBackendState cryptohome_state_;
 
-  // Blocks chrome from restarting while migrating from prefs to cryptohome PIN.
-  std::unique_ptr<ScopedKeepAlive> scoped_keep_alive_;
+  base::WeakPtrFactory<PinBackend> weak_ptr_factory_{this};
 };
 
-}  // namespace quick_unlock
-}  // namespace ash
+}  // namespace ash::quick_unlock
 
 #endif  // CHROME_BROWSER_ASH_LOGIN_QUICK_UNLOCK_PIN_BACKEND_H_

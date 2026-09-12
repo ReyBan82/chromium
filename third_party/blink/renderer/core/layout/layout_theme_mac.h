@@ -52,12 +52,11 @@ class LayoutThemeMac final : public LayoutThemeDefault {
   bool SupportsSelectionForegroundColors() const override { return false; }
   bool IsAccentColorCustomized(
       mojom::blink::ColorScheme color_scheme) const override;
-  Color GetSystemAccentColor(mojom::blink::ColorScheme color_scheme) const override;
-
- protected:
-  // Controls color values returned from FocusRingColor().
-  bool UsesTestModeFocusRingColor() const;
-  Color GetCustomFocusRingColor(mojom::blink::ColorScheme color_scheme) const;
+  Color GetSystemAccentColor(
+      mojom::blink::ColorScheme color_scheme) const override;
+  Color SystemHighlightFromColorProvider(
+      mojom::blink::ColorScheme color_scheme,
+      const ui::ColorProvider* color_provider) const override;
 };
 
 }  // namespace blink

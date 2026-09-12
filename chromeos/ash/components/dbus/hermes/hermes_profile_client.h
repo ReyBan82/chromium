@@ -37,6 +37,13 @@ class COMPONENT_EXPORT(HERMES_CLIENT) HermesProfileClient {
     // Sets service state to connected after eSIM profiles are enabled.
     virtual void SetEnableProfileBehavior(
         EnableProfileBehavior enable_profile_behavior) = 0;
+
+    // Sets the return for the next call to
+    // HermesEuiccClient::EnableCarrierProfile(). The implementation of this
+    // method should only accept error statuses since clients expect additional
+    // steps to have been taken when successful.
+    virtual void SetNextEnableCarrierProfileResult(
+        HermesResponseStatus status) = 0;
   };
 
   // Hermes profile properties.
@@ -71,10 +78,8 @@ class COMPONENT_EXPORT(HERMES_CLIENT) HermesProfileClient {
   };
 
   // Interface for observing changes to profile objects.
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
-    virtual ~Observer() = default;
-
     // Called when a carrier profile property changes.
     virtual void OnCarrierProfilePropertyChanged(
         const dbus::ObjectPath& object_path,
@@ -130,13 +135,12 @@ class COMPONENT_EXPORT(HERMES_CLIENT) HermesProfileClient {
   HermesProfileClient();
   virtual ~HermesProfileClient();
 
-  const base::ObserverList<HermesProfileClient::Observer>::Unchecked&
-  observers() {
+  const base::ObserverList<HermesProfileClient::Observer>& observers() {
     return observers_;
   }
 
  private:
-  base::ObserverList<HermesProfileClient::Observer>::Unchecked observers_;
+  base::ObserverList<HermesProfileClient::Observer> observers_;
 };
 
 }  // namespace ash

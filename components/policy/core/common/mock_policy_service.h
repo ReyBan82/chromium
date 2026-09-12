@@ -5,8 +5,12 @@
 #ifndef COMPONENTS_POLICY_CORE_COMMON_MOCK_POLICY_SERVICE_H_
 #define COMPONENTS_POLICY_CORE_COMMON_MOCK_POLICY_SERVICE_H_
 
+#include <optional>
+#include <string_view>
+
 #include "build/build_config.h"
 #include "components/policy/core/common/policy_service.h"
+#include "components/policy/core/common/policy_types.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 namespace policy {
@@ -45,9 +49,13 @@ class MockPolicyService : public PolicyService {
   MOCK_CONST_METHOD1(HasProvider, bool(ConfigurationPolicyProvider*));
 
   MOCK_CONST_METHOD1(GetPolicies, const PolicyMap&(const PolicyNamespace&));
+
+  MOCK_CONST_METHOD1(GetInitialChromePolicyValueHash,
+                     std::optional<size_t>(std::string_view policy_name));
   MOCK_CONST_METHOD1(IsInitializationComplete, bool(PolicyDomain domain));
   MOCK_CONST_METHOD1(IsFirstPolicyLoadComplete, bool(PolicyDomain domain));
-  MOCK_METHOD1(RefreshPolicies, void(base::OnceClosure));
+  MOCK_METHOD2(RefreshPolicies, void(base::OnceClosure, PolicyFetchReason));
+  MOCK_METHOD1(UseLocalTestPolicyProvider, void(ConfigurationPolicyProvider*));
 
 #if BUILDFLAG(IS_ANDROID)
   MOCK_METHOD0(GetPolicyServiceAndroid, android::PolicyServiceAndroid*());

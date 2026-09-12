@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 
+#include <string_view>
 #include <utility>
 
 #include "base/containers/span.h"
@@ -29,8 +30,9 @@ void AssociatedInterfacePtrStateBase::QueryVersion(
 }
 
 void AssociatedInterfacePtrStateBase::RequireVersion(uint32_t version) {
-  if (version <= version_)
+  if (version <= version_) {
     return;
+  }
 
   version_ = version;
   endpoint_client_->RequireVersion(version);
@@ -49,7 +51,7 @@ void AssociatedInterfacePtrStateBase::FlushForTesting() {
 
 void AssociatedInterfacePtrStateBase::CloseWithReason(
     uint32_t custom_reason,
-    const std::string& description) {
+    std::string_view description) {
   endpoint_client_->CloseWithReason(custom_reason, description);
 }
 

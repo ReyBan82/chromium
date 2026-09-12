@@ -59,7 +59,7 @@ class UserActionsCollectorTest : public testing::Test {
 
  protected:
   base::test::ScopedFeatureList feature_list_;
-  variations::ScopedVariationsIdsProvider scoped_variations_ids_provider_{
+  variations::test::ScopedVariationsIdsProvider scoped_variations_ids_provider_{
       variations::VariationsIdsProvider::Mode::kUseSignedInState};
   TestingPrefServiceSimple profile_prefs_;
   base::HistogramTester histogram_;
@@ -92,7 +92,7 @@ TEST_F(UserActionsCollectorTest, AddAndRetrieveOne64BitEntry) {
       "CountValuesDuringStoreInitialization",
       1, 1);
 
-  const base::Value::List& list_value =
+  const base::ListValue& list_value =
       user_actions_collector_->visit_metadata_string_list_pref_for_testing();
   ASSERT_EQ(1u, list_value.size());
 
@@ -246,7 +246,7 @@ TEST_F(UserActionsCollectorTest, SortedList) {
       "CountValuesDuringStoreInitialization",
       GetFeedConfig().max_url_entries_in_cache, 1);
 
-  const base::Value::List& list_value =
+  const base::ListValue& list_value =
       user_actions_collector_->visit_metadata_string_list_pref_for_testing();
 
   // First |count_entries| entries (with mid from 0 to |count_entries|-1) should
@@ -286,7 +286,7 @@ TEST_F(UserActionsCollectorTest, LimitCountOfMidsPerUrlEntry) {
       "CountValuesDuringStoreInitialization",
       1, 1);
 
-  const base::Value::List& list_value =
+  const base::ListValue& list_value =
       user_actions_collector_->visit_metadata_string_list_pref_for_testing();
 
   ASSERT_EQ(1u, list_value.size());

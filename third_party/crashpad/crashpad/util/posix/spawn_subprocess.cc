@@ -15,11 +15,16 @@
 #include "util/posix/spawn_subprocess.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <set>
+#include <string>
+#include <vector>
 
 #include "base/check.h"
 #include "base/check_op.h"
@@ -100,7 +105,7 @@ class PosixSpawnFileActions {
 
 bool SpawnSubprocess(const std::vector<std::string>& argv,
                      const std::vector<std::string>* envp,
-                     int preserve_fd,
+                     const std::set<int>& preserve_fds,
                      bool use_path,
                      void (*child_function)()) {
   // argv_c contains const char* pointers and is terminated by nullptr. This is
@@ -186,11 +191,13 @@ bool SpawnSubprocess(const std::vector<std::string>& argv,
 
     // Grandchild process.
 
-    CloseMultipleNowOrOnExec(STDERR_FILENO + 1, preserve_fd);
+    CloseMultipleNowOrOnExec(STDERR_FILENO + 1, preserve_fds);
+    ClearCloseOnExec(preserve_fds);
 
     auto execve_fp = use_path ? execvpe : execve;
     execve_fp(argv_for_spawn[0], argv_for_spawn, envp_for_spawn);
-    PLOG(FATAL) << (use_path ? "execvpe" : "execve");
+    PLOG(FATAL) << (use_path ? "execvpe" : "execve") << " "
+                << argv_for_spawn[0];
 #else
 #if BUILDFLAG(IS_APPLE)
     PosixSpawnAttr attr;
@@ -200,12 +207,15 @@ bool SpawnSubprocess(const std::vector<std::string>& argv,
     for (int fd = 0; fd <= STDERR_FILENO; ++fd) {
       file_actions.AddInheritedFileDescriptor(fd);
     }
-    file_actions.AddInheritedFileDescriptor(preserve_fd);
+    for (int preserve_fd : preserve_fds) {
+      file_actions.AddInheritedFileDescriptor(preserve_fd);
+    }
 
     const posix_spawnattr_t* attr_p = attr.Get();
     const posix_spawn_file_actions_t* file_actions_p = file_actions.Get();
 #else
-    CloseMultipleNowOrOnExec(STDERR_FILENO + 1, preserve_fd);
+    CloseMultipleNowOrOnExec(STDERR_FILENO + 1, preserve_fds);
+    ClearCloseOnExec(preserve_fds);
 
     const posix_spawnattr_t* attr_p = nullptr;
     const posix_spawn_file_actions_t* file_actions_p = nullptr;
@@ -218,7 +228,8 @@ bool SpawnSubprocess(const std::vector<std::string>& argv,
                                 attr_p,
                                 argv_for_spawn,
                                 envp_for_spawn)) != 0) {
-      PLOG(FATAL) << (use_path ? "posix_spawnp" : "posix_spawn");
+      PLOG(FATAL) << (use_path ? "posix_spawnp" : "posix_spawn") << " "
+                  << argv_for_spawn[0];
     }
 
     // _exit() instead of exit(), because fork() was called.

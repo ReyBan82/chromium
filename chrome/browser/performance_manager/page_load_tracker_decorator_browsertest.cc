@@ -6,7 +6,8 @@
 #include "base/process/process.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/performance_manager/graph/page_node_impl.h"
@@ -15,6 +16,8 @@
 #include "content/public/test/browser_test.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 
 namespace performance_manager {
 
@@ -27,30 +30,22 @@ using ::testing::ElementsAre;
 // transition to LoadingState::kLoadedIdle. Collects all intermediate states
 // observed in-between. Generates an error if transitions are observed for
 // another PageNode than |page_node|.
-class PageLoadingStateObserver : public PageNode::ObserverDefaultImpl,
+class PageLoadingStateObserver : public PageNodeObserver,
                                  public GraphOwnedDefaultImpl {
  public:
   PageLoadingStateObserver(base::WeakPtr<PageNode> page_node,
                            bool exit_if_already_loaded_idle)
       : page_node_(page_node) {
     DCHECK(PerformanceManagerImpl::IsAvailable());
-    PerformanceManagerImpl::CallOnGraphImpl(
-        FROM_HERE,
-        // |exit_if_already_loaded_idle| is captured by copy because the lambda
-        // can be executed after the constructor returns.
-        base::BindLambdaForTesting([&, exit_if_already_loaded_idle](
-                                       performance_manager::GraphImpl* graph) {
-          EXPECT_TRUE(page_node_);
+    EXPECT_TRUE(page_node_);
 
-          if (exit_if_already_loaded_idle &&
-              page_node_->GetLoadingState() ==
-                  PageNode::LoadingState::kLoadedIdle) {
-            QuitRunLoop();
-          } else {
-            graph_ = graph;
-            graph_->AddPageNodeObserver(this);
-          }
-        }));
+    if (exit_if_already_loaded_idle &&
+        page_node_->GetLoadingState() == PageNode::LoadingState::kLoadedIdle) {
+      QuitRunLoop();
+    } else {
+      graph_ = PerformanceManagerImpl::GetGraphImpl();
+      graph_->AddPageNodeObserver(this);
+    }
   }
 
   ~PageLoadingStateObserver() override = default;
@@ -77,7 +72,9 @@ class PageLoadingStateObserver : public PageNode::ObserverDefaultImpl,
   // PageNodeObserver:
   void OnLoadingStateChanged(const PageNode* page_node,
                              PageNode::LoadingState previous_state) override {
-    EXPECT_EQ(page_node_.get(), page_node);
+    if (page_node_.get() != page_node) {
+      return;
+    }
 
     if (page_node->GetLoadingState() == PageNode::LoadingState::kLoadedIdle) {
       graph_->RemovePageNodeObserver(this);
@@ -104,11 +101,7 @@ class PageLoadingStateObserver : public PageNode::ObserverDefaultImpl,
 
 }  // namespace
 
-class PageLoadTrackerDecoratorTest : public InProcessBrowserTest {
- public:
-  PageLoadTrackerDecoratorTest() = default;
-  ~PageLoadTrackerDecoratorTest() override = default;
-};
+using PageLoadTrackerDecoratorTest = InProcessBrowserTest;
 
 // Integration test verifying that everything is hooked up in Chrome to update
 // PageNode::GetLoadingState() is updated on navigation. See
@@ -118,7 +111,7 @@ IN_PROC_BROWSER_TEST_F(PageLoadTrackerDecoratorTest, PageNodeLoadingState) {
 
   base::WeakPtr<PageNode> page_node =
       PerformanceManager::GetPrimaryPageNodeForWebContents(
-          browser()->tab_strip_model()->GetActiveWebContents());
+          browser()->GetTabStripModel()->GetActiveWebContents());
 
   // Wait until GetLoadingState() is LoadingState::kLoadedIdle (the initial
   // navigation may or may not be ongoing).
@@ -134,9 +127,11 @@ IN_PROC_BROWSER_TEST_F(PageLoadTrackerDecoratorTest, PageNodeLoadingState) {
                                     /* exit_if_already_loaded_idle=*/false);
 
   // Navigate.
-  browser()->OpenURL(content::OpenURLParams(
-      embedded_test_server()->GetURL("/empty.html"), content::Referrer(),
-      WindowOpenDisposition::CURRENT_TAB, ui::PAGE_TRANSITION_TYPED, false));
+  browser()->OpenURL(
+      content::OpenURLParams(
+          embedded_test_server()->GetURL("/empty.html"), content::Referrer(),
+          WindowOpenDisposition::CURRENT_TAB, ui::PAGE_TRANSITION_TYPED, false),
+      /*navigation_handle_callback=*/{});
 
   // Wait until GetLoadingState() transitions to LoadingState::kLoadedIdle.
   observer.Wait();

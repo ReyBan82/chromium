@@ -23,13 +23,19 @@ MojoMediaClient::~MojoMediaClient() = default;
 void MojoMediaClient::Initialize() {}
 
 std::unique_ptr<AudioDecoder> MojoMediaClient::CreateAudioDecoder(
-    scoped_refptr<base::SequencedTaskRunner> task_runner) {
+    scoped_refptr<base::SequencedTaskRunner> task_runner,
+    std::unique_ptr<media::MediaLog> media_log) {
   return nullptr;
 }
 
 std::unique_ptr<AudioEncoder> MojoMediaClient::CreateAudioEncoder(
     scoped_refptr<base::SequencedTaskRunner> task_runner) {
   return nullptr;
+}
+
+SupportedAudioDecoderConfigs
+MojoMediaClient::GetSupportedAudioDecoderConfigs() {
+  return {};
 }
 
 SupportedVideoDecoderConfigs
@@ -41,14 +47,13 @@ VideoDecoderType MojoMediaClient::GetDecoderImplementationType() {
   return VideoDecoderType::kUnknown;
 }
 
-#if BUILDFLAG(ALLOW_OOP_VIDEO_DECODER)
+#if BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
 void MojoMediaClient::NotifyDecoderSupportKnown(
-    mojo::PendingRemote<stable::mojom::StableVideoDecoder> oop_video_decoder,
-    base::OnceCallback<
-        void(mojo::PendingRemote<stable::mojom::StableVideoDecoder>)> cb) {
+    mojo::PendingRemote<mojom::VideoDecoder> oop_video_decoder,
+    base::OnceCallback<void(mojo::PendingRemote<mojom::VideoDecoder>)> cb) {
   std::move(cb).Run(std::move(oop_video_decoder));
 }
-#endif  // BUILDFLAG(ALLOW_OOP_VIDEO_DECODER)
+#endif  // BUILDFLAG(ENABLE_OOP_VIDEO_DECODER)
 
 std::unique_ptr<VideoDecoder> MojoMediaClient::CreateVideoDecoder(
     scoped_refptr<base::SequencedTaskRunner> task_runner,
@@ -56,7 +61,7 @@ std::unique_ptr<VideoDecoder> MojoMediaClient::CreateVideoDecoder(
     mojom::CommandBufferIdPtr command_buffer_id,
     RequestOverlayInfoCB request_overlay_info_cb,
     const gfx::ColorSpace& target_color_space,
-    mojo::PendingRemote<stable::mojom::StableVideoDecoder> oop_video_decoder) {
+    mojo::PendingRemote<mojom::VideoDecoder> oop_video_decoder) {
   return nullptr;
 }
 
@@ -84,9 +89,7 @@ std::unique_ptr<Renderer> MojoMediaClient::CreateMediaFoundationRenderer(
     mojom::FrameInterfaceFactory* frame_interfaces,
     mojo::PendingRemote<mojom::MediaLog> media_log_remote,
     mojo::PendingReceiver<mojom::MediaFoundationRendererExtension>
-        renderer_extension_receiver,
-    mojo::PendingRemote<media::mojom::MediaFoundationRendererClientExtension>
-        client_extension_remote) {
+        renderer_extension_receiver) {
   return nullptr;
 }
 #endif  // BUILDFLAG(IS_WIN)

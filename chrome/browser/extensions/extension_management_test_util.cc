@@ -5,9 +5,9 @@
 #include "chrome/browser/extensions/extension_management_test_util.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include "base/containers/contains.h"
 #include "base/run_loop.h"
 #include "components/crx_file/id_util.h"
 #include "components/policy/core/common/configuration_policy_provider.h"
@@ -31,11 +31,11 @@ std::string make_path(const std::string& a, const std::string& b) {
   return a + "." + b;
 }
 
-void RemoveDictionaryPath(base::Value::Dict& dict, base::StringPiece path) {
-  base::StringPiece current_path(path);
-  base::Value::Dict* current_dictionary = &dict;
+void RemoveDictionaryPath(base::DictValue& dict, std::string_view path) {
+  std::string_view current_path(path);
+  base::DictValue* current_dictionary = &dict;
   size_t delimiter_position = current_path.rfind('.');
-  if (delimiter_position != base::StringPiece::npos) {
+  if (delimiter_position != std::string_view::npos) {
     current_dictionary =
         dict.FindDictByDottedPath(current_path.substr(0, delimiter_position));
     if (!current_dictionary)
@@ -47,8 +47,8 @@ void RemoveDictionaryPath(base::Value::Dict& dict, base::StringPiece path) {
 
 }  // namespace
 
-ExtensionManagementPrefUpdaterBase::ExtensionManagementPrefUpdaterBase() {
-}
+ExtensionManagementPrefUpdaterBase::ExtensionManagementPrefUpdaterBase() =
+    default;
 
 ExtensionManagementPrefUpdaterBase::~ExtensionManagementPrefUpdaterBase() {
   // Make asynchronous calls finished to deliver all preference changes to the
@@ -67,7 +67,7 @@ void ExtensionManagementPrefUpdaterBase::UnsetPerExtensionSettings(
 void ExtensionManagementPrefUpdaterBase::ClearPerExtensionSettings(
     const ExtensionId& id) {
   DCHECK(crx_file::id_util::IdIsValid(id));
-  pref_.Set(id, base::Value::Dict());
+  pref_.Set(id, base::DictValue());
 }
 
 // Helper functions for 'installation_mode' manipulation -----------------------
@@ -109,6 +109,14 @@ void ExtensionManagementPrefUpdaterBase::SetIndividualExtensionAutoInstalled(
       make_path(id, schema::kInstallationMode),
       forced ? schema::kForceInstalled : schema::kNormalInstalled);
   pref_.SetByDottedPath(make_path(id, schema::kUpdateUrl), update_url);
+}
+
+void ExtensionManagementPrefUpdaterBase::SetIndividualExtensionRemoved(
+    const ExtensionId& id) {
+  DCHECK(crx_file::id_util::IdIsValid(id));
+  pref_.SetByDottedPath(make_path(id, schema::kInstallationMode),
+                        schema::kRemoved);
+  RemoveDictionaryPath(pref_, make_path(id, schema::kUpdateUrl));
 }
 
 // Helper functions for 'install_sources' manipulation -------------------------
@@ -292,40 +300,40 @@ void ExtensionManagementPrefUpdaterBase::UnsetMinimumVersionRequired(
 
 // Expose a read-only preference to user ---------------------------------------
 
-const base::Value::Dict* ExtensionManagementPrefUpdaterBase::GetPref() {
+const base::DictValue* ExtensionManagementPrefUpdaterBase::GetPref() {
   return &pref_;
 }
 
 // Private section functions ---------------------------------------------------
 
-void ExtensionManagementPrefUpdaterBase::SetPref(base::Value::Dict pref) {
+void ExtensionManagementPrefUpdaterBase::SetPref(base::DictValue pref) {
   pref_ = std::move(pref);
 }
 
-base::Value::Dict ExtensionManagementPrefUpdaterBase::TakePref() {
+base::DictValue ExtensionManagementPrefUpdaterBase::TakePref() {
   return std::move(pref_);
 }
 
 void ExtensionManagementPrefUpdaterBase::ClearList(const std::string& path) {
-  pref_.SetByDottedPath(path, base::Value::List());
+  pref_.SetByDottedPath(path, base::ListValue());
 }
 
 void ExtensionManagementPrefUpdaterBase::AddStringToList(
     const std::string& path,
     const std::string& str) {
-  base::Value::List* list_value_weak = pref_.FindListByDottedPath(path);
+  base::ListValue* list_value_weak = pref_.FindListByDottedPath(path);
   if (!list_value_weak) {
     list_value_weak =
-        &pref_.SetByDottedPath(path, base::Value::List())->GetList();
+        &pref_.SetByDottedPath(path, base::ListValue())->GetList();
   }
-  CHECK(!base::Contains(*list_value_weak, base::Value(str)));
+  CHECK(!list_value_weak->contains(str));
   list_value_weak->Append(str);
 }
 
 void ExtensionManagementPrefUpdaterBase::RemoveStringFromList(
     const std::string& path,
     const std::string& str) {
-  base::Value::List* list_value = pref_.FindListByDottedPath(path);
+  base::ListValue* list_value = pref_.FindListByDottedPath(path);
   if (list_value)
     CHECK_GT(list_value->EraseValue(base::Value(str)), 0u);
 }
@@ -340,7 +348,7 @@ ExtensionManagementPolicyUpdater::ExtensionManagementPolicyUpdater(
           .Get(policy::PolicyNamespace(policy::POLICY_DOMAIN_CHROME,
                                        std::string()))
           .GetValue(policy::key::kExtensionSettings, base::Value::Type::DICT);
-  base::Value::Dict dict;
+  base::DictValue dict;
   if (policy_value && policy_value->is_dict()) {
     dict = policy_value->GetDict().Clone();
   }

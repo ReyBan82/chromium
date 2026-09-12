@@ -5,13 +5,13 @@
 #ifndef COMPONENTS_HISTORY_CORE_BROWSER_KEYWORD_SEARCH_TERM_H_
 #define COMPONENTS_HISTORY_CORE_BROWSER_KEYWORD_SEARCH_TERM_H_
 
+#include <optional>
 #include <string>
 
 #include "base/time/time.h"
 #include "components/history/core/browser/keyword_id.h"
 #include "components/history/core/browser/url_row.h"
 #include "sql/statement.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace history {
 
@@ -30,14 +30,14 @@ struct KeywordSearchTermVisit {
                                    // extra whitespace characters collapsed.
   int visit_count{0};              // The search term visit count.
   base::Time last_visit_time;      // The time of the last visit.
-  absl::optional<double> score;    // The optional calculated frecency score.
+  std::optional<double> score;     // The optional calculated frecency score.
 };
 
 // Used for URLs that have a search term associated with them.
 struct KeywordSearchTermRow {
   KeywordSearchTermRow() = default;
-  KeywordSearchTermRow(const KeywordSearchTermRow& other) = default;
-  ~KeywordSearchTermRow() = default;
+  KeywordSearchTermRow(KeywordSearchTermRow&& other) = default;
+  KeywordSearchTermRow& operator=(KeywordSearchTermRow&& other) = default;
 
   KeywordID keyword_id{0};         // ID of the keyword.
   URLID url_id{0};                 // ID of the url.
@@ -56,7 +56,6 @@ class KeywordSearchTermVisitEnumerator {
       delete;
   KeywordSearchTermVisitEnumerator& operator=(
       const KeywordSearchTermVisitEnumerator&) = delete;
-
   ~KeywordSearchTermVisitEnumerator() = default;
 
   // Returns the next search term visit or nullptr if no more visits are left.

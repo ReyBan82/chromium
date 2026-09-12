@@ -17,8 +17,7 @@ template <>
 struct COMPONENT_EXPORT(DISPLAY_SHARED_MOJOM_TRAITS)
     EnumTraits<display::mojom::Rotation, display::Display::Rotation> {
   static display::mojom::Rotation ToMojom(display::Display::Rotation type);
-  static bool FromMojom(display::mojom::Rotation type,
-                        display::Display::Rotation* output);
+  static display::Display::Rotation FromMojom(display::mojom::Rotation type);
 };
 
 template <>
@@ -26,8 +25,8 @@ struct COMPONENT_EXPORT(DISPLAY_SHARED_MOJOM_TRAITS)
     EnumTraits<display::mojom::TouchSupport, display::Display::TouchSupport> {
   static display::mojom::TouchSupport ToMojom(
       display::Display::TouchSupport type);
-  static bool FromMojom(display::mojom::TouchSupport type,
-                        display::Display::TouchSupport* output);
+  static display::Display::TouchSupport FromMojom(
+      display::mojom::TouchSupport type);
 };
 
 template <>
@@ -36,8 +35,8 @@ struct COMPONENT_EXPORT(DISPLAY_SHARED_MOJOM_TRAITS)
                display::Display::AccelerometerSupport> {
   static display::mojom::AccelerometerSupport ToMojom(
       display::Display::AccelerometerSupport type);
-  static bool FromMojom(display::mojom::AccelerometerSupport type,
-                        display::Display::AccelerometerSupport* output);
+  static display::Display::AccelerometerSupport FromMojom(
+      display::mojom::AccelerometerSupport type);
 };
 
 template <>
@@ -51,6 +50,10 @@ struct COMPONENT_EXPORT(DISPLAY_SHARED_MOJOM_TRAITS)
 
   static gfx::Size size_in_pixels(const display::Display& display) {
     return display.GetSizeInPixel();
+  }
+
+  static gfx::Point native_origin(const display::Display& display) {
+    return display.native_origin();
   }
 
   static const gfx::Rect& work_area(const display::Display& display) {
@@ -79,8 +82,9 @@ struct COMPONENT_EXPORT(DISPLAY_SHARED_MOJOM_TRAITS)
     return display.maximum_cursor_size();
   }
 
-  static gfx::DisplayColorSpaces color_spaces(const display::Display& display) {
-    return display.color_spaces();
+  static const gfx::DisplayColorSpaces& color_spaces(
+      const display::Display& display) {
+    return display.GetColorSpaces();
   }
 
   static int32_t color_depth(const display::Display& display) {
@@ -95,16 +99,11 @@ struct COMPONENT_EXPORT(DISPLAY_SHARED_MOJOM_TRAITS)
     return display.is_monochrome();
   }
 
-  static int32_t display_frequency(const display::Display& display) {
+  static float display_frequency(const display::Display& display) {
     return display.display_frequency();
   }
   static const std::string& label(const display::Display& display) {
     return display.label();
-  }
-
-  static const display::DrmFormatsAndModifiers& drm_formats_and_modifiers(
-      const display::Display& display) {
-    return display.GetDRMFormatsAndModifiers();
   }
 
   static bool Read(display::mojom::DisplayDataView data, display::Display* out);

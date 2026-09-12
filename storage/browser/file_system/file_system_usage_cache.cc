@@ -7,12 +7,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <memory>
+#include <optional>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/check.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
-#include "base/functional/bind.h"
 #include "base/pickle.h"
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
@@ -22,6 +24,8 @@ namespace storage {
 namespace {
 constexpr base::TimeDelta kCloseDelay = base::Seconds(5);
 const size_t kMaxHandleCacheSize = 2;
+
+constexpr std::array<const uint8_t, 4> kUsageFileHeader = {'F', 'S', 'U', '5'};
 }  // namespace
 
 FileSystemUsageCache::FileSystemUsageCache(bool is_incognito)
@@ -35,13 +39,11 @@ FileSystemUsageCache::~FileSystemUsageCache() {
 
 const base::FilePath::CharType FileSystemUsageCache::kUsageFileName[] =
     FILE_PATH_LITERAL(".usage");
-const char FileSystemUsageCache::kUsageFileHeader[] = "FSU5";
-const size_t FileSystemUsageCache::kUsageFileHeaderSize = 4;
 
 // Pickle::{Read,Write}Bool treat bool as int
 const int FileSystemUsageCache::kUsageFileSize =
-    sizeof(base::Pickle::Header) + FileSystemUsageCache::kUsageFileHeaderSize +
-    sizeof(int) + sizeof(int32_t) + sizeof(int64_t);  // NOLINT
+    sizeof(base::Pickle::Header) + kUsageFileHeader.size() + sizeof(int) +
+    sizeof(int32_t) + sizeof(int64_t);  // NOLINT
 
 bool FileSystemUsageCache::GetUsage(const base::FilePath& usage_file_path,
                                     int64_t* usage_out) {
@@ -148,7 +150,7 @@ bool FileSystemUsageCache::Exists(const base::FilePath& usage_file_path) {
   TRACE_EVENT0("FileSystem", "UsageCache::Exists");
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (is_incognito_)
-    return base::Contains(incognito_usages_, usage_file_path);
+    return incognito_usages_.contains(usage_file_path);
   return base::PathExists(usage_file_path);
 }
 
@@ -157,10 +159,7 @@ bool FileSystemUsageCache::Delete(const base::FilePath& usage_file_path) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   CloseCacheFiles();
   if (is_incognito_) {
-    if (!base::Contains(incognito_usages_, usage_file_path))
-      return false;
-    incognito_usages_.erase(incognito_usages_.find(usage_file_path));
-    return true;
+    return incognito_usages_.erase(usage_file_path);
   }
   return base::DeleteFile(usage_file_path);
 }
@@ -181,28 +180,24 @@ bool FileSystemUsageCache::Read(const base::FilePath& usage_file_path,
   DCHECK(is_valid);
   DCHECK(dirty_out);
   DCHECK(usage_out);
-  char buffer[kUsageFileSize];
-  const char* header;
-  if (usage_file_path.empty() ||
-      !ReadBytes(usage_file_path, buffer, kUsageFileSize))
+
+  uint8_t buffer[kUsageFileSize];
+  if (usage_file_path.empty() || !ReadBytes(usage_file_path, buffer)) {
     return false;
-  base::Pickle read_pickle(buffer, kUsageFileSize);
-  base::PickleIterator iter(read_pickle);
+  }
+  base::PickleIterator iter = base::PickleIterator::WithData(buffer);
   uint32_t dirty = 0;
   int64_t usage = 0;
 
-  if (!iter.ReadBytes(&header, kUsageFileHeaderSize) ||
-      !iter.ReadBool(is_valid) || !iter.ReadUInt32(&dirty) ||
-      !iter.ReadInt64(&usage))
-    return false;
+  if (iter.ReadBytes(kUsageFileHeader.size()) == kUsageFileHeader &&
+      iter.ReadBool(is_valid) && iter.ReadUInt32(&dirty) &&
+      iter.ReadInt64(&usage)) {
+    *dirty_out = dirty;
+    *usage_out = usage;
+    return true;
+  }
 
-  if (header[0] != kUsageFileHeader[0] || header[1] != kUsageFileHeader[1] ||
-      header[2] != kUsageFileHeader[2] || header[3] != kUsageFileHeader[3])
-    return false;
-
-  *dirty_out = dirty;
-  *usage_out = usage;
-  return true;
+  return false;
 }
 
 bool FileSystemUsageCache::Write(const base::FilePath& usage_file_path,
@@ -212,14 +207,12 @@ bool FileSystemUsageCache::Write(const base::FilePath& usage_file_path,
   TRACE_EVENT0("FileSystem", "UsageCache::Write");
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   base::Pickle write_pickle;
-  write_pickle.WriteBytes(kUsageFileHeader, kUsageFileHeaderSize);
+  write_pickle.WriteBytes(kUsageFileHeader);
   write_pickle.WriteBool(is_valid);
   write_pickle.WriteUInt32(dirty);
   write_pickle.WriteInt64(usage);
 
-  if (!WriteBytes(usage_file_path,
-                  static_cast<const char*>(write_pickle.data()),
-                  write_pickle.size())) {
+  if (!WriteBytes(usage_file_path, write_pickle)) {
     Delete(usage_file_path);
     return false;
   }
@@ -230,7 +223,6 @@ base::File* FileSystemUsageCache::GetFile(const base::FilePath& file_path) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (is_incognito_) {
     NOTREACHED();
-    return nullptr;
   }
   if (cache_files_.size() >= kMaxHandleCacheSize)
     CloseCacheFiles();
@@ -255,42 +247,41 @@ base::File* FileSystemUsageCache::GetFile(const base::FilePath& file_path) {
 }
 
 bool FileSystemUsageCache::ReadBytes(const base::FilePath& file_path,
-                                     char* buffer,
-                                     int64_t buffer_size) {
+                                     base::span<uint8_t> buffer) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (is_incognito_) {
-    if (!base::Contains(incognito_usages_, file_path))
+    auto it = incognito_usages_.find(file_path);
+    if (it == incognito_usages_.end()) {
       return false;
-    memcpy(buffer, incognito_usages_[file_path].data(), buffer_size);
+    }
+    buffer.copy_from_nonoverlapping(it->second);
     return true;
   }
   base::File* file = GetFile(file_path);
   if (!file)
     return false;
-  return file->Read(0, buffer, buffer_size) == buffer_size;
+  return file->ReadAndCheck(0, buffer);
 }
 
 bool FileSystemUsageCache::WriteBytes(const base::FilePath& file_path,
-                                      const char* buffer,
-                                      int64_t buffer_size) {
+                                      base::span<const uint8_t> buffer) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (is_incognito_) {
-    if (!base::Contains(incognito_usages_, file_path))
-      incognito_usages_[file_path] = std::vector<uint8_t>(buffer_size);
-    memcpy(incognito_usages_[file_path].data(), buffer, buffer_size);
+    auto [it, _] = incognito_usages_.try_emplace(file_path, buffer.size());
+    base::span(it->second).copy_from_nonoverlapping(buffer);
     return true;
   }
   base::File* file = GetFile(file_path);
   if (!file)
     return false;
-  return file->Write(0, buffer, buffer_size) == buffer_size;
+  return file->WriteAndCheck(0, buffer);
 }
 
 bool FileSystemUsageCache::FlushFile(const base::FilePath& file_path) {
   TRACE_EVENT0("FileSystem", "UsageCache::FlushFile");
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (is_incognito_)
-    return base::Contains(incognito_usages_, file_path);
+    return incognito_usages_.contains(file_path);
   base::File* file = GetFile(file_path);
   if (!file)
     return false;
@@ -308,7 +299,7 @@ void FileSystemUsageCache::ScheduleCloseTimer() {
 bool FileSystemUsageCache::HasCacheFileHandle(const base::FilePath& file_path) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK_LE(cache_files_.size(), kMaxHandleCacheSize);
-  return base::Contains(cache_files_, file_path);
+  return cache_files_.contains(file_path);
 }
 
 }  // namespace storage

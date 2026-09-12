@@ -4,18 +4,22 @@
 
 #include "mojo/public/cpp/bindings/service_factory.h"
 
+#include <optional>
+
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
+#include "base/task/thread_type.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "base/threading/platform_thread.h"
+#include "base/threading/thread.h"
 #include "mojo/public/cpp/bindings/generic_pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/tests/service_factory_unittest.test-mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace mojo {
 namespace test {
@@ -42,9 +46,7 @@ class TestService1Impl : public mojom::TestService1 {
   TestService1Impl(const TestService1Impl&) = delete;
   TestService1Impl& operator=(const TestService1Impl&) = delete;
 
-  ~TestService1Impl() override {
-    --num_instances_;
-  }
+  ~TestService1Impl() override { --num_instances_; }
 
   static int num_instances() { return num_instances_; }
 
@@ -170,7 +172,7 @@ TEST_F(ServiceFactoryTest, DestroyInstanceOnServiceDisconnect) {
 }
 
 TEST_F(ServiceFactoryTest, DestroyInstancesOnFactoryDestruction) {
-  absl::optional<ServiceFactory> factory{absl::in_place};
+  std::optional<ServiceFactory> factory{std::in_place};
   factory->Add(RunTestService1);
 
   Remote<mojom::TestService1> remote1;
@@ -192,6 +194,60 @@ TEST_F(ServiceFactoryTest, DestroyInstancesOnFactoryDestruction) {
   remote2.FlushForTesting();
   EXPECT_FALSE(remote1.is_connected());
   EXPECT_FALSE(remote2.is_connected());
+}
+
+TEST_F(ServiceFactoryTest, ThreadPriorityElevation) {
+  base::Thread service_thread("ServiceThread");
+  ASSERT_TRUE(service_thread.Start());
+
+  // Remote lives on main thread.
+  Remote<mojom::TestService1> remote;
+  GenericPendingReceiver receiver = remote.BindNewPipeAndPassReceiver();
+
+  auto factory = std::make_unique<ServiceFactory>();
+  auto* factory_ptr = factory.get();
+
+  // Helper to run tasks on service_thread synchronously.
+  auto run_on_service_thread = [&](base::OnceClosure task) {
+    base::RunLoop run_loop;
+    service_thread.task_runner()->PostTaskAndReply(FROM_HERE, std::move(task),
+                                                   run_loop.QuitClosure());
+    run_loop.Run();
+  };
+
+  // 1. Initialize factory on service_thread.
+  run_on_service_thread(base::BindOnce(
+      [](ServiceFactory* factory) {
+        factory->Add(RunTestService1, base::ThreadType::kPresentation);
+      },
+      factory_ptr));
+
+  // 2. Run service and check priority.
+  base::RunLoop run_service_loop;
+  auto quit_closure = run_service_loop.QuitClosure();
+  run_on_service_thread(
+      base::BindLambdaForTesting([&, quit = std::move(quit_closure)]() mutable {
+        EXPECT_TRUE(
+            factory_ptr->RunService(std::move(receiver), std::move(quit)));
+        EXPECT_EQ(base::ThreadType::kPresentation,
+                  base::PlatformThread::GetCurrentThreadType());
+      }));
+
+  // 3. Reset remote to trigger disconnection.
+  remote.reset();
+
+  // Wait for termination callback (which is run_service_loop.QuitClosure()).
+  run_service_loop.Run();
+
+  // 4. Verify thread priority went back to default.
+  run_on_service_thread(base::BindLambdaForTesting([]() {
+    EXPECT_EQ(base::ThreadType::kDefault,
+              base::PlatformThread::GetCurrentThreadType());
+  }));
+
+  // 5. Clean up factory on service_thread.
+  service_thread.task_runner()->DeleteSoon(FROM_HERE, std::move(factory));
+  service_thread.FlushForTesting();
 }
 
 }  // namespace service_factory_unittest

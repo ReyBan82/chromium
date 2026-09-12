@@ -7,6 +7,7 @@
 
 #include <cstdint>
 
+#include "base/containers/span.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -45,11 +46,12 @@ class WaylandDragDropTest : public WaylandTest {
   void SendDndEnter(WaylandWindow* window, const gfx::Point& location);
   void SendDndLeave();
   void SendDndMotion(const gfx::Point& location);
-  void SendDndDrop();
+  void SendDndDropPerformed();
+  void SendDndFinished();
   void SendDndCancelled();
   void SendDndAction(uint32_t action);
   void ReadAndCheckData(const std::string& mime_type,
-                        const std::string& expected_data);
+                        base::span<const uint8_t> expected_data);
 
   virtual void SendPointerEnter(WaylandWindow* window,
                                 MockPlatformWindowDelegate* delegate);

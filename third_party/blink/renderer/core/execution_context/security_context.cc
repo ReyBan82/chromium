@@ -26,28 +26,50 @@
 
 #include "third_party/blink/renderer/core/execution_context/security_context.h"
 
+#include "base/check_deref.h"
 #include "base/metrics/histogram_macros.h"
+#include "services/network/public/cpp/permissions_policy/permissions_policy.h"
 #include "services/network/public/cpp/web_sandbox_flags.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
 #include "third_party/blink/public/common/permissions_policy/document_policy.h"
 #include "third_party/blink/public/common/permissions_policy/document_policy_features.h"
-#include "third_party/blink/public/common/permissions_policy/permissions_policy.h"
-#include "third_party/blink/public/mojom/permissions_policy/permissions_policy.mojom-blink.h"
 #include "third_party/blink/public/mojom/permissions_policy/policy_value.mojom-blink.h"
 #include "third_party/blink/public/mojom/security_context/insecure_request_policy.mojom-blink.h"
 #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
 #include "third_party/blink/public/platform/platform.h"
+#include "third_party/blink/renderer/bindings/core/v8/capture_source_location.h"
+#include "third_party/blink/renderer/core/ad_tracker/ad_tracker.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+#include "third_party/blink/renderer/core/frame/intervention.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/inspector/inspector_audits_issue.h"
+#include "third_party/blink/renderer/core/permissions_policy/policy_helper.h"
 #include "third_party/blink/renderer/platform/weborigin/scheme_registry.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+#include "third_party/blink/renderer/platform/wtf/casting.h"
 
 namespace blink {
 
+namespace {
+
+String GetFeatureName(network::mojom::PermissionsPolicyFeature feature) {
+  for (const auto& entry :
+       GetDefaultFeatureNameMap(/*is_isolated_context=*/false)) {
+    if (entry.value == feature) {
+      return entry.key;
+    }
+  }
+  NOTREACHED();
+}
+
+}  // namespace
+
 // static
-WTF::Vector<unsigned> SecurityContext::SerializeInsecureNavigationSet(
+Vector<unsigned> SecurityContext::SerializeInsecureNavigationSet(
     const InsecureNavigationsSet& set) {
   // The set is serialized as a sorted array. Sorting it makes it easy to know
   // if two serialized sets are equal.
-  WTF::Vector<unsigned> serialized;
+  Vector<unsigned> serialized;
   serialized.reserve(set.size());
   for (unsigned host : set)
     serialized.emplace_back(host);
@@ -92,11 +114,15 @@ void SecurityContext::SetSecurityOrigin(
         is_worker_transition_to_opaque);
   security_origin_ = std::move(security_origin);
 
-  if (!security_origin_->IsPotentiallyTrustworthy()) {
+  if (!security_origin_->IsPotentiallyTrustworthy() &&
+      !is_worker_loaded_from_data_url_) {
     secure_context_mode_ = SecureContextMode::kInsecureContext;
     secure_context_explanation_ = SecureContextModeExplanation::kInsecureScheme;
   } else if (SchemeRegistry::SchemeShouldBypassSecureContextCheck(
                  security_origin_->Protocol())) {
+    // data: URL has opaque origin so security_origin's protocol will be empty
+    // and should never be bypassed.
+    CHECK(!is_worker_loaded_from_data_url_);
     secure_context_mode_ = SecureContextMode::kSecureContext;
     secure_context_explanation_ = SecureContextModeExplanation::kSecure;
   } else if (execution_context_) {
@@ -143,12 +169,12 @@ void SecurityContext::SetSandboxFlags(
 }
 
 void SecurityContext::SetPermissionsPolicy(
-    std::unique_ptr<PermissionsPolicy> permissions_policy) {
+    std::unique_ptr<network::PermissionsPolicy> permissions_policy) {
   permissions_policy_ = std::move(permissions_policy);
 }
 
 void SecurityContext::SetReportOnlyPermissionsPolicy(
-    std::unique_ptr<PermissionsPolicy> permissions_policy) {
+    std::unique_ptr<network::PermissionsPolicy> permissions_policy) {
   report_only_permissions_policy_ = std::move(permissions_policy);
 }
 
@@ -162,9 +188,8 @@ void SecurityContext::SetReportOnlyDocumentPolicy(
   report_only_document_policy_ = std::move(policy);
 }
 
-bool SecurityContext::IsFeatureEnabled(
-    mojom::blink::PermissionsPolicyFeature feature,
-    bool* should_report) const {
+SecurityContext::FeatureStatus SecurityContext::IsFeatureEnabled(
+    network::mojom::PermissionsPolicyFeature feature) const {
   DCHECK(permissions_policy_);
   bool permissions_policy_result =
       permissions_policy_->IsFeatureEnabled(feature);
@@ -172,12 +197,59 @@ bool SecurityContext::IsFeatureEnabled(
       !report_only_permissions_policy_ ||
       report_only_permissions_policy_->IsFeatureEnabled(feature);
 
-  if (should_report) {
-    *should_report =
-        !permissions_policy_result || !report_only_permissions_policy_result;
+  // Selective Permissions Intervention.
+  // https://chromestatus.com/feature/4811835974615040
+  if (permissions_policy_result && IsPrivacySensitiveFeature(feature)) {
+    if (LocalDOMWindow* window =
+            DynamicTo<LocalDOMWindow>(execution_context_.Get())) {
+      if (LocalFrame* frame = window->GetFrame()) {
+        AdTracker::AdScriptAncestry ad_ancestry;
+        AdTracker* ad_tracker = frame->GetAdTracker();
+
+        if (ad_tracker &&
+            ad_tracker->IsAdScriptInStack(
+                AdTracker::StackType::kTopOnly,
+                /*ignore_monkey_patch=*/AdTracker::MonkeyPatchableApi::kNone,
+                &ad_ancestry)) {
+          window->CountPermissionsPolicyUsage(
+              feature, UseCounterImpl::PermissionsPolicyUsageType::
+                           kEnabledPrivacySensitive);
+          if (RuntimeEnabledFeatures::
+                  SelectivePermissionsInterventionEnabled()) {
+            permissions_policy_result = false;
+
+            String feature_name = GetFeatureName(feature);
+            String intervention_message = StrCat(
+                {"Blocked call to ", feature_name,
+                 " because ad-script was in the JavaScript stack at the time "
+                 "of the call. See http://crbug.com/435223477 for more "
+                 "information about this intervention."});
+
+            Intervention::GenerateReportWithoutAdditionalConsoleWarning(
+                frame, "SelectivePermissions", intervention_message);
+
+            AuditsIssue::ReportSelectivePermissionsInterventionIssue(
+                execution_context_.Get(), feature_name, ad_ancestry,
+                CHECK_DEREF(SourceLocation::CaptureWithFullStackTrace()));
+          }
+        }
+      }
+    }
   }
 
-  return permissions_policy_result;
+  bool should_report =
+      !permissions_policy_result || !report_only_permissions_policy_result;
+
+  String reporting_endpoint;
+  if (!permissions_policy_result) {
+    reporting_endpoint =
+        String::FromUtf8(permissions_policy_->GetEndpointForFeature(feature));
+  } else if (!report_only_permissions_policy_result) {
+    reporting_endpoint = String::FromUtf8(
+        report_only_permissions_policy_->GetEndpointForFeature(feature));
+  }
+
+  return {permissions_policy_result, should_report, reporting_endpoint};
 }
 
 bool SecurityContext::IsFeatureEnabled(
@@ -185,6 +257,12 @@ bool SecurityContext::IsFeatureEnabled(
   DCHECK(GetDocumentPolicyFeatureInfoMap().at(feature).default_value.Type() ==
          mojom::blink::PolicyValueType::kBool);
   return IsFeatureEnabled(feature, PolicyValue::CreateBool(true)).enabled;
+}
+
+PolicyValue SecurityContext::GetDocumentPolicyValue(
+    mojom::blink::DocumentPolicyFeature feature) const {
+  CHECK(document_policy_);
+  return document_policy_->GetFeatureValue(feature);
 }
 
 SecurityContext::FeatureStatus SecurityContext::IsFeatureEnabled(
@@ -196,7 +274,8 @@ SecurityContext::FeatureStatus SecurityContext::IsFeatureEnabled(
   bool report_only_policy_result =
       !report_only_document_policy_ ||
       report_only_document_policy_->IsFeatureEnabled(feature, threshold_value);
-  return {policy_result, !policy_result || !report_only_policy_result};
+  return {policy_result, !policy_result || !report_only_policy_result,
+          String()};
 }
 
 }  // namespace blink

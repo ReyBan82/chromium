@@ -70,16 +70,16 @@ TEST_F(EventProcessorTest, Basic) {
   SetTarget(child.get());
   root()->AddChild(std::move(child));
 
-  MouseEvent mouse(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                   EventTimeForNow(), EF_NONE, EF_NONE);
+  MouseEvent mouse(EventType::kMouseMoved, gfx::Point(10, 10),
+                   gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
   DispatchEvent(&mouse);
-  EXPECT_TRUE(root()->child_at(0)->DidReceiveEvent(ET_MOUSE_MOVED));
-  EXPECT_FALSE(root()->DidReceiveEvent(ET_MOUSE_MOVED));
+  EXPECT_TRUE(root()->child_at(0)->DidReceiveEvent(EventType::kMouseMoved));
+  EXPECT_FALSE(root()->DidReceiveEvent(EventType::kMouseMoved));
 
   SetTarget(root());
   root()->RemoveChild(root()->child_at(0));
   DispatchEvent(&mouse);
-  EXPECT_TRUE(root()->DidReceiveEvent(ET_MOUSE_MOVED));
+  EXPECT_TRUE(root()->DidReceiveEvent(EventType::kMouseMoved));
 }
 
 // ReDispatchEventHandler is used to receive mouse events and forward them
@@ -146,19 +146,21 @@ TEST_F(EventProcessorTest, NestedEventProcessing) {
   // first event processor should be handled by |target_handler| instead.
   auto target_handler = std::make_unique<ReDispatchEventHandler>(
       second_processor.get(), root()->child_at(0));
-  std::ignore = root()->child_at(0)->SetTargetHandler(target_handler.get());
+  EventHandler* old_handler =
+      root()->child_at(0)->SetTargetHandler(target_handler.get());
 
   // Dispatch a mouse event to the tree of event targets owned by the first
   // event processor, checking in ReDispatchEventHandler that the phase and
   // target information of the event is correct.
-  MouseEvent mouse(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                   EventTimeForNow(), EF_NONE, EF_NONE);
+  MouseEvent mouse(EventType::kMouseMoved, gfx::Point(10, 10),
+                   gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
   DispatchEvent(&mouse);
 
   // Verify also that |mouse| was seen by the child nodes contained in both
   // event processors and that the event was not handled.
   EXPECT_EQ(1, target_handler->num_mouse_events());
-  EXPECT_TRUE(second_root->child_at(0)->DidReceiveEvent(ET_MOUSE_MOVED));
+  EXPECT_TRUE(
+      second_root->child_at(0)->DidReceiveEvent(EventType::kMouseMoved));
   EXPECT_FALSE(mouse.handled());
   second_root->child_at(0)->ResetReceivedEvents();
   root()->child_at(0)->ResetReceivedEvents();
@@ -168,12 +170,16 @@ TEST_F(EventProcessorTest, NestedEventProcessing) {
   // Indicate that the child of the second root should handle events, and
   // dispatch another mouse event to verify that it is marked as handled.
   second_root->child_at(0)->set_mark_events_as_handled(true);
-  MouseEvent mouse2(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                    EventTimeForNow(), EF_NONE, EF_NONE);
+  MouseEvent mouse2(EventType::kMouseMoved, gfx::Point(10, 10),
+                    gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
   DispatchEvent(&mouse2);
   EXPECT_EQ(1, target_handler->num_mouse_events());
-  EXPECT_TRUE(second_root->child_at(0)->DidReceiveEvent(ET_MOUSE_MOVED));
+  EXPECT_TRUE(
+      second_root->child_at(0)->DidReceiveEvent(EventType::kMouseMoved));
   EXPECT_TRUE(mouse2.handled());
+
+  old_handler = root()->child_at(0)->SetTargetHandler(old_handler);
+  EXPECT_EQ(old_handler, target_handler.get());
 }
 
 // Verifies that OnEventProcessingFinished() is called when an event
@@ -186,11 +192,11 @@ TEST_F(EventProcessorTest, OnEventProcessingFinished) {
 
   // Dispatch a mouse event. We expect the event to be seen by the target,
   // handled, and we expect OnEventProcessingFinished() to be invoked once.
-  MouseEvent mouse(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                   EventTimeForNow(), EF_NONE, EF_NONE);
+  MouseEvent mouse(EventType::kMouseMoved, gfx::Point(10, 10),
+                   gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
   DispatchEvent(&mouse);
-  EXPECT_TRUE(root()->child_at(0)->DidReceiveEvent(ET_MOUSE_MOVED));
-  EXPECT_FALSE(root()->DidReceiveEvent(ET_MOUSE_MOVED));
+  EXPECT_TRUE(root()->child_at(0)->DidReceiveEvent(EventType::kMouseMoved));
+  EXPECT_FALSE(root()->DidReceiveEvent(EventType::kMouseMoved));
   EXPECT_TRUE(mouse.handled());
   EXPECT_EQ(1, processor()->num_times_processing_finished());
 }
@@ -208,11 +214,11 @@ TEST_F(EventProcessorTest, OnEventProcessingStarted) {
   // OnEventProcessingStarted() should be called once, and
   // OnEventProcessingFinished() should be called once. The event should
   // remain unhandled.
-  MouseEvent mouse(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                   EventTimeForNow(), EF_NONE, EF_NONE);
+  MouseEvent mouse(EventType::kMouseMoved, gfx::Point(10, 10),
+                   gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
   DispatchEvent(&mouse);
-  EXPECT_TRUE(root()->child_at(0)->DidReceiveEvent(ET_MOUSE_MOVED));
-  EXPECT_FALSE(root()->DidReceiveEvent(ET_MOUSE_MOVED));
+  EXPECT_TRUE(root()->child_at(0)->DidReceiveEvent(EventType::kMouseMoved));
+  EXPECT_FALSE(root()->DidReceiveEvent(EventType::kMouseMoved));
   EXPECT_FALSE(mouse.handled());
   EXPECT_EQ(1, processor()->num_times_processing_started());
   EXPECT_EQ(1, processor()->num_times_processing_finished());
@@ -225,11 +231,11 @@ TEST_F(EventProcessorTest, OnEventProcessingStarted) {
   // seen by the target this time, but OnEventProcessingStarted() and
   // OnEventProcessingFinished() should both still be called once.
   processor()->set_should_processing_occur(false);
-  MouseEvent mouse2(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                    EventTimeForNow(), EF_NONE, EF_NONE);
+  MouseEvent mouse2(EventType::kMouseMoved, gfx::Point(10, 10),
+                    gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
   DispatchEvent(&mouse2);
-  EXPECT_FALSE(root()->child_at(0)->DidReceiveEvent(ET_MOUSE_MOVED));
-  EXPECT_FALSE(root()->DidReceiveEvent(ET_MOUSE_MOVED));
+  EXPECT_FALSE(root()->child_at(0)->DidReceiveEvent(EventType::kMouseMoved));
+  EXPECT_FALSE(root()->DidReceiveEvent(EventType::kMouseMoved));
   EXPECT_TRUE(mouse2.handled());
   EXPECT_EQ(1, processor()->num_times_processing_started());
   EXPECT_EQ(1, processor()->num_times_processing_finished());
@@ -257,11 +263,11 @@ TEST_F(EventProcessorTest, DispatchToNextBestTarget) {
   // When the root has a TestEventTargeter installed which permits bubbling,
   // events targeted at the grandchild target should be dispatched to all three
   // targets.
-  KeyEvent key_event(ET_KEY_PRESSED, VKEY_ESCAPE, EF_NONE);
+  KeyEvent key_event(EventType::kKeyPressed, VKEY_ESCAPE, EF_NONE);
   DispatchEvent(&key_event);
-  EXPECT_TRUE(root()->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_TRUE(child_r->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_TRUE(grandchild_r->DidReceiveEvent(ET_KEY_PRESSED));
+  EXPECT_TRUE(root()->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_TRUE(child_r->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_TRUE(grandchild_r->DidReceiveEvent(EventType::kKeyPressed));
   root()->ResetReceivedEvents();
   child_r->ResetReceivedEvents();
   grandchild_r->ResetReceivedEvents();
@@ -270,11 +276,11 @@ TEST_F(EventProcessorTest, DispatchToNextBestTarget) {
   // as handled. No targets in the hierarchy should receive the event.
   TestEventHandler handler;
   child_r->AddPreTargetHandler(&handler);
-  key_event = KeyEvent(ET_KEY_PRESSED, VKEY_ESCAPE, EF_NONE);
+  key_event = KeyEvent(EventType::kKeyPressed, VKEY_ESCAPE, EF_NONE);
   DispatchEvent(&key_event);
-  EXPECT_FALSE(root()->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_FALSE(child_r->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_FALSE(grandchild_r->DidReceiveEvent(ET_KEY_PRESSED));
+  EXPECT_FALSE(root()->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_FALSE(child_r->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_FALSE(grandchild_r->DidReceiveEvent(EventType::kKeyPressed));
   EXPECT_EQ(1, handler.num_key_events());
   handler.Reset();
 
@@ -283,11 +289,11 @@ TEST_F(EventProcessorTest, DispatchToNextBestTarget) {
   // event.
   child_r->RemovePreTargetHandler(&handler);
   child_r->AddPostTargetHandler(&handler);
-  key_event = KeyEvent(ET_KEY_PRESSED, VKEY_ESCAPE, EF_NONE);
+  key_event = KeyEvent(EventType::kKeyPressed, VKEY_ESCAPE, EF_NONE);
   DispatchEvent(&key_event);
-  EXPECT_FALSE(root()->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_FALSE(child_r->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_TRUE(grandchild_r->DidReceiveEvent(ET_KEY_PRESSED));
+  EXPECT_FALSE(root()->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_FALSE(child_r->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_TRUE(grandchild_r->DidReceiveEvent(EventType::kKeyPressed));
   EXPECT_EQ(1, handler.num_key_events());
   handler.Reset();
   grandchild_r->ResetReceivedEvents();
@@ -297,11 +303,11 @@ TEST_F(EventProcessorTest, DispatchToNextBestTarget) {
   // dispatch at the child of the root. The child and grandchild
   // targets should both receive the event, but the root should not.
   child_r->set_mark_events_as_handled(true);
-  key_event = KeyEvent(ET_KEY_PRESSED, VKEY_ESCAPE, EF_NONE);
+  key_event = KeyEvent(EventType::kKeyPressed, VKEY_ESCAPE, EF_NONE);
   DispatchEvent(&key_event);
-  EXPECT_FALSE(root()->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_TRUE(child_r->DidReceiveEvent(ET_KEY_PRESSED));
-  EXPECT_TRUE(grandchild_r->DidReceiveEvent(ET_KEY_PRESSED));
+  EXPECT_FALSE(root()->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_TRUE(child_r->DidReceiveEvent(EventType::kKeyPressed));
+  EXPECT_TRUE(grandchild_r->DidReceiveEvent(EventType::kKeyPressed));
   root()->ResetReceivedEvents();
   child_r->ResetReceivedEvents();
   grandchild_r->ResetReceivedEvents();
@@ -366,114 +372,167 @@ TEST_F(EventProcessorTest, HandlerSequence) {
   post_grandchild.set_recorder(&recorder);
   grandchild_r->AddPostTargetHandler(&post_grandchild);
 
-  MouseEvent mouse(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                   EventTimeForNow(), EF_NONE, EF_NONE);
+  MouseEvent mouse(EventType::kMouseMoved, gfx::Point(10, 10),
+                   gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
   DispatchEvent(&mouse);
 
-  std::string expected[] = { "PreR", "PreC", "PreG", "G", "PostG", "PostC",
-      "PostR", "PreR", "PreC", "C", "PostC", "PostR", "PreR", "R", "PostR" };
-  EXPECT_EQ(std::vector<std::string>(expected, expected + std::size(expected)),
+  EXPECT_EQ(std::vector<std::string>({"PreR", "PreC", "PreG", "G", "PostG",
+                                      "PostC", "PostR", "PreR", "PreC", "C",
+                                      "PostC", "PostR", "PreR", "R", "PostR"}),
             recorder);
 
-  root()->RemovePreTargetHandler(&pre_root);
-  child_r->RemovePreTargetHandler(&pre_child);
   grandchild_r->RemovePreTargetHandler(&pre_grandchild);
+  child_r->RemovePreTargetHandler(&pre_child);
+  root()->RemovePreTargetHandler(&pre_root);
+
+  grandchild_r->set_recorder(nullptr);
+  child_r->set_recorder(nullptr);
+  root()->set_recorder(nullptr);
 }
 
 namespace {
 
-class SelfDestroyingEventProcessor : public TestEventProcessor {
+enum DestroyTarget { kProcessor, kTargeter };
+
+class DestroyDuringDispatchEventProcessor : public TestEventProcessor {
  public:
-  SelfDestroyingEventProcessor() = default;
-  SelfDestroyingEventProcessor(const SelfDestroyingEventProcessor&) = delete;
-  SelfDestroyingEventProcessor& operator=(const SelfDestroyingEventProcessor&) =
-      delete;
-  ~SelfDestroyingEventProcessor() override = default;
+  DestroyDuringDispatchEventProcessor() = default;
+  DestroyDuringDispatchEventProcessor(
+      const DestroyDuringDispatchEventProcessor&) = delete;
+  DestroyDuringDispatchEventProcessor& operator=(
+      const DestroyDuringDispatchEventProcessor&) = delete;
+  ~DestroyDuringDispatchEventProcessor() override = default;
 
  protected:
   EventDispatchDetails PostDispatchEvent(EventTarget* target,
                                          const Event& event) override;
 };
 
-class SelfDestroyingTestEventTarget : public TestEventTarget {
+class DestroyDuringDispatchEventTarget : public TestEventTarget {
  public:
-  SelfDestroyingTestEventTarget()
-      : processor_(std::make_unique<SelfDestroyingEventProcessor>()) {}
+  explicit DestroyDuringDispatchEventTarget(DestroyTarget target)
+      : destroy_target_(target),
+        processor_(std::make_unique<DestroyDuringDispatchEventProcessor>()) {}
 
-  SelfDestroyingTestEventTarget(const SelfDestroyingTestEventTarget&) = delete;
-  SelfDestroyingTestEventTarget& operator=(
-      const SelfDestroyingTestEventTarget&) = delete;
+  DestroyDuringDispatchEventTarget(const DestroyDuringDispatchEventTarget&) =
+      delete;
+  DestroyDuringDispatchEventTarget& operator=(
+      const DestroyDuringDispatchEventTarget&) = delete;
 
   TestEventProcessor* processor() { return processor_.get(); }
 
-  void DestroyProcessor() { processor_.reset(); }
+  void Destroy() {
+    switch (destroy_target_) {
+      case kProcessor:
+        processor_.reset();
+        break;
+      case kTargeter:
+        SetEventTargeter(nullptr);
+    }
+  }
 
  private:
-  std::unique_ptr<SelfDestroyingEventProcessor> processor_;
+  DestroyTarget destroy_target_;
+  std::unique_ptr<TestEventProcessor> processor_;
 };
 
-EventDispatchDetails SelfDestroyingEventProcessor::PostDispatchEvent(
+EventDispatchDetails DestroyDuringDispatchEventProcessor::PostDispatchEvent(
     EventTarget* target,
     const Event& event) {
-  static_cast<SelfDestroyingTestEventTarget*>(target)->DestroyProcessor();
+  static_cast<DestroyDuringDispatchEventTarget*>(target)->Destroy();
   return EventDispatchDetails();
 }
 
 }  // namespace
 
-TEST(EventProcessorCrashTest, Basic) {
-  auto root = std::make_unique<TestEventTarget>();
-  auto target = std::make_unique<SelfDestroyingTestEventTarget>();
-  root->SetEventTargeter(
-      std::make_unique<TestEventTargeter>(target.get(), false));
-  TestEventProcessor* processor = target->processor();
-  processor->SetRoot(std::move(root));
+TEST(EventProcessorCrashTest, DestroyDuringDispatch) {
+  for (auto destroy_target : {kProcessor, kTargeter}) {
+    SCOPED_TRACE(destroy_target == kProcessor ? "Processor" : "Targeter");
+    auto root = std::make_unique<TestEventTarget>();
+    auto target =
+        std::make_unique<DestroyDuringDispatchEventTarget>(destroy_target);
+    root->SetEventTargeter(
+        std::make_unique<TestEventTargeter>(target.get(), false));
+    TestEventProcessor* processor = target->processor();
+    auto* target_ptr = target.get();
+    processor->SetRoot(std::move(root));
 
-  MouseEvent mouse(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                   EventTimeForNow(), EF_NONE, EF_NONE);
-  EXPECT_TRUE(processor->OnEventFromSource(&mouse).dispatcher_destroyed);
+    MouseEvent mouse(EventType::kMouseMoved, gfx::Point(10, 10),
+                     gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
+
+    if (destroy_target == kProcessor) {
+      EXPECT_TRUE(processor->OnEventFromSource(&mouse).dispatcher_destroyed);
+    } else {
+      EXPECT_FALSE(processor->OnEventFromSource(&mouse).dispatcher_destroyed);
+      EXPECT_FALSE(target_ptr->GetEventTargeter());
+    }
+  }
 }
 
 namespace {
 
-class SelfDestroyingTestEventTargeter : public TestEventTargeter {
+class DestroyDuringFindTargetEventTargeter : public TestEventTargeter {
  public:
-  explicit SelfDestroyingTestEventTargeter(std::unique_ptr<EventTarget> root)
+  DestroyDuringFindTargetEventTargeter(std::unique_ptr<TestEventTarget> root,
+                                       DestroyTarget target)
       : TestEventTargeter(nullptr, false),
+        destroy_target_(target),
+        root_(root.get()),
         processor_(std::make_unique<TestEventProcessor>()) {
     processor_->SetRoot(std::move(root));
   }
-  SelfDestroyingTestEventTargeter(const SelfDestroyingTestEventTarget&) =
-      delete;
-  SelfDestroyingTestEventTargeter& operator=(
-      const SelfDestroyingTestEventTargeter&) = delete;
-  ~SelfDestroyingTestEventTargeter() override = default;
+  DestroyDuringFindTargetEventTargeter(
+      const DestroyDuringFindTargetEventTargeter&) = delete;
+  DestroyDuringFindTargetEventTargeter& operator=(
+      const DestroyDuringFindTargetEventTargeter&) = delete;
+  ~DestroyDuringFindTargetEventTargeter() override = default;
 
   // EventTargeter:
   EventTarget* FindTargetForEvent(EventTarget* root, Event* event) override {
-    processor_.reset();
+    switch (destroy_target_) {
+      case kProcessor:
+        processor_.reset();
+        break;
+      case kTargeter:
+        processor_.release();
+        DCHECK_EQ(this, root_->GetEventTargeter());
+        root_->SetEventTargeter(nullptr);
+    }
     return nullptr;
   }
 
   EventProcessor* processor() { return processor_.get(); }
 
  private:
+  DestroyTarget destroy_target_;
+  raw_ptr<TestEventTarget> root_;
   std::unique_ptr<TestEventProcessor> processor_;
 };
 
 }  // namespace
 
 TEST(EventProcessorCrashTest, DestroyDuringFindTarget) {
-  auto root = std::make_unique<TestEventTarget>();
-  TestEventTarget* root_ptr = root.get();
-  auto event_targeter =
-      std::make_unique<SelfDestroyingTestEventTargeter>(std::move(root));
-  auto* processor = event_targeter->processor();
-  root_ptr->SetEventTargeter(std::move(event_targeter));
+  for (auto destroy_target : {kProcessor, kTargeter}) {
+    SCOPED_TRACE(destroy_target == kProcessor ? "Processor" : "Targeter");
+    auto root = std::make_unique<TestEventTarget>();
+    TestEventTarget* root_ptr = root.get();
+    auto event_targeter =
+        std::make_unique<DestroyDuringFindTargetEventTargeter>(std::move(root),
+                                                               destroy_target);
+    auto* processor = event_targeter->processor();
+    root_ptr->SetEventTargeter(std::move(event_targeter));
 
-  MouseEvent mouse(ET_MOUSE_MOVED, gfx::Point(10, 10), gfx::Point(10, 10),
-                   EventTimeForNow(), EF_NONE, EF_NONE);
-  EXPECT_TRUE(processor->OnEventFromSource(&mouse).dispatcher_destroyed);
+    MouseEvent mouse(EventType::kMouseMoved, gfx::Point(10, 10),
+                     gfx::Point(10, 10), EventTimeForNow(), EF_NONE, EF_NONE);
+    if (destroy_target == kProcessor) {
+      EXPECT_TRUE(processor->OnEventFromSource(&mouse).dispatcher_destroyed);
+    } else {
+      EXPECT_FALSE(processor->OnEventFromSource(&mouse).dispatcher_destroyed);
+      EXPECT_FALSE(root_ptr->GetEventTargeter());
+      // TestEventTargeter releases the processor when deleting the targeter.
+      delete processor;
+    }
+  }
 }
 
 }  // namespace test

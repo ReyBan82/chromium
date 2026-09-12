@@ -39,14 +39,15 @@ constexpr char kMarkSkipFile[] = "#<skip";
 constexpr char kSignalDiff[] = "*";
 constexpr char kMarkEndOfFile[] = "<-- End-of-file -->";
 
-using SetUpCommandLine = void (*)(base::CommandLine*);
+using InitializeFeatureList =
+    void (*)(base::test::ScopedFeatureList& scoped_feature_list);
 
 struct TypeInfo {
   const char* type;
   struct Mapping {
     const char* directive_prefix;
     const FilePath::CharType* expectations_file_postfix;
-    SetUpCommandLine setup_command_line;
+    InitializeFeatureList initialize_feature_list;
   } mapping;
 };
 
@@ -56,7 +57,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@ANDROID-",
             FILE_PATH_LITERAL("-android"),
-            [](base::CommandLine*) {},
+            [](base::test::ScopedFeatureList&) {},
         },
     },
     {
@@ -64,7 +65,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@BLINK-",
             FILE_PATH_LITERAL("-blink"),
-            [](base::CommandLine*) {},
+            [](base::test::ScopedFeatureList&) {},
         },
     },
     {
@@ -72,7 +73,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@FUCHSIA-",
             FILE_PATH_LITERAL("-fuchsia"),
-            [](base::CommandLine*) {},
+            [](base::test::ScopedFeatureList&) {},
         },
     },
     {
@@ -80,7 +81,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@AURALINUX-",
             FILE_PATH_LITERAL("-auralinux"),
-            [](base::CommandLine*) {},
+            [](base::test::ScopedFeatureList&) {},
         },
     },
     {
@@ -88,7 +89,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@MAC-",
             FILE_PATH_LITERAL("-mac"),
-            [](base::CommandLine*) {},
+            [](base::test::ScopedFeatureList&) {},
         },
     },
     {
@@ -96,7 +97,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@",
             FILE_PATH_LITERAL(""),
-            [](base::CommandLine*) {},
+            [](base::test::ScopedFeatureList&) {},
         },
     },
     {
@@ -104,12 +105,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@UIA-WIN-",
             FILE_PATH_LITERAL("-uia-win"),
-            [](base::CommandLine* command_line) {
-#if BUILDFLAG(IS_WIN)
-              command_line->AppendSwitch(
-                  ::switches::kEnableExperimentalUIAutomation);
-#endif
-            },
+            [](base::test::ScopedFeatureList&) {},
         },
     },
     {
@@ -117,12 +113,7 @@ constexpr TypeInfo kTypeInfos[] = {
         {
             "@WIN-",
             FILE_PATH_LITERAL("-win"),
-            [](base::CommandLine* command_line) {
-#if BUILDFLAG(IS_WIN)
-              command_line->RemoveSwitch(
-                  ::switches::kEnableExperimentalUIAutomation);
-#endif
-            },
+            [](base::test::ScopedFeatureList&) {},
         },
     }};
 
@@ -149,7 +140,7 @@ bool is_atk_version_supported() {
 }  // namespace
 
 AXInspectTestHelper::AXInspectTestHelper(AXApiType::Type type)
-    : expectation_type_(type) {}
+    : expectation_type_(std::string(type)) {}
 
 AXInspectTestHelper::AXInspectTestHelper(const char* expectation_type)
     : expectation_type_(expectation_type) {}
@@ -187,12 +178,14 @@ base::FilePath AXInspectTestHelper::GetExpectationFilePath(
   return base::FilePath();
 }
 
-void AXInspectTestHelper::SetUpCommandLine(
-    base::CommandLine* command_line) const {
-  const TypeInfo::Mapping* mapping = TypeMapping(expectation_type_);
-  if (mapping) {
-    mapping->setup_command_line(command_line);
+void AXInspectTestHelper::InitializeFeatureList() {
+  if (const auto* mapping = TypeMapping(expectation_type_); mapping) {
+    mapping->initialize_feature_list(scoped_feature_list_);
   }
+}
+
+void AXInspectTestHelper::ResetFeatureList() {
+  scoped_feature_list_.Reset();
 }
 
 AXInspectScenario AXInspectTestHelper::ParseScenario(
@@ -205,7 +198,7 @@ AXInspectScenario AXInspectTestHelper::ParseScenario(
                                  default_filters);
 }
 
-absl::optional<AXInspectScenario> AXInspectTestHelper::ParseScenario(
+std::optional<AXInspectScenario> AXInspectTestHelper::ParseScenario(
     const base::FilePath& scenario_path,
     const std::vector<AXPropertyFilter>& default_filters) {
   const TypeInfo::Mapping* mapping = TypeMapping(expectation_type_);
@@ -252,7 +245,7 @@ std::vector<AXApiType::Type> AXInspectTestHelper::EventTestPasses() {
 }
 
 // static
-absl::optional<std::vector<std::string>>
+std::optional<std::vector<std::string>>
 AXInspectTestHelper::LoadExpectationFile(const base::FilePath& expected_file) {
   base::ScopedAllowBlockingForTesting allow_blocking;
 
@@ -265,7 +258,7 @@ AXInspectTestHelper::LoadExpectationFile(const base::FilePath& expected_file) {
   base::RemoveChars(expected_contents_raw, "\r", &expected_contents);
 
   if (!expected_contents.compare(0, strlen(kMarkSkipFile), kMarkSkipFile)) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   std::vector<std::string> expected_lines =
@@ -313,7 +306,7 @@ bool AXInspectTestHelper::ValidateAgainstExpectation(
     diff += base::JoinString(actual_lines, "\n");
     diff += "\n";
 
-    // This is used by rebase_dump_accessibility_tree_test.py to signify
+    // This is used by rebase_dump_accessibility_tree_tests.py to signify
     // the end of the file when parsing the actual output from remote logs.
     diff += kMarkEndOfFile;
     diff += "\n";
@@ -379,18 +372,6 @@ FilePath::StringType AXInspectTestHelper::GetVersionSpecificExpectedFileSuffix(
     return suffix + FILE_PATH_LITERAL("-expected-blink-cros.txt");
   }
 #endif
-#if BUILDFLAG(IS_MAC)
-  // When running tests in a platform specific test directory (such as
-  // content/test/data/accessibility/mac/) the expectation_type_ == content.
-  if ((expectation_type_ == "mac" || expectation_type_ == "content") &&
-      !base::mac::IsAtLeastOS11()) {
-    FilePath::StringType suffix;
-    if (!expectations_qualifier.empty()) {
-      suffix = FILE_PATH_LITERAL("-") + expectations_qualifier;
-    }
-    return suffix + FILE_PATH_LITERAL("-expected-mac-before-11.txt");
-  }
-#endif
   return FILE_PATH_LITERAL("");
 }
 
@@ -402,8 +383,7 @@ std::vector<int> AXInspectTestHelper::DiffLines(
   std::vector<int> diff_lines;
   int i = 0, j = 0;
   while (i < actual_lines_count && j < expected_lines_count) {
-    if (expected_lines[j].size() == 0 ||
-        expected_lines[j][0] == kCommentToken) {
+    if (expected_lines[j].empty() || expected_lines[j][0] == kCommentToken) {
       // Skip comment lines and blank lines in expected output.
       ++j;
       continue;

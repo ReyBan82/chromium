@@ -4,25 +4,25 @@
 
 import("//build/config/android/channel.gni")
 import("//build/config/android/config.gni")
-import("//weblayer/variables.gni")
+import("//build/config/compiler/pgo/pgo.gni")
 
 declare_args() {
   # Show a launcher icon to open WebView developer UI. This is enabled by
-  # default for all prestable builds. The icon for Monochrome is shown
-  # dynamically at runtime if Monochrome is the current selected system WebView
-  # implementation or hidden otherwise.
+  # default for all prestable builds.
   webview_devui_show_icon = android_channel != "stable"
 }
 
 upstream_only_webview_deps = [
-  "//android_webview:platform_service_bridge_upstream_implementation_java",
+  "//android_webview/nonembedded:devui_banner_resources",
   "//android_webview/nonembedded:icon_resources",
 ]
 
-if (webview_includes_weblayer) {
-  upstream_only_webview_deps += [ "//weblayer/browser/java:upstream_java" ]
-}
-
-webview_jinja_variables = [ "use_isolated_splits=$weblayer_in_split" ]
-
 webview_product_config_java_package = "org.chromium.android_webview"
+
+use_webview_pgo_profile = current_cpu == "arm64" && chrome_pgo_phase == 2
+use_webview_pgo_profile_default_toolchain =
+    target_cpu == "arm64" && chrome_pgo_phase_default_toolchain == 2
+
+if (use_webview_pgo_profile_default_toolchain) {
+  webview_toolchain = "//build/toolchain/android:android_clang_arm64_webview"
+}

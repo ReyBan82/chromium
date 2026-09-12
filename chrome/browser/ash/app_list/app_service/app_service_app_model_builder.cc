@@ -9,8 +9,6 @@
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/ash/app_list/app_service/app_service_app_item.h"
 #include "chrome/browser/ash/arc/arc_util.h"
-#include "chrome/browser/ash/crostini/crostini_util.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/services/app_service/public/cpp/app_types.h"
 #include "components/sync/protocol/app_list_specifics.pb.h"
 #include "ui/base/l10n/l10n_util.h"
@@ -24,6 +22,7 @@ bool ShouldShowInLauncher(const apps::AppUpdate& update) {
     case apps::Readiness::kDisabledByBlocklist:
     case apps::Readiness::kDisabledByPolicy:
     case apps::Readiness::kTerminated:
+    case apps::Readiness::kDisabledByLocalSettings:
       return update.ShowInLauncher().value_or(false);
     default:
       return false;
@@ -43,7 +42,7 @@ void AppServiceAppModelBuilder::BuildModel() {
       apps::AppServiceProxyFactory::GetForProfile(profile());
   proxy->AppRegistryCache().ForEachApp(
       [this](const apps::AppUpdate& update) { OnAppUpdate(update); });
-  Observe(&proxy->AppRegistryCache());
+  app_registry_cache_observer_.Observe(&proxy->AppRegistryCache());
 }
 
 void AppServiceAppModelBuilder::OnAppUpdate(const apps::AppUpdate& update) {
@@ -51,10 +50,10 @@ void AppServiceAppModelBuilder::OnAppUpdate(const apps::AppUpdate& update) {
   bool show = ShouldShowInLauncher(update);
   if (item) {
     if (show) {
-      DCHECK(item->GetItemType() == AppServiceAppItem::kItemType);
+      DCHECK_EQ(item->GetItemType(), AppServiceAppItem::kItemType);
       static_cast<AppServiceAppItem*>(item)->OnAppUpdate(update);
 
-      // TODO(crbug.com/826982): drop the check for kChromeApp or kWeb, and
+      // TODO(crbug.com/40569217): drop the check for kChromeApp or kWeb, and
       // call UpdateItem unconditionally?
       apps::AppType app_type = update.AppType();
       if ((app_type == apps::AppType::kChromeApp) ||
@@ -80,7 +79,7 @@ void AppServiceAppModelBuilder::OnAppUpdate(const apps::AppUpdate& update) {
         unsynced_change = true;
       }
 
-      if (update.Readiness() == apps::Readiness::kUninstalledByMigration) {
+      if (update.Readiness() == apps::Readiness::kUninstalledByNonUser) {
         // Don't sync migration uninstallations as it will interfere with other
         // devices doing their own migration.
         unsynced_change = true;
@@ -99,5 +98,5 @@ void AppServiceAppModelBuilder::OnAppUpdate(const apps::AppUpdate& update) {
 
 void AppServiceAppModelBuilder::OnAppRegistryCacheWillBeDestroyed(
     apps::AppRegistryCache* cache) {
-  Observe(nullptr);
+  app_registry_cache_observer_.Reset();
 }

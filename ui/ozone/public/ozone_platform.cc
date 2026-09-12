@@ -18,6 +18,7 @@
 #include "ui/ozone/public/platform_keyboard_hook.h"
 #include "ui/ozone/public/platform_menu_utils.h"
 #include "ui/ozone/public/platform_screen.h"
+#include "ui/ozone/public/platform_session_manager.h"
 #include "ui/ozone/public/platform_user_input_monitor.h"
 
 namespace ui {
@@ -43,12 +44,22 @@ void EnsureInstance() {
 
 }  // namespace
 
-OzonePlatform::PlatformRuntimeProperties::SupportsSsdForTest
+OzonePlatform::PlatformRuntimeProperties::SupportsForTest
     OzonePlatform::PlatformRuntimeProperties::override_supports_ssd_for_test =
-        OzonePlatform::PlatformRuntimeProperties::SupportsSsdForTest::kNotSet;
+        OzonePlatform::PlatformRuntimeProperties::SupportsForTest::kNotSet;
+
+OzonePlatform::PlatformRuntimeProperties::SupportsForTest OzonePlatform::
+    PlatformRuntimeProperties::override_supports_per_window_scaling_for_test =
+        OzonePlatform::PlatformRuntimeProperties::SupportsForTest::kNotSet;
+
+OzonePlatform::PlatformProperties::SupportsForTest OzonePlatform::
+    PlatformProperties::override_set_parent_for_non_top_level_windows_for_test =
+        OzonePlatform::PlatformProperties::SupportsForTest::kNotSet;
 
 OzonePlatform::PlatformProperties::PlatformProperties() = default;
 OzonePlatform::PlatformProperties::~PlatformProperties() = default;
+
+OzonePlatform::PlatformRuntimeProperties::PlatformRuntimeProperties() = default;
 
 OzonePlatform::OzonePlatform() {
   DCHECK(!g_instance) << "There should only be a single OzonePlatform.";
@@ -58,12 +69,13 @@ OzonePlatform::OzonePlatform() {
 OzonePlatform::~OzonePlatform() = default;
 
 // static
-void OzonePlatform::PreEarlyInitialization() {
+void OzonePlatform::PreSandboxStartup() {
   EnsureInstance();
-  if (g_instance->prearly_initialized_)
+  if (g_instance->presandboxstartup_initialized_) {
     return;
-  g_instance->prearly_initialized_ = true;
-  g_instance->PreEarlyInitialize();
+  }
+  g_instance->presandboxstartup_initialized_ = true;
+  g_instance->OnPreSandboxStartup();
 }
 
 // static
@@ -83,6 +95,7 @@ bool OzonePlatform::InitializeForUI(const InitParams& args) {
 
 // static
 void OzonePlatform::InitializeForGPU(const InitParams& args) {
+  TRACE_EVENT("gpu,startup", "ui::OzonePlatform::InitializeForGPU");
   EnsureInstance();
   if (g_instance->initialized_gpu_)
     return;
@@ -105,6 +118,16 @@ bool OzonePlatform::IsInitialized() {
 // static
 std::string OzonePlatform::GetPlatformNameForTest() {
   return GetOzonePlatformName();
+}
+
+// static
+bool OzonePlatform::RunningOnWaylandForTest() {
+  return OzonePlatform::GetPlatformNameForTest() == "wayland";
+}
+
+// static
+bool OzonePlatform::RunningOnX11ForTest() {
+  return OzonePlatform::GetPlatformNameForTest() == "x11";
 }
 
 PlatformClipboard* OzonePlatform::GetPlatformClipboard() {
@@ -133,13 +156,17 @@ OzonePlatform::GetPlatformGlobalShortcutListener(
 std::unique_ptr<PlatformKeyboardHook> OzonePlatform::CreateKeyboardHook(
     PlatformKeyboardHookTypes type,
     base::RepeatingCallback<void(KeyEvent* event)> callback,
-    absl::optional<base::flat_set<DomCode>> dom_codes,
+    std::optional<base::flat_set<DomCode>> dom_codes,
     gfx::AcceleratedWidget accelerated_widget) {
   return nullptr;
 }
 
+PlatformSessionManager* OzonePlatform::GetSessionManager() {
+  return nullptr;
+}
+
 bool OzonePlatform::IsNativePixmapConfigSupported(
-    gfx::BufferFormat format,
+    viz::SharedImageFormat format,
     gfx::BufferUsage usage) const {
   // Platform that support NativePixmap must override this method.
   return false;
@@ -192,6 +219,6 @@ void OzonePlatform::SetFailInitializeUIForTest(bool fail) {
   g_fail_initialize_ui_for_test = fail;
 }
 
-void OzonePlatform::PreEarlyInitialize() {}
+void OzonePlatform::OnPreSandboxStartup() {}
 
 }  // namespace ui

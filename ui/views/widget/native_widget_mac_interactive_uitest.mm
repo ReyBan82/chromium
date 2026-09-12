@@ -4,22 +4,35 @@
 
 #include "ui/views/widget/native_widget_mac.h"
 
-#include "base/memory/raw_ptr.h"
-
 #import <Cocoa/Cocoa.h>
 
+#include <vector>
+
+#include "base/functional/bind.h"
 #import "base/mac/mac_util.h"
-#import "base/mac/scoped_nsobject.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_multi_source_observation.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/base/test/ui_controls.h"
 #import "ui/base/test/windowed_nsnotification_observer.h"
+#include "ui/events/event.h"
 #import "ui/events/test/cocoa_test_event_utils.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/test/native_widget_factory.h"
 #include "ui/views/test/test_widget_observer.h"
+#include "ui/views/test/views_test_utils.h"
+#include "ui/views/test/widget_activation_waiter.h"
 #include "ui/views/test/widget_test.h"
+#include "ui/views/widget/native_widget_private.h"
+#include "ui/views/widget/widget_observer.h"
 
 namespace views::test {
+
+bool kTestDisabledForVirtualMachineMac =
+    (base::mac::MacOSMajorVersion() == 15) && base::mac::IsVirtualMachine();
 
 // Tests for NativeWidgetMac that rely on global window manager state, and can
 // not be parallelized.
@@ -62,10 +75,11 @@ class NativeWidgetMacInteractiveUITest::Observer : public TestWidgetObserver {
   Observer& operator=(const Observer&) = delete;
 
   void OnWidgetActivationChanged(Widget* widget, bool active) override {
-    if (active)
+    if (active) {
       parent_->activation_count_++;
-    else
+    } else {
       parent_->deactivation_count_++;
+    }
   }
 
  private:
@@ -74,18 +88,22 @@ class NativeWidgetMacInteractiveUITest::Observer : public TestWidgetObserver {
 
 // Test that showing a window causes it to attain global keyWindow status.
 TEST_P(NativeWidgetMacInteractiveUITest, ShowAttainsKeyStatus) {
+  // TODO(crbug.com/445214951): Flaky on mac-vm builder for macOS 15.
+  if (kTestDisabledForVirtualMachineMac) {
+    GTEST_SKIP() << "Disabled on macOS Sequoia for virtual machines.";
+  }
+
   Widget* widget = MakeWidget();
   observer_ = std::make_unique<Observer>(this, widget);
 
   EXPECT_FALSE(widget->IsActive());
   EXPECT_EQ(0, activation_count_);
   {
-    WidgetActivationWaiter wait_for_first_active(widget, true);
     widget->Show();
-    wait_for_first_active.Wait();
+    WaitForWidgetActive(widget, true);
   }
   EXPECT_TRUE(widget->IsActive());
-  EXPECT_TRUE([widget->GetNativeWindow().GetNativeNSWindow() isKeyWindow]);
+  EXPECT_TRUE(widget->GetNativeWindow().GetNativeNSWindow().keyWindow);
   EXPECT_EQ(1, activation_count_);
   EXPECT_EQ(0, deactivation_count_);
 
@@ -94,18 +112,16 @@ TEST_P(NativeWidgetMacInteractiveUITest, ShowAttainsKeyStatus) {
   Widget* widget2 = MakeWidget();  // Note: not observed.
   EXPECT_EQ(0, deactivation_count_);
   {
-    WidgetActivationWaiter wait_for_deactivate(widget, false);
     widget2->Show();
-    wait_for_deactivate.Wait();
+    WaitForWidgetActive(widget2, true);
   }
   EXPECT_EQ(1, deactivation_count_);
   EXPECT_FALSE(widget->IsActive());
   EXPECT_EQ(1, activation_count_);
 
   {
-    WidgetActivationWaiter wait_for_external_activate(widget, true);
     [widget->GetNativeWindow().GetNativeNSWindow() makeKeyAndOrderFront:nil];
-    wait_for_external_activate.Wait();
+    WaitForWidgetActive(widget, true);
   }
   EXPECT_TRUE(widget->IsActive());
   EXPECT_EQ(1, deactivation_count_);
@@ -120,38 +136,43 @@ TEST_P(NativeWidgetMacInteractiveUITest, ShowAttainsKeyStatus) {
 
 // Test that ShowInactive does not take keyWindow status.
 TEST_P(NativeWidgetMacInteractiveUITest, ShowInactiveIgnoresKeyStatus) {
+  // TODO(crbug.com/445214951): Flaky on mac-vm builder for macOS 15.
+  if (kTestDisabledForVirtualMachineMac) {
+    GTEST_SKIP() << "Disabled on macOS Sequoia for virtual machines.";
+  }
+
   WidgetTest::WaitForSystemAppActivation();
   Widget* widget = MakeWidget();
   NSWindow* widget_window = widget->GetNativeWindow().GetNativeNSWindow();
 
-  base::scoped_nsobject<WindowedNSNotificationObserver> waiter(
+  WindowedNSNotificationObserver* waiter =
       [[WindowedNSNotificationObserver alloc]
           initForNotification:NSWindowDidBecomeKeyNotification
-                       object:widget_window]);
+                       object:widget_window];
 
   EXPECT_FALSE(widget->IsVisible());
-  EXPECT_FALSE([widget_window isVisible]);
+  EXPECT_FALSE(widget_window.visible);
   EXPECT_FALSE(widget->IsActive());
-  EXPECT_FALSE([widget_window isKeyWindow]);
+  EXPECT_FALSE(widget_window.keyWindow);
   widget->ShowInactive();
 
   EXPECT_TRUE(widget->IsVisible());
-  EXPECT_TRUE([widget_window isVisible]);
+  EXPECT_TRUE(widget_window.visible);
   EXPECT_FALSE(widget->IsActive());
-  EXPECT_FALSE([widget_window isKeyWindow]);
+  EXPECT_FALSE(widget_window.keyWindow);
 
   // If the window were to become active, this would activate it.
   RunPendingMessages();
   EXPECT_FALSE(widget->IsActive());
-  EXPECT_FALSE([widget_window isKeyWindow]);
-  EXPECT_EQ(0, [waiter notificationCount]);
+  EXPECT_FALSE(widget_window.keyWindow);
+  EXPECT_EQ(0, waiter.notificationCount);
 
   // Activating the inactive widget should make it key, asynchronously.
   widget->Activate();
   [waiter wait];
-  EXPECT_EQ(1, [waiter notificationCount]);
+  EXPECT_EQ(1, waiter.notificationCount);
   EXPECT_TRUE(widget->IsActive());
-  EXPECT_TRUE([widget_window isKeyWindow]);
+  EXPECT_TRUE(widget_window.keyWindow);
 
   widget->CloseNow();
 }
@@ -161,20 +182,208 @@ namespace {
 // Show |widget| and wait for it to become the key window.
 void ShowKeyWindow(Widget* widget) {
   NSWindow* widget_window = widget->GetNativeWindow().GetNativeNSWindow();
-  base::scoped_nsobject<WindowedNSNotificationObserver> waiter(
+  WindowedNSNotificationObserver* waiter =
       [[WindowedNSNotificationObserver alloc]
           initForNotification:NSWindowDidBecomeKeyNotification
-                       object:widget_window]);
+                       object:widget_window];
   widget->Show();
   EXPECT_TRUE([waiter wait]);
-  EXPECT_TRUE([widget_window isKeyWindow]);
+  EXPECT_TRUE(widget_window.keyWindow);
 }
 
 NSData* ViewAsTIFF(NSView* view) {
   NSBitmapImageRep* bitmap =
-      [view bitmapImageRepForCachingDisplayInRect:[view bounds]];
-  [view cacheDisplayInRect:[view bounds] toBitmapImageRep:bitmap];
+      [view bitmapImageRepForCachingDisplayInRect:view.bounds];
+  [view cacheDisplayInRect:view.bounds toBitmapImageRep:bitmap];
   return [bitmap TIFFRepresentation];
+}
+
+bool IsAppActive() {
+  return [NSApp isActive];
+}
+
+bool IsWidgetKeyWindow(Widget* widget) {
+  return widget->GetNativeWindow().GetNativeNSWindow().keyWindow;
+}
+
+bool ActivateFinder() {
+  NSArray<NSRunningApplication*>* finder_apps = [NSRunningApplication
+      runningApplicationsWithBundleIdentifier:@"com.apple.finder"];
+  if (finder_apps.count == 0) {
+    return false;
+  }
+  return [finder_apps.firstObject
+      activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+}
+
+class ShowWidgetOnMousePressedView : public View {
+  METADATA_HEADER(ShowWidgetOnMousePressedView, View)
+
+ public:
+  ShowWidgetOnMousePressedView(Widget* widget_to_show, bool* show_called)
+      : widget_to_show_(widget_to_show), show_called_(show_called) {}
+
+  ShowWidgetOnMousePressedView(const ShowWidgetOnMousePressedView&) = delete;
+  ShowWidgetOnMousePressedView& operator=(const ShowWidgetOnMousePressedView&) =
+      delete;
+
+ private:
+  bool OnMousePressed(const ui::MouseEvent& event) override {
+    *show_called_ = true;
+    widget_to_show_->Show();
+    return true;
+  }
+
+  raw_ptr<Widget> widget_to_show_;
+  raw_ptr<bool> show_called_;
+};
+
+BEGIN_METADATA(ShowWidgetOnMousePressedView)
+END_METADATA
+
+class WidgetActivationRecorder : public WidgetObserver {
+ public:
+  WidgetActivationRecorder(Widget* first, Widget* second) {
+    widget_observations_.AddObservation(first);
+    widget_observations_.AddObservation(second);
+  }
+
+  WidgetActivationRecorder(const WidgetActivationRecorder&) = delete;
+  WidgetActivationRecorder& operator=(const WidgetActivationRecorder&) = delete;
+
+  ~WidgetActivationRecorder() override = default;
+
+  const std::vector<raw_ptr<Widget, VectorExperimental>>& activated_widgets()
+      const {
+    return activated_widgets_;
+  }
+
+ private:
+  void OnWidgetActivationChanged(Widget* widget, bool active) override {
+    if (active) {
+      activated_widgets_.push_back(widget);
+    }
+  }
+
+  std::vector<raw_ptr<Widget, VectorExperimental>> activated_widgets_;
+  base::ScopedMultiSourceObservation<Widget, WidgetObserver>
+      widget_observations_{this};
+};
+
+void InstallShowWidgetOnMousePressedView(Widget* event_widget,
+                                         Widget* widget_to_show,
+                                         bool* show_called) {
+  auto view = std::make_unique<ShowWidgetOnMousePressedView>(widget_to_show,
+                                                             show_called);
+  view->SetBoundsRect(gfx::Rect(100, 100));
+  if (event_widget->client_view()) {
+    event_widget->client_view()->AddChildView(std::move(view));
+  } else {
+    event_widget->SetContentsView(std::move(view));
+  }
+}
+
+}  // namespace
+
+TEST_P(NativeWidgetMacInteractiveUITest,
+       ShowWidgetFromActivationIndependentWidgetWhileAppInactive) {
+  // TODO(crbug.com/445214951): Flaky on mac-vm builder for macOS 15.
+  if (kTestDisabledForVirtualMachineMac) {
+    GTEST_SKIP() << "Disabled on macOS Sequoia for virtual machines.";
+  }
+
+  WidgetTest::WaitForSystemAppActivation();
+
+  WidgetAutoclosePtr browser_widget(MakeWidget());
+  browser_widget->SetBounds(gfx::Rect(120, 120, 100, 100));
+  ShowKeyWindow(browser_widget.get());
+
+  bool show_called = false;
+  WidgetAutoclosePtr activation_independent_widget(MakeWidget());
+  activation_independent_widget->SetBounds(gfx::Rect(100, 100, 100, 100));
+  InstallShowWidgetOnMousePressedView(activation_independent_widget.get(),
+                                      browser_widget.get(), &show_called);
+  activation_independent_widget->SetZOrderLevel(
+      ui::ZOrderLevel::kFloatingWindow);
+  activation_independent_widget->SetActivationIndependence(true);
+  ShowKeyWindow(activation_independent_widget.get());
+  ASSERT_TRUE(activation_independent_widget->IsActive());
+  ASSERT_TRUE(browser_widget->IsVisible());
+
+  if (!ActivateFinder()) {
+    GTEST_SKIP() << "Unable to activate Finder.";
+  }
+  views::test::PropertyWaiter app_deactivation_waiter(
+      base::BindRepeating(&IsAppActive), false);
+  ASSERT_TRUE(app_deactivation_waiter.Wait());
+  views::test::PropertyWaiter key_window_deactivation_waiter(
+      base::BindRepeating(
+          &IsWidgetKeyWindow,
+          base::Unretained(activation_independent_widget.get())),
+      false);
+  ASSERT_TRUE(key_window_deactivation_waiter.Wait());
+  EXPECT_TRUE(activation_independent_widget->IsVisible());
+
+  NSEvent* mouse_down = cocoa_test_event_utils::LeftMouseDownAtPointInWindow(
+      NSMakePoint(50, 50),
+      activation_independent_widget->GetNativeWindow().GetNativeNSWindow());
+  [NSApp sendEvent:mouse_down];
+  EXPECT_TRUE(show_called);
+  EXPECT_TRUE(browser_widget->IsVisible());
+
+  views::test::PropertyWaiter widget_activation_waiter(
+      base::BindRepeating(&Widget::IsActive,
+                          base::Unretained(browser_widget.get())),
+      true);
+  EXPECT_TRUE(widget_activation_waiter.Wait());
+  EXPECT_TRUE(browser_widget->GetNativeWindow().GetNativeNSWindow().keyWindow);
+}
+
+TEST_P(NativeWidgetMacInteractiveUITest,
+       ShowInactiveWidgetDoesNotActivatePreviousKeyWindowFirst) {
+  // TODO(crbug.com/445214951): Flaky on mac-vm builder for macOS 15.
+  if (kTestDisabledForVirtualMachineMac) {
+    GTEST_SKIP() << "Disabled on macOS Sequoia for virtual machines.";
+  }
+
+  WidgetTest::WaitForSystemAppActivation();
+
+  WidgetAutoclosePtr target_widget(MakeWidget());
+  target_widget->SetBounds(gfx::Rect(120, 120, 100, 100));
+  ShowKeyWindow(target_widget.get());
+
+  WidgetAutoclosePtr previous_key_widget(MakeWidget());
+  previous_key_widget->SetBounds(gfx::Rect(100, 100, 100, 100));
+  ShowKeyWindow(previous_key_widget.get());
+  ASSERT_TRUE(previous_key_widget->IsActive());
+  ASSERT_TRUE(target_widget->IsVisible());
+  ASSERT_FALSE(target_widget->IsActive());
+
+  if (!ActivateFinder()) {
+    GTEST_SKIP() << "Unable to activate Finder.";
+  }
+  views::test::PropertyWaiter app_deactivation_waiter(
+      base::BindRepeating(&IsAppActive), false);
+  ASSERT_TRUE(app_deactivation_waiter.Wait());
+  views::test::PropertyWaiter previous_key_window_deactivation_waiter(
+      base::BindRepeating(&IsWidgetKeyWindow,
+                          base::Unretained(previous_key_widget.get())),
+      false);
+  ASSERT_TRUE(previous_key_window_deactivation_waiter.Wait());
+
+  WidgetActivationRecorder activation_recorder(previous_key_widget.get(),
+                                               target_widget.get());
+  target_widget->Show();
+  views::test::PropertyWaiter target_widget_activation_waiter(
+      base::BindRepeating(&Widget::IsActive,
+                          base::Unretained(target_widget.get())),
+      true);
+  EXPECT_TRUE(target_widget_activation_waiter.Wait());
+  EXPECT_TRUE(target_widget->GetNativeWindow().GetNativeNSWindow().keyWindow);
+
+  const auto& activated_widgets = activation_recorder.activated_widgets();
+  ASSERT_EQ(1u, activated_widgets.size());
+  EXPECT_EQ(target_widget.get(), activated_widgets.front());
 }
 
 class TestBubbleView : public BubbleDialogDelegateView {
@@ -187,8 +396,6 @@ class TestBubbleView : public BubbleDialogDelegateView {
   TestBubbleView& operator=(const TestBubbleView&) = delete;
 };
 
-}  // namespace
-
 // Test that parent windows keep their traffic lights enabled when showing
 // dialogs.
 TEST_F(NativeWidgetMacInteractiveUITest, ParentWindowTrafficLights) {
@@ -197,7 +404,7 @@ TEST_F(NativeWidgetMacInteractiveUITest, ParentWindowTrafficLights) {
   ShowKeyWindow(parent_widget);
 
   NSWindow* parent = parent_widget->GetNativeWindow().GetNativeNSWindow();
-  EXPECT_TRUE([parent isMainWindow]);
+  EXPECT_TRUE(parent.mainWindow);
 
   NSButton* button = [parent standardWindowButton:NSWindowCloseButton];
   EXPECT_TRUE(button);
@@ -220,11 +427,11 @@ TEST_F(NativeWidgetMacInteractiveUITest, ParentWindowTrafficLights) {
   EXPECT_TRUE(parent_widget->ShouldPaintAsActive());
 
   // Parent window should still be main, and have its traffic lights active.
-  EXPECT_TRUE([parent isMainWindow]);
-  EXPECT_FALSE([parent isKeyWindow]);
+  EXPECT_TRUE(parent.mainWindow);
+  EXPECT_FALSE(parent.keyWindow);
 
   // Enabled status doesn't actually change, but check anyway.
-  EXPECT_TRUE([button isEnabled]);
+  EXPECT_TRUE(button.enabled);
   NSData* button_image_with_child = ViewAsTIFF(button);
   EXPECT_TRUE([active_button_image isEqualToData:button_image_with_child]);
 
@@ -234,18 +441,18 @@ TEST_F(NativeWidgetMacInteractiveUITest, ParentWindowTrafficLights) {
   Widget* other_widget = CreateTopLevelPlatformWidget();
   other_widget->SetBounds(gfx::Rect(200, 200, 100, 100));
   ShowKeyWindow(other_widget);
-  EXPECT_FALSE([parent isMainWindow]);
-  EXPECT_FALSE([parent isKeyWindow]);
+  EXPECT_FALSE(parent.mainWindow);
+  EXPECT_FALSE(parent.keyWindow);
   EXPECT_FALSE(parent_widget->ShouldPaintAsActive());
-  EXPECT_TRUE([button isEnabled]);
+  EXPECT_TRUE(button.enabled);
   NSData* inactive_button_image = ViewAsTIFF(button);
   EXPECT_FALSE([active_button_image isEqualToData:inactive_button_image]);
 
   // Focus the child again and assert the parent once again paints as active.
   [child makeKeyWindow];
   EXPECT_TRUE(parent_widget->ShouldPaintAsActive());
-  EXPECT_TRUE([child isKeyWindow]);
-  EXPECT_FALSE([parent isKeyWindow]);
+  EXPECT_TRUE(child.keyWindow);
+  EXPECT_FALSE(parent.keyWindow);
 
   child_widget->CloseNow();
   other_widget->CloseNow();
@@ -261,14 +468,27 @@ TEST_F(NativeWidgetMacInteractiveUITest,
   params.native_widget =
       CreatePlatformNativeWidgetImpl(widget, kStubCapture, nullptr);
   // Start the window off in the dock.
-  params.show_state = ui::SHOW_STATE_MINIMIZED;
+  params.show_state = ui::mojom::WindowShowState::kMinimized;
   // "{}" in base64encode, to create some dummy restoration data.
   const std::string kDummyWindowRestorationData = "e30=";
   params.workspace = kDummyWindowRestorationData;
   widget->Init(std::move(params));
 
+  // Wait for the window to minimize. Ultimately we're going to check the
+  // NSWindow minimization state, so it would make sense to wait on the
+  // notification as we do below. However,
+  // widget->GetNativeWindow().GetNativeNSWindow() returns nil before the call
+  // to widget->Init(), and we'd need to set up the notification observer at
+  // that point. So instead, wait on the Widget state change.
+  {
+    views::test::PropertyWaiter minimize_waiter(
+        base::BindRepeating(&Widget::IsMinimized, base::Unretained(widget)),
+        true);
+    EXPECT_TRUE(minimize_waiter.Wait());
+  }
+
   NSWindow* window = widget->GetNativeWindow().GetNativeNSWindow();
-  EXPECT_TRUE([window isMiniaturized]);
+  EXPECT_TRUE(window.miniaturized);
 
   // As part of the window restoration process,
   // SessionRestoreImpl::ShowBrowser() -> BrowserView::Show() ->
@@ -277,12 +497,17 @@ TEST_F(NativeWidgetMacInteractiveUITest,
   // name is Show(), it "shows" the saved_show_state_ which in this case is
   // WindowVisibilityState::kHideWindow.
   widget->Show();
-  EXPECT_TRUE([window isMiniaturized]);
+  EXPECT_TRUE(window.miniaturized);
 
   // Activate the window from the dock (i.e.
   // SetVisibilityState(WindowVisibilityState::kShowAndActivateWindow)).
+  WindowedNSNotificationObserver* deminiaturizationObserver =
+      [[WindowedNSNotificationObserver alloc]
+          initForNotification:NSWindowDidDeminiaturizeNotification
+                       object:window];
   widget->Activate();
-  EXPECT_FALSE([window isMiniaturized]);
+  [deminiaturizationObserver wait];
+  EXPECT_FALSE(window.miniaturized);
 
   widget->CloseNow();
 }
@@ -350,30 +575,114 @@ TEST_F(NativeWidgetMacInteractiveUITest, GlobalNSTextInputContextUpdates) {
   Widget* widget = CreateTopLevelNativeWidget();
   Textfield* textfield = new Textfield;
   textfield->SetBounds(0, 0, 100, 100);
-  widget->GetContentsView()->AddChildView(textfield);
+  widget->GetContentsView()->AddChildViewRaw(textfield);
   textfield->RequestFocus();
   {
-    WidgetActivationWaiter wait_for_first_active(widget, true);
     widget->Show();
-    wait_for_first_active.Wait();
+    WaitForWidgetActive(widget, true);
   }
-  EXPECT_TRUE([widget->GetNativeView().GetNativeNSView() inputContext]);
-  EXPECT_EQ([widget->GetNativeView().GetNativeNSView() inputContext],
-            [NSTextInputContext currentInputContext]);
+  EXPECT_TRUE(widget->GetNativeView().GetNativeNSView().inputContext);
+  EXPECT_EQ(widget->GetNativeView().GetNativeNSView().inputContext,
+            NSTextInputContext.currentInputContext);
 
   widget->GetContentsView()->RemoveChildView(textfield);
 
   // NSTextInputContext usually only updates at the end of an AppKit event loop
   // iteration. We just tore out the inputContext, so ensure the raw, weak
   // global pointer that AppKit likes to keep around has been updated manually.
-  EXPECT_EQ(nil, [NSTextInputContext currentInputContext]);
-  EXPECT_FALSE([widget->GetNativeView().GetNativeNSView() inputContext]);
+  EXPECT_EQ(nil, NSTextInputContext.currentInputContext);
+  EXPECT_FALSE(widget->GetNativeView().GetNativeNSView().inputContext);
 
   // RemoveChildView() doesn't delete the view.
   delete textfield;
 
   widget->Close();
   base::RunLoop().RunUntilIdle();
+}
+
+// Ensure that view accelerators unregistered when closing a widget with type
+// CLIENT_OWNS_WIDGET.
+TEST_F(NativeWidgetMacInteractiveUITest, UnregisterAccelerators) {
+  auto parent_widget = base::WrapUnique<Widget>(
+      CreateTopLevelNativeWidget(Widget::InitParams::CLIENT_OWNS_WIDGET));
+  parent_widget->SetBounds(gfx::Rect(100, 100, 100, 100));
+  ShowKeyWindow(parent_widget.get());
+
+  auto child_widget = std::make_unique<Widget>();
+  Widget::InitParams params = CreateParams(
+      Widget::InitParams::CLIENT_OWNS_WIDGET, Widget::InitParams::TYPE_WINDOW);
+  params.parent = parent_widget->GetNativeView();
+  params.child = true;
+  child_widget->Init(std::move(params));
+  child_widget->Show();
+  ASSERT_EQ(child_widget->GetFocusManager(), parent_widget->GetFocusManager());
+
+  auto* focus_manager = parent_widget->GetFocusManager();
+  ui::Accelerator accelerator(ui::VKEY_F10,
+                              ui::EF_SHIFT_DOWN | ui::EF_ALT_DOWN);
+  ASSERT_FALSE(focus_manager->IsAcceleratorRegistered(accelerator));
+  View* view =
+      child_widget->GetContentsView()->AddChildView(std::make_unique<View>());
+  view->AddAccelerator(accelerator);
+  ASSERT_TRUE(focus_manager->IsAcceleratorRegistered(accelerator));
+
+  child_widget.reset();
+  EXPECT_FALSE(focus_manager->IsAcceleratorRegistered(accelerator));
+}
+
+// Regression test for crbug.com/443168930.
+// Widget::CloseAllWidgets() is intended to clean up all platform widgets
+// (typically called at shutdown). The CLIENT_OWNS_WIDGET ownership scheme
+// allows a views::Widget to be destroyed independently of its associated
+// platform widget (wrapped by a NativeWidget). This test ensures that
+// CloseAllWidgets() destroys all platform widgets in the case the corresponding
+// views::Widget has already been destroyed - leaving the platform widget /
+// NativeWidget effectively orphaned.
+TEST_F(NativeWidgetMacInteractiveUITest, ClientOwnsWidget_CloseAllWidgets) {
+  // Counts the number of reported views::Widgets.
+  const auto count_widgets = []() {
+    int count = 0;
+    for (NSWindow* window : [NSApp windows]) {
+      if (Widget::GetWidgetForNativeWindow(gfx::NativeWindow(window))) {
+        count++;
+      }
+    }
+    return count;
+  };
+  // Counts the number of reported NativeWidgets.
+  const auto count_native_widgets = []() {
+    int count = 0;
+    for (NSWindow* window : [NSApp windows]) {
+      if (internal::NativeWidgetPrivate::GetNativeWidgetForNativeWindow(
+              gfx::NativeWindow(window))) {
+        count++;
+      }
+    }
+    return count;
+  };
+
+  // Test should start with zero widgets.
+  EXPECT_EQ(0, count_widgets());
+  EXPECT_EQ(0, count_native_widgets());
+
+  // Create a new widget using CLIENT_OWNS_WIDGET.
+  auto widget = base::WrapUnique<Widget>(
+      CreateTopLevelNativeWidget(Widget::InitParams::CLIENT_OWNS_WIDGET));
+  widget->SetBounds(gfx::Rect(100, 100, 100, 100));
+  EXPECT_EQ(1, count_widgets());
+  EXPECT_EQ(1, count_native_widgets());
+
+  // Simulate a client destroying `widget`. The views::Widget should have been
+  // destroyed but the NativeWidget should remain.
+  widget.reset();
+  EXPECT_EQ(0, count_widgets());
+  EXPECT_EQ(1, count_native_widgets());
+
+  // CloseAllWidgets() is expected to close all platform widgets, including
+  // those for which the corresponding views::Widget has been destroyed.
+  Widget::CloseAllWidgets();
+  EXPECT_EQ(0, count_widgets());
+  EXPECT_EQ(0, count_native_widgets());
 }
 
 INSTANTIATE_TEST_SUITE_P(NativeWidgetMacInteractiveUITestInstance,

@@ -4,16 +4,16 @@
 
 #include "content/browser/cookie_store/cookie_store_manager.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/ranges/algorithm.h"
 #include "base/sequence_checker.h"
 #include "content/browser/cookie_store/cookie_change_subscriptions.pb.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
-#include "content/browser/service_worker/embedded_worker_status.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
+#include "content/browser/service_worker/service_worker_info.h"
 #include "content/browser/service_worker/service_worker_metrics.h"
 #include "content/browser/service_worker/service_worker_registration.h"
 #include "content/browser/service_worker/service_worker_version.h"
@@ -22,9 +22,10 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_process_host.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+#include "net/cookies/cookie_partition_key.h"
 #include "services/network/public/cpp/is_potentially_trustworthy.h"
 #include "services/network/public/mojom/network_context.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/blink/public/common/service_worker/embedded_worker_status.h"
 #include "third_party/blink/public/common/service_worker/service_worker_scope_match.h"
 #include "third_party/blink/public/common/service_worker/service_worker_status_code.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
@@ -37,6 +38,29 @@ namespace {
 
 // ServiceWorkerStorage user data key for cookie change subscriptions.
 const char kSubscriptionsUserKey[] = "cookie_store_subscriptions";
+
+void OnFindRegistrationById(
+    const blink::StorageKey& storage_key,
+    mojo::ReportBadMessageCallback bad_message_callback,
+    blink::mojom::CookieStore::GetSubscriptionsCallback callback,
+    std::vector<blink::mojom::CookieChangeSubscriptionPtr> mojo_subscriptions,
+    blink::ServiceWorkerStatusCode find_status,
+    scoped_refptr<ServiceWorkerRegistration> registration) {
+  if (find_status != blink::ServiceWorkerStatusCode::kOk) {
+    std::move(bad_message_callback).Run("Invalid service worker registration");
+    std::move(callback).Run(
+        std::vector<blink::mojom::CookieChangeSubscriptionPtr>(), false);
+    return;
+  }
+  CHECK(registration, base::NotFatalUntil::M159);
+  if (registration->key() != storage_key) {
+    std::move(bad_message_callback).Run("Invalid service worker");
+    std::move(callback).Run(
+        std::vector<blink::mojom::CookieChangeSubscriptionPtr>(), false);
+    return;
+  }
+  std::move(callback).Run(std::move(mojo_subscriptions), true);
+}
 
 }  // namespace
 
@@ -111,7 +135,7 @@ void CookieStoreManager::ProcessOnDiskSubscriptions(
     return;
   }
 
-  DCHECK(subscriptions_by_registration_.empty());
+  CHECK(subscriptions_by_registration_.empty(), base::NotFatalUntil::M159);
   subscriptions_by_registration_.reserve(user_data.size());
   bool load_success = true;
   for (const auto& pair : user_data) {
@@ -127,8 +151,8 @@ void CookieStoreManager::ProcessOnDiskSubscriptions(
     }
 
     ActivateSubscriptions(subscriptions);
-    DCHECK(
-        !subscriptions_by_registration_.count(service_worker_registration_id));
+    CHECK(!subscriptions_by_registration_.count(service_worker_registration_id),
+          base::NotFatalUntil::M159);
     subscriptions_by_registration_.emplace(
         std::move(service_worker_registration_id), std::move(subscriptions));
   }
@@ -140,7 +164,7 @@ void CookieStoreManager::DidLoadAllSubscriptions(
     bool succeeded,
     base::OnceCallback<void(bool)> load_callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(done_loading_subscriptions_);
+  CHECK(done_loading_subscriptions_, base::NotFatalUntil::M159);
   succeeded_loading_subscriptions_ = succeeded;
 
   for (auto& callback : subscriptions_loaded_callbacks_)
@@ -191,7 +215,7 @@ void CookieStoreManager::AddSubscriptions(
     return;
   }
 
-  if (!(storage_key == service_worker_registration->key())) {
+  if (storage_key != service_worker_registration->key()) {
     std::move(bad_message_callback).Run("Invalid service worker");
     std::move(callback).Run(false);
     return;
@@ -205,8 +229,6 @@ void CookieStoreManager::AddSubscriptions(
   }
 
   for (const auto& mojo_subscription : mojo_subscriptions) {
-    // TODO(crbug.com/1246549): This validation step should consider the storage
-    // key.
     if (!blink::ServiceWorkerScopeMatches(service_worker_registration->scope(),
                                           mojo_subscription->url)) {
       // Blink should have validated subscription URLs against the service
@@ -233,15 +255,16 @@ void CookieStoreManager::AddSubscriptions(
     auto new_subscription = std::make_unique<CookieChangeSubscription>(
         std::move(mojo_subscription), service_worker_registration->id());
 
-    auto existing_subscription_it = base::ranges::find(
-        subscriptions, *new_subscription,
-        &std::unique_ptr<CookieChangeSubscription>::operator*);
+    auto existing_subscription_it = std::ranges::find_if(
+        subscriptions, [&new_subscription](const auto& sub) {
+          return *sub == *new_subscription;
+        });
     if (existing_subscription_it == subscriptions.end())
       subscriptions.push_back(std::move(new_subscription));
   }
 
   ActivateSubscriptions(
-      base::make_span(subscriptions).subspan(old_subscriptions_size));
+      base::span(subscriptions).subspan(old_subscriptions_size));
   StoreSubscriptions(service_worker_registration_id, storage_key, subscriptions,
                      std::move(callback));
 }
@@ -331,14 +354,16 @@ void CookieStoreManager::RemoveSubscriptions(
   }
 
   for (auto& subscription : all_subscriptions) {
-    auto target_subscription_it = base::ranges::find(
-        target_subscriptions, *subscription,
-        &std::unique_ptr<CookieChangeSubscription>::operator*);
+    auto target_subscription_it = std::ranges::find_if(
+        target_subscriptions,
+        [&subscription](const auto& sub) { return *sub == *subscription; });
+
     if (target_subscription_it == target_subscriptions.end()) {
       // The subscription is not marked for deletion.
       live_subscriptions.push_back(std::move(subscription));
     } else {
-      DCHECK(**target_subscription_it == *subscription);
+      CHECK(**target_subscription_it == *subscription,
+            base::NotFatalUntil::M159);
       removed_subscriptions.push_back(std::move(subscription));
     }
   }
@@ -347,8 +372,9 @@ void CookieStoreManager::RemoveSubscriptions(
   // StoreSubscriptions() needs to be called before updating
   // |subscriptions_by_registration_|, because the update may delete the vector
   // holding the subscriptions.
-  StoreSubscriptions(service_worker_registration_id, storage_key,
-                     live_subscriptions, std::move(callback));
+  StoreSubscriptions(service_worker_registration_id,
+                     service_worker_registration->key(), live_subscriptions,
+                     std::move(callback));
   if (live_subscriptions.empty()) {
     subscriptions_by_registration_.erase(all_subscriptions_it);
   } else {
@@ -384,23 +410,19 @@ void CookieStoreManager::GetSubscriptions(
     return;
   }
 
-  const GURL& first_url = it->second[0]->url();
 #if DCHECK_IS_ON()
+  const GURL& first_url = it->second[0]->url();
   for (const auto& subscription : it->second) {
     DCHECK(url::IsSameOriginWith(first_url, subscription->url()))
         << "Service worker's change subscriptions don't have the same origin";
   }
 #endif  // DCHECK_IS_ON()
 
-  if (!storage_key.origin().IsSameOriginWith(first_url)) {
-    std::move(bad_message_callback).Run("Invalid service worker");
-    std::move(callback).Run(
-        std::vector<blink::mojom::CookieChangeSubscriptionPtr>(), false);
-    return;
-  }
-
-  std::move(callback).Run(CookieChangeSubscription::ToMojoVector(it->second),
-                          true);
+  service_worker_context_->FindReadyRegistrationForIdOnly(
+      service_worker_registration_id,
+      base::BindOnce(&OnFindRegistrationById, storage_key,
+                     std::move(bad_message_callback), std::move(callback),
+                     CookieChangeSubscription::ToMojoVector(it->second)));
 }
 
 void CookieStoreManager::StoreSubscriptions(
@@ -526,7 +548,7 @@ void CookieStoreManager::DeactivateSubscriptions(
     subscription->RemoveFromList();
   }
   auto it = subscriptions_by_url_key_.find(url_key);
-  DCHECK(it != subscriptions_by_url_key_.end());
+  CHECK(it != subscriptions_by_url_key_.end());
   if (it->second.empty())
     subscriptions_by_url_key_.erase(it);
 }
@@ -561,11 +583,14 @@ void CookieStoreManager::OnCookieChange(const net::CookieChangeInfo& change) {
     return;
   }
 
-  if (change.cause == net::CookieChangeCause::OVERWRITE) {
+  if (change.cause == net::CookieChangeCause::OVERWRITE ||
+      change.cause == net::CookieChangeCause::INSERTED_NO_CHANGE_OVERWRITE) {
     // Cookie overwrites generate an OVERWRITE event with the old cookie data
-    // and an INSERTED event with the new cookie data. The Cookie Store API
-    // only reports new cookie information, so OVERWRITE events doesn't need to
-    // be dispatched to service workers.
+    // and an INSERTED event with the new cookie data if the cookie changed and
+    // INSERTED_NO_CHANGE_OVERWRITE if the overwrite did not result in an
+    // observable change to the cookie. The Cookie Store API only reports new
+    // cookie information, so OVERWRITE events doesn't need to be dispatched to
+    // service workers or not at all if it does not result in a change.
     return;
   }
 
@@ -600,18 +625,58 @@ void CookieStoreManager::OnCookieChange(const net::CookieChangeInfo& change) {
         registration_id,
         base::BindOnce(
             [](base::WeakPtr<CookieStoreManager> manager,
+               BrowserContext* browser_context,
+               ContentBrowserClient* content_browser_client,
                const net::CookieChangeInfo& change,
                blink::ServiceWorkerStatusCode find_status,
                scoped_refptr<ServiceWorkerRegistration> registration) {
               if (find_status != blink::ServiceWorkerStatusCode::kOk)
                 return;
 
-              DCHECK(registration);
+              CHECK(registration, base::NotFatalUntil::M159);
               if (!manager)
                 return;
+
+              if (content_browser_client && !change.cookie.IsPartitioned() &&
+                  !content_browser_client->IsFullCookieAccessAllowed(
+                      browser_context, /*web_contents=*/nullptr,
+                      registration->scope(), registration->key(),
+                      /*overrides=*/{})) {
+                return;
+              }
+
+              // If the change is for a partition cookie, we check that its
+              // partition key matches the StorageKey's top-level site.
+              if (auto cookie_partition_key =
+                      registration->key().ToCookiePartitionKey()) {
+                if (change.cookie.IsPartitioned() &&
+                    change.cookie.PartitionKey() != cookie_partition_key) {
+                  return;
+                }
+                // If the cookie partition key for the worker has a nonce, then
+                // only partitioned cookies should be visible.
+                if (net::CookiePartitionKey::HasNonce(cookie_partition_key) &&
+                    !change.cookie.IsPartitioned()) {
+                  return;
+                }
+              }
+
+              if (registration->key().IsThirdPartyContext() &&
+                  !change.cookie.IsEffectivelySameSiteNone()) {
+                return;
+              }
+
+              // TODO(crbug.com/40063772): Third-party partitioned workers
+              // should not have access to unpartitioned state when third-party
+              // cookie blocking is on.
+              // TODO(crbug.com/40063772): Should RSA grant unpartitioned cookie
+              // access?
+
               manager->DispatchChangeEvent(std::move(registration), change);
             },
-            weak_factory_.GetWeakPtr(), change));
+            weak_factory_.GetWeakPtr(),
+            service_worker_context_->browser_context(),
+            GetContentClient()->browser(), change));
   }
 }
 
@@ -619,10 +684,10 @@ void CookieStoreManager::OnCookieChange(const net::CookieChangeInfo& change) {
 void CookieStoreManager::BindReceiverForFrame(
     RenderFrameHost* render_frame_host,
     mojo::PendingReceiver<blink::mojom::CookieStore> receiver) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(render_frame_host);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  CHECK(render_frame_host, base::NotFatalUntil::M159);
   RenderProcessHost* render_process_host = render_frame_host->GetProcess();
-  DCHECK(render_process_host);
+  CHECK(render_process_host, base::NotFatalUntil::M159);
 
   StoragePartitionImpl* storage_partition = static_cast<StoragePartitionImpl*>(
       render_process_host->GetStoragePartition());
@@ -630,14 +695,14 @@ void CookieStoreManager::BindReceiverForFrame(
   RenderFrameHostImpl* render_frame_host_impl =
       static_cast<RenderFrameHostImpl*>(render_frame_host);
   storage_partition->GetCookieStoreManager()->BindReceiver(
-      std::move(receiver), render_frame_host_impl->storage_key());
+      std::move(receiver), render_frame_host_impl->GetStorageKey());
 }
 
 // static
 void CookieStoreManager::BindReceiverForWorker(
     const ServiceWorkerVersionBaseInfo& info,
     mojo::PendingReceiver<blink::mojom::CookieStore> receiver) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   RenderProcessHost* render_process_host =
       RenderProcessHost::FromID(info.process_id);
   if (render_process_host == nullptr)
@@ -656,7 +721,8 @@ void CookieStoreManager::DispatchChangeEvent(
 
   scoped_refptr<ServiceWorkerVersion> active_version =
       registration->active_version();
-  if (active_version->running_status() != EmbeddedWorkerStatus::RUNNING) {
+  if (active_version->running_status() !=
+      blink::EmbeddedWorkerStatus::kRunning) {
     active_version->RunAfterStartWorker(
         ServiceWorkerMetrics::EventType::COOKIE_CHANGE,
         base::BindOnce(&CookieStoreManager::DidStartWorkerForChangeEvent,

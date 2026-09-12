@@ -24,13 +24,17 @@
  */
 
 #include "third_party/blink/renderer/core/css/css_timing_function_value.h"
+
+#include <algorithm>
+
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink::cssvalue {
 
 String CSSLinearTimingFunctionValue::CustomCSSText() const {
-  WTF::StringBuilder builder;
+  StringBuilder builder;
   builder.Append("linear(");
   for (wtf_size_t i = 0; i < points_.size(); ++i) {
     if (i != 0) {
@@ -47,20 +51,13 @@ String CSSLinearTimingFunctionValue::CustomCSSText() const {
 
 bool CSSLinearTimingFunctionValue::Equals(
     const CSSLinearTimingFunctionValue& other) const {
-  if (points_.size() != other.points_.size()) {
-    return false;
-  }
-  for (wtf_size_t i = 0; i < points_.size(); ++i) {
-    if (points_[i] != other.points_[i]) {
-      return false;
-    }
-  }
-  return true;
+  return std::ranges::equal(points_, other.points_);
 }
 
 String CSSCubicBezierTimingFunctionValue::CustomCSSText() const {
-  return "cubic-bezier(" + String::Number(x1_) + ", " + String::Number(y1_) +
-         ", " + String::Number(x2_) + ", " + String::Number(y2_) + ")";
+  return StrCat({"cubic-bezier(", String::Number(x1_), ", ",
+                 String::Number(y1_), ", ", String::Number(x2_), ", ",
+                 String::Number(y2_), ")"});
 }
 
 bool CSSCubicBezierTimingFunctionValue::Equals(
@@ -70,7 +67,7 @@ bool CSSCubicBezierTimingFunctionValue::Equals(
 }
 
 String CSSStepsTimingFunctionValue::CustomCSSText() const {
-  String step_position_string;
+  StringView step_position_string;
   switch (step_position_) {
     case StepsTimingFunction::StepPosition::START:
       step_position_string = "start";
@@ -100,10 +97,10 @@ String CSSStepsTimingFunctionValue::CustomCSSText() const {
   // If the step position is jump-end or end, serialize as steps(<integer>).
   // Otherwise, serialize as steps(<integer>, <step-position>).
   if (step_position_string.empty()) {
-    return "steps(" + String::Number(steps_) + ')';
+    return StrCat({"steps(", steps_->CssText(), ")"});
   }
 
-  return "steps(" + String::Number(steps_) + ", " + step_position_string + ')';
+  return StrCat({"steps(", steps_->CssText(), ", ", step_position_string, ")"});
 }
 
 bool CSSStepsTimingFunctionValue::Equals(

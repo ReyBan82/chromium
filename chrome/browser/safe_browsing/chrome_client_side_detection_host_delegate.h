@@ -6,9 +6,14 @@
 #define CHROME_BROWSER_SAFE_BROWSING_CHROME_CLIENT_SIDE_DETECTION_HOST_DELEGATE_H_
 
 #include "base/memory/raw_ptr.h"
+#include "components/content_extraction/content/browser/inner_text.h"
 #include "components/safe_browsing/content/browser/client_side_detection_host.h"
 #include "components/safe_browsing/content/browser/safe_browsing_navigation_observer_manager.h"
 #include "content/public/browser/global_routing_id.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "components/safe_browsing/core/browser/referring_app_info.h"
+#endif
 
 namespace safe_browsing {
 
@@ -32,18 +37,23 @@ class ChromeClientSideDetectionHostDelegate
 
   // ClientSideDetectionHost::Delegate implementation.
   bool HasSafeBrowsingUserInteractionObserver() override;
-  PrefService* GetPrefs() override;
   scoped_refptr<SafeBrowsingDatabaseManager> GetSafeBrowsingDBManager()
       override;
   scoped_refptr<BaseUIManager> GetSafeBrowsingUIManager() override;
-  base::WeakPtr<ClientSideDetectionService> GetClientSideDetectionService()
-      override;
   void AddReferrerChain(ClientPhishingRequest* verdict,
                         GURL current_url,
                         const content::GlobalRenderFrameHostId&
                             current_outermost_main_frame_id) override;
-  raw_ptr<VerdictCacheManager> GetCacheManager() override;
   ChromeUserPopulation GetUserPopulation() override;
+  void GetInnerText(HostInnerTextCallback callback) override;
+  void MaybeStartGeminiAntiscamProtection(
+      GURL url,
+      ClientSideDetectionType request_type,
+      std::optional<bool> did_match_high_confidence_allowlist) override;
+#if BUILDFLAG(IS_ANDROID)
+  internal::ReferringAppInfo GetReferringAppInfo(
+      content::WebContents* web_contents) override;
+#endif
 
   void SetNavigationObserverManagerForTesting(
       SafeBrowsingNavigationObserverManager* navigation_observer_manager) {
@@ -57,9 +67,14 @@ class ChromeClientSideDetectionHostDelegate
       SafeBrowsingNavigationObserverManager::AttributionResult result);
 
  private:
+  void OnInnerTextResult(
+      HostInnerTextCallback callback,
+      std::unique_ptr<content_extraction::InnerTextResult> result);
   raw_ptr<content::WebContents> web_contents_;
   raw_ptr<SafeBrowsingNavigationObserverManager> observer_manager_for_testing_ =
       nullptr;
+  base::WeakPtrFactory<ChromeClientSideDetectionHostDelegate> weak_factory_{
+      this};
 };
 
 }  // namespace safe_browsing

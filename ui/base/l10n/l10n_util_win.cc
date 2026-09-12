@@ -8,14 +8,16 @@
 #include <iterator>
 
 #include "base/i18n/rtl.h"
+#include "base/i18n/win/preferred_languages.h"
 #include "base/lazy_instance.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/win/i18n.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/display/display.h"
+#include "ui/display/win/dpi.h"
 #include "ui/display/win/screen_win.h"
+#include "ui/gfx/system_fonts_win.h"
 #include "ui/strings/grit/app_locale_settings.h"
 
 namespace {
@@ -27,12 +29,13 @@ class OverrideLocaleHolder {
   OverrideLocaleHolder(const OverrideLocaleHolder&) = delete;
   OverrideLocaleHolder& operator=(const OverrideLocaleHolder&) = delete;
 
-  const std::vector<std::string>& value() const { return value_; }
-  void swap_value(std::vector<std::string>* override_value) {
+  const std::vector<base::i18n::LanguageTag>& value() const { return value_; }
+  void swap_value(std::vector<base::i18n::LanguageTag>* override_value) {
     value_.swap(*override_value);
   }
+
  private:
-  std::vector<std::string> value_;
+  std::vector<base::i18n::LanguageTag> value_;
 };
 
 base::LazyInstance<OverrideLocaleHolder>::DestructorAtExit
@@ -41,14 +44,6 @@ base::LazyInstance<OverrideLocaleHolder>::DestructorAtExit
 }  // namespace
 
 namespace l10n_util {
-
-int GetExtendedStyles() {
-  return !base::i18n::IsRTL() ? 0 : WS_EX_LAYOUTRTL | WS_EX_RTLREADING;
-}
-
-DWORD GetExtendedTooltipStyles() {
-  return base::i18n::IsRTL() ? WS_EX_LAYOUTRTL : 0;
-}
 
 void HWNDSetRTLLayout(HWND hwnd) {
   LONG ex_style = ::GetWindowLong(hwnd, GWL_EXSTYLE);
@@ -65,49 +60,36 @@ void HWNDSetRTLLayout(HWND hwnd) {
   }
 }
 
-bool NeedOverrideDefaultUIFont(std::wstring* override_font_family,
-                               double* font_size_scaler) {
-  // This is rather simple-minded to deal with the UI font size
-  // issue for some Indian locales (ml, bn, hi) for which
-  // the default Windows fonts are too small to be legible.  For those
-  // locales, IDS_UI_FONT_FAMILY is set to an actual font family to
-  // use while for other locales, it's set to 'default'.
+void AdjustUiFont(gfx::win::FontAdjustment& font_adjustment) {
+  // This is rather simple-minded to deal with the UI font size issue for some
+  // Indian locales (ml, bn, hi) for which the default Windows fonts are too
+  // small to be legible.  For those locales, IDS_UI_FONT_FAMILY is set to an
+  // actual font family to use, while for other locales, it's set to "default".
   std::wstring ui_font_family = GetWideString(IDS_UI_FONT_FAMILY);
-  int scaler100;
-  if (!base::StringToInt(l10n_util::GetStringUTF16(IDS_UI_FONT_SIZE_SCALER),
-                         &scaler100))
-    return false;
-
-  // We use the OS default in two cases:
-  // 1) The resource bundle has 'default' and '100' for font family and
-  //    font scaler.
-  // 2) The resource bundle is not available for some reason and
-  //    ui_font_family is empty.
-  if ((ui_font_family == L"default" && scaler100 == 100) ||
-      ui_font_family.empty())
-    return false;
-
-  if (override_font_family && ui_font_family != L"default")
-    override_font_family->swap(ui_font_family);
-  if (font_size_scaler)
-    *font_size_scaler = scaler100 / 100.0;
-  return true;
+  if (!ui_font_family.empty()) {
+    int scaler;
+    if (base::StringToInt(l10n_util::GetStringUTF16(IDS_UI_FONT_SIZE_SCALER),
+                          &scaler)) {
+      if (const bool is_custom = ui_font_family != L"default";
+          is_custom || scaler != 100) {
+        if (is_custom) {
+          font_adjustment.font_family_override.swap(ui_font_family);
+        }
+        font_adjustment.font_scale = scaler / 100.0;
+      }
+    }
+  }
+  font_adjustment.font_scale *= display::win::GetAccessibilityFontScale();
 }
 
 void OverrideLocaleWithUILanguageList() {
-  std::vector<std::wstring> ui_languages;
-  if (base::win::i18n::GetThreadPreferredUILanguageList(&ui_languages)) {
-    std::vector<std::string> ascii_languages;
-    ascii_languages.reserve(ui_languages.size());
-    std::transform(ui_languages.begin(), ui_languages.end(),
-                   std::back_inserter(ascii_languages), &base::WideToASCII);
-    override_locale_holder.Get().swap_value(&ascii_languages);
-  } else {
-    NOTREACHED() << "Failed to determine the UI language for locale override.";
-  }
+  std::vector<base::i18n::LanguageTag> ui_languages =
+      base::i18n::GetThreadPreferredUILanguageList();
+  CHECK(!ui_languages.empty());
+  override_locale_holder.Get().swap_value(&ui_languages);
 }
 
-const std::vector<std::string>& GetLocaleOverrides() {
+const std::vector<base::i18n::LanguageTag>& GetLocaleOverrides() {
   return override_locale_holder.Get().value();
 }
 

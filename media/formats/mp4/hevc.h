@@ -14,6 +14,7 @@
 #include "media/base/media_export.h"
 #include "media/base/video_codecs.h"
 #include "media/base/video_decoder_config.h"
+#include "media/base/video_types.h"
 #include "media/formats/mp4/bitstream_converter.h"
 #include "media/formats/mp4/box_definitions.h"
 
@@ -39,7 +40,7 @@ struct MEDIA_EXPORT HEVCDecoderConfigurationRecord : Box {
   //       context and therefore the box header is not expected to be present
   //       in |data|.
   // Returns true if |data| was successfully parsed.
-  bool Parse(const uint8_t* data, int data_size);
+  bool Parse(base::span<const uint8_t> data);
   bool Serialize(std::vector<uint8_t>& output) const;
 
   uint8_t configurationVersion;
@@ -75,6 +76,7 @@ struct MEDIA_EXPORT HEVCDecoderConfigurationRecord : Box {
   VideoCodecProfile GetVideoProfile() const;
 #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
   VideoColorSpace GetColorSpace();
+  VideoChromaSampling GetChromaSampling();
   gfx::HDRMetadata GetHDRMetadata();
   VideoDecoderConfig::AlphaMode GetAlphaMode();
 #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
@@ -82,6 +84,7 @@ struct MEDIA_EXPORT HEVCDecoderConfigurationRecord : Box {
  private:
   bool ParseInternal(BufferReader* reader, MediaLog* media_log);
   VideoColorSpace color_space;
+  VideoChromaSampling chroma_sampling;
   gfx::HDRMetadata hdr_metadata;
   VideoDecoderConfig::AlphaMode alpha_mode;
 };
@@ -97,14 +100,15 @@ class MEDIA_EXPORT HEVC {
       std::vector<uint8_t>* buffer,
       std::vector<SubsampleEntry>* subsamples);
 
-  // Analyzes the contents of |buffer| for conformance to
-  // Section 7.4.2.4.4 of ISO/IEC 23008-2, and if conformant, further inspects
-  // |buffer| to report whether or not it looks like a keyframe.
-  // |subsamples| contains the information about what parts of the buffer are
+  // Analyzes the contents of `buffer` for keyframe detection. While it also
+  // checks for conformance to Section 7.4.2.4.4 of ISO/IEC 23008-2, parsing is
+  // intentionally lax to accommodate real-world content; out-of-order NALUs do
+  // not prevent keyframe determination and are reported via `is_conformant`.
+  // This method should primarily be used for keyframe probing.
+  // `subsamples` contains the information about what parts of the buffer are
   // encrypted and which parts are clear.
   static BitstreamConverter::AnalysisResult AnalyzeAnnexB(
-      const uint8_t* buffer,
-      size_t size,
+      base::span<const uint8_t> buffer,
       const std::vector<SubsampleEntry>& subsamples);
 };
 
@@ -122,7 +126,7 @@ class HEVCBitstreamConverter : public BitstreamConverter {
  private:
   ~HEVCBitstreamConverter() override;
   AnalysisResult Analyze(
-      std::vector<uint8_t>* frame_buf,
+      base::span<const uint8_t> frame_buf,
       std::vector<SubsampleEntry>* subsamples) const override;
   std::unique_ptr<HEVCDecoderConfigurationRecord> hevc_config_;
 };

@@ -14,8 +14,9 @@
 
 #include <memory>
 
+#include "base/sequence_checker.h"
 #include "base/task/single_thread_task_runner.h"
-#include "media/capture/video/linux/v4l2_capture_device_impl.h"
+#include "media/capture/video/linux/v4l2_capture_device.h"
 #include "media/capture/video/video_capture_device.h"
 #include "media/capture/video_capture_types.h"
 
@@ -28,7 +29,7 @@ namespace media {
 class V4L2CaptureDelegate;
 
 // Linux V4L2 implementation of VideoCaptureDevice.
-class VideoCaptureDeviceLinux : public VideoCaptureDevice {
+class CAPTURE_EXPORT VideoCaptureDeviceLinux : public VideoCaptureDevice {
  public:
   static VideoPixelFormat V4l2FourCcToChromiumPixelFormat(uint32_t v4l2_fourcc);
   static std::vector<uint32_t> GetListOfUsableFourCCs(bool favour_mjpeg);
@@ -48,6 +49,7 @@ class VideoCaptureDeviceLinux : public VideoCaptureDevice {
   void AllocateAndStart(const VideoCaptureParams& params,
                         std::unique_ptr<Client> client) override;
   void StopAndDeAllocate() override;
+  void InvalidateBuffers() override;
   void TakePhoto(TakePhotoCallback callback) override;
   void GetPhotoState(GetPhotoStateCallback callback) override;
   void SetPhotoOptions(mojom::PhotoSettingsPtr settings,

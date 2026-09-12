@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -19,7 +20,6 @@
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_forward.h"
 #include "base/location.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/strings/string_util.h"
@@ -27,13 +27,12 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/support_tool/data_collector.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "components/feedback/redaction_tool/pii_types.h"
 #include "components/feedback/redaction_tool/redaction_tool.h"
 #include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace {
 
@@ -42,6 +41,8 @@ namespace {
 constexpr char kChromeLogsDir[] = "log";
 // The pattern for name of Chrome logs file.
 constexpr char kChromeLogsPattern[] = "chrome*";
+// A reasonable limit for log collection to prevent OOM.
+constexpr size_t kMaxLogFileSize = 50 * 1024 * 1024;  // 50 MB
 
 // Paths of other (non-Chrome) user logs.
 constexpr std::array<const char*, 3> kOtherLogsPaths = {
@@ -51,11 +52,11 @@ constexpr std::array<const char*, 3> kOtherLogsPaths = {
 // Creates a temporary directory and returns it if there's no error. Gives the
 // ownership of the temporary directory to the caller and caller will be
 // responsible of deleting it.
-absl::optional<base::FilePath> CreateTempDir() {
+std::optional<base::FilePath> CreateTempDir() {
   base::ScopedTempDir temp_dir;
   if (temp_dir.CreateUniqueTempDir())
     return temp_dir.Take();
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 std::vector<base::FilePath> GetUserLogPaths(base::FilePath profile_dir) {
@@ -90,8 +91,10 @@ std::pair<base::FilePath, std::string> ReadUserLogAndCopyContents(
     return {base::FilePath(), std::string()};
 
   std::string file_contents;
-  if (!base::ReadFileToString(log_path, &file_contents))
+  if (!base::ReadFileToStringWithMaxSize(log_path, &file_contents,
+                                         kMaxLogFileSize)) {
     return {copy_target, std::string()};
+  }
 
   return {copy_target, file_contents};
 }
@@ -123,10 +126,11 @@ bool CopyTemporaryLogFileToTarget(base::FilePath log_file,
   return base::Move(log_file, target_path.Append(log_file.BaseName()));
 }
 
-absl::optional<std::string> ReadLogFromFile(base::FilePath log_file) {
+std::optional<std::string> ReadLogFromFile(base::FilePath log_file) {
   std::string log;
-  if (!base::ReadFileToString(log_file, &log))
-    return absl::nullopt;
+  if (!base::ReadFileToStringWithMaxSize(log_file, &log, kMaxLogFileSize)) {
+    return std::nullopt;
+  }
   return log;
 }
 
@@ -183,6 +187,14 @@ void ChromeUserLogsDataCollector::CollectDataAndDetectPII(
     scoped_refptr<redaction::RedactionToolContainer> redaction_tool_container) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
+  if (!user_manager::UserManager::Get()->IsUserLoggedIn()) {
+    SupportToolError error = {SupportToolErrorCode::kDataCollectorError,
+                              "A user must have logged in for "
+                              "ChromeUserLogsDataCollector."};
+    std::move(on_data_collected_callback).Run(error);
+    return;
+  }
+
   on_data_collector_done_callback_ = std::move(on_data_collected_callback);
   task_runner_for_redaction_tool_ = task_runner_for_redaction_tool;
   redaction_tool_container_ = redaction_tool_container;
@@ -194,7 +206,7 @@ void ChromeUserLogsDataCollector::CollectDataAndDetectPII(
 }
 
 void ChromeUserLogsDataCollector::OnTempDirCreated(
-    absl::optional<base::FilePath> temp_dir) {
+    std::optional<base::FilePath> temp_dir) {
   if (!temp_dir) {
     SupportToolError error = {SupportToolErrorCode::kDataCollectorError,
                               "Failed to create temporary directory for "
@@ -211,7 +223,8 @@ void ChromeUserLogsDataCollector::OnTempDirCreated(
   std::string user_hash = user->username_hash();
   DCHECK(!user_hash.empty());
   base::FilePath profile_dir =
-      ash::ProfileHelper::GetProfilePathByUserIdHash(user_hash);
+      ash::BrowserContextHelper::Get()->GetBrowserContextPathByUserIdHash(
+          user_hash);
 
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, {base::MayBlock()},
@@ -276,7 +289,7 @@ void ChromeUserLogsDataCollector::OnAllUserLogFilesReadAndDetected() {
   task_runner_for_redaction_tool_.reset();
   redaction_tool_container_.reset();
   if (errors_.empty()) {
-    std::move(on_data_collector_done_callback_).Run(absl::nullopt);
+    std::move(on_data_collector_done_callback_).Run(std::nullopt);
     return;
   }
   SupportToolError error = {
@@ -339,7 +352,7 @@ void ChromeUserLogsDataCollector::OnReadLogFromFile(
     std::set<redaction::PIIType> pii_types_to_keep,
     scoped_refptr<base::SequencedTaskRunner> task_runner_for_redaction_tool,
     scoped_refptr<redaction::RedactionToolContainer> redaction_tool_container,
-    absl::optional<std::string> log_contents) {
+    std::optional<std::string> log_contents) {
   if (!log_contents) {
     errors_.push_back(base::StringPrintf("Couldn't read logs from %s log file",
                                          file_name.c_str()));
@@ -384,7 +397,7 @@ void ChromeUserLogsDataCollector::OnAllLogFilesWritten() {
   // Clean-up the temporary directory when we're done with file operations.
   CleanUp();
   if (errors_.empty()) {
-    std::move(on_data_collector_done_callback_).Run(absl::nullopt);
+    std::move(on_data_collector_done_callback_).Run(std::nullopt);
     return;
   }
   SupportToolError error = {

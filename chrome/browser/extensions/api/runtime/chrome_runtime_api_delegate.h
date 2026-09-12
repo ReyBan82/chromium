@@ -15,20 +15,22 @@
 #include "extensions/browser/api/runtime/runtime_api_delegate.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_observer.h"
+#include "extensions/common/extension_id.h"
 
 namespace base {
 class TickClock;
 class TimeTicks;
-}
+}  // namespace base
 
 namespace content {
 class BrowserContext;
-}
+class WebContents;
+}  // namespace content
 
 namespace extensions {
 class RuntimeAPI;
 class UpdateObserver;
-}
+}  // namespace extensions
 
 class ChromeRuntimeAPIDelegate : public extensions::RuntimeAPIDelegate,
                                  public extensions::ExtensionRegistryObserver {
@@ -49,24 +51,27 @@ class ChromeRuntimeAPIDelegate : public extensions::RuntimeAPIDelegate,
   // extensions::RuntimeAPIDelegate implementation.
   void AddUpdateObserver(extensions::UpdateObserver* observer) override;
   void RemoveUpdateObserver(extensions::UpdateObserver* observer) override;
-  void ReloadExtension(const std::string& extension_id) override;
-  bool CheckForUpdates(const std::string& extension_id,
+  void ReloadExtension(const extensions::ExtensionId& extension_id) override;
+  bool CheckForUpdates(const extensions::ExtensionId& extension_id,
                        UpdateCheckCallback callback) override;
   void OpenURL(const GURL& uninstall_url) override;
   bool GetPlatformInfo(extensions::api::runtime::PlatformInfo* info) override;
   bool RestartDevice(std::string* error_message) override;
-  bool OpenOptionsPage(const extensions::Extension* extension,
-                       content::BrowserContext* browser_context) override;
+  void OpenOptionsPage(const extensions::Extension* extension,
+                       content::BrowserContext* browser_context,
+                       base::OnceCallback<void(bool)> callback) override;
+  int GetDeveloperToolsWindowId(
+      content::WebContents* developer_tools_web_contents) override;
 
   // ExtensionRegistryObserver implementation.
   void OnExtensionInstalled(content::BrowserContext* browser_context,
                             const extensions::Extension* extension,
                             bool is_update) override;
 
-  void OnExtensionUpdateFound(const std::string& id,
+  void OnExtensionUpdateFound(const extensions::ExtensionId& extension_id,
                               const base::Version& version);
-  void UpdateCheckComplete(const std::string& extension_id);
-  void CallUpdateCallbacks(const std::string& extension_id,
+  void UpdateCheckComplete(const extensions::ExtensionId& extension_id);
+  void CallUpdateCallbacks(const extensions::ExtensionId& extension_id,
                            const UpdateCheckResult& result);
 
   raw_ptr<content::BrowserContext> browser_context_;
@@ -78,7 +83,7 @@ class ChromeRuntimeAPIDelegate : public extensions::RuntimeAPIDelegate,
   // Map to prevent extensions from getting stuck in reload loops. Maps
   // extension id to the last time it was reloaded and the number of times
   // it was reloaded with not enough time in between reloads.
-  std::map<std::string, std::pair<base::TimeTicks, int> > last_reload_time_;
+  std::map<std::string, std::pair<base::TimeTicks, int>> last_reload_time_;
 
   // Information about update checks, keyed by extension id.
   struct UpdateCheckInfo;

@@ -5,7 +5,6 @@
 #include "chrome/browser/sessions/exit_type_service.h"
 
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/json/json_string_value_serializer.h"
 #include "base/path_service.h"
 #include "base/values.h"
@@ -15,17 +14,21 @@
 #include "chrome/browser/sessions/session_restore.h"
 #include "chrome/browser/sessions/session_service.h"
 #include "chrome/browser/sessions/session_service_factory.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_tabstrip.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/views/session_crashed_bubble_view.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/pref_names.h"
+#include "chrome/test/base/chrome_test_path_utils.h"
+#include "chrome/test/base/chrome_test_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "components/prefs/pref_service.h"
 #include "components/prefs/pref_value_map.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/web_contents.h"
@@ -35,6 +38,7 @@
 #include "ui/events/event.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/controls/button/label_button.h"
+#include "ui/views/controls/button/md_text_button.h"
 #include "ui/views/widget/widget.h"
 
 namespace {
@@ -45,7 +49,7 @@ void ClickButton(views::BubbleDialogDelegate* crash_bubble_delegate,
                  views::Button* button) {
   crash_bubble_delegate->ResetViewShownTimeStampForTesting();
   gfx::Point center(button->width() / 2, button->height() / 2);
-  const ui::MouseEvent event(ui::ET_MOUSE_PRESSED, center, center,
+  const ui::MouseEvent event(ui::EventType::kMousePressed, center, center,
                              ui::EventTimeForNow(), ui::EF_LEFT_MOUSE_BUTTON,
                              ui::EF_LEFT_MOUSE_BUTTON);
   button->OnMousePressed(event);
@@ -54,30 +58,37 @@ void ClickButton(views::BubbleDialogDelegate* crash_bubble_delegate,
 
 // Urls used for testing.
 GURL GetUrl1() {
-  return ui_test_utils::GetTestUrl(
+  return chrome_test_utils::GetTestUrl(
       base::FilePath().AppendASCII("session_history"),
       base::FilePath().AppendASCII("bot1.html"));
 }
 
 GURL GetUrl2() {
-  return ui_test_utils::GetTestUrl(
+  return chrome_test_utils::GetTestUrl(
       base::FilePath().AppendASCII("session_history"),
       base::FilePath().AppendASCII("bot2.html"));
 }
 
 GURL GetUrl3() {
-  return ui_test_utils::GetTestUrl(
+  return chrome_test_utils::GetTestUrl(
       base::FilePath().AppendASCII("session_history"),
       base::FilePath().AppendASCII("bot3.html"));
 }
 
-void WaitForBrowserToFinishLoading(Browser* browser) {
-  TabStripModel* tab_strip_model = browser->tab_strip_model();
-  for (int i = 0; i < tab_strip_model->count(); ++i) {
-    content::WebContents* contents = tab_strip_model->GetWebContentsAt(i);
-    contents->GetController().LoadIfNecessary();
-    content::WaitForLoadStop(contents);
-  }
+// Returns a single browser matching `url`.
+BrowserWindowInterface* FindBrowserWithUrl(const GURL& url) {
+  auto browsers = ui_test_utils::FindMatchingBrowsers(
+      [&url](BrowserWindowInterface* browser) {
+        TabStripModel* const tab_strip_model = browser->GetTabStripModel();
+        for (int i = 0; i < tab_strip_model->count(); ++i) {
+          if (tab_strip_model->GetWebContentsAt(i)->GetLastCommittedURL() ==
+              url) {
+            return true;
+          }
+        }
+        return false;
+      });
+  return browsers.empty() ? nullptr : browsers.front();
 }
 
 }  // namespace
@@ -89,21 +100,21 @@ class ExitTypeServiceTest : public InProcessBrowserTest {
   }
 
   bool IsSessionServiceSavingEnabled() {
-    return SessionServiceFactory::GetForProfile(browser()->profile())
+    return SessionServiceFactory::GetForProfile(browser()->GetProfile())
         ->is_saving_enabled();
   }
 
   ExitTypeService* GetExitTypeService() {
-    return ExitTypeService::GetInstanceForProfile(browser()->profile());
+    return ExitTypeService::GetInstanceForProfile(browser()->GetProfile());
   }
 };
 
 // Sets state so that on the next run the last session exit type is crashed.
 IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, PRE_PRE_PRE_CrashCrashNewBrowser) {
-  ExitTypeService::GetInstanceForProfile(browser()->profile())
+  ExitTypeService::GetInstanceForProfile(browser()->GetProfile())
       ->SetWaitingForUserToAckCrashForTest(true);
   SessionStartupPref::SetStartupPref(
-      browser()->profile(), SessionStartupPref(SessionStartupPref::LAST));
+      browser()->GetProfile(), SessionStartupPref(SessionStartupPref::LAST));
 }
 
 IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, PRE_PRE_CrashCrashNewBrowser) {
@@ -114,14 +125,14 @@ IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, PRE_PRE_CrashCrashNewBrowser) {
 // As the user didn't ack the crash, last session exit type should still be
 // crashed.
 IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, PRE_CrashCrashNewBrowser) {
-  EXPECT_EQ(1u, BrowserList::GetInstance()->size());
+  EXPECT_EQ(1u, GlobalBrowserCollection::GetInstance()->GetSize());
   ASSERT_EQ(ExitType::kCrashed, GetLastSessionExitType());
   EXPECT_FALSE(IsSessionServiceSavingEnabled());
   // As the crashed bubble is still open, creating a tab in the existing
   // browser should not enable saving.
-  chrome::NewTab(browser());
+  chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
   // Creating a new browser should enable saving.
-  CreateBrowser(browser()->profile());
+  CreateBrowser(browser()->GetProfile());
   EXPECT_TRUE(IsSessionServiceSavingEnabled());
   chrome::AttemptUserExit();
 }
@@ -131,18 +142,18 @@ IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, PRE_CrashCrashNewBrowser) {
 IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, CrashCrashNewBrowser) {
   ASSERT_EQ(ExitType::kClean, GetLastSessionExitType());
   EXPECT_TRUE(IsSessionServiceSavingEnabled());
-  EXPECT_EQ(2u, BrowserList::GetInstance()->size());
+  EXPECT_EQ(2u, GlobalBrowserCollection::GetInstance()->GetSize());
 }
 
 // Creates two browsers navigating to a couple of urls and sets it so on next
 // run last session exit status is crashed.
 IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, PRE_PRE_RestoreFromCrashBubble) {
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GetUrl1()));
-  Browser* browser2 = CreateBrowser(browser()->profile());
+  BrowserWindowInterface* browser2 = CreateBrowser(browser()->GetProfile());
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser2, GetUrl2()));
-  chrome::NewTab(browser2);
+  chrome::NewTab(browser2, NewTabTypes::kNoUserAction);
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser2, GetUrl3()));
-  ExitTypeService::GetInstanceForProfile(browser()->profile())
+  ExitTypeService::GetInstanceForProfile(browser()->GetProfile())
       ->SetWaitingForUserToAckCrashForTest(true);
 }
 
@@ -161,51 +172,57 @@ IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, RestoreFromCrashBubble) {
       SessionCrashedBubbleView::GetInstanceForTest();
   ASSERT_TRUE(crash_bubble_delegate);
   ClickButton(crash_bubble_delegate, crash_bubble_delegate->GetOkButton());
-  ASSERT_TRUE(SessionRestore::IsRestoring(browser()->profile()));
+  ASSERT_TRUE(SessionRestore::IsRestoring(browser()->GetProfile()));
   EXPECT_TRUE(GetExitTypeService()->waiting_for_user_to_ack_crash());
   base::RunLoop run_loop;
   GetExitTypeService()->AddCrashAckCallback(run_loop.QuitClosure());
   run_loop.Run();
   EXPECT_TRUE(IsSessionServiceSavingEnabled());
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   const bool restores_to_initial_browser = false;
 #else
   const bool restores_to_initial_browser = true;
 #endif
   ASSERT_EQ(2u + (restores_to_initial_browser ? 0u : 1u),
-            BrowserList::GetInstance()->size());
-  Browser* browser1 =
-      BrowserList::GetInstance()->get(restores_to_initial_browser ? 0 : 1);
-  Browser* browser2 =
-      BrowserList::GetInstance()->get(restores_to_initial_browser ? 1 : 2);
+            GlobalBrowserCollection::GetInstance()->GetSize());
+  BrowserWindowInterface* const browser1 = FindBrowserWithUrl(GetUrl1());
+  BrowserWindowInterface* const browser2 = FindBrowserWithUrl(GetUrl2());
+
   ASSERT_EQ((restores_to_initial_browser ? 2 : 1),
-            browser1->tab_strip_model()->count());
-  WaitForBrowserToFinishLoading(browser1);
+            browser1->GetTabStripModel()->count());
   // The first tab is created during startup.
   if (restores_to_initial_browser) {
-    EXPECT_EQ(GURL("about:blank"),
-              browser1->tab_strip_model()->GetWebContentsAt(0)->GetURL());
+    EXPECT_EQ(
+        GURL("about:blank"),
+        browser1->GetTabStripModel()->GetWebContentsAt(0)->GetVisibleURL());
   }
   EXPECT_EQ(GetUrl1(),
-            browser1->tab_strip_model()
+            browser1->GetTabStripModel()
                 ->GetWebContentsAt(restores_to_initial_browser ? 1 : 0)
-                ->GetURL());
-  ASSERT_EQ(2, browser2->tab_strip_model()->count());
-  WaitForBrowserToFinishLoading(browser2);
+                ->GetVisibleURL());
+  ASSERT_EQ(2, browser2->GetTabStripModel()->count());
   EXPECT_EQ(GetUrl2(),
-            browser2->tab_strip_model()->GetWebContentsAt(0)->GetURL());
+            browser2->GetTabStripModel()->GetWebContentsAt(0)->GetVisibleURL());
   EXPECT_EQ(GetUrl3(),
-            browser2->tab_strip_model()->GetWebContentsAt(1)->GetURL());
+            browser2->GetTabStripModel()->GetWebContentsAt(1)->GetVisibleURL());
 }
 
 // Marks the profile as crashing.
 IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, PRE_CloseCrashBubbleEnablesSaving) {
-  ExitTypeService::GetInstanceForProfile(browser()->profile())
+  ExitTypeService::GetInstanceForProfile(browser()->GetProfile())
       ->SetWaitingForUserToAckCrashForTest(true);
 }
 
+// TODO(crbug.com/40927197): Re-enable test that flakily times out
+#if BUILDFLAG(IS_CHROMEOS)
+#define MAYBE_CloseCrashBubbleEnablesSaving \
+  DISABLED_CloseCrashBubbleEnablesSaving
+#else
+#define MAYBE_CloseCrashBubbleEnablesSaving CloseCrashBubbleEnablesSaving
+#endif
 // Closes the crash bubble, which should enable saving.
-IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, CloseCrashBubbleEnablesSaving) {
+IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest,
+                       MAYBE_CloseCrashBubbleEnablesSaving) {
   ASSERT_EQ(ExitType::kCrashed, GetLastSessionExitType());
   EXPECT_FALSE(IsSessionServiceSavingEnabled());
 
@@ -215,8 +232,32 @@ IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, CloseCrashBubbleEnablesSaving) {
   base::RunLoop run_loop;
   GetExitTypeService()->AddCrashAckCallback(run_loop.QuitClosure());
   crash_bubble_delegate->GetBubbleFrameView()->GetWidget()->Close();
-  EXPECT_FALSE(SessionRestore::IsRestoring(browser()->profile()));
+  EXPECT_FALSE(SessionRestore::IsRestoring(browser()->GetProfile()));
   run_loop.Run();
   EXPECT_FALSE(GetExitTypeService()->waiting_for_user_to_ack_crash());
   EXPECT_TRUE(IsSessionServiceSavingEnabled());
+}
+
+IN_PROC_BROWSER_TEST_F(ExitTypeServiceTest, Defaults) {
+  ExitTypeService* service =
+      ExitTypeService::GetInstanceForProfile(browser()->GetProfile());
+  ASSERT_TRUE(service);
+  PrefService* prefs = browser()->GetProfile()->GetPrefs();
+  // The initial state is crashed; store for later reference.
+  std::string crash_value(prefs->GetString(prefs::kSessionExitType));
+
+  // The first call to a type other than crashed should change the value.
+  service->SetCurrentSessionExitType(ExitType::kForcedShutdown);
+  std::string first_call_value(prefs->GetString(prefs::kSessionExitType));
+  EXPECT_NE(crash_value, first_call_value);
+
+  // Subsequent calls to a non-crash value should be ignored.
+  service->SetCurrentSessionExitType(ExitType::kClean);
+  std::string second_call_value(prefs->GetString(prefs::kSessionExitType));
+  EXPECT_EQ(first_call_value, second_call_value);
+
+  // Setting back to a crashed value should work.
+  service->SetCurrentSessionExitType(ExitType::kCrashed);
+  std::string final_value(prefs->GetString(prefs::kSessionExitType));
+  EXPECT_EQ(crash_value, final_value);
 }

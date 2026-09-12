@@ -2,15 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "third_party/blink/renderer/platform/graphics/gpu/webgl_image_conversion.h"
 
+#include <array>
+#include <cstring>
 #include <limits>
 #include <memory>
 
+#include "base/bit_cast.h"
 #include "base/compiler_specific.h"
 #include "base/numerics/checked_math.h"
 #include "build/build_config.h"
+#include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/platform/graphics/cpu/arm/webgl_image_conversion_neon.h"
+#include "third_party/blink/renderer/platform/graphics/cpu/loongarch64/webgl_image_conversion_lsx.h"
 #include "third_party/blink/renderer/platform/graphics/cpu/mips/webgl_image_conversion_msa.h"
 #include "third_party/blink/renderer/platform/graphics/cpu/x86/webgl_image_conversion_sse.h"
 #include "third_party/blink/renderer/platform/graphics/image_observer.h"
@@ -337,7 +343,7 @@ void generatetables(){
 }
 */
 
-const uint16_t g_base_table[512] = {
+const std::array<uint16_t, 512> g_base_table = {
     0,     0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
     0,     0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
     0,     0,     0,     0,     0,     0,     0,     0,     0,     0,     0,
@@ -384,9 +390,10 @@ const uint16_t g_base_table[512] = {
     64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512,
     64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512,
     64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512, 64512,
-    64512, 64512, 64512, 64512, 64512, 64512};
+    64512, 64512, 64512, 64512, 64512, 64512,
+};
 
-const unsigned char g_shift_table[512] = {
+const std::array<unsigned char, 512> g_shift_table = {
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
@@ -413,10 +420,11 @@ const unsigned char g_shift_table[512] = {
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
     24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
-    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 13};
+    24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 13,
+};
 
 uint16_t ConvertFloatToHalfFloat(float f) {
-  unsigned temp = *(reinterpret_cast<unsigned*>(&f));
+  uint32_t temp = base::bit_cast<uint32_t>(f);
   uint16_t signexp = (temp >> 23) & 0x1ff;
   return g_base_table[signexp] +
          ((temp & 0x007fffff) >> g_shift_table[signexp]);
@@ -465,7 +473,7 @@ void generatef16tof32tables() {
 }
 */
 
-const uint32_t g_mantissa_table[2048] = {
+const std::array<uint32_t, 2048> g_mantissa_table = {
     0x0,        0x33800000, 0x34000000, 0x34400000, 0x34800000, 0x34a00000,
     0x34c00000, 0x34e00000, 0x35000000, 0x35100000, 0x35200000, 0x35300000,
     0x35400000, 0x35500000, 0x35600000, 0x35700000, 0x35800000, 0x35880000,
@@ -807,17 +815,19 @@ const uint32_t g_mantissa_table[2048] = {
     0x387d8000, 0x387da000, 0x387dc000, 0x387de000, 0x387e0000, 0x387e2000,
     0x387e4000, 0x387e6000, 0x387e8000, 0x387ea000, 0x387ec000, 0x387ee000,
     0x387f0000, 0x387f2000, 0x387f4000, 0x387f6000, 0x387f8000, 0x387fa000,
-    0x387fc000, 0x387fe000};
+    0x387fc000, 0x387fe000,
+};
 
-const uint16_t g_offset_table[64] = {
+const std::array<uint16_t, 64> g_offset_table = {
     0,    1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
     1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
     1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 0,
     1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
     1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
-    1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024};
+    1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
+};
 
-const uint32_t g_exponent_table[64] = {
+const std::array<uint32_t, 64> g_exponent_table = {
     0x0,        0x800000,   0x1000000,  0x1800000,  0x2000000,  0x2800000,
     0x3000000,  0x3800000,  0x4000000,  0x4800000,  0x5000000,  0x5800000,
     0x6000000,  0x6800000,  0x7000000,  0x7800000,  0x8000000,  0x8800000,
@@ -828,14 +838,18 @@ const uint32_t g_exponent_table[64] = {
     0x85000000, 0x85800000, 0x86000000, 0x86800000, 0x87000000, 0x87800000,
     0x88000000, 0x88800000, 0x89000000, 0x89800000, 0x8a000000, 0x8a800000,
     0x8b000000, 0x8b800000, 0x8c000000, 0x8c800000, 0x8d000000, 0x8d800000,
-    0x8e000000, 0x8e800000, 0x8f000000, 0xc7800000};
+    0x8e000000, 0x8e800000, 0x8f000000, 0xc7800000,
+};
 
 float ConvertHalfFloatToFloat(uint16_t half) {
   uint32_t temp =
       g_mantissa_table[g_offset_table[half >> 10] + (half & 0x3ff)] +
       g_exponent_table[half >> 10];
-  return *(reinterpret_cast<float*>(&temp));
+  return base::bit_cast<float>(temp);
 }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
 
 /* BEGIN CODE SHARED WITH MOZILLA FIREFOX */
 
@@ -898,6 +912,10 @@ void Unpack<WebGLImageConversion::kDataFormatBGRA8, uint8_t, uint8_t>(
   simd::unpackOneRowOfBGRA8LittleToRGBA8MSA(source32, destination32,
                                             pixels_per_row);
 #endif
+#if defined(ARCH_CPU_LOONGARCH_FAMILY)
+  simd::UnpackOneRowOfBGRA8LittleToRGBA8(source32, destination32,
+                                         pixels_per_row);
+#endif
   for (unsigned i = 0; i < pixels_per_row; ++i) {
     uint32_t bgra = source32[i];
 #if defined(ARCH_CPU_BIG_ENDIAN)
@@ -928,6 +946,10 @@ void Unpack<WebGLImageConversion::kDataFormatRGBA5551, uint16_t, uint8_t>(
 #if defined(HAVE_MIPS_MSA_INTRINSICS)
   simd::unpackOneRowOfRGBA5551ToRGBA8MSA(source, destination, pixels_per_row);
 #endif
+#if defined(ARCH_CPU_LOONGARCH_FAMILY)
+  simd::UnpackOneRowOfRGBA5551LittleToRGBA8(source, destination,
+                                            pixels_per_row);
+#endif
 
   for (unsigned i = 0; i < pixels_per_row; ++i) {
     uint16_t packed_value = source[0];
@@ -957,6 +979,10 @@ void Unpack<WebGLImageConversion::kDataFormatRGBA4444, uint16_t, uint8_t>(
 #endif
 #if defined(HAVE_MIPS_MSA_INTRINSICS)
   simd::unpackOneRowOfRGBA4444ToRGBA8MSA(source, destination, pixels_per_row);
+#endif
+#if defined(ARCH_CPU_LOONGARCH_FAMILY)
+  simd::UnpackOneRowOfRGBA4444LittleToRGBA8(source, destination,
+                                            pixels_per_row);
 #endif
   for (unsigned i = 0; i < pixels_per_row; ++i) {
     uint16_t packed_value = source[0];
@@ -1272,6 +1298,9 @@ void Pack<WebGLImageConversion::kDataFormatR8,
 #if defined(HAVE_MIPS_MSA_INTRINSICS)
   simd::packOneRowOfRGBA8LittleToR8MSA(source, destination, pixels_per_row);
 #endif
+#if defined(ARCH_CPU_LOONGARCH_FAMILY)
+  simd::PackOneRowOfRGBA8LittleToR8(source, destination, pixels_per_row);
+#endif
   for (unsigned i = 0; i < pixels_per_row; ++i) {
     float scale_factor = source[3] ? 255.0f / source[3] : 1.0f;
     uint8_t source_r =
@@ -1373,6 +1402,9 @@ void Pack<WebGLImageConversion::kDataFormatRA8,
 #endif
 #if defined(HAVE_MIPS_MSA_INTRINSICS)
   simd::packOneRowOfRGBA8LittleToRA8MSA(source, destination, pixels_per_row);
+#endif
+#if defined(ARCH_CPU_LOONGARCH_FAMILY)
+  simd::PackOneRowOfRGBA8LittleToRA8(source, destination, pixels_per_row);
 #endif
   for (unsigned i = 0; i < pixels_per_row; ++i) {
     float scale_factor = source[3] ? 255.0f / source[3] : 1.0f;
@@ -1566,6 +1598,9 @@ void Pack<WebGLImageConversion::kDataFormatRGBA8,
 #endif
 #if defined(HAVE_MIPS_MSA_INTRINSICS)
   simd::packOneRowOfRGBA8LittleToRGBA8MSA(source, destination, pixels_per_row);
+#endif
+#if defined(ARCH_CPU_LOONGARCH_FAMILY)
+  simd::PackOneRowOfRGBA8LittleToRGBA8(source, destination, pixels_per_row);
 #endif
   for (unsigned i = 0; i < pixels_per_row; ++i) {
     float scale_factor = source[3] ? 255.0f / source[3] : 1.0f;
@@ -3208,6 +3243,8 @@ unsigned TexelBytesForFormat(WebGLImageConversion::DataFormat format) {
 
 /* END CODE SHARED WITH MOZILLA FIREFOX */
 
+#pragma clang diagnostic pop
+
 class FormatConverter {
   STACK_ALLOCATED();
 
@@ -3277,6 +3314,7 @@ void FormatConverter::Convert(WebGLImageConversion::DataFormat src_format,
     FORMATCONVERTER_CASE_SRCFORMAT(WebGLImageConversion::kDataFormatRA8)
     FORMATCONVERTER_CASE_SRCFORMAT(WebGLImageConversion::kDataFormatRA32F)
     FORMATCONVERTER_CASE_SRCFORMAT(WebGLImageConversion::kDataFormatRGBA8)
+    FORMATCONVERTER_CASE_SRCFORMAT(WebGLImageConversion::kDataFormatRGBA16)
     FORMATCONVERTER_CASE_SRCFORMAT(WebGLImageConversion::kDataFormatARGB8)
     FORMATCONVERTER_CASE_SRCFORMAT(WebGLImageConversion::kDataFormatABGR8)
     FORMATCONVERTER_CASE_SRCFORMAT(WebGLImageConversion::kDataFormatAR8)
@@ -3388,13 +3426,11 @@ void FormatConverter::Convert() {
   if (SrcFormat == DstFormat &&
       alphaOp == WebGLImageConversion::kAlphaDoNothing) {
     NOTREACHED();
-    return;
   }
   // Note that ImageBitmaps with SrcFormat==kDataFormatRGBA16F return
   // false for IsFloatFormat since the input data is uint16_t.
   if (!IsFloatFormat<DstFormat>::value && IsFloatFormat<SrcFormat>::value) {
     NOTREACHED();
-    return;
   }
 
   // Only textures uploaded from DOM elements or ImageData can allow DstFormat
@@ -3404,25 +3440,21 @@ void FormatConverter::Convert() {
   if (!src_format_comes_from_dom_element_or_image_data &&
       SrcFormat != DstFormat) {
     NOTREACHED();
-    return;
   }
   // Likewise, only textures uploaded from DOM elements or ImageData can
   // possibly need to be unpremultiplied.
   if (!src_format_comes_from_dom_element_or_image_data &&
       alphaOp == WebGLImageConversion::kAlphaDoUnmultiply) {
     NOTREACHED();
-    return;
   }
   if (src_format_comes_from_dom_element_or_image_data &&
       alphaOp == WebGLImageConversion::kAlphaDoUnmultiply &&
       !SupportsConversionFromDomElements<DstFormat>::value) {
     NOTREACHED();
-    return;
   }
   if ((!HasAlpha(SrcFormat) || !HasColor(SrcFormat) || !HasColor(DstFormat)) &&
       alphaOp != WebGLImageConversion::kAlphaDoNothing) {
     NOTREACHED();
-    return;
   }
   // If converting DOM element data to UNSIGNED_INT_5_9_9_9_REV or
   // UNSIGNED_INT_10F_11F_11F_REV, we should always switch to FLOAT instead to
@@ -3432,7 +3464,6 @@ void FormatConverter::Convert() {
       (DstFormat == WebGLImageConversion::kDataFormatRGB5999 ||
        DstFormat == WebGLImageConversion::kDataFormatRGB10F11F11F)) {
     NOTREACHED();
-    return;
   }
 
   typedef typename DataTypeForFormat<SrcFormat>::Type SrcType;
@@ -3450,9 +3481,9 @@ void FormatConverter::Convert() {
   DCHECK(!kTrivialUnpack || !kTrivialPack);
 
   const SrcType* src_row_start =
-      static_cast<const SrcType*>(static_cast<const void*>(
+      static_cast<const SrcType*>(static_cast<const void*>(UNSAFE_TODO(
           static_cast<const uint8_t*>(src_start_) +
-          ((src_stride_ * src_sub_rectangle_.y()) + src_row_offset_)));
+          ((src_stride_ * src_sub_rectangle_.y()) + src_row_offset_))));
 
   // If packing multiple images into a 3D texture, and flipY is true,
   // then the sub-rectangle is pointing at the start of the
@@ -3460,8 +3491,8 @@ void FormatConverter::Convert() {
   // the positive direction, we need to back it up to point at the
   // last, or "topmost", of these images.
   if (dst_stride_ < 0 && depth_ > 1) {
-    src_row_start -=
-        (depth_ - 1) * src_stride_in_elements * unpack_image_height_;
+    UNSAFE_TODO(src_row_start -=
+                (depth_ - 1) * src_stride_in_elements * unpack_image_height_);
   }
 
   DstType* dst_row_start = static_cast<DstType*>(dst_start_);
@@ -3470,22 +3501,28 @@ void FormatConverter::Convert() {
       for (int i = 0; i < src_sub_rectangle_.height(); ++i) {
         Pack<DstFormat, alphaOp>(src_row_start, dst_row_start,
                                  src_sub_rectangle_.width());
-        src_row_start += src_stride_in_elements;
-        dst_row_start += dst_stride_in_elements;
+        UNSAFE_TODO({
+          src_row_start += src_stride_in_elements;
+          dst_row_start += dst_stride_in_elements;
+        });
       }
-      src_row_start += src_stride_in_elements *
-                       (unpack_image_height_ - src_sub_rectangle_.height());
+      UNSAFE_TODO(src_row_start +=
+                  src_stride_in_elements *
+                  (unpack_image_height_ - src_sub_rectangle_.height()));
     }
   } else if (kTrivialPack) {
     for (int d = 0; d < depth_; ++d) {
       for (int i = 0; i < src_sub_rectangle_.height(); ++i) {
         Unpack<SrcFormat>(src_row_start, dst_row_start,
                           src_sub_rectangle_.width());
-        src_row_start += src_stride_in_elements;
-        dst_row_start += dst_stride_in_elements;
+        UNSAFE_TODO({
+          src_row_start += src_stride_in_elements;
+          dst_row_start += dst_stride_in_elements;
+        });
       }
-      src_row_start += src_stride_in_elements *
-                       (unpack_image_height_ - src_sub_rectangle_.height());
+      UNSAFE_TODO(src_row_start +=
+                  src_stride_in_elements *
+                  (unpack_image_height_ - src_sub_rectangle_.height()));
     }
   } else {
     for (int d = 0; d < depth_; ++d) {
@@ -3497,20 +3534,18 @@ void FormatConverter::Convert() {
         Pack<DstFormat, alphaOp>(reinterpret_cast<IntermType*>(
                                      unpacked_intermediate_src_data_.get()),
                                  dst_row_start, src_sub_rectangle_.width());
-        src_row_start += src_stride_in_elements;
-        dst_row_start += dst_stride_in_elements;
+        UNSAFE_TODO({
+          src_row_start += src_stride_in_elements;
+          dst_row_start += dst_stride_in_elements;
+        });
       }
-      src_row_start += src_stride_in_elements *
-                       (unpack_image_height_ - src_sub_rectangle_.height());
+      UNSAFE_TODO(src_row_start +=
+                  src_stride_in_elements *
+                  (unpack_image_height_ - src_sub_rectangle_.height()));
     }
   }
   success_ = true;
   return;
-}
-
-bool FrameIsValid(const SkBitmap& frame_bitmap) {
-  return !frame_bitmap.isNull() && !frame_bitmap.empty() &&
-         frame_bitmap.colorType() == kN32_SkColorType;
 }
 
 }  // anonymous namespace
@@ -3538,7 +3573,6 @@ WebGLImageConversion::DataFormat WebGLImageConversion::SkColorTypeToDataFormat(
       return kDataFormatRGBA32F;
     default:
       NOTREACHED();
-      return kDataFormatNumFormats;
   }
 }
 
@@ -3758,73 +3792,6 @@ GLenum WebGLImageConversion::ComputeImageSizeInBytes(
   return GL_NO_ERROR;
 }
 
-WebGLImageConversion::ImageExtractor::ImageExtractor(
-    Image* image,
-    bool premultiply_alpha,
-    sk_sp<SkColorSpace> target_color_space) {
-  if (!image)
-    return;
-
-  sk_sp<SkImage> skia_image = image->PaintImageForCurrentFrame().GetSwSkImage();
-  if (skia_image && !skia_image->colorSpace())
-    skia_image = skia_image->reinterpretColorSpace(SkColorSpace::MakeSRGB());
-
-  if (image->HasData()) {
-    bool has_alpha = skia_image ? !skia_image->isOpaque() : true;
-    bool need_unpremultiplied = has_alpha && !premultiply_alpha;
-    bool need_color_conversion =
-        skia_image && target_color_space &&
-        !SkColorSpace::Equals(skia_image->colorSpace(),
-                              target_color_space.get());
-    if (!skia_image || !target_color_space || need_unpremultiplied ||
-        need_color_conversion) {
-      // Attempt to get raw unpremultiplied image data.
-      const bool data_complete = true;
-      // Always decode as unpremultiplied. If premultiplication is desired, it
-      // will be applied later.
-      const auto alpha_option = ImageDecoder::kAlphaNotPremultiplied;
-      // Decode to the default 8-bit depth (as opposed to floating-point).
-      // TODO(1320812): This is not always the correct choice.
-      auto bit_depth = ImageDecoder::kDefaultBitDepth;
-      // If we are not ignoring the color space, then tag the image with the
-      // target color space. It will be converted later on.
-      auto color_behavior =
-          target_color_space ? ColorBehavior::Tag() : ColorBehavior::Ignore();
-      std::unique_ptr<ImageDecoder> decoder(
-          ImageDecoder::Create(image->Data(), data_complete, alpha_option,
-                               bit_depth, color_behavior));
-      if (!decoder || !decoder->FrameCount())
-        return;
-      ImageFrame* frame = decoder->DecodeFrameBufferAtIndex(0);
-      if (!frame || frame->GetStatus() != ImageFrame::kFrameComplete)
-        return;
-      has_alpha = frame->HasAlpha();
-      SkBitmap bitmap = frame->Bitmap();
-      if (!FrameIsValid(bitmap))
-        return;
-
-      // TODO(fmalita): Partial frames are not supported currently: only fully
-      // decoded frames make it through.  We could potentially relax this and
-      // use SkImage::MakeFromBitmap(bitmap) to make a copy.
-      skia_image = frame->FinalizePixelsAndGetImage();
-    }
-  }
-
-  if (!skia_image)
-    return;
-
-  DCHECK(skia_image->width());
-  DCHECK(skia_image->height());
-
-  // Fail if the image was downsampled because of memory limits.
-  if (skia_image->width() != image->width() ||
-      skia_image->height() != image->height()) {
-    return;
-  }
-
-  sk_image_ = std::move(skia_image);
-}
-
 unsigned WebGLImageConversion::GetChannelBitsByFormat(GLenum format) {
   switch (format) {
     case GL_ALPHA:
@@ -3983,7 +3950,7 @@ bool WebGLImageConversion::ExtractTextureData(
     return false;
   const uint8_t* src_data = static_cast<const uint8_t*>(pixels);
   if (skip_size_in_bytes) {
-    src_data += skip_size_in_bytes;
+    UNSAFE_TODO(src_data += skip_size_in_bytes);
   }
 
   if (!PackPixels(src_data, source_data_format,
@@ -4029,9 +3996,9 @@ bool WebGLImageConversion::PackPixels(
   int dst_stride =
       source_data_sub_rectangle.width() * TexelBytesForFormat(dst_data_format);
   if (flip_y) {
-    destination_data =
+    destination_data = UNSAFE_TODO(
         static_cast<uint8_t*>(destination_data) +
-        dst_stride * ((depth * source_data_sub_rectangle.height()) - 1);
+        dst_stride * ((depth * source_data_sub_rectangle.height()) - 1));
     dst_stride = -dst_stride;
   }
   if (!HasAlpha(source_data_format) || !HasColor(source_data_format) ||
@@ -4039,10 +4006,12 @@ bool WebGLImageConversion::PackPixels(
     alpha_op = kAlphaDoNothing;
 
   if (source_data_format == dst_data_format && alpha_op == kAlphaDoNothing) {
-    const uint8_t* base_ptr = static_cast<const uint8_t*>(source_data) +
-                              src_stride * source_data_sub_rectangle.y();
-    const uint8_t* base_end = static_cast<const uint8_t*>(source_data) +
-                              src_stride * source_data_sub_rectangle.bottom();
+    const uint8_t* base_ptr =
+        UNSAFE_TODO(static_cast<const uint8_t*>(source_data) +
+                    src_stride * source_data_sub_rectangle.y());
+    const uint8_t* base_end =
+        UNSAFE_TODO(static_cast<const uint8_t*>(source_data) +
+                    src_stride * source_data_sub_rectangle.bottom());
 
     // If packing multiple images into a 3D texture, and flipY is true,
     // then the sub-rectangle is pointing at the start of the
@@ -4052,8 +4021,10 @@ bool WebGLImageConversion::PackPixels(
     if (flip_y && depth > 1) {
       const ptrdiff_t distance_to_top_image =
           (depth - 1) * src_stride * unpack_image_height;
-      base_ptr -= distance_to_top_image;
-      base_end -= distance_to_top_image;
+      UNSAFE_TODO({
+        base_ptr -= distance_to_top_image;
+        base_end -= distance_to_top_image;
+      });
     }
 
     unsigned row_size = (dst_stride > 0) ? dst_stride : -dst_stride;
@@ -4063,12 +4034,16 @@ bool WebGLImageConversion::PackPixels(
       const uint8_t* ptr = base_ptr;
       const uint8_t* ptr_end = base_end;
       while (ptr < ptr_end) {
-        memcpy(dst, ptr + src_row_offset, row_size);
-        ptr += src_stride;
-        dst += dst_stride;
+        UNSAFE_TODO({
+          memcpy(dst, ptr + src_row_offset, row_size);
+          ptr += src_stride;
+          dst += dst_stride;
+        });
       }
-      base_ptr += unpack_image_height * src_stride;
-      base_end += unpack_image_height * src_stride;
+      UNSAFE_TODO({
+        base_ptr += unpack_image_height * src_stride;
+        base_end += unpack_image_height * src_stride;
+      });
     }
     return true;
   }

@@ -4,34 +4,49 @@
 
 package org.chromium.chrome.browser.permissions;
 
+import android.view.View;
+
 import androidx.test.filters.MediumTest;
 
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.RuleChain;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.util.CallbackHelper;
 import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.base.test.util.Feature;
+import org.chromium.base.test.util.HistogramWatcher;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
-import org.chromium.chrome.browser.tab.EmptyTabObserver;
+import org.chromium.chrome.browser.modaldialog.ChromeTabModalPresenter;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.TabObserver;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+import org.chromium.chrome.test.transit.AutoResetCtaTransitTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
 import org.chromium.chrome.test.util.browser.LocationSettingsTestUtil;
+import org.chromium.components.permissions.DismissalType;
 import org.chromium.content_public.browser.NavigationHandle;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.ui.modaldialog.ModalDialogManager.ModalDialogType;
 
-/**
- * Test suite for interaction between permissions requests and navigation.
- */
+/** Test suite for interaction between permissions requests and navigation. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class PermissionNavigationTest {
+    public AutoResetCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.autoResetCtaActivityRule();
+    public PermissionTestRule mPermissionRule =
+            new PermissionTestRule(mActivityTestRule.getActivityTestRule());
+
     @Rule
-    public PermissionTestRule mPermissionRule = new PermissionTestRule();
+    public RuleChain mRuleChain = RuleChain.outerRule(mActivityTestRule).around(mPermissionRule);
 
     private static final String TEST_FILE = "/content/test/data/android/permission_navigation.html";
+
+    private static final String DISMISS_TYPE_HISTOGRAM =
+            "Permissions.Prompt.GeolocationApproximateOrPrecise.ModalDialog.Dismissed.Method";
 
     public PermissionNavigationTest() {}
 
@@ -48,33 +63,82 @@ public class PermissionNavigationTest {
     /**
      * Check that modal permission prompts and queued permission requests are removed upon
      * navigation.
-     *
-     * @throws Exception
      */
     @Test
     @MediumTest
     @Feature({"Permissions"})
     public void testNavigationDismissesModalPermissionPrompt() throws Exception {
         mPermissionRule.setUpUrl(TEST_FILE);
-        mPermissionRule.runJavaScriptCodeInCurrentTab("requestGeolocationPermission()");
+        mPermissionRule.runJavaScriptCodeWithUserGestureInCurrentTab(
+                "requestGeolocationPermission()");
         mPermissionRule.waitForDialogShownState(true);
 
-        Tab tab = mPermissionRule.getActivity().getActivityTab();
+        Tab tab = mPermissionRule.getActivityTab();
         final CallbackHelper callbackHelper = new CallbackHelper();
-        EmptyTabObserver navigationWaiter = new EmptyTabObserver() {
-            @Override
-            public void onDidFinishNavigationInPrimaryMainFrame(
-                    Tab tab, NavigationHandle navigation) {
-                callbackHelper.notifyCalled();
-            }
-        };
-        TestThreadUtils.runOnUiThreadBlocking(() -> tab.addObserver(navigationWaiter));
+        TabObserver navigationWaiter =
+                new TabObserver() {
+                    @Override
+                    public void onDidFinishNavigationInPrimaryMainFrame(
+                            Tab tab, NavigationHandle navigation) {
+                        callbackHelper.notifyCalled();
+                    }
+                };
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.addObserver(navigationWaiter));
 
         mPermissionRule.runJavaScriptCodeInCurrentTab("navigate()");
 
         callbackHelper.waitForCallback(0);
-        TestThreadUtils.runOnUiThreadBlocking(() -> tab.removeObserver(navigationWaiter));
+        ThreadUtils.runOnUiThreadBlocking(() -> tab.removeObserver(navigationWaiter));
 
         mPermissionRule.waitForDialogShownState(false);
+    }
+
+    @Test
+    @MediumTest
+    @Feature({"Permissions"})
+    public void testUmaMetricsForDismissalReasonsNavigateBackAndTouchOutsideTheScrim()
+            throws Exception {
+        mPermissionRule.setUpUrl(TEST_FILE);
+        mPermissionRule.runJavaScriptCodeWithUserGestureInCurrentTab(
+                "requestGeolocationPermission()");
+        mPermissionRule.waitForDialogShownState(true);
+
+        // Verify dismissing by pressing back is recorded in UMA
+        var histogramExpectation =
+                HistogramWatcher.newBuilder()
+                        .expectIntRecord(DISMISS_TYPE_HISTOGRAM, DismissalType.NAVIGATE_BACK)
+                        .build();
+
+        PermissionTestRule.waitForDialog(mPermissionRule.getActivity());
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mPermissionRule.getActivity().onBackPressed();
+                });
+
+        histogramExpectation.assertExpected(
+                "Should record tapping back to dismiss permission prompt in UMA");
+
+        // Verify touching outside the scrim is recorded in UMA
+        mPermissionRule.runJavaScriptCodeWithUserGestureInCurrentTab(
+                "requestGeolocationPermission()");
+        mPermissionRule.waitForDialogShownState(true);
+
+        histogramExpectation =
+                HistogramWatcher.newBuilder()
+                        .expectIntRecord(DISMISS_TYPE_HISTOGRAM, DismissalType.TOUCH_OUTSIDE)
+                        .build();
+        PermissionTestRule.waitForDialog(mPermissionRule.getActivity());
+
+        ChromeTabModalPresenter tabModalPresenter =
+                (ChromeTabModalPresenter)
+                        mPermissionRule
+                                .getActivity()
+                                .getModalDialogManager()
+                                .getPresenterForTest(ModalDialogType.TAB);
+
+        View dialogContainerForTest = tabModalPresenter.getDialogContainerForTest();
+        ThreadUtils.runOnUiThreadBlocking(dialogContainerForTest::performClick);
+        histogramExpectation.assertExpected(
+                "Should record tapping outside the scrim to dismiss permission prompt in UMA");
     }
 }

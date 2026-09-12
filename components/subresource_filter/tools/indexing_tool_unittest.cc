@@ -30,15 +30,13 @@ std::vector<uint8_t> ReadFileContents(const base::FilePath& file_path) {
 
   size_t length = base::checked_cast<size_t>(file.GetLength());
   std::vector<uint8_t> contents(length);
-  static_assert(sizeof(uint8_t) == sizeof(char), "Expected char = byte.");
-  file.Read(0, reinterpret_cast<char*>(contents.data()),
-            base::checked_cast<int>(length));
+  file.Read(0, contents);
   return contents;
 }
 
 class IndexingToolTest : public ::testing::Test {
  public:
-  IndexingToolTest() {}
+  IndexingToolTest() = default;
 
   IndexingToolTest(const IndexingToolTest&) = delete;
   IndexingToolTest& operator=(const IndexingToolTest&) = delete;
@@ -70,8 +68,7 @@ class IndexingToolTest : public ::testing::Test {
     // Write the test unindexed data to a file.
     const std::vector<uint8_t>& unindexed_data =
         test_ruleset_pair_.unindexed.contents;
-    base::WriteFile(path, reinterpret_cast<const char*>(unindexed_data.data()),
-                    base::checked_cast<int>(unindexed_data.size()));
+    base::WriteFile(path, unindexed_data);
   }
 
   int file_count_ = 0;
@@ -108,7 +105,7 @@ TEST_F(IndexingToolTest, VerifyOutput) {
 
   // Convert the unindexed data to indexed data, and write the result to
   // indexed_path.
-  EXPECT_TRUE(IndexAndWriteRuleset(unindexed_path, indexed_path));
+  EXPECT_TRUE(IndexAndWriteRuleset(unindexed_path, indexed_path, nullptr, 0));
 
   // Verify that the output equals the test indexed data.
   std::vector<uint8_t> indexed_data = ReadFileContents(indexed_path);
@@ -126,20 +123,21 @@ TEST_F(IndexingToolTest, VersionMetadata) {
   // Convert the unindexed data to indexed data, and write the result to
   // indexed_path.
   int checksum = 0;
-  EXPECT_TRUE(IndexAndWriteRuleset(unindexed_path, indexed_path, &checksum));
+  EXPECT_TRUE(IndexAndWriteRuleset(unindexed_path, indexed_path, &checksum, 0));
   EXPECT_NE(0, checksum);
   WriteVersionMetadata(version_path, "1.2.3", checksum);
   std::string version_json;
   EXPECT_TRUE(base::ReadFileToString(version_path, &version_json));
-  absl::optional<base::Value> json = base::JSONReader::Read(version_json);
+  std::optional<base::Value> json = base::JSONReader::Read(
+      version_json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
 
   std::string* actual_content = json->GetDict().FindStringByDottedPath(
       "subresource_filter.ruleset_version.content");
   EXPECT_EQ("1.2.3", *actual_content);
-  absl::optional<int> actual_format = json->GetDict().FindIntByDottedPath(
+  std::optional<int> actual_format = json->GetDict().FindIntByDottedPath(
       "subresource_filter.ruleset_version.format");
   EXPECT_EQ(RulesetIndexer::kIndexedFormatVersion, actual_format);
-  absl::optional<int> actual_checksum = json->GetDict().FindIntByDottedPath(
+  std::optional<int> actual_checksum = json->GetDict().FindIntByDottedPath(
       "subresource_filter.ruleset_version.checksum");
   EXPECT_EQ(checksum, actual_checksum);
 }

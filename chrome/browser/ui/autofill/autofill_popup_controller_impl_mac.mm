@@ -4,77 +4,72 @@
 
 #include "chrome/browser/ui/autofill/autofill_popup_controller_impl_mac.h"
 
+#import <utility>
+
+#import "chrome/browser/ui/autofill/popup_controller_common.h"
 #import "chrome/browser/ui/cocoa/touchbar/web_textfield_touch_bar_controller.h"
-#include "components/autofill/core/browser/ui/autofill_popup_delegate.h"
-#include "components/autofill/core/browser/ui/popup_item_ids.h"
+#include "components/autofill/core/browser/filling/filling_product.h"
+#include "components/autofill/core/browser/suggestions/suggestion_type.h"
+#include "components/autofill/core/browser/ui/autofill_suggestion_delegate.h"
 
 using base::WeakPtr;
 
 namespace autofill {
 
-// static
-WeakPtr<AutofillPopupControllerImpl> AutofillPopupControllerImpl::GetOrCreate(
-    WeakPtr<AutofillPopupControllerImpl> previous,
-    WeakPtr<AutofillPopupDelegate> delegate,
+base::WeakPtr<AutofillSuggestionController>
+CreateAutofillPopupControllerImplMac(
+    base::WeakPtr<AutofillSuggestionDelegate> delegate,
     content::WebContents* web_contents,
-    gfx::NativeView container_view,
-    const gfx::RectF& element_bounds,
-    base::i18n::TextDirection text_direction) {
-  if (previous.get() && previous->delegate_.get() == delegate.get() &&
-      previous->container_view() == container_view) {
-    previous->SetElementBounds(element_bounds);
-    previous->ClearState();
-    return previous;
-  }
-
-  if (previous.get())
-    previous->Hide(PopupHidingReason::kViewDestroyed);
-
-  AutofillPopupControllerImpl* controller = new AutofillPopupControllerImplMac(
-      delegate, web_contents, container_view, element_bounds, text_direction);
-  return controller->GetWeakPtr();
+    PopupControllerCommon controller_common) {
+  return (new AutofillPopupControllerImplMac(delegate, web_contents,
+                                             std::move(controller_common)))
+      ->GetWeakPtr();
 }
 
 AutofillPopupControllerImplMac::AutofillPopupControllerImplMac(
-    base::WeakPtr<AutofillPopupDelegate> delegate,
+    base::WeakPtr<AutofillSuggestionDelegate> delegate,
     content::WebContents* web_contents,
-    gfx::NativeView container_view,
-    const gfx::RectF& element_bounds,
-    base::i18n::TextDirection text_direction)
+    PopupControllerCommon controller_common)
     : AutofillPopupControllerImpl(delegate,
                                   web_contents,
-                                  container_view,
-                                  element_bounds,
-                                  text_direction),
-      touch_bar_controller_(nil),
-      is_credit_card_popup_(delegate->GetPopupType() ==
-                            PopupType::kCreditCards) {}
+                                  std::move(controller_common),
+                                  std::nullopt),
+      touch_bar_controller_(nil) {}
 
-AutofillPopupControllerImplMac::~AutofillPopupControllerImplMac() {}
+AutofillPopupControllerImplMac::~AutofillPopupControllerImplMac() = default;
 
 void AutofillPopupControllerImplMac::Show(
-    std::vector<autofill::Suggestion> suggestions,
-    AutoselectFirstSuggestion autoselect_first_suggestion) {
-  if (!suggestions.empty() && is_credit_card_popup_) {
+    UiSessionId ui_session_id,
+    std::vector<Suggestion> suggestions,
+    AutofillSuggestionTriggerSource trigger_source,
+    AutoselectFirstSuggestion autoselect_first_suggestion,
+    AutofillSuggestionsIgnoreFocusLoss ignore_focus_loss,
+    std::u16string search_bar_initial_value) {
+  if (!suggestions.empty() && HasCreditCardSuggestions()) {
     touch_bar_controller_ = [WebTextfieldTouchBarController
         controllerForWindow:[container_view().GetNativeNSView() window]];
     [touch_bar_controller_ showCreditCardAutofillWithController:this];
+  } else if (touch_bar_controller_) {
+    [touch_bar_controller_ hideCreditCardAutofillTouchBar];
+    touch_bar_controller_ = nil;
   }
 
-  AutofillPopupControllerImpl::Show(std::move(suggestions),
-                                    autoselect_first_suggestion);
+  AutofillPopupControllerImpl::Show(ui_session_id, std::move(suggestions),
+                                    trigger_source, autoselect_first_suggestion,
+                                    ignore_focus_loss,
+                                    std::move(search_bar_initial_value));
   // No code below this line!
   // |Show| may hide the popup and destroy |this|, so |Show| should be the last
   // line.
 }
 
 void AutofillPopupControllerImplMac::UpdateDataListValues(
-    const std::vector<std::u16string>& values,
-    const std::vector<std::u16string>& labels) {
-  if (touch_bar_controller_)
+    base::span<const SelectOption> options) {
+  if (touch_bar_controller_) {
     [touch_bar_controller_ invalidateTouchBar];
+  }
 
-  AutofillPopupControllerImpl::UpdateDataListValues(values, labels);
+  AutofillPopupControllerImpl::UpdateDataListValues(options);
   // No code below this line!
   // |UpdateDataListValues| may hide the popup and destroy |this|, so
   // |UpdateDataListValues| should be the last line.

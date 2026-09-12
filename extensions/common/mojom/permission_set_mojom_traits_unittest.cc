@@ -5,6 +5,7 @@
 #include "extensions/common/mojom/permission_set_mojom_traits.h"
 
 #include "extensions/common/manifest_handler.h"
+#include "extensions/common/manifest_handler_registry.h"
 #include "extensions/common/mojom/permission_set.mojom.h"
 #include "extensions/common/permissions/api_permission_set.h"
 #include "extensions/common/permissions/mock_manifest_permission.h"
@@ -43,7 +44,7 @@ TEST(PermissionSetMojomTraitsTest, BasicAPIPermission) {
       PermissionsInfo::GetInstance()->GetByID(mojom::APIPermissionID::kSocket);
   std::unique_ptr<APIPermission> input = permission_info->CreateAPIPermission();
   {
-    base::Value::List list;
+    base::ListValue list;
     list.Append("tcp-connect:*.example.com:80");
     list.Append("udp-bind::8080");
     list.Append("udp-send-to::8888");
@@ -63,7 +64,7 @@ TEST(PermissionSetMojomTraitsTest, BasicAPIPermissionSet) {
   std::unique_ptr<APIPermission> permission =
       permission_info->CreateAPIPermission();
   {
-    base::Value::List list;
+    base::ListValue list;
     list.Append("tcp-connect:*.example.com:80");
     list.Append("udp-bind::8080");
     list.Append("udp-send-to::8888");
@@ -131,7 +132,7 @@ TEST(PermissionSetMojomTraitsTest, BasicPermissionSet) {
   std::unique_ptr<APIPermission> permission =
       permission_info->CreateAPIPermission();
   {
-    base::Value::List list;
+    base::ListValue list;
     list.Append("tcp-connect:*.example.com:80");
     list.Append("udp-bind::8080");
     list.Append("udp-send-to::8888");

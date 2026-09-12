@@ -6,10 +6,11 @@
 
 #include <memory>
 
+#include "base/memory/scoped_refptr.h"
+
 namespace media {
 
-VP9Picture::VP9Picture() : frame_hdr(new Vp9FrameHeader()) {}
-
+VP9Picture::VP9Picture() : frame_hdr(std::make_unique<Vp9FrameHeader>()) {}
 VP9Picture::~VP9Picture() = default;
 
 V4L2VP9Picture* VP9Picture::AsV4L2VP9Picture() {
@@ -22,24 +23,15 @@ VaapiVP9Picture* VP9Picture::AsVaapiVP9Picture() {
 
 scoped_refptr<VP9Picture> VP9Picture::Duplicate() {
   scoped_refptr<VP9Picture> ret = CreateDuplicate();
-  if (ret == nullptr)
-    return nullptr;
+  ret->CopyCommonFieldsFrom(*this);
 
-  // Copy member of VP9Picture.
-  ret->frame_hdr = std::make_unique<Vp9FrameHeader>();
-  memcpy(ret->frame_hdr.get(), frame_hdr.get(), sizeof(Vp9FrameHeader));
-
-  // Copy member of CodecPicture.
-  // Note that decrypt_config_ is not used in here, so skip copying it.
-  ret->set_bitstream_id(bitstream_id());
-  ret->set_visible_rect(visible_rect());
-  ret->set_colorspace(get_colorspace());
-
+  // No members of VP9Picture to copy. `frame_hdr` will be replaced and
+  // `metadata_for_encoding` is not used during decoding.
   return ret;
 }
 
 scoped_refptr<VP9Picture> VP9Picture::CreateDuplicate() {
-  return nullptr;
+  return base::MakeRefCounted<VP9Picture>();
 }
 
 }  // namespace media

@@ -11,7 +11,6 @@
 #include "base/task/single_thread_task_runner.h"
 #include "media/base/renderer_factory.h"
 #include "media/base/win/dcomp_texture_wrapper.h"
-#include "media/base/win/overlay_state_observer_subscription.h"
 #include "media/mojo/clients/mojo_renderer_factory.h"
 #include "media/mojo/mojom/renderer_extensions.mojom.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -30,7 +29,6 @@ class MediaFoundationRendererClientFactory : public media::RendererFactory {
   MediaFoundationRendererClientFactory(
       MediaLog* media_log,
       GetDCOMPTextureWrapperCB get_dcomp_texture_wrapper_cb,
-      ObserveOverlayStateCB observe_overlay_state_cb,
       std::unique_ptr<media::MojoRendererFactory> mojo_renderer_factory,
       mojo::Remote<media::mojom::MediaFoundationRendererNotifier>
           media_foundation_renderer_notifier);
@@ -44,16 +42,10 @@ class MediaFoundationRendererClientFactory : public media::RendererFactory {
       media::RequestOverlayInfoCB request_surface_cb,
       const gfx::ColorSpace& target_color_space) override;
 
-  // The MediaFoundationRenderer uses a Type::URL.
-  media::MediaResource::Type GetRequiredMediaResourceType() override;
-
  private:
-  // Raw pointer is safe since both `this` and the `media_log` are owned by
-  // WebMediaPlayerImpl with the correct declaration order.
-  raw_ptr<MediaLog> media_log_ = nullptr;
+  const std::unique_ptr<MediaLog> media_log_;
 
   GetDCOMPTextureWrapperCB get_dcomp_texture_wrapper_cb_;
-  ObserveOverlayStateCB observe_overlay_state_cb_;
   std::unique_ptr<media::MojoRendererFactory> mojo_renderer_factory_;
   mojo::Remote<media::mojom::MediaFoundationRendererNotifier>
       media_foundation_renderer_notifier_;

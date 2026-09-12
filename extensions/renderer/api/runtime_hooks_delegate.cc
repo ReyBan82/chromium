@@ -4,19 +4,30 @@
 
 #include "extensions/renderer/api/runtime_hooks_delegate.h"
 
+#include <array>
+#include <string_view>
+#include <vector>
+
 #include "base/check.h"
 #include "base/containers/span.h"
-#include "base/strings/string_piece.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/types/expected.h"
+#include "build/build_config.h"
 #include "content/public/renderer/render_frame.h"
 #include "content/public/renderer/v8_value_converter.h"
 #include "extensions/common/api/messaging/message.h"
-#include "extensions/common/api/messaging/serialization_format.h"
+#include "extensions/common/api/messaging/messaging_util.h"
+#include "extensions/common/api/messaging/signing_certificate.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_features.h"
 #include "extensions/common/manifest.h"
+#include "extensions/common/manifest_handlers/externally_connectable.h"
 #include "extensions/common/manifest_handlers/web_accessible_resources_info.h"
+#include "extensions/common/mojom/message_port.mojom-shared.h"
 #include "extensions/renderer/api/messaging/message_target.h"
 #include "extensions/renderer/api/messaging/messaging_util.h"
 #include "extensions/renderer/api/messaging/native_renderer_messaging_service.h"
@@ -24,8 +35,11 @@
 #include "extensions/renderer/bindings/js_runner.h"
 #include "extensions/renderer/extension_frame_helper.h"
 #include "extensions/renderer/get_script_context.h"
+#include "extensions/renderer/renderer_extension_registry.h"
 #include "extensions/renderer/script_context.h"
+#include "extensions/renderer/service_worker_data.h"
 #include "extensions/renderer/v8_helpers.h"
+#include "extensions/renderer/worker_thread_dispatcher.h"
 #include "gin/converter.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "v8/include/v8-function-callback.h"
@@ -45,7 +59,8 @@ void GetExtensionId(v8::Local<v8::Name> property_name,
                     const v8::PropertyCallbackInfo<v8::Value>& info) {
   v8::Isolate* isolate = info.GetIsolate();
   v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context = info.Holder()->GetCreationContextChecked();
+  v8::Local<v8::Context> context =
+      info.Holder()->GetCreationContextChecked(isolate);
 
   ScriptContext* script_context = GetScriptContextFromV8Context(context);
   // This could potentially be invoked after the script context is removed
@@ -62,7 +77,8 @@ void GetDynamicId(v8::Local<v8::Name> property_name,
                   const v8::PropertyCallbackInfo<v8::Value>& info) {
   v8::Isolate* isolate = info.GetIsolate();
   v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context = info.Holder()->GetCreationContextChecked();
+  v8::Local<v8::Context> context =
+      info.Holder()->GetCreationContextChecked(isolate);
 
   ScriptContext* script_context = GetScriptContextFromV8Context(context);
   // This could potentially be invoked after the script context is removed
@@ -74,7 +90,15 @@ void GetDynamicId(v8::Local<v8::Name> property_name,
   }
 }
 
+void EmptySetter(v8::Local<v8::Name> name,
+                 v8::Local<v8::Value> value,
+                 const v8::PropertyCallbackInfo<v8::Boolean>& info) {
+  // Empty setter is required to keep the native data property in "accessor"
+  // state even in case the value is updated by user code.
+}
+
 constexpr char kGetManifest[] = "runtime.getManifest";
+constexpr char kGetVersion[] = "runtime.getVersion";
 constexpr char kGetURL[] = "runtime.getURL";
 constexpr char kConnect[] = "runtime.connect";
 constexpr char kConnectNative[] = "runtime.connectNative";
@@ -82,6 +106,8 @@ constexpr char kSendMessage[] = "runtime.sendMessage";
 constexpr char kSendNativeMessage[] = "runtime.sendNativeMessage";
 constexpr char kGetBackgroundPage[] = "runtime.getBackgroundPage";
 constexpr char kGetPackageDirectoryEntry[] = "runtime.getPackageDirectoryEntry";
+constexpr char kMarkListenerRegistrationComplete[] =
+    "runtime.markListenerRegistrationComplete";
 constexpr char kRequestUpdateCheck[] = "runtime.requestUpdateCheck";
 
 // The custom callback supplied to runtime.getBackgroundPage to find and return
@@ -90,7 +116,8 @@ void GetBackgroundPageCallback(
     const v8::FunctionCallbackInfo<v8::Value>& info) {
   v8::Isolate* isolate = info.GetIsolate();
   v8::HandleScope handle_scope(isolate);
-  v8::Local<v8::Context> context = info.Holder()->GetCreationContextChecked();
+  v8::Local<v8::Context> context =
+      info.This()->GetCreationContextChecked(isolate);
 
   // Custom callbacks are called with the arguments of the callback function and
   // the response from the API. Since the custom callback here handles all the
@@ -119,8 +146,8 @@ void GetBackgroundPageCallback(
 // Note: This is to allow the promise version of the API to return a single
 // object, while still supporting the previous callback version which expects
 // multiple parameters to be passed to the callback.
-std::vector<v8::Local<v8::Value>> MassageRequestUpdateCheckResults(
-    const std::vector<v8::Local<v8::Value>>& result_args,
+v8::LocalVector<v8::Value> MassageRequestUpdateCheckResults(
+    const v8::LocalVector<v8::Value>& result_args,
     v8::Local<v8::Context> context,
     binding::AsyncResponseType async_type) {
   // If this is not a callback based API call, we don't need to modify anything.
@@ -143,12 +170,201 @@ std::vector<v8::Local<v8::Value>> MassageRequestUpdateCheckResults(
   DCHECK(success);
 
   // Version is wrapped as a parameter on a details object.
-  v8::Isolate* isolate = context->GetIsolate();
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
   v8::Local<v8::Object> details = v8::Object::New(isolate);
   auto key = gin::StringToV8(isolate, "version");
   details->CreateDataProperty(context, key, version).Check();
-  return {status, details};
+  return v8::LocalVector<v8::Value>(isolate, {status, details});
 }
+
+// Constructs a URL string from an `id` and `path`. `id` is directly used as
+// the host and can be a static or dynamic (GUID) identifier.
+GURL UrlFromPathAndId(const std::string& id, const std::string& path) {
+  std::string maybe_slash = !path.empty() && path[0] == '/' ? "" : "/";
+  std::string url = base::StrCat(
+      {kExtensionScheme, url::kStandardSchemeSeparator, id, maybe_slash, path});
+  return GURL(url);
+}
+
+// Returns the serialization format to use for the given target extension.
+// The decision logic is as follows:
+// 1. If the sender is an extension, the sender's extension serialization
+//    preference is used to determine the format.
+// 2. If the target extension is not installed, returns JSON.
+// 3. If the target extension is installed but not externally connectable from
+//    the current context, returns JSON.
+// 4. If the target extension is installed and externally connectable, the
+//    target extension is used to determine the format.
+//
+//  Note: #2 and #3 are purposefully the same to prevent senders like
+//  untrusted web pages from discovering what extensions are installed by
+//  changing their message content.
+//  TODO(crbug.com/40321352): Consider in the above cases if we should instead
+//  not serialize the message at all and return an error. For the
+//  purposes of minimizing changes to messaging outside of structured clone
+//  serialization we're returning JSON for now.
+mojom::SerializationFormat GetSerializationFormat(
+    ScriptContext* script_context,
+    const std::string& target_id,
+    mojom::ChannelType channel_type) {
+  if (const Extension* sender_extension = script_context->extension()) {
+    return messaging_util::GetSerializationFormat(sender_extension,
+                                                  channel_type);
+  }
+
+  const Extension* installed_target_extension =
+      RendererExtensionRegistry::Get()->GetByID(target_id);
+  if (!installed_target_extension) {
+    // Extension not installed.
+    return mojom::SerializationFormat::kJson;
+  }
+
+  const ExternallyConnectableInfo* info =
+      ExternallyConnectableInfo::Get(installed_target_extension);
+  if (!info || !info->matches.MatchesURL(script_context->url())) {
+    // Extension installed, but not externally connectable from context.
+    return mojom::SerializationFormat::kJson;
+  }
+
+  // Extension installed and externally connectable from context so use the
+  // target extension's serialization format.
+  return messaging_util::GetSerializationFormat(installed_target_extension,
+                                                channel_type);
+}
+
+base::expected<std::string, std::string> GetNativeApplicationName(
+    ScriptContext* script_context,
+    v8::Local<v8::Value> target_arg) {
+  v8::Isolate* isolate = script_context->isolate();
+
+  if (target_arg->IsString()) {
+#if BUILDFLAG(IS_ANDROID)
+    const Extension* extension = script_context->extension();
+    CHECK(extension);
+
+    if (!Manifest::IsUnpackedLocation(extension->location())) {
+      return base::unexpected(
+          "Native messaging on Android requires packed extensions to specify a "
+          "NativeMessageTarget object.");
+    }
+#endif
+    return base::ok(gin::V8ToString(isolate, target_arg));
+  }
+
+  if (target_arg->IsObject()) {
+    v8::Local<v8::Context> v8_context = script_context->v8_context();
+    v8::Local<v8::Object> target_object = target_arg.As<v8::Object>();
+    v8::Local<v8::Value> application_val;
+    if (!target_object->Get(v8_context, gin::StringToV8(isolate, "application"))
+             .ToLocal(&application_val) ||
+        !application_val->IsString()) {
+      return base::unexpected(
+          "Native messaging requires a valid 'application' string in the "
+          "target object.");
+    }
+    return base::ok(gin::V8ToString(isolate, application_val));
+  }
+
+  return base::unexpected("Invalid native messaging target.");
+}
+
+#if BUILDFLAG(IS_ANDROID)
+// Parses a SHA-256 certificate string into a 32-byte array, stripping any
+// ':' or '-' separators. Returns an error message if the format is invalid.
+base::expected<SigningCertificate, std::string> ParseSHA256Certificate(
+    std::string_view cert_str) {
+  std::string stripped;
+  base::RemoveChars(cert_str, ":-", &stripped);
+
+  // Android's PackageManager.hasSigningCertificate (CERT_INPUT_SHA256) expects
+  // a 32-byte SHA-256 digest. We accept a case-insensitive 64-character hex
+  // string with optional ':' or '-' separators.
+  // https://developer.android.com/reference/android/content/pm/PackageManager
+  SigningCertificate cert_bytes;
+  if (stripped.size() != cert_bytes.size() * 2 ||
+      !base::HexStringToSpan(stripped, cert_bytes)) {
+    return base::unexpected("Malformed certificate string.");
+  }
+
+  return base::ok(cert_bytes);
+}
+
+// Extracts and validates the 'androidCertificates' field from `target_arg`.
+// Packed extensions on Android are required to provide at least one valid
+// certificate. Returns an empty vector if omitted for unpacked extensions.
+base::expected<SigningCertificates, std::string> GetCertificates(
+    ScriptContext* script_context,
+    v8::Local<v8::Value> target_arg) {
+  const Extension* extension = script_context->extension();
+  CHECK(extension);
+
+  bool is_packed = !Manifest::IsUnpackedLocation(extension->location());
+
+  // `target_arg` not being an object means no certificates were specified. But
+  // this path should not be reached by packed extensions (should be caught in
+  // GetNativeApplicationName).
+  if (!target_arg->IsObject()) {
+    CHECK(!is_packed);
+    return base::ok(SigningCertificates());
+  }
+
+  v8::Local<v8::Context> v8_context = script_context->v8_context();
+  v8::Local<v8::Object> target_object = target_arg.As<v8::Object>();
+  v8::Isolate* isolate = script_context->isolate();
+
+  v8::Local<v8::Value> certs_val;
+  if (!target_object
+           ->Get(v8_context, gin::StringToV8(isolate, "androidCertificates"))
+           .ToLocal(&certs_val) ||
+      certs_val->IsNullOrUndefined()) {
+    if (is_packed) {
+      return base::unexpected(
+          "Packed extensions on Android must specify at least one expected "
+          "signing certificate in 'androidCertificates'.");
+    }
+    return base::ok(SigningCertificates());
+  }
+
+  if (!certs_val->IsArray()) {
+    return base::unexpected(
+        "Property 'androidCertificates' must be an array of strings.");
+  }
+
+  v8::Local<v8::Array> certs_array = certs_val.As<v8::Array>();
+  uint32_t length = certs_array->Length();
+  if (length == 0) {
+    if (is_packed) {
+      return base::unexpected(
+          "Packed extensions on Android must specify at least one expected "
+          "signing certificate in 'androidCertificates'.");
+    }
+    return base::ok(SigningCertificates());
+  }
+
+  SigningCertificates certificates;
+  certificates.reserve(length);
+
+  for (uint32_t i = 0; i < length; ++i) {
+    v8::Local<v8::Value> element;
+    if (!certs_array->Get(v8_context, i).ToLocal(&element) ||
+        !element->IsString()) {
+      return base::unexpected(base::StringPrintf(
+          "Signing certificate at index %u is malformed.", i));
+    }
+
+    std::string cert_str = gin::V8ToString(isolate, element);
+    auto parsed_cert = ParseSHA256Certificate(cert_str);
+    if (!parsed_cert.has_value()) {
+      return base::unexpected(base::StringPrintf(
+          "Signing certificate at index %u is malformed.", i));
+    }
+
+    certificates.push_back(*parsed_cert);
+  }
+
+  return base::ok(std::move(certificates));
+}
+#endif  // BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
@@ -160,7 +376,7 @@ RuntimeHooksDelegate::~RuntimeHooksDelegate() = default;
 // static
 RequestResult RuntimeHooksDelegate::GetURL(
     ScriptContext* script_context,
-    const std::vector<v8::Local<v8::Value>>& arguments) {
+    const v8::LocalVector<v8::Value>& arguments) {
   DCHECK_EQ(1u, arguments.size());
   DCHECK(arguments[0]->IsString());
   DCHECK(script_context->extension());
@@ -168,22 +384,22 @@ RequestResult RuntimeHooksDelegate::GetURL(
   v8::Isolate* isolate = script_context->isolate();
   std::string path = gin::V8ToString(isolate, arguments[0]);
   const auto* extension = script_context->extension();
-  bool use_dynamic_url = false;
-  if (base::FeatureList::IsEnabled(
-          extensions_features::kExtensionDynamicURLRedirection)) {
-    use_dynamic_url =
-        WebAccessibleResourcesInfo::ShouldUseDynamicUrl(extension, path);
-  }
-  std::string id = use_dynamic_url ? extension->guid() : extension->id();
 
-  RequestResult result(RequestResult::HANDLED);
-  std::string url = base::StringPrintf(
-      "chrome-extension://%s%s%s", id.c_str(),
-      !path.empty() && path[0] == '/' ? "" : "/", path.c_str());
+  GURL url = UrlFromPathAndId(extension->id(), path);
   // GURL considers any possible path valid. Since the argument is only appended
   // as part of the path, there should be no way this could conceivably fail.
-  DCHECK(GURL(url).is_valid());
-  result.return_value = gin::StringToV8(isolate, url);
+  DCHECK(url.is_valid());
+
+  if (WebAccessibleResourcesInfo::ShouldUseDynamicUrl(extension,
+                                                      url.GetPath())) {
+    GURL::Replacements replacements;
+    replacements.SetHostStr(extension->guid());
+    url = url.ReplaceComponents(replacements);
+  }
+
+  RequestResult result(RequestResult::HANDLED);
+  DCHECK(url.is_valid());
+  result.return_value = gin::StringToV8(isolate, url.spec());
   return result;
 }
 
@@ -191,24 +407,27 @@ RequestResult RuntimeHooksDelegate::HandleRequest(
     const std::string& method_name,
     const APISignature* signature,
     v8::Local<v8::Context> context,
-    std::vector<v8::Local<v8::Value>>* arguments,
+    v8::LocalVector<v8::Value>* arguments,
     const APITypeReferenceMap& refs) {
   using Handler = RequestResult (RuntimeHooksDelegate::*)(
       ScriptContext*, const APISignature::V8ParseResult&);
   static const struct {
     Handler handler;
-    base::StringPiece method;
+    std::string_view method;
   } kHandlers[] = {
       {&RuntimeHooksDelegate::HandleSendMessage, kSendMessage},
       {&RuntimeHooksDelegate::HandleConnect, kConnect},
       {&RuntimeHooksDelegate::HandleGetURL, kGetURL},
       {&RuntimeHooksDelegate::HandleGetManifest, kGetManifest},
+      {&RuntimeHooksDelegate::HandleGetVersion, kGetVersion},
       {&RuntimeHooksDelegate::HandleConnectNative, kConnectNative},
       {&RuntimeHooksDelegate::HandleSendNativeMessage, kSendNativeMessage},
       {&RuntimeHooksDelegate::HandleGetBackgroundPage, kGetBackgroundPage},
       {&RuntimeHooksDelegate::HandleGetPackageDirectoryEntryCallback,
        kGetPackageDirectoryEntry},
       {&RuntimeHooksDelegate::HandleRequestUpdateCheck, kRequestUpdateCheck},
+      {&RuntimeHooksDelegate::HandleMarkListenerRegistrationComplete,
+       kMarkListenerRegistrationComplete},
   };
 
   ScriptContext* script_context = GetScriptContextFromV8ContextChecked(context);
@@ -234,7 +453,7 @@ RequestResult RuntimeHooksDelegate::HandleRequest(
   }
 
   if (should_massage) {
-    messaging_util::MassageSendMessageArguments(context->GetIsolate(),
+    messaging_util::MassageSendMessageArguments(v8::Isolate::GetCurrent(),
                                                 allow_options, arguments);
   }
 
@@ -253,13 +472,10 @@ void RuntimeHooksDelegate::InitializeTemplate(
     v8::Isolate* isolate,
     v8::Local<v8::ObjectTemplate> object_template,
     const APITypeReferenceMap& type_refs) {
-  object_template->SetAccessor(gin::StringToSymbol(isolate, "id"),
-                               &GetExtensionId);
-  if (base::FeatureList::IsEnabled(
-          extensions_features::kExtensionDynamicURLRedirection)) {
-    object_template->SetAccessor(gin::StringToSymbol(isolate, "dynamicId"),
-                                 &GetDynamicId);
-  }
+  object_template->SetNativeDataProperty(gin::StringToSymbol(isolate, "id"),
+                                         &GetExtensionId, &EmptySetter);
+  object_template->SetNativeDataProperty(
+      gin::StringToSymbol(isolate, "dynamicId"), &GetDynamicId, &EmptySetter);
 }
 
 RequestResult RuntimeHooksDelegate::HandleGetManifest(
@@ -278,6 +494,20 @@ RequestResult RuntimeHooksDelegate::HandleGetManifest(
   return result;
 }
 
+RequestResult RuntimeHooksDelegate::HandleGetVersion(
+    ScriptContext* script_context,
+    const APISignature::V8ParseResult& parse_result) {
+  DCHECK_EQ(binding::AsyncResponseType::kNone, parse_result.async_type);
+  CHECK(script_context->extension());
+
+  RequestResult result(RequestResult::HANDLED);
+  result.return_value = content::V8ValueConverter::Create()->ToV8Value(
+      script_context->extension()->VersionString(),
+      script_context->v8_context());
+
+  return result;
+}
+
 RequestResult RuntimeHooksDelegate::HandleGetURL(
     ScriptContext* script_context,
     const APISignature::V8ParseResult& parse_result) {
@@ -288,7 +518,7 @@ RequestResult RuntimeHooksDelegate::HandleGetURL(
 RequestResult RuntimeHooksDelegate::HandleSendMessage(
     ScriptContext* script_context,
     const APISignature::V8ParseResult& parse_result) {
-  const std::vector<v8::Local<v8::Value>>& arguments = *parse_result.arguments;
+  const v8::LocalVector<v8::Value>& arguments = *parse_result.arguments;
   DCHECK_EQ(4u, arguments.size());
 
   std::string target_id;
@@ -304,9 +534,10 @@ RequestResult RuntimeHooksDelegate::HandleSendMessage(
   v8::Local<v8::Context> v8_context = script_context->v8_context();
 
   v8::Local<v8::Value> v8_message = arguments[1];
-  std::unique_ptr<Message> message = messaging_util::MessageFromV8(
+  mojom::ChannelType channel_type = mojom::ChannelType::kSendMessage;
+  std::optional<Message> message = messaging_util::MessageFromV8(
       v8_context, v8_message,
-      messaging_util::GetSerializationFormat(*script_context), &error);
+      GetSerializationFormat(script_context, target_id, channel_type), &error);
   if (!message) {
     RequestResult result(RequestResult::INVALID_INVOCATION);
     result.error = std::move(error);
@@ -323,9 +554,8 @@ RequestResult RuntimeHooksDelegate::HandleSendMessage(
     response_callback = arguments[3].As<v8::Function>();
 
   v8::Local<v8::Promise> promise = messaging_service_->SendOneTimeMessage(
-      script_context, MessageTarget::ForExtension(target_id),
-      messaging_util::kSendMessageChannel, *message, parse_result.async_type,
-      response_callback);
+      script_context, MessageTarget::ForExtension(target_id), channel_type,
+      std::move(*message), parse_result.async_type, response_callback);
   DCHECK_EQ(parse_result.async_type == binding::AsyncResponseType::kPromise,
             !promise.IsEmpty())
       << "SendOneTimeMessage should only return a Promise for promise based "
@@ -341,34 +571,59 @@ RequestResult RuntimeHooksDelegate::HandleSendMessage(
 RequestResult RuntimeHooksDelegate::HandleSendNativeMessage(
     ScriptContext* script_context,
     const APISignature::V8ParseResult& parse_result) {
-  const std::vector<v8::Local<v8::Value>>& arguments = *parse_result.arguments;
+  const v8::LocalVector<v8::Value>& arguments = *parse_result.arguments;
   DCHECK_EQ(3u, arguments.size());
 
-  std::string application_name =
-      gin::V8ToString(script_context->isolate(), arguments[0]);
+  base::expected<std::string, std::string> application_name =
+      GetNativeApplicationName(script_context, arguments[0]);
+  if (!application_name.has_value()) {
+    RequestResult result(RequestResult::INVALID_INVOCATION);
+    result.error = std::move(application_name.error());
+    return result;
+  }
 
   v8::Local<v8::Value> v8_message = arguments[1];
   DCHECK(!v8_message.IsEmpty());
-  std::string error;
 
-  // Native messaging always uses JSON since a native host doesn't understand
-  // structured cloning serialization.
-  std::unique_ptr<Message> message =
-      messaging_util::MessageFromV8(script_context->v8_context(), v8_message,
-                                    SerializationFormat::kJson, &error);
+  mojom::ChannelType channel_type = mojom::ChannelType::kNative;
+  std::string error;
+  std::optional<Message> message = messaging_util::MessageFromV8(
+      script_context->v8_context(), v8_message,
+      messaging_util::GetSerializationFormat(script_context->extension(),
+                                             channel_type),
+      &error);
   if (!message) {
     RequestResult result(RequestResult::INVALID_INVOCATION);
     result.error = std::move(error);
     return result;
   }
 
+  SigningCertificates android_certificates;
+#if BUILDFLAG(IS_ANDROID)
+  // Signing certificates are only parsed for Android.
+  auto certificates_or_error = GetCertificates(script_context, arguments[0]);
+  if (!certificates_or_error.has_value()) {
+    RequestResult result(RequestResult::INVALID_INVOCATION);
+    result.error = std::move(certificates_or_error.error());
+    return result;
+  }
+
+  android_certificates = std::move(*certificates_or_error);
+#endif
+
   v8::Local<v8::Function> response_callback;
   if (!arguments[2]->IsNull())
     response_callback = arguments[2].As<v8::Function>();
 
+  // TODO(crbug.com/552709714): Refactor native application name and
+  // certificates into a struct so an Android-specific field doesn't show up in
+  // function signatures that simply pass it along.
   v8::Local<v8::Promise> promise = messaging_service_->SendOneTimeMessage(
-      script_context, MessageTarget::ForNativeApp(application_name),
-      std::string(), *message, parse_result.async_type, response_callback);
+      script_context,
+      MessageTarget::ForNativeApp(*application_name,
+                                  std::move(android_certificates)),
+      channel_type, std::move(*message), parse_result.async_type,
+      response_callback);
   DCHECK_EQ(parse_result.async_type == binding::AsyncResponseType::kPromise,
             !promise.IsEmpty())
       << "SendOneTimeMessage should only return a Promise for promise based "
@@ -384,7 +639,7 @@ RequestResult RuntimeHooksDelegate::HandleSendNativeMessage(
 RequestResult RuntimeHooksDelegate::HandleConnect(
     ScriptContext* script_context,
     const APISignature::V8ParseResult& parse_result) {
-  const std::vector<v8::Local<v8::Value>>& arguments = *parse_result.arguments;
+  const v8::LocalVector<v8::Value>& arguments = *parse_result.arguments;
   DCHECK_EQ(2u, arguments.size());
   DCHECK_EQ(binding::AsyncResponseType::kNone, parse_result.async_type);
 
@@ -405,38 +660,62 @@ RequestResult RuntimeHooksDelegate::HandleConnect(
         messaging_util::PARSE_CHANNEL_NAME);
   }
 
-  gin::Handle<GinPort> port = messaging_service_->Connect(
+  GinPort* port = messaging_service_->Connect(
       script_context, MessageTarget::ForExtension(target_id),
       options.channel_name,
-      messaging_util::GetSerializationFormat(*script_context));
-  DCHECK(!port.IsEmpty());
+      GetSerializationFormat(script_context, target_id,
+                             mojom::ChannelType::kConnect));
+  DCHECK(port);
   DCHECK_EQ(binding::AsyncResponseType::kNone, parse_result.async_type);
 
   RequestResult result(RequestResult::HANDLED);
-  result.return_value = port.ToV8();
+  result.return_value =
+      port->GetWrapper(script_context->isolate()).ToLocalChecked();
   return result;
 }
 
 RequestResult RuntimeHooksDelegate::HandleConnectNative(
     ScriptContext* script_context,
     const APISignature::V8ParseResult& parse_result) {
-  const std::vector<v8::Local<v8::Value>>& arguments = *parse_result.arguments;
+  const v8::LocalVector<v8::Value>& arguments = *parse_result.arguments;
   DCHECK_EQ(1u, arguments.size());
-  DCHECK(arguments[0]->IsString());
   DCHECK_EQ(binding::AsyncResponseType::kNone, parse_result.async_type);
 
-  std::string application_name =
-      gin::V8ToString(script_context->isolate(), arguments[0]);
+  base::expected<std::string, std::string> application_name =
+      GetNativeApplicationName(script_context, arguments[0]);
+  if (!application_name.has_value()) {
+    RequestResult result(RequestResult::INVALID_INVOCATION);
+    result.error = std::move(application_name.error());
+    return result;
+  }
 
-  // Native messaging always uses JSON since a native host doesn't understand
-  // structured cloning serialization.
-  auto format = SerializationFormat::kJson;
-  gin::Handle<GinPort> port = messaging_service_->Connect(
-      script_context, MessageTarget::ForNativeApp(application_name),
-      std::string(), format);
+  SigningCertificates android_certificates;
+#if BUILDFLAG(IS_ANDROID)
+  // Signing certificates are only parsed for Android.
+  auto certificates_or_error = GetCertificates(script_context, arguments[0]);
+  if (!certificates_or_error.has_value()) {
+    RequestResult result(RequestResult::INVALID_INVOCATION);
+    result.error = std::move(certificates_or_error.error());
+    return result;
+  }
+
+  android_certificates = std::move(*certificates_or_error);
+#endif
+
+  // TODO(crbug.com/552709714): Refactor native application name and
+  // certificates into a struct so an Android-specific field doesn't show up in
+  // function signatures that simply pass it along.
+  GinPort* port = messaging_service_->Connect(
+      script_context,
+      MessageTarget::ForNativeApp(*application_name,
+                                  std::move(android_certificates)),
+      std::string(),
+      messaging_util::GetSerializationFormat(script_context->extension(),
+                                             mojom::ChannelType::kNative));
 
   RequestResult result(RequestResult::HANDLED);
-  result.return_value = port.ToV8();
+  result.return_value =
+      port->GetWrapper(script_context->isolate()).ToLocalChecked();
   return result;
 }
 
@@ -479,10 +758,11 @@ RequestResult RuntimeHooksDelegate::HandleGetPackageDirectoryEntryCallback(
     // allow native code to run in the background page, we'll also need a
     // NativesEnabledScope for that context.
     DCHECK(v8_context == isolate->GetCurrentContext());
-    absl::optional<ModuleSystem::NativesEnabledScope> background_page_natives;
+    std::optional<ModuleSystem::NativesEnabledScope> background_page_natives;
     if (background_page &&
         background_page != script_context->GetRenderFrame() &&
-        blink::WebFrame::ScriptCanAccess(background_page->GetWebFrame())) {
+        blink::WebFrame::ScriptCanAccess(isolate,
+                                         background_page->GetWebFrame())) {
       ScriptContext* background_page_script_context =
           GetScriptContextFromV8Context(
               background_page->GetWebFrame()->MainWorldScriptContext());
@@ -501,8 +781,6 @@ RequestResult RuntimeHooksDelegate::HandleGetPackageDirectoryEntryCallback(
              ->Require("fileEntryBindingUtil")
              .ToLocal(&file_entry_binding_util)) {
       NOTREACHED();
-      // Abort, and consider the request handled.
-      return RequestResult(RequestResult::HANDLED);
     }
 
     v8::Local<v8::Value> get_bind_directory_entry_callback_value;
@@ -511,13 +789,10 @@ RequestResult RuntimeHooksDelegate::HandleGetPackageDirectoryEntryCallback(
                                    isolate, "getBindDirectoryEntryCallback"))
              .ToLocal(&get_bind_directory_entry_callback_value)) {
       NOTREACHED();
-      return RequestResult(RequestResult::THROWN);
     }
 
     if (!get_bind_directory_entry_callback_value->IsFunction()) {
       NOTREACHED();
-      // Abort, and consider the request handled.
-      return RequestResult(RequestResult::HANDLED);
     }
 
     v8::Local<v8::Function> get_bind_directory_entry_callback =
@@ -526,18 +801,15 @@ RequestResult RuntimeHooksDelegate::HandleGetPackageDirectoryEntryCallback(
     maybe_custom_callback =
         JSRunner::Get(v8_context)
             ->RunJSFunctionSync(get_bind_directory_entry_callback, v8_context,
-                                0, nullptr);
+                                {});
   }  // End modules enabled scope.
   v8::Local<v8::Value> callback;
   if (!maybe_custom_callback.ToLocal(&callback)) {
     NOTREACHED();
-    return RequestResult(RequestResult::THROWN);
   }
 
   if (!callback->IsFunction()) {
     NOTREACHED();
-    // Abort, and consider the request handled.
-    return RequestResult(RequestResult::HANDLED);
   }
 
   RequestResult result(RequestResult::NOT_HANDLED);
@@ -551,6 +823,23 @@ RequestResult RuntimeHooksDelegate::HandleRequestUpdateCheck(
   return RequestResult(RequestResult::NOT_HANDLED,
                        v8::Local<v8::Function>() /*custom_callback*/,
                        base::BindOnce(MassageRequestUpdateCheckResults));
+}
+
+RequestResult RuntimeHooksDelegate::HandleMarkListenerRegistrationComplete(
+    ScriptContext* script_context,
+    const APISignature::V8ParseResult& parse_result) {
+  // Complete the renderer-side phase to flush queued events.
+  if (script_context->IsForServiceWorker()) {
+    ServiceWorkerData* worker_data =
+        WorkerThreadDispatcher::GetServiceWorkerData();
+    CHECK(worker_data);
+    worker_data->MarkListenerRegistrationComplete();
+  }
+
+  // Forward the request to the browser to validate and commit the phase.
+  // Because this request shares an associated pipe with preceding listener
+  // registrations, it is guaranteed to arrive after them.
+  return RequestResult(RequestResult::NOT_HANDLED);
 }
 
 }  // namespace extensions

@@ -6,17 +6,19 @@
 #define COMPONENTS_VARIATIONS_NET_VARIATIONS_HTTP_HEADERS_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "components/variations/variations.mojom.h"
-#include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/mojom/network_context.mojom-forward.h"
 #include "services/network/public/mojom/url_response_head.mojom-forward.h"
 
 namespace net {
 struct NetworkTrafficAnnotationTag;
 struct RedirectInfo;
-}
+class URLRequest;
+}  // namespace net
 
 namespace network {
 struct ResourceRequest;
@@ -51,6 +53,26 @@ enum class SignedIn { kNo, kYes };
 
 extern const char kClientDataHeader[];
 
+// Returns true if the request is sent from a Google web property, i.e. from a
+// first-party context.
+//
+// The context is determined using |owner| and |resource_request|. |owner| is
+// used for subframe-initiated subresource requests from the renderer. Note that
+// for these kinds of requests, ResourceRequest::TrustedParams is not populated.
+bool IsFirstPartyContext(Owner owner,
+                         const network::ResourceRequest& resource_request);
+
+// Similar to `AppendVariationsHeader()`, but returns a `kClientDataHeader`
+// header value to be added, if any, or otherwise returns `std::nullopt`.
+// The header should be added to `network::ResourceRequest::cors_exempt_headers`
+// rather than `headers`, to be exempted from CORS checks, and to avoid exposing
+// the header to service workers.
+std::optional<std::string> GetVariationsHeaderValueToAppend(
+    const GURL& url,
+    InIncognito incognito,
+    SignedIn signed_in,
+    bool is_first_party_context);
+
 // Adds Chrome experiment and metrics state as custom headers to |request|.
 // The content of the headers will depend on |incognito| and |signed_in|
 // parameters. It is fine to pass SignedIn::NO if the state is not known to the
@@ -66,6 +88,13 @@ bool AppendVariationsHeader(const GURL& url,
                             SignedIn signed_in,
                             network::ResourceRequest* request);
 
+// Adds Chrome experiment and metrics state as custom headers to |request|.
+// As above, but for net::URLRequest.
+bool AppendVariationsHeader(const GURL& url,
+                            InIncognito incognito,
+                            SignedIn signed_in,
+                            net::URLRequest* request);
+
 // Similar to AppendVariationsHeader, but takes multiple appropriate headers,
 // one of which may be appended. It also uses |owner|, which indicates whether
 // the request-initiating frame's top frame is a Google-owned web property.
@@ -74,9 +103,18 @@ bool AppendVariationsHeader(const GURL& url,
 bool AppendVariationsHeaderWithCustomValue(
     const GURL& url,
     InIncognito incognito,
-    variations::mojom::VariationsHeadersPtr variations_headers,
+    const variations::mojom::VariationsHeaders* variations_headers,
     Owner owner,
     network::ResourceRequest* request);
+
+// As above, but for net::URLRequest. The `owner` param is omitted, with
+// kUnknown being used internally, as this API is not meant to be used for
+// subframe-initiated requests.
+bool AppendVariationsHeaderWithCustomValue(
+    const GURL& url,
+    InIncognito incognito,
+    const variations::mojom::VariationsHeaders* variations_headers,
+    net::URLRequest* request);
 
 // Adds Chrome experiment and metrics state as a custom header to |request|
 // when the signed-in state is not known to the caller; See above for details.
@@ -89,6 +127,7 @@ bool AppendVariationsHeaderUnknownSignedIn(const GURL& url,
 void RemoveVariationsHeaderIfNeeded(
     const net::RedirectInfo& redirect_info,
     const network::mojom::URLResponseHead& response_head,
+    InIncognito incognito,
     std::vector<std::string>* to_be_removed_headers);
 
 // Creates a SimpleURLLoader that will include the variations header for
@@ -125,9 +164,8 @@ bool GetVariationsHeader(const network::ResourceRequest& request,
                          std::string* out);
 
 // Calls the internal ShouldAppendVariationsHeader() for testing.
-bool ShouldAppendVariationsHeaderForTesting(
-    const GURL& url,
-    const std::string& histogram_suffix);
+bool ShouldAppendVariationsHeaderForTesting(const GURL& url,
+                                            InIncognito incognito);
 
 // Updates |cors_exempt_header_list| field of the given |param| to register the
 // variation headers.

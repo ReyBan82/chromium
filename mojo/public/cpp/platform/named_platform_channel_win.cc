@@ -5,17 +5,23 @@
 #include "mojo/public/cpp/platform/named_platform_channel.h"
 
 #include <windows.h>
-#include <memory>
 
-// NOTE: This needs to be included *after* windows.h.
 #include <sddl.h>
 
+#include <memory>
+#include <string_view>
+
+#include "base/check.h"
 #include "base/logging.h"
 #include "base/rand_util.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/strcat.h"
+#include "base/strings/strcat_win.h"
+#include "base/strings/string_number_conversions_win.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/win/access_token.h"
 #include "base/win/scoped_handle.h"
-#include "base/win/windows_version.h"
+#include "base/win/security_descriptor.h"
+#include "base/win/sid.h"
 
 namespace mojo {
 
@@ -30,25 +36,92 @@ namespace {
 constexpr wchar_t kDefaultSecurityDescriptor[] =
     L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)";
 
-NamedPlatformChannel::ServerName GenerateRandomServerName() {
-  return base::StringPrintf(L"%lu.%lu.%I64u", ::GetCurrentProcessId(),
-                            ::GetCurrentThreadId(), base::RandUint64());
+bool IsPrivilegedPipeOwner(HANDLE pipe_handle) {
+  auto sd = base::win::SecurityDescriptor::FromHandle(
+      pipe_handle, base::win::SecurityObjectType::kFile,
+      OWNER_SECURITY_INFORMATION);
+  return sd && sd->owner() &&
+         (*sd->owner() ==
+              base::win::Sid(base::win::WellKnownSid::kLocalSystem) ||
+          *sd->owner() ==
+              base::win::Sid(base::win::WellKnownSid::kBuiltinAdministrators));
 }
 
-std::wstring GetPipeNameFromServerName(
-    const NamedPlatformChannel::ServerName& server_name) {
-  return L"\\\\.\\pipe\\mojo." + server_name;
+bool VerifyServerPrivilege(HANDLE pipe_handle) {
+  DWORD pid = 0;
+  if (!GetNamedPipeServerProcessId(pipe_handle, &pid)) {
+    return false;
+  }
+
+  base::win::ScopedHandle process(
+      OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+  if (!process.is_valid()) {
+    // A medium-integrity client can't OpenProcess a SYSTEM server
+    // (ERROR_ACCESS_DENIED). Fall back to verify if the pipe's owner is
+    // privileged.
+    return IsPrivilegedPipeOwner(pipe_handle);
+  }
+
+  auto server_token = base::win::AccessToken::FromProcess(process.get());
+  auto client_token = base::win::AccessToken::FromCurrentProcess();
+
+  if (!server_token || !client_token) {
+    return false;
+  }
+
+  return server_token->IntegrityLevel() >= client_token->IntegrityLevel();
 }
 
 }  // namespace
+
+// static
+NamedPlatformChannel::ServerName
+NamedPlatformChannel::GenerateRandomServerName() {
+  return base::StrCat({base::NumberToWString(::GetCurrentProcessId()), L".",
+                       base::NumberToWString(::GetCurrentThreadId()), L".",
+                       base::NumberToWString(base::RandUint64())});
+}
+
+// static
+std::wstring NamedPlatformChannel::GetPipeNameFromServerName(
+    const NamedPlatformChannel::ServerName& server_name,
+    NamedPlatformChannel::PipeNameType name_type) {
+  // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createnamedpipea
+  // "Windows 10, version 1709:  Pipes are only supported within an
+  // app-container; ie, from one UWP process to another UWP process that's part
+  // of the same app. Also, named pipes must use the syntax \\.\pipe\LOCAL\ for
+  // the pipe name."
+  //
+  // Without "LOCAL" pipes can't be created inside an AppContainer sandbox.
+  // However older versions of mojo didn't include the "LOCAL" segment, and to
+  // communicate across versions both ends need to use the same pipe name.
+  //
+  // As a workaround, "LOCAL" is only included for local pipes that won't be
+  // exposed to other apps. So AppContainer sandboxes can create PlatformChannel
+  // pipes but not NamedPlatformChannel pipes, which must be opened in an
+  // unsandboxed broker.
+  std::wstring_view prefix;
+  switch (name_type) {
+    case PipeNameType::kDefault:
+      break;
+    case PipeNameType::kLocalPipe:
+      prefix = L"\\LOCAL";
+      break;
+    case PipeNameType::kAdminProtected:
+      prefix = L"\\ProtectedPrefix\\Administrators";
+      break;
+  }
+  return base::StrCat({L"\\\\.\\pipe", prefix, L"\\mojo.", server_name});
+}
 
 // static
 PlatformChannelServerEndpoint NamedPlatformChannel::CreateServerEndpoint(
     const Options& options,
     ServerName* server_name) {
   ServerName name = options.server_name;
-  if (name.empty())
+  if (name.empty()) {
     name = GenerateRandomServerName();
+  }
 
   PSECURITY_DESCRIPTOR security_desc = nullptr;
   ULONG security_desc_len = 0;
@@ -67,14 +140,17 @@ PlatformChannelServerEndpoint NamedPlatformChannel::CreateServerEndpoint(
   const DWORD kPipeMode =
       PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS;
 
-  std::wstring pipe_name = GetPipeNameFromServerName(name);
-  PlatformHandle handle(base::win::ScopedHandle(::CreateNamedPipeW(
-      pipe_name.c_str(), kOpenMode, kPipeMode,
-      options.enforce_uniqueness ? 1 : 255,  // Max instances.
-      4096,                                  // Out buffer size.
-      4096,                                  // In buffer size.
-      5000,                                  // Timeout in milliseconds.
-      &security_attributes)));
+  CHECK(options.max_clients > 0 &&
+        options.max_clients <= PIPE_UNLIMITED_INSTANCES);
+  std::wstring pipe_name =
+      GetPipeNameFromServerName(name, options.pipe_name_type);
+  PlatformHandle handle(base::win::ScopedHandle(
+      ::CreateNamedPipeW(pipe_name.c_str(), kOpenMode, kPipeMode,
+                         options.max_clients,  // Max instances.
+                         4096,                 // Out buffer size.
+                         4096,                 // In buffer size.
+                         5000,                 // Timeout in milliseconds.
+                         &security_attributes)));
 
   *server_name = name;
   return PlatformChannelServerEndpoint(std::move(handle));
@@ -83,17 +159,25 @@ PlatformChannelServerEndpoint NamedPlatformChannel::CreateServerEndpoint(
 // static
 PlatformChannelEndpoint NamedPlatformChannel::CreateClientEndpoint(
     const Options& options) {
-  std::wstring pipe_name = GetPipeNameFromServerName(options.server_name);
+  std::wstring pipe_name =
+      GetPipeNameFromServerName(options.server_name, options.pipe_name_type);
 
   // Note: This may block.
-  if (!::WaitNamedPipeW(pipe_name.c_str(), NMPWAIT_USE_DEFAULT_WAIT))
+  if (!::WaitNamedPipeW(pipe_name.c_str(), NMPWAIT_USE_DEFAULT_WAIT)) {
     return PlatformChannelEndpoint();
+  }
 
-  const DWORD kDesiredAccess = GENERIC_READ | GENERIC_WRITE;
+  // FILE_APPEND_DATA is FILE_CREATE_PIPE_INSTANCE on a pipe and GENERIC_WRITE
+  // expands to include it, so the rights are requested explicitly to let a
+  // server deny clients the right to add instances under its pipe name.
+  const DWORD kDesiredAccess =
+      (FILE_GENERIC_READ | FILE_GENERIC_WRITE) & ~FILE_APPEND_DATA;
   // The SECURITY_ANONYMOUS flag means that the server side cannot impersonate
   // the client.
-  const DWORD kFlags =
-      SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS | FILE_FLAG_OVERLAPPED;
+  const DWORD kFlags = SECURITY_SQOS_PRESENT |
+                       (options.allow_impersonation ? SECURITY_IMPERSONATION
+                                                    : SECURITY_ANONYMOUS) |
+                       FILE_FLAG_OVERLAPPED;
   PlatformHandle handle(base::win::ScopedHandle(
       ::CreateFileW(pipe_name.c_str(), kDesiredAccess, 0, nullptr,
                     OPEN_EXISTING, kFlags, nullptr)));
@@ -101,9 +185,18 @@ PlatformChannelEndpoint NamedPlatformChannel::CreateClientEndpoint(
   // The server may have stopped accepting a connection between the
   // WaitNamedPipe() and CreateFile(). If this occurs, an invalid handle is
   // returned.
-  DPLOG_IF(ERROR, !handle.is_valid())
-      << "Named pipe " << pipe_name
-      << " could not be opened after WaitNamedPipe succeeded";
+  if (!handle.is_valid()) {
+    DPLOG(ERROR) << "Named pipe " << pipe_name
+                 << " could not be opened after WaitNamedPipe succeeded";
+    return PlatformChannelEndpoint();
+  }
+
+  if (options.verify_server_privilege &&
+      !VerifyServerPrivilege(handle.GetHandle().Get())) {
+    DLOG(ERROR) << "Server privilege check failed.";
+    return PlatformChannelEndpoint();
+  }
+
   return PlatformChannelEndpoint(std::move(handle));
 }
 

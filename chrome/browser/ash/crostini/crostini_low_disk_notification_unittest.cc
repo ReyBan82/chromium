@@ -8,26 +8,29 @@
 
 #include <utility>
 
-#include "base/functional/bind.h"
+#include "ash/strings/grit/ash_strings.h"
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/crostini/crostini_util.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
-#include "chrome/browser/notifications/system_notification_helper.h"
-#include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
-#include "chrome/test/base/testing_browser_process.h"
 #include "chromeos/ash/components/dbus/cicerone/cicerone_client.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
 #include "chromeos/ash/components/dbus/seneschal/seneschal_client.h"
 #include "chromeos/ash/components/settings/cros_settings_names.h"
 #include "components/user_manager/fake_user_manager.h"
 #include "components/user_manager/scoped_user_manager.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/message_center/message_center.h"
+#include "ui/message_center/message_center_observer.h"
 #include "ui/message_center/public/cpp/notification.h"
 
 namespace crostini {
 
-class CrostiniLowDiskNotificationTest : public BrowserWithTestWindowTest {
+class CrostiniLowDiskNotificationTest
+    : public BrowserWithTestWindowTest,
+      public message_center::MessageCenterObserver {
  public:
   CrostiniLowDiskNotificationTest() = default;
   ~CrostiniLowDiskNotificationTest() override = default;
@@ -42,18 +45,7 @@ class CrostiniLowDiskNotificationTest : public BrowserWithTestWindowTest {
     GetCrosSettingsHelper()->SetBoolean(
         ash::kDeviceShowLowDiskSpaceNotification, true);
 
-    auto user_manager = std::make_unique<user_manager::FakeUserManager>();
-    user_manager_ = user_manager.get();
-    scoped_user_manager_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::move(user_manager));
-
-    TestingBrowserProcess::GetGlobal()->SetSystemNotificationHelper(
-        std::make_unique<SystemNotificationHelper>());
-    tester_ = std::make_unique<NotificationDisplayServiceTester>(
-        nullptr /* profile */);
-    tester_->SetNotificationAddedClosure(base::BindRepeating(
-        &CrostiniLowDiskNotificationTest::OnNotificationAdded,
-        base::Unretained(this)));
+    message_center_observation_.Observe(message_center::MessageCenter::Get());
     low_disk_notification_ = std::make_unique<CrostiniLowDiskNotification>();
     notification_count_ = 0;
     medium_notification_.set_free_bytes(600ll * 1024 * 1024);
@@ -64,14 +56,16 @@ class CrostiniLowDiskNotificationTest : public BrowserWithTestWindowTest {
 
   void TearDown() override {
     low_disk_notification_.reset();
+    message_center_observation_.Reset();
     ash::SeneschalClient::Shutdown();
     ash::ConciergeClient::Shutdown();
     ash::CiceroneClient::Shutdown();
     BrowserWithTestWindowTest::TearDown();
   }
 
-  absl::optional<message_center::Notification> GetNotification() {
-    return tester_->GetNotification("crostini_low_disk");
+  const message_center::Notification* GetNotification() {
+    return message_center::MessageCenter::Get()->FindNotificationById(
+        "crostini_low_disk");
   }
 
   void SetNotificationThrottlingInterval(int ms) {
@@ -79,12 +73,20 @@ class CrostiniLowDiskNotificationTest : public BrowserWithTestWindowTest {
         base::Milliseconds(ms));
   }
 
-  void OnNotificationAdded() { notification_count_++; }
+  void OnNotificationAdded(const std::string& notification_id) override {
+    if (notification_id == "crostini_low_disk") {
+      notification_count_++;
+    }
+  }
+
+  void OnNotificationUpdated(const std::string& notification_id) override {
+    OnNotificationAdded(notification_id);
+  }
 
  protected:
-  user_manager::FakeUserManager* user_manager_ = nullptr;
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
-  std::unique_ptr<NotificationDisplayServiceTester> tester_;
+  base::ScopedObservation<message_center::MessageCenter,
+                          message_center::MessageCenterObserver>
+      message_center_observation_{this};
   std::unique_ptr<CrostiniLowDiskNotification> low_disk_notification_;
   vm_tools::cicerone::LowDiskSpaceTriggeredSignal medium_notification_;
   vm_tools::cicerone::LowDiskSpaceTriggeredSignal high_notification;
@@ -95,7 +97,7 @@ TEST_F(CrostiniLowDiskNotificationTest, MediumLevelNotification) {
   std::u16string expected_title =
       l10n_util::GetStringUTF16(IDS_CROSTINI_LOW_DISK_NOTIFICATION_TITLE);
   low_disk_notification_->OnLowDiskSpaceTriggered(medium_notification_);
-  auto notification = GetNotification();
+  auto* notification = GetNotification();
   ASSERT_TRUE(notification);
   EXPECT_EQ(expected_title, notification->title());
   EXPECT_EQ(1, notification_count_);
@@ -113,7 +115,7 @@ TEST_F(CrostiniLowDiskNotificationTest, HighLevelReplacesMedium) {
       IDS_CROSTINI_CRITICALLY_LOW_DISK_NOTIFICATION_TITLE);
   low_disk_notification_->OnLowDiskSpaceTriggered(medium_notification_);
   low_disk_notification_->OnLowDiskSpaceTriggered(high_notification);
-  auto notification = GetNotification();
+  auto* notification = GetNotification();
   ASSERT_TRUE(notification);
   EXPECT_EQ(expected_title, notification->title());
   EXPECT_EQ(2, notification_count_);
@@ -143,10 +145,14 @@ TEST_F(CrostiniLowDiskNotificationTest,
 }
 
 TEST_F(CrostiniLowDiskNotificationTest, ShowForMultipleUsersWhenEnrolled) {
-  user_manager_->AddUser(
-      AccountId::FromUserEmailGaiaId("test_user1@example.com", "1234567891"));
-  user_manager_->AddUser(
-      AccountId::FromUserEmailGaiaId("test_user2@example.com", "1234567892"));
+  user_manager()->AddGaiaUser(
+      AccountId::FromUserEmailGaiaId("test_user1@example.com",
+                                     GaiaId("1234567891")),
+      user_manager::UserType::kRegular);
+  user_manager()->AddGaiaUser(
+      AccountId::FromUserEmailGaiaId("test_user2@example.com",
+                                     GaiaId("1234567892")),
+      user_manager::UserType::kRegular);
 
   SetNotificationThrottlingInterval(-1);
   low_disk_notification_->OnLowDiskSpaceTriggered(high_notification);
@@ -154,10 +160,14 @@ TEST_F(CrostiniLowDiskNotificationTest, ShowForMultipleUsersWhenEnrolled) {
 }
 
 TEST_F(CrostiniLowDiskNotificationTest, SupressedForMultipleUsersWhenEnrolled) {
-  user_manager_->AddUser(
-      AccountId::FromUserEmailGaiaId("test_user1@example.com", "1234567891"));
-  user_manager_->AddUser(
-      AccountId::FromUserEmailGaiaId("test_user2@example.com", "1234567892"));
+  user_manager()->AddGaiaUser(
+      AccountId::FromUserEmailGaiaId("test_user1@example.com",
+                                     GaiaId("1234567891")),
+      user_manager::UserType::kRegular);
+  user_manager()->AddGaiaUser(
+      AccountId::FromUserEmailGaiaId("test_user2@example.com",
+                                     GaiaId("1234567892")),
+      user_manager::UserType::kRegular);
 
   GetCrosSettingsHelper()->SetBoolean(ash::kDeviceShowLowDiskSpaceNotification,
                                       false);

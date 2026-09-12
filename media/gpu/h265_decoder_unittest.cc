@@ -2,17 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "media/gpu/h265_decoder.h"
+
+#include <array>
 #include <cstring>
 #include <memory>
 #include <string>
 
 #include "base/check.h"
+#include "base/containers/extend.h"
 #include "base/containers/queue.h"
 #include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/types/optional_util.h"
 #include "media/base/test_data_util.h"
-#include "media/gpu/h265_decoder.h"
+#include "media/filters/h26x_annex_b_bitstream_builder.h"
+#include "media/gpu/h265_builder.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -20,7 +27,6 @@ using ::testing::_;
 using ::testing::Args;
 using ::testing::Expectation;
 using ::testing::InSequence;
-using ::testing::Invoke;
 using ::testing::MakeMatcher;
 using ::testing::Matcher;
 using ::testing::MatcherInterface;
@@ -93,11 +99,14 @@ class MockH265Accelerator : public H265Decoder::H265Accelerator {
   MockH265Accelerator() = default;
 
   MOCK_METHOD0(CreateH265Picture, scoped_refptr<H265Picture>());
-  MOCK_METHOD5(SubmitFrameMetadata,
+  MOCK_METHOD8(SubmitFrameMetadata,
                Status(const H265SPS* sps,
                       const H265PPS* pps,
                       const H265SliceHeader* slice_hdr,
                       const H265Picture::Vector& ref_pic_list,
+                      const H265Picture::Vector& ref_pic_set_lt_curr,
+                      const H265Picture::Vector& ref_pic_set_st_curr_after,
+                      const H265Picture::Vector& ref_pic_set_st_curr_before,
                       scoped_refptr<H265Picture> pic));
   MOCK_METHOD(Status,
               SubmitSlice,
@@ -118,10 +127,19 @@ class MockH265Accelerator : public H265Decoder::H265Accelerator {
   MOCK_METHOD2(SetStream,
                Status(base::span<const uint8_t> stream,
                       const DecryptConfig* decrypt_config));
+  MOCK_METHOD(void,
+              ProcessSPS,
+              (const H265SPS* sps, base::span<const uint8_t> data),
+              (override));
+  MOCK_METHOD(void,
+              ProcessPPS,
+              (const H265PPS* pps, base::span<const uint8_t> data),
+              (override));
   bool IsChromaSamplingSupported(VideoChromaSampling format) override {
     return format == VideoChromaSampling::k420;
   }
   void Reset() override {}
+  bool IsAlphaLayerSupported() override { return true; }
 };
 
 // Test H265Decoder by feeding different h265 frame sequences and make sure it
@@ -142,13 +160,31 @@ class H265DecoderTest : public ::testing::Test {
   // If |set_stream_expect| is true, it will setup EXPECT_CALL for SetStream.
   AcceleratedVideoDecoder::DecodeResult Decode(bool set_stream_expect = true);
 
+  void ResetExpectations() {
+    // Sets default behaviors for mock methods for convenience.
+    ON_CALL(*accelerator_, CreateH265Picture()).WillByDefault([]() {
+      return base::MakeRefCounted<H265Picture>();
+    });
+    ON_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+        .WillByDefault(Return(H265Decoder::H265Accelerator::Status::kOk));
+    ON_CALL(*accelerator_, SubmitDecode(_))
+        .WillByDefault(Return(H265Decoder::H265Accelerator::Status::kOk));
+    ON_CALL(*accelerator_, OutputPicture(_)).WillByDefault(Return(true));
+    ON_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+        .With(Args<10, 11>(SubsampleSizeMatches()))
+        .WillByDefault(Return(H265Decoder::H265Accelerator::Status::kOk));
+    EXPECT_CALL(*accelerator_, SetStream(_, _))
+        .WillRepeatedly(
+            Return(H265Decoder::H265Accelerator::Status::kNotSupported));
+  }
+
  protected:
   std::unique_ptr<H265Decoder> decoder_;
   raw_ptr<MockH265Accelerator> accelerator_;
 
  private:
   base::queue<std::string> input_frame_files_;
-  std::string bitstream_;
+  std::vector<uint8_t> bitstream_;
   scoped_refptr<DecoderBuffer> decoder_buffer_;
 };
 
@@ -157,22 +193,7 @@ void H265DecoderTest::SetUp() {
   accelerator_ = mock_accelerator.get();
   decoder_.reset(new H265Decoder(std::move(mock_accelerator),
                                  VIDEO_CODEC_PROFILE_UNKNOWN));
-
-  // Sets default behaviors for mock methods for convenience.
-  ON_CALL(*accelerator_, CreateH265Picture()).WillByDefault(Invoke([]() {
-    return new H265Picture();
-  }));
-  ON_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _))
-      .WillByDefault(Return(H265Decoder::H265Accelerator::Status::kOk));
-  ON_CALL(*accelerator_, SubmitDecode(_))
-      .WillByDefault(Return(H265Decoder::H265Accelerator::Status::kOk));
-  ON_CALL(*accelerator_, OutputPicture(_)).WillByDefault(Return(true));
-  ON_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
-      .With(Args<10, 11>(SubsampleSizeMatches()))
-      .WillByDefault(Return(H265Decoder::H265Accelerator::Status::kOk));
-  ON_CALL(*accelerator_, SetStream(_, _))
-      .WillByDefault(
-          Return(H265Decoder::H265Accelerator::Status::kNotSupported));
+  ResetExpectations();
 }
 
 void H265DecoderTest::SetInputFrameFiles(
@@ -191,13 +212,13 @@ AcceleratedVideoDecoder::DecodeResult H265DecoderTest::Decode(
       return result;
     auto input_file = GetTestDataFilePath(input_frame_files_.front());
     input_frame_files_.pop();
-    CHECK(base::ReadFileToString(input_file, &bitstream_));
-    decoder_buffer_ = DecoderBuffer::CopyFrom(
-        reinterpret_cast<const uint8_t*>(bitstream_.data()), bitstream_.size());
+    CHECK(
+        base::OptionalUnwrapTo(base::ReadFileToBytes(input_file), bitstream_));
+    decoder_buffer_ = DecoderBuffer::CopyFrom(bitstream_);
     EXPECT_NE(decoder_buffer_.get(), nullptr);
     if (set_stream_expect)
       EXPECT_CALL(*accelerator_, SetStream(_, _));
-    decoder_->SetStream(bitstream_id++, *decoder_buffer_);
+    decoder_->SetStream(bitstream_id++, decoder_buffer_);
   }
 }
 
@@ -213,11 +234,13 @@ TEST_F(H265DecoderTest, DecodeSingleFrame) {
   EXPECT_CALL(*accelerator_, CreateH265Picture()).WillOnce(Return(nullptr));
   EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfSurfaces, Decode());
   EXPECT_TRUE(Mock::VerifyAndClearExpectations(&*accelerator_));
+  ResetExpectations();
 
   {
     InSequence sequence;
     EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(1);
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+        .Times(1);
     EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
         .Times(1);
     EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(0))).Times(1);
@@ -237,7 +260,8 @@ TEST_F(H265DecoderTest, SkipNonIDRFrames) {
   {
     InSequence sequence;
     EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(1);
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+        .Times(1);
     EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
         .Times(1);
     EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(0))).Times(1);
@@ -257,7 +281,8 @@ TEST_F(H265DecoderTest, DecodeProfileMain) {
   EXPECT_EQ(17u, decoder_->GetRequiredNumOfPictures());
 
   EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(6);
-  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(6);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(6);
   EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
       .Times(6);
 
@@ -296,7 +321,8 @@ TEST_F(H265DecoderTest, Decode10BitStream) {
   EXPECT_EQ(17u, decoder_->GetRequiredNumOfPictures());
 
   EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(4);
-  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(4);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(4);
   EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
       .Times(4);
 
@@ -330,10 +356,11 @@ TEST_F(H265DecoderTest, DenyDecodeNonYUV420) {
 
 TEST_F(H265DecoderTest, OutputPictureFailureCausesDecodeToFail) {
   // Provide enough data that Decode() will try to output a frame.
-  SetInputFrameFiles({kSpsPps, kFrame0, kFrame1, kFrame2, kFrame3});
+  SetInputFrameFiles({kSpsPps, kFrame0, kFrame1, kFrame2});
   EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, Decode());
-  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(4);
-  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(3);
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(3);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(3);
   EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
       .Times(3);
   EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(3);
@@ -343,12 +370,13 @@ TEST_F(H265DecoderTest, OutputPictureFailureCausesDecodeToFail) {
 
 // Verify that the decryption config is passed to the accelerator.
 TEST_F(H265DecoderTest, SetEncryptedStream) {
-  std::string bitstream, bitstream1, bitstream2;
+  std::vector<uint8_t> bitstream1, bitstream2;
   auto input_file1 = GetTestDataFilePath(kSpsPps);
-  CHECK(base::ReadFileToString(input_file1, &bitstream1));
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(input_file1), bitstream1));
   auto input_file2 = GetTestDataFilePath(kFrame0);
-  CHECK(base::ReadFileToString(input_file2, &bitstream2));
-  bitstream = bitstream1 + bitstream2;
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(input_file2), bitstream2));
+  std::vector<uint8_t> bitstream = bitstream1;
+  base::Extend(bitstream, bitstream2);
 
   const char kAnyKeyId[] = "any_16byte_keyid";
   const char kAnyIv[] = "any_16byte_iv___";
@@ -361,18 +389,17 @@ TEST_F(H265DecoderTest, SetEncryptedStream) {
   std::unique_ptr<DecryptConfig> decrypt_config =
       DecryptConfig::CreateCencConfig(kAnyKeyId, kAnyIv, subsamples);
   EXPECT_CALL(*accelerator_,
-              SubmitFrameMetadata(_, _, _, _,
+              SubmitFrameMetadata(_, _, _, _, _, _, _,
                                   DecryptConfigMatches(decrypt_config.get())))
       .WillOnce(Return(H265Decoder::H265Accelerator::Status::kOk));
   EXPECT_CALL(*accelerator_,
               SubmitDecode(DecryptConfigMatches(decrypt_config.get())))
       .WillOnce(Return(H265Decoder::H265Accelerator::Status::kOk));
 
-  auto buffer = DecoderBuffer::CopyFrom(
-      reinterpret_cast<const uint8_t*>(bitstream.data()), bitstream.size());
+  auto buffer = DecoderBuffer::CopyFrom(bitstream);
   ASSERT_NE(buffer.get(), nullptr);
   buffer->set_decrypt_config(std::move(decrypt_config));
-  decoder_->SetStream(0, *buffer);
+  decoder_->SetStream(0, buffer);
   EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, decoder_->Decode());
   EXPECT_EQ(HEVCPROFILE_MAIN, decoder_->GetProfile());
   EXPECT_EQ(8u, decoder_->GetBitDepth());
@@ -391,7 +418,7 @@ TEST_F(H265DecoderTest, SubmitFrameMetadataRetry) {
   {
     InSequence sequence;
     EXPECT_CALL(*accelerator_, CreateH265Picture());
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _))
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
         .WillOnce(Return(H265Decoder::H265Accelerator::Status::kTryAgain));
   }
   EXPECT_EQ(AcceleratedVideoDecoder::kTryAgain, Decode());
@@ -399,14 +426,14 @@ TEST_F(H265DecoderTest, SubmitFrameMetadataRetry) {
   // Try again, assuming key still not set. Only SubmitFrameMetadata()
   // should be called again.
   EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(0);
-  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _))
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
       .WillOnce(Return(H265Decoder::H265Accelerator::Status::kTryAgain));
   EXPECT_EQ(AcceleratedVideoDecoder::kTryAgain, Decode());
 
   // Assume key has been provided now, next call to Decode() should proceed.
   {
     InSequence sequence;
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _));
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _));
     EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _));
     EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(0)));
     EXPECT_CALL(*accelerator_, OutputPicture(HasPoc(0)));
@@ -427,7 +454,7 @@ TEST_F(H265DecoderTest, SubmitSliceRetry) {
   {
     InSequence sequence;
     EXPECT_CALL(*accelerator_, CreateH265Picture());
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _));
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _));
     EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
         .WillOnce(Return(H265Decoder::H265Accelerator::Status::kTryAgain));
   }
@@ -436,7 +463,8 @@ TEST_F(H265DecoderTest, SubmitSliceRetry) {
   // Try again, assuming key still not set. Only SubmitSlice() should be
   // called again.
   EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(0);
-  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(0);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(0);
   EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
       .WillOnce(Return(H265Decoder::H265Accelerator::Status::kTryAgain));
   EXPECT_EQ(AcceleratedVideoDecoder::kTryAgain, Decode());
@@ -463,7 +491,7 @@ TEST_F(H265DecoderTest, SubmitDecodeRetry) {
   {
     InSequence sequence;
     EXPECT_CALL(*accelerator_, CreateH265Picture());
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _));
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _));
     EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _));
     EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(0)))
         .WillOnce(Return(H265Decoder::H265Accelerator::Status::kTryAgain));
@@ -473,7 +501,8 @@ TEST_F(H265DecoderTest, SubmitDecodeRetry) {
   // Try again, assuming key still not set. Only SubmitDecode() should be
   // called again.
   EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(0);
-  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(0);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(0);
   EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
       .Times(0);
   EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(0)))
@@ -486,7 +515,7 @@ TEST_F(H265DecoderTest, SubmitDecodeRetry) {
     InSequence sequence;
     EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(0)));
     EXPECT_CALL(*accelerator_, CreateH265Picture());
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _));
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _));
     EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _));
     EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(4)));
     EXPECT_CALL(*accelerator_, OutputPicture(HasPoc(0)));
@@ -514,7 +543,8 @@ TEST_F(H265DecoderTest, SetStreamRetry) {
   {
     InSequence sequence;
     EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
-    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _)).Times(1);
+    EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+        .Times(1);
     EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
         .Times(1);
     EXPECT_CALL(*accelerator_, SubmitDecode(HasPoc(0))).Times(1);
@@ -529,6 +559,672 @@ TEST_F(H265DecoderTest, DecodeMultiFrameInput) {
   EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, Decode());
   EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, Decode());
   EXPECT_TRUE(decoder_->Flush());
+}
+
+TEST_F(H265DecoderTest, ConfigChangeOnNonIRAP) {
+  // 1. Initialize with 8-bit stream.
+  SetInputFrameFiles({kSpsPps, kFrame0});
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, Decode());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+
+  // Decode the first frame to establish state.
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(1);
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).Times(1);
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, Decode());
+  EXPECT_TRUE(decoder_->Flush());
+
+  std::vector<uint8_t> p_frame_data;
+  auto p_frame_file = GetTestDataFilePath(kFrame1);
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(p_frame_file),
+                               p_frame_data));
+
+  // 2. Inject 10-bit SPS/PPS (bit-depth config change) followed by P-frame
+  // (non-IRAP).
+  std::vector<uint8_t> ten_bit_sps_pps;
+  auto ten_bit_file = GetTestDataFilePath(k10BitFrame0);
+  std::vector<uint8_t> ten_bit_data;
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(ten_bit_file),
+                               ten_bit_data));
+  base::Extend(ten_bit_sps_pps, base::span(ten_bit_data).first(84u));
+
+  std::vector<uint8_t> bit_depth_bitstream = ten_bit_sps_pps;
+  base::Extend(bit_depth_bitstream, p_frame_data);
+
+  auto buffer1 = DecoderBuffer::CopyFrom(bit_depth_bitstream);
+  EXPECT_CALL(*accelerator_, SetStream(_, _));
+  decoder_->SetStream(1, buffer1);
+
+  // Verify bit-depth ConfigChange is NOT allowed on P-frame.
+  EXPECT_EQ(AcceleratedVideoDecoder::kDecodeError, decoder_->Decode());
+
+  // Reset decoder state so we can test a second invalid config change stream.
+  decoder_->Reset();
+
+  // 3. Inject SPS with modified CTB size (CTB log size config change) followed
+  // by P-frame (non-IRAP).
+  H26xAnnexBBitstreamBuilder builder;
+  H265SPS sps = {};
+  sps.sps_video_parameter_set_id = 0;
+  sps.sps_max_sub_layers_minus1 = 0;
+  sps.sps_temporal_id_nesting_flag = true;
+  sps.profile_tier_level.general_profile_idc = 1;
+  sps.profile_tier_level.general_level_idc = 120;
+  sps.sps_seq_parameter_set_id = 0;
+  sps.chroma_format_idc = 1;
+  sps.pic_width_in_luma_samples = 320;
+  sps.pic_height_in_luma_samples = 184;
+  sps.log2_min_luma_coding_block_size_minus3 = 1;  // Changed CTB log size
+  sps.log2_diff_max_min_luma_coding_block_size = 1;
+  sps.log2_min_luma_transform_block_size_minus2 = 0;
+  sps.log2_diff_max_min_luma_transform_block_size = 0;
+  sps.max_transform_hierarchy_depth_inter = 0;
+  sps.max_transform_hierarchy_depth_intra = 0;
+  sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
+  sps.sps_max_dec_pic_buffering_minus1[0] = 1;
+
+  BuildPackedH265SPS(builder, sps);
+  builder.Flush();
+
+  std::vector<uint8_t> ctb_bitstream(builder.data().begin(),
+                                     builder.data().end());
+  base::Extend(ctb_bitstream, p_frame_data);
+
+  auto buffer2 = DecoderBuffer::CopyFrom(ctb_bitstream);
+  EXPECT_CALL(*accelerator_, SetStream(_, _));
+  decoder_->SetStream(2, buffer2);
+
+  // Verify CTB log size ConfigChange is NOT allowed on P-frame.
+  EXPECT_EQ(AcceleratedVideoDecoder::kDecodeError, decoder_->Decode());
+
+  EXPECT_TRUE(decoder_->Flush());
+}
+
+TEST_F(H265DecoderTest, EndOfSequenceRequiresIRAP) {
+  // 1. Initialize and decode 8-bit IDR frame 0.
+  SetInputFrameFiles({kSpsPps, kFrame0});
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, Decode());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(1);
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).Times(1);
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, Decode());
+  EXPECT_TRUE(decoder_->Flush());
+
+  // 2. Prepend EOS_NUT followed by non-IRAP frames (kFrame1, kFrame2) and then
+  // an IRAP frame (kFrame0).
+  constexpr uint8_t kEosNutNalu[] = {0x00, 0x00, 0x00, 0x01, 0x48, 0x01};
+  std::vector<uint8_t> eos_stream(std::begin(kEosNutNalu),
+                                  std::end(kEosNutNalu));
+
+  std::vector<uint8_t> frame1_data;
+  CHECK(base::OptionalUnwrapTo(
+      base::ReadFileToBytes(GetTestDataFilePath(kFrame1)), frame1_data));
+  base::Extend(eos_stream, frame1_data);
+
+  std::vector<uint8_t> frame2_data;
+  CHECK(base::OptionalUnwrapTo(
+      base::ReadFileToBytes(GetTestDataFilePath(kFrame2)), frame2_data));
+  base::Extend(eos_stream, frame2_data);
+
+  std::vector<uint8_t> frame0_data;
+  CHECK(base::OptionalUnwrapTo(
+      base::ReadFileToBytes(GetTestDataFilePath(kFrame0)), frame0_data));
+  base::Extend(eos_stream, frame0_data);
+
+  auto buffer = DecoderBuffer::CopyFrom(eos_stream);
+  EXPECT_CALL(*accelerator_, SetStream(_, _));
+  decoder_->SetStream(1, buffer);
+
+  // Non-IRAP frames after EOS_NUT should be skipped; only the IRAP frame
+  // (kFrame0) should be decoded.
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(1);
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).Times(1);
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, decoder_->Decode());
+  EXPECT_TRUE(decoder_->Flush());
+}
+
+TEST_F(H265DecoderTest, ConfigChangeOnNonIRAPAfterEndOfSequence) {
+  // 1. Initialize with 8-bit stream.
+  SetInputFrameFiles({kSpsPps, kFrame0});
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, Decode());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+  EXPECT_EQ(8u, decoder_->GetBitDepth());
+
+  // Decode the first frame to establish state.
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(1);
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).Times(1);
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, Decode());
+  EXPECT_TRUE(decoder_->Flush());
+
+  std::vector<uint8_t> p_frame_data;
+  auto p_frame_file = GetTestDataFilePath(kFrame1);
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(p_frame_file),
+                               p_frame_data));
+
+  // 2. Inject EOS_NUT followed by 10-bit SPS/PPS (bit-depth config change) and
+  // a non-IRAP P-frame.
+  std::vector<uint8_t> ten_bit_sps_pps;
+  auto ten_bit_file = GetTestDataFilePath(k10BitFrame0);
+  std::vector<uint8_t> ten_bit_data;
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(ten_bit_file),
+                               ten_bit_data));
+  base::Extend(ten_bit_sps_pps, base::span(ten_bit_data).first(84u));
+
+  constexpr uint8_t kEosNutNalu[] = {0x00, 0x00, 0x00, 0x01, 0x48, 0x01};
+  std::vector<uint8_t> eos_bit_depth_bitstream(std::begin(kEosNutNalu),
+                                               std::end(kEosNutNalu));
+  base::Extend(eos_bit_depth_bitstream, ten_bit_sps_pps);
+  base::Extend(eos_bit_depth_bitstream, p_frame_data);
+
+  auto buffer = DecoderBuffer::CopyFrom(eos_bit_depth_bitstream);
+  EXPECT_CALL(*accelerator_, SetStream(_, _));
+  decoder_->SetStream(1, buffer);
+
+  // Per HEVC spec, a picture following EOS_NUT must be an IRAP picture.
+  // The non-IRAP picture is dropped without applying configuration changes.
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, decoder_->Decode());
+  EXPECT_EQ(8u, decoder_->GetBitDepth());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+
+  EXPECT_TRUE(decoder_->Flush());
+}
+
+TEST_F(H265DecoderTest, ConfigChangeOnNonIRAPAfterEndOfBitstream) {
+  // 1. Initialize with 8-bit stream.
+  SetInputFrameFiles({kSpsPps, kFrame0});
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, Decode());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+  EXPECT_EQ(8u, decoder_->GetBitDepth());
+
+  // Decode the first frame to establish state.
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(1);
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).Times(1);
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, Decode());
+  EXPECT_TRUE(decoder_->Flush());
+
+  std::vector<uint8_t> p_frame_data;
+  auto p_frame_file = GetTestDataFilePath(kFrame1);
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(p_frame_file),
+                               p_frame_data));
+
+  // 2. Inject EOB_NUT followed by 10-bit SPS/PPS (bit-depth config change) and
+  // a non-IRAP P-frame.
+  std::vector<uint8_t> ten_bit_sps_pps;
+  auto ten_bit_file = GetTestDataFilePath(k10BitFrame0);
+  std::vector<uint8_t> ten_bit_data;
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(ten_bit_file),
+                               ten_bit_data));
+  base::Extend(ten_bit_sps_pps, base::span(ten_bit_data).first(84u));
+
+  constexpr uint8_t kEobNutNalu[] = {0x00, 0x00, 0x00, 0x01, 0x4a, 0x01};
+  std::vector<uint8_t> eob_bit_depth_bitstream(std::begin(kEobNutNalu),
+                                               std::end(kEobNutNalu));
+  base::Extend(eob_bit_depth_bitstream, ten_bit_sps_pps);
+  base::Extend(eob_bit_depth_bitstream, p_frame_data);
+
+  auto buffer = DecoderBuffer::CopyFrom(eob_bit_depth_bitstream);
+  EXPECT_CALL(*accelerator_, SetStream(_, _));
+  decoder_->SetStream(1, buffer);
+
+  // Per HEVC spec, a picture following EOB_NUT must be an IRAP picture.
+  // The non-IRAP picture is dropped without applying configuration changes.
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, decoder_->Decode());
+  EXPECT_EQ(8u, decoder_->GetBitDepth());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+
+  EXPECT_TRUE(decoder_->Flush());
+}
+
+TEST_F(H265DecoderTest, ConfigChangeOnIRAPAfterEndOfSequence) {
+  // 1. Initialize with 8-bit stream.
+  SetInputFrameFiles({kSpsPps, kFrame0});
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, Decode());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+  EXPECT_EQ(8u, decoder_->GetBitDepth());
+
+  // Decode the first frame to establish state.
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(1);
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).Times(1);
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, Decode());
+  EXPECT_TRUE(decoder_->Flush());
+
+  // 2. Inject EOS_NUT followed by 10-bit IDR frame (which includes 10-bit
+  // VPS/SPS/PPS).
+  auto ten_bit_file = GetTestDataFilePath(k10BitFrame0);
+  std::vector<uint8_t> ten_bit_data;
+  CHECK(base::OptionalUnwrapTo(base::ReadFileToBytes(ten_bit_file),
+                               ten_bit_data));
+
+  constexpr uint8_t kEosNutNalu[] = {0x00, 0x00, 0x00, 0x01, 0x48, 0x01};
+  std::vector<uint8_t> eos_10bit_stream(std::begin(kEosNutNalu),
+                                        std::end(kEosNutNalu));
+  base::Extend(eos_10bit_stream, ten_bit_data);
+
+  auto buffer = DecoderBuffer::CopyFrom(eos_10bit_stream);
+  EXPECT_CALL(*accelerator_, SetStream(_, _));
+  decoder_->SetStream(1, buffer);
+
+  // Configuration change should be accepted on the IRAP frame following
+  // EOS_NUT.
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, decoder_->Decode());
+  EXPECT_EQ(10u, decoder_->GetBitDepth());
+  EXPECT_EQ(gfx::Size(320, 184), decoder_->GetPicSize());
+  EXPECT_EQ(HEVCPROFILE_MAIN10, decoder_->GetProfile());
+
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).Times(1);
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .Times(1);
+  EXPECT_CALL(*accelerator_, SubmitDecode(_)).Times(1);
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).Times(1);
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, decoder_->Decode());
+  EXPECT_TRUE(decoder_->Flush());
+}
+
+// This test verifies that dependent slices crossing layer boundaries
+// (different nuh_layer_id) are correctly rejected by the parser,
+// preventing unvalidated slice header state from being propagated.
+TEST_F(H265DecoderTest, DependentSliceLongTermRefPics) {
+  H26xAnnexBBitstreamBuilder builder;
+  // VPS
+  constexpr uint8_t kVpsWithAlpha[] = {
+      0x40, 0x01, 0x0c, 0x11, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00,
+      0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+      0x3e, 0x19, 0x40, 0xbf, 0x3e, 0x08, 0x00, 0x08, 0x30, 0x20,
+      0xa4, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0xc5, 0x20,
+  };
+  builder.AppendBits(32, 0x00000001);  // start code
+  builder.Flush();
+  for (uint8_t b : kVpsWithAlpha) {
+    builder.AppendBits(8, b);
+  }
+  builder.Flush();
+
+  // SPS
+  H265SPS sps = {};
+  sps.sps_video_parameter_set_id = 0;
+  sps.sps_max_sub_layers_minus1 = 0;
+  sps.sps_temporal_id_nesting_flag = true;
+  sps.profile_tier_level.general_profile_idc = 1;
+  sps.profile_tier_level.general_level_idc = 120;
+  sps.sps_seq_parameter_set_id = 0;
+  sps.chroma_format_idc = 1;
+  sps.pic_width_in_luma_samples = 320;
+  sps.pic_height_in_luma_samples = 184;
+  sps.log2_min_luma_coding_block_size_minus3 = 0;
+  sps.log2_diff_max_min_luma_coding_block_size = 1;
+  sps.log2_min_luma_transform_block_size_minus2 = 0;
+  sps.log2_diff_max_min_luma_transform_block_size = 0;
+  sps.max_transform_hierarchy_depth_inter = 0;
+  sps.max_transform_hierarchy_depth_intra = 0;
+  sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
+  sps.sps_max_dec_pic_buffering_minus1[0] = 1;
+  sps.sps_max_num_reorder_pics[0] = 0;
+  sps.sps_max_latency_increase_plus1[0] = 0;
+  sps.scaling_list_enabled_flag = false;
+  sps.amp_enabled_flag = false;
+  sps.sample_adaptive_offset_enabled_flag = false;
+  sps.pcm_enabled_flag = false;
+  sps.num_short_term_ref_pic_sets = 0;
+  sps.long_term_ref_pics_present_flag = true;
+  sps.num_long_term_ref_pics_sps = 0;
+  sps.sps_temporal_mvp_enabled_flag = false;
+  sps.strong_intra_smoothing_enabled_flag = false;
+  sps.vui_parameters_present_flag = false;
+  BuildPackedH265SPS(builder, sps);
+
+  // PPS
+  H265PPS pps = {};
+  pps.pps_pic_parameter_set_id = 0;
+  pps.pps_seq_parameter_set_id = 0;
+  pps.dependent_slice_segments_enabled_flag = true;
+  pps.output_flag_present_flag = false;
+  pps.num_extra_slice_header_bits = 0;
+  pps.sign_data_hiding_enabled_flag = false;
+  pps.cabac_init_present_flag = false;
+  pps.num_ref_idx_l0_default_active_minus1 = 0;
+  pps.num_ref_idx_l1_default_active_minus1 = 0;
+  pps.init_qp_minus26 = 0;
+  pps.constrained_intra_pred_flag = false;
+  pps.transform_skip_enabled_flag = false;
+  pps.cu_qp_delta_enabled_flag = false;
+  pps.pps_slice_chroma_qp_offsets_present_flag = false;
+  pps.pps_loop_filter_across_slices_enabled_flag = false;
+  pps.deblocking_filter_control_present_flag = false;
+  pps.pps_scaling_list_data_present_flag = false;
+  pps.lists_modification_present_flag = false;
+  pps.log2_parallel_merge_level_minus2 = 0;
+  pps.slice_segment_header_extension_present_flag = false;
+  BuildPackedH265PPS(builder, pps);
+
+  // NALU 1: Aux Layer (nuh_layer_id = 1)
+  builder.AppendBits(32, 0x00000001);  // start code
+  builder.Flush();
+  builder.AppendBits(1, 0);                  // forbidden_zero_bit
+  builder.AppendBits(6, H265NALU::CRA_NUT);  // nal_unit_type
+  builder.AppendBits(6, 1);                  // nuh_layer_id = 1
+  builder.AppendBits(3, 1);                  // nuh_temporal_id_plus1 = 1
+
+  builder.AppendBool(true);   // first_slice_segment_in_pic_flag
+  builder.AppendBool(false);  // no_output_of_prior_pics_flag (for IRAP)
+  builder.AppendUE(0);        // slice_pic_parameter_set_id
+  builder.AppendUE(2);        // slice_type = I (2)
+  builder.AppendBits(8, 0);   // slice_pic_order_cnt_lsb
+  builder.AppendBool(false);  // short_term_ref_pic_set_sps_flag
+  builder.AppendUE(0);        // num_negative_pics
+  builder.AppendUE(0);        // num_positive_pics
+
+  builder.AppendUE(32);  // num_long_term_pics = 32!
+  for (int i = 0; i < 32; ++i) {
+    builder.AppendBits(8, i);  // poc_lsb_lt
+    builder.AppendBool(
+        false);  // used_by_curr_pic_lt_flag = false -> goes to poc_lt_foll_
+    builder.AppendBool(false);  // delta_poc_msb_present_flag
+  }
+
+  builder.AppendSE(0);       // slice_qp_delta
+  builder.AppendBool(true);  // byte alignment bit
+  builder.Flush();
+
+  // NALU 2: Base Layer (nuh_layer_id = 0) with dependent slice
+  builder.AppendBits(32, 0x00000001);  // start code
+  builder.Flush();
+  builder.AppendBits(1, 0);                  // forbidden_zero_bit
+  builder.AppendBits(6, H265NALU::CRA_NUT);  // nal_unit_type
+  builder.AppendBits(6, 0);                  // nuh_layer_id = 0
+  builder.AppendBits(3, 1);                  // nuh_temporal_id_plus1 = 1
+
+  builder.AppendBool(false);  // first_slice_segment_in_pic_flag
+  builder.AppendBool(false);  // no_output_of_prior_pics_flag (for IRAP)
+  builder.AppendUE(0);        // slice_pic_parameter_set_id (MISSING BEFORE!)
+  builder.AppendBool(true);   // dependent_slice_segment_flag = true
+  builder.AppendBits(
+      8, 1);  // slice_segment_address = 1 (240 CTBs max, Log2Ceiling(240)=8)
+  builder.AppendBool(true);  // byte alignment bit
+  builder.Flush();
+
+  auto buffer = DecoderBuffer::CopyFrom(builder.data());
+
+  // Set EXPECT_CALLs for decoding so we can reach the vulnerable function
+  EXPECT_CALL(*accelerator_, SetStream(_, _))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).WillRepeatedly([]() {
+    return base::MakeRefCounted<H265Picture>();
+  });
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+  EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+  EXPECT_CALL(*accelerator_, SubmitDecode(_))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+  EXPECT_CALL(*accelerator_, OutputPicture(_)).WillRepeatedly(Return(true));
+
+  decoder_->SetStream(1, buffer);
+
+  // Decode until config change (VPS/SPS/PPS)
+  auto res1 = decoder_->Decode();
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, res1);
+
+  // Decode the frame (which would overflow the arrays if not rejected by the
+  // parser). It should be rejected as a decode error.
+  auto res2 = decoder_->Decode();
+  EXPECT_EQ(AcceleratedVideoDecoder::kDecodeError, res2);
+}
+
+TEST_F(H265DecoderTest, AlphaLayerSpsPpsMidPicture) {
+  H26xAnnexBBitstreamBuilder builder;
+
+  // VPS with alpha layer enabled
+  constexpr auto kVpsWithAlpha = std::to_array<uint8_t>({
+      0x40, 0x01, 0x0c, 0x11, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00,
+      0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+      0x3e, 0x19, 0x40, 0xbf, 0x3e, 0x08, 0x00, 0x08, 0x30, 0x20,
+      0xa4, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0xc5, 0x20,
+  });
+  builder.AppendBits(32, 0x00000001);  // start code
+  builder.Flush();
+  for (uint8_t b : kVpsWithAlpha) {
+    builder.AppendBits(8, b);
+  }
+  builder.Flush();
+
+  // Base layer SPS
+  H265SPS sps = {};
+  sps.sps_video_parameter_set_id = 0;
+  sps.sps_max_sub_layers_minus1 = 0;
+  sps.sps_temporal_id_nesting_flag = true;
+  sps.profile_tier_level.general_profile_idc = 1;
+  sps.profile_tier_level.general_level_idc = 120;
+  sps.sps_seq_parameter_set_id = 0;
+  sps.chroma_format_idc = 1;
+  sps.pic_width_in_luma_samples = 320;
+  sps.pic_height_in_luma_samples = 184;
+  sps.log2_min_luma_coding_block_size_minus3 = 0;
+  sps.log2_diff_max_min_luma_coding_block_size = 1;
+  sps.log2_min_luma_transform_block_size_minus2 = 0;
+  sps.log2_diff_max_min_luma_transform_block_size = 0;
+  sps.max_transform_hierarchy_depth_inter = 0;
+  sps.max_transform_hierarchy_depth_intra = 0;
+  sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
+  sps.sps_max_dec_pic_buffering_minus1[0] = 1;
+  sps.sps_max_num_reorder_pics[0] = 0;
+  sps.sps_max_latency_increase_plus1[0] = 0;
+  BuildPackedH265SPS(builder, sps);
+
+  // Base layer PPS
+  H265PPS pps = {};
+  pps.pps_pic_parameter_set_id = 0;
+  pps.pps_seq_parameter_set_id = 0;
+  BuildPackedH265PPS(builder, pps);
+
+  // Base layer Slice (nuh_layer_id = 0)
+  builder.AppendBits(32, 0x00000001);  // start code
+  builder.Flush();
+  builder.AppendBits(1, 0);                  // forbidden_zero_bit
+  builder.AppendBits(6, H265NALU::CRA_NUT);  // nal_unit_type
+  builder.AppendBits(6, 0);                  // nuh_layer_id = 0
+  builder.AppendBits(3, 1);                  // nuh_temporal_id_plus1 = 1
+
+  builder.AppendBool(true);   // first_slice_segment_in_pic_flag
+  builder.AppendBool(false);  // no_output_of_prior_pics_flag (for IRAP)
+  builder.AppendUE(0);        // slice_pic_parameter_set_id
+  builder.AppendUE(2);        // slice_type = I (2)
+  builder.AppendBits(8, 0);   // slice_pic_order_cnt_lsb
+  builder.AppendBool(false);  // short_term_ref_pic_set_sps_flag
+  builder.AppendUE(0);        // num_negative_pics
+  builder.AppendUE(0);        // num_positive_pics
+  builder.AppendSE(0);        // slice_qp_delta
+  builder.AppendBool(true);   // byte alignment bit
+  builder.Flush();
+
+  // Alpha layer SPS (nuh_layer_id = 1)
+  H26xAnnexBBitstreamBuilder alpha_sps_builder;
+  BuildPackedH265SPS(alpha_sps_builder, sps);
+  std::vector<uint8_t> alpha_sps_data(alpha_sps_builder.data().begin(),
+                                      alpha_sps_builder.data().end());
+  alpha_sps_data[5] = 0x09;  // nuh_layer_id = 1
+  builder.AppendBits(32, 0x00000001);
+  builder.Flush();
+  for (size_t i = 4; i < alpha_sps_data.size(); ++i) {
+    builder.AppendBits(8, alpha_sps_data[i]);
+  }
+  builder.Flush();
+
+  // Alpha layer PPS (nuh_layer_id = 1)
+  H26xAnnexBBitstreamBuilder alpha_pps_builder;
+  BuildPackedH265PPS(alpha_pps_builder, pps);
+  std::vector<uint8_t> alpha_pps_data(alpha_pps_builder.data().begin(),
+                                      alpha_pps_builder.data().end());
+  alpha_pps_data[5] = 0x09;  // nuh_layer_id = 1
+  builder.AppendBits(32, 0x00000001);
+  builder.Flush();
+  for (size_t i = 4; i < alpha_pps_data.size(); ++i) {
+    builder.AppendBits(8, alpha_pps_data[i]);
+  }
+  builder.Flush();
+
+  auto buffer = DecoderBuffer::CopyFrom(builder.data());
+
+  EXPECT_CALL(*accelerator_, SetStream(_, _))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).WillRepeatedly([]() {
+    return base::MakeRefCounted<H265Picture>();
+  });
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+
+  {
+    InSequence sequence;
+    EXPECT_CALL(*accelerator_, ProcessSPS(_, _));
+    EXPECT_CALL(*accelerator_, ProcessPPS(_, _));
+    EXPECT_CALL(*accelerator_, SubmitSlice(_, _, _, _, _, _, _, _, _, _, _, _))
+        .WillOnce(Return(H265Decoder::H265Accelerator::Status::kOk));
+    EXPECT_CALL(*accelerator_, SubmitDecode(_))
+        .WillOnce(Return(H265Decoder::H265Accelerator::Status::kOk));
+    EXPECT_CALL(*accelerator_, OutputPicture(_)).WillOnce(Return(true));
+    EXPECT_CALL(*accelerator_, ProcessSPS(_, _));
+    EXPECT_CALL(*accelerator_, ProcessPPS(_, _));
+  }
+
+  decoder_->SetStream(1, buffer);
+
+  EXPECT_EQ(AcceleratedVideoDecoder::kConfigChange, decoder_->Decode());
+  EXPECT_EQ(AcceleratedVideoDecoder::kRanOutOfStreamData, decoder_->Decode());
+}
+
+TEST_F(H265DecoderTest, InvalidCropRectReturnsDecodeError) {
+  H26xAnnexBBitstreamBuilder builder;
+
+  H265SPS sps = {};
+  sps.sps_video_parameter_set_id = 0;
+  sps.sps_max_sub_layers_minus1 = 0;
+  sps.sps_temporal_id_nesting_flag = true;
+  sps.profile_tier_level.general_profile_idc = 1;
+  sps.profile_tier_level.general_level_idc = 120;
+  sps.sps_seq_parameter_set_id = 0;
+  sps.chroma_format_idc = 1;
+  sps.pic_width_in_luma_samples = 320;
+  sps.pic_height_in_luma_samples = 184;
+  sps.conf_win_left_offset = 200;  // Out of bounds window offset
+  sps.conf_win_right_offset = 0;
+  sps.conf_win_top_offset = 0;
+  sps.conf_win_bottom_offset = 0;
+  sps.log2_min_luma_coding_block_size_minus3 = 0;
+  sps.log2_diff_max_min_luma_coding_block_size = 1;
+  sps.log2_min_luma_transform_block_size_minus2 = 0;
+  sps.log2_diff_max_min_luma_transform_block_size = 0;
+  sps.max_transform_hierarchy_depth_inter = 0;
+  sps.max_transform_hierarchy_depth_intra = 0;
+  sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
+  sps.sps_max_dec_pic_buffering_minus1[0] = 1;
+  sps.sps_max_num_reorder_pics[0] = 0;
+  sps.sps_max_latency_increase_plus1[0] = 0;
+  sps.scaling_list_enabled_flag = false;
+  sps.amp_enabled_flag = false;
+  sps.sample_adaptive_offset_enabled_flag = false;
+  sps.pcm_enabled_flag = false;
+  sps.num_short_term_ref_pic_sets = 0;
+  sps.long_term_ref_pics_present_flag = true;
+  sps.num_long_term_ref_pics_sps = 0;
+  sps.sps_temporal_mvp_enabled_flag = false;
+  sps.strong_intra_smoothing_enabled_flag = false;
+  sps.vui_parameters_present_flag = false;
+  BuildPackedH265SPS(builder, sps);
+
+  H265PPS pps = {};
+  pps.pps_pic_parameter_set_id = 0;
+  pps.pps_seq_parameter_set_id = 0;
+  pps.dependent_slice_segments_enabled_flag = true;
+  pps.output_flag_present_flag = false;
+  pps.num_extra_slice_header_bits = 0;
+  pps.sign_data_hiding_enabled_flag = false;
+  pps.cabac_init_present_flag = false;
+  pps.num_ref_idx_l0_default_active_minus1 = 0;
+  pps.num_ref_idx_l1_default_active_minus1 = 0;
+  pps.init_qp_minus26 = 0;
+  pps.constrained_intra_pred_flag = false;
+  pps.transform_skip_enabled_flag = false;
+  pps.cu_qp_delta_enabled_flag = false;
+  pps.pps_slice_chroma_qp_offsets_present_flag = false;
+  pps.pps_loop_filter_across_slices_enabled_flag = false;
+  pps.deblocking_filter_control_present_flag = false;
+  pps.pps_scaling_list_data_present_flag = false;
+  pps.lists_modification_present_flag = false;
+  pps.log2_parallel_merge_level_minus2 = 0;
+  pps.slice_segment_header_extension_present_flag = false;
+  BuildPackedH265PPS(builder, pps);
+
+  builder.AppendBits(32, 0x00000001);  // start code
+  builder.Flush();
+  builder.AppendBits(1, 0);                  // forbidden_zero_bit
+  builder.AppendBits(6, H265NALU::CRA_NUT);  // nal_unit_type
+  builder.AppendBits(6, 0);                  // nuh_layer_id = 0
+  builder.AppendBits(3, 1);                  // nuh_temporal_id_plus1 = 1
+
+  builder.AppendBool(true);   // first_slice_segment_in_pic_flag
+  builder.AppendBool(false);  // no_output_of_prior_pics_flag
+  builder.AppendUE(0);        // slice_pic_parameter_set_id
+  builder.AppendUE(2);        // slice_type = I (2)
+  builder.AppendBits(8, 0);   // slice_pic_order_cnt_lsb
+  builder.AppendBool(false);  // short_term_ref_pic_set_sps_flag
+  builder.AppendUE(0);        // num_negative_pics
+  builder.AppendUE(0);        // num_positive_pics
+
+  builder.AppendUE(32);  // num_long_term_pics = 32
+  for (int i = 0; i < 32; ++i) {
+    builder.AppendBits(8, i);   // poc_lsb_lt
+    builder.AppendBool(false);  // used_by_curr_pic_lt_flag
+    builder.AppendBool(false);  // delta_poc_msb_present_flag
+  }
+
+  builder.AppendSE(0);       // slice_qp_delta
+  builder.AppendBool(true);  // byte alignment bit
+  builder.Flush();
+
+  auto buffer = DecoderBuffer::CopyFrom(builder.data());
+
+  EXPECT_CALL(*accelerator_, SetStream(_, _))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+  EXPECT_CALL(*accelerator_, CreateH265Picture()).WillRepeatedly([]() {
+    return base::MakeRefCounted<H265Picture>();
+  });
+  EXPECT_CALL(*accelerator_, SubmitFrameMetadata(_, _, _, _, _, _, _, _))
+      .WillRepeatedly(Return(H265Decoder::H265Accelerator::Status::kOk));
+
+  decoder_->SetStream(1, buffer);
+
+  EXPECT_EQ(AcceleratedVideoDecoder::kDecodeError, decoder_->Decode());
 }
 
 }  // namespace media

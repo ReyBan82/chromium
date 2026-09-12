@@ -11,6 +11,9 @@ namespace switches {
 // alongside the definition of their values in the .cc file.
 extern const char kComponentUpdater[];
 extern const char kComponentUpdaterTrustTokensComponentPath[];
+extern const char kCampaignsTestTag[];
+extern const char kDemoModeTestTag[];
+extern const char kEnableComponentUninstall[];
 
 }  // namespace switches
 

@@ -5,12 +5,14 @@
 #ifndef CHROMEOS_ASH_COMPONENTS_LOGIN_SESSION_SESSION_TERMINATION_MANAGER_H_
 #define CHROMEOS_ASH_COMPONENTS_LOGIN_SESSION_SESSION_TERMINATION_MANAGER_H_
 
+#include <optional>
+
 #include "base/component_export.h"
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "chromeos/ash/components/dbus/cryptohome/UserDataAuth.pb.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "chromeos/dbus/power/power_manager_client.h"
 #include "third_party/cros_system_api/dbus/login_manager/dbus-constants.h"
 
 namespace ash {
@@ -23,6 +25,13 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_LOGIN_SESSION)
    public:
     // Occurs when the session will be terminated.
     virtual void OnSessionWillBeTerminated() {}
+
+    // Bridged to browser_shutdown::NotifyAppTerminating().
+    // For historical reasons, the callback here is "slightly" different from
+    // the one above.
+    // TODO(crbug.com/479113713): Consider to migrate into
+    // OnSessionWillBeTerminated().
+    virtual void OnAppTerminating() {}
   };
 
   SessionTerminationManager();
@@ -41,6 +50,10 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_LOGIN_SESSION)
   // To be called on login screen if the policy is set.
   void RebootIfNecessary();
 
+  // Relaunches the entire OS, instead of just relaunching the browser.
+  void Reboot(power_manager::RequestRestartReason reason,
+              const std::string& description);
+
   // To be called when the device gets locked to single user.
   void SetDeviceLockedToSingleUser();
 
@@ -55,12 +68,27 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_LOGIN_SESSION)
 
   void RemoveObserver(Observer* observer);
 
+  // Returns a callback notifying Observer::OnAppTerminating.
+  // This should be used only for bridging with Chrome app termination
+  // callback.
+  base::OnceClosure GetClosureNotifyingAppTerminating();
+
+  // Returns true if we sent or are planning to send a stop session request to
+  // session manager.
+  static bool IsSendingStopRequestToSessionManager();
+
+  // Sets the flag to send a stop request to session manager instead of
+  // shutting down/restarting Chrome in place.
+  static void SetSendStopRequestToSessionManager(
+      bool should_send_request = true);
+
  private:
   void DidWaitForServiceToBeAvailable(bool service_is_available);
   void ProcessCryptohomeLoginStatusReply(
-      const absl::optional<user_data_auth::GetLoginStatusReply>& reply);
+      const std::optional<user_data_auth::GetLoginStatusReply>& reply);
   void RebootIfNecessaryProcessReply(
-      absl::optional<user_data_auth::GetLoginStatusReply> reply);
+      std::optional<user_data_auth::GetLoginStatusReply> reply);
+  void OnAppTerminating();
 
   base::ObserverList<Observer> observers_;
   bool is_locked_to_single_user_ = false;

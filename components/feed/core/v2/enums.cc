@@ -5,7 +5,7 @@
 #include "components/feed/core/v2/enums.h"
 
 #include <ostream>
-#include "base/strings/string_piece.h"
+#include <string_view>
 
 namespace feed {
 
@@ -20,26 +20,12 @@ std::ostream& operator<<(std::ostream& out, NetworkRequestType value) {
       return out << "kUploadActions";
     case NetworkRequestType::kNextPage:
       return out << "kNextPage";
-    case NetworkRequestType::kListWebFeeds:
-      return out << "kListWebFeeds";
-    case NetworkRequestType::kUnfollowWebFeed:
-      return out << "kUnfollowWebFeed";
-    case NetworkRequestType::kFollowWebFeed:
-      return out << "kFollowWebFeed";
-    case NetworkRequestType::kListRecommendedWebFeeds:
-      return out << "kListRecommendedWebFeeds";
-    case NetworkRequestType::kWebFeedListContents:
-      return out << "kWebFeedListContents";
     case NetworkRequestType::kQueryInteractiveFeed:
       return out << "kQueryInteractiveFeed";
     case NetworkRequestType::kQueryBackgroundFeed:
       return out << "kQueryBackgroundFeed";
     case NetworkRequestType::kQueryNextPage:
       return out << "kQueryNextPage";
-    case NetworkRequestType::kSingleWebFeedListContents:
-      return out << "kSingleWebFeedListContents";
-    case NetworkRequestType::kQueryWebFeed:
-      return out << "kQueryWebFeed";
   }
 #endif
   return out << (static_cast<int>(value));
@@ -102,8 +88,8 @@ std::ostream& operator<<(std::ostream& out, LoadStreamStatus value) {
       return out << "kAbortWithPendingClearAll";
     case LoadStreamStatus::kAlreadyHaveUnreadContent:
       return out << "kAlreadyHaveUnreadContent";
-    case LoadStreamStatus::kNotAWebFeedSubscriber:
-      return out << "kNotAWebFeedSubscriber";
+    case LoadStreamStatus::kNotAWebFeedSubscriber_DEPRECATED:
+      return out << "kNotAWebFeedSubscriber_DEPRECATED";
     case LoadStreamStatus::kAccountTokenFetchFailedWrongAccount:
       return out << "kAccountTokenFetchFailedWrongAccount";
     case LoadStreamStatus::kAccountTokenFetchTimedOut:
@@ -112,6 +98,10 @@ std::ostream& operator<<(std::ostream& out, LoadStreamStatus value) {
       return out << "kNetworkFetchTimedOut";
     case LoadStreamStatus::kLoadNotAllowedDisabled:
       return out << "kLoadNotAllowedDisabled";
+    case LoadStreamStatus::kLoadNotAllowedDisabledByDse:
+      return out << "kLoadNotAllowedDisabledByDse";
+    case LoadStreamStatus::kNoCardReceived:
+      return out << "kNoCardReceived";
   }
 #else
   return out << (static_cast<int>(value));
@@ -148,12 +138,14 @@ bool IsLoadingSuccessfulAndFresh(LoadStreamStatus status) {
     case LoadStreamStatus::kDataInStoreIsForAnotherUser:
     case LoadStreamStatus::kAbortWithPendingClearAll:
     case LoadStreamStatus::kAlreadyHaveUnreadContent:
-    case LoadStreamStatus::kNotAWebFeedSubscriber:
+    case LoadStreamStatus::kNotAWebFeedSubscriber_DEPRECATED:
 
     case LoadStreamStatus::kAccountTokenFetchFailedWrongAccount:
     case LoadStreamStatus::kAccountTokenFetchTimedOut:
     case LoadStreamStatus::kNetworkFetchTimedOut:
     case LoadStreamStatus::kLoadNotAllowedDisabled:
+    case LoadStreamStatus::kLoadNotAllowedDisabledByDse:
+    case LoadStreamStatus::kNoCardReceived:
       return false;
   }
 }
@@ -210,22 +202,7 @@ std::ostream& operator<<(std::ostream& out, UploadActionsBatchStatus value) {
 #endif  // ifndef NDEBUG
 }
 
-std::ostream& operator<<(std::ostream& out, WebFeedRefreshStatus value) {
-  switch (value) {
-    case WebFeedRefreshStatus::kNoStatus:
-      return out << "kNoStatus";
-    case WebFeedRefreshStatus::kSuccess:
-      return out << "kSuccess";
-    case WebFeedRefreshStatus::kNetworkFailure:
-      return out << "kNetworkFailure";
-    case WebFeedRefreshStatus::kNetworkRequestThrottled:
-      return out << "kNetworkRequestThrottled";
-    case WebFeedRefreshStatus::kAbortFetchWebFeedPendingClearAll:
-      return out << "kAbortFetchWebFeedPendingClearAll";
-  }
-}
-
-base::StringPiece ToString(UserSettingsOnStart v) {
+std::string_view ToString(UserSettingsOnStart v) {
   switch (v) {
     case UserSettingsOnStart::kFeedNotEnabledByPolicy:
       return "FeedNotEnabledByPolicy";
@@ -247,6 +224,8 @@ base::StringPiece ToString(UserSettingsOnStart v) {
       return "SignedInNoRecentData";
     case UserSettingsOnStart::kFeedNotEnabled:
       return "FeedNotEnabled";
+    case UserSettingsOnStart::kFeedNotEnabledByDse:
+      return "FeedNotEnabledByDse";
   }
   return "Unknown";
 }

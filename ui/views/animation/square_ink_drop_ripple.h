@@ -5,14 +5,15 @@
 #ifndef UI_VIEWS_ANIMATION_SQUARE_INK_DROP_RIPPLE_H_
 #define UI_VIEWS_ANIMATION_SQUARE_INK_DROP_RIPPLE_H_
 
+#include <array>
 #include <memory>
 #include <string>
 
 #include "base/callback_list.h"
 #include "base/time/time.h"
 #include "third_party/skia/include/core/SkColor.h"
-#include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animator.h"
+#include "ui/compositor/layer_not_drawn.h"
 #include "ui/gfx/animation/tween.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/size.h"
@@ -20,10 +21,6 @@
 #include "ui/views/animation/ink_drop_ripple.h"
 #include "ui/views/animation/ink_drop_state.h"
 #include "ui/views/views_export.h"
-
-namespace ui {
-class Layer;
-}  // namespace ui
 
 namespace views {
 class CircleLayerDelegate;
@@ -69,7 +66,6 @@ class VIEWS_EXPORT SquareInkDropRipple : public InkDropRipple {
   void set_activated_shape(ActivatedShape shape) { activated_shape_ = shape; }
 
   // InkDropRipple:
-  void SnapToActivated() override;
   ui::Layer* GetRootLayer() override;
 
  private:
@@ -92,13 +88,14 @@ class VIEWS_EXPORT SquareInkDropRipple : public InkDropRipple {
 
   // Type that contains a gfx::Tansform for each of the layers required by the
   // ink drop.
-  using InkDropTransforms = gfx::Transform[PAINTED_SHAPE_COUNT];
+  using InkDropTransforms = std::array<gfx::Transform, PAINTED_SHAPE_COUNT>;
 
   float GetCurrentOpacity() const;
 
   // InkDropRipple:
   void AnimateStateChange(InkDropState old_ink_drop_state,
                           InkDropState new_ink_drop_state) override;
+  void SetStateToActivated() override;
   void SetStateToHidden() override;
   void AbortAllAnimations() override;
 
@@ -184,16 +181,17 @@ class VIEWS_EXPORT SquareInkDropRipple : public InkDropRipple {
   // The root layer that parents the animating layers. The root layer is used to
   // manipulate opacity and location, and its children are used to manipulate
   // the different painted shapes that compose the ink drop.
-  ui::Layer root_layer_;
+  ui::LayerNotDrawn root_layer_;
 
   // Sequence scheduled callback subscription for the root layer.
   base::CallbackListSubscription root_callback_subscription_;
 
   // ui::Layers for all of the painted shape layers that compose the ink drop.
-  std::unique_ptr<ui::Layer> painted_layers_[PAINTED_SHAPE_COUNT];
+  std::array<std::unique_ptr<ui::Layer>, PAINTED_SHAPE_COUNT> painted_layers_;
 
   // Sequence scheduled callback subscriptions for the painted layers.
-  base::CallbackListSubscription callback_subscriptions_[PAINTED_SHAPE_COUNT];
+  std::array<base::CallbackListSubscription, PAINTED_SHAPE_COUNT>
+      callback_subscriptions_;
 };
 
 }  // namespace views

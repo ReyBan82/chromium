@@ -84,10 +84,6 @@ std::ostream& operator<<(std::ostream& out, FeedUserActionType value) {
       return out << "kTappedRefollowAfterUnfollowOnSnackbar";
     case FeedUserActionType::kTappedUnfollowTryAgainOnSnackbar:
       return out << "kTappedUnfollowTryAgainOnSnackbar";
-    case FeedUserActionType::kTappedGoToFeedPostFollowActiveHelp:
-      return out << "kTappedGoToFeedPostFollowActiveHelp";
-    case FeedUserActionType::kTappedDismissPostFollowActiveHelp:
-      return out << "kTappedDismissPostFollowActiveHelp";
     case FeedUserActionType::kTappedDiscoverFeedPreview:
       return out << "kTappedDiscoverFeedPreview";
     case FeedUserActionType::kOpenedAutoplaySettings:
@@ -100,32 +96,10 @@ std::ostream& operator<<(std::ostream& out, FeedUserActionType value) {
       return out << "kTappedManageHidden";
     case FeedUserActionType::kTappedFollowButton:
       return out << "kTappedFollow";
-    case FeedUserActionType::kDiscoverFeedSelected:
-      return out << "kDiscoverFeedSelected";
-    case FeedUserActionType::kFollowingFeedSelected:
-      return out << "kFollowingFeedSelected";
     case FeedUserActionType::kTappedUnfollowButton:
       return out << "kTappedUnfollow";
-    case FeedUserActionType::kShowFollowSucceedSnackbar:
-      return out << "kShowFollowSucceedSnackbar";
-    case FeedUserActionType::kShowFollowFailedSnackbar:
-      return out << "kShowFollowFailedSnackbar";
-    case FeedUserActionType::kShowUnfollowSucceedSnackbar:
-      return out << "kShowUnfollowSucceedSnackbar";
-    case FeedUserActionType::kShowUnfollowFailedSnackbar:
-      return out << "kShowUnfollowFailedSnackbar";
     case FeedUserActionType::kTappedGoToFeedOnSnackbar:
       return out << "kTappedGoToFeedOnSnackbar";
-    case FeedUserActionType::kTappedCrowButton:
-      return out << "kTappedCrow";
-    case FeedUserActionType::kFirstFollowSheetShown:
-      return out << "kFirstFollowSheetShown";
-    case FeedUserActionType::kFirstFollowSheetTappedGoToFeed:
-      return out << "kFirstFollowSheetTappedGoToFeed";
-    case FeedUserActionType::kFirstFollowSheetTappedGotIt:
-      return out << "kFirstFollowSheetTappedGotIt";
-    case FeedUserActionType::kFollowRecommendationIPHShown:
-      return out << "kFollowRecommendationIPHShown";
     case FeedUserActionType::kTappedOpenInNewTabInGroup:
       return out << "kTappedOpenInNewTabInGroup";
     case FeedUserActionType::kFollowingFeedSelectedGroupByPublisher:
@@ -134,14 +108,10 @@ std::ostream& operator<<(std::ostream& out, FeedUserActionType value) {
       return out << "kFollowingFeedSelectedSortByLatest";
     case FeedUserActionType::kTappedFollowOnRecommendationFollowAccelerator:
       return out << "kTappedFollowOnRecommendationFollowAccelerator";
-    case FeedUserActionType::kTappedGotItFeedPostFollowActiveHelp:
-      return out << "kTappedGotItFeedPostFollowActiveHelp";
     case FeedUserActionType::kTappedRefreshFollowingFeedOnSnackbar:
       return out << "kTappedRefreshFollowingFeedOnSnackbar";
-    case FeedUserActionType::kTappedFeedSignInPromoUIContinue:
-      return out << "kTappedFeedSignInPromoUIContinue";
-    case FeedUserActionType::kTappedFeedSignInPromoUICancel:
-      return out << "kTappedFeedSignInPromoUICancel";
+    case FeedUserActionType::kNonSwipeManualRefresh:
+      return out << "kNonSwipeManualRefresh";
   }
 }
 

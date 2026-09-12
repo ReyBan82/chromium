@@ -7,12 +7,13 @@
 #include <utility>
 
 #include "services/metrics/public/cpp/ukm_builders.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/mojom/installedapp/related_application.mojom-blink.h"
 #include "third_party/blink/public/mojom/manifest/manifest.mojom-blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/navigator.h"
 #include "third_party/blink/renderer/modules/manifest/manifest_manager.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 
@@ -20,22 +21,43 @@ namespace blink {
 
 InstalledAppController::~InstalledAppController() = default;
 
-void InstalledAppController::GetInstalledRelatedApps(
-    std::unique_ptr<AppInstalledCallbacks> callbacks) {
-  // When detached, the fetch logic is no longer valid.
-  if (!GetSupplementable()->GetFrame()) {
-    // TODO(mgiuca): AbortError rather than simply undefined.
-    // https://crbug.com/687846
-    callbacks->OnError();
-    return;
+// static
+ScriptPromise<IDLSequence<RelatedApplication>>
+InstalledAppController::getInstalledRelatedApps(
+    ScriptState* script_state,
+    Navigator& navigator,
+    ExceptionState& exception_state) {
+  // [SecureContext] from the IDL ensures this.
+  CHECK(ExecutionContext::From(script_state)->IsSecureContext());
+
+  if (!navigator.DomWindow()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidStateError,
+        "The object is no longer associated to a document.");
+    return EmptyPromise();
   }
+
+  if (!navigator.DomWindow()->GetFrame()->IsOutermostMainFrame()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidStateError,
+        "getInstalledRelatedApps() is only supported in "
+        "top-level browsing contexts.");
+    return EmptyPromise();
+  }
+
+  auto* resolver = MakeGarbageCollected<
+      ScriptPromiseResolver<IDLSequence<RelatedApplication>>>(
+      script_state, exception_state.GetContext());
+
+  auto* app_controller = From(*navigator.DomWindow());
 
   // Get the list of related applications from the manifest.
   // Upon returning, filter the result list to those apps that are installed.
-  ManifestManager::From(*GetSupplementable())
+  ManifestManager::From(*navigator.DomWindow())
       ->RequestManifest(
-          WTF::BindOnce(&InstalledAppController::OnGetManifestForRelatedApps,
-                        WrapPersistent(this), std::move(callbacks)));
+          BindOnce(&InstalledAppController::OnGetManifestForRelatedApps,
+                   WrapPersistent(app_controller), WrapPersistent(resolver)));
+  return resolver->Promise();
 }
 
 InstalledAppController* InstalledAppController::From(LocalDOMWindow& window) {
@@ -56,11 +78,12 @@ InstalledAppController::InstalledAppController(LocalDOMWindow& window)
       provider_(&window) {}
 
 void InstalledAppController::OnGetManifestForRelatedApps(
-    std::unique_ptr<AppInstalledCallbacks> callbacks,
+    ScriptPromiseResolver<IDLSequence<RelatedApplication>>* resolver,
+    mojom::blink::ManifestRequestResult result,
     const KURL& url,
     mojom::blink::ManifestPtr manifest) {
   if (!GetSupplementable()->GetFrame()) {
-    callbacks->OnError();
+    // Resolving a promise is a no-op with a detached frame.
     return;
   }
   Vector<mojom::blink::RelatedApplicationPtr> mojo_related_apps;
@@ -84,14 +107,17 @@ void InstalledAppController::OnGetManifestForRelatedApps(
     DCHECK(provider_.is_bound());
   }
 
+  bool add_saved_related_applications =
+      (result != mojom::blink::ManifestRequestResult::kSuccess);
+
   provider_->FilterInstalledApps(
-      std::move(mojo_related_apps), url,
-      WTF::BindOnce(&InstalledAppController::OnFilterInstalledApps,
-                    WrapPersistent(this), std::move(callbacks)));
+      std::move(mojo_related_apps), url, add_saved_related_applications,
+      BindOnce(&InstalledAppController::OnFilterInstalledApps,
+               WrapPersistent(this), WrapPersistent(resolver)));
 }
 
 void InstalledAppController::OnFilterInstalledApps(
-    std::unique_ptr<AppInstalledCallbacks> callbacks,
+    ScriptPromiseResolver<IDLSequence<RelatedApplication>>* resolver,
     Vector<mojom::blink::RelatedApplicationPtr> result) {
   HeapVector<Member<RelatedApplication>> applications;
   for (const auto& res : result) {
@@ -111,7 +137,7 @@ void InstalledAppController::OnFilterInstalledApps(
       .SetCalled(true)
       .Record(window->UkmRecorder());
 
-  callbacks->OnSuccess(applications);
+  resolver->Resolve(applications);
 }
 
 void InstalledAppController::Trace(Visitor* visitor) const {

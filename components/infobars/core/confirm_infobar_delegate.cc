@@ -4,9 +4,13 @@
 
 #include "components/infobars/core/confirm_infobar_delegate.h"
 
+#include <optional>
+
+#include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/ui_base_types.h"
 #include "ui/strings/grit/ui_strings.h"
 
 ConfirmInfoBarDelegate::~ConfirmInfoBarDelegate() = default;
@@ -19,18 +23,47 @@ bool ConfirmInfoBarDelegate::EqualsDelegate(
          (confirm_delegate->GetMessageText() == GetMessageText());
 }
 
-ConfirmInfoBarDelegate* ConfirmInfoBarDelegate::AsConfirmInfoBarDelegate() {
-  return this;
+void ConfirmInfoBarDelegate::InfoBarDismissed() {
+  for (auto& observer : observers_) {
+    observer.OnDismiss();
+  }
 }
 
-infobars::InfoBarDelegate::InfoBarAutomationType
-ConfirmInfoBarDelegate::GetInfoBarAutomationType() const {
-  return CONFIRM_INFOBAR;
+const ConfirmInfoBarDelegate* ConfirmInfoBarDelegate::AsConfirmInfoBarDelegate()
+    const {
+  return this;
 }
 
 std::u16string ConfirmInfoBarDelegate::GetTitleText() const {
   return std::u16string();
 }
+
+std::u16string ConfirmInfoBarDelegate::GetMessageTextTemplate() const {
+  return std::u16string();
+}
+
+const std::vector<MessageSubstitution>&
+ConfirmInfoBarDelegate::GetMessageSubstitutions() const {
+  static const base::NoDestructor<std::vector<MessageSubstitution>> empty_subs;
+  return *empty_subs;
+}
+
+MessageSubstitution::MessageSubstitution(
+    std::u16string text,
+    bool is_link,
+    std::optional<std::u16string> accessible_name)
+    : text(std::move(text)),
+      is_link(is_link),
+      accessible_name(std::move(accessible_name)) {}
+
+MessageSubstitution::MessageSubstitution(const MessageSubstitution& other) =
+    default;
+MessageSubstitution::MessageSubstitution(MessageSubstitution&& other) = default;
+MessageSubstitution& MessageSubstitution::operator=(
+    const MessageSubstitution& other) = default;
+MessageSubstitution& MessageSubstitution::operator=(
+    MessageSubstitution&& other) = default;
+MessageSubstitution::~MessageSubstitution() = default;
 
 gfx::ElideBehavior ConfirmInfoBarDelegate::GetMessageElideBehavior() const {
   return gfx::ELIDE_TAIL;
@@ -61,13 +94,33 @@ std::u16string ConfirmInfoBarDelegate::GetButtonTooltip(
   return std::u16string();
 }
 
+std::optional<ui::ButtonStyle> ConfirmInfoBarDelegate::GetButtonStyle(
+    InfoBarButton button) const {
+  return std::nullopt;
+}
+
+bool ConfirmInfoBarDelegate::ShouldShowLinkBeforeButton() const {
+  return false;
+}
+
+int ConfirmInfoBarDelegate::GetLinkSpacingWhenPositionedBeforeButton() const {
+  return 0;
+}
+
 #if BUILDFLAG(IS_IOS)
 bool ConfirmInfoBarDelegate::UseIconBackgroundTint() const {
+  return true;
+}
+
+bool ConfirmInfoBarDelegate::IgnoreIconColorWithTint() const {
   return true;
 }
 #endif
 
 bool ConfirmInfoBarDelegate::Accept() {
+  for (auto& observer : observers_) {
+    observer.OnAccept();
+  }
   return true;
 }
 
@@ -75,9 +128,18 @@ bool ConfirmInfoBarDelegate::Cancel() {
   return true;
 }
 
-bool ConfirmInfoBarDelegate::ExtraButtonPressed() {
-  NOTREACHED() << "Method must be overridden.";
-  return true;
+bool ConfirmInfoBarDelegate::InlineSubstitutionLinkClicked(
+    size_t index,
+    WindowOpenDisposition disposition) {
+  return false;
+}
+
+void ConfirmInfoBarDelegate::AddObserver(Observer* observer) {
+  observers_.AddObserver(observer);
+}
+
+void ConfirmInfoBarDelegate::RemoveObserver(const Observer* observer) {
+  observers_.RemoveObserver(observer);
 }
 
 ConfirmInfoBarDelegate::ConfirmInfoBarDelegate() = default;

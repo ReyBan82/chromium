@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "ui/views/focus/focus_manager.h"
 
 namespace views {
@@ -59,17 +60,18 @@ class VIEWS_EXPORT ExternalFocusTracker : public FocusChangeListener {
 
   // Store the currently focused view for our view manager and register as a
   // listener for future focus changes.
-  void StartTracking();
-
-  // Focus manager which we are a listener for.
-  raw_ptr<FocusManager, DanglingUntriaged> focus_manager_;
+  void StartTracking(FocusManager* focus_manager);
 
   // The parent view of views which we should not track focus changes to. We
   // also do not track changes to parent_view_ itself.
-  raw_ptr<View, DanglingUntriaged> parent_view_;
+  const raw_ptr<View, DanglingUntriaged> parent_view_;
 
   // Holds the last focused view.
   std::unique_ptr<ViewTracker> last_focused_view_tracker_;
+
+  // Focus manager which we are a listener for.
+  base::ScopedObservation<FocusManager, FocusChangeListener>
+      focus_manager_observation_{this};
 };
 
 }  // namespace views

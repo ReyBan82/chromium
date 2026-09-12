@@ -2,12 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "ash/app_list/model/app_list_item.h"
 #include "ash/app_list/model/app_list_model.h"
+#include "ash/constants/web_app_id_constants.h"
 #include "ash/public/cpp/accelerators.h"
 #include "ash/public/cpp/shelf_model.h"
 #include "ash/public/cpp/test/app_list_test_api.h"
@@ -16,6 +18,7 @@
 #include "base/run_loop.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
+#include "chrome/browser/apps/app_service/chrome_app_deprecation/chrome_app_deprecation.h"
 #include "chrome/browser/ash/app_list/app_list_client_impl.h"
 #include "chrome/browser/ash/app_list/app_list_model_updater.h"
 #include "chrome/browser/ash/app_list/app_list_syncable_service_factory.h"
@@ -23,15 +26,13 @@
 #include "chrome/browser/ash/app_list/test/chrome_app_list_test_support.h"
 #include "chrome/browser/ash/login/login_manager_test.h"
 #include "chrome/browser/ash/login/test/login_manager_mixin.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
-#include "chrome/browser/web_applications/web_app_id_constants.h"
 #include "chrome/browser/web_applications/web_app_install_info.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/chrome_paths.h"
-#include "chrome/test/base/interactive_test_utils.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "components/account_id/account_id.h"
 #include "components/app_constants/constants.h"
 #include "components/session_manager/core/session_manager.h"
@@ -51,8 +52,9 @@ std::vector<std::string> GetOrderedShelfItems(
     const std::set<std::string>& filter) {
   std::vector<std::string> result;
   for (const auto& item : ash::ShelfModel::Get()->items()) {
-    if (base::Contains(filter, item.id.app_id))
+    if (filter.contains(item.id.app_id)) {
       result.push_back(item.id.app_id);
+    }
   }
   return result;
 }
@@ -76,7 +78,8 @@ class OemAppPositionTest : public ash::LoginManagerTest {
         user_manager::FakeUserManager::GetFakeUsernameHash(
             login_mixin_.users()[0].account_id);
     const base::FilePath user_profile_path = user_data_dir.Append(
-        ash::ProfileHelper::GetUserProfileDir(user_id_hash));
+        base::FilePath(ash::BrowserContextHelper::GetUserBrowserContextDirName(
+            user_id_hash)));
     base::CreateDirectory(user_profile_path);
 
     base::FilePath src_dir;
@@ -115,7 +118,7 @@ class ChromeAppListModelUpdaterTest : public extensions::ExtensionBrowserTest {
 
   void ShowAppList() {
     ash::AcceleratorController::Get()->PerformActionIfEnabled(
-        ash::TOGGLE_APP_LIST, {});
+        ash::AcceleratorAction::kToggleAppList, {});
     app_list_test_api_.WaitForBubbleWindow(
         /*wait_for_opening_animation=*/false);
   }
@@ -358,11 +361,11 @@ IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest,
   std::vector<std::string> top_level_id_list =
       app_list_test_api_.GetTopLevelViewIdList();
   ASSERT_GT(top_level_id_list.size(), 2u);
-  EXPECT_TRUE(base::Contains(top_level_id_list, folder_id));
+  EXPECT_TRUE(std::ranges::contains(top_level_id_list, folder_id));
   model->MoveItemToRootAt(app1_item, app2_item->position().CreateBefore());
 
   top_level_id_list = app_list_test_api_.GetTopLevelViewIdList();
-  EXPECT_FALSE(base::Contains(top_level_id_list, folder_id));
+  EXPECT_FALSE(std::ranges::contains(top_level_id_list, folder_id));
 
   std::vector<std::string> leading_items = {
       top_level_id_list[0],
@@ -413,19 +416,17 @@ IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest, UnmergeTwoItemFolder) {
 IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest,
                        PRE_SessionRestartDoesntOverrideDefaultAppListPosition) {
   // Simluate installation of an app pinned to shelf by default:
-  // App with web_app::kGmailAppId ID.
-  auto gmail_info = std::make_unique<WebAppInstallInfo>();
-  gmail_info->start_url =
-      GURL("https://mail.google.com/mail/?usp=installed_webapp");
+  // App with ash::kGmailAppId ID.
+  auto gmail_info = web_app::WebAppInstallInfo::CreateWithStartUrlForTesting(
+      GURL("https://mail.google.com/mail/?usp=installed_webapp"));
   gmail_info->display_mode = blink::mojom::DisplayMode::kMinimalUi;
   web_app::test::InstallWebApp(profile(), std::move(gmail_info));
 
-  std::set<std::string> app_filter({app_constants::kChromeAppId,
-                                    web_app::kGmailAppId,
-                                    web_app::kMessagesAppId});
-  EXPECT_EQ(std::vector<std::string>(
-                {app_constants::kChromeAppId, web_app::kGmailAppId}),
-            GetOrderedShelfItems(app_filter));
+  std::set<std::string> app_filter(
+      {app_constants::kChromeAppId, ash::kGmailAppId, ash::kMessagesAppId});
+  EXPECT_EQ(
+      std::vector<std::string>({app_constants::kChromeAppId, ash::kGmailAppId}),
+      GetOrderedShelfItems(app_filter));
 }
 
 IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest,
@@ -441,19 +442,17 @@ IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest,
       std::make_unique<syncer::FakeSyncChangeProcessor>());
 
   // Simluate installation of an app pinned to shelf by default after initial
-  // sync data is merged: app with web_app::kMessagesAppId ID.
-  auto messages_info = std::make_unique<WebAppInstallInfo>();
-  messages_info->start_url = GURL("https://messages.google.com/web/");
+  // sync data is merged: app with ash::kMessagesAppId ID.
+  auto messages_info = web_app::WebAppInstallInfo::CreateWithStartUrlForTesting(
+      GURL("https://messages.google.com/web/"));
   messages_info->display_mode = blink::mojom::DisplayMode::kMinimalUi;
   web_app::test::InstallWebApp(profile(), std::move(messages_info));
 
-  std::set<std::string> app_filter({app_constants::kChromeAppId,
-                                    web_app::kGmailAppId,
-                                    web_app::kMessagesAppId});
-  EXPECT_EQ(
-      std::vector<std::string>({app_constants::kChromeAppId,
-                                web_app::kGmailAppId, web_app::kMessagesAppId}),
-      GetOrderedShelfItems(app_filter));
+  std::set<std::string> app_filter(
+      {app_constants::kChromeAppId, ash::kGmailAppId, ash::kMessagesAppId});
+  EXPECT_EQ(std::vector<std::string>({app_constants::kChromeAppId,
+                                      ash::kGmailAppId, ash::kMessagesAppId}),
+            GetOrderedShelfItems(app_filter));
 
   // Verify that order of apps in the app list respects default app ordinals
   // (for test apps that have default app list ordinal set).
@@ -462,14 +461,14 @@ IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest,
       app_list_test_api_.GetTopLevelViewIdList();
   std::vector<std::string> filtered_top_level_id_list;
   for (const auto& item : top_level_id_list) {
-    if (base::Contains(app_filter, item))
+    if (app_filter.contains(item)) {
       filtered_top_level_id_list.push_back(item);
+    }
   }
 
-  EXPECT_EQ(
-      std::vector<std::string>({app_constants::kChromeAppId,
-                                web_app::kGmailAppId, web_app::kMessagesAppId}),
-      filtered_top_level_id_list);
+  EXPECT_EQ(std::vector<std::string>({app_constants::kChromeAppId,
+                                      ash::kGmailAppId, ash::kMessagesAppId}),
+            filtered_top_level_id_list);
 }
 
 IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest,
@@ -579,6 +578,11 @@ IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest, IsNewInstall) {
       LoadExtension(test_data_dir_.AppendASCII("app2"))->id();
   ASSERT_FALSE(app2_id.empty());
 
+  apps::chrome_app_deprecation::ScopedAddAppToAllowlistForTesting allowlist1(
+      app1_id);
+  apps::chrome_app_deprecation::ScopedAddAppToAllowlistForTesting allowlist2(
+      app2_id);
+
   // Both apps are new installs.
   ChromeAppListItem* item1 = model_updater->FindItem(app1_id);
   ASSERT_TRUE(item1);
@@ -611,6 +615,11 @@ IN_PROC_BROWSER_TEST_F(ChromeAppListModelUpdaterTest, IsNewInstallInFolder) {
   const std::string app2_id =
       LoadExtension(test_data_dir_.AppendASCII("app2"))->id();
   ASSERT_FALSE(app2_id.empty());
+
+  apps::chrome_app_deprecation::ScopedAddAppToAllowlistForTesting allowlist1(
+      app1_id);
+  apps::chrome_app_deprecation::ScopedAddAppToAllowlistForTesting allowlist2(
+      app2_id);
 
   ShowAppList();
 

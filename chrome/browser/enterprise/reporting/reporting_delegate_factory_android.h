@@ -7,6 +7,7 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "components/enterprise/browser/reporting/reporting_delegate_factory.h"
 
 class Profile;
@@ -26,18 +27,25 @@ class ReportingDelegateFactoryAndroid : public ReportingDelegateFactory {
 
   // ReportingDelegateFactory implementation.
   std::unique_ptr<BrowserReportGenerator::Delegate>
-  GetBrowserReportGeneratorDelegate() override;
+  GetBrowserReportGeneratorDelegate() const override;
   std::unique_ptr<ProfileReportGenerator::Delegate>
-  GetProfileReportGeneratorDelegate() override;
+  GetProfileReportGeneratorDelegate() const override;
   std::unique_ptr<ReportGenerator::Delegate> GetReportGeneratorDelegate()
-      override;
+      const override;
   std::unique_ptr<ReportScheduler::Delegate> GetReportSchedulerDelegate()
-      override;
+      const override;
   std::unique_ptr<RealTimeReportGenerator::Delegate>
-  GetRealTimeReportGeneratorDelegate() override;
+  GetRealTimeReportGeneratorDelegate() const override;
+  std::unique_ptr<RealTimeReportController::Delegate>
+  GetRealTimeReportControllerDelegate() const override;
 
   std::unique_ptr<ReportScheduler::Delegate> GetReportSchedulerDelegate(
-      Profile* profile);
+      Profile* profile) const;
+
+  void SetProfileForRealTimeController(Profile* profile);
+
+ private:
+  raw_ptr<Profile> profile_ = nullptr;
 };
 
 }  // namespace enterprise_reporting

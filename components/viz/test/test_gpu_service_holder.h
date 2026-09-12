@@ -31,6 +31,7 @@ class ShelfContextMenuTest;
 
 namespace gpu {
 class CommandBufferTaskExecutor;
+class GraphiteSharedContext;
 class SingleTaskSequence;
 #if BUILDFLAG(ENABLE_VULKAN)
 class VulkanImplementation;
@@ -54,7 +55,7 @@ class TestGpuServiceHolder : public gpu::GpuInProcessThreadServiceDelegate {
   // Don't instantiate FeatureList::ScopedDisallowOverrides when the GPU thread
   // is started. This shouldn't be required but there are existing tests that
   // initialize ScopedFeatureList after TestGpuServiceHolder.
-  // TODO(crbug.com/1241161): Fix racy tests and remove this.
+  // TODO(crbug.com/40785850): Fix racy tests and remove this.
   class ScopedAllowRacyFeatureListOverrides {
    public:
     ~ScopedAllowRacyFeatureListOverrides();
@@ -93,6 +94,7 @@ class TestGpuServiceHolder : public gpu::GpuInProcessThreadServiceDelegate {
   // GetInstance().
   static void DoNotResetOnTestExit();
 
+  TestGpuServiceHolder();
   explicit TestGpuServiceHolder(const gpu::GpuPreferences& preferences);
 
   TestGpuServiceHolder(const TestGpuServiceHolder&) = delete;
@@ -130,12 +132,18 @@ class TestGpuServiceHolder : public gpu::GpuInProcessThreadServiceDelegate {
   scoped_refptr<gpu::SharedContextState> GetSharedContextState() override;
   scoped_refptr<gl::GLShareGroup> GetShareGroup() override;
 
+  gpu::GraphiteSharedContext* GetGraphiteSharedContext() const;
+
+#if BUILDFLAG(IS_WIN)
+  void InitializeDirectComposition();
+#endif
+
  private:
   void InitializeOnGpuThread(const gpu::GpuPreferences& preferences,
                              base::WaitableEvent* completion);
   void DeleteOnGpuThread();
 
-// TODO(crbug.com/1267788): Fuchsia crashes. See details in the crbug.
+// TODO(crbug.com/40803043): Fuchsia crashes. See details in the crbug.
 #if BUILDFLAG(IS_OZONE) && !BUILDFLAG(IS_FUCHSIA)
   void BindInterface(const std::string& interface_name,
                      mojo::ScopedMessagePipeHandle interface_pipe);
@@ -143,7 +151,7 @@ class TestGpuServiceHolder : public gpu::GpuInProcessThreadServiceDelegate {
                                 mojo::ScopedMessagePipeHandle interface_pipe);
 #endif
 
-  absl::optional<base::FeatureList::ScopedDisallowOverrides>
+  std::optional<base::FeatureList::ScopedDisallowOverrides>
       disallow_feature_overrides_;
 
   base::Thread gpu_main_thread_;
@@ -157,6 +165,10 @@ class TestGpuServiceHolder : public gpu::GpuInProcessThreadServiceDelegate {
   std::unique_ptr<gpu::SingleTaskSequence> compositor_gpu_task_sequence_;
 #if BUILDFLAG(ENABLE_VULKAN)
   std::unique_ptr<gpu::VulkanImplementation> vulkan_implementation_;
+#endif
+
+#if BUILDFLAG(IS_WIN)
+  bool direct_composition_initialized_ = false;
 #endif
 
 #if BUILDFLAG(IS_OZONE) && !BUILDFLAG(IS_FUCHSIA)

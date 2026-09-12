@@ -1,67 +1,47 @@
 # Protocol Buffers - Google's data interchange format
 # Copyright 2008 Google Inc.  All rights reserved.
-# https://developers.google.com/protocol-buffers/
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are
-# met:
-#
-#     * Redistributions of source code must retain the above copyright
-# notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above
-# copyright notice, this list of conditions and the following disclaimer
-# in the documentation and/or other materials provided with the
-# distribution.
-#     * Neither the name of Google Inc. nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file or at
+# https://developers.google.com/open-source/licenses/bsd
+"""Contains _ExtensionDict class to represent extensions."""
 
-"""Contains _ExtensionDict class to represent extensions.
-"""
-
-from google.protobuf.internal import type_checkers
 from google.protobuf.descriptor import FieldDescriptor
+from google.protobuf.internal import type_checkers
 
 
 def _VerifyExtensionHandle(message, extension_handle):
   """Verify that the given extension handle is valid."""
 
   if not isinstance(extension_handle, FieldDescriptor):
-    raise KeyError('HasExtension() expects an extension handle, got: %s' %
-                   extension_handle)
+    raise KeyError(
+        'HasExtension() expects an extension handle, got: %s' % extension_handle
+    )
 
   if not extension_handle.is_extension:
     raise KeyError('"%s" is not an extension.' % extension_handle.full_name)
 
   if not extension_handle.containing_type:
-    raise KeyError('"%s" is missing a containing_type.'
-                   % extension_handle.full_name)
+    raise KeyError(
+        '"%s" is missing a containing_type.' % extension_handle.full_name
+    )
 
   if extension_handle.containing_type is not message.DESCRIPTOR:
-    raise KeyError('Extension "%s" extends message type "%s", but this '
-                   'message is of type "%s".' %
-                   (extension_handle.full_name,
-                    extension_handle.containing_type.full_name,
-                    message.DESCRIPTOR.full_name))
+    raise KeyError(
+        'Extension "%s" extends message type "%s", but this '
+        'message is of type "%s".'
+        % (
+            extension_handle.full_name,
+            extension_handle.containing_type.full_name,
+            message.DESCRIPTOR.full_name,
+        )
+    )
 
 
-# TODO(robinson): Unify error handling of "unknown extension" crap.
-# TODO(robinson): Support iteritems()-style iteration over all
+# TODO: Unify error handling of "unknown extension" crap.
+# TODO: Support iteritems()-style iteration over all
 # extensions with the "has" bits turned on?
 class _ExtensionDict(object):
-
   """Dict-like container for Extension fields on proto instances.
 
   Note that in all cases we expect extension handles to be
@@ -69,9 +49,9 @@ class _ExtensionDict(object):
   """
 
   def __init__(self, extended_message):
-    """
-    Args:
-      extended_message: Message instance for which we are the Extensions dict.
+    """Args:
+
+    extended_message: Message instance for which we are the Extensions dict.
     """
     self._extended_message = extended_message
 
@@ -84,17 +64,19 @@ class _ExtensionDict(object):
     if result is not None:
       return result
 
-    if extension_handle.label == FieldDescriptor.LABEL_REPEATED:
+    if extension_handle.is_repeated:
       result = extension_handle._default_constructor(self._extended_message)
     elif extension_handle.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE:
       message_type = extension_handle.message_type
       if not hasattr(message_type, '_concrete_class'):
-        # pylint: disable=protected-access
-        self._extended_message._FACTORY.GetPrototype(message_type)
-      assert getattr(extension_handle.message_type, '_concrete_class', None), (
-          'Uninitialized concrete class found for field %r (message type %r)'
-          % (extension_handle.full_name,
-             extension_handle.message_type.full_name))
+        # pylint: disable=g-import-not-at-top
+        from google.protobuf import message_factory
+
+        message_factory.GetMessageClass(message_type)
+      if not hasattr(extension_handle.message_type, '_concrete_class'):
+        from google.protobuf import message_factory
+
+        message_factory.GetMessageClass(extension_handle.message_type)
       result = extension_handle.message_type._concrete_class()
       try:
         result._SetListener(self._extended_message._listener_for_children)
@@ -111,8 +93,9 @@ class _ExtensionDict(object):
     # WARNING:  We are relying on setdefault() being atomic.  This is true
     #   in CPython but we haven't investigated others.  This warning appears
     #   in several other locations in this file.
-    result = self._extended_message._fields.setdefault(
-        extension_handle, result)
+    if self._extended_message._frozen:
+      result._SetFrozen()
+    result = self._extended_message._fields.setdefault(extension_handle, result)
 
     return result
 
@@ -147,23 +130,31 @@ class _ExtensionDict(object):
   # ancestors of the extended message.
   def __setitem__(self, extension_handle, value):
     """If extension_handle specifies a non-repeated, scalar extension
+
     field, sets the value of that field.
     """
 
     _VerifyExtensionHandle(self._extended_message, extension_handle)
 
-    if (extension_handle.label == FieldDescriptor.LABEL_REPEATED or
-        extension_handle.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE):
+    self._extended_message._AssureWritable()
+
+    if (
+        extension_handle.is_repeated
+        or extension_handle.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE
+    ):
       raise TypeError(
           'Cannot assign to extension "%s" because it is a repeated or '
-          'composite type.' % extension_handle.full_name)
+          'composite type.'
+          % extension_handle.full_name
+      )
 
     # It's slightly wasteful to lookup the type checker each time,
     # but we expect this to be a vanishingly uncommon case anyway.
     type_checker = type_checkers.GetTypeChecker(extension_handle)
     # pylint: disable=protected-access
-    self._extended_message._fields[extension_handle] = (
-        type_checker.CheckValue(value))
+    self._extended_message._fields[extension_handle] = type_checker.CheckValue(
+        value
+    )
     self._extended_message._Modified()
 
   def __delitem__(self, extension_handle):
@@ -178,7 +169,9 @@ class _ExtensionDict(object):
     Returns:
       Extension field descriptor.
     """
-    return self._extended_message._extensions_by_name.get(name, None)
+    descriptor = self._extended_message.DESCRIPTOR
+    extensions = descriptor.file.pool._extensions_by_name[descriptor]
+    return extensions.get(name, None)
 
   def _FindExtensionByNumber(self, number):
     """Tries to find a known extension with the field number.
@@ -189,12 +182,15 @@ class _ExtensionDict(object):
     Returns:
       Extension field descriptor.
     """
-    return self._extended_message._extensions_by_number.get(number, None)
+    descriptor = self._extended_message.DESCRIPTOR
+    extensions = descriptor.file.pool._extensions_by_number[descriptor]
+    return extensions.get(number, None)
 
   def __iter__(self):
     # Return a generator over the populated extension fields
-    return (f[0] for f in self._extended_message.ListFields()
-            if f[0].is_extension)
+    return (
+        f[0] for f in self._extended_message.ListFields() if f[0].is_extension
+    )
 
   def __contains__(self, extension_handle):
     _VerifyExtensionHandle(self._extended_message, extension_handle)
@@ -202,7 +198,7 @@ class _ExtensionDict(object):
     if extension_handle not in self._extended_message._fields:
       return False
 
-    if extension_handle.label == FieldDescriptor.LABEL_REPEATED:
+    if extension_handle.is_repeated:
       return bool(self._extended_message._fields.get(extension_handle))
 
     if extension_handle.cpp_type == FieldDescriptor.CPPTYPE_MESSAGE:

@@ -5,12 +5,15 @@
 #ifndef CHROME_BROWSER_ASH_POLICY_SERVER_BACKED_STATE_SERVER_BACKED_DEVICE_STATE_H_
 #define CHROME_BROWSER_ASH_POLICY_SERVER_BACKED_STATE_SERVER_BACKED_DEVICE_STATE_H_
 
+class PrefService;
+
 namespace policy {
 
-// Dictionary key constants for prefs::kServerBackedDeviceState.
+// Dictionary key constants for ash::prefs::kServerBackedDeviceState.
 extern const char kDeviceStateManagementDomain[];
 extern const char kDeviceStateMode[];
 extern const char kDeviceStateDisabledMessage[];
+extern const char kDeviceStateLocationTrackingEnabled[];
 extern const char kDeviceStatePackagedLicense[];
 extern const char kDeviceStateLicenseType[];
 extern const char kDeviceStateAssignedUpgradeType[];
@@ -19,6 +22,7 @@ extern const char kDeviceStateAssignedUpgradeType[];
 // kDeviceStateMode dictionary entry.
 extern const char kDeviceStateInitialModeEnrollmentEnforced[];
 extern const char kDeviceStateInitialModeEnrollmentZeroTouch[];
+extern const char kDeviceStateInitialModeTokenEnrollment[];
 // String constants used to persist the restorative action in the
 // kDeviceStateMode dictionary entry.
 extern const char kDeviceStateRestoreModeReEnrollmentRequested[];
@@ -56,11 +60,14 @@ enum DeviceStateMode {
   INITIAL_MODE_ENROLLMENT_ENFORCED = 5,
   // Enterprise initial enrollment is enforced and cannot be skipped.
   INITIAL_MODE_ENROLLMENT_ZERO_TOUCH = 6,
+  // Enterprise initial enrollment is enforced by presence of enrollment
+  // token, and cannot be skipped.
+  INITIAL_MODE_ENROLLMENT_TOKEN_ENROLLMENT = 7
 };
 
 // Parses the contents of the kDeviceStateMode dictionary entry and
 // returns it as a DeviceStateMode.
-DeviceStateMode GetDeviceStateMode();
+DeviceStateMode GetDeviceStateMode(const PrefService& local_state);
 
 }  // namespace policy
 

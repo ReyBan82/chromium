@@ -15,6 +15,7 @@ blink_modules_sources("hid") {
     "hid_input_report_event.cc",
     "hid_input_report_event.h",
   ]
+  deps = [ "//services/device/public/cpp:device_features" ]
 }
 
 source_set("unit_tests") {
@@ -28,9 +29,12 @@ source_set("unit_tests") {
   ]
 
   deps = [
+    "//base/test:test_support",
     "//testing/gtest",
+    "//third_party/blink/renderer/controller:blink_bindings_test_sources",
     "//third_party/blink/renderer/modules",
     "//third_party/blink/renderer/platform",
+    "//third_party/blink/renderer/platform:test_support",
     "//third_party/blink/renderer/platform/wtf",
   ]
 }

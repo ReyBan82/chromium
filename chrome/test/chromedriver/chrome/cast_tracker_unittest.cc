@@ -15,19 +15,18 @@ using testing::Return;
 
 namespace {
 
-base::Value CreateSink(const std::string& name, const std::string& id) {
-  base::Value sink(base::Value::Type::DICT);
-  sink.SetKey("name", base::Value(name));
-  sink.SetKey("id", base::Value(id));
-  sink.SetKey("session", base::Value("Example session"));
-  return sink;
+base::DictValue CreateSink(const std::string& name, const std::string& id) {
+  return base::DictValue()
+      .Set("name", base::Value(name))
+      .Set("id", base::Value(id))
+      .Set("session", base::Value("Example session"));
 }
 
 class MockDevToolsClient : public StubDevToolsClient {
  public:
   MOCK_METHOD2(SendCommand,
                Status(const std::string& method,
-                      const base::Value::Dict& params));
+                      const base::DictValue& params));
   MOCK_METHOD1(AddListener, void(DevToolsEventListener* listener));
 };
 
@@ -49,14 +48,14 @@ class CastTrackerTest : public testing::Test {
 };
 
 TEST_F(CastTrackerTest, OnSinksUpdated) {
-  const base::Value empty_sinks = base::Value(base::Value::List());
-  base::Value::Dict params;
+  const base::Value empty_sinks = base::Value(base::ListValue());
+  base::DictValue params;
   EXPECT_EQ(0u, cast_tracker_->sinks().GetList().size());
 
-  base::Value::List sinks;
-  sinks.Append(CreateSink("sink1", "1"));
-  sinks.Append(CreateSink("sink2", "2"));
-  params.Set("sinks", base::Value(std::move(sinks)));
+  base::ListValue sinks;
+  params.Set("sinks", base::ListValue()
+                          .Append(CreateSink("sink1", "1"))
+                          .Append(CreateSink("sink2", "2")));
   cast_tracker_->OnEvent(&devtools_client_, "Cast.sinksUpdated", params);
   EXPECT_EQ(2u, cast_tracker_->sinks().GetList().size());
 
@@ -67,7 +66,7 @@ TEST_F(CastTrackerTest, OnSinksUpdated) {
 
 TEST_F(CastTrackerTest, OnIssueUpdated) {
   const std::string issue_message = "There was an issue";
-  base::Value::Dict params;
+  base::DictValue params;
   EXPECT_EQ("", cast_tracker_->issue().GetString());
 
   params.Set("issueMessage", base::Value(issue_message));

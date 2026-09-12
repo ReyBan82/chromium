@@ -6,6 +6,7 @@
 
 #include <string>
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
@@ -48,6 +49,10 @@ void DemoSetupScreenHandler::OnSetupSucceeded() {
   CallExternalAPI("onSetupSucceeded");
 }
 
+base::WeakPtr<DemoSetupScreenView> DemoSetupScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
+}
+
 void DemoSetupScreenHandler::DeclareLocalizedValues(
     ::login::LocalizedValuesBuilder* builder) {
   builder->Add("demoSetupProgressScreenTitle",
@@ -66,7 +71,7 @@ void DemoSetupScreenHandler::DeclareLocalizedValues(
 }
 
 void DemoSetupScreenHandler::GetAdditionalParameters(
-    base::Value::Dict* parameters) {
+    base::DictValue* parameters) {
   parameters->Set("demoSetupSteps", DemoSetupController::GetDemoSetupSteps());
 }
 

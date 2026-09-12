@@ -29,6 +29,8 @@
 
 #include <unicode/utf16.h>
 
+#include <type_traits>
+
 #include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "third_party/blink/renderer/platform/wtf/text/integer_to_string_conversion.h"
@@ -36,7 +38,26 @@
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_export.h"
 
-namespace WTF {
+namespace blink {
+
+// A concept to check if a type is a character type supported by
+// StringBuilder::Append().
+template <typename CharType>
+concept IsAppendableCharType =
+    IsStringCharType<CharType> || std::is_same_v<char, CharType> ||
+    std::is_same_v<UChar32, CharType>;
+
+// A concept to check if a type is a string type supported by
+// StringBuilder::Append().
+template <typename T>
+concept IsAppendableStringType = std::is_convertible_v<T, StringView>;
+
+// A concept to check if a type is supported by StringBuilder::Append() or
+// StringBuilder::AppendNumber().
+template <typename T>
+concept IsAppendableType =
+    IsAppendableCharType<T> || IsAppendableStringType<T> ||
+    std::is_integral_v<T> || std::is_floating_point_v<T>;
 
 class WTF_EXPORT StringBuilder {
   USING_FAST_MALLOC(StringBuilder);
@@ -47,12 +68,10 @@ class WTF_EXPORT StringBuilder {
   StringBuilder& operator=(const StringBuilder&) = delete;
   ~StringBuilder() { ClearBuffer(); }
 
-  void Append(const UChar*, unsigned length);
-  void Append(const LChar*, unsigned length);
+  bool DoesAppendCauseOverflow(unsigned length) const;
 
-  ALWAYS_INLINE void Append(const char* characters, unsigned length) {
-    Append(reinterpret_cast<const LChar*>(characters), length);
-  }
+  void Append(base::span<const UChar> chars);
+  void Append(base::span<const LChar> chars);
 
   void Append(const StringBuilder& other) {
     if (!other.length_)
@@ -60,15 +79,15 @@ class WTF_EXPORT StringBuilder {
 
     if (!length_ && !HasBuffer() && !other.string_.IsNull()) {
       string_ = other.string_;
-      length_ = other.string_.length();
-      is_8bit_ = other.string_.Is8Bit();
+      length_ = other.length_;
+      is_8bit_ = other.is_8bit_;
       return;
     }
 
     if (other.Is8Bit())
-      Append(other.Characters8(), other.length_);
+      Append(other.Span8());
     else
-      Append(other.Characters16(), other.length_);
+      Append(other.Span16());
   }
 
   // NOTE: The semantics of this are different than StringView(..., offset,
@@ -85,35 +104,52 @@ class WTF_EXPORT StringBuilder {
     Append(StringView(string, offset, length));
   }
 
-  void Append(const StringView& string) {
-    if (string.empty())
+  void Append(const StringView& view) {
+    if (view.empty()) {
       return;
+    }
 
     // If we're appending to an empty builder, and there is not a buffer
-    // (reserveCapacity has not been called), then share the impl if
-    // possible.
+    // (reserveCapacity has not been called), then retain a view into the
+    // source impl rather than copying its characters.
     //
     // This is important to avoid string copies inside dom operations like
     // Node::textContent when there's only a single Text node child, or
     // inside the parser in the common case when flushing buffered text to
-    // a Text node.
-    StringImpl* impl = string.SharedImpl();
-    if (!length_ && !HasBuffer() && impl) {
-      string_ = impl;
-      length_ = impl->length();
-      is_8bit_ = impl->Is8Bit();
-      return;
+    // a Text node. It also seeds the view that the span append paths below
+    // can later extend (see TryExtendSharedView) so that a buffer collected
+    // verbatim from a single source (e.g. inline `text_content`) is never
+    // materialized as a copy.
+    //
+    // We only retain when the view starts at the beginning of its impl (a
+    // prefix). A view starting partway in could never be returned as the
+    // shared impl anyway (ToString() would substring-copy it), and extension
+    // only grows the view forward, so restricting to prefixes loses no
+    // sharing while letting us track just a length (no offset).
+    if (!length_ && !HasBuffer()) {
+      if (StringImpl* impl = view.SharedSubImpl()) {
+        string_ = String(impl);
+        length_ = view.length();
+        is_8bit_ = impl->Is8Bit();
+        return;
+      }
     }
 
-    if (string.Is8Bit())
-      Append(string.Characters8(), string.length());
-    else
-      Append(string.Characters16(), string.length());
+    // Otherwise append the characters. When we already hold a shared view, the
+    // span append paths try to extend it in place instead of copying.
+    if (view.Is8Bit()) {
+      Append(view.Span8());
+    } else {
+      Append(view.Span16());
+    }
   }
 
   void Append(UChar c) {
     if (is_8bit_ && c <= 0xFF) {
       Append(static_cast<LChar>(c));
+      return;
+    }
+    if (!is_8bit_ && TryExtendSharedViewWithChar(string_.Span16(), c)) {
       return;
     }
     EnsureBuffer16(1);
@@ -124,6 +160,9 @@ class WTF_EXPORT StringBuilder {
   void Append(LChar c) {
     if (!is_8bit_) {
       Append(static_cast<UChar>(c));
+      return;
+    }
+    if (TryExtendSharedViewWithChar(string_.Span8(), c)) {
       return;
     }
     EnsureBuffer8(1);
@@ -145,7 +184,7 @@ class WTF_EXPORT StringBuilder {
   template <typename IntegerType>
   void AppendNumber(IntegerType number) {
     IntegerToStringConverter<IntegerType> converter(number);
-    Append(converter.Characters8(), converter.length());
+    Append(converter.Span());
   }
 
   void AppendNumber(bool);
@@ -154,9 +193,62 @@ class WTF_EXPORT StringBuilder {
 
   void AppendNumber(double, unsigned precision = 6);
 
-  // Like WTF::String::Format, supports Latin-1 only.
-  PRINTF_FORMAT(2, 3)
-  void AppendFormat(const char* format, ...);
+  // Append each elements in a collection `range`, separated by `delimiter`.
+  // This adds nothing if `range` is empty.
+  //
+  // This supports collections of which element type is supported by
+  // StringBuilder::Append() or StringBuilder::AppendNumber().
+  template <typename R>
+    requires(std::ranges::range<R> &&
+             IsAppendableType<std::ranges::range_value_t<R>>)
+  StringBuilder& AppendRange(const R& range, StringView delimiter) {
+    StringView current_delimiter;
+    for (const auto& item : range) {
+      Append(current_delimiter);
+      current_delimiter = delimiter;
+      if constexpr (IsAppendableCharType<typename R::value_type>) {
+        Append(item);
+      } else if constexpr (std::is_integral_v<typename R::value_type> ||
+                           std::is_floating_point_v<typename R::value_type>) {
+        AppendNumber(item);
+      } else {
+        Append(item);
+      }
+    }
+    return *this;
+  }
+
+  // Append each elements in a collection `range`, separated by `delimiter`.
+  // This adds nothing if `range` is empty.  `stringifier` is a callable object,
+  // and it should append an element to the StringBuilder.
+  //
+  // Example:
+  //   HeapVector<Member<Foo>> list;
+  //   StringBuilder builder;
+  //   builder.AppendRange(
+  //       list, ", ", [](const auto& value, StringBuilder& builder) {
+  //         builder.Append(value->ToString());
+  //       });
+  template <typename R, typename F>
+    requires(std::ranges::range<R> &&
+             std::invocable<F,
+                            const std::ranges::range_value_t<R>&,
+                            StringBuilder&> &&
+             std::is_void_v<
+                 std::invoke_result_t<F,
+                                      const std::ranges::range_value_t<R>&,
+                                      StringBuilder&>>)
+  StringBuilder& AppendRange(const R& range,
+                             StringView delimiter,
+                             F stringifier) {
+    StringView current_delimiter;
+    for (const auto& item : range) {
+      Append(current_delimiter);
+      current_delimiter = delimiter;
+      stringifier(item, *this);
+    }
+    return *this;
+  }
 
   void erase(unsigned);
 
@@ -169,11 +261,17 @@ class WTF_EXPORT StringBuilder {
   String Substring(unsigned start, unsigned length) const;
   StringView SubstringView(unsigned start, unsigned length) const;
 
+  // Returns a UTF-8 encoded std::string. This is more efficient than
+  // ReleaseString().Utf8() or ToString().Utf8() because it avoids creating
+  // a temporary String instance.
+  [[nodiscard]] std::string Utf8(
+      Utf8ConversionMode mode = Utf8ConversionMode::kLenient) const;
+
   operator StringView() const {
     if (Is8Bit()) {
-      return StringView(Characters8(), length());
+      return StringView(Span8());
     } else {
-      return StringView(Characters16(), length());
+      return StringView(Span16());
     }
   }
 
@@ -199,30 +297,33 @@ class WTF_EXPORT StringBuilder {
   void Resize(unsigned new_size);
 
   UChar operator[](unsigned i) const {
-    SECURITY_DCHECK(i < length_);
     if (is_8bit_)
-      return Characters8()[i];
-    return Characters16()[i];
+      return Span8()[i];
+    return Span16()[i];
   }
 
-  const LChar* Characters8() const {
+  base::span<const LChar> Span8() const {
     DCHECK(is_8bit_);
-    if (!length())
-      return nullptr;
-    if (!string_.IsNull())
-      return string_.Characters8();
+    if (!length()) {
+      return {};
+    }
+    if (!string_.IsNull()) {
+      return string_.Span8().first(length_);
+    }
     DCHECK(has_buffer_);
-    return buffer8_.data();
+    return base::span(buffer8_).first(length());
   }
 
-  const UChar* Characters16() const {
+  base::span<const UChar> Span16() const {
     DCHECK(!is_8bit_);
-    if (!length())
-      return nullptr;
-    if (!string_.IsNull())
-      return string_.Characters16();
+    if (!length()) {
+      return {};
+    }
+    if (!string_.IsNull()) {
+      return string_.Span16().first(length_);
+    }
     DCHECK(has_buffer_);
-    return buffer16_.data();
+    return base::span(buffer16_).first(length());
   }
 
   bool Is8Bit() const { return is_8bit_; }
@@ -232,7 +333,7 @@ class WTF_EXPORT StringBuilder {
   void Swap(StringBuilder&);
 
  private:
-  static const unsigned kInlineBufferSize = 16;
+  static const unsigned kInlineBufferSize = 256;
   static unsigned InitialBufferSize() { return kInlineBufferSize; }
 
   typedef Vector<LChar, kInlineBufferSize / sizeof(LChar)> Buffer8;
@@ -254,12 +355,42 @@ class WTF_EXPORT StringBuilder {
   void ClearBuffer();
   bool HasBuffer() const { return has_buffer_; }
 
+  // True when `string_` is the source of a sub-range view (rather than holding
+  // exactly the builder's content), i.e. the content is the [0, length_) prefix
+  // of `string_` and `length_` is shorter than the whole impl.
+  bool HasSharedSubview() const {
+    // Retained views always start at offset 0 (see `Append(StringView)`), so a
+    // view is a strict sub-range exactly when it is a truncated prefix.
+    return !string_.IsNull() && length_ != string_.length();
+  }
+
+  // Collapses any sub-range view so that `string_` holds exactly the builder's
+  // content and can be returned directly. A no-op (and copy-free) when the view
+  // already covers the whole impl.
+  void NormalizeSharedString() {
+    if (HasSharedSubview()) {
+      string_ = string_.substr(0, length_);
+    }
+  }
+
+  // When no buffer exists and we hold a shared view into `string_`, attempts to
+  // extend that view to also cover `chars` (or the single character `c`), which
+  // succeeds only when the characters immediately following the view in
+  // `string_` are byte-identical to what is being appended. Returns true if
+  // absorbed (no copy made).
+  template <typename CharType>
+  bool TryExtendSharedView(base::span<const CharType> buffer,
+                           base::span<const CharType> chars);
+  template <typename CharType>
+  bool TryExtendSharedViewWithChar(base::span<const CharType> buffer,
+                                   CharType c);
+
   template <typename StringType>
   void BuildString() {
     if (is_8bit_)
-      string_ = StringType(Characters8(), length_);
+      string_ = StringType(Span8());
     else
-      string_ = StringType(Characters16(), length_);
+      string_ = StringType(Span16());
     ClearBuffer();
   }
 
@@ -275,39 +406,18 @@ class WTF_EXPORT StringBuilder {
 };
 
 template <typename CharType>
-bool Equal(const StringBuilder& s, const CharType* buffer, unsigned length) {
-  if (s.length() != length)
+bool StringBuilder::TryExtendSharedViewWithChar(
+    base::span<const CharType> buffer,
+    CharType c) {
+  if (HasBuffer() || string_.IsNull()) {
     return false;
-
-  if (s.Is8Bit())
-    return Equal(s.Characters8(), buffer, length);
-
-  return Equal(s.Characters16(), buffer, length);
-}
-
-template <typename CharType>
-bool DeprecatedEqualIgnoringCase(const StringBuilder& s,
-                                 const CharType* buffer,
-                                 unsigned length) {
-  if (s.length() != length)
+  }
+  const size_t end = length_;
+  if (end >= buffer.size() || buffer[end] != c) {
     return false;
-
-  if (s.Is8Bit())
-    return DeprecatedEqualIgnoringCase(s.Characters8(), buffer, length);
-
-  return DeprecatedEqualIgnoringCase(s.Characters16(), buffer, length);
-}
-
-// Unicode aware case insensitive string matching. Non-ASCII characters might
-// match to ASCII characters. This function is rarely used to implement web
-// platform features.
-// This function is deprecated. We should introduce EqualIgnoringASCIICase() or
-// EqualIgnoringUnicodeCase(). See crbug.com/627682
-inline bool DeprecatedEqualIgnoringCase(const StringBuilder& s,
-                                        const char* string) {
-  return DeprecatedEqualIgnoringCase(
-      s, reinterpret_cast<const LChar*>(string),
-      base::checked_cast<wtf_size_t>(strlen(string)));
+  }
+  ++length_;
+  return true;
 }
 
 template <typename StringType>
@@ -320,36 +430,25 @@ bool Equal(const StringBuilder& a, const StringType& b) {
 
   if (a.Is8Bit()) {
     if (b.Is8Bit())
-      return Equal(a.Characters8(), b.Characters8(), a.length());
-    return Equal(a.Characters8(), b.Characters16(), a.length());
+      return a.Span8() == b.Span8();
+    return a.Span8() == b.Span16();
   }
 
   if (b.Is8Bit())
-    return Equal(a.Characters16(), b.Characters8(), a.length());
-  return Equal(a.Characters16(), b.Characters16(), a.length());
+    return a.Span16() == b.Span8();
+  return a.Span16() == b.Span16();
 }
 
 inline bool operator==(const StringBuilder& a, const StringBuilder& b) {
   return Equal(a, b);
 }
-inline bool operator!=(const StringBuilder& a, const StringBuilder& b) {
-  return !Equal(a, b);
-}
 inline bool operator==(const StringBuilder& a, const String& b) {
   return Equal(a, b);
-}
-inline bool operator!=(const StringBuilder& a, const String& b) {
-  return !Equal(a, b);
 }
 inline bool operator==(const String& a, const StringBuilder& b) {
   return Equal(b, a);
 }
-inline bool operator!=(const String& a, const StringBuilder& b) {
-  return !Equal(b, a);
-}
 
-}  // namespace WTF
-
-using WTF::StringBuilder;
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_STRING_BUILDER_H_

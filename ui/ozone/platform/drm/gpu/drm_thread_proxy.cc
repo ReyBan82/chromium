@@ -10,6 +10,7 @@
 #include "base/functional/bind.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_restrictions.h"
+#include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "ui/gfx/linux/gbm_wrapper.h"
 #include "ui/ozone/platform/drm/gpu/drm_device.h"
@@ -22,16 +23,6 @@
 namespace ui {
 
 namespace {
-
-void OnBufferCreatedOnDrmThread(
-    scoped_refptr<base::SingleThreadTaskRunner> task_runner,
-    DrmThreadProxy::CreateBufferAsyncCallback callback,
-    std::unique_ptr<GbmBuffer> buffer,
-    scoped_refptr<DrmFramebuffer> framebuffer) {
-  task_runner->PostTask(FROM_HERE,
-                        base::BindOnce(std::move(callback), std::move(buffer),
-                                       std::move(framebuffer)));
-}
 
 class GbmDeviceGenerator : public DrmDeviceGenerator {
  public:
@@ -79,8 +70,8 @@ std::unique_ptr<DrmWindowProxy> DrmThreadProxy::CreateDrmWindowProxy(
 void DrmThreadProxy::CreateBuffer(gfx::AcceleratedWidget widget,
                                   const gfx::Size& size,
                                   const gfx::Size& framebuffer_size,
-                                  gfx::BufferFormat format,
-                                  gfx::BufferUsage usage,
+                                  viz::SharedImageFormat format,
+                                  NativePixmapUsageSet usage,
                                   uint32_t flags,
                                   std::unique_ptr<GbmBuffer>* buffer,
                                   scoped_refptr<DrmFramebuffer>* framebuffer) {
@@ -96,30 +87,10 @@ void DrmThreadProxy::CreateBuffer(gfx::AcceleratedWidget widget,
                               base::Unretained(&drm_thread_), std::move(task)));
 }
 
-void DrmThreadProxy::CreateBufferAsync(gfx::AcceleratedWidget widget,
-                                       const gfx::Size& size,
-                                       gfx::BufferFormat format,
-                                       gfx::BufferUsage usage,
-                                       uint32_t flags,
-                                       CreateBufferAsyncCallback callback) {
-  DCHECK(drm_thread_.task_runner())
-      << "no task runner! in DrmThreadProxy::CreateBufferAsync";
-  base::OnceClosure task = base::BindOnce(
-      &DrmThread::CreateBufferAsync, base::Unretained(&drm_thread_), widget,
-      size, format, usage, flags,
-      base::BindOnce(OnBufferCreatedOnDrmThread,
-                     base::SingleThreadTaskRunner::GetCurrentDefault(),
-                     std::move(callback)));
-  drm_thread_.task_runner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&DrmThread::RunTaskAfterDeviceReady,
-                     base::Unretained(&drm_thread_), std::move(task), nullptr));
-}
-
 void DrmThreadProxy::CreateBufferFromHandle(
     gfx::AcceleratedWidget widget,
     const gfx::Size& size,
-    gfx::BufferFormat format,
+    viz::SharedImageFormat format,
     gfx::NativePixmapHandle handle,
     std::unique_ptr<GbmBuffer>* buffer,
     scoped_refptr<DrmFramebuffer>* framebuffer) {
@@ -169,6 +140,7 @@ std::vector<OverlayStatus> DrmThreadProxy::CheckOverlayCapabilitiesSync(
   base::OnceClosure task = base::BindOnce(
       &DrmThread::CheckOverlayCapabilitiesSync, base::Unretained(&drm_thread_),
       widget, candidates, &result);
+
   PostSyncTask(drm_thread_.task_runner(),
                base::BindOnce(&DrmThread::RunTaskAfterDeviceReady,
                               base::Unretained(&drm_thread_), std::move(task)));
@@ -211,6 +183,15 @@ DrmThreadProxy::GetDrmThreadTaskRunner() {
 
 bool DrmThreadProxy::WaitUntilDrmThreadStarted() {
   return drm_thread_.WaitUntilThreadStarted();
+}
+
+void DrmThreadProxy::SetDrmModifiersFilter(
+    std::unique_ptr<DrmModifiersFilter> filter) {
+  DCHECK(drm_thread_.task_runner());
+  base::OnceClosure task =
+      base::BindOnce(&DrmThread::SetDrmModifiersFilter,
+                     base::Unretained(&drm_thread_), std::move(filter));
+  drm_thread_.task_runner()->PostTask(FROM_HERE, std::move(task));
 }
 
 }  // namespace ui

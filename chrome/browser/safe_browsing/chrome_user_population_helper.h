@@ -5,9 +5,10 @@
 #ifndef CHROME_BROWSER_SAFE_BROWSING_CHROME_USER_POPULATION_HELPER_H_
 #define CHROME_BROWSER_SAFE_BROWSING_CHROME_USER_POPULATION_HELPER_H_
 
+#include <optional>
+
 #include "chrome/browser/profiles/profile.h"
 #include "components/safe_browsing/core/common/proto/csd.pb.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace safe_browsing {
 
@@ -28,7 +29,7 @@ enum class NoCachedPopulationReason {
 // A cache of the ChromeUserPopulation is used to validate that we are
 // consistently populating the same values into Safe Browsing pings. This should
 // be cleared whenever we expect the correct value of the ChromeUserPopulation
-// to be cleared. See crbug/1208532.
+// to be cleared. See crbug.com/40766086.
 void ClearCachedUserPopulation(Profile* profile,
                                NoCachedPopulationReason reason);
 

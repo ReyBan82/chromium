@@ -9,41 +9,21 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/values.h"
+#include "chrome/browser/ash/login/enrollment/enrollment_launcher.h"
 #include "chrome/browser/ash/login/enrollment/enrollment_screen_view.h"
-#include "chrome/browser/ash/login/enrollment/enterprise_enrollment_helper.h"
 #include "chrome/browser/ash/policy/enrollment/enrollment_config.h"
 #include "chrome/browser/ui/webui/ash/login/base_screen_handler.h"
-#include "net/cookies/canonical_cookie.h"
+#include "chrome/browser/ui/webui/ash/login/online_login_utils.h"
+
+class ApplicationLocaleStorage;
+class PrefService;
 
 namespace ash {
 
-class CookieWaiter;
 class HelpAppLauncher;
-
-// Possible error states of the Active Directory screen. Must be in the same
-// order as ActiveDirectoryErrorState ( in enterprise_enrollment.js ) values.
-enum class ActiveDirectoryErrorState {
-  NONE = 0,
-  MACHINE_NAME_INVALID = 1,
-  MACHINE_NAME_TOO_LONG = 2,
-  BAD_USERNAME = 3,
-  BAD_AUTH_PASSWORD = 4,
-  BAD_UNLOCK_PASSWORD = 5,
-};
-
-// These values are persisted to logs. Entries should not be renumbered and
-// numeric values should never be reused.
-enum class ActiveDirectoryDomainJoinType {
-  // Configuration is not set on the domain.
-  WITHOUT_CONFIGURATION = 0,
-  // Configuration is set but was not unlocked during domain join.
-  NOT_USING_CONFIGURATION = 1,
-  // Configuration is set and was unlocked during domain join.
-  USING_CONFIGURATION = 2,
-  // Number of elements in the enum. Should be last.
-  COUNT,
-};
 
 // WebUIMessageHandler implementation which handles events occurring on the
 // page, such as the user pressing the signin button.
@@ -52,15 +32,15 @@ class EnrollmentScreenHandler : public BaseScreenHandler,
  public:
   using TView = EnrollmentScreenView;
 
-  EnrollmentScreenHandler();
+  // `local_state` and `application_locale_storage` must be non-null and must
+  // outlive `this`.
+  EnrollmentScreenHandler(PrefService* local_state,
+                          ApplicationLocaleStorage* application_locale_storage);
 
   EnrollmentScreenHandler(const EnrollmentScreenHandler&) = delete;
   EnrollmentScreenHandler& operator=(const EnrollmentScreenHandler&) = delete;
 
   ~EnrollmentScreenHandler() override;
-
-  // Implements WebUIMessageHandler:
-  void RegisterMessages() override;
 
   // Implements EnrollmentScreenView:
   void SetEnrollmentConfig(const policy::EnrollmentConfig& config) override;
@@ -74,13 +54,10 @@ class EnrollmentScreenHandler : public BaseScreenHandler,
   void Hide() override;
   void ShowSigninScreen() override;
   void ReloadSigninScreen() override;
+  void ResetEnrollmentScreen() override;
   void ShowSkipConfirmationDialog() override;
   void ShowUserError(const std::string& email) override;
   void ShowEnrollmentDuringTrialNotAllowedError() override;
-  void ShowActiveDirectoryScreen(const std::string& domain_join_config,
-                                 const std::string& machine_name,
-                                 const std::string& username,
-                                 authpolicy::ErrorType error) override;
   void ShowAttributePromptScreen(const std::string& asset_id,
                                  const std::string& location) override;
   void ShowEnrollmentSuccessScreen() override;
@@ -88,45 +65,44 @@ class EnrollmentScreenHandler : public BaseScreenHandler,
   void ShowEnrollmentTPMCheckingScreen() override;
   void ShowAuthError(const GoogleServiceAuthError& error) override;
   void ShowEnrollmentStatus(policy::EnrollmentStatus status) override;
-  void ShowOtherError(
-      EnterpriseEnrollmentHelper::OtherError error_code) override;
+  void ShowOtherError(EnrollmentLauncher::OtherError error_code) override;
   void Shutdown() override;
+  base::WeakPtr<EnrollmentScreenView> AsWeakPtr() override;
 
   // Implements BaseScreenHandler:
   void InitAfterJavascriptAllowed() override;
   void DeclareLocalizedValues(
       ::login::LocalizedValuesBuilder* builder) override;
-  void GetAdditionalParameters(base::Value::Dict* parameters) override;
+  void DeclareJSCallbacks() override;
 
-  void ContinueAuthenticationWhenCookiesAvailable(const std::string& user,
-                                                  int license_type);
   void OnCookieWaitTimeout();
 
  private:
   // Handlers for WebUI messages.
-  void HandleToggleFakeEnrollment();
+  void HandleToggleFakeEnrollmentAndCompleteLogin(const std::string& user,
+                                                  const std::string& gaia_id,
+                                                  const std::string& password,
+                                                  bool using_saml,
+                                                  int license_type);
   void HandleClose(const std::string& reason);
-  void HandleCompleteLogin(const std::string& user, int license_type);
-  void OnGetCookiesForCompleteLogin(
-      const std::string& user,
-      int license_type,
-      const net::CookieAccessResultList& cookies,
-      const net::CookieAccessResultList& excluded_cookies);
-  void HandleAdCompleteLogin(const std::string& machine_name,
-                             const std::string& distinguished_name,
-                             const std::string& encryption_types,
-                             const std::string& user_name,
-                             const std::string& password);
-  void HandleAdUnlockConfiguration(const std::string& password);
+  void HandleCompleteLogin(const std::string& user,
+                           const std::string& gaia_id,
+                           const std::string& password,
+                           bool using_saml,
+                           int license_type);
+  void CompleteAuthWithCookies(login::OnlineSigninArtifacts,
+                               int license_type,
+                               login::GaiaCookiesData cookies);
   void HandleIdentifierEntered(const std::string& email);
   void HandleRetry();
   void HandleFrameLoadingCompleted();
   void HandleDeviceAttributesProvided(const std::string& asset_id,
                                       const std::string& location);
   void HandleOnLearnMore();
+  void HandleGetDeviceId(const std::string& callback_id);
 
   // Shows a given enrollment step.
-  void ShowStep(const char* step);
+  void ShowStep(const std::string& step);
 
   // Display the given i18n resource as error message.
   void ShowError(int message_id, bool retry);
@@ -148,25 +124,25 @@ class EnrollmentScreenHandler : public BaseScreenHandler,
   void DoShowWithPartition(const std::string& partition_name);
 
   // Shows the screen with the given data dictionary.
-  void DoShowWithData(base::Value::Dict screen_data);
+  void DoShowWithData(base::DictValue screen_data);
 
-  // Screen data to be passed to web ui for attestation enrollment.
-  base::Value::Dict ScreenDataForAttestationEnrollment();
+  // Screen data to be passed to web ui for automatic enrollment.
+  base::DictValue ScreenDataForAutomaticEnrollment();
 
   // Screen data to be passed to web ui for gaia oauth-based enrollment.
-  base::Value::Dict ScreenDataForOAuthEnrollment();
+  base::DictValue ScreenDataForOAuthEnrollment();
 
   // Screen data to be passed to web ui for all enrollment modes.
-  base::Value::Dict ScreenDataCommon();
+  base::DictValue ScreenDataCommon();
 
   // Returns true if current visible screen is the enrollment sign-in page.
   bool IsOnEnrollmentScreen();
 
-  // Called after configuration seed was unlocked.
-  void OnAdConfigurationUnlocked(std::string unlocked_data);
+  const raw_ref<PrefService> local_state_;
+  const raw_ref<ApplicationLocaleStorage> application_locale_storage_;
 
   // Keeps the controller for this view.
-  Controller* controller_ = nullptr;
+  raw_ptr<Controller, DanglingUntriaged> controller_ = nullptr;
 
   bool show_on_init_ = false;
 
@@ -177,12 +153,6 @@ class EnrollmentScreenHandler : public BaseScreenHandler,
   FlowType flow_type_;
 
   GaiaButtonsType gaia_buttons_type_;
-
-  // Active Directory configuration in the form of encrypted binary data.
-  std::string active_directory_domain_join_config_;
-
-  ActiveDirectoryDomainJoinType active_directory_join_type_ =
-      ActiveDirectoryDomainJoinType::COUNT;
 
   // True if screen was not shown yet.
   bool first_show_ = true;
@@ -196,7 +166,7 @@ class EnrollmentScreenHandler : public BaseScreenHandler,
   // Help application used for help dialogs.
   scoped_refptr<HelpAppLauncher> help_app_;
 
-  std::unique_ptr<CookieWaiter> oauth_code_waiter_;
+  std::unique_ptr<GaiaCookieRetriever> gaia_cookie_retriever_;
 
   bool use_fake_login_for_testing_ = false;
 

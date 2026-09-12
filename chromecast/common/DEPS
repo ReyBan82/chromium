@@ -1,7 +1,7 @@
 include_rules = [
   "+components/cdm/common",
   "+components/cast/common",
-  "+components/services/heap_profiling/public/cpp",
+  "+components/embedder_support/user_agent_utils.h",
   "+components/url_matcher",
   "+components/version_info",
   "+content/public/common",

@@ -15,6 +15,7 @@
 #include "absl/strings/internal/damerau_levenshtein_distance.h"
 
 #include <cstdint>
+#include <string>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -54,7 +55,7 @@ TEST(Distance, TestDistances) {
 }
 
 TEST(Distance, TestCutoff) {
-  // Returing cutoff + 1 if the value is larger than cutoff or string longer
+  // Returning cutoff + 1 if the value is larger than cutoff or string longer
   // than MAX_SIZE.
   EXPECT_THAT(CappedDamerauLevenshteinDistance("abcd", "a", 3), uint8_t{3});
   EXPECT_THAT(CappedDamerauLevenshteinDistance("abcd", "a", 2), uint8_t{3});

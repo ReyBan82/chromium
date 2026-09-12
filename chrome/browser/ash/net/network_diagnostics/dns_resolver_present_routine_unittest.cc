@@ -37,8 +37,8 @@ const std::vector<std::string>& GetWellFormedDnsServers() {
 class DnsResolverPresentRoutineTest : public NetworkDiagnosticsTestHelper {
  public:
   DnsResolverPresentRoutineTest() {
-    dns_resolver_present_routine_ =
-        std::make_unique<DnsResolverPresentRoutine>();
+    dns_resolver_present_routine_ = std::make_unique<DnsResolverPresentRoutine>(
+        mojom::RoutineCallSource::kDiagnosticsUI);
   }
   DnsResolverPresentRoutineTest(const DnsResolverPresentRoutineTest&) = delete;
   DnsResolverPresentRoutineTest& operator=(
@@ -65,15 +65,16 @@ class DnsResolverPresentRoutineTest : public NetworkDiagnosticsTestHelper {
                         const std::string& type = shill::kTypeIPv4) {
     DCHECK(!wifi_path().empty());
     // Set up the name servers
-    base::Value::List dns_servers;
+    base::ListValue dns_servers;
     for (const std::string& name_server : name_servers) {
       dns_servers.Append(name_server);
     }
 
     // Set up the IP config
-    base::Value::Dict ip_config_properties;
-    ip_config_properties.Set(shill::kMethodProperty, type);
-    ip_config_properties.Set(shill::kNameServersProperty, dns_servers.Clone());
+    auto ip_config_properties =
+        base::DictValue()
+            .Set(shill::kMethodProperty, type)
+            .Set(shill::kNameServersProperty, dns_servers.Clone());
     helper()->ip_config_test()->AddIPConfig(kIPConfigPath,
                                             ip_config_properties.Clone());
     std::string wifi_device_path =
@@ -168,7 +169,7 @@ TEST_F(DnsResolverPresentRoutineTest, TestValidAndMalformedNameServers) {
 }
 
 TEST_F(DnsResolverPresentRoutineTest, TestNoActiveNetwork) {
-  SetUpWiFi(shill::kStateDisconnect);
+  SetUpWiFi(shill::kStateDisconnecting);
   SetUpNameServers(GetWellFormedDnsServers());
   RunRoutine(mojom::RoutineVerdict::kNotRun, {});
 }

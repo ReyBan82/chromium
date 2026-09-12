@@ -21,6 +21,8 @@ class TextfieldTestApi {
 
   void UpdateContextMenu();
 
+  void SetInitiatingDrag(bool initiating_drag);
+
   gfx::RenderText* GetRenderText() const;
 
   void CreateTouchSelectionControllerAndNotifyIt();
@@ -37,7 +39,7 @@ class TextfieldTestApi {
     return textfield_->context_menu_contents_.get();
   }
 
-  ui::TouchEditingControllerDeprecated* touch_selection_controller() const {
+  TouchSelectionController* touch_selection_controller() const {
     return textfield_->touch_selection_controller_.get();
   }
 
@@ -74,7 +76,7 @@ class TextfieldTestApi {
   void SetDisplayOffsetX(int x) const;
 
  private:
-  raw_ptr<Textfield> textfield_;
+  const raw_ptr<Textfield> textfield_;
 };
 
 }  // namespace views

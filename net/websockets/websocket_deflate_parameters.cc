@@ -4,6 +4,9 @@
 
 #include "net/websockets/websocket_deflate_parameters.h"
 
+#include <vector>  // for iterating over extension.parameters()
+
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 
 namespace net {
@@ -15,11 +18,11 @@ const WebSocketDeflater::ContextTakeOverMode kTakeOverContext =
 const WebSocketDeflater::ContextTakeOverMode kDoNotTakeOverContext =
     WebSocketDeflater::DO_NOT_TAKE_OVER_CONTEXT;
 
-const char kServerNoContextTakeOver[] = "server_no_context_takeover";
-const char kClientNoContextTakeOver[] = "client_no_context_takeover";
-const char kServerMaxWindowBits[] = "server_max_window_bits";
-const char kClientMaxWindowBits[] = "client_max_window_bits";
-const char kExtensionName[] = "permessage-deflate";
+constexpr char kServerNoContextTakeOver[] = "server_no_context_takeover";
+constexpr char kClientNoContextTakeOver[] = "client_no_context_takeover";
+constexpr char kServerMaxWindowBits[] = "server_max_window_bits";
+constexpr char kClientMaxWindowBits[] = "client_max_window_bits";
+constexpr char kExtensionName[] = "permessage-deflate";
 
 bool GetWindowBits(const std::string& value, int* window_bits) {
   return !value.empty() && value[0] != '0' &&
@@ -34,7 +37,7 @@ bool DuplicateError(const std::string& name, std::string* failure_message) {
 }
 
 bool InvalidError(const std::string& name, std::string* failure_message) {
-  *failure_message = "Received invalid " + name + " parameter";
+  *failure_message = base::StrCat({"Received invalid ", name, " parameter"});
   return false;
 }
 

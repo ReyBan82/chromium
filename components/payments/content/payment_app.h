@@ -5,6 +5,7 @@
 #ifndef COMPONENTS_PAYMENTS_CONTENT_PAYMENT_APP_H_
 #define COMPONENTS_PAYMENTS_CONTENT_PAYMENT_APP_H_
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -12,12 +13,12 @@
 #include "base/functional/callback_forward.h"
 #include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
-#include "components/autofill/core/browser/data_model/credit_card.h"
 #include "components/payments/core/payer_data.h"
 #include "services/metrics/public/cpp/ukm_source_id.h"
-#include "third_party/blink/public/mojom/payments/payment_app.mojom.h"
+#include "third_party/blink/public/mojom/payments/payment_app_events.mojom.h"
 #include "third_party/blink/public/mojom/payments/payment_handler_host.mojom.h"
 #include "third_party/skia/include/core/SkBitmap.h"
+#include "url/origin.h"
 
 namespace payments {
 
@@ -46,7 +47,7 @@ class PaymentApp {
 
   class Delegate {
    public:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
 
     // Should be called with method name (e.g., "https://google.com/pay") and
     // json-serialized stringified details.
@@ -57,7 +58,27 @@ class PaymentApp {
 
     // Should be called with a developer-facing error message to be used when
     // rejecting PaymentRequest.show().
-    virtual void OnInstrumentDetailsError(const std::string& error_message) = 0;
+    virtual void OnInstrumentDetailsError(mojom::PaymentEventResponseType error,
+                                          const std::string& error_message) = 0;
+  };
+
+  // Describes a PaymentEntityLogo composed of the accessibility label, and the
+  // icon and its url.
+  struct PaymentEntityLogo {
+    std::u16string label;
+    std::unique_ptr<SkBitmap> icon;
+    GURL url;
+    PaymentEntityLogo(std::u16string string,
+                      std::unique_ptr<SkBitmap> icon,
+                      GURL url);
+
+    // PaymentEntityLogo is a move-only type:
+    PaymentEntityLogo(const PaymentEntityLogo&) = delete;
+    PaymentEntityLogo& operator=(const PaymentEntityLogo&) = delete;
+    PaymentEntityLogo(PaymentEntityLogo&&);
+    PaymentEntityLogo& operator=(PaymentEntityLogo&&);
+
+    ~PaymentEntityLogo();
   };
 
   PaymentApp(const PaymentApp&) = delete;
@@ -81,8 +102,6 @@ class PaymentApp {
   virtual std::u16string GetMissingInfoLabel() const = 0;
   // Returns this app's answer for PaymentRequest.hasEnrolledInstrument().
   virtual bool HasEnrolledInstrument() const = 0;
-  // Records the use of this payment app.
-  virtual void RecordUse() = 0;
   // Check whether this payment app needs installation before it can be used.
   virtual bool NeedsInstallation() const = 0;
 
@@ -90,12 +109,20 @@ class PaymentApp {
   // GUID of an autofill card or the scope of a payment handler.
   virtual std::string GetId() const = 0;
 
+  // Returns the origin of the payment handler, if applicable.
+  virtual std::optional<url::Origin> GetPaymentHandlerOrigin() const;
+
   // Return the sub/label of payment app, to be displayed to the user.
   virtual std::u16string GetLabel() const = 0;
   virtual std::u16string GetSublabel() const = 0;
 
   // Returns the icon bitmap or null.
   virtual const SkBitmap* icon_bitmap() const;
+  // Returns the payment entities logos to be displayed to the user.
+  virtual std::vector<PaymentEntityLogo*> GetPaymentEntitiesLogos();
+
+  // Returns the total amount for this payment app, if any.
+  virtual const mojom::PaymentItemPtr& GetTotalForSpc() const;
 
   // Returns the identifier for another payment app that should be hidden when
   // this payment app is present.

@@ -7,6 +7,9 @@
 
 #include <type_traits>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+
 namespace gfx {
 
 // This header defines Double4 type for vectorized SIMD operations used in
@@ -54,11 +57,11 @@ ALWAYS_INLINE double Sum(Double4 v) {
   return v[0] + v[1] + v[2] + v[3];
 }
 
-ALWAYS_INLINE Double4 LoadDouble4(const double s[4]) {
+ALWAYS_INLINE Double4 LoadDouble4(base::span<const double, 4> s) {
   return Double4{s[0], s[1], s[2], s[3]};
 }
 
-ALWAYS_INLINE void StoreDouble4(Double4 v, double d[4]) {
+ALWAYS_INLINE void StoreDouble4(Double4 v, base::span<double, 4> d) {
   d[0] = v[0];
   d[1] = v[1];
   d[2] = v[2];

@@ -26,6 +26,7 @@ class CORE_EXPORT DOMRect final : public DOMRectReadOnly {
                          double y = 0,
                          double width = 0,
                          double height = 0);
+  static DOMRect* FromRect(const gfx::Rect&);
   static DOMRect* FromRectF(const gfx::RectF&);
   static DOMRect* fromRect(const DOMRectInit*);
 
@@ -42,9 +43,6 @@ class CORE_EXPORT DOMRect final : public DOMRectReadOnly {
 inline bool operator==(const DOMRect& lhs, const DOMRect& rhs) {
   return lhs.x() == rhs.x() && lhs.y() == rhs.y() &&
          lhs.width() == rhs.width() && lhs.height() == rhs.height();
-}
-inline bool operator!=(const DOMRect& lhs, const DOMRect& rhs) {
-  return !(lhs == rhs);
 }
 }  // namespace blink
 

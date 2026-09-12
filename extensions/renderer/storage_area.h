@@ -7,7 +7,7 @@
 
 #include <string>
 
-#include "base/strings/string_piece.h"
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "v8/include/v8-forward.h"
 
@@ -40,7 +40,7 @@ class StorageArea {
   static v8::Local<v8::Object> CreateStorageArea(
       v8::Isolate* isolate,
       const std::string& property_name,
-      const base::Value::List* property_values,
+      const base::ListValue* property_values,
       APIRequestHandler* request_handler,
       APIEventHandler* event_handler,
       APITypeReferenceMap* type_refs,
@@ -54,15 +54,15 @@ class StorageArea {
                                          v8::Local<v8::Object> wrapper);
 
  private:
-  APIRequestHandler* request_handler_;
+  raw_ptr<APIRequestHandler, DanglingUntriaged> request_handler_;
 
-  APIEventHandler* event_handler_;
+  raw_ptr<APIEventHandler, DanglingUntriaged> event_handler_;
 
-  const APITypeReferenceMap* type_refs_;
+  raw_ptr<const APITypeReferenceMap, DanglingUntriaged> type_refs_;
 
   std::string name_;
 
-  const BindingAccessChecker* const access_checker_;
+  const raw_ptr<const BindingAccessChecker, DanglingUntriaged> access_checker_;
 };
 
 }  // namespace extensions

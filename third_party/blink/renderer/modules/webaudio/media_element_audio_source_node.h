@@ -26,19 +26,16 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_MEDIA_ELEMENT_AUDIO_SOURCE_NODE_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_MEDIA_ELEMENT_AUDIO_SOURCE_NODE_H_
 
-#include <memory>
-
-#include "base/memory/scoped_refptr.h"
 #include "base/notreached.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/thread_annotations.h"
 #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
+#include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node.h"
 #include "third_party/blink/renderer/modules/webaudio/media_element_audio_source_handler.h"
 #include "third_party/blink/renderer/platform/audio/audio_source_provider_client.h"
 #include "third_party/blink/renderer/platform/audio/media_multi_channel_resampler.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
-#include "third_party/blink/renderer/platform/wtf/threading_primitives.h"
 
 namespace blink {
 
@@ -46,7 +43,7 @@ class AudioContext;
 class HTMLMediaElement;
 class MediaElementAudioSourceOptions;
 
-class MediaElementAudioSourceNode final
+class MODULES_EXPORT MediaElementAudioSourceNode final
     : public AudioNode,
       public AudioSourceProviderClient,
       public ActiveScriptWrappable<MediaElementAudioSourceNode> {
@@ -71,6 +68,7 @@ class MediaElementAudioSourceNode final
       GetMediaElementAudioSourceHandler().GetProcessLock());
   void unlock() override
       UNLOCK_FUNCTION(GetMediaElementAudioSourceHandler().GetProcessLock());
+  void OnCurrentSrcChanged(const KURL& current_src) override;
 
   // InspectorHelperMixin
   void ReportDidCreate() final;

@@ -6,11 +6,11 @@
 
 #include <cinttypes>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <utility>
 
 #include "base/compiler_specific.h"
+#include "base/feature_list.h"
 #include "base/memory/ptr_util.h"
 #include "base/strings/stringprintf.h"
 #include "components/services/storage/indexed_db/scopes/leveldb_scopes_coding.h"
@@ -18,13 +18,29 @@
 #include "third_party/leveldatabase/src/include/leveldb/db.h"
 #include "third_party/leveldatabase/src/include/leveldb/iterator.h"
 
-namespace content {
+namespace content::indexed_db {
 namespace {
+
+// Calling CompactRange() as part of a cleanup task ensures that disk space
+// from deleted entries is reclaimed immediately. However, CompactRange()
+// can be slow and I/O intensive. During bulk database deletions, repetitive
+// [delete, compact] cycles can severely degrade performance and actually delay
+// overall space reclamation compared to simply deleting ranges and letting
+// LevelDB compact automatically.
+//
+// This feature inhibits CompactRange() calls within cleanup tasks, allowing us
+// to evaluate the performance impact of delegating space reclamation entirely
+// to LevelDB's automatic background compactions. Depending on the results, we
+// may adopt alternative strategies, such as threshold-based full-database
+// compactions.
+BASE_FEATURE(kIdbInhibitCompactRange, base::FEATURE_DISABLED_BY_DEFAULT);
+
 bool IsKeyBeforeEndOfRange(const leveldb::Comparator* comparator,
                            const leveldb::Slice& key,
                            const leveldb::Slice& end) {
   return comparator->Compare(key, end) < 0;
 }
+
 }  // namespace
 
 LevelDBScopesTask::LevelDBScopesTask(scoped_refptr<LevelDBState> level_db,
@@ -72,8 +88,9 @@ leveldb::Status LevelDBScopesTask::DeleteRange(
        iterator->Next()) {
     write_batch_.Delete(iterator->key());
     s = MaybeSubmitWriteBatch(write_options);
-    if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+    if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
       return s;
+    }
   }
   if (!iterator->status().ok())
     return iterator->status();
@@ -93,8 +110,9 @@ CleanupScopeTask::~CleanupScopeTask() = default;
 
 leveldb::Status CleanupScopeTask::Run() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (UNLIKELY(level_db_->destruction_requested()))
+  if (level_db_->destruction_requested()) [[unlikely]] {
     return leveldb::Status::OK();
+  }
   leveldb::ReadOptions read_options;
   // Since the range being iterated will never be used again, don't fill the
   // cache.
@@ -120,14 +138,16 @@ leveldb::Status CleanupScopeTask::Run() {
         "Unable to find scopes metadata for scope %" PRId64 ".",
         scope_number_));
   }
-  if (UNLIKELY(!s.ok()))
+  if (!s.ok()) [[unlikely]] {
     return s;
+  }
 
   LevelDBScopesScopeMetadata metadata;
-  if (UNLIKELY(!metadata.ParseFromString(metadata_value)))
+  if (!metadata.ParseFromString(metadata_value)) [[unlikely]] {
     return leveldb::Status::Corruption("Unable to parse scope metadata.");
-  if (UNLIKELY(metadata.ignore_cleanup_tasks() !=
-               (mode_ == CleanupMode::kIgnoreCleanupTasks))) {
+  }
+  if (metadata.ignore_cleanup_tasks() !=
+      (mode_ == CleanupMode::kIgnoreCleanupTasks)) [[unlikely]] {
     return leveldb::Status::Corruption("Invalid cleanup mode on disk.");
   }
 #endif  // DCHECK_IS_ON()
@@ -138,18 +158,21 @@ leveldb::Status CleanupScopeTask::Run() {
       s = DeletePrefixedRange(
           scopes_encoder.TasksKeyPrefix(metadata_prefix_, scope_number_),
           read_options, write_options);
-      if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+      if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
         return s;
+      }
       break;
     case CleanupMode::kExecuteCleanupTasks:
       s = DeletePrefixedRange(
           scopes_encoder.UndoTaskKeyPrefix(metadata_prefix_, scope_number_),
           read_options, write_options);
-      if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+      if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
         return s;
+      }
       s = ExecuteAndDeleteCleanupTasks(read_options, write_options);
-      if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+      if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
         return s;
+      }
       break;
   }
 
@@ -175,37 +198,32 @@ leveldb::Status CleanupScopeTask::ExecuteAndDeleteCleanupTasks(
   for (; iterator->Valid() && iterator->key().starts_with(cleanup_tasks_prefix);
        iterator->Next()) {
     leveldb::Slice value = iterator->value();
-    if (!cleanup_task.ParseFromArray(value.data(), value.size()))
+    if (!cleanup_task.ParseFromArray(value.data(), value.size())) {
       return leveldb::Status::Corruption("Invalid cleanup operation value.");
-
-    switch (cleanup_task.operation_case()) {
-      case LevelDBScopesCleanupTask::kDeleteRange: {
-        auto range = cleanup_task.delete_range();
-        s = DeleteRange(range.begin(), range.end(), read_options,
-                        write_options);
-        if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
-          return s;
-        break;
-      }
-      case LevelDBScopesCleanupTask::kDeleteRangeAndCompact: {
-        auto range = cleanup_task.delete_range_and_compact();
-        leveldb::Slice begin(range.begin());
-        leveldb::Slice end(range.end());
-        s = DeleteRange(begin, end, read_options, write_options);
-        if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
-          return s;
-        level_db_->db()->CompactRange(&begin, &end);
-        break;
-      }
-      // The protobuf code generator is to blame for this style mismatch.
-      case LevelDBScopesCleanupTask::OPERATION_NOT_SET:
-        return leveldb::Status::Corruption("Invalid cleanup operation type.");
     }
+
+    if (!cleanup_task.has_delete_range_and_compact()) {
+      return leveldb::Status::Corruption("Invalid cleanup operation type.");
+    }
+
+    const auto& range = cleanup_task.delete_range_and_compact();
+    leveldb::Slice begin(range.begin());
+    leveldb::Slice end(range.end());
+    s = DeleteRange(begin, end, read_options, write_options);
+    if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
+      return s;
+    }
+
+    if (!base::FeatureList::IsEnabled(kIdbInhibitCompactRange)) {
+      level_db_->db()->CompactRange(&begin, &end);
+    }
+
     write_batch_.Delete(iterator->key());
 
     s = MaybeSubmitWriteBatch(write_options);
-    if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+    if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
       return s;
+    }
   }
   return iterator->status();
 }
@@ -224,11 +242,13 @@ leveldb::Status CleanupScopeTask::DeletePrefixedRange(
        iterator->Next()) {
     write_batch_.Delete(iterator->key());
     s = MaybeSubmitWriteBatch(write_options);
-    if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+    if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
       return s;
+    }
   }
-  if (UNLIKELY(!iterator->status().ok()))
+  if (!iterator->status().ok()) [[unlikely]] {
     return iterator->status();
+  }
   return MaybeSubmitWriteBatch(write_options);
 }
 
@@ -243,8 +263,9 @@ RevertScopeTask::~RevertScopeTask() = default;
 
 leveldb::Status RevertScopeTask::Run() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (UNLIKELY(level_db_->destruction_requested()))
+  if (level_db_->destruction_requested()) [[unlikely]] {
     return leveldb::Status::OK();
+  }
   leveldb::ReadOptions read_options;
   // After this job the scope's cleanup log entries will be read again for
   // deletion by a CleanupTask, so fill the cache here.
@@ -286,8 +307,9 @@ leveldb::Status RevertScopeTask::Run() {
         auto range = undo_operation.delete_range();
         s = DeleteRange(range.begin(), range.end(), read_options,
                         write_options);
-        if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+        if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
           return s;
+        }
         break;
       }
       case LevelDBScopesUndoTask::OPERATION_NOT_SET:
@@ -298,11 +320,13 @@ leveldb::Status RevertScopeTask::Run() {
     write_batch_.Delete(iterator->key());
 
     s = MaybeSubmitWriteBatch(write_options);
-    if (UNLIKELY(!s.ok() || level_db_->destruction_requested()))
+    if (!s.ok() || level_db_->destruction_requested()) [[unlikely]] {
       return s;
+    }
   }
-  if (UNLIKELY(!iterator->status().ok()))
+  if (!iterator->status().ok()) [[unlikely]] {
     return iterator->status();
+  }
 
   // Finally, overwrite the metadata to signal the revert is over.
   LevelDBScopesScopeMetadata metadata;
@@ -314,4 +338,4 @@ leveldb::Status RevertScopeTask::Run() {
   return s;
 }
 
-}  // namespace content
+}  // namespace content::indexed_db

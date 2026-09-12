@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {PageCallbackRouter, PageRemote, ProfileData, SwitchToTabInfo, TabSearchApiProxy} from 'chrome://tab-search.top-chrome/tab_search.js';
+import type {PageRemote, ProfileData, SwitchToTabInfo, TabSearchApiProxy} from 'chrome://tab-search.top-chrome/tab_search.js';
+import {PageCallbackRouter} from 'chrome://tab-search.top-chrome/tab_search.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
 
 export class TestTabSearchApiProxy extends TestBrowserProxy implements
@@ -10,15 +11,20 @@ export class TestTabSearchApiProxy extends TestBrowserProxy implements
   callbackRouter: PageCallbackRouter;
   callbackRouterRemote: PageRemote;
   private profileData_?: ProfileData;
+  private isSplit_: boolean = false;
 
   constructor() {
     super([
       'closeTab',
+      'closeTabs',
+      'closeWebUiTab',
       'getProfileData',
+      'getIsSplit',
       'openRecentlyClosedEntry',
+      'replaceActiveSplitTab',
       'switchToTab',
       'saveRecentlyClosedExpandedPref',
-      'showUi',
+      'maybeShowUi',
     ]);
 
     this.callbackRouter = new PageCallbackRouter();
@@ -31,15 +37,30 @@ export class TestTabSearchApiProxy extends TestBrowserProxy implements
     this.methodCalled('closeTab', [tabId]);
   }
 
+  closeTabs(tabIds: number[]) {
+    this.methodCalled('closeTabs', [tabIds]);
+  }
+
+  closeWebUiTab() {
+    this.methodCalled('closeWebUiTab', []);
+  }
+
   getProfileData() {
     this.methodCalled('getProfileData');
     return Promise.resolve({profileData: this.profileData_!});
   }
 
-  openRecentlyClosedEntry(
-      id: number, withSearch: boolean, isTab: boolean, index: number) {
-    this.methodCalled(
-        'openRecentlyClosedEntry', [id, withSearch, isTab, index]);
+  getIsSplit() {
+    this.methodCalled('getIsSplit');
+    return Promise.resolve({isSplit: this.isSplit_});
+  }
+
+  openRecentlyClosedEntry(id: number, withSearch: boolean, isTab: boolean) {
+    this.methodCalled('openRecentlyClosedEntry', [id, withSearch, isTab]);
+  }
+
+  replaceActiveSplitTab(replacementTabId: number) {
+    this.methodCalled('replaceActiveSplitTab', [replacementTabId]);
   }
 
   switchToTab(info: SwitchToTabInfo) {
@@ -50,8 +71,8 @@ export class TestTabSearchApiProxy extends TestBrowserProxy implements
     this.methodCalled('saveRecentlyClosedExpandedPref', [expanded]);
   }
 
-  showUi() {
-    this.methodCalled('showUi');
+  maybeShowUi() {
+    this.methodCalled('maybeShowUi');
   }
 
   getCallbackRouter() {
@@ -64,5 +85,9 @@ export class TestTabSearchApiProxy extends TestBrowserProxy implements
 
   setProfileData(profileData: ProfileData) {
     this.profileData_ = profileData;
+  }
+
+  setIsSplit(isSplit: boolean) {
+    this.isSplit_ = isSplit;
   }
 }

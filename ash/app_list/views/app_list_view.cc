@@ -16,18 +16,21 @@
 #include "ash/app_list/views/app_list_folder_view.h"
 #include "ash/app_list/views/app_list_main_view.h"
 #include "ash/app_list/views/apps_container_view.h"
+#include "ash/app_list/views/button_focus_skipper.h"
 #include "ash/app_list/views/contents_view.h"
 #include "ash/app_list/views/paged_apps_grid_view.h"
 #include "ash/app_list/views/search_box_view.h"
 #include "ash/keyboard/ui/keyboard_ui_controller.h"
 #include "ash/public/cpp/app_list/app_list_types.h"
 #include "ash/public/cpp/metrics_util.h"
-#include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
-#include "ash/wm/work_area_insets.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_macros.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/compositor/layer.h"
 #include "ui/compositor/layer_animator.h"
 #include "ui/display/display.h"
@@ -38,6 +41,7 @@
 #include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/controls/textfield/textfield.h"
 #include "ui/views/widget/widget.h"
+#include "ui/views/widget/widget_delegate.h"
 #include "ui/wm/core/ime_util_chromeos.h"
 
 namespace ash {
@@ -54,6 +58,7 @@ bool skip_page_reset_timer_for_testing = false;
 // This view forwards the focus to the search box widget by providing it as a
 // FocusTraversable when a focus search is provided.
 class SearchBoxFocusHost : public views::View {
+  METADATA_HEADER(SearchBoxFocusHost, views::View)
  public:
   explicit SearchBoxFocusHost(views::Widget* search_box_widget)
       : search_box_widget_(search_box_widget) {}
@@ -69,12 +74,12 @@ class SearchBoxFocusHost : public views::View {
     return nullptr;
   }
 
-  // views::View:
-  const char* GetClassName() const override { return "SearchBoxFocusHost"; }
-
  private:
-  views::Widget* search_box_widget_;
+  raw_ptr<views::Widget> search_box_widget_;
 };
+
+BEGIN_METADATA(SearchBoxFocusHost)
+END_METADATA
 
 float ComputeSubpixelOffset(const display::Display& display, float value) {
   float pixel_position = std::round(display.device_scale_factor() * value);
@@ -126,10 +131,10 @@ class AppListView::StateAnimationMetricsReporter {
 
  private:
   static void RecordMetrics(
-      absl::optional<TabletModeAnimationTransition> transition,
+      std::optional<TabletModeAnimationTransition> transition,
       int value);
 
-  absl::optional<TabletModeAnimationTransition> tablet_transition_;
+  std::optional<TabletModeAnimationTransition> tablet_transition_;
 };
 
 void AppListView::StateAnimationMetricsReporter::Reset() {
@@ -138,7 +143,7 @@ void AppListView::StateAnimationMetricsReporter::Reset() {
 
 // static
 void AppListView::StateAnimationMetricsReporter::RecordMetrics(
-    absl::optional<TabletModeAnimationTransition> tablet_transition,
+    std::optional<TabletModeAnimationTransition> tablet_transition,
     int value) {
   UMA_HISTOGRAM_PERCENTAGE("Apps.StateTransition.AnimationSmoothness", value);
 
@@ -208,7 +213,7 @@ AppListView::AppListView(AppListViewDelegate* delegate)
   // Default role of WidgetDelegate is ax::mojom::Role::kWindow which traps
   // ChromeVox focus within the root view. Assign ax::mojom::Role::kGroup here
   // to allow the focus to move from elements in app list view to search box.
-  // TODO(pbos): Should this be necessary with the OverrideNextFocus() used
+  // TODO(pbos): Should this be necessary with the SetNextFocus() used
   // below?
   SetAccessibleWindowRole(ax::mojom::Role::kGroup);
 }
@@ -246,6 +251,11 @@ void AppListView::InitContents() {
                                       /*is_app_list_bubble=*/false);
   search_box_view->InitializeForFullscreenLauncher();
 
+  // Skip the Gemini and Sunfish buttons on arrow up/down in app list.
+  button_focus_skipper_ = std::make_unique<ButtonFocusSkipper>(this);
+  button_focus_skipper_->AddButton(search_box_view->sunfish_button());
+  button_focus_skipper_->AddButton(search_box_view->gemini_button());
+
   // Assign |app_list_main_view_| and |search_box_view_| here since they are
   // accessed during Init().
   app_list_main_view_ = AddChildView(std::move(app_list_main_view));
@@ -256,6 +266,7 @@ void AppListView::InitContents() {
 void AppListView::InitWidget(gfx::NativeView parent) {
   DCHECK(!GetWidget());
   views::Widget::InitParams params(
+      views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
       views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
   params.name = "AppList";
   params.parent = parent;
@@ -298,12 +309,7 @@ void AppListView::Show(AppListViewState preferred_state) {
 
   UMA_HISTOGRAM_TIMES("Apps.AppListCreationTime",
                       base::Time::Now() - time_shown_.value());
-  time_shown_ = absl::nullopt;
-}
-
-void AppListView::SetDragAndDropHostOfCurrentAppList(
-    ApplicationDragAndDropHost* drag_and_drop_host) {
-  app_list_main_view_->SetDragAndDropHostOfCurrentAppList(drag_and_drop_host);
+  time_shown_ = std::nullopt;
 }
 
 void AppListView::CloseOpenedPage() {
@@ -340,10 +346,6 @@ void AppListView::OnPaint(gfx::Canvas* canvas) {
   views::WidgetDelegateView::OnPaint(canvas);
 }
 
-const char* AppListView::GetClassName() const {
-  return "AppListView";
-}
-
 bool AppListView::AcceleratorPressed(const ui::Accelerator& accelerator) {
   switch (accelerator.key_code()) {
     case ui::VKEY_ESCAPE:
@@ -352,14 +354,13 @@ bool AppListView::AcceleratorPressed(const ui::Accelerator& accelerator) {
       break;
     default:
       NOTREACHED();
-      return false;
   }
 
   // Don't let DialogClientView handle the accelerator.
   return true;
 }
 
-void AppListView::Layout() {
+void AppListView::Layout(PassKey) {
   // Avoid layout while building the view.
   if (is_building_)
     return;
@@ -378,10 +379,9 @@ void AppListView::Layout() {
   main_bounds.Inset(GetMainViewInsetsForShelf());
 
   app_list_main_view_->SetBoundsRect(main_bounds);
-}
 
-bool AppListView::IsShowingEmbeddedAssistantUI() const {
-  return app_list_main_view()->contents_view()->IsShowingEmbeddedAssistantUI();
+  // Call super class `Layout` to run `Layout` on child views.
+  LayoutSuperclass<views::WidgetDelegateView>(this);
 }
 
 bool AppListView::IsFolderBeingRenamed() {
@@ -405,7 +405,8 @@ void AppListView::UpdatePageResetTimer(bool app_list_visibility) {
 }
 
 gfx::Insets AppListView::GetMainViewInsetsForShelf() const {
-  return gfx::Insets::TLBR(0, 0, delegate_->GetShelfSize(), 0);
+  return gfx::Insets::TLBR(0, 0, delegate_->GetSystemShelfInsetsInTabletMode(),
+                           0);
 }
 
 void AppListView::UpdateWidget() {
@@ -422,15 +423,9 @@ void AppListView::HandleClickOrTap(ui::LocatedEvent* event) {
   // so they don't get closed.
   if (CloseKeyboardIfVisible()) {
     search_box_view_->NotifyGestureEvent();
-    if (search_box_view_->HasSearch() || IsShowingEmbeddedAssistantUI())
+    if (search_box_view_->HasSearch()) {
       return;
-  }
-
-  // Close embedded Assistant UI if it is shown.
-  if (IsShowingEmbeddedAssistantUI()) {
-    Back();
-    search_box_view_->ClearSearchAndDeactivateSearchBox();
-    return;
+    }
   }
 
   // Clear focus if the located event is not handled by any child view.
@@ -443,9 +438,10 @@ void AppListView::HandleClickOrTap(ui::LocatedEvent* event) {
   }
 
   if ((event->IsGestureEvent() &&
-       (event->AsGestureEvent()->type() == ui::ET_GESTURE_LONG_PRESS ||
-        event->AsGestureEvent()->type() == ui::ET_GESTURE_LONG_TAP ||
-        event->AsGestureEvent()->type() == ui::ET_GESTURE_TWO_FINGER_TAP)) ||
+       (event->AsGestureEvent()->type() == ui::EventType::kGestureLongPress ||
+        event->AsGestureEvent()->type() == ui::EventType::kGestureLongTap ||
+        event->AsGestureEvent()->type() ==
+            ui::EventType::kGestureTwoFingerTap)) ||
       (event->IsMouseEvent() &&
        event->AsMouseEvent()->IsOnlyRightMouseButton())) {
     // Home launcher is shown on top of wallpaper with transparent background.
@@ -453,8 +449,9 @@ void AppListView::HandleClickOrTap(ui::LocatedEvent* event) {
     gfx::Point onscreen_location(event->location());
     ConvertPointToScreen(this, &onscreen_location);
     delegate_->ShowWallpaperContextMenu(
-        onscreen_location, event->IsGestureEvent() ? ui::MENU_SOURCE_TOUCH
-                                                   : ui::MENU_SOURCE_MOUSE);
+        onscreen_location, event->IsGestureEvent()
+                               ? ui::mojom::MenuSourceType::kTouch
+                               : ui::mojom::MenuSourceType::kMouse);
     return;
   }
 
@@ -476,18 +473,6 @@ void AppListView::SetChildViewsForStateTransition(
     app_list_main_view_->contents_view()->SetActiveState(
         AppListState::kStateApps, /*animate=*/true);
   }
-}
-
-void AppListView::RecordStateTransitionForUma(AppListViewState new_state) {
-  AppListStateTransitionSource transition =
-      GetAppListStateTransitionSource(new_state);
-  // kMaxAppListStateTransition denotes a transition we are not interested in
-  // recording (ie. FullscreenAllApps->FullscreenAllApps).
-  if (transition == kMaxAppListStateTransition)
-    return;
-
-  UMA_HISTOGRAM_ENUMERATION("Apps.AppListStateTransitionSource", transition,
-                            kMaxAppListStateTransition);
 }
 
 void AppListView::MaybeCreateAccessibilityEvent(AppListViewState new_state) {
@@ -514,7 +499,7 @@ void AppListView::EnsureWidgetBoundsMatchCurrentState() {
 }
 
 display::Display AppListView::GetDisplayNearestView() const {
-  return display::Screen::GetScreen()->GetDisplayNearestView(
+  return display::Screen::Get()->GetDisplayNearestView(
       GetWidget()->GetNativeWindow()->parent());
 }
 
@@ -526,50 +511,8 @@ PagedAppsGridView* AppListView::GetRootAppsGridView() {
   return GetAppsContainerView()->apps_grid_view();
 }
 
-AppListStateTransitionSource AppListView::GetAppListStateTransitionSource(
-    AppListViewState target_state) const {
-  // TODO(https://crbug.com/1356661): Remove peeking and half launcher
-  // transitions.
-  switch (app_list_state_) {
-    case AppListViewState::kClosed:
-      // CLOSED->X transitions are not useful for UMA.
-      return kMaxAppListStateTransition;
-    case AppListViewState::kFullscreenAllApps:
-      switch (target_state) {
-        case AppListViewState::kClosed:
-          return kFullscreenAllAppsToClosed;
-        case AppListViewState::kFullscreenSearch:
-          return kFullscreenAllAppsToFullscreenSearch;
-        case AppListViewState::kFullscreenAllApps:
-          // FULLSCREEN_ALL_APPS->FULLSCREEN_ALL_APPS is used when resetting the
-          // widget positon after a failed state transition. Not useful for UMA.
-          return kMaxAppListStateTransition;
-      }
-    case AppListViewState::kFullscreenSearch:
-      switch (target_state) {
-        case AppListViewState::kClosed:
-          return kFullscreenSearchToClosed;
-        case AppListViewState::kFullscreenAllApps:
-          return kFullscreenSearchToFullscreenAllApps;
-        case AppListViewState::kFullscreenSearch:
-          // FULLSCREEN_SEARCH->FULLSCREEN_SEARCH is used when resetting the
-          // widget position after a failed state transition. Not useful for
-          // UMA.
-          return kMaxAppListStateTransition;
-      }
-  }
-}
-
 views::View* AppListView::GetInitiallyFocusedView() {
-  views::View* initial_view;
-  if (IsShowingEmbeddedAssistantUI()) {
-    // Assistant page will redirect focus to its subviews.
-    auto* content = app_list_main_view_->contents_view();
-    initial_view = content->GetPageView(content->GetActivePageIndex());
-  } else {
-    initial_view = app_list_main_view_->search_box_view()->search_box();
-  }
-  return initial_view;
+  return app_list_main_view_->search_box_view()->search_box();
 }
 
 void AppListView::OnScrollEvent(ui::ScrollEvent* event) {
@@ -589,19 +532,19 @@ void AppListView::OnMouseEvent(ui::MouseEvent* event) {
     return;
 
   switch (event->type()) {
-    // TODO(https://crbug.com/1356661): Consider not marking ET_MOUSE_DRAGGED as
+    // TODO(https://crbug.com/1356661): Consider not marking kMouseDragged as
     // handled here.
-    case ui::ET_MOUSE_PRESSED:
-    case ui::ET_MOUSE_DRAGGED:
+    case ui::EventType::kMousePressed:
+    case ui::EventType::kMouseDragged:
       event->SetHandled();
       break;
-    case ui::ET_MOUSE_RELEASED:
+    case ui::EventType::kMouseReleased:
       event->SetHandled();
       HandleClickOrTap(event);
       break;
-    case ui::ET_MOUSEWHEEL:
+    case ui::EventType::kMousewheel:
       if (HandleScroll(event->location(), event->AsMouseWheelEvent()->offset(),
-                       ui::ET_MOUSEWHEEL)) {
+                       ui::EventType::kMousewheel)) {
         event->SetHandled();
       }
       break;
@@ -616,10 +559,10 @@ void AppListView::OnGestureEvent(ui::GestureEvent* event) {
     return;
 
   switch (event->type()) {
-    case ui::ET_GESTURE_TAP:
-    case ui::ET_GESTURE_LONG_PRESS:
-    case ui::ET_GESTURE_LONG_TAP:
-    case ui::ET_GESTURE_TWO_FINGER_TAP:
+    case ui::EventType::kGestureTap:
+    case ui::EventType::kGestureLongPress:
+    case ui::EventType::kGestureLongTap:
+    case ui::EventType::kGestureTwoFingerTap:
       event->SetHandled();
       HandleClickOrTap(event);
       break;
@@ -683,21 +626,10 @@ void AppListView::SetState(AppListViewState new_state) {
   if (!set_state_request)
     return;
 
-  // Bail out if `WorkAreaInsets::SetPersistentDeskBarHeight(int height)` causes
-  // another call to `SetState()`. Note, the persistent desks bar is created in
-  // the primary display for now.
-  if (Shell::HasInstance() &&
-      WorkAreaInsets::ForWindow(Shell::GetPrimaryRootWindow())
-          ->PersistentDeskBarHeightInChange() &&
-      app_list_state_ == new_state) {
-    return;
-  }
-
   MaybeCreateAccessibilityEvent(new_state);
 
   app_list_main_view_->contents_view()->OnAppListViewTargetStateChanged(
       new_state);
-  RecordStateTransitionForUma(new_state);
   app_list_state_ = new_state;
   if (delegate_)
     delegate_->OnViewStateChanged(new_state);
@@ -815,10 +747,6 @@ void AppListView::RedirectKeyEventToSearchBox(ui::KeyEvent* event) {
   if (event->handled())
     return;
 
-  // Allow text input inside the Assistant page.
-  if (IsShowingEmbeddedAssistantUI())
-    return;
-
   views::Textfield* search_box = search_box_view_->search_box();
   const bool is_search_box_focused = search_box->HasFocus();
 
@@ -842,8 +770,9 @@ void AppListView::RedirectKeyEventToSearchBox(ui::KeyEvent* event) {
 
   // Insert it into search box if the key event is a character. Released
   // key should not be handled to prevent inserting duplicate character.
-  if (event->type() == ui::ET_KEY_PRESSED)
+  if (event->type() == ui::EventType::kKeyPressed) {
     search_box->InsertChar(*event);
+  }
 }
 
 void AppListView::OnScreenKeyboardShown(bool shown) {
@@ -940,5 +869,8 @@ void AppListView::ResetSubpixelPositionOffset(ui::Layer* layer) {
       gfx::Vector2dF(ComputeSubpixelOffset(display, bounds.x()),
                      ComputeSubpixelOffset(display, bounds.y())));
 }
+
+BEGIN_METADATA(AppListView)
+END_METADATA
 
 }  // namespace ash

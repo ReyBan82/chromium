@@ -10,8 +10,7 @@
 #include "chromeos/ash/components/phonehub/util/histogram_util.h"
 #include "chromeos/ash/services/network_config/in_process_instance.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 namespace {
 
@@ -78,8 +77,8 @@ TetherControllerImpl::TetherControllerImpl(
       cros_network_config_.BindNewPipeAndPassReceiver());
   cros_network_config_->AddObserver(receiver_.BindNewPipeAndPassRemote());
 
-  phone_model_->AddObserver(this);
-  multidevice_setup_client_->AddObserver(this);
+  phone_model_observation_.Observe(phone_model);
+  multidevice_setup_client_observation_.Observe(multidevice_setup_client);
 
   // Compute current status.
   status_ = ComputeStatus();
@@ -88,10 +87,7 @@ TetherControllerImpl::TetherControllerImpl(
   FetchVisibleTetherNetwork();
 }
 
-TetherControllerImpl::~TetherControllerImpl() {
-  phone_model_->RemoveObserver(this);
-  multidevice_setup_client_->RemoveObserver(this);
-}
+TetherControllerImpl::~TetherControllerImpl() = default;
 
 TetherController::Status TetherControllerImpl::GetStatus() const {
   PA_LOG(VERBOSE) << __func__ << ": status = " << status_;
@@ -145,7 +141,7 @@ void TetherControllerImpl::AttemptTurningOnTethering() {
   multidevice_setup_client_->SetFeatureEnabledState(
       Feature::kInstantTethering,
       /*enabled=*/true,
-      /*auth_token=*/absl::nullopt,
+      /*auth_token=*/std::nullopt,
       base::BindOnce(&TetherControllerImpl::OnSetFeatureEnabled,
                      weak_ptr_factory_.GetWeakPtr()));
 }
@@ -464,5 +460,4 @@ TetherController::Status TetherControllerImpl::ComputeStatus() const {
   return Status::kConnectionUnavailable;
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

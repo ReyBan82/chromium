@@ -4,6 +4,7 @@
 
 #include "components/enterprise/browser/reporting/cloud_profile_reporting_policy_handler.h"
 
+#include "base/command_line.h"
 #include "base/values.h"
 #include "components/enterprise/browser/reporting/common_pref_names.h"
 #include "components/policy/core/browser/policy_error_map.h"
@@ -33,8 +34,7 @@ bool CloudProfileReportingPolicyHandler::CheckPolicySettings(
   if (!TypeCheckingPolicyHandler::CheckPolicySettings(policies, errors))
     return false;
 
-  if (policy->source != policy::POLICY_SOURCE_CLOUD ||
-      policy->scope != policy::POLICY_SCOPE_USER) {
+  if (policy->scope != policy::POLICY_SCOPE_USER) {
     errors->AddError(policy_name(), IDS_POLICY_CLOUD_USER_ONLY_ERROR);
     return false;
   }

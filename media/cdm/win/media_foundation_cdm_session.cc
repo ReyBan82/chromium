@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/numerics/safe_conversions.h"
@@ -88,7 +89,7 @@ CdmKeysInfo ToCdmKeysInfo(const MFMediaKeyStatus* key_statuses, int count) {
   CdmKeysInfo keys_info;
   keys_info.reserve(count);
   for (int i = 0; i < count; ++i) {
-    const auto& key_status = key_statuses[i];
+    const auto& key_status = UNSAFE_TODO(key_statuses[i]);
 
     if (key_status.cbKeyId != sizeof(GUID)) {
       DLOG(ERROR) << __func__ << ": Key ID with unsupported size ignored";
@@ -132,8 +133,9 @@ class SessionCallbacks final
                           DWORD message_size,
                           LPCWSTR destination_url) final {
     DVLOG_FUNC(2) << ": message size=" << message_size;
-    message_cb_.Run(ToCdmMessageType(message_type),
-                    std::vector<uint8_t>(message, message + message_size));
+    message_cb_.Run(
+        ToCdmMessageType(message_type),
+        std::vector<uint8_t>(message, UNSAFE_TODO(message + message_size)));
     return S_OK;
   }
 
@@ -196,7 +198,7 @@ HRESULT MediaFoundationCdmSession::GenerateRequest(
     const std::vector<uint8_t>& init_data,
     SessionIdCB session_id_cb) {
   DVLOG_FUNC(1);
-  DCHECK(session_id_.empty() && !session_id_cb_);
+  CHECK((session_id_.empty() && !session_id_cb_));
 
   session_id_cb_ = std::move(session_id_cb);
 
@@ -258,7 +260,7 @@ void MediaFoundationCdmSession::OnSessionMessage(
   if (session_id_.empty() && !SetSessionId())
     return;
 
-  DCHECK(!session_id_.empty());
+  CHECK(!session_id_.empty());
   session_message_cb_.Run(session_id_, message_type, message);
 }
 
@@ -285,27 +287,27 @@ void MediaFoundationCdmSession::OnSessionKeysChange() {
   // ScopedCoMem<MFMediaKeyStatus> only releases memory for |key_statuses|. We
   // need to manually release memory for |pbKeyId| here.
   for (UINT i = 0; i < count; ++i) {
-    const auto& key_status = key_statuses[i];
+    const auto& key_status = UNSAFE_TODO(key_statuses[i]);
     if (key_status.pbKeyId)
       CoTaskMemFree(key_status.pbKeyId);
   }
 }
 
 bool MediaFoundationCdmSession::SetSessionId() {
-  DCHECK(session_id_.empty() && session_id_cb_);
+  CHECK((session_id_.empty() && session_id_cb_));
 
   base::win::ScopedCoMem<wchar_t> session_id;
   HRESULT hr = mf_cdm_session_->GetSessionId(&session_id);
   if (FAILED(hr) || !session_id) {
     bool success = std::move(session_id_cb_).Run("");
-    DCHECK(!success) << "Empty session ID should not be accepted";
+    CHECK(!success) << "Empty session ID should not be accepted";
     return false;
   }
 
   auto session_id_str = base::WideToUTF8(session_id.get());
   if (session_id_str.empty()) {
     bool success = std::move(session_id_cb_).Run("");
-    DCHECK(!success) << "Empty session ID should not be accepted";
+    CHECK(!success) << "Empty session ID should not be accepted";
     return false;
   }
 
@@ -321,13 +323,14 @@ bool MediaFoundationCdmSession::SetSessionId() {
 }
 
 HRESULT MediaFoundationCdmSession::UpdateExpirationIfNeeded() {
-  DCHECK(!session_id_.empty());
+  CHECK(!session_id_.empty());
 
   // Media Foundation CDM follows the EME spec where Time generally represents
   // an instant in time with millisecond accuracy.
   double new_expiration_ms = 0.0;
   RETURN_IF_FAILED(mf_cdm_session_->GetExpiration(&new_expiration_ms));
-  auto new_expiration = base::Time::FromJsTime(new_expiration_ms);
+  auto new_expiration =
+      base::Time::FromMillisecondsSinceUnixEpoch(new_expiration_ms);
 
   if (new_expiration == expiration_)
     return S_OK;

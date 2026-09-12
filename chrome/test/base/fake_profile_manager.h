@@ -27,7 +27,8 @@ class FilePath;
 //                   std::make_unique<FakeProfileManager>(user_data_dir));`
 class FakeProfileManager : public ProfileManagerWithoutInit {
  public:
-  explicit FakeProfileManager(const base::FilePath& user_data_dir);
+  explicit FakeProfileManager(const base::FilePath& user_data_dir,
+                              bool defer_async_loading = false);
   ~FakeProfileManager() override;
 
   // Allows subclasses to modify the TestingProfile creation. Used for both
@@ -35,7 +36,8 @@ class FakeProfileManager : public ProfileManagerWithoutInit {
   // `TestingProfile` initialized with `path` and `delegate`.
   virtual std::unique_ptr<TestingProfile> BuildTestingProfile(
       const base::FilePath& path,
-      Delegate* delegate);
+      Delegate* delegate,
+      Profile::CreateMode create_mode);
 
  protected:
   std::unique_ptr<Profile> CreateProfileHelper(

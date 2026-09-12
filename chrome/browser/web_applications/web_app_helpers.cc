@@ -4,25 +4,19 @@
 
 #include "chrome/browser/web_applications/web_app_helpers.h"
 
-#include "base/base64.h"
-#include "base/feature_list.h"
 #include "base/strings/strcat.h"
-#include "base/strings/string_number_conversions.h"
-#include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/web_applications/app_id_helpers.h"
+#include "chrome/browser/web_applications/proto/web_app_install_state.pb.h"
+#include "chrome/browser/web_applications/web_app.h"
 #include "chrome/browser/web_applications/web_app_provider.h"
 #include "chrome/browser/web_applications/web_app_registrar.h"
-#include "chrome/common/webui_url_constants.h"
 #include "components/crx_file/id_util.h"
-#include "components/password_manager/content/common/web_ui_constants.h"
-#include "components/prefs/pref_service.h"
-#include "content/public/common/content_features.h"
+#include "components/webapps/common/web_app_id.h"
 #include "crypto/sha2.h"
-#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/mojom/manifest/manifest.mojom.h"
 #include "url/gurl.h"
 #include "url/origin.h"
-#include "url/url_constants.h"
 
 namespace web_app {
 
@@ -35,102 +29,88 @@ namespace web_app {
 const char kCrxAppPrefix[] = "_crx_";
 
 std::string GenerateApplicationNameFromURL(const GURL& url) {
-  return base::StrCat({url.host_piece(), "_", url.path_piece()});
+  return base::StrCat({url.host(), "_", url.path()});
 }
 
-std::string GenerateApplicationNameFromAppId(const AppId& app_id) {
+std::string GenerateApplicationNameFromAppId(const webapps::AppId& app_id) {
   std::string t(kCrxAppPrefix);
   t.append(app_id);
   return t;
 }
 
-AppId GetAppIdFromApplicationName(const std::string& app_name) {
+webapps::AppId GetAppIdFromApplicationName(const std::string& app_name) {
   std::string prefix(kCrxAppPrefix);
   if (app_name.substr(0, prefix.length()) != prefix)
     return std::string();
   return app_name.substr(prefix.length());
 }
 
-AppId GenerateAppIdFromUnhashed(std::string unhashed_app_id) {
-  DCHECK_EQ(GURL(unhashed_app_id).spec(), unhashed_app_id);
-  // The app ID is hashed twice: here and in GenerateId.
-  // The double-hashing is for historical reasons and it needs to stay
-  // this way for backwards compatibility. (Back then, a web app's input to the
-  // hash needed to be formatted like an extension public key.)
-  return crx_file::id_util::GenerateId(
-      crypto::SHA256HashString(unhashed_app_id));
+webapps::AppId GenerateAppId(const std::optional<std::string>& manifest_id_path,
+                             const GURL& start_url) {
+  return internal::GenerateAppId(manifest_id_path, start_url);
 }
 
-std::string GenerateAppIdUnhashed(
-    const absl::optional<std::string>& manifest_id,
-    const GURL& start_url) {
-  // When manifest_id is specified, the app id is generated from
-  // <start_url_origin>/<manifest_id>.
-  // Note: start_url.DeprecatedGetOriginAsURL().spec() returns the origin ending
-  // with slash.
-  if (manifest_id.has_value()) {
-    GURL app_id(start_url.DeprecatedGetOriginAsURL().spec() +
-                manifest_id.value());
-    DCHECK(app_id.is_valid())
-        << "start_url: " << start_url << ", manifest_id = " << *manifest_id;
-    return app_id.spec();
-  }
-  return start_url.spec();
-}
-
-AppId GenerateAppId(const absl::optional<std::string>& manifest_id,
-                    const GURL& start_url) {
-  return GenerateAppIdFromUnhashed(
-      GenerateAppIdUnhashed(manifest_id, start_url));
-}
-
-std::string GenerateAppIdUnhashedFromManifest(
+webapps::AppId GenerateAppIdFromManifest(
     const blink::mojom::Manifest& manifest) {
-  return GenerateAppIdUnhashed(
-      manifest.id.has_value()
-          ? absl::optional<std::string>(base::UTF16ToUTF8(manifest.id.value()))
-          : absl::nullopt,
-      manifest.start_url);
+  return internal::GenerateAppIdFromManifest(manifest);
 }
 
-AppId GenerateAppIdFromManifest(const blink::mojom::Manifest& manifest) {
-  return GenerateAppIdFromUnhashed(GenerateAppIdUnhashedFromManifest(manifest));
+webapps::AppId GenerateAppIdFromManifestId(
+    const webapps::ManifestId& manifest_id) {
+  return internal::GenerateAppIdFromManifestId(manifest_id);
 }
 
-std::string GenerateRecommendedId(const GURL& start_url) {
-  if (!start_url.is_valid()) {
-    return base::EmptyString();
-  }
-
-  std::string full_url = start_url.spec();
-  std::string origin = start_url.DeprecatedGetOriginAsURL().spec();
-  DCHECK(!full_url.empty() && !origin.empty() &&
-         origin.size() <= full_url.size());
-  // Make recommended id starts with a leading slash so it's clear to developers
-  // that it's a root-relative url path. In reality it's always root-relative
-  // because the base_url is the origin.
-  return full_url.substr(origin.size() - 1);
+webapps::ManifestId GenerateManifestIdFromStartUrlOnly(const GURL& start_url) {
+  return internal::GenerateManifestIdFromStartUrlOnly(start_url);
 }
 
-bool IsValidWebAppUrl(const GURL& app_url) {
-  if (app_url.is_empty() || app_url.inner_url())
-    return false;
-
-  // TODO(crbug.com/1253234): Remove chrome-extension scheme.
-  return app_url.SchemeIs(url::kHttpScheme) ||
-         app_url.SchemeIs(url::kHttpsScheme) ||
-         app_url.SchemeIs("chrome-extension") ||
-         (app_url.SchemeIs("chrome") &&
-          (app_url.host() == password_manager::kChromeUIPasswordManagerHost));
+webapps::ManifestId GenerateManifestId(const std::string& manifest_id_path,
+                                       const GURL& start_url) {
+  return internal::GenerateManifestId(manifest_id_path, start_url);
 }
 
-absl::optional<AppId> FindInstalledAppWithUrlInScope(Profile* profile,
-                                                     const GURL& url,
-                                                     bool window_only) {
+std::optional<webapps::ManifestId> GenerateManifestIdUnsafe(
+    const std::string& manifest_id_path,
+    const GURL& start_url) {
+  return internal::GenerateManifestIdUnsafe(manifest_id_path, start_url);
+}
+
+std::optional<webapps::AppId> FindInstalledAppWithUrlInScope(Profile* profile,
+                                                             const GURL& url,
+                                                             bool window_only) {
   auto* provider = WebAppProvider::GetForLocalAppsUnchecked(profile);
-  return provider ? provider->registrar_unsafe().FindInstalledAppWithUrlInScope(
-                        url, window_only)
-                  : absl::nullopt;
+  return provider
+             ? provider->registrar_unsafe().FindBestAppWithUrlInScope(
+                   url, window_only
+                            ? web_app::WebAppFilter::OpensInDedicatedWindow()
+                            : web_app::WebAppFilter::InstalledInChrome())
+             : std::nullopt;
+}
+
+bool IsNonLocallyInstalledAppWithUrlInScope(Profile* profile, const GURL& url) {
+  if (auto* provider = WebAppProvider::GetForWebApps(profile)) {
+    FindBestAppInScopeOptions options(WebAppFilter::IsSuggestedApp());
+    options.eligibility_filter = WebAppFilter::IsAppSurfaceableToUser();
+    return provider->registrar_unsafe()
+        .FindBestAppWithUrlInScope(url, options)
+        .has_value();
+  }
+  return false;
+}
+
+bool LooksLikePlaceholder(const WebApp& app) {
+  for (const auto& [install_source, config] :
+       app.management_to_external_config_map()) {
+    if (config.is_placeholder) {
+      return true;
+    }
+    for (const GURL& install_url : config.install_urls) {
+      if (app.untranslated_name() == install_url.spec()) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace web_app

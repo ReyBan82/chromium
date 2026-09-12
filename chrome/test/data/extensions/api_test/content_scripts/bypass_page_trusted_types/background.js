@@ -4,20 +4,20 @@
 
 chrome.runtime.onConnect.addListener(port => {
   port.onMessage.addListener(msg => {
-    chrome.test.log("got message: " + msg);
-    if (msg === true)
+    chrome.test.log('got message: ' + msg);
+    if (msg === true) {
       chrome.test.notifyPass();
-    else
-      chrome.test.notifyFail("Expected message 'true', but got: " + msg);
+    } else {
+      chrome.test.notifyFail('Expected message \'true\', but got: ' + msg);
+    }
   });
 });
 
 chrome.test.getConfig(config => {
-  chrome.test.log("Creating tab...");
+  chrome.test.log('Creating tab...');
 
-  var testUrl =
-      "http://localhost:PORT/extensions/test_file_with_trusted_types.html"
-          .replace(/PORT/, config.testServer.port);
+  const testUrl = `http://localhost:${config.testServer.port}` +
+      '/extensions/test_file_with_trusted_types.html';
 
-  chrome.tabs.create({ url: testUrl });
+  chrome.tabs.create({url: testUrl});
 });

@@ -10,7 +10,7 @@
         `src/third_party/blink/web_tests/fast/`.
 1.  When the tests finish, any unexpected results should be displayed.
 
-See [Web Tests](testing/web_tests.md)
+See [Web Tests](web_tests.md)
 for full documentation about set up and available options.
 
 ## Pixel Tests
@@ -59,7 +59,7 @@ If `fast/dom/object-plugin-hides-properties.html` and
     using a chroot jail with Lucid 64-bit user space to be sure that your system
     matches the checked in baselines.  You can use `build/install-chroot.sh` to
     set up a Lucid 64 chroot. Learn more about
-    [using a linux chroot](linux/using_a_chroot.md).
+    [using a linux chroot](/docs/linux/using_a_chroot.md).
 
 ## Getting a web test into a debugger
 

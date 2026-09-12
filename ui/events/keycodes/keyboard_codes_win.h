@@ -2,14 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// IWYU pragma: private, include "ui/events/keycodes/keyboard_codes.h"
+
 #ifndef UI_EVENTS_KEYCODES_KEYBOARD_CODES_WIN_H_
 #define UI_EVENTS_KEYCODES_KEYBOARD_CODES_WIN_H_
+
+#include <cstdint>
 
 #include "ui/events/keycodes/keyboard_defines_win.h"
 
 namespace ui {
 
-enum KeyboardCode {
+enum KeyboardCode : uint8_t {
   VKEY_CANCEL = VK_CANCEL,
   VKEY_BACK = VK_BACK,
   VKEY_TAB = VK_TAB,
@@ -90,6 +94,7 @@ enum KeyboardCode {
   VKEY_COMMAND = VKEY_LWIN,  // Provide the Mac name for convenience.
   VKEY_RWIN = VK_RWIN,
   VKEY_APPS = VK_APPS,
+  VKEY_RIGHT_COMMAND = VKEY_APPS,  // Provide the Mac name for convenience.
   VKEY_SLEEP = VK_SLEEP,
   VKEY_NUMPAD0 = VK_NUMPAD0,
   VKEY_NUMPAD1 = VK_NUMPAD1,

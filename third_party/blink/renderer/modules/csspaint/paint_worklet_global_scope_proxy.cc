@@ -35,25 +35,18 @@ PaintWorkletGlobalScopeProxy::PaintWorkletGlobalScopeProxy(
   reporting_proxy_ = std::make_unique<MainThreadWorkletReportingProxy>(window);
 
   String global_scope_name =
-      StringView("PaintWorklet #") + String::Number(global_scope_number);
+      StrCat({"PaintWorklet #", String::Number(global_scope_number)});
 
   LocalFrameClient* frame_client = frame->Client();
-  const String user_agent =
-      RuntimeEnabledFeatures::SendFullUserAgentAfterReductionEnabled(window)
-          ? frame_client->FullUserAgent()
-      : RuntimeEnabledFeatures::UserAgentReductionEnabled(window)
-          ? frame_client->ReducedUserAgent()
-          : frame_client->UserAgent();
-
   auto creation_params = std::make_unique<GlobalScopeCreationParams>(
       window->Url(), mojom::blink::ScriptType::kModule, global_scope_name,
-      user_agent, frame_client->UserAgentMetadata(),
-      frame_client->CreateWorkerFetchContext(),
+      frame_client->UserAgent(), frame_client->UserAgentMetadata(),
+      frame_client->CreateWorkletFetchContext(),
       mojo::Clone(window->GetContentSecurityPolicy()->GetParsedPolicies()),
       Vector<network::mojom::blink::ContentSecurityPolicyPtr>(),
-      window->GetReferrerPolicy(), window->GetSecurityOrigin(),
-      window->IsSecureContext(), window->GetHttpsState(),
-      nullptr /* worker_clients */,
+      window->GetReferrerPolicy(), DocumentPolicy::DocumentPolicyBundle{},
+      window->GetSecurityOrigin(), window->IsSecureContext(),
+      window->GetHttpsState(), nullptr /* worker_clients */,
       frame_client->CreateWorkerContentSettingsClient(),
       OriginTrialContext::GetInheritedTrialFeatures(window).get(),
       base::UnguessableToken::Create(), nullptr /* worker_settings */,

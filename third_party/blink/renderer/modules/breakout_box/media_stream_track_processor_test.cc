@@ -16,11 +16,13 @@
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_tester.h"
 #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_readable_stream_read_result.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_media_stream_track_generator_init.h"
 #include "third_party/blink/renderer/core/streams/readable_stream.h"
 #include "third_party/blink/renderer/core/streams/readable_stream_default_reader.h"
 #include "third_party/blink/renderer/core/streams/writable_stream.h"
 #include "third_party/blink/renderer/core/streams/writable_stream_default_writer.h"
+#include "third_party/blink/renderer/modules/breakout_box/frame_queue_underlying_source.h"
 #include "third_party/blink/renderer/modules/breakout_box/media_stream_track_generator.h"
 #include "third_party/blink/renderer/modules/breakout_box/metrics.h"
 #include "third_party/blink/renderer/modules/breakout_box/pushable_media_stream_audio_source.h"
@@ -36,7 +38,10 @@
 #include "third_party/blink/renderer/platform/mediastream/media_stream_audio_track.h"
 #include "third_party/blink/renderer/platform/mediastream/media_stream_component_impl.h"
 #include "third_party/blink/renderer/platform/mediastream/media_stream_source.h"
+#include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
 #include "third_party/blink/renderer/platform/testing/io_task_runner_testing_platform_support.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
+#include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 
 using testing::_;
 
@@ -90,6 +95,17 @@ MediaStreamTrack* CreateAudioMediaStreamTrack(
 
 }  // namespace
 
+class TestVideoFrameQueueUnderlyingSource
+    : public VideoFrameQueueUnderlyingSource {
+ public:
+  using VideoFrameQueueUnderlyingSource::ClearTransferredSource;
+  using VideoFrameQueueUnderlyingSource::TransferSource;
+  using VideoFrameQueueUnderlyingSource::VideoFrameQueueUnderlyingSource;
+
+  bool StartFrameDelivery() override { return true; }
+  void StopFrameDelivery() override {}
+};
+
 class MediaStreamTrackProcessorTest : public testing::Test {
  public:
   ~MediaStreamTrackProcessorTest() override {
@@ -98,14 +114,15 @@ class MediaStreamTrackProcessorTest : public testing::Test {
   }
 
  protected:
+  test::TaskEnvironment task_environment_;
   ScopedTestingPlatformSupport<IOTaskRunnerTestingPlatformSupport> platform_;
 
- private:
   void RunIOUntilIdle() const {
     // Make sure that tasks on IO thread are completed before moving on.
     base::RunLoop run_loop;
-    Platform::Current()->GetIOTaskRunner()->PostTaskAndReply(
-        FROM_HERE, base::BindOnce([] {}), run_loop.QuitClosure());
+    PostCrossThreadTaskAndReply(*Platform::Current()->GetIOTaskRunner(),
+                                FROM_HERE, CrossThreadBindOnce([] {}),
+                                CrossThreadOnceClosure(run_loop.QuitClosure()));
     run_loop.Run();
     base::RunLoop().RunUntilIdle();
   }
@@ -423,6 +440,224 @@ TEST_F(MediaStreamTrackProcessorTest, AudioNoCloseOnTrackDisable) {
   track->setEnabled(false);
 
   EXPECT_FALSE(readable->IsClosed());
+}
+
+TEST_F(MediaStreamTrackProcessorTest, VideoStats) {
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  ExceptionState& exception_state = v8_scope.GetExceptionState();
+  PushableMediaStreamVideoSource* pushable_video_source =
+      CreatePushableVideoSource();
+
+  // Use a small buffer size to test discardedFrames.
+  const uint16_t buffer_size = 2;
+  MediaStreamTrackProcessor* track_processor =
+      MediaStreamTrackProcessor::Create(
+          script_state,
+          CreateVideoMediaStreamTrack(v8_scope.GetExecutionContext(),
+                                      pushable_video_source),
+          buffer_size, exception_state);
+
+  EXPECT_EQ(track_processor->totalFrames(), 0u);
+  EXPECT_EQ(track_processor->discardedFrames(), 0u);
+
+  // Accessing the readable connects it to the track.
+  track_processor->readable(script_state);
+
+  // Deliver frames.
+  scoped_refptr<media::VideoFrame> frame =
+      media::VideoFrame::CreateBlackFrame(gfx::Size(10, 5));
+
+  for (int i = 1; i <= 4; ++i) {
+    pushable_video_source->PushFrame(frame, base::TimeTicks());
+    RunIOUntilIdle();
+    EXPECT_EQ(track_processor->totalFrames(), static_cast<uint64_t>(i));
+    EXPECT_EQ(track_processor->discardedFrames(),
+              i > buffer_size ? static_cast<uint64_t>(i - buffer_size) : 0u);
+  }
+}
+
+TEST_F(MediaStreamTrackProcessorTest, StatsForDirectPushesToTransferredSource) {
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+
+  // Create source A and source B.
+  auto* source_a = MakeGarbageCollected<TestVideoFrameQueueUnderlyingSource>(
+      script_state, 10u, "device_id", 10u, std::nullopt);
+  auto* source_b = MakeGarbageCollected<TestVideoFrameQueueUnderlyingSource>(
+      script_state, 10u, "device_id", 10u, std::nullopt);
+
+  scoped_refptr<media::VideoFrame> frame =
+      media::VideoFrame::CreateBlackFrame(gfx::Size(10, 5));
+  source_a->QueueFrame(frame);
+  source_a->QueueFrame(frame);
+
+  // Transfer A to B.
+  source_a->TransferSource(source_b);
+
+  EXPECT_EQ(source_a->TotalFrames(), 2u);
+  EXPECT_EQ(source_b->TotalFrames(), 0u);
+
+  // Push a frame to A (forwarded to B).
+  source_a->QueueFrame(frame);
+
+  EXPECT_EQ(source_a->TotalFrames(), 3u);
+  EXPECT_EQ(source_b->TotalFrames(), 1u);
+
+  // Now push a frame directly to Source B.
+  source_b->QueueFrame(frame);
+
+  // Verify that Source A's TotalFrames() includes it.
+  EXPECT_EQ(source_a->TotalFrames(), 4u);
+  EXPECT_EQ(source_b->TotalFrames(), 2u);
+}
+
+TEST_F(MediaStreamTrackProcessorTest, ClearTransferredSourceStopsTransfer) {
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+
+  auto* source_a = MakeGarbageCollected<TestVideoFrameQueueUnderlyingSource>(
+      script_state, 10u, "device_id", 10u, std::nullopt);
+  auto* source_b = MakeGarbageCollected<TestVideoFrameQueueUnderlyingSource>(
+      script_state, 10u, "device_id", 10u, std::nullopt);
+
+  scoped_refptr<media::VideoFrame> frame =
+      media::VideoFrame::CreateBlackFrame(gfx::Size(10, 5));
+
+  source_a->TransferSource(source_b);
+  source_a->QueueFrame(frame);
+  EXPECT_EQ(source_b->TotalFrames(), 1u);
+
+  // Clearing the transferred source stops forwarding.
+  source_a->ClearTransferredSource();
+  source_a->QueueFrame(frame);
+  EXPECT_EQ(source_b->TotalFrames(), 1u);
+}
+
+TEST_F(MediaStreamTrackProcessorTest, TransferAfterClearDoesNotTransfer) {
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+
+  auto* source_a = MakeGarbageCollected<TestVideoFrameQueueUnderlyingSource>(
+      script_state, 10u, "device_id", 10u, std::nullopt);
+  auto* source_b = MakeGarbageCollected<TestVideoFrameQueueUnderlyingSource>(
+      script_state, 10u, "device_id", 10u, std::nullopt);
+
+  // ClearTransferredSource called before TransferSource (simulates Worker
+  // ContextDestroyed running before Main processes TransferSource).
+  source_a->ClearTransferredSource();
+
+  source_a->TransferSource(source_b);
+
+  scoped_refptr<media::VideoFrame> frame =
+      media::VideoFrame::CreateBlackFrame(gfx::Size(10, 5));
+  source_a->QueueFrame(frame);
+
+  // Frame should not be forwarded to source B because the destination was
+  // already cleared.
+  EXPECT_EQ(source_b->TotalFrames(), 0u);
+  EXPECT_EQ(source_a->DiscardedFrames(), 1u);
+}
+
+TEST_F(MediaStreamTrackProcessorTest, AudioStats) {
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  ExceptionState& exception_state = v8_scope.GetExceptionState();
+  std::unique_ptr<PushableMediaStreamAudioSource> pushable_audio_source =
+      CreatePushableAudioSource();
+  auto* pushable_source_ptr = pushable_audio_source.get();
+
+  // Use a small buffer size to test discardedFrames.
+  const uint16_t buffer_size = 2;
+  MediaStreamTrackProcessor* track_processor =
+      MediaStreamTrackProcessor::Create(
+          script_state,
+          CreateAudioMediaStreamTrack(v8_scope.GetExecutionContext(),
+                                      std::move(pushable_audio_source)),
+          buffer_size, exception_state);
+
+  EXPECT_EQ(track_processor->totalFrames(), 0u);
+  EXPECT_EQ(track_processor->discardedFrames(), 0u);
+
+  // Accessing the readable connects it to the track.
+  track_processor->readable(script_state);
+
+  // Deliver data.
+  auto audio_data = media::AudioBuffer::CreateEmptyBuffer(
+      media::ChannelLayout::CHANNEL_LAYOUT_STEREO, /*channel_count=*/2,
+      /*sample_rate=*/8000,
+      /*frame_count=*/100, base::Seconds(1));
+
+  for (int i = 1; i <= 3; ++i) {
+    pushable_source_ptr->PushAudioData(audio_data);
+    RunIOUntilIdle();
+    EXPECT_EQ(track_processor->totalFrames(), static_cast<uint64_t>(i));
+    EXPECT_EQ(track_processor->discardedFrames(),
+              i > buffer_size ? static_cast<uint64_t>(i - buffer_size) : 0u);
+  }
+}
+
+TEST_F(MediaStreamTrackProcessorTest, StatsAccessibleAfterClose) {
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  ExceptionState& exception_state = v8_scope.GetExceptionState();
+  PushableMediaStreamVideoSource* pushable_video_source =
+      CreatePushableVideoSource();
+
+  MediaStreamTrack* track = CreateVideoMediaStreamTrack(
+      v8_scope.GetExecutionContext(), pushable_video_source);
+
+  MediaStreamTrackProcessor* track_processor =
+      MediaStreamTrackProcessor::Create(script_state, track, exception_state);
+
+  EXPECT_EQ(track_processor->totalFrames(), 0u);
+
+  track_processor->readable(script_state);
+
+  scoped_refptr<media::VideoFrame> frame =
+      media::VideoFrame::CreateBlackFrame(gfx::Size(10, 5));
+  pushable_video_source->PushFrame(frame, base::TimeTicks());
+  RunIOUntilIdle();
+
+  EXPECT_EQ(track_processor->totalFrames(), 1u);
+
+  track->stopTrack(v8_scope.GetExecutionContext());
+  RunIOUntilIdle();
+
+  EXPECT_EQ(track_processor->totalFrames(), 1u);
+}
+
+TEST_F(MediaStreamTrackProcessorTest, AudioStatsAccessibleAfterClose) {
+  V8TestingScope v8_scope;
+  ScriptState* script_state = v8_scope.GetScriptState();
+  ExceptionState& exception_state = v8_scope.GetExceptionState();
+  std::unique_ptr<PushableMediaStreamAudioSource> pushable_audio_source =
+      CreatePushableAudioSource();
+  auto* pushable_source_ptr = pushable_audio_source.get();
+
+  MediaStreamTrack* track = CreateAudioMediaStreamTrack(
+      v8_scope.GetExecutionContext(), std::move(pushable_audio_source));
+
+  MediaStreamTrackProcessor* track_processor =
+      MediaStreamTrackProcessor::Create(script_state, track, exception_state);
+
+  EXPECT_EQ(track_processor->totalFrames(), 0u);
+
+  track_processor->readable(script_state);
+
+  auto audio_data = media::AudioBuffer::CreateEmptyBuffer(
+      media::ChannelLayout::CHANNEL_LAYOUT_STEREO, /*channel_count=*/2,
+      /*sample_rate=*/8000,
+      /*frame_count=*/100, base::Seconds(1));
+  pushable_source_ptr->PushAudioData(audio_data);
+  RunIOUntilIdle();
+
+  EXPECT_EQ(track_processor->totalFrames(), 1u);
+
+  track->stopTrack(v8_scope.GetExecutionContext());
+  RunIOUntilIdle();
+
+  EXPECT_EQ(track_processor->totalFrames(), 1u);
 }
 
 }  // namespace blink

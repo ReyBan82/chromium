@@ -38,9 +38,7 @@ class URLLoaderThrottle : public blink::URLLoaderThrottle,
       net::RedirectInfo* redirect_info,
       const network::mojom::URLResponseHead& response_head,
       bool* defer,
-      std::vector<std::string>* headers_to_remove,
-      net::HttpRequestHeaders* modified_headers,
-      net::HttpRequestHeaders* modified_cors_exempt_headers) override;
+      network::HttpRequestHeadersUpdateParams* headers_update_params) override;
   void WillProcessResponse(const GURL& response_url,
                            network::mojom::URLResponseHead* response_head,
                            bool* defer) override;
@@ -57,7 +55,12 @@ class URLLoaderThrottle : public blink::URLLoaderThrottle,
 
   // Information about the current request.
   GURL request_url_;
+  // Refers to the "last" referrer in the redirect chain.
   GURL request_referrer_;
+  // The origin that initiated the request. May be empty for browser-initiated
+  // requests. See network::ResourceRequest::request_initiator for details.
+  std::optional<url::Origin> request_initiator_;
+  std::optional<url::Origin> request_top_frame_origin_;
   net::HttpRequestHeaders request_headers_;
   net::HttpRequestHeaders request_cors_exempt_headers_;
   network::mojom::RequestDestination request_destination_ =

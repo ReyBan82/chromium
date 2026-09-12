@@ -4,32 +4,39 @@
 
 #include "chrome/browser/ash/policy/core/device_local_account_external_cache.h"
 
+#include <initializer_list>
+#include <iomanip>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
+#include "base/check_op.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
+#include "base/location.h"
+#include "base/logging.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
+#include "base/sequence_checker.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/current_thread.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/test_future.h"
+#include "base/time/time.h"
 #include "base/values.h"
-#include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/ash/crosapi/crosapi_manager.h"
-#include "chrome/browser/ash/crosapi/idle_service_ash.h"
-#include "chrome/browser/ash/crosapi/test_crosapi_dependency_registry.h"
 #include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
+#include "chrome/browser/chromeos/extensions/external_loader/device_local_account_external_policy_loader.h"
 #include "chrome/browser/extensions/external_provider_impl.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
-#include "chromeos/ash/components/login/login_state/login_state.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_utils.h"
 #include "extensions/browser/external_install_info.h"
@@ -38,7 +45,9 @@
 #include "extensions/browser/updater/extension_update_found_test_observer.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_urls.h"
+#include "extensions/common/mojom/manifest.mojom-shared.h"
 #include "services/data_decoder/public/cpp/test_support/in_process_data_decoder.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -146,9 +155,9 @@ class TrackingProxyTaskRunner : public base::SingleThreadTaskRunner {
 
 void AddExtensionToDictionary(const std::string& extension_id,
                               const std::string& update_url,
-                              base::Value::Dict& dict) {
-  base::Value::Dict value;
-  value.Set(extensions::ExternalProviderImpl::kExternalUpdateUrl, update_url);
+                              base::DictValue& dict) {
+  auto value = base::DictValue().Set(
+      extensions::ExternalProviderImpl::kExternalUpdateUrl, update_url);
   dict.Set(extension_id, std::move(value));
 }
 
@@ -181,8 +190,8 @@ class DeviceLocalAccountExternalCacheTest : public testing::Test {
           base::MakeRefCounted<network::WeakWrapperSharedURLLoaderFactory>(
               &test_url_loader_factory_)};
   base::FilePath test_dir_;
-  std::unique_ptr<crosapi::CrosapiManager> crosapi_manager_;
 
+  scoped_refptr<DeviceLocalAccountExternalPolicyLoader> extension_loader_;
   std::unique_ptr<DeviceLocalAccountExternalCache> external_cache_;
   MockExternalPolicyProviderVisitor visitor_;
   std::unique_ptr<extensions::ExternalProviderImpl> provider_;
@@ -203,16 +212,24 @@ void DeviceLocalAccountExternalCacheTest::SetUp() {
   ASSERT_TRUE(base::PathService::Get(chrome::DIR_TEST_DATA, &test_dir_));
 
   ASSERT_TRUE(testing_profile_manager_.SetUp());
-  ash::LoginState::Initialize();
-  crosapi::IdleServiceAsh::DisableForTesting();
   Profile* profile = testing_profile_manager_.CreateTestingProfile("Default");
-  crosapi_manager_ = crosapi::CreateCrosapiManagerWithTestRegistry();
 
-  external_cache_ =
-      std::make_unique<DeviceLocalAccountExternalCache>(kAccountId, cache_dir_);
+  extension_loader_ =
+      base::MakeRefCounted<chromeos::DeviceLocalAccountExternalPolicyLoader>();
+
+  external_cache_ = std::make_unique<DeviceLocalAccountExternalCache>(
+      TestingBrowserProcess::GetGlobal()->shared_url_loader_factory(),
+      /*loader=*/
+      base::BindRepeating(
+          [](scoped_refptr<chromeos::DeviceLocalAccountExternalPolicyLoader>
+                 loader,
+             const std::string&, base::DictValue cached_extensions) {
+            loader->OnExtensionListsUpdated(cached_extensions);
+          },
+          extension_loader_),
+      kAccountId, cache_dir_);
   provider_ = std::make_unique<extensions::ExternalProviderImpl>(
-      &visitor_, external_cache_->GetExtensionLoader(), profile,
-      ManifestLocation::kExternalPolicy,
+      &visitor_, extension_loader_, profile, ManifestLocation::kExternalPolicy,
       ManifestLocation::kExternalPolicyDownload,
       extensions::Extension::NO_FLAGS);
 
@@ -220,9 +237,8 @@ void DeviceLocalAccountExternalCacheTest::SetUp() {
 }
 
 void DeviceLocalAccountExternalCacheTest::TearDown() {
-  crosapi_manager_.reset();
+  provider_.reset();
   testing_profile_manager_.DeleteAllTestingProfiles();
-  ash::LoginState::Shutdown();
   TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(nullptr);
 }
 
@@ -242,8 +258,8 @@ base::FilePath DeviceLocalAccountExternalCacheTest::SimulateExtensionDownload(
         extension_update_found_observer) {
   // Return a manifest to the downloader.
   std::string manifest;
-  EXPECT_TRUE(base::ReadFileToString(test_dir_.Append(kExtensionUpdateManifest),
-                                     &manifest));
+  EXPECT_TRUE(
+      base::ReadFileToString(test_dir_.Append(manifest_file), &manifest));
 
   auto* pending_request = test_url_loader_factory_.GetPendingRequest(0);
   test_url_loader_factory_.AddResponse(pending_request->request.url.spec(),
@@ -261,7 +277,7 @@ base::FilePath DeviceLocalAccountExternalCacheTest::SimulateExtensionDownload(
                                        "Content is irrelevant.");
 
   return cache_dir_.Append(
-      base::StringPrintf("%s-%s.crx", kExtensionId, kExtensionCRXVersion));
+      base::StringPrintf("%s-%s.crx", id.c_str(), kExtensionCRXVersion));
 }
 
 // Verifies that when the cache is not explicitly started, the loader does not
@@ -269,7 +285,7 @@ base::FilePath DeviceLocalAccountExternalCacheTest::SimulateExtensionDownload(
 // is manually requested.
 TEST_F(DeviceLocalAccountExternalCacheTest, CacheNotStarted) {
   // Manually request a load.
-  external_cache_->GetExtensionLoader()->StartLoading();
+  extension_loader_->StartLoading();
 
   EXPECT_FALSE(external_cache_->IsCacheRunning());
 }
@@ -280,7 +296,7 @@ TEST_F(DeviceLocalAccountExternalCacheTest, ForceInstallListEmpty) {
   EXPECT_CALL(visitor_, OnExternalProviderReady(provider_.get())).Times(1);
   external_cache_->StartCache(
       base::SingleThreadTaskRunner::GetCurrentDefault());
-  external_cache_->UpdateExtensionsList(base::Value::Dict());
+  external_cache_->UpdateExtensionsList(base::DictValue());
   base::RunLoop().RunUntilIdle();
   VerifyAndResetVisitorCallExpectations();
 
@@ -301,7 +317,7 @@ TEST_F(DeviceLocalAccountExternalCacheTest, ForceInstallListEmpty) {
 // extension.
 TEST_F(DeviceLocalAccountExternalCacheTest, ForceInstallListSet) {
   extensions::ExtensionUpdateFoundTestObserver extension_update_found_observer;
-  base::Value::Dict dict;
+  base::DictValue dict;
   AddExtensionToDictionary(kExtensionId,
                            extension_urls::GetWebstoreUpdateUrl().spec(), dict);
 
@@ -349,5 +365,6 @@ TEST_F(DeviceLocalAccountExternalCacheTest, ForceInstallListSet) {
   shutdown_run_loop.Run();
   EXPECT_FALSE(cache_task_runner->has_pending_tasks());
 }
+
 
 }  // namespace chromeos

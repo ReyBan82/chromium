@@ -21,12 +21,16 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_HASH_FUNCTIONS_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_HASH_FUNCTIONS_H_
 
+#include <cstddef>
 #include <stdint.h>
+
+#include <concepts>
+#include <cstddef>
 #include <type_traits>
 
 #include "base/bit_cast.h"
 
-namespace WTF {
+namespace blink {
 
 namespace internal {
 
@@ -55,8 +59,8 @@ using IntHashBits = typename IntTypes<sizeof(T)>::UnsignedType;
 // Hash functions for integral and enum types.
 
 // Thomas Wang's 32 Bit Mix Function:
-// http://www.cris.com/~Ttwang/tech/inthash.htm
-inline unsigned HashInt(uint32_t key) {
+// https://web.archive.org/web/20060507103516/http://www.cris.com/~Ttwang/tech/inthash.htm
+constexpr uint32_t HashInt(uint32_t key) {
   key += ~(key << 15);
   key ^= (key >> 10);
   key += (key << 3);
@@ -66,19 +70,19 @@ inline unsigned HashInt(uint32_t key) {
   return key;
 }
 
-inline unsigned HashInt(uint16_t key16) {
+constexpr uint32_t HashInt(uint16_t key16) {
   uint32_t key = key16;
   return HashInt(key);
 }
 
-inline unsigned HashInt(uint8_t key8) {
+constexpr uint32_t HashInt(uint8_t key8) {
   uint32_t key = key8;
   return HashInt(key);
 }
 
 // Thomas Wang's 64 bit Mix Function:
-// http://www.cris.com/~Ttwang/tech/inthash.htm
-inline unsigned HashInt(uint64_t key) {
+// https://web.archive.org/web/20060507103516/http://www.cris.com/~Ttwang/tech/inthash.htm
+constexpr uint32_t HashInt(uint64_t key) {
   key += ~(key << 32);
   key ^= (key >> 22);
   key += ~(key << 13);
@@ -87,58 +91,68 @@ inline unsigned HashInt(uint64_t key) {
   key ^= (key >> 15);
   key += ~(key << 27);
   key ^= (key >> 31);
-  return static_cast<unsigned>(key);
+  return static_cast<uint32_t>(key);
 }
 
 }  // namespace internal
 
 // Compound integer hash method:
 // http://opendatastructures.org/versions/edition-0.1d/ods-java/node33.html#SECTION00832000000000000000
-inline unsigned HashInts(unsigned key1, unsigned key2) {
-  unsigned short_random1 = 277951225;          // A random 32-bit value.
-  unsigned short_random2 = 95187966;           // A random 32-bit value.
+constexpr uint32_t HashInts(uint32_t key1, uint32_t key2) {
+  uint32_t short_random1 = 277951225;          // A random 32-bit value.
+  uint32_t short_random2 = 95187966;           // A random 32-bit value.
   uint64_t long_random = 19248658165952623LL;  // A random, odd 64-bit value.
 
   uint64_t product =
       long_random * short_random1 * key1 + long_random * short_random2 * key2;
-  unsigned high_bits = static_cast<unsigned>(
-      product >> (8 * (sizeof(uint64_t) - sizeof(unsigned))));
+  uint32_t high_bits = static_cast<uint32_t>(
+      product >> (8 * (sizeof(uint64_t) - sizeof(uint32_t))));
   return high_bits;
 }
 
 template <typename T>
-unsigned HashInt(T key) {
-  static_assert(std::is_integral_v<T> || std::is_enum_v<T>);
+  requires(std::integral<T> || std::is_enum_v<T>)
+constexpr uint32_t HashInt(T key) {
   return internal::HashInt(static_cast<internal::IntHashBits<T>>(key));
 }
 
 template <typename T>
-unsigned HashFloat(T key) {
-  static_assert(std::is_floating_point_v<T>);
-  return internal::HashInt(base::bit_cast<internal::IntHashBits<T>>(key));
+  requires std::floating_point<T>
+constexpr T NormalizeSign(T number) {
+  // Converts -0.0 to 0.0, so that they have the same hash value.
+  return number + T{0};
 }
 
 template <typename T>
-bool FloatEqualForHash(T a, T b) {
-  static_assert(std::is_floating_point_v<T>);
-  return base::bit_cast<internal::IntHashBits<T>>(a) ==
-         base::bit_cast<internal::IntHashBits<T>>(b);
+  requires std::floating_point<T>
+constexpr uint32_t HashFloat(T key) {
+  return internal::HashInt(
+      base::bit_cast<internal::IntHashBits<T>>(NormalizeSign(key)));
 }
 
 template <typename T>
-unsigned HashPointer(T* key) {
-  return HashInt(base::bit_cast<internal::IntHashBits<T*>>(key));
+  requires std::floating_point<T>
+constexpr bool FloatEqualForHash(T a, T b) {
+  return base::bit_cast<internal::IntHashBits<T>>(NormalizeSign(a)) ==
+         base::bit_cast<internal::IntHashBits<T>>(NormalizeSign(b));
+}
+
+template <typename T>
+inline uint32_t HashPointer(T* key) {
+  return HashInt(reinterpret_cast<internal::IntHashBits<T*>>(key));
 }
 
 // Useful compounding hash functions.
-inline void AddIntToHash(unsigned& hash, unsigned key) {
+constexpr void AddIntToHash(uint32_t& hash, uint32_t key) {
   hash = ((hash << 5) + hash) + key;  // Djb2
 }
 
-inline void AddFloatToHash(unsigned& hash, float value) {
+// Normalizes -0.0 to +0.0 to reduce risk of hash and value comparisons
+// mismatching.
+constexpr void AddFloatToHash(uint32_t& hash, float value) {
   AddIntToHash(hash, HashFloat(value));
 }
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_HASH_FUNCTIONS_H_

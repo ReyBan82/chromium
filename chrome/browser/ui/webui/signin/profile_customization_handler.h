@@ -5,13 +5,12 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_SIGNIN_PROFILE_CUSTOMIZATION_HANDLER_H_
 #define CHROME_BROWSER_UI_WEBUI_SIGNIN_PROFILE_CUSTOMIZATION_HANDLER_H_
 
-#include "content/public/browser/web_ui_message_handler.h"
-
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/scoped_observation.h"
 #include "chrome/browser/profiles/profile_attributes_storage.h"
+#include "content/public/browser/web_ui_message_handler.h"
 
 class Profile;
 class ProfileAttributesEntry;
@@ -46,21 +45,20 @@ class ProfileCustomizationHandler : public content::WebUIMessageHandler,
   void OnProfileHighResAvatarLoaded(
       const base::FilePath& profile_path) override;
   void OnProfileThemeColorsChanged(const base::FilePath& profile_path) override;
-  void OnProfileHostedDomainChanged(
-      const base::FilePath& profile_path) override;
+  void OnProfileIsManagedChanged(const base::FilePath& profile_path) override;
   void OnProfileNameChanged(const base::FilePath& profile_path,
                             const std::u16string& old_profile_name) override;
 
  private:
-  friend class ProfilePickerLocalProfileCreationDialogBrowserTest;
+  friend class ProfilePickerCreationFlowBrowserTest;
 
   // Handlers for messages from javascript.
-  void HandleInitialized(const base::Value::List& args);
-  void HandleGetAvailableIcons(const base::Value::List& args);
-  void HandleDone(const base::Value::List& args);
-  void HandleSkip(const base::Value::List& args);
-  void HandleDeleteProfile(const base::Value::List& args);
-  void HandleSetAvatarIcon(const base::Value::List& args);
+  void HandleInitialized(const base::ListValue& args);
+  void HandleGetAvailableIcons(const base::ListValue& args);
+  void HandleDone(const base::ListValue& args);
+  void HandleSkip(const base::ListValue& args);
+  void HandleDeleteProfile(const base::ListValue& args);
+  void HandleSetAvatarIcon(const base::ListValue& args);
 
   // Sends an updated profile info (avatar and colors) to the WebUI.
   // `profile_path` is the path of the profile being updated, this function does
@@ -68,7 +66,7 @@ class ProfileCustomizationHandler : public content::WebUIMessageHandler,
   void UpdateProfileInfo(const base::FilePath& profile_path);
 
   // Computes the profile info (avatar and colors) to be sent to the WebUI.
-  base::Value::Dict GetProfileInfoValue();
+  base::DictValue GetProfileInfoValue();
 
   // Returns the ProfilesAttributesEntry associated with the current profile.
   ProfileAttributesEntry* GetProfileEntry() const;

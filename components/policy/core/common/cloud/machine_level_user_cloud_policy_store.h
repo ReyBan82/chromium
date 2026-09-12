@@ -27,6 +27,7 @@ class POLICY_EXPORT MachineLevelUserCloudPolicyStore
       const base::FilePath& external_policy_info_path,
       const base::FilePath& policy_path,
       const base::FilePath& key_path,
+      const std::string& policy_type,
       scoped_refptr<base::SequencedTaskRunner> background_task_runner);
   MachineLevelUserCloudPolicyStore(const MachineLevelUserCloudPolicyStore&) =
       delete;
@@ -43,12 +44,22 @@ class POLICY_EXPORT MachineLevelUserCloudPolicyStore
       const base::FilePath& policy_dir,
       scoped_refptr<base::SequencedTaskRunner> background_task_runner);
 
+  // Creates a MachineLevelUserCloudPolicyStore instance for extension install
+  // policy. |external_policy_path| must be a secure location because no
+  // signature validations are made on it.
+  static std::unique_ptr<MachineLevelUserCloudPolicyStore>
+  CreateForExtensionInstall(
+      const DMToken& machine_dm_token,
+      const std::string& machine_client_id,
+      const base::FilePath& policy_dir,
+      scoped_refptr<base::SequencedTaskRunner> background_task_runner);
+
   // override DesktopCloudPolicyStore
   void LoadImmediately() override;
   void Load() override;
 
   // override UserCloudPolicyStoreBase
-  std::unique_ptr<UserCloudPolicyValidator> CreateValidator(
+  std::unique_ptr<CloudPolicyValidatorBase> CreateValidator(
       std::unique_ptr<enterprise_management::PolicyFetchResponse> policy,
       CloudPolicyValidatorBase::ValidateTimestampOption option) override;
 
@@ -60,6 +71,10 @@ class POLICY_EXPORT MachineLevelUserCloudPolicyStore
   // No DM token can be fetched from server or read from disk. Finish
   // initialization with empty policy data.
   void InitWithoutToken();
+
+  const std::string& machine_client_id() const { return machine_client_id_; }
+
+  const DMToken& machine_dm_token() const { return machine_dm_token_; }
 
  private:
   // Function used as a PolicyLoadFilter to use external policies if they are
@@ -78,7 +93,7 @@ class POLICY_EXPORT MachineLevelUserCloudPolicyStore
       std::unique_ptr<enterprise_management::PolicyFetchResponse> policy,
       std::unique_ptr<enterprise_management::PolicySigningKey> key,
       bool validate_in_background,
-      UserCloudPolicyValidator::CompletionCallback callback) override;
+      CloudPolicyValidatorBase::CompletionCallback callback) override;
 
   DMToken machine_dm_token_;
   std::string machine_client_id_;

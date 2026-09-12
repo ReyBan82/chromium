@@ -1,39 +1,18 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
+
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 import java.lang.reflect.Method;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
 import java.util.AbstractList;
 import java.util.AbstractMap;
 import java.util.AbstractSet;
@@ -55,11 +34,8 @@ public final class Internal {
 
   private Internal() {}
 
-  static final Charset US_ASCII = Charset.forName("US-ASCII");
-  static final Charset UTF_8 = Charset.forName("UTF-8");
-  static final Charset ISO_8859_1 = Charset.forName("ISO-8859-1");
-
   /** Throws an appropriate {@link NullPointerException} if the given objects is {@code null}. */
+  @CanIgnoreReturnValue
   static <T> T checkNotNull(T obj) {
     if (obj == null) {
       throw new NullPointerException();
@@ -68,11 +44,25 @@ public final class Internal {
   }
 
   /** Throws an appropriate {@link NullPointerException} if the given objects is {@code null}. */
+  @CanIgnoreReturnValue
   static <T> T checkNotNull(T obj, String message) {
     if (obj == null) {
       throw new NullPointerException(message);
     }
     return obj;
+  }
+
+  /**
+   * Throws an {@link IllegalArgumentException} for unrecognized enum values.
+   *
+   * <p>Used from Enum.getNumber().
+   *
+   * @return nothing, but typed as int, so we can "return" the result of this method directly from
+   * Enum.getNumber(), generating smaller dex code for every enum.
+   */
+  @DoNotInline
+  public static int throwCannotGetNumberOfUnrecognized() {
+    throw new IllegalArgumentException("Can't get the number of an unknown enum value.");
   }
 
   /**
@@ -313,7 +303,11 @@ public final class Internal {
     }
     // ByteBuffer.equals() will only compare the remaining bytes, but we want to
     // compare all the content.
-    return a.duplicate().clear().equals(b.duplicate().clear());
+    ByteBuffer aDuplicate = a.duplicate();
+    Java8Compatibility.clear(aDuplicate);
+    ByteBuffer bDuplicate = b.duplicate();
+    Java8Compatibility.clear(bDuplicate);
+    return aDuplicate.equals(bDuplicate);
   }
 
   /** Helper method for implementing {@link Message#equals(Object)} for bytes field. */
@@ -353,7 +347,7 @@ public final class Internal {
           bytes.capacity() > DEFAULT_BUFFER_SIZE ? DEFAULT_BUFFER_SIZE : bytes.capacity();
       final byte[] buffer = new byte[bufferSize];
       final ByteBuffer duplicated = bytes.duplicate();
-      duplicated.clear();
+      Java8Compatibility.clear(duplicated);
       int h = bytes.capacity();
       while (duplicated.remaining() > 0) {
         final int length =
@@ -375,7 +369,6 @@ public final class Internal {
     }
   }
 
-
   /** An empty byte array constant used in generated code. */
   public static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
 
@@ -386,10 +379,39 @@ public final class Internal {
   public static final CodedInputStream EMPTY_CODED_INPUT_STREAM =
       CodedInputStream.newInstance(EMPTY_BYTE_ARRAY);
 
-
   /** Helper method to merge two MessageLite instances. */
   static Object mergeMessage(Object destination, Object source) {
     return ((MessageLite) destination).toBuilder().mergeFrom((MessageLite) source).buildPartial();
+  }
+
+  /**
+   * Provides an immutable view of {@code List<T>} around an {@code IntList}.
+   *
+   * <p>Protobuf internal. Used in protobuf generated code only.
+   */
+  public static class IntListAdapter<T> extends AbstractList<T> {
+    /** Convert individual elements of the List from int to T. */
+    public interface IntConverter<T> {
+      T convert(int from);
+    }
+
+    private final IntList fromList;
+    private final IntConverter<T> converter;
+
+    public IntListAdapter(IntList fromList, IntConverter<T> converter) {
+      this.fromList = fromList;
+      this.converter = converter;
+    }
+
+    @Override
+    public T get(int index) {
+      return converter.convert(fromList.getInt(index));
+    }
+
+    @Override
+    public int size() {
+      return fromList.size();
+    }
   }
 
   /**
@@ -546,7 +568,8 @@ public final class Internal {
       }
 
       @Override
-      public boolean equals(Object o) {
+      public boolean equals(
+              Object o) {
         if (o == this) {
           return true;
         }
@@ -600,6 +623,7 @@ public final class Internal {
     void addInt(int element);
 
     /** Like {@link #set(int, Object)} but more efficient in that it doesn't box the element. */
+    @CanIgnoreReturnValue
     int setInt(int index, int element);
 
     /** Returns a mutable clone of this list with the specified capacity. */
@@ -620,6 +644,7 @@ public final class Internal {
     void addBoolean(boolean element);
 
     /** Like {@link #set(int, Object)} but more efficient in that it doesn't box the element. */
+    @CanIgnoreReturnValue
     boolean setBoolean(int index, boolean element);
 
     /** Returns a mutable clone of this list with the specified capacity. */
@@ -640,6 +665,7 @@ public final class Internal {
     void addLong(long element);
 
     /** Like {@link #set(int, Object)} but more efficient in that it doesn't box the element. */
+    @CanIgnoreReturnValue
     long setLong(int index, long element);
 
     /** Returns a mutable clone of this list with the specified capacity. */
@@ -660,6 +686,7 @@ public final class Internal {
     void addDouble(double element);
 
     /** Like {@link #set(int, Object)} but more efficient in that it doesn't box the element. */
+    @CanIgnoreReturnValue
     double setDouble(int index, double element);
 
     /** Returns a mutable clone of this list with the specified capacity. */
@@ -680,11 +707,11 @@ public final class Internal {
     void addFloat(float element);
 
     /** Like {@link #set(int, Object)} but more efficient in that it doesn't box the element. */
+    @CanIgnoreReturnValue
     float setFloat(int index, float element);
 
     /** Returns a mutable clone of this list with the specified capacity. */
     @Override
     FloatList mutableCopyWithCapacity(int capacity);
   }
-
 }

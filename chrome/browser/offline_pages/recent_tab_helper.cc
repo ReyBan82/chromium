@@ -10,7 +10,6 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/system/sys_info.h"
 #include "base/task/single_thread_task_runner.h"
@@ -101,8 +100,7 @@ RecentTabHelper::RecentTabHelper(content::WebContents* web_contents)
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 }
 
-RecentTabHelper::~RecentTabHelper() {
-}
+RecentTabHelper::~RecentTabHelper() = default;
 
 void RecentTabHelper::SetDelegate(
     std::unique_ptr<RecentTabHelper::Delegate> delegate) {
@@ -132,7 +130,7 @@ void RecentTabHelper::ObserveAndDownloadCurrentPage(const ClientId& client_id,
   // If there is an ongoing snapshot request, completely ignore this one and
   // cancel the Background Offliner request.
   // TODO(carlosk): it might be better to make the decision to schedule or not
-  // the background request here. See https://crbug.com/686165.
+  // the background request here. See https://crbug.com/41298004.
   if (downloads_ongoing_snapshot_info_) {
     DVLOG(1) << "Ongoing request exist; ignored download request for: "
              << web_contents()->GetLastCommittedURL().spec();
@@ -340,23 +338,6 @@ void RecentTabHelper::WebContentsWasHidden() {
       base::BindOnce(&RecentTabHelper::ContinueSnapshotWithIdsToPurge,
                      weak_ptr_factory_.GetWeakPtr(),
                      last_n_ongoing_snapshot_info_.get()));
-
-  IsSavingSamePageEnum saving_same_page_value = IsSavingSamePageEnum::kNewPage;
-  if (last_n_latest_saved_snapshot_info_) {
-    // If there was a previously saved snapshot for the current page we are
-    // saving a new one for the same page.
-    // Note: there might be a difference in page quality between here and when
-    // it's assessed again in ContinueSnapshotAfterPurge but this is not
-    // expected to happen often.
-    if (last_n_latest_saved_snapshot_info_->expected_page_quality ==
-        snapshot_controller_->current_page_quality()) {
-      saving_same_page_value = IsSavingSamePageEnum::kSamePageSameQuality;
-    } else {
-      saving_same_page_value = IsSavingSamePageEnum::kSamePageBetterQuality;
-    }
-  }
-  UMA_HISTOGRAM_ENUMERATION("OfflinePages.LastN.IsSavingSamePage",
-                            saving_same_page_value);
 
   last_n_latest_saved_snapshot_info_.reset();
 }

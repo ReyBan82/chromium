@@ -59,8 +59,7 @@ void APIActivityLogger::AddRoutes() {
 
 // static
 bool APIActivityLogger::IsLoggingEnabled() {
-  const Dispatcher* dispatcher =
-      ExtensionsRendererClient::Get()->GetDispatcher();
+  const Dispatcher* dispatcher = ExtensionsRendererClient::Get()->dispatcher();
   return (dispatcher &&  // dispatcher can be null in unittests.
           dispatcher->activity_logging_enabled()) ||
          g_log_for_testing;
@@ -71,7 +70,7 @@ void APIActivityLogger::LogAPICall(
     IPCMessageSender* ipc_sender,
     v8::Local<v8::Context> context,
     const std::string& call_name,
-    const std::vector<v8::Local<v8::Value>>& arguments) {
+    const v8::LocalVector<v8::Value>& arguments) {
   if (!IsLoggingEnabled())
     return;
 
@@ -85,7 +84,7 @@ void APIActivityLogger::LogAPICall(
   converter->SetFunctionAllowed(true);
   converter->SetStrategy(&strategy);
 
-  base::Value::List value_args;
+  base::ListValue value_args;
   value_args.reserve(arguments.size());
   // TODO(devlin): This doesn't protect against custom properties, so it might
   // not perfectly reflect the passed arguments.
@@ -98,7 +97,8 @@ void APIActivityLogger::LogAPICall(
         base::Value::FromUniquePtrValue(std::move(converted_arg)));
   }
 
-  ipc_sender->SendActivityLogIPC(script_context->GetExtensionID(),
+  ipc_sender->SendActivityLogIPC(script_context,
+                                 script_context->GetExtensionID(),
                                  IPCMessageSender::ActivityLogCallType::APICALL,
                                  call_name, std::move(value_args),
                                  /*extra=*/std::string());
@@ -107,11 +107,12 @@ void APIActivityLogger::LogAPICall(
 void APIActivityLogger::LogEvent(IPCMessageSender* ipc_sender,
                                  ScriptContext* script_context,
                                  const std::string& event_name,
-                                 base::Value::List arguments) {
+                                 base::ListValue arguments) {
   if (!IsLoggingEnabled())
     return;
 
-  ipc_sender->SendActivityLogIPC(script_context->GetExtensionID(),
+  ipc_sender->SendActivityLogIPC(script_context,
+                                 script_context->GetExtensionID(),
                                  IPCMessageSender::ActivityLogCallType::EVENT,
                                  event_name, std::move(arguments),
                                  /*extra=*/std::string());
@@ -136,6 +137,11 @@ void APIActivityLogger::LogForJS(
   v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context = isolate->GetCurrentContext();
 
+  ScriptContext* script_context = GetContextByV8Context(context);
+  if (!script_context) {
+    return;
+  }
+
   std::string extension_id = *v8::String::Utf8Value(isolate, args[0]);
   std::string call_name = *v8::String::Utf8Value(isolate, args[1]);
   std::string extra;
@@ -145,7 +151,7 @@ void APIActivityLogger::LogForJS(
   }
 
   // Get the array of call arguments.
-  base::Value::List arguments;
+  base::ListValue arguments;
   v8::Local<v8::Array> arg_array = v8::Local<v8::Array>::Cast(args[2]);
   if (arg_array->Length() > 0) {
     arguments.reserve(arg_array->Length());
@@ -155,7 +161,7 @@ void APIActivityLogger::LogForJS(
     converter->SetFunctionAllowed(true);
     converter->SetStrategy(&strategy);
     for (size_t i = 0; i < arg_array->Length(); ++i) {
-      // TODO(crbug.com/913942): Possibly replace ToLocalChecked here with
+      // TODO(crbug.com/40605992): Possibly replace ToLocalChecked here with
       // actual error handling.
       std::unique_ptr<base::Value> converted_arg = converter->FromV8Value(
           arg_array->Get(context, i).ToLocalChecked(), context);
@@ -166,8 +172,8 @@ void APIActivityLogger::LogForJS(
     }
   }
 
-  ipc_sender_->SendActivityLogIPC(extension_id, call_type, call_name,
-                                  std::move(arguments), extra);
+  ipc_sender_->SendActivityLogIPC(script_context, extension_id, call_type,
+                                  call_name, std::move(arguments), extra);
 }
 
 }  // namespace extensions

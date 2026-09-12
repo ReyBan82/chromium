@@ -16,12 +16,12 @@ namespace {
 
 class MetricsServiceClientTest : public testing::Test {
  public:
-  MetricsServiceClientTest() {}
+  MetricsServiceClientTest() = default;
 
   MetricsServiceClientTest(const MetricsServiceClientTest&) = delete;
   MetricsServiceClientTest& operator=(const MetricsServiceClientTest&) = delete;
 
-  ~MetricsServiceClientTest() override {}
+  ~MetricsServiceClientTest() override = default;
 };
 
 }  // namespace
@@ -65,6 +65,54 @@ TEST_F(MetricsServiceClientTest, TestUploadIntervalLimitedForDos) {
       base::NumberToString(too_short_upload_sec));
   // Upload interval should be the DOS rate limit.
   ASSERT_EQ(base::Seconds(20), client.GetUploadInterval());
+}
+
+TEST_F(MetricsServiceClientTest, TestGetStorageLimits) {
+  TestMetricsServiceClient client;
+  const MetricsLogStore::StorageLimits storage_limits =
+      client.GetStorageLimits();
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  EXPECT_EQ(20u, storage_limits.initial_log_queue_limits.min_log_count);
+  EXPECT_EQ(8u, storage_limits.ongoing_log_queue_limits.min_log_count);
+  EXPECT_EQ(3u * 1024 * 1024,
+            storage_limits.initial_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(3u * 1024 * 1024,
+            storage_limits.ongoing_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(0u, storage_limits.initial_log_queue_limits.max_log_size_bytes);
+  EXPECT_EQ(1024u * 1024,
+            storage_limits.ongoing_log_queue_limits.max_log_size_bytes);
+#elif BUILDFLAG(IS_CHROMEOS)
+  EXPECT_EQ(20u, storage_limits.initial_log_queue_limits.min_log_count);
+  EXPECT_EQ(8u, storage_limits.ongoing_log_queue_limits.min_log_count);
+  EXPECT_EQ(300u * 1024,
+            storage_limits.initial_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(300u * 1024,
+            storage_limits.ongoing_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(0u, storage_limits.initial_log_queue_limits.max_log_size_bytes);
+  EXPECT_EQ(1024u * 1024,
+            storage_limits.ongoing_log_queue_limits.max_log_size_bytes);
+#elif BUILDFLAG(IS_ANDROID)
+  EXPECT_EQ(40u, storage_limits.initial_log_queue_limits.min_log_count);
+  EXPECT_EQ(16u, storage_limits.ongoing_log_queue_limits.min_log_count);
+  EXPECT_EQ(600u * 1024,
+            storage_limits.initial_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(600u * 1024,
+            storage_limits.ongoing_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(0u, storage_limits.initial_log_queue_limits.max_log_size_bytes);
+  EXPECT_EQ(200u * 1024,
+            storage_limits.ongoing_log_queue_limits.max_log_size_bytes);
+#else
+  EXPECT_EQ(20u, storage_limits.initial_log_queue_limits.min_log_count);
+  EXPECT_EQ(8u, storage_limits.ongoing_log_queue_limits.min_log_count);
+  EXPECT_EQ(300u * 1024,
+            storage_limits.initial_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(300u * 1024,
+            storage_limits.ongoing_log_queue_limits.min_queue_size_bytes);
+  EXPECT_EQ(0u, storage_limits.initial_log_queue_limits.max_log_size_bytes);
+  EXPECT_EQ(100u * 1024,
+            storage_limits.ongoing_log_queue_limits.max_log_size_bytes);
+#endif
 }
 
 }  // namespace metrics

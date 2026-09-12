@@ -4,17 +4,17 @@
 
 #include "media/gpu/v4l2/v4l2_video_decoder_delegate_vp9.h"
 
-// ChromeOS specific header; does not exist upstream
-#if BUILDFLAG(IS_CHROMEOS)
-#include <linux/media/vp9-ctrls-upstream.h>
-#endif
+#include <linux/v4l2-controls.h>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/numerics/safe_math.h"
-#include "media/filters/vp9_parser.h"
 #include "media/gpu/macros.h"
 #include "media/gpu/v4l2/v4l2_decode_surface.h"
 #include "media/gpu/v4l2/v4l2_decode_surface_handler.h"
+#include "media/gpu/v4l2/vp9/v4l2_vp9_compressed_header.h"
+#include "media/parsers/vp9_parser.h"
 
 namespace media {
 
@@ -35,7 +35,7 @@ class V4L2VP9Picture : public VP9Picture {
   ~V4L2VP9Picture() override = default;
 
   scoped_refptr<VP9Picture> CreateDuplicate() override {
-    return new V4L2VP9Picture(dec_surface_);
+    return base::MakeRefCounted<V4L2VP9Picture>(dec_surface_);
   }
 
   scoped_refptr<V4L2DecodeSurface> dec_surface_;
@@ -98,8 +98,10 @@ void FillV4L2VP9SegmentationParams(const Vp9SegmentationParams& vp9_seg_params,
                 "mismatch in number of segmentation features");
   for (size_t j = 0; j < kV4L2VP9SegmentationFeaturesLength; j++) {
     for (size_t i = 0; i < V4L2_VP9_SEG_LVL_MAX; i++) {
-      if (vp9_seg_params.feature_enabled[j][i])
-        v4l2_seg->feature_enabled[j] |= V4L2_VP9_SEGMENT_FEATURE_ENABLED(i);
+      if (UNSAFE_TODO(vp9_seg_params.feature_enabled[j][i])) {
+        UNSAFE_TODO(v4l2_seg->feature_enabled[j] |=
+                    V4L2_VP9_SEGMENT_FEATURE_ENABLED(i));
+      }
     }
   }
 
@@ -148,7 +150,7 @@ V4L2VideoDecoderDelegateVP9::V4L2VideoDecoderDelegateVP9(
       device_(device),
       supports_compressed_header_(
           device->IsCtrlExposed(V4L2_CID_STATELESS_VP9_COMPRESSED_HDR)) {
-  VLOGF(1);
+  VLOGF(1) << "supports_compressed_header: " << supports_compressed_header_;
   DCHECK(surface_handler_);
   DCHECK(device_);
 
@@ -167,19 +169,41 @@ scoped_refptr<VP9Picture> V4L2VideoDecoderDelegateVP9::CreateVP9Picture() {
   if (!dec_surface)
     return nullptr;
 
-  return new V4L2VP9Picture(std::move(dec_surface));
+  return base::MakeRefCounted<V4L2VP9Picture>(std::move(dec_surface));
+}
+
+scoped_refptr<VP9Picture> V4L2VideoDecoderDelegateVP9::CreateVP9PictureSecure(
+    uint64_t secure_handle) {
+  scoped_refptr<V4L2DecodeSurface> dec_surface =
+      surface_handler_->CreateSecureSurface(secure_handle);
+  if (!dec_surface) {
+    return nullptr;
+  }
+
+  return base::MakeRefCounted<V4L2VP9Picture>(std::move(dec_surface));
 }
 
 DecodeStatus V4L2VideoDecoderDelegateVP9::SubmitDecode(
     scoped_refptr<VP9Picture> pic,
     const Vp9SegmentationParams& segm_params,
     const Vp9LoopFilterParams& lf_params,
-    const Vp9ReferenceFrameVector& ref_frames,
-    base::OnceClosure done_cb) {
+    const Vp9ReferenceFrameVector& ref_frames) {
   const Vp9FrameHeader* frame_hdr = pic->frame_hdr.get();
   DCHECK(frame_hdr);
-  struct v4l2_ctrl_vp9_frame v4l2_frame_params;
-  memset(&v4l2_frame_params, 0, sizeof(v4l2_frame_params));
+
+  Vp9V4L2CompressedParseResult compressed_parse{};
+  if (supports_compressed_header_) {
+    DVLOGF(4) << "Parse VP9 compressed header";
+    std::optional<Vp9V4L2CompressedParseResult> parsed_compressed_header =
+        ParseVp9CompressedHeaderForV4L2(*frame_hdr);
+    if (!parsed_compressed_header) {
+      return DecodeStatus::kFail;
+    }
+
+    compressed_parse = std::move(*parsed_compressed_header);
+  }
+
+  struct v4l2_ctrl_vp9_frame v4l2_frame_params = {};
 
 #define SET_FLAG_IF(cond, flag) \
   v4l2_frame_params.flags |= ((frame_hdr->cond) ? (flag) : 0)
@@ -231,7 +255,7 @@ DecodeStatus V4L2VideoDecoderDelegateVP9::SubmitDecode(
   v4l2_frame_params.tile_rows_log2 = frame_hdr->tile_rows_log2;
   if (supports_compressed_header_) {
     v4l2_frame_params.reference_mode =
-        frame_hdr->compressed_header.reference_mode;
+        compressed_parse.compressed_header.reference_mode;
   }
   for (size_t i = 0; i < Vp9RefType::VP9_FRAME_MAX - VP9_FRAME_LAST; i++) {
     v4l2_frame_params.ref_frame_sign_bias |=
@@ -284,8 +308,9 @@ DecodeStatus V4L2VideoDecoderDelegateVP9::SubmitDecode(
   struct v4l2_ctrl_vp9_compressed_hdr v4l2_compressed_hdr_probs;
   if (supports_compressed_header_) {
     memset(&v4l2_compressed_hdr_probs, 0, sizeof(v4l2_compressed_hdr_probs));
-    v4l2_compressed_hdr_probs.tx_mode = frame_hdr->compressed_header.tx_mode;
-    FillV4L2VP9ProbsParams(frame_hdr->frame_context,
+    v4l2_compressed_hdr_probs.tx_mode =
+        compressed_parse.compressed_header.tx_mode;
+    FillV4L2VP9ProbsParams(compressed_parse.frame_context,
                            &v4l2_compressed_hdr_probs);
     ext_ctrls.push_back({.id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR,
                          .size = sizeof(v4l2_compressed_hdr_probs),
@@ -313,11 +338,11 @@ DecodeStatus V4L2VideoDecoderDelegateVP9::SubmitDecode(
   }
   dec_surface->SetReferenceSurfaces(std::move(ref_surfaces));
 
-  dec_surface->SetDecodeDoneCallback(std::move(done_cb));
-
   // Copy the frame data into the V4L2 buffer.
-  if (!surface_handler_->SubmitSlice(dec_surface.get(), frame_hdr->data,
-                                     frame_hdr->frame_size)) {
+  if (!surface_handler_->SubmitSlice(
+          dec_surface.get(),
+          dec_surface->secure_handle() ? nullptr : frame_hdr->data.data(),
+          frame_hdr->data.size())) {
     return DecodeStatus::kFail;
   }
 
@@ -334,20 +359,6 @@ bool V4L2VideoDecoderDelegateVP9::OutputPicture(scoped_refptr<VP9Picture> pic) {
                                  pic->bitstream_id(), pic->visible_rect(),
                                  pic->get_colorspace());
   return true;
-}
-
-bool V4L2VideoDecoderDelegateVP9::GetFrameContext(scoped_refptr<VP9Picture> pic,
-                                                  Vp9FrameContext* frame_ctx) {
-  NOTIMPLEMENTED() << "Frame context update not supported";
-  return false;
-}
-
-bool V4L2VideoDecoderDelegateVP9::NeedsCompressedHeaderParsed() const {
-  return supports_compressed_header_;
-}
-
-bool V4L2VideoDecoderDelegateVP9::SupportsContextProbabilityReadback() const {
-  return false;
 }
 
 }  // namespace media

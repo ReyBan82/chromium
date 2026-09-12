@@ -5,10 +5,10 @@
 #ifndef CONTENT_APP_SHIM_REMOTE_COCOA_WEB_CONTENTS_VIEW_COCOA_H_
 #define CONTENT_APP_SHIM_REMOTE_COCOA_WEB_CONTENTS_VIEW_COCOA_H_
 
-#include "base/mac/scoped_nsobject.h"
 #include "base/memory/raw_ptr.h"
 #include "content/common/content_export.h"
 #include "content/common/web_contents_ns_view_bridge.mojom.h"
+#include "content/public/common/child_process_id.h"
 #import "ui/base/cocoa/base_view.h"
 #import "ui/base/cocoa/views_hostable.h"
 
@@ -16,43 +16,19 @@ namespace content {
 struct DropData;
 }  // namespace content
 
-namespace remote_cocoa {
-class DroppedScreenShotCopierMac;
-namespace mojom {
+namespace remote_cocoa::mojom {
 class WebContentsNSViewHost;
-}  // namespace mojom
-}  // namespace remote_cocoa
+}  // namespace remote_cocoa::mojom
+
+namespace url {
+class Origin;
+}
 
 @class WebDragSource;
 
 CONTENT_EXPORT
 @interface WebContentsViewCocoa
-    : BaseView <ViewsHostable, NSDraggingSource, NSDraggingDestination> {
- @private
-  // Instances of this class are owned by both `_host` and AppKit. The `_host`
-  // must call `-setHost:nil` in its destructor.
-  raw_ptr<remote_cocoa::mojom::WebContentsNSViewHost> _host;
-
-  // The interface exported to views::Views that embed this as a sub-view.
-  raw_ptr<ui::ViewsHostableView> _viewsHostableView;
-
-  BOOL _mouseDownCanMoveWindow;
-
-  // Utility to copy screenshots to a usable directory for PWAs. This utility
-  // will maintain a temporary directory for such screenshot files until this
-  // WebContents is destroyed.
-  // https://crbug.com/1148078
-  std::unique_ptr<remote_cocoa::DroppedScreenShotCopierMac>
-      _droppedScreenShotCopier;
-
-  // Drag variables.
-  base::scoped_nsobject<WebDragSource> _dragSource;
-  NSDragOperation _dragOperation;
-  NSPoint _dragOffset;
-  CGFloat _dragImageHeight;
-
-  gfx::Rect _windowControlsOverlayRect;
-}
+    : BaseView <ViewsHostable, NSDraggingSource, NSDraggingDestination>
 
 // Set or un-set the mojo interface through which to communicate with the
 // browser process.
@@ -69,6 +45,9 @@ CONTENT_EXPORT
 - (instancetype)initWithViewsHostableView:(ui::ViewsHostableView*)v;
 - (void)registerDragTypes;
 - (void)startDragWithDropData:(const content::DropData&)dropData
+              renderProcessId:(content::ChildProcessId)renderProcessId
+                documentToken:(const blink::DocumentToken&)documentToken
+                 sourceOrigin:(const url::Origin&)sourceOrigin
             dragOperationMask:(NSDragOperation)operationMask
                         image:(NSImage*)image
                        offset:(NSPoint)offset
@@ -88,8 +67,6 @@ CONTENT_EXPORT
 // Updates the WCVC's web contents's visibility state. The update may occur
 // immediately or in the near future.
 - (void)updateWebContentsVisibility:(remote_cocoa::mojom::Visibility)visibility;
-
-- (void)updateWindowControlsOverlay:(const gfx::Rect&)boundingRect;
 
 @end
 

@@ -6,12 +6,13 @@
 
 #include <memory>
 
+#include "base/check.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service_factory.h"
 #include "components/prefs/testing_pref_store.h"
+#include "content/public/browser/network_service_util.h"
 #include "content/public/common/content_client.h"
-#include "content/public/common/network_service_util.h"
 #include "content/public/test/test_browser_context.h"
 #include "extensions/browser/extension_pref_value_map.h"
 #include "extensions/browser/extension_prefs.h"
@@ -41,7 +42,6 @@ ExtensionsTest::ExtensionsTest(
 ExtensionsTest::~ExtensionsTest() {
   // Destroy the task runners before nulling the browser/utility clients, as
   // posted tasks may use them.
-  rvh_test_enabler_.reset();
   task_environment_.reset();
   content::SetUtilityClientForTesting(nullptr);
 }
@@ -53,10 +53,26 @@ void ExtensionsTest::SetExtensionsBrowserClient(
   extensions_browser_client_ = std::move(extensions_browser_client);
 }
 
+void ExtensionsTest::SetBrowserContextPath(const base::FilePath& path) {
+  CHECK(!browser_context_);
+  browser_context_path_ = path;
+}
+
 void ExtensionsTest::SetUp() {
-  content::ForceInProcessNetworkService(true);
-  browser_context_ = std::make_unique<content::TestBrowserContext>();
+  content::ForceInProcessNetworkService();
+  browser_context_ =
+      std::make_unique<content::TestBrowserContext>(browser_context_path_);
   incognito_context_ = CreateTestIncognitoContext();
+
+  // Ensure `browser_context_` and `incognito_context_` are marked as live
+  // objects. This prevents issues where they might be allocated to the same
+  // memory addresses as objects that were deleted in the TearDown() of previous
+  // tests. Otherwise, this can trigger the CHECK failure of
+  // DependencyManager::AssertContextWasntDestroyed().
+  BrowserContextDependencyManager::GetInstance()->MarkBrowserContextLive(
+      browser_context_.get());
+  BrowserContextDependencyManager::GetInstance()->MarkBrowserContextLive(
+      incognito_context_.get());
 
   if (!extensions_browser_client_) {
     extensions_browser_client_ =
@@ -80,13 +96,12 @@ void ExtensionsTest::SetUp() {
   ExtensionPrefs::RegisterProfilePrefs(pref_registry);
   PermissionsManager::RegisterProfilePrefs(pref_registry);
   pref_service_ = factory.Create(pref_registry);
-  extensions_browser_client_->set_pref_service(pref_service_.get());
 
-  std::unique_ptr<ExtensionPrefs> extension_prefs(ExtensionPrefs::Create(
+  std::unique_ptr<ExtensionPrefs> extension_prefs = ExtensionPrefs::Create(
       browser_context(), pref_service_.get(),
       browser_context()->GetPath().AppendASCII("Extensions"),
       extension_pref_value_map_.get(), false /* extensions_disabled */,
-      std::vector<EarlyExtensionPrefsObserver*>()));
+      std::vector<EarlyExtensionPrefsObserver*>());
 
   ExtensionPrefsFactory::GetInstance()->SetInstanceForTesting(
       browser_context(), std::move(extension_prefs));
@@ -110,6 +125,7 @@ void ExtensionsTest::TearDown() {
   extensions_browser_client_.reset();
   ExtensionsBrowserClient::Set(nullptr);
 
+  rvh_test_enabler_.reset();
   incognito_context_.reset();
   browser_context_.reset();
   pref_service_.reset();

@@ -48,6 +48,10 @@ class ExtensionsSyncPerfTest : public SyncTest {
   ExtensionsSyncPerfTest(const ExtensionsSyncPerfTest&) = delete;
   ExtensionsSyncPerfTest& operator=(const ExtensionsSyncPerfTest&) = delete;
 
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return SetupSyncMode::kSyncTransportOnly;
+  }
+
   // Adds |num_extensions| new unique extensions to |profile|.
   void AddExtensions(int profile, int num_extensions);
 
@@ -93,7 +97,7 @@ void ExtensionsSyncPerfTest::RemoveExtensions(int profile) {
 }
 
 IN_PROC_BROWSER_TEST_F(ExtensionsSyncPerfTest, P0) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+  ASSERT_TRUE(SetupSync());
   int num_default_extensions = GetExtensionCount(0);
   int expected_extension_count = num_default_extensions + kNumExtensions;
 

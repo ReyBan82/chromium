@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "content/browser/network/network_errors_listing_ui.h"
 
 #include <memory>
@@ -11,7 +12,8 @@
 #include "base/json/json_writer.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/values.h"
-#include "content/grit/dev_ui_content_resources.h"
+#include "content/grit/network_errors_resources.h"
+#include "content/grit/network_errors_resources_map.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
@@ -29,13 +31,13 @@ namespace content {
 
 namespace {
 
-base::Value::List GetNetworkErrorData() {
-  base::Value::Dict error_codes = net::GetNetConstants();
-  const base::Value::Dict* net_error_codes_dict =
+base::ListValue GetNetworkErrorData() {
+  base::DictValue error_codes = net::GetNetConstants();
+  const base::DictValue* net_error_codes_dict =
       error_codes.FindDict(kNetworkErrorKey);
   DCHECK(net_error_codes_dict);
 
-  base::Value::List error_list;
+  base::ListValue error_list;
 
   for (auto it = net_error_codes_dict->begin();
        it != net_error_codes_dict->end(); ++it) {
@@ -43,7 +45,7 @@ base::Value::List GetNetworkErrorData() {
     // Exclude the aborted and pending codes as these don't return a page.
     if (error_code != net::Error::ERR_IO_PENDING &&
         error_code != net::Error::ERR_ABORTED) {
-      base::Value::Dict error;
+      base::DictValue error;
       error.Set(kErrorIdField, error_code);
       error.Set(kErrorCodeField, it->first);
       error_list.Append(std::move(error));
@@ -61,10 +63,9 @@ void HandleWebUIRequestCallback(BrowserContext* current_context,
                                 WebUIDataSource::GotDataCallback callback) {
   DCHECK(ShouldHandleWebUIRequestCallback(path));
 
-  base::Value::Dict data;
+  base::DictValue data;
   data.Set(kErrorCodesDataName, GetNetworkErrorData());
-  std::string json_string;
-  base::JSONWriter::Write(data, &json_string);
+  std::string json_string = base::WriteJson(data).value_or("");
   std::move(callback).Run(
       base::MakeRefCounted<base::RefCountedString>(std::move(json_string)));
 }
@@ -80,11 +81,9 @@ NetworkErrorsListingUI::NetworkErrorsListingUI(WebUI* web_ui)
 
   // Add required resources.
   html_source->UseStringsJs();
-  html_source->AddResourcePath("network_errors_listing.css",
-                               IDR_NETWORK_ERROR_LISTING_CSS);
-  html_source->AddResourcePath("network_errors_listing.js",
-                               IDR_NETWORK_ERROR_LISTING_JS);
-  html_source->SetDefaultResource(IDR_NETWORK_ERROR_LISTING_HTML);
+  html_source->AddResourcePaths(kNetworkErrorsResources);
+  html_source->SetDefaultResource(
+      IDR_NETWORK_ERRORS_NETWORK_ERRORS_LISTING_HTML);
   html_source->SetRequestFilter(
       base::BindRepeating(&ShouldHandleWebUIRequestCallback),
       base::BindRepeating(&HandleWebUIRequestCallback,

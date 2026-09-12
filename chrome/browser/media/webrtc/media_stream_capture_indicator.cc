@@ -11,8 +11,8 @@
 #include <utility>
 
 #include "base/check_op.h"
-#include "base/containers/contains.h"
-#include "base/functional/callback.h"
+#include "base/containers/flat_map.h"
+#include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/notreached.h"
 #include "base/observer_list.h"
@@ -20,22 +20,25 @@
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/content_settings/chrome_content_settings_utils.h"
+#include "chrome/browser/media/webrtc/capture_policy_utils.h"
+#include "chrome/browser/media/webrtc/same_origin_observer.h"
 #include "chrome/browser/status_icons/status_icon.h"
 #include "chrome/browser/status_icons/status_tray.h"
 #include "chrome/browser/tab_contents/tab_util.h"
+#include "components/enterprise/buildflags/buildflags.h"
 #include "components/url_formatter/elide_url.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/content_browser_client.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "extensions/buildflags/buildflags.h"
 #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/image/image_skia.h"
 
 #if !BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/media/webrtc/media_stream_focus_delegate.h"
-#include "chrome/grit/chromium_strings.h"
+#include "chrome/grit/branded_strings.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/gfx/color_palette.h"
@@ -45,7 +48,7 @@
 #if BUILDFLAG(ENABLE_EXTENSIONS)
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/common/extensions/extension_constants.h"
-#include "extensions/browser/extension_registry.h"
+#include "extensions/browser/extension_registry.h"  // nogncheck
 #include "extensions/common/extension.h"
 #endif
 
@@ -53,10 +56,21 @@
 #include "chrome/browser/chromeos/policy/dlp/dlp_content_manager.h"
 #endif
 
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+#include "chrome/browser/enterprise/data_protection/data_protection_features.h"
+#include "chrome/browser/media/webrtc/data_protection_tab_capture_handler.h"
+#include "content/public/browser/render_frame_host.h"
+#endif
+
 using content::BrowserThread;
 using content::WebContents;
 
 namespace {
+
+constexpr int kMaxMediaStreamCaptureListItems = 100;
+constexpr int IDC_MEDIA_CONTEXT_MEDIA_STREAM_CAPTURE_LIST_LAST =
+    IDC_MEDIA_CONTEXT_MEDIA_STREAM_CAPTURE_LIST_FIRST +
+    kMaxMediaStreamCaptureListItems - 1;
 
 #if BUILDFLAG(ENABLE_EXTENSIONS)
 const extensions::Extension* GetExtension(WebContents* web_contents) {
@@ -73,6 +87,33 @@ const extensions::Extension* GetExtension(WebContents* web_contents) {
 
 #endif  // BUILDFLAG(ENABLE_EXTENSIONS)
 
+std::unique_ptr<SameOriginObserver> MaybeCreateSameOriginObserverForTabCapture(
+    content::WebContents* capturer_web_contents,
+    const std::optional<content::DesktopMediaID>& media_id,
+    base::RepeatingCallback<void(content::WebContents*)> stop_callback) {
+  if (!media_id ||
+      media_id->type != content::DesktopMediaID::Type::TYPE_WEB_CONTENTS) {
+    return nullptr;
+  }
+
+  if (!capture_policy::CapturerRestrictedToSameOrigin(capturer_web_contents)) {
+    return nullptr;
+  }
+
+  auto* captured_contents = content::WebContents::FromRenderFrameHost(
+      content::RenderFrameHost::FromID(
+          media_id->web_contents_id.render_process_id,
+          media_id->web_contents_id.main_render_frame_id));
+  if (!captured_contents) {
+    return nullptr;
+  }
+
+  const url::Origin capturer_origin =
+      capturer_web_contents->GetPrimaryMainFrame()->GetLastCommittedOrigin();
+  return std::make_unique<SameOriginObserver>(
+      captured_contents, capturer_origin, std::move(stop_callback));
+}
+
 std::u16string GetTitle(WebContents* web_contents) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
@@ -87,6 +128,18 @@ std::u16string GetTitle(WebContents* web_contents) {
 
   return url_formatter::FormatUrlForSecurityDisplay(
       web_contents->GetLastCommittedURL());
+}
+
+bool IsDeviceCapturingTab(const blink::MediaStreamDevice& device) {
+  return device.display_media_info &&
+         device.display_media_info->display_surface ==
+             media::mojom::DisplayCaptureSurfaceType::BROWSER;
+}
+
+bool IsDeviceCapturingWindow(const blink::MediaStreamDevice& device) {
+  return device.display_media_info &&
+         device.display_media_info->display_surface ==
+             media::mojom::DisplayCaptureSurfaceType::WINDOW;
 }
 
 // Returns if the passed |device| is capturing the whole display. This is
@@ -119,16 +172,22 @@ ObserverMethod GetObserverMethodToCall(const blink::MediaStreamDevice& device) {
     case blink::mojom::MediaStreamType::DISPLAY_AUDIO_CAPTURE:
     case blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_THIS_TAB:
     case blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_SET:
-      return IsDeviceCapturingDisplay(device)
-                 ? &MediaStreamCaptureIndicator::Observer::
-                       OnIsCapturingDisplayChanged
-                 : &MediaStreamCaptureIndicator::Observer::
-                       OnIsCapturingWindowChanged;
+      if (IsDeviceCapturingTab(device)) {
+        return &MediaStreamCaptureIndicator::Observer::OnIsCapturingTabChanged;
+      }
+      if (IsDeviceCapturingWindow(device)) {
+        return &MediaStreamCaptureIndicator::Observer::
+            OnIsCapturingWindowChanged;
+      }
+      if (IsDeviceCapturingDisplay(device)) {
+        return &MediaStreamCaptureIndicator::Observer::
+            OnIsCapturingDisplayChanged;
+      }
+      NOTREACHED();
 
     case blink::mojom::MediaStreamType::NO_SERVICE:
     case blink::mojom::MediaStreamType::NUM_MEDIA_TYPES:
       NOTREACHED();
-      return nullptr;
   }
 }
 
@@ -154,23 +213,26 @@ class MediaStreamCaptureIndicator::WebContentsDeviceUsage
   bool IsCapturingAudio() const { return audio_stream_count_ > 0; }
   bool IsCapturingVideo() const { return video_stream_count_ > 0; }
   bool IsMirroring() const { return mirroring_stream_count_ > 0; }
+  bool IsCapturingTab() const { return tab_stream_count_ > 0; }
   bool IsCapturingWindow() const { return window_stream_count_ > 0; }
   bool IsCapturingDisplay() const { return display_stream_count_ > 0; }
 
   std::unique_ptr<content::MediaStreamUI> RegisterMediaStream(
       const blink::mojom::StreamDevices& devices,
       std::unique_ptr<MediaStreamUI> ui,
-      const std::u16string application_title);
+      const std::u16string application_title,
+      const std::optional<content::DesktopMediaID>& media_id);
 
   // Increment ref-counts up based on the type of each device provided.
   void AddDevices(const blink::mojom::StreamDevices& devices,
-                  base::OnceClosure stop_callback);
+                  base::OnceClosure stop_callback,
+                  int stop_callback_id);
 
   // Decrement ref-counts up based on the type of each device provided.
-  void RemoveDevices(const blink::mojom::StreamDevices& devices);
+  void RemoveDevices(const blink::mojom::StreamDevices& devices,
+                     int stop_callback_id);
 
-  // Helper to call |stop_callback_|.
-  void NotifyStopped();
+  void StopMediaCapturing(int media_type);
 
  private:
   int& GetStreamCount(const blink::MediaStreamDevice& device);
@@ -184,14 +246,18 @@ class MediaStreamCaptureIndicator::WebContentsDeviceUsage
     indicator_->UnregisterWebContents(web_contents());
   }
 
+  void StopCallbacks(std::map<int, base::OnceClosure>& stop_callbacks);
+
   scoped_refptr<MediaStreamCaptureIndicator> indicator_;
   int audio_stream_count_ = 0;
   int video_stream_count_ = 0;
   int mirroring_stream_count_ = 0;
+  int tab_stream_count_ = 0;
   int window_stream_count_ = 0;
   int display_stream_count_ = 0;
 
-  base::OnceClosure stop_callback_;
+  std::map<int, base::OnceClosure> display_media_stop_callbacks_;
+  std::map<int, base::OnceClosure> user_media_stop_callbacks_;
   base::WeakPtrFactory<WebContentsDeviceUsage> weak_factory_{this};
 };
 
@@ -202,21 +268,32 @@ class MediaStreamCaptureIndicator::WebContentsDeviceUsage
 // the stream.
 class MediaStreamCaptureIndicator::UIDelegate : public content::MediaStreamUI {
  public:
+  friend class MediaStreamCaptureIndicator;
+
   UIDelegate(WebContents* web_contents,
              base::WeakPtr<WebContentsDeviceUsage> device_usage,
              const blink::mojom::StreamDevices& devices,
              std::unique_ptr<::MediaStreamUI> ui,
-             const std::u16string application_title)
+             const std::u16string application_title,
+             std::optional<content::DesktopMediaID> media_id)
       : device_usage_(device_usage),
         devices_(devices),
         ui_(std::move(ui)),
 #if !BUILDFLAG(IS_ANDROID)
         focus_delegate_(web_contents),
 #endif
-        application_title_(std::move(application_title)) {
+        application_title_(std::move(application_title)),
+        stop_callback_id_(MediaStreamCaptureIndicator::g_stop_callback_id_++) {
     DCHECK_CURRENTLY_ON(BrowserThread::UI);
     DCHECK(devices_.audio_device.has_value() ||
            devices_.video_device.has_value());
+
+    // base::Unretained is safe here because `same_origin_observer_` is owned by
+    // `this`, so the callback will not be invoked after `this` is destroyed.
+    same_origin_observer_ = MaybeCreateSameOriginObserverForTabCapture(
+        web_contents, media_id,
+        base::BindRepeating(&UIDelegate::StopCaptureDueToPolicy,
+                            base::Unretained(this)));
   }
 
   UIDelegate(const UIDelegate&) = delete;
@@ -224,7 +301,7 @@ class MediaStreamCaptureIndicator::UIDelegate : public content::MediaStreamUI {
 
   ~UIDelegate() override {
     if (started_ && device_usage_)
-      device_usage_->RemoveDevices(devices_);
+      device_usage_->RemoveDevices(devices_, stop_callback_id_);
   }
 
  private:
@@ -238,21 +315,27 @@ class MediaStreamCaptureIndicator::UIDelegate : public content::MediaStreamUI {
     if (started_) {
       // Ignore possibly-compromised renderers that might call
       // MediaStreamDispatcherHost::OnStreamStarted() more than once.
-      // See: https://crbug.com/1155426
+      // See: https://crbug.com/40054066
       return 0;
     }
     started_ = true;
 
     if (device_usage_) {
       // |device_usage_| handles |stop_callback| when |ui_| is unspecified.
-      device_usage_->AddDevices(devices_,
-                                ui_ ? base::OnceClosure() : stop_callback);
+      device_usage_->AddDevices(devices_, stop_callback, stop_callback_id_);
     }
 
 #if BUILDFLAG(IS_CHROMEOS)
     policy::DlpContentManager::Get()->OnScreenShareStarted(
         label, screen_capture_ids, application_title_, stop_callback,
         state_change_callback, source_callback);
+#endif
+
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+    state_change_callback_ = state_change_callback;
+    for (const auto& media_id : screen_capture_ids) {
+      AddDataProtectionHandler(media_id);
+    }
 #endif
 
     // If a custom |ui_| is specified, notify it that the stream started and let
@@ -267,10 +350,15 @@ class MediaStreamCaptureIndicator::UIDelegate : public content::MediaStreamUI {
   void OnDeviceStoppedForSourceChange(
       const std::string& label,
       const content::DesktopMediaID& old_media_id,
-      const content::DesktopMediaID& new_media_id) override {
+      const content::DesktopMediaID& new_media_id,
+      bool captured_surface_control_active) override {
 #if BUILDFLAG(IS_CHROMEOS)
     policy::DlpContentManager::Get()->OnScreenShareSourceChanging(
-        label, old_media_id, new_media_id);
+        label, old_media_id, new_media_id, captured_surface_control_active);
+#endif
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+    RemoveDataProtectionHandler(old_media_id);
+    AddDataProtectionHandler(new_media_id);
 #endif
   }
 
@@ -279,10 +367,13 @@ class MediaStreamCaptureIndicator::UIDelegate : public content::MediaStreamUI {
 #if BUILDFLAG(IS_CHROMEOS)
     policy::DlpContentManager::Get()->OnScreenShareStopped(label, media_id);
 #endif
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+    RemoveDataProtectionHandler(media_id);
+#endif
   }
 
   void OnRegionCaptureRectChanged(
-      const absl::optional<gfx::Rect>& region_capture_rect) override {
+      const std::optional<gfx::Rect>& region_capture_rect) override {
     DCHECK_CURRENTLY_ON(BrowserThread::UI);
     if (ui_) {
       ui_->OnRegionCaptureRectChanged(region_capture_rect);
@@ -298,6 +389,46 @@ class MediaStreamCaptureIndicator::UIDelegate : public content::MediaStreamUI {
   }
 #endif
 
+  void StopCaptureDueToPolicy(content::WebContents* contents) {
+    if (device_usage_) {
+      device_usage_->StopMediaCapturing(MediaType::kUserMedia |
+                                        MediaType::kDisplayMedia);
+    }
+    capture_policy::ShowCaptureTerminatedDialog(contents);
+  }
+
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+  void AddDataProtectionHandler(const content::DesktopMediaID& media_id) {
+    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    if (!base::FeatureList::IsEnabled(
+            enterprise_data_protection::kEnableTabSharingProtection)) {
+      return;
+    }
+    if (media_id.type != content::DesktopMediaID::Type::TYPE_WEB_CONTENTS) {
+      return;
+    }
+    content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(
+        media_id.web_contents_id.render_process_id,
+        media_id.web_contents_id.main_render_frame_id);
+    content::WebContents* captured_contents =
+        content::WebContents::FromRenderFrameHost(rfh);
+    if (!captured_contents) {
+      data_protection_handlers_.erase(media_id.web_contents_id);
+      return;
+    }
+    data_protection_handlers_[media_id.web_contents_id] =
+        std::make_unique<DataProtectionTabCaptureHandler>(
+            captured_contents, media_id, state_change_callback_);
+  }
+
+  void RemoveDataProtectionHandler(const content::DesktopMediaID& media_id) {
+    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    if (media_id.type == content::DesktopMediaID::Type::TYPE_WEB_CONTENTS) {
+      data_protection_handlers_.erase(media_id.web_contents_id);
+    }
+  }
+#endif
+
   base::WeakPtr<WebContentsDeviceUsage> device_usage_;
   const blink::mojom::StreamDevices devices_;
   const std::unique_ptr<::MediaStreamUI> ui_;
@@ -306,30 +437,72 @@ class MediaStreamCaptureIndicator::UIDelegate : public content::MediaStreamUI {
 #endif
   const std::u16string application_title_;
   bool started_ = false;
+  const int stop_callback_id_;
+  std::unique_ptr<SameOriginObserver> same_origin_observer_;
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+  content::MediaStreamUI::StateChangeCallback state_change_callback_;
+  base::flat_map<content::WebContentsMediaCaptureId,
+                 std::unique_ptr<DataProtectionTabCaptureHandler>>
+      data_protection_handlers_;
+#endif
 };
+
+#if BUILDFLAG(ENTERPRISE_SCREENSHOT_PROTECTION)
+// static
+bool MediaStreamCaptureIndicator::HasDataProtectionHandlerForTesting(
+    const content::MediaStreamUI* ui,
+    const content::DesktopMediaID& media_id) {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  if (!ui ||
+      media_id.type != content::DesktopMediaID::Type::TYPE_WEB_CONTENTS) {
+    return false;
+  }
+  const auto* ui_delegate = static_cast<const UIDelegate*>(ui);
+  return ui_delegate->data_protection_handlers_.contains(
+      media_id.web_contents_id);
+}
+#endif
 
 std::unique_ptr<content::MediaStreamUI>
 MediaStreamCaptureIndicator::WebContentsDeviceUsage::RegisterMediaStream(
     const blink::mojom::StreamDevices& devices,
     std::unique_ptr<MediaStreamUI> ui,
-    const std::u16string application_title) {
+    const std::u16string application_title,
+    const std::optional<content::DesktopMediaID>& media_id) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   return std::make_unique<UIDelegate>(
       web_contents(), weak_factory_.GetWeakPtr(), devices, std::move(ui),
-      std::move(application_title));
+      std::move(application_title), media_id);
 }
 
 void MediaStreamCaptureIndicator::WebContentsDeviceUsage::AddDevices(
     const blink::mojom::StreamDevices& devices,
-    base::OnceClosure stop_callback) {
-  if (devices.audio_device.has_value())
+    base::OnceClosure stop_callback,
+    int stop_callback_id) {
+  MediaType type = MediaType::kUnknown;
+
+  if (devices.audio_device.has_value()) {
     AddDevice(devices.audio_device.value());
-  if (devices.video_device.has_value())
+    type = MediaStreamCaptureIndicator::GetMediaType(
+        devices.audio_device.value().type);
+  }
+
+  if (devices.video_device.has_value()) {
     AddDevice(devices.video_device.value());
+    type = MediaStreamCaptureIndicator::GetMediaType(
+        devices.video_device.value().type);
+  }
+
+  if (type == MediaType::kUserMedia) {
+    user_media_stop_callbacks_[stop_callback_id] = std::move(stop_callback);
+  }
+
+  if (type == MediaType::kDisplayMedia) {
+    display_media_stop_callbacks_[stop_callback_id] = std::move(stop_callback);
+  }
 
   if (web_contents()) {
-    stop_callback_ = std::move(stop_callback);
     web_contents()->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
   }
 
@@ -337,11 +510,28 @@ void MediaStreamCaptureIndicator::WebContentsDeviceUsage::AddDevices(
 }
 
 void MediaStreamCaptureIndicator::WebContentsDeviceUsage::RemoveDevices(
-    const blink::mojom::StreamDevices& devices) {
-  if (devices.audio_device.has_value())
+    const blink::mojom::StreamDevices& devices,
+    int stop_callback_id) {
+  MediaType type = MediaType::kUnknown;
+
+  if (devices.audio_device.has_value()) {
     RemoveDevice(devices.audio_device.value());
-  if (devices.video_device.has_value())
+    type = MediaStreamCaptureIndicator::GetMediaType(
+        devices.audio_device.value().type);
+  }
+
+  if (devices.video_device.has_value()) {
     RemoveDevice(devices.video_device.value());
+    type = MediaStreamCaptureIndicator::GetMediaType(
+        devices.video_device.value().type);
+  }
+  if (type == MediaType::kUserMedia) {
+    user_media_stop_callbacks_.erase(stop_callback_id);
+  }
+
+  if (type == MediaType::kDisplayMedia) {
+    display_media_stop_callbacks_.erase(stop_callback_id);
+  }
 
   if (web_contents() && !web_contents()->IsBeingDestroyed()) {
     web_contents()->NotifyNavigationStateChanged(content::INVALIDATE_TYPE_TAB);
@@ -351,9 +541,27 @@ void MediaStreamCaptureIndicator::WebContentsDeviceUsage::RemoveDevices(
   indicator_->UpdateNotificationUserInterface();
 }
 
-void MediaStreamCaptureIndicator::WebContentsDeviceUsage::NotifyStopped() {
-  if (stop_callback_)
-    std::move(stop_callback_).Run();
+void MediaStreamCaptureIndicator::WebContentsDeviceUsage::StopMediaCapturing(
+    int media_type) {
+  if (media_type & MediaType::kUserMedia) {
+    StopCallbacks(user_media_stop_callbacks_);
+  }
+  if (media_type & MediaType::kDisplayMedia) {
+    StopCallbacks(display_media_stop_callbacks_);
+  }
+}
+
+void MediaStreamCaptureIndicator::WebContentsDeviceUsage::StopCallbacks(
+    std::map<int, base::OnceClosure>& stop_callbacks) {
+  // This for loop is implemented in a weird way because std::move on the value
+  // will invalid the iterator; we need to record the next iter before
+  // std::move.
+  for (auto it = stop_callbacks.begin(), it_next = it;
+       it != stop_callbacks.end(); it = it_next) {
+    ++it_next;
+    std::move(it->second).Run();
+  }
+  stop_callbacks.clear();
 }
 
 int& MediaStreamCaptureIndicator::WebContentsDeviceUsage::GetStreamCount(
@@ -375,13 +583,20 @@ int& MediaStreamCaptureIndicator::WebContentsDeviceUsage::GetStreamCount(
     case blink::mojom::MediaStreamType::DISPLAY_AUDIO_CAPTURE:
     case blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_THIS_TAB:
     case blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_SET:
-      return IsDeviceCapturingDisplay(device) ? display_stream_count_
-                                              : window_stream_count_;
+      if (IsDeviceCapturingTab(device)) {
+        return tab_stream_count_;
+      }
+      if (IsDeviceCapturingWindow(device)) {
+        return window_stream_count_;
+      }
+      if (IsDeviceCapturingDisplay(device)) {
+        return display_stream_count_;
+      }
+      NOTREACHED();
 
     case blink::mojom::MediaStreamType::NO_SERVICE:
     case blink::mojom::MediaStreamType::NUM_MEDIA_TYPES:
       NOTREACHED();
-      return video_stream_count_;
   }
 }
 
@@ -412,11 +627,38 @@ void MediaStreamCaptureIndicator::WebContentsDeviceUsage::RemoveDevice(
   }
 }
 
+// Return whether current device os a screen sharing.
+MediaStreamCaptureIndicator::MediaType
+MediaStreamCaptureIndicator::GetMediaType(blink::mojom::MediaStreamType type) {
+  switch (type) {
+    case blink::mojom::MediaStreamType::DEVICE_AUDIO_CAPTURE:
+    case blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE:
+      return MediaStreamCaptureIndicator::MediaType::kUserMedia;
+
+    case blink::mojom::MediaStreamType::GUM_TAB_AUDIO_CAPTURE:
+    case blink::mojom::MediaStreamType::GUM_TAB_VIDEO_CAPTURE:
+    case blink::mojom::MediaStreamType::GUM_DESKTOP_VIDEO_CAPTURE:
+    case blink::mojom::MediaStreamType::GUM_DESKTOP_AUDIO_CAPTURE:
+    case blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE:
+    case blink::mojom::MediaStreamType::DISPLAY_AUDIO_CAPTURE:
+    case blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_THIS_TAB:
+      return MediaStreamCaptureIndicator::MediaType::kDisplayMedia;
+
+    case blink::mojom::MediaStreamType::DISPLAY_VIDEO_CAPTURE_SET:
+      return MediaStreamCaptureIndicator::MediaType::kAllScreensMedia;
+
+    default:
+      return MediaStreamCaptureIndicator::MediaType::kUnknown;
+  }
+}
+
 MediaStreamCaptureIndicator::Observer::~Observer() {
   DCHECK(!IsInObserverList());
 }
 
-MediaStreamCaptureIndicator::MediaStreamCaptureIndicator() {}
+int MediaStreamCaptureIndicator::g_stop_callback_id_ = 0;
+
+MediaStreamCaptureIndicator::MediaStreamCaptureIndicator() = default;
 
 MediaStreamCaptureIndicator::~MediaStreamCaptureIndicator() {
   // The user is responsible for cleaning up by reporting the closure of any
@@ -433,7 +675,8 @@ MediaStreamCaptureIndicator::RegisterMediaStream(
     content::WebContents* web_contents,
     const blink::mojom::StreamDevices& devices,
     std::unique_ptr<MediaStreamUI> ui,
-    const std::u16string application_title) {
+    const std::u16string application_title,
+    std::optional<content::DesktopMediaID> media_id) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   DCHECK(web_contents);
 
@@ -442,7 +685,7 @@ MediaStreamCaptureIndicator::RegisterMediaStream(
     usage = std::make_unique<WebContentsDeviceUsage>(this, web_contents);
 
   return usage->RegisterMediaStream(devices, std::move(ui),
-                                    std::move(application_title));
+                                    std::move(application_title), media_id);
 }
 
 void MediaStreamCaptureIndicator::ExecuteCommand(int command_id,
@@ -454,16 +697,18 @@ void MediaStreamCaptureIndicator::ExecuteCommand(int command_id,
   DCHECK_LE(0, index);
   DCHECK_GT(static_cast<int>(command_targets_.size()), index);
   WebContents* web_contents = command_targets_[index];
-  if (base::Contains(usage_map_, web_contents))
+  if (usage_map_.contains(web_contents)) {
     web_contents->GetDelegate()->ActivateContents(web_contents);
+  }
 }
 
 bool MediaStreamCaptureIndicator::CheckUsage(
     content::WebContents* web_contents,
     const WebContentsDeviceUsagePredicate& pred) const {
   auto it = usage_map_.find(web_contents);
-  if (it != usage_map_.end() && pred.Run(it->second.get()))
+  if (it != usage_map_.end() && pred(it->second.get())) {
     return true;
+  }
 
   for (auto* inner_contents : web_contents->GetInnerWebContents()) {
     if (CheckUsage(inner_contents, pred))
@@ -476,62 +721,62 @@ bool MediaStreamCaptureIndicator::CheckUsage(
 bool MediaStreamCaptureIndicator::IsCapturingUserMedia(
     content::WebContents* web_contents) const {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  return CheckUsage(
-      web_contents,
-      base::BindRepeating([](const WebContentsDeviceUsage* usage) {
-        return usage->IsCapturingAudio() || usage->IsCapturingVideo();
-      }));
+  return CheckUsage(web_contents, [](const WebContentsDeviceUsage* usage) {
+    return usage->IsCapturingAudio() || usage->IsCapturingVideo();
+  });
 }
 
 bool MediaStreamCaptureIndicator::IsCapturingVideo(
     content::WebContents* web_contents) const {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  return CheckUsage(
-      web_contents,
-      base::BindRepeating(&WebContentsDeviceUsage::IsCapturingVideo));
+  return CheckUsage(web_contents, &WebContentsDeviceUsage::IsCapturingVideo);
 }
 
 bool MediaStreamCaptureIndicator::IsCapturingAudio(
     content::WebContents* web_contents) const {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  return CheckUsage(
-      web_contents,
-      base::BindRepeating(&WebContentsDeviceUsage::IsCapturingAudio));
+  return CheckUsage(web_contents, &WebContentsDeviceUsage::IsCapturingAudio);
 }
 
 bool MediaStreamCaptureIndicator::IsBeingMirrored(
     content::WebContents* web_contents) const {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  return CheckUsage(web_contents,
-                    base::BindRepeating(&WebContentsDeviceUsage::IsMirroring));
+  return CheckUsage(web_contents, &WebContentsDeviceUsage::IsMirroring);
+}
+
+bool MediaStreamCaptureIndicator::IsCapturingTab(
+    content::WebContents* web_contents) const {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  return CheckUsage(web_contents, &WebContentsDeviceUsage::IsCapturingTab);
 }
 
 bool MediaStreamCaptureIndicator::IsCapturingWindow(
     content::WebContents* web_contents) const {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  return CheckUsage(
-      web_contents,
-      base::BindRepeating(&WebContentsDeviceUsage::IsCapturingWindow));
+  return CheckUsage(web_contents, &WebContentsDeviceUsage::IsCapturingWindow);
 }
 
 bool MediaStreamCaptureIndicator::IsCapturingDisplay(
     content::WebContents* web_contents) const {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  return CheckUsage(
-      web_contents,
-      base::BindRepeating(&WebContentsDeviceUsage::IsCapturingDisplay));
+  return CheckUsage(web_contents, &WebContentsDeviceUsage::IsCapturingDisplay);
 }
 
-void MediaStreamCaptureIndicator::NotifyStopped(
-    content::WebContents* web_contents) const {
+void MediaStreamCaptureIndicator::StopMediaCapturing(
+    content::WebContents* web_contents,
+    int media_type) const {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  // AllScreensMedia is an managed device feature, and should not be stopped
+  // unless fully discussed.
+  CHECK(!(media_type & MediaType::kAllScreensMedia))
+      << "AllScreensMedia should not be stopped by MediaStreamCaptureIndicator";
 
   auto it = usage_map_.find(web_contents);
-  DCHECK(it != usage_map_.end());
-  it->second->NotifyStopped();
-
+  if (it != usage_map_.end()) {
+    it->second->StopMediaCapturing(media_type);
+  }
   for (auto* inner_contents : web_contents->GetInnerWebContents())
-    NotifyStopped(inner_contents);
+    StopMediaCapturing(inner_contents, media_type);
 }
 
 void MediaStreamCaptureIndicator::UnregisterWebContents(
@@ -547,6 +792,11 @@ void MediaStreamCaptureIndicator::UnregisterWebContents(
   if (IsBeingMirrored(web_contents)) {
     for (Observer& observer : observers_)
       observer.OnIsBeingMirroredChanged(web_contents, false);
+  }
+  if (IsCapturingTab(web_contents)) {
+    for (Observer& observer : observers_) {
+      observer.OnIsCapturingTabChanged(web_contents, false);
+    }
   }
   if (IsCapturingWindow(web_contents)) {
     for (Observer& observer : observers_)
@@ -597,8 +847,10 @@ void MediaStreamCaptureIndicator::MaybeDestroyStatusTrayIcon() {
 
   StatusTray* status_tray = g_browser_process->status_tray();
   if (status_tray != nullptr) {
-    status_tray->RemoveStatusIcon(status_icon_);
+    std::unique_ptr<StatusIcon> removed_icon =
+        status_tray->RemoveStatusIcon(status_icon_);
     status_icon_ = nullptr;
+    removed_icon.reset();
   }
 }
 
@@ -671,13 +923,18 @@ void MediaStreamCaptureIndicator::GetStatusTrayIconInfo(
   const gfx::VectorIcon* icon = nullptr;
   if (audio && video) {
     message_id = IDS_MEDIA_STREAM_STATUS_TRAY_TEXT_AUDIO_AND_VIDEO;
-    icon = &vector_icons::kVideocamIcon;
+    icon =
+        &(features::IsRoundedIconsEnabled() ? vector_icons::kVideocamFilledIcon
+                                            : vector_icons::kVideocamOldIcon);
   } else if (audio && !video) {
     message_id = IDS_MEDIA_STREAM_STATUS_TRAY_TEXT_AUDIO_ONLY;
-    icon = &vector_icons::kMicIcon;
+    icon = &(features::IsRoundedIconsEnabled() ? vector_icons::kMicFilledIcon
+                                               : vector_icons::kMicOldIcon);
   } else if (!audio && video) {
     message_id = IDS_MEDIA_STREAM_STATUS_TRAY_TEXT_VIDEO_ONLY;
-    icon = &vector_icons::kVideocamIcon;
+    icon =
+        &(features::IsRoundedIconsEnabled() ? vector_icons::kVideocamFilledIcon
+                                            : vector_icons::kVideocamOldIcon);
   }
 
   *tool_tip = l10n_util::GetStringUTF16(message_id);

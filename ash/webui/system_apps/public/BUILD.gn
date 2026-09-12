@@ -2,20 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/chromeos/ui_mode.gni")
-
-assert(is_chromeos_ash)
+assert(is_chromeos)
 
 source_set("system_web_app_config") {
   sources = [ "system_web_app_ui_config.h" ]
   deps = [
-    ":system_web_app_type",
+    "//base",
+    "//chromeos/ash/components/system_web_apps:system_web_app_type",
     "//content/public/browser",
     "//ui/webui",
   ]
-}
-
-source_set("system_web_app_type") {
-  sources = [ "system_web_app_type.h" ]
-  public_deps = [ "//build:chromeos_buildflags" ]
 }

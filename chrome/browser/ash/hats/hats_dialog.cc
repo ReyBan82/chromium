@@ -4,30 +4,33 @@
 
 #include "chrome/browser/ash/hats/hats_dialog.h"
 
+#include <string_view>
+
 #include "ash/constants/ash_features.h"
 #include "base/containers/flat_map.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/escape.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/task/thread_pool.h"
 #include "chrome/browser/ash/hats/hats_config.h"
 #include "chrome/browser/ash/hats/hats_finch_helper.h"
 #include "chrome/browser/profiles/profile_destroyer.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser_dialogs.h"
-#include "chrome/common/pref_names.h"
+#include "chrome/browser/ui/dialogs/browser_dialogs.h"
 #include "chrome/grit/browser_resources.h"
-#include "chrome/grit/generated_resources.h"
 #include "chromeos/version/version_loader.h"
 #include "components/language/core/browser/pref_names.h"
 #include "components/language/core/common/locale_util.h"
 #include "components/prefs/pref_service.h"
 #include "components/version_info/version_info.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/browser/web_contents.h"
 #include "third_party/re2/src/re2/re2.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/gfx/geometry/size.h"
 
@@ -77,7 +80,7 @@ bool HatsDialog::ParseAnswer(const std::string& input,
                              int* question,
                              std::vector<int>* scores) {
   std::string question_num_string;
-  re2::StringPiece all_scores_string;
+  std::string_view all_scores_string;
   if (!RE2::FullMatch(input, kClientQuestionAnsweredRegex, &question_num_string,
                       &all_scores_string))
     return false;
@@ -124,10 +127,12 @@ bool HatsDialog::HandleClientTriggeredAction(
     return false;
   }
 
-  // Page asks to be closed after completing the survey.
+  // Response was submitted and the survey was complete.
   if (action == kClientActionComplete) {
     LogHistogram(histogram_name, kSurveyCompleteEnumeration);
-    return true;
+    // Do not close the dialog to show the thank you message.
+    // Subsequent `kClientActionClose` will close the dialog afterwards.
+    return false;
   }
 
   // A question was answered
@@ -161,10 +166,16 @@ HatsDialog::HatsDialog(const std::string& trigger_id,
     : trigger_id_(trigger_id), histogram_name_(histogram_name) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
-  url_ = std::string(kCrOSHaTSURL) + "?emitAnswers=true&" + site_context +
-         "&trigger=" + trigger_id_;
-
+  set_allow_default_context_menu(false);
+  set_can_close(true);
   set_can_resize(false);
+  set_dialog_content_url(GURL(std::string(kCrOSHaTSURL) + "?emitAnswers=true&" +
+                              site_context + "&trigger=" + trigger_id_));
+  set_dialog_frame_kind(ui::WebDialogDelegate::FrameKind::kDialog);
+  set_dialog_modal_type(ui::mojom::ModalType::kSystem);
+  set_dialog_size(gfx::Size(kDefaultWidth, kDefaultHeight));
+  set_show_close_button(true);
+  set_show_dialog_title(false);
 }
 
 HatsDialog::~HatsDialog() = default;
@@ -178,63 +189,14 @@ void HatsDialog::Show(const std::string& trigger_id,
       new HatsDialog(trigger_id, histogram_name, site_context));
 }
 
-ui::ModalType HatsDialog::GetDialogModalType() const {
-  return ui::MODAL_TYPE_SYSTEM;
-}
-
-std::u16string HatsDialog::GetDialogTitle() const {
-  return std::u16string();
-}
-
-GURL HatsDialog::GetDialogContentURL() const {
-  return GURL(url_);
-}
-
-void HatsDialog::GetWebUIMessageHandlers(
-    std::vector<WebUIMessageHandler*>* handlers) const {}
-
-void HatsDialog::GetDialogSize(gfx::Size* size) const {
-  size->SetSize(kDefaultWidth, kDefaultHeight);
-}
-
-std::string HatsDialog::GetDialogArgs() const {
-  return std::string();
-}
-
-void HatsDialog::OnCloseContents(WebContents* source, bool* out_close_dialog) {
-  *out_close_dialog = true;
-}
-
-void HatsDialog::OnDialogClosed(const std::string& json_retval) {
-  delete this;
-}
-
 void HatsDialog::OnLoadingStateChanged(WebContents* source) {
   // Only trigger actions when the URL changes
-  if (action_ != source->GetURL().ref()) {
-    action_ = source->GetURL().ref();
+  if (action_ != source->GetURL().GetRef()) {
+    action_ = source->GetURL().GetRef();
     if (HandleClientTriggeredAction(action_, histogram_name_)) {
       source->ClosePage();
     }
   }
-}
-
-bool HatsDialog::ShouldShowDialogTitle() const {
-  return false;
-}
-
-bool HatsDialog::ShouldShowCloseButton() const {
-  return true;
-}
-
-bool HatsDialog::HandleContextMenu(content::RenderFrameHost& render_frame_host,
-                                   const content::ContextMenuParams& params) {
-  // Disable context menu
-  return true;
-}
-
-ui::WebDialogDelegate::FrameKind HatsDialog::GetWebDialogFrameKind() const {
-  return ui::WebDialogDelegate::FrameKind::kDialog;
 }
 
 }  // namespace ash

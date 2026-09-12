@@ -7,20 +7,32 @@
 #include <memory>
 #include <vector>
 
+#include "base/byte_size.h"
+#include "base/containers/span.h"
+#include "base/debug/crash_logging.h"
+#include "base/debug/dump_without_crashing.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
+#include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/trace_event/trace_event.h"
+#include "content/browser/connection_allowlist_utils.h"
 #include "content/browser/devtools/devtools_instrumentation.h"
 #include "content/browser/renderer_host/policy_container_host.h"
+#include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/service_worker/service_worker_cache_writer.h"
 #include "content/browser/service_worker/service_worker_consts.h"
 #include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "content/browser/service_worker/service_worker_loader_helpers.h"
+#include "content/browser/service_worker/service_worker_metrics.h"
 #include "content/browser/service_worker/service_worker_version.h"
+#include "content/browser/storage_partition_impl.h"
+#include "content/browser/worker_host/network_restrictions_worker_throttle.h"
+#include "content/common/features.h"
 #include "content/public/browser/url_loader_throttles.h"
 #include "content/public/common/content_client.h"
 #include "net/base/ip_endpoint.h"
@@ -31,6 +43,7 @@
 #include "services/network/public/mojom/early_hints.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "third_party/blink/public/common/loader/throttling_url_loader.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 
 namespace content {
 
@@ -47,17 +60,14 @@ const uint32_t ServiceWorkerNewScriptLoader::kReadBufferSize = 32768;
 class ServiceWorkerNewScriptLoader::WrappedIOBuffer
     : public net::WrappedIOBuffer {
  public:
-  explicit WrappedIOBuffer(const char* data) : net::WrappedIOBuffer(data) {}
+  explicit WrappedIOBuffer(base::span<const char> data)
+      : net::WrappedIOBuffer(data) {}
 
  private:
   ~WrappedIOBuffer() override = default;
 
   // This is to make sure that the vtable is not merged with other classes.
-  virtual void dummy() {
-    // TODO(https://crbug.com/1312995): Change back to NOTREACHED() once the
-    // cause of the bug is identified.
-    CHECK(false);  // NOTREACHED
-  }
+  virtual void dummy() { NOTREACHED(); }
 };
 
 std::unique_ptr<ServiceWorkerNewScriptLoader>
@@ -71,11 +81,12 @@ ServiceWorkerNewScriptLoader::CreateAndStart(
     const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
     int64_t cache_resource_id,
     bool is_throttle_needed,
-    const GlobalRenderFrameHostId& requesting_frame_id) {
+    const GlobalRenderFrameHostId& requesting_frame_id,
+    const base::UnguessableToken& worker_network_restrictions_id) {
   return base::WrapUnique(new ServiceWorkerNewScriptLoader(
       request_id, options, original_request, std::move(client), version,
       loader_factory, traffic_annotation, cache_resource_id, is_throttle_needed,
-      requesting_frame_id));
+      requesting_frame_id, worker_network_restrictions_id));
 }
 
 // TODO(nhiroki): We're doing multiple things in the ctor. Consider factors out
@@ -90,13 +101,19 @@ ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader(
     const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
     int64_t cache_resource_id,
     bool is_throttle_needed,
-    const GlobalRenderFrameHostId& requesting_frame_id)
+    const GlobalRenderFrameHostId& requesting_frame_id,
+    const base::UnguessableToken& worker_network_restrictions_id)
     : request_id_(request_id),
       request_url_(original_request.url),
       is_main_script_(original_request.destination ==
                           network::mojom::RequestDestination::kServiceWorker &&
                       original_request.mode ==
                           network::mojom::RequestMode::kSameOrigin),
+      should_update_policy_container_(
+          is_main_script_ &&
+          (!base::FeatureList::IsEnabled(
+               features::kServiceWorkerVerifyMainScriptUrl) ||
+           original_request.url == version->script_url())),
       original_options_(options),
       version_(version),
       network_watcher_(FROM_HERE,
@@ -107,13 +124,18 @@ ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader(
       client_producer_watcher_(FROM_HERE,
                                mojo::SimpleWatcher::ArmingPolicy::MANUAL,
                                base::SequencedTaskRunner::GetCurrentDefault()),
-      requesting_frame_id_(requesting_frame_id) {
-  TRACE_EVENT_WITH_FLOW1(
-      "ServiceWorker",
-      "ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader",
-      TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                          TRACE_ID_LOCAL(request_id_)),
-      TRACE_EVENT_FLAG_FLOW_OUT, "request_url", request_url_);
+      requesting_frame_id_(requesting_frame_id),
+      worker_network_restrictions_id_(worker_network_restrictions_id),
+      creator_policies_(version_->creator_policies().Clone()) {
+  ServiceWorkerMetrics::RecordMainScriptRequestValidationResult(
+      service_worker_loader_helpers::ValidateMainScriptRequest(original_request,
+                                                               *version));
+
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader",
+              perfetto::Flow::ProcessScoped(request_id_,
+                                            kServiceWorkerNewScriptLoaderScope),
+              "request_url", request_url_);
   CHECK_NE(cache_resource_id, blink::mojom::kInvalidServiceWorkerResourceId);
 
   network::ResourceRequest resource_request(original_request);
@@ -122,8 +144,10 @@ ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader(
       version_->status(), is_main_script_, version_->script_type());
 #endif  // DCHECK_IS_ON()
 
+  ServiceWorkerContextCore* context = version_->context().get();
+  CHECK(context);
   scoped_refptr<ServiceWorkerRegistration> registration =
-      version_->context()->GetLiveRegistration(version_->registration_id());
+      context->GetLiveRegistration(version_->registration_id());
   // ServiceWorkerVersion keeps the registration alive while the service
   // worker is starting up, and it must be starting up here.
   CHECK(registration);
@@ -148,12 +172,13 @@ ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader(
     resource_request.load_flags |= net::LOAD_VALIDATE_CACHE;
   }
 
+  // Because the flag indicating whether decoding has occurred is not stored in
+  // Service Worker Storage, we always decode on the network service side.
+  resource_request.client_side_content_decoding_enabled = false;
+
   mojo::Remote<storage::mojom::ServiceWorkerResourceWriter> writer;
-  version_->context()
-      ->registry()
-      ->GetRemoteStorageControl()
-      ->CreateResourceWriter(cache_resource_id,
-                             writer.BindNewPipeAndPassReceiver());
+  context->registry().GetRemoteStorageControl()->CreateResourceWriter(
+      cache_resource_id, writer.BindNewPipeAndPassReceiver());
 
   cache_writer_ = ServiceWorkerCacheWriter::CreateForWriteBack(
       std::move(writer), cache_resource_id);
@@ -166,15 +191,35 @@ ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader(
   options &= ~network::mojom::kURLLoadOptionSniffMimeType;
 
   std::vector<std::unique_ptr<blink::URLLoaderThrottle>> throttles;
-  if (is_throttle_needed) {
+  if (is_throttle_needed && context && context->wrapper() &&
+      context->wrapper()->storage_partition()) {
     // A service worker is independent from WebContents and FrameTreeNode.
     // Return null or empty values when queried for either.
     base::RepeatingCallback<WebContents*()> web_contents_getter =
         base::BindRepeating([]() -> WebContents* { return nullptr; });
     throttles = CreateContentBrowserURLLoaderThrottles(
-        resource_request, version_->context()->wrapper()->browser_context(),
+        resource_request, context->wrapper()->browser_context(),
         std::move(web_contents_getter),
-        /*navigation_ui_data=*/nullptr, RenderFrameHost::kNoFrameTreeNodeId);
+        /*navigation_ui_data=*/nullptr, FrameTreeNodeId(),
+        /*navigation_id=*/std::nullopt);
+
+    // `rfh` may be null if the worker is being installed without a creator
+    // frame (e.g., browser-initiated update). In this case, we cannot log
+    // WebFeatures on the frame, and the script fetch itself is not restricted
+    // based on a creator frame's active restrictions.
+    // However, we still create the throttle to enforce connection allowlists
+    // for the service worker's future subresource requests. These are
+    // determined either from the script's response headers or from the
+    // persisted `creator_policies_` (restored from the database) if the worker
+    // inherits them.
+    auto* rfh = RenderFrameHostImpl::FromID(requesting_frame_id_);
+    if (auto throttle = NetworkRestrictionsWorkerThrottle::Create(
+            context->wrapper()->storage_partition()->GetWeakPtr(),
+            worker_network_restrictions_id_, creator_policies_.Clone(),
+            rfh ? rfh->GetWeakPtr() : nullptr,
+            /*is_service_worker=*/true)) {
+      throttles.push_back(std::move(throttle));
+    }
   }
 
   network_loader_ = blink::ThrottlingURLLoader::CreateLoaderAndStart(
@@ -188,12 +233,10 @@ ServiceWorkerNewScriptLoader::ServiceWorkerNewScriptLoader(
 }
 
 ServiceWorkerNewScriptLoader::~ServiceWorkerNewScriptLoader() {
-  TRACE_EVENT_WITH_FLOW0(
-      "ServiceWorker",
-      "ServiceWorkerNewScriptLoader::~ServiceWorkerNewScriptLoader",
-      TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                          TRACE_ID_LOCAL(request_id_)),
-      TRACE_EVENT_FLAG_FLOW_IN);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::~ServiceWorkerNewScriptLoader",
+              perfetto::TerminatingFlow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   // This class is used as a SelfOwnedReceiver and its lifetime is tied to the
   // corresponding mojo connection. There could be cases where the mojo
   // connection is disconnected while writing the response to the storage.
@@ -210,66 +253,40 @@ ServiceWorkerNewScriptLoader::~ServiceWorkerNewScriptLoader() {
 }
 
 void ServiceWorkerNewScriptLoader::FollowRedirect(
-    const std::vector<std::string>& removed_headers,
-    const net::HttpRequestHeaders& modified_headers,
-    const net::HttpRequestHeaders& modified_cors_exempt_headers,
-    const absl::optional<GURL>& new_url) {
+    network::HttpRequestHeadersUpdateParams headers_update_params,
+    const std::optional<GURL>& new_url) {
   // Resource requests for service worker scripts should not follow redirects.
   // See comments in OnReceiveRedirect().
-  CHECK(false);  // NOTREACHED
+  NOTREACHED();
 }
 
 void ServiceWorkerNewScriptLoader::SetPriority(net::RequestPriority priority,
                                                int32_t intra_priority_value) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::SetPriority",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerNewScriptLoader::SetPriority",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   if (network_loader_)
     network_loader_->SetPriority(priority, intra_priority_value);
-}
-
-void ServiceWorkerNewScriptLoader::PauseReadingBodyFromNet() {
-  TRACE_EVENT_WITH_FLOW0(
-      "ServiceWorker", "ServiceWorkerNewScriptLoader::PauseReadingBodyFromNet",
-      TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                          TRACE_ID_LOCAL(request_id_)),
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
-  if (network_loader_)
-    network_loader_->PauseReadingBodyFromNet();
-}
-
-void ServiceWorkerNewScriptLoader::ResumeReadingBodyFromNet() {
-  TRACE_EVENT_WITH_FLOW0(
-      "ServiceWorker", "ServiceWorkerNewScriptLoader::ResumeReadingBodyFromNet",
-      TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                          TRACE_ID_LOCAL(request_id_)),
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
-  if (network_loader_)
-    network_loader_->ResumeReadingBodyFromNet();
 }
 
 // URLLoaderClient for network loader ------------------------------------------
 
 void ServiceWorkerNewScriptLoader::OnReceiveEarlyHints(
     network::mojom::EarlyHintsPtr early_hints) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnReceiveEarlyHints",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::OnReceiveEarlyHints",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
 }
 
 void ServiceWorkerNewScriptLoader::OnReceiveResponse(
     network::mojom::URLResponseHeadPtr response_head,
     mojo::ScopedDataPipeConsumerHandle body,
-    absl::optional<mojo_base::BigBuffer> cached_metadata) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnReceiveResponse",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+    std::optional<mojo_base::BigBuffer> cached_metadata) {
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::OnReceiveResponse",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   CHECK_EQ(LoaderState::kLoadingHeader, network_loader_state_);
   if (!version_->context() || version_->is_redundant()) {
     CommitCompleted(network::URLLoaderCompletionStatus(net::ERR_FAILED),
@@ -290,16 +307,15 @@ void ServiceWorkerNewScriptLoader::OnReceiveResponse(
     return;
   }
 
-  if (is_main_script_) {
+  if (should_update_policy_container_) {
     // Check the path restriction defined in the spec:
     // https://w3c.github.io/ServiceWorker/#service-worker-script-response
-    std::string service_worker_allowed;
-    bool has_header = response_head->headers->EnumerateHeader(
-        nullptr, ServiceWorkerConsts::kServiceWorkerAllowed,
-        &service_worker_allowed);
+    std::optional<std::string_view> service_worker_allowed =
+        response_head->headers->EnumerateHeader(
+            nullptr, ServiceWorkerConsts::kServiceWorkerAllowed);
     if (!service_worker_loader_helpers::IsPathRestrictionSatisfied(
-            version_->scope(), request_url_,
-            has_header ? &service_worker_allowed : nullptr, &error_message)) {
+            version_->scope(), request_url_, service_worker_allowed,
+            &error_message)) {
       CommitCompleted(
           network::URLLoaderCompletionStatus(net::ERR_INSECURE_RESPONSE),
           error_message, std::move(response_head));
@@ -310,15 +326,18 @@ void ServiceWorkerNewScriptLoader::OnReceiveResponse(
              ->browser()
              ->ShouldServiceWorkerInheritPolicyContainerFromCreator(
                  request_url_)) {
-      version_->set_policy_container_host(
-          base::MakeRefCounted<PolicyContainerHost>(
-              // TODO(crbug.com/1352929): Add DCHECK to parsed_headers
-              response_head->parsed_headers
-                  // This does not parse the referrer policy, which will be
-                  // updated in ServiceWorkerGlobalScope::Initialize
-                  ? PolicyContainerPolicies(request_url_, response_head.get(),
-                                            /*client=*/nullptr)
-                  : PolicyContainerPolicies()));
+      PolicyContainerPolicies policies =
+          response_head->parsed_headers
+              // This does not parse the referrer policy, which will be
+              // updated in ServiceWorkerGlobalScope::Initialize
+              ? PolicyContainerPolicies(request_url_, response_head.get(),
+                                        /*client=*/nullptr)
+              : PolicyContainerPolicies();
+      policies.connection_allowlists = GetConnectionAllowlistsForWorker(
+          request_url_, response_head.get(), &creator_policies_,
+          /*inherit_from_creator=*/false);
+      version_->SetPolicyContainerHost(
+          base::MakeRefCounted<PolicyContainerHost>(std::move(policies)));
     }
 
     if (response_head->network_accessed)
@@ -330,6 +349,13 @@ void ServiceWorkerNewScriptLoader::OnReceiveResponse(
   }
 
   WriteHeaders(response_head.Clone());
+
+  // WriteHeaders() can commit completed.
+  if (network_loader_state_ == LoaderState::kCompleted &&
+      header_writer_state_ == WriterState::kCompleted &&
+      body_writer_state_ == WriterState::kCompleted) {
+    return;
+  }
 
   // Don't pass SSLInfo to the client when the original request doesn't ask
   // to send it.
@@ -374,17 +400,16 @@ void ServiceWorkerNewScriptLoader::OnReceiveResponse(
 void ServiceWorkerNewScriptLoader::OnReceiveRedirect(
     const net::RedirectInfo& redirect_info,
     network::mojom::URLResponseHeadPtr response_head) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnReceiveRedirect",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::OnReceiveRedirect",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   // Resource requests for service worker scripts should not follow redirects.
   //
   // Step 9.5: "Set request's redirect mode to "error"."
   // https://w3c.github.io/ServiceWorker/#update-algorithm
   //
-  // TODO(https://crbug.com/889798): Follow redirects for imported scripts.
+  // TODO(crbug.com/40595655): Follow redirects for imported scripts.
   CommitCompleted(network::URLLoaderCompletionStatus(net::ERR_UNSAFE_REDIRECT),
                   ServiceWorkerConsts::kServiceWorkerRedirectError,
                   std::move(response_head));
@@ -394,32 +419,27 @@ void ServiceWorkerNewScriptLoader::OnUploadProgress(
     int64_t current_position,
     int64_t total_size,
     OnUploadProgressCallback ack_callback) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnUploadProgress",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerNewScriptLoader::OnUploadProgress",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   client_->OnUploadProgress(current_position, total_size,
                             std::move(ack_callback));
 }
 
 void ServiceWorkerNewScriptLoader::OnTransferSizeUpdated(
     int32_t transfer_size_diff) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnTransferSizeUpdated",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::OnTransferSizeUpdated",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   client_->OnTransferSizeUpdated(transfer_size_diff);
 }
 
 void ServiceWorkerNewScriptLoader::OnComplete(
     const network::URLLoaderCompletionStatus& status) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnComplete",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerNewScriptLoader::OnComplete",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   LoaderState previous_state = network_loader_state_;
   network_loader_state_ = LoaderState::kCompleted;
   if (status.error_code != net::OK) {
@@ -449,39 +469,29 @@ void ServiceWorkerNewScriptLoader::OnComplete(
                       std::string() /* status_message */, nullptr);
       return;
   }
-  CHECK(false) << static_cast<int>(body_writer_state_);  // NOTREACHED
+  NOTREACHED() << static_cast<int>(body_writer_state_);
 }
 
 // End of URLLoaderClient ------------------------------------------------------
 
 void ServiceWorkerNewScriptLoader::WriteHeaders(
     network::mojom::URLResponseHeadPtr response_head) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::WriteHeaders",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerNewScriptLoader::WriteHeaders",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   CHECK_EQ(WriterState::kNotStarted, header_writer_state_);
   header_writer_state_ = WriterState::kWriting;
-  net::Error error = cache_writer_->MaybeWriteHeaders(
+  cache_writer_->MaybeWriteHeaders(
       std::move(response_head),
       base::BindOnce(&ServiceWorkerNewScriptLoader::OnWriteHeadersComplete,
                      weak_factory_.GetWeakPtr()));
-  if (error == net::ERR_IO_PENDING) {
-    // OnWriteHeadersComplete() will be called asynchronously.
-    return;
-  }
-  // MaybeWriteHeaders() doesn't run the callback if it finishes synchronously,
-  // so explicitly call it here.
-  OnWriteHeadersComplete(error);
 }
 
 void ServiceWorkerNewScriptLoader::OnWriteHeadersComplete(net::Error error) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnWriteHeadersComplete",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::OnWriteHeadersComplete",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   CHECK_EQ(WriterState::kWriting, header_writer_state_);
   CHECK_NE(net::ERR_IO_PENDING, error);
   if (error != net::OK) {
@@ -506,12 +516,11 @@ void ServiceWorkerNewScriptLoader::OnWriteHeadersComplete(net::Error error) {
 }
 
 void ServiceWorkerNewScriptLoader::MaybeStartNetworkConsumerHandleWatcher() {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::"
-                         "MaybeStartNetworkConsumerHandleWatcher",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT(
+      "ServiceWorker",
+      "ServiceWorkerNewScriptLoader::MaybeStartNetworkConsumerHandleWatcher",
+      perfetto::Flow::ProcessScoped(request_id_,
+                                    kServiceWorkerNewScriptLoaderScope));
   if (network_loader_state_ == LoaderState::kLoadingHeader) {
     // OnReceiveResponse() or OnComplete() will continue the sequence.
     return;
@@ -523,7 +532,20 @@ void ServiceWorkerNewScriptLoader::MaybeStartNetworkConsumerHandleWatcher() {
     return;
   }
 
-  CHECK_EQ(WriterState::kNotStarted, body_writer_state_);
+  if (body_writer_state_ != WriterState::kNotStarted) {
+    static bool has_dumped_without_crashing = false;
+    if (!has_dumped_without_crashing) {
+      has_dumped_without_crashing = true;
+      SCOPED_CRASH_KEY_NUMBER("SWNewScriptLoader", "network_loader_state",
+                              static_cast<int>(network_loader_state_));
+      SCOPED_CRASH_KEY_NUMBER("SWNewScriptLoader", "header_writer_state",
+                              static_cast<int>(header_writer_state_));
+      SCOPED_CRASH_KEY_NUMBER("SWNewScriptLoader", "body_writer_state",
+                              static_cast<int>(body_writer_state_));
+      base::debug::DumpWithoutCrashing();
+    }
+    return;
+  }
   body_writer_state_ = WriterState::kWriting;
 
   network_watcher_.Watch(
@@ -539,48 +561,51 @@ void ServiceWorkerNewScriptLoader::OnNetworkDataAvailable(MojoResult) {
   CHECK_EQ(WriterState::kWriting, body_writer_state_);
   CHECK(network_consumer_.is_valid());
   scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer;
-  uint32_t bytes_available = 0;
   MojoResult result = network::MojoToNetPendingBuffer::BeginRead(
-      &network_consumer_, &pending_buffer, &bytes_available);
-  TRACE_EVENT_WITH_FLOW1("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnNetworkDataAvailable",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "begin_read_result", result);
+      &network_consumer_, &pending_buffer);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::OnNetworkDataAvailable",
+              perfetto::Flow::ProcessScoped(request_id_,
+                                            kServiceWorkerNewScriptLoaderScope),
+              "begin_read_result", result);
   switch (result) {
-    case MOJO_RESULT_OK:
+    case MOJO_RESULT_OK: {
+      const uint32_t bytes_available = pending_buffer->size();
       WriteData(std::move(pending_buffer), bytes_available);
       return;
-    case MOJO_RESULT_FAILED_PRECONDITION:
+    }
+    case MOJO_RESULT_FAILED_PRECONDITION: {
       // Call WriteData() with null buffer to let the cache writer know that
       // body from the network reaches to the end.
       WriteData(/*pending_buffer=*/nullptr, /*bytes_available=*/0);
       return;
-    case MOJO_RESULT_SHOULD_WAIT:
+    }
+    case MOJO_RESULT_SHOULD_WAIT: {
       network_watcher_.ArmOrNotify();
       return;
+    }
   }
-  CHECK(false) << static_cast<int>(result);  // NOTREACHED
+  NOTREACHED() << static_cast<int>(result);
 }
 
 void ServiceWorkerNewScriptLoader::WriteData(
     scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer,
     uint32_t bytes_available) {
+  auto buffer = base::MakeRefCounted<WrappedIOBuffer>(
+      pending_buffer ? base::span(*pending_buffer) : base::span<const char>());
+
   // Cap the buffer size up to |kReadBufferSize|. The remaining will be written
   // next time.
-  uint32_t bytes_written = std::min<uint32_t>(kReadBufferSize, bytes_available);
+  base::span<const uint8_t> bytes = buffer->span();
+  bytes = bytes.first(std::min<size_t>(kReadBufferSize, bytes_available));
 
-  auto buffer = base::MakeRefCounted<WrappedIOBuffer>(
-      pending_buffer ? pending_buffer->buffer() : nullptr);
+  size_t bytes_written = 0;
   MojoResult result = client_producer_->WriteData(
-      buffer->data(), &bytes_written, MOJO_WRITE_DATA_FLAG_NONE);
-  TRACE_EVENT_WITH_FLOW1("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::WriteData",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "write_data_result", result);
+      bytes, MOJO_WRITE_DATA_FLAG_NONE, bytes_written);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerNewScriptLoader::WriteData",
+              perfetto::Flow::ProcessScoped(request_id_,
+                                            kServiceWorkerNewScriptLoaderScope),
+              "write_data_result", result);
   switch (result) {
     case MOJO_RESULT_OK:
       break;
@@ -592,9 +617,9 @@ void ServiceWorkerNewScriptLoader::WriteData(
                       nullptr);
       return;
     case MOJO_RESULT_SHOULD_WAIT:
-      DCHECK(pending_buffer);
-      DCHECK(!pending_network_buffer_);
-      DCHECK_EQ(pending_network_bytes_available_, 0u);
+      CHECK(pending_buffer, base::NotFatalUntil::M159);
+      CHECK(!pending_network_buffer_, base::NotFatalUntil::M159);
+      CHECK_EQ(pending_network_bytes_available_, 0u, base::NotFatalUntil::M159);
       // No data was written to `client_producer_` because the pipe was full.
       // Retry when the pipe becomes ready again.
       pending_network_buffer_ = std::move(pending_buffer);
@@ -602,37 +627,28 @@ void ServiceWorkerNewScriptLoader::WriteData(
       client_producer_watcher_.ArmOrNotify();
       return;
     default:
-      CHECK(false) << static_cast<int>(result);  // NOTREACHED
-      return;
+      NOTREACHED() << static_cast<int>(result);
   }
 
   // Write the buffer in the service worker script storage up to the size we
   // successfully wrote to the data pipe (i.e., |bytes_written|).
   // A null buffer and zero |bytes_written| are passed when this is the end of
   // the body.
-  net::Error error = cache_writer_->MaybeWriteData(
-      buffer.get(), base::strict_cast<size_t>(bytes_written),
+  cache_writer_->MaybeWriteData(
+      buffer.get(), bytes_written,
       base::BindOnce(&ServiceWorkerNewScriptLoader::OnWriteDataComplete,
                      weak_factory_.GetWeakPtr(), pending_buffer,
                      bytes_written));
-  if (error == net::ERR_IO_PENDING) {
-    // OnWriteDataComplete() will be called asynchronously.
-    return;
-  }
-  // MaybeWriteData() doesn't run the callback if it finishes synchronously, so
-  // explicitly call it here.
-  OnWriteDataComplete(std::move(pending_buffer), bytes_written, error);
 }
 
 void ServiceWorkerNewScriptLoader::OnWriteDataComplete(
     scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer,
-    uint32_t bytes_written,
+    size_t bytes_written,
     net::Error error) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnWriteDataComplete",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker",
+              "ServiceWorkerNewScriptLoader::OnWriteDataComplete",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   CHECK_NE(net::ERR_IO_PENDING, error);
   if (error != net::OK) {
     ServiceWorkerMetrics::CountWriteResponseResult(
@@ -668,22 +684,21 @@ void ServiceWorkerNewScriptLoader::CommitCompleted(
     const network::URLLoaderCompletionStatus& status,
     const std::string& status_message,
     const network::mojom::URLResponseHeadPtr response_head) {
-  TRACE_EVENT_WITH_FLOW0("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::CommitCompleted",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerNewScriptLoader::CommitCompleted",
+              perfetto::Flow::ProcessScoped(
+                  request_id_, kServiceWorkerNewScriptLoaderScope));
   net::Error error_code = static_cast<net::Error>(status.error_code);
-  int bytes_written = -1;
+  std::optional<base::ByteSize> bytes_written;
   std::string sha256_checksum;
   if (error_code == net::OK) {
     CHECK_EQ(LoaderState::kCompleted, network_loader_state_);
     CHECK_EQ(WriterState::kCompleted, header_writer_state_);
     CHECK_EQ(WriterState::kCompleted, body_writer_state_);
     CHECK(cache_writer_->did_replace());
-    bytes_written = cache_writer_->bytes_written();
-    DCHECK_EQ(cache_writer_->checksum_update_timing(),
-              ServiceWorkerCacheWriter::ChecksumUpdateTiming::kCacheMismatch);
+    bytes_written = base::ByteSize(cache_writer_->bytes_written());
+    CHECK_EQ(cache_writer_->checksum_update_timing(),
+             ServiceWorkerCacheWriter::ChecksumUpdateTiming::kCacheMismatch,
+             base::NotFatalUntil::M159);
     sha256_checksum = cache_writer_->GetSha256Checksum();
   } else {
     // When we fail a main script fetch, we do not have a renderer in which to
@@ -720,14 +735,12 @@ void ServiceWorkerNewScriptLoader::CommitCompleted(
 }
 
 void ServiceWorkerNewScriptLoader::OnClientWritable(MojoResult result) {
-  TRACE_EVENT_WITH_FLOW1("ServiceWorker",
-                         "ServiceWorkerNewScriptLoader::OnClientWritable",
-                         TRACE_ID_WITH_SCOPE(kServiceWorkerNewScriptLoaderScope,
-                                             TRACE_ID_LOCAL(request_id_)),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "mojo_result", result);
-  DCHECK(pending_network_buffer_);
-  DCHECK_GT(pending_network_bytes_available_, 0u);
+  TRACE_EVENT("ServiceWorker", "ServiceWorkerNewScriptLoader::OnClientWritable",
+              perfetto::Flow::ProcessScoped(request_id_,
+                                            kServiceWorkerNewScriptLoaderScope),
+              "mojo_result", result);
+  CHECK(pending_network_buffer_, base::NotFatalUntil::M159);
+  CHECK_GT(pending_network_bytes_available_, 0u, base::NotFatalUntil::M159);
 
   scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer =
       std::move(pending_network_buffer_);

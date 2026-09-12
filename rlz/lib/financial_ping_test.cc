@@ -22,7 +22,6 @@
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "rlz/lib/lib_values.h"
 #include "rlz/lib/machine_id.h"
 #include "rlz/lib/rlz_lib.h"
@@ -38,34 +37,25 @@
 #include "base/time/time.h"
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chromeos/ash/components/system/factory_ping_embargo_check.h"
 #include "rlz/chromeos/lib/rlz_value_store_chromeos.h"
 #endif
 
 namespace {
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 void RemoveMachineIdFromUrl(std::string* url) {
   size_t id_offset = url->find("&id=");
   EXPECT_NE(std::string::npos, id_offset);
   url->resize(id_offset);
 }
 
-// Utility function to convert a |base::Time::Exploded| to "yyyy-mm-dd" format.
-std::string ConvertExplodedToRlzEmbargoDate(
-    const base::Time::Exploded& exploded) {
-  std::string rlz_embargo_date = std::to_string(exploded.year);
-  rlz_embargo_date += '-';
-  if (exploded.month < 10)
-    rlz_embargo_date += '0';
-  rlz_embargo_date += std::to_string(exploded.month);
-  rlz_embargo_date += '-';
-  if (exploded.day_of_month < 10)
-    rlz_embargo_date += '0';
-  rlz_embargo_date += std::to_string(exploded.day_of_month);
-
-  return rlz_embargo_date;
+std::string ConvertTimeToRlzEmbargoDate(const base::Time& time) {
+  base::Time::Exploded exploded;
+  time.UTCExplode(&exploded);
+  return base::StringPrintf("%04d-%02d-%02d", exploded.year, exploded.month,
+                            exploded.day_of_month);
 }
 #endif
 
@@ -104,7 +94,7 @@ TEST_F(FinancialPingTest, FormRequest) {
   // Don't check the machine Id on Chrome OS since a random one is generated
   // each time.
   std::string machine_id;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   bool got_machine_id = false;
 #else
   bool got_machine_id = rlz_lib::GetMachineId(&machine_id);
@@ -112,9 +102,10 @@ TEST_F(FinancialPingTest, FormRequest) {
 
   std::string request;
   EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(rlz_lib::TOOLBAR_NOTIFIER,
-      points, "swg", brand, NULL, "en", false, &request));
+                                                  points, "swg", brand, "",
+                                                  "en", false, &request));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Ignore the machine Id of the request URL.  On Chrome OS a random Id is
   // generated with each request.
   RemoveMachineIdFromUrl(&request);
@@ -132,9 +123,10 @@ TEST_F(FinancialPingTest, FormRequest) {
 
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, ""));
   EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(rlz_lib::TOOLBAR_NOTIFIER,
-      points, "swg", brand, "IdOk2", NULL, false, &request));
+                                                  points, "swg", brand, "IdOk2",
+                                                  "", false, &request));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Ignore the machine Id of the request URL.  On Chrome OS a random Id is
   // generated with each request.
   RemoveMachineIdFromUrl(&request);
@@ -150,15 +142,16 @@ TEST_F(FinancialPingTest, FormRequest) {
   EXPECT_EQ(expected_response, request);
 
   EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(rlz_lib::TOOLBAR_NOTIFIER,
-      points, "swg", brand, "IdOk", NULL, true, &request));
+                                                  points, "swg", brand, "IdOk",
+                                                  "", true, &request));
   expected_response.clear();
   base::StringAppendF(&expected_response,
       "/tools/pso/ping?as=swg&brand=%s&pid=IdOk&"
       "events=I7S,W1I&rep=2&rlz=T4:" DCC_PARAM, brand);
   EXPECT_EQ(expected_response, request);
 
-  EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(rlz_lib::TOOLBAR_NOTIFIER,
-      points, "swg", brand, NULL, NULL, true, &request));
+  EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(
+      rlz_lib::TOOLBAR_NOTIFIER, points, "swg", brand, "", "", true, &request));
   expected_response.clear();
   base::StringAppendF(&expected_response,
       "/tools/pso/ping?as=swg&brand=%s&events=I7S,W1I&rep=2"
@@ -170,12 +163,11 @@ TEST_F(FinancialPingTest, FormRequest) {
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
 
   // Clear all RLZs.
-  char rlz[rlz_lib::kMaxRlzLength + 1];
   for (int ap = rlz_lib::NO_ACCESS_POINT + 1;
        ap < rlz_lib::LAST_ACCESS_POINT; ap++) {
-    rlz[0] = 0;
     rlz_lib::AccessPoint point = static_cast<rlz_lib::AccessPoint>(ap);
-    if (rlz_lib::GetAccessPointRlz(point, rlz, std::size(rlz)) && rlz[0]) {
+    if (std::optional<std::string> rlz = rlz_lib::GetAccessPointRlz(point);
+        rlz && !rlz->empty()) {
       rlz_lib::SetAccessPointRlz(point, "");
     }
   }
@@ -185,14 +177,15 @@ TEST_F(FinancialPingTest, FormRequest) {
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::QUICK_SEARCH_BOX,
       "QsbRlzValue"));
   EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(rlz_lib::TOOLBAR_NOTIFIER,
-      points, "swg", brand, NULL, NULL, false, &request));
+                                                  points, "swg", brand, "", "",
+                                                  false, &request));
   expected_response.clear();
   base::StringAppendF(&expected_response,
       "/tools/pso/ping?as=swg&brand=%s&rep=2&rlz=T4:TbRlzValue,"
       "Q1:QsbRlzValue" DCC_PARAM, brand);
   EXPECT_STREQ(expected_response.c_str(), request.c_str());
 
-  if (!GetAccessPointRlz(rlz_lib::IE_HOME_PAGE, rlz, std::size(rlz))) {
+  if (!GetAccessPointRlz(rlz_lib::IE_HOME_PAGE)) {
     points[2] = rlz_lib::IE_HOME_PAGE;
     EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(rlz_lib::TOOLBAR_NOTIFIER,
         points, "swg", brand, "MyId", "en-US", true, &request));
@@ -211,7 +204,8 @@ TEST_F(FinancialPingTest, FormRequestBadBrand) {
 
   std::string request;
   bool ok = rlz_lib::FinancialPing::FormRequest(rlz_lib::TOOLBAR_NOTIFIER,
-      points, "swg", "GOOG", NULL, "en", false, &request);
+                                                points, "swg", "GOOG", "", "en",
+                                                false, &request);
   EXPECT_EQ(rlz_lib::SupplementaryBranding::GetBrand().empty(), ok);
 }
 
@@ -328,7 +322,7 @@ TEST_F(FinancialPingTest, ClearLastPingTime) {
                                                  false));
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 TEST_F(FinancialPingTest, RlzEmbargoEndDate) {
   // Do not set last ping time, verify that |IsPingTime| returns true.
   EXPECT_TRUE(
@@ -336,14 +330,10 @@ TEST_F(FinancialPingTest, RlzEmbargoEndDate) {
 
   // Simulate writing a past embargo date to VPD, verify that |IsPingTime|
   // returns true when the embargo date has already passed.
-  base::Time::Exploded exploded;
-  base::Time past_rlz_embargo_date =
-      base::Time::NowFromSystemTime() - base::Days(1);
-  past_rlz_embargo_date.LocalExplode(&exploded);
-  std::string past_rlz_embargo_date_value =
-      ConvertExplodedToRlzEmbargoDate(exploded);
-  statistics_provider_->SetMachineStatistic(ash::system::kRlzEmbargoEndDateKey,
-                                            past_rlz_embargo_date_value);
+  statistics_provider_->SetMachineStatistic(
+      ash::system::kRlzEmbargoEndDateKey,
+      ConvertTimeToRlzEmbargoDate(base::Time::NowFromSystemTime() -
+                                  base::Days(1)));
 
   EXPECT_TRUE(
       rlz_lib::FinancialPing::IsPingTime(rlz_lib::TOOLBAR_NOTIFIER, false));
@@ -351,14 +341,11 @@ TEST_F(FinancialPingTest, RlzEmbargoEndDate) {
   // Simulate writing a future embargo date (less than
   // |kEmbargoEndDateGarbageDateThresholdDays|) to VPD, verify that
   // |IsPingTime| is false.
-  base::Time future_rlz_embargo_date =
-      base::Time::NowFromSystemTime() +
-      ash::system::kEmbargoEndDateGarbageDateThreshold - base::Days(1);
-  future_rlz_embargo_date.LocalExplode(&exploded);
-  std::string future_rlz_embargo_date_value =
-      ConvertExplodedToRlzEmbargoDate(exploded);
-  statistics_provider_->SetMachineStatistic(ash::system::kRlzEmbargoEndDateKey,
-                                            future_rlz_embargo_date_value);
+  statistics_provider_->SetMachineStatistic(
+      ash::system::kRlzEmbargoEndDateKey,
+      ConvertTimeToRlzEmbargoDate(
+          base::Time::NowFromSystemTime() +
+          ash::system::kEmbargoEndDateGarbageDateThreshold - base::Days(1)));
 
   EXPECT_FALSE(
       rlz_lib::FinancialPing::IsPingTime(rlz_lib::TOOLBAR_NOTIFIER, false));
@@ -366,13 +353,11 @@ TEST_F(FinancialPingTest, RlzEmbargoEndDate) {
   // Simulate writing a future embargo date (more than
   // |kEmbargoEndDateGarbageDateThresholdDays|) to VPD, verify that
   // |IsPingTime| is true.
-  future_rlz_embargo_date = base::Time::NowFromSystemTime() +
-                            ash::system::kEmbargoEndDateGarbageDateThreshold +
-                            base::Days(1);
-  future_rlz_embargo_date.LocalExplode(&exploded);
-  future_rlz_embargo_date_value = ConvertExplodedToRlzEmbargoDate(exploded);
-  statistics_provider_->SetMachineStatistic(ash::system::kRlzEmbargoEndDateKey,
-                                            future_rlz_embargo_date_value);
+  statistics_provider_->SetMachineStatistic(
+      ash::system::kRlzEmbargoEndDateKey,
+      ConvertTimeToRlzEmbargoDate(
+          base::Time::NowFromSystemTime() +
+          ash::system::kEmbargoEndDateGarbageDateThreshold + base::Days(1)));
 
   EXPECT_TRUE(
       rlz_lib::FinancialPing::IsPingTime(rlz_lib::TOOLBAR_NOTIFIER, false));

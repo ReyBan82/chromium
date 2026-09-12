@@ -31,53 +31,44 @@
 #include <memory>
 #include <utility>
 
-#include "base/location.h"
+#include "base/memory/ptr_util.h"
+#include "base/numerics/checked_math.h"
 #include "third_party/blink/renderer/platform/audio/audio_bus.h"
 #include "third_party/blink/renderer/platform/audio/vector_math.h"
-#include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
-#include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 
 namespace blink {
 
-const int kInputBufferSize = 8 * 16384;
+std::unique_ptr<ReverbConvolver> ReverbConvolver::TryCreate(
+    AudioChannel* impulse_response,
+    unsigned render_slice_size,
+    unsigned max_fft_size,
+    size_t convolver_render_phase,
+    float scale) {
+  auto convolver = base::WrapUnique(new ReverbConvolver());
+  if (!convolver->Initialize(impulse_response, render_slice_size, max_fft_size,
+                             convolver_render_phase, scale)) {
+    return nullptr;
+  }
+  return convolver;
+}
 
-// We only process the leading portion of the impulse response in the real-time
-// thread.  We don't exceed this length.  It turns out then, that the
-// background thread has about 278msec of scheduling slop.  Empirically, this
-// has been found to be a good compromise between giving enough time for
-// scheduling slop, while still minimizing the amount of processing done in the
-// primary (high-priority) thread.  This was found to be a good value on Mac OS
-// X, and may work well on other platforms as well, assuming the very rough
-// scheduling latencies are similar on these time-scales.  Of course, this code
-// may need to be tuned for individual platforms if this assumption is found to
-// be incorrect.
-const size_t kRealtimeFrameLimit = 8192 + 4096;  // ~278msec @ 44.1KHz
-
-const unsigned kMinFFTSize = 128;
-const unsigned kMaxRealtimeFFTSize = 2048;
-
-ReverbConvolver::ReverbConvolver(AudioChannel* impulse_response,
+bool ReverbConvolver::Initialize(AudioChannel* impulse_response,
                                  unsigned render_slice_size,
                                  unsigned max_fft_size,
                                  size_t convolver_render_phase,
-                                 bool use_background_threads,
-                                 float scale)
-    : impulse_response_length_(impulse_response->length()),
-      accumulation_buffer_(impulse_response->length() + render_slice_size),
-      input_buffer_(kInputBufferSize),
-      min_fft_size_(
-          kMinFFTSize),  // First stage will have this size - successive
-                         // stages will double in size each time
-      max_fft_size_(max_fft_size)  // until we hit m_maxFFTSize
-{
-  // If we are using background threads then don't exceed this FFT size for the
-  // stages which run in the real-time thread.  This avoids having only one or
-  // two large stages (size 16384 or so) at the end which take a lot of time
-  // every several processing slices.  This way we amortize the cost over more
-  // processing slices.
-  max_realtime_fft_size_ = kMaxRealtimeFFTSize;
+                                 float scale) {
+  impulse_response_length_ = impulse_response->length();
 
-  const float* response = impulse_response->Data();
+  uint32_t total_length = 0;
+  if (!base::CheckAdd(impulse_response->length(), render_slice_size)
+           .AssignIfValid(&total_length)) {
+    return false;
+  }
+
+  if (!accumulation_buffer_.TryAllocate(total_length)) {
+    return false;
+  }
+
   uint32_t total_response_length = impulse_response->length();
 
   // The total latency is zero because the direct-convolution is used in the
@@ -86,7 +77,10 @@ ReverbConvolver::ReverbConvolver(AudioChannel* impulse_response,
 
   unsigned stage_offset = 0;
   int i = 0;
-  unsigned fft_size = min_fft_size_;
+
+  // First stage will be of size kMinFFTSize.  Each next stage will be twice as
+  // big until we hit max_fft_size.
+  unsigned fft_size = kMinFFTSize;
   while (stage_offset < total_response_length) {
     unsigned stage_size = fft_size / 2;
 
@@ -104,19 +98,16 @@ ReverbConvolver::ReverbConvolver(AudioChannel* impulse_response,
     bool use_direct_convolver = !stage_offset;
 
     std::unique_ptr<ReverbConvolverStage> stage =
-        std::make_unique<ReverbConvolverStage>(
-            response, total_response_length, reverb_total_latency, stage_offset,
+        ReverbConvolverStage::TryCreate(
+            impulse_response->Span(), reverb_total_latency, stage_offset,
             stage_size, fft_size, render_phase, render_slice_size,
             &accumulation_buffer_, scale, use_direct_convolver);
 
-    bool is_background_stage = false;
-
-    if (use_background_threads && stage_offset > kRealtimeFrameLimit) {
-      background_stages_.push_back(std::move(stage));
-      is_background_stage = true;
-    } else {
-      stages_.push_back(std::move(stage));
+    if (!stage) {
+      return false;
     }
+
+    stages_.push_back(std::move(stage));
 
     stage_offset += stage_size;
     ++i;
@@ -126,48 +117,12 @@ ReverbConvolver::ReverbConvolver(AudioChannel* impulse_response,
       fft_size *= 2;
     }
 
-    if (use_background_threads && !is_background_stage &&
-        fft_size > max_realtime_fft_size_) {
-      fft_size = max_realtime_fft_size_;
-    }
-    if (fft_size > max_fft_size_) {
-      fft_size = max_fft_size_;
+    if (fft_size > max_fft_size) {
+      fft_size = max_fft_size;
     }
   }
 
-  // Start up background thread
-  // FIXME: would be better to up the thread priority here.  It doesn't need to
-  // be real-time, but higher than the default...
-  if (use_background_threads && background_stages_.size() > 0) {
-    background_thread_ = NonMainThread::CreateThread(
-        ThreadCreationParams(ThreadType::kReverbConvolutionBackgroundThread));
-  }
-}
-
-ReverbConvolver::~ReverbConvolver() {
-  // Wait for background thread to stop
-  background_thread_.reset();
-}
-
-void ReverbConvolver::ProcessInBackground() {
-  // Process all of the stages until their read indices reach the input buffer's
-  // write index
-  size_t write_index = input_buffer_.WriteIndex();
-
-  // Even though it doesn't seem like every stage needs to maintain its own
-  // version of readIndex we do this in case we want to run in more than one
-  // background thread.
-  // FIXME: do better to detect buffer overrun...
-  while (background_stages_[0]->InputReadIndex() != write_index) {
-    // The ReverbConvolverStages need to process in amounts which evenly divide
-    // half the FFT size
-    const int kSliceSize = kMinFFTSize / 2;
-
-    // Accumulate contributions from each stage
-    for (auto& background_stage : background_stages_) {
-      background_stage->ProcessInBackground(this, kSliceSize);
-    }
-  }
+  return true;
 }
 
 void ReverbConvolver::Process(const AudioChannel* source_channel,
@@ -178,30 +133,14 @@ void ReverbConvolver::Process(const AudioChannel* source_channel,
   DCHECK_GE(source_channel->length(), frames_to_process);
   DCHECK_GE(destination_channel->length(), frames_to_process);
 
-  const float* source = source_channel->Data();
-  float* destination = destination_channel->MutableData();
-  DCHECK(source);
-  DCHECK(destination);
-
-  // Feed input buffer (read by all threads)
-  input_buffer_.Write(source, frames_to_process);
-
   // Accumulate contributions from each stage
   for (auto& stage : stages_) {
-    stage->Process(source, frames_to_process);
+    stage->Process(source_channel->Span().first(frames_to_process));
   }
 
   // Finally read from accumulation buffer
-  accumulation_buffer_.ReadAndClear(destination, frames_to_process);
-
-  // Now that we've buffered more input, post another task to the background
-  // thread.
-  if (background_thread_) {
-    PostCrossThreadTask(
-        *background_thread_->GetTaskRunner(), FROM_HERE,
-        CrossThreadBindOnce(&ReverbConvolver::ProcessInBackground,
-                            CrossThreadUnretained(this)));
-  }
+  accumulation_buffer_.ReadAndClear(
+      destination_channel->MutableSpan().first(frames_to_process));
 }
 
 void ReverbConvolver::Reset() {
@@ -209,12 +148,7 @@ void ReverbConvolver::Reset() {
     stage->Reset();
   }
 
-  for (auto& background_stage : background_stages_) {
-    background_stage->Reset();
-  }
-
   accumulation_buffer_.Reset();
-  input_buffer_.Reset();
 }
 
 size_t ReverbConvolver::LatencyFrames() const {

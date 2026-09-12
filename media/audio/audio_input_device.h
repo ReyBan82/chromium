@@ -7,15 +7,12 @@
 //
 // Relationship of classes:
 //
-//  AudioInputController                 AudioInputDevice
+//  audio::InputController                 AudioInputDevice
 //           ^                                  ^
 //           |                                  |
 //           v                  IPC             v
-// MojoAudioInputStream    <----------->  AudioInputIPC
-//           ^                            (MojoAudioInputIPC)
-//           |
-//           v
-// AudioInputDeviceManager
+// audio::mojom::AudioInputStream    <----------->  AudioInputIPC
+//                                       (MojoAudioInputIPC)
 //
 // Transportation of audio samples from the browser to the render process
 // is done by using shared memory in combination with a SyncSocket.
@@ -46,6 +43,7 @@
 #define MEDIA_AUDIO_AUDIO_INPUT_DEVICE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/compiler_specific.h"
@@ -59,7 +57,6 @@
 #include "media/base/audio_capturer_source.h"
 #include "media/base/audio_parameters.h"
 #include "media/base/media_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace media {
 
@@ -92,7 +89,7 @@ class MEDIA_EXPORT AudioInputDevice : public AudioCapturerSource,
   void SetOutputDeviceForAec(const std::string& output_device_id) override;
 
  private:
-  friend class base::RefCountedThreadSafe<AudioInputDevice>;
+  ~AudioInputDevice() override;
 
   // Our audio thread callback class.  See source file for details.
   class AudioThreadCallback;
@@ -115,10 +112,8 @@ class MEDIA_EXPORT AudioInputDevice : public AudioCapturerSource,
     kMaxValue = kErrorDuringCapture
   };
 
-  ~AudioInputDevice() override;
-
   // AudioInputIPCDelegate implementation.
-  void OnStreamCreated(base::ReadOnlySharedMemoryRegion shared_memory_region,
+  void OnStreamCreated(base::UnsafeSharedMemoryRegion shared_memory_region,
                        base::SyncSocket::ScopedHandle socket_handle,
                        bool initially_muted) override;
   void OnError(AudioCapturerSource::ErrorCode code) override;
@@ -165,7 +160,7 @@ class MEDIA_EXPORT AudioInputDevice : public AudioCapturerSource,
 
   // Cache the output device used for AEC in case it's called before the stream
   // is created.
-  absl::optional<std::string> output_device_id_for_aec_;
+  std::optional<std::string> output_device_id_for_aec_;
 };
 
 }  // namespace media

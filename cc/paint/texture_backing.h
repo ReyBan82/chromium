@@ -5,6 +5,7 @@
 #ifndef CC_PAINT_TEXTURE_BACKING_H_
 #define CC_PAINT_TEXTURE_BACKING_H_
 
+#include "base/memory/ref_counted.h"
 #include "cc/paint/paint_export.h"
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
@@ -14,6 +15,13 @@ struct Mailbox;
 }  // namespace gpu
 
 namespace cc {
+
+class CC_PAINT_EXPORT TextureBackingContext
+    : public base::RefCountedThreadSafe<TextureBackingContext> {
+ protected:
+  friend class base::RefCountedThreadSafe<TextureBackingContext>;
+  virtual ~TextureBackingContext() = default;
+};
 
 // Used for storing mailboxes in a PaintImage.
 // This class must be created, used and destroyed on the same thread.
@@ -31,9 +39,8 @@ class CC_PAINT_EXPORT TextureBacking : public SkRefCnt {
   // Returns the shared image mailbox backing for this texture.
   virtual gpu::Mailbox GetMailbox() const = 0;
 
-  // Returns a texture backed SkImage. Only supported if the context used to
-  // create this image has a valid GrContext.
-  virtual sk_sp<SkImage> GetAcceleratedSkImage() = 0;
+  virtual void Bind(scoped_refptr<TextureBackingContext>) = 0;
+  virtual void Unbind() = 0;
 
   // Gets SkImage via a readback from GPU memory. Use this when actual SkImage
   // pixel data is required in software.
@@ -45,10 +52,6 @@ class CC_PAINT_EXPORT TextureBacking : public SkRefCnt {
                           size_t dst_row_bytes,
                           int src_x,
                           int src_y) = 0;
-
-  // Force a flush of any pending skia work. Only supported if this
-  // TextureBacking wraps an SkImage.
-  virtual void FlushPendingSkiaOps() = 0;
 };
 
 }  // namespace cc

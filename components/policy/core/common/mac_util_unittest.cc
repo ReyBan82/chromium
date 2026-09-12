@@ -8,7 +8,7 @@
 
 #include <memory>
 
-#include "base/mac/scoped_cftyperef.h"
+#include "base/apple/scoped_cftyperef.h"
 #include "base/values.h"
 #include "components/policy/core/common/policy_test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -19,7 +19,7 @@ namespace policy {
 // ValueToProperty() is successfully restored from the property with
 // PropertyToValue().
 TEST(PolicyMacUtilTest, ValueToPropertyRoundTrip) {
-  base::Value::Dict root;
+  base::DictValue root;
 
   // base::Value::Type::NONE
   root.Set("null", base::Value());
@@ -41,8 +41,8 @@ TEST(PolicyMacUtilTest, ValueToPropertyRoundTrip) {
   root.Set("empty", "");
 
   // base::Value::Type::LIST
-  root.Set("emptyl", base::Value::List());
-  base::Value::List list;
+  root.Set("emptyl", base::ListValue());
+  base::ListValue list;
   for (const auto [key, value] : root) {
     list.Append(value.Clone());
   }
@@ -51,7 +51,7 @@ TEST(PolicyMacUtilTest, ValueToPropertyRoundTrip) {
   root.Set("list", list.Clone());
 
   // base::Value::Type::DICT
-  root.Set("emptyd", base::Value::Dict());
+  root.Set("emptyd", base::DictValue());
 
   // Key with dots.
   root.Set("key.with.dots", 789);
@@ -61,9 +61,10 @@ TEST(PolicyMacUtilTest, ValueToPropertyRoundTrip) {
 
   const base::Value root_val(std::move(root));
   // base::Value -> property list -> base::Value.
-  base::ScopedCFTypeRef<CFPropertyListRef> property(ValueToProperty(root_val));
+  base::apple::ScopedCFTypeRef<CFPropertyListRef> property =
+      ValueToProperty(root_val);
   ASSERT_TRUE(property);
-  std::unique_ptr<base::Value> value = PropertyToValue(property);
+  std::unique_ptr<base::Value> value = PropertyToValue(property.get());
   ASSERT_TRUE(value);
   EXPECT_EQ(root_val, *value);
 }

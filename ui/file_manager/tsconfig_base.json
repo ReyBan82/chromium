@@ -1,9 +1,10 @@
 {
   "extends": "../../tools/typescript/tsconfig_base.json",
   "compilerOptions": {
-    "lib": ["dom", "ES2015.Generator", "ES2015.Iterable", "ESNext"],
+    "checkJs": true,
+    "lib": ["dom", "ES2015.Generator", "ES2015.Iterable", "ESNext", "dom.iterable"],
 
-    "importsNotUsedAsValues": "preserve",
+    "verbatimModuleSyntax": true,
     "typeRoots": [
       "../../third_party/node/node_modules/@types"
     ],
@@ -13,7 +14,9 @@
       "filewriter"
     ],
     "experimentalDecorators": true,
-    "importHelpers": true,
-    "skipLibCheck": true
+    "noEmitHelpers": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": false,
+    "useDefineForClassFields": false
   }
 }

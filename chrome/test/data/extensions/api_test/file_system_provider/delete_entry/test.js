@@ -4,37 +4,39 @@
 
 'use strict';
 
+let testUtil;
+
 /**
  * @type {Object}
  * @const
  */
-var TESTING_A_DIRECTORY = Object.freeze({
+const TESTING_A_DIRECTORY = Object.freeze({
   isDirectory: true,
   name: 'a',
   size: 0,
-  modificationTime: new Date(2014, 4, 28, 10, 39, 15)
+  modificationTime: new Date(2014, 4, 28, 10, 39, 15),
 });
 
 /**
  * @type {Object}
  * @const
  */
-var TESTING_B_DIRECTORY = Object.freeze({
+const TESTING_B_DIRECTORY = Object.freeze({
   isDirectory: true,
   name: 'b',
   size: 0,
-  modificationTime: new Date(2014, 4, 28, 10, 39, 15)
+  modificationTime: new Date(2014, 4, 28, 10, 39, 15),
 });
 
 /**
  * @type {Object}
  * @const
  */
-var TESTING_C_FILE = Object.freeze({
+const TESTING_C_FILE = Object.freeze({
   isDirectory: false,
   name: 'c',
   size: 0,
-  modificationTime: new Date(2014, 4, 28, 10, 39, 15)
+  modificationTime: new Date(2014, 4, 28, 10, 39, 15),
 });
 
 /**
@@ -45,7 +47,7 @@ var TESTING_C_FILE = Object.freeze({
  * @param {function(string)} onError Error callback with an error code.
  */
 function onDeleteEntryRequested(options, onSuccess, onError) {
-  if (options.fileSystemId !== test_util.FILE_SYSTEM_ID) {
+  if (options.fileSystemId !== testUtil.FILE_SYSTEM_ID) {
     onError('SECURITY');  // enum ProviderError.
     return;
   }
@@ -55,17 +57,18 @@ function onDeleteEntryRequested(options, onSuccess, onError) {
     return;
   }
 
-  if (options.entryPath === '/' + TESTING_A_DIRECTORY.name) {
-    if (options.recursive)
+  if (options.entryPath === `/${TESTING_A_DIRECTORY.name}`) {
+    if (options.recursive) {
       onSuccess();
-    else
+    } else {
       onError('INVALID_OPERATION');
+    }
     return;
   }
 
-  if (options.entryPath === '/' + TESTING_C_FILE.name ||
-      options.entryPath === '/' + TESTING_A_DIRECTORY.name + '/' +
-      TESTING_B_DIRECTORY.name) {
+  if (options.entryPath === `/${TESTING_C_FILE.name}` ||
+      options.entryPath ===
+          `/${TESTING_A_DIRECTORY.name}/${TESTING_B_DIRECTORY.name}`) {
     onSuccess();
     return;
   }
@@ -81,19 +84,18 @@ function onDeleteEntryRequested(options, onSuccess, onError) {
  */
 function setUp(callback) {
   chrome.fileSystemProvider.onGetMetadataRequested.addListener(
-      test_util.onGetMetadataRequestedDefault);
+      testUtil.onGetMetadataRequestedDefault);
 
-  test_util.defaultMetadata['/' + TESTING_A_DIRECTORY.name] =
+  testUtil.defaultMetadata[`/${TESTING_A_DIRECTORY.name}`] =
       TESTING_A_DIRECTORY;
-  test_util.defaultMetadata['/' + TESTING_A_DIRECTORY.name + '/' +
-      TESTING_B_DIRECTORY.name] = TESTING_B_DIRECTORY;
-  test_util.defaultMetadata['/' + TESTING_C_FILE.name] =
-      TESTING_C_FILE;
+  testUtil.defaultMetadata[`/${TESTING_A_DIRECTORY.name}/${
+      TESTING_B_DIRECTORY.name}`] = TESTING_B_DIRECTORY;
+  testUtil.defaultMetadata[`/${TESTING_C_FILE.name}`] = TESTING_C_FILE;
 
   chrome.fileSystemProvider.onDeleteEntryRequested.addListener(
       onDeleteEntryRequested);
 
-  test_util.mountFileSystem(callback);
+  testUtil.mountFileSystem(callback);
 }
 
 /**
@@ -103,7 +105,7 @@ function runTests() {
   chrome.test.runTests([
     // Delete a file. Should succeed.
     function deleteDirectorySuccessSimple() {
-      test_util.fileSystem.root.getFile(
+      testUtil.fileSystem.root.getFile(
           TESTING_C_FILE.name, {create: false},
           chrome.test.callbackPass(function(entry) {
             chrome.test.assertEq(TESTING_C_FILE.name, entry.name);
@@ -111,13 +113,14 @@ function runTests() {
             entry.remove(chrome.test.callbackPass(), function(error) {
               chrome.test.fail(error.name);
             });
-          }), function(error) {
+          }),
+          function(error) {
             chrome.test.fail(error.name);
           });
     },
     // Delete a directory which has contents, non-recursively. Should fail.
     function deleteDirectoryErrorNotEmpty() {
-      test_util.fileSystem.root.getDirectory(
+      testUtil.fileSystem.root.getDirectory(
           TESTING_A_DIRECTORY.name, {create: false},
           chrome.test.callbackPass(function(entry) {
             chrome.test.assertEq(TESTING_A_DIRECTORY.name, entry.name);
@@ -125,28 +128,36 @@ function runTests() {
             entry.remove(function() {
               chrome.test.fail('Unexpectedly succeded to remove a directory.');
             }, chrome.test.callbackPass);
-          }), function(error) {
+          }),
+          function(error) {
             chrome.test.fail(error.name);
           });
     },
     // Delete a directory which has contents, recursively. Should succeed.
     function deleteDirectoryRecursively() {
-      test_util.fileSystem.root.getDirectory(
+      testUtil.fileSystem.root.getDirectory(
           TESTING_A_DIRECTORY.name, {create: false},
           chrome.test.callbackPass(function(entry) {
             chrome.test.assertEq(TESTING_A_DIRECTORY.name, entry.name);
             chrome.test.assertTrue(entry.isDirectory);
             entry.removeRecursively(
-                chrome.test.callbackPass(),
-                function(error) {
+                chrome.test.callbackPass(), function(error) {
                   chrome.test.fail(error);
                 });
-          }), function(error) {
+          }),
+          function(error) {
             chrome.test.fail(error.name);
           });
-    }
+    },
   ]);
 }
 
-// Setup and run all of the test cases.
-setUp(runTests);
+// This works-around that background scripts can't import because they aren't
+// considered modules.
+(async () => {
+  testUtil = await import(
+      '/_test_resources/api_test/file_system_provider/test_util.js');
+
+  // Setup and run all of the test cases.
+  setUp(runTests);
+})();

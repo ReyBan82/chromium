@@ -4,6 +4,8 @@
 
 #include "services/network/public/cpp/simple_host_resolver.h"
 
+#include <string_view>
+
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/strings/string_util.h"
@@ -21,7 +23,7 @@
 namespace network {
 namespace {
 
-net::IPEndPoint CreateExpectedEndPoint(base::StringPiece address,
+net::IPEndPoint CreateExpectedEndPoint(std::string_view address,
                                        uint16_t port) {
   net::IPAddress ip_address;
   CHECK(ip_address.AssignFromIPLiteral(address));
@@ -29,7 +31,7 @@ net::IPEndPoint CreateExpectedEndPoint(base::StringPiece address,
 }
 
 std::string CreateMappingRules(
-    std::vector<std::pair<base::StringPiece, base::StringPiece>>
+    std::vector<std::pair<std::string_view, std::string_view>>
         host_ip_address_pairs) {
   std::vector<std::string> map_rules;
   for (auto [host, ip_address] : host_ip_address_pairs) {
@@ -45,15 +47,15 @@ class MockNetworkContext : public TestNetworkContextWithHostResolver {
       : TestNetworkContextWithHostResolver(std::move(host_resolver)) {}
 
   static std::unique_ptr<MockNetworkContext> CreateNetworkContext(
-      base::StringPiece host_mapping_rules) {
+      std::string_view host_mapping_rules) {
     return std::make_unique<MockNetworkContext>(
         net::HostResolver::CreateStandaloneResolver(
-            net::NetLog::Get(), /*options=*/absl::nullopt, host_mapping_rules,
+            net::NetLog::Get(), /*options=*/std::nullopt, host_mapping_rules,
             /*enable_caching=*/false));
   }
 
   // Resets ResolveHostClient when matching |host| is supplied in ResolveHost().
-  void SetResetClientFor(absl::optional<net::HostPortPair> reset_client_for) {
+  void SetResetClientFor(std::optional<net::HostPortPair> reset_client_for) {
     reset_client_for_ = std::move(reset_client_for);
   }
 
@@ -73,7 +75,7 @@ class MockNetworkContext : public TestNetworkContextWithHostResolver {
                     std::move(pending_response_client));
   }
 
-  absl::optional<net::HostPortPair> reset_client_for_;
+  std::optional<net::HostPortPair> reset_client_for_;
 };
 
 class SimpleHostResolverTest : public testing::Test {
@@ -88,7 +90,7 @@ class SimpleHostResolverTest : public testing::Test {
 
 struct HostResolverResult {
   int result;
-  absl::optional<net::IPEndPoint> resolved_address;
+  std::optional<net::IPEndPoint> resolved_address;
 };
 
 struct HostResolverRequest {
@@ -98,11 +100,11 @@ struct HostResolverRequest {
   bool reset_client = false;
 };
 
-using ResolveHostFuture = base::test::TestFuture<
-    int,
-    const net::ResolveErrorInfo&,
-    const absl::optional<net::AddressList>&,
-    const absl::optional<net::HostResolverEndpointResults>&>;
+using ResolveHostFuture =
+    base::test::TestFuture<int,
+                           const net::ResolveErrorInfo&,
+                           const net::AddressList&,
+                           const net::HostResolverEndpointResults&>;
 
 TEST_F(SimpleHostResolverTest, ResolveFourAddresses) {
   auto network_context = MockNetworkContext::CreateNetworkContext(
@@ -137,11 +139,16 @@ TEST_F(SimpleHostResolverTest, ResolveFourAddresses) {
     if (request.reset_client) {
       network_context->SetResetClientFor(request.host_port_pair);
     }
+    // The ios simulator may return the NAT64 address rather than
+    // the IPv4 address. The parameters specify the dns query type
+    // to resolve the issue.
+    auto resolver_parameters = network::mojom::ResolveHostParameters::New();
+    resolver_parameters->dns_query_type = net::DnsQueryType::A;
     simple_resolver->ResolveHost(
         network::mojom::HostResolverHost::NewHostPortPair(
             request.host_port_pair),
-        net::NetworkAnonymizationKey(),
-        /*optional_parameters=*/nullptr, future->GetCallback());
+        net::NetworkAnonymizationKey(), std::move(resolver_parameters),
+        future->GetCallback());
     futures.emplace_back(std::move(future), std::move(result));
   }
 
@@ -149,12 +156,12 @@ TEST_F(SimpleHostResolverTest, ResolveFourAddresses) {
 
   for (const auto& [future, resolver_result] : futures) {
     const auto& [result, resolve_error_info, resolved_addresses,
-                 endpoint_results_with_metadata] = future->Get();
+                 alternative_endpoints] = future->Get();
     EXPECT_EQ(result, resolver_result.result);
     if (!resolver_result.resolved_address) {
-      EXPECT_FALSE(resolved_addresses);
+      EXPECT_THAT(resolved_addresses, testing::IsEmpty());
     } else {
-      EXPECT_THAT(resolved_addresses->endpoints(),
+      EXPECT_THAT(resolved_addresses.endpoints(),
                   testing::ElementsAre(*resolver_result.resolved_address));
     }
   }

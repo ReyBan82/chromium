@@ -22,13 +22,12 @@ class DemuxerStream;
 class DecryptingDemuxerStream;
 
 // DecryptingMediaResource is a wrapper for a MediaResource implementation that
-// provides decryption. It should only be created when:
-// - The |media_resource| has type MediaResource::STREAM, and
-// - The |cdm_context| has a Decryptor that always supports decrypt-only.
-// Internally DecryptingDemuxerStreams will be created for all streams in
-// |media_resource| and decrypt them into clear streams. These clear streams are
-// then passed downstream to the rest of the media pipeline, which should no
-// longer need to worry about decryption.
+// provides decryption. It should only be created when the `cdm_context` has a
+// Decryptor that always supports decrypt-only. Internally
+// DecryptingDemuxerStreams will be created for all streams in `media_resource`
+// and decrypt them into clear streams. These clear streams are then passed
+// downstream to the rest of the media pipeline, which should no longer need to
+// worry about decryption.
 class MEDIA_EXPORT DecryptingMediaResource : public MediaResource {
  public:
   using InitCB = base::OnceCallback<void(bool success)>;
@@ -44,8 +43,7 @@ class MEDIA_EXPORT DecryptingMediaResource : public MediaResource {
   ~DecryptingMediaResource() override;
 
   // MediaResource implementation:
-  MediaResource::Type GetType() const override;
-  std::vector<DemuxerStream*> GetAllStreams() override;
+  std::vector<raw_ptr<DemuxerStream>> GetAllStreams() override;
 
   void Initialize(InitCB init_cb, WaitingCB waiting_cb_);
 
@@ -57,18 +55,18 @@ class MEDIA_EXPORT DecryptingMediaResource : public MediaResource {
 
   const raw_ptr<MediaResource> media_resource_;
   const raw_ptr<CdmContext> cdm_context_;
-  const raw_ptr<MediaLog> media_log_;
+  const std::unique_ptr<MediaLog> media_log_;
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
   // Number of DecryptingDemuxerStreams that have yet to be initialized.
   int num_dds_pending_init_ = 0;
 
-  // |streams_| is the set of streams that this implementation does not own and
-  // will be returned when GetAllStreams() is invoked. |owned_streams_| is the
-  // set of DecryptingDemuxerStreams that we have created and own (i.e.
-  // responsible for destructing).
-  std::vector<DemuxerStream*> streams_;
+  // |owned_streams_| is the set of DecryptingDemuxerStreams that we have
+  // created and own (i.e. responsible for destructing). |streams_| is the
+  // set of streams that this implementation does not own and will be returned
+  // when GetAllStreams() is invoked.
   std::vector<std::unique_ptr<DecryptingDemuxerStream>> owned_streams_;
+  std::vector<raw_ptr<DemuxerStream>> streams_;
 
   // Called when the final DecryptingDemuxerStream has been initialized *or*
   // if one of the DecryptingDemuxerStreams failed to initialize correctly.

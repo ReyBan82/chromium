@@ -4,8 +4,8 @@
 
 #include "chromecast/renderer/cast_window_manager_bindings.h"
 
+#include <array>
 #include <tuple>
-#include <vector>
 
 #include "base/check.h"
 #include "build/build_config.h"
@@ -15,8 +15,8 @@
 #include "chromecast/renderer/feature_manager.h"
 #include "content/public/renderer/render_frame.h"
 #include "gin/data_object_builder.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
-#include "third_party/blink/public/web/blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_view.h"
 
@@ -133,7 +133,8 @@ void CastWindowManagerBindings::Install(v8::Local<v8::Object> cast_platform,
 v8::Local<v8::Value> CastWindowManagerBindings::SetV8Callback(
     v8::UniquePersistent<v8::Function>* callback_function,
     v8::Local<v8::Function> callback) {
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  v8::Isolate* isolate =
+      render_frame()->GetWebFrame()->GetAgentGroupScheduler()->Isolate();
 
   *callback_function = v8::UniquePersistent<v8::Function>(isolate, callback);
 
@@ -171,11 +172,12 @@ void CastWindowManagerBindings::OnTouchInputSupportSet(
     bool resolve_promise,
     bool display_controls) {
   DVLOG(2) << __FUNCTION__;
-  v8::Isolate* isolate = blink::MainThreadIsolate();
-  v8::MicrotasksScope microtasks_scope(
-      isolate, v8::MicrotasksScope::kDoNotRunMicrotasks);
+  v8::Isolate* isolate =
+      render_frame()->GetWebFrame()->GetAgentGroupScheduler()->Isolate();
   v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context = original_context.Get(isolate);
+  v8::MicrotasksScope microtasks_scope(
+      context, v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope context_scope(context);
 
   if (resolve_promise) {
@@ -200,7 +202,7 @@ void CastWindowManagerBindings::BindGestureSource() {
   if (gesture_source_.is_bound() && gesture_source_.is_connected())
     return;
   gesture_source_.reset();
-  render_frame()->GetBrowserInterfaceBroker()->GetInterface(
+  render_frame()->GetBrowserInterfaceBroker().GetInterface(
       gesture_source_.BindNewPipeAndPassReceiver());
   gesture_source_.set_disconnect_handler(
       base::BindRepeating(&OnGestureSourceDisconnectionError));
@@ -212,7 +214,7 @@ void CastWindowManagerBindings::BindWindow() {
   if (window_.is_bound() && window_.is_connected())
     return;
   window_.reset();
-  render_frame()->GetBrowserInterfaceBroker()->GetInterface(
+  render_frame()->GetBrowserInterfaceBroker().GetInterface(
       window_.BindNewPipeAndPassReceiver());
   window_.set_disconnect_handler(base::BindRepeating(&OnWindowDisconnect));
 }
@@ -223,21 +225,18 @@ void CastWindowManagerBindings::InvokeV8Callback(
     return;
   }
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
-  v8::HandleScope handle_scope(isolate);
   blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
+  v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
+  v8::MicrotasksScope microtasks_scope(
+      context, v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope context_scope(context);
   v8::Local<v8::Function> handler =
-      v8::Local<v8::Function>::New(isolate, std::move(*callback_function));
+      v8::Local<v8::Function>::New(isolate, *callback_function);
 
-  v8::MaybeLocal<v8::Value> maybe_result =
-      handler->Call(context, context->Global(), 0, nullptr);
-
-  *callback_function = v8::UniquePersistent<v8::Function>(isolate, handler);
-
-  v8::Local<v8::Value> result;
-  std::ignore = maybe_result.ToLocal(&result);
+  // Running |handler| may delete |this|; do not touch any members afterwards.
+  std::ignore = handler->Call(context, context->Global(), 0, nullptr);
 }
 
 void CastWindowManagerBindings::InvokeV8Callback(
@@ -247,26 +246,24 @@ void CastWindowManagerBindings::InvokeV8Callback(
     return;
   }
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
-  v8::HandleScope handle_scope(isolate);
   blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
+  v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
+  v8::MicrotasksScope microtasks_scope(
+      context, v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope context_scope(context);
   v8::Local<v8::Function> handler =
-      v8::Local<v8::Function>::New(isolate, std::move(*callback_function));
+      v8::Local<v8::Function>::New(isolate, *callback_function);
 
   v8::Local<v8::Number> touch_x = v8::Integer::New(isolate, touch_location.x());
   v8::Local<v8::Number> touch_y = v8::Integer::New(isolate, touch_location.y());
 
-  std::vector<v8::Local<v8::Value>> args{touch_x, touch_y};
+  auto args = std::to_array<v8::Local<v8::Value>>({touch_x, touch_y});
 
-  v8::MaybeLocal<v8::Value> maybe_result =
+  // Running |handler| may delete |this|; do not touch any members afterwards.
+  std::ignore =
       handler->Call(context, context->Global(), args.size(), args.data());
-
-  *callback_function = v8::UniquePersistent<v8::Function>(isolate, handler);
-
-  v8::Local<v8::Value> result;
-  std::ignore = maybe_result.ToLocal(&result);
 }
 
 void CastWindowManagerBindings::OnBackGesture(
@@ -279,17 +276,18 @@ void CastWindowManagerBindings::OnBackGesture(
     return;
   }
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
-  v8::HandleScope handle_scope(isolate);
   blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
+  v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
+  v8::MicrotasksScope microtasks_scope(
+      context, v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope context_scope(context);
-  v8::Local<v8::Function> handler = v8::Local<v8::Function>::New(
-      isolate, std::move(on_back_gesture_callback_));
+  v8::Local<v8::Function> handler =
+      v8::Local<v8::Function>::New(isolate, on_back_gesture_callback_);
+  // Running |handler| may delete |this|; do not touch any members afterwards.
   auto result = handler->Call(context, context->Global(), 0, nullptr);
 
-  on_back_gesture_callback_ =
-      v8::UniquePersistent<v8::Function>(isolate, handler);
   if (result.IsEmpty()) {
     LOG(ERROR) << "No value from callback execution; ";
     std::move(callback).Run(false);

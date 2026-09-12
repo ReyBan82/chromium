@@ -31,12 +31,15 @@ class LocalizedError {
     PageState& operator=(PageState&& other);
 
     // Strings used within the error page HTML/JS.
-    base::Value::Dict strings;
+    base::DictValue strings;
+
+    // Sets whether the error is an offline error. Updates both the C++
+    // boolean and the "isOfflineError" string for JavaScript.
+    void SetIsOfflineError(bool value);
 
     bool is_offline_error = false;
     bool reload_button_shown = false;
     bool download_button_shown = false;
-    bool offline_content_feature_enabled = false;
     bool auto_fetch_allowed = false;
   };
 
@@ -55,17 +58,16 @@ class LocalizedError {
                                 bool stale_copy_in_cache,
                                 bool can_show_network_diagnostics_dialog,
                                 bool is_incognito,
-                                bool offline_content_feature_enabled,
                                 bool auto_fetch_feature_enabled,
                                 bool is_kiosk_mode,
                                 const std::string& locale,
                                 bool is_blocked_by_extension,
-                                const base::Value::Dict* error_page_params);
+                                const base::DictValue* error_page_params);
 
   // Returns a |PageState| that describes the elements that should be shown on
   // when default offline page is shown.
   static PageState GetPageStateForOverriddenErrorPage(
-      base::Value::Dict string_dict,
+      base::DictValue string_dict,
       int error_code,
       const std::string& error_domain,
       const GURL& failed_url,
@@ -81,6 +83,10 @@ class LocalizedError {
   static bool HasStrings(const std::string& error_domain, int error_code);
 
   static bool IsOfflineError(const std::string& error_domain, int error_code);
+
+  // Returns true if the error is due to a URL blocked by administrator through
+  // a URL blocklist policy.
+  static bool IsBlockedByAdministratorError(int error_code);
 };
 
 }  // namespace error_page

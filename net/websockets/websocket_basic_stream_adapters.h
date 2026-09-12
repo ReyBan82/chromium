@@ -5,23 +5,36 @@
 #ifndef NET_WEBSOCKETS_WEBSOCKET_BASIC_STREAM_ADAPTERS_H_
 #define NET_WEBSOCKETS_WEBSOCKET_BASIC_STREAM_ADAPTERS_H_
 
+#include <stddef.h>
+
 #include <memory>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "net/base/completion_once_callback.h"
+#include "net/base/net_errors.h"
 #include "net/base/net_export.h"
+#include "net/log/net_log_source.h"
+#include "net/log/net_log_with_source.h"
 #include "net/spdy/spdy_read_queue.h"
 #include "net/spdy/spdy_stream.h"
+#include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
+#include "net/third_party/quiche/src/quiche/quic/core/quic_stream_priority.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "net/websockets/websocket_basic_stream.h"
 #include "net/websockets/websocket_quic_spdy_stream.h"
 
+namespace quic {
+class QuicHeaderList;
+}  // namespace quic
+
 namespace net {
 
-class ClientSocketHandle;
+class StreamSocketHandle;
+class DrainableIOBuffer;
 class IOBuffer;
 class SpdyBuffer;
+struct NetworkTrafficAnnotationTag;
 
 // Trivial adapter to make WebSocketBasicStream use a TCP/IP or TLS socket.
 class NET_EXPORT_PRIVATE WebSocketClientSocketHandleAdapter
@@ -29,21 +42,40 @@ class NET_EXPORT_PRIVATE WebSocketClientSocketHandleAdapter
  public:
   WebSocketClientSocketHandleAdapter() = delete;
   explicit WebSocketClientSocketHandleAdapter(
-      std::unique_ptr<ClientSocketHandle> connection);
+      std::unique_ptr<StreamSocketHandle> connection);
   ~WebSocketClientSocketHandleAdapter() override;
 
   int Read(IOBuffer* buf,
            int buf_len,
            CompletionOnceCallback callback) override;
+
+  // A socket may accept only part of the buffer at a time, so Write() keeps
+  // writing until all of it has been accepted and reports only the total.
   int Write(IOBuffer* buf,
             int buf_len,
+            bool is_final_write,
             CompletionOnceCallback callback,
             const NetworkTrafficAnnotationTag& traffic_annotation) override;
   void Disconnect() override;
   bool is_initialized() const override;
 
  private:
-  std::unique_ptr<ClientSocketHandle> connection_;
+  // Writes until |buffer| is drained, in which case it returns the number of
+  // bytes written, or until the socket write does not complete, in which case
+  // it returns ERR_IO_PENDING or the error.
+  int DrainWriteBuffer(scoped_refptr<DrainableIOBuffer> buffer,
+                       const NetworkTrafficAnnotationTag& traffic_annotation);
+
+  // Called when a socket write completes. Writes the rest of |buffer| if there
+  // is any, otherwise runs |write_callback_|.
+  void OnWriteComplete(scoped_refptr<DrainableIOBuffer> buffer,
+                       const NetworkTrafficAnnotationTag& traffic_annotation,
+                       int result);
+
+  std::unique_ptr<StreamSocketHandle> connection_;
+
+  // Write callback saved while a socket write is outstanding.
+  CompletionOnceCallback write_callback_;
 };
 
 // Adapter to make WebSocketBasicStream use an HTTP/2 stream.
@@ -63,7 +95,7 @@ class NET_EXPORT_PRIVATE WebSocketSpdyStreamAdapter
     virtual ~Delegate() = default;
     virtual void OnHeadersSent() = 0;
     virtual void OnHeadersReceived(
-        const spdy::Http2HeaderBlock& response_headers) = 0;
+        const quiche::HttpHeaderBlock& response_headers) = 0;
     // Might destroy |this|.
     virtual void OnClose(int status) = 0;
   };
@@ -87,6 +119,7 @@ class NET_EXPORT_PRIVATE WebSocketSpdyStreamAdapter
   // Write() always returns asynchronously.
   int Write(IOBuffer* buf,
             int buf_len,
+            bool is_final_write,
             CompletionOnceCallback callback,
             const NetworkTrafficAnnotationTag& traffic_annotation) override;
 
@@ -96,13 +129,12 @@ class NET_EXPORT_PRIVATE WebSocketSpdyStreamAdapter
   // SpdyStream::Delegate methods.
 
   void OnHeadersSent() override;
-  void OnEarlyHintsReceived(const spdy::Http2HeaderBlock& headers) override;
+  void OnEarlyHintsReceived(const quiche::HttpHeaderBlock& headers) override;
   void OnHeadersReceived(
-      const spdy::Http2HeaderBlock& response_headers,
-      const spdy::Http2HeaderBlock* pushed_request_headers) override;
+      const quiche::HttpHeaderBlock& response_headers) override;
   void OnDataReceived(std::unique_ptr<SpdyBuffer> buffer) override;
   void OnDataSent() override;
-  void OnTrailers(const spdy::Http2HeaderBlock& trailers) override;
+  void OnTrailers(const quiche::HttpHeaderBlock& trailers) override;
   void OnClose(int status) override;
   bool CanGreaseFrameType() const override;
   NetLogSource source_dependency() const override;
@@ -117,6 +149,15 @@ class NET_EXPORT_PRIVATE WebSocketSpdyStreamAdapter
   // True if SpdyStream::Delegate::OnHeadersSent() has been called.
   // SpdyStream::SendData() must not be called before that.
   bool headers_sent_ = false;
+
+  // True once the final DATA frame has been sent to SendData(). This indicates
+  // that the stream should accept no more writes.
+  bool end_stream_sent_ = false;
+
+  // True once the peer's END_STREAM has been received, after which reads
+  // report the end of the stream. The stream may outlive this, waiting for
+  // `end_stream_sent_`.
+  bool end_stream_received_ = false;
 
   // The underlying SpdyStream.
   base::WeakPtr<SpdyStream> stream_;
@@ -133,6 +174,11 @@ class NET_EXPORT_PRIVATE WebSocketSpdyStreamAdapter
   // read operations.
   raw_ptr<IOBuffer> read_buffer_ = nullptr;
   size_t read_length_ = 0u;
+
+  // Set when we're in a read or write context because |read_callback_| and
+  // |write_callback_| can end up deleting |this|, therefore if this is set
+  // then the callback should be deferred.
+  bool in_callback_disallowed_scope_ = false;
 
   // Read callback saved for asynchronous reads.
   // Whenever |read_data_| is not empty, |read_callback_| must be null.
@@ -166,7 +212,7 @@ class NET_EXPORT_PRIVATE WebSocketQuicStreamAdapter
     virtual ~Delegate() = default;
     virtual void OnHeadersSent() = 0;
     virtual void OnHeadersReceived(
-        const spdy::Http2HeaderBlock& response_headers) = 0;
+        const quiche::HttpHeaderBlock& response_headers) = 0;
     virtual void OnClose(int status) = 0;
   };
 
@@ -183,7 +229,10 @@ class NET_EXPORT_PRIVATE WebSocketQuicStreamAdapter
   // Called by WebSocketQuicStreamAdapter::Delegate before it is destroyed.
   void clear_delegate() { delegate_ = nullptr; }
 
-  size_t WriteHeaders(spdy::Http2HeaderBlock header_block, bool fin);
+  size_t WriteHeaders(quiche::HttpHeaderBlock header_block, bool fin);
+
+  // Sets the priority of the underlying QUIC stream.
+  void SetPriority(const quic::QuicStreamPriority& priority);
 
   // WebSocketBasicStream::Adapter methods.
   // TODO(momoka): Add functions that are needed to implement
@@ -191,12 +240,22 @@ class NET_EXPORT_PRIVATE WebSocketQuicStreamAdapter
   int Read(IOBuffer* buf,
            int buf_len,
            CompletionOnceCallback callback) override;
+
+  // Writes data to the WebSocket QUIC stream. Returns the number of bytes
+  // written synchronously if the stream can accept new data, or ERR_IO_PENDING
+  // if the stream is blocked. When ERR_IO_PENDING is returned, |callback| will
+  // be invoked when the stream can accept new data.
   int Write(IOBuffer* buf,
             int buf_len,
+            bool is_final_write,
             CompletionOnceCallback callback,
             const NetworkTrafficAnnotationTag& traffic_annotation) override;
   void Disconnect() override;
   bool is_initialized() const override;
+
+  // Byte count accessors. Return 0 after Disconnect().
+  uint64_t stream_bytes_read() const;
+  uint64_t stream_bytes_written() const;
 
   // WebSocketQuicSpdyStream::Delegate methods.
   void OnInitialHeadersComplete(
@@ -205,18 +264,36 @@ class NET_EXPORT_PRIVATE WebSocketQuicStreamAdapter
       const quic::QuicHeaderList& header_list) override;
   void OnBodyAvailable() override;
   void ClearStream() override;
+  void OnClose(int status) override;
+
+  // Invoked when QUIC transport acknowledges sent data.
+  // Triggers the write callback with the number of bytes written.
+  void OnCanWriteNewData() override;
 
  private:
   //  `websocket_quic_spdy_stream_` notifies this object of its destruction,
   //  because they may be destroyed in any order.
   raw_ptr<WebSocketQuicSpdyStream> websocket_quic_spdy_stream_;
 
+  // Close error returned by Read() and Write() after the stream is cleared.
+  int stream_error_ = ERR_UNEXPECTED;
+
   raw_ptr<Delegate> delegate_;
 
   // Read buffer, length and callback used for asynchronous read operations.
   raw_ptr<IOBuffer> read_buffer_ = nullptr;
   int read_length_ = 0u;
+  int write_length_ = 0u;
+
+  // Set when we're in a read or write context because |read_callback_| and
+  // |write_callback_| can end up deleting |this|, therefore if this is set
+  // then the callback should be deferred.
+  bool in_callback_disallowed_scope_ = false;
+
   CompletionOnceCallback read_callback_;
+  CompletionOnceCallback write_callback_;
+
+  base::WeakPtrFactory<WebSocketQuicStreamAdapter> weak_factory_{this};
 };
 
 }  // namespace net

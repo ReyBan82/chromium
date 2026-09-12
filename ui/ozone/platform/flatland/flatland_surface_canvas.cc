@@ -4,9 +4,10 @@
 
 #include "ui/ozone/platform/flatland/flatland_surface_canvas.h"
 
-#include <fuchsia/sysmem/cpp/fidl.h>
+#include <fuchsia/sysmem2/cpp/fidl.h>
 #include <fuchsia/ui/composition/cpp/fidl.h>
 
+#include "base/compiler_specific.h"
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -15,6 +16,7 @@
 #include "base/unguessable_token.h"
 #include "mojo/public/cpp/platform/platform_handle.h"
 #include "third_party/skia/include/core/SkColorType.h"
+#include "ui/gfx/geometry/rect_f.h"
 #include "ui/gfx/geometry/skia_conversions.h"
 #include "ui/gfx/vsync_provider.h"
 
@@ -52,7 +54,6 @@ class FlatlandSurfaceCanvas::VSyncProviderImpl : public gfx::VSyncProvider {
   // gfx::VSyncProvider implementation.
   void GetVSyncParameters(UpdateVSyncCallback callback) override {
     DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-    DCHECK(!get_params_callback_);
     if (timebase_.is_null()) {
       get_params_callback_ = std::move(callback);
       return;
@@ -87,14 +88,14 @@ class FlatlandSurfaceCanvas::VSyncProviderImpl : public gfx::VSyncProvider {
 };
 
 void FlatlandSurfaceCanvas::Frame::InitializeBuffer(
-    fuchsia::sysmem::VmoBuffer vmo,
+    fuchsia::sysmem2::VmoBuffer vmo,
     gfx::Size size,
     size_t stride) {
   size_t buffer_size = stride * size.height();
   base::WritableSharedMemoryRegion memory_region =
       base::WritableSharedMemoryRegion::Deserialize(
           base::subtle::PlatformSharedMemoryRegion::Take(
-              std::move(vmo.vmo),
+              std::move(*vmo.mutable_vmo()),
               base::subtle::PlatformSharedMemoryRegion::Mode::kWritable,
               buffer_size, base::UnguessableToken::Create()));
   memory_mapping = memory_region.Map();
@@ -107,7 +108,7 @@ void FlatlandSurfaceCanvas::Frame::InitializeBuffer(
 
   // Initialize `surface`.
   SkSurfaceProps props;
-  surface = SkSurface::MakeRasterDirect(
+  surface = SkSurfaces::WrapPixels(
       SkImageInfo::MakeN32Premul(size.width(), size.height()),
       memory_mapping.memory(), stride, &props);
   dirty_region.setRect(gfx::RectToSkIRect(gfx::Rect(size)));
@@ -123,9 +124,9 @@ void FlatlandSurfaceCanvas::Frame::CopyDirtyRegionFrom(const Frame& frame) {
   int stride = surface->width() * SkColorTypeBytesPerPixel(kN32_SkColorType);
   for (SkRegion::Iterator i(dirty_region); !i.done(); i.next()) {
     uint8_t* dst_ptr =
-        static_cast<uint8_t*>(memory_mapping.memory()) +
-        i.rect().x() * SkColorTypeBytesPerPixel(kN32_SkColorType) +
-        i.rect().y() * stride;
+        UNSAFE_TODO(static_cast<uint8_t*>(memory_mapping.memory()) +
+                    i.rect().x() * SkColorTypeBytesPerPixel(kN32_SkColorType) +
+                    i.rect().y() * stride);
     frame.surface->readPixels(
         SkImageInfo::MakeN32Premul(i.rect().width(), i.rect().height()),
         dst_ptr, stride, i.rect().x(), i.rect().y());
@@ -134,7 +135,7 @@ void FlatlandSurfaceCanvas::Frame::CopyDirtyRegionFrom(const Frame& frame) {
 }
 
 FlatlandSurfaceCanvas::FlatlandSurfaceCanvas(
-    fuchsia::sysmem::Allocator_Sync* sysmem_allocator,
+    fuchsia::sysmem2::Allocator_Sync* sysmem_allocator,
     fuchsia::ui::composition::Allocator* flatland_allocator)
     : sysmem_allocator_(sysmem_allocator),
       flatland_allocator_(flatland_allocator),
@@ -181,24 +182,28 @@ void FlatlandSurfaceCanvas::ResizeCanvas(const gfx::Size& viewport_size,
   viewport_size_ = viewport_size;
   viewport_size_.SetToMax(gfx::Size(1, 1));
 
-  fuchsia::sysmem::BufferCollectionTokenSyncPtr collection_token;
-  sysmem_allocator_->AllocateSharedCollection(collection_token.NewRequest());
+  fuchsia::sysmem2::BufferCollectionTokenSyncPtr collection_token;
+  sysmem_allocator_->AllocateSharedCollection(
+      std::move(fuchsia::sysmem2::AllocatorAllocateSharedCollectionRequest{}
+                    .set_token_request(collection_token.NewRequest())));
 
-  fuchsia::sysmem::BufferCollectionTokenSyncPtr collection_token_for_flatland;
-  collection_token->Duplicate(ZX_RIGHT_SAME_RIGHTS,
-                              collection_token_for_flatland.NewRequest());
+  fuchsia::sysmem2::BufferCollectionTokenSyncPtr collection_token_for_flatland;
+  collection_token->Duplicate(std::move(
+      fuchsia::sysmem2::BufferCollectionTokenDuplicateRequest{}
+          .set_rights_attenuation_mask(ZX_RIGHT_SAME_RIGHTS)
+          .set_token_request(collection_token_for_flatland.NewRequest())));
 
-  collection_token->Sync();
+  fuchsia::sysmem2::Node_Sync_Result sync_result;
+  collection_token->Sync(&sync_result);
 
   fuchsia::ui::composition::BufferCollectionExportToken export_token;
-  fuchsia::ui::composition::BufferCollectionImportToken import_token;
   zx_status_t status =
-      zx::eventpair::create(0, &export_token.value, &import_token.value);
+      zx::eventpair::create(0, &export_token.value, &import_token_.value);
   ZX_DCHECK(status == ZX_OK, status);
 
   fuchsia::ui::composition::RegisterBufferCollectionArgs args;
   args.set_export_token(std::move(export_token));
-  args.set_buffer_collection_token(std::move(collection_token_for_flatland));
+  args.set_buffer_collection_token2(std::move(collection_token_for_flatland));
   args.set_usage(
       fuchsia::ui::composition::RegisterBufferCollectionUsage::DEFAULT);
 
@@ -211,81 +216,95 @@ void FlatlandSurfaceCanvas::ResizeCanvas(const gfx::Size& viewport_size,
         }
       });
 
-  sysmem_allocator_->BindSharedCollection(std::move(collection_token),
-                                          buffer_collection_.NewRequest());
+  sysmem_allocator_->BindSharedCollection(std::move(
+      fuchsia::sysmem2::AllocatorBindSharedCollectionRequest{}
+          .set_token(std::move(collection_token))
+          .set_buffer_collection_request(buffer_collection_.NewRequest())));
 
-  fuchsia::sysmem::BufferCollectionConstraints constraints;
-  constraints.usage.cpu =
-      fuchsia::sysmem::cpuUsageRead | fuchsia::sysmem::cpuUsageWrite;
-  constraints.min_buffer_count = kNumBuffers;
+  fuchsia::sysmem2::BufferCollectionConstraints constraints;
+  constraints.mutable_usage()->set_cpu(fuchsia::sysmem2::CPU_USAGE_READ |
+                                       fuchsia::sysmem2::CPU_USAGE_WRITE);
+  constraints.set_min_buffer_count(kNumBuffers);
 
-  constraints.has_buffer_memory_constraints = true;
-  constraints.buffer_memory_constraints.ram_domain_supported = true;
-  constraints.buffer_memory_constraints.cpu_domain_supported = true;
+  auto& memory_constraints = *constraints.mutable_buffer_memory_constraints();
+  memory_constraints.set_ram_domain_supported(true);
+  memory_constraints.set_cpu_domain_supported(true);
 
-  constraints.image_format_constraints_count = 1;
-  auto& image_constraints = constraints.image_format_constraints[0];
-  image_constraints.color_spaces_count = 1;
-  image_constraints.color_space[0] = fuchsia::sysmem::ColorSpace{
-      .type = fuchsia::sysmem::ColorSpaceType::SRGB};
-  image_constraints.pixel_format.type =
-      fuchsia::sysmem::PixelFormatType::BGRA32;
-  image_constraints.pixel_format.has_format_modifier = true;
-  image_constraints.pixel_format.format_modifier.value =
-      fuchsia::sysmem::FORMAT_MODIFIER_LINEAR;
-  image_constraints.min_coded_width = viewport_size_.width();
-  image_constraints.min_coded_height = viewport_size_.height();
+  auto& image_constraints =
+      constraints.mutable_image_format_constraints()->emplace_back();
+  image_constraints.mutable_color_spaces()->emplace_back(
+      fuchsia::images2::ColorSpace::SRGB);
+  image_constraints.set_pixel_format(fuchsia::images2::PixelFormat::B8G8R8A8);
+  image_constraints.set_pixel_format_modifier(
+      fuchsia::images2::PixelFormatModifier::LINEAR);
+  image_constraints.set_min_size(
+      fuchsia::math::SizeU{static_cast<uint32_t>(viewport_size_.width()),
+                           static_cast<uint32_t>(viewport_size_.height())});
 
-  buffer_collection_->SetConstraints(/*has_constraints=*/true,
-                                     std::move(constraints));
+  buffer_collection_->SetConstraints(std::move(
+      fuchsia::sysmem2::BufferCollectionSetConstraintsRequest{}.set_constraints(
+          std::move(constraints))));
+}
+
+void FlatlandSurfaceCanvas::FinalizeBufferAllocation() {
+  fuchsia::sysmem2::BufferCollection_WaitForAllBuffersAllocated_Result
+      wait_result;
+  zx_status_t status =
+      buffer_collection_->WaitForAllBuffersAllocated(&wait_result);
+  ZX_LOG_IF(FATAL, status != ZX_OK, status)
+      << "Sysmem connection failed (status).";
+  if (!wait_result.is_response()) {
+    if (wait_result.is_framework_err()) {
+      LOG(ERROR) << "WaitForBuffersAllocated (framework_err): "
+          << fidl::ToUnderlying(wait_result.framework_err());
+    } else {
+      LOG(ERROR) << "WaitForBuffersAllocated (err): "
+          << static_cast<uint32_t>(wait_result.err());
+    }
+    return;
+  }
+  auto buffer_info =
+      std::move(*wait_result.response().mutable_buffer_collection_info());
+
+  buffer_collection_->Release();
+  buffer_collection_.Unbind();
+
+  CHECK_GE(buffer_info.buffers().size(), kNumBuffers);
+  DCHECK(import_token_.value.is_valid());
 
   for (size_t i = 0; i < kNumBuffers; ++i) {
     fuchsia::ui::composition::ImageProperties image_properties;
     image_properties.set_size(
         fuchsia::math::SizeU{static_cast<uint32_t>(viewport_size_.width()),
                              static_cast<uint32_t>(viewport_size_.height())});
-    frames_[i].image_id = flatland_.NextContentId();
+    UNSAFE_TODO(frames_[i]).image_id = flatland_.NextContentId();
 
     fuchsia::ui::composition::BufferCollectionImportToken token;
-    status = import_token.Clone(&token);
+    status = import_token_.Clone(&token);
     ZX_DCHECK(status == ZX_OK, status);
 
-    flatland_.flatland()->CreateImage(frames_[i].image_id, std::move(token), i,
+    flatland_.flatland()->CreateImage(UNSAFE_TODO(frames_[i]).image_id,
+                                      std::move(token), i,
                                       std::move(image_properties));
 
-    // TODO(crbug.com/1330950): We should set SRC blend mode when Chrome has a
+    // TODO(crbug.com/42050483): We should set SRC blend mode when Chrome has a
     // reliable signal for opaque background.
     flatland_.flatland()->SetImageBlendingFunction(
-        frames_[i].image_id, fuchsia::ui::composition::BlendMode::SRC_OVER);
+        UNSAFE_TODO(frames_[i]).image_id,
+        fuchsia::ui::composition::BlendMode::SRC_OVER);
   }
-}
+  import_token_.value.reset();
 
-void FlatlandSurfaceCanvas::FinalizeBufferAllocation() {
-  int32_t wait_status;
-  fuchsia::sysmem::BufferCollectionInfo_2 buffer_info;
-  zx_status_t status =
-      buffer_collection_->WaitForBuffersAllocated(&wait_status, &buffer_info);
-  ZX_LOG_IF(FATAL, status != ZX_OK, status) << "Sysmem connection failed.";
-
-  if (wait_status != ZX_OK) {
-    ZX_LOG(WARNING, wait_status) << "WaitForBuffersAllocated";
-    return;
-  }
-
-  buffer_collection_->Close();
-  buffer_collection_.Unbind();
-
-  CHECK_GE(buffer_info.buffer_count, kNumBuffers);
-
-  const fuchsia::sysmem::ImageFormatConstraints& format =
-      buffer_info.settings.image_format_constraints;
+  const fuchsia::sysmem2::ImageFormatConstraints& format =
+      buffer_info.settings().image_format_constraints();
   size_t stride =
-      RoundUp(std::max(format.min_bytes_per_row, viewport_size_.width() * 4U),
-              format.bytes_per_row_divisor);
+      RoundUp(std::max(format.min_bytes_per_row(), viewport_size_.width() * 4U),
+              format.bytes_per_row_divisor());
 
   for (size_t i = 0; i < kNumBuffers; ++i) {
-    frames_[i].InitializeBuffer(std::move(buffer_info.buffers[i]),
-                                viewport_size_, stride);
+    UNSAFE_TODO(frames_[i])
+        .InitializeBuffer(std::move(buffer_info.mutable_buffers()->at(i)),
+                          viewport_size_, stride);
   }
 }
 
@@ -296,17 +315,20 @@ SkCanvas* FlatlandSurfaceCanvas::GetCanvas() {
     FinalizeBufferAllocation();
   }
 
-  if (viewport_size_.IsEmpty() || frames_[current_frame_].is_empty()) {
+  if (viewport_size_.IsEmpty() ||
+      UNSAFE_TODO(frames_[current_frame_]).is_empty()) {
     return nullptr;
   }
 
   // Wait for the buffer to become available. This call has to be blocking
   // because GetSurface() and PresentCanvas() are synchronous.
-  if (frames_[current_frame_].release_fence) {
-    auto status = frames_[current_frame_].release_fence.wait_one(
-        ZX_EVENT_SIGNALED,
-        zx::deadline_after(zx::duration(kFrameReleaseTimeout.InNanoseconds())),
-        nullptr);
+  if (UNSAFE_TODO(frames_[current_frame_]).release_fence) {
+    auto status =
+        UNSAFE_TODO(frames_[current_frame_])
+            .release_fence.wait_one(ZX_EVENT_SIGNALED,
+                                    zx::deadline_after(zx::duration(
+                                        kFrameReleaseTimeout.InNanoseconds())),
+                                    nullptr);
     if (status == ZX_ERR_TIMED_OUT) {
       // Timeout here indicates that Scenic is most likely broken. If it still
       // works, then in the worst case returning before |release_fence| is
@@ -317,7 +339,7 @@ SkCanvas* FlatlandSurfaceCanvas::GetCanvas() {
     }
   }
 
-  return frames_[current_frame_].surface->getCanvas();
+  return UNSAFE_TODO(frames_[current_frame_]).surface->getCanvas();
 }
 
 void FlatlandSurfaceCanvas::PresentCanvas(const gfx::Rect& damage) {
@@ -326,35 +348,38 @@ void FlatlandSurfaceCanvas::PresentCanvas(const gfx::Rect& damage) {
   // Subtract |damage| from the dirty region in the current frame since it's
   // been repainted.
   SkIRect sk_damage = gfx::RectToSkIRect(damage);
-  frames_[current_frame_].dirty_region.op(sk_damage, SkRegion::kDifference_Op);
+  UNSAFE_TODO(frames_[current_frame_])
+      .dirty_region.op(sk_damage, SkRegion::kDifference_Op);
 
   // Copy dirty region from the previous buffer to make sure the whole frame
   // is up to date.
   int prev_frame =
       current_frame_ == 0 ? (kNumBuffers - 1) : (current_frame_ - 1);
-  frames_[current_frame_].CopyDirtyRegionFrom(frames_[prev_frame]);
+  UNSAFE_TODO(frames_[current_frame_])
+      .CopyDirtyRegionFrom(UNSAFE_TODO(frames_[prev_frame]));
 
   // |damage| rect was updated in the current frame. It means that the rect is
   // no longer valid in all other buffers. Add |damage| to |dirty_region| in all
   // buffers except the current one.
   for (size_t i = 0; i < kNumBuffers; ++i) {
     if (i != current_frame_) {
-      frames_[i].dirty_region.op(sk_damage, SkRegion::kUnion_Op);
+      UNSAFE_TODO(frames_[i]).dirty_region.op(sk_damage, SkRegion::kUnion_Op);
     }
   }
 
-  flatland_.flatland()->SetContent(root_transform_id_,
-                                   frames_[current_frame_].image_id);
+  flatland_.flatland()->SetContent(
+      root_transform_id_, UNSAFE_TODO(frames_[current_frame_]).image_id);
 
   // Create release fence for the current buffer or reset it if it already
   // exists.
-  if (!frames_[current_frame_].release_fence) {
+  if (!UNSAFE_TODO(frames_[current_frame_]).release_fence) {
     auto status = zx::event::create(
-        /*options=*/0u, &(frames_[current_frame_].release_fence));
+        /*options=*/0u, &(UNSAFE_TODO(frames_[current_frame_]).release_fence));
     ZX_CHECK(status == ZX_OK, status);
   } else {
-    auto status = frames_[current_frame_].release_fence.signal(
-        /*clear_mask=*/ZX_EVENT_SIGNALED, /*set_mask=*/0);
+    auto status = UNSAFE_TODO(frames_[current_frame_])
+                      .release_fence.signal(
+                          /*clear_mask=*/ZX_EVENT_SIGNALED, /*set_mask=*/0);
     ZX_CHECK(status == ZX_OK, status);
   }
 
@@ -362,8 +387,9 @@ void FlatlandSurfaceCanvas::PresentCanvas(const gfx::Rect& damage) {
   // GetCanvas() to ensure that we reuse the buffer only after it's released
   // from scenic.
   zx::event release_fence_dup;
-  auto status = frames_[current_frame_].release_fence.duplicate(
-      ZX_RIGHT_SAME_RIGHTS, &release_fence_dup);
+  auto status =
+      UNSAFE_TODO(frames_[current_frame_])
+          .release_fence.duplicate(ZX_RIGHT_SAME_RIGHTS, &release_fence_dup);
   ZX_CHECK(status == ZX_OK, status);
 
   fuchsia::ui::composition::PresentArgs present_args;

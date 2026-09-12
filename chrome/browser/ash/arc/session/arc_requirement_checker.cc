@@ -4,9 +4,7 @@
 
 #include "chrome/browser/ash/arc/session/arc_requirement_checker.h"
 
-#include "ash/components/arc/arc_features.h"
-#include "ash/components/arc/arc_prefs.h"
-#include "ash/components/arc/arc_util.h"
+#include "base/check.h"
 #include "chrome/browser/ash/arc/arc_optin_uma.h"
 #include "chrome/browser/ash/arc/arc_util.h"
 #include "chrome/browser/ash/arc/optin/arc_terms_of_service_default_negotiator.h"
@@ -19,6 +17,9 @@
 #include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/signin/identity_manager_factory.h"
+#include "chromeos/ash/experiences/arc/arc_features.h"
+#include "chromeos/ash/experiences/arc/arc_prefs.h"
+#include "chromeos/ash/experiences/arc/arc_util.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_thread.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
@@ -39,7 +40,7 @@ bool g_ui_enabled = true;
 // tests, even when the tests are set to skip creating UI.
 bool g_enable_arc_terms_of_service_oobe_negotiator_in_tests = false;
 
-absl::optional<bool> g_enable_check_android_management_in_tests;
+std::optional<bool> g_enable_check_android_management_in_tests;
 
 policy::DeviceManagementService* GetDeviceManagementService() {
   policy::BrowserPolicyConnectorAsh* const connector =
@@ -81,10 +82,12 @@ ArcRequirementChecker::GetDefaultAndroidManagementCheckerFactory() {
 }
 
 ArcRequirementChecker::ArcRequirementChecker(
+    metrics::MetricsService* metrics_service,
     Profile* profile,
     ArcSupportHost* support_host,
     AndroidManagementCheckerFactory android_management_checker_factory)
-    : profile_(profile),
+    : metrics_service_(metrics_service),
+      profile_(profile),
       support_host_(support_host),
       android_management_checker_factory_(android_management_checker_factory) {}
 
@@ -156,9 +159,10 @@ void ArcRequirementChecker::StartRequirementChecks(
         std::make_unique<ArcTermsOfServiceOobeNegotiator>();
   } else if (support_host_) {
     VLOG(1) << "Use default negotiator.";
+    CHECK(metrics_service_);
     terms_of_service_negotiator_ =
         std::make_unique<ArcTermsOfServiceDefaultNegotiator>(
-            profile_->GetPrefs(), support_host_);
+            profile_->GetPrefs(), support_host_, metrics_service_);
   } else {
     DCHECK(!g_ui_enabled) << "Negotiator is not created on production.";
     return;
@@ -185,7 +189,7 @@ void ArcRequirementChecker::StartBackgroundChecks(
     return;
 
   android_management_checker_ = android_management_checker_factory_.Run(
-      profile_, true /* retry_on_error */);
+      profile_.get(), true /* retry_on_error */);
   android_management_checker_->StartCheck(base::BindOnce(
       &ArcRequirementChecker::OnBackgroundAndroidManagementChecked,
       weak_ptr_factory_.GetWeakPtr()));
@@ -244,7 +248,7 @@ void ArcRequirementChecker::StartAndroidManagementCheck() {
     return;
 
   android_management_checker_ = android_management_checker_factory_.Run(
-      profile_, false /* retry_on_error */);
+      profile_.get(), false /* retry_on_error */);
   android_management_checker_->StartCheck(
       base::BindOnce(&ArcRequirementChecker::OnAndroidManagementChecked,
                      weak_ptr_factory_.GetWeakPtr()));
@@ -294,15 +298,8 @@ void ArcRequirementChecker::OnBackgroundAndroidManagementChecked(
           .Run(BackgroundCheckResult::kNoActionRequired);
       break;
     case ArcAndroidManagementChecker::CheckResult::DISALLOWED:
-      if (base::FeatureList::IsEnabled(
-              arc::kEnableUnmanagedToManagedTransitionFeature)) {
-        state_ = State::kWaitingForPoliciesBackground;
-        WaitForPoliciesLoad();
-      } else {
-        state_ = State::kStopped;
-        std::move(background_check_callback_)
-            .Run(BackgroundCheckResult::kArcShouldBeDisabled);
-      }
+      state_ = State::kWaitingForPoliciesBackground;
+      WaitForPoliciesLoad();
       break;
     case ArcAndroidManagementChecker::CheckResult::ERROR:
       // This code should not be reached. For background check,

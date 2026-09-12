@@ -4,21 +4,35 @@
 
 #include "third_party/blink/renderer/modules/breakout_box/frame_queue_underlying_source.h"
 
+#include "base/feature_list.h"
 #include "base/task/bind_post_task.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
+#include "base/trace_event/trace_event.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/streams/readable_stream_default_controller_with_script_scope.h"
+#include "third_party/blink/renderer/core/timing/time_clamper.h"
 #include "third_party/blink/renderer/modules/webcodecs/audio_data.h"
 #include "third_party/blink/renderer/modules/webcodecs/video_frame.h"
 #include "third_party/blink/renderer/modules/webcodecs/video_frame_monitor.h"
 #include "third_party/blink/renderer/platform/bindings/exception_code.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 #include "third_party/webrtc/api/frame_transformer_interface.h"
 
 namespace blink {
+
+BASE_FEATURE(kBreakoutBoxPreferCaptureTimestampInVideoFrames,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kBreakoutBoxInsertVideoCaptureTimestamp,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
 namespace {
 
@@ -29,9 +43,7 @@ media::VideoFrame::ID GetFrameId(
 
 media::VideoFrame::ID GetFrameId(const scoped_refptr<media::AudioBuffer>&) {
   NOTREACHED();
-  return media::VideoFrame::ID();
 }
-
 }  // namespace
 
 template <typename NativeFrameType>
@@ -39,25 +51,31 @@ FrameQueueUnderlyingSource<NativeFrameType>::FrameQueueUnderlyingSource(
     ScriptState* script_state,
     wtf_size_t max_queue_size,
     std::string device_id,
-    wtf_size_t frame_pool_size)
+    wtf_size_t frame_pool_size,
+    std::optional<base::ThreadType> thread_type)
     : UnderlyingSourceBase(script_state),
       realm_task_runner_(ExecutionContext::From(script_state)
                              ->GetTaskRunner(TaskType::kInternalMediaRealTime)),
       frame_queue_handle_(
           base::MakeRefCounted<FrameQueue<NativeFrameType>>(max_queue_size)),
       device_id_(std::move(device_id)),
-      frame_pool_size_(frame_pool_size) {
+      frame_pool_size_(frame_pool_size),
+      thread_type_(thread_type),
+      realm_is_boostable_context_(ExecutionContext::From(script_state)
+                                      ->IsDedicatedWorkerGlobalScope()) {
   DCHECK(device_id_.empty() || frame_pool_size_ > 0);
 }
 
 template <typename NativeFrameType>
 FrameQueueUnderlyingSource<NativeFrameType>::FrameQueueUnderlyingSource(
     ScriptState* script_state,
-    wtf_size_t max_queue_size)
+    wtf_size_t max_queue_size,
+    std::optional<base::ThreadType> thread_type)
     : FrameQueueUnderlyingSource(script_state,
                                  max_queue_size,
                                  std::string(),
-                                 /*frame_pool_size=*/0) {}
+                                 /*frame_pool_size=*/0,
+                                 thread_type) {}
 
 template <typename NativeFrameType>
 FrameQueueUnderlyingSource<NativeFrameType>::FrameQueueUnderlyingSource(
@@ -68,13 +86,17 @@ FrameQueueUnderlyingSource<NativeFrameType>::FrameQueueUnderlyingSource(
                              ->GetTaskRunner(TaskType::kInternalMediaRealTime)),
       frame_queue_handle_(other_source->frame_queue_handle_.Queue()),
       device_id_(other_source->device_id_),
-      frame_pool_size_(other_source->frame_pool_size_) {
+      frame_pool_size_(other_source->frame_pool_size_),
+      thread_type_(other_source->thread_type_),
+      realm_is_boostable_context_(ExecutionContext::From(script_state)
+                                      ->IsDedicatedWorkerGlobalScope()) {
   DCHECK(device_id_.empty() || frame_pool_size_ > 0);
 }
 
 template <typename NativeFrameType>
-ScriptPromise FrameQueueUnderlyingSource<NativeFrameType>::pull(
-    ScriptState* script_state) {
+ScriptPromise<IDLUndefined> FrameQueueUnderlyingSource<NativeFrameType>::Pull(
+    ScriptState* script_state,
+    ExceptionState&) {
   DCHECK(realm_task_runner_->RunsTasksInCurrentSequence());
   {
     base::AutoLock locker(lock_);
@@ -82,7 +104,7 @@ ScriptPromise FrameQueueUnderlyingSource<NativeFrameType>::pull(
   }
   auto frame_queue = frame_queue_handle_.Queue();
   if (!frame_queue)
-    return ScriptPromise::CastUndefined(script_state);
+    return ToResolvedUndefinedPromise(script_state);
 
   if (!frame_queue->IsEmpty()) {
     // Enqueuing the frame in the stream controller synchronously can lead to a
@@ -91,15 +113,15 @@ ScriptPromise FrameQueueUnderlyingSource<NativeFrameType>::pull(
     // the frame on another task. See https://crbug.com/1216445#c1
     realm_task_runner_->PostTask(
         FROM_HERE,
-        WTF::BindOnce(&FrameQueueUnderlyingSource<
-                          NativeFrameType>::MaybeSendFrameFromQueueToStream,
-                      WrapPersistent(this)));
+        blink::BindOnce(&FrameQueueUnderlyingSource<
+                            NativeFrameType>::MaybeSendFrameFromQueueToStream,
+                        WrapPersistent(this)));
   }
-  return ScriptPromise::CastUndefined(script_state);
+  return ToResolvedUndefinedPromise(script_state);
 }
 
 template <typename NativeFrameType>
-ScriptPromise FrameQueueUnderlyingSource<NativeFrameType>::Start(
+ScriptPromise<IDLUndefined> FrameQueueUnderlyingSource<NativeFrameType>::Start(
     ScriptState* script_state) {
   DCHECK(realm_task_runner_->RunsTasksInCurrentSequence());
   if (is_closed_) {
@@ -109,30 +131,24 @@ ScriptPromise FrameQueueUnderlyingSource<NativeFrameType>::Start(
     if (!StartFrameDelivery()) {
       // There is only one way in which this can fail for now. Perhaps
       // implementations should return their own failure messages.
-      return ScriptPromise::Reject(
-          script_state,
-          V8ThrowDOMException::CreateOrEmpty(
-              script_state->GetIsolate(), DOMExceptionCode::kInvalidStateError,
-              "Invalid track"));
+      V8ThrowDOMException::Throw(script_state->GetIsolate(),
+                                 DOMExceptionCode::kInvalidStateError,
+                                 "Invalid track");
+      return EmptyPromise();
     }
   }
 
-  return ScriptPromise::CastUndefined(script_state);
+  return ToResolvedUndefinedPromise(script_state);
 }
 
 template <typename NativeFrameType>
-ScriptPromise FrameQueueUnderlyingSource<NativeFrameType>::Cancel(
+ScriptPromise<IDLUndefined> FrameQueueUnderlyingSource<NativeFrameType>::Cancel(
     ScriptState* script_state,
-    ScriptValue reason) {
+    ScriptValue reason,
+    ExceptionState&) {
   DCHECK(realm_task_runner_->RunsTasksInCurrentSequence());
   Close();
-  return ScriptPromise::CastUndefined(script_state);
-}
-
-template <typename NativeFrameType>
-bool FrameQueueUnderlyingSource<NativeFrameType>::HasPendingActivity() const {
-  base::AutoLock locker(lock_);
-  return (num_pending_pulls_ > 0) && GetExecutionContext();
+  return ToResolvedUndefinedPromise(script_state);
 }
 
 template <typename NativeFrameType>
@@ -155,6 +171,7 @@ void FrameQueueUnderlyingSource<NativeFrameType>::Close() {
     return;
 
   is_closed_ = true;
+  realm_thread_type_lease_ = std::nullopt;
   if (GetExecutionContext()) {
     StopFrameDelivery();
     CloseController();
@@ -164,6 +181,10 @@ void FrameQueueUnderlyingSource<NativeFrameType>::Close() {
     base::AutoLock locker(lock_);
     num_pending_pulls_ = 0;
     if (transferred_source_) {
+      // Absorb unread frames in the shared queue before clearing reference, as
+      // they will be dropped when the transferred source shuts down.
+      discarded_frames_ += transferred_source_->DiscardedAndQueuedFrames();
+      total_frames_ += transferred_source_->TotalFrames();
       PostCrossThreadTask(
           *transferred_source_->GetRealmRunner(), FROM_HERE,
           CrossThreadBindOnce(
@@ -171,26 +192,48 @@ void FrameQueueUnderlyingSource<NativeFrameType>::Close() {
               WrapCrossThreadWeakPersistent(transferred_source_.Get())));
       // The queue will be cleared by |transferred_source_|.
       should_clear_queue = false;
-    }
-    transferred_source_.Clear();
-  }
-  auto frame_queue = frame_queue_handle_.Queue();
-  if (frame_queue && should_clear_queue && MustUseMonitor()) {
-    while (!frame_queue->IsEmpty()) {
-      absl::optional<NativeFrameType> popped_frame = frame_queue->Pop();
-      base::AutoLock monitor_locker(GetMonitorLock());
-      MonitorPopFrameLocked(popped_frame.value());
+      transferred_source_.Clear();
     }
   }
-  // Invalidating will clear the queue in the non-monitoring case if there is
-  // no transferred source.
-  frame_queue_handle_.Invalidate();
+  scoped_refptr<FrameQueue<NativeFrameType>> frame_queue;
+  Deque<NativeFrameType> frames_to_destroy;
+  {
+    base::AutoLock locker(lock_);
+    frame_queue = frame_queue_handle_.Queue();
+    if (frame_queue && should_clear_queue) {
+      base::AutoLock queue_locker(frame_queue->GetLock());
+      discarded_frames_ += frame_queue->SizeLocked();
+      if (MustUseMonitor()) {
+        base::AutoLock monitor_locker(GetMonitorLock());
+        while (!frame_queue->IsEmptyLocked()) {
+          std::optional<NativeFrameType> popped_frame =
+              frame_queue->PopLocked();
+          MonitorPopFrameLocked(popped_frame.value());
+
+          // Move the frame into our local container so it isn't
+          // destroyed until the lock_ goes out of scope.
+          frames_to_destroy.push_back(std::move(popped_frame.value()));
+        }
+      }
+    }
+
+    // Invalidating the handle will release our reference to the queue.
+    // If this was the last reference (i.e., not transferred), it will
+    // eventually destroy the queue and any remaining audio frames in it.
+    frame_queue_handle_.Invalidate();
+  }
+
+  // frames_to_destroy goes out of scope here: Popped video frames are destroyed
+  // (if any were popped).
+  // frame_queue goes out of scope here: The queue and remaining audio frames
+  // are destroyed if this was the last reference.
 }
 
 template <typename NativeFrameType>
 void FrameQueueUnderlyingSource<NativeFrameType>::QueueFrame(
     NativeFrameType media_frame) {
   bool should_send_frame_to_stream;
+  scoped_refptr<FrameQueue<NativeFrameType>> frame_queue;
   {
     base::AutoLock locker(lock_);
     if (transferred_source_) {
@@ -198,51 +241,76 @@ void FrameQueueUnderlyingSource<NativeFrameType>::QueueFrame(
       return;
     }
     should_send_frame_to_stream = num_pending_pulls_ > 0;
+    // Increment total frames after forwarding check, so it only counts frames
+    // that are NOT forwarded to the transferred source.
+    total_frames_++;
+
+    frame_queue = frame_queue_handle_.Queue();
+    if (!frame_queue) {
+      discarded_frames_++;
+      return;
+    }
   }
 
-  auto frame_queue = frame_queue_handle_.Queue();
-  if (!frame_queue)
-    return;
-
+  bool did_discard = false;
   if (MustUseMonitor()) {
     base::AutoLock queue_locker(frame_queue->GetLock());
     base::AutoLock monitor_locker(GetMonitorLock());
-    absl::optional<NativeFrameType> oldest_frame = frame_queue->PeekLocked();
+    std::optional<NativeFrameType> oldest_frame = frame_queue->PeekLocked();
     NewFrameAction action = AnalyzeNewFrameLocked(media_frame, oldest_frame);
     switch (action) {
       case NewFrameAction::kPush: {
         MonitorPushFrameLocked(media_frame);
-        absl::optional<NativeFrameType> replaced_frame =
+        std::optional<NativeFrameType> replaced_frame =
             frame_queue->PushLocked(std::move(media_frame));
-        if (replaced_frame.has_value())
+        if (replaced_frame.has_value()) {
           MonitorPopFrameLocked(replaced_frame.value());
+          did_discard = true;
+        }
         break;
       }
-      case NewFrameAction::kReplace:
+      case NewFrameAction::kReplace: {
         MonitorPushFrameLocked(media_frame);
-        if (oldest_frame.has_value())
+        if (oldest_frame.has_value()) {
           MonitorPopFrameLocked(oldest_frame.value());
+        }
+
         // Explicitly pop the old frame and push the new one since the
         // |frame_pool_size_| limit has been reached and it may be smaller
         // than the maximum size of |frame_queue|.
-        frame_queue->PopLocked();
+        if (frame_queue->PopLocked().has_value()) {
+          did_discard = true;
+        }
+        // Pushing should be safe without drop since we just popped a frame.
         frame_queue->PushLocked(std::move(media_frame));
         break;
+      }
       case NewFrameAction::kDrop:
-        // Drop |media_frame| by retuning without doing anything with it.
-        return;
+        // Drop |media_frame| by returning without doing anything with it.
+        did_discard = true;
+        should_send_frame_to_stream = false;
+        break;
     }
   } else {
-    frame_queue->Push(std::move(media_frame));
+    // Push returns the dropped frame if the queue is full.
+    if (frame_queue->Push(std::move(media_frame)).has_value()) {
+      did_discard = true;
+    }
   }
-  if (should_send_frame_to_stream) {
-    PostCrossThreadTask(
-        *realm_task_runner_, FROM_HERE,
-        CrossThreadBindOnce(
-            &FrameQueueUnderlyingSource<
-                NativeFrameType>::MaybeSendFrameFromQueueToStream,
-            WrapCrossThreadPersistent(this)));
+
+  if (did_discard) {
+    base::AutoLock locker(lock_);
+    discarded_frames_++;
   }
+  if (!should_send_frame_to_stream) {
+    return;
+  }
+
+  PostCrossThreadTask(
+      *realm_task_runner_, FROM_HERE,
+      CrossThreadBindOnce(&FrameQueueUnderlyingSource<
+                              NativeFrameType>::MaybeSendFrameFromQueueToStream,
+                          WrapCrossThreadPersistent(this)));
 }
 
 template <typename NativeFrameType>
@@ -268,11 +336,16 @@ double FrameQueueUnderlyingSource<NativeFrameType>::DesiredSizeForTesting()
 template <typename NativeFrameType>
 void FrameQueueUnderlyingSource<NativeFrameType>::TransferSource(
     CrossThreadPersistent<FrameQueueUnderlyingSource<NativeFrameType>>
-        transferred_source) {
+        transferred_source,
+    base::TimeTicks time_origin,
+    bool is_cross_origin_isolated) {
   DCHECK(realm_task_runner_->RunsTasksInCurrentSequence());
+  UpdateRealmInfo(time_origin, is_cross_origin_isolated);
   base::AutoLock locker(lock_);
-  DCHECK(!transferred_source_);
-  transferred_source_ = std::move(transferred_source);
+  if (!transferred_source_cleared_) {
+    DCHECK(!transferred_source_);
+    transferred_source_ = std::move(transferred_source);
+  }
   CloseController();
   frame_queue_handle_.Invalidate();
 }
@@ -280,6 +353,11 @@ void FrameQueueUnderlyingSource<NativeFrameType>::TransferSource(
 template <typename NativeFrameType>
 void FrameQueueUnderlyingSource<NativeFrameType>::ClearTransferredSource() {
   base::AutoLock locker(lock_);
+  transferred_source_cleared_ = true;
+  if (transferred_source_) {
+    discarded_frames_ += transferred_source_->DiscardedAndQueuedFrames();
+    total_frames_ += transferred_source_->TotalFrames();
+  }
   transferred_source_.Clear();
 }
 
@@ -306,14 +384,29 @@ void FrameQueueUnderlyingSource<
       return;
   }
   while (true) {
-    absl::optional<NativeFrameType> media_frame = frame_queue->Pop();
+    std::optional<NativeFrameType> media_frame = frame_queue->Pop();
     if (!media_frame.has_value())
       return;
+
+    if (base::FeatureList::IsEnabled(features::kWebRtcUseMediaThreadTypes) &&
+        realm_is_boostable_context_ && !realm_thread_type_lease_.has_value() &&
+        thread_type_.has_value()) {
+      realm_thread_type_lease_.emplace(thread_type_.value());
+    }
 
     media::VideoFrame::ID frame_id = MustUseMonitor()
                                          ? GetFrameId(media_frame.value())
                                          : media::VideoFrame::ID();
-    Controller()->Enqueue(MakeBlinkFrame(std::move(media_frame.value())));
+    // It has been observed that if the time between JS read() operations
+    // is longer than the time between new frames, other tasks get delayed
+    // and the page freezes. Enqueuing in a separate task avoids this problem.
+    // See https://crbug.com/1490501
+    realm_task_runner_->PostTask(
+        FROM_HERE,
+        blink::BindOnce(
+            &FrameQueueUnderlyingSource::EnqueueBlinkFrame,
+            WrapPersistent(this),
+            WrapPersistent(MakeBlinkFrame(std::move(media_frame.value())))));
     // Update the monitor after creating the Blink VideoFrame to avoid
     // temporarily removing the frame from the monitor.
     MaybeMonitorPopFrameId(frame_id);
@@ -322,6 +415,15 @@ void FrameQueueUnderlyingSource<
       if (--num_pending_pulls_ == 0)
         return;
     }
+  }
+}
+
+template <typename NativeFrameType>
+void FrameQueueUnderlyingSource<NativeFrameType>::EnqueueBlinkFrame(
+    ScriptWrappable* blink_frame) const {
+  DCHECK(realm_task_runner_->RunsTasksInCurrentSequence());
+  if (GetExecutionContext() && !GetExecutionContext()->IsContextDestroyed()) {
+    Controller()->Enqueue(blink_frame);
   }
 }
 
@@ -368,9 +470,9 @@ template <typename NativeFrameType>
 typename FrameQueueUnderlyingSource<NativeFrameType>::NewFrameAction
 FrameQueueUnderlyingSource<NativeFrameType>::AnalyzeNewFrameLocked(
     const NativeFrameType& new_frame,
-    const absl::optional<NativeFrameType>& oldest_frame) {
+    const std::optional<NativeFrameType>& oldest_frame) {
   DCHECK(MustUseMonitor());
-  absl::optional<media::VideoFrame::ID> oldest_frame_id;
+  std::optional<media::VideoFrame::ID> oldest_frame_id;
   if (oldest_frame.has_value())
     oldest_frame_id = GetFrameId(oldest_frame.value());
 
@@ -409,8 +511,42 @@ ScriptWrappable*
 FrameQueueUnderlyingSource<scoped_refptr<media::VideoFrame>>::MakeBlinkFrame(
     scoped_refptr<media::VideoFrame> media_frame) {
   DCHECK(realm_task_runner_->RunsTasksInCurrentSequence());
-  return MakeGarbageCollected<VideoFrame>(std::move(media_frame),
-                                          GetExecutionContext(), device_id_);
+  if (base::FeatureList::IsEnabled(kBreakoutBoxInsertVideoCaptureTimestamp)) {
+    if (!first_frame_ticks_) {
+      first_frame_ticks_ = base::TimeTicks::Now() - media_frame->timestamp();
+    }
+
+    if (!media_frame->metadata().capture_begin_time &&
+        !media_frame->metadata().reference_time) {
+      media_frame->metadata().capture_begin_time =
+          *first_frame_ticks_ + media_frame->timestamp();
+      media_frame->metadata().reference_time =
+          *first_frame_ticks_ + media_frame->timestamp();
+    }
+  }
+  TRACE_EVENT(
+      "media", "FrameQueueUnderlyingSource::MakeBlinkFrame", "ts",
+      media_frame->timestamp(), "rt",
+      media_frame->metadata().reference_time.value_or(base::TimeTicks()), "cbt",
+      media_frame->metadata().capture_begin_time.value_or(base::TimeTicks()));
+
+  // Timestamps emitted to the page must have a clamped resolution.
+  auto* ec = GetExecutionContext();
+  auto timestamp = media_frame->timestamp();
+  if (base::FeatureList::IsEnabled(
+          kBreakoutBoxPreferCaptureTimestampInVideoFrames)) {
+    if (auto cbt = media_frame->metadata().capture_begin_time) {
+      timestamp = time_clamper_.ClampTimeResolution(
+          *cbt - base::TimeTicks(), ec->CrossOriginIsolatedCapability());
+    } else if (auto rt = media_frame->metadata().reference_time) {
+      timestamp = time_clamper_.ClampTimeResolution(
+          *rt - base::TimeTicks(), ec->CrossOriginIsolatedCapability());
+    }
+  }
+
+  return MakeGarbageCollected<VideoFrame>(std::move(media_frame), ec,
+                                          device_id_,
+                                          /*sk_image=*/nullptr, timestamp);
 }
 
 template <>
@@ -425,6 +561,44 @@ template <>
 bool FrameQueueUnderlyingSource<
     scoped_refptr<media::AudioBuffer>>::MustUseMonitor() const {
   return false;
+}
+
+template <typename NativeFrameType>
+uint64_t FrameQueueUnderlyingSource<NativeFrameType>::TotalFrames() const {
+  base::AutoLock locker(lock_);
+  if (transferred_source_) {
+    return total_frames_ + transferred_source_->TotalFrames();
+  }
+  return total_frames_;
+}
+
+template <typename NativeFrameType>
+uint64_t FrameQueueUnderlyingSource<NativeFrameType>::DiscardedFrames() const {
+  base::AutoLock locker(lock_);
+  if (transferred_source_) {
+    return discarded_frames_ + transferred_source_->DiscardedFrames();
+  }
+  return discarded_frames_;
+}
+
+template <typename NativeFrameType>
+uint64_t FrameQueueUnderlyingSource<NativeFrameType>::DiscardedAndQueuedFrames()
+    const {
+  base::AutoLock locker(lock_);
+
+  if (transferred_source_) {
+    return discarded_frames_ + transferred_source_->DiscardedAndQueuedFrames();
+  }
+
+  // Absorb unread frames in the shared queue before clearing reference, as
+  // they will be dropped when the source shuts down.
+  wtf_size_t queue_size = 0;
+  auto queue = frame_queue_handle_.Queue();
+  if (queue) {
+    base::AutoLock queue_locker(queue->GetLock());
+    queue_size = queue->SizeLocked();
+  }
+  return discarded_frames_ + queue_size;
 }
 
 template class MODULES_TEMPLATE_EXPORT

@@ -9,7 +9,6 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace content {
 
@@ -32,7 +31,7 @@ void WebUIMessageHandler::DisallowJavascript() {
     return;
 
   javascript_allowed_ = false;
-  DCHECK(!IsJavascriptAllowed());
+  CHECK(!IsJavascriptAllowed(), base::NotFatalUntil::M158);
 
   OnJavascriptDisallowed();
 }

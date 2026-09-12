@@ -7,25 +7,29 @@
 
 #include <memory>
 
-#include "base/containers/flat_map.h"
-#include "base/containers/span.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/devtools/protocol/protocol.h"
-#include "content/public/browser/devtools_manager_delegate.h"
+#include "build/build_config.h"
+#include "chrome/browser/devtools/chrome_devtools_session_base.h"
 
 namespace content {
 class DevToolsAgentHostClientChannel;
 }  // namespace content
 
+class AdsHandler;
+class AutofillHandler;
 class EmulationHandler;
 class BrowserHandler;
 class CastHandler;
+class ExtensionsHandler;
 class PageHandler;
+class PWAHandler;
 class SecurityHandler;
+class StorageHandler;
+class SystemInfoHandler;
 class TargetHandler;
+class WebMCPHandler;
 class WindowManagerHandler;
 
-class ChromeDevToolsSession : public protocol::FrontendChannel {
+class ChromeDevToolsSession : public ChromeDevToolsSessionBase {
  public:
   explicit ChromeDevToolsSession(
       content::DevToolsAgentHostClientChannel* channel);
@@ -35,38 +39,25 @@ class ChromeDevToolsSession : public protocol::FrontendChannel {
 
   ~ChromeDevToolsSession() override;
 
-  void HandleCommand(
-      base::span<const uint8_t> message,
-      content::DevToolsManagerDelegate::NotHandledCallback callback);
-
   TargetHandler* target_handler() { return target_handler_.get(); }
 
  private:
-  // protocol::FrontendChannel:
-  void SendProtocolResponse(
-      int call_id,
-      std::unique_ptr<protocol::Serializable> message) override;
-  void SendProtocolNotification(
-      std::unique_ptr<protocol::Serializable> message) override;
-  void FlushProtocolNotifications() override;
-  void FallThrough(int call_id,
-                   crdtp::span<uint8_t> method,
-                   crdtp::span<uint8_t> message) override;
-
-  base::flat_map<int, content::DevToolsManagerDelegate::NotHandledCallback>
-      pending_commands_;
-
-  protocol::UberDispatcher dispatcher_;
+  std::unique_ptr<AdsHandler> ads_handler_;
+  std::unique_ptr<AutofillHandler> autofill_handler_;
+  std::unique_ptr<ExtensionsHandler> extensions_handler_;
   std::unique_ptr<BrowserHandler> browser_handler_;
   std::unique_ptr<CastHandler> cast_handler_;
   std::unique_ptr<EmulationHandler> emulation_handler_;
   std::unique_ptr<PageHandler> page_handler_;
+  std::unique_ptr<PWAHandler> pwa_handler_;
   std::unique_ptr<SecurityHandler> security_handler_;
+  std::unique_ptr<StorageHandler> storage_handler_;
+  std::unique_ptr<SystemInfoHandler> system_info_handler_;
   std::unique_ptr<TargetHandler> target_handler_;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+  std::unique_ptr<WebMCPHandler> webmcp_handler_;
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<WindowManagerHandler> window_manager_handler_;
 #endif
-  content::DevToolsAgentHostClientChannel* client_channel_;
 };
 
 #endif  // CHROME_BROWSER_DEVTOOLS_CHROME_DEVTOOLS_SESSION_H_

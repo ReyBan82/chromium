@@ -47,6 +47,9 @@ class SVGFETurbulenceElement final
 
  public:
   explicit SVGFETurbulenceElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFETurbulenceElement;
+  }
 
   SVGAnimatedNumber* baseFrequencyX();
   SVGAnimatedNumber* baseFrequencyY();
@@ -68,6 +71,10 @@ class SVGFETurbulenceElement final
                                 const QualifiedName& attr_name) override;
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumberOptionalNumber> base_frequency_;
   Member<SVGAnimatedNumber> seed_;

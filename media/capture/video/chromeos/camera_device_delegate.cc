@@ -12,20 +12,22 @@
 #include <vector>
 
 #include "ash/constants/ash_features.h"
-#include "base/containers/contains.h"
-#include "base/cxx17_backports.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/no_destructor.h"
 #include "base/posix/safe_strerror.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/bind_post_task.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/typed_macros.h"
+#include "components/device_event_log/device_event_log.h"
 #include "media/capture/mojom/image_capture_types.h"
 #include "media/capture/video/blob_utils.h"
 #include "media/capture/video/chromeos/camera_3a_controller.h"
 #include "media/capture/video/chromeos/camera_app_device_bridge_impl.h"
+#include "media/capture/video/chromeos/camera_app_device_impl.h"
 #include "media/capture/video/chromeos/camera_buffer_factory.h"
 #include "media/capture/video/chromeos/camera_hal_delegate.h"
 #include "media/capture/video/chromeos/camera_metadata_utils.h"
@@ -55,6 +57,7 @@ constexpr int32_t kColorTemperatureStep = 100;
 constexpr int32_t kMicroToNano = 1000;
 
 constexpr char kIntelPowerMode[] = "intel.vendorCamera.powerMode";
+constexpr char kLibcameraStillCaptureMFNR[] = "org.libcamera.stillCaptureMFNR";
 constexpr uint8_t kIntelPowerModeLowPower = 0;
 constexpr uint8_t kIntelPowerModeHighQuality = 1;
 
@@ -142,17 +145,17 @@ void GetStreamResolutions(const cros::mojom::CameraMetadataPtr& static_metadata,
   const size_t kStreamHeightOffset = 2;
   const size_t kStreamTypeOffset = 3;
   const size_t kStreamConfigurationSize = 4;
-  int32_t* iter =
-      reinterpret_cast<int32_t*>((*stream_configurations)->data.data());
+  int32_t* iter = UNSAFE_TODO(
+      reinterpret_cast<int32_t*>((*stream_configurations)->data.data()));
   for (size_t i = 0; i < (*stream_configurations)->count;
        i += kStreamConfigurationSize) {
-    auto format =
-        static_cast<cros::mojom::HalPixelFormat>(iter[kStreamFormatOffset]);
-    int32_t width = iter[kStreamWidthOffset];
-    int32_t height = iter[kStreamHeightOffset];
-    auto type =
-        static_cast<cros::mojom::Camera3StreamType>(iter[kStreamTypeOffset]);
-    iter += kStreamConfigurationSize;
+    auto format = static_cast<cros::mojom::HalPixelFormat>(
+        UNSAFE_TODO(iter[kStreamFormatOffset]));
+    int32_t width = UNSAFE_TODO(iter[kStreamWidthOffset]);
+    int32_t height = UNSAFE_TODO(iter[kStreamHeightOffset]);
+    auto type = static_cast<cros::mojom::Camera3StreamType>(
+        UNSAFE_TODO(iter[kStreamTypeOffset]));
+    UNSAFE_TODO(iter += kStreamConfigurationSize);
 
     if (type != stream_type || format != stream_format) {
       continue;
@@ -179,6 +182,14 @@ void TakePhotoCallbackBundle(VideoCaptureDevice::TakePhotoCallback callback,
   std::move(on_photo_taken_callback).Run();
 }
 
+void TakeNormalPhotoCallbackBundle(TakePhotoCallback callback,
+                                   base::OnceClosure on_photo_taken_callback,
+                                   int32_t status,
+                                   mojom::BlobPtr blob) {
+  std::move(callback).Run(status, std::move(blob));
+  std::move(on_photo_taken_callback).Run();
+}
+
 void SetFpsRangeInMetadata(cros::mojom::CameraMetadataPtr* settings,
                            int32_t min_frame_rate,
                            int32_t max_frame_rate) {
@@ -188,9 +199,9 @@ void SetFpsRangeInMetadata(cros::mojom::CameraMetadataPtr* settings,
   // definition of the FPS metadata tag, its data type is int32, so we
   // reinterpret_cast here.
   std::vector<uint8_t> fps_range(sizeof(int32_t) * entry_length);
-  auto* fps_ptr = reinterpret_cast<int32_t*>(fps_range.data());
+  auto* fps_ptr = UNSAFE_TODO(reinterpret_cast<int32_t*>(fps_range.data()));
   fps_ptr[0] = min_frame_rate;
-  fps_ptr[1] = max_frame_rate;
+  UNSAFE_TODO(fps_ptr[1]) = max_frame_rate;
   cros::mojom::CameraMetadataEntryPtr e =
       cros::mojom::CameraMetadataEntry::New();
   e->tag = cros::mojom::CameraMetadataTag::ANDROID_CONTROL_AE_TARGET_FPS_RANGE;
@@ -203,28 +214,32 @@ void SetFpsRangeInMetadata(cros::mojom::CameraMetadataPtr* settings,
 
 }  // namespace
 
-bool IsInputStream(StreamType stream_type) {
-  // Currently there is only one input stream. Modify this method if there is
-  // any other input streams.
-  return stream_type == StreamType::kYUVInput;
+PortraitModeCallbacks::PortraitModeCallbacks() = default;
+PortraitModeCallbacks::PortraitModeCallbacks(PortraitModeCallbacks&& other)
+    : normal_photo_callback(std::move(other.normal_photo_callback)),
+      portrait_photo_callback(std::move(other.portrait_photo_callback)) {}
+PortraitModeCallbacks& PortraitModeCallbacks::operator=(
+    PortraitModeCallbacks&& other) {
+  normal_photo_callback = std::move(other.normal_photo_callback);
+  portrait_photo_callback = std::move(other.portrait_photo_callback);
+  return *this;
 }
+PortraitModeCallbacks::~PortraitModeCallbacks() = default;
+
+ResultMetadata::ResultMetadata() = default;
+ResultMetadata::~ResultMetadata() = default;
 
 StreamType StreamIdToStreamType(uint64_t stream_id) {
-  switch (stream_id) {
-    case 0:
-      return StreamType::kPreviewOutput;
-    case 1:
-      return StreamType::kJpegOutput;
-    case 2:
-      return StreamType::kYUVInput;
-    case 3:
-      return StreamType::kYUVOutput;
-    case 4:
-      return StreamType::kRecordingOutput;
+  switch (static_cast<StreamType>(stream_id)) {
+    case StreamType::kPreviewOutput:
+    case StreamType::kJpegOutput:
+    case StreamType::kPortraitJpegOutput:
+    case StreamType::kRecordingOutput:
+      return static_cast<StreamType>(stream_id);
     default:
       return StreamType::kUnknown;
   }
-}  // namespace media
+}
 
 std::string StreamTypeToString(StreamType stream_type) {
   switch (stream_type) {
@@ -232,17 +247,15 @@ std::string StreamTypeToString(StreamType stream_type) {
       return std::string("StreamType::kPreviewOutput");
     case StreamType::kJpegOutput:
       return std::string("StreamType::kJpegOutput");
-    case StreamType::kYUVInput:
-      return std::string("StreamType::kYUVInput");
-    case StreamType::kYUVOutput:
-      return std::string("StreamType::kYUVOutput");
+    case StreamType::kPortraitJpegOutput:
+      return std::string("StreamType::kPortraitJpegOutput");
     case StreamType::kRecordingOutput:
       return std::string("StreamType::kRecordingOutput");
     default:
       return std::string("Unknown StreamType value: ") +
              base::NumberToString(static_cast<int32_t>(stream_type));
   }
-}  // namespace media
+}
 
 std::ostream& operator<<(std::ostream& os, StreamType stream_type) {
   return os << StreamTypeToString(stream_type);
@@ -267,6 +280,19 @@ class CameraDeviceDelegate::StreamCaptureInterfaceImpl final
     }
   }
 
+  void OnNewBuffer(ClientType client_type,
+                   cros::mojom::CameraBufferHandlePtr buffer) final {
+    if (camera_device_delegate_) {
+      camera_device_delegate_->OnNewBuffer(client_type, std::move(buffer));
+    }
+  }
+
+  void OnBufferRetired(ClientType client_type, uint64_t buffer_id) final {
+    if (camera_device_delegate_) {
+      camera_device_delegate_->OnBufferRetired(client_type, buffer_id);
+    }
+  }
+
   void Flush(base::OnceCallback<void(int32_t)> callback) final {
     if (camera_device_delegate_) {
       camera_device_delegate_->Flush(std::move(callback));
@@ -277,16 +303,32 @@ class CameraDeviceDelegate::StreamCaptureInterfaceImpl final
   const base::WeakPtr<CameraDeviceDelegate> camera_device_delegate_;
 };
 
-ResultMetadata::ResultMetadata() = default;
-ResultMetadata::~ResultMetadata() = default;
-
 CameraDeviceDelegate::CameraDeviceDelegate(
     VideoCaptureDeviceDescriptor device_descriptor,
     CameraHalDelegate* camera_hal_delegate,
-    scoped_refptr<base::SingleThreadTaskRunner> ipc_task_runner)
+    scoped_refptr<base::SingleThreadTaskRunner> ipc_task_runner,
+    scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner)
     : device_descriptor_(device_descriptor),
       camera_hal_delegate_(camera_hal_delegate),
-      ipc_task_runner_(std::move(ipc_task_runner)) {}
+      ipc_task_runner_(std::move(ipc_task_runner)) {
+  if (!ash::features::IsVcWebApiEnabled()) {
+    return;
+  }
+  camera_effects_observer_ = base::SequenceBound<CrosCameraEffectsObserver>(
+      ui_task_runner,
+      base::BindPostTask(
+          ipc_task_runner_,
+          base::BindRepeating(&CameraDeviceDelegate::OnCameraEffectsChanged,
+                              GetWeakPtr())));
+  auto_framing_state_observer_ =
+      base::SequenceBound<CrosCameraAutoFramingStateObserver>(
+          ui_task_runner,
+          base::BindPostTask(
+              ipc_task_runner_,
+              base::BindRepeating(
+                  &CameraDeviceDelegate::OnAutoFramingStateChanged,
+                  GetWeakPtr())));
+}
 
 CameraDeviceDelegate::~CameraDeviceDelegate() = default;
 
@@ -294,6 +336,14 @@ void CameraDeviceDelegate::AllocateAndStart(
     const base::flat_map<ClientType, VideoCaptureParams>& params,
     CameraDeviceContext* device_context) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  if (device_context->GetState() != CameraDeviceContext::State::kStopped) {
+    // kError indicates that the device is in use but with some errors, or the
+    // device failed to open, or the mojo channel terminated unexpectedly.
+    // Therefore, the device does not need to be opened again when the
+    // state == kError either.
+    return;
+  }
 
   result_metadata_frame_number_for_photo_state_ = 0;
   result_metadata_frame_number_ = 0;
@@ -320,6 +370,8 @@ void CameraDeviceDelegate::AllocateAndStart(
   if (camera_app_device) {
     camera_app_device->SetCameraDeviceContext(device_context_);
   }
+  CameraAppDeviceBridgeImpl::GetInstance()->SetDeviceInUse(
+      device_descriptor_.device_id, true);
 
   auto camera_info = camera_hal_delegate_->GetCameraInfoFromDeviceId(
       device_descriptor_.device_id);
@@ -354,7 +406,7 @@ void CameraDeviceDelegate::AllocateAndStart(
   camera_hal_delegate_->OpenDevice(
       camera_hal_delegate_->GetCameraIdFromDeviceId(
           device_descriptor_.device_id),
-      device_ops_.BindNewPipeAndPassReceiver(),
+      device_descriptor_.model_id, device_ops_.BindNewPipeAndPassReceiver(),
       base::BindPostTaskToCurrentDefault(
           base::BindOnce(&CameraDeviceDelegate::OnOpenedDevice, GetWeakPtr())));
   device_ops_.set_disconnect_handler(base::BindOnce(
@@ -364,6 +416,9 @@ void CameraDeviceDelegate::AllocateAndStart(
 void CameraDeviceDelegate::StopAndDeAllocate(
     base::OnceClosure device_close_callback) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  CameraAppDeviceBridgeImpl::GetInstance()->SetDeviceInUse(
+      device_descriptor_.device_id, false);
 
   if (!device_context_ ||
       device_context_->GetState() == CameraDeviceContext::State::kStopped ||
@@ -413,7 +468,7 @@ void CameraDeviceDelegate::TakePhoto(
     return;
   }
 
-  TakePhotoImpl();
+  TakePhotoImpl(cros::mojom::Effect::kNoEffect);
 }
 
 void CameraDeviceDelegate::GetPhotoState(
@@ -453,8 +508,7 @@ void CameraDeviceDelegate::SetPhotoOptions(
 
   // Abort if background blur does not have already the desired value.
   if (settings->has_background_blur_mode &&
-      (!ash::features::IsVideoConferenceEnabled() ||
-       current_effects_.is_null() ||
+      (!ash::features::IsVcWebApiEnabled() || current_effects_.is_null() ||
        settings->background_blur_mode !=
            (current_effects_->blur_enabled ? mojom::BackgroundBlurMode::BLUR
                                            : mojom::BackgroundBlurMode::OFF))) {
@@ -465,7 +519,7 @@ void CameraDeviceDelegate::SetPhotoOptions(
   // the vendor tag is set and false otherwise.
   auto to_uint8_vector = [](int32_t value) {
     std::vector<uint8_t> temp(sizeof(int32_t));
-    auto* temp_ptr = reinterpret_cast<int32_t*>(temp.data());
+    auto* temp_ptr = UNSAFE_TODO(reinterpret_cast<int32_t*>(temp.data()));
     *temp_ptr = value;
     return temp;
   };
@@ -538,6 +592,9 @@ void CameraDeviceDelegate::SetPhotoOptions(
     int32_t min_diff = std::numeric_limits<int32_t>::max();
     for (const auto& mode : awb_available_modes) {
       auto it = map.find(mode);
+      if (it == map.end()) {
+        continue;
+      }
       // Find the nearest awb mode
       int32_t diff = std::abs(settings->color_temperature - it->second);
       if (diff < min_diff) {
@@ -633,13 +690,16 @@ void CameraDeviceDelegate::ReconfigureStreams(
   if (request_manager_) {
     request_manager_->StopPreview(
         base::BindOnce(&CameraDeviceDelegate::OnFlushed, GetWeakPtr(),
-                       ShouldUseBlobVideoSnapshot(), absl::nullopt));
+                       ShouldUseBlobVideoSnapshot(), std::nullopt));
   }
 }
 
 void CameraDeviceDelegate::SetRotation(int rotation) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
   DCHECK(rotation >= 0 && rotation < 360 && rotation % 90 == 0);
+  if (!device_context_) {
+    return;
+  }
   device_context_->SetScreenRotation(rotation);
 }
 
@@ -668,17 +728,21 @@ bool CameraDeviceDelegate::MaybeReconfigureForPhotoStream(
                        std::move(new_blob_resolution)));
   } else {
     request_manager_->StopPreview(base::BindOnce(
-        &CameraDeviceDelegate::OnFlushed, GetWeakPtr(), true, absl::nullopt));
+        &CameraDeviceDelegate::OnFlushed, GetWeakPtr(), true, std::nullopt));
   }
   return true;
 }
 
-void CameraDeviceDelegate::TakePhotoImpl() {
+void CameraDeviceDelegate::TakePhotoImpl(cros::mojom::Effect effect) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
 
+  StreamType request_stream_type =
+      (effect == cros::mojom::Effect::kPortraitMode)
+          ? StreamType::kPortraitJpegOutput
+          : StreamType::kJpegOutput;
   auto construct_request_cb =
       base::BindOnce(&CameraDeviceDelegate::ConstructDefaultRequestSettings,
-                     GetWeakPtr(), StreamType::kJpegOutput);
+                     GetWeakPtr(), request_stream_type);
 
   if (request_manager_->HasStreamsConfiguredForTakePhoto()) {
     auto camera_app_device =
@@ -689,7 +753,7 @@ void CameraDeviceDelegate::TakePhotoImpl() {
     // video recording.
     bool should_skip_3a = ShouldUseBlobVideoSnapshot() && camera_app_device &&
                           camera_app_device->GetCaptureIntent() ==
-                              cros::mojom::CaptureIntent::VIDEO_RECORD;
+                              cros::mojom::CaptureIntent::kVideoRecord;
     if (should_skip_3a) {
       std::move(construct_request_cb).Run();
     } else {
@@ -703,7 +767,7 @@ void CameraDeviceDelegate::TakePhotoImpl() {
   if (current_blob_resolution_.IsEmpty() &&
       on_reconfigured_callbacks_.empty()) {
     request_manager_->StopPreview(base::BindOnce(
-        &CameraDeviceDelegate::OnFlushed, GetWeakPtr(), true, absl::nullopt));
+        &CameraDeviceDelegate::OnFlushed, GetWeakPtr(), true, std::nullopt));
   }
   auto on_reconfigured_callback = base::BindOnce(
       [](base::WeakPtr<Camera3AController> controller,
@@ -740,7 +804,7 @@ void CameraDeviceDelegate::OnMojoConnectionError() {
 
 void CameraDeviceDelegate::OnFlushed(
     bool require_photo,
-    absl::optional<gfx::Size> new_blob_resolution,
+    std::optional<gfx::Size> new_blob_resolution,
     int32_t result) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
   if (result) {
@@ -766,7 +830,6 @@ void CameraDeviceDelegate::OnClosed(int32_t result) {
   if (request_manager_) {
     request_manager_->RemoveResultMetadataObserver(this);
   }
-  CameraHalDispatcherImpl::GetInstance()->RemoveCameraEffectObserver(this);
   ResetMojoInterface();
   device_context_ = nullptr;
   current_blob_resolution_.SetSize(0, 0);
@@ -819,6 +882,19 @@ void CameraDeviceDelegate::Initialize() {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
   DCHECK_EQ(device_context_->GetState(), CameraDeviceContext::State::kStarting);
 
+  bool use_buffer_management_apis = false;
+  if (device_api_version_ >= cros::mojom::CAMERA_DEVICE_API_VERSION_3_6) {
+    auto version = GetMetadataEntryAsSpan<uint8_t>(
+        static_metadata_, cros::mojom::CameraMetadataTag::
+                              ANDROID_INFO_SUPPORTED_BUFFER_MANAGEMENT_VERSION);
+    use_buffer_management_apis =
+        version.size() == 1 &&
+        version[0] ==
+            static_cast<uint8_t>(
+                cros::mojom::AndroidInfoSupportedBufferManagementVersion::
+                    ANDROID_INFO_SUPPORTED_BUFFER_MANAGEMENT_VERSION_HIDL_DEVICE_3_5);
+  }
+
   mojo::PendingRemote<cros::mojom::Camera3CallbackOps> callback_ops;
   // Assumes the buffer_type will be the same for all |chrome_capture_params|.
   request_manager_ = std::make_unique<RequestManager>(
@@ -829,31 +905,25 @@ void CameraDeviceDelegate::Initialize() {
       chrome_capture_params_[ClientType::kPreviewClient].buffer_type,
       std::make_unique<CameraBufferFactory>(),
       base::BindRepeating(&RotateAndBlobify), ipc_task_runner_,
-      device_api_version_);
+      device_api_version_, use_buffer_management_apis);
   camera_3a_controller_ = std::make_unique<Camera3AController>(
       static_metadata_, request_manager_.get(), ipc_task_runner_);
   device_ops_->Initialize(
       std::move(callback_ops),
       base::BindOnce(&CameraDeviceDelegate::OnInitialized, GetWeakPtr()));
   request_manager_->AddResultMetadataObserver(this);
-  // The callback passed to CameraHalDispatcherImpl will be called on a
-  // different thread inside CameraHalDispatcherImpl, so we need always
-  // post the callback onto current task runner.
-  CameraHalDispatcherImpl::GetInstance()->AddCameraEffectObserver(
-      this, base::BindPostTaskToCurrentDefault(base::BindOnce(
-                &CameraDeviceDelegate::OnCameraEffectObserverAdded,
-                weak_ptr_factory_.GetWeakPtr())));
 
   // For Intel IPU6 platform, set power mode to high quality for CCA and low
   // power mode for others.
   const VendorTagInfo* info =
       camera_hal_delegate_->GetVendorTagInfoByName(kIntelPowerMode);
   if (info != nullptr) {
-    bool is_cca =
+    // TODO(b/284403009): Currently we cannot check which device_id opens CCA
+    bool is_cca_open =
         CameraAppDeviceBridgeImpl::GetInstance()->GetWeakCameraAppDevice(
             device_descriptor_.device_id) != nullptr;
     uint8_t power_mode =
-        is_cca ? kIntelPowerModeHighQuality : kIntelPowerModeLowPower;
+        is_cca_open ? kIntelPowerModeHighQuality : kIntelPowerModeLowPower;
     request_manager_->SetRepeatingCaptureMetadata(
         info->tag, info->type, 1, std::vector<uint8_t>{power_mode});
   }
@@ -887,23 +957,23 @@ void CameraDeviceDelegate::OnInitialized(int32_t result) {
     }
     auto capture_intent = camera_app_device->GetCaptureIntent();
     switch (capture_intent) {
-      case cros::mojom::CaptureIntent::DEFAULT:
+      case cros::mojom::CaptureIntent::kDefault:
         return false;
-      case cros::mojom::CaptureIntent::STILL_CAPTURE:
+      case cros::mojom::CaptureIntent::kStillCapture:
+      case cros::mojom::CaptureIntent::kPortraitCapture:
         return true;
-      case cros::mojom::CaptureIntent::VIDEO_RECORD:
+      case cros::mojom::CaptureIntent::kVideoRecord:
         return ShouldUseBlobVideoSnapshot();
       default:
         NOTREACHED() << "Unknown capture intent: " << capture_intent;
-        return false;
     }
   }();
-  ConfigureStreams(require_photo, absl::nullopt);
+  ConfigureStreams(require_photo, std::nullopt);
 }
 
 void CameraDeviceDelegate::ConfigureStreams(
     bool require_photo,
-    absl::optional<gfx::Size> new_blob_resolution) {
+    std::optional<gfx::Size> new_blob_resolution) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
   DCHECK_EQ(device_context_->GetState(),
             CameraDeviceContext::State::kInitialized);
@@ -927,7 +997,7 @@ void CameraDeviceDelegate::ConfigureStreams(
         usage = cros::mojom::GRALLOC_USAGE_HW_COMPOSER;
         if (camera_app_device &&
             camera_app_device->GetCaptureIntent() ==
-                cros::mojom::CaptureIntent::VIDEO_RECORD &&
+                cros::mojom::CaptureIntent::kVideoRecord &&
             !camera_app_device->IsMultipleStreamsEnabled()) {
           usage |= cros::mojom::GRALLOC_USAGE_HW_VIDEO_ENCODER;
         }
@@ -979,8 +1049,6 @@ void CameraDeviceDelegate::ConfigureStreams(
     still_capture_stream->height = blob_height;
     still_capture_stream->format =
         cros::mojom::HalPixelFormat::HAL_PIXEL_FORMAT_BLOB;
-    // Set usage flag to allow HAL adapter to identify a still capture stream.
-    still_capture_stream->usage = cros::mojom::GRALLOC_USAGE_STILL_CAPTURE;
     still_capture_stream->data_space = 0;
     still_capture_stream->rotation =
         cros::mojom::Camera3StreamRotation::CAMERA3_STREAM_ROTATION_0;
@@ -989,51 +1057,35 @@ void CameraDeviceDelegate::ConfigureStreams(
     }
     stream_config->streams.push_back(std::move(still_capture_stream));
 
-    int32_t max_yuv_width = 0, max_yuv_height = 0;
-    bool is_recording_multi_stream =
-        camera_app_device &&
-        camera_app_device->GetCaptureIntent() ==
-            cros::mojom::CaptureIntent::VIDEO_RECORD &&
-        camera_app_device->IsMultipleStreamsEnabled();
-    if (IsYUVReprocessingSupported(&max_yuv_width, &max_yuv_height) &&
-        !is_recording_multi_stream) {
-      auto reprocessing_stream_input = cros::mojom::Camera3Stream::New();
-      reprocessing_stream_input->id =
-          static_cast<uint64_t>(StreamType::kYUVInput);
-      reprocessing_stream_input->stream_type =
-          cros::mojom::Camera3StreamType::CAMERA3_STREAM_INPUT;
-      reprocessing_stream_input->width = max_yuv_width;
-      reprocessing_stream_input->height = max_yuv_height;
-      reprocessing_stream_input->format =
-          cros::mojom::HalPixelFormat::HAL_PIXEL_FORMAT_YCbCr_420_888;
-      reprocessing_stream_input->data_space = 0;
-      reprocessing_stream_input->rotation =
-          cros::mojom::Camera3StreamRotation::CAMERA3_STREAM_ROTATION_0;
-      if (device_api_version_ >= cros::mojom::CAMERA_DEVICE_API_VERSION_3_5) {
-        reprocessing_stream_input->physical_camera_id = "";
-      }
-
-      auto reprocessing_stream_output = cros::mojom::Camera3Stream::New();
-      reprocessing_stream_output->id =
-          static_cast<uint64_t>(StreamType::kYUVOutput);
-      reprocessing_stream_output->stream_type =
+    if (camera_app_device && camera_app_device->GetCaptureIntent() ==
+                                 cros::mojom::CaptureIntent::kPortraitCapture) {
+      auto portrait_mode_stream = cros::mojom::Camera3Stream::New();
+      portrait_mode_stream->id =
+          static_cast<uint64_t>(StreamType::kPortraitJpegOutput);
+      portrait_mode_stream->stream_type =
           cros::mojom::Camera3StreamType::CAMERA3_STREAM_OUTPUT;
-      reprocessing_stream_output->width = max_yuv_width;
-      reprocessing_stream_output->height = max_yuv_height;
-      reprocessing_stream_output->format =
-          cros::mojom::HalPixelFormat::HAL_PIXEL_FORMAT_YCbCr_420_888;
-      // Set usage flag to allow HAL adapter to identify a still capture stream.
-      reprocessing_stream_output->usage =
-          cros::mojom::GRALLOC_USAGE_STILL_CAPTURE;
-      reprocessing_stream_output->data_space = 0;
-      reprocessing_stream_output->rotation =
+      portrait_mode_stream->width = blob_width;
+      portrait_mode_stream->height = blob_height;
+      portrait_mode_stream->format =
+          cros::mojom::HalPixelFormat::HAL_PIXEL_FORMAT_BLOB;
+      portrait_mode_stream->data_space = 0;
+      portrait_mode_stream->rotation =
           cros::mojom::Camera3StreamRotation::CAMERA3_STREAM_ROTATION_0;
       if (device_api_version_ >= cros::mojom::CAMERA_DEVICE_API_VERSION_3_5) {
-        reprocessing_stream_output->physical_camera_id = "";
+        portrait_mode_stream->physical_camera_id = "";
       }
 
-      stream_config->streams.push_back(std::move(reprocessing_stream_input));
-      stream_config->streams.push_back(std::move(reprocessing_stream_output));
+      portrait_mode_stream->effects =
+          std::vector<cros::mojom::Camera3StreamEffectPtr>();
+      cros::mojom::PortraitModeConfigPtr portrait_mode_config =
+          cros::mojom::PortraitModeConfig::New();
+      portrait_mode_config->enable_rectiface = false;
+      cros::mojom::Camera3StreamEffectPtr stream_effect =
+          cros::mojom::Camera3StreamEffect::NewPortraitModeConfig(
+              std::move(portrait_mode_config));
+      portrait_mode_stream->effects->push_back(std::move(stream_effect));
+
+      stream_config->streams.push_back(std::move(portrait_mode_stream));
     }
   }
 
@@ -1042,6 +1094,14 @@ void CameraDeviceDelegate::ConfigureStreams(
   if (device_api_version_ >= cros::mojom::CAMERA_DEVICE_API_VERSION_3_5) {
     stream_config->session_parameters = cros::mojom::CameraMetadata::New();
     ConfigureSessionParameters(&stream_config->session_parameters);
+    // TODO(b/336480993): Enable digital zoom in portrait mode.
+    bool request_digital_zoom =
+        camera_app_device != nullptr &&
+        camera_app_device->GetCaptureIntent() !=
+            cros::mojom::CaptureIntent::kPortraitCapture;
+    if (request_digital_zoom) {
+      SetDigitalZoomSessionParameters(&stream_config->session_parameters);
+    }
   }
   device_ops_->ConfigureStreams(
       std::move(stream_config),
@@ -1094,77 +1154,6 @@ void CameraDeviceDelegate::OnConfiguredStreams(
   ConstructDefaultRequestSettings(StreamType::kPreviewOutput);
 }
 
-bool CameraDeviceDelegate::IsYUVReprocessingSupported(int* max_width,
-                                                      int* max_height) {
-  bool has_yuv_reprocessing_capability = [&] {
-    auto capabilities = GetMetadataEntryAsSpan<uint8_t>(
-        static_metadata_,
-        cros::mojom::CameraMetadataTag::ANDROID_REQUEST_AVAILABLE_CAPABILITIES);
-    auto capability_yuv_reprocessing = static_cast<uint8_t>(
-        cros::mojom::AndroidRequestAvailableCapabilities::
-            ANDROID_REQUEST_AVAILABLE_CAPABILITIES_YUV_REPROCESSING);
-    for (auto capability : capabilities) {
-      if (capability == capability_yuv_reprocessing) {
-        return true;
-      }
-    }
-    return false;
-  }();
-
-  if (!has_yuv_reprocessing_capability) {
-    return false;
-  }
-
-  bool has_yuv_input_blob_output = [&] {
-    auto formats_map = GetMetadataEntryAsSpan<int32_t>(
-        static_metadata_,
-        cros::mojom::CameraMetadataTag::
-            ANDROID_SCALER_AVAILABLE_INPUT_OUTPUT_FORMATS_MAP);
-    // The formats map looks like: [
-    //   {INPUT_FORMAT, NUM_OF_OUTPUTS, OUTPUT_FORMAT_1, OUTPUT_FORMAT_2, ...},
-    //   {...},
-    //   ...
-    // ]
-    auto format_yuv = static_cast<int32_t>(
-        cros::mojom::HalPixelFormat::HAL_PIXEL_FORMAT_YCbCr_420_888);
-    auto format_blob = static_cast<int32_t>(
-        cros::mojom::HalPixelFormat::HAL_PIXEL_FORMAT_BLOB);
-
-    size_t idx = 0;
-    while (idx < formats_map.size()) {
-      auto in_format = formats_map[idx++];
-      auto out_amount = formats_map[idx++];
-      if (in_format != format_yuv) {
-        idx += out_amount;
-        continue;
-      }
-      for (size_t idx_end = idx + out_amount; idx < idx_end; idx++) {
-        auto out_format = formats_map[idx];
-        if (out_format == format_blob) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }();
-
-  if (!has_yuv_input_blob_output) {
-    return false;
-  }
-
-  std::vector<gfx::Size> yuv_resolutions;
-  GetStreamResolutions(
-      static_metadata_, cros::mojom::Camera3StreamType::CAMERA3_STREAM_INPUT,
-      cros::mojom::HalPixelFormat::HAL_PIXEL_FORMAT_YCbCr_420_888,
-      &yuv_resolutions);
-  if (yuv_resolutions.empty()) {
-    return false;
-  }
-  *max_width = yuv_resolutions.back().width();
-  *max_height = yuv_resolutions.back().height();
-  return true;
-}
-
 void CameraDeviceDelegate::ConstructDefaultRequestSettings(
     StreamType stream_type) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
@@ -1180,7 +1169,7 @@ void CameraDeviceDelegate::ConstructDefaultRequestSettings(
     // template here so the underlying camera HAL can set 3A tuning accordingly.
     auto request_template =
         camera_app_device && camera_app_device->GetCaptureIntent() ==
-                                 cros::mojom::CaptureIntent::VIDEO_RECORD
+                                 cros::mojom::CaptureIntent::kVideoRecord
             ? cros::mojom::Camera3RequestTemplate::CAMERA3_TEMPLATE_VIDEO_RECORD
             : cros::mojom::Camera3RequestTemplate::CAMERA3_TEMPLATE_PREVIEW;
     device_ops_->ConstructDefaultRequestSettings(
@@ -1191,7 +1180,7 @@ void CameraDeviceDelegate::ConstructDefaultRequestSettings(
   } else if (stream_type == StreamType::kJpegOutput) {
     auto request_template =
         camera_app_device && camera_app_device->GetCaptureIntent() ==
-                                 cros::mojom::CaptureIntent::VIDEO_RECORD
+                                 cros::mojom::CaptureIntent::kVideoRecord
             ? cros::mojom::Camera3RequestTemplate::
                   CAMERA3_TEMPLATE_VIDEO_SNAPSHOT
             : cros::mojom::Camera3RequestTemplate::
@@ -1200,6 +1189,14 @@ void CameraDeviceDelegate::ConstructDefaultRequestSettings(
         request_template,
         base::BindOnce(&CameraDeviceDelegate::
                            OnConstructedDefaultStillCaptureRequestSettings,
+                       GetWeakPtr(), request_template));
+  } else if (stream_type == StreamType::kPortraitJpegOutput) {
+    auto request_template =
+        cros::mojom::Camera3RequestTemplate::CAMERA3_TEMPLATE_STILL_CAPTURE;
+    device_ops_->ConstructDefaultRequestSettings(
+        request_template,
+        base::BindOnce(&CameraDeviceDelegate::
+                           OnConstructedDefaultPortraitModeRequestSettings,
                        GetWeakPtr()));
   } else {
     NOTREACHED() << "No default request settings for stream: " << stream_type;
@@ -1246,40 +1243,59 @@ void CameraDeviceDelegate::OnConstructedDefaultPreviewRequestSettings(
 
   request_manager_->StartPreview(std::move(settings));
   if (!take_photo_callbacks_.empty()) {
-    TakePhotoImpl();
+    TakePhotoImpl(cros::mojom::Effect::kNoEffect);
   }
 }
 
 void CameraDeviceDelegate::OnConstructedDefaultStillCaptureRequestSettings(
+    cros::mojom::Camera3RequestTemplate requset_template,
     cros::mojom::CameraMetadataPtr settings) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
 
-  auto camera_app_device =
-      CameraAppDeviceBridgeImpl::GetInstance()->GetWeakCameraAppDevice(
-          device_descriptor_.device_id);
+  if (requset_template ==
+      cros::mojom::Camera3RequestTemplate::CAMERA3_TEMPLATE_STILL_CAPTURE) {
+    const VendorTagInfo* info =
+        camera_hal_delegate_->GetVendorTagInfoByName(kLibcameraStillCaptureMFNR);
+    if (info != nullptr) {
+      auto e = BuildMetadataEntry(info->tag, uint8_t{1});
+      AddOrUpdateMetadataEntry(&settings, std::move(e));
+    }
+  }
 
   while (!take_photo_callbacks_.empty()) {
     auto take_photo_callback = base::BindOnce(
         &TakePhotoCallbackBundle, std::move(take_photo_callbacks_.front()),
         base::BindOnce(&Camera3AController::SetAutoFocusModeForStillCapture,
                        camera_3a_controller_->GetWeakPtr()));
-    if (camera_app_device) {
-      camera_app_device->ConsumeReprocessOptions(
-          std::move(take_photo_callback),
-          base::BindPostTaskToCurrentDefault(base::BindOnce(
-              &RequestManager::TakePhoto, request_manager_->GetWeakPtr(),
-              settings.Clone())));
-    } else {
-      request_manager_->TakePhoto(
-          settings.Clone(), CameraAppDeviceImpl::GetSingleShotReprocessOptions(
-                                std::move(take_photo_callback)));
-    }
+
+    request_manager_->TakePhoto(settings.Clone(),
+                                std::move(take_photo_callback));
     take_photo_callbacks_.pop();
   }
 }
 
+void CameraDeviceDelegate::OnConstructedDefaultPortraitModeRequestSettings(
+    cros::mojom::CameraMetadataPtr settings) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  TakePhotoCallbackMap callback_map;
+  if (take_portrait_photo_callbacks_.has_value()) {
+    callback_map[StreamType::kJpegOutput] = base::BindOnce(
+        &TakeNormalPhotoCallbackBundle,
+        std::move(take_portrait_photo_callbacks_->normal_photo_callback),
+        base::BindOnce(&Camera3AController::SetAutoFocusModeForStillCapture,
+                       camera_3a_controller_->GetWeakPtr()));
+    callback_map[StreamType::kPortraitJpegOutput] =
+        std::move(take_portrait_photo_callbacks_->portrait_photo_callback);
+
+    request_manager_->TakePortraitPhoto(settings.Clone(),
+                                        std::move(callback_map));
+    take_portrait_photo_callbacks_.reset();
+  }
+}
+
 gfx::Size CameraDeviceDelegate::GetBlobResolution(
-    absl::optional<gfx::Size> new_blob_resolution) {
+    std::optional<gfx::Size> new_blob_resolution) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
 
   std::vector<gfx::Size> blob_resolutions;
@@ -1294,7 +1310,7 @@ gfx::Size CameraDeviceDelegate::GetBlobResolution(
   // resolution specified through Mojo API as a fallback. If it fails too,
   // use the largest resolution as default.
   if (new_blob_resolution.has_value() &&
-      base::Contains(blob_resolutions, *new_blob_resolution)) {
+      std::ranges::contains(blob_resolutions, *new_blob_resolution)) {
     return *new_blob_resolution;
   }
 
@@ -1305,7 +1321,7 @@ gfx::Size CameraDeviceDelegate::GetBlobResolution(
     auto specified_capture_resolution =
         camera_app_device->GetStillCaptureResolution();
     if (!specified_capture_resolution.IsEmpty() &&
-        base::Contains(blob_resolutions, specified_capture_resolution)) {
+        std::ranges::contains(blob_resolutions, specified_capture_resolution)) {
       return specified_capture_resolution;
     }
   }
@@ -1335,6 +1351,19 @@ void CameraDeviceDelegate::ProcessCaptureRequest(
               CameraDeviceContext::State::kStopping);
     return;
   }
+
+  // Check if we have pending portrait mode callbacks in CameraAppDevice.
+  auto camera_app_device =
+      CameraAppDeviceBridgeImpl::GetInstance()->GetWeakCameraAppDevice(
+          device_descriptor_.device_id);
+  auto take_portrait_photo_callbacks =
+      camera_app_device ? camera_app_device->ConsumePortraitModeCallbacks()
+                        : std::nullopt;
+  if (take_portrait_photo_callbacks.has_value()) {
+    take_portrait_photo_callbacks_ = std::move(take_portrait_photo_callbacks);
+    TakePhotoImpl(cros::mojom::Effect::kPortraitMode);
+  }
+
   device_ops_->ProcessCaptureRequest(std::move(request), std::move(callback));
 }
 
@@ -1368,8 +1397,8 @@ bool CameraDeviceDelegate::SetPointsOfInterest(
   // the closest allowed value.
   // ref: https://www.w3.org/TR/image-capture/#points-of-interest
 
-  double x = base::clamp(points_of_interest[0]->x, 0.0, 1.0);
-  double y = base::clamp(points_of_interest[0]->y, 0.0, 1.0);
+  double x = std::clamp(points_of_interest[0]->x, 0.0, 1.0);
+  double y = std::clamp(points_of_interest[0]->y, 0.0, 1.0);
 
   // Handle rotation, still in normalized square space.
   std::tie(x, y) = [&]() -> std::pair<double, double> {
@@ -1385,7 +1414,6 @@ bool CameraDeviceDelegate::SetPointsOfInterest(
       default:
         NOTREACHED() << "Invalid orientation";
     }
-    return {x, y};
   }();
 
   // TODO(shik): Respect to SCALER_CROP_REGION, which is unused now.
@@ -1398,7 +1426,7 @@ bool CameraDeviceDelegate::SetPointsOfInterest(
 
 mojom::RangePtr CameraDeviceDelegate::GetControlRangeByVendorTagName(
     const std::string& range_name,
-    const absl::optional<int32_t>& current) {
+    const std::optional<int32_t>& current) {
   const VendorTagInfo* info =
       camera_hal_delegate_->GetVendorTagInfoByName(range_name);
   if (info == nullptr) {
@@ -1434,6 +1462,81 @@ bool CameraDeviceDelegate::ShouldUseBlobVideoSnapshot() {
                                   ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL_FULL);
 }
 
+void CameraDeviceDelegate::OnNewBuffer(
+    ClientType client_type,
+    cros::mojom::CameraBufferHandlePtr buffer) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  uint64_t buffer_id = buffer->buffer_id;
+  device_ops_->OnNewBuffer(
+      std::move(buffer),
+      base::BindOnce(&CameraDeviceDelegate::OnNewBufferResult, GetWeakPtr(),
+                     client_type, buffer_id));
+}
+
+void CameraDeviceDelegate::OnNewBufferResult(ClientType client_type,
+                                             uint64_t buffer_id,
+                                             int32_t result) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  if (result != 0) {
+    device_context_->SetErrorState(
+        media::VideoCaptureError::kCrosHalV3BufferManagerFailedToRegisterBuffer,
+        FROM_HERE,
+        base::StrCat({"On new buffer failed: ", base::safe_strerror(-result)}));
+    return;
+  }
+
+  buffer_ids_known_by_hal_[client_type].insert(buffer_id);
+
+  if (pending_retire_ids_.contains(buffer_id)) {
+    OnBufferRetired(client_type, buffer_id);
+    pending_retire_ids_.erase(buffer_id);
+  }
+}
+
+void CameraDeviceDelegate::OnBufferRetired(ClientType client_type,
+                                           uint64_t buffer_id) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  if (device_context_->GetState() == CameraDeviceContext::State::kError) {
+    return;
+  }
+
+  auto buffer_ids = buffer_ids_known_by_hal_.find(client_type);
+  if (buffer_ids == buffer_ids_known_by_hal_.end() ||
+      !(buffer_ids->second.contains(buffer_id))) {
+    // Buffer has been notified to HAL but still not complete the registration,
+    // so here delay the retiring after the registration is done.
+    pending_retire_ids_.insert(buffer_id);
+    return;
+  }
+
+  device_ops_->OnBufferRetired(buffer_id);
+  buffer_ids->second.erase(buffer_id);
+}
+
+void CameraDeviceDelegate::OnAllBufferRetired(ClientType client_type) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  auto buffer_ids = buffer_ids_known_by_hal_.find(client_type);
+  if (buffer_ids == buffer_ids_known_by_hal_.end()) {
+    // No buffers known by hal for `client_type`.
+    return;
+  }
+
+  // Skip if mojo connection is already closed.
+  if (!device_ops_.is_bound()) {
+    return;
+  }
+
+  for (auto buffer_id : buffer_ids->second) {
+    device_ops_->OnBufferRetired(buffer_id);
+  }
+
+  buffer_ids->second.clear();
+}
+
 void CameraDeviceDelegate::OnResultMetadataAvailable(
     uint32_t frame_number,
     const cros::mojom::CameraMetadataPtr& result_metadata) {
@@ -1442,7 +1545,7 @@ void CameraDeviceDelegate::OnResultMetadataAvailable(
   auto get_vendor_int =
       [&](const std::string& name,
           const cros::mojom::CameraMetadataPtr& result_metadata,
-          absl::optional<int32_t>* returned_value) {
+          std::optional<int32_t>* returned_value) {
         returned_value->reset();
         const VendorTagInfo* info =
             camera_hal_delegate_->GetVendorTagInfoByName(name);
@@ -1532,27 +1635,25 @@ void CameraDeviceDelegate::OnResultMetadataAvailable(
   }
 }
 
-void CameraDeviceDelegate::OnCameraEffectObserverAdded(
-    cros::mojom::EffectsConfigPtr current_effects) {
+void CameraDeviceDelegate::OnCameraEffectsChanged(
+    cros::mojom::EffectsConfigPtr new_effects) {
   DCHECK(ipc_task_runner_->BelongsToCurrentThread());
-  current_effects_ = std::move(current_effects);
-}
 
-void CameraDeviceDelegate::OnCameraEffectChanged(
-    const cros::mojom::EffectsConfigPtr& new_effects) {
-  if (!ipc_task_runner_->BelongsToCurrentThread()) {
-    ipc_task_runner_->PostTask(
-        FROM_HERE, base::BindOnce(&CameraDeviceDelegate::OnCameraEffectChanged,
-                                  GetWeakPtr(), new_effects.Clone()));
-    return;
-  }
-
-  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
   if (!current_effects_.is_null() &&
       current_effects_->blur_enabled != new_effects->blur_enabled) {
     device_context_->OnCaptureConfigurationChanged();
   }
-  current_effects_ = new_effects.Clone();
+  current_effects_ = std::move(new_effects);
+}
+
+void CameraDeviceDelegate::OnAutoFramingStateChanged(
+    cros::mojom::CameraAutoFramingState state) {
+  DCHECK(ipc_task_runner_->BelongsToCurrentThread());
+
+  if (current_auto_framing_state_ && *current_auto_framing_state_ != state) {
+    device_context_->OnCaptureConfigurationChanged();
+  }
+  current_auto_framing_state_ = state;
 }
 
 void CameraDeviceDelegate::DoGetPhotoState(
@@ -1583,12 +1684,24 @@ void CameraDeviceDelegate::DoGetPhotoState(
   // photos. And since we are not actually use the mechanism to get other
   // resolutions, we set the step to 0.0 here.
   photo_state->width->current = current_blob_resolution_.width();
-  photo_state->width->min = blob_resolutions.front().width();
-  photo_state->width->max = blob_resolutions.back().width();
+  photo_state->width->min =
+      std::ranges::min_element(blob_resolutions, {}, [](const gfx::Size& s) {
+        return s.width();
+      })->width();
+  photo_state->width->max =
+      std::ranges::max_element(blob_resolutions, {}, [](const gfx::Size& s) {
+        return s.width();
+      })->width();
   photo_state->width->step = 0.0;
   photo_state->height->current = current_blob_resolution_.height();
-  photo_state->height->min = blob_resolutions.front().height();
-  photo_state->height->max = blob_resolutions.back().height();
+  photo_state->height->min =
+      std::ranges::min_element(blob_resolutions, {}, [](const gfx::Size& s) {
+        return s.height();
+      })->height();
+  photo_state->height->max =
+      std::ranges::max_element(blob_resolutions, {}, [](const gfx::Size& s) {
+        return s.height();
+      })->height();
   photo_state->height->step = 0.0;
 
   photo_state->brightness = GetControlRangeByVendorTagName(
@@ -1657,7 +1770,10 @@ void CameraDeviceDelegate::DoGetPhotoState(
     else {
       // Need to find current color temperature.
       photo_state->current_white_balance_mode = mojom::MeteringMode::MANUAL;
-      current_temperature = map.at(result_metadata_.awb_mode.value());
+      auto it = map.find(result_metadata_.awb_mode.value());
+      if (it != map.end()) {
+        current_temperature = it->second;
+      }
     }
 
     int32_t min = std::numeric_limits<int32_t>::max();
@@ -1682,7 +1798,7 @@ void CameraDeviceDelegate::DoGetPhotoState(
       cros::mojom::CameraMetadataTag::ANDROID_CONTROL_AE_AVAILABLE_MODES);
   bool support_manual_exposure_time = false;
   if (ae_available_modes.size() > 1 && result_metadata_.ae_mode) {
-    support_manual_exposure_time = base::Contains(
+    support_manual_exposure_time = std::ranges::contains(
         ae_available_modes,
         static_cast<uint8_t>(
             cros::mojom::AndroidControlAeMode::ANDROID_CONTROL_AE_MODE_OFF));
@@ -1721,7 +1837,7 @@ void CameraDeviceDelegate::DoGetPhotoState(
       cros::mojom::CameraMetadataTag::ANDROID_CONTROL_AF_AVAILABLE_MODES);
   bool support_manual_focus_distance = false;
   if (af_available_modes.size() > 1 && result_metadata_.af_mode) {
-    support_manual_focus_distance = base::Contains(
+    support_manual_focus_distance = std::ranges::contains(
         af_available_modes,
         static_cast<uint8_t>(
             cros::mojom::AndroidControlAfMode::ANDROID_CONTROL_AF_MODE_OFF));
@@ -1806,12 +1922,11 @@ void CameraDeviceDelegate::DoGetPhotoState(
     }
   }
 
-  // For background blur part, we only set capabilities and current
-  // configuration setting if the feature flag is enabled.
+  // For background blur and face framing part, we only set capabilities and
+  // current configuration setting if the feature flag is enabled.
   //
   // https://w3c.github.io/mediacapture-extensions/#exposing-mediastreamtrack-source-background-blur-support
-  if (ash::features::IsVideoConferenceEnabled() &&
-      !current_effects_.is_null()) {
+  if (ash::features::IsVcWebApiEnabled() && !current_effects_.is_null()) {
     photo_state->supported_background_blur_modes = {
         current_effects_->blur_enabled ? mojom::BackgroundBlurMode::BLUR
                                        : mojom::BackgroundBlurMode::OFF};
@@ -1819,6 +1934,17 @@ void CameraDeviceDelegate::DoGetPhotoState(
     photo_state->background_blur_mode = current_effects_->blur_enabled
                                             ? mojom::BackgroundBlurMode::BLUR
                                             : mojom::BackgroundBlurMode::OFF;
+  }
+  // https://w3c.github.io/mediacapture-extensions/#exposing-mediastreamtrack-source-automatic-face-framing-support
+  if (ash::features::IsVcWebApiEnabled() && current_auto_framing_state_) {
+    photo_state->supported_face_framing_modes = {
+        current_auto_framing_state_ == cros::mojom::CameraAutoFramingState::OFF
+            ? mojom::MeteringMode::NONE
+            : mojom::MeteringMode::SINGLE_SHOT};
+    photo_state->current_face_framing_mode =
+        current_auto_framing_state_ == cros::mojom::CameraAutoFramingState::OFF
+            ? mojom::MeteringMode::NONE
+            : mojom::MeteringMode::SINGLE_SHOT;
   }
 
   std::move(callback).Run(std::move(photo_state));
@@ -1829,7 +1955,7 @@ std::pair<int32_t, int32_t> CameraDeviceDelegate::GetFrameRateRange() {
       CameraAppDeviceBridgeImpl::GetInstance()->GetWeakCameraAppDevice(
           device_descriptor_.device_id);
   auto specified_fps_range =
-      camera_app_device ? camera_app_device->GetFpsRange() : absl::nullopt;
+      camera_app_device ? camera_app_device->GetFpsRange() : std::nullopt;
   if (specified_fps_range) {
     return std::make_pair(specified_fps_range->GetMin(),
                           specified_fps_range->GetMax());
@@ -1841,7 +1967,7 @@ std::pair<int32_t, int32_t> CameraDeviceDelegate::GetFrameRateRange() {
   bool prefer_constant_frame_rate =
       base::FeatureList::IsEnabled(ash::features::kPreferConstantFrameRate) ||
       (camera_app_device && camera_app_device->GetCaptureIntent() ==
-                                cros::mojom::CaptureIntent::VIDEO_RECORD);
+                                cros::mojom::CaptureIntent::kVideoRecord);
   return GetTargetFrameRateRange(static_metadata_, requested_frame_rate,
                                  prefer_constant_frame_rate);
 }
@@ -1872,6 +1998,16 @@ void CameraDeviceDelegate::ConfigureSessionParameters(
       }
     }
   }
+}
+
+void CameraDeviceDelegate::SetDigitalZoomSessionParameters(
+    cros::mojom::CameraMetadataPtr* session_parameters) {
+  CAMERA_LOG(EVENT)
+      << "Setting kCrosDigitalZoomRequestedVendorKey in session_parameters.";
+  auto e = BuildMetadataEntry(static_cast<cros::mojom::CameraMetadataTag>(
+                                  kCrosDigitalZoomRequestedVendorKey),
+                              uint8_t{1});
+  AddOrUpdateMetadataEntry(session_parameters, std::move(e));
 }
 
 }  // namespace media

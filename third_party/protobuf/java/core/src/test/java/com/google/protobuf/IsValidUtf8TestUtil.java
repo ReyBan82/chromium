@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -35,9 +12,11 @@ import static com.google.common.truth.Truth.assertWithMessage;
 
 import java.lang.ref.SoftReference;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 
 /**
@@ -65,7 +44,7 @@ final class IsValidUtf8TestUtil {
       new ByteStringFactory() {
         @Override
         public ByteString newByteString(byte[] bytes) {
-          return new NioByteString(ByteBuffer.wrap(bytes));
+          return ByteString.wrap(ByteBuffer.wrap(bytes));
         }
       };
 
@@ -90,7 +69,7 @@ final class IsValidUtf8TestUtil {
           buffer.clear();
           buffer.put(bytes);
           buffer.flip();
-          return new NioByteString(buffer);
+          return ByteString.wrap(buffer);
         }
       };
 
@@ -276,8 +255,8 @@ final class IsValidUtf8TestUtil {
       }
       ByteString bs = factory.newByteString(bytes);
       boolean isRoundTrippable = bs.isValidUtf8();
-      String s = new String(bytes, Internal.UTF_8);
-      byte[] bytesReencoded = s.getBytes(Internal.UTF_8);
+      String s = new String(bytes, StandardCharsets.UTF_8);
+      byte[] bytesReencoded = s.getBytes(StandardCharsets.UTF_8);
       boolean bytesEqual = Arrays.equals(bytes, bytesReencoded);
 
       if (bytesEqual != isRoundTrippable) {
@@ -314,7 +293,7 @@ final class IsValidUtf8TestUtil {
       if (i > 0) {
         s.append(" ");
       }
-      s.append(String.format("%02x", b[i] & 0xFF));
+      s.append(String.format(Locale.ROOT, "%02x", b[i] & 0xFF));
     }
     s.append("\"");
     return s.toString();

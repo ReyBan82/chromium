@@ -73,7 +73,7 @@ found in the LICENSE file.
         android:textDirection="locale"
         android:textAppearance="@style/TextAppearance.TextMedium.Primary"/>
 
-      <org.chromium.ui.widget.ChromeImageView
+      <ImageView
           android:id="@+id/link_toggle_view"
           android:layout_height="@dimen/sharing_hub_preview_icon_size"
           android:layout_width="@dimen/sharing_hub_preview_icon_size"
@@ -87,7 +87,7 @@ found in the LICENSE file.
 
     <View
       android:id="@+id/preview_divider"
-      android:background="@macro/divider_line_bg_color"
+      android:background="@drawable/divider_line_bg"
       android:layout_height="1dp"
       android:layout_width="match_parent"/>
 
@@ -103,7 +103,7 @@ found in the LICENSE file.
 
     <View
       android:id="@+id/share_sheet_divider"
-      android:background="@macro/divider_line_bg_color"
+      android:background="@drawable/divider_line_bg"
       android:layout_height="1dp"
       android:layout_width="match_parent"
       android:visibility="gone" />
@@ -112,10 +112,11 @@ found in the LICENSE file.
       android:id="@+id/share_sheet_chrome_apps"
       android:clipToPadding="false"
       android:layout_width="wrap_content"
-      android:layout_height="113dp"
+      android:layout_height="wrap_content"
       android:minHeight="@dimen/min_touch_target_size"
       android:paddingStart="8dp"
       android:paddingEnd="8dp"
+      android:paddingBottom="15dp"
       android:visibility="gone" />
   </LinearLayout>
 </ScrollView>

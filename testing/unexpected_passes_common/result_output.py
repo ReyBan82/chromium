@@ -6,17 +6,20 @@
 Also probably a good example of how to *not* write HTML.
 """
 
-from __future__ import print_function
-
 import collections
 import logging
+import re
 import sys
 import tempfile
-from typing import Any, Dict, IO, List, Optional, OrderedDict, Set, Union
+from typing import Any, Dict, IO, List, Optional, Set, Union
 
-import six
-
+# //testing imports.
 from unexpected_passes_common import data_types
+
+# //third_party/ imports.
+# Used for generating and posting Buganizer comments.
+from blinkpy.w3c import buganizer
+from typ import expectations_parser
 
 FULL_PASS = 'Fully passed in the following'
 PARTIAL_PASS = 'Partially passed in the following'
@@ -151,19 +154,34 @@ for (element of highlighted_collapsible_groups) {
 """
 
 SECTION_STALE = 'Stale Expectations (Passed 100% Everywhere, Can Remove)'
-SECTION_SEMI_STALE = ('Semi Stale Expectations (Passed 100% In Some Places, '
-                      'But Not Everywhere - Can Likely Be Modified But Not '
-                      'Necessarily Removed)')
-SECTION_ACTIVE = ('Active Expectations (Failed At Least Once Everywhere, '
-                  'Likely Should Be Left Alone)')
-SECTION_UNMATCHED = ('Unmatched Results (An Expectation Existed When The Test '
-                     'Ran, But No Matching One Currently Exists OR The '
-                     'Expectation Is Too New)')
-SECTION_UNUSED = ('Unused Expectations (Indicative Of The Configuration No '
-                  'Longer Being Tested Or Tags Changing)')
+SECTION_SEMI_STALE = (
+  'Semi Stale Expectations (Passed 100% In Some Places, '
+  'But Not Everywhere - Can Likely Be Modified But Not '
+  'Necessarily Removed)'
+)
+SECTION_ACTIVE = (
+  'Active Expectations (Failed At Least Once Everywhere, '
+  'Likely Should Be Left Alone)'
+)
+SECTION_UNMATCHED = (
+  'Unmatched Results (An Expectation Existed When The Test '
+  'Ran, But No Matching One Currently Exists OR The '
+  'Expectation Is Too New)'
+)
+SECTION_UNUSED = (
+  'Unused Expectations (Indicative Of The Configuration No '
+  'Longer Being Tested Or Tags Changing)'
+)
 
 MAX_BUGS_PER_LINE = 5
 MAX_CHARACTERS_PER_CL_LINE = 72
+
+BUGANIZER_COMMENT = (
+  'The unexpected pass finder removed the last expectation '
+  'associated with this bug. An associated CL should be '
+  'landing shortly, after which this bug can be closed once '
+  'a human confirms there is no more work to be done.'
+)
 
 ElementType = Union[Dict[str, Any], List[str], str]
 # Sample:
@@ -242,14 +260,20 @@ UnusedExpectation = Dict[str, List[data_types.Expectation]]
 
 RemovedUrlsType = Union[List[str], Set[str]]
 
+_BUG_PREFIX_PATTERN = re.compile(
+  expectations_parser.TaggedTestListParser.BUG_PREFIX_REGEX
+)
 
-def OutputResults(stale_dict: data_types.TestExpectationMap,
-                  semi_stale_dict: data_types.TestExpectationMap,
-                  active_dict: data_types.TestExpectationMap,
-                  unmatched_results: UnmatchedResultsType,
-                  unused_expectations: UnusedExpectation,
-                  output_format: str,
-                  file_handle: Optional[IO] = None) -> None:
+
+def OutputResults(
+  stale_dict: data_types.TestExpectationMap,
+  semi_stale_dict: data_types.TestExpectationMap,
+  active_dict: data_types.TestExpectationMap,
+  unmatched_results: UnmatchedResultsType,
+  unused_expectations: UnusedExpectation,
+  output_format: str,
+  file_handle: Optional[IO] = None,
+) -> None:
   """Outputs script results to |file_handle|.
 
   Args:
@@ -277,9 +301,11 @@ def OutputResults(stale_dict: data_types.TestExpectationMap,
   semi_stale_str_dict = _ConvertTestExpectationMapToStringDict(semi_stale_dict)
   active_str_dict = _ConvertTestExpectationMapToStringDict(active_dict)
   unmatched_results_str_dict = _ConvertUnmatchedResultsToStringDict(
-      unmatched_results)
+    unmatched_results
+  )
   unused_expectations_str_list = _ConvertUnusedExpectationsToStringDict(
-      unused_expectations)
+    unused_expectations
+  )
 
   if output_format == 'print':
     file_handle = file_handle or sys.stdout
@@ -304,9 +330,9 @@ def OutputResults(stale_dict: data_types.TestExpectationMap,
     should_close_file = False
     if not file_handle:
       should_close_file = True
-      file_handle = tempfile.NamedTemporaryFile(delete=False,
-                                                suffix='.html',
-                                                mode='w')
+      file_handle = tempfile.NamedTemporaryFile(
+        delete=False, suffix='.html', mode='w'
+      )
 
     file_handle.write(HTML_HEADER)
     if stale_dict:
@@ -320,7 +346,7 @@ def OutputResults(stale_dict: data_types.TestExpectationMap,
       _RecursiveHtmlToFile(active_str_dict, file_handle)
 
     if unused_expectations_str_list:
-      file_handle.write('\n<h1>' + SECTION_UNUSED + "</h1>\n")
+      file_handle.write('\n<h1>' + SECTION_UNUSED + '</h1>\n')
       _RecursiveHtmlToFile(unused_expectations_str_list, file_handle)
     if unmatched_results_str_dict:
       file_handle.write('\n<h1>' + SECTION_UNMATCHED + '</h1>\n')
@@ -334,8 +360,9 @@ def OutputResults(stale_dict: data_types.TestExpectationMap,
     raise RuntimeError('Unsupported output format %s' % output_format)
 
 
-def RecursivePrintToFile(element: ElementType, depth: int,
-                         file_handle: IO) -> None:
+def RecursivePrintToFile(
+  element: ElementType, depth: int, file_handle: IO
+) -> None:
   """Recursively prints |element| as text to |file_handle|.
 
   Args:
@@ -345,7 +372,7 @@ def RecursivePrintToFile(element: ElementType, depth: int,
   """
   if element is None:
     element = str(element)
-  if isinstance(element, six.string_types):
+  if isinstance(element, str):
     file_handle.write(('  ' * depth) + element + '\n')
   elif isinstance(element, dict):
     for k, v in element.items():
@@ -370,7 +397,7 @@ def _RecursiveHtmlToFile(element: ElementType, file_handle: IO) -> None:
     element: A dict, list, or str/unicode to output.
     file_handle: An open file-like object to output to.
   """
-  if isinstance(element, six.string_types):
+  if isinstance(element, str):
     file_handle.write('<p>%s</p>\n' % _LinkifyString(element))
   elif isinstance(element, dict):
     for k, v in element.items():
@@ -380,8 +407,9 @@ def _RecursiveHtmlToFile(element: ElementType, file_handle: IO) -> None:
       # modified.
       if k and FULL_PASS in k:
         html_class = 'highlighted_collapsible_group'
-      file_handle.write('<button type="button" class="%s">%s</button>\n' %
-                        (html_class, k))
+      file_handle.write(
+        '<button type="button" class="%s">%s</button>\n' % (html_class, k)
+      )
       file_handle.write('<div class="content">\n')
       _RecursiveHtmlToFile(v, file_handle)
       file_handle.write('</div>\n')
@@ -410,7 +438,7 @@ def _LinkifyString(s: str) -> str:
 
 
 def _ConvertTestExpectationMapToStringDict(
-    test_expectation_map: data_types.TestExpectationMap
+  test_expectation_map: data_types.TestExpectationMap,
 ) -> ExpectationFileStringDict:
   """Converts |test_expectation_map| to a dict of strings for reporting.
 
@@ -460,7 +488,8 @@ def _ConvertTestExpectationMapToStringDict(
 
       for builder_name, step_map in builder_map.items():
         output_dict[expectation_file][test_name][expectation_str][
-            builder_name] = {}
+          builder_name
+        ] = {}
         fully_passed = []
         partially_passed = {}
         never_passed = []
@@ -475,7 +504,8 @@ def _ConvertTestExpectationMapToStringDict(
             partially_passed[step_name] = stats
 
         output_builder_map = output_dict[expectation_file][test_name][
-            expectation_str][builder_name]
+          expectation_str
+        ][builder_name]
         if fully_passed:
           output_builder_map[FULL_PASS] = fully_passed
         if partially_passed:
@@ -488,8 +518,9 @@ def _ConvertTestExpectationMapToStringDict(
   return output_dict
 
 
-def _ConvertUnmatchedResultsToStringDict(unmatched_results: UnmatchedResultsType
-                                         ) -> TestToBuilderStringDict:
+def _ConvertUnmatchedResultsToStringDict(
+  unmatched_results: UnmatchedResultsType,
+) -> TestToBuilderStringDict:
   """Converts |unmatched_results| to a dict of strings for reporting.
 
   Args:
@@ -520,14 +551,17 @@ def _ConvertUnmatchedResultsToStringDict(unmatched_results: UnmatchedResultsType
       builder_map = output_dict.setdefault(r.test, {})
       step_map = builder_map.setdefault(builder, {})
       result_str = 'Got "%s" on %s with tags [%s]' % (
-          r.actual_result, data_types.BuildLinkFromBuildId(
-              r.build_id), ' '.join(r.tags))
+        r.actual_result,
+        data_types.BuildLinkFromBuildId(r.build_id),
+        ' '.join(r.tags),
+      )
       step_map.setdefault(r.step, []).append(result_str)
   return output_dict
 
 
 def _ConvertUnusedExpectationsToStringDict(
-    unused_expectations: UnusedExpectation) -> Dict[str, List[str]]:
+  unused_expectations: UnusedExpectation,
+) -> Dict[str, List[str]]:
   """Converts |unused_expectations| to a dict of strings for reporting.
 
   Args:
@@ -556,17 +590,22 @@ def _ConvertUnusedExpectationsToStringDict(
 
 
 def _FormatExpectation(expectation: data_types.Expectation) -> str:
-  return '"%s" expectation on "%s"' % (' '.join(
-      expectation.expected_results), ' '.join(expectation.tags))
+  return '"%s" expectation on "%s"' % (
+    ' '.join(expectation.expected_results),
+    ' '.join(expectation.tags),
+  )
 
 
 def AddStatsToStr(s: str, stats: data_types.BuildStats) -> str:
   return '%s %s' % (s, stats.GetStatsAsString())
 
 
-def OutputAffectedUrls(removed_urls: RemovedUrlsType,
-                       orphaned_urls: Optional[RemovedUrlsType] = None,
-                       bug_file_handle: Optional[IO] = None) -> None:
+def OutputAffectedUrls(
+  removed_urls: RemovedUrlsType,
+  orphaned_urls: Optional[RemovedUrlsType] = None,
+  bug_file_handle: Optional[IO] = None,
+  auto_close_bugs: bool = True,
+) -> None:
   """Outputs URLs of affected expectations for easier consumption by the user.
 
   Outputs the following:
@@ -584,6 +623,9 @@ def OutputAffectedUrls(removed_urls: RemovedUrlsType,
         corresponding expectations.
     bug_file_handle: An optional open file-like object to write CL description
         bug information to. If not specified, will print to the terminal.
+    auto_close_bugs: A boolean specifying whether bugs in |orphaned_urls| should
+        be auto-closed on CL submission or not. If not closed, a comment will
+        be posted instead.
   """
   removed_urls = list(removed_urls)
   removed_urls.sort()
@@ -591,14 +633,19 @@ def OutputAffectedUrls(removed_urls: RemovedUrlsType,
   orphaned_urls = list(orphaned_urls)
   orphaned_urls.sort()
   _OutputAffectedUrls(removed_urls, orphaned_urls)
-  _OutputUrlsForClDescription(removed_urls,
-                              orphaned_urls,
-                              file_handle=bug_file_handle)
+  _OutputUrlsForClDescription(
+    removed_urls,
+    orphaned_urls,
+    file_handle=bug_file_handle,
+    auto_close_bugs=auto_close_bugs,
+  )
 
 
-def _OutputAffectedUrls(affected_urls: List[str],
-                        orphaned_urls: List[str],
-                        file_handle: Optional[IO] = None) -> None:
+def _OutputAffectedUrls(
+  affected_urls: List[str],
+  orphaned_urls: List[str],
+  file_handle: Optional[IO] = None,
+) -> None:
   """Outputs |urls| for opening in a browser as affected bugs.
 
   Args:
@@ -606,14 +653,14 @@ def _OutputAffectedUrls(affected_urls: List[str],
     orphaned_urls: A list of strings containing URLs to output as closable.
     file_handle: A file handle to write the string to. Defaults to stdout.
   """
-  _OutputUrlsForCommandLine(affected_urls, "Affected bugs", file_handle)
+  _OutputUrlsForCommandLine(affected_urls, 'Affected bugs', file_handle)
   if orphaned_urls:
-    _OutputUrlsForCommandLine(orphaned_urls, "Closable bugs", file_handle)
+    _OutputUrlsForCommandLine(orphaned_urls, 'Closable bugs', file_handle)
 
 
-def _OutputUrlsForCommandLine(urls: List[str],
-                              description: str,
-                              file_handle: Optional[IO] = None) -> None:
+def _OutputUrlsForCommandLine(
+  urls: List[str], description: str, file_handle: Optional[IO] = None
+) -> None:
   """Outputs |urls| for opening in a browser.
 
   The output string is meant to be passed to a browser via the command line in
@@ -635,9 +682,12 @@ def _OutputUrlsForCommandLine(urls: List[str],
   file_handle.write('%s: %s\n' % (description, ' '.join(urls)))
 
 
-def _OutputUrlsForClDescription(affected_urls: List[str],
-                                orphaned_urls: List[str],
-                                file_handle: Optional[IO] = None) -> None:
+def _OutputUrlsForClDescription(
+  affected_urls: List[str],
+  orphaned_urls: List[str],
+  file_handle: Optional[IO] = None,
+  auto_close_bugs: bool = True,
+) -> None:
   """Outputs |urls| for use in a CL description.
 
   Output adheres to the line length recommendation and max number of bugs per
@@ -647,6 +697,9 @@ def _OutputUrlsForClDescription(affected_urls: List[str],
     affected_urls: A list of strings containing URLs to output.
     orphaned_urls: A list of strings containing URLs to output as closable.
     file_handle: A file handle to write the string to. Defaults to stdout.
+    auto_close_bugs: A boolean specifying whether bugs in |orphaned_urls| should
+        be auto-closed on CL submission or not. If not closed, a comment will
+        be posted instead.
   """
 
   def AddBugTypeToOutputString(urls, prefix):
@@ -658,7 +711,7 @@ def _OutputUrlsForClDescription(affected_urls: List[str],
 
     while len(urls):
       current_bug = urls.popleft()
-      current_bug = current_bug.split('crbug.com/', 1)[1]
+      current_bug = _BUG_PREFIX_PATTERN.split(current_bug, 1)[1]
       # Handles cases like crbug.com/angleproject/1234.
       current_bug = current_bug.replace('/', ':')
 
@@ -667,8 +720,9 @@ def _OutputUrlsForClDescription(affected_urls: List[str],
         current_line = '%s %s' % (prefix, current_bug)
       # Bug or length limit hit for line.
       elif (
-          len(current_line) + len(current_bug) + 2 > MAX_CHARACTERS_PER_CL_LINE
-          or bugs_on_line >= MAX_BUGS_PER_LINE):
+        len(current_line) + len(current_bug) + 2 > MAX_CHARACTERS_PER_CL_LINE
+        or bugs_on_line >= MAX_BUGS_PER_LINE
+      ):
         output_str += current_line + '\n'
         bugs_on_line = 0
         current_line = '%s %s' % (prefix, current_bug)
@@ -690,6 +744,51 @@ def _OutputUrlsForClDescription(affected_urls: List[str],
   if affected_but_not_closable:
     output_str += AddBugTypeToOutputString(affected_but_not_closable, 'Bug:')
   if orphaned_urls:
-    output_str += AddBugTypeToOutputString(orphaned_urls, 'Fixed:')
+    if auto_close_bugs:
+      output_str += AddBugTypeToOutputString(orphaned_urls, 'Fixed:')
+    else:
+      output_str += AddBugTypeToOutputString(orphaned_urls, 'Bug:')
+      _PostCommentsToOrphanedBugs(orphaned_urls)
 
   file_handle.write('Affected bugs for CL description:\n%s' % output_str)
+
+
+def _PostCommentsToOrphanedBugs(orphaned_urls: List[str]) -> None:
+  """Posts comments to bugs in |orphaned_urls| saying they can likely be closed.
+
+  Does not post again if the comment has been posted before in the past.
+
+  Args:
+    orphaned_urls: A list of strings containing URLs to post comments to.
+  """
+
+  try:
+    buganizer_client = _GetBuganizerClient()
+  except buganizer.BuganizerError as e:
+    logging.error(
+      'Encountered error when authenticating, cannot post comments. %s', e
+    )
+    return
+
+  for url in orphaned_urls:
+    try:
+      comment_list = buganizer_client.GetIssueComments(url)
+      # GetIssueComments currently returns a dict if something goes wrong
+      # instead of raising an exception.
+      if isinstance(comment_list, dict):
+        logging.exception(
+          'Failed to get comments from %s: %s',
+          url,
+          comment_list.get('error', 'error not provided'),
+        )
+        continue
+      existing_comments = [c['comment'] for c in comment_list]
+      if BUGANIZER_COMMENT not in existing_comments:
+        buganizer_client.NewComment(url, BUGANIZER_COMMENT)
+    except buganizer.BuganizerError:
+      logging.exception('Could not fetch or add comments for %s', url)
+
+
+def _GetBuganizerClient() -> buganizer.BuganizerClient:
+  """Helper function to get a usable Buganizer client."""
+  return buganizer.BuganizerClient()

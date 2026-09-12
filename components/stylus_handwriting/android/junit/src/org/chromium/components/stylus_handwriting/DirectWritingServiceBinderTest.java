@@ -16,51 +16,46 @@ import android.os.RemoteException;
 import android.widget.directwriting.IDirectWritingService;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 import org.mockito.Spy;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.RuntimeEnvironment;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.base.test.util.Feature;
 
-/**
- * Unit tests for {@link DirectWritingServiceBinder}.
- */
+/** Unit tests for {@link DirectWritingServiceBinder}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class DirectWritingServiceBinderTest {
-    @Spy
-    private DirectWritingServiceBinder mDwServiceBinder;
-    @Mock
-    private DirectWritingServiceBinder.DirectWritingTriggerCallback mTriggerCallback;
-    @Mock
-    private IDirectWritingService mRemoteDwService;
-    @Mock
-    private DirectWritingServiceCallback mDwCallback;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+
+    @Spy private DirectWritingServiceBinder mDwServiceBinder;
+    @Mock private DirectWritingServiceBinder.DirectWritingTriggerCallback mTriggerCallback;
+    @Mock private IDirectWritingService mRemoteDwService;
+    @Mock private DirectWritingServiceCallback mDwCallback;
 
     private Context mContext;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mContext = RuntimeEnvironment.application;
         doReturn(mDwCallback).when(mTriggerCallback).getServiceCallback();
     }
 
     @Test
     @Feature({"Stylus Handwriting"})
-    public void testOnWindowFocusChanged() {
+    public void testHandleWindowFocusChanged() {
         // Test that callback is not unregistered when window focus is lost.
-        mDwServiceBinder.onWindowFocusChanged(mContext, false);
+        mDwServiceBinder.handleWindowFocusChanged(mContext, false);
         verify(mDwServiceBinder, never()).unregisterCallback();
         verify(mDwServiceBinder).handleWindowFocusLost(mContext);
 
         // Test that callback is registered when window focus is gained.
-        mDwServiceBinder.onWindowFocusChanged(mContext, true);
+        mDwServiceBinder.handleWindowFocusChanged(mContext, true);
         verify(mDwServiceBinder).registerCallback();
     }
 
@@ -74,7 +69,8 @@ public class DirectWritingServiceBinderTest {
         mDwServiceBinder.setRemoteServiceForTest(mRemoteDwService);
         mDwServiceBinder.registerCallback();
         verify(mRemoteDwService)
-                .registerCallback(eq(mDwCallback),
+                .registerCallback(
+                        eq(mDwCallback),
                         contains(IDirectWritingService.VALUE_SERVICE_HOST_SOURCE_WEBVIEW));
     }
 

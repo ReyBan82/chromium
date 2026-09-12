@@ -4,35 +4,24 @@
 
 package org.chromium.chrome.browser.ntp;
 
-import java.util.Date;
+import org.chromium.build.annotations.NullMarked;
 
-/**
- * Represents a recently closed entry from TabRestoreService.
- */
+/** Represents a recent tab or window closure event. */
+@NullMarked
 public class RecentlyClosedEntry {
-    private final int mSessionId;
-    private final Date mDate;
+    private final long mTimestamp;
 
     /**
-     * @param sessionId The Session ID of this entry.
      * @param timestamp The milliseconds since the Unix Epoch this entry was created.
      */
-    protected RecentlyClosedEntry(int sessionId, long timestamp) {
-        mSessionId = sessionId;
-        mDate = new Date(timestamp);
+    protected RecentlyClosedEntry(long timestamp) {
+        mTimestamp = timestamp;
     }
 
     /**
-     * @return the Session ID of the entry in TabRestoreService.
+     * @return the timestamp in milliseconds since the Unix Epoch when this entry was created.
      */
-    public int getSessionId() {
-        return mSessionId;
-    }
-
-    /**
-     * @return the {@link Date} when this entry was created.
-     */
-    public Date getDate() {
-        return mDate;
+    public long getTimestamp() {
+        return mTimestamp;
     }
 }

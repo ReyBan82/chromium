@@ -11,6 +11,15 @@
 
 namespace ash {
 
+// `NetworkConnectionObserver`s can veto a connection attempt.
+enum class ConnectToNetworkRequestVerdict {
+  // Don't veto the connection attempt.
+  kProceed = 0,
+  // A scan must finish for enterprise policy enforcement before a connection
+  // may be allowed.
+  kVetoWaitingForScan,
+};
+
 // Observer class for network connection events.
 class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkConnectionObserver {
  public:
@@ -22,13 +31,26 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkConnectionObserver {
 
   // Called when a connection to network |service_path| is requested by
   // calling NetworkConnectionHandler::ConnectToNetwork.
-  virtual void ConnectToNetworkRequested(const std::string& service_path);
+  // A `NetworkConnectionObserver` can veto the connection request (i.e. make
+  // it fail) through its return value.
+  virtual ConnectToNetworkRequestVerdict ConnectToNetworkRequested(
+      const std::string& service_path);
 
   // Called when a connection request succeeds.
+  // Note that this is only called for requests that went through
+  // NetworkConnectionHandler, so it will not be called e.g. if shill
+  // auto-connects to a network. Use
+  // NetworkStateHandlerObserver::NetworkConnectionStateChanged to observe all
+  // network connection events.
   virtual void ConnectSucceeded(const std::string& service_path);
 
   // Called when a connection request fails. Valid error names are defined in
   // NetworkConnectionHandler.
+  // Note that this is only called for requests that went through
+  // NetworkConnectionHandler, so it will not be called e.g. if shill
+  // attempts to auto-connect to a network. Use
+  // NetworkStateHandlerObserver::NetworkConnectionStateChanged to observe all
+  // network connection events.
   virtual void ConnectFailed(const std::string& service_path,
                              const std::string& error_name);
 

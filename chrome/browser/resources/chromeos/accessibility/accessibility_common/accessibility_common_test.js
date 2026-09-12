@@ -8,19 +8,10 @@ GEN_INCLUDE(['../common/testing/common_e2e_test_base.js']);
  * Accessibility common extension browser tests.
  */
 AccessibilityCommonE2ETest = class extends CommonE2ETestBase {
-  async getPref(name) {
+  async getFeature(name) {
     return new Promise(resolve => {
-      chrome.settingsPrivate.getPref(name, ret => {
-        resolve(ret);
-      });
-    });
-  }
-
-  async setPref(name, value) {
-    return new Promise(resolve => {
-      chrome.settingsPrivate.setPref(name, value, undefined, () => {
-        resolve();
-      });
+      chrome.accessibilityPrivate.isFeatureEnabled(
+          name, enabled => resolve(enabled));
     });
   }
 };
@@ -77,5 +68,32 @@ TEST_F('AccessibilityCommonE2ETest', 'ToggleFeatures', function() {
     assertEquals('settings.a11y.screen_magnifier', pref.key);
     assertFalse(pref.value);
     assertTrue(!accessibilityCommon.getMagnifierForTest());
+  })();
+});
+
+TEST_F('AccessibilityCommonE2ETest', 'FaceGazeEnabled', function() {
+  this.newCallback(async () => {
+    let pref = await this.getPref('settings.a11y.face_gaze.enabled');
+    assertEquals('settings.a11y.face_gaze.enabled', pref.key);
+    assertFalse(pref.value);
+
+    // FaceGaze should not be loaded yet.
+    assertFalse(Boolean(accessibilityCommon.getFaceGazeForTest()));
+
+    // Update the pref, FaceGaze should be loaded.
+    await this.setPref('settings.a11y.face_gaze.enabled', true);
+    pref = await this.getPref('settings.a11y.face_gaze.enabled');
+    assertEquals('settings.a11y.face_gaze.enabled', pref.key);
+    assertTrue(pref.value);
+
+    // Now it is loaded.
+    assertTrue(Boolean(accessibilityCommon.getFaceGazeForTest()));
+
+    // Unloads when the pref is turned off.
+    await this.setPref('settings.a11y.face_gaze.enabled', false);
+    pref = await this.getPref('settings.a11y.face_gaze.enabled');
+    assertEquals('settings.a11y.face_gaze.enabled', pref.key);
+    assertFalse(pref.value);
+    assertFalse(Boolean(accessibilityCommon.getFaceGazeForTest()));
   })();
 });

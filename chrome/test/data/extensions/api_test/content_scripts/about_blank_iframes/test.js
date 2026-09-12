@@ -4,58 +4,51 @@
 
 function checkFirstMessageEquals(expectedRequest) {
   return function(request) {
-    if (request != expectedRequest)
+    if (request !== expectedRequest) {
       chrome.test.fail('Unexpected request: ' + JSON.stringify(request));
+    }
     // chrome.test.succeed() will be called by chrome.test.listenOnce().
     // If this function is not used by chrome.test.listenOnce(), then
     // call chrome.test.succeed() when you're done.
   };
 }
 
-var onRequest = chrome.extension.onRequest;
+const onMessage = chrome.runtime.onMessage;
 chrome.test.getConfig(function(config) {
   chrome.test.runTests([
     function testDontInjectInAboutBlankFrame() {
-      chrome.test.listenOnce(onRequest, checkFirstMessageEquals('parent'));
+      chrome.test.listenOnce(onMessage, checkFirstMessageEquals('parent'));
       chrome.test.log('Creating tab...');
-      var test_url =
-          ('http://localhost:PORT/extensions/' +
-           'test_file_with_about_blank_iframe.html')
-              .replace(/PORT/, config.testServer.port);
-      chrome.tabs.create({ url: test_url });
+      const testUrl = `http://localhost:${config.testServer.port}` +
+          '/extensions/test_file_with_about_blank_iframe.html';
+      chrome.tabs.create({url: testUrl});
     },
     function testDontInjectInAboutSrcdocFrame() {
-      chrome.test.listenOnce(onRequest, checkFirstMessageEquals('parent'));
+      chrome.test.listenOnce(onMessage, checkFirstMessageEquals('parent'));
       chrome.test.log('Creating tab...');
-      var test_url =
-          ('http://localhost:PORT/extensions/' +
-           'api_test/webnavigation/srcdoc/a.html')
-              .replace(/PORT/, config.testServer.port);
-      chrome.tabs.create({ url: test_url });
+      const testUrl = `http://localhost:${config.testServer.port}` +
+          '/extensions/api_test/webnavigation/srcdoc/a.html';
+      chrome.tabs.create({url: testUrl});
     },
     function testDontInjectInNestedAboutFrames() {
-      chrome.test.listenOnce(onRequest, checkFirstMessageEquals('parent'));
+      chrome.test.listenOnce(onMessage, checkFirstMessageEquals('parent'));
       chrome.test.log('Creating tab...');
-      var test_url =
-          ('http://localhost:PORT/extensions/' +
-           'test_file_with_about_blank_in_srcdoc.html')
-              .replace(/PORT/, config.testServer.port);
-      chrome.tabs.create({ url: test_url });
+      const testUrl = `http://localhost:${config.testServer.port}` +
+          '/extensions/test_file_with_about_blank_in_srcdoc.html';
+      chrome.tabs.create({url: testUrl});
     },
     function testDocumentStartRunsInSameWorldAsDocumentEndOfJavaScriptUrl() {
-      onRequest.addListener(function listener(request) {
-        onRequest.removeListener(listener);
+      onMessage.addListener(function listener(request) {
+        onMessage.removeListener(listener);
         // The empty document was replaced with the result of the evaluated
         // JavaScript code.
         checkFirstMessageEquals('jsresult/something')(request);
         chrome.test.succeed();
       });
       chrome.test.log('Creating tab...');
-      var test_url =
-          ('http://localhost:PORT/extensions/' +
-           'test_file_with_javascript_url_iframe.html')
-              .replace(/PORT/, config.testServer.port);
-      chrome.tabs.create({ url: test_url });
-    }
+      const testUrl = `http://localhost:${config.testServer.port}` +
+          '/extensions/test_file_with_javascript_url_iframe.html';
+      chrome.tabs.create({url: testUrl});
+    },
   ]);
 });

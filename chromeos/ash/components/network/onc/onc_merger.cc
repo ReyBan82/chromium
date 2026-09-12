@@ -5,19 +5,22 @@
 #include "chromeos/ash/components/network/onc/onc_merger.h"
 
 #include <array>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/check.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/notreached.h"
 #include "base/values.h"
 #include "chromeos/ash/components/network/policy_util.h"
 #include "chromeos/components/onc/onc_signature.h"
 #include "components/onc/onc_constants.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace ash::onc {
 namespace {
@@ -54,9 +57,9 @@ bool IsReadOnlyField(const chromeos::onc::OncValueSignature& value_signature,
 
 // Inserts |true| at every field name in |result| that is recommended in
 // |policy|.
-void MarkRecommendedFieldnames(const base::Value::Dict& policy,
-                               base::Value::Dict* result) {
-  const base::Value::List* recommended_value =
+void MarkRecommendedFieldnames(const base::DictValue& policy,
+                               base::DictValue* result) {
+  const base::ListValue* recommended_value =
       policy.FindList(::onc::kRecommended);
   if (!recommended_value) {
     return;
@@ -82,8 +85,8 @@ base::Value GetDefaultValue(const chromeos::onc::OncFieldSignature* field) {
 
 // Returns a dictionary which contains |true| at each path that is editable by
 // the user. No other fields are set.
-base::Value::Dict GetEditableFlags(const base::Value::Dict& policy) {
-  base::Value::Dict result;
+base::DictValue GetEditableFlags(const base::DictValue& policy) {
+  base::DictValue result;
   MarkRecommendedFieldnames(policy, &result);
 
   // Recurse into nested dictionaries.
@@ -98,13 +101,49 @@ base::Value::Dict GetEditableFlags(const base::Value::Dict& policy) {
 
 // If `dict` doesn't have key `key` yet, set it to `value`.
 template <typename ValueType>
-void SetIfNotSet(base::Value::Dict& dict,
-                 base::StringPiece key,
-                 ValueType value) {
+void SetIfNotSet(base::DictValue& dict, std::string_view key, ValueType value) {
   if (dict.Find(key)) {
     return;
   }
   dict.Set(key, std::move(value));
+}
+
+// Returns a clone of |value| with any credential fields (per
+// FieldIsCredential) replaced by |kFakeCredential|, recursing into lists and
+// nested dictionaries according to |signature|. MergeDictionaries only
+// recurses into dictionary fields, so credentials inside lists of
+// dictionaries (e.g. WireGuard.Peers, Cellular.APNList) must be masked here
+// before the list is copied into the augmented result.
+base::Value CloneWithMaskedCredentials(
+    const chromeos::onc::OncValueSignature* signature,
+    const base::Value& value) {
+  if (!signature) {
+    return value.Clone();
+  }
+  if (value.is_list()) {
+    base::ListValue result;
+    for (const base::Value& entry : value.GetList()) {
+      result.Append(CloneWithMaskedCredentials(
+          signature->onc_array_entry_signature, entry));
+    }
+    return base::Value(std::move(result));
+  }
+  if (value.is_dict()) {
+    base::DictValue result;
+    for (auto item : value.GetDict()) {
+      if (chromeos::onc::FieldIsCredential(*signature, item.first)) {
+        result.Set(item.first, policy_util::kFakeCredential);
+        continue;
+      }
+      const chromeos::onc::OncFieldSignature* field =
+          chromeos::onc::GetFieldSignature(*signature, item.first);
+      result.Set(item.first,
+                 CloneWithMaskedCredentials(
+                     field ? field->value_signature : nullptr, item.second));
+    }
+    return base::Value(std::move(result));
+  }
+  return value.Clone();
 }
 
 // This is the base class for merging a list of Values in parallel. See
@@ -123,7 +162,7 @@ class MergeListOfDictionaries {
     kDeviceEditableIndex,
     kLength,
   };
-  using DictPointers = std::array<const base::Value::Dict*, kLength>;
+  using DictPointers = std::array<const base::DictValue*, kLength>;
   using ValuePointers = std::array<const base::Value*, kLength>;
 
   MergeListOfDictionaries() = default;
@@ -137,10 +176,10 @@ class MergeListOfDictionaries {
   // located at that path in each of the dictionaries. This function returns a
   // new dictionary containing all results of those calls at the respective
   // paths. The resulting dictionary doesn't contain empty dictionaries.
-  base::Value::Dict MergeDictionaries(const DictPointers& dicts) {
-    base::Value::Dict result;
-    std::set<std::string> visited;
-    for (const base::Value::Dict* dict_outer : dicts) {
+  base::DictValue MergeDictionaries(const DictPointers& dicts) {
+    base::DictValue result;
+    absl::flat_hash_set<std::string> visited;
+    for (const base::DictValue* dict_outer : dicts) {
       if (!dict_outer) {
         continue;
       }
@@ -158,7 +197,7 @@ class MergeListOfDictionaries {
             dicts_for_key[i] = dicts[i] ? dicts[i]->FindDict(key) : nullptr;
           }
 
-          base::Value::Dict merged_dict =
+          base::DictValue merged_dict =
               MergeNestedDictionaries(key, dicts_for_key);
           if (!merged_dict.empty()) {
             result.Set(key, std::move(merged_dict));
@@ -186,8 +225,8 @@ class MergeListOfDictionaries {
   virtual base::Value MergeListOfValues(const std::string& key,
                                         const ValuePointers& values) = 0;
 
-  virtual base::Value::Dict MergeNestedDictionaries(const std::string& key,
-                                                    const DictPointers& dicts) {
+  virtual base::DictValue MergeNestedDictionaries(const std::string& key,
+                                                  const DictPointers& dicts) {
     return MergeDictionaries(dicts);
   }
 };
@@ -196,11 +235,11 @@ class MergeListOfDictionaries {
 class MergeSettingsAndPolicies : public MergeListOfDictionaries {
  public:
   struct ValueParams {
-    const base::Value* user_policy;
-    const base::Value* device_policy;
-    const base::Value* user_setting;
-    const base::Value* shared_setting;
-    const base::Value* active_setting;
+    raw_ptr<const base::Value> user_policy;
+    raw_ptr<const base::Value> device_policy;
+    raw_ptr<const base::Value> user_setting;
+    raw_ptr<const base::Value> shared_setting;
+    raw_ptr<const base::Value> active_setting;
     bool user_editable;
     bool device_editable;
   };
@@ -214,21 +253,20 @@ class MergeSettingsAndPolicies : public MergeListOfDictionaries {
   // MergeValues is called. Its results are collected in a new dictionary which
   // is then returned. The resulting dictionary never contains empty
   // dictionaries.
-  base::Value::Dict MergeDictionaries(
-      const base::Value::Dict* user_policy,
-      const base::Value::Dict* device_policy,
-      const base::Value::Dict* user_settings,
-      const base::Value::Dict* shared_settings,
-      const base::Value::Dict* active_settings) {
+  base::DictValue MergeDictionaries(const base::DictValue* user_policy,
+                                    const base::DictValue* device_policy,
+                                    const base::DictValue* user_settings,
+                                    const base::DictValue* shared_settings,
+                                    const base::DictValue* active_settings) {
     has_user_policy_ = (user_policy != nullptr);
     has_device_policy_ = (device_policy != nullptr);
 
-    base::Value::Dict user_editable;
+    base::DictValue user_editable;
     if (user_policy) {
       user_editable = GetEditableFlags(*user_policy);
     }
 
-    base::Value::Dict device_editable;
+    base::DictValue device_editable;
     if (device_policy) {
       device_editable = GetEditableFlags(*device_policy);
     }
@@ -381,14 +419,22 @@ class MergeToAugmented : public MergeToEffective {
   MergeToAugmented(const MergeToAugmented&) = delete;
   MergeToAugmented& operator=(const MergeToAugmented&) = delete;
 
-  base::Value::Dict MergeDictionaries(
+  base::DictValue MergeDictionaries(
       const chromeos::onc::OncValueSignature& signature,
-      const base::Value::Dict* user_policy,
-      const base::Value::Dict* device_policy,
-      const base::Value::Dict* user_settings,
-      const base::Value::Dict* shared_settings,
-      const base::Value::Dict* active_settings) {
+      const base::DictValue* user_policy,
+      const base::DictValue* device_policy,
+      const base::DictValue* user_settings,
+      const base::DictValue* shared_settings,
+      const base::DictValue* active_settings) {
     signature_ = &signature;
+    // |active_settings| is produced from Shill state and may contain nested
+    // dictionaries that only exist in the derived "with state" signature (e.g.
+    // Cellular.LastGoodAPN). Track that signature in parallel so credential
+    // fields inside such dictionaries can still be identified and masked.
+    active_signature_ =
+        (&signature == &chromeos::onc::kNetworkConfigurationSignature)
+            ? &chromeos::onc::kNetworkWithStateSignature
+            : &signature;
     return MergeToEffective::MergeDictionaries(user_policy, device_policy,
                                                user_settings, shared_settings,
                                                active_settings);
@@ -408,6 +454,10 @@ class MergeToAugmented : public MergeToEffective {
       // controlled by policy. Return the plain active value instead of an
       // augmented dictionary.
       if (values.active_setting) {
+        if (active_signature_ &&
+            chromeos::onc::FieldIsCredential(*active_signature_, key)) {
+          return base::Value(policy_util::kFakeCredential);
+        }
         return values.active_setting->Clone();
       }
       return base::Value();
@@ -435,11 +485,12 @@ class MergeToAugmented : public MergeToEffective {
       return base::Value();
     }
 
-    base::Value::Dict augmented_value;
+    base::DictValue augmented_value;
 
     if (values.active_setting) {
       augmented_value.Set(::onc::kAugmentationActiveSetting,
-                          values.active_setting->Clone());
+                          CloneWithMaskedCredentials(field->value_signature,
+                                                     *values.active_setting));
     }
 
     if (merge_result.effective_source) {
@@ -468,11 +519,13 @@ class MergeToAugmented : public MergeToEffective {
     } else {
       if (values.user_policy) {
         augmented_value.Set(::onc::kAugmentationUserPolicy,
-                            values.user_policy->Clone());
+                            CloneWithMaskedCredentials(field->value_signature,
+                                                       *values.user_policy));
       }
       if (values.device_policy) {
         augmented_value.Set(::onc::kAugmentationDevicePolicy,
-                            values.device_policy->Clone());
+                            CloneWithMaskedCredentials(field->value_signature,
+                                                       *values.device_policy));
       }
     }
     if (values.user_setting) {
@@ -516,68 +569,67 @@ class MergeToAugmented : public MergeToEffective {
   }
 
   // MergeListOfDictionaries override.
-  base::Value::Dict MergeNestedDictionaries(
-      const std::string& key,
-      const DictPointers& dicts) override {
-    if (signature_) {
-      const chromeos::onc::OncValueSignature* enclosing_signature = signature_;
-      signature_ = nullptr;
-
-      const chromeos::onc::OncFieldSignature* field =
-          chromeos::onc::GetFieldSignature(*enclosing_signature, key);
-      if (field) {
-        signature_ = field->value_signature;
-      }
-      base::Value::Dict result =
-          MergeToEffective::MergeNestedDictionaries(key, dicts);
-      signature_ = enclosing_signature;
-      return result;
-    }
-    return MergeToEffective::MergeNestedDictionaries(key, dicts);
+  // Temporarily updates the tracked |signature_| and |active_signature_| to
+  // match the inner signatures of the nested dictionary being processed.
+  // Delegates the recursive merge to the base class, and then restores the
+  // original enclosing signatures once the recursion completes
+  base::DictValue MergeNestedDictionaries(const std::string& key,
+                                          const DictPointers& dicts) override {
+    const chromeos::onc::OncValueSignature* enclosing_signature = signature_;
+    const chromeos::onc::OncValueSignature* enclosing_active_signature =
+        active_signature_;
+    signature_ = ResolveInnerSignature(enclosing_signature, key);
+    active_signature_ = ResolveInnerSignature(enclosing_active_signature, key);
+    base::DictValue result =
+        MergeToEffective::MergeNestedDictionaries(key, dicts);
+    signature_ = enclosing_signature;
+    active_signature_ = enclosing_active_signature;
+    return result;
   }
 
  private:
-  const chromeos::onc::OncValueSignature* signature_;
+  // Looks up the signature for the field named |key| within the
+  // |enclosing_signature|. Returns the inner value signature if found,
+  // or nullptr if |enclosing_signature| is null or the field is not
+  // part of that signature.
+  const chromeos::onc::OncValueSignature* ResolveInnerSignature(
+      const chromeos::onc::OncValueSignature* enclosing_signature,
+      const std::string& key) {
+    if (!enclosing_signature) {
+      return nullptr;
+    }
+    const chromeos::onc::OncFieldSignature* field =
+        chromeos::onc::GetFieldSignature(*enclosing_signature, key);
+    return field ? field->value_signature : nullptr;
+  }
+
+  raw_ptr<const chromeos::onc::OncValueSignature> signature_;
+  raw_ptr<const chromeos::onc::OncValueSignature> active_signature_;
 };
 
 }  // namespace
 
-base::Value::Dict MergeSettingsAndPoliciesToEffective(
-    const base::Value::Dict* user_policy,
-    const base::Value::Dict* device_policy,
-    const base::Value* user_settings,
-    const base::Value* shared_settings) {
-  const base::Value::Dict* user_settings_dict =
-      user_settings ? &user_settings->GetDict() : nullptr;
-  const base::Value::Dict* shared_settings_dict =
-      shared_settings ? &shared_settings->GetDict() : nullptr;
-
+base::DictValue MergeSettingsAndPoliciesToEffective(
+    const base::DictValue* user_policy,
+    const base::DictValue* device_policy,
+    const base::DictValue* user_settings,
+    const base::DictValue* shared_settings) {
   MergeToEffective merger;
-  return merger.MergeDictionaries(user_policy, device_policy,
-                                  user_settings_dict, shared_settings_dict,
-                                  nullptr);
+  return merger.MergeDictionaries(user_policy, device_policy, user_settings,
+                                  shared_settings, nullptr);
 }
 
-base::Value::Dict MergeSettingsAndPoliciesToAugmented(
+base::DictValue MergeSettingsAndPoliciesToAugmented(
     const chromeos::onc::OncValueSignature& signature,
-    const base::Value* user_policy,
-    const base::Value* device_policy,
-    const base::Value* user_settings,
-    const base::Value* shared_settings,
-    const base::Value::Dict* active_settings) {
-  const base::Value::Dict* user_policy_dict =
-      user_policy ? &user_policy->GetDict() : nullptr;
-  const base::Value::Dict* device_policy_dict =
-      device_policy ? &device_policy->GetDict() : nullptr;
-  const base::Value::Dict* user_settings_dict =
-      user_settings ? &user_settings->GetDict() : nullptr;
-  const base::Value::Dict* shared_settings_dict =
-      shared_settings ? &shared_settings->GetDict() : nullptr;
-
+    const base::DictValue* user_policy,
+    const base::DictValue* device_policy,
+    const base::DictValue* user_settings,
+    const base::DictValue* shared_settings,
+    const base::DictValue* active_settings) {
   MergeToAugmented merger;
-  return merger.MergeDictionaries(signature, user_policy_dict,
-                                  device_policy_dict, user_settings_dict,
-                                  shared_settings_dict, active_settings);
+  return merger.MergeDictionaries(signature, user_policy, device_policy,
+                                  user_settings, shared_settings,
+                                  active_settings);
 }
 
 }  // namespace ash::onc

@@ -4,9 +4,9 @@
 
 package org.chromium.ui.modelutil;
 
-import static org.hamcrest.Matchers.is;
+import static com.google.common.truth.Truth.assertThat;
+
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -19,27 +19,26 @@ import android.view.View;
 import androidx.annotation.Nullable;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
-import org.robolectric.shadows.ShadowLooper;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.ui.modelutil.PropertyModel.WritableBooleanPropertyKey;
 import org.chromium.ui.modelutil.PropertyModel.WritableIntPropertyKey;
 import org.chromium.ui.modelutil.PropertyModel.WritableObjectPropertyKey;
 import org.chromium.ui.modelutil.PropertyModelChangeProcessor.ViewBinder;
 import org.chromium.ui.test.util.modelutil.FakeViewProvider;
 
-/**
- * Unit tests for LazyConstructionPropertyMcp.
- */
+/** Unit tests for LazyConstructionPropertyMcp. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class LazyConstructionPropertyMcpTest {
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
     private static final WritableBooleanPropertyKey VISIBILITY = new WritableBooleanPropertyKey();
     private static final WritableObjectPropertyKey<String> STRING_PROPERTY =
             new WritableObjectPropertyKey<>();
@@ -50,22 +49,23 @@ public class LazyConstructionPropertyMcpTest {
     private FakeViewProvider<View> mViewProvider;
     private @Nullable PropertyObservable.PropertyObserver<PropertyKey> mModelObserver;
 
-    @Mock
-    private View mView;
-    @Mock
-    private ViewBinder<PropertyModel, View, PropertyKey> mViewBinder;
+    @Mock private View mView;
+    @Mock private ViewBinder<PropertyModel, View, PropertyKey> mViewBinder;
 
     @Before
     public void setup() {
-        MockitoAnnotations.initMocks(this);
         mModel = new PropertyModel(ALL_PROPERTIES);
         mModel.set(VISIBILITY, false);
         mViewProvider = new FakeViewProvider<>();
-        mModel.addObserver((source, propertyKey) -> {
-            // Forward model changes to the model observer if it exists. It's important for the test
-            // that the observer is notified before the LazyConstructionPropertyMcp.
-            if (mModelObserver != null) mModelObserver.onPropertyChanged(source, propertyKey);
-        });
+        mModel.addObserver(
+                (source, propertyKey) -> {
+                    // Forward model changes to the model observer if it exists. It's important for
+                    // the test that the observer is notified before the
+                    // LazyConstructionPropertyMcp.
+                    if (mModelObserver != null) {
+                        mModelObserver.onPropertyChanged(source, propertyKey);
+                    }
+                });
     }
 
     @Test
@@ -77,7 +77,7 @@ public class LazyConstructionPropertyMcpTest {
 
         assertTrue(mViewProvider.inflationHasStarted());
         mViewProvider.finishInflation(mView);
-        ShadowLooper.idleMainLooper();
+        RobolectricUtil.runAllBackgroundAndUi();
 
         verifyBind(VISIBILITY);
     }
@@ -89,7 +89,7 @@ public class LazyConstructionPropertyMcpTest {
         mModel.set(VISIBILITY, true);
         assertTrue(mViewProvider.inflationHasStarted());
         mViewProvider.finishInflation(mView);
-        ShadowLooper.idleMainLooper();
+        RobolectricUtil.runAllBackgroundAndUi();
         verifyBind(STRING_PROPERTY, VISIBILITY);
     }
 
@@ -101,7 +101,7 @@ public class LazyConstructionPropertyMcpTest {
         mModel.set(VISIBILITY, true);
         assertTrue(mViewProvider.inflationHasStarted());
         mViewProvider.finishInflation(mView);
-        ShadowLooper.idleMainLooper();
+        RobolectricUtil.runAllBackgroundAndUi();
         verifyBind(VISIBILITY);
         Mockito.<ViewBinder>reset(mViewBinder);
 
@@ -120,7 +120,7 @@ public class LazyConstructionPropertyMcpTest {
         mModel.set(VISIBILITY, true);
         assertTrue(mViewProvider.inflationHasStarted());
         mViewProvider.finishInflation(mView);
-        ShadowLooper.idleMainLooper();
+        RobolectricUtil.runAllBackgroundAndUi();
         verifyBind(VISIBILITY);
 
         mModel.set(VISIBILITY, false);
@@ -145,21 +145,22 @@ public class LazyConstructionPropertyMcpTest {
         LazyConstructionPropertyMcp.create(mModel, VISIBILITY, mViewProvider, mViewBinder);
 
         // Increase INT_PROPERTY any time visibility changes.
-        mModelObserver = (source, propertyKey) -> {
-            if (propertyKey != VISIBILITY) return;
-            mModel.set(INT_PROPERTY, mModel.get(INT_PROPERTY) + 1);
-        };
+        mModelObserver =
+                (source, propertyKey) -> {
+                    if (propertyKey != VISIBILITY) return;
+                    mModel.set(INT_PROPERTY, mModel.get(INT_PROPERTY) + 1);
+                };
 
         mModel.set(VISIBILITY, true);
         mViewProvider.finishInflation(mView);
-        ShadowLooper.idleMainLooper();
+        RobolectricUtil.runAllBackgroundAndUi();
         verifyBind(VISIBILITY, INT_PROPERTY);
-        assertThat(mModel.get(INT_PROPERTY), is(1));
+        assertThat(mModel.get(INT_PROPERTY)).isEqualTo(1);
         Mockito.<ViewBinder>reset(mViewBinder);
 
         mModel.set(VISIBILITY, false);
         verifyBind(INT_PROPERTY, VISIBILITY);
-        assertThat(mModel.get(INT_PROPERTY), is(2));
+        assertThat(mModel.get(INT_PROPERTY)).isEqualTo(2);
     }
 
     private void verifyBind(PropertyKey... properties) {

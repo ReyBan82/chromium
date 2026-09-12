@@ -126,7 +126,14 @@ bool EsAdapterVideo::OnNewBuffer(
 }
 
 void EsAdapterVideo::ProcessPendingBuffers(bool flush) {
-  DCHECK(has_valid_config_);
+  if (!has_valid_config_) {
+    // If a flush is triggered (e.g., during MarkEndOfStream) before a valid
+    // video decoder config has been parsed, we cannot process any buffers.
+    // In this case, `buffer_list_` must be empty because all incoming buffers
+    // are discarded in `EmitBuffer` until a valid config is established.
+    DCHECK(buffer_list_.empty());
+    return;
+  }
 
   while (!buffer_list_.empty() &&
          (flush || buffer_list_.size() > kHistorySize)) {
@@ -212,11 +219,11 @@ void EsAdapterVideo::ReplaceDiscardedFrames(
       (stream_parser_buffer.GetDecodeTimestamp() - dts) /
       discarded_frame_count_;
 
+  auto stream_parser_buffer_span = base::span(stream_parser_buffer);
   for (int i = 0; i < discarded_frame_count_; i++) {
     scoped_refptr<StreamParserBuffer> frame = StreamParserBuffer::CopyFrom(
-        stream_parser_buffer.data(), stream_parser_buffer.data_size(),
-        stream_parser_buffer.is_key_frame(), stream_parser_buffer.type(),
-        stream_parser_buffer.track_id());
+        stream_parser_buffer_span, stream_parser_buffer.is_key_frame(),
+        stream_parser_buffer.type(), stream_parser_buffer.track_id());
     frame->SetDecodeTimestamp(dts);
     frame->set_timestamp(pts);
     frame->set_duration(pts_delta);

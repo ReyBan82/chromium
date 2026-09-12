@@ -5,16 +5,20 @@
 #ifndef COMPONENTS_VIZ_SERVICE_FRAME_SINKS_EXTERNAL_BEGIN_FRAME_SOURCE_MOJO_H_
 #define COMPONENTS_VIZ_SERVICE_FRAME_SINKS_EXTERNAL_BEGIN_FRAME_SOURCE_MOJO_H_
 
+#include <optional>
+
 #include "base/containers/flat_set.h"
 #include "base/memory/raw_ptr.h"
+#include "components/viz/common/display/display_scheduler_draw_result.h"
 #include "components/viz/common/frame_sinks/begin_frame_args.h"
 #include "components/viz/common/frame_sinks/begin_frame_source.h"
 #include "components/viz/service/display/display.h"
 #include "components/viz/service/frame_sinks/frame_sink_observer.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
+#include "mojo/public/cpp/bindings/associated_remote.h"
 #include "mojo/public/cpp/bindings/pending_associated_receiver.h"
+#include "mojo/public/cpp/bindings/pending_associated_remote.h"
 #include "services/viz/privileged/mojom/compositing/external_begin_frame_controller.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace viz {
 
@@ -31,47 +35,59 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
       public ExternalBeginFrameSourceClient,
       public FrameSinkObserver {
  public:
+  // `controller_receiver` must be a valid mojo receiver.
+  // `controller_client_remote` is optional and can be an invalid remote.
+  // If `wait_for_all_frame_sinks` is false, the frame callback is dispatched as
+  // soon as the display finishes the frame, without waiting for all frame
+  // sinks to finish.
   ExternalBeginFrameSourceMojo(
       FrameSinkManagerImpl* frame_sink_manager,
       mojo::PendingAssociatedReceiver<mojom::ExternalBeginFrameController>
           controller_receiver,
-      uint32_t restart_id);
+      mojo::PendingAssociatedRemote<mojom::ExternalBeginFrameControllerClient>
+          controller_client_remote,
+      uint32_t restart_id,
+      bool wait_for_all_frame_sinks = true);
   ~ExternalBeginFrameSourceMojo() override;
 
   // mojom::ExternalBeginFrameController implementation.
   void IssueExternalBeginFrame(
       const BeginFrameArgs& args,
-      bool force,
       base::OnceCallback<void(const BeginFrameAck&)> callback) override;
+
+#if BUILDFLAG(IS_MAC)
+  void IssueExternalVSync(const CADisplayLinkParams& params) override;
+  void SetSupportedDisplayLinkId(int64_t display_id,
+                                 bool is_supported) override;
+#endif
 
   void SetDisplay(Display* display);
 
+  const base::flat_set<FrameSinkId>& pending_frame_sinks_for_testing() const {
+    return pending_frame_sinks_;
+  }
+
+  const std::optional<BeginFrameId>& original_frame_id_for_testing() const {
+    return original_frame_id_;
+  }
+
  private:
   // ExternalBeginFrameSourceClient implementation.
-  void OnNeedsBeginFrames(bool needs_begin_frames) override {}
+  void OnNeedsBeginFrames(bool needs_begin_frames) override;
+  void SetPreferredInterval(base::TimeDelta interval) override;
 
   // DisplayObserver overrides.
-  void OnDisplayDidFinishFrame(const BeginFrameAck& ack) override;
+  void OnDisplayDidFinishFrame(const BeginFrameId& frame_id,
+                               DisplaySchedulerDrawResult result) override;
   void OnDisplayDestroyed() override;
 
   // FrameSinkObserver overrides.
-  void OnRegisteredFrameSinkId(const FrameSinkId& frame_sink_id) override {}
-  void OnInvalidatedFrameSinkId(const FrameSinkId& frame_sink_id) override {}
-  void OnCreatedCompositorFrameSink(const FrameSinkId& frame_sink_id,
-                                    bool is_root) override {}
   void OnDestroyedCompositorFrameSink(
       const FrameSinkId& frame_sink_id) override;
-  void OnRegisteredFrameSinkHierarchy(
-      const FrameSinkId& parent_frame_sink_id,
-      const FrameSinkId& child_frame_sink_id) override {}
-  void OnUnregisteredFrameSinkHierarchy(
-      const FrameSinkId& parent_frame_sink_id,
-      const FrameSinkId& child_frame_sink_id) override {}
   void OnFrameSinkDidBeginFrame(const FrameSinkId& frame_sink_id,
                                 const BeginFrameArgs& args) override;
   void OnFrameSinkDidFinishFrame(const FrameSinkId& frame_sink_id,
                                  const BeginFrameArgs& args) override;
-  void OnCaptureStarted(const FrameSinkId& frame_sink_id) override {}
 
   void MaybeProduceFrameCallback();
   void DispatchFrameCallback(const BeginFrameAck& ack);
@@ -85,13 +101,20 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
   base::OnceCallback<void(const BeginFrameAck& ack)> pending_frame_callback_;
 
   mojo::AssociatedReceiver<mojom::ExternalBeginFrameController> receiver_;
-  // The frame source id as specified in BeginFrameArgs passed to
-  // IssueExternalBeginFrame. Note this is likely to be different from our
-  // source id, but this is what will be reported to FrameSinkObserver methods.
-  uint64_t original_source_id_ = BeginFrameArgs::kStartingSourceId;
+  mojo::AssociatedRemote<mojom::ExternalBeginFrameControllerClient>
+      remote_client_;
+  // The frame id as specified in BeginFrameArgs passed to
+  // IssueExternalBeginFrame. Note its source id is likely to be different from
+  // our source id, but this is what will be reported to FrameSinkObserver
+  // methods. This is only set after an external begin frame has actually been
+  // issued. MaybeProduceFrameCallback() also builds its "display won't draw"
+  // nak from this.
+  std::optional<BeginFrameId> original_frame_id_;
+
+  const bool wait_for_all_frame_sinks_;
 
   base::flat_set<FrameSinkId> pending_frame_sinks_;
-  absl::optional<BeginFrameAck> pending_ack_;
+  std::optional<BeginFrameAck> pending_ack_;
   raw_ptr<Display> display_ = nullptr;
 };
 

@@ -5,14 +5,15 @@
 #ifndef CHROMECAST_BINDINGS_BINDINGS_MANAGER_FUCHSIA_H_
 #define CHROMECAST_BINDINGS_BINDINGS_MANAGER_FUCHSIA_H_
 
+#include <chromium/cast/cpp/fidl.h>
 #include <fuchsia/mem/cpp/fidl.h>
 
 #include <list>
 #include <map>
 #include <string>
+#include <string_view>
 
 #include "chromecast/bindings/bindings_manager.h"
-#include "fuchsia_web/runners/cast/fidl/fidl/hlcpp/chromium/cast/cpp/fidl.h"
 
 namespace chromecast {
 namespace bindings {
@@ -29,15 +30,15 @@ class BindingsManagerFuchsia : public chromium::cast::ApiBindings,
   ~BindingsManagerFuchsia() override;
 
   // BindingsManager implementation:
-  void AddBinding(base::StringPiece binding_name,
-                  base::StringPiece binding_script) override;
+  void AddBinding(std::string_view binding_name,
+                  std::string_view binding_script) override;
 
- protected:
   // chromium::cast::ApiBindings implementation:
   void GetAll(GetAllCallback callback) override;
   void Connect(
       std::string port_name,
       fidl::InterfaceHandle<::fuchsia::web::MessagePort> message_port) override;
+  void SetOrigin(std::string origin) override;
 
  private:
   // Stores all bindings, keyed on the string-based IDs provided by the

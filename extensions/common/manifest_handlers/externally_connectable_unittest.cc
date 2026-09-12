@@ -7,6 +7,7 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <iterator>
 
 #include "extensions/common/error_utils.h"
 #include "extensions/common/manifest_constants.h"
@@ -21,25 +22,14 @@ namespace extensions {
 
 namespace errors = externally_connectable_errors;
 
-class ExternallyConnectableTest : public ManifestTest {
- public:
-  ExternallyConnectableTest() = default;
-  ~ExternallyConnectableTest() override = default;
-
- protected:
-  ExternallyConnectableInfo* GetExternallyConnectableInfo(
-      scoped_refptr<Extension> extension) {
-    return static_cast<ExternallyConnectableInfo*>(
-        extension->GetManifestData(manifest_keys::kExternallyConnectable));
-  }
-};
+using ExternallyConnectableTest = ManifestTest;
 
 TEST_F(ExternallyConnectableTest, IDsAndMatches) {
   scoped_refptr<Extension> extension =
       LoadAndExpectSuccess("externally_connectable_ids_and_matches.json");
   ASSERT_TRUE(extension.get());
 
-  ExternallyConnectableInfo* info =
+  const ExternallyConnectableInfo* info =
       ExternallyConnectableInfo::Get(extension.get());
   ASSERT_TRUE(info);
 
@@ -98,7 +88,7 @@ TEST_F(ExternallyConnectableTest, IDs) {
       LoadAndExpectSuccess("externally_connectable_ids.json");
   ASSERT_TRUE(extension.get());
 
-  ExternallyConnectableInfo* info =
+  const ExternallyConnectableInfo* info =
       ExternallyConnectableInfo::Get(extension.get());
   ASSERT_TRUE(info);
 
@@ -116,7 +106,7 @@ TEST_F(ExternallyConnectableTest, Matches) {
       LoadAndExpectSuccess("externally_connectable_matches.json");
   ASSERT_TRUE(extension.get());
 
-  ExternallyConnectableInfo* info =
+  const ExternallyConnectableInfo* info =
       ExternallyConnectableInfo::Get(extension.get());
   ASSERT_TRUE(info);
 
@@ -156,7 +146,7 @@ TEST_F(ExternallyConnectableTest, MatchesWithTlsChannelId) {
       "externally_connectable_matches_tls_channel_id.json");
   ASSERT_TRUE(extension.get());
 
-  ExternallyConnectableInfo* info =
+  const ExternallyConnectableInfo* info =
       ExternallyConnectableInfo::Get(extension.get());
   ASSERT_TRUE(info);
 
@@ -178,7 +168,7 @@ TEST_F(ExternallyConnectableTest, AllIDs) {
       LoadAndExpectSuccess("externally_connectable_all_ids.json");
   ASSERT_TRUE(extension.get());
 
-  ExternallyConnectableInfo* info =
+  const ExternallyConnectableInfo* info =
       ExternallyConnectableInfo::Get(extension.get());
   ASSERT_TRUE(info);
 
@@ -193,28 +183,31 @@ TEST_F(ExternallyConnectableTest, AllIDs) {
 
 TEST_F(ExternallyConnectableTest, IdCanConnect) {
   // Not in order to test that ExternallyConnectableInfo sorts it.
-  std::string matches_ids_array[] = {"g", "h", "c", "i", "a", "z", "b"};
-  std::vector<std::string> matches_ids(
-      matches_ids_array, matches_ids_array + std::size(matches_ids_array));
+  const std::vector<ExtensionId> matches_ids = {"g", "h", "c", "i",
+                                                "a", "z", "b"};
 
-  std::string nomatches_ids_array[] = {"2", "3", "1"};
+  const std::vector<ExtensionId> nomatches_ids = {"2", "3", "1"};
 
   // all_ids = false.
   {
     ExternallyConnectableInfo info(URLPatternSet(), matches_ids, false, false);
-    for (size_t i = 0; i < matches_ids.size(); ++i)
-      EXPECT_TRUE(info.IdCanConnect(matches_ids[i]));
-    for (size_t i = 0; i < std::size(nomatches_ids_array); ++i)
-      EXPECT_FALSE(info.IdCanConnect(nomatches_ids_array[i]));
+    for (const auto& entry : matches_ids) {
+      EXPECT_TRUE(info.IdCanConnect(entry));
+    }
+    for (const auto& entry : nomatches_ids) {
+      EXPECT_FALSE(info.IdCanConnect(entry));
+    }
   }
 
   // all_ids = true.
   {
     ExternallyConnectableInfo info(URLPatternSet(), matches_ids, true, false);
-    for (size_t i = 0; i < matches_ids.size(); ++i)
-      EXPECT_TRUE(info.IdCanConnect(matches_ids[i]));
-    for (size_t i = 0; i < std::size(nomatches_ids_array); ++i)
-      EXPECT_TRUE(info.IdCanConnect(nomatches_ids_array[i]));
+    for (const auto& entry : matches_ids) {
+      EXPECT_TRUE(info.IdCanConnect(entry));
+    }
+    for (const auto& entry : nomatches_ids) {
+      EXPECT_TRUE(info.IdCanConnect(entry));
+    }
   }
 }
 
@@ -232,13 +225,15 @@ TEST_F(ExternallyConnectableTest, ErrorBadID) {
 TEST_F(ExternallyConnectableTest, ErrorBadMatches) {
   LoadAndExpectError("externally_connectable_error_bad_matches.json",
                      ErrorUtils::FormatErrorMessage(
-                         errors::kErrorInvalidMatchPattern, "www.yahoo.com"));
+                         errors::kErrorInvalidMatchPattern, "www.yahoo.com",
+                         "Missing scheme separator."));
 }
 
 TEST_F(ExternallyConnectableTest, AllURLs) {
   scoped_refptr<Extension> extension =
       LoadAndExpectSuccess("externally_connectable_all_urls.json");
-  ExternallyConnectableInfo* info = GetExternallyConnectableInfo(extension);
+  const ExternallyConnectableInfo* info =
+      ExternallyConnectableInfo::Get(extension.get());
   EXPECT_TRUE(info->matches.MatchesAllURLs());
 
   // Sanity check with a pattern and a few URLs.
@@ -251,7 +246,8 @@ TEST_F(ExternallyConnectableTest, AllURLs) {
 TEST_F(ExternallyConnectableTest, WildcardHost) {
   scoped_refptr<Extension> extension =
       LoadAndExpectSuccess("externally_connectable_wildcard_host.json");
-  ExternallyConnectableInfo* info = GetExternallyConnectableInfo(extension);
+  const ExternallyConnectableInfo* info =
+      ExternallyConnectableInfo::Get(extension.get());
   EXPECT_TRUE(info->matches.ContainsPattern(
       URLPattern(URLPattern::SCHEME_ALL, "http://*/*")));
   EXPECT_TRUE(info->matches.MatchesURL(GURL("http://example.com")));
@@ -261,7 +257,8 @@ TEST_F(ExternallyConnectableTest, WildcardHost) {
 TEST_F(ExternallyConnectableTest, TLD) {
   scoped_refptr<Extension> extension =
       LoadAndExpectSuccess("externally_connectable_tld.json");
-  ExternallyConnectableInfo* info = GetExternallyConnectableInfo(extension);
+  const ExternallyConnectableInfo* info =
+      ExternallyConnectableInfo::Get(extension.get());
   EXPECT_TRUE(info->matches.ContainsPattern(
       URLPattern(URLPattern::SCHEME_ALL, "http://*.co.uk/*")));
   EXPECT_FALSE(info->matches.MatchesURL(GURL("http://example.com")));
@@ -269,13 +266,26 @@ TEST_F(ExternallyConnectableTest, TLD) {
 }
 
 TEST_F(ExternallyConnectableTest, WarningNothingSpecified) {
+  LoadAndExpectWarning("externally_connectable_empty_ids.json",
+                       errors::kErrorNothingSpecified);
+  LoadAndExpectWarning("externally_connectable_empty_matches.json",
+                       errors::kErrorNothingSpecified);
   LoadAndExpectWarning("externally_connectable_nothing_specified.json",
                        errors::kErrorNothingSpecified);
 }
 
+TEST_F(ExternallyConnectableTest, WarningUnusedAcceptsTlsChannelId) {
+  std::vector<std::string> expected_warnings;
+  expected_warnings.emplace_back(errors::kErrorNothingSpecified);
+  expected_warnings.emplace_back(errors::kErrorUnusedAcceptsTlsChannelId);
+  LoadAndExpectWarnings(
+      "externally_connectable_accepts_tls_channel_id_without_matches.json",
+      expected_warnings);
+}
+
 // Tests that the deprecated externally_connectable.all_urls permission doesn't
 // trigger a warning for an extension that requests it.
-// TODO(https://crbug.com/1363485): Remove this test when we remove the
+// TODO(crbug.com/40864987): Remove this test when we remove the
 // externally_connectable.all_urls permission.
 TEST_F(ExternallyConnectableTest, DeprecatedAllUrlsPermission) {
   scoped_refptr<const Extension> extension =

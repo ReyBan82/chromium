@@ -4,6 +4,7 @@
 
 #include "chromeos/components/onc/onc_parsed_certificates.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,7 +17,6 @@
 #include "chromeos/components/onc/onc_utils.h"
 #include "components/onc/onc_constants.h"
 #include "net/cert/x509_certificate.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace chromeos::onc {
 
@@ -26,10 +26,10 @@ enum class CertificateType { kServer, kAuthority, kClient };
 
 // Parses the "Scope" of a policy-provided certificate.
 // If a Scope element is not present, returns CertificateScope::Default().
-// If a Scope element is present but malformed, returns an empty absl::optional.
-absl::optional<CertificateScope> ParseCertScope(
-    const base::Value::Dict& onc_certificate) {
-  const base::Value::Dict* scope_dict =
+// If a Scope element is present but malformed, returns an empty std::optional.
+std::optional<CertificateScope> ParseCertScope(
+    const base::DictValue& onc_certificate) {
+  const base::DictValue* scope_dict =
       onc_certificate.FindDict(::onc::certificate::kScope);
   if (!scope_dict)
     return CertificateScope::Default();
@@ -39,9 +39,9 @@ absl::optional<CertificateScope> ParseCertScope(
 
 // Returns true if the certificate described by |onc_certificate| requests web
 // trust.
-bool HasWebTrustFlag(const base::Value::Dict& onc_certificate) {
+bool HasWebTrustFlag(const base::DictValue& onc_certificate) {
   bool web_trust_flag = false;
-  const base::Value::List* trust_list =
+  const base::ListValue* trust_list =
       onc_certificate.FindList(::onc::certificate::kTrustBits);
   if (!trust_list)
     return false;
@@ -65,9 +65,8 @@ bool HasWebTrustFlag(const base::Value::Dict& onc_certificate) {
 }
 
 // Converts the ONC string certificate type into the CertificateType enum.
-// Returns |absl::nullopt| if the certificate type was not understood.
-absl::optional<CertificateType> GetCertTypeAsEnum(
-    const std::string& cert_type) {
+// Returns |std::nullopt| if the certificate type was not understood.
+std::optional<CertificateType> GetCertTypeAsEnum(const std::string& cert_type) {
   if (cert_type == ::onc::certificate::kServer) {
     return CertificateType::kServer;
   }
@@ -80,7 +79,7 @@ absl::optional<CertificateType> GetCertTypeAsEnum(
     return CertificateType::kClient;
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace
@@ -172,10 +171,10 @@ bool OncParsedCertificates::ClientCertificate::operator!=(
 }
 
 OncParsedCertificates::OncParsedCertificates()
-    : OncParsedCertificates(base::Value::List()) {}
+    : OncParsedCertificates(base::ListValue()) {}
 
 OncParsedCertificates::OncParsedCertificates(
-    const base::Value::List& onc_certificates) {
+    const base::ListValue& onc_certificates) {
   for (size_t i = 0; i < onc_certificates.size(); ++i) {
     const base::Value& onc_certificate = onc_certificates[i];
     DCHECK(onc_certificate.is_dict());
@@ -194,7 +193,7 @@ OncParsedCertificates::OncParsedCertificates(
 OncParsedCertificates::~OncParsedCertificates() = default;
 
 bool OncParsedCertificates::ParseCertificate(
-    const base::Value::Dict& onc_certificate) {
+    const base::DictValue& onc_certificate) {
   const std::string* guid =
       onc_certificate.FindString(::onc::certificate::kGUID);
   DCHECK(guid);
@@ -202,7 +201,7 @@ bool OncParsedCertificates::ParseCertificate(
   const std::string* type_key =
       onc_certificate.FindString(::onc::certificate::kType);
   DCHECK(type_key);
-  absl::optional<CertificateType> type_opt = GetCertTypeAsEnum(*type_key);
+  std::optional<CertificateType> type_opt = GetCertTypeAsEnum(*type_key);
   if (!type_opt) {
     return false;
   }
@@ -219,14 +218,13 @@ bool OncParsedCertificates::ParseCertificate(
       return ParseClientCertificate(*guid, onc_certificate);
   }
   NOTREACHED();
-  return false;
 }
 
 bool OncParsedCertificates::ParseServerOrCaCertificate(
     ServerOrAuthorityCertificate::Type type,
     const std::string& guid,
-    const base::Value::Dict& onc_certificate) {
-  absl::optional<CertificateScope> scope = ParseCertScope(onc_certificate);
+    const base::DictValue& onc_certificate) {
+  std::optional<CertificateScope> scope = ParseCertScope(onc_certificate);
   if (!scope) {
     LOG(ERROR) << "Certificate has malformed 'Scope'";
     return false;
@@ -249,7 +247,7 @@ bool OncParsedCertificates::ParseServerOrCaCertificate(
 
   scoped_refptr<net::X509Certificate> certificate =
       net::X509Certificate::CreateFromBytes(
-          base::as_bytes(base::make_span(certificate_der_data)));
+          base::as_byte_span(certificate_der_data));
   if (!certificate) {
     LOG(ERROR) << "Unable to create certificate from PEM encoding.";
     return false;
@@ -262,7 +260,7 @@ bool OncParsedCertificates::ParseServerOrCaCertificate(
 
 bool OncParsedCertificates::ParseClientCertificate(
     const std::string& guid,
-    const base::Value::Dict& onc_certificate) {
+    const base::DictValue& onc_certificate) {
   const std::string* base64_pkcs12_data_key =
       onc_certificate.FindString(::onc::certificate::kPKCS12);
   if (!base64_pkcs12_data_key || base64_pkcs12_data_key->empty()) {
@@ -275,7 +273,7 @@ bool OncParsedCertificates::ParseClientCertificate(
   std::string pkcs12_data;
   if (!base::Base64Decode(base64_pkcs12_data, &pkcs12_data)) {
     LOG(ERROR) << "Unable to base64 decode PKCS#12 data: \""
-               << base64_pkcs12_data_key << "\".";
+               << *base64_pkcs12_data_key << "\".";
     return false;
   }
 

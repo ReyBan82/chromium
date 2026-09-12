@@ -8,7 +8,7 @@
 #include <list>
 #include <memory>
 #include <string>
-#include <unordered_map>
+#include <string_view>
 
 #include "base/compiler_specific.h"
 #include "base/functional/callback.h"
@@ -18,6 +18,7 @@
 #include "components/prefs/pref_notifier.h"
 #include "components/prefs/pref_observer.h"
 #include "components/prefs/prefs_export.h"
+#include "third_party/abseil-cpp/absl/container/node_hash_map.h"
 
 class PrefService;
 
@@ -34,8 +35,8 @@ class COMPONENTS_PREFS_EXPORT PrefNotifierImpl : public PrefNotifier {
 
   // If the pref at the given path changes, we call the observer's
   // OnPreferenceChanged method.
-  void AddPrefObserver(const std::string& path, PrefObserver* observer);
-  void RemovePrefObserver(const std::string& path, PrefObserver* observer);
+  void AddPrefObserver(std::string_view path, PrefObserver* observer);
+  void RemovePrefObserver(std::string_view path, PrefObserver* observer);
 
   // These observers are called for any pref changes.
   //
@@ -50,9 +51,10 @@ class COMPONENTS_PREFS_EXPORT PrefNotifierImpl : public PrefNotifier {
   void AddInitObserver(base::OnceCallback<void(bool)> observer);
 
   void SetPrefService(PrefService* pref_service);
+  void OnServiceDestroyed();
 
   // PrefNotifier overrides.
-  void OnPreferenceChanged(const std::string& pref_name) override;
+  void OnPreferenceChanged(std::string_view pref_name) override;
 
  protected:
   // PrefNotifier overrides.
@@ -61,18 +63,20 @@ class COMPONENTS_PREFS_EXPORT PrefNotifierImpl : public PrefNotifier {
   // A map from pref names to a list of observers. Observers get fired in the
   // order they are added. These should only be accessed externally for unit
   // testing.
-  typedef base::ObserverList<PrefObserver>::Unchecked PrefObserverList;
-  typedef std::unordered_map<std::string, std::unique_ptr<PrefObserverList>>
-      PrefObserverMap;
-
-  typedef std::list<base::OnceCallback<void(bool)>> PrefInitObserverList;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  using PrefObserverList = base::ObserverList<
+      PrefObserver,
+      true,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>;
+  using PrefObserverMap = absl::node_hash_map<std::string, PrefObserverList>;
+  using PrefInitObserverList = std::list<base::OnceCallback<void(bool)>>;
 
   const PrefObserverMap* pref_observers() const { return &pref_observers_; }
 
  private:
   // For the given pref_name, fire any observer of the pref. Virtual so it can
   // be mocked for unit testing.
-  virtual void FireObservers(const std::string& path);
+  virtual void FireObservers(std::string_view path);
 
   // Weak reference; the notifier is owned by the PrefService.
   raw_ptr<PrefService> pref_service_;

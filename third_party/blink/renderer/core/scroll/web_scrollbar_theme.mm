@@ -35,14 +35,12 @@
 namespace blink {
 
 void WebScrollbarTheme::UpdateScrollbarsWithNSDefaults(
-    absl::optional<float> initial_button_delay,
-    absl::optional<float> autoscroll_button_delay,
-    ScrollerStyle preferred_scroller_style,
+    std::optional<float> initial_button_delay,
+    std::optional<float> autoscroll_button_delay,
     bool redraw,
     bool jump_on_track_click) {
   ScrollbarThemeMac::UpdateScrollbarsWithNSDefaults(
-      initial_button_delay, autoscroll_button_delay,
-      preferred_scroller_style == kScrollerStyleOverlay, redraw,
+      initial_button_delay, autoscroll_button_delay, redraw,
       jump_on_track_click);
 }
 

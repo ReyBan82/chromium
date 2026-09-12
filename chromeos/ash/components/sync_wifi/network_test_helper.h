@@ -5,6 +5,7 @@
 #ifndef CHROMEOS_ASH_COMPONENTS_SYNC_WIFI_NETWORK_TEST_HELPER_H_
 #define CHROMEOS_ASH_COMPONENTS_SYNC_WIFI_NETWORK_TEST_HELPER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "chromeos/ash/components/network/managed_network_configuration_handler.h"
 #include "chromeos/ash/components/network/network_configuration_handler.h"
 #include "chromeos/ash/components/network/network_connection_handler.h"
@@ -17,13 +18,17 @@
 #include "chromeos/ash/services/network_config/public/cpp/cros_network_config_test_helper.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
 
+namespace ash::test {
+class UserSessionTestEnvironment;
+}  // namespace ash::test
+
 namespace user_manager {
-class ScopedUserManager;
 class User;
 }  // namespace user_manager
 
 namespace ash {
 
+class BrowserContextHelper;
 class NetworkHandlerTestHelper;
 
 namespace sync_wifi {
@@ -39,13 +44,14 @@ class NetworkTestHelper : public network_config::CrosNetworkConfigTestHelper {
   // Returns the |guid| of the newly configured network.
   std::string ConfigureWiFiNetwork(const std::string& ssid,
                                    bool is_secured,
-                                   bool in_profile,
+                                   const user_manager::User* user,
                                    bool has_connected,
                                    bool owned_by_user = true,
                                    bool configured_by_sync = false,
                                    bool is_from_policy = false,
                                    bool is_hidden = false,
-                                   bool auto_connect = true);
+                                   bool auto_connect = true,
+                                   bool has_proxy = false);
 
   NetworkStateTestHelper* network_state_test_helper();
 
@@ -53,22 +59,31 @@ class NetworkTestHelper : public network_config::CrosNetworkConfigTestHelper {
     return &user_prefs_;
   }
 
+  const user_manager::User* primary_user() const { return primary_user_.get(); }
+
  private:
   void LoginUser(const user_manager::User* user);
 
+  // 1. Independent dependencies (must be destroyed last, so declared first)
+  sync_preferences::TestingPrefServiceSyncable user_prefs_;
+  TestingPrefServiceSimple local_state_;
+
+  // 2. Objects depending on prefs
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
   std::unique_ptr<NetworkProfileHandler> network_profile_handler_;
   std::unique_ptr<NetworkConfigurationHandler> network_configuration_handler_;
+  std::unique_ptr<UIProxyConfigService> ui_proxy_config_service_;
   std::unique_ptr<ManagedNetworkConfigurationHandler>
       managed_network_configuration_handler_;
-  std::unique_ptr<UIProxyConfigService> ui_proxy_config_service_;
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
+
+  std::unique_ptr<BrowserContextHelper> browser_context_helper_;
   std::unique_ptr<NetworkHandlerTestHelper> network_handler_test_helper_;
-  sync_preferences::TestingPrefServiceSyncable user_prefs_;
 
-  const user_manager::User* primary_user_;
-  const user_manager::User* secondary_user_;
-
-  TestingPrefServiceSimple local_state_;
+  // 3. Pointers to objects owned by user_session_test_environment_ (must be
+  // destroyed before user_session_test_environment_)
+  raw_ptr<const user_manager::User> primary_user_;
+  raw_ptr<const user_manager::User> secondary_user_;
 };
 
 }  // namespace sync_wifi

@@ -8,12 +8,17 @@
 #include <memory>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/timer/timer.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/touch_selection_controller_client_manager.h"
 #include "ui/touch_selection/touch_selection_controller.h"
 #include "ui/touch_selection/touch_selection_menu_runner.h"
+
+namespace ui {
+class TouchSelectionMagnifierAura;
+}
 
 namespace content {
 struct ContextMenuParams;
@@ -55,13 +60,18 @@ class CONTENT_EXPORT TouchSelectionControllerClientAura
   // better not to send context menu request from the renderer in this case and
   // instead decide in the client about showing the quick menu in response to
   // selection events. (http://crbug.com/548245)
-  bool HandleContextMenu(const ContextMenuParams& params);
+  virtual bool HandleContextMenu(const ContextMenuParams& params,
+                                 bool can_paste);
 
-  void UpdateClientSelectionBounds(const gfx::SelectionBound& start,
-                                   const gfx::SelectionBound& end);
+  virtual void UpdateClientSelectionBounds(const gfx::SelectionBound& start,
+                                           const gfx::SelectionBound& end);
 
   // TouchSelectionControllerClientManager.
   void DidStopFlinging() override;
+  void OnSwipeToMoveCursorBegin() override;
+  void OnSwipeToMoveCursorEnd() override;
+  void OnClientHitTestRegionUpdated(
+      ui::TouchSelectionControllerClient* client) override;
   void UpdateClientSelectionBounds(
       const gfx::SelectionBound& start,
       const gfx::SelectionBound& end,
@@ -79,12 +89,11 @@ class CONTENT_EXPORT TouchSelectionControllerClientAura
   class EnvEventObserver;
   class EnvPreTargetHandler;
 
-  bool IsQuickMenuAvailable() const;
+  bool IsQuickMenuAvailable(bool can_paste) const;
   void ShowQuickMenu();
   void UpdateQuickMenu();
-
-  void ShowMagnifier(const gfx::PointF& position);
-  void CloseMagnifier();
+  void ShowMagnifier();
+  void HideMagnifier();
 
   // ui::TouchSelectionControllerClient:
   bool SupportsAnimation() const override;
@@ -100,10 +109,10 @@ class CONTENT_EXPORT TouchSelectionControllerClientAura
   void DidScroll() override;
 
   // ui::TouchSelectionMenuClient:
-  bool IsCommandIdEnabled(int command_id) const override;
+  bool IsCommandIdEnabled(int command_id, bool can_paste) const override;
   void ExecuteCommand(int command_id, int event_flags) override;
   void RunContextMenu() override;
-  bool ShouldShowQuickMenu() override;
+  bool ShouldShowQuickMenu(bool can_paste) override;
   std::u16string GetSelectedText() override;
 
   // Not owned, non-null for the lifetime of this object.
@@ -149,6 +158,13 @@ class CONTENT_EXPORT TouchSelectionControllerClientAura
 
   // An event observer that deactivates touch selection on certain input events.
   std::unique_ptr<EnvEventObserver> env_event_observer_;
+
+  // Magnifier which is shown when touch dragging to adjust the selection.
+  std::unique_ptr<ui::TouchSelectionMagnifierAura> touch_selection_magnifier_;
+
+  // Factory used for cancelling in-flight OpenMenu requests.
+  base::WeakPtrFactory<TouchSelectionControllerClientAura>
+      menu_request_weak_ptr_factory_{this};
 };
 
 }  // namespace content

@@ -9,12 +9,12 @@
 #include "third_party/blink/renderer/platform/wtf/hash_traits.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
 
-namespace WTF {
+namespace blink {
 
 template <>
 struct HashTraits<SkImageInfo> : GenericHashTraits<SkImageInfo> {
-  static unsigned GetHash(const SkImageInfo& key) {
-    unsigned result = HashInts(key.width(), key.height());
+  static uint32_t GetHash(const SkImageInfo& key) {
+    uint32_t result = HashInts(key.width(), key.height());
     result = HashInts(result, key.colorType());
     result = HashInts(result, key.alphaType());
     if (auto* cs = key.colorSpace())
@@ -25,7 +25,7 @@ struct HashTraits<SkImageInfo> : GenericHashTraits<SkImageInfo> {
   static const bool kEmptyValueIsZero = true;
   static SkImageInfo EmptyValue() { return SkImageInfo::MakeUnknown(); }
   static void ConstructDeletedValue(SkImageInfo& slot) {
-    new (NotNullTag::kNotNull, &slot)
+    new (base::NotNullTag::kNotNull, &slot)
         SkImageInfo(SkImageInfo::MakeUnknown(-1, -1));
   }
   static bool IsDeletedValue(const SkImageInfo& value) {
@@ -33,6 +33,6 @@ struct HashTraits<SkImageInfo> : GenericHashTraits<SkImageInfo> {
   }
 };
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_SKIA_SK_IMAGE_INFO_HASH_H_

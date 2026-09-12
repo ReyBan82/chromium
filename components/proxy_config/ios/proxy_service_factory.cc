@@ -29,7 +29,8 @@ ProxyServiceFactory::CreatePrefProxyConfigTrackerOfProfile(
     PrefService* browser_state_prefs,
     PrefService* local_state_prefs) {
   return std::make_unique<PrefProxyConfigTrackerImpl>(
-      browser_state_prefs, web::GetIOThreadTaskRunner({}));
+      browser_state_prefs, web::GetIOThreadTaskRunner({}),
+      /*policy_service=*/nullptr);
 }
 
 // static
@@ -37,7 +38,8 @@ std::unique_ptr<PrefProxyConfigTracker>
 ProxyServiceFactory::CreatePrefProxyConfigTrackerOfLocalState(
     PrefService* local_state_prefs) {
   return std::make_unique<PrefProxyConfigTrackerImpl>(
-      local_state_prefs, web::GetIOThreadTaskRunner({}));
+      local_state_prefs, web::GetIOThreadTaskRunner({}),
+      /*policy_service=*/nullptr);
 }
 
 // static
@@ -51,6 +53,8 @@ ProxyServiceFactory::CreateProxyResolutionService(
   DCHECK_CURRENTLY_ON(web::WebThread::IO);
   std::unique_ptr<net::ProxyResolutionService> proxy_resolution_service(
       net::ConfiguredProxyResolutionService::CreateUsingSystemProxyResolver(
-          std::move(proxy_config_service), net_log, quick_check_enabled));
+          std::move(proxy_config_service),
+          /*host_resolver_for_override_rules=*/nullptr, net_log,
+          quick_check_enabled));
   return proxy_resolution_service;
 }

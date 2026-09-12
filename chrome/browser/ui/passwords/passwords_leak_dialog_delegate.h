@@ -9,8 +9,6 @@
 
 #include "components/password_manager/core/browser/ui/password_check_referrer.h"
 
-class GURL;
-
 // An interface for leak detection dialog implemented by
 // ManagePasswordsUIController. Allows to retrieve the current state of the tab
 // and notify about user actions.
@@ -22,6 +20,15 @@ class PasswordsLeakDialogDelegate {
   // Open a new tab pointing to Password Checkup.
   virtual void NavigateToPasswordCheckup(
       password_manager::PasswordCheckReferrer referrer) = 0;
+
+  // Called if the password change flow finishes successfully. It ensures the
+  // correct state after the flow.
+  virtual void OnPasswordChangeFinishedSuccessfully() = 0;
+
+  // Opens change password bubble and passes `username` and `new_password` that
+  // should be displayed on it.
+  virtual void ShowChangePasswordBubble(const std::u16string& username,
+                                        const std::u16string& new_password) = 0;
 
  protected:
   virtual ~PasswordsLeakDialogDelegate() = default;

@@ -8,6 +8,7 @@
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "chrome/browser/android/metrics/android_session_durations_service.h"
+#include "chrome/browser/metrics/profile_metrics_service_factory.h"
 #include "chrome/browser/profiles/incognito_helpers.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
@@ -75,24 +76,28 @@ AndroidSessionDurationsServiceFactory::AndroidSessionDurationsServiceFactory()
               .Build()) {
   DependsOn(SyncServiceFactory::GetInstance());
   DependsOn(IdentityManagerFactory::GetInstance());
+  DependsOn(ProfileMetricsServiceFactory::GetInstance());
 }
 
 AndroidSessionDurationsServiceFactory::
     ~AndroidSessionDurationsServiceFactory() = default;
 
-KeyedService* AndroidSessionDurationsServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+AndroidSessionDurationsServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   Profile* profile = Profile::FromBrowserContext(context);
   if (profile->IsOffTheRecord() && !profile->IsIncognitoProfile())
     return nullptr;
 
-  auto* service = new AndroidSessionDurationsService();
+  std::unique_ptr<AndroidSessionDurationsService> service =
+      std::make_unique<AndroidSessionDurationsService>();
   if (profile->IsIncognitoProfile()) {
     service->InitializeForIncognitoProfile();
   } else {
     service->InitializeForRegularProfile(
-        SyncServiceFactory::GetForProfile(profile),
-        IdentityManagerFactory::GetForProfile(profile));
+        profile->GetPrefs(), SyncServiceFactory::GetForProfile(profile),
+        IdentityManagerFactory::GetForProfile(profile),
+        ProfileMetricsServiceFactory::GetForProfile(profile));
   }
   return service;
 }

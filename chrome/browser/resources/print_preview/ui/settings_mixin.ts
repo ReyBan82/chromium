@@ -1,65 +1,93 @@
-// Copyright 2017 The Chromium Authors
+// Copyright 2025 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-import {dedupingMixin, PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
-import {getInstance, Setting, Settings} from '../data/model.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+
+import type {Settings} from '../data/model.js';
+import {getInstance} from '../data/model.js';
+import type {PrintPreviewModelElement} from '../data/model.js';
+import type {ObserverChangeCallback} from '../data/observable.js';
 
 type Constructor<T> = new (...args: any[]) => T;
 
-export const SettingsMixin = dedupingMixin(
-    <T extends Constructor<PolymerElement>>(superClass: T): T&
-    Constructor<SettingsMixinInterface> => {
-      class SettingsMixin extends superClass implements SettingsMixinInterface {
-        static get properties() {
-          return {
-            settings: Object,
-          };
-        }
+export const SettingsMixin = <T extends Constructor<CrLitElement>>(
+    superClass: T): T&Constructor<SettingsMixinInterface> => {
+  class SettingsMixin extends superClass implements SettingsMixinInterface {
+    private observers_: number[] = [];
+    private model_: PrintPreviewModelElement|null = null;
 
-        settings: Settings;
+    override connectedCallback() {
+      super.connectedCallback();
+      // Cache this reference, so that the same one can be used in
+      // disconnectedCallback(), othehrwise if `model_` has already been removed
+      // from the DOM, getInstance() will throw an error.
+      this.model_ = getInstance();
+    }
 
-        getSetting(settingName: string): Setting {
-          return getInstance().getSetting(settingName);
-        }
+    override disconnectedCallback() {
+      super.disconnectedCallback();
+      assert(this.model_);
 
-        getSettingValue(settingName: string): any {
-          return getInstance().getSettingValue(settingName);
-        }
-
-        setSetting(settingName: string, value: any, noSticky?: boolean) {
-          getInstance().setSetting(settingName, value, noSticky);
-        }
-
-        setSettingSplice(
-            settingName: string, start: number, end: number, newValue: any,
-            noSticky?: boolean) {
-          getInstance().setSettingSplice(
-              settingName, start, end, newValue, noSticky);
-        }
-
-        setSettingValid(settingName: string, valid: boolean) {
-          getInstance().setSettingValid(settingName, valid);
+      if (this.model_.isConnected) {
+        // Only remove observers if the PrintPreviewModelElement original
+        // singleton instance is still connected to the DOM. Otherwise all
+        // observers have already been remomved in PrintPreviewModelElement's
+        // disconnectedCallback.
+        for (const id of this.observers_) {
+          const removed = this.model_.observable.removeObserver(id);
+          assert(removed);
         }
       }
 
-      return SettingsMixin;
-    });
+      this.model_ = null;
+      this.observers_ = [];
+    }
+
+    addSettingObserver<T>(path: string, callback: ObserverChangeCallback<T>) {
+      const id = getInstance().observable.addObserver(path, callback);
+      this.observers_.push(id);
+    }
+
+    getSetting<K extends keyof Settings>(settingName: K): Settings[K] {
+      return getInstance().getSetting(settingName);
+    }
+
+    getSettingValue<K extends keyof Settings>(settingName: K):
+        Settings[K]['value'] {
+      return getInstance().getSettingValue(settingName);
+    }
+
+    setSetting<K extends keyof Settings>(
+        settingName: K, value: Settings[K]['value'], noSticky?: boolean) {
+      getInstance().setSetting(settingName, value, noSticky);
+    }
+
+    setSettingValid(settingName: keyof Settings, valid: boolean) {
+      getInstance().setSettingValid(settingName, valid);
+    }
+  }
+
+  return SettingsMixin;
+};
 
 export interface SettingsMixinInterface {
-  settings: Settings;
+  addSettingObserver<T>(path: string, callback: ObserverChangeCallback<T>):
+      void;
 
   /**
    * @param settingName Name of the setting to get.
    * @return The setting object.
    */
-  getSetting(settingName: string): Setting;
+  getSetting<K extends keyof Settings>(settingName: K): Settings[K];
 
   /**
    * @param settingName Name of the setting to get the value for.
    * @return The value of the setting, accounting for availability.
    */
-  getSettingValue(settingName: string): any;
+  getSettingValue<K extends keyof Settings>(settingName: K):
+      Settings[K]['value'];
 
   /**
    * Sets settings.settingName.value to |value|, unless updating the setting is
@@ -70,16 +98,8 @@ export interface SettingsMixinInterface {
    * @param value The value to set the setting to.
    * @param noSticky Whether to avoid stickying the setting. Defaults to false.
    */
-  setSetting(settingName: string, value: any, noSticky?: boolean): void;
-
-  /**
-   * @param settingName Name of the setting to set
-   * @param newValue The value to add (if any).
-   * @param noSticky Whether to avoid stickying the setting. Defaults to false.
-   */
-  setSettingSplice(
-      settingName: string, start: number, end: number, newValue: any,
-      noSticky?: boolean): void;
+  setSetting<K extends keyof Settings>(
+      settingName: K, value: Settings[K]['value'], noSticky?: boolean): void;
 
   /**
    * Sets the validity of |settingName| to |valid|. If the validity is changed,
@@ -87,5 +107,5 @@ export interface SettingsMixinInterface {
    * @param settingName Name of the setting to set
    * @param valid Whether the setting value is currently valid.
    */
-  setSettingValid(settingName: string, valid: boolean): void;
+  setSettingValid(settingName: keyof Settings, valid: boolean): void;
 }

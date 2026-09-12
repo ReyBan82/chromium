@@ -4,15 +4,16 @@
 
 #include "chromecast/renderer/settings_ui_bindings.h"
 
+#include <array>
 #include <tuple>
-#include <vector>
+#include <utility>
 
 #include "base/check.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "content/public/renderer/render_frame.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
-#include "third_party/blink/public/web/blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 
 namespace chromecast {
@@ -44,15 +45,15 @@ void SettingsUiBindings::HandleSideSwipe(
     return;
   }
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
-  v8::MicrotasksScope microtasks_scope(
-      isolate, v8::MicrotasksScope::kDoNotRunMicrotasks);
-  v8::HandleScope handle_scope(isolate);
   blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
+  v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
+  v8::MicrotasksScope microtasks_scope(
+      context, v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope context_scope(context);
   v8::Local<v8::Function> handler =
-      v8::Local<v8::Function>::New(isolate, std::move(side_swipe_handler_));
+      v8::Local<v8::Function>::New(isolate, side_swipe_handler_);
 
   v8::Local<v8::Number> touch_event =
       v8::Integer::New(isolate, static_cast<int>(event));
@@ -61,16 +62,12 @@ void SettingsUiBindings::HandleSideSwipe(
   v8::Local<v8::Number> touch_x = v8::Integer::New(isolate, touch_location.x());
   v8::Local<v8::Number> touch_y = v8::Integer::New(isolate, touch_location.y());
 
-  std::vector<v8::Local<v8::Value>> args{touch_event, touch_origin, touch_x,
-                                         touch_y};
+  auto args = std::to_array<v8::Local<v8::Value>>(
+      {touch_event, touch_origin, touch_x, touch_y});
 
-  v8::MaybeLocal<v8::Value> maybe_result =
+  // Running |handler| may delete |this|; do not touch any members afterwards.
+  std::ignore =
       handler->Call(context, context->Global(), args.size(), args.data());
-
-  side_swipe_handler_ = v8::UniquePersistent<v8::Function>(isolate, handler);
-
-  v8::Local<v8::Value> result;
-  std::ignore = maybe_result.ToLocal(&result);
 }
 
 void SettingsUiBindings::SendPlatformInfo(
@@ -80,30 +77,26 @@ void SettingsUiBindings::SendPlatformInfo(
     return;
   }
 
-  v8::Isolate* isolate = blink::MainThreadIsolate();
-  v8::MicrotasksScope microtasks_scope(
-      isolate, v8::MicrotasksScope::kDoNotRunMicrotasks);
-  v8::HandleScope handle_scope(isolate);
   blink::WebLocalFrame* web_frame = render_frame()->GetWebFrame();
+  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
+  v8::HandleScope handle_scope(isolate);
   v8::Local<v8::Context> context = web_frame->MainWorldScriptContext();
+  v8::MicrotasksScope microtasks_scope(
+      context, v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::Context::Scope context_scope(context);
   v8::Local<v8::Function> handler =
-      v8::Local<v8::Function>::New(isolate, std::move(platform_info_handler_));
+      v8::Local<v8::Function>::New(isolate, platform_info_handler_);
 
   v8::Local<v8::String> platform_info =
       v8::String::NewFromUtf8(isolate, platform_info_json.data(),
                               v8::NewStringType::kInternalized)
           .ToLocalChecked();
 
-  std::vector<v8::Local<v8::Value>> args{platform_info};
+  auto args = std::to_array<v8::Local<v8::Value>>({platform_info});
 
-  v8::MaybeLocal<v8::Value> maybe_result =
+  // Running |handler| may delete |this|; do not touch any members afterwards.
+  std::ignore =
       handler->Call(context, context->Global(), args.size(), args.data());
-
-  platform_info_handler_ = v8::UniquePersistent<v8::Function>(isolate, handler);
-
-  v8::Local<v8::Value> result;
-  std::ignore = maybe_result.ToLocal(&result);
 }
 
 void SettingsUiBindings::Install(v8::Local<v8::Object> cast_platform,
@@ -123,19 +116,24 @@ void SettingsUiBindings::Install(v8::Local<v8::Object> cast_platform,
 
 void SettingsUiBindings::SetSideSwipeHandler(
     v8::Local<v8::Function> side_swipe_handler) {
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  v8::Isolate* isolate =
+      render_frame()->GetWebFrame()->GetAgentGroupScheduler()->Isolate();
   side_swipe_handler_ =
       v8::UniquePersistent<v8::Function>(isolate, side_swipe_handler);
 }
 
 void SettingsUiBindings::SetPlatformInfoHandler(
     v8::Local<v8::Function> platform_info_handler) {
-  v8::Isolate* isolate = blink::MainThreadIsolate();
+  v8::Isolate* isolate =
+      render_frame()->GetWebFrame()->GetAgentGroupScheduler()->Isolate();
   platform_info_handler_ =
       v8::UniquePersistent<v8::Function>(isolate, platform_info_handler);
   if (!pending_platform_info_json_.empty()) {
-    SendPlatformInfo(pending_platform_info_json_);
-    pending_platform_info_json_.clear();
+    std::string pending;
+    std::swap(pending, pending_platform_info_json_);
+    // SendPlatformInfo() runs script and may delete |this|; do not touch any
+    // members afterwards.
+    SendPlatformInfo(pending);
   }
 }
 
@@ -151,7 +149,7 @@ void SettingsUiBindings::ReconnectMojo() {
   if (settings_platform_ptr_.is_bound())
     settings_platform_ptr_.reset();
 
-  render_frame()->GetBrowserInterfaceBroker()->GetInterface(
+  render_frame()->GetBrowserInterfaceBroker().GetInterface(
       settings_platform_ptr_.BindNewPipeAndPassReceiver());
   settings_platform_ptr_.set_disconnect_handler(base::BindOnce(
       &SettingsUiBindings::OnMojoConnectionError, weak_factory_.GetWeakPtr()));

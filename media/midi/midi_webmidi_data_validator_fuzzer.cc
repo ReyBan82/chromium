@@ -5,10 +5,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "base/compiler_specific.h"
 #include "media/midi/message_util.h"
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  std::vector<uint8_t> buffer(data, data + size);
+  std::vector<uint8_t> buffer(data, UNSAFE_TODO(data + size));
 
   if (midi::IsValidWebMIDIData(buffer))
     return 0;

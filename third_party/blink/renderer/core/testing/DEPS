@@ -1,4 +1,6 @@
 include_rules = [
+    "+base/command_line.h",
+    "+base/no_destructor.h",
     "+base/run_loop.h",
     "+base/process/process_handle.h",
     "+cc",
@@ -13,10 +15,14 @@ include_rules = [
 ]
 
 specific_include_rules = {
-    'scoped_fake_plugin_registry\.cc': [
+    'scoped_fake_plugin_registry\\.cc': [
         "+base/files/file_path.h",
     ],
-    'internals\.cc' : [
+    'internals\\.cc' : [
         "+third_party/blink/renderer/core/exported/web_view_impl.h",
+        "+ui/gfx/image/canvas_image_source.h",
+    ],
+    'worker_internals\\.cc' : [
+        "+ui/gfx/image/canvas_image_source.h",
     ],
 }

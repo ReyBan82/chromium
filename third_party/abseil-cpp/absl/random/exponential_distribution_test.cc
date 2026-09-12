@@ -29,8 +29,8 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/base/internal/raw_logging.h"
 #include "absl/base/macros.h"
+#include "absl/log/log.h"
 #include "absl/numeric/internal/representation.h"
 #include "absl/random/internal/chi_square.h"
 #include "absl/random/internal/distribution_test_util.h"
@@ -55,9 +55,9 @@ class ExponentialDistributionTypedTest : public ::testing::Test {};
 // https://bugs.llvm.org/show_bug.cgi?id=49132. Don't bother running these tests
 // with double doubles until compiler support is better.
 using RealTypes =
-    std::conditional<absl::numeric_internal::IsDoubleDouble(),
-                     ::testing::Types<float, double>,
-                     ::testing::Types<float, double, long double>>::type;
+    std::conditional_t<absl::numeric_internal::IsDoubleDouble(),
+                       ::testing::Types<float, double>,
+                       ::testing::Types<float, double, long double>>;
 TYPED_TEST_SUITE(ExponentialDistributionTypedTest, RealTypes);
 
 TYPED_TEST(ExponentialDistributionTypedTest, SerializeTest) {
@@ -114,10 +114,9 @@ TYPED_TEST(ExponentialDistributionTypedTest, SerializeTest) {
       if (sample > sample_max) sample_max = sample;
       if (sample < sample_min) sample_min = sample;
     }
-    if (!std::is_same<TypeParam, long double>::value) {
-      ABSL_INTERNAL_LOG(INFO,
-                        absl::StrFormat("Range {%f}: %f, %f, lambda=%f", lambda,
-                                        sample_min, sample_max, lambda));
+    if (!std::is_same_v<TypeParam, long double>) {
+      LOG(INFO) << "Range {" << lambda << "}: " << sample_min << ", "
+                << sample_max << ", lambda=" << lambda;
     }
 
     std::stringstream ss;
@@ -219,17 +218,16 @@ bool ExponentialDistributionTests::SingleZTest(const double p,
   const bool pass = absl::random_internal::Near("z", z, 0.0, max_err);
 
   if (!pass) {
-    ABSL_INTERNAL_LOG(
-        INFO, absl::StrFormat("p=%f max_err=%f\n"
-                              " lambda=%f\n"
-                              " mean=%f vs. %f\n"
-                              " stddev=%f vs. %f\n"
-                              " skewness=%f vs. %f\n"
-                              " kurtosis=%f vs. %f\n"
-                              " z=%f vs. 0",
-                              p, max_err, lambda(), m.mean, mean(),
-                              std::sqrt(m.variance), stddev(), m.skewness,
-                              skew(), m.kurtosis, kurtosis(), z));
+    // clang-format off
+    LOG(INFO)
+        << "p=" << p << " max_err=" << max_err << "\n"
+           " lambda=" << lambda() << "\n"
+           " mean=" << m.mean << " vs. " << mean() << "\n"
+           " stddev=" << std::sqrt(m.variance) << " vs. " << stddev() << "\n"
+           " skewness=" << m.skewness << " vs. " << skew() << "\n"
+           " kurtosis=" << m.kurtosis << " vs. " << kurtosis() << "\n"
+           " z=" << z << " vs. 0";
+    // clang-format on
   }
   return pass;
 }
@@ -274,16 +272,16 @@ double ExponentialDistributionTests::SingleChiSquaredTest() {
   double p = absl::random_internal::ChiSquarePValue(chi_square, dof);
 
   if (chi_square > threshold) {
-    for (int i = 0; i < cutoffs.size(); i++) {
-      ABSL_INTERNAL_LOG(
-          INFO, absl::StrFormat("%d : (%f) = %d", i, cutoffs[i], counts[i]));
+    for (size_t i = 0; i < cutoffs.size(); i++) {
+      LOG(INFO) << i << " : (" << cutoffs[i] << ") = " << counts[i];
     }
 
-    ABSL_INTERNAL_LOG(INFO,
-                      absl::StrCat("lambda ", lambda(), "\n",     //
-                                   " expected ", expected, "\n",  //
-                                   kChiSquared, " ", chi_square, " (", p, ")\n",
-                                   kChiSquared, " @ 0.98 = ", threshold));
+    // clang-format off
+    LOG(INFO) << "lambda " << lambda() << "\n"
+                 " expected " << expected << "\n"
+              << kChiSquared << " " << chi_square << " (" << p << ")\n"
+              << kChiSquared << " @ 0.98 = " << threshold;
+    // clang-format on
   }
   return p;
 }

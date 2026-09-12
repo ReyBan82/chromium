@@ -3,12 +3,15 @@
 // found in the LICENSE file.
 
 #include "base/command_line.h"
+#include "base/i18n/language_tag.h"
 #include "base/i18n/rtl.h"
+#include "base/i18n/test/scoped_icu_locale.h"
 #include "base/path_service.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/extensions/manifest_tests/chrome_manifest_test.h"
 #include "components/crx_file/id_util.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/extension.h"
@@ -18,6 +21,8 @@
 #include "extensions/common/switches.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/l10n/l10n_util.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -31,12 +36,11 @@ const char kAllowlistID[] = "lmadimbbgapmngbiclpjjngmdickadpl";
 namespace errors = manifest_errors;
 namespace keys = manifest_keys;
 
-class InitValueManifestTest : public ChromeManifestTest {
-};
+using InitValueManifestTest = ChromeManifestTest;
 
 TEST_F(InitValueManifestTest, InitFromValueInvalid) {
   SimpleFeature::ScopedThreadUnsafeAllowlistForTest allowlist(kAllowlistID);
-  Testcase testcases[] = {
+  const Testcase testcases[] = {
       Testcase("init_invalid_version_missing.json", errors::kInvalidVersion),
       Testcase("init_invalid_version_invalid.json", errors::kInvalidVersion),
       Testcase("init_invalid_version_name_invalid.json",
@@ -110,7 +114,7 @@ TEST_F(InitValueManifestTest, InitFromValueInvalid) {
       Testcase("init_invalid_short_name_type.json", errors::kInvalidShortName),
   };
 
-  RunTestcases(testcases, std::size(testcases), EXPECT_TYPE_ERROR);
+  RunTestcases(testcases, ExpectType::kError);
 }
 
 TEST_F(InitValueManifestTest, InitFromValueValid) {
@@ -125,7 +129,7 @@ TEST_F(InitValueManifestTest, InitFromValueValid) {
   EXPECT_EQ("1.0.0.0", extension->VersionString());
   EXPECT_EQ("my extension", extension->name());
   EXPECT_EQ(extension->name(), extension->short_name());
-  EXPECT_EQ(extension->id(), extension->url().host());
+  EXPECT_EQ(extension->id(), extension->url().GetHost());
   EXPECT_EQ(extension->path(), path);
   EXPECT_EQ(path, extension->path());
 
@@ -137,9 +141,9 @@ TEST_F(InitValueManifestTest, InitFromValueValid) {
   // Test with an options page.
   extension = LoadAndExpectSuccess("init_valid_options.json");
   EXPECT_EQ(extensions::kExtensionScheme,
-            OptionsPageInfo::GetOptionsPage(extension.get()).scheme());
+            OptionsPageInfo::GetOptionsPage(extension.get()).GetScheme());
   EXPECT_EQ("/options.html",
-            OptionsPageInfo::GetOptionsPage(extension.get()).path());
+            OptionsPageInfo::GetOptionsPage(extension.get()).GetPath());
 
   // Test optional short_name field.
   extension = LoadAndExpectSuccess("init_valid_short_name.json");
@@ -151,33 +155,32 @@ TEST_F(InitValueManifestTest, InitFromValueValid) {
   EXPECT_EQ("1.0.0.0", extension->VersionString());
   EXPECT_EQ("1.0 alpha", extension->GetVersionForDisplay());
 
-  Testcase testcases[] = {
-    // Test with a minimum_chrome_version.
-    Testcase("init_valid_minimum_chrome.json"),
+  const Testcase testcases[] = {
+      // Test with a minimum_chrome_version.
+      Testcase("init_valid_minimum_chrome.json"),
 
-    // Test a hosted app with a minimum_chrome_version.
-    Testcase("init_valid_app_minimum_chrome.json"),
+      // Test a hosted app with a minimum_chrome_version.
+      Testcase("init_valid_app_minimum_chrome.json"),
 
-    // Test a hosted app with a requirements section.
-    Testcase("init_valid_app_requirements.json"),
+      // Test a hosted app with a requirements section.
+      Testcase("init_valid_app_requirements.json"),
 
-    // Test a theme with a minimum_chrome_version.
-    Testcase("init_valid_theme_minimum_chrome.json"),
+      // Test a theme with a minimum_chrome_version.
+      Testcase("init_valid_theme_minimum_chrome.json"),
 
-    // Verify empty permission settings are considered valid.
-    Testcase("init_valid_permissions_empty.json"),
+      // Verify empty permission settings are considered valid.
+      Testcase("init_valid_permissions_empty.json"),
 
-    // We allow unknown API permissions, so this will be valid until we better
-    // distinguish between API and host permissions.
-    Testcase("init_valid_permissions_unknown.json")
-  };
+      // We allow unknown API permissions, so this will be valid until we better
+      // distinguish between API and host permissions.
+      Testcase("init_valid_permissions_unknown.json")};
 
-  RunTestcases(testcases, std::size(testcases), EXPECT_TYPE_SUCCESS);
+  RunTestcases(testcases, ExpectType::kSuccess);
 }
 
 TEST_F(InitValueManifestTest, InitFromValueValidNameInRTL) {
-  std::string locale = l10n_util::GetApplicationLocale("");
-  base::i18n::SetICUDefaultLocale("he");
+  base::i18n::ScopedDefaultIcuLocale scoped_locale(
+      base::i18n::GetKnownLanguageTag("he"));
 
   // No strong RTL characters in name.
   scoped_refptr<Extension> extension(LoadAndExpectSuccess(
@@ -193,9 +196,6 @@ TEST_F(InitValueManifestTest, InitFromValueValidNameInRTL) {
   localized_name = u"Dictionary (\x05D1\x05D2 Google)";
   base::i18n::AdjustStringForLocaleDirection(&localized_name);
   EXPECT_EQ(localized_name, base::UTF8ToUTF16(extension->name()));
-
-  // Reset locale.
-  base::i18n::SetICUDefaultLocale(locale);
 }
 
 }  // namespace extensions

@@ -7,18 +7,16 @@ package org.chromium.components.browser_ui.widget.displaystyle;
 import android.content.Context;
 import android.view.View;
 
-import androidx.annotation.VisibleForTesting;
-
 import org.chromium.base.Log;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * Exposes general configuration info about the display style for a given reference View.
- */
+/** Exposes general configuration info about the display style for a given reference View. */
+@NullMarked
 public class UiConfig {
     public static final int NARROW_DISPLAY_STYLE_MAX_WIDTH_DP = 320;
     public static final int WIDE_DISPLAY_STYLE_MIN_WIDTH_DP = 600;
@@ -28,26 +26,33 @@ public class UiConfig {
     private static final boolean DEBUG = false;
 
     private DisplayStyle mCurrentDisplayStyle;
+    private int mHorizontalInsetDp;
 
     private final List<DisplayStyleObserver> mObservers = new ArrayList<>();
     private final Context mContext;
+    private final View mView;
+    private final View.OnAttachStateChangeListener mOnAttachStateChangeListener;
 
     /**
      * @param referenceView the View we observe to deduce the configuration from.
      */
     public UiConfig(View referenceView) {
+        mView = referenceView;
         mContext = referenceView.getContext();
         mCurrentDisplayStyle = computeDisplayStyleForCurrentConfig();
 
-        referenceView.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
-            @Override
-            public void onViewAttachedToWindow(View v) {
-                updateDisplayStyle();
-            }
+        mOnAttachStateChangeListener =
+                new View.OnAttachStateChangeListener() {
+                    @Override
+                    public void onViewAttachedToWindow(View v) {
+                        updateDisplayStyle();
+                    }
 
-            @Override
-            public void onViewDetachedFromWindow(View v) {}
-        });
+                    @Override
+                    public void onViewDetachedFromWindow(View v) {}
+                };
+
+        mView.addOnAttachStateChangeListener(mOnAttachStateChangeListener);
     }
 
     /**
@@ -69,6 +74,11 @@ public class UiConfig {
         assert success;
     }
 
+    public void destroy() {
+        mView.removeOnAttachStateChangeListener(mOnAttachStateChangeListener);
+        mObservers.clear();
+    }
+
     /**
      * @return The context for the view associated with this UiConfig.
      */
@@ -77,23 +87,35 @@ public class UiConfig {
     }
 
     /**
-     * Refresh the display style, notify observers of changes.
+     * Sets the horizontal inset, which indicates that the reference view won't take up the full
+     * width of the window (e.g. native page shrinks to account for SideUI). Refreshes the display
+     * style, accordingly.
+     *
+     * @param horizontalInsetDp The new horizontal inset, in DP.
      */
+    public void setHorizontalInset(int horizontalInsetDp) {
+        mHorizontalInsetDp = horizontalInsetDp;
+        updateDisplayStyle();
+    }
+
+    /**
+     * @return The horizontal inset, in DP.
+     */
+    public int getHorizontalInset() {
+        return mHorizontalInsetDp;
+    }
+
+    /** Refresh the display style, notify observers of changes. */
     public void updateDisplayStyle() {
         updateDisplayStyle(computeDisplayStyleForCurrentConfig());
     }
 
-    /**
-     * Returns the currently used display style.
-     */
+    /** Returns the currently used display style. */
     public DisplayStyle getCurrentDisplayStyle() {
         return mCurrentDisplayStyle;
     }
 
-    /**
-     * Sets the display style, notifying observers of changes. Should only be used in testing.
-     */
-    @VisibleForTesting
+    /** Sets the display style, notifying observers of changes. Should only be used in testing. */
     public void setDisplayStyleForTesting(DisplayStyle displayStyle) {
         updateDisplayStyle(displayStyle);
     }
@@ -106,11 +128,10 @@ public class UiConfig {
     }
 
     private DisplayStyle computeDisplayStyleForCurrentConfig() {
-        int widthDp = mContext.getResources().getConfiguration().screenWidthDp;
+        int widthDp = mContext.getResources().getConfiguration().screenWidthDp - mHorizontalInsetDp;
         int heightDp = mContext.getResources().getConfiguration().screenHeightDp;
 
-        @HorizontalDisplayStyle
-        int newHorizontalDisplayStyle;
+        @HorizontalDisplayStyle int newHorizontalDisplayStyle;
         if (widthDp <= NARROW_DISPLAY_STYLE_MAX_WIDTH_DP) {
             newHorizontalDisplayStyle = HorizontalDisplayStyle.NARROW;
         } else if (widthDp >= WIDE_DISPLAY_STYLE_MIN_WIDTH_DP) {
@@ -121,8 +142,9 @@ public class UiConfig {
 
         @VerticalDisplayStyle
         int newVerticalDisplayStyle =
-                heightDp <= FLAT_DISPLAY_STYLE_MAX_HEIGHT_DP ? VerticalDisplayStyle.FLAT
-                                                             : VerticalDisplayStyle.REGULAR;
+                heightDp <= FLAT_DISPLAY_STYLE_MAX_HEIGHT_DP
+                        ? VerticalDisplayStyle.FLAT
+                        : VerticalDisplayStyle.REGULAR;
 
         final DisplayStyle displayStyle =
                 new DisplayStyle(newHorizontalDisplayStyle, newVerticalDisplayStyle);
@@ -160,8 +182,14 @@ public class UiConfig {
                 throw new IllegalStateException();
         }
 
-        String debugString = String.format(Locale.US, "%s | %s (w=%ddp, h=%ddp)",
-                horizontalStyleName, verticalStyleName, widthDp, heightDp);
+        String debugString =
+                String.format(
+                        Locale.US,
+                        "%s | %s (w=%ddp, h=%ddp)",
+                        horizontalStyleName,
+                        verticalStyleName,
+                        widthDp,
+                        heightDp);
         Log.d(TAG, debugString);
         Toast.makeText(mContext, debugString, Toast.LENGTH_SHORT).show();
     }
@@ -173,10 +201,8 @@ public class UiConfig {
      * @see VerticalDisplayStyle
      */
     public static final class DisplayStyle {
-        @HorizontalDisplayStyle
-        public final int horizontal;
-        @VerticalDisplayStyle
-        public final int vertical;
+        @HorizontalDisplayStyle public final int horizontal;
+        @VerticalDisplayStyle public final int vertical;
 
         public DisplayStyle(
                 @HorizontalDisplayStyle int horizontal, @VerticalDisplayStyle int vertical) {
@@ -191,6 +217,11 @@ public class UiConfig {
         public boolean isSmall() {
             return horizontal == HorizontalDisplayStyle.NARROW
                     || vertical == VerticalDisplayStyle.FLAT;
+        }
+
+        /** @return whether the display is horizontally wide. */
+        public boolean isWide() {
+            return horizontal == HorizontalDisplayStyle.WIDE;
         }
 
         @Override

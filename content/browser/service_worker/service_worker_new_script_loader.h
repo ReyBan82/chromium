@@ -5,13 +5,12 @@
 #ifndef CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_NEW_SCRIPT_LOADER_H_
 #define CONTENT_BROWSER_SERVICE_WORKER_SERVICE_WORKER_NEW_SCRIPT_LOADER_H_
 
+#include "content/browser/renderer_host/policy_container_host.h"
 #include "content/browser/service_worker/service_worker_cache_writer.h"
 #include "content/browser/service_worker/url_loader_client_checker.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/global_routing_id.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
-#include "mojo/public/cpp/bindings/receiver.h"
-#include "mojo/public/cpp/bindings/remote.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "services/network/public/cpp/net_adapters.h"
 #include "services/network/public/cpp/resource_request.h"
@@ -95,7 +94,8 @@ class CONTENT_EXPORT ServiceWorkerNewScriptLoader final
       const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
       int64_t cache_resource_id,
       bool is_throttle_needed,
-      const GlobalRenderFrameHostId& requesting_frame_id);
+      const GlobalRenderFrameHostId& requesting_frame_id,
+      const base::UnguessableToken& worker_network_restrictions_id);
 
   ServiceWorkerNewScriptLoader(const ServiceWorkerNewScriptLoader&) = delete;
   ServiceWorkerNewScriptLoader& operator=(const ServiceWorkerNewScriptLoader&) =
@@ -105,21 +105,17 @@ class CONTENT_EXPORT ServiceWorkerNewScriptLoader final
 
   // network::mojom::URLLoader:
   void FollowRedirect(
-      const std::vector<std::string>& removed_headers,
-      const net::HttpRequestHeaders& modified_headers,
-      const net::HttpRequestHeaders& modified_cors_exempt_headers,
-      const absl::optional<GURL>& new_url) override;
+      network::HttpRequestHeadersUpdateParams headers_update_params,
+      const std::optional<GURL>& new_url) override;
   void SetPriority(net::RequestPriority priority,
                    int32_t intra_priority_value) override;
-  void PauseReadingBodyFromNet() override;
-  void ResumeReadingBodyFromNet() override;
 
   // network::mojom::URLLoaderClient for the network load:
   void OnReceiveEarlyHints(network::mojom::EarlyHintsPtr early_hints) override;
   void OnReceiveResponse(
       network::mojom::URLResponseHeadPtr response_head,
       mojo::ScopedDataPipeConsumerHandle body,
-      absl::optional<mojo_base::BigBuffer> cached_metadata) override;
+      std::optional<mojo_base::BigBuffer> cached_metadata) override;
   void OnReceiveRedirect(
       const net::RedirectInfo& redirect_info,
       network::mojom::URLResponseHeadPtr response_head) override;
@@ -135,6 +131,8 @@ class CONTENT_EXPORT ServiceWorkerNewScriptLoader final
  private:
   class WrappedIOBuffer;
 
+  // `worker_network_restrictions_id`: the unique token identifying this
+  // worker's network restrictions in the network service.
   ServiceWorkerNewScriptLoader(
       int32_t request_id,
       uint32_t options,
@@ -145,7 +143,8 @@ class CONTENT_EXPORT ServiceWorkerNewScriptLoader final
       const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
       int64_t cache_resource_id,
       bool is_throttle_needed,
-      const GlobalRenderFrameHostId& requesting_frame_id);
+      const GlobalRenderFrameHostId& requesting_frame_id,
+      const base::UnguessableToken& worker_network_restrictions_id);
 
   // Writes the given headers into the service worker script storage.
   void WriteHeaders(network::mojom::URLResponseHeadPtr response_head);
@@ -164,7 +163,7 @@ class CONTENT_EXPORT ServiceWorkerNewScriptLoader final
                  uint32_t bytes_available);
   void OnWriteDataComplete(
       scoped_refptr<network::MojoToNetPendingBuffer> pending_buffer,
-      uint32_t bytes_written,
+      size_t bytes_written,
       net::Error error);
 
   // This is the last method that is called on this class. Notifies the final
@@ -187,6 +186,7 @@ class CONTENT_EXPORT ServiceWorkerNewScriptLoader final
   const GURL request_url_;
 
   const bool is_main_script_;
+  const bool should_update_policy_container_;
 
   // Load options originally passed to this loader. The options passed to the
   // network loader might be different from this.
@@ -255,6 +255,13 @@ class CONTENT_EXPORT ServiceWorkerNewScriptLoader final
   // the fetch and never get one. If that happens, we need to have a frame id
   // to log the failure into devtools.
   const GlobalRenderFrameHostId requesting_frame_id_;
+
+  // The unique token identifying this worker's network restrictions in the
+  // network service. Used to throttle the main script fetch.
+  const base::UnguessableToken worker_network_restrictions_id_;
+  // The policy container policies (including connection allowlists) inherited
+  // from the creator. Used to throttle the main script fetch.
+  const PolicyContainerPolicies creator_policies_;
 
   base::WeakPtrFactory<ServiceWorkerNewScriptLoader> weak_factory_{this};
 };

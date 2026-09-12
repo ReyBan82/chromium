@@ -8,12 +8,14 @@
 #include <string>
 
 #include "base/component_export.h"
+#include "base/observer_list_types.h"
 #include "base/values.h"
 
 namespace ash {
 
 // Observer class for network configuration events (remove only).
-class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkConfigurationObserver {
+class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkConfigurationObserver
+    : public base::CheckedObserver {
  public:
   NetworkConfigurationObserver& operator=(const NetworkConfigurationObserver&) =
       delete;
@@ -25,7 +27,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkConfigurationObserver {
   // Called whenever properties on a network configuration are modified.
   virtual void OnConfigurationModified(const std::string& service_path,
                                        const std::string& guid,
-                                       const base::Value::Dict* set_properties);
+                                       const base::DictValue* set_properties);
 
   // Called before a delete is attempted.
   virtual void OnBeforeConfigurationRemoved(const std::string& service_path,
@@ -43,7 +45,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) NetworkConfigurationObserver {
   virtual void OnShuttingDown();
 
  protected:
-  virtual ~NetworkConfigurationObserver();
+  ~NetworkConfigurationObserver() override;
 };
 
 }  // namespace ash

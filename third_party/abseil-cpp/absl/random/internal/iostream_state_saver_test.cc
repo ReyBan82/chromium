@@ -14,11 +14,16 @@
 
 #include "absl/random/internal/iostream_state_saver.h"
 
-#include <errno.h>
 #include <stdio.h>
 
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <ios>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <type_traits>
 
 #include "gtest/gtest.h"
 
@@ -29,7 +34,7 @@ using absl::random_internal::make_ostream_state_saver;
 using absl::random_internal::stream_precision_helper;
 
 template <typename T>
-typename absl::enable_if_t<std::is_integral<T>::value, T>  //
+typename std::enable_if_t<std::is_integral_v<T>, T>  //
 StreamRoundTrip(T t) {
   std::stringstream ss;
   {
@@ -53,7 +58,7 @@ StreamRoundTrip(T t) {
 }
 
 template <typename T>
-typename absl::enable_if_t<std::is_floating_point<T>::value, T>  //
+typename std::enable_if_t<std::is_floating_point_v<T>, T>  //
 StreamRoundTrip(T t) {
   std::stringstream ss;
   {
@@ -345,8 +350,9 @@ TEST(IOStreamStateSaver, RoundTripLongDoubles) {
     }
 
     // Avoid undefined behavior (overflow/underflow).
-    if (dd <= std::numeric_limits<int64_t>::max() &&
-        dd >= std::numeric_limits<int64_t>::lowest()) {
+    if (dd <= static_cast<long double>(std::numeric_limits<int64_t>::max()) &&
+        dd >=
+            static_cast<long double>(std::numeric_limits<int64_t>::lowest())) {
       int64_t x = static_cast<int64_t>(dd);
       EXPECT_EQ(x, StreamRoundTrip<int64_t>(x));
     }

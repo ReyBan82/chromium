@@ -4,31 +4,34 @@
 
 #include "device/bluetooth/bluetooth_adapter_mac.h"
 
-#import <CoreBluetooth/CBManager.h>
-#include <CoreFoundation/CFNumber.h>
 #import <IOBluetooth/objc/IOBluetoothDevice.h>
 #import <IOBluetooth/objc/IOBluetoothHostController.h>
 #include <IOKit/IOKitLib.h>
 #include <stddef.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
+#include "base/apple/foundation_util.h"
 #include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/mac/foundation_util.h"
 #include "base/mac/mac_util.h"
 #include "base/mac/scoped_ioobject.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/ref_counted_delete_on_sequence.h"
+#include "base/notimplemented.h"
 #include "base/numerics/safe_conversions.h"
-#include "base/ranges/algorithm.h"
+#include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
 #import "base/task/single_thread_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/task_traits.h"
+#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "components/device_event_log/device_event_log.h"
 #include "device/bluetooth/bluetooth_advertisement_mac.h"
@@ -36,9 +39,6 @@
 #include "device/bluetooth/bluetooth_common.h"
 #include "device/bluetooth/bluetooth_discovery_session.h"
 #include "device/bluetooth/bluetooth_discovery_session_outcome.h"
-#include "device/bluetooth/bluetooth_low_energy_central_manager_delegate.h"
-#include "device/bluetooth/bluetooth_low_energy_device_watcher_mac.h"
-#include "device/bluetooth/bluetooth_low_energy_peripheral_manager_delegate.h"
 #include "device/bluetooth/bluetooth_socket_mac.h"
 #include "device/bluetooth/public/cpp/bluetooth_address.h"
 
@@ -56,6 +56,138 @@ extern "C" {
 void IOBluetoothPreferenceSetControllerPowerState(int state);
 }
 
+namespace device {
+class BluetoothDevicesConnectListenerBridge;
+}
+
+@interface BluetoothDevicesConnectListener : NSObject {
+ @private
+  // Weak reference back to the C++ Bridge. This raw_ptr is safe to access
+  // concurrently from the background thread because:
+  // 1. It is only written to once during initialization on the UI thread and
+  //    remains read-only afterwards.
+  // 2. The Bridge strongly owns this Listener and employs a 2-second delayed
+  //    release during Shutdown() to ensure all in-flight background dispatches
+  //    have drained before the Bridge (and this Listener) are deallocated.
+  raw_ptr<device::BluetoothDevicesConnectListenerBridge> _bridge;
+  IOBluetoothUserNotification* __weak _connectNotification;
+}
+
+- (instancetype)initWithBridge:
+    (device::BluetoothDevicesConnectListenerBridge*)bridge;
+- (void)deviceConnected:(IOBluetoothUserNotification*)notification
+                 device:(IOBluetoothDevice*)device;
+- (void)stopListening;
+
+@end
+
+namespace device {
+// A C++ bridge that manages the lifetime of BluetoothDevicesConnectListener
+// and safely bounces notifications to the UI thread.
+class BluetoothDevicesConnectListenerBridge
+    : public base::RefCountedDeleteOnSequence<
+          BluetoothDevicesConnectListenerBridge> {
+ public:
+  explicit BluetoothDevicesConnectListenerBridge(
+      base::WeakPtr<device::BluetoothAdapterMac> adapter)
+      : base::RefCountedDeleteOnSequence<BluetoothDevicesConnectListenerBridge>(
+            base::SingleThreadTaskRunner::GetCurrentDefault()),
+        adapter_(adapter) {}
+
+  BluetoothDevicesConnectListenerBridge(
+      const BluetoothDevicesConnectListenerBridge&) = delete;
+  BluetoothDevicesConnectListenerBridge& operator=(
+      const BluetoothDevicesConnectListenerBridge&) = delete;
+
+  void Initialize() {
+    DCHECK(owning_task_runner()->RunsTasksInCurrentSequence());
+    listener_ = [[BluetoothDevicesConnectListener alloc] initWithBridge:this];
+  }
+
+  void Shutdown() {
+    DCHECK(owning_task_runner()->RunsTasksInCurrentSequence());
+    adapter_ = nullptr;
+    if (listener_) {
+      [listener_ stopListening];
+      // Keep this Bridge (and thus the ObjC listener) alive for 2 seconds by
+      // passing a scoped_refptr (WrapRefCounted) to the delayed task. This
+      // allows any in-flight background dispatches to drain safely.
+      // TODO(crbug.com/519625606): Refactor this to use a singleton listener
+      // to avoid the brittle 2-second timeout.
+      owning_task_runner()->PostDelayedTask(
+          FROM_HERE,
+          base::BindOnce(
+              &BluetoothDevicesConnectListenerBridge::ReleaseListener,
+              base::WrapRefCounted(this)),
+          base::Seconds(2));
+    }
+  }
+
+  void OnConnection(const std::string& device_address) {
+    owning_task_runner()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&BluetoothDevicesConnectListenerBridge::OnConnectionOnUI,
+                       base::WrapRefCounted(this), device_address));
+  }
+
+ private:
+  friend class base::RefCountedDeleteOnSequence<
+      BluetoothDevicesConnectListenerBridge>;
+  friend class base::DeleteHelper<BluetoothDevicesConnectListenerBridge>;
+
+  ~BluetoothDevicesConnectListenerBridge() {
+    DCHECK(owning_task_runner()->RunsTasksInCurrentSequence());
+  }
+
+  void OnConnectionOnUI(const std::string& device_address) {
+    DCHECK(owning_task_runner()->RunsTasksInCurrentSequence());
+    if (adapter_) {
+      adapter_->OnConnectNotification(device_address);
+    }
+  }
+
+  void ReleaseListener() {
+    DCHECK(owning_task_runner()->RunsTasksInCurrentSequence());
+    listener_ = nil;
+  }
+
+  base::WeakPtr<device::BluetoothAdapterMac> adapter_;
+  BluetoothDevicesConnectListener* listener_;
+};
+}  // namespace device
+
+@implementation BluetoothDevicesConnectListener
+
+- (instancetype)initWithBridge:
+    (device::BluetoothDevicesConnectListenerBridge*)bridge {
+  CHECK(bridge);
+  if ((self = [super init])) {
+    _bridge = bridge;
+
+    _connectNotification = [IOBluetoothDevice
+        registerForConnectNotifications:self
+                               selector:@selector(deviceConnected:device:)];
+    if (!_connectNotification) {
+      BLUETOOTH_LOG(ERROR) << "Failed to register for connect notification!";
+    }
+  }
+  return self;
+}
+
+- (void)deviceConnected:(IOBluetoothUserNotification*)notification
+                 device:(IOBluetoothDevice*)device {
+  if (_bridge) {
+    std::string address = base::SysNSStringToUTF8([device addressString]);
+    _bridge->OnConnection(address);
+  }
+}
+
+- (void)stopListening {
+  [_connectNotification unregister];
+}
+
+@end
+
 namespace {
 
 // The frequency with which to poll the adapter for updates.
@@ -67,9 +199,29 @@ bool IsDeviceSystemPaired(const std::string& device_address) {
   return device && [device isPaired];
 }
 
+// Returns a string containing a list of all UUIDs in `uuids`.
+std::string UuidSetToString(const device::BluetoothDevice::UUIDSet& uuids) {
+  std::vector<std::string> values;
+  std::ranges::transform(uuids, std::back_inserter(values),
+                         &device::BluetoothUUID::value);
+  return base::JoinString(values, /*separator=*/" ");
+}
+
 }  // namespace
 
 namespace device {
+
+BluetoothAdapterMac::DeviceInfo::DeviceInfo() = default;
+BluetoothAdapterMac::DeviceInfo::DeviceInfo(DeviceInfo&&) = default;
+BluetoothAdapterMac::DeviceInfo& BluetoothAdapterMac::DeviceInfo::operator=(
+    DeviceInfo&&) = default;
+BluetoothAdapterMac::DeviceInfo::~DeviceInfo() = default;
+
+BluetoothAdapterMac::AdapterState::AdapterState() = default;
+BluetoothAdapterMac::AdapterState::AdapterState(AdapterState&&) = default;
+BluetoothAdapterMac::AdapterState& BluetoothAdapterMac::AdapterState::operator=(
+    AdapterState&&) = default;
+BluetoothAdapterMac::AdapterState::~AdapterState() = default;
 
 // static
 scoped_refptr<BluetoothAdapter> BluetoothAdapter::CreateAdapter() {
@@ -94,61 +246,19 @@ scoped_refptr<BluetoothAdapterMac> BluetoothAdapterMac::CreateAdapterForTest(
   return adapter;
 }
 
-// static
-BluetoothUUID BluetoothAdapterMac::BluetoothUUIDWithCBUUID(CBUUID* uuid) {
-  std::string uuid_c_string = base::SysNSStringToUTF8([uuid UUIDString]);
-  return device::BluetoothUUID(uuid_c_string);
-}
-
-// static
-std::string BluetoothAdapterMac::String(NSError* error) {
-  if (!error) {
-    return "no error";
-  }
-  return std::string("error domain: ") + base::SysNSStringToUTF8(error.domain) +
-         ", code: " + std::to_string(error.code) + ", description: " +
-         base::SysNSStringToUTF8(error.localizedDescription);
-}
-
 BluetoothAdapterMac::BluetoothAdapterMac()
     : controller_state_function_(
-          base::BindRepeating(&BluetoothAdapterMac::GetHostControllerState,
-                              base::Unretained(this))),
+          base::BindRepeating(&BluetoothAdapterMac::GetHostControllerState)),
       power_state_function_(
           base::BindRepeating(IOBluetoothPreferenceSetControllerPowerState)),
-      classic_discovery_manager_(
-          BluetoothDiscoveryManagerMac::CreateClassic(this)),
-      low_energy_discovery_manager_(
-          BluetoothLowEnergyDiscoveryManagerMac::Create(this)),
-      low_energy_advertisement_manager_(
-          std::make_unique<BluetoothLowEnergyAdvertisementManagerMac>()),
-      low_energy_central_manager_delegate_(
-          [[BluetoothLowEnergyCentralManagerDelegate alloc]
-              initWithDiscoveryManager:low_energy_discovery_manager_.get()
-                            andAdapter:this]),
-      low_energy_peripheral_manager_delegate_(
-          [[BluetoothLowEnergyPeripheralManagerDelegate alloc]
-              initWithAdvertisementManager:
-                  low_energy_advertisement_manager_.get()
-                                andAdapter:this]),
       device_paired_status_callback_(
-          base::BindRepeating(&IsDeviceSystemPaired)) {
-  DCHECK(classic_discovery_manager_);
-  DCHECK(low_energy_discovery_manager_);
-}
+          base::BindRepeating(&IsDeviceSystemPaired)) {}
 
 BluetoothAdapterMac::~BluetoothAdapterMac() {
-  // When devices will be destroyed, they will need this current instance to
-  // disconnect the gatt connection. To make sure they don't use the mac
-  // adapter, they should be explicitly destroyed here.
-  devices_.clear();
-  // Explicitly clear out delegates, which might outlive the Adapter.
-  [low_energy_peripheral_manager_ setDelegate:nil];
-  [low_energy_central_manager_ setDelegate:nil];
-  // Set low_energy_central_manager_ to nil so no devices will try to use it
-  // while being destroyed after this method. |devices_| is owned by
-  // BluetoothAdapter.
-  low_energy_central_manager_.reset();
+  if (connect_listener_bridge_) {
+    connect_listener_bridge_->Shutdown();
+    connect_listener_bridge_ = nullptr;
+  }
 }
 
 std::string BluetoothAdapterMac::GetAddress() const {
@@ -175,11 +285,6 @@ void BluetoothAdapterMac::SetName(const std::string& name,
   NOTIMPLEMENTED();
 }
 
-bool BluetoothAdapterMac::IsInitialized() const {
-  // Initialize() does nothing and the lazy initialization state is hidden.
-  return true;
-}
-
 bool BluetoothAdapterMac::IsPresent() const {
   // Avoid calling LazyInitialize() so that a Bluetooth permission prompt
   // doesn't appear when simply trying to detect whether the system supports
@@ -190,7 +295,7 @@ bool BluetoothAdapterMac::IsPresent() const {
 
   base::mac::ScopedIOObject<io_iterator_t> iterator;
   IOReturn result = IOServiceGetMatchingServices(
-      kIOMasterPortDefault, IOServiceMatching("IOBluetoothHCIController"),
+      kIOMainPortDefault, IOServiceMatching("IOBluetoothHCIController"),
       iterator.InitializeInto());
   if (result != kIOReturnSuccess) {
     BLUETOOTH_LOG(ERROR) << "Failed to enumerate Bluetooth controller: "
@@ -198,35 +303,17 @@ bool BluetoothAdapterMac::IsPresent() const {
     return false;
   }
 
-  base::mac::ScopedIOObject<io_service_t> service(IOIteratorNext(iterator));
+  base::mac::ScopedIOObject<io_service_t> service(
+      IOIteratorNext(iterator.get()));
   if (!service) {
     return false;
   }
 
-  base::ScopedCFTypeRef<CFBooleanRef> connected(
-      base::mac::CFCast<CFBooleanRef>(IORegistryEntryCreateCFProperty(
-          service, CFSTR("BluetoothTransportConnected"), kCFAllocatorDefault,
-          0)));
-  return CFBooleanGetValue(connected);
-}
-
-BluetoothAdapter::PermissionStatus BluetoothAdapterMac::GetOsPermissionStatus()
-    const {
-  if (@available(macOS 10.15.0, *)) {
-    switch (CBCentralManager.authorization) {
-      case CBManagerAuthorizationNotDetermined:
-        return PermissionStatus::kUndetermined;
-      case CBManagerAuthorizationRestricted:
-      case CBManagerAuthorizationDenied:
-        return PermissionStatus::kDenied;
-      case CBManagerAuthorizationAllowedAlways:
-        return PermissionStatus::kAllowed;
-    }
-  }
-
-  // There are no Core Bluetooth permissions before macOS 10.15 so assume we
-  // always have permission.
-  return PermissionStatus::kAllowed;
+  base::apple::ScopedCFTypeRef<CFBooleanRef> connected(
+      base::apple::CFCast<CFBooleanRef>(IORegistryEntryCreateCFProperty(
+          service.get(), CFSTR("BluetoothTransportConnected"),
+          kCFAllocatorDefault, 0)));
+  return CFBooleanGetValue(connected.get());
 }
 
 bool BluetoothAdapterMac::IsPowered() const {
@@ -247,38 +334,9 @@ void BluetoothAdapterMac::SetDiscoverable(bool discoverable,
 }
 
 bool BluetoothAdapterMac::IsDiscovering() const {
-  return classic_discovery_manager_->IsDiscovering() ||
-         low_energy_discovery_manager_->IsDiscovering();
-}
-
-std::unordered_map<BluetoothDevice*, BluetoothDevice::UUIDSet>
-BluetoothAdapterMac::RetrieveGattConnectedDevicesWithDiscoveryFilter(
-    const BluetoothDiscoveryFilter& discovery_filter) {
-  LazyInitialize();
-
-  std::unordered_map<BluetoothDevice*, BluetoothDevice::UUIDSet>
-      connected_devices;
-  std::set<device::BluetoothUUID> uuids;
-  discovery_filter.GetUUIDs(uuids);
-  if (uuids.empty()) {
-    for (BluetoothDevice* device :
-         RetrieveGattConnectedDevicesWithService(nullptr)) {
-      connected_devices[device] = BluetoothDevice::UUIDSet();
-    }
-    return connected_devices;
-  }
-  for (const BluetoothUUID& uuid : uuids) {
-    for (BluetoothDevice* device :
-         RetrieveGattConnectedDevicesWithService(&uuid)) {
-      connected_devices[device].insert(uuid);
-    }
-  }
-  return connected_devices;
-}
-
-BluetoothAdapter::UUIDList BluetoothAdapterMac::GetUUIDs() const {
-  NOTIMPLEMENTED();
-  return UUIDList();
+  return (classic_discovery_manager_ &&
+          classic_discovery_manager_->IsDiscovering()) ||
+         BluetoothLowEnergyAdapterApple::IsDiscovering();
 }
 
 void BluetoothAdapterMac::CreateRfcommService(
@@ -305,33 +363,15 @@ void BluetoothAdapterMac::CreateL2capService(
                            std::move(error_callback));
 }
 
-void BluetoothAdapterMac::RegisterAdvertisement(
-    std::unique_ptr<BluetoothAdvertisement::Data> advertisement_data,
-    CreateAdvertisementCallback callback,
-    AdvertisementErrorCallback error_callback) {
-  LazyInitialize();
-  low_energy_advertisement_manager_->RegisterAdvertisement(
-      std::move(advertisement_data), std::move(callback),
-      std::move(error_callback));
-}
-
-BluetoothLocalGattService* BluetoothAdapterMac::GetGattService(
-    const std::string& identifier) const {
-  return nullptr;
-}
-
-BluetoothAdapter::DeviceList BluetoothAdapterMac::GetDevices() {
-  LazyInitialize();
-  return BluetoothAdapter::GetDevices();
-}
-
-BluetoothAdapter::ConstDeviceList BluetoothAdapterMac::GetDevices() const {
-  const_cast<BluetoothAdapterMac*>(this)->LazyInitialize();
-  return BluetoothAdapter::GetDevices();
-}
-
 void BluetoothAdapterMac::ClassicDeviceFound(IOBluetoothDevice* device) {
-  ClassicDeviceAdded(device);
+  IOBluetoothDevice* __strong strong_device = device;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
+       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
+      base::BindOnce(&BluetoothAdapterMac::RetrieveDeviceState, strong_device),
+      base::BindOnce(&BluetoothAdapterMac::OnConnectedDeviceStateRetrieved,
+                     weak_ptr_factory_.GetWeakPtr()));
 }
 
 void BluetoothAdapterMac::ClassicDiscoveryStopped(bool unexpected) {
@@ -343,12 +383,73 @@ void BluetoothAdapterMac::ClassicDiscoveryStopped(bool unexpected) {
     observer.AdapterDiscoveringChanged(this, false);
 }
 
-void BluetoothAdapterMac::DeviceConnected(IOBluetoothDevice* device) {
-  // TODO(isherman): Investigate whether this method can be replaced with a call
-  // to +registerForConnectNotifications:selector:.
-  DVLOG(1) << "Adapter registered a new connection from device with address: "
-           << BluetoothClassicDeviceMac::GetDeviceAddress(device);
-  ClassicDeviceAdded(device);
+void BluetoothAdapterMac::OnConnectNotification(
+    const std::string& device_address) {
+  IOBluetoothDevice* device = [IOBluetoothDevice
+      deviceWithAddressString:base::SysUTF8ToNSString(device_address)];
+  if (!device) {
+    BLUETOOTH_LOG(ERROR) << "Failed to find device for address: "
+                         << device_address;
+    return;
+  }
+  RetrieveDeviceStateAsync(
+      device,
+      base::BindOnce(&BluetoothAdapterMac::OnConnectedDeviceStateRetrieved,
+                     weak_ptr_factory_.GetWeakPtr()));
+}
+
+// static
+BluetoothAdapterMac::AdapterState BluetoothAdapterMac::RetrieveAdapterState(
+    HostControllerStateFunction controller_state_function) {
+  AdapterState state;
+  @autoreleasepool {
+    if (controller_state_function) {
+      HostControllerState controller_state = controller_state_function.Run();
+      state.is_present = controller_state.is_present;
+      state.classic_powered = controller_state.classic_powered;
+      state.address = controller_state.address;
+    }
+
+    for (IOBluetoothDevice* device in [IOBluetoothDevice pairedDevices]) {
+      DeviceInfo device_info = RetrieveDeviceState(device);
+      // pairedDevices sometimes includes unknown devices that are not paired.
+      // Radar issue with id 2282763004 has been filed about it.
+      if (device_info.is_paired) {
+        state.paired_devices.push_back(std::move(device_info));
+      }
+    }
+  }
+  return state;
+}
+
+// static
+BluetoothAdapterMac::DeviceInfo BluetoothAdapterMac::RetrieveDeviceState(
+    IOBluetoothDevice* device) {
+  DeviceInfo device_info;
+  @autoreleasepool {
+    device_info.address = BluetoothClassicDeviceMac::GetDeviceAddress(device);
+    if ([device name]) {
+      device_info.name = base::SysNSStringToUTF8([device name]);
+    }
+    device_info.is_paired = [device isPaired];
+    device_info.is_connected = [device isConnected];
+    device_info.objc_device = device;
+    device_info.uuids = BluetoothClassicDeviceMac::GetUuids(device);
+  }
+  return device_info;
+}
+
+// static
+void BluetoothAdapterMac::RetrieveDeviceStateAsync(
+    IOBluetoothDevice* device,
+    base::OnceCallback<void(DeviceInfo)> callback) {
+  IOBluetoothDevice* __strong strong_device = device;
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
+       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
+      base::BindOnce(&BluetoothAdapterMac::RetrieveDeviceState, strong_device),
+      std::move(callback));
 }
 
 base::WeakPtr<BluetoothAdapter> BluetoothAdapterMac::GetWeakPtr() {
@@ -360,37 +461,48 @@ bool BluetoothAdapterMac::SetPoweredImpl(bool powered) {
   return true;
 }
 
-void BluetoothAdapterMac::RemovePairingDelegateInternal(
-    BluetoothDevice::PairingDelegate* pairing_delegate) {}
+base::WeakPtr<BluetoothLowEnergyAdapterApple>
+BluetoothAdapterMac::GetLowEnergyWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
+}
+
+void BluetoothAdapterMac::TriggerSystemPermissionPrompt() {
+  // Call the system API `IOBluetoothDevice::pairedDevices` to trigger the
+  // Bluetooth system permission prompt if the permission is undetermined. This
+  // system API might block on user interaction with the prompt if the Bluetooth
+  // system permission is undetermined.
+  base::ThreadPool::PostTask(
+      FROM_HERE, {base::TaskPriority::BEST_EFFORT, base::MayBlock()},
+      base::BindOnce([] { [IOBluetoothDevice pairedDevices]; }));
+}
 
 void BluetoothAdapterMac::LazyInitialize() {
   if (lazy_initialized_)
     return;
 
-  low_energy_central_manager_.reset([[CBCentralManager alloc]
-      initWithDelegate:low_energy_central_manager_delegate_
-                 queue:dispatch_get_main_queue()]);
-  low_energy_discovery_manager_->SetCentralManager(low_energy_central_manager_);
-
-  low_energy_peripheral_manager_.reset([[CBPeripheralManager alloc]
-      initWithDelegate:low_energy_peripheral_manager_delegate_
-                 queue:dispatch_get_main_queue()]);
-
-  lazy_initialized_ = true;
-
-  low_energy_advertisement_manager_->Init(ui_task_runner_,
-                                          low_energy_peripheral_manager_);
+  // Defer classic_discovery_manager_ initialization here.
+  // This is to avoid system permission prompt caused by
+  // navigator.bluetooth.getAvailability() call. See crbug.com/1359338 for more
+  // information.
+  classic_discovery_manager_.reset(
+      BluetoothDiscoveryManagerMac::CreateClassic(this));
+  BluetoothLowEnergyAdapterApple::LazyInitialize();
+  connect_listener_bridge_ =
+      base::MakeRefCounted<BluetoothDevicesConnectListenerBridge>(
+          weak_ptr_factory_.GetWeakPtr());
+  connect_listener_bridge_->Initialize();
   PollAdapter();
+}
 
-  // To obtain list of low energy devices known to the system, we need to parse
-  // and watch system property list file for paired device addresses.
-  bluetooth_low_energy_device_watcher_ =
-      BluetoothLowEnergyDeviceWatcherMac::CreateAndStartWatching(
-          ui_task_runner_,
-          base::BindRepeating(&BluetoothAdapterMac::UpdateKnownLowEnergyDevices,
-                              weak_ptr_factory_.GetWeakPtr()));
+void BluetoothAdapterMac::InitForTest(
+    scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner) {
+  BluetoothLowEnergyAdapterApple::InitForTest(ui_task_runner);
+  is_present_for_testing_ = false;
+}
 
-  bluetooth_low_energy_device_watcher_->ReadBluetoothPropertyListFile();
+BluetoothLowEnergyAdapterApple::GetDevicePairedStatusCallback
+BluetoothAdapterMac::GetDevicePairedStatus() const {
+  return device_paired_status_callback_;
 }
 
 BluetoothAdapterMac::HostControllerState
@@ -408,46 +520,8 @@ BluetoothAdapterMac::GetHostControllerState() {
   return state;
 }
 
-void BluetoothAdapterMac::UpdateKnownLowEnergyDevices(
-    DevicesInfo updated_low_energy_devices_info) {
-  DevicesInfo changed_devices;
-  // Notify DeviceChanged() to devices that have been newly paired as well as to
-  // devices that have been removed from the pairing list.
-  std::set_symmetric_difference(
-      updated_low_energy_devices_info.begin(),
-      updated_low_energy_devices_info.end(), low_energy_devices_info_.begin(),
-      low_energy_devices_info_.end(),
-      std::inserter(changed_devices, changed_devices.end()));
-
-  low_energy_devices_info_ = std::move(updated_low_energy_devices_info);
-  for (const auto& info : changed_devices) {
-    auto it = devices_.find(
-        BluetoothLowEnergyDeviceMac::GetPeripheralHashAddress(info.first));
-    if (it == devices_.end())
-      continue;
-
-    NotifyDeviceChanged(it->second.get());
-  }
-}
-
 void BluetoothAdapterMac::SetPresentForTesting(bool present) {
   is_present_for_testing_ = present;
-}
-
-void BluetoothAdapterMac::SetCentralManagerForTesting(
-    CBCentralManager* central_manager) {
-  central_manager.delegate = low_energy_central_manager_delegate_;
-  low_energy_central_manager_.reset(central_manager,
-                                    base::scoped_policy::RETAIN);
-  low_energy_discovery_manager_->SetCentralManager(low_energy_central_manager_);
-}
-
-CBCentralManager* BluetoothAdapterMac::GetCentralManager() {
-  return low_energy_central_manager_;
-}
-
-CBPeripheralManager* BluetoothAdapterMac::GetPeripheralManager() {
-  return low_energy_peripheral_manager_;
 }
 
 void BluetoothAdapterMac::SetHostControllerStateFunctionForTesting(
@@ -460,29 +534,24 @@ void BluetoothAdapterMac::SetPowerStateFunctionForTesting(
   power_state_function_ = std::move(power_state_function);
 }
 
-void BluetoothAdapterMac::SetLowEnergyDeviceWatcherForTesting(
-    scoped_refptr<BluetoothLowEnergyDeviceWatcherMac>
-        bluetooth_low_energy_device_watcher) {
-  bluetooth_low_energy_device_watcher_ =
-      std::move(bluetooth_low_energy_device_watcher);
-  bluetooth_low_energy_device_watcher_->Init();
-}
-
 void BluetoothAdapterMac::SetGetDevicePairedStatusCallbackForTesting(
-    GetDevicePairedStatusCallback device_paired_status_callback) {
+    BluetoothLowEnergyAdapterApple::GetDevicePairedStatusCallback
+        device_paired_status_callback) {
   device_paired_status_callback_ = std::move(device_paired_status_callback);
 }
 
-void BluetoothAdapterMac::UpdateFilter(
-    std::unique_ptr<BluetoothDiscoveryFilter> discovery_filter,
-    DiscoverySessionResultCallback callback) {
-  // In Mac the start scan handles all updates automatically
-  StartScanWithFilter(std::move(discovery_filter), std::move(callback));
+void BluetoothAdapterMac::SetPollCallbackForTesting(
+    base::OnceClosure callback) {
+  poll_callback_for_testing_ = std::move(callback);
 }
 
 void BluetoothAdapterMac::StartScanWithFilter(
     std::unique_ptr<BluetoothDiscoveryFilter> discovery_filter,
     DiscoverySessionResultCallback callback) {
+  // We need to make sure classic_discovery_manager_ is initialized properly
+  // before starting scanning.
+  const_cast<BluetoothAdapterMac*>(this)->LazyInitialize();
+
   // Default to dual discovery if |discovery_filter| is NULL.  IOBluetooth seems
   // to allow starting low energy and classic discovery at once.
   BluetoothTransport transport = BLUETOOTH_TRANSPORT_DUAL;
@@ -503,10 +572,9 @@ void BluetoothAdapterMac::StartScanWithFilter(
       return;
     }
   }
+
   if (transport & BLUETOOTH_TRANSPORT_LE) {
-    // Begin a low energy discovery session or update it if one is already
-    // running.
-    low_energy_discovery_manager_->StartDiscovery(BluetoothDevice::UUIDList());
+    StartScanLowEnergy();
   }
   for (auto& observer : observers_)
     observer.AdapterDiscoveringChanged(this, true);
@@ -517,12 +585,10 @@ void BluetoothAdapterMac::StartScanWithFilter(
 }
 
 void BluetoothAdapterMac::StopScan(DiscoverySessionResultCallback callback) {
-  low_energy_discovery_manager_->StopDiscovery();
-  for (const auto& device_id_object_pair : devices_) {
-    device_id_object_pair.second->ClearAdvertisementData();
-  }
+  StopScanLowEnergy();
 
-  if (classic_discovery_manager_->IsDiscovering() &&
+  if (classic_discovery_manager_ &&
+      classic_discovery_manager_->IsDiscovering() &&
       !classic_discovery_manager_->StopDiscovery()) {
     DVLOG(1) << "Failed to stop classic discovery";
     // TODO: Provide a more precise error here.
@@ -536,55 +602,26 @@ void BluetoothAdapterMac::StopScan(DiscoverySessionResultCallback callback) {
                           UMABluetoothDiscoverySessionOutcome::SUCCESS);
 }
 
-bool BluetoothAdapterMac::StartDiscovery(
-    BluetoothDiscoveryFilter* discovery_filter) {
-  // Default to dual discovery if |discovery_filter| is NULL.  IOBluetooth seems
-  // allow starting low energy and classic discovery at once.
-  BluetoothTransport transport = BLUETOOTH_TRANSPORT_DUAL;
-  if (discovery_filter)
-    transport = discovery_filter->GetTransport();
-
-  if ((transport & BLUETOOTH_TRANSPORT_CLASSIC) &&
-      !classic_discovery_manager_->IsDiscovering()) {
-    // TODO(krstnmnlsn): If a classic discovery session is already running then
-    // we should update its filter. crbug.com/498056
-    if (!classic_discovery_manager_->StartDiscovery()) {
-      DVLOG(1) << "Failed to add a classic discovery session";
-      return false;
-    }
-  }
-  if (transport & BLUETOOTH_TRANSPORT_LE) {
-    // Begin a low energy discovery session or update it if one is already
-    // running.
-    low_energy_discovery_manager_->StartDiscovery(BluetoothDevice::UUIDList());
-  }
-  return true;
-}
-
-void BluetoothAdapterMac::Initialize(base::OnceClosure callback) {
-  // Real initialization is deferred to LazyInitialize().
-  ui_task_runner_ = base::SingleThreadTaskRunner::GetCurrentDefault();
-  std::move(callback).Run();
-}
-
-void BluetoothAdapterMac::InitForTest(
-    scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner) {
-  ui_task_runner_ = ui_task_runner;
-  lazy_initialized_ = true;
-  is_present_for_testing_ = false;
-}
-
 void BluetoothAdapterMac::PollAdapter() {
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
+       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
+      base::BindOnce(&BluetoothAdapterMac::RetrieveAdapterState,
+                     controller_state_function_),
+      base::BindOnce(&BluetoothAdapterMac::OnBackgroundPollComplete,
+                     weak_ptr_factory_.GetWeakPtr()));
+}
+
+void BluetoothAdapterMac::OnBackgroundPollComplete(AdapterState state) {
   const bool was_present = IsPresent();
-  HostControllerState state = controller_state_function_.Run();
 
   if (address_ != state.address)
     should_update_name_ = true;
   address_ = std::move(state.address);
 
   if (was_present != state.is_present) {
-    for (auto& observer : observers_)
-      observer.AdapterPresentChanged(this, state.is_present);
+    NotifyAdapterPresentChanged(state.is_present);
   }
 
   if (classic_powered_ != state.classic_powered) {
@@ -593,339 +630,71 @@ void BluetoothAdapterMac::PollAdapter() {
     NotifyAdapterPoweredChanged(classic_powered_);
   }
 
+  // Update devices with asynchronously polled state.
+  uint32_t count = 0;
+  for (auto& device_info : state.paired_devices) {
+    OnConnectedDeviceStateRetrieved(std::move(device_info));
+    // Update the existing device, if it already existed.
+    ++count;
+  }
+
+  // Log if the paired device count changed.
+  if (!paired_count_.has_value() || paired_count_.value() != count) {
+    BLUETOOTH_LOG(DEBUG) << "Paired devices: " << count;
+    paired_count_ = count;
+  }
+
   RemoveTimedOutDevices();
-  AddPairedDevices();
 
   ui_task_runner_->PostDelayedTask(
       FROM_HERE,
       base::BindOnce(&BluetoothAdapterMac::PollAdapter,
                      weak_ptr_factory_.GetWeakPtr()),
       base::Milliseconds(kPollIntervalMs));
-}
 
-void BluetoothAdapterMac::ClassicDeviceAdded(IOBluetoothDevice* device) {
-  std::string device_address =
-      BluetoothClassicDeviceMac::GetDeviceAddress(device);
-
-  BluetoothDevice* device_classic = GetDevice(device_address);
-
-  // Only notify observers once per device.
-  if (device_classic != nullptr) {
-    DVLOG(3) << "Updating classic device: " << device_classic->GetAddress();
-    device_classic->UpdateTimestamp();
-    return;
-  }
-
-  device_classic = new BluetoothClassicDeviceMac(this, device);
-  devices_[device_address] = base::WrapUnique(device_classic);
-  DVLOG(1) << "Adding new classic device: " << device_classic->GetAddress();
-
-  for (auto& observer : observers_)
-    observer.DeviceAdded(this, device_classic);
-}
-
-bool BluetoothAdapterMac::IsLowEnergyPowered() const {
-  return [low_energy_central_manager_ state] == CBManagerStatePoweredOn;
-}
-
-void BluetoothAdapterMac::LowEnergyDeviceUpdated(
-    CBPeripheral* peripheral,
-    NSDictionary* advertisement_data,
-    int rssi) {
-  BluetoothLowEnergyDeviceMac* device_mac =
-      GetBluetoothLowEnergyDeviceMac(peripheral);
-  // If has no entry in the map, create new device and insert into |devices_|,
-  // otherwise update the existing device.
-  const bool is_new_device = device_mac == nullptr;
-  if (is_new_device) {
-    // A new device has been found.
-    device_mac = new BluetoothLowEnergyDeviceMac(this, peripheral);
-    DVLOG(1) << *device_mac << ": New Device.";
-  } else if (DoesCollideWithKnownDevice(peripheral, device_mac)) {
-    return;
-  }
-
-  DCHECK(device_mac);
-  DVLOG(3) << *device_mac << ": Device updated with "
-           << base::SysNSStringToUTF8([advertisement_data description]);
-
-  // Get Advertised UUIDs
-  // Core Specification Supplement (CSS) v7, Part 1.1
-  // https://developer.apple.com/documentation/corebluetooth/cbadvertisementdataserviceuuidskey
-  BluetoothDevice::UUIDList advertised_uuids;
-  NSArray* service_uuids =
-      advertisement_data[CBAdvertisementDataServiceUUIDsKey];
-  for (CBUUID* uuid in service_uuids) {
-    advertised_uuids.push_back(
-        BluetoothAdapterMac::BluetoothUUIDWithCBUUID(uuid));
-  }
-  NSArray* overflow_service_uuids =
-      advertisement_data[CBAdvertisementDataOverflowServiceUUIDsKey];
-  for (CBUUID* uuid in overflow_service_uuids) {
-    advertised_uuids.push_back(
-        BluetoothAdapterMac::BluetoothUUIDWithCBUUID(uuid));
-  }
-
-  // Get Service Data.
-  // Core Specification Supplement (CSS) v7, Part 1.11
-  // https://developer.apple.com/documentation/corebluetooth/cbadvertisementdataservicedatakey
-  BluetoothDevice::ServiceDataMap service_data_map;
-  NSDictionary* service_data =
-      advertisement_data[CBAdvertisementDataServiceDataKey];
-  for (CBUUID* uuid in service_data) {
-    NSData* data = service_data[uuid];
-    const uint8_t* bytes = static_cast<const uint8_t*>([data bytes]);
-    size_t length = [data length];
-    service_data_map.emplace(BluetoothAdapterMac::BluetoothUUIDWithCBUUID(uuid),
-                             std::vector<uint8_t>(bytes, bytes + length));
-  }
-
-  // Get Manufacturer Data.
-  // "Size: 2 or more octets
-  // The first 2 octets contain the Company Identifier Code followed
-  // by additional manufacturer specific data"
-  // Core Specification Supplement (CSS) v7, Part 1.4
-  // https://developer.apple.com/documentation/corebluetooth/cbadvertisementdatamanufacturerdatakey
-  //
-  BluetoothDevice::ManufacturerDataMap manufacturer_data_map;
-  NSData* manufacturer_data =
-      advertisement_data[CBAdvertisementDataManufacturerDataKey];
-  const uint8_t* bytes = static_cast<const uint8_t*>([manufacturer_data bytes]);
-  size_t length = [manufacturer_data length];
-  if (length > 1) {
-    const uint16_t manufacturer_id = bytes[0] | bytes[1] << 8;
-    manufacturer_data_map.emplace(
-        manufacturer_id, std::vector<uint8_t>(bytes + 2, bytes + length));
-  }
-
-  // Get Tx Power.
-  // "Size: 1 octet
-  //  0xXX: -127 to +127 dBm"
-  // Core Specification Supplement (CSS) v7, Part 1.5
-  // https://developer.apple.com/documentation/corebluetooth/cbadvertisementdatatxpowerlevelkey
-  NSNumber* tx_power = advertisement_data[CBAdvertisementDataTxPowerLevelKey];
-  int8_t clamped_tx_power = BluetoothDevice::ClampPower([tx_power intValue]);
-
-  // Get the Advertising name
-  NSString* local_name = advertisement_data[CBAdvertisementDataLocalNameKey];
-
-  for (auto& observer : observers_) {
-    absl::optional<std::string> device_name_opt = device_mac->GetName();
-    absl::optional<std::string> local_name_opt =
-        base::SysNSStringToUTF8(local_name);
-
-    observer.DeviceAdvertisementReceived(
-        device_mac->GetAddress(), device_name_opt,
-        local_name == nil ? absl::nullopt : local_name_opt, rssi,
-        tx_power == nil ? absl::nullopt : absl::make_optional(clamped_tx_power),
-        absl::nullopt, /* TODO(crbug.com/588083) Implement appearance */
-        advertised_uuids, service_data_map, manufacturer_data_map);
-  }
-
-  device_mac->UpdateAdvertisementData(
-      BluetoothDevice::ClampPower(rssi), absl::nullopt /* flags */,
-      std::move(advertised_uuids),
-      tx_power == nil ? absl::nullopt : absl::make_optional(clamped_tx_power),
-      std::move(service_data_map), std::move(manufacturer_data_map));
-
-  if (is_new_device) {
-    std::string device_address =
-        BluetoothLowEnergyDeviceMac::GetPeripheralHashAddress(peripheral);
-    devices_[device_address] = base::WrapUnique(device_mac);
-    for (auto& observer : observers_)
-      observer.DeviceAdded(this, device_mac);
-  } else {
-    for (auto& observer : observers_)
-      observer.DeviceChanged(this, device_mac);
+  if (poll_callback_for_testing_) {
+    std::move(poll_callback_for_testing_).Run();
   }
 }
 
-void BluetoothAdapterMac::LowEnergyCentralManagerUpdatedState() {
-  DVLOG(1) << "Central manager state updated: "
-           << [low_energy_central_manager_ state];
-
-  // A state with a value lower than CBManagerStatePoweredOn implies that
-  // scanning has stopped and that any connected peripherals have been
-  // disconnected. Call DidDisconnectPeripheral manually to update the devices'
-  // states since macOS doesn't call it.
-  // See
-  // https://developer.apple.com/reference/corebluetooth/cbcentralmanagerdelegate/1518888-centralmanagerdidupdatestate?language=objc
-  if ([low_energy_central_manager_ state] < CBManagerStatePoweredOn) {
-    DVLOG(1)
-        << "Central no longer powered on. Notifying of device disconnection.";
-    for (BluetoothDevice* device : GetDevices()) {
-      // GetDevices() returns instances of BluetoothClassicDeviceMac and
-      // BluetoothLowEnergyDeviceMac. The DidDisconnectPeripheral() method is
-      // only available on BluetoothLowEnergyDeviceMac.
-      if (!static_cast<BluetoothDeviceMac*>(device)->IsLowEnergyDevice())
-        continue;
-      BluetoothLowEnergyDeviceMac* device_mac =
-          static_cast<BluetoothLowEnergyDeviceMac*>(device);
-      if (device_mac->IsGattConnected()) {
-        device_mac->DidDisconnectPeripheral(nullptr);
-      }
-    }
-  }
-}
-
-void BluetoothAdapterMac::AddPairedDevices() {
-  // Add any new paired devices.
-  for (IOBluetoothDevice* device in [IOBluetoothDevice pairedDevices]) {
-    // pairedDevices sometimes includes unknown devices that are not paired.
-    // Radar issue with id 2282763004 has been filed about it.
-    if ([device isPaired]) {
-      ClassicDeviceAdded(device);
-    }
-  }
-}
-
-std::vector<BluetoothDevice*>
-BluetoothAdapterMac::RetrieveGattConnectedDevicesWithService(
-    const BluetoothUUID* uuid) {
-  NSArray* cbUUIDs = nil;
-  if (!uuid) {
-    DVLOG(1) << "Retrieving all connected devices.";
-    // It is not possible to ask for all connected peripherals with
-    // -[CBCentralManager retrieveConnectedPeripheralsWithServices:] by passing
-    // nil. To try to get most of the peripherals, the search is done with
-    // Generic Access service.
-    CBUUID* genericAccessServiceUUID = [CBUUID UUIDWithString:@"1800"];
-    cbUUIDs = @[ genericAccessServiceUUID ];
-  } else {
-    DVLOG(1) << "Retrieving connected devices with UUID: "
-             << uuid->canonical_value();
-    NSString* uuidString =
-        base::SysUTF8ToNSString(uuid->canonical_value().c_str());
-    cbUUIDs = @[ [CBUUID UUIDWithString:uuidString] ];
-  }
-  NSArray* peripherals = [low_energy_central_manager_
-      retrieveConnectedPeripheralsWithServices:cbUUIDs];
-  std::vector<BluetoothDevice*> connected_devices;
-  for (CBPeripheral* peripheral in peripherals) {
-    BluetoothLowEnergyDeviceMac* device_mac =
-        GetBluetoothLowEnergyDeviceMac(peripheral);
-    const bool is_new_device = device_mac == nullptr;
-
-    if (!is_new_device && DoesCollideWithKnownDevice(peripheral, device_mac)) {
-      continue;
-    }
-    if (is_new_device) {
-      device_mac = new BluetoothLowEnergyDeviceMac(this, peripheral);
-      std::string device_address =
-          BluetoothLowEnergyDeviceMac::GetPeripheralHashAddress(peripheral);
-      devices_[device_address] = base::WrapUnique(device_mac);
+void BluetoothAdapterMac::OnConnectedDeviceStateRetrieved(
+    DeviceInfo device_info) {
+  BluetoothDevice* old_device = GetDevice(device_info.address);
+  if (old_device) {
+    if (static_cast<BluetoothClassicDeviceMac*>(old_device)
+            ->UpdateState(std::move(device_info))) {
+      DVLOG(1) << "Classic device changed: " << old_device->GetAddress();
+      BLUETOOTH_LOG(EVENT) << "Classic device changed: "
+                           << old_device->GetAddress() << " service UUIDs: "
+                           << UuidSetToString(old_device->GetUUIDs());
       for (auto& observer : observers_) {
-        observer.DeviceAdded(this, device_mac);
+        observer.DeviceChanged(this, old_device);
       }
     }
-    connected_devices.push_back(device_mac);
-    DVLOG(1) << *device_mac << ": New connected device.";
-  }
-  return connected_devices;
-}
-
-void BluetoothAdapterMac::CreateGattConnection(
-    BluetoothLowEnergyDeviceMac* device_mac) {
-  DVLOG(1) << *device_mac << ": Create gatt connection.";
-  [low_energy_central_manager_ connectPeripheral:device_mac->peripheral_
-                                         options:nil];
-}
-
-void BluetoothAdapterMac::DisconnectGatt(
-    BluetoothLowEnergyDeviceMac* device_mac) {
-  DVLOG(1) << *device_mac << ": Disconnect gatt.";
-  [low_energy_central_manager_
-      cancelPeripheralConnection:device_mac->peripheral_];
-}
-
-void BluetoothAdapterMac::DidConnectPeripheral(CBPeripheral* peripheral) {
-  BluetoothLowEnergyDeviceMac* device_mac =
-      GetBluetoothLowEnergyDeviceMac(peripheral);
-  if (!device_mac) {
-    [low_energy_central_manager_ cancelPeripheralConnection:peripheral];
     return;
   }
-  device_mac->DidConnectPeripheral();
-}
 
-void BluetoothAdapterMac::DidFailToConnectPeripheral(CBPeripheral* peripheral,
-                                                     NSError* error) {
-  BluetoothLowEnergyDeviceMac* device_mac =
-      GetBluetoothLowEnergyDeviceMac(peripheral);
-  if (!device_mac) {
-    [low_energy_central_manager_ cancelPeripheralConnection:peripheral];
-    return;
+  std::string device_address = device_info.address;
+  BLUETOOTH_LOG(EVENT) << "Device connected: name: "
+                       << device_info.name.value_or("")
+                       << " address: " << device_address;
+
+  // This might happen if the device is paired and connected within the
+  // kPollIntervalMs.
+  std::unique_ptr<BluetoothDevice> device =
+      std::make_unique<BluetoothClassicDeviceMac>(this, std::move(device_info));
+  BluetoothDevice* new_device = device.get();
+  devices_[device_address] = std::move(device);
+  static_cast<BluetoothClassicDeviceMac*>(new_device)
+      ->StartListeningDisconnectEvent();
+
+  DVLOG(1) << "Adding new classic device: " << new_device->GetAddress();
+  BLUETOOTH_LOG(EVENT) << "Classic device added: " << new_device->GetAddress()
+                       << " service UUIDs: "
+                       << UuidSetToString(new_device->GetUUIDs());
+  for (auto& observer : observers_) {
+    observer.DeviceAdded(this, new_device);
   }
-  BluetoothDevice::ConnectErrorCode error_code =
-      BluetoothDevice::ConnectErrorCode::ERROR_UNKNOWN;
-  if (error) {
-    error_code = BluetoothDeviceMac::GetConnectErrorCodeFromNSError(error);
-  }
-  DVLOG(1) << *device_mac << ": Failed to connect to peripheral with error "
-           << BluetoothAdapterMac::String(error)
-           << ", error code: " << error_code;
-  device_mac->DidConnectGatt(error_code);
-}
-
-void BluetoothAdapterMac::DidDisconnectPeripheral(CBPeripheral* peripheral,
-                                                  NSError* error) {
-  BluetoothLowEnergyDeviceMac* device_mac =
-      GetBluetoothLowEnergyDeviceMac(peripheral);
-  if (!device_mac) {
-    [low_energy_central_manager_ cancelPeripheralConnection:peripheral];
-    return;
-  }
-  device_mac->DidDisconnectPeripheral(error);
-}
-
-bool BluetoothAdapterMac::IsBluetoothLowEnergyDeviceSystemPaired(
-    base::StringPiece device_identifier) const {
-  auto it = base::ranges::find(low_energy_devices_info_, device_identifier,
-                               &DevicesInfo::value_type::first);
-  if (it == low_energy_devices_info_.end())
-    return false;
-
-  return device_paired_status_callback_.Run(it->second);
-}
-
-BluetoothLowEnergyDeviceMac*
-BluetoothAdapterMac::GetBluetoothLowEnergyDeviceMac(CBPeripheral* peripheral) {
-  std::string device_address =
-      BluetoothLowEnergyDeviceMac::GetPeripheralHashAddress(peripheral);
-  auto iter = devices_.find(device_address);
-  if (iter == devices_.end()) {
-    return nullptr;
-  }
-  // device_mac can be BluetoothClassicDeviceMac* or
-  // BluetoothLowEnergyDeviceMac* To return valid BluetoothLowEnergyDeviceMac*
-  // we need to first check with IsLowEnergyDevice()
-  BluetoothDeviceMac* device_mac =
-      static_cast<BluetoothDeviceMac*>(iter->second.get());
-  return device_mac->IsLowEnergyDevice()
-             ? static_cast<BluetoothLowEnergyDeviceMac*>(device_mac)
-             : nullptr;
-}
-
-bool BluetoothAdapterMac::DoesCollideWithKnownDevice(
-    CBPeripheral* peripheral,
-    BluetoothLowEnergyDeviceMac* device_mac) {
-  // Check that there are no collisions.
-  std::string stored_device_id = device_mac->GetIdentifier();
-  std::string updated_device_id =
-      BluetoothLowEnergyDeviceMac::GetPeripheralIdentifier(peripheral);
-  if (stored_device_id != updated_device_id) {
-    DVLOG(1) << "LowEnergyDeviceUpdated stored_device_id != updated_device_id: "
-             << std::endl
-             << "  " << stored_device_id << std::endl
-             << "  " << updated_device_id;
-    // Collision, two identifiers map to the same hash address.  With a 48 bit
-    // hash the probability of this occuring with 10,000 devices
-    // simultaneously present is 1e-6 (see
-    // https://en.wikipedia.org/wiki/Birthday_problem#Probability_table).  We
-    // ignore the second device by returning.
-    return true;
-  }
-  return false;
 }
 
 }  // namespace device

@@ -5,7 +5,12 @@
 #ifndef EXTENSIONS_BROWSER_API_WEB_CONTENTS_CAPTURE_CLIENT_H_
 #define EXTENSIONS_BROWSER_API_WEB_CONTENTS_CAPTURE_CLIENT_H_
 
+#include <optional>
+#include <string>
+
+#include "base/types/expected.h"
 #include "extensions/browser/extension_function.h"
+#include "extensions/browser/screenshot_access.h"
 #include "extensions/common/api/extension_types.h"
 
 class SkBitmap;
@@ -20,7 +25,7 @@ namespace extensions {
 // This is used by both webview.captureVisibleRegion and tabs.captureVisibleTab.
 class WebContentsCaptureClient {
  public:
-  WebContentsCaptureClient() {}
+  WebContentsCaptureClient() = default;
 
   WebContentsCaptureClient(const WebContentsCaptureClient&) = delete;
   WebContentsCaptureClient& operator=(const WebContentsCaptureClient&) = delete;
@@ -28,12 +33,7 @@ class WebContentsCaptureClient {
  protected:
   virtual ~WebContentsCaptureClient() {}
 
-  enum class ScreenshotAccess {
-    kEnabled,
-    kDisabledByPreferences,
-    kDisabledByDlp,
-  };
-  virtual ScreenshotAccess GetScreenshotAccess(
+  virtual base::expected<void, ScreenshotAccessError> GetScreenshotAccess(
       content::WebContents* web_contents) const = 0;
   virtual bool ClientAllowsTransparency() = 0;
 
@@ -49,10 +49,13 @@ class WebContentsCaptureClient {
       content::WebContents* web_contents,
       const api::extension_types::ImageDetails* image_detail,
       base::OnceCallback<void(const SkBitmap&)> callback);
-  bool EncodeBitmap(const SkBitmap& bitmap, std::string* base64_result);
   virtual void OnCaptureFailure(CaptureResult result) = 0;
   virtual void OnCaptureSuccess(const SkBitmap& bitmap) = 0;
   void CopyFromSurfaceComplete(const SkBitmap& bitmap);
+
+  // Encodes `bitmap`, and returns a base-64 encoded string if successful.
+  // Returns nullopt if not successful.
+  std::optional<std::string> EncodeBitmap(const SkBitmap& bitmap);
 
  private:
   // The format (JPEG vs PNG) of the resulting image.  Set in RunAsync().

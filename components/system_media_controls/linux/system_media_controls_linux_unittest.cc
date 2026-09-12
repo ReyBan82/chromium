@@ -5,13 +5,13 @@
 #include "components/system_media_controls/linux/system_media_controls_linux.h"
 
 #include <memory>
+#include <utility>
 
 #include "base/containers/flat_map.h"
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/task_environment.h"
-#include "components/dbus/thread_linux/dbus_thread_linux.h"
 #include "components/system_media_controls/system_media_controls_observer.h"
 #include "dbus/message.h"
 #include "dbus/mock_bus.h"
@@ -43,14 +43,18 @@ class MockSystemMediaControlsObserver : public SystemMediaControlsObserver {
 
   // SystemMediaControlsObserver implementation.
   MOCK_METHOD0(OnServiceReady, void());
-  MOCK_METHOD0(OnNext, void());
-  MOCK_METHOD0(OnPrevious, void());
-  MOCK_METHOD0(OnPause, void());
-  MOCK_METHOD0(OnPlayPause, void());
-  MOCK_METHOD0(OnStop, void());
-  MOCK_METHOD0(OnPlay, void());
-  MOCK_METHOD1(OnSeek, void(const base::TimeDelta&));
-  MOCK_METHOD1(OnSeekTo, void(const base::TimeDelta&));
+  MOCK_METHOD1(OnNext, void(system_media_controls::SystemMediaControls*));
+  MOCK_METHOD1(OnPrevious, void(system_media_controls::SystemMediaControls*));
+  MOCK_METHOD1(OnPause, void(system_media_controls::SystemMediaControls*));
+  MOCK_METHOD1(OnPlayPause, void(system_media_controls::SystemMediaControls*));
+  MOCK_METHOD1(OnStop, void(system_media_controls::SystemMediaControls*));
+  MOCK_METHOD1(OnPlay, void(system_media_controls::SystemMediaControls*));
+  MOCK_METHOD2(OnSeek,
+               void(system_media_controls::SystemMediaControls*,
+                    const base::TimeDelta&));
+  MOCK_METHOD2(OnSeekTo,
+               void(system_media_controls::SystemMediaControls*,
+                    const base::TimeDelta&));
 };
 
 class SystemMediaControlsLinuxTest : public testing::Test,
@@ -175,8 +179,7 @@ class SystemMediaControlsLinuxTest : public testing::Test,
     dbus::Bus::Options options;
     options.bus_type = dbus::Bus::SESSION;
     options.connection_type = dbus::Bus::PRIVATE;
-    options.dbus_task_runner = dbus_thread_linux::GetTaskRunner();
-    mock_bus_ = base::MakeRefCounted<dbus::MockBus>(options);
+    mock_bus_ = base::MakeRefCounted<dbus::MockBus>(std::move(options));
     mock_exported_object_ = base::MakeRefCounted<dbus::MockExportedObject>(
         mock_bus_.get(), dbus::ObjectPath(kMprisAPIObjectPath));
 
@@ -185,10 +188,6 @@ class SystemMediaControlsLinuxTest : public testing::Test,
         .WillOnce(Return(mock_exported_object_.get()));
     EXPECT_CALL(*mock_bus_, RequestOwnership(service_->GetServiceName(), _, _))
         .WillOnce(Invoke(this, &SystemMediaControlsLinuxTest::OnOwnership));
-
-    // The service must call ShutdownAndBlock in order to properly clean up the
-    // DBus service.
-    EXPECT_CALL(*mock_bus_, ShutdownAndBlock());
 
     EXPECT_CALL(*mock_exported_object_, ExportMethod(_, _, _, _))
         .WillRepeatedly(
@@ -227,18 +226,10 @@ class SystemMediaControlsLinuxTest : public testing::Test,
     if (service_wait_loop_)
       service_wait_loop_->Quit();
   }
-  void OnNext() override {}
-  void OnPrevious() override {}
-  void OnPlay() override {}
-  void OnPause() override {}
-  void OnPlayPause() override {}
-  void OnStop() override {}
-  void OnSeekTo(const base::TimeDelta& time) override {}
 
   base::test::TaskEnvironment task_environment_;
   std::unique_ptr<base::RunLoop> service_wait_loop_;
   std::unique_ptr<base::RunLoop> response_wait_loop_;
-  std::unique_ptr<SystemMediaControlsLinux> service_;
   scoped_refptr<dbus::MockBus> mock_bus_;
   scoped_refptr<dbus::MockExportedObject> mock_exported_object_;
 
@@ -246,6 +237,11 @@ class SystemMediaControlsLinuxTest : public testing::Test,
       player_interface_exported_methods_;
   base::flat_map<std::string, dbus::ExportedObject::MethodCallCallback>
       properties_interface_exported_methods_;
+
+  // `service_` field is last, because it contains `raw_ptr` to
+  // `dbus::ExportedObject` in the maps above.  Destroying the `service_` field
+  // first means that the `raw_ptr` doesn't become temporarily dangling.
+  std::unique_ptr<SystemMediaControlsLinux> service_;
 };
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfServiceReadyWhenAdded) {
@@ -256,56 +252,56 @@ TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfServiceReadyWhenAdded) {
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfNextCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnNext());
+  EXPECT_CALL(observer, OnNext(GetService()));
   AddObserver(&observer);
   CallMediaPlayer2PlayerMethodAndBlock("Next");
 }
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfPreviousCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnPrevious());
+  EXPECT_CALL(observer, OnPrevious(GetService()));
   AddObserver(&observer);
   CallMediaPlayer2PlayerMethodAndBlock("Previous");
 }
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfPauseCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnPause());
+  EXPECT_CALL(observer, OnPause(GetService()));
   AddObserver(&observer);
   CallMediaPlayer2PlayerMethodAndBlock("Pause");
 }
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfPlayPauseCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnPlayPause());
+  EXPECT_CALL(observer, OnPlayPause(GetService()));
   AddObserver(&observer);
   CallMediaPlayer2PlayerMethodAndBlock("PlayPause");
 }
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfStopCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnStop());
+  EXPECT_CALL(observer, OnStop(GetService()));
   AddObserver(&observer);
   CallMediaPlayer2PlayerMethodAndBlock("Stop");
 }
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfPlayCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnPlay());
+  EXPECT_CALL(observer, OnPlay(GetService()));
   AddObserver(&observer);
   CallMediaPlayer2PlayerMethodAndBlock("Play");
 }
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfSeekCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnSeek(base::Seconds(3)));
+  EXPECT_CALL(observer, OnSeek(GetService(), base::Seconds(3)));
   AddObserver(&observer);
   CallSeekAndBlock(/*is_seek_to=*/false, base::Seconds(3).InMicroseconds());
 }
 
 TEST_F(SystemMediaControlsLinuxTest, ObserverNotifiedOfSetPositionCalls) {
   MockSystemMediaControlsObserver observer;
-  EXPECT_CALL(observer, OnSeekTo(base::Seconds(7)));
+  EXPECT_CALL(observer, OnSeekTo(GetService(), base::Seconds(7)));
   AddObserver(&observer);
   CallSeekAndBlock(/*is_seek_to=*/true, base::Seconds(7).InMicroseconds());
 }
@@ -408,6 +404,57 @@ TEST_F(SystemMediaControlsLinuxTest, ChangingMetadataEmitsSignal) {
 
   // Setting the title to the same value as before should not emit a new signal.
   GetService()->SetTitle(u"Foo");
+}
+
+TEST_F(SystemMediaControlsLinuxTest, InvalidUTF8IsSanitized) {
+  base::RunLoop wait_for_signal;
+
+  // The returned signal should give the changed property.
+  EXPECT_CALL(*GetExportedObject(), SendSignal(_))
+      .WillOnce(WithArg<0>([&wait_for_signal](dbus::Signal* signal) {
+        ASSERT_NE(nullptr, signal);
+        dbus::MessageReader reader(signal);
+
+        std::string interface_name;
+        ASSERT_TRUE(reader.PopString(&interface_name));
+        EXPECT_EQ(kMprisAPIPlayerInterfaceName, interface_name);
+
+        dbus::MessageReader changed_properties_reader(nullptr);
+        ASSERT_TRUE(reader.PopArray(&changed_properties_reader));
+
+        dbus::MessageReader dict_entry_reader(nullptr);
+        ASSERT_TRUE(changed_properties_reader.PopDictEntry(&dict_entry_reader));
+
+        // The changed property name should be "Metadata".
+        std::string property_name;
+        ASSERT_TRUE(dict_entry_reader.PopString(&property_name));
+        EXPECT_EQ("Metadata", property_name);
+
+        // The new metadata should have the title with the noncharacter removed.
+        dbus::MessageReader metadata_variant_reader(nullptr);
+        ASSERT_TRUE(dict_entry_reader.PopVariant(&metadata_variant_reader));
+        dbus::MessageReader metadata_reader(nullptr);
+        ASSERT_TRUE(metadata_variant_reader.PopArray(&metadata_reader));
+
+        dbus::MessageReader metadata_entry_reader(nullptr);
+        ASSERT_TRUE(metadata_reader.PopDictEntry(&metadata_entry_reader));
+
+        std::string metadata_property_name;
+        ASSERT_TRUE(metadata_entry_reader.PopString(&metadata_property_name));
+        EXPECT_EQ("xesam:title", metadata_property_name);
+
+        std::string value;
+        ASSERT_TRUE(metadata_entry_reader.PopVariantOfString(&value));
+        EXPECT_EQ("TitleContainingNoncharacter", value);
+
+        // Metadata should be the only changed property.
+        EXPECT_FALSE(changed_properties_reader.HasMoreData());
+
+        wait_for_signal.Quit();
+      }));
+
+  GetService()->SetTitle(u"Title\uFFFFContainingNoncharacter");
+  wait_for_signal.Run();
 }
 
 TEST_F(SystemMediaControlsLinuxTest,

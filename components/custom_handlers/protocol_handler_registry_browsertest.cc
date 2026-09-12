@@ -134,19 +134,19 @@ IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerBrowserTest,
   ProtocolHandlerRegistry* registry =
       SimpleProtocolHandlerRegistryFactory::GetForBrowserContext(
           browser_context(), true);
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
 
   // Attempt to add an entry.
   ProtocolHandlerChangeWaiter waiter(registry);
-  ASSERT_TRUE(content::ExecuteScriptWithoutUserGesture(
-      web_contents(),
-      "navigator.registerProtocolHandler('web+"
-      "search', 'test.html?%s', 'test');"));
+  ASSERT_TRUE(content::ExecJs(web_contents(),
+                              "navigator.registerProtocolHandler('web+"
+                              "search', 'test.html?%s', 'test');",
+                              content::EXECUTE_SCRIPT_NO_USER_GESTURE));
   waiter.Wait();
 
   // Verify the registration is ignored if no user gesture involved.
-  ASSERT_EQ(1u, registry->GetHandlersFor(url.scheme()).size());
-  ASSERT_FALSE(registry->IsHandledProtocol(url.scheme()));
+  ASSERT_EQ(1u, registry->GetHandlersFor(url.GetScheme()).size());
+  ASSERT_FALSE(registry->IsHandledProtocol(url.GetScheme()));
 }
 
 // FencedFrames can not register to handle any protocols.
@@ -167,17 +167,17 @@ IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerBrowserTest, FencedFrame) {
   ProtocolHandlerRegistry* registry =
       SimpleProtocolHandlerRegistryFactory::GetForBrowserContext(
           browser_context(), true);
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
 
   // Attempt to add an entry.
   ProtocolHandlerChangeWaiter waiter(registry);
-  ASSERT_TRUE(content::ExecuteScript(fenced_frame_host,
-                                     "navigator.registerProtocolHandler('web+"
-                                     "search', 'test.html?%s', 'test');"));
+  ASSERT_TRUE(content::ExecJs(fenced_frame_host,
+                              "navigator.registerProtocolHandler('web+"
+                              "search', 'test.html?%s', 'test');"));
   waiter.Wait();
 
   // Ensure the registry is still empty.
-  ASSERT_EQ(0u, registry->GetHandlersFor(url.scheme()).size());
+  ASSERT_EQ(0u, registry->GetHandlersFor(url.GetScheme()).size());
 }
 #endif
 
@@ -199,7 +199,7 @@ class RegisterProtocolHandlerAndServiceWorkerInterceptor
   }
 };
 
-// TODO(crbug.com/1204127): Fix flakiness.
+// TODO(crbug.com/40763886): Fix flakiness.
 IN_PROC_BROWSER_TEST_F(RegisterProtocolHandlerAndServiceWorkerInterceptor,
                        DISABLED_RegisterFetchListenerForHTMLHandler) {
   // Register a service worker intercepting requests to the HTML handler.

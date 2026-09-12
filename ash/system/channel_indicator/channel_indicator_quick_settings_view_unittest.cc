@@ -9,23 +9,19 @@
 #include "ash/constants/ash_features.h"
 #include "ash/public/cpp/test/test_system_tray_client.h"
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "components/version_info/channel.h"
 #include "ui/views/widget/widget.h"
 
 namespace ash {
 
-// Parameterized by feature QsRevamp and whether user feedback is enabled.
+// Parameterized by whether user feedback is enabled.
 class ChannelIndicatorQuickSettingsViewTest
     : public AshTestBase,
-      public testing::WithParamInterface<std::tuple<bool, bool>> {
+      public testing::WithParamInterface<bool> {
  public:
-  ChannelIndicatorQuickSettingsViewTest() {
-    // Param 0 is whether QsRevamp is enabled.
-    if (std::get<0>(GetParam())) {
-      feature_list_.InitAndEnableFeature(features::kQsRevamp);
-    }
-  }
+  ChannelIndicatorQuickSettingsViewTest() = default;
   ChannelIndicatorQuickSettingsViewTest(
       const ChannelIndicatorQuickSettingsViewTest&) = delete;
   ChannelIndicatorQuickSettingsViewTest& operator=(
@@ -38,7 +34,7 @@ class ChannelIndicatorQuickSettingsViewTest
 
     // Param 1 is whether user feedback is allowed.
     system_tray_client_ = GetSystemTrayClient();
-    system_tray_client_->set_user_feedback_enabled(std::get<1>(GetParam()));
+    system_tray_client_->set_user_feedback_enabled(GetParam());
 
     // Instantiate view.
     auto view = std::make_unique<ChannelIndicatorQuickSettingsView>(
@@ -53,7 +49,9 @@ class ChannelIndicatorQuickSettingsViewTest
   }
 
   void TearDown() override {
+    view_ = nullptr;
     widget_.reset();
+    system_tray_client_ = nullptr;
     AshTestBase::TearDown();
   }
 
@@ -65,16 +63,15 @@ class ChannelIndicatorQuickSettingsViewTest
 
  private:
   base::test::ScopedFeatureList feature_list_;
-  TestSystemTrayClient* system_tray_client_ = nullptr;
+  raw_ptr<TestSystemTrayClient> system_tray_client_ = nullptr;
   std::unique_ptr<views::Widget> widget_;
-  ChannelIndicatorQuickSettingsView* view_ = nullptr;
+  raw_ptr<ChannelIndicatorQuickSettingsView> view_ = nullptr;
 };
 
 // Run the `Visible` test below for each value of version_info::Channel.
 INSTANTIATE_TEST_SUITE_P(ChannelValues,
                          ChannelIndicatorQuickSettingsViewTest,
-                         ::testing::Combine(::testing::Bool(),
-                                            ::testing::Bool()));
+                         ::testing::Bool());
 
 TEST_P(ChannelIndicatorQuickSettingsViewTest, Visible) {
   // View exists.

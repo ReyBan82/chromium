@@ -5,12 +5,10 @@
 #ifndef CHROME_BROWSER_UI_ANDROID_TAB_MODEL_TAB_MODEL_LIST_H_
 #define CHROME_BROWSER_UI_ANDROID_TAB_MODEL_TAB_MODEL_LIST_H_
 
-#include <stddef.h>
-
 #include <vector>
 
-#include "base/android/scoped_java_ref.h"
-#include "base/lazy_instance.h"
+#include "base/memory/raw_ptr.h"
+#include "base/no_destructor.h"
 #include "base/observer_list.h"
 #include "components/sessions/core/session_id.h"
 
@@ -27,14 +25,12 @@ class WebContents;
 // Stores a list of all TabModel objects.
 class TabModelList {
  public:
-  typedef std::vector<TabModel*> TabModelVector;
-  typedef TabModelVector::iterator iterator;
-  typedef TabModelVector::const_iterator const_iterator;
+  using TabModelVector = std::vector<raw_ptr<TabModel, VectorExperimental>>;
+  using iterator = TabModelVector::iterator;
+  using const_iterator = TabModelVector::const_iterator;
 
   TabModelList(const TabModelList& other) = delete;
-  TabModelList(TabModelList&& other) = delete;
   TabModelList& operator=(const TabModelList& other) = delete;
-  TabModelList&& operator=(TabModelList&& other) = delete;
   ~TabModelList();
 
   static void HandlePopupNavigation(NavigateParams* params);
@@ -47,12 +43,13 @@ class TabModelList {
   static TabModel* GetTabModelForWebContents(
       content::WebContents* web_contents);
   static TabModel* GetTabModelForTabAndroid(TabAndroid* tab_android);
-  static TabModel* FindTabModelWithId(SessionID desired_id);
-  static TabModel* FindNativeTabModelForJavaObject(
-      const base::android::ScopedJavaLocalRef<jobject>& jtab_model);
+  static TabModel* FindTabModelWithWindowSessionId(SessionID desired_id);
   static bool IsOffTheRecordSessionActive();
 
   static const TabModelVector& models();
+
+  static void SetArchivedTabModel(TabModel* archived_tab_model);
+  static TabModel* GetArchivedTabModel();
 
  private:
   TabModelList();
@@ -61,8 +58,9 @@ class TabModelList {
   // removal across all TabModelLists.
   base::ObserverList<TabModelListObserver>::Unchecked observers_;
   TabModelVector models_;
+  raw_ptr<TabModel> archived_tab_model_ = nullptr;
 
-  friend base::LazyInstanceTraitsBase<TabModelList>;
+  friend base::NoDestructor<TabModelList>;
 };
 
 #endif  // CHROME_BROWSER_UI_ANDROID_TAB_MODEL_TAB_MODEL_LIST_H_

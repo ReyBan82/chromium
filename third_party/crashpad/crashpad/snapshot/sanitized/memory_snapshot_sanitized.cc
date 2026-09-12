@@ -16,6 +16,10 @@
 
 #include <string.h>
 
+#include <algorithm>
+
+#include "util/linux/pac_helper.h"
+
 namespace crashpad {
 namespace internal {
 
@@ -53,8 +57,9 @@ class MemorySanitizer : public MemorySnapshot::Delegate {
         static_cast<Pointer>(MemorySnapshotSanitized::kDefaced);
 
     // Sanitize up to a word-aligned address.
-    const size_t aligned_offset =
-        ((address_ + sizeof(Pointer) - 1) & ~(sizeof(Pointer) - 1)) - address_;
+    const size_t aligned_offset = std::min<VMAddress>(
+        size,
+        ((address_ + sizeof(Pointer) - 1) & ~(sizeof(Pointer) - 1)) - address_);
     memcpy(data, &defaced, aligned_offset);
 
     // Sanitize words that aren't small and don't look like pointers.
@@ -62,8 +67,9 @@ class MemorySanitizer : public MemorySnapshot::Delegate {
     auto words =
         reinterpret_cast<Pointer*>(static_cast<char*>(data) + aligned_offset);
     for (size_t index = 0; index < word_count; ++index) {
-      if (words[index] > MemorySnapshotSanitized::kSmallWordMax &&
-          !ranges_->Contains(words[index])) {
+      auto word = StripPACBits(words[index]);
+      if (word > MemorySnapshotSanitized::kSmallWordMax &&
+          !ranges_->Contains(word)) {
         words[index] = defaced;
       }
     }

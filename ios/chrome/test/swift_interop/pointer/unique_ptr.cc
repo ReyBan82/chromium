@@ -4,36 +4,18 @@
 
 #include "ios/chrome/test/swift_interop/pointer/unique_ptr.h"
 
-ValueReturner::ValueReturner() {}
-
-ValueReturner::~ValueReturner() {
-#if !SWIFT_INTEROP_UNIQUE_PTR_WORKS
-  delete object_;
-#endif
-}
-
-Value* ValueReturner::ObjectPointer() {
-#if SWIFT_INTEROP_UNIQUE_PTR_WORKS
-  if (!object_) {
-    object_ = std::make_unique<Value>(17);
-  }
-  return object_.get();
-#else
-  if (!object_) {
-    object_ = new Value(17);
-  }
-  return object_;
-#endif
+std::unique_ptr<Value> ValueReturner::Object() {
+  return std::make_unique<Value>(42);
 }
 
 Value::Value(int value) : value_(value) {}
 
 Value::~Value() {}
 
-bool Value::IsValid() {
+bool Value::IsValid() const {
   return true;
 }
 
-int Value::GetValue() {
+int Value::GetValue() const {
   return value_;
 }

@@ -8,7 +8,7 @@
 #include "third_party/blink/renderer/core/fileapi/blob.h"
 #include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
-#include "third_party/blink/renderer/core/url/dom_url.h"
+#include "third_party/blink/renderer/core/url/url.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
@@ -24,7 +24,7 @@ String URLFileAPI::createObjectURL(ScriptState* script_state,
   DCHECK(execution_context);
 
   UseCounter::Count(execution_context, WebFeature::kCreateObjectURLBlob);
-  return DOMURL::CreatePublicURL(execution_context, blob);
+  return URL::CreatePublicURL(execution_context, blob);
 }
 
 // static
@@ -41,7 +41,7 @@ void URLFileAPI::revokeObjectURL(ExecutionContext* execution_context,
                                  const String& url_string) {
   DCHECK(execution_context);
 
-  KURL url(NullURL(), url_string);
+  KURL url(NullUrl(), url_string);
   execution_context->RemoveURLFromMemoryCache(url);
   execution_context->GetPublicURLManager().Revoke(url);
 }

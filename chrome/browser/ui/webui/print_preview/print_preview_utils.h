@@ -5,8 +5,6 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_PRINT_PREVIEW_PRINT_PREVIEW_UTILS_H_
 #define CHROME_BROWSER_UI_WEBUI_PRINT_PREVIEW_PRINT_PREVIEW_UTILS_H_
 
-#include <string>
-
 #include "base/values.h"
 #include "chrome/browser/ui/webui/print_preview/printer_handler.h"
 #include "printing/backend/print_backend.h"
@@ -26,7 +24,7 @@ extern const char kSelectString[];
 extern const char kTypeKey[];
 extern const char kVendorCapabilityKey[];
 
-// Converts `printer_list` to a base::Value::List form, runs `callback` with the
+// Converts `printer_list` to a base::ListValue form, runs `callback` with the
 // converted list as the argument if it is not empty, and runs `done_callback`.
 void ConvertPrinterListForCallback(
     PrinterHandler::AddedPrintersCallback callback,
@@ -39,7 +37,7 @@ void ConvertPrinterListForCallback(
 // Will also check some CDD entries to make sure the input conforms to the
 // requirements for those entries, although not comprehensively.
 // On failure, returns an empty dict.
-base::Value::Dict ValidateCddForPrintPreview(base::Value::Dict cdd);
+base::DictValue ValidateCddForPrintPreview(base::DictValue cdd);
 
 // Returns an updated version of `cdd` and ensures it has a valid value for the
 // DPI capability. Uses the existing validated value if it exists, or fills in a
@@ -47,22 +45,26 @@ base::Value::Dict ValidateCddForPrintPreview(base::Value::Dict cdd);
 // in the CDD, but it is crucial for performing page setup.
 //
 // Assumes `cdd` is the output from ValidateCddForPrintPreview().
-base::Value::Dict UpdateCddWithDpiIfMissing(base::Value::Dict cdd);
+base::DictValue UpdateCddWithDpiIfMissing(base::DictValue cdd);
+
+// Returns the list of media size options from the `cdd`, or nullptr if it does
+// not exist.  Returns a pointer into `cdd`.
+const base::ListValue* GetMediaSizeOptionsFromCdd(const base::DictValue& cdd);
+
+// Updates `cdd` by removing all continuous feed media size options.
+void FilterContinuousFeedMediaSizes(base::DictValue& cdd);
 
 // Starts a local print of `print_data` with print settings dictionary
 // `job_settings`. Runs `callback` on failure or success.
-void StartLocalPrint(base::Value::Dict job_settings,
+void StartLocalPrint(base::DictValue job_settings,
                      scoped_refptr<base::RefCountedMemory> print_data,
                      content::WebContents* preview_web_contents,
                      PrinterHandler::PrintCallback callback);
 
-// Parses print job settings. Returns `true` on success.
-// This is used by extension printers.
-bool ParseSettings(const base::Value::Dict& settings,
-                   std::string* out_destination_id,
-                   std::string* out_capabilities,
-                   gfx::Size* out_page_size,
-                   base::Value* out_ticket);
+// Checks if silent printing is enabled via the --kiosk-printing command line
+// flag or the SilentPrintingEnabled policy, which immediately closes the print
+// preview dialog and prints to the default printer with default options.
+bool SilentPrintingEnabled();
 
 }  // namespace printing
 

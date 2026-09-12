@@ -2,94 +2,93 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <memory>
+#include <utility>
+
+#include "base/cfi_buildflags.h"
 #include "base/functional/callback.h"
-#include "base/functional/callback_forward.h"
 #include "base/scoped_observation.h"
+#include "base/strings/strcat.h"
+#include "base/strings/utf_string_conversions.h"
+#include "base/task/thread_pool/thread_pool_instance.h"
 #include "base/test/bind.h"
+#include "base/test/metrics/user_action_tester.h"
+#include "base/test/run_until.h"
 #include "base/test/scoped_feature_list.h"
+#include "base/test/test_future.h"
+#include "base/test/test_timeouts.h"
+#include "base/types/expected.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
+#include "chrome/browser/apps/app_service/app_registry_cache_waiter.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
-#include "chrome/browser/apps/intent_helper/intent_picker_features.h"
-#include "chrome/browser/feature_engagement/tracker_factory.h"
+#include "chrome/browser/apps/link_capturing/link_capturing_feature_test_support.h"
+#include "chrome/browser/ui/actions/chrome_action_id.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_element_identifiers.h"
 #include "chrome/browser/ui/intent_picker_tab_helper.h"
+#include "chrome/browser/ui/interaction/browser_elements.h"
+#include "chrome/browser/ui/tabs/features.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/test/test_browser_ui.h"
+#include "chrome/browser/ui/ui_features.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/frame/toolbar_button_provider.h"
-#include "chrome/browser/ui/views/location_bar/intent_chip_button.h"
+#include "chrome/browser/ui/views/location_bar/intent_chip_button_test_base.h"
+#include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+#include "chrome/browser/ui/views/page_action/page_action_view.h"
+#include "chrome/browser/ui/views/page_action/page_action_view_interface.h"
 #include "chrome/browser/ui/web_applications/app_browser_controller.h"
 #include "chrome/browser/ui/web_applications/test/web_app_navigation_browsertest.h"
 #include "chrome/browser/web_applications/mojom/user_display_mode.mojom.h"
-#include "chrome/browser/web_applications/test/app_registry_cache_waiter.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
-#include "chrome/browser/web_applications/web_app_id.h"
 #include "chrome/browser/web_applications/web_app_install_info.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "components/feature_engagement/public/feature_constants.h"
-#include "components/feature_engagement/test/test_tracker.h"
-#include "components/user_education/test/feature_promo_test_util.h"
+#include "components/tabs/public/tab_interface.h"
+#include "components/webapps/common/web_app_id.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/interaction/interaction_test_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/events/event_utils.h"
+#include "ui/views/controls/button/button.h"
 #include "ui/views/test/button_test_api.h"
-#include "ui/views/view_observer.h"
 #include "ui/views/widget/any_widget_observer.h"
 
 #if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/apps/intent_helper/preferred_apps_test_util.h"
 #include "chrome/browser/web_applications/web_app_utils.h"
-#include "components/infobars/content/content_infobar_manager.h"
-#include "components/infobars/core/infobar.h"
-#include "components/infobars/core/infobar_delegate.h"
-#include "components/services/app_service/public/cpp/features.h"
+#else
+#include "chrome/browser/web_applications/web_app_command_scheduler.h"
+#include "chrome/browser/web_applications/web_app_provider.h"
 #endif
 
-namespace {
-
-// ViewObserver that sends a callback when the target View's size is set to a
-// nonzero value.
-class NonzeroSizeObserver : public views::ViewObserver {
- public:
-  NonzeroSizeObserver(views::View* view, base::OnceClosure callback)
-      : callback_(std::move(callback)) {
-    if (!view->size().IsEmpty())
-      std::move(callback_).Run();
-    else
-      observation_.Observe(view);
-  }
-  ~NonzeroSizeObserver() override = default;
-
-  // views::ViewObserver:
-  void OnViewBoundsChanged(views::View* observed_view) override {
-    if (!observed_view->size().IsEmpty()) {
-      std::move(callback_).Run();
-      observation_.Reset();
-    }
-  }
-
- private:
-  base::OnceClosure callback_;
-  base::ScopedObservation<views::View, views::ViewObserver> observation_{this};
-};
-
-}  // namespace
-
 class IntentChipButtonBrowserTest
-    : public web_app::WebAppNavigationBrowserTest {
+    : public web_app::WebAppNavigationBrowserTest,
+      public testing::WithParamInterface<
+          apps::test::LinkCapturingFeatureVersion>,
+      public IntentChipButtonTestBase {
  public:
   IntentChipButtonBrowserTest() {
-    scoped_feature_list_.InitWithFeatures(
-        /*enabled_features=*/{apps::features::kLinkCapturingUiUpdate},
-        /*disabled_features=*/{apps::features::kIntentChipSkipsPicker,
-                               apps::features::kIntentChipAppIcon});
+    std::vector<base::test::FeatureRefAndParams> features_to_enable =
+        apps::test::GetFeaturesToEnableLinkCapturingUX(GetParam());
+
+    scoped_feature_list_.InitWithFeaturesAndParameters(features_to_enable, {});
+  }
+
+  bool LinkCapturingEnabledByDefault() const {
+    return GetParam() == apps::test::LinkCapturingFeatureVersion::kV2DefaultOn;
   }
 
   void SetUpOnMainThread() override {
     web_app::WebAppNavigationBrowserTest::SetUpOnMainThread();
     InstallTestWebApp();
+    if (!LinkCapturingEnabledByDefault()) {
+      CHECK_EQ(
+          apps::test::EnableLinkCapturingByUser(profile(), test_web_app_id()),
+          base::ok());
+    }
   }
 
   void TearDownOnMainThread() override {
@@ -101,66 +100,65 @@ class IntentChipButtonBrowserTest
   }
 
   template <typename Action>
-  void DoAndWaitForIntentPickerIconUpdate(Action action) {
-    content::WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
-    base::RunLoop run_loop;
-    auto* tab_helper = IntentPickerTabHelper::FromWebContents(web_contents);
-    tab_helper->SetIconUpdateCallbackForTesting(run_loop.QuitClosure());
+  testing::AssertionResult DoAndWaitForIntentPickerIconUpdate(Action action) {
+    base::test::TestFuture<void> intent_picker_done;
+    auto* tab_helper = IntentPickerTabHelper::From(
+        browser()->GetTabStripModel()->GetActiveTab());
+    tab_helper->SetIconUpdateCallbackForTesting(
+        intent_picker_done.GetCallback());
+    // On Mac, updating the icon requires asynchronous work that is done on the
+    // threadpool (see `WebAppsIntentPickerDelegate::FindAllAppsForUrl()` for
+    // more information). Flushing the thread pool thus helps prevent flakiness
+    // in tests.
+#if BUILDFLAG(IS_MAC)
+    base::ThreadPoolInstance::Get()->FlushForTesting();
+#endif  // BUILDFLAG(IS_MAC)
     action();
-    run_loop.Run();
+    if (HasFailure()) {
+      return testing::AssertionFailure();
+    }
+    if (intent_picker_done.Wait()) {
+      return testing::AssertionSuccess();
+    }
+    return testing::AssertionFailure() << "Intent picker never resolved";
   }
 
   void OpenNewTab(const GURL& url) {
-    chrome::NewTab(browser());
-    DoAndWaitForIntentPickerIconUpdate(
-        [this] { NavigateToLaunchingPage(browser()); });
-    ClickLinkAndWaitForIconUpdate(
-        browser()->tab_strip_model()->GetActiveWebContents(), url);
-  }
-
-  IntentChipButton* GetIntentChip() {
-    return BrowserView::GetBrowserViewForBrowser(browser())
-        ->toolbar_button_provider()
-        ->GetIntentChipButton();
+    chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
+    EXPECT_TRUE(DoAndWaitForIntentPickerIconUpdate(
+        [this] { NavigateToLaunchingPage(browser()); }));
+    NavigateAndWaitForIconUpdate(url);
   }
 
   // Clicks the intent chip, and optionally waits for a browser app window to
   // appear if `wait_for_browser` is true. If waiting is specified, the new
   // browser window is returned; if waiting is not specified, null is returned.
-  Browser* ClickIntentChip(bool wait_for_browser) {
-    ui_test_utils::BrowserChangeObserver browser_opened(
-        nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  BrowserWindowInterface* ClickIntentChip(bool wait_for_browser) {
+    ui_test_utils::BrowserCreatedObserver browser_created_observer;
 
-    views::test::ButtonTestApi test_api(GetIntentChip());
-    ui::MouseEvent e(ui::ET_MOUSE_PRESSED, gfx::Point(), gfx::Point(),
-                     ui::EventTimeForNow(), 0, 0);
-    test_api.NotifyClick(e);
+    GetIntentChip(browser()).Click();
 
     if (wait_for_browser) {
-      return browser_opened.Wait();
+      return browser_created_observer.Wait();
     }
 
     return nullptr;
   }
 
-  void ClickLinkAndWaitForIconUpdate(content::WebContents* web_contents,
-                                     const GURL& link_url) {
-    auto* tab_helper = IntentPickerTabHelper::FromWebContents(web_contents);
-
-    base::RunLoop run_loop;
-    tab_helper->SetIconUpdateCallbackForTesting(run_loop.QuitClosure());
-    ClickLinkAndWait(web_contents, link_url, LinkTarget::SELF, "");
-    run_loop.Run();
+  void NavigateAndWaitForIconUpdate(const GURL& url) {
+    EXPECT_TRUE(DoAndWaitForIntentPickerIconUpdate([this, url] {
+      ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
+    }));
   }
 
   // Installs a web app on the same host as InstallTestWebApp(), but with "/" as
   // a scope, so it overlaps with all URLs in the test app scope.
   void InstallOverlappingApp() {
-    auto web_app_info = std::make_unique<WebAppInstallInfo>();
     const char* app_host = GetAppUrlHost();
-    web_app_info->start_url = https_server().GetURL(app_host, "/");
-    web_app_info->scope = https_server().GetURL(app_host, "/");
+    auto web_app_info =
+        web_app::WebAppInstallInfo::CreateWithStartUrlForTesting(
+            embedded_https_test_server().GetURL(app_host, "/"));
+    web_app_info->scope = embedded_https_test_server().GetURL(app_host, "/");
     web_app_info->title = base::UTF8ToUTF16(GetAppName());
     web_app_info->description = u"Test description";
     web_app_info->user_display_mode =
@@ -169,389 +167,194 @@ class IntentChipButtonBrowserTest
     overlapping_app_id_ =
         web_app::test::InstallWebApp(profile(), std::move(web_app_info));
     DCHECK(!overlapping_app_id_.empty());
-    web_app::AppReadinessWaiter(profile(), overlapping_app_id_).Await();
+    apps::AppReadinessWaiter(profile(), overlapping_app_id_).Await();
+    if (!LinkCapturingEnabledByDefault()) {
+      CHECK_EQ(
+          apps::test::EnableLinkCapturingByUser(profile(), overlapping_app_id_),
+          base::ok());
+    }
   }
+
+ protected:
+  webapps::AppId overlapping_app_id_;
 
  private:
   base::test::ScopedFeatureList scoped_feature_list_;
-  web_app::AppId overlapping_app_id_;
 };
 
-IN_PROC_BROWSER_TEST_F(IntentChipButtonBrowserTest,
-                       NavigationToInScopeLinkShowsIntentChip) {
+IN_PROC_BROWSER_TEST_P(IntentChipButtonBrowserTest,
+                       NavigationToInScopeLinkShowsIntentChipAndLaunchesApp) {
   const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
+      embedded_https_test_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
+  EXPECT_TRUE(DoAndWaitForIntentPickerIconUpdate([this, in_scope_url] {
+    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
+  }));
+  EXPECT_TRUE(WaitForPageActionButtonVisible(browser()));
+  EXPECT_TRUE(GetIntentChip(browser()).GetVisible());
 
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-
-  views::NamedWidgetShownWaiter waiter(views::test::AnyWidgetTestPasskey{},
-                                       "IntentPickerBubbleView");
-  ClickIntentChip(/*wait_for_browser=*/false);
-
-  waiter.WaitIfNeededAndGet();
-  ASSERT_TRUE(IntentPickerBubbleView::intent_picker_bubble());
+  // If a single app is installed, then clicking on the intent chip button
+  // directly launches the app on all platforms, if the app is set to be the
+  // preferred app for capturing links.
+  base::UserActionTester user_action_tester;
+  BrowserWindowInterface* app_browser =
+      ClickIntentChip(/*wait_for_browser=*/true);
+  ASSERT_EQ(1, user_action_tester.GetActionCount("IntentPickerIconClicked"));
+  ASSERT_TRUE(app_browser);
+  ASSERT_EQ(app_browser->GetType(), BrowserWindowInterface::Type::TYPE_APP);
 }
 
-IN_PROC_BROWSER_TEST_F(IntentChipButtonBrowserTest,
+IN_PROC_BROWSER_TEST_P(IntentChipButtonBrowserTest,
                        NavigationToOutOfScopeLinkDoesNotShowsIntentChip) {
-  const GURL out_of_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetOutOfScopeUrlPath());
+  const GURL out_of_scope_url = embedded_https_test_server().GetURL(
+      GetAppUrlHost(), GetOutOfScopeUrlPath());
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), out_of_scope_url));
-
-  EXPECT_FALSE(GetIntentChip()->GetVisible());
+  EXPECT_FALSE(GetIntentChip(browser()).GetVisible());
 }
 
-// TODO(crbug.com/1395393): This test is flaky on Mac.
-#if BUILDFLAG(IS_MAC)
-#define MAYBE_IconVisibilityAfterTabSwitching \
-  DISABLED_IconVisibilityAfterTabSwitching
-#else
-#define MAYBE_IconVisibilityAfterTabSwitching IconVisibilityAfterTabSwitching
-#endif
-IN_PROC_BROWSER_TEST_F(IntentChipButtonBrowserTest,
-                       MAYBE_IconVisibilityAfterTabSwitching) {
+IN_PROC_BROWSER_TEST_P(IntentChipButtonBrowserTest,
+                       ShowsIntentChipExpandedForPreferredApp) {
   const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  const GURL out_of_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetOutOfScopeUrlPath());
+      embedded_https_test_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
+  const GURL out_of_scope_url = embedded_https_test_server().GetURL(
+      GetAppUrlHost(), GetOutOfScopeUrlPath());
 
-  OmniboxChipButton* intent_chip_button = GetIntentChip();
+  auto intent_chip = GetIntentChip(browser());
+  // First three visits will always show as expanded.
+  for (int i = 0; i < 3; i++) {
+    EXPECT_TRUE(DoAndWaitForIntentPickerIconUpdate([this, in_scope_url] {
+      ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
+    }));
 
-  OpenNewTab(in_scope_url);
-  EXPECT_TRUE(intent_chip_button->GetVisible());
-  OpenNewTab(out_of_scope_url);
-  EXPECT_FALSE(intent_chip_button->GetVisible());
+    EXPECT_TRUE(WaitForPageActionButtonVisible(browser()));
 
-  chrome::SelectPreviousTab(browser());
-  EXPECT_TRUE(intent_chip_button->GetVisible());
-  chrome::SelectNextTab(browser());
-  EXPECT_FALSE(intent_chip_button->GetVisible());
+    EXPECT_TRUE(intent_chip.GetVisible());
+    EXPECT_FALSE(IsIntentChipFullyCollapsed(browser()));
+
+    EXPECT_TRUE(DoAndWaitForIntentPickerIconUpdate([this, out_of_scope_url] {
+      ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), out_of_scope_url));
+    }));
+    EXPECT_FALSE(intent_chip.GetVisible());
+  }
+
+  // Fourth visit should show as expanded because the app is set as preferred
+  // for this URL.
+  EXPECT_TRUE(DoAndWaitForIntentPickerIconUpdate([this, in_scope_url] {
+    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
+  }));
+
+  EXPECT_TRUE(WaitForPageActionButtonVisible(browser()));
+  EXPECT_TRUE(intent_chip.GetVisible());
+  EXPECT_FALSE(IsIntentChipFullyCollapsed(browser()));
 }
 
 #if BUILDFLAG(IS_CHROMEOS)
 // Using the Intent Chip for an app which is set as preferred should launch
 // directly into the app. Preferred apps are only available on ChromeOS.
-IN_PROC_BROWSER_TEST_F(IntentChipButtonBrowserTest, OpensAppForPreferredApp) {
+IN_PROC_BROWSER_TEST_P(IntentChipButtonBrowserTest, OpensAppForPreferredApp) {
   apps_util::SetSupportedLinksPreferenceAndWait(profile(), test_web_app_id());
 
   const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
+      embedded_https_test_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
+  EXPECT_TRUE(DoAndWaitForIntentPickerIconUpdate([this, in_scope_url] {
+    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
+  }));
 
-  Browser* app_browser = ClickIntentChip(/*wait_for_browser=*/true);
+  BrowserWindowInterface* app_browser =
+      ClickIntentChip(/*wait_for_browser=*/true);
 
   EXPECT_TRUE(web_app::AppBrowserController::IsForWebApp(app_browser,
                                                          test_web_app_id()));
 }
-
-IN_PROC_BROWSER_TEST_F(IntentChipButtonBrowserTest,
-                       ShowsIntentChipExpandedForPreferredApp) {
-  apps_util::SetSupportedLinksPreferenceAndWait(profile(), test_web_app_id());
-
-  const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  const GURL out_of_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetOutOfScopeUrlPath());
-
-  // First three visits will always show as expanded.
-  for (int i = 0; i < 3; i++) {
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
-    EXPECT_TRUE(GetIntentChip()->GetVisible());
-    EXPECT_FALSE(GetIntentChip()->is_fully_collapsed());
-
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), out_of_scope_url));
-    EXPECT_FALSE(GetIntentChip()->GetVisible());
-  }
-
-  // Fourth visit should show as expanded because the app is set as preferred
-  // for this URL.
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-  EXPECT_FALSE(GetIntentChip()->is_fully_collapsed());
-}
-
 #endif  // BUILDFLAG(IS_CHROMEOS)
 
-class IntentChipButtonSkipIntentPickerBrowserTest
-    : public IntentChipButtonBrowserTest {
- private:
-  base::test::ScopedFeatureList feature_list_{
-      apps::features::kIntentChipSkipsPicker};
-};
+INSTANTIATE_TEST_SUITE_P(
+    ,
+    IntentChipButtonBrowserTest,
+    testing::Values(apps::test::LinkCapturingFeatureVersion::kV2DefaultOff,
+                    apps::test::LinkCapturingFeatureVersion::kV2DefaultOn),
+    [](const auto& param_info) {
+      return IntentChipButtonTestBase::GenerateIntentChipTestName(param_info);
+    });
 
-IN_PROC_BROWSER_TEST_F(IntentChipButtonSkipIntentPickerBrowserTest,
-                       ClickingChipOpensApp) {
-  const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
-
-  Browser* app_browser = ClickIntentChip(/*wait_for_browser=*/true);
-
-  EXPECT_TRUE(web_app::AppBrowserController::IsForWebApp(app_browser,
-                                                         test_web_app_id()));
-}
-
-// TODO(crbug.com/1313274): Fix test flakiness on Lacros.
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#define MAYBE_ShowsIntentPickerWhenMultipleApps \
-  DISABLED_ShowsIntentPickerWhenMultipleApps
-#else
-#define MAYBE_ShowsIntentPickerWhenMultipleApps \
-  ShowsIntentPickerWhenMultipleApps
-#endif
-IN_PROC_BROWSER_TEST_F(IntentChipButtonSkipIntentPickerBrowserTest,
-                       MAYBE_ShowsIntentPickerWhenMultipleApps) {
-  InstallOverlappingApp();
-
-  const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
-  base::RunLoop().RunUntilIdle();
-
-  // The Intent Chip should appear, but the intent picker bubble should not
-  // appear automatically.
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-  EXPECT_FALSE(IntentPickerBubbleView::intent_picker_bubble());
-
-  views::NamedWidgetShownWaiter waiter(views::test::AnyWidgetTestPasskey{},
-                                       "IntentPickerBubbleView");
-  ClickIntentChip(/*wait_for_browser=*/false);
-
-  waiter.WaitIfNeededAndGet();
-  ASSERT_TRUE(IntentPickerBubbleView::intent_picker_bubble());
-}
-
-IN_PROC_BROWSER_TEST_F(IntentChipButtonSkipIntentPickerBrowserTest,
-                       ShowsIntentChipCollapsed) {
-  const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  const GURL out_of_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetOutOfScopeUrlPath());
-  const GURL separate_host_url =
-      https_server().GetURL(GetLaunchingPageHost(), GetLaunchingPagePath());
-
-  NavigateToLaunchingPage(browser());
-  content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
-
-  // 1st appearance: Expanded.
-  ClickLinkAndWaitForIconUpdate(web_contents, in_scope_url);
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-  EXPECT_FALSE(GetIntentChip()->is_fully_collapsed());
-
-  ClickLinkAndWaitForIconUpdate(web_contents, separate_host_url);
-  EXPECT_FALSE(GetIntentChip()->GetVisible());
-
-  // 2nd appearance: Expanded.
-  ClickLinkAndWaitForIconUpdate(web_contents, in_scope_url);
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-  EXPECT_FALSE(GetIntentChip()->is_fully_collapsed());
-
-  ClickLinkAndWaitForIconUpdate(web_contents, out_of_scope_url);
-  EXPECT_FALSE(GetIntentChip()->GetVisible());
-
-  // 3rd appearance: Expanded.
-  ClickLinkAndWaitForIconUpdate(web_contents, in_scope_url);
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-  EXPECT_FALSE(GetIntentChip()->is_fully_collapsed());
-
-  ClickLinkAndWaitForIconUpdate(web_contents, out_of_scope_url);
-  EXPECT_FALSE(GetIntentChip()->GetVisible());
-
-  // 4th appearance: Collapsed.
-  ClickLinkAndWaitForIconUpdate(web_contents, in_scope_url);
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-  EXPECT_TRUE(GetIntentChip()->is_fully_collapsed());
-
-  // Click to open app and reset the counter.
-  ClickIntentChip(/*wait_for_browser=*/true);
-
-  // Open another browser- we should be able to see the expanded chip again.
-  DoAndWaitForIntentPickerIconUpdate(
-      [this] { NavigateToLaunchingPage(browser()); });
-
-  // 1st appearance since intent chip counter reset: Expanded.
-  web_contents = browser()->tab_strip_model()->GetActiveWebContents();
-  ClickLinkAndWaitForIconUpdate(web_contents, in_scope_url);
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-  EXPECT_FALSE(GetIntentChip()->is_fully_collapsed());
-}
-
-class IntentChipButtonIPHBubbleBrowserTest
-    : public IntentChipButtonBrowserTest {
+class IntentChipButtonBrowserUiTest
+    : public UiBrowserTest,
+      public testing::WithParamInterface<
+          apps::test::LinkCapturingFeatureVersion>,
+      public IntentChipButtonTestBase {
  public:
-  IntentChipButtonIPHBubbleBrowserTest() {
-    feature_list_.InitAndEnableFeature(
-        feature_engagement::kIPHIntentChipFeature);
-    subscription_ =
-        BrowserContextDependencyManager::GetInstance()
-            ->RegisterCreateServicesCallbackForTesting(base::BindRepeating(
-                &IntentChipButtonIPHBubbleBrowserTest::RegisterTestTracker));
+  IntentChipButtonBrowserUiTest() {
+    std::vector<base::test::FeatureRefAndParams> features_to_enable =
+        apps::test::GetFeaturesToEnableLinkCapturingUX(GetParam());
+
+    scoped_feature_list_.InitWithFeaturesAndParameters(features_to_enable, {});
   }
+
+  // UiBrowserTest:
+  void ShowUi(const std::string& name) override {
+    auto* const web_contents =
+        browser()->GetTabStripModel()->GetActiveWebContents();
+    auto* const tab_helper = IntentPickerTabHelper::From(
+        tabs::TabInterface::GetFromContents(web_contents));
+    base::RunLoop run_loop;
+    tab_helper->SetIconUpdateCallbackForTesting(run_loop.QuitClosure());
+    tab_helper->MaybeShowIconForApps(
+        {{apps::PickerEntryType::kWeb, ui::ImageModel(), "app_id",
+          "Test app"}});
+    run_loop.Run();
+    if (features::IsWebUILocationBarEnabled()) {
+      auto intent_chip = GetIntentChip(browser());
+      EXPECT_TRUE(base::test::RunUntil([&]() {
+        return intent_chip.GetVisible() &&
+               !IsIntentChipFullyCollapsed(browser()) &&
+               intent_chip.GetElement() != nullptr;
+      }));
+    }
+  }
+
+  bool VerifyUi() override {
+    auto intent_chip = GetIntentChip(browser());
+
+    bool is_intent_chip_visible_and_expanded =
+        intent_chip.GetVisible() && !IsIntentChipFullyCollapsed(browser());
+    if (!is_intent_chip_visible_and_expanded) {
+      return false;
+    }
+
+    auto* const location_bar =
+        BrowserElements::From(browser())->GetElement(kLocationBarElementId);
+    EXPECT_NE(location_bar, nullptr);
+    if (!location_bar) {
+      return false;
+    }
+
+    const auto* const test_info =
+        testing::UnitTest::GetInstance()->current_test_info();
+    // Verify against the Skia gold result baseline from crrev.com/c/6092068.
+    // TODO(crbug.com/384567062): Support set_baseline() in UiBrowserTest.
+    const std::string screenshot_name = base::StrCat(
+        {test_info->test_suite_name(), "_", test_info->name(), "_7763146"});
+    return VerifyPixelUi(location_bar, test_info->test_suite_name(),
+                         screenshot_name) != ui::test::ActionResult::kFailed;
+  }
+
+  void WaitForUserDismissal() override {}
 
  private:
-  static void RegisterTestTracker(content::BrowserContext* context) {
-    feature_engagement::TrackerFactory::GetInstance()->SetTestingFactory(
-        context, base::BindRepeating(&CreateTestTracker));
-  }
-  static std::unique_ptr<KeyedService> CreateTestTracker(
-      content::BrowserContext*) {
-    return feature_engagement::CreateTestTracker();
-  }
-
-  base::test::ScopedFeatureList feature_list_;
-  base::CallbackListSubscription subscription_;
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-// TODO(crbug.com/1393003): This test is flaky on all platforms.
-IN_PROC_BROWSER_TEST_F(IntentChipButtonIPHBubbleBrowserTest,
-                       DISABLED_ShowAndCloseIPH) {
-  const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-
-  auto lock = BrowserFeaturePromoController::BlockActiveWindowCheckForTesting();
-  BrowserView* const browser_view =
-      BrowserView::GetBrowserViewForBrowser(browser());
-  ASSERT_TRUE(user_education::test::WaitForFeatureEngagementReady(
-      browser_view->GetFeaturePromoController()));
-
-  NavigateToLaunchingPage(browser());
-  content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
-
-  // Navigate to an in-scope page to see the intent chip and the IPH.
-  ClickLinkAndWaitForIconUpdate(web_contents, in_scope_url);
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-
-  // Wait for the chip to actually be laid out. This will result in the IPH
-  // showing.
-  base::RunLoop chip_loop;
-  NonzeroSizeObserver observer(GetIntentChip(), chip_loop.QuitClosure());
-  chip_loop.Run();
-
-  // Check if the IPH bubble is showing.
-  EXPECT_TRUE(browser_view->IsFeaturePromoActive(
-      feature_engagement::kIPHIntentChipFeature));
-
-  // When we click on the intent chip, the IPH should disappear.
-  ClickIntentChip(/*wait_for_browser=*/false);
-
-  // Check the IPH is no longer showing.
-  EXPECT_FALSE(browser_view->IsFeaturePromoActive(
-      feature_engagement::kIPHIntentChipFeature));
+IN_PROC_BROWSER_TEST_P(IntentChipButtonBrowserUiTest, InvokeUi_default) {
+  ShowAndVerifyUi();
 }
 
-class IntentChipButtonAppIconBrowserTest : public IntentChipButtonBrowserTest {
- public:
-  IntentChipButtonAppIconBrowserTest() {
-    feature_list_.InitAndEnableFeature(apps::features::kIntentChipAppIcon);
-  }
-
- private:
-  base::test::ScopedFeatureList feature_list_;
-};
-
-IN_PROC_BROWSER_TEST_F(IntentChipButtonAppIconBrowserTest, ShowsAppIconInChip) {
-  InstallOverlappingApp();
-
-  const GURL root_url = https_server().GetURL(GetAppUrlHost(), "/");
-  const GURL overlapped_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-  const GURL non_overlapped_url =
-      https_server().GetURL(GetAppUrlHost(), GetOutOfScopeUrlPath());
-
-  content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
-
-  ClickLinkAndWaitForIconUpdate(web_contents, root_url);
-
-  auto icon1 =
-      GetIntentChip()->GetImage(views::Button::ButtonState::STATE_NORMAL);
-  ASSERT_FALSE(IntentPickerTabHelper::FromWebContents(web_contents)
-                   ->app_icon()
-                   .IsEmpty());
-
-  ClickLinkAndWaitForIconUpdate(web_contents, non_overlapped_url);
-
-  // The chip should still be showing the same app icon.
-  auto icon2 =
-      GetIntentChip()->GetImage(views::Button::ButtonState::STATE_NORMAL);
-  ASSERT_TRUE(icon1.BackedBySameObjectAs(icon2));
-
-  ClickLinkAndWaitForIconUpdate(web_contents, overlapped_url);
-
-  // Loading a URL with multiple apps available should switch to a generic icon.
-  auto icon3 =
-      GetIntentChip()->GetImage(views::Button::ButtonState::STATE_NORMAL);
-  ASSERT_FALSE(icon1.BackedBySameObjectAs(icon3));
-  ASSERT_TRUE(IntentPickerTabHelper::FromWebContents(web_contents)
-                  ->app_icon()
-                  .IsEmpty());
-}
-
-#if BUILDFLAG(IS_CHROMEOS)
-// Test fixture class which shows the supported links infobar when opening an
-// app through the intent picker.
-class IntentChipWithInfoBarBrowserTest : public IntentChipButtonBrowserTest {
- public:
-  IntentChipWithInfoBarBrowserTest() {
-    feature_list_.InitWithFeatures(
-        /*enabled_features=*/{apps::features::kIntentChipSkipsPicker,
-                              apps::features::kLinkCapturingInfoBar},
-        /*disabled_features=*/{});
-  }
-
- private:
-  base::test::ScopedFeatureList feature_list_;
-};
-
-IN_PROC_BROWSER_TEST_F(IntentChipWithInfoBarBrowserTest,
-                       ShowsInfoBarOnAppOpen) {
-  const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-
-  DoAndWaitForIntentPickerIconUpdate([this, in_scope_url] {
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), in_scope_url));
-  });
-  EXPECT_TRUE(GetIntentChip()->GetVisible());
-
-  Browser* app_browser = ClickIntentChip(/*wait_for_browser=*/true);
-
-  EXPECT_TRUE(web_app::AppBrowserController::IsForWebApp(app_browser,
-                                                         test_web_app_id()));
-  auto* infobar_manager = infobars::ContentInfoBarManager::FromWebContents(
-      app_browser->tab_strip_model()->GetActiveWebContents());
-  ASSERT_EQ(infobar_manager->infobar_count(), 1u);
-  ASSERT_EQ(
-      infobar_manager->infobar_at(0)->delegate()->GetIdentifier(),
-      infobars::InfoBarDelegate::SUPPORTED_LINKS_INFOBAR_DELEGATE_CHROMEOS);
-}
-
-// Test fixture class which automatically displays the intent picker bubble when
-// a link is clicked to a page with an installed app.
-class IntentChipWithAutoDisplayBrowserTest
-    : public IntentChipButtonBrowserTest {
- private:
-  base::test::ScopedFeatureList feature_list_{
-      apps::features::kLinkCapturingAutoDisplayIntentPicker};
-};
-
-IN_PROC_BROWSER_TEST_F(IntentChipWithAutoDisplayBrowserTest,
-                       ShowsIntentPickerOnNavigation) {
-  const GURL in_scope_url =
-      https_server().GetURL(GetAppUrlHost(), GetInScopeUrlPath());
-
-  NavigateToLaunchingPage(browser());
-  content::WebContents* web_contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
-
-  views::NamedWidgetShownWaiter waiter(views::test::AnyWidgetTestPasskey{},
-                                       IntentPickerBubbleView::kViewClassName);
-
-  ClickLinkAndWait(web_contents, in_scope_url, LinkTarget::SELF, "");
-
-  waiter.WaitIfNeededAndGet();
-  ASSERT_TRUE(IntentPickerBubbleView::intent_picker_bubble());
-}
-#endif  // BUILDFLAG(IS_CHROMEOS)
+// Only run this test once with the parameterization that should be the
+// "default" release for navigation capturing per OS.
+// TODO(crbug.com/502643915): Edit the test to only consider the relevant
+// region.
+INSTANTIATE_TEST_SUITE_P(
+    ,
+    IntentChipButtonBrowserUiTest,
+    testing::Values(apps::test::LinkCapturingFeatureVersion::kV2DefaultOn),
+    [](const auto& param_info) {
+      return IntentChipButtonTestBase::GenerateIntentChipTestName(param_info);
+    });

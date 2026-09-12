@@ -5,6 +5,7 @@
 #ifndef SERVICES_NETWORK_PUBLIC_CPP_CORS_CORS_H_
 #define SERVICES_NETWORK_PUBLIC_CPP_CORS_CORS_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,7 +15,6 @@
 #include "services/network/public/cpp/cors/cors_error_status.h"
 #include "services/network/public/mojom/cors.mojom-shared.h"
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class GURL;
 namespace url {
@@ -29,7 +29,7 @@ namespace header_names {
 
 COMPONENT_EXPORT(NETWORK_CPP)
 extern const char kAccessControlAllowCredentials[];
-// TODO(https://crbug.com/1263483): Remove this.
+// TODO(crbug.com/40202951): Remove this.
 COMPONENT_EXPORT(NETWORK_CPP)
 extern const char kAccessControlAllowExternal[];
 COMPONENT_EXPORT(NETWORK_CPP)
@@ -39,18 +39,14 @@ extern const char kAccessControlAllowMethods[];
 COMPONENT_EXPORT(NETWORK_CPP)
 extern const char kAccessControlAllowOrigin[];
 COMPONENT_EXPORT(NETWORK_CPP)
-extern const char kAccessControlAllowPrivateNetwork[];
-COMPONENT_EXPORT(NETWORK_CPP)
 extern const char kAccessControlMaxAge[];
-// TODO(https://crbug.com/1263483): Remove this.
+// TODO(crbug.com/40202951): Remove this.
 COMPONENT_EXPORT(NETWORK_CPP)
 extern const char kAccessControlRequestExternal[];
 COMPONENT_EXPORT(NETWORK_CPP)
 extern const char kAccessControlRequestHeaders[];
 COMPONENT_EXPORT(NETWORK_CPP)
 extern const char kAccessControlRequestMethod[];
-COMPONENT_EXPORT(NETWORK_CPP)
-extern const char kAccessControlRequestPrivateNetwork[];
 
 }  // namespace header_names
 
@@ -71,17 +67,8 @@ enum class AccessCheckResult {
 COMPONENT_EXPORT(NETWORK_CPP)
 base::expected<void, CorsErrorStatus> CheckAccess(
     const GURL& response_url,
-    const absl::optional<std::string>& allow_origin_header,
-    const absl::optional<std::string>& allow_credentials_header,
-    mojom::CredentialsMode credentials_mode,
-    const url::Origin& origin);
-
-// Performs a CORS access check and reports result and error.
-COMPONENT_EXPORT(NETWORK_CPP)
-base::expected<void, CorsErrorStatus> CheckAccessAndReportMetrics(
-    const GURL& response_url,
-    const absl::optional<std::string>& allow_origin_header,
-    const absl::optional<std::string>& allow_credentials_header,
+    const std::optional<std::string>& allow_origin_header,
+    const std::optional<std::string>& allow_credentials_header,
     mojom::CredentialsMode credentials_mode,
     const url::Origin& origin);
 
@@ -91,19 +78,27 @@ base::expected<void, CorsErrorStatus> CheckAccessAndReportMetrics(
 // schemes that the spec officially supports.
 COMPONENT_EXPORT(NETWORK_CPP)
 bool ShouldCheckCors(const GURL& request_url,
-                     const absl::optional<url::Origin>& request_initiator,
+                     const std::optional<url::Origin>& request_initiator,
                      mojom::RequestMode request_mode);
 
 COMPONENT_EXPORT(NETWORK_CPP)
 bool IsCorsEnabledRequestMode(mojom::RequestMode mode);
 
 // Checks safelisted request parameters.
+//
+// `is_ad_auction_trusted_signals_request` should only be true for Protected
+// Audiences trusted signals requests, which allow the
+// "message/ad-auction-trusted-signals-request" Content-Type without a
+// preflight. This parameter is slated to be removed when the Protect Audiences
+// code is. It is always assumed to be false  by IsCorsSafelistedContentType().
 COMPONENT_EXPORT(NETWORK_CPP)
 bool IsCorsSafelistedMethod(const std::string& method);
 COMPONENT_EXPORT(NETWORK_CPP)
 bool IsCorsSafelistedContentType(const std::string& name);
 COMPONENT_EXPORT(NETWORK_CPP)
-bool IsCorsSafelistedHeader(const std::string& name, const std::string& value);
+bool IsCorsSafelistedHeader(const std::string& name,
+                            const std::string& value,
+                            bool is_ad_auction_trusted_signals_request = false);
 COMPONENT_EXPORT(NETWORK_CPP)
 bool IsNoCorsSafelistedHeaderName(const std::string& name);
 COMPONENT_EXPORT(NETWORK_CPP)
@@ -111,6 +106,12 @@ bool IsPrivilegedNoCorsHeaderName(const std::string& name);
 COMPONENT_EXPORT(NETWORK_CPP)
 bool IsNoCorsSafelistedHeader(const std::string& name,
                               const std::string& value);
+
+// Returns true if `name` is a CORS-safelisted response header name.
+// The match is case-insensitive.
+// https://fetch.spec.whatwg.org/#cors-safelisted-response-header-name
+COMPONENT_EXPORT(NETWORK_CPP)
+bool IsCorsSafelistedResponseHeaderName(std::string_view name);
 
 // https://fetch.spec.whatwg.org/#cors-unsafe-request-header-names
 // |headers| must not contain multiple headers for the same name.
@@ -128,7 +129,7 @@ std::vector<std::string> PrivilegedNoCorsHeaderNames();
 
 // Checks forbidden method in the fetch spec.
 // See https://fetch.spec.whatwg.org/#forbidden-method.
-COMPONENT_EXPORT(NETWORK_CPP) bool IsForbiddenMethod(const std::string& name);
+COMPONENT_EXPORT(NETWORK_CPP) bool IsForbiddenMethod(std::string_view name);
 
 // Returns true if |type| is a response type which makes a response
 // CORS-same-origin. See https://html.spec.whatwg.org/C/#cors-same-origin.

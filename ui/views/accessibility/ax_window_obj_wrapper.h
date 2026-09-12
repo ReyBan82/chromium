@@ -20,10 +20,6 @@
 #include "ui/base/ime/input_method_observer.h"
 #include "ui/views/accessibility/ax_aura_obj_wrapper.h"
 
-namespace ui {
-class InputMethod;
-}
-
 namespace views {
 class AXAuraObjCache;
 
@@ -41,7 +37,8 @@ class AXWindowObjWrapper : public AXAuraObjWrapper,
   // AXAuraObjWrapper overrides.
   bool HandleAccessibleAction(const ui::AXActionData& action) override;
   AXAuraObjWrapper* GetParent() override;
-  void GetChildren(std::vector<AXAuraObjWrapper*>* out_children) override;
+  void GetChildren(std::vector<raw_ptr<AXAuraObjWrapper, VectorExperimental>>*
+                       out_children) override;
   void Serialize(ui::AXNodeData* out_node_data) override;
   ui::AXNodeID GetUniqueId() const final;
   std::string ToString() const override;
@@ -73,13 +70,11 @@ class AXWindowObjWrapper : public AXAuraObjWrapper,
   // Fires an accessibility event.
   void FireEvent(ax::mojom::Event event_type);
 
-  gfx::Rect GetCaretBounds(const ui::TextInputClient* client);
-
   const raw_ptr<aura::Window> window_;
 
   const bool is_root_window_;
 
-  const ui::AXUniqueId unique_id_;
+  const ui::AXUniqueId unique_id_{ui::AXUniqueId::Create()};
 
   // Whether OnWindowDestroying has happened for |window_|. Used to suppress
   // further events from |window| after OnWindowDestroying. Otherwise, dangling

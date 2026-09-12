@@ -2,24 +2,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import print_function
-
+import logging
 import math
 import os
 import random
 import sys
-from typing import Any, List
+from typing import Any
 import unittest
 
+from telemetry.util import image_util
+from telemetry.util import rgba_color
+
+import gpu_path_util
 from gpu_tests import color_profile_manager
 from gpu_tests import common_browser_args as cba
 from gpu_tests import common_typing as ct
 from gpu_tests import gpu_integration_test
+from gpu_tests.util import screenshot_utils
 
-import gpu_path_util
-
-from telemetry.util import image_util
-from telemetry.util import rgba_color
+ASAN_SCREENSHOT_MULTIPLIER = 3
 
 
 class ScreenshotSyncIntegrationTest(gpu_integration_test.GpuIntegrationTest):
@@ -35,53 +36,80 @@ class ScreenshotSyncIntegrationTest(gpu_integration_test.GpuIntegrationTest):
   @classmethod
   def AddCommandlineArgs(cls, parser: ct.CmdArgParser) -> None:
     super(ScreenshotSyncIntegrationTest, cls).AddCommandlineArgs(parser)
-    parser.add_option(
-        '--dont-restore-color-profile-after-test',
-        dest='dont_restore_color_profile_after_test',
-        action='store_true',
-        default=False,
-        help="(Mainly on Mac) don't restore the system's original color "
-        'profile after the test completes; leave the system using the sRGB '
-        'color profile. See http://crbug.com/784456.')
+    parser.add_argument(
+      '--dont-restore-color-profile-after-test',
+      action='store_true',
+      default=False,
+      help=(
+        "(Mainly on Mac) don't restore the system's original color "
+        'profile after the test completes; leave the system using the '
+        'sRGB color profile. See http://crbug.com/784456.'
+      ),
+    )
 
   @classmethod
   def SetUpProcess(cls) -> None:
     super(cls, ScreenshotSyncIntegrationTest).SetUpProcess()
     options = cls.GetOriginalFinderOptions()
     color_profile_manager.ForceUntilExitSRGB(
-        options.dont_restore_color_profile_after_test)
+      options.dont_restore_color_profile_after_test
+    )
     cls.CustomizeBrowserArgs([])
     cls.StartBrowser()
     cls.SetStaticServerDirs([gpu_path_util.GPU_DATA_DIR])
 
   @classmethod
-  def GenerateBrowserArgs(cls, additional_args: List[str]) -> List[str]:
+  def GenerateBrowserArgs(cls, additional_args: list[str]) -> list[str]:
     """Adds default arguments to |additional_args|.
 
     See the parent class' method documentation for additional information.
     """
-    default_args = super(ScreenshotSyncIntegrationTest,
-                         cls).GenerateBrowserArgs(additional_args)
-    default_args.extend([
+    default_args = super(
+      ScreenshotSyncIntegrationTest, cls
+    ).GenerateBrowserArgs(additional_args)
+    default_args.extend(
+      [
         cba.FORCE_COLOR_PROFILE_SRGB,
         cba.ENSURE_FORCED_COLOR_PROFILE,
         # --test-type=gpu is used to suppress the "Google API Keys are
         # missing" and "Chrome for Testing" infobars, which cause flakiness
         # in tests.
         cba.TEST_TYPE_GPU,
-    ])
+      ]
+    )
+
+    # TODO(crbug.com/394842006): This flag is an android optimization which
+    # results in the toolbar hairline # being always drawn. The hariline
+    # overlaps with the page's contents and interferes with the tests. Disable
+    # it so the hairline isn't drawn.
+    default_args.extend(
+      ['--disable-features=AlwaysDrawCompositedToolbarHairline']
+    )
+
     return default_args
 
   @classmethod
   def GenerateGpuTests(cls, options: ct.ParsedCmdArgs) -> ct.TestGenerator:
-    yield ('ScreenshotSync_SWRasterWithCanvas', 'screenshot_sync_canvas.html',
-           ['--disable-gpu-rasterization'])
-    yield ('ScreenshotSync_SWRasterWithDivs', 'screenshot_sync_divs.html',
-           ['--disable-gpu-rasterization'])
-    yield ('ScreenshotSync_GPURasterWithCanvas', 'screenshot_sync_canvas.html',
-           [cba.ENABLE_GPU_RASTERIZATION])
-    yield ('ScreenshotSync_GPURasterWithDivs', 'screenshot_sync_divs.html',
-           [cba.ENABLE_GPU_RASTERIZATION])
+    yield (
+      'ScreenshotSync_SWRasterWithCanvas',
+      'screenshot_sync_canvas.html',
+      ['--disable-gpu-rasterization'],
+    )
+    yield (
+      'ScreenshotSync_SWRasterWithDivs',
+      'screenshot_sync_divs.html',
+      ['--disable-gpu-rasterization'],
+    )
+    yield (
+      'ScreenshotSync_GPURasterWithCanvas',
+      'screenshot_sync_canvas.html',
+      [cba.ENABLE_GPU_RASTERIZATION],
+    )
+    yield (
+      'ScreenshotSync_GPURasterWithDivs',
+      'screenshot_sync_divs.html',
+      [cba.ENABLE_GPU_RASTERIZATION],
+    )
 
   def _Navigate(self, test_path: str) -> None:
     url = self.UrlOfStaticFilePath(test_path)
@@ -91,9 +119,19 @@ class ScreenshotSyncIntegrationTest(gpu_integration_test.GpuIntegrationTest):
     # conditions.
     self.tab.action_runner.Navigate(url)
 
-  def _CheckColorMatchAtLocation(self, expectedRGB: rgba_color.RgbaColor,
-                                 screenshot: ct.Screenshot, x: int,
-                                 y: int) -> None:
+  def _GetScreenshotTimeout(self):
+    timeout = 10
+    if self._is_asan:
+      timeout *= ASAN_SCREENSHOT_MULTIPLIER
+    return timeout
+
+  def _CheckColorMatchAtLocation(
+    self,
+    expectedRGB: rgba_color.RgbaColor,
+    screenshot: ct.Screenshot,
+    x: int,
+    y: int,
+  ) -> None:
     pixel_value = image_util.GetPixelColor(screenshot, x, y)
     # Allow for off-by-one errors due to color conversion.
     tolerance = 1
@@ -102,33 +140,49 @@ class ScreenshotSyncIntegrationTest(gpu_integration_test.GpuIntegrationTest):
     if self.tab.browser.platform.GetDeviceTypeName() == 'Pixel 4':
       tolerance = 7
     if not expectedRGB.IsEqual(pixel_value, tolerance):
-      error_message = ('Color mismatch at (%d, %d): expected (%d, %d, %d), ' +
-                       'got (%d, %d, %d)') % (
-                           x, y, expectedRGB.r, expectedRGB.g, expectedRGB.b,
-                           pixel_value.r, pixel_value.g, pixel_value.b)
+      error_message = (
+        'Color mismatch at (%d, %d): expected (%d, %d, %d), '
+        + 'got (%d, %d, %d)'
+      ) % (
+        x,
+        y,
+        expectedRGB.r,
+        expectedRGB.g,
+        expectedRGB.b,
+        pixel_value.r,
+        pixel_value.g,
+        pixel_value.b,
+      )
       self.fail(error_message)
 
   def _CheckScreenshot(self) -> None:
     canvasRGB = rgba_color.RgbaColor(
-        random.randint(0, 255), random.randint(0, 255), random.randint(0, 255),
-        255)
+      random.randint(0, 255),
+      random.randint(0, 255),
+      random.randint(0, 255),
+      255,
+    )
     tab = self.tab
-    tab.EvaluateJavaScript('window.draw({{ red }}, {{ green }}, {{ blue }});',
-                           red=canvasRGB.r,
-                           green=canvasRGB.g,
-                           blue=canvasRGB.b)
-    screenshot = tab.Screenshot(10)
+    tab.EvaluateJavaScript(
+      'window.draw({{ red }}, {{ green }}, {{ blue }});',
+      red=canvasRGB.r,
+      green=canvasRGB.g,
+      blue=canvasRGB.b,
+    )
+    screenshot = tab.Screenshot(self._GetScreenshotTimeout())
+
+    effective_dpr = screenshot_utils.GetEffectiveDpr(tab)
     # Avoid checking along antialiased boundary due to limited Adreno 3xx
     # interpolation precision (crbug.com/847984). We inset by one CSS pixel
     # adjusted by the device pixel ratio.
-    inset = int(math.ceil(tab.EvaluateJavaScript('window.devicePixelRatio')))
+    inset = int(math.ceil(effective_dpr))
     # It seems that we should be able to set start_x to 2 * inset (one to
     # account for the inner div having left=1 and one to avoid sampling the
     # aa edge). For reasons not fully understood this is insufficent on
     # several bots (N9, 6P, mac-rel).
     start_x = 10
     start_y = inset
-    outer_size = 256 - inset
+    outer_size = int(math.floor(256 * effective_dpr)) - inset
     skip = 10
     for y in range(start_y, outer_size, skip):
       for x in range(start_x, outer_size, skip):
@@ -139,19 +193,23 @@ class ScreenshotSyncIntegrationTest(gpu_integration_test.GpuIntegrationTest):
     self.RestartBrowserIfNecessaryWithArgs([browser_arg])
     self._Navigate(test_path)
     repetitions = 20
-    for _ in range(0, repetitions):
+    for i in range(0, repetitions):
+      logging.info('Running iteration %d out of %d', i + 1, repetitions)
       self._CheckScreenshot()
 
   @classmethod
-  def ExpectationsFiles(cls) -> List[str]:
+  def ExpectationsFiles(cls) -> list[str]:
     return [
-        os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 'test_expectations',
-            'screenshot_sync_expectations.txt')
+      os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'test_expectations',
+        'screenshot_sync_expectations.txt',
+      )
     ]
 
 
-def load_tests(loader: unittest.TestLoader, tests: Any,
-               pattern: Any) -> unittest.TestSuite:
+def load_tests(
+  loader: unittest.TestLoader, tests: Any, pattern: Any
+) -> unittest.TestSuite:
   del loader, tests, pattern  # Unused.
   return gpu_integration_test.LoadAllTestsInModule(sys.modules[__name__])

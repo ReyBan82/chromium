@@ -4,10 +4,12 @@
 
 #include "components/download/internal/common/parallel_download_job.h"
 
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
 #include "base/test/mock_callback.h"
 #include "base/test/task_environment.h"
@@ -40,10 +42,10 @@ class MockDownloadDestinationObserver : public DownloadDestinationObserver {
   void DestinationError(
       DownloadInterruptReason reason,
       int64_t bytes_so_far,
-      std::unique_ptr<crypto::SecureHash> hash_state) override {}
+      std::optional<crypto::hash::Hasher> hash_state) override {}
   void DestinationCompleted(
       int64_t total_bytes,
-      std::unique_ptr<crypto::SecureHash> hash_state) override {}
+      std::optional<crypto::hash::Hasher> hash_state) override {}
   MOCK_METHOD2(CurrentUpdateStatus, void(int64_t, int64_t));
 };
 

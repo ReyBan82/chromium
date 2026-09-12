@@ -9,10 +9,10 @@
 #include "chrome/browser/android/android_theme_resources.h"
 #include "chrome/browser/android/resource_mapper.h"
 #include "chrome/browser/lookalikes/safety_tip_ui_helper.h"
-#include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "components/messages/android/mock_message_dispatcher_bridge.h"
 #include "components/strings/grit/components_strings.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "ui/base/l10n/l10n_util.h"
 
@@ -23,11 +23,13 @@ constexpr char16_t kSuggestUrl[] = u"http://google.com";
 
 class TestNavigationDelegate : public content::WebContentsDelegate {
  public:
-  ~TestNavigationDelegate() override {}
+  ~TestNavigationDelegate() override = default;
   // content::WebContentsDelegate:
   content::WebContents* OpenURLFromTab(
       content::WebContents* source,
-      const content::OpenURLParams& params) override {
+      const content::OpenURLParams& params,
+      base::OnceCallback<void(content::NavigationHandle&)>
+          navigation_handle_callback) override {
     opened_++;
     return source;
   }
@@ -174,7 +176,7 @@ TEST_F(SafetyTipMessageDelegateAndroidTest, MessagePropertyValuesLookAlike) {
   EXPECT_EQ(l10n_util::GetStringUTF16(GetSafetyTipLeaveButtonId(status)),
             GetMessageWrapper()->GetPrimaryButtonText());
   EXPECT_EQ(
-      ResourceMapper::MapToJavaDrawableId(IDR_ANDROID_INFOBAR_SAFETYTIP_SHIELD),
+      ResourceMapper::MapToJavaDrawableId(IDR_ANDROID_MESSAGE_SAFETYTIP_SHIELD),
       GetMessageWrapper()->GetIconResourceId());
   EXPECT_EQ(ResourceMapper::MapToJavaDrawableId(IDR_ANDROID_MESSAGE_SETTINGS),
             GetMessageWrapper()->GetSecondaryIconResourceId());

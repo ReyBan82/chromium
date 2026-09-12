@@ -3,18 +3,19 @@
 // found in the LICENSE file.
 
 #include "media/base/vector_math.h"
-#include "media/base/vector_math_testing.h"
 
 #include <algorithm>
 #include <cmath>
 
 #include "base/check_op.h"
+#include "base/containers/span.h"
 #include "base/cpu.h"
 #include "base/memory/aligned_memory.h"
 #include "build/build_config.h"
+#include "media/base/vector_math_testing.h"
 
 // NaCl does not allow intrinsics.
-#if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_NACL)
+#if defined(ARCH_CPU_X86_FAMILY)
 #include <immintrin.h>
 // Including these headers directly should generally be avoided. Since
 // Chrome is compiled with -msse3 (the minimal requirement), we include the
@@ -28,14 +29,21 @@
 #include <arm_neon.h>
 #endif
 
-namespace media {
-namespace vector_math {
+namespace media::vector_math {
 
-void FMAC(const float src[], float scale, int len, float dest[]) {
-  DCHECK(base::IsAligned(src, kRequiredAlignment));
-  DCHECK(base::IsAligned(dest, kRequiredAlignment));
+static constexpr float kClampMin = -1.0f;
+static constexpr float kClampMax = 1.0f;
+static constexpr float kSilence = 0.0f;
+
+void FMAC(base::span<const float> src, float scale, base::span<float> dest) {
+  if (src.empty()) {
+    return;
+  }
+  CHECK_LE(src.size(), dest.size());
+  DCHECK(base::IsAligned(src.data(), kRequiredAlignment));
+  DCHECK(base::IsAligned(dest.data(), kRequiredAlignment));
   static const auto fmac_func = [] {
-#if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_NACL)
+#if defined(ARCH_CPU_X86_FAMILY)
     base::CPU cpu;
     if (cpu.has_avx2() && cpu.has_fma3())
       return FMAC_AVX2;
@@ -47,19 +55,30 @@ void FMAC(const float src[], float scale, int len, float dest[]) {
 #endif
   }();
 
-  return fmac_func(src, scale, len, dest);
+  return fmac_func(src, scale, dest);
 }
 
-void FMAC_C(const float src[], float scale, int len, float dest[]) {
-  for (int i = 0; i < len; ++i)
+void FMAC_C(base::span<const float> src, float scale, base::span<float> dest) {
+  // Optimization: This check allows the compiler to skip the bounds checks on
+  // assign. Removing this causes measurable performance regression in
+  // VectorMathPerfTest.FMAC_unoptimized
+  CHECK_LE(src.size(), dest.size());
+  for (size_t i = 0; i < src.size(); ++i) {
     dest[i] += src[i] * scale;
+  }
 }
 
-void FMUL(const float src[], float scale, int len, float dest[]) {
-  DCHECK(base::IsAligned(src, kRequiredAlignment));
-  DCHECK(base::IsAligned(dest, kRequiredAlignment));
+void FMUL(base::span<const float> src, float scale, base::span<float> dest) {
+  if (src.empty()) {
+    return;
+  }
+  // Optimization: This check potentially allows the compiler to skip the bounds
+  // checks.
+  CHECK_LE(src.size(), dest.size());
+  DCHECK(base::IsAligned(src.data(), kRequiredAlignment));
+  DCHECK(base::IsAligned(dest.data(), kRequiredAlignment));
   static const auto fmul_func = [] {
-#if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_NACL)
+#if defined(ARCH_CPU_X86_FAMILY)
     base::CPU cpu;
     if (cpu.has_avx2())
       return FMUL_AVX2;
@@ -71,19 +90,63 @@ void FMUL(const float src[], float scale, int len, float dest[]) {
 #endif
   }();
 
-  return fmul_func(src, scale, len, dest);
+  return fmul_func(src, scale, dest);
 }
 
-void FMUL_C(const float src[], float scale, int len, float dest[]) {
-  for (int i = 0; i < len; ++i)
+void FMUL_C(base::span<const float> src, float scale, base::span<float> dest) {
+  // Optimization: This check allows the compiler to skip the bounds checks on
+  // assign. Removing this causes measurable performance regression in
+  // VectorMathPerfTest.FMUL_unoptimized
+  CHECK_LE(src.size(), dest.size());
+  for (size_t i = 0; i < src.size(); ++i) {
     dest[i] = src[i] * scale;
+  }
 }
 
-std::pair<float, float> EWMAAndMaxPower(
-    float initial_value, const float src[], int len, float smoothing_factor) {
-  DCHECK(base::IsAligned(src, kRequiredAlignment));
+void FCLAMP(base::span<const float> src, base::span<float> dest) {
+  if (src.empty()) {
+    return;
+  }
+  CHECK_LE(src.size(), dest.size());
+  CHECK(base::IsAligned(src.data(), kRequiredAlignment));
+  CHECK(base::IsAligned(dest.data(), kRequiredAlignment));
+  static const auto fclamp_func = [] {
+#if defined(ARCH_CPU_X86_FAMILY)
+    base::CPU cpu;
+    if (cpu.has_avx())
+      return FCLAMP_AVX;
+    return FCLAMP_SSE;
+#elif defined(ARCH_CPU_ARM_FAMILY) && defined(USE_NEON)
+    return FCLAMP_NEON;
+#else
+    return FCLAMP_C;
+#endif
+  }();
+
+  return fclamp_func(src, dest);
+}
+
+void FCLAMP_C(base::span<const float> src, base::span<float> dest) {
+  // Optimization: This check potentially allows the compiler to skip the bounds
+  // checks.
+  CHECK_LE(src.size(), dest.size());
+  for (size_t i = 0; i < src.size(); ++i) {
+    const float sample = src[i];
+    const float temp = std::isnan(sample) ? kSilence : sample;
+    // Using std::max + std::min is faster than std::clamp on official builds.
+    // Indeed, there is an extra instruction to ensure conformity with the C++
+    // standard for some special cases. E.g., `std::clamp(-0.0f, +0.0f, +0.0f)`
+    // must return `-0.0f`.
+    dest[i] = std::max(std::min(temp, kClampMax), kClampMin);
+  }
+}
+
+std::pair<float, float> EWMAAndMaxPower(float initial_value,
+                                        base::span<const float> src,
+                                        float smoothing_factor) {
+  DCHECK(base::IsAligned(src.data(), kRequiredAlignment));
   static const auto ewma_and_max_power_func = [] {
-#if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_NACL)
+#if defined(ARCH_CPU_X86_FAMILY)
     base::CPU cpu;
     if (cpu.has_avx2() && cpu.has_fma3())
       return EWMAAndMaxPower_AVX2;
@@ -95,16 +158,16 @@ std::pair<float, float> EWMAAndMaxPower(
 #endif
   }();
 
-  return ewma_and_max_power_func(initial_value, src, len, smoothing_factor);
+  return ewma_and_max_power_func(initial_value, src, smoothing_factor);
 }
 
-std::pair<float, float> EWMAAndMaxPower_C(
-    float initial_value, const float src[], int len, float smoothing_factor) {
+std::pair<float, float> EWMAAndMaxPower_C(float initial_value,
+                                          base::span<const float> src,
+                                          float smoothing_factor) {
   std::pair<float, float> result(initial_value, 0.0f);
   const float weight_prev = 1.0f - smoothing_factor;
-  for (int i = 0; i < len; ++i) {
+  for (const float sample : src) {
     result.first *= weight_prev;
-    const float sample = src[i];
     const float sample_squared = sample * sample;
     result.first += sample_squared * smoothing_factor;
     result.second = std::max(result.second, sample_squared);
@@ -112,123 +175,234 @@ std::pair<float, float> EWMAAndMaxPower_C(
   return result;
 }
 
-#if defined(ARCH_CPU_X86_FAMILY) && !BUILDFLAG(IS_NACL)
-void FMUL_SSE(const float src[], float scale, int len, float dest[]) {
-  const int rem = len % 4;
-  const int last_index = len - rem;
+#if defined(ARCH_CPU_X86_FAMILY)
+// AVX functions prefer 32-byte alignment for optimal performance.
+// TODO(crbug.com/40756517): Remove this and related checks when AudioBus
+// |kChannelAlignment| is updated to 32.
+static constexpr size_t kAVXAlignment = 32;
+
+void FMUL_SSE(base::span<const float> src,
+              float scale,
+              base::span<float> dest) {
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
   __m128 m_scale = _mm_set_ps1(scale);
-  for (int i = 0; i < last_index; i += 4)
-    _mm_store_ps(dest + i, _mm_mul_ps(_mm_load_ps(src + i), m_scale));
+  for (size_t i = 0; i < last_index; i += 4) {
+    _mm_store_ps(&dest[i], _mm_mul_ps(_mm_load_ps(&src[i]), m_scale));
+  }
 
   // Handle any remaining values that wouldn't fit in an SSE pass.
-  for (int i = last_index; i < len; ++i)
+  for (size_t i = last_index; i < src.size(); ++i) {
     dest[i] = src[i] * scale;
+  }
 }
 
-__attribute__((target("avx2"))) void FMUL_AVX2(const float src[],
+__attribute__((target("avx2"))) void FMUL_AVX2(base::span<const float> src,
                                                float scale,
-                                               int len,
-                                               float dest[]) {
-  const int rem = len % 8;
-  const int last_index = len - rem;
+                                               base::span<float> dest) {
+  const size_t rem = src.size() % 8;
+  const size_t last_index = src.size() - rem;
   __m256 m_scale = _mm256_set1_ps(scale);
-  // TODO(crbug.com/1191301): Remove below alignment conditionals when AudioBus
+  // TODO(crbug.com/40756517): Remove below alignment conditionals when AudioBus
   // |kChannelAlignment| updated to 32.
-  bool aligned_src = (reinterpret_cast<uintptr_t>(src) & 0x1F) == 0;
-  bool aligned_dest = (reinterpret_cast<uintptr_t>(dest) & 0x1F) == 0;
+  bool aligned_src = base::IsAligned(src.data(), kAVXAlignment);
+  bool aligned_dest = base::IsAligned(dest.data(), kAVXAlignment);
   if (aligned_src) {
     if (aligned_dest) {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_store_ps(dest + i,
-                        _mm256_mul_ps(_mm256_load_ps(src + i), m_scale));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_store_ps(&dest[i],
+                        _mm256_mul_ps(_mm256_load_ps(&src[i]), m_scale));
+      }
     } else {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_storeu_ps(dest + i,
-                         _mm256_mul_ps(_mm256_load_ps(src + i), m_scale));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_storeu_ps(&dest[i],
+                         _mm256_mul_ps(_mm256_load_ps(&src[i]), m_scale));
+      }
     }
   } else {
     if (aligned_dest) {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_store_ps(dest + i,
-                        _mm256_mul_ps(_mm256_loadu_ps(src + i), m_scale));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_store_ps(&dest[i],
+                        _mm256_mul_ps(_mm256_loadu_ps(&src[i]), m_scale));
+      }
     } else {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_storeu_ps(dest + i,
-                         _mm256_mul_ps(_mm256_loadu_ps(src + i), m_scale));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_storeu_ps(&dest[i],
+                         _mm256_mul_ps(_mm256_loadu_ps(&src[i]), m_scale));
+      }
     }
   }
 
   // Handle any remaining values that wouldn't fit in an SSE pass.
-  for (int i = last_index; i < len; ++i)
+  for (size_t i = last_index; i < src.size(); ++i) {
     dest[i] = src[i] * scale;
+  }
 }
 
-void FMAC_SSE(const float src[], float scale, int len, float dest[]) {
-  const int rem = len % 4;
-  const int last_index = len - rem;
+void FMAC_SSE(base::span<const float> src,
+              float scale,
+              base::span<float> dest) {
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
   __m128 m_scale = _mm_set_ps1(scale);
-  for (int i = 0; i < last_index; i += 4) {
-    _mm_store_ps(dest + i, _mm_add_ps(_mm_load_ps(dest + i),
-                 _mm_mul_ps(_mm_load_ps(src + i), m_scale)));
+  for (size_t i = 0; i < last_index; i += 4) {
+    _mm_store_ps(&dest[i],
+                 _mm_add_ps(_mm_load_ps(&dest[i]),
+                            _mm_mul_ps(_mm_load_ps(&src[i]), m_scale)));
   }
 
   // Handle any remaining values that wouldn't fit in an SSE pass.
-  for (int i = last_index; i < len; ++i)
+  for (size_t i = last_index; i < src.size(); ++i) {
     dest[i] += src[i] * scale;
+  }
 }
 
-__attribute__((target("avx2,fma"))) void FMAC_AVX2(const float src[],
+__attribute__((target("avx2,fma"))) void FMAC_AVX2(base::span<const float> src,
                                                    float scale,
-                                                   int len,
-                                                   float dest[]) {
-  const int rem = len % 8;
-  const int last_index = len - rem;
+                                                   base::span<float> dest) {
+  const size_t rem = src.size() % 8;
+  const size_t last_index = src.size() - rem;
   __m256 m_scale = _mm256_set1_ps(scale);
-  // TODO(crbug.com/1191301): Remove below alignment conditionals when AudioBus
+  // TODO(crbug.com/40756517): Remove below alignment conditionals when AudioBus
   // |kChannelAlignment| updated to 32.
-  bool aligned_src = (reinterpret_cast<uintptr_t>(src) & 0x1F) == 0;
-  bool aligned_dest = (reinterpret_cast<uintptr_t>(dest) & 0x1F) == 0;
+  bool aligned_src = base::IsAligned(src.data(), kAVXAlignment);
+  bool aligned_dest = base::IsAligned(dest.data(), kAVXAlignment);
   if (aligned_src) {
     if (aligned_dest) {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_store_ps(dest + i,
-                        _mm256_fmadd_ps(_mm256_load_ps(src + i), m_scale,
-                                        _mm256_load_ps(dest + i)));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_store_ps(&dest[i],
+                        _mm256_fmadd_ps(_mm256_load_ps(&src[i]), m_scale,
+                                        _mm256_load_ps(&dest[i])));
+      }
     } else {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_storeu_ps(dest + i,
-                         _mm256_fmadd_ps(_mm256_load_ps(src + i), m_scale,
-                                         _mm256_loadu_ps(dest + i)));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_storeu_ps(&dest[i],
+                         _mm256_fmadd_ps(_mm256_load_ps(&src[i]), m_scale,
+                                         _mm256_loadu_ps(&dest[i])));
+      }
     }
   } else {
     if (aligned_dest) {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_store_ps(dest + i,
-                        _mm256_fmadd_ps(_mm256_loadu_ps(src + i), m_scale,
-                                        _mm256_load_ps(dest + i)));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_store_ps(&dest[i],
+                        _mm256_fmadd_ps(_mm256_loadu_ps(&src[i]), m_scale,
+                                        _mm256_load_ps(&dest[i])));
+      }
     } else {
-      for (int i = 0; i < last_index; i += 8)
-        _mm256_storeu_ps(dest + i,
-                         _mm256_fmadd_ps(_mm256_loadu_ps(src + i), m_scale,
-                                         _mm256_loadu_ps(dest + i)));
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_storeu_ps(&dest[i],
+                         _mm256_fmadd_ps(_mm256_loadu_ps(&src[i]), m_scale,
+                                         _mm256_loadu_ps(&dest[i])));
+      }
     }
   }
 
   // Handle any remaining values that wouldn't fit in an SSE pass.
-  for (int i = last_index; i < len; ++i)
+  for (size_t i = last_index; i < src.size(); ++i) {
     dest[i] += src[i] * scale;
+  }
+}
+void FCLAMP_SSE(base::span<const float> src, base::span<float> dest) {
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
+  const __m128 m_min = _mm_set_ps1(kClampMin);
+  const __m128 m_max = _mm_set_ps1(kClampMax);
+  for (size_t i = 0; i < last_index; i += 4) {
+    const __m128 values = _mm_load_ps(&src[i]);
+    // Compare each value with itself. Since NaN != NaN, we end up with a mask
+    // with 0s instead of NaNs, and 1s for the original values.
+    const __m128 comparisons = _mm_cmpeq_ps(values, values);
+    // Zero-out all NaNs by applying the mask with a logical AND.
+    const __m128 sanitized_values = _mm_and_ps(comparisons, values);
+    _mm_store_ps(&dest[i],
+                 _mm_min_ps(_mm_max_ps(sanitized_values, m_min), m_max));
+  }
+
+  // Handle any remaining values that wouldn't fit in an SSE pass.
+  for (size_t i = last_index; i < src.size(); ++i) {
+    const float sample = src[i];
+    const float temp = std::isnan(sample) ? kSilence : sample;
+    // Using std::max + std::min is faster than std::clamp on official builds.
+    dest[i] = std::max(std::min(temp, kClampMax), kClampMin);
+  }
+}
+
+inline __attribute__((target("avx"))) __m256 SanitizeNan(const __m256 values) {
+  // Compare each value with itself. Since NaN != NaN, we end up with a mask
+  // with 0s instead of NaNs, and 1s for the original values.
+  const __m256 valid_mask = _mm256_cmp_ps(values, values, _CMP_EQ_OQ);
+
+  // Zero-out all NaNs by applying the mask with a logical AND.
+  return _mm256_and_ps(valid_mask, values);
+}
+
+__attribute__((target("avx"))) void FCLAMP_AVX(base::span<const float> src,
+                                               base::span<float> dest) {
+  const size_t rem = src.size() % 8;
+  const size_t last_index = src.size() - rem;
+  const __m256 m_max = _mm256_set1_ps(kClampMax);
+  const __m256 m_min = _mm256_set1_ps(kClampMin);
+
+  // TODO(crbug.com/40756517): Remove below alignment conditionals when AudioBus
+  // |kChannelAlignment| updated to 32.
+  bool aligned_src = base::IsAligned(src.data(), kAVXAlignment);
+  bool aligned_dest = base::IsAligned(dest.data(), kAVXAlignment);
+  if (aligned_src) {
+    if (aligned_dest) {
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_store_ps(
+            &dest[i],
+            _mm256_max_ps(
+                _mm256_min_ps(SanitizeNan(_mm256_load_ps(&src[i])), m_max),
+                m_min));
+      }
+    } else {
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_storeu_ps(
+            &dest[i],
+            _mm256_max_ps(
+                _mm256_min_ps(SanitizeNan(_mm256_load_ps(&src[i])), m_max),
+                m_min));
+      }
+    }
+  } else {
+    if (aligned_dest) {
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_store_ps(
+            &dest[i],
+            _mm256_max_ps(
+                _mm256_min_ps(SanitizeNan(_mm256_loadu_ps(&src[i])), m_max),
+                m_min));
+      }
+    } else {
+      for (size_t i = 0; i < last_index; i += 8) {
+        _mm256_storeu_ps(
+            &dest[i],
+            _mm256_max_ps(
+                _mm256_min_ps(SanitizeNan(_mm256_loadu_ps(&src[i])), m_max),
+                m_min));
+      }
+    }
+  }
+
+  // Handle any remaining values that wouldn't fit in an AVX2 pass.
+  for (size_t i = last_index; i < src.size(); ++i) {
+    const float sample = src[i];
+    const float temp = std::isnan(sample) ? kSilence : sample;
+    // Using std::max + std::min is faster than std::clamp on official builds.
+    dest[i] = std::max(std::min(temp, kClampMax), kClampMin);
+  }
 }
 
 // Convenience macro to extract float 0 through 3 from the vector |a|.  This is
 // needed because compilers other than clang don't support access via
 // operator[]().
 #define EXTRACT_FLOAT(a, i) \
-    (i == 0 ? \
-         _mm_cvtss_f32(a) : \
-         _mm_cvtss_f32(_mm_shuffle_ps(a, a, i)))
+  (i == 0 ? _mm_cvtss_f32(a) : _mm_cvtss_f32(_mm_shuffle_ps(a, a, i)))
 
-std::pair<float, float> EWMAAndMaxPower_SSE(
-    float initial_value, const float src[], int len, float smoothing_factor) {
+std::pair<float, float> EWMAAndMaxPower_SSE(float initial_value,
+                                            base::span<const float> src,
+                                            float smoothing_factor) {
   // When the recurrence is unrolled, we see that we can split it into 4
   // separate lanes of evaluation:
   //
@@ -241,8 +415,8 @@ std::pair<float, float> EWMAAndMaxPower_SSE(
   // Thus, the strategy here is to compute z[n], z[n-1], z[n-2], and z[n-3] in
   // each of the 4 lanes, and then combine them to give y[n].
 
-  const int rem = len % 4;
-  const int last_index = len - rem;
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
 
   const __m128 smoothing_factor_x4 = _mm_set_ps1(smoothing_factor);
   const float weight_prev = 1.0f - smoothing_factor;
@@ -256,16 +430,15 @@ std::pair<float, float> EWMAAndMaxPower_SSE(
   // 0, respectively.
   __m128 max_x4 = _mm_setzero_ps();
   __m128 ewma_x4 = _mm_setr_ps(0.0f, 0.0f, 0.0f, initial_value);
-  int i;
-  for (i = 0; i < last_index; i += 4) {
+  for (size_t i = 0; i < last_index; i += 4) {
     ewma_x4 = _mm_mul_ps(ewma_x4, weight_prev_4th_x4);
-    const __m128 sample_x4 = _mm_load_ps(src + i);
+    const __m128 sample_x4 = _mm_load_ps(&src[i]);
     const __m128 sample_squared_x4 = _mm_mul_ps(sample_x4, sample_x4);
     max_x4 = _mm_max_ps(max_x4, sample_squared_x4);
     // Note: The compiler optimizes this to a single multiply-and-accumulate
     // instruction:
-    ewma_x4 = _mm_add_ps(ewma_x4,
-                         _mm_mul_ps(sample_squared_x4, smoothing_factor_x4));
+    ewma_x4 =
+        _mm_add_ps(ewma_x4, _mm_mul_ps(sample_squared_x4, smoothing_factor_x4));
   }
 
   // y[n] = z[n] + (1-a)^1(z[n-1]) + (1-a)^2(z[n-2]) + (1-a)^3(z[n-3])
@@ -285,9 +458,8 @@ std::pair<float, float> EWMAAndMaxPower_SSE(
   std::pair<float, float> result(ewma, EXTRACT_FLOAT(max_x4, 0));
 
   // Handle remaining values at the end of |src|.
-  for (; i < len; ++i) {
+  for (const float sample : src.subspan(last_index)) {
     result.first *= weight_prev;
-    const float sample = src[i];
     const float sample_squared = sample * sample;
     result.first += sample_squared * smoothing_factor;
     result.second = std::max(result.second, sample_squared);
@@ -298,11 +470,10 @@ std::pair<float, float> EWMAAndMaxPower_SSE(
 
 __attribute__((target("avx2,fma"))) std::pair<float, float>
 EWMAAndMaxPower_AVX2(float initial_value,
-                     const float src[],
-                     int len,
+                     base::span<const float> src,
                      float smoothing_factor) {
-  const int rem = len % 8;
-  const int last_index = len - rem;
+  const size_t rem = src.size() % 8;
+  const size_t last_index = src.size() - rem;
   const float weight_prev = 1.0f - smoothing_factor;
 
   // y[7] = a(S[7]^2) + a(1-a)(S[6]^2) + a(1-a)^2(S[5]^2) + a(1-a)^3(S[4]^2) +
@@ -329,11 +500,11 @@ EWMAAndMaxPower_AVX2(float initial_value,
   __m256 res = _mm256_set_ps(initial_value, 0, 0, 0, 0, 0, 0, 0);
   __m256 res_coeff = !weight_prev ? _mm256_set1_ps(0)
                                   : _mm256_set1_ps(std::pow(weight_prev, 8));
-  bool aligned_src = (reinterpret_cast<uintptr_t>(src) & 0x1F) == 0;
-  int i = 0;
+  bool aligned_src = base::IsAligned(src.data(), kAVXAlignment);
+  size_t i = 0;
   for (; i < last_index; i += 8) {
     __m256 sample =
-        aligned_src ? _mm256_load_ps(src + i) : _mm256_loadu_ps(src + i);
+        aligned_src ? _mm256_load_ps(&src[i]) : _mm256_loadu_ps(&src[i]);
     __m256 sample_x2 = _mm256_mul_ps(sample, sample);
     max = _mm256_max_ps(max, sample_x2);
     res = _mm256_fmadd_ps(sample_x2, sum_coeff, _mm256_mul_ps(res, res_coeff));
@@ -358,9 +529,8 @@ EWMAAndMaxPower_AVX2(float initial_value,
   result.second = std::max(EXTRACT_FLOAT(m128_max, 0), result.second);
 
   // Handle remaining values at the end of |src|.
-  for (; i < len; ++i) {
+  for (const float sample : src.subspan(i)) {
     result.first *= weight_prev;
-    const float sample = src[i];
     const float sample_squared = sample * sample;
     result.first += sample_squared * smoothing_factor;
     result.second = std::max(result.second, sample_squared);
@@ -371,34 +541,70 @@ EWMAAndMaxPower_AVX2(float initial_value,
 #endif
 
 #if defined(ARCH_CPU_ARM_FAMILY) && defined(USE_NEON)
-void FMAC_NEON(const float src[], float scale, int len, float dest[]) {
-  const int rem = len % 4;
-  const int last_index = len - rem;
+void FMAC_NEON(base::span<const float> src,
+               float scale,
+               base::span<float> dest) {
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
   float32x4_t m_scale = vmovq_n_f32(scale);
-  for (int i = 0; i < last_index; i += 4) {
-    vst1q_f32(dest + i, vmlaq_f32(
-        vld1q_f32(dest + i), vld1q_f32(src + i), m_scale));
+  for (size_t i = 0; i < last_index; i += 4) {
+    vst1q_f32(&dest[i],
+              vmlaq_f32(vld1q_f32(&dest[i]), vld1q_f32(&src[i]), m_scale));
   }
 
   // Handle any remaining values that wouldn't fit in an NEON pass.
-  for (int i = last_index; i < len; ++i)
+  for (size_t i = last_index; i < src.size(); ++i) {
     dest[i] += src[i] * scale;
+  }
 }
 
-void FMUL_NEON(const float src[], float scale, int len, float dest[]) {
-  const int rem = len % 4;
-  const int last_index = len - rem;
+void FMUL_NEON(base::span<const float> src,
+               float scale,
+               base::span<float> dest) {
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
   float32x4_t m_scale = vmovq_n_f32(scale);
-  for (int i = 0; i < last_index; i += 4)
-    vst1q_f32(dest + i, vmulq_f32(vld1q_f32(src + i), m_scale));
+  for (size_t i = 0; i < last_index; i += 4) {
+    vst1q_f32(&dest[i], vmulq_f32(vld1q_f32(&src[i]), m_scale));
+  }
 
   // Handle any remaining values that wouldn't fit in an NEON pass.
-  for (int i = last_index; i < len; ++i)
+  for (size_t i = last_index; i < src.size(); ++i) {
     dest[i] = src[i] * scale;
+  }
 }
 
-std::pair<float, float> EWMAAndMaxPower_NEON(
-    float initial_value, const float src[], int len, float smoothing_factor) {
+void FCLAMP_NEON(base::span<const float> src, base::span<float> dest) {
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
+  const float32x4_t m_min = vmovq_n_f32(kClampMin);
+  const float32x4_t m_max = vmovq_n_f32(kClampMax);
+  for (size_t i = 0; i < last_index; i += 4) {
+    const float32x4_t values = vld1q_f32(&src[i]);
+
+    // Compare each value with itself. Since NaN != NaN, we end up with a mask
+    // with 0s instead of NaNs, and 1s for the original values.
+    const uint32x4_t comparisons = vceqq_f32(values, values);
+
+    // Zero-out all NaNs by applying the mask with a logical AND.
+    const float32x4_t sanitized_values = vreinterpretq_f32_u32(
+        vandq_u32(vreinterpretq_u32_f32(values), comparisons));
+
+    vst1q_f32(&dest[i], vminq_f32(vmaxq_f32(sanitized_values, m_min), m_max));
+  }
+
+  // Handle any remaining values that wouldn't fit in a NEON pass.
+  for (size_t i = last_index; i < src.size(); ++i) {
+    const float sample = src[i];
+    const float temp = std::isnan(sample) ? kSilence : sample;
+    // Using std::max + std::min is faster than std::clamp on official builds.
+    dest[i] = std::max(std::min(temp, kClampMax), kClampMin);
+  }
+}
+
+std::pair<float, float> EWMAAndMaxPower_NEON(float initial_value,
+                                             base::span<const float> src,
+                                             float smoothing_factor) {
   // When the recurrence is unrolled, we see that we can split it into 4
   // separate lanes of evaluation:
   //
@@ -411,8 +617,8 @@ std::pair<float, float> EWMAAndMaxPower_NEON(
   // Thus, the strategy here is to compute z[n], z[n-1], z[n-2], and z[n-3] in
   // each of the 4 lanes, and then combine them to give y[n].
 
-  const int rem = len % 4;
-  const int last_index = len - rem;
+  const size_t rem = src.size() % 4;
+  const size_t last_index = src.size() - rem;
 
   const float32x4_t smoothing_factor_x4 = vdupq_n_f32(smoothing_factor);
   const float weight_prev = 1.0f - smoothing_factor;
@@ -426,10 +632,10 @@ std::pair<float, float> EWMAAndMaxPower_NEON(
   // 0, respectively.
   float32x4_t max_x4 = vdupq_n_f32(0.0f);
   float32x4_t ewma_x4 = vsetq_lane_f32(initial_value, vdupq_n_f32(0.0f), 3);
-  int i;
+  size_t i;
   for (i = 0; i < last_index; i += 4) {
     ewma_x4 = vmulq_f32(ewma_x4, weight_prev_4th_x4);
-    const float32x4_t sample_x4 = vld1q_f32(src + i);
+    const float32x4_t sample_x4 = vld1q_f32(&src[i]);
     const float32x4_t sample_squared_x4 = vmulq_f32(sample_x4, sample_x4);
     max_x4 = vmaxq_f32(max_x4, sample_squared_x4);
     ewma_x4 = vmlaq_f32(ewma_x4, sample_squared_x4, smoothing_factor_x4);
@@ -451,7 +657,7 @@ std::pair<float, float> EWMAAndMaxPower_NEON(
   std::pair<float, float> result(ewma, vget_lane_f32(max_x2, 0));
 
   // Handle remaining values at the end of |src|.
-  for (; i < len; ++i) {
+  for (; i < src.size(); ++i) {
     result.first *= weight_prev;
     const float sample = src[i];
     const float sample_squared = sample * sample;
@@ -463,5 +669,4 @@ std::pair<float, float> EWMAAndMaxPower_NEON(
 }
 #endif
 
-}  // namespace vector_math
-}  // namespace media
+}  // namespace media::vector_math

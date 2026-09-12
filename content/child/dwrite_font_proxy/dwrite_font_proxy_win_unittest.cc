@@ -305,7 +305,7 @@ TEST_F(DWriteFontProxyUnitTest, LoadingFontFamily) {
   UINT32 font_count = family->GetFontCount();
   EXPECT_LT(0u, font_count);
   EXPECT_EQ(3u, fake_collection_->MessageCount());
-  EXPECT_EQ(FakeFontCollection::MessageType::kGetFontFiles,
+  EXPECT_EQ(FakeFontCollection::MessageType::kGetFontFileHandles,
             fake_collection_->GetMessageType(2));
   mswr::ComPtr<IDWriteFont> font;
   hr = family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,
@@ -382,6 +382,29 @@ TEST_F(DWriteFontProxyUnitTest, TestCustomFontFiles) {
   mswr::ComPtr<IDWriteFontFace> font_face;
   hr = font->CreateFontFace(&font_face);
   EXPECT_TRUE(SUCCEEDED(hr));
+}
+
+TEST_F(DWriteFontProxyUnitTest, DisconnectHandler) {
+  EXPECT_TRUE(collection_->IsFontServiceConnected());
+
+  fake_collection_.reset();
+  task_environment_.RunUntilIdle();
+
+  EXPECT_FALSE(collection_->IsFontServiceConnected());
+}
+
+TEST_F(DWriteFontProxyUnitTest, IsFontServiceConnectedSyncFailure) {
+  EXPECT_TRUE(collection_->IsFontServiceConnected());
+
+  fake_collection_.reset();
+  // Attempting to find a font will fail synchronously over Mojo.
+  // This must mark the font service disconnected without waiting for the
+  // disconnect task to be dispatched on the message loop.
+  UINT32 index = UINT_MAX;
+  BOOL exists = FALSE;
+  HRESULT hr = collection_->FindFamilyName(L"NonexistentFont", &index, &exists);
+  EXPECT_FALSE(SUCCEEDED(hr));
+  EXPECT_FALSE(collection_->IsFontServiceConnected());
 }
 
 }  // namespace

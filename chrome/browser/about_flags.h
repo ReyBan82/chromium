@@ -8,18 +8,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <map>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "base/command_line.h"
 #include "base/containers/span.h"
-#include "base/metrics/histogram_base.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "components/flags_ui/feature_entry.h"
-#include "components/flags_ui/flags_state.h"
+#include "components/webui/flags/feature_entry.h"
+#include "components/webui/flags/flags_state.h"
+
+class Profile;
 
 namespace base {
 class FeatureList;
@@ -30,6 +30,15 @@ class FlagsStorage;
 }
 
 namespace about_flags {
+
+// This method returns the FlagsStorage instance to use for this platform. In
+// addition, this returns the access level for the flags. The callback may be
+// synchronously invoked.
+// Note that |profile| is only used in ash-chrome.
+using GetStorageCallback =
+    base::OnceCallback<void(std::unique_ptr<flags_ui::FlagsStorage> storage,
+                            flags_ui::FlagAccess access)>;
+void GetStorage(Profile* profile, GetStorageCallback callback);
 
 // Returns true if the FeatureEntry should not be shown.
 bool ShouldSkipConditionalFeatureEntry(const flags_ui::FlagsStorage* storage,
@@ -56,8 +65,8 @@ std::vector<std::string> RegisterAllFeatureVariationParameters(
 // to |unsupported_entries|.
 void GetFlagFeatureEntries(flags_ui::FlagsStorage* flags_storage,
                            flags_ui::FlagAccess access,
-                           base::Value::List& supported_entries,
-                           base::Value::List& unsupported_entries);
+                           base::ListValue& supported_entries,
+                           base::ListValue& unsupported_entries);
 
 // Gets the list of feature entries for the deprecated flags page. Entries that
 // are available for the current platform are appended to |supported_entries|;
@@ -65,8 +74,8 @@ void GetFlagFeatureEntries(flags_ui::FlagsStorage* flags_storage,
 void GetFlagFeatureEntriesForDeprecatedPage(
     flags_ui::FlagsStorage* flags_storage,
     flags_ui::FlagAccess access,
-    base::Value::List& supported_entries,
-    base::Value::List& unsupported_entries);
+    base::ListValue& supported_entries,
+    base::ListValue& unsupported_entries);
 
 // Gets the FlagsState used in about_flags.
 flags_ui::FlagsState* GetCurrentFlagsState();
@@ -91,17 +100,17 @@ void SetOriginListFlag(const std::string& internal_name,
                        const std::string& value,
                        flags_ui::FlagsStorage* flags_storage);
 
+// Sets a flag value with a string given by |value|.
+void SetStringFlag(const std::string& internal_name,
+                   const std::string& value,
+                   flags_ui::FlagsStorage* flags_storage);
+
 // Removes all switches that were added to a command line by a previous call to
 // |ConvertFlagsToSwitches()|.
 void RemoveFlagsSwitches(base::CommandLine::SwitchMap* switch_list);
 
 // Reset all flags to the default state by clearing all flags.
 void ResetAllFlags(flags_ui::FlagsStorage* flags_storage);
-
-#if BUILDFLAG(IS_CHROMEOS)
-// Show flags of the other browser (Lacros/Ash).
-void CrosUrlFlagsRedirect();
-#endif
 
 // Sends UMA stats about experimental flag usage. This should be called once per
 // startup.

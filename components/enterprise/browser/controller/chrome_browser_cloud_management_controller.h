@@ -10,33 +10,47 @@
 
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
-#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "components/enterprise/browser/device_trust/device_trust_key_manager.h"
-#include "components/enterprise/browser/reporting/reporting_delegate_factory.h"
 #include "components/policy/core/common/cloud/chrome_browser_cloud_management_metrics.h"
 #include "components/policy/core/common/cloud/cloud_policy_client.h"
 #include "components/policy/core/common/policy_service.h"
 
 class PrefService;
 
+namespace base {
+class SingleThreadTaskRunner;
+}  // namespace base
+
 namespace network {
 class NetworkConnectionTracker;
 class SharedURLLoaderFactory;
 }  // namespace network
 
+namespace enterprise_connectors {
+class DeviceTrustKeyManager;
+}  // namespace enterprise_connectors
+
 namespace enterprise_reporting {
+class BrowserLaunchEventController;
+class ReportingDelegateFactory;
 class ReportScheduler;
+class SaasUsageReportScheduler;
+class SaasUsageReportingDelegateFactory;
 }  // namespace enterprise_reporting
+
+namespace client_certificates {
+class CertificateProvisioningService;
+}  // namespace client_certificates
 
 namespace policy {
 class ChromeBrowserCloudManagementRegistrar;
 class ClientDataDelegate;
 class ConfigurationPolicyProvider;
+class EnterpriseGroupsBrowserHandler;
 class MachineLevelUserCloudPolicyManager;
 class MachineLevelUserCloudPolicyFetcher;
 
@@ -136,9 +150,23 @@ class ChromeBrowserCloudManagementController
     virtual std::unique_ptr<enterprise_reporting::ReportingDelegateFactory>
     GetReportingDelegateFactory() = 0;
 
+    // Gets the platform-specific SaaS usage reporting delegate factory.
+    virtual std::unique_ptr<
+        enterprise_reporting::SaasUsageReportingDelegateFactory>
+    GetSaasUsageReportingDelegateFactory() = 0;
+
+    // Creates the platform-specific browser launch event controller.
+    virtual std::unique_ptr<enterprise_reporting::BrowserLaunchEventController>
+    CreateBrowserLaunchEventController() = 0;
+
     // Creates a platform-specific DeviceTrustKeyManager instance.
     virtual std::unique_ptr<enterprise_connectors::DeviceTrustKeyManager>
     CreateDeviceTrustKeyManager();
+
+    // Creates a platform-specific client certificate provisioning service
+    // instance.
+    virtual std::unique_ptr<client_certificates::CertificateProvisioningService>
+    CreateCertificateProvisioningService();
 
     // Sets the SharedURLLoaderFactory that this object will use to make
     // requests to GAIA.
@@ -158,6 +186,10 @@ class ChromeBrowserCloudManagementController
     // Returns the platform-specific client data delegate.
     virtual std::unique_ptr<ClientDataDelegate> CreateClientDataDelegate() = 0;
 
+    virtual void StartExtensionInstallPolicyInvalidator();
+
+    virtual bool CanStartExtensionInstallPolicyInvalidator() const;
+
     // Postpones controller initialization until |ReadyToInit()| is true.
     // Implemented in the delegate because the reason why initialization needs
     // to be deferred may vary across platforms.
@@ -166,7 +198,7 @@ class ChromeBrowserCloudManagementController
 
   class Observer {
    public:
-    virtual ~Observer() {}
+    virtual ~Observer() = default;
 
     // Called when policy enrollment is finished.
     // |succeeded| is true if |dm_token| is returned from the server.
@@ -181,6 +213,9 @@ class ChromeBrowserCloudManagementController
 
     // Called when enrollment result is recorded.
     virtual void OnEnrollmentResultRecorded() {}
+
+    // Called when shutting down.
+    virtual void OnShutdown() {}
   };
 
   // Directory name under the user-data-dir where the policy data is stored.
@@ -225,6 +260,8 @@ class ChromeBrowserCloudManagementController
       PrefService* local_state,
       scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory);
 
+  void MaybeStartExtensionInstallPolicyInvalidator();
+
   bool WaitUntilPolicyEnrollmentFinished();
 
   void AddObserver(Observer* observer);
@@ -238,8 +275,6 @@ class ChromeBrowserCloudManagementController
   void UnenrollBrowser(bool delete_dm_token);
 
   // CloudPolicyClient::Observer implementation:
-  void OnPolicyFetched(CloudPolicyClient* client) override;
-  void OnRegistrationStateChanged(CloudPolicyClient* client) override;
   void OnClientError(CloudPolicyClient* client) override;
   void OnServiceAccountSet(CloudPolicyClient* client,
                            const std::string& account_email) override;
@@ -250,6 +285,10 @@ class ChromeBrowserCloudManagementController
   // Returns the device trust key manager. Returns nullptr if the Device Trust
   // feature flag isn't enabled.
   enterprise_connectors::DeviceTrustKeyManager* GetDeviceTrustKeyManager();
+
+  // Returns a client certificate provisioning service.
+  client_certificates::CertificateProvisioningService*
+  GetCertificateProvisioningService();
 
   // Sets the SharedURLLoaderFactory that this will be used to make requests to
   // GAIA.
@@ -264,6 +303,7 @@ class ChromeBrowserCloudManagementController
   void NotifyPolicyRegisterFinished(bool succeeded);
   void NotifyBrowserUnenrolled(bool succeeded);
   void NotifyCloudReportingLaunched();
+  void NotifyShutdown();
 
  private:
   bool GetEnrollmentTokenAndClientId(std::string* enrollment_token,
@@ -275,7 +315,7 @@ class ChromeBrowserCloudManagementController
   void InvalidatePolicies();
   void UnenrollCallback(const std::string& metric_name, bool success);
 
-  void CreateReportScheduler();
+  void InitializeReporting();
 
   // Implementation of |DeferrableCreatePolicyManager| that can be invoked right
   // away or bound to a callback to be executed later.
@@ -297,10 +337,16 @@ class ChromeBrowserCloudManagementController
       cloud_management_registrar_;
   std::unique_ptr<MachineLevelUserCloudPolicyFetcher> policy_fetcher_;
 
+  std::unique_ptr<EnterpriseGroupsBrowserHandler> enterprise_groups_handler_;
+
   // Time at which the enrollment process was started.  Used to log UMA metric.
   base::Time enrollment_start_time_;
 
   std::unique_ptr<enterprise_reporting::ReportScheduler> report_scheduler_;
+  std::unique_ptr<enterprise_reporting::SaasUsageReportScheduler>
+      saas_usage_report_scheduler_;
+  std::unique_ptr<enterprise_reporting::BrowserLaunchEventController>
+      browser_launch_controller_;
 
   std::unique_ptr<CloudPolicyClient> cloud_policy_client_;
 
@@ -314,6 +360,9 @@ class ChromeBrowserCloudManagementController
 
   std::unique_ptr<enterprise_connectors::DeviceTrustKeyManager>
       device_trust_key_manager_;
+
+  std::unique_ptr<client_certificates::CertificateProvisioningService>
+      certificate_provisioning_service_;
 
   base::WeakPtrFactory<ChromeBrowserCloudManagementController> weak_factory_{
       this};

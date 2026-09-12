@@ -4,11 +4,15 @@
 
 #include "components/sync/test/nigori_test_utils.h"
 
+#include <algorithm>
+
 #include "base/base64.h"
 #include "base/check.h"
 #include "components/sync/base/time.h"
-#include "components/sync/engine/nigori/key_derivation_params.h"
-#include "components/sync/engine/nigori/nigori.h"
+#include "components/sync/model/crypto/key_derivation_params.h"
+#include "components/sync/model/crypto/nigori.h"
+#include "components/sync/nigori/cross_user_sharing_keys.h"
+#include "components/sync/nigori/cross_user_sharing_public_key.h"
 #include "components/sync/nigori/cryptographer_impl.h"
 #include "components/sync/nigori/nigori_key_bag.h"
 #include "components/sync/protocol/bookmark_specifics.pb.h"
@@ -18,6 +22,19 @@
 #include "components/sync/protocol/nigori_specifics.pb.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
+namespace {
+
+sync_pb::CrossUserSharingPublicKey PublicKeyToProto(
+    const syncer::CrossUserSharingPublicKey& public_key,
+    uint32_t key_pair_version) {
+  sync_pb::CrossUserSharingPublicKey output;
+  const auto key = public_key.GetRawPublicKey();
+  output.set_x25519_public_key(std::string(key.begin(), key.end()));
+  output.set_version(key_pair_version);
+  return output;
+}
+
+}  // namespace
 namespace syncer {
 
 KeyParamsForTesting KeystoreKeyParamsForTesting(
@@ -40,10 +57,23 @@ KeyParamsForTesting ScryptPassphraseKeyParamsForTesting(
   return {KeyDerivationParams::CreateForScrypt(passphrase), passphrase};
 }
 
+sync_pb::CrossUserSharingPublicKey CrossUserSharingKeysToPublicKeyProto(
+    const CrossUserSharingKeys& cross_user_sharing_keys,
+    size_t key_version) {
+  sync_pb::CrossUserSharingPublicKey public_key;
+  auto raw_public_key =
+      cross_user_sharing_keys.GetKeyPair(key_version).GetRawPublicKey();
+  public_key.set_x25519_public_key(
+      std::string(raw_public_key.begin(), raw_public_key.end()));
+  public_key.set_version(key_version);
+  return public_key;
+}
+
 sync_pb::NigoriSpecifics BuildKeystoreNigoriSpecifics(
     const std::vector<KeyParamsForTesting>& keybag_keys_params,
     const KeyParamsForTesting& keystore_decryptor_params,
-    const KeyParamsForTesting& keystore_key_params) {
+    const KeyParamsForTesting& keystore_key_params,
+    const CrossUserSharingKeys& cross_user_sharing_keys) {
   DCHECK(!keybag_keys_params.empty());
 
   sync_pb::NigoriSpecifics specifics;
@@ -55,11 +85,17 @@ sync_pb::NigoriSpecifics BuildKeystoreNigoriSpecifics(
 
   NigoriKeyBag encryption_keybag = NigoriKeyBag::CreateEmpty();
   for (const KeyParamsForTesting& key_params : keybag_keys_params) {
-    encryption_keybag.AddKey(Nigori::CreateByDerivation(
-        key_params.derivation_params, key_params.password));
+    encryption_keybag.AddKey(key_params.derivation_params, key_params.password);
   }
 
-  EXPECT_TRUE(cryptographer->Encrypt(encryption_keybag.ToProto(),
+  sync_pb::EncryptionKeys keys_for_encryption;
+
+  keys_for_encryption.mutable_key()->CopyFrom(
+      encryption_keybag.ToProto().key());
+  keys_for_encryption.mutable_cross_user_sharing_private_key()->CopyFrom(
+      cross_user_sharing_keys.ToProto().private_key());
+
+  EXPECT_TRUE(cryptographer->Encrypt(keys_for_encryption,
                                      specifics.mutable_encryption_keybag()));
 
   std::string serialized_keystore_decryptor =
@@ -72,8 +108,29 @@ sync_pb::NigoriSpecifics BuildKeystoreNigoriSpecifics(
       serialized_keystore_decryptor,
       specifics.mutable_keystore_decryptor_token()));
 
+  if (cross_user_sharing_keys.HasKeyPair(/*key_version=*/0)) {
+    specifics.mutable_cross_user_sharing_public_key()->CopyFrom(
+        CrossUserSharingKeysToPublicKeyProto(cross_user_sharing_keys,
+                                             /*key_version=*/0));
+  }
+
   specifics.set_passphrase_type(sync_pb::NigoriSpecifics::KEYSTORE_PASSPHRASE);
   specifics.set_keystore_migration_time(TimeToProtoTime(base::Time::Now()));
+  return specifics;
+}
+
+sync_pb::NigoriSpecifics BuildKeystoreNigoriSpecificsWithCrossUserSharingKeys(
+    const std::vector<KeyParamsForTesting>& keybag_keys_params,
+    const KeyParamsForTesting& keystore_decryptor_params,
+    const KeyParamsForTesting& keystore_key_params,
+    const CrossUserSharingKeys& cross_user_sharing_keys,
+    const CrossUserSharingPublicKey& cross_user_sharing_public_key,
+    const uint32_t cross_user_sharing_public_key_version) {
+  sync_pb::NigoriSpecifics specifics = BuildKeystoreNigoriSpecifics(
+      keybag_keys_params, keystore_decryptor_params, keystore_key_params,
+      cross_user_sharing_keys);
+  *specifics.mutable_cross_user_sharing_public_key() = PublicKeyToProto(
+      cross_user_sharing_public_key, cross_user_sharing_public_key_version);
   return specifics;
 }
 
@@ -98,14 +155,14 @@ sync_pb::NigoriSpecifics BuildTrustedVaultNigoriSpecifics(
       TimeToProtoTime(migration_time));
   specifics.mutable_trusted_vault_debug_info()->set_key_version(2);
 
-  EXPECT_TRUE(cryptographer->Encrypt(cryptographer->ToProto().key_bag(),
-                                     specifics.mutable_encryption_keybag()));
+  *specifics.mutable_encryption_keybag() =
+      cryptographer->ExportEncryptedKeyBag();
   return specifics;
 }
 
 sync_pb::NigoriSpecifics BuildCustomPassphraseNigoriSpecifics(
     const KeyParamsForTesting& passphrase_key_params,
-    const absl::optional<KeyParamsForTesting>& old_key_params) {
+    const std::optional<KeyParamsForTesting>& old_key_params) {
   KeyDerivationMethod method = passphrase_key_params.derivation_params.method();
 
   sync_pb::NigoriSpecifics nigori;
@@ -124,33 +181,30 @@ sync_pb::NigoriSpecifics BuildCustomPassphraseNigoriSpecifics(
       // Nigori.
       break;
     case KeyDerivationMethod::SCRYPT_8192_8_11:
-      base::Base64Encode(passphrase_key_params.derivation_params.scrypt_salt(),
-                         &encoded_salt);
+      encoded_salt = base::Base64Encode(
+          passphrase_key_params.derivation_params.scrypt_salt());
       nigori.set_custom_passphrase_key_derivation_salt(encoded_salt);
       break;
   }
 
   // Create the cryptographer, which encrypts with the key derived from
-  // |passphrase_key_params| and can decrypt with the key derived from
-  // |old_key_params| if given. |encryption_keybag| is a serialized version
-  // of this cryptographer |key_bag| encrypted with its encryption key.
+  // `passphrase_key_params` and can decrypt with the key derived from
+  // `old_key_params` if given. `encryption_keybag` is a serialized version
+  // of this cryptographer `key_bag` encrypted with its encryption key.
   auto cryptographer = CryptographerImpl::FromSingleKeyForTesting(
       passphrase_key_params.password, passphrase_key_params.derivation_params);
   if (old_key_params) {
     cryptographer->EmplaceKey(old_key_params->password,
                               old_key_params->derivation_params);
   }
-  sync_pb::CryptographerData proto = cryptographer->ToProto();
-  bool encrypt_result = cryptographer->Encrypt(
-      proto.key_bag(), nigori.mutable_encryption_keybag());
-  DCHECK(encrypt_result);
+  *nigori.mutable_encryption_keybag() = cryptographer->ExportEncryptedKeyBag();
 
   return nigori;
 }
 
 KeyDerivationParams InitCustomPassphraseKeyDerivationParamsFromNigori(
     const sync_pb::NigoriSpecifics& nigori) {
-  absl::optional<KeyDerivationMethod> key_derivation_method =
+  std::optional<KeyDerivationMethod> key_derivation_method =
       ProtoKeyDerivationMethodToEnum(
           nigori.custom_passphrase_key_derivation_method());
   if (!key_derivation_method.has_value()) {
@@ -184,10 +238,13 @@ std::unique_ptr<Cryptographer> InitCustomPassphraseCryptographerFromNigori(
   EXPECT_TRUE(cryptographer->DecryptToString(nigori.encryption_keybag(),
                                              &decrypted_keys_str));
 
-  sync_pb::NigoriKeyBag decrypted_keys;
+  sync_pb::EncryptionKeys decrypted_keys;
   EXPECT_TRUE(decrypted_keys.ParseFromString(decrypted_keys_str));
 
-  NigoriKeyBag key_bag = NigoriKeyBag::CreateFromProto(decrypted_keys);
+  NigoriKeyBag key_bag = NigoriKeyBag::CreateEmpty();
+  std::ranges::for_each(
+      decrypted_keys.key(),
+      [&key_bag](sync_pb::NigoriKey key) { key_bag.AddKeyFromProto(key); });
 
   cryptographer->EmplaceKeysFrom(key_bag);
   return cryptographer;

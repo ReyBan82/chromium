@@ -10,6 +10,7 @@
 #include "base/files/file_util.h"
 #include "base/path_service.h"
 #include "base/strings/escape.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
@@ -44,10 +45,8 @@ GURL FilePathToFileURL(const base::FilePath& path) {
         c == '\\' ||
 #endif
         c <= ' ') {
-      static const char kHexChars[] = "0123456789ABCDEF";
       url_string += '%';
-      url_string += kHexChars[(c >> 4) & 0xf];
-      url_string += kHexChars[c & 0xf];
+      base::AppendHexEncodedByte(static_cast<uint8_t>(c), url_string);
     } else {
       url_string += c;
     }
@@ -71,12 +70,12 @@ bool FileURLToFilePath(const GURL& url, base::FilePath* file_path) {
 
 #if BUILDFLAG(IS_WIN)
   std::string path;
-  std::string host = url.host();
+  std::string host = url.GetHost();
   if (host.empty()) {
     // URL contains no host, the path is the filename. In this case, the path
     // will probably be preceded with a slash, as in "/C:/foo.txt", so we
     // trim out that here.
-    path = url.path();
+    path = url.GetPath();
     size_t first_non_slash = path.find_first_not_of("/\\");
     if (first_non_slash != std::string::npos && first_non_slash > 0)
       path.erase(0, first_non_slash);
@@ -85,7 +84,7 @@ bool FileURLToFilePath(const GURL& url, base::FilePath* file_path) {
     // on the path.
     path = "\\\\";
     path.append(host);
-    path.append(url.path());
+    path.append(url.GetPath());
   }
   std::replace(path.begin(), path.end(), '/', '\\');
 #else   // BUILDFLAG(IS_WIN)
@@ -93,10 +92,10 @@ bool FileURLToFilePath(const GURL& url, base::FilePath* file_path) {
   // Usually, remote mounts are still mounted onto the local filesystem.
   // Therefore, we discard all URLs that are not obviously local to prevent
   // spoofing attacks using file:// URLs. See crbug.com/881675.
-  if (!url.host().empty() && !net::IsLocalhost(url)) {
+  if (!url.GetHost().empty() && !net::IsLocalhost(url)) {
     return false;
   }
-  std::string path = url.path();
+  std::string path = url.GetPath();
 #endif  // !BUILDFLAG(IS_WIN)
 
   if (path.empty())
@@ -109,7 +108,11 @@ bool FileURLToFilePath(const GURL& url, base::FilePath* file_path) {
   // https://crbug.com/585422 that this represents a potential security risk).
   // It isn't correct to keep it as "%2F", so this just fails. This is fine,
   // because '/' is not a valid filename character on either POSIX or Windows.
-  std::set<unsigned char> illegal_encoded_bytes{'/'};
+  //
+  // A valid URL may include "%00" (NULL) in its path (see
+  // https://crbug.com/1400251), which is considered an illegal filename and
+  // results in failure.
+  std::set<unsigned char> illegal_encoded_bytes{'/', '\0'};
 
 #if BUILDFLAG(IS_WIN)
   // "%5C" ('\\') on Windows results in failure, for the same reason as '/'
@@ -166,7 +169,7 @@ void GenerateSafeFileName(const std::string& mime_type,
   // Prepend "_" to the file name if it's a reserved name
   base::FilePath::StringType leaf_name = file_path->BaseName().value();
   DCHECK(!leaf_name.empty());
-  if (IsReservedNameOnWindows(leaf_name)) {
+  if (base::IsReservedNameOnWindows(leaf_name)) {
     leaf_name = base::FilePath::StringType(FILE_PATH_LITERAL("_")) + leaf_name;
     *file_path = file_path->DirName();
     if (file_path->value() == base::FilePath::kCurrentDirectory) {
@@ -176,47 +179,6 @@ void GenerateSafeFileName(const std::string& mime_type,
     }
   }
 #endif
-}
-
-bool IsReservedNameOnWindows(const base::FilePath::StringType& filename) {
-  // This list is taken from the MSDN article "Naming a file"
-  // http://msdn2.microsoft.com/en-us/library/aa365247(VS.85).aspx
-  // I also added clock$ because GetSaveFileName seems to consider it as a
-  // reserved name too.
-  static const char* const known_devices[] = {
-      "con",  "prn",  "aux",  "nul",  "com1", "com2", "com3",  "com4",
-      "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2",  "lpt3",
-      "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "clock$"};
-#if BUILDFLAG(IS_WIN)
-  std::string filename_lower = base::ToLowerASCII(base::WideToUTF8(filename));
-#elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
-  std::string filename_lower = base::ToLowerASCII(filename);
-#endif
-
-  for (const char* const device : known_devices) {
-    // Exact match.
-    if (filename_lower == device)
-      return true;
-    // Starts with "DEVICE.".
-    if (base::StartsWith(filename_lower, std::string(device) + ".",
-                         base::CompareCase::SENSITIVE)) {
-      return true;
-    }
-  }
-
-  static const char* const magic_names[] = {
-      // These file names are used by the "Customize folder" feature of the
-      // shell.
-      "desktop.ini",
-      "thumbs.db",
-  };
-
-  for (const char* const magic_name : magic_names) {
-    if (filename_lower == magic_name)
-      return true;
-  }
-
-  return false;
 }
 
 }  // namespace net

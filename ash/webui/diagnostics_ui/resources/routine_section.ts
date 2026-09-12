@@ -10,23 +10,27 @@ import './diagnostics_shared.css.js';
 import './icons.html.js';
 import './routine_result_list.js';
 import './text_badge.js';
-import './strings.m.js';
+import '/strings.m.js';
 
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
 import {loadTimeData} from 'chrome://resources/ash/common/load_time_data.m.js';
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {assert, assertNotReached} from 'chrome://resources/js/assert_ts.js';
+import {assert, assertNotReached} from 'chrome://resources/js/assert.js';
+import {sanitizeInnerHtml} from 'chrome://resources/js/parse_html_subset.js';
 import {IronA11yAnnouncer} from 'chrome://resources/polymer/v3_0/iron-a11y-announcer/iron-a11y-announcer.js';
-import {IronCollapseElement} from 'chrome://resources/polymer/v3_0/iron-collapse/iron-collapse.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {IronCollapseElement} from 'chrome://resources/polymer/v3_0/iron-collapse/iron-collapse.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getSystemRoutineController} from './mojo_interface_provider.js';
 import {RoutineGroup} from './routine_group.js';
-import {ExecutionProgress, ResultStatusItem, RoutineListExecutor, TestSuiteStatus} from './routine_list_executor.js';
+import type {ResultStatusItem} from './routine_list_executor.js';
+import {ExecutionProgress, RoutineListExecutor, TestSuiteStatus} from './routine_list_executor.js';
 import {getRoutineType, getSimpleResult} from './routine_result_entry.js';
-import {isRoutineGroupArray, isRoutineTypeArray, RoutineResultListElement} from './routine_result_list.js';
+import type {RoutineResultListElement} from './routine_result_list.js';
+import {isRoutineGroupArray, isRoutineTypeArray} from './routine_result_list.js';
 import {getTemplate} from './routine_section.html.js';
-import {PowerRoutineResult, RoutineType, StandardRoutineResult, SystemRoutineControllerInterface} from './system_routine_controller.mojom-webui.js';
+import type {PowerRoutineResult, SystemRoutineControllerInterface} from './system_routine_controller.mojom-webui.js';
+import {RoutineType, StandardRoutineResult} from './system_routine_controller.mojom-webui.js';
 import {BadgeType} from './text_badge.js';
 
 export type Routines = RoutineGroup[]|RoutineType[];
@@ -34,6 +38,7 @@ export type Routines = RoutineGroup[]|RoutineType[];
 export interface RoutineSectionElement {
   $: {
     collapse: IronCollapseElement,
+    detailsCollapse: IronCollapseElement,
   };
 }
 
@@ -47,8 +52,8 @@ export interface RoutineSectionElement {
 const RoutineSectionElementBase = I18nMixin(PolymerElement);
 
 export class RoutineSectionElement extends RoutineSectionElementBase {
-  static get is(): string {
-    return 'routine-section';
+  static get is(): 'routine-section' {
+    return 'routine-section' as const;
   }
 
   static get template(): HTMLTemplateElement {
@@ -118,6 +123,16 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
         value: null,
       },
 
+      detailMessagesHTML: {
+        type: Array,
+        value: () => [],
+      },
+
+      detailsOpened: {
+        type: Boolean,
+        value: false,
+      },
+
       runTestsButtonText: {
         type: String,
         value: '',
@@ -172,10 +187,19 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
         computed: 'getInitialButtonText(runTestsButtonText)',
       },
 
-      hideRoutineStatus: {
+      hideReportButton: {
         type: Boolean,
         value: false,
-        reflectToAttribute: true,
+      },
+
+      hideLearnMore: {
+        type: Boolean,
+        value: false,
+      },
+
+      showRoutineDetails: {
+        type: Boolean,
+        value: false,
       },
 
       opened: {
@@ -197,30 +221,35 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
     };
   }
 
-  routines: Routines;
-  routineRuntime: number;
-  runTestsButtonText: string;
-  additionalMessage: string;
-  learnMoreLinkSection: string;
-  testSuiteStatus: TestSuiteStatus;
-  isPowerRoutine: boolean;
-  isActive: boolean;
-  hideRoutineStatus: boolean;
-  opened: boolean;
-  hideVerticalLines: boolean;
-  usingRoutineGroups: boolean;
-  ignoreRoutineStatusUpdates: boolean;
-  private announcedText: string;
-  private routineStartTimeMs: number;
-  private executionStatus: ExecutionProgress;
-  private currentTestName: string;
-  private powerRoutineResult: PowerRoutineResult;
-  private badgeType: BadgeType;
-  private badgeText: string;
-  private statusText: string;
-  private isLoggedIn: boolean;
-  private bannerMessage: string;
-  private initialButtonText: string;
+  declare routines: Routines;
+  declare routineRuntime: number;
+  declare runTestsButtonText: string;
+  declare additionalMessage: string;
+  declare learnMoreLinkSection: string;
+  declare testSuiteStatus: TestSuiteStatus;
+  declare isPowerRoutine: boolean;
+  declare isActive: boolean;
+  declare hideReportButton: boolean;
+  declare hideLearnMore: boolean;
+  declare showRoutineDetails: boolean;
+  declare opened: boolean;
+  declare hideVerticalLines: boolean;
+  declare usingRoutineGroups: boolean;
+  ignoreRoutineStatusUpdates: boolean = false;
+  declare announcedText: string;
+  declare currentTestName: string;
+  declare private routineStartTimeMs: number;
+  declare private executionStatus: ExecutionProgress;
+  declare private powerRoutineResult: PowerRoutineResult;
+  declare private detailMessagesHTML: TrustedHTML[];
+  declare private detailsOpened: boolean;
+  declare private badgeType: BadgeType;
+  declare private badgeText: string;
+  declare private statusText: string;
+  declare private isLoggedIn: boolean;
+  declare private bannerMessage: string;
+  declare private initialButtonText: string;
+  private lastRoutineDetails: string|null = null;
   private executor: RoutineListExecutor|null = null;
   private failedTest: RoutineType|null = null;
   private hasTestFailure: boolean = false;
@@ -253,8 +282,9 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
   }
 
   private getResultListElem(): RoutineResultListElement {
-    const routineResultList: RoutineResultListElement|null =
-        this.shadowRoot!.querySelector('routine-result-list');
+    const routineResultList =
+        this.shadowRoot!.querySelector<RoutineResultListElement>(
+            'routine-result-list');
     assert(routineResultList);
     return routineResultList;
   }
@@ -292,6 +322,11 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
     }
     this.testSuiteStatus = TestSuiteStatus.RUNNING;
     this.failedTest = null;
+    this.detailMessagesHTML = [];
+    this.detailsOpened = false;
+    this.$.detailsCollapse.hide();
+    this.lastRoutineDetails = null;
+    this.ignoreRoutineStatusUpdates = false;
 
     this.systemRoutineController = getSystemRoutineController();
     const resultListElem = this.getResultListElem();
@@ -336,6 +371,12 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
           routineGroup.routines,
           (routineStatus) =>
               this.handleRunningRoutineStatus(routineStatus, resultListElem));
+      if (this.ignoreRoutineStatusUpdates) {
+        executor.cancel();
+        this.handleRoutinesCompletedStatus(status);
+        clearInterval(remainingTimeUpdaterId);
+        break;
+      }
       const isLastRoutineGroup = i === routines.length - 1;
       if (isLastRoutineGroup) {
         this.handleRoutinesCompletedStatus(status);
@@ -385,6 +426,10 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
       this.powerRoutineResult = status.result.powerResult;
     }
 
+    if (status.progress === ExecutionProgress.COMPLETED) {
+      this.lastRoutineDetails = status.details;
+    }
+
     if (status.result &&
         getSimpleResult(status.result) === StandardRoutineResult.kTestFailed &&
         !this.failedTest) {
@@ -399,7 +444,11 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
 
     this.executionStatus = status.progress;
 
-    resultListElem.onStatusUpdate.call(resultListElem, status);
+    const blockingFailure =
+        resultListElem.onStatusUpdate.call(resultListElem, status);
+    if (blockingFailure) {
+      this.ignoreRoutineStatusUpdates = true;
+    }
   }
 
   private cleanUp(): void {
@@ -426,6 +475,24 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
     this.$.collapse.toggle();
   }
 
+  private onToggleDetailsClicked(): void {
+    this.$.detailsCollapse.toggle();
+  }
+
+  protected isDetailsButtonHidden(): boolean {
+    return !this.showRoutineDetails || !this.detailMessagesHTML ||
+        this.detailMessagesHTML.length === 0;
+  }
+
+  protected hasDetailMessages(): boolean {
+    return this.detailMessagesHTML && this.detailMessagesHTML.length > 0;
+  }
+
+  protected getDetailsToggleButtonText(detailsOpened: boolean): string {
+    return loadTimeData.getString(
+        detailsOpened ? 'hideTestDetailsText' : 'seeTestDetailsText');
+  }
+
   protected onLearnMoreClicked(): void {
     const baseSupportUrl =
         'https://support.google.com/chromebook?p=diagnostics_';
@@ -434,8 +501,8 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
     window.open(baseSupportUrl + this.learnMoreLinkSection);
   }
 
-  protected isResultButtonHidden(): boolean {
-    return this.shouldHideReportList() ||
+  protected isReportButtonHidden(): boolean {
+    return this.hideReportButton || this.shouldHideReportList() ||
         this.executionStatus === ExecutionProgress.NOT_STARTED;
   }
 
@@ -458,7 +525,7 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
   /**
    * Sets status texts for remaining runtime while the routine runs.
    */
-  private setRunningStatusBadgeText(): void {
+  setRunningStatusBadgeText(): void {
     // Routines that are longer than 5 minutes are considered large
     const largeRoutine = this.routineRuntime >= 5;
 
@@ -497,6 +564,7 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
         this.setBadgeAndStatusText(
             BadgeType.STOPPED,
             loadTimeData.getStringF('testCancelledText', this.currentTestName));
+        this.populateDetailMessagesHTML();
         return;
       case ExecutionProgress.COMPLETED:
         const isPowerRoutine = this.isPowerRoutine || this.powerRoutineResult;
@@ -509,6 +577,7 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
               isPowerRoutine ? this.getPowerRoutineString() :
                                loadTimeData.getString('testSuccess'));
         }
+        this.populateDetailMessagesHTML();
         return;
     }
     assertNotReached();
@@ -521,9 +590,11 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
         'chargeTestResultText' :
         'dischargeTestResultText';
     const percentText = loadTimeData.getStringF(
-        'percentageLabel', this.powerRoutineResult.percentChange.toFixed(2));
+        'percentageLabel',
+        (this.powerRoutineResult?.percentChange || 0).toFixed(2));
     return loadTimeData.getStringF(
-        stringId, percentText, this.powerRoutineResult.timeElapsedSeconds);
+        stringId, percentText,
+        this.powerRoutineResult?.timeElapsedSeconds || 0);
   }
 
   private setBadgeAndStatusText(badgeType: BadgeType, statusText: string):
@@ -532,6 +603,17 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
       badgeType: badgeType,
       statusText: statusText,
     });
+  }
+
+  private populateDetailMessagesHTML(): void {
+    this.detailMessagesHTML = [];
+    if (!this.lastRoutineDetails) {
+      return;
+    }
+    this.detailMessagesHTML =
+        this.lastRoutineDetails.split('\n\n')
+            .filter(block => block.length > 0)
+            .map(block => sanitizeInnerHtml(block.replace(/\n/g, '<br>')));
   }
 
   protected isTestRunning(): boolean {
@@ -580,6 +662,10 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
     this.currentTestName = '';
     this.executionStatus = ExecutionProgress.NOT_STARTED;
     this.$.collapse.hide();
+    this.detailMessagesHTML = [];
+    this.detailsOpened = false;
+    this.$.detailsCollapse.hide();
+    this.lastRoutineDetails = null;
     this.ignoreRoutineStatusUpdates = false;
   }
 
@@ -597,7 +683,7 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
   }
 
   protected isLearnMoreButtonHidden(): boolean {
-    return !this.isLoggedIn || this.hideRoutineStatus;
+    return this.hideLearnMore || !this.isLoggedIn;
   }
 
   override disconnectedCallback(): void {
@@ -613,7 +699,7 @@ export class RoutineSectionElement extends RoutineSectionElementBase {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'routine-section': RoutineSectionElement;
+    [RoutineSectionElement.is]: RoutineSectionElement;
   }
 }
 

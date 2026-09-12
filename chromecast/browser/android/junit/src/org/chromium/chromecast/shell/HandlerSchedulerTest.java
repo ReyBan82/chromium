@@ -11,21 +11,17 @@ import android.os.Looper;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.Shadows;
-import org.robolectric.annotation.Config;
-import org.robolectric.annotation.LooperMode;
 import org.robolectric.shadows.ShadowLooper;
 
+import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.chromecast.base.Box;
 import org.chromium.chromecast.base.Observable.Scheduler;
-import org.chromium.testing.local.LocalRobolectricTestRunner;
 
-/**
- * Tests for HandlerScheduler.
- */
-@RunWith(LocalRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
-@LooperMode(LooperMode.Mode.LEGACY)
+import java.util.concurrent.TimeUnit;
+
+/** Tests for HandlerScheduler. */
+@RunWith(BaseRobolectricTestRunner.class)
 public class HandlerSchedulerTest {
     @Test
     public void testInjectedHandler() {
@@ -35,10 +31,10 @@ public class HandlerSchedulerTest {
         Box<Integer> box = new Box<>(0);
         scheduler.postDelayed(() -> ++box.value, 100);
         assertEquals(0, (int) box.value);
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         assertEquals(1, (int) box.value);
         scheduler.postDelayed(() -> ++box.value, 100);
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         assertEquals(2, (int) box.value);
     }
 
@@ -48,28 +44,26 @@ public class HandlerSchedulerTest {
         Box<Integer> box = new Box<>(0);
         scheduler.postDelayed(() -> ++box.value, 100);
         assertEquals(0, (int) box.value);
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         assertEquals(1, (int) box.value);
         scheduler.postDelayed(() -> ++box.value, 100);
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
         assertEquals(2, (int) box.value);
     }
 
     @Test
     public void testDelayInterval() {
-        ShadowLooper shadowLooper = Shadows.shadowOf(Looper.getMainLooper());
-        org.robolectric.util.Scheduler robolectricScheduler = shadowLooper.getScheduler();
         Scheduler scheduler = HandlerScheduler.onCurrentThread();
         Box<Integer> box = new Box<>(0);
         scheduler.postDelayed(() -> ++box.value, 100);
-        robolectricScheduler.advanceBy(50);
+        ShadowLooper.idleMainLooper(50, TimeUnit.MILLISECONDS);
         assertEquals(0, (int) box.value);
-        robolectricScheduler.advanceBy(50);
+        ShadowLooper.idleMainLooper(50, TimeUnit.MILLISECONDS);
         assertEquals(1, (int) box.value);
         scheduler.postDelayed(() -> ++box.value, 100);
-        robolectricScheduler.advanceBy(50);
+        ShadowLooper.idleMainLooper(50, TimeUnit.MILLISECONDS);
         assertEquals(1, (int) box.value);
-        robolectricScheduler.advanceBy(50);
+        ShadowLooper.idleMainLooper(50, TimeUnit.MILLISECONDS);
         assertEquals(2, (int) box.value);
     }
 }

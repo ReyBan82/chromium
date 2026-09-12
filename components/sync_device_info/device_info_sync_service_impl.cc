@@ -7,9 +7,11 @@
 #include <utility>
 
 #include "base/functional/callback.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/task/sequenced_task_runner.h"
 #include "components/sync/base/report_unrecoverable_error.h"
 #include "components/sync/invalidations/sync_invalidations_service.h"
-#include "components/sync/model/client_tag_based_model_type_processor.h"
+#include "components/sync/model/client_tag_based_data_type_processor.h"
 #include "components/sync_device_info/device_info.h"
 #include "components/sync_device_info/device_info_prefs.h"
 #include "components/sync_device_info/device_info_sync_bridge.h"
@@ -20,11 +22,12 @@
 namespace syncer {
 
 DeviceInfoSyncServiceImpl::DeviceInfoSyncServiceImpl(
-    OnceModelTypeStoreFactory model_type_store_factory,
+    OnceDataTypeStoreFactory data_type_store_factory,
     std::unique_ptr<MutableLocalDeviceInfoProvider> local_device_info_provider,
     std::unique_ptr<DeviceInfoPrefs> device_info_prefs,
     std::unique_ptr<DeviceInfoSyncClient> device_info_sync_client,
-    SyncInvalidationsService* sync_invalidations_service)
+    SyncInvalidationsService* sync_invalidations_service,
+    scoped_refptr<base::SequencedTaskRunner> pulse_task_runner)
     : device_info_sync_client_(std::move(device_info_sync_client)),
       sync_invalidations_service_(sync_invalidations_service) {
   DCHECK(local_device_info_provider);
@@ -37,13 +40,12 @@ DeviceInfoSyncServiceImpl::DeviceInfoSyncServiceImpl(
       local_device_info_provider->GetChannel();
 
   bridge_ = std::make_unique<DeviceInfoSyncBridge>(
-      std::move(local_device_info_provider),
-      std::move(model_type_store_factory),
-      std::make_unique<ClientTagBasedModelTypeProcessor>(
+      std::move(local_device_info_provider), std::move(data_type_store_factory),
+      std::make_unique<ClientTagBasedDataTypeProcessor>(
           DEVICE_INFO,
           /*dump_stack=*/base::BindRepeating(&ReportUnrecoverableError,
                                              channel)),
-      std::move(device_info_prefs));
+      std::move(device_info_prefs), std::move(pulse_task_runner));
 
   sync_invalidations_service_->AddTokenObserver(this);
   sync_invalidations_service_->SetInterestedDataTypesHandler(this);
@@ -58,7 +60,7 @@ DeviceInfoSyncServiceImpl::GetLocalDeviceInfoProvider() {
 
 void DeviceInfoSyncServiceImpl::
     SetCommittedAdditionalInterestedDataTypesCallback(
-        base::RepeatingCallback<void(const ModelTypeSet&)> callback) {
+        base::RepeatingCallback<void(const DataTypeSet&)> callback) {
   bridge_->SetCommittedAdditionalInterestedDataTypesCallback(
       std::move(callback));
 }
@@ -67,7 +69,7 @@ DeviceInfoTracker* DeviceInfoSyncServiceImpl::GetDeviceInfoTracker() {
   return bridge_.get();
 }
 
-base::WeakPtr<ModelTypeControllerDelegate>
+base::WeakPtr<DataTypeControllerDelegate>
 DeviceInfoSyncServiceImpl::GetControllerDelegate() {
   return bridge_->change_processor()->GetControllerDelegate();
 }

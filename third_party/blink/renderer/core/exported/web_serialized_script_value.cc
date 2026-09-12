@@ -30,9 +30,15 @@
 
 #include "third_party/blink/public/web/web_serialized_script_value.h"
 
-#include "third_party/blink/public/platform/web_string.h"
+#include "base/check.h"
+#include "mojo/public/cpp/system/message.h"
+#include "third_party/blink/public/common/messaging/cloneable_message_mojom_traits.h"
+#include "third_party/blink/public/mojom/blob/blob.mojom-blink.h"
+#include "third_party/blink/public/mojom/blob/blob.mojom.h"
+#include "third_party/blink/public/mojom/messaging/cloneable_message.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
-#include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value_factory.h"
+#include "third_party/blink/renderer/core/messaging/blink_cloneable_message.h"
+#include "third_party/blink/renderer/core/messaging/blink_cloneable_message_mojom_traits.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 
 namespace blink {
@@ -49,6 +55,44 @@ WebSerializedScriptValue WebSerializedScriptValue::Serialize(
   return serialized_value;
 }
 
+// static
+WebSerializedScriptValue WebSerializedScriptValue::CreateFromCloneableMessage(
+    CloneableMessage message) {
+  mojo::Message mojo_message =
+      mojom::blink::CloneableMessage::SerializeAsMessage(&message);
+
+  // Reconstruct the message to ensure handles are properly attached.
+  mojo::ScopedMessageHandle handle = mojo_message.TakeMojoMessage();
+  mojo_message = mojo::Message::CreateFromMessageHandle(&handle);
+
+  BlinkCloneableMessage blink_message;
+  if (!mojom::blink::CloneableMessage::DeserializeFromMessage(
+          std::move(mojo_message), &blink_message)) {
+    return CreateInvalid();
+  }
+  return WebSerializedScriptValue(std::move(blink_message.message));
+}
+
+CloneableMessage WebSerializedScriptValue::GetCloneableMessage(
+    base::UnguessableToken sender_agent_cluster_id) const {
+  BlinkCloneableMessage blink_message;
+  blink_message.message = private_.Get();
+  // The mojo serializer requires `sender_agent_cluster_id` to be non-empty.
+  blink_message.sender_agent_cluster_id = std::move(sender_agent_cluster_id);
+
+  mojo::Message mojo_message =
+      mojom::blink::CloneableMessage::SerializeAsMessage(&blink_message);
+
+  // Reconstruct the message to ensure handles are properly attached.
+  mojo::ScopedMessageHandle handle = mojo_message.TakeMojoMessage();
+  mojo_message = mojo::Message::CreateFromMessageHandle(&handle);
+
+  CloneableMessage message;
+  CHECK(mojom::blink::CloneableMessage::DeserializeFromMessage(
+      std::move(mojo_message), &message));
+  return message;
+}
+
 WebSerializedScriptValue WebSerializedScriptValue::CreateInvalid() {
   return SerializedScriptValue::Create();
 }
@@ -61,9 +105,26 @@ void WebSerializedScriptValue::Assign(const WebSerializedScriptValue& other) {
   private_ = other.private_;
 }
 
-v8::Local<v8::Value> WebSerializedScriptValue::Deserialize(
-    v8::Isolate* isolate) {
-  return private_->Deserialize(isolate);
+bool WebSerializedScriptValue::IsValid() const {
+  // Must have an underlying SerializedScriptValue object.
+  if (private_.IsNull()) {
+    return false;
+  }
+
+  // That object must have wire data. `CreateInvalid()` produces an empty
+  // buffer, whereas any valid serialization (even of JS `null`, `undefined`, or
+  // an empty string) always has a header.
+  return !private_->GetWireData().empty();
+}
+
+base::expected<v8::Local<v8::Value>, DeserializationError>
+WebSerializedScriptValue::Deserialize(v8::Isolate* isolate) {
+  SerializedScriptValue::DeserializeOptions options;
+  v8::Local<v8::Value> result = private_->Deserialize(isolate, options);
+  if (private_->HasDeserializationError()) {
+    return base::unexpected(DeserializationError::kDefaultFailure);
+  }
+  return result;
 }
 
 WebSerializedScriptValue::WebSerializedScriptValue(

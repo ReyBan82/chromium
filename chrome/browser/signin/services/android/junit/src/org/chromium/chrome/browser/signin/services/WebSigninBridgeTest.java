@@ -5,7 +5,7 @@
 package org.chromium.chrome.browser.signin.services;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.never;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -14,76 +14,81 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 
+import org.chromium.base.Callback;
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.base.test.util.JniMocker;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.components.signin.base.CoreAccountInfo;
-import org.chromium.components.signin.base.GoogleServiceAuthError;
-import org.chromium.components.signin.base.GoogleServiceAuthError.State;
+import org.chromium.components.signin.browser.WebSigninTrackerResult;
+import org.chromium.google_apis.gaia.GaiaId;
 
-/**
- * Unit tests for {@link WebSigninBridge}.
- */
+/** Unit tests for {@link WebSigninBridge}. */
 @RunWith(BaseRobolectricTestRunner.class)
 public class WebSigninBridgeTest {
     private static final CoreAccountInfo CORE_ACCOUNT_INFO =
-            CoreAccountInfo.createFromEmailAndGaiaId("user@domain.com", "gaia-id-user");
+            CoreAccountInfo.createFromEmailAndGaiaId("user@domain.com", new GaiaId("gaia-id-user"));
     private static final long NATIVE_WEB_SIGNIN_BRIDGE = 1000L;
 
-    @Rule
-    public final JniMocker mocker = new JniMocker();
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Rule
-    public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private WebSigninBridge.Natives mNativeMock;
 
-    @Mock
-    private WebSigninBridge.Natives mNativeMock;
+    @Mock private Profile mProfileMock;
 
-    @Mock
-    private Profile mProfileMock;
+    @Mock private Callback<@WebSigninTrackerResult Integer> mCallbackMock;
 
-    @Mock
-    private WebSigninBridge.Listener mListenerMock;
+    @Captor
+    private ArgumentCaptor<Callback<@WebSigninTrackerResult Integer>> mWebSigninCallbackCaptor;
 
     private final WebSigninBridge.Factory mFactory = new WebSigninBridge.Factory();
 
     @Before
     public void setUp() {
-        mocker.mock(WebSigninBridgeJni.TEST_HOOKS, mNativeMock);
-        when(mNativeMock.create(mProfileMock, CORE_ACCOUNT_INFO, mListenerMock))
+        WebSigninBridgeJni.setInstanceForTesting(mNativeMock);
+        when(mNativeMock.createWithCoreAccountId(
+                        eq(mProfileMock), eq(CORE_ACCOUNT_INFO.getId()), any()))
                 .thenReturn(NATIVE_WEB_SIGNIN_BRIDGE);
     }
 
     @Test
     public void testFactoryCreate() {
         WebSigninBridge webSigninBridge =
-                mFactory.create(mProfileMock, CORE_ACCOUNT_INFO, mListenerMock);
+                mFactory.createWithCoreAccountId(
+                        mProfileMock, CORE_ACCOUNT_INFO.getId(), mCallbackMock);
         Assert.assertNotNull("Factory#create should not return null!", webSigninBridge);
-        verify(mNativeMock).create(mProfileMock, CORE_ACCOUNT_INFO, mListenerMock);
+        verify(mNativeMock)
+                .createWithCoreAccountId(eq(mProfileMock), eq(CORE_ACCOUNT_INFO.getId()), any());
     }
 
     @Test
     public void testDestroy() {
-        mFactory.create(mProfileMock, CORE_ACCOUNT_INFO, mListenerMock).destroy();
+        mFactory.createWithCoreAccountId(mProfileMock, CORE_ACCOUNT_INFO.getId(), mCallbackMock);
+
+        verify(mNativeMock)
+                .createWithCoreAccountId(
+                        eq(mProfileMock),
+                        eq(CORE_ACCOUNT_INFO.getId()),
+                        mWebSigninCallbackCaptor.capture());
+
+        mWebSigninCallbackCaptor.getValue().onResult(WebSigninTrackerResult.SUCCESS);
+
         verify(mNativeMock).destroy(NATIVE_WEB_SIGNIN_BRIDGE);
     }
 
     @Test
     public void testOnSigninSucceed() {
-        WebSigninBridge.onSigninSucceeded(mListenerMock);
-        verify(mListenerMock).onSigninSucceeded();
-        verify(mListenerMock, never()).onSigninFailed(any());
+        WebSigninBridge.onSigninResult(mCallbackMock, WebSigninTrackerResult.SUCCESS);
+        verify(mCallbackMock).onResult(WebSigninTrackerResult.SUCCESS);
     }
 
     @Test
     public void testOnSigninFailed() {
-        final GoogleServiceAuthError error = new GoogleServiceAuthError(State.CONNECTION_FAILED);
-        WebSigninBridge.onSigninFailed(mListenerMock, error);
-        verify(mListenerMock).onSigninFailed(error);
-        verify(mListenerMock, never()).onSigninSucceeded();
+        WebSigninBridge.onSigninResult(mCallbackMock, WebSigninTrackerResult.OTHER_ERROR);
+        verify(mCallbackMock).onResult(WebSigninTrackerResult.OTHER_ERROR);
     }
 }

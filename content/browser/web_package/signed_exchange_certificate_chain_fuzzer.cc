@@ -4,12 +4,13 @@
 
 #include "content/browser/web_package/signed_exchange_certificate_chain.h"  // nogncheck
 
-#include "base/strings/string_piece.h"
+#include "base/containers/span.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 
 namespace content {
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  SignedExchangeCertificateChain::Parse(base::make_span(data, size), nullptr);
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(const base::span<const uint8_t> data) {
+  SignedExchangeCertificateChain::Parse(data, nullptr);
   return 0;
 }
 

@@ -14,36 +14,39 @@
 
 namespace blink {
 
-// static
-const char BlockingAttribute::kRenderToken[] = "render";
-
-// static
-HashSet<AtomicString>& BlockingAttribute::SupportedTokens() {
+HashSet<AtomicString>& BlockingAttribute::SupportedTokens() const {
   DEFINE_STATIC_LOCAL(HashSet<AtomicString>, tokens,
                       ({
-                          kRenderToken,
+                          keywords::kRender,
                       }));
-
   return tokens;
 }
 
 // static
 bool BlockingAttribute::HasRenderToken(const String& attribute_value) {
-  if (!RuntimeEnabledFeatures::BlockingAttributeEnabled())
+  if (attribute_value.empty()) {
     return false;
-  if (attribute_value.empty())
-    return false;
-  return SpaceSplitString(AtomicString(attribute_value)).Contains(kRenderToken);
+  }
+  return SpaceSplitString(AtomicString(attribute_value))
+      .Contains(keywords::kRender);
 }
 
 bool BlockingAttribute::ValidateTokenValue(const AtomicString& token_value,
                                            ExceptionState&) const {
-  DCHECK(RuntimeEnabledFeatures::BlockingAttributeEnabled());
   return SupportedTokens().Contains(token_value);
 }
 
-void BlockingAttribute::CountTokenUsage() {
-  if (contains(kRenderToken)) {
+RenderBlockingLevel BlockingAttribute::GetBlockingLevel() const {
+  if (HasRenderToken()) {
+    return RenderBlockingLevel::kBlock;
+  }
+  return RenderBlockingLevel::kNone;
+}
+
+void BlockingAttribute::OnAttributeValueChanged(const AtomicString& old_value,
+                                                const AtomicString& new_value) {
+  DidUpdateAttributeValue(old_value, new_value);
+  if (contains(keywords::kRender)) {
     GetElement().GetDocument().CountUse(
         WebFeature::kBlockingAttributeRenderToken);
   }

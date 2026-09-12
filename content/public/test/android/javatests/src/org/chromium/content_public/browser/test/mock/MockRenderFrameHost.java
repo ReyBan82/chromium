@@ -4,9 +4,12 @@
 
 package org.chromium.content_public.browser.test.mock;
 
+import androidx.annotation.Nullable;
+
 import org.chromium.base.Callback;
 import org.chromium.blink.mojom.AuthenticatorStatus;
 import org.chromium.content_public.browser.GlobalRenderFrameHostId;
+import org.chromium.content_public.browser.JavaScriptCallback;
 import org.chromium.content_public.browser.LifecycleState;
 import org.chromium.content_public.browser.PermissionsPolicyFeature;
 import org.chromium.content_public.browser.RenderFrameHost;
@@ -17,9 +20,7 @@ import org.chromium.url.Origin;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * Mock class for {@link RenderFrameHost}.
- */
+/** Mock class for {@link RenderFrameHost}. */
 public class MockRenderFrameHost implements RenderFrameHost {
     @Override
     public GURL getLastCommittedURL() {
@@ -29,6 +30,16 @@ public class MockRenderFrameHost implements RenderFrameHost {
     @Override
     public Origin getLastCommittedOrigin() {
         return null;
+    }
+
+    @Override
+    public RenderFrameHost getMainFrame() {
+        return null;
+    }
+
+    @Override
+    public boolean isOutermostMainFrame() {
+        return false;
     }
 
     @Override
@@ -57,7 +68,15 @@ public class MockRenderFrameHost implements RenderFrameHost {
     public void notifyUserActivation() {}
 
     @Override
+    public void notifyWebAuthnAssertionRequestSucceeded() {}
+
+    @Override
     public boolean isIncognito() {
+        return false;
+    }
+
+    @Override
+    public boolean isCloseWatcherActive() {
         return false;
     }
 
@@ -77,16 +96,33 @@ public class MockRenderFrameHost implements RenderFrameHost {
     }
 
     @Override
-    public WebAuthSecurityChecksResults performGetAssertionWebAuthSecurityChecks(
-            String relyingPartyId, Origin effectiveOrigin,
-            boolean isPaymentCredentialGetAssertion) {
-        return new WebAuthSecurityChecksResults(AuthenticatorStatus.SUCCESS, false);
+    public void performGetAssertionWebAuthSecurityChecks(
+            String relyingPartyId,
+            Origin effectiveOrigin,
+            boolean isPaymentCredentialGetAssertion,
+            @Nullable Origin remoteDesktopClientOverrideOrigin,
+            @Nullable String appId,
+            Callback<WebAuthSecurityChecksResults> callback) {
+        callback.onResult(new WebAuthSecurityChecksResults(AuthenticatorStatus.SUCCESS, false));
     }
 
     @Override
-    public int performMakeCredentialWebAuthSecurityChecks(
-            String relyingPartyId, Origin effectiveOrigin, boolean isPaymentCredentialCreation) {
-        return 0;
+    public void performMakeCredentialWebAuthSecurityChecks(
+            String relyingPartyId,
+            Origin effectiveOrigin,
+            boolean isPaymentCredentialCreation,
+            @Nullable Origin remoteDesktopClientOverrideOrigin,
+            @Nullable String appId,
+            Callback<WebAuthSecurityChecksResults> callback) {
+        callback.onResult(new WebAuthSecurityChecksResults(AuthenticatorStatus.SUCCESS, false));
+    }
+
+    @Override
+    public void performReportWebAuthSecurityChecks(
+            String relyingPartyId,
+            Origin effectiveOrigin,
+            Callback<WebAuthSecurityChecksResults> callback) {
+        callback.onResult(new WebAuthSecurityChecksResults(AuthenticatorStatus.SUCCESS, false));
     }
 
     @Override
@@ -101,4 +137,16 @@ public class MockRenderFrameHost implements RenderFrameHost {
 
     @Override
     public void insertVisualStateCallback(Callback<Boolean> callback) {}
+
+    @Override
+    public void executeJavaScriptInIsolatedWorld(
+            String script, int worldId, @Nullable JavaScriptCallback callback) {}
+
+    @Override
+    public boolean hasHitTestDataForTesting() {
+        return true;
+    }
+
+    @Override
+    public void viewSource() {}
 }

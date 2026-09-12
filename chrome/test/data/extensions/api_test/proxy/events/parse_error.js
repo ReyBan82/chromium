@@ -5,32 +5,32 @@
 // proxy api test
 // browser_tests.exe --gtest_filter=ProxySettingsApiTest.ProxyEventsParseError
 
-var expected_error = {
-    details: "line: 1: Uncaught SyntaxError: Unexpected token '!'",
-    error: "net::ERR_PAC_SCRIPT_FAILED",
-    fatal: false
+const EXPECTED_ERROR = {
+  details: `line: 1: Uncaught SyntaxError: Unexpected token '!'`,
+  error: 'net::ERR_PAC_SCRIPT_FAILED',
+  fatal: false,
 };
 
 function test() {
   // Install error handler and get the test server config.
-  chrome.proxy.onProxyError.addListener(function (error) {
-    chrome.test.assertEq(expected_error, error);
+  chrome.proxy.onProxyError.addListener(function(error) {
+    chrome.test.assertEq(EXPECTED_ERROR, error);
     chrome.test.notifyPass();
   });
 
   // Set an invalid PAC script. This should trigger a proxy errors.
-  var config = {
-    mode: "pac_script",
+  const config = {
+    mode: 'pac_script',
     pacScript: {
-      data: "trash!-FindProxyForURL",
-      mandatory: false
-    }
+      data: 'trash!-FindProxyForURL',
+      mandatory: false,
+    },
   };
-  chrome.proxy.settings.set({'value': config}, testDone);
+  chrome.proxy.settings.set({value: config}, testDone);
 }
 
 function testDone() {
- // Do nothing. The test success/failure is decided in the event handler.
+  // Do nothing. The test success/failure is decided in the event handler.
 }
 
 test();

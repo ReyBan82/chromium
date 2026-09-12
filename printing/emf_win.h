@@ -5,9 +5,10 @@
 #ifndef PRINTING_EMF_WIN_H_
 #define PRINTING_EMF_WIN_H_
 
+#include <windows.h>
+
 #include <stddef.h>
 #include <stdint.h>
-#include <windows.h>
 
 #include <memory>
 #include <vector>
@@ -17,10 +18,6 @@
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "printing/metafile.h"
-
-namespace base {
-class FilePath;
-}
 
 namespace gfx {
 class Rect;
@@ -45,13 +42,6 @@ class COMPONENT_EXPORT(PRINTING_METAFILE) Emf : public Metafile {
 
   // Closes metafile.
   void Close();
-
-  // Generates a new metafile that will record every GDI command, and will
-  // be saved to `metafile_path`.
-  bool InitToFile(const base::FilePath& metafile_path);
-
-  // Initializes the Emf with the data in `metafile_path`.
-  bool InitFromFile(const base::FilePath& metafile_path);
 
   // Metafile methods.
   bool Init() override;
@@ -96,20 +86,37 @@ class COMPONENT_EXPORT(PRINTING_METAFILE) Emf : public Metafile {
                                        LPARAM param);
 
   // Compiled EMF data handle.
-  HENHMETAFILE emf_;
+  HENHMETAFILE emf_ = nullptr;
 
   // Valid when generating EMF data through a virtual HDC.
-  HDC hdc_;
+  HDC hdc_ = nullptr;
+};
+
+// Emf subclass that knows how to play back PostScript data embedded as EMF
+// comment records.
+class COMPONENT_EXPORT(PRINTING_METAFILE) PostScriptMetaFile : public Emf {
+ public:
+  PostScriptMetaFile();
+
+  PostScriptMetaFile(const PostScriptMetaFile&) = delete;
+  PostScriptMetaFile& operator=(const PostScriptMetaFile&) = delete;
+
+  ~PostScriptMetaFile() override;
+
+  // `Emf` overrides:
+  mojom::MetafileDataType GetDataType() const override;
+  bool SafePlayback(HDC hdc) const override;
 };
 
 struct Emf::EnumerationContext {
-  EnumerationContext();
+  explicit EnumerationContext(uint32_t metafile_size);
 
-  raw_ptr<HANDLETABLE> handle_table;
-  int objects_count;
-  HDC hdc;
-  raw_ptr<const XFORM> base_matrix;
-  int dc_on_page_start;
+  HDC hdc = nullptr;
+  raw_ptr<HANDLETABLE> handle_table = nullptr;
+  raw_ptr<const XFORM> base_matrix = nullptr;
+  int objects_count = 0;
+  int dc_on_page_start = 0;
+  uint32_t remaining_metafile_size;
 };
 
 // One EMF record. It keeps pointers to the EMF buffer held by Emf::emf_.
@@ -159,6 +166,7 @@ class COMPONENT_EXPORT(PRINTING_METAFILE) Emf::Enumerator {
 
  private:
   FRIEND_TEST_ALL_PREFIXES(EmfPrintingTest, Enumerate);
+  FRIEND_TEST_ALL_PREFIXES(EmfTest, RemainingMetafileSize);
 
   // Processes one EMF record and saves it in the items_ array.
   static int CALLBACK EnhMetaFileProc(HDC hdc,

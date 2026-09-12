@@ -14,7 +14,6 @@
 #include "components/spellcheck/browser/pref_names.h"
 #include "components/spellcheck/common/spellcheck_features.h"
 #include "components/spellcheck/spellcheck_buildflags.h"
-#include "content/public/browser/notification_service.h"
 #include "extensions/browser/event_router_factory.h"
 #include "extensions/browser/extension_prefs.h"
 
@@ -54,7 +53,7 @@ class LanguageSettingsPrivateDelegateTest
         disable_browser_spell_checker;
 #endif  // BUILDFLAG(IS_WIN)
 
-    base::Value::List language_codes;
+    base::ListValue language_codes;
     language_codes.Append("fr");
     profile()->GetPrefs()->Set(spellcheck::prefs::kSpellCheckDictionaries,
                                base::Value(std::move(language_codes)));
@@ -72,7 +71,7 @@ class LanguageSettingsPrivateDelegateTest
     run_loop_.reset();
     dictionary->RemoveObserver(this);
 
-    delegate_.reset(LanguageSettingsPrivateDelegate::Create(browser_context()));
+    delegate_ = LanguageSettingsPrivateDelegate::Create(browser_context());
   }
 
   void TearDown() override {
@@ -91,8 +90,9 @@ class LanguageSettingsPrivateDelegateTest
       const std::string& language) override {}
   void OnHunspellDictionaryDownloadFailure(
       const std::string& language) override {
-    if (run_loop_)
+    if (run_loop_) {
       run_loop_->Quit();
+    }
   }
 
 #if BUILDFLAG(IS_WIN)

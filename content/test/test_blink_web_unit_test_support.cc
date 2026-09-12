@@ -7,7 +7,6 @@
 #include <memory>
 
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
@@ -43,8 +42,8 @@
 #include "v8/include/v8.h"
 
 #if BUILDFLAG(IS_APPLE)
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_nsautorelease_pool.h"
+#include "base/apple/foundation_util.h"
+#include "base/apple/scoped_nsautorelease_pool.h"
 #endif
 
 #ifdef V8_USE_EXTERNAL_STARTUP_DATA
@@ -74,9 +73,10 @@ content::TestBlinkWebUnitTestSupport* g_test_platform = nullptr;
 namespace content {
 
 TestBlinkWebUnitTestSupport::TestBlinkWebUnitTestSupport(
-    TestBlinkWebUnitTestSupport::SchedulerType scheduler_type) {
+    SchedulerType scheduler_type,
+    std::string additional_v8_flags) {
 #if BUILDFLAG(IS_APPLE)
-  base::mac::ScopedNSAutoreleasePool autorelease_pool;
+  base::apple::ScopedNSAutoreleasePool autorelease_pool;
 #endif
 
 #if defined(V8_USE_EXTERNAL_STARTUP_DATA)
@@ -86,6 +86,11 @@ TestBlinkWebUnitTestSupport::TestBlinkWebUnitTestSupport(
   // Test shell always exposes the GC, and some tests need to modify flags so do
   // not freeze them on initialization.
   std::string v8_flags("--expose-gc --no-freeze-flags-after-init");
+  v8_flags += additional_v8_flags;
+
+  // Makes Mojo calls to the browser. This is called inside
+  // blink::Initialize so it needs to be set first.
+  blink::WebRuntimeFeatures::EnableAndroidDownloadableFontsMatching(false);
 
   blink::Platform::InitializeBlink();
   scoped_refptr<base::SingleThreadTaskRunner> dummy_task_runner;
@@ -105,8 +110,6 @@ TestBlinkWebUnitTestSupport::TestBlinkWebUnitTestSupport(
     dummy_task_runner_handle =
         std::make_unique<base::SingleThreadTaskRunner::CurrentDefaultHandle>(
             dummy_task_runner);
-    // Force V8 to run single threaded.
-    v8_flags += " --single-threaded";
   } else {
     DCHECK_EQ(scheduler_type, SchedulerType::kRealScheduler);
     main_thread_scheduler_ =
@@ -119,15 +122,11 @@ TestBlinkWebUnitTestSupport::TestBlinkWebUnitTestSupport(
   // Set V8 flags.
   v8::V8::SetFlagsFromString(v8_flags.c_str(), v8_flags.size());
 
-  // Makes Mojo calls to the browser. This is called inside
-  // blink::Initialize so it needs to be set first.
-  blink::WebRuntimeFeatures::EnableAndroidDownloadableFontsMatching(false);
-
   mojo::BinderMap binders;
-  blink::Initialize(this, &binders, main_thread_scheduler_.get());
+  blink::InitializeWithoutIsolateForTesting(this, &binders,
+                                            main_thread_scheduler_.get());
   g_test_platform = this;
   blink::SetWebTestMode(true);
-  blink::WebRuntimeFeatures::EnableDatabase(true);
   blink::WebRuntimeFeatures::EnableNotifications(true);
   blink::WebRuntimeFeatures::EnableTouchEventFeatureDetection(true);
 
@@ -147,15 +146,7 @@ TestBlinkWebUnitTestSupport::~TestBlinkWebUnitTestSupport() {
 }
 
 blink::WebString TestBlinkWebUnitTestSupport::UserAgent() {
-  return blink::WebString::FromUTF8("test_runner/0.0.0.0");
-}
-
-blink::WebString TestBlinkWebUnitTestSupport::FullUserAgent() {
-  return blink::WebString::FromUTF8("test_runner/0.0.0.0");
-}
-
-blink::WebString TestBlinkWebUnitTestSupport::ReducedUserAgent() {
-  return blink::WebString::FromUTF8("test_runner/0.0.0.0");
+  return blink::WebString("test_runner/0.0.0.0");
 }
 
 blink::WebString TestBlinkWebUnitTestSupport::QueryLocalizedString(
@@ -163,27 +154,27 @@ blink::WebString TestBlinkWebUnitTestSupport::QueryLocalizedString(
   // Returns placeholder strings to check if they are correctly localized.
   switch (resource_id) {
     case IDS_FORM_FILE_NO_FILE_LABEL:
-      return WebString::FromASCII("<<NoFileChosenLabel>>");
+      return WebString::FromAscii("<<NoFileChosenLabel>>");
     case IDS_FORM_OTHER_DATE_LABEL:
-      return WebString::FromASCII("<<OtherDate>>");
+      return WebString::FromAscii("<<OtherDate>>");
     case IDS_FORM_OTHER_MONTH_LABEL:
-      return WebString::FromASCII("<<OtherMonth>>");
+      return WebString::FromAscii("<<OtherMonth>>");
     case IDS_FORM_OTHER_WEEK_LABEL:
-      return WebString::FromASCII("<<OtherWeek>>");
+      return WebString::FromAscii("<<OtherWeek>>");
     case IDS_FORM_CALENDAR_CLEAR:
-      return WebString::FromASCII("<<Clear>>");
+      return WebString::FromAscii("<<Clear>>");
     case IDS_FORM_CALENDAR_TODAY:
-      return WebString::FromASCII("<<Today>>");
+      return WebString::FromAscii("<<Today>>");
     case IDS_FORM_THIS_MONTH_LABEL:
-      return WebString::FromASCII("<<ThisMonth>>");
+      return WebString::FromAscii("<<ThisMonth>>");
     case IDS_FORM_THIS_WEEK_LABEL:
-      return WebString::FromASCII("<<ThisWeek>>");
+      return WebString::FromAscii("<<ThisWeek>>");
     case IDS_FORM_VALIDATION_VALUE_MISSING:
-      return WebString::FromASCII("<<ValidationValueMissing>>");
+      return WebString::FromAscii("<<ValidationValueMissing>>");
     case IDS_FORM_VALIDATION_VALUE_MISSING_SELECT:
-      return WebString::FromASCII("<<ValidationValueMissingForSelect>>");
+      return WebString::FromAscii("<<ValidationValueMissingForSelect>>");
     case IDS_FORM_INPUT_WEEK_TEMPLATE:
-      return WebString::FromASCII("Week $2, $1");
+      return WebString::FromAscii("Week $2, $1");
     default:
       return blink::WebString();
   }
@@ -194,11 +185,11 @@ blink::WebString TestBlinkWebUnitTestSupport::QueryLocalizedString(
     const blink::WebString& value) {
   switch (resource_id) {
     case IDS_FORM_VALIDATION_RANGE_UNDERFLOW:
-      return blink::WebString::FromASCII("range underflow");
+      return blink::WebString::FromAscii("range underflow");
     case IDS_FORM_VALIDATION_RANGE_OVERFLOW:
-      return blink::WebString::FromASCII("range overflow");
+      return blink::WebString::FromAscii("range overflow");
     case IDS_FORM_SELECT_MENU_LIST_TEXT:
-      return blink::WebString::FromASCII(value.Ascii() + " selected");
+      return blink::WebString::FromAscii(value.Ascii() + " selected");
   }
 
   return BlinkPlatformImpl::QueryLocalizedString(resource_id, value);
@@ -210,22 +201,35 @@ blink::WebString TestBlinkWebUnitTestSupport::QueryLocalizedString(
     const blink::WebString& value2) {
   switch (resource_id) {
     case IDS_FORM_VALIDATION_TOO_LONG:
-      return blink::WebString::FromASCII("too long");
+      return blink::WebString::FromAscii("too long");
     case IDS_FORM_VALIDATION_STEP_MISMATCH:
-      return blink::WebString::FromASCII("step mismatch");
+      return blink::WebString::FromAscii("step mismatch");
   }
 
   return BlinkPlatformImpl::QueryLocalizedString(resource_id, value1, value2);
 }
 
 blink::WebString TestBlinkWebUnitTestSupport::DefaultLocale() {
-  return blink::WebString::FromASCII("en-US");
+  return blink::WebString::FromAscii("en-US");
 }
 
 scoped_refptr<base::SingleThreadTaskRunner>
 TestBlinkWebUnitTestSupport::GetIOTaskRunner() const {
-  return ChildProcess::current() ? ChildProcess::current()->io_task_runner()
-                                 : nullptr;
+  scoped_refptr<base::SingleThreadTaskRunner> task_runner =
+      ChildProcess::current() ? ChildProcess::current()->io_task_runner()
+                              : nullptr;
+  return task_runner ? task_runner
+                     : base::SingleThreadTaskRunner::GetCurrentDefault();
+}
+
+scoped_refptr<base::SequencedTaskRunner>
+TestBlinkWebUnitTestSupport::GetMediaStreamVideoSourceVideoTaskRunner() const {
+  return GetIOTaskRunner();
+}
+
+scoped_refptr<base::SequencedTaskRunner>
+TestBlinkWebUnitTestSupport::MediaThreadTaskRunner() {
+  return base::SequencedTaskRunner::GetCurrentDefault();
 }
 
 bool TestBlinkWebUnitTestSupport::IsThreadedAnimationEnabled() {

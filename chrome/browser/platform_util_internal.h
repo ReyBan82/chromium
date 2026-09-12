@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_PLATFORM_UTIL_INTERNAL_H_
 #define CHROME_BROWSER_PLATFORM_UTIL_INTERNAL_H_
 
+#include "base/functional/callback_forward.h"
 #include "chrome/browser/platform_util.h"
 
 namespace base {
@@ -19,6 +20,7 @@ namespace internal {
 // of type |type|. Called on the thread pool with
 // base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN semantics (and thus can't
 // use global state torn down during shutdown).
+// Defined in per-platform files (e.g. platform_util_win.cc).
 void PlatformOpenVerifiedItem(const base::FilePath& path, OpenItemType type);
 
 // Prevent shell or external applications from being invoked during testing.
@@ -26,6 +28,15 @@ void DisableShellOperationsForTesting();
 
 // Returns false if DisableShellOperationsForTesting() has been called.
 bool AreShellOperationsAllowed();
+
+// If set, invoked on the worker thread OpenItem() schedules its
+// verify-and-open work on, before that work runs (regardless of whether
+// DisableShellOperationsForTesting() was called). Lets tests observe
+// properties of that thread, e.g. its COM apartment type on Windows.
+void SetOpenItemThreadObserverForTesting(base::RepeatingClosure observer);
+
+// Runs the observer set by SetOpenItemThreadObserverForTesting(), if any.
+void RunOpenItemThreadObserverForTesting();
 
 }  // namespace internal
 }  // namespace platform_util

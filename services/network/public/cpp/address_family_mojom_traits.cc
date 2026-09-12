@@ -4,25 +4,24 @@
 
 #include "services/network/public/cpp/address_family_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 // static
-bool EnumTraits<network::mojom::AddressFamily, net::AddressFamily>::FromMojom(
-    network::mojom::AddressFamily address_family,
-    net::AddressFamily* out) {
+net::AddressFamily
+EnumTraits<network::mojom::AddressFamily, net::AddressFamily>::FromMojom(
+    network::mojom::AddressFamily address_family) {
   using network::mojom::AddressFamily;
   switch (address_family) {
     case AddressFamily::UNSPECIFIED:
-      *out = net::ADDRESS_FAMILY_UNSPECIFIED;
-      return true;
+      return net::ADDRESS_FAMILY_UNSPECIFIED;
     case AddressFamily::IPV4:
-      *out = net::ADDRESS_FAMILY_IPV4;
-      return true;
+      return net::ADDRESS_FAMILY_IPV4;
     case AddressFamily::IPV6:
-      *out = net::ADDRESS_FAMILY_IPV6;
-      return true;
+      return net::ADDRESS_FAMILY_IPV6;
   }
-  return false;
+  NOTREACHED();
 }
 
 // static
@@ -39,7 +38,6 @@ EnumTraits<network::mojom::AddressFamily, net::AddressFamily>::ToMojom(
       return AddressFamily::IPV6;
   }
   NOTREACHED();
-  return AddressFamily::UNSPECIFIED;
 }
 
 }  // namespace mojo

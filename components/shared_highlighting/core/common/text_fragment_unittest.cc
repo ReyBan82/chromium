@@ -13,97 +13,103 @@ namespace shared_highlighting {
 namespace {
 
 base::Value TextFragmentToValue(const std::string& fragment) {
-  absl::optional<TextFragment> opt_frag =
+  std::optional<TextFragment> opt_frag =
       TextFragment::FromEscapedString(fragment);
   return opt_frag ? opt_frag->ToValue() : base::Value(base::Value::Type::NONE);
 }
 
 TEST(TextFragmentTest, FragmentToValueFromEncodedString) {
   // Success cases
-  std::string fragment = "start";
-  base::Value::Dict result = TextFragmentToValue(fragment).TakeDict();
+  base::Value result_val = TextFragmentToValue("start");
+  ASSERT_TRUE(result_val.is_dict());
+  base::DictValue result = std::move(result_val).TakeDict();
   EXPECT_FALSE(result.contains(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_FALSE(result.contains(kFragmentTextEndKey));
   EXPECT_FALSE(result.contains(kFragmentSuffixKey));
 
-  fragment = "start,end";
-  result = TextFragmentToValue(fragment).TakeDict();
+  result_val = TextFragmentToValue("start,end");
+  ASSERT_TRUE(result_val.is_dict());
+  result = std::move(result_val).TakeDict();
   EXPECT_FALSE(result.contains(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_EQ("end", *result.FindString(kFragmentTextEndKey));
   EXPECT_FALSE(result.contains(kFragmentSuffixKey));
 
-  fragment = "prefix-,start";
-  result = TextFragmentToValue(fragment).TakeDict();
+  result_val = TextFragmentToValue("prefix-,start");
+  ASSERT_TRUE(result_val.is_dict());
+  result = std::move(result_val).TakeDict();
   EXPECT_EQ("prefix", *result.FindString(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_FALSE(result.contains(kFragmentTextEndKey));
   EXPECT_FALSE(result.contains(kFragmentSuffixKey));
 
-  fragment = "start,-suffix";
-  result = TextFragmentToValue(fragment).TakeDict();
+  result_val = TextFragmentToValue("start,-suffix");
+  ASSERT_TRUE(result_val.is_dict());
+  result = std::move(result_val).TakeDict();
   EXPECT_FALSE(result.contains(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_FALSE(result.contains(kFragmentTextEndKey));
   EXPECT_EQ("suffix", *result.FindString(kFragmentSuffixKey));
 
-  fragment = "prefix-,start,end";
-  result = TextFragmentToValue(fragment).TakeDict();
+  result_val = TextFragmentToValue("prefix-,start,end");
+  ASSERT_TRUE(result_val.is_dict());
+  result = std::move(result_val).TakeDict();
   EXPECT_EQ("prefix", *result.FindString(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_EQ("end", *result.FindString(kFragmentTextEndKey));
   EXPECT_FALSE(result.contains(kFragmentSuffixKey));
 
-  fragment = "start,end,-suffix";
-  result = TextFragmentToValue(fragment).TakeDict();
+  result_val = TextFragmentToValue("start,end,-suffix");
+  ASSERT_TRUE(result_val.is_dict());
+  result = std::move(result_val).TakeDict();
   EXPECT_FALSE(result.contains(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_EQ("end", *result.FindString(kFragmentTextEndKey));
   EXPECT_EQ("suffix", *result.FindString(kFragmentSuffixKey));
 
-  fragment = "prefix-,start,end,-suffix";
-  result = TextFragmentToValue(fragment).TakeDict();
+  result_val = TextFragmentToValue("prefix-,start,end,-suffix");
+  ASSERT_TRUE(result_val.is_dict());
+  result = std::move(result_val).TakeDict();
   EXPECT_EQ("prefix", *result.FindString(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_EQ("end", *result.FindString(kFragmentTextEndKey));
   EXPECT_EQ("suffix", *result.FindString(kFragmentSuffixKey));
 
   // Trailing comma doesn't break otherwise valid fragment
-  fragment = "start,";
-  result = TextFragmentToValue(fragment).TakeDict();
+  result_val = TextFragmentToValue("start,");
+  ASSERT_TRUE(result_val.is_dict());
+  result = std::move(result_val).TakeDict();
   EXPECT_FALSE(result.contains(kFragmentPrefixKey));
   EXPECT_EQ("start", *result.FindString(kFragmentTextStartKey));
   EXPECT_FALSE(result.contains(kFragmentTextEndKey));
   EXPECT_FALSE(result.contains(kFragmentSuffixKey));
 
   // Failure Cases
-  fragment = "";
-  base::Value result_val = TextFragmentToValue(fragment);
+  result_val = TextFragmentToValue("");
   EXPECT_EQ(base::Value::Type::NONE, result_val.type());
 
-  fragment = "some,really-,malformed,-thing,with,too,many,commas";
-  result_val = TextFragmentToValue(fragment);
+  result_val =
+      TextFragmentToValue("some,really-,malformed,-thing,with,too,many,commas");
   EXPECT_EQ(base::Value::Type::NONE, result_val.type());
 
-  fragment = "prefix-,-suffix";
-  result_val = TextFragmentToValue(fragment);
+  result_val = TextFragmentToValue("prefix-,-suffix");
   EXPECT_EQ(base::Value::Type::NONE, result_val.type());
 
-  fragment = "start,prefix-,-suffix";
-  result_val = TextFragmentToValue(fragment);
+  result_val = TextFragmentToValue("start,prefix-,-suffix");
   EXPECT_EQ(base::Value::Type::NONE, result_val.type());
 
-  fragment = "prefix-,-suffix,start";
-  result_val = TextFragmentToValue(fragment);
+  result_val = TextFragmentToValue("prefix-,-suffix,start");
   EXPECT_EQ(base::Value::Type::NONE, result_val.type());
 
-  fragment = "prefix-";
-  result_val = TextFragmentToValue(fragment);
+  result_val = TextFragmentToValue("prefix-");
   EXPECT_EQ(base::Value::Type::NONE, result_val.type());
 
-  fragment = "-suffix";
-  result_val = TextFragmentToValue(fragment);
+  result_val = TextFragmentToValue("-suffix");
+  EXPECT_EQ(base::Value::Type::NONE, result_val.type());
+
+  // Invalid characters
+  result_val = TextFragmentToValue("\xFF\xFF");
   EXPECT_EQ(base::Value::Type::NONE, result_val.type());
 }
 
@@ -160,15 +166,15 @@ TEST(TextFragmentTest, FromValue) {
   base::Value string_value = base::Value(base::Value::Type::STRING);
   EXPECT_FALSE(TextFragment::FromValue(&string_value).has_value());
 
-  fragment_value.SetStringKey(kFragmentTextStartKey, text_start);
-  fragment_value.SetStringKey(kFragmentTextEndKey, text_end);
-  fragment_value.SetStringKey(kFragmentPrefixKey, prefix);
-  fragment_value.SetStringKey(kFragmentSuffixKey, suffix);
+  fragment_value.GetDict().Set(kFragmentTextStartKey, text_start);
+  fragment_value.GetDict().Set(kFragmentTextEndKey, text_end);
+  fragment_value.GetDict().Set(kFragmentPrefixKey, prefix);
+  fragment_value.GetDict().Set(kFragmentSuffixKey, suffix);
 
-  absl::optional<TextFragment> opt_fragment =
+  std::optional<TextFragment> opt_fragment =
       TextFragment::FromValue(&fragment_value);
-  EXPECT_TRUE(opt_fragment.has_value());
-  TextFragment fragment = opt_fragment.value();
+  ASSERT_TRUE(opt_fragment.has_value());
+  const TextFragment& fragment = opt_fragment.value();
   EXPECT_EQ(text_start, fragment.text_start());
   EXPECT_EQ(text_end, fragment.text_end());
   EXPECT_EQ(prefix, fragment.prefix());
@@ -176,7 +182,7 @@ TEST(TextFragmentTest, FromValue) {
 
   // Testing the case where the dictionary value doesn't have a text start
   // value.
-  ASSERT_TRUE(fragment_value.RemoveKey(kFragmentTextStartKey));
+  ASSERT_TRUE(fragment_value.GetDict().Remove(kFragmentTextStartKey));
   EXPECT_FALSE(TextFragment::FromValue(&fragment_value).has_value());
 }
 

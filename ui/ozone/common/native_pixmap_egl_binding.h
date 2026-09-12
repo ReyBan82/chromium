@@ -6,47 +6,58 @@
 #define UI_OZONE_COMMON_NATIVE_PIXMAP_EGL_BINDING_H_
 
 #include <memory>
+#include <optional>
 
+#include "base/threading/thread_checker.h"
+#include "components/viz/common/resources/shared_image_format.h"
+#include "ui/gfx/color_space.h"
 #include "ui/gfx/native_pixmap.h"
+#include "ui/gl/scoped_egl_image.h"
 #include "ui/ozone/public/native_pixmap_gl_binding.h"
-
-namespace gfx {
-class ColorSpace;
-}
-
-namespace gl {
-class GLImageNativePixmap;
-}
 
 namespace ui {
 
-// A binding maintained between GLImageNativePixmap and GL Textures in Ozone.
+// A binding maintained between NativePixmap and GL Textures in Ozone.
 class NativePixmapEGLBinding : public NativePixmapGLBinding {
  public:
-  NativePixmapEGLBinding(scoped_refptr<gl::GLImageNativePixmap> gl_image,
-                         gfx::BufferFormat format);
+  NativePixmapEGLBinding(const gfx::Size& size,
+                         viz::SharedImageFormat format,
+                         std::optional<int> plane_index);
   ~NativePixmapEGLBinding() override;
 
+  static bool IsSharedImageFormatSupported(viz::SharedImageFormat format);
+
+  // Create an EGLImage from a given NativePixmap and plane and bind
+  // |texture_id| to |target| followed by binding the image to |target|. The
+  // color space is for the external sampler: When we sample the YUV buffer as
+  // RGB, we need to tell it the encoding (BT.601, BT.709, or BT.2020) and range
+  // (limited or null), and |color_space| conveys this.
   static std::unique_ptr<NativePixmapGLBinding> Create(
       scoped_refptr<gfx::NativePixmap> pixmap,
-      gfx::BufferFormat plane_format,
-      gfx::BufferPlane plane,
+      viz::SharedImageFormat plane_format,
+      std::optional<int> plane_index,
       gfx::Size plane_size,
       const gfx::ColorSpace& color_space,
       GLenum target,
       GLuint texture_id);
 
-  // NativePixmapGLBinding:
-  GLuint GetInternalFormat() override;
-  GLenum GetDataType() override;
-
  private:
-  // TODO(hitawala): Merge BindTexImage, Initialize from GLImage and its
-  // subclass NativePixmap to NativePixmapEGLBinding once we stop using them
-  // elsewhere eg. VDA decoders in media.
-  scoped_refptr<gl::GLImageNativePixmap> gl_image_;
+  // Create an EGLImage from a given NativePixmap and bind |texture_id| to
+  // |target| followed by binding the image to |target|. This EGLImage can be
+  // converted to a GL texture.
+  bool InitializeFromNativePixmap(scoped_refptr<gfx::NativePixmap> pixmap,
+                                  const gfx::ColorSpace& color_space,
+                                  GLenum target,
+                                  GLuint texture_id);
 
-  gfx::BufferFormat format_;
+  gl::ScopedEGLImage egl_image_;
+  const gfx::Size size_;
+  THREAD_CHECKER(thread_checker_);
+  viz::SharedImageFormat format_;
+  scoped_refptr<gfx::NativePixmap> pixmap_;
+  // Set only for multiplanar formats without external sampler (textures per
+  // plane).
+  std::optional<int> plane_index_;
 };
 
 }  // namespace ui

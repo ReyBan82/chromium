@@ -4,26 +4,26 @@
 
 package org.chromium.chrome.browser.ntp;
 
+
 import android.content.Context;
 import android.util.AttributeSet;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.widget.FrameLayout;
 
-/**
- * Basic functionality to needed for FrameLayouts used as the root view of NativePages.
- */
+import org.chromium.build.annotations.NullMarked;
+
+/** Basic functionality to needed for FrameLayouts used as the root view of NativePages. */
+@NullMarked
 public class NativePageRootFrameLayout extends FrameLayout {
-    /**
-     * Constructor for inflating from XML.
-     */
+    /** Constructor for inflating from XML. */
     public NativePageRootFrameLayout(Context context, AttributeSet attrs) {
         super(context, attrs);
     }
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        // Fixes lanscape transitions when unfocusing the URL bar: crbug.com/288546
+        // Fixes lanscape transitions when unfocusing the URL bar: crbug.com/41049674
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN;
         return super.onCreateInputConnection(outAttrs);
     }

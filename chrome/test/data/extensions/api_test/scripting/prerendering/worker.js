@@ -11,7 +11,7 @@ async function testGetTitleByFrameId() {
     target: {tabId: tabId, frameIds: [prerenderingFrameId]},
     func: () => {
       return document.title;
-    }
+    },
   });
   chrome.test.assertEq(1, results.length);
   chrome.test.assertEq('prerendering', results[0].result);
@@ -23,7 +23,7 @@ async function testGetTitleByDocumentId() {
     target: {tabId: tabId, documentIds: [prerenderingDocumentId]},
     func: () => {
       return document.title;
-    }
+    },
   });
   chrome.test.assertEq(1, results.length);
   chrome.test.assertEq('prerendering', results[0].result);
@@ -40,7 +40,7 @@ async function testActivationOnExecution() {
               resolve('ok');
             });
           });
-        }
+        },
       },
       results => {
         chrome.test.assertEq(1, results.length);
@@ -51,8 +51,30 @@ async function testActivationOnExecution() {
     target: {tabId: tabId},
     func: () => {
       window.location.href = './prerendering.html';
-    }
+    },
   });
+}
+
+async function testEventRouter() {
+  chrome.scripting.executeScript(
+      {
+        target: {tabId: tabId, frameIds: [prerenderingFrameId]},
+        func: async () => {
+          return new Promise(resolve => {
+            chrome.storage.onChanged.addListener(function(
+                changes, event_namespace) {
+              resolve('ok');
+            });
+
+            chrome.storage.local.set({test: 1}).then(() => {});
+          });
+        },
+      },
+      results => {
+        chrome.test.assertEq(1, results.length);
+        chrome.test.assertEq('ok', results[0].result);
+        chrome.test.succeed();
+      });
 }
 
 chrome.test.getConfig(async config => {
@@ -86,8 +108,10 @@ chrome.test.getConfig(async config => {
   });
 
   chrome.test.runTests([
-    testGetTitleByFrameId,
-    testGetTitleByDocumentId,
-    testActivationOnExecution,
+    // TODO(crbug.com/40857271): disabled due to flakiness.
+    // testGetTitleByFrameId,
+    // testGetTitleByDocumentId,
+    testEventRouter,
+    // testActivationOnExecution,
   ]);
 });

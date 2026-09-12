@@ -4,6 +4,9 @@
 
 #include "content/public/browser/web_ui_url_loader_factory.h"
 
+#include <optional>
+
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/notreached.h"
 #include "base/strings/strcat.h"
@@ -11,24 +14,28 @@
 #include "build/build_config.h"
 #include "content/browser/webui/url_data_manager.h"
 #include "content/public/browser/url_data_source.h"
+#include "content/public/common/content_client.h"
 #include "content/public/common/url_constants.h"
+#include "content/public/test/test_browser_context.h"
+#include "content/public/test/test_content_browser_client.h"
+#include "content/public/test/test_content_client.h"
 #include "content/public/test/test_renderer_host.h"
-#include "mojo/public/c/system/data_pipe.h"
-#include "mojo/public/c/system/types.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "mojo/public/cpp/system/data_pipe_utils.h"
 #include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/url_loader.mojom.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "services/network/test/test_url_loader_client.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "url/url_util.h"
 
 namespace content {
 
 namespace {
 
 const char* kTestWebUIScheme = kChromeUIScheme;
+const char kNonChromeDummyScheme[] = "non-chrome";
 constexpr char kTestWebUIHost[] = "testhost";
 constexpr size_t kMaxTestResourceSize = 10;
 
@@ -53,9 +60,8 @@ class TestWebUIDataSource final : public URLDataSource {
       const GURL& /*url*/,
       const content::WebContents::Getter& /*wc_getter*/,
       content::URLDataSource::GotDataCallback callback) override {
-    std::vector<unsigned char> raw_resource = GetResource(resource_size_);
-    auto resource = base::RefCountedBytes::TakeVector(&raw_resource);
-    std::move(callback).Run(std::move(resource));
+    std::move(callback).Run(base::MakeRefCounted<base::RefCountedBytes>(
+        GetResource(resource_size_)));
   }
 
   std::string GetMimeType(const GURL& url) override { return "video/webm"; }
@@ -95,11 +101,15 @@ class OversizedWebUIDataSource final : public URLDataSource {
         delete;
 
     // base::RefCountedMemory implementation:
-    const unsigned char* front() const override {
-      NOTREACHED();
-      return nullptr;
+    base::span<const uint8_t> AsSpan() const override {
+      // This uses `reinterpret_cast` of `1` to avoid nullness `CHECK` in the
+      // constructor of `span`.
+      //
+      // SAFETY: This is unsound, but any use of the pointer will crash as the
+      // first page is not mapped. The test does not actually use the pointer.
+      return UNSAFE_BUFFERS(base::span<const uint8_t>(
+          reinterpret_cast<const uint8_t*>(1), size_));
     }
-    size_t size() const override { return size_; }
 
    private:
     ~OversizedRefCountedMemory() override = default;
@@ -114,19 +124,19 @@ class OversizedWebUIDataSource final : public URLDataSource {
 
 const struct RangeRequestTestData {
   size_t resource_size = 0;
-  absl::optional<int> first_byte_position;
-  absl::optional<int> last_byte_position;
+  std::optional<int> first_byte_position;
+  std::optional<int> last_byte_position;
   int expected_error_code = net::OK;
   uint32_t expected_size = 0;
 } kRangeRequestTestData[] = {
     // No range.
-    {kMaxTestResourceSize, absl::nullopt, absl::nullopt, net::OK,
+    {kMaxTestResourceSize, std::nullopt, std::nullopt, net::OK,
      kMaxTestResourceSize},
 
     // No range, 0-size resource.
-    {0, absl::nullopt, absl::nullopt, net::OK, 0},
+    {0, std::nullopt, std::nullopt, net::OK, 0},
 
-    {kMaxTestResourceSize, 3, absl::nullopt, net::OK, kMaxTestResourceSize - 3},
+    {kMaxTestResourceSize, 3, std::nullopt, net::OK, kMaxTestResourceSize - 3},
 
     {kMaxTestResourceSize, 1, 1, net::OK, 1},
 
@@ -144,7 +154,7 @@ const struct RangeRequestTestData {
 #if defined(ARCH_CPU_64_BITS)
     // Resource too large.
     {static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1,
-     absl::nullopt, absl::nullopt, net::ERR_INSUFFICIENT_RESOURCES, 0},
+     std::nullopt, std::nullopt, net::ERR_INSUFFICIENT_RESOURCES, 0},
 #endif  // defined(ARCH_CPU_64_BITS)
 };
 
@@ -199,28 +209,83 @@ TEST_P(WebUIURLLoaderFactoryTest, RangeRequest) {
 
   if (loader_client.completion_status().error_code == net::OK) {
     ASSERT_TRUE(loader_client.response_body().is_valid());
-    uint32_t response_size;
-    ASSERT_EQ(loader_client.response_body().ReadData(nullptr, &response_size,
-                                                     MOJO_READ_DATA_FLAG_QUERY),
-              MOJO_RESULT_OK);
-    ASSERT_EQ(response_size, GetParam().expected_size);
+    std::string response;
+    ASSERT_TRUE(mojo::BlockingCopyToString(
+        loader_client.response_body_release(), &response));
+    ASSERT_EQ(response.size(), GetParam().expected_size);
 
-    if (response_size > 0u) {
-      std::vector<uint8_t> response(response_size);
-      ASSERT_EQ(
-          loader_client.response_body().ReadData(
-              response.data(), &response_size, MOJO_READ_DATA_FLAG_ALL_OR_NONE),
-          MOJO_RESULT_OK);
-
-      std::vector<unsigned char> expected_resource =
-          TestWebUIDataSource::GetResource(GetParam().resource_size);
-      expected_resource.erase(expected_resource.begin(),
-                              expected_resource.begin() +
-                                  GetParam().first_byte_position.value_or(0));
-      expected_resource.resize(GetParam().expected_size);
-      EXPECT_EQ(response, expected_resource);
-    }
+    std::vector<unsigned char> expected_resource =
+        TestWebUIDataSource::GetResource(GetParam().resource_size);
+    expected_resource.erase(
+        expected_resource.begin(),
+        expected_resource.begin() + GetParam().first_byte_position.value_or(0));
+    expected_resource.resize(GetParam().expected_size);
+    EXPECT_EQ(std::vector<uint8_t>(response.begin(), response.end()),
+              expected_resource);
   }
 }
+
+class WebUIURLLoaderFactoryInvalidUrlTest
+    : public RenderViewHostTestHarness,
+      public testing::WithParamInterface<std::string> {
+ public:
+  void SetUp() override {
+    RenderViewHostTestHarness::SetUp();
+    browser_client_ = std::make_unique<InvalidUrlTestBrowserClient>();
+    old_browser_client_ = SetBrowserClientForTesting(browser_client_.get());
+  }
+
+  void TearDown() override {
+    SetBrowserClientForTesting(old_browser_client_);
+    RenderViewHostTestHarness::TearDown();
+  }
+
+ private:
+  class InvalidUrlTestBrowserClient : public TestContentBrowserClient {
+   public:
+    void GetAdditionalWebUISchemes(
+        std::vector<std::string>* additional_schemes) override {
+      additional_schemes->push_back(kNonChromeDummyScheme);
+    }
+  };
+
+  std::unique_ptr<InvalidUrlTestBrowserClient> browser_client_;
+  raw_ptr<ContentBrowserClient> old_browser_client_;
+};
+
+TEST_P(WebUIURLLoaderFactoryInvalidUrlTest, InvalidUrl) {
+  mojo::Remote<network::mojom::URLLoaderFactory> loader_factory(
+      CreateWebUIURLLoaderFactory(main_rfh(), kNonChromeDummyScheme,
+                                  /*allowed_hosts=*/{}));
+
+  network::ResourceRequest request;
+  request.url = GURL(base::StrCat({kNonChromeDummyScheme, "://", GetParam()}));
+
+  mojo::PendingRemote<network::mojom::URLLoader> loader;
+  network::TestURLLoaderClient loader_client;
+  loader_factory->CreateLoaderAndStart(
+      loader.InitWithNewPipeAndPassReceiver(), /*request_id=*/0,
+      /*options=*/0, request, loader_client.CreateRemote(),
+      net::MutableNetworkTrafficAnnotationTag(TRAFFIC_ANNOTATION_FOR_TESTS));
+  loader_client.RunUntilComplete();
+
+  EXPECT_EQ(loader_client.completion_status().error_code, net::ERR_INVALID_URL);
+}
+
+// Test that non-chrome://blob-internals, non-chrome://dino and
+// non-chrome://network-error/<xyz> are not reachable.
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    WebUIURLLoaderFactoryInvalidUrlTest,
+    testing::Values(kChromeUIBlobInternalsHost,
+                    kChromeUIDinoHost,
+                    base::StrCat({kChromeUINetworkErrorHost, "/-147"})),
+    [](const testing::TestParamInfo<std::string>& info) {
+      std::string name = base::StrCat({kNonChromeDummyScheme, "_", info.param});
+      std::replace_if(
+          name.begin(), name.end(), [](char c) { return !std::isalnum(c); },
+          '_');
+      return name;
+    });
 
 }  // namespace content

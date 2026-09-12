@@ -12,6 +12,8 @@
 // no-include-guard-because-multiply-included
 // NOLINT(build/header_guard)
 
+void eglAcquireExternalContextANGLEFn(EGLDisplay dpy,
+                                      EGLSurface readAndDraw) override;
 EGLBoolean eglBindAPIFn(EGLenum api) override;
 EGLBoolean eglBindTexImageFn(EGLDisplay dpy,
                              EGLSurface surface,
@@ -178,6 +180,7 @@ EGLint eglLabelObjectKHRFn(EGLDisplay display,
                            EGLenum objectType,
                            EGLObjectKHR object,
                            EGLLabelKHR label) override;
+void eglLockVulkanQueueANGLEFn(EGLDisplay dpy) override;
 EGLBoolean eglMakeCurrentFn(EGLDisplay dpy,
                             EGLSurface draw,
                             EGLSurface read,
@@ -188,6 +191,9 @@ EGLBoolean eglPostSubBufferNVFn(EGLDisplay dpy,
                                 EGLint y,
                                 EGLint width,
                                 EGLint height) override;
+EGLBoolean eglPresentationTimeANDROIDFn(EGLDisplay dpy,
+                                        EGLSurface surface,
+                                        EGLnsecsANDROID time) override;
 EGLenum eglQueryAPIFn(void) override;
 EGLBoolean eglQueryContextFn(EGLDisplay dpy,
                              EGLContext ctx,
@@ -239,6 +245,7 @@ EGLBoolean eglQuerySurfacePointerANGLEFn(EGLDisplay dpy,
                                          EGLint attribute,
                                          void** value) override;
 void eglReacquireHighPowerGPUANGLEFn(EGLDisplay dpy, EGLContext ctx) override;
+void eglReleaseExternalContextANGLEFn(EGLDisplay dpy) override;
 void eglReleaseHighPowerGPUANGLEFn(EGLDisplay dpy, EGLContext ctx) override;
 EGLBoolean eglReleaseTexImageFn(EGLDisplay dpy,
                                 EGLSurface surface,
@@ -247,6 +254,7 @@ EGLBoolean eglReleaseThreadFn(void) override;
 void eglSetBlobCacheFuncsANDROIDFn(EGLDisplay dpy,
                                    EGLSetBlobFuncANDROID set,
                                    EGLGetBlobFuncANDROID get) override;
+void eglSetValidationEnabledANGLEFn(EGLBoolean validationState) override;
 EGLBoolean eglStreamAttribKHRFn(EGLDisplay dpy,
                                 EGLStreamKHR stream,
                                 EGLenum attribute,
@@ -278,6 +286,7 @@ EGLBoolean eglSwapBuffersWithDamageKHRFn(EGLDisplay dpy,
                                          EGLint n_rects) override;
 EGLBoolean eglSwapIntervalFn(EGLDisplay dpy, EGLint interval) override;
 EGLBoolean eglTerminateFn(EGLDisplay dpy) override;
+void eglUnlockVulkanQueueANGLEFn(EGLDisplay dpy) override;
 EGLBoolean eglWaitClientFn(void) override;
 EGLBoolean eglWaitGLFn(void) override;
 EGLBoolean eglWaitNativeFn(EGLint engine) override;

@@ -4,9 +4,11 @@
 
 #include "third_party/blink/renderer/core/inspector/inspector_issue_reporter.h"
 
+#include <optional>
+
 #include "base/unguessable_token.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/mojom/devtools/inspector_issue.mojom-blink.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/dom_node_ids.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -34,7 +36,7 @@ void InspectorIssueReporter::DidFailLoading(
     const base::UnguessableToken& token) {
   if (!storage_)
     return;
-  absl::optional<network::mojom::BlockedByResponseReason>
+  std::optional<network::mojom::BlockedByResponseReason>
       blocked_by_response_reason = error.GetBlockedByResponseReason();
   if (!blocked_by_response_reason)
     return;
@@ -53,15 +55,16 @@ void InspectorIssueReporter::DomContentLoadedEventFired(LocalFrame* frame) {
     return;
 
   auto url = document->Url();
-  if (url.IsEmpty() || url.IsAboutBlankURL())
+  if (url.IsEmpty() || url.IsAboutBlankUrl()) {
     return;
+  }
 
   if (document->InNoQuirksMode())
     return;
 
   AuditsIssue::ReportQuirksModeIssue(
       document->GetExecutionContext(), document->InLimitedQuirksMode(),
-      DOMNodeIds::IdForNode(document), url.GetString(),
+      document->GetDomNodeId(), url.GetString(),
       IdentifiersFactory::FrameId(frame),
       IdentifiersFactory::LoaderId(document->Loader()));
 }

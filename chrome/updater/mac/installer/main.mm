@@ -11,6 +11,8 @@
 #include <string>
 
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/logging.h"
@@ -76,7 +78,7 @@ int Main() {
     return kErrorCreatingTempDir;
   }
 
-  int result = Unzip({data, data + size}, extract_path.GetPath());
+  int result = Unzip({data, UNSAFE_TODO(data + size)}, extract_path.GetPath());
   if (result != kErrorOk) {
     return result;
   }

@@ -8,21 +8,20 @@
 #include <array>
 #include <map>
 #include <memory>
+#include <optional>
 
 #include "base/observer_list.h"
 #include "base/process/process_handle.h"
+#include "base/process/process_metrics.h"
 #include "base/scoped_multi_source_observation.h"
+#include "base/time/time.h"
+#include "base/types/expected.h"
 #include "build/build_config.h"
 #include "content/public/browser/browser_child_process_observer.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_process_host_creation_observer.h"
 #include "content/public/browser/render_process_host_observer.h"
 #include "content/public/common/process_type.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-
-namespace base {
-class ProcessMetrics;
-}
 
 enum MonitoredProcessType {
   kBrowser,
@@ -36,25 +35,59 @@ enum MonitoredProcessType {
   kCount,
 };
 
-MonitoredProcessType
-GetMonitoredProcessTypeForNonRendererChildProcessForTesting(
-    const content::ChildProcessData& data);
+// A wrapper around base::ProcessMetrics that can be overridden in tests.
+class ProcessMetricsDelegate {
+ public:
+  virtual ~ProcessMetricsDelegate() = default;
+
+  virtual double GetPlatformIndependentCPUUsage(
+      base::TimeDelta cumulative_cpu) = 0;
+
+  virtual base::expected<double, base::ProcessCPUUsageError>
+  GetPlatformIndependentCPUUsage() = 0;
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
+    BUILDFLAG(IS_AIX)
+  virtual int GetIdleWakeupsPerSecond() = 0;
+#endif
+
+#if BUILDFLAG(IS_MAC)
+  virtual int GetPackageIdleWakeupsPerSecond() = 0;
+#endif
+};
 
 struct ProcessInfo {
-  ProcessInfo(MonitoredProcessType type,
-              std::unique_ptr<base::ProcessMetrics> process_metrics);
+  struct Key {
+    Key(MonitoredProcessType type, std::optional<std::string> subtype);
+    Key(const Key& other);
+    ~Key();
+
+    bool operator<(const Key& other) const;
+    bool operator==(const Key& other) const;
+
+    MonitoredProcessType type;
+    std::optional<std::string> subtype;
+  };
+
+  ProcessInfo(Key key, std::unique_ptr<ProcessMetricsDelegate> process_metrics);
   ~ProcessInfo();
 
-  MonitoredProcessType type;
-  std::unique_ptr<base::ProcessMetrics> process_metrics;
-  // The time at which the first process sample was taken (i.e. When the
+  Key key;
+  std::unique_ptr<ProcessMetricsDelegate> process_metrics;
+
+  // The time at which the first process sample was taken (i.e. when the
   // constructor is called). Used to distribute the calculated resource usage of
   // the first interval over the full kLongIntervalDuration. Set to nullopt
   // after the metrics for the first interval is calculated because the
   // subsequent intervals will always take the full duration of
   // kLongIntervalDuration.
-  absl::optional<base::TimeTicks> first_sample_time;
+  std::optional<base::TimeTicks> first_sample_time;
 };
+
+template <typename H>
+H AbslHashValue(H h, const ProcessInfo::Key& k) {
+  return H::combine(std::move(h), k.type, k.subtype);  // Combine all members
+}
 
 // ProcessMonitor is a tool which allows the sampling of power-related metrics
 // for all Chrome processes. The metrics sampling is driven externally by
@@ -72,7 +105,8 @@ class ProcessMonitor : public content::BrowserChildProcessObserver,
     // The percentage of time spent executing, across all threads of the
     // process, in the interval since the last time the metric was sampled. This
     // can exceed 100% in multi-thread processes running on multi-core systems.
-    double cpu_usage = 0.0;
+    // nullopt if there was an error calculating the CPU usage.
+    std::optional<double> cpu_usage;
 
 #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || \
     BUILDFLAG(IS_AIX)
@@ -86,10 +120,6 @@ class ProcessMonitor : public content::BrowserChildProcessObserver,
     // time the metric was sampled. See base/process/process_metrics.h for a
     // more detailed explanation.
     int package_idle_wakeups = 0;
-
-    // "Energy Impact" is a synthetic power estimation metric displayed by macOS
-    // in Activity Monitor and the battery menu.
-    double energy_impact = 0.0;
 #endif
   };
 
@@ -98,7 +128,7 @@ class ProcessMonitor : public content::BrowserChildProcessObserver,
     // Provides aggregated sampled metrics for all Chrome process of type
     // `type`. This is called once per process type whenever
     // `SampleAllProcesses` is called.
-    virtual void OnMetricsSampled(MonitoredProcessType type,
+    virtual void OnMetricsSampled(ProcessInfo::Key key,
                                   const Metrics& metrics) {}
 
     // Provides the aggregated sampled metrics from every Chrome process. This
@@ -116,7 +146,14 @@ class ProcessMonitor : public content::BrowserChildProcessObserver,
   // Gather the metrics for all the processes.
   virtual void SampleAllProcesses(Observer* observer);
 
+  void AddChildProcessInfoForTesting(
+      int id,
+      ProcessInfo::Key key,
+      std::unique_ptr<ProcessMetricsDelegate> process_metrics);
+
  private:
+  friend class ProcessMonitorIntervalTest;
+
   // content::RenderProcessHostCreationObserver:
   void OnRenderProcessHostCreated(
       content::RenderProcessHost* render_process_host) override;
@@ -132,7 +169,8 @@ class ProcessMonitor : public content::BrowserChildProcessObserver,
 
   // content::BrowserChildProcessObserver:
   void BrowserChildProcessLaunchedAndConnected(
-      const content::ChildProcessData& data) override;
+      const content::ChildProcessData& data,
+      const base::Process& process) override;
   void BrowserChildProcessHostDisconnected(
       const content::ChildProcessData& data) override;
   void BrowserChildProcessCrashed(
@@ -157,11 +195,19 @@ class ProcessMonitor : public content::BrowserChildProcessObserver,
 
   std::map<content::RenderProcessHost*, ProcessInfo> render_process_infos_;
 
-  std::map<int, ProcessInfo> browser_child_process_infos_;
+  std::map<int /*ChildProcessId*/, ProcessInfo> browser_child_process_infos_;
 
   // The metrics for the processes that exited during the last interval. Added
   // to the current interval's sample and then reset to zero.
-  std::array<Metrics, MonitoredProcessType::kCount> exited_processes_metrics_;
+  std::map<ProcessInfo::Key, Metrics> exited_processes_metrics_;
+
+  // The time at which the last interval sampling was completed. Used to
+  // calculate the duration of time an exited process lived during the current
+  // interval.
+  base::TimeTicks last_sample_time_ = base::TimeTicks::Now();
 };
+
+ProcessInfo::Key GetMonitoredProcessInfoKeyForNonRendererChildProcessForTesting(
+    const content::ChildProcessData& data);
 
 #endif  // CHROME_BROWSER_METRICS_POWER_PROCESS_MONITOR_H_

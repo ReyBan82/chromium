@@ -6,10 +6,11 @@
 #define COMPONENTS_POLICY_CORE_COMMON_CLOUD_USER_INFO_FETCHER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/values.h"
 #include "components/policy/policy_export.h"
 
@@ -22,6 +23,14 @@ class SimpleURLLoader;
 
 namespace policy {
 
+enum class EnterpriseUserInfoFetchStatus {
+  kSuccess,
+  kFailedWithNetworkError,
+  kCantParseJsonInResponse,
+  kResponseIsNotDict,
+  kMaxValue = kResponseIsNotDict
+};
+
 // Class that makes a UserInfo request, parses the response, and notifies
 // a provided Delegate when the request is complete.
 class POLICY_EXPORT UserInfoFetcher {
@@ -31,7 +40,7 @@ class POLICY_EXPORT UserInfoFetcher {
     // Invoked when the UserInfo request has succeeded, passing the parsed
     // response in |response|. Delegate may free the UserInfoFetcher in this
     // callback.
-    virtual void OnGetUserInfoSuccess(const base::Value::Dict& response) = 0;
+    virtual void OnGetUserInfoSuccess(const base::DictValue& response) = 0;
 
     // Invoked when the UserInfo request has failed, passing the associated
     // error in |error|. Delegate may free the UserInfoFetcher in this
@@ -52,7 +61,7 @@ class POLICY_EXPORT UserInfoFetcher {
   void Start(const std::string& access_token);
 
   // Called by |url_loader_| on completion.
-  void OnFetchComplete(std::unique_ptr<std::string> body);
+  void OnFetchComplete(std::optional<std::string> body);
 
  private:
   raw_ptr<Delegate> delegate_;

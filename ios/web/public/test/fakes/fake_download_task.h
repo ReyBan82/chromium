@@ -8,6 +8,7 @@
 #include <string>
 
 #include "base/files/file_path.h"
+#import "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/sequence_checker.h"
 #include "ios/web/public/download/download_task.h"
@@ -34,6 +35,8 @@ class FakeDownloadTask final : public DownloadTask {
   const base::FilePath& GetResponsePath() const final;
   NSString* GetIdentifier() const final;
   const GURL& GetOriginalUrl() const final;
+  const GURL& GetRedirectedUrl() const final;
+  NSString* GetOriginatingHost() const final;
   NSString* GetHttpMethod() const final;
   bool IsDone() const final;
   int GetErrorCode() const final;
@@ -45,6 +48,7 @@ class FakeDownloadTask final : public DownloadTask {
   std::string GetOriginalMimeType() const final;
   std::string GetMimeType() const final;
   base::FilePath GenerateFileName() const final;
+  base::WeakPtr<DownloadTask> GetWeakPtr() final;
   bool HasPerformedBackgroundDownload() const final;
   void AddObserver(DownloadTaskObserver* observer) final;
   void RemoveObserver(DownloadTaskObserver* observer) final;
@@ -63,6 +67,9 @@ class FakeDownloadTask final : public DownloadTask {
   void SetResponseData(NSData* response_data);
   void SetGeneratedFileName(const base::FilePath& generated_file_name);
   void SetPerformedBackgroundDownload(bool flag);
+  void SetOriginatingHost(NSString* originating_host);
+  void SetRedirectedURL(const GURL& redirected_url);
+  void SetIdentifier(NSString* identifier);
 
  private:
   // Called when download task was updated.
@@ -70,10 +77,17 @@ class FakeDownloadTask final : public DownloadTask {
 
   SEQUENCE_CHECKER(sequence_checker_);
 
-  base::ObserverList<DownloadTaskObserver, true>::Unchecked observers_;
-  WebState* web_state_ = nullptr;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      DownloadTaskObserver,
+      true,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>
+      observers_;
+  raw_ptr<WebState> web_state_ = nullptr;
   State state_ = State::kNotStarted;
   GURL original_url_;
+  GURL redirected_url_;
+  NSString* originating_host_;
   int error_code_ = 0;
   int http_code_ = -1;
   std::string content_disposition_;
@@ -87,8 +101,10 @@ class FakeDownloadTask final : public DownloadTask {
   __strong NSString* identifier_ = nil;
   base::FilePath response_path_;
   __strong NSData* response_data_ = nil;
-};
 
+ protected:
+  base::WeakPtrFactory<FakeDownloadTask> weak_factory_{this};
+};
 }  // namespace web
 
 #endif  // IOS_WEB_PUBLIC_TEST_FAKES_FAKE_DOWNLOAD_TASK_H_

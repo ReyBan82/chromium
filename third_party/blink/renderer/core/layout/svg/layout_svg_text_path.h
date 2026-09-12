@@ -39,7 +39,8 @@ class PathPositionMapper {
  public:
   PathPositionMapper(const Path&,
                      float computed_path_length,
-                     float start_offset);
+                     float start_offset,
+                     bool reverse_direction);
 
   enum PositionType {
     kOnPath,
@@ -54,6 +55,7 @@ class PathPositionMapper {
   Path::PositionCalculator position_calculator_;
   float path_length_;
   float path_start_offset_;
+  bool reverse_direction_;
 };
 
 class LayoutSVGTextPath final : public LayoutSVGInline {
@@ -64,9 +66,9 @@ class LayoutSVGTextPath final : public LayoutSVGInline {
 
   bool IsChildAllowed(LayoutObject*, const ComputedStyle&) const override;
 
-  bool IsOfType(LayoutObjectType type) const override {
+  bool IsSVGTextPath() const final {
     NOT_DESTROYED();
-    return type == kLayoutObjectSVGTextPath || LayoutSVGInline::IsOfType(type);
+    return true;
   }
 
   const char* GetName() const override {

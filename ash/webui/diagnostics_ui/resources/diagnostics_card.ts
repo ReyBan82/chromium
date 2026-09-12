@@ -5,7 +5,7 @@
 import './diagnostics_card_frame.js';
 import './diagnostics_shared.css.js';
 
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getTemplate} from './diagnostics_card.html.js';
@@ -42,8 +42,8 @@ export class DiagnosticsCardElement extends PolymerElement {
     };
   }
 
-  hideDataPoints: boolean;
-  isNetworkingCard: boolean;
+  declare hideDataPoints: boolean;
+  declare isNetworkingCard: boolean;
 
   protected getTopSectionClassName(): string {
     return `top-section${this.isNetworkingCard ? '-networking' : ''}`;

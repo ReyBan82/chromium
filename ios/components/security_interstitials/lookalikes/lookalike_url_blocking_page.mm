@@ -15,10 +15,6 @@
 #import "ios/components/security_interstitials/ios_blocking_page_controller_client.h"
 #import "ios/components/security_interstitials/ios_blocking_page_metrics_helper.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 LookalikeUrlBlockingPage::LookalikeUrlBlockingPage(
     web::WebState* web_state,
     const GURL& safe_url,
@@ -57,7 +53,7 @@ bool LookalikeUrlBlockingPage::ShouldCreateNewNavigation() const {
 }
 
 void LookalikeUrlBlockingPage::PopulateInterstitialStrings(
-    base::Value::Dict& load_time_data) const {
+    base::DictValue& load_time_data) const {
   // Set a value if backwards navigation is not available, used
   // to change the button text to 'Close page' when there is no
   // suggested URL.

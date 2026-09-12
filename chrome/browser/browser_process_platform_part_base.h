@@ -5,12 +5,6 @@
 #ifndef CHROME_BROWSER_BROWSER_PROCESS_PLATFORM_PART_BASE_H_
 #define CHROME_BROWSER_BROWSER_PROCESS_PLATFORM_PART_BASE_H_
 
-#include "content/public/browser/content_browser_client.h"
-
-namespace base {
-class CommandLine;
-}
-
 // A base class for platform-specific BrowserProcessPlatformPart
 // implementations. This class itself should never be used verbatim.
 class BrowserProcessPlatformPartBase {
@@ -24,14 +18,6 @@ class BrowserProcessPlatformPartBase {
 
   virtual ~BrowserProcessPlatformPartBase();
 
-  // Called after creating the process singleton or when another chrome
-  // rendez-vous with this one.
-  virtual void PlatformSpecificCommandLineProcessing(
-      const base::CommandLine& command_line);
-
-  // Called at the very beginning of BrowserProcessImpl::StartTearDown().
-  virtual void BeginStartTearDown();
-
   // Called in the middle of BrowserProcessImpl::StartTearDown().
   virtual void StartTearDown();
 
@@ -40,6 +26,9 @@ class BrowserProcessPlatformPartBase {
 
   // Called at the end of BrowserProcessImpl::PreMainMessageLoopRun().
   virtual void PreMainMessageLoopRun();
+
+  // Called at the beginning of BrowserProcessImpl::PostDestroyThreads().
+  virtual void PostDestroyThreads();
 };
 
 #endif  // CHROME_BROWSER_BROWSER_PROCESS_PLATFORM_PART_BASE_H_

@@ -8,9 +8,6 @@ for more details on the presubmit API built into depot_tools.
 """
 
 
-USE_PYTHON3 = True
-
-
 def CommonChecks(input_api, output_api):
     checks = input_api.canned_checks.GetUnitTestsRecursively(
         input_api,
@@ -18,9 +15,7 @@ def CommonChecks(input_api, output_api):
         input_api.PresubmitLocalPath(),
         files_to_check=[r'.+_unittest\.py$'],
         files_to_skip=[],
-        run_on_python2=False,
-        run_on_python3=True,
-        skip_shebang_check=True)
+    )
 
     return input_api.RunTests(checks, False)
 

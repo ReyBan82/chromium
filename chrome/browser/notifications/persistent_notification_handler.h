@@ -8,6 +8,8 @@
 #include <map>
 #include <memory>
 
+#include "base/callback_list.h"
+#include "base/containers/id_map.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/notifications/notification_handler.h"
 #include "chrome/common/buildflags.h"
@@ -43,20 +45,41 @@ class PersistentNotificationHandler : public NotificationHandler {
   void OnClick(Profile* profile,
                const GURL& origin,
                const std::string& notification_id,
-               const absl::optional<int>& action_index,
-               const absl::optional<std::u16string>& reply,
+               const std::optional<int>& action_index,
+               const std::optional<std::u16string>& reply,
                base::OnceClosure completed_closure) override;
-  void DisableNotifications(Profile* profile, const GURL& origin) override;
+  void DisableNotifications(Profile* profile,
+                            const GURL& origin,
+                            const std::optional<std::string>& notification_id,
+                            const std::optional<bool>& is_suspicious) override;
   void OpenSettings(Profile* profile, const GURL& origin) override;
+  void ReportNotificationAsSafe(const std::string& notification_id,
+                                const GURL& url,
+                                Profile* profile) override;
+  void ReportWarnedNotificationAsSpam(const std::string& notification_id,
+                                      const GURL& url,
+                                      Profile* profile) override;
+  void ReportUnwarnedNotificationAsSpam(const std::string& notification_id,
+                                        const GURL& url,
+                                        Profile* profile) override;
+  void OnShowOriginalNotification(const GURL& url,
+                                  const std::string& notification_id,
+                                  Profile* profile) override;
 
  private:
   void OnCloseCompleted(Profile* profile,
-                        base::OnceClosure completed_closure,
+                        uint64_t close_completed_callback_id,
                         content::PersistentNotificationStatus status);
   void OnClickCompleted(Profile* profile,
                         const std::string& notification_id,
                         base::OnceClosure completed_closure,
                         content::PersistentNotificationStatus status);
+  void OnMaybeReport(const std::string& notification_id,
+                     const GURL& url,
+                     Profile* profile,
+                     bool did_show_warning,
+                     bool did_user_unsubscribe);
+  void OnAppTerminating();
 
 #if BUILDFLAG(ENABLE_BACKGROUND_MODE)
   class NotificationKeepAliveState {
@@ -69,6 +92,8 @@ class PersistentNotificationHandler : public NotificationHandler {
     void AddKeepAlive(Profile* profile);
     void RemoveKeepAlive(Profile* profile);
 
+    void RemoveAllKeepAlives();
+
    private:
     const KeepAliveOrigin keep_alive_origin_;
     const ProfileKeepAliveOrigin profile_keep_alive_origin_;
@@ -76,9 +101,9 @@ class PersistentNotificationHandler : public NotificationHandler {
     // Makes sure we keep the browser alive while the event in being processed.
     // As we have no control on the click handling, the notification could be
     // closed before a browser is brought up, thus terminating Chrome if it was
-    // the last KeepAlive (see crbug.com/612815). We also need to wait until
+    // the last KeepAlive (see crbug.com/41254465). We also need to wait until
     // close events got handled as we need to access the profile when removing
-    // notifications from the NotificationDatabase (see crbug.com/1221601).
+    // notifications from the NotificationDatabase (see crbug.com/40773564).
     std::unique_ptr<ScopedKeepAlive> event_dispatch_keep_alive_;
 
     // Same as |event_dispatch_keep_alive_|, but prevent Profile* deletion
@@ -101,6 +126,17 @@ class PersistentNotificationHandler : public NotificationHandler {
       KeepAliveOrigin::PENDING_NOTIFICATION_CLOSE_EVENT,
       ProfileKeepAliveOrigin::kPendingNotificationCloseEvent};
 #endif
+
+  // App termination must release all `PENDING_NOTIFICATION_CLOSE_EVENT` keep
+  // alives to avoid delaying shutdown.  After app termination begins, a new
+  // browser launch cannot create a new window until shutdown completes.
+  base::CallbackListSubscription on_app_terminating_subscription_;
+
+  // Store pending 'notificationclose' event callbacks.  App termination may
+  // run these callbacks before the 'notificationclose' event completes.
+  using CloseCompletedCallbackMap =
+      base::IDMap<std::unique_ptr<base::OnceClosure>>;
+  CloseCompletedCallbackMap close_completed_callbacks_;
 
   base::WeakPtrFactory<PersistentNotificationHandler> weak_ptr_factory_{this};
 };

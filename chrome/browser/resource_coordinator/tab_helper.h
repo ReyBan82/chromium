@@ -11,7 +11,6 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 #include "services/metrics/public/cpp/ukm_source_id.h"
-#include "url/gurl.h"
 
 namespace resource_coordinator {
 
@@ -29,10 +28,15 @@ class ResourceCoordinatorTabHelper
   // default if there's no TabHelper for this content.
   static bool IsLoaded(content::WebContents* contents);
 
+  // Helper function to check if a given WebContents is frozen. Returns false by
+  // default if there's no TabHelper for this content.
+  static bool IsFrozen(content::WebContents* contents);
+
   // WebContentsObserver overrides.
   void DidStopLoading() override;
   void PrimaryMainFrameRenderProcessGone(
       base::TerminationStatus status) override;
+  void WasDiscarded() override;
   void WebContentsDestroyed() override;
   void PrimaryPageChanged(content::Page& page) override;
 

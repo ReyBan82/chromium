@@ -6,12 +6,11 @@
 
 #include <vector>
 
-#include "base/containers/cxx20_erase.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/guid.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/uuid.h"
 #include "content/browser/background_fetch/background_fetch_job_controller.h"
 #include "content/browser/background_fetch/background_fetch_request_info.h"
 #include "content/browser/background_fetch/background_fetch_test_base.h"
@@ -59,7 +58,7 @@ class FakeController : public BackgroundFetchJobController {
     // Record the completed request. Store everything after the origin and the
     // slash, to be able to directly compare with the provided requests.
     controller_sequence_list_->push_back(
-        result->response->url_chain[0].path().substr(1));
+        result->response->url_chain[0].GetPath().substr(1));
 
     // Continue normally.
     BackgroundFetchJobController::DidCompleteRequest(guid, std::move(result));
@@ -87,7 +86,7 @@ class BackgroundFetchSchedulerTest : public BackgroundFetchTestBase {
         storage_partition()->GetBackgroundFetchContext();
     scheduler_ = std::make_unique<BackgroundFetchScheduler>(
         background_fetch_context, data_manager_.get(), nullptr,
-        delegate_proxy_.get(), devtools_context().get(),
+        delegate_proxy_.get(), devtools_context(),
         embedded_worker_test_helper()->context_wrapper());
   }
 
@@ -100,7 +99,8 @@ class BackgroundFetchSchedulerTest : public BackgroundFetchTestBase {
   }
 
  protected:
-  void InitializeControllerWithRequests(
+  BackgroundFetchRegistrationId InitializeControllerWithRequests(
+      int64_t sw_id,
       const blink::StorageKey& storage_key,
       const std::vector<std::string>& requests) {
     std::vector<blink::mojom::FetchAPIRequestPtr> fetch_requests;
@@ -114,9 +114,9 @@ class BackgroundFetchSchedulerTest : public BackgroundFetchTestBase {
       fetch_requests.push_back(std::move(fetch_request));
     }
 
-    int64_t sw_id = RegisterServiceWorkerForOrigin(storage_key.origin());
     BackgroundFetchRegistrationId registration_id(
-        sw_id, storage_key, base::GenerateGUID(), base::GenerateGUID());
+        sw_id, storage_key, base::Uuid::GenerateRandomV4().AsLowercaseString(),
+        base::Uuid::GenerateRandomV4().AsLowercaseString());
     data_manager_->CreateRegistration(
         registration_id, std::move(fetch_requests),
         blink::mojom::BackgroundFetchOptions::New(), SkBitmap(),
@@ -132,10 +132,18 @@ class BackgroundFetchSchedulerTest : public BackgroundFetchTestBase {
                                         requests.size(),
                                         /* active_fetch_requests= */ {},
                                         /* start_paused= */ false,
-                                        /* isolation_info= */ absl::nullopt);
+                                        /* isolation_info= */ std::nullopt);
     scheduler_->job_controllers_[registration_id.unique_id()] =
         std::move(controller);
     scheduler_->controller_ids_.push_back(registration_id);
+    return registration_id;
+  }
+
+  BackgroundFetchRegistrationId InitializeControllerWithRequests(
+      const blink::StorageKey& storage_key,
+      const std::vector<std::string>& requests) {
+    int64_t sw_id = RegisterServiceWorkerForOrigin(storage_key.origin());
+    return InitializeControllerWithRequests(sw_id, storage_key, requests);
   }
 
   void RunSchedulerToCompletion() {
@@ -147,14 +155,18 @@ class BackgroundFetchSchedulerTest : public BackgroundFetchTestBase {
       const BackgroundFetchRegistrationId& registration_id,
       blink::mojom::BackgroundFetchFailureReason failure_reason,
       base::OnceCallback<void(blink::mojom::BackgroundFetchError)> callback) {
-    DCHECK_EQ(failure_reason, blink::mojom::BackgroundFetchFailureReason::NONE);
-    base::EraseIf(scheduler_->active_controllers_,
-                  [&registration_id](auto* controller) {
-                    return controller->registration_id() == registration_id;
-                  });
+    bool was_active =
+        base::EraseIf(scheduler_->active_controllers_,
+                      [&registration_id](const auto& controller) {
+                        return controller->registration_id() == registration_id;
+                      }) > 0;
     scheduler_->job_controllers_.erase(registration_id.unique_id());
-    --scheduler_->num_active_registrations_;
-    scheduler_->ScheduleDownload();
+    if (was_active) {
+      --scheduler_->num_active_registrations_;
+    }
+    if (failure_reason == blink::mojom::BackgroundFetchFailureReason::NONE) {
+      scheduler_->ScheduleDownload();
+    }
   }
 
  protected:
@@ -166,6 +178,24 @@ class BackgroundFetchSchedulerTest : public BackgroundFetchTestBase {
   void MakeSchedulerConcurrent() {
     scheduler_->max_running_downloads_ = 2;
     scheduler_->max_active_registrations_ = 2;
+  }
+
+  void ScheduleDownload() { scheduler_->ScheduleDownload(); }
+
+  void AbortFetches(int64_t service_worker_registration_id) {
+    scheduler_->AbortFetches(service_worker_registration_id);
+  }
+
+  size_t GetJobControllersSize() const {
+    return scheduler_->job_controllers_.size();
+  }
+
+  size_t GetControllerIdsSize() const {
+    return scheduler_->controller_ids_.size();
+  }
+
+  size_t GetActiveControllersSize() const {
+    return scheduler_->active_controllers_.size();
   }
 
   std::vector<std::string> controller_sequence_list_;
@@ -255,6 +285,57 @@ TEST_F(BackgroundFetchSchedulerTest, TwoControllersConcurrentSameOrigin) {
 
   RunSchedulerToCompletion();
   EXPECT_EQ(all_requests, controller_sequence_list_);
+}
+
+TEST_F(BackgroundFetchSchedulerTest, AbortFetchesWithMultipleControllers) {
+  MakeSchedulerConcurrent();
+
+  int64_t sw_id = RegisterServiceWorkerForOrigin(storage_key().origin());
+
+  InitializeControllerWithRequests(sw_id, storage_key(), {"A1", "A2"});
+  InitializeControllerWithRequests(sw_id, storage_key(), {"B1", "B2"});
+
+  EXPECT_EQ(GetJobControllersSize(), 2u);
+  EXPECT_EQ(GetControllerIdsSize(), 2u);
+
+  // Schedule one download so that at least one controller becomes active.
+  ScheduleDownload();
+  EXPECT_EQ(GetActiveControllersSize(), 1u);
+
+  // Aborting all fetches for this service worker should safely clean up all
+  // controllers.
+  AbortFetches(sw_id);
+
+  EXPECT_EQ(GetJobControllersSize(), 0u);
+  EXPECT_EQ(GetControllerIdsSize(), 0u);
+  EXPECT_EQ(GetActiveControllersSize(), 0u);
+}
+
+TEST_F(BackgroundFetchSchedulerTest, AbortFetchesMultipleServiceWorkers) {
+  MakeSchedulerConcurrent();
+
+  int64_t sw_id1 = RegisterServiceWorkerForOrigin(storage_key().origin());
+  auto storage_key2 =
+      blink::StorageKey::CreateFromStringForTesting("https://example.com");
+  int64_t sw_id2 = RegisterServiceWorkerForOrigin(storage_key2.origin());
+
+  InitializeControllerWithRequests(sw_id1, storage_key(), {"A1", "A2"});
+  InitializeControllerWithRequests(sw_id1, storage_key(), {"B1", "B2"});
+  InitializeControllerWithRequests(sw_id2, storage_key2, {"C1", "C2"});
+
+  EXPECT_EQ(GetJobControllersSize(), 3u);
+
+  // Abort only sw_id1's fetches.
+  AbortFetches(sw_id1);
+
+  EXPECT_EQ(GetJobControllersSize(), 1u);
+
+  // Abort all remaining fetches via kInvalidServiceWorkerRegistrationId.
+  AbortFetches(blink::mojom::kInvalidServiceWorkerRegistrationId);
+
+  EXPECT_EQ(GetJobControllersSize(), 0u);
+  EXPECT_EQ(GetControllerIdsSize(), 0u);
+  EXPECT_EQ(GetActiveControllersSize(), 0u);
 }
 
 }  // namespace content

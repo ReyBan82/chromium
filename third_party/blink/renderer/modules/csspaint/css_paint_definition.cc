@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "base/check_op.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_no_argument_constructor.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_paint_callback.h"
@@ -18,7 +19,6 @@
 #include "third_party/blink/renderer/modules/csspaint/paint_rendering_context_2d.h"
 #include "third_party/blink/renderer/modules/csspaint/paint_size.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
-#include "third_party/blink/renderer/platform/bindings/v8_binding_macros.h"
 #include "third_party/blink/renderer/platform/graphics/paint_generated_image.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
 
@@ -32,6 +32,26 @@ gfx::SizeF GetSpecifiedSize(const gfx::SizeF& size, float zoom) {
     return a * un_zoom_factor;
   };
   return gfx::SizeF(un_zoom_fn(size.width()), un_zoom_fn(size.height()));
+}
+
+std::unique_ptr<CrossThreadStyleValue> CreateUpdatedStyleValue(
+    const PaintWorkletInput::PropertyValue& value,
+    const CrossThreadStyleValue& old_style_value) {
+  switch (old_style_value.GetType()) {
+    case CrossThreadStyleValue::StyleValueType::kUnitType:
+      DCHECK(value.float_value);
+      return std::make_unique<CrossThreadUnitValue>(
+          value.float_value.value(),
+          To<CrossThreadUnitValue>(old_style_value).GetUnitType());
+    case CrossThreadStyleValue::StyleValueType::kColorType:
+      DCHECK(value.color_value);
+      return std::make_unique<CrossThreadColorValue>(
+          Color::FromSkColor4f(value.color_value.value()));
+    case CrossThreadStyleValue::StyleValueType::kUnknownType:
+    case CrossThreadStyleValue::StyleValueType::kUnparsedType:
+    case CrossThreadStyleValue::StyleValueType::kKeywordType:
+      NOTREACHED();
+  }
 }
 
 }  // namespace
@@ -67,22 +87,23 @@ PaintRecord CSSPaintDefinition::Paint(
       To<CSSPaintWorkletInput>(compositor_input);
   PaintWorkletStylePropertyMap* style_map =
       MakeGarbageCollected<PaintWorkletStylePropertyMap>(input->StyleMapData());
-  CSSStyleValueVector paint_arguments;
+  GCedCSSStyleValueVector* paint_arguments =
+      MakeGarbageCollected<GCedCSSStyleValueVector>();
   for (const auto& style_value : input->ParsedInputArguments()) {
-    paint_arguments.push_back(style_value->ToCSSStyleValue());
+    paint_arguments->push_back(style_value->ToCSSStyleValue());
   }
 
   ApplyAnimatedPropertyOverrides(style_map, animated_property_values);
 
   return Paint(input->GetSize(), input->EffectiveZoom(), style_map,
-               &paint_arguments);
+               paint_arguments);
 }
 
 PaintRecord CSSPaintDefinition::Paint(
     const gfx::SizeF& container_size,
     float zoom,
     StylePropertyMapReadOnly* style_map,
-    const CSSStyleValueVector* paint_arguments) {
+    const GCedCSSStyleValueVector* paint_arguments) {
   const gfx::SizeF specified_size = GetSpecifiedSize(container_size, zoom);
   ScriptState::Scope scope(script_state_);
 
@@ -96,14 +117,21 @@ PaintRecord CSSPaintDefinition::Paint(
 
   // Do subpixel snapping for the |container_size|.
   auto* rendering_context = MakeGarbageCollected<PaintRenderingContext2D>(
-      ToRoundedSize(container_size), context_settings_, zoom,
-      /*device_scale_factor=*/1,
-      global_scope_->GetTaskRunner(TaskType::kMiscPlatformAPI), global_scope_);
+      ToRoundedSize(container_size), context_settings_, zoom, global_scope_);
   PaintSize* paint_size = MakeGarbageCollected<PaintSize>(specified_size);
 
-  CSSStyleValueVector empty_paint_arguments;
-  if (!paint_arguments)
-    paint_arguments = &empty_paint_arguments;
+  if (!paint_arguments) {
+    DEFINE_THREAD_SAFE_STATIC_LOCAL(
+        ThreadSpecific<Persistent<GCedCSSStyleValueVector>>,
+        static_empty_arguments, {});
+    Persistent<GCedCSSStyleValueVector>& empty_arguments =
+        *static_empty_arguments;
+    if (!empty_arguments) [[unlikely]] {
+      empty_arguments = MakeGarbageCollected<GCedCSSStyleValueVector>();
+      LEAK_SANITIZER_IGNORE_OBJECT(&empty_arguments);
+    }
+    paint_arguments = empty_arguments.Get();
+  }
 
   v8::TryCatch try_catch(isolate);
   try_catch.SetVerbose(true);
@@ -112,7 +140,7 @@ PaintRecord CSSPaintDefinition::Paint(
   // invalid image.
   if (paint_
           ->Invoke(instance_.Get(isolate), rendering_context, paint_size,
-                   style_map, *paint_arguments)
+                   style_map, CSSStyleValueVector(std::move(*paint_arguments)))
           .IsNothing()) {
     return PaintRecord();
   }
@@ -124,35 +152,14 @@ void CSSPaintDefinition::ApplyAnimatedPropertyOverrides(
     PaintWorkletStylePropertyMap* style_map,
     const CompositorPaintWorkletJob::AnimatedPropertyValues&
         animated_property_values) {
-  for (const auto& property_value : animated_property_values) {
-    DCHECK(property_value.second.has_value());
-    String property_name(
-        property_value.first.custom_property_name.value().c_str());
-    DCHECK(style_map->StyleMapData().Contains(property_name));
-    CrossThreadStyleValue* old_value =
-        style_map->StyleMapData().at(property_name);
-    switch (old_value->GetType()) {
-      case CrossThreadStyleValue::StyleValueType::kUnitType: {
-        DCHECK(property_value.second.float_value);
-        std::unique_ptr<CrossThreadUnitValue> new_value =
-            std::make_unique<CrossThreadUnitValue>(
-                property_value.second.float_value.value(),
-                DynamicTo<CrossThreadUnitValue>(old_value)->GetUnitType());
-        style_map->StyleMapData().Set(property_name, std::move(new_value));
-        break;
-      }
-      case CrossThreadStyleValue::StyleValueType::kColorType: {
-        DCHECK(property_value.second.color_value);
-        std::unique_ptr<CrossThreadColorValue> new_value =
-            std::make_unique<CrossThreadColorValue>(Color::FromSkColor4f(
-                property_value.second.color_value.value()));
-        style_map->StyleMapData().Set(property_name, std::move(new_value));
-        break;
-      }
-      default:
-        NOTREACHED();
-        break;
-    }
+  auto& style_map_data = style_map->StyleMapData();
+  for (const auto& [key, value] : animated_property_values) {
+    DCHECK(value.has_value());
+    String property_name = String::FromUtf8(key.custom_property_name.value());
+    auto it = style_map_data.find(property_name);
+    CHECK_NE(it, style_map_data.end());
+    DCHECK(it->value);
+    it->value = CreateUpdatedStyleValue(value, *it->value);
   }
 }
 

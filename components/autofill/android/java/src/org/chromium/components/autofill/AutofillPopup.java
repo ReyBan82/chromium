@@ -13,23 +13,16 @@ import android.view.accessibility.AccessibilityEvent;
 import android.widget.AdapterView;
 import android.widget.PopupWindow;
 
-import androidx.annotation.Nullable;
-
-import org.chromium.ui.DropdownItem;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.ui.DropdownItemBase;
 import org.chromium.ui.DropdownPopupWindow;
-import org.chromium.ui.widget.RectProvider;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
 
-/**
- * The Autofill suggestion popup that lists relevant suggestions.
- */
+/** The Autofill suggestion popup that lists relevant suggestions. */
+@NullMarked
 public class AutofillPopup extends DropdownPopupWindow
-        implements AdapterView.OnItemClickListener, AdapterView.OnItemLongClickListener,
-                   PopupWindow.OnDismissListener, AutofillDropdownFooter.Observer {
+        implements AdapterView.OnItemClickListener, PopupWindow.OnDismissListener {
     /**
      * We post a delayed runnable to clear accessibility focus from the autofill popup's list view
      * when we receive a {@code TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED} event because we receive a
@@ -41,14 +34,14 @@ public class AutofillPopup extends DropdownPopupWindow
 
     private final Context mContext;
     private final AutofillDelegate mAutofillDelegate;
-    private List<AutofillSuggestion> mSuggestions;
 
-    private final Runnable mClearAccessibilityFocusRunnable = new Runnable() {
-        @Override
-        public void run() {
-            mAutofillDelegate.accessibilityFocusCleared();
-        }
-    };
+    private final Runnable mClearAccessibilityFocusRunnable =
+            new Runnable() {
+                @Override
+                public void run() {
+                    mAutofillDelegate.accessibilityFocusCleared();
+                }
+            };
 
     /**
      * Creates an AutofillWindow with specified parameters.
@@ -56,11 +49,12 @@ public class AutofillPopup extends DropdownPopupWindow
      * @param context Application context.
      * @param anchorView View anchored for popup.
      * @param autofillDelegate An object that handles the calls to the native AutofillPopupView.
-     * @param visibleWebContentsRectProvider The {@link RectProvider} for popup limits.
      */
-    public AutofillPopup(Context context, View anchorView, AutofillDelegate autofillDelegate,
-            @Nullable RectProvider visibleWebContentsRectProvider) {
-        super(context, anchorView, visibleWebContentsRectProvider);
+    public AutofillPopup(
+            Context context,
+            View anchorView,
+            AutofillDelegate autofillDelegate) {
+        super(context, anchorView);
         mContext = context;
         mAutofillDelegate = autofillDelegate;
 
@@ -72,73 +66,39 @@ public class AutofillPopup extends DropdownPopupWindow
     }
 
     /**
-     * Filters the Autofill suggestions to the ones that we support and shows the popup.
-     * @param suggestions Autofill suggestion data.
-     * @param isRtl @code true if right-to-left text.
-     * @param isRefresh Whether or not refreshed visual style should be used.
+     * Shows the Autofill popup with the given items.
+     *
+     * @param items Autofill suggestion data.
+     * @param isRtl true if right-to-left text.
      */
     @SuppressLint("InlinedApi")
-    public void filterAndShow(AutofillSuggestion[] suggestions, boolean isRtl, boolean isRefresh) {
-        mSuggestions = new ArrayList<AutofillSuggestion>(Arrays.asList(suggestions));
-        // Remove the AutofillSuggestions with IDs that are not supported by Android
-        List<DropdownItem> cleanedData = new ArrayList<>();
-        List<DropdownItem> footerRows = new ArrayList<>();
-        HashSet<Integer> separators = new HashSet<Integer>();
-        for (int i = 0; i < suggestions.length; i++) {
-            int itemId = suggestions[i].getSuggestionId();
-            if (itemId == PopupItemId.ITEM_ID_SEPARATOR) {
-                separators.add(cleanedData.size());
-            } else if (isFooter(itemId, isRefresh)) {
-                footerRows.add(suggestions[i]);
-            } else {
-                cleanedData.add(suggestions[i]);
-            }
-        }
-
-        // TODO(crbug.com/896349): Ideally, we would set the footer each time, as this guard assumes
-        // the footer is unchanged between calls to filterAndShow. However, the JellyBean popup
-        // implementation will not draw footers added after the initial call to show().
-        if (!footerRows.isEmpty() && !isShowing()) {
-            setFooterView(new AutofillDropdownFooter(mContext, footerRows, this));
-        }
-
-        setAdapter(new AutofillDropdownAdapter(mContext, cleanedData, separators, isRefresh));
+    public void filterAndShow(AutofillDropdownItem[] items, boolean isRtl) {
+        setAdapter(new AutofillDropdownAdapter(mContext, Arrays.asList(items)));
         setRtl(isRtl);
         show();
-        getListView().setOnItemLongClickListener(this);
-        getListView().setAccessibilityDelegate(new AccessibilityDelegate() {
-            @Override
-            public boolean onRequestSendAccessibilityEvent(
-                    ViewGroup host, View child, AccessibilityEvent event) {
-                getListView().removeCallbacks(mClearAccessibilityFocusRunnable);
-                if (event.getEventType()
-                        == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED) {
-                    getListView().postDelayed(
-                            mClearAccessibilityFocusRunnable, CLEAR_ACCESSIBILITY_FOCUS_DELAY_MS);
-                }
-                return super.onRequestSendAccessibilityEvent(host, child, event);
-            }
-        });
+        getListView()
+                .setAccessibilityDelegate(
+                        new AccessibilityDelegate() {
+                            @Override
+                            public boolean onRequestSendAccessibilityEvent(
+                                    ViewGroup host, View child, AccessibilityEvent event) {
+                                getListView().removeCallbacks(mClearAccessibilityFocusRunnable);
+                                if (event.getEventType()
+                                        == AccessibilityEvent
+                                                .TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED) {
+                                    getListView()
+                                            .postDelayed(
+                                                    mClearAccessibilityFocusRunnable,
+                                                    CLEAR_ACCESSIBILITY_FOCUS_DELAY_MS);
+                                }
+                                return super.onRequestSendAccessibilityEvent(host, child, event);
+                            }
+                        });
     }
 
     @Override
     public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-        AutofillDropdownAdapter adapter = (AutofillDropdownAdapter) parent.getAdapter();
-        int listIndex = mSuggestions.indexOf(adapter.getItem(position));
-        assert listIndex > -1;
-        mAutofillDelegate.suggestionSelected(listIndex);
-    }
-
-    @Override
-    public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
-        AutofillDropdownAdapter adapter = (AutofillDropdownAdapter) parent.getAdapter();
-        AutofillSuggestion suggestion = (AutofillSuggestion) adapter.getItem(position);
-        if (!suggestion.isDeletable()) return false;
-
-        int listIndex = mSuggestions.indexOf(suggestion);
-        assert listIndex > -1;
-        mAutofillDelegate.deleteSuggestion(listIndex);
-        return true;
+        mAutofillDelegate.suggestionAccepted(position);
     }
 
     @Override
@@ -146,45 +106,24 @@ public class AutofillPopup extends DropdownPopupWindow
         mAutofillDelegate.dismissed();
     }
 
-    @Override
-    public void onFooterSelection(DropdownItem item) {
-        // TODO(crbug.com/896349): Finding the suggestion index by its frontend id is a workaround
-        // for the fact that footer items are not redrawn on each call to filterAndShow, and so
-        // |item| will be identical to, but not equal to, an element in |mSuggestions|. Once this
-        // workaround is no longer needed, this should be changed to simply use
-        // mSuggestions.indexOf(item).
-        int index = -1;
+    /** A specialized DropdownItem for Autofill suggestions. */
+    public static class AutofillDropdownItem extends DropdownItemBase {
+        private final String mLabel;
+        private final String mSublabel;
 
-        for (int i = 0; i < mSuggestions.size(); i++) {
-            // Cast from DropdownItem to AutofillSuggestion is safe because filterAndShow creates
-            // the AutofillDropdownFooter which invokes this, and passes an AutofillSuggestion to
-            // the constructor.
-            if ((mSuggestions.get(i).getSuggestionId()
-                        == ((AutofillSuggestion) item).getSuggestionId())) {
-                index = i;
-                break;
-            }
+        public AutofillDropdownItem(String label, String sublabel) {
+            mLabel = label;
+            mSublabel = sublabel;
         }
 
-        assert index > -1;
-        mAutofillDelegate.suggestionSelected(index);
-    }
-
-    private boolean isFooter(int row, boolean isRefresh) {
-        // Footer items are only handled as a special case in the refreshed UI.
-        if (!isRefresh) {
-            return false;
+        @Override
+        public String getLabel() {
+            return mLabel;
         }
 
-        switch (row) {
-            case PopupItemId.ITEM_ID_CLEAR_FORM:
-            case PopupItemId.ITEM_ID_AUTOFILL_OPTIONS:
-            case PopupItemId.ITEM_ID_SCAN_CREDIT_CARD:
-            case PopupItemId.ITEM_ID_CREDIT_CARD_SIGNIN_PROMO:
-            case PopupItemId.ITEM_ID_ALL_SAVED_PASSWORDS_ENTRY:
-                return true;
-            default:
-                return false;
+        @Override
+        public String getSublabel() {
+            return mSublabel;
         }
     }
 }

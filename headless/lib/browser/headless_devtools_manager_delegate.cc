@@ -4,6 +4,7 @@
 
 #include "headless/lib/browser/headless_devtools_manager_delegate.h"
 
+#include "base/containers/span.h"
 #include "build/build_config.h"
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/devtools_agent_host_client_channel.h"
@@ -27,26 +28,28 @@ void HeadlessDevToolsManagerDelegate::HandleCommand(
     base::span<const uint8_t> message,
     NotHandledCallback callback) {
   auto it = sessions_.find(channel);
-  DCHECK(it != sessions_.end());
+  CHECK(it != sessions_.end());
   it->second->HandleCommand(message, std::move(callback));
 }
 
 scoped_refptr<content::DevToolsAgentHost>
-HeadlessDevToolsManagerDelegate::CreateNewTarget(const GURL& url,
-                                                 bool for_tab) {
+HeadlessDevToolsManagerDelegate::CreateNewTarget(
+    const GURL& url,
+    content::DevToolsManagerDelegate::TargetType target_type,
+    bool new_window) {
   if (!browser_)
     return nullptr;
 
   HeadlessBrowserContext* context = browser_->GetDefaultBrowserContext();
-  HeadlessWebContentsImpl* web_contents_impl = HeadlessWebContentsImpl::From(
-      context->CreateWebContentsBuilder()
-          .SetInitialURL(url)
-          .SetWindowSize(browser_->options()->window_size)
-          .Build());
-  return for_tab ? content::DevToolsAgentHost::GetOrCreateForTab(
-                       web_contents_impl->web_contents())
-                 : content::DevToolsAgentHost::GetOrCreateFor(
-                       web_contents_impl->web_contents());
+  HeadlessWebContents::CreateParams create_params(context, url);
+  create_params.window_bounds = gfx::Rect(browser_->options()->window_size);
+  HeadlessWebContentsImpl* web_contents_impl =
+      HeadlessWebContentsImpl::From(context->CreateWebContents(create_params));
+  return target_type == content::DevToolsManagerDelegate::kTab
+             ? content::DevToolsAgentHost::GetOrCreateForTab(
+                   web_contents_impl->web_contents())
+             : content::DevToolsAgentHost::GetOrCreateFor(
+                   web_contents_impl->web_contents());
 }
 
 bool HeadlessDevToolsManagerDelegate::HasBundledFrontendResources() {
@@ -55,7 +58,7 @@ bool HeadlessDevToolsManagerDelegate::HasBundledFrontendResources() {
 
 void HeadlessDevToolsManagerDelegate::ClientAttached(
     content::DevToolsAgentHostClientChannel* channel) {
-  DCHECK(sessions_.find(channel) == sessions_.end());
+  DCHECK(!sessions_.contains(channel));
   sessions_.emplace(
       channel,
       std::make_unique<protocol::HeadlessDevToolsSession>(browser_, channel));
@@ -66,31 +69,46 @@ void HeadlessDevToolsManagerDelegate::ClientDetached(
   sessions_.erase(channel);
 }
 
-std::vector<content::BrowserContext*>
+std::vector<base::WeakPtr<content::BrowserContext>>
 HeadlessDevToolsManagerDelegate::GetBrowserContexts() {
-  std::vector<content::BrowserContext*> contexts;
+  std::vector<base::WeakPtr<content::BrowserContext>> contexts;
   if (!browser_)
     return contexts;
   for (auto* context : browser_->GetAllBrowserContexts()) {
-    if (context != browser_->GetDefaultBrowserContext())
-      contexts.push_back(HeadlessBrowserContextImpl::From(context));
+    if (context != browser_->GetDefaultBrowserContext()) {
+      contexts.push_back(
+          HeadlessBrowserContextImpl::From(context)->GetWeakPtr());
+    }
   }
   return contexts;
 }
+
 content::BrowserContext*
 HeadlessDevToolsManagerDelegate::GetDefaultBrowserContext() {
-  return browser_ ? HeadlessBrowserContextImpl::From(
-                        browser_->GetDefaultBrowserContext())
-                  : nullptr;
+  if (!browser_) {
+    return nullptr;
+  }
+  return HeadlessBrowserContextImpl::From(browser_->GetDefaultBrowserContext());
+}
+
+content::BrowserContext* HeadlessDevToolsManagerDelegate::GetBrowserContext(
+    const std::string& context_id) {
+  if (!browser_) {
+    return nullptr;
+  }
+  return HeadlessBrowserContextImpl::From(
+      browser_->GetBrowserContextForId(context_id));
 }
 
 content::BrowserContext*
 HeadlessDevToolsManagerDelegate::CreateBrowserContext() {
   if (!browser_)
     return nullptr;
-  auto builder = browser_->CreateBrowserContextBuilder();
-  builder.SetIncognitoMode(true);
-  HeadlessBrowserContext* browser_context = builder.Build();
+  HeadlessBrowserContext::CreateParams params;
+  params.incognito_mode = true;
+  HeadlessBrowserContext* browser_context =
+      browser_->CreateBrowserContext(std::move(params));
+  CHECK(browser_context);
   return HeadlessBrowserContextImpl::From(browser_context);
 }
 
@@ -99,15 +117,6 @@ void HeadlessDevToolsManagerDelegate::DisposeBrowserContext(
     DisposeCallback callback) {
   HeadlessBrowserContextImpl* context =
       HeadlessBrowserContextImpl::From(browser_context);
-  std::vector<HeadlessWebContents*> web_contents = context->GetAllWebContents();
-  while (!web_contents.empty()) {
-    for (auto* wc : web_contents)
-      wc->Close();
-    // Since HeadlessWebContents::Close spawns a nested run loop to await
-    // closing, new web_contents could be opened. We need to re-query pages and
-    // close them too.
-    web_contents = context->GetAllWebContents();
-  }
   context->Close();
   std::move(callback).Run(true, "");
 }

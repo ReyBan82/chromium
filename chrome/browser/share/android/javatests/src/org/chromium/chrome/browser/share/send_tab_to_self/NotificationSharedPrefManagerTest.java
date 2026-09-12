@@ -10,16 +10,15 @@ import androidx.test.filters.SmallTest;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
+import org.chromium.base.shared_preferences.SharedPreferencesManager;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
 import org.chromium.chrome.browser.share.send_tab_to_self.NotificationSharedPrefManager.ActiveNotification;
 
 /** Tests for NotificationSharedPrefManagerTest */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class NotificationSharedPrefManagerTest {
     private @Nullable ActiveNotification deserialize(String serialized) {
         return NotificationSharedPrefManager.deserializeNotification(serialized);
@@ -102,7 +101,7 @@ public class NotificationSharedPrefManagerTest {
     @Test
     @SmallTest
     public void testMaxNotificationId() {
-        SharedPreferencesManager prefs = SharedPreferencesManager.getInstance();
+        SharedPreferencesManager prefs = ChromeSharedPreferences.getInstance();
         prefs.writeInt(
                 ChromePreferenceKeys.SEND_TAB_TO_SELF_NEXT_NOTIFICATION_ID, Integer.MAX_VALUE - 1);
 

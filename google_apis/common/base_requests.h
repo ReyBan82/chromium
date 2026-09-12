@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,10 @@
 namespace base {
 class Value;
 }  // namespace base
+
+namespace net {
+struct RedirectInfo;
+}  // namespace net
 
 namespace google_apis {
 
@@ -50,11 +55,17 @@ typedef base::RepeatingCallback<void(ApiErrorCode error,
                                      bool first_chunk)>
     GetContentCallback;
 
+// Most commonly used HTTP request methods.
+enum class HttpRequestMethod { kGet, kPost, kPut, kPatch, kDelete };
+
 // Parses JSON passed in |json|. Returns NULL on failure.
 std::unique_ptr<base::Value> ParseJson(const std::string& json);
 
 // Maps the error body to reason and logs the error code.
-absl::optional<std::string> MapJsonErrorToReason(const std::string& error_body);
+std::optional<std::string> MapJsonErrorToReason(const std::string& error_body);
+
+// Stringifies `HttpRequestMethod` enum value.
+std::string HttpRequestMethodToString(HttpRequestMethod method);
 
 //======================= AuthenticatedRequestInterface ======================
 
@@ -133,7 +144,7 @@ class UrlFetchRequestBase : public AuthenticatedRequestInterface,
 
   // Returns the request type. A derived class should override this method
   // for a request type other than HTTP GET.
-  virtual std::string GetRequestType() const;
+  virtual HttpRequestMethod GetRequestType() const;
 
   // Returns the extra HTTP headers for the request. A derived class should
   // override this method to specify any extra headers needed for the request.
@@ -236,7 +247,7 @@ class UrlFetchRequestBase : public AuthenticatedRequestInterface,
   void OnOutputFileClosed(bool success);
 
   // SimpleURLLoaderStreamConsumer implementation:
-  void OnDataReceived(base::StringPiece string_piece,
+  void OnDataReceived(std::string_view string_piece,
                       base::OnceClosure resume) override;
   void OnComplete(bool success) override;
   void OnRetry(base::OnceClosure start_retry) override;
@@ -251,6 +262,12 @@ class UrlFetchRequestBase : public AuthenticatedRequestInterface,
   void OnResponseStarted(const GURL& final_url,
                          const network::mojom::URLResponseHead& response_head);
 
+  // Called when SimpleURLLoader encounters a redirect.
+  void OnRedirect(const GURL& url_before_redirect,
+                  const net::RedirectInfo& redirect_info,
+                  const network::mojom::URLResponseHead& response_head,
+                  std::vector<std::string>* to_be_removed_headers);
+
   // Invokes callback with |code| and request to delete the request to
   // |sender_|.
   void CompleteRequestWithError(ApiErrorCode code);
@@ -262,7 +279,7 @@ class UrlFetchRequestBase : public AuthenticatedRequestInterface,
   int re_authenticate_count_;
   std::unique_ptr<network::SimpleURLLoader> url_loader_;
   raw_ptr<RequestSender> sender_;
-  absl::optional<ApiErrorCode> error_code_;
+  std::optional<ApiErrorCode> error_code_;
   const ProgressCallback upload_progress_callback_;
   const ProgressCallback download_progress_callback_;
   std::unique_ptr<DownloadData> download_data_;

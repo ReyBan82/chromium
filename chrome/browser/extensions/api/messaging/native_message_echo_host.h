@@ -20,15 +20,19 @@ class BrowserContext;
 namespace extensions {
 
 // A test NativeMessageHost used in ExtensionApiTest::NativeMessagingBasic.
-// See //chrome/browser/extensions/api/messaging/native_messaging_apitest.cc
+// See
+// //chrome/browser/extensions/api/messaging/native_messaging_apitest_desktop.cc
 // The behavior in this implementation must match the expectations defined in
 // //chrome/test/data/native_messaging/native_hosts/echo.py as that script is
 // used to drive the tests.
 class NativeMessageEchoHost : public NativeMessageHost {
  public:
-  static const char* const kHostName;
-  static const char* const kOrigins[];
-  static const size_t kOriginCount;
+  // Must match ScopedTestNativeMessagingHost::kHostName.
+  static constexpr char kHostName[] = "com.google.chrome.test.echo";
+
+  // Must match ScopedTestNativeMessagingHost::kExtensionId.
+  static constexpr const char* kOrigins[] = {
+      "chrome-extension://knldjmfmopnpolahpmmgbagdohdnhkik/"};
 
   static std::unique_ptr<NativeMessageHost> Create(
       content::BrowserContext* browser_context);
@@ -44,12 +48,13 @@ class NativeMessageEchoHost : public NativeMessageHost {
   scoped_refptr<base::SingleThreadTaskRunner> task_runner() const override;
 
  private:
-  void ProcessEcho(const base::Value::Dict& request);
+  void ProcessEcho(const base::DictValue& request);
+  void SendInvalidResponse();
 
   // Counter used to ensure message uniqueness for testing.
   int message_number_ = 0;
 
-  // |client_| must outlive this test instance.
+  // `client_` must outlive this test instance.
   raw_ptr<Client> client_ = nullptr;
 };
 

@@ -4,14 +4,6 @@
 
 let instance: WindowProxy|null = null;
 
-declare global {
-  interface Window {
-    // https://github.com/microsoft/TypeScript/issues/40807
-    requestIdleCallback(callback: () => void, options?: {timeout: number}):
-        void;
-  }
-}
-
 /** Abstracts some builtin JS functions to mock them in tests. */
 export class WindowProxy {
   static getInstance(): WindowProxy {
@@ -57,13 +49,20 @@ export class WindowProxy {
   /** Returns promise that resolves when lazy rendering should be started. */
   waitForLazyRender(): Promise<void> {
     return new Promise<void>(resolve => {
-      window.requestIdleCallback(resolve, {timeout: 500});
+      requestIdleCallback(() => resolve(), {timeout: 500});
     });
   }
 
-  /** Posts |message| on the content window of |iframe| at |targetOrigin|. */
-  postMessage(iframe: HTMLIFrameElement, message: any, targetOrigin: string) {
-    iframe.contentWindow!.postMessage(message, targetOrigin);
+  /**
+   * Posts |message| on |target| at |targetOrigin| (or on its content window if
+   * |target| is an iframe).
+   */
+  postMessage(
+      target: HTMLIFrameElement|Window, message: unknown,
+      targetOrigin: string) {
+    const targetWindow =
+        target instanceof HTMLIFrameElement ? target.contentWindow! : target;
+    targetWindow.postMessage(message, targetOrigin);
   }
 
   /** Returns `window.location.href` wrapped in a URL object. */

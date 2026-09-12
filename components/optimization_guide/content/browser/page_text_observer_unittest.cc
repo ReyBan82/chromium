@@ -4,12 +4,11 @@
 
 #include "components/optimization_guide/content/browser/page_text_observer.h"
 
+#include <optional>
 #include <string>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
-#include "base/strings/strcat.h"
-#include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/types/optional_util.h"
@@ -22,14 +21,10 @@
 #include "content/public/test/test_renderer_host.h"
 #include "content/public/test/web_contents_tester.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
-#include "mojo/public/cpp/bindings/associated_remote.h"
-#include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/http/http_response_headers.h"
-#include "services/service_manager/public/cpp/interface_provider.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
 #include "third_party/blink/public/common/features.h"
 
@@ -77,7 +72,7 @@ class TestConsumer : public PageTextObserver::Consumer {
 
   bool was_called() const { return was_called_; }
 
-  absl::optional<PageTextDumpResult> result() {
+  std::optional<PageTextDumpResult> result() {
     return base::OptionalFromPtr(result_.get());
   }
 
@@ -129,7 +124,7 @@ class FakePageTextService : public mojom::PageTextService {
   // called.
   void SetRemoteResponsesForEvent(
       mojom::TextDumpEvent event,
-      const std::vector<absl::optional<std::u16string>> responses) {
+      const std::vector<std::optional<std::u16string>> responses) {
     responses_.emplace(event, responses);
   }
 
@@ -156,7 +151,7 @@ class FakePageTextService : public mojom::PageTextService {
     mojo::Remote<mojom::PageTextConsumer> consumer_remote;
     consumer_remote.Bind(std::move(consumer));
 
-    for (const absl::optional<std::u16string>& resp : responses_iter->second) {
+    for (const std::optional<std::u16string>& resp : responses_iter->second) {
       if (resp) {
         consumer_remote->OnTextDumpChunk(*resp);
       } else {
@@ -173,13 +168,13 @@ class FakePageTextService : public mojom::PageTextService {
   bool disconnect_all_ = false;
 
   // Used to timeout a request.
-  absl::optional<mojom::TextDumpEvent> hang_event_;
+  std::optional<mojom::TextDumpEvent> hang_event_;
   mojo::Remote<mojom::PageTextConsumer> hung_consumer_remote_;
 
   // For each event, a sequence of responses to send on the next page dump
   // request. If an element has a value, |OnTextDumpChunk| is called with the
   // text chunk. If an element does not have a value, |OnChunksEnd| is called.
-  std::map<mojom::TextDumpEvent, std::vector<absl::optional<std::u16string>>>
+  std::map<mojom::TextDumpEvent, std::vector<std::optional<std::u16string>>>
       responses_;
 };
 
@@ -310,7 +305,7 @@ TEST_F(PageTextObserverTest, MojoPlumbingSuccessCase) {
                                               u"a",
                                               u"b",
                                               u"c",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -356,7 +351,7 @@ TEST_F(PageTextObserverTest, CompletedFrameDumpMetrics_Empty) {
   FakePageTextService fake_renderer_service;
   fake_renderer_service.SetRemoteResponsesForEvent(
       mojom::TextDumpEvent::kFirstLayout, {
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -398,7 +393,7 @@ TEST_F(PageTextObserverTest, CompletedFrameDumpMetrics_NotEmpty) {
                                               u"a",
                                               u"b",
                                               u"c",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -474,7 +469,7 @@ TEST_F(PageTextObserverTest, MaxLengthOnChunkBorder) {
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
                                               u"def",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -521,7 +516,7 @@ TEST_F(PageTextObserverTest, MaxLengthWithinChunk) {
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
                                               u"def",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -619,7 +614,7 @@ TEST_F(PageTextObserverTest, TwoConsumers) {
                                               u"a",
                                               u"b",
                                               u"c",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -684,7 +679,7 @@ TEST_F(PageTextObserverTest, RemoveConsumer) {
                                               u"a",
                                               u"b",
                                               u"c",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -736,12 +731,12 @@ TEST_F(PageTextObserverTest, TwoEventsRequested) {
   fake_renderer_service.SetRemoteResponsesForEvent(
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
   fake_renderer_service.SetRemoteResponsesForEvent(
       mojom::TextDumpEvent::kFinishedLoad, {
                                                u"xyz",
-                                               absl::nullopt,
+                                               std::nullopt,
                                            });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -800,7 +795,7 @@ TEST_F(PageTextObserverTest, AbandonedRequest) {
   fake_renderer_service.SetRemoteResponsesForEvent(
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
   fake_renderer_service.SetEventToHangForver(
       mojom::TextDumpEvent::kFinishedLoad);
@@ -859,7 +854,7 @@ TEST_F(PageTextObserverTest, AMPRequestedOnOOPIF) {
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
                                               u"def",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -888,7 +883,7 @@ TEST_F(PageTextObserverTest, AMPRequestedOnOOPIF) {
   subframe_fake_renderer_service.SetRemoteResponsesForEvent(
       mojom::TextDumpEvent::kFinishedLoad, {
                                                u"amp",
-                                               absl::nullopt,
+                                               std::nullopt,
                                            });
 
   observer()->RenderFrameCreated(oopif_subframe);
@@ -938,7 +933,7 @@ TEST_F(PageTextObserverTest, AMPNotRequestedOnOOPIF) {
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
                                               u"def",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -968,7 +963,7 @@ TEST_F(PageTextObserverTest, AMPNotRequestedOnOOPIF) {
       mojom::TextDumpEvent::kFinishedLoad, {
                                                u"\n",
                                                u"amp",
-                                               absl::nullopt,
+                                               std::nullopt,
                                            });
 
   observer()->RenderFrameCreated(oopif_subframe);
@@ -1008,7 +1003,7 @@ TEST_F(PageTextObserverTest, AMPRequestedOnNonOOPIF) {
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
                                               u"def",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -1038,7 +1033,7 @@ TEST_F(PageTextObserverTest, AMPRequestedOnNonOOPIF) {
       mojom::TextDumpEvent::kFinishedLoad, {
                                                u"\n",
                                                u"amp",
-                                               absl::nullopt,
+                                               std::nullopt,
                                            });
 
   observer()->RenderFrameCreated(subframe);
@@ -1144,7 +1139,7 @@ TEST_F(PageTextObserverWithPrerenderTest, AMPRequestedOnOOPIFInPrerendering) {
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
                                               u"def",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
   blink::AssociatedInterfaceProvider* remote_interfaces =
       prerender_frame->GetRemoteAssociatedInterfaces();
@@ -1170,7 +1165,7 @@ TEST_F(PageTextObserverWithPrerenderTest, AMPRequestedOnOOPIFInPrerendering) {
   subframe_fake_renderer_service.SetRemoteResponsesForEvent(
       mojom::TextDumpEvent::kFinishedLoad, {
                                                u"amp",
-                                               absl::nullopt,
+                                               std::nullopt,
                                            });
 
   observer()->RenderFrameCreated(oopif_subframe);
@@ -1207,7 +1202,7 @@ TEST_F(PageTextObserverFencedFramesTest, AMPRequestedOnOOPIFInFencedFrame) {
       mojom::TextDumpEvent::kFirstLayout, {
                                               u"abc",
                                               u"def",
-                                              absl::nullopt,
+                                              std::nullopt,
                                           });
 
   blink::AssociatedInterfaceProvider* remote_interfaces =
@@ -1246,7 +1241,7 @@ TEST_F(PageTextObserverFencedFramesTest, AMPRequestedOnOOPIFInFencedFrame) {
   subframe_fake_renderer_service.SetRemoteResponsesForEvent(
       mojom::TextDumpEvent::kFinishedLoad, {
                                                u"amp",
-                                               absl::nullopt,
+                                               std::nullopt,
                                            });
 
   observer()->RenderFrameCreated(oopif_subframe);

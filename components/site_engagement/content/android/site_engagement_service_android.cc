@@ -6,15 +6,17 @@
 
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
-#include "components/site_engagement/content/android/jni_headers/SiteEngagementService_jni.h"
 #include "components/site_engagement/content/site_engagement_score.h"
 #include "components/site_engagement/content/site_engagement_service.h"
 #include "content/public/browser/android/browser_context_handle.h"
 #include "url/gurl.h"
 
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "components/site_engagement/content/android/jni_headers/SiteEngagementService_jni.h"
+
 namespace site_engagement {
 
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 
 // static
 const base::android::ScopedJavaGlobalRef<jobject>&
@@ -44,36 +46,23 @@ SiteEngagementServiceAndroid::~SiteEngagementServiceAndroid() {
   java_service_.Reset();
 }
 
-double SiteEngagementServiceAndroid::GetScore(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& caller,
-    const JavaParamRef<jstring>& jurl) const {
-  if (!jurl)
-    return 0;
-
-  return service_->GetScore(
-      GURL(base::android::ConvertJavaStringToUTF16(env, jurl)));
+double SiteEngagementServiceAndroid::GetScore(const std::string& url) const {
+  return service_->GetScore(GURL(url));
 }
 
-void SiteEngagementServiceAndroid::ResetBaseScoreForURL(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& caller,
-    const JavaParamRef<jstring>& jurl,
-    double score) {
-  if (jurl) {
-    service_->ResetBaseScoreForURL(
-        GURL(base::android::ConvertJavaStringToUTF16(env, jurl)), score);
-  }
+void SiteEngagementServiceAndroid::ResetBaseScoreForURL(const std::string& url,
+                                                        double score) {
+  service_->ResetBaseScoreForURL(GURL(url), score);
 }
 
-void JNI_SiteEngagementService_SetParamValuesForTesting(JNIEnv* env) {
+static void JNI_SiteEngagementService_SetParamValuesForTesting(JNIEnv* env) {
   SiteEngagementScore::SetParamValuesForTesting();
 }
 
-base::android::ScopedJavaLocalRef<jobject>
+static base::android::ScopedJavaLocalRef<jobject>
 JNI_SiteEngagementService_SiteEngagementServiceForBrowserContext(
     JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& jhandle) {
+    const base::android::JavaRef<jobject>& jhandle) {
   SiteEngagementService* service = SiteEngagementService::Get(
       content::BrowserContextFromJavaHandle(jhandle));
   DCHECK(service);
@@ -83,3 +72,5 @@ JNI_SiteEngagementService_SiteEngagementServiceForBrowserContext(
 }
 
 }  // namespace site_engagement
+
+DEFINE_JNI(SiteEngagementService)

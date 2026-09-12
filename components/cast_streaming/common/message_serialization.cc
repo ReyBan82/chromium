@@ -4,10 +4,11 @@
 
 #include "components/cast_streaming/common/message_serialization.h"
 
+#include <optional>
+
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace cast_streaming {
 
@@ -44,39 +45,43 @@ const char kInitialConnectMessage[] = R"(
         "urn:x-cast:com.google.cast.webrtc",
         "urn:x-cast:com.google.cast.remoting",
         "urn:x-cast:com.google.cast.inject",
-        "urn:x-cast:com.google.cast.media"
+        "urn:x-cast:com.google.cast.media",
+        "urn:x-cast:com.google.cast.exo.bootstrap",
+        "urn:x-cast:com.google.cast.exo.input",
+        "urn:x-cast:com.google.cast.exo.capability"
       ],
       "version": "2.0.0",
       "messagesVersion": "1.0"
     }
     )";
 
-bool DeserializeCastMessage(base::StringPiece buffer,
+bool DeserializeCastMessage(std::string_view buffer,
                             std::string* sender_id,
                             std::string* message_namespace,
                             std::string* message) {
-  absl::optional<base::Value> converted_value = base::JSONReader::Read(buffer);
-  if (!converted_value)
+  std::optional<base::DictValue> converted_dict =
+      base::JSONReader::ReadDict(buffer, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
+  if (!converted_dict) {
     return false;
+  }
 
-  if (!converted_value->is_dict())
+  const std::string* sender_id_value = converted_dict->FindString(kKeySenderId);
+  if (!sender_id_value) {
     return false;
-
-  const std::string* sender_id_value =
-      converted_value->FindStringPath(kKeySenderId);
-  if (!sender_id_value)
-    return false;
+  }
   *sender_id = *sender_id_value;
 
   const std::string* message_namespace_value =
-      converted_value->FindStringPath(kKeyNamespace);
-  if (!message_namespace_value)
+      converted_dict->FindString(kKeyNamespace);
+  if (!message_namespace_value) {
     return false;
+  }
   *message_namespace = *message_namespace_value;
 
-  const std::string* message_value = converted_value->FindStringPath(kKeyData);
-  if (!message_value)
+  const std::string* message_value = converted_dict->FindString(kKeyData);
+  if (!message_value) {
     return false;
+  }
   *message = *message_value;
 
   return true;
@@ -85,10 +90,10 @@ bool DeserializeCastMessage(base::StringPiece buffer,
 std::string SerializeCastMessage(const std::string& sender_id,
                                  const std::string& message_namespace,
                                  const std::string& message) {
-  base::Value value(base::Value::Type::DICT);
-  value.SetStringKey(kKeyNamespace, message_namespace);
-  value.SetStringKey(kKeySenderId, sender_id);
-  value.SetStringKey(kKeyData, message);
+  base::DictValue value;
+  value.Set(kKeyNamespace, message_namespace);
+  value.Set(kKeySenderId, sender_id);
+  value.Set(kKeyData, message);
 
   std::string json_message;
   CHECK(base::JSONWriter::Write(value, &json_message));

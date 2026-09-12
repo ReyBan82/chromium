@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "chrome/browser/ui/global_error/global_error_observer.h"
 #include "components/keyed_service/core/keyed_service.h"
@@ -23,7 +24,7 @@ class GlobalError;
 class GlobalErrorService : public KeyedService {
  public:
   // Type used to represent the list of currently active errors.
-  using GlobalErrorList = std::vector<GlobalError*>;
+  using GlobalErrorList = std::vector<raw_ptr<GlobalError, VectorExperimental>>;
 
   // Constructs a GlobalErrorService object.
   GlobalErrorService();
@@ -46,7 +47,7 @@ class GlobalErrorService : public KeyedService {
   std::unique_ptr<GlobalError> RemoveGlobalError(GlobalError* error);
 
   // DEPRECATED; DO NOT USE!
-  // http://crbug.com/673578
+  // http://crbug.com/41290855
   //
   // These functions allow adding and removing of a GlobalError that is not
   // owned by the GlobalErrorService. In this case, the error's lifetime must

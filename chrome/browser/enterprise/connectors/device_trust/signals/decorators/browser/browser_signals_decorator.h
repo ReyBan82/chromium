@@ -5,16 +5,24 @@
 #ifndef CHROME_BROWSER_ENTERPRISE_CONNECTORS_DEVICE_TRUST_SIGNALS_DECORATORS_BROWSER_BROWSER_SIGNALS_DECORATOR_H_
 #define CHROME_BROWSER_ENTERPRISE_CONNECTORS_DEVICE_TRUST_SIGNALS_DECORATORS_BROWSER_BROWSER_SIGNALS_DECORATOR_H_
 
+#include <memory>
+#include <optional>
+
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "base/values.h"
-#include "chrome/browser/enterprise/connectors/device_trust/signals/decorators/common/signals_decorator.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/enterprise/device_trust/core/signals/decorators/common/signals_decorator.h"
+
+class Profile;
 
 namespace policy {
-class CloudPolicyStore;
+class CloudPolicyManager;
 }  // namespace policy
+
+namespace enterprise_core {
+class DependencyFactory;
+}  // namespace enterprise_core
 
 namespace enterprise_signals {
 struct DeviceInfo;
@@ -31,12 +39,13 @@ namespace enterprise_connectors {
 class BrowserSignalsDecorator : public SignalsDecorator {
  public:
   BrowserSignalsDecorator(
-      policy::CloudPolicyStore* cloud_policy_store,
+      policy::CloudPolicyManager* browser_cloud_policy_manager,
+      std::unique_ptr<enterprise_core::DependencyFactory> dependency_factory,
       device_signals::SignalsAggregator* signals_aggregator);
   ~BrowserSignalsDecorator() override;
 
   // SignalsDecorator:
-  void Decorate(base::Value::Dict& signals,
+  void Decorate(base::DictValue& signals,
                 base::OnceClosure done_closure) override;
 
  private:
@@ -44,7 +53,7 @@ class BrowserSignalsDecorator : public SignalsDecorator {
   // signals are added to `signals` for the caller to use. `done_closure` can be
   // invoked to indicate that this part of the signals collection has concluded.
   // `device_info` represents the signals collected by the DeviceInfoFetcher.
-  void OnDeviceInfoFetched(base::Value::Dict& signals,
+  void OnDeviceInfoFetched(base::DictValue& signals,
                            base::OnceClosure done_closure,
                            const enterprise_signals::DeviceInfo& device_info);
 
@@ -53,7 +62,7 @@ class BrowserSignalsDecorator : public SignalsDecorator {
   // invoked to indicate that this part of the signals collection has concluded.
   // `response` represents the signals collected by the aggregator.
   void OnAggregatedSignalsReceived(
-      base::Value::Dict& signals,
+      base::DictValue& signals,
       base::OnceClosure done_closure,
       device_signals::SignalsAggregationResponse response);
 
@@ -64,7 +73,8 @@ class BrowserSignalsDecorator : public SignalsDecorator {
   void OnAllSignalsReceived(base::TimeTicks start_time,
                             base::OnceClosure done_closure);
 
-  const raw_ptr<policy::CloudPolicyStore> cloud_policy_store_;
+  const raw_ptr<policy::CloudPolicyManager> browser_cloud_policy_manager_;
+  std::unique_ptr<enterprise_core::DependencyFactory> dependency_factory_;
 
   // Signals aggregator, which is a profile-keyed service. Can be nullptr in
   // the case where the Profile is an incognito profile.

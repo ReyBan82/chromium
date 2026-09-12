@@ -13,10 +13,10 @@ import androidx.test.filters.SmallTest;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.task.PostTask;
 import org.chromium.base.task.TaskTraits;
+import org.chromium.base.test.BaseRobolectricTestRule;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
 import java.io.FileNotFoundException;
@@ -24,11 +24,10 @@ import java.io.FileNotFoundException;
 /**
  * Tests working of ChromeFileProvider.
  *
- * The openFile should be blocked till notify is called. These tests can timeout if the notify does
- * not work correctly.
+ * <p>The openFile should be blocked till notify is called. These tests can timeout if the notify
+ * does not work correctly.
  */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class ChromeFileProviderTest {
     private ParcelFileDescriptor openFileFromProvider(Uri uri) {
         ChromeFileProvider provider = new ChromeFileProvider();
@@ -36,7 +35,7 @@ public class ChromeFileProviderTest {
         try {
             provider.openFile(uri, "r");
         } catch (FileNotFoundException e) {
-            assert false : "Failed to open file.";
+            throw new AssertionError("Failed to open file.");
         }
         return file;
     }
@@ -55,14 +54,17 @@ public class ChromeFileProviderTest {
     @LargeTest
     public void testOpenOnAsyncNotify() {
         final Uri uri = ChromeFileProvider.generateUriAndBlockAccess();
-        PostTask.postTask(TaskTraits.BEST_EFFORT_MAY_BLOCK, () -> {
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                // Ignore exception.
-            }
-            ChromeFileProvider.notifyFileReady(uri, null);
-        });
+        PostTask.postTask(
+                TaskTraits.BEST_EFFORT_MAY_BLOCK,
+                () -> {
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException e) {
+                        // Ignore exception.
+                    }
+                    ChromeFileProvider.notifyFileReady(uri, null);
+                });
+        BaseRobolectricTestRule.runAllBackgroundAndUi();
         ParcelFileDescriptor file = openFileFromProvider(uri);
         // File should be null because the notify passes a null file uri.
         Assert.assertNull(file);
@@ -74,14 +76,17 @@ public class ChromeFileProviderTest {
         Uri uri1 = ChromeFileProvider.generateUriAndBlockAccess();
         final Uri uri2 = ChromeFileProvider.generateUriAndBlockAccess();
         final Uri fileUri2 = new Uri.Builder().path("2").build();
-        PostTask.postTask(TaskTraits.BEST_EFFORT_MAY_BLOCK, () -> {
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                // Ignore exception.
-            }
-            ChromeFileProvider.notifyFileReady(uri2, fileUri2);
-        });
+        PostTask.postTask(
+                TaskTraits.BEST_EFFORT_MAY_BLOCK,
+                () -> {
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException e) {
+                        // Ignore exception.
+                    }
+                    ChromeFileProvider.notifyFileReady(uri2, fileUri2);
+                });
+        BaseRobolectricTestRule.runAllBackgroundAndUi();
 
         // This should not be blocked even without a notify since file was changed.
         Uri file1 = ChromeFileProvider.getFileUriWhenReady(uri1);

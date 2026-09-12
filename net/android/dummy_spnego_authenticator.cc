@@ -3,12 +3,15 @@
 // found in the LICENSE file.
 #include "net/android/dummy_spnego_authenticator.h"
 
+#include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "base/base64.h"
-#include "net/net_test_jni_headers/DummySpnegoAuthenticator_jni.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "net/android/dummy_spnego_authenticator_jni/DummySpnegoAuthenticator_jni.h"
+
+using base::android::JavaRef;
 
 namespace net {
 
@@ -146,7 +149,7 @@ int DummySpnegoAuthenticator::SecurityContextQuery::GetResult(JNIEnv* /*env*/) {
 
 void DummySpnegoAuthenticator::SecurityContextQuery::CheckGetTokenArguments(
     JNIEnv* env,
-    const JavaParamRef<jstring>& j_incoming_token) {
+    const JavaRef<jstring>& j_incoming_token) {
   std::string incoming_token =
       base::android::ConvertJavaStringToUTF8(env, j_incoming_token);
   EXPECT_EQ(expected_input_token, incoming_token);
@@ -195,3 +198,5 @@ void DummySpnegoAuthenticator::CheckQueueNotEmpty() {
 
 }  // namespace android
 }  // namespace net
+
+DEFINE_JNI(DummySpnegoAuthenticator)

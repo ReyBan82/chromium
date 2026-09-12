@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {assert} from '//resources/js/assert.js';
+import {CrLitElement} from '//resources/lit/v3_0/lit.rollup.js';
 
-import {getTemplate} from './cr_a11y_announcer.html.js';
+import {getCss} from './cr_a11y_announcer.css.js';
+import {getHtml} from './cr_a11y_announcer.html.js';
 
 /**
  * The CrA11yAnnouncerElement is a visually hidden element that reads out
@@ -13,15 +14,11 @@ import {getTemplate} from './cr_a11y_announcer.html.js';
  * @fileoverview
  */
 
-type CrA11yAnnouncerMessagesSentEvent = CustomEvent<{
+export type CrA11yAnnouncerMessagesSentEvent = CustomEvent<{
   messages: string[],
 }>;
 
-declare global {
-  interface HTMLElementEventMap {
-    'cr-a11y-announcer-messages-sent': CrA11yAnnouncerMessagesSentEvent;
-  }
-}
+
 
 /**
  * 150ms seems to be around the minimum time required for screen readers to
@@ -50,13 +47,17 @@ export function getInstance(container: HTMLElement = document.body):
   return instance;
 }
 
-export class CrA11yAnnouncerElement extends PolymerElement {
+export class CrA11yAnnouncerElement extends CrLitElement {
   static get is() {
     return 'cr-a11y-announcer';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
+  }
+
+  override render() {
+    return getHtml.bind(this)();
   }
 
   private currentTimeout_: number|null = null;
@@ -77,7 +78,7 @@ export class CrA11yAnnouncerElement extends PolymerElement {
     }
   }
 
-  announce(message: string) {
+  announce(message: string, timeout: number = TIMEOUT_MS) {
     if (this.currentTimeout_ !== null) {
       clearTimeout(this.currentTimeout_);
       this.currentTimeout_ = null;
@@ -86,7 +87,7 @@ export class CrA11yAnnouncerElement extends PolymerElement {
     this.messages_.push(message);
 
     this.currentTimeout_ = setTimeout(() => {
-      const messagesDiv = this.shadowRoot!.querySelector('#messages')!;
+      const messagesDiv = this.shadowRoot.querySelector('#messages')!;
       messagesDiv.innerHTML = window.trustedTypes!.emptyHTML;
 
       // <if expr="is_macosx">
@@ -111,7 +112,16 @@ export class CrA11yAnnouncerElement extends PolymerElement {
 
       this.messages_.length = 0;
       this.currentTimeout_ = null;
-    }, TIMEOUT_MS);
+    }, timeout);
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'cr-a11y-announcer': CrA11yAnnouncerElement;
+  }
+  interface HTMLElementEventMap {
+    'cr-a11y-announcer-messages-sent': CrA11yAnnouncerMessagesSentEvent;
   }
 }
 

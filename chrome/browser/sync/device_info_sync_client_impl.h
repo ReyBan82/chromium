@@ -5,9 +5,9 @@
 #ifndef CHROME_BROWSER_SYNC_DEVICE_INFO_SYNC_CLIENT_IMPL_H_
 #define CHROME_BROWSER_SYNC_DEVICE_INFO_SYNC_CLIENT_IMPL_H_
 
-#include "base/memory/raw_ptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
 
+#include "base/memory/raw_ptr.h"
 #include "components/sync_device_info/device_info_sync_client.h"
 
 class Profile;
@@ -30,21 +30,37 @@ class DeviceInfoSyncClientImpl : public syncer::DeviceInfoSyncClient {
   bool GetSendTabToSelfReceivingEnabled() const override;
 
   // syncer::DeviceInfoSyncClient:
-  absl::optional<syncer::DeviceInfo::SharingInfo> GetLocalSharingInfo()
+  syncer::DeviceInfo::SendTabReceivingType GetSendTabToSelfReceivingType()
       const override;
 
   // syncer::DeviceInfoSyncClient:
-  absl::optional<std::string> GetFCMRegistrationToken() const override;
+  std::optional<syncer::DeviceInfo::SharingInfo> GetLocalSharingInfo()
+      const override;
 
   // syncer::DeviceInfoSyncClient:
-  absl::optional<syncer::ModelTypeSet> GetInterestedDataTypes() const override;
+  std::optional<std::string> GetFCMRegistrationToken() const override;
 
   // syncer::DeviceInfoSyncClient:
-  absl::optional<syncer::DeviceInfo::PhoneAsASecurityKeyInfo>
+  std::optional<syncer::DataTypeSet> GetInterestedDataTypes() const override;
+
+  // syncer::DeviceInfoSyncClient:
+  syncer::DeviceInfo::PhoneAsASecurityKeyInfo::StatusOrInfo
   GetPhoneAsASecurityKeyInfo() const override;
 
   // syncer::DeviceInfoSyncClient:
   bool IsUmaEnabledOnCrOSDevice() const override;
+
+  // syncer::DeviceInfoSyncClient:
+  bool GetDesktopToIOSPromoReceivingEnabled() const override;
+  MobilePromoOnDesktopPromoTypeSet GetDesktopToIOSPromoReceivingTypes()
+      const override;
+
+  // syncer::DeviceInfoSyncClient:
+  syncer::DeviceInfo::GlicExperimentalTriggeringState
+  GetGlicExperimentalTriggeringState() const override;
+  std::optional<int> GetGlicExperimentalTriggeringVersion() const override;
+  std::optional<syncer::DeviceInfo::PersonalContextInfo>
+  GetLocalPersonalContextInfo() const override;
 
  private:
   const raw_ptr<Profile> profile_;

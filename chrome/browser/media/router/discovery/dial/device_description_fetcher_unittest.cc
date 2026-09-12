@@ -2,17 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/media/router/discovery/dial/device_description_fetcher.h"
+
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "base/byte_size.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
-#include "chrome/browser/media/router/discovery/dial/device_description_fetcher.h"
 #include "chrome/browser/media/router/discovery/dial/dial_device_data.h"
 #include "chrome/browser/media/router/test/provider_test_helpers.h"
 #include "net/base/ip_address.h"
@@ -26,33 +28,6 @@ using testing::HasSubstr;
 using testing::NiceMock;
 
 namespace media_router {
-
-class TestDeviceDescriptionFetcher : public DeviceDescriptionFetcher {
- public:
-  TestDeviceDescriptionFetcher(
-      const DialDeviceData& device_data,
-      base::OnceCallback<void(const DialDeviceDescriptionData&)> success_cb,
-      base::OnceCallback<void(const std::string&)> error_cb,
-      network::TestURLLoaderFactory* factory)
-      : DeviceDescriptionFetcher(device_data,
-                                 std::move(success_cb),
-                                 std::move(error_cb)),
-        factory_(factory) {}
-  ~TestDeviceDescriptionFetcher() override = default;
-
-  void Start() override {
-    fetcher_ = std::make_unique<NiceMock<TestDialURLFetcher>>(
-        base::BindOnce(&DeviceDescriptionFetcher::ProcessResponse,
-                       base::Unretained(this)),
-        base::BindOnce(&DeviceDescriptionFetcher::ReportError,
-                       base::Unretained(this)),
-        factory_);
-    fetcher_->Get(device_data_.device_description_url());
-  }
-
- private:
-  const raw_ptr<network::TestURLLoaderFactory> factory_;
-};
 
 class DeviceDescriptionFetcherTest : public testing::Test {
  public:
@@ -94,7 +69,7 @@ TEST_F(DeviceDescriptionFetcherTest, FetchSuccessful) {
   head->headers = base::MakeRefCounted<net::HttpResponseHeaders>("");
   head->headers->AddHeader("Application-URL", "http://127.0.0.1/apps");
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, std::move(head), body, status);
   StartRequest();
 }
@@ -107,7 +82,7 @@ TEST_F(DeviceDescriptionFetcherTest, FetchSuccessfulAppUrlWithTrailingSlash) {
   head->headers = base::MakeRefCounted<net::HttpResponseHeaders>("");
   head->headers->AddHeader("Application-URL", "http://127.0.0.1/apps/");
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, std::move(head), body, status);
   StartRequest();
 }
@@ -124,7 +99,7 @@ TEST_F(DeviceDescriptionFetcherTest, FetchFailsOnMissingAppUrl) {
   std::string body("<xml>description</xml>");
   EXPECT_CALL(*this, OnError(HasSubstr("Missing or empty Application-URL:")));
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, network::mojom::URLResponseHead::New(),
                               body, status);
   StartRequest();
@@ -137,7 +112,7 @@ TEST_F(DeviceDescriptionFetcherTest, FetchFailsOnEmptyAppUrl) {
   head->headers = base::MakeRefCounted<net::HttpResponseHeaders>("");
   head->headers->AddHeader("Application-URL", "");
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, std::move(head), body, status);
   StartRequest();
 }
@@ -149,7 +124,7 @@ TEST_F(DeviceDescriptionFetcherTest, FetchFailsOnInvalidAppUrl) {
   head->headers = base::MakeRefCounted<net::HttpResponseHeaders>("");
   head->headers->AddHeader("Application-URL", "http://www.example.com");
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, std::move(head), body, status);
   StartRequest();
 }
@@ -172,7 +147,7 @@ TEST_F(DeviceDescriptionFetcherTest, FetchFailsOnBadDescription) {
   head->headers = base::MakeRefCounted<net::HttpResponseHeaders>("");
   head->headers->AddHeader("Application-URL", "http://127.0.0.1/apps");
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, std::move(head), body, status);
   StartRequest();
 }

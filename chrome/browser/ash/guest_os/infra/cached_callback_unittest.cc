@@ -10,8 +10,8 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/task/thread_pool.h"
-#include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
 #include "chrome/browser/ash/borealis/testing/callback_factory.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -20,7 +20,6 @@ namespace guest_os {
 namespace {
 
 using ::testing::_;
-using ::testing::Invoke;
 
 enum class TestErrors {
   kFoo = 0,
@@ -45,11 +44,10 @@ TEST(CachedCallbackTest, IsNullInitially) {
 TEST(CachedCallbackTest, SuccessIsPropagated) {
   SuccessfulCache sc;
   borealis::NiceCallbackFactory<void(SuccessfulCache::Result)> callbacks;
-  EXPECT_CALL(callbacks, Call(_))
-      .WillOnce(Invoke([](SuccessfulCache::Result result) {
-        EXPECT_TRUE(result);
-        EXPECT_EQ(*result.Value(), "success");
-      }));
+  EXPECT_CALL(callbacks, Call(_)).WillOnce([](SuccessfulCache::Result result) {
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(*result.value(), "success");
+  });
   sc.Get(callbacks.BindOnce());
   EXPECT_NE(sc.MaybeGet(), nullptr);
 }
@@ -91,11 +89,10 @@ class FailureCache : public SuccessfulCache {
 TEST(CachedCallbackTest, FailureIsPropagated) {
   FailureCache fc;
   borealis::NiceCallbackFactory<void(FailureCache::Result)> callbacks;
-  EXPECT_CALL(callbacks, Call(_))
-      .WillOnce(Invoke([](FailureCache::Result result) {
-        EXPECT_FALSE(result);
-        EXPECT_EQ(result.Error(), TestErrors::kFoo);
-      }));
+  EXPECT_CALL(callbacks, Call(_)).WillOnce([](FailureCache::Result result) {
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), TestErrors::kFoo);
+  });
   fc.Get(callbacks.BindOnce());
 }
 
@@ -105,8 +102,9 @@ class DelayedCache : public SuccessfulCache {
 
   void DelayCallback(RealCallback callback) {
     // Busy loop until needed.
-    while (delay)
+    while (delay) {
       continue;
+    }
     std::move(callback).Run(
         SuccessfulCache::RealResult(std::make_unique<std::string>("success")));
   }
@@ -122,19 +120,27 @@ class DelayedCache : public SuccessfulCache {
   std::atomic_bool delay = true;
 };
 
+MATCHER(ExpectedTrue, "") {
+  return arg.has_value();
+}
+
 TEST(CachedCallbackTest, CanEnqueueCallbacks) {
   base::test::TaskEnvironment task_environment_;
-  borealis::StrictCallbackFactory<void(DelayedCache::Result)> callbacks;
+  base::test::TestFuture<DelayedCache::Result> first_callback;
+  base::test::TestFuture<DelayedCache::Result> second_callback;
+  base::test::TestFuture<DelayedCache::Result> third_callback;
   DelayedCache dc;
 
-  dc.Get(callbacks.BindOnce());
-  dc.Get(callbacks.BindOnce());
-  dc.Get(callbacks.BindOnce());
-  // We use a strict mock to show that the below expectation hasn't fired yet
-  // and therefore must be queued.
-  EXPECT_CALL(callbacks, Call(::testing::IsTrue())).Times(3);
+  dc.Get(first_callback.GetSequenceBoundCallback());
+  dc.Get(second_callback.GetSequenceBoundCallback());
+  dc.Get(third_callback.GetSequenceBoundCallback());
+  EXPECT_FALSE(first_callback.IsReady());
+  EXPECT_FALSE(second_callback.IsReady());
+  EXPECT_FALSE(third_callback.IsReady());
   dc.delay = false;
-  task_environment_.RunUntilIdle();
+  EXPECT_THAT(first_callback.Take(), ExpectedTrue());
+  EXPECT_THAT(second_callback.Take(), ExpectedTrue());
+  EXPECT_THAT(third_callback.Take(), ExpectedTrue());
 }
 
 class NonCompletingCache : public SuccessfulCache {
@@ -158,10 +164,10 @@ TEST(CachedCallbackTest, CanAbort) {
   // result of Reject(), which is a default-constructed E unless overridden.
   EXPECT_CALL(callbacks, Call(_))
       .Times(3)
-      .WillRepeatedly(Invoke([](NonCompletingCache::Result res) {
-        EXPECT_FALSE(res);
-        EXPECT_EQ(res.Error(), TestErrors::kFoo);
-      }));
+      .WillRepeatedly([](NonCompletingCache::Result res) {
+        EXPECT_FALSE(res.has_value());
+        EXPECT_EQ(res.error(), TestErrors::kFoo);
+      });
   ncc.reset();
 }
 

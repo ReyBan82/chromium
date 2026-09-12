@@ -4,20 +4,34 @@
 
 #include "services/network/cors/cors_url_loader_factory.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/debug/crash_logging.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/metrics/histogram_macros.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
+#include "base/time/time.h"
+#include "base/timer/elapsed_timer.h"
+#include "base/trace_event/typed_macros.h"
 #include "base/types/optional_util.h"
 #include "mojo/public/cpp/bindings/message.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "net/base/features.h"
 #include "net/base/load_flags.h"
+#include "net/base/network_handle.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_util.h"
+#include "net/shared_dictionary/shared_dictionary_isolation_key.h"
+#include "net/url_request/url_request_context.h"
 #include "services/network/cors/cors_url_loader.h"
+#include "services/network/cors/cors_util.h"
 #include "services/network/cors/preflight_controller.h"
 #include "services/network/network_service.h"
+#include "services/network/prefetch_matching_url_loader_factory.h"
 #include "services/network/public/cpp/cors/cors.h"
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/header_util.h"
@@ -25,12 +39,15 @@
 #include "services/network/public/cpp/is_potentially_trustworthy.h"
 #include "services/network/public/cpp/request_mode.h"
 #include "services/network/public/cpp/resource_request.h"
-#include "services/network/public/cpp/trust_token_operation_authorization.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
 #include "services/network/resource_scheduler/resource_scheduler_client.h"
+#include "services/network/shared_dictionary/shared_dictionary_manager.h"
+#include "services/network/shared_dictionary/shared_dictionary_storage.h"
 #include "services/network/url_loader.h"
 #include "services/network/url_loader_factory.h"
+#include "services/network/url_loader_util.h"
 #include "services/network/web_bundle/web_bundle_url_loader_factory.h"
+#include "url/gurl.h"
 #include "url/origin.h"
 
 namespace network::cors {
@@ -41,15 +58,17 @@ namespace {
 // functioning renderer:
 // - Trust Tokens should be enabled
 // - the request should come from a trustworthy context
-// - if the request is for redemption or signing, it should be from a context
-// where these operations are permitted (as specified by
-// URLLoaderFactoryParams::trust_token_redemption_policy).
+// - It should be from a context where the underlying operations are permitted
+// (as specified by URLLoaderFactoryParams::trust_token_redemption_policy and
+// URLLoaderFactoryParams::trust_token_issuance_policy).
 bool VerifyTrustTokenParamsIntegrityIfPresent(
     const ResourceRequest& resource_request,
     const NetworkContext* context,
-    mojom::TrustTokenRedemptionPolicy trust_token_redemption_policy) {
-  if (!resource_request.trust_token_params)
+    mojom::TrustTokenOperationPolicyVerdict trust_token_issuance_policy,
+    mojom::TrustTokenOperationPolicyVerdict trust_token_redemption_policy) {
+  if (!resource_request.trust_token_params) {
     return true;
+  }
 
   if (!context->trust_token_store()) {
     // Got a request with Trust Tokens parameters with Trust tokens
@@ -62,19 +81,32 @@ bool VerifyTrustTokenParamsIntegrityIfPresent(
     return false;
   }
 
-  // TODO(crbug.com/1145346): There's no current way to get a trusted
+  // TODO(crbug.com/40729410): There's no current way to get a trusted
   // browser-side view of whether a request "came from" a secure context, so we
   // don't implement a check for the second criterion in the function comment.
 
-  if (trust_token_redemption_policy ==
-          mojom::TrustTokenRedemptionPolicy::kForbid &&
-      DoesTrustTokenOperationRequirePermissionsPolicy(
-          resource_request.trust_token_params->operation)) {
-    // Got a request configured for Trust Tokens redemption or signing from
-    // a context in which this operation is prohibited.
-    mojo::ReportBadMessage(
-        "TrustTokenParamsIntegrity: RequestFromContextLackingPermission");
-    return false;
+  switch (resource_request.trust_token_params->operation) {
+    case network::mojom::TrustTokenOperationType::kRedemption:
+    case network::mojom::TrustTokenOperationType::kSigning:
+      if (trust_token_redemption_policy ==
+          mojom::TrustTokenOperationPolicyVerdict::kForbid) {
+        // Got a request configured for Trust Tokens redemption or signing from
+        // a context in which this operation is prohibited.
+        mojo::ReportBadMessage(
+            "TrustTokenParamsIntegrity: RequestFromContextLackingPermission");
+        return false;
+      }
+      break;
+    case network::mojom::TrustTokenOperationType::kIssuance:
+      if (trust_token_issuance_policy ==
+          mojom::TrustTokenOperationPolicyVerdict::kForbid) {
+        // Got a request configured for Trust Tokens issuance from
+        // a context in which this operation is prohibited.
+        mojo::ReportBadMessage(
+            "TrustTokenParamsIntegrity: RequestFromContextLackingPermission");
+        return false;
+      }
+      break;
   }
 
   return true;
@@ -84,6 +116,24 @@ base::debug::CrashKeyString* GetRequestInitiatorOriginLockCrashKey() {
   static auto* crash_key = base::debug::AllocateCrashKeyString(
       "request_initiator_origin_lock", base::debug::CrashKeySize::Size256);
   return crash_key;
+}
+
+bool IsTrustedNavigationRequestFromSecureContext(
+    const ResourceRequest& request) {
+  if (!request.trusted_params) {
+    return false;
+  }
+  if (request.mode != mojom::RequestMode::kNavigate) {
+    return false;
+  }
+
+  // `client_security_state` is not set for top-level navigation requests.
+  // TODO(crbug.com/40149351): Remove this when we set it for top-level
+  // navigation requests.
+  if (!request.trusted_params->client_security_state) {
+    return IsUrlPotentiallyTrustworthy(request.url);
+  }
+  return request.trusted_params->client_security_state->is_web_secure_context;
 }
 
 }  // namespace
@@ -166,14 +216,15 @@ CorsURLLoaderFactory::CorsURLLoaderFactory(
     NetworkContext* context,
     mojom::URLLoaderFactoryParamsPtr params,
     scoped_refptr<ResourceSchedulerClient> resource_scheduler_client,
-    mojo::PendingReceiver<mojom::URLLoaderFactory> receiver,
-    const OriginAccessList* origin_access_list)
+    const OriginAccessList* origin_access_list,
+    PrefetchMatchingURLLoaderFactory* owner)
     : context_(context),
       is_trusted_(params->is_trusted),
       disable_web_security_(params->disable_web_security),
       process_id_(params->process_id),
       request_initiator_origin_lock_(params->request_initiator_origin_lock),
       ignore_isolated_world_origin_(params->ignore_isolated_world_origin),
+      trust_token_issuance_policy_(params->trust_token_issuance_policy),
       trust_token_redemption_policy_(params->trust_token_redemption_policy),
       isolation_info_(params->isolation_info),
       automatically_assign_isolation_info_(
@@ -184,18 +235,62 @@ CorsURLLoaderFactory::CorsURLLoaderFactory(
               ? params->client_security_state->cross_origin_embedder_policy
               : CrossOriginEmbedderPolicy()),
       coep_reporter_(std::move(params->coep_reporter)),
+      dip_reporter_(std::move(params->dip_reporter)),
       client_security_state_(params->client_security_state.Clone()),
-      origin_access_list_(origin_access_list) {
+      url_loader_network_service_observer_(
+          std::move(params->url_loader_network_observer)),
+      shared_dictionary_observer_(
+          std::move(params->shared_dictionary_observer)),
+      require_cross_site_request_for_cookies_(
+          params->require_cross_site_request_for_cookies),
+      factory_cookie_setting_overrides_(params->cookie_setting_overrides),
+      devtools_cookie_setting_overrides_(
+          params->devtools_cookie_setting_overrides),
+      is_main_frame_origin_recently_accessed_(
+          params->is_main_frame_origin_recently_accessed),
+      is_outermost_main_frame_(params->is_outermost_main_frame),
+      renderer_accessible_http_cache_write_enabled_(
+          params->renderer_accessible_http_cache_write_enabled),
+      origin_access_list_(origin_access_list),
+      owner_(owner),
+      network_restrictions_id_(params->network_restrictions_id) {
+  TRACE_EVENT("loading", "CorsURLLoaderFactory::CorsURLLoaderFactory",
+              perfetto::Flow::FromPointer(this));
   DCHECK(context_);
   DCHECK(origin_access_list_);
-  DCHECK_NE(mojom::kInvalidProcessId, process_id_);
+  DCHECK(process_id_);
   DCHECK_EQ(net::IsolationInfo::RequestType::kOther,
             params->isolation_info.request_type());
+  if (context_->url_request_context()->bound_network() !=
+      net::handles::kInvalidNetworkHandle) {
+    // CorsURLLoaderFactories bound to a network allow CORS preflight load
+    // options (see CorsURLLoaderFactory::IsCorsPreflighLoadOptionAllowed for
+    // the rationale). To prevent security issues, such a factory must not be
+    // issuing CORS preflight requests itself. This is, for example, to prevent
+    // compromised renderers from using a CorsURLLoaderFactory that doesn't
+    // trigger CORS preflight requests, but also does not fail requests which
+    // represent CORS preflights. In other words, these two things are mutually
+    // exclusive and a CorsURLLoaderFactory must either:
+    // 1. Perform CORS, but fail loads that represent CORS preflight requests
+    // 2. Allow loads that represent CORS preflight requests, but do not perform
+    //    CORS
+    CHECK(disable_web_security_);
+  }
   if (params->automatically_assign_isolation_info) {
     DCHECK(params->isolation_info.IsEmpty());
     // Only the browser process is currently permitted to use automatically
     // assigned IsolationInfo, to prevent cross-site information leaks.
-    DCHECK_EQ(mojom::kBrowserProcessId, process_id_);
+    DCHECK(process_id_.is_browser());
+  }
+
+  if (context_->GetSharedDictionaryManager() && client_security_state_ &&
+      client_security_state_->is_web_secure_context) {
+    std::optional<net::SharedDictionaryIsolationKey> isolation_key =
+        net::SharedDictionaryIsolationKey::MaybeCreate(params->isolation_info);
+    if (isolation_key) {
+      shared_dictionary_storage_ =
+          context_->GetSharedDictionaryManager()->GetStorage(*isolation_key);
+    }
   }
 
   auto factory_override = std::move(params->factory_override);
@@ -209,10 +304,6 @@ CorsURLLoaderFactory::CorsURLLoaderFactory(
   } else {
     network_loader_factory_ = std::move(network_loader_factory);
   }
-
-  receivers_.Add(this, std::move(receiver));
-  receivers_.set_disconnect_handler(base::BindRepeating(
-      &CorsURLLoaderFactory::DeleteIfNeeded, base::Unretained(this)));
 }
 
 CorsURLLoaderFactory::~CorsURLLoaderFactory() {
@@ -230,6 +321,17 @@ CorsURLLoaderFactory::~CorsURLLoaderFactory() {
   while (!cors_url_loaders_.empty()) {
     cors_url_loaders_.erase(cors_url_loaders_.begin());
   }
+}
+
+// This function is only used as an export for URLLoaderNetworkServiceObserver
+// gained from URLLoaderFactoryParams, which might be invalid in a few cases.
+// Please call URLLoaderFactory::GetURLLoaderNetworkServiceObserver() instead.
+mojom::URLLoaderNetworkServiceObserver*
+CorsURLLoaderFactory::url_loader_network_service_observer() const {
+  if (url_loader_network_service_observer_) {
+    return url_loader_network_service_observer_.get();
+  }
+  return nullptr;
 }
 
 void CorsURLLoaderFactory::OnURLLoaderCreated(
@@ -257,66 +359,138 @@ void CorsURLLoaderFactory::CreateLoaderAndStart(
     const ResourceRequest& resource_request,
     mojo::PendingRemote<mojom::URLLoaderClient> client,
     const net::MutableNetworkTrafficAnnotationTag& traffic_annotation) {
+  NOTREACHED() << "Non-const ref version of this method should be used as a "
+                  "performance optimization.";
+}
+
+void CorsURLLoaderFactory::CreateLoaderAndStart(
+    mojo::PendingReceiver<mojom::URLLoader> receiver,
+    int32_t request_id,
+    uint32_t options,
+    ResourceRequest& resource_request,
+    mojo::PendingRemote<mojom::URLLoaderClient> client,
+    const net::MutableNetworkTrafficAnnotationTag& traffic_annotation) {
+  TRACE_EVENT("loading", "CorsURLLoaderFactory::CreateLoaderAndStart",
+              perfetto::Flow::FromPointer(this));
+
+  std::optional<base::ElapsedTimer> timer;
+  std::optional<base::ElapsedThreadTimer> thread_timer;
+
+  if (base::ShouldRecordSubsampledMetric(0.001)) {
+    timer.emplace();
+    if (base::ThreadTicks::IsSupported()) {
+      thread_timer.emplace();
+    }
+  }
+
   debug::ScopedResourceRequestCrashKeys request_crash_keys(resource_request);
   SCOPED_CRASH_KEY_NUMBER("net", "traffic_annotation_hash",
                           traffic_annotation.unique_id_hash_code);
   SCOPED_CRASH_KEY_STRING64("network", "factory_debug_tag", debug_tag_);
 
-  if (!IsValidRequest(resource_request, options)) {
+  if (!IsValidRequest(resource_request, options, traffic_annotation)) {
     mojo::Remote<mojom::URLLoaderClient>(std::move(client))
         ->OnComplete(URLLoaderCompletionStatus(net::ERR_INVALID_ARGUMENT));
     return;
+  }
+
+  if (base::FeatureList::IsEnabled(
+          net::features::kUpdateIsMainFrameOriginRecentlyAccessed) &&
+      is_main_frame_origin_recently_accessed_) {
+    resource_request.load_flags |=
+        net::LOAD_IS_MAIN_FRAME_ORIGIN_RECENTLY_ACCESSED;
   }
 
   if (resource_request.destination ==
       network::mojom::RequestDestination::kWebBundle) {
     DCHECK(resource_request.web_bundle_token_params.has_value());
 
-    mojo::PendingRemote<mojom::DevToolsObserver> devtools_observer;
-    if (resource_request.devtools_request_id.has_value()) {
-      devtools_observer = GetDevToolsObserver(resource_request);
+    // Clone the COEP reporter to pass independent ownership to the WebBundle
+    // loader factory.
+    mojo::PendingRemote<mojom::CrossOriginEmbedderPolicyReporter>
+        coep_reporter_remote;
+    if (coep_reporter_) {
+      coep_reporter_->Clone(
+          coep_reporter_remote.InitWithNewPipeAndPassReceiver());
     }
 
+    // TODO(crbug.com/379869738) Remove GetUnsafeValue.
     base::WeakPtr<WebBundleURLLoaderFactory> web_bundle_url_loader_factory =
         context_->GetWebBundleManager().CreateWebBundleURLLoaderFactory(
             resource_request.url, *resource_request.web_bundle_token_params,
-            process_id_, std::move(devtools_observer),
-            resource_request.devtools_request_id, cross_origin_embedder_policy_,
-            coep_reporter());
+            process_id_.GetUnsafeValue(), cross_origin_embedder_policy_,
+            std::move(coep_reporter_remote));
     client = web_bundle_url_loader_factory->MaybeWrapURLLoaderClient(
         std::move(client));
-    if (!client)
+    if (!client) {
       return;
+    }
   }
 
   mojom::URLLoaderFactory* const inner_url_loader_factory =
       factory_override_ ? factory_override_->get()
                         : network_loader_factory_.get();
   DCHECK(inner_url_loader_factory);
+
+  const net::IsolationInfo* isolation_info_ptr = &isolation_info_;
+  auto isolation_info = url_loader_util::GetIsolationInfo(
+      isolation_info_, automatically_assign_isolation_info_, resource_request);
+  if (isolation_info.has_value()) {
+    isolation_info_ptr = &isolation_info.value();
+  }
+
+  // Check if the initiator's network access has been restricted.
+  if (network_restrictions_id_.has_value() &&
+      !context_->IsNetworkForNetworkRestrictionsIdAndUrlAllowed(
+          *network_restrictions_id_, resource_request.url,
+          isolation_info_ptr->network_anonymization_key())) {
+    // TODO(crbug.com/447954811): Perhaps change to a new error code and
+    // add console messages.
+    mojo::Remote<mojom::URLLoaderClient>(std::move(client))
+        ->OnComplete(
+            URLLoaderCompletionStatus(net::ERR_NETWORK_ACCESS_REVOKED));
+    return;
+  }
+
   if (!disable_web_security_) {
-    mojo::PendingRemote<mojom::DevToolsObserver> devtools_observer =
-        GetDevToolsObserver(resource_request);
+    mojo::PendingRemote<mojom::DevToolsObserver> devtools_observer;
+    const bool always_clone = !base::FeatureList::IsEnabled(
+        network::features::kCloneDevToolsConnectionOnlyIfRequested);
+    if (always_clone || resource_request.devtools_request_id.has_value()) {
+      devtools_observer = GetDevToolsObserver(resource_request);
+    }
 
-    const net::IsolationInfo* isolation_info_ptr = &isolation_info_;
-    auto isolation_info = URLLoader::GetIsolationInfo(
-        isolation_info_, automatically_assign_isolation_info_,
-        resource_request);
-    if (isolation_info)
-      isolation_info_ptr = &isolation_info.value();
+    scoped_refptr<SharedDictionaryStorage> shared_dictionary_storage =
+        shared_dictionary_storage_;
+    if (context_->GetSharedDictionaryManager() &&
+        IsTrustedNavigationRequestFromSecureContext(resource_request)) {
+      // For trusted navigation requests, we need to get a storage using
+      // `isolation_info_ptr`.
+      std::optional<net::SharedDictionaryIsolationKey> isolation_key =
+          net::SharedDictionaryIsolationKey::MaybeCreate(*isolation_info_ptr);
+      if (isolation_key) {
+        shared_dictionary_storage =
+            context_->GetSharedDictionaryManager()->GetStorage(*isolation_key);
+      }
+    }
 
-    auto loader = std::make_unique<CorsURLLoader>(
+    std::unique_ptr<CorsURLLoader> loader = std::make_unique<CorsURLLoader>(
         std::move(receiver), process_id_, request_id, options,
         base::BindOnce(&CorsURLLoaderFactory::DestroyCorsURLLoader,
                        base::Unretained(this)),
-        resource_request, ignore_isolated_world_origin_,
+        std::move(resource_request), ignore_isolated_world_origin_,
         factory_override_ &&
             factory_override_->ShouldSkipCorsEnabledSchemeCheck(),
-        std::move(client), traffic_annotation, inner_url_loader_factory,
+        renderer_accessible_http_cache_write_enabled_, std::move(client),
+        traffic_annotation, inner_url_loader_factory,
         factory_override_ ? nullptr : network_loader_factory_.get(),
-        origin_access_list_, GetAllowAnyCorsExemptHeaderForBrowser(),
-        HasFactoryOverride(!!factory_override_), *isolation_info_ptr,
-        std::move(devtools_observer), client_security_state_.get(),
-        cross_origin_embedder_policy_, context_);
+        origin_access_list_, *isolation_info_ptr, std::move(devtools_observer),
+        client_security_state_.get(), &url_loader_network_service_observer_,
+        cross_origin_embedder_policy_, shared_dictionary_storage,
+        shared_dictionary_observer_ ? shared_dictionary_observer_.get()
+                                    : nullptr,
+        context_, network_restrictions_id_, factory_cookie_setting_overrides_,
+        devtools_cookie_setting_overrides_);
     auto* raw_loader = loader.get();
     OnCorsURLLoaderCreated(std::move(loader));
     raw_loader->Start();
@@ -325,22 +499,31 @@ void CorsURLLoaderFactory::CreateLoaderAndStart(
         std::move(receiver), request_id, options, resource_request,
         std::move(client), traffic_annotation);
   }
+
+  if (timer.has_value()) {
+    UMA_HISTOGRAM_CUSTOM_MICROSECONDS_TIMES(
+        "NetworkService.CorsURLLoaderFactory.CreateLoaderAndStart2.Duration",
+        timer->Elapsed(), base::Microseconds(1), base::Milliseconds(16), 100);
+  }
+  if (thread_timer.has_value()) {
+    UMA_HISTOGRAM_CUSTOM_MICROSECONDS_TIMES(
+        "NetworkService.CorsURLLoaderFactory.CreateLoaderAndStart2."
+        "ThreadDuration",
+        thread_timer->Elapsed(), base::Microseconds(1), base::Milliseconds(16),
+        100);
+  }
 }
 
 void CorsURLLoaderFactory::Clone(
     mojo::PendingReceiver<mojom::URLLoaderFactory> receiver) {
-  // The cloned factories stop working when this factory is destructed.
-  receivers_.Add(this, std::move(receiver));
-}
-
-void CorsURLLoaderFactory::ClearBindings() {
-  receivers_.Clear();
-  DeleteIfNeeded();
+  NOTREACHED() << "CorsURLLoaderFactory::Clone must not be called";
 }
 
 void CorsURLLoaderFactory::DeleteIfNeeded() {
-  if (receivers_.empty() && url_loaders_.empty() && cors_url_loaders_.empty())
-    context_->DestroyURLLoaderFactory(this);
+  if (url_loaders_.empty() && cors_url_loaders_.empty() &&
+      !owner_->HasAdditionalReferences() && !prevent_self_deletion_) {
+    owner_->DestroyURLLoaderFactory(this);
+  }
 }
 
 // static
@@ -359,11 +542,66 @@ bool CorsURLLoaderFactory::IsValidCorsExemptHeaders(
   return true;
 }
 
-bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
-                                          uint32_t options) {
+bool CorsURLLoaderFactory::IsMultiNetworkCCTWorkFlow() const {
+  return context_->url_request_context()->bound_network() !=
+         net::handles::kInvalidNetworkHandle;
+}
+
+bool CorsURLLoaderFactory::IsCorsPreflighLoadOptionAllowed() const {
+  // kURLLoadOptionAsCorsPreflight is set by CorsURLLoader itself, when
+  // starting a request, if CORS preflight request is needed.
+  // More precisely:
+  // - CorsURLLoader will create an additional request
+  // - Set kURLLoadOptionAsCorsPreflight within that one
+  // - Send that request via the network URLLoaderFactory that
+  //   CorsURLLoaderFactory is wrapping
+  // The code then makes the following assumption: the network
+  // URLLoaderFactory should not be a CorsURLLoaderFactory. As such,
+  // we should never see kURLLoadOptionAsCorsPreflight for a
+  // request going through CorsURLLoaderFactory (since they should only be sent
+  // via network URLLoaderFactories, which we're assuming are not
+  // CorsURLLoaderFactories).
+  // This is generally true, with the exception of two special scenarios:
+  // 1) PreflightControllerTest, tracked at crbug.com/40203308 and allowed via
+  //    `allow_external_preflights_for_testing_`.
+  // 2) Multi-network CCT, tracked at crbug.com/366242716 and allowed via
+  //    context_->url_request_context()->bound_network().
+  // In both scenarios, we end up with a CorsURLLoaderFactory acting as another
+  // CorsURLLoaderFactory's network URLLoaderFactory (for different reasons,
+  // see associated bugs for context). This is due to the way
+  // `URLLoaderFactoryParams.disable_web_security` works: the generated
+  // URLLoaderFactory won't create CorsURLLoaders but it will still be a
+  // CorsURLLoaderFactory. Due to that, the CORS preflight request will be
+  // flowing through the inner CorsURLLoaderFactory: here, we must not fail
+  // them, as this happening is "correct".
+  //
+  // Note: we could also just check for `disable_web_security_`. This is
+  // "simpler", but it casts a widernet : the subset of calling sites disabling
+  // web security is bigger than those creating a CorsURLLoaderFactory targeting
+  // a valid network. So, given that this config is security critical, it's best
+  // to "peek into implementation details" rather than granting this exception
+  // to a bigger group.
+  return allow_external_preflights_for_testing_ || IsMultiNetworkCCTWorkFlow();
+}
+
+bool CorsURLLoaderFactory::IsValidRequest(
+    ResourceRequest& request,
+    uint32_t options,
+    const net::MutableNetworkTrafficAnnotationTag& traffic_annotation) {
   if (request.url.SchemeIs(url::kDataScheme)) {
-    LOG(WARNING) << "CorsURLLoaderFactory doesn't support `data` scheme.";
-    mojo::ReportBadMessage("CorsURLLoaderFactory: data: URL is not supported.");
+    const std::string annotation_hash =
+        base::NumberToString(traffic_annotation.unique_id_hash_code);
+    LOG(WARNING) << "CorsURLLoaderFactory doesn't support `data` scheme.\n"
+                    "You can find the caller traffic annnotation id by:\n"
+                    "$ vpython3 "
+                    "tools/traffic_annotation/scripts/auditor/hashes.py | grep "
+                 << annotation_hash << "\n"
+                 << "It is defined as net::DefineNetworkTrafficAnnotation("
+                 << "\"<annotation_id>\", ..",
+        mojo::ReportBadMessage(
+            base::StrCat({"CorsURLLoaderFactory: data: URL is not supported. "
+                          "net-traffic_annotation_hash=",
+                          annotation_hash}));
     return false;
   }
 
@@ -378,12 +616,60 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
     return false;
   }
 
-  // Reject request with trusted params if factory is not for a trusted
-  // consumer.
-  if (request.trusted_params && !is_trusted_) {
-    mojo::ReportBadMessage(
-        "CorsURLLoaderFactory: Untrusted caller making trusted request");
-    return false;
+  // Reject requests with load flags that are only for use internally by the
+  // network service itself.
+  if (request.load_flags &
+      (net::LOAD_CAN_USE_SHARED_DICTIONARY |
+       net::LOAD_DISABLE_SHARED_DICTIONARY_AFTER_CROSS_ORIGIN_REDIRECT)) {
+    // In the multi-network CCT workflow, when fetching the subresource, we
+    // create a nested CorsURLLoaderFactory to run the same request on a
+    // specific network. That causes this check to be invoked twice: the first
+    // invocation performs the authoritative validation, and later passes may
+    // add internal flags to the request. Re-validating here is unnecessary and
+    // can falsely reject otherwise valid requests (See
+    // CorsURLLoaderFactory::IsCorsPreflighLoadOptionAllowed for the rational).
+    // Note: Skipping this check is appropriate for subresource requests.
+    // For main page loads or navigation requests, ideally the check should
+    // still be performed as there is no nesting. However, since this is only
+    // a sanity check, skipping it here is safe.
+    // TODO(crbug.com/449098586): refactor to get rid of nested
+    // CorsURLLoaderFactory to make the design clearer.
+    if (!IsMultiNetworkCCTWorkFlow()) {
+      mojo::ReportBadMessage(
+          "CorsURLLoaderFactory: Internal load flag received");
+      return false;
+    }
+  }
+
+  if (!process_id_.is_browser() && request.is_outermost_main_frame &&
+      !is_outermost_main_frame_ &&
+      request.mode != mojom::RequestMode::kNavigate) {
+    // The request value is renderer-controlled, while the factory value is
+    // browser-derived. Initial empty documents in opener-retaining popups can
+    // legitimately use a factory inherited from their creating subframe.
+    // Canonicalize to the factory's less-privileged value so Network Service
+    // downstream cookie policy does not allow top-level storage-access.
+    request.is_outermost_main_frame = is_outermost_main_frame_;
+    UMA_HISTOGRAM_BOOLEAN(
+        "NetworkService.CorsURLLoaderFactory.IsOutermostMainFrameClamped",
+        true);
+  }
+
+  // Check if this is an untrusted factory being provided parameters that should
+  // only be passed if it's trusted.
+  if (!is_trusted_) {
+    if (request.trusted_params) {
+      mojo::ReportBadMessage(
+          "CorsURLLoaderFactory: Untrusted caller making trusted request");
+      return false;
+    }
+
+    // Apply allowlist for which flags untrusted factories are allowed to use.
+    if (request.load_flags & ~GetAllowedLoadFlagsForUntrustedRequests()) {
+      mojo::ReportBadMessage(
+          "CorsURLLoaderFactory: Untrusted caller using restricted load flag");
+      return false;
+    }
   }
 
   // Reject request if the restricted prefetch load flag is set but the
@@ -393,10 +679,11 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
   bool request_network_isolation_info_present =
       request.trusted_params &&
       !request.trusted_params->isolation_info.IsEmpty();
-  if (request.load_flags & net::LOAD_RESTRICTED_PREFETCH &&
+  if (request.load_flags & net::LOAD_RESTRICTED_PREFETCH_FOR_MAIN_FRAME &&
       !request_network_isolation_info_present) {
     mojo::ReportBadMessage(
-        "CorsURLLoaderFactory: Request with LOAD_RESTRICTED_PREFETCH flag is "
+        "CorsURLLoaderFactory: Request with "
+        "LOAD_RESTRICTED_PREFETCH_FOR_MAIN_FRAME flag is "
         "not trusted");
     return false;
   }
@@ -413,6 +700,31 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
     return false;
   }
 
+  // A request whose destination is a frame type must be a navigation. A
+  // renderer-initiated subresource fetch must never claim to be a document /
+  // frame load, otherwise downstream consumers (e.g. Android WebView's
+  // shouldInterceptRequest) may misclassify it as a main-frame navigation.
+  // See 2.2.5 Requests: https://fetch.spec.whatwg.org/#requests
+  // See Navigation Request: https://fetch.spec.whatwg.org/#navigation-request
+  // See fenced frames: https://github.com/WICG/fenced-frame/issues/239
+  //
+  // This intentionally excludes destination types (see
+  // https://chromium-review.git.corp.google.com/c/chromium/src/+/7952612?tab=checks
+  // for details):
+  // * kEmbed: used by PDF pages to embed subresources.
+  // * kObject: used by wpt tests.
+  if (base::FeatureList::IsEnabled(
+          features::kRestrictFrameDestinationsToNavigate) &&
+      (request.destination == mojom::RequestDestination::kDocument ||
+       request.destination == mojom::RequestDestination::kFrame ||
+       request.destination == mojom::RequestDestination::kIframe ||
+       request.destination == mojom::RequestDestination::kFencedframe) &&
+      request.mode != mojom::RequestMode::kNavigate) {
+    mojo::ReportBadMessage(
+        "CorsURLLoaderFactory: frame destination requires kNavigate mode");
+    return false;
+  }
+
   // Validate that a navigation redirect chain is not sent for a non-navigation
   // request.
   if (!request.navigation_redirect_chain.empty() &&
@@ -423,12 +735,22 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
     return false;
   }
 
+  // Validate that `require_cross_site_request_for_cookies_` is respected by an
+  // empty SiteForCookies (indicating a cross-site request being made).
+  if (require_cross_site_request_for_cookies_ &&
+      !request.site_for_cookies.IsNull()) {
+    mojo::ReportBadMessage(
+        "CorsURLLoaderFactory: all requests in this context must be "
+        "cross-site");
+    return false;
+  }
+
   // By default we compare the `request_initiator` to the lock below.  This is
   // overridden for renderer navigations, however.
-  absl::optional<url::Origin> origin_to_validate = request.request_initiator;
+  std::optional<url::Origin> origin_to_validate = request.request_initiator;
 
-  // Ensure that renderer requests are covered either by CORS or CORB.
-  if (process_id_ != mojom::kBrowserProcessId) {
+  // Ensure that renderer requests are covered either by CORS or ORB.
+  if (!process_id_.is_browser()) {
     switch (request.mode) {
       case mojom::RequestMode::kNavigate:
         // A navigation request from a renderer can legally occur when a service
@@ -479,15 +801,68 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
         break;
 
       case mojom::RequestMode::kNoCors:
-        // SOP enforced by CORB.
+        // SOP enforced by ORB.
         break;
     }
+
+    switch (request.destination) {
+      // Allowed destinations from unprivileged process:
+      case network::mojom::RequestDestination::kAudio:
+      case network::mojom::RequestDestination::kAudioWorklet:
+      case network::mojom::RequestDestination::kCompressionDictionary:
+      case network::mojom::RequestDestination::kDocument:
+      case network::mojom::RequestDestination::kEmbed:
+      case network::mojom::RequestDestination::kEmpty:
+      case network::mojom::RequestDestination::kFencedframe:
+      case network::mojom::RequestDestination::kFont:
+      case network::mojom::RequestDestination::kFrame:
+      case network::mojom::RequestDestination::kIframe:
+      case network::mojom::RequestDestination::kImage:
+      case network::mojom::RequestDestination::kJson:
+      case network::mojom::RequestDestination::kManifest:
+      case network::mojom::RequestDestination::kObject:
+      case network::mojom::RequestDestination::kPaintWorklet:
+      case network::mojom::RequestDestination::kReport:
+      case network::mojom::RequestDestination::kScript:
+      case network::mojom::RequestDestination::kServiceWorker:
+      case network::mojom::RequestDestination::kSharedWorker:
+      case network::mojom::RequestDestination::kSpeculationRules:
+      case network::mojom::RequestDestination::kStyle:
+      case network::mojom::RequestDestination::kText:
+      case network::mojom::RequestDestination::kTrack:
+      case network::mojom::RequestDestination::kVideo:
+      case network::mojom::RequestDestination::kWebBundle:
+      case network::mojom::RequestDestination::kWorker:
+      case network::mojom::RequestDestination::kXslt:
+        break;
+      case network::mojom::RequestDestination::kWebIdentity:
+      case network::mojom::RequestDestination::kEmailVerification:
+        mojo::ReportBadMessage(
+            "CorsURLLoaderFactory: attempt to use forbidden destination from "
+            "renderer");
+        return false;
+    }
+  }
+
+  // FedCM requests must either disable cookies or disable redirects
+  // (this simplifies reasoning around SameSite=Lax cookies).
+  // See also the DCHECK in url_loader_util::ConfigureUrlRequest.
+  if ((request.destination == mojom::RequestDestination::kWebIdentity ||
+       request.destination ==
+           network::mojom::RequestDestination::kEmailVerification) &&
+      request.redirect_mode != mojom::RedirectMode::kError &&
+      request.credentials_mode != mojom::CredentialsMode::kOmit) {
+    mojo::ReportBadMessage(
+        "CorsURLLoaderFactory: FedCM and email verification requests must "
+        "either disable redirects "
+        "or disable cookies");
+    return false;
   }
 
   // Depending on the type of request, compare either `request_initiator` or
   // `request.url` to `request_initiator_origin_lock_`.
   InitiatorLockCompatibility initiator_lock_compatibility;
-  if (process_id_ == mojom::kBrowserProcessId) {
+  if (process_id_.is_browser()) {
     initiator_lock_compatibility = InitiatorLockCompatibility::kBrowserProcess;
   } else {
     initiator_lock_compatibility = VerifyRequestInitiatorLock(
@@ -503,16 +878,10 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
       // URLLoaderFactory vended to a renderer process.  See also
       // https://crbug.com/1114906.
       NOTREACHED();
-      mojo::ReportBadMessage(
-          "CorsURLLoaderFactory: no initiator lock in a renderer request");
-      return false;
 
     case InitiatorLockCompatibility::kNoInitiator:
       // Requests from the renderer need to always specify an initiator.
       NOTREACHED();
-      mojo::ReportBadMessage(
-          "CorsURLLoaderFactory: no initiator in a renderer request");
-      return false;
 
     case InitiatorLockCompatibility::kIncorrectLock:
       // Requests from the renderer need to always specify a correct initiator.
@@ -524,9 +893,23 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
       return false;
   }
 
-  if (!GetAllowAnyCorsExemptHeaderForBrowser() &&
-      !IsValidCorsExemptHeaders(*context_->cors_exempt_header_list(),
+  if (!IsValidCorsExemptHeaders(*context_->cors_exempt_header_list(),
                                 request.cors_exempt_headers)) {
+    return false;
+  }
+
+  const bool allow_unsafe_headers = cors::ShouldAllowUnsafeHeaders(
+      *origin_access_list_,
+      request.isolated_world_origin ? request.isolated_world_origin
+                                    : request.request_initiator,
+      request.url);
+  std::string forbidden_header;
+  if (!process_id_.is_browser() && !allow_unsafe_headers &&
+      ContainsForbiddenSecurityHeader(request.headers, &forbidden_header)) {
+    SCOPED_CRASH_KEY_STRING32("network", "forbidden_sec_header",
+                              forbidden_header);
+    mojo::ReportBadMessage(
+        "CorsURLLoaderFactory: Forbidden Sec- header from renderer");
     return false;
   }
 
@@ -555,18 +938,16 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
     return false;
   }
 
-  if (!allow_external_preflights_for_testing_) {
-    // kURLLoadOptionAsCorsPreflight should be set only by the network service.
-    // Otherwise the network service will be confused.
-    if (options & mojom::kURLLoadOptionAsCorsPreflight) {
-      mojo::ReportBadMessage(
-          "CorsURLLoaderFactory: kURLLoadOptionAsCorsPreflight is set");
-      return false;
-    }
+  if ((options & mojom::kURLLoadOptionAsCorsPreflight) &&
+      !IsCorsPreflighLoadOptionAllowed()) {
+    mojo::ReportBadMessage(
+        "CorsURLLoaderFactory: kURLLoadOptionAsCorsPreflight is set");
+    return false;
   }
 
   if (!VerifyTrustTokenParamsIntegrityIfPresent(
-          request, context_, trust_token_redemption_policy_)) {
+          request, context_, trust_token_issuance_policy_,
+          trust_token_redemption_policy_)) {
     // VerifyTrustTokenParamsIntegrityIfPresent will report an appropriate bad
     // message.
     return false;
@@ -579,13 +960,8 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
     return false;
   }
 
-  // Don't allow forbidden methods for any requests except RequestMode::kNoCors.
-  // Don't allow CONNECT method for any request.
-  if ((request.mode != mojom::RequestMode::kNoCors &&
-       cors::IsForbiddenMethod(request.method)) ||
-      (request.mode == mojom::RequestMode::kNoCors &&
-       base::EqualsCaseInsensitiveASCII(
-           request.method, net::HttpRequestHeaders::kConnectMethod))) {
+  // Don't allow forbidden methods.
+  if (cors::IsForbiddenMethod(request.method)) {
     mojo::ReportBadMessage("CorsURLLoaderFactory: Forbidden method");
     return false;
   }
@@ -593,7 +969,7 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
   // Check only when `disable_web_security_` is false because
   // PreflightControllerTest use CorsURLLoaderFactory with this flag true
   // instead of network::URLLoaderFactory.
-  // TODO(https://crbug.com/1264298): consider if we can remove this exemption.
+  // TODO(crbug.com/40203308): consider if we can remove this exemption.
   if (!disable_web_security_) {
     // `net_log_create_info` field is expected to be used within network
     // service.
@@ -611,12 +987,16 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
           "expected.");
       return false;
     }
+  }
 
-    if (request.target_ip_address_space != mojom::IPAddressSpace::kUnknown) {
-      mojo::ReportBadMessage(
-          "CorsURLLoaderFactory: target_ip_address_space field is set");
-      return false;
-    }
+  // The `client_side_content_decoding_enabled` flag is set only when the
+  // RendererSideContentDecoding feature is enabled.
+  if (request.client_side_content_decoding_enabled &&
+      !base::FeatureList::IsEnabled(features::kRendererSideContentDecoding)) {
+    mojo::ReportBadMessage(
+        "CorsURLLoaderFactory: client_side_content_decoding_enabled is set "
+        "unexpectedly.");
+    return false;
   }
 
   // TODO(yhirano): If the request mode is "no-cors", the redirect mode should
@@ -624,28 +1004,39 @@ bool CorsURLLoaderFactory::IsValidRequest(const ResourceRequest& request,
   return true;
 }
 
-bool CorsURLLoaderFactory::GetAllowAnyCorsExemptHeaderForBrowser() const {
-  return process_id_ == mojom::kBrowserProcessId &&
-         context_->allow_any_cors_exempt_header_for_browser();
-}
-
 mojo::PendingRemote<mojom::DevToolsObserver>
 CorsURLLoaderFactory::GetDevToolsObserver(
-    const ResourceRequest& resource_request) const {
+    ResourceRequest& resource_request) const {
+  TRACE_EVENT("loading", "CorsURLLoaderFactory::GetDevToolsObserver");
   mojo::PendingRemote<mojom::DevToolsObserver> devtools_observer;
   if (resource_request.trusted_params &&
       resource_request.trusted_params->devtools_observer) {
-    ResourceRequest::TrustedParams cloned_params =
-        *resource_request.trusted_params;
-    devtools_observer = std::move(cloned_params.devtools_observer);
+    auto& original_observer =
+        resource_request.trusted_params->devtools_observer;
+    mojo::Remote<mojom::DevToolsObserver> remote(std::move(original_observer));
+    remote->Clone(devtools_observer.InitWithNewPipeAndPassReceiver());
+    original_observer = remote.Unbind();
   } else {
     mojom::DevToolsObserver* observer =
         factory_override_ ? factory_override_->GetDevToolsObserver()
                           : network_loader_factory_->GetDevToolsObserver();
-    if (observer)
+    if (observer) {
       observer->Clone(devtools_observer.InitWithNewPipeAndPassReceiver());
+    }
   }
   return devtools_observer;
+}
+
+mojom::SharedDictionaryAccessObserver*
+CorsURLLoaderFactory::GetSharedDictionaryAccessObserver() const {
+  return shared_dictionary_observer_ ? shared_dictionary_observer_.get()
+                                     : nullptr;
+}
+
+net::handles::NetworkHandle CorsURLLoaderFactory::GetBoundNetworkForTesting()
+    const {
+  CHECK(!factory_override_);
+  return network_loader_factory_->GetBoundNetworkForTesting();  // IN-TEST
 }
 
 }  // namespace network::cors

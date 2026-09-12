@@ -4,11 +4,14 @@
 
 #include "chrome/browser/ash/policy/remote_commands/device_command_wipe_users_job.h"
 
+#include "base/check_deref.h"
 #include "base/functional/bind.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/system/user_removal_manager.h"
+#include "components/policy/core/common/remote_commands/remote_command_job.h"
 #include "components/policy/core/common/remote_commands/remote_commands_service.h"
 #include "components/policy/proto/device_management_backend.pb.h"
+#include "components/prefs/pref_service.h"
 
 namespace policy {
 
@@ -26,8 +29,9 @@ constexpr base::TimeDelta kWipeUsersCommandExpirationTime = base::Days(180);
 }  // namespace
 
 DeviceCommandWipeUsersJob::DeviceCommandWipeUsersJob(
+    PrefService* local_state,
     RemoteCommandsService* service)
-    : service_(service) {}
+    : local_state_(CHECK_DEREF(local_state)), service_(service) {}
 
 DeviceCommandWipeUsersJob::~DeviceCommandWipeUsersJob() = default;
 
@@ -40,8 +44,7 @@ bool DeviceCommandWipeUsersJob::IsExpired(base::TimeTicks now) {
   return now > issued_time() + kWipeUsersCommandExpirationTime;
 }
 
-void DeviceCommandWipeUsersJob::RunImpl(CallbackWithResult succeeded_callback,
-                                        CallbackWithResult failed_callback) {
+void DeviceCommandWipeUsersJob::RunImpl(CallbackWithResult result_callback) {
   // Set callback which gets called after command is ACKd to the server. We want
   // to log out only after the server got the ACK, otherwise we could log out
   // before ACKing and then the server would never get the ACK.
@@ -52,7 +55,8 @@ void DeviceCommandWipeUsersJob::RunImpl(CallbackWithResult succeeded_callback,
   // callback gets called and signals that the command was successfully received
   // and will be executed.
   ash::user_removal_manager::InitiateUserRemoval(
-      base::BindOnce(std::move(succeeded_callback), absl::nullopt));
+      &local_state_.get(), base::BindOnce(std::move(result_callback),
+                                          ResultType::kSuccess, std::nullopt));
 }
 
 }  // namespace policy

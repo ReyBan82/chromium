@@ -7,7 +7,7 @@
 
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
-#include "components/sync/driver/sync_service_observer.h"
+#include "components/sync/service/sync_service_observer.h"
 
 namespace syncer {
 class SyncService;
@@ -42,11 +42,6 @@ class SyncAppsyncOptinClient : public syncer::SyncServiceObserver {
   explicit SyncAppsyncOptinClient(syncer::SyncService* sync_service,
                                   user_manager::UserManager* user_manager,
                                   const base::FilePath& daemon_store_location);
-  explicit SyncAppsyncOptinClient(
-      syncer::SyncService* sync_service,
-      user_manager::UserManager* user_manager,
-      const base::FilePath& daemon_store_location,
-      const base::FilePath& old_daemon_store_location);
   SyncAppsyncOptinClient(const SyncAppsyncOptinClient& other) = delete;
   SyncAppsyncOptinClient& operator=(const SyncAppsyncOptinClient& other) =
       delete;
@@ -54,6 +49,7 @@ class SyncAppsyncOptinClient : public syncer::SyncServiceObserver {
 
   // syncer::SyncServiceObserver
   void OnStateChanged(syncer::SyncService* sync_service) override;
+  void OnSyncShutdown(syncer::SyncService* sync_service) override;
 
   // These values are persisted to logs. Entries should not be renumbered and
   // numeric values should never be reused.
@@ -69,26 +65,18 @@ class SyncAppsyncOptinClient : public syncer::SyncServiceObserver {
   // run - or it may fail, but will be attempted again on state change or
   // client instantiation.
   void UpdateOptinFile(bool opted_in, const syncer::SyncService* sync_service);
-  // Attmepts to remove any existing contents from defunct daemon-store
-  // location. May silently fail (with debug log), but should be reattempted the
-  // next time Client is instantiated so should eventually go through. Posted as
-  // a task to the ThreadPool.
-  void RemoveOldAppsyncDaemonDir(const syncer::SyncService* sync_service);
   // Looks up active profile and returns hash of username. String will be empty
   // if no profile can be found.
   std::string GetActiveProfileHash(const syncer::SyncService* sync_service);
 
-  const base::raw_ptr<syncer::SyncService> sync_service_;
-  const base::raw_ptr<user_manager::UserManager> user_manager_;
+  const raw_ptr<syncer::SyncService> sync_service_;
+  const raw_ptr<user_manager::UserManager> user_manager_;
 
   bool is_apps_sync_enabled_;
 
   // Location of daemon-store - can be changed for testing.
   base::FilePath daemon_store_filepath_;
-  // Only for use during migration from appsync-consent to appsync-optin
-  // directory.
-  base::FilePath old_daemon_store_filepath_;
 };
 }  // namespace ash
 
-#endif  //  CHROME_BROWSER_ASH_SYNC_SYNC_APPSYNC_OPTIN_CLIENT_H_
+#endif  // CHROME_BROWSER_ASH_SYNC_SYNC_APPSYNC_OPTIN_CLIENT_H_

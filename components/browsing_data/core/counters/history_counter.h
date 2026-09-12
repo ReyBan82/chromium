@@ -6,16 +6,18 @@
 #define COMPONENTS_BROWSING_DATA_CORE_COUNTERS_HISTORY_COUNTER_H_
 
 #include <memory>
+#include <string>
 
 #include "base/memory/raw_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/task/cancelable_task_tracker.h"
 #include "base/timer/timer.h"
+#include "base/types/optional_ref.h"
 #include "components/browsing_data/core/counters/browsing_data_counter.h"
 #include "components/browsing_data/core/counters/sync_tracker.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/web_history_service.h"
-#include "components/sync/driver/sync_service.h"
+#include "components/sync/service/sync_service.h"
 
 namespace browsing_data {
 
@@ -29,13 +31,19 @@ class HistoryCounter : public browsing_data::BrowsingDataCounter {
     HistoryResult(const HistoryCounter* source,
                   ResultInt value,
                   bool is_sync_enabled,
-                  bool has_synced_visits);
+                  bool has_synced_visits,
+                  std::string last_visited_domain);
     ~HistoryResult() override;
 
     bool has_synced_visits() const { return has_synced_visits_; }
 
+    const std::string& last_visited_domain() const {
+      return last_visited_domain_;
+    }
+
    private:
     bool has_synced_visits_;
+    std::string last_visited_domain_;
   };
 
   explicit HistoryCounter(history::HistoryService* history_service,
@@ -53,9 +61,11 @@ class HistoryCounter : public browsing_data::BrowsingDataCounter {
  private:
   void Count() override;
 
-  void OnGetLocalHistoryCount(history::HistoryCountResult result);
-  void OnGetWebHistoryCount(history::WebHistoryService::Request* request,
-                            const base::Value* result);
+  void OnGetWebHistoryCount(
+      history::WebHistoryService::Request* request,
+      base::optional_ref<const history::WebHistoryService::QueryHistoryResult>
+          result);
+  void OnGetUniqueDomains(history::DomainsVisitedResult result);
   void OnWebHistoryTimeout();
   void MergeResults();
 
@@ -63,7 +73,7 @@ class HistoryCounter : public browsing_data::BrowsingDataCounter {
 
   bool IsHistorySyncEnabled(const syncer::SyncService* sync_service);
 
-  raw_ptr<history::HistoryService> history_service_;
+  raw_ptr<history::HistoryService, DanglingUntriaged> history_service_;
 
   GetUpdatedWebHistoryServiceCallback web_history_service_callback_;
 
@@ -71,8 +81,8 @@ class HistoryCounter : public browsing_data::BrowsingDataCounter {
 
   bool has_synced_visits_;
 
-  bool local_counting_finished_;
   bool web_counting_finished_;
+  bool domain_fetching_finished_;
 
   base::CancelableTaskTracker cancelable_task_tracker_;
   std::unique_ptr<history::WebHistoryService::Request> web_history_request_;
@@ -80,7 +90,8 @@ class HistoryCounter : public browsing_data::BrowsingDataCounter {
 
   SEQUENCE_CHECKER(sequence_checker_);
 
-  BrowsingDataCounter::ResultInt local_result_;
+  std::string last_visited_domain_;
+  BrowsingDataCounter::ResultInt unique_domains_result_;
 
   base::WeakPtrFactory<HistoryCounter> weak_ptr_factory_{this};
 };

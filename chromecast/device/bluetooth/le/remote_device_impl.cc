@@ -486,6 +486,8 @@ void RemoteDeviceImpl::OnServicesRemoved(uint16_t start_handle,
     if (it->second->handle() >= start_handle &&
         it->second->handle() <= end_handle) {
       for (auto& characteristic : it->second->GetCharacteristics()) {
+        static_cast<RemoteCharacteristicImpl*>(characteristic.get())
+            ->Invalidate();
         handle_to_characteristic_.erase(characteristic->handle());
       }
       it = uuid_to_service_.erase(it);
@@ -499,6 +501,14 @@ void RemoteDeviceImpl::OnServicesAdded(
     const std::vector<bluetooth_v2_shlib::Gatt::Service>& services) {
   DCHECK(io_task_runner_->BelongsToCurrentThread());
   for (const auto& service : services) {
+    auto it = uuid_to_service_.find(service.uuid);
+    if (it != uuid_to_service_.end()) {
+      for (auto& characteristic : it->second->GetCharacteristics()) {
+        static_cast<RemoteCharacteristicImpl*>(characteristic.get())
+            ->Invalidate();
+        handle_to_characteristic_.erase(characteristic->handle());
+      }
+    }
     uuid_to_service_[service.uuid] = new RemoteServiceImpl(
         this, gatt_client_manager_, service, io_task_runner_);
   }
@@ -593,7 +603,7 @@ void RemoteDeviceImpl::ReadCharacteristicImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_characteristic_read_cbs_.find(characteristic->handle());
-  DCHECK(it != handle_to_characteristic_read_cbs_.end());
+  CHECK(it != handle_to_characteristic_read_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false, {});
   it->second.pop();
@@ -614,7 +624,7 @@ void RemoteDeviceImpl::WriteCharacteristicImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_characteristic_write_cbs_.find(characteristic->handle());
-  DCHECK(it != handle_to_characteristic_write_cbs_.end());
+  CHECK(it != handle_to_characteristic_write_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false);
   it->second.pop();
@@ -632,7 +642,7 @@ void RemoteDeviceImpl::ReadDescriptorImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_descriptor_read_cbs_.find(descriptor->handle());
-  DCHECK(it != handle_to_descriptor_read_cbs_.end());
+  CHECK(it != handle_to_descriptor_read_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false, {});
   it->second.pop();
@@ -651,7 +661,7 @@ void RemoteDeviceImpl::WriteDescriptorImpl(
 
   LOG(ERROR) << __func__ << " failed";
   auto it = handle_to_descriptor_write_cbs_.find(descriptor->handle());
-  DCHECK(it != handle_to_descriptor_write_cbs_.end());
+  CHECK(it != handle_to_descriptor_write_cbs_.end());
   DCHECK(!it->second.empty());
   std::move(it->second.front()).Run(false);
   it->second.pop();

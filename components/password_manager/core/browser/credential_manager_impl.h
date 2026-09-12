@@ -9,7 +9,10 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
+#include "components/credential_management/credential_manager_interface.h"
+#include "components/device_reauth/device_authenticator.h"
 #include "components/password_manager/core/browser/credential_manager_password_form_manager.h"
 #include "components/password_manager/core/browser/credential_manager_pending_prevent_silent_access_task.h"
 #include "components/password_manager/core/browser/credential_manager_pending_request_task.h"
@@ -24,7 +27,7 @@ using StoreCallback = base::OnceCallback<void()>;
 using PreventSilentAccessCallback = base::OnceCallback<void()>;
 using GetCallback =
     base::OnceCallback<void(CredentialManagerError,
-                            const absl::optional<CredentialInfo>&)>;
+                            const std::optional<CredentialInfo>&)>;
 
 // Class implementing Credential Manager methods Store, PreventSilentAccess
 // and Get in a platform independent way. Each method takes a callback as an
@@ -34,19 +37,22 @@ using GetCallback =
 class CredentialManagerImpl
     : public CredentialManagerPendingPreventSilentAccessTaskDelegate,
       public CredentialManagerPendingRequestTaskDelegate,
-      public CredentialManagerPasswordFormManagerDelegate {
+      public CredentialManagerPasswordFormManagerDelegate,
+      public credential_management::CredentialManagerInterface {
  public:
   explicit CredentialManagerImpl(PasswordManagerClient* client);
   CredentialManagerImpl(const CredentialManagerImpl&) = delete;
   CredentialManagerImpl& operator=(const CredentialManagerImpl&) = delete;
   ~CredentialManagerImpl() override;
 
-  void Store(const CredentialInfo& credential, StoreCallback callback);
-  void PreventSilentAccess(PreventSilentAccessCallback callback);
+  // credential_management::CredentialManagerInterface:
+  void Store(const CredentialInfo& credential, StoreCallback callback) override;
+  void PreventSilentAccess(PreventSilentAccessCallback callback) override;
   void Get(CredentialMediationRequirement mediation,
            bool include_passwords,
            const std::vector<GURL>& federations,
-           GetCallback callback);
+           GetCallback callback) override;
+  void ResetAfterDisconnecting() override;
 
   // CredentialManagerPendingRequestTaskDelegate:
   // Exposed publicly for testing.
@@ -72,6 +78,11 @@ class CredentialManagerImpl
                         const PasswordForm* form) override;
   PasswordManagerClient* client() const override;
 
+  void CancelBiometricReauthIfOngoing();
+  void OnReauthCompleted(SendCredentialCallback send_callback,
+                         CredentialInfo info,
+                         bool auth_succeeded);
+
   // CredentialManagerPendingPreventSilentAccessTaskDelegate:
   PasswordStoreInterface* GetProfilePasswordStore() override;
   PasswordStoreInterface* GetAccountPasswordStore() override;
@@ -96,6 +107,15 @@ class CredentialManagerImpl
 
   // Helper for making the requests on leak detection.
   LeakDetectionDelegate leak_delegate_;
+
+  // Last form that Password Manager considers submitted. Set in
+  // `Store` (if it was available) and reset in `OnProvisionalSaveComplete`.
+  // Only used on desktop.
+  std::optional<PasswordForm> last_submitted_form_;
+
+  std::unique_ptr<device_reauth::DeviceAuthenticator> authenticator_;
+
+  base::WeakPtrFactory<CredentialManagerImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace password_manager

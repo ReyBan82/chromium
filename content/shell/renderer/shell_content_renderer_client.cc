@@ -6,16 +6,26 @@
 
 #include <string>
 
+#include "base/base_switches.h"
+#include "base/check_is_test.h"
 #include "base/check_op.h"
 #include "base/command_line.h"
 #include "base/files/file.h"
 #include "base/functional/bind.h"
+#include "base/immediate_crash.h"
 #include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/allow_check_is_test_for_testing.h"
+#include "base/types/pass_key.h"
 #include "components/cdm/renderer/external_clear_key_key_system_info.h"
 #include "components/network_hints/renderer/web_prescient_networking_impl.h"
+#include "components/surface_embed/renderer/create_plugin.h"
 #include "components/web_cache/renderer/web_cache_impl.h"
+#include "content/common/pseudonymization_salt.h"
+#include "content/common/skia_utils.h"
+#include "content/public/common/content_switches.h"
 #include "content/public/common/pseudonymization_util.h"
 #include "content/public/common/web_identity.h"
 #include "content/public/renderer/render_frame.h"
@@ -24,13 +34,14 @@
 #include "content/shell/common/main_frame_counter_test_impl.h"
 #include "content/shell/common/power_monitor_test_impl.h"
 #include "content/shell/common/shell_switches.h"
+#include "content/shell/renderer/memory_coordinator/memory_coordinator_test_impl.h"
 #include "content/shell/renderer/shell_render_frame_observer.h"
 #include "mojo/public/cpp/bindings/binder_map.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/system/message_pipe.h"
 #include "net/base/net_errors.h"
-#include "ppapi/buildflags/buildflags.h"
+#include "net/http/structured_headers.h"
 #include "sandbox/policy/sandbox.h"
 #include "third_party/blink/public/platform/url_loader_throttle_provider.h"
 #include "third_party/blink/public/platform/web_url_error.h"
@@ -38,15 +49,19 @@
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_testing_support.h"
 #include "third_party/blink/public/web/web_view.h"
+#include "v8/include/v8-initialization.h"
 #include "v8/include/v8.h"
-
-#if BUILDFLAG(ENABLE_PLUGINS)
-#include "ppapi/shared_impl/ppapi_switches.h"  // nogncheck
-#endif
 
 #if BUILDFLAG(ENABLE_MOJO_CDM)
 #include "base/feature_list.h"
 #include "media/base/media_switches.h"
+#endif
+
+#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
+    (defined(ARCH_CPU_X86_64) || defined(ARCH_CPU_ARM64))
+#define ENABLE_WEB_ASSEMBLY_TRAP_HANDLER_LINUX
+#include "base/debug/stack_trace.h"
+#include "v8/include/v8-wasm-trap-handler-posix.h"
 #endif
 
 namespace content {
@@ -92,9 +107,9 @@ class TestRendererServiceImpl : public mojom::TestService {
 
   void DoCrashImmediately(DoCrashImmediatelyCallback callback) override {
     // This intentionally crashes the process and needs to be fatal regardless
-    // of DCHECK level. It's intended to get called. This is unlike the other
-    // NOTREACHED()s which are not expected to get called at all.
-    CHECK(false);
+    // of DCHECK level. This is unlike the other NOTREACHED()s which are not
+    // expected to get called at all.
+    base::ImmediateCrash();
   }
 
   void CreateFolder(CreateFolderCallback callback) override { NOTREACHED(); }
@@ -137,9 +152,28 @@ class TestRendererServiceImpl : public mojom::TestService {
         PseudonymizationUtil::PseudonymizeStringForTesting(value));
   }
 
+  void GetPseudonymizationSalt(
+      GetPseudonymizationSaltCallback callback) override {
+    std::move(callback).Run(content::GetPseudonymizationSalt());
+  }
+
+  void IsPseudonymizationSaltInitialized(
+      IsPseudonymizationSaltInitializedCallback callback) override {
+    std::move(callback).Run(content::IsSaltInitialized());
+  }
+
+  void IsSkiaInitialized(IsSkiaInitializedCallback callback) override {
+    std::move(callback).Run(IsSkiaInitializedForTesting());
+  }
+
   void PassWriteableFile(base::File file,
                          PassWriteableFileCallback callback) override {
     std::move(callback).Run();
+  }
+
+  void VerifyCheckIsTest(VerifyCheckIsTestCallback callback) override {
+    CHECK_IS_TEST();
+    std::move(callback).Run(true);
   }
 
   void WriteToPreloadedPipe() override { NOTREACHED(); }
@@ -150,24 +184,49 @@ class TestRendererServiceImpl : public mojom::TestService {
 class ShellContentRendererUrlLoaderThrottleProvider
     : public blink::URLLoaderThrottleProvider {
  public:
+  ShellContentRendererUrlLoaderThrottleProvider()
+      : main_thread_task_runner_(
+            content::RenderThread::IsMainThread()
+                ? base::SequencedTaskRunner::GetCurrentDefault()
+                : nullptr) {}
+
+  // This constructor works in conjunction with Clone().
+  ShellContentRendererUrlLoaderThrottleProvider(
+      const scoped_refptr<base::SequencedTaskRunner>& main_thread_task_runner,
+      base::PassKey<ShellContentRendererUrlLoaderThrottleProvider>)
+      : main_thread_task_runner_(std::move(main_thread_task_runner)) {}
+
   std::unique_ptr<URLLoaderThrottleProvider> Clone() override {
-    return std::make_unique<ShellContentRendererUrlLoaderThrottleProvider>();
+    return std::make_unique<ShellContentRendererUrlLoaderThrottleProvider>(
+        main_thread_task_runner_,
+        base::PassKey<ShellContentRendererUrlLoaderThrottleProvider>());
   }
 
-  blink::WebVector<std::unique_ptr<blink::URLLoaderThrottle>> CreateThrottles(
-      int render_frame_id,
-      const blink::WebURLRequest& request) override {
-    blink::WebVector<std::unique_ptr<blink::URLLoaderThrottle>> throttles;
-    // Workers can call us on a background thread. We don't care about such
-    // requests because we purposefully only look at resources from frames
-    // that the user can interact with.`
-    content::RenderFrame* frame =
-        RenderThread::IsMainThread()
-            ? content::RenderFrame::FromRoutingID(render_frame_id)
-            : nullptr;
-    if (frame) {
+  std::vector<std::unique_ptr<blink::URLLoaderThrottle>> CreateThrottles(
+      base::optional_ref<const blink::LocalFrameToken> local_frame_token,
+      const network::ResourceRequest& request) override {
+    std::vector<std::unique_ptr<blink::URLLoaderThrottle>> throttles;
+    if (local_frame_token.has_value()) {
       auto throttle = content::MaybeCreateIdentityUrlLoaderThrottle(
-          base::BindRepeating(blink::SetIdpSigninStatus, frame->GetWebFrame()));
+          base::BindRepeating(
+              [](const blink::LocalFrameToken& token,
+                 const scoped_refptr<base::SequencedTaskRunner>
+                     main_thread_task_runner,
+                 const std::optional<url::Origin>& initiator,
+                 const url::Origin& idp_origin,
+                 blink::mojom::IdpSigninStatus status) {
+                if (content::RenderThread::IsMainThread()) {
+                  blink::SetIdpSigninStatus(token, idp_origin, status);
+                  return;
+                }
+                if (main_thread_task_runner) {
+                  main_thread_task_runner->PostTask(
+                      FROM_HERE, base::BindOnce(&blink::SetIdpSigninStatus,
+                                                token, idp_origin, status));
+                }
+              },
+              local_frame_token.value(), main_thread_task_runner_),
+          content::GetSetLoginHeaderInProcessParser());
       if (throttle)
         throttles.push_back(std::move(throttle));
     }
@@ -176,6 +235,11 @@ class ShellContentRendererUrlLoaderThrottleProvider
   }
 
   void SetOnline(bool is_online) override {}
+
+ private:
+  // Set only when `this` was created on the main thread, or cloned from a
+  // provider which was created on the main thread.
+  scoped_refptr<base::SequencedTaskRunner> main_thread_task_runner_;
 };
 
 void CreateRendererTestService(
@@ -186,9 +250,69 @@ void CreateRendererTestService(
 
 }  // namespace
 
-ShellContentRendererClient::ShellContentRendererClient() {}
+ShellContentRendererClient::ShellContentRendererClient(bool is_browsertest) {
+  if (is_browsertest &&
+      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+          switches::kProcessType) == switches::kRendererProcess) {
+    base::test::AllowCheckIsTestForTesting();
+  }
+}
 
 ShellContentRendererClient::~ShellContentRendererClient() {
+}
+
+void ShellContentRendererClient::SetUpWebAssemblyTrapHandler() {
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+  // Mac and Windows use the default implementation (where the default v8 trap
+  // handler gets set up).
+  ContentRendererClient::SetUpWebAssemblyTrapHandler();
+  return;
+#else
+  base::CommandLine* const command_line =
+      base::CommandLine::ForCurrentProcess();
+  const bool crash_reporter_enabled =
+      command_line->HasSwitch(switches::kEnableCrashReporter)
+#if BUILDFLAG(IS_POSIX)
+      || command_line->HasSwitch(switches::kEnableCrashReporterForTesting)
+#endif  // BUILDFLAG(IS_POSIX)
+      ;
+
+  if (crash_reporter_enabled) {
+    // If either --enable-crash-reporter or --enable-crash-reporter-for-testing
+    // is enabled it should take care of signal handling for us, use the default
+    // implementation which doesn't register an additional handler.
+    ContentRendererClient::SetUpWebAssemblyTrapHandler();
+    return;
+  }
+
+  const bool use_v8_default_handler =
+#if defined(ENABLE_WEB_ASSEMBLY_TRAP_HANDLER_LINUX)
+      base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kDisableInProcessStackTraces)
+#else
+      true
+#endif  // defined(ENABLE_WEB_ASSEMBLY_TRAP_HANDLER_LINUX)
+      ;
+
+  if (use_v8_default_handler) {
+    // There is no signal handler yet, but it's okay if v8 registers one.
+    v8::V8::EnableWebAssemblyTrapHandler(/*use_v8_signal_handler=*/true);
+    return;
+  }
+
+#if defined(ENABLE_WEB_ASSEMBLY_TRAP_HANDLER_LINUX)
+  if (base::debug::SetStackDumpFirstChanceCallback(
+          v8::TryHandleWebAssemblyTrapPosix)) {
+    // Crashpad and Breakpad are disabled, but the in-process stack dump
+    // handlers are enabled, so set the callback on the stack dump handlers.
+    v8::V8::EnableWebAssemblyTrapHandler(/*use_v8_signal_handler=*/false);
+    return;
+  }
+
+  // As the registration of the callback failed, we don't enable trap
+  // handlers.
+#endif  // defined(ENABLE_WEB_ASSEMBLY_TRAP_HANDLER_LINUX)
+#endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
 }
 
 void ShellContentRendererClient::RenderThreadStarted() {
@@ -198,13 +322,16 @@ void ShellContentRendererClient::RenderThreadStarted() {
 void ShellContentRendererClient::ExposeInterfacesToBrowser(
     mojo::BinderMap* binders) {
   binders->Add<mojom::TestService>(
-      base::BindRepeating(&CreateRendererTestService),
+      &CreateRendererTestService,
+      base::SingleThreadTaskRunner::GetCurrentDefault());
+  binders->Add<mojom::MemoryCoordinatorTest>(
+      base::BindRepeating(&MemoryCoordinatorTestImpl::Bind),
       base::SingleThreadTaskRunner::GetCurrentDefault());
   binders->Add<mojom::PowerMonitorTest>(
-      base::BindRepeating(&PowerMonitorTestImpl::MakeSelfOwnedReceiver),
+      &PowerMonitorTestImpl::MakeSelfOwnedReceiver,
       base::SingleThreadTaskRunner::GetCurrentDefault());
   binders->Add<mojom::MainFrameCounterTest>(
-      base::BindRepeating(&MainFrameCounterTestImpl::Bind),
+      &MainFrameCounterTestImpl::Bind,
       base::SingleThreadTaskRunner::GetCurrentDefault());
   binders->Add<web_cache::mojom::WebCache>(
       base::BindRepeating(&web_cache::WebCacheImpl::BindReceiver,
@@ -217,6 +344,28 @@ void ShellContentRendererClient::RenderFrameCreated(RenderFrame* render_frame) {
   // browser tests. If we only create that for browser tests then the override
   // of this method in WebTestContentRendererClient would not be needed.
   new ShellRenderFrameObserver(render_frame);
+}
+
+bool ShellContentRendererClient::OverrideCreatePlugin(
+    RenderFrame* render_frame,
+    const blink::WebPluginParams& params,
+    blink::WebPlugin** plugin) {
+  // Tries to create a SurfaceEmbedWebPlugin for
+  // <embed type="application/x-chromium-surface-embed">. The renderer process
+  // will render an indication of error (a "sad webpage") in the plugin area if
+  // the browser process does not provide the SurfaceEmbedHost interface.
+  // Many embedders will choose to kill the renderer in that case, however.
+  //
+  // The interface is available in surface embed's content_browsertests /
+  // components_browsertests by overriding
+  // RegisterBrowserInterfaceBindersForFrame and is not available in the general
+  // content_shell. content_shell's default browser-side implementation triggers
+  // the fallback behavior, not a renderer crash.
+  if (surface_embed::MaybeCreatePlugin(render_frame, params, plugin)) {
+    return true;
+  }
+
+  return false;
 }
 
 void ShellContentRendererClient::PrepareErrorPage(
@@ -267,13 +416,16 @@ ShellContentRendererClient::CreateURLLoaderThrottleProvider(
 }
 
 #if BUILDFLAG(ENABLE_MOJO_CDM)
-void ShellContentRendererClient::GetSupportedKeySystems(
+std::unique_ptr<media::KeySystemSupportRegistration>
+ShellContentRendererClient::GetSupportedKeySystems(
+    content::RenderFrame* render_frame,
     media::GetSupportedKeySystemsCB cb) {
   media::KeySystemInfos key_systems;
   if (base::FeatureList::IsEnabled(media::kExternalClearKeyForTesting))
     key_systems.push_back(
         std::make_unique<cdm::ExternalClearKeyKeySystemInfo>());
   std::move(cb).Run(std::move(key_systems));
+  return nullptr;
 }
 #endif
 

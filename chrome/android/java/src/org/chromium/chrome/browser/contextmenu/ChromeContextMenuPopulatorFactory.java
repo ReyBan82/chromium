@@ -6,41 +6,90 @@ package org.chromium.chrome.browser.contextmenu;
 
 import android.content.Context;
 
-import androidx.annotation.NonNull;
+import androidx.browser.customtabs.CustomContentAction;
 
-import org.chromium.base.supplier.Supplier;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.base.supplier.SupplierUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.contextmenu.ChromeContextMenuPopulator.ContextMenuMode;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.share.ShareDelegate;
+import org.chromium.components.embedder_support.contextmenu.ContextMenuItemDelegate;
+import org.chromium.components.embedder_support.contextmenu.ContextMenuNativeDelegate;
 import org.chromium.components.embedder_support.contextmenu.ContextMenuParams;
-import org.chromium.components.externalauth.ExternalAuthUtils;
+import org.chromium.components.embedder_support.contextmenu.ContextMenuPopulator;
+import org.chromium.components.embedder_support.contextmenu.ContextMenuPopulatorFactory;
 
-/**
- * Factory for creating {@link ContextMenuPopulator}s.
- */
+import java.util.List;
+import java.util.function.Supplier;
+
+/** Factory for creating {@link ContextMenuPopulator}s. */
+@NullMarked
 public class ChromeContextMenuPopulatorFactory implements ContextMenuPopulatorFactory {
-    private final ContextMenuItemDelegate mItemDelegate;
-    private final Supplier<ShareDelegate> mShareDelegateSupplier;
+    private static @Nullable ShareDelegate sShareDelegateForTesting;
+    private final Supplier<@Nullable ShareDelegate> mShareDelegateSupplier;
     private final @ContextMenuMode int mContextMenuMode;
-    private final ExternalAuthUtils mExternalAuthUtils;
+    private final List<CustomContentAction> mCustomContentActions;
+    private @Nullable ContextMenuItemDelegate mItemDelegate;
 
-    public ChromeContextMenuPopulatorFactory(@NonNull ContextMenuItemDelegate itemDelegate,
-            Supplier<ShareDelegate> shareDelegateSupplier, @ContextMenuMode int contextMenuMode,
-            ExternalAuthUtils externalAuthUtils) {
+    /**
+     * Builds a {@link ChromeContextMenuPopulatorFactory}.
+     *
+     * @param itemDelegate The {@link ContextMenuItemDelegate} that will be notified with actions to
+     *     perform when menu items are selected.
+     * @param shareDelegate The Supplier of {@link ShareDelegate} that will be notified when a share
+     *     action is performed.
+     * @param contextMenuMode Defines the context menu mode.
+     * @param customContentActions List of {@link CustomContentAction} defined by the developer to
+     *     show in CCTs.
+     */
+    public ChromeContextMenuPopulatorFactory(
+            @Nullable ContextMenuItemDelegate itemDelegate,
+            Supplier<@Nullable ShareDelegate> shareDelegate,
+            @ContextMenuMode int contextMenuMode,
+            List<CustomContentAction> customContentActions) {
         mItemDelegate = itemDelegate;
-        mShareDelegateSupplier = shareDelegateSupplier;
+        mShareDelegateSupplier = shareDelegate;
         mContextMenuMode = contextMenuMode;
-        mExternalAuthUtils = externalAuthUtils;
+        if (ChromeFeatureList.sCctContextualMenuItems.isEnabled()) {
+            mCustomContentActions = customContentActions;
+        } else {
+            mCustomContentActions = List.of();
+        }
     }
 
     @Override
     public void onDestroy() {
-        mItemDelegate.onDestroy();
+        if (mItemDelegate != null) {
+            mItemDelegate.onDestroy();
+        }
+    }
+
+    @Override
+    public void setItemDelegate(@Nullable ContextMenuItemDelegate itemDelegate) {
+        mItemDelegate = itemDelegate;
+    }
+
+    public static void setShareDelegateForTesting(ShareDelegate shareDelegate) {
+        sShareDelegateForTesting = shareDelegate;
+        ResettersForTesting.register(() -> sShareDelegateForTesting = null);
     }
 
     @Override
     public ContextMenuPopulator createContextMenuPopulator(
             Context context, ContextMenuParams params, ContextMenuNativeDelegate nativeDelegate) {
-        return new ChromeContextMenuPopulator(mItemDelegate, mShareDelegateSupplier,
-                mContextMenuMode, mExternalAuthUtils, context, params, nativeDelegate);
+        assert mItemDelegate != null : "mItemDelegate should not be null";
+        return new ChromeContextMenuPopulator(
+                mItemDelegate,
+                sShareDelegateForTesting != null
+                        ? (Supplier<@Nullable ShareDelegate>)
+                                SupplierUtils.of(sShareDelegateForTesting)
+                        : mShareDelegateSupplier,
+                mCustomContentActions,
+                mContextMenuMode,
+                context,
+                params,
+                nativeDelegate);
     }
 }

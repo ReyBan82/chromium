@@ -39,6 +39,8 @@
 #include "third_party/blink/renderer/core/html/forms/form_data.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
+#include "third_party/blink/renderer/core/keywords.h"
+#include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 
 namespace blink {
@@ -52,13 +54,24 @@ InputTypeView* BaseCheckableInputType::CreateView() {
   return this;
 }
 
+LayoutObject* BaseCheckableInputType::CreateLayoutObject(
+    const ComputedStyle& style) const {
+  // Use InputTypeView layout when displayed as a list item
+  if (!RuntimeEnabledFeatures::CheckableInputTypeLayoutInlineEnabled() ||
+      style.IsDisplayListItem()) {
+    return InputTypeView::CreateLayoutObject(style);
+  }
+  return LayoutObject::CreateObject(&GetElement(), style);
+}
+
 FormControlState BaseCheckableInputType::SaveFormControlState() const {
-  return FormControlState(GetElement().Checked() ? "on" : "off");
+  return FormControlState(GetElement().Checked() ? keywords::kOn
+                                                 : keywords::kOff);
 }
 
 void BaseCheckableInputType::RestoreFormControlState(
     const FormControlState& state) {
-  GetElement().SetChecked(state[0] == "on");
+  GetElement().SetChecked(state[0] == keywords::kOn);
 }
 
 void BaseCheckableInputType::AppendToFormData(FormData& form_data) const {
@@ -84,14 +97,6 @@ void BaseCheckableInputType::HandleKeypressEvent(KeyboardEvent& event) {
 
 bool BaseCheckableInputType::CanSetStringValue() const {
   return false;
-}
-
-// FIXME: Could share this with KeyboardClickableInputTypeView and
-// RangeInputType if we had a common base class.
-void BaseCheckableInputType::AccessKeyAction(
-    SimulatedClickCreationScope creation_scope) {
-  InputTypeView::AccessKeyAction(creation_scope);
-  GetElement().DispatchSimulatedClick(nullptr, creation_scope);
 }
 
 bool BaseCheckableInputType::MatchesDefaultPseudoClass() {
@@ -122,7 +127,13 @@ bool BaseCheckableInputType::IsCheckable() {
 }
 
 void BaseCheckableInputType::HandleBlurEvent() {
-  GetElement().SetActive(false);
+  // The input might be the control element of a label
+  // that is in :active state. In that case the control should
+  // remain :active to avoid crbug.com/40934455.
+  HTMLInputElement& element = GetElement();
+  if (!element.HasActiveLabel()) {
+    element.SetActive(false);
+  }
 }
 
 }  // namespace blink

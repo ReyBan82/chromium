@@ -9,9 +9,11 @@
 #include "base/memory/raw_ptr.h"
 #include "base/timer/timer.h"
 #include "components/fullscreen_control/fullscreen_control_popup.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
 #include "ui/events/event_observer.h"
 
 class BrowserView;
+class ExclusiveAccessManager;
 
 namespace ui {
 class GestureEvent;
@@ -30,9 +32,19 @@ class EventMonitor;
 // fullscreen.
 // This UI is also used as a visual progress indicator when keyboard lock
 // requires user to press-and-hold ESC key to exit fullscreen.
+class BrowserWindowInterface;
+
 class FullscreenControlHost : public ui::EventObserver {
  public:
-  explicit FullscreenControlHost(BrowserView* browser_view);
+  DECLARE_USER_DATA(FullscreenControlHost);
+
+  FullscreenControlHost(BrowserView* browser_view,
+                        ExclusiveAccessManager* exclusive_access_manager,
+                        ui::UnownedUserDataHost& host);
+
+  // Returns the host for `browser`, or null if it does not have one (e.g.
+  // no BrowserView).
+  static FullscreenControlHost* From(BrowserWindowInterface* browser);
 
   FullscreenControlHost(const FullscreenControlHost&) = delete;
   FullscreenControlHost& operator=(const FullscreenControlHost&) = delete;
@@ -53,8 +65,17 @@ class FullscreenControlHost : public ui::EventObserver {
 
   bool IsVisible() const;
 
+  // Called when entering fullscreen mode. Enables event monitoring.
+  void OnEnterFullscreen();
+
+  // Called when exiting fullscreen mode. Hides the popup and may disable event
+  // monitoring.
+  void OnExitFullscreen();
+
  private:
   friend class FullscreenControlViewTest;
+
+  ui::ScopedUnownedUserData<FullscreenControlHost> scoped_unowned_user_data_;
 
   // Ensures symmetric input show and hide (e.g. a touch show is hidden by
   // touch).
@@ -74,13 +95,16 @@ class FullscreenControlHost : public ui::EventObserver {
                          base::TimeDelta timeout);
   void OnPopupTimeout(InputEntryMethod expected_input_method);
   bool IsExitUiNeeded();
+  bool IsPointerLocked();
   float CalculateCursorBufferHeight() const;
+  void OnExitFullscreenPopupClicked();
 
   InputEntryMethod input_entry_method_ = InputEntryMethod::NOT_ACTIVE;
 
   bool in_mouse_cooldown_mode_ = false;
 
   const raw_ptr<BrowserView> browser_view_;
+  const raw_ref<ExclusiveAccessManager> exclusive_access_manager_;
 
   std::unique_ptr<FullscreenControlPopup> fullscreen_control_popup_;
 

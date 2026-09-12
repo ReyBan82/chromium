@@ -9,26 +9,30 @@
 #include <vector>
 
 #include "base/command_line.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
+#include "base/logging/logging_settings.h"
 #include "chrome/utility/safe_browsing/mac/hfs.h"
 #include "chrome/utility/safe_browsing/mac/read_stream.h"
 #include "chrome/utility/safe_browsing/mac/udif.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 #include "testing/libfuzzer/libfuzzer_exports.h"
 
 extern "C" int LLVMFuzzerInitialize(int* argc, char*** argv) {
   base::CommandLine::Init(*argc, *argv);
   logging::LoggingSettings settings;
   settings.logging_dest = logging::LOG_NONE;
-  logging::SetMinLogLevel(logging::LOG_FATAL);
+  logging::SetMinLogLevel(logging::LOGGING_FATAL);
   return InitLogging(settings);
 }
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  safe_browsing::dmg::MemoryReadStream input(data, size);
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(const base::span<const uint8_t> data) {
+  safe_browsing::dmg::MemoryReadStream input(data);
   safe_browsing::dmg::UDIFParser udif_parser(&input);
 
-  if (!udif_parser.Parse())
+  if (!udif_parser.Parse()) {
     return 0;
+  }
 
   std::vector<uint8_t> buffer(getpagesize(), 0);
 
@@ -37,12 +41,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         udif_parser.GetPartitionReadStream(i));
     safe_browsing::dmg::HFSIterator iterator(partition.get());
 
-    if (!iterator.Open())
+    if (!iterator.Open()) {
       continue;
+    }
 
     while (iterator.Next()) {
-      if (iterator.IsHardLink() ||
-          iterator.IsDecmpfsCompressed() ||
+      if (iterator.IsHardLink() || iterator.IsDecmpfsCompressed() ||
           iterator.IsDirectory()) {
         continue;
       }
@@ -51,8 +55,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
           iterator.GetReadStream());
       size_t read_this_pass = 0;
       do {
-        if (!file->Read(buffer.data(), buffer.size(), &read_this_pass))
+        if (!file->Read(buffer, &read_this_pass)) {
           break;
+        }
       } while (read_this_pass != 0);
     }
   }

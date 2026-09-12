@@ -8,18 +8,21 @@
 
 #include "ash/constants/notifier_catalogs.h"
 #include "ash/public/cpp/notification_utils.h"
+#include "ash/resources/vector_icons/vector_icons.h"
+#include "ash/strings/grit/ash_strings.h"
+#include "ash/webui/settings/public/constants/routes.mojom.h"
+#include "base/check_deref.h"
 #include "base/functional/bind.h"
-#include "chrome/app/vector_icons/vector_icons.h"
 #include "chrome/browser/ash/crostini/crostini_util.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
-#include "chrome/browser/notifications/system_notification_helper.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/settings_window_manager_chromeos.h"
-#include "chrome/browser/ui/webui/settings/chromeos/constants/routes.mojom.h"
-#include "chrome/grit/generated_resources.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
 #include "chromeos/ash/components/settings/cros_settings_names.h"
+#include "chromeos/ash/experiences/settings_ui/settings_app_manager.h"
+#include "components/session_manager/core/session.h"
+#include "components/session_manager/core/session_manager.h"
 #include "components/user_manager/user_manager.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_types.h"
 #include "ui/message_center/public/cpp/notifier_id.h"
@@ -51,9 +54,7 @@ CrostiniLowDiskNotification::~CrostiniLowDiskNotification() {
 
 void CrostiniLowDiskNotification::OnLowDiskSpaceTriggered(
     const vm_tools::cicerone::LowDiskSpaceTriggeredSignal& signal) {
-
   if (signal.vm_name() != kCrostiniDefaultVmName) {
-    // TODO(crbug/1189009): Support VMs with different names
     return;
   }
   ShowNotificationIfAppropriate(signal.free_bytes());
@@ -77,7 +78,7 @@ void CrostiniLowDiskNotification::ShowNotificationIfAppropriate(
   // We suppress the low-space notifications when there are multiple users on an
   // enterprise managed device based on policy configuration.
   if (!show_low_disk_space_notification &&
-      user_manager::UserManager::Get()->GetUsers().size() > 1) {
+      user_manager::UserManager::Get()->GetPersistedUsers().size() > 1) {
     LOG(WARNING) << "Crostini is low on disk space, but the notification was "
                  << "suppressed on a managed device.";
     return;
@@ -86,8 +87,8 @@ void CrostiniLowDiskNotification::ShowNotificationIfAppropriate(
   if (severity != last_notification_severity_ ||
       (severity == Severity::HIGH &&
        now - last_notification_time_ > notification_interval_)) {
-    SystemNotificationHelper::GetInstance()->Display(
-        *CreateNotification(severity));
+    message_center::MessageCenter::Get()->AddNotification(
+        CreateNotification(severity));
     last_notification_time_ = now;
     last_notification_severity_ = severity;
   }
@@ -121,20 +122,25 @@ CrostiniLowDiskNotification::CreateNotification(Severity severity) {
       message_center::NotifierType::SYSTEM_COMPONENT, kNotifierLowDisk,
       ash::NotificationCatalogName::kCrostiniLowDisk);
 
-  auto on_click = base::BindRepeating([](absl::optional<int> button_index) {
+  auto on_click = base::BindRepeating([](std::optional<int> button_index) {
     if (button_index) {
       DCHECK_EQ(0, *button_index);
-      chrome::SettingsWindowManager::GetInstance()->ShowOSSettings(
-          ProfileManager::GetActiveUserProfile(),
-          chromeos::settings::mojom::kCrostiniDetailsSubpagePath);
+      auto* session =
+          session_manager::SessionManager::Get()->GetActiveSession();
+      CHECK(session);
+      auto* user =
+          user_manager::UserManager::Get()->FindUser(session->account_id());
+      ash::SettingsAppManager::Get()->Open(
+          CHECK_DEREF(user),
+          {.sub_page = chromeos::settings::mojom::kCrostiniDetailsSubpagePath});
     }
   });
   std::unique_ptr<message_center::Notification> notification =
       ash::CreateSystemNotificationPtr(
           message_center::NOTIFICATION_TYPE_SIMPLE, kLowDiskId, title, message,
-          std::u16string(), GURL(), notifier_id, optional_fields,
+          std::u16string(), notifier_id, optional_fields,
           new message_center::HandleNotificationClickDelegate(on_click),
-          kNotificationStorageFullIcon, warning_level);
+          ash::kNotificationStorageFullIcon, warning_level);
 
   return notification;
 }

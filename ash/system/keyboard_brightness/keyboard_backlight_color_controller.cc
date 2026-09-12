@@ -5,6 +5,7 @@
 #include "ash/system/keyboard_brightness/keyboard_backlight_color_controller.h"
 
 #include <memory>
+#include <optional>
 
 #include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
@@ -17,18 +18,20 @@
 #include "ash/wallpaper/wallpaper_controller_impl.h"
 #include "ash/webui/personalization_app/mojom/personalization_app.mojom-shared.h"
 #include "base/functional/bind.h"
-#include "base/metrics/histogram_functions.h"
 #include "chromeos/dbus/power/power_manager_client.h"
 #include "chromeos/dbus/power_manager/backlight.pb.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "components/session_manager/session_manager_types.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/skia/include/core/SkColor.h"
+#include "ui/gfx/color_utils.h"
 
 namespace ash {
 
 namespace {
+
+// Convenience alias for DisplayType enum.
+using DisplayType = KeyboardBacklightColorController::DisplayType;
 
 AccountId GetActiveAccountId() {
   return Shell::Get()->session_controller()->GetActiveAccountId();
@@ -41,6 +44,9 @@ PrefService* GetUserPrefService(const AccountId& account_id) {
 
 // Determines whether to use the |kDefaultColor| instead of |color|.
 bool ShouldUseDefaultColor(SkColor color) {
+  if (color == kInvalidWallpaperColor) {
+    return true;
+  }
   color_utils::HSL hsl;
   color_utils::SkColorToHSL(color, &hsl);
   // Determines if the color is nearly black or white.
@@ -88,22 +94,20 @@ void KeyboardBacklightColorController::RegisterPrefs(
   registry->RegisterIntegerPref(
       prefs::kPersonalizationKeyboardBacklightColor,
       static_cast<int>(personalization_app::mojom::BacklightColor::kWallpaper));
-  if (features::IsMultiZoneRgbKeyboardEnabled()) {
-    registry->RegisterDictionaryPref(
-        prefs::kPersonalizationKeyboardBacklightZoneColors);
-  }
+  registry->RegisterIntegerPref(
+      prefs::kPersonalizationKeyboardBacklightColorDisplayType,
+      static_cast<int>(DisplayType::kStatic));
+  registry->RegisterDictionaryPref(
+      prefs::kPersonalizationKeyboardBacklightZoneColors);
 }
 
 void KeyboardBacklightColorController::SetBacklightColor(
     personalization_app::mojom::BacklightColor backlight_color,
     const AccountId& account_id) {
-  DCHECK_NE(personalization_app::mojom::BacklightColor::kMultiZone,
-            backlight_color);
   DisplayBacklightColor(backlight_color);
   SetBacklightColorPref(backlight_color, account_id);
-  if (features::IsMultiZoneRgbKeyboardEnabled()) {
-    UpdateAllBacklightZoneColors(backlight_color, account_id);
-  }
+  SetDisplayType(DisplayType::kStatic, account_id);
+  UpdateAllBacklightZoneColors(backlight_color, account_id);
   MaybeToggleOnKeyboardBrightness();
 }
 
@@ -125,8 +129,7 @@ void KeyboardBacklightColorController::SetBacklightZoneColor(
     personalization_app::mojom::BacklightColor backlight_color,
     const AccountId& account_id) {
   DCHECK_LT(zone, Shell::Get()->rgb_keyboard_manager()->GetZoneCount());
-  SetBacklightColorPref(personalization_app::mojom::BacklightColor::kMultiZone,
-                        account_id);
+  SetDisplayType(DisplayType::kMultiZone, account_id);
   UpdateBacklightZoneColorPref(zone, backlight_color, account_id);
   DisplayBacklightZoneColor(zone, backlight_color);
   MaybeToggleOnKeyboardBrightness();
@@ -140,7 +143,7 @@ KeyboardBacklightColorController::GetBacklightZoneColors(
   auto* rgb_keyboard_manager = Shell::Get()->rgb_keyboard_manager();
   DCHECK(rgb_keyboard_manager);
 
-  const base::Value::Dict& color_dict =
+  const base::DictValue& color_dict =
       pref_service->GetDict(prefs::kPersonalizationKeyboardBacklightZoneColors);
   const int zone_count = rgb_keyboard_manager->GetZoneCount();
   std::vector<personalization_app::mojom::BacklightColor> colors;
@@ -153,6 +156,26 @@ KeyboardBacklightColorController::GetBacklightZoneColors(
     colors.push_back(zone_color);
   }
   return colors;
+}
+
+void KeyboardBacklightColorController::SetDisplayType(
+    DisplayType type,
+    const AccountId& account_id) {
+  GetUserPrefService(account_id)
+      ->SetInteger(prefs::kPersonalizationKeyboardBacklightColorDisplayType,
+                   static_cast<int>(type));
+}
+
+DisplayType KeyboardBacklightColorController::GetDisplayType(
+    const AccountId& account_id) {
+  // |account_id| may be empty in tests or login screen.
+  if (account_id.empty()) {
+    return DisplayType::kStatic;
+  }
+  auto* pref_service = GetUserPrefService(account_id);
+  DCHECK(pref_service);
+  return static_cast<DisplayType>(pref_service->GetInteger(
+      prefs::kPersonalizationKeyboardBacklightColorDisplayType));
 }
 
 void KeyboardBacklightColorController::OnRgbKeyboardSupportedChanged(
@@ -209,69 +232,75 @@ void KeyboardBacklightColorController::OnSessionStateChanged(
 void KeyboardBacklightColorController::OnActiveUserPrefServiceChanged(
     PrefService* pref_service) {
   const AccountId account_id = GetActiveAccountId();
-  const auto backlight_color = GetBacklightColor(account_id);
-  switch (backlight_color) {
-    case personalization_app::mojom::BacklightColor::kWhite:
-    case personalization_app::mojom::BacklightColor::kRed:
-    case personalization_app::mojom::BacklightColor::kYellow:
-    case personalization_app::mojom::BacklightColor::kGreen:
-    case personalization_app::mojom::BacklightColor::kBlue:
-    case personalization_app::mojom::BacklightColor::kIndigo:
-    case personalization_app::mojom::BacklightColor::kPurple:
-    case personalization_app::mojom::BacklightColor::kRainbow: {
-      if (features::IsMultiZoneRgbKeyboardEnabled()) {
-        // Defaults the zone color to be the currently set backlight color.
-        UpdateAllBacklightZoneColors(backlight_color, account_id);
+  const auto display_type = GetDisplayType(account_id);
+  switch (display_type) {
+    case DisplayType::kStatic: {
+      const auto backlight_color = GetBacklightColor(account_id);
+
+      // Defaults the zone color to be the currently set backlight color.
+      UpdateAllBacklightZoneColors(backlight_color, account_id);
+
+      switch (backlight_color) {
+        case personalization_app::mojom::BacklightColor::kWallpaper: {
+          // Displaying the wallpaper color is handled by
+          // |OnWallpaperColorsChanged()|.
+          return;
+        }
+        case personalization_app::mojom::BacklightColor::kWhite:
+        case personalization_app::mojom::BacklightColor::kRed:
+        case personalization_app::mojom::BacklightColor::kYellow:
+        case personalization_app::mojom::BacklightColor::kGreen:
+        case personalization_app::mojom::BacklightColor::kBlue:
+        case personalization_app::mojom::BacklightColor::kIndigo:
+        case personalization_app::mojom::BacklightColor::kPurple:
+        case personalization_app::mojom::BacklightColor::kRainbow: {
+          DisplayBacklightColor(backlight_color);
+          return;
+        }
       }
-      DisplayBacklightColor(backlight_color);
-      break;
+      return;
     }
-    case personalization_app::mojom::BacklightColor::kWallpaper: {
-      if (features::IsMultiZoneRgbKeyboardEnabled()) {
-        // Defaults the zone color to be the currently set backlight color.
-        UpdateAllBacklightZoneColors(backlight_color, account_id);
-      }
-      // If backlight color is wallpaper color, we will update the wall paper
-      // color in OnWallpaperColorsChanged.
-      break;
-    }
-    case personalization_app::mojom::BacklightColor::kMultiZone: {
-      // Handles displaying zone colors when they are set to preset colors.
+    case DisplayType::kMultiZone: {
       const std::vector<personalization_app::mojom::BacklightColor>
           zone_colors = GetBacklightZoneColors(account_id);
       for (size_t zone = 0; zone < zone_colors.size(); ++zone) {
         DisplayBacklightZoneColor(zone, zone_colors.at(zone));
       }
-      break;
+      return;
     }
   }
 }
 
 void KeyboardBacklightColorController::OnWallpaperColorsChanged() {
   const AccountId account_id = GetActiveAccountId();
-  const auto backlight_color = GetBacklightColor(account_id);
-  switch (backlight_color) {
-    case personalization_app::mojom::BacklightColor::kWallpaper: {
-      DisplayBacklightColor(backlight_color);
-      return;
+  const auto display_type = GetDisplayType(account_id);
+  switch (display_type) {
+    case DisplayType::kStatic: {
+      const auto backlight_color = GetBacklightColor(account_id);
+      switch (backlight_color) {
+        case personalization_app::mojom::BacklightColor::kWallpaper: {
+          DisplayBacklightColor(backlight_color);
+          return;
+        }
+        case personalization_app::mojom::BacklightColor::kWhite:
+        case personalization_app::mojom::BacklightColor::kRed:
+        case personalization_app::mojom::BacklightColor::kYellow:
+        case personalization_app::mojom::BacklightColor::kGreen:
+        case personalization_app::mojom::BacklightColor::kBlue:
+        case personalization_app::mojom::BacklightColor::kIndigo:
+        case personalization_app::mojom::BacklightColor::kPurple:
+        case personalization_app::mojom::BacklightColor::kRainbow: {
+          return;
+        }
+      }
     }
-    case personalization_app::mojom::BacklightColor::kWhite:
-    case personalization_app::mojom::BacklightColor::kRed:
-    case personalization_app::mojom::BacklightColor::kYellow:
-    case personalization_app::mojom::BacklightColor::kGreen:
-    case personalization_app::mojom::BacklightColor::kBlue:
-    case personalization_app::mojom::BacklightColor::kIndigo:
-    case personalization_app::mojom::BacklightColor::kPurple:
-    case personalization_app::mojom::BacklightColor::kRainbow: {
-      return;
-    }
-    case personalization_app::mojom::BacklightColor::kMultiZone: {
-      // Handles displaying zone colors when they are set to using kWallpaper.
+    case DisplayType::kMultiZone: {
       const std::vector<personalization_app::mojom::BacklightColor>
           zone_colors = GetBacklightZoneColors(account_id);
       for (size_t zone = 0; zone < zone_colors.size(); ++zone) {
         DisplayBacklightZoneColor(zone, zone_colors.at(zone));
       }
+      return;
     }
   }
 }
@@ -283,25 +312,11 @@ void KeyboardBacklightColorController::DisplayBacklightColor(
   DVLOG(3) << __func__ << " backlight_color=" << backlight_color;
   switch (backlight_color) {
     case personalization_app::mojom::BacklightColor::kWallpaper: {
-      // If colors have not been calculated yet, do nothing.
-      const auto* wallpaper_controller = Shell::Get()->wallpaper_controller();
-      DCHECK(wallpaper_controller);
-      if (!wallpaper_controller->calculated_colors().has_value()) {
-        return;
-      }
-      SkColor color = ConvertBacklightColorToSkColor(backlight_color);
-      bool valid_color = color != kInvalidWallpaperColor;
-      base::UmaHistogramBoolean(
-          "Ash.Personalization.KeyboardBacklight.WallpaperColor.Valid",
-          valid_color);
-      // Default to |kDefaultColor| if |color| is invalid or
-      // |ShouldUseDefaultColor| is true.
-      if (!valid_color || ShouldUseDefaultColor(color)) {
-        color = kDefaultColor;
-      }
+      SkColor wallpaper_color = GetCurrentWallpaperColor();
       rgb_keyboard_manager->SetStaticBackgroundColor(
-          SkColorGetR(color), SkColorGetG(color), SkColorGetB(color));
-      displayed_color_for_testing_ = color;
+          SkColorGetR(wallpaper_color), SkColorGetG(wallpaper_color),
+          SkColorGetB(wallpaper_color));
+      displayed_color_for_testing_ = wallpaper_color;
       break;
     }
     case personalization_app::mojom::BacklightColor::kWhite:
@@ -320,9 +335,6 @@ void KeyboardBacklightColorController::DisplayBacklightColor(
     case personalization_app::mojom::BacklightColor::kRainbow:
       rgb_keyboard_manager->SetRainbowMode();
       break;
-    case personalization_app::mojom::BacklightColor::kMultiZone:
-      NOTREACHED();
-      break;
   }
 }
 
@@ -335,18 +347,10 @@ void KeyboardBacklightColorController::DisplayBacklightZoneColor(
            << " backlight_color=" << backlight_color;
   switch (backlight_color) {
     case personalization_app::mojom::BacklightColor::kWallpaper: {
-      SkColor color = ConvertBacklightColorToSkColor(backlight_color);
-      bool valid_color = color != kInvalidWallpaperColor;
-      base::UmaHistogramBoolean(
-          "Ash.Personalization.KeyboardBacklight.WallpaperColor.Valid",
-          valid_color);
-      // Default to |kDefaultColor| if |color| is invalid or
-      // |ShouldUseDefaultColor| is true.
-      if (!valid_color || ShouldUseDefaultColor(color)) {
-        color = kDefaultColor;
-      }
-      rgb_keyboard_manager->SetZoneColor(
-          zone, SkColorGetR(color), SkColorGetG(color), SkColorGetB(color));
+      SkColor wallpaper_color = GetCurrentWallpaperColor();
+      rgb_keyboard_manager->SetZoneColor(zone, SkColorGetR(wallpaper_color),
+                                         SkColorGetG(wallpaper_color),
+                                         SkColorGetB(wallpaper_color));
       break;
     }
     case personalization_app::mojom::BacklightColor::kWhite:
@@ -361,10 +365,8 @@ void KeyboardBacklightColorController::DisplayBacklightZoneColor(
           zone, SkColorGetR(color), SkColorGetG(color), SkColorGetB(color));
       break;
     }
-    case personalization_app::mojom::BacklightColor::kRainbow:
-    case personalization_app::mojom::BacklightColor::kMultiZone: {
+    case personalization_app::mojom::BacklightColor::kRainbow: {
       NOTREACHED() << " Attempted to display an invalid color option";
-      break;
     }
   }
 }
@@ -408,7 +410,7 @@ void KeyboardBacklightColorController::MaybeToggleOnKeyboardBrightness() {
 }
 
 void KeyboardBacklightColorController::KeyboardBrightnessPercentReceived(
-    absl::optional<double> percentage) {
+    std::optional<double> percentage) {
   if (!percentage.has_value() || percentage.value() == 0.0) {
     DVLOG(1) << __func__ << " Toggling on the keyboard brightness.";
     power_manager::SetBacklightBrightnessRequest request;
@@ -420,6 +422,22 @@ void KeyboardBacklightColorController::KeyboardBrightnessPercentReceived(
     chromeos::PowerManagerClient::Get()->SetKeyboardBrightness(
         std::move(request));
   }
+}
+
+SkColor KeyboardBacklightColorController::GetCurrentWallpaperColor() {
+  const auto* wallpaper_controller = Shell::Get()->wallpaper_controller();
+  DCHECK(wallpaper_controller);
+  SkColor color = kDefaultColor;
+  bool missing_wallpaper_color =
+      !wallpaper_controller->calculated_colors().has_value();
+  if (!missing_wallpaper_color) {
+    color = ConvertBacklightColorToSkColor(
+        personalization_app::mojom::BacklightColor::kWallpaper);
+  }
+  if (ShouldUseDefaultColor(color)) {
+    color = kDefaultColor;
+  }
+  return color;
 }
 
 }  // namespace ash

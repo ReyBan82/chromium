@@ -3,14 +3,20 @@
 // found in the LICENSE file.
 
 self.addEventListener('fetch', function(event) {
-  event.waitUntil(
-    chrome.runtime.getBackgroundClient().then(function(client) {
-      // Ensure that the "seenUrls" list in the background page is updated
-      // before the response is served.
-      return new Promise(function(resolve) {
-        var chan = new MessageChannel();
-        chan.port1.onmessage = resolve;
-        client.postMessage(event.request.url, [chan.port2]);
-      });
-    }));
+  event.waitUntil((async () => {
+    // Find the associated background page from the active clients.
+    const foundClients =
+        await clients.matchAll({includeUncontrolled: true, type: 'window'});
+    const background = foundClients.find((client) => {
+      return new URL(client.url).pathname ===
+          '/_generated_background_page.html';
+    });
+    // Ensure that the "seenUrls" list in the background page is updated
+    // before the response is served.
+    await new Promise((resolve) => {
+      const chan = new MessageChannel();
+      chan.port1.onmessage = resolve;
+      background.postMessage(event.request.url, [chan.port2]);
+    });
+  })());
 });

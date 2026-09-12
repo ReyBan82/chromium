@@ -6,8 +6,8 @@
 
 namespace blink {
 
-TextMatchMarker::TextMatchMarker(unsigned start_offset,
-                                 unsigned end_offset,
+TextMatchMarker::TextMatchMarker(wtf_size_t start_offset,
+                                 wtf_size_t end_offset,
                                  MatchStatus status)
     : DocumentMarker(start_offset, end_offset), match_status_(status) {}
 
@@ -42,12 +42,6 @@ void TextMatchMarker::SetRect(const PhysicalRect& rect) {
 const PhysicalRect& TextMatchMarker::GetRect() const {
   DCHECK_EQ(layout_status_, LayoutStatus::kValidNotNull);
   return rect_;
-}
-
-void TextMatchMarker::NullifyLayoutRect() {
-  layout_status_ = LayoutStatus::kValidNull;
-  // Now |rendered_rect_| can not be accessed until |SetRenderedRect| is
-  // called.
 }
 
 void TextMatchMarker::Invalidate() {

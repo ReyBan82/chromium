@@ -38,9 +38,9 @@ class HeapObject : public GarbageCollected<HeapObject> {
  private:
   scoped_refptr<Other> m_ref;
   Member<HeapObject> m_obj;
-  Vector<Member<HeapObject>> m_objs;
+  HeapVector<Member<HeapObject>> m_objs;
   PartOther m_part;
 };
 }
 
-#endif
+#endif  // DESTRUCTOR_ACCESS_FINALIZED_FIELD_H_

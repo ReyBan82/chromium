@@ -17,37 +17,18 @@
 
 namespace {
 
-class OnDialogClosedWebDialogDelegate : public ui::test::TestWebDialogDelegate {
- public:
-  OnDialogClosedWebDialogDelegate() : ui::test::TestWebDialogDelegate(GURL()) {}
-  ~OnDialogClosedWebDialogDelegate() override = default;
-
-  // Overridden ui::test::TestWebDialogDelegate behavior:
-  void OnDialogClosed(const std::string& json_retval) override {
-    if (callback_)
-      std::move(callback_).Run(json_retval);
-  }
-
-  void RegisterOnDialogClosedCallback(
-      base::OnceCallback<void(const std::string&)> cb) {
-    callback_ = std::move(cb);
-  }
-
- private:
-  base::OnceCallback<void(const std::string&)> callback_;
-};
-
 class TestConstrainedWebDialogDelegate : public ConstrainedWebDialogDelegate {
  public:
   TestConstrainedWebDialogDelegate() {
-    web_dialog_delegate_ = std::make_unique<OnDialogClosedWebDialogDelegate>();
+    web_dialog_delegate_ = std::make_unique<ui::WebDialogDelegate>();
+    web_dialog_delegate_->set_delete_on_close(false);
   }
 
   // ConstrainedWebDialogDelegate::GetWebDialogDelegate w/ covariant returns
-  const OnDialogClosedWebDialogDelegate* GetWebDialogDelegate() const override {
+  const ui::WebDialogDelegate* GetWebDialogDelegate() const override {
     return web_dialog_delegate_.get();
   }
-  OnDialogClosedWebDialogDelegate* GetWebDialogDelegate() override {
+  ui::WebDialogDelegate* GetWebDialogDelegate() override {
     return web_dialog_delegate_.get();
   }
 
@@ -57,36 +38,26 @@ class TestConstrainedWebDialogDelegate : public ConstrainedWebDialogDelegate {
 
   std::unique_ptr<content::WebContents> ReleaseWebContents() override {
     NOTREACHED();
-    return nullptr;
   }
 
-  content::WebContents* GetWebContents() override {
-    NOTREACHED();
-    return nullptr;
-  }
+  content::WebContents* GetWebContents() override { NOTREACHED(); }
 
-  gfx::NativeWindow GetNativeDialog() override {
-    NOTREACHED();
-    return nullptr;
-  }
+  gfx::NativeWindow GetNativeDialog() override { NOTREACHED(); }
 
   gfx::Size GetConstrainedWebDialogMinimumSize() const override {
     NOTREACHED();
-    return gfx::Size();
   }
 
   gfx::Size GetConstrainedWebDialogMaximumSize() const override {
     NOTREACHED();
-    return gfx::Size();
   }
 
   gfx::Size GetConstrainedWebDialogPreferredSize() const override {
     NOTREACHED();
-    return gfx::Size();
   }
 
  private:
-  std::unique_ptr<OnDialogClosedWebDialogDelegate> web_dialog_delegate_;
+  std::unique_ptr<ui::WebDialogDelegate> web_dialog_delegate_;
 };
 
 }  // namespace
@@ -130,7 +101,7 @@ class ConstrainedWebDialogUITest : public ::testing::Test {
   std::unique_ptr<content::WebContents> web_contents_;
 };
 
-// Demonstrates that empty args list won't cause a crash: crbug.com/1262467.
+// Demonstrates that empty args list won't cause a crash: crbug.com/40799522.
 TEST_F(ConstrainedWebDialogUITest, DialogCloseWithEmptyArgs) {
   base::RunLoop run_loop;
   dialog_delegate()->GetWebDialogDelegate()->RegisterOnDialogClosedCallback(
@@ -138,7 +109,7 @@ TEST_F(ConstrainedWebDialogUITest, DialogCloseWithEmptyArgs) {
         ASSERT_EQ(json_retval, "");
         run_loop.Quit();
       }));
-  base::Value::List args;
+  base::ListValue args;
   web_ui()->HandleReceivedMessage("dialogClose", args);
   run_loop.Run();
 }
@@ -152,7 +123,7 @@ TEST_F(ConstrainedWebDialogUITest, DialogCloseWithJsonInArgs) {
         json_retval = cb_json_retval;
         run_loop.Quit();
       }));
-  base::Value::List args;
+  base::ListValue args;
   args.Append(kJsonRetval);
   web_ui()->HandleReceivedMessage("dialogClose", args);
   run_loop.Run();

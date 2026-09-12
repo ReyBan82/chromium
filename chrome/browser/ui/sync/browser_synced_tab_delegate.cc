@@ -6,11 +6,22 @@
 
 #include "chrome/browser/sync/sessions/sync_sessions_router_tab_helper.h"
 #include "components/sessions/content/session_tab_helper.h"
+#include "components/sessions/core/session_id.h"
+#include "components/tabs/public/tab_interface.h"
+
+DEFINE_USER_DATA(BrowserSyncedTabDelegate);
 
 BrowserSyncedTabDelegate::BrowserSyncedTabDelegate(
+    tabs::TabInterface& tab,
     content::WebContents* web_contents)
-    : content::WebContentsUserData<BrowserSyncedTabDelegate>(*web_contents) {
+    : scoped_unowned_user_data_(tab.GetUnownedUserDataHost(), *this) {
   SetWebContents(web_contents);
+}
+
+// static
+BrowserSyncedTabDelegate* BrowserSyncedTabDelegate::From(
+    tabs::TabInterface* tab) {
+  return Get(tab->GetUnownedUserDataHost());
 }
 
 BrowserSyncedTabDelegate::~BrowserSyncedTabDelegate() = default;
@@ -29,4 +40,10 @@ bool BrowserSyncedTabDelegate::IsPlaceholderTab() const {
   return false;
 }
 
-WEB_CONTENTS_USER_DATA_KEY_IMPL(BrowserSyncedTabDelegate);
+std::unique_ptr<sync_sessions::SyncedTabDelegate>
+BrowserSyncedTabDelegate::ReadPlaceholderTabSnapshotIfItShouldSync(
+    sync_sessions::SyncSessionsClient* sessions_client) {
+  NOTREACHED()
+      << "ReadPlaceholderTabSnapshotIfItShouldSync is not supported on "
+         "desktop platforms.";
+}

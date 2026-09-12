@@ -23,7 +23,7 @@ namespace viz {
 class VIZ_SERVICE_EXPORT OverlayProcessorMac
     : public OverlayProcessorInterface {
  public:
-  using CandidateList = CALayerOverlayList;
+  using CandidateList = OverlayCandidateList;
 
   OverlayProcessorMac();
   // For testing.
@@ -38,9 +38,7 @@ class VIZ_SERVICE_EXPORT OverlayProcessorMac
   bool DisableSplittingQuads() const override;
 
   bool IsOverlaySupported() const override;
-  gfx::Rect GetPreviousFrameOverlaysBoundingRect() const override;
   gfx::Rect GetAndResetOverlayDamage() override;
-  void SetIsVideoCaptureEnabled(bool enabled) override;
 
   // Returns true if the platform supports hw overlays and surface occluding
   // damage rect needs to be computed since it will be used by overlay
@@ -53,21 +51,10 @@ class VIZ_SERVICE_EXPORT OverlayProcessorMac
       DisplayResourceProvider* resource_provider,
       AggregatedRenderPassList* render_passes,
       const SkM44& output_color_matrix,
-      const FilterOperationsMap& render_pass_filters,
-      const FilterOperationsMap& render_pass_backdrop_filters,
       SurfaceDamageRectList surface_damage_rect_list,
-      OutputSurfaceOverlayPlane* output_surface_plane,
+      const PrimaryPlaneParams& primary_plane_params,
       CandidateList* overlay_candidates,
-      gfx::Rect* damage_rect,
-      std::vector<gfx::Rect>* content_bounds) override;
-
-  // For Mac, if we successfully generated a candidate list for CALayerOverlay,
-  // we no longer need the |output_surface_plane|. This function takes a pointer
-  // to the absl::optional instance so the instance can be reset.
-  // TODO(weiliangc): Internalize the |output_surface_plane| inside the overlay
-  // processor.
-  void AdjustOutputSurfaceOverlay(
-      absl::optional<OutputSurfaceOverlayPlane>* output_surface_plane) override;
+      gfx::Rect* damage_rect) override;
 
   gfx::CALayerResult GetCALayerErrorCode() const override;
 
@@ -75,7 +62,6 @@ class VIZ_SERVICE_EXPORT OverlayProcessorMac
   // The damage that should be added the next frame for drawing to the output
   // surface.
   gfx::Rect ca_overlay_damage_rect_;
-  gfx::Rect previous_frame_full_bounding_rect_;
 
  protected:
   // Protected for testing.
@@ -85,9 +71,6 @@ class VIZ_SERVICE_EXPORT OverlayProcessorMac
   CALayerOverlayProcessor* GetOverlayProcessor() const {
     return ca_layer_overlay_processor_.get();
   }
-
- private:
-  bool output_surface_already_handled_;
 };
 
 }  // namespace viz

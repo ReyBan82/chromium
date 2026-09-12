@@ -41,26 +41,19 @@ GbmSurfaceless::GbmSurfaceless(GbmSurfaceFactory* surface_factory,
                                gl::GLDisplayEGL* display,
                                std::unique_ptr<DrmWindowProxy> window,
                                gfx::AcceleratedWidget widget)
-    : Presenter(display, gfx::Size()),
-      surface_factory_(surface_factory),
+    : surface_factory_(surface_factory),
       window_(std::move(window)),
       widget_(widget),
-      has_implicit_external_sync_(
-          display->ext->b_EGL_ARM_implicit_external_sync) {
+      display_(display) {
   surface_factory_->RegisterSurface(window_->widget(), this);
   supports_plane_gpu_fences_ = window_->SupportsGpuFences();
-  unsubmitted_frames_.push_back(std::make_unique<PendingFrame>());
+  unsubmitted_frames_.push_back(
+      std::make_unique<PendingFrame>(next_frame_id()));
 }
 
 void GbmSurfaceless::QueueOverlayPlane(DrmOverlayPlane plane) {
   is_on_external_drm_device_ = !plane.buffer->drm_device()->is_primary_device();
   planes_.push_back(std::move(plane));
-}
-
-bool GbmSurfaceless::Initialize(gl::GLSurfaceFormat format) {
-  if (!SurfacelessEGL::Initialize(format))
-    return false;
-  return true;
 }
 
 bool GbmSurfaceless::ScheduleOverlayPlane(
@@ -76,10 +69,7 @@ bool GbmSurfaceless::Resize(const gfx::Size& size,
                             float scale_factor,
                             const gfx::ColorSpace& color_space,
                             bool has_alpha) {
-  if (window_)
-    window_->SetColorSpace(color_space);
-
-  return SurfacelessEGL::Resize(size, scale_factor, color_space, has_alpha);
+  return true;
 }
 
 bool GbmSurfaceless::SupportsPlaneGpuFences() const {
@@ -110,7 +100,8 @@ void GbmSurfaceless::Present(SwapCompletionCallback completion_callback,
   PendingFrame* frame = unsubmitted_frames_.back().get();
   frame->completion_callback = std::move(completion_callback);
   frame->presentation_callback = std::move(presentation_callback);
-  unsubmitted_frames_.push_back(std::make_unique<PendingFrame>());
+  unsubmitted_frames_.push_back(
+      std::make_unique<PendingFrame>(next_frame_id()));
 
   // TODO(dcastagna): Remove the following workaround once we get explicit sync
   // on all Intel boards, currently we don't have it on legacy KMS.
@@ -130,14 +121,15 @@ void GbmSurfaceless::Present(SwapCompletionCallback completion_callback,
 
   // TODO: the following should be replaced by a per surface flush as it gets
   // implemented in GL drivers.
-  EGLSyncKHR fence = InsertFence(has_implicit_external_sync_);
+  EGLSyncKHR fence = InsertFence();
   CHECK_NE(fence, EGL_NO_SYNC_KHR) << "eglCreateSyncKHR failed";
 
   base::OnceClosure fence_wait_task =
       base::BindOnce(&WaitForFence, GetEGLDisplay(), fence);
 
-  base::OnceClosure fence_retired_callback = base::BindOnce(
-      &GbmSurfaceless::FenceRetired, weak_factory_.GetWeakPtr(), frame);
+  base::OnceClosure fence_retired_callback =
+      base::BindOnce(&GbmSurfaceless::FenceRetired, weak_factory_.GetWeakPtr(),
+                     frame->frame_id);
 
   base::ThreadPool::PostTaskAndReply(
       FROM_HERE,
@@ -145,38 +137,16 @@ void GbmSurfaceless::Present(SwapCompletionCallback completion_callback,
       std::move(fence_wait_task), std::move(fence_retired_callback));
 }
 
-EGLConfig GbmSurfaceless::GetConfig() {
-  if (!config_) {
-    EGLint config_attribs[] = {EGL_BUFFER_SIZE,
-                               32,
-                               EGL_ALPHA_SIZE,
-                               8,
-                               EGL_BLUE_SIZE,
-                               8,
-                               EGL_GREEN_SIZE,
-                               8,
-                               EGL_RED_SIZE,
-                               8,
-                               EGL_RENDERABLE_TYPE,
-                               EGL_OPENGL_ES2_BIT,
-                               EGL_SURFACE_TYPE,
-                               EGL_DONT_CARE,
-                               EGL_NONE};
-    config_ = ChooseEGLConfig(GetEGLDisplay(), config_attribs);
-  }
-  return config_;
-}
-
 void GbmSurfaceless::SetRelyOnImplicitSync() {
   use_egl_fence_sync_ = false;
 }
 
 GbmSurfaceless::~GbmSurfaceless() {
-  Destroy();  // The EGL surface must be destroyed before SurfaceOzone.
   surface_factory_->UnregisterSurface(window_->widget());
 }
 
-GbmSurfaceless::PendingFrame::PendingFrame() = default;
+GbmSurfaceless::PendingFrame::PendingFrame(uint32_t frame_id)
+    : frame_id(frame_id) {}
 
 GbmSurfaceless::PendingFrame::~PendingFrame() = default;
 
@@ -196,11 +166,10 @@ void GbmSurfaceless::SubmitFrame() {
       if (overlay.z_order() == 0 && overlay.gpu_fence()) {
         submitted_frame_gpu_fence_ = std::make_unique<gfx::GpuFence>(
             overlay.gpu_fence()->GetGpuFenceHandle().Clone());
-        break;
       }
     }
     submitted_frame_ = std::move(unsubmitted_frames_.front());
-    unsubmitted_frames_.erase(unsubmitted_frames_.begin());
+    unsubmitted_frames_.pop_front();
 
     bool schedule_planes_succeeded =
         submitted_frame_->ScheduleOverlayPlanes(widget_);
@@ -221,17 +190,47 @@ void GbmSurfaceless::SubmitFrame() {
   }
 }
 
-EGLSyncKHR GbmSurfaceless::InsertFence(bool implicit) {
+EGLSyncKHR GbmSurfaceless::InsertFence() {
+  const bool has_global_fence = display_->ext->b_EGL_ANGLE_global_fence_sync;
+  const bool has_implicit_external_fence =
+      display_->ext->b_EGL_ARM_implicit_external_sync;
+
+  // Prefer EGL_ANGLE_global_fence_sync as it guarantees synchronization with
+  // past submissions from all contexts, rather than the current context.
+  const EGLenum syncType =
+      has_global_fence ? EGL_SYNC_GLOBAL_FENCE_ANGLE : EGL_SYNC_FENCE_KHR;
+  const bool use_implicit_external_sync =
+      has_implicit_external_fence && !has_global_fence;
   const EGLint attrib_list[] = {EGL_SYNC_CONDITION_KHR,
                                 EGL_SYNC_PRIOR_COMMANDS_IMPLICIT_EXTERNAL_ARM,
                                 EGL_NONE};
-  return eglCreateSyncKHR(GetEGLDisplay(), EGL_SYNC_FENCE_KHR,
-                          implicit ? attrib_list : nullptr);
+
+  return eglCreateSyncKHR(GetEGLDisplay(), syncType,
+                          use_implicit_external_sync ? attrib_list : nullptr);
 }
 
-void GbmSurfaceless::FenceRetired(PendingFrame* frame) {
-  frame->ready = true;
-  SubmitFrame();
+// Note: This O(1) lookup relies on frame IDs being monotonically increasing
+// and contiguous within unsubmitted_frames_. The unsigned 32-bit math correctly
+// handles UINT32_MAX wrap-around as long as the queue size is smaller than
+// 2^32.
+void GbmSurfaceless::FenceRetired(uint32_t frame_id) {
+  if (unsubmitted_frames_.empty()) {
+    return;
+  }
+
+  uint32_t first_frame_id = unsubmitted_frames_.front()->frame_id;
+  uint32_t index = frame_id - first_frame_id;
+  if (index < unsubmitted_frames_.size()) {
+    auto& frame = unsubmitted_frames_[index];
+    DCHECK_EQ(frame->frame_id, frame_id);
+    // If the frame doesn't have a completion callback yet, it means it hasn't
+    // been presented yet (it's the sentinel frame at the back).
+    if (!frame->completion_callback) {
+      return;
+    }
+    frame->ready = true;
+    SubmitFrame();
+  }
 }
 
 void GbmSurfaceless::OnSubmission(gfx::SwapResult result,
@@ -266,6 +265,10 @@ void GbmSurfaceless::OnPresentation(const gfx::PresentationFeedback& feedback) {
   }
 
   SubmitFrame();
+}
+
+EGLDisplay GbmSurfaceless::GetEGLDisplay() {
+  return display_->GetDisplay();
 }
 
 }  // namespace ui

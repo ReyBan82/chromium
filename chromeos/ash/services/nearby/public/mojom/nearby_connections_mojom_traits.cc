@@ -4,6 +4,8 @@
 
 #include "chromeos/ash/services/nearby/public/mojom/nearby_connections_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 nearby::connections::mojom::LogSeverity
@@ -24,33 +26,26 @@ EnumTraits<nearby::connections::mojom::LogSeverity,
   }
 
   NOTREACHED();
-  return nearby::connections::mojom::LogSeverity::kInfo;
 }
 
-bool EnumTraits<nearby::connections::mojom::LogSeverity,
-                nearby::api::LogMessage::Severity>::
-    FromMojom(nearby::connections::mojom::LogSeverity input,
-              nearby::api::LogMessage::Severity* out) {
+nearby::api::LogMessage::Severity
+EnumTraits<nearby::connections::mojom::LogSeverity,
+           nearby::api::LogMessage::Severity>::
+    FromMojom(nearby::connections::mojom::LogSeverity input) {
   switch (input) {
     case nearby::connections::mojom::LogSeverity::kVerbose:
-      *out = nearby::api::LogMessage::Severity::kVerbose;
-      return true;
+      return nearby::api::LogMessage::Severity::kVerbose;
     case nearby::connections::mojom::LogSeverity::kInfo:
-      *out = nearby::api::LogMessage::Severity::kInfo;
-      return true;
+      return nearby::api::LogMessage::Severity::kInfo;
     case nearby::connections::mojom::LogSeverity::kWarning:
-      *out = nearby::api::LogMessage::Severity::kWarning;
-      return true;
+      return nearby::api::LogMessage::Severity::kWarning;
     case nearby::connections::mojom::LogSeverity::kError:
-      *out = nearby::api::LogMessage::Severity::kError;
-      return true;
+      return nearby::api::LogMessage::Severity::kError;
     case nearby::connections::mojom::LogSeverity::kFatal:
-      *out = nearby::api::LogMessage::Severity::kFatal;
-      return true;
+      return nearby::api::LogMessage::Severity::kFatal;
   }
 
   NOTREACHED();
-  return false;
 }
 
 }  // namespace mojo

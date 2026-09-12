@@ -7,8 +7,9 @@
 
 #include "base/component_export.h"
 #include "build/build_config.h"
+#include "ui/base/mojom/window_show_state.mojom-forward.h"
 #include "ui/base/ui_base_types.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace gfx {
 class Rect;
@@ -44,7 +45,7 @@ class COMPONENT_EXPORT(UI_BASE) BaseWindow {
   virtual gfx::Rect GetRestoredBounds() const = 0;
 
   // Returns the restore state for the window (platform dependent).
-  virtual ui::WindowShowState GetRestoredState() const = 0;
+  virtual ui::mojom::WindowShowState GetRestoredState() const = 0;
 
   // Retrieves the window's current bounds, including its window.
   // This will only differ from GetRestoredBounds() for maximized
@@ -75,6 +76,15 @@ class COMPONENT_EXPORT(UI_BASE) BaseWindow {
   // Deactivates the window, making the next window in the Z order the active
   // window.
   virtual void Deactivate() = 0;
+
+#if BUILDFLAG(IS_ANDROID)
+  // Returns true if the window is currently in a state where it can be resized.
+  // If this returns true, |result| is set to WindowResizePrecheckResult::kOk.
+  // If this returns false, |result| is populated with the specific reason
+  // resizing is currently prohibited (e.g., the window is in a fixed-size
+  // state, not fully initialized on Android, or constrained by a modal dialog).
+  virtual bool CanResize(ui::WindowResizePrecheckResult& result) const = 0;
+#endif
 
   // Maximizes/minimizes/restores the window.
   virtual void Maximize() = 0;

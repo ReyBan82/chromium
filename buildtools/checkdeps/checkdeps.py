@@ -51,7 +51,7 @@ class DepsChecker(DepsBuilder):
     """Creates a new DepsChecker.
 
     Args:
-      base_directory: OS-compatible path to root of checkout, e.g. C:\chr\src.
+      base_directory: OS-compatible path to root of checkout, e.g. C:\\chr\\src.
       verbose: Set to true for debug output.
       being_tested: Set to true to ignore the DEPS file at
                     buildtools/checkdeps/DEPS.
@@ -149,7 +149,8 @@ class DepsChecker(DepsBuilder):
       rule_description is human-readable. Empty if no problems.
     """
     return self.CheckIncludesAndImports(
-        added_includes, cpp_checker.CppChecker(self.verbose))
+        added_includes, cpp_checker.CppChecker(
+        self.verbose, self._resolve_dotdot, self.base_directory))
 
   def CheckAddedJavaImports(self, added_imports,
                             allow_multiple_definitions=None):
@@ -186,7 +187,7 @@ class DepsChecker(DepsBuilder):
     """
     return self.CheckIncludesAndImports(
         added_imports, proto_checker.ProtoChecker(
-            verbose=self.verbose, root_dir=self.base_directory))
+        self.verbose, self._resolve_dotdot, self.base_directory))
 
 def PrintUsage():
   print("""Usage: python checkdeps.py [--root <root>] [tocheck]
@@ -235,6 +236,10 @@ def main():
       action='store_true', dest='skip_tests', default=False,
       help='Skip checking test files (best effort).')
   option_parser.add_option(
+      '-s', '--suppress-syntax-warnings',
+      action='store_true', dest='suppress_syntax_warnings', default=False,
+      help='Suppress SyntaxWarning messages from Python')
+  option_parser.add_option(
       '-v', '--verbose',
       action='store_true', default=False,
       help='Print debug logging')
@@ -248,6 +253,10 @@ def main():
            'to the file perfoming the inclusion.')
 
   options, args = option_parser.parse_args()
+
+  if options.suppress_syntax_warnings:
+    import warnings
+    warnings.filterwarnings("ignore", category=SyntaxWarning)
 
   deps_checker = DepsChecker(options.base_directory,
                              extra_repos=options.extra_repos,

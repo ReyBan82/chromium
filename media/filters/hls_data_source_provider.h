@@ -7,133 +7,216 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string_view>
 
+#include "base/containers/queue.h"
+#include "base/containers/span.h"
 #include "base/functional/callback.h"
-#include "base/strings/string_piece_forward.h"
+#include "base/sequence_checker.h"
+#include "base/types/id_type.h"
+#include "media/base/data_source.h"
 #include "media/base/media_export.h"
 #include "media/base/status.h"
+#include "media/filters/hls_demuxer_status.h"
+#include "media/formats/hls/security_metadata.h"
 #include "media/formats/hls/types.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 namespace media {
 
-namespace {
+class HlsDataSourceStream;
 
-// A small-ish size that it should probably be able to get most manifests in
-// a single chunk. Chosen somewhat arbitrarily otherwise.
-constexpr size_t kDefaultReadSize = 0xFFFF;
-
-}  // namespace
-
-class HlsDemuxer;
-
-// Interface which can provide HlsDemuxer with data, respecting byterange
-// boundaries.
-class MEDIA_EXPORT HlsDataSource {
- public:
-  enum class ReadStatusCodes : StatusCodeType {
-    kError,
-    kAborted,
-  };
-  struct ReadStatusTraits {
-    using Codes = ReadStatusCodes;
-    static constexpr StatusGroupType Group() {
-      return "HlsDataSource::ReadStatus";
-    }
-  };
-  using ReadStatus = TypedStatus<ReadStatusTraits>;
-  using ReadCb = base::OnceCallback<void(ReadStatus::Or<size_t>)>;
-
-  explicit HlsDataSource(absl::optional<uint64_t> size) : size_(size) {}
-  virtual ~HlsDataSource();
-
-  // Issues a read to the underlying data source, writing the results to
-  // `buffer` and running `callback` once that's completed. `pos` is a 0-based
-  // starting byte to read from, which will be mapped to the correct byterange
-  // within the underlying data source. `size` is the maximum number of bytes
-  // that may be written into `buffer`, and must be greater than 0. If an error
-  // occurred, `callback` will be run with the error status. Otherwise, it's run
-  // with the number of bytes read into `buffer`. If the number of bytes read is
-  // 0, there is no more data left in the data source.
-  virtual void Read(uint64_t pos,
-                    size_t size,
-                    uint8_t* buffer,
-                    ReadCb callback) = 0;
-
-  // Returns the MIME type of the underlying data source.
-  virtual base::StringPiece GetMimeType() const = 0;
-
-  // Returns the size of the underlying data source. If the size is unknown,
-  // returns `absl::nullopt`.
-  absl::optional<size_t> GetSize() const { return size_; }
-
- protected:
-  const absl::optional<size_t> size_;
-};
-
-// Interface which can provide the HlsDemuxer with data sources, given a URI and
-// an optional byterange. This interface should be used via
-// `base::SequenceBound` to proxy requests across the media thread and the main
-// thread.
+// Interface which can provide data sources, given a URI and an optional
+// byterange. This interface should be used via `base::SequenceBound` to proxy
+// requests across the media thread and the main thread.
 class MEDIA_EXPORT HlsDataSourceProvider {
  public:
-  virtual ~HlsDataSourceProvider();
+  virtual ~HlsDataSourceProvider() = 0;
 
-  // Sets the owning HlsDemuxer for this HlsDataSourceProvider.
-  // This may only be called once.
-  virtual void SetOwner(HlsDemuxer*) = 0;
+  using ReadResult = HlsDemuxerStatus::Or<std::unique_ptr<HlsDataSourceStream>>;
+  using ReadCb = HlsDemuxerStatusCb<std::unique_ptr<HlsDataSourceStream>>;
 
-  // API allowing an HlsDemuxer to make requests for external data.
-  using RequestCb = base::OnceCallback<void(std::unique_ptr<HlsDataSource>)>;
-  virtual void RequestDataSource(GURL uri,
-                                 absl::optional<hls::types::ByteRange> range,
-                                 RequestCb) = 0;
+  // Represents reading from a specific URI at the given byte range. Multiple
+  // segments can be added to a read queue to join chunks together from either
+  // multiple URIs or from multiple disjoing ranges on the same URI.
+  struct UrlDataSegment {
+    const GURL uri;
+    const std::optional<hls::types::ByteRange> range;
+    const DataSource::CacheMode cache_mode;
+    const DataSource::EncodingMode encoding_mode =
+        DataSource::EncodingMode::kIdentity;
+  };
+  // Kicks off a read to a single segment, and replies with a stream
+  // reference which can be used to continue fetching partial data.
+  virtual void ReadFromUrl(UrlDataSegment segment, ReadCb callback) = 0;
+
+  // Continues to read from an existing stream.
+  virtual void ReadFromExistingStream(
+      std::unique_ptr<HlsDataSourceStream> stream,
+      ReadCb callback) = 0;
+
+  // Aborts all pending reads and calls `callback` when finished.
+  virtual void AbortPendingReads(base::OnceClosure callback) = 0;
 };
 
 // A buffer-owning wrapper for an HlsDataSource which can be instructed to
 // read an entire data source, or to retrieve it in chunks.
 class MEDIA_EXPORT HlsDataSourceStream {
  public:
-  using Self = HlsDataSourceStream;
-  using ReadResult = HlsDataSource::ReadStatus::Or<Self>;
+  // The response to a stream read includes a raw pointer back to the stream
+  // which allows accessing the data from a read as well as caching a partially
+  // read stream handle for continued downloading.
+  using StreamId = base::IdType32<HlsDataSourceStream>;
 
-  // Callback fired when attempting to read the entire datasource at once.
-  using ReadCb = base::OnceCallback<void(ReadResult)>;
-
-  HlsDataSourceStream(std::unique_ptr<HlsDataSource> data_source);
+  // Create a stream where `on_destructed_cb` is used to give notice that this
+  // class is being destroyed. This class isn't safe to access from anything
+  // except for an ownership-holding smart pointer, as the destruction cb may
+  // do work across threads.
+  HlsDataSourceStream(StreamId stream_id,
+                      HlsDataSourceProvider::UrlDataSegment segment,
+                      base::OnceClosure on_destructed_cb);
   ~HlsDataSourceStream();
-  HlsDataSourceStream(const HlsDataSourceStream&) = delete;
-  HlsDataSourceStream(HlsDataSourceStream&&);
 
-  // Helpers for checking the internal state of the stream.
+  // Streams use an ID associated with a MultiBufferDataSource without
+  // owning it.
+  StreamId stream_id() const { return stream_id_; }
+
+  // Gets the URI from which the data was ultimately read, after any redirects.
+  // Before the data has been read and this URL can be determined, it returns
+  // nullopt, rather than guessing the URI based on the pre-redirect URI.
+  const std::optional<GURL>& uri() const { return uri_; }
+
+  // This is the byte position in the MultiBufferDataSource where new data
+  // will be read from. This only ever goes up, because these streams are not
+  // rewindable.
+  size_t read_position() const { return read_position_; }
+
+  size_t buffer_size() const { return buffer_.size(); }
+
+  std::optional<size_t> max_read_position() const { return max_read_position_; }
+
+  base::span<const uint8_t> data() const { return buffer_; }
+
+  uint64_t memory_usage() const { return memory_usage_; }
+
+  const hls::SecurityMetadata& SecurityInfo() const { return security_info_; }
+
+  void SetSecurityInfoForTesting(hls::SecurityMetadata inf) {
+    security_info_ = inf;
+  }
+
+  // Sets the URI for this data source - it must come from the post-redirect URI
+  // of the datasource.
+  void SetPostRedirectUri(GURL uri) { uri_ = std::move(uri); }
+
+  // Merge another security metadata into the current one. This combines the
+  // origin sets and merges the security flags.
+  void MergeSecurityMetadata(const hls::SecurityMetadata& other);
+
+  // Prepend another stream's data and merge its security metadata.
+  // This is used for parallel fetching of init segment and media segment.
+  void PrependInitStream(std::unique_ptr<HlsDataSourceStream> init_stream);
+
+  // A stream's origin is considered tainted if any backing data source involved
+  // in this playback is tainted.
+  void set_would_taint_origin() { security_info_.would_taint_origin = true; }
+
+  // A stream is considered to require a range request if any of the sub-URIs
+  // in the stream use range requests.
+  void set_requires_range_request() { security_info_.has_range_request = true; }
+
+  // A stream in which any constituent request had a redirect is considered to
+  // have a redirect. This state must never unset for security reasons.
+  void set_did_redirect() { security_info_.did_redirect = true; }
+
+  // Track all included security origins that are part of this request in order
+  // to make sure that we aren't merging cross origin data.
+  void TrackOrigin(const url::Origin& origin);
+
+  // Allows the stream creator to update memory usage after the first or after
+  // subsequent reads.
+  void set_total_memory_usage(uint64_t usage) { memory_usage_ = usage; }
+
+  // Often the network data for HLS consists of plain-text manifest files, so
+  // this supports accessing the fetched data as a string view.
+  std::string_view AsString() const;
+
+  // Determines whether the stream has been initialized with a data source.
+  bool RequiresInit() const;
+
+  // Gets the segment info to initialize the data source. It is invalid to call
+  // this method if `RequiresInit` does not return true.
+  std::tuple<GURL,
+             DataSource::CacheMode,
+             DataSource::RangeMode,
+             DataSource::EncodingMode>
+  GetSegmentInfo();
+
+  // Has the stream read all possible data?
   bool CanReadMore() const;
-  size_t BytesInBuffer() const;
 
-  // Helpers for accessing the buffer.
-  base::StringPiece AsStringPiece() const;
-  const uint8_t* AsRawData() const;
+  // Clears the internal buffer of data. Continual reads will refill the buffer
+  // and reading without clearing will append to the end of the buffer.
+  void Clear();
 
-  // Reset the internal buffer.
-  void Flush();
+  // Used by a HlsDataSourceProvider implementation to finish adding data to
+  // the internal buffer.
+  void UnlockStreamPostWrite(size_t read_size, bool end_of_stream);
 
-  // Read the entire data source at once, unless the data source has an
-  // undetermined size. In the case of undetermined size, ReadAll's behavior
-  // will default to chunk-by-chunk reading.
-  void ReadAll(ReadCb cb) &&;
-
-  // Read just one chunk of data of a given size.
-  void ReadChunk(ReadCb cb, size_t read_size = kDefaultReadSize) &&;
+  // Used by a HlsDataSourceProvider implementation to start adding new data,
+  // which means ensuring that there is enough space for the expected write, as
+  // well as returning the correct buffer address to write into.
+  base::span<uint8_t> LockStreamForWriting(size_t ensure_minimum_space);
 
  private:
-  // The data source to read from.
-  std::unique_ptr<HlsDataSource> data_source_;
+  const StreamId stream_id_;
 
-  // the buffer of data to read into.
+  // Critital info regarding the security of requests.
+  hls::SecurityMetadata security_info_;
+
+  // Active buffer data. Reading without clearing will append new data
+  // to the end of the buffer. Clearing will not reset the read-head, but will
+  // empty this buffer.
+  // TODO(crbug.com/40057824): Consider swapping out the vector with a more
+  // size-flexible data structure to avoid resizing.
   std::vector<uint8_t> buffer_;
 
-  // The total number of bytes read. Not affected by |Flush|.
-  size_t total_bytes_read_ = 0;
+  // The memory usage represents the total memory usage for _all_ streams used
+  // in this playback.
+  uint64_t memory_usage_ = 0;
+
+  size_t read_position_ = 0;
+
+  // The write index into `buffer_`. This gets reset on flush.
+  size_t write_index_ = 0;
+
+  // If this optional value is set, then data can't be read past this maximum
+  // value.
+  std::optional<size_t> max_read_position_;
+
+  // The data source read response indicated that the stream has ended.
+  bool reached_end_of_stream_ = false;
+
+  // The stream is unable to start a second write or clear until it is unlocked
+  // by UnlockStreamPostWrite.
+  bool stream_locked_ = false;
+
+  // The segment to read from.
+  HlsDataSourceProvider::UrlDataSegment segment_;
+
+  // The post-read URL after redirects. This is effectively unknown until any
+  // reading has started, hence the optional nature.
+  std::optional<GURL> uri_ = std::nullopt;
+
+  // Does this stream require initialization.
+  bool requires_init_ = true;
+
+  base::OnceClosure on_destructed_cb_;
+
+  SEQUENCE_CHECKER(sequence_checker_);
+  base::WeakPtrFactory<HlsDataSourceStream> weak_factory_{this};
 };
 
 }  // namespace media

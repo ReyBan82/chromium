@@ -22,16 +22,14 @@ class VariationsClient;
 // requests is for a google domains, it adds variations where appropriate (see
 // VariationsHeaderHelper::AppendHeaderIfNeeded) and removes them on redirect
 // if necessary.
-class VariationsURLLoaderThrottle
-    : public blink::URLLoaderThrottle,
-      public base::SupportsWeakPtr<VariationsURLLoaderThrottle> {
+class VariationsURLLoaderThrottle : public blink::URLLoaderThrottle {
  public:
   // Constructor for throttles created outside the render thread. Allows us to
   // distinguish between Owner::kUnknownFromRenderer and Owner::kUnknown for
   // ResourceRequests without TrustedParams. See IsFirstPartyContext() in
   // variations_http_headers.cc for more details.
   //
-  // TODO(crbug.com/1094303): Consider removing this once we've confirmed that
+  // TODO(crbug.com/40135370): Consider removing this once we've confirmed that
   // non-render-thread-initiated requests have TrustedParams when needed.
   explicit VariationsURLLoaderThrottle(
       variations::mojom::VariationsHeadersPtr variations_headers);
@@ -65,9 +63,7 @@ class VariationsURLLoaderThrottle
       net::RedirectInfo* redirect_info,
       const network::mojom::URLResponseHead& response_head,
       bool* defer,
-      std::vector<std::string>* to_be_removed_headers,
-      net::HttpRequestHeaders* modified_headers,
-      net::HttpRequestHeaders* modified_cors_exempt_headers) override;
+      network::HttpRequestHeadersUpdateParams* headers_update_params) override;
 
   // Stores multiple appropriate variations headers. See GetClientDataHeaders()
   // in variations_ids_provider.h for more details.

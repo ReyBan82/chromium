@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "components/cast_receiver/browser/permissions_manager_impl.h"
+
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
@@ -10,7 +11,7 @@
 
 namespace cast_receiver {
 
-// TODO(crbug.com/1356310): Add tests for ApplicationStateObserver.
+// TODO(crbug.com/40236247): Add tests for ApplicationStateObserver.
 class PermissionsManagerImplTest : public testing::Test {
  public:
   PermissionsManagerImplTest()
@@ -42,7 +43,8 @@ TEST_F(PermissionsManagerImplTest, Test) {
   EXPECT_FALSE(HasPermission(blink::PermissionType::NOTIFICATIONS, sub_url));
   EXPECT_FALSE(HasPermission(blink::PermissionType::NOTIFICATIONS, other_url));
   EXPECT_FALSE(HasPermission(blink::PermissionType::MIDI, app_url_));
-  EXPECT_FALSE(HasPermission(blink::PermissionType::DURABLE_STORAGE, app_url_));
+  EXPECT_FALSE(
+      HasPermission(blink::PermissionType::PERSISTENT_STORAGE, app_url_));
 
   permissions_manager_.AddPermission(blink::PermissionType::NOTIFICATIONS);
   EXPECT_TRUE(HasPermission(blink::PermissionType::NOTIFICATIONS, app_url_));
@@ -50,7 +52,8 @@ TEST_F(PermissionsManagerImplTest, Test) {
   EXPECT_TRUE(HasPermission(blink::PermissionType::NOTIFICATIONS, sub_url));
   EXPECT_FALSE(HasPermission(blink::PermissionType::NOTIFICATIONS, other_url));
   EXPECT_FALSE(HasPermission(blink::PermissionType::MIDI, app_url_));
-  EXPECT_FALSE(HasPermission(blink::PermissionType::DURABLE_STORAGE, app_url_));
+  EXPECT_FALSE(
+      HasPermission(blink::PermissionType::PERSISTENT_STORAGE, app_url_));
 
   permissions_manager_.AddOrigin(url::Origin::Create(http_url));
   EXPECT_TRUE(HasPermission(blink::PermissionType::NOTIFICATIONS, app_url_));
@@ -58,7 +61,8 @@ TEST_F(PermissionsManagerImplTest, Test) {
   EXPECT_TRUE(HasPermission(blink::PermissionType::NOTIFICATIONS, sub_url));
   EXPECT_FALSE(HasPermission(blink::PermissionType::NOTIFICATIONS, other_url));
   EXPECT_FALSE(HasPermission(blink::PermissionType::MIDI, app_url_));
-  EXPECT_FALSE(HasPermission(blink::PermissionType::DURABLE_STORAGE, app_url_));
+  EXPECT_FALSE(
+      HasPermission(blink::PermissionType::PERSISTENT_STORAGE, app_url_));
 
   permissions_manager_.AddPermission(blink::PermissionType::MIDI);
   EXPECT_TRUE(HasPermission(blink::PermissionType::NOTIFICATIONS, app_url_));
@@ -66,7 +70,8 @@ TEST_F(PermissionsManagerImplTest, Test) {
   EXPECT_TRUE(HasPermission(blink::PermissionType::NOTIFICATIONS, sub_url));
   EXPECT_FALSE(HasPermission(blink::PermissionType::NOTIFICATIONS, other_url));
   EXPECT_TRUE(HasPermission(blink::PermissionType::MIDI, app_url_));
-  EXPECT_FALSE(HasPermission(blink::PermissionType::DURABLE_STORAGE, app_url_));
+  EXPECT_FALSE(
+      HasPermission(blink::PermissionType::PERSISTENT_STORAGE, app_url_));
 }
 
 }  // namespace cast_receiver

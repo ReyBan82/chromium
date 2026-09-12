@@ -7,11 +7,16 @@
 
 #include "components/autofill/core/browser/strike_databases/payments/credit_card_save_strike_database.h"
 
+namespace strike_database {
+class StrikeDatabase;
+}
+
 namespace autofill {
 
 class TestCreditCardSaveStrikeDatabase : public CreditCardSaveStrikeDatabase {
  public:
-  explicit TestCreditCardSaveStrikeDatabase(StrikeDatabase* strike_database);
+  explicit TestCreditCardSaveStrikeDatabase(
+      strike_database::StrikeDatabase* strike_database);
 };
 
 }  // namespace autofill

@@ -6,17 +6,20 @@ package org.chromium.chrome.browser.flags;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.JniType;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.ui.messages.snackbar.Snackbar;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManager;
 import org.chromium.chrome.browser.ui.messages.snackbar.SnackbarManagerProvider;
 import org.chromium.ui.base.WindowAndroid;
 
-/**
- * This class provides for native code to manage a Bad Flags {@link Snackbar}.
- */
+/** This class provides for native code to manage a Bad Flags {@link Snackbar}. */
 @JNINamespace("chrome")
+@NullMarked
 public class BadFlagsSnackbarManager {
     /**
      * Show the snackbar.
@@ -25,16 +28,17 @@ public class BadFlagsSnackbarManager {
      * @param message Message to be shown in the snackbar.
      */
     @CalledByNative
-    public static void show(WindowAndroid windowAndroid, String message) {
+    public static void show(
+            WindowAndroid windowAndroid, @JniType("std::u16string") String message) {
         createSnackbar(message, SnackbarManagerProvider.from(windowAndroid));
     }
 
     @VisibleForTesting
-    static void createSnackbar(String message, SnackbarManager snackbarManager) {
+    static void createSnackbar(String message, @Nullable SnackbarManager snackbarManager) {
         if (snackbarManager == null) return;
         Snackbar snackBar =
                 Snackbar.make(message, null, Snackbar.TYPE_NOTIFICATION, Snackbar.UMA_BAD_FLAGS);
-        snackBar.setSingleLine(false);
+        snackBar.setDefaultLines(false);
         snackBar.setDuration(SnackbarManager.DEFAULT_SNACKBAR_DURATION_LONG_MS);
         snackbarManager.showSnackbar(snackBar);
     }

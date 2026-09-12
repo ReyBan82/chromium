@@ -6,18 +6,23 @@ package org.chromium.components.crash;
 
 import android.annotation.SuppressLint;
 import android.os.Build;
-import android.util.Log;
 
+import org.chromium.base.AndroidInfo;
 import org.chromium.base.ApiCompatibilityUtils;
-import org.chromium.base.BuildInfo;
-import org.chromium.base.CollectionUtil;
+import org.chromium.base.ApkInfo;
 import org.chromium.base.CommandLine;
 import org.chromium.base.ContextUtils;
+import org.chromium.base.DeviceInfo;
+import org.chromium.base.Log;
 import org.chromium.base.PiiElider;
 import org.chromium.base.StrictModeContext;
-import org.chromium.build.annotations.MainDex;
+import org.chromium.base.version_info.VersionInfo;
+import org.chromium.build.BuildConfig;
+import org.chromium.build.annotations.EnsuresNonNull;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.build.annotations.RequiresNonNull;
 import org.chromium.components.minidump_uploader.CrashFileManager;
-import org.chromium.components.version_info.VersionInfo;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -31,9 +36,10 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
 /**
  * Creates a crash report and uploads it to crash server if there is a Java exception.
  *
- * This class is written in pure Java, so it can handle exception happens before native is loaded.
+ * <p>This class is written in pure Java, so it can handle exception happens before native is
+ * loaded.
  */
-@MainDex
+@NullMarked
 public abstract class PureJavaExceptionReporter
         implements PureJavaExceptionHandler.JavaExceptionReporter {
     // report fields, please keep the name sync with MIME blocks in breakpad_linux.cc
@@ -58,7 +64,6 @@ public abstract class PureJavaExceptionReporter
     public static final String EXCEPTION_INFO = "exception_info";
     public static final String PROCESS_TYPE = "ptype";
     public static final String EARLY_JAVA_EXCEPTION = "early_java_exception";
-    public static final String CUSTOM_THEMES = "custom_themes";
     public static final String RESOURCES_VERSION = "resources_version";
 
     private static final String DUMP_LOCATION_SWITCH = "breakpad-dump-location";
@@ -67,13 +72,13 @@ public abstract class PureJavaExceptionReporter
     private static final String FORM_DATA_MESSAGE = "Content-Disposition: form-data; name=\"";
 
     private boolean mUpload;
-    protected Map<String, String> mReportContent;
-    protected File mMinidumpFile;
-    private FileOutputStream mMinidumpFileStream;
+    protected @Nullable Map<String, String> mReportContent;
+    protected @Nullable File mMinidumpFile;
+    private @Nullable FileOutputStream mMinidumpFileStream;
     private final String mLocalId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
     private final String mBoundary = "------------" + UUID.randomUUID() + RN;
 
-    private boolean mAttachLogcat;
+    private final boolean mAttachLogcat;
 
     public PureJavaExceptionReporter(boolean attachLogcat) {
         mAttachLogcat = attachLogcat;
@@ -89,12 +94,14 @@ public abstract class PureJavaExceptionReporter
         }
     }
 
+    @RequiresNonNull("mMinidumpFileStream")
     private void addPairedString(String messageType, String messageData) {
         addString(mBoundary);
         addString(FORM_DATA_MESSAGE + messageType + "\"");
         addString(RN + RN + messageData + RN);
     }
 
+    @RequiresNonNull("mMinidumpFileStream")
     private void addString(String s) {
         try {
             mMinidumpFileStream.write(ApiCompatibilityUtils.getBytesUtf8(s));
@@ -104,13 +111,13 @@ public abstract class PureJavaExceptionReporter
     }
 
     @SuppressLint("WrongConstant")
+    @EnsuresNonNull("mReportContent")
     private void createReportContent(Throwable javaException) {
         String processName = ContextUtils.getProcessName();
         if (processName == null || !processName.contains(":")) {
             processName = "browser";
         }
 
-        BuildInfo buildInfo = BuildInfo.getInstance();
         mReportContent = new HashMap<>();
         mReportContent.put(PRODUCT, getProductName());
         mReportContent.put(PROCESS_TYPE, processName);
@@ -121,23 +128,27 @@ public abstract class PureJavaExceptionReporter
         mReportContent.put(MODEL, Build.MODEL);
         mReportContent.put(BRAND, Build.BRAND);
         mReportContent.put(BOARD, Build.BOARD);
-        mReportContent.put(ANDROID_BUILD_FP, buildInfo.androidBuildFingerprint);
+        mReportContent.put(ANDROID_BUILD_FP, AndroidInfo.getAndroidBuildFingerprint());
         // ANDROID_SDK_INT and SDK are expected to have the same value.
         // ANDROID_SDK_INT is needed for compatibility with the C++ crashpad implementation.
         // SDK should be maintained for potential custom monitoring.
         mReportContent.put(SDK, String.valueOf(Build.VERSION.SDK_INT));
         mReportContent.put(ANDROID_SDK_INT, String.valueOf(Build.VERSION.SDK_INT));
-        mReportContent.put(GMS_CORE_VERSION, buildInfo.gmsVersionCode);
-        mReportContent.put(INSTALLER_PACKAGE_NAME, buildInfo.installerPackageName);
-        mReportContent.put(ABI_NAME, buildInfo.abiString);
-        mReportContent.put(EXCEPTION_INFO,
+        mReportContent.put(GMS_CORE_VERSION, DeviceInfo.getGmsVersionCode());
+        mReportContent.put(INSTALLER_PACKAGE_NAME, ApkInfo.getInstallerPackageName());
+        mReportContent.put(ABI_NAME, AndroidInfo.getAndroidSupportedAbis());
+        mReportContent.put(
+                EXCEPTION_INFO,
                 PiiElider.sanitizeStacktrace(Log.getStackTraceString(javaException)));
         mReportContent.put(EARLY_JAVA_EXCEPTION, "true");
-        mReportContent.put(PACKAGE,
-                String.format("%s v%s (%s)", BuildInfo.getFirebaseAppId(), buildInfo.versionCode,
-                        buildInfo.versionName));
-        mReportContent.put(CUSTOM_THEMES, buildInfo.customThemes);
-        mReportContent.put(RESOURCES_VERSION, buildInfo.resourcesVersion);
+        mReportContent.put(
+                PACKAGE,
+                String.format(
+                        "%s v%s (%s)",
+                        ApkInfo.getPackageName(),
+                        BuildConfig.VERSION_CODE,
+                        ApkInfo.getPackageVersionName()));
+        mReportContent.put(RESOURCES_VERSION, ApkInfo.getResourcesVersion());
 
         AtomicReferenceArray<String> values = CrashKeys.getInstance().getValues();
         for (int i = 0; i < values.length(); i++) {
@@ -146,17 +157,20 @@ public abstract class PureJavaExceptionReporter
         }
     }
 
+    @RequiresNonNull("mReportContent")
     protected void createReportFile() {
         try {
             String minidumpFileName = getMinidumpPrefix() + mLocalId + FILE_SUFFIX;
             File minidumpDir = new File(getCrashFilesDirectory(), CrashFileManager.CRASH_DUMP_DIR);
             // Tests disable minidump uploading by not creating the minidump directory.
             mUpload = minidumpDir.exists();
-            String overrideMinidumpDirPath =
-                    CommandLine.getInstance().getSwitchValue(DUMP_LOCATION_SWITCH);
-            if (overrideMinidumpDirPath != null) {
-                minidumpDir = new File(overrideMinidumpDirPath);
-                minidumpDir.mkdirs();
+            if (CommandLine.isInitialized()) {
+                String overrideMinidumpDirPath =
+                        CommandLine.getInstance().getSwitchValue(DUMP_LOCATION_SWITCH);
+                if (overrideMinidumpDirPath != null) {
+                    minidumpDir = new File(overrideMinidumpDirPath);
+                    minidumpDir.mkdirs();
+                }
             }
             mMinidumpFile = new File(minidumpDir, minidumpFileName);
             mMinidumpFileStream = new FileOutputStream(mMinidumpFile);
@@ -165,7 +179,9 @@ public abstract class PureJavaExceptionReporter
             mMinidumpFileStream = null;
             return;
         }
-        CollectionUtil.forEach(mReportContent, e -> { addPairedString(e.getKey(), e.getValue()); });
+        for (var e : mReportContent.entrySet()) {
+            addPairedString(e.getKey(), e.getValue());
+        }
         addString(mBoundary);
         flushToFile();
     }
@@ -204,15 +220,14 @@ public abstract class PureJavaExceptionReporter
         if (mMinidumpFile == null || !mUpload) return;
         if (mAttachLogcat) {
             LogcatCrashExtractor logcatExtractor = new LogcatCrashExtractor();
-            mMinidumpFile = logcatExtractor.attachLogcatToMinidump(
-                    mMinidumpFile, new CrashFileManager(getCrashFilesDirectory()));
+            mMinidumpFile =
+                    logcatExtractor.attachLogcatToMinidump(
+                            mMinidumpFile, new CrashFileManager(getCrashFilesDirectory()));
         }
         uploadMinidump(mMinidumpFile);
     }
 
-    /**
-     * @return the product name to be used in the crash report.
-     */
+    /** @return the product name to be used in the crash report. */
     protected abstract String getProductName();
 
     /**
@@ -222,13 +237,9 @@ public abstract class PureJavaExceptionReporter
      */
     protected abstract void uploadMinidump(File minidump);
 
-    /**
-     * @return prefix to be added before the minidump file name.
-     */
+    /** @return prefix to be added before the minidump file name. */
     protected abstract String getMinidumpPrefix();
 
-    /**
-     * @return The top level directory where all crash related files are stored.
-     */
+    /** @return The top level directory where all crash related files are stored. */
     protected abstract File getCrashFilesDirectory();
 }

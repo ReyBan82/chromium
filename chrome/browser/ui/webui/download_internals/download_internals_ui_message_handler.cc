@@ -5,7 +5,7 @@
 #include "chrome/browser/ui/webui/download_internals/download_internals_ui_message_handler.h"
 
 #include "base/functional/bind.h"
-#include "base/guid.h"
+#include "base/uuid.h"
 #include "base/values.h"
 #include "chrome/browser/download/background_download_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
@@ -21,8 +21,9 @@ DownloadInternalsUIMessageHandler::DownloadInternalsUIMessageHandler()
     : download_service_(nullptr) {}
 
 DownloadInternalsUIMessageHandler::~DownloadInternalsUIMessageHandler() {
-  if (download_service_)
+  if (download_service_) {
     download_service_->GetLogger()->RemoveObserver(this);
+  }
 }
 
 void DownloadInternalsUIMessageHandler::RegisterMessages() {
@@ -49,47 +50,52 @@ void DownloadInternalsUIMessageHandler::RegisterMessages() {
 }
 
 void DownloadInternalsUIMessageHandler::OnServiceStatusChanged(
-    const base::Value::Dict& service_status) {
-  if (!IsJavascriptAllowed())
+    const base::DictValue& service_status) {
+  if (!IsJavascriptAllowed()) {
     return;
+  }
 
   FireWebUIListener("service-status-changed", service_status);
 }
 
 void DownloadInternalsUIMessageHandler::OnServiceDownloadsAvailable(
-    const base::Value::List& service_downloads) {
-  if (!IsJavascriptAllowed())
+    const base::ListValue& service_downloads) {
+  if (!IsJavascriptAllowed()) {
     return;
+  }
 
   FireWebUIListener("service-downloads-available", service_downloads);
 }
 
 void DownloadInternalsUIMessageHandler::OnServiceDownloadChanged(
-    const base::Value::Dict& service_download) {
-  if (!IsJavascriptAllowed())
+    const base::DictValue& service_download) {
+  if (!IsJavascriptAllowed()) {
     return;
+  }
 
   FireWebUIListener("service-download-changed", service_download);
 }
 
 void DownloadInternalsUIMessageHandler::OnServiceDownloadFailed(
-    const base::Value::Dict& service_download) {
-  if (!IsJavascriptAllowed())
+    const base::DictValue& service_download) {
+  if (!IsJavascriptAllowed()) {
     return;
+  }
 
   FireWebUIListener("service-download-failed", service_download);
 }
 
 void DownloadInternalsUIMessageHandler::OnServiceRequestMade(
-    const base::Value::Dict& service_request) {
-  if (!IsJavascriptAllowed())
+    const base::DictValue& service_request) {
+  if (!IsJavascriptAllowed()) {
     return;
+  }
 
   FireWebUIListener("service-request-made", service_request);
 }
 
 void DownloadInternalsUIMessageHandler::HandleGetServiceStatus(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
   const base::Value& callback_id = args[0];
   ResolveJavascriptCallback(callback_id,
@@ -97,7 +103,7 @@ void DownloadInternalsUIMessageHandler::HandleGetServiceStatus(
 }
 
 void DownloadInternalsUIMessageHandler::HandleGetServiceDownloads(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
   const base::Value& callback_id = args[0];
   ResolveJavascriptCallback(
@@ -105,7 +111,7 @@ void DownloadInternalsUIMessageHandler::HandleGetServiceDownloads(
 }
 
 void DownloadInternalsUIMessageHandler::HandleStartDownload(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   CHECK_GT(args.size(), 1u) << "Missing argument download URL.";
   GURL url = GURL(args[1].GetString());
   if (!url.is_valid()) {
@@ -114,7 +120,7 @@ void DownloadInternalsUIMessageHandler::HandleStartDownload(
   }
 
   download::DownloadParams params;
-  params.guid = base::GenerateGUID();
+  params.guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
   params.client = download::DownloadClient::DEBUGGING;
   params.request_params.method = "GET";
   params.request_params.url = url;

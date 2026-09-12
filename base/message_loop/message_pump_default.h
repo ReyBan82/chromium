@@ -5,6 +5,8 @@
 #ifndef BASE_MESSAGE_LOOP_MESSAGE_PUMP_DEFAULT_H_
 #define BASE_MESSAGE_LOOP_MESSAGE_PUMP_DEFAULT_H_
 
+#include <optional>
+
 #include "base/base_export.h"
 #include "base/message_loop/message_pump.h"
 #include "base/synchronization/waitable_event.h"
@@ -28,11 +30,15 @@ class BASE_EXPORT MessagePumpDefault : public MessagePump {
   void ScheduleWork() override;
   void ScheduleDelayedWork(
       const Delegate::NextWorkInfo& next_work_info) override;
-#if BUILDFLAG(IS_APPLE)
-  void SetTimerSlack(TimerSlack timer_slack) override;
 
-  static void InitFeaturesPostFieldTrial();
-#endif
+  // Visible for testing.
+  void RecordWaitTime(base::TimeDelta wait_time);
+  bool ShouldBusyLoop() const;
+  bool BusyWaitOnEvent(base::TimeTicks before, base::TimeDelta next_work_delay);
+
+  void SetShouldBusyLoopForTesting(bool should_busy_loop) {
+    should_busy_loop_for_testing_ = should_busy_loop;
+  }
 
  private:
   // This flag is set to false when Run should return.
@@ -40,6 +46,10 @@ class BASE_EXPORT MessagePumpDefault : public MessagePump {
 
   // Used to sleep until there is more work to do.
   WaitableEvent event_;
+
+  base::TimeDelta last_wait_time_;
+  base::TimeDelta wait_time_exponential_moving_average_;
+  std::optional<bool> should_busy_loop_for_testing_;
 };
 
 }  // namespace base

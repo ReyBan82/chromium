@@ -8,7 +8,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/memory/weak_ptr.h"
 #include "gpu/gpu_gles2_export.h"
 
 namespace gpu {
@@ -44,6 +43,8 @@ class GPU_GLES2_EXPORT GLContextVirtualDelegate {
   virtual void RestoreTextureUnitBindings(unsigned unit) const = 0;
   virtual void RestoreVertexAttribArray(unsigned index) = 0;
   virtual void RestoreAllExternalTextureBindingsIfNeeded() = 0;
+
+  virtual void PauseTransformFeedback() {}
 
   virtual QueryManager* GetQueryManager() = 0;
 };

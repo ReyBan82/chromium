@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/extensions/extension_action_runner.h"
+
 #include <stddef.h>
 
 #include <map>
@@ -10,11 +12,7 @@
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
-#include "chrome/browser/extensions/active_tab_permission_granter.h"
 #include "chrome/browser/extensions/api/extension_action/extension_action_api.h"
-#include "chrome/browser/extensions/extension_action_runner.h"
-#include "chrome/browser/extensions/permissions_updater.h"
-#include "chrome/browser/extensions/scripting_permissions_modifier.h"
 #include "chrome/browser/extensions/tab_helper.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "chrome/test/base/testing_profile.h"
@@ -22,16 +20,24 @@
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/public/test/navigation_simulator.h"
 #include "extensions/browser/extension_registry.h"
+#include "extensions/browser/permissions/active_tab_permission_granter.h"
+#include "extensions/browser/permissions/permissions_updater.h"
+#include "extensions/browser/permissions/scripting_permissions_modifier.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_builder.h"
 #include "extensions/common/extension_features.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/manifest.h"
 #include "extensions/common/mojom/injection_type.mojom-shared.h"
 #include "extensions/common/mojom/run_location.mojom-shared.h"
 #include "extensions/common/user_script.h"
-#include "extensions/common/value_builder.h"
+#include "extensions/test/permissions_manager_waiter.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -66,31 +72,33 @@ class ExtensionActionRunnerUnitTest : public ChromeRenderViewHostTestHarness {
   // a script.
   bool RequiresUserConsent(const Extension* extension) const;
 
-  // Request an injection for the given |extension|.
+  // Request an injection for the given `extension` at idle.
   void RequestInjection(const Extension* extension);
   void RequestInjection(const Extension* extension,
                         mojom::RunLocation run_location);
 
   // Returns the number of times a given extension has had a script execute.
-  size_t GetExecutionCountForExtension(const std::string& extension_id) const;
+  size_t GetExecutionCountForExtension(const ExtensionId& extension_id) const;
 
   ExtensionActionRunner* runner() const { return extension_action_runner_; }
 
  private:
   // Returns a closure to use as a script execution for a given extension.
   ExtensionActionRunner::ScriptInjectionCallback
-  GetExecutionCallbackForExtension(const std::string& extension_id);
+  GetExecutionCallbackForExtension(const ExtensionId& extension_id);
 
   // Increment the number of executions for the given |extension_id|.
-  void IncrementExecutionCount(const std::string& extension_id, bool granted);
+  void IncrementExecutionCount(const ExtensionId& extension_id, bool granted);
 
   void SetUp() override;
+
+  void TearDown() override;
 
   // The associated ExtensionActionRunner.
   raw_ptr<ExtensionActionRunner> extension_action_runner_ = nullptr;
 
   // The map of observed executions, keyed by extension id.
-  std::map<std::string, int> extension_executions_;
+  std::map<ExtensionId, int> extension_executions_;
 
   scoped_refptr<const Extension> extension_;
 };
@@ -99,18 +107,16 @@ ExtensionActionRunnerUnitTest::ExtensionActionRunnerUnitTest() = default;
 ExtensionActionRunnerUnitTest::~ExtensionActionRunnerUnitTest() = default;
 
 const Extension* ExtensionActionRunnerUnitTest::AddExtension() {
-  const std::string kId = crx_file::id_util::GenerateId("all_hosts_extension");
+  const ExtensionId kId = crx_file::id_util::GenerateId("all_hosts_extension");
   extension_ =
       ExtensionBuilder()
-          .SetManifest(
-              DictionaryBuilder()
-                  .Set("name", "all_hosts_extension")
-                  .Set("description", "an extension")
-                  .Set("manifest_version", 2)
-                  .Set("version", "1.0.0")
-                  .Set("permissions",
-                       ListBuilder().Append(kAllHostsPermission).Build())
-                  .Build())
+          .SetManifest(base::DictValue()
+                           .Set("name", "all_hosts_extension")
+                           .Set("description", "an extension")
+                           .Set("manifest_version", 2)
+                           .Set("version", "1.0.0")
+                           .Set("permissions",
+                                base::ListValue().Append(kAllHostsPermission)))
           .SetLocation(mojom::ManifestLocation::kInternal)
           .SetID(kId)
           .Build();
@@ -152,16 +158,17 @@ void ExtensionActionRunnerUnitTest::RequestInjection(
 }
 
 size_t ExtensionActionRunnerUnitTest::GetExecutionCountForExtension(
-    const std::string& extension_id) const {
+    const ExtensionId& extension_id) const {
   auto iter = extension_executions_.find(extension_id);
-  if (iter != extension_executions_.end())
+  if (iter != extension_executions_.end()) {
     return iter->second;
+  }
   return 0u;
 }
 
 ExtensionActionRunner::ScriptInjectionCallback
 ExtensionActionRunnerUnitTest::GetExecutionCallbackForExtension(
-    const std::string& extension_id) {
+    const ExtensionId& extension_id) {
   // We use base unretained here, but if this ever gets executed outside of
   // this test's lifetime, we have a major problem anyway.
   return base::BindOnce(&ExtensionActionRunnerUnitTest::IncrementExecutionCount,
@@ -169,10 +176,11 @@ ExtensionActionRunnerUnitTest::GetExecutionCallbackForExtension(
 }
 
 void ExtensionActionRunnerUnitTest::IncrementExecutionCount(
-    const std::string& extension_id,
+    const ExtensionId& extension_id,
     bool granted) {
-  if (!granted)
+  if (!granted) {
     return;
+  }
   ++extension_executions_[extension_id];
 }
 
@@ -185,6 +193,35 @@ void ExtensionActionRunnerUnitTest::SetUp() {
   DCHECK(tab_helper);
   extension_action_runner_ = tab_helper->extension_action_runner();
   DCHECK(extension_action_runner_);
+}
+
+void ExtensionActionRunnerUnitTest::TearDown() {
+  extension_action_runner_ = nullptr;
+  ChromeRenderViewHostTestHarness::TearDown();
+}
+
+// TODO(crbug.com/40883928): Split the test by need for refresh or not to
+// confirm the blocked actions are running as expected. Tests that when an
+// extension is granted permissions (independent of page reload) the extension
+// is allowed to run.
+TEST_F(ExtensionActionRunnerUnitTest, GrantTabPermissions) {
+  ActiveTabPermissionGranter* active_tab_permission_granter =
+      ActiveTabPermissionGranter::FromWebContents(web_contents());
+  ASSERT_TRUE(active_tab_permission_granter);
+
+  const Extension* extension = AddExtension();
+  EXPECT_EQ(0u, GetExecutionCountForExtension(extension->id()));
+  NavigateAndCommit(GURL("https://www.google.com"));
+  RequestInjection(extension);
+  EXPECT_TRUE(RequiresUserConsent(extension));
+  EXPECT_TRUE(runner()->WantsToRun(extension));
+
+  runner()->GrantTabPermissions({extension});
+  task_environment()->RunUntilIdle();
+
+  EXPECT_EQ(1u, GetExecutionCountForExtension(extension->id()));
+  EXPECT_FALSE(RequiresUserConsent(extension));
+  EXPECT_FALSE(runner()->WantsToRun(extension));
 }
 
 // Test that extensions with all_hosts require permission to execute, and, once
@@ -209,7 +246,11 @@ TEST_F(ExtensionActionRunnerUnitTest, RequestPermissionAndExecute) {
   EXPECT_EQ(0u, GetExecutionCountForExtension(extension->id()));
 
   // Click to accept the extension executing.
-  runner()->RunForTesting(extension);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    runner()->RunForTesting(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
 
   // The extension should execute, and the extension shouldn't want to run.
   EXPECT_EQ(1u, GetExecutionCountForExtension(extension->id()));
@@ -220,7 +261,7 @@ TEST_F(ExtensionActionRunnerUnitTest, RequestPermissionAndExecute) {
   EXPECT_FALSE(RequiresUserConsent(extension));
 
   // Reloading and same-origin navigations shouldn't clear those permissions,
-  // and we shouldn't require user constent again.
+  // and we shouldn't require user consent again.
   content::NavigationSimulator::Reload(web_contents());
   EXPECT_FALSE(RequiresUserConsent(extension));
   NavigateAndCommit(GURL("https://www.google.com/foo"));
@@ -234,7 +275,11 @@ TEST_F(ExtensionActionRunnerUnitTest, RequestPermissionAndExecute) {
 
   // Grant access.
   RequestInjection(extension);
-  runner()->RunForTesting(extension);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    runner()->RunForTesting(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
   EXPECT_EQ(2u, GetExecutionCountForExtension(extension->id()));
   EXPECT_FALSE(runner()->WantsToRun(extension));
 
@@ -266,12 +311,59 @@ TEST_F(ExtensionActionRunnerUnitTest, PendingInjectionsRemovedAtNavigation) {
 
   // Request and accept a new injection.
   RequestInjection(extension);
-  runner()->RunForTesting(extension);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    runner()->RunForTesting(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
 
   // The extension should only have executed once, even though a grand total
   // of two executions were requested.
   EXPECT_EQ(1u, GetExecutionCountForExtension(extension->id()));
   EXPECT_FALSE(runner()->WantsToRun(extension));
+}
+
+// Tests that a pending (uncommitted) navigation does not affect whether the
+// extension requires user consent for the currently committed page.
+TEST_F(ExtensionActionRunnerUnitTest,
+       PendingNavigationDoesNotAffectUserConsent) {
+  const Extension* extension = AddExtension();
+  ASSERT_TRUE(extension);
+
+  const GURL withheld_url("https://www.withheld.com");
+  const GURL granted_url("https://www.granted.com");
+
+  // Grant the extension permission to always run on `granted_url`. It still
+  // requires user consent on `withheld_url`.
+  ScriptingPermissionsModifier(profile(), extension)
+      .GrantHostPermission(granted_url);
+
+  NavigateAndCommit(withheld_url);
+  EXPECT_TRUE(RequiresUserConsent(extension));
+
+  // Start (but don't commit) a browser-initiated navigation to `granted_url`.
+  // The committed page is still `withheld_url`, so user consent should still
+  // be required to inject into it.
+  std::unique_ptr<content::NavigationSimulator> navigation =
+      content::NavigationSimulator::CreateBrowserInitiated(granted_url,
+                                                           web_contents());
+  navigation->Start();
+  ASSERT_EQ(granted_url, web_contents()->GetVisibleURL());
+  ASSERT_EQ(withheld_url, web_contents()->GetLastCommittedURL());
+  EXPECT_TRUE(RequiresUserConsent(extension));
+
+  // The reverse: committed page is `granted_url`, with a pending navigation
+  // to `withheld_url`. The extension should not require user consent.
+  navigation->Commit();
+  ASSERT_EQ(granted_url, web_contents()->GetLastCommittedURL());
+  EXPECT_FALSE(RequiresUserConsent(extension));
+
+  navigation = content::NavigationSimulator::CreateBrowserInitiated(
+      withheld_url, web_contents());
+  navigation->Start();
+  ASSERT_EQ(withheld_url, web_contents()->GetVisibleURL());
+  ASSERT_EQ(granted_url, web_contents()->GetLastCommittedURL());
+  EXPECT_FALSE(RequiresUserConsent(extension));
 }
 
 // Test that queueing multiple pending injections, and then accepting, triggers
@@ -285,12 +377,17 @@ TEST_F(ExtensionActionRunnerUnitTest, MultiplePendingInjection) {
 
   const size_t kNumInjections = 3u;
   // Queue multiple pending injections.
-  for (size_t i = 0u; i < kNumInjections; ++i)
+  for (size_t i = 0u; i < kNumInjections; ++i) {
     RequestInjection(extension);
+  }
 
   EXPECT_EQ(0u, GetExecutionCountForExtension(extension->id()));
 
-  runner()->RunForTesting(extension);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    runner()->RunForTesting(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
 
   // All pending injections should have executed.
   EXPECT_EQ(kNumInjections, GetExecutionCountForExtension(extension->id()));
@@ -301,13 +398,16 @@ TEST_F(ExtensionActionRunnerUnitTest, ActiveScriptsUseActiveTabPermissions) {
   const Extension* extension = AddExtension();
   NavigateAndCommit(GURL("https://www.google.com"));
 
-  ActiveTabPermissionGranter* active_tab_permission_granter =
-      TabHelper::FromWebContents(web_contents())
-          ->active_tab_permission_granter();
-  ASSERT_TRUE(active_tab_permission_granter);
   // Grant the extension active tab permissions. This normally happens, e.g.,
   // if the user clicks on a browser action.
-  active_tab_permission_granter->GrantIfRequested(extension);
+  ActiveTabPermissionGranter* active_tab_permission_granter =
+      ActiveTabPermissionGranter::FromWebContents(web_contents());
+  ASSERT_TRUE(active_tab_permission_granter);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    active_tab_permission_granter->GrantIfRequested(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
 
   // Since we have active tab permissions, we shouldn't need user consent
   // anymore.
@@ -326,7 +426,7 @@ TEST_F(ExtensionActionRunnerUnitTest, ActiveScriptsUseActiveTabPermissions) {
   NavigateAndCommit(GURL("https://yahoo.com"));
   EXPECT_TRUE(RequiresUserConsent(extension));
 
-  // Back to the original origin should also re-require constent.
+  // Back to the original origin should also re-require consent.
   NavigateAndCommit(GURL("https://www.google.com"));
   EXPECT_TRUE(RequiresUserConsent(extension));
 
@@ -335,7 +435,11 @@ TEST_F(ExtensionActionRunnerUnitTest, ActiveScriptsUseActiveTabPermissions) {
   EXPECT_EQ(0u, GetExecutionCountForExtension(extension->id()));
 
   // Grant active tab.
-  active_tab_permission_granter->GrantIfRequested(extension);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    active_tab_permission_granter->GrantIfRequested(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
 
   // The pending injections should have run since active tab permission was
   // granted.
@@ -389,7 +493,11 @@ TEST_F(ExtensionActionRunnerUnitTest, TestAlwaysRun) {
   // Allow the extension to always run on this origin.
   ScriptingPermissionsModifier modifier(profile(), extension);
   modifier.GrantHostPermission(web_contents()->GetLastCommittedURL());
-  runner()->RunForTesting(extension);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    runner()->RunForTesting(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
 
   // The extension should execute, and the extension shouldn't want to run.
   EXPECT_EQ(1u, GetExecutionCountForExtension(extension->id()));
@@ -445,7 +553,11 @@ TEST_F(ExtensionActionRunnerUnitTest, TestDifferentScriptRunLocations) {
   EXPECT_EQ(BLOCKED_ACTION_SCRIPT_AT_START | BLOCKED_ACTION_SCRIPT_OTHER,
             runner()->GetBlockedActions(extension->id()));
 
-  runner()->RunForTesting(extension);
+  {
+    PermissionsManagerWaiter waiter(PermissionsManager::Get(profile()));
+    runner()->RunForTesting(extension);
+    waiter.WaitForActiveTabPermissionGranted(extension->id());
+  }
   EXPECT_EQ(BLOCKED_ACTION_NONE, runner()->GetBlockedActions(extension->id()));
 }
 

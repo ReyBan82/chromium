@@ -18,11 +18,14 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <memory>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/containers/adapters.h"
-#include "base/containers/contains.h"
+#include "base/containers/span.h"
 
 #if defined(ANDROID)
 // Work-around for buggy headers in Android's NDK
@@ -38,7 +41,6 @@
 #include "base/system/sys_info.h"
 #include "base/threading/thread.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "sandbox/linux/bpf_dsl/bpf_dsl.h"
 #include "sandbox/linux/bpf_dsl/errorcode.h"
 #include "sandbox/linux/bpf_dsl/linux_syscall_ranges.h"
@@ -189,10 +191,8 @@ bool IsSyscallForTestHarness(int sysno) {
   if (sysno == kMMapNr || sysno == __NR_munmap ||
 #if !defined(__aarch64__)
       sysno == __NR_pipe ||
-#else
-      sysno == __NR_pipe2 ||
 #endif
-      sysno == __NR_sigaltstack) {
+      sysno == __NR_pipe2 || sysno == __NR_sigaltstack) {
     return true;
   }
 #endif
@@ -326,9 +326,9 @@ ResultExpr ErrnoTestPolicy::EvaluateSyscall(int sysno) const {
 
 BPF_TEST_C(SandboxBPF, ErrnoTest, ErrnoTestPolicy) {
   // Verify that dup2() returns success, but doesn't actually run.
-  int fds[4];
-  BPF_ASSERT(pipe(fds) == 0);
-  BPF_ASSERT(pipe(fds + 2) == 0);
+  std::array<int, 4> fds;
+  BPF_ASSERT(pipe(fds.data()) == 0);
+  BPF_ASSERT(pipe(base::span(fds).subspan(2u).data()) == 0);
   BPF_ASSERT(dup2(fds[2], fds[0]) == 0);
   char buf[1] = {};
   BPF_ASSERT(write(fds[1], "\x55", 1) == 1);
@@ -481,6 +481,23 @@ BPF_TEST_C(SandboxBPF, SyntheticPolicy, SyntheticPolicy) {
     if (IsSyscallForTestHarness(syscall_number)) {
       continue;
     }
+#if defined(__NR_uretprobe)
+    if (syscall_number == __NR_uretprobe) {
+      // The kernel executes uretprobe(2) without consulting seccomp filters
+      // (it is a kernel implementation detail of x86-64 uprobes that default
+      // container policies were breaking), and it raises SIGILL when called
+      // from outside a real uprobe return trampoline, so it cannot be
+      // filtered or invoked here.
+      continue;
+    }
+#endif
+#if defined(__NR_uprobe)
+    if (syscall_number == __NR_uprobe) {
+      // uprobe(2) bypasses seccomp the same way and fails with its own errno
+      // rather than the filter's when called from outside a probe trampoline.
+      continue;
+    }
+#endif
     errno = 0;
     BPF_ASSERT(syscall(syscall_number) == -1);
     BPF_ASSERT(errno == SysnoToRandomErrno(syscall_number));
@@ -664,7 +681,7 @@ BPF_TEST_C(SandboxBPF, ForwardSyscall, PrctlPolicy) {
   // unaffected by our policy.
   struct utsname uts = {};
   BPF_ASSERT(!uname(&uts));
-  BPF_ASSERT(!strcmp(uts.sysname, "Linux"));
+  UNSAFE_TODO(BPF_ASSERT(!strcmp(uts.sysname, "Linux")));
 }
 
 intptr_t AllowRedirectedSyscall(const struct arch_seccomp_data& args, void*) {
@@ -1052,7 +1069,7 @@ class EqualityStressTest {
     return err;
   }
 
-  void Verify(int sysno, intptr_t* args, const ArgValue& arg_value) {
+  void Verify(int sysno, base::span<intptr_t> args, const ArgValue& arg_value) {
     uint32_t mismatched = 0;
     // Iterate over all the k_values in arg_value.tests[] and verify that
     // we see the expected return values from system calls, when we pass
@@ -1070,7 +1087,8 @@ class EqualityStressTest {
     // arg_value.tests[]. In most cases, the current value of "mismatched"
     // would fit this requirement. But on the off-chance that it happens
     // to collide, we double-check.
-    while (base::Contains(arg_value.tests, mismatched, &Tests::k_value)) {
+    while (
+        std::ranges::contains(arg_value.tests, mismatched, &Tests::k_value)) {
       ++mismatched;
     }
     // Now verify that we see the expected return value from system calls,
@@ -1087,7 +1105,7 @@ class EqualityStressTest {
     args[arg_value.argno] = 0;
   }
 
-  void VerifyErrno(int sysno, intptr_t* args, int err) {
+  void VerifyErrno(int sysno, base::span<intptr_t> args, int err) {
     // We installed BPF filters that return different errno values
     // based on the system call number and the parameters that we decided
     // to pass in. Verify that this condition holds true.
@@ -1697,24 +1715,19 @@ intptr_t PthreadTrapHandler(const struct arch_seccomp_data& args, void* aux) {
     // call. But if we ever get called for anything else, we want to verbosely
     // print as much information as possible.
     const char* msg = (const char*)aux;
-    printf(
-        "Clone() was called with unexpected arguments\n"
-        "  nr: %d\n"
-        "  1: 0x%llX\n"
-        "  2: 0x%llX\n"
-        "  3: 0x%llX\n"
-        "  4: 0x%llX\n"
-        "  5: 0x%llX\n"
-        "  6: 0x%llX\n"
-        "%s\n",
-        args.nr,
-        (long long)args.args[0],
-        (long long)args.args[1],
-        (long long)args.args[2],
-        (long long)args.args[3],
-        (long long)args.args[4],
-        (long long)args.args[5],
-        msg);
+    UNSAFE_TODO(
+        printf("Clone() was called with unexpected arguments\n"
+               "  nr: %d\n"
+               "  1: 0x%llX\n"
+               "  2: 0x%llX\n"
+               "  3: 0x%llX\n"
+               "  4: 0x%llX\n"
+               "  5: 0x%llX\n"
+               "  6: 0x%llX\n"
+               "%s\n",
+               args.nr, (long long)args.args[0], (long long)args.args[1],
+               (long long)args.args[2], (long long)args.args[3],
+               (long long)args.args[4], (long long)args.args[5], msg));
   }
   return -EPERM;
 }
@@ -2069,7 +2082,7 @@ bool FullPwrite64(int fd, const char* buffer, size_t count, off64_t offset) {
       return false;
     }
     count -= transfered;
-    buffer += transfered;
+    UNSAFE_TODO(buffer += transfered);
     offset += transfered;
   }
   return true;
@@ -2082,7 +2095,7 @@ bool FullPread64(int fd, char* buffer, size_t count, off64_t offset) {
       return false;
     }
     count -= transfered;
-    buffer += transfered;
+    UNSAFE_TODO(buffer += transfered);
     offset += transfered;
   }
   return true;
@@ -2131,12 +2144,13 @@ BPF_TEST_C(SandboxBPF, Pread64, TrapPread64Policy) {
   BPF_ASSERT(FullPwrite64(
       temp_file.fd(), kTestString, sizeof(kTestString), kLargeOffset));
 
-  char read_test_string[sizeof(kTestString)] = {0};
+  char read_test_string[sizeof(kTestString)] = {};
   BPF_ASSERT(FullPread64(temp_file.fd(),
                          read_test_string,
                          sizeof(read_test_string),
                          kLargeOffset));
-  BPF_ASSERT_EQ(0, memcmp(kTestString, read_test_string, sizeof(kTestString)));
+  UNSAFE_TODO(BPF_ASSERT_EQ(
+      0, memcmp(kTestString, read_test_string, sizeof(kTestString))));
   BPF_ASSERT(pread_64_was_forwarded);
 }
 
@@ -2161,7 +2175,7 @@ SANDBOX_TEST(SandboxBPF, Tsync) {
   const bool supports_multi_threaded = SandboxBPF::SupportsSeccompSandbox(
       SandboxBPF::SeccompLevel::MULTI_THREADED);
 // On Chrome OS tsync is mandatory.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   if (base::SysInfo::IsRunningOnChromeOS()) {
     BPF_ASSERT_EQ(true, supports_multi_threaded);
   }

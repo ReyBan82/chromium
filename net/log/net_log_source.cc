@@ -33,19 +33,19 @@ bool NetLogSource::IsValid() const {
   return id != kInvalidId;
 }
 
-void NetLogSource::AddToEventParameters(base::Value::Dict& event_params) const {
-  base::Value::Dict dict;
+void NetLogSource::AddToEventParameters(base::DictValue& event_params) const {
+  base::DictValue dict;
   dict.Set("type", static_cast<int>(type));
   dict.Set("id", static_cast<int>(id));
   event_params.Set("source_dependency", std::move(dict));
 }
 
-base::Value NetLogSource::ToEventParameters() const {
+base::DictValue NetLogSource::ToEventParameters() const {
   if (!IsValid())
-    return base::Value();
-  base::Value::Dict event_params;
+    return base::DictValue();
+  base::DictValue event_params;
   AddToEventParameters(event_params);
-  return base::Value(std::move(event_params));
+  return event_params;
 }
 
 }  // namespace net

@@ -1,4 +1,34 @@
 #!/usr/bin/env vpython3
+# /// script
+# requires-python = '>=3.8,<3.9'
+# dependencies = [
+#   'cachetools==2.0.1',
+#   'certifi==2020.11.8',
+#   'charset-normalizer==2.0.4',
+#   'enum34==1.1.6',
+#   'google-api-python-client==2.2.0',
+#   'google-api-core==1.31.5',
+#   'google-auth-httplib2==0.1.0',
+#   'google-auth==1.25.0',
+#   'googleapis-common-protos==1.52.0',
+#   'httplib2==0.19.1',
+#   'idna==2.8',
+#   'infra-libs==2.4.0',
+#   'oauth2client==3.0.0',
+#   'packaging==16.8',
+#   'protobuf==3.20.0',
+#   'pyasn1==0.4.5',
+#   'pyasn1-modules==0.2.4',
+#   'pyparsing==2.4.7',
+#   'pytz==2018.4',
+#   'requests==2.31.0',
+#   'rsa==3.4.2',
+#   'six==1.15.0',
+#   'uritemplate==3.0.0',
+#   'urllib3==1.24.3'
+# ]
+# ///
+
 # Copyright 2020 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
@@ -29,8 +59,13 @@ from oauth2client import tools
 from oauth2client.file import Storage
 
 import generator_utils
-from generator_utils import (XMLParser, map_annotations, load_tsv_file,
-                             Placeholder, PLACEHOLDER_STYLES)
+from generator_utils import (
+  XMLParser,
+  map_annotations,
+  load_tsv_file,
+  Placeholder,
+  PLACEHOLDER_STYLES,
+)
 
 # Absolute path to chrome/src.
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -45,13 +80,15 @@ class NetworkTrafficAnnotationsDoc:
   BLUE = {"red": 0.812, "green": 0.886, "blue": 0.953}
   WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
-  def __init__(self,
-               doc_id,
-               doc_name,
-               credentials_file_path,
-               client_token_file_path,
-               verbose,
-               index=None):
+  def __init__(
+    self,
+    doc_id,
+    doc_name,
+    credentials_file_path,
+    client_token_file_path,
+    verbose,
+    index=None,
+  ):
     """
     Args:
       doc_id: str
@@ -89,7 +126,9 @@ class NetworkTrafficAnnotationsDoc:
     """
     self._docs_service = self._initialize_service(
       self._get_credentials(
-        self._credentials_file_path, self._client_token_file_path))
+        self._credentials_file_path, self._client_token_file_path
+      )
+    )
     doc = self._get_doc_contents(self.destination_id)
     self._update_chrome_version(doc)
     self.index = self._clear_destination_contents(doc)
@@ -100,6 +139,7 @@ class NetworkTrafficAnnotationsDoc:
       self._get_doc_contents(self.destination_id, save=True)
 
     print("Done, please review the document before sharing it with clients.")
+    return True
 
   def _initialize_service(self, credentials):
     """Initializes the Google Docs API services.
@@ -115,7 +155,7 @@ class NetworkTrafficAnnotationsDoc:
     return discovery.build("docs", "v1", http=http)
 
   def _get_credentials(self, credentials_file_path, client_token_file_path):
-    """ Gets valid user credentials from storage. If nothing has been stored, or
+    """Gets valid user credentials from storage. If nothing has been stored, or
     if the stored credentials are invalid, the OAuth2 flow is completed to
     obtain the new credentials.
 
@@ -138,7 +178,8 @@ class NetworkTrafficAnnotationsDoc:
 
     if not credentials or credentials.invalid:
       flow = client.flow_from_clientsecrets(
-          os.path.join(SRC_DIR, credentials_file_path), self.SCOPES)
+        os.path.join(SRC_DIR, credentials_file_path), self.SCOPES
+      )
       flow.user_agent = self.APPLICATION_NAME
       flags = tools.argparser.parse_args([])
       credentials = tools.run_flow(flow, store, flags)
@@ -146,11 +187,14 @@ class NetworkTrafficAnnotationsDoc:
     return credentials
 
   def _get_doc_contents(self, document_id, save=False):
-    document = self._docs_service.documents().get(
-        documentId=document_id).execute()
+    document = (
+      self._docs_service.documents().get(documentId=document_id).execute()
+    )
     if save:
-      with open(os.path.join(SRC_DIR,
-      "tools/traffic_annotation/scripts/template.json"), "w") as out_file:
+      with open(
+        os.path.join(SRC_DIR, "tools/traffic_annotation/scripts/template.json"),
+        "w",
+      ) as out_file:
         json.dump(document, out_file)
       print("Saved template.json.")
 
@@ -164,8 +208,9 @@ class NetworkTrafficAnnotationsDoc:
     """
     version = ""
     with open(os.path.join(SRC_DIR, "chrome/VERSION"), "r") as version_file:
-      version = ".".join(line.strip().split("=")[1]
-                         for line in version_file.readlines())
+      version = ".".join(
+        line.strip().split("=")[1] for line in version_file.readlines()
+      )
 
     current_version = generator_utils.find_chrome_browser_version(doc)
     replacement = "Chrome Browser version {}".format(version)
@@ -175,18 +220,20 @@ class NetworkTrafficAnnotationsDoc:
       print("Document chrome version is already up to date.")
       return
 
-    req = [{
+    req = [
+      {
         "replaceAllText": {
-            "containsText": {
-                "text": target,
-                "matchCase": True
-            },
-            "replaceText": replacement
+          "containsText": {"text": target, "matchCase": True},
+          "replaceText": replacement,
         }
-    }]
+      }
+    ]
     self._perform_requests(req)
-    print("Updated document chrome version {} --> {}".format(
-        current_version, version))
+    print(
+      "Updated document chrome version {} --> {}".format(
+        current_version, version
+      )
+    )
 
   def _clear_destination_contents(self, doc):
     """Will clear the contents of the destination document from the end of the
@@ -205,32 +252,33 @@ class NetworkTrafficAnnotationsDoc:
       print("Nothing to overwrite.")
       return first_index
 
-    req = [{
+    req = [
+      {
         "deleteContentRange": {
-            "range": {
-                "startIndex": first_index,
-                "endIndex": last_index
-            }
+          "range": {"startIndex": first_index, "endIndex": last_index}
         }
-    }]
+      }
+    ]
     self._perform_requests(req)
     return first_index
 
   def _perform_requests(self, reqs):
-    """Performs the requests |reqs| using batch update.
-    """
+    """Performs the requests |reqs| using batch update."""
     if not reqs:
       print("Warning, no requests provided. Returning.")
       return
 
-    status = self._docs_service.documents().batchUpdate(
-        body={
-            "requests": reqs
-        }, documentId=self.destination_id, fields="").execute()
+    status = (
+      self._docs_service.documents()
+      .batchUpdate(
+        body={"requests": reqs}, documentId=self.destination_id, fields=""
+      )
+      .execute()
+    )
     if self.verbose:
-      print("#"*30)
+      print("#" * 30)
       print(status)
-      print("#"*30)
+      print("#" * 30)
     return status
 
   def _insert_placeholders(self, placeholders):
@@ -247,14 +295,14 @@ class NetworkTrafficAnnotationsDoc:
 
       if placeholder_type == Placeholder.ANNOTATION:
         req, index = self._create_annotation_request(
-            placeholder["traffic_annotation"],
-            self.index,
-            color=self._color_bool)
+          placeholder["traffic_annotation"], self.index, color=self._color_bool
+        )
         self._color_bool = not self._color_bool
       else:
         # is either a group or sender placeholder
         req, index = self._create_group_or_sender_request(
-            placeholder["name"], self.index, placeholder_type)
+          placeholder["name"], self.index, placeholder_type
+        )
 
       reqs += req
       self.index += index
@@ -268,12 +316,9 @@ class NetworkTrafficAnnotationsDoc:
       The request to insert raw text without formatting and the length of the
       text for appropriately incrementing |self.index|.
     """
-    return {
-        "insertText": {
-          "location": {"index": index},
-          "text": text
-        }
-    }, len(text)
+    return {"insertText": {"location": {"index": index}, "text": text}}, len(
+      text
+    )
 
   def _format_text(self, start_index, end_index, placeholder_type):
     """Format the text in between |start_index| and |end_index| using the styles
@@ -283,25 +328,21 @@ class NetworkTrafficAnnotationsDoc:
       |end_index|.
     """
     return {
-        "updateTextStyle": {
-            "range": {
-                "startIndex": start_index,
-                "endIndex": end_index
-            },
-            "textStyle": {
-                "bold": PLACEHOLDER_STYLES[placeholder_type]["bold"],
-                "fontSize": {
-                    "magnitude":
-                    PLACEHOLDER_STYLES[placeholder_type]["fontSize"],
-                    "unit": "PT"
-                },
-                "weightedFontFamily": {
-                    "fontFamily": PLACEHOLDER_STYLES[placeholder_type]["font"],
-                    "weight": 400
-                }
-            },
-            "fields": "*"
-        }
+      "updateTextStyle": {
+        "range": {"startIndex": start_index, "endIndex": end_index},
+        "textStyle": {
+          "bold": PLACEHOLDER_STYLES[placeholder_type]["bold"],
+          "fontSize": {
+            "magnitude": PLACEHOLDER_STYLES[placeholder_type]["fontSize"],
+            "unit": "PT",
+          },
+          "weightedFontFamily": {
+            "fontFamily": PLACEHOLDER_STYLES[placeholder_type]["font"],
+            "weight": 400,
+          },
+        },
+        "fields": "*",
+      }
     }
 
   def _create_group_or_sender_request(self, text, index, placeholder_type):
@@ -312,22 +353,22 @@ class NetworkTrafficAnnotationsDoc:
     text += "\n"
     req, idx = self._create_text_request(text, index)
     reqs = [req]
-    reqs.append({
+    reqs.append(
+      {
         "updateParagraphStyle": {
-            "range": {
-                "startIndex": index,
-                "endIndex": index + idx
-            },
-            "paragraphStyle": {
-                "namedStyleType":
-                PLACEHOLDER_STYLES[placeholder_type]["namedStyleType"],
-                "direction": "LEFT_TO_RIGHT",
-                "spacingMode": "NEVER_COLLAPSE",
-                "spaceAbove": {"unit": "PT"}
-            },
-            "fields": "*"
+          "range": {"startIndex": index, "endIndex": index + idx},
+          "paragraphStyle": {
+            "namedStyleType": PLACEHOLDER_STYLES[placeholder_type][
+              "namedStyleType"
+            ],
+            "direction": "LEFT_TO_RIGHT",
+            "spacingMode": "NEVER_COLLAPSE",
+            "spaceAbove": {"unit": "PT"},
+          },
+          "fields": "namedStyleType,direction,spacingMode,spaceAbove",
         }
-    })
+      }
+    )
     reqs.append(self._format_text(index, index + idx, placeholder_type))
     return reqs, idx
 
@@ -352,27 +393,27 @@ class NetworkTrafficAnnotationsDoc:
     # contains the remaining placeholders, e.g. trigger, description, etc.
     padding_req, _ = self._create_text_request("\n", index)
     reqs = [padding_req]
-    reqs.append({
-        "insertTable": {
-            "rows": 1,
-            "columns": 2,
-            "location": {"index": index}
-        }
-    })
+    reqs.append(
+      {"insertTable": {"rows": 1, "columns": 2, "location": {"index": index}}}
+    )
 
     # Writing the annotation's relevant information directly to the table,
     # within the left cell |left_text| and the right cell |right_text|.
     left_text = traffic_annotation.unique_id
     right_text = "{}\nTrigger: {}\nData: {}\nSettings: {}\nPolicy: {}".format(
-        traffic_annotation.description, traffic_annotation.trigger,
-        traffic_annotation.data, traffic_annotation.settings,
-        traffic_annotation.policy)
+      traffic_annotation.description,
+      traffic_annotation.trigger,
+      traffic_annotation.data,
+      traffic_annotation.settings,
+      traffic_annotation.policy,
+    )
 
     # +4 hardcoded due to intrinsic of tables in Google Docs API.
     start_index = index + 4
     left_req, left_increment = self._create_text_request(left_text, start_index)
     right_req, right_increment = self._create_text_request(
-        right_text, start_index + left_increment + offset)
+      right_text, start_index + left_increment + offset
+    )
 
     reqs.append(left_req)
     reqs.append(right_req)
@@ -381,88 +422,86 @@ class NetworkTrafficAnnotationsDoc:
 
     # This sizes the table correctly such as making the right cell's width
     # greater than that of the left cell.
-    col_properties = [{
-        "columnIndices": [0],
-        "width": 153
-    }, {
-        "columnIndices": [1],
-        "width": 534
-    }]
+    col_properties = [
+      {"columnIndices": [0], "width": 153},
+      {"columnIndices": [1], "width": 534},
+    ]
     for properties in col_properties:
-      reqs.append({
+      reqs.append(
+        {
           "updateTableColumnProperties": {
-              "tableStartLocation": {"index": index + 1},
-              "columnIndices": properties["columnIndices"],
-              "fields": "*",
-              "tableColumnProperties": {
-                  "widthType": "FIXED_WIDTH",
-                  "width": {
-                      "magnitude": properties["width"],
-                      "unit": "PT"
-                  }
-              }
+            "tableStartLocation": {"index": index + 1},
+            "columnIndices": properties["columnIndices"],
+            "fields": "*",
+            "tableColumnProperties": {
+              "widthType": "FIXED_WIDTH",
+              "width": {"magnitude": properties["width"], "unit": "PT"},
+            },
           }
-      })
+        }
+      )
 
     # Changing the table's color and ensuring that the borders are "turned off"
     # (really they're given the same color as the background).
     color = self.BLUE if color else self.WHITE
     color_and_border_req = {
-        "updateTableCellStyle": {
-            "tableStartLocation": {"index": index + 1},
-            "fields": "*",
-            "tableCellStyle": {
-                "rowSpan": 1,
-                "columnSpan": 1,
-                "backgroundColor": {
-                    "color": {
-                        "rgbColor": color
-                    }
-                }
-            }
-        }
+      "updateTableCellStyle": {
+        "tableStartLocation": {"index": index + 1},
+        "fields": "*",
+        "tableCellStyle": {
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "backgroundColor": {"color": {"rgbColor": color}},
+        },
+      }
     }
     # make the table borders 'invisible' and adjust the padding to site text in
     # the cell correctly.
     for direction in ["Left", "Right", "Top", "Bottom"]:
       color_and_border_req["updateTableCellStyle"]["tableCellStyle"][
-          "border" + direction] = {
-              "color": {"color": {"rgbColor": color}},
-              "width": {"unit": "PT"},
-              "dashStyle": "SOLID"
-          }
+        "border" + direction
+      ] = {
+        "color": {"color": {"rgbColor": color}},
+        "width": {"unit": "PT"},
+        "dashStyle": "SOLID",
+      }
       color_and_border_req["updateTableCellStyle"]["tableCellStyle"][
-          "padding" + direction] = {"magnitude": 1.44, "unit": "PT"}
+        "padding" + direction
+      ] = {"magnitude": 1.44, "unit": "PT"}
     reqs.append(color_and_border_req)
 
     # Text formatting (normal text, linespacing, etc.) adds space below the
     # lines within a cell.
-    reqs.append({
-        "updateParagraphStyle": {
-            "range": {
-                "startIndex": start_index,
-                "endIndex": end_index - 1
-            },
-            "paragraphStyle": {
-                "namedStyleType": "NORMAL_TEXT",
-                "lineSpacing": 100,
-                "direction": "LEFT_TO_RIGHT",
-                "spacingMode": "NEVER_COLLAPSE",
-                "spaceBelow": {"magnitude": 4, "unit": "PT"},
-                "avoidWidowAndOrphan": False
-            },
-            "fields": "*"
-        }
-    })
     reqs.append(
-        self._format_text(start_index, end_index - 1, Placeholder.ANNOTATION))
+      {
+        "updateParagraphStyle": {
+          "range": {"startIndex": start_index, "endIndex": end_index - 1},
+          "paragraphStyle": {
+            "namedStyleType": "NORMAL_TEXT",
+            "lineSpacing": 100,
+            "direction": "LEFT_TO_RIGHT",
+            "spacingMode": "NEVER_COLLAPSE",
+            "spaceBelow": {"magnitude": 4, "unit": "PT"},
+            "avoidWidowAndOrphan": False,
+          },
+          "fields": (
+            "namedStyleType,lineSpacing,direction,spacingMode,spaceBelow,"
+            "avoidWidowAndOrphan"
+          ),
+        }
+      }
+    )
+    reqs.append(
+      self._format_text(start_index, end_index - 1, Placeholder.ANNOTATION)
+    )
     return reqs, end_index - index
 
   def _to_bold(self, start_index, end_index):
     """Bold the text between start_index and end_index. Uses the same formatting
     as the annotation bold."""
-    return self._format_text(start_index, end_index,
-                             Placeholder.ANNOTATION_BOLD)
+    return self._format_text(
+      start_index, end_index, Placeholder.ANNOTATION_BOLD
+    )
 
   def _to_all_bold(self):
     """Bold the unique_id, description, trigger, etc. in the tables to
@@ -482,33 +521,39 @@ class NetworkTrafficAnnotationsDoc:
 
 
 def print_config_help():
-  print("The config.json file should have the following items:\n"
-        "doc_id:\n"
-        "  ID of the destination document.\n"
-        "doc_name:\n"
-        "  Name of the document.\n"
-        "credentials_file_path:\n"
-        "  Absolute path of the file that keeps user credentials.\n"
-        "client_token_file_path:\n"
-        "  Absolute path of the token.pickle which keeps the users credentials."
-        "  The file can be created as specified in:\n"
-        "  https://developers.google.com/docs/api/quickstart/python")
+  print(
+    "The config.json file should have the following items:\n"
+    "doc_id:\n"
+    "  ID of the destination document.\n"
+    "doc_name:\n"
+    "  Name of the document.\n"
+    "credentials_file_path:\n"
+    "  Absolute path of the file that keeps user credentials.\n"
+    "client_token_file_path:\n"
+    "  Absolute path of the token.pickle which keeps the users credentials."
+    "  The file can be created as specified in:\n"
+    "  https://developers.google.com/docs/api/quickstart/python"
+  )
 
 
 def main():
   args_parser = argparse.ArgumentParser(
-      description="Updates 'Chrome Browser Network Traffic Annotations' doc.")
+    description="Updates 'Chrome Browser Network Traffic Annotations' doc."
+  )
   args_parser.add_argument("--config-file", help="Configurations file.")
-  args_parser.add_argument("--annotations-file",
-                           help="TSV annotations file exported from auditor.")
-  args_parser.add_argument("--verbose",
-                           action="store_true",
-                           help="Reports all updates. "
-                           " Also creates a scripts/template.json file "
-                           " outlining the document's current structure.")
-  args_parser.add_argument("--config-help",
-                           action="store_true",
-                           help="Shows the configurations help.")
+  args_parser.add_argument(
+    "--annotations-file", help="TSV annotations file exported from auditor."
+  )
+  args_parser.add_argument(
+    "--verbose",
+    action="store_true",
+    help="Reports all updates. "
+    " Also creates a scripts/template.json file "
+    " outlining the document's current structure.",
+  )
+  args_parser.add_argument(
+    "--config-help", action="store_true", help="Shows the configurations help."
+  )
   args = args_parser.parse_args()
 
   if args.config_help:
@@ -520,14 +565,16 @@ def main():
     config = json.load(config_file)
 
   tsv_contents = load_tsv_file(
-    os.path.join(SRC_DIR, args.annotations_file), False)
+    os.path.join(SRC_DIR, args.annotations_file), False
+  )
   if not tsv_contents:
     print("Could not read annotations file.")
     return -1
 
   xml_parser = XMLParser(
-      os.path.join(SRC_DIR, "tools/traffic_annotation/summary/grouping.xml"),
-      map_annotations(tsv_contents))
+    os.path.join(SRC_DIR, "tools/traffic_annotation/summary/grouping.xml"),
+    map_annotations(tsv_contents),
+  )
   placeholders = xml_parser.build_placeholders()
   print("#" * 40)
   print("There are:", len(placeholders), "placeholders")
@@ -536,11 +583,12 @@ def main():
   print("#" * 40)
 
   network_traffic_doc = NetworkTrafficAnnotationsDoc(
-      doc_id=config["doc_id"],
-      doc_name=config["doc_name"],
-      credentials_file_path=config["credentials_file_path"],
-      client_token_file_path=config["client_token_file_path"],
-      verbose=args.verbose)
+    doc_id=config["doc_id"],
+    doc_name=config["doc_name"],
+    credentials_file_path=config["credentials_file_path"],
+    client_token_file_path=config["client_token_file_path"],
+    verbose=args.verbose,
+  )
 
   if not network_traffic_doc.update_doc(placeholders):
     return -1

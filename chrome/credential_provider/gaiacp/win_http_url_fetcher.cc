@@ -5,21 +5,23 @@
 #include "chrome/credential_provider/gaiacp/win_http_url_fetcher.h"
 
 #include <Windows.h>
-#include <winhttp.h>
 
 #include <atlconv.h>
 #include <process.h>
+#include <winhttp.h>
 
+#include <algorithm>
 #include <string>
+#include <string_view>
 
 #include "base/base64.h"
-#include "base/containers/contains.h"
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/memory/ptr_util.h"
 #include "base/strings/strcat.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/strcat_win.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/synchronization/lock.h"
 #include "base/time/time.h"
@@ -70,9 +72,9 @@ class HttpServiceRequest {
   // within the given |request_timeout|. If the background thread returns before
   // the timeout expires, it is guaranteed that a result can be returned and the
   // requester will delete itself.
-  absl::optional<base::Value> WaitForResponseFromHttpService(
+  std::optional<base::DictValue> WaitForResponseFromHttpService(
       const base::TimeDelta& request_timeout) {
-    absl::optional<base::Value> result;
+    std::optional<base::DictValue> result;
 
     // Start the thread and wait on its handle until |request_timeout| expires
     // or the thread finishes.
@@ -90,7 +92,7 @@ class HttpServiceRequest {
     // completely if needed.
     base::win::ScopedHandle thread_handle(
         reinterpret_cast<HANDLE>(wait_thread));
-    hr = ::WaitForSingleObject(thread_handle.Get(),
+    hr = ::WaitForSingleObject(thread_handle.get(),
                                request_timeout.InMilliseconds());
 
     // The race condition starts here. It is possible that between the expiry of
@@ -108,12 +110,12 @@ class HttpServiceRequest {
       return result;
     }
 
-    result = base::JSONReader::Read(
-        base::StringPiece(response_.data(), response_.size()),
+    result = base::JSONReader::ReadDict(
+        std::string_view(response_.data(), response_.size()),
         base::JSON_PARSE_CHROMIUM_EXTENSIONS |
             base::JSON_ALLOW_TRAILING_COMMAS);
-    if (!result || !result->is_dict()) {
-      LOGFN(ERROR) << "Failed to read json result from server response";
+    if (!result) {
+      LOGFN(ERROR) << "base::JSONReader::ReadDict failed";
       result.reset();
     }
 
@@ -265,7 +267,7 @@ WinHttpUrlFetcher::~WinHttpUrlFetcher() {
 }
 
 bool WinHttpUrlFetcher::IsValid() const {
-  return session_.IsValid();
+  return session_.is_valid();
 }
 
 HRESULT WinHttpUrlFetcher::SetRequestHeader(const char* name,
@@ -291,12 +293,11 @@ HRESULT WinHttpUrlFetcher::SetHttpRequestTimeout(const int timeout_in_millis) {
 }
 
 HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
-  USES_CONVERSION;
   DCHECK(response);
 
   response->clear();
 
-  if (!session_.IsValid()) {
+  if (!session_.is_valid()) {
     LOGFN(ERROR) << "Invalid fetcher";
     return E_UNEXPECTED;
   }
@@ -304,8 +305,10 @@ HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
   // Open a connection to the server.
   ScopedWinHttpHandle connect;
   {
-    ScopedWinHttpHandle::Handle connect_tmp = ::WinHttpConnect(
-        session_.Get(), A2CW(url_.host().c_str()), INTERNET_DEFAULT_PORT, 0);
+    std::string host = url_.GetHost();
+    ScopedWinHttpHandle::Handle connect_tmp =
+        ::WinHttpConnect(session_.get(), base::UTF8ToWide(host).c_str(),
+                         INTERNET_DEFAULT_PORT, 0);
     if (!connect_tmp) {
       HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
       LOGFN(ERROR) << "WinHttpConnect hr=" << putHR(hr);
@@ -317,7 +320,7 @@ HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
   {
     // Set timeout if specified.
     if (timeout_in_millis_ != 0) {
-      if (!::WinHttpSetTimeouts(session_.Get(), timeout_in_millis_,
+      if (!::WinHttpSetTimeouts(session_.get(), timeout_in_millis_,
                                 timeout_in_millis_, timeout_in_millis_,
                                 timeout_in_millis_)) {
         HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
@@ -329,10 +332,12 @@ HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
 
   {
     bool use_post = !body_.empty();
+    std::string path = url_.GetPath();
+    std::string path_for_request = url_.PathForRequest();
+    std::wstring object_name =
+        base::UTF8ToWide(use_post ? path : path_for_request);
     ScopedWinHttpHandle::Handle request = ::WinHttpOpenRequest(
-        connect.Get(), use_post ? L"POST" : L"GET",
-        use_post ? A2CW(url_.path().c_str())
-                 : A2CW(url_.PathForRequest().c_str()),
+        connect.get(), use_post ? L"POST" : L"GET", object_name.c_str(),
         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_REFRESH | WINHTTP_FLAG_SECURE);
     if (!request) {
@@ -341,16 +346,24 @@ HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
       return hr;
     }
     request_.Set(request);
+
+    DWORD autologon_policy = WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH;
+    if (!::WinHttpSetOption(request_.get(), WINHTTP_OPTION_AUTOLOGON_POLICY,
+                            &autologon_policy, sizeof(autologon_policy))) {
+      HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
+      LOGFN(ERROR) << "WinHttpSetOption WINHTTP_OPTION_AUTOLOGON_POLICY hr="
+                   << putHR(hr);
+      return hr;
+    }
   }
 
   // Add request headers.
 
   for (const auto& kv : request_headers_) {
-    const wchar_t* key = A2CW(kv.first.c_str());
-    const wchar_t* value = A2CW(kv.second.c_str());
-    std::wstring header = base::StringPrintf(L"%ls: %ls", key, value);
+    std::wstring header = base::StrCat(
+        {base::UTF8ToWide(kv.first), L": ", base::UTF8ToWide(kv.second)});
     if (!::WinHttpAddRequestHeaders(
-            request_.Get(), header.c_str(), header.length(),
+            request_.get(), header.c_str(), header.length(),
             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) {
       HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
       LOGFN(ERROR) << "WinHttpAddRequestHeaders name=" << kv.first
@@ -361,7 +374,7 @@ HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
 
   // Write request body if needed.
 
-  if (!::WinHttpSendRequest(request_.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+  if (!::WinHttpSendRequest(request_.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                             const_cast<char*>(body_.c_str()), body_.length(),
                             body_.length(),
                             reinterpret_cast<DWORD_PTR>(nullptr))) {
@@ -372,14 +385,14 @@ HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
 
   // Wait for the response.
 
-  if (!::WinHttpReceiveResponse(request_.Get(), nullptr)) {
+  if (!::WinHttpReceiveResponse(request_.get(), nullptr)) {
     HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
     LOGFN(ERROR) << "WinHttpReceiveResponse hr=" << putHR(hr);
     return hr;
   }
 
   DWORD length = 0;
-  if (!::WinHttpQueryDataAvailable(request_.Get(), &length)) {
+  if (!::WinHttpQueryDataAvailable(request_.get(), &length)) {
     HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
     LOGFN(ERROR) << "WinHttpQueryDataAvailable hr=" << putHR(hr);
     return hr;
@@ -391,21 +404,42 @@ HRESULT WinHttpUrlFetcher::Fetch(std::vector<char>* response) {
   // buffer than 256k.
   constexpr size_t kMaxResponseSize = 256 * 1024 * 1024;
   // Read the response.
-  auto buffer = std::make_unique<char[]>(length);
   DWORD actual = 0;
   do {
-    if (!::WinHttpReadData(request_.Get(), buffer.get(), length, &actual)) {
+    DWORD available_to_read = 0;
+    if (!::WinHttpQueryDataAvailable(request_.get(), &available_to_read)) {
+      HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
+      LOGFN(ERROR) << "WinHttpQueryDataAvailable hr=" << putHR(hr);
+      return hr;
+    }
+
+    if (available_to_read == 0) {
+      break;
+    }
+
+    size_t current_size = response->size();
+    // Check for overflow before resizing
+    if (current_size + available_to_read > kMaxResponseSize) {
+      LOGFN(ERROR) << "Response has exceeded max size=" << kMaxResponseSize;
+      return E_OUTOFMEMORY;
+    }
+
+    response->resize(current_size + available_to_read);
+
+    // Create a span of the newly allocated space in the vector.
+    // We use UNSAFE_BUFFERS only where we interface with the raw Win32 API.
+    auto dest_span = base::span(*response).subspan(current_size);
+
+    if (!::WinHttpReadData(request_.get(), dest_span.data(),
+                           static_cast<DWORD>(dest_span.size()), &actual)) {
       HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
       LOGFN(ERROR) << "WinHttpReadData hr=" << putHR(hr);
       return hr;
     }
 
-    size_t current_size = response->size();
-    response->resize(response->size() + actual);
-    memcpy(response->data() + current_size, buffer.get(), actual);
-    if (response->size() >= kMaxResponseSize) {
-      LOGFN(ERROR) << "Response has exceeded max size=" << kMaxResponseSize;
-      return E_OUTOFMEMORY;
+    // Shrink vector if actual read was less than available.
+    if (actual < available_to_read) {
+      response->resize(current_size + actual);
     }
   } while (actual);
 
@@ -421,23 +455,33 @@ HRESULT WinHttpUrlFetcher::BuildRequestAndFetchResultFromHttpService(
     const GURL& request_url,
     std::string access_token,
     const std::vector<std::pair<std::string, std::string>>& headers,
-    const base::Value::Dict& request_dict,
+    const base::DictValue& request_dict,
     const base::TimeDelta& request_timeout,
     unsigned int request_retries,
-    absl::optional<base::Value>* request_result) {
+    std::optional<base::DictValue>* request_result) {
   DCHECK(request_result);
 
   std::string request_body;
-  if (!base::JSONWriter::Write(request_dict, &request_body)) {
+  if (!request_dict.empty() &&
+      !base::JSONWriter::Write(request_dict, &request_body)) {
     LOGFN(ERROR) << "base::JSONWriter::Write failed";
+    return E_FAIL;
+  }
+  if ((request_dict.empty() && !request_body.empty()) ||
+      (!request_dict.empty() && request_body.empty())) {
+    LOGFN(ERROR) << "Mismatch between request dict and body";
     return E_FAIL;
   }
 
   for (unsigned int try_count = 0; try_count <= request_retries; ++try_count) {
     HttpServiceRequest* request = HttpServiceRequest::Create(
         request_url, access_token, headers, request_body, request_timeout);
-    if (!request)
+    if (!request) {
+      LOGFN(ERROR)
+          << "Could not create an HttpServiceRequest object. request url: "
+          << request_url.spec() << " request body: " << request_body;
       return E_FAIL;
+    }
 
     auto extracted_param =
         request->WaitForResponseFromHttpService(request_timeout);
@@ -445,22 +489,24 @@ HRESULT WinHttpUrlFetcher::BuildRequestAndFetchResultFromHttpService(
       continue;
 
     *request_result = std::move(extracted_param);
-    const base::Value* error_detail =
-        (*request_result)->FindDictKey(kErrorKeyInRequestResult);
+
+    const base::DictValue* error_detail =
+        (*request_result)->FindDict(kErrorKeyInRequestResult);
     if (!error_detail)
       return S_OK;
 
     LOGFN(ERROR) << "error: " << *error_detail;
 
     // If error code is known, retry only on retryable server errors.
-    absl::optional<int> error_code =
-        error_detail->FindIntKey(kHttpErrorCodeKeyNameInResponse);
+    std::optional<int> error_code =
+        error_detail->FindInt(kHttpErrorCodeKeyNameInResponse);
     if (error_code.has_value() &&
-        !base::Contains(kRetryableHttpErrorCodes, error_code.value())) {
+        !std::ranges::contains(kRetryableHttpErrorCodes, error_code.value())) {
       return E_FAIL;
     }
   }
 
+  LOGFN(ERROR) << "Unable to serve http service request";
   return E_FAIL;
 }
 

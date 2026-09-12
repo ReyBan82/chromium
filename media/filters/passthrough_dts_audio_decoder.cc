@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,8 +15,8 @@ PassthroughDTSAudioDecoder::PassthroughDTSAudioDecoder(
     const scoped_refptr<base::SequencedTaskRunner>& task_runner,
     MediaLog* media_log)
     : task_runner_(task_runner),
-      media_log_(media_log),
-      pool_(new AudioBufferMemoryPool()) {
+      media_log_(MediaLog::CloneSafely(media_log)),
+      pool_(base::MakeRefCounted<AudioBufferMemoryPool>()) {
   DETACH_FROM_SEQUENCE(sequence_checker_);
 }
 
@@ -103,15 +103,11 @@ void PassthroughDTSAudioDecoder::EncapsulateFrame(const DecoderBuffer& buffer) {
   std::vector<uint8_t> output_buffer(dts_frame_size);
 
   // Encapsulated a compressed DTS frame per IEC61937
-  base::span<const uint8_t> input_data;
-  input_data = base::span<const uint8_t>(buffer.data(), buffer.data_size());
-  dts::WrapDTSWithIEC61937(input_data, output_buffer, config_.codec());
+  dts::WrapDTSWithIEC61937(buffer, output_buffer, config_.codec());
 
-  // Create a mono channel "buffer" to hold IEC encapsulated bitstream
-  uint8_t* output_channels[1] = {output_buffer.data()};
   scoped_refptr<AudioBuffer> output = AudioBuffer::CopyBitstreamFrom(
       kSampleFormatIECDts, CHANNEL_LAYOUT_MONO, 1, config_.samples_per_second(),
-      samples_per_frame, output_channels, dts_frame_size, buffer.timestamp());
+      samples_per_frame, output_buffer, buffer.timestamp());
   output_cb_.Run(output);
 }
 

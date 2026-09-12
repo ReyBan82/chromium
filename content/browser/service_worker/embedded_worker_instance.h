@@ -18,17 +18,17 @@
 #include "base/observer_list.h"
 #include "base/unguessable_token.h"
 #include "components/services/storage/public/cpp/buckets/bucket_locator.h"
-#include "content/browser/service_worker/embedded_worker_status.h"
 #include "content/browser/service_worker/service_worker_metrics.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/content_browser_client.h"
+#include "content/public/common/child_process_id.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "services/network/public/mojom/client_security_state.mojom-forward.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/blink/public/common/service_worker/embedded_worker_status.h"
 #include "third_party/blink/public/common/service_worker/service_worker_status_code.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "third_party/blink/public/mojom/cache_storage/cache_storage.mojom.h"
@@ -40,17 +40,17 @@
 #include "third_party/blink/public/mojom/worker/subresource_loader_updater.mojom.h"
 #include "url/gurl.h"
 
-#if !BUILDFLAG(IS_ANDROID)
 #include "third_party/blink/public/mojom/hid/hid.mojom-forward.h"
-#endif
 
 namespace content {
 
 class CrossOriginEmbedderPolicyReporter;
+class DocumentIsolationPolicyReporter;
 class RenderProcessHost;
 class ServiceWorkerContentSettingsProxyImpl;
 class ServiceWorkerContextCore;
 class ServiceWorkerVersion;
+class StoragePartitionImpl;
 
 namespace service_worker_new_script_loader_unittest {
 class ServiceWorkerNewScriptLoaderTest;
@@ -88,7 +88,7 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   };
 
   // DEPRECATED, only for use by ServiceWorkerVersion.
-  // TODO(crbug.com/855852): Remove this interface.
+  // TODO(crbug.com/41396417): Remove this interface.
   class Listener {
    public:
     virtual ~Listener() {}
@@ -97,10 +97,13 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
     virtual void OnProcessAllocated() {}
     virtual void OnRegisteredToDevToolsManager() {}
     virtual void OnStartWorkerMessageSent() {}
+    virtual void OnScriptLoaded() {}
     virtual void OnScriptEvaluationStart() {}
     virtual void OnStarted(
         blink::mojom::ServiceWorkerStartStatus status,
-        blink::mojom::ServiceWorkerFetchHandlerType fetch_handler_type) {}
+        blink::mojom::ServiceWorkerFetchHandlerType fetch_handler_type,
+        bool has_hid_event_handlers,
+        bool has_usb_event_handlers) {}
 
     // Called when status changed to STOPPING. The renderer has been sent a Stop
     // IPC message and OnStopped() will be called upon successful completion.
@@ -112,11 +115,11 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
     // even before the Start IPC message was sent to the renderer.  In this
     // case, OnStopping() is not called; the worker is "stopped" immediately
     // (the Start IPC is never sent).
-    virtual void OnStopped(EmbeddedWorkerStatus old_status) {}
+    virtual void OnStopped(blink::EmbeddedWorkerStatus old_status) {}
 
     // Called when the browser-side IPC endpoint for communication with the
     // worker died. When this is called, status is STOPPED.
-    virtual void OnDetached(EmbeddedWorkerStatus old_status) {}
+    virtual void OnDetached(blink::EmbeddedWorkerStatus old_status) {}
 
     virtual void OnReportException(const std::u16string& error_message,
                                    int line_number,
@@ -158,27 +161,37 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   // synchronously complete if this instance is STARTING but the Start IPC
   // message has not yet been sent. In that case, the start procedure is
   // aborted, and this instance enters STOPPED status.
+  //
+  // May destroy `this`.
   void Stop();
 
   // Stops the worker if the worker is not being debugged (i.e. devtools is
   // not attached). This method is called by a stop-worker timer to kill
   // idle workers.
+  //
+  // May destroy `this`.
   void StopIfNotAttachedToDevTools();
 
   int embedded_worker_id() const { return embedded_worker_id_; }
-  EmbeddedWorkerStatus status() const { return status_; }
+  blink::EmbeddedWorkerStatus status() const { return status_; }
   StartingPhase starting_phase() const {
-    DCHECK_EQ(EmbeddedWorkerStatus::STARTING, status());
+    CHECK_EQ(blink::EmbeddedWorkerStatus::kStarting, status(),
+             base::NotFatalUntil::M159);
     return starting_phase_;
   }
   int restart_count() const { return restart_count_; }
-  int process_id() const;
+  bool pause_initializing_global_scope() const {
+    return pause_initializing_global_scope_;
+  }
+  void SetPauseInitializingGlobalScope();
+  void ResumeInitializingGlobalScope();
+  ChildProcessId process_id() const;
   int thread_id() const { return thread_id_; }
   int worker_devtools_agent_route_id() const;
   base::UnguessableToken WorkerDevtoolsId() const;
 
   // DEPRECATED, only for use by ServiceWorkerVersion.
-  // TODO(crbug.com/855852): Remove the Listener interface.
+  // TODO(crbug.com/41396417): Remove the Listener interface.
   void AddObserver(Listener* listener);
   void RemoveObserver(Listener* listener);
 
@@ -190,8 +203,9 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   }
 
   ServiceWorkerMetrics::StartSituation start_situation() const {
-    DCHECK(status() == EmbeddedWorkerStatus::STARTING ||
-           status() == EmbeddedWorkerStatus::RUNNING);
+    CHECK(status() == blink::EmbeddedWorkerStatus::kStarting ||
+              status() == blink::EmbeddedWorkerStatus::kRunning,
+          base::NotFatalUntil::M159);
     return start_situation_;
   }
 
@@ -204,7 +218,7 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   // Called when the worker is doomed.
   void OnWorkerVersionDoomed();
 
-  static std::string StatusToString(EmbeddedWorkerStatus status);
+  static std::string StatusToString(blink::EmbeddedWorkerStatus status);
   static std::string StartingPhaseToString(StartingPhase phase);
 
   // Forces this instance into STOPPED status and releases any state about the
@@ -212,6 +226,7 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   // renderer is unresponsive.  Essentially, it throws away any information
   // about the renderer-side worker, and frees this instance up to start a new
   // worker.
+  // May destroy `this`.
   void Detach();
 
   // Examine the current state of the worker in order to determine if it should
@@ -231,10 +246,8 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
       mojo::PendingReceiver<blink::mojom::CacheStorage> receiver,
       const storage::BucketLocator& bucket_locator);
 
-#if !BUILDFLAG(IS_ANDROID)
   void BindHidService(const url::Origin& origin,
                       mojo::PendingReceiver<blink::mojom::HidService> receiver);
-#endif  // !BUILDFLAG(IS_ANDROID)
 
   void BindUsbService(
       const url::Origin& origin,
@@ -247,26 +260,37 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   //
   // `client_security_state` may be nullptr, in which case a default value is
   // set in the bundle.
+  // `network_restrictions_id`: The unique token identifying this worker's
+  // network restrictions in the network service. Used to restrict subresource
+  // fetches by this worker.
   static std::unique_ptr<blink::PendingURLLoaderFactoryBundle>
   CreateFactoryBundle(
       RenderProcessHost* rph,
       int routing_id,
-      const url::Origin& origin,
+      const blink::StorageKey& storage_key,
       network::mojom::ClientSecurityStatePtr client_security_state,
       mojo::PendingRemote<network::mojom::CrossOriginEmbedderPolicyReporter>
           coep_reporter,
+      mojo::PendingRemote<network::mojom::DocumentIsolationPolicyReporter>
+          dip_reporter,
       ContentBrowserClient::URLLoaderFactoryType factory_type,
-      const std::string& devtools_worker_token);
+      const std::string& devtools_worker_token,
+      const base::UnguessableToken& network_restrictions_id);
 
-  // Returns the unique token that has been generated to identify this worker
-  // instance, and its corresponding GlobalScope in the renderer process. If the
-  // service worker is not currently running, this is absl::nullopt.
-  const absl::optional<blink::ServiceWorkerToken>& token() const {
-    return token_;
-  }
+  mojo::PendingRemote<network::mojom::CrossOriginEmbedderPolicyReporter>
+  GetCoepReporter();
+
+  mojo::PendingRemote<network::mojom::DocumentIsolationPolicyReporter>
+  GetDipReporter();
 
  private:
-  typedef base::ObserverList<Listener>::Unchecked ListenerList;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  typedef base::ObserverList<
+      Listener,
+      /*check_empty=*/false,
+      /*reentrancy=*/
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
+      ListenerList;
   struct StartInfo;
   class WorkerProcessHandle;
   friend class EmbeddedWorkerInstanceTestHarness;
@@ -285,7 +309,8 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   void SendStartWorker(blink::mojom::EmbeddedWorkerStartParamsPtr params);
 
   // Implements blink::mojom::EmbeddedWorkerInstanceHost.
-  void RequestTermination(RequestTerminationCallback callback) override;
+  void RequestTermination(uint64_t observed_keepalive_sequence_number,
+                          RequestTerminationCallback callback) override;
   void CountFeature(blink::mojom::WebFeature feature) override;
   void OnReadyForInspection(
       mojo::PendingRemote<blink::mojom::DevToolsAgent>,
@@ -296,10 +321,13 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   void OnStarted(
       blink::mojom::ServiceWorkerStartStatus status,
       blink::mojom::ServiceWorkerFetchHandlerType fetch_handler_type,
+      bool has_hid_event_handlers,
+      bool has_usb_event_handlers,
       int thread_id,
       blink::mojom::EmbeddedWorkerStartTimingPtr start_timing) override;
   // Resets the embedded worker instance to the initial state. Changes
   // the internal status from STARTING or RUNNING to STOPPED.
+  // May destroy `this`.
   void OnStopped() override;
   void OnReportException(const std::u16string& error_message,
                          int line_number,
@@ -312,7 +340,8 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
                               const GURL& source_url) override;
 
   // Resets all running state. After this function is called, |status_| is
-  // STOPPED.
+  // kStopped.
+  // May destroy `this`.
   void ReleaseProcess();
 
   // Called back from StartTask when the startup sequence failed. Calls
@@ -329,6 +358,10 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
       std::unique_ptr<blink::PendingURLLoaderFactoryBundle> script_bundle);
 
   void BindCacheStorageInternal();
+  mojo::PendingRemote<network::mojom::CrossOriginEmbedderPolicyReporter>
+  GetCoepReporterInternal(StoragePartitionImpl* storage_partition);
+  mojo::PendingRemote<network::mojom::DocumentIsolationPolicyReporter>
+  GetDipReporterInternal(StoragePartitionImpl* storage_partition);
 
   base::WeakPtr<ServiceWorkerContextCore> context_;
   raw_ptr<ServiceWorkerVersion> owner_version_;
@@ -336,9 +369,13 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   // Unique within a ServiceWorkerContextCore.
   const int embedded_worker_id_;
 
-  EmbeddedWorkerStatus status_;
+  blink::EmbeddedWorkerStatus status_;
   StartingPhase starting_phase_;
   int restart_count_;
+
+  // Pause initializing global scope when this flag is true
+  // (https://crbug.com/1431792).
+  bool pause_initializing_global_scope_ = false;
 
   // Current running information.
   std::unique_ptr<EmbeddedWorkerInstance::WorkerProcessHandle> process_handle_;
@@ -403,12 +440,17 @@ class CONTENT_EXPORT EmbeddedWorkerInstance
   // requests initiated from the service worker. The impl lives on the UI
   // thread, and |coep_reporter_| has the ownership of the impl instance.
   std::unique_ptr<CrossOriginEmbedderPolicyReporter> coep_reporter_;
+  mojo::PendingReceiver<blink::mojom::ReportingObserver>
+      coep_reporting_observer_receiver_;
 
-  // A unique identifier for this service worker instance. This is unique across
-  // the browser process, but not persistent across service worker restarts.
-  // This token is set every time the worker starts, and is plumbed through to
-  // the corresponding ServiceWorkerGlobalScope in the renderer process.
-  absl::optional<blink::ServiceWorkerToken> token_;
+  // DIP Reporter connected to the URLLoaderFactories that handles subresource
+  // requests initiated from the service worker. The impl lives on the UI
+  // thread, and |coep_reporter_| has the ownership of the impl instance.
+  std::unique_ptr<DocumentIsolationPolicyReporter> dip_reporter_;
+  mojo::PendingReceiver<blink::mojom::ReportingObserver>
+      dip_reporting_observer_receiver_;
+
+  bool in_dtor_{false};
 
   base::WeakPtrFactory<EmbeddedWorkerInstance> weak_factory_{this};
 };

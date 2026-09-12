@@ -7,26 +7,40 @@
 #include "base/functional/bind.h"
 #include "chrome/browser/sync/test/integration/sync_datatype_helper.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
-#include "components/sync/driver/sync_service_impl.h"
 #include "components/sync/engine/cycle/sync_cycle_snapshot.h"
+#include "components/sync/service/sync_service_impl.h"
 
 UpdatedProgressMarkerChecker::UpdatedProgressMarkerChecker(
     syncer::SyncServiceImpl* service)
     : SingleClientStatusChangeChecker(service) {
   DCHECK(sync_datatype_helper::test()->TestUsesSelfNotifications());
 
-  // HasUnsyncedItemsForTest() posts a task to the sync thread which guarantees
-  // that all tasks posted to the sync thread before this constructor have been
-  // processed.
-  service->HasUnsyncedItemsForTest(
-      base::BindOnce(&UpdatedProgressMarkerChecker::GotHasUnsyncedItems,
-                     weak_ptr_factory_.GetWeakPtr()));
+  // HasUnsyncedItemsForTest() requires the engine to be initialized.
+  if (service->IsEngineInitialized()) {
+    service->HasUnsyncedItemsForTest(
+        base::BindOnce(&UpdatedProgressMarkerChecker::GotHasUnsyncedItems,
+                       weak_ptr_factory_.GetWeakPtr()));
+  } else {
+    waiting_for_engine_initialization_ = true;
+  }
 }
 
 UpdatedProgressMarkerChecker::~UpdatedProgressMarkerChecker() = default;
 
 bool UpdatedProgressMarkerChecker::IsExitConditionSatisfied(std::ostream* os) {
   *os << "Waiting for progress markers... ";
+
+  if (service()->GetTransportState() ==
+          syncer::SyncService::TransportState::DISABLED ||
+      service()->GetTransportState() ==
+          syncer::SyncService::TransportState::PAUSED) {
+    return true;
+  }
+
+  if (!service()->IsEngineInitialized()) {
+    *os << "Waiting for engine initialization...";
+    return false;
+  }
 
   if (!has_unsynced_items_.has_value()) {
     *os << "Unknown synced values state.";
@@ -65,6 +79,17 @@ void UpdatedProgressMarkerChecker::GotHasUnsyncedItems(
     bool has_unsynced_items) {
   has_unsynced_items_ = has_unsynced_items;
   CheckExitCondition();
+}
+
+void UpdatedProgressMarkerChecker::OnStateChanged(syncer::SyncService* sync) {
+  if (waiting_for_engine_initialization_ && service()->IsEngineInitialized()) {
+    waiting_for_engine_initialization_ = false;
+    service()->HasUnsyncedItemsForTest(
+        base::BindOnce(&UpdatedProgressMarkerChecker::GotHasUnsyncedItems,
+                       weak_ptr_factory_.GetWeakPtr()));
+  }
+
+  SingleClientStatusChangeChecker::OnStateChanged(sync);
 }
 
 void UpdatedProgressMarkerChecker::OnSyncCycleCompleted(

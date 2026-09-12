@@ -5,10 +5,12 @@
 #include "chrome/browser/ui/tabs/existing_window_sub_menu_model.h"
 
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "chrome/browser/ui/tabs/tab_menu_model_delegate.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/tabs/tab_strip_model_delegate.h"
+#include "chrome/browser/ui/window_metadata/window_metadata_controller.h"
 #include "chrome/grit/generated_resources.h"
 #include "ui/base/accelerators/accelerator.h"
 
@@ -53,7 +55,8 @@ ExistingWindowSubMenuModel::ExistingWindowSubMenuModel(
                                TabStripModel::CommandMoveTabsToNewWindow) {
   Build(IDS_TAB_CXMENU_MOVETOANOTHERNEWWINDOW,
         BuildMenuItemInfoVectorForBrowsers(
-            tab_menu_model_delegate->GetExistingWindowsForMoveMenu()));
+            tab_menu_model_delegate->GetOtherBrowserWindows(
+                model->delegate()->IsForWebApp())));
 }
 
 ExistingWindowSubMenuModel::~ExistingWindowSubMenuModel() = default;
@@ -86,7 +89,24 @@ bool ExistingWindowSubMenuModel::IsCommandIdEnabled(int command_id) const {
 
 // static:
 bool ExistingWindowSubMenuModel::ShouldShowSubmenu(Profile* profile) {
-  return chrome::GetTabbedBrowserCount(profile) > 1;
+  int tabbed_browser_count = 0;
+  ProfileBrowserCollection::GetForProfile(profile)->ForEach(
+      [&tabbed_browser_count](BrowserWindowInterface* browser) {
+        // Stop iterating if `tabbed_browser_count` is already greater than 1.
+        if (browser->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL) {
+          tabbed_browser_count++;
+          return tabbed_browser_count < 2;
+        }
+        // Continue iterating if not a tabbed browser.
+        return true;
+      });
+  return tabbed_browser_count > 1;
+}
+
+bool ExistingWindowSubMenuModel::ShouldShowSubmenuForApp(
+    TabMenuModelDelegate* tab_menu_model_delegate) {
+  return tab_menu_model_delegate->GetOtherBrowserWindows(/*is_app=*/true)
+             .size() >= 1;
 }
 
 // static:
@@ -98,12 +118,13 @@ ExistingWindowSubMenuModel::GetPassKey() {
 // static:
 std::vector<ExistingBaseSubMenuModel::MenuItemInfo>
 ExistingWindowSubMenuModel::BuildMenuItemInfoVectorForBrowsers(
-    const std::vector<Browser*>& existing_browsers) {
+    const std::vector<BrowserWindowInterface*>& existing_browsers) {
   std::vector<MenuItemInfo> menu_item_infos;
   for (size_t i = 0; i < existing_browsers.size(); ++i) {
-    Browser* browser = existing_browsers[i];
+    BrowserWindowInterface* browser = existing_browsers[i];
     auto window_title =
-        browser->GetWindowTitleForMaxWidth(kWindowTitleForMenuMaxWidth);
+        WindowMetadataController::From(browser)->GetWindowTitleForMaxWidth(
+            kWindowTitleForMenuMaxWidth);
     menu_item_infos.emplace_back(window_title);
     menu_item_infos.back().may_have_mnemonics = false;
     menu_item_infos.back().target_index = i;

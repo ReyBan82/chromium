@@ -8,7 +8,6 @@
 #include <string>
 #include <utility>
 
-#include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/ui/views/payments/validation_delegate.h"
 #include "chrome/test/views/chrome_views_test_base.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -18,22 +17,22 @@ namespace payments {
 
 class ValidatingTextfieldTest : public ChromeViewsTestBase {
  public:
-  ValidatingTextfieldTest() {}
+  ValidatingTextfieldTest() = default;
 
   ValidatingTextfieldTest(const ValidatingTextfieldTest&) = delete;
   ValidatingTextfieldTest& operator=(const ValidatingTextfieldTest&) = delete;
 
-  ~ValidatingTextfieldTest() override {}
+  ~ValidatingTextfieldTest() override = default;
 
  protected:
   class TestValidationDelegate : public ValidationDelegate {
    public:
-    TestValidationDelegate() {}
+    TestValidationDelegate() = default;
 
     TestValidationDelegate(const TestValidationDelegate&) = delete;
     TestValidationDelegate& operator=(const TestValidationDelegate&) = delete;
 
-    ~TestValidationDelegate() override {}
+    ~TestValidationDelegate() override = default;
 
     // ValidationDelegate:
     bool TextfieldValueChanged(views::Textfield* textfield,

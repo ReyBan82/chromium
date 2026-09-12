@@ -23,10 +23,11 @@ class ScopedCOMInitializer;
 
 namespace content {
 class BrowserThreadImpl;
-class NotificationService;
 }
 
 namespace content {
+
+class BrowserIOThreadDelegate;
 
 // ----------------------------------------------------------------------------
 // A BrowserProcessIOThread is a physical thread backing the IO thread.
@@ -37,7 +38,8 @@ namespace content {
 class CONTENT_EXPORT BrowserProcessIOThread : public base::Thread {
  public:
   // Constructs a BrowserProcessIOThread.
-  BrowserProcessIOThread();
+  explicit BrowserProcessIOThread(
+      std::unique_ptr<BrowserIOThreadDelegate> delegate);
 
   BrowserProcessIOThread(const BrowserProcessIOThread&) = delete;
   BrowserProcessIOThread& operator=(const BrowserProcessIOThread&) = delete;
@@ -65,10 +67,6 @@ class CONTENT_EXPORT BrowserProcessIOThread : public base::Thread {
   void CleanUp() override;
 
  private:
-  // Second Init() phase that must happen on this thread but can only happen
-  // after it's promoted to a BrowserThread in |RegisterAsBrowserThread()|.
-  void CompleteInitializationOnBrowserThread();
-
   void IOThreadRun(base::RunLoop* run_loop);
 
   // BrowserThreads are not allowed to do file I/O nor wait on synchronization
@@ -82,9 +80,6 @@ class CONTENT_EXPORT BrowserProcessIOThread : public base::Thread {
 #if BUILDFLAG(IS_WIN)
   std::unique_ptr<base::win::ScopedCOMInitializer> com_initializer_;
 #endif
-
-  // Each specialized thread has its own notification service.
-  std::unique_ptr<NotificationService> notification_service_;
 
   THREAD_CHECKER(browser_thread_checker_);
 };

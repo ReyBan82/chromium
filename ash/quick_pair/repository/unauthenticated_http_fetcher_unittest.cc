@@ -5,6 +5,7 @@
 #include "ash/quick_pair/repository/unauthenticated_http_fetcher.h"
 
 #include "ash/quick_pair/common/mock_quick_pair_browser_delegate.h"
+#include "base/byte_size.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/test/task_environment.h"
 #include "net/http/http_util.h"
@@ -52,11 +53,11 @@ TEST_F(UnauthenticatedHttpFetcherTest, ExecuteGetRequest_Success) {
       net::HttpUtil::AssembleRawHeaders(""));
   head->headers->GetMimeType(&head->mime_type);
   network::URLLoaderCompletionStatus status(net::Error::OK);
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   url_loader_factory_.AddResponse(url, std::move(head), body, status);
 
   http_fetcher_->ExecuteGetRequest(
-      url, base::BindOnce([](std::unique_ptr<std::string> response,
+      url, base::BindOnce([](std::optional<std::string> response,
                              std::unique_ptr<FastPairHttpResult> result) {
         ASSERT_EQ(kBody, *response);
         ASSERT_TRUE(result->IsSuccess());
@@ -70,9 +71,9 @@ TEST_F(UnauthenticatedHttpFetcherTest, ExecuteGetRequest_Failure) {
 
   http_fetcher_->ExecuteGetRequest(
       GURL(kTestUrl),
-      base::BindOnce([](std::unique_ptr<std::string> response,
+      base::BindOnce([](std::optional<std::string> response,
                         std::unique_ptr<FastPairHttpResult> result) {
-        ASSERT_EQ(nullptr, response);
+        ASSERT_EQ(std::nullopt, response);
         ASSERT_FALSE(result->IsSuccess());
         ASSERT_EQ(result->http_response_error(),
                   net::HTTP_INTERNAL_SERVER_ERROR);
@@ -86,9 +87,9 @@ TEST_F(UnauthenticatedHttpFetcherTest, ExecuteGetRequest_Failure_NoUrlLoader) {
 
   http_fetcher_->ExecuteGetRequest(
       GURL(kTestUrl),
-      base::BindOnce([](std::unique_ptr<std::string> response,
+      base::BindOnce([](std::optional<std::string> response,
                         std::unique_ptr<FastPairHttpResult> result) {
-        ASSERT_EQ(nullptr, response);
+        ASSERT_EQ(std::nullopt, response);
         ASSERT_EQ(nullptr, result);
       }));
   task_environment_.RunUntilIdle();

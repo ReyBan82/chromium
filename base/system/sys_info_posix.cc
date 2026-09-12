@@ -12,16 +12,23 @@
 #include <sys/param.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
-#include <unistd.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <iostream>
+#include <type_traits>
 
+#include "base/byte_size.h"
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_util.h"
-#include "base/lazy_instance.h"
+#include "base/memory/page_size.h"
+#include "base/no_destructor.h"
+#include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/system/sys_info_internal.h"
@@ -41,31 +48,29 @@
 #endif
 
 #if BUILDFLAG(IS_MAC)
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
 #endif
 
 namespace {
 
-uint64_t AmountOfVirtualMemory() {
+base::ByteSize AmountOfVirtualMemory() {
   struct rlimit limit;
   int result = getrlimit(RLIMIT_DATA, &limit);
   if (result != 0) {
     NOTREACHED();
-    return 0;
   }
-  return limit.rlim_cur == RLIM_INFINITY ? 0 : limit.rlim_cur;
+  return base::ByteSize(limit.rlim_cur == RLIM_INFINITY ? 0 : limit.rlim_cur);
 }
-
-base::LazyInstance<
-    base::internal::LazySysInfoValue<uint64_t, AmountOfVirtualMemory>>::Leaky
-    g_lazy_virtual_memory = LAZY_INSTANCE_INITIALIZER;
+using LazyVirtualMemory =
+    base::internal::LazySysInfoValue<base::ByteSize, AmountOfVirtualMemory>;
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 bool IsStatsZeroIfUnlimited(const base::FilePath& path) {
   struct statfs stats;
 
-  if (HANDLE_EINTR(statfs(path.value().c_str(), &stats)) != 0)
+  if (HANDLE_EINTR(statfs(path.value().c_str(), &stats)) != 0) {
     return false;
+  }
 
   // This static_cast is here because various libcs disagree about the size
   // and signedness of statfs::f_type. In particular, glibc has it as either a
@@ -83,12 +88,117 @@ bool IsStatsZeroIfUnlimited(const base::FilePath& path) {
 }
 #endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 
-bool GetDiskSpaceInfo(const base::FilePath& path,
-                      int64_t* available_bytes,
-                      int64_t* total_bytes) {
+void GetKernelVersionNumbers(int32_t* major_version,
+                             int32_t* minor_version,
+                             int32_t* bugfix_version) {
+  struct utsname info;
+  CHECK_EQ(uname(&info), 0);
+  int num_read = UNSAFE_TODO(sscanf(info.release, "%d.%d.%d", major_version,
+                                    minor_version, bugfix_version));
+  if (num_read < 1) {
+    *major_version = 0;
+  }
+  if (num_read < 2) {
+    *minor_version = 0;
+  }
+  if (num_read < 3) {
+    *bugfix_version = 0;
+  }
+}
+
+}  // namespace
+
+namespace base {
+
+#if !BUILDFLAG(IS_OPENBSD)
+// static
+int SysInfo::NumberOfProcessors() {
+#if BUILDFLAG(IS_MAC)
+  std::optional<int> number_of_physical_cores =
+      internal::NumberOfProcessorsWhenCpuSecurityMitigationEnabled();
+  if (number_of_physical_cores.has_value()) {
+    return number_of_physical_cores.value();
+  }
+#endif  // BUILDFLAG(IS_MAC)
+
+  // This value is cached to avoid computing this value in the sandbox, which
+  // doesn't work on some platforms. The Mac-specific code above is not
+  // included because changing the value at runtime is the best way to unittest
+  // its behavior.
+  static int cached_num_cpus = [] {
+    // sysconf returns the number of "logical" (not "physical") processors on
+    // both Mac and Linux.  So we get the number of max available "logical"
+    // processors.
+    //
+    // Note that the number of "currently online" processors may be fewer than
+    // the returned value of NumberOfProcessors(). On some platforms, the kernel
+    // may make some processors offline intermittently, to save power when
+    // system loading is low.
+    //
+    // One common use case that needs to know the processor count is to create
+    // optimal number of threads for optimization. It should make plan according
+    // to the number of "max available" processors instead of "currently online"
+    // ones. The kernel should be smart enough to make all processors online
+    // when it has sufficient number of threads waiting to run.
+    long res = sysconf(_SC_NPROCESSORS_CONF);
+    if (res == -1) {
+      // `res` can be -1 if this function is invoked under the sandbox, which
+      // should never happen.
+      NOTREACHED();
+    }
+
+    int num_cpus = static_cast<int>(res);
+
+#if BUILDFLAG(IS_LINUX)
+    // Restrict the CPU count based on the process's CPU affinity mask, if
+    // available.
+    cpu_set_t* cpu_set = CPU_ALLOC(num_cpus);
+    size_t cpu_set_size = CPU_ALLOC_SIZE(num_cpus);
+    int ret = sched_getaffinity(0, cpu_set_size, cpu_set);
+    if (ret == 0) {
+      num_cpus = CPU_COUNT_S(cpu_set_size, cpu_set);
+    }
+    CPU_FREE(cpu_set);
+#endif  // BUILDFLAG(IS_LINUX)
+
+    return num_cpus;
+  }();
+
+  return cached_num_cpus;
+}
+#endif  // !BUILDFLAG(IS_OPENBSD)
+
+// static
+ByteSize SysInfo::AmountOfVirtualMemory() {
+  static_assert(std::is_trivially_destructible<LazyVirtualMemory>::value);
+  static LazyVirtualMemory virtual_memory;
+  return virtual_memory.value();
+}
+
+// static
+std::optional<int64_t> SysInfo::AmountOfFreeDiskSpace(const FilePath& path) {
+  return AmountOfDiskSpace(path).transform([](DiskSpaceInfo info) {
+    return static_cast<int64_t>(info.available.InBytes());
+  });
+}
+
+// static
+std::optional<int64_t> SysInfo::AmountOfTotalDiskSpace(const FilePath& path) {
+  return AmountOfDiskSpace(path).transform([](DiskSpaceInfo info) {
+    return static_cast<int64_t>(info.total.InBytes());
+  });
+}
+
+// static
+std::optional<SysInfo::DiskSpaceInfo> SysInfo::AmountOfDiskSpace(
+    const FilePath& path) {
+  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                base::BlockingType::MAY_BLOCK);
+
   struct statvfs stats;
-  if (HANDLE_EINTR(statvfs(path.value().c_str(), &stats)) != 0)
-    return false;
+  if (HANDLE_EINTR(statvfs(path.value().c_str(), &stats)) != 0) {
+    return std::nullopt;
+  }
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
   const bool zero_size_means_unlimited =
@@ -97,106 +207,17 @@ bool GetDiskSpaceInfo(const base::FilePath& path,
   const bool zero_size_means_unlimited = false;
 #endif
 
-  if (available_bytes) {
-    *available_bytes =
-        zero_size_means_unlimited
-            ? std::numeric_limits<int64_t>::max()
-            : base::saturated_cast<int64_t>(stats.f_bavail * stats.f_frsize);
-  }
-
-  if (total_bytes) {
-    *total_bytes =
-        zero_size_means_unlimited
-            ? std::numeric_limits<int64_t>::max()
-            : base::saturated_cast<int64_t>(stats.f_blocks * stats.f_frsize);
-  }
-  return true;
-}
-
-}  // namespace
-
-namespace base {
-
-namespace internal {
-
-int NumberOfProcessors() {
-#if BUILDFLAG(IS_MAC)
-  absl::optional<int> number_of_physical_cores =
-      NumberOfProcessorsWhenCpuSecurityMitigationEnabled();
-  if (number_of_physical_cores.has_value())
-    return number_of_physical_cores.value();
-#endif  // BUILDFLAG(IS_MAC)
-
-  // sysconf returns the number of "logical" (not "physical") processors on both
-  // Mac and Linux.  So we get the number of max available "logical" processors.
-  //
-  // Note that the number of "currently online" processors may be fewer than the
-  // returned value of NumberOfProcessors(). On some platforms, the kernel may
-  // make some processors offline intermittently, to save power when system
-  // loading is low.
-  //
-  // One common use case that needs to know the processor count is to create
-  // optimal number of threads for optimization. It should make plan according
-  // to the number of "max available" processors instead of "currently online"
-  // ones. The kernel should be smart enough to make all processors online when
-  // it has sufficient number of threads waiting to run.
-  long res = sysconf(_SC_NPROCESSORS_CONF);
-  if (res == -1) {
-    NOTREACHED();
-    return 1;
-  }
-
-  int num_cpus = static_cast<int>(res);
-
-#if BUILDFLAG(IS_LINUX)
-  // Restrict the CPU count based on the process's CPU affinity mask, if
-  // available.
-  cpu_set_t* cpu_set = CPU_ALLOC(num_cpus);
-  size_t cpu_set_size = CPU_ALLOC_SIZE(num_cpus);
-  int ret = sched_getaffinity(0, cpu_set_size, cpu_set);
-  if (ret == 0) {
-    num_cpus = CPU_COUNT_S(cpu_set_size, cpu_set);
-  }
-  CPU_FREE(cpu_set);
-#endif  // BUILDFLAG(IS_LINUX)
-
-  return num_cpus;
-}
-
-}  // namespace internal
-
-#if !BUILDFLAG(IS_OPENBSD)
-int SysInfo::NumberOfProcessors() {
-  static int number_of_processors = internal::NumberOfProcessors();
-  return number_of_processors;
-}
-#endif  // !BUILDFLAG(IS_OPENBSD)
-
-// static
-uint64_t SysInfo::AmountOfVirtualMemory() {
-  return g_lazy_virtual_memory.Get().value();
-}
-
-// static
-int64_t SysInfo::AmountOfFreeDiskSpace(const FilePath& path) {
-  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
-                                                base::BlockingType::MAY_BLOCK);
-
-  int64_t available;
-  if (!GetDiskSpaceInfo(path, &available, nullptr))
-    return -1;
-  return available;
-}
-
-// static
-int64_t SysInfo::AmountOfTotalDiskSpace(const FilePath& path) {
-  base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
-                                                base::BlockingType::MAY_BLOCK);
-
-  int64_t total;
-  if (!GetDiskSpaceInfo(path, nullptr, &total))
-    return -1;
-  return total;
+  int64_t available_bytes =
+      zero_size_means_unlimited
+          ? std::numeric_limits<int64_t>::max()
+          : base::saturated_cast<int64_t>(stats.f_bavail * stats.f_frsize);
+  int64_t total_bytes =
+      zero_size_means_unlimited
+          ? std::numeric_limits<int64_t>::max()
+          : base::saturated_cast<int64_t>(stats.f_blocks * stats.f_frsize);
+  return DiskSpaceInfo{
+      .total = ByteSize(static_cast<uint64_t>(total_bytes)),
+      .available = ByteSize(static_cast<uint64_t>(available_bytes))};
 }
 
 #if !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_ANDROID)
@@ -205,7 +226,6 @@ std::string SysInfo::OperatingSystemName() {
   struct utsname info;
   if (uname(&info) < 0) {
     NOTREACHED();
-    return std::string();
   }
   return std::string(info.sysname);
 }
@@ -217,7 +237,6 @@ std::string SysInfo::OperatingSystemVersion() {
   struct utsname info;
   if (uname(&info) < 0) {
     NOTREACHED();
-    return std::string();
   }
   return std::string(info.release);
 }
@@ -228,24 +247,21 @@ std::string SysInfo::OperatingSystemVersion() {
 void SysInfo::OperatingSystemVersionNumbers(int32_t* major_version,
                                             int32_t* minor_version,
                                             int32_t* bugfix_version) {
-  struct utsname info;
-  if (uname(&info) < 0) {
-    NOTREACHED();
-    *major_version = 0;
-    *minor_version = 0;
-    *bugfix_version = 0;
-    return;
-  }
-  int num_read = sscanf(info.release, "%d.%d.%d", major_version, minor_version,
-                        bugfix_version);
-  if (num_read < 1)
-    *major_version = 0;
-  if (num_read < 2)
-    *minor_version = 0;
-  if (num_read < 3)
-    *bugfix_version = 0;
+  GetKernelVersionNumbers(major_version, minor_version, bugfix_version);
 }
 #endif
+
+// static
+SysInfo::KernelVersionNumber SysInfo::KernelVersionNumber::Current() {
+  KernelVersionNumber v;
+  GetKernelVersionNumbers(&v.major, &v.minor, &v.bugfix);
+  return v;
+}
+
+std::ostream& operator<<(std::ostream& out,
+                         const SysInfo::KernelVersionNumber& v) {
+  return out << v.major << "." << v.minor << "." << v.bugfix;
+}
 
 #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_IOS)
 // static
@@ -253,7 +269,6 @@ std::string SysInfo::OperatingSystemArchitecture() {
   struct utsname info;
   if (uname(&info) < 0) {
     NOTREACHED();
-    return std::string();
   }
   std::string arch(info.machine);
   if (arch == "i386" || arch == "i486" || arch == "i586" || arch == "i686") {
@@ -269,8 +284,46 @@ std::string SysInfo::OperatingSystemArchitecture() {
 
 // static
 size_t SysInfo::VMAllocationGranularity() {
-  return checked_cast<size_t>(getpagesize());
+  return GetPageSize();
 }
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+
+namespace {
+std::vector<uint64_t> MaxFrequencyPerProcessorImpl() {
+  int num_cpus = base::SysInfo::NumberOfProcessors();
+  std::vector<uint64_t> max_core_frequencies(static_cast<size_t>(num_cpus), 0);
+
+  for (int core_index = 0; core_index < num_cpus; ++core_index) {
+    std::string content;
+    auto path = StringPrintf(
+        "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", core_index);
+    // The file may not exist, depending on whether there is a cpufreq
+    // driver. For instance, this is not present on virtual machines.
+    if (!ReadFileToStringNonBlocking(base::FilePath(path), &content)) {
+      return {};
+    }
+    uint32_t frequency_khz = 0;
+    if (!StringToUint(base::TrimWhitespaceASCII(content, TRIM_ALL),
+                      &frequency_khz)) {
+      return {};
+    }
+    max_core_frequencies[static_cast<size_t>(core_index)] =
+        static_cast<uint64_t>(frequency_khz) * 1000;
+  }
+
+  return max_core_frequencies;
+}
+}  // namespace
+
+// static
+const std::vector<uint64_t>& SysInfo::MaxFrequencyPerProcessor() {
+  static base::NoDestructor<std::vector<uint64_t>> result(
+      MaxFrequencyPerProcessorImpl());
+  return *result;
+}
+
+#endif
 
 #if !BUILDFLAG(IS_APPLE)
 // static
@@ -278,32 +331,23 @@ int SysInfo::NumberOfEfficientProcessorsImpl() {
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
   // Try to guess the CPU architecture and cores of each cluster by comparing
   // the maximum frequencies of the available (online and offline) cores.
-  int num_cpus = SysInfo::NumberOfProcessors();
-  DCHECK_GE(num_cpus, 0);
-  std::vector<uint32_t> max_core_frequencies_khz(static_cast<size_t>(num_cpus),
-                                                 0);
-  for (int core_index = 0; core_index < num_cpus; ++core_index) {
-    std::string content;
-    auto path = StringPrintf(
-        "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", core_index);
-    if (!ReadFileToStringNonBlocking(FilePath(path), &content))
-      return 0;
-    if (!StringToUint(
-            content,
-            &max_core_frequencies_khz[static_cast<size_t>(core_index)]))
-      return 0;
+  const std::vector<uint64_t>& max_core_frequencies =
+      MaxFrequencyPerProcessor();
+
+  if (max_core_frequencies.empty()) {
+    return 0;
   }
 
-  auto [min_max_core_frequencies_khz_it, max_max_core_frequencies_khz_it] =
-      std::minmax_element(max_core_frequencies_khz.begin(),
-                          max_core_frequencies_khz.end());
+  auto [min_max_core_frequencies_it, max_max_core_frequencies_it] =
+      std::ranges::minmax_element(max_core_frequencies);
 
-  if (*min_max_core_frequencies_khz_it == *max_max_core_frequencies_khz_it)
+  if (*min_max_core_frequencies_it == *max_max_core_frequencies_it) {
     return 0;
+  }
 
-  return static_cast<int>(std::count(max_core_frequencies_khz.begin(),
-                                     max_core_frequencies_khz.end(),
-                                     *min_max_core_frequencies_khz_it));
+  return static_cast<int>(std::count(max_core_frequencies.begin(),
+                                     max_core_frequencies.end(),
+                                     *min_max_core_frequencies_it));
 #else
   NOTIMPLEMENTED();
   return 0;

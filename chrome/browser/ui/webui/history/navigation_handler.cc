@@ -10,14 +10,15 @@
 #include "base/values.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
+#include "ui/base/page_transition_types.h"
 #include "ui/base/window_open_disposition.h"
 #include "ui/base/window_open_disposition_utils.h"
 
 namespace webui {
 
-NavigationHandler::NavigationHandler() {}
+NavigationHandler::NavigationHandler() = default;
 
-NavigationHandler::~NavigationHandler() {}
+NavigationHandler::~NavigationHandler() = default;
 
 void NavigationHandler::RegisterMessages() {
   web_ui()->RegisterMessageCallback(
@@ -26,7 +27,7 @@ void NavigationHandler::RegisterMessages() {
                           base::Unretained(this)));
 }
 
-void NavigationHandler::HandleNavigateToUrl(const base::Value::List& list) {
+void NavigationHandler::HandleNavigateToUrl(const base::ListValue& list) {
   const std::string& url_string = list[0].GetString();
   const std::string& target_string = list[1].GetString();
   double button = list[2].GetDouble();
@@ -44,7 +45,8 @@ void NavigationHandler::HandleNavigateToUrl(const base::Value::List& list) {
                                   : WindowOpenDisposition::CURRENT_TAB);
   web_ui()->GetWebContents()->OpenURL(
       content::OpenURLParams(GURL(url_string), content::Referrer(), disposition,
-                             ui::PAGE_TRANSITION_LINK, false));
+                             ui::PAGE_TRANSITION_LINK, false),
+      /*navigation_handle_callback=*/{});
 
   // This may delete us!
 }

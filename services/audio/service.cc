@@ -29,16 +29,18 @@
 #include "media/audio/mac/audio_device_listener_mac.h"
 #endif
 
+#if BUILDFLAG(IS_WIN)
+#include "base/win/win_util.h"
+#endif  // BUILDFLAG(IS_WIN)
+
 namespace audio {
 
 Service::Service(std::unique_ptr<AudioManagerAccessor> audio_manager_accessor,
                  bool enable_remote_client_support,
-                 bool run_audio_processing,
                  mojo::PendingReceiver<mojom::AudioService> receiver)
     : receiver_(this, std::move(receiver)),
       audio_manager_accessor_(std::move(audio_manager_accessor)),
-      enable_remote_client_support_(enable_remote_client_support),
-      run_audio_processing_(run_audio_processing) {
+      enable_remote_client_support_(enable_remote_client_support) {
   DCHECK(audio_manager_accessor_);
 
   if (enable_remote_client_support_) {
@@ -65,6 +67,12 @@ Service::Service(std::unique_ptr<AudioManagerAccessor> audio_manager_accessor,
   audio_manager_accessor_->GetAudioManager()->SetAecDumpRecordingManager(
       aecdump_recording_manager_->AsWeakPtr());
 #endif
+
+#if BUILDFLAG(IS_WIN)
+  // Disable high resolution timer throttling to prevent degraded audio quality.
+  base::win::SetProcessTimerThrottleState(
+      base::GetCurrentProcessHandle(), base::win::ProcessPowerState::kDisabled);
+#endif  // BUILDFLAG(IS_WIN)
 }
 
 Service::~Service() {
@@ -110,8 +118,13 @@ void Service::BindSystemInfo(
   }
 
   if (!system_info_) {
+#if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
+    system_info_ = std::make_unique<SystemInfo>(
+        audio_manager_accessor_->GetAudioManager(), &ml_model_manager_);
+#else
     system_info_ = std::make_unique<SystemInfo>(
         audio_manager_accessor_->GetAudioManager());
+#endif
   }
   system_info_->Bind(std::move(receiver));
 }
@@ -134,9 +147,15 @@ void Service::BindStreamFactory(
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   if (!stream_factory_) {
+#if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
     stream_factory_.emplace(audio_manager_accessor_->GetAudioManager(),
                             aecdump_recording_manager_.get(),
-                            run_audio_processing_);
+                            &ml_model_manager_);
+#else
+    stream_factory_.emplace(audio_manager_accessor_->GetAudioManager(),
+                            aecdump_recording_manager_.get(),
+                            /*ml_model_manager=*/nullptr);
+#endif
   }
   stream_factory_->Bind(std::move(receiver));
 }
@@ -165,6 +184,14 @@ void Service::BindTestingApi(
   auto& binder = GetTestingApiBinder();
   if (binder)
     binder.Run(std::move(receiver));
+}
+
+void Service::BindMlModelManager(
+    mojo::PendingReceiver<mojom::MlModelManager> receiver) {
+  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+#if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
+  ml_model_manager_.BindReceiver(std::move(receiver));
+#endif
 }
 
 void Service::InitializeDeviceMonitor() {

@@ -4,8 +4,7 @@
 
 #include "components/commerce/core/commerce_feature_list.h"
 
-#include <unordered_map>
-#include <unordered_set>
+#include <string_view>
 
 #include "base/feature_list.h"
 #include "base/metrics/field_trial_params.h"
@@ -18,18 +17,18 @@
 #endif  // !BUILDFLAG(IS_ANDROID)
 #include "components/commerce/core/commerce_heuristics_data_metrics_helper.h"
 #include "components/commerce/core/pref_names.h"
-#include "components/country_codes/country_codes.h"
-#include "components/variations/service/variations_service.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "third_party/re2/src/re2/re2.h"
 
 namespace commerce {
 
 namespace {
 
-typedef std::unordered_map<
+using CountryLocaleMap = absl::flat_hash_map<
     const base::Feature*,
-    std::unordered_map<std::string, std::unordered_set<std::string>>>
-    CountryLocaleMap;
+    absl::flat_hash_map<std::string_view,
+                        absl::flat_hash_set<std::string_view>>>;
 
 // Get a map of enabled countries to the set of allowed locales for that
 // country on a per-feature basis. Just because a locale is enabled for one
@@ -42,10 +41,30 @@ const CountryLocaleMap& GetAllowedCountryToLocaleMap() {
   static const base::NoDestructor<CountryLocaleMap> allowed_map([] {
     CountryLocaleMap map;
 
-    map[&kShoppingListRegionLaunched] = {{"us", {"en-us"}}};
-    map[&kShoppingPDPMetricsRegionLaunched] = {{"us", {"en-us"}}};
+#if BUILDFLAG(IS_ANDROID)
+    map[&kCommerceMerchantViewer] = {{"us", {"en-us"}}};
+    map[&kPriceAnnotations] = {{"us", {"en-us"}}};
+#endif  // BUILDFLAG(IS_ANDROID)
+
+#if BUILDFLAG(IS_IOS)
+    map[&kTabResumptionShopCard] = {{"us", {"en-us"}}};
+#endif  // BUILDFLAG(IS_IOS)
+
+#if !BUILDFLAG(IS_IOS)
+    map[&kEnableDiscountInfoApi] = {{"us", {"en-us"}}};
+#endif  // !BUILDFLAG(IS_IOS)
+
     map[&ntp_features::kNtpChromeCartModule] = {{"us", {"en-us"}}};
-    map[&kCommerceMerchantViewerRegionLaunched] = {{"us", {"en-us"}}};
+    map[&kPriceInsights] = {{"us", {"en-us"}}};
+    map[&kShoppingList] = {{"us", {"en-us"}}};
+    map[&kShoppingPageTypes] = {{"us", {"en-us"}}};
+    map[&kShoppingPDPMetrics] = {{"us", {"en-us"}}};
+    map[&kSubscriptionsApi] = {{"us", {"en", "en-gb", "en-us"}},
+                               {"au", {"en", "en-au", "en-gb", "en-us"}},
+                               {"ca", {"en", "en-ca", "en-gb", "en-us"}},
+                               {"in", {"en", "en-gb", "en-in", "en-us"}},
+                               {"jp", {"ja", "ja-jp"}}};
+    map[&kDiscountAutofill] = {};
 
     return map;
   }());
@@ -104,205 +123,113 @@ const re2::RE2& GetCouponPartnerMerchantPattern() {
 
 }  // namespace
 
-namespace switches {
-// Specifies whether ChromeCart is enabled.
-const char kEnableChromeCart[] = "enable-chrome-cart";
-}  // namespace switches
-
-BASE_FEATURE(kCommerceAllowLocalImages,
-             "CommerceAllowLocalImages",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kCommerceAllowLocalImages, base::FEATURE_DISABLED_BY_DEFAULT);
 
 BASE_FEATURE(kCommerceAllowOnDemandBookmarkUpdates,
-             "CommerceAllowOnDemandBookmarkUpdates",
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-BASE_FEATURE(kCommerceAllowServerImages,
-             "CommerceAllowServerImages",
-             base::FEATURE_ENABLED_BY_DEFAULT);
+BASE_FEATURE(kCommerceMerchantViewer, base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kCommerceCoupons,
-             "CommerceCoupons",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kCommerceLocalPDPDetection, base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kCommerceMerchantViewer,
-             "CommerceMerchantViewer",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-#if BUILDFLAG(IS_ANDROID)
-BASE_FEATURE(kCommerceMerchantViewerRegionLaunched,
-             "CommerceMerchantViewerRegionLaunched",
-             base::FEATURE_ENABLED_BY_DEFAULT);
+BASE_FEATURE(kPriceAnnotations, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kPriceInsights, base::FEATURE_DISABLED_BY_DEFAULT);
+
+const char kPriceInsightsDelayChipParam[] = "price-inishgts-delay-chip";
+const base::FeatureParam<bool> kPriceInsightsDelayChip{
+    &commerce::kPriceInsights, kPriceInsightsDelayChipParam, false};
+const char kPriceInsightsChipLabelExpandOnHighPriceParam[] =
+    "chip-expand-on-high-price";
+const base::FeatureParam<bool> kPriceInsightsChipLabelExpandOnHighPrice{
+    &commerce::kPriceInsights, kPriceInsightsChipLabelExpandOnHighPriceParam,
+    false};
+const char kPriceInsightsShowFeedbackParam[] = "price-insights-show-feedback";
+const base::FeatureParam<bool> kPriceInsightsShowFeedback{
+    &commerce::kPriceInsights, kPriceInsightsShowFeedbackParam, true};
+const char kPriceInsightsUseCacheParam[] = "price-insights-use-cache";
+const base::FeatureParam<bool> kPriceInsightsUseCache{
+    &commerce::kPriceInsights, kPriceInsightsUseCacheParam, true};
+
+// Discount Autofill at Checkout
+BASE_FEATURE(kDiscountAutofill, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Shopping variations to Tab resumption.
+BASE_FEATURE(kTabResumptionShopCard, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Discount on navigation
+BASE_FEATURE(kEnableDiscountInfoApi, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// Force traffic to alternate Chrome shopping server.
+BASE_FEATURE(kShoppingAlternateServer, base::FEATURE_DISABLED_BY_DEFAULT);
+
+// TODO(crbug.com/406555154): Clean up this flag when discount on clank launched.
+const char kDiscountOnShoppyPageParam[] = "discount-on-shoppy-page";
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+const base::FeatureParam<bool> kDiscountOnShoppyPage{
+    &kEnableDiscountInfoApi, kDiscountOnShoppyPageParam, true};
 #else
-BASE_FEATURE(kCommerceMerchantViewerRegionLaunched,
-             "CommerceMerchantViewerRegionLaunched",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-#endif  // BUILDFLAG(IS_ANDROID)
+const base::FeatureParam<bool> kDiscountOnShoppyPage{
+    &kEnableDiscountInfoApi, kDiscountOnShoppyPageParam, false};
+#endif
 
-BASE_FEATURE(kCommercePriceTracking,
-             "CommercePriceTracking",
+const char kHistoryClustersBehaviorParam[] = "history-cluster-behavior";
+const char kMerchantWideBehaviorParam[] = "merchant-wide-behavior";
+const char kNonMerchantWideBehaviorParam[] = "non-merchant-wide-behavior";
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+    BUILDFLAG(IS_CHROMEOS)
+BASE_FEATURE(kDiscountDialogAutoPopupBehaviorSetting,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+const base::FeatureParam<int> kHistoryClustersBehavior{
+    &commerce::kDiscountDialogAutoPopupBehaviorSetting,
+    kHistoryClustersBehaviorParam, 1};
+const base::FeatureParam<int> kMerchantWideBehavior{
+    &commerce::kDiscountDialogAutoPopupBehaviorSetting,
+    kMerchantWideBehaviorParam, 2};
+const base::FeatureParam<int> kNonMerchantWideBehavior{
+    &commerce::kDiscountDialogAutoPopupBehaviorSetting,
+    kNonMerchantWideBehaviorParam, 0};
+#else
+BASE_FEATURE(kDiscountDialogAutoPopupBehaviorSetting,
              base::FEATURE_DISABLED_BY_DEFAULT);
+const base::FeatureParam<int> kHistoryClustersBehavior{
+    &commerce::kDiscountDialogAutoPopupBehaviorSetting,
+    kHistoryClustersBehaviorParam, 0};
+const base::FeatureParam<int> kMerchantWideBehavior{
+    &commerce::kDiscountDialogAutoPopupBehaviorSetting,
+    kMerchantWideBehaviorParam, 2};
+const base::FeatureParam<int> kNonMerchantWideBehavior{
+    &commerce::kDiscountDialogAutoPopupBehaviorSetting,
+    kNonMerchantWideBehaviorParam, 2};
+#endif
+
+BASE_FEATURE(kDiscountDialogAutoPopupCounterfactual,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kDiscountsUiRefactor, base::FEATURE_DISABLED_BY_DEFAULT);
 
 const base::FeatureParam<bool> kDeleteAllMerchantsOnClearBrowsingHistory{
     &kCommerceMerchantViewer, "delete_all_merchants_on_clear_history", false};
 
-BASE_FEATURE(kShoppingList, "ShoppingList", base::FEATURE_DISABLED_BY_DEFAULT);
-#if BUILDFLAG(IS_ANDROID)
-BASE_FEATURE(kShoppingListRegionLaunched,
-             "ShoppingListRegionLaunched",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-#else
-BASE_FEATURE(kShoppingListRegionLaunched,
-             "ShoppingListRegionLaunched",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-#endif  // BUILDFLAG(IS_ANDROID)
+BASE_FEATURE(kShoppingList, base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kShoppingPDPMetrics,
-             "ShoppingPDPMetrics",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kShoppingPDPMetricsRegionLaunched,
-             "ShoppingPDPMetricsRegionLaunched",
+BASE_FEATURE(kPriceTrackingSubscriptionServiceLocaleKey,
              base::FEATURE_ENABLED_BY_DEFAULT);
 
-BASE_FEATURE(kRetailCoupons, "RetailCoupons", base::FEATURE_ENABLED_BY_DEFAULT);
+BASE_FEATURE(kShoppingPDPMetrics, base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kCommerceDeveloper,
-             "CommerceDeveloper",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kSubscriptionsApi, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kInStockNotification, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kShoppingPageTypes, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kRetailCoupons, base::FEATURE_ENABLED_BY_DEFAULT);
 
 const char kRetailCouponsWithCodeParam[] = "RetailCouponsWithCodeParam";
-
-// Params use for Discount Consent v2.
-BASE_FEATURE(kDiscountConsentV2,
-             "DiscountConsentV2",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-BASE_FEATURE(kCommerceHintAndroid,
-             "CommerceHintAndroid",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kMerchantWidePromotion,
-             "MerchantWidePromotion",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kCodeBasedRBD, "CodeBasedRBD", base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kChromeCartDomBasedHeuristics,
-             "ChromeCartDomBasedHeuristics",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-// Params for Discount Consent V2 in the NTP Cart module.
-const char kNtpChromeCartModuleDiscountConsentNtpVariationParam[] =
-    "discount-consent-ntp-variation";
-const base::FeatureParam<int> kNtpChromeCartModuleDiscountConsentNtpVariation{
-    &commerce::kDiscountConsentV2,
-    kNtpChromeCartModuleDiscountConsentNtpVariationParam, 4};
-const char kNtpChromeCartModuleDiscountConsentReshowTimeParam[] =
-    "discount-consent-ntp-reshow-time";
-const base::FeatureParam<base::TimeDelta>
-    kNtpChromeCartModuleDiscountConsentReshowTime{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentReshowTimeParam, base::Days(28)};
-const char kNtpChromeCartModuleDiscountConsentMaxDismissalCountParam[] =
-    "discount-consent-ntp-max-dismiss-count";
-const base::FeatureParam<int>
-    kNtpChromeCartModuleDiscountConsentMaxDismissalCount{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentMaxDismissalCountParam, 1};
-
-// String change variation params.
-const char kNtpChromeCartModuleDiscountConsentStringChangeContentParam[] =
-    "string-change-content";
-const base::FeatureParam<std::string>
-    kNtpChromeCartModuleDiscountConsentStringChangeContent{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentStringChangeContentParam, ""};
-
-const char kNtpChromeCartModuleDiscountConsentInlineShowCloseButtonParam[] =
-    "inline-card-show-button";
-const base::FeatureParam<bool>
-    kNtpChromeCartModuleDiscountConsentInlineShowCloseButton{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentStringChangeContentParam, true};
-
-// Discount consent v2 step 1 params.
-const char
-    kNtpChromeCartModuleDiscountConsentNtpStepOneUseStaticContentParam[] =
-        "step-one-use-static-content";
-const base::FeatureParam<bool>
-    kNtpChromeCartModuleDiscountConsentNtpStepOneUseStaticContent{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentNtpStepOneUseStaticContentParam,
-        true};
-const char kNtpChromeCartModuleDiscountConsentNtpStepOneStaticContentParam[] =
-    "step-one-static-content";
-const base::FeatureParam<std::string>
-    kNtpChromeCartModuleDiscountConsentNtpStepOneStaticContent{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentNtpStepOneStaticContentParam, ""};
-const char kNtpChromeCartModuleDiscountConsentNtpStepOneContentOneCartParam[] =
-    "step-one-one-cart-content";
-const base::FeatureParam<std::string>
-    kNtpChromeCartModuleDiscountConsentNtpStepOneContentOneCart{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentNtpStepOneContentOneCartParam, ""};
-const char kNtpChromeCartModuleDiscountConsentNtpStepOneContentTwoCartsParam[] =
-    "step-one-two-carts-content";
-const base::FeatureParam<std::string>
-    kNtpChromeCartModuleDiscountConsentNtpStepOneContentTwoCarts{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentNtpStepOneContentTwoCartsParam, ""};
-const char
-    kNtpChromeCartModuleDiscountConsentNtpStepOneContentThreeCartsParam[] =
-        "step-one-three-carts-content";
-const base::FeatureParam<std::string>
-    kNtpChromeCartModuleDiscountConsentNtpStepOneContentThreeCarts{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentNtpStepOneContentThreeCartsParam,
-        ""};
-
-// Discount consent v2 step 2 params.
-const char kNtpChromeCartModuleDiscountConsentNtpStepTwoContentParam[] =
-    "step-two-content";
-const base::FeatureParam<std::string>
-    kNtpChromeCartModuleDiscountConsentNtpStepTwoContent{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentNtpStepTwoContentParam, ""};
-const char
-    kNtpChromeCartModuleDiscountConsentInlineStepTwoDifferentColorParam[] =
-        "step-two-different-color";
-const base::FeatureParam<bool>
-    kNtpChromeCartModuleDiscountConsentInlineStepTwoDifferentColor{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentInlineStepTwoDifferentColorParam,
-        false};
-const char kNtpChromeCartModuleDiscountConsentNtpDialogContentTitleParam[] =
-    "dialog-content-title";
-const base::FeatureParam<std::string>
-    kNtpChromeCartModuleDiscountConsentNtpDialogContentTitle{
-        &commerce::kDiscountConsentV2,
-        kNtpChromeCartModuleDiscountConsentNtpDialogContentTitleParam, ""};
-
-const char kContextualConsentShowOnCartAndCheckoutPageParam[] =
-    "show-on-cart-and-checkout-page";
-const base::FeatureParam<bool> kContextualConsentShowOnCartAndCheckoutPage{
-    &commerce::kDiscountConsentV2,
-    kContextualConsentShowOnCartAndCheckoutPageParam, false};
-const char kContextualConsentShowOnSRPParam[] = "show-on-srp";
-const base::FeatureParam<bool> kContextualConsentShowOnSRP{
-    &commerce::kDiscountConsentV2, kContextualConsentShowOnSRPParam, false};
-
-const char kCommerceHintAndroidHeuristicsImprovementParam[] =
-    "CommerceHintAndroidHeuristicsImprovementParam";
-
-const char kReadyToFetchMerchantWidePromotionParam[] = "ready-to-fetch";
-const base::FeatureParam<bool> kReadyToFetchMerchantWidePromotion{
-    &commerce::kMerchantWidePromotion, kReadyToFetchMerchantWidePromotionParam,
-    false};
-
-const char kCodeBasedRuleDiscountParam[] = "code-based-rbd";
-const base::FeatureParam<bool> kCodeBasedRuleDiscount{
-    &commerce::kCodeBasedRBD, kCodeBasedRuleDiscountParam, false};
 
 const char kRevertIconOnFailureParam[] =
     "shopping-list-revert-page-action-icon-on-failure";
@@ -315,23 +242,17 @@ bool IsPartnerMerchant(const GURL& url) {
 }
 
 bool IsRuleDiscountPartnerMerchant(const GURL& url) {
-  const std::string& url_string = url.spec();
-  return RE2::PartialMatch(
-      re2::StringPiece(url_string.data(), url_string.size()),
-      GetRulePartnerMerchantPattern());
+  return RE2::PartialMatch(url.spec(), GetRulePartnerMerchantPattern());
 }
 
 bool IsCouponDiscountPartnerMerchant(const GURL& url) {
-  const std::string& url_string = url.spec();
-  return RE2::PartialMatch(
-      re2::StringPiece(url_string.data(), url_string.size()),
-      GetCouponPartnerMerchantPattern());
+  return RE2::PartialMatch(url.spec(), GetCouponPartnerMerchantPattern());
 }
 
 bool IsCartDiscountFeatureEnabled() {
   return base::GetFieldTrialParamByFeatureAsBool(
       ntp_features::kNtpChromeCartModule,
-      ntp_features::kNtpChromeCartModuleAbandonedCartDiscountParam, true);
+      ntp_features::kNtpChromeCartModuleAbandonedCartDiscountParam, false);
 }
 
 bool IsCouponWithCodeEnabled() {
@@ -345,37 +266,14 @@ bool IsFakeDataEnabled() {
              ntp_features::kNtpChromeCartModuleDataParam) == "fake";
 }
 
-bool isContextualConsentEnabled() {
-  return kContextualConsentShowOnCartAndCheckoutPage.Get() ||
-         kContextualConsentShowOnSRP.Get();
-}
-
 bool IsShoppingListAllowedForEnterprise(PrefService* prefs) {
-  const base::Value* pref =
-      prefs->GetUserPrefValue(kShoppingListEnabledPrefName);
-
-  // Default to true if there is no value set.
-  return !pref || pref->GetBool();
-}
-
-std::string GetCurrentCountryCode(variations::VariationsService* variations) {
-  std::string country;
-
-  if (variations)
-    country = variations->GetStoredPermanentCountry();
-
-  // Since variations doesn't provide a permanent country by default on things
-  // like local builds, we try to fall back to the country_codes component which
-  // should always have one.
-  if (country.empty())
-    country = country_codes::GetCurrentCountryCode();
-
-  return country;
+  return prefs->GetBoolean(kShoppingListEnabledPrefName) ||
+         !prefs->IsManagedPreference(kShoppingListEnabledPrefName);
 }
 
 bool IsEnabledForCountryAndLocale(const base::Feature& feature,
-                                  std::string country,
-                                  std::string locale) {
+                                  std::string_view country,
+                                  std::string_view locale) {
   const CountryLocaleMap& allowedCountryLocales =
       GetAllowedCountryToLocaleMap();
 
@@ -398,14 +296,23 @@ bool IsEnabledForCountryAndLocale(const base::Feature& feature,
 }
 
 bool IsRegionLockedFeatureEnabled(const base::Feature& feature,
-                                  const base::Feature& feature_region_launched,
                                   const std::string& country_code,
                                   const std::string& locale) {
+  auto* feature_list = base::FeatureList::GetInstance();
+
+  // If the feature has a server-side config, this check will ensure that
+  // we use that state rather than checking the country/region map. If a
+  // client is determined to be in the "default" group, this path is still
+  // taken, but is still subject to the experiment config filters. E.g. a
+  // config starting experimentation and filtering on CA will not affect
+  // launched users in the US.
+  if (feature_list && feature_list->IsFeatureOverridden(feature.name)) {
+    return base::FeatureList::IsEnabled(feature);
+  }
+
   bool flag_enabled = base::FeatureList::IsEnabled(feature);
   bool region_launched =
-      base::FeatureList::IsEnabled(feature_region_launched) &&
-      IsEnabledForCountryAndLocale(feature_region_launched, country_code,
-                                   locale);
+      IsEnabledForCountryAndLocale(feature, country_code, locale);
   return flag_enabled || region_launched;
 }
 
@@ -423,17 +330,15 @@ base::TimeDelta GetDiscountFetchDelay() {
 }
 
 bool IsNoDiscountMerchant(const GURL& url) {
-  const auto host_string = url.host_piece();
   auto* pattern_from_component =
       commerce_heuristics::CommerceHeuristicsData::GetInstance()
           .GetNoDiscountMerchantPattern();
   // If pattern from component updater is not available, merchants are
   // considered to have no discounts by default.
-  if (!pattern_from_component)
+  if (!pattern_from_component) {
     return true;
-  return RE2::PartialMatch(
-      re2::StringPiece(host_string.data(), host_string.size()),
-      *pattern_from_component);
+  }
+  return RE2::PartialMatch(url.host(), *pattern_from_component);
 }
 #endif
 }  // namespace commerce

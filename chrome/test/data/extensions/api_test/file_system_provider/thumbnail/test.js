@@ -4,55 +4,57 @@
 
 'use strict';
 
+let testUtil;
+
 /**
  * @type {Object}
  * @const
  */
-var TESTING_ROOT = Object.freeze({
+const TESTING_ROOT = Object.freeze({
   isDirectory: true,
   name: '',
   size: 0,
-  modificationTime: new Date(2013, 3, 27, 9, 38, 14)
+  modificationTime: new Date(2013, 3, 27, 9, 38, 14),
 });
 
 /**
  * @type {Object}
  * @const
  */
-var TESTING_WITH_VALID_THUMBNAIL_FILE = Object.freeze({
+const TESTING_WITH_VALID_THUMBNAIL_FILE = Object.freeze({
   isDirectory: false,
   name: 'valid-thumbnail.txt',
   size: 4096,
   modificationTime: new Date(2014, 4, 28, 10, 39, 15),
   thumbnail: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA' +
-             'AAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO' +
-             '9TXL0Y4OHwAAAABJRU5ErkJggg=='
+      'AAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO' +
+      '9TXL0Y4OHwAAAABJRU5ErkJggg==',
 });
 
 /**
  * @type {Object}
  * @const
  */
-var TESTING_ALWAYS_WITH_THUMBNAIL_FILE = Object.freeze({
+const TESTING_ALWAYS_WITH_THUMBNAIL_FILE = Object.freeze({
   isDirectory: false,
   name: 'always-with-thumbnail.txt',
   size: 4096,
   modificationTime: new Date(2014, 4, 28, 10, 39, 15),
   thumbnail: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA' +
-             'AAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO' +
-             '9TXL0Y4OHwAAAABJRU5ErkJggg=='
+      'AAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO' +
+      '9TXL0Y4OHwAAAABJRU5ErkJggg==',
 });
 
 /**
  * @type {Object}
  * @const
  */
-var TESTING_WITH_INVALID_THUMBNAIL_FILE = Object.freeze({
+const TESTING_WITH_INVALID_THUMBNAIL_FILE = Object.freeze({
   isDirectory: false,
   name: 'invalid-thumbnail.txt',
   size: 4096,
   modificationTime: new Date(2014, 4, 28, 10, 39, 15),
-  thumbnail: 'https://www.foobar.com/evil'
+  thumbnail: 'https://www.foobar.com/evil',
 });
 
 /**
@@ -64,28 +66,28 @@ var TESTING_WITH_INVALID_THUMBNAIL_FILE = Object.freeze({
  * @param {function(string)} onError Error callback with an error code.
  */
 function onGetMetadataRequested(options, onSuccess, onError) {
-  if (options.fileSystemId !== test_util.FILE_SYSTEM_ID) {
+  if (options.fileSystemId !== testUtil.FILE_SYSTEM_ID) {
     onError('SECURITY');  // enum ProviderError.
     return;
   }
 
   // Metadata to be returned.
-  var metadata;
+  let metadata;
 
   switch (options.entryPath) {
     case '/':
       metadata = TESTING_ROOT;
       break;
 
-    case '/' + TESTING_WITH_VALID_THUMBNAIL_FILE.name:
+    case `/${TESTING_WITH_VALID_THUMBNAIL_FILE.name}`:
       metadata = TESTING_WITH_VALID_THUMBNAIL_FILE;
       break;
 
-    case '/' + TESTING_ALWAYS_WITH_THUMBNAIL_FILE.name:
+    case `/${TESTING_ALWAYS_WITH_THUMBNAIL_FILE.name}`:
       metadata = TESTING_ALWAYS_WITH_THUMBNAIL_FILE;
       break;
 
-    case '/' + TESTING_WITH_INVALID_THUMBNAIL_FILE.name:
+    case `/${TESTING_WITH_INVALID_THUMBNAIL_FILE.name}`:
       metadata = TESTING_WITH_INVALID_THUMBNAIL_FILE;
       break;
 
@@ -98,12 +100,12 @@ function onGetMetadataRequested(options, onSuccess, onError) {
   // reasons. Remove the field if needed. However, do not remove it for one
   // file, to simulate an error.
   if (!options.thumbnail && metadata.thumbnail &&
-      options.entryPath !== '/' + TESTING_ALWAYS_WITH_THUMBNAIL_FILE.name) {
-    var metadataWithoutThumbnail = {
+      options.entryPath !== `/${TESTING_ALWAYS_WITH_THUMBNAIL_FILE.name}`) {
+    const metadataWithoutThumbnail = {
       isDirectory: metadata.isDirectory,
       name: metadata.name,
       size: metadata.size,
-      modificationTime: metadata.modificationTime
+      modificationTime: metadata.modificationTime,
     };
     onSuccess(metadataWithoutThumbnail);
   } else {
@@ -120,7 +122,7 @@ function onGetMetadataRequested(options, onSuccess, onError) {
 function setUp(callback) {
   chrome.fileSystemProvider.onGetMetadataRequested.addListener(
       onGetMetadataRequested);
-  test_util.mountFileSystem(callback);
+  testUtil.mountFileSystem(callback);
 }
 
 /**
@@ -131,11 +133,9 @@ function runTests() {
     // Test if providers are notified that no thumbnail is requested when normal
     // metadata is requested.
     function notRequestedAndNotProvidedThumbnailSuccess() {
-      test_util.fileSystem.root.getFile(
-          TESTING_WITH_VALID_THUMBNAIL_FILE.name,
-          {create: false},
-          chrome.test.callbackPass(),
-          function(error) {
+      testUtil.fileSystem.root.getFile(
+          TESTING_WITH_VALID_THUMBNAIL_FILE.name, {create: false},
+          chrome.test.callbackPass(), function(error) {
             chrome.test.fail(error.name);
           });
     },
@@ -143,10 +143,9 @@ function runTests() {
     // If providers return a thumbnail data despite not being requested for
     // that, then the operation must fail.
     function notRequestedButProvidedThumbnailError() {
-      test_util.fileSystem.root.getFile(
+      testUtil.fileSystem.root.getFile(
           TESTING_ALWAYS_WITH_THUMBNAIL_FILE.name,
-          {create: false},
-          function(fileEntry) {
+          {create: false}, function(fileEntry) {
             chrome.test.fail(
                 'Thumbnail returned when not requested should result in an ' +
                 'error, but the operation succeeded.');
@@ -157,13 +156,11 @@ function runTests() {
 
     // Thumbnails should be returned when available for private API request.
     function getEntryPropertiesWithThumbnailSuccess() {
-      test_util.fileSystem.root.getFile(
-          TESTING_WITH_VALID_THUMBNAIL_FILE.name,
-          {create: false},
+      testUtil.fileSystem.root.getFile(
+          TESTING_WITH_VALID_THUMBNAIL_FILE.name, {create: false},
           chrome.test.callbackPass(function(fileEntry) {
             chrome.fileManagerPrivate.getEntryProperties(
-                [fileEntry],
-                ['thumbnailUrl', 'size', 'modificationTime'],
+                [fileEntry], ['thumbnailUrl', 'size', 'modificationTime'],
                 chrome.test.callbackPass(function(fileProperties) {
                   chrome.test.assertEq(1, fileProperties.length);
                   chrome.test.assertEq(
@@ -176,22 +173,20 @@ function runTests() {
                       TESTING_WITH_VALID_THUMBNAIL_FILE.modificationTime,
                       new Date(fileProperties[0].modificationTime));
                 }));
-            }),
-            function(error) {
-              chrome.test.fail(error.name);
-            });
+          }),
+          function(error) {
+            chrome.test.fail(error.name);
+          });
     },
 
     // Confirm that extensions are not able to pass an invalid thumbnail url,
     // including evil urls.
     function getEntryPropertiesWithInvalidThumbnail() {
-      test_util.fileSystem.root.getFile(
-          TESTING_WITH_INVALID_THUMBNAIL_FILE.name,
-          {create: false},
+      testUtil.fileSystem.root.getFile(
+          TESTING_WITH_INVALID_THUMBNAIL_FILE.name, {create: false},
           chrome.test.callbackPass(function(fileEntry) {
             chrome.fileManagerPrivate.getEntryProperties(
-                [fileEntry],
-                ['thumbnailUrl'],
+                [fileEntry], ['thumbnailUrl'],
                 chrome.test.callbackPass(function(fileProperties) {
                   chrome.test.assertEq(1, fileProperties.length);
                   // The results for an entry is an empty dictionary in
@@ -199,36 +194,40 @@ function runTests() {
                   chrome.test.assertEq(
                       0, Object.keys(fileProperties[0]).length);
                 }));
-            }),
-            function(error) {
-              chrome.test.fail(error.name);
-            });
+          }),
+          function(error) {
+            chrome.test.fail(error.name);
+          });
     },
 
     // Confirm that the thumbnail is not requested when not needed.
     function getEntryPropertiesWithoutThumbnail() {
-      test_util.fileSystem.root.getFile(
-          TESTING_WITH_VALID_THUMBNAIL_FILE.name,
-          {create: false},
+      testUtil.fileSystem.root.getFile(
+          TESTING_WITH_VALID_THUMBNAIL_FILE.name, {create: false},
           chrome.test.callbackPass(function(fileEntry) {
             chrome.fileManagerPrivate.getEntryProperties(
-                [fileEntry],
-                ['size'],
+                [fileEntry], ['size'],
                 chrome.test.callbackPass(function(fileProperties) {
                   chrome.test.assertEq(1, fileProperties.length);
-                  chrome.test.assertFalse(
-                      'thumbnailUrl' in fileProperties[0]);
+                  chrome.test.assertFalse('thumbnailUrl' in fileProperties[0]);
                   chrome.test.assertEq(
                       TESTING_WITH_VALID_THUMBNAIL_FILE.size,
                       fileProperties[0].size);
                 }));
-            }),
-            function(error) {
-              chrome.test.fail(error.name);
-            });
-    }
+          }),
+          function(error) {
+            chrome.test.fail(error.name);
+          });
+    },
   ]);
 }
 
-// Setup and run all of the test cases.
-setUp(runTests);
+// This works-around that background scripts can't import because they aren't
+// considered modules.
+(async () => {
+  testUtil = await import(
+      '/_test_resources/api_test/file_system_provider/test_util.js');
+
+  // Setup and run all of the test cases.
+  setUp(runTests);
+})();

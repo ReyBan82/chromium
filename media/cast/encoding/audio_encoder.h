@@ -19,6 +19,9 @@ class TimeTicks;
 }
 
 namespace media {
+
+enum class AudioCodec;
+
 namespace cast {
 
 class AudioEncoder {
@@ -28,11 +31,15 @@ class AudioEncoder {
   using FrameEncodedCallback =
       base::RepeatingCallback<void(std::unique_ptr<SenderEncodedFrame>, int)>;
 
+  using EncodeCallback =
+      base::RepeatingCallback<void(std::unique_ptr<AudioBus> audio_bus,
+                                   base::TimeTicks recorded_time)>;
+
   AudioEncoder(const scoped_refptr<CastEnvironment>& cast_environment,
                int num_channels,
                int sampling_rate,
-               int bitrate,
-               Codec codec,
+               uint32_t bitrate,
+               AudioCodec codec,
                FrameEncodedCallback frame_encoded_callback);
 
   AudioEncoder(const AudioEncoder&) = delete;
@@ -44,9 +51,13 @@ class AudioEncoder {
 
   int GetSamplesPerFrame() const;
   base::TimeDelta GetFrameDuration() const;
-  int GetBitrate() const;
+  uint32_t GetBitrate() const;
   void InsertAudio(std::unique_ptr<AudioBus> audio_bus,
                    base::TimeTicks recorded_time);
+
+  // Returns a callback that can be safely called from any thread.
+  // It automatically hops the payload to the kAudio thread.
+  EncodeCallback GetAsynchronousEncodeCallback();
 
  private:
   class ImplBase;

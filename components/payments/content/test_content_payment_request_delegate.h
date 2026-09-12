@@ -41,27 +41,24 @@ class TestContentPaymentRequestDelegate : public ContentPaymentRequestDelegate {
   content::RenderFrameHost* GetRenderFrameHost() const override;
   std::unique_ptr<webauthn::InternalAuthenticator> CreateInternalAuthenticator()
       const override;
-  scoped_refptr<PaymentManifestWebDataService>
-  GetPaymentManifestWebDataService() const override;
+  scoped_refptr<WebPaymentsWebDataService> GetWebPaymentsWebDataService()
+      const override;
   PaymentRequestDisplayManager* GetDisplayManager() override;
   void ShowDialog(base::WeakPtr<PaymentRequest> request) override;
   void RetryDialog() override;
   void CloseDialog() override;
   void ShowErrorMessage() override;
   void ShowProcessingSpinner() override;
+  void ShowLoadingView() override;
   bool IsBrowserWindowActive() const override;
   void GetTwaPackageName(GetTwaPackageNameCallback callback) const override;
   PaymentRequestDialog* GetDialogForTesting() override;
-  SecurePaymentConfirmationNoCreds* GetNoMatchingCredentialsDialogForTesting()
-      override;
+
   autofill::PersonalDataManager* GetPersonalDataManager() override;
   const std::string& GetApplicationLocale() const override;
   bool IsOffTheRecord() const override;
   const GURL& GetLastCommittedURL() const override;
   autofill::AddressNormalizer* GetAddressNormalizer() override;
-  autofill::RegionDataLoader* GetRegionDataLoader() override;
-  ukm::UkmRecorder* GetUkmRecorder() override;
-  std::string GetAuthenticatedEmail() const override;
   PrefService* GetPrefService() override;
   void EmbedPaymentHandlerWindow(
       const GURL& url,
@@ -73,11 +70,8 @@ class TestContentPaymentRequestDelegate : public ContentPaymentRequestDelegate {
   void DelayFullCardRequestCompletion();
   void CompleteFullCardRequest();
   const base::WeakPtr<PaymentUIObserver> GetPaymentUIObserver() const override;
-  void ShowNoMatchingPaymentCredentialDialog(
-      const std::u16string& merchant_name,
-      const std::string& rp_id,
-      base::OnceClosure response_callback,
-      base::OnceClosure opt_out_callback) override;
+
+  std::string GetSecurePaymentConfirmationKeychainAccessGroup() const override;
 
   // Must be called if GetRenderFrameHost() needs to return non-null.
   void set_frame_routing_id(content::GlobalRenderFrameHostId frame_routing_id) {

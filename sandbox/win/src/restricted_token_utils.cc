@@ -5,6 +5,8 @@
 #include "sandbox/win/src/restricted_token_utils.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "base/check.h"
@@ -16,7 +18,6 @@
 #include "sandbox/win/src/sandbox_nt_util.h"
 #include "sandbox/win/src/security_level.h"
 #include "sandbox/win/src/win_utils.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace sandbox {
 
@@ -29,16 +30,22 @@ void AddSidException(std::vector<base::win::Sid>& sids,
 
 }  // namespace
 
-absl::optional<base::win::AccessToken> CreateRestrictedToken(
+std::optional<base::win::AccessToken> CreateRestrictedToken(
     TokenLevel security_level,
     IntegrityLevel integrity_level,
     TokenType token_type,
     bool lockdown_default_dacl,
-    const absl::optional<base::win::Sid>& unique_restricted_sid) {
+    const std::optional<base::win::Sid>& unique_restricted_sid,
+    std::optional<std::wstring_view> isolation_security_attribute_name) {
   RestrictedToken restricted_token;
   if (lockdown_default_dacl) {
     restricted_token.SetLockdownDefaultDacl();
   }
+  if (isolation_security_attribute_name) {
+    restricted_token.SetIsolationSecurityAttribute(
+        *isolation_security_attribute_name);
+  }
+
   if (unique_restricted_sid) {
     restricted_token.AddDefaultDaclSid(*unique_restricted_sid,
                                        base::win::SecurityAccessMode::kGrant,
@@ -126,7 +133,7 @@ absl::optional<base::win::AccessToken> CreateRestrictedToken(
       }
       break;
     case USER_LAST:
-      return absl::nullopt;
+      return std::nullopt;
   }
 
   if (deny_sids) {
@@ -138,10 +145,10 @@ absl::optional<base::win::AccessToken> CreateRestrictedToken(
   }
 
   restricted_token.SetIntegrityLevel(integrity_level);
-  absl::optional<base::win::AccessToken> result =
+  std::optional<base::win::AccessToken> result =
       restricted_token.GetRestrictedToken();
   if (!result) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   if (token_type == TokenType::kPrimary) {
@@ -151,14 +158,14 @@ absl::optional<base::win::AccessToken> CreateRestrictedToken(
   result = result->DuplicateImpersonation(
       base::win::SecurityImpersonationLevel::kImpersonation, TOKEN_ALL_ACCESS);
   if (!result) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return result;
 }
 
 DWORD HardenTokenIntegrityLevelPolicy(const base::win::AccessToken& token) {
-  absl::optional<base::win::SecurityDescriptor> sd =
+  std::optional<base::win::SecurityDescriptor> sd =
       base::win::SecurityDescriptor::FromHandle(
           token.get(), base::win::SecurityObjectType::kKernel,
           LABEL_SECURITY_INFORMATION);
@@ -188,44 +195,6 @@ DWORD HardenTokenIntegrityLevelPolicy(const base::win::AccessToken& token) {
   }
 
   return ERROR_SUCCESS;
-}
-
-bool CanLowIntegrityAccessDesktop() {
-  // Access required for UI thread to initialize (when user32.dll loads without
-  // win32k lockdown).
-  DWORD desired_access = DESKTOP_WRITEOBJECTS | DESKTOP_READOBJECTS;
-
-  // Desktop is inherited by child process unless overridden, e.g. by sandbox.
-  HDESK hdesk = ::GetThreadDesktop(GetCurrentThreadId());
-  absl::optional<base::win::SecurityDescriptor> sd =
-      base::win::SecurityDescriptor::FromHandle(
-          hdesk, base::win::SecurityObjectType::kDesktop,
-          OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-              DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION);
-  if (!sd) {
-    return false;
-  }
-
-  absl::optional<base::win::AccessToken> token =
-      base::win::AccessToken::FromCurrentProcess(/*impersonation=*/true,
-                                                 TOKEN_ADJUST_DEFAULT);
-  if (!token) {
-    return false;
-  }
-
-  absl::optional<base::win::AccessCheckResult> result;
-  // The token should still succeed before lowered, even if the lowered token
-  // fails.
-  DCHECK((result = sd->AccessCheck(*token, desired_access,
-                                   base::win::SecurityObjectType::kDesktop)) &&
-         result->access_status);
-  if (!token->SetIntegrityLevel(SECURITY_MANDATORY_LOW_RID)) {
-    return false;
-  }
-
-  result = sd->AccessCheck(*token, desired_access,
-                           base::win::SecurityObjectType::kDesktop);
-  return result && result->access_status;
 }
 
 }  // namespace sandbox

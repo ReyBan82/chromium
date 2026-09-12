@@ -10,28 +10,36 @@
 
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/safe_browsing/chrome_password_protection_service.h"
 #include "chrome/browser/ui/webui/reset_password/reset_password.mojom.h"
-#include "chrome/browser/ui/webui/webui_util.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/grit/browser_resources.h"
+#include "chrome/common/webui_url_constants.h"
+#include "chrome/grit/reset_password_resources.h"
+#include "chrome/grit/reset_password_resources_map.h"
+#include "components/password_manager/core/browser/password_manager_metrics_util.h"
 #include "components/safe_browsing/content/browser/password_protection/password_protection_service.h"
 #include "components/safe_browsing/core/browser/password_protection/metrics_util.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "components/safe_browsing/core/common/proto/csd.pb.h"
 #include "components/safe_browsing/core/common/safe_browsing_prefs.h"
 #include "components/strings/grit/components_strings.h"
 #include "components/url_formatter/url_formatter.h"
 #include "components/user_prefs/user_prefs.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui_data_source.h"
+#include "content/public/common/url_constants.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/webui/webui_util.h"
 
+using password_manager::metrics_util::PasswordType;
 using safe_browsing::LoginReputationClientResponse;
 using safe_browsing::RequestOutcome;
 
@@ -60,7 +68,7 @@ class ResetPasswordHandlerImpl : public mojom::ResetPasswordHandler {
   ResetPasswordHandlerImpl(const ResetPasswordHandlerImpl&) = delete;
   ResetPasswordHandlerImpl& operator=(const ResetPasswordHandlerImpl&) = delete;
 
-  ~ResetPasswordHandlerImpl() override {}
+  ~ResetPasswordHandlerImpl() override = default;
 
   // mojom::ResetPasswordHandler overrides:
   void HandlePasswordReset() override {
@@ -70,7 +78,7 @@ class ResetPasswordHandlerImpl : public mojom::ResetPasswordHandler {
         ChromePasswordProtectionService::GetPasswordProtectionService(profile);
     if (service) {
       service->OnUserAction(
-          web_contents_,
+          web_contents_->GetWeakPtr(),
           service->reused_password_account_type_for_last_shown_warning(),
           RequestOutcome::UNKNOWN,
           LoginReputationClientResponse::VERDICT_TYPE_UNSPECIFIED,
@@ -89,14 +97,13 @@ class ResetPasswordHandlerImpl : public mojom::ResetPasswordHandler {
 PasswordType GetPasswordType(content::WebContents* web_contents) {
   content::NavigationEntry* nav_entry =
       web_contents->GetController().GetPendingEntry();
-  if (!nav_entry || !nav_entry->GetHasPostData() || !nav_entry->GetPostData())
+  if (!nav_entry || !nav_entry->GetHasPostData() || !nav_entry->GetPostData()) {
     return PasswordType::PASSWORD_TYPE_UNKNOWN;
+  }
   auto& post_data = nav_entry->GetPostData()->elements()->at(0);
-  if (post_data.type() == network::DataElement::Tag::kBytes) {
+  if (const auto* bytes = post_data.TryAs<network::DataElementBytes>()) {
     int post_data_int = -1;
-    if (base::StringToInt(
-            post_data.As<network::DataElementBytes>().AsStringPiece(),
-            &post_data_int)) {
+    if (base::StringToInt(bytes->AsStringPiece(), &post_data_int)) {
       return static_cast<PasswordType>(post_data_int);
     }
   }
@@ -107,12 +114,17 @@ PasswordType GetPasswordType(content::WebContents* web_contents) {
 // Properly format host name based on text direction.
 std::u16string GetFormattedHostName(const std::string host_name) {
   std::u16string host = url_formatter::IDNToUnicode(host_name);
-  if (base::i18n::IsRTL())
+  if (base::i18n::IsRTL()) {
     base::i18n::WrapStringWithLTRFormatting(&host);
+  }
   return host;
 }
 
 }  // namespace
+
+ResetPasswordUIConfig::ResetPasswordUIConfig()
+    : DefaultWebUIConfig(content::kChromeUIScheme,
+                         chrome::kChromeUIResetPasswordHost) {}
 
 ResetPasswordUI::ResetPasswordUI(content::WebUI* web_ui)
     : ui::MojoWebUIController(web_ui),
@@ -121,17 +133,14 @@ ResetPasswordUI::ResetPasswordUI(content::WebUI* web_ui)
       content::WebUIDataSource::CreateAndAdd(
           web_ui->GetWebContents()->GetBrowserContext(),
           chrome::kChromeUIResetPasswordHost);
-  webui::EnableTrustedTypesCSP(html_source);
-  html_source->AddResourcePath("reset_password.js", IDR_RESET_PASSWORD_JS);
-  html_source->AddResourcePath("reset_password.mojom-webui.js",
-                               IDR_RESET_PASSWORD_MOJOM_WEBUI_JS);
-  html_source->SetDefaultResource(IDR_RESET_PASSWORD_HTML);
+  webui::SetupWebUIDataSource(html_source, kResetPasswordResources,
+                              IDR_RESET_PASSWORD_RESET_PASSWORD_HTML);
   html_source->AddLocalizedStrings(PopulateStrings());
 }
 
 WEB_UI_CONTROLLER_TYPE_IMPL(ResetPasswordUI)
 
-ResetPasswordUI::~ResetPasswordUI() {}
+ResetPasswordUI::~ResetPasswordUI() = default;
 
 void ResetPasswordUI::BindInterface(
     mojo::PendingReceiver<mojom::ResetPasswordHandler> receiver) {
@@ -139,7 +148,7 @@ void ResetPasswordUI::BindInterface(
       web_ui()->GetWebContents(), std::move(receiver));
 }
 
-base::Value::Dict ResetPasswordUI::PopulateStrings() const {
+base::DictValue ResetPasswordUI::PopulateStrings() const {
   auto* service = safe_browsing::ChromePasswordProtectionService::
       GetPasswordProtectionService(Profile::FromWebUI(web_ui()));
   std::string org_name =
@@ -154,12 +163,16 @@ base::Value::Dict ResetPasswordUI::PopulateStrings() const {
                               ? IDS_RESET_PASSWORD_WARNING_HEADING
                               : IDS_RESET_PASSWORD_HEADING;
   std::u16string explanation_paragraph_string;
+  std::u16string formatted_org_name;
   if (org_name.empty()) {
     explanation_paragraph_string = l10n_util::GetStringUTF16(
         known_password_type ? IDS_RESET_PASSWORD_WARNING_EXPLANATION_PARAGRAPH
                             : IDS_RESET_PASSWORD_EXPLANATION_PARAGRAPH);
   } else {
-    std::u16string formatted_org_name = GetFormattedHostName(org_name);
+    formatted_org_name = base::FeatureList::IsEnabled(
+                             safe_browsing::kEnterprisePasswordReuseUiRefresh)
+                             ? base::UTF8ToUTF16(org_name)
+                             : GetFormattedHostName(org_name);
     explanation_paragraph_string = l10n_util::GetStringFUTF16(
         known_password_type
             ? IDS_RESET_PASSWORD_WARNING_EXPLANATION_PARAGRAPH_WITH_ORG_NAME
@@ -167,12 +180,30 @@ base::Value::Dict ResetPasswordUI::PopulateStrings() const {
         formatted_org_name);
   }
 
-  base::Value::Dict load_time_data;
+  base::DictValue load_time_data;
   load_time_data.Set("title",
                      l10n_util::GetStringUTF16(IDS_RESET_PASSWORD_TITLE));
   load_time_data.Set("heading", l10n_util::GetStringUTF16(heading_string_id));
   load_time_data.Set("primaryParagraph", explanation_paragraph_string);
   load_time_data.Set("primaryButtonText",
                      l10n_util::GetStringUTF16(IDS_RESET_PASSWORD_BUTTON));
+  load_time_data.Set("learnMore", u" ");
+  if (base::FeatureList::IsEnabled(
+          safe_browsing::kEnterprisePasswordReuseUiRefresh) &&
+      known_password_type) {
+    load_time_data.Set(
+        "heading",
+        org_name.empty()
+            ? l10n_util::GetStringUTF16(IDS_RESET_PASSWORD_WARNING_HEADING_V2)
+            : l10n_util::GetStringFUTF16(
+                  IDS_RESET_PASSWORD_WARNING_HEADING_WITH_ORG_NAME,
+                  formatted_org_name));
+    load_time_data.Set(
+        "primaryParagraph",
+        l10n_util::GetStringUTF16(
+            IDS_RESET_PASSWORD_WARNING_EXPLANATION_PARAGRAPH_V2));
+    load_time_data.Set(
+        "learnMore", l10n_util::GetStringUTF16(IDS_RESET_PASSWORD_LEARN_MORE));
+  }
   return load_time_data;
 }

@@ -5,8 +5,10 @@
 #include "chrome/browser/ash/net/network_diagnostics/network_diagnostics_test_helper.h"
 
 #include "base/values.h"
+#include "chrome/test/base/testing_browser_process.h"
 #include "chromeos/ash/components/network/network_profile_handler.h"
 #include "chromeos/ash/services/network_config/in_process_instance.h"
+#include "components/user_manager/user_manager_impl.h"
 #include "third_party/cros_system_api/dbus/shill/dbus-constants.h"
 
 namespace ash {
@@ -14,21 +16,27 @@ namespace network_diagnostics {
 
 NetworkDiagnosticsTestHelper::NetworkDiagnosticsTestHelper()
     : task_environment_(base::test::TaskEnvironment::TimeSource::MOCK_TIME) {
+  // TODO(b/278643115) Remove LoginState dependency.
   LoginState::Initialize();
+
+  user_session_test_environment_ =
+      std::make_unique<ash::test::UserSessionTestEnvironment>(
+          TestingBrowserProcess::GetGlobal()->GetTestingLocalState());
+
   helper_ = std::make_unique<NetworkHandlerTestHelper>();
   helper_->AddDefaultProfiles();
   helper_->ResetDevicesAndServices();
-  helper_->RegisterPrefs(user_prefs_.registry(), local_state_.registry());
+  helper_->RegisterPrefs(user_prefs_.registry(), nullptr);
 
   PrefProxyConfigTrackerImpl::RegisterProfilePrefs(user_prefs_.registry());
-  PrefProxyConfigTrackerImpl::RegisterPrefs(local_state_.registry());
-  helper_->InitializePrefs(&user_prefs_, &local_state_);
+  helper_->InitializePrefs(
+      &user_prefs_, TestingBrowserProcess::GetGlobal()->GetTestingLocalState());
 
   NetworkHandler::Get()->managed_network_configuration_handler()->SetPolicy(
       ::onc::ONC_SOURCE_DEVICE_POLICY,
       /*userhash=*/std::string(),
-      /*network_configs_onc=*/base::Value(base::Value::Type::LIST),
-      /*global_network_config=*/base::Value(base::Value::Type::DICT));
+      /*network_configs_onc=*/base::ListValue(),
+      /*global_network_config=*/base::DictValue());
 
   cros_network_config_ = std::make_unique<network_config::CrosNetworkConfig>();
   network_config::OverrideInProcessInstanceForTesting(
@@ -39,6 +47,7 @@ NetworkDiagnosticsTestHelper::NetworkDiagnosticsTestHelper()
 NetworkDiagnosticsTestHelper::~NetworkDiagnosticsTestHelper() {
   cros_network_config_.reset();
   helper_.reset();
+  user_session_test_environment_.reset();
   LoginState::Shutdown();
 }
 

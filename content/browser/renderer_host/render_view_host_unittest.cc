@@ -9,26 +9,31 @@
 #include "base/path_service.h"
 #include "base/strings/strcat.h"
 #include "base/strings/utf_string_conversions.h"
-#include "content/browser/child_process_security_policy_impl.h"
+#include "base/time/time.h"
+#include "components/input/native_web_keyboard_event.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
 #include "content/browser/renderer_host/render_view_host_delegate_view.h"
 #include "content/browser/renderer_host/render_widget_helper.h"
+#include "content/browser/security/cpsp/child_process_security_policy_impl.h"
+#include "content/common/features.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/common/bindings_policy.h"
+#include "content/public/common/child_process_id.h"
 #include "content/public/common/content_client.h"
 #include "content/public/common/drop_data.h"
 #include "content/public/common/url_constants.h"
 #include "content/public/test/mock_render_process_host.h"
 #include "content/public/test/navigation_simulator.h"
+#include "content/public/test/test_content_browser_client.h"
 #include "content/test/navigation_simulator_impl.h"
-#include "content/test/test_content_browser_client.h"
 #include "content/test/test_render_view_host.h"
 #include "content/test/test_web_contents.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "net/base/filename_util.h"
 #include "skia/ext/skia_utils_base.h"
+#include "third_party/blink/public/common/input/web_input_event.h"
 #include "third_party/blink/public/common/page/drag_operation.h"
 #include "ui/base/page_transition_types.h"
 #include "ui/gfx/geometry/skia_conversions.h"
@@ -48,7 +53,7 @@ class RenderViewHostTestBrowserClient : public TestContentBrowserClient {
   ~RenderViewHostTestBrowserClient() override {}
 
   bool IsHandledURL(const GURL& url) override {
-    return url.scheme() == url::kFileScheme;
+    return url.GetScheme() == url::kFileScheme;
   }
 };
 
@@ -76,28 +81,19 @@ class RenderViewHostTest : public RenderViewHostImplTestHarness {
   raw_ptr<ContentBrowserClient> old_browser_client_;
 };
 
-// Ensure we do not grant bindings to a process shared with unprivileged views.
-TEST_F(RenderViewHostTest, DontGrantBindingsToSharedProcess) {
-  // Create another view in the same process.
-  std::unique_ptr<TestWebContents> new_web_contents(TestWebContents::Create(
-      browser_context(), main_rfh()->GetSiteInstance()));
-
-  main_rfh()->AllowBindings(BINDINGS_POLICY_WEB_UI);
-  EXPECT_FALSE(main_rfh()->GetEnabledBindings() & BINDINGS_POLICY_WEB_UI);
-}
-
 class MockDraggingRenderViewHostDelegateView
     : public RenderViewHostDelegateView {
  public:
   ~MockDraggingRenderViewHostDelegateView() override {}
-  void StartDragging(const DropData& drop_data,
-                     blink::DragOperationsMask allowed_ops,
-                     const gfx::ImageSkia& image,
-                     const gfx::Vector2d& cursor_offset,
-                     const gfx::Rect& drag_obj_rect,
-                     const blink::mojom::DragEventSourceInfo& event_info,
-                     RenderWidgetHostImpl* source_rwh) override {
-    drag_url_ = drop_data.url;
+  void StartDragging(
+      RenderFrameHost& source_rfh,
+      const DropData& drop_data,
+      blink::DragOperationsMask allowed_ops,
+      const gfx::ImageSkia& image,
+      const gfx::Vector2d& cursor_offset,
+      const gfx::Rect& drag_obj_rect,
+      const blink::mojom::DragEventSourceInfo& event_info) override {
+    drag_url_ = drop_data.url_infos.front().url;
     html_base_url_ = drop_data.html_base_url;
   }
 
@@ -126,29 +122,29 @@ TEST_F(RenderViewHostTest, StartDragging) {
 
   GURL blocked_url = GURL(kBlockedURL);
   GURL file_url = GURL("file:///home/user/secrets.txt");
-  drop_data.url = file_url;
   drop_data.html_base_url = file_url;
+  drop_data.url_infos = {ui::ClipboardUrlInfo{file_url, u""}};
   test_rvh()->TestStartDragging(drop_data);
   EXPECT_EQ(blocked_url, delegate_view.drag_url());
   EXPECT_EQ(blocked_url, delegate_view.html_base_url());
 
   GURL http_url = GURL("http://www.domain.com/index.html");
-  drop_data.url = http_url;
   drop_data.html_base_url = http_url;
+  drop_data.url_infos = {ui::ClipboardUrlInfo{http_url, u""}};
   test_rvh()->TestStartDragging(drop_data);
   EXPECT_EQ(http_url, delegate_view.drag_url());
   EXPECT_EQ(http_url, delegate_view.html_base_url());
 
   GURL https_url = GURL("https://www.domain.com/index.html");
-  drop_data.url = https_url;
   drop_data.html_base_url = https_url;
+  drop_data.url_infos = {ui::ClipboardUrlInfo{https_url, u""}};
   test_rvh()->TestStartDragging(drop_data);
   EXPECT_EQ(https_url, delegate_view.drag_url());
   EXPECT_EQ(https_url, delegate_view.html_base_url());
 
   GURL javascript_url = GURL("javascript:alert('I am a bookmarklet')");
-  drop_data.url = javascript_url;
   drop_data.html_base_url = http_url;
+  drop_data.url_infos = {ui::ClipboardUrlInfo{javascript_url, u""}};
   test_rvh()->TestStartDragging(drop_data);
   EXPECT_EQ(javascript_url, delegate_view.drag_url());
   EXPECT_EQ(http_url, delegate_view.html_base_url());
@@ -166,9 +162,8 @@ TEST_F(RenderViewHostTest, DragEnteredFileURLsStillBlocked) {
   GURL highlighted_file_url = net::FilePathToFileURL(highlighted_file_path);
   GURL dragged_file_url = net::FilePathToFileURL(dragged_file_path);
   GURL sensitive_file_url = net::FilePathToFileURL(sensitive_file_path);
-  dropped_data.url = highlighted_file_url;
-  dropped_data.filenames.push_back(
-      ui::FileInfo(dragged_file_path, base::FilePath()));
+  dropped_data.url_infos = {ui::ClipboardUrlInfo{highlighted_file_url, u""}};
+  dropped_data.filenames.emplace_back(dragged_file_path, base::FilePath());
 
   // TODO(paulmeyer): These will need to target the correct specific
   // RenderWidgetHost to work with OOPIFs. See crbug.com/647249.
@@ -177,17 +172,18 @@ TEST_F(RenderViewHostTest, DragEnteredFileURLsStillBlocked) {
       dropped_data, client_point, screen_point, blink::kDragOperationNone, 0,
       base::DoNothing());
 
-  int id = process()->GetID();
+  int id = process()->GetDeprecatedID();
+  ChildProcessId process_id = process()->GetID();
   ChildProcessSecurityPolicyImpl* policy =
       ChildProcessSecurityPolicyImpl::GetInstance();
 
   // Permissions are not granted at DragEnter.
   EXPECT_FALSE(policy->CanRequestURL(id, highlighted_file_url));
-  EXPECT_FALSE(policy->CanReadFile(id, highlighted_file_path));
+  EXPECT_FALSE(policy->CanReadFile(process_id, highlighted_file_path));
   EXPECT_FALSE(policy->CanRequestURL(id, dragged_file_url));
-  EXPECT_FALSE(policy->CanReadFile(id, dragged_file_path));
+  EXPECT_FALSE(policy->CanReadFile(process_id, dragged_file_path));
   EXPECT_FALSE(policy->CanRequestURL(id, sensitive_file_url));
-  EXPECT_FALSE(policy->CanReadFile(id, sensitive_file_path));
+  EXPECT_FALSE(policy->CanReadFile(process_id, sensitive_file_path));
 }
 
 TEST_F(RenderViewHostTest, MessageWithBadHistoryItemFiles) {
@@ -234,6 +230,31 @@ TEST_F(RenderViewHostTest, RoutingIdSane) {
   EXPECT_EQ(contents()->GetPrimaryMainFrame(), root_rfh);
   EXPECT_EQ(test_rvh()->GetProcess(), root_rfh->GetProcess());
   EXPECT_NE(test_rvh()->GetRoutingID(), root_rfh->GetRoutingID());
+}
+
+TEST_F(RenderViewHostTest, ViewWidgetType) {
+  EXPECT_EQ(test_rvh()->ViewWidgetType(), mojom::ViewWidgetType::kTopLevel);
+}
+
+class RenderViewHostTestIgnoringKeyboardEvents
+    : public RenderViewHostTest,
+      public testing::WithParamInterface<blink::WebInputEvent::Type> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    RenderViewHostTest,
+    RenderViewHostTestIgnoringKeyboardEvents,
+    testing::Values(blink::WebInputEvent::Type::kKeyDown,
+                    blink::WebInputEvent::Type::kRawKeyDown));
+
+TEST_P(RenderViewHostTestIgnoringKeyboardEvents, EventTriggersCallback) {
+  const content::WebContents::ScopedIgnoreInputEvents scoped_ignore =
+      contents()->IgnoreInputEvents({});
+  const int no_modifiers = 0;
+  const base::TimeTicks dummy_timestamp = {};
+  const input::NativeWebKeyboardEvent event{GetParam(), no_modifiers,
+                                            dummy_timestamp};
+  test_rvh()->MayRenderWidgetForwardKeyboardEvent(event);
+  EXPECT_TRUE(contents()->GetIgnoredUIEventCalled());
 }
 
 }  // namespace content

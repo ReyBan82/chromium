@@ -13,7 +13,11 @@ namespace blink {
 // The renderer can request to prewarm the font cache.
 class WebFontPrewarmer {
  public:
+  virtual ~WebFontPrewarmer() = default;
   virtual void PrewarmFamily(const WebString& family_name) = 0;
+  // Returns false if the underlying font service has disconnected (e.g. during
+  // shutdown).
+  virtual bool IsFontServiceConnected() const { return true; }
 };
 
 }  // namespace blink

@@ -2,93 +2,83 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import './strings.m.js';
+import '/strings.m.js';
+import './bypass_warning_confirmation_dialog.js';
 import './item.js';
 import './toolbar.js';
 import 'chrome://resources/cr_components/managed_footnote/managed_footnote.js';
 import 'chrome://resources/cr_elements/cr_button/cr_button.js';
-import 'chrome://resources/cr_elements/cr_hidden_style.css.js';
-import 'chrome://resources/cr_elements/cr_page_host_style.css.js';
-import 'chrome://resources/cr_elements/cr_shared_style.css.js';
-import 'chrome://resources/cr_elements/cr_shared_vars.css.js';
-import 'chrome://resources/polymer/v3_0/iron-list/iron-list.js';
+import 'chrome://resources/cr_elements/cr_infinite_list/cr_infinite_list.js';
 
+import {ColorChangeUpdater, COLORS_CSS_SELECTOR} from 'chrome://resources/cr_components/color_change_listener/colors_css_updater.js';
 import {getInstance as getAnnouncerInstance} from 'chrome://resources/cr_elements/cr_a11y_announcer/cr_a11y_announcer.js';
+import type {CrInfiniteListElement} from 'chrome://resources/cr_elements/cr_infinite_list/cr_infinite_list.js';
 import {getToastManager} from 'chrome://resources/cr_elements/cr_toast/cr_toast_manager.js';
-import {FindShortcutMixin} from 'chrome://resources/cr_elements/find_shortcut_mixin.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {FindShortcutMixinLit} from 'chrome://resources/cr_elements/find_shortcut_mixin_lit.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {EventTracker} from 'chrome://resources/js/event_tracker.js';
 import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
 import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
-import {IronListElement} from 'chrome://resources/polymer/v3_0/iron-list/iron-list.js';
-import {Debouncer, PolymerElement, timeOut} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-import {BrowserProxy} from './browser_proxy.js';
-import {States} from './constants.js';
-import {MojomData} from './data.js';
-import {PageCallbackRouter, PageHandlerInterface} from './downloads.mojom-webui.js';
-import {getTemplate} from './manager.html.js';
+import type {MojomData} from './data.js';
+import {browserProxyFactory} from './downloads.mojom-webui.js';
+import type {BrowserProxy} from './downloads.mojom-webui.js';
+import {getCss} from './manager.css.js';
+import {getHtml} from './manager.html.js';
 import {SearchService} from './search_service.js';
-import {DownloadsToolbarElement} from './toolbar.js';
-
-declare global {
-  interface Window {
-    // https://github.com/microsoft/TypeScript/issues/40807
-    requestIdleCallback(callback: () => void): void;
-  }
-}
+import type {DownloadsToolbarElement} from './toolbar.js';
 
 export interface DownloadsManagerElement {
   $: {
-    'toolbar': DownloadsToolbarElement,
-    'downloadsList': IronListElement,
+    toolbar: DownloadsToolbarElement,
+    downloadsList: CrInfiniteListElement<MojomData>,
+    mainContainer: HTMLElement,
   };
 }
 
-const DownloadsManagerElementBase = FindShortcutMixin(PolymerElement);
+type SaveDangerousClickEvent = CustomEvent<{id: string}>;
+
+declare global {
+  interface HTMLElementEventMap {
+    'save-dangerous-click': SaveDangerousClickEvent;
+  }
+}
+
+const DownloadsManagerElementBase = FindShortcutMixinLit(CrLitElement);
 
 export class DownloadsManagerElement extends DownloadsManagerElementBase {
   static get is() {
     return 'downloads-manager';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
-      hasDownloads_: {
-        observer: 'hasDownloadsChanged_',
-        type: Boolean,
-      },
+      hasDownloads_: {type: Boolean},
 
-      hasShadow_: {
-        type: Boolean,
-        value: false,
-        reflectToAttribute: true,
-      },
+      inSearchMode_: {type: Boolean},
+      items_: {type: Array},
+      spinnerActive_: {type: Boolean},
+      bypassPromptItemId_: {type: String},
 
-      inSearchMode_: {
-        type: Boolean,
-        value: false,
-      },
+      // <if expr="_google_chrome">
+      firstDangerousItemId_: {type: String},
+      isEligibleForEsbPromo_: {type: Boolean},
+      esbDownloadRowPromo_: {type: Boolean},
+      // </if>
 
-      items_: {
-        type: Array,
-        value() {
-          return [];
-        },
-      },
-
-      spinnerActive_: {
-        type: Boolean,
-        notify: true,
-      },
-
-      lastFocused_: Object,
-
-      listBlurred_: Boolean,
+      lastFocused_: {type: Object},
+      listBlurred_: {type: Boolean},
+      listScrollTarget_: {type: Object},
     };
   }
 
@@ -96,28 +86,33 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
     return ['itemsChanged_(items_.*)'];
   }
 
-  private items_: MojomData[];
-  private hasDownloads_: boolean;
-  private hasShadow_: boolean;
-  private inSearchMode_: boolean;
-  private spinnerActive_: boolean;
+  protected accessor items_: MojomData[] = [];
+  protected accessor hasDownloads_: boolean = false;
+  // Used for CSS styling.
+  protected accessor inSearchMode_: boolean = false;
+  protected accessor spinnerActive_: boolean = false;
+  protected accessor bypassPromptItemId_: string = '';
+  // <if expr="_google_chrome">
+  private accessor firstDangerousItemId_: string = '';
+  private accessor esbDownloadRowPromo_: boolean =
+      loadTimeData.getBoolean('esbDownloadRowPromo');
+  private accessor isEligibleForEsbPromo_: boolean = false;
+  // </if>
+  protected accessor lastFocused_: HTMLElement|null = null;
+  protected accessor listBlurred_: boolean = false;
+  protected accessor listScrollTarget_: HTMLElement = document.documentElement;
 
-  private announcerDebouncer_: Debouncer|null = null;
-  private mojoHandler_: PageHandlerInterface;
-  private mojoEventTarget_: PageCallbackRouter;
+  private announcerTimeout_: number|null = null;
+  private browserProxy_: BrowserProxy;
   private searchService_: SearchService = SearchService.getInstance();
   private loaded_: PromiseResolver<void> = new PromiseResolver();
-  private listenerIds_: number[];
+  private listenerIds_: number[] = [];
   private eventTracker_: EventTracker = new EventTracker();
 
   constructor() {
     super();
 
-    const browserProxy = BrowserProxy.getInstance();
-
-    this.mojoEventTarget_ = browserProxy.callbackRouter;
-
-    this.mojoHandler_ = browserProxy.handler;
+    this.browserProxy_ = browserProxyFactory.getInstance();
 
     // Regular expression that captures the leading slash, the content and the
     // trailing slash in three different groups.
@@ -128,7 +123,6 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
     }
   }
 
-  /** @override */
   override connectedCallback() {
     super.connectedCallback();
 
@@ -136,12 +130,22 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
     this.toggleAttribute('loading', true);
     document.documentElement.classList.remove('loading');
 
+    const enableWebuiRefresh2026 =
+        loadTimeData.getString('webuiRefresh2026') !== '';
+    if (enableWebuiRefresh2026) {
+      this.addThemedColors_();
+      ColorChangeUpdater.forDocument().start();
+    }
+
     this.listenerIds_ = [
-      this.mojoEventTarget_.clearAll.addListener(this.clearAll_.bind(this)),
-      this.mojoEventTarget_.insertItems.addListener(
+      this.browserProxy_.callbackRouter.clearAll.addListener(
+          this.clearAll_.bind(this)),
+      this.browserProxy_.callbackRouter.insertItems.addListener(
           this.insertItems_.bind(this)),
-      this.mojoEventTarget_.removeItem.addListener(this.removeItem_.bind(this)),
-      this.mojoEventTarget_.updateItem.addListener(this.updateItem_.bind(this)),
+      this.browserProxy_.callbackRouter.removeItem.addListener(
+          this.removeItem_.bind(this)),
+      this.browserProxy_.callbackRouter.updateItem.addListener(
+          this.updateItem_.bind(this)),
     ];
 
     this.eventTracker_.add(
@@ -149,12 +153,8 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
     this.eventTracker_.add(document, 'click', () => this.onClick_());
 
     this.loaded_.promise.then(() => {
-      window.requestIdleCallback(function() {
-        chrome.send(
-            'metricsHandler:recordTime',
-            ['Download.ResultsRenderedTime', window.performance.now()]);
-        // https://github.com/microsoft/TypeScript/issues/13569
-        (document as any).fonts.load('bold 12px Roboto');
+      requestIdleCallback(function() {
+        document.fonts.load('bold 12px Roboto');
       });
     });
 
@@ -162,42 +162,108 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
 
     // Intercepts clicks on toast.
     const toastManager = getToastManager();
-    toastManager.shadowRoot!.querySelector<HTMLElement>('#toast')!.onclick =
-        e => this.onToastClicked_(e);
+    toastManager.shadowRoot.querySelector<HTMLElement>('#toast')!.onclick = e =>
+        this.onToastClicked_(e);
+
+    // <if expr="_google_chrome">
+    this.browserProxy_.handler.isEligibleForEsbPromo().then((result) => {
+      this.isEligibleForEsbPromo_ = result.result;
+    });
+    // </if>
   }
 
-  /** @override */
   override disconnectedCallback() {
     super.disconnectedCallback();
 
     this.listenerIds_.forEach(
-        id => assert(this.mojoEventTarget_.removeListener(id)));
+        id => assert(this.browserProxy_.callbackRouter.removeListener(id)));
 
     this.eventTracker_.removeAll();
   }
 
-  private clearAll_() {
-    this.set('items_', []);
+  override firstUpdated(changedProperties: PropertyValues<this>) {
+    super.firstUpdated(changedProperties);
+    this.listScrollTarget_ = this.$.mainContainer;
   }
 
-  private hasDownloadsChanged_() {
-    if (this.hasDownloads_) {
-      this.$.downloadsList.fire('iron-resize');
+  protected onSaveDangerousClick_(e: SaveDangerousClickEvent) {
+    const bypassItem = this.items_.find(item => item.id === e.detail.id);
+    if (bypassItem) {
+      this.bypassPromptItemId_ = bypassItem.id;
+      this.browserProxy_.handler.recordOpenBypassWarningDialog(
+          this.bypassPromptItemId_);
     }
   }
 
+  // <if expr="_google_chrome">
+  // Evaluates user eligbility for an esb promotion on the most recent dangerous
+  // download. It does this by traversing the array of downloads and the first
+  // dangerous download it comes across will have the promotion (guarantees the
+  // most recent download will have the promo)
+  protected shouldShowEsbPromotion_(item: MojomData): boolean {
+    if (!this.isEligibleForEsbPromo_ || !this.esbDownloadRowPromo_) {
+      return false;
+    }
+    if (!this.firstDangerousItemId_ && item.isDangerous) {
+      this.firstDangerousItemId_ = item.id;
+    }
+
+    if (this.firstDangerousItemId_ !== item.id) {
+      return false;
+    }
+
+    // Currently logs the ESB promotion as viewed if the most recent dangerous
+    // download is within the the first 5 items.
+    // TODO(awado): Change this to log the ESB promo as viewed when the user
+    // scrolls the download into view.
+    if (this.items_.slice(0, 5).some(download => download.id === item.id)) {
+      this.browserProxy_.handler.logEsbPromotionRowViewed();
+      return true;
+    }
+    return false;
+  }
+  // </if>
+
+  protected shouldShowBypassWarningPrompt_(): boolean {
+    return this.bypassPromptItemId_ !== '';
+  }
+
+  protected computeBypassWarningDialogFileName_(): string {
+    const bypassItem =
+        this.items_.find(item => item.id === this.bypassPromptItemId_);
+    return bypassItem?.fileName || '';
+  }
+
+  private hideBypassWarningPrompt_() {
+    this.bypassPromptItemId_ = '';
+  }
+
+  protected onBypassWarningConfirmationDialogClose_() {
+    const dialog = this.shadowRoot.querySelector(
+        'downloads-bypass-warning-confirmation-dialog');
+    assert(dialog);
+    assert(this.bypassPromptItemId_ !== '');
+    if (dialog.wasConfirmed()) {
+      this.browserProxy_.handler.saveDangerousFromDialogRequiringGesture(
+          this.bypassPromptItemId_);
+    } else {
+      // Closing the dialog by clicking cancel is treated the same as closing
+      // the dialog by pressing Esc. Both are treated as CANCEL, not CLOSE.
+      this.browserProxy_.handler.recordCancelBypassWarningDialog(
+          this.bypassPromptItemId_);
+    }
+    this.hideBypassWarningPrompt_();
+  }
+
+  private clearAll_() {
+    this.items_ = [];
+    this.itemsChanged_();
+  }
+
   private insertItems_(index: number, items: MojomData[]) {
-    // Insert |items| at the given |index| via Array#splice().
+    // Insert |items| at the given |index|.
     if (items.length > 0) {
-      this.items_.splice(index, 0, ...items);
-      this.updateHideDates_(index, index + items.length);
-      this.notifySplices('items_', [{
-                           index: index,
-                           addedCount: items.length,
-                           object: this.items_,
-                           type: 'splice',
-                           removed: [],
-                         }]);
+      this.updateItems_(index, 0, items);
     }
 
     if (this.hasAttribute('loading')) {
@@ -208,38 +274,51 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
     this.spinnerActive_ = false;
   }
 
+  protected hasClearableDownloads_() {
+    return loadTimeData.getBoolean('allowDeletingHistory') &&
+        this.hasDownloads_;
+  }
+
   private itemsChanged_() {
     this.hasDownloads_ = this.items_.length > 0;
-    this.$.toolbar.hasClearableDownloads =
-        loadTimeData.getBoolean('allowDeletingHistory') &&
-        this.items_.some(
-            ({state}) => state !== States.DANGEROUS &&
-                state !== States.INSECURE && state !== States.IN_PROGRESS &&
-                state !== States.PAUSED);
 
-    if (this.inSearchMode_) {
-      this.announcerDebouncer_ = Debouncer.debounce(
-          this.announcerDebouncer_, timeOut.after(500), () => {
-            const searchText = this.$.toolbar.getSearchText();
-            const announcement = this.items_.length === 0 ?
-                this.noDownloadsText_() :
-                (this.items_.length === 1 ?
-                     loadTimeData.getStringF(
-                         'searchResultsSingular', searchText) :
-                     loadTimeData.getStringF(
-                         'searchResultsPlural', this.items_.length,
-                         searchText));
-            getAnnouncerInstance().announce(announcement);
-          });
+    if (!this.inSearchMode_) {
+      return;
     }
+
+    if (this.announcerTimeout_) {
+      clearTimeout(this.announcerTimeout_);
+    }
+
+    this.announcerTimeout_ = setTimeout(() => {
+      const searchText = this.$.toolbar.getSearchText();
+      const announcement = this.items_.length === 0 ?
+          this.noDownloadsText_() :
+          (this.items_.length === 1 ?
+               loadTimeData.getStringF('searchResultsSingular', searchText) :
+               loadTimeData.getStringF(
+                   'searchResultsPlural', this.items_.length, searchText));
+      getAnnouncerInstance().announce(announcement);
+      this.announcerTimeout_ = null;
+    }, 500);
   }
 
   /**
    * @return The text to show when no download items are showing.
    */
-  private noDownloadsText_(): string {
+  protected noDownloadsText_(): string {
     return loadTimeData.getString(
         this.inSearchMode_ ? 'noSearchResults' : 'noDownloads');
+  }
+
+  /**
+   * @return Whether the undo command can be handled by accelerator.
+   */
+  private canHandleUndoByAccelerator_(): boolean {
+    // If the toolbar's search field is in a focused state, we should not
+    // handle the undo command by accelerator, as it conflicts with the
+    // text undo accelerator key of the search field.
+    return !this.$.toolbar.isSearchFocused();
   }
 
   private onKeyDown_(e: KeyboardEvent) {
@@ -260,7 +339,7 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
       // <if expr="is_macosx">
       hasTriggerModifier = !e.ctrlKey && e.metaKey;
       // </if>
-      if (hasTriggerModifier) {
+      if (hasTriggerModifier && this.canHandleUndoByAccelerator_()) {
         this.onUndoCommand_();
         e.preventDefault();
       }
@@ -279,7 +358,7 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
       return;
     }
 
-    this.mojoHandler_.clearAll();
+    this.browserProxy_.handler.clearAll();
     const canUndo =
         this.items_.some(data => !data.isDangerous && !data.isInsecure);
     getToastManager().show(
@@ -293,7 +372,7 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
     }
 
     getToastManager().hide();
-    this.mojoHandler_.undo();
+    this.browserProxy_.handler.undo();
   }
 
   private onToastClicked_(e: Event) {
@@ -301,64 +380,79 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
     e.preventDefault();
   }
 
-  private onScroll_() {
-    const container = this.$.downloadsList.scrollTarget!;
+  protected onScroll_() {
+    const container = this.listScrollTarget_;
+    assert(!!container);
     const distanceToBottom =
         container.scrollHeight - container.scrollTop - container.offsetHeight;
     if (distanceToBottom <= 100) {
       // Approaching the end of the scrollback. Attempt to load more items.
       this.searchService_.loadMore();
     }
-    this.hasShadow_ = container.scrollTop > 0;
   }
 
-  private onSearchChanged_() {
+  protected onSearchChanged_() {
     this.inSearchMode_ = this.searchService_.isSearching();
   }
 
+  protected onSpinnerActiveChanged_(event: CustomEvent<{value: boolean}>) {
+    this.spinnerActive_ = event.detail.value;
+  }
+
   private removeItem_(index: number) {
-    const removed = this.items_.splice(index, 1);
-    this.updateHideDates_(index, index);
-    this.notifySplices('items_', [{
-                         index: index,
-                         addedCount: 0,
-                         object: this.items_,
-                         type: 'splice',
-                         removed: removed,
-                       }]);
-    this.onScroll_();
+    const removed = this.items_[index]!;
+    if (removed.id === this.bypassPromptItemId_) {
+      this.hideBypassWarningPrompt_();
+    }
+
+    this.updateItems_(index, 1, []);
+    this.updateComplete.then(() => this.onScroll_());
   }
 
-  private onUndoClick_() {
-    getToastManager().hide();
-    this.mojoHandler_.undo();
-  }
+  private updateItems_(
+      index: number, toRemove: number, newItems: MojomData[] = []) {
+    const items = [
+      ...this.items_.slice(0, index),
+      ...newItems,
+      ...this.items_.slice(index + toRemove),
+    ];
 
-  /**
-   * Updates whether dates should show for |this.items_[start - end]|. Note:
-   * this method does not trigger template bindings. Use notifySplices() or
-   * after calling this method to ensure items are redrawn.
-   */
-  private updateHideDates_(start: number, end: number) {
-    for (let i = start; i <= end; ++i) {
-      const current = this.items_[i];
+    // Update whether dates should show.
+    for (let i = index; i <= index + newItems.length; ++i) {
+      const current = items[i];
       if (!current) {
         continue;
       }
-      const prev = this.items_[i - 1];
+      const prev = items[i - 1];
       current.hideDate = !!prev && prev.dateString === current.dateString;
+    }
+
+    const lengthChanged = this.items_.length !== items.length;
+    this.items_ = items;
+    if (lengthChanged) {
+      this.itemsChanged_();
     }
   }
 
-  private updateItem_(index: number, data: MojomData) {
-    this.items_[index] = data;
-    this.updateHideDates_(index, index);
+  protected onUndoClick_() {
+    getToastManager().hide();
+    this.browserProxy_.handler.undo();
+  }
 
-    this.notifyPath(`items_.${index}`);
-    setTimeout(() => {
-      const list = this.$.downloadsList;
-      list.updateSizeForIndex(index);
-    }, 0);
+  private updateItem_(index: number, data: MojomData) {
+    this.updateItems_(index, 1, [data]);
+  }
+
+  protected onLastFocusedChanged_(e: CustomEvent<{value: HTMLElement | null}>) {
+    this.lastFocused_ = e.detail.value;
+  }
+
+  protected onListBlurredChanged_(e: CustomEvent<{value: boolean}>) {
+    this.listBlurred_ = e.detail.value;
+  }
+
+  protected onRestoreListFocus_() {
+    this.listBlurred_ = false;
   }
 
   // Override FindShortcutMixin methods.
@@ -373,6 +467,14 @@ export class DownloadsManagerElement extends DownloadsManagerElementBase {
   // Override FindShortcutMixin methods.
   override searchInputHasFocus() {
     return this.$.toolbar.isSearchFocused();
+  }
+
+  private addThemedColors_() {
+    assert(document.body.querySelector(COLORS_CSS_SELECTOR) === null);
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'chrome://theme/colors.css?sets=ui,chrome';
+    document.body.appendChild(link);
   }
 }
 

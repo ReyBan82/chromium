@@ -7,22 +7,21 @@ package org.chromium.chrome.browser.toolbar;
 import android.os.Handler;
 import android.os.Looper;
 
-import androidx.annotation.NonNull;
-
 import org.chromium.base.Callback;
-import org.chromium.base.supplier.ObservableSupplier;
+import org.chromium.base.supplier.NullableObservableSupplier;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.cc.input.BrowserControlsState;
 import org.chromium.ui.resources.dynamics.ViewResourceAdapter;
 
 /**
- * Watches a constraints supplier for the next time the browser controls are unlocked,
- * and then tells the {@link ViewResourceAdapter} to generate a resource.
+ * Watches a constraints supplier for the next time the browser controls are unlocked, and then
+ * tells the {@link ViewResourceAdapter} to generate a resource.
  */
-public class ConstraintsChecker implements Callback<Integer> {
-    @NonNull
+@NullMarked
+public class ConstraintsChecker implements Callback<@Nullable Integer> {
     private final ViewResourceAdapter mViewResourceAdapter;
-    @NonNull
-    private final ObservableSupplier<Integer> mConstraintsSupplier;
-    @NonNull
+    private final NullableObservableSupplier<@BrowserControlsState Integer> mConstraintsSupplier;
     private final Handler mHandler;
 
     /**
@@ -30,8 +29,10 @@ public class ConstraintsChecker implements Callback<Integer> {
      * @param constraintsSupplier The underlying supplier for the state of constraints.
      * @param looper Message loop to post deferred tasks to.
      */
-    public ConstraintsChecker(@NonNull ViewResourceAdapter viewResourceAdapter,
-            @NonNull ObservableSupplier<Integer> constraintsSupplier, @NonNull Looper looper) {
+    public ConstraintsChecker(
+            ViewResourceAdapter viewResourceAdapter,
+            NullableObservableSupplier<@BrowserControlsState Integer> constraintsSupplier,
+            Looper looper) {
         mViewResourceAdapter = viewResourceAdapter;
         mConstraintsSupplier = constraintsSupplier;
         mHandler = new Handler(looper);
@@ -47,8 +48,7 @@ public class ConstraintsChecker implements Callback<Integer> {
      */
     public boolean areControlsLocked() {
         Integer constraints = mConstraintsSupplier.get();
-        return constraints == null
-                || constraints.intValue() == org.chromium.cc.input.BrowserControlsState.SHOWN;
+        return constraints == null || constraints.intValue() == BrowserControlsState.SHOWN;
     }
 
     /**
@@ -57,11 +57,11 @@ public class ConstraintsChecker implements Callback<Integer> {
      * a long time to result in a call.
      */
     public void scheduleRequestResourceOnUnlock() {
-        mConstraintsSupplier.addObserver(this);
+        mConstraintsSupplier.addSyncObserverAndPostIfNonNull(this);
     }
 
     @Override
-    public void onResult(Integer result) {
+    public void onResult(@Nullable Integer result) {
         if (!areControlsLocked()) {
             mConstraintsSupplier.removeObserver(this);
             mHandler.post(mViewResourceAdapter::onResourceRequested);

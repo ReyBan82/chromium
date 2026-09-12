@@ -3,18 +3,19 @@
 // found in the LICENSE file.
 
 import 'chrome://personalization/strings.m.js';
-import 'chrome://webui-test/mojo_webui_test_support.js';
 
-import {fetchGooglePhotosAlbum, fetchGooglePhotosAlbums, fetchGooglePhotosPhotos, GooglePhotosAlbum, GooglePhotosEnablementState, GooglePhotosPhoto, GooglePhotosPhotosByAlbumId, initializeGooglePhotosData, PersonalizationActionName, SetErrorAction, WallpaperGridItem, WallpaperLayout, WallpaperType} from 'chrome://personalization/js/personalization_app.js';
-import {assertDeepEquals, assertEquals, assertNotEquals} from 'chrome://webui-test/chai_assert.js';
+import type {GooglePhotosAlbum, GooglePhotosPhoto, SetErrorAction, WallpaperGridItemElement} from 'chrome://personalization/js/personalization_app.js';
+import {fetchGooglePhotosAlbum, fetchGooglePhotosAlbums, fetchGooglePhotosEnabled, fetchGooglePhotosPhotos, GooglePhotosEnablementState, GooglePhotosPhotosByAlbumIdElement, PersonalizationActionName, WallpaperLayout, WallpaperType} from 'chrome://personalization/js/personalization_app.js';
+import {assertDeepEquals, assertEquals, assertFalse, assertNotEquals, assertTrue} from 'chrome://webui-test/chai_assert.js';
 import {waitAfterNextRender} from 'chrome://webui-test/polymer_test_util.js';
 
 import {baseSetup, createSvgDataUrl, initElement, teardownElement} from './personalization_app_test_utils.js';
-import {TestPersonalizationStore} from './test_personalization_store.js';
-import {TestWallpaperProvider} from './test_wallpaper_interface_provider.js';
+import type {TestPersonalizationStore} from './test_personalization_store.js';
+import type {TestWallpaperProvider} from './test_wallpaper_interface_provider.js';
 
-suite('GooglePhotosPhotosByAlbumIdTest', function() {
-  let googlePhotosPhotosByAlbumIdElement: GooglePhotosPhotosByAlbumId|null;
+suite('GooglePhotosPhotosByAlbumIdElementTest', function() {
+  let googlePhotosPhotosByAlbumIdElement: GooglePhotosPhotosByAlbumIdElement|
+      null;
   let personalizationStore: TestPersonalizationStore;
   let wallpaperProvider: TestWallpaperProvider;
 
@@ -55,25 +56,24 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
               id: '1',
               title: 'foo',
               photoCount: 1,
-              preview: {url: 'foo.com'},
+              preview: 'foo.com',
               timestamp: {internalValue: BigInt('1')},
               isShared: false,
             };
 
             // Set values returned by |wallpaperProvider|.
             wallpaperProvider.setGooglePhotosAlbums([album]);
-            wallpaperProvider.setGooglePhotosPhotosByAlbumId(
-                album.id, undefined);
+            wallpaperProvider.setGooglePhotosPhotosByAlbumId(album.id, null);
 
             // Initialize Google Photos data in the |personalizationStore|.
-            await initializeGooglePhotosData(
+            await fetchGooglePhotosEnabled(
                 wallpaperProvider, personalizationStore);
             await fetchGooglePhotosAlbums(
                 wallpaperProvider, personalizationStore);
 
             // Initialize |googlePhotosPhotosByAlbumIdElement|.
-            googlePhotosPhotosByAlbumIdElement =
-                initElement(GooglePhotosPhotosByAlbumId, {hidden: false});
+            googlePhotosPhotosByAlbumIdElement = initElement(
+                GooglePhotosPhotosByAlbumIdElement, {hidden: false});
             await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
 
             // Select |album| and expect an |error|.
@@ -110,7 +110,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
               personalizationStore.data.error!.dismiss!.callback = resolve;
             });
             googlePhotosPhotosByAlbumIdElement.hidden = true;
-            assertEquals(await dismissCallbackPromise, /*fromUser=*/ false);
+            assertFalse(await dismissCallbackPromise);
             await new Promise<void>(resolve => setTimeout(resolve));
             assertEquals(
                 wallpaperProvider.getCallCount('fetchGooglePhotosPhotos'), 0);
@@ -123,7 +123,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       photoCount: 2,
       // Use svg data urls so that img on-load event fires and removes the
       // placeholder attribute.
-      preview: {url: createSvgDataUrl('svg-1')},
+      preview: createSvgDataUrl('svg-1'),
       timestamp: {internalValue: BigInt('1')},
       isShared: false,
     };
@@ -132,7 +132,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '2',
       title: 'bar',
       photoCount: 1,
-      preview: {url: createSvgDataUrl('svg-2')},
+      preview: createSvgDataUrl('svg-2'),
       timestamp: {internalValue: BigInt('2')},
       isShared: false,
     };
@@ -143,16 +143,16 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
           id: '9bd1d7a3-f995-4445-be47-53c5b58ce1cb',
           dedupKey: '2d0d1595-14af-4471-b2db-b9c8eae3a491',
           name: 'foo',
-          date: {data: []},
-          url: {url: createSvgDataUrl('svg-3')},
+          date: '',
+          url: createSvgDataUrl('svg-3'),
           location: 'home1',
         },
         {
           id: '0ec40478-9712-42e1-b5bf-3e75870ca042',
           dedupKey: '2cb1b955-0b7e-4f59-b9d0-802227aeeb28',
           name: 'bar',
-          date: {data: []},
-          url: {url: createSvgDataUrl('svg-4')},
+          date: '',
+          url: createSvgDataUrl('svg-4'),
           location: 'home2',
         },
       ],
@@ -161,8 +161,8 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
           id: '0a268a37-877a-4936-81d4-38cc84b0f596',
           dedupKey: 'd99eedfa-43e5-4bca-8882-b881222b8db9',
           name: 'baz',
-          date: {data: []},
-          url: {url: createSvgDataUrl('svg-5')},
+          date: '',
+          url: createSvgDataUrl('svg-5'),
           location: 'home3',
         },
       ],
@@ -174,7 +174,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
 
     // Initialize |googlePhotosPhotosByAlbumIdElement|.
     googlePhotosPhotosByAlbumIdElement =
-        initElement(GooglePhotosPhotosByAlbumId, {hidden: false});
+        initElement(GooglePhotosPhotosByAlbumIdElement, {hidden: false});
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
 
     const photoSelector =
@@ -242,7 +242,8 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
     };
     personalizationStore.notifyObservers();
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
-    const photosEls = querySelectorAll(photoSelector) as WallpaperGridItem[];
+    const photosEls =
+        querySelectorAll(photoSelector) as WallpaperGridItemElement[];
     assertEquals(
         photosEls.length, photosByAlbumId[album.id]?.length,
         'correct number of photo elements for album');
@@ -277,7 +278,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '1',
       title: '',
       photoCount: 2,
-      preview: {url: ''},
+      preview: '',
       timestamp: {internalValue: BigInt('1')},
       isShared: false,
     };
@@ -286,8 +287,8 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '9bd1d7a3-f995-4445-be47-53c5b58ce1cb',
       dedupKey: '2d0d1595-14af-4471-b2db-b9c8eae3a491',
       name: 'foo',
-      date: {data: []},
-      url: {url: 'foo.com'},
+      date: '',
+      url: 'foo.com',
       location: 'home1',
     };
 
@@ -295,8 +296,8 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '0ec40478-9712-42e1-b5bf-3e75870ca042',
       dedupKey: '2cb1b955-0b7e-4f59-b9d0-802227aeeb28',
       name: 'bar',
-      date: {data: []},
-      url: {url: 'bar.com'},
+      date: '',
+      url: 'bar.com',
       location: 'home2',
     };
 
@@ -304,8 +305,8 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '0a268a37-877a-4936-81d4-38cc84b0f596',
       dedupKey: photo.dedupKey,
       name: 'baz',
-      date: {data: []},
-      url: {url: 'baz.com'},
+      date: '',
+      url: 'baz.com',
       location: 'home3',
     };
 
@@ -317,25 +318,26 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
         album.id, [photo, anotherPhoto]);
 
     // Initialize Google Photos data in the |personalizationStore|.
-    await initializeGooglePhotosData(wallpaperProvider, personalizationStore);
+    await fetchGooglePhotosEnabled(wallpaperProvider, personalizationStore);
     await fetchGooglePhotosAlbums(wallpaperProvider, personalizationStore);
     await fetchGooglePhotosPhotos(wallpaperProvider, personalizationStore);
 
     // The wallpaper controller is expected to impose max resolution.
-    album.preview.url += '=s512';
-    photo.url.url += '=s512';
-    anotherPhoto.url.url += '=s512';
-    yetAnotherPhoto.url.url += '=s512';
+    album.preview += '=s512';
+    photo.url += '=s512';
+    anotherPhoto.url += '=s512';
+    yetAnotherPhoto.url += '=s512';
 
     // Initialize |googlePhotosPhotosByAlbumIdElement|.
     googlePhotosPhotosByAlbumIdElement =
-        initElement(GooglePhotosPhotosByAlbumId, {hidden: false});
+        initElement(GooglePhotosPhotosByAlbumIdElement, {hidden: false});
     googlePhotosPhotosByAlbumIdElement.setAttribute('album-id', album.id);
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
 
     // Verify that the expected photos are rendered.
     const photoSelector = 'wallpaper-grid-item:not([hidden]).photo';
-    const photoEls = querySelectorAll(photoSelector) as WallpaperGridItem[];
+    const photoEls =
+        querySelectorAll(photoSelector) as WallpaperGridItemElement[];
     assertEquals(photoEls.length, 2);
 
     // Verify selected states.
@@ -354,8 +356,9 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
     // Complete the pending selection.
     personalizationStore.data.wallpaper.pendingSelected = null;
     personalizationStore.data.wallpaper.currentSelected = {
-      attribution: [],
-      description: undefined,
+      descriptionContent: '',
+      descriptionTitle: '',
+      actionUrl: null,
       key: photo.id,
       layout: WallpaperLayout.kCenter,
       type: WallpaperType.kOnceGooglePhotos,
@@ -379,8 +382,9 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
     // Complete the pending selection.
     personalizationStore.data.wallpaper.pendingSelected = null;
     personalizationStore.data.wallpaper.currentSelected = {
-      attribution: [],
-      description: undefined,
+      descriptionContent: '',
+      descriptionTitle: '',
+      actionUrl: null,
       key: anotherPhoto.id,
       layout: WallpaperLayout.kCenter,
       type: WallpaperType.kOnceGooglePhotos,
@@ -404,8 +408,9 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
     // Complete the pending selection.
     personalizationStore.data.wallpaper.pendingSelected = null;
     personalizationStore.data.wallpaper.currentSelected = {
-      attribution: [],
-      description: undefined,
+      descriptionContent: '',
+      descriptionTitle: '',
+      actionUrl: null,
       key: yetAnotherPhoto.dedupKey!,
       layout: WallpaperLayout.kCenter,
       type: WallpaperType.kOnceGooglePhotos,
@@ -429,8 +434,9 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
     // Complete the pending selection.
     personalizationStore.data.wallpaper.pendingSelected = null;
     personalizationStore.data.wallpaper.currentSelected = {
-      attribution: [],
-      description: undefined,
+      descriptionContent: '',
+      descriptionTitle: '',
+      actionUrl: null,
       key: '//foo',
       layout: WallpaperLayout.kCenter,
       type: WallpaperType.kCustomized,
@@ -450,23 +456,23 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '1',
       title: '',
       photoCount: photosCount,
-      preview: {url: ''},
+      preview: '',
       timestamp: {internalValue: BigInt('1')},
       isShared: false,
     };
-    const photos: GooglePhotosPhoto[] = Array.from(
-        {length: photosCount}, (_, i) => ({
-                                 id: `id-${i}`,
-                                 dedupKey: `dedupKey-${i}`,
-                                 name: `name-${i}`,
-                                 date: {data: []},
-                                 url: {url: createSvgDataUrl(`svg-${i}`)},
-                                 location: `location-${i}`,
-                               }));
+    const photos: GooglePhotosPhoto[] =
+        Array.from({length: photosCount}, (_, i) => ({
+                                            id: `id-${i}`,
+                                            dedupKey: `dedupKey-${i}`,
+                                            name: `name-${i}`,
+                                            date: '',
+                                            url: createSvgDataUrl(`svg-${i}`),
+                                            location: `location-${i}`,
+                                          }));
 
     // Initialize |googlePhotosPhotosByAlbumIdElement|.
     googlePhotosPhotosByAlbumIdElement =
-        initElement(GooglePhotosPhotosByAlbumId, {hidden: false});
+        initElement(GooglePhotosPhotosByAlbumIdElement, {hidden: false});
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
 
     // Initially no album id selected. Photos and placeholders should be absent.
@@ -549,7 +555,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '1',
       title: '',
       photoCount: photosCount,
-      preview: {url: ''},
+      preview: '',
       timestamp: {internalValue: BigInt('1')},
       isShared: false,
     };
@@ -565,8 +571,8 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
             id: `id-${nextPhotoId}`,
             dedupKey: `dedupKey-${nextPhotoId}`,
             name: `name-${nextPhotoId}`,
-            date: {data: []},
-            url: {url: `url-${nextPhotoId}`},
+            date: '',
+            url: `url-${nextPhotoId}`,
             location: `location-${nextPhotoId++}`,
           };
         }));
@@ -578,7 +584,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
         album.id, resumeToken);
 
     // Initialize Google Photos data in |personalizationStore|.
-    await initializeGooglePhotosData(wallpaperProvider, personalizationStore);
+    await fetchGooglePhotosEnabled(wallpaperProvider, personalizationStore);
     await fetchGooglePhotosAlbums(wallpaperProvider, personalizationStore);
     await fetchGooglePhotosPhotos(wallpaperProvider, personalizationStore);
     assertDeepEquals(
@@ -605,16 +611,15 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
             id: `id-${nextPhotoId}`,
             dedupKey: `dedupKey-${nextPhotoId}`,
             name: `name-${nextPhotoId}`,
-            date: {data: []},
-            url: {url: `url-${nextPhotoId}`},
+            date: '',
+            url: `url-${nextPhotoId}`,
             location: `location-${nextPhotoId++}`,
           };
         }));
 
     // Set the next photos resume token returned by |wallpaperProvider|. When
-    // resume token is undefined, it indicates no additional photos exist.
-    wallpaperProvider.setGooglePhotosPhotosByAlbumIdResumeToken(
-        album.id, undefined);
+    // resume token is null, it indicates no additional photos exist.
+    wallpaperProvider.setGooglePhotosPhotosByAlbumIdResumeToken(album.id, null);
 
     // Restrict the viewport so that |googlePhotosPhotosByAlbumIdElement| will
     // lazily create photos instead of creating them all at once.
@@ -630,7 +635,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
 
     // Initialize |googlePhotosPhotosByAlbumIdElement|.
     googlePhotosPhotosByAlbumIdElement =
-        initElement(GooglePhotosPhotosByAlbumId, {hidden: false});
+        initElement(GooglePhotosPhotosByAlbumIdElement, {hidden: false});
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
 
     // Select |album|.
@@ -662,7 +667,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       title: '',
       photoCount: 0,
       isShared: false,
-      preview: {url: ''},
+      preview: '',
       timestamp: {internalValue: BigInt(0)},
     };
 
@@ -678,7 +683,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
 
     // Initialize |googlePhotosPhotosByAlbumIdElement| in hidden state.
     googlePhotosPhotosByAlbumIdElement =
-        initElement(GooglePhotosPhotosByAlbumId, {hidden: true});
+        initElement(GooglePhotosPhotosByAlbumIdElement, {hidden: true});
     googlePhotosPhotosByAlbumIdElement.setAttribute('album-id', album.id);
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
 
@@ -706,7 +711,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '1',
       title: 'foo',
       photoCount: 1,
-      preview: {url: 'foo.com'},
+      preview: 'foo.com',
       timestamp: {internalValue: BigInt('1')},
       isShared: false,
     };
@@ -715,8 +720,8 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
       id: '9bd1d7a3-f995-4445-be47-53c5b58ce1cb',
       dedupKey: '2d0d1595-14af-4471-b2db-b9c8eae3a491',
       name: 'foo',
-      date: {data: []},
-      url: {url: 'foo.com'},
+      date: '',
+      url: 'foo.com',
       location: 'home',
     };
 
@@ -727,13 +732,14 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
 
     // Initialize |googlePhotosPhotosByAlbumIdElement|.
     googlePhotosPhotosByAlbumIdElement =
-        initElement(GooglePhotosPhotosByAlbumId, {hidden: false});
+        initElement(GooglePhotosPhotosByAlbumIdElement, {hidden: false});
     googlePhotosPhotosByAlbumIdElement.setAttribute('album-id', album.id);
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
 
     // Verify that the expected |photo| is rendered.
     const photoSelector = 'wallpaper-grid-item:not([hidden]).photo';
-    const photoEls = querySelectorAll(photoSelector) as WallpaperGridItem[];
+    const photoEls =
+        querySelectorAll(photoSelector) as WallpaperGridItemElement[];
     assertEquals(photoEls.length, 1);
     assertEquals(photoEls[0]!.src, photo.url);
     assertEquals(photoEls[0]!.primaryText, undefined);
@@ -742,7 +748,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
     // Select |photo| and verify selection started.
     photoEls[0]!.click();
     assertEquals(personalizationStore.data.wallpaper.loading.setImage, 1);
-    assertEquals(personalizationStore.data.wallpaper.loading.selected, true);
+    assertTrue(personalizationStore.data.wallpaper.loading.selected.image);
     assertEquals(personalizationStore.data.wallpaper.pendingSelected, photo);
 
     // Wait for and verify hard-coded selection failure.
@@ -751,7 +757,7 @@ suite('GooglePhotosPhotosByAlbumIdTest', function() {
     assertEquals(await wallpaperProvider.whenCalled(methodName), photo.id);
     await waitAfterNextRender(googlePhotosPhotosByAlbumIdElement);
     assertEquals(personalizationStore.data.wallpaper.loading.setImage, 0);
-    assertEquals(personalizationStore.data.wallpaper.loading.selected, false);
+    assertFalse(personalizationStore.data.wallpaper.loading.selected.image);
     assertEquals(personalizationStore.data.wallpaper.pendingSelected, null);
   });
 });

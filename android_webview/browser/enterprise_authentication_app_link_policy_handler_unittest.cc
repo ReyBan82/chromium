@@ -4,6 +4,7 @@
 
 #include "android_webview/browser/enterprise_authentication_app_link_policy_handler.h"
 
+#include "android_webview/browser/aw_enterprise_authentication_app_link_manager.h"
 #include "base/json/json_reader.h"
 #include "components/policy/core/browser/configuration_policy_pref_store.h"
 #include "components/policy/core/browser/configuration_policy_pref_store_test.h"
@@ -36,16 +37,19 @@ TEST_F(EnterpriseAuthenticationAppLinkPolicyHandlerTest, ValidPolicy) {
                  "  {"
                  "    \"url\": \"https://www.testserver2.com/login\""
                  "  }"
-                 "]"),
+                 "]",
+                 base::JSON_PARSE_CHROMIUM_EXTENSIONS),
              nullptr);
   this->UpdateProviderPolicy(policy);
   const base::Value* pref_value = nullptr;
-  absl::optional<base::Value> expected = base::JSONReader::Read(R"(
+  std::optional<base::Value> expected =
+      base::JSONReader::Read(R"(
     [
      "https://www.testserver1.com/login",
      "https://www.testserver2.com/login"
     ]
-  )");
+  )",
+                             base::JSON_PARSE_CHROMIUM_EXTENSIONS);
 
   EXPECT_TRUE(store_->GetValue(
       android_webview::prefs::kEnterpriseAuthAppLinkPolicy, &pref_value));
@@ -62,7 +66,8 @@ TEST_F(EnterpriseAuthenticationAppLinkPolicyHandlerTest, InvalidPolicy) {
                  "  {"
                  "    \"abc\": \"https://www.testserver1.com/login\""
                  "  },"
-                 "]"),
+                 "]",
+                 base::JSON_PARSE_CHROMIUM_EXTENSIONS),
              nullptr);
   this->UpdateProviderPolicy(policy);
   const base::Value* pref_value = nullptr;

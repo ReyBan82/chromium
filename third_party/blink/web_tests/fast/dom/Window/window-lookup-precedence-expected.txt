@@ -219,8 +219,6 @@ PASS 'function MediaList() { [native code] }' is 'function MediaList() { [native
 PASS 'function MediaList() { [native code] }' is 'function MediaList() { [native code] }'
 PASS 'function MouseEvent() { [native code] }' is 'function MouseEvent() { [native code] }'
 PASS 'function MouseEvent() { [native code] }' is 'function MouseEvent() { [native code] }'
-PASS 'function MutationEvent() { [native code] }' is 'function MutationEvent() { [native code] }'
-PASS 'function MutationEvent() { [native code] }' is 'function MutationEvent() { [native code] }'
 PASS 'function NamedNodeMap() { [native code] }' is 'function NamedNodeMap() { [native code] }'
 PASS 'function NamedNodeMap() { [native code] }' is 'function NamedNodeMap() { [native code] }'
 PASS 'function Node() { [native code] }' is 'function Node() { [native code] }'
@@ -275,8 +273,8 @@ PASS 'function XPathEvaluator() { [native code] }' is 'function XPathEvaluator()
 PASS 'function XPathEvaluator() { [native code] }' is 'function XPathEvaluator() { [native code] }'
 PASS 'function XPathResult() { [native code] }' is 'function XPathResult() { [native code] }'
 PASS 'function XPathResult() { [native code] }' is 'function XPathResult() { [native code] }'
-PASS 'function XSLTProcessor() { [native code] }' is 'function XSLTProcessor() { [native code] }'
-PASS 'function XSLTProcessor() { [native code] }' is 'function XSLTProcessor() { [native code] }'
+FAIL win['XSLTProcessor'] should be null (of type object). Was undefined (of type undefined).
+FAIL win['XSLTProcessor'] should be null. Was [object HTMLInputElement].
 PASS win['onload'] is null
 PASS win['onload'] is null
 PASS win['frames'] == '[object Window]' is true

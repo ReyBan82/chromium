@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 #include <memory>
-#include <string>
+#include <vector>
 
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
@@ -23,6 +23,7 @@ class TestDocumentLoader : public DocumentLoader {
   // `pdf_name` is the base name for a PDF file.
   TestDocumentLoader(Client* client,
                      const base::FilePath::StringType& pdf_name);
+  TestDocumentLoader(Client* client, std::vector<uint8_t> pdf_data);
   ~TestDocumentLoader() override;
 
   // Simulates loading up to `max_bytes` more data, returning `true` if there is
@@ -32,17 +33,23 @@ class TestDocumentLoader : public DocumentLoader {
   // DocumentLoader:
   bool Init(std::unique_ptr<URLLoaderWrapper> loader,
             const std::string& url) override;
-  bool GetBlock(uint32_t position, uint32_t size, void* buf) const override;
+  bool GetBlock(uint32_t position, base::span<uint8_t> buf) const override;
   bool IsDataAvailable(uint32_t position, uint32_t size) const override;
   void RequestData(uint32_t position, uint32_t size) override;
   bool IsDocumentComplete() const override;
   uint32_t GetDocumentSize() const override;
   uint32_t BytesReceived() const override;
   void ClearPendingRequests() override;
+  std::string GetFileNameFromContentDisposition() const override;
+
+  void set_content_disposition_file_name(const std::string& file_name) {
+    content_disposition_file_name_ = file_name;
+  }
 
  private:
   const raw_ptr<Client> client_;
-  std::string pdf_data_;
+  const std::vector<uint8_t> pdf_data_;
+  std::string content_disposition_file_name_;
 
   // Not using ChunkStream, for more fine-grained control over request size.
   uint32_t received_bytes_ = 0;

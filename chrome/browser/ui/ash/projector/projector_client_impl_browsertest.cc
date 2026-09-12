@@ -8,43 +8,50 @@
 
 #include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
+#include "ash/constants/web_app_id_constants.h"
 #include "ash/public/cpp/projector/projector_client.h"
 #include "ash/public/cpp/projector/projector_new_screencast_precondition.h"
 #include "ash/public/cpp/test/mock_projector_client.h"
 #include "ash/webui/projector_app/public/cpp/projector_app_constants.h"
-#include "ash/webui/system_apps/public/system_web_app_type.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
-#include "chrome/browser/apps/app_service/app_icon/app_icon_factory.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/ash/drive/drive_integration_service.h"
+#include "chrome/browser/ash/drive/drive_integration_service_factory.h"
 #include "chrome/browser/ash/drive/drivefs_test_support.h"
 #include "chrome/browser/ash/login/test/device_state_mixin.h"
 #include "chrome/browser/ash/login/test/logged_in_user_mixin.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/signin/identity_manager_factory.h"
+#include "chrome/browser/ui/ash/account_manager/scoped_fake_account_manager_dialog.h"
 #include "chrome/browser/ui/ash/projector/projector_app_client_impl.h"
 #include "chrome/browser/ui/ash/projector/projector_utils.h"
 #include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/web_applications/web_app_command_manager.h"
-#include "chrome/browser/web_applications/web_app_id.h"
 #include "chrome/browser/web_applications/web_app_provider.h"
-#include "chrome/test/base/fake_gaia_mixin.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/mixin_based_in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "chromeos/ash/components/browser_delegate/browser_delegate.h"
+#include "chromeos/ash/components/system_web_apps/system_web_app_type.h"
 #include "components/account_id/account_id.h"
+#include "components/account_manager_core/account_manager_metrics.h"
+#include "components/prefs/pref_service.h"
 #include "components/services/app_service/public/cpp/app_registry_cache.h"
 #include "components/services/app_service/public/cpp/app_types.h"
 #include "components/services/app_service/public/cpp/icon_types.h"
+#include "components/webapps/common/web_app_id.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/page_type.h"
@@ -58,18 +65,13 @@ namespace ash {
 
 namespace {
 
+using testing::Optional;
+using testing::StrEq;
+
+constexpr char kReauthEmail[] = "projector-user@example.com";
+
 apps::AppServiceProxy* GetAppServiceProxy(Profile* profile) {
   return apps::AppServiceProxyFactory::GetForProfile(profile);
-}
-
-// Returns the account id for logging in.
-absl::optional<AccountId> GetPrimaryAccountId(bool is_managed) {
-  if (is_managed) {
-    return AccountId::FromUserEmailGaiaId(
-        FakeGaiaMixin::kEnterpriseUser1, FakeGaiaMixin::kEnterpriseUser1GaiaId);
-  }
-  // Use the default FakeGaiaMixin::kFakeUserEmail consumer test account id.
-  return absl::nullopt;
 }
 
 }  // namespace
@@ -95,11 +97,13 @@ class DriveFsMountStatusWaiter : public ProjectorAppClient::Observer {
       const NewScreencastPrecondition& condition) override {
     std::move(quit_closure_).Run();
   }
-  MOCK_METHOD1(OnScreencastsPendingStatusChanged,
-               void(const PendingScreencastSet&));
-  MOCK_METHOD1(OnSodaProgress, void(int));
-  MOCK_METHOD0(OnSodaError, void());
-  MOCK_METHOD0(OnSodaInstalled, void());
+  MOCK_METHOD(void,
+              OnScreencastsPendingStatusChanged,
+              (const PendingScreencastContainerSet&),
+              (override));
+  MOCK_METHOD(void, OnSodaProgress, (int), (override));
+  MOCK_METHOD(void, OnSodaError, (), (override));
+  MOCK_METHOD(void, OnSodaInstalled, (), (override));
 
   void SetDriveEnabled(bool enabled_drive, base::OnceClosure quit_closure) {
     quit_closure_ = std::move(quit_closure);
@@ -112,14 +116,14 @@ class DriveFsMountStatusWaiter : public ProjectorAppClient::Observer {
 
  private:
   base::OnceClosure quit_closure_;
-  drive::DriveIntegrationService* service_;
+  raw_ptr<drive::DriveIntegrationService> service_;
 };
 
 class ProjectorClientTest : public InProcessBrowserTest {
  public:
   ProjectorClientTest() {
-    scoped_feature_list_.InitWithFeatures(
-        {features::kProjector, features::kOnDeviceSpeechRecognition}, {});
+    scoped_feature_list_.InitAndEnableFeature(
+        features::kOnDeviceSpeechRecognition);
   }
 
   ~ProjectorClientTest() override = default;
@@ -158,7 +162,9 @@ class ProjectorClientTest : public InProcessBrowserTest {
         std::make_unique<drive::FakeDriveFsHelper>(profile, mount_path);
     // The integration service is owned by `KeyedServiceFactory`.
     auto* integration_service = new drive::DriveIntegrationService(
-        profile, /*test_mount_point_name=*/std::string(), mount_path,
+        g_browser_process->local_state(), profile,
+        IdentityManagerFactory::GetForProfile(profile),
+        /*test_mount_point_name=*/std::string(), mount_path,
         fake_drivefs_helpers_[profile]->CreateFakeDriveFsListenerFactory());
     return integration_service;
   }
@@ -179,27 +185,22 @@ class ProjectorClientTest : public InProcessBrowserTest {
 // This test verifies that the (un)trusted Projector app and annotator WebUI
 // URLs are valid.
 IN_PROC_BROWSER_TEST_F(ProjectorClientTest, AppUrlsValid) {
-  VerifyUrlValid(kChromeUITrustedProjectorUrl);
   VerifyUrlValid(kChromeUIUntrustedProjectorUrl);
-  VerifyUrlValid(kChromeUITrustedAnnotatorUrl);
-  VerifyUrlValid(kChromeUIUntrustedAnnotatorUrl);
 }
 
 IN_PROC_BROWSER_TEST_F(ProjectorClientTest, OpenProjectorApp) {
-  auto* profile = browser()->profile();
+  auto* profile = browser()->GetProfile();
   SystemWebAppManager::GetForTest(profile)->InstallSystemAppsForTesting();
 
-  ui_test_utils::BrowserChangeObserver browser_opened(
-      nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  ui_test_utils::BrowserCreatedObserver browser_created_observer;
   client()->OpenProjectorApp();
-  browser_opened.Wait();
+  browser_created_observer.Wait();
 
   // Verify that Projector App is opened.
-  Browser* app_browser =
-      FindSystemWebAppBrowser(profile, SystemWebAppType::PROJECTOR);
+  ash::BrowserDelegate* app_browser = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
   ASSERT_TRUE(app_browser);
-  content::WebContents* tab =
-      app_browser->tab_strip_model()->GetActiveWebContents();
+  content::WebContents* tab = app_browser->GetActiveWebContents();
   ASSERT_TRUE(tab);
   EXPECT_EQ(tab->GetController().GetVisibleEntry()->GetPageType(),
             content::PAGE_TYPE_NORMAL);
@@ -209,25 +210,25 @@ IN_PROC_BROWSER_TEST_F(ProjectorClientTest, OpenProjectorApp) {
 // already open. The launch event should recycle the existing window and should
 // not open a new window.
 IN_PROC_BROWSER_TEST_F(ProjectorClientTest, SendFilesToProjectorApp) {
-  const size_t starting_browser_count = chrome::GetTotalBrowserCount();
+  const size_t starting_browser_count =
+      GlobalBrowserCollection::GetInstance()->GetSize();
 
-  auto* profile = browser()->profile();
+  auto* profile = browser()->GetProfile();
   SystemWebAppManager::GetForTest(profile)->InstallSystemAppsForTesting();
 
   // Launch the app for the first time.
-  ui_test_utils::BrowserChangeObserver browser_opened(
-      nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  ui_test_utils::BrowserCreatedObserver browser_created_observer;
   client()->OpenProjectorApp();
-  browser_opened.Wait();
+  browser_created_observer.Wait();
 
   // Verify that Projector App is opened.
-  Browser* app_browser1 =
-      FindSystemWebAppBrowser(profile, SystemWebAppType::PROJECTOR);
+  ash::BrowserDelegate* app_browser1 = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
   ASSERT_TRUE(app_browser1);
-  EXPECT_EQ(chrome::GetTotalBrowserCount(), starting_browser_count + 1);
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(),
+            starting_browser_count + 1);
 
-  content::WebContents* tab =
-      app_browser1->tab_strip_model()->GetActiveWebContents();
+  content::WebContents* tab = app_browser1->GetActiveWebContents();
   ASSERT_TRUE(tab);
   EXPECT_TRUE(WaitForLoadStop(tab));
 
@@ -237,65 +238,66 @@ IN_PROC_BROWSER_TEST_F(ProjectorClientTest, SendFilesToProjectorApp) {
   SendFilesToProjectorApp({file1, file2});
 
   // Verify that the Projector App is still open.
-  Browser* app_browser2 =
-      FindSystemWebAppBrowser(profile, SystemWebAppType::PROJECTOR);
+  ash::BrowserDelegate* app_browser2 = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
   // Launching the app with files should not open a new window.
   EXPECT_EQ(app_browser1, app_browser2);
-  EXPECT_EQ(chrome::GetTotalBrowserCount(), starting_browser_count + 1);
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(),
+            starting_browser_count + 1);
 
-  tab = app_browser2->tab_strip_model()->GetActiveWebContents();
+  tab = app_browser2->GetActiveWebContents();
   ASSERT_TRUE(tab);
   EXPECT_EQ(tab->GetController().GetVisibleEntry()->GetPageType(),
             content::PAGE_TYPE_NORMAL);
 }
 
 IN_PROC_BROWSER_TEST_F(ProjectorClientTest, MinimizeProjectorApp) {
-  auto* profile = browser()->profile();
+  auto* profile = browser()->GetProfile();
   SystemWebAppManager::GetForTest(profile)->InstallSystemAppsForTesting();
 
-  ui_test_utils::BrowserChangeObserver browser_opened(
-      nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  ui_test_utils::BrowserCreatedObserver browser_created_observer;
   client()->OpenProjectorApp();
-  browser_opened.Wait();
+  browser_created_observer.Wait();
 
   // Verify that Projector App is opened.
-  Browser* app_browser =
-      FindSystemWebAppBrowser(profile, SystemWebAppType::PROJECTOR);
+  ash::BrowserDelegate* app_browser = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
   ASSERT_TRUE(app_browser);
-  content::WebContents* tab =
-      app_browser->tab_strip_model()->GetActiveWebContents();
+
+  content::WebContents* tab = app_browser->GetActiveWebContents();
   ASSERT_TRUE(tab);
   EXPECT_EQ(tab->GetController().GetVisibleEntry()->GetPageType(),
             content::PAGE_TYPE_NORMAL);
 
   client()->MinimizeProjectorApp();
   // Verify that Projector App is minimized.
-  EXPECT_TRUE(app_browser->window()->IsMinimized());
+  EXPECT_TRUE(app_browser->IsMinimized());
 }
 
 IN_PROC_BROWSER_TEST_F(ProjectorClientTest, CloseProjectorApp) {
-  auto* profile = browser()->profile();
+  auto* profile = browser()->GetProfile();
   SystemWebAppManager::GetForTest(profile)->InstallSystemAppsForTesting();
 
-  ui_test_utils::BrowserChangeObserver browser_opened(
-      nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  ui_test_utils::BrowserCreatedObserver browser_created_observer;
   client()->OpenProjectorApp();
-  browser_opened.Wait();
+  browser_created_observer.Wait();
 
   // Verify that Projector App is opened.
-  Browser* app_browser =
-      FindSystemWebAppBrowser(profile, SystemWebAppType::PROJECTOR);
+  ash::BrowserDelegate* app_browser = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
   ASSERT_TRUE(app_browser);
-  content::WebContents* tab =
-      app_browser->tab_strip_model()->GetActiveWebContents();
+
+  content::WebContents* tab = app_browser->GetActiveWebContents();
   ASSERT_TRUE(tab);
   EXPECT_EQ(tab->GetController().GetVisibleEntry()->GetPageType(),
             content::PAGE_TYPE_NORMAL);
 
-  EXPECT_FALSE(app_browser->IsAttemptingToCloseBrowser());
+  EXPECT_FALSE(app_browser->IsAttemptingToClose());
   client()->CloseProjectorApp();
-  // Verify that Projector App is closing.
-  EXPECT_TRUE(app_browser->IsAttemptingToCloseBrowser());
+  // Verify that Projector App is closing or closed.
+  ash::BrowserDelegate* closing_browser = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
+  EXPECT_TRUE(!closing_browser || closing_browser->IsAttemptingToClose());
 }
 
 IN_PROC_BROWSER_TEST_F(ProjectorClientTest, GetDriveFsMountPointPath) {
@@ -304,13 +306,13 @@ IN_PROC_BROWSER_TEST_F(ProjectorClientTest, GetDriveFsMountPointPath) {
 
   base::FilePath mounted_path;
   ASSERT_TRUE(client()->GetBaseStoragePath(&mounted_path));
-  ASSERT_EQ(browser()->profile()->GetPath().Append("drivefs"), mounted_path);
+  ASSERT_EQ(browser()->GetProfile()->GetPath().Append("drivefs"), mounted_path);
 }
 
 IN_PROC_BROWSER_TEST_F(ProjectorClientTest, DriveUnmountedAndRemounted) {
   drive::DriveIntegrationService* service =
       drive::DriveIntegrationServiceFactory::FindForProfile(
-          browser()->profile());
+          browser()->GetProfile());
   EXPECT_TRUE(service->is_enabled());
 
   DriveFsMountStatusWaiter observer{service};
@@ -329,6 +331,31 @@ IN_PROC_BROWSER_TEST_F(ProjectorClientTest, DriveUnmountedAndRemounted) {
   }
 }
 
+// Verifies Projector opens the reauth dialog through the Account Manager dialog
+// coordinator. The fake dialog keeps the test focused on the dialog handoff and
+// UMA behavior.
+IN_PROC_BROWSER_TEST_F(ProjectorClientTest,
+                       HandleAccountReauthOpensReauthDialog) {
+  base::HistogramTester histogram_tester;
+  auto* profile = browser()->GetProfile();
+  test::ScopedFakeAccountManagerDialog fake_account_manager_dialog(profile);
+
+  ProjectorAppClient::Get()->HandleAccountReauth(kReauthEmail);
+
+  EXPECT_EQ(1, fake_account_manager_dialog
+                   ->show_account_reauthentication_dialog_calls());
+  EXPECT_THAT(fake_account_manager_dialog->last_reauth_email(),
+              Optional(StrEq(kReauthEmail)));
+  EXPECT_EQ(0,
+            fake_account_manager_dialog->show_account_addition_dialog_calls());
+  histogram_tester.ExpectUniqueSample(
+      account_manager::kAccountAdditionSourceHistogramName,
+      account_manager::AccountAdditionSource::kChromeOSProjectorAppReauth,
+      /*expected_count=*/1);
+
+  fake_account_manager_dialog->CloseDialog();
+}
+
 // Tests Projector client for child and managed users.
 class ProjectorClientManagedTest
     : public MixinBasedInProcessBrowserTest,
@@ -341,20 +368,19 @@ class ProjectorClientManagedTest
 
   bool is_child() const { return GetParam(); }
 
-  bool is_managed() const { return !is_child(); }
-
   ProjectorClient* client() { return ProjectorClient::Get(); }
 
   std::string GetPolicy() {
-    if (is_child())
+    if (is_child()) {
       return prefs::kProjectorDogfoodForFamilyLinkEnabled;
+    }
     return prefs::kProjectorAllowByPolicy;
   }
 
-  apps::Readiness GetAppReadiness(const web_app::AppId& app_id) {
+  apps::Readiness GetAppReadiness(const webapps::AppId& app_id) {
     apps::Readiness readiness;
     bool app_found =
-        GetAppServiceProxy(browser()->profile())
+        GetAppServiceProxy(browser()->GetProfile())
             ->AppRegistryCache()
             .ForOneApp(app_id, [&readiness](const apps::AppUpdate& update) {
               readiness = update.Readiness();
@@ -363,10 +389,10 @@ class ProjectorClientManagedTest
     return readiness;
   }
 
-  absl::optional<apps::IconKey> GetAppIconKey(const web_app::AppId& app_id) {
-    absl::optional<apps::IconKey> icon_key;
+  std::optional<apps::IconKey> GetAppIconKey(const webapps::AppId& app_id) {
+    std::optional<apps::IconKey> icon_key;
     bool app_found =
-        GetAppServiceProxy(browser()->profile())
+        GetAppServiceProxy(browser()->GetProfile())
             ->AppRegistryCache()
             .ForOneApp(app_id, [&icon_key](const apps::AppUpdate& update) {
               icon_key = update.IconKey();
@@ -379,29 +405,25 @@ class ProjectorClientManagedTest
   DeviceStateMixin device_state_{
       &mixin_host_, DeviceStateMixin::State::OOBE_COMPLETED_CONSUMER_OWNED};
   LoggedInUserMixin logged_in_user_mixin_{
-      &mixin_host_,
+      &mixin_host_, /*test_base=*/this, embedded_test_server(),
       is_child() ? LoggedInUserMixin::LogInType::kChild
-                 : LoggedInUserMixin::LogInType::kRegular,
-      embedded_test_server(),
-      this,
-      /*should_launch_browser=*/true,
-      GetPrimaryAccountId(is_managed())};
+                 : LoggedInUserMixin::LogInType::kManaged};
 };
 
 IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest,
                        OpenProjectorAppWithoutPolicy) {
-  auto* profile = browser()->profile();
+  auto* profile = browser()->GetProfile();
   SystemWebAppManager::GetForTest(profile)->InstallSystemAppsForTesting();
 
-  ui_test_utils::BrowserChangeObserver browser_opened(
-      nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  ui_test_utils::BrowserCreatedObserver browser_created_observer;
   client()->OpenProjectorApp();
-  if (!is_child())
-    browser_opened.Wait();
+  if (!is_child()) {
+    browser_created_observer.Wait();
+  }
 
   // Verify that Projector App is opened.
-  Browser* app_browser =
-      FindSystemWebAppBrowser(profile, ash::SystemWebAppType::PROJECTOR);
+  ash::BrowserDelegate* app_browser = FindSystemWebAppBrowser(
+      profile, ash::SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
 
   if (is_child()) {
     // Can't open for Family Link account.
@@ -414,7 +436,7 @@ IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest,
 
 IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest,
                        PRE_DisableThenEnablePolicy) {
-  auto* profile = browser()->profile();
+  auto* profile = browser()->GetProfile();
   // By the time the test runs, SystemWebAppManager already marked the app as
   // disabled because the policy is not set. This PRE step, sets the policy so
   // that the app is correctly enabled when the actual test runs.
@@ -423,20 +445,19 @@ IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest,
 
 // Prevents a regression to b/230779397.
 IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest, DisableThenEnablePolicy) {
-  auto* profile = browser()->profile();
+  auto* profile = browser()->GetProfile();
   SystemWebAppManager::GetForTest(profile)->InstallSystemAppsForTesting();
 
-  ui_test_utils::BrowserChangeObserver browser_opened(
-      nullptr, ui_test_utils::BrowserChangeObserver::ChangeType::kAdded);
+  ui_test_utils::BrowserCreatedObserver browser_created_observer;
   client()->OpenProjectorApp();
-  browser_opened.Wait();
+  browser_created_observer.Wait();
 
   // Verify the user can open the Projector App when the policy is enabled.
-  Browser* app_browser =
-      FindSystemWebAppBrowser(profile, SystemWebAppType::PROJECTOR);
+  ash::BrowserDelegate* app_browser = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
   ASSERT_TRUE(app_browser);
-  content::WebContents* tab =
-      app_browser->tab_strip_model()->GetActiveWebContents();
+
+  content::WebContents* tab = app_browser->GetActiveWebContents();
   ASSERT_TRUE(tab);
   EXPECT_EQ(tab->GetController().GetVisibleEntry()->GetPageType(),
             content::PAGE_TYPE_NORMAL);
@@ -445,7 +466,9 @@ IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest, DisableThenEnablePolicy) {
   // the Projector app open.
   profile->GetPrefs()->SetBoolean(GetPolicy(), false);
   // The Projector app immediately closes to prevent further access.
-  EXPECT_TRUE(app_browser->IsAttemptingToCloseBrowser());
+  ash::BrowserDelegate* closing_browser = FindSystemWebAppBrowser(
+      profile, SystemWebAppType::PROJECTOR, ash::BrowserType::kApp);
+  EXPECT_TRUE(!closing_browser || closing_browser->IsAttemptingToClose());
 
   auto* web_app_provider = web_app::WebAppProvider::GetForTest(profile);
   base::RunLoop loop;
@@ -456,9 +479,10 @@ IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest, DisableThenEnablePolicy) {
   // We can't uninstall the Projector SWA until the next session, but the icon
   // is greyed out and disabled.
   EXPECT_EQ(apps::Readiness::kDisabledByPolicy,
-            GetAppReadiness(kChromeUITrustedProjectorSwaAppId));
-  EXPECT_TRUE(apps::IconEffects::kBlocked &
-              GetAppIconKey(kChromeUITrustedProjectorSwaAppId)->icon_effects);
+            GetAppReadiness(ash::kChromeUIUntrustedProjectorSwaAppId));
+  EXPECT_TRUE(
+      apps::IconEffects::kBlocked &
+      GetAppIconKey(ash::kChromeUIUntrustedProjectorSwaAppId)->icon_effects);
 
   // The app can re-enable too if it's already installed and the policy flips to
   // true.
@@ -470,9 +494,10 @@ IN_PROC_BROWSER_TEST_P(ProjectorClientManagedTest, DisableThenEnablePolicy) {
   web_app_provider->command_manager().AwaitAllCommandsCompleteForTesting();
 
   EXPECT_EQ(apps::Readiness::kReady,
-            GetAppReadiness(kChromeUITrustedProjectorSwaAppId));
-  EXPECT_FALSE(apps::IconEffects::kBlocked &
-               GetAppIconKey(kChromeUITrustedProjectorSwaAppId)->icon_effects);
+            GetAppReadiness(ash::kChromeUIUntrustedProjectorSwaAppId));
+  EXPECT_FALSE(
+      apps::IconEffects::kBlocked &
+      GetAppIconKey(ash::kChromeUIUntrustedProjectorSwaAppId)->icon_effects);
 }
 
 INSTANTIATE_TEST_SUITE_P(,

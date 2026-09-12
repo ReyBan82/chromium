@@ -4,537 +4,707 @@
 
 package org.chromium.chrome.browser.tab;
 
+import static org.junit.Assert.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
-import android.os.Handler;
-import android.os.Looper;
+import static org.chromium.chrome.browser.url_constants.UrlConstantResolver.getOriginalNativeNtpUrl;
 
-import org.junit.After;
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TestRule;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
-import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.Robolectric;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLooper;
 
-import org.chromium.base.ObserverList.RewindableIterator;
-import org.chromium.base.task.TaskTraits;
-import org.chromium.base.task.test.ShadowPostTask;
+import org.chromium.base.Token;
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.base.test.util.Features;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
-import org.chromium.chrome.browser.tab.state.CriticalPersistedTabData;
+import org.chromium.base.test.RobolectricUtil;
+import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.chrome.browser.tab.TabStateAttributes.DirtinessState;
+import org.chromium.components.embedder_support.util.UrlConstants;
 import org.chromium.content_public.browser.NavigationHandle;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.content_public.browser.WebContentsObserver;
+import org.chromium.content_public.browser.test.mock.MockWebContents;
 import org.chromium.ui.base.WindowAndroid;
+import org.chromium.ui.test.util.MockitoHelper;
 import org.chromium.url.GURL;
 import org.chromium.url.JUnitTestGURLs;
 
 import java.util.concurrent.TimeUnit;
 
-/**
- * Unit tests for TabStateAttributes.
- */
+/** Unit tests for TabStateAttributes. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, shadows = {ShadowLooper.class, ShadowPostTask.class})
+@Config(shadows = {ShadowLooper.class})
 public class TabStateAttributesTest {
-    @Rule
-    public TestRule mProcessor = new Features.JUnitProcessor();
 
-    @Mock
-    private WebContents mWebContents;
-    @Mock
-    private TabStateAttributes.Observer mAttributesObserver;
+    @Rule public final MockitoRule mockito = MockitoJUnit.rule();
 
-    @Captor
-    ArgumentCaptor<WebContentsObserver> mWebContentsObserverCaptor;
+    @Mock private Profile mProfile;
+    @Mock private MockWebContents mWebContents;
+    @Mock private TabStateAttributes.Observer mAttributesObserver;
+    @Mock private TabStateAttributes.Observer mAttributesObserver2;
+
+    @Captor ArgumentCaptor<WebContentsObserver> mWebContentsObserverCaptor;
 
     private MockTab mTab;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
-        ShadowPostTask.setTestImpl(new ShadowPostTask.TestImpl() {
-            @Override
-            public void postDelayedTask(TaskTraits taskTraits, Runnable task, long delay) {
-                new Handler(Looper.getMainLooper()).postDelayed(task, delay);
-            }
-        });
+        mTab =
+                new MockTab(0, mProfile) {
+                    @Override
+                    public WebContents getWebContents() {
+                        return mWebContents;
+                    }
 
-        mTab = new MockTab(0, false) {
-            @Override
-            public WebContents getWebContents() {
-                return mWebContents;
-            };
+                    @Override
+                    public boolean isInitialized() {
+                        return true;
+                    }
+                };
+        mTab.setCanGoForward(false);
+        mTab.setCanGoBack(false);
 
-            @Override
-            public boolean isInitialized() {
-                return true;
-            }
-        };
         doNothing().when(mWebContents).addObserver(mWebContentsObserverCaptor.capture());
     }
 
-    @After
-    public void tearDown() {
-        ShadowPostTask.reset();
-    }
-
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testDefaultDirtyState() {
-        TabStateAttributes.createForTab(mTab, null);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        mTab.getUserDataHost().removeUserData(TabStateAttributes.class);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, null);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        TabStateAttributesRegistry.clearForTesting(mTab);
 
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        mTab.getUserDataHost().removeUserData(TabStateAttributes.class);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        TabStateAttributesRegistry.clearForTesting(mTab);
 
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_FOR_LAZY_LOAD);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        mTab.getUserDataHost().removeUserData(TabStateAttributes.class);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_FOR_LAZY_LOAD);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        TabStateAttributesRegistry.clearForTesting(mTab);
 
-        TabStateAttributes.createForTab(mTab, TabCreationState.LIVE_IN_BACKGROUND);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        mTab.getUserDataHost().removeUserData(TabStateAttributes.class);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.LIVE_IN_BACKGROUND);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        TabStateAttributesRegistry.clearForTesting(mTab);
 
-        TabStateAttributes.createForTab(mTab, TabCreationState.LIVE_IN_FOREGROUND);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        mTab.getUserDataHost().removeUserData(TabStateAttributes.class);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.LIVE_IN_FOREGROUND);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        TabStateAttributesRegistry.clearForTesting(mTab);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testTitleUpdate() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onTitleUpdated(mTab);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onTitleUpdated(mTab);
+        }
 
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testFinishMainFrameNavigation() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onContentChanged(mTab);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onContentChanged(mTab);
+        }
         WebContentsObserver webContentsObserver = mWebContentsObserverCaptor.getValue();
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
-        GURL testGURL = JUnitTestGURLs.getGURL(JUnitTestGURLs.EXAMPLE_URL);
+        getAttributes().addObserver(mAttributesObserver);
+        GURL testGURL = JUnitTestGURLs.EXAMPLE_URL;
         NavigationHandle navHandle = NavigationHandle.createForTesting(testGURL, false, 0, false);
 
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
         webContentsObserver.didFinishNavigationInPrimaryMainFrame(navHandle);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testPageLoadFinished() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
-        GURL testGURL = JUnitTestGURLs.getGURL(JUnitTestGURLs.EXAMPLE_URL);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        GURL testGURL = JUnitTestGURLs.EXAMPLE_URL;
 
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        while (observers.hasNext()) observers.next().onPageLoadFinished(mTab, testGURL);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.UNTIDY);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onPageLoadFinished(mTab, testGURL);
+        }
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
     }
 
     @Test
-    @Features.DisableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
-    public void testLoadStopped_WithoutOptimizations() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
+    public void testLoadStopped_DifferentDocument() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
 
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ true);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onLoadStopped(mTab, /* toDifferentDocument= */ true);
         }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.UNTIDY);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ true);
+        getAttributes().setStateForTesting(DirtinessState.UNTIDY);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onLoadStopped(mTab, /* toDifferentDocument= */ true);
         }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
-
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.CLEAN);
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ false);
-        }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
-
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.UNTIDY);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ false);
-        }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
-    public void testLoadStopped_DifferentDocument_WithOptimizations() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
+    public void testLoadStopped_SameDocument() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
 
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ true);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onLoadStopped(mTab, /* toDifferentDocument= */ false);
         }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.UNTIDY);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ true);
+        RobolectricUtil.runAllBackgroundAndUi();
+        getAttributes().setStateForTesting(DirtinessState.UNTIDY);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onLoadStopped(mTab, /* toDifferentDocument= */ false);
         }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
-    }
-
-    @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
-    public void testLoadStopped_SameDocument_WithOptimizations() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
-
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ false);
-        }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
-
-        ShadowLooper.idleMainLooper();
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.UNTIDY);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ false);
-        }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Assert.assertEquals(1, Robolectric.getForegroundThreadScheduler().size());
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        assertEquals(1, Robolectric.getForegroundThreadScheduler().size());
 
         // An additional call to onLoadStopped should not change the state, nor should another
         // task be queued.
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) {
-            observers.next().onLoadStopped(mTab, /* toDifferentDocument */ false);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onLoadStopped(mTab, /* toDifferentDocument= */ false);
         }
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Assert.assertEquals(1, Robolectric.getForegroundThreadScheduler().size());
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        assertEquals(1, Robolectric.getForegroundThreadScheduler().size());
 
-        Robolectric.getForegroundThreadScheduler().advanceBy(
-                TabStateAttributes.DEFAULT_LOW_PRIORITY_SAVE_DELAY_MS, TimeUnit.MILLISECONDS);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
-        Assert.assertEquals(0, Robolectric.getForegroundThreadScheduler().size());
+        Robolectric.getForegroundThreadScheduler()
+                .advanceBy(
+                        TabStateAttributes.DEFAULT_LOW_PRIORITY_SAVE_DELAY_MS,
+                        TimeUnit.MILLISECONDS);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        assertEquals(0, Robolectric.getForegroundThreadScheduler().size());
     }
 
     @Test
-    @Features.DisableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
-    public void testHide_WithoutOptimizations() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
+    public void testLoadStopped_NTPInTabGroup() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
 
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onHidden(mTab, TabHidingType.CHANGED_TABS);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.UNTIDY);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onHidden(mTab, TabHidingType.CHANGED_TABS);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
+        mTab.setUrl(new GURL(getOriginalNativeNtpUrl()));
+        mTab.setTabGroupId(new Token(1L, 2L));
+
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onLoadStopped(mTab, /* toDifferentDocument= */ true);
+        }
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
-    public void testHide_WithOptimizations() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
+    public void testHide() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        getAttributes().addObserver(mAttributesObserver);
 
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onHidden(mTab, TabHidingType.CHANGED_TABS);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onHidden(mTab, TabHidingType.CHANGED_TABS);
+        }
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
         // If a tab is not closing, then hiding the tab should mark it as dirty.
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.UNTIDY);
+        getAttributes().setStateForTesting(DirtinessState.UNTIDY);
         mTab.setClosing(false);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onHidden(mTab, TabHidingType.CHANGED_TABS);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onHidden(mTab, TabHidingType.CHANGED_TABS);
+        }
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
 
         // If a tab is closing, then hiding the tab should not mark it as dirty.
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.CLEAN);
+        getAttributes().setStateForTesting(DirtinessState.CLEAN);
         mTab.setClosing(true);
-        while (observers.hasNext()) observers.next().onHidden(mTab, TabHidingType.CHANGED_TABS);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onHidden(mTab, TabHidingType.CHANGED_TABS);
+        }
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testUndoClosingCommitsDirtiness() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        getAttributes().addObserver(mAttributesObserver);
 
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onClosingStateChanged(mTab, false);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onClosingStateChanged(mTab, false);
+        }
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.UNTIDY);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onClosingStateChanged(mTab, false);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
+        getAttributes().setStateForTesting(DirtinessState.UNTIDY);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onClosingStateChanged(mTab, false);
+        }
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testReparenting() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        getAttributes().addObserver(mAttributesObserver);
 
         // Detaching a tab does not mark a tab as needing to be saved.
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onActivityAttachmentChanged(mTab, null);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onActivityAttachmentChanged(mTab, null);
+        }
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
-        WindowAndroid window = Mockito.mock(WindowAndroid.class);
+        WindowAndroid window = mock(WindowAndroid.class);
         // Re-attaching a tab does mark a tab as needing to be saved.
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onActivityAttachmentChanged(mTab, window);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.UNTIDY);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onActivityAttachmentChanged(mTab, window);
+        }
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testNavigationEntryUpdates() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        RewindableIterator<TabObserver> observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onContentChanged(mTab);
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onContentChanged(mTab);
+        }
         WebContentsObserver webContentsObserver = mWebContentsObserverCaptor.getValue();
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
+        getAttributes().addObserver(mAttributesObserver);
 
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
         webContentsObserver.navigationEntriesChanged();
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.UNTIDY);
-        Mockito.reset(mAttributesObserver);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).setStateForTesting(TabStateAttributes.DirtinessState.CLEAN);
-        observers = TabTestUtils.getTabObservers(mTab);
-        while (observers.hasNext()) observers.next().onNavigationEntriesDeleted(mTab);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
+        getAttributes().setStateForTesting(DirtinessState.CLEAN);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onNavigationEntriesDeleted(mTab);
+        }
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+
+        getAttributes().setStateForTesting(DirtinessState.CLEAN);
+        for (TabObserver observer : TabTestUtils.getTabObservers(mTab)) {
+            observer.onNavigationEntriesAppended(mTab);
+        }
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver, times(2))
+                .onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
     public void testRootIdUpdates() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        CriticalPersistedTabData.from(mTab).setRootId(12);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
+        mTab.setRootId(12);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(getOriginalNativeNtpUrl()));
+        mTab.setRootId(56);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver, times(2))
+                .onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(UrlConstants.CONTENT_SCHEME + "://hello_world"));
+        mTab.setRootId(100);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
+    public void testTabGroupIdUpdates() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        mTab.setTabGroupId(new Token(1L, 2L));
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(getOriginalNativeNtpUrl()));
+        mTab.setTabGroupId(null);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver, times(2))
+                .onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(UrlConstants.CONTENT_SCHEME + "://hello_world"));
+        mTab.setTabGroupId(new Token(2L, 1L));
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+    }
+
+    @Test
+    public void testTabHasSensitiveContentUpdates() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        mTab.setTabHasSensitiveContent(true);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(getOriginalNativeNtpUrl()));
+        mTab.setTabHasSensitiveContent(false);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(UrlConstants.CONTENT_SCHEME + "://hello_world"));
+        mTab.setTabHasSensitiveContent(true);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        // Checks that that the number of dirtiness changes to `UNTIDY` did not increase since the
+        // last `UNTIDY` check above.
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+    }
+
+    @Test
+    public void testIsPinnedUpdates() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        mTab.setIsPinned(true);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setIsPinned(false);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        getAttributes().clearTabStateDirtiness();
+        verify(mAttributesObserver, times(2))
+                .onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+
+        // Test for NTP.
+        mTab.setUrl(new GURL(getOriginalNativeNtpUrl()));
+        mTab.setIsPinned(true);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        getAttributes().clearTabStateDirtiness();
+        verify(mAttributesObserver, times(3))
+                .onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+
+        mTab.setIsPinned(false);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        getAttributes().clearTabStateDirtiness();
+        verify(mAttributesObserver, times(4))
+                .onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+
+        verify(mAttributesObserver, never())
+                .onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
+    }
+
+    @Test
+    public void testTabUnarchived() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        mTab.onTabRestoredFromArchivedTabModel();
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(getOriginalNativeNtpUrl()));
+        mTab.onTabRestoredFromArchivedTabModel();
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver, times(2))
+                .onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setUrl(new GURL(UrlConstants.CONTENT_SCHEME + "://hello_world"));
+        mTab.onTabRestoredFromArchivedTabModel();
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+    }
+
+    @Test
     public void testDuplicateUpdateCalls() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        TabStateAttributes.from(mTab).addObserver(mAttributesObserver);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.CLEAN);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        getAttributes().updateIsDirty(DirtinessState.CLEAN);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.UNTIDY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.UNTIDY);
-        Mockito.reset(mAttributesObserver);
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.UNTIDY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.UNTIDY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.DIRTY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.DIRTY);
-        Mockito.reset(mAttributesObserver);
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.DIRTY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verifyNoMoreInteractions(mAttributesObserver);
-        Mockito.reset(mAttributesObserver);
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+        verifyNoMoreInteractions(mAttributesObserver);
+        reset(mAttributesObserver);
 
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.CLEAN);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
-        Mockito.verify(mAttributesObserver)
-                .onTabStateDirtinessChanged(mTab, TabStateAttributes.DirtinessState.CLEAN);
-        Mockito.reset(mAttributesObserver);
+        getAttributes().updateIsDirty(DirtinessState.CLEAN);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.CLEAN);
+        reset(mAttributesObserver);
     }
 
     @Test
-    @Features.EnableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
-    public void testUpdatesIgnoredDuringRestore_WithOptimizations() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.CLEAN);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+    public void testUpdatesIgnoredDuringRestore() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().updateIsDirty(DirtinessState.CLEAN);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
         mTab.setIsBeingRestored(true);
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.DIRTY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
         mTab.setIsBeingRestored(false);
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.DIRTY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
     }
 
     @Test
-    @Features.DisableFeatures(ChromeFeatureList.TAB_STATE_V1_OPTIMIZATIONS)
-    public void testUpdatesIgnoredDuringRestore_WithoutOptimizations() {
-        TabStateAttributes.createForTab(mTab, TabCreationState.FROZEN_ON_RESTORE);
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.CLEAN);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+    public void testDirtyCannotBecomeUntidy() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_FOR_LAZY_LOAD);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
 
-        mTab.setIsBeingRestored(true);
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.DIRTY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+    }
 
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.CLEAN);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.CLEAN,
-                TabStateAttributes.from(mTab).getDirtinessState());
+    @Test
+    public void testUpdateDirtinessPredicate() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
 
-        mTab.setIsBeingRestored(false);
-        TabStateAttributes.from(mTab).updateIsDirty(TabStateAttributes.DirtinessState.DIRTY);
-        Assert.assertEquals(TabStateAttributes.DirtinessState.DIRTY,
-                TabStateAttributes.from(mTab).getDirtinessState());
+        mTab.setUrl(new GURL(getOriginalNativeNtpUrl()));
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        mTab.setCanGoForward(false);
+        mTab.setCanGoBack(true);
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setCanGoForward(true);
+        mTab.setCanGoBack(false);
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+        getAttributes().clearTabStateDirtiness();
+
+        mTab.setCanGoForward(false);
+        mTab.setCanGoBack(false);
+        mTab.setUrl(new GURL(UrlConstants.CONTENT_SCHEME + "://hello_world"));
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        mTab.setUrl(new GURL("https://www.foo.com/"));
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        assertEquals(DirtinessState.UNTIDY, getAttributes().getDirtinessState());
+    }
+
+    @Test
+    public void testBatchEdit() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+
+        getAttributes().beginBatchEdit();
+        mTab.setRootId(1);
+        mTab.setTabGroupId(Token.createRandom());
+        mTab.setRootId(2);
+        mTab.setTabGroupId(null);
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(eq(mTab), anyInt());
+        getAttributes().endBatchEdit();
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        reset(mAttributesObserver);
+
+        getAttributes().beginBatchEdit();
+        getAttributes().updateIsDirty(DirtinessState.CLEAN);
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(eq(mTab), anyInt());
+        getAttributes().endBatchEdit();
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.CLEAN);
+        reset(mAttributesObserver);
+
+        getAttributes().beginBatchEdit();
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        getAttributes().updateIsDirty(DirtinessState.CLEAN);
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(eq(mTab), anyInt());
+        getAttributes().endBatchEdit();
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.UNTIDY);
+        reset(mAttributesObserver);
+
+        getAttributes().beginBatchEdit();
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        getAttributes().updateIsDirty(DirtinessState.CLEAN);
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+        getAttributes().updateIsDirty(DirtinessState.CLEAN);
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(eq(mTab), anyInt());
+        getAttributes().endBatchEdit();
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        reset(mAttributesObserver);
+    }
+
+    @Test
+    public void testNestedBatchEdit() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+
+        getAttributes().beginBatchEdit();
+        getAttributes().updateIsDirty(DirtinessState.UNTIDY);
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(eq(mTab), anyInt());
+
+        getAttributes().beginBatchEdit();
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(eq(mTab), anyInt());
+
+        getAttributes().endBatchEdit();
+        verify(mAttributesObserver, never()).onTabStateDirtinessChanged(eq(mTab), anyInt());
+
+        getAttributes().endBatchEdit();
+        verify(mAttributesObserver).onTabStateDirtinessChanged(mTab, DirtinessState.DIRTY);
+        verifyNoMoreInteractions(mAttributesObserver);
+    }
+
+    @Test
+    public void testDoubleObserver() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        getAttributes().addObserver(mAttributesObserver);
+        getAttributes().addObserver(mAttributesObserver2);
+
+        // Both observers will try to clear the dirty state.
+        MockitoHelper.doRunnable(
+                        () ->
+                                TabStateAttributesRegistry.getAttributesFor(
+                                                mTab, TabStateAttributes.StoreKey.class)
+                                        .clearTabStateDirtiness())
+                .when(mAttributesObserver)
+                .onTabStateDirtinessChanged(any(), anyInt());
+        MockitoHelper.doRunnable(
+                        () ->
+                                TabStateAttributesRegistry.getAttributesFor(
+                                                mTab, TabStateAttributes.StoreKey.class)
+                                        .clearTabStateDirtiness())
+                .when(mAttributesObserver2)
+                .onTabStateDirtinessChanged(any(), anyInt());
+
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+
+        // Regardless of which observer is notified first, both should see dirty.
+        verify(mAttributesObserver).onTabStateDirtinessChanged(any(), eq(DirtinessState.DIRTY));
+        verify(mAttributesObserver2).onTabStateDirtinessChanged(any(), eq(DirtinessState.DIRTY));
+    }
+
+    @Test
+    public void testSetDirty() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        assertEquals(DirtinessState.CLEAN, getAttributes().getDirtinessState());
+
+        TabStateAttributes.setDirty(mTab);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+
+        // Null and destroyed tabs should not throw exception
+        TabStateAttributes.setDirty(null);
+        mTab.destroy();
+        TabStateAttributes.setDirty(mTab);
+    }
+
+    @Test
+    public void testUpdateIsDirty_nullTabUrl() {
+        TabStateAttributesRegistry.createAttributesForTab(
+                mTab, TabStateAttributes.StoreKey.class, TabCreationState.FROZEN_ON_RESTORE);
+        mTab.setUrl(null);
+        getAttributes().updateIsDirty(DirtinessState.DIRTY);
+        assertEquals(DirtinessState.DIRTY, getAttributes().getDirtinessState());
+    }
+
+    private TabStateAttributes getAttributes() {
+        return TabStateAttributesRegistry.getAttributesFor(mTab, TabStateAttributes.StoreKey.class);
     }
 }
